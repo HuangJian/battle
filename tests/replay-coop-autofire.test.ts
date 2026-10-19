@@ -203,16 +203,16 @@ describe('Lie-Back-Win-Mode replay determinism (coop + auto-fire)', () => {
 
   it('auto-fire frames are actually captured in the stream (P1 fires from tick 0)', () => {
     const rec = recordCoop(14, 1785585133360, 600, false)
-    // frames layout v2: [ver][flags][p1][p2][p1][p2]...  bit4 = fire
+    // frames layout v3: [ver][flags][p1][p2][p1][p2]...  bit3 = fire
     const f = rec.result.frames
-    expect(f[0]).toBe(2)
+    expect(f[0]).toBe(3)
     expect(f[1]).toBe(0x01)
     let p1FireCount = 0
-    for (let i = 2; i < f.length; i += 2) if (f[i] & 0x10) p1FireCount++
+    for (let i = 2; i < f.length; i += 2) if (f[i] & 0x08) p1FireCount++
     const ticks = (f.length - 2) / 2
     // Idle human + armed auto-fire ⇒ P1 requests fire on EVERY tick.
     expect(p1FireCount).toBe(ticks)
-    expect(f[2] & 0x10).toBe(0x10) // firing already on tick 0
+    expect(f[2] & 0x08).toBe(0x08) // firing already on tick 0
   })
 
   it('single-player (non-coop) recording still round-trips exactly', () => {

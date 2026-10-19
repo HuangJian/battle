@@ -136,9 +136,9 @@ export interface SerializeInput {
  */
 export function serializeReplayFile(input: SerializeInput): string {
   // Declare the schema the BYTES actually use, not the newest one this build
-  // knows. A single-stream recording is packed as v1 (packFrames / InputRecorder
-  // downgrade for backward compat), so stamping the envelope with 0x02 was a
-  // lie that made the file unreadable to v1-era readers for no reason.
+  // knows. A legacy single-stream recording is packed as v1 (for backward
+  // compat), so stamping the envelope with the newest version was a lie that
+  // made the file unreadable to older readers for no reason.
   const blobSchema = frameSchemaVersionOf(input.frames)
   const envelope: FileEnvelope = {
     format: FORMAT_ID,
@@ -292,7 +292,10 @@ function decodeFrames(
   // Re-derive the standalone P2 stream so an imported coop replay carries the
   // same `frames2` an in-session recording would (InputRecorder produces it).
   const streams = unpackFrames(frames)
-  const frames2 = streams?.p2 && streams.p2.length > 0 ? packFrames(streams.p2) : null
+  const frames2 =
+    streams?.p2 && streams.p2.length > 0
+      ? packFrames(streams.p2, null, { p1HoldFire3: streams.p2HoldFire3 })
+      : null
 
   return { frames, blobSchema, frames2 }
 }

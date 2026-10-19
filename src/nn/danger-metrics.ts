@@ -61,7 +61,12 @@ import type { Bullet, Tank } from '../types'
 import type { World } from '../game/World'
 import { TileMap } from '../game/TileMap'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist, snap } from '../utils/helpers'
-import type { ShieldWindow } from './shield-window'
+import {
+  SHIELD_CLASS_POWERUP,
+  SHIELD_CLASS_SPAWN,
+  SHIELD_CLASS_STARLIKE,
+  type ShieldWindow,
+} from './shield-window'
 
 /** 触发半径（格）：**v9 起不再被 `inThreatLane` 使用**；保留给 dodge-l0 镜像与测试。 */
 export const THREAT_RADIUS_CELLS = 6
@@ -151,6 +156,29 @@ export function threatLaneExempt(world: World): boolean {
  */
 export function exposureExempt(world: World, shield: ShieldWindow): boolean {
   return world.freezeTimer > 0 || shield.powerupActive()
+}
+
+/**
+ * B5 `windowKind`：**唯一**的「窗口」分类谓词（plan §4-B5 S15）。
+ *
+ * 与 idx47/idx51 的豁免列是**交集，不是另一套口径**：两者都基于同一个粘性
+ * `ShieldWindow`（它才能把盾道具窗与复活/星盾 grace 分开——只看 `shieldTimer`
+ * 剩余值会把 20s 道具盾的尾段误判成复活盾）。
+ *
+ * 奖励/分母只认 `freeze ∪ propShield`；`respawnShield ∪ starShieldGrace` 是
+ * **挨打/死亡换来的**，单独记诊断列（`deathDerivedShieldTicks`），不进奖励。
+ * 冻结优先（冻结期间即使也有道具盾，仍归 freeze）。
+ */
+export type WindowKind = 'none' | 'freeze' | 'propShield' | 'respawnShield' | 'starShieldGrace'
+
+export function windowKind(world: World, shield: ShieldWindow): WindowKind {
+  if (world.freezeTimer > 0) return 'freeze'
+  if ((world.player?.shieldTimer ?? 0) <= 0) return 'none'
+  const cls = shield.classOf()
+  if (cls === SHIELD_CLASS_POWERUP) return 'propShield'
+  if (cls === SHIELD_CLASS_SPAWN) return 'respawnShield'
+  if (cls === SHIELD_CLASS_STARLIKE) return 'starShieldGrace'
+  return 'none'
 }
 
 /**

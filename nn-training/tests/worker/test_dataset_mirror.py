@@ -133,6 +133,15 @@ def test_move_label_flip() -> None:
         assert out == want, f"move_label {mv} -> {out}, 期望 {want}"
 
 
+def test_move_label_flip_v6() -> None:
+    """B1 v6 move 标签（up,down,left,right = 0..3，无 STOP）：left(2)↔right(3)。"""
+    for mv, want in [(0, 0), (1, 1), (2, 3), (3, 2)]:
+        _o, _s, out, _ex = mirror_x(
+            _mk_obs(BULLET_CH, 1), _mk_scalars(), mv, action_v6=True
+        )
+        assert out == want, f"v6 move_label {mv} -> {out}, 期望 {want}"
+
+
 def test_scalar_x_flip_sign() -> None:
     """SCALAR_X_INDICES（15/18/29）分量翻转符号，非 x 分量不变。"""
     _o, out, _mv, _ex = mirror_x(_mk_obs(BULLET_CH, 1), _mk_scalars(), 0)

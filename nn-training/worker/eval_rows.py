@@ -220,6 +220,28 @@ def eval_v11_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v12 窗口三列（plan/nn-capability-upgrade.plan.md §4-B5）。
+#: 与 v8–v11 同约：旧报告/未同步节点缺键 = 整键省略；`eval_row` 与
+#: `trainer/batch_runner.py` 两处行构造点必须经本函数取数。
+EVAL_V12_KEYS = (
+    "freezeShieldWindowTicks",
+    "hitsInFreezeShieldWindow",
+    "deathDerivedShieldTicks",
+)
+
+
+def eval_v12_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v12 窗口三列（缺键 = 整键省略，不写 None）。"""
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V12_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -288,6 +310,7 @@ def eval_row(
         **eval_v10_fields(manifest),
         # metrics v11 热线族 2 列（与 batch_runner 同源，见 eval_v11_fields）。
         **eval_v11_fields(manifest),
+        **eval_v12_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

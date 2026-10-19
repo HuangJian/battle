@@ -16,6 +16,8 @@ const IDLE_FRAME: InputFrame = {
   firing: false,
   guard: false,
   frenzy: false,
+  hold: false,
+  fireBeforeTurn: false,
 }
 
 /**
@@ -26,9 +28,12 @@ export class ReplayInput implements InputLike {
   private frames1: InputFrame[]
   private frames2: InputFrame[] | null
   private cursor = 0
-  /** Current tick index into the interleaved stream (v2) or simple cursor (v1). */
+  /** Current tick index into the interleaved stream (v2/v3) or simple cursor (v1). */
   private tick = 0
   private _totalTicks: number
+  /** Per-stream action contract: v3 blobs only if the recorder declared it. */
+  private p1HoldFire3 = false
+  private p2HoldFire3 = false
 
   /**
    * @param data  Packed frame bytes (Uint8Array), prefixed with schema version.
@@ -38,6 +43,8 @@ export class ReplayInput implements InputLike {
     if (result) {
       this.frames1 = result.p1
       this.frames2 = result.p2
+      this.p1HoldFire3 = result.p1HoldFire3
+      this.p2HoldFire3 = result.p2HoldFire3
     } else {
       this.frames1 = []
       this.frames2 = null
@@ -48,7 +55,7 @@ export class ReplayInput implements InputLike {
   /** Second player input (God AI). Null for v1 replays. */
   get input2(): InputLike | null {
     if (!this.frames2) return null
-    return new ReplayInputSlice(this.frames2, () => this.tick)
+    return new ReplayInputSlice(this.frames2, () => this.tick, this.p2HoldFire3)
   }
 
   // ---- InputLike implementation (player1) ----
@@ -61,6 +68,20 @@ export class ReplayInput implements InputLike {
   isFiring(): boolean {
     const frame = this.frames1[this.cursor]
     return frame?.firing ?? IDLE_FRAME.firing
+  }
+
+  isHolding(): boolean {
+    const frame = this.frames1[this.cursor]
+    return frame?.hold ?? IDLE_FRAME.hold!
+  }
+
+  isFireBeforeTurn(): boolean {
+    const frame = this.frames1[this.cursor]
+    return frame?.fireBeforeTurn ?? IDLE_FRAME.fireBeforeTurn!
+  }
+
+  usesHoldFire3(): boolean {
+    return this.p1HoldFire3
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
@@ -115,10 +136,12 @@ export class ReplayInput implements InputLike {
 class ReplayInputSlice implements InputLike {
   private frames: InputFrame[]
   private getTick: () => number
+  private readonly holdFire3: boolean
 
-  constructor(frames: InputFrame[], getTick: () => number) {
+  constructor(frames: InputFrame[], getTick: () => number, holdFire3: boolean) {
     this.frames = frames
     this.getTick = getTick
+    this.holdFire3 = holdFire3
   }
 
   getMoveDirection(): Direction | null {
@@ -129,6 +152,20 @@ class ReplayInputSlice implements InputLike {
   isFiring(): boolean {
     const frame = this.frames[this.getTick()]
     return frame?.firing ?? IDLE_FRAME.firing
+  }
+
+  isHolding(): boolean {
+    const frame = this.frames[this.getTick()]
+    return frame?.hold ?? IDLE_FRAME.hold!
+  }
+
+  isFireBeforeTurn(): boolean {
+    const frame = this.frames[this.getTick()]
+    return frame?.fireBeforeTurn ?? IDLE_FRAME.fireBeforeTurn!
+  }
+
+  usesHoldFire3(): boolean {
+    return this.holdFire3
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy'): boolean {

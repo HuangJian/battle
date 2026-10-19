@@ -71,6 +71,42 @@ export class PlayerSystem {
     // Movement
     if (!input) return // no input source (God AI tank without input2)
     const dir = input.getMoveDirection()
+    const firing = input.isFiring()
+
+    if (input.usesHoldFire3?.() === true) {
+      // v3 action contract (NN only): hold = turn without advancing;
+      // fireBeforeTurn = fire along the committed facing BEFORE the turn.
+      // God-AI/human inputs omit `usesHoldFire3`, so their path below stays
+      // byte-identical.
+      const hold = input.isHolding?.() ?? false
+      const fireBefore = input.isFireBeforeTurn?.() ?? false
+      // B2 prevAction = the REQUEST this tick (not the accepted turn): it mirrors
+      // the policy's output and is what a replay/BC label also carries.
+      p.lastActionDir = dir
+      p.lastActionHold = hold
+      p.lastActionFire = firing ? (fireBefore ? 1 : 2) : 0
+      if (firing && fireBefore) this.d.combat.tryFire(p)
+      let turnAccepted = true
+      if (dir !== null) {
+        p.dir = dir
+        p.moving = !hold
+        // Turn-only (hold) skips step ⑦'s movement block, so adjudicate the
+        // cooldown here explicitly; otherwise hold would be free aiming.
+        turnAccepted = this.d.combat.applyTurnCooldown(p, w)
+      } else {
+        p.moving = false
+      }
+      // A rejected turn means the committed facing is still the old one;
+      // firing now would be the pre-A1 side-shot, so skip this tick's shot.
+      if (firing && !fireBefore && turnAccepted) this.d.combat.tryFire(p)
+      return
+    }
+
+    // Legacy 5/2 input has no hold/turn-order bits: firing maps to "after turn".
+    p.lastActionDir = dir
+    p.lastActionHold = false
+    p.lastActionFire = firing ? 2 : 0
+
     if (dir !== null) {
       p.dir = dir
       p.moving = true
@@ -79,7 +115,7 @@ export class PlayerSystem {
     }
 
     // Firing
-    if (input.isFiring()) {
+    if (firing) {
       this.d.combat.tryFire(p)
     }
   }
@@ -100,6 +136,11 @@ export class PlayerSystem {
     let lastFire = p.frenzyLastFire ?? 0
     p.dir = dir
     p.moving = false
+    // Frenzy locks the input; the observable "last request" is still the locked
+    // direction + an auto shot (fire=2: after the (no-op) turn).
+    p.lastActionDir = dir
+    p.lastActionHold = false
+    p.lastActionFire = 2
     while (shotsLeft > 0 && now - lastFire >= interval) {
       this.spawnFrenzyShot(p, dir)
       shotsLeft -= 1

@@ -218,8 +218,8 @@ export class ReplayManager {
    *
    * The gate reads the BLOB's leading byte, not `replay.schemaVersion`: the
    * blob is what `ReplayInput` decodes, and older builds stored a descriptive
-   * `schemaVersion` that lied (always 0x02, even for a v1 blob). Both v1 and
-   * v2 are decodable, so both are playable (DECISIONS #76).
+   * `schemaVersion` that lied (always 0x02, even for a v1 blob). v1, v2 and
+   * v3 are decodable, so all three are playable (DECISIONS #76).
    */
   canPlay(replay: Replay): boolean {
     if (!replay) return false

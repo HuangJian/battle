@@ -13,6 +13,8 @@ import { ReplayInput } from '../src/replay/ReplayInput'
 import { PlaybackController } from '../src/replay/PlaybackController'
 import {
   FRAME_SCHEMA_V1,
+  FRAME_SCHEMA_V2,
+  FRAME_SCHEMA_V3,
   FRAME_SCHEMA_VERSION,
   isSupportedFrameSchema,
   SUPPORTED_FRAME_SCHEMA_VERSIONS,
@@ -91,10 +93,15 @@ describe('frame schema — the blob byte is authoritative', () => {
     expect(frameSchemaVersionOf(null)).toBe(0)
   })
 
-  it('both v1 and v2 are supported; nothing else is', () => {
-    expect(SUPPORTED_FRAME_SCHEMA_VERSIONS).toEqual([FRAME_SCHEMA_V1, FRAME_SCHEMA_VERSION])
+  it('v1, v2 and v3 are supported; nothing else is', () => {
+    expect(SUPPORTED_FRAME_SCHEMA_VERSIONS).toEqual([
+      FRAME_SCHEMA_V1,
+      FRAME_SCHEMA_V2,
+      FRAME_SCHEMA_V3,
+    ])
     expect(isSupportedFrameSchema(FRAME_SCHEMA_V1)).toBe(true)
-    expect(isSupportedFrameSchema(FRAME_SCHEMA_VERSION)).toBe(true)
+    expect(isSupportedFrameSchema(FRAME_SCHEMA_V2)).toBe(true)
+    expect(isSupportedFrameSchema(FRAME_SCHEMA_V3)).toBe(true)
     expect(isSupportedFrameSchema(0)).toBe(false)
     expect(isSupportedFrameSchema(0x99)).toBe(false)
     expect(isSupportedFrameSchema(undefined)).toBe(false)

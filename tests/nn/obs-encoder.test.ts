@@ -116,15 +116,15 @@ function mkWorld(over: Record<string, unknown> = {}): World {
 }
 
 describe('obs-encoder dimensions', () => {
-  it('exposes the canonical 16×26×26 obs and 40-dim scalar (v5: +POLICY_EXTRA 37)', () => {
+  it('exposes the canonical 16×26×26 obs and 46-dim scalar (v6: +POLICY_EXTRA 57)', () => {
     expect(OBS_CHANNELS).toBe(16)
     expect(BOARD).toBe(26)
-    expect(SCALAR_DIM as number).toBe(40)
-    expect(OBS_SCHEMA_MAJOR as number).toBe(5)
+    expect(SCALAR_DIM as number).toBe(46)
+    expect(OBS_SCHEMA_MAJOR as number).toBe(6)
     const enc = new ObsEncoder()
     expect(enc.obs.length).toBe(16 * 26 * 26)
-    expect(enc.scalars.length).toBe(40)
-    expect(enc.extra.length).toBe(37)
+    expect(enc.scalars.length).toBe(46)
+    expect(enc.extra.length).toBe(57)
   })
 })
 

@@ -39,9 +39,15 @@ export const REPLAY_FAVORITE_LIMIT = 100
  *
  * v1 (0x01): single input stream per tick.
  * v2 (0x02): dual input stream when coop is active — [flags byte][p1][p2] per tick.
+ * v3 (0x03): same container as v2, but the per-frame byte trades the unused
+ *            direction bit for `hold` + `fireBeforeTurn` (NN action space).
+ *            Single-stream blobs carrying either bit MUST be v3 — a v1
+ *            header would silently drop both.
  */
-export const FRAME_SCHEMA_VERSION = 0x02
+export const FRAME_SCHEMA_VERSION = 0x03
 export const FRAME_SCHEMA_V1 = 0x01
+export const FRAME_SCHEMA_V2 = 0x02
+export const FRAME_SCHEMA_V3 = 0x03
 
 /**
  * Every packed-frame schema this build can decode (see `unpackFrames`).
@@ -54,7 +60,8 @@ export const FRAME_SCHEMA_V1 = 0x01
  */
 export const SUPPORTED_FRAME_SCHEMA_VERSIONS: readonly number[] = [
   FRAME_SCHEMA_V1,
-  FRAME_SCHEMA_VERSION,
+  FRAME_SCHEMA_V2,
+  FRAME_SCHEMA_V3,
 ]
 
 /** Whether this build can decode a packed-frame blob of the given version. */

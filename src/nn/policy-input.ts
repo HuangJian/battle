@@ -18,6 +18,7 @@ import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
 import { ObsEncoder, computeMasks } from './obs-encoder'
 import { decodeMove } from './action-space'
+import { HOLD_DIM, decodeMove4 } from './action-space-v6'
 import {
   createDecisionGateConfig,
   createDecisionGateState,
@@ -112,6 +113,9 @@ export class NNInput implements InputLike {
   // direction (the heading is observable in ch6 `self`), so there is no keep
   // class and no held-direction (keep) semantic. dims/heads/masks are unchanged.
   private firing = false
+  /** B1 v6: only meaningful when `usesHoldFire3()` is true. */
+  private holding = false
+  private fireBeforeTurn = false
 
   // A decision is committed (and holds until the next due tick). Only the lazy
   // fallback for callers that never reset()/endFrame() decides on read.
@@ -139,6 +143,20 @@ export class NNInput implements InputLike {
     return this.firing
   }
 
+  isHolding(): boolean {
+    if (!this.committed) this.decide()
+    return this.holding
+  }
+
+  isFireBeforeTurn(): boolean {
+    if (!this.committed) this.decide()
+    return this.fireBeforeTurn
+  }
+
+  usesHoldFire3(): boolean {
+    return this.model.usesHoldFire3 === true
+  }
+
   // v2: AI 不使用主动道具 — guard/frenzy/rewind 一律不激活。
   wasItemPressed(kind?: 'guard' | 'frenzy' | 'rewind'): false {
     void kind
@@ -164,6 +182,8 @@ export class NNInput implements InputLike {
   reset(): void {
     this.moveDir = null
     this.firing = false
+    this.holding = false
+    this.fireBeforeTurn = false
     // 新一局 = 新决策流（Δt 读数不跨局；suppressEventsUntilTick 归零）。
     this.gate = createDecisionGateState()
     // Tick 0's decision, on the freshly loaded stage (callers reset() after
@@ -181,18 +201,31 @@ export class NNInput implements InputLike {
     this.decide()
   }
 
-  /** Greedy move-argmax (0-4) from the latest forward pass. */
+  /** Greedy move-argmax (v6 0..3 / legacy 0..4) from the latest forward pass. */
   moveArgmax(): number {
     const mv = this.model.moveLogits
+    const n = this.model.moveDim ?? mv.length
     let b = 0
-    for (let i = 1; i < 5; i++) if (mv[i] > mv[b]) b = i
+    for (let i = 1; i < n; i++) if (mv[i] > mv[b]) b = i
     return b
   }
 
-  /** Greedy fire-argmax (0 release / 1 hold) from the latest forward pass. */
+  /** Greedy hold-argmax (0 advance / 1 turn-only); legacy models have no hold head. */
+  holdArgmax(): number {
+    const hv = this.model.holdLogits
+    if (!hv) return 0
+    let b = 0
+    for (let i = 1; i < HOLD_DIM; i++) if (hv[i] > hv[b]) b = i
+    return b
+  }
+
+  /** Greedy fire-argmax (v6 0/1/2, legacy 0 release / 1 hold). */
   fireArgmax(): number {
     const fr = this.model.fireLogits
-    return fr[1] > fr[0] ? 1 : 0
+    const n = this.model.fireDim ?? fr.length
+    let b = 0
+    for (let i = 1; i < n; i++) if (fr[i] > fr[b]) b = i
+    return b
   }
 
   /**
@@ -209,27 +242,43 @@ export class NNInput implements InputLike {
     // v4：extra 一并喂（旧布局模型忽略第三参；新架构必须）。
     this.model.forward(this.encoder.obs, this.encoder.scalars, this.encoder.extra)
 
-    const masks = computeMasks(w)
+    const v6 = this.model.usesHoldFire3 === true
+    const masks = computeMasks(w, v6)
 
-    // --- move head (argmax over 5) ---
-    const mv = this.model.moveLogits
-    let bestMove = 0
-    let bestMoveV = mv[0]
-    for (let i = 1; i < 5; i++)
-      if (mv[i] > bestMoveV) {
-        bestMoveV = mv[i]
-        bestMove = i
+    if (v6) {
+      // --- B1 v6: hold(2) / move(4) / fire(3) ---
+      const hv = this.model.holdLogits
+      this.holding = hv ? hv[1] > hv[0] : false
+      const mv = this.model.moveLogits
+      let bestMove = 0
+      for (let i = 1; i < 4; i++) if (mv[i] > mv[bestMove]) bestMove = i
+      this.moveDir = decodeMove4(bestMove)
+      const fr = this.model.fireLogits
+      // Masked argmax over {0 no shot, 1 fire-before-turn, 2 fire-after-turn}.
+      // fire[0] is always legal; 1/2 require the cooldown gate (masks.fire[i]).
+      let bestFire = 0
+      for (let i = 1; i < 3; i++) {
+        if (masks.fire[i] === 1 && fr[i] > fr[bestFire]) bestFire = i
       }
-    // v1 move mask is all-valid; fall back to none if the chosen slot is masked.
-    if (masks.move[bestMove] !== 1) bestMove = 0
-    // B案: index 0 = STOP (decodeMove(0) === null ⇒ moving=false). 1..4 = the
-    // four directions. Held for the rest of the inter-decision window.
-    this.moveDir = decodeMove(bestMove)
-
-    // --- fire head (argmax over 2: 0 release, 1 hold) ---
-    const fr = this.model.fireLogits
-    const fireHold = fr[1] > fr[0] && masks.fire[1] === 1
-    this.firing = fireHold
+      this.fireBeforeTurn = bestFire === 1
+      this.firing = bestFire !== 0
+    } else {
+      // --- legacy 5-move/2-fire checkpoint (byte-identical path) ---
+      const mv = this.model.moveLogits
+      let bestMove = 0
+      let bestMoveV = mv[0]
+      for (let i = 1; i < 5; i++)
+        if (mv[i] > bestMoveV) {
+          bestMoveV = mv[i]
+          bestMove = i
+        }
+      if (masks.move[bestMove] !== 1) bestMove = 0
+      this.moveDir = decodeMove(bestMove)
+      const fr = this.model.fireLogits
+      this.firing = fr[1] > fr[0] && masks.fire[1] === 1
+      this.holding = false
+      this.fireBeforeTurn = false
+    }
 
     // v2: item head removed — AI never activates guard/frenzy/rewind.
 

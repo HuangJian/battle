@@ -12,9 +12,9 @@
   ③ 互斥与拒绝：legacy_arch 与 policy_extra 同给 / 三者都不给 ⇒ SystemExit。
 
 obs-v5（plan/obs-v5-vector-gap.plan.md §2.7 / A10）追加：
-  ④ **列迁移**：cus 94→104、move/fire 137→165、value 128→165——旧列**逐位等**、
+  ④ **列迁移**：fc 94→110、move/fire 137→185、value 128→185——旧列**逐位等**、
      新列 `normal_(0,0.01)` 重 init（量级 ≤0.05）、未迁移张量逐位等（非新增列路径一致）；
-  ⑤ 腿 B 的**分段**映射（旧 `[tower|s30|extra9]` → 新 `[tower|s40|extra37]`）：拷的三段逐位等、
+  ⑤ 腿 B 的**分段**映射（旧 `[tower|s30|extra9]` → 新 `[tower|s46|extra57]`）：拷的三段逐位等、
      新 scalars/extra 两段重 init、value 头不在分段表内（全重 init）；
   ⑥ 形状不合法（既非同行、也非「宽−n/分段」）⇒ **响亮拒绝**（不静默跳过）。
 """
@@ -162,7 +162,7 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
             # 对称性没打破。首行展开后必须与全片不等（固定 seed 下确定性判据）。
             assert not torch.equal(tail, tail[0:1].expand_as(tail)), f"{name} 新列跨行全同（广播 init）"
     # value 新列是纯 0（门控纪律：零起步＋训练期牵引，见 test_value_anchor.py）——
-    # 旧 128 列逐位等，新 37 列逐位零（不是 0.01 随机）。
+    # 旧 128 列逐位等，新 57 列逐位零（不是 0.01 随机）。
     assert torch.equal(new["value_head.weight"][:, :128], old["value_head.weight"])
     assert torch.equal(
         new["value_head.weight"][:, 128:], torch.zeros_like(new["value_head.weight"][:, 128:])
@@ -178,17 +178,17 @@ def test_leg_b_segmented_migration(tmp_path: Path) -> None:
     """⑤ 腿 B 分段映射：三段逐位等 + 新两段重 init + value 不在表内。"""
     torch.manual_seed(12)
     src = _saved(tmp_path / "legB-v4.json", PPOStudent(policy_extra=True, spatial_tower=True))
-    # 新布局 [tower 112 | s40 112..151 | extra37 152..188] → 旧布局 [tower | s30 | extra9]
+    # 新布局 [tower 112 | s46 112..157 | extra57 158..214] → 旧布局 [tower | s30 | extra9]
     meta = json.loads(src.read_text(encoding="utf-8"))
     for name in ("move_head.weight", "fire_head.weight"):
         entry = meta["params"][name]
         shape = list(entry["shape"])
         arr = np.frombuffer(base64.b64decode(entry["data"]), dtype="<f4").reshape(shape)
-        legacy_row = np.concatenate([arr[:, 0:112], arr[:, 112:142], arr[:, 161:170]], axis=1).copy()
+        legacy_row = np.concatenate([arr[:, 0:112], arr[:, 112:142], arr[:, 158:167]], axis=1).copy()
         assert legacy_row.shape[1] == 151
         entry["shape"] = list(legacy_row.shape)
         entry["data"] = base64.b64encode(legacy_row.tobytes()).decode("ascii")
-    # v4 腿 B 的 value 头 = 128 宽（只吃 h）⇒ 新档 189 无对应前缀：全重 init
+    # v4 腿 B 的 value 头 = 128 宽（只吃 h）⇒ 新档 215 无对应前缀：全重 init
     _truncate_tail_value(meta, 128)
     meta["schema_major"] = 4
     src.write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -201,20 +201,20 @@ def test_leg_b_segmented_migration(tmp_path: Path) -> None:
     assert info["warmstart_partial"] == ["fire_head.weight", "move_head.weight"]
     old = load_weights_json(str(src), allow_legacy_schema=True)[1]
     new = load_weights_json(str(dst))[1]
-    segs = ((0, 0, 112), (112, 112, 30), (142, 152, 9))
+    segs = ((0, 0, 112), (112, 112, 30), (142, 158, 9))
     for name in ("move_head.weight", "fire_head.weight"):
         for src_start, dst_start, count in segs:
             assert torch.equal(
                 new[name][:, dst_start : dst_start + count], old[name][:, src_start : src_start + count]
             ), f"{name} 段 {src_start}→{dst_start} 不是逐位等"
-        # 重 init 的两段：新 scalars s30–39 = [142..151]、新 extra 9–36 = [161..188]
-        for lo, hi in ((142, 152), (161, 189)):
+        # 重 init 的两段：新 scalars s30–45 = [142..157]、新 extra 9–56 = [167..214]
+        for lo, hi in ((142, 158), (167, 215)):
             seg = new[name][:, lo:hi]
             assert float(seg.abs().max()) <= 0.05, f"{name}[{lo}:{hi}] 量级过大"
             # 同上：多行张量的新段必须跨行有差异（广播 init 会全行全同）
             assert not torch.equal(seg, seg[0:1].expand_as(seg)), f"{name}[{lo}:{hi}] 新段跨行全同"
-    # value 头：新档 189 宽、整张都是 0.01 尺度（`_init_value_head`），没被迁移污染
-    assert new["value_head.weight"].shape[1] == 189
+    # value 头：新档 215 宽、整张都是 0.01 尺度（`_init_value_head`），没被迁移污染
+    assert new["value_head.weight"].shape[1] == 215
     assert float(new["value_head.weight"].abs().max()) <= 0.05
     # fc 同样按「尾部 +10 列」迁移（与腿 A 同规）
     assert torch.equal(new["fc.weight"][:, :94], old["fc.weight"][:, :94])
@@ -223,9 +223,9 @@ def test_leg_b_segmented_migration(tmp_path: Path) -> None:
 
 
 def test_leg_a_to_b_migration_extra9_segment(tmp_path: Path) -> None:
-    """⑦ 腿 A 源（头 137）→ 腿 B：旧 extra9 拷进新 [152:161]，其余全重 init。
+    """⑦ 腿 A 源（头 137）→ 腿 B：旧 extra9 拷进新 [158:167]，其余全重 init。
 
-    新 pf `[tower 0–111 | s40 112–151 | extra37 152–188]` 里旧头只有 extra9 有对应槽
+    新 pf `[tower 0–111 | s46 112–157 | extra57 158–214]` 里旧头只有 extra9 有对应槽
     （hidden 128 在新 pf 无槽）；fc 照旧拷 94；value 无前缀、全重 init（仍在 missing）。
     """
     torch.manual_seed(14)
@@ -249,14 +249,14 @@ def test_leg_a_to_b_migration_extra9_segment(tmp_path: Path) -> None:
     new = load_weights_json(str(dst))[1]
     assert torch.equal(new["fc.weight"][:, :94], old["fc.weight"][:, :94])
     for name in ("move_head.weight", "fire_head.weight"):
-        # 唯一有对应槽的旧列：extra9 [128:137] → [152:161] 逐位等
-        assert torch.equal(new[name][:, 152:161], old[name][:, 128:137]), f"{name} extra9 段不是逐位等"
-        # 其余 180 列全重 init：量级对＋跨行有差异
-        rest = torch.cat([new[name][:, :152], new[name][:, 161:]], dim=1)
-        assert rest.shape[1] == 180
+        # 唯一有对应槽的旧列：extra9 [128:137] → [158:167] 逐位等
+        assert torch.equal(new[name][:, 158:167], old[name][:, 128:137]), f"{name} extra9 段不是逐位等"
+        # 其余 206 列全重 init：量级对＋跨行有差异
+        rest = torch.cat([new[name][:, :158], new[name][:, 167:]], dim=1)
+        assert rest.shape[1] == 206
         assert float(rest.abs().max()) <= 0.05, f"{name} 新列量级过大"
         assert not torch.equal(rest, rest[0:1].expand_as(rest)), f"{name} 新列跨行全同"
-    assert new["value_head.weight"].shape[1] == 189
+    assert new["value_head.weight"].shape[1] == 215
     assert float(new["value_head.weight"].abs().max()) <= 0.05
     model = build_ppo(str(dst))
     assert model.spatial_tower is True
@@ -281,7 +281,7 @@ def test_migration_rejects_unexpected_shape(tmp_path: Path) -> None:
     torch.manual_seed(13)
     src = _truncate_tail(
         _saved(tmp_path / "legA-bad.json", PPOStudent(policy_extra=True)),
-        {"move_head.weight": 100},  # 既不是 165 也不是 137
+        {"move_head.weight": 100},  # 既不是 185 也不是 137
     )
     with pytest.raises(SystemExit):
         convert(

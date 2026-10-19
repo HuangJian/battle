@@ -25,6 +25,50 @@
 
 ---
 
+## §78 B′ 观测 bump 落地（B2–B5）：`SCALAR 40→46` / `EXTRA 37→57` / `OBS_SCHEMA_MAJOR 6` / `metrics v12 = 79`（2026-10-19）
+
+**做了什么**（plan/nn-capability-upgrade.plan.md §4-B2–B5，一次 schema bump）：
+
+| 项 | 契约 | 单一来源 |
+|---|---|---|
+| B2 prevAction | SCALAR `s40–s43`（hold / fire 3 值 one-hot）+ EXTRA `41–44`（move 4 向）；写入方 = **`SimulationPlayer`**（请求，不是被接受的转向） | `src/types.ts` `lastActionDir/Hold/Fire` |
+| B2 lastHit | SCALAR `s44` ticksSinceHit（/300，从未 = 1）+ EXTRA `45–48`（world 方位 one-hot，**方向 = 弹的飞行方向**，不取反）；同拍多源取**最大伤害发** | `CombatSystem.recordPlayerHit` |
+| B2 敌朝向 | SCALAR `s45` `nearestEnemyBeyond` = `(E−P)·facing/|E−P|`（沿**该敌**的朝向，不是玩家朝向）+ EXTRA `49–52` 最近敌 `dir` one-hot | `obs-encoder` / `policy-extra` |
+| B3 leadHit | EXTRA `53–56`（前/后/左/右）：轴向距 ≤13 格、`t* = 轴向距/弹速` 的横向偏差 < 19px、`laneOccluded` 必须为假、排除 `spawnTimer > 0` | `leadHitForDir`（零分配、只读） |
+| B4 拆族 | EXTRA `37–40` = 敌车炮口威胁；`0–3` 仍只含敌弹；包夹度 `8` 改为**两族合计**的 min(左,右)；护盾期两族 + 包夹度置零，**冰冻期不置零** | `computePolicyExtra` |
+| B5 窗口三列 | metrics v12 `76–78`：`freezeShieldWindowTicks`（freeze ∪ **道具**盾）/ `hitsInFreezeShieldWindow` / `deathDerivedShieldTicks`（复活盾 + 星盾 grace，只判读） | `windowKind()` 基于**粘性** `ShieldWindow` 分类，与 idx47/idx51 豁免是**交集不是第三套口径** |
+
+**两侧同源**：TS `POLICY_EXTRA_NAMES/MIRROR_SWAPS` 与 Python `POLICY_EXTRA_LAYOUT/EXTRA_MIRROR_SWAPS`
+同步（新增 5 对左右 swap）；指纹串按 MAJOR 6 重算，双端单测断言相等。
+
+**踩到的坑（都已修，留档）**：
+1. `worker/scripts/init_spatial_leg.py` 的腿 B 分段表把**新 extra 起点写死 152**（v5 绝对值）。
+   bump 后必须随之移动，否则旧 extra9 被灌进 `s30–s45` —— 正是该脚本文档里警告的**静默错位**。
+   现改为 `_NEW_EXTRA_START = 112 + SCALAR_DIM`（同一族下次 bump 不再重犯）。
+2. 三处测试把 v5 布局写成字面量（`test_init_spatial_leg` / `test_value_anchor` / `test_policy_new_rms`）
+   与两处语料宽度（`test_reward_npy_shard` 的 76、`test_build_demo_bank` 的 40/37/5）。
+   口径：**能由 `SCALAR_DIM/POLICY_EXTRA_DIM/METRICS_DIM`/`policy_input_dim` 派生的不许写字面量**；
+   只有「旧 v4 源族身份」（头 137/151）与「旧 schema 应被拒」两处保留绝对数——它们是**历史坐标**。
+3. `trainer/batch_runner.py` 顶到 1000 LOC 预算（`test_python_loc_budget` 红）：`eval_v12_fields`
+   并入同一 import 行省一行；该文件仍在天花板，下一族必须先按 `plan/nn-training-refactor.md` §5.7 拆。
+4. `metrics-v11-hotlane` 的**采样链金标**随 golden 夹具重出而变（`fc` 输入宽 56→62 ⇒ 随机权重重抽
+   ⇒ 同一 `(stage, seed)` 是另一局）。按 obs-v5 先例**重标数值、判据结构不动**：重选了
+   `s1/14`（near 非零）、`s0/13`（零例）、`s2/11`（两列非零）。这是夹具换代，不是列语义变化。
+
+**B4 哨兵已接线**（评审 Bf9）：`export-eval-game.ts` 的 `_eval_report.json` 新增
+`postThawDamage` / `postThawDamageRate`（绝对值 + 份额）。口径写死在 `post-thaw-damage.test.ts`：
+解冻帧 = `freezeTimer` 由 >0 变 ≤0 的那一拍；窗口 `[thawFrame, thawFrame+60)` 左闭右开；
+重新冻结 ⇒ 窗关；分母 = 整局 `player_damage`，零承伤 ⇒ 0。**只产出读数、不做门判定**——
+基线必须是新 schema null 腿同期值（本机无该基线）。
+
+**未做（有意）**：B6 窗口命中奖励（数据级课程 JSONC）、整链动作迁移（mask 仍 7 位，见
+§2026-10-19-goalnn-b1-v6-head-switch）、全语料重灌。旧权重/旧 shard 在 v6 schema 下按 MAJOR 响亮拒绝。
+
+**门禁**：`bun run check` 2577 pass / 0 fail · `bun run build` 过 · `freeze:check` FROZEN-SIGNATURE OK ·
+`nn-training` pytest 全量绿。
+
+---
+
 ## §77 锁重入守卫的 15s 预算假红：纯 CPU 全仓扫描不得配比 per-test 口径更紧的 `time_budget`（2026-10-12）
 
 **症状**：2026-10-12 pre-commit 门禁在并发负载下红了一条「与本次改动无关」的

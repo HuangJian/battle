@@ -56,14 +56,15 @@ import { cornerAnchorDist, nearestPickupCenter, sampleBasePressure } from './dan
 export const OBS_CHANNELS = 16
 export const BOARD = GRID // 26
 // v5（plan/obs-v5-vector-gap.plan.md，2026-10-12）：30 → 40（s30..s39 追加）。
-// **0–29 的序号与语义一字不动**（只追加）——旧权重/旧语料按 MAJOR 被拒收，不靠重编号兼容。
-export const SCALAR_DIM = 40
+// v6（plan/nn-capability-upgrade.plan.md §4-B2）：40 → 46（s40..s45，prevAction /
+// lastHit / 敌朝向投影）。**0–39 的序号与语义一字不动**（只追加）。
+export const SCALAR_DIM = 46
 // v4（plan/policy-spatial-head.plan.md §4-S0b，2026-10-05）：新增 POLICY_EXTRA(9) 张量
 // （观测流新增一张量 ⇒ 旧代码读不了）。
 // v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，且
 // critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
 // 指纹防语义错位、MAJOR 防版本混跑。
-export const OBS_SCHEMA_MAJOR = 5
+export const OBS_SCHEMA_MAJOR = 6
 
 // ---- Channel index map (plan §1.1 + obs-schema-v3.plan.md v4.0 §3.2) ----
 export const CH = {
@@ -174,6 +175,13 @@ export const SCALAR_NAMES = [
   'baseRelY',
   'basePressure',
   'nearestEnemyApproach',
+  // ---- v6 新增（plan §4-B2）：prevAction 的非方向位 + lastHit + 敌后方投影 ----
+  'prevActionHold',
+  'prevActionFireNone',
+  'prevActionFireBeforeTurn',
+  'prevActionFireAfterTurn',
+  'ticksSinceHit',
+  'nearestEnemyBeyond',
 ] as const
 if (SCALAR_NAMES.length !== SCALAR_DIM) {
   throw new Error(`SCALAR_NAMES must have ${SCALAR_DIM} entries, got ${SCALAR_NAMES.length}`)
@@ -513,6 +521,8 @@ export class ObsEncoder {
     let ndy = 0
     let nvx = 0
     let nvy = 0
+    /** B2：s45 `nearestEnemyBeyond` 沿**该敌**的朝向投影（不是玩家朝向）。 */
+    let ndir: Direction = 'up'
     if (hasPc) {
       for (let i = 0; i < allTanks.length; i++) {
         const e = allTanks[i]
@@ -528,6 +538,7 @@ export class ObsEncoder {
           ndy = dy
           nvx = e.vx
           nvy = e.vy
+          ndir = e.dir
         }
       }
     }
@@ -647,6 +658,36 @@ export class ObsEncoder {
 
     // s39 最近敌人**径向接近速度**（正 = 朝我来）。分母 3 与 clamp 的说明见模块常量。
     s[39] = computeNearestEnemyApproach(nd, ndx, ndy, nvx, nvy)
+
+    // ---- v6 新增 s40..s45（plan §4-B2）----
+
+    if (p) {
+      // s40–s43 prevAction 的非方向位（move one-hot 在 POLICY_EXTRA 41–44）：
+      // 「没有上一动作」= hold=0 + fire none=1（fire one-hot 是完备的）。
+      s[40] = p.lastActionHold ? 1 : 0
+      const fire = p.lastActionFire ?? 0
+      s[41] = fire === 0 ? 1 : 0
+      s[42] = fire === 1 ? 1 : 0
+      s[43] = fire === 2 ? 1 : 0
+
+      // s44 最近一次挨打距今 / 300（5s）：从未挨打 ⇒ 饱和 1.0（plan §4-B2 G5-2/3）。
+      s[44] = clamp01(
+        (p.lastHitFrame === undefined ? 300 : Math.min(world.frame - p.lastHitFrame, 300)) / 300,
+      )
+
+      // s45 我是否在最近敌的后方（余弦式，plan §4-B2 Bf7）：
+      // beyond = (E−P)·facing / |E−P|；>0 ⇒ 我在它后方（它背对我）。镜像下不变。
+      if (nd < Infinity && nd > 0) {
+        const fx = ndir === 'left' ? -1 : ndir === 'right' ? 1 : 0
+        const fy = ndir === 'up' ? -1 : ndir === 'down' ? 1 : 0
+        const b = (ndx * fx + ndy * fy) / nd
+        s[45] = b < -1 ? -1 : b > 1 ? 1 : b
+      } else {
+        s[45] = 0
+      }
+    } else {
+      for (let i = 40; i <= 45; i++) s[i] = 0
+    }
   }
 }
 
@@ -775,8 +816,10 @@ export function actionFromFrame(f: { direction: Direction | null; firing: boolea
 }
 
 export interface Masks {
-  move: number[] // length 5
-  fire: number[] // length 2  ([release valid, hold valid])
+  move: number[] // legacy length 5 (0=STOP); v6 length 4 (up/down/left/right)
+  fire: number[] // legacy length 2 ([no-shot, shot-ready]); v6 length 3 (\u0031 before-turn / after-turn)
+  /** B1 v6: hold head mask (always [1,1]); legacy consumers ignore it. */
+  hold: number[] // length 2
 }
 
 /**
@@ -802,12 +845,16 @@ export interface Masks {
  *  改动纪律：本函数返回的**内容**不是指纹输入（指纹只钉上方常量表），但改了
  *  mask 语义 = 改了「一个样本是什么」⇒ 必须走 schema bump 与新语料轮次。
  */
-export function computeMasks(world: World): Masks {
+export function computeMasks(world: World, v6 = false): Masks {
   const p = world.player
   const ready = p ? isFireReady(world) : false
-  const fire: number[] = [1, ready ? 1 : 0]
-  const move: number[] = [1, 1, 1, 1, 1]
-  return { move, fire }
+  // v6: fire head = {0 no shot, 1 before turn, 2 after turn}. Both shot slots
+  // share the same physical gate (cooldown), so only readiness carries information
+  // — same as the legacy 2-slot layout. hold/move stay constant by design.
+  const fire: number[] = v6 ? [1, ready ? 1 : 0, ready ? 1 : 0] : [1, ready ? 1 : 0]
+  const move: number[] = v6 ? [1, 1, 1, 1] : [1, 1, 1, 1, 1]
+  const hold: number[] = [1, 1]
+  return { move, fire, hold }
 }
 
 function isFireReady(world: World): boolean {

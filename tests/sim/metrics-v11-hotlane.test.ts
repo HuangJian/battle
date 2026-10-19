@@ -310,14 +310,14 @@ const studentWeights = (() => {
 })()
 
 describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
-  // ⚠ obs-v5 重标（2026-10-12，plan/obs-v5-vector-gap.plan.md §2.1）：金标随 golden 夹具
-  // 重出而重定——夹具按新 schema 生成（SCALAR_DIM 30→40 ⇒ 旧架构的 `fc` 输入宽 46→56），
+  // ⚠ obs-v6 重标（2026-10-19，plan/nn-capability-upgrade.plan.md §4-B2）：金标随 golden
+  // 夹具重出而重定——夹具按新 schema 生成（SCALAR_DIM 40→46 ⇒ 旧架构的 `fc` 输入宽 56→62），
   // 随机权重整体重抽 ⇒ 同一 (stage, seed) 的另一局。**判据结构不变**：仍要求「两列各有
-  // 非零正例 + 至少一个零例」，数值为 2026-10-12 实测（确定性：同 seed 两跑逐值相同）。
+  // 非零正例 + 至少一个零例」，数值为 2026-10-19 实测（确定性：同 seed 两跑逐值相同）。
   const cases = [
-    { stage: 1, seed: 7, near: 126, lane: 0, note: 'near 非零' },
+    { stage: 1, seed: 14, near: 134, lane: 0, note: 'near 非零' },
     { stage: 0, seed: 13, near: 0, lane: 0, note: '两列全零（零例）' },
-    { stage: 2, seed: 3, near: 80, lane: 12, note: '两列非零（`near` 更大 + `lane` 非零）' },
+    { stage: 2, seed: 11, near: 78, lane: 44, note: '两列非零（`near` 更大 + `lane` 非零）' },
   ] as const
   for (const c of cases) {
     it(`stage ${c.stage} seed ${c.seed}：near=${c.near} / lane=${c.lane}（${c.note}）`, () => {
@@ -335,13 +335,13 @@ describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
   }
 
   it('同 seed 连跑两遍逐值相同（金标可复现；同进程第二局不继承第一局的窗）', () => {
-    // 用 stage 2 seed 3（重标后两列都非零的那例）而不是全零例：金标不是 0 == 0。
-    const a = runOneBench(2, STAGES[2] as never, 3, 'hard', MAX_TICKS, studentWeights)
-    const b = runOneBench(2, STAGES[2] as never, 3, 'hard', MAX_TICKS, studentWeights)
+    // 用 stage 2 seed 11（重标后两列都非零的那例）而不是全零例：金标不是 0 == 0。
+    const a = runOneBench(2, STAGES[2] as never, 11, 'hard', MAX_TICKS, studentWeights)
+    const b = runOneBench(2, STAGES[2] as never, 11, 'hard', MAX_TICKS, studentWeights)
     expect(b.nearSqSum).toBe(a.nearSqSum)
     expect(b.postHitLaneTicks).toBe(a.postHitLaneTicks)
-    expect(a.nearSqSum).toBe(80) // 非零正例：金标不是 0 == 0
-    expect(a.postHitLaneTicks).toBe(12)
+    expect(a.nearSqSum).toBe(78) // 非零正例：金标不是 0 == 0
+    expect(a.postHitLaneTicks).toBe(44)
   })
 })
 

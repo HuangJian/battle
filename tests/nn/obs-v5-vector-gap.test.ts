@@ -62,6 +62,11 @@ const MIRROR_SWAPS: Array<[number, number]> = [
   [26, 27],
   [29, 30],
   [35, 36],
+  [39, 40],
+  [43, 44],
+  [47, 48],
+  [51, 52],
+  [55, 56],
 ]
 const MIRROR_NEG = [32]
 

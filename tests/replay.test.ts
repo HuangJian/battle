@@ -10,6 +10,8 @@ import { packFrame, unpackFrame, packFrames, unpackFrames } from '../src/replay/
 import {
   FRAME_SCHEMA_VERSION,
   FRAME_SCHEMA_V1,
+  FRAME_SCHEMA_V2,
+  FRAME_SCHEMA_V3,
   REPLAY_RETENTION_POLICIES,
 } from '../src/replay/config'
 import type { Direction } from '../src/constants'
@@ -90,13 +92,34 @@ function normalize(snap: unknown): string {
 
 describe('Replay frame packing', () => {
   it('packFrame/unpackFrame round-trips every field', () => {
-    for (const f of SAMPLE_FRAMES) {
+    const frames: InputFrame[] = [
+      ...SAMPLE_FRAMES,
+      { direction: 'up', firing: true, guard: false, frenzy: false, hold: true },
+      {
+        direction: 'left',
+        firing: true,
+        guard: false,
+        frenzy: false,
+        fireBeforeTurn: true,
+      },
+      {
+        direction: 'right',
+        firing: false,
+        guard: true,
+        frenzy: true,
+        hold: true,
+        fireBeforeTurn: true,
+      },
+    ]
+    for (const f of frames) {
       const b = packFrame(f)
       const out = unpackFrame(b)
       expect(out.direction).toBe(f.direction)
       expect(out.firing).toBe(f.firing)
       expect(out.guard).toBe(f.guard)
       expect(out.frenzy).toBe(f.frenzy)
+      expect(out.hold ?? false).toBe(f.hold ?? false)
+      expect(out.fireBeforeTurn ?? false).toBe(f.fireBeforeTurn ?? false)
     }
   })
 
@@ -115,17 +138,17 @@ describe('Replay frame packing', () => {
     }
   })
 
-  it('packFrames with frames2 produces v2 format', () => {
+  it('packFrames with frames2 produces the v3 interleaved format', () => {
     const p2frames: InputFrame[] = [
       { direction: 'left', firing: true, guard: false, frenzy: false },
       { direction: null, firing: false, guard: false, frenzy: false },
     ]
     const packed = packFrames(SAMPLE_FRAMES, p2frames)
-    expect(packed[0]).toBe(FRAME_SCHEMA_VERSION) // v2
+    expect(packed[0]).toBe(FRAME_SCHEMA_VERSION) // v3
     expect(packed[1] & 0x01).toBe(1) // hasP2 flag
     const out = unpackFrames(packed)
     expect(out).not.toBeNull()
-    // v2 interleaved: tickCount = P1 length (5); P2 is shorter → padded with idle frames
+    // interleaved: tickCount = P1 length (5); P2 is shorter → padded with idle frames
     expect(out!.p1.length).toBe(SAMPLE_FRAMES.length)
     expect(out!.p2).not.toBeNull()
     expect(out!.p2!.length).toBe(SAMPLE_FRAMES.length)
@@ -135,6 +158,58 @@ describe('Replay frame packing', () => {
     expect(out!.p2![1].direction).toBe(null)
     // Remaining P2 frames are idle (defaulted)
     expect(out!.p2![2].firing).toBe(false)
+  })
+
+  it('writes v3 for a single stream carrying hold/fireBeforeTurn (P0-1)', () => {
+    const frames: InputFrame[] = [
+      { direction: 'up', firing: false, guard: false, frenzy: false, hold: true },
+      {
+        direction: 'left',
+        firing: true,
+        guard: false,
+        frenzy: false,
+        fireBeforeTurn: true,
+      },
+    ]
+    const packed = packFrames(frames)
+    expect(packed[0]).toBe(FRAME_SCHEMA_V3)
+    const out = unpackFrames(packed)
+    expect(out).not.toBeNull()
+    expect(out!.p2).toBeNull()
+    expect(out!.p1[0].hold).toBe(true)
+    expect(out!.p1[1].fireBeforeTurn).toBe(true)
+    expect(out!.p1[1].direction).toBe('left')
+  })
+
+  it('records the per-stream hold/fire3 action contract in the v3 flags byte', () => {
+    const frames: InputFrame[] = [{ direction: 'up', firing: true, guard: false, frenzy: false }]
+    // No hold/fireBeforeTurn bits, but the input declared fire(3) semantics:
+    // the flag is what lets playback tell fire=2 apart from legacy fire.
+    const packed = packFrames(frames, null, { p1HoldFire3: true })
+    expect(packed[0]).toBe(FRAME_SCHEMA_V3)
+    expect(packed[1] & 0x02).toBe(0x02)
+    const out = unpackFrames(packed)
+    expect(out!.p1HoldFire3).toBe(true)
+    expect(out!.p2HoldFire3).toBe(false)
+    expect(new ReplayInput(packed).usesHoldFire3()).toBe(true)
+
+    const dual = packFrames(frames, frames, { p1HoldFire3: false, p2HoldFire3: true })
+    const outDual = unpackFrames(dual)
+    expect(outDual!.p1HoldFire3).toBe(false)
+    expect(outDual!.p2HoldFire3).toBe(true)
+  })
+
+  it('still decodes legacy v2 single-stream frames with the old bit layout', () => {
+    const legacy: InputFrame = {
+      direction: 'right',
+      firing: true,
+      guard: true,
+      frenzy: true,
+    }
+    const packed = new Uint8Array([FRAME_SCHEMA_V2, 0, packFrame(legacy, FRAME_SCHEMA_V2)])
+    const out = unpackFrames(packed)
+    expect(out).not.toBeNull()
+    expect(out!.p1[0]).toEqual({ ...legacy, hold: false, fireBeforeTurn: false })
   })
 
   it('unpackFrames returns null on schema-version mismatch (L3 guard)', () => {
@@ -175,7 +250,7 @@ describe('ReplayInput', () => {
   })
 
   it('rejects an unknown schema version → zero frames → immediate end', () => {
-    const bad = new Uint8Array([0x02, 0x10]) // version 2, with a payload byte
+    const bad = new Uint8Array([0x99, 0x10]) // unknown version, with a payload byte
     const input = new ReplayInput(bad)
     expect(input.isFinished).toBe(true)
     expect(input.getMoveDirection()).toBe(null)
@@ -222,7 +297,7 @@ describe('ReplayManager', () => {
     expect(replay.schemaVersion).toBe(FRAME_SCHEMA_V1)
   })
 
-  it('create() records v2 for a coop (dual-stream) recording', () => {
+  it('create() records v3 for a coop (dual-stream) recording', () => {
     const mgr = new ReplayManager({ now: () => 0 })
     const frames = packFrames(SAMPLE_FRAMES, SAMPLE_FRAMES)
     const replay = mgr.create('clear', {} as any, frames, SAMPLE_FRAMES.length, {

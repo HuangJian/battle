@@ -16,7 +16,6 @@
  */
 
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
-import { POLICY_EXTRA_DIM } from './policy-extra'
 import { noteFeaturesTs, runStudentFeatures } from './conv/conv'
 import { runStudentConvTs, type ConvTsView } from './conv/conv_ts'
 import {
@@ -30,6 +29,7 @@ import {
 // MOVE_DIM now lives in action-space.ts (single source: index 0 = STOP, 1..4 =
 // directions). Re-exported here so `infer`'s public surface is unchanged.
 import { MOVE_DIM } from './action-space'
+import { FIRE3_DIM, HOLD_DIM, MOVE4_DIM } from './action-space-v6'
 export { MOVE_DIM }
 export const FIRE_DIM = 2
 
@@ -47,6 +47,11 @@ export interface ModelLike {
   readonly scalarDim: number
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
+  /** B1 v6: optional hold head; absent on legacy 5/2 checkpoints. */
+  readonly holdLogits?: Float32Array | null
+  readonly moveDim?: number
+  readonly fireDim?: number
+  readonly usesHoldFire3?: boolean
 }
 
 const RELU = (x: number): number => (x > 0 ? x : 0)
@@ -114,14 +119,20 @@ export class NNModel {
   private moveB: Float32Array // [MOVE_DIM]
   private fireW: Float32Array // [FIRE_DIM, headHidden]
   private fireB: Float32Array // [FIRE_DIM]
+  private holdW: Float32Array | null
+  private holdB: Float32Array | null
+  readonly moveDim: number
+  readonly fireDim: number
+  readonly usesHoldFire3: boolean
 
   // ---- reusable buffers (no per-tick allocation) ----
   private obsF: Float32Array // [inCh * board * board]
   private convBuf: Float32Array[] // per conv layer output [outCh * board * board]
   private pooled: Float32Array // [convOutCh]
   private hidden: Float32Array // [headHidden]
-  readonly moveLogits: Float32Array // [MOVE_DIM]
-  readonly fireLogits: Float32Array // [FIRE_DIM]
+  readonly moveLogits: Float32Array // [moveDim]
+  readonly fireLogits: Float32Array // [fireDim]
+  readonly holdLogits: Float32Array | null // [HOLD_DIM] (v6 only)
 
   constructor(params: Record<string, Float32Array>, shapes?: Record<string, number[]>) {
     const p = (name: string): Float32Array => {
@@ -144,14 +155,23 @@ export class NNModel {
     this.moveB = p('move_head.bias')
     this.fireW = p('fire_head.weight')
     this.fireB = p('fire_head.bias')
+    // B1 v6 detection: presence of the hold head. Legacy 5/2 checkpoints keep
+    // their original widths; v6 checkpoints use 2/4/3.
+    const holdW = params['hold_head.weight']
+    this.usesHoldFire3 = !!holdW
+    this.moveDim = this.usesHoldFire3 ? MOVE4_DIM : MOVE_DIM
+    this.fireDim = this.usesHoldFire3 ? FIRE3_DIM : FIRE_DIM
+    this.holdW = holdW ?? null
+    this.holdB = params['hold_head.bias'] ?? null
 
     const sp = BOARD * BOARD
     this.obsF = new Float32Array(this.inCh * sp)
     this.convBuf = this.layers.map((l) => new Float32Array(l.outCh * sp))
     this.pooled = new Float32Array(convOutCh)
     this.hidden = new Float32Array(HEAD_HIDDEN)
-    this.moveLogits = new Float32Array(MOVE_DIM)
-    this.fireLogits = new Float32Array(FIRE_DIM)
+    this.moveLogits = new Float32Array(this.moveDim)
+    this.fireLogits = new Float32Array(this.fireDim)
+    this.holdLogits = this.usesHoldFire3 ? new Float32Array(HOLD_DIM) : null
   }
 
   /**
@@ -197,8 +217,11 @@ export class NNModel {
       this.hidden[o] = RELU(acc)
     }
 
-    this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, HEAD_HIDDEN)
-    this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, HEAD_HIDDEN)
+    this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, this.moveDim, HEAD_HIDDEN)
+    this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, this.fireDim, HEAD_HIDDEN)
+    if (this.holdW && this.holdB && this.holdLogits) {
+      this.linear(this.hidden, this.holdW, this.holdB, this.holdLogits, HOLD_DIM, HEAD_HIDDEN)
+    }
   }
 
   /** head = W · h + b ; W is [outDim, inDim] (PyTorch Linear layout). */
@@ -311,6 +334,12 @@ export class StudentModel implements ModelLike {
   private moveB: Float32Array
   private fireW: Float32Array
   private fireB: Float32Array
+  private holdW: Float32Array | null
+  private holdB: Float32Array | null
+  readonly moveDim: number
+  readonly fireDim: number
+  readonly usesHoldFire3: boolean
+  readonly extraDim: number
   // Per-tick value head: **吃与策略头同一份 `pf`**（obs-v5，plan §2.6）——宽度随档位：
   // legacy 128（= hidden）/ 腿 A 165（hidden+extra37）/ 腿 B 189（tower+scalars40+extra37）。
   // 旧稿的「value 只吃 hidden 128」已由 DECISIONS §2026-10-12-goalnn-obs-v5-critic-superset 推翻，
@@ -363,6 +392,7 @@ export class StudentModel implements ModelLike {
   private readonly tsConvView: ConvTsView
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
+  readonly holdLogits: Float32Array | null
   readonly valueOut: Float32Array
   readonly intentLogits: Float32Array // [8] (M4)
   readonly enemyLogits: Float32Array // [5] (M4)
@@ -409,6 +439,13 @@ export class StudentModel implements ModelLike {
     this.moveB = p('move_head.bias')
     this.fireW = p('fire_head.weight')
     this.fireB = p('fire_head.bias')
+    // B1 v6 detection (see NNModel).
+    const holdW = params['hold_head.weight']
+    this.usesHoldFire3 = !!holdW
+    this.moveDim = this.usesHoldFire3 ? MOVE4_DIM : MOVE_DIM
+    this.fireDim = this.usesHoldFire3 ? FIRE3_DIM : FIRE_DIM
+    this.holdW = holdW ?? null
+    this.holdB = params['hold_head.bias'] ?? null
     // Value head is OPTIONAL: RL weights include value_head.*; BC-only
     // checkpoints don't, in which case we zero-init (harmless for the
     // pure-policy deployment path). M8 (P1-5②): intent RL weights carry a
@@ -424,11 +461,14 @@ export class StudentModel implements ModelLike {
     //   pfLen = 128 legacy / 165 腿 A / 189 腿 B —— 与策略头同一份输入。
     const vh = params['value_head.weight']
     const vb = params['value_head.bias'] ?? new Float32Array(1)
-    const pfLen = this.spatialTower
-      ? SPATIAL_TOWER_FC_OUT + SCALAR_DIM + POLICY_EXTRA_DIM
+    // pf width from the move head: legacy 128/165/189, v6 128/165/189 too until
+    // B2–B5 append dims. This keeps archived fixtures loadable.
+    const pfLen = this.moveW.length / this.moveDim
+    this.extraDim = this.spatialTower
+      ? pfLen - SPATIAL_TOWER_FC_OUT - this.scalarDim
       : this.policyExtra
-        ? this.headHidden + POLICY_EXTRA_DIM
-        : this.headHidden
+        ? pfLen - this.headHidden
+        : 0
     const v137Len = this.headHidden + INJECT_DIM
     const strict = this.spatialTower || this.policyExtra || intentHeads === true
     const want = this.spatialTower || this.policyExtra ? pfLen : v137Len
@@ -533,8 +573,9 @@ export class StudentModel implements ModelLike {
     this.spatialZ = new Float32Array(SPATIAL_TOWER_C * sp)
     this.spatialVec = new Float32Array(SPATIAL_TOWER_FEAT)
     this.spatialOut = new Float32Array(SPATIAL_TOWER_FC_OUT)
-    this.moveLogits = new Float32Array(MOVE_DIM)
-    this.fireLogits = new Float32Array(FIRE_DIM)
+    this.moveLogits = new Float32Array(this.moveDim)
+    this.fireLogits = new Float32Array(this.fireDim)
+    this.holdLogits = this.usesHoldFire3 ? new Float32Array(HOLD_DIM) : null
     this.valueOut = new Float32Array(1)
     this.intentLogits = new Float32Array(8)
     this.enemyLogits = new Float32Array(5)
@@ -577,24 +618,26 @@ export class StudentModel implements ModelLike {
         this.spatialVec,
         this.spatialOut,
       )
-      if (!extra)
-        throw new Error(`StudentModel: spatialTower 模型必须喂 extra(${POLICY_EXTRA_DIM})`)
+      if (!extra) throw new Error(`StudentModel: spatialTower 模型必须喂 extra(${this.extraDim})`)
       let o = 0
       this.headIn.set(this.spatialOut, o)
       o += SPATIAL_TOWER_FC_OUT
-      this.headIn.set(scalars, o)
+      this.headIn.set(scalars.subarray(0, this.scalarDim), o)
       o += this.scalarDim
-      this.headIn.set(extra, o)
+      this.headIn.set(extra.subarray(0, this.extraDim), o)
       pf = this.headIn
     } else if (this.policyExtra) {
-      if (!extra) throw new Error(`StudentModel: policyExtra 模型必须喂 extra(${POLICY_EXTRA_DIM})`)
+      if (!extra) throw new Error(`StudentModel: policyExtra 模型必须喂 extra(${this.extraDim})`)
       this.headIn.set(this.hidden)
-      this.headIn.set(extra, this.headHidden)
+      this.headIn.set(extra.subarray(0, this.extraDim), this.headHidden)
       pf = this.headIn
     }
 
-    this.linear(pf, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, pf.length)
-    this.linear(pf, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, pf.length)
+    this.linear(pf, this.moveW, this.moveB, this.moveLogits, this.moveDim, pf.length)
+    this.linear(pf, this.fireW, this.fireB, this.fireLogits, this.fireDim, pf.length)
+    if (this.holdW && this.holdB && this.holdLogits) {
+      this.linear(pf, this.holdW, this.holdB, this.holdLogits, HOLD_DIM, pf.length)
+    }
     if (this.valuePfW !== null) {
       // obs-v5：critic 与策略看到**同一份** pf（legacy 档下 pf === hidden，行为不变）。
       this.linear(pf, this.valuePfW, this.valuePfB, this.valueOut, 1, pf.length)

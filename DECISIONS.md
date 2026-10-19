@@ -7698,3 +7698,119 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   不再出现在尾窗。
 - **门禁**：同上（`web-ssr-errors-page` 新增外壳/分组/已恢复 3 例、`web-alert-dock` 新增噪声/历史 2 例、
   `server-api-error-registry` 新增撤销/账本 4 例）；四份 bundle 过（`errors.js` 仍独立）。
+
+## §2026-10-19-goalnn-a1-blocked-replay-v3 — A1 被 God-AI score gate 拒绝（回退）；回放帧先升 v3 保住 hold/fireBeforeTurn
+
+- **现场**：`plan/nn-capability-upgrade.plan.md` 的 A1 要修“子弹方向 ≠ 开火时刻已提交朝向”。
+  按 L1 实现两版：① `tryFire` 内先 `applyTurnCooldown`，被拒仍按旧朝向发射；
+  ② 玩家路径先提交转身，被拒则本拍不发射。两版都让 God-AI 的转身同拍开火失效。
+- **证据**：`tests/godai-score-gate.test.ts`（v7，classic/hard/chaos，20 seed/关）：
+  ① classic 10 关低于地板（S7/S13/S19/S22/S23/S27/S28/S31/S32/S34，均值 0.65–0.82，
+  truth 0.85–0.97）；② 仍 7 关低于地板（S10/S13/S21/S22/S28/S32/S34，均值 0.66–0.90）。
+  这不是随机噪声，是“侧射/转身同拍开火”本身在 God-AI 战术里的贡献。
+- **决策**：
+  1. **A1 回退，不签入**；God-AI golden 保持原样。不得用延长冷却、改掩码、给 AI 加补偿来“修绿”。
+  2. A1 若要重启，必须单独立项回答“God-AI 的转身同拍开火是否可放弃”；
+     若只服务 NN，则用显式能力开关（默认关）而不是改全局引擎语义，且开关要进快照/回放契约。
+  3. **P0-1 独立先做**：回放帧升 v3（单字节重排，`bits 0–2` 方向、`bit3` 开火、`bit6` hold、
+     `bit7` fireBeforeTurn）；单流只要含任一 v3 位就写 v3，v1/v2 继续兼容读。
+     这样 B′ 不会在“录制侧写不进两位 / 读回恒 false”上静默失败。
+- **备选与否决**：① 直接接受 A1 的分数下降并下调地板 —— 否（地板是 God-AI v7 的 truth 派生，
+  下调等于把回归写成通过）；② 只对敌人开 A1 —— 否（玩家侧才是 NN 要修的那一侧）；
+  ③ v3 双字节/tick —— 否（方向只需 3 bit，白扔的 bit 正好装两位，体积不变）。
+- **后果**：当前 HEAD 无 A1，`bun run check` 的 score gate 三难度全绿；B′ 仍被 A1 阻塞，
+  但回放 v3 已就绪。旧 v1/v2 `.replay` 可继续导入/播放；新录单流若带 NN 两位则必须是 v3。
+- **门禁**：`bun run check`（2554 tests；含 replay v1/v2/v3 round-trip、单流 v3、旧 v2 解码）；
+  `bun run build` 待跑。
+
+## §2026-10-19-goalnn-nn-only-hold-fire3 — A1 改为 NN-only 输入能力位：God-AI 保留侧射，B′ 拿得到“开火时刻朝向权威”
+
+- **背景**：上一条 A1 被 God-AI score gate 拒绝，但 B′ 的 `fire=1/2` 与 `hold` 需要
+  “先打再转 / 先转再打”的确定性。全局改 `tryFire` 会连 God-AI 一起改，已证明不可接受。
+- **决策**：把差异收进输入契约，而不是引擎全局语义：
+  1. `InputLike.usesHoldFire3?(): boolean`，**默认 false**；`Input` / `GodAIInput` 不实现
+     ⇒ 旧路径逐字节不变，golden 不需要新纪元。
+  2. `SimulationPlayer` 的 v3 分支：`hold=1` 只转向不前进，并显式调
+     `applyTurnCooldown`（零速车会跳过 step⑦，不显式裁决就是免费瞄准）；
+     `fireBeforeTurn=true` 先按旧朝向开火再转身；默认先转身，**转身被冷却拒绝则本拍不发射**。
+  3. `applyTurnCooldown` 改为 public 且返回是否接受，供 B1/回放复用；旧调用点忽略返回值。
+  4. v3 `ReplayInput` 自动返回 true（v1/v2 回放仍走旧路径）；`NNInput` 在 B1 接线时返回 true。
+- **备选与否决**：① 全局 A1 + 接受 God-AI 分数下降 —— 否（已实测 7–10 关跌破地板）；
+  ② 另加 `world.rules` 开关 —— 否（规则开关会进快照/回放契约，输入能力位更小且天然只影响
+  声明它的输入源）；③ 只在训练脚本里模拟 —— 否（回放/评估会与训练分裂）。
+- **后果**：God-AI 的侧射保留；NN 腿获得与 B1 一致的动作语义；`fire=1` 的 BC 样本仍≈0
+  （人类输入不声明 v3），符合 plan §11.1 的预期。
+- **门禁**：`tests/hold-fire3.test.ts` 4 例 · `bun run check` 2547 pass / 0 fail ·
+  `bun run build` 过 · God-AI score gate 三难度全绿 · `freeze:check` 仍
+  `FROZEN-SIGNATURE OK`（God-AI 无行为变化，golden 不动）。
+
+## §2026-10-19-goalnn-b1-v6-head-switch — B1 动作空间三头以 `hold_head` 权重键切换，默认仍 5/2（拒绝半迁移）
+
+- **背景**：B′ 的 B1 要把 `move(5)+fire(2)` 换成 `hold(2)+move(4)+fire(3)`。整条训练链
+  （PPO rollout/update、BC dataset、shard `actions/masks`、`export-*` 工具、语料身份）都按
+  7 位 mask 与 (move,fire) 布局写读；一次全量迁移必须与语料重导同批完成。
+- **决策**：采用**运行时按权重自述切换**，而不是把全局常量直接翻成 4/3：
+  1. TS `ModelLike` 以 `hold_head.*` 存在 ⇒ `usesHoldFire3=true`（`StudentModel` 载入时判）；
+     `NNInput` 走 v6 分支，`computeMasks(world, v6=true)` 返回 move4/fire3（fire 两槽共用
+     cooldown 闸，与 plan §4-B1 的「只有 1 位信息」一致）。
+  2. Python `common.schema` 追加 `HOLD_DIM/MOVE4_DIM/FIRE3_DIM/MASK_V6_DIM` 与
+     `MOVE_LABEL_SEMANTICS_V6`；`StudentNet(action_v6=True)` 才建 `hold_head`，arch 写
+     `actionV6`；`model_build` 的 logit 归一与 `mirror_x` 的 4 路左右翻转同步覆盖。
+  3. 仍是 5/2 的默认路径**逐字节不变**（旧权重、旧 shard、God-AI 回放全部照常）。
+- **为何不做「一次翻完」**：PPO update 按 `mask[:, :MOVE_DIM]` 切 7 位、dataset 按同一布局切
+  两段、四个 export 工具各自 argmax 2 头——只翻 schema 会让这些点**静默读错位**（比红更糟）。
+  故本刀只交付契约+运行时；下一步要么整链迁移+重导语料，要么保持 v6 不训练。
+- **备选与否决**：① 直接全局 4/3 —— 否（半迁移静默错配）；② 每个 shard 自带布局字节 ——
+  否（同一份 mask 会有两套读者，正是 C5 要防的双事实源）；③ v6 模型静默回落 5/2 ——
+  否（PPO 解 3 元组会当场 ValueError，这是有意的响亮失败）。
+- **后果**：旧模型继续可服务；v6 权重可被 TS 部署与 Python BC/推理加载，但**尚未有 v6 语料**。
+  `export-*` 工具遇到 v6 权重仍按旧布局读——在生成 v6 语料前不得把它们指向 v6 权重。
+- **门禁**：`bun run check` 2557 pass / 0 fail · `bun run build` 过 · `freeze:check` FROZEN-SIGNATURE OK ·
+  torch↔TS `student-golden-v6.json` 四头对账 ≤1e-4 · Python `test_action_head_hygiene` /
+  `test_student_model` / `test_dataset_mirror` 全绿。
+
+## §2026-10-19-goalnn-obs-v6-b2b5 — B′ 观测/遥测一次 bump 到 v6（SCALAR 46 / EXTRA 57 / MAJOR 6 / metrics v12）：能力位进观测，口径只留一个
+
+- **背景**：plan/nn-capability-upgrade §4-B2–B5 要在同一次 schema bump 里交付 prevAction /
+  lastHit / 敌朝向 / leadHit / 威胁拆族 / 窗口三列——任何一项单独做都要付一遍全语料重导。
+- **决策**：
+  1. **prevAction 由 `SimulationPlayer` 写入 `World.player`**（请求值 = 冷却前、地形前的输入），
+     不是写进 `NNInput`：回放/BC 重导时没有 `NNInput`，只写在那里会让 BC 与 rollout 分布分家。
+  2. **lastHit* 由 `CombatSystem` 写入**（真实扣血 + 星盾消耗两处），护盾 bounce 不写；
+     方向 = 弹的**飞行方向**（不取反）；同拍多源取**最大伤害发**（不是最后一发）。
+  3. **威胁拆族用「加列」不「改列」**：`0–3` 保持「只含敌弹」的旧语义，敌车炮口进 `37–40`；
+     包夹度 `8` 改读两族合计（粗读数语义不变）。护盾期两族置零，冰冻期**不置零**。
+  4. **窗口只留一个谓词**：`windowKind()` 基于粘性 `ShieldWindow` 分类（freeze / propShield /
+     respawnShield / starShieldGrace），B5 三列与 idx47/idx51 豁免列都从它派生（交集，非第三套口径）。
+     `deathDerivedShieldTicks` 只判读、不进奖励/分母——复活盾是「死了才拿到的无敌」。
+  5. **lastHit* 不进 `tickHash`**（纯观测，不参与回放对账），改由快照往返全字段断言覆盖。
+- **备选与否决**：① prevAction 写 `NNInput` —— 否（BC 缺该对象，分布分家）；② 直接把 `0–3`
+  改成「敌弹+敌车」合计 —— 否（旧读数语义被改写，历史课程不可比且无法用差列还原）；
+  ③ 另写一套 B5 窗口判定 —— 否（C5 要防的双事实源）；④ lastHitDir 存「攻击者相对方位」——
+  否（与弹方向互为取反，取反那一层不可查）。
+- **后果**：旧权重/旧 shard/旧 eval 报告在 MAJOR 6 下响亮拒绝（须重灌语料）；`metrics.npy`
+  行宽 76→79、eval 行新增三键（旧报告缺键 = 省略）；腿 B 起点迁移的 extra 槽位随 SCALAR_DIM 移动。
+  B6（窗口命中奖励）仍是数据级改动，本批未接公式。
+- **全文**：`docs/nn/engineering.md` §78。
+- **门禁**：`bun run check` 2577 pass / 0 fail · `bun run build` 过 · `freeze:check` OK ·
+  `nn-training` pytest 全量绿（含 1926 条 worker/trainer）。
+
+## §2026-10-19-goalnn-post-thaw-sentinel — B4 哨兵 `postThawDamageRate` 的口径：解冻帧起 60 拍、重新冻结即关窗、分母用 `player_damage`
+
+- **背景**：B4 让冰冻期不再置零威胁（信息不删），需要一条「解冻即挨打」的读数防止把 D2 修成 D2'
+  （plan/nn-capability-upgrade §4-B4 / 评审 Bf9）。计划只给了名字与「解冻后 60 拍内 player_damage 份额」，
+  没定三件事：窗口起点、再冻结怎么算、分母用什么。
+- **决策**：
+  1. **解冻帧** = `freezeTimer` 由 >0 变 ≤0 的那一拍（`Simulation` 在拍首递减）；
+     窗口 `[thawFrame, thawFrame + 60)`（1 s，左闭右开）——同帧伤害算「解冻后」。
+  2. **重新冻结 ⇒ 窗关**：冻结期的伤害不是「解冻即挨打」，留在窗口里会污染这个哨兵。
+  3. **分母 = 整局 `player_damage` 之和**（与 `playerDamageTaken` 同源），零承伤 ⇒ 0（不产生 NaN）。
+  4. 只产出读数（`_eval_report.json` 的 `postThawDamage` / `postThawDamageRate`），**不做门判定**；
+     门基线 = 新 schema null 腿同期值（本机无该基线）。
+- **备选与否决**：① 窗口从「下一拍」起算 —— 否（解冻当拍开火已是真实威胁，丢掉最危险的一帧）；
+  ② 再冻结不清窗 —— 否（等于把冻结期挨打算成解冻代价）；③ 分母用 `player_hit` 次数 ——
+  否（星盾/致死路径不发 `player_damage`，份额会在「被秒杀」的对局里失真）；④ 用 `player_hits`
+  为分子 —— 否（计划写死 player_damage，且次数丢伤害权重）。
+- **后果**：eval 报告多两个键（旧报告缺键 = 无读数）；metrics 列不变（79 列），无需重灌语料。
+- **全文**：`docs/nn/engineering.md` §78。
+- **门禁**：`bun run check` 2577 pass / 0 fail · build 过 · `freeze:check` OK。

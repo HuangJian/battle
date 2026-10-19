@@ -2,9 +2,10 @@ import { type InputLike } from '../game/Input'
 import type { World } from '../game/World'
 import type { WorldSnapshot } from '../snapshot/types'
 import { cloneWorld } from '../snapshot/WorldSerializer'
-import { packFrame } from './pack'
-import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1, REPLAY_HASH_INTERVAL } from './config'
+import { packFrames } from './pack'
+import { REPLAY_HASH_INTERVAL } from './config'
 import { worldTickHash } from './tickHash'
+import type { InputFrame } from './types'
 
 // ================================================================
 // InputRecorder — passively captures player input per tick
@@ -37,8 +38,8 @@ export interface RecorderResult {
 }
 
 export class InputRecorder {
-  private frames: number[] = []
-  private frames2: number[] = []
+  private frames: InputFrame[] = []
+  private frames2: InputFrame[] = []
   private tickHashes: string[] = []
   private active = false
   private initialSnapshot: WorldSnapshot | null = null
@@ -48,6 +49,9 @@ export class InputRecorder {
   private coopAtStart = false
   /** 督战双玩家: captured at recording start for hasP2 determination. */
   private spectateDualAtStart = false
+  /** Whether each stream's input declared the v3 hold/fire(3) contract. */
+  private p1HoldFire3 = false
+  private p2HoldFire3 = false
 
   /** Begin a new recording session. */
   startNew(world: World): void {
@@ -59,6 +63,8 @@ export class InputRecorder {
     this.world = world
     this.coopAtStart = world.coop
     this.spectateDualAtStart = world.spectateDual
+    this.p1HoldFire3 = false
+    this.p2HoldFire3 = false
   }
 
   /**
@@ -68,29 +74,34 @@ export class InputRecorder {
   recordFrame(input: InputLike, input2?: InputLike | null): void {
     if (!this.active) return
 
-    // Record player1 input
-    this.frames.push(
-      packFrame({
-        direction: input.getMoveDirection(),
-        firing: input.isFiring(),
-        guard: input.wasItemPressed('guard'),
-        frenzy: input.wasItemPressed('frenzy'),
-      }),
-    )
+    // Sticky per session: a stream that ever speaks v3 must be replayed as v3.
+    this.p1HoldFire3 = this.p1HoldFire3 || input.usesHoldFire3?.() === true
+    if (input2) this.p2HoldFire3 = this.p2HoldFire3 || input2.usesHoldFire3?.() === true
+
+    // Record player1 input. hold/fireBeforeTurn are v3-only and optional:
+    // human/God-AI inputs leave them undefined -> false (legacy semantics).
+    this.frames.push({
+      direction: input.getMoveDirection(),
+      firing: input.isFiring(),
+      guard: input.wasItemPressed('guard'),
+      frenzy: input.wasItemPressed('frenzy'),
+      hold: input.isHolding?.() ?? false,
+      fireBeforeTurn: input.isFireBeforeTurn?.() ?? false,
+    })
 
     // Record player2 (God AI) input when coop is active
     if (input2) {
-      this.frames2.push(
-        packFrame({
-          direction: input2.getMoveDirection(),
-          firing: input2.isFiring(),
-          guard: input2.wasItemPressed('guard'),
-          frenzy: input2.wasItemPressed('frenzy'),
-        }),
-      )
+      this.frames2.push({
+        direction: input2.getMoveDirection(),
+        firing: input2.isFiring(),
+        guard: input2.wasItemPressed('guard'),
+        frenzy: input2.wasItemPressed('frenzy'),
+        hold: input2.isHolding?.() ?? false,
+        fireBeforeTurn: input2.isFireBeforeTurn?.() ?? false,
+      })
     } else {
       // Pad with idle frame to keep streams aligned
-      this.frames2.push(packFrame({ direction: null, firing: false, guard: false, frenzy: false }))
+      this.frames2.push({ direction: null, firing: false, guard: false, frenzy: false })
     }
 
     // Tick-hash checkpoint — phase contract in tickHash.ts header: sample the
@@ -117,37 +128,20 @@ export class InputRecorder {
     // God AI never produces non-idle input.
     const hasCoopInput = (this.coopAtStart || this.spectateDualAtStart) && this.frames2.length > 0
 
-    let frames: Uint8Array
-    let frames2: Uint8Array | null = null
-
-    if (hasCoopInput) {
-      // v2: [version][flags:hasP2][p1_0][p2_0][p1_1][p2_1]...
-      const packed = new Uint8Array(2 + tickCount * 2)
-      packed[0] = FRAME_SCHEMA_VERSION
-      packed[1] = 0x01 // hasP2 flag
-      for (let i = 0; i < tickCount; i++) {
-        const base = 2 + i * 2
-        packed[base] = this.frames[i]
-        packed[base + 1] = this.frames2[i]
-      }
-      frames = packed
-      // Also store frames2 separately for the Replay.frames2 field.
-      // It is a SINGLE stream, so it must carry the v1 header — stamping it
-      // 0x02 declared a dual-stream layout it does not have, and any reader
-      // that unpacked it would consume byte 1 as a flags byte.
-      frames2 = new Uint8Array(tickCount + 1)
-      frames2[0] = FRAME_SCHEMA_V1
-      for (let i = 0; i < tickCount; i++) {
-        frames2[i + 1] = this.frames2[i]
-      }
-    } else {
-      // v1: [version][frame0][frame1]... — downgrade for backward compat
-      frames = new Uint8Array(tickCount + 1)
-      frames[0] = FRAME_SCHEMA_V1
-      for (let i = 0; i < tickCount; i++) {
-        frames[i + 1] = this.frames[i]
-      }
-    }
+    // Delegate to packFrames so the version choice is in one place: legacy
+    // single-stream stays v1, coop or any v3-only bit becomes v3. Writing a
+    // v1 header over a frame that carries hold/fireBeforeTurn would silently
+    // erase both (review P0-1).
+    const frames = packFrames(this.frames, hasCoopInput ? this.frames2 : null, {
+      p1HoldFire3: this.p1HoldFire3,
+      p2HoldFire3: this.p2HoldFire3,
+    })
+    // Also store frames2 separately for the Replay.frames2 field. It is a
+    // SINGLE stream, so it gets its own header (v1 unless it carries a
+    // v3-only bit); it must never claim the interleaved dual layout.
+    const frames2 = hasCoopInput
+      ? packFrames(this.frames2, null, { p1HoldFire3: this.p2HoldFire3 })
+      : null
 
     this.active = false
     this.initialSnapshot = null
