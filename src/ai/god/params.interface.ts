@@ -1265,6 +1265,30 @@ export interface GodAIParams {
   aimTurnSnapGuard: number
 
   /**
+   * A2 (plan/godai-post-a1-retune.plan.md §3.1): committed-facing fire gate.
+   *
+   * A1 made "a bullet always leaves along the tank's *committed* facing" a
+   * hard engine rule (`SimulationCombat.tryFire` adjudicates the pending turn
+   * before deriving the bullet direction). The God AI's fire decisions were
+   * written against the opposite invariant — "the bullet flies along
+   * `_moveDir`" — which A1 only guarantees on ticks where the turn is
+   * actually accepted. Inside the turn-cooldown window (200 ms ≈ 12 ticks) a
+   * "turn + fire" request now emits a bullet along the OLD facing: one wasted
+   * shot in the wrong lane (measured: hard 77.7% → 58.7% win).
+   *
+   * When ON, `GodAIInput.isFiring()` — the single choke point every candidate
+   * funnels through — additionally requires `turnWillCommit(...)`
+   * (`src/ai/god/turn-gate.ts`): the emitted shot must fly along this tick's
+   * requested direction. Otherwise the tick is spent turning only; the shot
+   * goes out 1..k ticks later once the turn commits (k ≤ turnCooldownMs/TICK_MS).
+   * Pure predicate: no RNG, no World mutation — replay/snapshot-safe.
+   *
+   * 0 = OFF (pre-A2 / A1-era behavior, byte-identical — A/B baseline).
+   * 1 = ON (the fix — shipped 2026-10-19, DECISIONS §A2).
+   */
+  turnCommitFireGate: number
+
+  /**
    * §84: Aggressive branch stall detection. When > 0, the aggressive
    * (freeze/shield) stop-and-aim code tracks how long the player has been
    * stopped at the same cell with no kills. If the player camps for more

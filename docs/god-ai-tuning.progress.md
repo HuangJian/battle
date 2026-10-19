@@ -21,6 +21,48 @@
 > classic **0.6421** / **83%** · chaos **0.3786** / **53%**。
 > 全文 → `DECISIONS.md §2026-10-19-goalnn-a1-global-fire-facing-and-god-gates-retired`。
 > ⚠️ 上表提到的"Phase III 胜率首要指标"口径在**本纪元起不再对 God-AI 生效**（其绝对值不再是目标；关卡难度口径仍 = 人类熟练玩家）。
+> → **后续（同日）**：**A2 提交朝向开火门**已把该缺口回收 **65%**（hard 35×20 胜率 58.7% → 71.0%），见本档 **§A2**。
+
+---
+
+## §A2. 提交朝向开火门（`turnCommitFireGate`）— A1 缺口的机制性回收（2026-10-19）
+
+> DECISIONS 索引：**§2026-10-19-godai-a2-committed-facing-fire-gate**。诊断与方案全集 →
+> `plan/godai-post-a1-retune.plan.md`（本节的数字是该 plan 方案 A 的实测落地）。
+
+**问题**：A1 之后「子弹方向 == 开火时刻的已提交朝向」成为硬规则，而 God-AI 的通用开火不变量仍是
+「子弹沿 `_moveDir` 飞」——旧引擎 bug 让它免费成立（瞬时甩炮）。A1 一落地，「转向 + 同拍开火」
+在 200ms（≈12 拍）转身冷却窗内就变成**沿旧朝向的偏弹**：白耗一发且打空。
+
+**修法**（`src/ai/god/turn-gate.ts` + `GodAIInput.isFiring()` 唯一 choke point）：
+`turnWillCommit(w, p, dir)` 精确判定"本拍子弹会不会沿 `dir` 出膛"。对 `applyTurnCooldown` 的三条
+路径归约后只剩两式：`dir === p.prevMoveDir`（无转身 / 转身被拒后回退正落在该方向）**或** 冷却已过期。
+闸装在 `isFiring()` 而不是逐点改 45 处 `_fire =` —— 决策语义、分支计数、遥测全不变，只拦"这一枪会飞错方向"。
+
+**配对 A/B**（`bun tools/eval/eval-suite.ts --compare tmp/a2-gate0.params.json tmp/a2-gate1.params.json --difficulty hard --seeds 20`，
+700 paired cells，CRN）：
+
+| | SUITE | 算术 score | 胜率 | 最弱关 |
+|---|---|---|---|---|
+| A（gate=0，A1 后基线） | 0.4189 | 0.4938 | 58.7% | Riverbed 0.212 / 10% |
+| B（gate=1，A2） | **0.5112** | **0.5912** | **71.0%** | Battlement 0.271 / 20% |
+
+mean Δscore **+0.0964 ± 0.0162**（t=5.94, p<0.0001），441 好 / 256 坏 / 3 平。
+显著改善 6 关：Riverbed **+0.330**（p<0.001）· Ice Palace +0.221 · Eagle Nest +0.219 ·
+Brick Maze +0.197 · Concentric +0.191 · Spider +0.158；**显著倒退 0 关**。
+回收 A1 缺口 **65%**（SUITE 65.2% / 算术 63.4% / 胜率 63.7%）。
+
+**机制读数**（7 关 × 3 seed，各 6000 拍，`tmp/a2-*` 一次性脚本）：
+偏弹率 **27.4% → 0.0%**，开火量 588 → 558（−5%）⇒ 拦掉的是偏弹，不是"少开火"。
+被拦 episode 延迟：p50 **4 拍** / p90 **10 拍** / p99 11 拍 / max 62 拍（285 episodes / 1127 发）。
+⇒ 语义确实是"等转身再射"；**残余 35% 缺口的主因 = 这 1..k 拍延迟**（快目标在等待期横移），
+故下一步优先 **方案 D（提前量/预测射击）**，其次 **方案 C（等待期沿旧朝向做机会射击）**。
+
+**新纪元 60-seed 基线**：hard SUITE **0.5246** / win **74%** · classic **0.6941** / **87%** ·
+chaos **0.5048** / **71%**（A1 后基线 0.4123/58% · 0.6421/83% · 0.3786/53%）。
+
+**重标**：`det-golden` `0ff1ba66…` → `3f256031…`；`metrics-v11-hotlane` god 金标 3 例；
+`midlane-sticky` §164 换 seed 7 并复活 sticky=90 用例。**新增** `tests/godai-turn-commit-fire.test.ts`。
 
 ---
 

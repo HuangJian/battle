@@ -7883,3 +7883,45 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`src/game/SimulationCombat.ts:282-292`（`tryFire` 内新增一次 `applyTurnCooldown`）。
 - **门禁**：`bun run check` **2597 pass / 8 skip / 0 fail** · `freeze:check` 用新 golden
   `FROZEN-SIGNATURE OK` · `tests/hold-fire3.test.ts` 4 例 · `tests/fire-facing.test.ts` 2 例。
+
+## §2026-10-19-godai-a2-committed-facing-fire-gate — A2 提交朝向开火门：God-AI 不再把 `_moveDir` 当子弹方向，回收 A1 缺口的 65%
+
+- **来龙去脉**：A1（上一条）把「子弹方向 == 开火时刻的已提交朝向」变成硬引擎规则。God-AI 的**通用开火
+  不变量**却是「子弹沿 `_moveDir` 飞」——A1 之前这条**靠引擎 bug 免费成立**（转身被冷却拒绝时子弹仍走
+  请求方向 = 瞬时甩炮）。A1 之后它只在**转身被接受的那一拍**成立 ⇒ 「转向 + 同拍开火」在 200ms
+  转身冷却窗（≈12 拍）内变成**沿旧朝向的偏弹**，白耗一发。诊断全文 → `plan/godai-post-a1-retune.plan.md`。
+- **决策（方案 A，已实施）**：
+  1. 新增纯谓词 `turnWillCommit(w, p, dir)`（`src/ai/god/turn-gate.ts`）：**本拍子弹会不会沿 `dir` 出膛**。
+     对 `applyTurnCooldown` 的三条路径逐条归约后**精确**化简为两式 ——
+     `dir === p.prevMoveDir`（无转身，或转身被拒后回退**正落**在该方向）**或** 转身冷却已过期。
+     读 World/tank 既有字段，无 RNG、无 World 写入 ⇒ 快照/回放安全（AGENTS §2.2/§2.3）。
+  2. **只在唯一 choke point 上闸**：`GodAIInput.isFiring()`（每个候选的 `_fire` 都从这里出闸）
+     `&& turnWillCommit(...)`。**不改任何候选的 `_fire` 赋值**——决策语义/分支计数/遥测保持原样，
+     只拦「这一枪会飞错方向」的那一拍；本拍只转身，转身提交后 1..k 拍（k ≤ 12）再开火。
+     比计划里"逐点加谓词"更小、更不可能漏点（11 个 candidate × 45 处 `_fire=` 赋值）。
+  3. 参数 `turnCommitFireGate`（0 = OFF，字节等同 A1 后基线；**1 = 默认，已发布**）。
+- **实测（hard 35 stages × 20 seeds，CRN 同种子，eval-suite v7 配对）**：
+  | | SUITE | 算术 score | 胜率 | 最弱关 |
+  |---|---|---|---|---|
+  | A1 后（gate=0） | 0.4189 | 0.4938 | 58.7% | Riverbed 0.212 / 10% |
+  | **A2（gate=1）** | **0.5112** | **0.5912** | **71.0%** | Battlement 0.271 / 20% |
+  | A1 前（参照） | 0.5602 | 0.6473 | 78% | Battlement 0.284 / 20% |
+  配对：**mean Δscore +0.0964 ± 0.0162（t=5.94, p<0.0001）**，441 好 / 256 坏 / 3 平；
+  6 关显著改善（Riverbed +0.330 p<0.001 · Ice Palace +0.221 · Eagle Nest +0.219 · Brick Maze +0.197 ·
+  Concentric +0.191 · Spider +0.158），**0 关显著倒退**。
+  ⇒ 回收 A1 缺口的 **65%**（SUITE 口径 65.2% / 算术 63.4% / 胜率 63.7%）。
+- **机制证据（不是"胜率碰巧涨"）**：中位偏弹率（子弹 `dir` ≠ 本拍请求方向）**27.4% → 0.0%**，开火量仅 −5%
+  ⇒ 拦的是**飞错方向的发**而非把开火砍掉。代价：每次被拦 episode 中位 **4 拍** / p90 **10 拍**（一个转身
+  冷却窗）⇒ 语义是"等转身"；残余缺口主因即这 1..k 拍延迟（下一步 → 方案 C/D）。
+- **新纪元 60-seed 三难度基线（eval-suite v7）**：hard SUITE **0.5246** / win **74%** ·
+  classic **0.6941** / **87%** · chaos **0.5048** / **71%**（A1 后：0.4123/58% · 0.6421/83% · 0.3786/53%
+  —— 三难度**全线上升，无结构性倒退**）。
+- **连带重标（A2 换了每一局 ⇒ 旧行为金标按"换局不改判据"处理，同 A1 先例）**：`tools/det-golden.v1.sha256`
+  `0ff1ba66…` → `3f256031…`（21 组合全变）；`tests/sim/metrics-v11-hotlane.test.ts` 评估链 god 金标 3 例重标数值；
+  `tests/midlane-sticky.test.ts` §164 seed 10 在 A2 下 sticky=0 也能过关 ⇒ **换 seed 7**（仍复现），并**复活** A1 跳过的 sticky=90 用例。
+- **新增回归**：`tests/godai-turn-commit-fire.test.ts`（谓词 × 三条引擎路径 5 例 + 端到端"gate ON ⇒ 零偏弹 /
+  gate OFF ⇒ 有偏弹"两条，后者防 vacuous）。
+- **不做 / 遗留**：不回退 A1、不改引擎、不碰任务侧、不复活 `tests/godai-score-gate.test.ts`。
+  NN 执行器（`src/nn/intent-executor.ts` / `goal-executor.ts`）直接读 `god._fire` 绕过 `isFiring()` ⇒
+  同一个 A1 语义缺口在 NN 策略上**仍在**（God-AI 评估链不受影响），另行立项。
+- **门禁**：`bun run check` **2586 pass / 15 skip / 0 fail** · `bun run build` 过 · `freeze:check` 绿。
