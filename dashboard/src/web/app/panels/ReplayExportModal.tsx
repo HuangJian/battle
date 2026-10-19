@@ -53,9 +53,9 @@ export function roundLabel(r: EvalRoundOption): string {
 }
 
 /** 任务态 → 弹窗该说什么（§3.6 归因判据）。**只有 `kind === 'done'` 允许把 files 交付给用户**：
- *  其余（无清单 / 异轮 / 失败）一律当「上一次产物」——自动交付 = 把别的次的文件写成这次的成果。 */
+ *  其余（无清单 / 异轮 / 失败 / **对账不一致**）一律不交付——自动交付 = 把错的产物写成这次的成果。 */
 export type JobOutcome = {
-  kind: 'done' | 'failed' | 'other-round' | 'no-manifest'
+  kind: 'done' | 'failed' | 'other-round' | 'no-manifest' | 'mismatch'
   message: string
   files: Array<{ stage: number; seed: number; file: string }>
 }
@@ -78,6 +78,21 @@ export function jobOutcome(m: EvalReplayManifest | null, selectedIter: number | 
     return {
       kind: 'failed',
       message: `导出失败：${m.failReason ?? m.errors[0]?.error ?? '0 局产出——看日志尾'}`,
+      files: [],
+    }
+  }
+  // ★ 确定性契约对账（2026-10-19 用户报障）：重放局必须与 eval 账本逐字段一致。
+  //   不一致 = 重放跑的是**另一局**（常见原因：课程的 decision_k / decision_events 未随重放
+  //   透传 —— y24-k4 的 K=4 被缺省成 K=10，22 局全 mismatch，败局重放成胜局）。
+  //   此时**一个文件都不交付**：宁可不给，也不把「账本说败、录像说胜」的东西递给用户。
+  if (m.mismatches.length > 0) {
+    const badGames = new Set(m.mismatches.map((x) => `${x.stage}:${x.seed}`)).size
+    const fields = [...new Set(m.mismatches.map((x) => x.field))].join('/')
+    return {
+      kind: 'mismatch',
+      message:
+        `对账不一致 ${badGames}/${m.files.length} 局（${fields}）——重放结果与 eval 账本不同，` +
+        '确定性契约破裂，已拒绝交付。看 tmp/<课>/replay-export.log 与该轮课程配置。',
       files: [],
     }
   }

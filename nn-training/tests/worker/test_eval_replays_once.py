@@ -190,6 +190,91 @@ def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
     return main()
 
 
+# ─────────────────── 决策节奏透传（2026-10-19 用户报障回归） ───────────────────
+
+
+def _capture_replay_kwargs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, course_overrides: dict
+) -> dict:
+    """跑一次真 `main()`，把 `run_local_eval_game` 收到的 kwargs 抓下来。
+
+    权重解析与逐局仿真都打桩（不起 bun）——本用例只钉「课程的 decision_k /
+    decision_events 有没有透传到重放」这一件事。课程配置由 tracked 夹具
+    `curricula/c6-chip.jsonc` 覆写而来，保证 pydantic schema 仍然合法。
+    """
+    import worker.eval_replays_once as mod
+    from common.jsonc import load
+
+    base = load(str(Path(__file__).resolve().parents[2] / "curricula" / "c6-chip.jsonc"))
+    base.update(course_overrides)
+    base["name"] = "k-probe"
+    course_file = tmp_path / "k-probe.jsonc"
+    course_file.write_text(json.dumps(base), encoding="utf-8")
+
+    games = tmp_path / "games.json"
+    games.write_text(json.dumps([{"stage": 7, "seed": 111}]), encoding="utf-8")
+
+    captured: dict = {}
+
+    def fake_run(*_a, **kw):
+        captured.update(kw)
+        return {"outcome": "gameover", "ticks": 1, "kills": 0}
+
+    monkeypatch.setattr("worker.eval_local.run_local_eval_game", fake_run)
+    monkeypatch.setattr(mod, "resolve_weights", lambda *_a, **_k: tmp_path / "w.json")
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--course",
+            str(course_file),
+            "--iter",
+            "3",
+            "--wver",
+            "a" * 16,
+            "--games",
+            str(games),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--manifest",
+            str(tmp_path / "m.json"),
+        ],
+    )
+    # rc 只由「有没有产出 .replay」决定（打桩不产文件 ⇒ 1）；与透传无关。
+    assert rc in (0, 1)
+    return captured
+
+
+def test_replay_passes_course_decision_k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 2026-10-19 事故回归：课程的 `decision_k` 必须透传到重放。
+
+    现场：y24-k4（唯一实验变量 decision_k=4）it25 勾了 kills=0/1/2 的 22 局
+    （账本全是 gameover），导出却拿到一堆胜利。根因 = 导出器不传 decision_k，
+    `run_local_eval_game` 静默取缺省 10 ⇒ 重放跑的是**另一个策略**：22 局 ticks
+    全不一致、19 局 kills、7 局 outcome（含败局重放成胜局）。
+    实测同一 (权重, 关, seed)：K=4 与账本逐字段一致，K=10 直接 stage_clear/20 杀。
+    """
+    kw = _capture_replay_kwargs(monkeypatch, tmp_path, {"decision_k": 4})
+    assert kw["decision_k"] == 4
+
+
+def test_replay_passes_course_decision_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`decision_events` 同口径（事件门决定「哪些 tick 才做决策」，漏了同样是另一局）。"""
+    kw = _capture_replay_kwargs(monkeypatch, tmp_path, {"decision_events": True, "decision_k": 4})
+    assert kw["decision_events"] is True
+    assert kw["decision_k"] == 4
+
+
+def test_replay_defaults_match_legacy_for_k10_courses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """decision_k 缺席（=10）的课行为逐字节不变：缺省值仍是 False/10。"""
+    kw = _capture_replay_kwargs(monkeypatch, tmp_path, {})
+    assert kw["decision_events"] is False
+    assert kw["decision_k"] == 10
+
+
 def test_main_games_unreadable_writes_fail_manifest_and_returns_2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

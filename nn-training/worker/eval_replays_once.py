@@ -251,6 +251,19 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     difficulty = str(getattr(ns, "difficulty", "hard") or "hard")
     lives = getattr(ns, "lives_override", None)
     level = getattr(ns, "player_level", None)
+    # ★ 决策节奏必须与账本那一局**同口径**透传（2026-10-19 事故修复）：
+    #   原先这里不传 decision_events / decision_k，`run_local_eval_game` 静默取缺省
+    #   （False / 10）⇒ 对 `decision_k ≠ 10` 的课（如 y24-k4 = 4），重放跑的是**另一个
+    #   策略**：22 局全 mismatch，且败局会重放成胜局（用户报障「勾了 kills=0/1/2 的败局，
+    #   导出一堆胜利」）。主循环派发处（trainer/eval_dispatch.py:807-809 /
+    #   trainer/dispatch.py:778 / remote/offline_eval.py:546）都透传这两项，
+    #   漏一处就是「train/deploy 静默分裂」——`run_local_eval_game` 的 docstring 点名过这类。
+    decision_events = bool(getattr(ns, "decision_events", False))
+    decision_k = int(getattr(ns, "decision_k", 10))
+    log(
+        f"[replay-exp] it{args.iter} 语义口径: decision_k={decision_k} "
+        f"decision_events={decision_events} max_ticks={max_ticks} difficulty={difficulty}"
+    )
 
     # 上一轮产物清场（同课程重导出不残留旧文件；manifest 在 traj 直下不受影响）。
     # F4（串话归因）：POST 受理时控制台已清旧 manifest，此处再清 out_dir 里的旧 .replay——
@@ -309,6 +322,9 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
                 stage_json=stage_json_for_args(ns, stage) or "",
                 lives_override=lives if lives is not None else None,
                 player_level=level if level is not None else None,
+                # 决策节奏与账本那一局同口径（缺省 False/10 只对 decision_k==10 的课成立）。
+                decision_events=decision_events,
+                decision_k=decision_k,
                 policy="nn",
                 replay_dir=str(out_dir),
             )

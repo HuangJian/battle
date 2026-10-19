@@ -129,4 +129,40 @@ describe('jobOutcome（§3.6 归因判据：只有 done 可自动交付）', () 
     const tail = jobOutcome(manifest({ ok: false, files: [] }), 12)
     expect(tail.message).toContain('看日志尾')
   })
+
+  it('★ 对账不一致 ⇒ mismatch，一个文件都不交付（2026-10-19 用户报障回归）', () => {
+    // 现场：勾了 it25 的 kills=0/1/2 共 22 局（账本全是 gameover），导出却拿到一堆胜利。
+    //   根因 = 重放没透传课程的 decision_k（y24-k4=4 被缺省成 10）⇒ 重放跑的是另一局，
+    //   manifest 里 48 处 mismatch。那时 files 非空、kind 仍是 done ⇒ 错的录像被自动交付。
+    //   口径修正：确定性契约（同 权重/关/seed 逐 tick 一致）破裂 ⇒ 拒绝交付，宁可不给。
+    const bad = jobOutcome(
+      manifest({
+        mismatches: [
+          { stage: 2000, seed: 860011, field: 'ticks', ledger: 1638, resim: 995 },
+          { stage: 2000, seed: 860011, field: 'kills', ledger: 2, resim: 1 },
+          { stage: 2000, seed: 860013, field: 'outcome', ledger: 'gameover', resim: 'stage_clear' },
+        ],
+      }),
+      12,
+    )
+    expect(bad.kind).toBe('mismatch')
+    expect(bad.files).toEqual([])
+    expect(bad.message).toContain('对账不一致')
+    expect(bad.message).toContain('2/2 局') // 按**局数**汇总（3 处 mismatch 只涉及 2 局）
+    expect(bad.message).toContain('拒绝交付')
+    // 同一局多个字段 + 跨局：局数去重
+    const many = jobOutcome(
+      manifest({
+        mismatches: [
+          { stage: 1, seed: 1, field: 'ticks', ledger: 1, resim: 2 },
+          { stage: 1, seed: 2, field: 'kills', ledger: 1, resim: 2 },
+          { stage: 1, seed: 2, field: 'outcome', ledger: 'gameover', resim: 'stage_clear' },
+        ],
+      }),
+      12,
+    )
+    expect(many.kind).toBe('mismatch')
+    expect(many.message).toContain('2/2 局')
+    expect(many.message).toContain('ticks/kills/outcome') // 字段名点出来（哪个维度漂了）
+  })
 })

@@ -7565,3 +7565,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `nn-training/.venv/`（工具链）仍未隔离——它们是只读源数据/工具链，不是运行时工作目录。
 - **门禁**：`bun run typecheck` 绿 · `bunx oxlint` 0 警告 · `oxfmt --check` 净 ·
   `bun run test` 1712 绿 · `bun src/server/build.ts` 四份 bundle 过。
+
+## §2026-10-19-goalnn-replay-export-decision-k — 重放导出必须透传课程的 decision_k/decision_events；对账不一致一律拒绝交付
+
+- **现场（用户报障）**：控制台「导出 replay」勾了 y24-k4 it25 的 kills=0/1/2 共 22 局
+  （eval_log 里这 22 局全是 `gameover`），导到 `replays/exports` 却有一大批是胜利（clear）。
+- **根因**：`worker/eval_replays_once.py::_export` 调 `run_local_eval_game()` 时**没有透传**
+  课程的 `decision_events` / `decision_k`，于是静默走缺省 `False` / `10`。而 y24-k4 的**唯一
+  实验变量就是 `decision_k: 4`** ⇒ 重放跑的是另一个策略。实测同一 (权重, 关, seed)
+  （stage 2000 / seed 860013）：账本 `gameover`/1268 ticks/1 杀；K=4 重放**逐字段一致**；
+  K=10 重放 `stage_clear`/7241 ticks/20 杀。manifest 里那 48 处 mismatch
+  （22/22 局 ticks、19 局 kills、7 局 outcome）就是同一件事的指纹。
+  主循环派发处（`trainer/eval_dispatch.py:807-809` / `trainer/dispatch.py:778` /
+  `remote/offline_eval.py:546`）都透传这两项——**漏一处就是 train/deploy 静默分裂**，
+  `run_local_eval_game` 的 docstring 点名过这类。
+- **决策**：
+  1. 导出器从课程 namespace 读 `decision_events` / `decision_k` 并透传，且把口径写进日志
+     （`[replay-exp] it<N> 语义口径: decision_k=… decision_events=… max_ticks=… difficulty=…`）；
+  2. **确定性契约对账不一致 ⇒ 一个文件都不交付**。原先 `mismatches` 只在完成文案里带一句
+     「· N 局对账不一致」，`kind` 仍是 `done` ⇒ 错的录像被自动写进用户目录。
+     新增 `jobOutcome` 的 `mismatch` 档：按**局数**汇总 + 点名漂了哪些字段 + 拒绝交付；
+     「重新保存」同样拒绝（宁可不给，也不把「账本说败、录像说胜」的东西递出去）。
+- **备选与否决**：① **只修透传、不改交付判据** —— 否（这次的 48 处 mismatch 在旧判据下
+  照样静默交付，用户是靠肉眼发现而不是靠系统）；② 只交付对得上的那些局 —— 否
+  （静默丢局比整体拒绝更难排查）；③ 把 `decision_k` 写进 manifest 让前端展示 —— 已有日志行，
+  不再加第二处事实源。
+- **后果**：同 22 局重放，`mismatch=0`、22/22 与账本逐字段一致（全 `died`）。
+  **不承诺**：其它未透传项——本轮已逐项比对 `run_local_eval_game` 的全部入参，
+  派发处与导出处只差这两项（`policy` / `replay_dir` 是导出器自己的语义，不算漏）。
+- **门禁**：nn-python-gate 绿（4728 passed，`test_eval_replays_once.py` +3 例：
+  decision_k / decision_events / K=10 缺省逐字节不变）· dashboard `bun run test` 1713 绿
+  （`web-app-replay-modal.test.ts` +1 例：mismatch ⇒ 拒绝交付）· typecheck / oxlint / oxfmt 净。
