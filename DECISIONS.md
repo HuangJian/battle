@@ -8000,3 +8000,29 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   但人类同规，须拍板 + 真人 playtest）；② 死资产清理（61 个默认 0 参数 + 6 条 never-taken
   分支：`survive`/`suicideReturn`/`firingLane`/`carvePath`/`midLaneHold`/`unifiedCandidates`，
   全部是 mode=0 或 weight=0，非遮蔽性 bug）；③ 别再在"站位/瞄准"上投入。
+
+## §2026-10-20-godai-crosscheck-other-lineage — 与外部研究（godai-tuning-summary-20261020）的交叉核对
+
+- **先核验血缘**：该文档引用的 7 个提交（bbf59ac / ceeb5d4 / 7e43987 / 79968d6 / 97a9402 /
+  06acc5e / a139c68）**在本库全部不存在**，`campaign/god-tune` 也不在 origin 分支列表内 ⇒
+  **两条并行血缘**（本库为 `god-retune`）。其结论不能直接采信，只能按"概念"逐条核对。
+- **口径对齐**：按对方的 35 关 × 120 seed = 4200 局重跑本树 ⇒ **SUITE 0.5629 / 胜率 78%**，
+  最弱 Battlement 30.8%。对方 82.14%。**弱关编号完全对齐**（s34 ≈30%、s8 ≈38%、s20 ≈61%），
+  且对方 run1 基线 78.86% ≈ 本树 78% ⇒ 差的 ~4pp 来自其六件套，而非口径差异。
+- **六件套在本树的存在性（grep 验证）**：`playerPlanCell`（planCell v2）·`GOD_TANKWALL`·
+  `predictCrossSlackTicks`·aim-threat 的基地威胁加权 — **全部不存在**；`findEnemyDirectionImpl`
+  的打分只有兵种威胁 + 星车 + 血量。⇒ 移植候选明确，但**无一可在本库直接验证**。
+- **独立复现对方结论（两条血缘互证）**：
+  * 复刻其 aim-threat 到本树（`aimThreatBaseWeight`，直射 +3W / 拆环 +2W / 防守模式 10 格内）：
+    **Δ +0.0016（p=0.81）干净 NULL** —— 与其文档自述的 fresh A/B（−0.19pp NULL）一致，
+    反证其 run2→run3 的 +2.19pp 确属顺序/噪声（文档自注"归因存疑"是对的）。
+  * 其"Hunt 追击移动敌人普遍震荡（~15 次/局）"：本树实测 **25.6 次/局**（navigate 3424 拍/局、
+    其中站桩 302 拍），最差 Final Redoubt 52 / Spider 50 / Brick Maze 49。**问题成立**。
+  * 但其"因 target 换格 ⇒ A* 每拍重算"这条根因，**本树加了目标格粘性（8/15/30 三档）全部负向**
+    （−0.004 / −0.006 / −0.005）⇒ 每拍重算是自适应的，不是纯抖动；与其"拦截狩猎三版全负"互证。
+- **仍未移植的唯一正向信号**：坦克墙 GOD_TANKWALL（其 +1.24pp, p=0.0927）。本树 `findPath`
+  只有地形代价（外加一个给护卫避让玩家用的 blockedCell），**没有把敌坦克计入击破代价** ⇒
+  需要其源码才能可靠移植，不建议凭描述重写。
+- **收敛判断**：两条独立血缘在"执行层 knob 已穷尽"上结论一致（其 combat-tuning 13 方向
+  1 winner/13 证伪；本审计 12 次 A/B 全 null/负向）。⇒ 下一步是**架构层**（其文档所述
+  R46/重写选 B），继续在 knob 上投入的边际收益已接近 0。
