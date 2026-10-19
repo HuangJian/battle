@@ -16,6 +16,7 @@ import path from 'path'
 import { loadConfigSafe } from '../src/server/api/config'
 import {
   collectLocalLogEvents,
+  logScanCacheEntryCount,
   resetErrorScanCaches,
   scanLocalLogEvents,
 } from '../src/server/api/error-scan'
@@ -78,6 +79,7 @@ let dir = ''
 let tmp = ''
 let prevTmp: string | undefined
 let prevCurricula: string | undefined
+let prevRegistry: string | undefined
 
 beforeAll(() => {
   dir = path.join(os.tmpdir(), `bcity-errscan-${process.pid}-${Date.now()}`)
@@ -87,8 +89,13 @@ beforeAll(() => {
   mkdirSync(curricula, { recursive: true })
   prevTmp = process.env.BCITY_TMP_LOGS_DIR
   prevCurricula = process.env.BCITY_CURRICULA_DIR
+  prevRegistry = process.env.BCITY_REGISTRY_FILE
   process.env.BCITY_TMP_LOGS_DIR = tmp
   process.env.BCITY_CURRICULA_DIR = curricula
+  // 组件日志解析会先看 registry 里记录的 `log` 路径：不重定向就会读到**真账本**里
+  // 上一次进程留下的绝对路径（实测：直接 `bun test <本文件>` 会扫到仓根 tmp 的
+  // `cloudflared-*.log`，缓存条目多 1 条）。没预载时也要自成一体。
+  process.env.BCITY_REGISTRY_FILE = path.join(dir, 'registry.json')
   resetErrorScanCaches()
 })
 
@@ -97,6 +104,8 @@ afterAll(() => {
   else process.env.BCITY_TMP_LOGS_DIR = prevTmp
   if (prevCurricula === undefined) delete process.env.BCITY_CURRICULA_DIR
   else process.env.BCITY_CURRICULA_DIR = prevCurricula
+  if (prevRegistry === undefined) delete process.env.BCITY_REGISTRY_FILE
+  else process.env.BCITY_REGISTRY_FILE = prevRegistry
   resetErrorScanCaches()
   rmSync(dir, { recursive: true, force: true })
 })
@@ -143,5 +152,34 @@ describe('scanLocalLogEvents — 全局去重 / 无开课闸 / 活动度', () =>
     const events = scanLocalLogEvents(loadConfigSafe(), now)
     expect(events.some((e) => e.scope === 'course-old')).toBe(false)
     expect(events.filter((e) => e.component === 'hubServer').length).toBe(1)
+  })
+
+  it('185 门课 × 3 拍：缓存条目 = 文件数（全局件不按课复制），收缩扫描面即淘汰', () => {
+    // 清掉上一条用例的课，保证条目数可精确断言（hub 日志保留）。
+    rmSync(path.join(tmp, 'course-live'), { recursive: true, force: true })
+    resetErrorScanCaches()
+    const n = 185
+    for (let i = 0; i < n; i++)
+      writeCourse(`bulk-${String(i).padStart(3, '0')}`, '[09:00:00] ModuleNotFoundError: numpy\n')
+
+    const now = Date.now()
+    const first = scanLocalLogEvents(loadConfigSafe(), now)
+    expect(first.filter((e) => e.component === 'hubServer').length).toBe(1) // ★ 不是 ×185
+    expect(first.filter((e) => e.component === 'trainingLoop').length).toBe(n)
+    // 1 份全局日志 + 每课 1 份 trainer 日志 = n + 1 条；重复采集会在这里 ×4/×185。
+    expect(logScanCacheEntryCount()).toBe(n + 1)
+
+    // 拍 2/3：签名未变 ⇒ 复用缓存（不新增条目，事件数不涨）。
+    scanLocalLogEvents(loadConfigSafe(), now + 10_000)
+    const third = scanLocalLogEvents(loadConfigSafe(), now + 20_000)
+    expect(third.length).toBe(first.length)
+    expect(logScanCacheEntryCount()).toBe(n + 1)
+
+    // 扫描面收缩（100 门课被清理）⇒ 对应缓存条目当拍淘汰。
+    for (let i = 0; i < 100; i++) {
+      rmSync(path.join(tmp, `bulk-${String(i).padStart(3, '0')}`), { recursive: true, force: true })
+    }
+    scanLocalLogEvents(loadConfigSafe(), now + 30_000)
+    expect(logScanCacheEntryCount()).toBe(n - 100 + 1)
   })
 })

@@ -389,3 +389,11 @@ export function resetErrorScanCaches(): void {
   logScanCache.clear()
   seenFailJobs.clear()
 }
+
+/** 缓存条目数（**仅供用例/诊断**）：一条 = 一个被扫过的日志文件。
+ *
+ *  这是「全局日志不随课数倍增」（plan §4 Phase 6 / 评审 F1/F11）的结构性判据：
+ *  185 门课 + 1 份 hub 日志应为 186 条，而不是 4 个全局组件 × 课数。 */
+export function logScanCacheEntryCount(): number {
+  return logScanCache.size
+}
