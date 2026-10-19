@@ -160,10 +160,17 @@ METRICS: tuple[str, ...] = (
     # 来源 = docs/nn/experiments.md §71（人类 62 局 vs x20-steady 62 对，窗口配对）里
     # 「显著但 v9 无列可测」的四族：停/静止/按住开火（输入级）· 敌距/近敌 · 伤害成簇 -
     # 被包围率。能由现有列推的（命中率/承伤率/危险 lane/低血/拾取/换格率）**不重复建列**。
-    "stopTicks",  # 54  ← v10：累计「本 tick 无移动输出」（动作头 idx0 = STOP；
-    #                     评估侧同义 `ai.getMoveDirection() === null`）。
+    "stopTicks",  # 54  ← v10：累计「本 tick 无移动输出」；**产出侧口径随动作空间切换**——
+    #                     v6（hold 头）下 = `hold==1`（`export-eval-game.ts:829` 认 `ai.isHolding()`），
+    #                     legacy/无输入侧 = `ai.getMoveDirection() === null`。
+    #                     ⚠ 旧注释「动作头 idx0 = STOP」是 v10 旧动作空间的字面；v6 已由 hold 位取代
+    #                     （plan/nn-capability-upgrade §4-B1 · DECISIONS §2026-10-19-goalnn-b1-v6-head-switch）。
+    #                     语义（"这一拍没在前进"）与历史可比性**不变**，故列不改名、不删除。
     "fireHeldTicks",  # 55  ← v10：累计「本 tick 开火输出为真」（fire head held；
     #                     非 `playerShots` 实弹 —— 后者被冷却/弹量上限门掉）。
+    #                     ⚠ **跨 K 不可比**（plan/nn-capability-upgrade §5-C3）：对 NN 恒等于
+    #                     `K × playerShots`（实测 F/S = 9.94@K=10、4.00@K=4；`K·shots/千` 与实测差 <0.7%）
+    #                     ⇒ 跨 K 的行为读数只用 shots/千 · hit/千 · kill/千 · dmg/千 · 余量。
     "idleTicks",  # 56  ← v10：累计 `player.moving === false`（想动被地形挡也计）。
     "enemyDist",  # 57  ← v10：**每行采样**（非累计）：最近存活已激活敌车中心距（px）；
     #                     无车/玩家不在场 = 哨兵 -1（与 pickupDist(40) 同族，公式侧 where 归零）。

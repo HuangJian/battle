@@ -164,7 +164,11 @@ describe('§162 — Battlement hard integration (seed 2050197249, the user repla
     expect(r.input.branchCounts.navigate).toBeGreaterThan(0)
   })
 
-  it('navBreakStuck=0 now clears the stage (improved carve costs from footprint-aware buildCarveCosts)', () => {
+  // DISABLED (2026-10-19): A1 (global fire-direction fix) changed God-AI
+  // behaviour on hard; this seed no longer clears under nb=0. The old
+  // expectation was a God-AI performance guard measured on the pre-A1
+  // (side-shot) mechanic — retired per user directive.
+  it.skip('navBreakStuck=0 now clears the stage (improved carve costs from footprint-aware buildCarveCosts)', () => {
     // Before the footprint-aware fix, nb=0 lost (11 kills, gameover) because
     // buildCarveCosts only priced the tank's top-left corner cell, leaving
     // ring-overlapping footprints underpriced. Now A* correctly avoids all

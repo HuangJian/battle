@@ -28,7 +28,22 @@ import { EVAL_DIFFICULTY_KEYS } from '../src/config/difficulty'
 
 const DIFFS = EVAL_DIFFICULTY_KEYS
 
-test(
+// ---------------------------------------------------------------------------
+// DISABLED (2026-10-19) — the God-AI performance gate is retired.
+//
+// The per-stage/aggregate floors were re-captured from a God-AI that relied on
+// the *side-shot* (firing along a just-requested direction whose turn the 200ms
+// cooldown then rejected — see plan/nn-capability-upgrade.plan.md §3 A1). A1
+// unified the base mechanic (`tryFire` now adjudicates the pending turn first),
+// so that behaviour is gone and God-AI's hard win rate legitimately drops
+// (78% → 59%, 35×20 hard; score 0.6473 → 0.4938). The old truth was a *cheating*
+// baseline ⇒ freezing God-AI to it is meaningless (user directive 2026-10-19).
+//
+// The harness (`score-gate-core.ts` / `score-gate-worker.ts`) and
+// `tools/diag/recapture-score-truth.ts` are kept — re-enable this gate only
+// after a deliberate, re-calibrated God-AI baseline exists.
+// ---------------------------------------------------------------------------
+test.skip(
   'God-AI score gate (classic+hard+chaos, godai-score v7, worker pool)',
   async () => {
     const t0 = Date.now()

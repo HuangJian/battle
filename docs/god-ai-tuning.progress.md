@@ -12,6 +12,16 @@
 
 > 🔥 **新阶段（Phase III，2026-08-12 起）：Hard 聚焦行为调优** —— 调优重心从"冲过关率"转向"在 hard 难度上仿真、挖掘并修正不合理行为模式"。胜率仍是**首要指标**（方向筛选与回归定位靠它），但不再是压倒性唯一指标；与击杀数 / 存命数 / 开火命中率 / 中弹数 / 过关时间共同评估 GOD AI 表现。classic / chaos 过关率仅作参考，不出现大幅度倒退即可；chaos 未来还会增强敌人 AI、过关率预期下降属正常（评估框架详见 §0.C）。
 
+> ⚠️ **纪元变更（2026-10-19）：A1 全局开火方向统一 ⇒ God-AI「高胜率」重估 + 表现门禁退役**
+> —— 引擎在 `tryFire` 内先裁决转身再定子弹方向（plan/nn-capability-upgrade.plan.md §3-A1），
+> 人类/敌人/God 一律不再侧射。God-AI 表现随之下降：**hard 35×20 胜率 78% → 59%、score 0.6473 → 0.4938**。
+> ⇒ **God-AI 表现门禁退役**（`tests/godai-score-gate.test.ts` `test.skip`；旧 truth 是侧射作弊行为上采集的），
+> `freeze:check`（确定性门）按新纪元三件套**更新 golden**（`c2c25cdb… → 0ff1ba66…`）。
+> **新纪元 60-seed 三难度基线（eval-suite v7）**：hard SUITE **0.4123** / win **58%** ·
+> classic **0.6421** / **83%** · chaos **0.3786** / **53%**。
+> 全文 → `DECISIONS.md §2026-10-19-goalnn-a1-global-fire-facing-and-god-gates-retired`。
+> ⚠️ 上表提到的"Phase III 胜率首要指标"口径在**本纪元起不再对 God-AI 生效**（其绝对值不再是目标；关卡难度口径仍 = 人类熟练玩家）。
+
 ---
 
 ## §M0. God-AI 摘除主动道具（superItemMode/GuardThreat 默认归零）— plan/AI-No-Items-Warmstart.md M0（2026-08-25）

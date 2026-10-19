@@ -13,6 +13,9 @@
  * 分母恒为 ENEMIES_PER_STAGE=20 且不触顶，无损）；余命 = dims.lives.raw；
  * 拾取道具 = dims.loot.raw；单局耗时 = dims.clearSpeed.raw（ticks）。
  * kills 自 2026-08-23 起累计（更早迭代已被 --keep-iters 轮转，无法回补）。
+ *
+ * 读数纪律（plan/nn-capability-upgrade §5-C5）：任何「缺陷严重程度」量化必须用机会侧 / 反事实 /
+ * 人类参照，禁用当前策略的实际走位来估 —— 否则会把「策略犯了错」读成「这不是个问题」。
  */
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -254,6 +257,10 @@ export interface EvalSummary {
   games: number
   wins: number
   winRate: number | null
+  /** 锚点轨胜率（50 局固定种子，跨轮可比）。旧混轨行缺失（plan §5-C1）。 */
+  anchorWr: number | null
+  /** 轮转轨胜率（当轮轮换段，跨轮不可比）。 */
+  rotorWr: number | null
   dropped: number
   rolloutWinRate: number | null
   nodes: Record<string, number>
@@ -290,6 +297,8 @@ export function readEvalSummaries(): Map<number, EvalSummary> {
       games: typeof r.games === 'number' ? r.games : 0,
       wins: typeof r.wins === 'number' ? r.wins : 0,
       winRate: typeof r.winRate === 'number' ? r.winRate : null,
+      anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
+      rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
       dropped: typeof r.dropped === 'number' ? r.dropped : -1,
       rolloutWinRate: typeof r.rolloutWinRate === 'number' ? r.rolloutWinRate : null,
       nodes,
@@ -680,10 +689,15 @@ function buildHtml(
       const rollGames = gamesOf(e)
       const rollWrCell =
         rollGames > 0 ? `${(e.winRate * 100).toFixed(1)}% (${rollWins}/${rollGames})` : '—'
-      const evalWrCell =
-        ev && typeof ev.winRate === 'number'
-          ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games})`
-          : '—'
+      // C1（plan/nn-capability-upgrade §5）：双轨轮**默认读锚点轨**（50 局固定种子，跨轮可比）；
+      // 只有旧混轨行（无 `anchor_wr`）才回落 `winRate`，并标「混」以示跨轮不可比。
+      const evalWrCell = !ev
+        ? '—'
+        : ev.anchorWr != null
+          ? `${(ev.anchorWr * 100).toFixed(1)}% 锚`
+          : typeof ev.winRate === 'number'
+            ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games}) 混`
+            : '—'
       const ke = klEff(e)
       const bi = baseIntegrityOf(e)
       const klCell =
@@ -823,7 +837,8 @@ ${recentRows}
   </tbody>
 </table>
 </div>
-<div class="meta">KL 累计口径：流式 = Σ各 wave（熔断判据，上限 policy.streamKlCap 默认 0.12）· ⛔N = 该轮熔断丢弃的已结算局数 · 旧日志行无 kl_cum，显示单值 kl（串行模式即全轮均值）。</div>
+<div class="meta">KL 累计口径：流式 = Σ各 wave（熔断判据，上限 policy.streamKlCap 默认 0.12）· ⛔N = 该轮熔断丢弃的已结算局数 · 旧日志行无 kl_cum，显示单值 kl（串行模式即全轮均值）。<br>
+eval 胜率口径（C1，plan/nn-capability-upgrade §5）：双轨轮默认显示<b>锚点轨</b>（50 局固定种子，跨轮可比，标「锚」）；仅旧混轨行回落 200/400 局 winRate（标「混」，跨轮换段不可比，勿用于 it0↔itk 比较）。</div>
 
 <h2>${passHeading}</h2>
 <div class="wrap">

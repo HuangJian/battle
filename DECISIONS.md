@@ -7814,3 +7814,72 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：eval 报告多两个键（旧报告缺键 = 无读数）；metrics 列不变（79 列），无需重灌语料。
 - **全文**：`docs/nn/engineering.md` §78。
 - **门禁**：`bun run check` 2577 pass / 0 fail · build 过 · `freeze:check` OK。
+
+## §2026-10-19-goalnn-a1-nn-only-semantics-and-god-side-shot-residual — A1 只修 NN 侧：转身被拒即不发弹；God-AI 侧射登记为永久已知残留
+
+- **背景**：落地评审（`reports/nn-capability-review-20261019.md` §3 D2/D3）发现两处「后人按 plan 字面理解会与代码对不上」的坑：
+  ① plan §3-A1 验收 case 3 写「冷却未满 ⇒ 子弹朝**旧方向**且该拍不移动」，而 NN-only 落点的**最终设计**
+  （plan §3「A1 的 NN-only 落点」末行）与实现（`src/game/SimulationPlayer.ts:88-101`）都是
+  **转身被拒 ⇒ 本拍不发弹**——plan 自身两处字面冲突，代码取了后者。
+  ② plan 原意是「修引擎 bug（侧射）」，但 A1 被 God-AI score gate 拒绝后改走 NN-only
+  ⇒ God-AI 的侧射**永久保留**；该认识此前只散落在证据里，未登记为已知残留。
+- **决策**：
+  1. **A1 的权威语义 = 开火时刻的已提交朝向，且「请求转向但冷却拒绝 ⇒ 本拍不发弹」**
+     （**不是**「沿旧朝向出弹」）。理由：请求了转向却没转成，此时开火等于打没瞄的方向；
+     「沿旧朝向出弹」已由 `fire=1` 单独提供（`fireBeforeTurn`）。
+     ⇒ plan §7 / A1 验收 case 3 的字面（「子弹朝旧方向」）**作废**，以本节为准。
+  2. **God-AI 侧射 = 永久已知残留**：`Input`（人类）与 `GodAIInput` 都不实现 `usesHoldFire3`
+     ⇒ 永远走旧引擎路径，保留「转身同拍开火（子弹方向 = 本拍请求方向，拍末朝向可能尚未翻转）」。
+     **不得在后续任何改动里顺手『统一』它**（那正是两次让 God-AI 跌破地板的路）；
+     若要重开必须**单独立项**（回答「God-AI 的转身同拍开火是否可放弃」）。
+- **迁移对照记账**：NN v6 路径的 `shots/千` 会因「转身被拒不发弹」比 stack2 略低
+  （12 拍冷却 vs 10 拍决策窗，拒绝不罕见）。这是**新架构相对 stack2 的额外一层行为差**，
+  B1 通电后首腿必须**先对 stack2 用 `shots/千` 校准这条差**，不要算到 hold / leadHit 头上。
+- **证据（God-AI 跌幅，供后人重开时免再摸底）**：`tests/godai-score-gate.test.ts`（v7，classic，20 seed/关）——
+  · 旧朝向 L1（`tryFire` 内先裁决、被拒仍按旧朝向发射）：S7/S13/S19/S22/S23/S27/S28/S31/S32/S34 共 **10 关**跌破，
+    均值 0.65–0.82（truth 0.85–0.97）；
+  · 跳过发射 L1'（先提交转身、被拒则本拍不发射）：S10/S13/S21/S22/S28/S32/S34 共 **7 关**跌破，均值 0.66–0.90。
+- **备选与否决**：① 沿旧朝向出弹（旧 A1 case 3）—— 否（与「开火时刻朝向权威」自相矛盾，且 `fire=1` 已覆盖该语义）；
+  ② 把 God-AI 侧射也修掉 —— 否（已实测跌破地板）；③ 让 plan 字面胜出而不改代码 —— 否（验收用例会被写成必然红）。
+- **落点**：`src/game/SimulationPlayer.ts:76-103`（v3 分支）· `src/game/Input.ts:22-34`（能力位默认 false/undefined）。
+- **门禁**：本次为**文档登记**，无代码行为改动；`bun run check` 绿不变。
+
+## §2026-10-19-goalnn-a1-global-fire-facing-and-god-gates-retired — A1 全局落地（子弹方向 == 开火时刻的已提交朝向，人类/敌人/God 同规）；God-AI 表现门禁退役
+
+- **用户指令（2026-10-19）**：「这是游戏底层的基础机制，要统一！修！修完再看 god ai 在 hard 难度下 35stages×20seeds 的表现变化。」
+  → 测完：「god ai 原来的高胜率，是靠作弊实现的。既然现在胜率下降那么多，对于它的门禁就没有意义了，都禁用掉吧。」
+- **决策**：
+  1. **A1 改为全局引擎规则**（不再只服务 NN）：`SimulationCombat.tryFire()` 在 `passesFireGate` 之后、
+     取 `DIR_VECTORS[tank.dir]` **之前**调 `applyTurnCooldown(tank, w)`
+     ⇒ **开火时刻的已提交朝向成为权威**。被冷却拒绝的转身先回退 `dir`、再出膛 ⇒ 子弹**沿旧朝向**飞
+     （不再侧射，也不再"被拒不发弹"）。人类/敌人/God/护卫/诱饵**一律同规**。
+     幂等：`dir === prevMoveDir` 时 `applyTurnCooldown` 早退 ⇒ step⑦ 那次调用变 no-op ⇒ **移动行为不变**。
+     NN 的 v3 路径（`usesHoldFire3`）不受影响：其内部已显式裁决，`tryFire` 的二次调用是 no-op；
+     `hold` / `fire=1`（先打再走）/ `fire=2` 语义照旧（见上一节 + `tests/hold-fire3.test.ts`）。
+  2. **God-AI 表现门禁退役**：`tests/godai-score-gate.test.ts`（per-stage/aggregate score 地板）`test.skip`。
+     理由 = 旧 truth 是在**侧射作弊行为**上采集的（§233/§276/§293/§304 历次重钉），不再是有效的回归基线。
+     **harness（`score-gate-core.ts` / `score-gate-worker.ts`）与 `tools/diag/recapture-score-truth.ts` 保留**，
+     重开需先有经刻意标定的 God-AI 基线。
+  3. **`freeze:check` 保持启用**（它是**确定性**门，AGENTS §2.3 —— 不是表现门）⇒ 按新纪元三件套
+     **更新 golden**（`tools/det-golden.v1.sha256`：`c2c25cdb…` → `0ff1ba66…`，21 组合签名全变）。
+- **实测（hard，35 stages × 20 seeds，改前/改后，CRN 同种子）**：
+  | | score(arithmetic) | SUITE | 胜率 | 最弱关 |
+  |---|---|---|---|---|
+  | 改前 | **0.6473** | 0.5602 | **78%** | Battlement 0.284 / 20% |
+  | 改后 | **0.4938** | 0.4189 | **59%** | Riverbed 0.212 / 10% |
+  ⇒ God-AI 的"高胜率"里有一大块是侧射提供的（**−19pp**）。**不在本刀顺手补偿**（God-AI 调参 = 另一个立项）。
+- **新纪元 60-seed 三难度基线（eval-suite v7，A1 后）**：hard SUITE **0.4123** / win **58%** ·
+  classic **0.6421** / **83%** · chaos **0.3786** / **53%**。
+- **连带退役/重标（A1 改变了敌方行为 ⇒ 旧断言/金标不再成立）**：
+  · `tests/godai-travel-fire.test.ts` §218 两条 —— 钉的正是被移除的侧射契约（`it.skip`）；
+  · `tests/midlane-sticky.test.ts` §164 `sticky=90 seed10 clears`（`it.skip`）；
+  · `tests/navbreak-carve-dig.test.ts` §162 `navBreakStuck=0 clears`（`it.skip`）；
+  · `tests/sim/metrics-v11-hotlane.test.ts` 三条遥测金标 —— **重标数值、判据结构不变**（新纪元换局）。
+- **supersede**：`§2026-10-19-goalnn-nn-only-hold-fire3` 里「God-AI 的侧射保留」**作废**（本刀全局修了）；
+  `§2026-10-19-goalnn-a1-blocked-replay-v3` 的「A1 回退」**由本条取代**；
+  上一节「God-AI 侧射 = 永久已知残留」**作废**。
+- **修复复现用例**：`tests/fire-facing.test.ts`（legacy 路径：冷却内请求新方向 + 开火 ⇒ 子弹沿**旧**朝向；
+  冷却已满 ⇒ 沿**新**朝向）—— 改动前红、改动后绿（AGENTS §7）。
+- **落点**：`src/game/SimulationCombat.ts:282-292`（`tryFire` 内新增一次 `applyTurnCooldown`）。
+- **门禁**：`bun run check` **2597 pass / 8 skip / 0 fail** · `freeze:check` 用新 golden
+  `FROZEN-SIGNATURE OK` · `tests/hold-fire3.test.ts` 4 例 · `tests/fire-facing.test.ts` 2 例。

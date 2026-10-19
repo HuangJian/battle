@@ -25,6 +25,43 @@
 
 ---
 
+## §79 落地评审处置 + C 段读数口径（2026-10-19）
+
+**来源**：`reports/nn-capability-review-20261019.md`（对 `68bc4f79` B1 + `525e8e7e` B′ + A1 回退 `f3ae58b2`/`51987e1b` 的逐项评审）。
+总评：代码质量高、门禁全绿、与 plan（含三轮评审 43 条裁定）逐项吻合。**一个现状必须记住：B1 默认未通电**
+（`MOVE_DIM=5/FIRE_DIM=2` 仍是默认契约，v6 由权重里的 `hold_head.*` 开关）⇒ **不要现在开新腿**
+（新观测 + 老动作的混合体会让 B′ 的能力腿读数失真）。
+
+**评审偏差处置**：
+
+| 项 | 处置 |
+|---|---|
+| **D2** A1 语义（NN 路径「转身被拒**不发弹**」，非 plan §3-A1 验收 case 3 字面的「沿旧朝向出弹」） | 登记 `DECISIONS §2026-10-19-goalnn-a1-nn-only-semantics-and-god-side-shot-residual`：以本实现为**权威语义**，case 3 字面作废。`shots/千` 相对 stack2 的这层差**单独记账**，不算到 hold/leadHit 头上 |
+| **D3** God-AI 侧射 | 同上条目登记为**永久已知残留**（含 classic 10 关 / 7 关跌幅数字），不得在后续改动里顺手统一；重开须单独立项 |
+| **D4** B4 哨兵降级为读数 | `postThawDamageRate` 目前只在逐局 `_eval_report.json` ⇒ **接成门的前置 = 先加一条 METRICS 列**（否则无法按腿聚合），基线 = 新 schema null 腿同期值。已列进 plan §7 DoD |
+| **D6** `stopTicks` 注释陈旧 | `reward_library.py` 列注释已更新：v6 下 = `hold==1`（`export-eval-game.ts:829` 认 `isHolding`）；列名/语义/历史可比性**不变** |
+
+**C 段读数口径（plan §5）落地**：
+
+- **C1 anchor 过滤通用化**：门内胜率入口（`gate_inputs._row_from_summary`，锚点优先、旧行回退）与
+  dashboard（`iters.ts:813` `anchorWr`）**早已锚点优先**；本轮把最后一个仍读**混轨**的判读脚本
+  `tools/diag/rl-hourly-inspect.ts` 改为默认读**锚点轨**（标「锚」，旧混轨行标「混」+ 跨轮不可比说明）。
+- **C2 门模板**：门引擎 `gate_judges._sustain` 本就是**区间判定**（窗口 `n_pass/sustain`，配 `min_gain_pp` /
+  `require_rising`），非单点。纪律（区间中位或同轮配对、**基线取 null 同期不取 it0**）见下 C5。
+- **C3 `fireHeldTicks` 跨 K 不可比**：对 NN 恒等于 `K × playerShots`（F/S = 9.94@K=10、4.00@K=4）⇒
+  跨 K 的行为读数只用 shots/千 · hit/千 · kill/千 · dmg/千 · 余量。已写进列注释（`reward_library.py`）。
+- **C4 空射口径**：旧口径（瞬时快照内「射界无目标」= 38.2%）与命中率 81% **自相矛盾** ⇒ **停用**；
+  替代 = `aimMisses` 家族（恒等式 `playerShots = aimHits+aimBricks+aimIgnited+aimMisses`，metrics v10 idx66–73）。
+- **C5 元纪律**：任何「缺陷严重程度」量化必须用 **机会侧 / 反事实 / 人类参照**，禁用当前策略的实际走位来估
+  （已犯四次：`fireHeld` 密度 / `hitsInFreeze` / `threat` 幻影 / 窗口奖励剂量）。
+
+**下一刀（排期，非本轮）**：全语料重灌 + `hold_head` 通电（B1 才真正生效）；此后 B′ 的能力腿读数才有意义。
+
+**门禁**：`bun run check` **2600 pass / 3 skip / 0 fail**（含 God-AI score gate classic 0.870 / hard 0.777 /
+chaos 0.753，三难度全绿）；`nn-training` pytest `test_reward_golden.py` 60 passed（仅列注释改动）。
+
+---
+
 ## §78 B′ 观测 bump 落地（B2–B5）：`SCALAR 40→46` / `EXTRA 37→57` / `OBS_SCHEMA_MAJOR 6` / `metrics v12 = 79`（2026-10-19）
 
 **做了什么**（plan/nn-capability-upgrade.plan.md §4-B2–B5，一次 schema bump）：

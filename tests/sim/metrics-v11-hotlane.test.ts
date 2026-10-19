@@ -314,8 +314,10 @@ describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
   // 夹具重出而重定——夹具按新 schema 生成（SCALAR_DIM 40→46 ⇒ 旧架构的 `fc` 输入宽 56→62），
   // 随机权重整体重抽 ⇒ 同一 (stage, seed) 的另一局。**判据结构不变**：仍要求「两列各有
   // 非零正例 + 至少一个零例」，数值为 2026-10-19 实测（确定性：同 seed 两跑逐值相同）。
+  // ⚠ A1 再重标（2026-10-19，plan/nn-capability-upgrade.plan.md §3-A1）：引擎统一开火方向后
+  // 敌方行为改变 ⇒ 同一 (stage, seed) 又是另一局，`near`/`lane` 全部重标；判据结构仍不变。
   const cases = [
-    { stage: 1, seed: 14, near: 134, lane: 0, note: 'near 非零' },
+    { stage: 1, seed: 14, near: 50, lane: 333, note: 'near 非零' },
     { stage: 0, seed: 13, near: 0, lane: 0, note: '两列全零（零例）' },
     { stage: 2, seed: 11, near: 78, lane: 44, note: '两列非零（`near` 更大 + `lane` 非零）' },
   ] as const
@@ -347,9 +349,9 @@ describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
 
 describe('评估链金标（god 确定性策略；两列非零）', () => {
   const cases = [
-    { stage: 0, seed: 9, near: 138, lane: 202 },
-    { stage: 0, seed: 5, near: 88, lane: 135 },
-    { stage: 1, seed: 6, near: 177, lane: 84 },
+    { stage: 0, seed: 9, near: 119, lane: 29 },
+    { stage: 0, seed: 5, near: 64, lane: 201 },
+    { stage: 1, seed: 6, near: 236, lane: 270 },
   ] as const
   for (const c of cases) {
     it(`stage ${c.stage} seed ${c.seed}：near=${c.near} / lane=${c.lane}`, () => {

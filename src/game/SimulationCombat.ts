@@ -281,6 +281,14 @@ export class CombatSystem {
 
     if (!this.passesFireGate(tank, now)) return
 
+    // A1 (plan/nn-capability-upgrade.plan.md §3-A1): a shot always leaves along
+    // the tank's *committed* facing. Adjudicate the pending turn BEFORE deriving
+    // the bullet direction, so a turn rejected by the cooldown reverts `dir`
+    // first and the bullet flies along the old facing — never sideways.
+    // Idempotent: `applyTurnCooldown` early-returns when dir === prevMoveDir, so
+    // step ⑦'s second call becomes a no-op and movement is unchanged.
+    this.applyTurnCooldown(tank, w)
+
     const v = DIR_VECTORS[tank.dir]
 
     // Bullet starts at the center of the tank's front edge

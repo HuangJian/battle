@@ -72,7 +72,11 @@ describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
     expect(r.terminalTick).toBeLessThan(10000)
   })
 
-  it('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
+  // DISABLED (2026-10-19): A1 (global fire-direction fix) changed God-AI
+  // behaviour on hard; this seed no longer clears, so the §164 sticky benefit no
+  // longer holds here. The old expectation was a God-AI performance guard
+  // measured on the pre-A1 (side-shot) mechanic — retired per user directive.
+  it.skip('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
     const r = runSeed10({ midLaneStickyTicks: 90 })
     expect(r.outcome).toBe('stageclear')
   })
