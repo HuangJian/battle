@@ -25,6 +25,37 @@
 
 ---
 
+## §A3. 转身经济（`turnEconomyMode`）— 别请求拿不到的转身，硬胜率 74% → 79%（2026-10-19）
+
+> DECISIONS 索引：**§2026-10-19-godai-a3-turn-economy**。前置：§A2（`turnWillCommit` 谓词）。
+
+**取数**（8 关 × 3 seed，hard）：每局接受 **240 次转身**，**95.1% 在 12 拍内没换来一发**；
+**17.7% 的全部 tick** 在请求一个转身冷却不会批准的方向 —— 而 `applyTurnCooldown` 拒绝时会
+`moving=false`，**这些 tick 就是白白站桩**。
+
+**修法**：`effectiveMoveDir()` 挂在 `getMoveDirection()` 唯一出口：转身拿不到 ⇒ 请求**已提交朝向**
+（继续走），`_moveDir` 分支意图不动；`isFiring()` 在「有效方向 ≠ 瞄准方向」时不开火 ⇒ 子弹集与 A2 一致。
+mode 2 = 只有在已提交朝向**未被敌弹穿过**时才替换（`isSafeDir`）——被拒的躲弹转身必须还是「停」。
+
+| 臂（vs A2，CRN 配对） | 20-seed | 60-seed | 胜率(60) | 备注 |
+|---|---|---|---|---|
+| mode 1 无条件替换 | +0.0393 (p=0.012) | +0.0183 (p=0.033) | 74%→77% | Steel Web **−0.12** |
+| **mode 2 敌弹守卫** | **+0.0618 (p=1e-4)** | **+0.0384 (t=4.56)** | **74%→79%** | 4 涨 **0 跌** |
+
+SUITE **0.5246 → 0.5748**；1150 好 / 947 坏 / 3 平；▲Diamond +0.082 · ▲Concentric +0.102 ·
+▲Eagle Nest +0.117 · ▲Frozen Field +0.126。
+
+**新纪元 60-seed**：hard **0.5748 / 79%** · classic **0.7330 / 89%** · chaos **0.5343 / 75%**。
+
+**⚠ 确定性坑（已修）**：`getMoveDirection()` 由纯读变成读 `world.frame`，而 `InputRecorder.recordFrame()`
+在 `sim.tick()` 之后又读一次 ⇒ 重算得到不同方向，`tests/replay-roundtrip.test.ts` 炸（score 6600 vs 4000）。
+修法 = **每拍缓存**（`endFrame()`/`reset()` 失效）。**凡是让输入 getter 依赖时钟的改动，必须做每拍快照。**
+
+**口径**：护卫（天降神兵）自建 God-AI 脑且用 DEFAULT 参数 ⇒ 不认 `--params` 覆盖；A/B 的「关」臂里
+护卫仍开着 mode 2 ⇒ 上面的 +0.0384 是玩家侧净效应，总效应 ≥ 此值。
+
+---
+
 ## §A2. 提交朝向开火门（`turnCommitFireGate`）— A1 缺口的机制性回收（2026-10-19）
 
 > DECISIONS 索引：**§2026-10-19-godai-a2-committed-facing-fire-gate**。诊断与方案全集 →

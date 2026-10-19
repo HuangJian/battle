@@ -1,7 +1,8 @@
 # God-AI 侧射移除后的退化诊断与调优 plan（v1，2026-10-19）
 
 > **本文可独立阅读**：不依赖任何对话上下文。结论均带实测数字与 `file:line` 锚点。
-> **状态**：**方案 A 已实施并发布**（2026-10-19，见下「实施结果」）；B/C/D/E 未动。
+> **状态**：**方案 A（A2）已实施并发布**；**方案 D 实测无头寸（未实施）**；**新增方案 A3「转身经济」已实施并发布**
+> （2026-10-19，见下「实施结果」）；B/C/E 不做。
 > **上游证据**：`DECISIONS.md §2026-10-19-goalnn-a1-global-fire-facing-and-god-gates-retired` ·
 > `plan/nn-capability-upgrade.plan.md §3-A1` · 实测语料 `tmp/a1-before-hard.json` / `tmp/a1-after-hard.json`
 > （复算脚本 `tmp/a1-hard-diff.ts`）· `docs/god-ai-tuning.progress.md` 顶部纪元变更块。
@@ -46,6 +47,21 @@
 ⇒ **残余的 7pp 全是转身延迟的代价**（冷却减半就超过 A1 前的 78%）；且 100 与 0 几乎相同
 （0 反而略低）= 冷却本身有反振荡价值，100ms 是甜点而非「越快越好」。
 但 `turnCooldownMs` 是**人类玩家同规的机制**（plan §3.6 明令不动），**属用户决策，不由本 plan 擅自改**。
+
+### 方案 A3：转身经济（2026-10-19，**已实施并发布**）
+
+既然「等待」不能从 aim 侧消除，就**别去要那个拿不到的转身**。取证：每局 240 次转身、95.1% 没换来一发；
+**17.7% 的全部 tick** 在请求一个冷却不会批准的方向 ⇒ 引擎拒绝时 `moving=false`，这些 tick 全是站桩。
+
+- 落点：`GodAIInput.effectiveMoveDir()`（`getMoveDirection()` 唯一出口）。转身拿不到 ⇒ 请求**已提交朝向**，
+  `_moveDir` 分支意图不动；`isFiring()` 在替换发生时不开火 ⇒ 子弹集与 A2 一致（只买「少站桩」）。
+- `turnEconomyMode`：0=关 · 1=无条件 · **2=已提交朝向未被敌弹穿过时才替换**（SHIPPED；被拒的躲弹转身
+  必须保持停，§95 的 halt 就是 dodge）。
+- 实测（vs A2，CRN）：mode 1 60-seed **+0.0183（p=0.033）**，Steel Web −0.12；
+  **mode 2 60-seed +0.0384（t=4.56, p<1e-4），胜率 74%→79%，4 关涨 0 关跌**。
+- 新纪元 60-seed：hard **0.5748/79%** · classic **0.7330/89%** · chaos **0.5343/75%**。
+- ⚠ 确定性：`getMoveDirection()` 从纯读变成依赖 `world.frame`，录制器在 tick 之后二次读取会得到不同值
+  （`replay-roundtrip` 炸）⇒ **必须每拍缓存**。见 DECISIONS §2026-10-19-godai-a3-turn-economy。
 
 ---
 

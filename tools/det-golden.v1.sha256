@@ -1,10 +1,11 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-10-19 @ A2 提交朝向开火门（plan/godai-post-a1-retune.plan.md §3.1）。
-#       `turnCommitFireGate=1`：God-AI 开火前要求本拍子弹确实沿请求方向出膛
-#       （`turnWillCommit`，src/ai/god/turn-gate.ts），否则本拍只转身不开火。
-#       这是纯 God-AI 行为改动，引擎/规则零改动 ⇒ 21 组合签名全变（上一钉 0ff1ba66…，A1 纪元）。
-#       回收 A1 缺口（hard 35×20：胜率 58.7%→71.0%、score 0.4938→0.5912、SUITE 0.4189→0.5112）。
-#       新纪元 60-seed 基线（eval-suite v7）：hard SUITE 0.5246 / win 74% · classic 0.6941 / 87% · chaos 0.5048 / 71%。
+# 采集：2026-10-19 @ A3 转身经济（DECISIONS §2026-10-19-godai-a3-turn-economy）。
+#       `turnEconomyMode=2`：转身被冷却拒绝时不再请求那个拿不到的转身（引擎会因此把坦克
+#       冻住 `moving=false`），改为沿**已提交朝向**继续走；若该朝向被敌弹穿过则保持停
+#       （被拒的躲弹转身必须还是「停」，§95 的 halt 就是 dodge）。
+#       纯 God-AI 行为改动，引擎/规则零改动 ⇒ 21 组合签名全变（上一钉 3f256031…，A2 纪元）。
+#       hard 35×60 配对：Δscore +0.0384 ±0.0084（t=4.56）、SUITE 0.5246→0.5748、胜率 74%→79%。
+#       新纪元 60-seed 基线（eval-suite v7）：hard 0.5748 / 79% · classic 0.7330 / 89% · chaos 0.5343 / 75%。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-3f2560312a3dc25d2973cf2992ca551c5c52669ce3a612e8025659a7240ff8ee
+ed6dc0f9377f942162d21dcdafaa557bcf133fe81b842987b0da6498466da6e2

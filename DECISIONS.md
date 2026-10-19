@@ -7926,3 +7926,41 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **残余归因（同日调研，未改代码）**：C（等待期机会射击）p=0.39 否定；D（把转身等待加进 §193-D 到达
   时间）**700/700 局逐局相同 = 空转**（该门只拦 0.6% 的发）。只改 `turnCooldownMs`：200→**71.0%** ·
   100→**81.0%** · 0→80.6% ⇒ 残余 7pp 是**转身延迟**代价，aim 侧无头寸；冷却人类同规，机制决策未动。
+
+## §2026-10-19-godai-a3-turn-economy — A3 转身经济：不请求拿不到的转身（引擎会因此把坦克冻住），胜率 74%→79%
+
+- **取数先行**（hard，8 关 × 3 seed，2026-10-19）：God-AI 每局接受 **240 次转身**，其中 **95.1% 在 12 拍内
+  没换来任何一发**（转身是买走位的，但价款用「瞄准锁定」付）；更关键的是 **17.7% 的全部 tick** 在请求一个
+  转身冷却**根本不会批准**的方向 —— 而 `applyTurnCooldown` 拒绝时不仅回退 `dir`，还置 `moving=false`
+  ⇒ **这 17.7% 的 tick 是白白站桩**。A2 之前无从判断（没有谓词），A2 给了 `turnWillCommit`，A3 由此可做。
+- **决策**：在**唯一出口** `GodAIInput.getMoveDirection()` 上做替换（`effectiveMoveDir()`）：
+  转身拿不到 ⇒ 改为请求**已提交朝向**（继续走、别站桩），`_moveDir` 里的分支意图不动；
+  `isFiring()` 在「有效方向 ≠ 分支瞄准方向」时**不开火** ⇒ **子弹集与 A2 完全一致**，这一刀只买「少站桩」。
+  参数 `turnEconomyMode`：0=关 · 1=无条件替换 · **2=仅当已提交朝向未被敌弹穿过时替换**（SHIPPED）。
+  mode 1 的心智风险正是 §95 那条：「被拒的躲弹转身必须保持停」，halt 本身就是 dodge。
+- **实测（hard 35×20 / 35×60，CRN 配对，vs A2）**：
+  | 臂 | 20-seed Δscore | 60-seed Δscore | 胜率(60) | 备注 |
+  |---|---|---|---|---|
+  | mode 1（无条件） | +0.0393 (p=0.012) | +0.0183 (p=0.033) | 74%→77% | **Steel Web −0.12（p=0.017）** |
+  | **mode 2（敌弹守卫）** | **+0.0618 (p=0.0001)** | **+0.0384 (t=4.56, p<1e-4)** | **74%→79%** | 4 关涨 / **0 关跌** |
+  60-seed 明细：1150 好 / 947 坏 / 3 平；SUITE **0.5246 → 0.5748**；
+  ▲Diamond +0.082 · ▲Concentric +0.102 · ▲Eagle Nest +0.117 · ▲Frozen Field +0.126。
+  ⇒ 「别把惯性开进子弹」就是 mode 1 → mode 2 的全部差距（Steel Web 的倒退也随之消失）。
+- **新纪元 60-seed 三难度基线（eval-suite v7）**：hard **0.5748 / 79%** · classic **0.7330 / 89%** ·
+  chaos **0.5343 / 75%**（A2 后：0.5246/74% · 0.6941/87% · 0.5048/71% ⇒ 三难度全线上升）。
+- **⚠ 过程中抓到的确定性回归（本条最贵的教训）**：`getMoveDirection()` 原本是纯读，A3 让它读了
+  `world.frame`；而 `InputRecorder.recordFrame()` 在 `sim.tick()` **之后**再读一次输入 ⇒ 重算会得到与
+  实际下发不同的方向，`tests/replay-roundtrip.test.ts` 当场炸（score 6600 vs 4000）。
+  **修法**：`effectiveMoveDir()` 按 tick 缓存（`_effectiveDirCache`，`endFrame()`/`reset()` 失效）。
+  **纪律**：任何让 `getMoveDirection()` / `isFiring()` 变成「依赖时钟」的改动，必须做成每拍快照。
+- **口径警告**：天降神兵护卫（`SimulationEnemies.guardAIFor`）自建 God-AI 脑且**用 DEFAULT 参数** ⇒ 它们
+  跟随出厂默认、不认 `--params` 覆盖。所以 A/B 的「关」臂里护卫仍开着 mode 2，测出的 +0.0384 是**玩家侧
+  净效应**，总效应 ≥ 此值。
+- **连带重标**：`det-golden` `3f256031…` → `ed6dc0f9…`；`metrics-v11-hotlane` god 金标 3 例
+  （stage 0 seed 9 的 lane 归零 ⇒ 换 stage 0 seed 3）；`midlane-sticky` §164 回到原 seed 10
+  （A3 下重新可复现：sticky=0 tick 2855 失守 / sticky=90 过关）；`godai-turn-snap-guard` §80 与
+  `godai-turn-commit-fire` 的 A2 用例显式钉 `turnEconomyMode: 0`（各自隔离被测机制）。
+- **新增回归**：`tests/godai-turn-economy.test.ts`（5 例：可用转身不替换 / 拿不到则沿已提交朝向 /
+  mode 0 不替换 / 敌弹在已提交朝向时保持 null / 替换时不开火）。
+- **不做**：不改引擎、不动 `turnCooldownMs`（机制决策待拍板）、不复活 `tests/godai-score-gate.test.ts`。
+- **门禁**：`bun run check` **2591 pass / 15 skip / 0 fail** · `bun run build` 过 · `freeze:check` 绿。
