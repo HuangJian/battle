@@ -80,4 +80,45 @@ describe('Hero 训练状态区（§367：最新 6 轮完整指标）', () => {
     const html3 = renderToString(h(Hero, { stateView: mkView([]), onMore: () => {} }))
     expect(html3).not.toContain('tc-hero__iters')
   })
+
+  // ★ 2026-10-19 事故回归（用户报障「该卡片加载失败：Cannot read properties of null
+  //   (reading 'toFixed')」）：`rollout_end` 行的 PPO 侧字段在服务端写 NaN，而
+  //   **`JSON.stringify` 把 NaN 序列化成 null** ⇒ 客户端拿到 null。旧 phaseSecs 的
+  //   `ppoCloudSec != null ? … : ppoSec` 两条都是 null ⇒ `null.toFixed(0)` 抛，
+  //   整个 Hero 主表掉进 PanelErrorBoundary。
+  //   it0 基线行一向同形状，但被 heroMainRows 的 `iter > 0` 挡在主表外 —— 所以这个坑
+  //   一直到 pending 行（iter>0）出现才炸。这里用 JSON 往返真实模拟线上字节。
+  it('rollout_end 行过 JSON 后（PPO 侧 = null）照样渲染，显「—」而不是崩', async () => {
+    const { Hero: H } = await import('../src/web/app/panels/Hero')
+    const mkView = (iters: IterRow[]): ConsoleStateView => ({
+      time: 't',
+      course: 'kb1',
+      courses: [],
+      components: [],
+      nodes: [],
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: true, iters },
+      phase: { phase: 'idle', sinceMs: null, iter: null },
+    })
+    // 服务端的 NaN 过 JSON 一律变 null —— 必须真的走一趟 JSON.parse(JSON.stringify())
+    const pending = JSON.parse(
+      JSON.stringify({
+        ...fakeRow(1),
+        pendingPpo: true,
+        ppoSec: Number.NaN,
+        ppoCloudSec: Number.NaN,
+        pureCollectSec: 41.9,
+        kl: Number.NaN,
+        entropy: Number.NaN,
+        meanRet: Number.NaN,
+        lr: Number.NaN,
+      }),
+    ) as IterRow
+    expect(pending.ppoSec).toBeNull() // 前提：线上字节确实长这样
+    const html = renderToString(h(H, { stateView: mkView([pending]), onMore: () => {} }))
+    expect(html).toContain('PPO 中')
+    // 阶段耗时：rollout 有读数、PPO 未回传 ⇒ `—`（不是 0、不是 NaN、不是崩）
+    expect(html).toContain('42/—/—s')
+    expect(html).toContain('>—<') // kl / entropy / meanRet / lr 四列
+  })
 })

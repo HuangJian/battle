@@ -8,6 +8,7 @@ import {
   EVAL_ROW_KEYS,
   filterGroups,
   fmtLootPickDrop,
+  fmtNum,
   fmtPaired,
   fmtPct,
   fmtOverfitGap,
@@ -166,7 +167,10 @@ function winTicksYMin(...seriesList: Array<{ vals: number[] } | undefined>): num
 }
 
 /** 击杀/道具 展示辅助：每局平均；击杀 1 位、道具 2 位小数。 */
-function fmtPerGame(total: number, games: number, digits = 1): string {
+/** 击杀/道具 展示辅助：每局平均；击杀 1 位、道具 2 位小数。
+ *  total 为「无读数」时显 `—`（2026-10-19：`rollout_end` 行 / it0 基线行过 JSON 后是 null）。 */
+function fmtPerGame(total: number | null | undefined, games: number, digits = 1): string {
+  if (total == null || !Number.isFinite(total)) return '—'
   if (games <= 0) return String(total)
   return (total / games).toFixed(digits)
 }
@@ -183,8 +187,8 @@ function fmtInt(v: number | null): string {
 /** 胜局耗时列：优先 avgWinTicks，旧缓存无该字段时回退全样本 avgTicks（标题注明）。 */
 function winTicksCell(r: IterRow): string {
   if (r.actuals?.avgWinTicks != null) return String(r.actuals.avgWinTicks)
-  if (r.actuals) return `${r.actuals.avgTicks}≈`
-  return `${r.avgTicks}≈`
+  if (r.actuals) return `${fmtNum(r.actuals.avgTicks, 0)}≈`
+  return `${fmtNum(r.avgTicks, 0)}≈`
 }
 
 /** 配对裁判行（只读哨子，不进门判）：最新 eval vs 开腿 / vs 上一轮，同语料逐 seed 配对。
@@ -311,7 +315,7 @@ function MainTable({
                 </span>
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                  {r.kills.toFixed(1)}≈
+                  {fmtNum(r.kills, 1)}≈
                 </span>
               )}
             </td>
@@ -346,22 +350,22 @@ function MainTable({
                 </span>
               ) : (
                 <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                  {(r.loot * 100).toFixed(0)}%≈
+                  {fmtNum(r.loot == null ? null : r.loot * 100, 0)}%≈
                 </span>
               )}
             </td>
             <td className="tc-num" title={phaseSecsTitle(phaseSecs(r))}>
               {fmtPhaseSecs(phaseSecs(r))}
             </td>
-            <td className="tc-num">{r.scoreMean.toFixed(4)}</td>
+            <td className="tc-num">{fmtNum(r.scoreMean, 4)}</td>
             <td>
-              <Badge tone={klTone(r.kl)}>{r.kl.toFixed(4)}</Badge>
+              <Badge tone={klTone(r.kl)}>{fmtNum(r.kl, 4)}</Badge>
             </td>
-            <td className="tc-num">{r.entropy.toFixed(3)}</td>
+            <td className="tc-num">{fmtNum(r.entropy, 3)}</td>
             <td>
-              <Badge tone={retTone(r.meanRet)}>{r.meanRet.toFixed(3)}</Badge>
+              <Badge tone={retTone(r.meanRet)}>{fmtNum(r.meanRet, 3)}</Badge>
             </td>
-            <td className="tc-num">{r.lr.toFixed(6)}</td>
+            <td className="tc-num">{fmtNum(r.lr, 6)}</td>
           </tr>
         ))}
       </tbody>

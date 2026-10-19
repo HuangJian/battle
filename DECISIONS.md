@@ -7596,3 +7596,37 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：nn-python-gate 绿（4728 passed，`test_eval_replays_once.py` +3 例：
   decision_k / decision_events / K=10 缺省逐字节不变）· dashboard `bun run test` 1713 绿
   （`web-app-replay-modal.test.ts` +1 例：mismatch ⇒ 拒绝交付）· typecheck / oxlint / oxfmt 净。
+
+## §2026-10-19-goalnn-rollout-end-json-null — `rollout_end` 行的 PPO 侧读数过 JSON 变 null：渲染层全链路「无读数显 —」
+
+- **现场（用户报障）**：dashboard 首页报「该卡片加载失败：Cannot read properties of null
+  (reading 'toFixed')」，发生在 y25-price it1 rollout 结束那一刻。浏览器栈：
+  `phaseSecsTitle ← MainTable 的 Array.map`。
+- **根因**：`buildIterRows` 给 `rollout_end` 行的 PPO 侧字段写 `Number.NaN`（"缺口不是 0"
+  约定），而 **`JSON.stringify` 把 `NaN` 序列化成 `null`** ⇒ `/api/state` 吐出去的是
+  `{"ppoSec":null,"ppoCloudSec":null,"kl":null,…}`。客户端 `phaseSecs` 的
+  `r.ppoCloudSec != null ? r.ppoCloudSec : r.ppoSec` 两条都是 `null` ⇒ `null.toFixed(0)` 抛，
+  PanelErrorBoundary 收下整张主表。**it0 基线行一向是同形状的 null，但它被
+  `heroMainRows` 的 `iter > 0` 挡在主表外** —— 所以这个坑一直到 pending 行（iter>0）出现才炸。
+- **决策**：读面全链路按「无读数」处理，**显 `—`，绝不画 0**（0 会被读成「训练用了 0 秒」）：
+  1. `view/format.ts` 新增 `hasNum(v)`（`null`/`undefined`/`NaN` 统一判空）与
+     `fmtNum(v, digits)`；`fmtPct` 改走同一判据；
+  2. `phaseSecs` 入参放宽到 `number | null | undefined`，`PhaseSecs.ppo/net` 改为可空，
+     PPO 两侧都缺 ⇒ `null`；`fmtPhaseSecs` / `phaseSecsTitle` 用 `fmtNum` 渲染；
+  3. `winTone` / `klTone` / `retTone` 接受可空并返回中性档——旧签名 `(v: number)` 下
+     `null > 0.05` 恒 false ⇒ **染成绿（"好"）**，比崩溃更隐蔽；
+  4. Hero 主表与指标页表的 `scoreMean/kl/entropy/meanRet/lr/kills/loot/avgTicks` 各格
+     与本地 `fmtPerGame` 全部改走 `fmtNum` / 可空口径。
+- **备选与否决**：① **服务端改吐 `null`（而不是 NaN）** —— 否（`metricSeries`/`sparkPoints`/
+  TrendChart 的"缺口"语义建立在 `Number.isFinite` 上，`Number.isFinite(null)` 恰好为 false，
+  改 null 也能当缺口；但那样要把 `Series.vals` 改成 `Array<number|null>` 牵连一整片类型，
+  收益只是"服务端更诚实"，读面照样得判空 ⇒ 本轮不动，留给后续）；② 客户端收到后统一
+  归一成 NaN —— 否（没有单一入口，且归一层自己也会漏）；③ 只修 `phaseSecs` 一处 —— 否
+  （kl/entropy/meanRet/lr/scoreMean 五列同样是 `null.toFixed`，逐个爆）。
+- **后果**：`rollout_end` 行在首页/指标页正常渲染：rollout 侧有读数，PPO 侧显 `—` + iter 列
+  「PPO 中」徽标。**不承诺**：`Series.vals` 的类型仍是 `number[]`（线上实际可能是 null，
+  `Number.isFinite` 恰好兼容）——这是已知的类型谎言，见备选①。
+- **门禁**：dashboard `bun run test` 1719 pass / 0 fail（新增：
+  `web-view-format` 4 例、`web-view-rows` 1 例、`web-app-hero-overview` 1 例端到端渲染）
+  · typecheck 绿 · oxlint 0 警告 · oxfmt 净 · `bun src/server/build.ts` 四份 bundle 过
+  · 用线上真实 `/api/state` 载荷复验 Hero / MetricsTable 均不再抛。

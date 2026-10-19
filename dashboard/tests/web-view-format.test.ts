@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   fmtFullTs,
+  fmtNum,
   fmtOverfitGap,
   fmtPct,
   fmtPhaseSecs,
@@ -102,5 +103,48 @@ describe('phaseSecs：rollout/ppo/net 准确拆分', () => {
         distPhaseSec: null,
       }),
     ).toEqual({ rollout: 60, ppo: 40, net: 0 })
+  })
+
+  // ★ 2026-10-19 事故回归：`rollout_end` 行的 PPO 侧字段在服务端写 NaN，而
+  //   **JSON.stringify 把 NaN 序列化成 null** ⇒ 客户端拿到的是 null。旧 phaseSecs 的
+  //   `r.ppoCloudSec != null ? … : r.ppoSec` 两条都是 null ⇒ `null.toFixed(0)` 抛，
+  //   整个 Hero 主表掉进 PanelErrorBoundary（用户报障「该卡片加载失败」）。
+  //   it0 基线行一向是同形状的 null，但它被 heroMainRows 的 iter>0 挡在主表外，
+  //   所以这个坑一直到 pending 行（iter>0）出现才炸。
+  it('rollout_end 行（PPO 未回传，过 JSON 后是 null）⇒ ppo/net 为 null 且不抛', () => {
+    const p = phaseSecs({
+      rolloutSec: 45.3,
+      ppoSec: null,
+      pureCollectSec: 41.9,
+      ppoCloudSec: null,
+      distPhaseSec: null,
+    })
+    expect(p).toEqual({ rollout: 41.9, ppo: null, net: null })
+    // 渲染必须显「—」，不是 0（0 会被读成「训练用了 0 秒」）也不是 NaN
+    expect(fmtPhaseSecs(p)).toBe('42/—/—s')
+    expect(phaseSecsTitle(p)).toContain('ppo 真训练 —s')
+  })
+
+  it(' rolloutSec 也缺（极端）⇒ rollout 回落 0，仍不抛', () => {
+    const p = phaseSecs({ rolloutSec: null, ppoSec: null })
+    expect(p).toEqual({ rollout: 0, ppo: null, net: null })
+    expect(fmtPhaseSecs(p)).toBe('0/—/—s')
+  })
+})
+
+describe('fmtNum：无读数显 —（JSON 的 null / NaN 都不画 0）', () => {
+  it('null / undefined / NaN → —；正常值按位数', () => {
+    expect(fmtNum(null, 4)).toBe('—')
+    expect(fmtNum(undefined, 4)).toBe('—')
+    expect(fmtNum(Number.NaN, 4)).toBe('—')
+    expect(fmtNum(0, 4)).toBe('0.0000')
+    expect(fmtNum(0.018562, 4)).toBe('0.0186')
+    expect(fmtNum(0.00015, 6)).toBe('0.000150')
+  })
+
+  it('fmtPct 同口径（无读数 → —，不画 0.0%）', () => {
+    expect(fmtPct(null)).toBe('—')
+    expect(fmtPct(Number.NaN)).toBe('—')
+    expect(fmtPct(0.5849)).toBe('58.5%')
   })
 })

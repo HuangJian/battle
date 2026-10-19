@@ -12,19 +12,26 @@ export function latestRow(iters: IterRow[]): IterRow | null {
 
 export type ValueTone = 'g' | 'y' | 'r'
 
-export function winTone(v: number): ValueTone {
+/** 无读数（`null` / `NaN`）⇒ 灰。`rollout_end` 行的 PPO 侧列还没跑，
+ *  染成绿/黄/红都是把一个不存在的判断涂上颜色（2026-10-19 事故的同源问题）。 */
+const NO_READING: ValueTone = 'y'
+
+export function winTone(v: number | null | undefined): ValueTone {
+  if (v == null || !Number.isFinite(v)) return NO_READING
   if (v >= 0.3) return 'g'
   if (v >= 0.1) return 'y'
   return 'r'
 }
 
-export function klTone(v: number): ValueTone {
+export function klTone(v: number | null | undefined): ValueTone {
+  if (v == null || !Number.isFinite(v)) return NO_READING
   if (v > 0.05) return 'r'
   if (v > 0.02) return 'y'
   return 'g'
 }
 
-export function retTone(v: number): ValueTone {
+export function retTone(v: number | null | undefined): ValueTone {
+  if (v == null || !Number.isFinite(v)) return NO_READING
   if (v > -0.5) return 'g'
   if (v > -1.0) return 'y'
   return 'r'

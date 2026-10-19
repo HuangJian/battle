@@ -13,9 +13,12 @@ import {
   filterGroups,
   iterGroups,
   keywordMatch,
+  klTone,
   latestRow,
+  retTone,
   sortRows,
   statusFromRecent,
+  winTone,
   type IterRow,
 } from '../src/web/view'
 
@@ -123,5 +126,30 @@ describe('view 指标行分组 / 过滤 / 排序（DS-U1 13 列 + eval 子行语
       'warn',
     )
     expect(statusFromRecent([false, false])).toBe('bad')
+  })
+})
+
+// ─────────────── 色调：无读数不染色（2026-10-19 事故同源问题） ───────────────
+//
+// `rollout_end` 行的 PPO 侧字段过 JSON 后是 null（服务端写 NaN，`JSON.stringify` 把它变成
+// null）。旧 tone 函数签名是 `(v: number)`，`null > 0.05` 恒 false ⇒ 染成**绿**（"好"）——
+// 把一个不存在的判断涂上"正常"的颜色，比崩溃更隐蔽。
+describe('色调函数：null / NaN ⇒ 不判定', () => {
+  it('klTone / retTone / winTone 对无读数返回同一档（不染绿也不染红）', () => {
+    for (const v of [null, undefined, Number.NaN]) {
+      expect(klTone(v as number)).toBe(klTone(Number.NaN))
+      expect(retTone(v as number)).toBe(retTone(Number.NaN))
+      expect(winTone(v as number)).toBe(winTone(Number.NaN))
+    }
+    // 有读数时档位不变（回归护栏）
+    expect(klTone(0.001)).toBe('g')
+    expect(klTone(0.03)).toBe('y')
+    expect(klTone(0.1)).toBe('r')
+    expect(retTone(0)).toBe('g')
+    expect(retTone(-0.7)).toBe('y')
+    expect(retTone(-2)).toBe('r')
+    expect(winTone(0.5)).toBe('g')
+    expect(winTone(0.2)).toBe('y')
+    expect(winTone(0.05)).toBe('r')
   })
 })

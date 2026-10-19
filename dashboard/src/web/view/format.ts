@@ -38,8 +38,26 @@ export function fmtRel(ms: number, now = Date.now()): string {
 
 // ────────────────────────── 纯函数：数值/文本 ──────────────────────────
 
+/** 「无读数」判据：`null`（JSON 缺键 / `JSON.stringify(NaN)` 的产物）与 `NaN` 都算。
+ *
+ *  ★ 为什么需要它（2026-10-19 事故）：`rollout_end` 行的 PPO 侧字段在服务端写成 `NaN`
+ *    （「缺口不是 0」约定），而 **`JSON.stringify` 把 `NaN` 序列化成 `null`** ⇒ 客户端收到
+ *    的是 `null` 而不是 `NaN`。原先所有单元格直接 `v.toFixed()`，`null.toFixed` 当场抛
+ *    （首页 Hero 主表整块掉进 PanelErrorBoundary：「该卡片加载失败」）。
+ *    it0 基线行的同名字段一向是 `null`，但它被 `heroMainRows` 的 `iter > 0` 过滤掉、
+ *    从不进主表，所以这个坑一直到 pending 行（`iter > 0`）出现才暴露。
+ *  ⇒ 判空统一走这里，渲染一律显 `—`（与 `fmtPct` 的既有口径一致），**绝不画 0**。 */
+export function hasNum(v: number | null | undefined): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+/** 数字读数格式化：无读数（`null` / `NaN`）显 `—`；有读数按 digits 位小数。 */
+export function fmtNum(v: number | null | undefined, digits: number): string {
+  return hasNum(v) ? v.toFixed(digits) : '—'
+}
+
 export function fmtPct(v: number | null | undefined): string {
-  return typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—'
+  return hasNum(v) ? `${(v * 100).toFixed(1)}%` : '—'
 }
 
 /** 每局平均：Σ / games，保留 digits 位小数；null → '-'。 */
@@ -145,8 +163,10 @@ export function fmtBytes(b: number | null | undefined): string {
 /** 阶段耗时三元组（rollout=纯采集 · ppo=真训练 · net=网络/传输/排队）。 */
 export interface PhaseSecs {
   rollout: number
-  ppo: number
-  net: number
+  /** 云端真训练秒；**未回传 / 旧账本缺键 = null**（`rollout_end` 行的 PPO 侧还没跑）。 */
+  ppo: number | null
+  /** 网络/排队净开销；PPO 未回传时同 null（算不出来，不编 0）。 */
+  net: number | null
 }
 
 /**
@@ -156,37 +176,44 @@ export interface PhaseSecs {
  *   volume 多波：loop 层 combine_reports 聚合 min(分发起点)→max(样本齐)。
  *   旧账本 pure_collect = 末局结算−权重下发完毕；无此键时回退 rolloutSec。
  * - ppo：优先 ppoCloudSec（云端自报真训练秒）；旧账本/本机回退 ppoSec。
+ *   **两者都缺（`rollout_end` 行：PPO 还没跑）⇒ null**，渲染显 `—`。
  * - net：权重下发（distPhaseSec）+ 远端往返超出真训练的部分（ppoSec−ppoCloudSec）。
  *   本机/流式（ppoCloudSec 缺失或 == ppoSec）时 ppo 侧净开销为 0。
- */
+ *
+ *  ★ 2026-10-19：入参从 `number` 放宽到 `number | null | undefined` —— 服务端的 `NaN`
+ *    过 JSON 会变 `null`（见 `hasNum` 的注释），旧签名把这条路径整个漏掉了。 */
 export function phaseSecs(r: {
-  rolloutSec: number
-  ppoSec: number
+  rolloutSec: number | null | undefined
+  ppoSec: number | null | undefined
   pureCollectSec?: number | null
   ppoCloudSec?: number | null
   distPhaseSec?: number | null
 }): PhaseSecs {
-  const rollout = r.pureCollectSec != null ? r.pureCollectSec : r.rolloutSec
-  const ppo = r.ppoCloudSec != null ? r.ppoCloudSec : r.ppoSec
+  const rollout = r.pureCollectSec != null ? r.pureCollectSec : (r.rolloutSec ?? 0)
+  // PPO 两侧都无读数 ⇒ null（不是 0：0 会被读成「训练用了 0 秒」）。
+  const ppo = r.ppoCloudSec != null ? r.ppoCloudSec : (r.ppoSec ?? null)
   const dist = r.distPhaseSec ?? 0
-  const ppoNet = r.ppoCloudSec != null ? Math.max(0, r.ppoSec - r.ppoCloudSec) : 0
+  const ppoNet =
+    r.ppoCloudSec != null && r.ppoSec != null ? Math.max(0, r.ppoSec - r.ppoCloudSec) : 0
+  if (ppo == null) return { rollout, ppo: null, net: null }
   return { rollout, ppo, net: dist + ppoNet }
 }
 
 /**
  * 阶段耗时展示：`120/80/15s`（rollout/ppo/net，整秒）。
  * rollout = 权重开始分发→样本齐（2026-09-19 用户口径，边分发边开采）。
+ * 任一段无读数 ⇒ `—`（`rollout_end` 行：PPO 未回传）。
  */
 export function fmtPhaseSecs(p: PhaseSecs): string {
-  return `${p.rollout.toFixed(0)}/${p.ppo.toFixed(0)}/${p.net.toFixed(0)}s`
+  return `${fmtNum(p.rollout, 0)}/${fmtNum(p.ppo, 0)}/${fmtNum(p.net, 0)}s`
 }
 
 /** 阶段耗时 hover：把三段拆开写清楚，避免再把网络算进训练。 */
 export function phaseSecsTitle(p: PhaseSecs): string {
   return (
-    `rollout 权重分发→样本齐 ${p.rollout.toFixed(0)}s · ` +
-    `ppo 真训练 ${p.ppo.toFixed(0)}s · ` +
-    `net 网络/排队 ${p.net.toFixed(0)}s`
+    `rollout 权重分发→样本齐 ${fmtNum(p.rollout, 0)}s · ` +
+    `ppo 真训练 ${fmtNum(p.ppo, 0)}s · ` +
+    `net 网络/排队 ${fmtNum(p.net, 0)}s`
   )
 }
 

@@ -11,6 +11,7 @@ import {
   evalBannerDone,
   filterGroups,
   fmtLootPickDrop,
+  fmtNum,
   fmtOverfitGap,
   fmtPct,
   fmtPhaseSecs,
@@ -71,7 +72,9 @@ function buildRows(rows: IterRow[], mode: IterFilter): MetricRow[] {
 }
 
 /** 击杀/道具每局平均展示。 */
-function fmtPerGame(total: number, games: number, digits = 1): string {
+/** 击杀/道具每局平均展示；「无读数」显 `—`（2026-10-19：过 JSON 的 null）。 */
+function fmtPerGame(total: number | null | undefined, games: number, digits = 1): string {
+  if (total == null || !Number.isFinite(total)) return '—'
   if (games <= 0) return String(total)
   return (total / games).toFixed(digits)
 }
@@ -235,7 +238,7 @@ function skillCols(): Col<MetricRow>[] {
             </span>
           ) : (
             <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-              {r.main.kills.toFixed(1)}≈
+              {fmtNum(r.main.kills, 1)}≈
             </span>
           )
         ) : r.eval.killRate != null ? (
@@ -258,7 +261,7 @@ function skillCols(): Col<MetricRow>[] {
         if (abs != null)
           return (
             <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
-              {abs.toFixed(1)}
+              {fmtNum(abs, 1)}
             </span>
           )
         return <span className="tc-muted">-</span>
@@ -293,7 +296,7 @@ function skillCols(): Col<MetricRow>[] {
             </span>
           ) : (
             <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-              {(r.main.loot * 100).toFixed(0)}%≈
+              {fmtNum(r.main.loot == null ? null : r.main.loot * 100, 0)}%≈
             </span>
           )
         ) : r.eval.totalPU !== null ? (
@@ -375,7 +378,7 @@ function buildMetricCols(
     ...colDef('scoreMean'),
     cell: (r) =>
       r.kind === 'main' ? (
-        r.main.scoreMean.toFixed(4)
+        fmtNum(r.main.scoreMean, 4)
       ) : r.eval.scoreMean !== null ? (
         r.eval.scoreMean.toFixed(4)
       ) : (
@@ -440,7 +443,7 @@ function klEntropyCols(): Col<MetricRow>[] {
       ...colDef('kl'),
       cell: (r) =>
         r.kind === 'main' ? (
-          <Badge tone={klTone(r.main.kl)}>{r.main.kl.toFixed(4)}</Badge>
+          <Badge tone={klTone(r.main.kl)}>{fmtNum(r.main.kl, 4)}</Badge>
         ) : (
           <span className="tc-muted">-</span>
         ),
@@ -448,20 +451,20 @@ function klEntropyCols(): Col<MetricRow>[] {
     {
       ...colDef('entropy'),
       cell: (r) =>
-        r.kind === 'main' ? r.main.entropy.toFixed(3) : <span className="tc-muted">-</span>,
+        r.kind === 'main' ? fmtNum(r.main.entropy, 3) : <span className="tc-muted">-</span>,
     },
     {
       ...colDef('meanRet'),
       cell: (r) =>
         r.kind === 'main' ? (
-          <Badge tone={retTone(r.main.meanRet)}>{r.main.meanRet.toFixed(3)}</Badge>
+          <Badge tone={retTone(r.main.meanRet)}>{fmtNum(r.main.meanRet, 3)}</Badge>
         ) : (
           <span className="tc-muted">-</span>
         ),
     },
     {
       ...colDef('lr'),
-      cell: (r) => (r.kind === 'main' ? r.main.lr.toFixed(6) : <span className="tc-muted">-</span>),
+      cell: (r) => (r.kind === 'main' ? fmtNum(r.main.lr, 6) : <span className="tc-muted">-</span>),
     },
   ]
 }
