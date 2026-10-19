@@ -49,6 +49,9 @@ export class InputRecorder {
   private coopAtStart = false
   /** 督战双玩家: captured at recording start for hasP2 determination. */
   private spectateDualAtStart = false
+  /** Whether each stream's input declared the v3 hold/fire(3) contract. */
+  private p1HoldFire3 = false
+  private p2HoldFire3 = false
 
   /** Begin a new recording session. */
   startNew(world: World): void {
@@ -60,6 +63,8 @@ export class InputRecorder {
     this.world = world
     this.coopAtStart = world.coop
     this.spectateDualAtStart = world.spectateDual
+    this.p1HoldFire3 = false
+    this.p2HoldFire3 = false
   }
 
   /**
@@ -68,6 +73,10 @@ export class InputRecorder {
    */
   recordFrame(input: InputLike, input2?: InputLike | null): void {
     if (!this.active) return
+
+    // Sticky per session: a stream that ever speaks v3 must be replayed as v3.
+    this.p1HoldFire3 = this.p1HoldFire3 || input.usesHoldFire3?.() === true
+    if (input2) this.p2HoldFire3 = this.p2HoldFire3 || input2.usesHoldFire3?.() === true
 
     // Record player1 input. hold/fireBeforeTurn are v3-only and optional:
     // human/God-AI inputs leave them undefined -> false (legacy semantics).
@@ -123,11 +132,16 @@ export class InputRecorder {
     // single-stream stays v1, coop or any v3-only bit becomes v3. Writing a
     // v1 header over a frame that carries hold/fireBeforeTurn would silently
     // erase both (review P0-1).
-    const frames = packFrames(this.frames, hasCoopInput ? this.frames2 : null)
+    const frames = packFrames(this.frames, hasCoopInput ? this.frames2 : null, {
+      p1HoldFire3: this.p1HoldFire3,
+      p2HoldFire3: this.p2HoldFire3,
+    })
     // Also store frames2 separately for the Replay.frames2 field. It is a
     // SINGLE stream, so it gets its own header (v1 unless it carries a
     // v3-only bit); it must never claim the interleaved dual layout.
-    const frames2 = hasCoopInput ? packFrames(this.frames2) : null
+    const frames2 = hasCoopInput
+      ? packFrames(this.frames2, null, { p1HoldFire3: this.p2HoldFire3 })
+      : null
 
     this.active = false
     this.initialSnapshot = null

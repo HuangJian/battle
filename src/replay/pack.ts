@@ -66,6 +66,16 @@ const V3_FIRE_BEFORE_TURN_BIT = 1 << 7
 
 /** V2/V3 flags byte bits */
 const HAS_P2_BIT = 1 << 0
+/** V3-only: the stream was recorded from an input using hold/fire(3) semantics. */
+const P1_HOLD_FIRE3_BIT = 1 << 1
+const P2_HOLD_FIRE3_BIT = 1 << 2
+
+export interface FrameActionFlags {
+  /** P1 was recorded from an input declaring `usesHoldFire3()`. */
+  p1HoldFire3?: boolean
+  /** P2 was recorded from an input declaring `usesHoldFire3()` (coop only). */
+  p2HoldFire3?: boolean
+}
 
 const IDLE_FRAME: InputFrame = {
   direction: null,
@@ -146,9 +156,18 @@ export function unpackFrame(packed: number, schema: number = FRAME_SCHEMA_VERSIO
  * A single stream carrying hold/fireBeforeTurn is written as v3 with
  * hasP2=0 — writing v1 would silently erase both bits (review P0-1).
  */
-export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null): Uint8Array {
+export function packFrames(
+  frames: InputFrame[],
+  frames2?: InputFrame[] | null,
+  actionFlags?: FrameActionFlags,
+): Uint8Array {
   const hasP2 = !!(frames2 && frames2.length > 0)
-  const v3 = hasP2 || needsV3(frames) || (frames2 ? needsV3(frames2) : false)
+  // `hold`/`fireBeforeTurn` bits imply v3 semantics; coop alone only implies
+  // the v3 container. The flags byte records the *action contract* separately
+  // so a legacy God-AI coop stream is not replayed through the NN fire path.
+  const p1V3 = !!actionFlags?.p1HoldFire3 || needsV3(frames)
+  const p2V3 = !!actionFlags?.p2HoldFire3 || (frames2 ? needsV3(frames2) : false)
+  const v3 = hasP2 || p1V3 || p2V3
 
   if (!v3) {
     // v1 format — single stream, no flags byte
@@ -162,10 +181,12 @@ export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null):
 
   // v3 format — flags byte + optional interleaved dual streams
   const tickCount = frames.length
+  const flags =
+    (hasP2 ? HAS_P2_BIT : 0) | (p1V3 ? P1_HOLD_FIRE3_BIT : 0) | (p2V3 ? P2_HOLD_FIRE3_BIT : 0)
   if (!hasP2) {
     const packed = new Uint8Array(2 + tickCount)
     packed[0] = FRAME_SCHEMA_V3
-    packed[1] = 0
+    packed[1] = flags
     for (let i = 0; i < tickCount; i++) {
       packed[2 + i] = packFrame(frames[i], FRAME_SCHEMA_V3)
     }
@@ -175,7 +196,7 @@ export function packFrames(frames: InputFrame[], frames2?: InputFrame[] | null):
   // [version][flags][p1_0][p2_0][p1_1][p2_1]... = 2 + tickCount * 2
   const packed = new Uint8Array(2 + tickCount * 2)
   packed[0] = FRAME_SCHEMA_V3
-  packed[1] = HAS_P2_BIT
+  packed[1] = flags
   for (let i = 0; i < tickCount; i++) {
     const base = 2 + i * 2
     packed[base] = packFrame(frames[i], FRAME_SCHEMA_V3)
@@ -201,9 +222,13 @@ export function frameSchemaVersionOf(data: Uint8Array | null | undefined): numbe
  * Returns { p1, p2 } where p2 is null for v1 replays or when no coop data.
  * Returns null if the schema version is unrecognized.
  */
-export function unpackFrames(
-  data: Uint8Array,
-): { p1: InputFrame[]; p2: InputFrame[] | null } | null {
+export function unpackFrames(data: Uint8Array): {
+  p1: InputFrame[]
+  p2: InputFrame[] | null
+  /** v3 streams recorded from a hold/fire(3) input; legacy streams are false. */
+  p1HoldFire3: boolean
+  p2HoldFire3: boolean
+} | null {
   if (data.length < 1) return null
   const schemaVersion = data[0]
 
@@ -213,14 +238,17 @@ export function unpackFrames(
     for (let i = 1; i < data.length; i++) {
       frames.push(unpackFrame(data[i], FRAME_SCHEMA_V1))
     }
-    return { p1: frames, p2: null }
+    return { p1: frames, p2: null, p1HoldFire3: false, p2HoldFire3: false }
   }
 
   if (schemaVersion === FRAME_SCHEMA_V2 || schemaVersion === FRAME_SCHEMA_V3) {
-    // v2/v3: flags byte (bit 0 = hasP2); per-frame layout depends on version
+    // v2/v3: flags byte (bit 0 = hasP2, bits 1/2 = per-player hold/fire3)
     if (data.length < 2) return null
     const flags = data[1]
     const hasP2 = (flags & HAS_P2_BIT) !== 0
+    const v3 = schemaVersion === FRAME_SCHEMA_V3
+    const p1HoldFire3 = v3 && (flags & P1_HOLD_FIRE3_BIT) !== 0
+    const p2HoldFire3 = v3 && (flags & P2_HOLD_FIRE3_BIT) !== 0
 
     if (!hasP2) {
       // single stream after flags byte
@@ -228,7 +256,7 @@ export function unpackFrames(
       for (let i = 2; i < data.length; i++) {
         frames.push(unpackFrame(data[i], schemaVersion))
       }
-      return { p1: frames, p2: null }
+      return { p1: frames, p2: null, p1HoldFire3, p2HoldFire3 }
     }
 
     // interleaved dual streams
@@ -240,7 +268,7 @@ export function unpackFrames(
       p1.push(unpackFrame(data[base], schemaVersion))
       p2.push(unpackFrame(data[base + 1], schemaVersion))
     }
-    return { p1, p2 }
+    return { p1, p2, p1HoldFire3, p2HoldFire3 }
   }
 
   return null

@@ -113,9 +113,9 @@ export class CombatSystem {
    * refuses to turn faster than this), making the God AI's
    * dodgeOscillationCounterFire unnecessary in practice.
    */
-  private applyTurnCooldown(tank: Tank, w: World): void {
+  applyTurnCooldown(tank: Tank, w: World): boolean {
     const turnCd = w.rules?.turnCooldownMs ?? 0
-    if (turnCd <= 0 || tank.dir === tank.prevMoveDir) return
+    if (turnCd <= 0 || tank.dir === tank.prevMoveDir) return true
     const now = w.frame * TICK_MS
     if (now - (tank.lastTurnMs ?? TURN_SENTINEL_MS) < turnCd) {
       // Cooldown active — the requested turn is deferred. Revert to
@@ -130,11 +130,12 @@ export class CombatSystem {
       // ICE_DECEL_TRACTION, preserving the glide).
       tank.dir = tank.prevMoveDir ?? tank.dir
       tank.moving = false
-    } else {
-      // Cooldown expired — accept the turn
-      tank.prevMoveDir = tank.dir
-      tank.lastTurnMs = now
+      return false
     }
+    // Cooldown expired — accept the turn
+    tank.prevMoveDir = tank.dir
+    tank.lastTurnMs = now
+    return true
   }
 
   /**

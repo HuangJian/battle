@@ -7654,3 +7654,24 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   但回放 v3 已就绪。旧 v1/v2 `.replay` 可继续导入/播放；新录单流若带 NN 两位则必须是 v3。
 - **门禁**：`bun run check`（2554 tests；含 replay v1/v2/v3 round-trip、单流 v3、旧 v2 解码）；
   `bun run build` 待跑。
+
+## §2026-10-19-goalnn-nn-only-hold-fire3 — A1 改为 NN-only 输入能力位：God-AI 保留侧射，B′ 拿得到“开火时刻朝向权威”
+
+- **背景**：上一条 A1 被 God-AI score gate 拒绝，但 B′ 的 `fire=1/2` 与 `hold` 需要
+  “先打再转 / 先转再打”的确定性。全局改 `tryFire` 会连 God-AI 一起改，已证明不可接受。
+- **决策**：把差异收进输入契约，而不是引擎全局语义：
+  1. `InputLike.usesHoldFire3?(): boolean`，**默认 false**；`Input` / `GodAIInput` 不实现
+     ⇒ 旧路径逐字节不变，golden 不需要新纪元。
+  2. `SimulationPlayer` 的 v3 分支：`hold=1` 只转向不前进，并显式调
+     `applyTurnCooldown`（零速车会跳过 step⑦，不显式裁决就是免费瞄准）；
+     `fireBeforeTurn=true` 先按旧朝向开火再转身；默认先转身，**转身被冷却拒绝则本拍不发射**。
+  3. `applyTurnCooldown` 改为 public 且返回是否接受，供 B1/回放复用；旧调用点忽略返回值。
+  4. v3 `ReplayInput` 自动返回 true（v1/v2 回放仍走旧路径）；`NNInput` 在 B1 接线时返回 true。
+- **备选与否决**：① 全局 A1 + 接受 God-AI 分数下降 —— 否（已实测 7–10 关跌破地板）；
+  ② 另加 `world.rules` 开关 —— 否（规则开关会进快照/回放契约，输入能力位更小且天然只影响
+  声明它的输入源）；③ 只在训练脚本里模拟 —— 否（回放/评估会与训练分裂）。
+- **后果**：God-AI 的侧射保留；NN 腿获得与 B1 一致的动作语义；`fire=1` 的 BC 样本仍≈0
+  （人类输入不声明 v3），符合 plan §11.1 的预期。
+- **门禁**：`tests/hold-fire3.test.ts` 4 例 · `bun run check` 2547 pass / 0 fail ·
+  `bun run build` 过 · God-AI score gate 三难度全绿 · `freeze:check` 仍
+  `FROZEN-SIGNATURE OK`（God-AI 无行为变化，golden 不动）。

@@ -181,6 +181,24 @@ describe('Replay frame packing', () => {
     expect(out!.p1[1].direction).toBe('left')
   })
 
+  it('records the per-stream hold/fire3 action contract in the v3 flags byte', () => {
+    const frames: InputFrame[] = [{ direction: 'up', firing: true, guard: false, frenzy: false }]
+    // No hold/fireBeforeTurn bits, but the input declared fire(3) semantics:
+    // the flag is what lets playback tell fire=2 apart from legacy fire.
+    const packed = packFrames(frames, null, { p1HoldFire3: true })
+    expect(packed[0]).toBe(FRAME_SCHEMA_V3)
+    expect(packed[1] & 0x02).toBe(0x02)
+    const out = unpackFrames(packed)
+    expect(out!.p1HoldFire3).toBe(true)
+    expect(out!.p2HoldFire3).toBe(false)
+    expect(new ReplayInput(packed).usesHoldFire3()).toBe(true)
+
+    const dual = packFrames(frames, frames, { p1HoldFire3: false, p2HoldFire3: true })
+    const outDual = unpackFrames(dual)
+    expect(outDual!.p1HoldFire3).toBe(false)
+    expect(outDual!.p2HoldFire3).toBe(true)
+  })
+
   it('still decodes legacy v2 single-stream frames with the old bit layout', () => {
     const legacy: InputFrame = {
       direction: 'right',

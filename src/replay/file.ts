@@ -292,7 +292,10 @@ function decodeFrames(
   // Re-derive the standalone P2 stream so an imported coop replay carries the
   // same `frames2` an in-session recording would (InputRecorder produces it).
   const streams = unpackFrames(frames)
-  const frames2 = streams?.p2 && streams.p2.length > 0 ? packFrames(streams.p2) : null
+  const frames2 =
+    streams?.p2 && streams.p2.length > 0
+      ? packFrames(streams.p2, null, { p1HoldFire3: streams.p2HoldFire3 })
+      : null
 
   return { frames, blobSchema, frames2 }
 }

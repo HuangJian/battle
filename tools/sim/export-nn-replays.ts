@@ -298,7 +298,9 @@ class ScriptedInput implements InputLike {
 
   setAction(move: number, fire: number): void {
     this.moveDir = decodeMove(move)
-    this.firing = fire === 1
+    // Fire head v3 is 0/1/2 (1 = before turn, 2 = after turn): both are a
+    // shot. `=== 1` would silently drop the 2 class once B1 lands.
+    this.firing = fire !== 0
   }
 
   getMoveDirection(): Direction | null {

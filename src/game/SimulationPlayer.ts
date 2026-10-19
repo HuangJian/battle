@@ -71,6 +71,32 @@ export class PlayerSystem {
     // Movement
     if (!input) return // no input source (God AI tank without input2)
     const dir = input.getMoveDirection()
+    const firing = input.isFiring()
+
+    if (input.usesHoldFire3?.() === true) {
+      // v3 action contract (NN only): hold = turn without advancing;
+      // fireBeforeTurn = fire along the committed facing BEFORE the turn.
+      // God-AI/human inputs omit `usesHoldFire3`, so their path below stays
+      // byte-identical.
+      const hold = input.isHolding?.() ?? false
+      const fireBefore = input.isFireBeforeTurn?.() ?? false
+      if (firing && fireBefore) this.d.combat.tryFire(p)
+      let turnAccepted = true
+      if (dir !== null) {
+        p.dir = dir
+        p.moving = !hold
+        // Turn-only (hold) skips step ⑦'s movement block, so adjudicate the
+        // cooldown here explicitly; otherwise hold would be free aiming.
+        turnAccepted = this.d.combat.applyTurnCooldown(p, w)
+      } else {
+        p.moving = false
+      }
+      // A rejected turn means the committed facing is still the old one;
+      // firing now would be the pre-A1 side-shot, so skip this tick's shot.
+      if (firing && !fireBefore && turnAccepted) this.d.combat.tryFire(p)
+      return
+    }
+
     if (dir !== null) {
       p.dir = dir
       p.moving = true
@@ -79,7 +105,7 @@ export class PlayerSystem {
     }
 
     // Firing
-    if (input.isFiring()) {
+    if (firing) {
       this.d.combat.tryFire(p)
     }
   }
