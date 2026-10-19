@@ -450,6 +450,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §80: Turn-snap aim guard — 1 = ON (default, the fix). 0 = OFF (pre-§80
   // behavior, A/B baseline). See interface docs.
   aimTurnSnapGuard: 1,
+  // A2 (plan/godai-post-a1-retune.plan.md §3.1): committed-facing fire gate —
+  // 0 = OFF (pre-A2 / A1-era behavior, byte-identical A/B baseline).
+  // 1 = ON (SHIPPED 2026-10-19). hard 35×20 CRN 配对: Δscore +0.0964 ±0.0162
+  // (t=5.94, 441 好/256 坏/3 平), 算术 score 0.6104 → 0.7069, 胜率 58.7% → 71.0%
+  // ⇒ 回收 A1 缺口的 66.6%；中位偏弹率 27.4% → 0%. 见 DECISIONS §A2.
+  turnCommitFireGate: 1,
   // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
   aggCampTimeoutTicks: 120,
   // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.

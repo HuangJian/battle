@@ -1,11 +1,23 @@
 # God-AI 侧射移除后的退化诊断与调优 plan（v1，2026-10-19）
 
 > **本文可独立阅读**：不依赖任何对话上下文。结论均带实测数字与 `file:line` 锚点。
-> **状态**：**仅诊断 + 方案设计，未实施**（引擎侧 A1 已落地并交付）。
+> **状态**：**方案 A 已实施并发布**（2026-10-19，见下「实施结果」）；B/C/D/E 未动。
 > **上游证据**：`DECISIONS.md §2026-10-19-goalnn-a1-global-fire-facing-and-god-gates-retired` ·
 > `plan/nn-capability-upgrade.plan.md §3-A1` · 实测语料 `tmp/a1-before-hard.json` / `tmp/a1-after-hard.json`
 > （复算脚本 `tmp/a1-hard-diff.ts`）· `docs/god-ai-tuning.progress.md` 顶部纪元变更块。
 > **下游产出**：God-AI 调参腿（本 plan 落地后再开）。
+
+### 实施结果（方案 A，2026-10-19）
+
+- 落点：`src/ai/god/turn-gate.ts`（`turnWillCommit`）+ `GodAIInput.isFiring()` 单点上闸；
+  参数 `turnCommitFireGate` 默认 **1**。**未**按本文原案逐点改 45 处 `_fire =`（漏点风险），
+  闸放在唯一 choke point 上，决策语义/分支计数不变。
+- hard 35×20 配对（CRN）：**Δscore +0.0964 ± 0.0162（t=5.94）**，SUITE 0.4189 → **0.5112**，
+  算术 0.4938 → **0.5912**，胜率 58.7% → **71.0%**；6 关显著改善、0 关显著倒退 ⇒ **回收缺口 65%**。
+- 机制读数：偏弹率 27.4% → 0%，开火量 −5%；被拦 episode 延迟 p50 4 拍 / p90 10 拍
+  ⇒ **残余缺口主因 = 1..k 拍等待延迟**，下一步优先 **方案 D（提前量）**，其次 **方案 C**。
+- 60-seed 三难度：hard 0.5246/74% · classic 0.6941/87% · chaos 0.5048/71%（A1 后：0.4123/58% · 0.6421/83% · 0.3786/53%）。
+- 决策：`DECISIONS.md §2026-10-19-godai-a2-committed-facing-fire-gate`。
 
 ---
 

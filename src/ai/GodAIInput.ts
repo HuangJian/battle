@@ -15,6 +15,7 @@ import {
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
 import { newStuckTrack, type StuckTrack } from './god/stuck-track'
+import { turnWillCommit } from './god/turn-gate'
 import type { ActionIntent } from './god/StrategyPlanner'
 import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
@@ -1134,6 +1135,18 @@ export class GodAIInput implements InputLike {
 
   isFiring(): boolean {
     if (!this._thought) this.think()
+    if (!this._fire) return false
+    // A2 (plan/godai-post-a1-retune.plan.md §3.1): the single choke point for
+    // every candidate's fire decision. After A1 a shot always leaves along the
+    // COMMITTED facing, so firing on a tick whose turn gets rejected by the
+    // turn cooldown spends a bullet in the OLD lane. Suppress that shot here
+    // (decisions stay untouched, so branch counters / telemetry still reflect
+    // the AI's intent); the turn commits 1..k ticks later and the shot goes
+    // out then. See `god/turn-gate.ts` for why the predicate is exact.
+    if (this.params.turnCommitFireGate > 0) {
+      const p = this.controlledTank(this.world)
+      if (!turnWillCommit(this.world, p, this._moveDir)) return false
+    }
     return this._fire
   }
 

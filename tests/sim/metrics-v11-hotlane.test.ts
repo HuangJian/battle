@@ -348,10 +348,14 @@ describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
 })
 
 describe('评估链金标（god 确定性策略；两列非零）', () => {
+  // ⚠ A2 重标（2026-10-19，plan/godai-post-a1-retune.plan.md §3.1）：
+  // `turnCommitFireGate=1` 让 God-AI 不再白耗偏弹 ⇒ 同一 (stage, seed) 又是另一局，
+  // `near`/`lane` 全部重标（同 A1 的换局纪律）。**判据结构不变**：仍要求两列非零。
+  // 数值为 2026-10-19 实测（确定性：同 seed 两跑逐值相同）。
   const cases = [
-    { stage: 0, seed: 9, near: 119, lane: 29 },
-    { stage: 0, seed: 5, near: 64, lane: 201 },
-    { stage: 1, seed: 6, near: 236, lane: 270 },
+    { stage: 0, seed: 9, near: 126, lane: 281 },
+    { stage: 0, seed: 5, near: 108, lane: 82 },
+    { stage: 1, seed: 6, near: 352, lane: 102 },
   ] as const
   for (const c of cases) {
     it(`stage ${c.stage} seed ${c.seed}：near=${c.near} / lane=${c.lane}`, () => {

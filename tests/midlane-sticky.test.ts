@@ -27,11 +27,13 @@ import { START_LIVES } from '../src/constants'
 // to the lane point and holds through the whole drill.
 // ================================================================
 
-function runSeed10(params: Partial<typeof DEFAULT_GOD_AI_PARAMS>): {
+function runRiverbed(
+  seed: number,
+  params: Partial<typeof DEFAULT_GOD_AI_PARAMS>,
+): {
   outcome: string
   terminalTick: number
 } {
-  const seed = 10
   const difficulty = 'hard'
   const world = new World()
   world.rng.reseed(seed)
@@ -63,21 +65,25 @@ function runSeed10(params: Partial<typeof DEFAULT_GOD_AI_PARAMS>): {
 }
 
 describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
-  it('baseline (sticky=0): seed 10 loses — reproduces the drill base death', () => {
+  // ⚠ A2 重标（2026-10-19，plan/godai-post-a1-retune.plan.md §3.1）：
+  // `turnCommitFireGate=1` 改变了 God-AI 的每一局 ⇒ **原 seed 10 在 sticky=0 下
+  // 也能过关**（开局不再白耗偏弹，抢在钻击前压死了车道敌人），本用例的
+  // 「sticky=0 ⇒ 输」前提消失。按 A1 的换局纪律**换 seed 而不改判据**：seed 7 上
+  // sticky=0 仍于 tick 1696 失守、sticky=90 过关（tick 6953）——机制语义不变，
+  // 只是同一关的另一局。换局后顺手**复活**原本被 A1 跳过的 sticky=90 用例。
+  const SEED = 7
+
+  it('baseline (sticky=0): seed 7 loses — reproduces the drill base death', () => {
     // Pin sticky OFF explicitly: the shipped default is now 90 (hard/chaos),
     // which is exactly the fix under test. At 0 the drill chews the ring, the
     // fatal bullet wins the race — this documents the bug the sticky fixes.
-    const r = runSeed10({ midLaneStickyTicks: 0 })
+    const r = runRiverbed(SEED, { midLaneStickyTicks: 0 })
     expect(r.outcome).toBe('gameover')
     expect(r.terminalTick).toBeLessThan(10000)
   })
 
-  // DISABLED (2026-10-19): A1 (global fire-direction fix) changed God-AI
-  // behaviour on hard; this seed no longer clears, so the §164 sticky benefit no
-  // longer holds here. The old expectation was a God-AI performance guard
-  // measured on the pre-A1 (side-shot) mechanic — retired per user directive.
-  it.skip('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
-    const r = runSeed10({ midLaneStickyTicks: 90 })
+  it('sticky=90 (shipped default): seed 7 clears — the player commits to the lane point', () => {
+    const r = runRiverbed(SEED, { midLaneStickyTicks: 90 })
     expect(r.outcome).toBe('stageclear')
   })
 })
