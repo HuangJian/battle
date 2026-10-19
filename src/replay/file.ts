@@ -371,6 +371,15 @@ function reconcileSnapshotStage(built: Replay): void {
   }
 }
 
+/**
+ * True when `name` looks like a .replay artifact (case-insensitive).
+ * Shared by the file picker, the Replay Browser and the window-level
+ * drag-and-drop entry point so they all accept exactly the same names.
+ */
+export function isReplayFilename(name: string): boolean {
+  return name.toLowerCase().endsWith('.replay')
+}
+
 // ---- Filename builder ----
 
 export interface FilenameParts {

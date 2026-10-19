@@ -1996,6 +1996,41 @@ body.theme-modern .ui-menu {
 }
 
 /* ================================================================
+   Replay drag & drop overlay
+   Dropping a .replay file anywhere on the game window plays it
+   immediately, so the hint is a viewport-wide drop target.
+   ================================================================ */
+.replay-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.replay-drop-overlay.active {
+  display: flex;
+}
+
+.replay-drop-card {
+  padding: 22px 32px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--theme-text-primary);
+  background: var(--theme-panel-bg);
+  border: 2px dashed var(--theme-accent-primary);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px var(--theme-panel-shadow);
+}
+
+/* ================================================================
    Performance Observatory (Alt+D dev overlay)
    Fixed top-right, semi-transparent dark panel — never obscures the
    battle field. Read-only debug HUD; not drawn on the canvas.

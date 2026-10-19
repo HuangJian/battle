@@ -1,4 +1,5 @@
 import type { Replay, ReplayID, ReplayType } from '../../replay/types'
+import { isReplayFilename } from '../../replay/file'
 import { t } from '../../i18n'
 import { formatBytes, formatCreated } from './helpers'
 import { localizedStageName } from '../../config/stages'
@@ -263,7 +264,7 @@ export class ReplayBrowser {
       dragCount = 0
       overlay.style.display = 'none'
       for (const file of e.dataTransfer?.files ?? []) {
-        if (file.name.endsWith('.replay')) this.importFile(file)
+        if (isReplayFilename(file.name)) this.importFile(file)
       }
     })
   }

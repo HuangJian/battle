@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'bun:test'
-import { serializeReplayFile, parseReplayFile, buildReplayFilename } from '../src/replay/file'
+import {
+  serializeReplayFile,
+  parseReplayFile,
+  buildReplayFilename,
+  isReplayFilename,
+} from '../src/replay/file'
 import { GAME_VERSION } from '../src/snapshot/config'
 import { FRAME_SCHEMA_VERSION, FRAME_SCHEMA_V1 } from '../src/replay/config'
 import { packFrames } from '../src/replay/pack'
@@ -249,6 +254,27 @@ describe('Replay file format round-trip', () => {
     const milestones = Math.floor(oneKill / SCORE_DROP_INTERVAL)
     expect(levelFactor(stageIndex)).toBeLessThan(100)
     expect(milestones).toBeLessThan(100)
+  })
+})
+
+// ============================================================
+// isReplayFilename (drag & drop / picker gate)
+// ============================================================
+
+describe('isReplayFilename', () => {
+  it('accepts generated replay filenames', () => {
+    expect(isReplayFilename('classic-s01-clear-l3-t230-seed123.replay')).toBe(true)
+  })
+
+  it('accepts the extension case-insensitively', () => {
+    expect(isReplayFilename('HARD-S12-DIED.REPLAY')).toBe(true)
+  })
+
+  it('rejects files without the .replay extension', () => {
+    expect(isReplayFilename('replay')).toBe(false)
+    expect(isReplayFilename('foo.replay.json')).toBe(false)
+    expect(isReplayFilename('notification.replay.bak')).toBe(false)
+    expect(isReplayFilename('')).toBe(false)
   })
 })
 

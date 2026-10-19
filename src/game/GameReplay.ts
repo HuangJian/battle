@@ -10,7 +10,12 @@ import type { PlaybackSpeed } from '../replay/PlaybackController'
 import { ReplayInput } from '../replay/ReplayInput'
 import type { Replay, ReplayType } from '../replay/types'
 import { GAME_VERSION } from '../snapshot/config'
-import { serializeReplayFile, buildReplayFilename } from '../replay/file'
+import {
+  serializeReplayFile,
+  parseReplayFile,
+  buildReplayFilename,
+  isReplayFilename,
+} from '../replay/file'
 import { REPLAY_HASH_INTERVAL } from '../replay/config'
 import { SEED_HASH } from '../constants'
 import { cloneWorld, restoreWorld } from '../snapshot/WorldSerializer'
@@ -462,6 +467,8 @@ export class ReplayController {
   wireReplayUI(): void {
     const ui = this.g.presentation.ui
 
+    this.wireWindowReplayDrop()
+
     ui.replayBrowser.init({
       getReplays: () => this.g.replays.getAll(),
       onPlay: (id) => {
@@ -597,27 +604,106 @@ export class ReplayController {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = '.replay'
-    input.addEventListener('change', async () => {
+    input.addEventListener('change', () => {
       const file = input.files?.[0]
       if (!file) return
-      try {
-        const text = await file.text()
-        const { parseReplayFile } = await import('../replay/file')
-        const result = parseReplayFile(text)
-        if ('error' in result) {
-          this.g.presentation.ui.notify(
-            t('toast.replayParseError', { error: result.error }),
-            'warn',
-          )
-          return
-        }
-        this.startPlayback(result.replay)
-      } catch (err) {
-        this.g.presentation.ui.notify(t('toast.replayReadError'), 'warn')
-        console.warn('[replay] local load error:', err)
-      }
+      void this.playLocalReplayFile(file)
     })
     input.click()
+  }
+
+  /**
+   * Window-level drag & drop: dropping a .replay file anywhere on the game
+   * window plays it immediately (no need to open the Replay Browser first).
+   *
+   * The Replay Browser panel owns drops aimed at itself — that path imports
+   * the file into the library — so this handler stands down while it is open.
+   * `dragover`/`drop` are always default-prevented, otherwise the browser
+   * navigates away to the dropped file instead.
+   */
+  private wireWindowReplayDrop(): void {
+    const ui = this.g.presentation.ui
+
+    const overlay = document.createElement('div')
+    overlay.className = 'replay-drop-overlay'
+    const card = document.createElement('div')
+    card.className = 'replay-drop-card'
+    overlay.appendChild(card)
+    document.body.appendChild(overlay)
+
+    const hasFiles = (e: DragEvent): boolean => e.dataTransfer?.types.includes('Files') ?? false
+    const hide = (): void => overlay.classList.remove('active')
+    const show = (): void => {
+      card.textContent = t('browser.replay.dropPlayHint')
+      overlay.classList.add('active')
+    }
+
+    // dragenter/dragleave fire for every child element, so a boolean flag
+    // would flicker. Count entries and only hide when the counter reaches 0.
+    let depth = 0
+    document.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      depth++
+      if (!ui.replayBrowser.isOpen()) show()
+    })
+    document.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return
+      // Always block the browser's default "navigate to the dropped file".
+      e.preventDefault()
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = ui.replayBrowser.isOpen() ? 'none' : 'copy'
+      }
+    })
+    document.addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return
+      depth = Math.max(0, depth - 1)
+      if (depth === 0) hide()
+    })
+    document.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      depth = 0
+      hide()
+      // The Replay Browser imports drops that land on its own panel.
+      if (ui.replayBrowser.isOpen()) return
+      const file = this.pickReplayFile(e.dataTransfer?.files)
+      if (!file) {
+        ui.notify(t('toast.replayDropInvalid'), 'warn')
+        return
+      }
+      void this.playLocalReplayFile(file)
+    })
+    // Dragging out of the window never delivers the final dragleave.
+    window.addEventListener('blur', () => {
+      depth = 0
+      hide()
+    })
+  }
+
+  /** First .replay file in a drag payload / picker selection, or null. */
+  private pickReplayFile(files: FileList | null | undefined): File | null {
+    if (!files) return null
+    for (const file of files) {
+      if (isReplayFilename(file.name)) return file
+    }
+    return null
+  }
+
+  /** Parse and play a local .replay file (shared by picker and drag-drop). */
+  private async playLocalReplayFile(file: File): Promise<void> {
+    try {
+      const text = await file.text()
+      const result = parseReplayFile(text)
+      if ('error' in result) {
+        this.g.presentation.ui.notify(t('toast.replayParseError', { error: result.error }), 'warn')
+        return
+      }
+      this.startPlayback(result.replay)
+    } catch (err) {
+      this.g.presentation.ui.notify(t('toast.replayReadError'), 'warn')
+      console.warn('[replay] local load error:', err)
+    }
   }
 
   /** Open the Replay Browser (Control Center button). */
