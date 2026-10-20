@@ -331,20 +331,31 @@ export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
   )
 }
 
-/** 一段 job 引用的文本：`§<课>:it<N>`；`it` 不可知 ⇒ `it?`；课解析不出 ⇒ `?:it<N>`。
+/** 一段 job 引用的文本：`<课>:it<N>`；`it` 不可知 ⇒ `it?`；课解析不出 ⇒ `?:it<N>`。
  *
- *  纯函数、导出以便单测（与 `fmtShare` 同规）——三段共用同一个形状，不各拼一遍。 */
+ *  纯函数、导出以便单测（与 `fmtShare` 同规）——三段共用同一个形状，不各拼一遍。
+ *  ★ 2026-10-20（用户口径）：**去掉 `§` 前缀**——它原是给引用加个「这是引用」的眼色，
+ *    但渲染出来是一串 `计算中§y26-null:it94 已下载§y26-shotmix:it98`，`§` 读起来像坏字符。
+ *    改由**版式**承担这件事：标签（淡底小签）+ 引用（等宽胶囊）各占各的格。 */
 export function jobRefText(r: PpoJobRef): string {
-  return `§${r.course || '?'}:${r.it == null ? 'it?' : `it${r.it}`}`
+  return `${r.course || '?'}:${r.it == null ? 'it?' : `it${r.it}`}`
 }
 
-/** 段（计算中 / 已下载 / 下载中）：**空段整段不渲染**（不是渲染一个空标题）。 */
+/** 段（计算中 / 已下载 / 下载中）：**空段整段不渲染**（不是渲染一个空标题）。
+ *
+ *  ★ 2026-10-20（用户口径「给这一行内容应用上合理样式」）：段内**标签与引用分格**——
+ *  标签是淡底小签、引用是等宽胶囊。此前两者同字号同底色连排（`计算中§x:itN`），
+ *  一行三段时根本看不出「哪几个引用属于哪个标签」。 */
 function JobSeg({ label, refs, title }: { label: string; refs: PpoJobRef[]; title: string }) {
   if (refs.length === 0) return null
   return (
     <span className="tc-contrib-jobseg" title={title}>
-      <b>{label}</b>
-      {refs.map(jobRefText).join(',')}
+      <span className="tc-contrib-jobseg-label">{label}</span>
+      {refs.map((r, i) => (
+        <span className="tc-contrib-jobref" key={`${r.jobId}|${r.course}|${r.it}|${i}`}>
+          {jobRefText(r)}
+        </span>
+      ))}
     </span>
   )
 }
@@ -390,7 +401,7 @@ export function PpoWorkerRows({
             title="在工作中（hub 侧有活租约 / 持 live 接管 / 有已下好的软持有）"
           />
           <span className="tc-contrib-ppolive--name">{w.worker}</span>
-          <span className="tc-muted">{fmtShare(w.share)}</span>
+          <span className="tc-contrib-ppolive--share">{fmtShare(w.share)}</span>
           <JobSeg
             label="计算中"
             refs={w.computing}
@@ -418,7 +429,7 @@ export function PpoWorkerRows({
             </span>
           ) : null}
           {w.ageSec != null ? (
-            <span className="tc-muted tc-small" title="预取状态上报龄（hub 侧 TTL 60s）">
+            <span className="tc-contrib-ppolive--age" title="预取状态上报龄（hub 侧 TTL 60s）">
               {`${w.ageSec.toFixed(0)}s前`}
             </span>
           ) : null}

@@ -3749,7 +3749,7 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
 }
 /* ── 每台工作盘**此刻**在干什么（2026-10-09，plan/dashboard-ppo-live-rows）──
-   汇总行（`.tc-contrib-ppobrief`）下面逐台一行：● 名字 份额 计算中§… 已下载§… 下载中§…
+   汇总行（`.tc-contrib-ppobrief`）下面逐台一行：● 名字 份额 [计算中][课:itN] [已下载][课:itN] …
    同样 `flex-basis:100%`：`.tc-nodes` 是 pill 行，不加这条每行会被当成胶囊挤到行尾。 */
 .tc-contrib-ppolive {
   flex: 0 0 100%;
@@ -3770,14 +3770,47 @@ a.tc-btn {
 /* 名字用等宽字：对齐后一眼能比出「哪台在下、哪台在算」。
    ⚠ 字体栈**写显式**、不引 `--mono`：那个 token 是个**颜色**（`#4b5563`），`var()` 进来
    是非法 font-family（实测：`.tc-contrib-legend` 那一行就被静默丢弃了）。 */
-.tc-contrib-ppolive--name,
-.tc-contrib-jobseg {
+.tc-contrib-ppolive--name {
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-weight: 500;
 }
-/* 段：`计算中§课:itN`——标签加粗、引用等宽，段内逗号连接（不换行拆段）。 */
+/* 份额：等宽数字（多行时百分比对齐）；比名字弱一档。 */
+.tc-contrib-ppolive--share {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* 上报龄：与前面的「在干什么」之间给一道细竖线，视线不必再回读（它属于 worker，不属于某段）。 */
+.tc-contrib-ppolive--age {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--line);
+}
+/* 段：**标签与引用分格**（2026-10-20 用户口径「给这一行内容应用上合理样式」）。
+   此前标签加粗、引用同字号连排（`计算中§课:itN`），一行三段时看不出「哪几个引用属于哪个标签」。
+   现在：标签 = 淡底小签（正文字体），引用 = 等宽描边胶囊；段与段之间靠 flex gap 断开。 */
 .tc-contrib-jobseg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
   white-space: nowrap;
   color: var(--muted);
+}
+.tc-contrib-jobseg-label {
+  padding: 0 6px;
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+.tc-contrib-jobref {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--mono);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums;
 }
 /* 「自主」徽标（文案与节点页 WorkerRegistry 同一枚，不新造词）。 */
 .tc-contrib-badge--auto {

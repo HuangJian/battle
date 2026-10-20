@@ -344,9 +344,34 @@ describe('limitLiveToCourses（三段只在训课程，用户 2026-10-10）', ()
 
 describe('PpoWorkerRows / jobRefText', () => {
   it('引用文本：缺 course ⇒ `?`，缺 it ⇒ `it?`（都不编数）', () => {
-    expect(jobRefText(ref(J1, 'x23-cm2', 121))).toBe('§x23-cm2:it121')
-    expect(jobRefText(ref(J1, '', 121))).toBe('§?:it121')
-    expect(jobRefText(ref(J1, 'x23-cm2', null))).toBe('§x23-cm2:it?')
+    expect(jobRefText(ref(J1, 'x23-cm2', 121))).toBe('x23-cm2:it121')
+    expect(jobRefText(ref(J1, '', 121))).toBe('?:it121')
+    expect(jobRefText(ref(J1, 'x23-cm2', null))).toBe('x23-cm2:it?')
+  })
+
+  it('★ 不带 `§` 前缀（2026-10-20 用户口径：`§` 读起来像坏字符）', () => {
+    expect(jobRefText(ref(J1, 'x23-cm2', 121))).not.toContain('§')
+  })
+
+  it('★ 标签与引用分格（`tc-contrib-jobseg-label` / `tc-contrib-jobref`）', () => {
+    const html = renderToString(
+      h(PpoWorkerRows, {
+        live: [
+          {
+            worker: 'kaggle-c',
+            share: 0.23,
+            autonomous: false,
+            ageSec: 4,
+            computing: [ref(J1, 'x23-cm2', 121)],
+            held: [ref(J2, 'x23-cm0', 119)],
+            dl: [],
+          },
+        ],
+      }),
+    )
+    expect(html).toContain('tc-contrib-jobseg-label')
+    expect(html).toContain('tc-contrib-jobref')
+    expect(html).not.toContain('§')
   })
 
   it('空数组 / null ⇒ 一点都不渲染（无空区块）', () => {
@@ -390,8 +415,8 @@ describe('PpoWorkerRows / jobRefText', () => {
         trainingCourses: ['x24-stack'],
       }),
     )
-    expect(html).toContain('§x24-stack:it110')
-    expect(html).not.toContain('§x20-steady')
+    expect(html).toContain('x24-stack:it110')
+    expect(html).not.toContain('x20-steady')
   })
 
   it('接线：app.tsx 同时透传 live 与 trainingCourses（少一个 ⇒ 裁剪失效或整块不画）', () => {
@@ -427,14 +452,14 @@ describe('PpoWorkerRows / jobRefText', () => {
     )
     expect(html).toContain('kaggle-c')
     expect(html).toContain('23.0%')
-    expect(html).toContain('§x23-cm2:it121')
-    expect(html).toContain('§x23-cm0:it119')
+    expect(html).toContain('x23-cm2:it121')
+    expect(html).toContain('x23-cm0:it119')
     expect(html).not.toContain('下载中') // 空段：整段不渲染
     expect(html).toContain('aistudio-c')
     expect(html).toContain('自主')
     // 自主盘的轮次是**派生读数**：这里没有任何已补传产物 ⇒ `it?`（不编 0）；
     // course 解析不出时的 `?:itN` 形态由上面的 `jobRefText` 用例单独钉。
-    expect(html).toContain('§x23-cm2:it?')
+    expect(html).toContain('x23-cm2:it?')
     expect(html).toContain('—') // 无贡献的机器：份额「—」而不是 0%
   })
 })
