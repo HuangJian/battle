@@ -29,6 +29,15 @@ export interface PathConstraints {
    */
   breakBrick?: boolean
   /**
+   * 坦克墙（机制修复 2026-10-20）：敌车占据的格子不是「不可通行」，而是「可击破的墙」——
+   * 给这些格加一份击破代价（cells），A* 就在「绕远」与「打穿」之间按 tick 比价。
+   * 实测缺陷：A* 只算地形，路径穿过敌车格后顶牛 **0.43% 的 tick（24 拍/局）**。
+   * 0 = OFF（byte-identical）。
+   */
+  enemyCellCost?: number
+  /** 敌车中心格列表（与 blockedCell 同约定：±1 视为 footprint）。 */
+  enemyCells?: readonly { col: number; row: number }[]
+  /**
    * §69: Per-cell threat cost array (GRID*GRID Float64Array). When provided,
    * each cell's threat cost is added to the A* step cost, making the pathfinder
    * naturally prefer routes that avoid cells where enemy bullets are expected
@@ -375,6 +384,23 @@ function pfPop(): number {
  * is optimal (shortest) with Manhattan-distance heuristic on a 4-connected
  * grid.
  */
+/**
+ * 坦克墙代价：敌车 footprint（中心格 ±1）上的格子额外计价。
+ * 纯查表、无分配；敌人 ≤6，线性扫描足够便宜（nav 结果按 60 拍缓存）。
+ */
+function enemyCostAt(
+  cells: readonly { col: number; row: number }[],
+  col: number,
+  row: number,
+  cost: number,
+): number {
+  for (let i = 0; i < cells.length; i++) {
+    const c = cells[i]
+    if (Math.abs(col - c.col) <= 1 && Math.abs(row - c.row) <= 1) return cost
+  }
+  return 0
+}
+
 export function findPath(
   tileMap: TileMap,
   from: Cell,
@@ -393,6 +419,8 @@ export function findPath(
     // §nav-cost 3.3: fire stop cost for brick edges.
     const brickStopCost = constraints?.brickStopCost ?? 0
     // §nav-cost 3.3: tank's current facing direction (for start-cell turn cost).
+    const enemyCellCost = constraints?.enemyCellCost ?? 0
+    const enemyCells = constraints?.enemyCells
     const startDir = constraints?.startDir
     const startDirIdx = startDir
       ? startDir === 'up'
@@ -513,7 +541,9 @@ export function findPath(
           const st = state[nk]
           if (st === g2c) continue // already closed
           // stepCost=1 in this branch (breakBrick=false). §69: add threat cost.
-          const tentativeG = gCur + 1 + (threatCosts ? threatCosts[nk] : 0)
+          const tankC =
+            enemyCellCost > 0 && enemyCells ? enemyCostAt(enemyCells, nc, nr, enemyCellCost) : 0
+          const tentativeG = gCur + 1 + tankC + (threatCosts ? threatCosts[nk] : 0)
           // `fresh` == the old `gScore[nk] === Infinity` case: a cell never
           // relaxed this call always accepts the first relaxation.
           const fresh = st < g2
@@ -622,7 +652,9 @@ export function findPath(
             }
           }
           // §69: add threat cost.
-          const tentativeG = gCur + cost + (threatCosts ? threatCosts[nk] : 0)
+          const tankC2 =
+            enemyCellCost > 0 && enemyCells ? enemyCostAt(enemyCells, nc, nr, enemyCellCost) : 0
+          const tentativeG = gCur + cost + tankC2 + (threatCosts ? threatCosts[nk] : 0)
           // `fresh` == the old `gScore[nk] === Infinity` case (see the
           // breakBrick=false branch).
           const fresh = st < g2

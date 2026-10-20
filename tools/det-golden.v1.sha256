@@ -1,11 +1,10 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-10-20 @ 机制修复（DECISIONS §2026-10-20-godai-mechfix-carvefire）。
-#       ① carveFire 的 `bs.steel` 是整条射线判定 ⇒ 远处有钢就不敢打眼前的砖（1.59% 的
-#          tick 命中，≈87 拍/局）→ 改为「先遇到砖就放行」（brickBeforeSteelImpl）。
-#       ② 道具候选收尾改用 carveFire（路被砖挡就破砖，原来原地打转）。
-#       两处都是机制修复（不是调参）：行为变了 ⇒ 签名全变（上一钉 ed6dc0f9…，A3 纪元）。
-#       hard 35×60：SUITE 0.5748 → 0.5793、胜率 79% → 80%、Battlement 0.339 → 0.479。
-#       新纪元 60-seed 基线（eval-suite v7）：hard 0.5791/79% · classic 0.7299/89% · chaos 0.5449/76%。
+# 采集：2026-10-20 @ 坦克墙（DECISIONS §2026-10-20-godai-mechfix-tankwall）。
+#       `navEnemyCellCost=2`：敌车 footprint 在 A* 里按「可击破的墙」计价，不再当作不存在。
+#       缺陷实测：路径穿过敌车格后顶牛 0.43% 的 tick（24 拍/局，81% 在 navigate）。
+#       hard 35×60：SUITE 0.5791 → 0.5825（1625/2100 局相同，胜率不变）⇒ 机制正确且不伤人。
+#       新纪元 60-seed 基线（eval-suite v7）：hard 0.5828/79% · classic 0.7276/89% · chaos 0.5451/76%。
+#       上一钉 820d25be…（carveFire + powerup carve 纪元）。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-820d25bee309d40b66cc05809788c120725acc672ba0719ac9822d222095bd8d
+ba02a9eb3b50e41f6015c30b4adaa2234c02498dc87faf0e31c0bc8e67e75989

@@ -11691,3 +11691,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`bun run check` **2594 pass / 0 fail** · `build` 过 · `freeze:check` 绿。
 - **未做的同类修复（待下一轮）**：坦克墙（A* 把敌坦克当可击破的墙）、planCell 语义
   （shift 检测用 floor、重规划起点用 round）、dig-compare（绕路 vs 挖砖的 tick 级比价）。
+
+## §2026-10-20-godai-mechfix-tankwall — 坦克墙（机制修复，已发货）+ planCell 与 dig-compare 的核查结论
+
+> 承接 §2026-10-20-godai-mechfix-carvefire 的机制修复清单（#1 坦克墙 / #2 planCell / #3 dig-compare）。
+
+- **#1 坦克墙（SHIPPED，`navEnemyCellCost=2`）**：A* 只算地形，**完全不知道敌车存在** ⇒ 路径
+  穿过敌车格后玩家被顶住。**本树实测**（35 关 × 6 seed）：**0.43% 的全部 tick（24 拍/局）**
+  请求方向的前方格被敌车 footprint 覆盖且地形可走；分支 navigate 4165 · t2a 367 · aggressive 288；
+  其中连续 ≥5 拍的「原地顶牛」累计 664 拍。
+  **修复**：`PathConstraints.enemyCells/enemyCellCost` —— 敌车 footprint 按**可击破的墙**计价
+  （每格 +2 cells），A* 因此在「绕远」与「打穿」之间按 tick 比价；两条 A* 路径（corridor / dig）
+  都带上。
+  **后果（hard 35×60 配对）**：SUITE **0.5791 → 0.5825**、胜率不变、**1625/2100 局完全相同**
+  （只有 ~23% 的局受影响），**0 关显著倒退**。⇒ 机制正确且不伤人，开为默认。
+  新纪元 60-seed：hard **0.5828/79%** · classic **0.7276/89%** · chaos **0.5451/76%**。
+- **#2 planCell 语义（量到缺陷，但修复被证否 → 回滚）**：本树 `navigateTowardsImpl` 的缓存键用
+  `playerCell()`（round），车身跨半格就翻格。**实测 round 翻格 321.9 次/局，其中 99.3%
+  （319.8 次/局）是 floor 未变的「过半格假翻格」**，其中 11.8 次/局紧接着首步反向。
+  按 v2 语义改（**缓存键用 floor、A* 起点仍用 round**）后 **hard 60-seed 0.5791 → 0.5556（−0.024）**。
+  **下降根因**：本树的 `navigateTowards` **只返回首步**（没有带索引的 path following）⇒ 缓存键
+  比 A* 起点更"稳"时，返回的首步会落后一格 —— 这正是对方 v1 踩过的坑（其 v1 −7.1pp）。
+  对方 v2（shift 用 floor + 重规划起点用 round）**净收益 ≈ 0**（其自述 −0.15pp）。
+  **结论**：缺陷真实但不是"键用错格"，而是"没有路径跟随"；正确修法是引入 `_navPath + index`、
+  按 floor 推进索引，属结构性改动且**预期收益≈0** ⇒ 暂不做，已回滚（golden 不受影响）。
+- **#3 dig-compare（无需移植）**：本树 A* 已有 `navBrickStopCost: 2`（砖边按格计价）+ fire-stop
+  模型（`navFireStopModel`），绕路与挖砖本来就在同一 tick 量纲上比价 ⇒ 对方那条属于"补齐口径"，
+  本树不存在该缺陷。
+- **门禁**：`bun run check` **2609 pass / 0 fail** · `build` 过 · `freeze:check` 绿（`ba02a9eb…`）。
