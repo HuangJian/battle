@@ -161,14 +161,10 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
         // 但这一拍根本打不出子弹 ⇒ 白转一次（12 拍锁定 + 站桩）。审计：这类
         // 「navigate→t2a→navigate」切换 1568 次/700 局，是"无用转身"的头号来源。
         // 关掉后 t2a 在冷却期直接不提交，方向盘留给 navigate。
-        // 0 = OFF（byte-identical）。
-        // 两档：
-        //  1 = 冷却期一律不提交；
-        //  2 = 只在「需要转身才能对准」时不提交（已经对准就允许站着等 —— 不产生
-        //      无用转身，还能保住开阔图上的站位；Oasis 在 1 档会掉 0.119）。
-        const readyMode = self.params.fireBranchRequiresReady
-        const fireReadyGate =
-          readyMode === 1 ? onCooldown : readyMode >= 2 && onCooldown && p.dir !== aimDir
+        // 用户定规（2026-10-20）：**开火冷却没到，开火策略不许生效**（无开关，固定生效）。
+        // 只约束**玩家坦克**（P1/P2）。护卫/盟友是独立的辅助 AI，其「挡道避让 + 恢复自主」
+        // 契约不归本规则管（tests/godai-guard.test.ts 锁定该行为）。
+        const fireReadyGate = onCooldown && p.kind === 'player'
         if (!campedTooLong && !outgunned && !fireReadyGate) {
           // ---- §49: 炮口相向分场景策略 ----
           // When an enemy faces the player, adapt per enemy type: ice skips,

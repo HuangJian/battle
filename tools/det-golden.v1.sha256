@@ -1,10 +1,12 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-10-20 @ 坦克墙（DECISIONS §2026-10-20-godai-mechfix-tankwall）。
-#       `navEnemyCellCost=2`：敌车 footprint 在 A* 里按「可击破的墙」计价，不再当作不存在。
-#       缺陷实测：路径穿过敌车格后顶牛 0.43% 的 tick（24 拍/局，81% 在 navigate）。
-#       hard 35×60：SUITE 0.5791 → 0.5825（1625/2100 局相同，胜率不变）⇒ 机制正确且不伤人。
-#       新纪元 60-seed 基线（eval-suite v7）：hard 0.5828/79% · classic 0.7276/89% · chaos 0.5451/76%。
-#       上一钉 820d25be…（carveFire + powerup carve 纪元）。
+# 采集：2026-10-20 @ 开火准入 + §164 sticky 重调（DECISIONS §mechfix-fire-admission）。
+#       ① 开火策略准入**固定生效、无开关**：冷却期内 t2a 不提交（只约束玩家坦克 P1/P2，
+#          护卫/盟友不受影响）。候选切换型无用转身 35.5 → 23.1（−35%）。
+#       ② 同纪元把 midLaneStickyTicks 90 → **0**（60-seed sweep 单调：0 0.5781 / 30 0.5747 /
+#          60 0.5686 / 90 0.5654）——开火准入后玩家不再蹲车道，sticky 反成负担。
+#       最终（三难度 × 60）：hard **0.5788/79%** · classic 0.6452/83% · chaos 0.5433/76%。
+#       相对上一钉 ba02a9eb（坦克墙）：hard −0.004（胜率不变）、classic −0.082（用户拍板接受）、
+#       chaos −0.002。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-ba02a9eb3b50e41f6015c30b4adaa2234c02498dc87faf0e31c0bc8e67e75989
+375a529f7e9076c815c838b0b9c9837642e5199bf3014ce1e1f9b06f0b610c50

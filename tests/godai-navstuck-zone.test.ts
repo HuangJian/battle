@@ -112,9 +112,10 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
       2400,
     )
     // Unfixed behavior: the pin runs far past the 180-tick escape threshold.
-    // §187 target blacklist (targetBlacklistStuckTicks=240) provides partial
-    // relief even when navStuckZone=0, reducing the pin from >600 to ~564.
-    expect(dwell).toBeGreaterThan(500)
+    // §187 target blacklist (targetBlacklistStuckTicks=240) reduced the pin
+    // from >600 to ~564. ⚠ 2026-10-20 开火准入纪元：t2a 冷却期不再提交后，
+    // 该 pin 进一步缩到 **422 拍**（仍远超 180 的逃逸阈值，所以 ON 档仍有意义）。
+    expect(dwell).toBeGreaterThan(400)
   })
 
   it('ON (navStuckZone 1 + window) bounds the dwell — the escape fires', () => {
@@ -123,8 +124,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // zone. Generous bound (well above 180, well below the 1200-tick pin):
     // a few extra ticks can pass before HUNT next evaluates after the
     // threshold is crossed, and re-pins are allowed as long as each one is
-    // bounded.
-    expect(dwell).toBeLessThan(500)
+    // bounded. 本纪元实测 OFF=422 / ON=**347**（开火准入已把 pin 缩短，两者差距收窄）。
+    expect(dwell).toBeLessThan(400)
   })
 
   it('ON bounds the dwell across several Battlement losing seeds', () => {
