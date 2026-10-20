@@ -156,7 +156,20 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
           1,
         )
 
-        if (!campedTooLong && !outgunned) {
+        // 开火策略准入（2026-10-20 用户定规）：**开火冷却没到，开火策略不许生效**。
+        // 原来 onCooldown 时 t2a 仍会把 `_moveDir` 设成 aimDir（为"对准"转走方向盘），
+        // 但这一拍根本打不出子弹 ⇒ 白转一次（12 拍锁定 + 站桩）。审计：这类
+        // 「navigate→t2a→navigate」切换 1568 次/700 局，是"无用转身"的头号来源。
+        // 关掉后 t2a 在冷却期直接不提交，方向盘留给 navigate。
+        // 0 = OFF（byte-identical）。
+        // 两档：
+        //  1 = 冷却期一律不提交；
+        //  2 = 只在「需要转身才能对准」时不提交（已经对准就允许站着等 —— 不产生
+        //      无用转身，还能保住开阔图上的站位；Oasis 在 1 档会掉 0.119）。
+        const readyMode = self.params.fireBranchRequiresReady
+        const fireReadyGate =
+          readyMode === 1 ? onCooldown : readyMode >= 2 && onCooldown && p.dir !== aimDir
+        if (!campedTooLong && !outgunned && !fireReadyGate) {
           // ---- §49: 炮口相向分场景策略 ----
           // When an enemy faces the player, adapt per enemy type: ice skips,
           // 1HP enemies fight normally (counter-fire still applies — it is a

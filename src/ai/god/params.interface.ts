@@ -1289,6 +1289,13 @@ export interface GodAIParams {
   turnCommitFireGate: number
 
   /**
+   * 开火策略准入（2026-10-20 用户定规）：**开火冷却没到，开火策略不许生效**。
+   * 冷却期内 t2a 不再提交（原来它会为"对准"把 `_moveDir` 设成 aimDir，白转一次），
+   * 方向盘留给 navigate。0 = OFF（byte-identical）。
+   */
+  fireBranchRequiresReady: number
+
+  /**
    * 坦克墙（机制修复 2026-10-20）：敌车格在 A* 里的额外代价（cells）。
    * 缺陷实测：A* 只算地形 ⇒ 路径穿过敌车格后顶牛 **0.43% 的 tick（24 拍/局）**，
    * 81% 发生在 navigate 分支。给敌车 footprint 计价后，规划器会在「绕远」与
