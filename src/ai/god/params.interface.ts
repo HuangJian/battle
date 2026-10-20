@@ -1289,6 +1289,14 @@ export interface GodAIParams {
   turnCommitFireGate: number
 
   /**
+   * 坦克墙（机制修复 2026-10-20）：敌车格在 A* 里的额外代价（cells）。
+   * 缺陷实测：A* 只算地形 ⇒ 路径穿过敌车格后顶牛 **0.43% 的 tick（24 拍/局）**，
+   * 81% 发生在 navigate 分支。给敌车 footprint 计价后，规划器会在「绕远」与
+   * 「打穿」之间按 tick 比价。0 = OFF（byte-identical）。
+   */
+  navEnemyCellCost: number
+
+  /**
    * A3 (turn economy): don't request a turn the cooldown will refuse.
    *
    * `applyTurnCooldown` reverts a refused turn AND sets `moving = false` — the

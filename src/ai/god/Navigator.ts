@@ -194,7 +194,28 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
 
   // Cache miss — recompute.
   // Try regular A* (corridors only) first.
-  const constraints = blkCell ? { blockedCell: blkCell } : undefined
+  // 坦克墙（机制修复 2026-10-20）：把敌车 footprint 计入 A* 代价（可击破的墙），
+  // 而不是当作不存在 —— 原来路径会穿过敌车格，玩家走一步被顶住（24 拍/局顶牛）。
+  const enemyCells: { col: number; row: number }[] = []
+  if (self.params.navEnemyCellCost > 0) {
+    const list = self._enemies.length > 0 ? self._enemies : w.tanks
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]
+      if (!t.alive || t.spawnTimer > 0) continue
+      if (t.id === p.id) continue
+      const tc = self.tankCell(t)
+      enemyCells.push({ col: tc.col, row: tc.row })
+    }
+  }
+  const constraints =
+    blkCell || enemyCells.length > 0
+      ? {
+          ...(blkCell ? { blockedCell: blkCell } : {}),
+          ...(enemyCells.length > 0
+            ? { enemyCells, enemyCellCost: self.params.navEnemyCellCost }
+            : {}),
+        }
+      : undefined
   let path = findPath(w.tileMap, playerCell, target, constraints)
 
   // P3.1: If no corridor path, try dig-through-brick path.
@@ -206,6 +227,7 @@ export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction |
     path = findPath(w.tileMap, playerCell, target, {
       breakBrick: true,
       ...(blkCell ? { blockedCell: blkCell } : {}),
+      ...(enemyCells.length > 0 ? { enemyCells, enemyCellCost: self.params.navEnemyCellCost } : {}),
       ...(self.params.navBaseRingMult > 0 ? { baseRingCosts: buildBaseRingCosts(self) } : {}),
       // NOTE: firecontrol model is gated by navBrickStopCost > 0 (the
       // flat/off master switch) — setting navFireStopModel:'firecontrol'
