@@ -88,11 +88,26 @@ export class PlayerSystem {
       if (firing && fireBefore) this.d.combat.tryFire(p)
       let turnAccepted = true
       if (dir !== null) {
+        // ★ 三个动作头**正交**，24 种组合全部合法（2026-10-20 用户裁定）：
+        //   `hold` 只管"前进 / 不前进"，`move` 只管"朝哪"，`fire` 只管"打不打、什么时机"。
+        //   `hold=1 + move=d` = **转向到 d 但不前进**（turn-only）；这里**没有**另一种
+        //   "hold 忽略 move" 的语义 —— 那会让 hold 与 move 不再正交（用户已否决）。
+        //
+        // ★ 冷却纪律：**不转向 ⇒ 不占冷却**（"不转向就不需要被限制"）。
+        //   判据用 `prevMoveDir`（**已提交**朝向），不是 `p.dir`（后者只是上一拍写进来的
+        //   **请求**，可能还没被接受 —— A1 用例正是 `p.dir='right'` 而 `prevMoveDir='up'`
+        //   的形状；比 `p.dir` 会让"被拒的转向"照样朝新方向开火）。
+        //
+        // 为什么这条纪律是必须的：`applyTurnCooldown` 在冷却期内会**回退朝向**并 halt
+        // （`tank.dir = prevMoveDir; tank.moving = false`）。若每一拍都调它，那么
+        // 「hold=1 + 保持朝向」这种纯粹"站着不动"的请求也会被 halt —— v6 的 move 头
+        // 没有 null 类，策略必须每拍给方向，所以它必须能靠"方向不变"free 掉冷却。
+        const turning = dir !== p.prevMoveDir
         p.dir = dir
         p.moving = !hold
-        // Turn-only (hold) skips step ⑦'s movement block, so adjudicate the
-        // cooldown here explicitly; otherwise hold would be free aiming.
-        turnAccepted = this.d.combat.applyTurnCooldown(p, w)
+        if (turning) {
+          turnAccepted = this.d.combat.applyTurnCooldown(p, w)
+        }
       } else {
         p.moving = false
       }

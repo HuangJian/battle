@@ -50,6 +50,7 @@ import type { ReplayType } from '../../src/replay/types'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { decodeMove } from '../../src/nn/action-space'
+import { decodeMove4 } from '../../src/nn/action-space-v6'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
@@ -147,9 +148,21 @@ const TELEMETRY_SAMPLE_TICKS = 6
 class ScriptedInput {
   moveDir: Direction | null = null
   firing = false
+  /** B1 v6（hold 头）：turn-only，不前进。legacy 恒 false。 */
+  hold = false
+  /** B1 v6（fire 头 3 值）：1 = 先打再走。legacy 恒 false。 */
+  fireBefore = false
+  private readonly v6: boolean
 
-  setAction(move: number, fire: number): void {
-    this.moveDir = decodeMove(move)
+  constructor(v6 = false) {
+    this.v6 = v6
+  }
+
+  setAction(move: number, fire: number, hold = 0): void {
+    // v6 的 move 是 0..3（up/down/left/right，**没有 STOP 类**）；legacy 是 0..4（0=STOP）。
+    this.moveDir = this.v6 ? decodeMove4(move) : decodeMove(move)
+    this.hold = this.v6 && hold === 1
+    this.fireBefore = this.v6 && fire === 1
     // Fire head v3 is 0/1/2 (1 = before turn, 2 = after turn): both are a
     // shot. `=== 1` would silently drop the 2 class once B1 lands.
     this.firing = fire !== 0
@@ -162,7 +175,16 @@ class ScriptedInput {
   isFiring(): boolean {
     return this.firing
   }
-
+  // legacy 时 `usesHoldFire3()` 返回 false ⇒ `SimulationPlayer` 走 legacy 分支。
+  isHolding(): boolean {
+    return this.hold
+  }
+  isFireBeforeTurn(): boolean {
+    return this.fireBefore
+  }
+  usesHoldFire3(): boolean {
+    return this.v6
+  }
   wasItemPressed(): false {
     return false
   }
@@ -174,6 +196,8 @@ class ScriptedInput {
   reset(): void {
     this.moveDir = null
     this.firing = false
+    this.hold = false
+    this.fireBefore = false
   }
 }
 
@@ -181,6 +205,9 @@ interface RolloutModel {
   forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
+  /** B1 v6 才有（权重带 `hold_head.*` ⇒ `usesHoldFire3` 为真时非空）。 */
+  readonly holdLogits?: Float32Array | null
+  readonly usesHoldFire3?: boolean
   readonly valueOut: Float32Array
 }
 
@@ -625,7 +652,11 @@ export function runEvalOne(
     policy === 'nn' || isGoalMasked
       ? (buildModelFromText(weightsText) as unknown as RolloutModel)
       : null
-  const scripted = new ScriptedInput()
+  // B1 v6 判据 = 权重（`usesHoldFire3`，即 `hold_head.*` 存在）：与 TS 推理 /
+  // export-rl-rollout / build_ppo 同一契约。它决定掩码宽度、move 的 decode（无 STOP 类）、
+  // 是否采第三头。
+  const v6 = model?.usesHoldFire3 === true
+  const scripted = new ScriptedInput(v6)
   let exec: IntentExecutor | GoalExecutor | GodAIInput | null = null
   if (isIntent) {
     exec = new IntentExecutor(world, {
@@ -805,7 +836,8 @@ export function runEvalOne(
             `[dbg] weightsSha=${createHash('sha256').update(weightsText).digest('hex').slice(0, 12)} move=[${Array.from(model!.moveLogits).map((x) => x.toFixed(2))}] fire=[${Array.from(model!.fireLogits).map((x) => x.toFixed(2))}]`,
           )
         }
-        const masks = computeMasks(world)
+        // v6：掩码 9 宽（move4/fire3/hold2）；legacy 7 宽（move5/fire2）。
+        const masks = computeMasks(world, v6)
         let mv = argmaxCat(model!.moveLogits, masks.move)
         if (isGoalMasked && goalSteering) {
           // 每 tick 先跑 God 全链（reflex 层 + 导航目标刷新）；eval 期可接受。
@@ -829,10 +861,14 @@ export function runEvalOne(
           }
         }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
-        scripted.setAction(mv, fr)
+        // v6 第三头（hold：0 advance / 1 turn-only）。legacy 没有这个头 ⇒ 恒 0。
+        const hd = v6 && model!.holdLogits ? argmaxCat(model!.holdLogits!, masks.hold) : 0
+        scripted.setAction(mv, fr, hd)
         moveHist[mv]++
         decisions++
-        if (mv === 0) curStopRun++
+        // 「没在前进」的判据随动作空间变（与 export-rl-rollout 的 stopHeld 同源）：
+        // legacy 是 move 0 = STOP；v6 的 move 0 是 **up**，不前进由 hold 位表达。
+        if (v6 ? hd === 1 : mv === 0) curStopRun++
         else {
           if (curStopRun > 0) stopRuns.push(curStopRun)
           curStopRun = 0

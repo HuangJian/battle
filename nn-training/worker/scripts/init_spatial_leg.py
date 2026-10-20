@@ -187,6 +187,35 @@ def _migrate_columns(
     return done
 
 
+def _scalar_delta_for(model: Any, params: dict[str, Any]) -> int:
+    """按**源 `fc.weight` 的真实行宽**推 scalar 段的列差（不写死 30→46）。
+
+    ★ 为什么必须自动推：`_SCALAR_DELTA = SCALAR_DIM - 30` 假设源是 v4 的 **s30**。
+    而 `y25-price` 是 v5 的 **s40**（`fc.weight [128,104]` = h64 + s40）⇒ 真实差是
+    **6** 而不是 16。照用 16 会把 104 列当"94 列"，`_migrate_columns` 的宽度校验会拒
+    （`fc.weight 旧列数 104 ≠ 预期 94`）—— 拦住了，但也意味着 s40/s46 系权重根本迁不了。
+    这与 `_NEW_EXTRA_START` 注释里警告的是同一类坑：**把某个历史版本的宽度写死**。
+
+    只对 `("drop", …)` 形态的 fc 生效（`drop0`/`segments` 的语义各自独立）。
+    """
+    old = params.get("fc.weight")
+    if old is None or getattr(old, "ndim", 0) != 2:
+        return _SCALAR_DELTA
+    old_cols = int(old.shape[1])
+    old_scalar = old_cols - int(model.h)
+    if old_scalar < 0:
+        raise SystemExit(
+            f"拒绝：源 fc.weight 行宽 {old_cols} < h={int(model.h)}（不是 {{{{hidden|scalars}}}} 布局）"
+        )
+    delta = SCALAR_DIM - old_scalar
+    if delta < 0:
+        raise SystemExit(
+            f"拒绝：源 scalar 段 {old_scalar} > SCALAR_DIM={SCALAR_DIM}"
+            "（本脚本只做**加列**迁移，不做降维）"
+        )
+    return delta
+
+
 def _migrate_action_heads(model: Any, params: dict[str, Any], *, gen: Any) -> list[str]:
     """B1 v6：把旧 5/2 动作头的**行**（输出类）搬进新 4/3/2 三头，返回已搬运的张量名。
 
@@ -228,27 +257,40 @@ def _migrate_action_heads(model: Any, params: dict[str, Any], *, gen: Any) -> li
 
     with torch.no_grad():
         head_in = model.move_head.weight.shape[1]
+        # 源头的**输入列宽**可能比新头窄（scalar 段 40→46 ⇒ pf 104→110）：
+        # 只拷前 `min(旧,新)` 列，余下 0.01 初始化。行数（输出类）必须精确对得上，
+        # 否则说明源根本不是 5/2 动作空间 ⇒ 整头随机（交给 missing 记账），不猜。
+        def _copy_rows(old_w: Any, new_w: Any, rows_map: list[tuple[int, int]]) -> bool:
+            if old_w is None or getattr(old_w, "ndim", 0) != 2:
+                return False
+            if int(old_w.shape[0]) != max(src for _, src in rows_map) + 1:
+                return False
+            cols = min(int(old_w.shape[1]), int(new_w.shape[1]))
+            for dst, src in rows_map:
+                new_w[dst, :cols] = old_w[src, :cols]
+            return True
 
         old_move_w = params.get("move_head.weight")
         old_move_b = params.get("move_head.bias")
-        if old_move_w is not None and tuple(old_move_w.shape) == (MOVE_DIM, head_in):
-            model.move_head.weight.copy_(old_move_w[1:MOVE_DIM])
+        # 行映射：新 0..3 ← 旧 1..4（丢掉旧 index 0 = STOP 类）
+        new_mw = torch.empty((MOVE4_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
+        if _copy_rows(old_move_w, new_mw, [(i, i + 1) for i in range(MOVE4_DIM)]):
+            model.move_head.weight.copy_(new_mw)
             if old_move_b is not None and tuple(old_move_b.shape) == (MOVE_DIM,):
                 model.move_head.bias.copy_(old_move_b[1:MOVE_DIM])
             moved.append("move_head")
         else:
-            # 源没有同形 5 列 ⇒ 整头保持 kaiming（由 `_init_weights` 给），
+            # 源没有 5 行 ⇒ 整头保持 kaiming（由 `_init_weights` 给），
             # 记进 `warmstart_missing` 由 S0-c 三态表裁决，不在这里抛。
             moved.append("move_head(random)")
 
         old_fire_w = params.get("fire_head.weight")
         old_fire_b = params.get("fire_head.bias")
-        if old_fire_w is not None and tuple(old_fire_w.shape) == (FIRE_DIM, head_in):
-            # 行 0 = none：直搬。行 1 = fireBefore：旧动作空间无法表达 ⇒ 保持 0.01
-            # 初始化（不是 0：全 0 会让这一行 logits 恒 0，与另两行不同量级）。
-            new_fw = torch.empty((FIRE3_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
-            new_fw[0].copy_(old_fire_w[0])
-            new_fw[2].copy_(old_fire_w[1])  # fireAfter ← 旧 firing
+        # 行映射：新 0(none) ← 旧 0；新 2(fireAfter) ← 旧 1(firing)；
+        # 新 1(fireBefore) 旧动作空间无对应 ⇒ 保持 0.01（不是 0：全 0 会让这一行
+        # logits 恒 0，与另两行不同量级）。
+        new_fw = torch.empty((FIRE3_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
+        if _copy_rows(old_fire_w, new_fw, [(0, 0), (2, 1)]):
             model.fire_head.weight.copy_(new_fw)
             if old_fire_b is not None and tuple(old_fire_b.shape) == (FIRE_DIM,):
                 new_fb = torch.zeros(FIRE3_DIM)
@@ -259,13 +301,49 @@ def _migrate_action_heads(model: Any, params: dict[str, Any], *, gen: Any) -> li
         else:
             moved.append("fire_head(random)")
 
-        # hold：旧动作空间里「转向但不前进」不可表达 ⇒ 整头 0.01 初始化
-        # （不是 0：见 fireBefore 同理）。
-        model.hold_head.weight.copy_(
-            torch.empty((HOLD_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
-        )
-        model.hold_head.bias.zero_()
-        moved.append("hold_head")
+        # hold 头 = 旧 move 头「STOP vs 方向」的二分类**重建**（2026-10-20 三次修正后的定论）。
+        #
+        # 前两次都错，且错法不同：
+        #  ① 整头 0.01 随机 ⇒ logits≈0 ⇒ argmax 恒落 advance ⇒「不会停」。
+        #  ② 只搬 STOP 行给 hold[1]（hold[0] 留噪声）⇒ 同类两类量级不可比 ⇒ 恒选 hold[1]
+        #     ⇒「几乎全程不动」（ladder 40 局 idle 6812/6891 = 99%，pass 0/40）。
+        #  ③ 对称搬运 hold[0]=−STOP, hold[1]=+STOP ⇒ 仍是**单独一行**的绝对值，
+        #     而旧 `argmax(5)` 的语义是 **STOP 与 4 个方向行比较**。
+        #     实测仍 1/40、idle 6972 ⇒ 绝对值搬不动决策边界。
+        #
+        # 正解：直接把「旧 move 头在做的那次 argmax」**降成二分类**：
+        #   hold[1] = STOP 行                      （"停"那一类的打分）
+        #   hold[0] = 4 个方向行的均值              （"走"那一类的打分基线）
+        # ⇒ `hold[1] > hold[0]` ⇔ 旧 argmax 会选 STOP，两行**同量级同分布**，
+        #   argmax 因此恢复旧策略的 STOP/走 边界（差异仅剩：v6 的 hold=1 允许转向）。
+        # 用均值而非 max：逐元素 max 无意义，均值与 logit 同量级且连续可微。
+        old_stop_w = None if old_move_w is None or old_move_w.ndim != 2 else old_move_w[0]
+        new_hw = torch.empty((HOLD_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
+        new_hb = torch.zeros(HOLD_DIM)
+        if old_stop_w is not None and int(old_stop_w.shape[0]) == head_in:
+            # mypy 收窄：`old_stop_w` 非 None 已蕴含 `old_move_w` 非 None 且 ndim==2
+            # （它是由上面那一行三元式从 old_move_w 里切出来的），但类型系统看不到这层关系。
+            assert old_move_w is not None
+            dir_rows = old_move_w[1:MOVE_DIM]  # 旧 4 个方向行（= v6 move 头拿到的那些）
+            mean_dir = dir_rows.mean(dim=0)
+            new_hw[1].copy_(old_stop_w)
+            new_hw[0].copy_(mean_dir)
+            if old_move_b is not None and tuple(old_move_b.shape) == (MOVE_DIM,):
+                new_hb[1] = old_move_b[0]
+                new_hb[0] = old_move_b[1:MOVE_DIM].mean()
+            # ★ hold 门限标定（2026-10-20，`tmp/diag-migrate.ts` 实测）：
+            # 旧 STOP 判据是 `STOP > **max**(4 方向)`，而线性头能表达的最接近形式是
+            # `STOP > **mean**(4 方向)` —— 因为 max ≥ mean，这个近似会让 hold **过于容易赢**。
+            # stage0/seed860001 实测：bias=0 时 hold 频率 **73.1%**，而旧 STOP 只有 **24.7%**
+            # （过度停顿 ⇒ freeze 下 pass 4/40）；bias=+2 加到 hold=0 侧 ⇒ hold 频率 **24.4%**
+            # 与旧 STOP 对齐、方向一致率 89.2%（bias=0 时只有 35.8%）。
+            # 这是**线性头无法精确表达 max 判据**的补偿项，不是拍脑袋调参。
+            new_hb[0] += 2.0
+            moved.append("hold_head(STOP|dir,b+2)")
+        else:
+            moved.append("hold_head(random)")
+        model.hold_head.weight.copy_(new_hw)
+        model.hold_head.bias.copy_(new_hb)
     return moved
 
 
@@ -327,6 +405,11 @@ def convert(
             )
     else:
         table = _MIGRATION_LEG_A if policy_extra else _MIGRATION_LEGACY
+    # fc.weight 的删列数按**源真实行宽**推（`_SCALAR_DELTA` 写死 30→46，s40 系会拒）。
+    delta = _scalar_delta_for(model, params)
+    ent = table.get("fc.weight")
+    if ent is not None and ent[0] == "drop":
+        table = {**table, "fc.weight": ("drop", delta)}
     gen = torch.Generator().manual_seed(seed)  # 与模型 init 分开 ⇒ 新列可复现
     partial = _migrate_columns(model, params, table=table, gen=gen)
     # B1 v6：动作头的**行**迁移（move 5→4 丢 STOP、fire 2→3、hold 新建）。

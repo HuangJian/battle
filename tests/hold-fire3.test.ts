@@ -81,7 +81,9 @@ function setup(turnCooldownMs = 200): {
 }
 
 describe('v3 action contract: hold / fireBeforeTurn', () => {
-  it('hold=1 turns without advancing and still obeys the turn cooldown', () => {
+  it('hold=1 + move=d ⇒ 转向到 d、不前进、真换向吃冷却（三头正交）', () => {
+    // ⚠ 训练 rollout 与真部署**恒用 turn-only**（`export-rl-rollout` 的 ScriptedInput
+    // 与浏览器侧都实现 `isHoldTurnOnly()=>true`）：能力超集，模型必须能学"转向不前进"。
     const { world, sim, input } = setup(200)
     const p = world.player!
     p.dir = 'up'
@@ -215,5 +217,140 @@ describe('v3 action contract: hold / fireBeforeTurn', () => {
     expect(shots.length).toBeGreaterThan(0)
     // 全沿 frenzyDir('up') —— 没有一发走 v3 请求的 'down'
     for (const b of shots) expect(b.dir as string).toBe('up')
+  })
+})
+
+/**
+ * 「保持朝向」不是转向请求 ⇒ 不占转向冷却（2026-10-20 用户裁定：
+ * "不转向就不需要被限制"）。
+ *
+ * 事故形状：`applyTurnCooldown` 在冷却期内会**回退朝向**（`tank.dir = prevMoveDir`）
+ * 并 **halt**（`tank.moving = false`）。旧写法对**每一拍**都要 `dir` 的输入都调它，
+ * 于是「hold=1 + 朝向没变」这种纯粹的"站着不动"，只要前几拍刚转过就被判非法转向。
+ * v6 的 move 头没有 null 类（4 类全是方向）⇒ 每拍都在请求方向 ⇒ 频繁撞上
+ * ⇒ 策略卡死原地（ladder-c20-lives1 实测 idle 79%、pass 9/40 vs legacy 27/40）。
+ *
+ * legacy 路径本来就是这个语义：STOP 时 `dir === null`，根本不进 turn 分支。
+ */
+describe('v3 三头正交：hold / move / fire 各管各的（2×4×3 = 24 组合全合法）', () => {
+  it('hold 只决定"前进与否"，不改 move 的方向语义', () => {
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = -9999
+
+    // hold=1 → 转向到 right 但不前进
+    input.set('right', false, true)
+    sim.tick()
+    expect(p.dir as string).toBe('right')
+    expect(p.moving).toBe(false)
+
+    // hold=0 → 同一个 right，这次前进
+    input.set('right', false, false)
+    sim.tick()
+    expect(p.dir as string).toBe('right')
+    expect(p.moving).toBe(true)
+  })
+
+  it('fire 与 hold/move 独立：hold=0 时 fireBefore 仍沿旧朝向前置开火', () => {
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = -9999
+
+    // hold=0（前进）+ move=right + fire=1（before turn）
+    input.set('right', true, false, true)
+    sim.tick()
+    const shot = world.bullets.find((b) => b.ownerId === p.id)
+    expect(shot?.dir as string).toBe('up') // 沿旧朝向
+    expect(p.dir as string).toBe('right')
+    expect(p.moving).toBe(true)
+  })
+
+  it('hold=1 时 fireAfter 照常出弹（hold 不吞开火）', () => {
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = -9999
+
+    input.set('up', true, true, false) // hold=1 + fire=2（after turn）
+    sim.tick()
+    expect(p.moving).toBe(false)
+    expect(world.bullets.some((b) => b.ownerId === p.id)).toBe(true)
+  })
+})
+
+describe('v3：保持朝向不受转向约束', () => {
+  it('hold=1 但方向不变 ⇒ 不吃冷却（"不转向就不需要被限制"）', () => {
+    // turn-only 下逃出"永远在冷却"的唯一途径：策略**保持朝向**。
+    // 冷启动的策略做不到 ⇒ 这是评估期需要 freeze 的原因。
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = 0 // 冷却期内
+
+    input.set('up', false, true)
+    sim.tick()
+    expect(p.dir as string).toBe('up')
+    expect(p.moving).toBe(false)
+    for (let i = 0; i < 6; i++) sim.tick()
+    expect(p.dir as string).toBe('up')
+    expect(p.y).toBe(10 * CELL)
+  })
+
+  it('hold=1 + 朝向不变 ⇒ 冷却期内也不被拒、朝向不回退、连续多拍都成立', () => {
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = 0 // 冷却期**内**（now - 0 < 200）
+
+    input.set('up', false, true)
+    sim.tick()
+    expect(p.dir as string).toBe('up') // 不回退到 prevMoveDir
+    expect(p.moving).toBe(false) // 不前进（hold 的本义）
+    expect(p.x).toBe(8 * CELL)
+    expect(p.y).toBe(10 * CELL)
+
+    // 连续 6 拍：每一拍都是"保持朝向 + hold"，都不该被冷却拦。
+    // 旧实现在第一拍就会 halt 并把 dir 打回 prevMoveDir。
+    for (let i = 0; i < 6; i++) sim.tick()
+    expect(p.dir as string).toBe('up')
+    expect(p.y).toBe(10 * CELL)
+  })
+
+  it('keep-facing + hold=0 也不吃冷却，且冷却期内照样能开火', () => {
+    // 旧行为：冷却期内即使朝向没变，`turnAccepted=false` ⇒ **不开火** + halt。
+    // 朝向没变时"不能开火"没有依据 —— A1 要防的是"打到旧朝向"，这里没有旧朝向。
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = 0
+
+    input.set('up', true, false, false) // 同朝向 + 开火（fireAfter）
+    sim.tick()
+    expect(p.dir as string).toBe('up')
+    expect(p.moving).toBe(true) // 前进
+    expect(world.bullets.some((b) => b.ownerId === p.id)).toBe(true) // 开火没被吞
+  })
+
+  it('真换向仍然吃冷却（这条约束不能松）', () => {
+    const { world, sim, input } = setup(200)
+    const p = world.player!
+    p.dir = 'up'
+    p.prevMoveDir = 'up'
+    p.lastTurnMs = 0 // 冷却中
+
+    input.set('right', false, true) // 换向 + hold
+    sim.tick()
+    // 被拒 ⇒ 朝向回退、halt（原有语义，未动）
+    expect(p.dir as string).toBe('up')
+    expect(p.moving).toBe(false)
+    expect(p.x).toBe(8 * CELL)
   })
 })
