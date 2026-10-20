@@ -44,6 +44,28 @@ describe('collectLocalLogEvents — 去噪与分类', () => {
     expect(events[0]!.classification).toBe('remote-failure')
   })
 
+  it('★ 例行进度行不产事件（2026-10-20 用户报障「这是误报吧？」）', () => {
+    // sampler-agent 每 10 分钟一行进度：说的是**零失败**，却被关键词扫成 error ⇒
+    // 控制台横幅把它当错误报（实测 2 个假事件、count 10）。
+    const progress = [
+      '[17:37:22] [sampler-agent] 近30min产出 games=2884（rollout=1391 / eval=1493） · ' +
+        '96.1 局/分（30min） · 失败=0 · 轮次=40 · 在飞=3 · 待取失败=0 · 累计=21814',
+      '[17:47:22] [sampler-agent] 近30min产出 games=2941（rollout=1426 / eval=1515） · ' +
+        '98 局/分（30min） · 失败=0 · 轮次=40 · 在飞=0 · 待取失败=0 · 累计=22780',
+    ]
+    expect(collectLocalLogEvents(progress, scope({ component: 'selfNode' }), 1_000)).toEqual([])
+    // cloudflared 的**信息行**里带 FAIL 字样（实测 6 个假事件）⇒ 同样不产事件
+    const cfInfo = [
+      '2026-10-20T02:13:20Z INF |  UDP Connectivity  region2.v2.argotunnel.com  FAIL    ' +
+        'QUIC connection failed                  |',
+      '{"level":"info","time":"2026-10-20T02:13:20Z","message":"|  UDP Connectivity  FAIL  |"}',
+    ]
+    expect(collectLocalLogEvents(cfInfo, scope({ component: 'cloudflared' }), 1_000)).toEqual([])
+    // 真错误照旧产事件（别把闸开太大）
+    const real = ['[17:50:53] [sampler-agent] task failed: export-eval-game exited 1']
+    expect(collectLocalLogEvents(real, scope({ component: 'selfNode' }), 1_000).length).toBe(1)
+  })
+
   it('traceback 续行不单独成事件；命中行 detail 仍含整块', () => {
     const lines = [
       '[09:00:00] [run_rl] start',

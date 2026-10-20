@@ -42,6 +42,58 @@ const LOG_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(?:\[([^\]]+)\]\s*)?/
 const LOG_ERR_RE = /(error|fail|panic|fatal|exception|✗|❌|超时未完成|失败)/i
 const LOG_WARN_RE = /(warn|warning|⚠|timeout|retry|重试|降级)/i
 
+/** 零值读数里的错误关键词（文本 `失败=0` 形态 / JSON `"error":null` 形态）。
+ *
+ *  ★ 2026-10-20（用户报障「这是误报吧？」）：关键词扫描把**零值读数**当成了错误——
+ *  sampler-agent 的例行进度行「近30min产出 games=2884 … · **失败=0** · 轮次=40 ·
+ *  **待取失败=0** · 累计=21814」被扫成 error ⇒ 控制台横幅把它当错误报出来（实测两条假
+ *  事件、count 10）。`失败=0` 说的是「零失败」，恰恰是**好消息**。
+ *  ⇒ 判级别前把「关键词在左、值是零/空」的那一截涂掉（只涂关键词，保留 `=0` 便于阅读）。 */
+const ZERO_VALUED_ERROR_KW_TEXT_RE =
+  /(失败|fail(?:ed|s|ure)?|errors?|异常|崩溃|panic|fatal|exception)\s*[=:：]\s*0+(?:\.0+)?(?![0-9.])/gi
+/** JSON 形态：键是错误关键词、值是空/零（`{"error":null}` / `{"error":""}`）。 */
+const EMPTY_ERROR_KEY_JSON_RE = /"(error|errors|failure|failures|err)"\s*:\s*(?:null|0\b|"|\{\})/gi
+
+/** 显式级别（结构化日志**自带** level ⇒ 以它为准，胜过关键词扫描）。
+ *
+ *  ① JSON 行：`{"level":"info",…}`（cloudflared 形状，level 总是第一个键）；
+ *  ② 文本行：`<ISO 时间戳> INF|ERR|WRN …`（cloudflared 文本形状）。
+ *
+ *  ★ 同日实测的同族误报：cloudflared 的**信息行**里带 FAIL/failed 字样 ——
+ *  `2026-10-20T02:13:20Z INF |  UDP Connectivity … FAIL  QUIC connection failed |`、
+ *  `INF precheck component="UDP Connectivity" details="QUIC connection failed" … status=fail`、
+ *  以及它们的 JSON 孪生 `{"level":"info",…,"message":"… FAIL …"}` ⇒ 6 个假事件。
+ *  规则：**日志自己声明了级别，就别再拿关键词去推翻它。** */
+const JSON_LEVEL_RE = /^\{"level"\s*:\s*"(error|err|warn|warning|info|debug|trace|fatal|panic)"/i
+const TEXT_LEVEL_RE =
+  /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z?\s+(INF|INFO|ERR|ERROR|WRN|WARN|FTL|FATAL|DBG|DEBUG)\b/
+
+/** 显式级别 → 归一的三档；没有声明 ⇒ null（交给关键词扫描）。 */
+export function explicitLogLevel(text: string): LogLevel | null {
+  const j = JSON_LEVEL_RE.exec(text)
+  if (j) {
+    const v = j[1]!.toLowerCase()
+    if (v === 'error' || v === 'err' || v === 'fatal' || v === 'panic') return 'error'
+    if (v === 'warn' || v === 'warning') return 'warn'
+    return 'info'
+  }
+  const t = TEXT_LEVEL_RE.exec(text)
+  if (t) {
+    const v = t[1]!.toUpperCase()
+    if (v === 'ERR' || v === 'ERROR' || v === 'FTL' || v === 'FATAL') return 'error'
+    if (v === 'WRN' || v === 'WARN') return 'warn'
+    return 'info'
+  }
+  return null
+}
+
+/** 涂掉「零值读数」里的错误关键词（只涂关键词本身，保留 `=0` / `:null` 这段可读性）。 */
+function maskZeroValuedErrorKeywords(text: string): string {
+  return text
+    .replace(ZERO_VALUED_ERROR_KW_TEXT_RE, (m) => m.replace(/[A-Za-z一-鿿]+/g, ''))
+    .replace(EMPTY_ERROR_KEY_JSON_RE, (m) => m.replace(/[A-Za-z]+/g, ''))
+}
+
 /** HTTP 访问日志的**行首结构**：`"GET /path HTTP/1.1" 200`（python http.server / uvicorn 同形）。
  *
  *  ★ 判级别必须看**状态码**而不是路径关键词（plan §1.1 M1/M2）：`/admin/errors` 里的
@@ -60,15 +112,27 @@ export function httpAccessStatus(text: string): number | null | undefined {
 /** 切分日志行：[HH:MM:SS] 时间戳 + [组件] 标签 + 正文；按关键词判级别。训练 JSON 行不走此解析。
  *
  *  访问日志例外：级别只看状态码（`>=500` ⇒ error，其余 info）。4xx 不算错误——
- *  否则 `/admin/errors?since=0` 这类带 `error` 的路径又会被误报（plan D4）。 */
+ *  否则 `/admin/errors?since=0` 这类带 `error` 的路径又会被误报（plan D4）。
+ *
+ *  ★ 两条降误报规则（2026-10-20 用户报障「这是误报吧？」，实测 6 个假事件）：
+ *  ① **显式级别优先**：日志自带 level（JSON `"level":"info"` / 文本 `INF`）⇒ 以它为准，
+ *     不拿关键词推翻它（`INF … FAIL …` 是信息行，不是错误）。
+ *  ② **零值读数不是错误**：`失败=0` / `待取失败=0` / `"error":null` ⇒ 关键词先涂掉再扫。 */
 export function parseLogLine(line: string): ParsedLogLine {
   const m = LOG_TIME_RE.exec(line)
   const rest = m ? line.slice(m[0].length) : line
   const access = httpAccessStatus(rest)
   let level: LogLevel = 'info'
   if (access !== undefined) level = access !== null && access >= 500 ? 'error' : 'info'
-  else if (LOG_ERR_RE.test(rest)) level = 'error'
-  else if (LOG_WARN_RE.test(rest)) level = 'warn'
+  else {
+    const explicit = explicitLogLevel(rest)
+    if (explicit) level = explicit
+    else {
+      const masked = maskZeroValuedErrorKeywords(rest)
+      if (LOG_ERR_RE.test(masked)) level = 'error'
+      else if (LOG_WARN_RE.test(masked)) level = 'warn'
+    }
+  }
   return { ts: m?.[1] ?? null, tag: m?.[2] ?? null, level, text: rest }
 }
 

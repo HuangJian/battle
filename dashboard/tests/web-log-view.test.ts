@@ -41,6 +41,51 @@ describe('日志页展示层（§367：结构化解析 + 事件卡）', () => {
     expect(parseLogLine(truncated).level).toBe('info')
   })
 
+  it('★ 零值读数不是错误（2026-10-20 用户报障「这是误报吧？」）', () => {
+    // sampler-agent 的例行进度行：说的是「零失败」，却被关键词扫描判成 error ⇒
+    // 控制台横幅把它当错误报出来（实测 2 个假事件、count 10）。
+    const progress = parseLogLine(
+      '[17:37:22] [sampler-agent] 近30min产出 games=2884（rollout=1391 / eval=1493） · ' +
+        '96.1 局/分（30min） · 失败=0 · 轮次=40 · 在飞=3 · 待取失败=0 · 累计=21814',
+    )
+    expect(progress.level).toBe('info')
+    // 真错误仍是错误（别把闸开太大）
+    expect(parseLogLine('[17:50:53] [sampler-agent] task failed: exit 1').level).toBe('error')
+    // 非零的失败仍是错误
+    expect(parseLogLine('[17:50:53] [sampler-agent] 失败=3 · 轮次=40').level).toBe('error')
+    // JSON 形态：键是 error、值是空/零 ⇒ 不是错误
+    expect(parseLogLine('{"event":"iter","error":null}').level).toBe('info')
+  })
+
+  it('★ 显式级别优先于关键词（结构化日志自带 level ⇒ 以它为准）', () => {
+    // cloudflared 的信息行里带 FAIL/failed 字样（实测 6 个假事件）
+    expect(
+      parseLogLine(
+        '2026-10-20T02:13:20Z INF |  UDP Connectivity  region2.v2.argotunnel.com  FAIL    ' +
+          'QUIC connection failed                  |',
+      ).level,
+    ).toBe('info')
+    expect(
+      parseLogLine(
+        '2026-10-20T02:13:20Z INF precheck component="UDP Connectivity" ' +
+          'details="QUIC connection failed" status=fail',
+      ).level,
+    ).toBe('info')
+    // JSON 孪生：level=info 但正文里有 FAIL
+    expect(
+      parseLogLine(
+        '{"level":"info","time":"2026-10-20T02:13:20Z","message":"|  UDP Connectivity  FAIL  |"}',
+      ).level,
+    ).toBe('info')
+    // 真错误行不受影响
+    expect(
+      parseLogLine('2026-10-20T08:13:26Z ERR error="Unable to reach the origin service"').level,
+    ).toBe('error')
+    expect(parseLogLine('{"level":"error","error":"lookup region1.v2: i/o timeout"}').level).toBe(
+      'error',
+    )
+  })
+
   it('parseTrainingEvent：trainingLoop JSON 行 → event 徽章 + 精选字段；iter_error 带 error', () => {
     const it = JSON.stringify({
       event: 'iteration',
