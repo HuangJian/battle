@@ -25,6 +25,43 @@
 
 ---
 
+## §81 死端口不是「快速失败」：claim 的同步控制台腿让 12 条 hub 用例白等 8s/次（2026-10-20）
+
+**触发**（用户 2026-10-20）：「把 `tests/common/test_offline_task_queue.py` 里几条 hub 用例的死端口控制台
+换成快速拒绝替身，砍掉每次 claim 的 8s 等待」（= §109 那条 claim 超时修复的同根问题，但这次只在**测试侧**）。
+
+**读数（同一台 Linux 沙箱，改前 → 改后）**：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| `test_task_list_worker_claimable_implies_the_same_claim_succeeds` | 24.05s（3 次 claim） | 0.02s |
+| 其余 11 条要成功 claim 的用例 | 8.02–16.03s 各 | ≤0.06s |
+| 本文件墙钟 | ≈130s（12 条 × 8s） | **1.5s**（含 pytest 启动） |
+| nn python gate 全量 | 95–119s（三次实测） | **72s** |
+
+**根因**：`tests/conftest.py` 把 `BCITY_CONSOLE_URL` 钉在死端口（`http://127.0.0.1:9`）——那是**安全网**
+（防门禁打到正在跑的控制台），不是「控制台立刻拒绝」的仿真。死端口上没人听**不等于**连上去立刻被拒：
+内核回 RST 时要几毫秒，而防火墙/沙箱丢掉 SYN 时 `connect` 会一路挂到
+`hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC`（8s）。而 hub 的 `/offline/claim` **成功分支**在回
+200 前会**同步**请一次控制台核对包新鲜度（`hub/offline.py::_ask_console_freshness`；缺包路是
+`_task_pack_miss_gate`）⇒ 本文件每条成功 claim 都白等一次（`reset_auto_handoff_triggers` 在 claim
+成功时清零，所以**每次**都是 trigger、会被每次重付）。
+
+**决定**：本文件加 autouse fixture `console_down`，把 `hub.task_pack._net_urlopen` 换成
+`_RefusingConsole`（抛 `ConnectionRefusedError(111, …)`）——`trigger_auto_handoff` /
+`trigger_task_bundle_export` / `console_export_status` 三个腿的 `except Exception` 分支与生产
+「控制台没起」**逐字相同**（都落到「控制台不可达 —— 降级为手动」），语义等价、与内核 TCP 行为
+解耦。只打这一个别名（hub 其余外发调用不受影响），conftest 的地址桩照旧在。
+
+**顺带钉住降级本身**：`test_claim_grants_a_lease_and_blocks_another_worker` 现在断言①桩**被调到**
+（`_net_urlopen` 别名仍是唯一出口，换人了本文件会静默慢回去）②回执里有「控制台不可达」（不可达只是
+回执，**不挡租约**）。这比“只要 200 就行”更严，不是放宽。
+
+**一般规则（本轮第 6 次踩）**：**「没人听」的端口不能当「快速失败」用**。测试要演「对端不在」时，
+要么用拒绝替身（`ConnectionRefusedError`）——住**同步路径**上的腿必选这条，因为它把墙钟压到 µs 级且
+与内核行为无关；要么起一个**真在听**但立刻返回错误码的桩（e2e 的 `_NoAutoHandoffConsole` = 一律 404）。
+死端口只适合「反正没人断言耗时」的旁路腿。
+
 ## §80 课程门作者模板 —— 区间中位 / 同轮配对 / null 同期基线（2026-10-19）
 
 > **性质：规范性文档，长期有效**（不是一次性的流水账）。plan/nn-capability-upgrade §5-C2
