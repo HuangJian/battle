@@ -21,6 +21,8 @@ import {
   TC_ALERT_ACKS,
   alertAckKey,
   classificationHint,
+  errorGroupNote,
+  errorStatusLabel,
   isNoiseClassification,
   parseAlertAcks,
   type ErrorClassification,
@@ -197,7 +199,9 @@ export function ErrorsApp({ initial, options }: ErrorsAppProps) {
             {items.length === 0
               ? '登记表是空的 —— 没有组件报错。'
               : `${pending.length} 条未处理 · ${resolved.length} 条已恢复`}
-            {noiseCount > 0 ? ` · ${noiseCount} 条噪声已折叠` : ''}
+            {noiseCount > 0
+              ? ` · ${noiseCount} 条噪声${showNoise ? '（灰行 · 自动撤销 · 无需处置）' : '已折叠'}`
+              : ''}
             {historicalCount > 0 ? ` · ${historicalCount} 条历史` : ''}
             {scannedAt > 0 ? `（最近巡检 ${relAgo(now, scannedAt)}）` : '（巡检还没跑过）'}
             {options.readOnly ? '（只读视图：只影响动作，不影响本页读数）' : ''}
@@ -277,86 +281,97 @@ export function ErrorsApp({ initial, options }: ErrorsAppProps) {
                 <th>状态</th>
               </tr>
             </thead>
-            {groups.map(([classification, rows]) => (
-              <tbody key={classification}>
-                <tr class="tc-errors__group">
-                  <td colSpan={8}>
-                    {ERROR_CLASSIFICATION_LABEL[classification]}
-                    <span class="tc-errors__group-count">（{rows.length}）</span>
-                  </td>
-                </tr>
-                {rows.map((it) => {
-                  const acked = acks.includes(rowAckKey(it))
-                  const hint = classificationHint(it.classification)
-                  return (
-                    <>
-                      <tr
-                        key={it.fp}
-                        class={`tc-errors__row${acked ? ' tc-errors__row--acked' : ''}`}
-                        onClick={() => void toggle(it)}
-                      >
-                        <td className="tc-errors__sev">
-                          {it.severity === 'err' ? '错误' : '警告'}
-                        </td>
-                        <td>{ERROR_CLASSIFICATION_LABEL[it.classification]}</td>
-                        <td>{SOURCE_LABEL.get(it.source) ?? it.source}</td>
-                        <td>
-                          {it.component}
-                          {it.scope ? ` · ${it.scope}` : ''}
-                          {it.activity === 'historical' ? '（历史）' : ''}
-                        </td>
-                        <td>{it.count}×</td>
-                        <td title={new Date(it.lastAt).toLocaleString()}>
-                          {relAgo(now, it.lastAt)}
-                        </td>
-                        <td class="tc-errors__msg">{it.message}</td>
-                        <td>
-                          {acked ? '已确认' : '未处理'}
-                          {openFp === it.fp ? ' ▾' : ' ▸'}
-                        </td>
-                      </tr>
-                      {openFp === it.fp ? (
-                        <tr key={`${it.fp}-detail`} class="tc-errors__detail-row">
-                          <td colSpan={8}>
-                            <pre class="tc-errors__detail">{details[it.fp] ?? '（取详情中…）'}</pre>
-                            {hint ? <div class="tc-errors__sub">处置：{hint}</div> : null}
-                            <div class="tc-errors__acts">
-                              {it.ref.kind === 'log' ? (
-                                <a class="tc-btn tc-btn--sm" href={`/log/${it.ref.target}`}>
-                                  打开日志页
-                                </a>
-                              ) : it.ref.kind === 'node' ? (
-                                <a class="tc-btn tc-btn--sm" href="/nodes">
-                                  去节点页
-                                </a>
-                              ) : (
-                                <a class="tc-btn tc-btn--sm" href={'/courses'}>
-                                  去课程页
-                                </a>
-                              )}
-                              {acked ? (
-                                <span class="tc-errors__acked">已确认</span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  class="tc-btn tc-btn--sm tc-btn--primary"
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    persist([...acks, rowAckKey(it)])
-                                  }}
-                                >
-                                  知道了
-                                </button>
-                              )}
-                            </div>
+            {groups.map(([classification, rows]) => {
+              const groupNote = errorGroupNote(classification)
+              return (
+                <tbody key={classification}>
+                  <tr class="tc-errors__group">
+                    <td colSpan={8}>
+                      {ERROR_CLASSIFICATION_LABEL[classification]}
+                      <span class="tc-errors__group-count">（{rows.length}）</span>
+                      {groupNote ? <span class="tc-errors__group-note">· {groupNote}</span> : null}
+                    </td>
+                  </tr>
+                  {rows.map((it) => {
+                    const acked = acks.includes(rowAckKey(it))
+                    const hint = classificationHint(it.classification)
+                    // 噪声行只降权、不隐藏：分类分组仍是唯一的分拣口径（默认视图已折叠它们）。
+                    const noise = isNoiseClassification(it.classification)
+                    return (
+                      <>
+                        <tr
+                          key={it.fp}
+                          class={`tc-errors__row${noise ? ' tc-errors__row--noise' : ''}${acked ? ' tc-errors__row--acked' : ''}`}
+                          onClick={() => void toggle(it)}
+                        >
+                          <td className="tc-errors__sev">
+                            {it.severity === 'err' ? '错误' : '警告'}
+                          </td>
+                          <td>
+                            {ERROR_CLASSIFICATION_LABEL[it.classification]}
+                            {noise ? <span class="tc-errors__noise-tag">无需处置</span> : null}
+                          </td>
+                          <td>{SOURCE_LABEL.get(it.source) ?? it.source}</td>
+                          <td>
+                            {it.component}
+                            {it.scope ? ` · ${it.scope}` : ''}
+                            {it.activity === 'historical' ? '（历史）' : ''}
+                          </td>
+                          <td>{it.count}×</td>
+                          <td title={new Date(it.lastAt).toLocaleString()}>
+                            {relAgo(now, it.lastAt)}
+                          </td>
+                          <td class="tc-errors__msg">{it.message}</td>
+                          <td>
+                            {errorStatusLabel(it.classification, acked)}
+                            {openFp === it.fp ? ' ▾' : ' ▸'}
                           </td>
                         </tr>
-                      ) : null}
-                    </>
-                  )
-                })}
-              </tbody>
-            ))}
+                        {openFp === it.fp ? (
+                          <tr key={`${it.fp}-detail`} class="tc-errors__detail-row">
+                            <td colSpan={8}>
+                              <pre class="tc-errors__detail">
+                                {details[it.fp] ?? '（取详情中…）'}
+                              </pre>
+                              {hint ? <div class="tc-errors__sub">处置：{hint}</div> : null}
+                              <div class="tc-errors__acts">
+                                {it.ref.kind === 'log' ? (
+                                  <a class="tc-btn tc-btn--sm" href={`/log/${it.ref.target}`}>
+                                    打开日志页
+                                  </a>
+                                ) : it.ref.kind === 'node' ? (
+                                  <a class="tc-btn tc-btn--sm" href="/nodes">
+                                    去节点页
+                                  </a>
+                                ) : (
+                                  <a class="tc-btn tc-btn--sm" href={'/courses'}>
+                                    去课程页
+                                  </a>
+                                )}
+                                {acked ? (
+                                  <span class="tc-errors__acked">已确认</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    class="tc-btn tc-btn--sm tc-btn--primary"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      persist([...acks, rowAckKey(it)])
+                                    }}
+                                  >
+                                    知道了
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </>
+                    )
+                  })}
+                </tbody>
+              )
+            })}
           </table>
         )}
 

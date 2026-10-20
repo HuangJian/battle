@@ -34,6 +34,21 @@ export function isNoiseClassification(c: ErrorClassification): boolean {
   return c === 'transient-network' || c === 'process-lifecycle'
 }
 
+/** 行状态文案（页面与测试共用同一个判据）：已确认 > 噪声自动撤销 > 未处理。
+ *
+ *  ★ 为什么噪声行不写「未处理」（2026-10-20 用户口径「cloudflared 类不需要运维处理」）：
+ *   这类错误由采集侧两拍自动撤销（`error-registry.applySweep`），写「未处理」会让人
+ *   去点「知道了」——把自动机制变成人工待办的假象。 */
+export function errorStatusLabel(c: ErrorClassification, acked: boolean): string {
+  if (acked) return '已确认'
+  return isNoiseClassification(c) ? '自动撤销' : '未处理'
+}
+
+/** 分组标题的副注：噪声组明说「无需处置」，避免在「显示噪声」后与真问题混淆。 */
+export function errorGroupNote(c: ErrorClassification): string {
+  return isNoiseClassification(c) ? '噪声 · 无需处置，连续两拍不出现会自动撤销' : ''
+}
+
 /** 自动撤销只看这两类（plan D3；非瞬时错误保持「消失即结束」）。 */
 export function isTransientClassification(c: ErrorClassification): boolean {
   return c === 'transient-network' || c === 'process-lifecycle'
@@ -50,6 +65,11 @@ export function classificationHint(c: ErrorClassification): string {
       return '查看对应 job 的 payload / 日志'
     case 'capacity':
       return '降低并发或扩容节点'
+    // 噪声两类也给一行：与其留空让人以为漏了处置，不如明说「不用管、多久自愈」。
+    case 'transient-network':
+      return '无需人工处置：网络抖动连续两拍不出现会自动撤销；同一隧道持续抖动超过一天再查 cloudflared / hub 连通性'
+    case 'process-lifecycle':
+      return '无需人工处置：进程重启/关闭时的连接中断会自动撤销'
     default:
       return ''
   }

@@ -3895,6 +3895,30 @@ a.tc-btn {
 .tc-errors__sev {
   white-space: nowrap;
 }
+/* 噪声行（transient-network / process-lifecycle）：灰字 + 「无需处置」标签 + 「自动撤销」状态。
+   默认视图已折叠它们；「显示噪声」后必须一眼看出「这不是待办」——只降权、不删除
+   （错误列表的价值是「发生过什么」）。 */
+.tc-errors__row--noise td {
+  color: var(--muted);
+}
+.tc-errors__row--noise .tc-errors__msg {
+  font-style: italic;
+}
+.tc-errors__noise-tag {
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.tc-errors__group-note {
+  margin-left: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
 .tc-errors__msg {
   word-break: break-all;
 }
