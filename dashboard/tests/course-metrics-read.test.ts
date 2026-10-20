@@ -172,6 +172,9 @@ describe('读侧回退', () => {
     process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
     expect(actionRequiresLive('preset')).toBe(true)
     expect(actionRequiresLive('setCourse')).toBe(false)
+    // ★ openCourse 是活体的**创造者**，不是消费者：2026-10-20 报障（y26-shotmix 只有备份
+    //   数据 ⇒ 开课被 409 死锁）。端到端行为在 course-lifecycle.test.ts ⑥ 钉死。
+    expect(actionRequiresLive('openCourse')).toBe(false)
     const resp = await routeAction('preset', { course: 'r-cmp' })
     expect(resp?.status).toBe(409)
     const text = await resp!.text()

@@ -7919,3 +7919,29 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   并计进"新增" ⇒ 对未开塔的权重虚报 **+16.9%**（塔是 v4 腿 B 存量，不是 B′ 新增）。
   现在只在 `model.spatialTower === true` 时才测，并直出 `verdict` 字段。
 - **门禁**：`bun run check` **2612 pass / 8 skip / 0 fail**（2597 基线 + 本次新增/修复 15 条）。
+
+## §2026-10-20-dashboard-open-course-not-live-gated — openCourse 移出「无活体」动作闸：它是活体的创造者，不是消费者
+
+- **报障**（用户 2026-10-20）：控制台开课 `y26-shotmix` 报
+  `❌ 无活体：y26-shotmix 只有备份数据（tmp 已无该课），不能执行 openCourse`。
+- **根因**：`dashboard/src/server/api/route.ts` 的 `COURSE_MUTATING_ACTIONS`（2026-10-18
+  课程读数备份那一刀引入的 409 闸）把 `openCourse` 也列了进去。可 `openCourse`
+  （`actions/course-lifecycle.ts`）恰恰是**唯一会建出活体工作区**的动作（`tmp/<课>/` 的
+  账本 + `remote-jobs/` + 开课标记），不是活体的消费者。于是 tmp 被清理过、只剩备份数据的课
+  **死锁**：越需要开课，越被「没有活体」拒绝；而 UI 侧（课程 select / 管理页 / 开课弹窗）
+  按设计仍把这门课显示出来（备份课可见可读、可切视图），按钮点了必然 409。
+- **决定**：把 `openCourse` 从 `COURSE_MUTATING_ACTIONS` 移除。它的前置检查本来就在动作内部
+  （`assertCourseExists` 课程文件存在性 + 锁身份 + 意图文件健康），闸不代劳。plan
+  `course-metrics-persistence` §0/§8 明确支持同名课重开（读侧 live 优先、显示当次 run，旧数据
+  留在备份库）——闸与它矛盾的是代码，不是 plan。
+- **备选与否决**：① 保留闸、要求先 `course-metrics restore` 再开课 —— 否（把一步能做完的事
+  拆成两步人工仪式，且「恢复备份」会复活旧 run 的账本与当次 run 混写，比 live 优先更脏）；
+  ② 让 `openCourse` 在闸里按「tmp 目录是否存在」判 —— 否（tmp 不存在正是它要处理的正常态，
+  等于没闸）；③ UI 对备份课不画开课键 —— 否（治标：API 直调仍 409，且与「重开」语义相悖）。
+- **回归用例**：`dashboard/tests/course-lifecycle.test.ts` ⑥（造旧 run 镜像 → 删 tmp →
+  `routeAction('openCourse')` 必须 200 且活体工作区被建回；改动前红 = 409、改动后绿）
+  ＋ `dashboard/tests/course-metrics-read.test.ts` 动作闸用例补 `actionRequiresLive('openCourse')
+  === false` 哨兵（挡「有人再把它加回集合」这一类复发）。
+- **落点**：`dashboard/src/server/api/route.ts:154`（集合）＋ `:149-162`（注释写明为什么）。
+- **门禁**：dashboard typecheck + **1754 用例**（+1 新用例）· `bun run check` **2625 pass / 8 skip /
+  0 fail** · `bun run build` 过。

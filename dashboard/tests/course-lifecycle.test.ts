@@ -32,6 +32,8 @@ process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
 process.env.BCITY_REGISTRY_FILE = path.join(DIR, 'registry.json')
 process.env.BCITY_RL_CONFIG = path.join(DIR, 'rl-config.json')
 process.env.BCITY_TMP_LOGS_DIR = path.join(DIR, 'traj')
+// 备份库也重定向：本套件要验「只有备份数据（tmp 已清）的课仍可开课」，不能读写真库。
+process.env.BCITY_COURSE_METRICS = path.join(DIR, 'course-metrics')
 process.env.BCITY_LOOP_CONTROL = path.join(DIR, 'loop-control.json')
 process.env.BCITY_LOOP_APPLIED = path.join(DIR, 'loop-control.applied.json')
 // 锁文件目录：开课的前置检查**会读它**（另一份按课 runner 在跑 ⇒ 拒开课），而
@@ -62,6 +64,8 @@ import {
 } from '../src/server/actions/course-lifecycle'
 import { COURSE_ENABLE_MARKER } from '../src/stack/courses'
 import { tmpCourseDir } from '../src/core/paths'
+import { routeAction } from '../src/server/api/route'
+import { syncAll } from '../src/server/course-metrics/mirror'
 import { pruneNoiseCourses } from '../src/stack/course-knobs'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
 import * as actions from '../src/server/actions'
@@ -637,6 +641,44 @@ describe('开课的写序：被拒 = 零副作用', () => {
     } finally {
       if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
       else process.env.BCITY_CURRICULA_DIR = prev
+    }
+  })
+})
+
+// ────────────────── ⑥ 备份课（tmp 已清）重开：openCourse 不受「无活体」闸拦 ──────────────────
+//
+// 2026-10-20 用户报障：`❌ 无活体：y26-shotmix 只有备份数据（tmp 已无该课），不能执行 openCourse`。
+// 根因：`COURSE_MUTATING_ACTIONS` 把 openCourse 也当成了「活体的消费者」，可它恰恰是**唯一
+// 会建出活体工作区**的动作（账本 / remote-jobs / 开课标记）。于是 tmp 被清理过、只剩备份的
+// 课被死锁：越需要开课，越被「没有活体」拒绝。plan/course-metrics-persistence 明确支持同名课
+// 重开（读侧 live 优先，显示当次 run；旧数据留在备份库），所以闸不能拦开课本身。
+describe('备份课重开：openCourse 是活体的**创造者**，不是消费者', () => {
+  const REOPEN_COURSE = 'c5-margin'
+
+  it('tmp 已清、只有备份数据 ⇒ openCourse 仍成功，并把活体工作区建回来', async () => {
+    const dir = path.join(TRAJ, REOPEN_COURSE)
+    const lib = process.env.BCITY_COURSE_METRICS!
+    try {
+      // 造一份「上一次 run」的备份：临时账本 → 转存 → 删掉 tmp（= tmp-clean 之后的状态）。
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        `${JSON.stringify({ event: 'iteration', iter: 1, winRate: 0.5 })}\n`,
+      )
+      syncAll({ course: REOPEN_COURSE, budgetBytes: 0 })
+      rmSync(dir, { recursive: true, force: true })
+      expect(existsSync(dir)).toBe(false)
+
+      const resp = await routeAction('openCourse', { course: REOPEN_COURSE })
+      expect(resp?.status).toBe(200)
+      const body = (await resp!.json()) as { ok?: boolean; message?: string }
+      expect(body.ok).toBe(true)
+      // 关键事实：这次动作真的把活体建回来了（不是「先 restore 再开课」的两步仪式）。
+      expect(existsSync(path.join(dir, 'training_log.jsonl'))).toBe(true)
+      expect(existsSync(path.join(dir, 'remote-jobs'))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(lib, { recursive: true, force: true })
     }
   })
 })

@@ -150,14 +150,20 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
  *
  *  为什么在分发层做（plan/course-metrics-persistence §3.3 / 评审 F6）：备份课在 UI 里可见
  *  （读数要能看），但起课/停课/导出/导入/评估都必须有 tmp 活体；散在每个 case 里迟早漏一个。
- *  `setCourse` 不在此列——它只切视图，是读。 */
+ *  `setCourse` 不在此列——它只切视图，是读。
+ *
+ *  ★ `openCourse` **也不在此列**（2026-10-20 用户报障：`无活体：y26-shotmix 只有备份数据
+ *  （tmp 已无该课），不能执行 openCourse`）：它是活体工作区的**创造者**（账本 / remote-jobs /
+ *  开课标记都是它写的），不是消费者——把它放进闸里，tmp 被清理过、只剩备份的课就被死锁：
+ *  越需要开课，越被「没有活体」拒绝，而 plan 明确支持同名课重开（live 优先，旧数据留备份库）。
+ *  它的前置检查本来就在 `openCourse` 内部（课程文件存在性 + 锁身份 + 意图文件健康），
+ *  不需要这道闸代劳。 */
 const COURSE_MUTATING_ACTIONS = new Set([
   'start',
   'stop',
   'smoke',
   'smokeTrain',
   'preset',
-  'openCourse',
   'stopCourse',
   'setCoursePaused',
   'setMode',
