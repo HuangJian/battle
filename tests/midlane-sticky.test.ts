@@ -64,23 +64,22 @@ function runRiverbed(
   return { outcome, terminalTick }
 }
 
-describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
-  // ⚠ A2/A3 换局（2026-10-19）：A2 一次换到 seed 7；A3 转身经济（沿已提交朝向继续走）
-  // 又把局面改了 ⇒ **seed 10 重新成为可复现的样本**（sticky=0 于 tick 2855 失守、
-  // sticky=90 过关 tick 7440），故回到文件原本的 seed 10。机制语义与判据均不变。
+describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks) — 开火准入纪元（2026-10-20）', () => {
+  // ⚠ 本用例在「开火策略准入」纪元（DECISIONS §2026-10-20-godai-mechfix-fire-admission）
+  // 被改写：t2a 在冷却期不再提交 ⇒ 玩家不再蹲车道，seed 10 的钻砖死亡**不再复现**；
+  // 而 sticky=90 会把玩家钉在原地，反而把它从 clear 变 gameover。
+  // 新纪元 60-seed 配对 sweep（A = 旧默认 90）：0 → SUITE 0.5781（+0.0127）· 30 → 0.5747 ·
+  // 60 → 0.5686 · 90 → 0.5654 ⇒ 单调下降 ⇒ 默认改为 0。
   const SEED = 10
 
-  it('baseline (sticky=0): seed 10 loses — reproduces the drill base death', () => {
-    // Pin sticky OFF explicitly: the shipped default is now 90 (hard/chaos),
-    // which is exactly the fix under test. At 0 the drill chews the ring, the
-    // fatal bullet wins the race — this documents the bug the sticky fixes.
-    const r = runRiverbed(SEED, { midLaneStickyTicks: 0 })
-    expect(r.outcome).toBe('gameover')
-    expect(r.terminalTick).toBeLessThan(10000)
+  it('shipped default (sticky=0): seed 10 clears — the drill death is gone in this epoch', () => {
+    const r = runRiverbed(SEED, {})
+    expect(r.outcome).toBe('stageclear')
   })
 
-  it('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
+  it('sticky=90 loses this seed — documents why the default moved back to 0', () => {
     const r = runRiverbed(SEED, { midLaneStickyTicks: 90 })
-    expect(r.outcome).toBe('stageclear')
+    expect(r.outcome).toBe('gameover')
+    expect(r.terminalTick).toBeLessThan(10000)
   })
 })

@@ -348,14 +348,14 @@ describe('真实 rollout 金标（采样链，§3.5 新① 改判）', () => {
 })
 
 describe('评估链金标（god 确定性策略；两列非零）', () => {
-  // ⚠ A3 重标（2026-10-19，DECISIONS §A3 转身经济）：`turnEconomyMode=2` 让拿不到的转身
-  // 改为沿已提交朝向继续走 ⇒ 又是另一局，`near`/`lane` 重标（同 A1/A2 的换局纪律）。
-  // stage 0 seed 9 在此纪元 lane 变 0（违反"两列非零"）⇒ 换 stage 0 seed 3。
-  // 数值为 2026-10-19 实测（确定性：同 seed 两跑逐值相同）。
+  // ⚠ 开火准入重标（2026-10-20，DECISIONS §mechfix-fire-admission）：t2a 在开火冷却期
+  // 不再提交 ⇒ 又是另一局（同 A1/A2/A3 的换局纪律）。原 stage0 seed5 / stage1 seed6
+  // 在本纪元 `lane` 变 0（违反"两列非零"）⇒ 换成 stage0 seed12 / stage1 seed9。
+  // 数值为 2026-10-20 实测（确定性：同 seed 两跑逐值相同）。
   const cases = [
-    { stage: 0, seed: 3, near: 222, lane: 39 },
-    { stage: 0, seed: 5, near: 253, lane: 67 },
-    { stage: 1, seed: 6, near: 209, lane: 14 },
+    { stage: 0, seed: 3, near: 165, lane: 30 },
+    { stage: 0, seed: 12, near: 68, lane: 27 },
+    { stage: 1, seed: 9, near: 194, lane: 154 },
   ] as const
   for (const c of cases) {
     it(`stage ${c.stage} seed ${c.seed}：near=${c.near} / lane=${c.lane}`, () => {

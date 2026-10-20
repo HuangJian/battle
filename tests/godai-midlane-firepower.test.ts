@@ -267,6 +267,9 @@ describe('§165 Problem 3: Fire strength / outnumbered retreat', () => {
       t2aOutnumberedRetreat: 0,
     })
     positionPlayer(world, 8, 20)
+    // 2026-10-20 开火准入：冷却期内 t2a 不再提交（用户定规）。本用例考的是「撤退逻辑是否
+    // 会误伤正常交战」，前提必须是**这一拍真能开火** ⇒ 显式把坦克置为可开火状态。
+    world.player!.lastFire = -1e9
     spawnEnemy(world, 8, 16, 'down')
     spawnEnemy(world, 8, 18, 'down')
     thinkImpl(ai)
@@ -281,6 +284,8 @@ describe('§165 Problem 3: Fire strength / outnumbered retreat', () => {
       t2aOutnumberedCount: 2,
     })
     positionPlayer(world, 8, 20)
+    // 同上：前提是「这一拍能开火」。
+    world.player!.lastFire = -1e9
     spawnEnemy(world, 8, 16, 'down')
     thinkImpl(ai)
     // 1 enemy is a fair duel — T2a should commit

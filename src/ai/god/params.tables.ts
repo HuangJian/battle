@@ -351,13 +351,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   midLaneHoldRange: 1,
   midLaneMaxDist: 8,
   midLaneMaxDigCells: 3,
-  // §164: mid-lane drill sticky — SHIPPED hard/chaos = 90 (2026-08-14,
-  // DECISIONS §195; classic restore 0 via CLASSIC_MODEL_PARAMS). 60-seed
-  // paired A/B: hard SUITE 0.5333→0.5380, S8 Riverbed 37%→45% (5 L→W, 0
-  // W→L on seeds 1-30); classic/chaos no regression. Sweep 60/90/120/150/
-  // 180/240 peaked at 90 — must bridge the 70-130 tick drill gaps without
-  // over-anchoring the player (≥120 starts trading away map control).
-  midLaneStickyTicks: 90,
+  // §164: mid-lane drill sticky — 曾 SHIPPED 90（2026-08-14，DECISIONS §195）。
+  // ⚠ 2026-10-20 开火准入纪元重调：**90 已从"修复"变成"负担"**。同一 60-seed 配对
+  // （A=90 新纪元基线 0.5654）下 sweep：0 → SUITE **0.5781（+0.0127）**、30 → 0.5747、
+  // 60 → 0.5686、90 → 基线 ⇒ 单调下降。原因：新纪元里 t2a 冷却期不再提交，玩家本来就
+  // 不会蹲车道，sticky 反而把他钉在原地（Riverbed seed 4/8/10/12… 从 clear 变 gameover）。
+  // ⇒ 默认改 0；§164 的钻砖复现用例已按新epoch改写（见 tests/midlane-sticky.test.ts）。
+  midLaneStickyTicks: 0,
   // §164: proactive mid-lane flank hold. 0 = OFF (byte-identical).
   // §165 round 2: A/B tested — CATASTROPHIC (-4.1pp). The enemy-near-lane
   // trigger fires 14-35% of ticks on most maps → player statue at the base
@@ -456,12 +456,6 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (t=5.94, 441 好/256 坏/3 平), 算术 score 0.6104 → 0.7069, 胜率 58.7% → 71.0%
   // ⇒ 回收 A1 缺口的 66.6%；中位偏弹率 27.4% → 0%. 见 DECISIONS §A2.
   turnCommitFireGate: 1,
-  // 开火策略准入（2026-10-20 用户定规「冷却没到，开火策略不许生效」）：
-  //   2 = 只禁「需要转身才能对准」的提交 · 1 = 冷却期一律不提交 · 0 = OFF。
-  // ⚠ 实测（60-seed）代价很大：mode2 hard SUITE 0.5828→0.5609、classic 0.7276→0.6807；
-  //   mode1 更狠（Oasis −0.119）。t2a 冷却期的「站着保持对准」是承重的（开阔图站位）⇒
-  //   默认 OFF，等用户决定是否作为政策强制。机制数据见 DECISIONS §mechfix-fire-admission。
-  fireBranchRequiresReady: 0,
   // 坦克墙（机制修复，SHIPPED 2026-10-20）：敌车格在 A* 里按「可击破的墙」计价。
   // hard 60-seed vs 0：SUITE 0.5791→0.5825（1625/2100 局相同，胜率不变）⇒ 机制正确且不伤人。
   navEnemyCellCost: 2,
