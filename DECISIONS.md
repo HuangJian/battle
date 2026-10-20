@@ -8273,3 +8273,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`pytest e2e/test_auto_handoff_e2e.py` **14/14 绿**（此前 1 红）· nn python gate
   **4781 passed / 2 skipped**（ruff + mypy 全绿）· `tests/test_reuse_ledger.py` 绿。
 - **全文** → `docs/nn/remote-transport.md` §109。
+
+## §2026-10-20-goalnn-port-probe-bounded — 端口探测必须带上界：`portListen` 的 connect 在丢 SYN 的主机上永不返回
+
+- **触发**（用户 2026-10-20）：「`portOwnedBy（真实监听进程） > spec.ownsResource …（真监听）` -- fix it」
+  （= `dashboard/tests/training-port-reclaim.test.ts` 里修完 `freePort()` 之后剩下的最后一条红）。
+- **根因**：`dashboard/src/core/proc.ts::portOwnedBy(pid, port)` 在 `portOwnerPids(port)` 为空时退回
+  `portListen(port)` 再确认一次；`portListen` = `Bun.connect`，它默认「没人监听 ⇒ 立刻 ECONNREFUSED」。
+  在**丢回环 SYN** 的主机上这个前提不成立：探针实测 `Bun.connect` 到闭端口 >6s 不返回、
+  `portOwnedBy(pid, 闭端口)` >5s 挂死（`portListen` 在 `bind` 探测下 3ms、`lsof` 51ms）。
+  影响面不止这一个函数：`portListen` 是所有「就绪 / 归属 / 空闲」判断的代理
+  （`specs.ownsResource`、`slots.allocateSlot`、`stack/hub` 就绪复核、`stack/smoke`、`launch/cli` 占用扫描）。
+- **决定**：`core/net.ts::portListen` 加**上界** `PORT_PROBE_TIMEOUT_MS = 500`（第三参可覆盖）：
+  `Promise.race([probe, 超时])`，超时按 `false`；超时之后才连上的那一份连接仍然 `end()`（不许漏 socket），
+  并清 timer。判据依据：回环上真在监听的 socket 由内核直接回 SYN-ACK（不等 `accept`），握手 µs 级
+  —— 500ms 是三个数量级的余量，而「没人听」「内核丢 SYN」两个真相的正确答案都是 `false`。
+- **被否决**：① 只在测试里打桩 `portOwnedBy`（绕过被测函数 = 删掉覆盖面）；② 另写一个“快速失败”专用
+  探针（同一个真相做成两份）；③ 超时当 `true`（`owners` 为空已经说明没人持有，判 true 会让监督器把
+  僵尸认成新进程）。也不改 `Bun.connect` 的用法本身（它仍是“能连上就是在听”的正确判据）。
+- **读数（同一台 Linux 沙箱）**：该测试文件 12 pass / 3 fail → **15 pass / 0 fail（1.7s）**；
+  `bun run test` 全量 1783/3（157.4s）→ **1786 pass / 0 fail（21.6s）**；`typecheck` / `oxlint`（0 警告）/
+  `oxfmt --check` / `bun dashboard/src/server/build.ts` 四份 bundle 全绿。
+- **落地**：`dashboard/src/core/net.ts`（`PORT_PROBE_TIMEOUT_MS` + `portListen` 上界）·
+  `dashboard/tests/training-port-reclaim.test.ts`（`freePort` → bind 探测 `portFree`）。
+- **全文** → `docs/nn/console.md` §41。
