@@ -108,6 +108,23 @@ describe('读侧回退', () => {
     expect(sanitizeViewCourse('r-hot')).toBe('r-hot')
   })
 
+  it('课程发现：库里的 `*.run` / 下划线杂项目录不进 select（历史残留也挡）', () => {
+    // 2026-10-20 用户报障：select 里冒出 `ab-v6-*.jsonl.run` / `repro-course`。
+    // 前者是独立评估目录（本不该进库），后者是人工 repro 目录。即使它们已经躺在库里
+    // （历史残留），课程发现也必须按名字白名单挡住——否则清库之前 select 永远是脏的。
+    for (const junk of ['v6-freeze.jsonl.run', '_repro']) {
+      const dir = path.join(LIB, junk)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(path.join(dir, 'mirror-meta.json'), '{}')
+    }
+    const names = discoverCourses()
+    expect(names).not.toContain('v6-freeze.jsonl.run')
+    expect(names).not.toContain('_repro')
+    expect(sanitizeViewCourse('v6-freeze.jsonl.run')).toBe('')
+    // 正常备份课（r-hot，无 curricula 文件）仍照常发现——白名单不是「只认 curricula」。
+    expect(names).toContain('r-hot')
+  })
+
   it('live 优先：同名课重开后显示当次 run', async () => {
     makeCourse('r-hot', [9])
     const m = await readCourseMetrics('r-hot')
@@ -170,12 +187,19 @@ describe('读侧回退', () => {
   it('动作闸：备份课 409「无活体」；setCourse 不受限', async () => {
     process.env.BCITY_CONSOLE_LOG = path.join(DIR, 'console.log')
     process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
-    expect(actionRequiresLive('preset')).toBe(true)
+    // ★ 训练进程与课程正交（2026-10-20 报障：课程 tmp 被删后，停 trainer/hub 被
+    //   「无活体」409）：组件启停 / 启动编排 / 组件冒烟 / 平台开关都不消费课程工作区，
+    //   不得进闸。trainer 是共享进程（一个进程服务所有课程），课程备份与否与它无关。
+    //   端到端 stop 行为在 course-lifecycle.test.ts ⑦ 钉死。
+    for (const a of ['start', 'stop', 'preset', 'smoke', 'setMode'])
+      expect(actionRequiresLive(a)).toBe(false)
     expect(actionRequiresLive('setCourse')).toBe(false)
     // ★ openCourse 是活体的**创造者**，不是消费者：2026-10-20 报障（y26-shotmix 只有备份
     //   数据 ⇒ 开课被 409 死锁）。端到端行为在 course-lifecycle.test.ts ⑥ 钉死。
     expect(actionRequiresLive('openCourse')).toBe(false)
-    const resp = await routeAction('preset', { course: 'r-cmp' })
+    // 取一个**仍然需要活体工作区**的课程动作验闸（redoPpo 写 tmp/<课>/redo-ppo.json）；
+    // 进程类动作（preset 等）已在上面钉死为不受限，不能拿它当闸的样本（会真起进程）。
+    const resp = await routeAction('redoPpo', { course: 'r-cmp' })
     expect(resp?.status).toBe(409)
     const text = await resp!.text()
     expect(text).toContain('无活体')

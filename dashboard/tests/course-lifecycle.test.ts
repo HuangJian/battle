@@ -682,3 +682,38 @@ describe('备份课重开：openCourse 是活体的**创造者**，不是消费�
     }
   })
 })
+
+// ────────────────── ⑦ 备份课（tmp 已清）不阻塞进程启停：stop 不被「无活体」闸拦 ──────────────────
+//
+// 2026-10-20 用户报障：`❌ 无活体：y26-dmg 只有备份数据（tmp 已无该课），不能执行 stop`。
+// 根因：`COURSE_MUTATING_ACTIONS` 把**组件级** `start`/`stop` 与**课程级** `stopCourse`
+// 混为一谈。trainer/hub 是共享进程（一个进程服务所有课程），课程 tmp 在不在与它无关——
+// 进程启停不得被课程数据状态阻塞（与 ⑥ 的 openCourse 是同一类「闸住了不该闸的」错误）。
+describe('进程与课程正交：备份课不得阻塞组件启停', () => {
+  const STOP_COURSE = 'c-stop-orphan'
+
+  it('tmp 已清、只有备份数据 ⇒ stop trainingLoop 仍成功（不是 409）', async () => {
+    const dir = path.join(TRAJ, STOP_COURSE)
+    const lib = process.env.BCITY_COURSE_METRICS!
+    try {
+      // 先造一份备份再删 tmp —— 与 tmp-clean 之后留下的状态一致。
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        `${JSON.stringify({ event: 'iteration', iter: 1, winRate: 0.5 })}\n`,
+      )
+      syncAll({ course: STOP_COURSE, budgetBytes: 0 })
+      rmSync(dir, { recursive: true, force: true })
+      expect(existsSync(dir)).toBe(false)
+
+      const resp = await routeAction('stop', { course: STOP_COURSE, component: 'trainingLoop' })
+      expect(resp?.status).toBe(200)
+      const body = (await resp!.json()) as { ok?: boolean; message?: string }
+      expect(body.ok).toBe(true)
+      expect(body.message ?? '').not.toContain('无活体')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(lib, { recursive: true, force: true })
+    }
+  })
+})

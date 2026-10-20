@@ -74,6 +74,10 @@ export function isCourseName(name: string): boolean {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return false
   // 测试/探针/库自身子目录不是课程（`pytest-tmp` 下有形如课程的临时账本）。
   if (name === 'pytest-tmp' || name === 'backups' || name === 'deliver') return false
+  // `tmp/<name>.jsonl.run/` = 独立评估输出目录（有 eval_log/dist-agent-meta，没有
+  // training_log）——**不是课程**。2026-10-20 报障：这些目录被转存后，课程发现把
+  // `ab-v6-*.jsonl.run` 当成备份课捞进左下角 select。
+  if (name.endsWith('.run')) return false
   return !name.startsWith('_')
 }
 

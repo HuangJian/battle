@@ -146,10 +146,11 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
   return resp
 }
 
-/** 课程级**改状态**的动作（备份课一律 409「无活体」）。
+/** 需要**课程活体工作区**的动作（备份课一律 409「无活体」）。
  *
- *  为什么在分发层做（plan/course-metrics-persistence §3.3 / 评审 F6）：备份课在 UI 里可见
- *  （读数要能看），但起课/停课/导出/导入/评估都必须有 tmp 活体；散在每个 case 里迟早漏一个。
+ *  判据不是「名字听起来像改状态」，而是「这个动作是否读写 `tmp/<课>/`」：备份课在 UI 里
+ *  可见（读数要能看），但起课/停课/导出/导入/评估都必须有活体；散在每个 case 里迟早漏一个。
+ *  为什么在分发层做：plan/course-metrics-persistence §3.3 / 评审 F6。
  *  `setCourse` 不在此列——它只切视图，是读。
  *
  *  ★ `openCourse` **也不在此列**（2026-10-20 用户报障：`无活体：y26-shotmix 只有备份数据
@@ -157,16 +158,19 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
  *  开课标记都是它写的），不是消费者——把它放进闸里，tmp 被清理过、只剩备份的课就被死锁：
  *  越需要开课，越被「没有活体」拒绝，而 plan 明确支持同名课重开（live 优先，旧数据留备份库）。
  *  它的前置检查本来就在 `openCourse` 内部（课程文件存在性 + 锁身份 + 意图文件健康），
- *  不需要这道闸代劳。 */
+ *  不需要这道闸代劳。
+ *
+ *  ★ **组件启停/启动编排/组件冒烟/平台开关也不在此列**（2026-10-20 用户报障：
+ *  `无活体：y26-dmg ... 不能执行 stop`）。trainer / hub / 隧道 / 本机 worker 都是**共享**
+ *  进程（一个进程服务所有课程，见 `SHARED_COMPONENTS`），课程 tmp 只是它们碰巧在用的数据；
+ *  课程被清理不该让进程停不下来（反之亦然）。「训练进程与课程正交」是 2026-09-20 进程/课程
+ *  解耦的既有口径：`start`/`stop`/`preset`/`smoke` 的 handler 都不消费 ctx.course 的活体
+ *  工作区，`setMode` 写的是全局 `rl.*`。plan §3.3 里要闸的是**课程级** stop（本文件的
+ *  `stopCourse`）——实现曾把同名的组件 `stop` 一起闸了，是同一类「闸住了不该闸的」错误。 */
 const COURSE_MUTATING_ACTIONS = new Set([
-  'start',
-  'stop',
-  'smoke',
   'smokeTrain',
-  'preset',
   'stopCourse',
   'setCoursePaused',
-  'setMode',
   'evalA',
   'evalReplays',
   'evalProbeRun',

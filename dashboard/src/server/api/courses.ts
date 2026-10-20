@@ -7,6 +7,7 @@ import { courseEnableMarkerPath } from '../../stack/courses'
 import {
   coldCourses,
   hasHotMirror,
+  isCourseName,
   libraryRoot,
   readArchiveIndex,
   readMirrorMeta,
@@ -21,6 +22,8 @@ function backupCourses(): string[] {
   try {
     for (const ent of readdirSync(libraryRoot(), { withFileTypes: true })) {
       if (!ent.isDirectory()) continue
+      // 名字白名单（`*.run` / `_*` / 测试目录）——历史残留也要挡，不能等清库。
+      if (!isCourseName(ent.name)) continue
       if (hasHotMirror(ent.name)) names.add(ent.name)
     }
     for (const course of coldCourses()) names.add(course)
@@ -47,6 +50,9 @@ function backupCourseMtime(course: string): number {
 export function sanitizeViewCourse(raw: string | null): string {
   if (!raw) return ''
   if (!/^[A-Za-z0-9._-]+$/.test(raw)) return ''
+  // 与课程发现同一套名字白名单：`*.run` 的评估目录 / `_*` 杂项不是课程，不能借
+  // `?course=` 绕过 select 的过滤（读面仍是 live⇒mirror⇒archive 三态）。
+  if (!isCourseName(raw)) return ''
   try {
     if (existsSync(tmpCourseDir(raw))) return raw
     // 备份课（热/冷）也放行：tmp 被清后仍能在 select 与 ?course= 里打开（plan §3.3 R1）。

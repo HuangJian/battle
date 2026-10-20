@@ -17,6 +17,7 @@ import {
   MIRROR_FILES,
   type ArchiveIndex,
   type MirrorMeta,
+  isCourseName,
   memberName,
   parseArchiveIndex,
   parseMirrorMeta,
@@ -124,6 +125,7 @@ export function coldCourses(): string[] {
   for (const name of names) {
     if (!name.endsWith('.tar.gz')) continue
     const course = name.slice(0, -'.tar.gz'.length)
+    if (!isCourseName(course)) continue
     if (readArchiveIndex(course)) out.push(course)
   }
   return out.sort()

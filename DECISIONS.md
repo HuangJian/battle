@@ -8058,3 +8058,36 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   用例确认一字未动。
 - **门禁**：`bun run check` 绿（tsc ＋ check-decisions ＋ agents-budget ＋ 根套件）；
   `tools/githook/pre-commit --selftest` 绿。
+
+## §2026-10-20-process-lifecycle-not-course-gated — 组件启停与课程正交：`stop` 闸的是 `stopCourse`，不是共享进程
+
+- **报障**（用户 2026-10-20）：课程的 `tmp/<课>/` 被清理后，停止 trainer / hub 报
+  `❌ 无活体：y26-dmg 只有备份数据（tmp 已无该课），不能执行 stop`。课程数据没了，
+  进程却停不下来。
+- **根因**：`COURSE_MUTATING_ACTIONS` 用「动作名像改状态」当判据，把**组件级** `stop`
+  （`stopComponent(key, course)`）与**课程级** `stopCourse` 混为一谈；`start` / `preset` /
+  `smoke` / `setMode` 也一起被误闸。trainer / hub / 隧道 / 本机 worker 都是
+  `SHARED_COMPONENTS`（一个进程服务所有课程，账本槽恒 `''`），它们的启停根本不消费
+  `ctx.course` 的工作区；课程 tmp 只是它们碰巧在用的数据。plan/course-metrics-persistence
+  §3.3 的闸本来针对「起课/停课/导出/导入/评估」这些**课程级**动作，实现把同名的组件
+  `stop` 一起收进来，与 `openCourse` 被误闸（§2026-10-20-dashboard-open-course-not-live-gated）
+  是同一类错误：闸住了不该闸的。
+- **决定**：`COURSE_MUTATING_ACTIONS` 只保留**真正读写 `tmp/<课>/`** 的动作：
+  `smokeTrain` / `stopCourse` / `setCoursePaused` / `eval*` / `redoPpo` / `archiveCourse` /
+  `exportTaskBundle` / `cloud-halt` / `cloud-resume` / `releaseCourseHold` / `unfreeze-job` /
+  `autoOfflineHandoff`。移除 `start` / `stop` / `preset` / `smoke` / `setMode`——
+  前四者是共享进程生命周期/探针，`setMode` 写的是全局 `rl.*`（平台配置），都不需要课程活体。
+  注释里把判据从「动作名」改成「是否读写 `tmp/<课>/`」，并写明 plan 里的 `stop` 指
+  `stopCourse`。
+- **备选与否决**：① 只特判 trainer/hub 的 `stop` —— 否（`start` / `preset` / `smoke` 与
+  其它共享组件会以同样方式复发；按动作类型豁免才是根因修复）；② 闸里按
+  `isSharedComponent` 判断 —— 否（动作本身不带 component，且 `preset`/`setMode` 根本不是
+  组件）；③ 把课程 tmp 目录自动重建/恢复 —— 否（停进程不该有数据副作用；课程重开是
+  `openCourse` 的事）。
+- **回归**：`dashboard/tests/course-metrics-read.test.ts` 钉住
+  `actionRequiresLive({start,stop,preset,smoke,setMode}) === false`，并用仍需要活体的
+  `redoPpo` 验证 409 闸仍在；`dashboard/tests/course-lifecycle.test.ts` ⑦ 端到端：
+  备份课（tmp 已清）`routeAction('stop', {component:'trainingLoop'})` 返回 **200**，
+  不再是 409。两条先红后绿（红时拿到的就是用户那条原文 409）。
+- **门禁**：dashboard typecheck ＋ **1757 用例** · `bun run check` **2634 pass / 8 skip / 0 fail** ·
+  `bun run build` 过。

@@ -193,6 +193,19 @@ describe('mirror sync（真临时目录）', () => {
     expect(existsSync(path.join(LIB, 'pytest-tmp'))).toBe(false)
   })
 
+  it('扫描面白名单：`*.run/**` 的 eval 尾账不进库（它们不是课程）', () => {
+    // 2026-10-20 用户报障：左下角课程 select 里冒出一串 `ab-v6-*.jsonl.run` / `v6-*.jsonl.run`。
+    // 根因：`isCourseName` 的注释写着 `*.run/**` 不是课程，实现却漏了后缀判据 ⇒ 独立评估
+    // 目录的 `eval_log.jsonl` / `dist-agent-meta.jsonl` 被当成课程转存，课程发现再把它们当
+    // 备份课捞回选择器。注：这类目录**有** eval 账本、**没有** `training_log.jsonl`。
+    const run = path.join(TMP, 'ab-eval.jsonl.run')
+    mkdirSync(run, { recursive: true })
+    writeFileSync(path.join(run, 'eval_log.jsonl'), '{"event":"eval_summary"}\n')
+    writeFileSync(path.join(run, 'dist-agent-meta.jsonl'), '{"win":1}\n')
+    syncAll({ budgetBytes: 0 })
+    expect(existsSync(path.join(LIB, 'ab-eval.jsonl.run'))).toBe(false)
+  })
+
   it('锁：第二次拿不到；死 pid 陈旧锁可抢占', () => {
     const root = libraryRoot()
     const release = acquireLock(root, Date.now())
