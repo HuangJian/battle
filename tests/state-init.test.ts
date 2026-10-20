@@ -255,7 +255,7 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.initCounters).toBeNull()
     expect(a.initSnapshot).toBe('')
     expect(a.shard.metrics[0][0]).toBe(0)
-    expect(METRICS_VERSION).toBe(11) // v11：热线族 2 列（行宽 74→76）
+    expect(METRICS_VERSION).toBe(12) // v12：v11 热线族 + freeze/星盾窗 3 列（行宽 76→79）
     expect(a.shard.n).toBe(b.shard.n)
     expect(a.ticks).toBe(b.ticks)
     expect(a.kills).toBe(b.kills)

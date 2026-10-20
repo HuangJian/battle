@@ -239,3 +239,73 @@ def test_write_shard_selects_the_bc_list_for_bc_containers(tmp_path: Path) -> No
     shard_mod.write_shard(files, manifest, str(out))
 
     assert sorted(p.name for p in out.iterdir()) == sorted([*shard_mod.BC_SHARD_FILES, "manifest.json"])
+
+
+def test_v6_optional_files_are_accepted_not_rejected() -> None:
+    """B1 v6（2026-10-20）：`a_hold.npy`/`lp_hold.npy` 出现时必须**放行**。
+
+    事故：v6 的三头 shard 多落这两列，而 `SHARD_FILES` 是**严格集合**校验
+    ⇒ 云端把每一局都判成 `file set mismatch (extra=['a_hold.npy','lp_hold.npy'])`
+    ⇒ 三条腿的 rollout 全部 requeue 到放弃（实测 157 次同一原因，`it1/` 空目录）。
+
+    修法 = **可选白名单**（`OPTIONAL_SHARD_FILES`）：多出来的只允许是这两列，
+    缺的仍然一律拒收。**不要求 v6 shard 必须带它们** —— 那会让所有历史 legacy
+    shard 被反向拒收；"v6 必须有"的强校验放在加载端
+    （`np_core._check_mask_width` 用 `a_hold` 存在性推掩码宽度 9/7）。
+    """
+    m = {"wver": "w1", "stage": 3, "seed": 7}
+    files = _petick_files()
+    # ① 纯 legacy（没有这两列）⇒ 照旧放行
+    assert shard_mod.validate_result(m, files, "w1", {(3, 7)}, set()) is None
+
+    # ② 带两个可选项 ⇒ 也必须放行（修复前这里是 mismatch 拒收）
+    v6 = _petick_files(**{n: b"\x00\x01" for n in shard_mod.OPTIONAL_SHARD_FILES})
+    assert len(v6) == len(shard_mod.SHARD_FILES) + len(shard_mod.OPTIONAL_SHARD_FILES)
+    assert shard_mod.validate_result(m, v6, "w1", {(3, 7)}, set()) is None
+
+    # ③ 可选项之外的多余文件仍然拒收（白名单不是开口子）
+    bad = _petick_files(**{n: b"\x00\x01" for n in shard_mod.OPTIONAL_SHARD_FILES})
+    bad["evil.npy"] = b"\x00"
+    assert shard_mod.validate_result(m, bad, "w1", {(3, 7)}, set()) == (
+        "file set mismatch (extra=['evil.npy'], missing=[])"
+    )
+
+    # ④ 缺必需文件仍然拒收（可选项的宽松不掩盖缺件）
+    lack = _petick_files(**{n: b"\x00\x01" for n in shard_mod.OPTIONAL_SHARD_FILES})
+    lack.pop("mask.npy")
+    assert shard_mod.validate_result(m, lack, "w1", {(3, 7)}, set()) == (
+        "file set mismatch (extra=[], missing=['mask.npy'])"
+    )
+
+
+def test_write_shard_persists_optional_files(tmp_path) -> None:
+    """B1 v6（2026-10-20）：`write_shard` 必须把可选项**落盘**。
+
+    事故：`write_shard` 只遍历 `_shard_files_for(manifest)`（必需清单）⇒ 节点上传的
+    `a_hold.npy`/`lp_hold.npy` 被**静默丢弃**。落盘的 shard 因此有 **9 宽 mask 却没有
+    a_hold** ⇒ 云 worker 加载时 `_check_mask_width` 炸：
+      `mask.npy 形状 (620, 9) 与动作空间不符：a_hold.npy 不在 ⇒ 期望 (7,)`
+    而且 job 被标成"内容决定性崩溃（同一份字节重领也会同一处炸）"⇒ 直接 skip 不重试。
+
+    ★ 丢文件比报错更危险：若没有那条宽度校验，worker 会按 7 宽读 9 宽 mask（静默错位）。
+    """
+    m = {"wver": "w1", "stage": 3, "seed": 7}
+    files = {n: b"\x00\x01" for n in shard_mod.SHARD_FILES}
+    files.update({n: b"\x02\x03" for n in shard_mod.OPTIONAL_SHARD_FILES})
+    out = tmp_path / "rl_s3_seed7"
+    shard_mod.write_shard(files, m, str(out))
+
+    on_disk = {p.name for p in out.iterdir()}
+    # 必需 + 可选 + manifest 全在
+    assert on_disk == set(shard_mod.SHARD_FILES) | set(shard_mod.OPTIONAL_SHARD_FILES) | {
+        "manifest.json"
+    }
+    # 可选项的字节逐位保留（不是空文件、不是占位）
+    for n in shard_mod.OPTIONAL_SHARD_FILES:
+        assert (out / n).read_bytes() == b"\x02\x03"
+
+    # 反过来：`files` 里**没有**可选项时不能凭空造出空文件
+    files2 = {n: b"\x00\x01" for n in shard_mod.SHARD_FILES}
+    out2 = tmp_path / "rl_s3_seed8"
+    shard_mod.write_shard(files2, m, str(out2))
+    assert {p.name for p in out2.iterdir()} == set(shard_mod.SHARD_FILES) | {"manifest.json"}

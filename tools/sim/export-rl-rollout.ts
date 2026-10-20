@@ -279,10 +279,19 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
 export const METRICS_DIM = 79
 /**
- * metrics v11：热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被 §4bis 杀线
- * 拦下）。与 Python METRICS_VERSION 同步；变更元组 = shard 格式变更（老规矩，见文件头注释）。
+ * metrics **v12**：v11 的热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被
+ * §4bis 杀线拦下）+ v12 的 freeze ∪ 道具盾窗口 3 列（idx76–78，
+ * plan/nn-capability-upgrade.plan.md §4-B5）。与 Python METRICS_VERSION 同步；
+ * 变更元组 = shard 格式变更（老规矩，见文件头注释）。
+ *
+ * ★ 2026-10-20 修正：v12 那次加列（idx76–78）**只 bump 了 Python 侧、漏了 TS** ——
+ * `METRICS_DIM` 已经 79（= v12 的行宽），常量却还写 11，而两条测试也锁着 11。
+ * 后果：所有新 rollout shard 的 manifest 声明 `metrics_version=11`，发布端的行宽版本门
+ * （`iter_shard_dirs` → `_shard_metrics_version != METRICS_VERSION`）把**每一局都过滤掉**
+ * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
+ * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 11
+export const METRICS_VERSION = 12
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -2169,7 +2178,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v11 = [N+1,76]）；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v12 = [N+1,79]）；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,

@@ -1,0 +1,146 @@
+// 课程 y26-shotmix —— **"率→量"腿**（机制验证；Φ 总量刻意保持不变）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20：人类 vs NN 的差距里，**出手频率是最硬的一条**
+//   （161 局人类参照：shots/千 **12.31** vs NN **7.52** = 1.64×）；
+//   但**命中率 NN 更高**（0.814 vs 0.788）、kills/shot 也更高（0.348 vs 0.325）
+//   ⇒ **不是瞄不准，是不敢打**。
+//
+// ── 本腿要证的机制：`wAcc` 在结构上惩罚"多射" ──────────────────────────────
+//   `wAcc * aimHits/(playerShots+1)` 奖励的是**准确率** —— 分母是出手数。
+//   边际账（用 it105 单局 58 shots / 50 hits / 8 misses，`wMiss 0.35` `wAcc 15.3`）：
+//     · 多射 1 发**空枪**：`wMiss −0.35`，且分母 +1 ⇒ `wAcc` 项 13.0 → 12.77 = **−0.23**
+//       ⇒ **成本 0.58 分/发**
+//     · 多射 1 发**命中**：`wHit +0.20`，`wAcc` 项 13.0 → 13.06 = **+0.06**（分子+1 但分母也+1）
+//       ⇒ **收益 0.26 分/发**
+//     ⇒ 以命中率 0.8 计，多射一发的**期望值 = 0.8×0.26 − 0.2×0.58 = +0.09**：
+//       名义上微正，但只要命中率略低于 0.9、或敌人少（空射率 7% 的实测在"朝道具移动"时更高），
+//       **期望立刻转负** ⇒ 策略学到的最优解就是**少射**。
+//   ⇒ 这解释了"出手少 1.64×"这个现象，而且它是**奖励函数的直接后果，不是探索不足**。
+//
+// ── 单变量声明：动的是"偏好形状"，不是"总量"────────────────────────────────
+//   改两个参数，**刻意让 Φ 总量净变化 ≈ 0**：
+//     `wAcc` **15.3 → 7.6**（准确率价减半）· `wHit` **0.2 → 0.35**（命中量价 +75%）
+//   净 ΔΦ（it105 单局，50 命中）= (7.6−15.3)×50/59 + (0.35−0.2)×50
+//                                  = −6.53 + 7.50 = **+0.97 分 ≈ Φ 的 1.2%**
+//   ★ **为什么要净 0**：如果同时抬高总量，行为变化就分不清"是因为率→量的偏好变了"
+//     还是"因为整体激励变强了"。净 0 才能**孤立**这一个变量。
+//   ⚠ 代价：**胜率层面不可测**（1.2% ≪ 15% 剂量线）。所以本腿**不判 win**，
+//     判的是**行为指标**（shots/千 / hitRate）。这是本腿的设计前提，不是缺陷。
+//   其余 18 个参数、公式字符串、terminal、scheme、所有训练参数、起点、seed **全部逐字不动**。
+//
+// ── 改后的边际账（为什么这个配比能翻符号）──────────────────────────────────
+//   `wMiss 0.35`（不动）· `wAcc 7.6` · `wHit 0.35`：
+//     · 空射 1 发成本 = 0.35 + 7.6/59² ≈ **0.35 + 0.113 = 0.463**
+//     · 命中 1 发收益 = 0.35 + (7.6 的边际增量) ≈ **0.35 + 0.113 = 0.463**
+//     ⇒ 命中率 p 下期望 = p×0.463 − (1−p)×0.463 = **(2p−1)×0.463**
+//     ⇒ **p > 0.5 就开始赚钱**（原来要 p > 0.69 才赚）。NN 的 p = 0.814 ⇒ **稳定正**。
+//   ⇒ 预期**出手频率上升**，而命中率**不崩**（`wMiss` 一分没降，脱靶仍然挨罚）。
+//
+// ── 判据（**行为门**，不是胜率门）──────────────────────────────────────────
+//   基线 = `y26-null` 同期（同 seed / 同面板 / 同起点）。
+//   主判 it100（it80–120 五点中位）：
+//     · **shots/千 ≥ null 同期 + 15%**（7.5 → ≥8.6）⇒ 机制生效
+//     · 且 **hitRate ≥ 0.75**（it95 是 0.814，容许 −0.064）⇒ 没有变成乱射
+//     · 且 **kills_mean ≥ null 同期 − 0.5** ⇒ 出手多了，杀伤不能掉
+//   副判（同为 it80–120 中位）：
+//     · **aimMisses/局 ≤ null 同期 + 40%** —— 出手涨 15% 时脱靶涨 40% 是可接受的，
+//       但如果脱靶涨得比出手快，说明是"乱射"而不是"敢打"，机制判负。
+//   延伸（it160–200）：若 shots 涨了、hitRate 没崩、kills 也没涨 ⇒ **结论同样是负的**：
+//     说明"出手少"**不是**当前瓶颈（那瓶颈在别处，比如位置/时机），
+//     这条结论本身有价值，要写进报告，**不要再加一档 wHit**。
+//
+// ── 杀腿（任一即停）────────────────────────────────────────────────────────
+//   ① it40（it30–50）shots/千 没涨 ≥ 5% ⇒ **机制没生效**（`wAcc` 不是压制出手的原因），
+//      停。**不许把 wAcc 再往下压**（那只是在赌同一个假设）。
+//   ② hitRate < 0.70 或 aimMisses/局 > null + 60% ⇒ 变成乱射，停。
+//   ③ kills_mean < 15.0 ⇒ 杀不动，停。
+//   ④ timeout > 5%（乱射会拖长局）⇒ 停。
+//   ⑤ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红（Φ 总量本该持平，跌说明结构失衡）。
+//   ⑥ **win 单点 < 0.60 ⇒ 停**：虽然本腿不判 win，但胜率崩了说明"多射"真的有害。
+//
+// ── 与另两腿的关系（三腿同时开，必须互不干扰）─────────────────────────────
+//   `y26-null`（基线）· `y26-dmg`（wDmg ×4）· `y26-shotmix`（本腿）
+//   · 三条腿**同起点、同 seed（20270206）、同面板、同预算** ⇒ 可与 null 做同轮逐座位配对。
+//   · 本腿动的 `wAcc`/`wHit` 与 `y26-dmg` 动的 `wDmg` **无交叠**（不同参数、不同 metric）
+//     ⇒ 两条腿的结果可以并读，不会互相污染。
+//   · ⚠ 若三腿都要 24h × 500 iters 而算力不够 ⇒ 优先后台跑 `y26-null` + 本腿
+//     （一个给基线、一个给机制），`y26-dmg` 的靶（承伤）已有 y25 的池外证据支撑，可稍后。
+//   · ⚠ **B6（窗口命中奖励）不得与本线同时生效**（方向相反）。
+{
+  "version": 5,
+  "name": "y26-shotmix",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y25-price 逐字，**只改 wAcc 15.3→7.6 与 wHit 0.2→0.35**（净 Φ ≈ +1 分）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.35,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 7.6,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y26-v6/y26-v6.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y26-shotmix/weights.json",
+  "traj": "tmp/y26-shotmix",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y26-shotmix",
+  "backup_prefix": "y26-shotmix",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

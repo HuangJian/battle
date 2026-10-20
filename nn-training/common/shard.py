@@ -33,6 +33,20 @@ SHARD_FILES = (
     "mask.npy",
 )
 
+#: **可选** shard 文件（2026-10-20，B1 v6）：出现了才允许，**不强制要求**。
+#:
+#: v6 的三头 shard 多落这两列（`hold` 的动作与 logp），legacy 5/2 shard 没有它们。
+#: 校验分成两半：
+#:   · **本表 = 宽容侧**：`validate_result` 只拒绝"清单外且不在本表"的多余文件；
+#:     不要求 v6 shard 必须带这两列 —— 强制要求会让**所有历史 legacy shard 被反向拒收**。
+#:   · **强校验在加载端**：`worker/ppo/np_core.py::_check_mask_width` 用
+#:     `a_hold.npy` 的存在性推掩码宽度（9 vs 7），缺失/不一致即响亮报错。
+#:     ⇒ 这里的宽松不会让"半个 v6 shard"混过去。
+OPTIONAL_SHARD_FILES = (
+    "a_hold.npy",
+    "lp_hold.npy",
+)
+
 # M8 意图 RL shard 清单（export-intent-rollout.ts 产物）——意图步 semi-MDP：
 # inject（prev one-hot 8 + duration）与 dt（窗口时长 tick，变步长 GAE 用）替换
 # a_move/a_fire/lp_move/lp_fire；mask 为 8 类死类掩码。
@@ -134,10 +148,14 @@ def validate_result(
             return f"bc loss-skip shard must carry no files (got {sorted(files)})"
         return None
     want = _shard_files_for(manifest)
-    if set(files.keys()) != set(want):
-        extra = sorted(set(files) - set(want))
-        lack = sorted(set(want) - set(files))
-        return f"file set mismatch (extra={extra}, missing={lack})"
+    got = set(files.keys())
+    if got != set(want):
+        # 多出来的只允许是 OPTIONAL_SHARD_FILES（v6 的 a_hold/lp_hold）；
+        # 缺的仍然一律拒收（必需清单是硬的）。
+        extra = sorted(got - set(want) - set(OPTIONAL_SHARD_FILES))
+        lack = sorted(set(want) - got)
+        if extra or lack:
+            return f"file set mismatch (extra={extra}, missing={lack})"
     for name, val in files.items():
         try:
             # v2 容器值为原始 bytes；v1 旧 agent 值为 base64 str——双模兼容。
@@ -161,7 +179,16 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     直接写盘不受影响；此处补齐 dist 路径两侧同规。
     """
     os.makedirs(out_dir, exist_ok=True)
-    for name in _shard_files_for(manifest):
+    # ★ B1 v6（2026-10-20）：**可选项也要落盘**。
+    # 原先这里只写 `_shard_files_for(manifest)`（必需清单）⇒ 节点上传的
+    # `a_hold.npy`/`lp_hold.npy` 被**静默丢弃**，落盘的 shard 于是有 9 宽 mask
+    # 却没有 hold 两列 ⇒ 云 worker 加载时 `_check_mask_width` 直接炸：
+    #   `mask.npy 形状 (620, 9) 与动作空间不符：a_hold.npy 不在 ⇒ 期望 (7,)`
+    # （那条校验是在**正确报警**，根因在写盘侧 —— 丢文件比报错更隐蔽：
+    #  若没有那条校验，worker 会按 7 宽读 9 宽 mask，静默错位。）
+    names = list(_shard_files_for(manifest))
+    names += [n for n in OPTIONAL_SHARD_FILES if n in files]
+    for name in names:
         val = files[name]
         raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
         with open(os.path.join(out_dir, name), "wb") as f:

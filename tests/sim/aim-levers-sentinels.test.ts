@@ -72,8 +72,8 @@ describe('口径源码哨兵：训练导出器（P3）', () => {
     expect(apply).toBeLessThan(score) // 打包/打分前一次应用
   })
 
-  it('METRICS_VERSION = 11（metrics v11 热线族 2 列；plan/metrics-v11-hotlane.plan.md）', () => {
-    expect(roll).toContain('export const METRICS_VERSION = 11')
+  it('METRICS_VERSION = 12（v11 热线族 + v12 freeze/星盾窗 3 列；2026-10-20 补 bump）', () => {
+    expect(roll).toContain('export const METRICS_VERSION = 12')
   })
 
   it('metrics v11：bulletOwnerId 接线（3 处 push，且写在 bulletId 之后）', () => {

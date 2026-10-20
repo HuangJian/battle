@@ -1,0 +1,231 @@
+// 课程 y26-null —— **v6 三头动作空间的基线腿**（null 腿：奖励逐字不动）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20：`plan/nn-capability-upgrade.plan.md` 的 B1 三头已落地并验证，
+//   现在要回答的问题是 —— **换成 v6 动作空间（hold2/move4/fire3）之后，
+//   单靠结构本身能不能站住 y25-price 的水平？**
+//   在回答它之前，任何新奖励项都不该进来（否则分不清是结构还是奖励的功劳）。
+//
+// ── 本腿是 null 腿（唯一变量 = 动作空间 + 起点权重）────────────────────────
+//   `reward` 整块（公式字符串 + 20 个参数 + terminal + scheme）**逐字 = y25-price**。
+//   `lr` / `epochs` / `mb` / `gamma` / `lam` / `ppo_schedule` / `decision_k` /
+//   `target_transitions` / `seed` / `eval_*` 全部逐字。
+//   变的只有两样：
+//     ① `bc` ← `y26-v6.it0.json`（y25-price.it95 的 **v6 迁移版**，见下）；
+//     ② 网络按 `arch.actionV6=true` 建三头（`build_ppo` 读 arch 自动切）。
+//
+// ── 为什么奖励可以逐字沿用（这是本腿最容易被质疑的一点，先证）──────────────
+//   表面上的风险：y25 的主力罚项是 `- wBlock*(idleTicks - stopTicks)/(ticks+1)`，
+//   而 v6 的 `hold=1` 与 legacy 的 `move=0` 都让 `moving=false` —— 看起来
+//   `idleTicks - stopTicks` 会恒为 0、这一项（Φ 的 21%）会静默塌掉。
+//
+//   逐情形展开（`stopTicks` 已在 commit 2f40560e 里改成 **v6 感知**：读 hold 位）：
+//     情形                    idleTicks   stopTicks   idle−stop
+//     legacy move=0（主动停）      计          计           0
+//     v6     hold=1（主动停）      计          计           0
+//     撞墙（moving 仍为 true）    不计        不计           0
+//     **被转向冷却 halt**         计          不计          +1
+//   ⇒ 两条路径下这一项**都等于「被转向冷却 halt 的拍数」**，不是"撞墙"也不是"主动停"。
+//   ⇒ **v6 的 hold 是免费的**（不计入罚项），**主动停也不会被罚** ✓
+//   ⇒ 所以 v6 的新能力（hold 边转边等 / fireBefore 边退边打）**不会被奖励函数压死**。
+//   （⚠ 上一版我误判过这一项会塌 —— 原因是我从 eval 行的 `stop` 列读到 0，而
+//      `eval-course-ckpt` 的行**根本没有 stopTicks 字段**，那是字段缺失不是真值。
+//      要读这一列得看 rollout 的 metrics 行 idx54/55。）
+//
+// ── 起点权重：y25-price.it95 的 v6 迁移版 ──────────────────────────────────
+//   `nn-training/weights/y26-v6/y26-v6.it0.json`
+//   = `init_spatial_leg.py --from y25-price.it95 --action-v6 --allow-partial-init`
+//   迁移内容（数值校验全部 max|Δ| = 0.0）：
+//     · `fc` 前 104 列直搬，新增 6 列 0.01（scalar 40→46，delta 按**源真实行宽**自动推）
+//     · `move` 4 行 ← 旧 `move[1:5]`（丢 STOP 类："不动"改由 hold 位表达）
+//     · `fire[0]` ← 旧 0 · `fire[2]`(fireAfter) ← 旧 1(firing) · `fire[1]`(fireBefore) = 0.01
+//     · `hold[1]` ← 旧 `move[0]`(STOP 行) · `hold[0]` ← **旧 4 个方向行的均值** · `bias[0] += 2.0`
+//   ★ `bias + 2.0` 是**门限标定**，不是调参：旧判据是 `STOP > **max**(4 方向)`，线性头只能
+//     表达 `STOP > **mean**(4 方向)`，`max ≥ mean` ⇒ hold 天然更容易赢。实测（stage0/seed860001，
+//     271 决策拍）：bias=0 时 hold 频率 **73.1%** 而旧 STOP 只有 **24.7%**（过度停顿 3 倍）；
+//     bias=+2 ⇒ hold **24.4%**，方向一致率 89.2%（bias=0 时只有 35.8%）。
+//
+//   迁移验证（`ladder-c20-lives1`，4 关 × 10 seed × 2 批，同 seed 配对）：
+//     | 批次    | label | pass | kills | beHit | dmg  | idle |
+//     |---------|-------|------|-------|-------|------|------|
+//     | 860001  | leg   | 27/40| 696   | 18    | 7724 | 1154 |
+//     |         | v6    | 30/40| 664   | 13    | 7512 | 1114 |
+//     | 870001  | leg   | 27/40| 649   | 21    | 8254 | 1223 |
+//     |         | v6    | 27/40| **649** | 21  | 8132 | 1106 |
+//     | 合计    | leg   | 54/80|       |       |      |      |
+//     |         | v6    | **57/80** |   |       |      |      |
+//     ⇒ 第二批 pass 与 kills **完全相同**；`idle` 与 legacy 持平。
+//     **⚠ 不宣称"v6 更强"**：两只都是**初始化**，57 vs 54 在 40 局噪声内。
+//     它证明的是"**迁移没有把权重搞坏**"，不是"结构更好"——那是本腿要跑出来的。
+//
+// ── 本腿要回答什么 / 怎么判 ────────────────────────────────────────────────
+//   问题：v6 结构 + y25 的奖励，能不能**站住** y25-price it95 的水平（anchor win 0.715 /
+//         余量 0.905 / dmg 31.2/千）？若站不住，是结构代价，不是奖励问题。
+//
+//   **基线 = y25-price it95**（不是它自己的 it0）：
+//     ① 同面板（anchor 860xxx = seed 860001-860050）才是可比的；
+//     ② 本腿起点就是 it95 迁移过来的 ⇒ it0 = it95 的行为（ladder 已验），
+//        拿 it0 当基线等于"自己跟自己比"，漂移全被记成训练效果。
+//
+//   方向门 it40（读 it30–50）：
+//     · **anchor win 中位 ≥ 0.715 − 8pp = 0.635**（`<8pp 不判` 的噪声带纪律）
+//     · 且 **余量中位 ≥ 0.905 − 0.05 = 0.855**
+//     —— 两条任意一条不过 ⇒ **v6 结构在起步阶段就掉了**，进杀腿评估。
+//   判决门 it100（读 it80–120 五点中位）：
+//     · **anchor win 中位 ≥ 0.715**（追平）或 **余量中位 ≥ 0.955**（比 it95 多 0.05）
+//     —— 达到 ⇒ v6 结构**站得住**，可以在它上面开奖励腿。
+//   延伸门 it200（读 it160–200）：
+//     · 余量中位 **≥ 1.00**（y22-null 全程最高 1.02，y25 it90 是 0.965）
+//     —— 到不了不必杀腿，但要记进报告：v6 + 旧定价的天花板在哪。
+//
+// ── 杀腿条件（任一触发即停；不叠奖励项、不救）──────────────────────────────
+//   ① it40 方向门两条都不过 ⇒ **结构代价坐实**，停（不要在它上面继续烧轮次）。
+//   ② 余量中位（it80–120）< **0.855** ⇒ 活得比 y25 更差，停。
+//   ③ **powerUpsCollected ≥ 5.0/局** 是守卫（起点 6.38）；< 4.0 ⇒ 道具被戒了，停。
+//   ④ win 单点 < **0.60**（0.715 − 11.5pp，超 ±8pp 带）⇒ 停。
+//   ⑤ timeout > 5% ⇒ 停（反苟）。
+//   ⑥ entropy 比 it0 涨 > 0.15 ⇒ 停（v6 三头的熵基线可能不同，首次 eval 记下来）。
+//   ⑦ Φ 斜率 ≤ −0.05/轮（**从 it1 起算**）⇒ 红。
+//   ⑧ **dmg/千 > 40**（it95 是 31.2，+28%）⇒ 停：v6 若靠"多挨打换出手"就违背了
+//      y25 的核心结论（"赢法是挨得少"）。
+//
+// ── ★ 预期要放低（诚实评估）────────────────────────────────────────────────
+//   ① v6 的 move 头**没有 STOP 类**，策略每拍必须给一个方向 ⇒ 冷启动时容易在 4 个方向
+//      之间抖 ⇒ 撞转向冷却（200ms ≈ 12 拍）⇒ 被 halt。`wBlock` 项**恰好罚的就是这个**
+//      （= `idle−stop`），所以 it0→it40 的 Φ 可能**先降后升**（策略要学会"少换向"）。
+//      这不是 bug，是本腿要观察的东西。
+//   ② 三头独立 ⇒ 动作空间从 10 种（5×2）变成 24 种（2×4×3）⇒ **熵更高、探索更散**。
+//      `ent_break 0` 保持不动，但首个 eval 点要记 entropy 绝对值（后续腿的基线）。
+//   ③ **很可能落进 ±8pp 噪声带**（y21 四腿的教训：<7pp 的奖励效应不可分辨，
+//      而这里连奖励都没改，只有结构）。⇒ 判决门要按字面执行，不许"再等等"。
+//
+// ── 后续腿的候选（**不在本腿里做**，单变量原则）────────────────────────────
+//   等本腿判决门过了、有了 v6 的同期基线，再按单变量逐条开：
+//   · **wMiss 0.35 → 0.25**：人类出手频率是 NN 的 1.55×，而 `wMiss` 直接压制出手
+//     （NN 命中率 0.814 已高于人类 0.788 ⇒ 不是瞄不准，是不敢打）。
+//     ⚠ 必须先算剂量：空射率 × 每局拍数 × Δw，过 15% 的 Φ 才可测。
+//   · **fireBefore 专项**：v6 独有的 `fire=1`（先打再走）。若 `metric` 里能拆出
+//     "fireBefore 拍占比"，可以做一条只看它的腿；否则先靠 wHit/wMiss 间接观察。
+//   · ~~道具特效腿（降 wFrStar/wFrFreeze/wFrBomb）~~：y25 头注已把它列为 D1 的下一步，
+//     **与本腿互斥**（本腿是 null），等本腿判决后再议。
+//   · ⚠ **B6（窗口命中奖励）不得与本线同时生效**（`nn-capability-upgrade.plan.md` §4b）：
+//     B6 抬"道具→窗口"链的价值，而 y25 把道具价压到 0.6，方向相反。
+//
+// ── 开工门 ─────────────────────────────────────────────────────────────────
+//   ① `tmp/y26-null` 不存在（§15.5 新 out/traj/backup，不得续跑）。
+//   ② 起点 `y26-v6.it0.json` 的 `arch.actionV6 = true`（否则会静默跑回 5/2 头）。
+//   ③ 开课走控制台（唯一入口）；草稿过 `load_course + validate_reward`。
+//   ④ **确认没有别的腿在跑**（y21/y22 的老腿若还挂着会抢节点、让每轮耗时失真）。
+//
+// ── KL / entropy 的预期基线（v6 vs v5）：**本腿不动这两个开关，先记读数**──────────
+//   ★ 问题（2026-10-20 用户提出）：网络结构变了，KL 是不是可以放松？
+//   答案是**不需要，而且不该动**，依据是实测而不是直觉：
+//
+//   ① `kl_cap` 的真实作用 = **波次软降档**，不是硬停（`trainer/stream.py:46-64`）：
+//        `if cum_kl > 0.7 * kl_cap: wave 规模缩到 1/3`（更频繁地做更新，压住过冲）
+//      我们课程写 `kl_cap: 0.1` ⇒ 触发阈值 = **0.07**。
+//   ② y25-price 的 **109 轮实测**（`tmp/y25-price/training_log.jsonl`）：
+//        `kl` min **0.0131** / median **0.0177** / max **0.0250**
+//        ⇒ 最高值只到阈值的 **36%**，**`> 0.07` 的轮数 = 0/109** ⇒ **降档一次都没触发**。
+//      ⇒ **`kl_cap` 在 v5 上是死参数。放松它不会有任何效果。**
+//   ③ `kl_coef: 0.05` 是**可微软惩罚**：`loss += 0.05 × ((ratio−1) − log_ratio)`
+//      ≈ `0.05 × KL = 0.05 × 0.018 = 0.0009`，相对 `policy_loss`（O(1)）**可忽略**。
+//      放松它同样几乎无感。
+//   ④ **v6 会让 KL 变大，但方向是"更保守"不是"更放"**：联合 logp 从
+//      `move + fire` 变成 `move + fire + hold`（多一项）⇒ 同样更新幅度下 KL ≈ **1.5×**，
+//      按 0.018 估 ≈ **0.027**，仍只到阈值 0.07 的 39%。⇒ 依然不触发。
+//   ⑤ **entropy 的绝对值会明显变高（+38%）**，这是空间变大，不是"探索变多"：
+//        v5: `ent(move5)+ent(fire2)` ≈ log5+log2 ≈ **2.30**
+//        v6: `ent(move4)+ent(fire3)+ent(hold2)` ≈ log4+log3+log2 ≈ **3.18**
+//      ⇒ `ent_break 0.0`（**涨幅** >0.15 才断）不受影响，但**首个 eval 点的绝对值
+//        不能拿 v5 的 0.72 去比**（会把空间变大误读成发散）。
+//
+//   ⇒ **本腿保持 `kl_coef 0.05` / `kl_cap 0.1` 逐字不动**（null 腿必须是纯基线）。
+//   ⇒ **要观察的**：首个 eval 点的 `kl` 与 `entropy` 绝对值，记进报告作为后续所有
+//      v6 腿的基线。**若实测 kl 持续 > 0.05**（v5 的 2.8 倍、阈值的 71%）再谈收/放，
+//      **不要**在没读数之前先改 —— 那会让三腿之间失去"只有奖励不同"的可比性。
+//
+// ── 防污染 ─────────────────────────────────────────────────────────────────
+//   评估面板仍是 860xxx（anchor 200 座 = seed 860001-860050）；人类语料 414xxx 不参与本腿。
+//   ⚠ it0 只有 anchor 200 局、it≥5 是 400 局（anchor + 轮换 rotor）⇒ 任何 it0↔it_k 比较
+//     必须过滤 seed，且**不用 `eval_summary.winRate`**（混面板，转子会虚高 ~5pp）。
+{
+  "version": 5,
+  "name": "y26-null",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：逐字 = y25-price（公式 / 20 参数 / terminal / scheme 全部不动）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y25-price.it95 的 v6 迁移版（arch.actionV6=true ⇒ 自动三头）──
+  "bc": "nn-training/weights/y26-v6/y26-v6.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  // mb 的整倍数（24576 / 1024 = 24）—— ragged 末块会让 XLA 每 epoch 重编译。
+  "target_transitions": 24576,
+  // 与 y25-price / y22-null 同值：主判是同轮 / 同面板配对，必须同流（§15.1 例外理由）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y26-null/weights.json",
+  "traj": "tmp/y26-null",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y26-null",
+  "backup_prefix": "y26-null",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

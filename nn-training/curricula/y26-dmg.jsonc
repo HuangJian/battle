@@ -1,0 +1,156 @@
+// 课程 y26-dmg —— **"挨打加价"腿**（追求胜率；单变量 `wDmg 0.03 → 0.12`）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20：y25-price 的结课结论是"**赢法变了：不是杀得快，而是挨得少**"
+//   （池外 800 局：承伤/局 −11.8，dmg/千 −11%，余量 0.877→0.940）。
+//   但**奖励里"少挨打"这一维几乎是白送的** —— 用 it105 单局实测反推 Φ 的构成：
+//     `wKill 3.0 × 20 kills        = +60.0`   ← **77%**
+//     `wAcc 15.3 × 50/59           = +13.0`
+//     `wHit 0.2 × 50               = +10.0`
+//     `wPickup 0.6 × 11            = +6.6`
+//     `wMiss 0.35 × 8              = −2.8`
+//     `wDmg 0.03 × 400 dmg         = −12.0`
+//     `wBlock 110 × 75/9718        = −0.85`   ← ⚠ 见下
+//     ⇒ 净 ≈ 78 分（与 it0 的 Φ 78.6 同量级）
+//   ⇒ **已验证最有效的维度（承伤）只占总价的 15%，且这一项是线性的**：
+//     挨打翻倍才多罚 12 分。**奖励没有表达"少挨打很值钱"这件事。**
+//
+// ── ⚠ 先纠正 y25 头注里的一个错数（避免本腿继承它）──────────────────────────
+//   y25 头注把 `wBlock` 写成 "110 × 0.1485 ≈ −16.3 分（Φ 的 21%）"。
+//   **那是拿 `idleTicks` 算的，漏减了 `stopTicks`。** 实测（it105, seed 860192）：
+//     `idleTicks 2625` · `stopTicks 2550` ⇒ **`idle − stop = 75`**
+//     ⇒ `wBlock` 项 = 110 × 75/9718 = **0.85 分（1%）**，不是 16.3。
+//   ⇒ `wBlock` **不是主力罚项**，本腿不碰它（也不指望它能约束 v6 的换向）。
+//   （这一项的真实语义 = "被转向冷却 halt 的拍数"，见 `y26-null` 头注。）
+//
+// ── 单变量声明（相对 y26-null：只有 wDmg）──────────────────────────────────
+//   `reward.params.wDmg` **0.03 → 0.12**（×4）。公式字符串、其余 19 个参数、terminal、
+//   scheme、lr/epochs/mb/gamma/lam/ppo_schedule/decision_k/target_transitions/seed/eval
+//   **全部逐字不动**。起点同为 `y26-v6.it0.json`（v6 迁移权重）。
+//
+// ── 剂量推导（为什么是 0.12，不是 0.06 也不是 0）────────────────────────────
+//   1. **结算粒度**：`RewardFn.__call__` 返回 `np.diff(phi)` ⇒ 每决策奖励 = ΔΦ，
+//      所以"每局总价"就是全部权重 × 每局计数之和，可以逐项对账（上面那张表）。
+//   2. **每局承伤的实测值**：y25 it95 pool800 = **199.1/局**（`reports/pk-it95-vs-stack2-20261019.md`）
+//      ⇒ ΔΦ = (0.12 − 0.03) × 199.1 = **−17.9 分**。
+//   3. **过 15% 剂量线**：Φ 78.6 ⇒ **−22.8%** ✓ 可测。
+//      对照：`wDmg 0.03→0.06` 只有 −6.0 分（−7.6%）⇒ **不可测，故不选**。
+//   4. **不是归零**：`wDmg` 是"线性伤害价"，归零等于宣布"挨打免费"——
+//      这正是 y23-acc-off 的反向坑（删一项 ⇒ 行为朝反方向走）。本腿是**加价**，方向一致。
+//   5. **为什么 ×4 而不是 ×10**：`wDmg 0.3` 会让"一次挨打(约 21 点) = 6.3 分"，
+//      而"一次击杀 = 3 分" ⇒ **躲一次伤害比杀一个人还值钱** ⇒ 会直接推向"不打只躲"。
+//      ×4 后"一次挨打 = 2.52 分 < 一次击杀 3.0 分"，仍保持"杀敌优先"的序。
+//      **这是本腿的硬边界：`wDmg × 21 < wKill`。**
+//
+// ── 预期（诚实评估）────────────────────────────────────────────────────────
+//   ① **主效应在承伤，不在胜率**。y25 已经证明"承伤 −11.8/局"在统计上站得住（t=−2.26），
+//      而胜率在 ±8pp 噪声带内（p=0.62）。本腿更可能复制这个形状：
+//      **dmg/千 显著下降，win 仍在噪声内**。
+//   ② **风险是"苟"**：加价 4 倍可能让策略退到角落等敌人上门 ⇒ 杀速下降、局长拉长、
+//      甚至 timeout 上升。所以杀腿条件里放了两条硬约束（kills / timeout）。
+//   ③ 若 dmg 降了但 win 没动、kills 也没掉 ⇒ 这是**好结果**（说明生存维度还有余量可挖），
+//      但**不能宣称胜率提升**。
+//
+// ── 门与杀腿（基线 = y26-null 同期，不是 y25 —— 主变量里已经含了结构）─────────
+//   ★ 为什么不拿 y25-price 当基线：本腿同时有 v6 结构（null 腿已改）与 wDmg 两个变量。
+//     拿 y25 比会把"结构代价"混进"奖励效应"。**必读 y26-null 的同期读数**。
+//   方向门 it40（读 it30–50 中位，逐座位配对 vs null）：
+//     · **dmg/千 中位 ≤ null 同期 − 8%**（本腿的主靶，必须先动）
+//     · 且 **kills_mean ≥ null 同期 − 1.0**（不能靠少杀换少挨）
+//   判决门 it100（it80–120 五点中位）：
+//     · dmg/千 ≤ null 同期 − 15%，且 **anchor win ≥ null 同期 + 8pp**
+//       （**或**余量中位 ≥ null 同期 + 0.08）
+//   守卫（任何时刻）：
+//     · kills_mean ≥ 15.0（it95 是 16.98，容许 −12%）
+//     · powerUpsCollected ≥ 5.0/局（起点 6.38，容许 −22%）
+//     · timeout_frac ≤ 5%
+//     · shots/千 ≥ null 同期 − 15%（别为了躲而彻底不开火）
+//   杀腿（任一即停）：
+//     ① it40 dmg/千 没降 8% ⇒ **剂量没换来回避**，停（不许加价叠加）。
+//     ② kills_mean < 14.0 或 timeout > 5% ⇒ **苟住了**，停。
+//     ③ win 单点 < 0.60 ⇒ 停（0.715 − 11.5pp）。
+//     ④ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红。
+//     ⑤ entropy 比 it0 涨 > 0.15 ⇒ 停。
+//
+// ── 若本腿成立，下一步（不在本腿里做）──────────────────────────────────────
+//   · `wHurt 150`（火线承伤，占比 `hurtWeight/(ticks+1)`）与 `wDmg` 是同一族的两个口径：
+//     本腿只动"结算伤害"，不动"暴露在火线"。**若本腿有效，下一腿单独动 wHurt**，
+//     验证"罚暴露"是否比"罚结果"更早介入（预警 vs 事后）。
+//   · ⚠ **B6（窗口命中奖励）不得与本线同时生效**（方向相反）。
+{
+  "version": 5,
+  "name": "y26-dmg",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y25-price 逐字，**只改 wDmg 0.03 → 0.12** ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.12,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y26-v6/y26-v6.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y26-dmg/weights.json",
+  "traj": "tmp/y26-dmg",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y26-dmg",
+  "backup_prefix": "y26-dmg",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
