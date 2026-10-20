@@ -653,12 +653,32 @@ describe('开课的写序：被拒 = 零副作用', () => {
 // 课被死锁：越需要开课，越被「没有活体」拒绝。plan/course-metrics-persistence 明确支持同名课
 // 重开（读侧 live 优先，显示当次 run；旧数据留在备份库），所以闸不能拦开课本身。
 describe('备份课重开：openCourse 是活体的**创造者**，不是消费者', () => {
-  const REOPEN_COURSE = 'c5-margin'
+  // 本课是**测试自造的夹具**：课程文件与 bc 种子都落在临时目录（BCITY_CURRICULA_DIR
+  // 重定向），一个字不读仓库里的真课程/真权重。
+  //
+  // 2026-10-20 事故：本用例原用真课 `c5-margin`，而它的 bc 种子
+  // `nn-training/weights/c4-margin/c4-margin.it140.…json` 被归档进 weights 压缩包 ⇒ 开课
+  // 在 `seedWeightsFromBc` 处响亮失败（409）。「备份课重开」验的是生命周期闸，不该把
+  // 仓库工作目录里某份权重的去留当依赖——夹具才是它该要的东西。
+  const REOPEN_COURSE = 'reopen-fixture'
+  const FIXTURE_SEED = path.join(DIR, 'fixture-seed-weights.json')
+  const FIXTURE_SEED_BODY = '{"fixture":"reopen"}'
 
   it('tmp 已清、只有备份数据 ⇒ openCourse 仍成功，并把活体工作区建回来', async () => {
     const dir = path.join(TRAJ, REOPEN_COURSE)
     const lib = process.env.BCITY_COURSE_METRICS!
+    const prev = process.env.BCITY_CURRICULA_DIR
+    const cur = path.join(DIR, 'curricula')
     try {
+      // 课程夹具：真课程文件（过 assertCourseExists）+ bc 指向临时种子（过权重播种）。
+      mkdirSync(cur, { recursive: true })
+      writeFileSync(FIXTURE_SEED, FIXTURE_SEED_BODY)
+      writeFileSync(
+        path.join(cur, `${REOPEN_COURSE}.jsonc`),
+        JSON.stringify({ name: REOPEN_COURSE, bc: FIXTURE_SEED }, null, 2),
+      )
+      process.env.BCITY_CURRICULA_DIR = cur
+
       // 造一份「上一次 run」的备份：临时账本 → 转存 → 删掉 tmp（= tmp-clean 之后的状态）。
       mkdirSync(dir, { recursive: true })
       writeFileSync(
@@ -676,9 +696,15 @@ describe('备份课重开：openCourse 是活体的**创造者**，不是消费�
       // 关键事实：这次动作真的把活体建回来了（不是「先 restore 再开课」的两步仪式）。
       expect(existsSync(path.join(dir, 'training_log.jsonl'))).toBe(true)
       expect(existsSync(path.join(dir, 'remote-jobs'))).toBe(true)
+      // 权重播种走的是**夹具**（盘上真 bc 产物在不在都不影响本用例）。
+      expect(readFileSync(path.join(dir, 'weights.json'), 'utf-8')).toBe(FIXTURE_SEED_BODY)
     } finally {
+      if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
+      else process.env.BCITY_CURRICULA_DIR = prev
       rmSync(dir, { recursive: true, force: true })
       rmSync(lib, { recursive: true, force: true })
+      rmSync(cur, { recursive: true, force: true })
+      rmSync(FIXTURE_SEED, { force: true })
     }
   })
 })

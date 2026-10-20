@@ -321,7 +321,7 @@ function componentErrorAlerts(input: AlertInput): AlertItem[] {
         title: `组件报错：${pending.length} 条未处理（最近 ${relAgo(input.now, latest.lastAt)}）`,
         detail:
           `来源分布：${dist}；最近一条：${latest.component} — ${latest.message}${truncated}。` +
-          (noise > 0 ? `另有 ${noise} 条瞬时噪声已折叠（不打断）。` : '') +
+          (noise > 0 ? `另有 ${noise} 条瞬时噪声已折叠（无需处置，不打断）。` : '') +
           '逐条的 traceback/上下文与 ack 在详情页。',
         role: 'alert',
         actions: [
