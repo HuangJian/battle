@@ -221,3 +221,43 @@ describe('mirror sync（真临时目录）', () => {
     expect(existsSync(path.join(root, '.lock'))).toBe(false)
   })
 })
+
+/**
+ * ticker 的**日志形状**（2026-10-20 用户口径「这个 log 一直在刷屏，请删除」）。
+ *
+ * 备份库写侧是 60s 一拍的节拍：每拍一行 `[mirror] 课 N ｜ 新增 … ｜ 未变 … ｜ memo … ｜ Nms`
+ * ⇒ 控制台被它刷满，而那行全是**常态读数**（课数/新增/未变/耗时/memo），既不指向任何动作，
+ * 出问题也定位不到具体文件。⇒ 常态静默。
+ *
+ * 真正要看的信号各有各的行（**不能跟着汇总一起删掉**）：
+ *   · 复位 / 失败 / 冷存失败 = 逐条 warn（`[mirror] 复位 …` / `[mirror] 失败 …` / `[mirror] 冷存失败 …`）；
+ *   · 「预算用尽」原先只活在那行汇总里 ⇒ 单独升成 warn（备份库正在落后，是要人管的）。
+ *
+ * 这里是**源码级**断言（节拍闭包直接跑真 IO，不适合单测；形状问题用读源码钉住——
+ * 与 tests/pre-commit-staged-scope.test.ts 同一手法）。
+ */
+describe('mirror ticker 的日志形状（常态静默 / 异常必响）', () => {
+  const SRC = readFileSync(
+    path.join(import.meta.dir, '..', 'src', 'server', 'course-metrics-mirror.ts'),
+    'utf8',
+  )
+
+  it('常态汇总行已删（不再有「课 N ｜ 新增 …」那一行）', () => {
+    expect(SRC).not.toContain('[mirror] 课 ')
+    expect(SRC).not.toContain('｜ 新增 ')
+  })
+
+  it('逐条异常 warn 仍在（复位 / 失败 / 冷存失败）', () => {
+    expect(SRC).toContain('[mirror] 复位 ')
+    expect(SRC).toContain('[mirror] 失败 ')
+    expect(SRC).toContain('[mirror] 冷存失败 ')
+  })
+
+  it('「预算用尽」升成 warn（原先只活在被删的汇总行里）', () => {
+    expect(SRC).toContain('[mirror] 预算用尽')
+    const warn = SRC.indexOf('[mirror] 预算用尽')
+    expect(warn).toBeGreaterThan(-1)
+    // 必须走 warn 而不是 log（log 是「常态播报」那一档）
+    expect(SRC.slice(Math.max(0, warn - 200), warn)).toContain('console.warn')
+  })
+})

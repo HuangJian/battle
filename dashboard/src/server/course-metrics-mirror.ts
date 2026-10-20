@@ -25,29 +25,24 @@ export function startCourseMetricsMirror(intervalMs = COURSE_METRICS_INTERVAL_MS
   const run = async (): Promise<void> => {
     if (running) return
     running = true
-    const started = Date.now()
     try {
       const budget = Number(process.env.BCITY_COURSE_METRICS_BUDGET ?? '')
       const s = syncAll({
         budgetBytes: Number.isFinite(budget) && budget >= 0 ? budget : COURSE_METRICS_BUDGET,
       })
       const c = await compactAll({ max: 1 })
-      const memo = archiveMemoStats()
-      const parts = [
-        `[mirror] 课 ${s.courses} ｜ 新增 ${(s.bytes / 1024).toFixed(1)}KB（${s.lines} 行）`,
-        `未变 ${s.skipped} ｜ 复位 ${s.resets.length} ｜ 失败 ${s.failed.length}`,
-      ]
-      if (c.packed.length > 0) {
-        parts.push(
-          `冷存 ${c.packed.map((p) => `${p.course}→${(p.bytes / 1048576).toFixed(1)}MB`).join(',')}`,
+      // ★ 2026-10-20（用户口径「这个 log 一直在刷屏，请删除」）：**删掉每拍一行的汇总**。
+      //   60s 一拍、每拍一行 ⇒ 控制台被它刷满；而这行里的数（课数/新增/未变/耗时/memo）都是
+      //   **常态读数**，出问题时也定位不到具体文件——它是「看着很热闹、实际不指向任何动作」的行。
+      //   真正要看的信号各有各的行：复位 / 失败 / 冷存失败 = 逐条 warn（下面几行），
+      //   「预算用尽」= 唯一只活在这行里的可行动计数 ⇒ 单独升成 warn。
+      //   ⇒ 常态静默，异常必响。
+      if (s.budgetHit || c.budgetHit) {
+        console.warn(
+          `[mirror] 预算用尽：本拍转存/冷存量超出预算（${(s.bytes / 1048576).toFixed(1)}MB）` +
+            '——备份库正在落后，下拍继续',
         )
       }
-      if (s.budgetHit || c.budgetHit) parts.push('预算用尽')
-      parts.push(
-        `memo ${(memo.bytes / 1048576).toFixed(0)}/${(memo.capBytes / 1048576).toFixed(0)}MB`,
-      )
-      parts.push(`${Date.now() - started}ms`)
-      console.log(parts.join(' ｜ '))
       for (const x of s.resets) console.warn(`[mirror] 复位 ${x.course}/${x.rel}: ${x.reason}`)
       for (const x of s.failed) console.warn(`[mirror] 失败 ${x.course}/${x.rel}: ${x.error}`)
       for (const x of c.failed) console.warn(`[mirror] 冷存失败 ${x.course}: ${x.error}`)
