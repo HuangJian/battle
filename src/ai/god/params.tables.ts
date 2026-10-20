@@ -183,7 +183,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // powerup navigation. Conservative: maze nav rarely exceeds 3s stuck.
   powerupStuckTicks: 300,
   // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
-  // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
+  // A6 (2026-10-20) 实测后维持 OFF：默认防守位 (12,23) 确实是基地环砖格，
+  // A* 到砖格目标返回空路径（回防只能靠 directMove 盲走破砖）—— 但把它换成
+  // 可站格后，35×60 串行 A/B（真实 stageIndex）胜率 79.7% vs base 80.0%
+  // （Δ-0.0036, t=-0.33），且**单关总 tick +5.5%**（s35 seeds1-20:
+  // 160135→168987）：玩家真的跑回基地了，清关却更慢。即「回防目标不可达」
+  // 无意中把玩家留在了战场上（打转），修好可达性只是把打转换成了回防奔袭，
+  // 两者都不产生净胜率 —— 与「站位/防守侧 A/B 全负」的历史结论一致。
+  // defensePosStandableMinDist=8：仅远位启用，近基 idle 保持旧行为。
   defensePosStandable: 0,
   defensePosStandableMinDist: 8,
   // §145: 冰上滑行控制 — default 0 (OFF, byte-identical)。iceGlideMinSpeed
@@ -465,6 +472,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // hard 35×60 CRN 配对 vs A2：Δscore +0.0384 ±0.0084（t=4.56），SUITE 0.5246→0.5725，
   // 胜率 74%→79%（1150 好/947 坏/3 平，4 关涨 0 关跌）。mode 1 只有 +0.0183 且 Steel Web 倒退。
   turnEconomyMode: 2,
+  // A4 (2026-10-20): hysteresis on the hunt↔defend distance thresholds.
+  // 0 = OFF (byte-identical to pre-A4). 35×60 串行配对（真实 stageIndex）：
+  // 全量 35×60 串行配对（真实 stageIndex）：1 → Δ-0.0016 (t=-0.15) ·
+  // 2 → Δ-0.0102 (t=-0.97) · 3 → Δ-0.0029 (t=-0.27) —— h1 与 h3 的胜率差
+  // 3 局，纯噪声。按**机制强度**取 3：40 局探针上翻转次数 46.7→41.1（h1，
+  // 只 −12%，等于没修好）vs 46.7→18.9（h3，−60%）。h2 是唯一的真退步。
+  defenseReturnHysteresis: 3,
+  // A5 (2026-10-20): probe the movement axis un-snapped in canMoveDir /
+  // canMoveOrBreak. 保留实现，默认 OFF —— 实测它让碰撞判定整体更保守，
+  // 触发 directMove 的 any-passable fallback 更频繁（打转 43.5→52.6 次/局、
+  // 短抖动 33→63 次/局），证明病根在 fallback 选向而不在探测精度。
+  navExactMoveProbe: 0,
   // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
   aggCampTimeoutTicks: 120,
   // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.

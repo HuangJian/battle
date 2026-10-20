@@ -581,8 +581,12 @@ export function canMoveOrBreakImpl(self: GodAIInput, tank: Tank, dir: Direction)
 
   const w = self.world
   const v = DIR_VECTORS[dir]
-  const gx = snap(tank.x, CELL)
-  const gy = snap(tank.y, CELL)
+  // A5: same movement-axis fix as `canMoveDirRaw` (see its comment) — the two
+  // must agree, otherwise directMove can return a direction canMoveDir calls
+  // blocked (and vice versa).
+  const exact = self.params.navExactMoveProbe > 0
+  const gx = exact && v.dx !== 0 ? tank.x : snap(tank.x, CELL)
+  const gy = exact && v.dy !== 0 ? tank.y : snap(tank.y, CELL)
   const nx = gx + v.dx * CELL
   const ny = gy + v.dy * CELL
 
@@ -645,8 +649,27 @@ function canMoveDirRaw(self: GodAIInput, tank: Tank, dir: Direction): boolean {
   const w = self.world
   const v = DIR_VECTORS[dir]
   // M0.5 (2026-08-03): canMoveDirFloorSnap retired (A/B -2.6pp, never shipped) — fixed snap.
-  const gx = snap(tank.x, CELL)
-  const gy = snap(tank.y, CELL)
+  //
+  // A5 (2026-10-20): the movement axis is probed from the tank's REAL
+  // coordinate, not from `snap()`. `snap` is `round(v / CELL) * CELL`, so it
+  // jumps a full cell when the tank crosses the half-cell line — and the
+  // tank crosses one every ~8px of travel. For a left/right probe that flip
+  // moves the probed rectangle a whole cell sideways, so "can I go left?"
+  // answers FALSE on the near half of a cell and TRUE on the far half for the
+  // SAME wall. Measured (turn-waste-probe, hard s35 seed 1000 t2395-2450): the
+  // tank paced x=354↔368 at y=160 for 300+ ticks — `snapx` 352 ⇒ left blocked
+  // ⇒ directMove's fallback picked `right` (away from the target); `snapx` 368
+  // ⇒ left open ⇒ `left`. Net displacement zero, one wasted turn reversal per
+  // ~11 ticks. This is the dominant remaining oscillation source (583 of 871
+  // standing runs per game have a STABLE target — it is the A*/directMove
+  // layer flipping, not the objective).
+  //
+  // The perpendicular axis still uses `snap` — `SimulationCombat.updateMovement`
+  // snaps it every tick, so the snapped value is what the engine will actually
+  // use (probing the unsnapped one would test a position the tank never holds).
+  const exact = self.params.navExactMoveProbe > 0
+  const gx = exact && v.dx !== 0 ? tank.x : snap(tank.x, CELL)
+  const gy = exact && v.dy !== 0 ? tank.y : snap(tank.y, CELL)
   const nx = gx + v.dx * CELL
   const ny = gy + v.dy * CELL
   if (!w.isInBounds(nx, ny, TANK, TANK)) return false

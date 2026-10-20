@@ -345,6 +345,14 @@ export class GodAIInput implements InputLike {
   _huntCommitUntil = 0
 
   /**
+   * A4 (2026-10-20): "already returning to defend" latch for the hunt↔defend
+   * hysteresis (see `params.defenseReturnHysteresis`). AI-internal decision
+   * state — never serialized, cleared in reset(). Default param 0 ⇒ the latch
+   * is never read ⇒ byte-identical to pre-A4.
+   */
+  _defenseReturnLatch = false
+
+  /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
    * locked for a lease with expiry/progress/threat revalidation, or null.
    * Written/read only when params.intentMode > 0; reset() clears. Default
@@ -1055,6 +1063,7 @@ export class GodAIInput implements InputLike {
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
+    this._defenseReturnLatch = false // A4
     this._intent = null // Phase 2 §6.3
     this._coverageCell = null // Phase 3
     this._coverageUntil = 0

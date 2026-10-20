@@ -2085,7 +2085,14 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // endgame, base defense takes priority over hunting when the player is
   // too far away to intercept in time.
   const playerDistToBase = manhattan(playerCell.col, playerCell.row, baseCol, baseRow)
-  if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
+  // A4 hysteresis: see `params.defenseReturnHysteresis`. `distMargin` is added
+  // to the measured distance ONLY once the defend objective is already latched,
+  // which lowers the release threshold to `threshold - hysteresis` while
+  // leaving the (immediate) entry threshold untouched. With hysteresis 0 the
+  // margin is always 0 ⇒ byte-identical to pre-A4.
+  const distMargin = self._defenseReturnLatch ? self.params.defenseReturnHysteresis : 0
+  if (baseUnderThreat && playerDistToBase + distMargin > self.params.maxPlayerDistFromBase) {
+    self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
 
@@ -2132,9 +2139,23 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // retreats instead of hunting. The 60-seed A/B empirically validated this
   // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
   // regression by reordering the blocks.
-  if (isFieldRetreatConditionImpl(self, baseUnderThreat, playerDistToBase, enemies.length)) {
+  // A4 hysteresis: same margin as the base-threat gate above — the two gates
+  // share one latch because their consequence is identical (return to the same
+  // defense position), so neither can re-flip the objective alone.
+  if (
+    isFieldRetreatConditionImpl(
+      self,
+      baseUnderThreat,
+      playerDistToBase + distMargin,
+      enemies.length,
+    )
+  ) {
+    self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
+  // No defend condition holds any more (threat gone / far enough inside the
+  // release threshold) — drop the latch so the next entry is immediate again.
+  self._defenseReturnLatch = false
 
   // Aggressive mode (freeze): chase nearest — see freezeChaseTarget().
   if (self.aggressive) return freezeChaseTarget(self, w, playerCell, enemies, baseCol, baseRow)
