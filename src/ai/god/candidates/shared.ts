@@ -7,7 +7,7 @@ import { type GodAIInput, recordBranch } from '../../GodAIInput'
 import type { World } from '../../../game/World'
 import type { Cell } from '../../../utils/grid-search'
 import type { Direction } from '../../../constants'
-import { BASE_POS, GRID } from '../../../constants'
+import { BASE_POS, CELL, GRID } from '../../../constants'
 import { shotReachesBaseImpl, enemyInShotCorridorImpl, scanAheadImpl } from '../FireControl'
 import { RING_CELLS } from '../ThreatBudget'
 import { isFieldRetreatConditionImpl } from '../StrategyPlanner'
@@ -141,7 +141,12 @@ export function commitPowerupTail(
   target: { col: number; row: number },
 ): boolean {
   self._moveDir = self.navigateTowards(target)
-  self._fire = !ctx.onCooldown && self.shouldFireInDir(ctx.pcx, ctx.pcy, self._moveDir ?? ctx.p.dir)
+  // 机制修复（2026-10-20，复刻外部研究并独立验证）：道具候选原来只调
+  // shouldFireInDir —— 路被砖挡住时既不挖也不走，原地打转（外部取证 s34
+  // (22,21) 想去拿道具、2×2 车身被 (23,20) 的砖挡死）。
+  // 改走 carveFire：能走就正常射击，走不动且眼前是砖就开火破砖。
+  // carveFire 内部已挡 baseWall / baseSteel，不会打基地保护环。
+  carveFire(self, ctx, self._moveDir)
   recordBranch(self, 'powerup')
   return true
 }
@@ -243,11 +248,49 @@ export function findFiringLaneCellImpl(self: GodAIInput, pc: Cell): Cell | null 
  * exact ring). Moving freely → fire at enemies in the facing direction
  * only (suppression, allowWallFire=false — side walls are not carved).
  */
+/**
+ * 机制修复（2026-10-20，复刻外部研究的 carveFire 修复并独立验证）：
+ * `scanAhead` 的 `steel` 是**整条射线**上有没有钢 —— 钢在 9 格外时，眼前 (x,y-1)
+ * 的砖也会被拒绝击破，于是坦克对着砖墙原地卡死。
+ * 实测本树：**1.59% 的全部 tick**（≈87 拍/局）命中该否决，其中 13201 拍本可开火；
+ * 分支分布 navigate 5645 · dodge 4467 · baseConnectClear 3936 · t2a 2794。
+ *
+ * 判据：从坦克前沿沿 dir 逐格走，**先**遇到砖 ⇒ 这一发打的是砖（安全且有用）；
+ * 先遇到钢/基地/边界 ⇒ 确实不该打。
+ */
+function brickBeforeSteelImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  steelCol: number,
+  steelRow: number,
+): boolean {
+  const tm = self.world.tileMap
+  const stepX = dir === 'left' ? -1 : dir === 'right' ? 1 : 0
+  const stepY = dir === 'up' ? -1 : dir === 'down' ? 1 : 0
+  let col = Math.floor(pcx / CELL) + stepX
+  let row = Math.floor(pcy / CELL) + stepY
+  for (let i = 0; i < GRID; i++) {
+    if (col < 0 || row < 0 || col >= GRID || row >= GRID) return false
+    if (col === steelCol && row === steelRow) return false
+    const t = tm.get(col, row)
+    if (t === 'brick') return true
+    if (t === 'steel' || t === 'base') return false
+    col += stepX
+    row += stepY
+  }
+  return false
+}
+
 export function carveFire(self: GodAIInput, ctx: DecisionContext, dir: Direction | null): void {
   const { p, pcx, pcy, onCooldown } = ctx
   if (dir && !self.canMoveDir(p, dir)) {
     const bs = scanAheadImpl(self, pcx, pcy, dir)
-    if (bs.wall && !bs.baseWall && !bs.baseSteel && !bs.steel) {
+    // `bs.steel` 只说明**射线某处**有钢：若砖在钢之前，这一发打的是砖，必须放行。
+    const steelBlocks =
+      bs.steel && !brickBeforeSteelImpl(self, pcx, pcy, dir, bs.steelCol, bs.steelRow)
+    if (bs.wall && !bs.baseWall && !bs.baseSteel && !steelBlocks) {
       self._fire = !onCooldown
       return
     }
