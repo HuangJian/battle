@@ -456,6 +456,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (t=5.94, 441 好/256 坏/3 平), 算术 score 0.6104 → 0.7069, 胜率 58.7% → 71.0%
   // ⇒ 回收 A1 缺口的 66.6%；中位偏弹率 27.4% → 0%. 见 DECISIONS §A2.
   turnCommitFireGate: 1,
+  // 开火策略准入（2026-10-20 用户定规「冷却没到，开火策略不许生效」）：
+  //   2 = 只禁「需要转身才能对准」的提交 · 1 = 冷却期一律不提交 · 0 = OFF。
+  // ⚠ 实测（60-seed）代价很大：mode2 hard SUITE 0.5828→0.5609、classic 0.7276→0.6807；
+  //   mode1 更狠（Oasis −0.119）。t2a 冷却期的「站着保持对准」是承重的（开阔图站位）⇒
+  //   默认 OFF，等用户决定是否作为政策强制。机制数据见 DECISIONS §mechfix-fire-admission。
+  fireBranchRequiresReady: 0,
   // 坦克墙（机制修复，SHIPPED 2026-10-20）：敌车格在 A* 里按「可击破的墙」计价。
   // hard 60-seed vs 0：SUITE 0.5791→0.5825（1625/2100 局相同，胜率不变）⇒ 机制正确且不伤人。
   navEnemyCellCost: 2,
