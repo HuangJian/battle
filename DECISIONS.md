@@ -8091,3 +8091,47 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   不再是 409。两条先红后绿（红时拿到的就是用户那条原文 409）。
 - **门禁**：dashboard typecheck ＋ **1757 用例** · `bun run check` **2634 pass / 8 skip / 0 fail** ·
   `bun run build` 过。
+
+## §2026-10-20-hub-crash-commit-limit-and-infra-auto-restart — hub「崩溃」实为提交限额击穿下的**被外部终止**；基础设施组件改为自动重启
+
+- **报障**（用户 2026-10-20）：hub 进程在 ~14:40 崩溃了。
+- **定位（证据链，五步坐实「谁杀的」）**：
+  ① **死亡时刻**：看护器标记 `[console] 2026-10-20T06:44:32.071Z hub-server (作业中枢) 意外退出
+     (PID 23232)`（UTC ⇒ 本地 **14:44:32** 发现）；hub 自己最后一条访问日志 **14:44:22**
+     ⇒ 死于 14:44:22–32 之间。
+  ② **不是自身异常退出**：日志尾**只有正常访问行**，无 traceback、无 SystemExit；hub 的
+     stdout/stderr 合并进同一个日志文件（`run-python.ts`）⇒ 「没有输出」是真的没有。
+  ③ **不是原生崩溃**：Windows Application 日志 14:30–15:00 **无** Application Error 事件。
+  ④ **真凶**：Windows **System** 日志 Event 2004「low virtual memory condition」@ **14:44:24**
+     （explorer.exe 14.5GB / Code.exe 7.1GB / vmmemWSL 1.7GB）⇒ **提交限额 37.9GB 被击穿**，
+     hub 是**受害者**（它自己 RSS 只有 37MB，不在事件榜前三）。
+  ⑤ **08:04 那次是另一回事**：当日 Event 2004 只有 14:44/14:49 两条；08:04 那次标记对应的
+     hub 最后一条日志是**前一晚 23:31** ⇒ 整个控制台+hub 栈夜里就停了，hub 是跟栈一起没的。
+     ⇒ 两起不同因，别混成一条故事。
+- **影响与放大器**：训练主链**未断**（远端 PPO 走云端 hub `100.124.208.62:8787`，trainer
+  全程在跑）；断的是本机 hub 的腿（控制台 admin 轮询、云机 worker 领活、在飞 job
+  `95cab515f03877b8`(y26-null) 随**内存 job 表**一起消失 ⇒ 重启后查该 job = 404，trainer 补发
+  unfreeze/cancel-job 也 404）。**真正的损失是放大器**：看护器**只记不重启**（文案就是
+  「用控制台「启动」恢复」）⇒ hub 实停 **1 小时 29 分**（14:44:22 → 16:13:36 才恢复应答）。
+- **决定**：① **共享基础设施组件意外退出 ⇒ 自动重启**（新 `dashboard/src/server/auto-restart.ts`）：
+  只管 **hubServer / selfNode**；**trainingLoop 是课程状态**（门判决/ALL DONE 后悄悄续跑 =
+  违背 §385 的判死判决）不自动续跑。**四道闸**（任一不满足 ⇒ 不重启，理由写进日志）：
+  非设计内停车 / **宽限 12s 后账本条目仍在**（操作员手动 stop 会 `clearAnyComponent` ⇒
+  条目消失 = 最可靠的「操作员要它停」判据，胜过用时间窗口猜意图）/ 组件仍不健康 /
+  频次闸（10 分钟 ≤3 次，超闸只报警不动手）。启动复用动作路径（`stepHubServer`/`stepSelfNode`）
+  ⇒ 账本/换代接管/端口回收语义一致。
+  ② **死因文案点破形态**：`buildExitMarker` 在「有日志、但尾段无任何异常输出」时明说
+  「更像**被外部终止**（系统内存耗尽 / 被杀 / 断电），而非自身异常退出；请对照系统事件日志
+  确认」——原文案「非正常退出，请检查下列日志」会把操作员引到进程自己的日志（那里什么都没有）。
+  ③ cloudflared / localWorker **暂不**纳入自动接管（启动路径各带隧道选项 / venv 解析）。
+- **备选与否决**：① 只加内存/调页文件就收工 —— 否（那是缓解不是修复：hub 仍是「一死等人」，
+  且页文件要重启才生效）；② 自动重启**所有**组件 —— 否（同上：课程状态不自动续跑）；
+  ③ 宽限期内靠时间窗口猜操作员意图 —— 否（意图是动作，账本是动作的果）。
+- **落点**：`dashboard/src/server/auto-restart.ts`（新）· `dashboard/src/server/exit-watchdog.ts`
+  （接线 + 文案）· `dashboard/tests/auto-restart.test.ts`（新，14 例）。
+- **门禁**：dashboard typecheck + **1771 用例**（+14）· `bun run check` 绿。
+- **未做（机器层面，留给运维/用户）**：提交限额本身要抬——当前 commit limit **37.9GB**
+  （RAM 29.6GB + 页文件约 8GB；页文件在 E: 且**当前 0 字节占用**、系统级自动管理关闭）。
+  建议把 E: 的页文件设为定值 24–32GB（E: 尚余 103GB）⇒ 提交限额升到约 55–60GB；
+  **改完需重启才生效**（本机在训练中，未擅自动）。另：explorer.exe 当时独占 14.5→17.6GB
+  （经典泄漏，重启 Explorer 即可清）、VS Code 7.8GB。

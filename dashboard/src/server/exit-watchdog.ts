@@ -30,6 +30,7 @@ import {
 import type { Component, ProcSpec, Registry, RegistryEntry } from '../core/types'
 import { readLogTail, resolveComponentLog, discoverCourses, effectiveCourse } from './api'
 import { COMPONENT_LABELS, loadConsoleState, restartSpecFor, triggerCloudHalt } from './actions'
+import { scheduleAutoRestart } from './auto-restart'
 
 /** 监督/看护的归属键：`key|course`（多课下同一组件有多份进程）。 */
 export function watchIdOf(item: { key: Component; course: string }): string {
@@ -92,8 +93,18 @@ export function buildExitMarker(
     : failureReason
       ? `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——原因：${failureReason}；` +
         '请检查下列日志；用控制台「启动」恢复：'
-      : `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
-        '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
+      : tail.length
+        ? // 有日志、但尾段里**没有**任何异常输出（无 traceback / 无 SystemExit）⇒ 更像
+          // **被外部终止**（系统内存耗尽 / 被杀 / 断电），而不是自身异常退出。
+          // 2026-10-20 hub 崩溃事故就是这一形态：日志尾只有正常访问行，真实死因在
+          // Windows System 日志（Event 2004 low virtual memory）里——文案不点破，
+          // 操作员只会去翻进程自己的日志（永远翻不到）。
+          `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
+          '**日志尾无任何异常输出**（无 traceback / 无 SystemExit）⇒ 更像**被外部终止**' +
+          '（系统内存耗尽 / 被杀 / 断电），而非自身异常退出；请对照系统事件日志确认；' +
+          '用控制台「启动」恢复（原因尾段见上）：'
+        : `[console] ${now} ${label} 意外退出 (PID ${entry.pid})——非正常退出，` +
+          '请检查下列日志；用控制台「启动」恢复（原因尾段见上）：'
   const lines = [head, ...(tail.length ? tail.map((l) => `  | ${l}`) : ['  | (日志缺失或为空)'])]
   return lines.join('\n')
 }
@@ -498,6 +509,9 @@ export async function runExitCheck(): Promise<number> {
       // 空洞的「意外退出 (PID …)」。
       const failureReason = planned ? null : tailFailureReason(tail)
       recordExitFailure(key, hit.course, entry, logRel, tail, {}, undefined, planned, failureReason)
+      // 共享基础设施组件意外退出 ⇒ 排一次自动重启（2026-10-20 hub 崩溃事故：光记不重启
+      // ⇒ hub 停了 1h29m 靠人点按钮）。课程状态类（trainingLoop）不自动续跑。
+      scheduleAutoRestart(key, planned)
       // §385 复审：TrainingLoop 一死（设计内停车或崩溃）→ 云端停机省 GPU 配额；
       // 本地 hubServer/console 一律不动。幂等由 triggerCloudHalt 守卫；
       // 停机命令按**该条目的课程**下发（多课下不得误停别课 hub）。
