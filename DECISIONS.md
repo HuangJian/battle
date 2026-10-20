@@ -8135,3 +8135,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   建议把 E: 的页文件设为定值 24–32GB（E: 尚余 103GB）⇒ 提交限额升到约 55–60GB；
   **改完需重启才生效**（本机在训练中，未擅自动）。另：explorer.exe 当时独占 14.5→17.6GB
   （经典泄漏，重启 Explorer 即可清）、VS Code 7.8GB。
+
+## §2026-10-20-auto-restart-covers-all-managed-components — 自动重启扩到全部受管组件（trainingLoop / cloudflared 纳入）
+
+- **用户指令**（2026-10-20）：「trainingLoop 和 cloudflared 也需要自动重启。」
+- **口径修正（把判据从「哪些组件」换成「哪种退出」）**：本条**撤销**上一条里
+  「trainingLoop 是课程状态 ⇒ 不自动重启」的取舍。真正的分界不是组件身份，而是**退出性质**：
+  - **设计内停车**（`gate_verdict` / `circuit_break` / `ALL DONE`）⇒ **不重启**——那是判决，
+    不是崩溃；悄悄续跑会推翻人的判死决定（§385）。看护器对 trainingLoop 已有该判据
+    （`recentPlannedStop` / `tailNormalCompletion`），其余组件本就没有设计内停车语义。
+  - **意外退出**（崩溃 / 被外部杀死）⇒ 重启。**全部受管组件**同此待遇：
+    selfNode / hubServer / cloudflared / localWorker / trainingLoop。
+  「操作员手动停过」仍由**账本清账**保护（stop 会 `clearAnyComponent` ⇒ 条目消失 ⇒ 不复活）。
+- **启动动作复用操作员的「启动」路径**（`startComponent`）——不另写一套：单实例锁检查
+  （trainer 的 `run_cluster` 锁；python 侧对死持有者按「陈旧锁接管」放行）、端口回收、
+  **隧道 URL 回写**（cloudflared 每次起来 URL 都变，只有 `stepCloudflared` 会回写账本）、
+  **trainer 重启后的云端停机态复位**（`markCloudHaltRecovered` ⇒ hub `/admin/workers/resume`
+  ⇒ 崩溃时 §385 的停机指令在 12s 后自动解除，不留「停了不恢复」的死局）全在那条路径上；
+  抄一份必然漂（抄 `restartProc` 就会漏掉 URL 回写与停机态复位）。
+- **健康探针与看护器判死同源**：`restartSpecFor(key, '').healthy()`（看护器的 `classifyExit`
+  用的是同一份）⇒ 不会出现「看护器说死了、自动重启说活着」的双口径。
+- **瞬时失败有限重试**：busy 互斥 / 端口未释放 / 锁未清都是瞬时的 ⇒ 最多试
+  `AUTO_RESTART_ATTEMPTS`（3）次、间隔 8s；每次重试**重过一遍闸**（期间被别人拉起 ⇒ 立即停手；
+  账本被清 ⇒ 停手）。崩溃循环由频次闸兜底（10 分钟 ≤3 次，超闸只报警）。
+- **与 §385 云端停机的关系**：崩溃时看护器仍发停机指令（省 GPU 配额，语义不变），但 trainer
+  12s 后自动重启 ⇒ 停机态随之解除 ⇒ 训练自动续上；**设计内停车**则停机态保留（等人）。
+- **落点**：`dashboard/src/server/auto-restart.ts`（重写）· `dashboard/tests/auto-restart.test.ts`
+  （16 例）。
+- **门禁**：dashboard typecheck + **1773 用例**（+2）· `bun run check` 绿。
