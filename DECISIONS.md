@@ -11769,3 +11769,143 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   · `§168` pin 阈值：OFF 564 → **422**、ON 347（准入已把 pin 缩短）；
   · 评估链金标：stage0 s3 → 165/30；s5 与 s1 s6 的 `lane` 变 0（违反两列非零）⇒ 换 s12(68/27) 与 s1 s9(194/154)。
 - **门禁**：`bun run check` **2594 pass / 0 fail** · `build` 过 · `freeze:check` 绿（`375a529f…`）。
+
+
+### §2026-10-21 A4 回防滞后（hunt↔defend 目标抖动）—— SHIPPED 默认 3
+
+**背景**：A1（子弹方向 == 已提交朝向）/ A2（提交朝向开火门）/ A3（转身经济）三连已消除
+「转身被拒 → 站桩」与「冷却期开偏弹」。本轮继续清剩余的**原地无效转头/振荡**。
+
+**取证工具**：`tmp/turn-waste-probe.ts`（一次性法医脚本，**不入库**）。每 tick 在
+`sim.tick()` 前后各采一次玩家状态，把「想走但没走成」的 tick 做互斥分类，并按 branch
+归因、按「目标是否同时翻转」二次归因。
+
+#### 一、基线量化（hard，5 关 × 4 seed = 20 局，99280 个玩家可动 tick）
+
+| 类别 | 占比 | 说明 |
+|---|---|---|
+| 有位移 | 86.67% | |
+| 引擎回退转身 | **0.00%** | **A3 已完全覆盖，这一类已被清零** |
+| A3 主动停（躲弹） | 0.52% | §95 语义，保留 |
+| 分支主动停 | 8.97% | 各分支的主动 stop-and-aim |
+| 撞墙/挡住零位移 | 3.84% | |
+| **原地打转游程**（≥6 tick 且净位移 <8px） | **48.6 次/局，浪费 12.4% 的 tick** | 本轮目标 |
+
+按归因拆分：目标翻转型 288 / A* 路径型 583。
+
+#### 二、三个根因（逐个取证到 tick）
+
+**① 主因（已修）：回防距离阈值 × 离散格距离 ⇒ 目标每 11 tick 翻转一次**
+
+- 现场（s35 seed1000 t760-850，持续 90+ tick）：坦克在 x=384 的 y=152↔165 之间上下往返。
+  `t787 pc=(24,10) want=up` / `t788 pc=(24,9) want=down` —— 同一像素位置，方向相反。
+- 根因：`selectTargetUncached` 里
+  `playerDistToBase = manhattan(playerCell...) > maxPlayerDistFromBase(26)`，
+  而 `playerCell = round(x / CELL)` 是**离散格**，坦克每跨一格（~11 tick）`distToBase`
+  就在 26↔27 之间跳一次：26 ⇒ 猎杀（向上），27 ⇒ 回防（向下）。方向一反转，
+  200 ms 转身冷却（12 tick）就比走完一格还长，**两次反转都完不成**。
+- 修复（`defenseReturnHysteresis`）：**进入**回防保持即时（真紧急不延迟）；**退出**
+  要求距离降到 `阈值 − hysteresis`。两条回防门（§159 `maxPlayerDistFromBase` /
+  M13 `outnumberedFieldDistCells`）共用**一个闩锁** `_defenseReturnLatch`，因为后果相同；
+  任一门都不成立时立即清闩。
+
+**② A6（实测后维持 OFF）：回防目标 (12,23) 本身不可达**
+
+- 现场（s35 seed1000 t2395-2450，300+ tick）：坦克在 x=354↔368 横跳，`tgt=(12,23)` 恒定、
+  `navCache=left` 恒定、但 `followPath` 恒返回 null（`plen=0`）。
+- 根因：默认防守位 `(12, 23)` 在**全部 35 关上都是基地环砖格**（§137 注释已承认），
+  corridor 与 breakBrick 两种 A* 到砖格目标都返回空路径 ⇒ 回防只能靠 `directMove` 盲走破砖，
+  撞墙后落进 `directMove` 的 any-passable fallback（选到 `right`，**完全背离目标**）。
+- 已有的 `defensePosStandable`（§146 B，默认 0）正是这个修复。打开后：
+  **单关总 tick +5.5%**（s35 seeds1-20：160135 → 168987），即玩家真的跑回基地了，
+  清关却更慢；35×60 串行 A/B 胜率 79.7% vs base 80.0%（Δ−0.0036, t=−0.33）。
+- ⇒ 「回防目标不可达」**无意中把玩家留在了战场上**（打转），修好可达性只是把打转
+  换成了回防奔袭，**两者都不产生净胜率** —— 与「站位/防守侧 A/B 全负」的历史结论一致。
+  **维持 OFF**（代码与旋钮保留，注释记实测）。
+
+**③ A5（默认 OFF）：`snap()` 半格跳变是 directMove 左右翻转的直接原因**
+
+- 现场：同一像素邻域 `directMove(pc=(22,10)) → right` 而 `directMove(pc=(23,10)) → left`。
+- 根因：`canMoveDirRaw` / `canMoveOrBreakImpl` 用 `snap(v,CELL) = round(v/CELL)*CELL`
+  把坦克吸附到网格后再 ±CELL 探测。`snapx` 在 x=360 处从 352 跳到 368 ⇒
+  「往左能不能走」对**同一堵墙**给出 false / true 两个答案。
+- 修法（`navExactMoveProbe`）：移动轴用**真实像素坐标**探测，垂直轴仍用 snap（引擎每 tick
+  snap 垂直轴）。**实测反而更差**：更保守的判定让 `directMove` 的 any-passable fallback
+  触发更频繁（打转 43.5→52.6 次/局、短抖动 33→63 次/局）。
+- ⇒ **病根在 fallback 乱选方向，不在探测精度**。**代码保留、默认 OFF**，注释记实测。
+
+#### 三、A4 的效果
+
+| 指标 | OFF | hysteresis=3 |
+|---|---|---|
+| 基地↔猎杀翻转（40 局） | 46.7 次/局 | **18.9（−60%）** |
+| 原地打转游程（40 局） | 60.7 次/局 | 47.6 |
+| **S34 Battlement nav-stuck 钉住**（seed1-25，§168 口径） | 249~893（均值 ~460） | **≤262（均值 ~171）** |
+| 同一 seed 8 | 422 拍 | **163 拍** |
+
+hysteresis 档位全量扫描（35×60 串行配对，真实 stageIndex）：
+
+| 档 | 胜率 | Δ vs base | t |
+|---|---|---|---|
+| base（OFF） | 80.0% | — | — |
+| 1 | 79.9% | −0.0016 | −0.15 |
+| **2** | 79.1% | **−0.0102** | **−0.97** |
+| **3（SHIPPED）** | 79.8% | −0.0029 | −0.27 |
+
+### 三·补 档位选择的决定性证据：S34 钉住时长随 hysteresis 的变化（13 seed 均值）
+
+| hysteresis | 0 | 1 | 2 | **3** |
+|---|---|---|---|---|
+| nav-stuck 钉住均值（拍） | 457 | **492** | **429** | **168（−63%）** |
+| 最差单 seed | 893 | 1028 | 1546 | 262 |
+| hard 60-seed Δ | —（基线） | −0.0016 | −0.0102 | −0.0029 |
+
+⇒ **只有 3 真正消除了钉住**；h=1（492）与 h=2（429）不但没修好，h2 还制造了一个 1546 拍的
+新钉住。原因是 pin 的抖动幅度不止 1 格（坦克在多个格之间往返），1 格滞后盖不住。
+**h1 在 hard 上"看起来更好"（−0.0016 vs −0.0029）是 3 局噪声，而它在机制上是无效的** ——
+按机制强度取 3，不按噪声取 1。
+
+#### 四、连带发现（工具层，未改）
+
+**`tools/eval/eval-suite.ts` 的 `runCorpus` 不传 `stageIndex`**（默认 0），而
+`SimTask` 的注释自己声明 *"index 0 and index 33 are genuinely different runs on the
+same seed"*（`dropOnScoreMilestone` / kill score 随 index 变）。实证：
+`defensePosStandable` 在 s35 seeds1-20 上，stageIndex=34 时 17→18 胜，
+stageIndex=0 时 17→16 胜 —— **符号翻转**。本项目所有历史基线都跑在 stageIndex=0 口径下。
+本轮的结论一律改用**真实 stageIndex 的串行 runner**（`tmp/ab-full.ts`）得出。
+
+#### 五、新纪元连带重标
+
+- `tests/sim/metrics-v11-hotlane.test.ts` 评估链金标：原 stage1 seed9 在本纪元 `lane` 变 0
+  （违反「两列非零」）、原 stage0 seed12 的 `lane` 只剩 9（太脆）⇒ 重扫 seed1-30 后换成
+  **stage0 seed3 (108/67) / stage0 seed4 (62/74) / stage1 seed27 (255/163)**（lane 都显著非零）。
+- `tests/godai-navstuck-zone.test.ts` §168：OFF 复现腿的 pin 被 A4 从 422 缩到 163
+  （ON 腿同时失去额外收益）⇒ OFF 腿显式加 `defenseReturnHysteresis: 0` 以保留复现证据。
+- 新增 `tests/godai-return-hysteresis.test.ts`（4 条：bug 复现 / 翻转下降 / pin 422→163 /
+  闩锁只推迟退出）。
+
+#### 六、三难度 60-seed 满格（35×60 串行配对，真实 stageIndex，全部实测）
+
+| 难度 | base | hysteresis=3 | Δ(win+0.01·kills) | t | 胜率 |
+|---|---|---|---|---|---|
+| hard | 1679/2100 | 1674/2100 | −0.0029 ± 0.0107 | −0.27 | 80.0% → 79.7% |
+| classic | 1738/2100 | 1749/2100 | **+0.0054 ± 0.0057** | **0.95** | 82.8% → **83.3%** |
+| chaos | 1640/2100 | 1648/2100 | **+0.0041 ± 0.0108** | 0.38 | 78.1% → **78.5%** |
+
+⇒ **三格全部在噪声内**（|t| ≤ 0.95）：classic / chaos 正向，hard 微负（−0.3pp，5 局）。
+没有一格显著。这是本轮的诚实结论 —— **消除振荡本身不买胜率**，与「执行层 knob 已穷尽」
+的历史结论一致：释放出来的 tick 只是被拿去走了更多路，没有变成更多击杀
+（Δkills：hard −110 / classic +43 / chaos +59）。
+
+**为什么不回滚**：`defenseReturnHysteresis` 修的是一个**明确的机制 bug**（判定函数对同一
+位置给出矛盾答案），且它的收益落在别处 —— S34 Battlement 的 nav-stuck 钉住从均值 ~460 拍
+砍到 ~171 拍（那正是 §162/§168 记录多年、曾让 P1 在出生点口袋振荡 17-30s 的同类失败）。
+胜率 noise 级 + 机制正确 = 按用户政策发货。
+
+#### 七、门禁
+
+- `bun run check` **2598 pass / 0 fail**（15 skip，128657 expect）。
+- `bun run freeze:check` 绿（新钉 `c5abb064…`，上一钉 `375a529f…`）。
+- 一次性脚本 `tmp/turn-waste-probe.ts` / `tmp/ab-full.ts` / `tmp/scan-pin.ts` /
+  `tmp/stand-check.ts` / `tmp/rescan-golden.ts` **用完即删，不入库**
+  （残留会挂 typecheck/build）。

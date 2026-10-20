@@ -1331,6 +1331,55 @@ export interface GodAIParams {
   turnEconomyMode: number
 
   /**
+   * A4 (2026-10-20): hysteresis (in cells) on the "return to defend" distance
+   * thresholds — `maxPlayerDistFromBase` and `outnumberedFieldDistCells`.
+   *
+   * WHY: those thresholds are compared against `playerDistToBase`, a DISCRETE
+   * cell distance derived from `playerCell()` (`round(x / CELL)`), so it flips
+   * between `d` and `d+1` every time the tank crosses a cell boundary — about
+   * every 11 ticks at player speed. When the tank sits exactly on the boundary
+   * the objective flips between "hunt the enemy" and "return to base", which
+   * reverses the desired direction — and the 200 ms turn cooldown (12 ticks)
+   * is longer than one cell of travel, so the reversal can never complete.
+   * Measured (turn-waste-probe, hard, 5 stages × 4 seeds): **48.6 standing
+   * oscillations per game burning 12.4% of all ticks with zero net
+   * displacement**, 36.2 of them a hunt↔defend objective flip. Concrete case
+   * (s35 seed 1000): the tank paced y=152↔165 at x=384 for 90+ ticks —
+   * `distToBase` 26 (cell row 10) → hunt up; 27 (row 9) → return down.
+   *
+   * Semantics: entering the defend objective stays immediate (a real emergency
+   * is never delayed). Leaving it requires the distance to fall to
+   * `threshold - defenseReturnHysteresis`, so the objective cannot re-flip on
+   * the boundary the tank is standing on. The latch is cleared as soon as no
+   * defend condition holds, so a vanishing threat releases it at once.
+   *
+   * 0 = OFF (byte-identical to pre-A4).
+   */
+  defenseReturnHysteresis: number
+
+  /**
+   * A5 (2026-10-20): probe `canMoveDir` / `canMoveOrBreak` along the movement
+   * axis from the tank's REAL pixel coordinate instead of `snap()`-ing it to
+   * the cell grid first.
+   *
+   * `snap` is `round(v / CELL) * CELL`, so it jumps a whole cell at every
+   * half-cell — which the tank crosses every ~8px. For a sideways probe that
+   * shifts the probed rectangle by one cell, so "can I go left?" flips between
+   * FALSE and TRUE for the SAME wall depending on which half of the cell the
+   * tank is on. `directMove` then alternates between `left` and its
+   * any-passable fallback (`right`, straight away from the target), and the
+   * 200 ms turn cooldown means neither reversal ever completes: the tank paces
+   * one cell forever. Measured: 43.5 standing oscillations per game after A4,
+   * of which 67% have a stable objective (the A-star / directMove layer is what
+   * flips). Concrete case: hard s35 seed 1000, x=354↔368 at y=160, 300+ ticks.
+   *
+   * The perpendicular axis keeps `snap` — the engine snaps it every tick.
+   *
+   * 0 = OFF (byte-identical to pre-A5). 1 = ON.
+   */
+  navExactMoveProbe: number
+
+  /**
    * §84: Aggressive branch stall detection. When > 0, the aggressive
    * (freeze/shield) stop-and-aim code tracks how long the player has been
    * stopped at the same cell with no kills. If the player camps for more

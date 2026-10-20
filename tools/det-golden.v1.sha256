@@ -1,12 +1,23 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
-# 采集：2026-10-20 @ 开火准入 + §164 sticky 重调（DECISIONS §mechfix-fire-admission）。
-#       ① 开火策略准入**固定生效、无开关**：冷却期内 t2a 不提交（只约束玩家坦克 P1/P2，
-#          护卫/盟友不受影响）。候选切换型无用转身 35.5 → 23.1（−35%）。
-#       ② 同纪元把 midLaneStickyTicks 90 → **0**（60-seed sweep 单调：0 0.5781 / 30 0.5747 /
-#          60 0.5686 / 90 0.5654）——开火准入后玩家不再蹲车道，sticky 反成负担。
-#       最终（三难度 × 60）：hard **0.5788/79%** · classic 0.6452/83% · chaos 0.5433/76%。
-#       相对上一钉 ba02a9eb（坦克墙）：hard −0.004（胜率不变）、classic −0.082（用户拍板接受）、
-#       chaos −0.002。
+# 采集：2026-10-21 @ A4 回防滞后（DECISIONS §2026-10-21-godai-a4-return-hysteresis）。
+#       `defenseReturnHysteresis=3`：hunt↔defend 的目标切换加 3 格滞后（进入即时、
+#       退出要降到阈值−3），消除 `playerDistToBase`（离散格）在阈值边界上每 11 拍
+#       翻转一次造成的原地振荡。
+#       效果：基地↔猎杀翻转 46.7 → 18.9 次/局（−60%，40 局）；
+#             **S34 Battlement nav-stuck 钉住 13 seed 均值 457 → 168 拍（−63%），
+#             seed8 422 → 163**（§162/§168 记录多年的出生点口袋振荡被顺带消除）。
+#       档位决定性证据：钉住均值 h0=457 / h1=492 / h2=429 / **h3=168** —— 只有 3 有效
+#       （抖动幅度不止 1 格），h2 还制造了一个 1546 拍的新钉住。
+#       三难度 60-seed 串行配对（真实 stageIndex，全噪声级）：
+#         hard    80.0% → 79.7%（Δ−0.0029，t=−0.27）
+#         classic 82.8% → **83.3%**（Δ+0.0054，t=0.95）
+#         chaos   78.1% → **78.5%**（Δ+0.0041，t=0.38）
+#        ⇒ 消除振荡本身不买胜率；按「机制修复 + 胜率 noise 级」政策发货。
+#       同纪元维持 OFF（实测后）：`defensePosStandable`（回防目标可达性，单关 tick +5.5%
+#       但胜率不变）、`navExactMoveProbe`（snap 半格跳变的精确探测，让 fallback 更频繁）。
+#       相对上一钉 375a529f（开火准入 + §164 sticky 重调）。
 # 用法：bash tools/probe-det-baseline.sh --golden  → 当前全量签名 ≠ 本哈希则非零退出
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
-375a529f7e9076c815c838b0b9c9837642e5199bf3014ce1e1f9b06f0b610c50
+# ⚠ 本纪元另需连带重标：metrics-v11 评估链金标（lane 落 0 / 过脆 ⇒ 换 seed）与
+#    §168 navstuck OFF 复现腿（A4 已消除该 pin ⇒ 复现腿须显式关 hysteresis）。
+c5abb064e7a9dc7d364dacef7ee18db50dbe4f6b4208e916bd4d9b732d536104

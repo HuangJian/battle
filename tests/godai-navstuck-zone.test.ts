@@ -106,6 +106,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
         navStuckZone: 0,
         baseConnectClearMode: 0,
         pixelStuckDirectMoveTicks: 0,
+        // A4 会一并消除这个 pin（见下方断言注释）—— 复现腿必须回到 A4 前。
+        defenseReturnHysteresis: 0,
       },
       STAGE,
       SEED,
@@ -113,8 +115,10 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     )
     // Unfixed behavior: the pin runs far past the 180-tick escape threshold.
     // §187 target blacklist (targetBlacklistStuckTicks=240) reduced the pin
-    // from >600 to ~564. ⚠ 2026-10-20 开火准入纪元：t2a 冷却期不再提交后，
-    // 该 pin 进一步缩到 **422 拍**（仍远超 180 的逃逸阈值，所以 ON 档仍有意义）。
+    // from >600 to ~564. 2026-10-20 开火准入纪元：t2a 冷却期不再提交后该 pin
+    // 缩到 422。**A4 回防滞后纪元（2026-10-21）把同一个 pin 缩到 163** ——
+    // 滞后直接消除了造成它的 hunt↔defend 目标抖动，所以本腿必须显式关掉
+    // defenseReturnHysteresis 才能继续复现（复现证据保留，防未来回归）。
     expect(dwell).toBeGreaterThan(400)
   })
 
@@ -124,7 +128,7 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // zone. Generous bound (well above 180, well below the 1200-tick pin):
     // a few extra ticks can pass before HUNT next evaluates after the
     // threshold is crossed, and re-pins are allowed as long as each one is
-    // bounded. 本纪元实测 OFF=422 / ON=**347**（开火准入已把 pin 缩短，两者差距收窄）。
+    // bounded. 本纪元实测 OFF=163 / ON=**163**（A4 已把 pin 消除，ON 档无额外收益）。
     expect(dwell).toBeLessThan(400)
   })
 
