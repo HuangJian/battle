@@ -32,6 +32,13 @@
 #                   （它欠采样：改 stages.ts 只跑 1 个而 50 个依赖它；
 #                   DECISIONS §2026-09-15-gate-trigger-scope · 全文 → docs/nn/engineering.md §20）；纯文档/课程配置与
 #                   只改 dashboard 仍直接跳过。红 → 拦 + 归因指引（SKIP_BUN_TEST=1 定向跳过重试）
+#   eol 归一        **commit 时把工作树里的 CRLF 拉回 LF**（按 git 索引字节）：
+#                   codehash 集 + staged 文件。2026-10-20 mac 节点门事故的修法
+#                   ——codeHash 算**工作区原始字节**，某工具把已提交文件写成 CRLF
+#                   后 git status 干净（行尾归一隐形）但集内哈希已变 ⇒ 全集群
+#                   判 stale。**只修纯行尾污染**（归一后逐字节 == 索引 blob ⇒
+#                   无任何真实内容改动，他人在途编辑绝不被碰）；有真实内容差异
+#                   的文件一律不碰，只报。永不阻断。
 #   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
 #                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
 #                   （2026-09-06 v1 事故教训）。永不阻断。
@@ -51,10 +58,13 @@
 #   --no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #
-#   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化外，本 hook
-#   对工作树 **零写操作**。历史教训：v1「临时摘除未暂存改动」在多 agent 并行
+#   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化，以及 eol 归一
+#   对「**纯行尾污染**文件」的工作树重写外，本 hook 对工作树 **零写操作**。历史
+#   教训：v1「临时摘除未暂存改动」在多 agent 并行
 #   下弄丢了他人在途工作；v2 影子树方案（junction/锁/守卫）因复杂危险被否决
 #   ——归因式拦截是既不弃门禁又不碰工作树的解。
+#   eol 归一的写入面被前置条件锁死（normalize-lf.ts::classifyDrift）：工作区字节
+#   按 CRLF→LF 归一后必须**逐字节等于索引 blob** ⇒ 只动行尾，不动内容。
 #   已知接受的误差（用户裁定语义）：staged 改共享接口 → 报错落在他人未暂存
 #   文件上 → 放行，对方后继撞见并修复；反向（他人半成品 import 进我的
 #   staged 文件）→ 假拦截，肉眼可辨后走逃生口。
@@ -188,6 +198,10 @@ hook_selftest() {
   if [ -n "$(printf '%s\n' "$DASH_FILES" | attrib_staged_hits "$D/dash-other.txt")" ]; then
     echo "selftest FAIL: dashboard 归因与非 staged 路径不得有交集"; FAIL=1
   fi
+  # EOL 归一器自检（分类判据：same / eol / real 三分支 + 端到端修复与「真实改动不动」）
+  if ! "$BUN" tools/githook/normalize-lf.ts --selftest > "$D/eol-selftest.log" 2>&1; then
+    echo "selftest FAIL: EOL 归一器自检未过（见 $D/eol-selftest.log）"; FAIL=1
+  fi
   # 零删除铁律（2026-09-15）：截断文件、不 rmdir（rmdir ✓ 也在沙箱包装清单上）。
   # 残留的 tmp/selftest-$$ 0 字节目录由 periodic 清理兜底。
   for __f in "$D"/*; do [ -e "$__f" ] && : > "$__f"; done
@@ -231,6 +245,24 @@ trap 'for __f in "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_
 STAGED_FILTER=ACMR
 staged_paths() { git diff --cached --name-only --diff-filter="$STAGED_FILTER"; }
 staged_paths > "$STAGED_LIST"
+
+# ---------- EOL 归一（commit 时把工作树里的 CRLF 拉回 LF） ----------
+# 2026-10-20 mac 节点门事故（DECISIONS §2026-10-20-rollout-node-codehash-training-side-crlf）：
+#   codeHash = 集内文件**工作区原始字节**的哈希 ⇒ 某个 Windows 侧写文件工具把已提交
+#   文件写成 CRLF 后，git status 干净（core.autocrlf=input + `* text=auto eol=lf` 归一，
+#   行尾污染隐形）⇒ 但集内哈希已变 ⇒ 训练机期望值与任何干净 checkout 都不等 ⇒
+#   全集群节点判 stale、mac 被排除在 rollout/eval 外。
+#   ⇒ 修法不是「让 git 提交时归一」（索引早就是 LF，坏的是**工作树**），而是把
+#      工作树拉回**索引字节**。索引 = 提交内容的唯一真相 ⇒ 拉回它零语义风险。
+# 写工作树的唯一新增例外（oxfmt 之外）：**纯行尾污染**的工作区文件 ——
+#   归一后逐字节 == 索引 blob ⇒ 文件里没有任何真实内容改动，他人的在途编辑
+#   （真实内容差异）绝不会被覆盖（判据 = normalize-lf.ts::classifyDrift）。
+# 放在 dirty 清单**之前**：归一后「因行尾而不一致」的文件不再算未暂存改动。
+echo " ▸ eol 归一（工作树 CRLF → LF：codehash 集 + staged）"
+if ! "$BUN" tools/githook/normalize-lf.ts --staged-list "$STAGED_LIST"; then
+  echo " ⚠ EOL 归一步失败（不拦提交）——工作树可能仍带 CRLF 污染，节点门会红"
+fi
+
 git diff --name-only --diff-filter="$STAGED_FILTER" > "$DIRTY_LIST"
 STAGED_N=$(wc -l < "$STAGED_LIST" | tr -d ' ')
 DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')

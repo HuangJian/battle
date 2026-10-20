@@ -7945,3 +7945,116 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`dashboard/src/server/api/route.ts:154`（集合）＋ `:149-162`（注释写明为什么）。
 - **门禁**：dashboard typecheck + **1754 用例**（+1 新用例）· `bun run check` **2625 pass / 8 skip /
   0 fail** · `bun run build` 过。
+
+## §2026-10-20-course-select-ghost-run-dirs — 课程 select 的 `*.run` 幽灵课：名字白名单写进实现，历史残留进隔离区
+
+- **报障**（用户 2026-10-20）：左下角课程 select 里冒出一串 `ab-v6-*.jsonl.run` /
+  `v6-*.jsonl.run` 和 `repro-course` 之类的杂项。
+- **根因（三段链路各漏一道）**：
+  ① `course-metrics/meta.ts::isCourseName` 的注释明写「`*.run/**` 也有临时账本，它们不是课程」，
+     实现却只排除了 `pytest-tmp` / `backups` / `deliver` / `_` 前缀——**漏了 `.run` 后缀**；
+  ② `sourceCourses` 的判据是「目录里四个备份文件命中任意一个」⇒ `tmp/<name>.jsonl.run/`
+     带着 `eval_log.jsonl` / `dist-agent-meta.jsonl` 被当成课程转存进库；
+  ③ `api/courses.ts::backupCourses` 只用 `hasHotMirror`（存在 `mirror-meta.json`）收课，
+     **没有过名字白名单** ⇒ 库里一旦有脏目录，`discoverCourses` 就把它们当备份课捞回 select；
+     `sanitizeViewCourse` 也只做路径字符校验，`?course=<x>.run` 同样放行。
+  `repro-course` 则是人工 repro 时在 `tmp/` 下建的临时课目录（有 `training_log`），被 ② 转存后
+  经 ③ 常驻——名字本身合法，只能人工隔离。
+- **决定**：① `isCourseName` 增加 `.run` 后缀拒绝（扫描面 / 库内列表 / 冷存 / 课程发现同一口径）；
+  ② `backupCourses` 与 `coldCourses` 补 `isCourseName` 过滤（历史脏目录不等清库就不可见）；
+  ③ `sanitizeViewCourse` 同口径（`?course=` 不能绕过 select 的白名单）；
+  ④ 既有 13 个脏目录移到 `dashboard/data/course-metrics/_quarantine-20261020/`（`_` 前缀被白名单
+     挡住；**不删除**，保留 A/B 评估日志的可回溯性）。
+- **备选与否决**：① 只清库不改代码 —— 否（下一次 A/B 的 `.run` 目录又会转存回来）；
+  ② 只过滤 select、不过滤 mirror 写侧 —— 否（库继续膨胀、`backup` 的 tar 变脏、冷存也会打包幽灵课）；
+  ③ 把「有 `training_log.jsonl`」当唯一判据 —— 否（`repro-course` 也有，治不了这一类；
+  且历史备份可能只剩 eval 账本，会把真课误伤）。名字白名单是第一道，锚点判据不重复加。
+- **回归用例**：`dashboard/tests/course-metrics-mirror.test.ts`（`*.run/**` 的 eval 尾账不进库）
+  ＋ `dashboard/tests/course-metrics-read.test.ts`（库内历史残留 `*.run` / `_*` 不进
+  `discoverCourses`、`sanitizeViewCourse` 返回空；无 curricula 的正常备份课仍被发现）。
+  两条均先红后绿。
+- **落点**：`dashboard/src/server/course-metrics/meta.ts:73`（后缀判据）·
+  `dashboard/src/server/api/courses.ts:20-31 / 47-55`（发现与 `?course=` 白名单）·
+  `dashboard/src/server/course-metrics/archive.ts:115`（冷存列表同口径）。
+- **门禁**：dashboard typecheck + **1756 用例**（+2）· `bun run check` **2625 pass / 8 skip / 0 fail** ·
+  `bun run build` 过。
+
+## §2026-10-20-rollout-node-codehash-training-side-crlf — 节点门「版本指纹对不上」的真凶在训练机侧（集内文件 CRLF 污染）
+
+- **报障**（用户 2026-10-20）：rollout 集群的 mac 已更新到 git commit `ddbda71`，仍显示版本指纹
+  对不上、不参与 rollout/eval（训练机日志逐轮 `node mac: codeHash mismatch (local=1095afee
+  remote=e64efa38) — remote pull cannot converge (uncommitted training-tree changes), restart
+  suppressed (dirty-tree:1) — excluded this round`）。
+- **根因（差的是训练机，不是节点）**：codeHash = **集内文件的工作区原始字节**哈希
+  （`tools/agent/codehash-files.txt` 展开，TS/Python 双侧同式）。训练机工作区里
+  `src/game/Input.ts` 是 **CRLF**（386 CRLF / 386 LF），索引 blob 是 LF——`core.autocrlf=input`
+  ＋ `.gitattributes` 的 `* text=auto eol=lf` 让 git 比较时先归一 ⇒ **`git status` 完全看不出**
+  （这正是 2026-09-09「mac 事故」同款隐形污染）。⇒ 训练机期望值 `1095afee…`，而**任何干净
+  checkout 都是 `e64efa38…`**（mac ping 上报的正是后者，逐字节核对一致）⇒ 节点永远红。
+  更糟的一环：`dirty_hash_files()` 非空 ⇒ dispatch 的 dirty-tree 护栏**拒发**远端
+  pull/restart（「remote pull cannot converge」）⇒ 连「让节点自己收敛」这条退路都被堵死。
+- **判据（可复用，三步定位）**：① 先比「训练机期望 hash」与「节点 ping hash」，别先怀疑节点；
+  ② `common.distribution.dirty_hash_files()` 非空 ⇒ **先查训练机**（远端 pull 永远不收敛）；
+  ③ 把集内文件按 CRLF→LF 归一后重算 hash，若等于节点上报值 ⇒ 污染侧确定是训练机
+  （本次即此路坐实：mac 全程正确，`agentVersion=ddbda71f` 与本地 HEAD 一致）。
+- **决定**：① 集内文件的**工作区字节必须 == 索引字节**——训练机自检 `dirty_hash_files()` 非空时，
+  不得给远端发升级/重启，先修训练机（否则一次「升级波」打空，还把护栏变成静默排除）；
+  ② 修复动作 = **`rm` + `git checkout -- <file>`**，**禁用 `git checkout-index -f`**（实测它的
+  stat 缓存短路，CRLF 文件压根不会被重写，写完仍是 CRLF）；③ 写盘后 `git update-index --refresh`
+  / `--really-refresh` **修不好** stat 缓存（`git status` 仍报 M），只有 `git checkout --` 会
+  （重写文件＋重新 stat，实测 45 个文件逐一验证）。
+- **备选与否决**：① 重启 mac 的 agent／在 mac 上再 pull —— 否（mac 已干净；且 dirty-tree 护栏
+  本就拒绝远端 pull，重启与 pull 都治不了训练机侧的期望值）；② 放宽节点门（忽略 codeHash／加
+  容差／把指纹改成 commit 号）—— 否（门的存在正是为了不让旧代码节点混进同代语料，
+  2026-09-15 x3-power it30「epoch 全员 mismatch → 600s 零局」就是反向教训；掺 commit 号更会让
+  无关提交把全节点判 stale，见 §2026-09-17-goalnn-unified-node-gate）；③ 把训练机的期望 hash 当
+  真理、逼节点对齐 —— 否（期望值就是从工作区算出来的，污染侧永远是训练机本身）。
+- **附带处置**：全仓字节级体检（同 `dirty_hash_files` 判据）发现同一类潜伏污染 **45 个文件**
+  （`nn-training/**`，均在 codehash 集外）⇒ 已按同法归一（语义零变化，只换行尾）；
+  `DECISIONS.md` ＋ 5 个 dashboard 文件有**真实未提交改动**（并行会话在写）⇒ 未动。
+- **落点**：`src/game/Input.ts`（训练机工作区）· 判据 `nn-training/common/distribution.py::
+  compute_code_hash` / `dirty_hash_files` · 门 `nn-training/trainer/dispatch.py:203/238/263`。
+- **结果**：训练机期望值 = 节点上报值 = `e64efa38…`；`dirty_hash_files()` = `[]`；
+  11:27 起 mac 回场（rollout `byNode` 出现 `mac`，eval 出现 `node=mac`），a95/a97 一并恢复。
+- **防复发（下一步）**：① 集内文件一旦被 Windows 侧工具写回，必须保持 LF（Windows 文本模式写
+  文件默认 CRLF ⇒ 写集内文件前先确认工具的换行策略）；② 建议把「`dirty_hash_files()` 非空即红」
+  做成 pre-commit / 开训前自检门（现在是运行时才 WARN，且表现为静默排除）。
+
+## §2026-10-20-eol-guard-commit-time-lf-normalization — 「commit 时把文件改为 LF」= 把**工作树**拉回索引字节（不是让 git 提交时归一）
+
+- **用户指令**（2026-10-20）：配置本机 commit 时自动把文件改为 LF，问是否能避免 mac 节点门事故。
+- **先纠正前提**（实测）：**git 的提交时归一早就在做，且早就是对的**——`.gitattributes` 的
+  `* text=auto eol=lf` ＋ 本机 `core.autocrlf=input` ⇒ 索引里永远是 LF（事故当天
+  `src/game/Input.ts` 的索引 blob 就是 13641 字节 LF，而工作区是 14027 字节 CRLF）。
+  实测 `eol=lf` **压过** `core.autocrlf=true`（临时仓库实验：checkout 写出 CR=0）⇒ git 本身
+  不是污染源。**坏的是工作树**，而 codeHash 算的正是**工作区原始字节** ⇒ 「提交时归一」治不了
+  它；能治它的是「**把工作树拉回索引字节**」。
+- **决定**：① **本机 user 级 git 配置**：`core.autocrlf=input`（已有）+ `core.eol=lf`（新）+
+  `core.safecrlf=warn`（新）——`safecrlf` 实测在 `git add` 时喊「CRLF will be replaced by LF」，
+  是**早信号**；不用 `=true`（实测 `git add` 直接 fatal，会把提交卡死在看不懂的报错上）。
+  ② **pre-commit 钩子新增一步「eol 归一」**（`tools/githook/normalize-lf.ts`）：commit 时把
+  **codehash 集 + staged 文件**里**纯行尾污染**的工作树文件重写为**索引字节**（LF）。
+  ③ 判据锁死（`classifyDrift`）：工作区字节按 CRLF→LF 归一后必须**逐字节等于索引 blob**
+  ⇒ 只动行尾、不动内容 ⇒ 他人的在途编辑（真实内容差异）**一字不碰**、只报告。
+  ④ 二进制（集内 `prebuilt/**` 的 .wasm/.dll/.dylib/.so）永不参与。
+- **与钩子铁律的关系**：钩子原有铁律是「除 oxfmt 精确格式化外对工作树**零写操作**」——本次
+  新增的写入面被**前置条件**（归一后 == 索引 blob）锁死，与 oxfmt 那条例外同性质（只动自己
+  确认安全的内容），已在钩子头注释里显式改写铁律并说明理由。
+- **为什么这能覆盖事故**：事故当天 09:42 污染、11:16 有一次提交（ddbda71）⇒ 有这道闸，
+  集内文件会在那次提交时被拉回 LF，**mac 不会被判 stale**。闸放在 dirty 清单**之前**：
+  归一后「仅因行尾而不一致」的文件不再算未暂存改动。
+- **备选与否决**：① 只设 `core.autocrlf` / `core.safecrlf` 就收工 —— 否（索引早就是 LF，
+  坏的是工作树，配置层动不到它）；② 提交时把**全部**跟踪文件重写成 LF —— 否（与 oxfmt 同样
+  的风险面：会吃掉未暂存的真实编辑；本条只修「归一后 == 索引」的那一类）；
+  ③ 在**训练侧**（dispatch）自动修复集内污染 —— 未实施（训练链路的写工作树行为变更，另议；
+  运行时的 `dirty_hash_files()` WARN 仍在，且已被本条的前置闸大幅缩短窗口）。
+- **落点**：`tools/githook/normalize-lf.ts`（新）· `tools/githook/pre-commit`（新增一步 ＋
+  铁律改写 ＋ selftest 接线）· `tests/normalize-lf.test.ts`（新，9 例）· 本机 user 级 git 配置。
+- **回归**：① 归一器 `--selftest`（分类三分支 ＋ 端到端修复 ＋「真实改动不动」）；
+  ② 钩子 `--selftest`（含归一器自检）绿；③ `tests/normalize-lf.test.ts` 9 例（分类 ＋ 修复
+  ＋ 覆盖面接线 ＋「钩子调它且在 dirty 清单之前」）；④ **事故级端到端**：把集内文件
+  `src/utils/RNG.ts` 写成 CRLF ⇒ `dirty_hash_files` 报它、期望 codeHash 由 `e64efa38…` 变
+  `f0f774df…` ⇒ 归一后工作树回到索引字节、dirty 清空、期望值复原 `e64efa38…`；真实内容差异
+  用例确认一字未动。
+- **门禁**：`bun run check` 绿（tsc ＋ check-decisions ＋ agents-budget ＋ 根套件）；
+  `tools/githook/pre-commit --selftest` 绿。
