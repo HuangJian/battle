@@ -249,6 +249,70 @@ describe('Snapshot Framework — restore round-trip', () => {
     expect(world.player!.x).toBe(savedPlayerX)
   })
 
+  /**
+   * B2 新增的六个 `Tank` 字段（`src/types.ts:225-229` 的 `lastHitDir/Frame/Damage`
+   * 与 `lastActionDir/Hold/Fire`）**不进 `tickHash`** ⇒ 快照往返是它们**唯一**的回归覆盖。
+   * `WorldSerializer.cloneTank` 是 `{...t}` 展开（`WorldSerializer.ts:19-22`），新字段自动带上，
+   * 但**没有任何断言钉住它** ⇒ 哪天序列化改成显式字段枚举就会静默丢字段
+   * （plan/nn-capability-upgrade.plan.md §7 DoD-B）。
+   */
+  it('B2 的 lastHit* / lastAction* 六字段随快照往返（这是它们唯一的覆盖）', () => {
+    const mgr = makeManager()
+    const world = makePlayingWorld()
+    const sim = new Simulation(world, new Input())
+    for (let i = 0; i < 60; i++) sim.tick()
+
+    const p = world.player!
+    // 全部设成**非默认**值：默认值（undefined / null / 0）会让"字段丢失"看起来像"没改过"。
+    p.lastActionDir = 'left'
+    p.lastActionHold = true
+    p.lastActionFire = 1
+    p.lastHitDir = 'down'
+    p.lastHitFrame = 4242
+    p.lastHitDamage = 3
+
+    const snap = mgr.create('manual', world)!
+
+    // 污染：六个字段全部改成别的值
+    p.lastActionDir = 'right'
+    p.lastActionHold = false
+    p.lastActionFire = 2
+    p.lastHitDir = 'up'
+    p.lastHitFrame = 999
+    p.lastHitDamage = 1
+
+    expect(mgr.restore(snap.id, world)).toBe(true)
+
+    const q = world.player!
+    expect(q.lastActionDir as string).toBe('left')
+    expect(q.lastActionHold).toBe(true)
+    expect(q.lastActionFire).toBe(1)
+    expect(q.lastHitDir as string).toBe('down')
+    expect(q.lastHitFrame).toBe(4242)
+    expect(q.lastHitDamage).toBe(3)
+  })
+
+  it('B2 六字段为 undefined 时往返不炸（可选字段的缺省态）', () => {
+    const world = makePlayingWorld()
+    const p = world.player!
+    // 开局还没挨打也还没决策 ⇒ 六个字段都是缺省态
+    p.lastActionDir = undefined
+    p.lastActionHold = undefined
+    p.lastActionFire = undefined
+    p.lastHitDir = undefined
+    p.lastHitFrame = undefined
+    p.lastHitDamage = undefined
+
+    const cloned = cloneWorld(world)
+    const c = cloned.player!
+    expect(c.lastActionDir).toBeUndefined()
+    expect(c.lastActionHold).toBeUndefined()
+    expect(c.lastActionFire).toBeUndefined()
+    expect(c.lastHitDir).toBeUndefined()
+    expect(c.lastHitFrame).toBeUndefined()
+    expect(c.lastHitDamage).toBeUndefined()
+  })
+
   it('a restored world reproduces the exact same future (determinism §2.3)', () => {
     const mgr = makeManager()
     const world = makePlayingWorld()

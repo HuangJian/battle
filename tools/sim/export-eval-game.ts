@@ -184,6 +184,31 @@ interface RolloutModel {
   readonly valueOut: Float32Array
 }
 
+/**
+ * v10 `stopTicks` 的**单一口径**（metrics 列 54）："这一拍没在前进"。
+ *
+ * ⚠ 口径随动作空间切换（plan/nn-capability-upgrade §4-B1 S2-3）：
+ *   · **v6（hold 头）** = `isHolding() === true` —— v6 的 move 头**没有 null 类**，
+ *     "不动"只能由 hold 位表达；
+ *   · **legacy** = `getMoveDirection() === null`（没有 `isHolding` 的输入源）。
+ *
+ * 抽成纯函数是为了**可单测**：这两条语义若被改回「一律 `=== null`」，v6 通电后
+ * `stopTicks` 会**静默归零** ⇒ 依赖它的 wBlock 项从 −0.5 分暴涨到 −16.3 分
+ * （idle 148.5/千 − stop 143.7/千 ⇒ 5/千；归零则 −110 × 0.1485）。
+ */
+export function isStopTick(ai: InputLike): boolean {
+  return ai.isHolding?.() === true || ai.getMoveDirection() === null
+}
+
+/**
+ * v10 `fireHeldTicks` 的**单一口径**（metrics 列 55）："本 tick 开火输出为真"。
+ * 刻意**不是** `playerShots` 实弹——后者被冷却/弹量上限门掉。
+ * ⚠ 对 NN 恒等于 `K × playerShots`（F/S 实测 9.94@K=10）⇒ **跨 K 不可比**。
+ */
+export function isFireTick(ai: InputLike): boolean {
+  return ai.isFiring()
+}
+
 /** 掩码 argmax：并列取最小索引（确定性）；全掩码时与 sampleCat 同退化为末位。 */
 function argmaxCat(logits: Float32Array, mask: number[] | null): number {
   let best = -Infinity
@@ -822,11 +847,10 @@ export function runEvalOne(
     // 输入对象（nn 的 ScriptedInput 与 god 的 GodAIInput 都实现了 `isFiring()`）。
     // 刻意不用 `bullet_fired`：那被冷却/弹量上限门掉，是「实弹」不是「开火输出」。
     // nn 策略下 ≡ export-rl-rollout 的 fireHeld（同 held head，见该文件 setAction 注释）。
-    const fireOutThisTick = ai.isFiring()
-    // metrics v10：移动输出（None/方向）——与 `fireOutThisTick` 同采样点、同 held head。
-    const moveOutThisTick = ai.getMoveDirection()
-    // v6（plan §4-B1 S2-3）："没在前进" = hold=1 或 legacy 的无输入（v6 的 move 头没有 null）。
-    const stopOutThisTick = ai.isHolding?.() === true || moveOutThisTick === null
+    const fireOutThisTick = isFireTick(ai)
+    // metrics v10 `stopTicks`（列 54）：口径已抽到 `isStopTick`（v6 走 hold 位、
+    // legacy 走 `move === null`）⇒ 这里不再内联一份，避免两处口径分叉。
+    const stopOutThisTick = isStopTick(ai)
     // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
     if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()

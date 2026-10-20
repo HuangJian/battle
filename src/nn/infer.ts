@@ -314,7 +314,20 @@ export class NNModel {
 export class StudentModel implements ModelLike {
   readonly inCh = OBS_CHANNELS
   readonly board = BOARD
-  readonly scalarDim = SCALAR_DIM
+  /**
+   * 融合宽度 = `fc.weight` 的**真实行宽** − h，不是硬取的 `SCALAR_DIM`。
+   *
+   * ★ 为什么不能硬取常量（2026-10-19 修复，见 `tests/nn/student-scalar-compat.test.ts`）：
+   * schema bump（B′ 的 `SCALAR_DIM` 40→46）能改 fixture，**改不了生产权重**——它们是训练
+   * 产出的，`y25-price` 系列 `arch.scalar_dim=40`、`fc.weight` 形状 `[128, 104]`。
+   * 硬取 46 ⇒ forward 按 `fusedLen = h+46 = 110` 步进读 104 宽的表 ⇒ **从第 0 行起就错位**，
+   * 越界部分读到 `undefined` ⇒ NaN ⇒ 被 `RELU = x > 0 ? x : 0`（本文件第 57 行）**静默吞成 0**
+   * ⇒ 不崩、不 NaN、输出有限但完全错误（实测 hidden 最大偏差 7481）。
+   *
+   * 反推后：旧权重按 40 维融合，只读 `scalars[0..39]`（B′ 新增的 6 位被正确忽略）；
+   * 新权重按 46 维。两侧都自洽，且不需要"权重迁移"。
+   */
+  readonly scalarDim: number
   readonly h: number
   readonly d: number
   readonly headHidden: number
@@ -402,7 +415,14 @@ export class StudentModel implements ModelLike {
 
   constructor(
     params: Record<string, Float32Array>,
-    arch: { h?: number; d?: number; policyExtra?: boolean; spatialTower?: boolean },
+    arch: {
+      h?: number
+      d?: number
+      policyExtra?: boolean
+      spatialTower?: boolean
+      /** 权重自带的融合宽度（`nn-training/common/schema.py::SCALAR_DIM` 产出时的值）。 */
+      scalar_dim?: number
+    },
     intentHeads?: boolean,
   ) {
     const p = (name: string): Float32Array => {
@@ -435,6 +455,29 @@ export class StudentModel implements ModelLike {
     }
     this.fcW = p('fc.weight')
     this.fcB = p('fc.bias')
+    // ★ 融合宽度反推（理由见 `scalarDim` 字段注释）：`fc.weight` 形状 = [headHidden, h + scalar_dim]。
+    // 三步校验全部「响亮拒绝」——这里静默 = 后面几千局 rollout 全在错算。
+    const rowWidth = this.fcW.length / this.headHidden
+    if (!Number.isInteger(rowWidth) || rowWidth <= h) {
+      throw new Error(
+        `StudentModel: fc.weight 宽度 ${this.fcW.length} 与 head_hidden=${this.headHidden} 不匹配` +
+          `（行宽 ${rowWidth} 必须是整数且 > h=${h}）`,
+      )
+    }
+    const derived = rowWidth - h
+    if (arch.scalar_dim !== undefined && arch.scalar_dim !== derived) {
+      throw new Error(
+        `StudentModel: arch.scalar_dim=${arch.scalar_dim} 与 fc.weight 反推的 ${derived} 不符` +
+          `（行宽 ${rowWidth} = h ${h} + ${derived}）`,
+      )
+    }
+    if (derived > SCALAR_DIM) {
+      throw new Error(
+        `StudentModel: 权重的融合宽度 ${derived} 超过本编码器 SCALAR_DIM=${SCALAR_DIM}` +
+          `（编码器喂不满 ⇒ 尾部恒 0；请升级 schema 或换权重）`,
+      )
+    }
+    this.scalarDim = derived
     this.moveW = p('move_head.weight')
     this.moveB = p('move_head.bias')
     this.fireW = p('fire_head.weight')

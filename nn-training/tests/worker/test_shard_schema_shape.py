@@ -20,7 +20,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
-from worker.ppo.np_core import _RL_SHARD_SHAPES, _RL_SHARD_SPEC, load_shard_fields
+from worker.ppo.np_core import (
+    _RL_SHARD_OPTIONAL,
+    _RL_SHARD_SHAPES,
+    _RL_SHARD_SPEC,
+    load_shard_fields,
+)
 
 
 def _write_shard(
@@ -53,7 +58,12 @@ def _write_shard(
 def test_load_shard_fields_accepts_current_schema(tmp_path: Path) -> None:
     """① 当前 schema：装载成功且读数逐位保留（形状判据不误伤）。"""
     _write_shard(tmp_path)
-    d = load_shard_fields(str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES)
+    # B1 v6（2026-10-20）：`_RL_SHARD_SPEC` 现在含 v6 才有的 `a_hold`/`lp_hold`，
+    # 本 fixture 写的是 legacy shard（没有这两个文件）⇒ 必须按生产口径传 `optional`。
+    d = load_shard_fields(
+        str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+    )
+    assert d.get("a_hold") is None  # legacy shard：整键省略，不是填 0
     assert d["obs"].shape == (4, OBS_CHANNELS, BOARD, BOARD)
     assert d["scalars"].shape == (4, SCALAR_DIM)
     assert d["extra"].shape == (4, POLICY_EXTRA_DIM)
@@ -78,9 +88,13 @@ def test_load_shard_fields_refuses_legacy_schema(
     """
     _write_shard(tmp_path, **{key: legacy})
     with pytest.raises(ValueError):
-        load_shard_fields(str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES)
+        load_shard_fields(
+            str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+        )
     _write_shard(tmp_path, **{key: current})
-    d = load_shard_fields(str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES)
+    d = load_shard_fields(
+        str(tmp_path), _RL_SHARD_SPEC, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+    )
     assert d["obs"].shape[0] == 4
 
 

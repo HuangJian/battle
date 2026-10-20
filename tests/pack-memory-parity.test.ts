@@ -63,6 +63,11 @@ function makeShard(n = 5): ShardData {
     aFire: Array.from({ length: n }, (_, i) => i % 2),
     lpMove: Array.from({ length: n }, () => -0.5),
     lpFire: Array.from({ length: n }, () => -0.25),
+    // v6 三头字段：本 fixture 是 legacy 5/2 ⇒ 数组留空、v6=false
+    // （`shardNpyEntries` 按 `v6` 决定是否落 a_hold/lp_hold.npy 与掩码宽度）。
+    aHold: [],
+    lpHold: [],
+    v6: false,
     value: Array.from({ length: n }, () => 0.1),
     metrics,
     done: [...Array.from({ length: n - 1 }, () => 0), 1],

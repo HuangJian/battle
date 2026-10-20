@@ -4,10 +4,14 @@
  *
  * 在**真实决策点**上分别测（hu150 权重的贪心局，ladder-c20-lives1 四关）：
  *   · encoder.encode        现有观测编码（不含 extra）
- *   · computePolicyExtra    新增 9 维扫描（一趟子弹 + 一趟坦克 + 每敌 4 向射线）
+ *   · computePolicyExtra    新增扫描（一趟子弹 + 一趟坦克 + 每敌 4 向射线；B′ 后 = 57 维）
  *   · model.forward         主干+头（native 路径；含 bufA）
- *   · spatialTowerForward   空间塔（随机权重；C=8 生产档 h=64/d=8）
+ *   · spatialTowerForward   空间塔（随机权重）—— **仅当权重开了 spatialTower 才跑**
  * 报每决策点绝对毫秒（mean/median/p95）+ 每局决策数 + 新增算力占比推算吞吐下降 %。
+ *
+ * ⚠ 口径（2026-10-19 修）：`throughput_drop_pct` **只统计本 schema bump 真正新增的算力**。
+ * 旧版无条件跑塔并把它计进"新增" ⇒ 对未开塔的权重虚报 +16.9%（塔是 v4 腿 B 的存量特性，
+ * 不是 B′ 新增）。`tower_us` 现在单列，且只在 `model.spatialTower === true` 时才有值。
  *
  * Usage:
  *   bun tools/sim/spatial-probe-bench.ts --weights <json> --seeds 2
@@ -121,6 +125,8 @@ function main(): void {
   const model = buildModelFromText(readFileSync(weightsPath, 'utf8'))
   const bufA = (model as unknown as { bufA: Float32Array }).bufA
   if (!bufA) throw new Error('bench: 模型没有 bufA（架构不符）')
+  // 塔只在该权重真的开了塔时才跑（否则它是 v4 存量特性，不该算进本 bump 的新增算力）。
+  const hasTower = (model as unknown as { spatialTower?: boolean }).spatialTower === true
 
   const tEnc: Stats = { samples: 0, sum: 0, list: [] }
   const tExtra: Stats = { samples: 0, sum: 0, list: [] }
@@ -171,7 +177,9 @@ function main(): void {
           let t2 = performance.now()
           model.forward(enc.obs, enc.scalars)
           let t3 = performance.now()
-          spatialTowerForward(bufA, projW, projB, fcW, fcB, zBuf, vecBuf, towerOut)
+          if (hasTower) {
+            spatialTowerForward(bufA, projW, projB, fcW, fcB, zBuf, vecBuf, towerOut)
+          }
           let t4 = performance.now()
           add(tEnc, (t1 - t0) * 1000)
           add(tExtra, (t2 - t1) * 1000)
@@ -201,9 +209,11 @@ function main(): void {
   const addPerDecision = rExtra.mean_us + rTower.mean_us
   const dropPct = (addPerDecision / oldPerDecision) * 100
   process.stderr.write(
-    `[bench] decisions=${decisions} games=${games} ticks=${ticksTotal} ` +
-      `old/decision=${(oldPerDecision / 1000).toFixed(3)}ms new-extra=${(addPerDecision / 1000).toFixed(3)}ms ` +
-      `⇒ 吞吐下降 ≈ ${dropPct.toFixed(2)}%（MAdds 口径 +0.36M/38.19M ≈ 0.95%）\n`,
+    `[bench] decisions=${decisions} games=${games} ticks=${ticksTotal} spatialTower=${hasTower}\n` +
+      `[bench] old/decision=${(oldPerDecision / 1000).toFixed(3)}ms ` +
+      `added=${(addPerDecision / 1000).toFixed(3)}ms（extra ${(rExtra.mean_us / 1000).toFixed(3)}` +
+      ` + tower ${(rTower.mean_us / 1000).toFixed(3)}）⇒ 吞吐下降 ≈ ${dropPct.toFixed(2)}%\n` +
+      `[bench] 判据（plan §6 Bf10/S17）：增量 >10% ⇒ 现在就决定拆批；否则一次做完\n`,
   )
   process.stdout.write(
     JSON.stringify(
@@ -211,6 +221,7 @@ function main(): void {
         weights: weightsPath,
         games,
         decisions,
+        spatialTower: hasTower,
         per_decision: {
           encode_us: rEnc,
           extra_us: rExtra,
@@ -220,7 +231,10 @@ function main(): void {
           added_us: addPerDecision,
           throughput_drop_pct: dropPct,
         },
-        madds_note: '+0.36M / 38.19M ≈ 0.95%（算术下界；实测量含常数开销）',
+        // 判据（plan §6 Bf10/S17）：>10% ⇒ 拆批；≤10% ⇒ 一次做完。
+        // ⚠ 只有 `extra_us` 是本 schema bump 真正新增的；`tower_us` 是 v4 腿 B 存量，
+        // 且只在 `spatialTower=true` 的权重上才有值（否则恒 0）。
+        verdict: dropPct > 10 ? 'SPLIT-BATCH（增量 >10%）' : 'ONE-SHOT OK（增量 ≤10%，一次做完）',
       },
       null,
       2,

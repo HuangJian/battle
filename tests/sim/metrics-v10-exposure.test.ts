@@ -500,8 +500,13 @@ describe('metrics v10：导出器接线（源码哨兵）', () => {
     const src = await Bun.file(
       join(import.meta.dir, '..', '..', 'tools', 'sim', 'export-rl-rollout.ts'),
     ).text()
-    expect(src).toContain('fireHeld = fr.idx === 1')
-    expect(src).toContain('stopHeld = aMove === 0')
+    // ⚠ B1 v6（2026-10-20）后这两行是**双分支**：判据是「开火输出为真 / 没在前进」，
+    // 不是「等于某个类号」——类号在 5/2 与 4/3/2 两套动作空间里语义不同：
+    //   fire: legacy {0 release, 1 hold} ⇒ `=== 1`；v6 {0 none, 1 before, 2 after} ⇒ `!== 0`
+    //         （照抄 `=== 1` 会漏掉所有 fireAfter 拍，fireHeldTicks 少算一半以上）
+    //   move: legacy 0 = STOP；v6 **没有 STOP 类**，不前进由 hold 位表达 ⇒ 看 hold
+    expect(src).toContain('fireHeld = v6 ? fr.idx !== 0 : fr.idx === 1')
+    expect(src).toContain('stopHeld = v6 ? hd !== null && hd.idx === 1 : aMove === 0')
     expect(src).toContain('if (stopHeld) tel.stopTicks++')
     expect(src).toContain('if (fireHeld) tel.fireHeldTicks++')
     expect(src).toContain('if (!world.player.moving) tel.idleTicks++')

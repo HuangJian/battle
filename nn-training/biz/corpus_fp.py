@@ -23,6 +23,31 @@ from biz.course_spec import CourseConfig
 #: 于是规则变更自动让旧 shard 成为异血缘（D14 拒收），而不是静默混训（§15.5）。
 VOLUME_RULE_V1 = 1
 
+
+def _bc_action_space(bc_path: str) -> str:
+    """读起点权重的动作空间：`'v6'`（hold2/move4/fire3）或 `'legacy'`（5/2）。
+
+    为什么从权重文件读、不用全局常量：动作空间是**每条腿自己的**属性（见
+    `corpus_identity_fp` 里 `action_space` 键的注释）。判据与 `build_ppo` 同一处
+    ——权重 `arch.actionV6`（`PPOStudent.arch()` 写入），那是 rollout 真正会走的动作空间。
+
+    **纯 stdlib 读 JSON 顶层 `arch`**（不 import `worker.data.weights_io`）：
+    `biz/` 不得依赖 `worker/`（分层，见模块 docstring）。读不到（路径空/文件缺失/
+    非 JSON/无 arch）⇒ 一律按 legacy —— **保守方向是"老行为逐字节不变"**，不是猜 v6。
+    """
+    if not bc_path:
+        return "legacy"
+    try:
+        with open(bc_path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return "legacy"
+    arch = doc.get("arch") if isinstance(doc, dict) else None
+    if isinstance(arch, dict) and arch.get("actionV6") is True:
+        return "v6"
+    return "legacy"
+
+
 def corpus_identity_fp(course: CourseConfig) -> str:
     """语料身份指纹（D14 语义版）：sha256(canonical(env+reward))。
 
@@ -43,7 +68,12 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     只有身份本身含 schema 才能把跨 era 语料挡在**混入之前**（加载侧
     data.npyio.verify_shard_schema 是最后一道，到那一步已经在崩了）。
     """
-    from common.schema import MOVE_LABEL_SEMANTICS, OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
+    from common.schema import (
+        MOVE_LABEL_SEMANTICS,
+        MOVE_LABEL_SEMANTICS_V6,
+        OBS_SCHEMA_MAJOR,
+        SCHEMA_FINGERPRINT,
+    )
 
     stages = (
         [s.model_dump() for s in course.stages]
@@ -72,6 +102,17 @@ def corpus_identity_fp(course: CourseConfig) -> str:
         "dodge": course.dodge,
         "reward": course.reward.model_dump(),
     }
+    # ---- B1 v6 动作空间（2026-10-20）----
+    # 为什么**不翻全局 `MOVE_LABEL_SEMANTICS` 常量**：动作空间是**每条腿自己的**属性
+    # （y25 系是 5/2，新 v6 腿是 4/3/2），不是一个全局纪元。翻常量会让所有历史 5/2
+    # shard 被判成异血缘 ⇒ 已跑完的语料全废。正确做法 = 只让 v6 腿带新键：
+    #   · v6 课程 ⇒ payload 多一个 `action_space` ⇒ 与 5/2 语料异血缘（D14 分流）✓
+    #   · 5/2 课程 ⇒ payload 逐字不变 ⇒ 指纹零漂移、历史 shard 继续有效 ✓
+    # 判据 = 起点权重（`course.bc`）的 `arch.actionV6`——那是 rollout 真正会用的
+    # 动作空间的**唯一真源**（`build_ppo` 也读它）。`bc` 路径本身仍**不进**身份
+    # （它是路径不是语义，挪个目录不该断血缘）。
+    if _bc_action_space(getattr(course, "bc", "") or "") == "v6":
+        payload["action_space"] = MOVE_LABEL_SEMANTICS_V6
     # 动态采集（2026-09-15）：target_transitions 与 seed_rotate 同类（决定**抽哪些**
     # 样本），进身份；规则版本常量随之进（规则变更必须能让 D14 一眼分辨）。
     # ⚠ **仅在键激活时进 payload**：无条件加入会让每一条既有课程的指纹全体漂移

@@ -57,6 +57,23 @@ def _mean(rows: Sequence[EvalRow], metric: str) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+def _median(rows: Sequence[EvalRow], metric: str) -> float | None:
+    """窗口内某 metric 的**中位数**（C2 门模板「区间中位」口径的统计层支撑）。
+
+    为什么要有它：`_mean` 是算术均值，**会被单轮跳变带偏**——100 局/点下 SE=4.3pp
+    （`course_spec.py` 池化判据注释），一个异常轮能把窗口均值拖过门限，而门一旦压到
+    单点噪声量级就是在噪声上做判决（DECISIONS 口径：**基线取 null 同期，不取 it0**）。
+    中位数对单点跳变免疫，且**与 `_mean` 同签名** ⇒ 课程作者可原地替换、语义不变。
+    偶数个取中间两值均值（与 `statistics.median` 同口径）。
+    """
+    vals = sorted(v for v in (r.metric(metric) for r in rows) if v is not None)
+    if not vals:
+        return None
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
 def _slope(vals: Sequence[float]) -> float:
     """最小二乘斜率（等距 x = 0..n-1）；n<2 返回 0.0。"""
     n = len(vals)

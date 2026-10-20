@@ -59,8 +59,14 @@ def test_eval_row_carries_v8_fields():
 
 
 def test_batch_eval_record_uses_shared_helper():
-    # `BatchEvalRunner.record` 是闭包/方法体，改与不改只能看源码：它必须经 eval_v8_fields 取 v8 列
-    # （与 eval_row 同源），否则两处行构造点再次分叉。
+    """`BatchEvalRunner.record` 是闭包/方法体，改与不改只能看源码。
+
+    它必须经**共享 helper** 取 metrics 列（与 `eval_row` 同源），否则两处行构造点再次分叉
+    （v8 的实际事故）。2026-10-19 起判据从「含 `eval_v8_fields`」放宽为「含 `eval_metric_fields`」：
+    v8–v13 六族改由 `eval_rows.eval_metric_fields` 聚合后，batch_runner 不再逐族 import
+    （它已顶到 1000 LOC 天花板）。判据放宽但**不削弱**——只要还在调聚合入口，
+    不管内部是几族都与 `eval_row` 同源（等价性由 `test_eval_metric_fields_equals_union_of_v8_to_v13` 钉住）。
+    """
     import pathlib
 
     # 从本文件反推仓根：门禁（`nn-python-gate.sh`）的 cwd 是 `nn-training/`，
@@ -71,4 +77,4 @@ def test_batch_eval_record_uses_shared_helper():
     src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_runner.py").read_text(
         encoding="utf-8"
     )
-    assert "eval_v8_fields" in src
+    assert "eval_metric_fields" in src

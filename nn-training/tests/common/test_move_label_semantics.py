@@ -67,3 +67,54 @@ def test_all_funnels_share_one_d14_predicate() -> None:
     for rel in ("worker/resume.py", "remote/hub_client.py"):
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert "d14_corpus_match" in src, f"{rel} 未走共享 D14 判据（标签版本执法会漏）"
+
+
+# ───────────── B1 v6 动作空间：身份随**起点权重**走，不翻全局常量 ─────────────
+
+
+def test_v6_action_space_enters_identity_from_bc_arch(tmp_path: Path) -> None:
+    """B1 v6（2026-10-20）：`action_space` 键**只对 v6 腿**进身份。
+
+    为什么不是翻全局 `MOVE_LABEL_SEMANTICS`：动作空间是**每条腿自己的**属性
+    （y25 系 5/2、新 v6 腿 4/3/2）。翻常量会让所有历史 5/2 shard 被判成异血缘
+    ⇒ 已跑完的语料全废。正确做法 = 从起点权重的 `arch.actionV6` 读（与 `build_ppo`
+    同一判据，也是 rollout 真正会走的动作空间）。
+
+    三条断言分别钉：① 5/2 权重 ⇒ 指纹**逐字节不变**（历史语料继续有效）；
+    ② v6 权重 ⇒ 指纹变（D14 分流，防止 5/2 与 4/3/2 的 `a_move` 混训）；
+    ③ 读不到/坏文件 ⇒ 保守按 legacy（老行为，不猜）。
+    """
+    legacy_w = tmp_path / "legacy.json"
+    legacy_w.write_text('{"schema_major": 6, "arch": {"kind": "student"}}', encoding="utf-8")
+    v6_w = tmp_path / "v6.json"
+    v6_w.write_text(
+        '{"schema_major": 6, "arch": {"kind": "student", "actionV6": true}}', encoding="utf-8"
+    )
+
+    base = corpus_identity_fp(CourseConfig(name="v6-leg"))
+    # ① 5/2：与「没有 bc」完全一致 ⇒ payload 里没有新键
+    assert corpus_identity_fp(CourseConfig(name="v6-leg", bc=str(legacy_w))) == base
+    # ② v6：异血缘
+    assert corpus_identity_fp(CourseConfig(name="v6-leg", bc=str(v6_w))) != base
+    # ③ 缺失/坏 JSON ⇒ legacy（不猜 v6）
+    assert corpus_identity_fp(CourseConfig(name="v6-leg", bc=str(tmp_path / "nope.json"))) == base
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json", encoding="utf-8")
+    assert corpus_identity_fp(CourseConfig(name="v6-leg", bc=str(bad))) == base
+
+
+def test_bc_path_itself_stays_out_of_identity(tmp_path: Path) -> None:
+    """`bc` 是**路径**不是语义：两份同 arch 的权重放不同目录 ⇒ 指纹必须相同。
+
+    （防止有人图省事把 `course.bc` 字符串直接塞进 payload —— 那会让「挪个目录」
+    断掉全部血缘，D14 会把同一份语料判成异身份。）
+    """
+    a = tmp_path / "a.json"
+    b = tmp_path / "dir2" / "b.json"
+    b.parent.mkdir()
+    payload = '{"arch": {"kind": "student", "actionV6": true}}'
+    a.write_text(payload, encoding="utf-8")
+    b.write_text(payload, encoding="utf-8")
+    assert corpus_identity_fp(CourseConfig(name="v6-leg", bc=str(a))) == corpus_identity_fp(
+        CourseConfig(name="v6-leg", bc=str(b))
+    )

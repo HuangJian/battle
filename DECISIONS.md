@@ -7883,3 +7883,39 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`src/game/SimulationCombat.ts:282-292`（`tryFire` 内新增一次 `applyTurnCooldown`）。
 - **门禁**：`bun run check` **2597 pass / 8 skip / 0 fail** · `freeze:check` 用新 golden
   `FROZEN-SIGNATURE OK` · `tests/hold-fire3.test.ts` 4 例 · `tests/fire-facing.test.ts` 2 例。
+
+## §2026-10-19-goalnn-student-scalardim-from-weights — 融合宽度按 `fc.weight` 真实行宽反推（schema bump 改不了生产权重 ⇒ 不许硬取 `SCALAR_DIM`）；另：B′ 吞吐增量实测 0.19%
+
+- **事故**：B′（`plan/nn-capability-upgrade.plan.md` §4-B2）把 `SCALAR_DIM` **40 → 46**，
+  **fixture 跟着改了行宽**（`student-golden.json` 是 h=16 ⇒ `fc.weight` `[128, 62]` = 128×(16+46)），
+  但**生产权重是训练产出的，改不了** —— `y25-price` 系列 `arch.scalar_dim=40`、`fc.weight` `[128, 104]`。
+  而 `StudentModel.scalarDim` 是**硬取 `SCALAR_DIM` 的类字段**（`src/nn/infer.ts:317`）
+  ⇒ forward 按 `fusedLen = h + 46 = 110` 步进读一张 104 宽的表：
+  · **从第 0 行起就错位**（不是"尾部越界"——每行读到的都是下一行的前 6 个数）；
+  · o ≥ 121 的行直接越界 ⇒ `undefined` ⇒ NaN ⇒ 被 **`RELU = x > 0 ? x : 0`**（`infer.ts:57`）
+    **静默吞成 0**：**不崩、不 NaN、输出有限但完全错误**（实测 `hidden` 最大偏差 **7481**，
+    与按 104 行宽的参照实现对比）。
+  ⇒ B′ 落地后（10-19 白天）起，**所有 v5 权重（含基准权重 `y25-price.it95`）在 TS 侧推理输出的都是垃圾**，
+  且没有任何一处报错。
+- **决策**：`StudentModel.scalarDim` **不再硬取常量**，改由 `fc.weight` 的真实行宽反推
+  （`行宽 = fcW.length / headHidden`，`scalarDim = 行宽 − h`），并加三步**响亮拒绝**：
+  ① 行宽非整数或 ≤ h ⇒ throw；② `arch.scalar_dim`（若存在）与反推值不符 ⇒ throw；
+  ③ 反推值 > `SCALAR_DIM` ⇒ throw（编码器喂不满）。
+  ⇒ 旧权重按 40 维融合、**只读 `scalars[0..39]`**（B′ 新增 6 位被正确忽略），新权重按 46 维，
+  **两侧都自洽，且不需要"权重迁移"**。
+- **为何不是别的做法**：① 就地迁移旧权重 → 4.2 万个 ckpt 文件，且要重跑所有历史对账，不划算；
+  ② 让 TS 拒绝加载 v5 权重 → 直接断掉"基准权重"这条对照线，B′ 的迁移起点就没了；
+  ③ 加一个 `arch.scalar_dim` 分支 → 多一个事实源（权重形状本身已经是权威）。
+  ⇒ 反推行宽 = **单一事实源**，且对"权重与声明不符"这类问题天然能抓到。
+- **落点**：`src/nn/infer.ts:317`（字段改可变）+ `:436-462`（反推 + 三重校验）。
+- **回归用例**：`tests/nn/student-scalar-compat.test.ts`（6 例）。核心断言手法（不需要参照实现）：
+  **行宽 = h+40 的权重，改 `scalars[40..45]` 输出必须逐字节不变**；行宽 = h+46 的权重则必须变化
+  （防"一律截断到 40"的反向 bug）。
+- **附：B′ 全链路耗时 A/B（plan §6 Bf10/S17，评审担忧不成立）** —— `y25-price.it95`、
+  ladder-c20-lives1 4 关 × 2 seed = 8 局 / 5654 决策点：`computePolicyExtra`（EXTRA 57，
+  含 leadHit 4 向射线 + threat 分族）**3.1 µs/决策**、`encoder.encode`（含 SCALAR 46 写入）
+  22.2 µs ⇒ **吞吐下降 0.19%** ≪ 10% 阈值 ⇒ **B′ 一次做完，不拆批**。
+  ⚠ 同时修了 `tools/sim/spatial-probe-bench.ts` 的口径 bug：它无条件跑 `spatialTowerForward`
+  并计进"新增" ⇒ 对未开塔的权重虚报 **+16.9%**（塔是 v4 腿 B 存量，不是 B′ 新增）。
+  现在只在 `model.spatialTower === true` 时才测，并直出 `verdict` 字段。
+- **门禁**：`bun run check` **2612 pass / 8 skip / 0 fail**（2597 基线 + 本次新增/修复 15 条）。

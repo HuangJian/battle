@@ -2076,7 +2076,14 @@ def install_progress_pinger(
     now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
     state: dict[str, Any] = {
-        "at": 0.0,
+        # `-inf` 而不是 `0.0`：首拍必须恒发，而 `now - 0.0 < interval` 只在
+        # `now`(=time.monotonic()) **大于 interval** 时才成立 —— monotonic 的起点是
+        # **系统启动**（Windows 尤其），所以「开机不到 1 小时」的机器上首拍会被
+        # 当成「刚发过」而吃掉（2026-10-20 实测 monotonic=3167s < interval=3600s
+        # ⇒ 打点首句静默丢失、`test_progress_ping_lands_on_the_wire_once_per_window`
+        # 红；同一份代码在开机 >1h 的机器上绿 ⇒ 忽红忽绿的唯一成因）。
+        # `-inf` 让 `now - at = +inf` 恒大于任何 interval，语义与上面那句注释对齐。
+        "at": float("-inf"),
         "fails": 0,
         "dead": "",
         "outcome": "",

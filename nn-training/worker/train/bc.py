@@ -281,7 +281,27 @@ def train(args) -> dict:
         f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
     )
     use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
-    model = PPOStudent() if use_value else (StudentNet() if args.arch == "student" else NNPolicy())  # type: ignore
+    # B1 v6 三头（hold2/move4/fire3）：与 `build_ppo` 同一契约——开关走 CLI，
+    # 落盘写进 `arch.actionV6`（`PPOStudent.arch()`），下游据此重建。
+    # ⚠ 只有 `student` 家族支持（PPOStudent / StudentNet）；`NNPolicy` 是老
+    # Conv 架构、只有 5/2 两头且 forward 返回二元组 ⇒ **显式拒绝**，不静默退化成 legacy。
+    action_v6 = bool(getattr(args, "action_v6", False))
+    if action_v6:
+        # B1 v6 的**数据侧**还没接：语料的 hold 标签与掩码（`masks.npy` 7→9）要
+        # rollout 导出、`dataset.py`、`np_core.py`、PPO/BC 训练循环四头同时改。
+        # 只改模型头不改这四处 ⇒ 模型是 4/3 头、数据是 7 维掩码 ⇒ **静默错配**
+        # （argmax 在前 7 位里选，动作语义全错且不报错）。
+        # ⇒ 这里显式拒绝，等整链落地再放开。v6 起点权重走
+        # `worker/scripts/init_spatial_leg.py --action-v6`（不需要 BC 重训）。
+        raise SystemExit(
+            "拒绝：--action-v6 的 BC 训练尚未接通（hold 标签 + masks 7→9 数据链未落地）。"
+            "v6 起点权重请用 init_spatial_leg.py --action-v6 从现有 5/2 权重迁移。"
+        )
+    model = (
+        PPOStudent()
+        if use_value
+        else (StudentNet() if args.arch == "student" else NNPolicy())
+    )  # type: ignore
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)

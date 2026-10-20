@@ -74,6 +74,7 @@ import {
 import { decodeStageGrid } from '../../src/nn/config-stage'
 import { buildModelFromText } from '../../src/nn/infer'
 import { MOVE_DIM, decodeMove, encodeMove } from '../../src/nn/action-space'
+import { MASK_V6_DIM, decodeMove4, encodeMove4 } from '../../src/nn/action-space-v6'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import {
@@ -148,7 +149,24 @@ const MAX_TICKS = 36000
 // K 的单一来源（plan/new-era-stop.plan.md §6 R2）：旧字面量 10 保留为别名，语义不变。
 const K = DEFAULT_DECISION_K
 const FIRE_DIM = 2
+/** legacy 5/2 的掩码宽度（move5 + fire2）。 */
 export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
+
+/**
+ * B1 v6 的掩码宽度（move4 + fire3 + hold2 = 9）—— **值来自 `action-space-v6.ts`**，
+ * 这里只做转发式导出（单一来源，不抄第二份 9）。
+ *
+ * ★ 为什么不直接把 `MASK_DIM` 改成 9：归档的 5/2 shard 与消费方（`np_core._RL_SHARD_SPEC`、
+ * `dataset.py`）按 7 读，全局改常量会让**所有历史语料静默错位**（mask 列被按 9 切，
+ * 第 7–8 列读到下一拍的数据）。⇒ **宽度随权重走**，判据 = `ModelLike.usesHoldFire3`
+ * （权重里有 `hold_head.*`），与 TS 推理 / `build_ppo` 同一契约。
+ */
+export { MASK_V6_DIM }
+
+/** 掩码宽度（唯一入口；`v6` 由权重 `usesHoldFire3` 决定）。 */
+export function maskDimFor(v6: boolean): number {
+  return v6 ? MASK_V6_DIM : MASK_DIM
+}
 
 // shard 文件名清单（与 writeRlShard 的 writeNpy 调用一一对应；--pack 打容器时按此顺序）。
 /** shard 落盘的文件清单（顺序 == manifest 里 files 的顺序；两条 pack 路径共用，测试也拿它当真相源）。 */
@@ -169,6 +187,15 @@ export const RL_SHARD_FILES = [
   'done.npy',
   'mask.npy',
 ] as const
+
+/**
+ * v6 shard 的**追加**文件（`RL_SHARD_FILES` 的超集）。
+ *
+ * 判据 = 文件存在性：有 `a_hold.npy` ⇒ 9 宽掩码 + 三头；没有 ⇒ 7 宽 + 5/2。
+ * 为什么不用 manifest 标志当判据：文件是**事实**，标志是**声明**——两者不一致时
+ * 应该以事实为准（并且加载端会发现 mask 宽度对不上而响亮报错）。
+ */
+export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'] as const
 
 // ---- 41 维指标列序（MUST mirror `nn-training/biz/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
@@ -411,13 +438,27 @@ const TELEMETRY_SAMPLE_TICKS = 6
 // BASE_PRESSURE_RADIUS / sampleBasePressure / nearestPickupDist 的定义已搬进
 // `src/nn/danger-metrics.ts`（obs-v5 P3：观测侧与 telemetry 必须同一份公式）。
 
-/** 受控输入：实现 InputLike，把采样动作施加到 World（B案：0 = STOP，1..4 = 方向）。 */
+/** 受控输入：实现 InputLike，把采样动作施加到 World（legacy：0 = STOP，1..4 = 方向）。 */
 class ScriptedInput {
   moveDir: Direction | null = null
   firing = false
+  /** v6（hold 头）：turn-only，不前进。legacy 恒 false。 */
+  hold = false
+  /** v6（fire 头 3 值）：1 = 先打再走。legacy 恒 false ⇒ 走"转身后开火"。 */
+  fireBefore = false
+  private readonly v6: boolean
 
-  setAction(move: number, fire: number): void {
-    this.moveDir = decodeMove(move)
+  /** `v6` 必须由**权重**决定（`usesHoldFire3`），与推理/导出同一契约。 */
+  constructor(v6 = false) {
+    this.v6 = v6
+  }
+
+  setAction(move: number, fire: number, hold = 0): void {
+    // v6 的 move 是 0..3（up/down/left/right，**没有 STOP 类**）；legacy 是 0..4
+    // （0 = STOP）。两个 decode 不能混用——混用会让 v6 的 `up` 被读成 legacy 的 STOP。
+    this.moveDir = this.v6 ? decodeMove4(move) : decodeMove(move)
+    this.hold = this.v6 && hold === 1
+    this.fireBefore = this.v6 && fire === 1
     // Fire head v3 is 0/1/2 (1 = before turn, 2 = after turn): both are a
     // shot. `=== 1` would silently drop the 2 class once B1 lands.
     this.firing = fire !== 0
@@ -429,6 +470,17 @@ class ScriptedInput {
   isFiring(): boolean {
     return this.firing
   }
+  // ---- v6 能力位。legacy 时 `usesHoldFire3()` 返回 false ⇒ `SimulationPlayer`
+  // 走 legacy 分支、`isHolding` 的值不被读 ⇒ 逐字节不变。----
+  isHolding(): boolean {
+    return this.hold
+  }
+  isFireBeforeTurn(): boolean {
+    return this.fireBefore
+  }
+  usesHoldFire3(): boolean {
+    return this.v6
+  }
   wasItemPressed(): false {
     return false
   }
@@ -438,6 +490,8 @@ class ScriptedInput {
   reset(): void {
     this.moveDir = null
     this.firing = false
+    this.hold = false
+    this.fireBefore = false
   }
 }
 
@@ -445,7 +499,19 @@ interface RolloutModel {
   forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
+  /** v6 才有（`usesHoldFire3` 为真时非空）。 */
+  readonly holdLogits?: Float32Array | null
   readonly valueOut: Float32Array
+  readonly usesHoldFire3?: boolean
+}
+
+/** v6 第三头的 logits 取用（`assertRolloutWeightsSchema` 已在 runOne 入口保证非空）。 */
+function holdLogitsOf(m: RolloutModel): Float32Array {
+  const h = m.holdLogits
+  if (!h) {
+    throw new Error('export-rl-rollout: v6 模型缺 holdLogits（入口自检应已拦下，此处兜底）')
+  }
+  return h
 }
 
 // ---- per-game telemetry（语义逐字段对齐 simulation-runner）----
@@ -814,6 +880,14 @@ export interface ShardData {
   aFire: number[]
   lpMove: number[]
   lpFire: number[]
+  /**
+   * B1 v6 才有的两个字段（legacy shard 留空 ⇒ 不落 npy、消费方按 legacy 读）。
+   * ⚠ 判据是 `v6`，不是"数组非空"：n=0 的局两者都空，用非空判会误判。
+   */
+  aHold: number[]
+  lpHold: number[]
+  /** 本 shard 是否 v6 三头（决定掩码宽度 9 vs 7、是否落 a_hold/lp_hold.npy）。 */
+  v6: boolean
   value: number[]
   /** 每决策步的 41 维指标快照（[N+1][41]：决策行 + 终局行）——reward 的唯一定义源。 */
   metrics: number[][]
@@ -822,7 +896,7 @@ export interface ShardData {
   n: number
 }
 
-function newShard(): ShardData {
+function newShard(v6 = false): ShardData {
   return {
     obs: [],
     scalars: [],
@@ -831,6 +905,9 @@ function newShard(): ShardData {
     aFire: [],
     lpMove: [],
     lpFire: [],
+    aHold: [],
+    lpHold: [],
+    v6,
     value: [],
     metrics: [],
     done: [],
@@ -1024,6 +1101,29 @@ function resolveDodge(dodgeArg: string, stageIdx: number): 'off' | 'l0' | 'god' 
   return isArenaId(stageIdx) ? 'l0' : 'off'
 }
 
+/**
+ * B1 v6 的 shard 契约自检（2026-10-20）。
+ *
+ * 为什么要有它：v6 的 shard 与 legacy **不是同一个 schema**（掩码 7 vs 9、多两个字段），
+ * 而 `np_core._RL_SHARD_SPEC` 的 mask **没有形状校验**（`_RL_SHARD_SHAPES` 只盯
+ * obs/scalars/extra）⇒ 一个 7 宽 mask 配一个 v6 模型，会一路静默读到训练完才表现异常。
+ * 所以：**导出端声明、加载端校验**，两侧都留判据。
+ *
+ * v6 时额外要求 `holdLogits` 存在——权重有 `hold_head.*` 但推理面没吐出 logits，
+ * 说明 `ModelLike` 与权重不同源，此时采样第三头会拿到 undefined。
+ */
+export function assertRolloutWeightsSchema(model: unknown): void {
+  const m = model as { usesHoldFire3?: boolean; holdLogits?: Float32Array | null } | null
+  if (m == null) return
+  if (m.usesHoldFire3 !== true) return
+  if (!m.holdLogits) {
+    throw new Error(
+      'export-rl-rollout: 权重声明 v6 三头（usesHoldFire3=true）但没有 holdLogits —— ' +
+        '模型与权重不同源，采样第三头会拿到 undefined。',
+    )
+  }
+}
+
 function runOne(
   stageIdx: number,
   stage: any,
@@ -1061,7 +1161,13 @@ function runOne(
   if (playerLevelOverride !== null) world.playerLevel = playerLevelOverride
 
   const model = buildModelFromText(weightsText) as unknown as RolloutModel
-  const scripted = new ScriptedInput()
+  assertRolloutWeightsSchema(model)
+  // ★ 动作空间判据 = 权重（`usesHoldFire3`，即权重里有 `hold_head.*`），
+  // 与 TS 推理（`infer.ts:443`）和 `build_ppo`（`arch.actionV6`）同一契约。
+  // 这一个布尔决定整条链：掩码宽度（7/9）、是否采第三头、是否落 a_hold/lp_hold.npy、
+  // move 用哪套 decode（legacy 5 类含 STOP / v6 4 类无 STOP）。
+  const v6 = model.usesHoldFire3 === true
+  const scripted = new ScriptedInput(v6)
   const sim = new Simulation(world, scripted as any)
   // arena 编号不得进入 loadStageData 的 stageIndex：index 进 killScore 的
   // 1.05^index 关卡缩放，而分数经 dropOnScoreMilestone 反哺玩法——index=1000
@@ -1119,7 +1225,7 @@ function runOne(
   godProbe?.reset()
 
   const encoder = new ObsEncoder()
-  const shard = newShard()
+  const shard = newShard(v6)
   const rng = mulberry32((seed ^ 0x85ebca6b) >>> 0)
 
   const tel: Telemetry = {
@@ -1270,6 +1376,9 @@ function runOne(
     aFire: number
     lpMove: number
     lpFire: number
+    /** v6 才有（`v6=false` 时永远 undefined，flush 时按 shard.v6 决定是否 push）。 */
+    aHold?: number
+    lpHold?: number
     value: number
     mask: number[]
   } | null = null
@@ -1291,9 +1400,15 @@ function runOne(
     shard.aFire.push(pending.aFire)
     shard.lpMove.push(pending.lpMove)
     shard.lpFire.push(pending.lpFire)
+    if (shard.v6) {
+      // v6 才落第三头的两列；`pending.aHold` 在 v6 路径上必然已定（见决策拍）。
+      shard.aHold.push(pending.aHold ?? 0)
+      shard.lpHold.push(pending.lpHold ?? 0)
+    }
     shard.value.push(pending.value)
     shard.done.push(term ? 1 : 0)
-    for (let j = 0; j < MASK_DIM; j++) shard.mask.push(pending.mask[j])
+    const mDim = maskDimFor(shard.v6)
+    for (let j = 0; j < mDim; j++) shard.mask.push(pending.mask[j])
     shard.n++
     pending = null
   }
@@ -1304,9 +1419,13 @@ function runOne(
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
       model.forward(encoder.obs, encoder.scalars, encoder.extra)
-      const masks = computeMasks(world)
+      // 掩码宽度随权重走（legacy 7 / v6 9）；`computeMasks` 的 v6 分支返回
+      // move4/fire3/hold2（`obs-encoder.ts:848-858`），legacy 返回 move5/fire2。
+      const masks = computeMasks(world, v6)
       const mv = sampleCat(model.moveLogits, masks.move, rng)
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
+      // v6 第三头：hold（0 advance / 1 turn-only）。legacy 没有这个头 ⇒ null。
+      const hd = v6 ? sampleCat(holdLogitsOf(model), masks.hold, rng) : null
       const value = model.valueOut[0]
       decisionTicks++
 
@@ -1316,10 +1435,12 @@ function runOne(
       let aMove = mv.idx
       let lpMove = mv.logp
       if (dodgeMode === 'l0') {
-        const sampledDir = decodeMove(mv.idx)
+        // ⚠ v6 的 move 是 0..3（无 STOP 类），必须用 decodeMove4/encodeMove4；
+        // 用 legacy 的 0..4 编码会让 aMove 整体偏 1（v6 的 up 变成 legacy 的 stop）。
+        const sampledDir = v6 ? decodeMove4(mv.idx) : decodeMove(mv.idx)
         const d = dodgeL0(world, sampledDir)
         if (d.triggered && d.dir) {
-          aMove = encodeMove(d.dir)
+          aMove = v6 ? encodeMove4(d.dir) : encodeMove(d.dir)
           lpMove = logProbAt(model.moveLogits, masks.move, aMove)
           dodgeTicks++
         }
@@ -1327,7 +1448,7 @@ function runOne(
         godProbe.getMoveDirection()
         godProbe.isFiring()
         if (godProbe._lastBranch === 'dodge' && godProbe._moveDir) {
-          aMove = encodeMove(godProbe._moveDir)
+          aMove = v6 ? encodeMove4(godProbe._moveDir) : encodeMove(godProbe._moveDir)
           lpMove = logProbAt(model.moveLogits, masks.move, aMove)
           dodgeTicks++
         }
@@ -1349,16 +1470,25 @@ function runOne(
         lpMove,
         lpFire: fr.logp,
         value,
-        mask: [...masks.move, ...masks.fire],
+        // v6：掩码 = move4 + fire3 + hold2（9 位）；legacy = move5 + fire2（7 位）。
+        mask: v6 ? [...masks.move, ...masks.fire, ...masks.hold] : [...masks.move, ...masks.fire],
+        ...(hd !== null ? { aHold: hd.idx, lpHold: hd.logp } : {}),
       }
-      scripted.setAction(aMove, fr.idx)
+      scripted.setAction(aMove, fr.idx, hd ? hd.idx : 0)
       // 本决策步选定的 fire head（held 到下一个决策步；`onLaneHoldFireTicks` 用它，
       // 不用 `bullet_fired` —— 后者被冷却/弹量上限门掉，是「实弹」不是「开火输出」）。
       // ≡ export-eval-game 的 `ai.isFiring()`（nn 策略下同 ScriptedInput 持有实现，
       // endFrame 无脉冲，两边读的是同一个 held head；god 策略只走 eval 侧，不跨源对账）。
-      fireHeld = fr.idx === 1
-      // metrics v10：移动输出为 STOP（`decodeMove(idx <= 0) === null`）⇒ `stopTicks` 计本拍。
-      stopHeld = aMove === 0
+      // ⚠ 判据是「**开火输出为真**」，不是「等于某个类号」：
+      //   legacy fire 头 = {0 release, 1 hold} ⇒ `=== 1`；
+      //   v6     fire 头 = {0 none, 1 before, 2 after} ⇒ **`!== 0`**。
+      //   照抄 `=== 1` 到 v6 会把所有 fireAfter 拍漏计（fireHeldTicks 少算一半以上），
+      //   而它正是 wBlock / onLaneHoldFire 的分母来源。
+      fireHeld = v6 ? fr.idx !== 0 : fr.idx === 1
+      // metrics v10：移动输出为「没在前进」⇒ `stopTicks` 计本拍。
+      // legacy：move 0 = STOP（`decodeMove(idx<=0)===null`）；
+      // v6：move 头**没有 STOP 类**，不前进由 hold 位表达 ⇒ 看 hold。
+      stopHeld = v6 ? hd !== null && hd.idx === 1 : aMove === 0
     }
     sim.tick()
     scripted.endFrame()
@@ -1773,28 +1903,37 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   const extra = new Float32Array(N * POLICY_EXTRA_DIM)
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
+  // v6：第三头的动作与 logp（legacy shard 不落这两个文件 —— 消费方按文件存在性判 v6）。
+  const v6 = d.v6
+  const aHold = v6 ? new Uint8Array(N) : null
+  const lpHold = v6 ? new Float32Array(N) : null
   const lpMove = new Float32Array(N)
   const lpFire = new Float32Array(N)
   const value = new Float32Array(N)
   const metrics = new Float64Array((N + 1) * METRICS_DIM)
   const done = new Uint8Array(N)
-  const mask = new Uint8Array(N * MASK_DIM)
+  const maskDim = maskDimFor(v6)
+  const mask = new Uint8Array(N * maskDim)
   for (let i = 0; i < N; i++) {
     obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(d.scalars[i], i * SCALAR_DIM)
     extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
+    if (aHold && lpHold) {
+      aHold[i] = d.aHold[i]
+      lpHold[i] = d.lpHold[i]
+    }
     lpMove[i] = d.lpMove[i]
     lpFire[i] = d.lpFire[i]
     value[i] = d.value[i]
     done[i] = d.done[i]
-    for (let j = 0; j < MASK_DIM; j++) mask[i * MASK_DIM + j] = d.mask[i * MASK_DIM + j]
+    for (let j = 0; j < maskDim; j++) mask[i * maskDim + j] = d.mask[i * maskDim + j]
   }
   for (let i = 0; i <= N; i++) {
     metrics.set(d.metrics[i], i * METRICS_DIM)
   }
-  return [
+  const out = [
     { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
     { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
     { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
@@ -1805,8 +1944,16 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     { name: 'value.npy', data: npyBytes(value, [N], 'f4') },
     { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f8') },
     { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
-    { name: 'mask.npy', data: npyBytes(mask, [N, MASK_DIM], 'u1') },
+    { name: 'mask.npy', data: npyBytes(mask, [N, maskDim], 'u1') },
   ]
+  if (aHold && lpHold) {
+    // 顺序 = `RL_SHARD_FILES_V6` 的尾部（pack 与校验按名取，不按位置）。
+    out.push(
+      { name: 'a_hold.npy', data: npyBytes(aHold, [N], 'u1') },
+      { name: 'lp_hold.npy', data: npyBytes(lpHold, [N], 'f4') },
+    )
+  }
+  return out
 }
 
 /** bench / 进程内调用：与 CLI 同一 `runOne`（生产 sampler 仍 spawn 子进程）。 */
@@ -2202,7 +2349,10 @@ export function main(argv: string[] = process.argv.slice(2)): void {
             `(0 samples — check maxTicks/stage validity)`,
         )
       }
-      entries = RL_SHARD_FILES.map((name) => ({
+      // v6 shard 多 a_hold/lp_hold 两个文件；判据 = 盘上**实际**存在的那个（事实优先），
+      // 不用 manifest 标志（标志与文件不一致时，以文件为准——加载端会因宽度对不上报错）。
+      const hasHoldFiles = existsSync(`${shardDir}/a_hold.npy`)
+      entries = (hasHoldFiles ? RL_SHARD_FILES_V6 : RL_SHARD_FILES).map((name) => ({
         name,
         data: readFileSync(`${shardDir}/${name}`),
       }))

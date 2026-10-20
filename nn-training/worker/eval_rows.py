@@ -242,6 +242,52 @@ def eval_v12_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: B4 哨兵（Bf9 / 评审 D4）解冻后 60 拍内承伤份额 —— **逐局标量**，不是 per-tick
+#: metrics 列，故走本账本行而非 `biz.reward_library.METRICS` 那个 79 列向量。
+#: 落点 `tools/sim/export-eval-game.ts:518`（`postThawDamageRate`），顶层直出
+#: `_eval_report.json`（:1406）。此前它**只进逐局报告、不进账本行** ⇒ 无法按腿聚合
+#: ⇒ 评审 D4 要求的「把 B4 哨兵接成门」缺前置。基线 = 新 schema null 腿同期值。
+#: ⚠ 与 v8–v12 同约：缺键 = 整键省略（0 是合法读数）；`eval_row` 与
+#: `trainer/batch_runner.py` 两处行构造点必须经本函数取数。
+EVAL_V13_KEYS = ("postThawDamageRate",)
+
+
+def eval_v13_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 B4 哨兵列（缺键 = 整键省略，不写 None）。"""
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V13_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def eval_metric_fields(manifest: dict | None) -> dict:
+    """**metrics 族的唯一聚合入口** = v8 ∪ v9 ∪ v10 ∪ v11 ∪ v12 ∪ v13。
+
+    为什么要有它（2026-10-19）：v8–v13 六个族在**两处**行构造点逐族展开
+    （`eval_rows.eval_row` 与 `trainer/batch_runner.py`），加一族就要改两处、且容易漏一处
+    （2026-09-24 v8 提交就是 Python 两处全漏 ⇒ 日常 eval 失明）。聚合后：
+      · 新族只需在**本文件**登记一次，两个行构造点自动跟上；
+      · `trainer/batch_runner.py` 从 6 行压到 1 行 —— 该文件已顶到
+        `tests/test_python_loc_budget.py` 的 1000 LOC 天花板，这是**腾预算**而非新增预算。
+    语义：与逐族调用**逐键等价**（同键不会被重复赋值，因为各族键集互斥）。
+    """
+    out: dict = {}
+    for fn in (
+        eval_v8_fields,
+        eval_v9_fields,
+        eval_v10_fields,
+        eval_v11_fields,
+        eval_v12_fields,
+        eval_v13_fields,
+    ):
+        out.update(fn(manifest))
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -311,6 +357,8 @@ def eval_row(
         # metrics v11 热线族 2 列（与 batch_runner 同源，见 eval_v11_fields）。
         **eval_v11_fields(manifest),
         **eval_v12_fields(manifest),
+        # B4 哨兵：解冻后承伤份额（评审 D4 接门的前置；与 batch_runner 同源）。
+        **eval_v13_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

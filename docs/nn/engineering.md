@@ -25,6 +25,63 @@
 
 ---
 
+## §80 课程门作者模板 —— 区间中位 / 同轮配对 / null 同期基线（2026-10-19）
+
+> **性质：规范性文档，长期有效**（不是一次性的流水账）。plan/nn-capability-upgrade §5-C2
+> 要求把这几条纪律落成**模板工件**；此前它们只存在于 `§79` 的纪律清单与评审口头约定里。
+> 落地：`worker/gate_judges.py::_median`（统计层）+ 本节（作者模板）。
+
+### 三条硬纪律（写门前先过一遍）
+
+| # | 纪律 | 违反的后果 |
+|---|---|---|
+| **1** | **判据取区间，不取单点**：用窗口内**中位数**（`_median`）或均值（`_mean`）判，不拿某一轮的数当结论 | 100 局/点下 SE=4.3pp，门压到这个量级就是在噪声上做判决 |
+| **2** | **配对比较用同轮**：A/B 两腿比指标，必须**同 `it` 配对**，不拿「A 的第 200 轮」比「B 的第 60 轮」 | 轮次不同 = 训练量不同，比的是数据量不是方法 |
+| **3** | **基线取 null 同期，不取 it0**：基线的分母是**同期 null 腿**，不是目标腿自己的 it0 | it0 只有 anchor 200 局、it≥5 是 400 局 ⇒ 面板宽度差一倍，混合面板胜率是假象（实测 y22-null it200：0.6475 vs anchor 0.680，差 3.3pp） |
+
+### 现成口径（都在 `worker/gate_judges.py`，别自己造）
+
+| helper | 用途 | 备注 |
+|---|---|---|
+| `_sustain(ctx, judge)` | **区间判定主入口**：窗口 `sustain` 轮里达标几轮 | 已是区间判定，不是单点；窗口不足 → `completion` 永不满 1.0 |
+| `_window(rule, ctx, n)` | 取最近 n 个**去重后**的 summary 行 | 不足 n ⇒ `None`（数据不足，不判） |
+| `_halves(rule, ctx, n)` | 窗口前后半 | plateau / hack 口径 |
+| `_mean(rows, metric)` | 窗口算术均值 | 会被单轮跳变带偏 |
+| **`_median(rows, metric)`** | **窗口中位数**（§80 新增） | **对单点跳变免疫**，与 `_mean` 同签名可原地替换；偶数个取中间两值均值（同 `statistics.median`）；缺数据 `None` 整条剔除，不按 0 计 |
+| `_slope(vals)` | 最小二乘斜率（等距 x） | n<2 返回 0.0 |
+
+### 课程 JSONC 写法（可直接抄）
+
+```jsonc
+{
+  "id": "g1", "kind": "wins_mastery", "verdict": "ADVANCE",
+  // ① 区间判定：窗口 5 轮里 ≥4 轮达标（不是某一轮达标）
+  "sustain": 5,
+  // ② 池化判据（别逐点判）：合并最近 3 个评估点的局数后再判，SE 才压得下去
+  "pool_window": 3, "conf_z": 1.64,
+  // ③ 效应必须高于噪声：p − conf_z×SE ≥ baseline + min_gain_pp/100
+  "min_gain_pp": 3.0, "require_rising": true,
+  // ④ 基线写**同期 null 腿**的课程名，不写自己
+  "course": "y22-null"
+}
+```
+
+⇒ 新门落地前，用 `grep -n "pool_window\|sustain" nn-training/curricula/*.jsonc` 找一条最像的抄，
+再按上表改。**不要**从零写。
+
+### 反模式清单（都是真事）
+
+- ❌ 「第 N 轮胜率 0.712 ≥ 0.70 ⇒ 放行」 —— 单点判决，SE 4.3pp 下毫无意义。
+- ❌ 「本腿 it120 比上一腿 it120 高 2pp，但两条腿跑到 it120 用了不同天数」 —— 轮次配对被墙钟污染。
+- ❌ 「较 it0 提升 3pp」 —— it0 面板宽度与 it≥5 不同，是假读数（纪律 3）。
+- ❌ 用当前策略的实际走位估「缺陷严重程度」 —— 已犯四次（`fireHeld` 密度 / `hitsInFreeze` /
+  `threat` 幻影 / 窗口奖励剂量）。必须用**机会侧 / 反事实 / 人类参照**。
+
+**门禁**：`tests/worker/test_gate_judges_split.py::test_median_is_outlier_immune_and_matches_statistics_median`
+（离群值下均值被带飞、中位数不动）+ 该文件的 ⑨ 分流判据语义用例。
+
+---
+
 ## §79 落地评审处置 + C 段读数口径（2026-10-19）
 
 **来源**：`reports/nn-capability-review-20261019.md`（对 `68bc4f79` B1 + `525e8e7e` B′ + A1 回退 `f3ae58b2`/`51987e1b` 的逐项评审）。

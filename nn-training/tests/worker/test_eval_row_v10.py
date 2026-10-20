@@ -8,7 +8,16 @@
 注意 `idleTicks` 不走本族：它已有自己的通道（`EVAL_NEWERA_KEYS`，与
 moveHist/decisions/stopRuns 同行）——两表同含一键会在行构造点重复赋值。
 """
-from worker.eval_local import eval_row, eval_v10_fields
+from worker.eval_local import (
+    eval_metric_fields,
+    eval_row,
+    eval_v8_fields,
+    eval_v9_fields,
+    eval_v10_fields,
+    eval_v11_fields,
+    eval_v12_fields,
+    eval_v13_fields,
+)
 
 EVAL_V10_KEYS = (
     "stopTicks",
@@ -126,11 +135,31 @@ def test_eval_row_carries_v10_fields():
 
 
 def test_batch_runner_record_uses_shared_helper():
-    # `BatchEvalRunner.record` 是方法体，改与不改只能看源码：它必须经 eval_v10_fields 取
-    # v10 列（与 eval_row 同源），否则两处行构造点再次分叉（v8 的实际事故）。
+    """`BatchEvalRunner.record` 是方法体，改与不改只能看源码。
+
+    它必须经**共享 helper** 取 metrics 列（与 `eval_row` 同源），否则两处行构造点再次分叉
+    （v8 的实际事故）。2026-10-19 起判据从「含 `eval_v10_fields`」放宽为
+    「含 `eval_metric_fields`」：v8–v13 六族改由 `eval_rows.eval_metric_fields` 聚合后，
+    batch_runner 不再逐族 import（`batch_runner.py` 已顶到 1000 LOC 天花板，
+    逐族展开会让「加一族 = 加一行」的账压在那里）。
+    ⇒ 只要它还在调聚合入口，不管内部是几族都与 `eval_row` 同源。
+    """
     import pathlib
 
     src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_runner.py").read_text(
         encoding="utf-8"
     )
-    assert "eval_v10_fields" in src
+    assert "eval_metric_fields" in src
+
+
+def test_eval_metric_fields_equals_union_of_v8_to_v13():
+    """聚合入口必须与逐族调用**逐键等价**（新族登记后两个行构造点自动跟上）。"""
+    m = _manifest()
+    union: dict = {}
+    for fn in (eval_v8_fields, eval_v9_fields, eval_v10_fields, eval_v11_fields, eval_v12_fields):
+        union.update(fn(m))
+    union.update(eval_v13_fields(m))
+    assert eval_metric_fields(m) == union
+    # 缺键（旧节点/旧报告）不伪造 0
+    assert eval_metric_fields({}) == {}
+    assert eval_metric_fields(None) == {}

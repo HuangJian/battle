@@ -53,6 +53,7 @@ MOVED_NAMES = {
     "_eval_wins_mastery",
     "_halves",
     "_mean",
+    "_median",
     "_route_by_completion",
     "_slope",
     "_sustain",
@@ -262,3 +263,45 @@ def test_route_by_completion_semantics() -> None:
     assert route(rule(("a",), None), {"a": 1.0}) == "ADVANCE"
     assert route(rule(("gone",), 0.5), {}) == "REMEDIATE"  # 缺席按 0.0 计
     assert gate_judges_mod.DUTY_MIN_EVENTS == 2
+
+
+# ───────────────────────── ⑩ C2 门模板：区间中位统计 ─────────────────────────
+
+
+def test_median_is_outlier_immune_and_matches_statistics_median() -> None:
+    """`_median` 是 C2「区间中位」口径的统计层支撑：对单点跳变免疫，且与
+    `statistics.median` 同口径（偶数个取中间两值均值）。
+
+    为什么钉这一条：门一旦压到单点噪声量级（100 局/点下 SE=4.3pp），算术均值会被
+    单轮异常拖过门限；中位数不会。本用例用「一个 100 倍的离群值」把两者区分开。
+    """
+    import statistics
+
+    median = gate_judges_mod._median
+    mean = gate_judges_mod._mean
+
+    def row(v: float | None) -> Any:
+        return SimpleNamespace(metric=lambda _k: v)
+
+    def rows(*vs: float | None) -> list[Any]:
+        return [row(v) for v in vs]
+
+    # 奇数个：正中那个
+    assert median(rows(3.0, 1.0, 2.0), "x") == 2.0
+    # 偶数个：中间两值均值（与 statistics.median 同口径）
+    assert median(rows(4.0, 1.0, 3.0, 2.0), "x") == 2.5
+    # 与 statistics.median 逐例对齐
+    for vs in ((1.0,), (1.0, 2.0), (5.0, 1.0, 3.0, 2.0, 4.0), (9.0, 9.0, 9.0, 1.0)):
+        assert median(rows(*vs), "x") == statistics.median(vs)
+    # 缺数据（None）整条剔除，不按 0 计 —— 与 `_mean` 同约
+    assert median(rows(1.0, None, 3.0), "x") == 2.0
+    assert median(rows(None, None), "x") is None
+    assert median([], "x") is None
+
+    # 关键对照：一个离群值把均值拖走一倍，中位数纹丝不动
+    clean = rows(1.0, 2.0, 2.0, 2.0, 3.0)
+    dirty = rows(1.0, 2.0, 2.0, 2.0, 300.0)
+    assert mean(clean, "x") == 2.0
+    dirty_mean = mean(dirty, "x")
+    assert dirty_mean is not None and dirty_mean > 60.0  # 均值被单点带飞
+    assert median(clean, "x") == median(dirty, "x") == 2.0  # 中位数免疫

@@ -1807,3 +1807,35 @@ def test_run_one_course_does_not_arm_the_pinger_without_a_lease(
         progress=progress,
     )
     assert rc == 0 and armed == [] and progress == {}
+
+
+def test_progress_first_ping_ignores_the_monotonic_origin() -> None:
+    """首拍恒发**不依赖 `time.monotonic()` 的起点**（2026-10-20 事故）。
+
+    事故形状：`state["at"]` 初值是 `0.0`，节流判据是 `now - at < interval`。
+    `now` 是 `time.monotonic()`，而它的起点是**系统启动**（Windows 尤其）——
+    所以**开机不到 1 小时**的机器上 `now < interval(3600)` ⇒ 首拍被当成"刚发过"
+    ⇒ 打点第一句**静默丢失**（云端 hold 的活性少一次心跳），且用例忽红忽绿：
+    开机 <1h 红、>1h 绿。实测触发值 monotonic=3167s。
+
+    ★ 这条用例的价值：上面那条 `test_progress_ping_lands_on_the_wire_once_per_window`
+    **锁不住**这个机制（它在开机 >1h 的机器上修没修都绿）。这里把 `clock` 钉成 `0.0`
+    —— 旧实现（`at=0.0`）必然返回 False，新实现（`at=-inf`）必然 True。
+    """
+    from common import progress_hook
+
+    seen: list[str] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        seen.append(url)
+        return 200, {}
+
+    detach, _lines = _pinger("http://hub", post=fake_post, interval=3600.0, clock=lambda: 0.0)
+    try:
+        # clock 恒 0.0：monotonic 起点在最不利的位置，首拍照发。
+        assert progress_hook.report("iter", done=1, total=8) is True
+        # 同一时刻的第二拍仍被节流（修的是"首拍"，不是把节流拆掉）
+        assert progress_hook.report("iter", done=2, total=8) is False
+    finally:
+        assert detach() == ""
+    assert len(seen) == 1

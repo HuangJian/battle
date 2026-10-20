@@ -42,6 +42,10 @@ MOVED_NAMES = {
     "EVAL_V9_KEYS",
     "EVAL_V10_KEYS",
     "EVAL_V11_KEYS",
+    # v12/v13 是后续批次加进 `eval_rows.py` 的，初版 MOVED_NAMES 没同步 ⇒ 守卫有洞
+    # （这两个族在 `eval_local.py` 里重复实现不会被抓）。2026-10-19 补上，v13 一并纳入。
+    "EVAL_V12_KEYS",
+    "EVAL_V13_KEYS",
     "_read_ledger_rows",
     "_summary_games",
     "append_eval_rows",
@@ -56,6 +60,9 @@ MOVED_NAMES = {
     "eval_v9_fields",
     "eval_v10_fields",
     "eval_v11_fields",
+    "eval_v12_fields",
+    "eval_v13_fields",
+    "eval_metric_fields",
     "merge_eval_rows",
     "read_eval_rows",
     "read_eval_summary_rows",

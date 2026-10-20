@@ -187,6 +187,88 @@ def _migrate_columns(
     return done
 
 
+def _migrate_action_heads(model: Any, params: dict[str, Any], *, gen: Any) -> list[str]:
+    """B1 v6：把旧 5/2 动作头的**行**（输出类）搬进新 4/3/2 三头，返回已搬运的张量名。
+
+    为什么另写而不并进 `_migrate_columns`：那张表搬的是**列**（pf 宽度），而 v6 变的是
+    **行**（输出类数），形状关系正交。
+
+    映射（`plan/nn-capability-upgrade.plan.md` §4-B1 的动作头契约）：
+      · `move` [5,N] → [4,N]：丢掉 index 0（**STOP 类**）。v6 的 move 头**没有 null 类**，
+        「不动」改由 **hold 位**表达 ⇒ 旧 STOP 行在 v6 里没有对应物，丢弃是语义正确的，
+        不是信息损失。
+      · `fire` [2,N] → [3,N]：`0=none` 直搬；**`2=fireAfter` ← 旧 `1=firing`**——旧契约里
+        firing 的落地顺序是「先提交转身再出弹」（`SimulationPlayer.ts` legacy 路径
+        `lastActionFire = firing ? 2 : 0` 与 `tryFire` 调用点都在转身之后），
+        语义等价于 v6 的 fireAfter；新 `1=fireBefore` 在旧动作空间里无法表达 ⇒ 0.01 初始化。
+      · `hold` [2,N]：旧无对应 ⇒ 全 0.01（不是 0：全 0 会让 hold 头初始 logits 恒等、
+        argmax 落在 index 0 = advance，与「hold 表达不动」无关地偏置了第一步动作）。
+    源缺键 / 形状不符 ⇒ 静默跳过（交给 `load_state_into` 记 `warmstart_missing`），
+    这里**不抛**：头的形状正确性由 `student.py` 的 `move_dim/fire_dim` 构造期保证。
+    """
+    import torch
+
+    from common.schema import FIRE3_DIM, FIRE_DIM, HOLD_DIM, MOVE4_DIM, MOVE_DIM
+
+    moved: list[str] = []
+
+    # 头宽自检：`action_v6=True` 才建得出 hold 头 ⇒ 宽度不对说明开关没生效，
+    # 后面 `old_move_w[1:MOVE_DIM]` 的行拷贝会错位。响亮拒绝，不迁就。
+    if (
+        model.move_head.weight.shape[0] != MOVE4_DIM
+        or model.fire_head.weight.shape[0] != FIRE3_DIM
+        or model.hold_head is None
+    ):
+        raise SystemExit(
+            f"拒绝：action_v6=True 但头宽是 move{model.move_head.weight.shape[0]}"
+            f"/fire{model.fire_head.weight.shape[0]}"
+            f"{'/hold 缺席' if model.hold_head is None else ''}"
+            f"，期望 move{MOVE4_DIM}/fire{FIRE3_DIM}/hold{HOLD_DIM}"
+        )
+
+    with torch.no_grad():
+        head_in = model.move_head.weight.shape[1]
+
+        old_move_w = params.get("move_head.weight")
+        old_move_b = params.get("move_head.bias")
+        if old_move_w is not None and tuple(old_move_w.shape) == (MOVE_DIM, head_in):
+            model.move_head.weight.copy_(old_move_w[1:MOVE_DIM])
+            if old_move_b is not None and tuple(old_move_b.shape) == (MOVE_DIM,):
+                model.move_head.bias.copy_(old_move_b[1:MOVE_DIM])
+            moved.append("move_head")
+        else:
+            # 源没有同形 5 列 ⇒ 整头保持 kaiming（由 `_init_weights` 给），
+            # 记进 `warmstart_missing` 由 S0-c 三态表裁决，不在这里抛。
+            moved.append("move_head(random)")
+
+        old_fire_w = params.get("fire_head.weight")
+        old_fire_b = params.get("fire_head.bias")
+        if old_fire_w is not None and tuple(old_fire_w.shape) == (FIRE_DIM, head_in):
+            # 行 0 = none：直搬。行 1 = fireBefore：旧动作空间无法表达 ⇒ 保持 0.01
+            # 初始化（不是 0：全 0 会让这一行 logits 恒 0，与另两行不同量级）。
+            new_fw = torch.empty((FIRE3_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
+            new_fw[0].copy_(old_fire_w[0])
+            new_fw[2].copy_(old_fire_w[1])  # fireAfter ← 旧 firing
+            model.fire_head.weight.copy_(new_fw)
+            if old_fire_b is not None and tuple(old_fire_b.shape) == (FIRE_DIM,):
+                new_fb = torch.zeros(FIRE3_DIM)
+                new_fb[0] = old_fire_b[0]
+                new_fb[2] = old_fire_b[1]
+                model.fire_head.bias.copy_(new_fb)
+            moved.append("fire_head")
+        else:
+            moved.append("fire_head(random)")
+
+        # hold：旧动作空间里「转向但不前进」不可表达 ⇒ 整头 0.01 初始化
+        # （不是 0：见 fireBefore 同理）。
+        model.hold_head.weight.copy_(
+            torch.empty((HOLD_DIM, head_in)).normal_(0.0, 0.01, generator=gen)
+        )
+        model.hold_head.bias.zero_()
+        moved.append("hold_head")
+    return moved
+
+
 def convert(
     src: str,
     dst: str,
@@ -194,13 +276,18 @@ def convert(
     policy_extra: bool,
     spatial_tower: bool,
     legacy_arch: bool,
+    action_v6: bool = False,
     seed: int = 20261005,
 ) -> dict[str, Any]:
     """造起点权重（腿 A/B 新架构档 或 A0 旧架构迁移档）；返回落盘回执。
 
-    三档互斥：`legacy_arch` | `policy_extra`（± `spatial_tower`）。旧 schema 只在此处
-    显式放行（`allow_legacy_schema=True`，S0-c warm-start 态）；A0 档要求全量命中
+    三档互斥：`legacy_arch` | `policy_extra`（± `spatial_tower`）**且 `legacy_arch` 与
+    `action_v6` 互斥**（旧 schema 只在 `--legacy-arch` 处显式放行
+    （`allow_legacy_schema=True`，S0-c warm-start 态）；A0 档要求全量命中
     （`warmstart_missing` 为空——旧架构与 hu150 逐键同形，不允许静默缺键）。
+
+    `action_v6`（B1 三头）**与 `policy_extra`/`spatial_tower` 正交**：前者换动作头
+    （hold2/move4/fire3），后者换头输入宽度（extra/塔）。两者可同时开。
     """
     import torch
 
@@ -209,11 +296,17 @@ def convert(
 
     if legacy_arch and (policy_extra or spatial_tower):
         raise SystemExit("拒绝：--legacy-arch 与 --policy-extra/--spatial-tower 互斥（A0 档保持旧架构）")
-    if not legacy_arch and not policy_extra and not spatial_tower:
-        raise SystemExit("拒绝：至少要 --legacy-arch、--policy-extra 或 --spatial-tower 之一")
+    if legacy_arch and action_v6:
+        raise SystemExit("拒绝：--legacy-arch 与 --action-v6 互斥（A0 档保持旧 5/2 动作空间）")
+    if not legacy_arch and not policy_extra and not spatial_tower and not action_v6:
+        raise SystemExit(
+            "拒绝：至少要 --legacy-arch、--policy-extra、--spatial-tower 或 --action-v6 之一"
+        )
 
     torch.manual_seed(seed)
-    model = PPOStudent(policy_extra=policy_extra, spatial_tower=spatial_tower)
+    model = PPOStudent(
+        policy_extra=policy_extra, spatial_tower=spatial_tower, action_v6=action_v6
+    )
     not_loaded = load_state_into(model, src, allow_legacy_schema=True)
     # obs-v5 列迁移（§2.7）：换形张量不是「缺失」，而是「拷旧列 + 新列 0.01 初始化」。
     # 腿 B 的源按旧头宽自动识别（宽即族 identity）：151 = v4 腿 B（三段）/ 137 = v4 腿 A
@@ -236,6 +329,11 @@ def convert(
         table = _MIGRATION_LEG_A if policy_extra else _MIGRATION_LEGACY
     gen = torch.Generator().manual_seed(seed)  # 与模型 init 分开 ⇒ 新列可复现
     partial = _migrate_columns(model, params, table=table, gen=gen)
+    # B1 v6：动作头的**行**迁移（move 5→4 丢 STOP、fire 2→3、hold 新建）。
+    # 必须在 `_migrate_columns` 之后（它按 table 搬列，动的是 pf 宽度，与头正交）。
+    head_moved: list[str] = []
+    if action_v6:
+        head_moved = _migrate_action_heads(model, params, gen=gen)
     not_loaded = [k for k in not_loaded if k not in partial]
     if legacy_arch and not_loaded:
         # A0 的契约 = 「hu150 全量迁移」：缺任何键都说明起点/形状不对，拒绝落盘
@@ -249,6 +347,7 @@ def convert(
             "warmstart_from": src,
             "warmstart_missing": not_loaded,
             "warmstart_partial": partial,
+            "warmstart_heads": head_moved,
             "warmstart_seed": seed,
         },
     )
@@ -259,6 +358,7 @@ def convert(
         "params": param_count(model),
         "warmstart_missing": not_loaded,
         "warmstart_partial": sorted(partial),
+        "warmstart_heads": head_moved,
         "schema_major": meta.get("schema_major"),
     }
 
@@ -269,6 +369,15 @@ def main() -> None:
     ap.add_argument("--to", dest="dst", required=True, help="输出起点权重路径")
     ap.add_argument("--policy-extra", action="store_true", help="腿 A 档（头 165）")
     ap.add_argument("--spatial-tower", action="store_true", help="腿 B 档（塔 + 头 189）")
+    ap.add_argument(
+        "--action-v6",
+        action="store_true",
+        help=(
+            "B1 v6 三头（hold2/move4/fire3，掩码 7→9）。与 --policy-extra/--spatial-tower "
+            "正交（前者换动作头、后者换头输入宽度）；与 --legacy-arch 互斥（旧动作空间对照档）。"
+            "落盘后 arch.actionV6=true ⇒ 下游 build_ppo / TS 运行时按权重切到 v6。"
+        ),
+    )
     ap.add_argument(
         "--legacy-arch",
         action="store_true",
@@ -295,6 +404,7 @@ def main() -> None:
         policy_extra=args.policy_extra,
         spatial_tower=args.spatial_tower,
         legacy_arch=args.legacy_arch,
+        action_v6=args.action_v6,
         seed=args.seed,
     )
     print(json.dumps(info, ensure_ascii=False))

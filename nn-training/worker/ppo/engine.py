@@ -52,7 +52,7 @@ import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
-from common.schema import FIRE_DIM, MOVE_DIM
+from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
 from worker.data.weights_io import load_weights_json, save_weights_json
 from worker.models.student import PPOStudent
 
@@ -133,7 +133,7 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
     先由 `worker/scripts/init_spatial_leg.py` 转出（带 arch 标志），否则静默退回旧架构。
     """
     h = d = head_hidden = None
-    policy_extra = spatial_tower = False
+    policy_extra = spatial_tower = action_v6 = False
     if weights_path and os.path.exists(weights_path):
         meta, _ = load_weights_json(weights_path)
         a = meta.get("arch", {})
@@ -142,12 +142,19 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
         head_hidden = a.get("head_hidden", 128)
         policy_extra = bool(a.get("policyExtra", False))
         spatial_tower = bool(a.get("spatialTower", False))
+        # B1 v6 三头（hold2/move4/fire3）—— 与 TS 侧"开关随权重走"同一契约：
+        # TS 用 `hold_head.*` 键是否存在判（`src/nn/infer.ts:443`），Python 用
+        # `arch.actionV6`。**必须由权重驱动，不能翻全局常量**——否则归档的 5/2
+        # ckpt 会静默按新头宽重建（头宽错 ⇒ load_state_into 全缺键 ⇒ 随机初始化）。
+        # 写入方 = `PPOStudent.arch()`（`student.py:230-231`）。
+        action_v6 = bool(a.get("actionV6", False))
     return PPOStudent(
         h=h or 64,
         d=d or 8,
         head_hidden=head_hidden or 128,
         policy_extra=policy_extra,
         spatial_tower=spatial_tower,
+        action_v6=action_v6,
     )
 
 
@@ -459,14 +466,37 @@ def ppo_update(
             lp_fire = e["lp_fire"]
             adv = e["adv"]
             ret = e["ret"]
-            mask = e["mask"]  # (T, 7)
+            mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片见下
 
-            mv, fr, val = model(obs, sc, e.get("extra"))
-            move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-            fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+            # B1 v6（2026-10-20）：`PPOStudent.forward` 在 `action_v6` 下返回 **4-tuple**
+            # `(move, fire, hold, value)`，legacy 是 3-tuple。判据 = shard 是否带 `a_hold`
+            # （数据事实），与 `load_shard` 的 v6 判据同一来源——不看模型，因为
+            # "模型是 v6 但数据是 5/2"正是必须炸掉的那种不同源。
+            out = model(obs, sc, e.get("extra"))
+            if e.get("a_hold") is not None:
+                mv, fr, hd, val = out
+            else:
+                mv, fr, val = out
+                hd = None
+            # 掩码布局随动作空间变（**不能复用同一组切片**）：
+            #   legacy [move5 | fire2]         ⇒ :5 / 5:7
+            #   v6     [move4 | fire3 | hold2] ⇒ :4 / 4:7 / 7:9
+            # 用 legacy 的 `MOVE_DIM=5` 去切 v6 掩码，会把 hold[0] 当成 fire 的第 3 类、
+            # 同时切掉 move 的第 4 类（right）——静默错位，loss 照降。
+            if hd is not None:
+                move_logp = masked_logsoftmax(mv, mask[:, :MOVE4_DIM])
+                fire_logp = masked_logsoftmax(fr, mask[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM])
+                hold_logp = masked_logsoftmax(hd, mask[:, MOVE4_DIM + FIRE3_DIM :])
+            else:
+                move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
+                fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+                hold_logp = None
 
             lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
             lp_old = lp_move + lp_fire
+            if hold_logp is not None:
+                lp_new = lp_new + cat_logprob(e["a_hold"], hold_logp)
+                lp_old = lp_old + e["lp_hold"]
 
             ratio = torch.exp(lp_new - lp_old)
             surr1 = ratio * adv
@@ -475,6 +505,8 @@ def ppo_update(
 
             value_loss = F.mse_loss(val.squeeze(-1), ret)
             entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
+            if hold_logp is not None:
+                entropy = entropy + cat_entropy(hold_logp)
 
             loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
             if kl_coef > 0.0:

@@ -24,7 +24,17 @@ import numpy.typing as npt
 
 from common.errors import ProtocolError
 from common.log import log
-from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from common.schema import (
+    BOARD,
+    FIRE3_DIM,
+    FIRE_DIM,
+    HOLD_DIM,
+    MOVE4_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    POLICY_EXTRA_DIM,
+    SCALAR_DIM,
+)
 
 # wire-diet §3：奖励面的文件名 / 版本 / f16 字段表住 `common/`（写端 `remote.payload_slim`
 # 也要逐字一致，而 hub 侧不得 import `worker.*`）——这里只 import，**不再**另定一份。
@@ -91,6 +101,7 @@ def load_shard_fields(
     dirpath: str,
     spec: dict[str, tuple[str, npt.DTypeLike]],
     shapes: dict[str, tuple[int, ...]] | None = None,
+    optional: set[str] | None = None,
 ) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
@@ -102,10 +113,17 @@ def load_shard_fields(
     `shapes`（obs-v5 A9）：每字段的**非批次维**期望形状（首维 = N，随 shard 变）——
     只查 dtype 挡不住「旧 schema 语料混装」：9 维 `extra.npy` 会被当 37 维静默读进来，
     错位到训练完才发作。不符即 `ValueError`（响亮，不静默）。
+
+    `optional`（B1 v6，2026-10-20）：这些键**文件缺失时整键省略**，不报错也不填 None。
+    用途 = v6 才有的 `a_hold`/`lp_hold`（legacy shard 没有）。判据是**文件存在性**
+    （事实），调用方据此决定走 5/2 还是 4/3/2。
     """
     out: dict[str, np.ndarray] = {}
     for key, (fname, dtype) in spec.items():
-        arr = np.load(os.path.join(dirpath, fname)).astype(dtype, copy=False)
+        path = os.path.join(dirpath, fname)
+        if optional and key in optional and not os.path.exists(path):
+            continue
+        arr = np.load(path).astype(dtype, copy=False)
         exp = (shapes or {}).get(key)
         if exp is not None and tuple(arr.shape[1:]) != tuple(exp):
             got = tuple(arr.shape[1:])
@@ -687,7 +705,21 @@ _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "metrics": (METRICS_NAME, np.float64),
     "done": ("done.npy", np.int64),
     "mask": ("mask.npy", np.int64),
+    # ---- B1 v6 才有的两列（2026-10-20）----
+    # 存在性即判据：有 `a_hold.npy` ⇒ 4/3/2 三头 + 9 宽掩码；没有 ⇒ 5/2 两头 + 7 宽。
+    # 走 `load_shard_fields(optional=...)`，缺文件时**整键省略**（不是填 None/0 ——
+    # 填 0 会让 `a_hold` 恒为 0，训练时静默学一个"永不 hold"的策略）。
+    "a_hold": ("a_hold.npy", np.int64),
+    "lp_hold": ("lp_hold.npy", np.float32),
 }
+
+#: v6 专有字段（legacy shard 没有这些文件）。见 `load_shard_fields(optional=...)`。
+_RL_SHARD_OPTIONAL: frozenset[str] = frozenset({"a_hold", "lp_hold"})
+
+#: 掩码宽度 → 是否为 v6（唯一判据来源；两侧常量在 TS `action-space-v6.ts` 与
+#: `common/schema.py`，这里只做"读到的东西自洽吗"的校验）。
+_MASK_DIM_LEGACY = MOVE_DIM + FIRE_DIM  # 7
+_MASK_DIM_V6 = HOLD_DIM + MOVE4_DIM + FIRE3_DIM  # 9
 
 #: 只有 `reward.npy`（打包端算好）的 shard 用的字段表 —— 由 `_RL_SHARD_SPEC` **派生**，
 #: 不抄第二份字段名单（wire-diet §3 P1）。
@@ -718,8 +750,17 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
             manifest = json.load(f)
     has_metrics = os.path.exists(os.path.join(dirpath, METRICS_NAME))
     spec = _RL_SHARD_SPEC if has_metrics else _RL_SHARD_SPEC_REWARD
-    d = load_shard_fields(dirpath, spec, _RL_SHARD_SHAPES)
+    d = load_shard_fields(
+        dirpath, spec, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+    )
     n_obs = int(d["obs"].shape[0])
+    # ★ B1 v6 掩码宽度校验（2026-10-20）：`mask` 此前**完全没有形状校验**
+    # （`_RL_SHARD_SHAPES` 只盯 obs/scalars/extra）⇒ 7 宽 mask 配 v6 模型会一路
+    # 静默读到训练完才表现异常（第 4–6 列被当 fire、第 7–8 列不存在）。
+    # 判据：`a_hold.npy` 存在 ⇔ 9 宽；不存在 ⇔ 7 宽。两侧不一致 = 导出端/加载端
+    # 版本不同源（或有人只改了一半），必须响亮。
+    is_v6 = "a_hold" in d
+    _check_mask_width(d["mask"], is_v6, dirpath)
     if has_metrics:
         metrics = d.pop("metrics")  # [N+1,76]
         if metrics.shape[0] != n_obs + 1:
@@ -736,6 +777,27 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
     d["stage"] = np.asarray(int(manifest.get("stage", -1)))
     return d
+
+
+def _check_mask_width(mask: np.ndarray, is_v6: bool, dirpath: str) -> None:
+    """掩码宽度必须与动作空间自洽（B1 v6，2026-10-20）。
+
+    ★ 为什么必须有这一条：`mask` 此前**完全没有形状校验**（`_RL_SHARD_SHAPES` 只盯
+    `obs`/`scalars`/`extra`）。7 宽 mask 配 v6 模型会一路静默读到训练完才表现异常
+    —— 第 4–6 列被当 fire、hold 两列根本不存在，`masked_logsoftmax` 照算，
+    loss 照降（只是学的是错的东西）。
+
+    判据 = `a_hold.npy` 存在性（导出端的**事实**，见 `_RL_SHARD_OPTIONAL`）。
+    """
+    want = _MASK_DIM_V6 if is_v6 else _MASK_DIM_LEGACY
+    got = tuple(mask.shape[1:])
+    if got != (want,):
+        raise ValueError(
+            f"mask.npy 形状 {tuple(mask.shape)} 与动作空间不符（{dirpath}）："
+            f"a_hold.npy {'在' if is_v6 else '不在'} ⇒ 期望非批次维 ({want},)，实得 {got}。"
+            "导出端与加载端不同源（v6 rollout 配 legacy 读取器，或只改了一半的宽度）"
+            "——禁止静默错位。"
+        )
 
 
 def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> np.ndarray:
@@ -854,21 +916,26 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
     """
+    d = load_shard(dirpath)
+    # B1 v6：多两个字段（存在性判据，见 `_RL_SHARD_OPTIONAL`）。legacy 分支的
+    # `fields` 元组逐字不变 ⇒ 历史 shard 的 episode 字典键集也逐字不变。
+    base = (
+        "obs",
+        "scalars",
+        "a_move",
+        "a_fire",
+        "lp_move",
+        "lp_fire",
+        "value",
+        "adv",  # 占位：GAE 现算
+        "ret",
+        "mask",
+    )
+    fields = (*base, "a_hold", "lp_hold") if "a_hold" in d else base
     return episode_from_shard(
-        load_shard(dirpath),
-        lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
-        fields=(
-            "obs",
-            "scalars",
-            "a_move",
-            "a_fire",
-            "lp_move",
-            "lp_fire",
-            "value",
-            "adv",  # 占位：GAE 现算
-            "ret",
-            "mask",
-        ),
+        d,
+        lambda x: compute_gae(x["reward"], x["value"], x["done"], gamma, lam),
+        fields=fields,
     )
 
 
