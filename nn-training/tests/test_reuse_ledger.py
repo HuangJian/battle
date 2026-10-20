@@ -68,9 +68,21 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: `float(shutil.disk_usage(path).free)` + `except OSError: return None`。
 #: ⚠ 两处需要**同改**：那四行是「盘满 = 成因行」的判据面，一侧改了另一侧要跟上（本仓对这类双生
 #: 常量的手法 = 孪生常量对账用例 + 这行账）。抬这一格是有意的欠债（待 boot/交付面的单文件契约解除）。
+#: **2026-10-20 抬同名 7 格（81 → 88）的账**（`plan/ppo-worker-transfer-isolation` 的下行半场：
+#: 新增 `remote/payload_proc.py` 与 `remote/payload_worker.py`）。新增的 7 个名字，逐条理由：
+#:
+#: | 名字 | 成员 | 为什么不是「又拄一份」 |
+#: |---|---|---|
+#: | `take` · `prune` · `status` | `payload_proc` + `payload_worker` + `prefetch`/`offline_deliver`/`deliver_proc` | **面名（契约镜像）**：父侧代理必须**逐字像**它替换的那个对象（`PrefetchStore`）——`job_round` / `worker_loop` 只认这一种形状，否则降级路径要写两套分派 |
+#: | `__getattr__` | `payload_proc` + `offline_boot` + `worker.ppo` | 同上：降级后整类**转发**给进程内那份（逐个手写 8 个一行方法只会多写 8 个方法，不会多一份实现） |
+#: | `_degrade` · `_stop_child` | `deliver_proc` + `upload_proc` + `payload_proc` | 三个进程代理的**同名生命周期钩子**；实现已 2026-10-20 抽到 `remote/child_proc`（`reap_child` / `spawn_module`），剩下的只是「本类怎么降级」这一句策略，各代理必须自己写 |
+#: | `_send` | `payload_proc` + `error_report` + `forkdist` | 一行的管道写入（写一行 JSON + flush）；与另两处的同名字没有可共享的实现 |
+#:
+#: ⚠ 同一次改动里 `exact_groups` **没有上涨**（`_repo_root` 从两份变成一份 `child_proc.repo_root`），
+#: `clone_groups` 反而 17 → 15（`spawn`/`stop` 三段式也合了）。抬的只是同名计数。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 81
+BASELINE_SAME_NAME_GE3 = 88
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

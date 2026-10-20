@@ -24,6 +24,13 @@ CPU/GPU —— 两者是**不相交的资源**，天然可叠：
 
 `mode="sync"` 逐字回退到改造前的行为（回传占关键路径、`overlap=0`），现场出问题时的
 逃生口 = `--result-upload sync`。
+
+`mode="process"`（2026-10-20，`plan/ppo-worker-transfer-isolation`）：回传整条腿搬进**独立子进程**
+（`remote/upload_proc.py` 的父侧代理 + `remote/upload_worker.py` 的子进程入口）。理由与自主 worker
+的补传腿逐字同源（`plan/offline-deliver-isolation` §0）：`json.dumps` + gzip + HTTP 都压在同一
+解释器的 GIL 上，而 PPO 线程要的正是那几核 CPU。**缺省仍是 `async`** —— 进程模式由入口显式开
+（云机 `run_pull_worker` 带 `--result-upload process`），否则所有 patch `post_result` 的测试接缝
+都会被迫起真子进程。
 """
 
 from __future__ import annotations
@@ -33,11 +40,14 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
-#: 回传模式（CLI `--result-upload` 同字面量域）。`sync` = 旧行为（回传占关键路径）。
-RESULT_UPLOAD_MODES = ("async", "sync")
-#: 缺省 = 异步（本模块存在的全部理由）。
+#: 回传模式（CLI `--result-upload` 同字面量域）：
+#: · `process` = 独立子进程（PPO worker 的传输隔离面）；
+#: · `async`   = 进程内后台线程（缺省；P2.5 的形状）；
+#: · `sync`    = 旧行为（回传占关键路径，逃生口）。
+RESULT_UPLOAD_MODES = ("process", "async", "sync")
+#: 缺省 = 异步（本模块存在的全部理由）。进程模式是**入口显式开**的能力，不改缺省。
 RESULT_UPLOAD_MODE_DEFAULT = "async"
 #: 在飞上限。**不是随便取的**：双课程交错下同时在飞的回传最多 2 份（一门一份）。
 #: 队列满了就**背压**（主循环等一等，而不是无界涨内存或丢结果）——结果是最贵的产物，
@@ -50,6 +60,10 @@ RESULT_ENQUEUE_TIMEOUT_SEC = 300.0
 RESULT_DRAIN_TIMEOUT_SEC = 1800.0
 #: 落定结果保留条数（给 `--once` 查自己那份、给收尾行报账）。
 RESULT_OUTCOME_KEEP = 8
+#: 进程模式的**落定行**前缀（子进程 stdout 的协议）：两边同源 —— 子进程写、父侧解析。
+#: 放在本模块（L0）而不是任一进程模块里，是为了不让「父侧代理 import 子进程入口」
+#: （那会给 `remote/upload_proc.py` 凭空加一层到 `job_lifecycle` 的依赖）。
+OUTCOME_PREFIX = "@@upload@@"
 
 
 @dataclass
@@ -68,6 +82,35 @@ class UploadTask:
     #: 落定回调（`(jid, outcome) -> None`）——生产侧用它把本 job 的传输账**收在落定那一刻**
     #: （async 下 `out` 的账要到那时才记完，过早 flush 会把回传读成 0s）。
     on_settled: Callable[[str, Outcome], None] | None = None
+
+
+class UploaderLike(Protocol):
+    """回传器的**共同接口**（`job_round.run_one_round` / `worker.worker_loop` 只认它）。
+
+    两个实现：`ResultUploader`（进程内：线程 / 同步）与 `UploaderProcess`（独立子进程 +
+    sticky 降级）。换实现不该动任何调用方 —— 与 `plan_handoff` 的 `DelivererLike` 同一条纪律。
+    """
+
+    #: 实现身份（`process` / `async` / `sync`；降级后如实变 `async`）。
+    mode: str
+
+    #: 累计提交份数。
+    submitted: int
+
+    @property
+    def off_critical_path(self) -> bool:
+        """回传是否在关键路径之外（`sync` = False）。阶段账的 `overlap=` 读它。"""
+        ...
+
+    def submit(self, task: UploadTask) -> None: ...
+
+    def drain(self, timeout: float | None = None) -> bool: ...
+
+    def close(self, timeout: float | None = None) -> bool: ...
+
+    def outcome(self, jid: str) -> Outcome | None: ...
+
+    def stats(self) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -103,7 +146,11 @@ class ResultUploader:
         enqueue_timeout: float = RESULT_ENQUEUE_TIMEOUT_SEC,
         log: Callable[[str], None] | None = None,
     ) -> None:
-        self.mode = mode if mode in RESULT_UPLOAD_MODES else RESULT_UPLOAD_MODE_DEFAULT
+        # `process` 落到本类 = 实现选择没生效（`make_uploader` 才会起子进程）；语义上它仍
+        # 是「关键路径之外的异步回传」⇒ 按 `async` 跑，**不谎报** `mode=process`。
+        self.mode = "async" if mode == "process" else (
+            mode if mode in ("async", "sync") else RESULT_UPLOAD_MODE_DEFAULT
+        )
         self._upload = upload
         self._drain_timeout = float(drain_timeout)
         self._enqueue_timeout = float(enqueue_timeout)
@@ -119,6 +166,11 @@ class ResultUploader:
         self.sync_uploads = 0
 
     # ------------------------------------------------------------------ 对外
+
+    @property
+    def off_critical_path(self) -> bool:
+        """`sync` 之外都在关键路径之外（改造后从此处读，别再比 `mode == "async"`）。"""
+        return self.mode != "sync"
 
     def submit(self, task: UploadTask) -> None:
         """交一份结果：async = 入队即返回；sync = 当场发完再返回。

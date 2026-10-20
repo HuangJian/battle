@@ -241,6 +241,13 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         "--threads", "0",
         "--poll-sec", str(cfg["poll_interval_sec"]),
         "--max-idle-sec", str(max_idle),
+        # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：云机 PPO worker 的回传腿跑在
+        # **独立子进程**里（`remote/upload_worker.py`）——与自主 worker 的补传腿同形（
+        # `plan/offline-deliver-isolation` §P1）。不这么开场，云机 PPO 线程会继续与
+        # `json.dumps` + gzip + HTTP 抢 GIL（2026-10-06 那条 40× 事故的通道）。
+        # 子进程起不来（老代码树里没有那个模块）⇒ `UploaderProcess` 自己 sticky 降级回线程，
+        # 一行响亮日志，训练不停。
+        "--result-upload", "process",
     ]
     # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cfg["cache_dir"]` 非空才加这个
     # 参数（**缺省空 = 逐字旧行为**——不写这一行时子进程 argv 与改造前完全一致）。

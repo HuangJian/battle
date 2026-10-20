@@ -65,6 +65,7 @@ __all__ = [
     "_wire_note_resend",
     "_wire_note_wait",
     "_wire_start",
+    "_wire_take",
     "_wire_time",
     "_wire_totals",
     "set_bulk_log",
@@ -393,6 +394,19 @@ def _wire_totals(jid: str) -> tuple[int, int]:
     segs = w.get("segs") or {}
     total = sum(int(n) for n, _sec in segs.values())
     return total, int(w.get("preempt_wasted", 0))
+
+
+def _wire_take(jid: str) -> dict:
+    """把某 job 的整只账**取走**（pop 并返回）——给「回传腿住子进程」那条路用（2026-10-20）。
+
+    为什么需要它：`remote/upload_worker.py` 在**另一个进程**里跑 `post_result`，于是
+    `result` 段的字节/秒与排队秒记进的是**子进程**的 `_WIRE`；而打每 job 那一行账的是父进程
+    （`_wire_flush` 读自己的 `_WIRE`）。不把桶交回去 ⇒ job 行里 `out=` 恒 0，`overlap=` 永远是 NULL
+    ——「账不许撒谎」那条纪律会静默失效。
+
+    父侧用 `_wire_add` / `_wire_note_wait` 重放交回来的段（桶已经 pop，重放不会重复计）。
+    """
+    return _WIRE.pop(jid, {})
 
 
 def _wire_note_failed(jid: str, nbytes: int, sec: float) -> None:

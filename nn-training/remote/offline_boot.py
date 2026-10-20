@@ -265,6 +265,15 @@ DEFAULT_HUB_TRIES = 10
 #: 探活与取包的超时（秒）。取包给得宽：任务包几 MB～几十 MB，云机的下行不一定快。
 PING_TIMEOUT = 8.0
 PACK_TIMEOUT = 300.0
+#: `claim` 的客户端超时（秒）。**必须**大于 hub 在这条应答里可能花掉的时间：
+#: 成功分支里 `hub/offline.py::_ask_console_freshness` 会**同步**请一次控制台核对包新鲜度
+#: （预算 `hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC` = 8s，控制台挂住时就是整 8s）
+#: ⇒ 旧值 `PING_TIMEOUT`（8.0）与 hub 的预算**撞在同一个数上**，客户端恰好先到点。
+#: 为什么这是 bug 而不只是「重试一次」：claim 是**写**——hub 可能已经把租约发出去、hold
+#: 已落盘，客户端却只看到 `net`（按纪律照旧跑、**无租约**）⇒ 那份 hold 没人交还，一拖一
+#: 把本盘其余课全挡在 `busy` 上等 900s（2026-10-20 实测：e2e 的三门课只跑成第一门）。
+#: 20s 之外的余量留给同一分支里的包 sha256（几十~几百 MB 的包要真读一遍）。
+CLAIM_TIMEOUT = 30.0
 #: 手动上传的搜索位置（浅扫，不递归大树）：工作目录/挂载点/平台默认落点。
 UPLOAD_GLOBS = (
     ".",
@@ -1865,7 +1874,7 @@ def claim_course(
     log: Callable[[str], None],
     *,
     takeover: bool = False,
-    timeout: float = PING_TIMEOUT,
+    timeout: float = CLAIM_TIMEOUT,
 ) -> tuple[str, str]:
     """领一门课的离线租约 → `(lease_token, "")`；没领到 → `("", reason)`。
 

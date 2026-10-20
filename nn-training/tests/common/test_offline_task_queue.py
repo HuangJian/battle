@@ -1022,6 +1022,33 @@ def test_claim_and_release_never_raise_on_a_dead_hub(monkeypatch: pytest.MonkeyP
     assert any("连不上" in ln for ln in lines), lines
 
 
+def test_claim_timeout_outlives_the_hub_console_leg() -> None:
+    """`claim` 是**写**：客户端超时必须盖得住 hub 在这条应答里舍得花的时间。
+
+    hub 的 `/offline/claim` 成功分支里**同步**请一次控制台核对包新鲜度
+    （`hub/offline.py::_ask_console_freshness`），预算 = `TASK_PACK_TRIGGER_TIMEOUT_SEC`（8s）；
+    控制台挂住（不可达、而 SYN 被对端丢掉＝黑洞）时这条应答就要整 8s。
+
+    为什么撞在同一个数上是 bug：客户端先到点 ⇒ 它只看到 `net`（纪律：照旧跑、无租约），
+    而 hub 那一侧租约已经发出去、hold 已落盘 —— 没有人交还它，一拖一把本盘其余课全挡在
+    `busy` 里等 900s（2026-10-20 实测：`e2e/test_auto_handoff_e2e.py`
+    `test_auto_loop_runs_the_claimable_batch_in_order` 恒红，三门课只跑成第一门）。
+
+    断言两条**常量**的关系（不是重跑一遍 8s 的端到端）：任何一个数被调走
+    （hub 放宽控制台预算 / 客户端缩回探活档）都必须在这里响。
+    """
+    from hub import task_pack
+
+    assert offline_boot.CLAIM_TIMEOUT > task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC, (
+        "claim 的客户端超时必须大于 hub 应答里可能花掉的控制台预算"
+        f"（CLAIM_TIMEOUT={offline_boot.CLAIM_TIMEOUT}s vs "
+        f"TASK_PACK_TRIGGER_TIMEOUT_SEC={task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC}s）"
+    )
+    assert offline_boot.CLAIM_TIMEOUT > offline_boot.PING_TIMEOUT, (
+        "claim 不能与探活同档：探活是只读，claim 是写（超时 = 白丢一份已发出的租约）"
+    )
+
+
 def test_claim_course_reports_a_foreign_holder(monkeypatch: pytest.MonkeyPatch) -> None:
     """409「被持有」⇒ `("", "held")`（照旧跑）+ 一行「已被谁持有、多久后过期」。"""
     monkeypatch.setattr(

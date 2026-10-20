@@ -267,6 +267,9 @@ from remote.job_lifecycle import (
     post_result as post_result,
 )
 from remote.job_lifecycle import (
+    record_upload_wire as record_upload_wire,
+)
+from remote.job_lifecycle import (
     release_job as release_job,
 )
 from remote.job_lifecycle import (
@@ -290,19 +293,27 @@ from remote.job_lifecycle import (
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
 from remote.job_round import run_one_round
+from remote.payload_proc import PayloadProcess, make_prefetcher
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
+    PREFETCH_MODES,
     PREFETCH_UNPACK_DEFAULT,
     PrefetchStore,
 )
 from remote.result_upload import (
     RESULT_UPLOAD_MODE_DEFAULT,
     RESULT_UPLOAD_MODES,
-    ResultUploader,
+)
+
+# 显式转发（`as` 自别名）：测试/旧调用方从 `remote.worker` 取这个名字（线程模式的实现）。
+# 进程模式的入口是 `make_uploader`（下面的 import）——两者同接口（`UploaderLike`）。
+from remote.result_upload import (
+    ResultUploader as ResultUploader,
 )
 from remote.train_core import (
     run_training_core as run_training_core,
 )
+from remote.upload_proc import make_uploader
 
 # 传输账 / 低速重抽 / bulk 节流（S4 拆分 → `remote/wire.py`）。这里是**显式转发**：
 # 状态与实现同住 `wire`，避免模块全局在拆分后变成两份账（见 `remote/wire.py` 头部）。
@@ -898,6 +909,10 @@ def worker_loop(
     role: str = ROLE_ONLINE,
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
+    # 下行腿跑在哪里（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
+    # `process` = 独立子进程（缺省，见 `PREFETCH_MODE_DEFAULT`）/ `thread` = 进程内填充线程
+    # （= 改造前的旧行为，逃生口）。空串 = 按 `$NN_PREFETCH_MODE` > 缺省解析。
+    prefetch_mode: str = "",
     # 预取解包份数（plan/prefetch-stage-unpack §2.3）：peek 前 N 份顺手解好；0 = 只存字节
     # （= 改造前的旧行为，回退档）。与 `prefetch_depth` 独立：深度管「预取几份」，这个管「解几份」。
     prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
@@ -930,6 +945,17 @@ def worker_loop(
     # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
     _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
     _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
+    # 下行腿分进程后的 P1 协同（2026-10-20）：预取的 P2 在**子进程**里，而本进程的关键下载/回传
+    # （P1）要能挡住它。`_BULK` 的 P1 进出等待在这里广播给每个预取子进程（`foreign_p1` 同口径：
+    # 不开新工 + 当场打断在飞的那份）。**多个 hub ⇒ 多个子进程 ⇒ 全广播**（每一条 P2 都该让）。
+    # 与 `configure_yield` 同一条纪律：`_BULK` 是进程单例 ⇒ 退出时必须还原。
+    def _p1_broadcast(waiting: bool) -> None:
+        for _pf in list(pf_stores.values()):
+            note = getattr(_pf, "note_p1", None)
+            if note is not None:
+                note(waiting)
+
+    _prev_p1_observer = _BULK.set_p1_observer(_p1_broadcast)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
     #: 控制面分位数，超阈值即**就地降为 never 语义**并打一行原因（一次性、不回升）。
     _yield_live = bulk_yield != "never"
@@ -971,10 +997,22 @@ def worker_loop(
     halt_seen: dict[int, bool] = {}
     # P2.5 异步回传（2026-09-22）：把 `out` 从关键路径上摘下来。`post_result` 按**调用时**
     # 解析（供测试 monkeypatch）；`sync` = 逐字回退到改造前（`--result-upload sync`）。
-    uploader = ResultUploader(upload=post_result, mode=result_upload, log=log)
+    # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：`process` 档把整条回传腿搬进
+    # **独立子进程**（`remote/upload_worker.py`）——与自主 worker 的补传腿同形：`json.dumps`
+    # （~1.6MB）+ gzip + HTTP 不再压在训练线程的 GIL 上。子进程起不来 ⇒ 它自己 sticky 降级回
+    # 线程（响亮一行），训练永不受影响。
+    uploader = make_uploader(
+        upload=post_result,
+        mode=result_upload,
+        log=log,
+        # 子进程交回的传输账重放进**本进程**的每 job 账（实现住 `job_lifecycle`：
+        # `_wire_add` 一族的调用点归那一簇，`test_job_lifecycle_split` 有闸）。
+        record_wire=record_upload_wire,
+    )
 
     # P2 软持有暂存区（按 hub 分区；`blob_cache` 共享根与 run_job 的口径一致）。
-    pf_stores: dict[int, PrefetchStore] = {}
+    # 缺省 = 进程模式（`PayloadProcess`）；`thread` 档 = 进程内 `PrefetchStore`（旧行为）。
+    pf_stores: dict[int, PrefetchStore | PayloadProcess] = {}
     try:
         while True:
             base_url = hubs[hi]
@@ -988,14 +1026,17 @@ def worker_loop(
                 # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
                 # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
                 # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
-                pf_stores[hi] = PrefetchStore(
+                pf_stores[hi] = make_prefetcher(
                     part_dir,
+                    mode=prefetch_mode,
                     log=log,
                     staged_max=max(prefetch_depth, prefetch_unpack),
                 )
                 # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
                 # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
-                pf_stores[hi].prune()
+                # 进程模式的 `init` 已经扫过（子进程是暂存区的**唯一写者**）⇒ 不重复下一道命令。
+                if isinstance(pf_stores[hi], PrefetchStore):
+                    pf_stores[hi].prune()
             pf_store = pf_stores.get(hi)
             try:
                 _polls_since_log += 1
@@ -1137,6 +1178,14 @@ def worker_loop(
         # （测试 / 多会话）继承 auto——`test_control_plane_bypass.py` 那类「要求无条件让路」
         # 的既有用例会确定性变红。
         _BULK.configure_yield(after_sec=_prev_yield[0], total_budget_sec=_prev_yield[1])
+        _BULK.set_p1_observer(_prev_p1_observer)
+        # 下行腿收尾（2026-10-20）：进程模式要收掉填充线程与子进程（否则一个会话漏一个
+        # `python -m remote.payload_worker`）。它**不丢任何东西**——暂存区是软持有（无租约），
+        # 没被 claim 的候选本来就要蒸发。
+        for _pf in list(pf_stores.values()):
+            _closer = getattr(_pf, "close", None)
+            if _closer is not None:
+                _closer()
         # P2.5（2026-09-22）：**每条**退出路径都要过这里——`break`（空闲/停机）、
         # `--once` 的 return、热替换的 SystemExit(86)、以及任何异常。队列里可能还有
         # 没送出去的结果；不等它落定就退出 = 静默丢掉最贵的产物（训练侧要等租约
@@ -1184,7 +1233,10 @@ def main() -> None:
         "--result-upload",
         choices=RESULT_UPLOAD_MODES,
         default=RESULT_UPLOAD_MODE_DEFAULT,
-        help="结果回传模式：async=不占关键路径（缺省）/ sync=旧行为（逃生口）",
+        help=(
+            "结果回传模式：async=不占关键路径（缺省）/ process=独立子进程（真隔离，云机用）"
+            " / sync=旧行为（逃生口）"
+        ),
     )
     ap.add_argument(
         "--echo",
@@ -1207,6 +1259,17 @@ def main() -> None:
         type=int,
         default=PREFETCH_UNPACK_DEFAULT,
         help=f"预取顺手解包前 N 份（0=只存字节/旧行为；缺省 {PREFETCH_UNPACK_DEFAULT}）",
+    )
+    # 下行腿在哪跑（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
+    # process = 独立子进程（peek + 下载 + 解包全在子进程里，缺省）/ thread = 进程内（旧行为）。
+    ap.add_argument(
+        "--prefetch-mode",
+        choices=PREFETCH_MODES,
+        default="",
+        help=(
+            "下行腿（预取下载/解包）跑在哪：process=独立子进程（缺省，不抢训练进程的 GIL）"
+            " / thread=进程内填充线程（旧行为，逃生口）；空=按 $NN_PREFETCH_MODE > 缺省"
+        ),
     )
     # bulk 让路策略（plan/transfer-residual W1）：auto=条件让路（缺省）；always=旧语义（逃生口）；
     # never=永不让路（极端臂，量「让路到底买到了什么」）。
@@ -1270,6 +1333,7 @@ def main() -> None:
             max_idle_sec=args.max_idle_sec,
             restart_argv=sys.argv[1:],
             hub_urls=hub_urls,
+            prefetch_mode=args.prefetch_mode,
             role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
             prefetch_depth=args.prefetch_depth,
             prefetch_unpack=args.prefetch_unpack,
