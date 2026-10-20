@@ -6,6 +6,46 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §106 采样节点的**导入副作用**不许清扫工作目录：boot 收敛移入 `import.meta.main`（2026-10-20，用户报障「errors 页的错误该修的修」）
+
+**症状（`/errors` 页 `selfNode` 那一行）**：`export-eval-game exited 1: … ENOENT: no such file or directory,
+open 'tmp/dist-agent/weights-eval-350fc387cde7dc2a.json'`——同一拍 `s000/seed860007..860012` **七局 eval 全灭**。
+文件是 16:22 一次 `x-kind=eval` 的 POST 亲手写下的（日志有 `switched -> 350fc387… (buckets=1)`），
+17:50 却不见了；而 agent 内存桶仍指着它（`weightsOf` 命中了旧课程桶的同一 sha），所以 409 自愈没触发。
+
+**根因（不是权重淘汰，是导入副作用）**：`tools/agent/sampler-agent.ts` **模块顶层**就跑 boot 收敛——
+`fs.mkdirSync(WORK_DIR)` + `sweepWorkdir()`。而 `sweepWorkdir` 的「谁还在用」判据 = **本进程的内存桶**。
+于是任何 import 本模块的进程（`bun run check` 里的 `tests/dist-agent.test.ts` / `tests/agent/*`、诊断工具）都带着
+**空桶**去扫**真** `tmp/dist-agent` ⇒ `sweepWeightFilePlan` 认为所有权重都没人引用，每个 kind 只留最新
+`KEEP=4` 份、其余删除。现场对账：17:51 与 18:06 两次文件消失，正好对应三条 commit 的 pre-commit 门禁时间。
+文件被删掉后，正在服务的 agent 仍从内存桶返回该路径 ⇒ 子进程 `readFileSync(weightsPath)` ENOENT。
+（同一类导入副作用还有 `AUTH_KEY = loadOrCreateAuthKey()`：会在 import 时往 `tools/agent/agent.auth` 写秘密。）
+
+**修法**（`tools/agent/sampler-agent.ts`）：
+- boot 收敛抽成 `sweepWorkdirAtBoot()`，**只**在 `import.meta.main` 里、`runInstanceGuard()` **之前**调用
+  （锁文件住 `WORK_DIR`，目录得先存在）。`--help` / `--print-code-hash` 等诊断入口不再顺带扫盘。
+- `AUTH_KEY` 改为惰性 `authKey()`（首个请求/探活用一次，行为不变）——import 不再写秘密文件。
+- `WORK_DIR` 加 `SAMPLER_WORK_DIR` 重定向（同仓库 `BCITY_*` 惯例，**仅供单测**）：默认行为零变化。
+
+**契约（`tests/agent/sampler-import-side-effects.test.ts`，2 例）**：子进程 `import` 本模块后，夹具目录里
+**6 份**超过 KEEP 的权重必须原样全在；**缺失的工作目录不得被创建**。两例在旧实现上实测**红**
+（删掉最旧 2 份 + 目录被创建），修后绿。
+
+**代价与影响**：本文件在 `tools/agent/codehash-files.txt`（codeHash SSOT）内 ⇒ codeHash 变化，
+**节点需 push + 升级/重启**才吃到修复；升级窗口内未升级节点仍会（被任意 import 本模块的进程）删权重，
+属已知残留风险。
+
+**被否方案**：① 把 `KEEP` 调大——只是把窗口拉长，机制未变；② `sweepWorkdir` 加文件锁 / pid 判活——
+要新增跨进程协议，而「谁在服务」的事实已经由单实例锁给出，导入侧本来就不该扫；③ 只在 `NODE_ENV=test`
+下跳过——依赖环境变量判定行为，别处 import（诊断脚本）照样中招。
+
+**顺带核对（同一批 errors，已被既有修复覆盖，不动）**：`mask.npy (620,9)` / `file set mismatch
+(extra=['a_hold.npy','lp_hold.npy'])` = v6 三层清单漏改（`d8e6ca92` + `2f40560e` 已修，`write_shard` 落可选文件 +
+`validate_result` 白名单）；`INF … FAIL` / `失败=0` 假事件 = `d35e3529` 已修；`HTTP 530` / `i/o timeout` /
+`AUTH FAIL`（回环） = 基础设施/历史行；旧 hub 的 `/admin/errors` 404 = 该端点已在 `hub/admin.py` 落地。
+
+---
+
 ## §105 采样节点的「近 30 分钟产出」摘要行：窗口计算住 agent，日志只搬那一行（2026-10-18）
 
 **报障**（用户原话）：「rollout.ipynb 及 sampler-agent 的 log 无法观察最近贡献情况，请持续统计

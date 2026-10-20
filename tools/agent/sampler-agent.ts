@@ -111,7 +111,12 @@ console.log = (...a: unknown[]): void => _agentLog(`[${_ts()}]`, ...a)
 console.error = (...a: unknown[]): void => _agentLogErr(`[${_ts()}]`, ...a)
 
 const AGENT_AUTH_PATH = path.join(import.meta.dir, 'agent.auth')
-const WORK_DIR = path.join(REPO_ROOT, 'tmp', 'dist-agent')
+/** 工作目录（权重 / 结果缓存文件 / 单实例锁 / 在飞局目录）。
+ *
+ *  `SAMPLER_WORK_DIR` 仅供**单测**重定向（同仓库 `BCITY_*` 惯例）：导入本模块的副作用
+ *  用例必须在临时目录里验证，绝不能对着正在服务的真 `tmp/dist-agent` 断言（那既会把
+ *  被删的证据一起删掉，也会在跑门禁时伤到运行中的节点）。默认行为零变化。 */
+const WORK_DIR = process.env.SAMPLER_WORK_DIR?.trim() || path.join(REPO_ROOT, 'tmp', 'dist-agent')
 export const SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
@@ -747,17 +752,33 @@ export function latestWeightsOfKind(kind: string, dir: string = WORK_DIR): Weigh
   )
   return fromDisk
 }
-const AUTH_KEY = loadOrCreateAuthKey()
-fs.mkdirSync(WORK_DIR, { recursive: true })
-// boot 收敛（§374）：清被杀进程残留的 game-* 孤儿 / 陈旧 pid，权重按 kind 收敛到最新
-// KEEP 份——重启后内存桶为空，旧文件若无人清扫会无限累积（此前正则不匹配 kind 命名）。
-const workdirBefore = fs.readdirSync(WORK_DIR).length
-try {
-  sweepWorkdir()
-  const swept = workdirBefore - fs.readdirSync(WORK_DIR).length
-  if (swept > 0) console.log(`[sampler-agent] workdir swept @boot (${swept} stale entries removed)`)
-} catch {
-  /* best effort */
+/** authKey（惰性）：**不在模块顶层生成**——单测/诊断工具 import 本模块不该往
+ *  `tools/agent/agent.auth` 写秘密文件（导入副作用，2026-10-20 与工作目录扫掠同批清理）。 */
+let authKeyMemo: string | null = null
+function authKey(): string {
+  if (authKeyMemo === null) authKeyMemo = loadOrCreateAuthKey()
+  return authKeyMemo
+}
+
+/** boot 收敛（§374）：清被杀进程残留的 game-* 孤儿 / 陈旧 pid，权重按 kind 收敛到最新
+ *  KEEP 份——重启后内存桶为空，旧文件若无人清扫会无限累积（此前正则不匹配 kind 命名）。
+ *
+ *  ★ **只能在 `import.meta.main` 里调用**（2026-10-20 事故）：它拿**本进程的内存桶**当
+ *  「谁还在用」的判据。任何 import 本模块的进程（`bun run check` 的测试、诊断工具）桶是
+ *  空的 ⇒ 会把这个正在服务的 agent 仍在引用的权重文件删掉（每 kind 只留 4 份）⇒ 下一局
+ *  子进程 `readFileSync(weightsPath)` ENOENT。历史实现写在模块顶层，pre-commit 跑门禁
+ *  就等于对着生产节点做删除；回归用例：`tests/agent/sampler-import-side-effects.test.ts`。 */
+function sweepWorkdirAtBoot(): void {
+  fs.mkdirSync(WORK_DIR, { recursive: true })
+  const workdirBefore = fs.readdirSync(WORK_DIR).length
+  try {
+    sweepWorkdir()
+    const swept = workdirBefore - fs.readdirSync(WORK_DIR).length
+    if (swept > 0)
+      console.log(`[sampler-agent] workdir swept @boot (${swept} stale entries removed)`)
+  } catch {
+    /* best effort */
+  }
 }
 
 function lruPut(key: string, buf: Buffer): void {
@@ -986,13 +1007,13 @@ function removeInstanceLock(): void {
   }
 }
 
-/** 本机探活：`127.0.0.1:<port>/v1/status`（带 AUTH_KEY）。任何失败 = 探不到。 */
+/** 本机探活：`127.0.0.1:<port>/v1/status`（带 authKey）。任何失败 = 探不到。 */
 async function probeLocalInstance(): Promise<ProbeInfo> {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), PROBE_TIMEOUT_MS)
   try {
     const res = await fetch(`http://127.0.0.1:${port}${PROBE_PATH}`, {
-      headers: { authorization: `Bearer ${AUTH_KEY}` },
+      headers: { authorization: `Bearer ${authKey()}` },
       signal: ac.signal,
     })
     if (!res.ok) return emptyProbe()
@@ -1829,7 +1850,7 @@ async function handle(req: Request): Promise<Response> {
   }
   const auth = req.headers.get('authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-  if (!token || !safeEqual(token, AUTH_KEY)) return jsonResponse({ error: 'unauthorized' }, 401)
+  if (!token || !safeEqual(token, authKey())) return jsonResponse({ error: 'unauthorized' }, 401)
 
   // kept 短路径探针（2026-09-19）：只查内存桶，不读 body。trainer 命中后跳过 POST。
   if (req.method === 'GET' && url.pathname === '/v1/weights/cached') {
@@ -2425,6 +2446,9 @@ if (import.meta.main) {
     )
     process.exit(0)
   }
+  // boot 收敛（工作目录 + 旧权重 + 被强杀进程残留）：**只在本进程真的起服务时做**。
+  // 必须在 runInstanceGuard **之前**——锁文件就住 WORK_DIR（目录得先存在）。
+  sweepWorkdirAtBoot()
   // 单实例互斥（plan/sampler-single-instance.plan.md §3.1）：第二个实例必须响亮拒起。
   // 必须在预热**之前**——预热可长达 ~80s，若先预热再抢锁，两个冷启动实例会双双通过判定。
   await runInstanceGuard()
