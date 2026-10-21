@@ -33,6 +33,45 @@
 
 **复读法**：`PPO_PROFILE=1 PPO_CUDA_DIAG=1` 跑一单；`n` 会少 `PPO_PROFILE_STEPS`（采样步不进 median）。
 
+### 原始输出（未改写，一手数据）
+
+来源：Colab T4（`colab-t`），job `057252a24d56a2e8`，2026-10-21 13:54，进程代码 `sha12=e1cc0356e813`，
+`PPO_PROFILE=1`，采样 5 步（`PPO_PROFILE_STEPS=5`；缺省 10 步，钩 1–50）。表头/列名是 torch 原样，
+`aten::` 行的时间**包含**其 kernel（两族不能相加）。
+
+```text
+[13:54:10] job 057252a24d56a2e8: 准备完成 7.2s｜...｜设备=cuda｜n=1｜[0]=Tesla T4｜cap=(7, 5)｜dp=False｜threads=1｜...
+[13:54:15] [ppo] profile（前 5 步，按 self CUDA 时间降序；CPU / CUDA 两列同表）:
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+                             aten::convolution_backward         0.22%       7.670ms        10.12%     350.288ms       4.121ms        1.260s        53.83%        1.328s      15.619ms            85
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     505.883ms        21.61%     505.883ms      12.647ms            40
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     327.643ms        14.00%     327.643ms       8.191ms            40
+_5x_cudnn_volta_scudnn_128x64_stridedB_splitK_medium...         0.00%       0.000us         0.00%       0.000us       0.000us     288.631ms        12.33%     288.631ms       7.216ms            40
+                                aten::_conv_depthwise2d         0.09%       3.157ms         0.17%       5.788ms     144.691us     278.554ms        11.90%     288.908ms       7.223ms            40
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     278.554ms        11.90%     278.554ms       6.964ms            40
+                               aten::threshold_backward         0.25%       8.680ms         0.35%      11.997ms     133.295us     183.160ms         7.82%     183.160ms       2.035ms            90
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     183.127ms         7.82%     183.127ms       2.154ms            85
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     172.837ms         7.38%     172.837ms     751.466us           230
+                                             aten::add_         0.34%      11.758ms         0.43%      14.983ms      41.050us     153.524ms         6.56%     155.193ms     425.186us           365
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     126.735ms         5.41%     126.735ms       1.267ms           100
+                                        aten::clamp_min         0.52%      17.888ms         0.66%      22.982ms     255.360us     126.711ms         5.41%     128.189ms       1.424ms            90
+                                aten::cudnn_convolution         4.49%     155.194ms         5.57%     192.806ms       4.285ms     112.062ms         4.79%     263.431ms       5.854ms            45
+                                  Lazy Function Loading         0.12%       4.085ms         0.12%       4.085ms      39.279us     108.085ms         4.62%     108.085ms       1.039ms           104
+                                  volta_sgemm_128x64_nn         0.00%       0.000us         0.00%       0.000us       0.000us      90.865ms         3.88%      90.865ms       2.019ms            45
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+Self CPU time total: 3.460s
+Self CUDA time total: 2.341s
+
+[13:55:00] [ppo] step wall median=488.1ms p95=539.1ms n=89（已剔前 2 步 warmup，总 91 步）
+[13:55:00] job 057252a24d56a2e8: PPO done in 49.9s｜进度=epoch 4/4 done (49s total, 24 chunks)｜...
+```
+
+附注（当次同时出现，不影响读数）：`torch/profiler/profiler.py:224: UserWarning: Profiler clears events at
+the end of each cycle.` —— 单次 `profile()` 上下文只有一个 cycle，表就是这 5 步的全量；
+`Lazy Function Loading 108ms` 是 cuDNN 首次懒加载的一次性开销（5 步样本里约占 2%，看 10 步更干净）。
+
 ---
 ## §35 y26 线切腿 A（`policyExtra=true`）：POLICY_EXTRA(57) 第一次真正进网络（2026-10-20）
 

@@ -269,6 +269,10 @@ def _profile_steps(device: Any) -> int:
 
     ★ 采样步**不进 `_step_walls`**（profiler 自身有开销）：开 profiler 时
     `PPO_CUDA_DIAG` 的 median 仍干净，代价是 n 少 `PPO_PROFILE_STEPS`。
+
+    ★ 一手读数（2026-10-21，Colab T4，5 步）：`docs/nn/training-stack.md` §36 ——
+    `Self CUDA 468ms/步` vs `wall 488ms/步`（约 96% 是设备 kernel）⇒ 设备受限；
+    改 PPO 墙钟前先读那节，别重提 threads / CUDA graph / 同卡多 worker。
     """
     if os.environ.get("PPO_PROFILE", "0") in ("", "0"):
         return 0
