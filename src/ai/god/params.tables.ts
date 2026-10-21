@@ -479,6 +479,18 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 3 局，纯噪声。按**机制强度**取 3：40 局探针上翻转次数 46.7→41.1（h1，
   // 只 −12%，等于没修好）vs 46.7→18.9（h3，−60%）。h2 是唯一的真退步。
   defenseReturnHysteresis: 3,
+  // A9 (2026-10-21): 远程来袭弹提前判线 + 封线 —— SHIPPED（hard/chaos）。
+  // 35×60 串行配对（真实 stageIndex、CRN）：hard 79.5%→**80.0%**（Δ+0.48pp, t=1.20）
+  // · chaos 77.8%→**78.1%**（Δ+0.29pp, t=0.66）· classic 84.2%→84.1%（Δ−0.14pp,
+  // t=−1.73，但整张表只有 3 局翻盘且全向下）⇒ classic 经 CLASSIC_OVERRIDES restore 0
+  // （与 baseLaneSentry §198 / defenseIntercept §134 同规）。机制侧证据：把「本该被
+  // 反应式拦截（t8）的子弹」提前消掉 —— t8 触发 45 → 2 次 / 140 局。
+  baseLaneSealMode: 1,
+  baseLaneSealMinDist: 8,
+  baseLaneSealRange: 14,
+  // csb-only（只封「直射基地」的射手，不提前封拆环者）：35×20 上 +0.71pp(t=0.66)
+  // vs 含 cbr 的 ±0 —— 拆环威胁太常见，提前封线会把玩家从进攻位拖走。
+  baseLaneSealCbr: 0,
   // A8 (2026-10-21): 集合点必须是能站的格 —— (12,23) 在 35/35 关都是环砖，
   // A* 两种模式都返回空路径 ⇒ 所有回防指令都交给导航层一个到不了的目标。
   // 1 = 解析到 (12,22)（SHIPPED）· 0 = 原始格（仅 A/B 基线，字节等同）。
@@ -854,6 +866,11 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
+  // A9 (2026-10-21): 远程封线在 classic 上实测**只坏不好** —— 35×60 配对里
+  // 2100 局只有 3 局翻盘、全部向下（Δ−0.14pp, t=−1.73, +0/−3）。classic 是
+  // bulletCap 1 的单发对枪，站上车道等于把每发都变成对射 ⇒ restore 0
+  // （byte-identical classic gate）。hard/chaos 正向，保持 1。
+  baseLaneSealMode: 0,
   // Phase 2 §6.1: 行动有效性契约未在任何难度 A/B — restore 0（byte-identical
   // classic gate；且 classic 防御分支本就 restore 0，无站桩提交可管）。
   actionContractMode: 0,

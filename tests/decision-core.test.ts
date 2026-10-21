@@ -37,6 +37,8 @@ describe('M1 decision-chain invariants', () => {
       'defenseIntercept',
       // §163 / 中路防守 — defenseIntercept(550) 之下、closePickup(540) 之上。
       'midLaneDefense',
+      // A9 / 远程封线 — midLaneDefense(545) 之下、closePickup(540) 之上。
+      'baseLaneSeal',
       // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
       'closePickup',
       'engage',
@@ -69,6 +71,8 @@ describe('M1 decision-chain invariants', () => {
       defenseIntercept: 550,
       // §163 / 中路防守 — defenseIntercept(550) 之下、closePickup(540) 之上。
       midLaneDefense: 545,
+      // A9 / 远程封线 — midLaneDefense(545) 之下、closePickup(540) 之上。
+      baseLaneSeal: 542,
       // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
       closePickup: 540,
       engage: 500,

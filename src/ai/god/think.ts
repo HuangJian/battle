@@ -33,6 +33,7 @@ import { CLOSE_PICKUP } from './candidates/ClosePickup'
 import { AGGRO } from './candidates/Aggro'
 import { PICKUP_HIGH } from './candidates/PickupHigh'
 import { BASE_LANE_SENTRY } from './candidates/BaseLaneSentry'
+import { BASE_LANE_SEAL } from './candidates/BaseLaneSeal'
 import { UNIFIED_CANDIDATES } from './candidates/UnifiedCandidates'
 import { INTERCEPT_BASE } from './candidates/InterceptBase'
 import { DODGE } from './candidates/Dodge'
@@ -152,6 +153,8 @@ export const CANDIDATES: Candidate[] = [
   DEFENSE_INTERCEPT,
   // §163: 中路防守 — defenseIntercept(550) 之下、closePickup(540) 之上。
   MID_LANE_DEFENSE,
+  // A9: 远程来袭弹封线 — midLaneDefense(545) 之下、closePickup(540) 之上。
+  BASE_LANE_SEAL,
   // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
   CLOSE_PICKUP,
   ENGAGE,

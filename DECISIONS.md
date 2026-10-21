@@ -12095,3 +12095,68 @@ right 28%），不是「玩家没站在 (12,22)」** —— 站到集合点也�
 - `bun run freeze:check` **换钉** `c5abb064…` → **`7af64ddf…`**（新纪元三件套齐：
   本条目 + 60-seed 基线 + golden），corpus 21 runs / 108513 行签名。
 - 一次性探针 `tmp/defpos-probe.ts` / `tmp/anchor-probe.ts` 用完即删。
+
+## §2026-10-21-godai-a9-base-lane-seal — 远程来袭弹的提前判线 + 封线（SHIPPED，classic restore 0）
+
+**结论先行**：700 局审计说 90% 的失败是丢基地、致命弹来自半张图外的顺线点名（down 40% /
+left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0.23 个敌人）。原有的
+`baseLaneSentry`（§198）只在玩家 `range+1` 范围里反应，远程射手**从来没人管**。
+新增候选 `baseLaneSeal`：基地列上出现**直射基地**的远程射手（`canShootBase`，≥8 格）且
+玩家在 14 格内时，走到该列**最靠近基地的可站格**（环砖正上方）——站位既挡弹、又拿到向上
+的射击线——站定开火。**机制证据**：反应式拦截（t8）触发 **45 → 2 次 / 140 局**，本该在
+飞行中才被拦的子弹被提前消掉。三难度 35×60：hard **+0.48pp**、chaos **+0.29pp**、
+classic −0.14pp（只有 3 局翻盘且全向下）⇒ classic restore 0。
+
+### 一、为什么是「封线」而不是「继续拦截」
+
+- 反应式拦截（`interceptBase` / t8，权重 900）只能在**子弹已经在飞**之后抢位；飞行时间
+  25 拍量级，而玩家 p50 在 9 格外 ⇒ 追不上。
+- `baseLaneSentry`（850）只覆盖玩家身边的哨兵站位（`baseLaneSentryRange+1`），远程射手
+  不在其射程内。
+- 所以缺的正是**提前判线**：在「射手还没扣扳机」的时候占住它到基地的那条线。
+
+### 二、实现（`candidates/BaseLaneSeal.ts`，权重 542）
+
+1. **判线**：遍历敌人，只考虑 `canShootBase`（直射基地，意味着环砖已被拆穿、下一发真能
+   打到鹰）或 `canBreachRing`（拆环威胁，可用 `baseLaneSealCbr` 关掉）；要求**垂直车道**
+   （列 = 基地列或基地列+1 —— 致命弹 40% 是 `down`）且离基地 ≥ `baseLaneSealMinDist`。
+   `csb` 优先，同级按玩家距离排序（近的先处理，飞行时间短）。
+2. **选位**：从 `(基地行−2)` 沿该列向上找第一个可站格 —— 35 关都是环砖正上方那一格；
+   站上去等于「用自己的车身堵住这条线」。
+3. **执行**：`navigateTowards(seat)`（A* 负责绕路）；到点后定身朝上、`shouldFireInDir`
+   放行就开火（往上打射手，不会打到自家环砖）。
+
+### 三、参数（全部可 A/B，模式 0 = 字节等同）
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `baseLaneSealMode` | **1** | 候选入链（classic restore 0） |
+| `baseLaneSealMinDist` | 8 | 只封「远程」射手，近带交给 `baseLaneSentry` / `defenseIntercept` |
+| `baseLaneSealRange` | 14 | 玩家愿意跨多远去封线（超出就不做） |
+| `baseLaneSealCbr` | **0** | 是否连「拆环威胁」也提前封（实测含 cbr 只有 ±0，见下） |
+
+### 四、A/B（35×60 串行、真实 stageIndex、CRN）
+
+| difficulty | OFF | ON | Δ | t | kills |
+|---|---|---|---|---|---|
+| hard | 79.5% (1670) | **80.0% (1680)** | **+0.48pp** | 1.20 | +101 |
+| chaos | 77.8% (1634) | **78.1% (1640)** | **+0.29pp** | 0.66 | +150 |
+| classic | 84.2% (1769) | 84.1% (1766) | −0.14pp | −1.73 | −27 |
+
+**为什么 classic 要 restore 0**：classic 是 `bulletCap 1` 的单发对枪，站上车道等于把
+每一发都变成对射；2100 局里只有 3 局翻盘，**全部向下**（+0/−3）。t=−1.73 的「显著」是
+零方差塌缩的产物，但方向一致 ⇒ 按 §134/§198 的既有规矩 restore 0（byte-identical）。
+
+**为什么 cbr 关掉**：含 `cbr`（连拆环威胁也提前封）时 35×20 上是 **±0**，只封 `csb` 是
++0.71pp。拆环威胁太常见（每个对齐环砖的敌人），提前封线会把玩家从进攻位反复拖走。
+
+### 五、门禁与连带
+
+- `bun run check` **2613 pass / 0 fail** · `bun run build` 过 ·
+  `freeze:check` 换钉 `7af64ddf…` → **`ab119977…`**（21 runs / 108513 行）。
+- 新增 `tests/godai-base-lane-seal.test.ts`（6 例：默认值 + classic 回退、mode 0 不接管、
+  远程同列接管、到点定身开火、非基地列/近带不管、无活射界不管）；`decision-core` 的
+  链顺序与权重断言同步（542，严格递减）。
+- 评估链金标（metrics-v11）**逐值不变**（三例 seed 的 1500-tick 轨迹未受影响）。
+- 新基线（A9 发货后，35×60）：hard **80.0% / suite 0.6172** · classic 84.2% / 0.6687 ·
+  chaos **78.1% / 0.5950**。

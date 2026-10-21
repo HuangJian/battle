@@ -1,4 +1,17 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# 采集：2026-10-21 @ A9 远程来袭弹封线（DECISIONS §2026-10-21-godai-a9-base-lane-seal）。
+#       `baseLaneSealMode=1`（classic restore 0）：基地列上存在**直射基地**的远程射手
+#       （canShootBase，距离 ≥8）且玩家在 14 格内时，走到该列最靠近基地的可站格
+#       （环砖正上方），站位既挡弹又获得向上射击线，站定开火。
+#       三难度 35×60 串行配对（真实 stageIndex、CRN）：
+#         hard    79.5% → **80.0%**（Δ+0.48pp, t=1.20）· kills +101
+#         chaos   77.8% → **78.1%**（Δ+0.29pp, t=0.66）· kills +150
+#         classic 84.2% → 84.1%（Δ−0.14pp, t=−1.73，只有 3 局翻盘且全向下）
+#               ⇒ classic 经 CLASSIC_OVERRIDES restore 0（与 §198/§134 同规）。
+#       机制证据：反应式拦截（t8）触发 45 → 2 次 / 140 局 —— 本该在飞行中才被拦的
+#       子弹被**提前消掉**（射手被点位压制/击杀）。
+#       相对上一钉 7af64ddf（A8 集合点可站化）。
+# --- 历史（A8 纪元，同一文件保留说明）---
 # 采集：2026-10-21 @ A8 集合点可站化（DECISIONS §2026-10-21-godai-a8-defense-cell）。
 #       `defenseCellResolve=1`：默认集合点 (12,23) 在 **35/35 关都是环砖**，
 #       `findPath` corridor 与 breakBrick **两模式全返回空路径**（从出生点与中场
@@ -32,4 +45,4 @@
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
 # ⚠ 本纪元另需连带重标：metrics-v11 评估链金标（lane 落 0 / 过脆 ⇒ 换 seed）与
 #    §168 navstuck OFF 复现腿（A4 已消除该 pin ⇒ 复现腿须显式关 hysteresis）。
-7af64ddf1b800cbe0069a9f9d66b7b39a276fd2b951702a2b59d9321aabdd8ef
+ab11997743ad9bdb15541a32ce8f4f0180308ba4f2ef0909e85a6221cb1a4815
