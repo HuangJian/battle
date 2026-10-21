@@ -30,6 +30,12 @@
 **跨进程 P1 协同**：`note_p1()` / `{"op":"p1"}` —— 父进程的关键下载/回传（P1）在跑时，子进程
 的 P2 必须**不开工 + 当场退出**（`bulk_sched.foreign_p1`）。没有这条，搬进程就等于让预取从
 「可被 P1 挤走」退化成「和 P1 抢带宽」（§2.2 的三条纪律里最难自己发现的一条）。
+
+**`id` = 兑现凭据**（协议的一条硬约定，两侧各守一半）：父侧 `_request` 发的命令都带 `id`，
+子进程按它回一条 `@@pf@@` 应答行；**没有 `id` 的命令是 fire-and-forget**（协议里只有 `p1`
+广播：父进程的关键下载里绝不等应答）⇒ 子进程**不应答**，父侧收到无 `id` 的应答行只**计数**
+（`status()["unclaimed"]`，版本错配的信号）不刷屏 —— 反过来做（子进程每条命令都回）会让
+每次 P1 进出等待都多一条 `WARN 预取应答行没有 id`（现场：每 job 4~6 条）。
 """
 
 from __future__ import annotations
@@ -120,6 +126,9 @@ class PayloadProcess:
         self.pid: int | None = None
         #: 诊断读数：成功发出的命令数（降级后仍保留最后的值）。
         self.commands = 0
+        #: 诊断读数：**无 id 的应答行**条数（fire-and-forget 的回执；子进程不该回，
+        #: 回了 ⇒ 版本错配的信号）—— 计数而非刷屏（见 `_on_reply`）。
+        self._unclaimed = 0
 
     # ------------------------------------------------------------ 生命周期
 
@@ -340,6 +349,10 @@ class PayloadProcess:
         只写不等：这条回调挂在 `BulkScheduler.slot()` 上，**绝不能**在关键下载里等一个应答
         （子进程卡死时也得让 P1 走）。写失败 = 子进程没了 ⇒ 由 reader 线程的 EOF 去降级。
         降级后它是**空操作**（P2 已住回本进程，`slot()` 自己就是那套口径）。
+
+        **这条命令不带 `id`** —— 它是协议里唯一的 fire-and-forget 命令：`id` = 兑现凭据，
+        没有凭据 ⇒ 子进程不应答（`payload_worker._reply`）⇒ 父侧也不会收到一条「没有 id 的
+        应答行」（那种行只可能来自版本错配的子进程 ⇒ 计数不刷屏，见 `_on_reply`）。
         """
         if self._local is not None:
             # 降级后 P2 又住回**本进程** ⇒ 什么都不用做：`slot()` 自己的 P1 挡/抢就是那个口径，
@@ -357,6 +370,7 @@ class PayloadProcess:
             "degrade_reason": self._degrade_reason,
             "pid": self.pid,
             "commands": self.commands,
+            "unclaimed": self._unclaimed,
             "work_dir": self._work_dir,
             "alive": bool(self._proc is not None and self._proc.poll() is None),
         }
@@ -452,8 +466,14 @@ class PayloadProcess:
         if not isinstance(rep, dict):
             return
         rid = rep.get("id")
+        if rid is None:
+            # **无 id 的应答行** = fire-and-forget 命令的回执（老子进程会回）：没有兑现凭据
+            # ⇒ 没人等 ⇒ **计数不刷屏**（现场：每 job 刷 4~6 条 `WARN 预取应答行没有 id`，
+            # 这层噪声会把真故障埋掉）。计数进 `status()["unclaimed"]`（状态面可观测）。
+            self._unclaimed += 1
+            return
         if not isinstance(rid, int):
-            self._log(f"WARN 预取应答行没有 id（忽略）：{payload[:120]}")
+            self._log(f"WARN 预取应答行的 id 不是整数（忽略）：{payload[:120]}")
             return
         with self._lock:
             item = self._waiters.get(rid)

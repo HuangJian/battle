@@ -8425,3 +8425,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落地**：`dashboard/src/core/net.ts`（`PORT_PROBE_TIMEOUT_MS` + `portListen` 上界）·
   `dashboard/tests/training-port-reclaim.test.ts`（`freePort` → bind 探测 `portFree`）。
 - **全文** → `docs/nn/console.md` §41。
+
+## §2026-10-21-goalnn-prefetch-p1-fire-and-forget — 下行腿的 `id` = **兑现凭据**：fire-and-forget 的 `p1` 广播**不应答**（WARN 刷屏的根因）
+
+- **报障**（用户 2026-10-21）：PPO worker 日志里刷
+  `WARN 预取应答行没有 id（忽略）：{"id": null, "ok": true}` —— 每个 job 6~8 条。
+- **根因**（父子两侧协议错半拍，§2026-10-20-goalnn-ppo-worker-downlink-isolation 搬下行腿时带进来的）：
+  `id` 是父子之间的**兑现凭据**（父侧 `_request` 编 id → 子进程回 `@@pf@@ {"id": …}` → 父侧按 id 派发），
+  但协议里**唯一**的 fire-and-forget 命令 `p1`（P1 进出等待的广播，父侧挂在
+  `bulk_sched.set_p1_observer` 上，**绝不能**在关键下载里等应答）**不带 id**；
+  子进程此前**每条命令都回** ⇒ `p1` 的回执 `id` 是 `null` ⇒ 父侧 `_on_reply` 按「协议坏了」
+  **响亮** ⇒ 每个 P1 进出等待一条 WARN。一个 job 有 3~4 次 P1 传输（payload 下载 / blob init /
+  blob opt / 结果回传）⇒ 6~8 条。**不是故障，是噪声**（真故障会被这层埋掉）。
+- **决定**（两侧各守一半，写成协议的一条硬约定）：
+  ① 子进程 `remote/payload_worker.py::_reply` **只在命令带 `id` 时才写应答行**（无 `id` ⇒
+  fire-and-forget ⇒ 不回；顺带省掉每次 P1 进出等待白醒父侧读者线程一次 —— 这轮搬进程就是为了
+  抢 GIL）；② 父侧 `remote/payload_proc.py::_on_reply` 收到无 `id` 的应答行**不是故障**
+  （没有兑现凭据 ⇒ 没人等）⇒ **计数**（`status()["unclaimed"]`，版本错配的信号）**不刷屏**；
+  `id` 不是整数才是真故障 ⇒ 仍 WARN。
+- **被否决**：① 父侧给 `p1` 编个 id（那样应答行带着一个**没人等**的 id 回到父侧，靠「没人等 ⇒ 丢」
+  兜住，子进程仍要为每条 fire-and-forget 命令 print+flush 一行 —— 协议上撒谎，且没消掉噪声）；
+  ② 父侧直接忽略所有无 `id` 的应答行（不计数）：那就看不出「子进程版本错配」这个真信号；
+  ③ 把 WARN 降级成 `DEBUG`（本仓无 DEBUG 级；且真故障仍会被噪声淹没）。
+- **落地**：`remote/payload_worker.py`（`_reply` 带 `rid` 参数 + `main` 传 id · 模块头协议段）·
+  `remote/payload_proc.py`（`_on_reply` 分流 + `status()["unclaimed"]` + `note_p1` 协议注记）·
+  `tests/remote/test_prefetch_proc.py`（假子进程逐字对齐真子进程「无 id 不回」+ 三条新用例）。
+- **门禁**：`tests/remote/` + 复用账本 + 文本断言护栏 + 分层账本 **1440 绿** ·
+  ruff / mypy 绿 · nn python gate 全量绿。
+- **全文** → `docs/nn/remote-transport.md` §110。

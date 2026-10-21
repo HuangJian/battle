@@ -6,6 +6,44 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §110 下行腿的 `id` = **兑现凭据**：fire-and-forget 的 `p1` 广播**不应答**（2026-10-21，用户报障「ppo worker 日志里 WARN 刷屏」· 决策 `DECISIONS.md` §2026-10-21-goalnn-prefetch-p1-fire-and-forget）
+
+**现场**（PPO worker 云机日志）：
+
+```
+[01:39:18] [worker] WARN 预取应答行没有 id（忽略）：{"id": null, "ok": true}
+[01:39:18] [worker] WARN 预取应答行没有 id（忽略）：{"id": null, "ok": true}
+[01:39:23] [worker] WARN 预取应答行没有 id（忽略）：{"id": null, "ok": true}
+…
+```
+
+**根因**（父子两侧的协议错半拍，§108 搬下行腿时带进来的）：
+
+* `id` 是父子之间的**兑现凭据**：父侧 `PayloadProcess._request` 给每条要等的命令编一个 `id`，
+  子进程回一条 `@@pf@@ {"id": …}` 应答行，父侧按 `id` 派发（`_waiters` 表）。
+* 但协议里**唯一**的 fire-and-forget 命令是 `p1`（P1 进出等待的广播，父侧挂在
+  `bulk_sched.set_p1_observer` 上，**绝不能**在关键下载里等应答）⇒ 父侧 `note_p1` 发的命令
+  **不带 `id`**。
+* 子进程（`remote/payload_worker.py`）此前**每条命令都回** ⇒ `p1` 的回执 `id` 是 `null`
+  ⇒ 父侧 `_on_reply` 按「协议坏了」**响亮** ⇒ 每次 P1 进出等待一条 WARN。
+  一个 job 有 3~4 次 P1 传输（payload 下载 / blob init / blob opt / 结果回传）⇒ 每 job 6~8 条。
+
+**决定**（两侧各守一半，协议写成一条硬约定）：
+
+| 面 | 改动 |
+|---|---|
+| 子进程 `payload_worker._reply` | **只在命令带 `id` 时才写应答行**（`id` = 兑现凭据；无 `id` ⇒ fire-and-forget ⇒ 不回）。顺带省掉每次 P1 进出等待白醒父侧读者线程一次（这轮搬进程就是为了抢 GIL） |
+| 父进程 `payload_proc._on_reply` | 无 `id` 的应答行**不是故障**（没有兑现凭据 ⇒ 没人等）⇒ **计数**（`status()["unclaimed"]`，版本错配的信号）**不刷屏**；`id` 不是整数才是真故障 ⇒ 仍 WARN |
+
+**为什么不反过来「让父侧给 `p1` 编个 id」**（被否决的备选）：那样应答行会带着一个**没人等**的
+`id` 回到父侧（靠「没人等 ⇒ 丢」那条分支兜住），子进程仍要为每条 fire-and-forget 命令
+print+flush 一行 —— 协议上撒谎（明明不等却发凭据），且把噪声挪去别处而不是消掉。
+
+**测试**：`tests/remote/test_prefetch_proc.py` 三条 —— ① P1 广播**一行日志都不许多**
+（快层：假子进程逐字对齐真子进程「无 id 不回」+ 排序屏障）；② 无 `id` 的应答行 ⇒ 计数不刷屏，
+而 `id` 不是整数仍**响亮**；③ **真子进程**那条（慢层）把 P1 广播钉在真链路上（改前红：
+正是日志里那两条 WARN）。
+
 ## §109 `claim` 的客户端超时**撞在** hub 的控制台腿上：8s vs 8s（2026-10-20，用户指令「`e2e/test_auto_handoff_e2e.py::test_auto_loop_runs_the_claimable_batch_in_order` 在本机恒红 —— 修！」· 决策 `DECISIONS.md` §2026-10-20-goalnn-claim-timeout-outlives-console-leg）
 
 **触发**：这条 e2e 在**本机**恒红（三门课只跑成第一门，`seen == ['e2e-off-first']`），上一刀

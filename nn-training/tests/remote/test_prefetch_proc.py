@@ -125,15 +125,17 @@ class _FakePayloadChild:
             cmd = json.loads(item)
             self.commands.append(cmd)
             op = str(cmd.get("op") or "")
+            rid = cmd.get("id")
             if op == "shutdown":
                 self._rc = 0
-                self.stdout.put(
-                    PREFETCH_LINE_PREFIX + json.dumps({"id": cmd.get("id"), "ok": True}) + "\n"
-                )
+                self.stdout.put(PREFETCH_LINE_PREFIX + json.dumps({"id": rid, "ok": True}) + "\n")
                 break
             if op in self._silent:
                 continue
-            self.stdout.put(PREFETCH_LINE_PREFIX + json.dumps(self._answer(cmd)) + "\n")
+            # **带 id 的命令才应答**（`id` = 兑现凭据；无 id 的命令是 fire-and-forget
+            # ⇒ 不回）—— 逐字对齐真子进程（`remote/payload_worker.py` 的 `_reply`）。
+            if isinstance(rid, int):
+                self.stdout.put(PREFETCH_LINE_PREFIX + json.dumps(self._answer(cmd)) + "\n")
             # 「处理完第 N 条就死」：在**应答之后**退（模拟 OOM / 被杀时手上那条刚完）
             if self._crash_after is not None and len(self.commands) >= self._crash_after:
                 self._rc = 1
@@ -386,6 +388,50 @@ def test_degraded_p1_notification_is_a_noop(tmp_path: Path) -> None:
         pf.close()
 
 
+def test_p1_broadcast_is_fire_and_forget_and_never_logs(tmp_path: Path) -> None:
+    """P1 广播**没有兑现凭据** ⇒ 子进程不应答 ⇒ 父侧一行日志都不许多（现场噪声源）。
+
+    现场（2026-10-21，PPO worker 日志）：每 job 4~6 条
+    `WARN 预取应答行没有 id（忽略）：{"id": null, "ok": true}`。
+    根因：`note_p1` 发的命令**不带 id**（刻意 —— 关键下载里绝不等应答），而子进程
+    **每条命令都回** ⇒ 应答行的 `id` 是 null ⇒ 父侧按「协议坏了」响亮 ⇒ 刷屏。
+    """
+    logs: list[str] = []
+    pf, child = _proc(tmp_path, logs=logs)
+    try:
+        before = len(logs)
+        pf.note_p1(True)
+        pf.note_p1(False)
+        assert _until(lambda: len([c for c in child.commands if c.get("op") == "p1"]) == 2), (
+            child.commands
+        )
+        pf.drop(JID1)  # 排序屏障：这条请求-应答兑现 ⇒ 前面两条广播的回执（若有）已被读掉
+        assert len(logs) == before, logs
+        assert pf.status()["unclaimed"] == 0, pf.status()
+    finally:
+        pf.close()
+
+
+def test_orphan_reply_without_id_is_counted_not_logged(tmp_path: Path) -> None:
+    """**无 id 的应答行**（老子进程会回）⇒ 父侧**计数**（状态面可观测），一行日志都不许多。
+
+    为什么留着这条兜底：父侧不能假设子进程永远是同版本（热替换/回滚会短暂错配）。
+    无 id 的应答行**不是故障**（没有兑现凭据 ⇒ 没人等）—— 刷屏只会把真故障埋掉。
+    """
+    logs: list[str] = []
+    pf, _child = _proc(tmp_path, logs=logs)
+    try:
+        before = len(logs)
+        pf._on_reply('{"id": null, "ok": true}')
+        assert len(logs) == before, logs
+        assert pf.status()["unclaimed"] == 1, pf.status()
+        # 真正坏掉的 id（不是整数）仍然是**响亮**的（不许被上面那条兜底吃掉）
+        pf._on_reply('{"id": "x", "ok": true}')
+        assert len(logs) == before + 1, logs
+    finally:
+        pf.close()
+
+
 # ────────────────────────── ④ 模式域 / 工厂 ──────────────────────────
 
 
@@ -496,6 +542,14 @@ def test_real_child_boots_init_fills_and_shuts_down(tmp_path: Path) -> None:
         assert pf.fills_out_of_process, f"真子进程没起来：{logs}"
         assert pf.status()["alive"]
         assert pf.status()["pid"] and pf.status()["pid"] != os.getpid()
+        # P1 广播（fire-and-forget）：真子进程**不应答** ⇒ 父侧不刷 `WARN 预取应答行没有 id`
+        # （现场：每 job 4~6 条；根因 = 无 id 的命令也被子进程回了）。
+        before = len(logs)
+        pf.note_p1(True)
+        pf.note_p1(False)
+        assert pf.take(JID1) is None  # 排序屏障（请求-应答）
+        assert len(logs) == before, logs
+        assert pf.status()["unclaimed"] == 0, pf.status()
         # 不可达的 hub 地址 ⇒ peek 立刻失败（`urlopen` 的 URL 解析错误），填充器进等待循环
         assert pf.start_fill(base_url="", token="", depth=1, unpack_n=0)
         assert pf.take(JID1) is None

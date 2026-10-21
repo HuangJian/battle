@@ -14,7 +14,8 @@
     `release` / `prune` / `p1` / `ping` / `shutdown`）。token **只走这条管道**，不进 argv
     （`/proc/<pid>/cmdline` 全机可读），也不进环境变量（父侧可能同时握多个 hub 的 token）。
   * **stdout**：普通行 = 日志（父侧原样转发）；`@@pf@@ {json}` = **应答行**（带 `id`，
-    父侧按 id 兑现）。
+    父侧按 id 兑现）。**`id` = 兑现凭据**：命令**没有** `id` ⇒ fire-and-forget
+    （只有 `p1` 广播）⇒ **不应答**（回了也没人等，白醒父侧读者线程）。
   * **stdin EOF = 父进程没了** ⇒ 立即退出 0（不空转、不等人）。
 
 **谁写暂存区**：**只有本进程**（`work_dir/prefetch/<jid>/`）。父侧通过命令间接操作它
@@ -54,9 +55,17 @@ def _log(msg: str) -> None:
     print(f"[payload] {msg}", flush=True)
 
 
-def _reply(payload: dict[str, Any]) -> None:
-    """应答行（协议 = 纯 ASCII：`ensure_ascii` 缺省转义，管道里不走未定义编码）。"""
-    print(PREFETCH_LINE_PREFIX + json.dumps(payload), flush=True)
+def _reply(rid: Any, payload: dict[str, Any]) -> None:
+    """应答行（协议 = 纯 ASCII：`ensure_ascii` 缺省转义，管道里不走未定义编码）。
+
+    **只在命令带 `id` 时才写** —— `id` 是**兑现凭据**：父侧 `_request` 按它派发应答。
+    没有 `id` 的命令是 **fire-and-forget**（`p1` 广播：父进程的关键下载里绝不等应答）
+    ⇒ **不应答**：回了父侧也只会当成「没人等」丢掉，而每次 P1 进出等待都白醒父侧
+    读者线程一次（现场：worker 日志每 job 刷 4~6 条 `WARN 预取应答行没有 id`）。
+    """
+    if not isinstance(rid, int):
+        return
+    print(PREFETCH_LINE_PREFIX + json.dumps({"id": rid, **payload}), flush=True)
 
 
 class _Engine:
@@ -226,17 +235,16 @@ def main() -> int:
             fn = _COMMANDS.get(op)
             rid = cmd.get("id")
             if fn is None:
-                _reply({"id": rid, "ok": False, "error": f"未知命令 {op!r}"})
+                _reply(rid, {"ok": False, "error": f"未知命令 {op!r}"})
                 continue
             try:
                 out = fn(engine, cmd)
             except BaseException as e:  # 命令失败不许把整条腿带走（父侧按应答缺省处理）
                 _log(f"命令 {op} 失败（{type(e).__name__}: {e}）")
                 out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            _reply(rid, out)
             if op == "shutdown":
-                _reply({"id": rid, **out})
                 break
-            _reply({"id": rid, **out})
     finally:
         engine.close()
     _log("stdin EOF（父进程收线）——下行腿退出 0")
