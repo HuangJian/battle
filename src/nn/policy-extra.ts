@@ -40,6 +40,7 @@ import { BASE_POS, CELL, GRID, type Direction } from '../constants'
 import type { World } from '../game/World'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist } from '../utils/helpers'
 import { RING_CELLS } from '../ai/god/ThreatBudget'
+import { leadHitForDir } from '../ai/god/lead-fire'
 import {
   BASE_CENTER_X,
   BASE_CENTER_Y,
@@ -224,54 +225,6 @@ const _scan = new Float64Array(6)
 
 /** 世界方位 → one-hot 下标（up/down/left/right ≡ 0..3）。 */
 const DIR_ORDER: readonly Direction[] = ['up', 'down', 'left', 'right']
-
-/**
- * B3 `leadHitD[d]`：沿世界方位 `dir` 开火，**到达时**能否命中（计划§4-B3）。
- *
- * 条件：轴向距 ≤ 13 格、线性外推 t*=轴向距/弹速 后的横向偏差 < 19px、
- * 路径无阻弹地形、排除生成中的敌。敌人转向不可预知 ⇒ 用 live 速度外推
- * （停着的车横向不动 = 恒速假设的退化情形）。
- *
- * 零分配、只读 World。
- */
-function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: number): number {
-  const p = world.player
-  if (!p) return 0
-  const vertical = dir === 'up' || dir === 'down'
-  const sign = dir === 'down' || dir === 'right' ? 1 : -1
-  const bulletSpeed = p.bulletSpeed > 0 ? p.bulletSpeed : 4
-  const maxAxial = 13 * CELL
-  const shooterCol = Math.floor(pcx / CELL)
-  const shooterRow = Math.floor(pcy / CELL)
-  const tileMap = world.tileMap
-  const tanks = world.allTanks
-  for (let i = 0; i < tanks.length; i++) {
-    const t = tanks[i]
-    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
-    const tx = t.x + t.w / 2
-    const ty = t.y + t.h / 2
-    const axial = (vertical ? ty - pcy : tx - pcx) * sign
-    if (axial <= 0 || axial > maxAxial) continue
-    const lateral = vertical ? tx - pcx : ty - pcy
-    const vLat = vertical ? t.vx : t.vy
-    const tStar = axial / bulletSpeed
-    if (Math.abs(lateral + vLat * tStar) >= THREAT_ALIGN_BAND_PX) continue
-    const colLow = Math.floor(t.x / CELL)
-    const colHigh = Math.floor((t.x + t.w - 1) / CELL)
-    const rowLow = Math.floor(t.y / CELL)
-    const rowHigh = Math.floor((t.y + t.h - 1) / CELL)
-    const occluded = laneOccluded(
-      tileMap,
-      shooterCol,
-      shooterRow,
-      vertical,
-      vertical ? rowLow : colLow,
-      vertical ? rowHigh : colHigh,
-    )
-    if (!occluded) return 1
-  }
-  return 0
-}
 
 /** 距离 → [0,1]；无目标 ⇒ 1.5 哨兵。 */
 function hitNorm(dist: number): number {

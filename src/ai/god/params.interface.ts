@@ -1358,6 +1358,32 @@ export interface GodAIParams {
   defenseReturnHysteresis: number
 
   /**
+   * A10 (2026-10-21): LEAD FIRE — fire before alignment.
+   *
+   * The shipped fire gate is `shouldFireInDir` → `scanAheadImpl`, a **static**
+   * ray scan: an enemy must be on the line RIGHT NOW. Nothing in `src/ai/god`
+   * extrapolates an enemy's velocity to the shell's arrival time (the only
+   * velocity-aware code is `Navigator`'s pursuit slide, i.e. movement). The NN
+   * observation `leadHitD[4]` does exactly that, and this knob gives the God AI
+   * the same capability — literally the same predicate (`god/lead-fire.ts`,
+   * shared with `nn/policy-extra`).
+   *
+   * Measured gap (hard, 140 games / 770,082 player-alive ticks):
+   *   · aligned now            305,841 (39.7%)
+   *   · shots actually fired     8,890 (≈64/game)
+   *   · `leadHit(facing)`      139,295 (18.1%)
+   *   · `lead && !aligned`      21,235 (2.76%)  ← refused by construction
+   *   · of those, gun READY      5,080 (≈36/game) ⇒ potential +56% volume.
+   *
+   * 1 = fire along the COMMITTED facing when the shell would land on an enemy
+   *     that is drifting into the lane, but only on ticks where no candidate
+   *     asked to fire (an aligned shot always wins). The predicate already
+   *     requires a clear lane, so it cannot shoot through the base or its ring.
+   * 0 = OFF (byte-identical to pre-A10).
+   */
+  leadFireMode: number
+
+  /**
    * A9 (2026-10-21): seal a REMOTE base-shot lane before the shell is fired.
    *
    * The 700-game audit found the base dies to shots from far up the base COLUMN

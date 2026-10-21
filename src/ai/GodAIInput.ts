@@ -27,6 +27,7 @@ import {
   detectCentralBreachRisk,
 } from './god/params'
 import type { GodAIParams } from './god/params'
+import { leadHitForDir } from './god/lead-fire'
 export {
   DEFAULT_GOD_AI_PARAMS,
   SKILLED_HUMAN_PARAMS,
@@ -1229,6 +1230,25 @@ export class GodAIInput implements InputLike {
 
   isFiring(): boolean {
     if (!this._thought) this.think()
+    // A10 (2026-10-21): LEAD FIRE — fire along the COMMITTED facing when the
+    // shell would LAND on an enemy that is drifting into the lane, even though
+    // nothing is aligned right now. The alignment gate (`shouldFireInDir` →
+    // `scanAhead`) only ever sees the current geometry, so this shot class was
+    // structurally unreachable: measured on hard (140 games, 770k ticks) at
+    // 2.76% of ticks, of which **36/game have the gun ready and nothing
+    // aligned** — vs 64 shots/game actually taken (≈ +56% volume).
+    //
+    // Only consulted when no candidate asked to fire (`!_fire`): an aligned
+    // target always wins. The predicate is the same one the NN sees as
+    // `leadHitD` (`god/lead-fire.ts`), and it already implies a clear lane
+    // (no base / ring brick / steel in between), so the self-fire base guard
+    // cannot be violated here.
+    if (this.params.leadFireMode > 0 && !this._fire) {
+      const p = this.controlledTank(this.world)
+      if (p && p.alive && leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2) > 0) {
+        return true
+      }
+    }
     if (!this._fire) return false
     // A2 (plan/godai-post-a1-retune.plan.md §3.1): the single choke point for
     // every candidate's fire decision. After A1 a shot always leaves along the
