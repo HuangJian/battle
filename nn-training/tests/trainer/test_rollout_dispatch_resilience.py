@@ -180,6 +180,12 @@ def test_transient_502_does_not_circuit_break_node(tmp_path, monkeypatch) -> Non
     joined = "\n".join(h.logs)
     assert "circuit-broken" not in joined
     assert "瞬断/背压（不计节点故障）" in joined
+    # P0-1 读数接线（2026-10-21，plan/rollout-corpus-supply §3.4）：4 局、无竞速副本 ⇒
+    # dupRate=0；分子（Σ局服务时长）必须真的被累加（manifest 每局 0.001s）；在线槽 = 1。
+    d = report["dist"]
+    assert d["dupRate"] == 0.0 and d["raceDrops"] == {}, d
+    assert d["slotsOnline"] == 1, d
+    assert d["sumGameSec"] == pytest.approx(0.004), d  # 4 局 × elapsedSec 0.001
 
 
 def test_hard_failure_trips_then_bounded_rearm(tmp_path, monkeypatch) -> None:

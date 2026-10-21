@@ -517,6 +517,9 @@ class RolloutDispatcher:
         cap_full = max(1, min(args.workers, n_total_tasks))
         local_cap = [local_slots]
         local_active = [0]
+        # 有效并行度的分子：**节点服务时长**之和（`elapsedSec`，不含排队/取包）。
+        # 用训练机侧 wall 会把网络等待算成「占着槽」，E 会虚高（plan/rollout-corpus-supply §3.4）。
+        sum_game_sec = [0.0]
         last_remote_ok = [time.time()]
         # 2026-09-09 诊断：local_slots 闸门实测失效（配置 1、实测并发≈8）时的一手证据。
         # 线程孵化数 = max(local_slots, cap_full) ⇒ 闸门若失效，并发就等于这里的
@@ -917,6 +920,13 @@ class RolloutDispatcher:
                             },
                         )
                         el = summary.get("elapsedSec")
+                        if el is not None:
+                            try:
+                                sum_game_sec[0] += float(el)
+                            except (TypeError, ValueError):
+                                # 上游口径变了（非数字）⇒ 不给 E 添一个假零头；
+                                # 分子少算会让 E 偏低，读数是「下界」，不会误导成「很好」。
+                                pass
                         if on_result:
                             try:
                                 on_result(summary)
@@ -1215,10 +1225,21 @@ class RolloutDispatcher:
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
         )
         race_total = sum(race_drops.values())
+        # 重复执行**率**（按局数）：这是「竞速副本吃掉了多少槽时」的唯一机读口径。
+        # 分子 = 重复执行次数（settled + inflight + main_by_fanout），分母 = 局数——
+        # 写成百分数才看得出「38% 的槽时白烧」，也才是 A2′ 的决策输入。
+        race_rate = common.distribution.dup_rate(race_total, len(results))
+        slots_online = sum(int(n.get("c") or 0) for n in nodes)
         if race_total:
+            rate_txt = (
+                f"，dup={race_total}（{race_rate:.1%} of {len(results)} 局）"
+                if race_rate is not None
+                else f"，dup={race_total}"
+            )
             log(
                 f"[dist] race drops (expected, sampled≤{RACE_LOG_SAMPLE}/kind): "
                 + " ".join(f"{k}={v}" for k, v in race_drops.items() if v)
+                + rate_txt
             )
         if missing:
             log(f"[dist] missing pairs: {[list(k) for k in missing]}")
@@ -1243,6 +1264,15 @@ class RolloutDispatcher:
             "nodes": by_node,
             "retried": stats["retried"],
             "resumed": len(done),
+            # P0-1 的机读读数（2026-10-21，plan/rollout-corpus-supply §3.4）：没有它们，
+            # 「E 为什么只有 11」只能靠人拼日志（v2 就是在这个缺口里读反了本地 lane）。
+            "raceDrops": {k: v for k, v in race_drops.items() if v},
+            "dupRate": race_rate,
+            "slotsOnline": slots_online,
+            # 3 位小数：stub/小窗用例的单局是 ms 级，1 位会把「累加真的发生了」抹成 0.0。
+            "sumGameSec": round(sum_game_sec[0], 3),
+            # `effSlots` 在采集墙钟算出来之后再落（见下方）：先占位会让「测不到」
+            # 与「测到 0」混成同一个值。
             # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
             "offPlanShards": max(0, len(done_all) - len(done)),
         }
@@ -1260,6 +1290,15 @@ class RolloutDispatcher:
         collect_sec = common.distribution.rollout_collect_sec(t_dist_start_box[0], last_settle_at[0])
         if collect_sec is not None:
             combined["pure_collect_sec"] = collect_sec
+        # 有效并行度 E = Σ局服务时长 / 采集墙钟（Little's law，plan/rollout-corpus-supply §3.4）。
+        # 判据：E 远低于在线槽数 ⇒ 缺口在「重复执行/远端慢」；E ≈ 在线槽 ⇒ 只能加槽。
+        eff_slots = common.distribution.effective_slots(sum_game_sec[0], collect_sec)
+        combined["dist"]["effSlots"] = eff_slots
+        if eff_slots is not None:
+            log(
+                f"[dist] round eff: E={eff_slots} 槽（Σ局时长 {sum_game_sec[0]:.1f}s / 采集 {collect_sec}s）"
+                f"，在线槽 {slots_online}，dup={race_total}"
+            )
         # 数值锚点：多波 volume 由 combine_reports 做 it 级 min→max 聚合。
         if t_dist_start_box[0] is not None:
             combined["weights_dist_start_ts"] = float(t_dist_start_box[0])

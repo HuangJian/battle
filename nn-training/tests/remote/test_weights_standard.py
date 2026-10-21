@@ -280,3 +280,92 @@ def test_cloud_copy_keeps_store_delta_and_reuses_cache(tmp_path: Path) -> None:
     # 转一次一直复用：把基准删掉，第二次仍能拿到缓存（证明没再解一遍）。
     anchor.unlink()
     assert ws.standard_weights_copy(store / "it-237" / "weights.json", store, course="c", log=_quiet) == got
+
+
+# --------------------------------------------------------------- v2：预算 / 负缓存 / 不吞预算
+
+
+def _missing_pack(seed: int) -> bytes:
+    """一份**基准不在盘上**的 delta 容器（base_sha 是假的，逐字节搜索必然 miss）。"""
+    return wd.pack_weights_delta(
+        _weights_json(_params(seed)),
+        _weights_json(_step(_params(seed), seed=seed + 1)),
+        base_sha="f" * 64,
+    )
+
+
+def test_mutually_referencing_deltas_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """7 个互为候选 + 基准全缺：v1 是 7!（现场 232! 的缩影），v2 每个路径只读一次。
+
+    用读计数钩子（不用计时）：未改动代码上读次数远超 3N，v2 上 ≤ 3N（根 2 次 + 6 个候选）。
+    N 取 7 而不是 50——50! 只会把测试挂死，红不了也绿不了。
+    """
+    n = 7
+    paths = [tmp_path / f"d{i}.json" for i in range(n)]
+    for i, p in enumerate(paths):
+        p.write_bytes(_missing_pack(300 + i))
+
+    reads = {"n": 0}
+    real = Path.read_bytes
+
+    def counted(self: Path) -> bytes:
+        reads["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted)
+    with pytest.raises(ws.BaseNotFoundError):
+        ws.ensure_standard_weights(paths[0], course="c", log=_quiet)
+    assert reads["n"] >= n, f"读计数钩子没生效？只读到 {reads['n']} 次（n={n}）"
+    assert reads["n"] <= n + 3, f"候选被重复读：{reads['n']} 次（n={n}，根 2 次 + 候选各 1 次）"
+
+
+def test_same_path_is_read_once_and_counted_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一路径在两条分支下被访问 ⇒ 磁盘**只读一次**，预算只计一次（DoD §2.4）。"""
+    p = tmp_path / "w.json"
+    p.write_bytes(b"X" * 10)
+    reads = {"n": 0}
+    real = Path.read_bytes
+
+    def counted(self: Path) -> bytes:
+        reads["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted)
+    ctx = ws._SearchContext()
+    assert ctx.read(p) == ctx.read(p) == b"X" * 10
+    assert reads["n"] == 1
+    assert (ctx.bytes_read, ctx.candidates_read) == (10, 1)
+
+
+def test_budget_exceeded_is_not_swallowed_by_the_parent(tmp_path: Path) -> None:
+    """预算在**子层**撞顶 ⇒ 最终异常必须是 SearchBudgetExceededError，而不是「基准不在本机」。
+
+    v1 的父层 `except ProtocolError: continue` 会把预算当一次候选 miss 吞掉；v2 单独重抛。
+    """
+    a, b, c = (tmp_path / f"{x}.json" for x in "abc")
+    for seed, p in ((400, a), (401, b), (402, c)):
+        p.write_bytes(_missing_pack(seed))
+
+    ctx = ws._SearchContext()
+    # 根 a + 候选 b 还能读；b 再递归读 c 时撞顶（差 1 字节）。
+    limit = len(a.read_bytes()) + len(b.read_bytes()) + len(c.read_bytes()) - 1
+    ctx.max_bytes = limit
+    with pytest.raises(ws.SearchBudgetExceededError) as ei:
+        ws._standard_bytes(a, course="c", traj_root=None, extra_roots=(), ctx=ctx)
+    # 结构化读面：撞的是字节预算、限额是多少、当时累计读了多少（不挂中文文案）。
+    assert (ei.value.kind, ei.value.limit) == ("bytes", limit)
+    assert 0 < ei.value.used <= limit
+    # 若父层把它当「这个候选不行」吞掉，这里会是 BaseNotFoundError（v1 的 bug）。
+    assert not isinstance(ei.value, ws.BaseNotFoundError)
+
+
+def test_deterministic_failures_are_marked_non_retryable() -> None:
+    """`round_failure` 的判据是异常属性，不是中文文案。"""
+    assert ws.BaseNotFoundError("x").retryable is False
+    assert ws.ChainTooLongError("x").retryable is False
+    assert ws.CycleDetectedError("x").retryable is False
+    assert ws.SearchBudgetExceededError("x").retryable is False

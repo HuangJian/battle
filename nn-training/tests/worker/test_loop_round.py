@@ -303,3 +303,19 @@ def test_smoke_void_round_stops_cleanly_without_counting_a_failure(
     loop.args = types.SimpleNamespace(smoke=False)
     assert loop.run_one_round(9) == RoundOutcome(ROUND_RETRY, 9)
     assert loop._consec_fail == 0
+
+
+def test_composition_does_not_retry_deterministic_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """基准缺失/链超/成环/预算 = 确定性失败 ⇒ 不睡 30s、不重试，直接上抛（v2）。"""
+    import trainer.loop_round_steps as lrs
+    from remote.weights_standard import BaseNotFoundError
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(lrs.time, "sleep", lambda s: sleeps.append(s))
+    loop = _bare_loop(tmp_path)
+    with pytest.raises(BaseNotFoundError):
+        loop.round_failure(BaseNotFoundError("基准不在本机"), 3, backoff=True)
+    assert sleeps == []  # 没有退避重试
+    assert loop._consec_fail == 1  # 但这次失败仍然计账

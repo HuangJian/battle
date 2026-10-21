@@ -171,7 +171,16 @@ export async function fetchEvalReplayJob(course = ''): Promise<EvalReplayJobView
  *  子进程（面板拿不到退出码）⇒ 成败只能从 python 在退出层写的那份旁挂件读。
  *  **不可知**与**成功**必须是两个值：旧面板把两者都显示成「没问题」。 */
 export interface TaskBundleExportStatus {
+  /** `true` = 这次导出真的产出了包，且状态没有过期（见 `stale`/`expired`）。 */
   ok: boolean
+  /** 文件说「进行中」（python 启动时写的运行态）。渲染前先看 `expired`。 */
+  running: boolean
+  /** 状态早于本课任务包的作废/新包 ⇒ **不可知**（不是成功）。 */
+  stale: boolean
+  /** `running` 但超时 / 进程不在 ⇒ **不可知**（不是成功，也不是失败）。 */
+  expired: boolean
+  /** `running` 时的已跑秒数（其余为 0）。 */
+  elapsedSec: number
   reason: string
   at: number
 }
@@ -204,6 +213,10 @@ export async function fetchTaskBundleInfo(course: string): Promise<TaskBundleInf
     status: st
       ? {
           ok: st.ok === true,
+          running: st.running === true,
+          stale: st.stale === true,
+          expired: st.expired === true,
+          elapsedSec: typeof st.elapsedSec === 'number' ? st.elapsedSec : 0,
           reason: typeof st.reason === 'string' ? st.reason : '',
           at: typeof st.at === 'number' ? st.at : 0,
         }

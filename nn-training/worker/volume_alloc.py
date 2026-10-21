@@ -38,6 +38,13 @@ VOLUME_ALLOC_RULE = "per-stage-v3"
 #: 1.25 会把过采率降到 3.1%，代价是首批更小、补差批数变多——回标值（§3.4 表）。
 DEFAULT_EST_HI_FACTOR = 1.15
 
+#: 派局 est 的**下界**系数（plan/rollout-corpus-supply §3.1 A0-c）：`est_low = floor(est × 0.92)`
+#: ⇒ 缺口方程 `ceil(quota/est)` 多派 ~8% 局，把「局长继续变短」的趋势误差吃掉一部分。
+#: 为什么是 0.92：DoD 的 `Σgames ≤ 1.15 × 理论` 只容得下 ~13% 超派，0.92 落在里面
+#: （6144/488=13 局 vs 理论 12 局 = 1.08）；0.85 那种「末批保守」档会直接打穿腿 C 的 CPU 秒账。
+#: 已知残余：趋势误差 >8% 的关仍会出第二批——所以 DoD 写 `batches ≤ 2`，不写 `== 1`。
+DEFAULT_EST_LO_FACTOR = 0.92
+
 #: 补差批数上界（**不含**首批）：首批 + 最多 3 批补差 ⇒ P(缺口) 18.9% → 3.0%（§3.4 表）。
 DEFAULT_TOPUP_MAX_BATCHES = 3
 
@@ -76,6 +83,43 @@ def est_hi(est: int, *, factor: float = DEFAULT_EST_HI_FACTOR) -> int:
         raise ValueError(f"est_hi 需要 factor > 0，得到 {factor!r}")
     num, den = _scale(int(est), factor)
     return max(1, _ceil_div(num, den))
+
+
+def pull_est_low(est: int, *, factor: float = DEFAULT_EST_LO_FACTOR) -> int:
+    """`est` 的**下界**估计 `floor(est × factor)`；`est ≤ 0` ⇒ **`0` = 无估计**。
+
+    用途只有一处：**喂派局**（`plan_continuous_batch` 的 `ests`）——把局均估计往低处拉，
+    让 `ceil(缺口/est)` 多派几局。**不喂硬顶**（`game_cap` 仍按原 est 算，避免双重放大）。
+
+    定点化（与 `est_hi` 同一条教训）：`530 × 0.92` 在二进制浮点里可能落在 487.59999…，
+    `floor` 会掉一档；这里先乘 1000 再整除，结果与「十进制手算」逐字一致。
+    `est=1` 时结果为 1 而不是 0：`0` 在下游是「无估计」的语义值，会把派局切到 fallback——
+    那是一次静默的口径漂移，不是「保守」。
+    """
+    if int(est) <= 0:
+        return 0
+    if not 0 < float(factor) <= 1:
+        raise ValueError(f"pull_est_low 需要 0 < factor ≤ 1，得到 {factor!r}")
+    num, den = _scale(int(est), factor)
+    return max(1, num // den)
+
+
+def pick_stage_est(learned: int, trailing: int) -> tuple[int, str]:
+    """分关 est 的来源选择：**本轮已结算 → 历史窗口 → 无估计**。
+
+    为什么把顺序写成函数（2026-10-21，plan/rollout-corpus-supply §1.3/§3.1）：现场是
+    `trailing or learned`，而 trailing 永远有值 ⇒ **本轮自校准被短路**，est 一直跟着
+    3 轮 pooled 均值走（652 vs 实际 530，+23% ⇒ 少派局 ⇒ 多补一批）。`learned` 是唯一
+    不依赖历史窗口的量，必须先说话。
+
+    返回 `(est, src)`：`src` 进 iteration 事件的 `est_src`（可复核「这一轮到底用了谁」）。
+    `(0, "none")` = 首轮连历史都没有 ⇒ 调用方走「不猜」档（**不是**错误）。
+    """
+    if int(learned) > 0:
+        return int(learned), "learned"
+    if int(trailing) > 0:
+        return int(trailing), "trailing"
+    return 0, "none"
 
 
 def alloc_games_by_stage(

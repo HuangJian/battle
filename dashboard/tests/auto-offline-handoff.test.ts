@@ -49,9 +49,11 @@ writeFileSync(
 import {
   autoBundleDecision,
   autoOfflineHandoff,
+  bundleFacts,
   codeDimensionStale,
   ensureFreshTaskBundle,
 } from '../src/server/actions/auto-offline-handoff'
+import { busy, release } from '../src/server/actions/result'
 import {
   backfillHubRun,
   CODE_EXCLUDE_DIRS,
@@ -60,7 +62,11 @@ import {
   CODE_SNAPSHOT_PROTO,
   bundleMetaMagic,
   taskBundleStatusMagic,
+  taskBundleStatusProto,
   taskBundleStatusFileName,
+  taskBundleBusyKey,
+  writeTaskBundleStatus,
+  EXPORT_TIMEOUT_MS,
   codeSnapshotDir,
   codeSnapshotMetaPath,
   newestCodeMtimeMs,
@@ -631,6 +637,59 @@ describe('集群快照读取 / 旁挂元数据', () => {
     }
   })
 
+  it('running 四态：活 pid = 进行中；死 pid / 超时 = 不可知；永不冒充成功', () => {
+    mkdirSync(tmpCourseDir(WITH_PACK), { recursive: true })
+    const side = taskBundleStatusPath(WITH_PACK)
+    try {
+      writeTaskBundleStatus(WITH_PACK, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+      })
+      const live = readTaskBundleStatus(WITH_PACK)
+      expect(live?.running).toBe(true)
+      expect(live?.expired).toBe(false)
+      expect(exportStatusLine(WITH_PACK)).toContain('正在导出')
+
+      writeTaskBundleStatus(WITH_PACK, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: 999_999_999,
+      })
+      const dead = readTaskBundleStatus(WITH_PACK)
+      // `running` = 文件说进行中（第一手）；`expired` = 这份进行中已不可信。两者分开，
+      // 渲染/判锁先看 `expired`——`running && !expired` 才算“真的在跑”。
+      expect(dead?.running).toBe(true)
+      expect(dead?.expired).toBe(true)
+      expect(exportStatusLine(WITH_PACK)).toContain('不可知')
+      expect(exportStatusLine(WITH_PACK)).not.toContain('上次导出成功')
+
+      writeTaskBundleStatus(WITH_PACK, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+        at: Date.now() / 1000 - EXPORT_TIMEOUT_MS / 1000 - 10,
+      })
+      expect(readTaskBundleStatus(WITH_PACK)?.expired).toBe(true)
+    } finally {
+      rmSync(side, { force: true })
+    }
+  })
+
+  it('导出 busy 按课分键：A 在导不否决 B', () => {
+    const key = taskBundleBusyKey(WITH_PACK)
+    busy.add(key)
+    try {
+      expect(bundleFacts(WITH_PACK).busy).toBe(true)
+      expect(bundleFacts(NO_WEIGHTS).busy).toBe(false)
+    } finally {
+      release(key)
+    }
+  })
+
   it('跨语言契约：后缀/魔数与 `remote/bundle.py` 同表（读 python 源对账）', () => {
     const py = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/bundle.py'), 'utf-8')
     expect(py).toContain('BUNDLE_META_SUFFIX = ".meta.json"')
@@ -642,6 +701,8 @@ describe('集群快照读取 / 旁挂元数据', () => {
     // 导出是 detached 子进程（控制台拿不到退出码）⇒ 成败只能由那个进程自己落盘。
     expect(py).toContain('EXPORT_STATUS_NAME = "export-status.json"')
     expect(py).toContain('EXPORT_STATUS_MAGIC = "battle2-export-status"')
+    expect(py).toContain('EXPORT_STATUS_PROTO = 1')
+    expect(taskBundleStatusProto).toBe(1)
     expect(py).toContain('def export_status_path')
     expect(taskBundleStatusFileName).toBe('export-status.json')
     expect(taskBundleStatusMagic).toBe('battle2-export-status')

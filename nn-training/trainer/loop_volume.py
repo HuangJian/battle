@@ -247,8 +247,12 @@ class TrainingVolume:
             stages = parse_stages_arg(raw) if raw else stages
         except ValueError:
             pass
+        # `agg="latest"`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：只取最近一轮。
+        # 3 轮 pooled 均值在「局长变短」时结构性偏高（现场 652 vs 实际 530，+23% ⇒ 少派局
+        # ⇒ 多补一批）；而路线（it62→it63 `{476,523,693,657}`→`{652,674,664,548}`）显示主成分是
+        # **逐轮跳变**，取 min 会把跳变放大到最保守一侧 ⇒ 跟趋势就得取最近一轮。
         return trailing_stage_samples_per_game(
-            self._traj_root, stages, window_iters=3, fallback=fallback
+            self._traj_root, stages, window_iters=3, fallback=fallback, agg="latest"
         )
 
     def _dispatch_volume_wave(
@@ -477,6 +481,8 @@ class TrainingVolume:
         from worker.volume_alloc import (
             VOLUME_ALLOC_RULE,
             default_game_caps,
+            pick_stage_est,
+            pull_est_low,
             spread_games_by_stage,
         )
         from worker.volume_quota import (
@@ -512,6 +518,10 @@ class TrainingVolume:
         combined: dict | None = None
         self._volume_capped = False
         self._volume_waves = 0
+        # 首波的 est 读数（进 iteration 事件）：批数由**首波**决定，所以要记首波用了什么，
+        # 而不是末波（末波总是「剩余缺口 / 新 est」，它好了不代表首波没浪费一批）。
+        first_est_used: dict[int, int] = {}
+        first_est_src: dict[int, str] = {}
 
         while self._volume_waves < max_batches:
             wver = common.distribution.weights_fingerprint(args.out)
@@ -527,27 +537,37 @@ class TrainingVolume:
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
             # 同步 dispatch：批间无在飞；批内调度器自己竞速。软停用批前账本。
             inflight = {s: 0 for s in stages}
-            # 局均估计（plan/rollout-estfree-worksteal §4.1）：① 前几轮的**盘上历史**（est_s）；
-            # ② **本轮自己**已结算的局（自校准 —— 冷启动第一小批之后就有值了）。
+            # 局均估计（plan/rollout-estfree-worksteal §4.1）：① **本轮自己**已结算的局
+            # （自校准 — 冷启动第一小批之后就有值了）；② 前几轮的**盘上历史**（est_s，最近一轮）。
+            # 顺序不能反（plan/rollout-corpus-supply §1.3/§3.1 A0-a）：旧代码是
+            # `trailing or learned`，而 trailing 永远有值 ⇒ 自校准**恒被短路**，est 一直跟着
+            # 历史窗口走（652 vs 实际 530，+23% ⇒ 少派局 ⇒ 多补一批）。
             # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
-            est_s_now = {
-                s: int(est_s.get(s, 0) or 0)
-                or _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0))
-                for s in stages
-            }
+            est_s_now: dict[int, int] = {}
+            est_src_now: dict[int, str] = {}
+            for s in stages:
+                est_s_now[s], est_src_now[s] = pick_stage_est(
+                    _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0)),
+                    int(est_s.get(s, 0) or 0),
+                )
             est_now = int(est_global or 0) or _learned_samples_per_game(
                 sum(collected.values()), sum(games_done.values())
             )
+            # 派局用的 est 往低处拉（A0-c）：`ceil(缺口/est)` 因此多派 ~8% 局，把「局长继续变短」
+            # 的趋势误差吃掉一部分。只动派局，**不动硬顶**（`stage_caps` 仍由原 est 算）。
+            est_dispatch = {s: pull_est_low(v) for s, v in est_s_now.items()}
+            est_srcs = set(est_src_now.values())
+            est_src = next(iter(est_srcs)) if len(est_srcs) == 1 else "mixed"
             if est_now > 0:
                 plan = plan_continuous_batch(
                     stages=stages,
                     collected=collected,
                     inflight=inflight,
                     target_transitions=target,
-                    ests=est_s_now,
+                    ests=est_dispatch,
                     games_done=games_done,
                     game_cap=0,
-                    fallback_est=est_now,
+                    fallback_est=pull_est_low(est_now),
                     game_cap_by_stage=stage_caps,
                 )
                 plan_g = dict(plan.games_by_stage)
@@ -555,7 +575,6 @@ class TrainingVolume:
                     s: plan.shortfall.get(s, 0) for s in stages if plan.shortfall.get(s, 0)
                 }
                 plan_capped = bool(plan.capped)
-                est_src = "trailing"
             else:
                 # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
                 plan_g = spread_games_by_stage(
@@ -573,8 +592,14 @@ class TrainingVolume:
                 }
                 plan_capped = False
                 est_src = "cold-start"
+                est_src_now = {s: "cold-start" for s in stages}
             if not plan_g:
                 break
+            # 首波读数：进 iteration 事件（`est_used` / `est_src`）—— 批数由首波决定，
+            # 记末波的 est 等于「事后诸葛亮」，会读不出「首波高估了多少」。
+            if not first_est_used:
+                first_est_used = dict(est_dispatch)
+                first_est_src = dict(est_src_now)
             pairs = continuous_pairs(self._rotate_seed, it, plan_g, start_idx)
             for s, n in plan_g.items():
                 start_idx[s] = start_idx.get(s, 0) + int(n)
@@ -582,7 +607,8 @@ class TrainingVolume:
             log(
                 f"[volume] it{it}: batch{self._volume_waves} "
                 f"games={plan_g}（差额 {short_note} "
-                f"est_s={ {s: est_s_now.get(s) for s in plan_g} } src={est_src}"
+                f"est_used={ {s: est_dispatch.get(s) for s in plan_g} } "
+                f"est_raw={ {s: est_s_now.get(s) for s in plan_g} } src={est_src}"
                 + (
                     f"，无历史 ⇒ 按宽度 {width} 满铺（不猜 est））"
                     if est_src == "cold-start"
@@ -620,7 +646,12 @@ class TrainingVolume:
             s: {
                 "collected": int(totals.get(s, (0, 0))[1]),
                 "games": int(totals.get(s, (0, 0))[0]),
+                # `est_s` = 盘上历史（最近一轮），与旧行的同名字段同源，保持不变；
+                # `est_used` = **首波实际派局用的值**（已乘安全系数）——两者放在一起才读得出
+                # 「首波高估了多少」（P0-2 的口径）；只剩 est_s 时，改了口径也看不出来。
                 "est_s": int(est_s.get(s, est_global)),
+                "est_used": int(first_est_used.get(s, 0)),
+                "est_src": first_est_src.get(s, "none"),
                 "cap_games": int(stage_caps.get(s, 0)),
             }
             for s in stages
@@ -629,9 +660,12 @@ class TrainingVolume:
         # 规则版本 + 分关 collected/games/est_s/cap_games + 缺口（硬指标）。为什么带上规则
         # 版本：分关分配不进 `corpus_identity_fp`（与 est 同类，用户拍板 ②），所以「哪一轮起
         # 换了分配口径」必须在**事件**里可读（§15.5 的精神：不许静默漂移，也不拒收在训课程）。
+        # 顶层 `est_src`：只在全关同源时给具体值，否则 `mixed`（拼一个「首关的源」会把
+        # 「一半 learned 一半 trailing」这轮最该看的情形抹平）。
+        _srcs = set(first_est_src.values()) or {"none"}
         self._volume_stage_stats = {
             "rule": VOLUME_ALLOC_RULE,
-            "est_src": "trailing",  # 本机链的 est 来源（分关 trailing，缺历史回退全局 est）
+            "est_src": next(iter(_srcs)) if len(_srcs) == 1 else "mixed",
             "quota": int(quota),
             "stages": {str(s): stage_stats[s] for s in stages},
             "shortfall": {str(s): int(v) for s, v in unmet.items()},

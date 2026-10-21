@@ -1,4 +1,5 @@
 import { networkInterfaces } from 'node:os'
+import { readFileSync } from 'node:fs'
 
 /** net.ts — 健康探测原语（全 Bun 原生 API，无平台分支，沿袭 hub-start §339）。
 
@@ -76,6 +77,44 @@ export function pidAlive(pid: number | undefined | null): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/** 读一个 pid 的命令行（**kill 前的身份联锁**：PID 会被复用）。
+ *
+ *  Linux：直读 `/proc/<pid>/cmdline`（**不 fork**，µs 级；这条判据会被状态轮询反复调到）；
+ *  其余 POSIX：`ps -o command= -p`；Windows：`pwsh` + `Get-CimInstance Win32_Process`（仓库只允许
+ *  `pwsh`，见 AGENTS §17.7）。读不到 / 命令不可用 ⇒ 空串（调用方按「身份不明」处理，**不杀**）。
+ */
+export function pidCommandLine(pid: number): string {
+  if (!pid) return ''
+  try {
+    if (process.platform === 'linux') {
+      // NUL 分隔的 argv；进程刚退出或已换主都可能读到空 ⇒ 交给调用方判「不明」。
+      const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf-8')
+      const joined = raw.split('\u0000').filter(Boolean).join(' ').trim()
+      if (joined) return joined
+    } else if (process.platform === 'win32') {
+      const r = Bun.spawnSync(
+        [
+          'pwsh',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        ],
+        { stdout: 'pipe', stderr: 'ignore', windowsHide: true },
+      )
+      return r.stdout.toString('utf8').trim()
+    }
+    const r = Bun.spawnSync(['ps', '-o', 'command=', '-p', String(pid)], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+      windowsHide: true,
+    })
+    return r.stdout.toString('utf8').trim()
+  } catch {
+    return ''
   }
 }
 

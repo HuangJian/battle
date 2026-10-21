@@ -264,6 +264,7 @@ def write_export_status(
     ok: bool,
     exit_code: int,
     reason: str = "",
+    running: bool = False,
     course: str = "",
     iters: int = 0,
     run_iters: int = 0,
@@ -277,6 +278,9 @@ def write_export_status(
         "magic": EXPORT_STATUS_MAGIC,
         "proto": EXPORT_STATUS_PROTO,
         "ok": bool(ok),
+        # `running` = 启动时写的「进行中」态（2026-10-21，plan/export-bundle-stall §3.3）。
+        # 控制台与 hub 必须把它当**不可知**，不能当成功、也不能当失败。
+        "running": bool(running),
         "exit_code": int(exit_code),
         # `reason` 是**第一手**的：写这条状态的人就是那个进程，它手上的异常比自己日志的尾巴准。
         # 控制台的 `tailFailureReason`（读日志尾）只当**找不到状态文件时**的兜底（被 kill / OOM）。
@@ -332,6 +336,21 @@ def export_status_guard(args: Any, *, pack_path: str | Path | None = None):
     if not out:
         yield
         return
+    # ★ 2026-10-21（plan/export-bundle-stall §3.3）：**启动时先写 running**。否则「进程没退出」
+    #   在盘上与「还没跑完」「被 kill」不可分——控制台只能看到上一次的 ok:true（现场 13:53）。
+    #   写入失败只降级（旁挂件不配把主腿拖红），终态仍由下面的 finally 负责。
+    write_export_status(
+        Path(out).parent,
+        ok=False,
+        exit_code=0,
+        reason="导出进行中",
+        running=True,
+        course=str(getattr(args, "course_name", "") or ""),
+        iters=int(getattr(args, "iters", 0) or 0),
+        run_iters=int(getattr(args, "run_iters", 0) or 0),
+        pid=os.getpid(),
+        pack=out,
+    )
     exc: BaseException | None = None
     try:
         yield
@@ -344,6 +363,7 @@ def export_status_guard(args: Any, *, pack_path: str | Path | None = None):
             ok=exc is None,
             exit_code=_exit_code_of(exc),
             reason="" if exc is None else f"{type(exc).__name__}: {exc}",
+            running=False,
             course=str(getattr(args, "course_name", "") or ""),
             iters=int(getattr(args, "iters", 0) or 0),
             run_iters=int(getattr(args, "run_iters", 0) or 0),

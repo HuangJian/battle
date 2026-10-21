@@ -686,6 +686,9 @@ class _StubLoop:
         self._volume_g0 = 0
         self._volume_est = 0
         self._volume_capped = False
+        # 生产在 `_volume_collect_continuous` 末尾写入（分关账 + est 口径）；
+        # 桩先声明，测试才能断言首波读数（mypy 也才看得见这个属性）。
+        self._volume_stage_stats: dict = {}
         # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
         self._journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
         self.dispatched: list[list[tuple[int, int]]] = []
@@ -861,6 +864,26 @@ def test_continuous_with_history_keeps_est_sizing(tmp_path: Path, _patch_wver: N
     stub._volume_collect_continuous(1, None)
     assert [len(w) for w in stub.dispatched] == [12], stub.dispatched  # 每关 3 局即达标 ⇒ 一批到底
     assert all(len(w) == 12 for w in stub.dispatched)
+
+
+def test_continuous_autocalibrates_and_pulls_est_low(tmp_path: Path, _patch_wver: None) -> None:
+    """★ A0（2026-10-21，plan/rollout-corpus-supply §3.1）：**本轮自校准优先 + 派局 est 压低**。
+
+    历史 est=20、实际 10 samples/局（局长变短）。首波没有 learned ⇒ 用历史 20 → 压到 18 ⇒
+    每关 `ceil(50/18)=3` 局 = 12 局；结算后 learned=10（**不是**历史 20）⇒ 压到 9 ⇒
+    每关 `ceil(20/9)=3` 局 = 12 局。
+
+    旧口径（`trailing or learned` + 不压）：同样首波 12 局，但第二批 `ceil(20/20)=1` = 4 局 ⇒
+    `[12, 4]`。`[12, 12]` 与 `[12, 4]` 的差别就是这条改动的全部意义：**第二批按事实说话**。
+    """
+    stub = _StubLoop(tmp_path, target=200, est=20, samples=10)
+    stub._volume_collect_continuous(1, None)
+    assert [len(w) for w in stub.dispatched] == [12, 12], stub.dispatched
+    # 首波读数已落事件：est_used 是**压过**的值，est_s 仍是盘上历史（可对账）。
+    stage0 = stub._volume_stage_stats["stages"]["0"]
+    assert stage0["est_used"] == 18 and stage0["est_s"] == 20
+    assert stage0["est_src"] == "trailing"
+    assert stub._volume_stage_stats["est_src"] == "trailing"
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:

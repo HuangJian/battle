@@ -1119,6 +1119,38 @@ def rollout_collect_sec(t_dist_start: float | None, last_settle: float | None) -
     return round(last_settle - t_dist_start, 1)
 
 
+def dup_rate(race_total: int, games: int) -> float | None:
+    """竞速副本的**重复执行率** = 重复执行次数 / 局数（plan/rollout-corpus-supply §3.4）。
+
+    为什么按局数而不是按任务数：重复执行是「同一局跑了不止一次」，按局数才读得出
+    「有多少槽时白烧」（现场 it63：16/42 = 38%）。`games ≤ 0` ⇒ `None`（测不到），
+    **不是** 0——0 是「测到零重复」，两者混在一起会让下游误以为那一轮很干净。
+    """
+    g = int(games)
+    if g <= 0:
+        return None
+    return round(max(0, int(race_total)) / g, 3)
+
+
+def effective_slots(sum_game_sec: float, collect_sec: float | None) -> float | None:
+    """有效并行度 E = Σ(局的服务时长) / 采集墙钟（Little's law；同上 §3.4）。
+
+    * 分子 = **节点服务时长**（`elapsedSec`，不含排队/取任务）——用训练机侧 wall 会把
+      取包与网络等待算成「占着槽」，E 虚高；
+    * 分母 = **采集墙钟**（首局结算 → 末局结算，`rollout_collect_sec`）——用整轮 wall 会把
+      发布/落盘算进去，E 虚低。
+
+    `collect_sec` 缺失或 ≤0 ⇒ `None`。返回值保留 1 位小数：E 的用途是「11 vs 16」这类判决，
+    不是毫秒级计时。
+    """
+    if collect_sec is None:
+        return None
+    wall = float(collect_sec)
+    if wall <= 0:
+        return None
+    return round(max(0.0, float(sum_game_sec)) / wall, 1)
+
+
 def unpack_container(raw: bytes) -> tuple[dict, dict]:
     """解结果容器（自动识别版本）→ (manifest, files)。
 

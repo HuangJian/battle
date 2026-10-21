@@ -130,8 +130,10 @@ class TrainingExport:
         # est = **盘上历史派生量**（课程/CLI 的声明值已退场，2026-10-12）；0 = 无估计。
         est = int(trailing_samples_per_game(jsonl, window=5) or 0) if jsonl else 0
         # 分关 est（2026-10-07，plan/rollout-stage-balance §4.3）：与本地链
-        # `_volume_stage_ests_map` **同函数同窗口**（window=3、fallback=全局 est），
+        # `_volume_stage_ests_map` **同函数同窗口同聚合**（window=3、agg="latest"、fallback=全局 est），
         # 所以计划里的 `G_s` 就是导出那一刻本地循环会用的那套反解。
+        # `agg="latest"`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：只取最近一轮——
+        # 两侧不保持一致时，云机补差批会比本地链更早低估产出（同一轮两份口径）。
         # `--stages` 用**共享解析器**再解一次（同一函数 ⇒ 同一结果；解析失败这里的
         # SystemExit 与 volume_block 内部同源）。
         #
@@ -143,7 +145,7 @@ class TrainingExport:
         except ValueError as e:
             raise SystemExit(f"[run_rl] 动态采集无法写进离线计划（--stages {e}）") from e
         per_stage = trailing_stage_samples_per_game(
-            self._traj_root, stages, window_iters=3, fallback=est
+            self._traj_root, stages, window_iters=3, fallback=est, agg="latest"
         )
         try:
             return volume_block(

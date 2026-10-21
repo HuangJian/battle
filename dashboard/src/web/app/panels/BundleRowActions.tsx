@@ -133,13 +133,31 @@ export function BundleRowActions({ course }: BundleRowActionsProps) {
       >
         {busy === 'export' ? '导出中…' : '导出任务包'}
       </button>
-      {info?.status && !info.status.ok ? (
+      {info?.status?.running && !info.status.expired ? (
+        // ★ 2026-10-21（plan/export-bundle-stall §3.3）：**进行中**不是失败。旧渲染只看
+        //   `!ok`，导出跑着的几十秒里行上会显示「上次导出失败 · 导出进行中」——人在最需要
+        //   等的时刻被吓一跳。
+        <span className="tc-badge tc-badge--y" title={info.statusLine}>
+          正在导出
+          {info.status.elapsedSec > 0
+            ? ` · 已 ${Math.max(1, Math.round(info.status.elapsedSec / 60))} 分钟`
+            : ''}
+        </span>
+      ) : info?.status && !info.status.ok ? (
         // ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：**上次导出失败**
         //   必须在行上看得见。旧读面里每一方都在演「成功」（面板说「产物将落在 …」、
         //   hub 说「已触发」），而失败证据只留在日志末行、没有任何一方读它。
-        <span className="tc-badge tc-badge--r" title={info.statusLine || info.status.reason}>
-          上次导出失败 · {info.status.reason || '见日志'}
-        </span>
+        //   `expired`/`stale` 是**不可知**（超时 / 进程不在 / 状态早于作废）：说「失败」是编原因，
+        //   所以灰色徽标 + 状态行的原话（“不可知”“不等于成功”）。
+        info.status.expired || info.status.stale ? (
+          <span className="tc-badge tc-badge--gray" title={info.statusLine || info.status.reason}>
+            导出状态不可知 · 不等于成功
+          </span>
+        ) : (
+          <span className="tc-badge tc-badge--r" title={info.statusLine || info.status.reason}>
+            上次导出失败 · {info.status.reason || '见日志'}
+          </span>
+        )
       ) : null}
       {info?.exists ? (
         <span className="tc-mx__bundleinfo" title={`${fmtBytes(info.bytes)} · ${info.log ?? ''}`}>

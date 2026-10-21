@@ -35,5 +35,8 @@ export const bundleMetaMagic = 'battle2-task-bundle-meta'
  *  一个由**那个进程自己**写的旁挂件是唯一跨重启的权威锚。魔数对不上就当它不存在。 */
 export const taskBundleStatusMagic = 'battle2-export-status'
 
+/** 状态文件的协议号（python：`remote/bundle.py::EXPORT_STATUS_PROTO`）。 */
+export const taskBundleStatusProto = 1
+
 /** 状态文件的名字（python：`remote/bundle.py::EXPORT_STATUS_NAME`）。 */
 export const taskBundleStatusFileName = 'export-status.json'

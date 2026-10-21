@@ -70,9 +70,20 @@ def test_success_is_written_too(tmp_path: Path) -> None:
     st = _status(tmp_path)
     assert (st["magic"], st["proto"]) == (EXPORT_STATUS_MAGIC, EXPORT_STATUS_PROTO)
     assert (st["ok"], st["exit_code"], st["reason"]) == (True, 0, "")
+    assert st["running"] is False  # 终态：进行中必须被翻掉
     assert (st["course"], st["iters"], st["run_iters"]) == ("x1", 0, -1)
     assert st["pack"].endswith("task-x1.zip")
     assert st["pid"] > 0 and st["at"] > 0
+
+
+def test_running_is_written_on_entry(tmp_path: Path) -> None:
+    """启动就写 `running:true`：进程不退出时盘上仍有「进行中」，而不是上一次的 ok:true。"""
+    with export_status_guard(_args(tmp_path)):
+        st = _status(tmp_path)
+        assert st["running"] is True
+        assert st["ok"] is False
+        assert st["reason"] == "导出进行中"
+        assert st["pid"] > 0
 
 
 def test_failure_records_the_first_hand_reason_and_still_raises(tmp_path: Path) -> None:
@@ -88,6 +99,7 @@ def test_failure_records_the_first_hand_reason_and_still_raises(tmp_path: Path) 
         raise AssertionError("异常被旁挂件吞了")
     st = _status(tmp_path)
     assert (st["ok"], st["exit_code"]) == (False, 1)
+    assert st["running"] is False
     assert st["reason"].startswith("SystemExit: [run_rl] --export-bundle")
     assert st["iters"] == 2000
 

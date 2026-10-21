@@ -63,6 +63,8 @@ from hub.server import _HubQueue, make_server
 from hub.task_pack import lease_verdict
 
 TOKEN = "sekret"
+#: autouse 夹具会把 `console_export_status` 打桩；这里的解析用例要拿**真函数**（import 期抓一份）。
+_REAL_CONSOLE_EXPORT_STATUS = task_pack_mod.console_export_status
 
 #: 清单行的字段全集（★M4b 守卫：mode/authority/pinned/seize/auto_handoff 一个都不许回来）。
 ROW_KEYS = {
@@ -563,6 +565,42 @@ def test_stale_failure_and_unknown_status_never_change_the_verdict(
     # 未记账（「不可知」与「上一轮的失败」都不该进读面）
     assert auto_handoff_failure("c5-gae") == ("", 0.0)
     assert asked == ["c5-gae"]
+
+
+def test_console_status_running_stale_or_expired_is_unknown(monkeypatch) -> None:
+    """`running`/`stale`/`expired` 一律映射 `unknown`：不把「进行中」当失败、不把陈旧当成功。
+
+    v1 的新 bug：启动写 `ok:false, running:true` ⇒ 这里若只看 `ok`，hub 会立刻
+    `note_auto_handoff_failure` 并停试 900s（导出还在跑）。
+    """
+
+    class _Resp:
+        def __init__(self, status: dict) -> None:
+            self._status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"status": self._status}).encode("utf-8")
+
+    def ask(status: dict) -> dict:
+        monkeypatch.setattr(task_pack_mod, "console_export_status", _REAL_CONSOLE_EXPORT_STATUS)
+        monkeypatch.setattr(task_pack_mod, "_net_urlopen", lambda _req, timeout=None: _Resp(status))
+        return _REAL_CONSOLE_EXPORT_STATUS("c1")
+
+    base = {"running": False, "stale": False, "expired": False, "reason": "", "at": 1.0}
+    assert ask({**base, "ok": False, "running": True, "reason": "导出进行中"}) == {"unknown": True}
+    assert ask({**base, "ok": True, "stale": True}) == {"unknown": True}
+    assert ask({**base, "ok": False, "expired": True, "reason": "超时"}) == {"unknown": True}
+    assert ask({**base, "ok": False, "reason": "boom", "at": 2.0}) == {
+        "ok": False,
+        "reason": "boom",
+        "at": 2.0,
+    }
 
 
 def test_auto_handoff_decision_failed_window_expires() -> None:

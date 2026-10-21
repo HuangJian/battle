@@ -8466,6 +8466,86 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   ruff / mypy 绿 · nn python gate 全量绿。
 - **全文** → `docs/nn/remote-transport.md` §110。
 
+## §2026-10-21-goalnn-est-latest-and-dispatch-safety — 采集 est 取**最近一轮** + 派局压 0.92；**不承诺 `batches == 1`**
+
+- **触发**（用户 2026-10-21「处理评审发现的问题」）：`plan/rollout-corpus-supply.plan.md` v2 的 A0 写成
+  「`learned or trailing` + trailing 取近 3 轮 min ⇒ 批数 3 → 1」。复核代码后判定三处要改。
+- **根因**：① `loop_volume.py` 是 `trailing or learned` ⇒ trailing 恒有值 ⇒ **本轮自校准被短路**；
+  ② 分关 trailing 是 **3 轮 pooled 均值**，局长变短时结构性偏高（现场 652 vs 实际 530，+23%）；
+  ③ 但 est 的主成分是**逐轮跳变**（it62 取 `{476,523,693,657}` → it63 取 `{652,674,664,548}`，上升），
+  对一个 ±40% 跳变的量取 min 会把误差放大到最保守一侧（最坏 +60% 局数），直接打穿自采的 CPU 秒账。
+- **决定**：① 优先级 `learned → trailing`（`volume_alloc.pick_stage_est`）；② 新增 `agg="latest"`
+  只取最近一轮（`resume.trailing_stage_samples_per_game`，本地链与 `loop_export` 同口径）；
+  ③ 派局 est 乘 **0.92** 定点化下压（`volume_alloc.pull_est_low`），**只喂派局、不喂硬顶**；
+  ④ 已知残余：趋势误差 >8% 的关仍会出第二批 ⇒ DoD 写 **`batches ≤ 2`**，`== 1` 是 stretch。
+- **被否决**：①「近 3 轮 min」（放大跳变，见根因③）；②「每人 +1 局」（`ceil` 已向上取整，双重余量
+  会越 DoD 的 `Σgames ≤ 1.15 × 理论`）；③ 只改本地链（云机 spec 的 `est_s_by_stage` 走同一函数，
+  两侧口径分裂 = 同一轮两份反解）；④ 改 `plan_continuous_batch` 的软停/硬顶语义（本改动只动输入）。
+- **身份**：分配规则**不进** `corpus_identity_fp`（用户 2026-10-07 拍板 ②，见 `loop_volume.py` 注释）
+  ⇒ 不构成新实验；但 seed 计划与局数会变 ⇒ **在 it 边界声明断点**，跨断点不可逐位比较。
+- **落地**：`worker/volume_alloc.py`（`pick_stage_est` / `pull_est_low`）· `worker/resume.py`（`agg`）·
+  `trainer/loop_volume.py`（优先级 + `est_used`/`est_src` 进 iteration 事件）· `trainer/loop_export.py`。
+- **门禁**：`tests/worker/test_rollout_est.py`（新）· `tests/worker/test_rollout_volume.py`
+  （`test_continuous_autocalibrates_and_pulls_est_low`：`[12,12]` vs 旧口径 `[12,4]`）·
+  `tests/worker/test_volume_alloc.py` · `tests/worker/test_volume_plan_block.py` ·
+  `tests/trainer/test_loop_export_split.py` · `tests/worker/test_iter_topup.py` · `e2e/test_volume_e2e.py` 全绿。
+- **全文** → `plan/rollout-corpus-supply.plan.md` §1.3 / §3.1 / §3.5。
+
+## §2026-10-21-goalnn-effslots-diagnosis — E 低的成因是**重复执行 + 远端忙碌**，不是本地 lane；只测不改
+
+- **触发**（用户 2026-10-21「处理评审发现的问题」）：v2 把「有效并行度只有 ~11 槽」归因成
+  「本地 lane 优先 ⇒ 自机吃掉 69%」，并把 A2′ 写成「改本地 lane 的优先级」。
+- **根因**：代码事实相反 —— `dispatch.py:622-628` 在远端失联超阈值时把 `local_cap[0]` 抬到
+  `cap_full`（现场 8），日志里 `local_slots=0`；自机 29 局 ÷ 8 槽 = **3.6 波 ≈ 8.7s**，正好是那个 9s 墙钟
+  ⇒ 自机是**满产能**，不是被闸门偏爱。真正的缺口：远端 12 槽在 9s 里只出 13 局（**~29% 忙碌**）+ 同一行
+  日志的 `fanout_settled=9 + fanout_inflight=7`（+`main_by_fanout=4`）⇒ **重复执行 ≥16 次 ≈ 21% 槽秒**。
+- **决定**：① **不动**本地 lane 优先级（动了只会把活推给更慢的节点，墙钟更长）；② **不封顶**竞速副本
+  （它是空槽能被填上的机制），要动先拿读数；③ 本轮只把读数做出来：`[dist] round done` 增 `dup=`、
+  `[dist] round eff` 增 `E=`，`combined["dist"]` 增 `raceDrops/dupRate/slotsOnline/sumGameSec/effSlots`；
+  ④ E 的口径固定为 **Σ局服务时长（`elapsedSec`）/ 采集墙钟**（Little's law），分子不用训练机侧 wall。
+- **被否决**：① 给本地 lane 加优先级/降并发（成因判错，见根因）；② 用「训练机侧 wall」当分子
+  （把取包与网络等待算成占槽 ⇒ E 虚高）；③ 在日志里现算（口径会散在脑子里，v2 就是这么读反的）。
+- **落地**：`common/distribution.py`（`dup_rate` / `effective_slots`）· `trainer/dispatch.py`（累加 + 两行读数
+  + 结构化字段）· `tests/common/test_rollout_eff.py`（新）·
+  `tests/trainer/test_rollout_dispatch_resilience.py`（接线断言）。
+- **门禁**：上述用例 + `tests/worker/test_rollout_volume.py` + nn python gate 全绿。
+- **全文** → `plan/rollout-corpus-supply.plan.md` §1.1 / §3.4 / §13.2。
+
+## §2026-10-21-export-bundle-stall — 导出腿：基准搜索要有**总**预算，锁要按课分且有**持久**上界
+
+- **触发**（用户 2026-10-21「处理评审发现的问题」）：2026-10-21 现场三课导出全被挡；一个 detached 导出
+  进程以 343 MB/s 累计读到 8.5 TB 且永不退出，全局单键 `bundle:export` 把别的课一并焊死。
+- **根因**（两条独立缺陷）：① `_standard_bytes` 递归落地候选时，`_MAX_CHAIN`/`_MAX_CANDIDATES` 是
+  **每次调用各一份**，232 个互为候选的 delta 展开成阶乘；② 导出互斥是全局单键 + 只认进程退出（8 小时上界
+  且 release 不杀进程）；③ 附带：状态文件只有 `at`、没有新鲜度/到期判据 ⇒ 11:41 的 `ok:true` 一直演成功。
+- **决定**：① 一次顶层解析共享 `_SearchContext`（同一路径只读一次 / 失败按路径负缓存 / 成功按内容 sha
+  正缓存 / 唯一读字节 2 GiB 与唯一候选 20000 双预算），撞顶抛 `SearchBudgetExceeded` 且**父层不得吞**；
+  ② 失败族带 `retryable=False`，`round_failure` 据此不重试（判据是属性，不是中文文案）；
+  ③ 互斥键按课（`bundle:export:<课>`），`busy` 与持久 `running` **同源**成 `exportBusyReason`；
+  ④ 30 分钟硬上界 + 超时 `killPidTree`（先验命令行身份，验不了不杀）+ 终态 + release + 恢复旧包；
+  ⑤ 状态四态：python 启动写 `running:true`，控制台读面派生 `stale`（作废锚 = stale 文件名 UTC 戳与线上包
+  mtime 取大，**不是** rename 保留的 mtime）与 `expired`（超时 / pid 不在），hub 一律映射 `unknown`。
+- **被否决**：①「调小 `_MAX_CHAIN`/`_MAX_CANDIDATES`」（掩盖乘积，不是修）；② v1 的「只加成功 memo」
+  （本次基准缺失 ⇒ 零命中）；③ 给导出套 `busySince` 的 5 分钟 TTL（合法导出会跑更久）；
+  ④ 把 `running` 在读面直接降成 `false`（看门狗分不清「还在跑」与「运行态已到期」，会把已产出的包误写成
+  失败）；⑤ 超时只 release 不 kill（僵尸继续烧盘）；⑥ 盲杀 PID（复用会杀无关进程）；
+  ⑦ hub 把 `running` 当 `ok:false`（导出还在跑就停试 900s）。
+- **2026-10-21 补（用户口径：「等 30 分钟不可接受」）**：PID 复用不再靠 30 分钟上界硬等——导出腿加
+  `exportPidState(pid, course): 'match' | 'mismatch' | 'unknown'`（命令行三态）作为**身份判活**：
+  `running && pidAlive && 状态写下 ≥5s` 时查一次（Linux 直读 `/proc/<pid>/cmdline` 不 fork；
+  其余平台 15s 缓存，Windows 一次 `pwsh`），`mismatch` ⇒ `expired` ⇒ **点一下就能重导**。
+  两个方向的保守刚好相反：`unknown` 不解锁也不杀，`mismatch` 只解锁不杀，`match` 才杀。
+  仍**不修**共享 `pidAlive`（48 个调用点：trainer 监督 / hub / worker / stop / eval）——
+  原语级修法（PID + 启动时刻 / `pidfd` / 心跳文件）是另一条腿，且本环境只能验到 Linux 一半。
+  被否决：① 直接把 `pidAlive` 改成双因子（全局语义变更、Windows 无法验证）；② `unknown` 也解锁
+  （同课并发写同一个 `.tmp`，破不变量 2）；③ 缩短 30 分钟上界（真正卡住的导出合法地可以跑很久）。
+- **身份**：不动 `--export-bundle` 的锁与账本语义，不动 delta 包格式与「本机不猜基准」纪律 ⇒ 不是新实验。
+- **落地**：`remote/weights_standard.py` · `trainer/loop_round_steps.py` · `remote/bundle.py` · `hub/task_pack.py` ·
+  `server/bundles/{export,marks}.ts` · `core/net.ts` · `server/actions/auto-offline-handoff.ts` · `server/api/route.ts` ·
+  `server/server.ts` · `web/app/lib/api-client.ts` · `web/app/panels/BundleRowActions.tsx`。
+- **门禁**：`nn-training` 侧 97 用例（weights_standard / loop_round / export_status / auto_handoff）+ dashboard
+  91 用例（task-bundle / auto-offline-handoff，含 PID 复用三态）+ 两个 typecheck + 三份 web bundle 全绿。
+- **全文** → `plan/export-bundle-stall.plan.md`（评审 `plan/export-bundle-stall.review-bf.md`）。
 ## §2026-10-21-goalnn-online-worker-bun-for-self-collect — 在线 worker 盘**自采模式**下允许装 bun（`§2026-09-25-goalnn-online-worker-no-bun` 的**限定例外**）
 
 - **触发**（用户 2026-10-21 裁决，原话「如果改成自采集，可以装！」）：`plan/rollout-corpus-supply.plan.md`
