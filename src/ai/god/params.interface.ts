@@ -1358,6 +1358,35 @@ export interface GodAIParams {
   defenseReturnHysteresis: number
 
   /**
+   * A9 (2026-10-21): seal a REMOTE base-shot lane before the shell is fired.
+   *
+   * The 700-game audit found the base dies to shots from far up the base COLUMN
+   * while the player stands a median 9 cells away (only 0.23 enemies within 6
+   * cells at the fatal moment; fatal bullet `down` 40% / `left` 32% / `right`
+   * 28%). `baseLaneSentry` (§198) reacts to `canShootBase` / `canBreachRing`
+   * shooters but only within `baseLaneSentryRange + 1` of the player, so a
+   * column shooter 9-20 cells up is never contested.
+   *
+   * 1 = `baseLaneSeal` is in the chain: pick the most dangerous remote shooter
+   *     (live line to the base, ≥ `baseLaneSealMinDist` away, within
+   *     `baseLaneSealRange` of the player), walk to the closest-to-base
+   *     standable cell on that shooter's column, hold it facing up and fire.
+   *     Standing there both blocks the shell with the tank and gives a clear
+   *     firing line at the shooter. Vertical lanes only (see the candidate).
+   * 0 = OFF (byte-identical to pre-A9).
+   */
+  baseLaneSealMode: number
+  /** A9: only seal against shooters at least this many cells from the base
+   * (closer shooters belong to baseLaneSentry / defenseIntercept). */
+  baseLaneSealMinDist: number
+  /** A9: max manhattan distance from the player to the shooter we will chase. */
+  baseLaneSealRange: number
+  /** A9: also pre-empt RING-BREACH shooters (`enemyCanBreachRing`), not just
+   * shooters with a clear line to the base (`enemyCanShootBase`). 1 = both,
+   * 0 = direct base shots only. */
+  baseLaneSealCbr: number
+
+  /**
    * A8 (2026-10-21): resolve the defense cell to a cell the tank can STAND on.
    *
    * `getDefaultDefensePosition()` returns `(BASE_POS.col, BASE_POS.row −
