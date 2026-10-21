@@ -353,6 +353,19 @@ export class GodAIInput implements InputLike {
   _defenseReturnLatch = false
 
   /**
+   * A8 (2026-10-21): resolved standable defense cell — `(12,23)` is the base
+   * ring's top brick on all 35 stages, so the raw cell must never reach the
+   * navigator (see `resolveStandableDefenseCellImpl`). Cached per
+   * `tileMap.revision` + requested cell; cleared by reset().
+   */
+  _defCellCol = -99
+  _defCellRow = -99
+  _defCellKeyCol = -99
+  _defCellKeyRow = -99
+  _defCellRev = -1
+  _defCellValid = false
+
+  /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
    * locked for a lease with expiry/progress/threat revalidation, or null.
    * Written/read only when params.intentMode > 0; reset() clears. Default
@@ -1064,6 +1077,8 @@ export class GodAIInput implements InputLike {
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
     this._defenseReturnLatch = false // A4
+    this._defCellValid = false // A8
+    this._defCellRev = -1
     this._intent = null // Phase 2 §6.3
     this._coverageCell = null // Phase 3
     this._coverageUntil = 0

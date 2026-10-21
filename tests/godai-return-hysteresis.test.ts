@@ -57,7 +57,15 @@ function countObjectiveFlips(
     // defensePosStandable 固定为 0：它会把集合点改到基地周边的可站格，
     // 使「目标是否等于集合点」这一判定本身随地形漂移，从而污染翻转计数。
     // 本测试只隔离 A4。
-    { ...DEFAULT_GOD_AI_PARAMS, defenseReturnHysteresis: hyst, defensePosStandable: 0 },
+    // defenseCellResolve 固定为 0（A8 之前的原始环砖集合点）：A8 把集合点解析到
+    // 可站的 (12,22) 之后，「目标 == 集合点」的判定语义整体改变，翻转计数不再
+    // 反映 A4 自身的滞后效果。本测试只隔离 A4，因此固定在 A4 纪元的口径。
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      defenseReturnHysteresis: hyst,
+      defensePosStandable: 0,
+      defenseCellResolve: 0,
+    },
     godRng,
   )
   const sim = new Simulation(world, input)
@@ -165,6 +173,9 @@ describe('A4 回防目标滞后 — 离散格距离阈值上的目标翻转', ()
       navStuckZone: 0,
       baseConnectClearMode: 0,
       pixelStuckDirectMoveTicks: 0,
+      // A8 之后集合点变成可站的 (12,22)，S34 的轨迹整体改变（OFF 档 dwell
+      // 422 → 373）。本用例钉的是 A4 自己的贡献，固定在 A4 纪元口径。
+      defenseCellResolve: 0,
     }
     const off = maxZoneDwell({ ...base, defenseReturnHysteresis: 0 }, 33, 8, 2400)
     const on = maxZoneDwell({ ...base, defenseReturnHysteresis: 3 }, 33, 8, 2400)

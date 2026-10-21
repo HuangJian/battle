@@ -354,8 +354,12 @@ describe('评估链金标（god 确定性策略；两列非零）', () => {
   // 原 stage1 seed9 在本纪元 `lane` 变 0（违反"两列非零"）⇒ 换成 stage1 seed27；
   // 原 stage0 seed12 的 `lane` 只剩 9（太脆）⇒ 换成 stage0 seed4。
   // 数值为 2026-10-21 实测（确定性：同 seed 两跑逐值相同）。
+  // ⚠ A8 集合点可站化重标（2026-10-21，DECISIONS §2026-10-21-godai-a8-defense-cell）：
+  // 回防目标从不可站的 (12,23) 变成可站的 (12,22)。扫描（stage0/1 × seed1-30，本测
+  // 口径 1500 tick）后只有 **stage0 seed3** 的两列变了（108/67 → 47/49）；seed4 与
+  // s1 seed27 逐值不变。种子不换，三例 lane 仍为 49/74/163（都远高于 0）。
   const cases = [
-    { stage: 0, seed: 3, near: 108, lane: 67 },
+    { stage: 0, seed: 3, near: 47, lane: 49 },
     { stage: 0, seed: 4, near: 62, lane: 74 },
     { stage: 1, seed: 27, near: 255, lane: 163 },
   ] as const

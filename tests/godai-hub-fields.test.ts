@@ -160,6 +160,12 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   // ---- C: keyed cache companions (guarding flag IS lifecycle-covered) ----
   _canMoveResult: { cls: 'C', why: 'bitmask payload of _canMoveComputed' },
   _playerCellCache: { cls: 'C', why: 'payload of _playerCellValid' },
+  // A8 (2026-10-21): resolved standable defense cell — flag `_defCellValid` is
+  // cleared in reset(), the payload/key ride behind it.
+  _defCellCol: { cls: 'C', why: 'A8 payload of _defCellValid' },
+  _defCellRow: { cls: 'C', why: 'A8 payload of _defCellValid' },
+  _defCellKeyCol: { cls: 'C', why: 'A8 requested-cell key of _defCellValid' },
+  _defCellKeyRow: { cls: 'C', why: 'A8 requested-cell key of _defCellValid' },
   _selTargetBuf: { cls: 'C', why: '§125 payload of _selTargetValid' },
   _selTargetKeyCol: { cls: 'C', why: '§125 key of _selTargetValid' },
   _selTargetKeyRow: { cls: 'C', why: '§125 key of _selTargetValid' },

@@ -108,6 +108,10 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
         pixelStuckDirectMoveTicks: 0,
         // A4 会一并消除这个 pin（见下方断言注释）—— 复现腿必须回到 A4 前。
         defenseReturnHysteresis: 0,
+        // A8（2026-10-21）把集合点解析到可站的 (12,22)，S34 轨迹整体改变
+        // （OFF 档 dwell 422 → 373）。本腿要复现的是 §168 记录的原始 pin，
+        // 固定在 A8 纪元之前的口径。
+        defenseCellResolve: 0,
       },
       STAGE,
       SEED,
