@@ -23,6 +23,15 @@
 // Vertical lanes only: the base column is the dominant fatal line (down 40%),
 // and a horizontal seal would require standing inside the base band, which
 // `baseLaneSentry` / `defenseIntercept` already own.
+//
+// MEASURED (2026-10-21, hard 35×20, paired): adding the horizontal half
+// (`left`+`right` = 60% of fatal shells on paper) turns the vertical-only
+// **+0.71pp into −0.29pp** — i.e. ≈ −1.0pp. Reason: a horizontal lane can only
+// be sealed from a cell just outside the ring ON THE BASE ROW, which parks the
+// player in the open a few pixels from the eagle, dueling at point-blank with
+// whatever is coming; and horizontal base shots are usually fired from inside
+// the base band, where `baseLaneSentry` already reacts. Do not re-add without
+// a new measurement that beats vertical-only.
 import type { Direction } from '../../../constants'
 import { BASE_POS, GRID } from '../../../constants'
 import { type GodAIInput, recordBranch } from '../../GodAIInput'
