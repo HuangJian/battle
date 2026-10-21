@@ -37,6 +37,7 @@ const difficulty = process.argv[2] ?? 'hard'
 const seeds = Number(process.argv[3] ?? 60)
 const aJson = process.argv[4] ?? '{}'
 const bJson = process.argv[5] ?? '{}'
+const levelOverride = Number(process.argv[6] ?? 0) || undefined
 const a = {
   ...DEFAULT_GOD_AI_PARAMS,
   ...(JSON.parse(aJson) as Partial<GodAIParams>),
@@ -57,6 +58,7 @@ function runOne(stageIndex: number, seed: number, params: GodAIParams): Scorable
     collectMetrics: false,
     collectEvents: false,
     telemetry: true,
+    playerLevelOverride: levelOverride,
   })
   return {
     outcome: r.outcome,

@@ -498,6 +498,7 @@ export interface RunOptions {
    * 一命覆写（plan/dodge-item-curriculum.md §1b F1）：强制玩家命数替代
    * difficulty.startLives。S-Dodge 锚定探针传 1。缺省 = difficulty.startLives。
    */
+  playerLevelOverride?: number
   livesOverride?: number
   /**
    * Collect v6 evaluation telemetry (plan/God-AI-Evaluation-Redesign.md §3).
@@ -626,7 +627,7 @@ export function runSimulation(opts: RunOptions): SimResult {
   // (loadStageData) therefore diverged: gates/A/Bs measured a "first life 0★,
   // 3 lives" baseline that understates the shipped config. Sync both here so
   // the simulation matches the real game on the first life.
-  world.playerLevel = world.difficulty?.playerStartLevel ?? 0
+  world.playerLevel = opts.playerLevelOverride ?? world.difficulty?.playerStartLevel ?? 0
   world.lives = opts.livesOverride ?? world.difficulty?.startLives ?? START_LIVES
 
   // Create the God AI input with an independent RNG (DECISIONS #47).
