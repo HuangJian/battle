@@ -8284,3 +8284,90 @@ stageIndex=0 时 17→16 胜 —— **符号翻转**。本项目所有历史基�
 - 一次性脚本 `tmp/turn-waste-probe.ts` / `tmp/ab-full.ts` / `tmp/scan-pin.ts` /
   `tmp/stand-check.ts` / `tmp/rescan-golden.ts` **用完即删，不入库**
   （残留会挂 typecheck/build）。
+
+## §2026-10-21-godai-a7-dm-fallback — directMove 的 any-passable fallback：承诺逃逸（机制实现保留，默认 OFF）
+
+**结论先行**：`directMove` 的 any-passable fallback **确实**在背离目标的方向上走出
+12% 的 directMove tick，但它**没有第二个选项可选** —— 那里只有「背离主轴」与「背离副轴」
+两条路。真正可修的是**每拍重新选向**导致的 1 格打转。承诺窗口把打转砍掉 40-48%，
+代价是 **chaos −3.05pp（t=−2.77，显著）**：commit 是「固定 40 拍不看目标」的盲走，
+代价随威胁密度放大，而它修的振荡不是胜率瓶颈 ⇒ **实现保留、默认 OFF**（与 A5/A6 同口径）。
+
+### 一、前提核对：fallback 到底有多常见、选了什么
+
+包装 `GodAIInput.directMove`（实例属性覆盖原型方法即可，`think()` 走 `self.directMove`），
+在 5 关 × 8 局的 hard 上逐 tick 复算 `prefA/prefB` 与 `canMoveOrBreak`：
+
+| 指标 | 值 |
+|---|---|
+| directMove 调用 | 931–3645 次/局 |
+| 命中 fallback（两个朝目标轴都不可走/不可破） | **80–543 tick/局，占 directMove 的 12%** |
+| 选出的方向**背离目标**（`(dx,dy)·v < 0`） | **58.7%** |
+| 逃逸 episode（连续 fallback tick） | 189 段 / 8 局，均值 9.8 拍 |
+| 其中「逃逸失败」（episode+20 拍内净位移 < 8px） | **29.1%** |
+
+**为什么「背离」是结构性的**：走到 fallback 时 `prefA` 与 `prefB`（两个朝目标的轴）
+都不可 `canMoveOrBreak`，剩下四条方向里只有 `opposite(prefA)` 与 `opposite(prefB)` 可能
+可走，而旧扫描**硬跳过** `opposite(prefA)` ⇒ 唯一幸存者就是 `opposite(prefB)`
+= 「沿副轴背离目标」。**它不是选错的，是没有别的可走。**
+
+### 二、尝试过的三种「修法」
+
+1. **rank=1 排序**（按移动后到目标的平方距离给两条「背离」排序 + 主轴反向作最后手段）：
+   实测**更差** —— fallback tick 1.86k→3.93k、失败逃逸 29.1%→**43.6%**。
+   两个原因：① 两条候选都是「背离」，排序只是换一条背离；② 放开 `opposite(prefA)`
+   等于把 §162 特意封住的**封口袋出口重新打开**（Battlement 出生点口袋），打转回来了。
+2. **rank=2 交给路由**（fallback 里调 `navigateTowards(target)`）：
+   与 rank=1 逐字节相同 —— A* 在这里**恰好返回 null**（目标就是那个不可站的防守格
+   (12,23)，环砖内部），路由无话可说。这条证明「病根不在选向，而在无路可走」。
+3. **hold 承诺**（选中方向后，在窗口内覆盖每拍重决策）：唯一有效的部分。
+   窗口档位（8 局）：12 → **40.1%（比基线差）**、16 → 34.8%、24 → 22.4%、
+   32 → 18.3%、**40 → 16.3%**（基线 29.1%）。12 拍档反而变差正是「必须长于
+   200 ms 转身冷却（12 拍）」的直接证据 —— 短于冷却的承诺连一次转身都换不回来。
+
+### 三、三难度满格 A/B（35×60 串行、真实 stageIndex、CRN 配对）
+
+本轮把这条口径**固化成工具** `tools/eval/paired-serial.ts`（eval-suite 的 `runCorpus`
+不传 `stageIndex`，见 A4 条目第六节）：
+`bun tools/eval/paired-serial.ts <difficulty> <seeds> <jsonA> <jsonB> [--stages]`。
+
+`directMoveFallbackHold: 40` vs 0：
+
+| difficulty | win A | win B | Δ | t | suite | score |
+|---|---|---|---|---|---|---|
+| hard | 79.6% (1672) | 79.0% (1658) | −0.67pp | −0.62 | 0.6139 → 0.5996 | −0.0059 |
+| classic | 83.4% (1751) | 82.7% (1737) | −0.67pp | −0.68 | 0.6591 → 0.6518 | −0.0062 |
+| chaos | 78.4% (1647) | 75.4% (1583) | **−3.05pp** | **−2.77** | 0.5984 → 0.5663 | −0.0232 |
+
+**chaos 显著负**，且 hard/classic 同号同幅（−0.67pp）。逐局看更清楚：hard 8 局探针里
+3 局 clear→gameover、1 局 gameover→clear（s34 seed1000：7200 拍清关 → 2302 拍阵亡）。
+
+**为什么 chaos 掉得最狠**：commit 是「固定 40 拍不重新看目标」的盲走。chaos 的子弹密度
+最高，40 拍 = 0.67s 的盲走窗口里挨弹概率最大；hard/classic 窗口多数能走完并换来一次
+真正的绕行。而**它修的东西**（1 格打转）在 700 局审计里并不是败因（90% 失败是丢基地）。
+
+### 四、发货判定
+
+按用户政策「机制修复即使胜率下降也要做」，本轮仍**不发货**，理由是它**不是机制修复**：
+旧行为没有给出错误答案（只有那一条路可走），它是**缺记忆**；补记忆的代价随威胁密度
+线性放大，而收益（少打转）没有转成击杀。真正待试的是**闸门化的承诺**：基地/敌弹威胁
+出现时立即放弃 commit（`isBaseUnderThreat` 已有），这需要在 chaos 上单独跑一轮满格表。
+
+### 五、探针教训（会反复踩，务必记住）
+
+直接 `sim.tick()` 驱动 `Simulation` **必须自己调 `input.endFrame()`** —— `runSimulation`
+在每拍末尾调它（`tools/sim/simulation-runner.ts:862`），而 `Simulation.tick()` 本身**不调**。
+漏掉时 `_thought` 永远为 true ⇒ **`think()` 只在第 0 拍真正跑一次**，之后
+`_moveDir` 一直冻结：本轮的第一次探针就是这么得出「directMove 每局只调用 1 次、
+fallback 从不触发」的假结论（实际 931–3645 次），坦克在第一个障碍物前站到终局。
+另一处同类陷阱：`playerCell()` 返回的是**复用对象**，跨 tick 保存引用会读到后面被改写的值。
+
+### 六、门禁
+
+- `bun run check` 全绿（见下条提交）。
+- `bun run freeze:check` **绿且无需换钉**（`c5abb064…` 不变）—— 两个 knob 默认 0 时
+  代码路径整段跳过，字节等同。
+- 新增 `tools/eval/paired-serial.ts`（串行配对 A/B，真实 stageIndex；本轮三难度表与
+  A4 的对比表都用它产）。
+- 新增 `tests/godai-dm-fallback.test.ts`（4 例）：默认值守卫、reset 清状态、
+  s35 seed1002 上 fallback tick −63% / 失败逃逸 13→2、hold=0 与基线逐字节一致。

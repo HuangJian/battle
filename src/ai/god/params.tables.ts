@@ -484,6 +484,16 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 触发 directMove 的 any-passable fallback 更频繁（打转 43.5→52.6 次/局、
   // 短抖动 33→63 次/局），证明病根在 fallback 选向而不在探测精度。
   navExactMoveProbe: 0,
+  // A7 (2026-10-21): directMove 的 any-passable fallback 选向/承诺。
+  // 0 = OFF（旧行为，字节等同）。rank=1 实测阴性（打转 29.1%→43.6% 的失败逃逸）：
+  // 「主轴反向」一开就把 §162 特意封住的封口袋出口重新打开 ⇒ 只保留实现。
+  directMoveFallbackRank: 0,
+  // A7：逃逸方向承诺窗口（tick）。40 实测：fallback tick 1858→975（−48%）、
+  // 失败逃逸 29.1%→16.3%，但**三难度全负**：hard −0.67pp(t=−0.62) ·
+  // classic −0.67pp(t=−0.68) · **chaos −3.05pp(t=−2.77)**。
+  // 结论：承诺窗口是「固定 40 拍不看目标」的盲走，代价随威胁密度放大，
+  // 而它修的振荡本来就不是胜率瓶颈 ⇒ 默认 OFF。见 DECISIONS §2026-10-21-A7。
+  directMoveFallbackHold: 0,
   // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
   aggCampTimeoutTicks: 120,
   // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.

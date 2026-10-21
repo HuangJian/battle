@@ -1380,6 +1380,68 @@ export interface GodAIParams {
   navExactMoveProbe: number
 
   /**
+   * A7 (2026-10-21): make `directMove`'s any-passable fallback pick and hold a
+   * useful escape direction instead of the first entry of ALL_DIRS.
+   *
+   * The fallback is reached only when BOTH preferred directions (the axis
+   * toward the target) are blocked by something unbreakable (steel / water /
+   * base / another tank / base-protection brick). At that point `prefA` and
+   * `prefB` are non-passable by construction, so the legacy scan — which skips
+   * `opposite(prefA)` and returns the first passable dir in (up, down, left,
+   * right) order — has exactly ONE candidate left: `opposite(prefB)`, i.e.
+   * "walk away from the target along the secondary axis". Measured (hard,
+   * 8 games over 5 stages): the fallback fires on **12% of all directMove
+   * ticks** (~230/game) and **58.7% of its picks move the tank away from the
+   * target**; **29.1% of the resulting escape episodes end with < 8 px of net
+   * displacement** — the tank paces into the obstacle and straight back out.
+   *
+   * 0 = OFF (legacy first-passable scan — byte-identical to pre-A7).
+   * 1 = rank the passable candidates by the squared distance they leave to the
+   *     target (cheapest detour wins) and allow the reverse of the primary
+   *     axis when it is the only passable direction (a dead end must not
+   *     freeze the tank).
+   *
+   * MEASURED NEGATIVE (2026-10-21, hard, 8 games): fallback ticks 1.86k →
+   * 3.93k, failed escapes 29.1% → 43.6%. Reason: `prefA`/`prefB` are the two
+   * *toward* axes, so the only two legal moves are their reverses — ranking
+   * them just picks a different "away"; and allowing `opposite(prefA)` reopens
+   * the sealed-pocket exit that §162 deliberately closed. Kept as an
+   * implementation only; ships at 0.
+   * 2 = ask the router instead (`navigateTowards(target)`), falling through to
+   *     the ranked scan when A* answers nothing. Measured: identical to 1 —
+   *     A* returns null exactly when this fallback fires (the target is the
+   *     unreachable defense cell), so the router has nothing to say here.
+   */
+  directMoveFallbackRank: number
+
+  /**
+   * A7 (2026-10-21): how long (ticks) a fallback escape direction is committed
+   * to, in addition to `directMoveFallbackRank > 0`.
+   *
+   * A one-cell escape needs ~23 ticks of travel, while the fallback condition
+   * typically clears after ~10 (the away move unblocks the preferred axis), so
+   * without commitment the tank walks straight back and the 200 ms turn
+   * cooldown (12 ticks) means neither move ever completes. The window must
+   * therefore exceed 12 ticks to do anything at all — measured tiers
+   * (8 games): 12 → failed escapes **worse** (40.1%), 16 → 34.8%,
+   * 24 → 22.4%, 32 → 18.3%, **40 → 16.3%** (baseline 29.1%).
+   *
+   * BUT the window is blind — it ignores the target for its whole length — so
+   * its cost scales with threat density while the pacing it fixes does not:
+   *   | difficulty | win A  | win B  |    Δ    |   t   |
+   *   | hard       | 79.6%  | 79.0%  | −0.67pp | −0.62 |
+   *   | classic    | 83.4%  | 82.7%  | −0.67pp | −0.68 |
+   *   | chaos      | 78.4%  | 75.4%  | −3.05pp | −2.77 |
+   * (35×60 serial, real stageIndex, CRN paired.) Chaos is significant, and the
+   * pacing it removes is not the win-rate bottleneck ⇒ **ships at 0**; the
+   * viable variant is aborting the commit when the base/enemy threat appears,
+   * which needs its own measurement.
+   *
+   * 0 = no commitment (legacy per-tick re-decision — byte-identical to pre-A7).
+   */
+  directMoveFallbackHold: number
+
+  /**
    * §84: Aggressive branch stall detection. When > 0, the aggressive
    * (freeze/shield) stop-and-aim code tracks how long the player has been
    * stopped at the same cell with no kills. If the player camps for more

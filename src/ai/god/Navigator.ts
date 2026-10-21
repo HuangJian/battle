@@ -535,6 +535,17 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
     else if (dy < 0) prefB = 'up'
   }
 
+  // A7: committed escape — while the window is open, the previously chosen
+  // fallback direction overrides this tick's re-decision. This is the part
+  // that actually breaks the one-cell pacing: the fallback condition clears
+  // after ~10 ticks (the away move unblocks the preferred axis), so without
+  // the override the tank walks straight back into the wall on the next tick
+  // and the 200 ms turn cooldown (12 ticks) means neither move ever completes.
+  if (self.params.directMoveFallbackHold > 0 && self._dmEscDir !== null) {
+    if (w.frame < self._dmEscUntil && self.canMoveDir(p, self._dmEscDir)) return self._dmEscDir
+    self._dmEscDir = null
+  }
+
   // Return the first preferred direction that we can either move through
   // or break through (brick wall). This enables wall-breaking: the tank
   // faces the wall, shouldFireInDir fires at it, and the wall breaks.
@@ -544,11 +555,87 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
 
   // All preferred directions blocked by unbreakable terrain or tanks —
   // try any passable direction (excluding reverse of primary).
+  //
+  // A7 (2026-10-21): the legacy scan below returns the FIRST passable entry of
+  // ALL_DIRS (up, down, left, right) after skipping `opposite(prefA)`. Since
+  // prefA AND prefB are both non-passable by construction at this point, the
+  // only survivors are `opposite(prefA)` (skipped) and `opposite(prefB)` — so
+  // the legacy fallback has exactly ONE option and it always points AWAY from
+  // the target on the secondary axis. Measured (8 hard games, 5 stages × 4
+  // seeds worth of directMove calls): the fallback fires on 12% of all
+  // directMove ticks and **58.7% of its picks move the tank away from the
+  // target**; 29.1% of the resulting escape episodes end with < 8px of net
+  // displacement (the tank paces into the wall and back).
+  //
+  // The ranked + committed escape (`directMoveFallbackRank` / `...Hold`):
+  //   - rank BOTH away options by the squared distance they leave to the
+  //     target (pick the cheaper detour — the one that keeps the larger axis
+  //     gap intact), and let the reverse of the primary axis win when it is
+  //     the only passable direction (standing still in a dead end is worse);
+  //   - commit the pick until the tank actually crosses into another cell
+  //     (or `directMoveFallbackHold` ticks elapse). Without the commitment the
+  //     fallback clears after ~10 ticks — before the tank has travelled the
+  //     ~23 ticks a cell needs — and the next tick walks straight back.
+  // NOTE (measured 2026-10-21): the RANKED choice alone is a net negative
+  // (fallback ticks 1.86k → 3.93k, stuck episodes 29.1% → 43.6% over the same
+  // 8 games) because "reverse of the primary axis as a last resort" reopens
+  // the sealed-pocket exit that §162 deliberately closed. The COMMITMENT is
+  // the part that pays; `directMoveFallbackRank` therefore ships at 0.
   const primaryOpposite = prefA !== null ? opposite(prefA) : prefB !== null ? opposite(prefB) : null
-  for (let di = 0; di < ALL_DIRS.length; di++) {
-    const d = ALL_DIRS[di]
-    if (primaryOpposite !== null && d === primaryOpposite) continue
-    if (self.canMoveDir(p, d)) return d
+
+  let pick: Direction | null = null
+  if (self.params.directMoveFallbackRank === 2) {
+    // A7 mode 2: both greedy axes are blocked, so let the router answer — A*
+    // knows how to walk around steel/water/tanks, which is exactly the case
+    // the blind scan cannot handle. `navigateTowards` is per-tick cached and
+    // is the same call the long-range branch makes, so this reuses the routing
+    // machinery instead of inventing a second one.
+    pick = self.navigateTowards(target)
+  }
+  if (pick === null && self.params.directMoveFallbackRank > 0) {
+    let best: Direction | null = null
+    let bestScore = Infinity
+    let revBest: Direction | null = null
+    let revScore = Infinity
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
+      if (!self.canMoveDir(p, d)) continue
+      const v = DIR_VECTORS[d]
+      const rx = dx - v.dx * CELL
+      const ry = dy - v.dy * CELL
+      const score = rx * rx + ry * ry
+      if (d === primaryOpposite) {
+        if (score < revScore) {
+          revScore = score
+          revBest = d
+        }
+        continue
+      }
+      if (score < bestScore) {
+        bestScore = score
+        best = d
+      }
+    }
+    // Reverse only as a last resort (nothing else passable).
+    pick = best ?? revBest
+  } else {
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const d = ALL_DIRS[di]
+      if (primaryOpposite !== null && d === primaryOpposite) continue
+      if (self.canMoveDir(p, d)) {
+        pick = d
+        break
+      }
+    }
+  }
+  if (pick !== null) {
+    if (self.params.directMoveFallbackHold > 0) {
+      self._dmEscDir = pick
+      self._dmEscCol = playerCell.col
+      self._dmEscRow = playerCell.row
+      self._dmEscUntil = w.frame + self.params.directMoveFallbackHold
+    }
+    return pick
   }
 
   // §162: still stuck — try BREAKABLE directions (canMoveOrBreak). The

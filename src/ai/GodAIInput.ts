@@ -353,6 +353,20 @@ export class GodAIInput implements InputLike {
   _defenseReturnLatch = false
 
   /**
+   * A7 (2026-10-21): commitment state for `directMove`'s any-passable
+   * fallback (`params.directMoveFallbackRank` / `directMoveFallbackHold`).
+   * `_dmEscDir` is the escape direction currently committed to, valid until
+   * the tank crosses into another cell (`_dmEscCol/_dmEscRow` = the cell it
+   * was in when the escape was chosen) or `_dmEscUntil` (absolute frame).
+   * AI-internal decision state — never serialized, cleared in reset(). Both
+   * params default to 0 ⇒ never read ⇒ byte-identical to pre-A7.
+   */
+  _dmEscDir: Direction | null = null
+  _dmEscCol = -99
+  _dmEscRow = -99
+  _dmEscUntil = 0
+
+  /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
    * locked for a lease with expiry/progress/threat revalidation, or null.
    * Written/read only when params.intentMode > 0; reset() clears. Default
@@ -1064,6 +1078,10 @@ export class GodAIInput implements InputLike {
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
     this._defenseReturnLatch = false // A4
+    this._dmEscDir = null // A7
+    this._dmEscCol = -99
+    this._dmEscRow = -99
+    this._dmEscUntil = 0
     this._intent = null // Phase 2 §6.3
     this._coverageCell = null // Phase 3
     this._coverageUntil = 0
