@@ -216,6 +216,46 @@ class _FakeConsole:
         self.srv.server_close()
 
 
+class _NoAutoHandoffConsole:
+    """假控制台：**没有**自动交接/导出端点（一律 404）——「控制台不在 / 太旧」的确定性替身。
+
+    为什么不用死端口（`tests/conftest.py` 钉的那个）：`ECONNREFUSED` 只在「没人在听且内核
+    立刻回 RST」的机器上快；有的主机/沙箱把回环死端口的 SYN 直接**丢掉** ⇒ 每次触发都要
+    烧满 `hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC`（8s）。而 hub 的 `/offline/claim`
+    成功分支会**同步**请一次控制台核对新鲜度 ⇒ 一条 8s 的腿就让 `claim` 的客户端超时先到点
+    （2026-10-20 `test_auto_loop_runs_the_claimable_batch_in_order` 恒红的那条链：三门课只
+    跑成第一门）。本类给的是「端点不存在」这个**确定性**降级（`trigger_auto_handoff` 的 404
+    分支：「控制台没有自动交接端点（旧版本）——降级为手动导出」），零等待、与主机 TCP 行为无关。
+    """
+
+    def __init__(self) -> None:
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # BaseHTTPRequestHandler 的约定方法名
+                self._deny()
+
+            def do_GET(self) -> None:
+                self._deny()
+
+            def _deny(self) -> None:
+                out = json.dumps({"error": "not found"}).encode("utf-8")
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *args: object) -> None:
+                return None
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
 # ────────────────────────── 真 hub 进程 ──────────────────────────
 
 
@@ -235,6 +275,13 @@ class _Hub:
         hold_stale_sec: float = 0.0,
         export_sec: float = 0.0,
     ) -> None:
+        """`console_url` 留空 ⇒ 自己起一个**快速拒**的假控制台（见 `_NoAutoHandoffConsole`）。
+
+        为什么不是「留空就吃 `os.environ` 里的死端口」：那让本层的墙钟取决于主机的 TCP 行为
+        （丢 SYN 的机器上每次触发 8s），而 claim 是**同步**走控制台腿的那条路（2026-10-20）。
+        """
+        self._console = _NoAutoHandoffConsole() if not console_url else None
+
         def _argv(port: int) -> list[str]:
             return [
                 sys.executable,
@@ -261,9 +308,8 @@ class _Hub:
             **os.environ,
             "PYTHONPATH": str(ROOT),
             "BCITY_WEIGHTS_ARCHIVE_ROOT": str(traj_root / "weights-archive"),
+            "BCITY_CONSOLE_URL": console_url or (self._console.url if self._console else ""),
         }
-        if console_url:
-            env["BCITY_CONSOLE_URL"] = console_url
         if stall_sec:
             env["BCITY_OFFLINE_STALL_SEC"] = str(stall_sec)
         if hold_stale_sec:
@@ -306,6 +352,8 @@ class _Hub:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=5)
+        if self._console is not None:
+            self._console.close()
 
 
 # ─────────────── ① 全链：在训在线课 → claim 接管 → 跑满 → 不可再领 → 重导解封 ───────────────

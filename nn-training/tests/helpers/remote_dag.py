@@ -134,12 +134,33 @@ LAYERS: dict[str, int] = {
     "hub.store_results": 0,
     "hub.store_wire": 0,
     "remote.prefetch": 0,
+    # 下行腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation` 的下行半场）：
+    #   * `payload_proc` = 父侧代理 `PayloadProcess` + 工厂 `make_prefetcher`（依赖面 =
+    #     `prefetch`(L0) + `common.platform_utils` + stdlib ⇒ **L1**）；
+    #   * `payload_worker` = 子进程入口（`python -m remote.payload_worker`）：要 `job_round`(L4)
+    #     的 `_prefetch_fill`（唯一实现）与 `prefetch`(L0) 的 `PrefetchStore` ⇒ **L5**。
+    # 两者与 `upload_proc`(L1) / `upload_worker`(L4) 同形：父側只拿 L0 常量，子侧只 import
+    # 出唯一实现，两边**互不 import**（否则父側会被子侧的实现拖进一张更深的秩）。
+    # ⚠ `payload_worker` **不是** standalone 引导文件（不进 `STANDALONE_BOOT_MODULES`）。
+    "remote.payload_proc": 1,
+    "remote.payload_worker": 5,
+    # 子进程三件套（拉起 / 收线 / 行泵 + `repo_root`）的**唯一实现**（2026-10-20）：回传腿与
+    # 下行腿两个代理共用。只 import stdlib + `common.platform_utils` ⇒ **L0**。
+    # 它存在的理由就是复用账本：第三个副本（`_repo_root` / `_spawn` / `_stop_child`）会立刻
+    # 变成三份各自会漂的真相。
+    "remote.child_proc": 0,
     # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**纯判据**（合并 origin 时新拆的叶子）：只靠
     # `common.protocol` + `net_http`(L0) ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为
     # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
     "hub.task_pack": 0,
 
     "remote.result_upload": 0,
+    # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理
+    # `UploaderProcess` + 工厂 `make_uploader`。依赖面 = `result_upload`(L0，共同接口/常量)
+    # + `common.platform_utils`(L0) + stdlib ⇒ 拓扑秩 **L1**（`remote.worker`(L5) 站在它上面）。
+    # ⚠ 它**不** import 子进程入口（那会把 `job_lifecycle` 拉进来并凭空加一层）：落定行前缀
+    # `OUTCOME_PREFIX` 住在 `result_upload`(L0) —— 两边同时从那里 import。
+    "remote.upload_proc": 1,
     # 云机错误上报腿（2026-10-16，plan/component-error-registry §4.3-S3b）：只 import
     # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
     # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
@@ -277,6 +298,12 @@ LAYERS: dict[str, int] = {
     "hub.queue": 4,
     "hub.result": 3,
     "remote.job_round": 4,
+    # 回传腿的**子进程入口**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：
+    # `python -m remote.upload_worker`，由 `remote.upload_proc` 用 `Popen` 拉起。
+    # 依赖面 = `remote.job_lifecycle`(L3，`post_result` 的唯一实现) + `remote.wire`(L1，
+    # `_wire_take` 把传输账交回父侧) + `result_upload`(L0) ⇒ 拓扑秩 **L4**。
+    # 与 `deliver_worker` 同理它**不是** standalone 引导文件（不进 `STANDALONE_BOOT_MODULES`）。
+    "remote.upload_worker": 4,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，

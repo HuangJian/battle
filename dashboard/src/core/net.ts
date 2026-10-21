@@ -8,14 +8,50 @@ import { networkInterfaces } from 'node:os'
  *  - pidAlive / killPid: 信号原语（SIGTERM → 轮询 → SIGKILL）。
  */
 
-/** 端口是否在监听：原生 TCP 连接探测。 */
-export async function portListen(port: number, host = '127.0.0.1'): Promise<boolean> {
+/** 端口探测的上界（毫秒）。回环上**真在听**的 socket，握手是 µs 级（内核直接回 SYN-ACK，
+ *  不等 accept）——超过这个上界只可能是「没人听」，按 `false` 收。
+ *
+ *  为什么必须有上界（2026-10-20）：`Bun.connect` 到**没人监听**的端口，正常主机立刻
+ *  `ECONNREFUSED`；可丢回环 SYN 的主机上它**既不报错也不返回**（本仓 Linux 沙箱实测 >6s）。
+ *  而 `portListen` 是「就绪 / 归属 / 空闲」所有判断的代理：`proc.portOwnedBy` 的兜底、
+ *  `allocateSlot` 的槽位探测、`hub/smoke` 的就绪复核都会跟着挂（实测
+ *  `portOwnedBy(pid, 闭端口)` 挂死 >5s；`tests/training-port-reclaim.test.ts` 的「真监听」用例恒红）。
+ */
+export const PORT_PROBE_TIMEOUT_MS = 500
+
+/** 端口是否在监听：原生 TCP 连接探测，**带上界**（见 `PORT_PROBE_TIMEOUT_MS`）。
+ *
+ *  超时的那一份连接如果**事后**还是连上了，就地把它 `end()` 掉——超时只意味着「这次不算数」，
+ *  不能把 socket 漏在进程里。
+ *
+ *  **残余**（写下来免得下次当 bug 查）：超时后那次 connect 如果**永远不返回**（内核丢 SYN），
+ *  它占的那一个 fd 要等内核自己放弃（~2min）才释放；它不再阻塞**任何调用方**，只是这段时间
+ *  占一个句柄。为什么不在超时就销毁：`Bun.connect` 给的是“连上后的 promise”，没有取消句柄；
+ *  要真取消得换 `node:net` 的 `socket.destroy()`——与本文件「全 Bun 原生 API、无平台分支」的
+ *  模块头纪律冲突，故留此残余（触发条件是擕 SYN 的主机，那里控制台本来就不该跑满频率探测）。
+ */
+export async function portListen(
+  port: number,
+  host = '127.0.0.1',
+  timeoutMs = PORT_PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const probe = (async (): Promise<boolean> => {
+    try {
+      const conn = await Bun.connect({ hostname: host, port, socket: { data() {} } })
+      conn.end()
+      return true
+    } catch {
+      return false
+    }
+  })()
+  const bounded = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs)
+  })
   try {
-    const conn = await Bun.connect({ hostname: host, port, socket: { data() {} } })
-    conn.end()
-    return true
-  } catch {
-    return false
+    return await Promise.race([probe, bounded])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 

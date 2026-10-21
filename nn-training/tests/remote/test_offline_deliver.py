@@ -69,6 +69,45 @@ def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 RUN = "run-offline-1"
 
 
+class _RefusingHub:
+    """`common.net_http.urlopen` 的替身：`down=True` 时抛「连接被拒」（= hub 关机的真实形状）。
+
+    **为什么不用 `http://127.0.0.1:1` 这个真死端口**（2026-10-20）：那个端口没人听**不等于**
+    连上去就立刻被拒 —— 防火墙/沙箱把 SYN 丢掉时 `connect` 会一路挂到 `probe()` 自己的
+    20s 上限。于是 `test_hub_unreachable_…`（两次探活）白等 40s、
+    `test_run_plan_job_ignores_delivery_failures`（三轮）白等 60s，两条都被耗时预算
+    （>30s）判红，而断言的**语义**一条都没变。
+
+    语义等价：`ConnectionRefusedError` 正是 `_urllib_opener` 在生产里抛出的那一种，
+    `probe()` 的 `except Exception` 分支逐字相同（两者都落到「不可达」）。
+    `down` 可以翻回 False ⇒ 同一个用例还能演「hub 又回来了」，而这时它委托给**真**的
+    `net_http.urlopen`（回环照旧绕开代理）。
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.down = True
+        #: 每一次被拦下的 URL（断言「真发过探活」用——否则「不可达」可能只是没发）。
+        self.calls: list[str] = []
+
+    def __call__(self, req, timeout: float = 30.0):
+        url = getattr(req, "full_url", None) or str(req)
+        self.calls.append(url)
+        if self.down:
+            raise ConnectionRefusedError(111, "Connection refused")
+        return self._real(req, timeout=timeout)
+
+
+@pytest.fixture
+def hub_down(monkeypatch: pytest.MonkeyPatch) -> _RefusingHub:
+    """把回环 HTTP 换成「hub 关机」（见 `_RefusingHub`；不打桩就白等 20s/发）。"""
+    from common import net_http
+
+    stub = _RefusingHub(net_http.urlopen)
+    monkeypatch.setattr(net_http, "urlopen", stub)
+    return stub
+
+
 def _make_artifacts(root: Path, *, run_id: str = RUN, iters: tuple[int, ...] = (1, 2, 3)) -> Path:
     """手搓一个产物目录（形状与 `ArtifactStore` 同规：manifest + it-NNN/ + metrics.jsonl）。"""
     root.mkdir(parents=True, exist_ok=True)
@@ -317,16 +356,22 @@ def test_delivered_ledger_makes_redelivery_restart_safe(tmp_path: Path) -> None:
         th.join(timeout=5)
 
 
-def test_hub_unreachable_is_free_and_backlog_delivers_on_reconnect(tmp_path: Path) -> None:
+def test_hub_unreachable_is_free_and_backlog_delivers_on_reconnect(
+    tmp_path: Path, hub_down: _RefusingHub
+) -> None:
     """**核心需求**：hub 关机期间照跑（返回 0、不抛、不标记）；连上那天积压一次补齐。"""
     root = _make_artifacts(tmp_path / "art")
     down = _deliverer("http://127.0.0.1:1", root)  # 没人听的端口
     assert down.sync() == 0  # 不抛
+    assert hub_down.calls and hub_down.calls[0].endswith("/ping"), (
+        "一次探活都没发出去 —— 「不可达」不是被测出来的"
+    )
     assert not (root / "delivered.json").exists()  # 什么都没记成已投递
     assert down.pending() == [1, 2, 3]
     assert down.deliver_result(it_end=3, state="complete") is False
 
-    # 中途连上了（同一目录、同一个 run）
+    # 中途连上了（同一目录、同一个 run）：放行真回环，让下面刚起的 server 能被连上
+    hub_down.down = False
     base, store, srv, th = _boot_server(tmp_path)
     try:
         up = _deliverer(base, root)
@@ -1089,7 +1134,7 @@ def test_deliverer_carries_the_lease_token_only_when_it_has_one(tmp_path: Path) 
 
 
 
-def test_run_plan_job_ignores_delivery_failures(tmp_path: Path) -> None:
+def test_run_plan_job_ignores_delivery_failures(tmp_path: Path, hub_down: _RefusingHub) -> None:
     """补传坏掉（hub 没人听）时整段照常跑完 —— 这是本功能唯一不可让步的性质。"""
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)
     result = run_plan_job(
@@ -1107,6 +1152,7 @@ def test_run_plan_job_ignores_delivery_failures(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert result["it_end"] == 3 and result["run_state"] == "complete"
+    assert hub_down.calls, "整段跑完了却一次补传都没试过 —— 「补传坏掉」不是被测出来的"
     assert (tmp_path / "art" / "artifacts.zip").exists()  # 产物照常
     assert not (tmp_path / "art" / "delivered.json").exists()  # 一次都没投成
 

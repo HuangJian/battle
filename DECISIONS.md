@@ -8292,3 +8292,136 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：§122 总表与逐条结论 · 十份课程头注 · `tmp/y2627-close.py` / `tmp/mk-y2627-close.py`（临时件，不入库）。
 - **不再做**：不重跑这十腿（判负的机制都已定位到价目表或结构，重跑同一剂量只会复现）；能力侧的下一次机会
   全部押在 `y27-steady`（§121）与它的后续半剂量腿。
+## §2026-10-20-goalnn-ppo-worker-transfer-isolation — PPO worker 的结果回传腿搬进独立子进程（`--result-upload process`）
+
+- **用户指令（2026-10-20）**：「云机自主 worker 上，已经把网络传输进程与 PPO 进程独立，两者互不
+  阻塞。ppo worker 也需要同样处理，请检查。」检查结论 = **确实没做**：自主腿的补传住在
+  `DelivererProcess` → `remote/deliver_worker.py`（2026-10-07，`plan/offline-deliver-isolation` §P1），
+  而 PPO worker（`remote/worker.py`）的结果回传仍是**进程内后台线程**
+  （`remote/result_upload.py::ResultUploader`）。同一个解释器里做 `json.dumps`（线上体 ~1.6MB）+
+  gzip + HTTP，正是 §69 那次现场（PPO 单步 `0.186 → 5.26 / 7.40 s`）的同一条「网络腿抢 GIL/核」通道。
+- **决策**：给 `--result-upload` 加 `process` 档：父侧代理 `remote/upload_proc.py::UploaderProcess`
+  （与 `ResultUploader` 同接口 `UploaderLike`）+ 子进程入口 `remote/upload_worker.py`；子进程只做
+  「收票 → 调 `job_lifecycle.post_result` → 交回落定行与传输账」。**库缺省仍是 `async`**，
+  云机入口 `notebook_runtime.run_pull_worker` 显式开 `--result-upload process`。
+- **为什么不换缺省**：全仓 10+ 处 `monkeypatch.setattr(remote.worker, "post_result", …)` 是**进程内**
+  接缝；进程模式下真正 POST 的是子进程 ⇒ 换缺省会让那批用例被迫起真子进程（慢 + 假红）。能力由
+  入口显式开，是 2026-10-07 补传腿那条「缺省 process」的对偶取舍（那条的入口是离线包，接缝少）。
+- **为什么不重启子进程而是降级**（与 `DelivererProcess` 的有意差异）：票全在父侧内存里，重启也得把
+  它们重发一遍；而「重发」是幂等 POST（hub 409/200）⇒ 直接**sticky 降级**到进程内线程，省一次
+  boot 握手与管道重建。降级那一段确实重新与训练线程抢 GIL ⇒ 必须**响亮一行**（不是静默优化）。
+- **绝不丢**：`close()` = drain → 关 stdin → 等余量 → 收线程 → **残票父侧同步补发**；子进程半路死
+  （OOM/被杀）走同一条路。子进程起不来的**主路径**是在飞的 `code.zip`/旧树里没有那个模块 ——
+  与补传腿同形：降级是预期形态，不是异常。
+- **记账不撒谎**：真正 POST 的进程不是打 job 行的那个 ⇒ 子进程用 `wire._wire_take` 取走自己的桶、
+  随落定行交回；父侧 `job_lifecycle.record_upload_wire` 重放进同一份每 job 账 ⇒ job 行的 `out=`
+  与 `overlap=` 与线程模式同义。这一跳**必须住 `job_lifecycle`**（`worker.py` 里不许有 `_wire_add`
+  调用点，`test_job_lifecycle_split` 有闸——首版就撞上了）。
+- **被否决的备选**：① 缺省就切 `process`（接缝全废，见上）；② 把整条传输腿（含预取下载）一起搬
+  ——预取与上一轮 PPO 重叠是**刻意设计**（`remote/prefetch.py` 头部），搬它要另立「暂存目录单写者」
+  设计，另案；③ 复用 `deliver_worker` 的 ctl 文件协议（它是磁盘产物腿，结果体在内存里，套上去
+  只是多一层 spool 文件与清理）；④ 子进程自己重写一套重试/409/403（必然与 `post_result` 分叉）。
+- **已知边界**：子进程的 `_BULK` 调度器是它自己那份（单请求无争用 ⇒ 退化为直发；父侧控制面不再与
+  回传共享排程，与 `deliver_worker` 同族取舍）；降级/补发那份只有秒数没有字节（`sync_fallback`
+  计数会露出来）。
+- **落点**：`nn-training/remote/upload_proc.py`（新）· `remote/upload_worker.py`（新）·
+  `remote/result_upload.py`（`UploaderLike` + `OUTCOME_PREFIX` + `off_critical_path` + 模式域）·
+  `remote/wire.py::_wire_take` · `remote/job_lifecycle.py::record_upload_wire` · `remote/job_round.py`
+  （协议 + `off_critical_path`）· `remote/worker.py` · `remote/notebook_runtime.py` ·
+  `tests/helpers/remote_dag.py`（秩：`upload_proc` L1 / `upload_worker` L4）·
+  `tests/remote/test_result_upload_proc.py`（12 例）。
+- **门禁**：nn python gate **2551 passed / 2 skipped**（余 2 条 `test_offline_deliver` 的 40s 耗时预算
+  超限在干净 HEAD 上同样红 = 环境）· ruff / mypy（714 源文件）绿 · `bun run check` 绿。
+- **全文** → `docs/nn/remote-transport.md` §107；计划 → `plan/ppo-worker-transfer-isolation.plan.md`。
+
+## §2026-10-20-goalnn-ppo-worker-downlink-isolation — PPO worker 的**下行腿**（预取 payload 下载 + 解包）也搬进子进程（用户指令）
+
+- **背景**：§2026-10-20-goalnn-ppo-worker-transfer-isolation 把**上行**（结果回传）搬进子进程后，
+  用户追加同一句话的后半段：「把 PPO worker 的下行腿（payload 下载/预取解包）也搬进子进程」。
+  下行此前住在训练进程的后台填充线程（`job_round._prefetch_fill`：`peek` + `download_payload`(P2)
+  + `unpack_payload`(单线程 lzma，单份 300MB 级)），而它**刻意**与上一轮 PPO 重叠
+  （`remote/prefetch.py` 头部 §0：串行会把 GPU 饿死在传输上）⇒ 重叠的价值必须保留，代价（抢同一个
+  GIL / 同一颗核）必须消掉。
+- **决定**：新增 `remote/payload_worker.py`（子进程，L5：跑**唯一实现** `_prefetch_fill` +
+  `PrefetchStore`）+ `remote/payload_proc.py`（父侧 `PayloadProcess` / 工厂 `make_prefetcher`，L1）；
+  `worker.py --prefetch-mode {process,thread}`，**缺省 process**（测试钉 `NN_PREFETCH_MODE=thread`）。
+  四条纪律：① **暂存区单写者 = 子进程**（`take` 走请求-应答，父侧 `rename` 与子进程 `prune`
+  不可能夹住同一份）；② 未解包的命中项 zip 走 base64（落文件会让父侧读一半被 prune 删）；
+  ③ 起不来/中途死 ⇒ **sticky 降级**到进程内 `PrefetchStore` + 填充线程（`__getattr__` 逐字转发，
+  `job_round` 旧分支一字不改）；④ **跨进程 P1 协同**：`bulk_sched.set_p1_observer` / `foreign_p1`
+  —— P2 的「P1 在等就不开工 + 可当场打断」原本靠同一个调度器实例，搬进程后必须显式广播。
+- **为什么不顺手改库缺省（上行是 `async`、下行是 `process`）**：上行的 10+ 处测试 patch
+  `remote.worker.post_result` 是**进程内接缝**，换缺省会假红；下行的接缝全在 `PrefetchStore` /
+  `_prefetch_fill` 上，`tests/conftest.py` 钉一个 env 就够。判据是「这个缺省会不会把别人的接缝
+  变成空操作」，不是「两个代理要长得一样」。
+- **共用的部分真的抽了出去**：`repo_root` / `spawn_module` / `reap_child` / `pump_lines` 落进新的
+  `remote/child_proc.py`（L0），两个代理不再各持一份（复用账本 `exact_groups` 回 14，
+  `clone_groups` 17→15；`same_name_ge3` 81→88 的 7 个名字逐条理由写在 `tests/test_reuse_ledger.py`）。
+- **顺带修掉的两条慢用例**：`tests/remote/test_offline_deliver.py` 的两条用真死端口
+  `http://127.0.0.1:1` 演「hub 关机」——在会丢弃 SYN 的环境里 connect 会挂到 `probe()` 自己的 20s
+  上限（实测 40s / 60s），被耗时预算判红而断言全绿。改用 `_RefusingHub`（`net_http.urlopen` 替身抛
+  `ConnectionRefusedError`，= 生产里 `_urllib_opener` 抛的那一种），语义等价、与内核行为解耦。
+- **落地**：`remote/payload_proc.py` · `remote/payload_worker.py` · `remote/child_proc.py` ·
+  `remote/prefetch.py`（模式常量 + 行前缀）· `remote/bulk_sched.py`（`set_p1_observer` / `foreign_p1`）·
+  `remote/job_round.py`（`pf_proc` 分派 + `stop_fill`）· `remote/worker.py`（`make_prefetcher` /
+  `--prefetch-mode` / 收尾 close / P1 广播）· `tests/helpers/remote_dag.py`（秩：`payload_proc` L1 /
+  `payload_worker` L5 / `child_proc` L0）· `tests/conftest.py` · `tests/remote/test_prefetch_proc.py`（14 例）·
+  `tests/remote/test_offline_deliver.py`（两条用例的替身）。
+- **门禁**：ruff / mypy 绿 · nn python gate **4781 passed / 2 skipped**（`e2e/test_auto_handoff_e2e.py`
+  的 1 条在本机恒红，已在干净 HEAD 的 worktree 复现 = 环境丢回环包）· `bun run check` 绿（2633 例）·
+  `check-decisions` 绿。
+- **全文** → `docs/nn/remote-transport.md` §108；计划 → `plan/ppo-worker-transfer-isolation.plan.md` §5。
+
+## §2026-10-20-goalnn-claim-timeout-outlives-console-leg — `claim` 的客户端超时必须 > hub 在应答里花掉的控制台预算（8s vs 8s = 白丢租约 + 一拖一自锁）
+
+- **报障**（用户 2026-10-20）：「`e2e/test_auto_handoff_e2e.py::test_auto_loop_runs_the_claimable_batch_in_order`
+  在本机恒红 —— 修！」（上一刀 `§2026-10-20-goalnn-ppo-worker-downlink-isolation` 把它记成
+  「沙箱丢回环包」的环境问题；那个判读**不完整**：环境只是放大器，真因是下面这条超时撞车。）
+- **根因**：hub 的 `/offline/claim` 成功分支在回 200 **之前**同步跑 `_ask_console_freshness`
+  （故意：作废必须发生在响应返回前，否则云机随后取包会拿到旧包），预算是
+  `hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC` = 8s；而云机侧的 `claim_course` 用
+  `PING_TIMEOUT` = 8.0 当超时 —— **两个 8 撞在同一个数上**，控制台挂住时客户端必然先到点。
+  claim 是**写**：hub 已经发出租约、hold 已落盘，客户端只看到 `net`（纪律：照旧跑、无租约）
+  ⇒ 没人交还那份 hold，一拖一（按 worker）把本盘其余课全挡在 `busy` 上等 900s。实测：
+  e2e 三门课只跑成第一门，日志里 `端点连不上（TimeoutError）` 与 hub 的 `offline-claim … 200`
+  同一秒出现。
+- **被否决的备选**：把 hub 的控制台腿挪到后台线程/响应之后。否决理由：claim 与随后取包之间的
+  竞态现在是靠「响应返回前旧包已作废」关掉的，挪走等于重新打开它（云机从旧起点烧几十轮，
+  比慢 8s 贵得多）。**要动的是客户端对「写」的超时预算，不是 hub 的同步语义。**
+- **决定**：`remote/offline_boot.py` 新增 `CLAIM_TIMEOUT = 30.0`（20s 余量留给同一分支里的包
+  `sha256`）并作为 `claim_course` 的缺省；只读探活/清单仍用 `PING_TIMEOUT`（8s）。
+  一般规则：**写请求的客户端超时必须 ≥ 服务端允许自己花掉的时间**；两个数相等 = 踩线。
+- **测试侧同一条链的放大器**：e2e 的 `_Hub` 缺省不再吃 `tests/conftest.py` 钉的死端口
+  `http://127.0.0.1:9`（回 RST 还是丢 SYN 取决于主机 ⇒ 每次触发 8s 还是 2ms 看天气），改为自带
+  `_NoAutoHandoffConsole`（一律 404 = 「控制台不在/太旧」的确定性降级）。该用例 25s（3×8s）→ <1s。
+- **落地**：`remote/offline_boot.py`（`CLAIM_TIMEOUT` + `claim_course` 缺省）·
+  `e2e/test_auto_handoff_e2e.py`（`_NoAutoHandoffConsole` + `_Hub` 缺省接线 + `close()` 收它）·
+  `tests/common/test_offline_task_queue.py::test_claim_timeout_outlives_the_hub_console_leg`
+  （契约用例：两个常量任何一边被调走都当场红）。
+- **门禁**：`pytest e2e/test_auto_handoff_e2e.py` **14/14 绿**（此前 1 红）· nn python gate
+  **4781 passed / 2 skipped**（ruff + mypy 全绿）· `tests/test_reuse_ledger.py` 绿。
+- **全文** → `docs/nn/remote-transport.md` §109。
+
+## §2026-10-20-goalnn-port-probe-bounded — 端口探测必须带上界：`portListen` 的 connect 在丢 SYN 的主机上永不返回
+
+- **触发**（用户 2026-10-20）：「`portOwnedBy（真实监听进程） > spec.ownsResource …（真监听）` -- fix it」
+  （= `dashboard/tests/training-port-reclaim.test.ts` 里修完 `freePort()` 之后剩下的最后一条红）。
+- **根因**：`dashboard/src/core/proc.ts::portOwnedBy(pid, port)` 在 `portOwnerPids(port)` 为空时退回
+  `portListen(port)` 再确认一次；`portListen` = `Bun.connect`，它默认「没人监听 ⇒ 立刻 ECONNREFUSED」。
+  在**丢回环 SYN** 的主机上这个前提不成立：探针实测 `Bun.connect` 到闭端口 >6s 不返回、
+  `portOwnedBy(pid, 闭端口)` >5s 挂死（`portListen` 在 `bind` 探测下 3ms、`lsof` 51ms）。
+  影响面不止这一个函数：`portListen` 是所有「就绪 / 归属 / 空闲」判断的代理
+  （`specs.ownsResource`、`slots.allocateSlot`、`stack/hub` 就绪复核、`stack/smoke`、`launch/cli` 占用扫描）。
+- **决定**：`core/net.ts::portListen` 加**上界** `PORT_PROBE_TIMEOUT_MS = 500`（第三参可覆盖）：
+  `Promise.race([probe, 超时])`，超时按 `false`；超时之后才连上的那一份连接仍然 `end()`（不许漏 socket），
+  并清 timer。判据依据：回环上真在监听的 socket 由内核直接回 SYN-ACK（不等 `accept`），握手 µs 级
+  —— 500ms 是三个数量级的余量，而「没人听」「内核丢 SYN」两个真相的正确答案都是 `false`。
+- **被否决**：① 只在测试里打桩 `portOwnedBy`（绕过被测函数 = 删掉覆盖面）；② 另写一个“快速失败”专用
+  探针（同一个真相做成两份）；③ 超时当 `true`（`owners` 为空已经说明没人持有，判 true 会让监督器把
+  僵尸认成新进程）。也不改 `Bun.connect` 的用法本身（它仍是“能连上就是在听”的正确判据）。
+- **读数（同一台 Linux 沙箱）**：该测试文件 12 pass / 3 fail → **15 pass / 0 fail（1.7s）**；
+  `bun run test` 全量 1783/3（157.4s）→ **1786 pass / 0 fail（21.6s）**；`typecheck` / `oxlint`（0 警告）/
+  `oxfmt --check` / `bun dashboard/src/server/build.ts` 四份 bundle 全绿。
+- **落地**：`dashboard/src/core/net.ts`（`PORT_PROBE_TIMEOUT_MS` + `portListen` 上界）·
+  `dashboard/tests/training-port-reclaim.test.ts`（`freePort` → bind 探测 `portFree`）。
+- **全文** → `docs/nn/console.md` §41。

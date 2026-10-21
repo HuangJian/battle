@@ -74,6 +74,11 @@ from remote.job_lifecycle import (
     report_prefetch,
     start_cancel_watcher,
 )
+
+# 下行腿的**进程模式**代理（2026-10-20）：本模块只拿它做 isinstance 分派（「填充在子进程
+# 里？」）与三处调用（`take` / `start_fill` / `stop_fill`）；暂存账、填充循环都在对方那边
+# （`payload_proc` L1 / `payload_worker` L5）—— 分层是向下的（本模块 L4 → L1），不反向。
+from remote.payload_proc import PayloadProcess
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
     PREFETCH_UNPACK_DEFAULT,
@@ -81,7 +86,7 @@ from remote.prefetch import (
     pick_candidates,
     prefetch_worth_it,
 )
-from remote.result_upload import Outcome, ResultUploader, UploadTask
+from remote.result_upload import Outcome, UploaderLike, UploadTask
 from remote.wire import _wire_flush, _wire_hit, _wire_start, _wire_totals
 from remote.worker_proc import _request_reload
 
@@ -280,7 +285,7 @@ def settle_result(
     out: Outcome,
     wall_end: float,
     *,
-    uploader: ResultUploader,
+    uploader: UploaderLike,
     log: Callable[[str], None],
 ) -> None:
     """回传落定：**把本 job 的传输账收在这一刻**（P2.5）。
@@ -295,7 +300,9 @@ def settle_result(
     `result POST 403（…）`，见 `job_lifecycle.post_result`）；hub 侧另有一行受理记录。
     `out` 仍在签名里（`on_settled` 回调形状），不再是日志输入。
     """
-    _wire_flush(jid, log, wall_end=wall_end if uploader.mode == "async" else None)
+    # `off_critical_path`（而不是 `mode == "async"`）：进程模式（`UploaderProcess`）同样是
+    # 「回传不占关键路径」，`mode` 只说明实现身份（2026-10-20，plan/ppo-worker-transfer-isolation）。
+    _wire_flush(jid, log, wall_end=wall_end if uploader.off_critical_path else None)
 
 
 def run_one_round(
@@ -305,7 +312,7 @@ def run_one_round(
     *,
     part_dir: Path,
     code_cache_dir: Path | None,
-    pf_store: PrefetchStore | None,
+    pf_store: PrefetchStore | PayloadProcess | None,
     polls_since_accept: int,
     worker_id: str,
     #: R0（M0）身份映射的根（= `--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）。
@@ -318,7 +325,7 @@ def run_one_round(
     role: str = ROLE_ONLINE,
     prefetch_depth: int,
     prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
-    uploader: ResultUploader,
+    uploader: UploaderLike,
     run_job_fn: Callable[..., dict],
     log: Callable[[str], None],
 ) -> RoundOutcome:
@@ -362,6 +369,12 @@ def run_one_round(
     preloaded: dict | None = None
     _pf_stop = threading.Event()
     pf_thread: threading.Thread | None = None
+    # 下行腿在**哪**跑（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
+    # `PayloadProcess` 且**未降级** ⇒ 填充在子进程里（这里只下一道 `fill` 命令）；
+    # 其余（`PrefetchStore` / 降级后的 `PayloadProcess`）⇒ 旧的进程内填充线程。
+    # 降级后 `pf_proc.fills_out_of_process` 会翻成 False，而它自己的 `__getattr__` 把
+    # `store`/`held`/`begin`… 逐字转给进程内那份 ⇒ 下面的旧分支一字不改就能接。
+    pf_proc = pf_store if isinstance(pf_store, PayloadProcess) else None
     if pf_store is not None:
         got = pf_store.take(jid)
         want_sha = str((job.get("manifest") or {}).get("payload_sha256") or "")
@@ -383,21 +396,39 @@ def run_one_round(
             # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
             log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
             pf_store.drop(jid)  # staged 形状的暂存目录也要一起清（drop 连 _handoff 一起清）
-        pf_thread = threading.Thread(
-            target=_prefetch_fill,
-            args=(base_url, token, pf_store, _pf_stop),
-            kwargs={
-                "worker_id": worker_id,
-                "role": role,
-                "depth": prefetch_depth,
-                "unpack_n": prefetch_unpack,
-                "skip": {jid},
-                "log": log,
-            },
-            daemon=True,
-            name=f"pf-{jid[:8]}",
+        # 先试子进程（下行腿已在进程外：网络 + 解包都不抢训练线程的 GIL）。
+        # `start_fill` 返回 False = 没交出去（子进程已降级/死了）：就地回退到进程内线程，
+        # 预取是提前量 —— 它没有自己的失败面（`prefetch.py` 头部 §2）。
+        remote_ok = bool(
+            pf_proc is not None
+            and pf_proc.fills_out_of_process
+            and pf_proc.start_fill(
+                base_url=base_url,
+                token=token,
+                worker_id=worker_id,
+                role=role,
+                depth=prefetch_depth,
+                unpack_n=prefetch_unpack,
+                skip={jid},
+                log=log,
+            )
         )
-        pf_thread.start()
+        if not remote_ok:
+            pf_thread = threading.Thread(
+                target=_prefetch_fill,
+                args=(base_url, token, pf_store, _pf_stop),
+                kwargs={
+                    "worker_id": worker_id,
+                    "role": role,
+                    "depth": prefetch_depth,
+                    "unpack_n": prefetch_unpack,
+                    "skip": {jid},
+                    "log": log,
+                },
+                daemon=True,
+                name=f"pf-{jid[:8]}",
+            )
+            pf_thread.start()
     _hb_stop = threading.Event()
     hb_thread = None
     if lease_token:
@@ -618,7 +649,10 @@ def run_one_round(
         # 失败/取消/热替换/异常）上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
         if pf_store is not None:
             pf_store.release_handoff()
-        # 预取填充线程同理：job 结束即停（它最多再跑一轮下载，join 有超时兜底）。
+        # 预取填充同理：job 结束即停。进程模式等子进程确认收干净（同 30s 预算），
+        # 进程内线程照旧 join（它最多再跑一轮下载）。
+        if pf_proc is not None:
+            pf_proc.stop_fill()
         _pf_stop.set()
         if pf_thread is not None:
             pf_thread.join(timeout=30.0)

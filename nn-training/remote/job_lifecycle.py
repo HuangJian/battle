@@ -71,6 +71,7 @@ from remote.wire import (
     _BULK,
     _bulk_pace,
     _wire_add,
+    _wire_note_failed,
     _wire_note_wait,
 )
 
@@ -529,6 +530,46 @@ def acquire_job(
             got.setdefault("course", cand.get("course"))
             return got
     return {"halt": True} if halt else None
+
+
+def record_upload_wire(jid: str, wire: dict) -> None:
+    """子进程回传腿交回的传输账 → 父侧的每 job 账（`plan/ppo-worker-transfer-isolation` §1-4）。
+
+    为什么要这一跳：`--result-upload process` 下真正跑 `post_result` 的是**子进程**
+    （`remote/upload_worker.py`，与自主 worker 的补传腿同形）；`result` 段的 `(bytes, sec)`
+    与排队秒记在它的 `wire` 模块里，而打 job 行的是父进程（`_wire_flush`）。不重放 ⇒ job 行的
+    `out=` 恒 0、`overlap=` 永远 NULL（「账不许撒谎」静默失效）。
+
+    为什么住本模块：`_wire_add` / `_wire_note_wait` / `_wire_note_failed` 的调用点本来就归
+    `job_lifecycle`（`post_result` 内部那几笔）—— 放到 `worker.py` 会被
+    `test_job_lifecycle_split::test_request_family_has_no_call_site_in_worker_any_more` 当场
+    顶红（那条闸的意思正是「回的账只许在这一簇里写」）。
+
+    口径与 `post_result` 内部逐字对齐：成功段走 `_wire_add`（`nbytes<=0` 时它自己吞掉）、
+    排队走 `_wire_note_wait`、未成功的尝试走 `_wire_note_failed`。
+    """
+    segs = wire.get("segs") or {}
+    if isinstance(segs, dict):
+        for seg, pair in segs.items():
+            try:
+                nbytes, sec = int(pair[0]), float(pair[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            _wire_add(jid, str(seg), nbytes, sec)
+    try:
+        wait = float(wire.get("waits") or 0.0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    if wait > 0:
+        _wire_note_wait(jid, "result", wait)
+    failed = wire.get("failed") or {}
+    if isinstance(failed, dict) and int(failed.get("n", 0) or 0) > 0:
+        try:
+            _wire_note_failed(
+                jid, int(failed.get("bytes", 0) or 0), float(failed.get("sec", 0.0) or 0.0)
+            )
+        except (TypeError, ValueError):
+            pass
 
 
 def post_result(

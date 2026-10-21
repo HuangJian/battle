@@ -89,6 +89,11 @@ def pin_production_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     # 钉成进程内线程模式，行为等价、无进程边界。真子进程只在
     # `tests/remote/test_offline_deliver_proc.py` 里显式 `mode="process"` 跑。
     monkeypatch.setenv("NN_DELIVER_MODE", "thread")
+    # 下行腿（预取下载/解包）同理（2026-10-20）：缺省是**独立子进程**
+    # （`remote.payload_worker`，不抢训练进程的 GIL）。单测不该为预取起真子进程
+    # （慢、且填充线程的 seam 全在进程内），钉成进程内模式；真子进程只在
+    # `tests/remote/test_prefetch_proc.py` 里显式 `mode="process"` 跑。
+    monkeypatch.setenv("NN_PREFETCH_MODE", "thread")
     for name, rel in PRODUCTION_STATE_PINS.items():
         # 只钉路径、**不预建**：真写点自己会 `mkdir(parents=True)`（`write_state` /
         # `write_intent` / `write_applied` 都这样），而预建目录会把「本用例的 tmp_path

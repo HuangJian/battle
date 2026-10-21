@@ -87,11 +87,33 @@ describe('reclaimPort（注入依赖）', () => {
 const CAN_ENUMERATE = process.platform === 'win32' || !!Bun.which('lsof')
 const integrationIt = CAN_ENUMERATE ? it : it.skip
 
-/** 取一个本机空闲高端口（占用者探测触发，无固定等待）。 */
+/** 端口是否空闲：**bind 探测**（不是 connect 探测）。
+ *
+ *  2026-10-20：旧写法用 `portListen`（= `Bun.connect`）判「空闲」——它默认「连不上会立刻
+ *  `ECONNREFUSED`」。可丢回环 SYN 的环境里（本仓 Linux 沙箱实测）connect 既不报错也不返回：
+ *  `Bun.connect` 到闭端口 **>6s** 才被外部 `timeout` 杀掉 ⇒ `freePort()` 的 20 次探测一路挂到
+ *  用例上限，下面三条「真实监听进程」用例恒红（5s/50s 超时），而同一段逻辑在 `bun test` 外
+ *  跑 183ms 全绿。
+ *
+ *  bind 是**权威判据**，而且两种结局都**立刻**有答案（实测占用 12ms 抛错、释放后 9ms 绑上）：
+ *  能绑上 ⇒ 端口一定空闲；`EADDRINUSE` ⇒ 一定被占。与内核怎么回 connect 无关。
+ *  用的是与下面 `spawnListener` 同一种资源（`Bun.serve`），判据与用法同构。
+ */
+async function portFree(port: number): Promise<boolean> {
+  try {
+    const srv = Bun.serve({ port, hostname: '127.0.0.1', fetch: () => new Response('ok') })
+    srv.stop(true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 取一个本机空闲高端口（bind 探测触发，无固定等待；为什么不用 connect 见 `portFree`）。 */
 async function freePort(): Promise<number> {
   for (let i = 0; i < 20; i++) {
     const p = 21000 + Math.floor(Math.random() * 8000)
-    if (!(await portListen(p))) return p
+    if (await portFree(p)) return p
   }
   throw new Error('找不到空闲测试端口')
 }

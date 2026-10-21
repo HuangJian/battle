@@ -13,6 +13,37 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §41 端口探测必须带上界：`portOwnedBy` 的 connect 兜底会把「没人听」等成挂死（2026-10-20）
+
+**触发**：`dashboard/tests/training-port-reclaim.test.ts` 的「真监听」第三条恒红
+（`portOwnedBy（真实监听进程） > spec.ownsResource = 「新进程确实持有它要独占的端口」`）。
+修 `freePort()`（connect 探测 → **bind 探测**，见该文件 `portFree`）后仍红，因为挂的是**生产代码**。
+
+**链**：`proc.ts::portOwnedBy(pid, port)` 在 `portOwnerPids(port)` 为空时退回 `portListen(port)` 再确认一次
+——而 `portListen` = `Bun.connect`，它默认「没人监听 ⇒ 立刻 `ECONNREFUSED`」。
+在**丢回环 SYN** 的主机上这个前提不成立：探针实测 `Bun.connect` 到闭端口 **>6s** 不返回，
+`portOwnedBy(pid, 闭端口)` **>5s 挂死**。受影响的不止这个函数：`portListen` 是所有「就绪 / 归属 / 空闲」
+判断的代理（`specs.ownsResource`、`slots.allocateSlot` 的槽位探测、`stack/hub` 的就绪复核、
+`stack/smoke`、`launch/cli` 的占用扫描）——一处挂死就是控制台侧的一条链停摆。
+
+**决定**：`core/net.ts::portListen` 加**上界**（`PORT_PROBE_TIMEOUT_MS = 500`，可传第三参覆盖）：
+`Promise.race([probe, 超时])`，超时按 `false`；**超时之后才连上的那一份连接仍然 `end()`**（超时只意味着
+「这次不算数」，不许漏 socket）；`finally` 里清 timer。
+
+**为什么 500ms 是安全的**：回环上真在监听的 socket 由**内核**直接回 SYN-ACK（不等 `accept`），握手是
+µs 级 —— 500ms 是三个数量级的余量；而「没人听」与「内核丢 SYN」两个真相的正确答案都是 `false`。
+所以这条上界不改任何判据，只把「永久挂起」换成「有限等待」。
+
+**被否决**：① 只在测试里打桩 `portOwnedBy`（绕过被测函数，等于删掉这条覆盖）；
+② 给 `freePort` 之外再写一个“快速失败”专用探针（把同一个真相做成两份）；
+③ 超时时当 `true`（“不判死”）——`owners` 为空已说明没人持有，再判 true 会让监控器把**僵尸**认成新进程。
+
+**读数（同一台 Linux 沙箱）**：该文件 12 pass / 3 fail → **15 pass / 0 fail（1.7s）**；
+`bun run test` 全量 1783/3（157s）→ **1786 pass / 0 fail（21.6s）**；`typecheck` / `oxlint` / `oxfmt --check` /
+`build.ts` 四份 bundle 全绿。
+
+决策 → `DECISIONS.md §2026-10-20-goalnn-port-probe-bounded`。
+
 ## §40 单一常驻 trainer：准入闸 + 心跳判死 + 两条横幅（plan/single-resident-trainer，2026-10-17）
 
 **现场**：`trainer/run_rl.py` 一个人背四种角色（常驻训练 / 冒烟 / 导出 / 预采），而常驻写者只允许

@@ -49,6 +49,22 @@ PREFETCH_DEPTH_DEFAULT = 3
 PREFETCH_BUDGET_BYTES_DEFAULT = 64 * 1024 * 1024
 #: 暂存目录名（`work_dir/prefetch/`，单 hub ⇒ 不做 hub{i} 分区）。**必须在 prune 豁免名单里**。
 PREFETCH_DIR_NAME = "prefetch"
+
+# ── 进程模式（2026-10-20，`plan/ppo-worker-transfer-isolation` 的下行半场）───────
+#: 下行腿（`peek` + payload 下载 + 解包）跑在哪里：`process` = 独立子进程
+#: （`python -m remote.payload_worker`，父侧代理 `remote/payload_proc.py`）；`thread` = 进程内填充
+#: 线程（= 改造前的旧行为，逃生口/测试档）。
+#:
+#: **为什么缺省是进程**：这条腿的网络 + `lzma` 解包（单份 300MB 级）此前全压在训练进程上——
+#: 预取的价值是「与上一轮 PPO 重叠」，而重叠的代价是抢同一个 GIL / 同一颗核。搬走 = 重叠保持、
+#: 竞争消失（与回传腿 `--result-upload process` 同一条理由，同一个 plan）。
+#: 测试钉 `NN_PREFETCH_MODE=thread`（`tests/conftest.py`）：单测不该为预取起真子进程。
+PREFETCH_MODE_ENV = "NN_PREFETCH_MODE"
+PREFETCH_MODE_DEFAULT = "process"
+PREFETCH_MODES = ("process", "thread")
+#: 子进程的**控制行**前缀：`@@pf@@ {json}`（父侧 `payload_proc` 的解析口径）。
+#: 两边同源 = 这个 L0 常量（子进程与父侧**互不 import**，与 `result_upload.OUTCOME_PREFIX` 同形）。
+PREFETCH_LINE_PREFIX = "@@pf@@"
 #: 预取**解包**的份数（缺省 1，plan/prefetch-stage-unpack §2.3）：只解 peek 顺序里的**前 N 份**，
 #: `0` = 只存字节（= 改造前的旧行为，回退档）。解包是纯 CPU（单线程 lzma）而窗口是上一轮的
 #: **PPO 32–35s** ⇒ 白解包的成本被这条闸限在「每轮最多 N 份」；命中的那份按 `rotation_order`

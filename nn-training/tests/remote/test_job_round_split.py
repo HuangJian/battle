@@ -102,6 +102,11 @@ ALLOWED_PROJECT_IMPORTS = {
     "remote.error_report",
     "remote.job_fs",
     "remote.job_lifecycle",
+    # 下行腿的**进程模式**代理（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
+    # 本轮只拿它做 isinstance 分派与 `take`/`start_fill`/`stop_fill` 三处调用 —— 预取的
+    # 「在哪跑」是宿主级的决定（`worker_loop` 造 `PayloadProcess` 或 `PrefetchStore`），
+    # 本轮只需要知道交进来的是哪一种。
+    "remote.payload_proc",
     "remote.prefetch",
     "remote.result_upload",
     "remote.wire",

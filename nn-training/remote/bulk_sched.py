@@ -169,12 +169,67 @@ class BulkScheduler:
         #: 排队归属（S3d）：token -> 本次 slot 的排队秒数，由调用方 `take_wait()` 取走。
         #: 单通道 ⇒ 同时在册的只有当前 token；前进式修剪兜底（见 `slot`）。
         self._waits: dict[int, float] = {}
+        #: P1「进出等待」的观察者（2026-10-20，下行腿分进程）：本进程的 P1 与**另一个进程**
+        #: 的 P2 不在同一个调度器里，而 P2 的两条纪律（开工门禁 + 抢占）全靠 `_p1_waiting` —
+        #: 父侧由 `worker_loop` 装一个「广播给预取子进程」的回调（见 `set_p1_observer`）。
+        #: 缺省 None = 逐字旧行为（库层零副作用）。
+        self._on_p1: Any = None
 
     # ------------------------------------------------------------------ 槽位
 
     def set_log(self, log: Any) -> None:
         """注入日志函数（worker 在进入循环时把现场日志交给调度器）。"""
         self._log = log
+
+    # ------------------------------------------------------------------ 跨进程 P1
+
+    def set_p1_observer(self, observer: Any) -> Any:
+        """装「P1 进出等待」的观察者（`observer(waiting: bool)`），**返回旧值**供还原。
+
+        为什么存在（2026-10-20，`plan/ppo-worker-transfer-isolation` 的下行半场）：预取的 P2
+        下载搬进子进程后，父进程的关键下载/回传（P1）与它不在同一个调度器里 —— 而 P2 的两条
+        纪律（`_p1_waiting` 开工门禁 + `_preempt_at` 当场打断）全靠这个计数。父侧装一个
+        「广播给子进程」的回调（`PayloadProcess.note_p1`），子侧用 `foreign_p1()` 接。
+
+        ★ 与 `configure_yield` 同一条纪律：`_BULK` 是**进程单例** ⇒ 装配方必须在 finally
+        还原（不还原就把「往管道写一行的副作用」泄漏给同进程后续使用者/测试）。
+        """
+        prev = self._on_p1
+        self._on_p1 = observer
+        return prev
+
+    def _notify_p1(self, waiting: bool) -> None:
+        """广播给观察者。**持锁之外**调（观察者可能走管道，不许压在调度器的锁上）。
+
+        观察者自己的异常一律吞掉：它是**观测/协同**面，绝不允许一条断掉的管道把关键下载
+        （P1）带死（`PayloadProcess` 自己负责把那件事响亮地说一次）。
+        """
+        obs = self._on_p1
+        if obs is None:
+            return
+        try:
+            obs(bool(waiting))
+        except Exception:
+            pass
+
+    def foreign_p1(self, waiting: bool) -> None:
+        """**另一个进程**报告 P1 进出等待 —— 按本进程 P1 的**同一个口径**处理。
+
+        两条都与 `slot()` 里的 P1 分支逐条对齐：
+          · `waiting=True` ⇒ `_p1_waiting += 1`（P2 **不许新开工**）且若此刻 P2 正在传，
+            推一个抢占点（`_preempt_at = _holding`）⇒ 它在下一个分片间隙丢半截退出
+            （幂等重下）。
+          · `waiting=False` ⇒ 计数回落（`max(0, …)`：配对丢失时只会少挡一次，永不为负）。
+
+        事件计数的口径差异是诚实的：跨进程只看得到「有没有 P1 在等」，看不到父侧队列深度。
+        """
+        with self._lock:
+            if waiting:
+                self._p1_waiting += 1
+                if self._inflight and self._holder_prio == BULK_P2_PREFETCH:
+                    self._preempt_at = self._holding
+            else:
+                self._p1_waiting = max(0, self._p1_waiting - 1)
 
     def inflight(self) -> int:
         """当前在途 bulk 数（**不变量：任意时刻 ≤ 1**）。"""
@@ -200,6 +255,7 @@ class BulkScheduler:
         if prio == BULK_P1_CRITICAL:
             with self._lock:
                 self._p1_waiting += 1
+            self._notify_p1(True)
         try:
             with self._lock:
                 if self._inflight and prio == BULK_P1_CRITICAL and self._holder_prio == BULK_P2_PREFETCH:
@@ -229,6 +285,7 @@ class BulkScheduler:
             if prio == BULK_P1_CRITICAL:
                 with self._lock:
                     self._p1_waiting -= 1
+                self._notify_p1(False)
         if waited:
             dt = self._clock() - t0
             with self._lock:

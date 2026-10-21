@@ -126,6 +126,44 @@ def _offline_hub(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     return base, hub, srv
 
 
+class _RefusingConsole:
+    """`hub/task_pack.py::_net_urlopen` 的替身：控制台**一碰就拒**（=「控制台没起」的真实形状）。
+
+    **为什么不靠 `tests/conftest.py` 钉的那个死端口**（2026-10-20）：死端口上没人听**不等于**
+    连上去立刻被拒 —— 防火墙/沙箱把 SYN 丢掉时 `connect` 会一路挂到
+    `hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC`（8s）。而本文件**每一条成功的 claim**
+    都会同步走一次控制台腿（`hub/offline.py::_ask_console_freshness`；缺包路是
+    `_task_pack_miss_gate`）—— 实测同一台机器上 12 条用例白等 8s/次（最长 24s = 3 次 claim），
+    而断言的语义一条都没变。
+
+    语义等价：`ConnectionRefusedError` 正是 `_urllib_opener` 在生产里「控制台没起」时抛的那一种，
+    `trigger_auto_handoff` / `trigger_task_bundle_export` / `console_export_status` 的
+    `except Exception` 分支逐字相同（都落到「控制台不可达 —— 降级为手动」）。
+    """
+
+    def __init__(self) -> None:
+        #: 被拦下的 URL（以后要断言「真发过控制台腿」时用——否则「不可达」可能只是没发）。
+        self.calls: list[str] = []
+
+    def __call__(self, req: Any, timeout: float | None = None) -> Any:
+        self.calls.append(getattr(req, "full_url", None) or str(req))
+        raise ConnectionRefusedError(111, "Connection refused")
+
+
+@pytest.fixture(autouse=True)
+def console_down(monkeypatch: pytest.MonkeyPatch) -> _RefusingConsole:
+    """控制台**一碰就拒**（见 `_RefusingConsole`；不打桩就白等 8s/次 claim）。
+
+    只打 `hub.task_pack` 的那个别名（三个触发腿都只走它）：hub 其余外发调用不受影响，
+    `tests/conftest.py` 的地址桩照旧在（安全网不扶）。
+    """
+    from hub import task_pack
+
+    stub = _RefusingConsole()
+    monkeypatch.setattr(task_pack, "_net_urlopen", stub)
+    return stub
+
+
 # ------------------------------------------------------------------ hub：清单
 
 
@@ -252,7 +290,9 @@ def _lease_of(base: str, worker: str = "w1") -> str:
     return str(_claim(base, worker=worker)[1]["lease"]["token"])
 
 
-def test_claim_grants_a_lease_and_blocks_another_worker(tmp_path: Path) -> None:
+def test_claim_grants_a_lease_and_blocks_another_worker(
+    tmp_path: Path, console_down: _RefusingConsole
+) -> None:
     base, _hub, _srv = _offline_hub(tmp_path)
     _write_pack(tmp_path)
 
@@ -262,6 +302,11 @@ def test_claim_grants_a_lease_and_blocks_another_worker(tmp_path: Path) -> None:
     assert lease["course"] == "c5-gae" and lease["worker_id"] == "w1"
     assert lease["ttl_sec"] == OFFLINE_LEASE_TTL_SEC and lease["token"]
     assert lease["expires_at"] > 0
+    # claim 成功时 hub 会**同步**请一次控制台核对包新鲜度（`_ask_console_freshness`）：
+    # 桩被调到 = 那个 `_net_urlopen` 别名仍是唯一出口（换人了 ⇒ 本文件其余用例会静默慢回去）；
+    # 且「控制台不可达」只是**回执**，不挡租约（降级不留半状态）。
+    assert console_down.calls, "claim 没走控制台腿？`hub/task_pack` 的外发出口换人了"
+    assert "控制台不可达" in str(doc.get("handoff") or ""), doc
 
     st2, doc2 = _claim(base, worker="w2")
     assert st2 == 409, doc2
@@ -1020,6 +1065,33 @@ def test_claim_and_release_never_raise_on_a_dead_hub(monkeypatch: pytest.MonkeyP
     )
     offline_boot.release_course("http://hub", "tok", "c5-gae", "lease1", lines.append)
     assert any("连不上" in ln for ln in lines), lines
+
+
+def test_claim_timeout_outlives_the_hub_console_leg() -> None:
+    """`claim` 是**写**：客户端超时必须盖得住 hub 在这条应答里舍得花的时间。
+
+    hub 的 `/offline/claim` 成功分支里**同步**请一次控制台核对包新鲜度
+    （`hub/offline.py::_ask_console_freshness`），预算 = `TASK_PACK_TRIGGER_TIMEOUT_SEC`（8s）；
+    控制台挂住（不可达、而 SYN 被对端丢掉＝黑洞）时这条应答就要整 8s。
+
+    为什么撞在同一个数上是 bug：客户端先到点 ⇒ 它只看到 `net`（纪律：照旧跑、无租约），
+    而 hub 那一侧租约已经发出去、hold 已落盘 —— 没有人交还它，一拖一把本盘其余课全挡在
+    `busy` 里等 900s（2026-10-20 实测：`e2e/test_auto_handoff_e2e.py`
+    `test_auto_loop_runs_the_claimable_batch_in_order` 恒红，三门课只跑成第一门）。
+
+    断言两条**常量**的关系（不是重跑一遍 8s 的端到端）：任何一个数被调走
+    （hub 放宽控制台预算 / 客户端缩回探活档）都必须在这里响。
+    """
+    from hub import task_pack
+
+    assert offline_boot.CLAIM_TIMEOUT > task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC, (
+        "claim 的客户端超时必须大于 hub 应答里可能花掉的控制台预算"
+        f"（CLAIM_TIMEOUT={offline_boot.CLAIM_TIMEOUT}s vs "
+        f"TASK_PACK_TRIGGER_TIMEOUT_SEC={task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC}s）"
+    )
+    assert offline_boot.CLAIM_TIMEOUT > offline_boot.PING_TIMEOUT, (
+        "claim 不能与探活同档：探活是只读，claim 是写（超时 = 白丢一份已发出的租约）"
+    )
 
 
 def test_claim_course_reports_a_foreign_holder(monkeypatch: pytest.MonkeyPatch) -> None:
