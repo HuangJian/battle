@@ -334,6 +334,61 @@ def test_pull_max_idle_floor_with_long_session(
     assert argv[argv.index("--max-idle-sec") + 1] == "28800"
 
 
+# ------------------------------------------------------------------ W-DP：一机 N worker
+
+
+def test_two_workers_get_one_gpu_each_and_share_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ W-DP（2026-10-21）：`workers=2` ⇒ 单卡各自跑，`--out` 分开、`--cache-dir` 共享。
+
+    这是评审 P0-2 的落点：云机启动 argv 在仓内 ⇒「一机两 worker」不需要新 launcher，
+    也不需要控制台改动。`--out` 必须分开（`prune_job_dirs` 会互删在飞目录），
+    `--cache-dir` 必须共享（否则 `course_cache/latest.json` 各自一份 ⇒ 命中率 ~1/N）。
+    """
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    cache_root = tmp_path / "persist-cache"
+    rc = nbr.run_pull_worker(
+        _base_cfg(tmp_path, device_resolved="cuda-dp", workers=2, cache_dir=str(cache_root)),
+        lambda m: None,
+    )
+    assert rc == 0 and len(seen) == 2
+    devices = [argv[argv.index("--device") + 1] for argv in seen]
+    outs = [Path(argv[argv.index("--out") + 1]) for argv in seen]
+    assert devices == ["cuda:0", "cuda:1"]
+    assert len(set(outs)) == 2, f"两个 worker 的 --out 必须分开：{outs}"
+    for argv in seen:
+        assert argv[argv.index("--cache-dir") + 1] == str(cache_root)
+        assert argv[argv.index("--out") + 1] != str(tmp_path / "work")
+    # token 文件各一份（否则两个进程抬同一个文件，热替换会串）
+    toks = {Path(argv[argv.index("--token-file") + 1]) for argv in seen}
+    assert len(toks) == 2
+
+
+def test_workers_on_non_cuda_falls_back_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CPU/TPU 上 `workers=2` 无意义 ⇒ 只起 1 个（不静默起两个抢同一设备的进程）。"""
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    nbr.run_pull_worker(_base_cfg(tmp_path, workers=2), lambda m: None)
+    assert len(seen) == 1
+    assert seen[0][seen[0].index("--device") + 1] == "cpu"
+
+
 # ------------------------------------------------------------------ A3 持久缓存根
 
 

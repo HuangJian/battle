@@ -305,6 +305,63 @@ def settle_result(
     _wire_flush(jid, log, wall_end=wall_end if uploader.off_critical_path else None)
 
 
+#: W2（plan/ppo-worker-wallclock §4.4）：`/jobs/{id}/start` 的线程化预算。
+#:
+#: 为什么不用 15s（= `job_lifecycle.job_started` 的缺省 timeout）：join 卡在 `job_ready()`
+#: **之前**，15s 会把「算完待回传」这个**重复抑制**信号压后 15s —— 正好放大它要防的那种
+#: 「备份副本重算一整轮」的窗口。线程自己的 HTTP 也必须短于 join，否则超时后的同步
+#: 补发会与仍在飞的请求并发（同一 job 打两次 `/start`）。
+START_TIMEOUT_SEC = 3.0
+START_JOIN_SEC = 3.5
+#: 线程路径超过这个耗时补一行日志（`ppo_start_ms` 的 p95 读数；稳态基本不会出现）。
+START_SLOW_MS = 800.0
+
+
+class _StartBeacon:
+    """把 `POST /jobs/{id}/start` 挪出准备段关键路径（W2）。
+
+    形态：线程发 + `job_ready()` 之前 `settle()`。happy path 上 PPO 要跑 ~24s ⇒ join 为 0，
+    `computing_at` 的落库时刻与同步版**同一时刻**（都早于 ready）⇒ hub 侧掉队阈值一行不改
+    （它是 `store_scheduling` 里 `computing_elsewhere_since` 的唯一时基）。
+
+    ★ 失败路径（2026-10-21）：join 超时/线程报错 ⇒ **先 ready**（重复抑制优先）再同步补发
+    一次；仍失败只记一行 —— `job_started` 本身是 `try/except pass`，所以「失败」只能靠本类
+    的 `ok` 位判，不能靠异常。**绝不阻塞 PPO。**
+    """
+
+    __slots__ = ("_fn", "_thread", "ms", "ok")
+
+    def __init__(self, fn: Callable[[], None]) -> None:
+        self._fn = fn
+        self._thread: threading.Thread | None = None
+        self.ms = 0.0
+        self.ok = False
+
+    def start(self) -> None:
+        t0 = time.time()
+
+        def _run() -> None:
+            try:
+                self._fn()
+                self.ok = True
+            except Exception:  # job_started 不抛；这里只兜「未来改了实现」
+                self.ok = False
+            finally:
+                self.ms = (time.time() - t0) * 1000.0
+
+        self._thread = threading.Thread(target=_run, daemon=True, name="ppo-start")
+        self._thread.start()
+
+    def settle(self, timeout: float = START_JOIN_SEC) -> bool:
+        if self._thread is None:
+            return True  # 没发过（备份副本）⇒ 不算失败
+        self._thread.join(timeout)
+        # `ok` 只在 `fn` 返回**之后**才置位 ⇒ 它已经是「落地了」的充分判据；
+        # 不再叠 `is_alive()`（那只会在 fn 刚返回、线程还没完全退出的几微秒里误报失败，
+        # 进而多打一次 `/start`）。
+        return self.ok
+
+
 def run_one_round(
     base_url: str,
     token: str,
@@ -449,6 +506,15 @@ def run_one_round(
     _watch_stop = threading.Event()
     start_cancel_watcher(base_url, token, jid, _watch_stop, _cancel, log=log)
     _t_ppo0 = time.time()
+    _beacon = (
+        None
+        if claim_mode == CLAIM_MODE_BACKUP
+        else _StartBeacon(
+            lambda: job_started(
+                base_url, token, jid, worker_id=worker_id, timeout=START_TIMEOUT_SEC
+            )
+        )
+    )
     try:
         result = run_job_fn(
             base_url,
@@ -467,16 +533,27 @@ def run_one_round(
             # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
             # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
             # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
-            on_ppo_start=(
-                None
-                if claim_mode == CLAIM_MODE_BACKUP
-                else lambda: job_started(base_url, token, jid, worker_id=worker_id)
-            ),
+            # W2：通道改成线程（`_beacon.start`），落地在下面的 `job_ready()` 之前。
+            on_ppo_start=None if _beacon is None else _beacon.start,
         )
         # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
         # 备份副本不报身份：`set_ready` 会顺手写这份 job 的 `_last_heartbeat`，而那个字段是
         # 主人孤儿判据（`_lease_state`）的输入——备份的一次「算完了」不该把主人的静默洗白。
+        # W2：`computing_at` 必须在 ready 之前落地（线程 + 超时回退，见 `_StartBeacon`）。
+        # 失败时**先 ready**（重复抑制优先），再同步补发一次；仍失败也不阻塞这条腿。
+        _start_ok = True if _beacon is None else _beacon.settle()
         job_ready(base_url, token, jid, worker_id="" if claim_mode == CLAIM_MODE_BACKUP else worker_id)
+        if _beacon is not None:
+            if not _start_ok:
+                log(
+                    f"job {jid}: /start 线程 {_beacon.ms:.0f}ms 未落地 ⇒ ready 后同步补发"
+                    "（ppo_start_failed=1，不阻塞 PPO）"
+                )
+                job_started(
+                    base_url, token, jid, worker_id=worker_id, timeout=START_TIMEOUT_SEC
+                )
+            elif _beacon.ms >= START_SLOW_MS:
+                log(f"job {jid}: /start 落地 {_beacon.ms:.0f}ms（慢于 {START_SLOW_MS:.0f}ms）")
         # ★ 关键路径到此为止（P2.5 异步回传）：回传不再占着算力等。交给上传线程，
         #   主循环立刻去领下一份——而下一份的字节多半已被预取到本地（P2），两者
         #   资源不相交（链路 vs CPU/GPU），天然可叠。
@@ -502,7 +579,7 @@ def run_one_round(
             if cache_root is not None:
                 course_cache.settle(
                     cache_root,
-                    str(job.get("course_fp") or ""),
+                    course_cache.course_fp_of(job),
                     _j,
                     status=_out.status,
                     log=log,

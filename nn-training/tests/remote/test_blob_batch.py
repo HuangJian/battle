@@ -325,6 +325,23 @@ def test_hub_400s_an_unknown_name(tmp_path: Path) -> None:
     assert h.codes == [400]
 
 
+def test_blob_wanted_skip_drops_opt_but_keeps_ref() -> None:
+    """W1b（`plan/ppo-worker-wallclock` §4.3）：身份命中 ⇒ opt 不进批，**ref 照旧进批**。
+
+    `blob_wanted` 是纯函数（判据都在 manifest 上）⇒「命中就不下」可单测。
+    """
+    from remote.train_core import blob_wanted
+
+    m = {"opt_sha": "o" * 64, "ref_sha": "r" * 64}
+    assert blob_wanted(m, kick_kl=0.0) == {BLOB_OPT: "o" * 64}
+    assert blob_wanted(m, kick_kl=1.0) == {BLOB_OPT: "o" * 64, BLOB_REF: "r" * 64}
+    # 身份命中：只有 opt 被 skip（`ref` 是另一件字节，kick 打开时不能顺手一起省）
+    assert blob_wanted(m, kick_kl=1.0, skip=frozenset({BLOB_OPT})) == {BLOB_REF: "r" * 64}
+    assert blob_wanted(m, kick_kl=0.0, skip=frozenset({BLOB_OPT})) == {}
+    # 缺 sha / 旧 hub：不编造名字
+    assert blob_wanted({}, kick_kl=1.0) == {}
+
+
 def test_a_single_name_still_goes_through_the_old_branch(tmp_path: Path) -> None:
     """`?name=opt`（单名）逐字走旧分支——新 hub 对旧 worker 的响应形状不变。"""
     root = tmp_path / "jobs"

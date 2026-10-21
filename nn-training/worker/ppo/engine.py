@@ -188,7 +188,16 @@ def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tens
     return per.mean()
 
 
-def apply_value_anchor_pull(model: Any, rho: float) -> float:
+def _zero_scalar(model: Any) -> torch.Tensor:
+    """0 维零值（与「未启用门控」同语义的**设备侧标量**，不触发 host 同步）。"""
+    try:
+        dev = next(model.parameters()).device
+    except (StopIteration, AttributeError):
+        dev = torch.device("cpu")
+    return torch.zeros((), dtype=torch.float32, device=dev)
+
+
+def apply_value_anchor_pull(model: Any, rho: float) -> torch.Tensor:
     """value 新列的后步乘性收缩 `w *= (1-ρ)`（x26-obs it90 诊断的门控实现）。
 
     机制：冷 critic 吃 pf 后在新列上 35 倍爆炸（0.0086→0.30）拟合噪声 →
@@ -197,13 +206,18 @@ def apply_value_anchor_pull(model: Any, rho: float) -> float:
     ρ≤0 时**只读数不收缩**（对照腿 anchor=0：权重逐位不动、监控照样看见膨胀，
     前者是 ablation 有效的前提，后者是“无绳腿炸了能发现”的前提）。
     `no_grad` 下操作：不读 RNG（ckpt 断点续跑精确复现），不碰 Adam 矩（只动权重本身）。
+
+    ★ 2026-10-21（plan/ppo-worker-wallclock §4.5 W3）：返回值是**0 维张量**而不是 float。
+    以前这里 `float(...)` 每步一次全设备同步（只为这个遥测数），与 `policy_new_rms_of`
+    一起构成每步多出来的 2 次同步；返回张量后由 `sync_scalars` 的那一次同步一并取回，
+    数值逐位不变（float32 → double 的同一转换）。
     """
     slices: list[tuple[int, int]] = (
         model.value_anchor_slices() if hasattr(model, "value_anchor_slices") else []
     )
     vh = getattr(model, "value_head", None)
     if vh is None or not hasattr(vh, "weight") or not slices:
-        return 0.0
+        return _zero_scalar(model)
     with torch.no_grad():
         w = vh.weight
         if rho > 0.0:
@@ -211,11 +225,10 @@ def apply_value_anchor_pull(model: Any, rho: float) -> float:
             for lo, hi in slices:
                 w[:, lo:hi].mul_(pull)
         parts = [w[:, lo:hi].reshape(-1) for lo, hi in slices]
-        rms = float(torch.cat(parts).pow(2).mean().sqrt()) if parts else 0.0
-    return rms
+        return torch.cat(parts).pow(2).mean().sqrt() if parts else _zero_scalar(model)
 
 
-def policy_new_rms_of(model: Any) -> float:
+def policy_new_rms_of(model: Any) -> torch.Tensor:
     """policy 双头（move/fire）在新列上的 rms（x27 冻结判决：行为由 policy 解释）。
 
     机制：x27-obs it100 panel 显示 value 新列 0→0.073（有绳）/ 0→0.305（没绳）天翻地覆、
@@ -223,8 +236,10 @@ def policy_new_rms_of(model: Any) -> float:
     `value_new_rms` 对行为无预测力。复用 `value_anchor_slices()` 的列片
     （三头吃同一份 pf，新列是输入属性不是 value 属性）；**纯只读、无 ρ 参数**
     （policy 同拴在 §2026-10-12-goalnn-value-gating 已否决：2–4x 良性、第二变量）。
-    缺片/缺头返回 0.0（legacy/旧 worker 恒 0——⚠ 精确 0.0 连击 = 旧 worker 味，
+    缺片/缺头返回 0 维零张量（legacy/旧 worker 恒 0——⚠ 精确 0.0 连击 = 旧 worker 味，
     见 §2026-10-13-goalnn-x27-frozen D3 的精确零告警欠账）。`no_grad` 下只读权重。
+
+    ★ 2026-10-21（§4.5 W3）：同 `apply_value_anchor_pull`——返回张量，不再每步 `float(...)`。
     """
     slices: list[tuple[int, int]] = (
         model.value_anchor_slices() if hasattr(model, "value_anchor_slices") else []
@@ -235,10 +250,10 @@ def policy_new_rms_of(model: Any) -> float:
         if h is not None and hasattr(h, "weight")
     ]
     if not slices or not heads:
-        return 0.0
+        return _zero_scalar(model)
     with torch.no_grad():
         parts = [h.weight[:, lo:hi].reshape(-1) for h in heads for lo, hi in slices]
-        return float(torch.cat(parts).pow(2).mean().sqrt()) if parts else 0.0
+        return torch.cat(parts).pow(2).mean().sqrt() if parts else _zero_scalar(model)
 
 
 def ppo_update(
@@ -297,6 +312,10 @@ def ppo_update(
     # 熵正则系数：None → 模块缺省（数学与接线前逐字节一致）；显式给值 → 该项被覆盖。
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
+    # W0-b（plan/ppo-worker-wallclock §4.1）：每步墙钟**累加常开**（判据底座；W3/W3.5 的
+    # 「median 下降」就是拿它比的）。只 append 一个 float，不新增设备同步；**打印**另受
+    # PPO_CUDA_DIAG 控（默认 0）——稳态不多一行（日志节食）。
+    _step_walls: list[float] = []
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
     tensored = tensored_chunks(chunks, device)
@@ -573,12 +592,10 @@ def ppo_update(
                             "mean_ret": ret.mean(),
                             "mean_adv": adv.mean(),
                             "gnorm": gn,
-                            "value_new_rms": torch.as_tensor(
-                                value_new_rms, dtype=torch.float32, device=device
-                            ),
-                            "policy_new_rms": torch.as_tensor(
-                                policy_new_rms, dtype=torch.float32, device=device
-                            ),
+                            # W3：这两个是**设备侧张量**（不再每步 `float()` ⇒ 不再各付一次
+                            # 全设备同步），与其余 9 个标量同一次 `sync_scalars` 取回。
+                            "value_new_rms": value_new_rms,
+                            "policy_new_rms": policy_new_rms,
                         }
                     )
                 )
@@ -590,6 +607,7 @@ def ppo_update(
             # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
             xla_mark_step(device)
             now = time.time()
+            _step_walls.append(now - _step_t0)
             # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
             # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
             if diag_on:
@@ -732,6 +750,16 @@ def ppo_update(
             diag_b.add("最慢窗口指标", diag_worst_delta)
         diag_b.add("图签名", diag_sig or "-")
         diag_b.emit(f"[ppo] XLA 步耗诊断（{total_steps} 步 / {time.time() - t0:.0f}s）")
+    # ---- W0-b 收尾：per-step 墙钟的 steady-state 读数（剔前 2 步 = CUDA context init /
+    # autotune；只报 median/p95，别把 warmup 混进中位数）。受 env 控 ⇒ 稳态日志零变化。
+    if _step_walls and os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
+        _ws = sorted(_step_walls[2:]) or sorted(_step_walls)
+        _med = _ws[len(_ws) // 2]
+        _p95 = _ws[min(len(_ws) - 1, int(len(_ws) * 0.95))]
+        log(
+            f"[ppo] step wall median={_med * 1000:.1f}ms p95={_p95 * 1000:.1f}ms "
+            f"n={len(_ws)}（已剔前 2 步 warmup，总 {len(_step_walls)} 步）"
+        )
     # aggregate
     if not stats:
         # 断点续跑"剩余 0 epoch"路径（checkpoint 已完成）：无梯度步可跑，

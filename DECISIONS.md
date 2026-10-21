@@ -8524,3 +8524,43 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`nn-training/curricula/y29-{steady,dmg-half}.jsonc` · `docs/nn/experiments.md §125` ·
   `tmp/y29-validate.py`（日志同名 `.log`）· `.workbuddy/memory/2026-10-21.md`。
   **开课 = 人在控制台点**；agent 不起训练。
+
+## §2026-10-21-goalnn-ppo-wallclock-batch1 — PPO worker 墙钟第一批：身份命中链**从未通电**（接线 + 顺序）、`/start` 线程化、两次同步合并、设备行、一机 N worker
+
+- **背景**：`plan/ppo-worker-wallclock.plan.md` 三轮评审（ds / Beam / `plan/ppo.review-bf.md`）后落地第一批。
+  现场日志（job `d749659e732144f2`）里 `init` 与 `opt` 每轮都 `src=download`（1.2s/轮），而身份映射的设计
+  是零字节 —— 实测命中率 **0%**，不是预期的「~5% 未命中」。
+- **根因两处（缺一不可）**：
+  1. **接线**：`hub/schedule.py:166-180` 的 claim 响应顶层**没有** `course_fp`（它在 `manifest` 里），
+     而 `job_round` 的落定回调只读顶层 ⇒ `course_cache.settle()` 收到空串 ⇒ 早退 ⇒ `latest.json` 永不写。
+     修法：`course_cache.course_fp_of(job)`（先顶层、再 `manifest`，单点可测）。
+  2. **顺序**：`train_core` 先 `resolve_blobs_batch`（**非惰性**，当场 `download_blobs` 并落盘）再判身份
+     ⇒ 即使命中，opt 的 0.60MB / 0.7s 也已经付掉、下回来的字节被丢弃。修法：`hit()` 上移 +
+     `blob_wanted(..., skip={BLOB_OPT})`（纯参数；`ref` 不在 skip 里）。
+- **链语义变更（已在 `docs/nn/remote-transport.md` §94 的 identity 档内）**：修复后训练起点 = 本机 f32，
+  不再等于 hub 落盘的量化重建字节 ⇒「训练用的权重」与「评估/发布的权重」正式分家。
+  **不在跑着的腿中间热切**：开腿时按 §6.3b 三件套（新 `--out`/`--traj` + 60-seed 三难度基线 + golden）。
+  本批只做接线与顺序，**没有**任何腿被切换。
+- **顺带修**：`blob_hits` 只认 `src=="cache"` ⇒ 身份命中（`course_cache`）漏记；改为一并计入。
+- **`/start` 线程化（W2）**：形态 = 线程发 + `job_ready()` **之前** `join(3.5s)` + 超时**先 ready 再同步补发**。
+  否决了 v3 的 `join(15)`：`job_started` 自身 HTTP timeout 15s ⇒ join 必然超时，而 ready 是**重复抑制**信号，
+  压后 15s 等于放大「备份副本重算一整轮」的窗口；也否决了「线程内重试一次」（它会与同步补发叠成第三次并发 POST）。
+  `computing_at`（掉队判据唯一时基）的落库时刻与同步版相同（都早于 ready）⇒ 阈值一行未动。
+- **W3（同步合并）**：`apply_value_anchor_pull` / `policy_new_rms_of` 返回 **0 维张量**（不再 `float()`），
+  折进已有的 `sync_scalars` ⇒ 每步 3 次全设备同步 → 1 次。数值逐位不变（同一个 float32→double 转换）；
+  键集由 `tests/worker/test_ppo_scalar_sync.py` 钉住。**否决**「每 epoch 只算一次」——那两个数每步都进 stats。
+- **W0-a / W0-b**：job 级「设备」行（`n=` / 卡名 / `cap=` / `dp=` / `threads=`，CPU 有 guard）；
+  per-step 墙钟**累加常开**、汇总行只在 `PPO_CUDA_DIAG=1` 时打（稳态日志零变化）；产物段（save/pack/identity）
+  同开关计时（它不在 `ppo=` 里，是 `other=` 归因不闭合的那一块）。
+- **一机 N worker（W-DP 起法）**：启动 argv 在仓内 `remote/notebook_runtime.py`（`:236-259`），
+  不是控制台功能（控制台 `localWorker` 是**开发机**单实例）⇒ 新增 `worker_restart_argv(instance, workers)` +
+  `cfg["workers"]`（缺省 1 = 逐字节旧行为）：每实例 `--device cuda:<i>`、各自 `--out`（token 随之各自一份）、
+  **共享 `--cache-dir`**（否则身份命中率 ~1/N）、线程 = `cpu_count()//N`。
+  **否决**「engine.py 的 `--threads` 缺省 8 导致超配」：云机 argv 写死 `--threads "0"`（torch/OMP 缺省），
+  那个 8 只对 standalone CLI 生效。
+- **`course_cache._blob` 读命中 touch mtime**：身份对在命中时**不经** `_cache_blob`（不走下载），
+  不 touch 就按「生产时间」定生死；补一行 `os.utime` 后 §8-Q7（是否给 `blob_cache` 单独预算）**结案：不需要**。
+- **未做（等真机）**：W3.5 CUDA graph（需 profiler 读数 + `dp=0` 形态）、W-DP 三组 A/B/C、W5 显存探针。
+  profiler 插桩也未做（会改 `ppo_update` 的循环结构）。
+- **落点**：`remote/course_cache.py` · `remote/job_round.py` · `remote/train_core.py` · `remote/notebook_runtime.py` ·
+  `worker/ppo/engine.py` · `tests/remote/*` · `tests/worker/test_{ppo_scalar_sync,value_anchor,policy_new_rms}.py`。

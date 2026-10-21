@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -196,6 +197,56 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
 # ════════════════════════ Pull 模式 runner ════════════════════════
 
 
+def worker_restart_argv(
+    cfg: dict[str, Any],
+    *,
+    work_dir: Path,
+    token_file: Path,
+    max_idle: int,
+    instance: int = 0,
+    workers: int = 1,
+) -> list[str]:
+    """单个云机 worker 的重启 argv（监督器用它重拉子进程）。
+
+    ★ 2026-10-21（`plan/ppo-worker-wallclock.plan.md` §4.2 W-DP / 评审 P0-2）：
+    「一机 N worker」不需要新 launcher，也不需要控制台改动 —— 启动参数就在本函数里。
+    `workers > 1` 时每个实例：**单卡**（`--device cuda:<i>`，显式单卡不会被 `auto` 升成 DP）+
+    各自的 `--out`（`job_fs.prune_job_dirs` 会互删在飞目录）+ **共享的 `--cache-dir`**
+    （否则 `course_cache/<course_fp>/latest.json` 各自一份 ⇒ 身份命中率掉到 ~1/N）。
+    线程数按 vCPU 均分（缺省 `0` = torch/OMP 自己的缺省，**不是** 8——那个 8 只在
+    `python -m worker.ppo.engine` 的 standalone CLI 上）。
+
+    `workers == 1` 时逐字节等于改造前（顺序/字面量都不动）。
+    """
+    hub_url = str(cfg["hub_url"])
+    if workers > 1 and str(cfg["device_resolved"]).startswith("cuda"):
+        device = f"cuda:{int(instance)}"
+        cpus = int(os.cpu_count() or 1)
+        threads = str(max(1, cpus // max(1, int(workers))))
+    else:
+        device = str(cfg["device_resolved"])
+        threads = "0"
+    argv = [
+        "--poll", hub_url,
+        "--token-file", str(token_file),
+        "--out", str(work_dir),
+        "--device", device,
+        "--threads", threads,
+        "--poll-sec", str(cfg["poll_interval_sec"]),
+        "--max-idle-sec", str(max_idle),
+        # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：云机 PPO worker 的回传腿跑在
+        # **独立子进程**里（`remote/upload_worker.py`）——与自主 worker 的补传腿同形
+        # （`plan/offline-deliver-isolation` §P1）。不这么开场，云机 PPO 线程会继续与
+        # `json.dumps` + gzip + HTTP 抢 GIL（2026-10-06 那条 40× 事故的通道）。
+        "--result-upload", "process",
+    ]
+    if str(cfg.get("cache_dir") or "").strip():
+        argv += ["--cache-dir", str(cfg["cache_dir"])]
+    if cfg.get("offline_worker"):
+        argv.append("--offline")
+    return argv
+
+
 def run_pull_worker(cfg: dict[str, Any], log) -> int:
     """连接 hub 轮询领 job（PPO 与 BC 同 worker）。返回退出码：
     0 = 干净退出（空闲满/会话到顶）；-2 = 配置致命（不重启）；其它非 0 = 可重启的失败。"""
@@ -226,35 +277,39 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 
     # token 走 --token-file（H10：不进进程列表）；热替换 = 子进程退 86 → 监督器
     # 用同参重拉（fresh 进程加载新代码），kernel 与 cell 的输出流不断。
-    token_file = work_dir / "hub.token"
-    token_file.write_text(hub_token, encoding="utf-8")
-    try:
-        token_file.chmod(0o600)
-    except Exception:
-        pass
     max_idle = max(int(cfg["idle_floor_sec"]), (int(cfg["max_session_hours"]) - 1) * 3600)
-    restart_argv = [
-        "--poll", hub_url,
-        "--token-file", str(token_file),
-        "--out", str(work_dir),
-        "--device", str(cfg["device_resolved"]),
-        "--threads", "0",
-        "--poll-sec", str(cfg["poll_interval_sec"]),
-        "--max-idle-sec", str(max_idle),
-        # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：云机 PPO worker 的回传腿跑在
-        # **独立子进程**里（`remote/upload_worker.py`）——与自主 worker 的补传腿同形（
-        # `plan/offline-deliver-isolation` §P1）。不这么开场，云机 PPO 线程会继续与
-        # `json.dumps` + gzip + HTTP 抢 GIL（2026-10-06 那条 40× 事故的通道）。
-        # 子进程起不来（老代码树里没有那个模块）⇒ `UploaderProcess` 自己 sticky 降级回线程，
-        # 一行响亮日志，训练不停。
-        "--result-upload", "process",
-    ]
-    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cfg["cache_dir"]` 非空才加这个
-    # 参数（**缺省空 = 逐字旧行为**——不写这一行时子进程 argv 与改造前完全一致）。
-    # 用途：云盘 `/tmp` 每会话被清，code(2.5MB)/init/ref 每次冷启重下；把内容寻址缓存挂到
-    # 持久目录后跨会话复用。⚠ 只挪**缓存**，`--out` 的 job 目录仍留 /tmp（清场语义不变）。
+    # ★ W-DP（2026-10-21，plan/ppo-worker-wallclock §4.2）：一机 N worker。缺省 1 ⇒ 逐字节旧行为
+    # （argv 顺序与字面量都不变）；N>1 时每个实例单卡 + 各自 `--out` + 共享 `--cache-dir`。
+    n_workers = max(1, int(cfg.get("workers") or 1))
+    if n_workers > 1 and not str(cfg.get("device_resolved", "")).startswith("cuda"):
+        log(f"workers={n_workers} 但 device={cfg.get('device_resolved')} 不是 cuda ⇒ 只起 1 个 worker")
+        n_workers = 1
+    # token 走 --token-file（H10：不进进程列表）；热替换 = 子进程退 86 → 监督器
+    # 用同参重拉（fresh 进程加载新代码），kernel 与 cell 的输出流不断。
+    specs: list[tuple[str, list[str]]] = []
+    for i in range(n_workers):
+        wd = work_dir if n_workers == 1 else work_dir.with_name(f"{work_dir.name}-w{i}")
+        wd.mkdir(parents=True, exist_ok=True)
+        token_file = wd / "hub.token"
+        token_file.write_text(hub_token, encoding="utf-8")
+        try:
+            token_file.chmod(0o600)
+        except Exception:
+            pass
+        specs.append(
+            (
+                "worker" if n_workers == 1 else f"w{i}",
+                worker_restart_argv(
+                    cfg,
+                    work_dir=wd,
+                    token_file=token_file,
+                    max_idle=max_idle,
+                    instance=i,
+                    workers=n_workers,
+                ),
+            )
+        )
     if str(cfg.get("cache_dir") or "").strip():
-        restart_argv += ["--cache-dir", str(cfg["cache_dir"])]
         log(f"持久缓存根：{cfg['cache_dir']}（code/ts_code/blob 跨会话复用）")
     # 离线训练模式（2026-09-19）：`CFG["offline_worker"]` 打开 ⇒ 自报**归属**「本会话属于
     # 离线盘」——hub 只把归属为 offline 的整段 job 放给这台机器，**且**它不再兼领在线盘的活
@@ -262,14 +317,40 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     # 旧口径「带标仍可领在线课」已作废）。CLI 名与头的字面量不变（混合部署兼容）；
     # 缺省关 ⇒ 在线盘，行为逐字不变。
     if cfg.get("offline_worker"):
-        restart_argv.append("--offline")
         log("已自报归属=离线盘（只领整段 job，不再兼领在线活）")
-    log(f"worker 启动（max_idle={max_idle}s, poll={cfg['poll_interval_sec']}s, device={cfg['device_resolved']}）")
+    log(
+        f"worker 启动（max_idle={max_idle}s, poll={cfg['poll_interval_sec']}s, "
+        f"device={cfg['device_resolved']}, workers={n_workers}）"
+    )
+    if n_workers == 1:
+        try:
+            return supervise_worker(specs[0][1])
+        except KeyboardInterrupt:
+            log("收到中断——worker 已终止")
+            return 0
+    # 多实例：每个实例一个监督器线程（各自管子进程与热替换；输出行会交错，但每行完整）。
+    rcs: dict[str, int] = {}
+
+    def _run(name: str, argv: list[str]) -> None:
+        try:
+            rcs[name] = supervise_worker(argv)
+        except KeyboardInterrupt:
+            rcs[name] = 0
+
+    threads = [
+        threading.Thread(target=_run, args=(name, argv), name=f"sup-{name}", daemon=True)
+        for name, argv in specs
+    ]
+    for t in threads:
+        t.start()
     try:
-        return supervise_worker(restart_argv)
+        for t in threads:
+            t.join()
     except KeyboardInterrupt:
         log("收到中断——worker 已终止")
         return 0
+    bad = [rc for rc in rcs.values() if rc != 0]
+    return 0 if not bad else int(bad[0])
 
 
 # ════════════════════════ Push 模式 runner ════════════════════════

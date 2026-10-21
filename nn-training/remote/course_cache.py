@@ -61,6 +61,7 @@ __all__ = [
     "PENDING_NAME",
     "cache_root_of",
     "confirm",
+    "course_fp_of",
     "hit",
     "identity_dir",
     "invalidate",
@@ -68,6 +69,29 @@ __all__ = [
     "record_pending",
     "settle",
 ]
+
+
+def course_fp_of(job: dict | None) -> str:
+    """本 job 的课程身份：claim 响应把它放在 **`manifest`** 里，顶层没有。
+
+    ★ 2026-10-21（`plan/ppo-worker-wallclock.plan.md` §4.3 W1a）：`job_round` 的落定回调
+    曾只读顶层 `job["course_fp"]`，而 `hub/schedule.py` 的 claim 响应顶层是
+    `{job_id, course, status, lease_token, halt, epoch, manifest}` ⇒ 取到恒空串 ⇒
+    `settle()` 第一句就早退 ⇒ `latest.json` 永不写 ⇒ **身份命中率恒 0**
+    （`DECISIONS §2026-10-14-goalnn-wire-diet-enable-all` 预期的是「~5% 未命中」）。
+
+    读取顺序写在这里（而不是调用点）是为了：判据可单测、只有一份真相、旧形态/测试
+    把 `course_fp` 放在顶层时也照旧能用。
+    """
+    if not isinstance(job, dict):
+        return ""
+    top = str(job.get("course_fp") or "")
+    if top:
+        return top
+    man = job.get("manifest")
+    if isinstance(man, dict):
+        return str(man.get("course_fp") or "")
+    return ""
 
 
 def cache_root_of(blob_root: Path | str) -> Path:
@@ -243,6 +267,15 @@ def _blob(blob_root: Path | str, sha: str, nbytes: int) -> bytes | None:
         return None
     if hashlib.sha256(raw).hexdigest() != s:
         return None  # 键是 sha、内容却不是它 ⇒ 坏件（与 `_cache_blob` 的修法同判据）
+    # ★ 2026-10-21（plan/ppo-worker-wallclock §4.3 ⑦）：读命中也要 touch mtime。
+    #   `prune_caches` 按 mtime 丢最旧（`download.py:prune_caches`），而身份链依赖的这两份
+    #   副本**只在这里被读**——命中时根本不走 `_cache_blob`（那条路径命中才 touch）。
+    #   不 touch ⇒ 它们的「年龄」永远停在生产那一刻 ⇒ 多 worker 共享缓存 / 长断点续跑 /
+    #   code_cache 大进大出时，热件会按「谁先来谁先死」被挤掉（不是 LRU）。
+    try:
+        os.utime(p, None)
+    except OSError:
+        pass
     return raw
 
 

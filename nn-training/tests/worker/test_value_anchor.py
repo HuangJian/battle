@@ -53,7 +53,8 @@ def test_pull_shrinks_only_new_slices() -> None:
     w = m.value_head.weight
     assert torch.equal(w[:, :128], torch.full((1, 128), 2.0))
     assert torch.equal(w[:, 128:], torch.full((1, POLICY_EXTRA_DIM), 1.8))
-    assert rms == float(w[:, 128:].pow(2).mean().sqrt())
+    # ★ 2026-10-21（W3）：返回值是 0 维张量（不再每步 `float()` 同步），数值与逐项取回逐位相同。
+    assert torch.is_tensor(rms) and float(rms) == float(w[:, 128:].pow(2).mean().sqrt())
 
 
 def test_pull_zero_reads_but_never_writes() -> None:
@@ -62,11 +63,11 @@ def test_pull_zero_reads_but_never_writes() -> None:
     torch.manual_seed(1)
     m = PPOStudent(policy_extra=True)
     before = m.value_head.weight.clone()
-    assert apply_value_anchor_pull(m, 0.0) == float(before[:, 128:].pow(2).mean().sqrt())
+    assert float(apply_value_anchor_pull(m, 0.0)) == float(before[:, 128:].pow(2).mean().sqrt())
     assert torch.equal(m.value_head.weight, before)
     legacy = PPOStudent()
     before_legacy = legacy.value_head.weight.clone()
-    assert apply_value_anchor_pull(legacy, 1.0) == 0.0
+    assert float(apply_value_anchor_pull(legacy, 1.0)) == 0.0
     assert torch.equal(legacy.value_head.weight, before_legacy)
 
 
