@@ -89,6 +89,8 @@ export type ActionId =
   // 距离 ≥ baseLaneSealMinDist 时，站到该列最靠近基地的可站格（同时挡弹 + 获得
   // 向上的射击线）。见 candidates/BaseLaneSeal.ts。
   | 'baseLaneSeal'
+  // A10.5: 先瞄准再压时开火（人类式预判开火）。
+  | 'leadFire'
   // §164 / 中路列旁主动驻守 (proactive mid-lane flank hold, user request
   // 2026-08-06): 出袋后在顶部广场时优先驻守基地列旁的对消格（列无钢防且
   // 中路繁忙时），而非长期驻守边路出生点。Weight 220 > hunt(200)、< carvePath(250)
@@ -159,6 +161,9 @@ export const ACTION_WEIGHTS: Record<ActionId, number> = {
   // 基地射击线比顺手捡道具更值，但已进基地带的拦截（550）更急。链顺序要求严格
   // 递减，故取 542。
   baseLaneSeal: 542,
+  // A10.5 预判开火: engage(500) 之上、closePickup(540) 之下 —— 已对齐的确定命中
+  // 由 engage 先接管，本候选只处理「现在没对齐、但到达时能中」的车道。
+  leadFire: 505,
   // M4: 统一行动候选 — interceptBase(900) 之下、baseLaneSentry(850) 之上。
   unifiedCandidates: 860,
 }

@@ -41,6 +41,8 @@ describe('M1 decision-chain invariants', () => {
       'baseLaneSeal',
       // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
       'closePickup',
+      // A10.5 / 预判开火 — closePickup(540) 之下、engage(500) 之上。
+      'leadFire',
       'engage',
       'pickupLow',
       // §139 / 方向 A: 火力死区解除 — 插在 hunt 之前（weight 300 > 200）。
@@ -73,6 +75,8 @@ describe('M1 decision-chain invariants', () => {
       midLaneDefense: 545,
       // A9 / 远程封线 — midLaneDefense(545) 之下、closePickup(540) 之上。
       baseLaneSeal: 542,
+      // A10.5 / 预判开火 — closePickup(540) 之下、engage(500) 之上。
+      leadFire: 505,
       // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
       closePickup: 540,
       engage: 500,

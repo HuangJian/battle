@@ -34,6 +34,7 @@ import { AGGRO } from './candidates/Aggro'
 import { PICKUP_HIGH } from './candidates/PickupHigh'
 import { BASE_LANE_SENTRY } from './candidates/BaseLaneSentry'
 import { BASE_LANE_SEAL } from './candidates/BaseLaneSeal'
+import { LEAD_FIRE } from './candidates/LeadFire'
 import { UNIFIED_CANDIDATES } from './candidates/UnifiedCandidates'
 import { INTERCEPT_BASE } from './candidates/InterceptBase'
 import { DODGE } from './candidates/Dodge'
@@ -157,6 +158,7 @@ export const CANDIDATES: Candidate[] = [
   BASE_LANE_SEAL,
   // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
   CLOSE_PICKUP,
+  LEAD_FIRE,
   ENGAGE,
   PICKUP_LOW,
   FIRING_LANE,
