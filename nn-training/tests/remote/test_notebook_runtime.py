@@ -147,7 +147,11 @@ def test_resolve_device_cuda_single_and_multi(
     monkeypatch.setattr(
         nbr, "_probe_cuda", lambda log: _fake_probe(n=2, names=["FakeGPU0", "FakeGPU1"])
     )
-    assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cuda"  # 只用第 0 张
+    cfg_one = _base_cfg(tmp_path)
+    assert nbr.resolve_device(cfg_one, lambda m: None) == "cuda"  # 只用第 0 张
+    # ★ 2026-10-21：卡数要留给下流的 argv 生成（`workers>1` 是「一卡一 worker」还是
+    #   「一卡 N worker」全看它）；只打日志不留值 ⇒ 1 卡机上的 `cuda:1` 必炸。
+    assert cfg_one["gpu_count"] == 2
     cfg_multi = _base_cfg(tmp_path, use_multi_gpu=True)
     assert nbr.resolve_device(cfg_multi, lambda m: None) == "cuda-dp"  # >1 卡 + 开关
 
@@ -332,6 +336,127 @@ def test_pull_max_idle_floor_with_long_session(
     nbr.run_pull_worker(_base_cfg(tmp_path, max_session_hours=9), lambda m: None)
     argv = seen["argv"]
     assert argv[argv.index("--max-idle-sec") + 1] == "28800"
+
+
+# ------------------------------------------------------------------ W-DP：一机 N worker
+
+
+def test_two_workers_get_one_gpu_each_and_share_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ W-DP（2026-10-21）：`workers=2` ⇒ 单卡各自跑，`--out` 分开、`--cache-dir` 共享。
+
+    这是评审 P0-2 的落点：云机启动 argv 在仓内 ⇒「一机两 worker」不需要新 launcher，
+    也不需要控制台改动。`--out` 必须分开（`prune_job_dirs` 会互删在飞目录），
+    `--cache-dir` 必须共享（否则 `course_cache/latest.json` 各自一份 ⇒ 命中率 ~1/N）。
+    """
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    cache_root = tmp_path / "persist-cache"
+    rc = nbr.run_pull_worker(
+        _base_cfg(
+            tmp_path,
+            device_resolved="cuda-dp",
+            workers=2,
+            gpu_count=2,  # 2 卡机：一卡一 worker
+            cache_dir=str(cache_root),
+        ),
+        lambda m: None,
+    )
+    assert rc == 0 and len(seen) == 2
+    devices = [argv[argv.index("--device") + 1] for argv in seen]
+    outs = [Path(argv[argv.index("--out") + 1]) for argv in seen]
+    assert devices == ["cuda:0", "cuda:1"]
+    assert len(set(outs)) == 2, f"两个 worker 的 --out 必须分开：{outs}"
+    for argv in seen:
+        assert argv[argv.index("--cache-dir") + 1] == str(cache_root)
+        assert argv[argv.index("--out") + 1] != str(tmp_path / "work")
+    # token 文件各一份（否则两个进程抬同一个文件，热替换会串）
+    toks = {Path(argv[argv.index("--token-file") + 1]) for argv in seen}
+    assert len(toks) == 2
+
+
+def test_two_workers_share_one_gpu_when_only_one_is_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-21（单卡机修正）：可见 1 张卡 + `workers=2` ⇒ 两个都跑 `cuda`（设备 0）。
+
+    上一版一律 `cuda:<instance>` ⇒ 第二个子进程拿 `cuda:1`，每单 `invalid device ordinal`。
+    共享腿的语义：两个独立进程各自跑整单，只靠 GPU 并发吃利用率（单 job 数学逐位不变）。
+    `--out` / `--token-file` 仍必须分开，`--cache-dir` 仍共享。
+    """
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+    logs: list[str] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    cache_root = tmp_path / "persist-cache"
+    rc = nbr.run_pull_worker(
+        _base_cfg(
+            tmp_path,
+            device_resolved="cuda",
+            workers=2,
+            gpu_count=1,  # 单卡机（Colab T4 / aistudio V100 16GB 的常态）
+            cache_dir=str(cache_root),
+        ),
+        logs.append,
+    )
+    assert rc == 0 and len(seen) == 2
+    assert [argv[argv.index("--device") + 1] for argv in seen] == ["cuda", "cuda"]
+    assert len({argv[argv.index("--out") + 1] for argv in seen}) == 2
+    assert len({argv[argv.index("--token-file") + 1] for argv in seen}) == 2
+    for argv in seen:
+        assert argv[argv.index("--cache-dir") + 1] == str(cache_root)
+    assert any("共享 cuda" in line for line in logs), f"缺共享腿的播报：{logs}"
+
+
+def test_unknown_gpu_count_keeps_legacy_per_card_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`gpu_count` 未知（旧 cfg / 没经 `resolve_device`）⇒ 保持旧行为 `cuda:<i>`。
+
+    这是共享腿的**红线**：卡数已知且不够才降级；未知一律按「一卡一 worker」的旧语义，
+    不静默改变启动形状（旧 cfg 的调用方与 2 卡 A/B 的 argv 逐字节不变）。
+    """
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    nbr.run_pull_worker(
+        _base_cfg(tmp_path, device_resolved="cuda-dp", workers=2), lambda m: None
+    )
+    assert [a[a.index("--device") + 1] for a in seen] == ["cuda:0", "cuda:1"]
+
+
+def test_workers_on_non_cuda_falls_back_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CPU/TPU 上 `workers=2` 无意义 ⇒ 只起 1 个（不静默起两个抢同一设备的进程）。"""
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    nbr.run_pull_worker(_base_cfg(tmp_path, workers=2), lambda m: None)
+    assert len(seen) == 1
+    assert seen[0][seen[0].index("--device") + 1] == "cpu"
 
 
 # ------------------------------------------------------------------ A3 持久缓存根

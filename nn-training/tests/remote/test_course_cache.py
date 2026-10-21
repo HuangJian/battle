@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -163,6 +164,43 @@ def test_course_fp_is_required_and_partitioned(tmp_path: Path) -> None:
     cc.confirm(cache_root, "a" * 8, JOB_ID)
     assert _hit(blob_root, cache_root, course_fp="a" * 8) is not None
     assert _hit(blob_root, cache_root, course_fp="b" * 8) is None
+
+
+def test_settle_reads_course_fp_from_manifest(tmp_path: Path) -> None:
+    """W1a（2026-10-21）：claim 响应的 `course_fp` 在 **`manifest`** 里，顶层没有。
+
+    接线断在 `job_round` 只读顶层 ⇒ `settle` 收到空串 ⇒ 早退 ⇒ `latest.json` 永不写
+    ⇒ 身份命中率恒 0。这里同时钉住两种形态与「没有就是空串」。
+    """
+    assert cc.course_fp_of({"job_id": "j", "manifest": {"course_fp": COURSE_FP}}) == COURSE_FP
+    assert cc.course_fp_of({"course_fp": COURSE_FP}) == COURSE_FP  # 旧形态/测试里放顶层
+    assert cc.course_fp_of({"job_id": "j"}) == ""
+    assert cc.course_fp_of({"job_id": "j", "manifest": None}) == ""
+    assert cc.course_fp_of(None) == ""
+    # 端到端：拿真实 claim 形状过一遍 settle（这就是 W1a 修的那一条链）
+    blob_root, cache_root = _tree(tmp_path)
+    _record(blob_root, cache_root, weights=b"w" * 8, opt=b"o" * 8, job_id="job-claim")
+    job = {"job_id": "job-claim", "manifest": {"course_fp": COURSE_FP}}
+    action = cc.settle(cache_root, cc.course_fp_of(job), "job-claim", status=200, log=_quiet)
+    assert action == "confirm"
+    assert _hit(blob_root, cache_root, opt_from="job-claim") is not None
+
+
+def test_blob_read_touches_mtime(tmp_path: Path) -> None:
+    """命中的副本也得抬 mtime（`prune_caches` 按 mtime 丢最旧）。
+
+    身份链的两份副本命中时**不走下载**（`_cache_blob` 的 touch 不会发生）——若这里也不
+    touch，它们的年龄永远停在「生产那一刻」⇒ 共享缓存的第二个 worker 一写，热件就按
+    「谁先来谁先死」被挤掉（不是 LRU）。
+    """
+    blob_root, cache_root = _tree(tmp_path)
+    _record(blob_root, cache_root, weights=b"w" * 8, opt=b"o" * 8)
+    assert cc.confirm(cache_root, COURSE_FP, JOB_ID) is True
+    victim = blob_root / hashlib.sha256(b"w" * 8).hexdigest()
+    old = 1_000_000_000.0
+    os.utime(victim, (old, old))
+    assert _hit(blob_root, cache_root) is not None
+    assert victim.stat().st_mtime > old, "身份命中读过的那份没被 touch（会被 prune 当最旧）"
 
 
 def test_write_failure_is_optimization_only(tmp_path: Path) -> None:

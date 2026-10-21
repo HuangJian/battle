@@ -25,6 +25,40 @@
 
 ---
 
+## §82 退 86 只换 job 代码，`remote/*` 仍跑 cell 引导那份（2026-10-21）
+
+**触发**（用户 2026-10-21）：worker 跑 `3509711d` 的 log 里，7 条 `准备完成` **一条都没有 `设备=`**。
+
+**事实链**：
+
+- hub 侧是新的：`tmp/.code-snapshot/snapshot.json` 的 `commit=3509711d`、`zip=code.45b96d14104a.zip`
+  （20:40:42 打），zip 里 `remote/train_core.py` 有 `n={torch.cuda.device_count()`、`job_round.py` 有
+  `_StartBeacon`、`course_cache.py` 有 `course_fp_of`。
+- worker 也置了 86 并重启（12:42:13 → 12:42:18），但**宿主模块没换**：`supervise_worker` 只重拉
+  `python -m remote.worker`，`PYTHONPATH=Path(worker_proc.__file__).parents[1]` = **cell 引导时**
+  `/code` 解包的那个目录；该目录只在**重跑 cell** 时刷新（`notebook_runtime` 头注：「重跑 cell
+  即拉到新版」）。`remote/worker.py:313` 是模块级 `from remote.train_core import …` ⇒ 进程活多久，
+  宿主代码就旧多久。
+- 86 只能救 **job 代码**（`worker/ppo/*`、`rl/*` 按 per-job `code_root` 延迟 import），救不了 `remote/*`。
+- `_ACTIVE_CODE_SHA` 是**清单回显**不是代码身份：进程内从 `None` 起步、首个 job 的
+  `manifest["code_sha256"]` 直接写进去 ⇒ 换代后第一单必被接受，日志上照样
+  `进程代码 sha=45b96d14…`。这就是「旧宿主跑新 job 且零报错」的通道。
+
+**判据（下次一眼看出）**：`准备完成` 行缺 `设备=cuda｜n=…｜[0]=…｜cap=…｜dp=…｜threads=…`，
+且连续 job 无 `opt 身份命中（course_cache）` ⇒ 宿主是旧代码，**不是** W1 没命中。
+
+**处置**：改 `remote/**` 后必须**重跑 notebook cell**（重新 `/code` 引导）；只等 86 不够。
+根治（未做）：监督器重拉前重新拉 `/code`，或 `run_job` 用启动时记下的 job-scope sha 与
+`manifest["code_sha256"]` 对账（不一致 ⇒ 响亮报错而非静默接受）。
+
+**复测（2026-10-21 13:00，重跑 cell 后）**：`code.zip 就绪: sha12=45b96d14104a` ⇒ 宿主换代成功，
+`设备=cuda｜n=1｜[0]=Tesla T4｜cap=(7, 5)｜dp=False｜threads=1`、`opt 身份命中（course_cache）`
+与 `/start 落地 …ms` 三条新读数全部出现。**`threads=1`** 是 W0-a 第一次量到的真实值（argv 是
+`--threads 0` = 不碰 torch 缺省）——「云机 8 线程」是评审时的错事实；要判「1 vCPU」还是
+「`OMP_NUM_THREADS=1`」，同一条 `设备=` 行里加个 `cpus=os.cpu_count()` 即可（未做）。
+
+---
+
 ## §81 死端口不是「快速失败」：claim 的同步控制台腿让 12 条 hub 用例白等 8s/次（2026-10-20）
 
 **触发**（用户 2026-10-20）：「把 `tests/common/test_offline_task_queue.py` 里几条 hub 用例的死端口控制台

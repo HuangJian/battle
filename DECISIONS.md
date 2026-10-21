@@ -8268,6 +8268,18 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   全文与逐项价目表 → `docs/nn/experiments.md §121`；分析脚本 `tmp/y27-steady-design.py`（临时件，不入库）。
 - **边界**：不动观测表、不碰 base 族 12 维（用户口径：预留观测）、不改动作空间 / decision_k /
   target_transitions；加新指标列（承伤速率）留给下一腿。
+- **2026-10-21 追加（同日，用户指令）**：① **改名** `y27-steady` → `y28-steady`、`y27-steady-nowinhit` →
+  `y28-nowinhit`（文件内 name/out/traj/backup 同步，identity 不变：`cc5f51de1abb58a6` /
+  `ac67e941bfe7e924`）；② **三臂并行**，新增第三腿 **`y28-dmg-half`**（`wDmg 0.12→0.06`，identity
+  `267a52fe8465f8af`）。三臂 = 2 轴设计的三个格：对照（原表）/ nowinhit（削"打中"的窗内溢价）/
+  dmg-half（削"挨打"的价），同起点 `y27-lead.it90`、同 `paired_rotate_seed 20270206`、同面板、
+  同 **300 iter / 18h** ⇒ 任意两臂可逐座位配对。第三腿的依据 = §122 ⑤ 的反向读数：y26-dmg 把
+  wDmg ×4 后 **dmg/局 +3%（没降）/ idle/千 ×2.5 / kills/千 −11% / 尾段 −5.9pp（z=−3.0）** ⇒
+  承伤价买的是恐惧而非回避；减半后相对剂量 3.6% ≈ 旧表 0.03 的 3.95%（赢过 0.12 的档），而单发
+  +0.450 / P\* 0.247 / 有效命中价 0.983 **逐字不变**（与开火轴正交）。否决 `wDist 6.0`（按发付钱
+  +0.13/发 ≈ 0.6× shotmix，会把 2.0× 推到 2.6×）、删 back/side（与 nowinhit 同源）、训练侧 λ/entropy
+  （证据薄且三臂需一条解释"价"的腿）。三份 `validate_reward` 0 error，逐字段对账只差点名项；
+  全文 → `docs/nn/experiments.md §124` + `y28-dmg-half.jsonc` 头注。
 
 ## §2026-10-21-goalnn-y26-y27-close — y26/y27 十腿结课：唯一成立的是 wHit 0.35；两条预注册判据（乱射红线 / 单点 win 门）被数据判为坏口径
 
@@ -8534,3 +8546,101 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`nn-training` 侧 97 用例（weights_standard / loop_round / export_status / auto_handoff）+ dashboard
   91 用例（task-bundle / auto-offline-handoff，含 PID 复用三态）+ 两个 typecheck + 三份 web bundle 全绿。
 - **全文** → `plan/export-bundle-stall.plan.md`（评审 `plan/export-bundle-stall.review-bf.md`）。
+## §2026-10-21-goalnn-online-worker-bun-for-self-collect — 在线 worker 盘**自采模式**下允许装 bun（`§2026-09-25-goalnn-online-worker-no-bun` 的**限定例外**）
+
+- **触发**（用户 2026-10-21 裁决，原话「如果改成自采集，可以装！」）：`plan/rollout-corpus-supply.plan.md`
+  腿 C（**GPU 实例自采语料**，`kind=iter`）需要该盘自己跑 TS rollout，而执行体
+  `nn-training/worker/iter_rollout.py::resolve_bun` 明确要求**节点上有 bun**（找不到 ⇒ 响亮拒绝，
+  且原话「本 worker 所属的盘不跑 rollout」）。腿 C 的收益（免语料网络 + 免网络波动 + 供给随 worker 线性）
+  **以 bun 可装为前提**。
+- **裁决**：`§2026-09-25-goalnn-online-worker-no-bun` 的「在线 worker 盘不装 bun」**降级为「默认不装」** ——
+  **自采模式**（该盘自己跑 rollout）时装 bun；**纯训练 worker 逐字不变**（仍不装、不付公网下载与启动延迟）。
+- **实现的硬约束（四条，照做即可）**：
+
+  | # | 约束 | 出处 |
+  |---|---|---|
+  | ① | **复用现成装机函数**，不许另写：采样节点已有 `remote/rollout_node.py::_ensure_bun`（找 `bun` / `/root/.bun/bin/bun` / `~/.bun/bin/bun` ⇒ 缺失则 `curl -fsSL https://bun.sh/install | bash`，timeout 600s；`bun install --frozen-lockfile` 失败不致命） | 退役过的 `ensure_bun()` **不许复活**（`tests/remote/test_tailscale_boot_bun.py::test_retired_bun_helpers_do_not_come_back` 钉着） |
+  | ② | **顺序**：公网下载必须**发生在代理/隧道切换之前** | `remote/rollout_node.py:18` 的既有纪律（「公网下载一律在 `platform_net_env()` 里或发生在 ensure 之前」）⇒ 装机点在 tailnet/cloudflared 引导**之前** |
+  | ③ | **护栏改写而不是删掉**：六条守卫从「在线 worker 一律不许装 bun」改为「**仅当自采模式开启时**才许装」 | `tests/remote/test_tailscale_boot_bun.py`（守卫**随口径一起改**，不允许只改断言或只改实现） |
+  | ④ | **TS 代码树不用新做**：worker 已有 `remote/download.py::_ensure_ts_code` | `ts_code_cache/<sha>/` = **bun 的 cwd**（另一棵树，`download.py:17`）⇒ 自采只差 **bun** 这一个装机件 |
+
+- **被否决**：① 直接废掉「在线 worker 不装 bun」这条纪律（⇒ 纯训练 worker 也要下载 bun、付公网安装的失败面与
+  启动延迟，而它**永远不会用**）；② 在 worker 盘另装一份 bun 的副本（⇒ 两份真相 + 版本漂移；日志里已有
+  `bun patch differs (1.4.3 vs 1.4.2) — allowed (yellow)` 这类容差，别再扩大）；③ 把 bun 塞进 payload /
+  代码快照（⇒ 把「可执行文件」混进内容寻址的代码树，破坏「代码 = 源码」的边界）。
+- **影响面**：**仅在腿 C 落地时生效**（`plan/rollout-corpus-supply.plan.md` §5.3）；在此之前**逐字不变**。
+- **落点**：`plan/rollout-corpus-supply.plan.md` §5.3 · 实现时改 `remote/tailscale_boot.py` /
+  `remote/notebook_boot.py` 的引导顺序 + `tests/remote/test_tailscale_boot_bun.py` 的守卫口径 ·
+  `docs/nn/remote-transport.md`（顶部新增 §）· `.workbuddy/memory/2026-10-21.md`（一行）。
+
+
+## §2026-10-21-goalnn-y29-resume-from-it300 — 不续旧课：从 `y28-steady.it300` 重开两臂（摘 `wWinHit` + `wDmg` 减半），因为 lr 档已打满而尾段斜率仍显著
+
+- **背景**：`y28-steady` 跑满 300 轮，anchor **0.695 → 0.815**（同座配对 +12.0pp / McNemar p=0.0088）。
+  用户 2026-10-21 判定「胜率喜人、还在上升、可以继续」，并令 `y28-dmg-half`（停在 it62）**停跑**，
+  改开两条从 it300 起的新腿。
+- **「还在上升」的实测口径**（`reports/y28-steady-20261021.md §2.1`）：分段斜率
+  it60–150 **−0.85±0.38（t=−2.2）** · it150–235 +0.17 · **it235–300 +0.99±0.33（t=3.0）** ·
+  it265–300 +0.95（t=1.0，不显著）⇒ **是台阶后高位横盘，不是线性爬升**，外推收益要按衰减估。
+  （同一节的旧结论「尾段已平」是只用端点配对 p=0.464 得出的，已订正。）
+- **决定**：
+  1. `y29-steady` = `y28-steady` 的价目表**摘掉 `wWinHit`**（双臂已证零胜率回报：窗内命中 −14.2% 但
+     it300 配对 Δ−1.5pp / p=0.798），起点 `y28-steady.it300`（sha16 `c5030c2e3e869605`），
+     `iters 200 / max_hours 8`，lr 档重排（it1–120 用 1.5e-4 → 之后 1e-4，因为 y28 全程已在最低档）；
+  2. `y29-dmg-half` = 逐字同上，只 `wDmg 0.12 → 0.06`（相对剂量 3.59% ≈ 旧表 0.03 的 3.95%，
+     即 y26-dmg 里"赢过 0.12"的那一档）；
+  3. `paired_rotate_seed 20270206 → 20270207`（本腿不是 y28 的续臂；同流会让 it1..300 与 y28 的 300 轮
+     `(stage,seed)` 全重复，§15.1）。**评估面板 anchor 860001-860050 不变**（跨代可作方向参照）。
+- **★ 必须记住的一条**：`y29-steady` 的 reward identity = **`ac67e941bfe7e924`，与 `y28-nowinhit` 完全相同**
+  ⇒ 两腿价目表逐字一致，差别只有起点/lr 档/seed 流。**不得**把「y29-steady 涨了」归因于价目表改动。
+- **否决的备选**：① 原地 `--run-iters +200` 续旧课（在 1e-4 最低档上磨，且 `out/traj` 复用会让新旧
+  两段混在一个账本里）；② 沿用 `y28-dmg-half` 的 it62 当 dmg 对照（起点分布不同 —— 它从 it90 起、
+  没经历过 0.12 的 300 轮塑形）；③ 换评估面板（会失去与 y28 的跨代参照）。
+- **判据（预注册）**：主判 = 两臂 it150–200 的 11 个点按座位聚合后 McNemar（|Δ|≥5pp 且 p<0.05 = 有影响；
+  |Δ|<3pp = 分不出）；**不设 it40–60 绝对阈门**（§124 的 B2/B3 判负而末态 +12pp 的教训）。
+  杀腿：`kills/千 <2.40` · `timeout >5%` · it100 `anchor_wr <0.72` · `dmg/局 >1.10×起点 且 Δwin ≤0`。
+- **已知低估偏差**：两臂同从 `wDmg 0.12` 塑形过的 it300 起 ⇒ dmg-half 测的是「从怕疼的策略出发把价减半」，
+  前 30–50 轮可能无差；判据窗口因此放 it150–200。
+- **落点**：`nn-training/curricula/y29-{steady,dmg-half}.jsonc` · `docs/nn/experiments.md §125` ·
+  `tmp/y29-validate.py`（日志同名 `.log`）· `.workbuddy/memory/2026-10-21.md`。
+  **开课 = 人在控制台点**；agent 不起训练。
+
+## §2026-10-21-goalnn-ppo-wallclock-batch1 — PPO worker 墙钟第一批：身份命中链**从未通电**（接线 + 顺序）、`/start` 线程化、两次同步合并、设备行、一机 N worker
+
+- **背景**：`plan/ppo-worker-wallclock.plan.md` 三轮评审（ds / Beam / `plan/ppo.review-bf.md`）后落地第一批。
+  现场日志（job `d749659e732144f2`）里 `init` 与 `opt` 每轮都 `src=download`（1.2s/轮），而身份映射的设计
+  是零字节 —— 实测命中率 **0%**，不是预期的「~5% 未命中」。
+- **根因两处（缺一不可）**：
+  1. **接线**：`hub/schedule.py:166-180` 的 claim 响应顶层**没有** `course_fp`（它在 `manifest` 里），
+     而 `job_round` 的落定回调只读顶层 ⇒ `course_cache.settle()` 收到空串 ⇒ 早退 ⇒ `latest.json` 永不写。
+     修法：`course_cache.course_fp_of(job)`（先顶层、再 `manifest`，单点可测）。
+  2. **顺序**：`train_core` 先 `resolve_blobs_batch`（**非惰性**，当场 `download_blobs` 并落盘）再判身份
+     ⇒ 即使命中，opt 的 0.60MB / 0.7s 也已经付掉、下回来的字节被丢弃。修法：`hit()` 上移 +
+     `blob_wanted(..., skip={BLOB_OPT})`（纯参数；`ref` 不在 skip 里）。
+- **链语义变更（已在 `docs/nn/remote-transport.md` §94 的 identity 档内）**：修复后训练起点 = 本机 f32，
+  不再等于 hub 落盘的量化重建字节 ⇒「训练用的权重」与「评估/发布的权重」正式分家。
+  **不在跑着的腿中间热切**：开腿时按 §6.3b 三件套（新 `--out`/`--traj` + 60-seed 三难度基线 + golden）。
+  本批只做接线与顺序，**没有**任何腿被切换。
+- **顺带修**：`blob_hits` 只认 `src=="cache"` ⇒ 身份命中（`course_cache`）漏记；改为一并计入。
+- **`/start` 线程化（W2）**：形态 = 线程发 + `job_ready()` **之前** `join(3.5s)` + 超时**先 ready 再同步补发**。
+  否决了 v3 的 `join(15)`：`job_started` 自身 HTTP timeout 15s ⇒ join 必然超时，而 ready 是**重复抑制**信号，
+  压后 15s 等于放大「备份副本重算一整轮」的窗口；也否决了「线程内重试一次」（它会与同步补发叠成第三次并发 POST）。
+  `computing_at`（掉队判据唯一时基）的落库时刻与同步版相同（都早于 ready）⇒ 阈值一行未动。
+- **W3（同步合并）**：`apply_value_anchor_pull` / `policy_new_rms_of` 返回 **0 维张量**（不再 `float()`），
+  折进已有的 `sync_scalars` ⇒ 每步 3 次全设备同步 → 1 次。数值逐位不变（同一个 float32→double 转换）；
+  键集由 `tests/worker/test_ppo_scalar_sync.py` 钉住。**否决**「每 epoch 只算一次」——那两个数每步都进 stats。
+- **W0-a / W0-b**：job 级「设备」行（`n=` / 卡名 / `cap=` / `dp=` / `threads=`，CPU 有 guard）；
+  per-step 墙钟**累加常开**、汇总行只在 `PPO_CUDA_DIAG=1` 时打（稳态日志零变化）；产物段（save/pack/identity）
+  同开关计时（它不在 `ppo=` 里，是 `other=` 归因不闭合的那一块）。
+- **一机 N worker（W-DP 起法）**：启动 argv 在仓内 `remote/notebook_runtime.py`（`:236-259`），
+  不是控制台功能（控制台 `localWorker` 是**开发机**单实例）⇒ 新增 `worker_restart_argv(instance, workers)` +
+  `cfg["workers"]`（缺省 1 = 逐字节旧行为）：每实例 `--device cuda:<i>`、各自 `--out`（token 随之各自一份）、
+  **共享 `--cache-dir`**（否则身份命中率 ~1/N）、线程 = `cpu_count()//N`。
+  **否决**「engine.py 的 `--threads` 缺省 8 导致超配」：云机 argv 写死 `--threads "0"`（torch/OMP 缺省），
+  那个 8 只对 standalone CLI 生效。
+- **`course_cache._blob` 读命中 touch mtime**：身份对在命中时**不经** `_cache_blob`（不走下载），
+  不 touch 就按「生产时间」定生死；补一行 `os.utime` 后 §8-Q7（是否给 `blob_cache` 单独预算）**结案：不需要**。
+- **未做（等真机）**：W3.5 CUDA graph（需 profiler 读数 + `dp=0` 形态）、W-DP 三组 A/B/C、W5 显存探针。
+  profiler 插桩也未做（会改 `ppo_update` 的循环结构）。
+- **落点**：`remote/course_cache.py` · `remote/job_round.py` · `remote/train_core.py` · `remote/notebook_runtime.py` ·
+  `worker/ppo/engine.py` · `tests/remote/*` · `tests/worker/test_{ppo_scalar_sync,value_anchor,policy_new_rms}.py`。

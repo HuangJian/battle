@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -93,16 +94,21 @@ def _load_opt_state(path: str | Path) -> tuple[Any, int]:
     return state, raised
 
 
-def blob_wanted(manifest: dict, *, kick_kl: float) -> dict[str, str]:
+def blob_wanted(
+    manifest: dict, *, kick_kl: float, skip: frozenset[str] = frozenset()
+) -> dict[str, str]:
     """本轮**要向 hub 要哪几件** blob（纯函数）→ `{name: sha}`。
 
     * `opt` —— 只要有 sha 就必进批（每轮都有的那一件）；
     * `ref` —— **只在 kick 打开时**进批（关了就不该为它付一次取字节的代价）；
     * sha 为空的名字**不进本批**（那走 `_resolve_blob` 的 inline/legacy 路径）。
+    * `skip` —— 调用方已经**本机**拿到、确定不需要下行的名字（今天只有 opt：身份命中）。
+      它是纯参数（不读环境/不写盘），所以「命中就不下」可以单测；`ref` 不在 skip 里——
+      kick 打开时它是另一件字节。
     """
     wanted: dict[str, str] = {}
     opt_sha = str(manifest.get("opt_sha", "") or "")
-    if opt_sha:
+    if opt_sha and BLOB_OPT not in skip:
         wanted[BLOB_OPT] = opt_sha
     if float(kick_kl) > 0.0:
         ref_sha = str(manifest.get("ref_sha", "") or "")
@@ -325,6 +331,23 @@ def run_training_core(
         # 上一版只把分派条件换成 dev_str，这里仍写 `torch.device(device)`，
         # 于是 auto 照样被喂进 torch.device（日志上「兜底为 cuda」打了、job 仍炸 auto）。
         device_t = torch.device(dev_str)
+    # ---- W0-a（plan/ppo-worker-wallclock §4.0）：把「这一轮到底跑在什么上」按 job 打回来 ----
+    # 日志里曾经彻底看不到卡数/形态：boot 写死 `use_multi_gpu=True`，而「DataParallel 生效」
+    # 那行 2026-10-06 已退役 ⇒ 「这一轮跑了几张卡」只能靠人告诉。`dp=` 就是把它按 job 补回。
+    # CPU-only worker 上 `torch.cuda.*` 会抛 ⇒ 必须 guard（`n=0 (cpu)` 仍给线程账）。
+    if dev_str not in ("tpu", "xla"):
+        _cu = torch.cuda.is_available()
+        try:
+            _gpu_name = torch.cuda.get_device_name(0) if _cu else "-"
+            _gpu_cap = str(torch.cuda.get_device_capability(0)) if _cu else "-"
+        except Exception:  # 驱动/可见性异常不该拖垮 prep
+            _gpu_name, _gpu_cap = "?", "?"
+        prep_b.add(
+            "设备",
+            f"{device_t}｜n={torch.cuda.device_count() if _cu else 0}"
+            f"{'' if _cu else ' (cpu)'}｜[0]={_gpu_name}｜cap={_gpu_cap}｜"
+            f"dp={use_dp}｜threads={torch.get_num_threads()}",
+        )
     # ---- M2 B3：opt 内容寻址解析（cache / preloaded / download / inline）----
     # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
     # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
@@ -340,7 +363,25 @@ def run_training_core(
     _kick_kl = kick_kl_value(manifest)
     if _raw_kick != 0.0 and _kick_kl == 0.0:
         log(f"job {jid}: kickstart_kl={_raw_kick:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
-    _wanted = blob_wanted(manifest, kick_kl=_kick_kl)
+    # ---- R0（M0）：opt 也先试**身份**命中（本机 f32 全量副本，零字节、零降质）----
+    # 判据全在 `course_cache.hit`；不成立就直接落回下面的内容寻址路径（逐字节旧行为）。
+    # ★ 2026-10-21（plan/ppo-worker-wallclock §4.3 W1b）：判定必须在批量解析**之前**。
+    #   `resolve_blobs_batch` 不是惰性的（`download.py:resolve_blobs_batch`：cache →
+    #   preloaded → **剩下的当场 `download_blobs` 并落盘**）⇒ 判晚了即使命中，opt 的
+    #   0.60MB / 0.7s 也已经付掉，下回来的字节直接被丢弃。命中判据只读 manifest + 本机
+    #   缓存、无副作用 ⇒ 上提安全。
+    _local = course_cache.hit(
+        cache_root=course_cache.cache_root_of(blob_root),
+        blob_root=blob_root,
+        course_fp=str(manifest.get("course_fp", "") or ""),
+        opt_from=str(manifest.get("opt_from", "") or ""),
+        expect_it=int(manifest.get("it", 0) or 0) - 1,
+        log=log,
+    )
+    # 身份命中 ⇒ opt 不进本批（`skip` 是纯参数；`ref` 照旧进批——kick 打开时它是另一件）。
+    _wanted = blob_wanted(
+        manifest, kick_kl=_kick_kl, skip=frozenset({BLOB_OPT}) if _local is not None else frozenset()
+    )
     _batch = (
         resolve_blobs_batch(
             wanted=_wanted,
@@ -356,16 +397,6 @@ def run_training_core(
     )
     # `blob_hits` / `blob_miss_bytes` 的值由入参传来（init 那一手账在作业壳的权重解析处建）
     # —— 本模块只在它上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
-    # ---- R0（M0）：opt 也先试**身份**命中（本机 f32 全量副本，零字节、零降质）----
-    # 判据全在 `course_cache.hit`；不成立就直接落回下面的内容寻址路径（逐字节旧行为）。
-    _local = course_cache.hit(
-        cache_root=course_cache.cache_root_of(blob_root),
-        blob_root=blob_root,
-        course_fp=str(manifest.get("course_fp", "") or ""),
-        opt_from=str(manifest.get("opt_from", "") or ""),
-        expect_it=int(manifest.get("it", 0) or 0) - 1,
-        log=log,
-    )
     if _local is not None:
         opt_raw, opt_hit, opt_src = _local["opt"], True, "course_cache"
         log(
@@ -385,7 +416,9 @@ def run_training_core(
             batch=_batch,
             log=log,
         )
-    if opt_hit and opt_src == "cache":
+    # ★ 2026-10-21：身份命中也是命中（`src=course_cache`）——漏记会让 wire 账看不见这一笔
+    #   （init 侧早已计入，见 `worker.py` 的 `weights_src in ("cache", "course_cache")`）。
+    if opt_hit and opt_src in ("cache", "course_cache"):
         blob_hits += 1
     if opt_src == "download":
         blob_miss_bytes += len(opt_raw)
@@ -696,6 +729,11 @@ def run_training_core(
     train_b.add("chunks", len(chunks))
     train_b.add("kl", agg.get("kl"))
     train_b.emit(f"job {jid}: PPO done in {ppo_sec}s")
+    # ---- P1-4（2026-10-21）：产物段自己的账（save_weights_json / _ppo_save / pack_*）----
+    # 这一段在关键路径上、**不属于 `ppo=`**（`t_ppo` 在 `ppo_update` 之后就已结束），
+    # 但日志的 `other=` 格又被当成「准备段 CPU」解释了 ⇒ 归因不闭合。读数只在
+    # `PPO_CUDA_DIAG=1` 时打一行（稳态不增行，日志节食的约束不变）。
+    _t_art = time.time()
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
@@ -778,6 +816,12 @@ def run_training_core(
         opt=(hashlib.sha256(opt_tar_raw).hexdigest(), len(opt_tar_raw)),
         log=log,
     )
+
+    if os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
+        log(
+            f"job {jid}: 产物落盘 {time.time() - _t_art:.2f}s"
+            "（save/pack/identity——不计入 ppo=，与 prep 分开看）"
+        )
 
     result = {
         "job_id": jid,

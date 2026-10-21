@@ -42,9 +42,10 @@ def test_leg_a_covers_both_heads() -> None:
         .mean()
         .sqrt()
     )
-    assert got == want
+    # ★ 2026-10-21（W3）：返回值是 0 维张量（不再每步 `float()` 同步）。
+    assert torch.is_tensor(got) and float(got) == want
     # move 5×POLICY_EXTRA_DIM 个 2.0、fire 2×POLICY_EXTRA_DIM 个 4.0：pin 住量级（旧列不参与）。
-    assert abs(got - 2.7256) < 1e-4
+    assert abs(float(got) - 2.7256) < 1e-4
 
 
 def test_read_only_never_writes() -> None:
@@ -56,17 +57,17 @@ def test_read_only_never_writes() -> None:
     r1 = policy_new_rms_of(m)
     assert torch.equal(m.move_head.weight, before_move)
     assert torch.equal(m.fire_head.weight, before_fire)
-    assert policy_new_rms_of(m) == r1
+    assert float(policy_new_rms_of(m)) == float(r1)
 
 
 def test_legacy_and_missing_heads_return_zero() -> None:
     """legacy（空片）→ 0.0；缺头（无 move/fire）→ 0.0；权重逐位不动。"""
     legacy = PPOStudent()
     before = legacy.move_head.weight.clone()
-    assert policy_new_rms_of(legacy) == 0.0
+    assert float(policy_new_rms_of(legacy)) == 0.0
     assert torch.equal(legacy.move_head.weight, before)
     naked = SimpleNamespace(value_anchor_slices=lambda: [(0, 8)])
-    assert policy_new_rms_of(naked) == 0.0
+    assert float(policy_new_rms_of(naked)) == 0.0
 
 
 def test_tower_covers_whole_head() -> None:
@@ -78,4 +79,4 @@ def test_tower_covers_whole_head() -> None:
     with torch.no_grad():
         m.move_head.weight.fill_(1.0)
         m.fire_head.weight.fill_(1.0)
-    assert policy_new_rms_of(m) == 1.0
+    assert float(policy_new_rms_of(m)) == 1.0
