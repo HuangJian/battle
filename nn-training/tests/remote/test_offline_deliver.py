@@ -44,6 +44,7 @@ from common.protocol import (
 )
 from remote.offline_deliver import (
     DISABLE_COOLDOWN_SEC,
+    MAX_FAILS_PER_PASS,
     PROBE_FAIL_TTL_SEC,
     PROBE_TTL_SEC,
     REJECTED_MAX_TRIES,
@@ -1593,3 +1594,178 @@ def test_reset_rejected_cli_is_usable(tmp_path: Path, capsys: pytest.CaptureFixt
     assert rc == 0
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["reset"] == 1
     assert json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["rejected"] == []
+
+
+# ────────────────── 2026-10-21 事故：抖动期可以失败，**不许卡住** ──────────────────
+# plan/offline-deliver-stall.plan.md §4-W1-A / W2 / W1-B′。三条症状各自钉一条：
+#   G1 一次数据失败把「hub 可达」判死（下一拍连探活都不做）；
+#   G2 队头失败 ⇒ `break` ⇒ 后面的轮次一次都没被试过（现场 it69…it81）；
+#   G3 失败只走 300s 节流日志 ⇒ 6 次失败只看见 2 行。
+
+
+class _ScriptedOpener:
+    """按「哪一轮 / 体里有没有 eval_rows / 体多大」脚本化的替身 opener（不碰网络）。
+
+    `record` 里每次调用都留 `(url, it | None, 体字节, eval 行数, timeout)` —— 断言直接读它，
+    不靠日志文本（文本是第二事实源）。
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_its: set[int] | None = None,
+        fail_if_eval_rows: bool = False,
+        fail_all: bool = False,
+        max_body: int | None = None,
+    ) -> None:
+        self.fail_its = set(fail_its or ())
+        self.fail_if_eval_rows = fail_if_eval_rows
+        self.fail_all = fail_all
+        self.max_body = max_body
+        self.record: list[tuple[str, int | None, int, int, float]] = []
+
+    @property
+    def artifact_calls(self) -> list[tuple[str, int | None, int, int, float]]:
+        return [r for r in self.record if not r[0].endswith("/ping")]
+
+    def __call__(self, url: str, data: bytes, headers: dict, timeout: float):
+        it: int | None = None
+        eval_rows = 0
+        if data:
+            try:
+                body = json.loads(data.decode("utf-8"))
+            except ValueError:
+                body = {}
+            if isinstance(body, dict):
+                raw_it = body.get("it")
+                it = raw_it if isinstance(raw_it, int) else None
+                rows = body.get("eval_rows")
+                eval_rows = len(rows) if isinstance(rows, list) else 0
+        self.record.append((url, it, len(data), eval_rows, timeout))
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        if self.fail_all or (it is not None and it in self.fail_its):
+            raise TimeoutError("The read operation timed out")
+        if self.max_body is not None and len(data) > self.max_body:
+            raise TimeoutError("The read operation timed out")
+        if self.fail_if_eval_rows and eval_rows:
+            raise TimeoutError("The read operation timed out")
+        return 200, b'{"status":"accepted"}'
+
+
+def test_data_failure_does_not_poison_reachability(tmp_path: Path) -> None:
+    """G1（评审 P1-1）：一件数据没过去 ≠ hub 不可达 —— 下一拍**立刻**重探并接着推，不等负缓存。
+
+    为什么盯这个：旧码在 `_post` 里置 `_reachable=False`，而探活失败是 15s 负缓存 ⇒ 链路其实
+    早就好了，下一拍却连 16B 的 `/ping` 都不发、直接返回 0（现场的「卡住」有一半是这里）。
+    """
+    root = _make_artifacts(tmp_path / "art")
+    clock = [1000.0]
+    op = _ScriptedOpener(fail_its={1})
+    d = _deliverer("http://hub.invalid", root, opener=op, now_fn=lambda: clock[0])
+
+    assert d.sync() == 2  # it2/it3 照推（G2），it1 没过去
+    assert d.pending() == [1]
+    op.fail_its.clear()  # 链路恢复（**时钟不动**：不许靠 15s 负缓存过期来蒙混过关）
+    assert d.sync() == 1
+    assert d.pending() == []
+    assert len([r for r in op.record if r[0].endswith("/ping")]) >= 2
+
+
+def test_failed_head_does_not_block_the_rounds_behind_it(tmp_path: Path) -> None:
+    """G2：队头失败**不再 `break`** —— 积压 14 轮时后面的轮次必须被尝试（现场 it69…it81 从未 POST）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
+    op = _ScriptedOpener(fail_its={1})
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 2
+    assert [r[1] for r in op.artifact_calls] == [1, 2, 3]
+    assert d.pending() == [1]  # 失败的照旧留在积压里（不销账）
+
+
+def test_transport_failures_are_capped_per_pass(tmp_path: Path) -> None:
+    """每次失败已付一个超时窗口 ⇒ 一拍最多吃 `MAX_FAILS_PER_PASS` 次（段末 90s 预算不许被吃穿）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3, 4))
+    op = _ScriptedOpener(fail_all=True)
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 0
+    assert len(op.artifact_calls) == MAX_FAILS_PER_PASS
+    # 安全网（评审 P0-2）：`pending()` 的语义**一点没窄** —— 四轮全在，抽屉照吃。
+    assert d.pending() == [1, 2, 3, 4]
+    st = d.status()
+    assert st["fail_n"] == MAX_FAILS_PER_PASS
+    assert st["last_fail_kind"] == "timeout"
+
+
+def test_failure_logs_first_then_every_tenth_and_reports_recovery(tmp_path: Path) -> None:
+    """G3：失败走**三触发**（第 1 次 / 每 10 次 / 恢复时），不再被 300s 节流吞掉。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    op = _ScriptedOpener(fail_all=True)
+    msgs: list[str] = []
+    d = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="sekret",
+        run_id=RUN,
+        artifacts_dir=root,
+        opener=op,
+        log=msgs.append,
+    )
+
+    for _ in range(5):  # 每拍 2 次失败（两轮 × 每拍上限 2）⇒ 5 拍攒到 10 次
+        assert d.sync() == 0
+    fails = [m for m in msgs if m.startswith("补传失败 x")]
+    assert [m.split("（")[0] for m in fails] == ["补传失败 x1", "补传失败 x10"], msgs
+
+    op.fail_all = False
+    assert d.sync() == 2
+    assert any(m.startswith("链路恢复（失败 10 次") for m in msgs), msgs
+
+
+def test_final_pass_tries_the_last_round_first(tmp_path: Path) -> None:
+    """D-1 末轮强制补发：段末（`force_probe`）那一次把**最新那一轮**排最前，其余照旧升序。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
+    op = _ScriptedOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op, sync_cap=1)
+
+    assert d.sync(force_probe=True) == 1
+    assert [r[1] for r in op.artifact_calls] == [3]
+
+
+def test_budget_clips_the_per_attempt_timeout(tmp_path: Path) -> None:
+    """W2：段末传剩余预算 ⇒ 单件超时被夹到剩余量（起跑就不会越界，`terminate()` 不触发）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    op = _ScriptedOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync(force_probe=True, budget_sec=7.0) == 1
+    (timeout,) = [r[4] for r in op.artifact_calls]
+    assert timeout <= 7.0, f"预算没夹住单件超时：{timeout}"
+
+
+def test_big_eval_body_degrades_to_weights_first_then_reposts_the_rows(tmp_path: Path) -> None:
+    """W1-B′ 降级档（Q4）：带 400 局评估的大体没过去 ⇒ **权重先到岸**，评估读数另欠一次重投。
+
+    为什么这样切而不是「拆四件」：hub 的 `duplicate` 分支本来就会把重投里的 `eval_rows` 并进
+    课程账本 ⇒ 零契约改动、零按件记账、`delivered.json` 的「送达」语义不变。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    _write_eval_log(root, it=1, games=2)
+    op = _ScriptedOpener(fail_if_eval_rows=True)
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 0  # 带评估读数的那一体没过去
+    assert d.pending() == [1]  # 这一轮没销账
+    assert d.unsent_reposts() == [1]  # 但评估读数已经记成欠账（且落盘）
+    assert d.status()["degraded"] == [1]
+    assert json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["owed_reposts"] == [1]
+
+    assert d.sync() == 1  # 第二拍：只发权重/opt/账本行 ⇒ 到岸
+    assert d.pending() == []
+    assert d.unsent_reposts() == [1]  # 评估读数还欠着（等链路好）
+
+    op.fail_if_eval_rows = False  # 链路好了一些（大体能过了）
+    assert d.sync() == 1  # 第三拍 = 重投，**重新带全量评估读数**
+    assert d.unsent_reposts() == []
+    full = [r for r in op.artifact_calls if r[3]]
+    assert len(full) == 2, op.record  # 第一次（失败）与重投（成功）都带了评估行

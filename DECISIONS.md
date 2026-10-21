@@ -8644,3 +8644,43 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   profiler 插桩也未做（会改 `ppo_update` 的循环结构）。
 - **落点**：`remote/course_cache.py` · `remote/job_round.py` · `remote/train_core.py` · `remote/notebook_runtime.py` ·
   `worker/ppo/engine.py` · `tests/remote/*` · `tests/worker/test_{ppo_scalar_sync,value_anchor,policy_new_rms}.py`。
+
+## §2026-10-21-goalnn-offline-deliver-not-stuck — 补传「失败可以、不许卡住」；陈旧 hold 的恢复宽限**一代只给一次**；降级档替代拆件
+
+- **背景**：`plan/offline-deliver-stall.plan.md` v2（评审 `plan/offline-deliver-stall.review-bf.md` P0×5/P1×8）。
+  两个现场：① `y28-nowinhit` 05:53–05:55 逐轮成功（非 eval 轮 322KB），05:57 起该轮体涨到 1.24MB
+  （`eval_rows` 400 局 ×2,355B）后 6 分钟零送达、积压 13→14 轮；② `y28-steady` 跑完 6.9h 后
+  `/offline/hold` 仍 `state=live / progress_ago=300.0 / expires_in=600.0`（两次采样逐位相同）。
+- **根因 B 改判（评审 P0-1，这是本条最重要的一条）**：那组读数是 `_dispatch_load` 的**恢复宽限**
+  （`HOLD_RESTORE_GRACE_SEC=300`，只改内存、不落盘）的指纹：`900-300=600`，两项都 600。
+  真打点的 `ago` 不可能两次都恰好 300.0。⇒ **不是「训完还在打点」**，是「每重启一次 hub 就把陈旧
+  hold 抬回 `now-300`」；重启周期 <600s 就能永久焊住 busy 闸。
+- **决定**：
+  1. **宽限一代一次**：派发记录加 `hold_restored_for_at`（落盘）；只有 `hold.at` 更新的接管才再吃一次。
+     **不写 `updated_at`**（它是 `note_progress` 的 60s 落盘节流基准，改它会吞掉重启后第一拍打点）。
+  2. **传输失败不污染可达性**（D-4）：`_post` 异常只作废**探活成功缓存**（`_probe_dirty`），
+     `_reachable`/15s 负缓存/`unreachable` 日志一字不动（旧写法一次数据失败 = 下一拍连 `/ping` 都不发）。
+  3. **失败不挡后面**（G2）：`_sync` 遇 `stop` 不再 `break`，续推下一轮，每拍最多 `MAX_FAILS_PER_PASS=2`
+     次传输失败（一次失败已付一个超时窗口）。**`pending()` 的语义永不收窄**（D-3：它是备份抽屉与
+     idle 退出的唯一判据；「只发一部分」只能是优先级/降级，不能是过滤）。
+  4. **超时按件缩放 + 段末预算**（D-6）：`clamp(20s, bytes/4000Bps, 60s)`；`sync(budget_sec=)` 起跑前
+     判剩余量并把单件超时夹到它（下限 5s）⇒ 90s 的段末 flush 不会被执行成 4×60s（否则
+     `deliver_proc._stop_child` 直接 `terminate()`，D-1 末轮补发当场失效）。段末最新一轮排最前。
+  5. **降级档（Q4 的自动版）**：带 `eval_rows` 的体没过去 ⇒ 下一拍只发 weights/opt/账本行，
+     评估读数登记进 `owed_reposts`（落盘），靠 hub 既有 `duplicate` 分支补账 ⇒ **零契约改动**。
+- **否决的备选**：① **拆四件**（`?parts=opt/metrics/eval`）—— hub 的 `weights_json` 必填（`?parts=opt`
+  单发必 400）、按件记账（`delivered.json` 是按轮的）、同一 `it-NNN` 单写者都要一起改（评审 P1-3），
+  而降级档已拿到同一收益的 80%；② **锚点 + `pending()` 改窄** —— 评审 P0-2：改窄会让非锚点轮
+  「既不上传也不进抽屉」，且锚点（= eval 轮）恰好是最大的体，优先级方向存疑；③ **给 `eval_rows` 瘦身** ——
+  白名单必须保留 `(iter,wver,stage,seed)` 去重键（`worker/eval_rows.py:390-401`），否则 400 行全落哨兵键
+  只剩一行（评审 P0-5）；④ **worker 训完停打点（B3）** —— 本条已证明该形态不需要它，真要做先补读数。
+- **被推翻的旧判断**：`remote/offline_boot.py` 那句「租约只在显式 release / TTL / **hub 重启**时消失」
+  **是错的**（重启是复活）；已就地更正。`HTTP_TIMEOUT_SEC` 的注解「上传体 ~1.9MB」按实测（322KB/1.24MB）重写。
+- **代价（诚实账）**：① 段末最多 2 次尝试/拍（原来是 4）——一条坏链路下对**小件**的追赶会慢一拍；
+  ② 降级档让「评估读数」在坏链路下晚到（但它本来就会丢，现在至少不会拖住权重）；
+  ③ 未做拆件/瘦身 ⇒ 抖动期 1.24MB 那档仍可能长期失败（只是不再挡住别的轮次）。
+- **落点**：`remote/offline_deliver.py` · `remote/deliver_ledger.py`（新，LOC 预算搬出 `delivered.json`
+  记账面，L1）· `remote/deliver_worker.py`（预算透传 + 状态面）· `hub/queue_offline.py`（`_dispatch_write`
+  无锁内核 + 代次水位）· `hub/task_pack.py`（文档）· `tests/{remote,hub}/*` · `docs/nn/remote-transport.md §111`。
+- **验收**：9 条新用例先在 `HEAD` 工作树（`git worktree add --detach`）跑成**红**，改动后全绿；
+  `bun run pygate` 4829 passed / 2 skipped（Windows 专用回落）；`bun run check` 见 §9。

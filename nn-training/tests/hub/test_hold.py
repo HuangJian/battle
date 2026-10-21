@@ -183,7 +183,17 @@ def test_note_hold_writes_v2_and_clears_pending_export(tmp_path: Path) -> None:
     hub.note_hold(COURSE, worker_id="w1", token="tok-a")
     disk = _disk(tmp_path)
     assert disk["v"] == DISPATCH_VERSION == 2
-    assert set(disk) == {"v", "completed_pack_sha", "hold", "pending_export", "updated_at"}
+    # ★ 2026-10-21（plan/offline-deliver-stall §2.3）：形状多了 `hold_restored_for_at`
+    # （恢复宽限的代次水位）。它是**故意的 schema 扩键**：没有它，宽限每重启一次就复活。
+    assert set(disk) == {
+        "v",
+        "completed_pack_sha",
+        "hold",
+        "pending_export",
+        "hold_restored_for_at",
+        "updated_at",
+    }
+    assert disk["hold_restored_for_at"] == 0.0  # 新记录还没吃过宽限
     assert disk["hold"]["worker_id"] == "w1" and disk["hold"]["token"] == "tok-a"
     assert disk["hold"]["at"] == 1000.0
     assert disk["hold"]["last_progress_at"] == 1000.0  # claim 本身是第一个进度锚
@@ -554,3 +564,74 @@ def test_hold_mirror_is_pushed_to_the_store_and_reads_without_the_token(
     hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
     assert hub.revoke_offline_lease(COURSE, "test") is True
     assert st.hold_meta == {} and hub.hold_of(COURSE) == {}
+
+
+# ─────────── 2026-10-21（plan/offline-deliver-stall §2.3）：宽限一代只给一次 ───────────
+
+
+def test_restore_grace_is_one_shot_per_hold_generation(tmp_path: Path) -> None:
+    """同一代 hold **只吃一次**恢复宽限：第二次重启不再把进度抬回 `now-300`。
+
+    为什么这条是症状 B 的修法（评审 P0-1）：现场两次采样的 `progress_ago` 都**恰好** 300.0、
+    `expires_in` 都恰好 600.0，而真打点（`PROGRESS_MIN_INTERVAL_SEC=240`）不可能两次都停在 300
+    ——那是「每次采样前刚重启过 hub」的指纹。宽限只改内存时，重启周期 < 600s 就能永久焊住 busy 闸。
+    """
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    hub.note_hold(COURSE, worker_id="w1", token="tok")
+    rec = _disk(tmp_path)
+    rec["hold"]["last_progress_at"] = 1000.0 - 5000.0
+    (tmp_path / COURSE / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    clock[0] = 9000.0
+    hub2 = _hub(tmp_path, clock)
+    _course(tmp_path, hub2)
+    hold = hub2.hold_of(COURSE)
+    assert hold["state"] == "live"  # 第一次重启：宽限生效（活着的 worker 不被误杀）
+    assert hold["expires_in"] == pytest.approx(600.0)  # = 900 - 300：现场那个读数
+    disk = _disk(tmp_path)
+    assert disk["hold"]["last_progress_at"] == pytest.approx(8700.0)
+    assert disk["hold_restored_for_at"] == pytest.approx(1000.0)  # 代次水位落盘
+
+    clock[0] = 12000.0  # 5 分钟后再重启一次（现场就是这种节奏）
+    hub3 = _hub(tmp_path, clock)
+    _course(tmp_path, hub3)
+    hold3 = hub3.hold_of(COURSE)
+    assert hold3["last_progress_at"] == pytest.approx(8700.0), "宽限又被续了一次"
+    assert hold3["state"] == "stale"  # ⇒ 死掉的 hold 不再永久 live，busy 闸能松开
+    # 判据只看**盘上的读数**（文本断言有配额，见 tests/test_source_text_assert_budget.py）：
+    # 第二次重启没有把任何时间戳写回去。
+    assert _disk(tmp_path)["hold"]["last_progress_at"] == pytest.approx(8700.0)
+
+
+def test_a_new_hold_generation_gets_grace_again(tmp_path: Path) -> None:
+    """新的一代接管（`at` 更新）仍然吃得到宽限——别把「只给一次」做成「永远不给」。"""
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    hub.note_hold(COURSE, worker_id="w1", token="tok")
+    rec = _disk(tmp_path)
+    rec["hold"]["last_progress_at"] = 1000.0 - 5000.0
+    (tmp_path / COURSE / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    clock[0] = 9000.0
+    hub2 = _hub(tmp_path, clock)
+    _course(tmp_path, hub2)
+    assert hub2.hold_of(COURSE)["state"] == "live"
+
+    clock[0] = 12000.0
+    hub3 = _hub(tmp_path, clock)
+    _course(tmp_path, hub3)
+    hub3.note_hold(COURSE, worker_id="w2", token="tok-2")  # 换主 = 新一代（at=12000）
+    rec = _disk(tmp_path)
+    rec["hold"]["last_progress_at"] = 12000.0 - 5000.0
+    (tmp_path / COURSE / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+
+    clock[0] = 20000.0
+    hub4 = _hub(tmp_path, clock)
+    _course(tmp_path, hub4)
+    hold = hub4.hold_of(COURSE)
+    assert hold["state"] == "live"
+    assert hold["last_progress_at"] == pytest.approx(19700.0)  # now - 宽限
+    assert _disk(tmp_path)["hold_restored_for_at"] == pytest.approx(12000.0)

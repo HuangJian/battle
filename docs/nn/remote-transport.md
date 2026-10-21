@@ -6,6 +6,65 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §111 补传在抖动期**失败可以、不许卡住**；陈旧 hold 不许被 hub 重启无限续命（2026-10-21，用户报障「云机补传 24 连败后再没回传过 / y28 两课跑完还要重启 trainer 才能领新课」· `plan/offline-deliver-stall.plan.md` v2 · 决策 `DECISIONS.md` §2026-10-21-goalnn-offline-deliver-not-stuck)
+
+**现场 A（补传）**：`y28-nowinhit` 05:53–05:55 逐轮成功（非 eval 轮，体 322KB），05:57 起
+`[eval-cloud] it70 开评 400/400` ⇒ 该轮体涨到 1.24MB ⇒ 之后 6 分钟**零送达**、积压 13→14 轮。
+
+**现场 B（hold）**：`y28-steady` 跑完 6.9 小时后 `/offline/hold` 仍是 `state=live /
+progress_ago=300.0 / expires_in=600.0`，两次采样（间隔 103.7s）**两项都恰好不变**。
+
+### B 的根因：恢复宽限每重启一次就续 600s（不是「训完还在打点」）
+
+`hub/queue_offline.py::_dispatch_load` 在**每次 hub 进程首次读到该课**时把盘上 hold 的
+`last_progress_at`/`touch_at` 抬到 `now - 300`（`HOLD_RESTORE_GRACE_SEC`），且只改内存。
+⇒ 刚从盘上恢复的 hold：`progress_ago = 300.0`、`min(左进度, 左TTL) = min(600, 600) = 600.0`
+—— 与现场读数逐位一致。而真打点（`PROGRESS_MIN_INTERVAL_SEC = 240`）不可能两次采样都停在 300.0。
+后果：重启周期 < 600s 就能把陈旧 hold 永久抬在 `live` ⇒ busy 闸永不放行。
+
+**修法**：派发记录多一个 `hold_restored_for_at`（代次水位，落盘）。只有 `hold.at` 比它更新
+的**新一代接管**才吃宽限；吃过就写回抬升值和 `hold.at`。⚠ **不写 `updated_at`**：它是
+`note_progress` 的落盘节流基准（60s），改它会把重启后的第一拍打点吞掉。
+
+### A 的三条「卡住」（修的是行为，不是体积）
+
+| # | 旧行为 | 后果 | 现在 |
+|---|---|---|---|
+| G1 | `_post` 异常 ⇒ `_reachable = False` | 一件数据没过去被读成「hub 不可达」，下一拍连 16B `/ping` 都不发 | 只作废**探活成功缓存**（`_probe_dirty`），下一拍立刻重探（≤20s）；`_reachable`/负缓存/`unreachable` 日志一字未动 |
+| G2 | 第一个 `stop` 就 `break` | 积压 14 轮时每拍只赌第 1 轮，it69–it81 从未被 POST 过 | 失败续推下一轮，每拍最多吃 `MAX_FAILS_PER_PASS = 2` 次传输失败 |
+| G3 | 失败走 `_throttled_log`（300s） | 6 次失败只看见 2 行（每 60s 一次阻塞，不是 15s） | 三触发：第 1 次 / 每 10 次 / 恢复时；每条带 `累计次数｜elapsed｜体字节` |
+
+### 超时模型（纠错）
+
+`urlopen(timeout=60)` = `socket.settimeout`：约束**每一次**连接/send/recv 的阻塞，**不是**
+整请求墙钟预算 ⇒ 「体积 ÷ 60s = 需要速率」的推论作废（现场 322KB 也会挂，1.24MB 也可能过）。
+现在：单件超时**按件缩放** `clamp(20s, bytes / 4000Bps, 60s)`；段末 `sync(budget_sec=…)`
+把剩余预算传进去，起跑前判剩余量、并把单件超时**夹到剩余量**（下限 5s）⇒ 90s 的 flush
+不会被执行成 4×60s（那会让 `deliver_proc._stop_child` 直接 `terminate()`）。
+
+### 降级档（体量按「不可再生」排序）
+
+带 `eval_rows` 的体（400 局 ≈ 920KB）传输失败 ⇒ 该轮进本会话 `_degraded`，并且：
+
+* **下一拍只发** weights/opt/账本行（322KB）—— 那三件不可再生；
+* 评估读数登记成一次重投（`owed_reposts` **落盘**，跨会话不丢）；
+* 重投走的是 hub 既有的 `duplicate` 分支（`merge_eval_rows`）⇒ **零契约改动**，
+  等价于 Q4「只发权重」档的自动化版本。
+
+> 拆四件（`?parts=opt/metrics/eval`）**没做**：hub 的 `weights_json` 必填、按件记账与
+> 同一 `it-NNN` 的单写者都要一起改（评审 P1-3），而降级档已经拿到同一收益的 80%。
+
+### 读数面（判「这是哪一档」用，不是判决）
+
+`OfflineDeliverer.status()` / 子进程状态文件新增 `last_body_kb` · `last_elapsed_sec` ·
+`last_fail_kind`（`timeout|net|http`）· `fail_n` · `fail_for_sec` · `degraded` · `probe_dirty`。
+判读：失败 elapsed ≈60s ⇒ 客户端 socket 超时；≈100s ⇒ Cloudflare 100s（524）；≈20s ⇒ 探活那档。
+
+**落点**：`remote/offline_deliver.py`（失败/恢复/降级/预算）· `remote/deliver_ledger.py`（从
+`offline_deliver` 搬出的 `delivered.json` 读/写/重置水位，LOC 预算）· `remote/deliver_worker.py`
+（段末预算透传 + 状态面）· `hub/queue_offline.py` + `hub/task_pack.py`（一代一次宽限）·
+`remote/offline_boot.py`（更正「hub 重启租约就消失」那句注释）。
+
 ## §110 下行腿的 `id` = **兑现凭据**：fire-and-forget 的 `p1` 广播**不应答**（2026-10-21，用户报障「ppo worker 日志里 WARN 刷屏」· 决策 `DECISIONS.md` §2026-10-21-goalnn-prefetch-p1-fire-and-forget）
 
 **现场**（PPO worker 云机日志）：

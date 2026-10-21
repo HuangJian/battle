@@ -263,7 +263,11 @@ LAYERS: dict[str, int] = {
     # ⇒ 拓扑秩 **L1**。⚠ 代价是诚实的：`offline_deliver` 站在它上面 ⇒ 升到 L2（连带它的两个
     # 进程模式兄弟）。
     "remote.backup_drawer": 1,
-    # 补传腿本体（投递/探活/账本）：最深依赖是 `backup_drawer`(L1) ⇒ 拓扑秩 **L2**。
+    # 补传的**唯一记账**（2026-10-21，`plan/offline-deliver-stall` §4-W5）：从 `offline_deliver`
+    # 搬出（同一个 LOC 预算又把它顶到 1000 行）。依赖面 = `common.protocol`（不在本账本）+
+    # `remote.artifacts`(L0) ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
+    "remote.deliver_ledger": 1,
+    # 补传腿本体（投递/探活/降级）：最深依赖是 `backup_drawer`/`deliver_ledger`(L1) ⇒ 拓扑秩 **L2**。
     "remote.offline_deliver": 2,
     # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：
     #   * `deliver_proc` = 父侧代理 `DelivererProcess` + 共同接口 + 工厂；

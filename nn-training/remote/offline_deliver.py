@@ -79,6 +79,17 @@ from common.protocol import (
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 from remote.backup_drawer import BackupDrawer
 
+# `as` 别名 = 显式再导出（测试/operator 脚本一直从本模块拿这个名字；定义已搬到
+# `deliver_ledger`，删掉这条会让 `from remote.offline_deliver import …` 断掉）。
+from remote.deliver_ledger import REJECTED_MAX_TRIES as REJECTED_MAX_TRIES
+from remote.deliver_ledger import (
+    REJECTED_RESET_KEY,
+    REJECTED_TTL_SEC,
+    DeliverLedgerMixin,
+    _num_or,
+    _prune_reset_markers,
+)
+
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
 PROBE_TTL_SEC = 60.0
@@ -93,9 +104,26 @@ DISABLE_COOLDOWN_SEC = 600.0
 #: 单次 `sync()` 最多投递几轮。一个刚连上的积压段可能攒了十几轮，全推会让「落到训练循环里
 #: 的那一次调用」耗时不可控（每轮 ~1.9MB + 往返）。少量多次：下轮继续补。
 SYNC_CAP = 4
-#: 单次 HTTP 超时（秒）。上传体 ~1.9MB，60s 对 3.5Mbps 隧道（~4.4s）极宽裕。
+#: 单件上传的**上限**超时（秒）。⚠ 它是 `socket.settimeout` 语义 —— 约束**每一次**
+#: 连接/send/recv 的阻塞时长，**不是整请求墙钟预算**（plan/offline-deliver-stall §1.1）：
+#: 稳定 5KB/s 传 250KB（50s）不会因为「超过 60s」失败，失败只发生在某一次操作卡住时。
+#: 实测体量：非 eval 轮 322KB / 带 400 局评估的轮 1.24MB（2026-10-21）。
 HTTP_TIMEOUT_SEC = 60.0
+#: 单件尝试超时的**下限**（秒）：1KB 的摘要/账本行件不该等满 60s 才认输。
+#: 缩放式 `timeout = clamp(MIN, bytes / RATE_FLOOR, self.timeout)`，见 `_timeout_for`。
+MIN_ATTEMPT_TIMEOUT_SEC = 20.0
+#: 缩放分母（字节/秒）：按「至少 4KB/s 才值得等」折算单件超时（1KB→20s、154KB→38s、≥240KB→60s）。
+ATTEMPT_RATE_FLOOR_BPS = 4000.0
+#: 一次 `sync()` 最多吃几次**传输失败**（每次失败已经付掉一个超时窗口：60s 一次，
+#: 两次就是这条腿这一拍的预算）。超了就把剩下的留给下一拍 —— 这是「不阻塞」的另一半：
+#: 继续推后面的轮次，但**不许**把一拍拖成 4×60s（段末 90s 预算会被吃穿）。
+MAX_FAILS_PER_PASS = 2
+#: 失败日志的**三触发**节流（plan §4-W1-A-3）：第 1 次、每 N 次、恢复时各打一条。
+#: 为什么不是 `LOG_THROTTLE_SEC`：那个 300s 的节流正是现场「6 分钟只看到 2 行」的原因
+#: （每 60s 一次阻塞 ⇒ 6 次失败里 4 次被吞），观测上像「腿停了」。
+FAIL_LOG_EVERY = 10
 #: 同一类不可用日志的最小间隔（秒）——hub 关机时每轮一条就够了。
+#: ⚠ 只给 `unreachable` / `probe` 用；`transport` 走三触发（见上）。
 LOG_THROTTLE_SEC = 300.0
 #: 段末有界 flush 的缺省预算（秒）：`close()` 最多为「把积压推完」等这么久。产物已在本地，
 #: 超过它就走（daemon 线程不会挂住进程退出）。
@@ -115,40 +143,18 @@ DRAIN_MAX_PASSES = 256#: 备份抽屉的**开闸门槛**：只有「磁盘上有
 #: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
 #: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
 POST_FAILURE_LIMIT = 3
-#: 内容拒收记录的**寿命**（秒）与**最多记几次**（D6 / plan §15）：`rejected` 跨会话活着（按权重
-#: 指纹认领），而一次**误判**（例如 hub 侧 409 被读成内容问题）会让那一轮**永久不再回传** ——
-#: 权重还在本地盘上，代价却是永久静默丢一轮。到点就自动复活（宁多试一次，不静默丢）。
-REJECTED_TTL_SEC = 24 * 3600.0
-REJECTED_MAX_TRIES = 3
-#: `delivered.json` 里「人显式重置过拒收」的水位（unix 秒）：`reset_rejected()` 写它，而写方
-#: （`_save_ledger`）比它更早的拒收记录一律不再落盘 —— 否则运维刚清掉的行会被**活着的**补传
-#: 子进程在下一次落盘时原样写回来（它的 `_rejected` 还在内存里）。
-REJECTED_RESET_KEY = "rejected_reset_at"
 _log_default = tag_logger("deliver", lambda: time)
 
 
-def _prune_reset_markers(markers: dict[str, float], *, now: float) -> dict[str, float]:
-    """只留 TTL 窗内的重置水位。
+def _is_timeout(exc: BaseException) -> bool:
+    """这个异常是不是**超时**（而不是连接被拒/DNS/TLS）。
 
-    为什么不能「行没了就把水位也删掉」：水位的作用恰恰是拦**别人内存里那一份**还在的记录
-    ——行刚被放掉时它还在飞；删了水位就等于把刚做的重置撤回。代价是水位会慢慢积累，所以
-    按 TTL 清：过期的水位已经没有用了（能靠它救回来的那份内存记录自己也过了 TTL）。
+    为什么要分开记：`elapsed` 的判读靠它（plan §1.1）——≈60s 且是超时 ⇒ 客户端 socket 超时；
+    ≈100s ⇒ Cloudflare 的 100s；≈20s ⇒ 探活那档。HTTPError 走的是状态码分支，不会到这里。
     """
-    return {k: v for k, v in markers.items() if now - v <= REJECTED_TTL_SEC}
-
-
-def _num_or(v: object, default: float) -> float:
-    """宽容地读一个数（JSON 里可能是字符串/None/压根没有）。
-
-    为什么不用 `float(v)`：`delivered.json` 是**盘上的**、也可能被手改过 ⇒ 一个坏字段不该让
-    整个加载返回（那会把「已投递」全忘掉 = 全量重投）。
-    """
-    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
-        return default
-    try:
-        return float(v)
-    except ValueError:
-        return default
+    if isinstance(exc, TimeoutError):
+        return True
+    return "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
 
 
 def _cpu_seconds() -> float:
@@ -176,7 +182,7 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
         return int(e.code), e.read()
 
 
-class OfflineDeliverer:
+class OfflineDeliverer(DeliverLedgerMixin):
     """一段自主训练的产物补传器（best-effort；每个公开方法都**不会抛**）。
 
     只读产物目录、只写一个 `delivered.json`——它不参与训练的任何判定（不是调度器的一部分），
@@ -270,6 +276,24 @@ class OfflineDeliverer:
         self._next_try = 0.0
         self._reachable: bool | None = None
         self._probed_at = 0.0
+        #: 探活**成功缓存作废**（plan §4-W1-A-2，评审 P1-1）：数据面失败只说明「这一件没过去」，
+        #: 不该把「hub 可达」判死（那会让下一拍先付一次探活的等待，且 15s 负缓存会把恢复窗砍掉一截）。
+        #: 置真 ⇒ 下一拍**立刻**重探一次（≤20s），探通了就接着推。`_reachable` 的语义一个字没动。
+        self._probe_dirty = False
+        #: 传输失败的观测面（W5）：累计次数 / 起始时刻 / 最后一类 / 最后一次的耗时与体量。
+        #: `elapsed` 是 plan §1.1 的判读依据（60.0 / 100 / 20 三档），**不是**判决依据。
+        self._fail_n = 0
+        self._fail_since = 0.0
+        self._last_fail_kind = ""
+        self._last_elapsed = 0.0
+        self._last_body_bytes = 0
+        #: 本次会话里「带评估读数的大体没过去」的轮次（plan §4-W1-B′ 的降级档）：
+        #: 下一拍对它们只发权重/opt/账本行，评估读数靠 `_repost`（`owed_reposts`）另投。
+        #: **只住内存**：子进程重启后若该轮仍未送达，会重新带全量试一次（自愈，不会永久降级）。
+        self._degraded: set[int] = set()
+        #: 本次尝试是不是**降级体**（不含评估读数）。`_sync` 靠它决定要不要销「重投」欠账：
+        #: 降级送达只是把权重送到岸，评估读数还欠着（销了它就真的丢了）。
+        self._attempt_degraded = False
         self._last_log: dict[str, float] = {}
         self._delivered: set[int] = set()
         #: `delivered.json` 读出来了吗（存在 ∧ 解析得开 ∧ `run_id` 是本次的）。
@@ -491,10 +515,17 @@ class OfflineDeliverer:
 
     def _push_backlog(self, deadline: float, force_probe: bool = False) -> int:
         """把积压尽量推完（每次 `sync()` 最多 sync_cap 轮，直到推空/推不动/超预算），
-        然后**观测一次账本**决定要不要把没送出去的轮次备进抽屉（拍板-3 的每轮那一档）。"""
+        然后**观测一次账本**决定要不要把没送出去的轮次备进抽屉（拍板-3 的每轮那一档）。
+
+        `deadline`（`self._now()` 时基）在这里**逐拍折算成硬预算**传给 `_sync`：一次失败
+        阻塞一整个超时窗口，不计预算就会把「段末 90s 收线」拖成 4×60s。
+        """
         total = 0
         for _ in range(DRAIN_MAX_PASSES):
-            n = self._sync(force_probe=force_probe and total == 0)
+            budget = max(0.0, float(deadline) - self._now()) if deadline else None
+            n = self._sync(
+                force_probe=force_probe and total == 0, budget_sec=budget
+            )
             if n <= 0:
                 break
             total += n
@@ -531,155 +562,6 @@ class OfflineDeliverer:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------ 记账（delivered.json）
-
-    @property
-    def ledger_path(self) -> Path:
-        return self.root / OFFLINE_DELIVERED_NAME
-
-    def _load_ledger(self) -> None:
-        """读已投递项（缺失/损坏 → 空：那只会导致重复投递，hub 侧幂等兜住）。
-
-        读成功（存在 ∧ 解析开 ∧ `run_id` 是本次的）时**顺带**把 `_ledger_readable` 置真 ——
-        抽屉删除拿它当硬门槛（DoD-3c），所以「读不出来」与「没送达」必须在这里就分开。
-        """
-        p = self.ledger_path
-        if not p.exists():
-            return
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if not isinstance(data, dict) or data.get("run_id") != self.run_id:
-            return  # 别的 run 的记账（同一个目录被复用）——不认
-        self._ledger_readable = True
-        for it in data.get("artifacts") or []:
-            if isinstance(it, int) and not isinstance(it, bool):
-                self._delivered.add(it)
-        self._result_done = bool(data.get("result_done"))
-        # 跨会话的两笔欠账（必须落盘；§10.3）：
-        #   * `owed_reposts` —— 上一段没送出去的重投，**本会话直接接手**（那些轮次早已记账，
-        #     `pending()` 不会再现它们 ⇒ 不读回就是丢一次补读数）；
-        #   * `rejected` —— 被 hub 内容拒收的轮次（按**权重指纹**记账）：核对得上才认，
-        #     指纹不符（同一 it 换了内容）⇒ 不认，新会话照常再试一次。
-        for it in data.get("owed_reposts") or []:
-            if isinstance(it, int) and not isinstance(it, bool):
-                self._repost.add(it)
-                self._rejected.pop(it, None)
-        if self._repost:
-            self.log(f"上个会话欠 {len(self._repost)} 轮重投（补评估读数）——本会话继续补")
-        for row in data.get("rejected") or []:
-            if not isinstance(row, dict):
-                continue
-            it = row.get("it")
-            fp = str(row.get("weights_fp", "") or "")
-            if not isinstance(it, int) or isinstance(it, bool):
-                continue
-            if not fp or not self._weights_fp_matches(it, fp):
-                continue  # 没证据 / 内容换了 ⇒ 当它没被拒过（宁多试一次，不静默丢一轮）
-            # D6：拒收**不是**永久判决 —— 到 TTL（或记满次数）就当我没拒过。
-            # 旧账本没有 `at`（当时不记年龄）⇒ 按「早于 TTL」算，也就是**一律复活**：一条没有
-            # 年龄的证据不足以支撑「永不再试」，而重试一轮的代价只是再推 ~1.9MB。
-            at = _num_or(row.get("at"), 0.0)
-            tries = int(_num_or(row.get("tries"), 0.0))
-            age = self._now() - at
-            if tries >= REJECTED_MAX_TRIES or age > REJECTED_TTL_SEC:
-                self.log(
-                    f"补传 it{it} 不再沿用上次的内容拒收（记了 {tries} 次｜{age / 3600:.1f}h 前）"
-                    "——本会话再试一次（D6）"
-                )
-                continue
-            self._rejected[it] = str(row.get("why", "") or "")
-            self._rejected_fp[it] = fp
-            self._rejected_at[it] = at
-            self._rejected_tries[it] = tries
-
-    def refresh_from_ledger(self) -> None:
-        """重读 `delivered.json`（**只读镜像用**：进程模式下账本的写者是子进程，父侧那份缓存
-        不刷新就会骗人：明明三轮回传都到了，`pending()` 还列着它们）。
-
-        与 `_load_ledger` 的差别只有一个：先把上一份读面清掉（否则删除的记账永远删不掉）。
-        """
-        self._delivered.clear()
-        self._rejected.clear()
-        self._rejected_fp.clear()
-        self._rejected_at.clear()
-        self._rejected_tries.clear()
-        self._result_done = False
-        self._load_ledger()
-
-    def _weights_fp_matches(self, it: int, fp: str) -> bool:
-        """这一轮的权重文件是不是**就是**上次被拒收的那份（只在加载时，对「被拒过的」那几轮算）。"""
-        try:
-            wj = ArtifactStore(self.root, run_id=self.run_id).weights_path(it).read_bytes()
-        except OSError:
-            return False
-        return sha256_bytes(wj) == fp
-
-    def _save_ledger(self) -> None:
-        with self._cv:
-            owed = sorted(self._repost)
-        # 人的重置水位（D6 的「现在就要它再试一次」）：比它更早的拒收**不落盘**。不读这一眼的话，
-        # 运维刚清空的行会被活着的子进程下一次落盘原样写回来（它的 `_rejected` 还在内存里）。
-        markers = self._ledger_reset_markers()
-        for it, at in list(self._rejected_at.items()):
-            if at <= markers.get(str(it), 0.0):
-                self._rejected.pop(it, None)
-                self._rejected_fp.pop(it, None)
-                self._rejected_at.pop(it, None)
-                self._rejected_tries.pop(it, None)
-        rows = [
-            {
-                "it": it,
-                "weights_fp": self._rejected_fp.get(it, ""),
-                "why": why,
-                # 年龄面（D6）：`at` 与 `tries` 决定这条记录何时过期（`REJECTED_TTL_SEC`/
-                # `REJECTED_MAX_TRIES`）——没有它们就只剩「永久生效」这一种语义。
-                "at": self._rejected_at.get(it, self._now()),
-                "tries": self._rejected_tries.get(it, 1),
-            }
-            for it, why in sorted(self._rejected.items())
-        ]
-        atomic_write_json(
-            self.ledger_path,
-            {
-                "run_id": self.run_id,
-                "hub_url": self.base_url,
-                "artifacts": sorted(self._delivered),
-                "result_done": self._result_done,
-                # 欠账（§10.3）：`owed_reposts` = 还没送达的重投（送达即销账）；`rejected` = 内容
-                # 拒收过的轮次 + 当时的权重指纹。两者都是**磁盘状态**：_repost 只住内存时，
-                # 段末或子进程重启丢掉的那一次就永远补不回来了。
-                "owed_reposts": owed,
-                "rejected": rows,
-                "updated_at": self._now(),
-                # 水位原样带过去（连「已被放掉」那些也要带）：抹掉它 = 活着的会话下一次落盘
-                # 又把那一轮写回来了。只按 TTL 窗清（见 `_prune_reset_markers`）。
-                REJECTED_RESET_KEY: _prune_reset_markers(markers, now=self._now()),
-            },
-        )
-        # 写成功 ⇒ 账本这份证据是**可信**的（`_ledger_readable` 从此不再只是「进门时读得到」）：
-        # 抽屉删除把它当硬门槛（DoD-3c），而本会话第一次送达时磁盘上还没有账本（首开目录），
-        # 不在这里置真就永远删不掉 —— 刚写完的账本就是「hub 收过」的书面证据，且它是我们写的。
-        self._ledger_readable = True
-
-    def _ledger_reset_markers(self) -> dict[str, float]:
-        """`delivered.json` 里「人重置过这一轮拒收」的水位：`it（字符串）→ 重置时刻`。
-
-        为什么按 it 而不是一个全局水位：只重置一环时，全局水位会把**其余**环次的拒收
-        一并复活（活着的子进程下一次落盘就会把它们也放了）。见 `reset_rejected()`。
-        """
-        try:
-            data = json.loads(self.ledger_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        raw = data.get(REJECTED_RESET_KEY)
-        if not isinstance(raw, dict):
-            return {}
-        return {str(k): _num_or(v, 0.0) for k, v in raw.items()}
-
     # ------------------------------------------------------------ 探活
 
     def probe(self, *, force: bool = False) -> bool:
@@ -691,9 +573,16 @@ class OfflineDeliverer:
         ttl = float(self.probe_ttl)
         if self._reachable is False:
             ttl = min(ttl, self.probe_fail_ttl)  # 失败只可能更短（旧口径的 60s 平坦缓存不许回来）
-        if not force and self._reachable is not None and now - self._probed_at < ttl:
-            return self._reachable
+        cached = self._reachable
+        if (
+            not force
+            and not self._probe_dirty
+            and cached is not None
+            and now - self._probed_at < ttl
+        ):
+            return cached
         self._probed_at = now
+        self._probe_dirty = False
         try:
             status, _body = self._opener(
                 f"{self.base_url}/ping", b"", self._headers(), min(self.timeout, 20.0)
@@ -750,6 +639,48 @@ class OfflineDeliverer:
             return
         self._last_log[key] = now
         self.log(msg)
+
+    def _timeout_for(self, nbytes: int) -> float:
+        """这一件该等多久（**按件缩放**，plan §4-W2）：`clamp(20s, bytes/4000, self.timeout)`。
+
+        为什么不是「体积 ÷ 超时 = 需要速率」（评审 P0-3）：`timeout` 是**每次 socket 操作**的
+        stall 超时，不是整请求预算 —— 稳定慢链路根本不会超时。这里只做一件事：把**小件**
+        失败后的等待从 60s 压到 20–40s（失败得越早，恢复窗口越短），大件仍用 60s 上限。
+        """
+        n = max(0, int(nbytes))
+        return max(
+            MIN_ATTEMPT_TIMEOUT_SEC,
+            min(float(self.timeout), float(n) / ATTEMPT_RATE_FLOOR_BPS),
+        )
+
+    def _note_failure(self, kind: str, detail: str) -> None:
+        """记一次传输失败：**三触发**日志（第 1 次 / 每 `FAIL_LOG_EVERY` 次 / 恢复时）。
+
+        为什么不用 `_throttled_log`（plan §4-W1-A-3）：300s 的节流配上「每 60s 失败一次」的节奏，
+        现场 6 次失败只看见 2 行 —— 观测上像「这条腿停了」，而它其实在拼命重试。三触发让
+        「第一次」与「第 10 次」都能被看见，又不按轮刷屏。
+        """
+        now = self._now()
+        if not self._fail_n:
+            self._fail_since = now
+        self._fail_n += 1
+        self._last_fail_kind = kind
+        if self._fail_n == 1 or self._fail_n % FAIL_LOG_EVERY == 0:
+            self.log(
+                f"补传失败 x{self._fail_n}（{kind}｜{self._last_elapsed:.1f}s｜"
+                f"{self._last_body_bytes / 1024:.0f}KB）: {detail}"
+            )
+
+    def _note_recovery(self) -> None:
+        """一次真送达 → 如果之前连续失败过，打一行「链路恢复」（失败次数 / 持续秒数）。"""
+        if not self._fail_n:
+            return
+        n = self._fail_n
+        dur = max(0.0, self._now() - self._fail_since)
+        self._fail_n = 0
+        self._fail_since = 0.0
+        self._last_fail_kind = ""
+        self.log(f"链路恢复（失败 {n} 次 / {dur:.0f}s）——补传继续")
 
     # ------------------------------------------------------------ 待投递集
 
@@ -962,17 +893,23 @@ class OfflineDeliverer:
 
     # ------------------------------------------------------------ 投递
 
-    def sync(self, *, force_probe: bool = False) -> int:
+    def sync(self, *, force_probe: bool = False, budget_sec: float | None = None) -> int:
         """把待投递轮次尽量推上去，返回本轮投递成功数。**永不抛**。
 
         `force_probe` = 绕过探活的**负结果 TTL**：段末 / 子进程收线时用——那是最后一次机会，
         不能被上一次失败静默吞掉（否则整段最该送出去的那几轮会“什么都没做”地结束）。
+        同时它也是**段末语义**：待投集里最新那一轮排最前（D-1 末轮强制补发）。
+
+        `budget_sec` = 这一拍的**硬预算**（秒；`None` = 不限）。段末收线时由子进程传剩余预算：
+        `_sync` 在**起跑前**判剩余量，并把单件超时夹到剩余量上 ⇒ 90s 的 flush 不会被 4×60s
+        的连续超时吃穿（那样 `deliver_proc._stop_child` 会直接 `terminate()` 子进程，
+        段末那次补发当场失效）。
 
         同步模式（`background=False`）的 `submit_round` 走这里 ⇒ 备份观测也在这里（与后台腿
         `_push_backlog` 同口径；两处都只调 `backup_pending`，幂等）。
         """
         try:
-            n = self._sync(force_probe=force_probe)
+            n = self._sync(force_probe=force_probe, budget_sec=budget_sec)
         except Exception as e:  # 兜底：补传的任何意外都不得波及训练
             self.log(f"补传异常（忽略，训练继续）：{type(e).__name__}: {e}")
             n = 0
@@ -993,6 +930,20 @@ class OfflineDeliverer:
         if not self.background or self._thread is None:
             return
         self.mark_repost(it)
+
+    def _owe_repost(self, it: int) -> bool:
+        """登记一次「欠评估读数重投」，**不**唤醒线程（`_sync` 自己会把账本置脏并落盘）。
+
+        与 `mark_repost` 的差别只有两条：不 `notify`（降级档发生在 `_sync` 里面，下一拍就是同一拍
+        的下一轮，额外唤醒只会多绕一圈），也不单独落盘（`_sync` 收尾那次 `_save_ledger` 会带上它）。
+        返回「本次真的新登记了」（用于 `changed` 置脏，不置脏就会让 `owed_reposts` 停在旧水位）。
+        """
+        with self._cv:
+            if int(it) in self._repost:
+                return False
+            self._repost.add(int(it))
+            self._want_sync = True
+            return True
 
     def mark_repost(self, it: int) -> None:
         """登记一轮「要重投」（评估行迟到）。**与模式无关**：线程模式走 `submit_eval_round`，
@@ -1016,8 +967,8 @@ class OfflineDeliverer:
         with self._cv:
             return sorted(self._repost)
 
-    def _sync(self, *, force_probe: bool = False) -> int:
-        """`force_probe` = 绕过探活的负结果 TTL。
+    def _sync(self, *, force_probe: bool = False, budget_sec: float | None = None) -> int:
+        """`force_probe` = 绕过探活的负结果 TTL；`budget_sec` = 本拍硬预算（见 `sync`）。
 
         为什么段末必须绕过：`probe()` 把「不可达」缓存 `PROBE_TTL_SEC` 秒，而段末收线是
         **最后一次机会**——若最后一次探活在 60s 内失败过，不强制就会让整个段末 flush
@@ -1030,6 +981,11 @@ class OfflineDeliverer:
         `_repost` 是**持久集**（2026-10-07）：不再「先取走、失败再放回」——那样会留下一个
         「只唤醒、不消费」的入口，正是 2026-10-06 忙等事故的成因。只有**真正被 `_post_artifact`
         处理过**且返回 `ok`/`skip` 的轮次才销账；被 `sync_cap` 截断在外的、返回 `stop` 的一律留着。
+        ⚠ 例外（2026-10-21 降级档）：**降级体**的 `ok` 不销账 —— 那一趟只把权重送到岸，
+        评估读数还欠着（销了它就真的丢了）。
+
+        失败**不 `break`**（G2）：返回 `stop`/`deferred` 就续推下一轮，直到 `MAX_FAILS_PER_PASS`——
+        每次失败已经付了一个超时窗口，所以「续推」与「每拍有界」必须同时成立。
         """
         if not self.enabled:
             return 0
@@ -1063,13 +1019,33 @@ class OfflineDeliverer:
         done = 0
         sent: list[int] = []
         changed = False
+        fails = 0
+        deadline = (self._now() + float(budget_sec)) if budget_sec is not None else None
+        # 段末（`force_probe`）：最新那一轮排最前 —— D-1「末轮强制补发」的落地形态。
+        # 为什么不是「全部降序」：升序才是续跑进度的自然顺序，只有最后那一轮值是**整段**的终点。
+        if force_probe and len(todo) > 1:
+            newest = max(todo)
+            todo = [newest] + [it for it in todo if it != newest]
         for it in todo[: self.sync_cap]:
-            outcome = self._post_artifact_guarded(it)
-            if outcome == "stop":
-                break  # 传输坏了/毒丸未达上限——别接着打，剩下的下轮再补
+            if deadline is not None and self._now() >= deadline:
+                break  # 预算用尽：**不**再起一件（起跑就可能越界，段末会被 terminate）
+            outcome = self._post_artifact_guarded(it, budget_sec=budget_sec)
+            if outcome in ("stop", "deferred"):
+                # ★ 2026-10-21（评审 P0-4 / G2）：**不再 break**。
+                # `stop` 只说明「这一件这次没过去」，不该让后面的轮次一次都不被尝试——
+                # 积压 14 轮时 `break` 等于永远只赌队列第 1 轮（现场 it69…it81 从未被 POST 过）。
+                # 但也不能无限接着打：每次失败已经付了一个超时窗口，所以有上限。
+                if outcome == "deferred":
+                    changed = True  # 降级档：`owed_reposts` 多了这一轮，必须落盘
+                fails += 1
+                if fails >= MAX_FAILS_PER_PASS:
+                    break
+                continue
             if outcome in ("ok", "skip"):
                 with self._cv:
-                    if it in self._repost:
+                    # 降级体送达**不销**重投：那一趟只把权重送到岸，评估读数还欠着。
+                    # （非降级趟 / 内容拒收照旧销账——否则 `_repost` 会变成一个永不熄灭的热循环。）
+                    if it in self._repost and not (outcome == "ok" and self._attempt_degraded):
                         self._repost.discard(it)
                         changed = True
                 self._post_failures.pop(it, None)
@@ -1099,14 +1075,14 @@ class OfflineDeliverer:
             self._next_try = self._now() + LOG_THROTTLE_SEC
         return done
 
-    def _post_artifact_guarded(self, it: int) -> str:
+    def _post_artifact_guarded(self, it: int, *, budget_sec: float | None = None) -> str:
         """`_post_artifact` 的**毒丸防护**：同一轮连续 `POST_FAILURE_LIMIT` 次异常 ⇒ 当内容问题处理。
 
         为什么需要：`_repost` 是持久集 ⇒ 一个**永远投不出去**的轮次（权重文件被删/盘抖动/编码炸）
         会在每次唤醒时重抛一次，并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛。
         """
         try:
-            return self._post_artifact(it)
+            return self._post_artifact(it, budget_sec=budget_sec)
         except Exception as e:
             n = self._post_failures.get(it, 0) + 1
             self._post_failures[it] = n
@@ -1142,13 +1118,16 @@ class OfflineDeliverer:
         )
         return "skip"
 
-    def _post_artifact(self, it: int) -> str:
-        """投递一轮产物（权重 + opt + 账本行）。返回：
+    def _post_artifact(self, it: int, *, budget_sec: float | None = None) -> str:
+        """投递一轮产物（权重 + opt + 账本行 + 评估读数）。返回：
 
           * ``"ok"`` —— 这一轮可以记为已投递（含 hub 409「已有这一轮」的幂等分支）；
           * ``"skip"`` —— 这一轮被**内容**拒收（已记进 `_rejected`），继续推后面的轮次；
-          * ``"stop"`` —— 链路问题（没送达 / 5xx / 鉴权），这一拍到此为止、下轮再试。
+          * ``"stop"`` —— 这一件这次没过去（没送达 / 5xx / 鉴权），**后面的轮次照推**；
+          * ``"deferred"`` —— 带评估读数的大体没过去，已降级成「只发权重」并登记了一次重投。
         """
+        # 先归零：本轮若在读权重之前就早退（文件没了/空），别把**上一轮**的降级标记留给销账判据。
+        self._attempt_degraded = False
         d = ArtifactStore(self.root, run_id=self.run_id)
         wp = d.weights_path(it)
         try:
@@ -1170,6 +1149,10 @@ class OfflineDeliverer:
                 opt = b""  # 动量缺失的代价是「hub 侧续跑 Adam 归零」，不是投递失败
         m = self._manifest()
         wfp = sha256_bytes(wj)
+        # 降级档（§4-W1-B′）：这一轮**还在本会话降级过**且权重尚未送达 ⇒ 先只发「不评估读数」的小体。
+        # 一旦权重到岸（`_delivered`），同一轮的重投（补评估读数）仍然带全量——两份职责分开。
+        self._attempt_degraded = it in self._degraded and it not in self._delivered
+        eval_rows = [] if self._attempt_degraded else self._eval_rows_for(it)
         body = {
             "run_id": self.run_id,
             "it": int(it),
@@ -1182,8 +1165,9 @@ class OfflineDeliverer:
             "row": self._row_for(it, wfp),
             # 云机 A 层评估的就地读数（`eval_on_cloud`）：与权重同一趟回去，hub 侧并进
             # 课程账本（`_HubQueue.merge_eval_rows`）——否则控制台要等整段结束才知道读
-            # 数，而「一条跑偏的腿」正是这条腿要尽早看见的东西。空列表 = 本轮没评。
-            "eval_rows": self._eval_rows_for(it),
+            # 数，而「一条跑偏的腿」正是这条腿要尽早看见的东西。空列表 = 本轮没评
+            # （或本会话已降到「只发权重」，那一次读数由 `_repost` 另投）。
+            "eval_rows": eval_rows,
             # 血缘（hub 侧据此把这条腿接回某个 run；全是 manifest 里的原值）
             "plan_sha256": str(m.get("plan_sha256", "") or ""),
             "course_fp": str(m.get("course_fp", "") or ""),
@@ -1204,11 +1188,25 @@ class OfflineDeliverer:
             return self._reject_round(
                 it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B", wfp
             )
-        status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw)
-        if not status:  # 没送达（_post 已记一笔）
+        status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw, budget_sec=budget_sec)
+        if not status:  # 没送达（_post 已记读数）
+            if eval_rows and it not in self._degraded:
+                # 降级档（§4-W1-B′）：带评估读数的大体（现场 1.24MB）没过去 —— 下一拍
+                # 先用「只发权重/opt/账本行」的体（现场 322KB）把**不可再生**的那三件送到；
+                # 评估读数登记成一次重投（`owed_reposts` 落盘，跨会话不丢），等链路好一些再补。
+                # 为什么这比「拆四件」便宜：hub 的 `duplicate` 分支**本来**就会把重投里的
+                # `eval_rows` 并进课程账本（`merge_eval_rows`），所以零契约改动、零按件记账。
+                self._degraded.add(it)
+                self._owe_repost(it)
+                self.log(
+                    f"补传 it{it}：带 {len(eval_rows)} 条评估读数的体（{len(raw) / 1024:.0f}KB）没过去"
+                    f" ⇒ 下一拍只发权重/opt/账本行，评估读数另欠一次（`owed_reposts`）"
+                )
+                return "deferred"
             return "stop"
         if status in (200, 201):
             self._delivered.add(it)
+            self._note_recovery()
             return "ok"
         if status == 409:
             # ★ 2026-10-11 事故：409 曾经与 200 同一个分支（`_delivered.add(it)` + "ok"）——
@@ -1228,6 +1226,7 @@ class OfflineDeliverer:
         if status in (400, 413, 422):
             return self._reject_round(it, f"HTTP {status}: {_err_text(resp)}", wfp)
         self._reachable = False
+        self._note_failure("http", f"it{it} HTTP {status}: {_err_text(resp)}")
         self._throttled_log(
             "post", f"补传 it{it} 失败（HTTP {status}: {_err_text(resp)}）——本轮放弃，下轮再试"
         )
@@ -1336,6 +1335,7 @@ class OfflineDeliverer:
             if not status:
                 return False  # 没送达（_post 已记一笔）
             if status in (200, 201):
+                self._note_recovery()
                 if not self._result_done:
                     self._result_done = True
                     self._save_ledger()
@@ -1351,21 +1351,42 @@ class OfflineDeliverer:
             self.log(f"段末摘要补传异常（忽略）：{type(e).__name__}: {e}")
             return False
 
-    def _post(self, path: str, raw: bytes) -> tuple[int, bytes]:
+    def _post(
+        self, path: str, raw: bytes, *, budget_sec: float | None = None
+    ) -> tuple[int, bytes]:
         """POST 一趟。**永不抛**：传输层异常 → `(0, b"")`（状态 0 只在此出现 = 没送达）。
 
         为什么要在这儿收口而不是在 `sync()` 外层兜：走外层兜会让「本轮已投递的几轮」
         留在内存里却没落 `delivered.json`（异常把 `_save_ledger` 跳过了）——下次会话重传
         一遍。全程可重入的代价不该由记账来承担。
+
+        三条 2026-10-21 的纪律（plan §4-W1-A / W2）：
+
+          * 超时**按件缩放**（`_timeout_for`），段末再夹到**剩余预算**上 ⇒ 90s 的 flush
+            不会被 4×60s 吃穿（`deliver_proc._stop_child` 会直接 terminate）；
+          * 传输失败**不置 `_reachable=False`**（那会把「hub 可达」也判死），只作废探活的成功缓存；
+          * 每次尝试都记 **elapsed** —— 它是「60s socket / 100s CF / 20s 探活」三档的唯一判据。
         """
+        timeout = self._timeout_for(len(raw))
+        if budget_sec is not None:
+            # 下限 5s：太小会把「能过的件」也判死，而 5s 已经够建连 + 走完一个小体。
+            timeout = max(5.0, min(timeout, float(budget_sec)))
+        self._last_body_bytes = len(raw)
+        t0 = time.monotonic()
         try:
-            return self._opener(f"{self.base_url}{path}", raw, self._headers(), self.timeout)
-        except Exception as e:
-            self._reachable = False
-            self._throttled_log(
-                "transport", f"补传传输异常（{type(e).__name__}: {e}）——本轮跳过，下轮再试"
+            status, body = self._opener(
+                f"{self.base_url}{path}", raw, self._headers(), timeout
             )
+        except Exception as e:
+            self._last_elapsed = max(0.0, time.monotonic() - t0)
+            # ★ 只作废**探活成功缓存**：数据面失败与「hub 不可达」是两件事（评审 P1-1）。
+            # 下一拍会立刻重探一次（≤20s），探通了就接着推；`_reachable` 的语义与负缓存不变。
+            self._probe_dirty = True
+            kind = "timeout" if _is_timeout(e) else "net"
+            self._note_failure(kind, f"{type(e).__name__}: {e}")
             return 0, b""
+        self._last_elapsed = max(0.0, time.monotonic() - t0)
+        return status, body
 
     # ------------------------------------------------------------ 状态（日志/自检用）
 
@@ -1413,6 +1434,20 @@ class OfflineDeliverer:
             "retry_n": int(self._retry_n),
             "last_error": str(self._last_error),
             "next_try_sec": max(0.0, float(self._next_try) - self._now()) if self._next_try else 0.0,
+            #: 传输失败的读数面（W5 / plan §1.1）：最后一次尝试的**体量**与**耗时**——
+            #: elapsed 是「60s socket 超时 / 100s Cloudflare / 20s 探活」三档的唯一判据。
+            #: `fail_n` 连续失败次数（送达即归零），`fail_for_sec` 这一串失败持续了多久。
+            "last_body_kb": round(self._last_body_bytes / 1024.0, 1),
+            "last_elapsed_sec": round(float(self._last_elapsed), 2),
+            "last_fail_kind": str(self._last_fail_kind),
+            "fail_n": int(self._fail_n),
+            "fail_for_sec": (
+                round(max(0.0, self._now() - self._fail_since), 1) if self._fail_n else 0.0
+            ),
+            #: 降级档（§4-W1-B′）：本会话里「带评估读数的大体没过去 ⇒ 先只发权重」的轮次。
+            "degraded": sorted(self._degraded),
+            #: 探活成功缓存是否已被数据面失败作废（下一拍会真的重探）。
+            "probe_dirty": bool(self._probe_dirty),
             #: 抽屉字节读数（§3.3 DoD-2c + §14 容量行）：总 / 两账本 / 单轮均字节。
             #: `drawer_budget_bytes` = 下一步大概还要往网络盘写多少 = `pending × 均字节 + 两账本`。
             "drawer_bytes": int(self._drawer_stat[0]),

@@ -248,6 +248,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "dispatch_record",
             "_dispatch_load",
             "_dispatch_update",
+            # 2026-10-21（plan/offline-deliver-stall §2.3）：恢复宽限的**代次水位**要在
+            # `_dispatch_load`（锁内）落盘，而 `Lock` 不可重入 ⇒ 把原子写拆成无锁内核。
+            "_dispatch_write",
             # 开课标记的唯一公开读面（停课 = 唯一 opt-out；claim/清单/停滞三处同源）。
             "course_open",
             "_marker_exists",
@@ -546,7 +549,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # `_drop_dead_courses`）⇒ 124。
     # 2026-10-17（plan/export-must-not-cancel-live-job §5）：+1（`ledger_net_state` 的 hub 转发
     # ——`/jobs/{id}/status` 认账本净态，status 与派发池从此同源）⇒ 127。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 127, len(DOMAIN_METHODS)
+    # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 128, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -556,7 +560,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 127, len(seen)
+    assert len(seen) == 128, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (

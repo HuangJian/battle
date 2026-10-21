@@ -173,6 +173,15 @@ def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_a
                 "retry_n": int(st.get("retry_n", 0)),
                 "last_error": str(st.get("last_error", "")),
                 "next_try_sec": float(st.get("next_try_sec", 0.0)),
+                # 传输失败的读数面（plan/offline-deliver-stall §4-W5）：体量 / 耗时 / 类别 /
+                # 连续次数。`last_elapsed_sec` 是「60s socket / 100s CF / 20s 探活」的唯一判据。
+                "last_body_kb": float(st.get("last_body_kb", 0.0)),
+                "last_elapsed_sec": float(st.get("last_elapsed_sec", 0.0)),
+                "last_fail_kind": str(st.get("last_fail_kind", "")),
+                "fail_n": int(st.get("fail_n", 0)),
+                "fail_for_sec": float(st.get("fail_for_sec", 0.0)),
+                "degraded": list(st.get("degraded") or []),
+                "probe_dirty": bool(st.get("probe_dirty")),
             },
         )
     except Exception as e:  # 状态面坏掉不该拖垮补传本身
@@ -290,7 +299,15 @@ def main(argv: list[str] | None = None) -> int:
                 TICK_SECONDS if stop_deadline is None else max(0.0, stop_deadline - time.monotonic())
             )
             while True:
-                n = d.sync(force_probe=stop_deadline is not None)
+                # 收线时把**剩余预算**递进去（`sync` 会在起跑前判它、并把单件超时夹到剩余量上）：
+                # 否则一次失败就要阻塞一整个超时窗口，4 次就把 `stop.budget` 吃穿——
+                # 父侧 `_stop_child` 到点会直接 `terminate()`，段末那次强制补发当场失效。
+                budget = (
+                    None
+                    if stop_deadline is None
+                    else max(0.0, stop_deadline - time.monotonic())
+                )
+                n = d.sync(force_probe=stop_deadline is not None, budget_sec=budget)
                 if n <= 0:
                     break
                 rounds += n

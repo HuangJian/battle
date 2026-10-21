@@ -2326,7 +2326,9 @@ def resolve_courses(
             )
         return picked, [], tasks
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
-    #   为什么还持有租约？」）：租约只有在**显式 release / 900s TTL 到期 / hub 重启**时才消失，
+    #   为什么还持有租约？」）：租约只在**显式 release / 900s TTL 到期 / 接管静默超阈被判 stale**
+    #   时消失。⚠ 2026-10-21 更正：**hub 重启不会让租约消失**——盘上的 hold 照读，而且恢复宽限
+    #   （`HOLD_RESTORE_GRACE_SEC`）还会把它抬回 `now-300`（plan/offline-deliver-stall §2.3）。
     #   而**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，这一档到不了现场 ⇒
     #   自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
     #   这里补上：没有可领的课、而某几行是**我自己**的租约 ⇒ 照领（claim 会续上）。

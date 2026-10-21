@@ -119,6 +119,11 @@ def dispatch_record_default() -> dict:
         "completed_pack_sha": "",
         "hold": {},
         "pending_export": {},
+        #: 恢复宽限的**代次水位**（plan/offline-deliver-stall §2.3）：只有 `hold.at` 比它更新
+        #: 的 hold（= 新的一代接管）才再吃一次宽限。**为什么必须落盘**：宽限只改内存时，
+        #: 每重启一次就把陈旧 hold 的进度抬回 `now-300` ⇒ 「重启周期 < 600s」可以永久焊住
+        #: busy 闸（现场 `ago=300.0 / expires_in=600.0` 就是这个指纹）。
+        "hold_restored_for_at": 0.0,
         "updated_at": 0.0,
     }
 
@@ -183,6 +188,7 @@ def dispatch_record_merge(raw: object) -> dict:
         rec["updated_at"] = 0.0
     rec["hold"] = hold_record_merge(raw.get("hold"))
     rec["pending_export"] = pending_export_record_merge(raw.get("pending_export"))
+    rec["hold_restored_for_at"] = _pos_float(raw.get("hold_restored_for_at"))
     return rec
 
 
@@ -748,6 +754,13 @@ class QueueOfflineMixin(QueuePeer):
         `hold-restored`。理由：hub 重启时盘上的时间是旧的，而 worker 大概率还在跑
         （它不知道自己「被重启」了）—— 不抬就会把活着的盘当场判掉线，协作派发与本机
         held 会一起解开。
+
+        ★ 2026-10-21（plan/offline-deliver-stall §2.3）：**一代 hold 只宽限一次**。宽限后把
+        抬升值和代次水位（`hold_restored_for_at`）一起落盘，只有 `hold.at` 比水位更新的
+        接管才再吃一次。否则「每重启一次就复活」会把陈旧 hold 的进度永远抬在 `now-300`
+        （现场 `progress_ago=300.0 / expires_in=600.0` 就是这个指纹）⇒ busy 闸永不松开。
+        ⚠ **不动 `updated_at`**：它是 `note_progress` 落盘节流的基准（`HOLD_PROGRESS_PERSIST_SEC`）。
+        宽限是读时修复、不是状态变更；改它会让重启后的第一拍打点被 60s 节流吃掉。
         """
         try:
             raw = json.loads(self._dispatch_path(course).read_text(encoding="utf-8"))
@@ -760,16 +773,24 @@ class QueueOfflineMixin(QueuePeer):
         now = float(self._now())
         raw_progress = hold_progress_at(hold)
         raw_touch = hold_touch_at(hold)
-        progress = hold_restore_grace(now, raw_progress)
-        touch = hold_restore_grace(now, raw_touch)
-        if progress > raw_progress or touch > raw_touch:
+        generation = _pos_float(hold.get("at"))
+        restored_for = float(rec.get("hold_restored_for_at") or 0.0)
+        progress, touch = raw_progress, raw_touch
+        if generation > restored_for:
+            progress = hold_restore_grace(now, raw_progress)
+            touch = hold_restore_grace(now, raw_touch)
             hold = dict(hold)
             hold["last_progress_at"] = progress
             hold["touch_at"] = touch
             rec["hold"] = hold
+            # 没有 `at` 的旧记录：用 now 当水位 —— 它之后不会再有「更新的代」，
+            # 也就是这一代只吃这一次宽限（保守方向：不复活）。
+            rec["hold_restored_for_at"] = generation if generation > 0.0 else now
+            self._dispatch_write(course, rec)
         print(
             f"[hub-server] hold-restored {course}: worker={hold.get('worker_id') or '?'} "
-            f"progress={max(0.0, now - progress):.0f}s 前",
+            f"progress={max(0.0, now - progress):.0f}s 前"
+            + ("" if generation > restored_for else "（本代已宽限过，不再续命）"),
             flush=True,
         )
         return rec
@@ -796,15 +817,23 @@ class QueueOfflineMixin(QueuePeer):
             rec["v"] = DISPATCH_VERSION
             rec["updated_at"] = float(self._now())
             self._dispatch[course] = rec
-            path = self._dispatch_path(course)
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(path.name + ".tmp")
-                tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-                os.replace(tmp, path)
-            except OSError as e:
-                print(f"[hub-server] 派发状态落盘失败 {course}: {e}", flush=True)
+            self._dispatch_write(course, rec)
             return dict(rec)
+
+    def _dispatch_write(self, course: str, rec: dict) -> None:
+        """把一条派发记录原子落盘（写 `.tmp` 再 `os.replace`）。**调用方必须已持 `_dispatch_lock`**。
+
+        为什么拆出来：`_dispatch_load` 的恢复宽限也要落一次盘（代次水位），而它在锁内被调用
+        —— `Lock` 不可重入，直接调 `_dispatch_update` 会自锁死。落盘失败只记一行（与原来同口径）。
+        """
+        try:
+            path = self._dispatch_path(course)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+        except (OSError, ProtocolError) as e:
+            print(f"[hub-server] 派发状态落盘失败 {course}: {e}", flush=True)
 
     # ── 接管（hold）写入面与读数（★ M1a 双写，2026-10-07；plan §3-M1a）─────────
     #

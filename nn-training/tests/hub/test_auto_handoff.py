@@ -216,7 +216,17 @@ def test_dispatch_record_merge_ignores_the_retired_mode_keys() -> None:
         }
     )
     assert old == dispatch_record_default()
-    assert set(old) == {"v", "completed_pack_sha", "hold", "pending_export", "updated_at"}
+    # ★ 2026-10-21（plan/offline-deliver-stall §2.3）：形状多了 `hold_restored_for_at`
+    # （恢复宽限的代次水位）；它**不是**玩法状态，缺省 0.0，旧文件读到即 0。
+    assert set(old) == {
+        "v",
+        "completed_pack_sha",
+        "hold",
+        "pending_export",
+        "hold_restored_for_at",
+        "updated_at",
+    }
+    assert old["hold_restored_for_at"] == 0.0
     assert old["v"] == 2
     # v2 的三个真字段照归一（含坏值退回「没有」而不是幽灵）
     good = dispatch_record_merge(
