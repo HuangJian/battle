@@ -692,21 +692,43 @@ class _StubLoop:
         # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
         self._journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
         self.dispatched: list[list[tuple[int, int]]] = []
+        #: 熔断后**没派出去**的候选局数（新语义：它们从不运行）
+        self.undispatched: int = 0
+        self._volume_halted: bool = False
 
     def _commit_journal(self) -> CommitJournal:
         return self._journal
 
     def _dispatch_volume_wave(
-        self, it: int, pairs: list[tuple[int, int]], dist_cfg: dict | None
+        self,
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
     ) -> dict:
-        self.dispatched.append(list(pairs))
+        """假派发：**逐局结算**并回 `on_result`，满额（`halt_event`）后**停止派剩下的**。
+
+        这是「候选池 + 满额即停」的可执行形状：池里排在后面的候选在熔断后**根本没跑**
+        （`self.dispatched` 只记真派出手的那些，`self.undispatched` 记没派的）。
+        """
+        taken: list[tuple[int, int]] = []
         for stage, seed in pairs:
+            if halt_event is not None and halt_event.is_set():
+                break  # ★ 熔断：剩下的候选不派（不是"派了再丢"）
+            taken.append((stage, seed))
             _manifest(self._traj_dir, stage, seed, _WVER, self.samples)
-        samples = len(pairs) * self.samples
+            if on_result is not None:
+                on_result({"stage": int(stage), "seed": int(seed), "nSamples": int(self.samples)})
+        self.dispatched.append(taken)
+        self.undispatched += len(pairs) - len(taken)
+        samples = len(taken) * self.samples
         return {
-            "games": len(pairs),
+            "games": len(taken),
             "winRate": 0.0,
-            "outcomes": {"timeout": len(pairs)},
+            "outcomes": {"timeout": len(taken)},
             "totalSamples": samples,
             # K=10 的 stub 惯例：ticks = 10×samples。配额只认 samples，所以故意让
             # 两者不同——任何误读 ticks 的路径都会在断言里 10× 暴露。
@@ -840,7 +862,14 @@ def test_continuous_cold_start_spreads_by_width(tmp_path: Path, _patch_wver: Non
     assert len(first) == 4, f"首小批应 == 宽度 4（退化成每关 1 局），实际 {len(first)}：{first}"
     assert sorted(s for s, _ in first) == [0, 1, 2, 3]
     # 第二批起 = 自校准：est_s 从**本轮自己**的盘上事实（14 samples/局）派生 ⇒ 批大小变成缺口形状
-    assert [len(w) for w in stub.dispatched] == [4, 12], stub.dispatched
+    # ★ 2026-10-21 用户口径：第二批给的是**候选池**（缺口 ×2 = 24 局），逐关一满额就熔断 ⇒
+    #   池里剩下的候选**从不运行**（`undispatched`），因此「派了多少」不再等于「池多大」。
+    assert len(stub.dispatched[0]) == 4, stub.dispatched
+    pool = 24  # ceil(36×2 / 12) × 4 关
+    second = len(stub.dispatched[1])
+    assert 12 <= second <= pool, second
+    assert second + stub.undispatched == pool, "没派出去的候选必须没跑（不是派了再丢）"
+    assert stub._volume_halted is True, "逐关配额满额后必须熔断"
     assert stub._volume_waves == 2
     assert {s for s, _ in stub.dispatched[1]} == {0, 1, 2, 3}
     # 首波不是「按估计铺的」⇒ 读数记 -1（0 在下游是「无估计」的值，会和「估出来是 0」混掉）
@@ -858,31 +887,43 @@ def test_continuous_cold_start_uses_local_slots_as_width(tmp_path: Path, _patch_
     assert sorted(s for s, _ in stub.dispatched[0]) == [0, 1, 2]
 
 
-def test_continuous_with_history_keeps_est_sizing(tmp_path: Path, _patch_wver: None) -> None:
-    """★ 有历史 ⇒ **逐字不变**：仍走 `plan_continuous_batch` 的 est 反解（在跑腿零影响）。
+def test_continuous_with_history_uses_an_overprovisioned_pool(
+    tmp_path: Path, _patch_wver: None
+) -> None:
+    """★ 2026-10-21 用户口径：有历史 ⇒ 派的是一个**过供候选池**（缺口 ×2），不是"刚好够"。
 
-    与冷启动的区别在批大小上直接可见：est=20 ⇒ 首小批 = 每关 `ceil(50/20)=3` 局 = 12 局，
-    而不是满铺的 4 局。这是「est 退场只动了无历史那一档」的可回归钉子。
+    与冷启动的区别仍在批大小上可见：est=20 ⇒ 池 = 每关 `ceil(50×2/18)=6` 局 = 24 局，
+    而不是满铺的 4 局、也不是旧口径的 12 局。
+    ★ 池大 ≠ 跑得多：逐关一满额就熔断 ⇒ 池里剩下的候选**从不运行**（`undispatched`），
+    所以「派出局数」< 「池大小」是**期望**，超采不再发生。
     """
     stub = _StubLoop(tmp_path, target=200, est=20, samples=20)
     stub._volume_collect_continuous(1, None)
-    assert [len(w) for w in stub.dispatched] == [12], stub.dispatched  # 每关 3 局即达标 ⇒ 一批到底
-    assert all(len(w) == 12 for w in stub.dispatched)
+    pool = 24  # ceil(50×2 / 18) × 4 关
+    assert next(len(w) for w in stub.dispatched) <= pool, stub.dispatched
+    assert len(stub.dispatched) == 1, "一批到底（池够大 ⇒ 不需要第二批）"
+    assert len(stub.dispatched[0]) + stub.undispatched == pool
+    assert stub._volume_halted is True
+    assert stub._volume_waves == 1
 
 
 def test_continuous_autocalibrates_and_pulls_est_low(tmp_path: Path, _patch_wver: None) -> None:
     """★ A0（2026-10-21，plan/rollout-corpus-supply §3.1）：**本轮自校准优先 + 派局 est 压低**。
 
     历史 est=20、实际 10 samples/局（局长变短）。首波没有 learned ⇒ 用历史 20 → 压到 18 ⇒
-    每关 `ceil(50/18)=3` 局 = 12 局；结算后 learned=10（**不是**历史 20）⇒ 压到 9 ⇒
-    每关 `ceil(20/9)=3` 局 = 12 局。
+    每关池 = `ceil(50×2/18)=6` 局（不是旧口径的 3 局）⇒ 池 24 局。
 
-    旧口径（`trailing or learned` + 不压）：同样首波 12 局，但第二批 `ceil(20/20)=1` = 4 局 ⇒
-    `[12, 4]`。`[12, 12]` 与 `[12, 4]` 的差别就是这条改动的全部意义：**第二批按事实说话**。
+    ★ 2026-10-21（用户口径）：**est 偏一半也不再换来第二批**——旧口径 `[12, 12]`（两批）
+    在池语义下变成**一批**（派 23 局后逐关满额、熔断，池里剩 1 局没派）。
+    第二批那一次完整的波次开销 + 冷启动，就是这么被消掉的。
     """
     stub = _StubLoop(tmp_path, target=200, est=20, samples=10)
     stub._volume_collect_continuous(1, None)
-    assert [len(w) for w in stub.dispatched] == [12, 12], stub.dispatched
+    pool = 24
+    assert len(stub.dispatched) == 1, stub.dispatched  # ★ 一批到底（旧口径是两批）
+    assert len(stub.dispatched[0]) + stub.undispatched == pool
+    assert stub._volume_halted is True
+    assert stub._volume_waves == 1
     # 首波读数已落事件：est_used 是**压过**的值，est_raw 是估计原值，est_s 仍是盘上历史（可对账）。
     stage0 = stub._volume_stage_stats["stages"]["0"]
     assert stage0["est_used"] == 18 and stage0["est_raw"] == 20 and stage0["est_s"] == 20

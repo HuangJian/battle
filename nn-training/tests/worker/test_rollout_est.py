@@ -24,7 +24,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.resume import trailing_stage_samples_per_game
-from worker.volume_alloc import pick_stage_est, pull_est_low
+from worker.volume_alloc import (
+    pick_stage_est,
+    pool_games_by_stage,
+    pull_est_low,
+    quota_met,
+)
 
 
 def _shard(it_dir: Path, stage: int, seed: int, samples: int) -> None:
@@ -129,3 +134,66 @@ def test_pull_est_low_is_bounded_and_deterministic() -> None:
     assert pull_est_low(1) == 1  # 不许掉到 0（0 = 无估计，会改走 fallback）
     assert pull_est_low(0) == 0
     assert pull_est_low(530) < 530
+
+
+def test_pool_games_by_stage_overprovisions_and_respects_caps() -> None:
+    """★ 候选池（2026-10-21 用户口径）：池 = 缺口 × mult，且**夹在硬顶内**。
+
+    它回答的不是「要采多少局」，而是「队列里先放多少候选」——多出来的那部分只在配额
+    没达成时才可能被派出去，满额即熔断 ⇒ 从不运行。
+    """
+    # quota=50、est=20、mult=2 ⇒ ceil(50×2/20)=5 局/关
+    pool = pool_games_by_stage(
+        stages=[0, 1],
+        collected={0: 0, 1: 10},
+        games_done={0: 0, 1: 1},
+        target_transitions=100,
+        ests={0: 20, 1: 20},
+        game_caps={},
+        mult=2.0,
+    )
+    assert pool == {0: 5, 1: 4}, pool  # 关 1 已收 10 ⇒ ceil(40×2/20)=4
+
+    # 硬顶是硬顶：cap 余量只有 2 ⇒ 只给 2（不是 5）
+    capped = pool_games_by_stage(
+        stages=[0],
+        collected={},
+        games_done={0: 3},
+        target_transitions=100,
+        ests={0: 20},
+        game_caps={0: 5},
+        mult=2.0,
+    )
+    assert capped == {0: 2}, capped
+
+    # 已达标的关不进池；无估计 ⇒ 1 局（不猜）
+    assert pool_games_by_stage(
+        stages=[0, 1],
+        collected={0: 50, 1: 0},
+        games_done={},
+        target_transitions=100,
+        ests={0: 20, 1: 0},
+        game_caps={},
+    ) == {1: 1}
+
+
+def test_pool_games_by_stage_fills_up_to_width() -> None:
+    """`width` 已知时再兜一次：池比机器窄 ⇒ 按轮转补足（显式铺满所有槽）。"""
+    pool = pool_games_by_stage(
+        stages=[0, 1],
+        collected={},
+        games_done={},
+        target_transitions=100,
+        ests={0: 50, 1: 50},  # 池只有 2 局
+        game_caps={},
+        width=8,
+        mult=1.0,
+    )
+    assert sum(pool.values()) == 8, pool
+    assert pool == {0: 4, 1: 4}, pool
+
+
+def test_quota_met_is_per_stage() -> None:
+    """逐关判据：全局达标不算——短局关不能靠长局关顶。"""
+    assert quota_met(stages=[0, 1], collected={0: 50, 1: 50}, target_transitions=100)
+    assert not quota_met(stages=[0, 1], collected={0: 90, 1: 10}, target_transitions=100)

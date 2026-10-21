@@ -116,6 +116,7 @@ class RolloutDispatcher:
         extra_wver: str | None = None,
         course_fp: str | None = None,
         corpus_fp: str | None = None,
+        pool_halt: bool = False,
     ):
         self.bun = bun
         self.rl_path = rl_path
@@ -133,6 +134,10 @@ class RolloutDispatcher:
         self.extra_wver = extra_wver
         self.course_fp = course_fp
         self.corpus_fp = corpus_fp
+        # ★ `pool_halt`（2026-10-21 用户口径）：`halt` 是**候选池铺满后逐关满额**的停 ⇒
+        #   池里没派出去的候选不算「缺口」（它们从不运行）。外部熔断（KL halt 等）不置位
+        #   本标记 ⇒ `missing` 保持旧语义（没派的局照旧报出来，e2e 的 halt preset 钉着它）。
+        self.pool_halt = bool(pool_halt)
         #: 本机槽的长驻池（`_run` 里按需建；生命周期 = 这一轮，见 `run`）。
         self._pool: serve_pool.ServePool | None = None
 
@@ -1235,7 +1240,11 @@ class RolloutDispatcher:
                 f"仍在收尾（本轮结果已齐，不再等待）: {stuck[:5]}"
             )
 
-        missing = sorted(k for k in all_tasks if k not in seen)
+        # ★ 候选池的「满额即停」下，「缺口」只算真派出去过的（`attempts` 的 key）：池里没派的
+        #   候选不是失败（2026-10-21）——否则 `missing` 会把整个未用的池报成失败。
+        #   外部熔断（`pool_halt=False`）保持旧语义：没派的局照旧报，操作员要知道哪几局没跑。
+        #   竞速副本不进 `attempts`：它们跑了却没回结果，halted 时算 missing 是正确语义。
+        missing = sorted(k for k in (set(attempts) if halted and self.pool_halt else all_tasks) if k not in seen)
         by_node = common.distribution.by_node_of(results)
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
@@ -1276,9 +1285,7 @@ class RolloutDispatcher:
             sum_game_sec=sum_game_sec[0],
             sum_game_sec_by_node=sum_game_sec_by_node,
         )
-        combined["dist_phase_sec"] = round(
-            (t_dist_done_box[0] or time.time()) - t_queue_enter, 1
-        )
+        combined["dist_phase_sec"] = round((t_dist_done_box[0] or time.time()) - t_queue_enter, 1)
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True
             log(

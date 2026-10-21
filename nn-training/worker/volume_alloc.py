@@ -51,6 +51,14 @@ DEFAULT_TOPUP_MAX_BATCHES = 3
 #: 末批（`batches_left == 1`）的 est 折扣：缺口不可恢复、浪费可恢复 ⇒ 末批故意偏保守。
 DEFAULT_LAST_BATCH_LO_FACTOR = 0.85
 
+#: ★ 候选池的**过供**倍数（2026-10-21，用户口径「一开始就铺满所有 worker」）。
+#: 派出去的局数不再是「刚好够」，而是「缺口 × 本值」的一个**候选池**：队列里一直有活，
+#: 结算一局就从池里取下一局（dispatcher 本来就是这个语义），逐关满额即 `halt_event` 熔断，
+#: 池里**没派出去的候选从不运行**（不是"派了再丢"）。
+#: 为什么不吃 est 误差：est 逐轮 ±40% 跳变，缺口方程算出的局数必然整体偏少/偏多，
+#: 而「池 + 早停」的墙钟由**配额达成时刻**决定，与池多大无关（多出来的局从不跑）。
+DEFAULT_POOL_MULT = 2.0
+
 #: **无估计**（首轮冷启动：est 已从课程/CLI 面退场，盘上又没有历史）时的补差批数上界。
 #: 初批只有「每关 1 局」（`alloc_games_by_stage` 的不猜档），缺口全靠满铺批填 ⇒ 常规的
 #: `DEFAULT_TOPUP_MAX_BATCHES`（3，按「首批已反解到位、只需补残余」标定）不够；这里给的
@@ -274,6 +282,95 @@ def topup_games_by_stage(
             continue
         out[stage] = n
     return out
+
+
+def pool_games_by_stage(
+    *,
+    stages: Sequence[int],
+    collected: Mapping[int, int],
+    games_done: Mapping[int, int],
+    target_transitions: int,
+    ests: Mapping[int, int],
+    game_caps: Mapping[int, int],
+    width: int = 0,
+    mult: float = DEFAULT_POOL_MULT,
+) -> dict[int, int]:
+    """**候选池**（2026-10-21，用户口径）：一次派多少局的**上限**，不是"要采多少局"。
+
+    与 `spread_games_by_stage` / `topup_games_by_stage` 的分工：
+
+    * 那两个是「**要采多少局**」——由缺口方程决定，est 偏一点就少采一批或多采一批；
+    * 本函数是「**队列里先放多少候选**」——`缺口 × mult`，多余的那部分**只在配额没达成时
+      才可能被派出去**；逐关一满额就 `halt_event` 熔断，池里剩下的候选**从不运行**
+      （不是"派了再丢"，是不派）。
+
+    ⇒ 调度侧因此**不需要知道集群有几个槽位**：只要池远大于槽位（52×2=104 >> 32），
+    dispatcher 从 t=0 起就把每个槽都填满，并且一直有活（队列语义本来就是"空一个补一个"）。
+    `width > 0` 时再兜一次：池小于 `width` 就按缺口比例补足到 `width`（显式铺满）。
+
+    `est ≤ 0` = 无估计 ⇒ 该关 **1 局**（不猜，与 `alloc_games_by_stage` 同口径）。
+    `game_cap` 是硬顶（与 `spread_games_by_stage` 同：余量用完就不再发）。
+    """
+    stage_list = [int(s) for s in stages]
+    if not stage_list:
+        raise ValueError("pool_games_by_stage 需要至少一个 stage")
+    if float(mult) <= 0:
+        raise ValueError(f"pool_games_by_stage 需要 mult > 0，得到 {mult!r}")
+    quota = target_per_stage(int(target_transitions), len(stage_list))
+    eligible: list[int] = []
+    for stage in stage_list:
+        if int(collected.get(stage, 0) or 0) >= quota:
+            continue
+        cap = int(game_caps.get(stage, 0) or 0)
+        if cap > 0 and int(games_done.get(stage, 0) or 0) >= cap:
+            continue
+        eligible.append(stage)
+    if not eligible:
+        return {}
+    out: dict[int, int] = {}
+    for stage in eligible:
+        got = int(collected.get(stage, 0) or 0)
+        done = int(games_done.get(stage, 0) or 0)
+        est = int(ests.get(stage, 0) or 0)
+        mult_num = round(float(mult) * 1000)
+        n = 1 if est <= 0 else _ceil_div((quota - got) * mult_num, est * 1000)
+        cap = int(game_caps.get(stage, 0) or 0)
+        if cap > 0:
+            n = min(n, max(0, cap - done))
+        if n > 0:
+            out[stage] = n
+    # 兜底铺满：池 < 机器宽度 ⇒ 按缺口比例补到 width（只在 width 已知时）
+    want = int(width)
+    if want > 0:
+        total = sum(out.values())
+        if total < want:
+            for stage in _round_robin(eligible, want - total):
+                cap = int(game_caps.get(stage, 0) or 0)
+                done = int(games_done.get(stage, 0) or 0)
+                if cap > 0 and out.get(stage, 0) + done >= cap:
+                    continue
+                out[stage] = out.get(stage, 0) + 1
+    return {s: v for s, v in out.items() if v > 0}
+
+
+def _round_robin(stages: Sequence[int], n: int) -> list[int]:
+    """`n` 个名额按 stage 给定序轮转发（确定性，与 `spread_games_by_stage` 同形状）。"""
+    out: list[int] = []
+    for i in range(max(0, int(n))):
+        out.append(int(stages[i % len(stages)]))
+    return out
+
+
+def quota_met(
+    *, stages: Sequence[int], collected: Mapping[int, int], target_transitions: int
+) -> bool:
+    """**逐关**配额是否全部达成（熔断判据；全局达标不算——短局关不能靠长局关顶）。
+
+    语义与 `shortfall_by_stage` 逐字同源：每一关都必须 `collected ≥ quota`。
+    """
+    return not shortfall_by_stage(
+        stages=stages, collected=collected, target_transitions=target_transitions
+    )
 
 
 def shortfall_by_stage(
