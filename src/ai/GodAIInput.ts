@@ -1248,19 +1248,24 @@ export class GodAIInput implements InputLike {
       if (p && p.alive) {
         const mode = this.params.leadFireMode
         const lead =
-          mode >= 3
+          mode === 3
             ? // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
               leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
                 inboundOnly: true,
                 maxAxialCells: 6,
                 bandPx: 10,
               })
-            : mode === 2
-              ? // A10.2: only enemies drifting INTO the lane.
+            : mode >= 4
+              ? // A10.4: only when waiting would NOT give an aligned shot.
                 leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                  inboundOnly: true,
+                  waitWindowTicks: 74,
                 })
-              : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+              : mode === 2
+                ? // A10.2: only enemies drifting INTO the lane.
+                  leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
+                    inboundOnly: true,
+                  })
+                : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
         if (lead > 0) return true
       }
     }
