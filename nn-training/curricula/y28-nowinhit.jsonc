@@ -1,0 +1,193 @@
+// 课程 y28-nowinhit —— **减法腿：只删 `wWinHit` 一项**（窗内命中价 1.6 → 无），其余 21 个参数、
+// 除该项外的 formula 语义、terminal、全部训练参数**逐字 = `y28-steady`**。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+// 2026-10-21 改名 `y27-steady-nowinhit` → `y28-nowinhit`。同日三臂并行：
+//   `y28-steady`（对照）/ **本腿** / `y28-dmg-half`（`wDmg 0.12→0.06`），
+//   同起点 / 同 `paired_rotate_seed` / 同面板 ⇒ 任意两臂可逐座位配对（见 §124）。
+//
+// 立项 → 2026-10-21。起因 = 对 `y28-steady` 价目表的一次算数复核（`tmp/y28-audit.py` / `tmp/y28-fix.py`，
+// 日志 `tmp/y28-audit.log` / `tmp/y28-fix.log`）。复核先纠了三处**口径错误**，再把"删哪一项"从直觉变成算术。
+//
+// ── 复核 A：`wHit` 不是"一发命中"的价钱 ─────────────────────────────────────────────
+//   `backHits`(idx45) / `sideHits`(idx46) / `hitsInFreezeShieldWindow`(idx77) 都是 `aimHits` 的**子集**
+//   （reward_library 逐条写明），公式把它们**加在同一发上**，所以一发命中的实际收款是
+//     wHit + wBackHits·P(背) + wSideHits·P(侧) + wWinHit·P(窗)
+//   lead 起点行为（40 局 shard：hits 39.60 / shots 66.20 / P 0.598 / 背 5.00 / 侧 24.77 / 窗 8.03）：
+//     0.32 + 1.2×0.126 + 0.3×0.626 + 1.6×0.203 = **0.983 = wHit 的 3.07×**
+//   ⇒ 单发期望 **+0.450**（steady 头注写 +0.137）· 盈亏平衡命中率 P* **0.247**（写 0.532）·
+//     一杀净价 **+3.32**（写 +1.71）。三处都只算了 wHit、漏了子集价。
+//   同口径回算旧表：clear 行为 **+0.066 / P* 0.676**；**真正起点**（lead 行为 P 0.598）**−0.005 / P* 0.604**
+//   ⇒ 立项第 ② 条的**方向成立**（起点确实贴着盈亏线，差 0.6pp），但数值差 1.7×（0.604 ≠ 1.05）；
+//   真正错的是第 ③ 条（量纲，见复核 B）。
+//
+// ── 复核 B：一发敌弹 ≈95 点血，不是 8 点 ────────────────────────────────────────────
+//   逐 tick 差分（`tmp/y28-dmg-unit.py`，40 局 92 笔非致死扣血）：唯一值 72/86/100/128/148/158/186，
+//   均值 **94.9**、中位 86；配置同源（`config/combat.ts`：basic firepower 50 × DAMAGE_SCALE 2 = 100，
+//   玩家 HP = round(50 × HP_SCALE 5 × 1.05) = 263 ⇒ 3 发死）。
+//   ⇒ `wDmg 0.12` = **11.4 Φ/发**（旧 0.03 = 2.85 Φ），不是 1 Φ；**一发 = 3.4 杀的价钱**。
+//   `playerDamageTaken` 只累计**非致死**扣血（`SimulationCombat.ts:641`）⇒ 致死那发过程价为 0，
+//   死亡价由 terminal −35 + 放弃的 wWin 48 承担。
+//   ⇒ 第 ③ 条"多打多挨是净赚"**反向不成立**：steady 已经是四条腿里最怕挨打的表。
+//
+// ── 复核 C：结论不是"再改价"，而是"删一项" ──────────────────────────────────────────
+//   把"开火激励"按 **ΔΦ/发 ÷ 该腿回报 σ** 对齐（`normalize_ret: true` 按批内 std 归一 ⇒ 可比的是这个比值）：
+//     y26-shotmix（全系列唯一正收益）wHit .2→.35：+0.113/发，σ 41.2 ⇒ **0.274%** → shots/千 +15.4%、win +5.8pp
+//     y28-steady 旧表→新表                       ：+0.455/发，σ 81.0 ⇒ **0.562%（2.0× shotmix）**
+//   两个**已知负剂量**都在 0.562% 之上：`y27-window` 的 wWinHit 3.0 = +0.384/发（同旧表，3.4× shotmix，旧 σ 41.2
+//   ⇒ 0.93%）→ −11.1pp（0/19 点为正）；`y27-shot` 的 wHit 0.8 = +0.496/发（4.4×）→ −8.3pp。
+//   ⇒ steady 的开火剂量已经坐在"已知好"（0.27%）与"已知坏"（0.93%）之间：**不该再往上加**（这也是本轮
+//     撤掉原 `y28-steady-fire` 草案的原因——它只加 0.3×，方向正好反了）。
+//   而 `wWinHit 1.6` 一项就贡献 **+0.194/发 = 0.87× shotmix 的全部剂量**、占有效命中价 **33.0%** ——
+//   它正是"唯一被判负的杠杆"（y27-window）在 steady 里的残留。删它，开火剂量从 2.0× 回到 **1.3×**
+//   （+0.261/发 ÷ 74.6 = 0.350%）。
+//
+// ── 为什么删它不会把表改瘦（三条读数）──────────────────────────────────────────────
+//   ① 它给**两种结局**都发钱：胜局 +16.18 / 负局 **+6.63**（每局）。删后四条腿的负局 Φ 一律更负：
+//      clear −17.3→−22.0 · lead −15.0→−21.7 · shot −32.3→−33.5 · window −18.5→−24.3
+//      （= 输的局不再领补贴，terminal 的死亡价恢复）。
+//   ② 正项质量 153.6 → **140.7（−8.4%）**、胜负差 160.18 → **150.63（−6.0%）**、σ 81.0 → **74.6（−7.9%）**
+//      ⇒ 差/σ **1.98 → 2.02**：它贡献的方差比它贡献的判别力还多。
+//   ③ 四条腿在新表上的差/σ：clear 1.89→1.90 · lead 1.98→**2.02** · shot 1.97→1.97 · window 1.93→**1.97**
+//      ⇒ 没有一条腿因为删它而变差。
+//
+// ── 兼容性（各腿自己的行为放到新表上重算；同结局可比、跨腿 win 不可比）─────────────────
+//   腿        | win  | steady 胜/负 Φ | nowinhit 胜/负 Φ | 差/σ
+//   y27-clear | 0.533| +146.6 / −17.3 | +132.0 / −22.0  | 1.89 → 1.90
+//   y27-lead  | 0.650| +145.2 / −15.0 | +129.0 / −21.7  | 1.98 → 2.02   ← 起点行为
+//   y27-shot  | 0.400| +151.9 / −32.3 | +140.3 / −33.5  | 1.97 → 1.97
+//   y27-window| 0.625| +142.7 / −18.5 | +128.4 / −24.3  | 1.93 → 1.97
+//   开火闸门：有效命中价 0.983 → **0.659**（仍 2.06× wHit）· 单发 +0.450 → **+0.256** ·
+//   P* 0.247 → **0.331** · 一杀净价 +3.32 → **+2.50**（仍为正）。
+//   ⇒ 删的是"窗内多给的那一份"，不是"少开火"；闸门仍比实测 P=0.598 宽 27pp。
+//
+// ── 判据（预注册；开课后按此判，不在跑完后再改口径）────────────────────────────────
+//   A. 接线（shard，it≥10 起每 20 iter 抽 40 局）：`wWinHit` 项已不在公式里（与 steady 的 identity 不同、
+//      与它自己 it0 的 wver 相同）、单发 ∈ [+0.24,+0.28]、P* ∈ [0.32,0.35]、差/σ ≥ 1.9。
+//      任一不成立 ⇒ 表没落地，先停（不是"再等等"）。
+//   B. 主判 = 与 `y28-steady` **逐座位配对**（键 `iter|stage|seed`；同起点 / 同 `paired_rotate_seed`
+//      20270206 / 同面板 ⇒ 两腿每个 eval 座位一一对应）：
+//      B1 it0 指纹：两腿 it0 `wver` 逐字相等（同一快照）；不等 ⇒ 快照拿错，停。
+//      B2 方向窗 it40–60（5 点 ≈2000 个共同座位）：Δwin ≥ **+1.5pp** 且 McNemar z ≥ **2.0**。
+//      B3 判决窗 it80–120（9 点 ≈3600 座）：Δwin ≥ **+2.0pp** 且 z ≥ **2.5**。
+//      B4 绝对地板：it80–120 窗均值 ≥ **0.62**（十条腿的常态水位；配对赢但绝对值塌了仍算回归）。
+//      B5 杀腿（窗口径，禁单点）：it≥30 起连续 3 个点 < 0.60；或 it40–60 的 Δwin ≤ **−2pp**。
+//   C. 机制读数（同批 shard，主判方向不主判绝对值）：
+//      C1 窗内命中密度（`hitsInFreezeShieldWindow / freezeShieldWindowTicks`）比 steady **低 ≥15%**
+//         —— 操纵检查：项真的在驱动行为。若纹丝不动 ⇒ 它本来就是死钱（结论 = "删得对但无行为收益"）。
+//      C2 `shots/千` ∈ [9.4, 11.5]：跌出下界且 P 上升 ⇒ 删过头了（窗内那发本来是唯一愿意冒险的时机），
+//         记作剂量效应，不算表的胜利。
+//      C3 P ≥ **0.58**（起点 0.598；删掉窗内补贴后应微升或持平）· `kills/千` ≥ **2.45** · `dmg/杀` ≤ **14.2**。
+//      C4 负局均值 Φ < steady 的 −15.04（更负）——价格语义落地；只看均值，不看单局。
+//   D. 读法禁令：不看 `dmg/千`（早死会把分母变短）；不与 steady 比单点 win；跨腿只比同轮同座位的配对差。
+//
+// ── 明确不做 ─────────────────────────────────────────────────────────────────────
+//   · 不动 `wHit/wMiss/wAcc`：审计说开火剂量已 2.0×，再动就是拿唯一验证过的轴做赌博；
+//   · 不动 `wBackHits 1.2 / wSideHits 0.3`（几何子集，各占有效价 15.4% / 19.1%）：没有判负记录，
+//     且与本腿正交；要动需单独一条腿；
+//   · 不动 `wDmg 0.12 / wWin 48 / terminal −35 / wDist 4.0 / wKill 3.0 / wSpeed 3.0`；
+//   · 不碰观测表 / 动作空间（仍 v6：move4/fire3/hold2）/ decision_k / target_transitions；
+//   · 不重跑已证伪五族（x20-dodge L1/L2a/L2b/L3/L3d2、wWinHit 3.0、wHit 0.8）；
+//   · 不加新指标列；与 steady 同 seed 流**只为同轮配对**（§15.1 例外理由同 y27 四腿）。
+
+// ── 结课报告（2026-10-21 · y28 · 判负 · wWinHit 该摘 · 全文 `reports/y28-steady-20261021.md`）─
+//   跑量：it1→it300 全跑满 · 与 y28-steady 同起点（`y27-lead.it90`）/ 同 `paired_rotate_seed 20270206` /
+//         同面板 · 09:32 本地起 → 云机盘跑完（`run_id c3a69d172f453e3f`，complete）· eval 61 点
+//   轨迹 anchor_wr：it0 **0.6950**（与 steady 逐字相同，同起点✓）→ it40 0.590 → it60 **0.520**
+//     → it250-300 均值 **0.7759±0.0084** → it300 **0.8000**
+//   主判（vs y28-steady，it300 同 200 座配对）：steady 胜 / 本臂胜 = **29 / 32**，
+//     **Δ = −1.5pp，McNemar p = 0.798** ⇒ **分不出**。（it60 那个 14pp 差是早期噪声：两臂中段都在 0.52–0.72 摆）
+//   行为（it250-300）：窗内命中/局 **5.078 vs steady 5.919（−14.2%）** · 窗内拍/局 1214.9 vs 1251.0
+//     ⇒ **`wWinHit 1.6` 确实买到了行为**（窗口密度差 14%）。
+//   判决：**判负 —— 有行为剂量、零胜率回报**。`wWinHit` 不是"没接线"，是"接上了但这条行为不值 1.6 的价"。
+//     ⇒ **从价目表摘掉**（它吃掉 7.2% 正项份额）；不再调剂量（`window` 腿 3.0 与本腿 1.6 两档都测过，均无回报）。
+//   交付：包内 `it-300/weights.json` 是 delta（sha16 `c81548d9` = `state.last_weights_fp`），
+//     **顶层另带一份 `it300.weight.json` 整份**（sha256[:16] `a3cc09c7`）—— 与 y28-steady 的包不同（那个没带）。
+//     已归档 `nn-training/weights/y28-nowinhit/y28-nowinhit.it300.20261021-1617.json`。
+//   遗产：`y29-steady` 的价目表 = **本腿的价目表（identity `ac67e941bfe7e924`）+ 起点 it300**
+//     ⇒ 别把「y29-steady 涨了」读成「摘 wWinHit 有用」，那个问题本报告已答完（p=0.798）。
+//   证据：`reports/y28-steady-20261021.md §11`
+// ── 结课报告结束 ──────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "y28-nowinhit",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：steady 逐字，删掉末项 wWinHit（见头注）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    // 与 steady 同：两种输法同价（本关 1 命，lives_exhausted 就是"死"）。
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：与 steady 同一份 → 逐座位配对的前提 ──
+  "bc": "nn-training/weights/y27-lead/y27-lead.it90.20261021-013949.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  // 300 iter ≈ 16–17h：与对照臂 `y28-steady` 同长（三臂并行占满算力）。判据仍在 it40–60 / it80–120；
+  // 尾巴留给"赢了直接可部署"与长程曲线。B5 命中就停，别把 18h 烧在已判死的腿上。
+  "iters": 300,
+  "max_hours": 18,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // 与 y28-steady 同值：判据是同轮同座位配对，必须同流（§15.1 例外理由同 y27 四腿）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y28-nowinhit/weights.json",
+  "traj": "tmp/y28-nowinhit",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y28-nowinhit",
+  "backup_prefix": "y28-nowinhit",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

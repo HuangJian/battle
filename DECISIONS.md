@@ -8268,6 +8268,18 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   全文与逐项价目表 → `docs/nn/experiments.md §121`；分析脚本 `tmp/y27-steady-design.py`（临时件，不入库）。
 - **边界**：不动观测表、不碰 base 族 12 维（用户口径：预留观测）、不改动作空间 / decision_k /
   target_transitions；加新指标列（承伤速率）留给下一腿。
+- **2026-10-21 追加（同日，用户指令）**：① **改名** `y27-steady` → `y28-steady`、`y27-steady-nowinhit` →
+  `y28-nowinhit`（文件内 name/out/traj/backup 同步，identity 不变：`cc5f51de1abb58a6` /
+  `ac67e941bfe7e924`）；② **三臂并行**，新增第三腿 **`y28-dmg-half`**（`wDmg 0.12→0.06`，identity
+  `267a52fe8465f8af`）。三臂 = 2 轴设计的三个格：对照（原表）/ nowinhit（削"打中"的窗内溢价）/
+  dmg-half（削"挨打"的价），同起点 `y27-lead.it90`、同 `paired_rotate_seed 20270206`、同面板、
+  同 **300 iter / 18h** ⇒ 任意两臂可逐座位配对。第三腿的依据 = §122 ⑤ 的反向读数：y26-dmg 把
+  wDmg ×4 后 **dmg/局 +3%（没降）/ idle/千 ×2.5 / kills/千 −11% / 尾段 −5.9pp（z=−3.0）** ⇒
+  承伤价买的是恐惧而非回避；减半后相对剂量 3.6% ≈ 旧表 0.03 的 3.95%（赢过 0.12 的档），而单发
+  +0.450 / P\* 0.247 / 有效命中价 0.983 **逐字不变**（与开火轴正交）。否决 `wDist 6.0`（按发付钱
+  +0.13/发 ≈ 0.6× shotmix，会把 2.0× 推到 2.6×）、删 back/side（与 nowinhit 同源）、训练侧 λ/entropy
+  （证据薄且三臂需一条解释"价"的腿）。三份 `validate_reward` 0 error，逐字段对账只差点名项；
+  全文 → `docs/nn/experiments.md §124` + `y28-dmg-half.jsonc` 头注。
 
 ## §2026-10-21-goalnn-y26-y27-close — y26/y27 十腿结课：唯一成立的是 wHit 0.35；两条预注册判据（乱射红线 / 单点 win 门）被数据判为坏口径
 
@@ -8453,3 +8465,62 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`tests/remote/` + 复用账本 + 文本断言护栏 + 分层账本 **1440 绿** ·
   ruff / mypy 绿 · nn python gate 全量绿。
 - **全文** → `docs/nn/remote-transport.md` §110。
+
+## §2026-10-21-goalnn-online-worker-bun-for-self-collect — 在线 worker 盘**自采模式**下允许装 bun（`§2026-09-25-goalnn-online-worker-no-bun` 的**限定例外**）
+
+- **触发**（用户 2026-10-21 裁决，原话「如果改成自采集，可以装！」）：`plan/rollout-corpus-supply.plan.md`
+  腿 C（**GPU 实例自采语料**，`kind=iter`）需要该盘自己跑 TS rollout，而执行体
+  `nn-training/worker/iter_rollout.py::resolve_bun` 明确要求**节点上有 bun**（找不到 ⇒ 响亮拒绝，
+  且原话「本 worker 所属的盘不跑 rollout」）。腿 C 的收益（免语料网络 + 免网络波动 + 供给随 worker 线性）
+  **以 bun 可装为前提**。
+- **裁决**：`§2026-09-25-goalnn-online-worker-no-bun` 的「在线 worker 盘不装 bun」**降级为「默认不装」** ——
+  **自采模式**（该盘自己跑 rollout）时装 bun；**纯训练 worker 逐字不变**（仍不装、不付公网下载与启动延迟）。
+- **实现的硬约束（四条，照做即可）**：
+
+  | # | 约束 | 出处 |
+  |---|---|---|
+  | ① | **复用现成装机函数**，不许另写：采样节点已有 `remote/rollout_node.py::_ensure_bun`（找 `bun` / `/root/.bun/bin/bun` / `~/.bun/bin/bun` ⇒ 缺失则 `curl -fsSL https://bun.sh/install | bash`，timeout 600s；`bun install --frozen-lockfile` 失败不致命） | 退役过的 `ensure_bun()` **不许复活**（`tests/remote/test_tailscale_boot_bun.py::test_retired_bun_helpers_do_not_come_back` 钉着） |
+  | ② | **顺序**：公网下载必须**发生在代理/隧道切换之前** | `remote/rollout_node.py:18` 的既有纪律（「公网下载一律在 `platform_net_env()` 里或发生在 ensure 之前」）⇒ 装机点在 tailnet/cloudflared 引导**之前** |
+  | ③ | **护栏改写而不是删掉**：六条守卫从「在线 worker 一律不许装 bun」改为「**仅当自采模式开启时**才许装」 | `tests/remote/test_tailscale_boot_bun.py`（守卫**随口径一起改**，不允许只改断言或只改实现） |
+  | ④ | **TS 代码树不用新做**：worker 已有 `remote/download.py::_ensure_ts_code` | `ts_code_cache/<sha>/` = **bun 的 cwd**（另一棵树，`download.py:17`）⇒ 自采只差 **bun** 这一个装机件 |
+
+- **被否决**：① 直接废掉「在线 worker 不装 bun」这条纪律（⇒ 纯训练 worker 也要下载 bun、付公网安装的失败面与
+  启动延迟，而它**永远不会用**）；② 在 worker 盘另装一份 bun 的副本（⇒ 两份真相 + 版本漂移；日志里已有
+  `bun patch differs (1.4.3 vs 1.4.2) — allowed (yellow)` 这类容差，别再扩大）；③ 把 bun 塞进 payload /
+  代码快照（⇒ 把「可执行文件」混进内容寻址的代码树，破坏「代码 = 源码」的边界）。
+- **影响面**：**仅在腿 C 落地时生效**（`plan/rollout-corpus-supply.plan.md` §5.3）；在此之前**逐字不变**。
+- **落点**：`plan/rollout-corpus-supply.plan.md` §5.3 · 实现时改 `remote/tailscale_boot.py` /
+  `remote/notebook_boot.py` 的引导顺序 + `tests/remote/test_tailscale_boot_bun.py` 的守卫口径 ·
+  `docs/nn/remote-transport.md`（顶部新增 §）· `.workbuddy/memory/2026-10-21.md`（一行）。
+
+
+## §2026-10-21-goalnn-y29-resume-from-it300 — 不续旧课：从 `y28-steady.it300` 重开两臂（摘 `wWinHit` + `wDmg` 减半），因为 lr 档已打满而尾段斜率仍显著
+
+- **背景**：`y28-steady` 跑满 300 轮，anchor **0.695 → 0.815**（同座配对 +12.0pp / McNemar p=0.0088）。
+  用户 2026-10-21 判定「胜率喜人、还在上升、可以继续」，并令 `y28-dmg-half`（停在 it62）**停跑**，
+  改开两条从 it300 起的新腿。
+- **「还在上升」的实测口径**（`reports/y28-steady-20261021.md §2.1`）：分段斜率
+  it60–150 **−0.85±0.38（t=−2.2）** · it150–235 +0.17 · **it235–300 +0.99±0.33（t=3.0）** ·
+  it265–300 +0.95（t=1.0，不显著）⇒ **是台阶后高位横盘，不是线性爬升**，外推收益要按衰减估。
+  （同一节的旧结论「尾段已平」是只用端点配对 p=0.464 得出的，已订正。）
+- **决定**：
+  1. `y29-steady` = `y28-steady` 的价目表**摘掉 `wWinHit`**（双臂已证零胜率回报：窗内命中 −14.2% 但
+     it300 配对 Δ−1.5pp / p=0.798），起点 `y28-steady.it300`（sha16 `c5030c2e3e869605`），
+     `iters 200 / max_hours 8`，lr 档重排（it1–120 用 1.5e-4 → 之后 1e-4，因为 y28 全程已在最低档）；
+  2. `y29-dmg-half` = 逐字同上，只 `wDmg 0.12 → 0.06`（相对剂量 3.59% ≈ 旧表 0.03 的 3.95%，
+     即 y26-dmg 里"赢过 0.12"的那一档）；
+  3. `paired_rotate_seed 20270206 → 20270207`（本腿不是 y28 的续臂；同流会让 it1..300 与 y28 的 300 轮
+     `(stage,seed)` 全重复，§15.1）。**评估面板 anchor 860001-860050 不变**（跨代可作方向参照）。
+- **★ 必须记住的一条**：`y29-steady` 的 reward identity = **`ac67e941bfe7e924`，与 `y28-nowinhit` 完全相同**
+  ⇒ 两腿价目表逐字一致，差别只有起点/lr 档/seed 流。**不得**把「y29-steady 涨了」归因于价目表改动。
+- **否决的备选**：① 原地 `--run-iters +200` 续旧课（在 1e-4 最低档上磨，且 `out/traj` 复用会让新旧
+  两段混在一个账本里）；② 沿用 `y28-dmg-half` 的 it62 当 dmg 对照（起点分布不同 —— 它从 it90 起、
+  没经历过 0.12 的 300 轮塑形）；③ 换评估面板（会失去与 y28 的跨代参照）。
+- **判据（预注册）**：主判 = 两臂 it150–200 的 11 个点按座位聚合后 McNemar（|Δ|≥5pp 且 p<0.05 = 有影响；
+  |Δ|<3pp = 分不出）；**不设 it40–60 绝对阈门**（§124 的 B2/B3 判负而末态 +12pp 的教训）。
+  杀腿：`kills/千 <2.40` · `timeout >5%` · it100 `anchor_wr <0.72` · `dmg/局 >1.10×起点 且 Δwin ≤0`。
+- **已知低估偏差**：两臂同从 `wDmg 0.12` 塑形过的 it300 起 ⇒ dmg-half 测的是「从怕疼的策略出发把价减半」，
+  前 30–50 轮可能无差；判据窗口因此放 it150–200。
+- **落点**：`nn-training/curricula/y29-{steady,dmg-half}.jsonc` · `docs/nn/experiments.md §125` ·
+  `tmp/y29-validate.py`（日志同名 `.log`）· `.workbuddy/memory/2026-10-21.md`。
+  **开课 = 人在控制台点**；agent 不起训练。
