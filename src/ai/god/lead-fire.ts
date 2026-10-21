@@ -60,13 +60,31 @@ function laneBlocked(
   return false
 }
 
-export function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: number): number {
+export interface LeadFireOpts {
+  /** Only count enemies whose lateral motion is TOWARD the lane
+   * (`lateral * vLat < 0`) — the "drifting into my line" case, not "leaving". */
+  inboundOnly?: boolean
+  /** Override the axial reach (cells). Default 13 (NN parity). */
+  maxAxialCells?: number
+  /** Override the hit band (px). Default TANK/2 + BULLET/2 = 19 (NN parity). */
+  bandPx?: number
+}
+
+export function leadHitForDir(
+  world: World,
+  dir: Direction,
+  pcx: number,
+  pcy: number,
+  opts?: LeadFireOpts,
+): number {
   const p = world.player
   if (!p) return 0
   const vertical = dir === 'up' || dir === 'down'
   const sign = dir === 'down' || dir === 'right' ? 1 : -1
   const bulletSpeed = p.bulletSpeed > 0 ? p.bulletSpeed : 4
-  const maxAxial = 13 * CELL
+  const maxAxial = (opts?.maxAxialCells ?? 13) * CELL
+  const bandPx = opts?.bandPx ?? LEAD_HIT_BAND_PX
+  const inboundOnly = opts?.inboundOnly === true
   const shooterCol = Math.floor(pcx / CELL)
   const shooterRow = Math.floor(pcy / CELL)
   const tileMap = world.tileMap
@@ -81,7 +99,8 @@ export function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: nu
     const lateral = vertical ? tx - pcx : ty - pcy
     const vLat = vertical ? t.vx : t.vy
     const tStar = axial / bulletSpeed
-    if (Math.abs(lateral + vLat * tStar) >= LEAD_HIT_BAND_PX) continue
+    if (Math.abs(lateral + vLat * tStar) >= bandPx) continue
+    if (inboundOnly && lateral * vLat >= 0) continue
     const colLow = Math.floor(t.x / CELL)
     const colHigh = Math.floor((t.x + t.w - 1) / CELL)
     const rowLow = Math.floor(t.y / CELL)

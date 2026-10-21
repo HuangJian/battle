@@ -1245,8 +1245,23 @@ export class GodAIInput implements InputLike {
     // cannot be violated here.
     if (this.params.leadFireMode > 0 && !this._fire) {
       const p = this.controlledTank(this.world)
-      if (p && p.alive && leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2) > 0) {
-        return true
+      if (p && p.alive) {
+        const mode = this.params.leadFireMode
+        const lead =
+          mode >= 3
+            ? // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
+              leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
+                inboundOnly: true,
+                maxAxialCells: 6,
+                bandPx: 10,
+              })
+            : mode === 2
+              ? // A10.2: only enemies drifting INTO the lane.
+                leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
+                  inboundOnly: true,
+                })
+              : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+        if (lead > 0) return true
       }
     }
     if (!this._fire) return false
