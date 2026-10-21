@@ -1769,3 +1769,202 @@ def test_big_eval_body_degrades_to_weights_first_then_reposts_the_rows(tmp_path:
     assert d.unsent_reposts() == []
     full = [r for r in op.artifact_calls if r[3]]
     assert len(full) == 2, op.record  # 第一次（失败）与重投（成功）都带了评估行
+
+
+# ────────────────────── W3/Q2 瘦身 + W1-C/D 锚点（2026-10-22） ──────────────────────
+
+
+class _BodyOpener:
+    """把每个**产物体**记下来的 opener（断言读体，不读日志文本——文本是第二事实源）。"""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    def __call__(self, url: str, data: bytes, headers: dict, timeout: float):
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        self.bodies.append(json.loads(data.decode("utf-8")))
+        return 200, b'{"status":"accepted"}'
+
+
+def _heavy_eval_log(root: Path, *, it: int, games: int = 1) -> Path:
+    """一份**带分析列**的 eval 账本（行仍取自唯一构造点 `worker.eval_rows.eval_row`）。
+
+    为什么要分析列：白名单的整个意义就是「实时体不带它们」。只写瘦行的话，「去掉了一段
+    不存在的字段」也会绿——那是一条空断言。
+    """
+    from worker.eval_rows import eval_row
+
+    rows = [
+        eval_row(
+            {
+                "win": True,
+                "cleared": True,
+                "score": 100,
+                "kills": 4,
+                "ticks": 900,
+                "dims": {"loot": {"value": 3}},
+                "hitsByKind": [1, 2, 3],
+                "killsByKind": [3, 0, 0],
+                "exposureByKind": [9, 8, 7],
+                "moveHist": [10, 2, 3, 4, 5],
+                "decisions": [1, 2, 3, 4],
+                "stopRuns": [0, 1],
+            },
+            it=it,
+            key16="k" * 16,
+            task=(1, 100 + i),
+            node="cloud",
+        )
+        for i in range(games)
+    ]
+    p = root / "eval_log.jsonl"
+    p.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+    return p
+
+
+def _metrics_row(root: Path, it: int, **extra: object) -> None:
+    """写一行**与权重字节相符**的账本行（`_row_for` 只认这一种；否则本轮不发 row）。"""
+    row = {"it": it, "weights_fp": _weights_fp(root, it), **extra}
+    (root / "metrics.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_eval_rows_go_through_the_wire_whitelist_and_local_ledger_is_untouched(
+    tmp_path: Path,
+) -> None:
+    """W3（评审 P0-5）：实时体的逐局行**过白名单**，去重键一个不少，本地账本一字未动。
+
+    白名单之外的列不是丢了：它们逐字留在 `eval_log.jsonl` 里，而那份文件由抽屉与离线包
+    整份带走。这条用例同时钉住两件事——「瘦」与「瘦的东西还能在 hub 去重」。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(2,))
+    p = _heavy_eval_log(root, it=2, games=2)
+    before = p.read_bytes()
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 1
+    (body,) = op.bodies
+    rows = body["eval_rows"]
+    assert len(rows) == 2
+    # 白名单是**契约**，所以用例自己写一份（不 import 实现里的那个常量：那是拿实现验实现）。
+    kept = {
+        "event",
+        "iter",
+        "wver",
+        "stage",
+        "seed",
+        "time",
+        "node",
+        "outcome",
+        "win",
+        "cleared",
+        "ticks",
+        "score",
+        "quality",
+        "kills",
+        "playerDamageTaken",
+        "playerDeaths",
+        "puGotTank",
+        "powerUpsCollected",
+        "dims",
+    }
+    assert set(rows[0]) <= kept, f"白名单之外的东西上了实时体：{sorted(set(rows[0]) - kept)}"
+    for k in ("event", "iter", "wver", "stage", "seed"):
+        assert k in rows[0], f"去重键被瘦掉了：{k}"
+    for k in ("hitsByKind", "killsByKind", "exposureByKind", "moveHist", "decisions", "stopRuns"):
+        assert k not in rows[0], f"分析列不该上实时体：{k}"
+    assert rows[0]["dims"] == {"loot": 3}, "控制台 spawn 反推要它（`eval_row` 把 dims 拍平成标量）"
+    assert p.read_bytes() == before, "本地账本是交付面，瘦身只该发生在**上行**那一份上"
+    raw, wire = d.status()["eval_rows_bytes"]
+    assert 0 < wire < raw, f"白名单没起作用（{raw} → {wire}）"
+
+
+def test_projected_eval_rows_still_dedupe_on_the_hub(tmp_path: Path) -> None:
+    """W3 的另一半：**瘦过**的行拿去 hub 合并两次 ⇒ 行数不变（去重键必须活着）。
+
+    为什么用体里真发出去的那几行：用例自己重抄一份白名单就等于只测了用例自己。
+    """
+    from worker.eval_rows import append_eval_rows
+
+    root = _make_artifacts(tmp_path / "art", iters=(5,))
+    _heavy_eval_log(root, it=5, games=3)
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+    assert d.sync() == 1
+    rows = op.bodies[0]["eval_rows"]
+
+    ledger = tmp_path / "课程" / "eval_log.jsonl"
+    assert append_eval_rows(ledger, rows) == 3
+    assert append_eval_rows(ledger, rows) == 0, "同一批行并第二次必须一条都不加"
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 3
+
+
+def test_per_game_detail_does_not_ride_the_realtime_body(tmp_path: Path) -> None:
+    """Q2：`perGame`/`perGameSecs` 只随抽屉/离线包到达；**本地账本与聚合列照旧**。
+
+    代价（明写在 plan §7.1 Q2 的答案里）：包到之前该轮的逐局弹窗是空的——所以这里还要
+    钉住「读数面知道自己摘了几局」（`status()['pergame_deferred']`），否则人只能看见空弹窗。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    per_game = [{"stage": 1, "seed": i, "win": True} for i in range(34)]
+    _metrics_row(root, 1, perGame=per_game, perGameSecs=[0.5] * 34, agg={"kl": 0.01})
+    before = (root / "metrics.jsonl").read_bytes()
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 1
+    (body,) = op.bodies
+    assert not ({"perGame", "perGameSecs"} & set(body["row"])), "实时体不许带逐局明细"
+    assert body["row"]["agg"] == {"kl": 0.01}, "聚合列照发（控制台指标表靠它）"
+    assert (root / "metrics.jsonl").read_bytes() == before, "本地账本不许被摘"
+    assert d.status()["pergame_deferred"] == 34
+
+
+def test_realtime_sends_only_anchor_rounds_and_pending_keeps_every_round(
+    tmp_path: Path,
+) -> None:
+    """W1-C/D：实时体只发**锚点轮**（有 A 层评估读数的那几轮），而 `pending()` 一个字没窄。
+
+    两半都要钉：① 只发 it2；② `pending()` 仍是 [1,3,4]，且抽屉照吃全量（D-3 的安全网）。
+    第二半是评审 P0-2 的全部意义——非锚点轮不许「既不上传也不进抽屉」。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3, 4))
+    _write_eval_log(root, it=2, games=1)
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op, backup_root=tmp_path / "bk")
+
+    assert d.sync() == 1
+    assert [b["it"] for b in op.bodies] == [2]
+    assert d.pending() == [1, 3, 4], "非锚点轮必须留在待投集里（抽屉/idle/对账都读它）"
+    assert d.status()["pending_anchors"] == 0
+    assert d.backup_pending() == 3, "三轮回抽屉（不因不进实时体而失去第二副本）"
+
+
+def test_final_pass_also_sends_the_newest_non_anchor_round(tmp_path: Path) -> None:
+    """D-1 × W1-C/D：段末（`force_probe`）除了锚点，还要把**最新那一轮**带上。
+
+    否则最后一段（距上一个锚点不足 `eval_every`）的进度永远差几轮，续跑要多跑一遍。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3, 4))
+    _write_eval_log(root, it=2, games=1)
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync(force_probe=True) == 2
+    # 顺序：段末把**最新那一轮**排最前（`_sync` 的 D-1 重排），锚点在后。
+    assert [b["it"] for b in op.bodies] == [4, 2]
+    assert d.pending() == [1, 3], "段末也不许把非锚点轮从待投集里抹掉"
+
+
+def test_without_any_eval_rows_every_pending_round_is_sent(tmp_path: Path) -> None:
+    """没有锚点可依的腿（不做 A 层评估）**退回全量**——否则它一轮也发不出去。
+
+    这是数据条件不是旋钮：`eval_log.jsonl` 缺失/为空 ⇒ 锚点集为空 ⇒ 「只发锚点」= 零发送。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 3
+    assert sorted(b["it"] for b in op.bodies) == [1, 2, 3]

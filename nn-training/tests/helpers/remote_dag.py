@@ -114,6 +114,11 @@ LAYERS: dict[str, int] = {
     # 会当场报 stale）。它们是 stdlib-only 叶子（L0），搬走不改变任何残留边的方向。
     "remote.artifacts": 0,
     "remote.bulk_sched": 0,
+    # 补传**实时体的投影**（2026-10-22，`plan/offline-deliver-stall` §9.6）：评估行白名单 /
+    # `perGame` 摘键 / 锚点判据（`read_eval_iters`）三块纯函数。依赖面 = stdlib + `Path`
+    # ⇒ **L0**；`offline_deliver`(L2) 站在它上面，秩不变。（与 `deliver_ledger` 同一条纪律：
+    # 同一个 LOC 预算把腿本体顶到 1000 行，就把纯数据/判据下沉。）
+    "remote.deliver_wire": 0,
     # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
     # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
     "remote.control_pool": 0,

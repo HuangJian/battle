@@ -6,6 +6,66 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §112 实时体只发**锚点轮** + 逐局评估行过白名单 + `perGame` 走包（2026-10-22 · `plan/offline-deliver-stall.plan.md` §9.6 · 决策 `DECISIONS.md` §2026-10-22-goalnn-offline-realtime-anchor-and-slim）
+
+§111 修的是「失败之后不许卡住」；这一条修的是**体本身**——它决定抖动期一次尝试要背多少字节。
+
+### 体量从哪来（实测 2026-10-21，逐件算）
+
+| 件 | 上线字节 | 说明 |
+|---|---|---|
+| `weights_json`（delta） | 122,892 | 不可再生，必发 |
+| `opt_tar_b64`（delta） | 153,960 | Adam 动量，必发 |
+| `row` | 45,135 | 含 `perGame` 34 局；**聚合列只占 ~1KB** |
+| `eval_rows`（400 局） | 920,011 | 2.3KB/行，其中**分析列**（v8–v13、分敌种、`moveHist`/`decisions`/`stopRuns`）是大头 |
+
+非 eval 轮 322KB · eval 轮 1.24MB。抖动期前者能过、后者过不去（§111 时间线），所以减体的
+两个抓手是「逐局行过白名单」与「`perGame` 不上实时体」。
+
+### 1）逐局评估行 → 白名单（`EVAL_ROW_WIRE_KEYS`）
+
+实时体那份逐局行只保留**两类读者要的键**：
+
+- hub 合并去重：`event/iter/wver/stage/seed`（`worker/eval_rows.eval_row_key` 逐字依赖，少一个
+  就会被并成一行或落哨兵键 `(None,"",-1,-1)`）；
+- 控制台逐局表与聚合：`win/cleared/outcome/ticks/kills/score/quality/playerDamageTaken/
+  playerDeaths/puGotTank/powerUpsCollected/dims/time/node`（`dashboard/src/server/iters.ts`
+  的 `EvalGameRow` 与 `residualHpFromFields`；`dims.loot` 是 spawn 反推的来源）。
+
+**丢掉的不是数据，是通道**：`eval_log.jsonl` 整份由抽屉（`remote/backup_drawer`）与离线包
+（`remote/deliver_zip`）带走，分析列（`tools/lever_scan.py` 读 `moveHist`、metrics v8–v13 族）
+照旧能在包到达后读到。代价明写：**包到达之前**，控制台看不到这些列。
+
+读数：`status()['eval_rows_bytes'] = (投影前, 投影后)`，`_throttled_log('eval-slim')` 每轮最多一行。
+
+### 2）`perGame` / `perGameSecs` 不上实时体（Q2 的答案）
+
+`row` 里唯一随局数线性长的是 `perGame`（34 局 ≈ 45KB）。hub 落它的唯一去处是
+`<课程>/it<N>/per-game.json`，而那个文件**本来就是随包到达的读数面**（`remote/deliver_zip`
+导入时也写它）。所以：实时体里摘掉这两个键（浅拷，本地 `metrics.jsonl` 一字不动），
+`status()['pergame_deferred']` 报这一轮摘了几局。
+代价：包到之前该轮的逐局弹窗是空的；聚合列与趋势列不受影响。
+
+### 3）实时链路只发**锚点轮**（`pending_anchors()`）
+
+- **锚点 = 有 A 层评估读数的轮次**（`eval_log.jsonl` 里 `event ∈ {eval, eval_summary}` 且无
+  `source` 的 `iter`，与 `_eval_rows_for` **同源同判据**）。锚点间隔 = `eval_every`（plan D-2，
+  不新增旋钮）；段末 / 子进程收线时**额外带上最新那一轮**（D-1 末轮强制补发），否则最后一段
+  的进度永远差几轮，续跑要多跑一遍。
+- ★ **`pending()` 一个字没窄**（D-3）：抽屉、`status()`、`idle` 退出与对账仍吃全量。
+  非锚点轮因此仍然进抽屉（第二副本）并进离线包，只是**不进实时体**。这是与「把 `pending()`
+  改窄」的关键区别——后者会让 4 轮既不上传也不进抽屉（评审 P0-2 的静默丢权重）。
+- 没有 A 层评估的腿（`eval_log.jsonl` 缺失/为空）⇒ 锚点集为空 ⇒ **退回全量**。这不是旋钮，
+  是数据条件：没有锚点可用时「只发锚点」等价于「一轮也不发」。
+- 读数：`status()['pending']`（全量欠账）与 `status()['pending_anchors']`（这一拍真会发）必须
+  一起读；`_log_diag` 两个都打。子进程 `idle` 退出判据改为 `pending_anchors()` 空 + 无重投。
+
+### 验收（`tests/remote/test_offline_deliver.py` 新增 6 条）
+
+在 `HEAD` 的 worktree 上 **4 红 2 绿**（两条是护栏：去重幂等、无锚点退回全量），改动后 6 条全绿；
+`nn-training/tests/remote` 1437 条全绿。白名单用的是「用例自己写一份契约」而不是 import 实现里的
+常量——否则就是拿实现验证实现。
+
 ## §111 补传在抖动期**失败可以、不许卡住**；陈旧 hold 不许被 hub 重启无限续命（2026-10-21，用户报障「云机补传 24 连败后再没回传过 / y28 两课跑完还要重启 trainer 才能领新课」· `plan/offline-deliver-stall.plan.md` v2 · 决策 `DECISIONS.md` §2026-10-21-goalnn-offline-deliver-not-stuck)
 
 **现场 A（补传）**：`y28-nowinhit` 05:53–05:55 逐轮成功（非 eval 轮，体 322KB），05:57 起

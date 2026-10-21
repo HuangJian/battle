@@ -8684,3 +8684,44 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   无锁内核 + 代次水位）· `hub/task_pack.py`（文档）· `tests/{remote,hub}/*` · `docs/nn/remote-transport.md §111`。
 - **验收**：9 条新用例先在 `HEAD` 工作树（`git worktree add --detach`）跑成**红**，改动后全绿；
   `bun run pygate` 4829 passed / 2 skipped（Windows 专用回落）；`bun run check` 见 §9。
+
+## §2026-10-22-goalnn-offline-realtime-anchor-and-slim — 实时体只发**锚点轮**、逐局评估行过白名单、`perGame` 走包（修订 §2026-10-21 的三条否决）
+
+- **背景**：用户对 `plan/offline-deliver-stall.plan.md` §4 的推迟表提出质疑（「为什么不做？」），
+  并点名要 ②锚点 + ③瘦身（`eval_rows` 与 `perGame`）；**①拆四件仍不做**（维持上一条的理由：
+  hub `weights_json` 必填、按件记账、`it-NNN` 单写者三件要一起改）。
+- **修订说明（重要）**：上一条把这 ②③ 记进了「否决的备选」，本轮**部分推翻**——推翻的是
+  「不做」，**没有**推翻它们当初被否决的**理由**。两条旧理由都被遵守：
+  - 「`pending()` 永不收窄」（D-3）**仍然成立**：本轮收窄的是**实时体的候选集**
+    （`pending_anchors()`），`pending()`、抽屉、`status()`、idle 对账**全部照吃全量**。
+  - 「白名单必须保住 `(iter,wver,stage,seed)` 去重键」**仍然成立**：白名单逐字包含它们
+    （外加 `event`），并新加一条「同一批（瘦过的）行并两次 ⇒ 行数不变」用例。
+- **决定**：
+  1. **逐局评估行过白名单**（`EVAL_ROW_WIRE_KEYS`）：实时体只留「hub 去重要用的 5 键 + 控制台
+     逐局表/聚合列（`win/cleared/outcome/ticks/kills/score/quality/playerDamageTaken/
+     playerDeaths/puGotTank/powerUpsCollected/dims/time/node`）」。分析列（metrics v8–v13、
+     分敌种画像、`moveHist/decisions/stopRuns/idleTicks`）**不上实时体**，但它们逐字留在
+     `eval_log.jsonl` 里，由抽屉与离线包整份带走。`eval_summary` 行**不投影**（控制台指标表/
+     门判/开课回执全认它）。
+  2. **`perGame`/`perGameSecs` 不上实时体**（Q2 的答案）：`row` 里唯一随局数线性长的字段
+     （34 局 ≈ 45KB）；hub 落它的唯一去处 `<课程>/it<N>/per-game.json` 本来就是「随包到达」的
+     读数面。浅拷摘键，本地 `metrics.jsonl` 一字不动；`status()['pergame_deferred']` 报摘了几局。
+  3. **实时体只发锚点轮**（`pending_anchors()`）：锚点 = 有 A 层评估读数的轮次（与
+     `_eval_rows_for` 同源判据），间隔 = `eval_every`（D-2，不加新旋钮）；段末/收线**额外带最新
+     那一轮**（D-1）。没有 A 层评估的腿（`eval_log.jsonl` 缺失/为空）⇒ **退回全量**（数据条件，
+     不是旋钮：没有锚点时「只发锚点」= 一轮也不发）。子进程 idle 退出判据同步改成
+     `pending_anchors()` 空 + 无重投。
+- **代价（诚实账）**：① 非锚点轮的**训练账本行**不再实时到达 ⇒ 控制台指标表在两次 eval 之间
+  不动，要等抽屉/离线包导入；② `perGame` 与完整逐局列同理（逐局弹窗在包到之前是空的）；
+  ③ hub 侧 `resume_anchor` 的最新"同轮齐全"轮次可能落后 ≤`eval_every-1` 轮 ⇒ 中断重跑会重算那几轮。
+  这三条都是「带宽换新鲜度」的显式代价，不是回归。
+- **为什么现在可以做**：§111 修完之后失败不再卡住，于是「一次尝试背多少字节」成了唯一的余量；
+  这三条把最坏一档从 1.24MB 压到「锚点轮 ~400KB / 非锚点轮 ~277KB」，且不新增任何协议分支。
+- **落点**：`remote/deliver_wire.py`（**新**，L0：`EVAL_ROW_WIRE_KEYS`/`slim_eval_rows`/
+  `wire_row`/`read_eval_iters`/`pick_anchors`——同一个 LOC 预算把腿本体顶到 1000 行）·
+  `remote/offline_deliver.py`（`pending_anchors` 入口 + `status` 三个新键）·
+  `remote/deliver_worker.py`（idle 判据 + 状态面三个新键）·
+  `tests/remote/test_offline_deliver.py`（+6 条）· `tests/helpers/remote_dag.py`（`remote.deliver_wire: 0`）·
+  `docs/nn/remote-transport.md §112`。
+- **验收**：6 条新用例在 `HEAD` worktree 上 **4 红 2 绿**（另两条是护栏：去重幂等、无锚点退回全量），
+  改动后 6 条全绿；`nn-training/tests/remote` 1437 全绿；`bun run pygate` / `bun run check` 见 plan §9.6。

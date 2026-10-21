@@ -150,6 +150,13 @@ def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_a
                 "disabled_reason": str(st.get("disabled_reason", "") or ""),
                 "delivered": int(st.get("delivered", 0)),
                 "pending": int(st.get("pending", 0)),
+                # 锚点读数（plan §4-W1-C/D，2026-10-22）：`pending` 是「磁盘有 − 账本无」的全量
+                # （抽屉/idle 的判据），`pending_anchors` 才是**这一拍真会发**的轮次。两个一起看：
+                # `pending - pending_anchors` = 只走抽屉/离线包的那几轮（不是卡住）。
+                "pending_anchors": int(st.get("pending_anchors", 0)),
+                # 实时体瘦身的两个读数（Q2 / W3）：被摘掉的逐局明细局数、评估行投影前后字节。
+                "pergame_deferred": int(st.get("pergame_deferred", 0)),
+                "eval_rows_bytes": list(st.get("eval_rows_bytes") or (0, 0)),
                 "reposts_unsent": int(st.get("reposts_unsent", 0)),
                 "rejected": st.get("rejected") or {},
                 "result_done": bool(st.get("result_done")),
@@ -320,7 +327,9 @@ def main(argv: list[str] | None = None) -> int:
                 stop_deadline is None
                 and not parent_gone.is_set()
                 and time.monotonic() - last_ctl_at >= idle
-                and not d.pending()
+                # 退出判据从 `pending()` 改为**锚点**（plan §4-W1-C/D）：非锚点轮不进实时体，
+                # 它们已经在抽屉里（`backup_pending()` 吃全量）⇒ 拿全量判 idle 就是永不退出。
+                and not d.pending_anchors()
                 and not d.unsent_reposts()
             ):
                 reason = "idle"
