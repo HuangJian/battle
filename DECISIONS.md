@@ -8163,3 +8163,132 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`dashboard/src/server/auto-restart.ts`（重写）· `dashboard/tests/auto-restart.test.ts`
   （16 例）。
 - **门禁**：dashboard typecheck + **1773 用例**（+2）· `bun run check` 绿。
+
+## §2026-10-20-goalnn-y26-leg-a-policyextra — y26 线切腿 A：`policyExtra=true` 让 POLICY_EXTRA(57) 第一次真正进网络
+
+- **背景**：`docs/nn/experiments.md §119` 查明 y26 六腿模型全是 `policyExtra=false` 档
+  （`move_head` 宽 128 ⇒ `src/nn/infer.ts:510-515` 把 `extraDim` 定为 0、`forward` 第三参
+  `extra` 全程不被读；Python `PPOStudent.policy_features` 同判据）。⇒ B2–B4 新增 26 个观测位里的
+  **20 个（整个 extra 增量：leadHitD×4 / threat 分族 / enemyFacing / lastHitDir / prevAction 方向
+  one-hot）写进每个 shard 却从未进入策略**。这不是“训练没学会”，是结构上不可能生效。
+- **决定**：y26 线改走**腿 A**（`policyExtra=true`，头输入 185 = hidden 128 + extra 57）。
+  **不**把那些位搬进 scalar。
+- **否决「搬进 scalar」的理由**：`extra.npy` 已是 57 维且每个 shard 都有 ⇒ 切档**零重导**；
+  搬进 scalar 要 `SCALAR_DIM 46→66` = `OBS_SCHEMA_MAJOR` 7 + obs-encoder/schema/指纹/全语料重导
+  + demo/BC 语料作废，代价大一个量级，且与 `§2026-10-19-goalnn-obs-v5-critic-superset` 那条
+  “extra 走独立张量”的分层决定相冲突。
+- **起点怎么造**：`worker/scripts/init_spatial_leg.py` 新增族 **legacy-v6 → 腿 A v6**。
+  判据只看张量形状（`_is_v6_source()`：move4/fire3/hold2 且 `hold_head.weight` 在），补列用
+  **`drop0`（extra 57 列全 0）** 而不是 0.01 噪声，并**跳过 `_migrate_action_heads`**——
+  后者是为 5/2 旧源写的：v6 源（4 行）会被它判非法 ⇒ move/fire 整头随机 init，且 `old_move_w[0]`
+  （v6 的 up 行）会被当成 STOP 拿去重建 hold 头，三层静默错位。legacy **5/2** 源仍按原样拒绝。
+- **等价性（为什么这不算“换了起点”）**：extra 补 0 ⇒ it0 与 `y26-v6.it0` 行为等价，实测
+  ① torch 四头 max|Δ| ≤ 1e-4 且 argmax 相同（185 vs 128 宽累加次序不同，末位 ~2e-5，
+  逐位相等做不到也不该要求）；② 真局 `export-eval-game --stage 7 --seed 860001` 两版
+  **89 项读数除 `weightsSha` 外逐字相同**；③ `extra=0.5` 时 `move_head/hold_head.weight.grad[:,128:]`
+  非零 ⇒ 57 维第一步就能学；④ `build_ppo(y26-v6x.it0)` ⇒ `policy_extra=True/policy_input_dim=185`、
+  严格装载 `missing=[]`；rollout 实跑一局 ⇒ shard 带 `extra(114,57)`/`mask(114,9)`/`a_hold`。
+- **不做承诺**：腿 A 只改“extra 能不能进网络”，**不动 Φ**。`§119` 的“一手普通弹定价 −0.10 分 /
+  平均过关 −0.37 分”那个病仍在 ⇒ 新腿 `y27-clear` 的判据写成**同轮配对 vs `y26-clear`**
+  （同 `paired_rotate_seed` ⇒ 同 stage/seed 流），**不用绝对 0.715**（那是 v5 系列的单点峰值，
+  22 点均值 64.4 / sd 5.0）。
+- **落点**：`nn-training/worker/scripts/init_spatial_leg.py`（新族 + 跳过行迁移）·
+  `nn-training/weights/y26-v6x/y26-v6x.it0.json` · `nn-training/curricula/y27-clear.jsonc`（规格草稿，
+  **开课 = 控制台点**）· `nn-training/tests/worker/test_init_spatial_leg.py`（新用例）·
+  `tests/fixtures/student-golden-v6x.json` + `tests/nn/student-infer.test.ts`（腿 A + v6 的 TS↔torch 对账）。
+- **门禁**：`bun run check` **2637 pass / 8 skip / 0 fail**；`bun run build` 过；
+  `nn-py-safe pytest`（init_spatial_leg + student_model + shard_action_space_v6 + action_head_hygiene）
+  **28 pass**。
+- **后续（各自单独立项）**：迁移成本重修（BC 蒸馏替掉 `hold=4 方向均值 + bias 2.0`）；
+  `metrics v13` 补 `holdTicks`/`fireBeforeTicks`；extra 消融读数（四头 `[:,128:]` 清零跑同面板）。
+
+## §2026-10-20-goalnn-y27-triad — y27 四腿（clear + shot / lead / window）：按测出的 Φ 份额配剂量激活三张休眠能力
+
+- **命名**：原 `y26-clear-x` 改名 **`y27-clear`**（架构腿：`policyExtra=true` 的基线；奖励 = `y26-clear` 逐字，
+  故 `y27-clear` vs `y26-clear` 的配对差 = **纯架构效应**）。三条能力腿都以它为基线。
+- **为什么是这三条腿**（`docs/nn/experiments.md §119` 的休眠能力清单）：
+  `hold` 已活（22.5%）；`prevAction/leadHitD/enemyFacing` 是**输入**，只能靠“奖励让它们有用”来激活；
+  `fire=1` 在竞技场 0/54 611、冰/盾期密度只有均匀度的 91%（人类 128%）。
+  ⇒ 三条腿各对准一个**可测的行为读数**，而不是“再多跑一条”。
+- **剂量全部按 it0 / anchor 200 局实测的 Φ（77.3）算，不拍脑袋**：
+
+  | 腿 | 单变量 | ΔΦ | 占 Φ | 对准的读数 |
+  |---|---|---|---|---|
+  | `y27-shot` | `wHit 0.2 → 0.8` | +23.5 | **30.3%** | 出手/千；`a_fire==1` 占比 |
+  | `y27-lead` | `wDist 0.6 → 6.0` | +18.4 | **23.7%** | A10 命中距离；D01 承伤 |
+  | `y27-window` | formula + `wWinHit*hitsInFreezeShieldWindow`，`wWinHit 3.0` | +13.7 | **17.7%** | 窗内命中密度；win |
+
+- **否决的剂量（都算过、都不过 15% 线）**：`wMiss 0.35→0.10` 只有 +3.6（4.6%）；
+  `wAcc 15.3→6.0` 是 −6.6（8.5%）；`wWinHit 2.0` 只有 +9.2（11.9%）⇒ 取 3.0（＝“窗内一发 ≈ 一个击杀”）。
+- **`y27-shot` 的功效换算**（这是本腿的立论）：一手普通弹的期望从
+  `0.722×0.2 − 0.278×0.35 − 0.20(分母税) = **−0.10**` 变成 `0.722×0.8 − 0.278×0.35 − 0.20 = **+0.27**`
+  ⇒ 梯度方向从“别打”翻成“打”，这是 `fire=1` 唯一可能被采样到并被付钱的路径。
+- **`y27-lead` 是 y26-dist 的可证伪重开**：同一杠杆（wDist ×10）在 extra 死档上判负（A10 没动）；
+  现在 `leadHitD/enemyFacing` 真进了网络 ⇒ 若这轮 A10 还是不动，就不是“缺特征”，而是**这条杠杆本身无效**。
+- **三条腿的互相排斥与耦合**已写进各自头注：`shot` 会把 A01 压低，而 `lead` 用 A01 ≥0.75 守门
+  ⇒ 两腿同时把 A01 压破线时**两条都判负**，不许互相“救”。
+  `window` 的杀腿 ⑤（窗口拍涨 >30% = 追护盾刷窗口）专门抓 plan §4b 说的“窗口奖励 vs 道具低价”张力。
+- **本轮明确不做的三件事**（用户 2026-10-20 拍板）：
+  1. **不做 BC 蒸馏三头** —— 三头是 RL 可学的（`hold` 已证）；蒸馏原本的目标是**收回迁移丢的 11pp hitRate**
+     （空射 +70%），不是“教能力”。不做 = 接受起点这笔亏，让 `y27-*` 四腿用配对差读出来（见下条 Q&A）。
+     另：`demo 语料 fire 可训练子集里 hold 只占 1.84%`（`docs/nn/experiments.md §118`）⇒ 对 fire 头蒸馏本来就不靠谱。
+  2. **不加 `holdTicks`/`fireBeforeTicks` 两列**（`metrics v13`） —— 分析时用脚本读 shard：
+     `node tmp/agg-shards.cjs tmp/y27-shot/it<N>/dist`（本会话写的，任何 `dist/**` 都能跑）。
+     代价：**能力使用率不在 `eval_log` 里**，只能事后抽查某个 it 的 shard（不是逐轮序列）。
+  3. **暂不做 extra 消融** —— 见下条 Q&A 的后果说明；`y27-clear` 的结课报告要按该口径写清楚“能证什么、不能证什么”。
+- **落点**：`nn-training/curricula/y27-{clear,shot,lead,window}.jsonc`（四条都过
+  `load_course + validate_reward`，errors=0；`y27-window` 的 `hitsInFreezeShieldWindow` 已在
+  `biz/reward_library.py:214` 的 METRICS idx77 里，B5 就是为 B6 落的这列）。
+- **开工顺序**：人在控制台开 ×4（同起点 `y26-v6x.it0`、同 `paired_rotate_seed 20270206`）。
+  `y27-clear` 必须先活着 —— 另外三条腿的判决全靠它的**同轮**读数。
+
+## §2026-10-21-goalnn-y27-steady-pricing — y27 四腿之后不再守单变量：一门 `y27-steady` 同时修「死一局仍赚 / 开火恒负 / 挨打免费」并把三条休眠能力一次接线
+
+- **背景**：`docs/nn/experiments.md §120` 证了机制在动（shot 出手 +17%、lead 采样 A10 +0.48、
+  window 窗内密度 0.831→1.002），但四腿胜率全线下滑；用户 2026-10-21 明确**不要求单变量**，
+  只要求「快速稳定提高胜率 + 新能力都生效且互相兼容 + 参数量级算实」。
+- **三处病根**（60 局 `y27-clear` shard 实算）：负局 Φ **+24.34**（`lives_exhausted` 终局额 = 0）；
+  单发期望 **−0.164**（P\* = **1.050** ⇒ 永不值得开火）；挨打 231 点只值 **6.9 Φ**。
+- **结构判断（新读数）**：胜负局的**每局承伤相同**（231.7 vs 231.2），差别在速率
+  （胜 30.98/千拍 vs 负 62.89/千拍，7478 vs 3676 拍）⇒ 承伤按事件定价、存活靠终局、速度只当胜局内次序。
+- **决定**：新建 `nn-training/curricula/y27-steady.jsonc`（22 参数：12 重定价 + 2 新增 + 8 冻结）；
+  `wWin` 改二元 48.0、`wSpeed 3.0` 单列、`wWinHit 1.6`、`wDist 4.0`、`wDmg 0.12`、`wAcc 2.0`、
+  `wHit 0.32` / `wMiss 0.30`（P\* = 0.532）、`terminal` 两输同价 −35。正项 94.2 → 138.1（+46.6%）、
+  胜负差 +72.15 → +163.92（×2.27）、负局 Φ 首次为负（−17.34）、过程 Φ/千拍判别比 1.95× → 4.1×。
+- **起点改 `y27-lead.it90`**（greedy 0.690，n=400；extra 已非零）而不是 `y26-v6x.it0`：省掉四腿各花的
+  10–20 iter 全零暖机；代价是 value 头要按新价重标定 ⇒ 预注册判据**不判 it5**。
+- **否决的备选**：`wDmg 0.03→0.10` 单变量（= §120 ⑦ 的建议；只 −16 Φ，压不住 shot 的 +25.7 Φ 挤兑）；
+  继续抬 `wHit 0.8` / `wWinHit 3.0`（shot 负局仍赚、window 命中率泄漏到 0.752 已实测）；
+  `wDist 6.0`（采样 +0.48 / 部署 +0.17，抬剂量只加大漂移）；`wAcc` 归零（留 2.0 = 税 0.030 作弱信号）。
+- **判据（预注册，别跑完再改）**：A 价格接线（单发 >0 / P\*∈[0.50,0.56] / 负局**均值** Φ<0 / 胜负差 ≥1.5σ）；
+  B 胜率（it0 ≥0.66 复核；it40 ≥0.70 且 it40/50/60 均值 ≥0.69；**it60 <0.66 杀腿**）；
+  C 能力（shots/千 ≥9.4 且 P≥0.60 / A10 ≥3.8 格 / 窗内密度 ≥1.05 / fire=1 不为 0 / 死亡率 ≤起点）。
+- **落点**：`nn-training/curricula/y27-steady.jsonc`（identity `cc5f51de1abb58a6`，errors=0）·
+  `nn-training/rl-config.json` `courses.y27-steady.rollout_src=local` ·
+  全文与逐项价目表 → `docs/nn/experiments.md §121`；分析脚本 `tmp/y27-steady-design.py`（临时件，不入库）。
+- **边界**：不动观测表、不碰 base 族 12 维（用户口径：预留观测）、不改动作空间 / decision_k /
+  target_transitions；加新指标列（承伤速率）留给下一腿。
+
+## §2026-10-21-goalnn-y26-y27-close — y26/y27 十腿结课：唯一成立的是 wHit 0.35；两条预注册判据（乱射红线 / 单点 win 门）被数据判为坏口径
+
+- **范围**：y26 六腿（null/clear/shotmix/dmg/dist/early）+ y27 四腿（clear/shot/window/lead）。
+  十份结课报告**写进各自课程头注**（`── 结课报告（2026-10-21 …`，幂等 MARK，只动注释）；
+  十个 `reward_spec().identity()` 回写前后逐个相等（`d5…/fa…/33…/ea…` 与 §120 记的 course_formula_hash 一致）。
+- **口径**：`tmp/y2627-close.py` —— 窗口 = 逐局聚合后各点中位（方向门 it30–50、判决门 it80–120）；
+  判决 = **同轮逐座位 McNemar**（键 `iter|stage|seed`），逐迭代均值只作附证；十条腿均**无 `run_complete`**
+  （控制台停腿/收工），报告按最后完成迭代截断。
+- **判决**：成立 1（`y26-shotmix`：尾段 +5.8pp，z=4.8；dmg/杀 −10.7%；行为主判三条全过）·
+  弱正未过门 1（`y26-clear`：+2.2pp，z=2.9，门要 +5pp）· 灰区 1（`y27-lead`：A10 +0.79、D01 −6.5%、
+  尾段 +5.9pp z=3.8，但 P 0.685 触发红线）· **判负 7**（null −13pp vs y25；dmg 买到瘫痪；dist 死档学不到；
+  early 抬总价推不动；y27-clear 接线通≠有用 −2.3pp；shot 更准不是更多 −8.3pp；window 能力达标但胜负解耦 −11.1pp）。
+- **两条判据被数据判为坏口径**（不是“事后改门”，是量到了它的失败模式）：
+  ① **“乱射红线”（misses/局 ≤ null+40%/+60%）**：出手 +15% 必然把脱靶绝对量推上去 ⇒ shotmix 被误杀，
+     而它 kills/局 +5%、dmg/杀 −10.7%、win +5.8pp。以后判乱射看 **kills/局 + dmg/杀**，不看脱靶绝对量。
+  ② **“win 单点 < 0.50/0.55/0.60 ⇒ 杀腿”**：n=200–400 的 se 是 2.3–3.5pp ⇒ **十条腿全部**触发过自己的单点门，
+     而 lead 的 it35 0.480 后来长到 0.690（全系列最高）。以后判决只用窗口 + 配对；单点门不作数。
+- **方法学结论**（写进 §122，y27-steady 已按此设计）：结构决定可学性（同一 wDist ×10 在死档上 A10 +0.10、
+  在 extra 接入后 +0.79）；接线通 ≠ 有用；`wHit` 的剂量-反应非单调（0.35 正 / 0.8 负，因 `wAcc` 分母税未动）；
+  罚“结果”买不到回避（wDmg ×4 → idle ×2.5、尾段 −5.9pp）。
+- **落点**：§122 总表与逐条结论 · 十份课程头注 · `tmp/y2627-close.py` / `tmp/mk-y2627-close.py`（临时件，不入库）。
+- **不再做**：不重跑这十腿（判负的机制都已定位到价目表或结构，重跑同一剂量只会复现）；能力侧的下一次机会
+  全部押在 `y27-steady`（§121）与它的后续半剂量腿。

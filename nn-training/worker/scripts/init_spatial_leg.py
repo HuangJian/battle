@@ -37,7 +37,8 @@ loader 对**换形**张量只会整块跳过（随机 init），
     --policy-extra --allow-partial-init
 
   · 源必须是同族旧档：腿 A 要求 v4 **policy_extra** 系（头 137 = hidden 128 + 旧 extra 9，
-    value 128）——legacy 系（头 128、无 extra 列）会被响亮拒绝；腿 B 要求 v4 腿 B 系
+    value 128）**或 B1 v6 三头系**（move4/fire3/hold2，头 **128 = hidden only、无 extra 列**，
+    value 128）——legacy **5/2** 系（头 128 但动作头是 5/2）会被响亮拒绝；腿 B 要求 v4 腿 B 系
     （头 151 = tower 112 + scalars 30 + 旧 extra 9，value 128）**或 v4 腿 A 系**
     （头 137：只拷 extra9 → 新 [158..166]，hidden 在新 pf 无槽，其余全重 init；
     源族按旧头宽自动识别，137/151 之外一律拒绝）。偏移表只认这些宽度，
@@ -93,6 +94,20 @@ _MIGRATION_LEG_A: dict[str, tuple[str, Any]] = {
     "fire_head.weight": ("drop", _EXTRA_DELTA),
     # value 只拷前 128 列（旧只吃 hidden，语义仍是 hidden），新 37 列纯 0（门控纪律，
     # x26-obs it90 诊断：0.01 噪声起步是 35 倍爆炸的源头，零起步＋训练期牵引）。
+    "value_head.weight": ("drop0", POLICY_EXTRA_DIM),
+}
+# B1 v6 三头 + legacy（无 extra）头 → 腿 A v6（2026-10-20）：
+# 源 pf = `[hidden 0–127]`（128 列，没有 extra 段）⇒ 新 pf 的 extra 57 列**全 0**。
+# 为什么不照 `_MIGRATION_LEG_A` 的 0.01：那是「新增特征列」的常规起步；这里源根本没有
+# extra 段，零列 = **行为逐位不变**（it0 与源模型同分布、可直接与旧基线配对比较），
+# 与 value 头的 `drop0` 是同一套理由（噪声起步会把"只看 extra 有没有用"的实验污染成
+# "起点也变了"）。行（输出类）不迁：v6 源的 4/3/2 与目标同形，`_migrate_action_heads`
+# 必须跳过（它按 5/2 旧源设计，会把 4 行源判成非法并整头随机化）。
+_MIGRATION_V6_HEAD_TO_A: dict[str, tuple[str, Any]] = {
+    "fc.weight": ("drop", _SCALAR_DELTA),
+    "move_head.weight": ("drop0", POLICY_EXTRA_DIM),
+    "fire_head.weight": ("drop0", POLICY_EXTRA_DIM),
+    "hold_head.weight": ("drop0", POLICY_EXTRA_DIM),
     "value_head.weight": ("drop0", POLICY_EXTRA_DIM),
 }
 _MIGRATION_LEG_B: dict[str, tuple[str, Any]] = {
@@ -214,6 +229,31 @@ def _scalar_delta_for(model: Any, params: dict[str, Any]) -> int:
             "（本脚本只做**加列**迁移，不做降维）"
         )
     return delta
+
+
+def _is_v6_source(params: dict[str, Any]) -> bool:
+    """源是不是 B1 v6 三头（move4/fire3/hold2）——判据只看张量形状，不看文件名/目录。
+
+    为什么必须有这条判据：`_migrate_action_heads` 是**为 5/2 旧源写**的（它要求 move 有 5 行
+    才能把第 0 行当 STOP）。拿 v6 源喂进去，`_copy_rows` 会因行数不符返回 False ⇒ move/fire
+    整头随机 init，且 `old_move_w[0]`（v6 的 **up** 行）会被当成 STOP 拿去重建 hold 头 ——
+    三层静默错位，与 §"静默错位"纪律正面冲突。
+    """
+    from common.schema import FIRE3_DIM, HOLD_DIM, MOVE4_DIM
+
+    mv = params.get("move_head.weight")
+    fw = params.get("fire_head.weight")
+    hd = params.get("hold_head.weight")
+    if mv is None or fw is None or hd is None:
+        return False
+    return (
+        getattr(mv, "ndim", 0) == 2
+        and getattr(fw, "ndim", 0) == 2
+        and getattr(hd, "ndim", 0) == 2
+        and int(mv.shape[0]) == MOVE4_DIM
+        and int(fw.shape[0]) == FIRE3_DIM
+        and int(hd.shape[0]) == HOLD_DIM
+    )
 
 
 def _migrate_action_heads(model: Any, params: dict[str, Any], *, gen: Any) -> list[str]:
@@ -404,7 +444,13 @@ def convert(
                 "（hidden 在新 pf 无槽，不接受其他族）"
             )
     else:
-        table = _MIGRATION_LEG_A if policy_extra else _MIGRATION_LEGACY
+        if not policy_extra:
+            table = _MIGRATION_LEGACY
+        elif _is_v6_source(params):
+            # v6 三头源（头 128 = hidden only）⇒ extra 57 列全 0 补齐，动作头不迁（同形）。
+            table = _MIGRATION_V6_HEAD_TO_A
+        else:
+            table = _MIGRATION_LEG_A
     # fc.weight 的删列数按**源真实行宽**推（`_SCALAR_DELTA` 写死 30→46，s40 系会拒）。
     delta = _scalar_delta_for(model, params)
     ent = table.get("fc.weight")
@@ -415,7 +461,11 @@ def convert(
     # B1 v6：动作头的**行**迁移（move 5→4 丢 STOP、fire 2→3、hold 新建）。
     # 必须在 `_migrate_columns` 之后（它按 table 搬列，动的是 pf 宽度，与头正交）。
     head_moved: list[str] = []
-    if action_v6:
+    src_is_v6 = _is_v6_source(params)
+    if action_v6 and src_is_v6:
+        # 源已是 4/3/2 ⇒ 行不需要（也不能）重建：列迁移（drop0）已把三头整块搬过去。
+        head_moved = ["move_head(v6-copy)", "fire_head(v6-copy)", "hold_head(v6-copy)"]
+    elif action_v6:
         head_moved = _migrate_action_heads(model, params, gen=gen)
     not_loaded = [k for k in not_loaded if k not in partial]
     if legacy_arch and not_loaded:

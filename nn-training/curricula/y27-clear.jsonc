@@ -1,0 +1,185 @@
+// 课程 y27-clear —— **"把 POLICY_EXTRA 真正接进网络"腿**（腿 A 档：policyExtra=true）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20，依据 `docs/nn/experiments.md §119`：
+//   y26 六条腿（null/clear/dist/early/shotmix/dmg）的模型**全是 policyExtra=false 档**
+//   （`arch` 无 policyExtra、`move_head` 宽 128、`src/nn/infer.ts:510-515` ⇒ `extraDim=0`）。
+//   而 B2–B4 新增的 26 个观测位里有 **20 个落在 POLICY_EXTRA**（leadHitD×4 / threat 分族 /
+//   enemyFacing / lastHitDir / prevAction 方向 one-hot）—— 它们**写进了每个 shard，
+//   却从未进入策略**（Python 侧 `PPOStudent.policy_features` 同判据）。
+//   ⇒ 这些能力不是"训练没学会"，是**结构上不可能生效**。本腿的目的只有一个：把这条线
+//     切到能读 extra 的档位，然后看它到底有没有用。
+//
+// ── 单变量声明（相对 `y26-clear`：只有 `bc` 指向的起点权重/架构）────────────────
+//   `bc`:  `nn-training/weights/y26-v6/y26-v6.it0.json`
+//       → `nn-training/weights/y26-v6x/y26-v6x.it0.json`
+//   其余全部逐字不动：reward 公式（**含已修的 `(13000-clearTick)/1400` 基准**）、
+//   20 个参数、terminal、scheme、lr/epochs/mb/gamma/lam/ppo_schedule/decision_k/
+//   target_transitions/seed/eval_stages/eval_games_per_stage **全部照抄**。
+//
+// ── 起点是怎么造的 / 为什么可以认为"行为等价"────────────────────────────────
+//   `bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
+//      --from nn-training/weights/y26-v6/y26-v6.it0.json \
+//      --to   nn-training/weights/y26-v6x/y26-v6x.it0.json \
+//      --policy-extra --action-v6 --allow-partial-init`
+//     · 动作头行（4/3/2）**不重建**（源已是 v6），只把头输入 128 → 185 补列：
+//       `[hidden 0–127 | extra 128–184]`，新 57 列 **全 0**（不是 0.01 噪声）。
+//     · 为什么零列：it0 必须与 `y26-v6.it0` 行为等价，否则"extra 有没有用"的对照
+//       会被"起点也变了"污染（与 value 头 `drop0` 同一条门控纪律）。
+//     · 实测等价性（2026-10-20）：
+//       ① torch 侧四头（move/fire/hold/value）vs 源模型 **max|Δ| ≤ 1e-4 且 argmax 相同**
+//          （185 宽 vs 128 宽的累加次序不同，末位差 ~2e-5；逐位相等做不到）。
+//          用例：`nn-training/tests/worker/test_init_spatial_leg.py::test_leg_a_from_v6_source_*`。
+//       ② 真局对账（`tools/sim/export-eval-game.ts --stage 7 --seed 860001`）：两版权重
+//          89 项读数**除 `weightsSha` 外全部逐字相同**（gameover 2186 拍 / kills 1 / hitRate 0.4）。
+//       ③ extra 段的梯度非零（`extra=0.5` 时 `move_head/hold_head.weight.grad[:,128:]` 有值）
+//          ⇒ 那 57 维**在第一步就能被学**，不是死列。
+//       ④ TS↔torch 对账：`tests/fixtures/student-golden-v6x.json`（h=16/d=2，
+//          policyExtra+actionV6，头 185）四头 ≤1e-4（`tests/nn/student-infer.test.ts`）。
+//   ⚠ **本腿是结构腿，没有 Φ 剂量**（奖励一字未改）⇒ 不走"≥15% Φ"那条剂量线；
+//     能证明的只有"同轮配对的 win/行为指标差"。按 §119，**别指望它单独把 win 拉上去**
+//     （Φ 对 win 的定价≈0 那个病还在）；它的价值是**让 B2–B4 的 20 维进入可评估状态**。
+//
+// ── 判据（基线 = `y26-clear` 的**同轮**读数；同 `paired_rotate_seed` ⇒ 同 stage/seed 流）──
+//   ★ 为什么不是绝对 0.715：§119 已证那是 v5 系列的单点峰值（y25-price 22 点均值 64.4、
+//     sd 5.0、峰值 74.0@it35），拿它当门等于给所有新腿预埋 2–5pp 负偏。本腿一律用**配对差**。
+//   主判 it100（it80–120 五点中位，anchor 面板 = seed 860001–860050）：
+//     · **anchor win ≥ clear 同期 + 5pp**
+//     · 且 **hitRate ≥ clear 同期**（接上 extra 不该以命中率为代价）
+//   副判（同为 it80–120 中位）：
+//     · **A10 命中距离 ≥ clear 同期 + 0.3 格**（leadHitD/enemyFacing 最该改善的就是这条）
+//     · **dmg/千 ≤ clear 同期 + 5%**
+//     · **kills/千 ≥ clear 同期 − 5%**
+//   方向门 it40（it30–50）：
+//     · anchor win ≥ clear 同期（不许更差）；
+//     · 且 **A10 或 D09 至少一项朝好方向动**（0.3 格 / −10%）——否则等于 extra 白接。
+//
+// ── 杀腿（任一即停）─────────────────────────────────────────────────────────
+//   ① it40 anchor win < clear 同期 − 3pp ⇒ 接 extra 反而更差，停。
+//   ② it100 两条主判都不过 ⇒ 结构腿判负（extra 对这条策略线没有增益），停。
+//   ③ **dmg/千 > clear 同期 + 15%** ⇒ 变成贴脸换命中，停。
+//   ④ **hitRate < clear 同期 − 3pp** ⇒ extra 把瞄准带偏了，停。
+//   ⑤ timeout > 5% ⇒ 停。
+//   ⑥ win 单点 < 0.50 ⇒ 停。
+//   ⑦ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红（看斜率不看绝对值）。
+//   ⑧ entropy 比 it0 涨 > 0.15 ⇒ 停（**v6 三头的熵基线 3.18 与 v5 的 2.30 不可比**，
+//     只比本腿自己的 it0；§119 已记 v6 实测 1.15 → 0.87 的量级）。
+//
+// ── 诊断（不做判决，只做读数；跑不动就跳过并在结课报告里写明）──────────────────
+//   · **extra 消融**：在 it50 / it100 各做一次 —— 同 anchor 面板跑两遍：原权重 vs
+//     把四头 `[:,128:]` 清零（等价于 policyExtra=false 的行为），比 win/hitRate/A10。
+//     差值 = 策略对那 20 维的**实际依赖度**（这是目前唯一能回答"有没有用上"的硬读数，
+//     因为 eval_log/metrics 里没有 hold/fireBefore/extra 使用率的列）。
+//   · **能力使用率**：抽 it50 的 shard 读 `a_hold.npy`/`a_fire.npy`（见 `tmp/agg-shards.cjs`），
+//     与 y26-null it117 的 hold 22.5% / fireBefore 0.0% 对照。
+//
+// ── 防污染 / 开工门 ─────────────────────────────────────────────────────────
+//   ① `tmp/y27-clear` 不存在（§15.5：新 out/traj/backup，**不得续跑**）。
+//   ② 起点 `y26-v6x.it0.json` 的 `arch` 必须同时带 `policyExtra=true` 与 `actionV6=true`
+//      （否则静默退回 128 宽头 / 5+2 头）。核一条：
+//      `node -e "...arch..."` 或直接看 `warmstart_partial` 四张头。
+//   ③ 开课走控制台（唯一入口）；草稿过 `load_course + validate_reward`。
+//   ④ 同轮配对要求 `y26-clear` 仍在跑（或至少已产出到 it100+）；若它已停，
+//      退化口径 = anchor 绝对读数 + 与 `y26-null` 同期配对，并在结课报告里写明。
+//
+// ── 与另几条线的关系 ────────────────────────────────────────────────────────
+//   `y26-clear`（基线，wWin 已填坑）· 本腿（同奖励 + 腿 A 架构）
+//   ⚠ **B6（窗口命中奖励）不得与本线同时生效**（方向相反，见 `nn-capability-upgrade.plan.md` §4b）。
+//   ⚠ 本腿不是"v6 迁移重修"：迁移成本（空射 +70%、hitRate −11pp）仍需另立一条（用 BC 蒸馏三头）。
+// ── 结课报告（2026-10-21 · 架构判负 · 接线通≠有用 · 全文 `docs/nn/experiments.md §122`）─
+//   跑量：it0→it100（101 iter）· 2026-10-20 20:53→2026-10-21 02:24（5.5h，与另三条 y27 腿并发）· eval 21 点
+//   轨迹 win：it0 0.665 → it30–50 0.552 → it80–120 0.578 ｜ 峰 0.667@it5 ｜ 斜率 −0.05pp/100it
+//   预注册门：主判 ① anchor win ≥ y26-clear+5pp ❌（**−2.2pp**：0.578 vs 0.600）· ② P ≥ y26-clear ✅（0.819 = 0.819）
+//             方向门 it40 win ≥ clear ❌（−2.0pp）· ③ A10 或 D09 至少一项朝好方向 ❌（A10 −0.05 格，D09 −1.8%）
+//             副判 A10 ≥ clear+0.3 ❌ · dmg/千 ≤ clear+5% ✅（−4.4%）· kills/千 ≥ clear−5% ✅（0.0%）
+//   杀腿：② 判决门两条不过 ⇒ 停 · ⑥ win 单点 < 0.50（it100 0.495）
+//   配对（同轮逐座位 vs y26-clear）：全段 **−2.26pp（z=−3.00，5 正 / 14 负）** · it≥30 −2.48pp（z=−2.78）·
+//         it≥80 −1.25pp（z=−0.82）｜ vs y26-null：−0.05pp（z=−0.07）
+//   行为：P 0.819 · A10 3.32（clear 3.37）· kills/千 2.77（clear 2.77）· dmg/杀 13.70（clear 14.00）——
+//         **与 clear 逐项都在噪声内**，策略几乎没变。
+//   判决：**架构判负 —— "接线通" ≠ "有用"**。POLICY_EXTRA(57) 真进了 185 宽四头（§120 ①②：梯度到 extra、
+//         TS↔torch 对账 1e-5、extra rms 0.027–0.095），但行为没变、win −2.3pp（14/19 个迭代点为负）。
+//         extra 的信息对这条奖励线没有可兑现的增益；2–3pp 的结构代价是实的。
+//   遗产：y27 三条能力腿的对照臂；`policyExtra` 信道保留（y27-steady 仍用它，但起点换成 y27-lead.it90）；
+//         结课语：**先有"值得看的奖励"，再谈"更宽的输入"**。
+//   证据：tmp/y2627-close.py；§120 ① 的四条接线证据 + ⑤ 的用量口径。
+// ── 结课报告结束 ──────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "y27-clear",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y26-clear 逐字（含 `(13000-clearTick)/1400` 已修的基准）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 唯一变量：起点 = y25-price.it95 的 v6 迁移版，**头补 57 列 0 的腿 A 档** ──
+  "bc": "nn-training/weights/y26-v6x/y26-v6x.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // 与 y25-price / y26-* 同值：主判是同轮 / 同面板配对，必须同流（§15.1 例外理由）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y27-clear/weights.json",
+  "traj": "tmp/y27-clear",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y27-clear",
+  "backup_prefix": "y27-clear",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

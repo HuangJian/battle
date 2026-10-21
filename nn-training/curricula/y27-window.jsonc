@@ -1,0 +1,164 @@
+// 课程 y27-window —— **B6：窗口期（冰冻 ∪ 道具盾）命中奖励**腿（单变量：formula 末尾多一项）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20：`plan/nn-capability-upgrade.plan.md` 的 **B6** 是那批能力里
+//   **唯一一条动奖励**、也是唯一一直没落地的（B1–B5 已全部落地，见 `docs/nn/experiments.md §119`）。
+//   它的立论在 plan §1.5b（人类 160 局 vs NN 11 局，已剔除复活盾）：
+//     · 窗口占全部拍：人类 20.7% / NN 20.9%（**两边一样多**）；
+//     · **窗口内命中密度：人类 8.02/千窗拍（均匀度的 128%）vs NN 4.00（91%）⇒ 差 2.0×**；
+//     · 窗口内击杀 5.28 vs 3.27（每局）。
+//   ⇒ NN 在"敌人被冻住 / 自己无敌"的黄金 20% 拍里**没有更凶**，白送的伤害没拿走。
+//
+// ── 单变量声明（相对 `y27-clear`：formula 末尾**新增一项** + 一个新参数）────────
+//   formula 末尾追加 `+ wWinHit*hitsInFreezeShieldWindow`，新参数 `wWinHit = 3.0`。
+//   其余 20 个参数、terminal、scheme、全部训练参数、起点、seed、eval **逐字不动**。
+//
+// ── 口径（为什么这一列就是 B6 要的那个分母/分子）────────────────────────────
+//   `hitsInFreezeShieldWindow`（metrics v12 idx77）由 `tools/sim/export-rl-rollout.ts:1605`
+//   在 `winKind ∈ {freeze, propShield}` 时自增；**复活盾（180 拍）与星盾宽限（90 拍）走另一列**
+//   `deathDerivedShieldTicks`（idx78）⇒ 已经满足 plan §1.5b 的"**剔除复活盾**"要求
+//   （否则等于**奖励死亡换来的无敌**）。分母真相另有一列 `freezeShieldWindowTicks`（idx76），
+//   本腿只用分子（命中数），不用比值——比值项会引入除零与尺度耦合。
+//
+// ── 剂量推导（基线 Φ = 77.3，it0 / anchor 200 局实测）──────────────────────────
+//   实测 it0：窗口拍 **1133/局**、窗内命中 **4.58/局**、窗内命中密度 **4.05/千窗拍**。
+//   ΔΦ = 3.0 × 4.58 = **+13.7 分 = Φ 的 +17.7%** ✓ 过 15% 剂量线。
+//   校准：`wWinHit = 2.0` 只有 +9.2（11.9%）⇒ 不过线，故取 3.0；
+//   该定价的语义 = **"窗口里的一发命中 ≈ 一个击杀"**（wKill 3.0），与 plan §1.5b 的
+//   "人类在窗口期打得比对杀还凶"一致，不是拍脑袋放大。
+//
+// ── 要激活的能力 ───────────────────────────────────────────────────────────
+//   ① **冰/盾期主动进攻**（§119 里三个"没激活"的能力之一，且是本批唯一靠奖励激活的）；
+//   ② 道具价值链：窗口来自 `freeze` / `shield` 道具 ⇒ 若本腿成立，
+//      `puGotFreeze` / `puGotShield` 与 `wFrFreeze`（2.0）的相对价会**自动变重要**
+//      （B6 的机制假设就是"道具→窗口→输出"这条链值钱）；
+//   ③ 附带：窗口期敌人不动 ⇒ 命中更省，**A01 命中率与 `aimMisses/千` 都该改善**；
+//      本腿若反而把 A01 压下去，说明它在"为了奖励乱打"，直接判负（见杀腿 ②）。
+//
+// ── 判据（基线 = `y27-clear` 的**同轮**读数；同 `paired_rotate_seed` ⇒ 同 stage/seed 流）──
+//   主判 it100（it80–120 五点中位，anchor 面板）：
+//     · **窗内命中密度（hitsInFreezeShieldWindow / freezeShieldWindowTicks）≥ 基线 × 1.3**
+//       （4.05 → ≥5.3/千窗拍；人类 8.02 是**远期**目标，不是本腿的门）
+//     · 且 **win ≥ 基线 + 3pp**
+//   副判（同为 it80–120 中位）：
+//     · **窗内命中/局 ≥ 6.0**（it0 4.58；分母也要盯，别靠"窗口变长"刷比值）
+//     · **A01 命中率 ≥ 基线 − 1pp**（窗口打得多不该更不准）
+//     · **dmg/千 ≤ 基线 + 5%**（窗口不是无敌：冻前发出的弹照样命中）
+//     · **timeout ≤ 5%**
+//   方向门 it40（it30–50）：
+//     · **窗内命中/局 ≥ 基线**（剂量 17.7%，40 轮内该见方向）
+//
+// ── 杀腿（任一即停）─────────────────────────────────────────────────────────
+//   ① it40 窗内命中/局 没涨 ⇒ 3.0 的价换不来窗内开火，机制判负，停（**不许再抬 wWinHit**）。
+//   ② **A01 < 基线 − 3pp** ⇒ 为了拿窗口奖励乱打（窗口外也开始乱射），停。
+//   ③ **dmg/千 > 基线 + 15%** ⇒ 用挨打换窗口输出，停。
+//   ④ **窗内命中密度 ≥1.3× 但 win 没动（it100 < 基线 +3pp）** ⇒ 窗口输出与胜负解耦，停
+//      （这条是本腿最可能的失败模式：plan §1.6 说瓶颈是出手量，不是窗口密度）。
+//   ⑤ **freezeShieldWindowTicks 涨 > 30%** ⇒ 靠"多拿护盾/冰冻"刷分母（同时说明道具价被扭曲），停。
+//   ⑥ timeout > 5% ⇒ 停。
+//   ⑦ win 单点 < 0.50 ⇒ 停。
+//   ⑧ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红。注意本腿 Φ 抬高约 13.7 分，**看斜率不看绝对值**，
+//      且**不与另两腿比 Φ 绝对值**（formula 不同）。
+//   ⑨ entropy 比 it0 涨 > 0.15 ⇒ 停。
+//
+// ── 与另两腿的关系 ─────────────────────────────────────────────────────────
+//   四腿同起点（`y26-v6x.it0`）/ 同 seed 20270206 / 同面板 860xxx / 同预算。
+//   `shot` 动 wHit、`lead` 动 wDist、**`window` 新增窗口项** ⇒ 互不交叠；
+//   ⚠ plan §4b 的相互排斥针对的是 **y26 系（wPickup 0.6 的老定价）**：
+//     本腿基线是 `y27-clear`（同 wPickup 0.6），所以**确实存在"窗口奖励 vs 道具低价"的张力**——
+//     这正是杀腿 ⑤ 要抓的东西（若策略开始追护盾/冰冻来刷窗口，就是被扭曲了）。
+// ── 结课报告（2026-10-21 · 判负 · 能力达标但胜负解耦 · 全文 `docs/nn/experiments.md §122`）─
+//   跑量：it0→it95（96 iter）· 2026-10-20 20:53→2026-10-21 02:23（5.5h）· eval 20 点
+//   轨迹 win：it0 0.665 → it30–50 0.527 → it80–120 0.509 ｜ 峰 0.665@it0 ｜ 斜率 −0.05pp/100it
+//   预注册门：主判 ① 窗内命中密度 ≥ clear × 1.3 ❌（**×1.29**：6.56 vs 5.07）· ② win ≥ clear+3pp ❌（−6.9pp）
+//             方向门 it40 窗命中/局 ≥ clear ✅（6.46 vs 5.84）· 副判 窗命中/局 ≥ 6.0 ✅（**7.02**）·
+//             P ≥ clear−1pp ❌（**−5.0pp**：0.769 vs 0.819）· dmg/千 ≤ clear+5% ❌（**+22%**）· timeout ✅
+//   杀腿：② P < clear−3pp ⇒ **触发** · ④ 密度达标但 win 没动 ⇒ **触发** · ⑥ win 单点 < 0.50（it80 0.458）
+//   配对（vs y27-clear）：全段 **−7.22pp（z=−9.25）** · it≥30 −7.34pp（z=−7.85）·
+//         **it≥80 −11.06pp（z=−6.21）** · **0 / 19 个迭代点为正**（全系列最差）
+//   行为（判决窗）：窗密度 6.56（+29%）· 窗命中/局 7.02（clear 5.84，+20%）· P 0.769 · dmg/杀 15.91（+16%）
+//   判决：**判负（最差的一条）—— 能力买到了，胜负解耦**。窗口输出确实涨（密度 +29%），但命中率被拉到
+//         0.769、每杀耗血 +16%、win −11pp（尾窗，z=−6.2）；`freezeShieldWindowTicks` 只 +0%⇒不是分母刷。
+//         奖励买成了"处处多打"：窗口只是顺带被利用（§120 ⑦ 的"泄漏"预言逐字命中）。
+//   遗产：窗口期"该更凶"是真的（shard 密度 0.831→1.002），但**必须与命中率/承伤同时定价**；
+//         y27-steady 取 `wWinHit 1.6`（不是 3.0）+ `wMiss 0.30` + `wDmg 0.12`。
+//   证据：tmp/y2627-close.py；§120 ⑥ 的密度比、⑦ 的命中率泄漏。
+// ── 结课报告结束 ──────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "y27-window",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y27-clear 逐字 + 末尾新增 `wWinHit*hitsInFreezeShieldWindow` ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2,
+      "wWinHit": 3.0
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y26-v6x/y26-v6x.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y27-window/weights.json",
+  "traj": "tmp/y27-window",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y27-window",
+  "backup_prefix": "y27-window",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

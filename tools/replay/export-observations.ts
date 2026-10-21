@@ -70,6 +70,32 @@ import type { RunTelemetry } from '../sim/simulation-runner'
 const EXPORTER_VERSION = '2.0.0'
 const K = 10 // subsample period (plan §1.3)
 const MASK_DIM = 7
+/**
+ * B1 v6（2026-10-20）：三头动作空间的行宽。
+ *
+ * legacy = `actions (N,2) [move5, fire2]` + `masks (N,7)`；
+ * v6     = `actions (N,3) [move4, fire3, hold2]` + `masks (N,9)`。
+ *
+ * **标签映射**（legacy 录像 → v6 标签，无歧义）：
+ *   · `move=0`（STOP，`decodeMove(0)=null`）⇒ `hold=1` + `move=**当前已提交朝向**`
+ *     （`world.player.dir`；legacy `dir=null` 时 `p.dir` 保持不变，两者同步 ✓；
+ *      `TankFactory` 的 `prevMoveDir: dir` 保证开局也有确定朝向）
+ *   · `move=k`(1..4) ⇒ `hold=0` + `move=k-1`
+ *   · `fire=0/1` ⇒ `fire=0/2`（legacy 无 fireBefore 类 ⇒ v6 的 `fire=1` 在人类语料恒不出现）
+ */
+const MASK_DIM_V6 = 9
+/**
+ * STOP 在 v6 里由 `hold=1` 表达，但 move 头仍必须给一个值 —— 取**当前已提交朝向**
+ * （不是"随便一个"）：这样 `hold=1 + move=当前朝向` 与 legacy 的 `move=0`
+ * 物理等价（不转向、不前进），而不是 turn-only 那种"转过去但不走"。
+ */
+const DIR_INDEX: Record<string, number> = { up: 0, down: 1, left: 2, right: 3 }
+
+/** CLI 开关的**模块级**副本：写 npy 的辅助函数与主循环不在同一作用域，
+ *  传参要改一圈签名；本文件是单次 CLI 执行，模块级读取最省且无副作用。 */
+const ACTION_V6 = process.argv.includes('--action-v6')
+const ACT_DIM = ACTION_V6 ? 3 : 2
+const MASK_WIDTH = ACTION_V6 ? MASK_DIM_V6 : MASK_DIM
 
 const RL_SCORE_CONFIG = {
   ...V7_SCORE_CONFIG,
@@ -261,12 +287,23 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
         acc.nFilteredItem++
       } else {
         const label = actionFromFrame({ direction: curDir, firing: cur?.firing ?? false })
-        const masks = computeMasks(world)
+        const masks = computeMasks(world, ACTION_V6)
         acc.obs.push(encoder.obs.slice())
         acc.scalars.push(encoder.scalars.slice())
         acc.extra.push(encoder.extra.slice())
-        acc.actions.push(label.move, label.fire)
-        acc.masks.push(...masks.move, ...masks.fire)
+        if (ACTION_V6) {
+          // legacy → v6 标签映射（见文件头 `MASK_DIM_V6` 的说明）。
+          // STOP 必须落到「hold=1 + **当前已提交朝向**」而不是 turn-only：
+          // 后者会真的转过去（`p.dir = dir`），与录像里"原地不动"不等价。
+          const dirIdx = DIR_INDEX[world.player?.dir ?? 'up'] ?? 0
+          const hold = label.move === 0 ? 1 : 0
+          const move4 = label.move === 0 ? dirIdx : label.move - 1
+          acc.actions.push(move4, label.fire === 0 ? 0 : 2, hold)
+          acc.masks.push(...masks.move, ...masks.fire, ...(masks.hold ?? []))
+        } else {
+          acc.actions.push(label.move, label.fire)
+          acc.masks.push(...masks.move, ...masks.fire)
+        }
         acc.conditions.push(condition)
         const baseAlive = !world.tileMap.isBaseDestroyed()
         tel.baseWallIntact = countBaseWall(world)
@@ -411,8 +448,8 @@ export function flushShard(
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
   const extra = new Float32Array(N * POLICY_EXTRA_DIM)
-  const actions = new Uint8Array(N * 2)
-  const masks = new Uint8Array(N * MASK_DIM)
+  const actions = new Uint8Array(N * ACT_DIM)
+  const masks = new Uint8Array(N * MASK_WIDTH)
   const conditions = new Uint8Array(N)
   const returns = new Float32Array(N)
   const ret = discountReturns(acc.rewards)
@@ -420,9 +457,8 @@ export function flushShard(
     obs.set(acc.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
     extra.set(acc.extra[i], i * POLICY_EXTRA_DIM)
-    actions[i * 2] = acc.actions[i * 2]
-    actions[i * 2 + 1] = acc.actions[i * 2 + 1]
-    for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = acc.masks[i * MASK_DIM + j]
+    for (let j = 0; j < ACT_DIM; j++) actions[i * ACT_DIM + j] = acc.actions[i * ACT_DIM + j]
+    for (let j = 0; j < MASK_WIDTH; j++) masks[i * MASK_WIDTH + j] = acc.masks[i * MASK_WIDTH + j]
     conditions[i] = acc.conditions[i]
     returns[i] = ret[i]
   }
@@ -439,8 +475,8 @@ export function flushShard(
   writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
   writeNpy(`${dir}/extra.npy`, extra, [N, POLICY_EXTRA_DIM], 'f4')
-  writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
-  writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
+  writeNpy(`${dir}/actions.npy`, actions, [N, ACT_DIM], 'u1')
+  writeNpy(`${dir}/masks.npy`, masks, [N, MASK_WIDTH], 'u1')
   writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')
   writeNpy(`${dir}/returns.npy`, returns, [N], 'f4')
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
@@ -488,7 +524,9 @@ async function main(): Promise<void> {
   let determinism = false
   const files: string[] = []
   for (const a of args) {
-    if (a === '--skip-verify') skipVerify = true
+    if (a === '--action-v6')
+      continue // 模块级 ACTION_V6 已从 argv 读过
+    else if (a === '--skip-verify') skipVerify = true
     else if (a === '--verify-determinism') determinism = true
     else if (a === '--out') continue
     else if (args[args.indexOf(a) - 1] === '--out') continue

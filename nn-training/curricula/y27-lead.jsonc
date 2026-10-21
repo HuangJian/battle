@@ -1,0 +1,152 @@
+// 课程 y27-lead —— **"中距离/预判命中"腿**（单变量：`wDist 0.6 → 6.0`）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20。这条杠杆**不是新的**：`y26-dist` 已经跑过一次（wDist ×10），
+//   判负（it46 时 anchor 均值 55.5%，A10 命中距离没动、kills −13%）。
+//   **但它当时是在 extra 死档上跑的**（`docs/nn/experiments.md §119`：`policyExtra=false`
+//   ⇒ `leadHitD×4` / `enemyFacing×4` 这些"能不能提前量打到"的特征**根本没进网络**）。
+//   一个只会贴脸的打法在"看不见提前量"的条件下，抬远距离命中价只能换来脱靶——
+//   这正是 y26-dist 的形状。现在 `y27-clear` 已切腿 A（头输入 185 含 extra 57）⇒
+//   **同一个杠杆第一次有了可用的观测**。本腿 = 那条负结果的**可证伪重开**。
+//
+//   y26 侧的实测（`tools/gap-text-table.ts` 44 项口径，§119 同源）：
+//     人类 A10 命中距离 **5.32** 格；NN（y25/y26）**3.05–3.40**；而 NN 的命中率**高于人类**
+//     ⇒ 不是打不准，是**只敢贴脸**。贴脸的代价直接写在 `D01 承伤/千`（人类 22.3 / NN 39.5）。
+//
+// ── 单变量声明（相对 `y27-clear`：只有 `reward.params.wDist`）──────────────────
+//   `wDist` **0.6 → 6.0**（×10）。formula 字符串、其余 19 个参数、terminal、scheme、
+//   全部训练参数、起点、seed、eval **逐字不动**。
+//   当前该项只值 `0.6 × 136/40.1 = 2.04 分`（Φ 77.3 的 2.6%）⇒ **写了但等于没写**。
+//
+// ── 剂量推导（基线 Φ = 77.3，it0 / anchor 200 局实测）──────────────────────────
+//   ΔΦ = (6.0 − 0.6) × aimHitDistSum/(aimHits+1) = 5.4 × 3.40 = **+18.4 分 = +23.7%** ✓ 过 15% 线。
+//   对照：`wDist → 2.0` 只有 +4.8 分（6.2%）⇒ 不可测，故不选。
+//
+// ── 要激活的能力 ───────────────────────────────────────────────────────────
+//   ① **`leadHitD×4`（extra 53–56）**：沿四个世界方位开火、**到达时**能否命中的预判位——
+//      这是"远距离打移动目标"的充分条件，而它之前从未进网络（§119）；
+//   ② **`enemyFacing×4`（extra 49–52）**：敌朝向 ⇒ 决定提前量方向与打背/侧的时机；
+//   ③ 附带：`prevAction`（s40–s43 + extra 41–44）—— 远距离命中要求**朝向稳定**，
+//      策略若学会"少换向"，`wBlock`（halt 罚）与 A12 击杀间隔都该跟着改善。
+//
+// ── 判据（基线 = `y27-clear` 的**同轮**读数；同 `paired_rotate_seed` ⇒ 同 stage/seed 流）──
+//   主判 it100（it80–120 五点中位，anchor 面板）：
+//     · **A10 命中距离 ≥ 基线 + 0.6 格**（it0 3.40 ⇒ 目标 ≥4.0；y26-dist 是 +0.8 且失败）
+//     · 且 **D01 承伤/千 ≤ 基线 − 5%**（远打必须换来安全，这是本腿的因果链）
+//   副判（同为 it80–120 中位）：
+//     · **kills/千 ≥ 基线 − 5%**（远打不能变成打不中）
+//     · **A01 命中率 ≥ 0.75**（it0 0.722，基线 it100 约 0.86；允许掉，但不许跌破 0.75）
+//     · **D09 近敌 4 格/千 ≤ 基线 − 10%**（真的在拉开距离，而不是只有命中点变远）
+//   方向门 it40（it30–50）：
+//     · **A10 ≥ 基线 + 0.25 格**（剂量 24%，40 轮内该见方向）
+//
+// ── 杀腿（任一即停）─────────────────────────────────────────────────────────
+//   ① it40 A10 没涨 0.25 格 ⇒ **连预判特征都换不来距离**，机制判负，停（y26-dist 二次确认）。
+//   ② it100 **A10 未达 +0.6 格** ⇒ 主判失败，停。
+//   ③ **A01 < 0.70** 或 **aimMisses/千 涨 > 30%** ⇒ 变成远距离乱射，停。
+//   ④ **D01 承伤没降**（it100 未达 −5%）⇒ 远打没换来安全，因果链断，停。
+//   ⑤ **kills/千 < 基线 − 10%** ⇒ 打远了就杀不掉，停。
+//   ⑥ timeout > 5% ⇒ 停（远打变成耗时间）。
+//   ⑦ win 单点 < 0.50 ⇒ 停。
+//   ⑧ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红。
+//   ⑨ entropy 比 it0 涨 > 0.15 ⇒ 停。
+//
+// ── 与另两腿的关系 ─────────────────────────────────────────────────────────
+//   四腿同起点 / 同 seed / 同面板 / 同预算 ⇒ 同轮逐座位配对。
+//   `shot` 动 wHit、**`lead` 动 wDist**、`window` 新增窗口项 ⇒ 互不交叠。
+//   ⚠ 与 `y27-shot` 有一个**已知耦合**要盯着：多开火会拉低 A01，而本腿靠 A01 ≥0.75 守门；
+//     若两腿同时把 A01 压到 0.72 以下，**两条都判负**（不是互相救）。
+// ── 结课报告（2026-10-21 · 半负灰区 · 机制全中但触发红线 · 全文 `docs/nn/experiments.md §122`）─
+//   跑量：it0→it100（101 iter）· 2026-10-20 20:53→2026-10-21 02:24（5.5h）· eval 21 点
+//   轨迹 win：it0 0.665 → it30–50 0.532 → it80–120 **0.627** ｜ 峰 **0.690@it90** ｜ 斜率 **+0.10pp/100it**（唯一正斜率）
+//   预注册门：主判 ① A10 ≥ clear+0.6 格 ✅ **+0.79**（4.11 vs 3.32）· ② D01 承伤/千 ≤ clear−5% ✅（−6.5%）
+//             方向门 it40 A10 ≥ clear+0.25 ❌（+0.13）· 副判 kills/千 ≥ clear−5% ✅（−1.4%）·
+//             P ≥ 0.75 ❌（**0.685**）· D09 近敌4格/千 ≤ clear−10% ✅（**−14.7%**：306.8 vs 359.7）
+//   杀腿：③ P < 0.70 或 misses/千 > +30% ⇒ **触发**（misses/千 2.81 vs clear 1.33）· ⑦ win 单点 < 0.50（it35 0.480）
+//   配对（vs y27-clear）：全段 −1.04pp（z=−1.37，6 正 / 14 负）· it≥30 +0.40pp（z=+0.44）·
+//         **it≥80 +5.85pp（z=+3.79，n=2000）**；最后三点 +12.2 / +10.3 / +10.8pp（it90/95/100）
+//   行为（判决窗）：A10 4.11 · shots/千 9.45（+17.6%）· P 0.685（−13.4pp）· kills/千 2.73 · dmg/千 34.6（−6.5%）
+//   判决：**半负灰区 —— 机制全中、收益在后段、但按预注册触发了命中率红线（杀腿③）**。
+//         A10 +0.79 格、D01 −6.5%、D09 −14.7%、尾段 win +5.9pp（z=+3.8）是**唯一一条在部署口径显著抬胜率的腿**；
+//         代价是 P 0.685 与脱靶/千 翻倍（远距乱射）。⇒ **不可直接采纳，但值得半剂量重开**。
+//   遗产：① 预判特征确实可学（y26-dist 在死档上学不到的，这里学到了）；② 采样会、部署也会，但**要给命中率守门**；
+//         ③ y27-steady 的 `wDist 4.0`（半剂量）+ `wMiss 0.30` + `dmg 0.12` 就是这条的下一步。
+//   证据：tmp/y2627-close.py；§120 ⑥ 的 A10 采样/部署两口径（+0.48 / +0.17 → 本报告尾窗 +0.79）。
+// ── 结课报告结束 ──────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "y27-lead",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y27-clear 逐字，**只改 wDist 0.6 → 6.0** ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 6.0,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y26-v6x/y26-v6x.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y27-lead/weights.json",
+  "traj": "tmp/y27-lead",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y27-lead",
+  "backup_prefix": "y27-lead",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

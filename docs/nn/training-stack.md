@@ -7,6 +7,51 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §35 y26 线切腿 A（`policyExtra=true`）：POLICY_EXTRA(57) 第一次真正进网络（2026-10-20）
+
+**起因**：`experiments.md §119` 查明 y26 六腿模型全是 `policyExtra=false` 档 —— `move_head` 宽 128、
+`src/nn/infer.ts:510-515` 据此把 `extraDim` 定为 0、`forward` 的第三参 `extra` 全程不被读；
+Python 侧 `PPOStudent.policy_features` 同判据。⇒ B2–B4 新增 26 个观测位里的 **20 个（整个 extra 增量：
+leadHitD×4 / threat 分族 / enemyFacing / lastHitDir / prevAction 方向 one-hot）写进了每个 shard 却从未进策略**。
+
+**决定**：切 **腿 A**（`policyExtra=true`，头输入 185 = hidden 128 + extra 57），不把那些位搬进 scalar。
+理由：`extra.npy` 已经是 57 维且每个 shard 都有（**语料零重导**）；搬进 scalar 要 `SCALAR_DIM 46→66`
+= MAJOR 7 + obs-encoder/schema/指纹/全语料重导，代价大一个量级。
+
+**落地（四处）**：
+1. `worker/scripts/init_spatial_leg.py` 新增族 **legacy-v6 → 腿 A v6**：`_is_v6_source()` 按**张量形状**
+   （move4/fire3/hold2 + hold_head 在）识别，走 `_MIGRATION_V6_HEAD_TO_A`（`drop0`：extra 57 列**全 0**），
+   并**跳过 `_migrate_action_heads`**（它为 5/2 旧源写：4 行源会被判非法 ⇒ 整头随机 init，且
+   `old_move_w[0]`（v6 的 up 行）会被当 STOP 拿去重建 hold ⇒ 三层静默错位）。legacy **5/2** 源仍拒绝。
+2. 起点 `nn-training/weights/y26-v6x/y26-v6x.it0.json`（`arch` = `policyExtra:true` + `actionV6:true`，
+   头 185/185/185/185，`warmstart_missing: []`）。
+3. 课程 `nn-training/curricula/y27-clear.jsonc`（相对 `y26-clear` 只换 `bc`；奖励逐字）。
+4. 测试：`tests/worker/test_init_spatial_leg.py::test_leg_a_from_v6_source_pads_zero_columns_and_is_bit_identical`
+   + `tests/fixtures/student-golden-v6x.json`（h=16/d=2，policyExtra+actionV6）+ `tests/nn/student-infer.test.ts` 新用例。
+
+**等价性（为什么不是“换了起点”的污染）**：extra 57 列补 0 ⇒ it0 行为与 `y26-v6.it0` 等价，实测：
+① torch 四头 **max|Δ| ≤ 1e-4 且 argmax 相同**（185 vs 128 宽累加次序不同，末位 ~2e-5，逐位相等做不到）；
+② 真局 `export-eval-game --stage 7 --seed 860001`：两版 **89 项读数除 `weightsSha` 外逐字相同**；
+③ `extra=0.5` 时 `move_head/hold_head.weight.grad[:,128:]` 非零 ⇒ 57 维**第一步就能学**；
+④ 训练侧 `build_ppo(y26-v6x.it0)` ⇒ `policy_extra=True/action_v6=True/policy_input_dim=185`、严格装载
+   `missing=[]`；rollout 实跑一局 ⇒ shard 带 `extra(114,57)`、`mask(114,9)`、`a_hold`。
+
+**⚠ 两条别搞混的读数**：
+· “fireBefore 永不出现”是 **y26 已训练策略在 ladder 竞技场**的事实（0/54 611，§119）；同一份**起点权重**
+  在 stage 7 上实测 `a_fire=1` 占 **5.3%**（114 步）⇒ 该位不是硬掩码，只是竞技场里拿不到正梯度。
+· 腿 A 只改“extra 能不能进网络”，**不改 Φ**：§119 的“奖励给一手普通弹定价 −0.10 分/过关价 ≈0”那个病仍在，
+  所以本腿不承诺 win 上涨；`y27-clear` 的判据写成**同轮配对 vs `y26-clear`**（而不是绝对 0.715 ——
+  那是 v5 的单点峰值）。
+
+**后续（2026-10-20 用户拍板后的定稿：四条课 = `DECISIONS §2026-10-20-goalnn-y27-triad`）**：
+`y27-clear`（本腿基线）+ 三条能力腿 `y27-shot`（`wHit 0.2→0.8`，ΔΦ +30.3%）/
+`y27-lead`（`wDist 0.6→6.0`，+23.7%，= y26-dist 在 extra 活档上的可证伪重开）/
+`y27-window`（B6：`+wWinHit*hitsInFreezeShieldWindow`，`wWinHit 3.0`，+17.7%）——同起点 / 同 seed / 同预算。
+**不做**（用户拍板）：BC 蒸馏三头（三头是 RL 可学的；蒸馏原本只想收回迁移丢的 11pp hitRate，且 demo 的 fire 标签本身
+只有 1.84% 可训练）/ `metrics v13` 两列（改用脚本读 shard：`node tmp/agg-shards.cjs <dist 目录>`）/ extra 消融（暂缓，
+后果见 §119 的“能证/不能证”边界）。
+
+---
 ## §34 入口分家（S3）：`run_rl.py` 收成 CLI 壳 + 一次性腿独立成模块（2026-10-17，plan/single-resident-trainer §3）
 
 **现场**：`trainer/run_rl.py` 一个人背四种角色 —— 常驻训练循环 / 冒烟预演 / 导出快照 / 预采子进程。

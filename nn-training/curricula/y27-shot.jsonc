@@ -1,0 +1,154 @@
+// 课程 y27-shot —— **"给多开火正定价"腿**（单变量：`wHit 0.2 → 0.8`）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-20，依据 `docs/nn/experiments.md §119`：
+//   y26 六腿训练到 it100+ 的实测是 **shots/局 −25%、aimMisses −71%、hitRate +16pp、win −9pp**
+//   —— 策略学到的正是奖励付钱的那件事：**少开火、少空射**。
+//   算账（it0，anchor 200 局）：一手普通弹的期望 = `wHit×0.722 − wMiss×0.278 − 分母税 0.20`
+//     = **+0.144 − 0.097 − 0.196 = −0.10 分/发**（分母税 = `wAcc×hits/(shots+1)²` = 15.3×39.1/55.2²）。
+//   而 plan §1.6 早就定死了瓶颈是**出手量**（NN 39% vs 人类 61% 的武器产能）。
+//   ⇒ 这条腿只做一件事：把"一发普通弹"从"负收益"改成"正收益"。
+//
+// ── 单变量声明（相对 `y27-clear`：只有 `reward.params.wHit`）────────────────────
+//   `wHit` **0.2 → 0.8**（×4）。formula 字符串、其余 19 个参数、terminal、scheme、
+//   全部训练参数、起点、seed、eval **逐字不动**。
+//
+// ── 剂量推导（基线 Φ = 77.3，it0 / anchor 200 局实测）──────────────────────────
+//   ΔΦ = (0.8 − 0.2) × aimHits(39.1) = **+23.5 分 = Φ 的 +30.3%** ✓ 过 15% 剂量线。
+//   改完后单发期望 = 0.578 − 0.097 − 0.196 = **+0.27**（正）⇒ 梯度方向从"别打"翻成"打"。
+//   对照（同口径，都**不选**）：
+//     · `wMiss 0.35→0.10`：ΔΦ 只有 **+3.6（4.6%）** ⇒ 量级不够，测不出来；
+//     · `wAcc 15.3→6.0`：ΔΦ **−6.6（8.5%）** ⇒ 也是不足，且它是**唯一动分母税**的旋钮
+//       （降 wAcc 会让"多打"变便宜），是下一轮若本腿剂量不够时的**候选**，不是本轮变量。
+//
+// ── 要激活的能力 ───────────────────────────────────────────────────────────
+//   ① **出手量本身**（`shots/千`、`kills/千`）；
+//   ② **`fire=1`（先打再走）**：该位在 y26 已训练策略里 0/54 611（§119），但同一份起点权重
+//      在 stage 7 上占 5.3% ⇒ **不是硬掩码，是竞技场里拿不到正梯度**。多开火如果不痛，
+//      这条位就有机会被采样到并被付钱（本腿是它**唯一**可能被激活的路径）。
+//   ③ 附带：`fire=1` 的语义是"转身前先按旧朝向补一发" ⇒ 若真被用起来，
+//      `backHits`（wBackHits 1.0，Φ 11.1%）与 `sideHits` 都该跟着动。
+//
+// ── 判据（基线 = `y27-clear` 的**同轮**读数；同 `paired_rotate_seed` ⇒ 同 stage/seed 流）──
+//   主判 it100（it80–120 五点中位，anchor 面板 seed 860001–860050）：
+//     · **出手/千 ≥ 基线 + 15%**（it0 约 7.9/千拍；§119 的瓶颈就这一条）
+//     · 且 **kills/千 ≥ 基线**（多打必须换到杀伤，不能只是空放）
+//   副判（同为 it80–120 中位）：
+//     · **A01 命中率 ≥ 0.72**（本腿把 miss 的相对价降了，要盯住别退化成乱射；
+//       it0 是 0.722，基线 it100 约 0.86 —— 允许掉到 0.72，但**不许低于**）
+//     · **dmg/千 ≤ 基线 + 10%**（多开火不该=多挨打）
+//     · **`a_fire==1` 占比 > 0**（脚本统计：`node tmp/agg-shards.cjs tmp/y27-shot/it<N>/dist`）
+//   方向门 it40（it30–50）：
+//     · **出手/千 ≥ 基线**（不看幅度，只看方向；剂量 30% 还不动就是机制判负）
+//
+// ── 杀腿（任一即停）─────────────────────────────────────────────────────────
+//   ① it40 出手/千 没涨 ⇒ 30% 的剂量换不来开火，机制判负，停（**不许再抬 wHit**）。
+//   ② it100 **A01 < 0.65** ⇒ 变成乱射（命中率从 0.86 掉 21pp），停。
+//   ③ **aimMisses/千 涨 > 60%** ⇒ 同上，停。
+//   ④ **dmg/千 > 基线 + 15%** ⇒ 用挨打换出手（y25 的结课结论是"赢法是挨得少"），停。
+//   ⑤ **kills/千 < 基线 − 10%** ⇒ 打得多但杀不掉，停。
+//   ⑥ timeout > 5% ⇒ 停。
+//   ⑦ win 单点 < 0.50 ⇒ 停。
+//   ⑧ Φ 斜率 ≤ −0.05/轮（it1 起算）⇒ 红（看斜率不看绝对值，本腿 Φ 抬高 23.5 分）。
+//   ⑨ entropy 比 it0 涨 > 0.15 ⇒ 停。
+//
+// ── 与另两腿的关系 ─────────────────────────────────────────────────────────
+//   `y27-clear`（基线：腿 A 架构 + clear 奖励）· **`y27-shot`（本腿）** · `y27-lead`（wDist ×10）·
+//   `y27-window`（B6 窗口命中奖励）。四腿同起点（`y26-v6x.it0`）/ 同 seed 20270206 /
+//   同面板 860xxx / 同预算 ⇒ 同轮逐座位配对；三条腿各动一个互不重叠的旋钮
+//   （wHit / wDist / 新增窗口项），**Φ 绝对值不可横向比**（window 腿公式多一项）。
+// ── 结课报告（2026-10-21 · 判负 · 更准不是更多 · 全文 `docs/nn/experiments.md §122`）─
+//   跑量：it0→it100（101 iter）· 2026-10-20 20:53→2026-10-21 02:22（5.5h）· eval 21 点
+//   轨迹 win：it0 0.665 → it30–50 0.545 → it80–120 0.505 ｜ 峰 0.672@it5 ｜ 斜率 −0.18pp/100it
+//   预注册门：主判 ① shots/千 ≥ clear+15% ❌（**−0.1%**：8.03 vs 8.04）· ② kills/千 ≥ clear ✅（+6.5%）
+//             方向门 it40 shots ≥ clear ✅（+15.1%：8.70 vs 7.56）· 副判 P ≥ 0.72 ✅（**0.864**）·
+//             dmg/千 ≤ clear+10% ❌（**+28.9%**）· fire=1 > 0 ✅（13.6% 开火，§120 ⑥）
+//   杀腿：④ dmg/千 > clear+15% ⇒ **触发** · ⑥ win 单点 < 0.50（it85 0.492 / it100 0.448）
+//   配对（vs y27-clear）：全段 −2.89pp（z=−3.86，7 正 / 13 负）· it≥30 −4.92pp（z=−5.51）·
+//         **it≥80 −8.25pp（z=−5.31，n=2000）**
+//   行为（判决窗）：shots/千 8.03（= 基线）· P 0.864（+4.5pp）· misses/千 1.00（clear 1.33，**更少**）·
+//         kills/千 2.95（+6.5%）· **dmg/杀 16.31（+19%）** · dmg/局 241.4（+10.4%）
+//   判决：**判负 —— 4× 的 wHit 买到的是"更准"，不是"更多"；而多出来的杀伤是拿血换的**。机制：`wAcc` 的
+//         分母税（15.3×hits/(shots+1)²）与 `wMiss` 一分没动 ⇒ "多发一发"的边际仍然是负的，只给命中加钱
+//         等于把最优解推向"少而准"。出手量在判决窗回到基线就是这条的直读。
+//   遗产：**`wHit` 的剂量-反应是非单调的**：0.35 = +5.8pp（y26-shotmix），0.8 = −8.3pp（本条）。
+//         y27-steady 因此取 0.32 并把 `wAcc` 15.3→2.0（税 0.228→0.030）、`wMiss` 0.30（P*=0.532）。
+//   证据：tmp/y2627-close.py；§120 ⑦ 的"多打多挨在奖励眼里是净赚"。
+// ── 结课报告结束 ──────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "y27-shot",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y27-clear 逐字，**只改 wHit 0.2 → 0.8** ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.8,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 0.6,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y26-v6x/y26-v6x.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y27-shot/weights.json",
+  "traj": "tmp/y27-shot",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y27-shot",
+  "backup_prefix": "y27-shot",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

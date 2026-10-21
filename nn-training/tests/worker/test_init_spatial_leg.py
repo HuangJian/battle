@@ -17,6 +17,12 @@ obs-v5（plan/obs-v5-vector-gap.plan.md §2.7 / A10）追加：
   ⑤ 腿 B 的**分段**映射（旧 `[tower|s30|extra9]` → 新 `[tower|s46|extra57]`）：拷的三段逐位等、
      新 scalars/extra 两段重 init、value 头不在分段表内（全重 init）；
   ⑥ 形状不合法（既非同行、也非「宽−n/分段」）⇒ **响亮拒绝**（不静默跳过）。
+
+B1 v6 → 腿 A（2026-10-20）追加：
+  ⑦ **v6 三头源**（move4/fire3/hold2、头 128 = hidden only）可迁进腿 A v6：
+     extra 57 列**全 0**补齐、动作头行不重建；**前向与源模型等价**（四头 max|Δ| ≤ 1e-4
+     且 argmax 相同——185 宽 vs 128 宽的累加次序不同，逐位相等做不到，也不该要求），
+     extra 非零时输出改变（证明那 57 列真的进图）。legacy **5/2** 源仍拒绝（④ 不变）。
 """
 
 from __future__ import annotations
@@ -124,6 +130,99 @@ def test_leg_a_from_legacy_source_is_refused(tmp_path: Path) -> None:
             legacy_arch=False,
             seed=3,
         )
+
+
+def test_leg_a_from_v6_source_pads_zero_columns_and_is_bit_identical(tmp_path: Path) -> None:
+    """⑦ v6 三头源（无 extra 段）→ 腿 A v6：57 列纯 0 补齐 + 前向逐位相同。
+
+    这是 y26 线的唯一开关：`policyExtra=true` 才让 POLICY_EXTRA(57) 进网络
+    （`infer.ts:510-515` 在 policyExtra=false 时把 extraDim 定成 0，extra 全程不被读）。
+    零列而不是 0.01：it0 必须与源行为**逐位相同**，否则「extra 到底有没有用」的
+    对照就被起点变化污染了。
+    """
+    torch.manual_seed(13)
+    src = _saved(tmp_path / "v6-src.json", PPOStudent(action_v6=True))
+    dst = tmp_path / "legA-v6.json"
+    info = convert(
+        str(src),
+        str(dst),
+        policy_extra=True,
+        spatial_tower=False,
+        legacy_arch=False,
+        action_v6=True,
+        seed=5,
+    )
+    assert info["arch"].get("policyExtra") is True
+    assert info["arch"].get("actionV6") is True
+    assert info["warmstart_missing"] == []  # 四张换形张量全部走列迁移
+    assert info["warmstart_partial"] == [
+        "fire_head.weight",
+        "hold_head.weight",
+        "move_head.weight",
+        "value_head.weight",
+    ]
+    old = load_weights_json(str(src), allow_legacy_schema=True)[1]
+    new = load_weights_json(str(dst))[1]
+    for name in ("move_head.weight", "fire_head.weight", "hold_head.weight", "value_head.weight"):
+        assert new[name].shape[1] == 128 + 57, f"{name} 头输入宽应 = hidden 128 + extra 57"
+        assert new[name].shape[0] == old[name].shape[0], f"{name} 输出类数不应变"
+        assert torch.equal(new[name][:, :128], old[name]), f"{name} 前 128 列应逐位等"
+        assert torch.equal(
+            new[name][:, 128:], torch.zeros_like(new[name][:, 128:])
+        ), f"{name} 的 extra 列必须是纯 0（行为保持），不是 0.01 噪声"
+
+    # 前向对账：extra 全 0 ⇒ 与源模型逐位相同（含 hold / value）。
+    g = torch.Generator().manual_seed(91)
+    obs = torch.randint(0, 256, (1, 16, 26, 26), generator=g, dtype=torch.uint8)
+    sc = torch.rand((1, 46), generator=g)
+    zeros = torch.zeros((1, 57))
+    src_m = build_ppo(str(src))
+    dst_m = build_ppo(str(dst))
+    load_state_into(src_m, str(src))
+    load_state_into(dst_m, str(dst))
+    src_m.eval()
+    dst_m.eval()
+    with torch.no_grad():
+        s_move, s_fire, s_hold, s_val = src_m(obs, sc, None)
+        d_move, d_fire, d_hold, d_val = dst_m(obs, sc, zeros)
+    # 为什么不是 `torch.equal`：头输入从 128 宽变 185 宽，即便多出的 57 列全 0，
+    # BLAS 的累加/向量化次序也已不同 ⇒ 末位差（本用例实测 ≤2e-5）。判据 = 与
+    # torch↔TS golden 同口径的 1e-4 + **决策不变**（argmax 相同）。
+    for name, a, b in (
+        ("move", s_move, d_move),
+        ("fire", s_fire, d_fire),
+        ("hold", s_hold, d_hold),
+        ("value", s_val, d_val),
+    ):
+        assert float((a - b).abs().max()) <= 1e-4, f"extra 全 0 时 {name} 偏离过大（起点行为变了）"
+        if name != "value":
+            assert torch.equal(a.argmax(dim=-1), b.argmax(dim=-1)), f"{name} 的 argmax 变了"
+
+    # ① 前向接线：extra 列在**头输入里**（而不是被丢掉）。零列时输出当然不变，
+    #   所以往 extra 段写一个非零权，输出必须变。
+    leaked = dst_m.move_head.weight.data.clone()
+    try:
+        with torch.no_grad():
+            dst_m.move_head.weight.data[:, 128:] = 0.5
+            wired_move, _, _, _ = dst_m(obs, sc, torch.full((1, 57), 0.5))
+        assert not torch.equal(wired_move, d_move), "extra 非零但 move logits 没变 ⇒ 57 列不在头输入里"
+    finally:
+        with torch.no_grad():
+            dst_m.move_head.weight.data.copy_(leaked)
+
+    # ② 梯度可达（这才是“能不能学”的判据）：it0 时 extra 列是 0，但它们的梯度
+    #   = grad_out ⊗ extra ≠ 0 ⇒ PPO 第一步就能把它们拉起来。
+    dst_m.zero_grad(set_to_none=True)
+    m_out, _, h_out, _ = dst_m(obs, sc, torch.full((1, 57), 0.5))
+    (m_out.sum() + h_out.sum()).backward()
+    for head in ("move_head", "hold_head"):
+        grad = getattr(dst_m, head).weight.grad
+        assert grad is not None, f"{head} 没拿到梯度"
+        extra_grad = grad[:, 128:]
+        assert float(extra_grad.abs().max()) > 0.0, (
+            f"{head} 的 extra 列梯度全 0 ⇒ 那 57 维永远不会被学（等于没接）"
+        )
+    dst_m.zero_grad(set_to_none=True)
 
 
 def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:

@@ -37,6 +37,8 @@ interface StudentGolden {
   /** B1 v6 only. */
   actionV6?: boolean
   holdLogits?: number[]
+  /** v4 腿 A（policyExtra）only：POLICY_EXTRA(57) 输入。 */
+  policyExtra?: boolean
   extra?: number[]
   params: Record<string, unknown>
 }
@@ -49,6 +51,9 @@ const PROD = JSON.parse(
 ) as StudentGolden
 const V6 = JSON.parse(
   readFileSync(join(import.meta.dir, '..', 'fixtures', 'student-golden-v6.json'), 'utf8'),
+) as StudentGolden
+const V6X = JSON.parse(
+  readFileSync(join(import.meta.dir, '..', 'fixtures', 'student-golden-v6x.json'), 'utf8'),
 ) as StudentGolden
 
 function maxAbsDiff(a: number[], b: Float32Array): number {
@@ -97,6 +102,39 @@ function runCaseV6(g: StudentGolden): {
   }
 }
 
+/**
+ * 腿 A + v6（`policyExtra=true` 且 `hold_head` 在）：三头输入 185 = hidden 128 + extra 57。
+ *
+ * 这是 y26 线“新观测到底进没进网络”的唯一开关（`infer.ts:510-515`：policyExtra=false 时
+ * `extraDim=0`，第三参 `extra` 全程不被读）。
+ */
+function runCaseV6X(g: StudentGolden): {
+  move: number
+  fire: number
+  hold: number
+  value: number
+  /** 头输入宽（应 = hidden + extra）。 */
+  headIn: number
+} {
+  const model = buildModelFromText(
+    JSON.stringify({
+      arch: { kind: 'student', h: g.h, d: g.d, policyExtra: true },
+      params: g.params,
+    }),
+  ) as ModelLike & { valueOut: Float32Array; holdLogits: Float32Array; headIn: Float32Array }
+  const obs = new Uint8Array(g.obs)
+  const scalars = new Float32Array(g.scalars)
+  const extra = new Float32Array(g.extra ?? [])
+  model.forward(obs, scalars, extra)
+  return {
+    move: maxAbsDiff(g.moveLogits, model.moveLogits),
+    fire: maxAbsDiff(g.fireLogits, model.fireLogits),
+    hold: maxAbsDiff(g.holdLogits ?? [], model.holdLogits),
+    value: maxAbsDiff(g.valueLogits, model.valueOut),
+    headIn: model.headIn.length,
+  }
+}
+
 describe('StudentNet TS/Py forward consistency — per-tick RL policy heads (axis 2)', () => {
   it('golden 元信息：format/seed/arch 溯源（两个规格）', () => {
     for (const g of [SLIM, PROD]) {
@@ -122,6 +160,18 @@ describe('StudentNet TS/Py forward consistency — per-tick RL policy heads (axi
     expect(V6.fireLogits.length).toBe(3)
     expect(V6.holdLogits?.length).toBe(2)
     const d = runCaseV6(V6)
+    expect(d.move, `move maxΔ=${d.move}`).toBeLessThanOrEqual(1e-4)
+    expect(d.fire, `fire maxΔ=${d.fire}`).toBeLessThanOrEqual(1e-4)
+    expect(d.hold, `hold maxΔ=${d.hold}`).toBeLessThanOrEqual(1e-4)
+    expect(d.value, `value maxΔ=${d.value}`).toBeLessThanOrEqual(1e-4)
+  })
+
+  it('腿 A + v6 golden：extra(57) 进头输入（185 宽）且四头 ≤1e-4', () => {
+    expect(V6X.actionV6).toBe(true)
+    expect(V6X.policyExtra).toBe(true)
+    expect(V6X.extra?.length).toBe(57)
+    const d = runCaseV6X(V6X)
+    expect(d.headIn, '头输入宽必须 = hidden + extra').toBe(V6X.head_hidden + 57)
     expect(d.move, `move maxΔ=${d.move}`).toBeLessThanOrEqual(1e-4)
     expect(d.fire, `fire maxΔ=${d.fire}`).toBeLessThanOrEqual(1e-4)
     expect(d.hold, `hold maxΔ=${d.hold}`).toBeLessThanOrEqual(1e-4)
