@@ -144,6 +144,10 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     info = _probe_cuda(log)
     if info is not None and int(info.get("n") or 0) > 0:
         n_gpu = int(info["n"])
+        # ★ 2026-10-21：把卡数交给下游 argv 生成（`worker_restart_argv` 判「一卡一 worker」
+        #   还是「一卡 N worker」）。以前这个数只用于打日志，于是 1 卡机上 `workers=2`
+        #   会拿到 `cuda:1` ⇒ invalid device ordinal（每单炸一次）。
+        cfg["gpu_count"] = n_gpu
         log(f"torch {info.get('v')}, CUDA 可见 {n_gpu} 张 GPU")
         names = list(info.get("names") or [])
         for i in range(n_gpu):
@@ -219,8 +223,15 @@ def worker_restart_argv(
     `workers == 1` 时逐字节等于改造前（顺序/字面量都不动）。
     """
     hub_url = str(cfg["hub_url"])
+    # ★ 2026-10-21（第二次修正）：可见卡数 < workers ⇒ **共享同一张卡**（`cuda`）。
+    #   上一版一律 `cuda:<instance>`，在**单卡机**（Colab T4 / aistudio V100 16GB 都是 1 张）
+    #   上 `workers=2` 会让第二个子进程拿到 `cuda:1` ⇒ `invalid device ordinal`，每单炸一次。
+    #   共享腿的语义：两个独立进程各自跑整单（数学逐位不变），只靠 GPU 并发吃利用率——
+    #   这正是「步耗 0.49s 而利用率个位数」时可试的聚合腿。`gpu_count` 未知（旧 cfg / 测试）
+    #   时保持旧行为，不做静默降级。
+    gpus = int(cfg.get("gpu_count") or 0)
     if workers > 1 and str(cfg["device_resolved"]).startswith("cuda"):
-        device = f"cuda:{int(instance)}"
+        device = "cuda" if (gpus and gpus < workers) else f"cuda:{int(instance)}"
         cpus = int(os.cpu_count() or 1)
         threads = str(max(1, cpus // max(1, int(workers))))
     else:
@@ -284,6 +295,12 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     if n_workers > 1 and not str(cfg.get("device_resolved", "")).startswith("cuda"):
         log(f"workers={n_workers} 但 device={cfg.get('device_resolved')} 不是 cuda ⇒ 只起 1 个 worker")
         n_workers = 1
+    elif n_workers > 1 and 0 < int(cfg.get("gpu_count") or 0) < n_workers:
+        # 可见卡数不够 ⇒ 全部落到设备 0。写清楚：这不是「一卡一 worker」。
+        log(
+            f"workers={n_workers} > 可见卡数 {int(cfg.get('gpu_count') or 0)} "
+            "⇒ 全部共享 cuda（同一张卡内并发，单 job 数学不变；显存与主机线程按 N 分）"
+        )
     # token 走 --token-file（H10：不进进程列表）；热替换 = 子进程退 86 → 监督器
     # 用同参重拉（fresh 进程加载新代码），kernel 与 cell 的输出流不断。
     specs: list[tuple[str, list[str]]] = []

@@ -256,6 +256,31 @@ def policy_new_rms_of(model: Any) -> torch.Tensor:
         return torch.cat(parts).pow(2).mean().sqrt() if parts else _zero_scalar(model)
 
 
+def _profile_steps(device: Any) -> int:
+    """`PPO_PROFILE=1` ⇒ 抓前 N 个梯度步的 CPU/CUDA 剖面；返回采样步数（0 = 关）。
+
+    为什么（2026-10-21，真机步耗卡在 ~0.49s/step）：`PPO_CUDA_DIAG` 只给 median/p95，
+    分不清「GPU 真在算」还是「主机在排队」——而 §4.6 判 W3.5 卡的正是这条分岔
+    （CPU ≫ CUDA ⇒ 图捕获治不了，要先改数据通路）。开这个开关只跑
+    `PPO_PROFILE_STEPS`（缺省 10，钳 1..50）步，随后按 `self_cuda_time_total` 降序打表。
+
+    CPU / XLA 直接返回 0：CPU 上没有 CUDA 活动列（表会误导），XLA 的 profiler 语义不同
+    （惰性图 + 编译段不落 CUDA 计时）——宁可不给读数，也不给假读数。
+
+    ★ 采样步**不进 `_step_walls`**（profiler 自身有开销）：开 profiler 时
+    `PPO_CUDA_DIAG` 的 median 仍干净，代价是 n 少 `PPO_PROFILE_STEPS`。
+    """
+    if os.environ.get("PPO_PROFILE", "0") in ("", "0"):
+        return 0
+    if not str(device).startswith("cuda"):
+        return 0
+    try:
+        n = int(os.environ.get("PPO_PROFILE_STEPS", "10"))
+    except ValueError:
+        n = 10
+    return max(1, min(50, n))
+
+
 def ppo_update(
     model,
     opt,
@@ -316,6 +341,16 @@ def ppo_update(
     # 「median 下降」就是拿它比的）。只 append 一个 float，不新增设备同步；**打印**另受
     # PPO_CUDA_DIAG 控（默认 0）——稳态不多一行（日志节食）。
     _step_walls: list[float] = []
+    # ---- 可选 profiler（`PPO_PROFILE=1`；判读见 `_profile_steps` 的 docstring）----
+    _prof_steps = _profile_steps(device)
+    _prof: Any = None
+    _prof_left = 0
+    if _prof_steps:
+        import torch.profiler as _tp
+
+        _prof = _tp.profile(activities=[_tp.ProfilerActivity.CPU, _tp.ProfilerActivity.CUDA])
+        _prof.start()
+        _prof_left = _prof_steps
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
     tensored = tensored_chunks(chunks, device)
@@ -607,7 +642,21 @@ def ppo_update(
             # 设备为 no-op，CPU/CUDA 数值与行为逐位不变。
             xla_mark_step(device)
             now = time.time()
-            _step_walls.append(now - _step_t0)
+            if _prof is not None:
+                # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `_profile_steps`）。
+                _prof_left -= 1
+                if _prof_left <= 0:
+                    _prof.stop()
+                    log(
+                        f"[ppo] profile（前 {_prof_steps} 步，按 self CUDA 时间降序；"
+                        "CPU / CUDA 两列同表）:\n"
+                        + _prof.key_averages().table(
+                            sort_by="self_cuda_time_total", row_limit=15
+                        )
+                    )
+                    _prof = None
+            else:
+                _step_walls.append(now - _step_t0)
             # XLA 步耗读数（必须在 mark_step 之后：编译/执行都已 drain，否则恒为 0）。
             # 未取样的步只累计墙钟——delta 是累积的，中间发生的编译仍会落在下一次读数里。
             if diag_on:
@@ -750,6 +799,15 @@ def ppo_update(
             diag_b.add("最慢窗口指标", diag_worst_delta)
         diag_b.add("图签名", diag_sig or "-")
         diag_b.emit(f"[ppo] XLA 步耗诊断（{total_steps} 步 / {time.time() - t0:.0f}s）")
+    # ---- profiler 收尾：步数没跑满采样窗口（断点续跑/提前 break）也要把表打出来 ----
+    if _prof is not None:
+        _prof.stop()
+        log(
+            f"[ppo] profile（只跑了 {_prof_steps - _prof_left}/{_prof_steps} 步，提前收尾；"
+            "样本少时单步噪声占比高）:\n"
+            + _prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=15)
+        )
+        _prof = None
     # ---- W0-b 收尾：per-step 墙钟的 steady-state 读数（剔前 2 步 = CUDA context init /
     # autotune；只报 median/p95，别把 warmup 混进中位数）。受 env 控 ⇒ 稳态日志零变化。
     if _step_walls and os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
