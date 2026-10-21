@@ -109,7 +109,7 @@ export interface TaskBundleStatus {
   running: boolean
   /** 状态早于本课任务包作废/新包生成 ⇒ 不可知（不是成功）。 */
   stale: boolean
-  /** `running` 但超过 30 分钟或 pid 已不在 ⇒ 不可知（不是成功）。 */
+  /** `running` 但超过 30 分钟 / pid 已不在 / PID 已被复用 ⇒ 不可知（不是成功）。 */
   expired: boolean
   /** `running` 时的已跑秒数（其余为 0）。 */
   elapsedSec: number
@@ -172,12 +172,20 @@ function statusIsStale(course: string, at: number): boolean {
   return floor > 0 && at * 1000 + STATUS_TIME_SLACK_MS < floor
 }
 
+/** 读面的可注入点（只有用例会传：不需要真进程表就能验「身份不明」与「刚写入不验」两条边界）。 */
+export interface TaskBundleStatusReadDeps {
+  pidState?: (pid: number, course: string) => ExportPidState
+}
+
 /** 读导出状态（没有 / 坏 JSON / 魔数不符 ⇒ `null`，**永不抛**）。
  *
  *  `null` = **不可知**（还没跑完 / 被 kill / 旧版本），不是成功——调用方必须把这两件事分开说。
  *  `running` / `stale` / `expired` 都在这里收口，面板与 hub 走同一个读面。
  */
-export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
+export function readTaskBundleStatus(
+  course: string,
+  deps: TaskBundleStatusReadDeps = {},
+): TaskBundleStatus | null {
   let raw: string
   try {
     raw = readFileSync(taskBundleStatusPath(course), 'utf-8')
@@ -194,6 +202,16 @@ export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
     const rawRunning = j.running === true
     const rawOk = j.ok === true
     const stale = !rawRunning && statusIsStale(course, at)
+    // PID 复用（2026-10-21 用户口径：「等 30 分钟不可接受」）：`running` + pid 活着，但命令行
+    // **不是**本课这次导出 ⇒ 那个 pid 已被别的进程占用，这份 running 描述的是一个死进程。
+    // 验不出命令行（`unknown`）时**不放行**——宁可少放一次，也不让同课两个导出并发写同一个 `.tmp`。
+    const pidReused =
+      rawRunning &&
+      !stale &&
+      pid > 0 &&
+      pidAlive(pid) &&
+      Date.now() / 1000 - at >= EXPORT_IDENTITY_MIN_AGE_SEC &&
+      (deps.pidState ?? cachedExportPidState)(pid, course) === 'mismatch'
     // 「进行中」的到期判据必须**读得到**（不能只活在 watchExportExit 里：控制台重启即消失）。
     const expired =
       rawRunning &&
@@ -201,11 +219,12 @@ export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
         Date.now() / 1000 - at > EXPORT_TIMEOUT_MS / 1000 ||
         pid <= 0 ||
         !pidAlive(pid) ||
+        pidReused ||
         stale)
     return {
       ok: rawOk && !stale && !expired,
       // `running` = **文件说进行中**（第一手），`expired` = 「但这份进行中已不可信」
-      // （超时 / pid 不在）。两者分开：看门狗收尾要分辨「进程还在跑」与「运行态已过期」，
+      // （超时 / pid 不在 / PID 已被复用）。两者分开：看门狗收尾要分辨「进程还在跑」与「运行态已过期」，
       // 渲染侧永远先看 `expired`（见 `exportStatusLine` / BundleRowActions 的顺序）。
       running: rawRunning,
       stale,
@@ -271,7 +290,8 @@ export function exportStatusLine(course: string): string {
   if (!status) return '导出状态：尚无记录（还没跑完 / 被 kill / 旧版本）——不可知，不等于成功'
   const when = status.at > 0 ? new Date(status.at * 1000).toLocaleString() : '时间未知'
   if (status.stale) return '导出状态不可知（状态早于任务包作废）——不等于成功'
-  if (status.expired) return '导出状态不可知（上一次导出超时，或进程已不在）——不等于成功'
+  if (status.expired)
+    return '导出状态不可知（上一次导出超时 / 进程已不在 / PID 已被别的进程复用）——不等于成功'
   if (status.running) {
     const mins = Math.max(1, Math.round(status.elapsedSec / 60))
     return `正在导出（PID ${status.pid}，已跑 ${mins} 分钟）`
@@ -687,15 +707,52 @@ export function exportBusyReason(course: string): string | null {
   return null
 }
 
+/** 导出的命令行身份（**三态**：`unknown` ≠ `mismatch`）。
+ *
+ *  `mismatch` = 拿到了命令行，但不是本课这次导出 ⇒ 那个 pid 已被别的进程占用（PID 复用）；
+ *  `unknown` = 读不到命令行（`/proc` 受限 / `ps` 与 `pwsh` 不可用）⇒ **不能当作「不是它」**。
+ *
+ *  这个区分是承重的：kill 只在 `match` 时做（验不明就不杀），而「解锁」只在 `mismatch` 时做
+ *  （验不明就继续等 30 分钟上界）——两个方向的保守刚好相反。
+ */
+export type ExportPidState = 'match' | 'mismatch' | 'unknown'
+
+/** 身份判据的缓存时长（毫秒）。Windows 那条腿是一次 `pwsh`（百毫秒级），不能每 5s 轮询都起。 */
+export const EXPORT_IDENTITY_TTL_MS = 15_000
+/** 状态写入多久之后才值得怀疑（秒）：刚写的 `running` 描述的就是刚启动的进程，不必去验。 */
+export const EXPORT_IDENTITY_MIN_AGE_SEC = 5
+
+/** 判一个 pid 是不是**本课这次导出**（`readCmd` 可注入：用例不需要真进程表）。 */
+export function exportPidState(
+  pid: number,
+  course: string,
+  readCmd: (pid: number) => string = pidCommandLine,
+): ExportPidState {
+  if (pid <= 0) return 'unknown'
+  const cmd = readCmd(pid)
+  if (!cmd) return 'unknown'
+  if (!cmd.includes('run_rl.py')) return 'mismatch'
+  return cmd.includes('--export-bundle') && cmd.includes(taskBundleFileName(course))
+    ? 'match'
+    : 'mismatch'
+}
+
+/** 带 TTL 的身份缓存（键 = 课程 + pid；超出就整表清掉——这张表只服务「最近这几课」）。 */
+const pidStateCache = new Map<string, { at: number; state: ExportPidState }>()
+function cachedExportPidState(pid: number, course: string): ExportPidState {
+  const key = `${course}:${pid}`
+  const now = Date.now()
+  const hit = pidStateCache.get(key)
+  if (hit && now - hit.at < EXPORT_IDENTITY_TTL_MS) return hit.state
+  if (pidStateCache.size >= 32) pidStateCache.clear()
+  const state = exportPidState(pid, course)
+  pidStateCache.set(key, { at: now, state })
+  return state
+}
+
 /** 导出的命令行身份（kill 前的安全联锁：PID 会被复用，盲杀可能杀掉无关进程）。 */
 export function exportPidMatches(pid: number, course: string): boolean {
-  const cmd = pidCommandLine(pid)
-  if (!cmd) return false
-  return (
-    cmd.includes('run_rl.py') &&
-    cmd.includes('--export-bundle') &&
-    cmd.includes(taskBundleFileName(course))
-  )
+  return exportPidState(pid, course) === 'match'
 }
 
 /** 看门狗日志：控制台日志 + 导出日志各一行（**不许静默解锁**）。 */

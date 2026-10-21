@@ -8518,10 +8518,19 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   ④ 把 `running` 在读面直接降成 `false`（看门狗分不清「还在跑」与「运行态已到期」，会把已产出的包误写成
   失败）；⑤ 超时只 release 不 kill（僵尸继续烧盘）；⑥ 盲杀 PID（复用会杀无关进程）；
   ⑦ hub 把 `running` 当 `ok:false`（导出还在跑就停试 900s）。
+- **2026-10-21 补（用户口径：「等 30 分钟不可接受」）**：PID 复用不再靠 30 分钟上界硬等——导出腿加
+  `exportPidState(pid, course): 'match' | 'mismatch' | 'unknown'`（命令行三态）作为**身份判活**：
+  `running && pidAlive && 状态写下 ≥5s` 时查一次（Linux 直读 `/proc/<pid>/cmdline` 不 fork；
+  其余平台 15s 缓存，Windows 一次 `pwsh`），`mismatch` ⇒ `expired` ⇒ **点一下就能重导**。
+  两个方向的保守刚好相反：`unknown` 不解锁也不杀，`mismatch` 只解锁不杀，`match` 才杀。
+  仍**不修**共享 `pidAlive`（48 个调用点：trainer 监督 / hub / worker / stop / eval）——
+  原语级修法（PID + 启动时刻 / `pidfd` / 心跳文件）是另一条腿，且本环境只能验到 Linux 一半。
+  被否决：① 直接把 `pidAlive` 改成双因子（全局语义变更、Windows 无法验证）；② `unknown` 也解锁
+  （同课并发写同一个 `.tmp`，破不变量 2）；③ 缩短 30 分钟上界（真正卡住的导出合法地可以跑很久）。
 - **身份**：不动 `--export-bundle` 的锁与账本语义，不动 delta 包格式与「本机不猜基准」纪律 ⇒ 不是新实验。
 - **落地**：`remote/weights_standard.py` · `trainer/loop_round_steps.py` · `remote/bundle.py` · `hub/task_pack.py` ·
   `server/bundles/{export,marks}.ts` · `core/net.ts` · `server/actions/auto-offline-handoff.ts` · `server/api/route.ts` ·
   `server/server.ts` · `web/app/lib/api-client.ts` · `web/app/panels/BundleRowActions.tsx`。
 - **门禁**：`nn-training` 侧 97 用例（weights_standard / loop_round / export_status / auto_handoff）+ dashboard
-  89 用例（task-bundle / auto-offline-handoff）+ 两个 typecheck + 三份 web bundle 全绿。
+  91 用例（task-bundle / auto-offline-handoff，含 PID 复用三态）+ 两个 typecheck + 三份 web bundle 全绿。
 - **全文** → `plan/export-bundle-stall.plan.md`（评审 `plan/export-bundle-stall.review-bf.md`）。

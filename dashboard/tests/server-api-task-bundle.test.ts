@@ -52,6 +52,7 @@ import {
 import {
   exportBusyReason,
   exportGuardReason,
+  exportPidState,
   exportStatusLine,
   RUN_MAX_ITERS_HARD_CAP,
   invalidateTaskBundle,
@@ -306,6 +307,72 @@ describe('任务包导出', () => {
       expect(readTaskBundleStatus(course)?.stale).toBe(true)
       expect(exportStatusLine(course)).toContain('不可知')
       expect(exportStatusLine(course)).not.toContain('上次导出成功')
+    } finally {
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('PID 被别的进程复用 ⇒ 不当「还在导」：立刻放行，并说不可知', () => {
+    // 用户口径（2026-10-21）：「等 30 分钟不可接受」。running 状态 + pid 活着但命令行不是本课导出
+    // ⇒ 那个 pid 已换主，这份 running 描述的是死进程 ⇒ 点一下就能重导，不必等超时。
+    const course = '__reused-pid-course__'
+    try {
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+        at: Date.now() / 1000 - 60, // 已写下 60s ⇒ 过了「刚写入不验」的门
+      })
+      // 本测试进程的命令行里没有 run_rl.py / --export-bundle。
+      expect(exportPidState(process.pid, course)).toBe('mismatch')
+      const st = readTaskBundleStatus(course)
+      expect(st?.running).toBe(true)
+      expect(st?.expired).toBe(true)
+      expect(exportBusyReason(course)).toBeNull()
+      expect(exportStatusLine(course)).toContain('不可知')
+      expect(exportStatusLine(course)).not.toContain('上次导出成功')
+    } finally {
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('身份三态：验不明（unknown）不放行；刚写入的 running（<5s）根本不去验', () => {
+    const course = '__unknown-pid-course__'
+    expect(exportPidState(0, course, () => 'whatever')).toBe('unknown')
+    expect(exportPidState(1, course, () => '')).toBe('unknown')
+    expect(exportPidState(1, course, () => '/usr/bin/python run_rl.py --course x')).toBe('mismatch')
+    expect(
+      exportPidState(1, course, () => `python run_rl.py --export-bundle ${taskBundlePath(course)}`),
+    ).toBe('match')
+    try {
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+        at: Date.now() / 1000 - 60,
+      })
+      // 验不出来 ⇒ 保守：仍算进行中（宁可少放一次，不让同课两个导出并发写同一个 .tmp）。
+      const unknown = readTaskBundleStatus(course, { pidState: () => 'unknown' })
+      expect(unknown?.expired).toBe(false)
+      expect(unknown?.running).toBe(true)
+      expect(exportBusyReason(course)).toBeNull() // 真读面：本测试进程恰好是 mismatch
+
+      // 刚写下的 running 描述的就是刚启动的进程：不读进程表（抛错证明没被调到）。
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+      })
+      const fresh = readTaskBundleStatus(course, {
+        pidState: () => {
+          throw new Error('刚写入的状态不该去验身份')
+        },
+      })
+      expect(fresh?.running).toBe(true)
+      expect(fresh?.expired).toBe(false)
     } finally {
       rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
