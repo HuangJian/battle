@@ -230,13 +230,22 @@ def worker_restart_argv(
     #   这正是「步耗 0.49s 而利用率个位数」时可试的聚合腿。`gpu_count` 未知（旧 cfg / 测试）
     #   时保持旧行为，不做静默降级。
     gpus = int(cfg.get("gpu_count") or 0)
+    # ★ 2026-10-21（第三次修正）：`cfg["threads"]` = **显式** torch intra-op 线程数（0/缺省 =
+    #   逐字旧行为 `"0"`）。真机实测：Colab T4 可见 2 vCPU（`sched_getaffinity=2`、
+    #   `cpu.max=max`），但 `omp_get_max_threads()`、`mkl_get_max_threads()` 都是 **1**，且
+    #   `OMP_NUM_THREADS=4` **被忽略** ⇒ env 这条路无效，只有 `torch.set_num_threads(N)` 能改
+    #   （`train_core.py:248` 正是它）。所以留一个显式旋钮，否则「1 线程」永远调不了。
+    #   语义：`workers > 1` 时它是**每 worker** 的值（不自动除）——自动除只用于缺省推导。
+    explicit_threads = int(cfg.get("threads") or 0)
     if workers > 1 and str(cfg["device_resolved"]).startswith("cuda"):
         device = "cuda" if (gpus and gpus < workers) else f"cuda:{int(instance)}"
         cpus = int(os.cpu_count() or 1)
-        threads = str(max(1, cpus // max(1, int(workers))))
+        threads = str(
+            explicit_threads if explicit_threads > 0 else max(1, cpus // max(1, int(workers)))
+        )
     else:
         device = str(cfg["device_resolved"])
-        threads = "0"
+        threads = str(explicit_threads) if explicit_threads > 0 else "0"
     argv = [
         "--poll", hub_url,
         "--token-file", str(token_file),
@@ -337,7 +346,8 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         log("已自报归属=离线盘（只领整段 job，不再兼领在线活）")
     log(
         f"worker 启动（max_idle={max_idle}s, poll={cfg['poll_interval_sec']}s, "
-        f"device={cfg['device_resolved']}, workers={n_workers}）"
+        f"device={cfg['device_resolved']}, workers={n_workers}, "
+        f"threads={int(cfg.get('threads') or 0) or 'torch缺省'}）"
     )
     if n_workers == 1:
         try:
