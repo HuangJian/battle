@@ -121,8 +121,12 @@ function fallbackStats(
   return { fallback, episodes, stuckEpisodes, outcome: world.state }
 }
 
-const OFF = { ...DEFAULT_GOD_AI_PARAMS }
-const ON = { ...DEFAULT_GOD_AI_PARAMS, directMoveFallbackHold: 40 }
+// A8（2026-10-21）把集合点解析到可站的 (12,22) 之后，fallback 的触发次数整体下降
+// （s35 seed1002：543 → 149），本用例的「相对下降」比例被稀释。这里固定在 A8 之前
+// 的口径，测的是 A7 承诺机制本身，而不是当前关卡分布的混合效果。
+const ERA = { ...DEFAULT_GOD_AI_PARAMS, defenseCellResolve: 0 }
+const OFF = { ...ERA }
+const ON = { ...ERA, directMoveFallbackHold: 40 }
 
 describe('A7 — directMove any-passable fallback commitment', () => {
   it('ships OFF by default (byte-identical gate)', () => {
@@ -159,7 +163,7 @@ describe('A7 — directMove any-passable fallback commitment', () => {
 
   it('is inert when the hold is 0 (same run, same outcome)', () => {
     const a = fallbackStats(OFF, 12, 1000, 9000)
-    const b = fallbackStats({ ...DEFAULT_GOD_AI_PARAMS, directMoveFallbackRank: 0 }, 12, 1000, 9000)
+    const b = fallbackStats({ ...ERA, directMoveFallbackRank: 0 }, 12, 1000, 9000)
     expect(b.fallback).toBe(a.fallback)
     expect(b.stuckEpisodes).toBe(a.stuckEpisodes)
     expect(b.outcome).toBe(a.outcome)

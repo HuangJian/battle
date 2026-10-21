@@ -479,6 +479,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 3 局，纯噪声。按**机制强度**取 3：40 局探针上翻转次数 46.7→41.1（h1，
   // 只 −12%，等于没修好）vs 46.7→18.9（h3，−60%）。h2 是唯一的真退步。
   defenseReturnHysteresis: 3,
+  // A8 (2026-10-21): 集合点必须是能站的格 —— (12,23) 在 35/35 关都是环砖，
+  // A* 两种模式都返回空路径 ⇒ 所有回防指令都交给导航层一个到不了的目标。
+  // 1 = 解析到 (12,22)（SHIPPED）· 0 = 原始格（仅 A/B 基线，字节等同）。
+  defenseCellResolve: 1,
   // A5 (2026-10-20): probe the movement axis un-snapped in canMoveDir /
   // canMoveOrBreak. 保留实现，默认 OFF —— 实测它让碰撞判定整体更保守，
   // 触发 directMove 的 any-passable fallback 更频繁（打转 43.5→52.6 次/局、

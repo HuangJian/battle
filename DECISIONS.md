@@ -8371,3 +8371,102 @@ fallback 从不触发」的假结论（实际 931–3645 次），坦克在第�
   A4 的对比表都用它产）。
 - 新增 `tests/godai-dm-fallback.test.ts`（4 例）：默认值守卫、reset 清状态、
   s35 seed1002 上 fallback tick −63% / 失败逃逸 13→2、hold=0 与基线逐字节一致。
+
+## §2026-10-21-godai-a8-defense-cell — 集合点可站化：（12,23）在 35/35 关都是环砖，回防路由从来没通过
+
+**结论先行**：`getDefaultDefensePosition()` 返回 `(BASE_POS.col, BASE_POS.row − defenseRowOffset)`
+= **(12,23)**。实测 **35/35 关该格都是基地环砖**，`findPath` 在 **corridor 与
+dig-through-brick 两种模式下从出生点与中场都返回空路径** ⇒ 所有「回防」指令
+（`selectTarget` 的 baseUnderThreat 分支、M13 外线撤收、§113/§88 回防）都在把导航层
+指向一个**永远到不了**的目标：`followPath` 返回 null，`directMove` 只能朝环砖盲走破砖，
+玩家在环砖前打转。**已修并发货**（`defenseCellResolve: 1`），35 关全部落到 **(12,22)**。
+三难度净值在噪声内（classic **+0.86pp**、hard −0.14pp、chaos −0.62pp）。
+
+### 一、缺陷证据（35 关全量）
+
+```
+s1 Outpost:       def=(12,23) terrain=brick standable=N spawnPath=0 midPath=0 digPath=0
+...
+s35 Final Redoubt: def=(12,23) terrain=brick standable=N spawnPath=0 midPath=0 digPath=0
+unstandable 35/35 · empty corridor path from spawn 35 · from mid 35
+```
+
+`digPath=0` 是关键：破砖 A* 连「先打穿砖再站上去」都不给，因为目标格本身不可站。
+对比修复后的 (12,22)：**digPath 6–10**（从出生点出发的真实破砖路线长度）。
+
+### 二、修复语义（`resolveStandableDefenseCellImpl`）
+
+1. 原格**可站且四邻至少一个可站** → 原样保留（环内单格气泡「可站但 A* 进不去」
+   同样算坏格）；
+2. 否则沿**基地列向上**最多 6 行 —— 防守位要覆盖的就是基地正面的接近带，列不变
+   语义最强（35 关的答案都是 (12,22)，即环砖正上方一格）；
+3. 仍无解 → 基地周边 7×10 盒内按曼哈顿距离就近取可站格；
+4. 全都没有 → 原样返回（极端封闭地形，不比现状更差）。
+
+按 `tileMap.revision` + 请求格缓存（地形变化 / 伙伴偏移变化才重算），`reset()` 清空；
+纯地形函数，无 RNG、与玩家位置无关 ⇒ 决策确定性不受影响（冻结签名换钉是因为行为
+真的变了，不是因为随机性）。
+
+**为什么不用现成的 `baseGuardAnchorMode` 评分**：它是环砖外的「有射界」评分
+（ringCover/approachCover/laneCover），实测历史是 marginal≈0（§149），且它是旋钮
+（默认 0）；本轮要修的是「目标不可站」这个**机制**，用最小语义改动即可 —— 不动
+「站哪最有利」的评分，先把「站不上」修掉。
+
+### 三、三难度满格 A/B（35×60 串行、真实 stageIndex、CRN 配对）
+
+`defenseCellResolve: 1` vs `0`：
+
+| difficulty | win 0 | win 1 | Δ | t | suite | score |
+|---|---|---|---|---|---|---|
+| hard | 79.7% (1673) | 79.5% (1670) | −0.14pp | −0.20 | 0.6146 → 0.6119 | −0.0005 |
+| classic | 83.4% (1751) | **84.2% (1769)** | **+0.86pp** | 0.77 | 0.6591 → **0.6687** | +0.0062 |
+| chaos | 78.4% (1647) | 77.8% (1634) | −0.62pp | −0.88 | 0.5986 → 0.5943 | −0.0046 |
+
+**新基线（A8 发货后，35×60）**：hard 79.5% / suite 0.6119 · classic 84.2% / 0.6687 ·
+chaos 77.8% / 0.5943。
+
+### 四、胜率恢复研究（用户要求：修完再研究怎么把胜率提回来）
+
+三组实验，hard 35×20（n=700，SE≈1.5pp）：
+
+| 候选 | Δ | t | 判读 |
+|---|---|---|---|
+| `maxPlayerDistFromBase` 26 → **30**（回防更晚） | **+0.86pp** | 0.76 | 噪声内 |
+| `maxPlayerDistFromBase` 26 → **22**（回防更早） | +0.43pp | 0.28 | 噪声内 |
+| `defenseRowOffset` 1 → **3**（守位行深一格，落到 (12,21)） | **0.00pp** | 0.00 | 完全无差别 |
+
+**两个方向都「正」** ⇒ 这就是噪声，不是杠杆。守位行深 0.00pp 更直接：**站在环砖
+上一格还是两格，对胜率完全无所谓**。所以本轮没有「被修坏」的胜率可恢复 ——
+A8 的净值本来就是 0。
+
+**为什么净值是 0（与 A4/A7 同一条线）**：修复前「回防」指令是**惰性**的（目标到不了
+⇒ 玩家留在原地继续打），修复后玩家**真的会走回家**。也就是说这 0.14~0.86pp 的差异
+只是「原地打」和「回家守」两种策略的差价，而两种都≈79%。这与 700 局审计一致：
+**90% 的失败是丢基地，但丢基地的原因是远距离顺线点名（致命弹 down 40%/left 32%/
+right 28%），不是「玩家没站在 (12,22)」** —— 站到集合点也挡不住隔着半张图的炮弹。
+
+### 五、新纪元连带重标（A8 改变了整条决策轨迹）
+
+1. **评估链金标**（`tests/sim/metrics-v11-hotlane.test.ts`，本测口径 1500 tick）：
+   扫 stage0/1 × seed1-30 后**只有 stage0 seed3 变了**（near/lane 108/67 → **47/49**）；
+   seed4（62/74）与 s1 seed27（255/163）逐值不变。种子不换，只改数值。
+2. **三条历史机制测试腿固定回本纪元之前的口径**（`defenseCellResolve: 0`），否则它们
+   测的不再是各自那个机制：
+   - `tests/godai-return-hysteresis.test.ts`（A4 翻转计数 57→63 **反向**、S34 OFF 档
+     dwell 422→373）；
+   - `tests/godai-navstuck-zone.test.ts`（§168 OFF 复现腿，同一 pin 373）；
+   - `tests/godai-dm-fallback.test.ts`（A7 fallback 计数 543→149，相对下降被稀释）。
+3. `tests/base-defense-standable.test.ts` 改写成**退役守卫**：旧旋钮
+   `defensePosStandable` 已不再被读取（近基/远基都无效果），旧行为只能靠
+   `defenseCellResolve: 0` 复现。
+4. `tests/godai-hub-fields.test.ts` allowlist 补 4 条（`_defCellCol/Row/KeyCol/KeyRow`，
+   class C，守卫旗标 `_defCellValid` 已在 reset() 覆盖）。
+
+### 六、门禁
+
+- `bun run check` 全绿；新增 `tests/godai-defense-cell.test.ts`（5 例：默认 1、
+  35/35 原格是砖、35/35 解析后可站且四邻有路、35/35 破砖路由从 0 → >0、缓存与
+  reset 语义）。
+- `bun run freeze:check` **换钉** `c5abb064…` → **`7af64ddf…`**（新纪元三件套齐：
+  本条目 + 60-seed 基线 + golden），corpus 21 runs / 108513 行签名。
+- 一次性探针 `tmp/defpos-probe.ts` / `tmp/anchor-probe.ts` 用完即删。

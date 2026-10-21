@@ -1,4 +1,16 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# 采集：2026-10-21 @ A8 集合点可站化（DECISIONS §2026-10-21-godai-a8-defense-cell）。
+#       `defenseCellResolve=1`：默认集合点 (12,23) 在 **35/35 关都是环砖**，
+#       `findPath` corridor 与 breakBrick **两模式全返回空路径**（从出生点与中场
+#       都试过）⇒ 所有「回防」指令都把导航层指向一个永远到不了的目标。
+#       修复：可站且四邻不全封就保留；否则沿基地列向上找（最多 6 行），再在基地
+#       周边 7×10 盒内就近取；35 关全部落到 **(12,22)**，破砖路由 6–10 格。
+#       三难度 60-seed 串行配对（真实 stageIndex）：hard 79.7%→79.5%（t=−0.20）·
+#       classic 83.4%→**84.2%**（t=0.77）· chaos 78.4%→77.8%（t=−0.88）⇒ 净值噪声内。
+#       胜利后恢复研究（hard 35×20，均噪声级）：`maxPlayerDistFromBase` 26→30 +0.86pp、
+#       26→22 +0.43pp（两向都正 ⇒ 噪声）、`defenseRowOffset` 1→3 **0.00pp**（守位行深无关）。
+#       相对上一钉 c5abb064（A4 回防滞后）。
+# --- 历史（A4 纪元，同一文件保留说明）---
 # 采集：2026-10-21 @ A4 回防滞后（DECISIONS §2026-10-21-godai-a4-return-hysteresis）。
 #       `defenseReturnHysteresis=3`：hunt↔defend 的目标切换加 3 格滞后（进入即时、
 #       退出要降到阈值−3），消除 `playerDistToBase`（离散格）在阈值边界上每 11 拍
@@ -20,4 +32,4 @@
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
 # ⚠ 本纪元另需连带重标：metrics-v11 评估链金标（lane 落 0 / 过脆 ⇒ 换 seed）与
 #    §168 navstuck OFF 复现腿（A4 已消除该 pin ⇒ 复现腿须显式关 hysteresis）。
-c5abb064e7a9dc7d364dacef7ee18db50dbe4f6b4208e916bd4d9b732d536104
+7af64ddf1b800cbe0069a9f9d66b7b39a276fd2b951702a2b59d9321aabdd8ef

@@ -1358,6 +1358,34 @@ export interface GodAIParams {
   defenseReturnHysteresis: number
 
   /**
+   * A8 (2026-10-21): resolve the defense cell to a cell the tank can STAND on.
+   *
+   * `getDefaultDefensePosition()` returns `(BASE_POS.col, BASE_POS.row −
+   * defenseRowOffset)` = **(12, 23)**. Measured over all 35 stages: that cell
+   * is the base ring's top brick on **35/35**, and `findPath` returns an empty
+   * route in BOTH modes (corridor and dig-through-brick) from the spawn cell
+   * and from mid-map. So every "return to defend" order — `selectTarget`'s
+   * baseUnderThreat branch, the M13 field retreat, §113/§88 base returns —
+   * handed the navigator a target that can never be reached: `followPath`
+   * returns null, `directMove` blind-digs at the ring, and the player paces in
+   * front of a wall (§146B / §149 / A6 all saw the symptom; none removed the
+   * cause).
+   *
+   * 1 = resolve (SHIPPED): keep the cell if it is standable AND has at least
+   *     one standable 4-neighbour (a standable single-cell bubble inside the
+   *     ring is still unreachable); otherwise walk UP the base column (the
+   *     approach band the position is meant to cover) up to
+   *     `DEFENSE_SCAN_UP` rows, then widen to a 7×10 box and take the nearest
+   *     usable cell. On all 35 stages this lands on **(12,22)** — directly in
+   *     front of the base, standable, with a 6–10 cell dig route from spawn.
+   * 0 = legacy raw cell (A/B baseline only; byte-identical to pre-A8).
+   *
+   * Cached per `tileMap.revision` + requested cell (terrain changes only bump
+   * it), cleared in `reset()`. Pure terrain function — no RNG, no player state.
+   */
+  defenseCellResolve: number
+
+  /**
    * A5 (2026-10-20): probe `canMoveDir` / `canMoveOrBreak` along the movement
    * axis from the tank's REAL pixel coordinate instead of `snap()`-ing it to
    * the cell grid first.
@@ -2654,7 +2682,10 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   },
   { gate: 'defenseInterceptPredictCells', note: '方向 D 预测版 (§135, byte-identical)' },
   { gate: 'defenseInterceptDigBricks', note: '方向 D 破砖版 (§136, byte-identical)' },
-  { gate: 'defensePosStandable', note: '+ minDist 子参数 (§146B 收窄版外全关, §149 边际≈0)' },
+  {
+    gate: 'defensePosStandable',
+    note: 'A8 取代 —— 见 defenseCellResolve（§146B 收窄版外全关, §149 边际≈0）',
+  },
   { gate: 'iceGlideControl', note: '+ minSpeed 子参数 (§145, S24 难度地板关)' },
   { gate: 'defenseBreachBonus', note: 'D2 拆环威胁评分 (§141)' },
   { gate: 'baseLaneSentryInBandNav', note: '带内应急进 lane (§225A/§226 双否决)' },
