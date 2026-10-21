@@ -96,7 +96,7 @@ class TrainingExport:
         self._ts_code_sha256 = sha
         self._ts_code_zip_path = zp
 
-    def _volume_plan_block(self) -> dict | None:
+    def _volume_plan_block(self, it: int) -> dict | None:
         """计划要带上的**动态采集块**（`target_transitions > 0` 时；见 `biz/volume_waves`）。
 
         为什么必须进计划：全离线/半离线腿（kind=run）的逐轮语料由 `biz/plan.pairs_for` 重放
@@ -130,9 +130,9 @@ class TrainingExport:
         # est = **盘上历史派生量**（课程/CLI 的声明值已退场，2026-10-12）；0 = 无估计。
         est = int(trailing_samples_per_game(jsonl, window=5) or 0) if jsonl else 0
         # 分关 est（2026-10-07，plan/rollout-stage-balance §4.3）：与本地链
-        # `_volume_stage_ests_map` **同函数同窗口同聚合**（window=3、agg="latest"、fallback=全局 est），
+        # `_volume_stage_ests_map` **同函数同窗口同聚合**（window=3、同 `--est-agg`、fallback=全局 est），
         # 所以计划里的 `G_s` 就是导出那一刻本地循环会用的那套反解。
-        # `agg="latest"`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：只取最近一轮——
+        # `agg=latest`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）是缺省口径：
         # 两侧不保持一致时，云机补差批会比本地链更早低估产出（同一轮两份口径）。
         # `--stages` 用**共享解析器**再解一次（同一函数 ⇒ 同一结果；解析失败这里的
         # SystemExit 与 volume_block 内部同源）。
@@ -144,8 +144,19 @@ class TrainingExport:
             stages = parse_stages_arg(str(getattr(args, "stages", "") or ""))
         except ValueError as e:
             raise SystemExit(f"[run_rl] 动态采集无法写进离线计划（--stages {e}）") from e
+        # `agg` 与本地链同源（`--est-agg`，2026-10-21 评审 #8）：两侧不同值 = 同一轮两份反解。
+        agg = str(getattr(args, "est_agg", "latest") or "latest")
         per_stage = trailing_stage_samples_per_game(
-            self._traj_root, stages, window_iters=3, fallback=est, agg="latest"
+            self._traj_root,
+            stages,
+            window_iters=3,
+            fallback=est,
+            agg=agg,
+            # ★ `it` = 正在导出的这一轮：`step_prepare_iter` 已经 mkdir 了 `traj_root/it{it}`
+            #   （导出在本轮 rollout **之前**跑，`loop_export.py:229`）⇒ 不排除它，
+            #   `latest` 会读到一个空目录并整份回退 `fallback`（全关同值），
+            #   云机 `est_s_by_stage` 退化成「每关同一个 G」（评审 P0，2026-10-21）。
+            exclude_it=int(it),
         )
         try:
             return volume_block(
@@ -226,7 +237,7 @@ class TrainingExport:
             workers=workers,
             game_timeout_sec=game_timeout,
             budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
-            volume=self._volume_plan_block(),
+            volume=self._volume_plan_block(it),
             # 段长上界的再降档（`--run-max-iters`；0 = 硬上界）——与 `common/manifest.py`
             # 的注释、控制台的静态预判读的是同一件事（D1：两边不得漂）。
             max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),

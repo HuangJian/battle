@@ -505,6 +505,10 @@ class RolloutDispatcher:
             "dup_settle": 0,
             "fanout_settled": 0,
             "fanout_inflight": 0,
+            # 2026-10-21 评审 P1：节点按 busy 直接拒收的副本——**一局没跑**，不算重复执行。
+            # 与 `fanout_inflight`（副本在飞时主副本先返回，副本跑没跑完未知）分开记，
+            # 否则 `dup_rate` 的分子里混着一堆零成本拒收（现场 503 常见）⇒ 候选①被推成假大头。
+            "fanout_rejected": 0,
             "main_by_fanout": 0,
         }
         missing_keys: set[tuple[int, int]] = set()
@@ -519,7 +523,11 @@ class RolloutDispatcher:
         local_active = [0]
         # 有效并行度的分子：**节点服务时长**之和（`elapsedSec`，不含排队/取包）。
         # 用训练机侧 wall 会把网络等待算成「占着槽」，E 会虚高（plan/rollout-corpus-supply §3.4）。
+        # ★ 逐节点分桶（2026-10-21 评审 P1）：只报一个总和时，「远端只出 29% 的活」既可能是
+        #   「远端每任务慢」也可能是「队列先到先得、localhost 零延迟抢走队首」——两者的刀不同。
+        #   分桶后 `利用率 = sumGameSecByNode[n] / (concurrency[n] × 采集墙钟)` 可直接判。
         sum_game_sec = [0.0]
+        sum_game_sec_by_node: dict[str, float] = {}
         last_remote_ok = [time.time()]
         # 2026-09-09 诊断：local_slots 闸门实测失效（配置 1、实测并发≈8）时的一手证据。
         # 线程孵化数 = max(local_slots, cap_full) ⇒ 闸门若失效，并发就等于这里的
@@ -922,7 +930,11 @@ class RolloutDispatcher:
                         el = summary.get("elapsedSec")
                         if el is not None:
                             try:
-                                sum_game_sec[0] += float(el)
+                                _el = float(el)
+                                sum_game_sec[0] += _el
+                                sum_game_sec_by_node[nd_id] = (
+                                    sum_game_sec_by_node.get(nd_id, 0.0) + _el
+                                )
                             except (TypeError, ValueError):
                                 # 上游口径变了（非数字）⇒ 不给 E 添一个假零头；
                                 # 分子少算会让 E 偏低，读数是「下界」，不会误导成「很好」。
@@ -958,6 +970,15 @@ class RolloutDispatcher:
                             if race_drops["fanout_settled"] <= RACE_LOG_SAMPLE:
                                 log(
                                     f"[dist] fanout copy s{task[0]}/seed{task[1]} failed ({err}) — settled, dropped"
+                                )
+                        elif busy503:
+                            # 节点按 busy **直接拒收**：这一份副本一局都没跑、零槽秒。
+                            # 算进 `dup=` 会让「重复执行率」虚高（503 在竞速高峰是常态）⇒ 单列。
+                            race_drops["fanout_rejected"] += 1
+                            if race_drops["fanout_rejected"] <= RACE_LOG_SAMPLE:
+                                log(
+                                    f"[dist] fanout copy s{task[0]}/seed{task[1]} rejected (busy)"
+                                    " — never ran, not a dup"
                                 )
                         else:
                             race_drops["fanout_inflight"] += 1
@@ -1215,32 +1236,16 @@ class RolloutDispatcher:
             )
 
         missing = sorted(k for k in all_tasks if k not in seen)
-        by_node: dict[str, int] = {}
-        for s in results:
-            # nodeId = 下发时的配置 id；缺失时回退 agent 自报名（旧结果/本地直跑）。
-            nid = str(s.get("nodeId") or s.get("node") or "?")
-            by_node[nid] = by_node.get(nid, 0) + 1
+        by_node = common.distribution.by_node_of(results)
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
         )
-        race_total = sum(race_drops.values())
-        # 重复执行**率**（按局数）：这是「竞速副本吃掉了多少槽时」的唯一机读口径。
-        # 分子 = 重复执行次数（settled + inflight + main_by_fanout），分母 = 局数——
-        # 写成百分数才看得出「38% 的槽时白烧」，也才是 A2′ 的决策输入。
-        race_rate = common.distribution.dup_rate(race_total, len(results))
-        slots_online = sum(int(n.get("c") or 0) for n in nodes)
-        if race_total:
-            rate_txt = (
-                f"，dup={race_total}（{race_rate:.1%} of {len(results)} 局）"
-                if race_rate is not None
-                else f"，dup={race_total}"
-            )
-            log(
-                f"[dist] race drops (expected, sampled≤{RACE_LOG_SAMPLE}/kind): "
-                + " ".join(f"{k}={v}" for k, v in race_drops.items() if v)
-                + rate_txt
-            )
+        # 竞速账 + 重复执行率（口径见 `common.distribution.race_stats`；2026-10-21 收口）
+        if _race_line := common.distribution.race_log_line(
+            race_drops, len(results), sample=RACE_LOG_SAMPLE
+        ):
+            log(_race_line)
         if missing:
             log(f"[dist] missing pairs: {[list(k) for k in missing]}")
 
@@ -1259,23 +1264,18 @@ class RolloutDispatcher:
         )
         combined["missing"] = [list(k) for k in missing]
         combined["expectedGames"] = len(pairs)
-        combined["dist"] = {
-            "iterId": iter_id,
-            "nodes": by_node,
-            "retried": stats["retried"],
-            "resumed": len(done),
-            # P0-1 的机读读数（2026-10-21，plan/rollout-corpus-supply §3.4）：没有它们，
-            # 「E 为什么只有 11」只能靠人拼日志（v2 就是在这个缺口里读反了本地 lane）。
-            "raceDrops": {k: v for k, v in race_drops.items() if v},
-            "dupRate": race_rate,
-            "slotsOnline": slots_online,
-            # 3 位小数：stub/小窗用例的单局是 ms 级，1 位会把「累加真的发生了」抹成 0.0。
-            "sumGameSec": round(sum_game_sec[0], 3),
-            # `effSlots` 在采集墙钟算出来之后再落（见下方）：先占位会让「测不到」
-            # 与「测到 0」混成同一个值。
-            # 跨配置断点轮的目录残留量（不在本轮计划、已忽略）——一次性观测
-            "offPlanShards": max(0, len(done_all) - len(done)),
-        }
+        combined["dist"] = common.distribution.dist_block(
+            iter_id=iter_id,
+            by_node=by_node,
+            nodes=nodes,
+            retried=stats["retried"],
+            resumed=len(done),
+            off_plan=max(0, len(done_all) - len(done)),
+            race_drops=race_drops,
+            games=len(results),
+            sum_game_sec=sum_game_sec[0],
+            sum_game_sec_by_node=sum_game_sec_by_node,
+        )
         combined["dist_phase_sec"] = round(
             (t_dist_done_box[0] or time.time()) - t_queue_enter, 1
         )
@@ -1297,7 +1297,8 @@ class RolloutDispatcher:
         if eff_slots is not None:
             log(
                 f"[dist] round eff: E={eff_slots} 槽（Σ局时长 {sum_game_sec[0]:.1f}s / 采集 {collect_sec}s）"
-                f"，在线槽 {slots_online}，dup={race_total}"
+                f"，在线槽 {combined['dist']['slotsOnline']}，dup={combined['dist']['dupExecuted']}"
+                f"+{combined['dist']['dupRejected']}拒收"
             )
         # 数值锚点：多波 volume 由 combine_reports 做 it 级 min→max 聚合。
         if t_dist_start_box[0] is not None:

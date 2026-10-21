@@ -610,8 +610,8 @@ class _StubLoop:
     def _volume_journal_replay(self, it: int) -> Any:
         return TrainingLoop._volume_journal_replay(cast(Any, self), it)
 
-    def _volume_stage_ests_map(self) -> dict[int, int]:
-        return TrainingLoop._volume_stage_ests_map(cast(Any, self))
+    def _volume_stage_ests_map(self, it: int) -> dict[int, int]:
+        return TrainingLoop._volume_stage_ests_map(cast(Any, self), it)
 
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
@@ -843,6 +843,10 @@ def test_continuous_cold_start_spreads_by_width(tmp_path: Path, _patch_wver: Non
     assert [len(w) for w in stub.dispatched] == [4, 12], stub.dispatched
     assert stub._volume_waves == 2
     assert {s for s, _ in stub.dispatched[1]} == {0, 1, 2, 3}
+    # 首波不是「按估计铺的」⇒ 读数记 -1（0 在下游是「无估计」的值，会和「估出来是 0」混掉）
+    stage0 = stub._volume_stage_stats["stages"]["0"]
+    assert stage0["est_used"] == -1 and stage0["est_raw"] == -1, stage0
+    assert stage0["est_src"] == "cold-start"
 
 
 def test_continuous_cold_start_uses_local_slots_as_width(tmp_path: Path, _patch_wver: None) -> None:
@@ -879,11 +883,42 @@ def test_continuous_autocalibrates_and_pulls_est_low(tmp_path: Path, _patch_wver
     stub = _StubLoop(tmp_path, target=200, est=20, samples=10)
     stub._volume_collect_continuous(1, None)
     assert [len(w) for w in stub.dispatched] == [12, 12], stub.dispatched
-    # 首波读数已落事件：est_used 是**压过**的值，est_s 仍是盘上历史（可对账）。
+    # 首波读数已落事件：est_used 是**压过**的值，est_raw 是估计原值，est_s 仍是盘上历史（可对账）。
     stage0 = stub._volume_stage_stats["stages"]["0"]
-    assert stage0["est_used"] == 18 and stage0["est_s"] == 20
+    assert stage0["est_used"] == 18 and stage0["est_raw"] == 20 and stage0["est_s"] == 20
     assert stage0["est_src"] == "trailing"
     assert stub._volume_stage_stats["est_src"] == "trailing"
+
+
+def test_stage_est_ignores_the_empty_current_round(tmp_path: Path, _patch_wver: None) -> None:
+    """★ 2026-10-21 评审 P0：分关 est 读**上一轮**，不被本轮的空目录抹成单值。
+
+    生产形状：`step_prepare_iter` 在每轮开跑前就 `mkdir(traj_root/it{it})`
+    （`loop_iter_dir._prepare_iter_dir`）⇒ `agg="latest"` 若按「mtime 最新目录」取，
+    在**每轮首批**恒等于这个空目录 ⇒ 整份回退 `fallback`（全局 est）⇒
+    `rollout-stage-balance` 的四关分关反解被静默抹平。
+
+    本用例造出「it2 有分关 shard（530/423）、it3 已建且空」，断言 `it3` 的首批 est
+    仍是**分关**值，而不是 4 关同一个 fallback(20)。
+    """
+    stub = _StubLoop(tmp_path, target=200, est=20, samples=10, it=3)
+    stub._iteration_pairs(3)  # 生产里由 step_course_iter 调；这里只为把 _volume_est 就位
+    for it_no, table in ((1, {0: 900}), (2, {0: 530, 1: 423})):
+        prev = stub._traj_root / f"it{it_no}"
+        for stage, samples in table.items():
+            d = prev / f"rl_s{stage}_seed77"
+            d.mkdir(parents=True)
+            (d / "manifest.json").write_text(
+                json.dumps({"stage": stage, "nSamples": samples}), encoding="utf-8"
+            )
+
+    est = stub._volume_stage_ests_map(3)
+    assert est == {0: 530, 1: 423, 2: 20, 3: 20}, est
+    assert len({est[0], est[1]}) == 2, "四关不许被抹成一个 fallback 值"
+
+    # `--est-agg pooled`（评审 #8 的旋钮）：近 3 轮池化，**仍然排除本轮** ⇒ stage0=(900+530)/2=715
+    stub.args.est_agg = "pooled"
+    assert stub._volume_stage_ests_map(3)[0] == 715
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:

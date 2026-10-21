@@ -328,7 +328,8 @@ def test_infinite_course_exports_an_open_ended_segment(
     steps_x = _bare_steps()
     steps_x.args.iters = 0
     steps_x.args.out = "w.json"  # 起点权重（指纹函数已被替身，不真读盘）
-    steps_x._volume_plan_block = lambda: None
+    # `it` 是 2026-10-21 评审 P0 加的（分关 est 必须排除正在导出的那一轮，否则读到空目录）
+    steps_x._volume_plan_block = lambda _it: None
     steps_x._rotate_seed = 1
     # `_bare_steps()` 是**裸** `RoundSteps`（MRO 没拼）：`_export_offline_bundle` 住
     # `TrainingExport` ⇒ 按未绑定函数调（组合根才是生产形态）。

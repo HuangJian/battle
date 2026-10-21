@@ -60,15 +60,45 @@ def test_latest_takes_only_the_newest_round(tmp_path: Path) -> None:
     assert latest[0] == 500, "latest 必须只读最近一轮；池进来就是把变短的局判高"
 
 
-def test_latest_falls_back_when_newest_round_has_no_shards(tmp_path: Path) -> None:
-    """最近一轮还没落 shard（刚开轮）⇒ 回退 fallback，**不**回读更早的轮。
+def test_latest_skips_the_in_progress_round(tmp_path: Path) -> None:
+    """★ 2026-10-21 评审 P0：**正在跑的那一轮**不是历史，必须跳过。
 
-    回读更早的轮会把上一次的局长当成这一次的——正是本轮要消灭的高估源。
+    现场形状：`step_prepare_iter` 在每轮开跑前就 `mkdir(traj_root/it{N})`
+    （`trainer/loop_iter_dir._prepare_iter_dir`），所以「mtime 最新的目录」在**每轮首批**
+    恒等于这个空目录。旧实现 (`it_dirs[:1]`) 因此每次都读到 0 个 shard ⇒ 整份回退
+    `fallback`（全关同一个值）⇒ `rollout-stage-balance` 的分关估计被静默抹平。
+
+    两条口径各钉一次：
+      * **不传 `exclude_it`**（老调用方/无 `it` 的调用点）⇒ 跳过空目录、用上一轮的分关值，
+        **不是**回退 fallback；
+      * **传 `exclude_it`**（trainer / 导出侧知道 `it`）⇒ 同一结果，且窗口不被空目录占位。
     """
     root = tmp_path / "traj"
-    _round(root, 1, [900], mtime=1_700_000_001)
-    (root / "it2").mkdir()
+    _round(root, 1, [900, 300], mtime=1_700_000_001)  # 上一轮：两关不同局长
+    (root / "it2").mkdir()  # 本轮：已建、空
     os.utime(root / "it2", (1_700_000_002, 1_700_000_002))
+
+    # `_round` 只写 stage 0（两个 shard）；这里补一个 stage 1 的，才能验「分关」不被抹平
+    _shard(root / "it1", 1, 99, 120)
+    latest = trailing_stage_samples_per_game(
+        root, [0, 1], window_iters=3, fallback=42, agg="latest", exclude_it=2
+    )
+    assert latest == {0: 600, 1: 120}, latest  # (900+300)/2=600；不是 42
+    # 不传 exclude_it 也必须跳过空目录（否则老调用点又回到「全关一个值」）
+    assert trailing_stage_samples_per_game(
+        root, [0, 1], window_iters=3, fallback=42, agg="latest"
+    ) == {0: 600, 1: 120}
+
+
+def test_latest_falls_back_only_when_no_round_has_shards(tmp_path: Path) -> None:
+    """**没有任何一轮有 shard** 才回退 fallback（首轮冷启动）。
+
+    ⚠️ 旧用例钉的是「最新目录为空 ⇒ 回退 fallback」，那正是 P0 的成因：
+    空目录 = 正在跑的那一轮，不是「最近一轮」。
+    """
+    root = tmp_path / "traj"
+    (root / "it1").mkdir(parents=True)
+    os.utime(root / "it1", (1_700_000_001, 1_700_000_001))
 
     out = trailing_stage_samples_per_game(root, [0], window_iters=3, fallback=42, agg="latest")
     assert out[0] == 42

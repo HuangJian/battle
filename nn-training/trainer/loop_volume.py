@@ -235,8 +235,14 @@ class TrainingVolume:
         )
         return pairs
 
-    def _volume_stage_ests_map(self) -> dict[int, int]:
-        """分关 est_s：近轮盘上 shard 局均 nSamples，缺省回退全局 est。"""
+    def _volume_stage_ests_map(self, it: int) -> dict[int, int]:
+        """分关 est_s：近轮盘上 shard 局均 nSamples，缺省回退全局 est。
+
+        `it` = **正在跑的这一轮**：必须排除它。`step_prepare_iter` 在本轮开跑前就
+        `mkdir(traj_root/it{it})`（`loop_iter_dir._prepare_iter_dir`），所以「mtime 最新的
+        目录」在**每轮首批**恒等于这个空目录 ⇒ 不排除就会整份回退 `fallback`（全局单值），
+        把分关估计静默抹平（plan/rollout-corpus-supply 评审 P0，2026-10-21）。
+        """
         from worker.resume import trailing_stage_samples_per_game
         from worker.volume_waves import parse_stages_arg
 
@@ -247,12 +253,17 @@ class TrainingVolume:
             stages = parse_stages_arg(raw) if raw else stages
         except ValueError:
             pass
-        # `agg="latest"`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：只取最近一轮。
-        # 3 轮 pooled 均值在「局长变短」时结构性偏高（现场 652 vs 实际 530，+23% ⇒ 少派局
-        # ⇒ 多补一批）；而路线（it62→it63 `{476,523,693,657}`→`{652,674,664,548}`）显示主成分是
-        # **逐轮跳变**，取 min 会把跳变放大到最保守一侧 ⇒ 跟趋势就得取最近一轮。
+        # `agg` 可选（`--est-agg`，2026-10-21 评审 #8）：latest = 最近一个真有 shard 的轮（缺省）；
+        # pooled = 近 3 轮池化（旧口径）。两侧（本链 / `loop_export`）必须同值——不一致
+        # 就是「同一轮两份反解」（云机拿到的 G_s 与本地派局不同源）。
+        agg = str(getattr(self.args, "est_agg", "latest") or "latest")
         return trailing_stage_samples_per_game(
-            self._traj_root, stages, window_iters=3, fallback=fallback, agg="latest"
+            self._traj_root,
+            stages,
+            window_iters=3,
+            fallback=fallback,
+            agg=agg,
+            exclude_it=int(it),
         )
 
     def _dispatch_volume_wave(
@@ -496,7 +507,7 @@ class TrainingVolume:
         target = int(args.target_transitions)
         quota = target_per_stage(target, len(stages))
         est_global = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
-        est_s = self._volume_stage_ests_map()
+        est_s = self._volume_stage_ests_map(it)
         self._volume_stage_ests = est_s
         # 硬顶**分关**（2026-10-07，plan/rollout-stage-balance §4.2）：课程显式
         # `--max-games-per-stage` 优先；否则 `4 × ceil(quota/est_s)`。用全局 est 算 cap
@@ -520,7 +531,13 @@ class TrainingVolume:
         self._volume_waves = 0
         # 首波的 est 读数（进 iteration 事件）：批数由**首波**决定，所以要记首波用了什么，
         # 而不是末波（末波总是「剩余缺口 / 新 est」，它好了不代表首波没浪费一批）。
+        # 三个数必须一起记（2026-10-21 评审 P1）：
+        #   est_raw  = 首波选中的估计**原值**（learned / trailing，未乘安全系数）
+        #   est_used = 实际喂给 `plan_continuous_batch` 的值（= pull_est_low(est_raw)）
+        #   est_s    = 盘上 trailing（最近一轮），与旧行同名字段同源
+        # 只有 est_used 时，「高估是估计器的错还是 0.92 的错」分不开（P0-2 的偏差表算不出来）。
         first_est_used: dict[int, int] = {}
+        first_est_raw: dict[int, int] = {}
         first_est_src: dict[int, str] = {}
 
         while self._volume_waves < max_batches:
@@ -598,7 +615,12 @@ class TrainingVolume:
             # 首波读数：进 iteration 事件（`est_used` / `est_src`）—— 批数由首波决定，
             # 记末波的 est 等于「事后诸葛亮」，会读不出「首波高估了多少」。
             if not first_est_used:
-                first_est_used = dict(est_dispatch)
+                # 冷启动档（无 learned、无 trailing）根本不是「用了某个估计」：那批是
+                # `spread_games_by_stage(width)` 按机器宽度铺的。记 `-1` 而不是 `0`
+                # （0 在下游是「无估计」的值，会和「估出来是 0」混成一件事）。
+                cold = all(v == "cold-start" for v in est_src_now.values())
+                first_est_used = {s: (-1 if cold else int(est_dispatch.get(s, 0))) for s in stages}
+                first_est_raw = {s: (-1 if cold else int(est_s_now.get(s, 0))) for s in stages}
                 first_est_src = dict(est_src_now)
             pairs = continuous_pairs(self._rotate_seed, it, plan_g, start_idx)
             for s, n in plan_g.items():
@@ -647,10 +669,13 @@ class TrainingVolume:
                 "collected": int(totals.get(s, (0, 0))[1]),
                 "games": int(totals.get(s, (0, 0))[0]),
                 # `est_s` = 盘上历史（最近一轮），与旧行的同名字段同源，保持不变；
-                # `est_used` = **首波实际派局用的值**（已乘安全系数）——两者放在一起才读得出
-                # 「首波高估了多少」（P0-2 的口径）；只剩 est_s 时，改了口径也看不出来。
+                # `est_used` = **首波实际派局用的值**（已乘安全系数），`est_raw` = 乘系数**之前**
+                # 的估计原值（learned / trailing），两者放在一起才读得出「首波高估了多少」，
+                # 也才分得清「估计器错」与「0.92 系数错」（P0-2 的口径；2026-10-21 评审 P1）。
+                # `-1` = 冷启动（那批不是按估计铺的，是按机器宽度满铺）。
                 "est_s": int(est_s.get(s, est_global)),
                 "est_used": int(first_est_used.get(s, 0)),
+                "est_raw": int(first_est_raw.get(s, 0)),
                 "est_src": first_est_src.get(s, "none"),
                 "cap_games": int(stage_caps.get(s, 0)),
             }
@@ -666,6 +691,9 @@ class TrainingVolume:
         self._volume_stage_stats = {
             "rule": VOLUME_ALLOC_RULE,
             "est_src": next(iter(_srcs)) if len(_srcs) == 1 else "mixed",
+            # 聚合口径也进事件：`--est-agg` 的 A/B（latest vs pooled）会产出**同一形状**的读数，
+            # 不写这一格就分不清「哪一轮用的是哪个口径」（P0-2 的偏差表要按它分组）。
+            "est_agg": str(getattr(self.args, "est_agg", "latest") or "latest"),
             "quota": int(quota),
             "stages": {str(s): stage_stats[s] for s in stages},
             "shortfall": {str(s): int(v) for s, v in unmet.items()},
