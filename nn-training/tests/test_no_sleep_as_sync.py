@@ -400,3 +400,203 @@ def test_the_guard_recognizes_calls_and_subscripts(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert _timing_problems(good) == [], _timing_problems(good)
+
+
+# ──────────── 第三条规则：断言里比较两个**事件时间戳**（2026-10-21）────────────
+
+#: 标注关键字 + 理由族（闭集，同前两条的设计：自由文本会让「等对方先跑」蒙混过关）。
+_ORDER_MARK = re.compile(r"order-ok:\s*(?P<why>[^\r\n]*)")
+#: 允许的理由族：
+#:   * `粗序事实` —— 只信**先后**、不信毫秒差（跨进程/跨时钟的粗序；判据不该带毫秒补偿）；
+#:   * `契约即时间` —— 契约本身就是时间上的先后/间隔，这条断言**就是**契约。
+ORDER_FAMILIES = ("粗序事实", "契约即时间")
+
+
+def _is_clock_call(node: ast.AST) -> bool:
+    """这次调用是不是一次**时钟读数**（`time.time()` / `monotonic()` / `perf_counter()` 形）。"""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _TIME_FUNCS
+    )
+
+
+def _timestamp_names(tree: ast.Module) -> set[str]:
+    """文件里**收集过时钟读数**的名字。
+
+    三种收法：`x.append(time.time())`（事件时间戳列表）· `x = [time.time()]` ·
+    `x = time.time()`（单个读数）。命中这些名字的**下标**（`x[0]`）也算一次时间戳读数。
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and node.args
+            and _is_clock_call(node.args[0])
+            and isinstance(node.func.value, ast.Name)
+        ):
+            names.add(node.func.value.id)
+        if isinstance(node, ast.Assign):
+            hit = (
+                isinstance(node.value, ast.List) and any(_is_clock_call(e) for e in node.value.elts)
+            ) or _is_clock_call(node.value)
+            if hit:
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        names.add(t.id)
+    return names
+
+
+def _is_ts_read(node: ast.AST, names: set[str]) -> bool:
+    """这个表达式是一次**时间戳读数**吗？
+
+    四种形态：直接时钟调用 · 时间戳名字 · 时间戳列表的下标 · **带偏移的读数**
+    （`ready[0] - 0.1` / `max(ready[0], ready[1])` —— 那条缝常被写成「减个补偿再比」，
+    形状上仍是时间戳）。偏移只认**常量**那一侧：两个时间戳相减是**时长**（归第二条规则管）。
+    """
+    if _is_clock_call(node):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in names
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        return node.value.id in names
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+        for side, other in ((node.left, node.right), (node.right, node.left)):
+            if (
+                isinstance(other, ast.Constant)
+                and isinstance(other.value, (int, float))
+                and _is_ts_read(side, names)
+            ):
+                return True
+        return False
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("max", "min")
+        and bool(node.args)
+        and all(_is_ts_read(a, names) for a in node.args)
+    )
+
+
+def _ts_pair_asserts(src: str) -> list[tuple[int, str]]:
+    """断言里**比较两个时间戳读数**的位置 → (行号, 该行源码)。"""
+    if "assert" not in src or not _TIME_CALL_RE.search(src):
+        return []
+    tree = ast.parse(src)
+    names = _timestamp_names(tree)
+    if not names:
+        return []
+    lines = src.splitlines()
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assert):
+            continue
+        for cmp in (c for c in ast.walk(node.test) if isinstance(c, ast.Compare)):
+            lefts = [cmp.left, *cmp.comparators[:-1]]
+            for op, left, right in zip(cmp.ops, lefts, cmp.comparators, strict=True):
+                if not isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+                    continue
+                if _is_ts_read(left, names) and _is_ts_read(right, names):
+                    out.append(
+                        (
+                            node.lineno,
+                            lines[node.lineno - 1].strip() if node.lineno <= len(lines) else "",
+                        )
+                    )
+                    break
+            else:
+                continue
+            break
+    return out
+
+
+def _order_reason(lines: list[str], lineno: int) -> str | None:
+    """这一处比较的 `# order-ok:` 理由（同行尾注优先，其次上一行）；没标注 → None。"""
+    for idx in (lineno - 1, lineno - 2):
+        if idx < 0:
+            continue
+        m = _ORDER_MARK.search(lines[idx])
+        if m is not None:
+            return m.group("why").strip()
+    return None
+
+
+def _order_problems(py: Path) -> list[str]:
+    """该文件里每一处不合格「比较两个时间戳」的 `路径:行: 源码 → 问题`。"""
+    src = source_scan.read_text(str(py))
+    lines = src.splitlines()
+    rel = _rel(py)
+    out: list[str] = []
+    for lineno, text in _ts_pair_asserts(src):
+        why = _order_reason(lines, lineno)
+        if why is None:
+            out.append(f"{rel}:{lineno}: {text.strip()} → 未标注（缺 `# order-ok: …`）")
+        elif not why.startswith(ORDER_FAMILIES):
+            out.append(
+                f"{rel}:{lineno}: {text.strip()} → 理由 {why!r} 不在两族内"
+                f"（须以 {' / '.join(ORDER_FAMILIES)} 开头）"
+            )
+    return out
+
+
+def test_every_two_timestamp_comparison_declares_a_reason() -> None:
+    """`tests/` + `e2e/` 里每一处「比较两个事件时间戳」都要有落进两族的 `# order-ok: <理由>`。
+
+    为什么单独立一条（前两条都抓不到它）：**跨进程比两个时间戳**的缝只有几毫秒，而 Windows
+    的 `time.time()` 量化到 **15.6ms** ⇒ 量出来的差值能落到**负数** ⇒ 断言假红
+    （2026-10-21 实测：`test_start_batches_spawns` 每三次全量门禁红一次；单跑绿 ⇒ 看着像回归）。
+    前两条只管「睡固定时长」与「拿绝对数字当上界」，这条管「拿两个时间戳比大小」——
+    同一个反模式（`docs/nn/engineering.md` §21 ③）的第三个面。
+    """
+    problems: list[str] = []
+    for root in SCAN_ROOTS:
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts:
+                continue
+            problems += _order_problems(py)
+    assert not problems, (
+        "比较两个事件时间戳（`assert spawns[2] >= ready[0]`）必须标注理由，且理由落进"
+        "「粗序事实」/「契约即时间」两族（它是不是只信先后、还是契约本身就是时间）——"
+        "跨进程的时间戳缝只有几毫秒，比大小就是拿机器速度当契约：\n  "
+        + "\n  ".join(problems)
+        + "\n规则与背景：docs/nn/engineering.md §21"
+    )
+
+
+def test_the_guard_actually_catches_two_timestamp_comparisons(tmp_path: Path) -> None:
+    """自证：第三条守卫不恒真 —— 未标注 / 理由不在两族都抓得到；与常量比、与非时间戳比放行。"""
+    bad = tmp_path / "bad_order.py"
+    bad.write_text(
+        "import time\n"
+        "\n"
+        "def f():\n"
+        "    spawns = []\n"
+        "    ready = []\n"
+        "    spawns.append(time.time())\n"
+        "    ready.append(time.time())\n"
+        "    assert spawns[0] <= ready[0]\n"  # 未标注
+        "    assert spawns[0] >= ready[0] - 0.1  # order-ok: 等对方先跑\n",  # 理由不在两族
+        encoding="utf-8",
+    )
+    got = _order_problems(bad)
+    # 两处都抓到：第一处「未标注」，第二处「理由不在两族内」
+    assert len(got) == 2 and got[0].endswith("未标注（缺 `# order-ok: …`）"), got
+    assert got[1].endswith("不在两族内（须以 粗序事实 / 契约即时间 开头）"), got
+
+    good = tmp_path / "good_order.py"
+    good.write_text(
+        "import time\n"
+        "\n"
+        "def f():\n"
+        "    spawns = []\n"
+        "    ready = []\n"
+        "    spawns.append(time.time())\n"
+        "    ready.append(time.time())\n"
+        "    assert spawns[0] > 0\n"  # 与常量比：不是两个时间戳
+        "    assert spawns[0] <= ready[0]  # order-ok: 粗序事实（只信先后，不信毫秒差）\n"
+        "    assert status < 400\n",  # 非时间戳，不管
+        encoding="utf-8",
+    )
+    assert _order_problems(good) == [], _order_problems(good)

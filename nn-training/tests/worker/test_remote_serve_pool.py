@@ -795,37 +795,48 @@ def test_start_counts_only_real_ready(tmp_path: Path) -> None:
 
 
 def test_start_batches_spawns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ 分批：批内并发、批间串行（评审 P1-5 的观测点：spawn 时间戳 + 就绪时刻落盘）。
+    """★ 分批：批内并发、批间串行（评审 P1-5 的观测点：**每个 spawn 时刻已就绪的 worker 数**）。
 
     为什么要钉它：94 个 bun 一次性并发 `Popen` 全砸在同一块盘上，是 2026-10-07 现场冷启动
     风暴的直接成因；分批是杀它的那一条。断言不能看 `spawned`（计数没有时间线）。
+
+    ★ 判据从「墙钟时间戳」改成「**spawn 时刻已就绪的 worker 数**」（2026-10-21，flake 修）：
+    原来拿父进程的 `time.time()` 与子进程的 `time.time()` 互相比（② 还带一个 `- 0.1s` 补偿），
+    那是**用绝对数字当同步手段**（`docs/nn/engineering.md` §21 的头号反模式）。实测那条缝只有
+    **+2~+19ms**（子进程写就绪文件 → 父进程读到 `__SERVE_READY__` → 起下一批），而 Windows 的
+    `time.time()` 量化到 **15.6ms** ⇒ 量出来的差值能落到**负数**；①（`spawns[2] <= ready[0]`）
+    没有补偿 ⇒ 机器一忙（每三次全量门禁红一次，`test_start_batches_spawns`）就假红。
+
+    现在只数**顺序事实**：每个 spawn 落地时桩写的就绪文件有几个（文件写在 `__SERVE_READY__`
+    **之前** ⇒ 「文件数」= 已就绪 worker 数的**下界**）。批次纪律（下一批只在前一批全就绪后
+    才起）⇒ 计数序列必是 `[0, 0, 2, 2, 4, 4]` 的形状，与负载、与时钟跳变都无关。
     """
     monkeypatch.setattr(serve_pool, "SPAWN_BATCH_SIZE", 2)
     ready_dir = tmp_path / "ready"
     script = _write_stub(
         tmp_path, _STUB_SERVE_DELAY, name="stub_delay.py", ready=str(ready_dir), delay="0.25"
     )
-    spawns: list[float] = []
+    batch_ready: list[int] = []
     real_spawn = serve_pool.ServePool._spawn
 
     def timed(self: serve_pool.ServePool) -> serve_pool._Worker | None:
-        t = time.time()
-        w = real_spawn(self)
-        spawns.append(t)
-        return w
+        batch_ready.append(len(list(ready_dir.iterdir())) if ready_dir.is_dir() else 0)
+        return real_spawn(self)
 
     monkeypatch.setattr(serve_pool.ServePool, "_spawn", timed)
     pool = ServePool(
         sys.executable, tmp_path, 6, entry=script.name, ready_timeout_sec=30.0
     )
-    assert pool.start() == 6 and pool.unready == 0
+    assert pool.start() == 6 and pool.unready == 0, (pool.unready, pool.killed)
     pool.close()
-    ready = sorted(float(p.name.rsplit("_", 1)[1]) for p in ready_dir.iterdir())
-    assert len(spawns) == 6 and len(ready) == 6, (spawns, ready)
-    # ① 第一个就绪事件之前的 spawn 数 ≤ 批大小（= 没有把 6 个一次性全砸出去）
-    assert sum(1 for t in spawns if t <= ready[0]) <= 2, (spawns, ready)
-    # ② 第 3 个 spawn 必须等前两个就绪（批间串行；批内那两个已经在上面钉住了）
-    assert spawns[2] >= max(ready[0], ready[1]) - 0.1, (spawns, ready)
+    ready = sorted(p.name for p in ready_dir.iterdir())
+    assert len(batch_ready) == 6 and len(ready) == 6, (batch_ready, ready)
+    # ① 批内并发：任何 worker 就绪之前最多只砸一批（= 批大小）个 —— 没有把 6 个一次性全砸出去
+    assert sum(1 for c in batch_ready if c == 0) <= 2, batch_ready
+    # ② 批间串行：第 3 个 spawn 落地时，第 1 批的两个 worker 都已就绪（就绪文件已落盘）
+    assert batch_ready[2] >= 2, batch_ready
+    # ③ 同理：第 5 个 spawn 落地时，前两批共 4 个都已就绪
+    assert batch_ready[4] >= 4, batch_ready
 
 
 def test_pool_start_fails_fast_when_script_has_no_serve(tmp_path: Path) -> None:

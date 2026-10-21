@@ -551,6 +551,7 @@ def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch
     # 事件驱动（2026-09-24）：判据是**次序**（慢节点那局的回包在收工之后才到 ⇒ 收工没等它；
     # 通常收工时它还在飞，列表直接为空），不是「墙钟 < 2.0s」——那个数只反映机器快慢，
     # 反映不了「等没等」。
+    # order-ok: 粗序事实（同进程 monotonic，只信先后，不信毫秒差）
     assert not slow_done or min(slow_done) > returned_at, (
         "收工等了慢节点：它的局在 play 返回前就结束了（旧实现 join(window + taskTimeoutSec)）"
     )

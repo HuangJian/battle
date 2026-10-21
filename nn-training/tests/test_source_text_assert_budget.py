@@ -203,6 +203,17 @@ FORM 未动）：新用例 `tests/common/test_tmp_clean_needs_mirror.py` 按**�
 stdout 行集合 —— 不是源码文本；同一批里能改成行为判据的已改（转存失败只看「目标是否还在」、
 命令形状用 argv 切片相等）。**不**靠再抬一格来掩盖措辞判据：新文件里没有 `assert "…" in <文本>` 形态。
 
+**2026-10-21 抬 SOURCE 一格的账**（`docs/nn/engineering.md` §21「同族第二例」：跨进程比两个
+事件时间戳的 flake；SOURCE 1096 → **1100** = +4，FORM 未动）：新增**第三条静态守卫**
+（`tests/test_no_sleep_as_sync.py` 的「比较两个事件时间戳」）—— 它的 4 条断言**按设计**要读
+`.py` 源码：静态守卫的被测对象**就是源码本身**，没有行为替身（这与该文件既有的两条规则
+——`.sleep` 与上界墙钟断言——同族同理由：它们本来就在这条基线上）。
+触发它的假红：`tests/worker/test_remote_serve_pool.py::test_start_batches_spawns` 拿**父进程**
+的 `time.time()` 与**子进程**的 `time.time()` 互比，而那条缝实测只有 +2~+19ms（Windows 的
+`time.time()` 量化到 15.6ms ⇒ 量出来的差值能落到负数）⇒ 每三次全量门禁假红一次；**该用例本身
+的修法是预算中性的**（口径 A/B 各 +0：判据从墙钟比较换成「spawn 时刻已就绪的 worker 数」，
+且新变量名避开本文件里已被判成派生名的 `seen`）。
+
 """
 
 from __future__ import annotations
@@ -228,8 +239,9 @@ ROOT = Path(__file__).resolve().parents[1]
 BASELINE_FORM = 1483
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
-#: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）。）
-BASELINE_SRC = 1096
+#: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
+#: 2026-10-21 第三条静态守卫（比较两个事件时间戳）抬到 **1100**（+4；理由见模块头末段）。）
+BASELINE_SRC = 1100
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 
