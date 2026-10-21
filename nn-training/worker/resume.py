@@ -295,15 +295,27 @@ def trailing_stage_samples_per_game(
     *,
     window_iters: int = 3,
     fallback: int = 1,
+    agg: str = "pooled",
 ) -> dict[int, int]:
     """近几轮盘上 shard 的 **分关** 局均 nSamples（连续配额 est_s）。
 
     扫 `traj_root/it*` 下最近 `window_iters` 个仍有 manifest 的轮目录，
     对每个 stage 聚合 `ΣnSamples/Σgames`；无数据的关回退 `fallback`（通常=全局 est）。
+
+    `agg`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：
+      * `"pooled"`（缺省，旧口径）= 窗口内**池化**求和（`Σsamples/Σgames`）——
+        局长在变短时**结构性偏高**（窗口里混着更早的长局）；
+      * `"latest"` = **只取最近一轮**（按 mtime）。路线（it62→it63）显示 est 的主成分是
+        **逐轮跳变**（±40%）而不是单调高估，所以「取 min」会把跳变放大到最保守一侧，
+        而「取最近一轮」跟得上趋势。最近一轮还没落 shard ⇒ 回退 `fallback`，**不**回读
+        更早的轮（回读 = 把上一次的局长当成这一次的）。
+
     `fallback ≤ 0` 合法（= **无估计**）：该关返回 `0`，调用方按「不猜」档处理
     （plan/rollout-estfree-worksteal §4.1）——**不许**在这里把它抬成 1（那会反解出巨大批）。
     量纲与 `settled_stage_totals` 同：只认 nSamples/totalSamples，不读 ticks。
     """
+    if agg not in ("pooled", "latest"):
+        raise ValueError(f"agg 只接受 'pooled' / 'latest'，得到 {agg!r}")
     from collections import defaultdict
 
     stage_set = {int(s) for s in stages}
@@ -319,6 +331,9 @@ def trailing_stage_samples_per_game(
     it_dirs = [p for _mt, p in sorted(it_cands, key=lambda t: t[0], reverse=True)][
         : max(1, int(window_iters))
     ]
+    if agg == "latest":
+        # 只读最近一轮：窗口的意义是「跨轮平滑」，而这里的趋势是**走得比平滑快**。
+        it_dirs = it_dirs[:1]
     games: dict[int, int] = defaultdict(int)
     samples: dict[int, int] = defaultdict(int)
     for it_dir in it_dirs:
