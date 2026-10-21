@@ -29,6 +29,7 @@ from worker.volume_alloc import (
     pool_games_by_stage,
     pull_est_low,
     quota_met,
+    widen_by_width,
 )
 
 
@@ -197,3 +198,20 @@ def test_quota_met_is_per_stage() -> None:
     """逐关判据：全局达标不算——短局关不能靠长局关顶。"""
     assert quota_met(stages=[0, 1], collected={0: 50, 1: 50}, target_transitions=100)
     assert not quota_met(stages=[0, 1], collected={0: 90, 1: 10}, target_transitions=100)
+
+
+def test_widen_by_width_refills_to_the_machine_width() -> None:
+    """★ 2026-10-22 用户口径「有几个 worker 铺多少局」：把逐关局数重铺到 ≥ 本机宽度。
+
+    自主机自己 rollout ⇒ 宽度 = `cpu_worker_slots()`（不 ping、不看 hub 的 plan 声明）。
+    plan 里那份是**打包时**的缺口形状，本机核数比它多就加宽；派发侧逐关满额即停，
+    多加的候选不会白跑。
+    """
+    per = {0: 6, 1: 6, 2: 6, 3: 6}  # 打包时 24 局
+    assert widen_by_width(per, 32) == {0: 8, 1: 8, 2: 8, 3: 8}  # 24 → 32（轮转补 8）
+    assert widen_by_width(per, 24) == per, "已经够宽 ⇒ 原样返回（不折腾）"
+    assert widen_by_width(per, 8) == per, "比它窄 ⇒ 也不动（宽度只做下界）"
+    assert widen_by_width(per, 0) == per, "宽度未知（0）⇒ 原样"
+    assert widen_by_width({}, 32) == {}
+    # 不均匀的也按序轮转补，不重新分配已有份额（5+2=7 → 10：补 3 ⇒ stage0 得 2、stage1 得 1）
+    assert widen_by_width({0: 5, 1: 2}, 10) == {0: 7, 1: 3}

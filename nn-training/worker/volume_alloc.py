@@ -373,6 +373,30 @@ def quota_met(
     )
 
 
+def widen_by_width(games_by_stage: Mapping[int, int], width: int) -> dict[int, int]:
+    """把逐关局数**重铺到至少 `width` 个候选**（用户口径 2026-10-22：有几个 worker 铺多少局）。
+
+    与 `pool_games_by_stage(width=…)` 的分工：那个在**派发前**算（知道 collected/quota/est），
+    这个在**已经有了一份逐关局数**（plan 里的 `games_per_stage_by_stage`）之后把它加宽——
+    只需要一个数：本机 worker 数（`cpu_worker_slots()`，自主机问自己，不 ping 任何人）。
+
+    规则：总数已 ≥ `width` ⇒ 原样返回（不折腾）；不足 ⇒ 按 stage 给定序**轮转**补足
+    （确定性，与 `spread_games_by_stage` 同形状）。多加的候选不会白跑——派发侧逐关满额即停，
+    池里剩下的从不运行。
+    """
+    out = {int(s): max(0, int(v)) for s, v in games_by_stage.items()}
+    want = int(width)
+    if want <= 0 or not out:
+        return out
+    total = sum(out.values())
+    if total >= want:
+        return out
+    stages = sorted(out)
+    for i in range(want - total):
+        out[stages[i % len(stages)]] += 1
+    return out
+
+
 def shortfall_by_stage(
     *, stages: Sequence[int], collected: Mapping[int, int], target_transitions: int
 ) -> dict[int, int]:
