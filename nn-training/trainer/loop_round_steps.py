@@ -547,6 +547,12 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         self._consec_fail += 1
         kind = "SystemExit" if isinstance(e, SystemExit) else type(e).__name__
         self._ledger_apply(log_iter_error(self._jsonl_path, it, f"{kind}: {e}"))
+        # ★ 2026-10-21（plan/export-bundle-stall §2.3）：确定性失败（基准缺失/链超/成环/预算）
+        #   重试 5 次的结果逐字相同——直接退出，别把 5×30s（现场是几分钟级读盘）再烧一遍。
+        #   判据是异常上的 `retryable=False`，不是中文文案（文案是第二事实源）。
+        if getattr(e, "retryable", True) is False:
+            log(f"[run_rl] it{it} FAILED ({kind}: {e}); 确定性失败——不重试，直接退出")
+            raise e
         log(
             f"[run_rl] it{it} FAILED ({kind}: {e}); "
             f"consecutive={self._consec_fail}/5 — retry same iteration"

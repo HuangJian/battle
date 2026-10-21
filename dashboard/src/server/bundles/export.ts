@@ -18,6 +18,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  writeFileSync,
 } from 'fs'
 import path from 'path'
 import { REPO_ROOT, tmpCourseDir } from '../../core/paths'
@@ -27,8 +28,10 @@ import {
   bundleMetaSuffix,
   taskBundleStatusFileName,
   taskBundleStatusMagic,
+  taskBundleStatusProto,
 } from './marks'
-import { pidAlive, sleep } from '../../core/net'
+import { killPidTree, pidAlive, pidCommandLine, sleep } from '../../core/net'
+import { warn as logWarn } from '../../core/log'
 import { courseLogDir } from '../../stack/specs'
 import { busy, release } from '../actions/result'
 import { tailLines } from '../actions/labels'
@@ -37,9 +40,22 @@ import { spawnRunPython } from '../run-python'
 /** 一次导出的段长：`-1` = 到课程末尾（见文件头注释）。 */
 export const exportRunIters = -1
 
-/** 导出进行中的互斥键。**释放靠进程退出**（不是请求返回）：导出要跑几分钟，
- *  在请求里 add/delete 等于没有锁——第二次点会起第二个 run_rl 去抢同一门课的锁。 */
-export const TASK_BUNDLE_BUSY_KEY = 'bundle:export'
+/** 一次导出的**硬上界**（毫秒）。正常 10s~2min；30 分钟对齐云机等包的窗口
+ *  （`offline_boot.obtain_pack`，见 `invalidateTaskBundle` 的注释）。
+ *
+ *  为什么不是 5 分钟：导出合法地会跑很久（打包 4.4MB + 重代码快照）；`busySince` 那套
+ *  单动作 TTL 不适用于导出。30 分钟是**看门狗**，不是常规期望。 */
+export const EXPORT_TIMEOUT_MS = 30 * 60 * 1000
+/** 看门狗轮询间隔（毫秒）。 */
+export const EXPORT_POLL_MS = 2000
+
+/** 导出的互斥键：**按课程分键**（2026-10-21，plan/export-bundle-stall §3.1(1)）。
+ *
+ *  全局单键会把「A 课在导」变成「B 课也导不了」——两门课的包落在不同目录，产物零共享。
+ *  同课互斥仍在（包互相覆盖 `tmp.replace`，见 `bundle.py:212/218`）。 */
+export function taskBundleBusyKey(course: string): string {
+  return `bundle:export:${course}`
+}
 
 export function taskBundleFileName(course: string): string {
   return `task-${course}.zip`
@@ -81,10 +97,22 @@ export function taskBundleStatusPath(course: string): string {
   return path.join(path.dirname(taskBundlePath(course)), taskBundleStatusFileName)
 }
 
-/** 状态文件的形状（python 写全量，控制台只读这几项）。 */
+/** 状态文件的形状（python 写全量，控制台只读这几项）。
+ *
+ *  四态（2026-10-21，plan/export-bundle-stall §3.3）：`ok` / 失败 / `running` / 不可知
+ *  （`stale` 早于包作废、`expired` 超时或 pid 不在）。「不可知/进行中」永远不许渲染成成功。
+ */
 export interface TaskBundleStatus {
-  /** `true` = 这次导出真的产出了包；`false` = 失败（`reason` 就是原因）。 */
+  /** `true` = 这次导出真的产出了包，且状态没有过期。 */
   ok: boolean
+  /** 导出进程仍在跑（启动时写 `running:true`；过期或 pid 不在 ⇒ false）。 */
+  running: boolean
+  /** 状态早于本课任务包作废/新包生成 ⇒ 不可知（不是成功）。 */
+  stale: boolean
+  /** `running` 但超过 30 分钟或 pid 已不在 ⇒ 不可知（不是成功）。 */
+  expired: boolean
+  /** `running` 时的已跑秒数（其余为 0）。 */
+  elapsedSec: number
   exitCode: number
   /** **第一手**的原因（写它的人就是那个进程）。控制台的 `tailFailureReason` 只当没有状态文件时的兜底。 */
   reason: string
@@ -95,9 +123,59 @@ export interface TaskBundleStatus {
   pid: number
 }
 
+/** 状态 `at` 是秒级浮点；包证据是 ms。比较时留 1 秒容差（文件名戳截到秒）。 */
+const STATUS_TIME_SLACK_MS = 1000
+
+/** 从 stale 文件名里解析**作废时刻**（`toISOString` 的 UTC、秒级）。 */
+function stalePackStampMs(stamp: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})$/.exec(stamp)
+  if (!m) return 0
+  return Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6]),
+  )
+}
+
+/** 本课「包证据」的最新时刻（ms）：线上包 mtime 与 stale 文件名戳取最大。
+ *
+ *  ⚠ 不能用 `statSync(stale).mtimeMs`：`renameSync` 保留原 mtime，那是包**生成**时间，
+ *  不是作废时间。文件名戳才是作废时刻（UTC；按本地时间解析会在 UTC+8 差 8 小时）。
+ */
+export function latestPackEvidenceMs(course: string): number {
+  let ms = 0
+  try {
+    ms = statSync(taskBundlePath(course)).mtimeMs
+  } catch {
+    /* 没有线上包 */
+  }
+  try {
+    const pre = `${taskBundleFileName(course)}.stale-`
+    for (const name of readdirSync(stalePackDir(course))) {
+      if (!name.startsWith(pre)) continue
+      const stamp = stalePackStampMs(name.slice(pre.length))
+      if (stamp > ms) ms = stamp
+    }
+  } catch {
+    /* 没有 stale-packs */
+  }
+  return ms
+}
+
+/** 这份 `ok:true` 是否描述**作废之前**的那次导出（是 ⇒ 降级成不可知）。 */
+function statusIsStale(course: string, at: number): boolean {
+  if (at <= 0) return false
+  const floor = latestPackEvidenceMs(course)
+  return floor > 0 && at * 1000 + STATUS_TIME_SLACK_MS < floor
+}
+
 /** 读导出状态（没有 / 坏 JSON / 魔数不符 ⇒ `null`，**永不抛**）。
  *
  *  `null` = **不可知**（还没跑完 / 被 kill / 旧版本），不是成功——调用方必须把这两件事分开说。
+ *  `running` / `stale` / `expired` 都在这里收口，面板与 hub 走同一个读面。
  */
 export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
   let raw: string
@@ -111,29 +189,93 @@ export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
     if (!parsed || typeof parsed !== 'object') return null
     const j = parsed as Record<string, unknown>
     if (j.magic !== taskBundleStatusMagic) return null
+    const at = Number(j.at ?? 0) || 0
+    const pid = Number(j.pid ?? 0) || 0
+    const rawRunning = j.running === true
+    const rawOk = j.ok === true
+    const stale = !rawRunning && statusIsStale(course, at)
+    // 「进行中」的到期判据必须**读得到**（不能只活在 watchExportExit 里：控制台重启即消失）。
+    const expired =
+      rawRunning &&
+      (at <= 0 ||
+        Date.now() / 1000 - at > EXPORT_TIMEOUT_MS / 1000 ||
+        pid <= 0 ||
+        !pidAlive(pid) ||
+        stale)
     return {
-      ok: j.ok === true,
+      ok: rawOk && !stale && !expired,
+      // `running` = **文件说进行中**（第一手），`expired` = 「但这份进行中已不可信」
+      // （超时 / pid 不在）。两者分开：看门狗收尾要分辨「进程还在跑」与「运行态已过期」，
+      // 渲染侧永远先看 `expired`（见 `exportStatusLine` / BundleRowActions 的顺序）。
+      running: rawRunning,
+      stale,
+      expired,
+      elapsedSec: rawRunning && at > 0 ? Math.max(0, Math.floor(Date.now() / 1000 - at)) : 0,
       exitCode: Number(j.exit_code ?? 0) || 0,
       reason: String(j.reason ?? '').slice(0, 600),
-      at: Number(j.at ?? 0) || 0,
+      at,
       iters: Number(j.iters ?? 0) || 0,
       runIters: Number(j.run_iters ?? 0) || 0,
-      pid: Number(j.pid ?? 0) || 0,
+      pid,
     }
   } catch {
     return null
   }
 }
 
+/** 控制台侧写一份终态（超时/被 kill/接管）。原子写；永不抛。 */
+export interface TaskBundleStatusWrite {
+  ok: boolean
+  running: boolean
+  reason: string
+  pid?: number
+  at?: number
+  iters?: number
+  runIters?: number
+}
+
+export function writeTaskBundleStatus(course: string, s: TaskBundleStatusWrite): void {
+  const body = {
+    magic: taskBundleStatusMagic,
+    proto: taskBundleStatusProto,
+    ok: s.ok,
+    running: s.running,
+    exit_code: s.ok ? 0 : 1,
+    reason: s.reason.slice(0, 600),
+    course,
+    iters: s.iters ?? 0,
+    run_iters: s.runIters ?? 0,
+    pid: s.pid ?? 0,
+    pack: taskBundlePath(course),
+    at: s.at ?? Date.now() / 1000,
+  }
+  try {
+    const side = taskBundleStatusPath(course)
+    mkdirSync(path.dirname(side), { recursive: true })
+    // 与 python 的 `.tmp` 分开：控制台只在进程已死/已杀之后写，仍避免两个写者交错同一个临时文件。
+    const tmp = `${side}.console.tmp`
+    writeFileSync(tmp, JSON.stringify(body, null, 1), 'utf-8')
+    renameSync(tmp, side)
+  } catch {
+    /* 旁挂件不配把主腿拖红 */
+  }
+}
+
 /** 一行**可读**的导出状态（面板与 hub 共用同一句口径）。
  *
- *  三态必须分开说：`null` = **不可知**（不是成功）。这是「失败要响亮」那条口径的落点
- *  ——旧读面在失败时每一方都在演「成功」（面板说「产物将落在 …」、hub 说「已触发」）。
+ *  顺序是承重的：stale/expired（不可知）→ running（进行中）→ ok → 失败。
+ *  前三态永远不许说「成功」——这是「失败要响亮」那条口径的落点。
  */
 export function exportStatusLine(course: string): string {
   const status = readTaskBundleStatus(course)
   if (!status) return '导出状态：尚无记录（还没跑完 / 被 kill / 旧版本）——不可知，不等于成功'
   const when = status.at > 0 ? new Date(status.at * 1000).toLocaleString() : '时间未知'
+  if (status.stale) return '导出状态不可知（状态早于任务包作废）——不等于成功'
+  if (status.expired) return '导出状态不可知（上一次导出超时，或进程已不在）——不等于成功'
+  if (status.running) {
+    const mins = Math.max(1, Math.round(status.elapsedSec / 60))
+    return `正在导出（PID ${status.pid}，已跑 ${mins} 分钟）`
+  }
   return status.ok
     ? `上次导出成功（exit ${status.exitCode}，课程 iters=${status.iters}，${when}）`
     : `上次导出失败：${status.reason || `exit ${status.exitCode}`}（${when}）`
@@ -533,19 +675,73 @@ export interface ExportLaunchResult {
   archived?: string
 }
 
+/** 本课导出是否该被拒（**锁判据**：进程内 busy + 持久状态；不做业务校验）。 */
+export function exportBusyReason(course: string): string | null {
+  if (busy.has(taskBundleBusyKey(course)))
+    return '上一次任务包导出还没跑完（产物 zip 会在过程中重写）——稍等或看日志'
+  const st = readTaskBundleStatus(course)
+  if (st?.running && !st.expired) {
+    const mins = Math.max(1, Math.round(st.elapsedSec / 60))
+    return `同课导出还在跑（PID ${st.pid}，已跑 ${mins} 分钟）——等它结束/超时，或先看日志`
+  }
+  return null
+}
+
+/** 导出的命令行身份（kill 前的安全联锁：PID 会被复用，盲杀可能杀掉无关进程）。 */
+export function exportPidMatches(pid: number, course: string): boolean {
+  const cmd = pidCommandLine(pid)
+  if (!cmd) return false
+  return (
+    cmd.includes('run_rl.py') &&
+    cmd.includes('--export-bundle') &&
+    cmd.includes(taskBundleFileName(course))
+  )
+}
+
+/** 看门狗日志：控制台日志 + 导出日志各一行（**不许静默解锁**）。 */
+function exportLog(course: string, line: string): void {
+  logWarn(`[export] ${course}: ${line}`)
+  try {
+    appendFileSync(taskBundleLogPath(course), `\n[watchdog] ${line}\n`, 'utf-8')
+  } catch {
+    /* 日志写不进去不影响收尾 */
+  }
+}
+
+export interface ExportWatchOptions {
+  /** 测试注入（生产 = `EXPORT_TIMEOUT_MS`）。 */
+  timeoutMs?: number
+  /** 测试注入（生产 = `EXPORT_POLL_MS`）。 */
+  pollMs?: number
+  /** 测试注入（生产 = `exportPidMatches`）。 */
+  matchesPid?: (pid: number, course: string) => boolean
+  /** 本次导出的起点（ms）：判断「这个包是不是本次产出的」。 */
+  startedAtMs?: number
+}
+
 /** 起一次导出（detach；日志 `logs/<课程>/export-bundle.log`）。**不注册组件**——
  *  它是一次性动作，进组件账本会被监督器当成「该重启的组件」。
  *
- *  互斥（`TASK_BUNDLE_BUSY_KEY`）在**子进程退出**时释放：轮询 `pidAlive`（不是 `busySince`
- *  那套 TTL——导出合法地会跑过 5 分钟，TTL 清扫会在中途解锁）。 */
+ *  互斥 = 进程内 `busy`（按课分键）+ **持久状态**（跨控制台重启）。释放由
+ *  `watchExportExit` 轮询 pid / 30 分钟上界完成；**不**用 `busySince` 那套 5 分钟 TTL。 */
 export function launchTaskBundleExport(course: string): ExportLaunchResult {
-  if (busy.has(TASK_BUNDLE_BUSY_KEY))
-    return {
-      ok: false,
-      message: '上一次任务包导出还没跑完（产物 zip 会在过程中重写）——稍等或看日志',
-    }
-  const blocked = exportGuard(course)
+  const blocked = exportBusyReason(course)
   if (blocked) return { ok: false, message: blocked }
+  const guard = exportGuard(course)
+  if (guard) return { ok: false, message: guard }
+  // 上一次遗留的 running/stale（控制台重启过 / 外部 kill）：先落一条终态再接管，
+  // 否则新导出的启动状态会被旧 running 挡住（launch 时 exportBusyReason 已判过期）。
+  const prior = readTaskBundleStatus(course)
+  if (prior?.expired || prior?.stale) {
+    writeTaskBundleStatus(course, {
+      ok: false,
+      running: false,
+      reason: prior.expired
+        ? `上一次导出超时/进程已不在（PID ${prior.pid}），本次接管`
+        : '上一次导出状态早于任务包作废，本次接管',
+      pid: prior.pid,
+    })
+  }
   // ★ 2026-09-22：导出 = **重新打一份带当前代码的包** ⇒ 先把旧包作废（掉进 stale-packs）。
   //   放在 exportGuard **之后**：没起点权重这类拒启不该先把旧包挪走（那会平白让
   //   云机取不到包，而导出的前提本来就没满足）。
@@ -553,8 +749,8 @@ export function launchTaskBundleExport(course: string): ExportLaunchResult {
   const argv = taskBundleArgs(course)
   try {
     const r = spawnRunPython(argv[0], argv.slice(1), taskBundleLogPath(course))
-    busy.add(TASK_BUNDLE_BUSY_KEY)
-    void watchExportExit(r.pid, course)
+    busy.add(taskBundleBusyKey(course))
+    void watchExportExit(r.pid, course, { startedAtMs: Date.now() })
     return {
       ok: true,
       message:
@@ -581,13 +777,68 @@ export function launchTaskBundleExport(course: string): ExportLaunchResult {
   }
 }
 
-/** 等导出进程退出就解锁（每 2s 看一眼 pid；控制台进程自己重启则键随进程消失）。
+/** 等导出进程退出就解锁（每 2s 看一眼 pid；30 分钟硬上界）。
+ *
+ *  为什么必须有上界：v1 的上界是 `8*60*30` 次 × 2s = **8 小时**，且 release 不杀进程——
+ *  一个卡住的导出会烧盘到天荒地老，8h 后还会与第二个导出并发写同一个 `.tmp`。
+ *
+ *  为什么 kill 前验身份：PID 会被复用；盲杀可能杀掉无关进程（共享 trainer）。
+ *  验不了就不杀（只 release + 日志）。杀用 `killPidTree`（Windows `taskkill /T /F`）。
  *
  *  退出后还有一道兜底：**没产出新包就把旧包恢复**（见 restorePackIfMissing）——作废 + 导出失败
  *  不能变成「这门课没有包」，那是把人锁在云机上干等。 */
-async function watchExportExit(pid: number, course: string): Promise<void> {
-  for (let i = 0; i < 8 * 60 * 30 && pidAlive(pid); i++) await sleep(2000)
-  release(TASK_BUNDLE_BUSY_KEY)
+export async function watchExportExit(
+  pid: number,
+  course: string,
+  opts: ExportWatchOptions = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? EXPORT_TIMEOUT_MS
+  const pollMs = opts.pollMs ?? EXPORT_POLL_MS
+  const matches = opts.matchesPid ?? exportPidMatches
+  const startedAt = opts.startedAtMs ?? Date.now()
+  while (pidAlive(pid) && Date.now() - startedAt < timeoutMs) await sleep(pollMs)
+
+  const timedOut = pidAlive(pid)
+  const mins = Math.max(1, Math.round(timeoutMs / 60000))
+  let killed = false
+  if (timedOut) {
+    if (matches(pid, course)) {
+      killed = await killPidTree(pid)
+      exportLog(
+        course,
+        killed
+          ? `导出超时（>${mins} 分钟），已终止 PID ${pid}`
+          : `导出超时（>${mins} 分钟），未能终止 PID ${pid}`,
+      )
+    } else {
+      exportLog(course, `导出超时（>${mins} 分钟），PID ${pid} 身份无法确认（命令行不匹配）——未杀`)
+    }
+  }
+
+  const packMs = (() => {
+    try {
+      return statSync(taskBundlePath(course)).mtimeMs
+    } catch {
+      return 0
+    }
+  })()
+  const produced = packMs > 0 && packMs >= startedAt
+  const st = readTaskBundleStatus(course)
+  if (produced) {
+    // 包已经产出（原子 replace）⇒ 看门狗即使终止了进程，也不能把成功改写成失败。
+    if (st?.running) writeTaskBundleStatus(course, { ok: true, running: false, reason: '', pid })
+  } else if (st?.running || timedOut) {
+    writeTaskBundleStatus(course, {
+      ok: false,
+      running: false,
+      reason: timedOut
+        ? `导出超时（>${mins} 分钟）${killed ? '，已终止' : '，未终止'} PID ${pid}`
+        : `导出进程已退出但没有落状态（PID ${pid}；被 kill / 崩溃？）`,
+      pid,
+    })
+  }
+
+  release(taskBundleBusyKey(course))
   restorePackIfMissing(course)
 }
 

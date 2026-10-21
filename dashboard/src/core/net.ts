@@ -79,6 +79,38 @@ export function pidAlive(pid: number | undefined | null): boolean {
   }
 }
 
+/** 读一个 pid 的命令行（**kill 前的身份联锁**：PID 会被复用）。
+ *
+ *  POSIX：`ps -o command= -p`；Windows：`pwsh` + `Get-CimInstance Win32_Process`（仓库只允许
+ *  `pwsh`，见 AGENTS §17.7）。读不到 / 命令不可用 ⇒ 空串（调用方按「身份不明」处理，**不杀**）。
+ */
+export function pidCommandLine(pid: number): string {
+  if (!pid) return ''
+  try {
+    if (process.platform === 'win32') {
+      const r = Bun.spawnSync(
+        [
+          'pwsh',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        ],
+        { stdout: 'pipe', stderr: 'ignore', windowsHide: true },
+      )
+      return r.stdout.toString('utf8').trim()
+    }
+    const r = Bun.spawnSync(['ps', '-o', 'command=', '-p', String(pid)], {
+      stdout: 'pipe',
+      stderr: 'ignore',
+      windowsHide: true,
+    })
+    return r.stdout.toString('utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
 /** 轮询等待条件成立（探测即输出源），超时前最后再测一次。 */
 export async function waitUntil(
   check: () => Promise<boolean>,

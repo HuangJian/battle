@@ -8498,3 +8498,30 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `tests/trainer/test_rollout_dispatch_resilience.py`（接线断言）。
 - **门禁**：上述用例 + `tests/worker/test_rollout_volume.py` + nn python gate 全绿。
 - **全文** → `plan/rollout-corpus-supply.plan.md` §1.1 / §3.4 / §13.2。
+
+## §2026-10-21-export-bundle-stall — 导出腿：基准搜索要有**总**预算，锁要按课分且有**持久**上界
+
+- **触发**（用户 2026-10-21「处理评审发现的问题」）：2026-10-21 现场三课导出全被挡；一个 detached 导出
+  进程以 343 MB/s 累计读到 8.5 TB 且永不退出，全局单键 `bundle:export` 把别的课一并焊死。
+- **根因**（两条独立缺陷）：① `_standard_bytes` 递归落地候选时，`_MAX_CHAIN`/`_MAX_CANDIDATES` 是
+  **每次调用各一份**，232 个互为候选的 delta 展开成阶乘；② 导出互斥是全局单键 + 只认进程退出（8 小时上界
+  且 release 不杀进程）；③ 附带：状态文件只有 `at`、没有新鲜度/到期判据 ⇒ 11:41 的 `ok:true` 一直演成功。
+- **决定**：① 一次顶层解析共享 `_SearchContext`（同一路径只读一次 / 失败按路径负缓存 / 成功按内容 sha
+  正缓存 / 唯一读字节 2 GiB 与唯一候选 20000 双预算），撞顶抛 `SearchBudgetExceeded` 且**父层不得吞**；
+  ② 失败族带 `retryable=False`，`round_failure` 据此不重试（判据是属性，不是中文文案）；
+  ③ 互斥键按课（`bundle:export:<课>`），`busy` 与持久 `running` **同源**成 `exportBusyReason`；
+  ④ 30 分钟硬上界 + 超时 `killPidTree`（先验命令行身份，验不了不杀）+ 终态 + release + 恢复旧包；
+  ⑤ 状态四态：python 启动写 `running:true`，控制台读面派生 `stale`（作废锚 = stale 文件名 UTC 戳与线上包
+  mtime 取大，**不是** rename 保留的 mtime）与 `expired`（超时 / pid 不在），hub 一律映射 `unknown`。
+- **被否决**：①「调小 `_MAX_CHAIN`/`_MAX_CANDIDATES`」（掩盖乘积，不是修）；② v1 的「只加成功 memo」
+  （本次基准缺失 ⇒ 零命中）；③ 给导出套 `busySince` 的 5 分钟 TTL（合法导出会跑更久）；
+  ④ 把 `running` 在读面直接降成 `false`（看门狗分不清「还在跑」与「运行态已到期」，会把已产出的包误写成
+  失败）；⑤ 超时只 release 不 kill（僵尸继续烧盘）；⑥ 盲杀 PID（复用会杀无关进程）；
+  ⑦ hub 把 `running` 当 `ok:false`（导出还在跑就停试 900s）。
+- **身份**：不动 `--export-bundle` 的锁与账本语义，不动 delta 包格式与「本机不猜基准」纪律 ⇒ 不是新实验。
+- **落地**：`remote/weights_standard.py` · `trainer/loop_round_steps.py` · `remote/bundle.py` · `hub/task_pack.py` ·
+  `server/bundles/{export,marks}.ts` · `core/net.ts` · `server/actions/auto-offline-handoff.ts` · `server/api/route.ts` ·
+  `server/server.ts` · `web/app/lib/api-client.ts` · `web/app/panels/BundleRowActions.tsx`。
+- **门禁**：`nn-training` 侧 97 用例（weights_standard / loop_round / export_status / auto_handoff）+ dashboard
+  89 用例（task-bundle / auto-offline-handoff）+ 两个 typecheck + 三份 web bundle 全绿。
+- **全文** → `plan/export-bundle-stall.plan.md`（评审 `plan/export-bundle-stall.review-bf.md`）。

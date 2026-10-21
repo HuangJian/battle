@@ -606,9 +606,19 @@ async function main(): Promise<void> {
             mtimeMs: info.mtimeMs,
             log: path.relative(REPO_ROOT, info.log).replace(/\\/g, '/'),
             // ★ 2026-10-15（J3）：把上次导出的**成败**一起递出去（同一条 5s 轮询，不另起通道）。
-            //   三态必须分开：`status === null` = 不可知（还没跑完 / 被 kill），**不是**成功。
+            //   四态必须分开：`status === null` = 不可知（还没跑完 / 被 kill），**不是**成功；
+            //   `running/stale/expired` 由 `readTaskBundleStatus` 统一收口（同一读面）。
             statusLine: exportStatusLine(course),
-            status: st && { ok: st.ok, reason: st.reason, at: st.at },
+            status: st && {
+              ok: st.ok,
+              running: st.running,
+              stale: st.stale,
+              expired: st.expired,
+              reason: st.reason,
+              at: st.at,
+              pid: st.pid,
+              elapsedSec: st.elapsedSec,
+            },
           })
         }
         // 任务包下载（`content-disposition: task-<课程>.zip`）

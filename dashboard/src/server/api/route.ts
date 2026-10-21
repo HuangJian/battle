@@ -545,7 +545,8 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         // 任务包导出（`task-<课程>.zip`）：把整段剩余交给云机。真正的导出在 python 一侧
         // （run_rl --export-bundle）；这里只起进程 + 把产出文件信息回给面板。
         if (!ctx.course) return errResp('缺少 course', 400)
-        // 互斥在 launchTaskBundleExport 里，靠**子进程退出**释放（导出是长任务）。
+        // 互斥在 launchTaskBundleExport 里，靠**子进程退出**释放（导出是长任务）；
+        // 30 分钟硬上界由 watchExportExit 兜底（超时 kill + 终态，见 plan/export-bundle-stall §3.1）。
         const r = launchTaskBundleExport(ctx.course)
         if (!r.ok) return errResp(r.message, 409)
         return okResp({
@@ -584,11 +585,16 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
                 ? null
                 : {
                     ok: status.ok,
+                    running: status.running,
+                    stale: status.stale,
+                    expired: status.expired,
+                    elapsedSec: status.elapsedSec,
                     exitCode: status.exitCode,
                     reason: status.reason,
                     at: status.at,
                     iters: status.iters,
                     runIters: status.runIters,
+                    pid: status.pid,
                   },
           }),
           { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } },

@@ -50,22 +50,28 @@ import {
   type DeliverZipRunner,
 } from '../src/server/bundles'
 import {
+  exportBusyReason,
   exportGuardReason,
+  exportStatusLine,
   RUN_MAX_ITERS_HARD_CAP,
   invalidateTaskBundle,
   latestStalePack,
   launchTaskBundleExport,
+  readTaskBundleStatus,
   restorePackIfMissing,
   restoreTaskBundle,
   stalePackDir,
-  TASK_BUNDLE_BUSY_KEY,
   taskBundleArgs,
+  taskBundleBusyKey,
   taskBundleFileName,
   taskBundleInfo,
   taskBundleLogPath,
   taskBundlePath,
+  watchExportExit,
+  writeTaskBundleStatus,
 } from '../src/server/bundles/export'
 import { busy, release } from '../src/server/actions/result'
+import { killPid, pidAlive } from '../src/core/net'
 
 const COURSE = 'x1-rebirth-a2'
 
@@ -229,8 +235,8 @@ describe('任务包导出', () => {
     // 第二次点击会起第二个 run_rl 去抢同一门课的锁——锁是 python 侧的，控制台只
     // 会看到「启动成功」而日志里多一段锁冲突。键的释放路径是轮询 pid，见
     // `watchExportExit`；这里只需要它**在键存在时拒启**，且理由先于业务校验。
-    const key = 'bundle:export'
-    expect(TASK_BUNDLE_BUSY_KEY).toBe(key)
+    const key = taskBundleBusyKey(COURSE)
+    expect(key).toBe(`bundle:export:${COURSE}`)
     busy.add(key)
     try {
       const r = launchTaskBundleExport(COURSE)
@@ -238,6 +244,184 @@ describe('任务包导出', () => {
       expect(r.message).toContain('还没跑完')
     } finally {
       release(key)
+    }
+  })
+
+  it('两门课各一把锁：A 在导不阻断 B', () => {
+    const key = taskBundleBusyKey('__export-course-a__')
+    busy.add(key)
+    try {
+      expect(exportBusyReason('__export-course-a__')).toContain('还没跑完')
+      expect(exportBusyReason('__export-course-b__')).toBeNull()
+    } finally {
+      release(key)
+    }
+  })
+
+  it('同课 running 状态（活 pid）挡住第二次；死 pid 放行', () => {
+    const course = '__running-export-course__'
+    try {
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: process.pid,
+      })
+      expect(exportBusyReason(course)).toContain('还在跑')
+      expect(exportStatusLine(course)).toContain('正在导出')
+
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: 999_999_999,
+      })
+      expect(exportBusyReason(course)).toBeNull()
+      expect(readTaskBundleStatus(course)?.expired).toBe(true)
+      expect(exportStatusLine(course)).toContain('不可知')
+      expect(exportStatusLine(course)).not.toContain('上次导出成功')
+    } finally {
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('状态早于包作废（stale 文件名戳按 UTC）⇒ 不可知，不说成功', () => {
+    const course = '__stale-status-course__'
+    const live = taskBundlePath(course)
+    try {
+      mkdirSync(path.dirname(live), { recursive: true })
+      const stale = path.join(
+        stalePackDir(course),
+        `${taskBundleFileName(course)}.stale-2026-10-21T05-53-22`,
+      )
+      mkdirSync(path.dirname(stale), { recursive: true })
+      writeFileSync(stale, 'OLD-CODE', 'utf-8')
+      // 11:41:32 (+08) = 03:41:32Z；早于 13:53 (+08) = 05:53:22Z 的作废时刻。
+      writeTaskBundleStatus(course, {
+        ok: true,
+        running: false,
+        reason: '',
+        at: Date.UTC(2026, 9, 21, 3, 41, 32) / 1000,
+      })
+      expect(readTaskBundleStatus(course)?.stale).toBe(true)
+      expect(exportStatusLine(course)).toContain('不可知')
+      expect(exportStatusLine(course)).not.toContain('上次导出成功')
+    } finally {
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('超时 ⇒ 杀进程 + release + 恢复旧包（三个副作用都要发生）', async () => {
+    const course = '__timeout-export-course__'
+    const live = taskBundlePath(course)
+    const key = taskBundleBusyKey(course)
+    const child = Bun.spawn([process.execPath, '-e', 'setTimeout(() => {}, 60000)'])
+    const pid = child.pid
+    try {
+      mkdirSync(path.dirname(live), { recursive: true })
+      writeFileSync(live, 'OLD-CODE', 'utf-8')
+      expect(invalidateTaskBundle(course).invalidated).toBe(true)
+      busy.add(key)
+      await watchExportExit(pid, course, {
+        timeoutMs: 50,
+        pollMs: 5,
+        matchesPid: () => true,
+        startedAtMs: Date.now(),
+      })
+      expect(pidAlive(pid)).toBe(false) // 杀进程
+      expect(busy.has(key)).toBe(false) // release
+      expect(existsSync(live)).toBe(true) // 恢复旧包
+      expect(readFileSync(live, 'utf-8')).toBe('OLD-CODE')
+      const st = readTaskBundleStatus(course)
+      expect(st?.running).toBe(false)
+      expect(st?.reason).toContain('超时')
+    } finally {
+      if (pidAlive(pid)) await killPid(pid)
+      release(key)
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('包已产出（看门狗后到）⇒ 不把成功改写成失败', async () => {
+    const course = '__produced-export-course__'
+    const live = taskBundlePath(course)
+    const key = taskBundleBusyKey(course)
+    try {
+      mkdirSync(path.dirname(live), { recursive: true })
+      writeFileSync(live, 'NEW-CODE', 'utf-8') // 本次产出的包（mtime = 现在）
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: 999_999_999, // 进程已退出（死 pid）：循环立即结束，走「产出后收尾」
+      })
+      busy.add(key)
+      await watchExportExit(999_999_999, course, {
+        timeoutMs: 50,
+        pollMs: 5,
+        startedAtMs: Date.now() - 60_000,
+      })
+      const st = readTaskBundleStatus(course)
+      expect(st?.ok).toBe(true)
+      expect(st?.running).toBe(false)
+      expect(st?.reason).toBe('')
+      expect(readFileSync(live, 'utf-8')).toBe('NEW-CODE')
+      expect(busy.has(key)).toBe(false)
+    } finally {
+      release(key)
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('进程退出但没落状态、也没产出包 ⇒ 写失败终态（不留 running 幻觉）', async () => {
+    const course = '__crashed-export-course__'
+    const key = taskBundleBusyKey(course)
+    try {
+      mkdirSync(tmpCourseDir(course), { recursive: true })
+      writeTaskBundleStatus(course, {
+        ok: false,
+        running: true,
+        reason: '导出进行中',
+        pid: 999_999_999,
+      })
+      busy.add(key)
+      await watchExportExit(999_999_999, course, {
+        timeoutMs: 50,
+        pollMs: 5,
+        startedAtMs: Date.now() - 60_000,
+      })
+      const st = readTaskBundleStatus(course)
+      expect(st?.running).toBe(false)
+      expect(st?.ok).toBe(false)
+      expect(st?.expired).toBe(false)
+      expect(st?.reason).toContain('没有落状态')
+      expect(exportStatusLine(course)).toContain('上次导出失败')
+    } finally {
+      release(key)
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
+    }
+  })
+
+  it('超时但 pid 身份不匹配 ⇒ 不杀，只 release', async () => {
+    const course = '__unverified-export-course__'
+    const key = taskBundleBusyKey(course)
+    const child = Bun.spawn([process.execPath, '-e', 'setTimeout(() => {}, 60000)'])
+    const pid = child.pid
+    try {
+      busy.add(key)
+      await watchExportExit(pid, course, {
+        timeoutMs: 30,
+        pollMs: 5,
+        matchesPid: () => false,
+        startedAtMs: Date.now(),
+      })
+      expect(pidAlive(pid)).toBe(true) // 没杀
+      expect(busy.has(key)).toBe(false) // 但锁要放
+      expect(readTaskBundleStatus(course)?.reason).toContain('超时')
+    } finally {
+      if (pidAlive(pid)) await killPid(pid)
+      release(key)
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 })

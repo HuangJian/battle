@@ -23,8 +23,8 @@
 
 import { courseEnabled } from '../../stack/courses'
 import {
-  TASK_BUNDLE_BUSY_KEY,
   backfillHubRun,
+  exportBusyReason,
   exportGuard,
   launchTaskBundleExport,
   newestCodeMtimeMs,
@@ -34,13 +34,14 @@ import {
   weightsMtimeMs,
   type TaskBundleInfo,
 } from '../bundles'
-import { busy, type ActionResult } from './result'
+import { type ActionResult } from './result'
 
 /** 自动导出的**输入事实**（全部由调用方查好：纯函数不碰 IO，规则表见下）。 */
 export interface AutoBundleFacts {
   /** `BCITY_NO_AUTO_TASK_BUNDLE` 已设（测试逃生阀：用例不该起真导出子进程）。 */
   valve: boolean
-  /** 导出互斥键忙（导出是分钟级长任务，`launchTaskBundleExport` 也会自己拒第二次）。 */
+  /** 本课导出忙（进程内互斥键 **或** 持久 `running` 状态都算；判据 = `exportBusyReason`）。
+   *  导出是分钟级长任务，`launchTaskBundleExport` 也会自己拒第二次。 */
   busy: boolean
   /** `exportGuard` 的拒启原因（`null` = 可以导）。 */
   guardReason: string | null
@@ -155,11 +156,18 @@ export function autoBundleDecision(f: AutoBundleFacts): AutoBundleResult {
   }
 }
 
-/** 规则表的**输入事实**（唯一一处读盘；两个调用方共用 ⇒ 判据不会各读一份而漂开）。 */
-function bundleFacts(course: string): AutoBundleFacts {
+/** 规则表的**输入事实**（唯一一处读盘；两个调用方共用 ⇒ 判据不会各读一份而漂开）。
+ *
+ *  `busy` **按课程**查（2026-10-21，plan/export-bundle-stall §3.1(1)）：A 课在导出不许
+ *  否决 B 课的重导——两门课的产物零共享。
+ *
+ *  `busy` 的判据与「点导出」**同源**（`exportBusyReason`：进程内键 + 持久 `running` 状态）：
+ *  控制台重启后进程内键消失，只看 `busy` 会把「同课导出还在跑」判成「可以导」⇒ 起第二个
+ *  导出抢同一个 `.tmp`；而 `launchTaskBundleExport` 随后拒启又会让 hub 记一次失败。 */
+export function bundleFacts(course: string): AutoBundleFacts {
   return {
     valve: Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE),
-    busy: busy.has(TASK_BUNDLE_BUSY_KEY),
+    busy: exportBusyReason(course) !== null,
     guardReason: exportGuard(course),
     pack: taskBundleInfo(course),
     // ★ 2026-10-04：这条路的课**正在（或刚在）训练**——盘上的旧包会把云机拖回旧起点

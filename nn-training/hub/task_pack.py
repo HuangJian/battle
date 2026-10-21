@@ -538,6 +538,11 @@ def console_export_status(
     if not isinstance(st, dict):
         # `status: null` = 还没写过状态文件（正在跑 / 被 kill / 旧版本）——不可知，**不是成功**。
         return {"unknown": True}
+    # ★ 2026-10-21（plan/export-bundle-stall §3.3）：`running`/`stale`/`expired` 都是**不可知**。
+    #   把 `running` 当 `ok:false` 会让 hub 在导出进行中就 `note_auto_handoff_failure`、
+    #   停试 900s（v1 的新 bug）；把 stale 当 ok:true 则会演一个陈旧的成功。
+    if st.get("running") or st.get("stale") or st.get("expired"):
+        return {"unknown": True}
     return {
         "ok": bool(st.get("ok")),
         "reason": str(st.get("reason") or ""),

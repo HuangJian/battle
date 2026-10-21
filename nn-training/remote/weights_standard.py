@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -78,6 +79,127 @@ STANDARD_CACHE_DIR = ".weights-standard"
 _MAX_CHAIN = 512
 #: 单次搜索最多哈希多少个候选（坏盘/巨型目录时不让读侧变成扫描器）。
 _MAX_CANDIDATES = 4000
+
+#: 一次**顶层**解析的唯一读字节预算（同一路径只读一次；不是 N² 的重复读）。
+#: 现场 232 个候选 × ≤400 KB ≈ 93 MB，2 GiB 留出 20× 余量，同时远离 8.5 TB 的事故量级。
+_MAX_TOTAL_READ_BYTES = 2 * 1024**3
+#: 一次顶层解析最多读多少个**唯一**候选（坏盘/巨型目录的兜底）。
+_MAX_TOTAL_CANDIDATES = 20000
+#: 上下文缓存的内存上界（读预算之外的第二道闸；超过就退化成重复读，由预算兜底）。
+_MAX_RAW_CACHE_BYTES = 256 * 1024**2
+_MAX_LANDED_CACHE_BYTES = 512 * 1024**2
+
+
+class WeightsStandardError(ProtocolError):
+    """权重读侧落地的**确定性**失败：同一份盘 + 同一个空候选池，重试结果逐字相同。
+
+    `round_failure` 按这个属性判「不重试」——不匹配中文文案（文案是第二事实源）。
+    """
+
+    retryable = False
+
+
+class BaseNotFoundError(WeightsStandardError):
+    """基准不在本机（候选池里逐字节找不到）。"""
+
+
+class ChainTooLongError(WeightsStandardError):
+    """基准链超过 `_MAX_CHAIN` 环。"""
+
+
+class CycleDetectedError(WeightsStandardError):
+    """基准链成环（同一路径又绕回自己）。"""
+
+
+class SearchBudgetExceededError(WeightsStandardError):
+    """一次顶层解析撞了读字节/候选数预算（不是「找不到」，是「不许再找」）。
+
+    `kind` / `limit` / `used` 是**结构化**读面：运维要能在日志与用例里分辨「撞了哪条预算、
+    累计多少」，而不用去匹配中文文案。
+    """
+
+    def __init__(self, message: str, *, kind: str = "", limit: int = 0, used: int = 0) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.limit = limit
+        self.used = used
+
+
+@dataclass
+class _SearchContext:
+    """一次**顶层**解析的共享状态（v2，2026-10-21）。
+
+    为什么必须是共享对象：v1 的 `_MAX_CHAIN`/`_MAX_CANDIDATES` 是**每层调用**各一份，
+    232 个互为候选的 delta 会展开成阶乘；`seen` 只挡当前链。v2 在这里把三件事收成一份：
+    `raw`（同一路径只读一次）、`failed`（`BaseNotFoundError` 按路径负缓存）、`landed`
+    （成功落地按内容 sha 正缓存），并给读字节/候选数一个跨递归的总预算。
+    """
+
+    max_bytes: int = _MAX_TOTAL_READ_BYTES
+    max_candidates: int = _MAX_TOTAL_CANDIDATES
+    bytes_read: int = 0
+    candidates_read: int = 0
+    raw_bytes: int = 0
+    landed_bytes: int = 0
+    raw: dict[str, bytes] = field(default_factory=dict)
+    landed: dict[str, bytes] = field(default_factory=dict)
+    failed: dict[str, str] = field(default_factory=dict)
+
+    def read(self, p: Path) -> bytes:
+        """读一个候选/根；**同一路径只读一次**，并按唯一字节/候选数计预算。"""
+        key = _path_key(p)
+        hit = self.raw.get(key)
+        if hit is not None:
+            return hit
+        size = p.stat().st_size
+        if self.bytes_read + size > self.max_bytes:
+            raise SearchBudgetExceededError(
+                f"权重 delta 基准搜索撞**读字节预算**：上限 {self.max_bytes} B，"
+                f"已读 {self.bytes_read} B，下一个候选 {p}（{size} B）"
+                "——确定性失败，重试结果相同，直接退出",
+                kind="bytes",
+                limit=self.max_bytes,
+                used=self.bytes_read,
+            )
+        if self.candidates_read >= self.max_candidates:
+            raise SearchBudgetExceededError(
+                f"权重 delta 基准搜索撞**候选数预算**：上限 {self.max_candidates} 个，"
+                f"已读 {self.candidates_read} 个（下一个 {p}）"
+                "——确定性失败，重试结果相同，直接退出",
+                kind="candidates",
+                limit=self.max_candidates,
+                used=self.candidates_read,
+            )
+        raw = p.read_bytes()
+        self.bytes_read += len(raw)
+        self.candidates_read += 1
+        if self.bytes_read > self.max_bytes:
+            raise SearchBudgetExceededError(
+                f"权重 delta 基准搜索撞**读字节预算**：上限 {self.max_bytes} B，"
+                f"实际读到 {self.bytes_read} B（{p} 的 stat 偏小）——确定性失败，不重试",
+                kind="bytes",
+                limit=self.max_bytes,
+                used=self.bytes_read,
+            )
+        if self.raw_bytes + len(raw) <= _MAX_RAW_CACHE_BYTES:
+            self.raw[key] = raw
+            self.raw_bytes += len(raw)
+        return raw
+
+    def remember(self, raw_sha: str, standard: bytes) -> bytes:
+        """成功落地正缓存（内容寻址；内存有界）。"""
+        if self.landed_bytes + len(standard) <= _MAX_LANDED_CACHE_BYTES:
+            self.landed[raw_sha] = standard
+            self.landed_bytes += len(standard)
+        return standard
+
+
+def _path_key(p: Path) -> str:
+    """路径缓存键（`resolve` 失败时退回原串——坏盘/悬空链接不配把判据炸掉）。"""
+    try:
+        return str(p.resolve())
+    except OSError:
+        return str(p)
 
 
 def _archive_root() -> Path:
@@ -173,47 +295,78 @@ def _standard_bytes(
     blob_root: str | Path | None = None,
     depth: int = 0,
     seen: set[str] | None = None,
+    ctx: _SearchContext | None = None,
 ) -> bytes:
-    """`path` 的**整份**字节（本身就是整份 ⇒ 原样返回；是容器 ⇒ 逐字节找基准后重建）。"""
-    raw = path.read_bytes()
+    """`path` 的**整份**字节（本身就是整份 ⇒ 原样返回；是容器 ⇒ 逐字节找基准后重建）。
+
+    v2（2026-10-21）：所有递归共享一个 `_SearchContext`——同一路径只读一次、
+    `BaseNotFoundError` 按路径负缓存、成功落地按内容 sha 正缓存，并受总读字节/候选数预算约束。
+    预算撞顶抛 `SearchBudgetExceededError`（**终止性**失败），父层不得把它当「这个候选不行」吞掉。
+    """
+    ctx = _SearchContext() if ctx is None else ctx
+    key = _path_key(path)
+    cached_failure = ctx.failed.get(key)
+    if cached_failure is not None:
+        raise BaseNotFoundError(cached_failure)
+
+    raw = ctx.read(path)
     if not weights_delta.is_container(raw):
         return raw
     seen = set() if seen is None else seen
-    key = str(path.resolve())
     if key in seen:
-        raise ProtocolError(f"权重 delta 基准成环：{path} 又绕回自己——拒收（数据坏了）")
+        raise CycleDetectedError(f"权重 delta 基准成环：{path} 又绕回自己——拒收（数据坏了）")
     if depth >= _MAX_CHAIN:
-        raise ProtocolError(
+        raise ChainTooLongError(
             f"权重 delta 基准链超过 {_MAX_CHAIN} 环（{path}）——拒收（同名轮次互相引用？）"
         )
     seen = {*seen, key}
     base_sha = weights_delta.base_sha_of(raw)
     if not base_sha:
-        raise ProtocolError(f"权重 delta 容器头读不出 base_sha（{path}）——拒收（容器坏了）")
+        raise BaseNotFoundError(f"权重 delta 容器头读不出 base_sha（{path}）——拒收（容器坏了）")
+    raw_sha = hashlib.sha256(raw).hexdigest()
+    cached_landed = ctx.landed.get(raw_sha)
+    if cached_landed is not None:
+        return cached_landed
 
     def rebuilt(base_bytes: bytes) -> bytes:
         # 重建 = 权威字节（delta 是相对**这一份**基准确认过的增量）。
-        return weights_delta.apply_weights_delta(base_bytes, raw, expect_base_sha=base_sha)
+        return ctx.remember(
+            raw_sha,
+            weights_delta.apply_weights_delta(base_bytes, raw, expect_base_sha=base_sha),
+        )
 
     cas = _cas_hit(blob_root, base_sha)
     if cas is not None:
         return rebuilt(cas)
 
     searched: list[str] = []
+    misses = 0
+
+    def note(cand: Path, reason: str) -> None:
+        nonlocal misses
+        misses += 1
+        if len(searched) < 8:
+            searched.append(f"{cand}（{reason[:160]}）")
+
     for n, cand in enumerate(_candidates(
         path, course=course, traj_root=traj_root, extra_roots=extra_roots
     )):
         if n >= _MAX_CANDIDATES:
             searched.append(f"…（候选超过 {_MAX_CANDIDATES} 个，已截断）")
             break
+        cand_key = _path_key(cand)
+        cached_failure = ctx.failed.get(cand_key)
+        if cached_failure is not None:
+            note(cand, f"已失败：{cached_failure}")
+            continue
         try:
-            base_bytes = cand.read_bytes()
+            base_bytes = ctx.read(cand)
         except OSError:
             continue
         if hashlib.sha256(base_bytes).hexdigest() == base_sha:
             return rebuilt(base_bytes)
         if not weights_delta.is_container(base_bytes):
-            searched.append(str(cand))
+            note(cand, "不是基准（整份但 sha 不符）")
             continue
         # 候选自己也是 delta：先落地再看 sha（链式往返；落地件才是下一轮的基准）。
         try:
@@ -225,13 +378,22 @@ def _standard_bytes(
                 blob_root=blob_root,
                 depth=depth + 1,
                 seen=seen,
+                ctx=ctx,
             )
+        except SearchBudgetExceededError:
+            # 预算是**终止性**的：父层不许把它当一次候选 miss 吞掉（v1 的 bug）。
+            raise
+        except BaseNotFoundError as e:
+            # 基准缺失与路径无关（同一份容器/同一个空候选池）⇒ 负缓存，树从 N! 降到 N²。
+            ctx.failed[cand_key] = str(e)[:400]
+            note(cand, str(e))
+            continue
         except ProtocolError as e:
-            searched.append(f"{cand}（{e}）")
+            note(cand, str(e))
             continue
         if hashlib.sha256(landed).hexdigest() == base_sha:
             return rebuilt(landed)
-        searched.append(str(cand))
+        note(cand, "落地件 sha 不符")
 
     roots_line = "、".join(
         str(r)
@@ -243,10 +405,13 @@ def _standard_bytes(
         )
         if r is not None
     )
-    raise ProtocolError(
+    detail = "；".join(searched)
+    raise BaseNotFoundError(
         f"权重 delta 的基准不在本机：容器 {path} 要 base_sha={base_sha[:16]}…，"
-        f"在候选根里逐字节找不到（找过 {len(searched)} 个候选：{roots_line}）。"
-        "修法：① 让这份权重所在的**上一轮整份**回到候选根里（归档 / remote-jobs/*/blob.init / "
+        f"在候选根里逐字节找不到（考虑 {misses} 个候选，唯一读 {ctx.candidates_read} 个 / "
+        f"{ctx.bytes_read} B：{roots_line}）。"
+        + (f" 明细：{detail}" if detail else "")
+        + " 修法：① 让这份权重所在的**上一轮整份**回到候选根里（归档 / remote-jobs/*/blob.init / "
         "deliver 镜像都算）；② 或让源头重发**整份** nn-weights-json（本机不猜基准——"
         "落错基准会产出形状对、数值错的权重）。"
     )
