@@ -7,6 +7,33 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §36 PPO 步耗是 **GPU kernel 时间**，不是 CPU/同步：三路「省主机」全部判死（2026-10-21）
+
+**读数**（Colab T4，`PPO_PROFILE=1 PPO_PROFILE_STEPS=5`，24 chunks × 4 epochs = 96 步）：
+
+- `step wall median=488.1ms p95=539.1ms`；**`Self CUDA time total = 2.341s / 5 步 = 468ms/步`** ⇒
+  墙钟的 **96% 是设备 kernel 在跑**（每步只有 ~20ms 间隙）。
+- `Self CPU time total = 3.460s / 5 步 = 692ms/步` **不是「主机在算」**：那是 CUDA API 排队阻塞
+  （GPU 反压）的时间，不能按它判 `CPU ≫ CUDA`。
+- 设备侧大头（占 CUDA 时间）：`conv_depthwise*` 反向三项 **1.11s = 47%** · `convolution_backward` 1.26s ·
+  `threshold_backward` 183ms · `add_`/`clamp_min`/elementwise 各 5–8% · 1×1 的
+  `scudnn_128x64_splitK` 289ms（12%）。
+
+**因此判死的三条**（以后不要再提）：
+
+1. **threads（1→2）**：只影响主机算子；关键路径是设备 kernel，提到 2 也不会有感知。
+2. **CUDA graph**（plan §4.6）：CPU≫CUDA 的前提不成立；每步只有 ~20ms 可抢。
+3. **同卡多 worker 吃聚合**：GPU 已 96% 忙，第二个进程只是把同一批 kernel 切开，聚合吞吐不涨
+   （这点推翻了同日早先「利用率个位数 ⇒ 并发 ≈ N×」的猜测——`6% of peak` 是**效率低**不是**卡闲着**）。
+
+**仍未判死的**：fp16（T4 有 tensor core，plan §4.7 已列「单独立项」；要接受导出 fp32 / 训练 fp16 的双轨）·
+模型结构（5×5 depthwise 占设备时间近一半，换 3×3 省 ~64% 那块数学，但要重训 + TS 双胞胎同步改）。
+**§4.7 的一个前提被推翻**：`cudnn.benchmark` 当时以「kernel 效率不是瓶颈」否决——本次读数说明
+正是瓶颈（算法选择层面的 A/B 值得做，但换算法 ⇒ 数值可能漂，红线仍是 TS 逐字节）。
+
+**复读法**：`PPO_PROFILE=1 PPO_CUDA_DIAG=1` 跑一单；`n` 会少 `PPO_PROFILE_STEPS`（采样步不进 median）。
+
+---
 ## §35 y26 线切腿 A（`policyExtra=true`）：POLICY_EXTRA(57) 第一次真正进网络（2026-10-20）
 
 **起因**：`experiments.md §119` 查明 y26 六腿模型全是 `policyExtra=false` 档 —— `move_head` 宽 128、
