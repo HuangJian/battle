@@ -150,6 +150,25 @@ class _Harness:
             halt_event=halt_event,
         ).run()
 
+    def stop_when_rearm_exhausted(self, monkeypatch) -> threading.Event:
+        """回场上界用尽 = **确定性的「派发已死」信号**，直接当 `halt_event` 用。
+
+        上界用尽后本节点不会再补孵线程，也不会再有取活 ⇒ 轮可以在这一刻收工，
+        取活次数只由常量（软停/熔断阈值 × `nodeRearmLimit`）决定，与窗口长度、
+        机器快慢都无关。此前要靠 `deadline` 结束（「剩余局谁也结算不了」），于是
+        「8 次取活」变成了「8 次取活**在窗内**完成」——门禁并行时同一用例实测 7 次
+        （详见用例 docstring），判据不可靠。
+        """
+        halt = threading.Event()
+
+        def _sink(msg: str) -> None:
+            self.logs.append(msg)
+            if "回场上界" in msg and "已用尽" in msg:
+                halt.set()
+
+        monkeypatch.setattr(ql, "log", _sink)
+        return halt
+
     def manifest(self) -> dict:
         return {
             "outcome": "timeout",
@@ -274,31 +293,30 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
 
     契约：软停一次 → 轮内回场一次（`nodeRearmLimit`=3）⇒ 4 轮 × 2 = 8 次取活。
 
-    2026-09-20（墙钟）：`queueWindowSec` 30 → **3**。本用例是**纯空闲等待**——
-    回场上界用尽后已无任何可服务的 worker（candidates 空、alive 空），剩余 4 局谁也
-    不会去结算，主循环/worker/rescan 三处全部停在 `all_settled.wait(0.5)` 直到 deadline
-    （pytest-timeout 线程栈实测，见 docs/nn/engineering.md §14）；即实测的 26.5s = 30s 窗 − 前置。
-    窗口在这里只是**配速**（同 nodeRecoverFirstSec/recoverPingSec 的「小节奏」用法），
-    断言只看取活次数与漏局集，与窗口长度无关；配小后本用例 ~1.5s（不再 26.5s）。
+    2026-10-22（判据换状态，修门禁 flake）：此前「8 次取活」要靠窗口兜住——回场上界
+    用尽后已无任何可服务的 worker（candidates 空、alive 空），剩余 4 局谁也不会去结算，
+    整轮只能空等到 deadline（pytest-timeout 线程栈实测，见 docs/nn/engineering.md §14）。
+    于是「取活 8 次」被悄悄换成了「**在窗内**取活 8 次」：机器一被调度停住就漏第 8 次。
+    实测：窗 1.5s 时门禁并行（8 路）抓到 **7 次**（504 参数），单跑 12/12 绿；同族记录见
+    docs/nn/engineering.md §21（「判据在测机器」）。加窗（0.6 → 0.9 → 1.5s）只是把
+    概率压低，没消除依赖。
+    现在：`stop_when_rearm_exhausted` 把「上界用尽」（= 再也不会补孵、再也不会取活）
+    这个**状态**当收工信号，窗只留作挂起护栏。次数于是纯粹由常量决定：
+    软停阈值 2 × (1 + `nodeRearmLimit` 3) = 8 次，与机器快慢无关。
     注：回场节奏的 1.0s 地板当轮也会随之暴露（旋钮 0.05s 不生效）——已在
     trainer/queue_local.py 改为与 wait 同源地板，故 4 轮在这里只需零点几秒。
     （遗留议题：生产缺省窗 1800s，「全员停派且回场用尽」时整轮会空等到窗口——
-     已在 §98 记录，属终止语义变更，未擅自改。）
+     已在 docs/nn/engineering.md §83 记录，属终止语义变更，未擅自改；本用例只钉「取活有界」＋
+     「上界用尽即收工」，不再钉那段空等。）
     """
     h = _Harness(
         tmp_path,
         monkeypatch,
         games=4,
-        # 窗只要盖住「4 轮×2 取活」的**整轮工时**（含每轮回场节奏 + 线程调度延迟）+ 负载余量；
-        # 窗的长度就是本用例的墙钟（轮里再没有能结算的人，只能等到 deadline）。
-        # 2026-09-29 实测（tmp/dur/window_probe.py）：首次→第 8 次取活的**跨度**稳定 0.173s。
-        # ★ 2026-10-10 修满载 flake：只按那个跨度取 0.6s 不够 —— 窗盖的是整轮工时，不是那 0.17s：
-        #   8 路并发下 4 轮会超过 0.6s（单跑 12/12 绿，并发 8 例里 **5 例红**，实测取活 6~7 次，
-        #   第 8 次落在窗外）；探针复量跨度 ≤ 0.23s（12 路并发）⇒ 差的不是跨度而是调度余量。
-        #   A/B（同机、8 路并发，各 16 次）：0.6s ⇒ 5/8 红；0.9s 与 1.5s ⇒ **0/16 红**。
-        #   取 **1.5s** = 旧值的 2.5×、实测够用的 0.9s 的 1.7×，墙钟代价 ~+0.9s/例。
-        # 断言（8 次取活 + 4 局全进 missing）与窗长无关 —— 它只看次数与漏局集。
-        policy={"nodeSoftFailStreak": 2, "queueWindowSec": 1.5},
+        # 窗**不是判据**，只是挂起护栏：上界用尽 ⇒ sink 立即 halt，轮在 ~0.2s 工时 +
+        # 一次 0.5s 唤醒步长内收工。留 10s 是为了让「判据成立」与「机器多快」彻底解耦——
+        # 真正卡死的回归（上界信号永不出现）还要等满这个窗才红，代价可控。
+        policy={"nodeSoftFailStreak": 2, "queueWindowSec": 10},
     )
     calls = {"n": 0}
 
@@ -306,7 +324,11 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
         calls["n"] += 1
         raise common.distribution.DistError(status, "")
 
-    report = h.run(fetch)
+    halt = h.stop_when_rearm_exhausted(monkeypatch)
+    report = h.run(fetch, halt_event=halt)
+    # 收工必须由「上界用尽」触发（日志措辞是这个状态的唯一机读信号，改措辞要同步这里）。
+    assert halt.is_set(), "没等到『回场上界用尽』——收工判据失效（它才是本用例的时钟替身）"
+    assert report.get("halt_aborted") is True, report
     assert calls["n"] == 8, f"软停 + 有界回场应共 8 次取活（实测 {calls['n']}）"
     joined = "\n".join(h.logs)
     assert "连续 2 次瞬时失败" in joined
@@ -397,8 +419,9 @@ def test_rescan_rearm_bounded_by_limit(tmp_path, monkeypatch) -> None:
         tmp_path,
         monkeypatch,
         games=6,
-        # 同上：窗长 = 本用例的墙钟（6 次取活的工时 ~0.2s），只当配速。
-        policy={"nodeRearmLimit": 1, "queueWindowSec": 0.6},
+        # 同 `test_soft_streak…`：窗只当挂起护栏（上界用尽是确定性收工信号）。
+        # 这里原先是 0.6s —— 6 次取活全靠窗口兜住，与上一例同一类墙钟依赖。
+        policy={"nodeRearmLimit": 1, "queueWindowSec": 10},
     )
     calls = {"n": 0}
 
@@ -406,7 +429,10 @@ def test_rescan_rearm_bounded_by_limit(tmp_path, monkeypatch) -> None:
         calls["n"] += 1
         raise common.distribution.DistError(0, "validate: bad manifest")
 
-    h.run(fetch)
+    halt = h.stop_when_rearm_exhausted(monkeypatch)
+    report = h.run(fetch, halt_event=halt)
+    assert halt.is_set(), "没等到『回场上界用尽』——本用例的收工判据失效"
+    assert report.get("halt_aborted") is True, report
     # 熔断 3 次 → 回场 1 次（再 3 次）→ 上界用尽，不再补孵。
     assert calls["n"] == 6, f"回场上界失效（实测 {calls['n']} 次取活）"
     assert "回场上界 1 次已用尽" in "\n".join(h.logs)
