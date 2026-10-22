@@ -506,6 +506,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // A* 两种模式都返回空路径 ⇒ 所有回防指令都交给导航层一个到不了的目标。
   // 1 = 解析到 (12,22)（SHIPPED）· 0 = 原始格（仅 A/B 基线，字节等同）。
   defenseCellResolve: 1,
+  // A11 (2026-10-23): 基地掉血后无条件回防（单人）。**实测显著负向 ⇒ 默认 OFF**：
+  // hard 35×20 配对 Δ−3.00pp（t=−4.09，+3/−24）、kills −181。
+  // 机制：把玩家从战场上拽回基地 = 停止清敌 ⇒ 敌人越积越多，基地照样被打穿
+  // （与 A4/A8 同一条线：站着守基地救不了基地，**打掉射手**才能）。
+  // 0 = OFF（字节等同）。
+  emergencyBaseHpSingle: 0,
   // A5 (2026-10-20): probe the movement axis un-snapped in canMoveDir /
   // canMoveOrBreak. 保留实现，默认 OFF —— 实测它让碰撞判定整体更保守，
   // 触发 directMove 的 any-passable fallback 更频繁（打转 43.5→52.6 次/局、

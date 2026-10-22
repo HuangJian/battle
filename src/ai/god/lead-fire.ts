@@ -68,6 +68,10 @@ export interface LeadFireOpts {
   maxAxialCells?: number
   /** Override the hit band (px). Default TANK/2 + BULLET/2 = 19 (NN parity). */
   bandPx?: number
+  /** OPPORTUNITY COST (A10.4): skip the lead shot when some enemy will come
+   * aligned within this many ticks anyway — waiting dominates, because the
+   * shot costs the same cooldown but the aligned one is a 100% hit. */
+  waitWindowTicks?: number
 }
 
 export function leadHitForDir(
@@ -85,6 +89,7 @@ export function leadHitForDir(
   const maxAxial = (opts?.maxAxialCells ?? 13) * CELL
   const bandPx = opts?.bandPx ?? LEAD_HIT_BAND_PX
   const inboundOnly = opts?.inboundOnly === true
+  const waitWindowTicks = opts?.waitWindowTicks ?? 0
   const shooterCol = Math.floor(pcx / CELL)
   const shooterRow = Math.floor(pcy / CELL)
   const tileMap = world.tileMap
@@ -101,6 +106,21 @@ export function leadHitForDir(
     const tStar = axial / bulletSpeed
     if (Math.abs(lateral + vLat * tStar) >= bandPx) continue
     if (inboundOnly && lateral * vLat >= 0) continue
+    if (waitWindowTicks > 0) {
+      // Will anything be aligned on this lane within the cooldown anyway?
+      let soon = false
+      for (let k = 0; k <= waitWindowTicks; k++) {
+        if (Math.abs(lateral + vLat * k) < LEAD_HIT_BAND_PX) {
+          soon = true
+          break
+        }
+      }
+      // `soon` for THIS enemy is exactly the case we are looking at — the
+      // caller wants the opposite: bail when the enemy about to align is any
+      // enemy on the lane. Handled by the early return below.
+      if (soon) return -1
+      return 1
+    }
     const colLow = Math.floor(t.x / CELL)
     const colHigh = Math.floor((t.x + t.w - 1) / CELL)
     const rowLow = Math.floor(t.y / CELL)

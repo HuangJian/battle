@@ -2147,6 +2147,24 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
     self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
+  // A11 (2026-10-23): BASE HP EMERGENCY — the worst stages (s34 Battlement 40%,
+  // s20 Bastion 55%, s3/s24/s28 65%) all lose by base destruction, and their
+  // games are SHORT (Thicket 4000 ticks vs 5300 average): the eagle is being
+  // opened up in the first half while the player is still far away. The
+  // distance gate above (maxPlayerDistFromBase 26) is what keeps it away.
+  // Once the base is bleeding, distance stops mattering: return regardless.
+  // (emergencyBaseHpFrac previously only applied in dual mode inside HUNT's
+  // nav-stuck escape, i.e. almost never.)
+  if (
+    self.params.emergencyBaseHpSingle > 0 &&
+    self.params.emergencyBaseHpFrac > 0 &&
+    self.hasBase &&
+    self.world.baseHp > 0 &&
+    self.world.baseHp <= self.params.emergencyBaseHpFrac * self.world.baseMaxHp
+  ) {
+    self._defenseReturnLatch = true
+    return self.getDefaultDefensePosition()
+  }
 
   // ---- P4.2: Outnumbered retreat (S18 crossfire family) ----
   // When several enemies converge on the player away from the base, pressing

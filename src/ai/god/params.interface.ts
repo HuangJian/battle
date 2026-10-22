@@ -1441,6 +1441,14 @@ export interface GodAIParams {
   defenseCellResolve: number
 
   /**
+   * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.
+   * `emergencyBaseHpFrac` used to be dual-only (inside HUNT's nav-stuck escape),
+   * so a bleeding eagle never pulled the player home unless it was already
+   * within `maxPlayerDistFromBase`. 1 = on (default), 0 = legacy.
+   */
+  emergencyBaseHpSingle: number
+
+  /**
    * A5 (2026-10-20): probe `canMoveDir` / `canMoveOrBreak` along the movement
    * axis from the tank's REAL pixel coordinate instead of `snap()`-ing it to
    * the cell grid first.

@@ -1248,24 +1248,38 @@ export class GodAIInput implements InputLike {
       if (p && p.alive) {
         const mode = this.params.leadFireMode
         const lead =
-          mode === 3
-            ? // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
-              leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                inboundOnly: true,
-                maxAxialCells: 6,
-                bandPx: 10,
-              })
-            : mode >= 4
-              ? // A10.4: only when waiting would NOT give an aligned shot.
-                leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                  waitWindowTicks: 74,
-                })
-              : mode === 2
-                ? // A10.2: only enemies drifting INTO the lane.
+          // A10.8: the user's counterfactual — a lead shot does NOT have to
+          // beat "wait 1–2 ticks", because the tank is not going to sit there:
+          // it fires and then uses the whole cooldown to reposition / return to
+          // base / leave the lane. So take the shot whenever the tank is going
+          // to MOVE anyway (the movement is already decided this tick).
+          // A10.9 PARTING SHOT (mode 7): the movement decision is about to turn
+          // the tank AWAY from the lane it is facing (`_moveDir !== p.dir`), so
+          // this is the last tick the muzzle can cover it. Take the lead shot
+          // now and spend the whole cooldown executing that move — the shot
+          // costs nothing that the move needed. Fires at most on the turn tick.
+          mode >= 7 && this._moveDir !== null && this._moveDir !== p.dir
+            ? leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+            : mode >= 6 && this._moveDir !== null
+              ? leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+              : mode === 3
+                ? // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
                   leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
                     inboundOnly: true,
+                    maxAxialCells: 6,
+                    bandPx: 10,
                   })
-                : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+                : mode >= 4
+                  ? // A10.4: only when waiting would NOT give an aligned shot.
+                    leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
+                      waitWindowTicks: 74,
+                    })
+                  : mode === 2
+                    ? // A10.2: only enemies drifting INTO the lane.
+                      leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
+                        inboundOnly: true,
+                      })
+                    : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
         if (lead > 0) return true
       }
     }
