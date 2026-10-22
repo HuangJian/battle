@@ -65,6 +65,8 @@ from hub.task_pack import lease_verdict
 TOKEN = "sekret"
 #: autouse 夹具会把 `console_export_status` 打桩；这里的解析用例要拿**真函数**（import 期抓一份）。
 _REAL_CONSOLE_EXPORT_STATUS = task_pack_mod.console_export_status
+#: 「这个键没出现在响应里」的哨兵（与「给了 null」区分开：旧控制台不返回 `exporting`）。
+_MISSING = object()
 
 #: 清单行的字段全集（★M4b 守卫：mode/authority/pinned/seize/auto_handoff 一个都不许回来）。
 ROW_KEYS = {
@@ -156,20 +158,36 @@ def _stub_console_export_status(
     reason: str = "",
     at_now: bool = True,
     at: float = 0.0,
+    present: bool | None = None,
+    exporting: bool | None = None,
 ) -> list[str]:
     """打桩**网络**那一层（`hub.task_pack.console_export_status`）。
 
-    只打这一层：限频 / 「只认新失败」/ 记账那半是**真实逻辑**，用例要盖它（plan §3.3）。
+    只打这一层：限频 / 「只认新事实」/ 记账那半是**真实逻辑**，用例要盖它（plan §3.3）。
     `at` 缺省取**调用时刻**（= 晚于上一次触发 ⇒ 这份失败算这一轮的）；要造「上一轮的失败」
     就传 `at_now=False, at=<很小的数>`。
+
+    `exporting` ★ 2026-10-22 三态：`True` 在跑 / `False` 确认没有 / `None` 控制台没给（旧版本）。
+    缺省 `None` ⇒ 现有用例走「旧控制台」语义，行为不变。
     """
     calls: list[str] = []
 
     def fake(course: str, log=None, timeout=None):
         calls.append(course)
         if unknown:
-            return {"unknown": True}
-        return {"ok": ok, "reason": reason, "at": (time.time() if at_now else at)}
+            # `present` 缺省跟随 `unknown`：不可达时不给（调用方也不该用）。
+            return {
+                "unknown": True,
+                **({"present": present} if present is not None else {}),
+                "exporting": exporting,
+            }
+        return {
+            "ok": ok,
+            "reason": reason,
+            "at": (time.time() if at_now else at),
+            "present": True if present is None else present,
+            "exporting": exporting,
+        }
 
     monkeypatch.setattr(task_pack_mod, "console_export_status", fake)
     return calls
@@ -517,6 +535,79 @@ def test_claim_without_pack_records_pending_export_and_triggers_export(
     assert calls == ["c5-gae"]
 
 
+def _arm_trigger_aged(course: str, age: float) -> None:
+    """把触发账本拨到 `age` 秒前（造「本窗口已触发过、且已过启动宽限」的现场）。"""
+    task_pack_mod.note_auto_handoff_trigger(course, now=time.time() - age)
+
+
+def test_throttled_window_says_no_export_process_when_console_confirms(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 2026-10-22：节流窗里的话必须是**控制台确认过的事实**，不是「我触发过」的同义词。
+
+    现场（22:33 y31-*）：y30-stack 的导出占着**全局**锁 8s，四门课的自动交接在同一秒全被
+    skip；hub 只知道自己触发过 ⇒ 云机连收 8 分钟「已经在导包了（节流窗内不重复触发）」，
+    而 `tmp/y31-{pickup,horizon,null}/` 下连 `export-bundle.log` 都没有（进程一次没起）。
+
+    现在：控制台明说 `exporting=false`、且已过 `EXPORT_START_GRACE_SEC` ⇒ 说「没有导出进程」
+    并 `give_up`（云机换下一门课，不在一次**从没启动**的导出上空等到 deadline）。
+    """
+    _stub_auto_handoff(monkeypatch)
+    _stub_console_export_status(monkeypatch, unknown=True, present=False, exporting=False)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _arm_trigger_aged("c5-gae", task_pack_mod.EXPORT_START_GRACE_SEC + 30)
+    body = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )
+    assert body["triggered"] is False, body
+    assert body["give_up"] is True, body
+    assert body["export_state"] == "not_started", body
+    # 唯一保留的**文本**判据：钉住旧谎言不回来（`trigger_note` 本身就是给云机/人看的交付物；
+    # 同族先例 = 2026-10-15 J3 那条 `trigger_note`，见 `test_source_text_assert_budget` 模块头）。
+    assert "已经在导包了" not in body["trigger_note"], body
+
+
+def test_throttled_window_says_running_when_console_confirms(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """反向：控制台确认进程在跑 ⇒ 如实说「正在跑」，**不** give_up。
+
+    为什么这两个必须成对：只加「没起」那一半，等于把「正在导」也判成 `give_up` —— 而
+    导出长达数分钟，云机会在导出最需要等待的时候换课（比原 bug 更糟）。
+    """
+    _stub_auto_handoff(monkeypatch)
+    _stub_console_export_status(monkeypatch, unknown=True, present=True, exporting=True)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _arm_trigger_aged("c5-gae", task_pack_mod.EXPORT_START_GRACE_SEC + 30)
+    body = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )
+    assert body["give_up"] is False, body
+    assert body["export_state"] == "running", body
+
+
+def test_throttled_window_old_console_is_never_read_as_not_running(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """旧控制台不返回 `exporting` ⇒ `None` ⇒ **不许**判成「没起」（会误伤正在跑的导出）。
+
+    `None` 与 `False` 必须分开：前者是「不知道」，后者是「确认没有」。把不知道当没有，
+    等于把一次 6 分钟的导出在 90 秒时判死。
+    """
+    _stub_auto_handoff(monkeypatch)
+    _stub_console_export_status(monkeypatch, unknown=True, exporting=None)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _arm_trigger_aged("c5-gae", task_pack_mod.EXPORT_START_GRACE_SEC + 30)
+    body = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )
+    assert body["give_up"] is False, body
+    assert body["export_state"] == "unknown", body
+
+
 def test_console_export_failure_stops_the_blind_retries(tmp_path: Path, monkeypatch) -> None:
     """★ J3（`plan/offline-open-ended-iters-and-loud-export` §3.3）：控制台说「上次导出失败」⇒
     hub **不再盲重试**，并把**第一手原因**写进读面。
@@ -542,6 +633,9 @@ def test_console_export_failure_stops_the_blind_retries(tmp_path: Path, monkeypa
     b2 = _json(_req(base, url, method="POST")[1])
     assert b2["triggered"] is False
     assert "--run-iters" in b2["trigger_note"], b2
+    # ★ 2026-10-22：问到失败就**当场** `give_up`（原来要等下一次 claim 走 `failed` 分支），
+    #   而 `export_failed` 跟着一起亮——云机与面板都该一眼看出是「导出失败」而非「没起」。
+    assert (b2["give_up"], b2["export_failed"]) == (True, True), b2
     # ③ 第三次：已知失败 ⇒ 直接 `failed`（不再触发），`give_up` 与 `export_failed` 一起递给云机
     b3 = _json(_req(base, url, method="POST")[1])
     assert (b3["give_up"], b3["export_failed"]) == (True, True), b3
@@ -585,8 +679,9 @@ def test_console_status_running_stale_or_expired_is_unknown(monkeypatch) -> None
     """
 
     class _Resp:
-        def __init__(self, status: dict) -> None:
+        def __init__(self, status: dict | None, exporting: object = _MISSING) -> None:
             self._status = status
+            self._exporting = exporting
 
         def __enter__(self):
             return self
@@ -595,21 +690,43 @@ def test_console_status_running_stale_or_expired_is_unknown(monkeypatch) -> None
             return None
 
         def read(self) -> bytes:
-            return json.dumps({"status": self._status}).encode("utf-8")
+            doc: dict = {"status": self._status}
+            if self._exporting is not _MISSING:
+                doc["exporting"] = self._exporting
+            return json.dumps(doc).encode("utf-8")
 
-    def ask(status: dict) -> dict:
+    def ask(status: dict | None, exporting: object = _MISSING) -> dict:
         monkeypatch.setattr(task_pack_mod, "console_export_status", _REAL_CONSOLE_EXPORT_STATUS)
-        monkeypatch.setattr(task_pack_mod, "_net_urlopen", lambda _req, timeout=None: _Resp(status))
+        monkeypatch.setattr(
+            task_pack_mod, "_net_urlopen", lambda _req, timeout=None: _Resp(status, exporting)
+        )
         return _REAL_CONSOLE_EXPORT_STATUS("c1")
 
+    # ★ 2026-10-22：返回值多了 `present` / `exporting` 两个事实字段（`exporting` 三态，
+    #   旧控制台不给 ⇒ `None`，**不许当 False**）。
     base = {"running": False, "stale": False, "expired": False, "reason": "", "at": 1.0}
-    assert ask({**base, "ok": False, "running": True, "reason": "导出进行中"}) == {"unknown": True}
-    assert ask({**base, "ok": True, "stale": True}) == {"unknown": True}
-    assert ask({**base, "ok": False, "expired": True, "reason": "超时"}) == {"unknown": True}
+    unknown = {"unknown": True, "present": True, "exporting": None}
+    assert ask({**base, "ok": False, "running": True, "reason": "导出进行中"}) == unknown
+    assert ask({**base, "ok": True, "stale": True}) == unknown
+    assert ask({**base, "ok": False, "expired": True, "reason": "超时"}) == unknown
     assert ask({**base, "ok": False, "reason": "boom", "at": 2.0}) == {
         "ok": False,
         "reason": "boom",
         "at": 2.0,
+        "present": True,
+        "exporting": None,
+    }
+    # 控制台给了在跑判据就原样透出（hub 靠它说真话，不靠 status 字段猜）
+    assert ask({**base, "ok": False, "running": True}, exporting=True) == {
+        "unknown": True,
+        "present": True,
+        "exporting": True,
+    }
+    # 没有状态文件（从没跑过导出）：present=False + exporting=False 是**两个独立事实**
+    assert ask(None, exporting=False) == {
+        "unknown": True,
+        "present": False,
+        "exporting": False,
     }
 
 

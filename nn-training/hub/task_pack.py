@@ -229,6 +229,12 @@ TASK_BUNDLE_FAILURE_WINDOW_SEC = 900.0
 #: 同一个导包窗口内，向控制台问状态的**最小间隔**（秒）：云机每 ~60s 重试一次 claim，
 #: 不限频就会每次去问一遍（而导出本身是分钟级的）。
 TASK_BUNDLE_STATUS_POLL_SEC = 60.0
+#: 「已触发过导包」但控制台确认**没有**本课导出进程时，要等多久才敢下这个结论（秒）。
+#:
+#: 为什么需要宽限：触发 → 起的是 detached 子进程，python 侧一进 `--export-bundle` 就写
+#: `running:true`（`remote/bundle.py::export_status_guard`）——正常一两秒内就能看见。
+#: 90s 是给「冷启动 + 磁盘排队」留的宽裕值，不是常规期望。
+EXPORT_START_GRACE_SEC = 90.0
 #: 连续触发上界：到顶仍无包 ⇒ 409 带 `give_up=true`（云机放弃该课，继续下一门）。
 TASK_AUTO_HANDOFF_TRIGGER_LIMIT = 3
 _TASK_PACK_LOCK = Lock()
@@ -514,9 +520,18 @@ def auto_handoff_failure(course: str) -> tuple[str, float]:
 def console_export_status(
     course: str, *, log=_hub_log, timeout: float = TASK_PACK_TRIGGER_TIMEOUT_SEC
 ) -> dict:
-    """问控制台「上次导出成没成」（**只读**动作，零副作用）。
+    """问控制台「上次导出成没成」+「此刻有没有本课的导出进程」（**只读**动作，零副作用）。
 
-    返回 `{"unknown": True}`（不可知）/ `{"ok": bool, "reason": str, "at": float}`。
+    返回三种形状：
+      · `{"unknown": True, "present": bool, "exporting": bool | None}`
+      · `{"ok": bool, "reason": str, "at": float, "present": True, "exporting": bool | None}`
+      · `{"unknown": True}`（控制台不可达 —— 此时 `present`/`exporting` 都**没有意义**）
+
+    `present` = 盘上有没有这份课的状态文件（曾经跑过导出）；`exporting` = **控制台自己**的
+    「本课导出进程在跑吗」判据（进程内 busy 键 + 持久 `running`，与「点导出」同源）。
+    ★ 三态：`True` 在跑 / `False` 确认没有 / **`None` 控制台没给（旧版本）**。
+    `None` 绝不能当 `False` —— 那会把「旧控制台」判成「没起」。
+
     **不可知不是失败**：没写过状态（正在跑 / 被 kill / 旧版本）/ 控制台不可达 ⇒ 只回 unknown；
     这条腿只负责「**知道**失败时少烧资源」，不负责把未知当失败。
     """
@@ -534,52 +549,79 @@ def console_export_status(
     except Exception as e:
         log(f"export-status {course}: 控制台不可达/不接受（{type(e).__name__}）——视为不可知")
         return {"unknown": True}
+    exporting: bool | None = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("exporting"), bool):
+        exporting = bool(parsed["exporting"])
     st = parsed.get("status") if isinstance(parsed, dict) else None
     if not isinstance(st, dict):
         # `status: null` = 还没写过状态文件（正在跑 / 被 kill / 旧版本）——不可知，**不是成功**。
-        return {"unknown": True}
+        # 但「没写文件」与「没起进程」是两件事：后者由 `exporting` 回答，见 `poll_console_export_status`。
+        return {"unknown": True, "present": False, "exporting": exporting}
     # ★ 2026-10-21（plan/export-bundle-stall §3.3）：`running`/`stale`/`expired` 都是**不可知**。
     #   把 `running` 当 `ok:false` 会让 hub 在导出进行中就 `note_auto_handoff_failure`、
     #   停试 900s（v1 的新 bug）；把 stale 当 ok:true 则会演一个陈旧的成功。
     if st.get("running") or st.get("stale") or st.get("expired"):
-        return {"unknown": True}
+        return {"unknown": True, "present": True, "exporting": exporting}
     return {
         "ok": bool(st.get("ok")),
         "reason": str(st.get("reason") or ""),
         "at": float(st.get("at") or 0.0),
+        "present": True,
+        "exporting": exporting,
     }
 
 
 def poll_console_export_status(
     course: str, *, now: float | None = None, log=_hub_log
-) -> str:
-    """在「谁在导包」的窗口里问一次控制台：**限频** + **只认新失败**。
+) -> dict:
+    """在「谁在导包」的窗口里问一次控制台：**限频** + **只认新事实**。
 
-    返回**新观察到的**失败原因（空 = 没新失败 / 不可知 / 被限频）。
+    返回（全部可叠加判断，空 dict = 没新事实 / 不可知 / 被限频）：
+      · `{"failure": <原因>}` —— 有**这一轮**的失败（`at` 不早于上次触发，否则是上一轮的，不归罪）
+      · `{"ok": True}`       —— 这一轮已经导出成功（包在盘上，云机下一拍即可取）
+      · `{"live": True}`     —— 控制台确认本课导出进程在跑
+      · `{"live": False, "present": bool}` —— 控制台确认**没有**导出进程（已过启动宽限）
 
-    「新」的判据 = 那份状态的写入时刻**不早于**我们上一次触发（`last`）——否则它属于上一轮
-    导出，拿它去归罪这一轮就是栽赃（与 P0-1 的「回灌腿」同族：时间锚写错，判据就会误伤）。
+    ★ 2026-10-22：后两种是**新事实**（现场：四门课全说「已经在导包了」，而三门课一个导出进程
+    都没起）。此前这条腿只认 `ok:false`，`status:null` 与 `running` 一律压成 `unknown`
+    ⇒ 「本窗口触发过」被当成了「正在导包」的同义词。
     """
     now = time.time() if now is None else float(now)
     with _TASK_PACK_LOCK:
         st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
         if st is None:
-            return ""  # 没触发过就没这条腿（读接口不该凭空向外发请求）
+            return {}  # 没触发过就没这条腿（读接口不该凭空向外发请求）
         last = float(st.get("last", 0.0))
         polled = float(st.get("polled_at", 0.0))
         if polled and now - polled < TASK_BUNDLE_STATUS_POLL_SEC:
-            return ""
+            return {}
         st["polled_at"] = now
     got = console_export_status(course, log=log)
-    if got.get("unknown") or got.get("ok"):
-        return ""
+    exporting = got.get("exporting")
+    if got.get("unknown"):
+        if exporting is True:
+            return {"live": True}
+        # 「确认没有进程」需要两个条件同时成立：控制台**明说** False（None = 旧版本，不算），
+        # 且触发已经过了启动宽限（刚触发的几秒里状态文件本来就还没落）。
+        if exporting is False and last and now - last >= EXPORT_START_GRACE_SEC:
+            present = bool(got.get("present"))
+            log(
+                f"export-status {course}: 控制台确认**没有**本课导出进程"
+                f"（触发后 {now - last:.0f}s；状态文件{'在' if present else '不存在'}）"
+            )
+            return {"live": False, "present": present}
+        return {}
+    if exporting is True:
+        return {"live": True}
     at = float(got.get("at") or 0.0)
     if at < last:
-        return ""  # 上一轮的失败：不归罪这一轮
+        return {}  # 上一轮的失败/成功：不归罪也不报喜
+    if got.get("ok"):
+        return {"ok": True}
     reason = str(got.get("reason") or "导出进程失败（控制台日志末行有原因）")
     note_auto_handoff_failure(course, reason, at)
     log(f"export-status {course}: 控制台报**导出失败**：{reason}")
-    return reason
+    return {"failure": reason}
 
 
 def auto_handoff_decision(course: str, *, now: float | None = None) -> str:

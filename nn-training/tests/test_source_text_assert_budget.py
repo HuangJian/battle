@@ -214,6 +214,17 @@ stdout 行集合 —— 不是源码文本；同一批里能改成行为判据�
 的修法是预算中性的**（口径 A/B 各 +0：判据从墙钟比较换成「spawn 时刻已就绪的 worker 数」，
 且新变量名避开本文件里已被判成派生名的 `seen`）。
 
+**2026-10-22 抬 FORM 一格的账**（`hub/offline.py::_claim_without_pack` 的节流窗读面；形态 1483 → **1484**
+= +1，SOURCE 未动）：节流窗里原来写死「已经在导包了（节流窗内不重复触发）」——那是**假陈述**
+（账本只记得「本窗口触发过」），现场 22:33 四门课全说这句、三门连 `export-bundle.log` 都没有。
+新用例的判据主体是**结构化字段** `export_state`（`triggered`/`running`/`done`/`failed`/`not_started`/
+`unknown`，三条用例各断言一枚）与 `give_up`/`export_failed`；唯一留下的文本判据是**反探针**
+`"已经在导包了" not in trigger_note` —— 它守的正是「旧谎言不许回来」，而 `trigger_note` 就是递给
+云机/人看的那行字（同族先例 = 上面 2026-10-15 J3 那笔）。
+
+同一批里能改成行为判据的都改了（3 条原本要撒在措辞上的断言 → `export_state` 等值），
+所以这一格是 **+1** 而不是 +5。
+
 """
 
 from __future__ import annotations
@@ -235,8 +246,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-17 离线 backfeed-resilience 的 E/F/G/H 四片抬到 1480（+10 操作员读数行 −6 已改成非文本；
 #:   逐笔分摊见模块头）
 #: 2026-10-18 plan/eval-gap-honesty 抬到 1483（+3 收工/裁定行；理由见模块头）
+#: 2026-10-22 节流窗读面抬到 **1484**（+1 反探针 `"已经在导包了" not in trigger_note`；理由见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1483
+BASELINE_FORM = 1484
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

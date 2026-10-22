@@ -41,6 +41,7 @@ import {
   stopLadder,
 } from '../eval-board'
 import {
+  exportBusyReason,
   exportStatusLine,
   launchTaskBundleExport,
   readTaskBundleStatus,
@@ -575,10 +576,19 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         // 「一直在试」（而重试上界又是**进程内**记忆，重启即清零）⇒ 它必须能问到那份第一手事实。
         if (!ctx.course) return errResp('缺少 course', 400)
         const status = readTaskBundleStatus(ctx.course)
+        // ★ 2026-10-22：`exporting` = **本课此刻有没有导出进程**。判据与「点导出」同源
+        //   （`exportBusyReason`：进程内 busy 键 + 持久 `running`、且判过 PID 身份）。
+        //   为什么必须给：hub 在 600s 节流窗里只能问这一个端点，而 `status:null` 既可能是
+        //   「刚起、状态文件还没落」，也可能是「压根没起」——两种都压成 unknown 时，
+        //   hub 只能对云机演「已经在导包了」（2026-10-22 22:33 现场：四门课全这么说，
+        //   三门一个导出进程都没有）。`true/false` 之外的第三种情况（旧版本没这个字段）
+        //   由 hub 侧按 `None` 处理，**不许当 false**。
+        const exporting = exportBusyReason(ctx.course) !== null
         return new Response(
           JSON.stringify({
             ok: true,
             message: exportStatusLine(ctx.course),
+            exporting,
             // `status` 为 `null` = **不可知**（还没跑完 / 被 kill / 旧版本）——不是成功。
             status:
               status === null

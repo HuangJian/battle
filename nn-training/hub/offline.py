@@ -913,24 +913,66 @@ class OfflineRoutes:
             )
             return
         decision = auto_handoff_decision(course)
+        # `give_up` 与 **已知失败**同义（都对云机说「别再等这一轮了」）；
+        # 区别只在 reason 从哪来：`give_up` 是「试满次数」，`failed` 是**导出进程自己写的失败原因**。
+        # ★ 2026-10-22：节流窗里**问出来的**「没进程 / 没落地」也要能置它 —— 否则云机会为一次
+        #   从未启动的导出空等到 deadline（现场 22:33：四门课全说「已经在导包了」，三门没起进程）。
+        give_up = decision in ("give_up", "failed")
+        export_failed = decision == "failed"
+        #: 导出腿的**机器可读状态**（2026-10-22）：`trigger_note` 是给人看的一句话，这一枚给
+        #: 云机/面板/用例判据用 —— 判据不许挂在措辞上（`tests/helpers/text_asserts.py` 的口径）。
+        #: 值域：`triggered` 本次已推控制台 / `running` 确认在跑 / `done` 本轮已出包 /
+        #: `failed` / `not_started` 确认没起进程 / `unknown` 说不清（含试满 `give_up` 与旧控制台）。
+        export_state = "unknown"
         if decision == "trigger":
             note_auto_handoff_trigger(course)
             ok, why2 = trigger_auto_handoff(course)
+            export_state = "triggered"
             note = (
                 "已请控制台写配置并导包（导出约需数分钟）"
                 if ok
                 else f"想替这门课导包，但控制台不可达/不接受（{why2}）——请到控制台点一次「导出任务包」"
             )
         elif decision == "throttled":
-            note = "已经在导包了（节流窗内不重复触发）"
+            # ★ 2026-10-22（现场 22:33 y31-*）：这里原来写死「已经在导包了（节流窗内不重复触发）」
+            #   ——那是**假陈述**：账本只记得「本窗口触发过」，不知道控制台到底起没起进程。
+            #   现在先问一次控制台（限频 60s，与失败回读共用一次请求），按它给的事实说话。
+            note = "本窗口已触发过导包（节流窗内不重复触发；控制台是否真在跑未确认）"
             # ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：
             #   这个分支正是导包窗里「云机每 ~60s 重试一次 claim」那条路——是**唯一**
             #   周期性经过这里的地方，所以「问一次控制台：上次到底成没成」安在这。
-            #   限频 + 只认新失败（见 `poll_console_export_status`）：不可达/不可知不改变结论。
             seen = poll_console_export_status(course)
-            if seen:
-                note = f"已经在导包，但**上次导出失败了**：{seen}——控制台修好后再点「导出任务包」"
+            if seen.get("failure"):
+                export_state = "failed"
+                note = (
+                    f"已经在导包，但**上次导出失败了**：{seen['failure']}"
+                    "——控制台修好后再点「导出任务包」"
+                )
+                # 已经知道失败：不让云机再空等一拍（`failed` 分支下一拍也会给同一个结论）。
+                give_up = True
+                export_failed = True
+            elif seen.get("ok"):
+                export_state = "done"
+                note = "本窗口那次导包**已经完成**（控制台已写出新包）——重试 claim 即可取到"
+            elif seen.get("live") is True:
+                export_state = "running"
+                note = "控制台确认这门课的导出进程**正在跑**（导包约需数分钟）"
+            elif seen.get("live") is False:
+                export_state = "not_started"
+                give_up = True
+                if seen.get("present"):
+                    note = (
+                        "本窗口触发过导包，但控制台说**没有**这门课的导出进程在跑"
+                        "（状态文件停在上一轮：上一次导出死了/超时）——到控制台点一次「导出任务包」"
+                    )
+                else:
+                    note = (
+                        "本窗口触发过导包，但控制台既**没有**这门课的导出进程、也**没写过**它的"
+                        "导出状态——那次触发没落地（控制台没接受/没起来）："
+                        "到控制台点一次「导出任务包」"
+                    )
         elif decision == "failed":
+            export_state = "failed"
             reason, _at = auto_handoff_failure(course)
             note = f"上次导出**失败**：{reason}——本窗口不再重试（控制台修好后再点「导出任务包」）"
         else:
@@ -941,10 +983,9 @@ class OfflineRoutes:
                 "course": course,
                 "pending_export": True,
                 "triggered": decision == "trigger",
-                # `give_up` 与 **已知失败**同义（都对云机说「别再等这一轮了」）；
-                # 区别只在 reason 从哪来：前者是「试满次数」，后者是**导出进程自己写的失败原因**。
-                "give_up": decision in ("give_up", "failed"),
-                "export_failed": decision == "failed",
+                "give_up": give_up,
+                "export_failed": export_failed,
+                "export_state": export_state,
                 "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
                 "trigger_note": note,
             },
