@@ -8890,3 +8890,26 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/training-stack.md §38` · `plan/episode-reuse.plan.md`。
 - **验收**：`tests/worker/test_sibling_reuse.py` 13 passed；`tests/trainer`（eval/rollout 子集）47 passed；
   `bash tools/githook/nn-python-gate.sh` 全绿；`bun run check` 绿。
+
+## §2026-10-22-fixed-offpool-eval-seeds（2026-10-22，用户口径「in-loop eval 改固定池外种子、不轮换」）
+
+- **背景**：A 层 in-loop eval 原是「锚点 50（固定）+ 轮转 50（每 3 轮换段）」双轨。轮转段每轮换一批局
+  ⇒ ① 不同课程（哪怕同 level）各轮 it 的胜率/击杀/耗时**不在同一批局上**，逐点不可比；② 轮转轨要
+  「同 it 间隔不是 3 的倍数」才转得起来（`--eval-every 3` 直接退化成固定段）；③ 旧池 860001 起落在
+  rollout 抽签区间 `[1, 2**30)` 内 ⇒ 评估局可能与训练局撞同一 `(stage, seed)`（读数不独立）。
+- **备选与否决**：① **保留轮转、只再加一段跨课程对齐的固定种子** —— 否，「每轮换局」本身就是不可比的
+  来源，且轮转的存在理由（防记忆化）在**池外**语料下不成立：训练空间之外没有可被梯度记住的局。
+  ② **每次 run 随机抽一个大基址** —— 否，读数要跨 run / 跨机器复现；随机基址让「同一批语料」事后无从核对。
+  ③ **把 B/C 层（梯段批 / 判据批）语料一起迁** —— 否，那层有自己的历史读数与段语义
+  （`trainer/batch_plan.py::EVAL_SEED0 = 860001` 有单测钉死），迁移 = 另起一次实验，超出本次口径。
+- **决定**：A 层语料改为**固定池外池**（`worker/eval_track.py::EVAL_SEEDS_BASE = 2_000_000_001`，200 个；
+  `2**30 < base < 2**31` ⇒ 与 rollout 抽签区间永不相交、且不碰 32 位有符号假设），且 `a_eval_seed_list`
+  **不含 it**（`EVAL_SEEDS[:n]`；`n=50` 翻成日常档 100 ⇒ 成本与精度与双轨总量持平）。双轨连同
+  `anchor_wr` / `rotor_wr` / `overfit_gap_pp` 与过拟合报警一起退场；门改读 `winRate`（固定池 ⇒ 该读数
+  本身就是逐点可比的读数）。B/C 层语料不动，与 A 层分属两个种子空间（`eval2g` vs `eval860k`）。
+- **违反后果**：拿「每轮换局」的读数去比不同课程的 it ⇒ 差异里混着卷面难度，结论必错；把评估种子放回
+  `[1, 2**30)` ⇒ 评估与训练可能撞同一局，读数不独立。
+- **代价（诚实账）**：锚点 vs 轮转那个**过拟合探测器**随双轨一起退场（它测的是「熟题分高、生题分低」，
+  池外固定池下没有第二批局可比）；留下的是**选择噪声**（同一批 100 局上反复选 ckpt ⇒ winner's curse），
+  靠 100 局（SE≈5pp）+ 配对比较 + 逐轮同语料来控。
+- **全文**（背景 / 备选与否决 / 落地清单 / 验收）→ `docs/nn/training-stack.md` §39

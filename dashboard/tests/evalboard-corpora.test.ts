@@ -26,6 +26,7 @@ import {
   verdictCovered,
   verdictQueued,
 } from '../src/evalboard/requests'
+import { A_EVAL_SEED0, EVAL_SEED0 } from '../src/evalboard/store'
 
 const REPO_ROOT = path.resolve(import.meta.dir, '..', '..')
 
@@ -50,8 +51,11 @@ describe('corpora 注册表读取与校验', () => {
     expect(doc.corpora.length).toBeGreaterThan(0)
     const c = corpusOf(REPO_ROOT, 'v-ladder-c03-p400600')
     expect(c.level).toBe('ladder-c03')
-    // 池外段：与训练池 860001-860200 及已用池外段 400000/400200 不相交（§15.1）。
+    // 池外段：与 B/C 层段空间（860001 起）、A 层语料池（2000000001 起）及已用池外段
+    // 400000/400200 均不相交（§15.1 语料轮转）。
     expect(c.seed0).toBe(400600)
+    expect(c.seed0 + c.games_per_stage).toBeLessThan(EVAL_SEED0)
+    expect(c.seed0 + c.games_per_stage).toBeLessThan(A_EVAL_SEED0)
   })
 
   it('EVALBOARD_CORPORA 覆盖路径生效（冒烟/单测惯例）', () => {

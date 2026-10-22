@@ -257,10 +257,6 @@ export interface EvalSummary {
   games: number
   wins: number
   winRate: number | null
-  /** 锚点轨胜率（50 局固定种子，跨轮可比）。旧混轨行缺失（plan §5-C1）。 */
-  anchorWr: number | null
-  /** 轮转轨胜率（当轮轮换段，跨轮不可比）。 */
-  rotorWr: number | null
   dropped: number
   rolloutWinRate: number | null
   nodes: Record<string, number>
@@ -297,8 +293,6 @@ export function readEvalSummaries(): Map<number, EvalSummary> {
       games: typeof r.games === 'number' ? r.games : 0,
       wins: typeof r.wins === 'number' ? r.wins : 0,
       winRate: typeof r.winRate === 'number' ? r.winRate : null,
-      anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
-      rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
       dropped: typeof r.dropped === 'number' ? r.dropped : -1,
       rolloutWinRate: typeof r.rolloutWinRate === 'number' ? r.rolloutWinRate : null,
       nodes,
@@ -689,15 +683,12 @@ function buildHtml(
       const rollGames = gamesOf(e)
       const rollWrCell =
         rollGames > 0 ? `${(e.winRate * 100).toFixed(1)}% (${rollWins}/${rollGames})` : '—'
-      // C1（plan/nn-capability-upgrade §5）：双轨轮**默认读锚点轨**（50 局固定种子，跨轮可比）；
-      // 只有旧混轨行（无 `anchor_wr`）才回落 `winRate`，并标「混」以示跨轮不可比。
-      const evalWrCell = !ev
-        ? '—'
-        : ev.anchorWr != null
-          ? `${(ev.anchorWr * 100).toFixed(1)}% 锚`
-          : typeof ev.winRate === 'number'
-            ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games}) 混`
-            : '—'
+      // eval 胜率读数：2026-10-22 起语料是**固定池外池**（每轮同一批局）⇒ summary 的
+      // winRate 本身就是跨轮/跨课（同 level）逐点可比的读数，不再有锚点/轮转两轨之分。
+      const evalWrCell =
+        ev && typeof ev.winRate === 'number'
+          ? `${(ev.winRate * 100).toFixed(1)}% (${ev.wins}/${ev.games})`
+          : '—'
       const ke = klEff(e)
       const bi = baseIntegrityOf(e)
       const klCell =

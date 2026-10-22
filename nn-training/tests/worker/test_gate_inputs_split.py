@@ -75,7 +75,6 @@ ENGINE_SURFACE = {
     "VERDICT_PRIORITY",
     "_lazy_config",
     "_notes",
-    "_rotation_notes",
     "build_cli",
     "evaluate",
     "main",
@@ -184,8 +183,9 @@ def test_public_call_sites_can_still_import_from_gate_check() -> None:
 # ───────────────────────── ⑦ 读数语义（逐条钉住） ─────────────────────────
 
 
-def test_row_from_summary_prefers_anchor_wr_and_drops_bad_rows() -> None:
-    """门内唯一胜率入口：`anchor_wr`（锚点轨）优先，旧行回退 `winRate`；无 games 丢弃。"""
+def test_row_from_summary_reads_winrate_and_drops_bad_rows() -> None:
+    """门内唯一胜率入口：`winRate`（固定池外语料下它本身跨轮可比）；旧行的
+    `anchor_wr` 只留在历史行里，门不再按它分流。无 games 丢弃。"""
     r = gate_inputs_mod._row_from_summary(
         {
             "event": "eval_summary",
@@ -199,7 +199,7 @@ def test_row_from_summary_prefers_anchor_wr_and_drops_bad_rows() -> None:
         }
     )
     assert r is not None
-    assert r.win_rate == 0.7 and r.seed_fp == "7"
+    assert r.win_rate == 0.2 and r.seed_fp == "7"
     assert gate_inputs_mod._row_from_summary({"event": "iteration"}) is None
     assert (
         gate_inputs_mod._row_from_summary(
@@ -274,7 +274,6 @@ def test_new_missing_field_rows_read_same_as_old_rows() -> None:
         "games": 200,
         "wins": 120,
         "winRate": 0.6,
-        "anchor_wr": 0.7,
         "kills_mean": 1.5,
         "timeout_frac": 0.1,
         "course_fp": "fp1",
@@ -298,7 +297,7 @@ def test_new_missing_field_rows_read_same_as_old_rows() -> None:
         wver="w2",
         games=200,
         wins=120,
-        win_rate=0.7,
+        win_rate=0.6,
         kills_mean=1.5,
         zero_kill_frac=None,
         phits_mean=None,

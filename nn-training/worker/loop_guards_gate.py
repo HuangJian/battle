@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from common.log import log
+from worker.eval_track import a_eval_seed_list
 from worker.events import write_gate_verdict
 from worker.gate_check import (
     BudgetInfo,
@@ -40,6 +41,10 @@ def _gate_startup_notes(args: Any, course: Any, spec: Any) -> list[str]:
     games = int(getattr(args, "eval_games_per_stage", 0) or 0)
     if games <= 0:
         games = int(getattr(course, "eval_games_per_stage", 0) or 0)
+    # 课程配置 → **实际**每关卡数（`a_eval_seed_list` 是语料唯一入口：50 被翻成日常档 100）。
+    # 不翻译就会拿 50 局去算 SE，对着一门真跑 100 局的课报「判决力不足」的假警。
+    if games > 0:
+        games = len(a_eval_seed_list(0, games))
     notes = list(
         spec.budget_warnings(
             float(getattr(args, "max_hours", 0.0) or 0.0),

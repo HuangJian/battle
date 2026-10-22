@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { ingestEvalRow, ingestRows, type IngestCtx } from '../src/evalboard/ingest'
 import { claimPending, enqueueBatch, loadBatches, updateBatch } from '../src/evalboard/batches'
+import { A_EVAL_SEED0, EVAL_SEED0 } from '../src/evalboard/store'
 
 const ctx: IngestCtx = {
   run_id: 'run1',
@@ -24,15 +25,33 @@ const ctx: IngestCtx = {
 describe('ingestEvalRow', () => {
   it('raw → schema v1（probe_key 五段式，seed_segment，wver 透传）', () => {
     const r = ingestEvalRow(
-      { iter: 30, wver: 'w1', stage: 0, seed: 860001, outcome: 'stage_clear', win: 1, cleared: 1 },
+      {
+        iter: 30,
+        wver: 'w1',
+        stage: 0,
+        seed: A_EVAL_SEED0,
+        outcome: 'stage_clear',
+        win: 1,
+        cleared: 1,
+      },
       ctx,
     )
     expect(r.schema).toBe(1)
     expect(r.probe_key).toContain('c4l1-hard-t2400-')
-    expect(r.probe_key.endsWith('-eval860k')).toBe(true)
+    expect(r.probe_key.endsWith('-eval2g')).toBe(true)
     expect(r.seed_segment).toBe(0)
     expect(r.greedy).toBe(true)
     expect(r.metrics_version).toBe(1)
+  })
+
+  it('B/C 层语料（860001 段）仍标 eval860k —— 两层不共空间（§2.2 禁止跨界相减）', () => {
+    const r = ingestEvalRow(
+      { iter: 30, wver: 'w1', stage: 0, seed: EVAL_SEED0, outcome: 'timeout', win: 0 },
+      ctx,
+    )
+    expect(r.seedSpace).toBe('eval860k')
+    expect(r.probe_key.endsWith('-eval860k')).toBe(true)
+    expect(r.seed_segment).toBe(0)
   })
 })
 

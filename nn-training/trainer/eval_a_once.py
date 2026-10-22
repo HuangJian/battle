@@ -3,8 +3,8 @@
 与训练主循环每 eval_every 轮的干净评估**走同一条路**（`trainer/eval_dispatch.py::EvalDispatcher`
 经 `dispatch_eval_round`），不是「另一套本机评估」：
 
-  · 语料同口径：`eval_stages` × `a_eval_seed_list(it, eval_games_per_stage)`（双轨 n==50
-    → 锚点 50 + 当轮轮转 50，与 in-loop 逐字节同语料）；去重同口径
+  · 语料同口径：`eval_stages` × `a_eval_seed_list(it, eval_games_per_stage)`（固定池外池，
+    与 it 无关、与 in-loop 逐字节同语料）；去重同口径
     （`eval_done_keys(..., min_iter=1)`）。
   · 算力同池：**派发到全部过门节点**（evalSupport / stageJsonSupport / bun 版本 / codeHash
     同一套判据，并行 ping + 并行权重下发）+ 本机份额（`policy.evalLocalSlots`，缺省 4）。
@@ -83,17 +83,13 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
     用于「同权重已在别轮评完」：`EvalDispatcher` 在那种情况会早退**不写 summary**
     （in-loop 侧有 `_drain` 的覆盖判定兜底，手动触发没有），而控制台按 iter 挂
     evalData、缺本 iter 的 summary 则指标表永远显示空。行归属仍是原 iter，summary
-    只是本 iter 的读数入口。双轨：按 seed 落段拆出 anchor_wr/rotor_wr/overfit_gap_pp
-    （与 settle 同口径）。返回聚合到的局数（0 = 账本里根本没有该 wver 的局）。
+    只是本 iter 的读数入口。返回聚合到的局数（0 = 账本里根本没有该 wver 的局）。
     """
-    from worker.eval_local import is_anchor_seed, is_rotor_seed, overfit_gap_pp
-
     wins = 0
     clears = 0
     n = 0
     outcomes: dict[str, int] = {}
     nodes: dict[str, int] = {}
-    a_wins = a_n = r_wins = r_n = 0
     try:
         with open(eval_jsonl, encoding="utf-8") as f:
             for line in f:
@@ -115,22 +111,10 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
                 outcomes[oc] = outcomes.get(oc, 0) + 1
                 nd = str(r.get("node") or "?")
                 nodes[nd] = nodes.get(nd, 0) + 1
-                try:
-                    sd = int(r.get("seed"))
-                except (TypeError, ValueError):
-                    continue
-                if is_anchor_seed(sd):
-                    a_n += 1
-                    a_wins += w
-                elif is_rotor_seed(sd):
-                    r_n += 1
-                    r_wins += w
     except OSError:
         return 0
     if n == 0:
         return 0
-    a_wr = (a_wins / a_n) if a_n else None
-    r_wr = (r_wins / r_n) if r_n else None
     summary = {
         "event": "eval_summary",
         "iter": it,
@@ -152,9 +136,6 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
         "pickup_mean": None,
         "timeout_frac": None,
         "course_fp": "",
-        "anchor_wr": round(a_wr, 4) if a_wr is not None else None,
-        "rotor_wr": round(r_wr, 4) if r_wr is not None else None,
-        "overfit_gap_pp": overfit_gap_pp(a_wr, r_wr),
         "reused_wver": True,
     }
     with open(eval_jsonl, "a", encoding="utf-8") as jf:

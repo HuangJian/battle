@@ -6,9 +6,10 @@
  *  但**列模型**不该有两份：此前两处的表头文字与 hover 口径各写一遍，能一致纯靠人手抄得仔细
  *  ——改一处漏一处只是时间问题。
  *
- *  本仓已有正确先例：配对列（b01/b10/p/delta/过拟合）的 hover 文案早就抽到 `view/format.ts`
- *  由两处共用（`PAIRED_COL_TITLES` / `OVERFIT_COL_TITLE`，注释写着「防两处分化」）。本模块把
+ *  本仓已有正确先例：配对列（b01/b10/p/delta）的 hover 文案早就抽到 `view/format.ts`
+ *  由两处共用（`PAIRED_COL_TITLES`，注释写着「防两处分化」）。本模块把
  *  同一条做法扩到全部列。
+ *  （2026-10-22：双轨退场 ⇒ 「过拟合」列与它的 hover 文案 `OVERFIT_COL_TITLE` 一起删了。）
  *
  *  三个不变量（改列时按它判断）：
  *    1. **label / title 只在这里写一次**——两个面板都不许再出现表头字面量。
@@ -19,7 +20,7 @@
  *  本模块纯数据 + 纯函数（无 JSX / 无 IO），与其它 `view/` 模块同规：服务端与客户端共用。
  */
 
-import { OVERFIT_COL_TITLE, PAIRED_COL_TITLES } from './format'
+import { PAIRED_COL_TITLES } from './format'
 
 // ────────────────────────── 键 ──────────────────────────
 
@@ -54,7 +55,6 @@ export type EvalRowColKey =
   | 'b10'
   | 'pairedP'
   | 'delta'
-  | 'overfit'
   | 'avgWinTicks'
   | 'kills'
   | 'dmgPerKill'
@@ -137,7 +137,6 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
   b10: { key: 'b10', label: 'b10', title: PAIRED_COL_TITLES.b10, num: true },
   pairedP: { key: 'pairedP', label: 'p', title: PAIRED_COL_TITLES.p, num: true },
   delta: { key: 'delta', label: 'delta', title: PAIRED_COL_TITLES.delta, num: true },
-  overfit: { key: 'overfit', label: '过拟合', title: OVERFIT_COL_TITLE, num: true },
 
   // ── eval 专属 ──
   evalSec: {
@@ -177,7 +176,6 @@ export const EVAL_ROW_KEYS: readonly EvalRowColKey[] = [
   'b10',
   'pairedP',
   'delta',
-  'overfit',
   'avgWinTicks',
   'kills',
   'dmgPerKill',

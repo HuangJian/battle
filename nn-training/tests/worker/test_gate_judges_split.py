@@ -87,6 +87,8 @@ BRANCH_KINDS = {"skill_floor", "plateau", "budget", "transfer", "retention"}
 ALL_KINDS = REGISTRY_KINDS | BRANCH_KINDS
 
 #: 引擎与判决模型**留在** `gate_check.py`（不然这刀搬错了对象）。
+#: ⚠ 2026-10-22（DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：`_rotation_notes`（双轨轮转
+#: 退化告警）随双轨退场而删 —— 语料不再轮换，「轮转轨形同固定段」这个病灶不存在了。
 ENGINE_SURFACE = {
     "EXIT_CODES",
     "GateResult",
@@ -94,7 +96,6 @@ ENGINE_SURFACE = {
     "VERDICT_PRIORITY",
     "_lazy_config",
     "_notes",
-    "_rotation_notes",
     "build_cli",
     "evaluate",
     "main",

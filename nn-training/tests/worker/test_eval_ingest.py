@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from trainer.eval_m1 import parse_m1_eval_report
 from worker.eval_ingest import (
+    A_EVAL_SEED0,
+    A_EVAL_SEED_LEN,
     iter_eval_rows,
     m1_game_row,
     seed_space_of,
@@ -23,12 +25,21 @@ from worker.eval_ingest import (
 
 
 def test_segments_mirror_store_ts() -> None:
+    """段号/空间名与 `dashboard/src/evalboard/store.ts` 同式（两层分属两个空间）。"""
+    # B/C 层池（不动）
     assert segment_of_seed(860001) == 0
     assert segment_of_seed(860100) == 0
     assert segment_of_seed(860101) == 1
     assert segment_of_seed(42) == -1
     assert seed_space_of(860001) == "eval860k"
     assert seed_space_of(5) == "probe0"
+    # A 层池（2026-10-22 起）
+    assert segment_of_seed(A_EVAL_SEED0) == 0
+    assert segment_of_seed(A_EVAL_SEED0 + 100) == 1
+    assert seed_space_of(A_EVAL_SEED0) == "eval2g"
+    assert seed_space_of(A_EVAL_SEED0 + A_EVAL_SEED_LEN - 1) == "eval2g"
+    # 池外 ⇒ 无段
+    assert segment_of_seed(A_EVAL_SEED0 + A_EVAL_SEED_LEN) == -1
 
 
 def test_m1_game_row_keys_align_with_record() -> None:

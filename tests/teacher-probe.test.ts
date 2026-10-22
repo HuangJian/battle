@@ -105,8 +105,10 @@ describe('常量锚', () => {
       'ladder-c06',
       'ladder-c07',
     ])
-    // nn-training/biz/eval_local.py: EVAL_SEEDS = tuple(range(860001, 860201))
-    // （2026-09-30 刀 4：纯逻辑整族从 rl/ 出包到 biz/）
-    expect(EVAL_SEED0).toBe(860001)
+    // nn-training/worker/eval_track.py: EVAL_SEEDS = tuple(range(2000000001, 2000000201))
+    // （2026-10-22：A 层评估语料迁到训练池外固定池；2026-09-30 刀 4：纯逻辑整族从 rl/ 出包到 biz/）
+    expect(EVAL_SEED0).toBe(2000000001)
+    expect(EVAL_SEED0).toBeGreaterThan(2 ** 30) // rollout 抽签上界 ⇒ 与训练种子不相交
+    expect(EVAL_SEED0).toBeLessThan(2 ** 31) // 32 位有符号安全带
   })
 })

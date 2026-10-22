@@ -137,7 +137,10 @@ describe('镜像常量（权威在 python；这里防漂）', () => {
   })
 
   it('账本筛选键与 python `read_trend_rows` 同一字面量（event=eval_summary）', () => {
-    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/worker/gate_check.py'), 'utf-8')
+    // `read_trend_rows` 住在 `worker/gate_inputs.py`（趋势读面下沉那刀之后；gate_check.py
+    // 只剩判决面）。守卫要盯**真实现**那一侧 —— 盯错文件 = 守卫失效（2026-10-22 双轨退场时
+    // 删掉 `_rotation_notes` 顺带删掉了 gate_check.py 里最后一个同形字面量）。
+    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/worker/gate_inputs.py'), 'utf-8')
     expect(gatePy).toContain('r.get("event") != "eval_summary"')
   })
 })

@@ -1,19 +1,16 @@
-"""拆分的**契约守卫**：双轨种子分类 + 过拟合报警 + summary 结算永住 `biz/eval_track.py`（S5 第三刀，2026-09-27）。
+"""拆分的**契约守卫**：评估种子池 + summary 结算永住 `worker/eval_track.py`（S5 第三刀，2026-09-27）。
 
-`biz/eval_local.py` **870 → 573 行**；四段跨度（`EVAL_SEEDS` 池 · 双轨种子块 · `report_winrate_safe` ·
-`_acc`/`_ratio`/`_read_recent_track_wrs`/`_maybe_warn_overfit`/`settle_eval_summary`）整块搬到
-`biz/eval_track.py`（404 行）。本文件钉五件事：
+`worker/eval_local.py` 只留执行面（跑一局 / 读台账）。本文件钉五件事：
 
-1. **定义唯一**——这 23 个名字不许在 `eval_local.py` 里再实现一遍（否则「搬了一半」）；
-2. **无环 / 方向**——`eval_track` 只依赖 stdlib + `biz.log`，且**不得** import `biz.eval_local`（反向边 = 环）；
-3. **同一对象**——`eval_local` 的那些名字必须是 `eval_track` 的转发（不是副本）；
-4. **搬走的语义没变**——双轨种子分段（锚点固定 / 轮转周期 3 / 无重叠）+ 过拟合判决（功能性用例）；
+1. **定义唯一**——这些名字不许在 `eval_local.py` 里再实现一遍（否则「搬了一半」）；
+2. **无环 / 方向**——`eval_track` 只依赖 stdlib + `common.log`，且**不得** import `eval_local`；
+3. **同一对象**——`eval_local` 的公开名字必须是 `eval_track` 的转发（不是副本）；
+4. **搬走的语义没变**——固定池外种子（与 rollout 抽签区间无交）+ summary 结算（功能性用例）；
 5. **它在分层里是 L1 纯逻辑**——不在 `remote_dag` 的传输账本里。
 
-为什么单独成家：「双轨怎么分段、怎么判过拟合、summary 怎么结算」是**读账本算趋势**的纯逻辑，
-与「怎么在本机/云上跑一局评估」（`eval_local` 的 `run_eval_runner_capture` / `run_local_eval_game`）
-是两件事——读者（`gate_check` / `eval_a_once` / `remote/offline_eval`）要的是「双轨怎么算」，
-不是「评估器怎么起」。分开后纯逻辑模块不拖入运行器。
+为什么单独成家：「评估用哪些种子、summary 怎么结算」是**读账本算趋势**的纯逻辑，与「怎么在
+本机/云上跑一局评估」是两件事——读者（`gate_check` / `eval_a_once` / `remote/offline_eval`）
+要的是「口径怎么算」，不是「评估器怎么起」。分开后纯逻辑模块不拖入运行器。
 """
 
 from __future__ import annotations
@@ -33,31 +30,25 @@ from tests.helpers import remote_dag as dag
 TRACK_FILE = ROOT / "worker" / "eval_track.py"
 LOCAL_FILE = ROOT / "worker" / "eval_local.py"
 
-#: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_track.py` 里出现。
+#: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_track.py` 里出现，且在 `eval_local.py`
+#: 只做 `X as X` 门面（同一对象）。
 MOVED_NAMES = {
-    "DUAL_TRACK_ANCHOR",
-    "DUAL_TRACK_ROTOR",
     "EVAL_SEEDS",
-    "OVERFIT_GAP_PP",
-    "OVERFIT_PERSIST_ROUNDS",
-    "_ANCHOR_SEED_SET",
-    "_ROTOR_SEED_SET",
     "_acc",
-    "_maybe_warn_overfit",
     "_ratio",
-    "_read_recent_track_wrs",
     "a_eval_seed_list",
-    "dual_track_seeds",
-    "is_anchor_seed",
-    "is_rotor_seed",
-    "overfit_fires",
-    "overfit_gap_pp",
     "report_winrate_safe",
-    "rotor_offset",
-    "rotor_span",
     "settle_eval_summary",
-    "should_dual_track",
-    "split_anchor_rotor",
+}
+
+#: 不住门面的内部口径（只有 `eval_track` 自己有，读者直接从这个模块取）。
+TRACK_ONLY_NAMES = {
+    "EVAL_DAILY_SEEDS",
+    "EVAL_SEEDS_BASE",
+    "MISSING_MAX",
+    "ROLLOUT_SEED_MAX",
+    "_missing_reasons",
+    "lost_by_node",
 }
 
 #: `eval_track.py` 允许的 import 面（stdlib + 本仓唯一的日志原语 `biz.log`；多一个即红）。
@@ -97,7 +88,9 @@ def _imports(path: Path) -> set[str]:
 
 def test_moved_names_are_defined_in_eval_track_and_not_redefined_in_eval_local() -> None:
     """定义唯一：搬走的名字只在 `eval_track.py` 里实现（`eval_local.py` 再定义一遍 = 搬了一半）。"""
-    assert _defined(TRACK_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(TRACK_FILE))
+    assert _defined(TRACK_FILE) >= MOVED_NAMES | TRACK_ONLY_NAMES, sorted(
+        (MOVED_NAMES | TRACK_ONLY_NAMES) - _defined(TRACK_FILE)
+    )
     leftovers = MOVED_NAMES & _defined(LOCAL_FILE)
     assert leftovers == set(), f"eval_local.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
@@ -153,40 +146,23 @@ def test_eval_local_facade_forwards_the_same_objects() -> None:
 
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
-    """名字是契约：旧的 `from biz.eval_local import settle_eval_summary`（多处在用）必须仍然成立。"""
-    from worker.eval_local import dual_track_seeds, overfit_fires, settle_eval_summary
+    """名字是契约：旧的 `from worker.eval_local import settle_eval_summary`（多处在用）必须仍然成立。"""
+    from worker.eval_local import a_eval_seed_list, settle_eval_summary
 
-    assert dual_track_seeds is eval_track_mod.dual_track_seeds
-    assert overfit_fires is eval_track_mod.overfit_fires
+    assert a_eval_seed_list is eval_track_mod.a_eval_seed_list
     assert settle_eval_summary is eval_track_mod.settle_eval_summary
 
 
-# ─────────────────────── ④ 搬走的语义没变（功能性） ───────────────────────
+# ─────────────────── ④ 搬走的语义没变（功能性） ───────────────────────
 
 
-def test_seed_pool_and_segment_split_semantics_unchanged() -> None:
-    """池连续严格递增 · 锚点固定 · 轮转周期 3 · 两轨无重叠 —— 从 `eval_track` 直接读，逐条钉住。"""
+def test_seed_pool_semantics_unchanged() -> None:
+    """池外固定池：连续严格递增、与 rollout 抽签区间无交、切片与 it 无关 —— 逐条钉住。"""
     track = eval_track_mod
     assert tuple(sorted(set(track.EVAL_SEEDS))) == track.EVAL_SEEDS
-    anchor = set(track.EVAL_SEEDS[: track.DUAL_TRACK_ANCHOR])
-    # 锚点跨轮恒定、轮转段周期 3、且当轮两轨不相交（总量 = 锚点 + 轮转）。
-    for it in (1, 2, 3, 4):
-        seeds = track.dual_track_seeds(it)
-        assert len(seeds) == track.DUAL_TRACK_ANCHOR + track.DUAL_TRACK_ROTOR
-        assert set(seeds[: track.DUAL_TRACK_ANCHOR]) == anchor
-        rotor = set(track.EVAL_SEEDS[i] for i in track.rotor_span(it))
-        assert not (rotor & anchor)
-    assert track.rotor_offset(1) == track.rotor_offset(4)
-
-
-def test_overfit_verdict_semantics_unchanged() -> None:
-    """过拟合判决：缺读数 / 轮数不足不响；持续 persist 轮且 gap ≥ 阈值才响。"""
-    track = eval_track_mod
-    assert track.overfit_fires([0.5] * 3, [0.5] * 3) is False
-    assert track.overfit_fires([0.5] * 3, [None] * 3) is False
-    assert track.overfit_fires([0.5] * 2, [0.4] * 2) is False  # 轮数 < persist
-    assert track.overfit_fires([0.60] * 3, [0.50] * 3) is True
-    # gap 是百分点、任一侧缺读数 → None（不伪装成 0）。
-    assert track.overfit_gap_pp(0.6, 0.5) == 10.0
-    assert track.overfit_gap_pp(None, 0.5) is None
+    assert len(track.EVAL_SEEDS) == 200
+    assert track.EVAL_SEEDS[0] > track.ROLLOUT_SEED_MAX == 2**30
+    corpus = track.a_eval_seed_list(1, 100)
+    for it in (2, 3, 40):
+        assert track.a_eval_seed_list(it, 100) == corpus
     assert track.report_winrate_safe(None) is None

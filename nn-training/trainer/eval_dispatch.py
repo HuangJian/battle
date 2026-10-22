@@ -37,7 +37,6 @@ from worker.eval_local import (
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
     run_local_eval_game,
     settle_eval_summary,
-    should_dual_track,
 )
 from worker.eval_track import lost_by_node
 
@@ -259,9 +258,9 @@ class EvalDispatcher:
                 eval_stages = parse_range(eval_stage_spec)
             else:
                 eval_stages = list(range(args.total_stages))
-            # 双轨日常评估（plan/dual-track-eval-seeds）：A-eval 且 n_seeds==50 时
-            # 锚点 50 + 轮转 50（总量翻倍）；it0 基线与更大正式前缀（100/200）保持
-            # EVAL_SEEDS[:n_seeds] 逐字节兼容。小 n_seeds（冒烟/单测）仍走前缀切片。
+            # 固定池外语料（2026-10-22，DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：
+            # `a_eval_seed_list` 与 it 无关 ⇒ 每轮、每门同 level 的课都评同一批
+            # (stage,seed)，it 之间/课程之间逐点可比。小 n_seeds（冒烟/单测）照旧切片。
             seed_list = a_eval_seed_list(it, n_seeds, baseline=baseline)
             pairs = [(s, sd) for s in eval_stages for sd in seed_list]
             if not pairs:
@@ -1082,7 +1081,6 @@ class EvalDispatcher:
                 f"[eval] it{it}: dispatch {total} greedy games "
                 f"(corpus={len(pairs)}, done={len(pairs) - total})"
                 + (" [it0 基线 · bc 权重]" if baseline else "")
-                + (" [dual-track anchor+rotor]" if should_dual_track(n_seeds, baseline) else "")
                 + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
                 + (f" [local tail-reserved ×{reserved}]" if reserved else "")
             )

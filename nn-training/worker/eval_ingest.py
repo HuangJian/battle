@@ -18,21 +18,37 @@ import json
 import time
 from pathlib import Path
 
+from worker.eval_track import EVAL_SEEDS_BASE
+
+#: B/C 层段基址（与 `dashboard/src/evalboard/store.ts::EVAL_SEED0` 同值；跨语言常量）。
 EVAL_SEED0 = 860001
+#: A 层（in-loop eval）语料池基址（2026-10-22）：训练池外的固定池，与 it 无关。
+#: = `worker/eval_track.py::EVAL_SEEDS_BASE`（= dashboard 侧 `A_EVAL_SEED0`）。
+A_EVAL_SEED0 = EVAL_SEEDS_BASE
+#: A 层池长（= `worker/eval_track.EVAL_SEEDS` 长度）。
+A_EVAL_SEED_LEN = 200
 SEGMENT_LEN = 100
 SEGMENT_COUNT = 16
 
 
 def segment_of_seed(seed: int) -> int:
-    """seed → 所属段（eval860k 空间内；空间外 -1。与 store.ts 同式）。"""
-    d = seed - EVAL_SEED0
-    if d < 0 or d >= SEGMENT_LEN * SEGMENT_COUNT:
-        return -1
-    return d // SEGMENT_LEN
+    """seed → 所属段（A 层池优先；B/C 池次之；空间外 -1。与 store.ts 同式）。"""
+    a = seed - A_EVAL_SEED0
+    if 0 <= a < A_EVAL_SEED_LEN:
+        return a // SEGMENT_LEN
+    b = seed - EVAL_SEED0
+    if 0 <= b < SEGMENT_LEN * SEGMENT_COUNT:
+        return b // SEGMENT_LEN
+    return -1
 
 
 def seed_space_of(seed: int) -> str:
-    """860001–860100 = eval860k 段 0；其余暂归 probe0（§2.2：跨界相减由断言拒绝）。"""
+    """A 层池 = `eval2g`；B/C 段 0 = `eval860k`；其余 `probe0`（§2.2：跨界相减由断言拒绝）。
+
+    两层分属两个空间 ⇒ 换池前后的 A 层读数不会被当成同一批局相减。
+    """
+    if A_EVAL_SEED0 <= seed < A_EVAL_SEED0 + A_EVAL_SEED_LEN:
+        return "eval2g"
     if EVAL_SEED0 <= seed < EVAL_SEED0 + SEGMENT_LEN:
         return "eval860k"
     return "probe0"

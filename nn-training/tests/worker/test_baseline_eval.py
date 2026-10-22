@@ -382,6 +382,7 @@ def test_dispatch_baseline_writes_iter0_rows(
     it0 行永远不落盘。
     """
     import trainer.eval_dispatch as ed
+    from worker.eval_track import EVAL_SEEDS_BASE
 
     work = tmp_path / "baseline"
     work.mkdir()
@@ -392,7 +393,13 @@ def test_dispatch_baseline_writes_iter0_rows(
     wver = common.distribution.weights_fingerprint(str(bc))
     (work / "eval_log.jsonl").write_text(
         json.dumps(
-            {"event": "eval", "iter": 1, "wver": wver[:16], "stage": 2000, "seed": 860001}
+            {
+                "event": "eval",
+                "iter": 1,
+                "wver": wver[:16],
+                "stage": 2000,
+                "seed": EVAL_SEEDS_BASE,
+            }
         )
         + "\n",
         encoding="utf-8",
@@ -432,7 +439,7 @@ def test_dispatch_baseline_writes_iter0_rows(
     ed.dispatch_eval_round(
         "bun", str(bc), traj, args, cfg, "rid.0", 0, local_gate=gate, baseline=True
     )
-    assert ran == [(2000, 860001)]  # 同 wver 的 it1 行没把它吞掉
+    assert ran == [(2000, EVAL_SEEDS_BASE)]  # 同 wver 的 it1 行没把它吞掉
 
     def rows() -> list[dict]:
         return [

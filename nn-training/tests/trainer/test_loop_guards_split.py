@@ -222,7 +222,12 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
             "worker.paired_kill",
         }
     ),
-    "loop_guards_gate.py": frozenset({"worker.events", "worker.gate_check", "common.log"}),
+    # 2026-10-22（DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：启动期「判决力够不够亮」
+    # 的告警要用**实际**每关局数（课程写的 50 在双轨退场后被翻成日常档 100）⇒ 顶层多一条
+    # `worker.eval_track`（语料唯一入口 `a_eval_seed_list`；不翻译就会拿 50 局算 SE 报假警）。
+    "loop_guards_gate.py": frozenset(
+        {"worker.events", "worker.gate_check", "common.log", "worker.eval_track"}
+    ),
     # 2026-10-13（plan/ppo-job-lifecycle-ownership §6，M5）：无 result 的**终局残留**
     # （`fail.json` / 账本已作废）也过同一道 keep_iters 闸 ⇒ 顶层多两条：失败件名走
     # `common.protocol`（单一来源），账本 fold 走 `worker.bc_ledger`（训练侧唯一实现，

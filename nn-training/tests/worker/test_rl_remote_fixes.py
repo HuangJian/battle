@@ -271,15 +271,23 @@ def test_d14_predicate_is_single_implementation() -> None:
 
 
 def test_eval_seeds_support_200_games() -> None:
-    """eval_games_per_stage:200 不再被常量截断；前 100 seed 历史前缀逐字节不变。"""
+    """eval_games_per_stage:200 不再被常量截断；池在 rollout 抽签区间之外（2026-10-22）。
+
+    池基址从 860001 迁到 2_000_000_001：`2**30 < base < 2**31` ⇒ 与训练种子永不相交，
+    且池**不含 it** ⇒ 每轮/每门同 level 的课评同一批局（跨轮/跨课逐点可比）。
+    """
     from worker.eval_local import EVAL_SEEDS
+    from worker.eval_track import EVAL_SEEDS_BASE, ROLLOUT_SEED_MAX
 
     assert len(EVAL_SEEDS) == 200
-    assert EVAL_SEEDS[0] == 860001 and EVAL_SEEDS[1] == 860002
-    assert EVAL_SEEDS[99] == 860100
-    assert EVAL_SEEDS[100] == 860101 and EVAL_SEEDS[-1] == 860200
-    # 旧口径（≤100）逐字节兼容：前缀切片不变
-    assert EVAL_SEEDS[:100] == tuple(range(860001, 860101))
+    assert EVAL_SEEDS[0] == EVAL_SEEDS_BASE and EVAL_SEEDS[1] == EVAL_SEEDS_BASE + 1
+    assert EVAL_SEEDS[99] == EVAL_SEEDS_BASE + 99
+    assert EVAL_SEEDS[100] == EVAL_SEEDS_BASE + 100 and EVAL_SEEDS[-1] == EVAL_SEEDS_BASE + 199
+    # 池外：rollout 抽签在 [1, 2**30) ⇒ 永不相交；上界 2**31 是 32 位安全带
+    assert EVAL_SEEDS_BASE > ROLLOUT_SEED_MAX == 2**30
+    assert EVAL_SEEDS[-1] < 2**31
+    # 前缀切片即成员集（连续严格递增）
+    assert EVAL_SEEDS[:100] == tuple(range(EVAL_SEEDS_BASE, EVAL_SEEDS_BASE + 100))
 
 
 def test_d14_corpus_match_prefers_semantic_identity() -> None:

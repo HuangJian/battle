@@ -83,31 +83,24 @@ def _rows(n: int, **kw: object) -> list[dict]:
 # ----------------------------------------------------------------- P1-a 胜率口径
 
 
-def test_dual_track_row_prefers_anchor_wr() -> None:
-    """P1-a：summary 带 `anchor_wr` 时门读锚点轨，不读 200 局混轨 `winRate`。
+def test_gate_reads_winrate_and_ignores_legacy_anchor_wr() -> None:
+    """门只读 `winRate`（2026-10-22，固定池外语料）。
 
-    病根：`winRate` = 锚点 50 + 当轮轮转 50 的混轨口径，轮转段每轮换 ⇒ 逐点趋势
-    不可比。门若继续读它，趋势线会在双轨上线那天静默跳变。
+    语料不再轮换 ⇒ `winRate` 本身就是跨轮/跨课可比的读数，双轨时代的 `anchor_wr`
+    （锚点 50 局）退场；旧行里还留着它，门按「不存在的字段」处理——两套口径并存
+    只会让趋势线在切换日静默跳变（同类病见 2026-09-15 P1-a）。
     """
     r = _row(7, wr=0.50)
-    r["anchor_wr"] = 0.72  # 锚点轨读数和 winRate 故意不同
+    r["anchor_wr"] = 0.72  # 故意不同：读的是哪一个由此断言
     rows = normalize_rows([r])
     assert len(rows) == 1
-    assert rows[0].win_rate == 0.72
+    assert rows[0].win_rate == 0.50
 
-
-def test_old_rows_fall_back_to_winrate() -> None:
-    """旧行（双轨上线前）无 `anchor_wr` → 回退 `winRate`，历史逐点仍可比。"""
-    rows = normalize_rows(_rows(3, wr=0.60))
-    assert [x.win_rate for x in rows] == [0.60, 0.60, 0.60]
-
-
-def test_anchor_wr_none_falls_back_to_winrate() -> None:
-    """`anchor_wr` 显式为 None（缺台账行）不能把胜率吞成 0——回退 winRate。"""
-    r = _row(9, wr=0.41)
-    r["anchor_wr"] = None
-    rows = normalize_rows([r])
-    assert rows[0].win_rate == 0.41
+    # 旧行（无该字段）与显式 None 都不影响读数
+    assert [x.win_rate for x in normalize_rows(_rows(3, wr=0.60))] == [0.60, 0.60, 0.60]
+    r2 = _row(9, wr=0.41)
+    r2["anchor_wr"] = None
+    assert normalize_rows([r2])[0].win_rate == 0.41
 
 
 FROZEN_NOW = 1_700_000_000.0

@@ -6,7 +6,14 @@
  * 不静默补编造数据（缺失 gameplay 字段填 0/null 并进覆盖率报告）。
  */
 
-import { appendRow, dataRootOk, loadDedupKeys, segmentOfSeed, type EvalGameRow } from './store'
+import {
+  appendRow,
+  dataRootOk,
+  loadDedupKeys,
+  segmentOfSeed,
+  seedSpaceOf,
+  type EvalGameRow,
+} from './store'
 
 /** ingest 上下文（调用方=训练进程：归属 + 引擎身份 + 批次）。 */
 export interface IngestCtx {
@@ -100,7 +107,7 @@ export function ingestEvalRow(raw: RawEvalRow, ctx: IngestCtx, ts?: string): Eva
   const source: EvalGameRow['source'] =
     raw.source === 'B' || raw.source === 'C' ? raw.source : ctx.source
   const batchId = typeof raw.batch_id === 'string' && raw.batch_id ? raw.batch_id : ctx.batch_id
-  const seedSpace = seed >= 860001 && seed <= 860100 ? ('eval860k' as const) : ('probe0' as const)
+  const seedSpace = seedSpaceOf(seed)
   const mapHash = ctx.mapHashOfStage?.(stage) ?? 'unknown'
   return {
     schema: 1,

@@ -151,7 +151,6 @@ describe('列模型：完整性（键 ↔ 定义）', () => {
   it('配对列的 hover 口径与 view/format.ts 同源（不是第二份文案）', () => {
     expect(METRIC_COLS.b01.title).toBe('基线输、新权重赢的局数——新学会的本事，涨没涨看它')
     expect(METRIC_COLS.delta.title?.startsWith('净涨幅=b01−b10')).toBe(true)
-    expect(METRIC_COLS.overfit.title?.length).toBeGreaterThan(10)
   })
 })
 

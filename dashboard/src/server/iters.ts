@@ -810,9 +810,6 @@ function collectEvalSummaries(
           dmgPerKill: null,
           scoreMean: null,
           scoreStd: null,
-          anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
-          rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
-          overfitGapPp: typeof r.overfit_gap_pp === 'number' ? r.overfit_gap_pp : null,
         })
       } catch {
         /* skip bad line */
@@ -1222,11 +1219,15 @@ export function compareSeedMaps(
   }
 }
 
-/** 配对裁判（只读哨子，不进门判）：最新 eval vs it0 基线（bc 权重）/ vs 上一 eval 轮。
+/** 配对裁判（只读哨兵，不进门判）：最新 eval vs it0 基线（bc 权重）/ vs 上一 eval 轮。
  *
  * 同 (stage,seed) 逐局配对，比较的是同一语料下两个 checkpoint 的贪心胜负——
- * 跨语料（bc 在 0-99 vs 新权重在 860001+）时差分把卷面难度抵消掉。一边缺席的
- * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。 */
+ * 跨语料（不同轮用了不同 seed 集）时差分把卷面难度抵消掉。一边缺席的
+ * 局只计 unpaired 诚实披露。单轮/无数据 → 对应项 null（UI 空态）。
+ *
+ * 2026-10-22（DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：A 层语料改成**固定池外池**
+ * （每轮同一批 (stage,seed)）⇒ 这一列从「半数 unpaired」变成**逐局全配对**，它读到的
+ * 差异才是策略差异而不是卷面差异。 */
 /** 从「逐局胜负表」组装配对裁判（路径版与内容版共用）。 */
 export function buildPairedReferee(
   byIter: Map<number, Map<string, boolean>>,

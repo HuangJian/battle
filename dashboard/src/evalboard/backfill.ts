@@ -1,7 +1,7 @@
 /** backfill.ts — P4 回填入队（plan/rl-eval-system.md §10.5）。
  *
  * 回填 p3-kb1 / c4-kb1 / c4-margin 三腿各 3–5 个关键 ckpt × 阶梯前 3 关 × 100 局
- * （≤4500 局，eval860k 空间）。k_seq 全 0 → 同 100 seed（段 0）→ ckpt 间配对可比。
+ * （≤4500 局，B/C 层 860xxx 段空间）。k_seq 全 0 → 同 100 seed（段 0）→ ckpt 间配对可比。
  * only_rungs 精确到单关，避免门控前瞻多跑（预算内）。
  *
  * **写路径（2026-09-11 修正）**：此前直接 `enqueueBatch` 写 `batches.jsonl`，

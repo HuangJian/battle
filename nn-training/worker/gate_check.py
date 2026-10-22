@@ -43,7 +43,6 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.platform_utils import force_utf8_stdio
-from worker.eval_local import rotor_offset
 
 # ---- 输入面 + 判决面已下沉（S5 第十五刀，2026-09-27）-------------------------------
 # 实现搬家、名字留门面：全仓 `from biz.gate_check import …` 与外部调用点一行不改
@@ -601,38 +600,7 @@ def _notes(course: Any, rows: Sequence[Mapping[str, Any]]) -> list[str]:
         )
     )
     notes += list(spec.power_notes(games_per_point))
-    notes += _rotation_notes(rows)
     return notes
-
-
-def _rotation_notes(rows: Sequence[Mapping[str, Any]]) -> list[str]:
-    """双轨轮转退化告警（P2-a，2026-09-15；warn-only）。
-
-    `rotor_offset` 周期 3 ⇒ 轮转轨要真正转起来，两次 A-eval 的 iter 间隔必须**不**是
-    3 的倍数。`--eval-every 3/6/9` 或 `--eval-at '30,60,90'` 会让每次落到同一段 ⇒
-    轮转轨退化为固定段、"没见过"的那部分种子永远没被评估（过拟合报警失去对照）。
-    只在确实能看出病灶时报警（≥3 个评估点、全落同一段），不误伤正常腿。
-    """
-    points: list[tuple[int, int]] = []
-    for r in rows:
-        if r.get("event") != "eval_summary":
-            continue
-        it = r.get("iter")
-        wr = r.get("rotor_wr")
-        if not isinstance(it, int) or not isinstance(wr, (int, float)):
-            continue
-        points.append((it, rotor_offset(max(1, it))))
-    if len(points) < 3:
-        return []
-    if len({off for _, off in points}) > 1:
-        return []
-    its = [it for it, _ in points]
-    return [
-        f"双轨轮转退化：{len(points)} 个评估点（iter {its[0]}..{its[-1]}）全部落在同一轮转段 "
-        f"(下标 {points[0][1]})——两次 eval 的 iter 间隔是 3 的倍数（--eval-every / "
-        "--eval-at 所致）。轮转轨形同固定段，过拟合报警失去对照；改用非 3 倍数的间隔"
-        "（如 eval_every=2/4/5）"
-    ]
 
 
 if __name__ == "__main__":

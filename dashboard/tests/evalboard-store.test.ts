@@ -4,10 +4,13 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import {
+  A_EVAL_SEED0,
+  A_EVAL_SEED_LEN,
   appendRow,
   assertComparable,
   coverageReport,
   dedupKeyOf,
+  EVAL_SEED0,
   GAMEPLAY_FIELDS,
   IncomparableError,
   loadDedupKeys,
@@ -17,6 +20,7 @@ import {
   segmentOf,
   segmentOfSeed,
   seed0OfSegment,
+  seedSpaceOf,
   type EvalGameRow,
 } from '../src/evalboard/store'
 
@@ -87,16 +91,33 @@ function row(over: Partial<EvalGameRow> = {}): EvalGameRow {
 }
 
 describe('segments (§2.2/§2.3)', () => {
-  it('seg = k % 16，seed0 = 860001 + 100×seg', () => {
+  it('seg = k % 16，seed0 = B/C 池基址 + 100×seg（A 层池另立）', () => {
     expect(segmentOf(0)).toBe(0)
     expect(segmentOf(16)).toBe(0)
     expect(segmentOf(17)).toBe(1)
-    expect(seed0OfSegment(0)).toBe(860001)
-    expect(seed0OfSegment(15)).toBe(861501)
-    expect(segmentOfSeed(860001)).toBe(0)
-    expect(segmentOfSeed(860100)).toBe(0)
-    expect(segmentOfSeed(860101)).toBe(1)
+    expect(seed0OfSegment(0)).toBe(EVAL_SEED0)
+    expect(seed0OfSegment(15)).toBe(EVAL_SEED0 + 1500)
+    expect(segmentOfSeed(EVAL_SEED0)).toBe(0)
+    expect(segmentOfSeed(EVAL_SEED0 + 99)).toBe(0)
+    expect(segmentOfSeed(EVAL_SEED0 + 100)).toBe(1)
     expect(segmentOfSeed(42)).toBe(-1)
+    // 历史行（旧池 860001 起）的段号必须与当年一致，否则重入不幂等
+    expect(segmentOfSeed(860001)).toBe(0)
+    expect(segmentOfSeed(860101)).toBe(1)
+    // A 层池（2e9 段）自成段号，与 B/C 池不相交
+    expect(segmentOfSeed(A_EVAL_SEED0)).toBe(0)
+    expect(segmentOfSeed(A_EVAL_SEED0 + 100)).toBe(1)
+  })
+
+  it('种子空间：A 层 eval2g / B/C 段 0 eval860k / 其余 probe0（禁止跨界相减）', () => {
+    expect(seedSpaceOf(A_EVAL_SEED0)).toBe('eval2g')
+    expect(seedSpaceOf(A_EVAL_SEED0 + A_EVAL_SEED_LEN - 1)).toBe('eval2g')
+    expect(seedSpaceOf(860001)).toBe('eval860k')
+    expect(seedSpaceOf(42)).toBe('probe0')
+    // A 层池在 rollout 抽签区间 [1, 2**30) 之外 ⇒ 与训练种子永不相交
+    expect(A_EVAL_SEED0).toBeGreaterThan(2 ** 30)
+    expect(A_EVAL_SEED0).toBeLessThan(2 ** 31) // 32 位有符号安全带
+    expect(EVAL_SEED0).toBe(860001) // B/C 层语料不动（Python batch_plan 同值）
   })
 })
 

@@ -376,7 +376,10 @@ LAYERS: dict[str, int] = {
     "worker.data.weights_meta": 0,
     "worker.engine_pool": 0,
     "worker.eval_heartbeat": 0,
-    "worker.eval_ingest": 0,
+    # 2026-10-22（DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：A 层语料池基址改为
+    # **单一来源**（`worker.eval_track.EVAL_SEEDS_BASE`，池外固定池）⇒ 本模块不再自带
+    # 860001 那份副本 ⇒ 顶层多一条 `worker.eval_track` 边 ⇒ 秩 **L1**（`worker.eval_track` L0）。
+    "worker.eval_ingest": 1,
     "worker.eval_rows": 0,
     "worker.eval_track": 0,
     "worker.eval_yield": 0,

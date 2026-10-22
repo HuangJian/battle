@@ -11,7 +11,6 @@ import {
   fmtNum,
   fmtPaired,
   fmtPct,
-  fmtOverfitGap,
   fmtPhaseSecs,
   heroMainRows,
   iterGroups,
@@ -19,8 +18,6 @@ import {
   latestRow,
   MAIN_ROW_KEYS,
   metricSeries,
-  overfitCellTitle,
-  overfitTone,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
@@ -469,17 +466,6 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                   ) : (
                     <span title={`${PAIRED_COL_TITLES.delta}；${pairedVerdictText(p.verdict)}`}>
                       {(p.deltaPp > 0 ? '+' : '') + p.deltaPp.toFixed(1)}pp
-                    </span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.overfitGapPp != null ? (
-                    <Badge tone={overfitTone(e.overfitGapPp)} title={overfitCellTitle(e)}>
-                      {fmtOverfitGap(e.overfitGapPp)}
-                    </Badge>
-                  ) : (
-                    <span className="tc-muted" title={overfitCellTitle(e)}>
-                      -
                     </span>
                   )}
                 </td>

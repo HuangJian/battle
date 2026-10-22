@@ -17,8 +17,21 @@ import path from 'path'
 export const EVAL_SCHEMA = 1
 /** 逐局行 metrics 口径版本（哨兵 S8 校验用）。 */
 export const EVAL_METRICS_VERSION = 1
-/** B/C 层种子空间（§2.2）：段 0 = EVAL_SEEDS（eval_local.py:28）。 */
+/** B/C 层（梯段批 / 判据批）段基址（§2.2/§2.3）：段 = 100 个连续 seed。
+ *
+ *  跨语言镜像 = `nn-training/trainer/batch_plan.py::EVAL_SEED0`（同值；改一侧必须同步另一侧，
+ *  否则 TS 侧规划出来的批与 Python 侧执行用的批跑的不是同一批局）。
+ *  ⚠ 这一层**不在**本次「A 层迁池」的范围内：B/C 语料有自己的历史读数与段语义，不动。 */
 export const EVAL_SEED0 = 860001
+/** A 层（in-loop eval）语料池基址（2026-10-22）：**训练池外**的固定池。
+ *
+ *  = `nn-training/worker/eval_track.py::EVAL_SEEDS_BASE`（跨语言常量，改一侧必须同步另一侧）。
+ *  取值条件：`2**30 < base < 2**31`——rollout 抽签在 [1, 2**30) ⇒ 与训练种子永不相交；
+ *  上界 2**31 给 32 位有符号假设留安全带（仿真侧 RNG 是 `seed >>> 0` 的 mulberry32）。
+ *  池**不含 it** ⇒ 每轮、每门同 level 的课评同一批 (stage,seed) ⇒ it 之间/课程之间逐点可比。 */
+export const A_EVAL_SEED0 = 2000000001
+/** A 层池长（= Python `EVAL_SEEDS` 长度 200）。 */
+export const A_EVAL_SEED_LEN = 200
 /** 每段局数（§2.3）。 */
 export const SEGMENT_LEN = 100
 /** 段数（§2.3：16 段稀释 winner's curse）。 */
@@ -32,8 +45,9 @@ export const WINDOW_GAMES = BATCH_GAMES * WINDOW_BATCHES
 
 /** 数据层（§2.1）。 */
 export type EvalSource = 'A' | 'B' | 'C'
-/** 种子空间（§2.2：禁止跨界相减）。 */
-export type SeedSpace = 'eval860k' | 'probe0' | 'stage1_60'
+/** 种子空间（§2.2：禁止跨界相减）。`eval2g` = A 层现役池外固定池，`eval860k` = B/C 层段 0
+ *  （也是旧 A 层读数所在的空间——换池前后分属两个空间，不得相减）。 */
+export type SeedSpace = 'eval2g' | 'eval860k' | 'probe0' | 'stage1_60'
 /** 策略（§3.2）。 */
 export type EvalPolicy = 'nn' | 'god'
 
@@ -172,11 +186,25 @@ export function seed0OfSegment(seg: number): number {
   return EVAL_SEED0 + SEGMENT_LEN * segmentOf(seg)
 }
 
-/** seed → 所属段（eval860k 空间内；空间外返回 -1）。 */
+/** seed → 所属段（A 层池优先；B/C 池次之；空间外 -1）。
+ *
+ *  两池不相交（A 层在 2e9 段，B/C 池在 860001 段）⇒ 同一个 seed 只会落进一个池。
+ *  B/C 段的段号与当年一致 ⇒ 历史行重入幂等。 */
 export function segmentOfSeed(seed: number): number {
-  const d = seed - EVAL_SEED0
-  if (d < 0 || d >= SEGMENT_LEN * SEGMENT_COUNT) return -1
-  return Math.floor(d / SEGMENT_LEN)
+  const a = seed - A_EVAL_SEED0
+  if (a >= 0 && a < A_EVAL_SEED_LEN) return Math.floor(a / SEGMENT_LEN)
+  const b = seed - EVAL_SEED0
+  if (b >= 0 && b < SEGMENT_LEN * SEGMENT_COUNT) return Math.floor(b / SEGMENT_LEN)
+  return -1
+}
+
+/** seed → 种子空间（A 层池 `eval2g` / B/C 段 0 `eval860k` / 其余 `probe0`；§2.2 禁止跨界相减）。
+ *
+ *  A 层与旧 A 层读数分属两个空间（`eval2g` vs `eval860k`）⇒ 换池前后不会被当成同一批局相减。 */
+export function seedSpaceOf(seed: number): SeedSpace {
+  if (seed >= A_EVAL_SEED0 && seed < A_EVAL_SEED0 + A_EVAL_SEED_LEN) return 'eval2g'
+  if (seed >= EVAL_SEED0 && seed < EVAL_SEED0 + SEGMENT_LEN) return 'eval860k'
+  return 'probe0'
 }
 
 /** probe_key 组装：`<rung>-<difficulty>-t<maxTicks>-<mapHash>-<seedSpace>`（§3.2）。 */

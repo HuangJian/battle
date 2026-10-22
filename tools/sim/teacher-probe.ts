@@ -8,12 +8,13 @@
  * 「BC 暖启 + PPO」。它不判关卡难度 / 不设门 / 不评梯度（教师是有缺陷的规则系统，
  * 不是天花板）。因此本工具只产出观测值，不产出任何 verdict。
  *
- * 种子 = Python 侧 `nn-training/biz/eval_local.py::EVAL_SEEDS = range(860001, 860201)`
- * 的前缀（200 局）；level 单关 ⇒ eval-course-ckpt 的 seed = seed0 + g，逐值对齐。
+ * 种子 = Python 侧 `nn-training/worker/eval_track.py::EVAL_SEEDS`（= `range(2000000001,
+ * 2000000201)`，2026-10-22 起的**训练池外**固定池）的前缀（200 局）；level 单关 ⇒
+ * eval-course-ckpt 的 seed = seed0 + g，逐值对齐。
  *
  * 用法：
  *   bun tools/sim/teacher-probe.ts [--levels c01,c02 | --levels all] [--games 200]
- *     [--seed0 860001] [--workers 8] [--out nn-training/ladder/reports/teacher-probe.json]
+ *     [--seed0 2000000001] [--workers 8] [--out nn-training/ladder/reports/teacher-probe.json]
  *     [--ledger nn-training/ladder/LEDGER.jsonc]
  */
 
@@ -54,8 +55,12 @@ export const TEACHER_LEVELS = [
   'ladder-c07',
 ] as const
 
-/** 与 nn-training/biz/eval_local.py::EVAL_SEEDS 首值一致（range(860001, 860201)）。 */
-export const EVAL_SEED0 = 860001
+/** 与 `nn-training/worker/eval_track.py::EVAL_SEEDS` 首值一致（range(2000000001, 2000000201)）。
+ *
+ *  2026-10-22：随 A 层评估语料迁到**训练池外**（`2**30 < base < 2**31`）——探针与
+ *  NN 评估必须同语料才可比；旧基址（860001）落在 rollout 抽签区间内，已退场。
+ *  旧台账条目的 `seeds` 字段记着当次 seed 区间 ⇒ 跨池读数不可比，可自查。 */
+export const EVAL_SEED0 = 2000000001
 
 export interface ScoreStats {
   games: number

@@ -7,6 +7,60 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §39 A 层评估语料改「固定池外池」：轮换退场，it 之间/课程之间逐点可比（2026-10-22；DECISIONS §2026-10-22-fixed-offpool-eval-seeds）
+
+**触发**（用户 2026-10-22）：「in-loop eval 改为固定池外种子（选个很大的随机数？避免和 rollout 种子有交集），
+不需要随机轮换，让使用相同 level 的不同课程也可以比较各轮 it 之间的胜率、击杀、耗时等指标。」
+
+**旧形态（双轨）**：A 层日常评估 = **锚点 50**（固定种子，跨轮配对可比）+ **轮转 50**（每 3 轮换一段，
+防记忆化）；summary 另落 `anchor_wr` / `rotor_wr` / `overfit_gap_pp`，门按 `anchor_wr` 判，
+网页多一列「过拟合 gap」，还有一条「轮转退化」告警（`--eval-every 3` 时轮转轨形同固定段）。
+
+**为什么它挡了用户要的那件事**：轮转段**每轮换一批局** ⇒ 不同课程（哪怕同 level）各轮 it 的胜率/击杀/耗时
+**不在同一批局上**，差异里混着卷面难度 ⇒ 逐点不可比。要「跨课程、跨 it 比较」，语料必须固定。
+
+**新形态（固定池外池）**
+
+1. **池在训练空间之外**：`worker/eval_track.py::EVAL_SEEDS_BASE = 2_000_000_001`，200 个种子。
+   取值条件 `2**30 < base < 2**31`——rollout 的种子是 `biz/course.build_pairs` 从
+   `rng.integers(1, 2**30)` 抽的 ⇒ 旧池（860001 起）**可能**与训练局撞同一 `(stage, seed)`（读数不独立），
+   新池与训练种子**永不相交**；上界 2**31 是给 32 位有符号假设留的安全带（仿真侧 RNG = `seed >>> 0` 的
+   mulberry32，硬上界 2**32）。**不是随机大数**：随机基址会让「同一批语料」事后无从核对。
+2. **池不含 it**：`a_eval_seed_list(it, n, baseline=…)` = `EVAL_SEEDS[:n]`（`it` / `baseline` 两个参数只为
+   兼容调用面保留）⇒ 同一关每轮评**同一批** `(stage, seed)`；it 之间、**同 level 的不同课程之间**的胜率/击杀/
+   耗时逐点可比。它是 in-loop / evalA / 云侧（`remote/offline_eval.py`）共用的**唯一**语料入口。
+3. **成本与精度一字不变**：课程写 `eval_games_per_stage: 50` 是双轨时代「锚点那一半」的配置 ⇒ 现在翻成
+   日常档 **100** 局/关（双轨时代是锚点 50 + 轮转 50 = 100，总量持平）。其它值（120/200/冒烟个位数）照配置
+   切片，不重映射。启动期「判决力够不够亮」的告警要按**实际**局数算 SE ⇒
+   `worker/loop_guards_gate.py` 用 `a_eval_seed_list` 翻译一次（不翻译就拿 50 局算 SE，报假警）。
+4. **双轨整族退场**：`anchor_wr` / `rotor_wr` / `overfit_gap_pp` 三字段、`_maybe_warn_overfit` 过拟合报警、
+   `rotor_offset` / `rotor_span` / `dual_track_seeds` / `is_anchor_seed` / `is_rotor_seed` /
+   `split_anchor_rotor` / `should_dual_track`、网页的「过拟合」列、`gate_check` 的「轮转退化」告警——
+   全部删掉。门（`worker/gate_inputs.py`）改读 `winRate`：固定池 ⇒ 这个读数本身就是逐点可比的。
+5. **B/C 层（梯段批 / 判据批）语料不动**：`trainer/batch_plan.py::EVAL_SEED0 = 860001` 有单测钉死，
+   那层有自己的历史读数与段语义 ⇒ 迁移等于另起一次实验，超出本次口径。两层因此分属**两个种子空间**
+   （A 层 `eval2g` / B/C 段 0 `eval860k`，dashboard `store.ts::seedSpaceOf`）⇒ 换池前后的 A 层读数
+   不会被当成同一批局相减。
+
+**代价（诚实账）**：锚点 vs 轮转那个**过拟合探测器**随双轨退场（它测「熟题分高、生题分低」；池外固定池下
+没有第二批局可比）。留下的是**选择噪声**：在同一批 100 局上反复挑 ckpt ⇒ winner's curse；靠 100 局
+（SE≈5pp）+ 配对比较 + 逐轮同语料来控。另外**换池是一次性台阶**：迁池前后的 A 层读数不在同一批局上，
+不可直接相减（门按 `course_fp` 另有一层隔离）。
+
+**落点**：`nn-training/worker/eval_track.py`（池 + `a_eval_seed_list` + summary 结算）·
+`nn-training/worker/eval_local.py`（门面同步删名）· `nn-training/worker/gate_inputs.py`（门读 `winRate`）·
+`nn-training/worker/gate_check.py`（删轮转退化告警）· `nn-training/worker/loop_guards_gate.py`（局数翻译）·
+`nn-training/trainer/eval_dispatch.py` · `nn-training/trainer/eval_a_once.py` ·
+`nn-training/remote/offline_eval.py` · `nn-training/worker/eval_ingest.py`（段/空间镜像）·
+`dashboard/src/evalboard/store.ts`（`A_EVAL_SEED0` + `seedSpaceOf`）· `dashboard/src/evalboard/ingest.ts` ·
+`dashboard/src/server/iters.ts` + `dashboard/src/web/view/*`（删「过拟合」列）· `tools/sim/teacher-probe.ts`
+（教师探针跟着换池，否则教师与学生的语料不再同批）· `tools/diag/rl-hourly-inspect.ts`（删锚/轮读数）。
+**用例**：`nn-training/tests/worker/test_eval_seed_pool.py`（新，池外性 / it 不变性 / 50→100 翻译 /
+续跑去重 / summary 无双轨字段）、`test_eval_track_split.py`、`test_gate_check.py`、
+`test_gate_inputs_split.py`、`tests/remote/test_offline_eval_cloud.py`、
+`dashboard/tests/evalboard-{store,ingest,corpora}.test.ts`、`tests/teacher-probe.test.ts`。
+
+---
 ## §38 同族课程产物直取：并行课不再把同一局各算一遍（2026-10-22；DECISIONS §2026-10-22-sibling-episode-reuse）
 
 **触发**（用户 2026-10-22，两段口径）：现在经常同时开多条并行课（y30 四腿），用相同起始权重。

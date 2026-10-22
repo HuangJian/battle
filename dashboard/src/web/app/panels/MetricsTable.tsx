@@ -12,14 +12,11 @@ import {
   filterGroups,
   fmtLootPickDrop,
   fmtNum,
-  fmtOverfitGap,
   fmtPct,
   fmtPhaseSecs,
   iterGroups,
   klTone,
   METRIC_COLS,
-  overfitCellTitle,
-  overfitTone,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
@@ -310,29 +307,6 @@ function skillCols(): Col<MetricRow>[] {
   ]
 }
 
-function overfitCol(): Col<MetricRow> {
-  return {
-    ...colDef('overfit'),
-    sortValue: (r) => (r.kind === 'eval' ? (r.eval.overfitGapPp ?? null) : null),
-    cell: (r) => {
-      if (r.kind !== 'eval') return <span className="tc-muted">-</span>
-      const gap = r.eval.overfitGapPp
-      if (gap == null) {
-        return (
-          <span className="tc-muted" title={overfitCellTitle(r.eval)}>
-            -
-          </span>
-        )
-      }
-      return (
-        <Badge tone={overfitTone(gap)} title={overfitCellTitle(r.eval)}>
-          {fmtOverfitGap(gap)}
-        </Badge>
-      )
-    },
-  }
-}
-
 /**
  * 列工厂。
  * - eval-only：列结构与顺序与首页 Hero EvalTable 逐列一致
@@ -392,7 +366,6 @@ function buildMetricCols(
       timeCol,
       winRateCol('evalRate'),
       ...pairedCols(baselineIter),
-      overfitCol(),
       ...skillCols(),
       scoreCol,
       {
@@ -418,7 +391,6 @@ function buildMetricCols(
     iterCol(ea),
     timeCol,
     winRateCol('winRate'),
-    overfitCol(),
     ...skillCols(),
     {
       ...colDef('phaseSecs'),

@@ -123,16 +123,16 @@ def test_eval_plan_reads_the_course_and_gates_on_eval_every() -> None:
     assert eval_plan_of(_course(eval_stages="")).stages == (0, 1)
 
 
-def test_eval_pairs_are_the_in_loop_corpus_including_dual_track() -> None:
-    """语料必须是 in-loop 的 `a_eval_seed_list`（含双轨锚点+轮转），且逐局同序。"""
+def test_eval_pairs_are_the_in_loop_corpus() -> None:
+    """语料必须是 in-loop 的 `a_eval_seed_list`（固定池外、不轮换），且逐局同序。"""
     plan = eval_plan_of(_course(eval_stages="0-1", eval_games_per_stage=50))
     for it in (1, 2, 3, 4):
         want = [(s, sd) for s in (0, 1) for sd in a_eval_seed_list(it, 50)]
         assert eval_pairs(plan, it) == want
-    # 双轨：it 变化 ⇒ 轮转轨跟着变（锚点那 50 个种子不变）——云机与 in-loop 同一口径
+    # it 变化不改语料（日常档 50 配置 → 每关 100 局）：云机与 in-loop 同一口径
     p1, p2 = {sd for _, sd in eval_pairs(plan, 1)}, {sd for _, sd in eval_pairs(plan, 2)}
-    assert p1 != p2
-    assert len(p1) == 100, "n_seeds==50 时双轨 = 锚点 50 + 轮转 50"
+    assert p1 == p2
+    assert len(p1) == 100, "n_seeds==50 ⇒ 日常档 100 局/关（与双轨总量持平）"
 
 
 # ─────────────────────────── 逐局执行（含失败容忍 / 去重） ───────────────────────────

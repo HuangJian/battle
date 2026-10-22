@@ -38,6 +38,9 @@ LEVELS_DIR = REPO_ROOT / "nn-training" / "levels"
 
 REGRESSION_EVERY = 3  # 与 runner.ts 同值（双侧镜像，改一侧必须同步另一侧）
 BATCH_STAGE_BASE = 2000
+#: B/C 层（梯段批 / 判据批）段基址（跨语言常量 = `dashboard/src/evalboard/store.ts::EVAL_SEED0`）。
+#: ⚠ 与 A 层（in-loop eval）语料池**不是**同一个池：A 层在 `worker/eval_track.py::EVAL_SEEDS_BASE`
+#: （2026-10-22 起的训练池外固定池），本池（B/C）保持 860xxx 不动（有自己的历史读数与段语义）。
 EVAL_SEED0 = 860001
 SEGMENT_LEN = 100
 

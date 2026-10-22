@@ -25,77 +25,27 @@ from common.protocol import UnreapableChildError
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（biz/ 上溯 3 层，修正 2026-09-03）
 
 # ---------------------------------------------------------------------------
-# 双轨评估（种子分类 + 过拟合报警 + summary 结算）已下沉 `biz/eval_track.py`
-# （S5 第三刀，2026-09-27）。实现搬家、名字留门面：全仓调用点与测试一行不改。
+# 评估种子池 + summary 结算已下沉 `worker/eval_track.py`（S5 第三刀，2026-09-27）。
+# 实现搬家、名字留门面：全仓调用点与测试一行不改。
+# 2026-10-22：双轨（锚点/轮转 + 过拟合报警）退场，门面同步删掉那些名字。
 # ---------------------------------------------------------------------------
 from worker.eval_track import (
-    _ANCHOR_SEED_SET as _ANCHOR_SEED_SET,
-)
-from worker.eval_track import (
-    _ROTOR_SEED_SET as _ROTOR_SEED_SET,
-)
-from worker.eval_track import (
-    DUAL_TRACK_ANCHOR as DUAL_TRACK_ANCHOR,
-)
-from worker.eval_track import (
-    DUAL_TRACK_ROTOR as DUAL_TRACK_ROTOR,
-)
-from worker.eval_track import (
     EVAL_SEEDS as EVAL_SEEDS,
-)
-from worker.eval_track import (
-    OVERFIT_GAP_PP as OVERFIT_GAP_PP,
-)
-from worker.eval_track import (
-    OVERFIT_PERSIST_ROUNDS as OVERFIT_PERSIST_ROUNDS,
 )
 from worker.eval_track import (
     _acc as _acc,
 )
 from worker.eval_track import (
-    _maybe_warn_overfit as _maybe_warn_overfit,
-)
-from worker.eval_track import (
     _ratio as _ratio,
-)
-from worker.eval_track import (
-    _read_recent_track_wrs as _read_recent_track_wrs,
 )
 from worker.eval_track import (
     a_eval_seed_list as a_eval_seed_list,
 )
 from worker.eval_track import (
-    dual_track_seeds as dual_track_seeds,
-)
-from worker.eval_track import (
-    is_anchor_seed as is_anchor_seed,
-)
-from worker.eval_track import (
-    is_rotor_seed as is_rotor_seed,
-)
-from worker.eval_track import (
-    overfit_fires as overfit_fires,
-)
-from worker.eval_track import (
-    overfit_gap_pp as overfit_gap_pp,
-)
-from worker.eval_track import (
     report_winrate_safe as report_winrate_safe,
 )
 from worker.eval_track import (
-    rotor_offset as rotor_offset,
-)
-from worker.eval_track import (
-    rotor_span as rotor_span,
-)
-from worker.eval_track import (
     settle_eval_summary as settle_eval_summary,
-)
-from worker.eval_track import (
-    should_dual_track as should_dual_track,
-)
-from worker.eval_track import (
-    split_anchor_rotor as split_anchor_rotor,
 )
 
 # ---- 「评估让位/份额（尾巴）策略」已下沉 `biz/eval_yield.py`（S5 第十二刀，2026-09-27）-----

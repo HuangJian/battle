@@ -134,19 +134,17 @@ def _build_row(r: Mapping[str, Any]) -> EvalRow | None:
 
     非 eval_summary / 无 games 的行丢弃。
 
-    胜率口径（2026-09-15，P1-a）：日常 A-eval 起 summary 带 `anchor_wr`
-    （锚点段 50 局，固定种子、跨轮配对可比），此时**门按锚点轨判**；
-    `winRate` 是 200 局混轨口径（锚点 + 当轮轮转段），跨轮换段 ⇒ 逐点趋势
-    不可比，只作展示与旧行回退。旧行（双轨上线前）无 `anchor_wr` → 回退 `winRate`。
-    这里是门内**唯一**的胜率入口 ⇒ G1 / G10 / plateau / pool 全部随之跟到锚点轨。
+    胜率口径（2026-10-22，DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：门读
+    `winRate`。评估语料是**固定池外池**（每轮/每门同 level 的课同 (stage,seed)）⇒
+    这个读数本身就跨轮配对可比，不需要（也不再存在）「锚点轨」特例；旧行的
+    `anchor_wr` 只留在历史行里，门不再按它分流（口径切换的一次性台阶记在决定里）。
+    这里是门内**唯一**的胜率入口 ⇒ G1 / G10 / plateau / pool 全部同源。
     """
     if r.get("event") != "eval_summary":
         return None
     games = r.get("games")
     wins = r.get("wins")
-    wr = r.get("anchor_wr")
-    if not isinstance(wr, (int, float)):
-        wr = r.get("winRate")
+    wr = r.get("winRate")
     if not isinstance(games, int) or games <= 0:
         return None
     if not isinstance(wins, int):

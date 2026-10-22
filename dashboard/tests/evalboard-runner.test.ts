@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'bun:test'
 import { batchIterId, planBatch, REGRESSION_SEG, seedsOfSegment } from '../src/evalboard/runner'
 import { buildLadder } from '../src/evalboard/ladder'
+import { EVAL_SEED0 } from '../src/evalboard/store'
 
 describe('planBatch (§4.3)', () => {
   const ladder = buildLadder()
@@ -16,7 +17,7 @@ describe('planBatch (§4.3)', () => {
     // k=2 → 回归位
     const p2 = planBatch({ batch_id: 'b2', course: 'c', ladder, ladderPos: 0, k: 2 })
     expect(p2.units.length).toBe(3)
-    expect(p2.units[2].seed0).toBe(860001 + 100 * REGRESSION_SEG)
+    expect(p2.units[2].seed0).toBe(EVAL_SEED0 + 100 * REGRESSION_SEG)
     expect(p2.units[2].rung).toBe('c4l1')
     // k 派生段：k=17 → seg 1（per-(course,rung) 序号，非全局 id）
     const p17 = planBatch({ batch_id: 'b17', course: 'c', ladder, ladderPos: 3, k: 17 })
