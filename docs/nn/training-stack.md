@@ -7,6 +7,72 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §36 PPO 步耗是 **GPU kernel 时间**，不是 CPU/同步：三路「省主机」全部判死（2026-10-21）
+
+**读数**（Colab T4，`PPO_PROFILE=1 PPO_PROFILE_STEPS=5`，24 chunks × 4 epochs = 96 步）：
+
+- `step wall median=488.1ms p95=539.1ms`；**`Self CUDA time total = 2.341s / 5 步 = 468ms/步`** ⇒
+  墙钟的 **96% 是设备 kernel 在跑**（每步只有 ~20ms 间隙）。
+- `Self CPU time total = 3.460s / 5 步 = 692ms/步` **不是「主机在算」**：那是 CUDA API 排队阻塞
+  （GPU 反压）的时间，不能按它判 `CPU ≫ CUDA`。
+- 设备侧大头（占 CUDA 时间）：`conv_depthwise*` 反向三项 **1.11s = 47%** · `convolution_backward` 1.26s ·
+  `threshold_backward` 183ms · `add_`/`clamp_min`/elementwise 各 5–8% · 1×1 的
+  `scudnn_128x64_splitK` 289ms（12%）。
+
+**因此判死的三条**（以后不要再提）：
+
+1. **threads（1→2）**：只影响主机算子；关键路径是设备 kernel，提到 2 也不会有感知。
+2. **CUDA graph**（plan §4.6）：CPU≫CUDA 的前提不成立；每步只有 ~20ms 可抢。
+3. **同卡多 worker 吃聚合**：GPU 已 96% 忙，第二个进程只是把同一批 kernel 切开，聚合吞吐不涨
+   （这点推翻了同日早先「利用率个位数 ⇒ 并发 ≈ N×」的猜测——`6% of peak` 是**效率低**不是**卡闲着**）。
+
+**仍未判死的**：fp16（T4 有 tensor core，plan §4.7 已列「单独立项」；要接受导出 fp32 / 训练 fp16 的双轨）·
+模型结构（5×5 depthwise 占设备时间近一半，换 3×3 省 ~64% 那块数学，但要重训 + TS 双胞胎同步改）。
+**§4.7 的一个前提被推翻**：`cudnn.benchmark` 当时以「kernel 效率不是瓶颈」否决——本次读数说明
+正是瓶颈（算法选择层面的 A/B 值得做，但换算法 ⇒ 数值可能漂，红线仍是 TS 逐字节）。
+
+**复读法**：`PPO_PROFILE=1 PPO_CUDA_DIAG=1` 跑一单；`n` 会少 `PPO_PROFILE_STEPS`（采样步不进 median）。
+
+### 原始输出（未改写，一手数据）
+
+来源：Colab T4（`colab-t`），job `057252a24d56a2e8`，2026-10-21 13:54，进程代码 `sha12=e1cc0356e813`，
+`PPO_PROFILE=1`，采样 5 步（`PPO_PROFILE_STEPS=5`；缺省 10 步，钩 1–50）。表头/列名是 torch 原样，
+`aten::` 行的时间**包含**其 kernel（两族不能相加）。
+
+```text
+[13:54:10] job 057252a24d56a2e8: 准备完成 7.2s｜...｜设备=cuda｜n=1｜[0]=Tesla T4｜cap=(7, 5)｜dp=False｜threads=1｜...
+[13:54:15] [ppo] profile（前 5 步，按 self CUDA 时间降序；CPU / CUDA 两列同表）:
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+                             aten::convolution_backward         0.22%       7.670ms        10.12%     350.288ms       4.121ms        1.260s        53.83%        1.328s      15.619ms            85
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     505.883ms        21.61%     505.883ms      12.647ms            40
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     327.643ms        14.00%     327.643ms       8.191ms            40
+_5x_cudnn_volta_scudnn_128x64_stridedB_splitK_medium...         0.00%       0.000us         0.00%       0.000us       0.000us     288.631ms        12.33%     288.631ms       7.216ms            40
+                                aten::_conv_depthwise2d         0.09%       3.157ms         0.17%       5.788ms     144.691us     278.554ms        11.90%     288.908ms       7.223ms            40
+void at::native::(anonymous namespace)::conv_depthwi...         0.00%       0.000us         0.00%       0.000us       0.000us     278.554ms        11.90%     278.554ms       6.964ms            40
+                               aten::threshold_backward         0.25%       8.680ms         0.35%      11.997ms     133.295us     183.160ms         7.82%     183.160ms       2.035ms            90
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     183.127ms         7.82%     183.127ms       2.154ms            85
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     172.837ms         7.38%     172.837ms     751.466us           230
+                                             aten::add_         0.34%      11.758ms         0.43%      14.983ms      41.050us     153.524ms         6.56%     155.193ms     425.186us           365
+void at::native::vectorized_elementwise_kernel<4, at...         0.00%       0.000us         0.00%       0.000us       0.000us     126.735ms         5.41%     126.735ms       1.267ms           100
+                                        aten::clamp_min         0.52%      17.888ms         0.66%      22.982ms     255.360us     126.711ms         5.41%     128.189ms       1.424ms            90
+                                aten::cudnn_convolution         4.49%     155.194ms         5.57%     192.806ms       4.285ms     112.062ms         4.79%     263.431ms       5.854ms            45
+                                  Lazy Function Loading         0.12%       4.085ms         0.12%       4.085ms      39.279us     108.085ms         4.62%     108.085ms       1.039ms           104
+                                  volta_sgemm_128x64_nn         0.00%       0.000us         0.00%       0.000us       0.000us      90.865ms         3.88%      90.865ms       2.019ms            45
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------
+Self CPU time total: 3.460s
+Self CUDA time total: 2.341s
+
+[13:55:00] [ppo] step wall median=488.1ms p95=539.1ms n=89（已剔前 2 步 warmup，总 91 步）
+[13:55:00] job 057252a24d56a2e8: PPO done in 49.9s｜进度=epoch 4/4 done (49s total, 24 chunks)｜...
+```
+
+附注（当次同时出现，不影响读数）：`torch/profiler/profiler.py:224: UserWarning: Profiler clears events at
+the end of each cycle.` —— 单次 `profile()` 上下文只有一个 cycle，表就是这 5 步的全量；
+`Lazy Function Loading 108ms` 是 cuDNN 首次懒加载的一次性开销（5 步样本里约占 2%，看 10 步更干净）。
+
+---
 ## §35 y26 线切腿 A（`policyExtra=true`）：POLICY_EXTRA(57) 第一次真正进网络（2026-10-20）
 
 **起因**：`experiments.md §119` 查明 y26 六腿模型全是 `policyExtra=false` 档 —— `move_head` 宽 128、

@@ -206,6 +206,23 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "触顶 = 停采 + 响亮日志",
     )
     ap.add_argument(
+        "--volume-pool-mult",
+        type=float,
+        default=_d("volume_pool_mult", 0),
+        help="采集**候选池**的过供倍数（0/缺省 = `DEFAULT_POOL_MULT`=2）："
+        "派出去的是「缺口 × 本值」的一池候选，逐关满额即停 ⇒ 池里剩下的从不运行",
+    )
+    # 分关 est 的聚合口径（2026-10-21，plan/rollout-corpus-supply 评审 #8）：**只用于 A/B**。
+    # 缺省 latest；pooled 是 2026-10-21 之前的旧口径（近 3 轮池化，局长变短时结构性偏高）。
+    # 谁对谁错要靠 `est_raw / est_actual` 的实测分布判，不靠论证 ⇒ 先给一个能对着跑三档的旋钮。
+    ap.add_argument(
+        "--est-agg",
+        choices=("latest", "pooled"),
+        default=_d("est_agg", "latest"),
+        help="分关局均 est 的聚合：latest=最近一个**真有 shard** 的轮（缺省）；"
+        "pooled=近 3 轮池化（旧口径，A/B 用）",
+    )
+    ap.add_argument(
         "--rotate-stages",
         type=int,
         default=_d("rotate_stages", 0),

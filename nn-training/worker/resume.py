@@ -296,6 +296,7 @@ def trailing_stage_samples_per_game(
     window_iters: int = 3,
     fallback: int = 1,
     agg: str = "pooled",
+    exclude_it: int | None = None,
 ) -> dict[int, int]:
     """近几轮盘上 shard 的 **分关** 局均 nSamples（连续配额 est_s）。
 
@@ -305,10 +306,19 @@ def trailing_stage_samples_per_game(
     `agg`（2026-10-21，plan/rollout-corpus-supply §3.1 A0-b）：
       * `"pooled"`（缺省，旧口径）= 窗口内**池化**求和（`Σsamples/Σgames`）——
         局长在变短时**结构性偏高**（窗口里混着更早的长局）；
-      * `"latest"` = **只取最近一轮**（按 mtime）。路线（it62→it63）显示 est 的主成分是
+      * `"latest"` = **只取最近一轮**。路线（it62→it63）显示 est 的主成分是
         **逐轮跳变**（±40%）而不是单调高估，所以「取 min」会把跳变放大到最保守一侧，
-        而「取最近一轮」跟得上趋势。最近一轮还没落 shard ⇒ 回退 `fallback`，**不**回读
-        更早的轮（回读 = 把上一次的局长当成这一次的）。
+        而「取最近一轮」跟得上趋势。
+        ★ 2026-10-21 修正（plan 评审 P0）：**「最近一轮」= 最近一个真有 shard 的轮**，
+        不是「mtime 最新的目录」。训练循环在开跑前就把 `traj_root/it{N}` mkdir 出来
+        （`trainer/loop_round_steps.step_prepare_iter`），所以「最新目录」在**每轮首批**
+        恒等于「正在跑的那一轮的空目录」⇒ 旧实现每次都回退 `fallback`（全局单值），
+        把 `rollout-stage-balance` 的分关估计静默抹平。
+
+    `exclude_it`（2026-10-21，同一条 P0）：**调用方知道「正在跑哪一轮」时必须传**
+    （trainer 传当前 `it`），否则刚 mkdir 的空目录/半轮 shard 会被当成"历史"。
+    传了就按「已完成轮」取窗口——`agg="latest"` 于是拿到**上一轮的分关值**，
+    而不是一个全关相同的 fallback。
 
     `fallback ≤ 0` 合法（= **无估计**）：该关返回 `0`，调用方按「不猜」档处理
     （plan/rollout-estfree-worksteal §4.1）——**不许**在这里把它抬成 1（那会反解出巨大批）。
@@ -328,15 +338,21 @@ def trailing_stage_samples_per_game(
                 it_cands.append((p.stat().st_mtime, p))
         except OSError:
             continue
-    it_dirs = [p for _mt, p in sorted(it_cands, key=lambda t: t[0], reverse=True)][
-        : max(1, int(window_iters))
-    ]
-    if agg == "latest":
-        # 只读最近一轮：窗口的意义是「跨轮平滑」，而这里的趋势是**走得比平滑快**。
-        it_dirs = it_dirs[:1]
+    # ★ 先剔除「正在跑的那一轮」再切窗口：否则窗口被一个空目录占掉一格
+    #   （pooled 少读一轮、latest 直接空转）。名字比对而不是 mtime 比对——mtime 会被
+    #   清场/续跑刷新，名字是唯一稳定键（`self._traj_dir = traj_root / f"it{it}"`）。
+    ordered = [p for _mt, p in sorted(it_cands, key=lambda t: t[0], reverse=True)]
+    if exclude_it is not None:
+        skip = f"it{int(exclude_it)}"
+        ordered = [p for p in ordered if p.name != skip]
+    # `latest`：从新到旧逐轮看，**第一个真有 shard 的轮**就是「最近一轮」（由下面的累积循环
+    #   `added > 0` 提前 break）——空目录 = 正在跑/崩掉的那一轮，不是数据。
+    # `pooled`：窗口照旧（每轮都读，空轮只是贡献 0）。
+    it_dirs = ordered if agg == "latest" else ordered[: max(1, int(window_iters))]
     games: dict[int, int] = defaultdict(int)
     samples: dict[int, int] = defaultdict(int)
     for it_dir in it_dirs:
+        added = 0
         for d in walk_shard_dirs(it_dir, with_manifest=True):
             mp = d / MANIFEST_NAME
             try:
@@ -353,6 +369,9 @@ def trailing_stage_samples_per_game(
                 continue
             games[int(st)] += 1
             samples[int(st)] += int(n)
+            added += 1
+        if agg == "latest" and added > 0:
+            break  # 只读这一轮（它真有 shard）
     out: dict[int, int] = {}
     fb = max(0, int(fallback))
     for st in stage_set:

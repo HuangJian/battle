@@ -85,6 +85,7 @@ def run_rollout_queue(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    pool_halt: bool = False,
 ) -> dict:
     """中央队列调度（薄包装：RolloutDispatcher 构造 + run，OO 实现在 trainer/dispatch.py）。"""
     from trainer.dispatch import RolloutDispatcher
@@ -106,4 +107,5 @@ def run_rollout_queue(
         extra_wver,
         course_fp,
         corpus_fp,
+        pool_halt,
     ).run()

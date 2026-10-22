@@ -203,10 +203,31 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     except ProtocolError as e:
         ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
         ctx.last_opt_sha = ""
-    pairs = pairs_for(ctx.plan, it)
-    spec = iter_spec(ctx.plan, it, pairs, wver=init_fp, course=ctx.course)
+    # ★ 2026-10-22（用户口径「有几个 worker 铺多少局」）：自主机自己 rollout ⇒ 宽度就是
+    #   `ctx.rollout_workers`（缺省 = 本机 `cpu_worker_slots()`，见 plan_handoff 的装配），
+    #   **不 ping 任何人、不看 hub 的 plan 声明**。plan 里的 `games_per_stage_by_stage` 是
+    #   打包时的缺口形状（est 反解），本机核数比它多就按宽度重铺；派发侧逐关满额即停，
+    #   多出来的候选不会白跑。无 `volume` 的老课程逐字走 `pairs_for`。
+    vol_probe = ctx.plan.get("volume")
+    if isinstance(vol_probe, dict):
+        from worker.volume_alloc import widen_by_width
+
+        _per = vol_probe.get("games_per_stage_by_stage")
+        _width = int(ctx.rollout_workers or 0)
+        if isinstance(_per, dict) and _per and _width > 0:
+            _wide = widen_by_width(_per, _width)
+            if sum(_wide.values()) > sum(int(v) for v in _per.values()):
+                ctx.log(
+                    f"it{it} 首批按本机宽度重铺：{sum(int(v) for v in _per)} → "
+                    f"{sum(_wide.values())} 局（workers={_width}）"
+                )
+                vol_probe = dict(vol_probe, games_per_stage_by_stage=_wide)
+    _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
+    pairs = pairs_for(_plan, it)
+    spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)
     spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
-    vol = ctx.plan.get("volume")
+    # 日志面用**重铺后的** plan（否则打出来的还是打包时的旧 G_s，与实采对不上）
+    vol = vol_probe
     # ★ 2026-09-24（日志节食）：这几行与 `run_job` 自己的入口/设备/装载读数是**同一个阶段**
     # （本轮上云从拼 spec 到 PPO 开算），所以攒进同一个 bundle，由 `run_job` 在装载完成时
     # 打**一行**（原来这里是 1 行 + 它那边 9 行）。

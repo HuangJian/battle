@@ -414,12 +414,16 @@ def _stub(**kw: Any) -> Any:
 
 
 def test_volume_plan_block_gates_run_from_the_new_home() -> None:
-    """★ `_volume_plan_block` 两道门真跑：非 per-tick / target≤0 一律 None（无声返回）。"""
+    """★ `_volume_plan_block` 两道门真跑：非 per-tick / target≤0 一律 None（无声返回）。
+
+    `it` 是 2026-10-21 评审 P0 加的（当时导出侧会读到本轮的空目录，分关 est 全变 fallback）；
+    两道门都在用它**之前**返回，所以门内行为与旧签名逐字一致。
+    """
     from trainer.loop_export import TrainingExport
 
     fn = cast(Any, TrainingExport._volume_plan_block)
-    assert fn(_stub(mode="intent", target_transitions=100)) is None  # mode 门
-    assert fn(_stub(mode="per-tick", target_transitions=0)) is None  # target 门
+    assert fn(_stub(mode="intent", target_transitions=100), 1) is None  # mode 门
+    assert fn(_stub(mode="per-tick", target_transitions=0), 1) is None  # target 门
 
 
 def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:

@@ -24,7 +24,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.resume import trailing_stage_samples_per_game
-from worker.volume_alloc import pick_stage_est, pull_est_low
+from worker.volume_alloc import (
+    pick_stage_est,
+    pool_games_by_stage,
+    pull_est_low,
+    quota_met,
+    widen_by_width,
+)
 
 
 def _shard(it_dir: Path, stage: int, seed: int, samples: int) -> None:
@@ -60,15 +66,45 @@ def test_latest_takes_only_the_newest_round(tmp_path: Path) -> None:
     assert latest[0] == 500, "latest 必须只读最近一轮；池进来就是把变短的局判高"
 
 
-def test_latest_falls_back_when_newest_round_has_no_shards(tmp_path: Path) -> None:
-    """最近一轮还没落 shard（刚开轮）⇒ 回退 fallback，**不**回读更早的轮。
+def test_latest_skips_the_in_progress_round(tmp_path: Path) -> None:
+    """★ 2026-10-21 评审 P0：**正在跑的那一轮**不是历史，必须跳过。
 
-    回读更早的轮会把上一次的局长当成这一次的——正是本轮要消灭的高估源。
+    现场形状：`step_prepare_iter` 在每轮开跑前就 `mkdir(traj_root/it{N})`
+    （`trainer/loop_iter_dir._prepare_iter_dir`），所以「mtime 最新的目录」在**每轮首批**
+    恒等于这个空目录。旧实现 (`it_dirs[:1]`) 因此每次都读到 0 个 shard ⇒ 整份回退
+    `fallback`（全关同一个值）⇒ `rollout-stage-balance` 的分关估计被静默抹平。
+
+    两条口径各钉一次：
+      * **不传 `exclude_it`**（老调用方/无 `it` 的调用点）⇒ 跳过空目录、用上一轮的分关值，
+        **不是**回退 fallback；
+      * **传 `exclude_it`**（trainer / 导出侧知道 `it`）⇒ 同一结果，且窗口不被空目录占位。
     """
     root = tmp_path / "traj"
-    _round(root, 1, [900], mtime=1_700_000_001)
-    (root / "it2").mkdir()
+    _round(root, 1, [900, 300], mtime=1_700_000_001)  # 上一轮：两关不同局长
+    (root / "it2").mkdir()  # 本轮：已建、空
     os.utime(root / "it2", (1_700_000_002, 1_700_000_002))
+
+    # `_round` 只写 stage 0（两个 shard）；这里补一个 stage 1 的，才能验「分关」不被抹平
+    _shard(root / "it1", 1, 99, 120)
+    latest = trailing_stage_samples_per_game(
+        root, [0, 1], window_iters=3, fallback=42, agg="latest", exclude_it=2
+    )
+    assert latest == {0: 600, 1: 120}, latest  # (900+300)/2=600；不是 42
+    # 不传 exclude_it 也必须跳过空目录（否则老调用点又回到「全关一个值」）
+    assert trailing_stage_samples_per_game(
+        root, [0, 1], window_iters=3, fallback=42, agg="latest"
+    ) == {0: 600, 1: 120}
+
+
+def test_latest_falls_back_only_when_no_round_has_shards(tmp_path: Path) -> None:
+    """**没有任何一轮有 shard** 才回退 fallback（首轮冷启动）。
+
+    ⚠️ 旧用例钉的是「最新目录为空 ⇒ 回退 fallback」，那正是 P0 的成因：
+    空目录 = 正在跑的那一轮，不是「最近一轮」。
+    """
+    root = tmp_path / "traj"
+    (root / "it1").mkdir(parents=True)
+    os.utime(root / "it1", (1_700_000_001, 1_700_000_001))
 
     out = trailing_stage_samples_per_game(root, [0], window_iters=3, fallback=42, agg="latest")
     assert out[0] == 42
@@ -99,3 +135,83 @@ def test_pull_est_low_is_bounded_and_deterministic() -> None:
     assert pull_est_low(1) == 1  # 不许掉到 0（0 = 无估计，会改走 fallback）
     assert pull_est_low(0) == 0
     assert pull_est_low(530) < 530
+
+
+def test_pool_games_by_stage_overprovisions_and_respects_caps() -> None:
+    """★ 候选池（2026-10-21 用户口径）：池 = 缺口 × mult，且**夹在硬顶内**。
+
+    它回答的不是「要采多少局」，而是「队列里先放多少候选」——多出来的那部分只在配额
+    没达成时才可能被派出去，满额即熔断 ⇒ 从不运行。
+    """
+    # quota=50、est=20、mult=2 ⇒ ceil(50×2/20)=5 局/关
+    pool = pool_games_by_stage(
+        stages=[0, 1],
+        collected={0: 0, 1: 10},
+        games_done={0: 0, 1: 1},
+        target_transitions=100,
+        ests={0: 20, 1: 20},
+        game_caps={},
+        mult=2.0,
+    )
+    assert pool == {0: 5, 1: 4}, pool  # 关 1 已收 10 ⇒ ceil(40×2/20)=4
+
+    # 硬顶是硬顶：cap 余量只有 2 ⇒ 只给 2（不是 5）
+    capped = pool_games_by_stage(
+        stages=[0],
+        collected={},
+        games_done={0: 3},
+        target_transitions=100,
+        ests={0: 20},
+        game_caps={0: 5},
+        mult=2.0,
+    )
+    assert capped == {0: 2}, capped
+
+    # 已达标的关不进池；无估计 ⇒ 1 局（不猜）
+    assert pool_games_by_stage(
+        stages=[0, 1],
+        collected={0: 50, 1: 0},
+        games_done={},
+        target_transitions=100,
+        ests={0: 20, 1: 0},
+        game_caps={},
+    ) == {1: 1}
+
+
+def test_pool_games_by_stage_fills_up_to_width() -> None:
+    """`width` 已知时再兜一次：池比机器窄 ⇒ 按轮转补足（显式铺满所有槽）。"""
+    pool = pool_games_by_stage(
+        stages=[0, 1],
+        collected={},
+        games_done={},
+        target_transitions=100,
+        ests={0: 50, 1: 50},  # 池只有 2 局
+        game_caps={},
+        width=8,
+        mult=1.0,
+    )
+    assert sum(pool.values()) == 8, pool
+    assert pool == {0: 4, 1: 4}, pool
+
+
+def test_quota_met_is_per_stage() -> None:
+    """逐关判据：全局达标不算——短局关不能靠长局关顶。"""
+    assert quota_met(stages=[0, 1], collected={0: 50, 1: 50}, target_transitions=100)
+    assert not quota_met(stages=[0, 1], collected={0: 90, 1: 10}, target_transitions=100)
+
+
+def test_widen_by_width_refills_to_the_machine_width() -> None:
+    """★ 2026-10-22 用户口径「有几个 worker 铺多少局」：把逐关局数重铺到 ≥ 本机宽度。
+
+    自主机自己 rollout ⇒ 宽度 = `cpu_worker_slots()`（不 ping、不看 hub 的 plan 声明）。
+    plan 里那份是**打包时**的缺口形状，本机核数比它多就加宽；派发侧逐关满额即停，
+    多加的候选不会白跑。
+    """
+    per = {0: 6, 1: 6, 2: 6, 3: 6}  # 打包时 24 局
+    assert widen_by_width(per, 32) == {0: 8, 1: 8, 2: 8, 3: 8}  # 24 → 32（轮转补 8）
+    assert widen_by_width(per, 24) == per, "已经够宽 ⇒ 原样返回（不折腾）"
+    assert widen_by_width(per, 8) == per, "比它窄 ⇒ 也不动（宽度只做下界）"
+    assert widen_by_width(per, 0) == per, "宽度未知（0）⇒ 原样"
+    assert widen_by_width({}, 32) == {}
+    # 不均匀的也按序轮转补，不重新分配已有份额（5+2=7 → 10：补 3 ⇒ stage0 得 2、stage1 得 1）
+    assert widen_by_width({0: 5, 1: 2}, 10) == {0: 7, 1: 3}

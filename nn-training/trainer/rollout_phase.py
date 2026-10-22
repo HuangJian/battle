@@ -158,6 +158,9 @@ def dispatch_rollout_phase(
     eval_on_round: bool,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    halt_event: threading.Event | None = None,
+    on_result=None,
+    pool_halt: bool = False,
 ) -> tuple[
     dict,
     dict | None,
@@ -300,6 +303,14 @@ def dispatch_rollout_phase(
                 local_slots_max=local_slots_max_of(args),
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                # ★ 2026-10-21（用户口径「铺满 + 满额即停」）：调用方可以
+                #   ① `on_result` 每结算一局就更新逐关账本；② 满额后 `halt_event`
+                #   置位 ⇒ worker 立即停止取新任务，池里没派出去的候选从不运行。
+                #   `run_rollout`（无节点/纯本机）没有这两个口 ⇒ 只在队列路径传。
+                halt_event=halt_event,
+                on_result=on_result,
+                # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
+                pool_halt=pool_halt,
             )
             # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
             # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。

@@ -442,6 +442,38 @@ def test_unknown_gpu_count_keeps_legacy_per_card_argv(
     assert [a[a.index("--device") + 1] for a in seen] == ["cuda:0", "cuda:1"]
 
 
+def test_threads_cfg_overrides_the_broken_platform_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-21（真机）：Colab T4 可见 2 vCPU，但 `omp/mkl_get_max_threads()` 都是 1，
+    且 `OMP_NUM_THREADS=4` 被忽略 ⇒ env 无效，只能用显式 `--threads N`。
+
+    缺省（无 `threads` 键 / =0）必须逐字节旧行为 `"0"`；显式值时透传，workers>1 时是
+    **每 worker** 的值（不自动除）。
+    """
+    _patch_hub_open(monkeypatch, 200)
+    seen: list[list[str]] = []
+
+    def fake_supervise(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr("remote.worker.supervise_worker", fake_supervise)
+    nbr.run_pull_worker(_base_cfg(tmp_path, threads=2), lambda m: None)
+    assert seen[0][seen[0].index("--threads") + 1] == "2"
+
+    seen.clear()
+    nbr.run_pull_worker(
+        _base_cfg(tmp_path, device_resolved="cuda", gpu_count=1, workers=2, threads=2),
+        lambda m: None,
+    )
+    assert [a[a.index("--threads") + 1] for a in seen] == ["2", "2"]
+
+    seen.clear()
+    nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None)
+    assert seen[0][seen[0].index("--threads") + 1] == "0"
+
+
 def test_workers_on_non_cuda_falls_back_to_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
