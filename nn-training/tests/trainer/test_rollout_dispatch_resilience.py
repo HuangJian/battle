@@ -438,6 +438,66 @@ def test_rescan_rearm_bounded_by_limit(tmp_path, monkeypatch) -> None:
     assert "回场上界 1 次已用尽" in "\n".join(h.logs)
 
 
+def test_sibling_reuse_filters_tasks_before_any_dispatch(tmp_path, monkeypatch) -> None:
+    """同族课程的现成局**不进派发队列**：没本机槽（集群模式）也不许重算一遍。
+
+    派发前过滤（`worker.sibling_reuse.reuse_rollouts`）是本轮唯一不看「派给谁」的接缝：
+    命中局的 shard 拷进本课 traj 后由 `resumed_manifests` 收进聚合，`fetch_task` 一次
+    都不该为它被调用。
+    """
+    import json
+
+    from biz.course_resolve import load_course
+    from worker import sibling_reuse as sr
+
+    global_yaml = Path(__file__).resolve().parents[2] / "curricula"
+    me = load_course(global_yaml / "y30-pickup.jsonc")
+    sib = load_course(global_yaml / "y30-speed.jsonc")
+    h = _Harness(tmp_path, monkeypatch, games=4)
+    h.args.course_obj = me
+    monkeypatch.setenv("NN_REUSE_SIBLINGS", "1")
+    sib_root = tmp_path / "sib"
+    # 兄弟课那一局：同权重（wver 由 harness 的 weights 文件算出）、同 (stage,seed)
+    shard = sib_root / "it1" / "w0" / "rl_s2000_seed1"
+    shard.mkdir(parents=True)
+    wver = common.distribution.weights_fingerprint(str(h.weights))
+    (shard / "manifest.json").write_text(
+        json.dumps({"stage": 2000, "seed": 1, "wver": wver, "nSamples": 30}),
+        encoding="utf-8",
+    )
+    for name in ("obs.npy", "metrics.npy"):
+        (shard / name).write_bytes(b"\x00")
+    (shard.parent / "_rl_report.json").write_text(
+        json.dumps(
+            {
+                "games": 1,
+                "wver": wver,
+                "outcomes": {"stage_clear": 1},
+                "totalSamples": 30,
+                "totalTicks": 900,
+                "scoreList": [2.0],
+                "dimLists": {},
+                "elapsedSec": 8.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sr, "_resolve_dir", lambda raw: sib_root if str(raw) == str(sib.traj) else None
+    )
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        return h.manifest(), {}
+
+    report = h.run(fetch)
+    assert report["missing"] == [], report.get("missing")
+    assert calls["n"] == 3, f"命中局被派给节点重算了（取活 {calls['n']} 次）"
+    # 借来的局照样进本轮报告（否则出队 = 丢局）
+    assert report["games"] == 4, report
+
+
 def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
     """KL 熔断后不得白等窗口：halt 置位 → worker 退出、回场线程退出、join 不再等满。"""
     h = _Harness(tmp_path, monkeypatch, games=4, policy={"queueWindowSec": 30})

@@ -66,7 +66,38 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     ⇒ 允许混入同一训练（形状不同的 shard 拼一起）。远端结果缓存键虽含 runId（RL 侧
     每次启动新 runId，续跑复用 runId 时同 BC 一样裸奔），但 D14 分流不看 runId，
     只有身份本身含 schema 才能把跨 era 语料挡在**混入之前**（加载侧
-    data.npyio.verify_shard_schema 是最后一道，到那一步已经在崩了）。
+    `data.npyio.verify_shard_schema` 是最后一道，到那一步已经在崩了）。
+    """
+    return _fp(_identity_payload(course))
+
+
+def episode_identity_fp(course: CourseConfig) -> str:
+    """**一局**的身份指纹 = 语料身份 minus `reward`（plan/episode-reuse.plan.md §2.1）。
+
+    用途：跨课程复用**同一局**时证明「可复用」（`worker/sibling_reuse` 筛兄弟课程的唯一判据）。
+
+    为什么减掉 reward 仍然精确：per-tick 的奖励面由训练侧读 `metrics.npy` 现算
+    （`worker/ppo/np_core.load_shard` 的公式引擎，TS 只落逐拍 metrics）⇒ 同一局的
+    obs/action/metrics 与奖励公式无关，换课重算奖励逐值相同。y30 四腿正是这种形态：
+    同一关/同一 rotateSeed/同一权重，只有 reward 不同。
+
+    ⚠ 只对 **metrics 载体**成立。盘上只有 `reward.npy` 的语料（打包端已算奖励、读端只校验
+    血缘）必须用完整 `corpus_identity_fp` 判同——`worker.sibling_reuse.rollout_sources` 用
+    「有 metrics 且无 reward」把这条守死，本函数不自带判断（它只看配置，看不到盘）。
+    """
+    return _fp(_identity_payload(course, drop_reward=True))
+
+
+def _fp(payload: dict[str, object]) -> str:
+    """payload → sha256（规范 JSON：排序 + 紧凑 + ASCII 转义；两侧同输入同输出）。"""
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _identity_payload(course: CourseConfig, *, drop_reward: bool = False) -> dict[str, object]:
+    """语料身份的 payload（**唯一**构造点；两条公开指纹都从这里出）。
+
+    `drop_reward=True` ⇒ 一局的身份（`episode_identity_fp`）；其余字段一个不少。
     """
     from common.schema import (
         MOVE_LABEL_SEMANTICS,
@@ -154,5 +185,7 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     # 老课程指纹逐字节不动——显式写 10 与缺席同义，语义相同即身份相同）。
     if int(getattr(course, "decision_k", 10)) != 10:
         payload["decision_k"] = int(course.decision_k)
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    if drop_reward:
+        # 唯一的「与这局字节无关」的成分（见 `episode_identity_fp`）。
+        payload.pop("reward", None)
+    return payload

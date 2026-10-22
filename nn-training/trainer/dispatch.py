@@ -30,6 +30,7 @@ from worker import node_identity, serve_pool
 from worker.agent_meta import record_agent_meta as _record_agent_meta_impl
 from worker.reports import combine_reports, win_of
 from worker.resume import completed_pairs, resumed_manifests, state_init_enabled
+from worker.sibling_reuse import reuse_rollouts
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,9 +42,7 @@ RUN_ID = secrets.token_hex(8)
 # 每迭代新建实例，计数器必须挂模块级才跨轮累积；连续 ≥3 轮 dedup 且非 self ⇒ WARN。
 # 非 dedup 结局（节点 rejoin / restart-requested / dirty-tree / restart-failed）清零。
 DEDUP_STREAK: dict[str, int] = {}
-MAX_TASK_ATTEMPTS = (
-    3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新鲜种子自然补覆盖）
-)
+MAX_TASK_ATTEMPTS = 3  # 单局失败回队重试上限；超限计入 missing 当轮放弃（rotate 新种子自然补覆盖）
 ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 RACE_LOG_SAMPLE = 2  # 竞速输家/dup settle 每类最多打前 N 条，其余进 round-done 汇总
 
@@ -429,7 +428,10 @@ class RolloutDispatcher:
             state_init=state_init_enabled(args),
         )
         done = done_all & plan_set
-        tasks = [p for p in norm_pairs if p not in done]
+        # 同族课程的现成局（plan/episode-reuse.plan.md §3 S3b）：命中即出队，不派节点、不重算，
+        # 聚合由下面两个 `resumed_manifests` 从盘上收（与「重启撞上已落盘局」同一条路）——
+        # 与 `local_slots` 无关，集群轮（本机槽 0）也不会把命中局再派给远端。
+        tasks = reuse_rollouts([p for p in norm_pairs if p not in done], traj_dir, wver, args)
         if done_all:
             log(
                 f"[dist] resume: {len(done)}/{len(norm_pairs)} planned pairs already on disk — "

@@ -28,10 +28,13 @@ from remote import weights_standard
 # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`，见 `common.game_watch`）；
 # serve_pool = 节点侧同一份长驻池（`worker/serve_pool.py`）。
 from worker import node_identity, serve_pool
-from worker.cmd import build_rollout_cmd
+from worker.cmd import build_rollout_cmd, corpus_fp_for_args, course_fp_for_args
 from worker.reports import combine_reports
+from worker.sibling_reuse import reuse_rollout, rollout_sources
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 battle2（trainer/ 上溯 3 层，修正 2026-09-02）
+REPO_ROOT = (
+    Path(__file__).resolve().parents[2]
+)  # 仓库根 battle2（trainer/ 上溯 3 层，修正 2026-09-02）
 
 #: 本机腿交给长驻池的单局硬顶（秒）——**故意远大于任何合法长局**。
 #:
@@ -96,6 +99,35 @@ def make_local_pool(
 # 在 `common/game_watch.PROGRESS_LOG_SEC`（与节点侧 `iter_rollout` 同一份，改一处两边同步）。
 
 
+# ---------------------------------------------------------------------------
+# 同族课程的局直取（plan/episode-reuse.plan.md；worker/sibling_reuse.py）：本机两条腿
+# （`run_rollout.run_one` 与 dispatcher 的 `run_local_rollout`）共用同一份函数 —— 一处语义。
+#
+# 不建缓存（用户 2026-10-22 口径：缓存会让内存/硬盘爆炸）：源 = 兄弟课程**工作目录里已经
+# 存在的 shard**（`episode_identity_fp` 相同 = level/关卡/难度/max_ticks/决策粒度全同；
+# `wver` 逐字节同才算同一局）。找到就拷进本课波次目录并 D14 改戳，找不到就自采。
+#
+# 扫描索引**只活一轮**（`wver` 变即重建）：它是「盘上现在有什么」的目录快照，不是产物缓存
+# ——不落盘、不跨轮、上限 `MAX_INDEX`；同型先例 = `worker/resume._SCAN_CACHE`。
+_REUSE_INDEX: dict[tuple[int, int], tuple[Path, Path, str]] = {}
+_REUSE_SIG: list[tuple[str, str]] = [("", "")]
+
+
+def reuse_index(wver: str, args) -> dict[tuple[int, int], tuple[Path, Path, str]]:
+    """本轮（同课程同 `wver`）的兄弟课现成局索引；换权重/换课就重建。"""
+    sig = (str(getattr(args, "course_name", "") or ""), wver)
+    if _REUSE_SIG[0] != sig:
+        _REUSE_INDEX.clear()
+        _REUSE_SIG[0] = sig
+        _REUSE_INDEX.update(rollout_sources(None, wver, args))
+    return _REUSE_INDEX
+
+
+def _reuse_stamps(args) -> tuple[str, str]:
+    """本课的 D14 血缘（改戳用）：(course_fp, corpus_fp)。"""
+    return course_fp_for_args(args), corpus_fp_for_args(args)
+
+
 def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, int]], args) -> dict:
     """Run one rollout generation into traj_dir with up to W concurrent games over
     the given (stage, seed) game pairs.
@@ -116,9 +148,16 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
     weights_standard.ensure_standard_weights(rl_path, log=log)
     wver = common.distribution.weights_fingerprint(rl_path)
     workers = max(1, min(args.workers, len(pairs)))
-    pool = make_local_pool(
-        bun, rl_path, traj_dir, pairs[0] if pairs else None, args, wver, workers
-    )
+    # 兄弟课的现成局（本轮索引）：命中就不 spawn；找不到就自采。
+    sources = {t: s for t, s in reuse_index(wver, args).items() if t in set(pairs)}
+    reuse_n = [0]
+    reuse_lock = threading.Lock()
+    if sources:
+        log(
+            f"[reuse] rollout: {len(sources)}/{len(pairs)} 局在同族课程的工作目录里现成"
+            "（同权重 + 同 (stage,seed) ⇒ 不重算；shard 拷入本课 traj）"
+        )
+    pool = make_local_pool(bun, rl_path, traj_dir, pairs[0] if pairs else None, args, wver, workers)
 
     def run_one(idx: int, si: int, seed: int) -> tuple[int, dict | None]:
         wdir = traj_dir / f"w{idx}"
@@ -134,6 +173,15 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             wver=wver,
             node_label="local",
         )
+        # 同族课程的现成局：命中就不 spawn（连子进程启动都不付）。
+        src = sources.get((si, seed))
+        if src is not None:
+            cfp, cfp2 = _reuse_stamps(args)
+            reused = reuse_rollout(src, wdir, stage=si, seed=seed, course_fp=cfp, corpus_fp=cfp2)
+            if reused is not None:
+                with reuse_lock:
+                    reuse_n[0] += 1
+                return 0, reused
         pooled = None
         if pool is not None:
             # `cmd[1:]` = 池的任务口径（`[脚本, …args]`，不含 bun 本身；池内部再去掉脚本路径）。
@@ -179,6 +227,12 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
             tail = (traj_dir / f"w{failed[0]}" / "rollout.log").read_text(encoding="utf-8")[-2000:]
             raise SystemExit(f"[run_rl] rollout worker(s) {failed} failed:\n{tail}")
 
+        if reuse_n[0]:
+            log(
+                f"[reuse] rollout: 复用 {reuse_n[0]}/{len(pairs)} 局"
+                "（同权重 + 同 (stage,seed) ⇒ 未重算；shard 已拷入本课 traj）"
+            )
+
         reports = [r for _rc, r in results if r is not None]
         return combine_reports(reports)
     finally:
@@ -197,7 +251,10 @@ def run_local_rollout(
     wver: str,
     pool: serve_pool.ServePool | None = None,
 ) -> dict:
-    """dispatcher 本机槽的单局（`pool` 非空时走长驻池，拿不准就地回退一次性 spawn）。"""
+    """dispatcher 本机槽的单局（`pool` 非空时走长驻池，拿不准就地回退一次性 spawn）。
+
+    兄弟课现成局走本模块的**本轮索引**（`reuse_index`，同 `wver` 只建一次）：命中就不 spawn。
+    """
     si, sd = task
     wdir = traj_dir / f"w{idx}"
     wdir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +269,15 @@ def run_local_rollout(
         node_label="local",
     )
     log_path = wdir / "rollout.log"
+    # 兄弟课的现成局（同 run_rollout.run_one 同一份函数）：命中即返回其报告 + 拷入的 shard，
+    # 不 spawn、不占机器时长（`elapsedSec` 只算拷贝，源局耗时另列）。
+    src = reuse_index(wver, args).get(task)
+    if src is not None:
+        cfp, cfp2 = _reuse_stamps(args)
+        reused = reuse_rollout(src, wdir, stage=si, seed=sd, course_fp=cfp, corpus_fp=cfp2)
+        if reused is not None:
+            reused["_dir"] = str(wdir)
+            return reused
     # 整局墙钟计时，与远端 agent 写入 manifest 的 elapsedSec 同口径——
     # 此前 local 局无耗时数据，巡检「采样机健康」的局均耗时列对 local 恒为 '—'。
     t0 = time.time()
@@ -431,9 +497,7 @@ def rescan_nodes(
             # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
             # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重
             # 发进 rollout 桶，任务全 409（与 A1 同一类陷阱）。
-            if why == "new" and common.distribution.weights_already_pushed(
-                wver, nid, kind=wkind
-            ):
+            if why == "new" and common.distribution.weights_already_pushed(wver, nid, kind=wkind):
                 mode = "kept(cache)"
             else:
                 if why == "rearm":

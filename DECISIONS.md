@@ -8839,3 +8839,54 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   采集优先）· `tests/worker/test_loop_tasks.py`（族表）· `e2e/test_loop_supervisor_integration.py`
   （两条跨课顺序断言）· `docs/nn/training-stack.md §37`。
 - **验收**：上述四份用例全绿（36 passed）；`bash tools/githook/nn-python-gate.sh` 全绿。
+
+## §2026-10-22-sibling-episode-reuse — 并行课共享「同一局」：到同族课程的工作目录里直取产物，**不做缓存**
+
+- **背景（用户 2026-10-22，两段口径 + 一条否决）**：① 现在经常同时开多条并行课（y30 四腿），用
+  相同起始权重；起点权重与 level 相同的课，**it0 评估**局局相同 ⇒ 可复用。② 若这些课的
+  `paired_rotate_seed` 也相同，那么同一次迭代抽到的 **rollout** (stage,seed) 也相同 ⇒ 语料可复用。
+  ③ 并行课延迟开课时前面课程的语料可能已被 `keep_iters` 清空 —— 找不到就自行重采。
+  ④ **不做缓存**：缓存会让内存/硬盘爆炸。
+  （曾把这件事误读成「it0 eval ≡ it1 rollout」——两侧种子池/执行模式不同，那种互相当账是伪造读数；
+  复用轴是**跨课程**，不是跨迭代。）
+- **决定**：
+  1. **复用面 = 盘上已有的产物**（`nn-training/worker/sibling_reuse.py`），零新增存储：无缓存根、
+     无索引、无 LRU。
+  2. **兄弟课判据** = `episode_identity_fp` 相同（`biz/corpus_fp.episode_identity_fp` = 语料身份
+     减去 `reward`；与 `corpus_identity_fp` 共用唯一构造点 `_identity_payload`，现有指纹逐字节不变），
+     排除自己，上限 `MAX_SOURCES=100`（用户 2026-10-22：复用面就是全库同族，扫不全等于白算）。合法性：per-tick 奖励由训练侧读 `metrics.npy` 现算
+     ⇒ 同一局 obs/action/metrics 与奖励公式无关，换课重算奖励是**精确**的。
+  3. **局判据**：rollout 只认目录名 `rl_s{stage}_seed{seed}` + manifest `wver` **逐字节同**
+     （`paired_rotate_seed` 不必单独比：种子流不同就撞不上同一对），且同波有 `_rl_report.json`、
+     有 `metrics.npy` 且**无** `reward.npy`（预置奖励是别的课算的，不借）；eval 只认同
+     `(wver16, stage, seed)` 的 `event:"eval"` 行（带 `source` 的 B/C 批行不取）。
+  4. **取用方式**：rollout 命中把那一局的 shard 拷进本课 `w{idx}/rl_s*_seed*` 并 **D14 改戳成本课**、
+     写 `reused.from`（派发前过滤那条腿用 `rw{i}/`，避开本机槽正在写的 `w{i}`）；eval 命中把那一行
+     **移植**进本课账本（只换 iter/节点/时间/来源，读数逐字段保留，`reusedFrom` 记出处）。
+     找不到 ⇒ 本课自采（不降级、不伪造）。
+  5. **只替代计算、不替代账**（R6）：shard 照落本课 traj、照被 `completed_pairs` 数到；评估行照落
+     本课 `eval_log.jsonl` 并进 `landed` 收工口径；`node=reuse` 不入采样机健康账（它不是机器）。
+     命中局 `elapsedSec` 只算拷贝墙钟，源局耗时另列 `reusedSourceElapsedSec`。
+  6. **接缝**：① `trainer/dispatch` 在**派发前**调 `reuse_rollouts`——命中局出队（不派节点、不重算），
+     shard 拷进本课 traj 后由 `resumed_manifests` 从盘上收进聚合（与「重启撞上已落盘局」同一条路），
+     所以没本机槽（`local_slots=0`）的集群轮也不重算；② `trainer/queue_local.run_one`/`run_local_rollout`
+     用本轮索引（`reuse_index`，同 `wver` 只建一次）做同样的直取；③ `trainer/eval_dispatch`
+     （`record(row=…)` 支持整行移植）。
+  7. **开关**：`--reuse-siblings 0` / env `NN_REUSE_SIBLINGS=0` = 关（逐字节旧行为）；测试的全局
+     隔离夹具把它钉成 0（否则单测会读操作员在跑的课）。
+- **否决的备选**：① **内容寻址缓存**（先写一份、以后取）—— 用户否决：内存/磁盘占用不可控；
+  ② 引用源课 traj 路径而不拷贝 —— `keep_iters` 会清、跨目录不稳；③ 用完整 `corpus_identity_fp`
+  做判据（含 reward）⇒ y30 四腿永不命中，等于没做；④ 只按 `(wver, stage, seed)` 手写判据 ——
+  漏关卡/难度/决策粒度就会拿别人的读数当自己的。
+- **代价（诚实账）**：每轮扫一遍候选工作目录（按目录名匹配，命中才读 manifest；有 `MAX_SOURCES`
+  上限）；命中一局 = 一次 shard 目录拷贝（本来就落盘）。奖励不同的腿在 PPO 首步后就分岔，it1 起
+  rollout 自然 hit=0；跨机器取产物（节点集群）**未做**。
+- **落点**：`nn-training/worker/sibling_reuse.py`（新）· `biz/corpus_fp.py`（拆 `_identity_payload` +
+  `episode_identity_fp`）· `trainer/queue_local.py` · `trainer/dispatch.py` · `trainer/eval_dispatch.py` ·
+  `worker/cli.py`（`--reuse-siblings`）· `tests/conftest.py`（测试隔离）· `tests/helpers/remote_dag.py`
+  （新模块 **L4**：D14 穿模要拿 L3 的 `worker.cmd`）· `tests/worker/test_sibling_reuse.py`（13 例）·
+  `tests/trainer/test_rollout_dispatch_resilience.py`
+  （派发前过滤用例）· `tests/trainer/test_eval_dispatch_resilience.py`（借行不派发用例）·
+  `docs/nn/training-stack.md §38` · `plan/episode-reuse.plan.md`。
+- **验收**：`tests/worker/test_sibling_reuse.py` 13 passed；`tests/trainer`（eval/rollout 子集）47 passed；
+  `bash tools/githook/nn-python-gate.sh` 全绿；`bun run check` 绿。

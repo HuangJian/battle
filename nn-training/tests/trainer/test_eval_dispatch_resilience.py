@@ -1187,3 +1187,62 @@ def test_eval_scratch_lives_outside_the_iter_dir(tmp_path, monkeypatch) -> None:
     assert not (h.work / "it1" / "local-eval").exists(), "本机落点不得再住 it<N>/"
     assert (h.work / "_eval-it1").is_dir()
     assert seen and seen[0] == h.work / "_eval-it1" / "_eval_frozen_weights.json", seen
+
+
+def test_sibling_eval_rows_land_without_dispatch(tmp_path, monkeypatch) -> None:
+    """同族课程的现成读数**不进任务表**：命中局只移植一行账，节点不该为它被调一次。
+
+    这是 eval 侧的「复用只替代计算、不替代账」：行照常落本课 `eval_log.jsonl`（带
+    `reusedFrom` 出处，`node=reuse` 不进采样机健康账），未命中局照旧派发。
+    """
+    from biz.course_resolve import load_course
+    from worker import sibling_reuse as sr
+    from worker.eval_local import a_eval_seed_list
+
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    curricula = Path(__file__).resolve().parents[2] / "curricula"
+    h.args.course_obj = load_course(curricula / "y30-pickup.jsonc")
+    sib = load_course(curricula / "y30-speed.jsonc")
+    monkeypatch.setenv("NN_REUSE_SIBLINGS", "1")
+    seeds = a_eval_seed_list(5, 2)
+    assert len(set(seeds)) == 2, seeds
+    sib_root = tmp_path / "sib"
+    sib_root.mkdir()
+    (sib_root / "eval_log.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "eval",
+                "iter": 3,
+                "wver": h.wver[:16],
+                "time": "2026-10-22 10:00:00",
+                "stage": 2000,
+                "seed": seeds[0],
+                "node": "a97",
+                "outcome": "stage_clear",
+                "win": 1,
+                "cleared": 1,
+                "score": 2.0,
+                "dims": {"kills": 4},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sr, "_resolve_dir", lambda raw: sib_root if str(raw) == str(sib.traj) else None
+    )
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        return h.manifest(2000, seeds[1]), {}
+
+    rows = h.run(fetch)
+    games = [r for r in rows if r.get("event") == "eval"]
+    borrowed = [r for r in games if r["seed"] == seeds[0]]
+    assert borrowed, "借来的局必须落本课账本（否则等于丢局）"
+    assert borrowed[0]["node"] == sr.REUSE_NODE, borrowed[0]
+    assert borrowed[0]["reusedFrom"] == "y30-speed", borrowed[0]
+    assert borrowed[0]["dims"] == {"kills": 4}, "读数逐字段来自源行，不重算"
+    assert calls["n"] == 1, f"命中局被派给节点重算了（取活 {calls['n']} 次）"
+    assert any(r["seed"] == seeds[1] and r["node"] != sr.REUSE_NODE for r in games)

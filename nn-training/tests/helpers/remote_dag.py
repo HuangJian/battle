@@ -401,6 +401,11 @@ LAYERS: dict[str, int] = {
     "worker.ppo.trainer": 0,
     "worker.reports": 0,
     "worker.resume": 0,
+    # 同族课程产物直取（plan/episode-reuse.plan.md）：`common.log` + 延迟 import 的
+    # `biz.*`（不在本账本里）+ 派发前那一条要拿 D14 穿模（`worker.cmd` 的
+    # `course_fp_for_args`/`corpus_fp_for_args`，L3）⇒ 拓扑秩 **L4**。
+    # 唯一的消费者是 trainer（`queue_local`/`dispatch`/`eval_dispatch`，不在本账本里）。
+    "worker.sibling_reuse": 4,
     # 逐局 argv 重定向原语（2026-10-07，plan/rollout-stage-balance）：从 `worker/plan.py`(L4)
     # **下沉**出来的纯字符串叶子——L2 的补差模块与 L5 的 `remote/worker` 都要用它，
     # 留 L4 会让 L2 长出上向边（见 `worker/rollout_argv.py` 头注与 `worker/plan.py` 的 import）。

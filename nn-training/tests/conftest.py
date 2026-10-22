@@ -89,6 +89,10 @@ def pin_production_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     # 钉成进程内线程模式，行为等价、无进程边界。真子进程只在
     # `tests/remote/test_offline_deliver_proc.py` 里显式 `mode="process"` 跑。
     monkeypatch.setenv("NN_DELIVER_MODE", "thread")
+    # 同族课程产物直取（plan/episode-reuse.plan.md）：它会扫 `nn-training/tmp/**` 下真实的
+    # 课程工作目录与 `curricula/*.jsonc`（找出同 level/难度的兄弟课）。不关就会让单测读出
+    # 操作员在跑的课（既有污染面，也不 hermetic）⇒ 测试一律关，开关本身由专门用例钉。
+    monkeypatch.setenv("NN_REUSE_SIBLINGS", "0")
     # 下行腿（预取下载/解包）同理（2026-10-20）：缺省是**独立子进程**
     # （`remote.payload_worker`，不抢训练进程的 GIL）。单测不该为预取起真子进程
     # （慢、且填充线程的 seam 全在进程内），钉成进程内模式；真子进程只在

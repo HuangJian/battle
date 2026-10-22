@@ -52,6 +52,7 @@ from worker.eval_yield import (
     release_local_gate_if_starved,
     reserve_local_slots,
 )
+from worker.sibling_reuse import REUSE_NODE, land_reused_eval, reuse_eval_round
 
 #: 干净评估的权重 kind（B6，2026-09-19）：节点按 (kind, wver) 分桶缓存权重
 #: （sampler-agent `weightsByKindSha`）。旧实现与训练 rollout 共用 'rollout' 桶 ⇒ 训练每轮
@@ -281,6 +282,11 @@ class EvalDispatcher:
                     + ("（it0 基线）" if baseline else "")
                 )
                 return
+            # ---- 同族课程的现成读数（plan/episode-reuse.plan.md）----
+            # 到兄弟课（同 level/关卡/难度/决策粒度）的 `eval_log.jsonl` 里找同 wver 同
+            # (stage,seed) 的行：命中局**不进任务表**（连权重 POST / 节点往返都不发生），
+            # 行照移植进本课账（下方「预落账」）——只替代**计算**，不替代账。
+            todo, reused = reuse_eval_round(todo, key16=key16, args=args, it=it)
             t_eval_start = time.time()
 
             # 本地参与前提：冻结权重快照。主循环在 PPO 收尾后会原地覆盖 rl_path，
@@ -302,7 +308,7 @@ class EvalDispatcher:
                 except OSError as e:
                     log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
 
-            total = len(todo)
+            total = len(todo) + len(reused)  # 借来的局也进收工口径（行照落，只是不占节点）
             # 尾段预留量（公式在 biz/eval_yield.reserve_local_slots）：gate 接线且本地可用时，
             # 节点不取最后 reserved 局（留给本机直跑）
             reserved = reserve_local_slots(
@@ -423,9 +429,11 @@ class EvalDispatcher:
                 nd_id: str,
                 task: tuple[int, int],
                 wall_sec: float | None = None,
+                row: dict | None = None,
             ) -> None:
-                # 行构造的唯一实现点在 biz/eval_local.eval_row（云机离线评估用同一份）
-                row = eval_row(
+                # 行构造的唯一实现点在 biz/eval_local.eval_row（云机离线评估用同一份）；
+                # `row` 非空 = 兄弟课那一行的移植（读数逐字段来自源行，不重算）。
+                row = row or eval_row(
                     manifest, it=it, key16=key16, task=task, node=nd_id, wall_sec=wall_sec
                 )
                 # 累加器要的两个量从行里读回（它们本来就是同一份 manifest 的派生）
@@ -438,21 +446,22 @@ class EvalDispatcher:
                     # meta 是观测面：它**抛错不得让调用方重派**（成功边界 = 上面的 eval 行
                     # append，评审 P1-3）——否则同 (stage,seed) 会写第二行。
                     try:
-                        _record_agent_meta(
-                            meta_path,
-                            {
-                                "node": nd_id,
-                                "mode": "eval",
-                                "it": it,
-                                "stage": task[0],
-                                "seed": task[1],
-                                "ok": True,
-                                "win": win,
-                                "elapsedSec": manifest.get("elapsedSec"),
-                                "wallSec": wall_sec,
-                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            },
-                        )
+                        if nd_id != REUSE_NODE:  # 借来的局不是采样机，不进机器健康账
+                            _record_agent_meta(
+                                meta_path,
+                                {
+                                    "node": nd_id,
+                                    "mode": "eval",
+                                    "it": it,
+                                    "stage": task[0],
+                                    "seed": task[1],
+                                    "ok": True,
+                                    "win": win,
+                                    "elapsedSec": manifest.get("elapsedSec"),
+                                    "wallSec": wall_sec,
+                                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                },
+                            )
                     except Exception as e:
                         log(
                             f"[eval] WARN record meta 写入失败（忽略）"
@@ -466,7 +475,11 @@ class EvalDispatcher:
                     outcomes[oc] = outcomes.get(oc, 0) + 1
 
             def _record_with_retry(
-                manifest: dict, nd_id: str, task: tuple[int, int], wall_sec: float | None
+                manifest: dict,
+                nd_id: str,
+                task: tuple[int, int],
+                wall_sec: float | None,
+                row: dict | None = None,
             ) -> bool:
                 """落盘重试（G4）：成功边界 = eval 行 append 成功。
 
@@ -478,7 +491,7 @@ class EvalDispatcher:
                 last_err: Exception | None = None
                 for attempt in range(1, 2 + EVAL_RECORD_RETRY_MAX):
                     try:
-                        record(manifest, nd_id, task, wall_sec)
+                        record(manifest, nd_id, task, wall_sec, row=row)
                         break
                     except Exception as e:  # eval_row 缺键 / 写盘失败（行未落盘）
                         last_err = e
@@ -523,6 +536,10 @@ class EvalDispatcher:
                         _settle_complete()
                 return True
 
+            # 命中局预落账：行照落（进 `landed` 收工口径），但不占节点、不碰网络；
+            # `seen` 同步登记，否则收官行会报「认领≠落盘」（那是给丢掉的真局用的告警）。
+            land_reused_eval(reused, _record_with_retry, seen, lock)
+
             def worker(nd: dict) -> None:
                 # 线程本地标签（不继承主线程）：收工断连的作用域键。
                 common.distribution.set_request_tag(req_scope)
@@ -558,9 +575,7 @@ class EvalDispatcher:
                             elif not pending and not inflight:
                                 return
                         if task is None and inflight:
-                            cand = pick_race_target(
-                                inflight, nd["id"], inflight_nodes, {}
-                            )
+                            cand = pick_race_target(inflight, nd["id"], inflight_nodes, {})
                             if cand is not None:
                                 task = cand
                                 inflight[task] += 1
@@ -579,8 +594,12 @@ class EvalDispatcher:
                         continue
                     ok = False
                     err = ""
-                    transient = False  # 背压/瞬断（判据单一实现：common.distribution.is_transient_error）
-                    task_lost = False  # 取包丢失（节点重启/清场；common.distribution.is_task_lost_error）
+                    transient = (
+                        False  # 背压/瞬断（判据单一实现：common.distribution.is_transient_error）
+                    )
+                    task_lost = (
+                        False  # 取包丢失（节点重启/清场；common.distribution.is_task_lost_error）
+                    )
                     manifest: dict = {}
                     try:
                         from worker.config import args_rollout_overrides, stage_json_for_args
@@ -645,7 +664,9 @@ class EvalDispatcher:
                         # 并清该节点这条腿的 reuse 账本（重启后桶也可能空了）。
                         task_lost = common.distribution.is_task_lost_error(e)
                         if task_lost:
-                            common.distribution.forget_weights_node(nd["id"], kind=EVAL_WEIGHTS_KIND)
+                            common.distribution.forget_weights_node(
+                                nd["id"], kind=EVAL_WEIGHTS_KIND
+                            )
                             transient = True
                     with lock:
                         if ok:
@@ -679,12 +700,9 @@ class EvalDispatcher:
                                 streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
                             _pop_inflight(task, nd["id"])
                             if (
-                                (
-                                    leg < EVAL_TASK_ATTEMPTS
-                                    or (transient and leg < EVAL_TASK_ATTEMPTS_TRANSIENT)
-                                )
-                                and task not in seen
-                            ):
+                                leg < EVAL_TASK_ATTEMPTS
+                                or (transient and leg < EVAL_TASK_ATTEMPTS_TRANSIENT)
+                            ) and task not in seen:
                                 if transient:
                                     retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
                                 pending.append(task)
@@ -699,9 +717,7 @@ class EvalDispatcher:
                                     )
                                 )
                             elif task not in seen:
-                                _record_failed_meta(
-                                    meta_path, it, task, nd["id"], err
-                                )
+                                _record_failed_meta(meta_path, it, task, nd["id"], err)
                                 log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err}) "
                                     f"— dropped"
@@ -848,10 +864,7 @@ class EvalDispatcher:
                                         f"[eval] local: 连续 {soft_streak_max} 次瞬时失败"
                                         "（背压/瞬断，非节点故障）— 本轮停派"
                                     )
-                                if (
-                                    leg < EVAL_TASK_ATTEMPTS_TRANSIENT
-                                    and task not in seen
-                                ):
+                                if leg < EVAL_TASK_ATTEMPTS_TRANSIENT and task not in seen:
                                     retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
                                     pending.append(task)
                                     log(
@@ -998,9 +1011,7 @@ class EvalDispatcher:
                     continue
                 # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 课程的局同样只派给能力位节点
                 # （旧 agent 静默跑 K=10 混入，同规 fail-closed；缺席/10 = 不查）。
-                if int(getattr(args, "decision_k", 10)) != 10 and not ping.get(
-                    "decisionKSupport"
-                ):
+                if int(getattr(args, "decision_k", 10)) != 10 and not ping.get("decisionKSupport"):
                     log(
                         f"[eval] node {nid}: K≠10 课程 eval 需 decisionKSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
@@ -1071,11 +1082,7 @@ class EvalDispatcher:
                 f"[eval] it{it}: dispatch {total} greedy games "
                 f"(corpus={len(pairs)}, done={len(pairs) - total})"
                 + (" [it0 基线 · bc 权重]" if baseline else "")
-                + (
-                    " [dual-track anchor+rotor]"
-                    if should_dual_track(n_seeds, baseline)
-                    else ""
-                )
+                + (" [dual-track anchor+rotor]" if should_dual_track(n_seeds, baseline) else "")
                 + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
                 + (f" [local tail-reserved ×{reserved}]" if reserved else "")
             )
@@ -1275,7 +1282,18 @@ def dispatch_eval_bg(
 ) -> threading.Thread:
     t_ = threading.Thread(
         target=dispatch_eval_round,
-        args=(bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate, baseline),
+        args=(
+            bun,
+            rl_path,
+            traj_dir,
+            args,
+            cfg,
+            iter_id,
+            it,
+            rollout_winrate,
+            local_gate,
+            baseline,
+        ),
         daemon=True,
         name=f"eval-it{it}" + ("-baseline" if baseline else ""),
     )

@@ -7,6 +7,59 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §38 同族课程产物直取：并行课不再把同一局各算一遍（2026-10-22；DECISIONS §2026-10-22-sibling-episode-reuse）
+
+**触发**（用户 2026-10-22，两段口径）：现在经常同时开多条并行课（y30 四腿），用相同起始权重。
+① 起点权重与 level 相同的课，**it0 评估**局局相同 ⇒ 可以复用。② 如果这些课的
+`paired_rotate_seed` 也相同，那么**同一次迭代抽到的 rollout** (stage,seed) 也相同 ⇒ 语料同样可复用。
+③ 并行课**延迟开课**时前面的语料可能已被 `keep_iters` 清空 —— 找不到就自己重新采。
+④ **不做缓存**（缓存会让内存/硬盘爆炸）。
+
+> ⚠ 复用轴是**跨课程**，不是跨迭代。曾误读成「it0 eval ≡ it1 rollout」——两侧种子池不同、
+> 贪心/采样不同，那种互相当账是伪造读数（`plan/episode-reuse.plan.md` §5 R5 仍守着）。
+
+**机制**（`worker/sibling_reuse.py`）：复用面只限**盘上已经有的东西**，零新增存储。
+
+1. **找出可复用的课程** = `episode_identity_fp` 相同的课（`biz/corpus_fp.episode_identity_fp` =
+   语料身份减去 `reward`；与 `corpus_identity_fp` 共用唯一构造点 `_identity_payload`，现有指纹
+   逐字节不变）。覆盖 level/关卡/难度/max_ticks/玩家配置/决策粒度；`reward` 刻意不在其中
+   （per-tick 奖励由训练侧读 `metrics.npy` 现算，同一局的 obs/action/metrics 与奖励公式无关，
+   换课重算奖励是**精确**的）。排除自己；上限 `MAX_SOURCES=100` 门课（扫不全会白算；命中才读 manifest）。
+2. **到它们的工作目录里找这一局**（课程文件里的 `traj`）：
+   · rollout ⇒ `**/rl_s{stage}_seed{seed}/manifest.json` 且 `wver` 与本次**逐字节同**
+     （`paired_rotate_seed` 不必单独比：种子流不同就根本撞不上同一 (stage,seed)），
+     且同波有 `_rl_report.json`、有 `metrics.npy` 且**无** `reward.npy`；
+   · eval ⇒ 兄弟课 `eval_log.jsonl` 里 `(wver16, stage, seed)` 相同的 `event:"eval"` 行
+     （带 `source` 的 B/C 批行不取：那是另一套 harness）。
+3. **找到就取、找不到就自采**（不降级、不伪造）。rollout 命中把那一局的 shard 拷进本课
+   `w{idx}/rl_s*_seed*` 并 **D14 改戳成本课**（`course_fp`/`corpus_fp`，事实上只差 `reward` 一项）、
+   写 `reused.from` 出处；eval 命中把那一行**移植**进本课账本（只换 iter/节点/时间/来源，
+   读数逐字段保留）。
+4. **接缝按「派给谁」分三条**：① `trainer/dispatch` 在**派发前**过滤（`reuse_rollouts`）——命中局
+   不出队则集群轮会被照样派给远端重算，因此这一条与 `local_slots` 无关：拷进来的 shard 由
+   `resumed_manifests` 收进本轮聚合（目录名 `rw{i}`，避开本机槽正在写的 `w{i}`）；② 本机槽
+   （`run_local_rollout`/`run_rollout.run_one`）用轮内索引 `reuse_index`（同 `wver` 只建一次，
+   不落盘）；③ eval 派发前整轮移植（`reuse_eval_round`/`land_reused_eval`）。
+
+**红线**：`reward.npy` 载体（奖励是别的课算的）不借；`--replay` 的 rollout 不借；
+**起始分布课不借 rollout**（切点随 `(rotate_seed, it, stage, seed)` 变，跨课借 = 换了起跑状态）；
+`node=reuse` 的评估行不进采样机健康账（它不是机器），但会出现在 summary 的 per-node 表里。
+
+**只替代计算、不替代账**：shard 照常落在本课 traj（`completed_pairs`/PPO 装载/断点续跑看到的
+形态与真跑同构），评估行照常落本课 `eval_log.jsonl` 并进 `landed` 收工口径；命中局的
+`elapsedSec` 只算拷贝墙钟（源局耗时记在 `reusedSourceElapsedSec`），机器健康与有效并行度只数真算的时间。
+
+**开关**：`--reuse-siblings 0`（或 env `NN_REUSE_SIBLINGS=0`）= 关，逐字节旧行为；测试的全局隔离
+夹具把它钉成 0（否则单测会读出操作员在跑的课）。
+
+**未做（不写成已做）**：跨机器取产物（节点集群需要 hub 侧「哪台机器有这份 shard」的索引）；
+命中率的绝对读数（真开课一轮才出得来，读 `[reuse]` 日志行与账本 `reusedFrom`）。
+
+**回归**：`tests/worker/test_sibling_reuse.py`（兄弟筛选/wver 判据/奖励载体拒收/D14 改戳/行移植/
+开关/起始分布/无课程不猜/派发前过滤，13 例）· `tests/trainer/test_rollout_dispatch_resilience.py`
+（命中局不派发、聚合仍覆盖整轮）· `tests/trainer/test_eval_dispatch_resilience.py`（eval 借行不派发、
+读数逐字段移植）· `tests/helpers/remote_dag.py` 登记新模块（**L4**，D14 穿模要拿 L3 的 `worker.cmd`）。
+
 ## §37 多课程排程改成「按课分批 + 采集优先」：A 的 rollout 不再和 B 的 eval 交错（2026-10-22，用户口径；DECISIONS §2026-10-22-course-batched-rollout-eval）
 
 **旧行为**：`Supervisor._pick` 是 R2c 定案的**步级公平轮转**（从上次选中的下一门课开始找第一个

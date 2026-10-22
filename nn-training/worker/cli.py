@@ -354,6 +354,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="keep only the last N trajectory dirs (disk bound); 0 = keep all",
     )
     ap.add_argument(
+        "--reuse-siblings",
+        type=int,
+        default=1,
+        help="同族课程产物直取（plan/episode-reuse.plan.md）：1（默认）= 到同 level/关卡/难度、"
+        "同起点权重的兄弟课程**工作目录**里找这一局现成的 shard / eval 行，找到就复用、找不到就"
+        "自采；0 = 关（逐字节旧行为）。**不建缓存**：只在盘上已有的内容里找，零额外占用。",
+    )
+    ap.add_argument(
         "--stream",
         type=int,
         default=_d("stream", 1),
