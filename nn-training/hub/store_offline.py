@@ -175,6 +175,33 @@ def _artifact_identity(body: dict, hold_meta: dict[str, Any] | None) -> dict[str
     return out
 
 
+def _metrics_seen(path: Path) -> set[tuple[int, str]]:
+    """`<run>/metrics.jsonl` 里已有的 `(it, weights_fp)` —— 统计补投的**幂等判据**。
+
+    读不动/半行 ⇒ 当它不存在（那只会导致重投一轮，统计可再生；漏掉才是真的丢）。
+    """
+    out: set[tuple[int, str]] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        it = r.get("it")
+        if isinstance(it, bool) or not isinstance(it, int):
+            continue
+        out.add((int(it), str(r.get("weights_fp") or "")))
+    return out
+
+
 class OfflineRoundsMixin:
     """域混入：见模块头部。"""
 
@@ -479,6 +506,89 @@ class OfflineRoundsMixin:
             "raw_fp": got,
             "weights_fp": full_fp,
         }
+
+    def store_offline_metrics(self, body: object) -> dict:
+        """★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4 / S4）：**只带统计**的补传。
+
+        为什么要有第二条入口：抖动期「权重发不动、但读数不能丢」，以及 `anchors` 档里锚点之间
+        那几轮——它们从来没有权重上行的机会，而控制台的胜率/击杀曲线就靠这半边。
+
+        落点只有两处（**不碰权重那一半**）：
+          ① `<run>/metrics.jsonl`（补传自己的账）；
+          ② 课程侧 `training_log.jsonl`（`_land_round_metrics`，控制台指标表读它）。
+
+        **不创建 `it-N/`、不碰活动指针/归档/交付镜像**：它没有权重，写进去就是脏轮
+        （`resume_anchor` 会看到一个没有权重的轮）。
+
+        幂等：按 `(it, weights_fp)` 去重——同一轮重复投递 ⇒ 跳过（不追加第二行）。
+        失败（体不对 / `it` 非法）⇒ 抛 `ProtocolError`（HTTP 400），**不落任何东西**。
+        """
+        if not isinstance(body, dict):
+            raise ProtocolError("metrics 体必须是 JSON 对象")
+        run_id = sanitize_run_id(body.get("run_id"))
+        rows = body.get("rows")
+        if not isinstance(rows, list) or not rows:
+            raise ProtocolError("metrics 体缺 `rows`（非空数组）")
+        with self._lock:
+            d = self.offline_run_dir(run_id)
+            d.mkdir(parents=True, exist_ok=True)
+            mpath = d / self.OFFLINE_METRICS_NAME
+            seen = _metrics_seen(mpath)
+            fresh: list[dict] = []
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                it = raw.get("it")
+                if not isinstance(it, int) or isinstance(it, bool) or it < 0:
+                    continue
+                raw_row = raw.get("row")
+                row: dict = raw_row if isinstance(raw_row, dict) else {}
+                fp = str(row.get("weights_fp") or raw.get("weights_fp") or "")
+                key = (int(it), fp)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fresh.append({"it": int(it), "row": row, "weights_fp": fp})
+            if fresh:
+                lines: list[str] = []
+                for item in fresh:
+                    lines.append(
+                        json.dumps(
+                            {
+                                "event": "offline_metrics",
+                                "run_id": run_id,
+                                "it": item["it"],
+                                # landed_fp 缺失是有意的：这一轮**没有权重落地**
+                                # ⇒ 读方按「能不能直接用它」选地址时不会误选它。
+                                "weights_fp": item["weights_fp"],
+                                "parts": "metrics",
+                                **item["row"],
+                                "ts": self._now(),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                self._append_metrics_lines(mpath, lines)
+                for item in fresh:
+                    self._land_round_metrics(
+                        item["row"], run_id=run_id, it=item["it"]
+                    )
+        return {
+            "status": "accepted",
+            "run_id": run_id,
+            "it": [f["it"] for f in fresh],
+            "rows": len(fresh),
+            "skipped": max(0, len(rows) - len(fresh)),
+        }
+
+    def _append_metrics_lines(self, path: Path, lines: list[str]) -> None:
+        """把统计行追加进 `<run>/metrics.jsonl`（每行一条，与既有写法同形）。"""
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                for ln in lines:
+                    f.write(ln + "\n")
+        except OSError as e:
+            raise ProtocolError(f"写 {path.name} 失败：{e}") from e
 
     def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
         """把这一轮的度量搬进**课程侧**（实时回传也能让控制台指标表动起来）。

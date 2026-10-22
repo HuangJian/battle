@@ -143,6 +143,13 @@ class DelivererProcess:
         worker_module: str = DELIVER_WORKER_MODULE,
         idle_timeout: float = PROC_IDLE_TIMEOUT_SEC,
         tick_sec: float = DRAIN_TICK_SEC,
+        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.0）：档位自适应开关
+        #: （只在 argv 里传 `--adaptive`，子进程才启用；缺省 = 旧行为）。
+        adaptive: bool = False,
+        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.5/§3.3）：父侧把课程的
+        #: `eval_every` 与统计批开关显式传进子进程 argv；缺省 = 旧行为（不传 = 老语义）。
+        eval_every: int = 0,
+        metrics_parts: bool = False,
     ) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or "")
@@ -164,6 +171,11 @@ class DelivererProcess:
         self._worker_module = str(worker_module)
         self._idle_timeout = float(idle_timeout)
         self._tick_sec = float(tick_sec)
+        #: 两个开关（`__init__` 同款注释）：只在 argv 里出现非缺省值时传给子进程 ⇒ 老 argv
+        #: 逐字节不变（老子进程不认这两个参数，多传就是 `unrecognized arguments`）。
+        self._eval_every = int(eval_every or 0)
+        self._metrics_parts = bool(metrics_parts)
+        self._adaptive = bool(adaptive)
         self._cwd = Path(__file__).resolve().parents[1]  # nn-training 根
         # ⚠ 必须**可重入**：`_append` 持锁调 `_ensure_alive()`，而按需重启那条路（子进程死了、
         # 而 `result_done` 还没落盘）会在锁内**再调一次** `_append` 重述段末摘要（★C1/C15）——
@@ -256,6 +268,13 @@ class DelivererProcess:
         ]
         if self.course:
             argv += ["--course", self.course]
+        # ★ 2026-10-23：两个新开关只在**非缺省**时才进 argv（老 argv 逐字节不变）。
+        if self._eval_every > 0:
+            argv += ["--eval-every", str(self._eval_every)]
+        if self._metrics_parts:
+            argv += ["--metrics-parts"]
+        if self._adaptive:
+            argv += ["--adaptive"]
         env = os.environ.copy()
         # `sys.path` 可能被离线包解压 / `notebook_runtime` 改过 ⇒ 不继承就会 `No module named`。
         env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
@@ -675,6 +694,19 @@ def make_deliverer(
     mode: str = "",
     #: 后台并行（只有 `thread`/`sync` 模式用；`process` 时代理由 `DelivererProcess.status()` 报）。
     background: bool = True,
+    #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps`）：课程的 `eval_every`（`anchors` 档
+    #: 兜底步长；0 = 旧行为）与统计批开关（`?parts=metrics`，漏轮 row 单独上行）。
+    #: **真机腿应显式给**（课程的 `eval_every` + True）——缺省保持旧行为。
+    #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps`）：课程的 `eval_every`（`anchors` 档
+    #: 兜底步长）、统计批开关（`?parts=metrics`）、档位自适应。
+    #: **真机腿三个都默开**（用户口径：顺畅就每轮回传 + 漏轮统计也要上行）；直接构造
+    #: `OfflineDeliverer` 的旧调用点仍是关（它们不走这个工厂）。
+    #: ⚠ 三个都只在**非缺省**时进子进程 argv ⇒ 云机上**旧的 code.zip**（不认这些参数）会
+    #: `unrecognized arguments` ⇒ `DelivererProcess` 走既有 sticky 降级到进程内线程模式
+    #: （功能不退，只是慢一档 + 一行 WARN）。新导出的任务包用新代码就没这一步。
+    eval_every: int = 5,
+    metrics_parts: bool = True,
+    adaptive: bool = True,
     log: Callable[[str], None] = _log_default,
 ) -> DelivererLike | None:
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
@@ -710,6 +742,9 @@ def make_deliverer(
             backup_root=backup_root,
             work_dir=work_dir,
             log=log,
+            eval_every=int(eval_every or 0),
+            metrics_parts=bool(metrics_parts),
+            adaptive=bool(adaptive),
         )
     return OfflineDeliverer(
         base_url=hub_url,
@@ -720,6 +755,9 @@ def make_deliverer(
         hub_lease=hub_lease,
         worker_name=worker_name,
         backup_root=backup_root,
-        background=background if kind == "thread" else False,
+            background=background if kind == "thread" else False,
+        eval_every=int(eval_every or 0),
+        metrics_parts=bool(metrics_parts),
+        adaptive=bool(adaptive),
         log=log,
     )

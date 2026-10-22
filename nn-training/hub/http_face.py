@@ -519,6 +519,11 @@ class HubHandler(
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         return (qs.get("course") or [""])[0].strip()
 
+    def _query_str(self, key: str) -> str:
+        """任意 query 参数（空 = 未给定）。★ 2026-10-23：`?parts=`（补传按件分流）用它。"""
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        return (qs.get(key) or [""])[0].strip()
+
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]

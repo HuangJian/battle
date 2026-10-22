@@ -72,10 +72,9 @@ from common.protocol import (
     OFFLINE_DELIVERED_NAME,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
-    encode_opt_tar,
-    encode_weights_json,
     sanitize_run_id,
 )
+from remote import deliver_mode, deliver_parts
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes, weights_fps
 from remote.backup_drawer import BackupDrawer
 
@@ -89,7 +88,9 @@ from remote.deliver_ledger import (
     _num_or,
     _prune_reset_markers,
 )
-from remote.deliver_wire import pick_anchors, read_eval_iters, slim_eval_rows, wire_row
+from remote.deliver_mode import eta_text
+from remote.deliver_parts import DeliverMetricsMixin
+from remote.deliver_wire import pick_anchors, read_eval_iters, wire_row
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -183,7 +184,7 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
         return int(e.code), e.read()
 
 
-class OfflineDeliverer(DeliverLedgerMixin):
+class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
     """一段自主训练的产物补传器（best-effort；每个公开方法都**不会抛**）。
 
     只读产物目录、只写一个 `delivered.json`——它不参与训练的任何判定（不是调度器的一部分），
@@ -213,6 +214,21 @@ class OfflineDeliverer(DeliverLedgerMixin):
         #: 「抖动 60s 后恢复」这个主场景就没有任何一条用例真在量它（plan §4.2-1 / DoD-3a）。
         probe_fail_ttl: float = PROBE_FAIL_TTL_SEC,
         sync_cap: int = SYNC_CAP,
+        #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.5）：课程的 `eval_every`，
+        #: 只用于 `anchors` 档「没有 A 层读数时按每 N 轮兜底」。
+        #: **缺省 0 = 旧行为**（退回全量）：直接构造 `OfflineDeliverer` 的历史调用点不该被
+        #: 静默改语义；真机腿由 `make_deliverer`（→ `DelivererProcess`/`deliver_worker`）显式给。
+        eval_every: int = 0,
+        #: ★ 2026-10-23（§3.3/S5）：**统计批**是否启用（`?parts=metrics`，把漏轮的 row 单独送上去）。
+        #: 缺省 False = **旧行为**（老 hub 没有这个入口，硬发只会 404 并污染探活）；
+        #: 由 `make_deliverer`（真机腿的构造入口）显式开 True——那才是要发统计的那条路。
+        metrics_parts: bool = False,
+        #: ★ 2026-10-23（§3.0）：**档位自适应**。开 ⇒ 每一拍按「实测吞吐 × 本档每轮字节」
+        #: 选档：好档 `full`（每轮整份）/ 中档 `bulk`（每轮 delta）/ 差档或断连 `anchors`
+        #: （只发评估轮 + 统计批）。关 ⇒ 永远 `anchors`（= 旧行为，只发有 A 层读数的轮）。
+        #: 缺省 False 的理由：直接构造 `OfflineDeliverer` 的历史调用点（测试/老腿）不该被
+        #: 静默改语义；真机腿由 `make_deliverer` 显式开（那里默认 True）。
+        adaptive: bool = False,
         #: 后台并行模式（见模块 docstring）：True = 训练线程只入队，另一个线程推。
         #: 缺省 False（同步老行为）——调用方明确要并行时开（`make_deliverer` 缺省已开）。
         background: bool = False,
@@ -245,6 +261,13 @@ class OfflineDeliverer(DeliverLedgerMixin):
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
         self.backup_root = Path(backup_root) if backup_root else None
+        #: 课程 `eval_every`（`anchors` 档锚点兜底的步长；见 `__init__` 的同一条注释）。
+        self.eval_every = int(eval_every or 0)
+        #: 统计批开关（见 `__init__`）；`_metrics_unsupported` = 探测到 hub 不支持后本会话关掉。
+        self.metrics_parts = bool(metrics_parts)
+        self._metrics_unsupported = False
+        #: ★ 档位机（S0/S7）：自适应开关（状态本身在下面 `_now` 就绪后才造）。
+        self.adaptive = bool(adaptive)
         #: 本会话的备份统计（只读面/日志用）：`(轮次, 字节, 失败, 账本未变跳过)`。
         self._backup_stat: tuple[int, int, int, int] = (0, 0, 0, 0)
         #: 抽屉字节读数 `(总字节, 两账本字节, 单轮均字节)`：由**写方**在 `backup_pending()` 里顺手量
@@ -265,6 +288,10 @@ class OfflineDeliverer(DeliverLedgerMixin):
         self._opener = opener or _urllib_opener
         self._now = now_fn or time.time
         self.log = log
+        #: 档位状态（必须晚于 `_now`/`log`：ModeTracker 拿它们当时钟与日志）。
+        self._modes = deliver_mode.ModeTracker(
+            adaptive=self.adaptive, now_fn=self._now, log=self.log
+        )
         self.enabled = bool(self.base_url and self.token and self.run_id)
         #: 本会话停用（bad token / 体被拒）——一次性配置问题，重试无意义（见模块 docstring）。
         #: ⚠ 不是死刑：`_maybe_revive()` 在 `DISABLE_COOLDOWN_SEC` 后自动解封并重探。
@@ -297,6 +324,10 @@ class OfflineDeliverer(DeliverLedgerMixin):
         self._attempt_degraded = False
         self._last_log: dict[str, float] = {}
         self._delivered: set[int] = set()
+        #: ★ 2026-10-23：统计件已送达的轮次（与 `_delivered` 分开记账，见 `deliver_ledger`）。
+        self._metrics_sent: set[int] = set()
+        #: 统计批的读数 `(本批轮数, 本批字节)`（S7 观测用）。
+        self._metrics_stat: tuple[int, int] = (0, 0)
         #: `delivered.json` 读出来了吗（存在 ∧ 解析得开 ∧ `run_id` 是本次的）。
         #: 它是**抽屉删除**的硬门槛（D3/DoD-3c）：账本不可读 ⇒ 本会话一份送达证据都没有，
         #: 而抽屉是跨会话的唯一第二副本 ⇒ 一个字节都不许删。
@@ -793,7 +824,15 @@ class OfflineDeliverer(DeliverLedgerMixin):
         # 「缓存住哪」与「什么时候调」——缓存形状 `(size, mtime_ns)` 是读过它的类的事。
         key, its = read_eval_iters(self.root / ArtifactStore.EVAL_LOG_NAME, self._eval_iters_cache)
         self._eval_iters_cache = (key, its)
-        return pick_anchors(self.pending(), its, with_newest=with_newest)
+        # ★ 2026-10-23（plan §3.5 / D-2）：无 A 层读数时**不再退回全量**，按 `eval_every` 兜底，
+        #   并把这个事实说出来（旧行为是静默全量发，等于「网络好时反而发更多、网络差时也不降档」）。
+        if not its and self.eval_every > 0:
+            self._throttled_log(
+                f"anchor-fallback:{self.eval_every}",
+                f"补传锚点兜底：{ArtifactStore.EVAL_LOG_NAME} 里没有 A 层读数 ⇒ "
+                f"锚点按每 {self.eval_every} 轮取（plan D-2）",
+            )
+        return pick_anchors(self.pending(), its, with_newest=with_newest, every=self.eval_every)
 
     # ------------------------------------------------------------ 备份抽屉（拍板-3）
 
@@ -1035,7 +1074,12 @@ class OfflineDeliverer(DeliverLedgerMixin):
         # 为什么不是 `pending()`（plan §4-W1-C/D）：实时链路只负责「把有读数的轮次送回去」，
         # 其余轮次的权重与账本行走抽屉 + 离线包（两条腿都是整份）。`pending()` 本身没收窄
         # （D-3）——抽屉 / `status()` / 重投判据照吃全量，安全网一格没少。
-        todo = self.pending_anchors(with_newest=force_probe)
+        # ★ 2026-10-23（§3.0）：候选集由**档位**决定——
+        #   `anchors`（差档/断连/未开自适应）= 只发有 A 层读数的轮（旧行为）；
+        #   `full` / `bulk`（网络顺畅）= **每一轮都发**（用户口径：顺畅就该每轮回传）。
+        # 统计批不走这个集合（它在下面先发，见 §3.3）。段末把最新一轮提前由下面的通用段做。
+        mode = self._modes.tick_mode()
+        todo = self.pending_anchors(with_newest=force_probe) if mode == "anchors" else self.pending()
         # 重投只服务**真轮次**（纵深防御：旧账本/旧会话里的起点或半截轮次不该被重投带出去）。
         rounds = self._ledger_its()
         todo += [it for it in repost if it not in todo and it in rounds]
@@ -1058,6 +1102,10 @@ class OfflineDeliverer(DeliverLedgerMixin):
         sent: list[int] = []
         changed = False
         fails = 0
+        # ★ S5（2026-10-23）：**统计批先走**（小件优先）。权重发不动时读数也要到（D11），
+        #   且它 ~1 KB/轮——25 KB/s 档也过得去。失败不销账 ⇒ 下一拍照旧再试。
+        if self._post_metrics_batch(self._metrics_gap(), budget_sec=budget_sec):
+            changed = True
         deadline = (self._now() + float(budget_sec)) if budget_sec is not None else None
         # 段末（`force_probe`）：最新那一轮排最前 —— D-1「末轮强制补发」的落地形态。
         # 为什么不是「全部降序」：升序才是续跑进度的自然顺序，只有最后那一轮值是**整段**的终点。
@@ -1090,6 +1138,11 @@ class OfflineDeliverer(DeliverLedgerMixin):
             if outcome == "ok":
                 done += 1
                 sent.append(it)
+                # `row` 已随这一趟到达 ⇒ 统计件也记上（否则下一拍会再单独发一遍同一轮的统计；
+                # 分开发只是为了让「权重发不动」时读数也能走，不是要发两次）。
+                if it not in self._metrics_sent:
+                    self._metrics_sent.add(it)
+                    changed = True
             # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推。
             # 拒收**本身也要落盘**（D6）：TTL/上限的年龄面就住在那条记录里，而「本拍只有拒收、
             # 没有成功投递」的组合只会让 `done=0` ⇒ 不置脏就会连旧记录一起停在上一次的水位。
@@ -1130,31 +1183,22 @@ class OfflineDeliverer(DeliverLedgerMixin):
             self.log(f"补传 it{it} 投递异常（第 {n} 次，{why}）——本轮放弃，下轮再试")
             return "stop"
 
-    def _reject_round(self, it: int, reason: str, weights_fp: str = "") -> str:
-        """把这一轮记进拒收集（`pending()` 从下拍起不再带它），返回 "skip"。
+    def _full_parts_for(self, it: int, *, mode: str) -> tuple[bytes, bytes, str]:
+        """这一轮要发的 `(权重字节, opt字节, wire_form)`——档位决定发整份还是原件（装配见
+        `deliver_parts.full_parts_for`；腿本体只留「怎么发」）。"""
+        from remote import opt_standard, weights_standard  # L1：L2 才持有这条边；full 档才付
 
-        与 401/403 的「停用整条腿」严格区分：内容问题（体形状/账本行）只毁一轮，而停用
-        会把这一整段剩下的几十轮全部拦下（2026-09-22 事故：it1 一次 400 之后整段再没回过
-        一轮）；而鉴权问题每轮重试会把本 IP 封掉（D9）——两者代价完全不同，不能共用一个反应。
-
-        跨会话（2026-10-07）：这条记录随 `delivered.json` 带上**权重指纹**——子进程重启/idle-timeout
-        会把「会话」缩到分钟级，只住内存的话同一轮会反复重投 ~1.9MB；而新会话读回时先核对指纹，
-        同一 `it` 换了内容就不认（照常再试一次）。
-
-        D6（2026-10-16）：跨会话意味着一**次误判会永久生效**（hub 409 被读成内容问题时，那一轮
-        就再也不会回传）⇒ 每条记录带上 `at`/`tries`，到 `REJECTED_TTL_SEC` 或记满
-        `REJECTED_MAX_TRIES` 次自动复活；`reset_rejected()` 是「现在就要它再试一次」的人工出口。
-        """
-        self._rejected[int(it)] = reason
-        self._rejected_at[int(it)] = self._now()
-        self._rejected_tries[int(it)] = self._rejected_tries.get(int(it), 0) + 1
-        if weights_fp:
-            self._rejected_fp[int(it)] = str(weights_fp)
-        self.log(
-            f"补传 it{it} **本轮跳过**（{reason}）——产物照常落本地；"
-            f"其余轮次照推（本会话不再重试这一轮，{REJECTED_TTL_SEC / 3600:.0f}h 内或新会话会再试一次）"
+        return deliver_parts.full_parts_for(
+            self.root,
+            self.run_id,
+            int(it),
+            mode=mode,
+            expand_weights=lambda p: weights_standard.standard_weights_copy(
+                p, self.root, course=self.course, log=self.log
+            ),
+            expand_opt=lambda p: opt_standard.standard_opt_copy(p, self.root, log=self.log),
+            log=self.log,
         )
-        return "skip"
 
     def _post_artifact(self, it: int, *, budget_sec: float | None = None) -> str:
         """投递一轮产物（权重 + opt + 账本行 + 评估读数）。返回：
@@ -1199,43 +1243,29 @@ class OfflineDeliverer(DeliverLedgerMixin):
                 f"补传 it{it}: 逐局明细 {self._last_pergame_games} 局不入实时体"
                 "（随抽屉/离线包到达；实时体只带聚合列）",
             )
-        body = {
-            "run_id": self.run_id,
-            "it": int(it),
-            "weights_fp": wfp,
-            "weights_json": encode_weights_json(wj),
-            "opt_fp": sha256_bytes(opt) if opt else "",
-            "opt_tar_b64": encode_opt_tar(opt) if opt else "",
-            # 账本行**随本轮一起走**（hub 侧要拿它画曲线/对账）：只取**与本轮字节相符**的那一
-            # 行（同名 it 的历史行一律不取——见 `_row_for`）；找不到就只发权重（不含 row）。
-            "row": row,
-            # 云机 A 层评估的就地读数（`eval_on_cloud`）：与权重同一趟回去，hub 侧并进
-            # 课程账本（`_HubQueue.merge_eval_rows`）——否则控制台要等整段结束才知道读
-            # 数，而「一条跑偏的腿」正是这条腿要尽早看见的东西。空列表 = 本轮没评
-            # （或本会话已降到「只发权重」，那一次读数由 `_repost` 另投）。
-            "eval_rows": eval_rows,
-            # 血缘（hub 侧据此把这条腿接回某个 run；全是 manifest 里的原值）
-            "plan_sha256": str(m.get("plan_sha256", "") or ""),
-            "course_fp": str(m.get("course_fp", "") or ""),
-            "commit": str(m.get("commit", "") or ""),
-            "source_dir": str(self.root)[-300:],
-            "ts": self._now(),
-        }
-        if self.course:
-            body["course"] = self.course
-        if self.hub_lease:
-            body["lease_token"] = self.hub_lease
-        # 可读名（`kaggle-o`）：dashboard 节点贡献统计的 PPO 组拿它当列名（hub 收下这一轮时
-        # 把它记进账本的 `offline_artifact` 行）。**缺省不带键**（与 `course`/`lease_token` 同纪律）。
-        if self.worker_name:
-            body["worker_name"] = self.worker_name
+        body = deliver_parts.build_artifact_body(
+            run_id=self.run_id,
+            it=int(it),
+            weights_json=wj,
+            opt_tar=opt,
+            row=row,
+            eval_rows=eval_rows,
+            lineage=m,
+            source_dir=str(self.root),
+            course=self.course,
+            hub_lease=self.hub_lease,
+            worker_name=self.worker_name,
+            now=self._now(),
+        )
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
             return self._reject_round(
                 it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B", wfp
             )
+        t0 = self._now()
         status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw, budget_sec=budget_sec)
         if not status:  # 没送达（_post 已记读数）
+            self._modes.note_disconnect()
             if eval_rows and it not in self._degraded:
                 # 降级档（§4-W1-B′）：带评估读数的大体（现场 1.24MB）没过去 —— 下一拍
                 # 先用「只发权重/opt/账本行」的体（现场 322KB）把**不可再生**的那三件送到；
@@ -1252,6 +1282,10 @@ class OfflineDeliverer(DeliverLedgerMixin):
             return "stop"
         if status in (200, 201):
             self._delivered.add(it)
+            # ★ 档位机的吞吐输入：这一趟真过去了（体大小 / 耗时）。
+            self._modes.note_delivery(
+                int(self._last_body_bytes), max(1e-6, self._now() - t0)
+            )
             self._note_recovery()
             return "ok"
         if status == 409:
@@ -1271,6 +1305,8 @@ class OfflineDeliverer(DeliverLedgerMixin):
             return "stop"
         if status in (400, 413, 422):
             return self._reject_round(it, f"HTTP {status}: {_err_text(resp)}", wfp)
+        # 5xx / 网关错 = 链路问题（内容错已在上面拒收，不算断连）⇒ 记进断连滑窗。
+        self._modes.note_disconnect()
         self._reachable = False
         self._note_failure("http", f"it{it} HTTP {status}: {_err_text(resp)}")
         self._throttled_log(
@@ -1282,65 +1318,12 @@ class OfflineDeliverer(DeliverLedgerMixin):
     EVAL_ROWS_CAP = 400
 
     def _eval_rows_for(self, it: int) -> list[dict]:
-        """产物目录里本轮的评估读数（`eval_log.jsonl`；没评过 = 空列表，永不抛）。
-
-        逐局行：只取 `iter == it` 且没有 `source` 的（`source` 是 B/C evalboard 行的标记，
-        它们不是这条腿的读数）。上界 `EVAL_ROWS_CAP`：超过就只发前 N 条并记一笔
-        （宁少不错——体超限会让整个补传被拒，连权重一起丢）。
-
-        **summary 行也一起发**（每个 `(iter,wver)` 至多一行，不占上界）：它是控制台指标表
-        eval 列 / eval 弹窗 / 开课回执 / 门判据唯一认的读数键（2026-09-23：只发逐局行
-        ⇒ 云腿整段的评估在控制台上不可见），而云机自己的账本就是它唯一的产地——
-        本地没有这条腿的循环，没人替它算。
-        """
-        p = Path(self.root) / ArtifactStore.EVAL_LOG_NAME
-        rows: list[dict] = []
-        summary: list[dict] = []
-        try:
-            if not p.exists():
-                return rows
-            for line in p.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    r = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(r, dict) or "source" in r:
-                    continue
-                if r.get("iter") != int(it):
-                    continue
-                if r.get("event") == "eval_summary":
-                    summary.append(r)
-                    continue
-                if r.get("event") != "eval":
-                    continue
-                rows.append(r)
-        except OSError:
-            return []
-        if len(rows) > self.EVAL_ROWS_CAP:
-            self.log(
-                f"补传 it{it}: 评估行 {len(rows)} 条 > 上界 {self.EVAL_ROWS_CAP}"
-                f"——只发前 {self.EVAL_ROWS_CAP} 条（其余随 artifacts zip 回去）"
-            )
-            rows = rows[: self.EVAL_ROWS_CAP]
-        # W3 瘦身（2026-10-22）：逐局行过白名单（`EVAL_ROW_WIRE_KEYS`）。**summary 行不过**：
-        # 它本来就只占一行/轮，而且控制台的指标表、eval 列、开课回执全都认它（`EVAL_ROWS_CAP`
-        # 那段的注释）。为什么要量字节：只改形状不报数字的话，下次读日志的人分不清
-        # 「今天体小是因为没评估」还是「因为白名单生效了」。
-        if rows:
-            rows, raw_bytes, wire_bytes = slim_eval_rows(rows)
-            self._eval_rows_raw_bytes, self._eval_rows_wire_bytes = raw_bytes, wire_bytes
-            if self._eval_rows_wire_bytes < self._eval_rows_raw_bytes:
-                self._throttled_log(
-                    "eval-slim",
-                    f"评估行白名单：it{it} {self._eval_rows_raw_bytes / 1024:.0f}KB"
-                    f" → {self._eval_rows_wire_bytes / 1024:.0f}KB（{len(rows)} 行；"
-                    "分析列随抽屉/离线包到达）",
-                )
-        else:
-            self._eval_rows_raw_bytes = self._eval_rows_wire_bytes = 0
-        return rows + summary
+        """本轮评估读数（实现住 `deliver_parts.eval_rows_for`；判据一字不改）。"""
+        rows, raw_b, wire_b = deliver_parts.eval_rows_for(
+            self.root, int(it), cap=self.EVAL_ROWS_CAP, log=self.log, throttled_log=self._throttled_log
+        )
+        self._eval_rows_raw_bytes, self._eval_rows_wire_bytes = raw_b, wire_b
+        return rows
 
     def deliver_result(
         self,
@@ -1452,6 +1435,7 @@ class OfflineDeliverer(DeliverLedgerMixin):
 
     # ------------------------------------------------------------ 状态（日志/自检用）
 
+
     def status(self) -> dict:
         """一行式状态（给启动日志与 operator 看：补传在不在、投了几轮、卡在哪）。"""
         pending = self.pending()  # 两处读数都用它（每拍被调，别算两遍）
@@ -1468,6 +1452,20 @@ class OfflineDeliverer(DeliverLedgerMixin):
             "pending_anchors": len(self.pending_anchors()),
             #: 上一轮实时体里被摘掉的逐局明细局数（Q2）：>0 = 该轮控制台逐局弹窗等包。
             "pergame_deferred": int(self._last_pergame_games),
+            # ★ 2026-10-23（S7）：档位机读数。`mode` = 这一拍的档（`adaptive=False` ⇒ 恒
+            # `anchors`）；`avail_bps` = 实测吞吐（`None` = 还没成功投过）；`backlog` =
+            # 还没发权重的轮数；`eta` = 按当前档把 backlog 发完还要多久（`-`/`>1h`）。
+            "mode": self._modes.mode,
+            "adaptive": self.adaptive,
+            "avail_bps": self._modes.avail_bps,
+            "disconnects": self._modes.disconnects,
+            "backlog": len(pending),
+            "eta": eta_text(len(pending), mode=self._modes.mode, avail_bps=self._modes.avail_bps),
+            # ★ 统计批（S5）：还剩多少轮的 `row` 没单独上行；`metrics_sent` = 已上行的轮数。
+            "metrics_backlog": len(self._metrics_gap()),
+            "metrics_sent": len(self._metrics_sent),
+            "metrics_unsupported": self._metrics_unsupported,
+            "metrics_last": dict(zip(("rounds", "bytes"), self._metrics_stat, strict=True)),
             "rejected": dict(self._rejected),
             #: 拒收记录的年龄面（D6）：`it → (记了几次, 几秒前记的)`。到 TTL/上限会自动复活，
             #: 人也可以 `reset_rejected()`（或控制台的同名单个动作）现在就把某一环摆回台面。

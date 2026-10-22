@@ -124,6 +124,14 @@ LAYERS: dict[str, int] = {
     # ⇒ **L0**；`offline_deliver`(L2) 站在它上面，秩不变。（与 `deliver_ledger` 同一条纪律：
     # 同一个 LOC 预算把腿本体顶到 1000 行，就把纯数据/判据下沉。）
     "remote.deliver_wire": 0,
+    # 补传**档位机**（2026-10-23，`plan/offline-deliver-full-and-gaps` §3.0）：三档判定 /
+    # `need_bps` / `eta` 三块纯函数。依赖面 = stdlib + `collections.abc`
+    # ⇒ **L0**；读者只有 `offline_deliver`(L2)，秩不变。
+    "remote.deliver_mode": 0,
+    # 补传「发什么」的装配（2026-10-23，LOC 下沉）：整份展开（落地器**注入**，不 import）+
+    # 统计批组装。依赖 `delta_files`(L0) / `artifacts`(L0) / `weights_delta`+`opt_delta`(L0，只取魔数)
+    # ⇒ **L1**；读者只有 `offline_deliver`(L2)。
+    "remote.deliver_parts": 1,
     # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
     # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
     "remote.control_pool": 0,

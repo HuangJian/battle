@@ -73,6 +73,10 @@ class DeliverLedgerMixin:
     log: Callable[[str], None]
     _cv: threading.Condition
     _delivered: set[int]
+    #: ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.3）：**统计件**已送达的轮次。
+    #: 与 `_delivered`（权重件）**必须分开**：共用一本时「metrics 成功」会把「权重没发」
+    #: 掩盖掉（`pending()` 就再也列不出那一轮了）。
+    _metrics_sent: set[int]
     _repost: set[int]
     _rejected: dict[int, str]
     _rejected_at: dict[int, float]
@@ -105,6 +109,11 @@ class DeliverLedgerMixin:
         for it in data.get("artifacts") or []:
             if isinstance(it, int) and not isinstance(it, bool):
                 self._delivered.add(it)
+        # 统计件（2026-10-23）：老账本没有这个键 ⇒ 空集（等价于「都还没发」，会重发一次，
+        # hub 侧按 (it, weights_fp) 幂等兜住）。
+        for it in data.get("metrics") or []:
+            if isinstance(it, int) and not isinstance(it, bool):
+                self._metrics_sent.add(it)
         self._result_done = bool(data.get("result_done"))
         # 跨会话的两笔欠账（必须落盘；§10.3）：
         #   * `owed_reposts` —— 上一段没送出去的重投，**本会话直接接手**（那些轮次早已记账，
@@ -143,6 +152,32 @@ class DeliverLedgerMixin:
             self._rejected_at[it] = at
             self._rejected_tries[it] = tries
 
+    def _reject_round(self, it: int, reason: str, weights_fp: str = "") -> str:
+        """把这一轮记进拒收集（`pending()` 从下拍起不再带它），返回 "skip"。
+
+        与 401/403 的「停用整条腿」严格区分：内容问题（体形状/账本行）只毁一轮，而停用
+        会把这一整段剩下的几十轮全部拦下（2026-09-22 事故：it1 一次 400 之后整段再没回过
+        一轮）；而鉴权问题每轮重试会把本 IP 封掉（D9）——两者代价完全不同，不能共用一个反应。
+
+        跨会话（2026-10-07）：这条记录随 `delivered.json` 带上**权重指纹**——子进程重启/idle-timeout
+        会把「会话」缩到分钟级，只住内存的话同一轮会反复重投 ~1.9MB；而新会话读回时先核对指纹，
+        同一 `it` 换了内容就不认（照常再试一次）。
+
+        D6（2026-10-16）：跨会话意味着一**次误判会永久生效**（hub 409 被读成内容问题时，那一轮
+        就再也不会回传）⇒ 每条记录带上 `at`/`tries`，到 `REJECTED_TTL_SEC` 或记满
+        `REJECTED_MAX_TRIES` 次自动复活；`reset_rejected()` 是「现在就要它再试一次」的人工出口。
+        """
+        self._rejected[int(it)] = reason
+        self._rejected_at[int(it)] = self._now()
+        self._rejected_tries[int(it)] = self._rejected_tries.get(int(it), 0) + 1
+        if weights_fp:
+            self._rejected_fp[int(it)] = str(weights_fp)
+        self.log(
+            f"补传 it{it} **本轮跳过**（{reason}）——产物照常落本地；"
+            f"其余轮次照推（本会话不再重试这一轮，{REJECTED_TTL_SEC / 3600:.0f}h 内或新会话会再试一次）"
+        )
+        return "skip"
+
     def refresh_from_ledger(self) -> None:
         """重读 `delivered.json`（**只读镜像用**：进程模式下账本的写者是子进程，父侧那份缓存
         不刷新就会骗人：明明三轮回传都到了，`pending()` 还列着它们）。
@@ -150,6 +185,7 @@ class DeliverLedgerMixin:
         与 `_load_ledger` 的差别只有一个：先把上一份读面清掉（否则删除的记账永远删不掉）。
         """
         self._delivered.clear()
+        self._metrics_sent.clear()
         self._rejected.clear()
         self._rejected_fp.clear()
         self._rejected_at.clear()
@@ -195,6 +231,8 @@ class DeliverLedgerMixin:
                 "run_id": self.run_id,
                 "hub_url": self.base_url,
                 "artifacts": sorted(self._delivered),
+                # ★ 2026-10-23：统计件单独一本（权重件 = `artifacts`，两本互不相掩）。
+                "metrics": sorted(self._metrics_sent),
                 "result_done": self._result_done,
                 # 欠账（§10.3）：`owed_reposts` = 还没送达的重投（送达即销账）；`rejected` = 内容
                 # 拒收过的轮次 + 当时的权重指纹。两者都是**磁盘状态**：_repost 只住内存时，

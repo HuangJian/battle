@@ -192,6 +192,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "locate_offline_course",
             "store_offline_artifact",
             "store_offline_result",
+            # 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4）：+1 —— 只带统计的补传
+            # （没有权重那一半；抖动期 / `anchors` 档漏轮的唯一上行通路）。
+            "store_offline_metrics",
         ),
     ),
     "queue_observe": (
@@ -352,7 +355,13 @@ FACADE_SAME_SIG = (
 #: ★ 门面契约的**例外三条**：同名，但多一个**前置 `course`**。理由：store 是**每课程一份**
 #: （`store_offline_*` 与 `claimable_job_ids` 都作用在某一门课上），而队列要**跨课程寻址**，
 #: 所以队列侧先收课程名再转发。名字照旧、语义只多一层寻址 —— 这三条是本刀明确**不**统一的。
-FACADE_COURSE_EXTRA = ("claimable_job_ids", "store_offline_artifact", "store_offline_result")
+FACADE_COURSE_EXTRA = (
+    "claimable_job_ids",
+    "store_offline_artifact",
+    "store_offline_result",
+    # 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4）：只带统计的补传（门面多一个 course）。
+    "store_offline_metrics",
+)
 
 #: ★ 门面的**改名**转发（同名承诺在 store 侧名字不同）。`abandon` 是唯一一条。
 FACADE_RENAMED = {"abandon": "abandon_job"}
@@ -550,7 +559,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-17（plan/export-must-not-cancel-live-job §5）：+1（`ledger_net_state` 的 hub 转发
     # ——`/jobs/{id}/status` 认账本净态，status 与派发池从此同源）⇒ 127。
     # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 128, len(DOMAIN_METHODS)
+    # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 129, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -560,7 +570,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 128, len(seen)
+    assert len(seen) == 129, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -680,7 +690,8 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     # 2026-10-11 W7：34 → 35（`cancel_job` 的门面转发：单 job 定向作废）
     # 2026-10-17（plan/export-must-not-cancel-live-job §5）：35 → 36（`ledger_net_state`
     # ——账本净态的读面；`/jobs/{id}/status` 与派发池同源）。
-    assert len(declared) == 36, len(declared)
+    # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：36 → 37（`store_offline_metrics`）。
+    assert len(declared) == 37, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert "abandon" in FACADE_RENAMED and "abandon" not in common
     assert "abandon_job" in _callable_names(_JobStore)
@@ -703,7 +714,8 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
 
 def test_the_course_addressed_three_differ_only_by_the_leading_course_param() -> None:
     """★ 三条例外：同名，且**只**多一个前置 `course`——不得多也不得少。"""
-    assert len(FACADE_COURSE_EXTRA) == 3
+    # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：3 → 4（`store_offline_metrics`）。
+    assert len(FACADE_COURSE_EXTRA) == 4
     for name in FACADE_COURSE_EXTRA:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))
@@ -942,8 +954,9 @@ def test_queue_peer_is_declarations_only() -> None:
     # 2026-10-07 M1b 再 +1（`_sync_hold`：hold 镜像的推送，每次改 hold 都要调）；★M1c −1
     # （`_sync_parked` 删：闸输入只剩 hold）；★M4b −7 删（`mode_of` / `offline_courses` /
     # `set_mode` / `dispatch_effective_mode` / `set_mode_pinned` / `pinned_of` / `authority_of`）、
-    # +1 增（`course_open`：开课标记的唯一公开读面）；2026-10-11 W7 +1（`cancel_job`）⇒ 80。
-    assert len(funcs) == 80, len(funcs)
+    # +1 增（`course_open`：开课标记的唯一公开读面）；2026-10-11 W7 +1（`cancel_job`）⇒ 80；
+    # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）+1（`store_offline_metrics`）⇒ 81。
+    assert len(funcs) == 81, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

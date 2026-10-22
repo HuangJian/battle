@@ -98,7 +98,11 @@ def wire_row(row: dict | None) -> tuple[dict | None, int]:
 
 
 def pick_anchors(
-    pending: list[int], eval_iters: set[int], *, with_newest: bool = False
+    pending: list[int],
+    eval_iters: set[int],
+    *,
+    with_newest: bool = False,
+    every: int = 0,
 ) -> list[int]:
     """`pending` 里**这一拍该发**的锚点轮（`pending_anchors` 的全部逻辑，纯函数便于单测）。
 
@@ -106,13 +110,25 @@ def pick_anchors(
     `with_newest`（段末/收线）额外带**最新那一轮**（D-1 末轮强制补发），否则最后一段
     （距上一个锚点不足 `eval_every`）的进度永远差几轮，续跑要多跑一遍。
 
-    没有 A 层评估的腿（`eval_log.jsonl` 缺失/为空）⇒ 退回全量。这不是旋钮而是**数据条件**：
-    没有锚点时「只发锚点」等价于「一轮也不发」。
+    没有 A 层评估的腿（`eval_log.jsonl` 缺失/为空）：
+      * `every > 0` ⇒ **按 `it % every == 0` 兜底**（plan D-2 的原口径，2026-10-23 补上），
+        调用方（`pending_anchors`）负责打那一行 WARN；
+      * `every <= 0` ⇒ 退回全量（**旧行为**，只留给不传 `every` 的历史调用点）：没有锚点时
+        「只发锚点」等价于「一轮也不发」。
+
+    ⚠ 这条兜底**只服务 `anchors` 档**（`plan/offline-deliver-full-and-gaps` §3.5）：`full` / `bulk`
+    档取 `pending()` 全量，根本不走这个函数。
     """
     if not pending:
         return []
     if not eval_iters:
-        return list(pending)
+        step = int(every or 0)
+        if step <= 0:
+            return list(pending)
+        out = [it for it in pending if it % step == 0]
+        if with_newest and pending[-1] not in out:
+            out.append(pending[-1])
+        return out
     out = [it for it in pending if it in eval_iters]
     if with_newest and pending[-1] not in out:
         out.append(pending[-1])

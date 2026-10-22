@@ -373,6 +373,14 @@ class QueueResumeMixin(QueuePeer):
             )
         return store.store_offline_artifact(body, advance_active=advance_active, stage=stage)
 
+    def store_offline_metrics(self, course: str, body: dict) -> dict:
+        """★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4）：**只带统计**的补传。
+
+        与 `store_offline_artifact` 的差别只有一条：**没有权重**。所以它不推进活动起点、
+        不创建 `it-N/`、不做首写锁定/409——统计可再生，幂等由 `(it, weights_fp)` 去重。
+        """
+        return self._stores[course].store_offline_metrics(body)
+
     def store_offline_result(self, course: str, body: dict) -> dict:
         return self._stores[course].store_offline_result(body)
 

@@ -219,6 +219,22 @@ def build_argparser() -> argparse.ArgumentParser:
         help=f"纯兜底：无新控制行 + 无积压 + 无未送达重投满这么久 ⇒ 退出（缺省 {IDLE_TIMEOUT_SEC:g}s）",
     )
     ap.add_argument("--tick-sec", type=float, default=DRAIN_TICK_SEC, help="tick 间隔（秒）")
+    ap.add_argument(
+        "--eval-every",
+        type=int,
+        default=0,
+        help="★ 2026-10-23：`anchors` 档「没有 A 层读数」时按每 N 轮兜底（0 = 旧行为=全量）",
+    )
+    ap.add_argument(
+        "--metrics-parts",
+        action="store_true",
+        help="★ 2026-10-23：启用统计批（`?parts=metrics`）——漏轮的 row 单独上行，不等权重",
+    )
+    ap.add_argument(
+        "--adaptive",
+        action="store_true",
+        help="★ 2026-10-23：档位自适应——网络顺畅就每轮回传（full/bulk），差档/断连退回评估轮",
+    )
     return ap
 
 
@@ -244,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
         worker_name=worker_name,
         # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
         background=False,
+        # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
+        # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
+        eval_every=int(args.eval_every or 0),
+        metrics_parts=bool(args.metrics_parts),
+        adaptive=bool(args.adaptive),
         log=_log,
     )
     tick = max(0.05, float(args.tick_sec))

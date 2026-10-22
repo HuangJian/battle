@@ -102,6 +102,7 @@ class OfflineRoutes:
     _json: Any
     _log_reject: Any
     _query_course: Any
+    _query_str: Any
     _read_capped_body: Any
     _worker_id: Any
 
@@ -335,6 +336,28 @@ class OfflineRoutes:
                     "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
+            # ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4 / S4）：
+            # `?parts=metrics` = **只带统计**的补传（没有权重那一半）。抖动期权重发不动、
+            # `anchors` 档里锚点之间那些轮，只有这条路能把胜率/击杀送到控制台。
+            # 它**不推进活动起点、不创建 `it-N/`**（没有权重 ⇒ 不该让 `resume_anchor` 看见它）。
+            if self._query_str("parts") == "metrics":
+                res = self.hub.store_offline_metrics(course, body)
+                try:
+                    self.hub.merge_eval_rows(course, body.get("eval_rows"))
+                except Exception as e:
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] [hub-server] metrics 体的 eval 行并入失败"
+                        f"（忽略）: {type(e).__name__}: {e}",
+                        flush=True,
+                    )
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE-METRICS "
+                    f"course={course or '-'} run={res.get('run_id')} "
+                    f"rows={res.get('rows')} skip={res.get('skipped')} <- {len(raw)}B",
+                    flush=True,
+                )
+                self._json(res, 200)
+                return
             # ★P1-1（M1b）：**盖章无条件、advance 要活+持准**——镜像/归档照落（算过什么的
             # 证据），但活动起点只听**活跃 hold 的持有人**。判据三态见 `offline_advance_ok`。
             advance, why = self.hub.offline_advance_ok(
