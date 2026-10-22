@@ -12,6 +12,15 @@
 3. **故障域按课隔离**：一门课 `ABORT`（门禁停腿 / 5 连击）只脏它自己的队列，
    其它课照常（与 §3.13「停机达令按课程」同口径）。
 
+**排程策略（2026-10-22 用户口径，取代「步级公平轮转」）**：**按课分批** + **采集优先**。
+
+* **按课分批**：一旦选中某门课，就把它的**本 it** 任务连续跑完再换课（让位点仍只有
+  `WAIT` / 资源票被挡 / 本轮收尾）——A 课的 rollout 与 B 课的 eval 不再交错；
+* **采集恒高于 eval**：没在分批时挑课（首拍 / 本批收尾 / 本课在等外部）的族序 =
+  `rollout`/`volume_topup`（`FAMILY_COLLECT`）→ 其余 → `eval_dispatch`/`eval_join`
+  （`FAMILY_EVAL`）；同一门课排在评估步骤、而**别的课有采集可跑** ⇒ 本课让位。理由与被否决
+  备选见 DECISIONS `§2026-10-22-course-batched-rollout-eval`。
+
 **本模块是调度**，不含训练逻辑：执行体由调用方注入（`executor(task, ctx)`），
 因此可以完全脱离 torch / 网络做单测；R2c-2 把它接到真的 `TrainingLoop` 任务体上。
 
@@ -28,7 +37,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from worker.loop_tasks import ABORT as ABORT_STATUS
-from worker.loop_tasks import DONE, RETRY, WAIT, Task, TaskResult, resolve_failure
+from worker.loop_tasks import (
+    DONE,
+    FAMILY_COLLECT,
+    FAMILY_EVAL,
+    FAMILY_STEP,
+    RETRY,
+    WAIT,
+    Task,
+    TaskResult,
+    resolve_failure,
+    task_family,
+)
 
 #: 重试退避（与现主循环的 `time.sleep(30)` 同值；`now()` 可注入 ⇒ 测试不真睡）。
 RETRY_BACKOFF_SEC = 30.0
@@ -138,7 +158,7 @@ class StepTrace:
 
 
 class Supervisor:
-    """单进程调度器：公平轮转 → 资源闸门 → 单线程执行 → 按四态收敛。
+    """单进程调度器：按课分批（采集优先）→ 资源闸门 → 单线程执行 → 按四态收敛。
 
     `planner(course, it, queue) -> list[Task]`：为某课的某一轮准备任务表（生产实现 =
     `pending_tasks(round_tasks(...), RoundFacts(...))`）；返回空表 = 这门课没有可做事
@@ -162,6 +182,8 @@ class Supervisor:
         self.max_attempts = max_attempts
         self.courses: dict[str, CourseQueue] = {}
         self._cursor = 0
+        #: 「本批」课程（2026-10-22 按课分批）：上一步跑的课，下一步优先还是它，直到本轮收尾。
+        self._last_course: str | None = None
         self.traces: list[StepTrace] = []
         #: 本圈已被资源池挡住的课（全被挡住 = 真没事可做 ⇒ step() 返回 None，不空转）。
         self.blocked_courses: set[str] = set()
@@ -188,32 +210,75 @@ class Supervisor:
 
     # ------------------------------------------------------------ 调度
 
-    def _pick(self, now: float) -> CourseQueue | None:
-        """公平轮转：从上次的下一门课开始找第一个可跑的（避免固定顺序饿死末位课程）。"""
+    def _candidates(self, now: float) -> list[CourseQueue]:
+        """可跑的课（**按轮转序**，即从上次选中的下一门开始绕一圈）。
+
+        被资源池挡住 / 等外部 / 暂停 / 停腿的课不进候选：按课分批后上一门课会一直是首选，
+        「选中它再由 `step` 返回 None」等于两拍才给别的课一次机会——那是饿死，不是排队。
+        """
         names = list(self.courses)
-        if not names:
-            return None
         n = len(names)
+        out: list[CourseQueue] = []
         for off in range(n):
             q = self.courses[names[(self._cursor + off) % n]]
-            if q.runnable(now):
-                self._cursor = (names.index(q.course) + 1) % n
-                return q
+            if q.course in self.blocked_courses or not q.runnable(now):
+                continue
+            out.append(q)
+        return out
+
+    def _take(self, q: CourseQueue) -> CourseQueue:
+        """选中一门课：推进轮转游标，并记下「本批」是哪门课（下一步继续优先它）。"""
+        names = list(self.courses)
+        self._cursor = (names.index(q.course) + 1) % len(names)
+        self._last_course = q.course
+        return q
+
+    def _pick(self, now: float) -> CourseQueue | None:
+        """挑下一步：**按课分批 + 采集优先**（2026-10-22 用户口径，见模块 docstring）。
+
+        ① **黏住上一门课**：同一门课的某个 it 的任务连续跑完再换课——A 的 rollout 与 B 的
+           eval 不再交错（**非评估**步骤不会因为别课有采集而被打断：那会把一门课的准备/PPO/
+           落账无限推后，语料并没有更快到账）；
+        ② 唯一例外 =「本课排在评估上、别的课有采集可跑」⇒ 让位（**采集恒高于评估**）；
+        ③ 没有可黏的课（首拍 / 上一轮已收尾 / 上一门课在等外部）⇒ 采集 → 其余 → 评估，
+           同族内仍按轮转序（末位课程不会因为上游一直有采集而永远饿着）。
+        """
+        cands = self._candidates(now)
+        if not cands:
+            return None
+        sticky: CourseQueue | None = None
+        for q in cands:
+            if q.course == self._last_course:
+                sticky = q
+                break
+        if sticky is not None:
+            cur = sticky.current
+            assert cur is not None  # 候选只收 runnable（tasks 非空）
+            if task_family(cur.kind) != FAMILY_EVAL:
+                return self._take(sticky)
+            # 本课在评估上：别的课的采集先跑（采集恒高于评估）
+            for q in cands:
+                other = q.current
+                if other is not None and task_family(other.kind) == FAMILY_COLLECT:
+                    return self._take(q)
+            return self._take(sticky)
+        for family in (FAMILY_COLLECT, FAMILY_STEP, FAMILY_EVAL):
+            for q in cands:
+                cur = q.current
+                if cur is not None and task_family(cur.kind) == family:
+                    return self._take(q)
         return None
 
     def step(self) -> StepTrace | None:
         """跑一步。返回 None = 没事可做（全 WAIT / 全暂停 / 全停腿 / **能跑的都被池挡住**）。
 
         「被池挡住」也算没事可做：否则调度器会在两个阻塞的课之间空转（单线程下纯烧 CPU，
-        而且会把 traces 灌爆）。被挡住的事实仍在 `blocked_courses` 里，读面看得到。
-        一旦有票被释放（某课真的推进了），挡住集合清空——因为局面变了。
+        而且会把 traces 灌爆）。被挡住的课在 `_pick` 里就被跳过（读面仍可在 `blocked_courses`
+        看到它们），全被挡住时返回 None 并**清空**挡住集合——下一拍重新问一遍（局面可能变了）。
         """
         now = self.now()
         q = self._pick(now)
         if q is None:
-            self.blocked_courses.clear()
-            return None
-        if q.course in self.blocked_courses:
             self.blocked_courses.clear()
             return None
         task = q.current
@@ -326,6 +391,7 @@ class Supervisor:
         q.state = ABORTED
         q.reason = reason
         q.mid_round = False  # 停腿：不再有「轮内在用」的引擎需要护住
+        self._last_course = None  # 停腿的课不再是「本批」，下一拍从轮转序挑新课
         return StepTrace(
             course=q.course,
             action="aborted",
@@ -341,6 +407,8 @@ class Supervisor:
         q.next_it += 1
         q.reason = ""
         q.mid_round = False  # 本轮已收尾；下一轮尚未动手 ⇒ 引擎此刻可安全驱逐
+        # ★ 按课分批的边界（2026-10-22）：**本 it** 跑完就换课（不是一口气把下一轮也接着跑）。
+        self._last_course = None
         q.tasks = list(self.planner(q.course, q.next_it, q))
         q.state = QUEUE_DONE if not q.tasks else READY
         return StepTrace(

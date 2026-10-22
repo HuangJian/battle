@@ -8808,3 +8808,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`test_pack_full` 10 例全绿（含真容器落地与端到端一键包）；`test_remote_dag` /
   `test_python_loc_budget` / `test_source_text_assert_budget`（基线未抬）/ `test_reuse_ledger` /
   `test_offline_{notebook,deliverable_split,boot}` / `test_plan_run_split` 共 165 passed。
+
+## §2026-10-22-course-batched-rollout-eval — 多课程排程：**按课分批 + 采集优先**（rollout 恒高于 eval，取代步级公平轮转）
+
+- **背景（用户 2026-10-22 口径）**：单进程多课程 supervisor 的 `_pick` 是 R2c 定案的**步级公平
+  轮转**（从上次选中的下一门课开始找第一个可跑的）⇒ 13 步队列逐步跨课交错：A 课的 `rollout`
+  窗口里插进 B 课的 `eval_dispatch`/`eval_join`，也就是现场看到的「rollout/eval 全部混在一起」。
+- **决定**：
+  1. **按课分批**：选中一门课后把它**本 it** 的任务连续跑完再换课（`Supervisor._last_course`
+     粘住；边界 = `_finish_round`（该 it 收尾）/ `WAIT` / 资源票被挡 / `ABORT`）。轮粒度下
+     顺序仍为 a1,b1,a2,b2（旧用例不变）。
+  2. **采集恒高于 eval**：新增任务族表 `worker/loop_tasks.KIND_FAMILY` + `task_family()`
+     （`rollout`/`volume_topup` = `collect`，`eval_dispatch`/`eval_join` = `eval`，其余 = `step`）
+     作为**唯一来源**；**没在分批时**挑课的族序 = collect → step → eval，族内仍按轮转序
+     （末位课程不饿死）。
+  3. **分批的唯一例外**：本课排在 eval 步、而别的课有 collect 可跑 ⇒ 本课让位——「始终」二字的
+     落点。**eval 也只让位给 collect**，不让位给 `step`（否则别课的 PPO/落账会插进本课中途，
+     分批就漏了；而采集要尽早回账，那是关键路径）。
+  4. **被资源池挡住的课在 `_pick` 里直接跳过**（旧写法是选中它再由 `step` 返回 None）：分批后
+     粘住的课会一直是首选，不跳过就变成两拍才给别的课一次机会（那是饿死，不是排队）。
+- **否决的备选**：① 保持步级轮转（就是问题本身）；② 全局两段批（先把所有课的 rollout 跑完再跑
+  所有课的 eval）——某课的 PPO/落账会被推到所有课采集之后，且与「跑完一课某 it 再下一课」冲突；
+  ③ 采集无条件抢占粘住宿主的**非评估**步——把准备/PPO/落账无限推后，语料并没有更快到账。
+- **代价（诚实账）**：轮粒度 + 显式 `cache_courses=1` 两门课时「轮间驱逐」现在真的会发生（两课
+  不再同时处于轮内）；上限默认 = 开课数，生产不受影响。`tests/trainer/test_serve_wiring.py` 的
+  P1 用例改成「a 在 WAIT 的轮内、b 建栈 ⇒ 宁可超预算也不抽栈」（与 2026-10-02 事故判据同义）。
+- **落点**：`nn-training/worker/loop_scheduler.py`（`_candidates`/`_take`/`_pick`/`step`/
+  `_finish_round`/`_abort`）· `nn-training/worker/loop_tasks.py`（`KIND_FAMILY`/`task_family`）·
+  `nn-training/tests/worker/test_loop_scheduler.py`（原「步级公平轮转」断言 → 分批；+批次边界 +
+  采集优先）· `tests/worker/test_loop_tasks.py`（族表）· `e2e/test_loop_supervisor_integration.py`
+  （两条跨课顺序断言）· `docs/nn/training-stack.md §37`。
+- **验收**：上述四份用例全绿（36 passed）；`bash tools/githook/nn-python-gate.sh` 全绿。

@@ -8,13 +8,14 @@
   ├─ 真账本写入（_record_iteration → training_log.jsonl）
   ├─ 真门禁/熔断/止损/预算判定（agg=None ⇒ 不熔断；per-tick ⇒ 不止损；无 gates ⇒ 门恒 False）
   └─ 假：_rollout_phase / _serial_ppo / _join_eval / 预采 / 巡检 / 轮转 / 报告打印
-真 Supervisor（轮转 + 资源票 + 四态收敛 + 按课隔离）
+真 Supervisor（按课分批 + 资源票 + 四态收敛 + 按课隔离）
 真 LoopRunner（planner 读账本；RoundOutcome → 四态）
 ```
 
 钉住的四件事：
 
-1. **一个进程服务多门课**：两个 `TrainingLoop` 在同一进程里交替推进，互不串账；
+1. **一个进程服务多门课**：两个 `TrainingLoop` 在同一进程里**按课分批**推进（一门课的一个
+   it 跑完再换课，2026-10-22），互不串账；
 2. **`WAIT` 让位**：一门课在等远端 PPO 回传时，另一门课照常跑完自己的轮次；
 3. **账本是 SSOT**：进程重开后按账本续跑，绝不重复写 `iteration` 行（幂等铁律）；
 4. **引擎异常 = 一次失败**：原地重试（it 不前跳、不静默跳轮）。
@@ -366,8 +367,9 @@ def test_two_courses_advance_in_one_process_without_cross_contamination(tmp_path
     # 两门课都跑满 2 轮，各自的账本独立
     assert _ledger_iters(tmp_path / "a-course") == [1, 2]
     assert _ledger_iters(tmp_path / "b-course") == [1, 2]
-    # 轮转公平：前两步来自不同课程（不是「跑完 a 再 b」）
-    assert len({c for c, _ in events[:2]}) == 2
+    # 按课分批（2026-10-22）：a 的 it1 跑完才轮到 b 的 it1，之后各进 it2 ——
+    # 不再逐步轮转（那样 A 的 rollout 会和 B 的 eval 交错）。
+    assert events == [("a-course", 1), ("b-course", 1), ("a-course", 2), ("b-course", 2)]
     # 队列收敛到 done（planner 见 iters 跑满）
     snap = sup.snapshot()
     assert snap["courses"]["a-course"]["state"] == "done"
@@ -545,8 +547,8 @@ def test_engine_exception_retries_same_iteration(tmp_path: Path) -> None:
 
 # ============================= R2c-3：轮内 13 步（细粒度） =============================
 
-def test_step_mode_walks_all_steps_and_rotates_per_step(tmp_path: Path) -> None:
-    """细粒度驱动：每课各自走完全部 13 步，且**步级轮转**（让位点密度 = 每步一个）。"""
+def test_step_mode_walks_all_steps_in_per_course_batches(tmp_path: Path) -> None:
+    """细粒度驱动：每课各自走完全部 13 步，且**按课分批**（A 的 13 步连着走完再轮到 B）。"""
     from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
@@ -569,8 +571,8 @@ def test_step_mode_walks_all_steps_and_rotates_per_step(tmp_path: Path) -> None:
     assert _ledger_iters(tmp_path / "b") == [1]
     assert [k for c, k in order if c == "a"] == list(ROUND_TASKS)
     assert [k for c, k in order if c == "b"] == list(ROUND_TASKS)
-    # ★ 步级让位：前两步来自不同课程（轮粒度下这里会是同一课的整轮 13 步连着跑）
-    assert len({c for c, _ in order[:2]}) == 2
+    # ★ 按课分批（2026-10-22 取代「步级轮转」）：A 的 13 步连着走完，再 B 的 13 步
+    assert [c for c, _ in order] == ["a"] * len(ROUND_TASKS) + ["b"] * len(ROUND_TASKS)
     assert sup.snapshot()["courses"]["a"]["state"] == "done"
 
 

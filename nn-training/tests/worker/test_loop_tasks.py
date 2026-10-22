@@ -21,6 +21,10 @@ if str(ROOT) not in sys.path:
 from worker.loop_tasks import (
     ABORT,
     DONE,
+    FAMILY_COLLECT,
+    FAMILY_EVAL,
+    FAMILY_STEP,
+    KIND_FAMILY,
     RESOURCE_OF,
     RETRY,
     ROUND_TASKS,
@@ -36,6 +40,7 @@ from worker.loop_tasks import (
     resolve_failure,
     retry,
     round_tasks,
+    task_family,
     waiting,
 )
 
@@ -66,6 +71,26 @@ def test_resource_pools_only_on_heavy_steps() -> None:
     for kind in ("prepare_iter", "record_iteration", "gate", "eval_dispatch", "cleanup"):
         assert Task("c", 1, kind).resource is None
     assert set(RESOURCE_OF).issubset(set(ROUND_TASKS))
+
+
+def test_task_family_puts_collection_before_evaluation() -> None:
+    """任务族（跨课排程优先级，2026-10-22）：采集 > 其余 > 评估。分类表必须是步骤表的子集。"""
+    assert task_family("rollout") == FAMILY_COLLECT
+    assert task_family("volume_topup") == FAMILY_COLLECT
+    assert task_family("eval_dispatch") == FAMILY_EVAL
+    assert task_family("eval_join") == FAMILY_EVAL
+    for kind in (
+        "prepare_iter",
+        "hot_reload",
+        "course_iter",
+        "ppo",
+        "export_weights",
+        "record_iteration",
+        "gate",
+        "cleanup",
+    ):
+        assert task_family(kind) == FAMILY_STEP
+    assert set(KIND_FAMILY).issubset(set(ROUND_TASKS))
 
 
 # ------------------------------------------------------------------ 四态

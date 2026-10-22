@@ -116,6 +116,24 @@ RESOURCE_OF: dict[str, str] = {
     "eval_join": "eval_local",
 }
 
+#: 任务族 —— **跨课排程优先级**的唯一来源（2026-10-22 用户口径：rollout 恒高于 eval）。
+#: 只在「挑哪门课跑下一步」时用（`worker/loop_scheduler.Supervisor._pick`）；**课内**顺序
+#: 仍以 `ROUND_TASKS` 为准（采集本来就排在评估之前，这里不重排它）。
+FAMILY_COLLECT = "collect"  #: 采集（rollout / 配额补波）——喂训练的关键路径
+FAMILY_EVAL = "eval"  #: 干净评估（派发 / 收尾）——永远排在采集之后
+FAMILY_STEP = "step"  #: 其余步骤（准备 / PPO / 落账 / 门禁 / 清理）
+KIND_FAMILY: dict[str, str] = {
+    "rollout": FAMILY_COLLECT,
+    "volume_topup": FAMILY_COLLECT,
+    "eval_dispatch": FAMILY_EVAL,
+    "eval_join": FAMILY_EVAL,
+}
+
+
+def task_family(kind: str) -> str:
+    """步骤 kind → 任务族（未列出的步骤 = `FAMILY_STEP`，不参与优先级比较）。"""
+    return KIND_FAMILY.get(kind, FAMILY_STEP)
+
 
 @dataclass(frozen=True)
 class Task:

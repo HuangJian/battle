@@ -7,6 +7,36 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §37 多课程排程改成「按课分批 + 采集优先」：A 的 rollout 不再和 B 的 eval 交错（2026-10-22，用户口径；DECISIONS §2026-10-22-course-batched-rollout-eval）
+
+**旧行为**：`Supervisor._pick` 是 R2c 定案的**步级公平轮转**（从上次选中的下一门课开始找第一个
+可跑的）。单进程多课程下 13 步队列因此逐步跨课交错 —— A 的 `rollout` 窗口里插进 B 的
+`eval_dispatch` / `eval_join`，反之亦然（eval 自身还跑在后台线程/云机上，观感就是
+「rollout 与 eval 全混在一起」）。
+
+**新行为**（`worker/loop_scheduler.Supervisor` + `worker/loop_tasks`）：
+
+1. **按课分批**：选中一门课后把它**本 it** 的任务连续跑完再换课（`_last_course` 粘住；
+   边界 = `_finish_round`（该 it 收尾）/ `WAIT` / 资源票被挡 / `ABORT`）。轮粒度下顺序不变
+   （a1,b1,a2,b2）。
+2. **采集恒高于 eval**：任务族表 `KIND_FAMILY`（`rollout`/`volume_topup` = `collect`，
+   `eval_dispatch`/`eval_join` = `eval`，其余 `step`）是**唯一来源**；**没在分批时**挑课的族序 =
+   collect → step → eval，族内仍按轮转序（末位课程不饿死）。
+3. **分批的唯一例外**：本课排在 eval 步、而别的课有 collect 可跑 ⇒ 本课让位（「始终」的落点）；
+   **eval 也只让位给 collect**，不让位给 `step`（否则别课的 PPO/落账会插进本课中途）。
+4. **被资源池挡住的课在 `_pick` 里直接跳过**（旧写法是选中它、由 `step` 返回 None、再清空
+   挡住集合）：分批后粘住的课会一直是首选，不跳过就变成两拍才给别的课一次机会（饿死）。
+
+**代价（诚实账）**：轮粒度 + 显式 `cache_courses=1` 两门课时「轮间驱逐」现在真会发生
+（两课不再同时处于轮内）；上限默认 = 开课数，生产不受影响。原 P1 用例（轮内不抽栈）改成
+「a 在 WAIT 的轮内、b 建栈 ⇒ 宁可超预算也不驱逐」——与 2026-10-02 事故的判据同义。
+
+**落点/回归**：`worker/loop_scheduler.py` · `worker/loop_tasks.py` ·
+`tests/worker/test_loop_scheduler.py`（原「步级公平轮转」断言 → 分批；+批次边界 +采集优先）·
+`tests/worker/test_loop_tasks.py`（族表）· `e2e/test_loop_supervisor_integration.py`（两条跨课顺序
+断言）· `tests/trainer/test_serve_wiring.py`（P1 场景）。
+
+---
 ## §36 PPO 步耗是 **GPU kernel 时间**，不是 CPU/同步：三路「省主机」全部判死（2026-10-21）
 
 **读数**（Colab T4，`PPO_PROFILE=1 PPO_PROFILE_STEPS=5`，24 chunks × 4 epochs = 96 步）：
@@ -1357,6 +1387,9 @@ R2 第三相位的第一半。设计稿 `plan/r2-loop-task-queue.md` §4/§8 同
 
 外加：轮转公平（`a,b,c,a,b,c` 而不是「跑完 a 再 b」）、`RoundFacts` 算不出时不跳（保守方向）、
 执行体抛异常 = 一次失败（不打崩调度器）、planner 空转 ⇒ 响亮抛错。
+
+> ⚠ **2026-10-22 变更**：「轮转公平」**已被 §37 的「按课分批 + 采集优先」取代**（用户口径：
+> rollout 恒高于 eval）。本节其余性质（单线程 / `WAIT` 让位 / 故障域）不变。
 
 ### 两处设计上的新东西（原设计稿没写到的）
 

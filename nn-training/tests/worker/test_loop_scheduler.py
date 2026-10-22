@@ -6,8 +6,9 @@
 2. **`WAIT` 不占执行权也不占资源票**——一门课等外部时，另一门课照常推进；
 3. **故障域按课隔离**——一门课 ABORT（门禁停腿 / 5 连击）只脏它自己的队列。
 
-外加：资源池容量与记账（定案：本机 PPO/eval 跨课排队 = 1）、轮转公平性、
-`RoundFacts` 算不出时的保守方向（判据未知 ⇒ 任务不跳）、以及 IO 边缘（`loop_plan`）。
+外加：资源池容量与记账（定案：本机 PPO/eval 跨课排队 = 1）、**按课分批 + 采集优先**
+（2026-10-22 取代步级公平轮转）、`RoundFacts` 算不出时的保守方向（判据未知 ⇒ 任务不跳）、
+以及 IO 边缘（`loop_plan`）。
 """
 
 from __future__ import annotations
@@ -94,10 +95,15 @@ def test_tasks_run_in_order_and_round_advances() -> None:
     assert peak == 1
 
 
-# ------------------------------------------- 多课：轮转公平 + WAIT 让位
+# --------------------------------- 多课：按课分批 + 采集优先 + WAIT 让位
 
-def test_round_robin_fairness_across_courses() -> None:
-    """轮转而不是「跑完一门再跑下一门」——否则末位课程永远在饿。"""
+
+def test_a_course_runs_its_iteration_in_one_batch() -> None:
+    """★ 按课分批（2026-10-22 用户口径）：一门课某一轮的任务连着跑完才轮到下一门课程。
+
+    取代旧的步级公平轮转（`a,b,c,a,b,c`）——那种交错正是「A 课的 rollout 和 B 课的 eval
+    混在一起」的现场。
+    """
     order: list[str] = []
 
     def exec_(task: Task, q: CourseQueue):
@@ -113,8 +119,55 @@ def test_round_robin_fairness_across_courses() -> None:
     for c in ("a", "b", "c"):
         sup.add_course(c, 1)
     sup.run_until_idle()
-    assert order[:3] == ["a", "b", "c"]  # 第一圈每课各一步
-    assert order == ["a", "b", "c", "a", "b", "c"]
+    assert order == ["a", "a", "b", "b", "c", "c"]
+
+
+def test_batch_boundary_is_the_iteration() -> None:
+    """分批的边界 = **某个 it 跑完**：本课不连着跑下一轮（否则末位课程一直排在同课后面）。"""
+    order: list[tuple[str, int]] = []
+
+    def exec_(task: Task, q: CourseQueue):
+        order.append((task.course, task.it))
+        return done()
+
+    sup = Supervisor(
+        exec_,
+        lambda c, it, q: [Task(c, it, "gate") for _ in range(2)] if it <= 2 else [],
+        capacities={},
+    )
+    sup.add_course("a", 1)
+    sup.add_course("b", 1)
+    sup.run_until_idle()
+    assert order == [
+        ("a", 1),
+        ("a", 1),
+        ("b", 1),
+        ("b", 1),
+        ("a", 2),
+        ("a", 2),
+        ("b", 2),
+        ("b", 2),
+    ]
+
+
+def test_collection_outranks_evaluation_across_courses() -> None:
+    """★ 采集恒高于评估：a 排在评估步骤、b 有采集可跑 ⇒ 先跑 b 的采集（a 的评估让位）。"""
+    order: list[str] = []
+
+    def exec_(task: Task, q: CourseQueue):
+        order.append(f"{task.course}:{task.kind}")
+        return done()
+
+    plan = {"a": ["rollout", "eval_join", "eval_dispatch"], "b": ["rollout"]}
+    sup = Supervisor(
+        exec_,
+        lambda c, it, q: [Task(c, it, k) for k in plan[c]] if it == 1 else [],
+        capacities={"local_rollout": 1, "eval_local": 1},
+    )
+    sup.add_course("a", 1)
+    sup.add_course("b", 1)
+    sup.run_until_idle()
+    assert order == ["a:rollout", "b:rollout", "a:eval_join", "a:eval_dispatch"]
 
 
 def test_wait_yields_and_other_course_proceeds() -> None:

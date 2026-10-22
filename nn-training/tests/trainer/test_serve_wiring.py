@@ -82,7 +82,7 @@ class FakeLoop:
     """引擎替身：只记录调度器真的调了它什么（17 个方法里用到的那些）。"""
 
     instances: list[FakeLoop] = []
-    #: 全进程的推进顺序 `(课, it)`——轮转公平性的直接证据（跨课）。
+    #: 全进程的推进顺序 `(课, it)`——按课分批的直接证据（跨课）。
     order: list[tuple[str, int]] = []
     #: `课 → {it: 远端是否已回传}`（缺省 True；测让位时按 it 关掉几轮）。
     ready_map: dict[str, dict[int, bool]] = {}
@@ -214,7 +214,7 @@ def test_two_courses_alternate_and_both_finish(env: SimpleNamespace) -> None:
         assert rep.courses[course]["rounds_done"] == 2
         assert rep.courses[course]["state"] == "done"
         assert rep.courses[course]["next_it"] == 3
-    # ★ 轮转推进（一门课不是一口气跑完两轮）：a,b,a,b —— 公平轮转的直接证据
+    # ★ 按课分批 + 轮粒度：a1,b1,a2,b2（不逐步轮转，也不一口气把两轮跑完）
     assert [(c, it) for c, it in FakeLoop.order] == [("a", 1), ("b", 1), ("a", 2), ("b", 2)]
     for loop in FakeLoop.instances:
         assert [it for it, _ in loop.executed] == [1, 2]
@@ -411,12 +411,35 @@ def test_mid_round_courses_are_never_evicted(
 
     现场（h4-hurt-f75/f150）：cap=5 而 7 门课在跑 ⇒ 轮内的课被抽走引擎，重建出的新引擎没有
     轮内属性（`_node_rollout` 等），而调度器队列已走到 `ppo` ⇒ 一步一崩、每秒重启、0 条
-    `iteration`。细粒度（13 步）下一门课大部分时间都在轮内，故这里必须**零「驱逐→重建」**。
+    `iteration`。
+
+    ★ 2026-10-22（按课分批）：a 在轮内等远端回传（`WAIT`，`mid_round=True`）时 b 开始跑，
+    b 建引擎必须**宁可超预算**也不抽 a 的栈——分批把「A 在等的空隙里 B 跑一轮」这条路径变成
+    常态，它正是本判据最常被撞到的入口。（另半边「轮间驱逐是正常的」见同文件轮粒度用例：
+    轮内不抽栈本来就不是「永不驱逐」。）
 
     判据用日志与 `builds` 而不是 `evictions`：进程退出时的 `close()` 也计 evictions（历史口径），
     那两条与「轮内被抽走」无关 —— 真正要看的是**有没有 LRU 驱逐**。
     """
-    rep = serve(["a", "b"], prepare=False, bun="bun", iters=1, step_mode=True, cache_courses=1)
+    clock = FakeClock()
+    FakeLoop.ready_map["a"] = {1: False}
+
+    def flip(_n: int) -> None:
+        # 两拍空转后 a 的远端回传到了（b 早已跑完并让出执行权）
+        FakeLoop.ready_map["a"] = {1: True}
+
+    clock.on_sleep = flip
+    rep = serve(
+        ["a", "b"],
+        prepare=False,
+        bun="bun",
+        iters=1,
+        step_mode=False,  # 轮粒度：让位钩子在轮边界（`remote_job_ready`），a 才真的停在轮内
+        cache_courses=1,
+        now=clock.now,
+        sleep=clock.sleep,
+        max_steps=50,
+    )
     out = capsys.readouterr().out
 
     assert rep.stop_reason == "all_settled"
