@@ -76,7 +76,7 @@ from common.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
-from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
+from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes, weights_fps
 from remote.backup_drawer import BackupDrawer
 
 # `as` 别名 = 显式再导出（测试/operator 脚本一直从本模块拿这个名字；定义已搬到
@@ -891,6 +891,11 @@ class OfflineDeliverer(DeliverLedgerMixin):
             一个指错轮次的行比没有行危险得多（读数看起来完全正常）。
 
         配不上时记一笔 WARN（两个前缀摆在一起，一眼看出是拿错了行还是文件被动过）。
+
+        ★ 两态都认（2026-10-22，`plan/offline-full-weights-backup`）：落地过的产物目录里同一轮
+        会同时有 `weights.json`（**整份**）与 `weights.delta`（原件，行里记的就是它的 sha）⇒
+        直接拿 `weights_path` 的 sha 去配会一片“不符”（整轮不发 row）。先按传入的 fp 配，
+        配不上再看兄弟 `.delta`（只多读一次，且只在错配时读）。
         """
         p = self.root / ArtifactStore.METRICS_NAME
         if not p.exists():
@@ -909,9 +914,10 @@ class OfflineDeliverer(DeliverLedgerMixin):
                     cands.append(row)
         except OSError:
             return None
-        for row in reversed(cands):  # 新→旧：最新的那一行最先被认
-            if str(row.get("weights_fp", "") or "") == weights_fp:
-                return row
+        for fp in weights_fps(self.root, int(it), prefer=weights_fp):
+            for row in reversed(cands):  # 新→旧：最新的那一行最先被认
+                if fp and str(row.get("weights_fp", "") or "") == fp:
+                    return row
         if cands:
             self.log(
                 f"补传 it{it}: 账本行与权重不符（行记 {str(cands[-1].get('weights_fp', ''))[:16]}… "

@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -530,13 +530,24 @@ def deliver_pack_name(course: str, meta: dict) -> str:
 
 
 def write_deliver_zip(
-    src_root: Path, dest: Path, *, course: str, source: str, log: Callable[[str], None]
+    src_root: Path,
+    dest: Path,
+    *,
+    course: str,
+    source: str,
+    log: Callable[[str], None],
+    full_for: Callable[[int], Mapping[str, Path]] | None = None,
 ) -> bool:
     """把一份产物根打成**可导入**的 zip：轮次 + 存在的锚点（三件 + 两账本）+ `IMPORT_META.json`。
 
     为什么从这里得（而不是 `shutil.make_archive` 整棵）：产物根里还有 `LATEST.zip`、历史包这些
     **派生件** —— 装进去只是把体积翻倍（控制台要的只是轮次 + 读数 + 三件）。
     先写 `.tmp-<pid>` 再 `os.replace`：半截包绝不落到人能下载的名字上。**永不抛**（失败一句人话）。
+
+    `full_for(it)`（2026-10-22，`plan/offline-full-weights-backup`）= **整份权重的提供者**，由调用方注入
+    （与 `ArtifactStore.finalize` 同一个约定）：给了某件的整份 ⇒ 包内那个名字写整份、原件旁存成
+    同主名的 `.delta`（与 hub 树逐字同形）。**为什么这个形参而不再 import 落地器**：本模块是 L0（被
+    `remote/deliver_zip` L1 与 `remote/backup_drawer` L1 import），import `weights_standard`(L1) 就是向上边。
     """
     rounds = _pack_rounds(src_root)
     if not rounds:
@@ -553,9 +564,22 @@ def write_deliver_zip(
                 if p.is_file():
                     z.write(p, name)
             for _it, d in rounds:
+                full = _full_map(full_for, _it)
+                seen: set[str] = set()  # 包内名唯一（重导过的目录里已有 `.delta` 旁件）
                 for f in sorted(d.rglob("*")):
-                    if f.is_file():
-                        z.write(f, str(Path(d.name) / f.relative_to(d)))
+                    if not f.is_file():
+                        continue
+                    rel = str(Path(d.name) / f.relative_to(d))
+                    alt = full.get(f.name) if f.parent == d else None
+                    pair: list[tuple[str, Path]] = [(rel, f)]
+                    if alt is not None and Path(alt) != f and Path(alt).is_file():
+                        # 整份顶名 + 原件旁存（两版都进包：与 hub 树同形，且 `rows-fp` 体检靠原件对账）
+                        delta_arc = str(Path(d.name) / f.with_suffix(".delta").name)
+                        pair = [(rel, Path(alt)), (delta_arc, f)]
+                    for arc, src in pair:
+                        if arc not in seen:
+                            seen.add(arc)
+                            z.write(src, arc)
         os.replace(tmp, dest)
     except (OSError, ValueError) as e:
         log(f"[pack] 打包失败（{type(e).__name__}: {e}）—— {src_root}")
@@ -567,11 +591,24 @@ def write_deliver_zip(
     return True
 
 
+def _full_map(
+    full_for: Callable[[int], Mapping[str, Path]] | None, it: int
+) -> Mapping[str, Path]:
+    """`full_for(it)` 的安全调用（**永不抛**：整份只是加值，拿不到就发原件）。"""
+    if full_for is None:
+        return {}
+    try:
+        return full_for(int(it)) or {}
+    except Exception:
+        return {}
+
+
 def package_pending(
     cfg: dict,
     log: Callable[[str], None],
     *,
     courses: list[str] | None = None,
+    full_for: Callable[[int], Mapping[str, Path]] | None = None,
 ) -> list[Path]:
     """一键打包**待回传产物**（两态判据表，plan §5.2）：本地产物根齐 ⇒ 打它；只有抽屉齐 ⇒ 打抽屉。
 
@@ -645,7 +682,9 @@ def package_pending(
             continue
         meta = deliver_meta(src_root, course=course, source=source, rounds=rounds)
         dest = out_dir / deliver_pack_name(course, meta)
-        if write_deliver_zip(src_root, dest, course=course, source=source, log=log):
+        if write_deliver_zip(
+            src_root, dest, course=course, source=source, log=log, full_for=full_for
+        ):
             made.append(dest)
             log(
                 f"[pack] {course}: {dest}（{dest.stat().st_size} bytes，{len(rounds)} 轮 "

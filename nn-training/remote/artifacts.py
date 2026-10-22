@@ -47,7 +47,7 @@ import json
 import os
 import time
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -185,6 +185,60 @@ def resolve_backup_root(
 
 
 # ------------------------------------------------------------------ 产物目录
+
+
+def _round_entries(
+    d: Path, full_for: Callable[[int], Mapping[str, Path]] | None
+) -> list[tuple[str, Path]]:
+    """一轮进包的 `(包内名, 源路径)` 清单：给了整份 ⇒ 整份顶名 + 原件旁存成同主名的 `.delta`。
+
+    `full_for` 由调用方注入（见 `finalize` 的 docstring）；不给 ⇒ 逐字就是以前的行为。
+    只处理**平坦**的轮目录（产物的真实形状：`it-NNN/` 下只有几个文件）。
+    """
+    full: Mapping[str, Path] = {}
+    if full_for is not None:
+        try:
+            full = full_for(int(d.name[len(ArtifactStore.IT_PREFIX) :])) or {}
+        except Exception:  # 整份只是加值（提供者自己逐件 WARN）；包必须照出
+            full = {}  # 目录名不是轮次 / 落地失败：逐字旧行为
+    out: list[tuple[str, Path]] = []
+    seen: set[str] = set()  # 包内名唯一：重复名会让 zip 里出现第二条同名头（读方取哪条看工具）
+
+    def add(arc: str, src: Path) -> None:
+        if arc not in seen:
+            seen.add(arc)
+            out.append((arc, src))
+
+    for p in sorted(d.iterdir()):
+        if not p.is_file():
+            continue
+        alt = full.get(p.name)
+        if alt is not None and Path(alt) != p and Path(alt).is_file():
+            add(f"{d.name}/{p.name}", Path(alt))
+            add(f"{d.name}/{p.with_suffix('.delta').name}", p)
+        else:
+            add(f"{d.name}/{p.name}", p)  # 本来就是整份（或 .delta 旁件）⇒ 原样装
+    return out
+
+
+def weights_fps(root: Path, it: int, prefer: str = "") -> Iterator[str]:
+    """一轮在盘上**可能对得上的**权重指纹（先给 `prefer`（不读盘），再给整份/原件的实算 sha）。
+
+    两态落地（2026-10-22，`plan/offline-full-weights-backup`）之后，同一轮目录里会同时有
+    `weights.json`（整份）与 `weights.delta`（原件），而账本行 / `state.last_weights_fp` 记的
+    永远是**回传出去的**那份字节（`checkpoint` 的语义不变）⇒ 对账必须两态都认，否则落地过的
+    包/目录会报一片「指纹不符」（假红），甚至整轮不发账本行（`offline_deliver._row_for`）。
+
+    是生成器：命中 `prefer` 的调用方**一次盘都不用读**；名字写死两个（本模块是 L0，`delta_files`
+    也是 L0 —— 同秩不算「严格向下」，见 `tests/test_remote_dag.py`）。
+    """
+    if prefer:
+        yield prefer
+    for name in ("weights.json", "weights.delta"):
+        try:
+            yield sha256_bytes((root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}" / name).read_bytes())
+        except OSError:
+            continue
 
 
 class ArtifactStore:
@@ -392,11 +446,25 @@ class ArtifactStore:
 
     # ---- 收尾 ----
 
-    def finalize(self, *, state: str, summary: dict | None = None) -> Path | None:
+    def finalize(
+        self,
+        *,
+        state: str,
+        summary: dict | None = None,
+        full_for: Callable[[int], Mapping[str, Path]] | None = None,
+    ) -> Path | None:
         """收尾：刷新状态 + 打全量包（`artifacts.zip`）。返回包路径（失败 → None）。
 
         全量包**只在收尾打**（每轮都打会让 I/O 变成 O(n²)，而逐轮明细本来就在目录里、
         Kaggle 的 output 也是整目录提交）。
+
+        `full_for`（2026-10-22，`plan/offline-full-weights-backup`）——**整份权重的提供者**，
+        由调用方**注入**（`plan_run` 用 `standard_weights_copy` 实现，命中旁路缓存就是一次 stat）：
+        给了某件的整份路径 ⇒ 包内那个名字写**整份**，原件旁存为同主名的 `*.delta`（与 hub 树
+        逐字同形：`hub/store_offline.py` 的 `to_write`）。**为什么是注入而不是 import**：落地器住在
+        `remote/weights_standard`（L1）而本模块是 L0（被 `hub.store_offline` L1 直接 import）——
+        在这里 import 它就是 L1→L3 的向上边（`tests/test_remote_dag.py`）。
+        产品根**一个字节都不改**：整份只在 zip 里顶名（`plan §1.2`）。
         """
         st = self.read_state() or {}
         atomic_write_json(
@@ -426,9 +494,8 @@ class ArtifactStore:
                 for d in sorted(self.root.glob(f"{self.IT_PREFIX}*")):
                     if not d.is_dir():
                         continue
-                    for p in sorted(d.iterdir()):
-                        if p.is_file():
-                            z.write(p, arcname=f"{d.name}/{p.name}")
+                    for arc, src in _round_entries(d, full_for):
+                        z.write(src, arcname=arc)
         except OSError as e:
             self.log(f"[artifacts] artifacts.zip 打包失败: {e}")
             return None

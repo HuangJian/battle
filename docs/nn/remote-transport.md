@@ -6,6 +6,66 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §113 打包出口接上「整份」：`.weights-standard` 复用 + 注入式 `full_for`（2026-10-22 · `plan/offline-full-weights-backup.plan.md` v3 · 决策 `DECISIONS.md` §2026-10-22-goalnn-offline-full-weights-backup）
+
+现场（`reports/y28-steady-20261021.md`）：离线包 469 成员 / 52.7MB，232 份 `it-*/weights.json`
+**全是** 149KB 的 `BWD1`（`delta-i16`），本机一份都解不开 ⇒ 控制台只能评估到 it63。
+
+### 根因一句话
+
+delta 只该活在「回传进程 ↔ hub 落地器」之间（`hub/deltas.py` 模块头），而云机产物目录存的是
+**回传件**（`plan_run._weight_bytes` → `checkpoint`）；三个打包出口（`artifacts.zip` /
+`LATEST.zip` / `write_deliver_zip`）直接拷字节 ⇒ 落地器全程没机会跑。
+**不是导入器的错**，是打包出口少了那一步；`base_sha` 指云机自己载入的 init ⇒ 只能在云机上落。
+
+### 设计（三件，都很小）
+
+1. **注入，不搬家**：`ArtifactStore.finalize(full_for=…)` / `write_deliver_zip(full_for=…)` /
+   `package_pending(full_for=…)`；`full_for(it) -> {包内名: 整份路径}`，缺键 = 落不下来（保留原件）。
+   实现住在 L6 的 `plan_run._pack_full_for`。**为什么不能 import**：`remote/artifacts` 是 L0、被
+   `hub.store_offline`(L1) 直接 import，自己去 import 落地器(`weights_standard` L1) 就是向上边
+   （`tests/test_remote_dag.py`）；搬 `hub/deltas.py` 到 `remote/land_stage.py` 会重编号整张账本。
+2. **复用已经在盘上的 sidecar**：云机每轮开跑前就调 `standard_weights_copy(prev_weights, store.root)`
+   （2026-10-15 的既有行为）写 `<store>/.weights-standard/<sha16>.json`；`prune_caches` 只扫
+   `cache_root` 的三棵内容寻址缓存，碰不到产物根 ⇒ 历史轮打包时**一次 `is_file()`** 就够，
+   只有末轮要现场落（基准走 `blob_root` 的 `_cas_hit`，O(1)）。
+3. **形状与 hub 树逐字同形**：包内整份顶成 `weights.json`、原件旁存 `weights.delta`（`_round_names`
+   那次事故的教训：只认一种名字 = 对真抽屉永远返回 None）。
+
+### 两态判据（三个读者共用一条口径）
+
+账本行 / `state.last_weights_fp` 记的永远是**回传件**的 sha（`artifacts.py:405` 的语义不变），而
+落地后盘上多了整份 ⇒ 三个读者都要「两态都认」，否则落地过的包会报假红甚至整轮不发账本行：
+
+| 读者 | 判据 |
+|---|---|
+| `deliver_zip` 的 `rows-fp` | `_weight_fp_matches(it_dir, fp)`（整份或原件命中即绿） |
+| `deliver_zip` 的 `state-fp` | 同一个函数（`state.last_weights_fp` 也是原件 sha） |
+| `offline_deliver._row_for` | `weights_fps(root, it, prefer=fp)`：先试传入 fp（**不读盘**），再试同轮两份的实算 sha |
+
+### 成本（诚实账）
+
+- **包体是唯一真成本**：两版都进包 ⇒ 每轮 +394,685B（= 整份本身，**不是**「整份−原件」）
+  ⇒ 238 轮 ≈ +93.9MB **裸字节**；f32 JSON 的 zip 压缩率未实测，这个数是上界不是预测。
+- **回传字节零变化**：落地只发生在打包时，上行仍是 delta ≈149KB。
+- **产物根零变化**：只用 `standard_weights_copy`（写 sidecar）。**严禁**把产物路径喂给
+  `ensure_standard_weights` —— 它对「叫 `.json` 却装着容器」的输入是**就地改写**
+  （旁存 `.delta` + 覆盖 `.json`）⇒ deliver 腿字节变、账本指纹全变、同轮重传被 hub 判 409。
+- **`LATEST.zip` 不落**：它是每轮重写的便利件，加落地就是往训练热路径上叠 I/O。
+
+### 未做 / 待现场
+
+`<store>/.weights-standard/` 的真实份数、单轮 land 墙钟、加整份后的 zip 实测体积，以及换机验收
+（无 `blob_cache`、无 `nn-training/weights/` 的机器上导入 + `eval_a_once` 400 局）——见 plan §5/§7。
+
+**notebook 里那个「中途取回」cell 故意先不注入**：`package_pending` 只做透传。
+**不是做不到** —— blob 根的解析函数现成（`plan_handoff._blob_roots_of(work_dir)`），只是那条腿
+没接线（P1-5 说的是「没接线」）。真正的顾虑是「抽屉-only」那支不共享搜索预算（每次落地都是新
+`_SearchContext`）⇒ 失败路径会变 O(n²) 扫读，而这是人点一下坐着等的 cell。
+段末自动腿与「跑完再点」不受影响（两者都复制 `finalize` 刚打的包）。要做先量墙钟（plan §7-Q5）。
+
+---
+
 ## §112 实时体只发**锚点轮** + 逐局评估行过白名单 + `perGame` 走包（2026-10-22 · `plan/offline-deliver-stall.plan.md` §9.6 · 决策 `DECISIONS.md` §2026-10-22-goalnn-offline-realtime-anchor-and-slim）
 
 §111 修的是「失败之后不许卡住」；这一条修的是**体本身**——它决定抖动期一次尝试要背多少字节。

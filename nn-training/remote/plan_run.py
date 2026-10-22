@@ -171,7 +171,15 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     #   deliver 腿发送的字节、hub 侧 duplicate/conflict 判据、账本指纹***全都不变***，而本轮拿到的
     #   是可直接装载的整份。基准从本机产物链里逐字节找（找不到即响亮拒，不猜）。
     #   这条路径本身就是「不重传」：Init 用本机自己的字节重建，**零字节日下传输**。
-    weights = weights_standard.standard_weights_copy(weights, ctx.store.root, log=ctx.log)
+    # ★ 2026-10-22（`plan/offline-full-weights-backup` P0-1）：基准优先走**内容寻址缓存**
+    #   （`_cas_hit`，键就是 base_sha，O(1)）；不传它就退回「按名序扫 `.weights-standard`」——
+    #   链长了就是 O(n) 次 394KB 读。缓存里没有时 `_candidates` 那条老路照旧在（两态都对）。
+    weights = weights_standard.standard_weights_copy(
+        weights,
+        ctx.store.root,
+        blob_root=next((p for p in _blob_roots(ctx) if Path(p).is_dir()), None),
+        log=ctx.log,
+    )
     init_fp = sha256_file(weights)
     # ★ 2026-10-15（离线 opt delta 的读侧落地，与上面 weights 同一条口径）：产物里的
     #   `it-N/opt.tar` 就是**我们回传出去的** BOD1 容器（现场 `tmp/y5-term` 的 it-237，300945B，
@@ -297,6 +305,49 @@ def _opt_bytes_from_result(result: dict) -> bytes:
         return decode_opt_tar(b64)
     except Exception:
         return b""
+
+
+def _pack_full_for(ctx: RunContext) -> Callable[[int], dict[str, Path]]:
+    """段末打包的**整份提供者**（`ArtifactStore.finalize(full_for=…)` 的注入实现）。
+
+    为什么是注入而不是让 `artifacts` 自己落地（2026-10-22 · `plan/offline-full-weights-backup` §4-W2）：
+    `remote/artifacts` 是 L0 且被 `hub.store_offline`(L1) 直接 import，自己去 import 落地器
+    (`remote/weights_standard` L1) 就是 L1→L3 的向上边（`tests/test_remote_dag.py`）。
+
+    为什么几乎不要钱：云机每轮开跑前已经把**上一轮**落成整份写进 `<store>/.weights-standard/`
+    （`_run_iteration` 里的 `standard_weights_copy`），所以历史轮全部**命中缓存 = 一次 stat**；
+    只有末轮（还没被当 init）要现场落一次，基准走 `blob_root`（`_cas_hit`，O(1)）。
+
+    落不下来（基准不在本机）⇒ 这一件**不给** ⇒ 包里保留原件（与原行为逐字相同，绝不静默丢字节）。
+    """
+    blob = next((p for p in _blob_roots(ctx) if Path(p).is_dir()), None)
+
+    def full_for(it: int) -> dict[str, Path]:
+        out: dict[str, Path] = {}
+        try:
+            out["weights.json"] = weights_standard.standard_weights_copy(
+                ctx.store.weights_path(it),
+                ctx.store.root,
+                course=str(ctx.course or ""),
+                traj_root=ctx.store.root,
+                blob_root=blob,
+                log=ctx.log,
+            )
+        except ProtocolError as e:
+            ctx.log(f"WARN 打包 it{it}：权重落地失败（{e}）—— 包内保留原件")
+        try:
+            out["opt.tar"] = opt_standard.standard_opt_copy(
+                ctx.store.opt_path(it),
+                ctx.store.root,
+                blob_roots=[blob] if blob is not None else [],
+                traj_root=ctx.store.root,
+                log=ctx.log,
+            )
+        except ProtocolError as e:
+            ctx.log(f"WARN 打包 it{it}：opt 落地失败（{e}）—— 包内保留原件")
+        return out
+
+    return full_for
 
 
 def _weight_bytes(result: dict) -> bytes:
@@ -569,7 +620,11 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
             )
         else:
             ctx.log("计划内的轮次都已在产物里——无事可做")
-        ctx.store.finalize(state="complete", summary={"last_it": start_from, "rows": len(ctx.store.rows)})
+        ctx.store.finalize(
+            state="complete",
+            summary={"last_it": start_from, "rows": len(ctx.store.rows)},
+            full_for=_pack_full_for(ctx),
+        )
         # 无事可做也可能**有东西要补传**：上次会话断网、这次连上了，积压全在这一步补完。
         # `end_it_reached` 用同一判据重算：接续点已在终点之后 ⇒ 重报一次「跑满」（幂等；
         # 上一个会话跑满但没送达的摘要，由这一拍补上）。
@@ -617,7 +672,7 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
             prev = it
     except (ProtocolError, RetryableError) as e:
         fail_summary = {"last_it": prev, "error": f"{type(e).__name__}: {e}"}
-        ctx.store.finalize(state="failed", summary=fail_summary)
+        ctx.store.finalize(state="failed", summary=fail_summary, full_for=_pack_full_for(ctx))
         ctx.log(f"自主段在 it{prev + 1} 处失败（{type(e).__name__}: {e}）——产物已收尾，可续跑")
         # 段失败也要报：控制面最需要的就是「这条腿停了、停在哪、为什么」——云机那一侧
         # 的日志人看不到，而失败是**最该被看见**的状态。
@@ -630,7 +685,11 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     # 刚收完线的评估账本（eval_log.jsonl），而摘要里报的行数/末轮才与包一致。
     _close_eval(ctx)
     summary = {"last_it": prev, "rows": len(ctx.store.rows), "session": len(session)}
-    ctx.store.finalize(state="complete" if stopped == "complete" else stopped, summary=summary)
+    ctx.store.finalize(
+        state="complete" if stopped == "complete" else stopped,
+        summary=summary,
+        full_for=_pack_full_for(ctx),
+    )
     # T6：跑满计划区间才自报 `end_it_reached`（预算/失败停下的段不算——它们还要人接管）。
     ctx.deliver_final(
         it_end=prev,

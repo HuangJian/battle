@@ -1,0 +1,187 @@
+"""tests/remote/test_pack_full.py —— 打包时把**整份**权重顶进去（`plan/offline-full-weights-backup`）。
+
+离线盘那条腿的产物里 `it-NNN/weights.json` 装的是**回传用的 delta 容器**（`train_core` 的
+`sent` 字节），而 hub 的接收侧会就地落成整份（`hub/store_offline` + `hub/deltas`）。打包出口
+（`artifacts.zip` / 一键包）绕过接收侧 ⇒ 包里 232 份权重在本机一份都解不开。
+
+本文件钉住三件事：
+
+  1. `finalize(full_for=…)` / `write_deliver_zip(full_for=…)` 把**整份**顶成 `weights.json`、
+     并把原件旁存成 `weights.delta`（与 hub 树逐字同形）；**产物根一个字节不改**。
+  2. 不给 `full_for` 时逐字就是以前的行为（没有 `.delta` 旁件，`weights.json` 是原件）。
+  3. 落地过的包导入时，`rows-fp` 与 `state-fp` 两项体检**不再假红**（它们记的是**原件**的 sha，
+     而包里两版都在 ⇒ 「两态都认」才是正确判据）。
+
+为什么 `full_for` 是**注入**而不是 import：`remote/artifacts` 与 `remote/offline_deliverable`
+都是 L0（前者被 `hub.store_offline` L1 直接 import），import 落地器（L1）是向上边
+（`tests/test_remote_dag.py`）。注入实现住在 L6 的 `plan_run._pack_full_for`。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from common.hashing import sha256_bytes
+from common.protocol import OFFLINE_DELIVERED_NAME
+from remote.artifacts import ArtifactStore
+from remote.deliver_zip import import_deliver_zip
+from remote.offline_deliver import OfflineDeliverer
+from remote.offline_deliverable import write_deliver_zip
+
+
+def _weights(it: int) -> bytes:
+    return json.dumps({"it": it, "w": it * 0.5}).encode("utf-8")
+
+
+def _full_weights(it: int) -> bytes:
+    """「整份」的替身：与原件**字节不同**（判据必须是「哪一份进了包」，不是「差不多」）。"""
+    return json.dumps({"it": it, "w": it * 0.5, "full": True}).encode("utf-8")
+
+
+def _store(tmp_path: Path, *, iters=(1, 2, 3)) -> ArtifactStore:
+    root = tmp_path / "art"
+    store = ArtifactStore(root, run_id="pack-full")
+    store.start(
+        {"start_it": iters[0] - 1, "end_it": iters[-1], "iters_total": iters[-1], "pairs": {}},
+        {"runId": "pack-full", "commit": "c" * 40},
+    )
+    for it in iters:
+        store.checkpoint(
+            it,
+            weights_json=_weights(it),
+            opt_tar=b"opt-%d" % it,
+            row={"agg": {"kl": 0.01}, "wall_sec": 1.0},
+        )
+    return store
+
+
+def _full_for(tmp_path: Path, its: set[int]):
+    """`full_for` 的替身：给点名的那几轮备一个「整份」文件。"""
+
+    def full_for(it: int) -> dict[str, Path]:
+        if it not in its:
+            return {}
+        p = tmp_path / f"full-{it}.json"
+        p.write_bytes(_full_weights(it))
+        return {"weights.json": p}
+
+    return full_for
+
+
+def _zip_names(zp: Path) -> set[str]:
+    with zipfile.ZipFile(zp) as z:
+        return set(z.namelist())
+
+
+def test_finalize_packs_the_full_weights_and_keeps_the_original_as_delta(tmp_path: Path) -> None:
+    """W2：段末全量包里，被落地的那一轮 = 整份顶名 + 原件旁存；产物根一字未改。"""
+    store = _store(tmp_path)
+    before = {p: p.read_bytes() for p in (store.root / "it-002").iterdir() if p.is_file()}
+    assert store.finalize(state="complete", full_for=_full_for(tmp_path, {2})) is not None
+    zp = store.root / ArtifactStore.ALL_ZIP
+    with zipfile.ZipFile(zp) as z:
+        assert z.read("it-002/weights.json") == _full_weights(2), "整份没顶上去"
+        assert z.read("it-002/weights.delta") == _weights(2), "原件必须旁存（hub 树同形）"
+        assert z.read("it-001/weights.json") == _weights(1), "没被落地的那轮照旧是原件"
+        assert {"it-001/weights.delta"}.isdisjoint(z.namelist()), "没落地就不带旁件"
+    after = {p: p.read_bytes() for p in (store.root / "it-002").iterdir() if p.is_file()}
+    assert after == before, "打包只读：产物根一个字节都不许改"
+
+
+def test_finalize_without_full_for_is_the_old_behaviour(tmp_path: Path) -> None:
+    """不注入 = 逐字旧行为（没有 `.delta` 旁件）——默认路径零变化。"""
+    store = _store(tmp_path)
+    assert store.finalize(state="complete") is not None
+    names = _zip_names(store.root / ArtifactStore.ALL_ZIP)
+    assert {"it-001/weights.delta", "it-002/weights.delta"}.isdisjoint(names)
+    with zipfile.ZipFile(store.root / ArtifactStore.ALL_ZIP) as z:
+        assert z.read("it-002/weights.json") == _weights(2)
+
+
+def test_write_deliver_zip_uses_the_injected_full(tmp_path: Path) -> None:
+    """W4：一键包走同一套判据（同一个 `full_for` 约定）。"""
+    store = _store(tmp_path, iters=(1, 2))
+    dest = tmp_path / "deliver-x.zip"
+    ok = write_deliver_zip(
+        store.root,
+        dest,
+        course="",
+        source="pending",
+        log=lambda _m: None,
+        full_for=_full_for(tmp_path, {2}),
+    )
+    assert ok
+    with zipfile.ZipFile(dest) as z:
+        assert z.read("it-002/weights.json") == _full_weights(2)
+        assert z.read("it-002/weights.delta") == _weights(2)
+        assert z.read("it-001/weights.json") == _weights(1)
+
+
+def test_repacking_an_already_landed_round_keeps_names_unique(tmp_path: Path) -> None:
+    """重导过的目录（整份 + 原件都在）再打一次包：包内名不重复、`.delta` 仍是原件。
+
+    这一档很容易写错：`standard_weights_copy` 对「本来就是整份」的输入原样交回同一路径 ⇒
+    若不加「alt 与源同一就照旧装 + 包内名去重」，`weights.delta` 会先拿到**整份**字节，
+    再被真原件覆盖成两条同名头（zip 允许重复名，读方取哪条看工具）。
+    """
+    store = _store(tmp_path, iters=(1,))
+    d = store.dir_for(1)
+    original = (d / "weights.json").read_bytes()
+    (d / "weights.delta").write_bytes(original)
+    (d / "weights.json").write_bytes(_full_weights(1))
+
+    def full_for(it: int) -> dict[str, Path]:
+        return {"weights.json": d / "weights.json"} if it == 1 else {}
+
+    dest = tmp_path / "repack.zip"
+    ok = write_deliver_zip(
+        store.root, dest, course="", source="pending", log=lambda _m: None, full_for=full_for
+    )
+    assert ok
+    with zipfile.ZipFile(dest) as z:
+        names = z.namelist()
+        assert len(names) == len(set(names)), f"包内名重复：{names}"
+        assert z.read("it-001/weights.json") == _full_weights(1)
+        assert z.read("it-001/weights.delta") == original
+
+
+def test_landed_package_passes_rows_fp_and_state_fp(tmp_path: Path) -> None:
+    """P0-4：落地过的包导入时两项指纹体检都绿（记的是**原件**的 sha，包内两版都在）。"""
+    store = _store(tmp_path)
+    store.finalize(state="complete", full_for=_full_for(tmp_path, {1, 2, 3}))
+    got = import_deliver_zip(store.root / ArtifactStore.ALL_ZIP, tmp_path / "deliver", course="")
+    checks = {c["id"]: c for c in got["checks"]}
+    assert checks["rows-fp"]["ok"], checks["rows-fp"]
+    assert checks["state-fp"]["ok"], checks["state-fp"]
+    # 落地件的确到位：末轮 ckpt 是整份，原件仍在旁边
+    last = Path(got["ckpt"])
+    assert last.read_bytes() == _full_weights(3)
+    assert (last.parent / "weights.delta").read_bytes() == _weights(3)
+
+
+def test_row_for_accepts_the_sibling_delta_after_landing(tmp_path: Path) -> None:
+    """P0-4 的第三处读者：产物被落地后，账本行（记原件 sha）仍然配得上这一轮。"""
+    store = _store(tmp_path, iters=(1,))
+    d = store.dir_for(1)
+    original = (d / "weights.json").read_bytes()
+    (d / "weights.delta").write_bytes(original)
+    (d / "weights.json").write_bytes(_full_weights(1))
+    (store.root / OFFLINE_DELIVERED_NAME).write_text("{}", encoding="utf-8")
+
+    deliv = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="sekret",
+        run_id="pack-full",
+        artifacts_dir=store.root,
+        log=lambda _m: None,
+    )
+    row = deliv._row_for(1, sha256_bytes(_full_weights(1)))
+    assert row is not None, "落地后（weights.json 是整份、原件在 .delta）行必须还能认出来"
+    assert row["weights_fp"] == sha256_bytes(original)

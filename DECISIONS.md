@@ -8725,3 +8725,49 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/remote-transport.md §112`。
 - **验收**：6 条新用例在 `HEAD` worktree 上 **4 红 2 绿**（另两条是护栏：去重幂等、无锚点退回全量），
   改动后 6 条全绿；`nn-training/tests/remote` 1437 全绿；`bun run pygate` / `bun run check` 见 plan §9.6。
+
+## §2026-10-22-goalnn-offline-full-weights-backup — 打包出口用**注入的 `full_for`** 接上整份（复用 `<store>/.weights-standard/`），不改 `hub/deltas.py`、不搬模块
+
+- **背景**：`plan/offline-full-weights-backup.plan.md` v3（评审 `plan/offline-full-weights-backup.review-bf.md`
+  P0×5 / P1×7）。现场：y28-steady 的离线包里 232 份 `it-*/weights.json` **全是** 149KB 的 `BWD1`
+  容器（`delta-i16`），本机一份都解不开 ⇒ 控制台只评估到 it63。
+- **根因**：delta 只该活在「回传进程 ↔ hub 落地器」之间（`hub/deltas.py` 模块头），而云机产物目录
+  存的就是**回传件**（`plan_run._weight_bytes` → `checkpoint`，`artifacts.py:405` 的行 fp 也是它）；
+  三个打包出口（`artifacts.zip` / `LATEST.zip` / `write_deliver_zip`）直接拷字节 ⇒ 落地器没机会跑。
+  `base_sha` 指云机本轮实际载入的 init ⇒ **只能在云机上落**。
+- **决定**：
+  1. **注入，不搬家**：`finalize(full_for=…)` / `write_deliver_zip(full_for=…)` / `package_pending(full_for=…)`，
+     实现住 L6 的 `plan_run._pack_full_for`。**否决**「搬 `hub/deltas.py` → `remote/land_stage.py`」：
+     `remote/artifacts` 是 L0 且被 `hub.store_offline`(L1) import，接落地器(L1) 就是向上边，
+     连带 `remote.offline_deliver`/`deliver_worker`/`plan_run` 全要重编号（`tests/test_remote_dag.py`）。
+  2. **复用已在盘上的 sidecar**：云机每轮开跑前就 `standard_weights_copy(prev_weights, store.root)`
+     写 `<store>/.weights-standard/<sha16>.json`，而 `prune_caches` 只扫 `cache_root` 三棵内容寻址缓存
+     （`download.py:452`）⇒ 历史轮打包 = 一次 `is_file()`；只有末轮现场落（基准走 `blob_root` 的
+     `_cas_hit`，O(1)）。**否决** v2 的「`full-last` 当默认档」：既然命中 sidecar 几乎免费，
+     分档的成本只剩包体，而段末只打一次包。
+  3. **只准 `standard_weights_copy`，严禁 `ensure_standard_weights`**：后者对「叫 `.json` 却装着容器」
+     的输入是**就地改写**（旁存 `.delta` + 覆盖 `.json`）⇒ 会同时破「产物根不可变」、改变 deliver 腿
+     发出的字节、并让同轮重传撞 hub 的 409。
+  4. **两态判据由布局所有者提供一份**：`weights_fps(root, it, prefer)` 生成器（`remote/artifacts`，L0），
+     三个读者共用 —— `rows-fp`、`state-fp`（`deliver_zip._weight_fp_matches`）、`_row_for`
+     （`offline_deliver`）。行里的 fp 语义**不变**（仍是回传件 sha）。
+  5. **两版都进包**（整份顶名 + 原件旁存），与 hub 树逐字同形；包体每轮 +394,685B（裸字节，
+     238 轮 ≈ +93.9MB，压缩率未实测）。**否决**「只替换原件」（省 1.6 倍但破坏同形，且体检拿不到原件对账）。
+  6. **`LATEST.zip` 不落**（v2 的 W3 删掉）：每轮重写的便利件，加落地等于往训练热路径叠 I/O。
+- **代价（诚实账）**：① 包体上界 +93.9MB（opt 也一起落，P1-3）；② 盘上已被清掉基准的轮次仍是原件
+  （包照出 + 一行 WARN，不阻断）；③ 「任意历史轮」只覆盖当过 init 的轮（sidecar 没有清理路径，
+  但盘可回收）；④ **notebook 那个「中途取回」cell 暂不注入**（`package_pending` 只做透传）：
+  blob 根解析函数现成（`plan_handoff._blob_roots_of(work_dir)`），只是那条腿没接线（P1-5）；
+  真正的顾虑是抽屉-only 那支不共享搜索预算（每次 `standard_weights_copy` 都是新 `_SearchContext`）
+  ⇒ 失败路径会变成 O(n²) 扫读，而那是人点一下坐着等的。段末自动腿与「跑完再点」已覆盖
+  （`package_deliverable` 复制的是 `finalize` 刚打的包）；要做先量墙钟（plan §7-Q5）。
+- **落点**：`remote/artifacts.py`（`_round_entries`/`weights_fps`/`finalize(full_for=)`）·
+  `remote/offline_deliverable.py`（`write_deliver_zip`/`_full_map`/`package_pending`）·
+  `remote/deliver_zip.py`（`_weight_fp_matches`）· `remote/offline_deliver.py`（`_row_for`）·
+  `remote/plan_run.py`（`_pack_full_for` + `blob_root`）· `tests/remote/test_pack_full.py`（新，5 例）·
+  `docs/nn/remote-transport.md §113`。**`hub/*` 一个字节没动。**
+- **验收**：5 条新用例绿（含「不给 `full_for` 逐字旧行为」「打包前后产物根逐字节相同」
+  「落地包导入后 `rows-fp`+`state-fp` 都绿」「落地后 `_row_for` 仍认得出账本行」）；
+  `nn-training/tests/{remote,hub,worker,common}` 全绿；`tests/test_remote_dag.py` 与
+  `tests/test_python_loc_budget.py` 绿（`offline_deliver.py` 999/1000）。换机端到端、包体实测与
+  W0 三项读数 **未做**（需现场），见 plan §5/§7。

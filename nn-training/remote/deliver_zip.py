@@ -84,6 +84,28 @@ def course_from_filename(zip_path: str | Path) -> str:
     return name if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name) else ""
 
 
+def _weight_fp_matches(it_dir: Path, expected: str) -> bool:
+    """`expected` 与这一轮的权重字节相符吗？**两态都认**：整份 `weights.json` 或原件 `weights.delta`。
+
+    为什么（2026-10-22，`plan/offline-full-weights-backup`）：打包侧把整份顶成 `weights.json`、
+    原件旁存为 `weights.delta`（与 hub 树同形），而账本行/`state.last_weights_fp` 记的是**原件**的
+    sha（`artifacts.py:351` 的语义不变 —— 行凭什么就是什么）。只比 `weights.json` 的话，
+    落地过的包会报一片「指纹不符」（假红），而其实两版都在、原件就是那一份。
+    `expected` 空 = 没有可对账的指纹 ⇒ 不算不过（与旧行为同）。
+    """
+    if not expected:
+        return True
+    for name in delta_files.variants("weights.json"):
+        p = Path(it_dir) / name
+        if p.is_file():
+            try:
+                if sha256_file(p) == expected:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def _package_checks(
     base: Path,
     pkg_iters: list[int],
@@ -142,11 +164,11 @@ def _package_checks(
     for it in pkg_iters:
         if it not in rows:
             no_row.append(it)
-        w = delta_files.find_existing(base / f"{ArtifactStore.IT_PREFIX}{it:03d}", "weights.json")
-        if w is None:
+        it_dir = base / f"{ArtifactStore.IT_PREFIX}{it:03d}"
+        if delta_files.find_existing(it_dir, "weights.json") is None:
             no_w.append(it)
             continue
-        if rows.get(it) and sha256_file(w) != rows[it]:
+        if not _weight_fp_matches(it_dir, rows.get(it, "")):
             bad_fp.append(it)
     out.append({
         "id": "rows-fp",
@@ -183,13 +205,10 @@ def _package_checks(
             f"{'it' + str(pkg_iters[-1]) if iters_ok else '?'}"
         ),
     })
-    last_w = (
-        delta_files.find_existing(base / f"{ArtifactStore.IT_PREFIX}{pkg_iters[-1]:03d}", "weights.json")
-        if iters_ok
-        else None
-    )
+    last_dir = base / f"{ArtifactStore.IT_PREFIX}{pkg_iters[-1]:03d}"
+    last_w = delta_files.find_existing(last_dir, "weights.json") if iters_ok else None
     st_fp = str(st.get("last_weights_fp") or "")
-    fp_ok = bool(st_fp) and last_w is not None and sha256_file(last_w) == st_fp
+    fp_ok = bool(st_fp) and last_w is not None and _weight_fp_matches(last_dir, st_fp)
     out.append({
         "id": "state-fp",
         "ok": fp_ok,
