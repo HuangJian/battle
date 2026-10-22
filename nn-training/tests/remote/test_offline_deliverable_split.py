@@ -275,10 +275,11 @@ def _code_cells() -> list[str]:
 def test_notebook_fetches_and_pops_the_sibling() -> None:
     cells = _code_cells()
     boot = next(t for t in cells if "_run(CFG" in t)
-    assert 'for _name in ("offline_boot.py", "tailscale_boot.py", "offline_deliverable.py"):' in boot, (
-        "主引导格拉取名单缺 offline_deliverable.py —— 交付面会响亮 ImportError（老 notebook 形态）"
-    )
-    assert '"offline_deliverable", "remote.offline_deliverable"' in boot, (
+    assert (
+        'for _name in ("offline_boot.py", "tailscale_boot.py", "offline_deliverable.py", '
+        '"land_provider.py"):' in boot
+    ), "主引导格拉取名单缺兄弟文件（offline_deliverable / land_provider）—— 老 notebook 形态"
+    assert '"offline_deliverable", "remote.offline_deliverable", "land_provider", "remote.land_provider"' in boot, (
         "sys.modules.pop 名单缺兄弟文件 ⇒ 同 kernel 第二次 Run 会命中旧模块（2026-09-25 事故同型）"
     )
 
@@ -286,10 +287,12 @@ def test_notebook_fetches_and_pops_the_sibling() -> None:
 def test_pack_cell_fallback_fetches_the_pair() -> None:
     cells = _code_cells()
     pack = next(t for t in cells if "package_pending" in t)
-    assert 'for _name in ("offline_boot.py", "offline_deliverable.py"):' in pack, (
-        "取回格的 raw 兜底要成对抓（只抓 offline_boot.py 会让交付面缺兄弟文件）"
+    assert 'for _name in ("offline_boot.py", "offline_deliverable.py", "land_provider.py"):' in pack, (
+        "取回格的 raw 兜底要成组抓（缺兄弟文件会让交付面或整份提供者缺位）"
     )
-    assert "_ob.package_pending(CFG, _log)" in pack, "取回格仍走 runtime 的 package_pending（单一实现）"
+    assert "_ob.package_pending_full(CFG, _log)" in pack, (
+        "取回格仍走 runtime 的一键包入口（单一实现；`_full` = 已绑整份提供者）"
+    )
     # ⚠ 旧入口 `package_partial` 仍在（老 notebook / 老调用方），但**不再**是底部那格的入口：
     # 它只挑一个包（现场 27 轮只拿到一轮），而这一格要的是整段（plan §5.2）。
     assert "package_partial" not in pack, "取回格不该再挑单包（那正是本片要修的形状）"

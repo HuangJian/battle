@@ -34,10 +34,11 @@ job 再喂回 `run_job`——离线轮与 hub 监管轮走的是字面同一条�
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
 import remote.weights_standard as weights_standard
 from common import progress_hook
@@ -307,47 +308,20 @@ def _opt_bytes_from_result(result: dict) -> bytes:
         return b""
 
 
-def _pack_full_for(ctx: RunContext) -> Callable[[int], dict[str, Path]]:
+def _pack_full_for(ctx: RunContext) -> Callable[[Path, int], Mapping[str, Path]]:
     """段末打包的**整份提供者**（`ArtifactStore.finalize(full_for=…)` 的注入实现）。
 
-    为什么是注入而不是让 `artifacts` 自己落地（2026-10-22 · `plan/offline-full-weights-backup` §4-W2）：
+    实现整体在 `remote/land_provider`（三条出口 + notebook 一键包共一份）；这里只做两件事：
+    把本 ctx 的 `blob_cache` 根交过去（`_cas_hit`，O(1) 命中末轮的基准）与绑定日志。
+
+    为什么是注入而不是让 `artifacts` 自己落地（2026-10-22 · `plan/offline-full-weights-backup` W2）：
     `remote/artifacts` 是 L0 且被 `hub.store_offline`(L1) 直接 import，自己去 import 落地器
-    (`remote/weights_standard` L1) 就是 L1→L3 的向上边（`tests/test_remote_dag.py`）。
+    (`remote/weights_standard` L1) 就是向上边（`tests/test_remote_dag.py`）。
 
-    为什么几乎不要钱：云机每轮开跑前已经把**上一轮**落成整份写进 `<store>/.weights-standard/`
-    （`_run_iteration` 里的 `standard_weights_copy`），所以历史轮全部**命中缓存 = 一次 stat**；
-    只有末轮（还没被当 init）要现场落一次，基准走 `blob_root`（`_cas_hit`，O(1)）。
-
-    落不下来（基准不在本机）⇒ 这一件**不给** ⇒ 包里保留原件（与原行为逐字相同，绝不静默丢字节）。
+    为什么几乎不要钱：历史轮命中 `<store>/.weights-standard/`（每轮开跑前落的）＝ 一次 stat；
+    只有末轮要现场落（基准在 `blob_cache`）。落不下来 ⇒ 这一件不给 ⇒ 包里保留原件。
     """
-    blob = next((p for p in _blob_roots(ctx) if Path(p).is_dir()), None)
-
-    def full_for(it: int) -> dict[str, Path]:
-        out: dict[str, Path] = {}
-        try:
-            out["weights.json"] = weights_standard.standard_weights_copy(
-                ctx.store.weights_path(it),
-                ctx.store.root,
-                course=str(ctx.course or ""),
-                traj_root=ctx.store.root,
-                blob_root=blob,
-                log=ctx.log,
-            )
-        except ProtocolError as e:
-            ctx.log(f"WARN 打包 it{it}：权重落地失败（{e}）—— 包内保留原件")
-        try:
-            out["opt.tar"] = opt_standard.standard_opt_copy(
-                ctx.store.opt_path(it),
-                ctx.store.root,
-                blob_roots=[blob] if blob is not None else [],
-                traj_root=ctx.store.root,
-                log=ctx.log,
-            )
-        except ProtocolError as e:
-            ctx.log(f"WARN 打包 it{it}：opt 落地失败（{e}）—— 包内保留原件")
-        return out
-
-    return full_for
+    return land_provider.provider(blob_roots=_blob_roots(ctx), log=ctx.log)
 
 
 def _weight_bytes(result: dict) -> bytes:

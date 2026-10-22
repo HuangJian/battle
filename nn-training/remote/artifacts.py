@@ -188,17 +188,17 @@ def resolve_backup_root(
 
 
 def _round_entries(
-    d: Path, full_for: Callable[[int], Mapping[str, Path]] | None
+    d: Path, root: Path, full_for: Callable[[Path, int], Mapping[str, Path]] | None
 ) -> list[tuple[str, Path]]:
     """一轮进包的 `(包内名, 源路径)` 清单：给了整份 ⇒ 整份顶名 + 原件旁存成同主名的 `.delta`。
 
-    `full_for` 由调用方注入（见 `finalize` 的 docstring）；不给 ⇒ 逐字就是以前的行为。
-    只处理**平坦**的轮目录（产物的真实形状：`it-NNN/` 下只有几个文件）。
+    `full_for(root, it)` 由调用方注入（见 `finalize` 的 docstring；实现见 `remote/land_provider`）；
+    不给 ⇒ 逐字就是以前的行为。只处理**平坦**的轮目录（真实形状：`it-NNN/` 下只有几个文件）。
     """
     full: Mapping[str, Path] = {}
     if full_for is not None:
         try:
-            full = full_for(int(d.name[len(ArtifactStore.IT_PREFIX) :])) or {}
+            full = full_for(Path(root), int(d.name[len(ArtifactStore.IT_PREFIX) :])) or {}
         except Exception:  # 整份只是加值（提供者自己逐件 WARN）；包必须照出
             full = {}  # 目录名不是轮次 / 落地失败：逐字旧行为
     out: list[tuple[str, Path]] = []
@@ -451,15 +451,15 @@ class ArtifactStore:
         *,
         state: str,
         summary: dict | None = None,
-        full_for: Callable[[int], Mapping[str, Path]] | None = None,
+        full_for: Callable[[Path, int], Mapping[str, Path]] | None = None,
     ) -> Path | None:
         """收尾：刷新状态 + 打全量包（`artifacts.zip`）。返回包路径（失败 → None）。
 
         全量包**只在收尾打**（每轮都打会让 I/O 变成 O(n²)，而逐轮明细本来就在目录里、
         Kaggle 的 output 也是整目录提交）。
 
-        `full_for`（2026-10-22，`plan/offline-full-weights-backup`）——**整份权重的提供者**，
-        由调用方**注入**（`plan_run` 用 `standard_weights_copy` 实现，命中旁路缓存就是一次 stat）：
+        `full_for(root, it)`（2026-10-22，`plan/offline-full-weights-backup`）——**整份权重的
+        提供者**，由调用方**注入**（实现见 `remote/land_provider`，命中旁路缓存就是一次 stat）：
         给了某件的整份路径 ⇒ 包内那个名字写**整份**，原件旁存为同主名的 `*.delta`（与 hub 树
         逐字同形：`hub/store_offline.py` 的 `to_write`）。**为什么是注入而不是 import**：落地器住在
         `remote/weights_standard`（L1）而本模块是 L0（被 `hub.store_offline` L1 直接 import）——
@@ -494,7 +494,7 @@ class ArtifactStore:
                 for d in sorted(self.root.glob(f"{self.IT_PREFIX}*")):
                     if not d.is_dir():
                         continue
-                    for arc, src in _round_entries(d, full_for):
+                    for arc, src in _round_entries(d, self.root, full_for):
                         z.write(src, arcname=arc)
         except OSError as e:
             self.log(f"[artifacts] artifacts.zip 打包失败: {e}")

@@ -8771,3 +8771,40 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `nn-training/tests/{remote,hub,worker,common}` 全绿；`tests/test_remote_dag.py` 与
   `tests/test_python_loc_budget.py` 绿（`offline_deliver.py` 999/1000）。换机端到端、包体实测与
   W0 三项读数 **未做**（需现场），见 plan §5/§7。
+
+## §2026-10-22-goalnn-notebook-pack-full-wiring — 「中途取回」cell 接上整份：`package_pending_full` + 落地失败连续 3 轮停试（修订同日 §2026-10-22-goalnn-offline-full-weights-backup 的「代价 ④」）
+
+- **背景**：用户对 §2026-10-22-goalnn-offline-full-weights-backup 的「notebook cell 暂不注入」提出
+  两条事实：① 云机上每一轮的**整份**权重本来就存在（`train_core` 写出、`_cache_produced_weights`
+  进内容寻址缓存、`.weights-standard` 每轮把上一轮落成整份）；② 网络盘抽屉是**逐字节拷贝**、
+  不是另一套格式。复核：这两条都成立（抽屉拷的是产物字节，而产物里 `it-NNN/weights.json` 是回传件
+  —— 抽屉自己不带整份，但它拷的 `artifacts.zip` 带；这条差别记在 docs §114）。⇒ 没有理由不接。
+- **决定**：
+  1. **新模块 `remote/land_provider.py`（L2）** 是整份提供者的**唯一定义**：`provider()` 把
+     `standard_weights_copy` / `standard_opt_copy` 包成打包侧的 `full_for(root, it)` 契约，
+     weights 与 opt 各自独立成败；`blob_roots_of` 同处定义（`plan_handoff._blob_roots_of` 转发）。
+  2. **契约从 `full_for(it)` 改成 `full_for(root, it)`**：`package_pending` 逐课程换 `src_root`，
+     同一份提供者要能给多课程复用；三条出口（`finalize` / `write_deliver_zip` / `package_pending`）
+     与 `plan_run._pack_full_for` 全部改到这一份。
+  3. **notebook 入口 = `offline_boot.package_pending_full`**：交付面 `package_pending` 仍是 L0、
+     定义唯一；boot 是 standalone（延迟 import 允许）⇒ 由它 import `land_provider` 并绑
+     `blob_roots=<cfg.work_dir 推>`。notebook 引导格/raw 兜底/`sys.modules.pop` 三处名单加
+     `land_provider.py`；老 notebook 缺它 ⇒ ImportError → 退回旧行为 + 一行说明（不抛）。
+  4. **失败封口 `MAX_FAILURES=3`**：基准链断时逐轮扫会 O(n²)，而这是人点一下坐着等的 cell ⇒
+     同一件连续失败 3 轮即停试（响亮一行），之后该件不再尝试（成功一次即重置计数）。
+- **实测（W0-2，本机，40 轮 × 100k 参数 ≈391KB/轮）**：sidecar 全命中时纯落地 **0.01s**；
+  整包 **2.84s**（71ms/轮）；无 sidecar、blob 全在 3.43s；**基准链断 2.16s**（40 轮，含约 2s zip）
+  ⇒ 成本几乎全在 zip 压缩，落地不是瓶颈，O(n²) 已被封住。
+- **否决的备选**：① 在 `offline_deliverable` 里默认落地 —— L0 import L1 是向上边
+  （`test_remote_dag` 当场红）；② 只改 cell 文本就地拼提供者 —— notebook 文本是契约，拼装逻辑
+  会漂；③ 不做失败封口只靠「人点」—— 断链时 238 轮逐轮扫读，等待不可估。
+- **落点**：`remote/land_provider.py`（新，L2）· `remote/offline_boot.py`（`package_pending_full` /
+  `_landing_provider` / `_load_land_provider`）· `remote/plan_handoff.py`（`_blob_roots_of` 转发）·
+  `remote/plan_run.py`（`_pack_full_for` 改用 provider）· `remote/artifacts.py` +
+  `remote/offline_deliverable.py`（契约 `(root, it)`）· `nn-training/ipynb/battle.offline.ipynb`
+  （三处名单 + cell 入口）· `tests/helpers/remote_dag.py`（`remote.land_provider: 2`）·
+  `tests/remote/test_pack_full.py`（+4：真 delta + blob 缓存落地 / 失败停试 / notebook 端到端 /
+  模块缺失退化）· `docs/nn/remote-transport.md §114`。
+- **验收**：`test_pack_full` 10 例全绿（含真容器落地与端到端一键包）；`test_remote_dag` /
+  `test_python_loc_budget` / `test_source_text_assert_budget`（基线未抬）/ `test_reuse_ledger` /
+  `test_offline_{notebook,deliverable_split,boot}` / `test_plan_run_split` 共 165 passed。

@@ -48,6 +48,7 @@ from typing import Any
 import common.game_watch as game_watch
 import common.scratch as scratch
 import remote.delta_files as delta_files
+import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
 import remote.weights_standard as weights_standard
 from common.logutil import tag_logger
@@ -806,11 +807,12 @@ def _blob_roots(ctx: RunContext) -> list[Path]:
 
 def _blob_roots_of(work_dir: str | Path) -> list[Path]:
     """没有 `ctx` 时的同一份候选根判据（`_seed_opt_blob_cache` / `_seed_ref_blob_cache` 这些
-    只拿得到 `work_dir` 的调用点用；顺序与 `_blob_roots` 一致）。"""
-    wd = Path(work_dir)
-    # 顺序 = **已知好用**的那个在前：`seed_opt_blob` 写第一个能写的根，写错地方等于声明一个
-    # 解析不到的地址（`seed_opt_blob_cache` 一直都在 `work_dir/blob_cache` 写，那里就是权威）。
-    return [wd / "blob_cache", wd / "code_cache" / "blob_cache"]
+    只拿得到 `work_dir` 的调用点用；顺序与 `_blob_roots` 一致）。
+
+    判据的**唯一实现**在 `remote/land_provider.blob_roots_of`（2026-10-22：notebook 一键包也要
+    同一份根，而它只能延迟 import 模块）；本函数只转发，避免第二份会漂的清单。
+    """
+    return land_provider.blob_roots_of(work_dir)
 
 
 def _carry_ts_tree(ctx: RunContext, *, ts_code_cache_dir: Path | None, ts_tree: Path | None) -> None:

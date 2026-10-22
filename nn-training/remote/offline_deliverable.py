@@ -536,7 +536,7 @@ def write_deliver_zip(
     course: str,
     source: str,
     log: Callable[[str], None],
-    full_for: Callable[[int], Mapping[str, Path]] | None = None,
+    full_for: Callable[[Path, int], Mapping[str, Path]] | None = None,
 ) -> bool:
     """把一份产物根打成**可导入**的 zip：轮次 + 存在的锚点（三件 + 两账本）+ `IMPORT_META.json`。
 
@@ -544,7 +544,7 @@ def write_deliver_zip(
     **派生件** —— 装进去只是把体积翻倍（控制台要的只是轮次 + 读数 + 三件）。
     先写 `.tmp-<pid>` 再 `os.replace`：半截包绝不落到人能下载的名字上。**永不抛**（失败一句人话）。
 
-    `full_for(it)`（2026-10-22，`plan/offline-full-weights-backup`）= **整份权重的提供者**，由调用方注入
+    `full_for(root, it)`（2026-10-22，`plan/offline-full-weights-backup`）= **整份权重的提供者**，由调用方注入
     （与 `ArtifactStore.finalize` 同一个约定）：给了某件的整份 ⇒ 包内那个名字写整份、原件旁存成
     同主名的 `.delta`（与 hub 树逐字同形）。**为什么这个形参而不再 import 落地器**：本模块是 L0（被
     `remote/deliver_zip` L1 与 `remote/backup_drawer` L1 import），import `weights_standard`(L1) 就是向上边。
@@ -564,7 +564,7 @@ def write_deliver_zip(
                 if p.is_file():
                     z.write(p, name)
             for _it, d in rounds:
-                full = _full_map(full_for, _it)
+                full = _full_map(full_for, Path(src_root), _it)
                 seen: set[str] = set()  # 包内名唯一（重导过的目录里已有 `.delta` 旁件）
                 for f in sorted(d.rglob("*")):
                     if not f.is_file():
@@ -592,13 +592,13 @@ def write_deliver_zip(
 
 
 def _full_map(
-    full_for: Callable[[int], Mapping[str, Path]] | None, it: int
+    full_for: Callable[[Path, int], Mapping[str, Path]] | None, root: Path, it: int
 ) -> Mapping[str, Path]:
-    """`full_for(it)` 的安全调用（**永不抛**：整份只是加值，拿不到就发原件）。"""
+    """`full_for(root, it)` 的安全调用（**永不抛**：整份只是加值，拿不到就发原件）。"""
     if full_for is None:
         return {}
     try:
-        return full_for(int(it)) or {}
+        return full_for(Path(root), int(it)) or {}
     except Exception:
         return {}
 
@@ -608,7 +608,7 @@ def package_pending(
     log: Callable[[str], None],
     *,
     courses: list[str] | None = None,
-    full_for: Callable[[int], Mapping[str, Path]] | None = None,
+    full_for: Callable[[Path, int], Mapping[str, Path]] | None = None,
 ) -> list[Path]:
     """一键打包**待回传产物**（两态判据表，plan §5.2）：本地产物根齐 ⇒ 打它；只有抽屉齐 ⇒ 打抽屉。
 

@@ -113,6 +113,11 @@ LAYERS: dict[str, int] = {
     # 留着它们的 `common.*` 键就是「账本腐烂」——`test_ledger_covers_exactly_every_remote_module`
     # 会当场报 stale）。它们是 stdlib-only 叶子（L0），搬走不改变任何残留边的方向。
     "remote.artifacts": 0,
+    # 打包时的**整份提供者**（2026-10-22，`plan/offline-full-weights-backup` §7-Q5）：把
+    # `standard_weights_copy` / `standard_opt_copy`（两个 L1 落地器）包成打包侧那个
+    # `full_for(root, it)` 契约 ⇒ **L2**。读者只有 L6 的 `plan_run` 与 standalone 的
+    # `offline_boot`（经 importlib 延迟装载，不算边）—— L0 的两个打包模块仍只认注入的形参。
+    "remote.land_provider": 2,
     "remote.bulk_sched": 0,
     # 补传**实时体的投影**（2026-10-22，`plan/offline-deliver-stall` §9.6）：评估行白名单 /
     # `perGame` 摘键 / 锚点判据（`read_eval_iters`）三块纯函数。依赖面 = stdlib + `Path`

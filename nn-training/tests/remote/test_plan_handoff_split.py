@@ -97,6 +97,10 @@ ALLOWED_IMPORTS = {
     # 不自己拼名字（拼了就会在“名字跟着内容”的树上找不着）。它是 **L0**（顶层只 import stdlib）
     # ⇒ 本模块站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
     "remote.delta_files",
+    # 2026-10-22（`plan/offline-full-weights-backup` Q5）：`blob_cache` 候选根的**唯一实现**搬到
+    # `remote/land_provider.blob_roots_of`（该模块是打包侧整份提供者的家，L2）——notebook 一键包
+    # 与云机共用一份判据，本模块的 `_blob_roots_of` 只转发。边 L6→L2 严格向下（`test_remote_dag`）。
+    "remote.land_provider",
     # 2026-10-12（plan/offline-leg-ppo-attribution）：装配点要算**可读 worker 名**
     # （`worker_tag(offline=True, hub_url=…)` = `kaggle-o`，dashboard 节点贡献统计 PPO 组的列名）。
     # 它住 `remote.job_lifecycle`（**L3**）：只能在 L5 的这个装配点算 —— `deliver_proc`(L2) /

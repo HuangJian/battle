@@ -195,7 +195,8 @@ def test_long_task_logging_is_wired(cell: str) -> None:
 def test_boot_modules_are_fetched_by_name_and_exist(cell: str) -> None:
     # 引导文件集（S5 第十四刀 +）：交付面兄弟文件 `offline_deliverable.py` 也在这个名单里
     # （`offline_boot` 惰性装载它；名单缺它 ⇒ 交付格会响亮 ImportError）。
-    for name in ("offline_boot.py", "tailscale_boot.py", "offline_deliverable.py"):
+    # 2026-10-22：`land_provider.py`（整份提供者）同规——名单缺它 ⇒ 一键包退回旧行为（一行说明）。
+    for name in ("offline_boot.py", "tailscale_boot.py", "offline_deliverable.py", "land_provider.py"):
         assert f'"{name}"' in cell, f"cell 没拉 {name}"
         assert (NN / "remote" / name).is_file(), f"cell 要拉 {name}，仓库里却没有"
 
@@ -246,7 +247,7 @@ def test_notebook_has_a_mid_run_package_cell() -> None:
     """底部那格「中途取回」（用户口径 2026-09-23）：跑到一半也能把产物交回控制台。
 
     守三件事：① 它**恰有一格**且不含引导调用（引导 cell 的唯一性靠 `_run(CFG` 判定，
-    多一个含它的 cell 会让那份 fixture 直接报错）；② 它走 runtime 的 `package_pending`
+    多一个含它的 cell 会让那份 fixture 直接报错）；② 它走 runtime 的入口
     （产物根的推导、两态判据表、命名都在那里一份，cell 不许自己拼一份）；③ 名字与下一步
     写明 —— 控制台靠文件名/包内 `IMPORT_META` 对账课程，而人需要知道去哪里下载。
 
@@ -258,7 +259,10 @@ def test_notebook_has_a_mid_run_package_cell() -> None:
     assert len(hits) == 1, f"期望恰好 1 个中途取回 cell，实际 {len(hits)}"
     pack = hits[0]
     assert "_run(CFG" not in pack, "中途取回 cell 不得含引导调用（会破坏引导 cell 的唯一性）"
-    assert "_ob.package_pending(CFG, _log)" in pack, "必须调 runtime 的 package_pending（单一实现）"
+    # 2026-10-22（`plan/offline-full-weights-backup` §7-Q5）：入口改成 `package_pending_full`——
+    # 打包本体仍是交付面那一份（定义唯一），`offline_boot` 只把**整份提供者**绑上去（落地器是
+    # L2，而交付面是 L0，不能反向 import）。
+    assert "_ob.package_pending_full(CFG, _log)" in pack, "必须调 runtime 的一键包入口（单一实现）"
     assert "导入产物" in pack, "要说清下一步是把包上传到控制台「导入产物」"
     assert "deliver-<课>.zip" in pack, "要写明产出的名字（收官那支与老习惯一致）"
     assert "deliver-<课>@<run>-it<N>.zip" in pack, "中途包是附注名（多 run 不互盖）——要写明"

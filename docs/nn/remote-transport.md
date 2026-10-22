@@ -6,6 +6,40 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §114 notebook「中途取回」cell 也接上整份：`package_pending_full` + 落地失败连续 3 轮停试（2026-10-22 晚 · §113 的 Q5 收尾 · 决策 `DECISIONS.md` §2026-10-22-goalnn-notebook-pack-full-wiring）
+
+§113 把段末自动包修好了，但**人点的那一格**（`_ob.package_pending(CFG, _log)`）还是打差分包。
+现在接上了，三个事实值得记住：
+
+1. **不是「拿不到 blob 根」**：`_blob_roots_of(work_dir)` 一直是现成的（`<work_dir>/blob_cache` ·
+   `<work_dir>/code_cache/blob_cache`），只是 notebook 那条腿没调它。判据已下沉成
+   `land_provider.blob_roots_of`（`plan_handoff` 转发），notebook 与云机共用一份。
+2. **落地成本≈0**：40 轮 × 100k 参数（≈391KB/轮）实测——sidecar 全命中时纯落地 **0.01s**；
+   整包墙钟 **2.84s**（71ms/轮），几乎全在 zip 压缩。所以「人点一下坐着等」不是理由。
+3. **真正的风险是失败路径，已用「连续 3 轮停试」封住**：基准链断时每次 `standard_weights_copy`
+   都是新的 `_SearchContext`（逐轮扫）⇒ 逐轮重试会变 O(n²)。`land_provider.MAX_FAILURES=3`
+   让第 4 轮起直接跳过（响亮一行），整包从「不可估」变成 40 轮 **2.16s**（其中约 2s 仍是 zip）。
+
+**契约也在这里从 `full_for(it)` 扩成 `full_for(root, it)`**：`package_pending` 逐课程换 `src_root`，
+一份提供者要能给多课程复用；三条出口与 `plan_run._pack_full_for` 全部改到 `land_provider.provider`
+（唯一实现，`plan_handoff._blob_roots_of` 也改为转发它的 `blob_roots_of`）。§113 里写 `full_for(it)`
+的地方按本条读。
+
+形状（分层仍然一格不动）：交付面 `package_pending` 是 L0、落地器是 L1 ⇒ 在 L0 里 import 就是
+向上边。所以由 standalone 的 `offline_boot` 做延迟 import 并绑好提供者：
+
+```
+offline_boot.package_pending_full(cfg, log)        # 新入口（cell 调它）
+  └─ land_provider.provider(blob_roots=<cfg.work_dir 推>)   # L2，weights+opt 各自成败
+  └─ offline_deliverable.package_pending(..., full_for=…)   # 定义唯一，仍住交付面
+```
+
+**老 notebook 不坏**：引导格没拉 `land_provider.py` ⇒ `_load_land_provider()` 抛 ImportError ⇒
+`_landing_provider` 退回 `None` + 一行「包内权重是回传件」；包照出。新 notebook 的引导格、
+raw 兜底名单、`sys.modules.pop` 名单都已带上 `land_provider.py`。
+
+---
+
 ## §113 打包出口接上「整份」：`.weights-standard` 复用 + 注入式 `full_for`（2026-10-22 · `plan/offline-full-weights-backup.plan.md` v3 · 决策 `DECISIONS.md` §2026-10-22-goalnn-offline-full-weights-backup）
 
 现场（`reports/y28-steady-20261021.md`）：离线包 469 成员 / 52.7MB，232 份 `it-*/weights.json`
@@ -21,8 +55,9 @@ delta 只该活在「回传进程 ↔ hub 落地器」之间（`hub/deltas.py` �
 ### 设计（三件，都很小）
 
 1. **注入，不搬家**：`ArtifactStore.finalize(full_for=…)` / `write_deliver_zip(full_for=…)` /
-   `package_pending(full_for=…)`；`full_for(it) -> {包内名: 整份路径}`，缺键 = 落不下来（保留原件）。
-   实现住在 L6 的 `plan_run._pack_full_for`。**为什么不能 import**：`remote/artifacts` 是 L0、被
+   `package_pending(full_for=…)`；`full_for(root, it) -> {包内名: 整份路径}`（契约在当日晚些时候
+   从 `(it)` 扩成 `(root, it)`，理由见 §114），缺键 = 落不下来（保留原件）。
+   实现住在 L6 的 `plan_run._pack_full_for`（当晚改为 `land_provider.provider`，见 §114）。**为什么不能 import**：`remote/artifacts` 是 L0、被
    `hub.store_offline`(L1) 直接 import，自己去 import 落地器(`weights_standard` L1) 就是向上边
    （`tests/test_remote_dag.py`）；搬 `hub/deltas.py` 到 `remote/land_stage.py` 会重编号整张账本。
 2. **复用已经在盘上的 sidecar**：云机每轮开跑前就调 `standard_weights_copy(prev_weights, store.root)`
@@ -58,11 +93,9 @@ delta 只该活在「回传进程 ↔ hub 落地器」之间（`hub/deltas.py` �
 `<store>/.weights-standard/` 的真实份数、单轮 land 墙钟、加整份后的 zip 实测体积，以及换机验收
 （无 `blob_cache`、无 `nn-training/weights/` 的机器上导入 + `eval_a_once` 400 局）——见 plan §5/§7。
 
-**notebook 里那个「中途取回」cell 故意先不注入**：`package_pending` 只做透传。
-**不是做不到** —— blob 根的解析函数现成（`plan_handoff._blob_roots_of(work_dir)`），只是那条腿
-没接线（P1-5 说的是「没接线」）。真正的顾虑是「抽屉-only」那支不共享搜索预算（每次落地都是新
-`_SearchContext`）⇒ 失败路径会变 O(n²) 扫读，而这是人点一下坐着等的 cell。
-段末自动腿与「跑完再点」不受影响（两者都复制 `finalize` 刚打的包）。要做先量墙钟（plan §7-Q5）。
+**notebook 里那个「中途取回」cell**：本条落地的同一晚也接上了（`package_pending_full`），
+含「落地失败连续 3 轮停试」的封口与 40 轮实测墙钟 —— 见 **§114**（上文那句「故意先不注入」
+已被 §114 取代）。
 
 ---
 

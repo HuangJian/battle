@@ -141,6 +141,64 @@ def _load_deliverable() -> Any:
     )
 
 
+def _load_land_provider() -> Any:
+    """整份供者模块（`remote/land_provider`）：引导目录里的兄弟文件优先，包内兜底。
+
+    单独一个 loader（不复用 `_load_deliverable`）：它是**可选**依赖——老 notebook 的引导格
+    没拉 `land_provider.py`，那时包装照打、权重是原件，只多一行响亮说明（绝不 ImportError）。
+    """
+    for _name in ("land_provider", "remote.land_provider"):
+        try:
+            return importlib.import_module(_name)
+        except ImportError:
+            continue
+    raise ImportError(
+        "找不到 land_provider（notebook 引导格没拉它？）—— 包内权重将是回传件"
+    )
+
+
+def package_pending_full(
+    cfg: dict,
+    log: Callable[[str], None],
+    *,
+    courses: list[str] | None = None,
+    full_for: Callable[[Path, int], dict[str, Path]] | None = None,
+) -> list[Path]:
+    """一键打包待回传产物（**门面 + 整份注入**；真正的打包逻辑在交付面模块）。
+
+    名字里的 `_full` 不是装饰：`package_pending` 本体（及其唯一定义）住在
+    `offline_deliverable`（`test_offline_deliverable_split` 钉住「定义唯一」），本函数只把
+    **整份提供者**绑上去，再调它。
+
+    为什么注入放在这里（2026-10-22，`plan/offline-full-weights-backup` §7-Q5）：落地器
+    `remote/land_provider` 是 L2（它要 import L1 的 `weights_standard`/`opt_standard`），而交付面
+    `offline_deliverable` 是 L0（被 `hub.store_offline` L1 直接 import）——在 L0 里 import 它
+    就是向上边（`tests/test_remote_dag.py`）。本模块是 standalone 引导文件，**延迟 import 允许**。
+
+    代价：这个 cell 是人点一下坐着等的 ⇒ 落地失败**连续 3 轮就停试**（`land_provider.MAX_FAILURES`），
+    断链不会变成 O(n²) 的扫读等待；包照出、原件不丢。
+    """
+    if full_for is None:
+        full_for = _landing_provider(cfg, log)
+    packs: list[Path] = _load_deliverable().package_pending(
+        cfg, log, courses=courses, full_for=full_for
+    )
+    return packs
+
+
+def _landing_provider(cfg: dict, log: Callable[[str], None]) -> Any:
+    """`cfg` → 整份提供者（blob 根从 `work_dir` 推；拿不到模块 ⇒ `None` = 旧行为）。"""
+    try:
+        land = _load_land_provider()
+    except ImportError as e:
+        log(f"[pack] {e}（包内权重是回传件：本机可解，换机需要基准）")
+        return None
+    work_dir = str(cfg.get("work_dir") or "").strip()
+    return land.provider(
+        blob_roots=land.blob_roots_of(work_dir) if work_dir else [], log=log
+    )
+
+
 def __getattr__(name: str) -> Any:
     """门面（PEP 562）：交付面的名字转发到 `_load_deliverable()`——名字是契约，位置不是。
 
