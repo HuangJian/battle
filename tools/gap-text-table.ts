@@ -19,6 +19,24 @@
  * （组内逃脱率 vs 平均敌距 corr≈0/−0.4），不定价（分母威胁暴露可操纵 + 无动作梯度）。
  */
 import { readFileSync } from 'fs'
+import { World } from '../src/game/World'
+import { Simulation } from '../src/game/Simulation'
+import { restoreWorld } from '../src/snapshot/WorldSerializer'
+import { ReplayInput } from '../src/replay/ReplayInput'
+import { parseReplayFile } from '../src/replay/file'
+import { NNInput } from '../src/nn/policy-input'
+import { decodeStageGrid } from '../src/nn/config-stage'
+import { DIFFICULTIES } from '../src/config/difficulty'
+import { RULES, DEFAULT_RULES } from '../src/config/rules'
+import { STAGES } from '../src/config/stages'
+import {
+  threatLaneSources,
+  nearestPickupDist,
+  THREAT_ALIGN_BAND_PX,
+} from '../src/nn/danger-metrics'
+import { bulletLaneDist, BULLET_LANE_MISS } from '../src/utils/helpers'
+import { createShieldWindow } from '../src/nn/shield-window'
+import { CELL } from '../src/constants'
 
 type Spec = { code: string; feat: string; plain: string }
 type Axis = { title: string; rows: Spec[] }
@@ -497,7 +515,626 @@ const smartMode = (comparePath: string, hp: string, np: string): void => {
   }
 }
 
+// ───────────────── 行为探针（--behavior）：五类「苟/懒」的逐拍读数 ─────────────────
+// 为什么塞进本文件而不是另开工具：这五类都是**位置×时间**的量，eval_log 的局末聚合列
+// 量不到；而「人 vs 机」的对照表本来就是本工具的职责（SPECS/MEANFN 是同一套展示）。
+// 逐拍只读 World（AGENTS §2.1）；停/火线/冻盾谓词全部复用引擎实现，不另写第二套。
+// 口径：hard / 1 命 / 20 敌 / max_ticks 12900；速率除以**存活拍**；
+//   停 = getMoveDirection()===null ∨ isHolding()；中心 = 距几何中心 ≤3 格切比雪夫；
+//   冻/盾窗 = shield-window.ts 粘性分类（道具盾 ≠ 复活盾）；
+//   道具「捡到」= id 消失且最后位置距玩家 ≤40px（近似，含极少数到期消失）。
+// Usage:
+//   bun tools/gap-text-table.ts --behavior <pairs.json> <weights.json> <replay...> [--limit=N]
+
+const CENTER_PX = 208 // GRID 26 × CELL 16 / 2
+const CENTER_R = 3 * CELL // 中心 3 格（切比雪夫）
+const NEAR6 = 6 * CELL
+const MAX_TICKS = 12900
+const HIT_WINDOW = 300
+
+interface Acc {
+  files: string
+  stage: number
+  seed: number
+  ticks: number
+  alive: number
+  kills: number
+  win: number
+  // 中心
+  center: number
+  centerStop: number
+  centerAlone: number
+  // 冻/盾
+  freeze: number
+  freezeStop: number
+  freezeCenter: number
+  freezeKills: number
+  freezeShots: number
+  freezeDmg: number
+  shield: number
+  shieldStop: number
+  shieldCenter: number
+  shieldKills: number
+  shieldShots: number
+  shieldDmg: number
+  // 挨打
+  hitN: number
+  hitSameCell: number
+  hitLeaveSum: number
+  hitLeaveN: number
+  hitDeath300: number
+  hitDmg: number
+  // 道具
+  puSeen: number
+  puGot: number
+  puNear: number
+  puNearSafe: number
+  puNearSafeStop: number
+  // 火线
+  safe: number
+  danger: number
+  enterBullet: number
+  enterMuzzle: number
+  enterPassive: number
+  enterActive: number
+  enterActiveBullet: number
+  stopShots: number
+  deathAfterCross: number
+  // 全局
+  stop: number
+  shots: number
+  dmg: number
+  distSum: number
+  distN: number
+}
+
+const zero = (): Acc => ({
+  files: '',
+  stage: 0,
+  seed: 0,
+  ticks: 0,
+  alive: 0,
+  kills: 0,
+  win: 0,
+  center: 0,
+  centerStop: 0,
+  centerAlone: 0,
+  freeze: 0,
+  freezeStop: 0,
+  freezeCenter: 0,
+  freezeKills: 0,
+  freezeShots: 0,
+  freezeDmg: 0,
+  shield: 0,
+  shieldStop: 0,
+  shieldCenter: 0,
+  shieldKills: 0,
+  shieldShots: 0,
+  shieldDmg: 0,
+  hitN: 0,
+  hitSameCell: 0,
+  hitLeaveSum: 0,
+  hitLeaveN: 0,
+  hitDeath300: 0,
+  hitDmg: 0,
+  puSeen: 0,
+  puGot: 0,
+  puNear: 0,
+  puNearSafe: 0,
+  puNearSafeStop: 0,
+  safe: 0,
+  danger: 0,
+  enterBullet: 0,
+  enterMuzzle: 0,
+  enterPassive: 0,
+  enterActive: 0,
+  enterActiveBullet: 0,
+  stopShots: 0,
+  deathAfterCross: 0,
+  stop: 0,
+  shots: 0,
+  dmg: 0,
+  distSum: 0,
+  distN: 0,
+})
+
+function run(world: any, input: any, total: number, a: Acc): void {
+  const shield = createShieldWindow()
+  let prevThreat = false
+  let hitTick = -1
+  let hitCol = -1
+  let hitRow = -1
+  let hitResolved = true
+  let lastCrossTick = -1
+  let wasAlive = false
+  let lastBulletId = -1
+  let lastKills = 0
+  let hp = 0
+  const puPos = new Map<number, { x: number; y: number }>()
+
+  const sim = new Simulation(world, input)
+  if (input.input2 !== undefined) sim.input2 = input.input2 ?? null
+  world.state = 'playing'
+
+  while (a.ticks < total) {
+    sim.tick()
+    if (typeof input.advance === 'function') input.advance()
+    else if (typeof input.endFrame === 'function') input.endFrame()
+    a.ticks++
+    shield.update(world)
+    const p = world.player
+    const freeze = (world.freezeTimer ?? 0) > 0
+    const propShield = freeze ? false : shield.powerupActive()
+
+    if (p && p.alive) {
+      wasAlive = true
+      a.alive++
+      const pcx = p.x + p.w / 2
+      const pcy = p.y + p.h / 2
+      const col = Math.floor(pcx / CELL)
+      const row = Math.floor(pcy / CELL)
+      const moveDir = input.getMoveDirection()
+      const holding = typeof input.isHolding === 'function' && input.isHolding() === true
+      const stopped = moveDir === null || holding
+      const center = Math.abs(pcx - CENTER_PX) <= CENTER_R && Math.abs(pcy - CENTER_PX) <= CENTER_R
+      const threat = threatLaneSources(world) > 0
+
+      // 敌弹是否已在同一 lane 上逼近（与 threatLaneSources 同一共享谓词）
+      let bulletLane = 0
+      for (let i = 0; i < world.bullets.length; i++) {
+        const b = world.bullets[i]
+        if (!b.alive || b.allegiance !== 'enemy') continue
+        if (
+          bulletLaneDist(b.dir, b.x + b.w / 2, b.y + b.h / 2, pcx, pcy, THREAT_ALIGN_BAND_PX) !==
+          BULLET_LANE_MISS
+        )
+          bulletLane++
+      }
+
+      // 最近敌人距离
+      let nd = Infinity
+      for (let i = 0; i < world.allTanks.length; i++) {
+        const t = world.allTanks[i]
+        if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+        const dx = t.x + t.w / 2 - pcx
+        const dy = t.y + t.h / 2 - pcy
+        const d = Math.hypot(dx, dy)
+        if (d < nd) nd = d
+      }
+      if (nd < Infinity) {
+        a.distSum += nd
+        a.distN++
+      }
+
+      if (stopped) a.stop++
+      if (center) {
+        a.center++
+        if (stopped) a.centerStop++
+        if (!(nd <= NEAR6)) a.centerAlone++
+      }
+      if (freeze) {
+        a.freeze++
+        if (stopped) a.freezeStop++
+        if (center) a.freezeCenter++
+      }
+      if (propShield) {
+        a.shield++
+        if (stopped) a.shieldStop++
+        if (center) a.shieldCenter++
+      }
+
+      // 火线迁移
+      if (!threat) a.safe++
+      else a.danger++
+      if (!prevThreat && threat) {
+        if (moveDir === null) a.enterPassive++
+        else if (bulletLane > 0) {
+          a.enterBullet++
+          a.enterActiveBullet++
+          lastCrossTick = a.ticks
+        } else a.enterMuzzle++
+        if (moveDir !== null) a.enterActive++
+      }
+      prevThreat = threat
+
+      // 道具：最近距离 / 安全窗 / 拾取（id 消失时按最后位置与玩家的距离判「捡了」）
+      const pd = nearestPickupDist(world)
+      if (pd >= 0 && pd <= 3) {
+        a.puNear++
+        if (!threat) {
+          a.puNearSafe++
+          if (stopped) a.puNearSafeStop++
+        }
+      }
+      const aliveIds = new Set<number>()
+      for (let i = 0; i < world.powerUps.length; i++) {
+        const pu = world.powerUps[i]
+        if (!pu.alive) continue
+        aliveIds.add(pu.id)
+        if (!puPos.has(pu.id)) {
+          puPos.set(pu.id, { x: pu.x, y: pu.y })
+          a.puSeen++
+        } else {
+          const q = puPos.get(pu.id)!
+          q.x = pu.x
+          q.y = pu.y
+        }
+      }
+      for (const [id, pos] of puPos) {
+        if (aliveIds.has(id)) continue
+        const d = Math.hypot(pos.x + 8 - pcx, pos.y + 8 - pcy)
+        if (d <= 40) a.puGot++
+        puPos.delete(id)
+      }
+
+      // 击杀 / 开枪增量
+      const k = world.killCount ?? 0
+      const dk = k - lastKills
+      lastKills = k
+      let newShots = 0
+      for (let i = 0; i < world.bullets.length; i++) {
+        const b = world.bullets[i]
+        if (b.allegiance !== 'player') continue
+        if (b.id > lastBulletId) newShots++
+      }
+      for (let i = 0; i < world.bullets.length; i++) {
+        const b = world.bullets[i]
+        if (b.allegiance === 'player' && b.id > lastBulletId) lastBulletId = b.id
+      }
+      a.shots += newShots
+      if (stopped) a.stopShots += newShots
+      if (freeze) {
+        a.freezeKills += dk
+        a.freezeShots += newShots
+      }
+      if (propShield) {
+        a.shieldKills += dk
+        a.shieldShots += newShots
+      }
+
+      // 挨打
+      const newHp = p.hp
+      if (hp > 0 && newHp < hp) {
+        const d = hp - newHp
+        a.hitN++
+        a.dmg += d
+        a.hitDmg += d
+        if (freeze) a.freezeDmg += d
+        if (propShield) a.shieldDmg += d
+        hitTick = a.ticks
+        hitCol = col
+        hitRow = row
+        hitResolved = false
+      }
+      hp = newHp
+
+      // 挨打后是否离开原地（300 拍窗口）
+      if (!hitResolved) {
+        if (col !== hitCol || row !== hitRow) {
+          a.hitLeaveSum += a.ticks - hitTick
+          a.hitLeaveN++
+          hitResolved = true
+        } else if (a.ticks - hitTick <= HIT_WINDOW) {
+          a.hitSameCell++
+        } else {
+          a.hitLeaveSum += HIT_WINDOW
+          a.hitLeaveN++
+          hitResolved = true
+        }
+      }
+      if (world.state !== 'playing') break
+    } else {
+      if (wasAlive) {
+        if (hitTick >= 0 && a.ticks - hitTick <= HIT_WINDOW) a.hitDeath300++
+        if (lastCrossTick >= 0 && a.ticks - lastCrossTick <= 120) a.deathAfterCross++
+        wasAlive = false
+      }
+      hitTick = -1
+      hitResolved = true
+      hp = 0
+      prevThreat = false
+    }
+  }
+
+  a.kills = world.killCount ?? 0
+  a.win = world.state === 'stageclear' ? 1 : 0
+}
+
+type Pair = { stage: number; seed: number }
+
+/** 人类侧：逐局回放复算（ReplayInput 每拍 advance，与训练/eval 同一 Simulation）。 */
+const behaviorHuman = (files: string[]): Acc[] => {
+  const out: Acc[] = []
+  for (const fp of files) {
+    const parsed: any = parseReplayFile(readFileSync(fp, 'utf8'))
+    if (parsed.error || !parsed.replay) {
+      console.error(`FAIL ${fp}`)
+      continue
+    }
+    const rp = parsed.replay
+    const md: any = rp.metadata ?? {}
+    const world = new World() as any
+    world.rng.reseed(rp.seed)
+    const dkey = md.difficulty || 'classic'
+    world.difficultyKey = dkey
+    world.difficulty = (DIFFICULTIES as any)[dkey] ?? (DIFFICULTIES as any)['classic']
+    world.rules = (RULES as any)[dkey] ?? DEFAULT_RULES
+    world.loadStageData((STAGES as any[])[md.stage] ?? (STAGES as any[])[0], 0)
+    restoreWorld(world, rp.initialSnapshot)
+    const input: any = new ReplayInput(rp.frames)
+    const a = zero()
+    a.files = fp
+    a.stage = md.stage
+    a.seed = rp.seed
+    run(world, input, rp.totalTicks ?? 0, a)
+    out.push(a)
+  }
+  return out
+}
+
+/** NN 侧：同 pairs 的座位跑同一套 ladder（stage 2000-2003 / hard / 1 命）。 */
+const behaviorNn = (weights: string, pairs: Pair[]): Acc[] => {
+  const ladder = JSON.parse(
+    readFileSync('nn-training/levels/ladder-c20-lives1.jsonc', 'utf8')
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//'))
+      .join('\n')
+      .replace(/,(\s*[}\]])/g, '$1'),
+  )
+  const grids: Record<number, any> = {}
+  ;[2000, 2001, 2002, 2003].forEach((sid, i) => {
+    grids[sid] = ladder.stages[i]
+  })
+  const out: Acc[] = []
+  for (const pr of pairs) {
+    const stage = decodeStageGrid(JSON.stringify(grids[pr.stage]), pr.stage, pr.seed)
+    const world = new World() as any
+    world.rng.reseed(pr.seed)
+    world.difficultyKey = 'hard'
+    world.difficulty = (DIFFICULTIES as any)['hard']
+    world.rules = (RULES as any)['hard'] ?? DEFAULT_RULES
+    world.lives = 1
+    world.playerLevel = 0
+    const input: any = new NNInput(world, { weightsPath: weights })
+    world.loadStageData(stage, 0)
+    input.reset()
+    const a = zero()
+    a.files = weights
+    a.stage = pr.stage
+    a.seed = pr.seed
+    run(world, input, MAX_TICKS, a)
+    out.push(a)
+  }
+  return out
+}
+
+const bSum = (rs: Acc[], f: (r: Acc) => number): number =>
+  rs.reduce((acc, r) => acc + (f(r) || 0), 0)
+const bAlive = (rs: Acc[]): number => bSum(rs, (r) => r.alive)
+const bPer1k = (rs: Acc[], f: (r: Acc) => number): number | null => {
+  const d = bAlive(rs)
+  return d > 0 ? (bSum(rs, f) / d) * 1000 : null
+}
+const bRate = (rs: Acc[], num: (r: Acc) => number, den: (r: Acc) => number): number | null => {
+  const d = bSum(rs, den)
+  return d > 0 ? bSum(rs, num) / d : null
+}
+const bPer1kOf = (rs: Acc[], num: (r: Acc) => number, den: (r: Acc) => number): number | null => {
+  const v = bRate(rs, num, den)
+  return v === null ? null : v * 1000
+}
+const bMean = (rs: Acc[], f: (r: Acc) => number): number | null =>
+  rs.length ? bSum(rs, f) / rs.length : null
+
+// 行规格：与 SPECS 同一套展示，只是取数来自本文件的逐拍采集（不是常量面板）。
+const BEHAVIOR_ROWS: Array<{
+  code: string
+  plain: string
+  note: string
+  f: (rs: Acc[]) => number | null
+}> = [
+  {
+    code: 'Q01',
+    plain: '停占比',
+    note: '停不是罪：人 0.29',
+    f: (rs) =>
+      bRate(
+        rs,
+        (r) => r.stop,
+        (r) => r.alive,
+      ),
+  },
+  {
+    code: 'Q02',
+    plain: '停∧中心/千',
+    note: '真信号：苟在中心',
+    f: (rs) => bPer1k(rs, (r) => r.centerStop),
+  },
+  {
+    code: 'Q03',
+    plain: '中心∧6格无敌/千',
+    note: '等人上门',
+    f: (rs) => bPer1k(rs, (r) => r.centerAlone),
+  },
+  {
+    code: 'Q04',
+    plain: '停着开火占比',
+    note: '站桩点射',
+    f: (rs) =>
+      bRate(
+        rs,
+        (r) => r.stopShots,
+        (r) => r.shots,
+      ),
+  },
+  {
+    code: 'Q05',
+    plain: '冻期开枪/千冻拍',
+    note: '白给窗口',
+    f: (rs) =>
+      bPer1kOf(
+        rs,
+        (r) => r.freezeShots,
+        (r) => r.freeze,
+      ),
+  },
+  {
+    code: 'Q06',
+    plain: '冻期击杀/千冻拍',
+    note: '同上',
+    f: (rs) =>
+      bPer1kOf(
+        rs,
+        (r) => r.freezeKills,
+        (r) => r.freeze,
+      ),
+  },
+  {
+    code: 'Q07',
+    plain: '冻期在中心/千冻拍',
+    note: '冻着也龟',
+    f: (rs) =>
+      bPer1kOf(
+        rs,
+        (r) => r.freezeCenter,
+        (r) => r.freeze,
+      ),
+  },
+  {
+    code: 'Q08',
+    plain: '盾期开枪/千盾拍',
+    note: '无敌期该压',
+    f: (rs) =>
+      bPer1kOf(
+        rs,
+        (r) => r.shieldShots,
+        (r) => r.shield,
+      ),
+  },
+  {
+    code: 'Q09',
+    plain: '盾期击杀/千盾拍',
+    note: '同上',
+    f: (rs) =>
+      bPer1kOf(
+        rs,
+        (r) => r.shieldKills,
+        (r) => r.shield,
+      ),
+  },
+  {
+    code: 'Q10',
+    plain: '安全∧3格道具+站/千',
+    note: '贴道具磨蹭',
+    f: (rs) => bPer1k(rs, (r) => r.puNearSafeStop),
+  },
+  {
+    code: 'Q11',
+    plain: '道具转化率',
+    note: '捡到/出现',
+    f: (rs) =>
+      bRate(
+        rs,
+        (r) => r.puGot,
+        (r) => r.puSeen,
+      ),
+  },
+  {
+    code: 'Q12',
+    plain: '主动进火线/千',
+    note: '穿越频率',
+    f: (rs) => bPer1k(rs, (r) => r.enterActive),
+  },
+  {
+    code: 'Q13',
+    plain: '穿线后120死占比',
+    note: '占全部死亡',
+    f: (rs) =>
+      bRate(
+        rs,
+        (r) => r.deathAfterCross,
+        (r) => (r.win ? 0 : 1),
+      ),
+  },
+  {
+    code: 'Q14',
+    plain: '挨打后同格拍/次',
+    note: '挨打不换位',
+    f: (rs) =>
+      bRate(
+        rs,
+        (r) => r.hitSameCell,
+        (r) => r.hitN,
+      ),
+  },
+  { code: 'Q15', plain: '局长/局', note: '节奏总账', f: (rs) => bMean(rs, (r) => r.ticks) },
+  { code: 'Q16', plain: '击杀/局', note: '火力无辜', f: (rs) => bMean(rs, (r) => r.kills) },
+]
+
+const behaviorMode = (argv: string[]): void => {
+  const rest = argv.filter((a) => !a.startsWith('--'))
+  const limitArg = argv.find((a) => a.startsWith('--limit='))
+  const limit = limitArg ? Number(limitArg.split('=')[1]) : 0
+  const pairsPath = rest[0]
+  const weights = rest[1]
+  let replays = rest.slice(2)
+  if (!pairsPath || !weights || replays.length === 0) {
+    console.error(
+      'usage: bun tools/gap-text-table.ts --behavior <pairs.json> <weights.json> <replay...> [--limit=N]',
+    )
+    process.exit(2)
+  }
+  if (limit > 0) replays = replays.slice(0, limit)
+  const pairs = JSON.parse(readFileSync(pairsPath, 'utf8')) as Pair[]
+  const usePairs = limit > 0 ? pairs.slice(0, limit) : pairs
+
+  console.error(`[behavior] 人类 ${replays.length} 局 / NN ${usePairs.length} 局 …`)
+  const human = behaviorHuman(replays)
+  const nn = behaviorNn(weights, usePairs)
+
+  const NW = 6
+  const PW = 26
+  const VW = 11
+  const ZW = 20
+  const hWin = human.filter((r) => r.win).length
+  const nWin = nn.filter((r) => r.win).length
+  const pc = (a: number, b: number): string => `${((a / Math.max(1, b)) * 100).toFixed(1)}%`
+  console.log('行为探针（逐拍复算 · 速率除以存活拍 · 人机同座配对）')
+  console.log(
+    `  人: ${human.length} 局 通关 ${hWin}（${pc(hWin, human.length)}）· 平均 ${Math.round(bMean(human, (r) => r.ticks) ?? 0)} 拍`,
+  )
+  console.log(
+    `  机: ${nn.length} 局 通关 ${nWin}（${pc(nWin, nn.length)}）· 平均 ${Math.round(bMean(nn, (r) => r.ticks) ?? 0)} 拍`,
+  )
+  console.log('')
+  console.log(
+    tpad('编号', NW) +
+      tpad('这是啥', PW) +
+      tpad('人', VW) +
+      tpad('机', VW) +
+      tpad('机/人', VW) +
+      '注',
+  )
+  for (const row of BEHAVIOR_ROWS) {
+    const a = row.f(human)
+    const b = row.f(nn)
+    const ratio = a !== null && b !== null && a !== 0 ? `${(b / a).toFixed(2)}x` : '—'
+    console.log(
+      tpad(row.code, NW) +
+        tpad(row.plain, PW) +
+        tpad(a === null ? '—' : fmt(a), VW) +
+        tpad(b === null ? '—' : fmt(b), VW) +
+        tpad(ratio, VW) +
+        tpad(row.note, ZW),
+    )
+  }
+}
+
 const main = (): void => {
+  if (process.argv[2] === '--behavior') {
+    behaviorMode(process.argv.slice(3))
+    return
+  }
   if (process.argv[2] === '--smart') {
     const [, , , comparePath, hp, np] = process.argv
     if (!comparePath || !hp || !np) {

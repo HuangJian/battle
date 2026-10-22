@@ -23,6 +23,9 @@
 - gameover 样本 <10 局打 ⚠（比值不稳，只看方向）。
 - 进不了本表的（eval 行没有逐步列）：选中动作置信 −logπ、V(t)、hurt 窗口增量——
   那是 rollout shard 的地盘（`tmp/y5-autopsy*.py` 管）：本表只到局 FIN 行的聚合列。
+- **位置×时间类**（停在中心、冻期发呆、贴着道具不捡、安全时走进火线）eval 行根本没有，
+  不在本表：走 `bun tools/gap-text-table.ts --behavior <pairs.json> <weights.json> <replay...>`
+  （逐拍复算，人机同座；本表只收能直接从 eval 列算出来的那三条：W9/W10/G8）。
 
 行为解释（每条见 METRICS 注，口径已和用户对齐十次， summarized）：
 - 背击/侧击是**奖**：我从背后/侧面打中敌人 = 无伤杀敌（敌人还不了手），多多益善。
@@ -103,6 +106,14 @@ METRICS = [
      "贴角落区时间。已有税 wCorner=110（重税）。"),
     ("W8", "火线承伤加权/千", "rate", lambda r: r.get("hurtWeight", 0),
      "暴露状态下挨打。总量税 wHurt=110（信号摊在分母里变稀→死局6-7x却改不动=刚性，加码排队）。"),
+    ("W9", "冻盾窗占比", "game",
+     lambda r: (r.get("freezeShieldWindowTicks", 0) / (r.get("ticks", 0) + 1)) if r.get("ticks") else None,
+     "冻∨道具盾的拍占存活比（idx76）。窗口=免费杀敌期；占比低说明道具链没兑现（不是不想打）。"),
+    ("W10", "窗内命中密度/千窗拍", "game",
+     lambda r: (r["hitsInFreezeShieldWindow"] / r["freezeShieldWindowTicks"] * 1000)
+     if r.get("freezeShieldWindowTicks") else None,
+     ("窗口里每千拍打中几发（idx77/idx76，**分母是窗口不是存活**）。y30 的 wWinHit 定价对象；"
+      "密度低=白给窗口，高=窗口被吃满。")),
     # ── 中了不跑：行为税候选 ──
     ("P1", "中了不跑/局", "game", lambda r: r.get("postHitLaneTicks", 0),
      "挨打后还站在火线上（中了不跑）。v11列已存在（idx75），定价前先补人类分离度。"),
@@ -153,6 +164,9 @@ METRICS = [
     ("G7", "关键道具/局", "game",
      lambda r: r.get("puGotFreeze", 0) + r.get("puGotBomb", 0) + r.get("puGotTank", 0),
      "冻/炸弹/加命拾取（翻盘三件套）。死局缺哪个？"),
+    ("G8", "道具转化率", "game",
+     lambda r: (r["powerUpsCollected"] / r["powerUpsSpawned"]) if r.get("powerUpsSpawned") else None,
+     "捡到/出现。分母是刷新数 ⇒ 排除运气：死/活同率=价钱问题，不同率=机会问题（G1/G4 的原版）。"),
     # ── dashboard 节奏四维 ──
     ("T1", "tempo", "game", lambda r: (r.get("dims") or {}).get("tempo"),
      "整局节奏分。死局低=全程被动。"),
