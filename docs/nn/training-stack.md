@@ -7,6 +7,36 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §40 自主机首批铺满撞「首批局数同源」校验 —— 宽度随块声明（`widen_width`；2026-10-22 事故修复）
+
+**触发**：y30-stack 离线自主段 it156 **一局没跑**就 `ProtocolError`，整条串行链停在第一门课（剩 4 门未执行）。
+
+**根因**（三个环节各自都对，串起来必死）：
+
+1. `remote/plan_run.py` 的 `widen_by_width` 把首批局数按本机 worker 数加宽（y30：9 局/关 → 24/24/23/23 = 94；
+   包内 `workers=1`、Σ=36，云机 94 槽）；
+2. `worker/plan.iter_spec` 把块转运行时块时调 `validate_runtime_volume`；
+3. `worker/volume_alloc.validate_volume_block_ext` 强验 `games_per_stage_by_stage == alloc_games_by_stage(est_hi)`（=9）
+   ⇒ 24 ≠ 9 响亮失败。
+
+`plan/rollout-topup-fastpath.plan.md` S8 早已写死这条强验；`plan/rollout-corpus-supply.plan.md:266` 加宽时只改
+games、没碰校验 ⇒ 缝隙没测试（`_run_iteration` 的加宽分支没有端到端用例，两刀各自绿）。
+
+**修法**：宽度**随块声明**（`widen_width`，缺省 0 = 未加宽），校验侧 want 值改成
+`widen_by_width(alloc_games_by_stage(...), widen_width)` ⇒ 同源仍是**可复算**，不是「谁都能把首批局数改大」。
+节点 `iter_topup` 跑同一个 validate（它不读 games，补差按 `spread_games_by_stage(width=slots)` 铺）；
+老 spec / 导出计划无该键 ⇒ 逐字不变。顺带修现场日志的 `8006`：`sum(int(v) for v in _per)` 迭代的是 dict **keys**
+（2000+2001+2002+2003），真正的和是 36。
+
+**钉住**：`tests/worker/test_plan.py::test_iter_spec_accepts_width_widened_volume_block`（y30 的逐字形状；抹掉宽度
+声明必须拒）+ `tests/worker/test_volume_alloc.py` 的加宽正例与三条反例。**否定备选**：把校验放宽成
+`games >= alloc`——那会让「手改局数」静默通过，同源就不再是判据。
+
+**残余**：① 加宽让同一 `it` 的 pairs 依赖**本机宽度** ⇒ 换一台不同核数的机器重放同一轮必然对不上（2026-10-22
+起如此，非本次引入）；② 铺满 = 过采（配额约 40 局却铺 94 局，已开跑的那一波停不下来），是「一开始铺满所有
+worker」的既定代价。诊断全文 → `reports/y30-autoworker-widen-protocolerror-20261022.md`。
+
+---
 ## §39 A 层评估语料改「固定池外池」：轮换退场，it 之间/课程之间逐点可比（2026-10-22；DECISIONS §2026-10-22-fixed-offpool-eval-seeds）
 
 **触发**（用户 2026-10-22）：「in-loop eval 改为固定池外种子（选个很大的随机数？避免和 rollout 种子有交集），

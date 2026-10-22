@@ -375,3 +375,59 @@ def test_validate_plan_rejects_malformed() -> None:
         assert kw in str(ei.value), (kw, str(ei.value))
     with pytest.raises(ProtocolError):
         validate_plan([1, 2, 3])  # type: ignore[arg-type]
+
+
+# ────────────────────── 自主机首批铺满（2026-10-22 事故回归）──────────────────────
+
+
+def _widened_plan() -> dict:
+    """y30-stack it156 的**逐字**形状：est 628/644/616/637 ⇒ 9 局/关，本机 94 槽 ⇒ 加宽到 94 局。
+
+    现场（`[14:34:16]` 日志）：`widen_by_width` 只改了 `games_per_stage_by_stage`，
+    `iter_spec` 的同源校验按 est 反解出 9 ⇒ `ProtocolError` 整段死（345 轮一局没跑）。
+    """
+    from worker.volume_alloc import widen_by_width
+
+    ests = {2000: 628, 2001: 644, 2002: 616, 2003: 637}
+    vol: dict = {
+        "target_transitions": 24576,
+        "stages": [2000, 2001, 2002, 2003],
+        "per_stage_quota": 6144,  # ceil(24576/4)
+        "est_s_by_stage": ests,
+        "est_hi_factor": 1.15,
+        "games_per_stage_by_stage": {s: 9 for s in ests},
+        "topup": {
+            "enabled": True,
+            "max_batches": 3,
+            "last_lo_factor": 0.85,
+            "max_games_per_stage": 0,
+        },
+    }
+    wide = widen_by_width(vol["games_per_stage_by_stage"], 94)
+    assert wide == {2000: 24, 2001: 24, 2002: 23, 2003: 23}, wide
+    return {
+        "argv_template": [list(_TMPL)],
+        "workers": 94,
+        "game_timeout_sec": 0.0,
+        "rotate_seed": 20270208,
+        "volume": {**vol, "games_per_stage_by_stage": wide, "widen_width": 94},
+    }
+
+
+def test_iter_spec_accepts_width_widened_volume_block() -> None:
+    """加宽后的块必须能拼成 spec：`games` 与 `widen_width` 一起声明 ⇒ 同源仍成立。"""
+    plan = _widened_plan()
+    pairs = pairs_for(plan, 156)
+    assert len(pairs) == 94, "首批 = 加宽后的局数（逐关满额即停，多的候选不跑）"
+    spec = iter_spec(plan, 156, pairs, wver="W" * 64, course=None)
+    assert spec["volume"]["games_per_stage_by_stage"] == {2000: 24, 2001: 24, 2002: 23, 2003: 23}
+    assert spec["volume"]["widen_width"] == 94
+    assert len(spec["argv"]) == sum(spec["volume"]["games_per_stage_by_stage"].values())
+
+    # 反例（同一个块、只在拼 spec 前把宽度声明抹掉）：必须响亮失败 —— 「加宽」放行的前提
+    # 是块里能复算出宽度，不是「谁都能把首批局数改大」。
+    from worker.volume_alloc import validate_runtime_volume
+
+    bare = {k: v for k, v in plan["volume"].items() if k != "widen_width"}
+    with pytest.raises(ValueError, match="同源"):
+        validate_runtime_volume({**bare, "it": 156, "rotate_seed": 20270208})

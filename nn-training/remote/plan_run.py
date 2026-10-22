@@ -208,6 +208,10 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     #   **不 ping 任何人、不看 hub 的 plan 声明**。plan 里的 `games_per_stage_by_stage` 是
     #   打包时的缺口形状（est 反解），本机核数比它多就按宽度重铺；派发侧逐关满额即停，
     #   多出来的候选不会白跑。无 `volume` 的老课程逐字走 `pairs_for`。
+    # ★ 2026-10-22 补（同源面的那一刀）：加宽必须**连 `widen_width` 一起写进块**——块里的
+    #   `games_per_stage_by_stage` 要过 `validate_runtime_volume` 的同源复算（首批局数 =
+    #   `widen_by_width(est 反解值, widen_width)`），只改 games 不声明宽度会被节点/`iter_spec`
+    #   响亮拒收（现场：y30-stack it156，9 局/关被铺到 24 局/关 ⇒ ProtocolError 整段死）。
     vol_probe = ctx.plan.get("volume")
     if isinstance(vol_probe, dict):
         from worker.volume_alloc import widen_by_width
@@ -218,10 +222,12 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
             _wide = widen_by_width(_per, _width)
             if sum(_wide.values()) > sum(int(v) for v in _per.values()):
                 ctx.log(
-                    f"it{it} 首批按本机宽度重铺：{sum(int(v) for v in _per)} → "
+                    f"it{it} 首批按本机宽度重铺：{sum(int(v) for v in _per.values())} → "
                     f"{sum(_wide.values())} 局（workers={_width}）"
                 )
-                vol_probe = dict(vol_probe, games_per_stage_by_stage=_wide)
+                vol_probe = dict(
+                    vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
+                )
     _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
     pairs = pairs_for(_plan, it)
     spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)

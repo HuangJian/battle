@@ -35,6 +35,7 @@ from worker.volume_alloc import (
     topup_games_by_stage,
     validate_runtime_volume,
     wasted_samples,
+    widen_by_width,
 )
 
 STAGES = [2000, 2001, 2002, 2003]
@@ -329,11 +330,34 @@ def test_validate_runtime_volume_accepts_consistent_block() -> None:
     assert blk["est_hi_factor"] == 1.15
 
 
+def test_validate_runtime_volume_accepts_width_widened_block() -> None:
+    """★ 2026-10-22 事故（y30-stack it156）：自主机按本机 worker 数铺满首批后，
+    `games_per_stage_by_stage` 是 est 反解值的**确定性加宽**（不是手改）。宽度随块声明
+    （`widen_width`）⇒ 同源复算仍逐关相等，块必须被接受——否则自主段在拼 spec 那一刻
+    就 `ProtocolError` 整段死（现场：9 局/关被铺到 24 局/关，94 槽云机）。
+    """
+    base = _block()
+    wide = widen_by_width(base["games_per_stage_by_stage"], 200)
+    assert sum(wide.values()) == 200 and wide != base["games_per_stage_by_stage"]
+    blk = validate_runtime_volume(_block(games_per_stage_by_stage=wide, widen_width=200))
+    assert blk["games_per_stage_by_stage"] == wide
+    assert blk["widen_width"] == 200, "宽度必须随块透传（下游复算/排障的唯一依据）"
+
+
+_WIDE = widen_by_width(_block()["games_per_stage_by_stage"], 200)
+
+
 @pytest.mark.parametrize(
     "over, frag",
     [
         ({"per_stage_quota": 12001}, "per_stage_quota"),
         ({"games_per_stage_by_stage": {2000: 31, 2001: 35, 2002: 32, 2003: 30}}, "同源"),
+        # ★ 加宽的两条反例：只改 games 不声明宽度 = 老口径的漂移；宽度与 games 不匹配 = 假声明。
+        #   「加宽」放行的前提是**可复算**，不是「谁都能把首批局数改大」。
+        ({"games_per_stage_by_stage": _WIDE, "widen_width": 0}, "同源"),
+        ({"games_per_stage_by_stage": _WIDE, "widen_width": 300}, "同源"),
+        ({"widen_width": -1}, "widen_width"),
+        ({"widen_width": True}, "widen_width"),
         ({"est_s_by_stage": {2000: 340}}, "缺关"),
         ({"games_per_stage_by_stage": {2000: 32}}, "缺关"),
         ({"stages": [2000, 2001, 2002]}, "多出关"),

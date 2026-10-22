@@ -491,6 +491,10 @@ def validate_volume_block_ext(block: object, *, require_runtime: bool = False) -
     同源 = 「块里的 `per_stage_quota` 与 `games_per_stage_by_stage` 必须能从 `target/stages/est`
     重新解出来」——两侧（hub 导出 / 节点补差）各自只信自己重算的那一份，杜绝「规则改了但块
     没跟上」的静默漂移。失败抛 `ValueError`（调用方转 `ProtocolError`，响亮失败）。
+
+    `widen_width`（可选，缺省 0 = 未加宽）：自主机把首批按本机 worker 数铺满后写在块里，
+    此时 `games_per_stage_by_stage` 必须等于 `widen_by_width(反解值, widen_width)`——
+    「加宽」是可复算的纯函数，同源约束照旧逐关生效。
     """
     if not isinstance(block, dict):
         raise ValueError(f"volume 必须是对象，收到 {type(block).__name__}")
@@ -570,6 +574,16 @@ def validate_volume_block_ext(block: object, *, require_runtime: bool = False) -
         int(block["target_transitions"]),
         ests_hi={s: est_hi(ests[s], factor=float(factor)) for s in stages},
     )
+    # ★ 2026-10-22（自主机首批铺满的**同源**面）：`remote/plan_run` 会用 `widen_by_width`
+    #   把首批局数按本机 worker 数加宽（用户口径「有几个 worker 铺多少局」）⇒ 块里的
+    #   `games_per_stage_by_stage` 从此**不再等于** est 反解值，而是它的确定性加宽。
+    #   宽度本身必须随块声明（`widen_width`），这里按声明值复算一遍、逐关逐字比对：
+    #   同源没被放松——「加宽」是可复算的纯函数，不是「谁都能把 games 改大」。
+    widen = block.get("widen_width", 0)
+    if isinstance(widen, bool) or not isinstance(widen, int) or widen < 0:
+        raise ValueError(f"volume.widen_width 必须是非负整数（0 = 未加宽），收到 {widen!r}")
+    if int(widen) > 0:
+        want_g = widen_by_width(want_g, int(widen))
     for stage in stages:
         if games[stage] != want_g[stage]:
             raise ValueError(
