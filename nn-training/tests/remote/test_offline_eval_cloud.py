@@ -551,13 +551,23 @@ def test_run_cloud_eval_skips_loudly_when_prerequisites_are_missing(
 
 
 def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`submit` 必须立刻返回：后台线程跑局，提交方（下一轮 rollout/PPO）不等它。"""
+    """`submit` 必须立刻返回：后台线程跑局，提交方（下一轮 rollout/PPO）不等它。
+
+    2026-10-22（flake 修）：第二条判据从「墙钟 < 1s」改成**状态判据**——"submit 返回时那一轮仍在飞、
+    后台任务一次都没跑完"。原因：那条路径的合法等待只有 `handoff_wait_sec=0.05s`，而并行门禁里
+    曾因**调度噪声**量到 1.30s（单跑 3/3 绿 0.2s）—— 墙钟在这个量级上测的是机器负载，不是契约。
+    墙钟只留一条远离危险分支（等满 5s 的 fake job）的挂起护栏。
+    """
     started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
 
     def slow(**job: object) -> dict:
         started.set()
-        release.wait(5)
+        try:
+            release.wait(5)
+        finally:
+            finished.set()  # 后台任务「跑完过」的唯一证据（与 submit 是否阻塞无关）
         return {"ran": True, "it": job.get("it")}
 
     monkeypatch.setattr(offline_eval, "run_cloud_eval", slow)
@@ -574,8 +584,14 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     runner.handoff_wait_sec = 0.05
     t1 = time.time()
     assert runner.submit(4) is False
-    # timing-ok: 上界兜底（handoff 已设 0.05s，1s 只挡挂起）
-    assert time.time() - t1 < 1.0
+    # ★ 权威判据是**状态**，不是延迟：返回时 it3 仍在飞（它要等满 release/5s 才结束），且后台
+    # 任务一次都没跑完 ⇒ submit 走的确实是「有界等一小会就跳过」那条路。
+    assert runner.inflight_it() == 3 and not finished.is_set(), (
+        f"submit 等到了在飞那一轮结束（{time.time() - t1:.2f}s）——那就变成串行 eval 了"
+    )
+    # 不拿它当延迟判据：并行门禁的调度噪声曾把这条 0.05s 的路径顶到 1.30s。
+    # timing-ok: 上界兜底——真会卡住的分支要等满 5s 的 fake job，3s 远离它（只挡挂起，不测延迟）。
+    assert time.time() - t1 < 3.0
     assert any("跳过本轮" in m for m in logs)
     release.set()
     assert runner.drain(timeout=5.0) is True
