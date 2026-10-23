@@ -1441,6 +1441,12 @@ export interface GodAIParams {
   defenseCellResolve: number
 
   /**
+   * A12 (2026-10-23): multi-sector crossfire escape (see god/crossfire.ts).
+   * 0 = OFF (byte-identical), 1 = on.
+   */
+  crossfireSectorMode: number
+
+  /**
    * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.
    * `emergencyBaseHpFrac` used to be dual-only (inside HUNT's nav-stuck escape),
    * so a bleeding eagle never pulled the player home unless it was already
