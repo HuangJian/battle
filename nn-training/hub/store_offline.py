@@ -361,6 +361,9 @@ class OfflineRoundsMixin:
         o_full: bytes = staged.get("opt.tar") or opt
         landed: dict = staged.get("landed") or {}
         note = str(staged.get("note") or "")
+        #: 这一轮回传的 opt **形态**（`plan/anchor-full-rounds` S4）：按内容判（不看名字）。
+        #: 读方靠它回答「这一轮发的是整份还是 delta」——省量只能从账本上量，不能靠推断。
+        opt_form = delta_files.form_of(opt)
         full_fp = hashlib.sha256(w_full).hexdigest()
         with self._lock:
             d = self.offline_run_dir(run_id)
@@ -461,6 +464,7 @@ class OfflineRoundsMixin:
                             # ★ 空串 = 整份到手；有值 = 没到手 + 原因（读方据此判断这一轮能不能直接用）
                             "land_note": str(staged.get("note") or ""),
                             "opt_bytes": len(opt),
+                            "opt_form": opt_form,
                             **(row if isinstance(row, dict) else {}),
                             # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
                             #   冒名顶替 hub 的认定），别顺手挪到上面去。
@@ -480,6 +484,7 @@ class OfflineRoundsMixin:
                     # hub 手上那份（**落地后的整份**）的地址：与 `weights_fp`（回传原件）分开记——
                     # 读方按"我能不能直接用它"选地址时看这一个。
                     "landed_fp": full_fp,
+                    "opt_form": opt_form,
                     **_artifact_identity(body, self.hold_meta),
                     "ts": self._now(),
                 }

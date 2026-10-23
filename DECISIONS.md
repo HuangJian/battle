@@ -8913,3 +8913,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   池外固定池下没有第二批局可比）；留下的是**选择噪声**（同一批 100 局上反复选 ckpt ⇒ winner's curse），
   靠 100 局（SE≈5pp）+ 配对比较 + 逐轮同语料来控。
 - **全文**（背景 / 备选与否决 / 落地清单 / 验收）→ `docs/nn/training-stack.md` §39
+
+## §2026-10-23-goalnn-anchor-full-rounds（2026-10-23，用户口径「首轮和 eval 轮发整份 weight 和 opt，其它轮发 delta」）
+
+- **背景**：云机腿每轮的 opt 一直是**整份**（~509 KB 线上），占整轮 637 KB 的 **79%**；weight 早就是
+  delta（127 KB）。opt 的 delta 容器（`BOD1`）早就存在（published 腿在用），离线段只是没有「什么时候
+  发整份」的判据。500 轮 / `eval_every=5` 的账：现状 311 MB，本形态 ~198 MB（−36%），磁盘反而
+  615→154 KB/非锚点轮。顺带发现一个漏传：补传体把 `perGame` 摘了，而它是云机逐局明细的**唯一**实时通道。
+- **决定**：形态在**写盘那一刻**定（`remote/round_forms.RoundForms`，L2），判据唯一 = 「首轮 ∪
+  `it % eval_every == 0`」（`deliver_wire.is_full_round`）。锚点轮：弹 `w_fmt`（worker 回整份）+ opt 落地成
+  整份；其余：`opt.tar` 就地写成 `BOD1` 容器。基准 = **盘上最近一份整份**（不是上一轮）。补传体
+  `wire_row(..., keep_per_game=True)`。
+- **否决的备选**：① **基准 = 上一轮回来的那份整份** —— hub 侧 sha 永远对不上（重打 tar 随 mtime 变），
+  第一轮 delta 之后整条链解不开；② **容器改名成 `opt.delta`** —— `opt.tar` 是 deliver 腿唯一的字节源，
+  改名 = 补传一个字节 opt 都不发；③ **在 `ArtifactStore` 里直接 import 落地器/packer** —— L0 向上边；
+  ④ **`eval_every=1`（`CourseSpec` 缺省）也装** —— 每轮都是锚点，权重退回整份 **净亏 ~267 KB/轮**；
+  ⑤ **接上 `deliver_parts.full_parts_for`**（投递侧按档位展开）—— 它会把非锚点轮重新展开成整份，
+  本决策的省量当场归零且无人察觉（今天它没有生产调用点，两个 docstring 已钉死）。
+- **违反后果**：少写整份 ⇒ eval 轮不能单独装载（`resume_anchor` 只认整份，门判据与控制台读数都指向
+  那一轮），链一断就是整段；用「重建出来的字节」当基准 ⇒ hub 拒绝落地，整段只能靠 sweep 人工补。
+- **代价（诚实账）**：非锚点轮解回要多走一步（基准在锚点，不在上一轮；实测 152→154 KB/轮，可忽略）；
+  写盘时多一次 pack（两个 tar 的 `torch.load`，~15ms/轮，只在 4/5 的轮）；非锚点轮 hub 落地出的整份
+  带 ≤4 轮 f16 残差（~1e-4）。**本轮没做**：云机真跑验收（30 轮 + hub 可装载 + ≤70% 体量）——本机
+  没有云机腿，上线后首个课重测。
+- **落点**：`nn-training/remote/round_forms.py`（新，L2）· `remote/deliver_wire.py`（`is_full_round` /
+  `note_opt_wire`）· `remote/artifacts.py`（`after_write` 注入点）· `remote/plan_handoff.py`（装配）·
+  `remote/plan_run.py`（按轮设形态位）· `remote/offline_deliver.py`（S6 + 形态读数）· `remote/delta_files.py`
+  （`form_of`）· `hub/store_offline.py`（账本 `opt_form`）· `tests/helpers/remote_dag.py`（层号）·
+  `tests/remote/test_round_forms.py` · `tests/remote/test_offline_deliver.py` · `tests/hub/test_offline_backfeed.py` ·
+  `plan/anchor-full-rounds.plan.md` · `docs/nn/remote-transport.md §115`。
+- **验收**：`tests/remote/test_round_forms.py` 16 passed；`tests/hub/test_offline_backfeed.py`、
+  `tests/remote/test_offline_deliver.py` 子集、`tests/test_remote_dag.py` 全绿；`bun run check` 绿。

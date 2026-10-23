@@ -50,6 +50,11 @@ def full_parts_for(
 ) -> tuple[bytes, bytes, str]:
     """这一轮要发的 `(权重字节, opt字节, wire_form)`——**档位决定发整份还是原件**。
 
+    ⚠ **今天没有任何生产调用点**（`offline_deliver._post_artifact` 直接发盘上字节，不看档位），
+    会调它的只有 `tests/remote/test_deliver_mode.py`。**别把它接上**：2026-10-23 起形态在
+    **写盘时**就已定好（`plan/anchor-full-rounds`：非锚点轮的 `opt.tar` 本来就是容器），而
+    `mode == "full"` 会把它们重新展开成整份 ⇒ 那个 plan 的省量当场归零，且无人察觉。
+
     * `mode != "full"` ⇒ **不展开**：直接发产物目录里的原件（delta 容器）。这一档的存在
       意义就是把体积压到最小，展开成整份再发是自相矛盾；
     * `mode == "full"` ⇒ 用注入进来的落地器展开（调用方传 `plan_run` 装载那条路同一个函数）；

@@ -1900,11 +1900,13 @@ def test_projected_eval_rows_still_dedupe_on_the_hub(tmp_path: Path) -> None:
     assert len(ledger.read_text(encoding="utf-8").splitlines()) == 3
 
 
-def test_per_game_detail_does_not_ride_the_realtime_body(tmp_path: Path) -> None:
-    """Q2：`perGame`/`perGameSecs` 只随抽屉/离线包到达；**本地账本与聚合列照旧**。
+def test_per_game_detail_rides_the_backfeed_body(tmp_path: Path) -> None:
+    """S6（`plan/anchor-full-rounds`）：**补传体带逐局明细**，`pergame_deferred` 恒 0。
 
-    代价（明写在 plan §7.1 Q2 的答案里）：包到之前该轮的逐局弹窗是空的——所以这里还要
-    钉住「读数面知道自己摘了几局」（`status()['pergame_deferred']`），否则人只能看见空弹窗。
+    为什么反转 Q2：这条腿是云机逐局明细的**唯一**实时通道（权重体送出过的轮次被记进
+    `_metrics_sent`，不会再走统计批）⇒ 摘掉就是永久丢（现场 y31-null 28 轮全空）。
+    代价 4.3 KB/轮。Q2 的摘键仍留在 `wire_row` 的默认值上（在线实时体若恢复，那条面照旧
+    只带聚合列，见 `tests/remote/test_round_forms.py`）。
     """
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     per_game = [{"stage": 1, "seed": i, "win": True} for i in range(34)]
@@ -1915,10 +1917,33 @@ def test_per_game_detail_does_not_ride_the_realtime_body(tmp_path: Path) -> None
 
     assert d.sync() == 1
     (body,) = op.bodies
-    assert not ({"perGame", "perGameSecs"} & set(body["row"])), "实时体不许带逐局明细"
+    assert body["row"]["perGame"] == per_game, "补传体必须带逐局明细（否则永久丢）"
+    assert len(body["row"]["perGameSecs"]) == 34, "逐局秒数一起走（只用来诊断，不上聚合列）"
     assert body["row"]["agg"] == {"kl": 0.01}, "聚合列照发（控制台指标表靠它）"
-    assert (root / "metrics.jsonl").read_bytes() == before, "本地账本不许被摘"
-    assert d.status()["pergame_deferred"] == 34
+    assert (root / "metrics.jsonl").read_bytes() == before, "本地账本一字未动"
+    assert d.status()["pergame_deferred"] == 0, "补传路径没摘任何逐局明细（读数不许说谎）"
+
+
+def test_status_reports_the_opt_form_and_the_measured_savings(tmp_path: Path) -> None:
+    """S4（`plan/anchor-full-rounds`）：形态读数只来自**实际发出去的字节**。
+
+    整份那一趟定义了“本来要多少”（`opt_tar_b64` 的长度），delta 那一趟记省量；两趟都是
+    真 POST 的体，所以读数可复算。"""
+    import random
+
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    rnd = random.Random(7)  # 确定性且不可压：省量不能靠 gzip 碰巧压得下来
+    (root / "it-001" / "opt.tar").write_bytes(rnd.randbytes(200_000))
+    (root / "it-002" / "opt.tar").write_bytes(b"BOD1" + rnd.randbytes(40_000))
+    op = _BodyOpener()
+    d = _deliverer("http://hub.invalid", root, opener=op)
+
+    assert d.sync() == 2
+    st = d.status()
+    full_wire = len(op.bodies[0]["opt_tar_b64"])
+    delta_wire = len(op.bodies[1]["opt_tar_b64"])
+    assert st["opt_form"] == "delta"
+    assert st["opt_saved_bytes"] == max(0, full_wire - delta_wire) > 100_000
 
 
 def test_realtime_sends_only_anchor_rounds_and_pending_keeps_every_round(

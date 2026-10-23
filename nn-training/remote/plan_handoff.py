@@ -50,6 +50,10 @@ import common.scratch as scratch
 import remote.delta_files as delta_files
 import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
+
+#: 轮形态（`plan/anchor-full-rounds`）：判据 + 落盘后的就地改写（L2）。本模块是唯一装配点，
+#: `course.eval_every` 就在手边 —— 别的层（`artifacts` 是 L0）拿不到也不该自己判。
+import remote.round_forms as round_forms
 import remote.weights_standard as weights_standard
 from common.logutil import tag_logger
 from common.platform_utils import call_bounded, cpu_worker_slots
@@ -218,6 +222,9 @@ class RunContext:
         #: 0 = 按本机核数自动。
         rollout_workers: int = 0,
         ts_tree_dir: Path | None = None,
+        #: 轮形态（`plan/anchor-full-rounds`）：None = 不分形（= 旧的「opt 每轮整份」）。
+        #: 驱动侧据此按轮设 `w_fmt`（锚点轮要整份权重）；落盘侧由 `store.after_write` 动手。
+        round_forms: Any = None,
         log: Callable[[str], None] = _log_default,
     ) -> None:
         self.plan = plan
@@ -242,6 +249,7 @@ class RunContext:
         self.eval_slots = int(eval_slots or 0)
         self.eval_game_timeout_sec = float(eval_game_timeout_sec or 0.0)
         self.rollout_workers = int(rollout_workers or 0)
+        self.round_forms = round_forms
         #: TS 运行时树的**实际根**（云机评估的 `cwd`：`tools/sim/export-eval-game.ts` 在那儿）。
         self.ts_tree_dir = Path(ts_tree_dir) if ts_tree_dir is not None else None
         #: 云机评估的后台执行者 / 口径（`_setup_cloud_eval` 装配；None = 不评估）。
@@ -372,7 +380,17 @@ def open_run_context(
     backup = resolve_backup_root(
         backup_root, run_id=str(manifest.get("runId", "")), work_dir=work_dir
     )
-    store = ArtifactStore(root, run_id=str(manifest.get("runId", "")), log=log)
+    # 轮形态（2026-10-23，`plan/anchor-full-rounds` S1/S2）：**开段时算一次**
+    # （`first_it` = 产物里最小的一轮；`eval_every` = 课程的计划判据）。
+    # `None` = 不装钩子 —— 课程缺失 / `eval_every<2` 时**退回今天的行为**（opt 每轮整份），
+    # 并在 `for_store` 里响亮记一行；绝不把 `eval_every` 的缺省（1）当成“每轮都整份”去装。
+    forms = round_forms.RoundForms.for_store(root, plan=plan, course=course, log=log)
+    store = ArtifactStore(
+        root,
+        run_id=str(manifest.get("runId", "")),
+        log=log,
+        after_write=forms.after_write if forms is not None else None,
+    )
     state = store.start(plan, manifest, plan_sha256=plan_sha256)
     ctx = RunContext(
         plan=plan,
@@ -404,6 +422,7 @@ def open_run_context(
             if int(rollout_workers or 0) > 0
             else cpu_worker_slots()
         ),
+        round_forms=forms,
         ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),
         deliverer=(
             deliverer

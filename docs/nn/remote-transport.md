@@ -6,6 +6,49 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §115 轮形态在**写盘时**定：锚点轮（首轮 ∪ eval 轮）两件整份、其余 delta（2026-10-23 · `plan/anchor-full-rounds.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-anchor-full-rounds）
+
+用户口径原话：「首轮和 eval 轮发整份 weight 和 opt，其它轮发 delta」。落地把它从**投递侧的档位
+判断**搬到了**写盘时的轮类型判断**（`remote/round_forms.py`，L2）：
+
+```
+plan_run._run_iteration        → forms.prepare_manifest(m, it)   锚点：弹 w_fmt（worker 回整份）
+ArtifactStore.checkpoint(hook) → forms.after_write(it, it_dir)    非锚点：opt.tar 就地写成 BOD1 容器
+```
+
+四条教训（写下来是因为每一条都足以静默地把这个 plan 变成零收益）：
+
+1. **基准只能是「盘上最近一份整份」**。hub 的落地器按 sha256 逐字节找基准（`opt_standard._base_tar_bytes`），
+   而重打出来的 tar 字节随 mtime 变（`opt_delta.rebuilt_opt_tar` 自己写着）⇒ 拿「上一轮重建出来的那份」
+   当基准，`base_sha` 在 hub 侧**永远对不上**，第一轮 delta 之后整条链在 hub 上都解不开。双方逐字节
+   共有的整份只有**锚点轮与回落整份的那几轮**。
+2. **容器写回 `opt.tar`，不改名成 `opt.delta`**。`opt.tar` 同时是 deliver 腿发什么（`_post_artifact`
+   只读 `opt_path`）、hub 侧 duplicate/conflict 判据、下一轮装载的输入；改名 = 补传一个字节 opt 都
+   不发（`opt.tar` 不存在就发空）。这条链一直的口径是**内容才是权威**（`delta_files.head4/named_for`）。
+3. **形态改写要注入**（`ArtifactStore(after_write=…)`）：`remote.artifacts` 是 L0，`round_forms` L2
+   且吃 torch ⇒ 自己 import 就是向上边（`tests/test_remote_dag.py` 连延迟 import 也算）。
+4. **`eval_every < 2` 不装**（缺省就是 1）：装了等于「每轮都是锚点」—— opt 与今天一样，权重从
+   delta（127 KB）退回整份（387 KB），**净亏 ~267 KB/轮**。绝不把缺省补成 5。
+
+**读数**：`status().opt_form/opt_saved_bytes`（从**实际发出去的** `opt_tar_b64` 长度量，参照=最近一份
+整份）、hub 两处 `offline_artifact` 行都带 `opt_form`（`delta_files.form_of`）。**一个字节都没省时
+读数必须是 0**（没见过整份就不计），否则「省了多少」变成假读数。
+
+**顺带修的漏传（S6）**：补传体不再摘 `perGame`/`perGameSecs`。这条腿是云机逐局明细的**唯一**实时
+通道（权重体送出过的轮次被记进 `_metrics_sent`，不会再走统计批）⇒ 摘掉就是永久丢（现场 y31-null
+28 轮全走权重体、0 条 `offline_metrics`、控制台耗时/击杀/承伤/残血/道具全空）。代价 4.3 KB/轮。
+
+**别接的线**：`deliver_parts.full_parts_for` / `OfflineDeliverer._full_parts_for` **今天没有生产调用点**
+（只有 `tests/remote/test_deliver_mode.py` 在调）。接上它 = `full` 档把非锚点轮重新展开成整份 ⇒ 本
+计划的省量归零且无人察觉；两个 docstring 里都写了这句。
+
+**体量（实测口径）**：500 轮 / `eval_every=5` 全整份 opt ≈ 311 MB；本形态 ≈ **198 MB**（−36%），
+比「连 eval 轮也 delta」少省 ~60 MB —— 那 60 MB 买的是**eval 轮可单独装载**（`resume_anchor` 只认
+整份，门判据/控制台读数都指向那一轮）。磁盘反而变少：非锚点 opt 615 KB → ~154 KB。
+
+用例：`tests/remote/test_round_forms.py`（判据/形态/单独装载/缺基准/结构变化/幂等/读数/`run_plan_job`
+接线面）、`tests/remote/test_offline_deliver.py`（S6 + S4）、`tests/hub/test_offline_backfeed.py`（账本 `opt_form`）。
+
 ## §114 notebook「中途取回」cell 也接上整份：`package_pending_full` + 落地失败连续 3 轮停试（2026-10-22 晚 · §113 的 Q5 收尾 · 决策 `DECISIONS.md` §2026-10-22-goalnn-notebook-pack-full-wiring）
 
 §113 把段末自动包修好了，但**人点的那一格**（`_ob.package_pending(CFG, _log)`）还是打差分包。

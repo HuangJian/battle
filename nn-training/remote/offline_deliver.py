@@ -74,7 +74,7 @@ from common.protocol import (
     OFFLINE_RESULT_PATH,
     sanitize_run_id,
 )
-from remote import deliver_mode, deliver_parts
+from remote import deliver_mode, deliver_parts, deliver_wire
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes, weights_fps
 from remote.backup_drawer import BackupDrawer
 
@@ -328,6 +328,10 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         self._metrics_sent: set[int] = set()
         #: 统计批的读数 `(本批轮数, 本批字节)`（S7 观测用）。
         self._metrics_stat: tuple[int, int] = (0, 0)
+        # ★ 2026-10-23（`plan/anchor-full-rounds` S4）：**轮形态**读数（`(形态, 累计省字节,
+        #   整份参照字节)`）。累加与判据在 `deliver_wire.note_opt_wire`（L0 纯函数，单元可测）；
+        #   本类是唯一持有它的人，`status()` 原样转出。
+        self._opt_wire: tuple[str, int, int] = deliver_wire.OPT_WIRE_ZERO
         #: `delivered.json` 读出来了吗（存在 ∧ 解析得开 ∧ `run_id` 是本次的）。
         #: 它是**抽屉删除**的硬门槛（D3/DoD-3c）：账本不可读 ⇒ 本会话一份送达证据都没有，
         #: 而抽屉是跨会话的唯一第二副本 ⇒ 一个字节都不许删。
@@ -1185,7 +1189,12 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
 
     def _full_parts_for(self, it: int, *, mode: str) -> tuple[bytes, bytes, str]:
         """这一轮要发的 `(权重字节, opt字节, wire_form)`——档位决定发整份还是原件（装配见
-        `deliver_parts.full_parts_for`；腿本体只留「怎么发」）。"""
+        `deliver_parts.full_parts_for`；腿本体只留「怎么发」）。
+
+        ⚠ **没人调它**（生产路径走 `_post_artifact` 的「盘上是什么发什么」）。留着是为了
+        `plan/offline-deliver-full-and-gaps` 的档位语义可读；**别接上**——理由在
+        `deliver_parts.full_parts_for` 的 docstring（会把 `plan/anchor-full-rounds` 的
+        写盘形态重新展开，省量归零）。"""
         from remote import opt_standard, weights_standard  # L1：L2 才持有这条边；full 档才付
 
         return deliver_parts.full_parts_for(
@@ -1235,14 +1244,15 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         # 一旦权重到岸（`_delivered`），同一轮的重投（补评估读数）仍然带全量——两份职责分开。
         self._attempt_degraded = it in self._degraded and it not in self._delivered
         eval_rows = [] if self._attempt_degraded else self._eval_rows_for(it)
-        # Q2：账本行里的逐局明细不上实时体（`remote.deliver_wire.wire_row` 浅拷摘键）。
-        row, self._last_pergame_games = wire_row(self._row_for(it, wfp))
-        if self._last_pergame_games:
-            self._throttled_log(
-                "pergame",
-                f"补传 it{it}: 逐局明细 {self._last_pergame_games} 局不入实时体"
-                "（随抽屉/离线包到达；实时体只带聚合列）",
-            )
+        # ★ 2026-10-23（`plan/anchor-full-rounds` S6）：**补传体不摘逐局明细**。
+        #   这条腿是云机逐局明细的**唯一**实时通道：权重体送出过的轮次会被记进 `_metrics_sent`
+        #   （下面的销账分支），于是它们**不会**再走统计批 ⇒ 这里摘掉就是永久丢（现场 y31-null
+        #   28 轮全走权重体、0 条 `offline_metrics`，控制台的耗时/击杀/承伤/残血/道具全空）。
+        #   体积代价 4.3 KB/轮（实测 94 局 23.3KB 原 → 4.3KB 线上）。Q2 的摘键仍留在
+        #   `wire_row` 的默认值上（在线实时体若恢复，那条面照旧只带聚合列）。
+        row, self._last_pergame_games = wire_row(self._row_for(it, wfp), keep_per_game=True)
+        # ★ 形态读数（S4）：这一轮盘上 opt 是整份还是容器（记账在体建好之后，见下面 `note_opt_wire`）。
+        opt_form = delta_files.form_of(opt)
         body = deliver_parts.build_artifact_body(
             run_id=self.run_id,
             it=int(it),
@@ -1256,6 +1266,9 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             hub_lease=self.hub_lease,
             worker_name=self.worker_name,
             now=self._now(),
+        )
+        self._opt_wire = deliver_wire.note_opt_wire(
+            self._opt_wire, opt_form, len(str(body.get("opt_tar_b64") or ""))
         )
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
@@ -1452,6 +1465,10 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             "pending_anchors": len(self.pending_anchors()),
             #: 上一轮实时体里被摘掉的逐局明细局数（Q2）：>0 = 该轮控制台逐局弹窗等包。
             "pergame_deferred": int(self._last_pergame_games),
+            #: 轮形态（`plan/anchor-full-rounds` S4）：上一次发出去的 opt 是什么形态 / 本会话
+            #: 累计省下的线上字节（参照 = 最近一份整份的 `opt_tar_b64` 长度）。
+            "opt_form": self._opt_wire[0],
+            "opt_saved_bytes": int(self._opt_wire[1]),
             # ★ 2026-10-23（S7）：档位机读数。`mode` = 这一拍的档（`adaptive=False` ⇒ 恒
             # `anchors`）；`avail_bps` = 实测吞吐（`None` = 还没成功投过）；`backlog` =
             # 还没发权重的轮数；`eta` = 按当前档把 backlog 发完还要多久（`-`/`>1h`）。

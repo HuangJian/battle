@@ -236,6 +236,11 @@ LAYERS: dict[str, int] = {
     # （叶子）+ `remote.opt_delta`(L0) ⇒ **L1**；读者是 `remote.plan_run`(L6/`_run_iteration`)、
     # `remote.plan_handoff`(L5/起点播种) 与 `remote.train_core`(restore 段) —— 边一律严格向下。
     "remote.opt_standard": 1,
+    # 轮形态（2026-10-23，`plan/anchor-full-rounds`）：判据（`deliver_wire` L0）+ 两个落地器（L1）
+    # + `opt_delta`/`delta_files`(L0) ⇒ 拓扑秩 **L2**；torch 惰性。装配点 `plan_handoff`(L5) 与
+    # 驱动侧 `plan_run`(L6) 都在它上面，边严格向下。`artifacts`(L0) **不** import 它 ——
+    # 那里收的是注入进来的 `after_write`。
+    "remote.round_forms": 2,
     "remote.hub_client": 1,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；

@@ -280,6 +280,11 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
                 "——按计划走（采集量由计划反解）"
             )
         m["per_stage_quota"] = want
+    # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
+    # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
+    # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
+    if ctx.round_forms is not None:
+        ctx.round_forms.prepare_manifest(m, it)
     m["job_id"] = make_job_id(m)
     m = normalize_manifest(m)
     # ---- 本轮 payload：只有 init_weights.json（shard 由节点现场产，与 kind=iter 一致）----

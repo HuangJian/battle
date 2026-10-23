@@ -1,10 +1,12 @@
 """remote/deliver_wire.py — 补传**实时体**的投影（2026-10-22，`plan/offline-deliver-stall` §9.6）。
 
-三件事，全部是无状态纯函数（一次 `stat` + 一次读文件是唯一 IO）：
+五件事，全部是无状态纯函数（一次 `stat` + 一次读文件是唯一 IO）：
 
   * `EVAL_ROW_WIRE_KEYS` / `slim_eval_rows` —— 逐局评估行的**白名单投影**（评审 P0-5）；
-  * `wire_row` —— 账本行摘掉 `perGame`/`perGameSecs`（Q2 的答案）；
-  * `read_eval_iters` —— **锚点判据**：`eval_log.jsonl` 里有读数的那几轮（`pending_anchors` 的输入）。
+  * `wire_row` —— 账本行摘掉 `perGame`/`perGameSecs`（Q2 的答案；**补传体不摘**，见 `keep_per_game`）；
+  * `pick_anchors` / `read_eval_iters` —— **锚点判据**：`eval_log.jsonl` 里有读数的那几轮（`pending_anchors` 的输入）；
+  * `is_full_round` —— **写盘侧**的锚点判据（`plan/anchor-full-rounds` §3）：首轮 ∪ `it % eval_every == 0`；
+  * `note_opt_wire` —— 补传腿的**形态读数**累计（S4：`opt_form` / 实际省下的线上字节）。
 
 为什么单独成文件（不是「为拆而拆」）：`tests/test_python_loc_budget.py` 把
 `remote/offline_deliver.py` 顶在 1000 行（2026-10-21 刚从 1074 搬到 965，本轮 +100 又超），
@@ -85,16 +87,66 @@ def slim_eval_rows(rows: list[dict]) -> tuple[list[dict], int, int]:
     return out, before, after
 
 
-def wire_row(row: dict | None) -> tuple[dict | None, int]:
+def wire_row(row: dict | None, *, keep_per_game: bool = False) -> tuple[dict | None, int]:
     """实时体里的账本行：摘掉 `perGame`/`perGameSecs`，返回 `(行, 被摘掉的局数)`。
 
     浅拷（不就地 `pop`）：产物目录里的 `metrics.jsonl` 才是交付面，它一个字节也不能变。
+
+    `keep_per_game=True` = **补传体**（`/offline/artifact`）的调用面（`plan/anchor-full-rounds` S6）：
+    那条腿是云机逐局明细的**唯一**实时通道 —— 权重体送出过的轮次会被记进 `_metrics_sent`
+    （`offline_deliver` 的 `_sync`），于是它们**不会**再走统计批，摘掉这一份就是永久丢。
+    默认 False = 旧行为（在线实时体若将来恢复，仍按 Q2 摘）。
     """
+    if keep_per_game:
+        return row, 0
     if not isinstance(row, dict) or not any(k in row for k in PER_GAME_WIRE_KEYS):
         return row, 0
     out = {k: v for k, v in row.items() if k not in PER_GAME_WIRE_KEYS}
     pg = row.get("perGame")
     return out, (len(pg) if isinstance(pg, list) else 0)
+
+
+#: 形态计数的初始值：`(上一次发出去的形态, 本会话累计省下的线上字节, 最近一份整份的线上字节)`。
+#: 三个数一起走，因为第三个是前两个的参照值 —— 分开存就会出现「省字节用了一个参照、读数
+#: 用了另一个」的分叉可能。
+OPT_WIRE_ZERO: tuple[str, int, int] = ("none", 0, 0)
+
+
+def note_opt_wire(
+    state: tuple[str, int, int], form: str, wire_bytes: int
+) -> tuple[str, int, int]:
+    """一次投递后的形态累计（`plan/anchor-full-rounds` S4）——纯函数，单元可测。
+
+    `wire_bytes` = 这一轮 opt **实际发出去的线上字节**（`len(body["opt_tar_b64"])`，不是估算）：
+    发了多少只有一个权威读数，就是这次 POST 的体。
+
+    * `full` ⇒ 更新参照值（整份就是那个“本来要花多少”的尺子），本轮省零；
+    * `delta` ⇒ 省 `参照 − 本轮`；**参照没见过**（本会话没发过整份）⇒ 不计（宁少不多：一个
+      编出来的基数会把“省了多少”变成假读数）。
+    """
+    before_form, saved, full = state
+    if not wire_bytes:
+        return str(form or before_form), saved, full
+    if form == "full":
+        return "full", saved, max(int(full), int(wire_bytes))
+    if form == "delta" and full:
+        return "delta", saved + max(0, int(full) - int(wire_bytes)), full
+    return str(form or before_form), saved, full
+
+
+def is_full_round(it: int, *, first_it: int, eval_every: int) -> bool:
+    """这一轮**写盘时**要不要整份（`plan/anchor-full-rounds` §3，单一判据）。
+
+    锚点轮 = 首轮（建基准那一轮）∪ `it % eval_every == 0`（计划判据）。与 `pick_anchors` 的
+    `every` 兜底分支**逐字同一条**，但**不是**它的读数分支：写盘那一刻 `eval_log.jsonl` 里
+    还没有这一轮的读数（评估在这轮落盘之后才跑）。两处不一致时的方向是安全的 ——
+    **多写整份无害，少写整份才会毁掉「eval 轮可单独装载」**。
+
+    `eval_every <= 0` ⇒ 只有首轮是整份（调用方应在 `eval_every` 缺失时**根本不装**这个判据，
+    否则退化成「首轮之后全是 delta、一个落点都没有」）。
+    """
+    it, first, step = int(it), int(first_it), int(eval_every)
+    return it == first or (step > 0 and it % step == 0)
 
 
 def pick_anchors(

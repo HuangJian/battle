@@ -273,10 +273,17 @@ class ArtifactStore:
         *,
         run_id: str,
         log=lambda msg: None,
+        after_write: Callable[[int, Path], None] | None = None,
     ) -> None:
         self.root = Path(root)
         self.run_id = str(run_id)
         self.log = log
+        #: 落盘后、算指纹前的**形态钩子**（`plan/anchor-full-rounds` S1）：轮目录已写完两件，
+        #: 由它就地决定「这一轮留整份还是 delta」（实现住 `remote/round_forms`，L2）。
+        #: **为什么是注入而不是自己 import**：本模块是 L0，落地器/packer 都是 L0+ 且吃 numpy/torch
+        #: ⇒ 同层边当场撞 `tests/test_remote_dag.py`（延迟 import 也算）。
+        #: 缺省 `None` = 今天的行为（写什么就是什么），历史调用点零改动。
+        self.after_write = after_write
         self.rows: list[dict] = []
 
     # ---- 开段 / 续跑 ----
@@ -402,11 +409,26 @@ class ArtifactStore:
         atomic_write_bytes(self.weights_path(it), weights_json)
         if opt_tar:
             atomic_write_bytes(self.opt_path(it), opt_tar)
+        # 形态钩子：写完之后、**算指纹之前**（账本记的必须是最终字节，否则续跑/去重对不上）。
+        # 失败只记一行：形态改不动是「这一轮大一点/不独立」，不是「这一轮没写」。
+        if self.after_write is not None and (weights_json or opt_tar):
+            try:
+                self.after_write(int(it), d)
+            except Exception as e:
+                self.log(
+                    f"[artifacts] it{int(it)} 形态改写失败（保留原字节）：{type(e).__name__}: {e}"
+                )
         wfp = sha256_file(self.weights_path(it))
+        opt_size = len(opt_tar)
+        if self.after_write is not None and opt_tar:
+            try:
+                opt_size = self.opt_path(it).stat().st_size  # 钩子可能把它换成容器
+            except OSError:
+                opt_size = len(opt_tar)
         entry = {
             "it": int(it),
             "weights_fp": wfp,
-            "opt_bytes": len(opt_tar),
+            "opt_bytes": opt_size,
             "ts": time.time(),
             **(row or {}),
         }

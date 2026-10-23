@@ -120,6 +120,11 @@ ALLOWED_IMPORTS = {
     # `remote.weights_standard` 是 **L1**（只依赖 `remote.weights_delta`(L0) + `remote.delta_files`(L0)
     # + `common.*` 叶子）⇒ 本模块站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
     "remote.weights_standard",
+    # 2026-10-23（`plan/anchor-full-rounds` S1/S2）：交接面是**轮形态的唯一点配点**——
+    # `course.eval_every` 就在手边（`artifacts`(L0) 拿不到也不该自己判），`ArtifactStore` 的
+    # `after_write` 注入与 `ctx.round_forms` 都从这里发出。`remote.round_forms` 是 **L2**
+    # （判据 L0 + 两个落地器 L1）⇒ 本模块站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
+    "remote.round_forms",
     "remote.offline_deliver",
     "remote.offline_eval",
     "worker.plan",

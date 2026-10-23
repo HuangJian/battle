@@ -30,6 +30,7 @@ __all__ = [
     "container_file",
     "delta_name",
     "find_existing",
+    "form_of",
     "glob_sorted",
     "head4",
     "named_for",
@@ -71,6 +72,19 @@ def named_for(standard_name: str, raw: bytes) -> str:
     内容仍然才是权威（读侧两种名字都认，见 `variants`/`find_existing`）。
     """
     return delta_name(standard_name) if raw[:4] in DELTA_MAGICS else standard_name
+
+
+def form_of(raw: bytes, *, empty: str = "none") -> str:
+    """这份**字节**的形态：`"delta"` / `"full"` / `empty`（缺省 `"none"`）。
+
+    与 `named_for` 同一判据（头 4 字节），只是返回一个词而不是文件名——读数面要能说清
+    这一轮发的是什么形态（`OfflineDeliverer.status()['opt_form']` / hub 账本的 `opt_form`）。
+    为什么住在这：2026-10-23 起 `it-N/opt.tar` 里装的可能就是容器
+    （`plan/anchor-full-rounds`），而「按内容说形态」这件事（以及它的魔数登记）已经在本模块。
+    """
+    if not raw:
+        return empty
+    return "delta" if raw[:4] in DELTA_MAGICS else "full"
 
 
 def find_existing(root: str | Path, standard_name: str) -> Path | None:

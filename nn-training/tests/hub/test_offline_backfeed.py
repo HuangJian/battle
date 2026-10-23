@@ -489,6 +489,29 @@ def _rows_of(tmp_path: Path, run_id: str) -> tuple[dict, dict]:
     )
 
 
+def test_artifact_rows_carry_the_opt_form_in_both_places(tmp_path: Path) -> None:
+    """S4（`plan/anchor-full-rounds`）：账本行说清这一轮 opt 是**整份还是容器**（两处都带）。
+
+    为什么必须落账：省量只能从账本上量（`full` 与 `delta` 的字节量差一个量级），而“这轮是
+    哪种形态”只看回复的字节就能答——却没人记。判据按内容（魔数），不看名字。
+    """
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, _hub, srv = _boot(tmp_path)
+    try:
+        for it, opt, want in (
+            (5, b"", "none"),  # 没带 opt ⇒ 不算任何形态（不写空串“full”）
+            (6, b"opt-body", "full"),
+            (7, b"BOD1" + b"\0" * 32, "delta"),
+        ):
+            st, doc = _post(base, OFFLINE_ARTIFACT_PATH, _round_body(it, W1, run_id="seg-f", opt=opt))
+            assert st == 200 and doc.get("status") == "accepted", doc
+            mirror, ledger = _rows_of(tmp_path, "seg-f")
+            assert mirror["opt_form"] == want, (it, mirror)
+            assert ledger["opt_form"] == want, (it, ledger)
+    finally:
+        srv.shutdown()
+
+
 def test_artifact_rows_carry_the_readable_name_in_both_places(tmp_path: Path) -> None:
     """`worker_name` 逐字落**两处**；没有 hold 时 `worker` 键**整个缺席**（不是空串 —— 见下条）。"""
     (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
