@@ -1362,16 +1362,23 @@ def verify_and_land(
 
     校验：
       1. init_weights_fp == 当前 args.out 指纹（fencing：云从 hub 打包的 init 起步）；
-      2. data_fp == 本地重算（对本轮 shard 集重算比对——防云训练了别的语料）；
+      2. data_fp == **发布快照**（`manifest.data_fp`，即打进 payload 的那份集合）；
       3. commit 一致（result.commit_echo == manifest.commit）。
     任一不等 → 响亮拒绝（抛 HubClientError），不落盘。
     返回落盘 weights 的指纹（供 wver 下游直接使用）。
 
-    kind="iter"（M3）：本轮 shard 由云节点现产，hub 侧**无本地副本可重算**——data_fp
-    改比 manifest 的**声明集**值（hub 发布时算的），而「实产集 == 声明集」由节点侧
-    在产完后用同一函数校验（不通过就在云上响亮失败，job 不会回传成功结果）。
-    所以这里的第 2 项从「本地重算」变成「两边都是声明集」：节点能回传成功结果本身就
-    蕴含了实产集相符（协议层不可绕）；§5.5① 的逐位对拍是离线验收，不是这条链的守卫。
+    ★ 2026-10-23（y32 事故，`reports/y32-ppo-job-vs-iter-20261023.md`）：第 2 项**全 kind
+    都只认声明集**，不再对 `it{it}` 活目录重算。原实现对本地轮重算活目录，而慢节点的
+    **计划局** shard 会在 job 在飞期间才落进来（轮次收官时 dispatch 不等在飞线程）⇒
+    集合漂 ⇒ 一份完全正确的回传被判死 ⇒ 整遍 PPO 白烧。实测 22 job / 10 轮（~55% GPU）。
+    这么改不丢防线：worker 的 `result["data_fp"]` 逐字抄 `manifest["data_fp"]`
+    （`remote/train_core.py:828`）⇒ 两侧恒等，「本地重算」从来只是「目录变了没有」的
+    自检，对云端行为零判别力。而 payload 是快照、训练也吃快照 ⇒ 权威只能是声明集
+    （与 `kind="iter"` 同一条口径）。活目录的重算降级为**只报不拒**的供给诊断。
+
+    kind="iter"（M3）：本轮 shard 由云节点现产，hub 侧**无本地副本可重算**——「实产集 ==
+    声明集」由节点侧在产完后用同一函数校验（不通过就在云上响亮失败，job 不会回传成功
+    结果），§5.5① 的逐位对拍是离线验收，不是这条链的守卫。
     """
     # R3/M4 / R1/M3：delta 重建（吃 numpy/torch）只在**落位时**需要 ⇒ 局部 import（理由见模块头）。
     import remote.opt_delta as opt_delta
@@ -1380,27 +1387,36 @@ def verify_and_land(
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
         raise TripleCheckError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
-    if str(m.get("kind", "ppo") or "ppo") == "iter":
-        local_fp = str(m["data_fp"])
-    else:
-        # D14：与发布端同一条血缘过滤（打包集 == 云端接受集 == 这里重算的集合）。
-        local_fp = data_fp(
-            iter_shard_dirs(
-                traj_dir,
-                it,
-                log=log,
-                course_fp=str(m.get("course_fp") or ""),
-                corpus_fp=str(m.get("corpus_fp") or ""),
-                # 与发布端（`trainer/loop_steps`）同一条过滤：本地重算的集合必须恒等于
-                # 打进 payload 的集合（P3.5），否则三重校验误拒一份正常 job。
-                state_init=state_init,
-            )
-        )
-    if result["data_fp"] != local_fp:
+    # ★ 第 2 项：**只认发布快照**（理由见 docstring ★ 2026-10-23）。活目录不参与判定。
+    declared_fp = str(m["data_fp"])
+    if result["data_fp"] != declared_fp:
         raise TripleCheckError(
             f"三重校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "
-            f"本地={local_fp[:12]}…）——拒收"
+            f"声明={declared_fp[:12]}…）——拒收"
         )
+    if str(m.get("kind", "ppo") or "ppo") != "iter":
+        # 供给诊断（**只报不拒**）：本地活目录 vs 发布快照。发散 = 有 shard 迟到或离场
+        # （y32 实测 a96 在 job 在飞期间落盘 2 张）⇒ 本轮语料比计划少几张。那是调度侧
+        # 的账（派给 slow 节点的计划局该在 rollout_end 前封盘），落位不该替它判死。
+        try:
+            live_dirs = iter_shard_dirs(
+                traj_dir,
+                it,
+                log=lambda _m: None,
+                course_fp=str(m.get("course_fp") or ""),
+                corpus_fp=str(m.get("corpus_fp") or ""),
+                state_init=state_init,
+            )
+            live_fp = data_fp(live_dirs)
+        except Exception as e:  # 目录被清/被删都不该阻断落位
+            log(f"WARN: it{it} 活目录对账不可做（{e}）——不阻断落位")
+        else:
+            if live_fp != declared_fp:
+                log(
+                    f"WARN: it{it} 活目录与发布快照不一致（活 {len(live_dirs)} 张 "
+                    f"live={live_fp[:12]}… vs 声明={declared_fp[:12]}…）"
+                    "——迟到/离场 shard；本轮按快照训练，不拒收"
+                )
     if result["commit_echo"] != m["commit"]:
         raise TripleCheckError(
             f"三重校验失败: commit_echo={result['commit_echo'][:12]}… != "
