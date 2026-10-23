@@ -85,6 +85,8 @@ let killsB = 0
 
 const t0 = performance.now()
 for (let s = 0; s < STAGES.length; s++) {
+  const _only = Number(process.argv[7] ?? 0)
+  if (_only > 0 && s !== _only - 1) continue
   for (let k = 0; k < seeds; k++) {
     const ra = runOne(s, k, a)
     const rb = runOne(s, k, b)
@@ -104,8 +106,8 @@ for (let s = 0; s < STAGES.length; s++) {
 }
 
 const names = STAGES.map((_s, i) => `s${i + 1}`)
-const aggA = names.map((n, i) => aggregateStage(n, perStageA.get(i)!))
-const aggB = names.map((n, i) => aggregateStage(n, perStageB.get(i)!))
+const aggA = names.map((n, i) => aggregateStage(n, perStageA.get(i) ?? []))
+const aggB = names.map((n, i) => aggregateStage(n, perStageB.get(i) ?? []))
 const suiteA = aggregateSuite(aggA)
 const suiteB = aggregateSuite(aggB)
 const cmp = comparePaired(
