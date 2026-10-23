@@ -28,6 +28,8 @@ from worker.loop_round import (
     COLLECT_HELD,
     COLLECT_LOCAL,
     COLLECT_NODE,
+    FALLBACK_HOLD_STALE,
+    FALLBACK_NODE_UNAVAILABLE,
     ROUND_NEXT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
@@ -39,6 +41,7 @@ from worker.loop_round import (
     RoundYieldError,
     advance,
     finish,
+    resolve_collect,
     resolve_collect_mode,
     wait_for,
 )
@@ -109,6 +112,30 @@ def test_resolve_collect_mode_precedence() -> None:
     assert resolve_collect_mode("run", 3) == COLLECT_LOCAL  # 退役取值：调用方已映射成本机
     assert resolve_collect_mode("local", 1) == COLLECT_LOCAL  # 段长不再是「归云机」的同义词
     assert resolve_collect_mode("node", 2) == COLLECT_NODE
+
+
+def test_resolve_collect_fallback_is_orthogonal_to_the_mode() -> None:
+    """自愈两格（plan/offline-hold-stale-fallback §2/§3-S1）：**降级不改枚举**。
+
+    ★ P0-1 的钉子：`_node_rollout = mode != COLLECT_LOCAL` 决定「本机跑不跑 PPO」；
+    降级轮必须是 `COLLECT_LOCAL`（真本机采样 + 真本机 PPO），原因只进 `fallback`。
+    """
+    plan = resolve_collect("node", 0, lapsed=True)
+    assert (plan.mode, plan.fallback) == (COLLECT_LOCAL, FALLBACK_HOLD_STALE)
+    # 结构性不可用：与 hold 历史无关（交还 / 强制解除 / trainer 重启都照样自愈）
+    plan = resolve_collect("node", 0, node_ok=False)
+    assert (plan.mode, plan.fallback) == (COLLECT_LOCAL, FALLBACK_NODE_UNAVAILABLE)
+    # 被接管优先于两个降级格（held 永远赢）
+    assert resolve_collect("node", 0, held=True, lapsed=True, node_ok=False) == (
+        resolve_collect("node", 0, held=True)
+    )
+    # `local` 课永不被这两个格改写（它本来就是本机采样）
+    assert resolve_collect("local", 0, lapsed=True, node_ok=False).fallback == ""
+    # 正常 node 轮：既不降级也不换路
+    assert resolve_collect("node", 0) == resolve_collect("node", 0, node_ok=True)
+    assert resolve_collect("node", 0).mode == COLLECT_NODE
+    # 薄包装与 plan 同源（旧读者拿到的仍是 mode）
+    assert resolve_collect_mode("node", 0, lapsed=True) == COLLECT_LOCAL
 
 
 def test_round_context_marks_are_ordered_and_unique() -> None:

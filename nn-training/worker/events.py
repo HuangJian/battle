@@ -187,7 +187,11 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
 
     m: {rollout_sec, ppo_sec, total_steps, chunks_n, agg, kl_cum, halted,
         dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec,
-        volume_alloc_rule, volume_stage_stats}
+        volume_alloc_rule, volume_stage_stats, collect_fallback}
+
+    `collect_fallback`（2026-10-23，plan/offline-hold-stale-fallback §3-S1e）：本轮是**降级**轮
+    （采集模式本是 node，实际由本机采样）的原因 `hold_stale` / `node_unavailable`。
+    **只在非空时写键**——普通轮的事件逐字节不变（账本/门禁/回归基线都靠这条）。
     """
     agg = m["agg"]
     return write_event(
@@ -242,6 +246,14 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             # 「哪一轮起换了分配口径」只在这里可读（§15.5：不静默漂移）。
             "volume_alloc_rule": m.get("volume_alloc_rule"),
             "volume_stage_stats": m.get("volume_stage_stats"),
+            # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：
+            # `hold_stale` = 云机接管已 stale；`node_unavailable` = node 路径带不了 volume。
+            # 只在降级轮出现（普通轮无此键 ⇒ 既有行逐字节不变）。
+            **(
+                {"collect_fallback": m["collect_fallback"]}
+                if m.get("collect_fallback")
+                else {}
+            ),
             # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
             # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）
             "reward": getattr(args, "reward", ""),

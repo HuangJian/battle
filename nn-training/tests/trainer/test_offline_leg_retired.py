@@ -42,7 +42,16 @@ from tests.hub.test_role_routing import OFF_JID, _manifest, _store  # type: igno
 from tests.remote.test_worker_bun_precheck import _job as _worker_job  # type: ignore
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
-from worker.loop_round import COLLECT_HELD, COLLECT_LOCAL, ROUND_HELD_EXIT, RoundContext
+from worker.loop_round import (
+    COLLECT_HELD,
+    COLLECT_LOCAL,
+    COLLECT_NODE,
+    FALLBACK_HOLD_STALE,
+    FALLBACK_NODE_UNAVAILABLE,
+    ROUND_HELD_EXIT,
+    ROUND_SKIP,
+    RoundContext,
+)
 
 TOKEN = "sekret"
 # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
@@ -173,14 +182,21 @@ def test_worker_refuses_a_run_kind_job_before_any_download(
 # ═════════════════ ④ 本机循环：被接管的课不跑（一行指路 + 干净收官；★M2 换判据） ═════════════════
 
 
+def _facts(held: bool = False, *, lapsed: bool = False):
+    """`step_course_iter` 唯一读的 hold 事实（替身；判据本身在 `test_loop_hold.py`）。"""
+    from trainer.loop_hold import HoldFacts
+
+    return lambda _args, **_kw: HoldFacts(held=held, lapsed=lapsed)
+
+
 def _bare_steps(*, held: bool = True) -> Any:
     """不跑 `__init__` 的 `RoundSteps`：只喂 `step_course_iter` 真正会碰到的那几样。
 
     `Any` 是刻意的（与 `tests/worker/test_loop_round.py::_bare_loop` 同一手法）：本用例的**目的**
     就是「这一步在被接管的课上做了什么」，替身不是被测对象。
 
-    `held` 旗子由调用方经 `lrs.course_held` 的 monkeypatch 注入（★M2 的双通道判据不在本文件
-    的测程里——它有自己的用例，见 `tests/trainer/test_loop_hold.py`）。
+    `held` 旗子由调用方经 `lrs.course_hold_facts` 的 monkeypatch 注入（★M2 的双通道判据不在
+    本文件的测程里——它有自己的用例，见 `tests/trainer/test_loop_hold.py`）。
     """
     steps: Any = RoundSteps()
     steps.args = SimpleNamespace(
@@ -214,7 +230,7 @@ def test_held_course_stops_the_round_cleanly_with_a_pointing_line(
     lines: list[str] = []
     monkeypatch.setattr(lrs, "log", lines.append)
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: True)
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts(held=True))
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.run_iters = run_iters
@@ -236,7 +252,7 @@ def test_not_held_keeps_the_local_leg_untouched(monkeypatch: pytest.MonkeyPatch)
     import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: False)
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts())
     steps = _bare_steps()
     ctx = RoundContext(it=4, pairs=[])
     assert steps.step_course_iter(ctx) is None
@@ -256,7 +272,7 @@ def test_export_bundle_still_wins_over_the_held_early_exit(
 
     monkeypatch.setattr(lrs, "log", lambda _m: None)
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: True)
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts(held=True))
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.export_bundle = "tools.task.zip"
@@ -341,7 +357,7 @@ def test_infinite_course_exports_an_open_ended_segment(
     # ③ 第三个闸（`step_course_iter` 里的 `ctx.seg == 0`）只对**没声明段长**的拒：
     #   无限课也得说清一段多长（它管的是 `--run-iters`，不是课程 iters ⇒ J1 后依然有效）。
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: False)
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts())
     steps = _bare_steps()
     steps.args.export_bundle = "tools.task.zip"
     steps.args.run_iters = 0  # 没声明段长
@@ -535,3 +551,116 @@ def test_offline_boot_announces_the_disk_identity_on_every_hub_call() -> None:
 
     src = (ROOT / "remote" / "offline_boot.py").read_text(encoding="utf-8")
     assert '{"Authorization": "Bearer " + token}' not in src, "有调用点绕过了 `_headers`"
+
+
+# ═════════════ 2026-10-23：掉线自愈（plan/offline-hold-stale-fallback） ═════════════
+#
+# 本组钉三件事（每件都对应评审里的一条 P0/P1）：
+#   ① 降级**不换采集枚举**（`collect_mode` 仍 local，`_node_rollout` 必须为 False ⇒ 本机真跑 PPO）；
+#   ② 结构性不可用（node+volume）与 hold 历史无关 ⇒ 交还/重启/强制解除都照样自愈；
+#   ③ 配置冲突只跳过本轮（`ROUND_SKIP`），由既有 30s/5 连击梯子收口，不再 SystemExit 下线。
+
+
+def test_lapsed_node_course_falls_back_to_local_but_keeps_local_ppo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ P0-1 的钉子：降级轮 `collect_mode==local` ∧ `_node_rollout is False` ∧ 一行 WARN。"""
+    import trainer.loop_round_steps as lrs
+
+    lines: list[str] = []
+    monkeypatch.setattr(lrs, "log", lines.append)
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts(lapsed=True))
+    steps = _bare_steps()
+    steps.args.rollout_src = "node"
+    ctx = RoundContext(it=1, pairs=[])
+    assert steps.step_course_iter(ctx) is None
+    assert ctx.collect_mode == COLLECT_LOCAL
+    assert ctx.collect_fallback == FALLBACK_HOLD_STALE
+    # 这一条错了就是「本机采样 + 本机不跑 PPO」（iter 涨、权重不变且不报错）
+    assert steps._node_rollout is False
+    # 降级时喊过（去重键被记下 = 走了 `_note_collect_fallback`）
+    assert steps._fallback_note == FALLBACK_HOLD_STALE
+    assert lines, "降级必须响亮：一行 WARN 是操作员唯一的现场读数"
+
+
+def test_fallback_note_is_deduped_by_reason_not_by_the_whole_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """去重键 = 原因：静默分钟数每轮都在变，拿整句去重会让日志每轮刷一行。"""
+    import trainer.loop_round_steps as lrs
+
+    lines: list[str] = []
+    monkeypatch.setattr(lrs, "log", lines.append)
+    steps = _bare_steps()
+    steps._fallback_note = ""
+    steps._note_collect_fallback(FALLBACK_HOLD_STALE, 6_780.0, "")
+    steps._note_collect_fallback(FALLBACK_HOLD_STALE, 6_900.0, "")  # 分钟数变了，原因没变
+    assert len(lines) == 1, lines
+    # 没降级了 ⇒ 清空 ⇒ 再掉线能再喊
+    steps._note_collect_fallback("", None, "")
+    steps._note_collect_fallback(FALLBACK_HOLD_STALE, 60.0, "")
+    assert len(lines) == 2, lines
+
+
+def test_node_volume_conflict_falls_back_without_any_hold_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """结构性不可用（D 格）：与 hold 无关 ⇒ 交还/强制解除/重启后仍自愈。"""
+    import trainer.loop_round_steps as lrs
+
+    monkeypatch.setattr(lrs, "log", lambda _m: None)
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_hold_facts", _facts())  # 没有任何 hold 记录
+    steps = _bare_steps()
+    steps.args.rollout_src = "node"
+    steps.args.target_transitions = 24576
+    ctx = RoundContext(it=1, pairs=[])
+    assert steps.step_course_iter(ctx) is None
+    assert (ctx.collect_mode, ctx.collect_fallback) == (
+        COLLECT_LOCAL,
+        FALLBACK_NODE_UNAVAILABLE,
+    )
+    assert steps._node_rollout is False
+
+
+def test_remote_iter_skips_the_round_instead_of_killing_the_course(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_remote_iter` 的兜底守卫：不再 `SystemExit`（整课下线），只跳本轮。"""
+    import trainer.loop_remote_drive as drive
+
+    lines: list[str] = []
+    monkeypatch.setattr(drive, "log", lines.append)
+    host: Any = SimpleNamespace(args=SimpleNamespace(target_transitions=24576))
+    assert drive.TrainingRemoteDrive._remote_iter(host, 1, []) == ROUND_SKIP
+    assert lines, "冲突必须响亮地喊一声（ERROR 行）——静默跳过等于把配置错藏起来"
+
+
+def test_step_rollout_propagates_the_skip_and_does_not_fall_into_ppo() -> None:
+    """返回值**必须**被读：否则本轮带着空 shard 走进 PPO（比下线更难查）。"""
+    steps = _bare_steps()
+    ctx = RoundContext(it=3, pairs=[])
+    ctx.collect_mode = COLLECT_NODE
+    calls: list[tuple[int, list]] = []
+
+    def _skip(it: int, pairs: list) -> str:
+        calls.append((it, pairs))
+        return ROUND_SKIP
+
+    steps._remote_iter = _skip
+    res = steps.step_rollout(ctx)
+    assert calls == [(3, [])]
+    assert res is not None and res.is_final and res.outcome == ROUND_SKIP
+
+
+def test_skip_maps_to_a_backed_off_retry_not_a_hot_loop() -> None:
+    """★ 评审 P1-1：`ROUND_SKIP` 走普通 RETRY（30s 退避 + 5 连击），**不是** same_iter。"""
+    from trainer.loop_runner import LoopRunner
+    from worker.loop_round import RoundOutcome
+    from worker.loop_tasks import RETRY
+
+    runner = LoopRunner(loop=SimpleNamespace(inflight_job_id=lambda _it: None), course="c5")
+    res = runner._map_outcome(RoundOutcome(ROUND_SKIP, 4, "上云轮配置冲突"))
+    assert res.status == RETRY, res
+    assert not res.payload.get("same_iter"), "same_iter ⇒ 0 退避 ⇒ 毫秒级烧完 5 次再下线"

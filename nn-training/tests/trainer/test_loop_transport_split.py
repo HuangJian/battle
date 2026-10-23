@@ -69,6 +69,7 @@ MOVED_DEFS = (
     "fatal_remote_http",
     "kickstart_coef",
     "kickstart_warn_kind",
+    "node_volume_conflict",
     "remote_retryable_exceptions",
     "require_remote_transport",
     "resolve_hub_push",
@@ -320,3 +321,49 @@ def test_remote_leg_methods_read_their_own_module_seams() -> None:
     root_reads = _module_class_reads(NN_ROOT / "trainer" / "loop_remote.py")
     for name in ("_push_submit", "_push_wait_result", "common", "log"):
         assert name not in root_reads, f"组合根不该再读 {name}"
+
+
+# ─────────────────────── `node` × 动态采集的能力判据（2026-10-23） ───────────────────────
+#
+# 为什么是一个**能力**判据而不是「永远互斥」：逐轮上云的 `iter_job.build_iter_spec` 不带
+# `volume` 块，而离线计划那条路（`worker/plan.iter_spec` + `loop_export._volume_plan_block`）
+# 已经支持。将来把 volume 接进 live spec，本函数返回 "" 即自动解除。
+
+
+def _args(**kw: object) -> SimpleNamespace:
+    base: dict[str, object] = {
+        "rollout_src": "auto",
+        "course_path": "curricula/c5-gae.jsonc",
+        "target_transitions": 0,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_node_volume_conflict_is_empty_unless_both_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三档：没开动态采集 / 本机采样 / 两者都在 ⇒ 只有最后一档返回人话。"""
+    monkeypatch.setattr(transport.common.distribution, "load_dist_config", lambda: {})
+    assert transport.node_volume_conflict(_args()) == ""
+    assert transport.node_volume_conflict(_args(target_transitions=24576)) == ""
+    # CLI 显式 node + 动态采集 ⇒ 冲突
+    # 返回值的**形状**是契约（`""` = 相容，否则一句人话）；措辞本身不在这里钉。
+    assert transport.node_volume_conflict(
+        _args(rollout_src="node", target_transitions=24576)
+    )
+
+
+def test_node_volume_conflict_reads_the_same_config_source_as_the_trainer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`courses.<课>.rollout_src=node`（配置来源）也命中——与 `_rollout_source` 同一次解析。"""
+    monkeypatch.setattr(
+        transport.common.distribution,
+        "load_dist_config",
+        lambda: {"courses": {"c5-gae": {"rollout_src": "node"}}},
+    )
+    msg = transport.node_volume_conflict(_args(target_transitions=24576))
+    assert msg, "配置来源的 node 没被读到（那会在真实课程上静默放过）"
+    # 显式传已解析值时不再读盘（`step_course_iter` 每轮已算过 `_rollout_source`）
+    assert transport.node_volume_conflict(
+        _args(target_transitions=24576), source="local"
+    ) == ""

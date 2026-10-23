@@ -8944,3 +8944,43 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `plan/anchor-full-rounds.plan.md` · `docs/nn/remote-transport.md §115`。
 - **验收**：`tests/remote/test_round_forms.py` 16 passed；`tests/hub/test_offline_backfeed.py`、
   `tests/remote/test_offline_deliver.py` 子集、`tests/test_remote_dag.py` 全绿；`bun run check` 绿。
+
+## §2026-10-23-goalnn-hold-stale-fallback（2026-10-23，用户口径「接管掉线应该是自动的」）
+
+- **背景**：y31-null（`rollout_src=node` + `target_transitions: 24576`）在云机 hold 静默 113 分钟后，
+  每轮 `_remote_iter` 的互斥守卫 `SystemExit` ⇒ **整门课下线**（`loop_serve` ABORT），只有人改
+  `rl-config.json` 才能回来。采集裁决点（`worker/loop_round.resolve_collect_mode`）只有
+  「被接管 / 整轮上云 / 本机采样」三格，没有「云机曾经接管、现已掉线」，也没有「node 这条路对本课
+  结构性不可用」。
+- **决定**：补两格自愈，且**降级只是一个正交标记**：`lapsed`（**仅** hub 显式 `state=="stale"`）⇒
+  `local` + `fallback="hold_stale"`；`node_volume_conflict`（`node` ∧ `target_transitions>0`，
+  纯配置事实，与 hold 历史无关）⇒ `local` + `fallback="node_unavailable"`。`collect_mode` 仍只有
+  三值——`_node_rollout = mode != COLLECT_LOCAL` 决定本机跑不跑 PPO，降级轮必须回本机 PPO。
+  配置冲突不再 `SystemExit`：`_remote_iter` 返回 `ROUND_SKIP`，由既有梯子（`RETRY_BACKOFF_SEC=30s`
+  + `resolve_failure` 5 连击）收口；开课处只 WARN 不拒启（serve 每次启动都会开课，拒启=一重启就
+  把在跑的课打下线）。可见性零新通道：日志一行 + `iteration.collect_fallback`（只降级轮写）+
+  控制台 `collectFallback`（`rollout_src` ⊕ hub `hold.state`，且要求 `state` 真给过 ⇒ 新 `stateExplicit`）。
+- **否决的备选**：① **新增第四个采集枚举**（`COLLECT_FALLBACK_LOCAL`）—— 打穿 `_node_rollout`，
+  变成「本机采样 + 本机不跑 PPO」（iter 在涨、权重不变且不报错）；② **用控制台缓存
+  `tmp/loop-control.json` 判掉线** —— 它是探 hub 时整份重写的缓存，「条目过期」只等于「控制台没探过
+  hub」，trainer↔hub 断网而云机正常时本机开跑 = 双跑；③ **只做 `lapsed` 不做结构性那一格** ——
+  交还/强制解除会清零 hold，`lapsed` 永不触发而 node 轮本机 build 不出 spec、云机也领不到 ⇒ 永久停摆；
+  ④ **开课拒绝该配置（400）** —— 违反用户口径（逼人改配置），且会让 trainer 重启把在跑的课打下线；
+  ⑤ **`ROUND_SKIP` 复用 `same_iter` 的 retry** —— 0 退避 ⇒ 毫秒级烧完 5 次再下线；⑥ **新开
+  `CONFLICT_SKIP_LIMIT`** —— 第二份阈值，与既有梯子分叉；⑦ **降级后自动切回 node** —— 切回要在轮
+  边界做而 hold 随时可夺；现状「云机取包即夺 hold ⇒ 本机下一轮 `COLLECT_HELD`」已把退让做对了，
+  配置留给人（运行时覆盖，**不写回** `rl-config.json`）。
+- **违反后果**：把降级塞进采集枚举 ⇒ 本机采样却不训（最难查的一类：日志全绿）；拿文件缓存判掉线 ⇒
+  与活着的云机双跑（读数被两份采样混在一起）；只认 hold 历史 ⇒ 交还后的课永久停摆；`SystemExit`
+  留在 `_remote_iter` ⇒ 一次配置错 = 整课下线，必须人工干预。
+- **代价（诚实账）**：hold 只在**轮边界**问一次 ⇒ 云机中途夺回时本机最迟本轮结束才退让（本轮已采
+  shard 归本机批，账本可区分；不承诺中途停）；控制台**看不到**结构性那一格（不读课程 jsonc 的
+  `target_transitions`），只能靠日志 + 账本归因；`node_volume_conflict` 是**能力判据**不是真理——
+  `iter_job.build_iter_spec` 将来接上 volume 时返回 `""` 即自动解除。
+- **落点**：`worker/loop_round.py`（`CollectPlan`/`resolve_collect`/`ROUND_SKIP`）· `trainer/loop_hold.py`
+  （`hub_hold_doc`/`hub_hold_state`/`course_hold_facts`）· `trainer/loop_transport.py`（`node_volume_conflict`）·
+  `trainer/{loop_round_steps,loop_remote_drive,loop_runner,loop_lifecycle,loop_serve}.py` · `worker/events.py` ·
+  `dashboard/src/server/api/overview.ts` + `web/view/{course-overview,course-status}.ts` · 用例见 
+  `tests/{worker,trainer}/` 五份 + `dashboard/tests/server-api-overview.test.ts` · 全文 → `docs/nn/remote-transport.md §116`。
+- **验收**：`bun run check` 2617 pass / 0 fail · dashboard typecheck + 1799 pass / 0 fail · nn 子集 70 passed ·
+  e2e supervisor 11 passed · ruff + mypy ✓ · `bun run build` ✓。

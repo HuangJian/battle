@@ -309,10 +309,18 @@ export function holdTitle(course: string, ov: CourseOverviewRow, wait: string): 
       ? `已回传段内 ${ov.offlineRounds} 轮（最新 it${ov.offlineLastIter ?? '—'}）`
       : '还没有任何段内产物回传'
   if (hold.state === 'stale') {
+    // 降级句（plan/offline-hold-stale-fallback §3-S1d）：只有「配置节点 + hub 明确答 stale」
+    // 才有它（服务端算好；`silentSec === null` = 没有进度读数，不编分钟）。
+    const fb = ov.collectFallback
+    const takeover = fb
+      ? ` ⇒ **本机接管 rollout**（配置仍是 node；云机已静默 ${
+          fb.silentSec === null ? '时长未知' : `${Math.floor(fb.silentSec / 60)} 分钟`
+        }；云机回来需重开课才切回上云）。`
+      : ''
     return (
       `接管掉线：持有人「${who}」${age}（超进度阈）——**协作派发与本机采样已自动恢复**` +
       `（在队任务照常可领；被释放的 worker 若还活着，它的产物只归档）。${rounds}。` +
-      `新自主盘可直接 claim 接管（无需人工）。${wait}`
+      `新自主盘可直接 claim 接管（无需人工）。${takeover}${wait}`
     )
   }
   return (

@@ -41,6 +41,7 @@ from worker.loop_round import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
     ROUND_RETRY,
+    ROUND_SKIP,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
     ROUND_WAIT,
@@ -57,6 +58,7 @@ __all__ = [
     "ROUND_BUNDLE_EXIT",
     "ROUND_NEXT",
     "ROUND_RETRY",
+    "ROUND_SKIP",
     "ROUND_SMOKE_STOP",
     "ROUND_STOP",
     "ROUND_WAIT",
@@ -232,6 +234,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         #: ⇒ 每拍重问同一轮，那行日志会每 `poll_interval` 重放一遍（比今天更吵）。记下上一条，
         #: **同一状态只喊一次**（状态变了——接管解除 / 换了一门课——就再喊）。
         self._held_note: str = ""
+        #: 降级（plan/offline-hold-stale-fallback §3-S1c）：去重键 = 原因（`""` = 没降级），
+        #: 与写进 `iteration` 事件的 `_collect_fallback` 同一个值。两者都**不是**采集模式：
+        #: `collect_mode` 仍只有 local|node|held（`_node_rollout` 靠它决定本机跑不跑 PPO）。
+        self._fallback_note: str = ""
+        self._collect_fallback: str = ""
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
         # 2026-09-17：未收官的 eval 尾巴 (thread, 派发时刻)——由下一轮 rollout 收官时

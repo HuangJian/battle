@@ -55,6 +55,7 @@ from trainer.loop_plan import (
     round_tasks_for,
 )
 from trainer.loop_runner import ROUND_KIND, LoopRunner
+from trainer.loop_transport import node_volume_conflict
 from worker.course_args import (
     COURSE_MACHINE_OVERRIDE_KEYS as COURSE_MACHINE_OVERRIDE_KEYS,
 )
@@ -218,6 +219,13 @@ def open_course(
     from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     args = course_args(course, argv)
+    # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S2）：`node` + 动态采集在本轮上云
+    #   路径上跑不了（`iter_job.build_iter_spec` 不带 volume）。**只告警、不拒启**：
+    #   serve 每次启动都会走这里，拒启 = trainer 一重启就把在跑的课打下线（正是本 plan 治的病）；
+    #   而且运行时已经自愈（`resolve_collect` 的 `node_unavailable` 格 ⇒ 本机 rollout）。
+    _conflict = node_volume_conflict(args)
+    if _conflict:
+        log(f"[serve] WARN 课程 {course}：{_conflict}")
     # 死键点名（plan/course-workers-removal §3-S1.5）：**开课侧**一次，一行/门课。
     # 不放 `apply_course`：只读视图 `course_openable` 走同一条链，会被控制台每拍轮询重复打。
     from biz.course_spec import dead_key_warnings

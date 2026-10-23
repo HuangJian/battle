@@ -65,6 +65,7 @@ from trainer.loop_transport import (
     fatal_remote_http,
     kickstart_coef,
     kickstart_warn_kind,
+    node_volume_conflict,
     remote_retryable_exceptions,
     require_remote_transport,
     resolve_hub_push,
@@ -95,6 +96,7 @@ __all__ = [
     "fatal_remote_http",
     "kickstart_coef",
     "kickstart_warn_kind",
+    "node_volume_conflict",
     "remote_retryable_exceptions",
     "require_remote_transport",
     "resolve_hub_push",
@@ -136,6 +138,9 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     #: M3：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。必须在这里声明类型
     #: ——只在 _remote_iter 里赋值会被 mypy 推成 float，子类的 `float | None` 就冲突。
     _node_rollout_sec: float | None
+    #: 本轮降级原因（`""` = 没降级；plan/offline-hold-stale-fallback §3-S1e）：
+    #: `_record_iteration` 把它写进 `iteration.collect_fallback`（只在非空时写键）。
+    _collect_fallback: str
     _ppo_sec: float
     #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
     #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
@@ -570,6 +575,8 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                     # 动态采集（None = 未开该模式；additive 字段，旧行无此键）
                     "transitions_target": self._volume_target,
                     "transitions_collected": self._volume_collected,
+                    # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：空串 = 不写键。
+                    "collect_fallback": self._collect_fallback,
                     "transitions_capped": True if self._volume_capped else None,
                     # 分关采样分配（2026-10-07，plan/rollout-stage-balance §4.2）：规则版本与
                     # 分关账（additive，旧行无此键 → None）。分关分配**不进** `corpus_identity_fp`

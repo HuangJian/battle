@@ -31,13 +31,14 @@ from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from remote import weights_standard
 from trainer.loop_baseline import TrainingBaseline
 from trainer.loop_dispatch import TrainingDispatch
-from trainer.loop_hold import course_held
+from trainer.loop_hold import course_hold_facts
 from trainer.loop_iter_dir import TrainingIterDir
 from trainer.loop_steps import (
     BundleExportedError,
     SmokeVoidRoundError,
     _rollout_source,
     _run_segment_iters,
+    node_volume_conflict,
 )
 from trainer.loop_volume import TrainingVolume
 from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
@@ -47,6 +48,7 @@ from worker.loop_round import (
     COLLECT_HELD,
     COLLECT_LOCAL,
     COLLECT_NODE,
+    FALLBACK_HOLD_STALE,
     ROUND_BUNDLE_EXIT,
     ROUND_HELD_EXIT,
     ROUND_NEXT,
@@ -59,7 +61,7 @@ from worker.loop_round import (
     RoundOutcome,
     StepResult,
     finish,
-    resolve_collect_mode,
+    resolve_collect,
 )
 from worker.loop_tasks import ROUND_TASKS
 
@@ -121,6 +123,10 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
     _remote_ppo_step: Callable[[RoundContext], StepResult | None]
     #: 接管等待的**去重文案**（★M2；声明在 `loop_core` 的构造器里）。
     _held_note: str
+    #: 降级的去重键（`CollectPlan.fallback`；`""` = 没降级 ⇒ 下次掉线能再喊）。
+    _fallback_note: str
+    #: 本轮降级原因（写进 `iteration` 事件；`""` = 没降级）。
+    _collect_fallback: str
     _export_weights: Any
     _join_eval: Any
     _record_rollout: Any
@@ -283,9 +289,25 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         ctx.seg = _run_segment_iters(args)
         # M3/接管：node 时本机**完全不采样**（也不预采/不补波），由 `_remote_iter`
         # （kind=iter）派发；被接管的课本机什么都不做。eval 不动（仍在本地 hub 跑，§5.4）。
-        ctx.collect_mode = resolve_collect_mode(src, ctx.seg, held=course_held(args))
-        self._node_rollout = ctx.collect_mode != COLLECT_LOCAL
+        # ★ 2026-10-23（plan/offline-hold-stale-fallback §2/§3-S1）：降级是**正交事实**，
+        #   不是第四个采集模式。`_node_rollout` 决定「本机跑不跑 PPO」，所以它只认
+        #   `mode != COLLECT_LOCAL`——降级轮必须回本机 PPO（否则 iter 涨、权重不变）。
+        #   `facts.lapsed` 只来自 hub 的显式 `state=="stale"`（控制台缓存没资格判掉线）。
+        facts = course_hold_facts(args)
+        volume_note = node_volume_conflict(args, source=src)
+        plan = resolve_collect(
+            src,
+            ctx.seg,
+            held=facts.held,
+            lapsed=facts.lapsed,
+            node_ok=not volume_note,
+        )
+        ctx.collect_mode = plan.mode
+        ctx.collect_fallback = plan.fallback
+        self._collect_fallback = plan.fallback
+        self._node_rollout = plan.mode != COLLECT_LOCAL
         ctx.node_rollout = self._node_rollout
+        self._note_collect_fallback(plan.fallback, facts.silent_sec, volume_note)
         if getattr(args, "export_bundle", ""):
             # 全离线导出：本轮**不训练**——把 it..it+n-1 打成可上传云机的任务包后退出。
             if ctx.seg == 0:
@@ -321,6 +343,34 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
             return finish(ROUND_HELD_EXIT, HELD_WAIT_HINT)
         return None
 
+    def _note_collect_fallback(
+        self, fallback: str, silent_sec: float | None, volume_note: str
+    ) -> None:
+        """降级时喊一行（每门课每进程/引擎重建一次；`fallback` 变了才再喊）。
+
+        去重键 = **原因**而不是整句：静默分钟数每轮都在变，拿整句去重会让日志每轮刷一行。
+        引擎被 serve 驱逐重建（`plan/pinned`，2026-10-02 事故的产物）后属性丢失 ⇒ 再喊一次，
+        这是想要的（新引擎的输出读面不该静默地少一句）。
+        """
+        if not fallback:
+            self._fallback_note = ""
+            return
+        if fallback == getattr(self, "_fallback_note", ""):
+            return
+        self._fallback_note = fallback
+        course = getattr(self.args, "course_name", "") or "?"
+        if fallback == FALLBACK_HOLD_STALE:
+            mins = "未知" if silent_sec is None else f"{max(0.0, silent_sec) / 60:.0f}"
+            log(
+                f"[serve] {course}: 云机接管已静默 {mins} 分钟（>900s）⇒ 本课改由本机 rollout"
+                "（配置仍是 node；云机回来后需重开课才切回上云）"
+            )
+            return
+        log(
+            f"[serve] {course}: {volume_note or 'node 路径不可用'} ⇒ 本课改由本机 rollout"
+            "（配置仍是 node）"
+        )
+
     # ------------------------------------------------------------- ⑤ 采集
 
     def step_rollout(self, ctx: RoundContext) -> StepResult | None:
@@ -340,7 +390,12 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 f"本机不跑这门课：{HELD_LEG_HINT}"
             )
         if ctx.collect_mode == COLLECT_NODE:
-            self._remote_iter(it, ctx.pairs)
+            # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
+            #   必须被读——配置冲突就只跳过本轮（`ROUND_SKIP` 走既有 30s/5 连击梯子），
+            #   而不是「带着空 shard 走进 PPO」或「整课 SystemExit 下线」。
+            skipped = self._remote_iter(it, ctx.pairs)
+            if skipped:
+                return finish(skipped, "上云轮配置冲突：本轮跳过")
         elif self._volume_active():
             # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
             # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。

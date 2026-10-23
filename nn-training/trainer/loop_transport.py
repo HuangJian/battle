@@ -166,6 +166,32 @@ def _rollout_source(args: Any) -> str:
     return val
 
 
+def node_volume_conflict(args: Any, *, source: str | None = None) -> str:
+    """`node` 与动态采集在本轮上云路径上是否**不相容** → `""`（相容）或一句人话。
+
+    事实（不是猜测）：逐轮上云的 `worker/iter_job.build_iter_spec` **不带** `volume` 块，
+    而动态采集要的是「按关配额、可补差」的批次（`worker/iter_topup` 只在 spec 里真有
+    `volume` 时才跑）。所以 `rollout_src=node && target_transitions>0` 时本机既 build 不出
+    spec（`_remote_iter` 的守卫），云机也永远领不到这一轮 ⇒「等云机」= 永久停摆。
+
+    措辞刻意写成**能力判据**（"本轮上云路径不带 volume"），不是「永远互斥」：离线计划那条路
+    （`worker/plan.iter_spec` + `trainer/loop_export._volume_plan_block`）已经支持 volume，
+    将来若把它接进 `build_iter_spec`，本函数返回 `""` 即自动解除。
+
+    `source` 可传入已解析值（`step_course_iter` 每轮已算过 `_rollout_source`，别再读一次盘）。
+    """
+    if int(getattr(args, "target_transitions", 0) or 0) <= 0:
+        return ""
+    src = _rollout_source(args) if source is None else str(source or "")
+    if src != "node":
+        return ""
+    return (
+        "[run_rl] rollout_src=node 与 --target-transitions（动态采集）不相容："
+        "本轮上云路径（iter_job.build_iter_spec）不带 volume 块，补波无处可做"
+        "——本课改由本机 rollout（配置仍是 node；要彻底消除请把 rollout_src 改回 local）"
+    )
+
+
 #: 「离线自动复原」在显式 `--rollout-src` 下**不成立**——已喊过的（课, 实测值）去重：
 #: `_rollout_source` 每轮都会被问一次，不去重就是每轮刷一行。
 _RESTORE_UNSUPPORTED_NOTED: set[tuple[str, str]] = set()

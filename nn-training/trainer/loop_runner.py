@@ -55,7 +55,7 @@ from trainer.loop_core import (
     ROUND_WAIT,
     RoundOutcome,
 )
-from worker.loop_round import ROUND_HELD_EXIT, STEP_METHOD, RoundContext, StepResult
+from worker.loop_round import ROUND_HELD_EXIT, ROUND_SKIP, STEP_METHOD, RoundContext, StepResult
 from worker.loop_scheduler import CourseQueue
 from worker.loop_tasks import (
     ROUND_TASKS,
@@ -298,6 +298,12 @@ class LoopRunner:
         if out.status == ROUND_RETRY:
             # 主循环里这是「it 原地重试」：不判 5 连击（那由引擎内部 _consec_fail 负责）
             return retry("本轮作废，it 原地重试", same_iter=True)
+        if out.status == ROUND_SKIP:
+            # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：配置冲突这类
+            #   「这一轮跑不了」不是「立刻重来」——**不带** same_iter ⇒ 调度器给
+            #   `RETRY_BACKOFF_SEC=30s` 退避，上限是 `resolve_failure` 的 5 连击。
+            #   复用 retry 的 same_iter=True 会在毫秒内烧完 3 次再下线（评审 P1-1）。
+            return retry(out.detail or f"本轮跳过（it{out.it}）")
         if out.status == ROUND_SMOKE_STOP:
             self.finished = True
             self.finish_reason = "smoke-void"

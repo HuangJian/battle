@@ -440,8 +440,11 @@ def test_held_course_waits_and_resumes_without_reopen(
     ⇒ 本用例 patch 的是后者的入口（与生产同一条缝：`loop_round_steps` 每轮边界问一次）。
     """
     import trainer.loop_round_steps as lrs
+    from trainer.loop_hold import HoldFacts
 
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: True)
+    monkeypatch.setattr(
+        lrs, "course_hold_facts", lambda _args, **_kw: HoldFacts(held=True)
+    )
     clock = {"t": 1000.0}
     a = _make_loop(tmp_path, "a", iters=2)
     runner = LoopRunner(loop=a, course="a", iters=2, now=lambda: clock["t"])
@@ -460,7 +463,9 @@ def test_held_course_waits_and_resumes_without_reopen(
     assert runner.finished is False and runner.finish_reason == ""
 
     # ② 接管解除（云机交还 / 900s 无进度自动恢复）⇒ 下一拍同一引擎实例续跑
-    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: False)
+    monkeypatch.setattr(
+        lrs, "course_hold_facts", lambda _args, **_kw: HoldFacts(held=False)
+    )
     clock["t"] += 16.0  # 越过 WAIT 的 resume_at（poll_interval=15s）
     _drive(sup)
     assert _ledger_iters(tmp_path / "a") == [1, 2]
@@ -472,11 +477,12 @@ def test_held_wait_does_not_block_other_courses(
 ) -> None:
     """★T6 附带（§6.4 的 `hold=False` 调度面）：a 被接管等待期间 b 照常跑完两轮。"""
     import trainer.loop_round_steps as lrs
+    from trainer.loop_hold import HoldFacts
 
-    def _held(args: object, **_kw: object) -> bool:
-        return str(getattr(args, "traj", "")).endswith("a")
+    def _held(args: object, **_kw: object) -> HoldFacts:
+        return HoldFacts(held=str(getattr(args, "traj", "")).endswith("a"))
 
-    monkeypatch.setattr(lrs, "course_held", _held)
+    monkeypatch.setattr(lrs, "course_hold_facts", _held)
     clock = {"t": 1000.0}
     loops = {"a": _make_loop(tmp_path, "a", iters=1), "b": _make_loop(tmp_path, "b", iters=2)}
     runners = {

@@ -6,6 +6,50 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §116 云机掉线后本机自愈：采集裁决补两格 + 降级是**正交标记**（2026-10-23 · `plan/offline-hold-stale-fallback.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-hold-stale-fallback）
+
+用户口径：「接管掉线应该是自动的」，不该每门课每掉一次线就手工改 `rl-config.json`。现场形状：
+y31-null（`rollout_src=node` + `target_transitions=24576`）在云机 hold 静默 113 分钟后，每轮
+`_remote_iter` 的互斥守卫 `SystemExit` ⇒ **整门课下线**，只有人改配置才能回来。
+
+**采集裁决从「三选一」扩成四格**（`worker/loop_round.resolve_collect`）：
+
+```
+held（hub live ∨ 文件新鲜）        → COLLECT_HELD（本机完全不采样）
+lapsed（hub **显式**答 stale）      → LOCAL + fallback="hold_stale"
+node 与 target_transitions>0      → LOCAL + fallback="node_unavailable"（结构性，与 hold 历史无关）
+其余                               → 按 src 原样（含「从未有过 / 已交还 / hub 问不到」）
+```
+
+四条教训：
+
+1. **降级不能是第四个采集枚举**。`_node_rollout = mode != COLLECT_LOCAL` 决定本机**跑不跑 PPO**；
+   加一个 `COLLECT_FALLBACK_LOCAL` ⇒ 本机采样却跳过本机 PPO（iter 在涨、权重不变、不报错）。
+   所以 `mode` 只有三值，降级是旁证 `fallback`，日志/账本/读面各自读它。
+2. **「掉线」只认 hub 的显式负事实**。`tmp/loop-control.json` 的 `held` 是控制台**探 hub 时整份重写**
+   的缓存；拿它的「条目过期」判掉线 = 「控制台很久没探过 hub」，trainer↔hub 断网而云机正常时本机
+   就开跑 = **双跑**（比下线严重）。hub 问不到 ⇒ 不降级（PPO 也走 hub，采了也发不出去）。
+3. **结构性那一格必须与 hold 历史无关**。交还 / 强制解除会把 hold 清零，此时 `lapsed` 永远不触发，
+   而这类课的 node 轮在本机侧 build 不出 spec、云机也领不到 ⇒「等云机」= 永久停摆。
+   `node_volume_conflict` 是**能力判据**（`iter_job.build_iter_spec` 不带 volume），不是「永远互斥」：
+   离线计划那条路（`plan.iter_spec` + `_volume_plan_block`）已支持 volume，将来接进 live spec 时
+   本函数返回 `""` 即自动解除。
+4. **配置冲突只跳一轮，不拖垮整门课**。`_remote_iter` 返回 `ROUND_SKIP`（不再 `SystemExit`）⇒
+   `LoopRunner._map_outcome` 走**普通** RETRY（`RETRY_BACKOFF_SEC=30s` + 5 连击），**不能**复用
+   `same_iter`：那是 0 退避，毫秒级烧完三次重试再下线。开课处（`open_course`）只 WARN 不拒启——
+   serve 每次启动都会走那里，拒启 = trainer 一重启就把在跑的课打下线。
+
+**可见性（零新通道）**：trainer 日志一行（`fallback` 去重 ⇒ 同原因只喊一次，引擎重建后允许再喊）；
+`iteration.collect_fallback` 只在降级轮出现（普通轮逐字节不变）；控制台每课行 `collectFallback`
+来自 `rollout_src`（与训练侧同一解析器）+ hub `hold.state=="stale"`，**且要求 `state` 真的给过**
+（`stateExplicit`：`parseHold` 为派发把缺 `state` 默认成 stale，横幅吃那个默认值会在旧 hub 上误报）。
+
+**契约（不承诺「立刻」）**：hold 只在轮边界问一次 ⇒ 云机中途夺回时，本机最迟本轮结束退让；
+本轮已采 shard 带 `collect_fallback` 归本机批，不承诺采集中途停（要做得在批边界加 hold 检查）。
+
+**门禁**：nn `tests/{worker,trainer}` 子集 70 passed · e2e supervisor 11 passed · ruff/mypy ✓ ·
+`bun run check` 2617 pass / 0 fail · dashboard typecheck + 1799 pass / 0 fail · `bun run build` ✓。
+
 ## §115 轮形态在**写盘时**定：锚点轮（首轮 ∪ eval 轮）两件整份、其余 delta（2026-10-23 · `plan/anchor-full-rounds.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-anchor-full-rounds）
 
 用户口径原话：「首轮和 eval 轮发整份 weight 和 opt，其它轮发 delta」。落地把它从**投递侧的档位

@@ -22,6 +22,7 @@ import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
 import { hubPushEnabled } from '../../stack/push-config'
+import { resolveRolloutSrc } from '../../stack/specs'
 import {
   type HubHoldView,
   type HubPendingExportView,
@@ -385,6 +386,11 @@ export async function buildOverview(
       iters[c] = await courseIter(c)
     }),
   )
+  // 「本机接管 rollout」的降级横幅（plan/offline-hold-stale-fallback §3-S1d）：
+  // `rollout_src` 与训练侧同一解析器（`courses.<课>` > `rl`，auto/退役值已映射）；
+  // 「掉线」那一半来自 hub 每课行的 `hold.state`（不另算窗口）。
+  const rolloutSrc: Record<string, 'local' | 'node'> = {}
+  for (const c of names) rolloutSrc[c] = resolveRolloutSrc(cfg, c) === 'node' ? 'node' : 'local'
   return {
     hubUrl: admin.url,
     hubOnline: admin.url !== null,
@@ -404,6 +410,7 @@ export async function buildOverview(
       iters,
       offline: admin.offline,
       leases: admin.leases,
+      rolloutSrc,
     }),
   }
 }
