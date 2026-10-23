@@ -42,7 +42,12 @@ from typing import Any
 
 from common import distribution
 from common.fs import atomic_write_json
-from common.protocol import ProtocolError
+from common.protocol import (
+    NODE_CAPABILITIES,
+    NODE_KINDS,
+    ProtocolError,
+    node_capabilities,
+)
 
 # ------------------------------------------------------------------ net-probe（M0）
 
@@ -168,13 +173,24 @@ def _read_rl_config(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _kind_caps(kind: str) -> list[str]:
+    """注册 wire 的 `kind` → 要写的能力键（`sampler` 不是能力 ⇒ 空）。"""
+    return [kind] if kind in NODE_CAPABILITIES else []
+
+
 def _merge_managed_node(prev: dict | None, payload: dict) -> dict:
     """register 的 upsert 合并（F1 语义，唯一权威）。
 
     * 新条目：`enabled=True`（此后归控制台）；
     * 既有 managed：只改 `url`/`authKey`/`label`；`concurrency` **永不改**（控制台手工值不被顶）；
       `enabled` 只在上一轮干净收工（带 `unregistered_at`）时恢复 True，否则原样保留
-      （会话进行中的控制台停用不被云机顶掉）。
+      （会话进行中的控制台停用不被云机顶掉）；
+    * **能力键：`kind` 缺席即不动**（2026-10-23 评审 P0-2）：采样节点客户端**根本不发
+      `kind`**，而它每个会话都注册一次 —— 若把「缺省 = sampler」当成本次声明，一次普通注册
+      就会把控制台手工挂上的 `gpu_push` 静默删掉（而能力键是派发器唯一认的持久事实）。所以：
+      `"kind" not in payload` ⇒ 能力键**原样保留**；显式 `kind` ⇒ 先清空全部
+      `NODE_CAPABILITIES`、再写本次那一个（`sampler` ⇒ 只清）。后者覆盖「同一 id 从 gpu_push
+      切到 offline_push」——否则 GPU 派发器会把离线节点当 GPU 节点推几十 MB。
     """
     if prev is None:
         node: dict = {
@@ -184,6 +200,8 @@ def _merge_managed_node(prev: dict | None, payload: dict) -> dict:
             "managed": True,
             "enabled": True,
         }
+        if "kind" in payload:
+            node.update({cap: True for cap in _kind_caps(str(payload["kind"]))})
         if "concurrency" in payload:
             node["concurrency"] = payload["concurrency"]
         if "label" in payload:
@@ -194,6 +212,11 @@ def _merge_managed_node(prev: dict | None, payload: dict) -> dict:
     node["authKey"] = payload["authKey"]
     if "label" in payload:
         node["label"] = payload["label"]
+    if "kind" in payload:
+        for cap in NODE_CAPABILITIES:
+            node.pop(cap, None)
+        for cap in _kind_caps(str(payload["kind"])):
+            node[cap] = True
     if node.pop("unregistered_at", None) is not None:
         node["enabled"] = True  # 上轮干净收工 ⇒ 本轮回来即恢复启用
     node["managed"] = True
@@ -642,7 +665,15 @@ class AdminRoutes:
         cfg = _read_rl_config(_nodes_config_path())
         nodes: list[dict] = []
         if cfg is not None and isinstance(cfg.get("nodes"), list):
-            keep = ("id", "url", "label", "enabled", "concurrency", "unregistered_at")
+            keep = (
+                "id",
+                "url",
+                "label",
+                "enabled",
+                "concurrency",
+                "unregistered_at",
+                *NODE_CAPABILITIES,
+            )
             nodes = [
                 {k: n[k] for k in keep if k in n}
                 for n in cfg["nodes"]
@@ -677,7 +708,17 @@ class AdminRoutes:
         if not auth_key:
             self._json({"error": "authKey 不能为空（节点 tools/agent/agent.auth 的内容）"}, 400)
             return
+        # `kind`（2026-10-23，plan/push-mode-notebooks §4.1）：显式出现才进 payload ⇒
+        # 「缺席 = 不动能力键」落在合并函数里（老客户端每会话注册一次也不清能力键）。
+        kind = str(body.get("kind") or "").strip()
+        if kind and kind not in NODE_KINDS:
+            self._json(
+                {"error": f"kind 非法: {kind!r}（只接受 {'/'.join(NODE_KINDS)}，或不传）"}, 400
+            )
+            return
         payload: dict = {"id": nid, "url": url, "authKey": auth_key}
+        if kind:
+            payload["kind"] = kind
         if body.get("concurrency") is not None:
             conc = body.get("concurrency")
             if isinstance(conc, bool) or not isinstance(conc, int) or not 1 <= conc <= _NODE_CONC_MAX:
@@ -718,16 +759,27 @@ class AdminRoutes:
                 flush=True,
             )
         else:
-            ping = distribution.node_ping(url, auth_key)
+            # push 类节点（GPU / 离线）的探活面是 worker_server 的 `GET /ping`（Bearer）；
+            # 采样节点是 rollout agent 的 `GET /v1/ping`。打错端点时两台服务都不会答（422），
+            # 或者更糟：把「另一个服务在同一端口上答了 200」当成节点在线。
+            push_kind = bool(_kind_caps(kind))
+            ping = (
+                distribution.push_node_ping(url, auth_key)
+                if push_kind
+                else distribution.node_ping(url, auth_key)
+            )
             if ping is None:
                 self._json(
-                    {"error": f"节点 ping 不通（{url}/v1/ping 无应答，或 authKey 不符）——不写盘"},
+                    {
+                        "error": f"节点 ping 不通（{url}{'/ping' if push_kind else '/v1/ping'} "
+                        "无应答，或 authKey 不符）——不写盘"
+                    },
                     422,
                 )
                 return
         merged = _merge_managed_node(prev, payload)
         if prev is not None and merged == prev:
-            self._json({"ok": True, "id": nid, "action": "unchanged"}, 200)
+            self._nodes_ack(nid, "unchanged", kind, prev)
             return
         new_nodes = list(nodes)
         if idx >= 0:
@@ -743,7 +795,21 @@ class AdminRoutes:
             + f"（来源 {self.client_address[0]}）",
             flush=True,
         )
-        self._json({"ok": True, "id": nid, "action": action}, 200)
+        self._nodes_ack(nid, action, kind, merged)
+
+    def _nodes_ack(self, nid: str, action: str, kind: str, node: dict) -> None:
+        """注册 200 应答（三条出口共用）。
+
+        `kind` 显式出现时回显 `kind` + `capabilities`（**hub 真的听懂了**的证据）：worker 据此
+        区分「新 hub + 能力已落盘」与「老 hub 静默忽略 kind」。⚠ 必须三条出口都走这里——
+        `unchanged` 是最常命中的那条（worker 重启后 url/token 都没变），漏了它就会让每次重启
+        都喊一次 `old_hub` 假警报（2026-10-23 评审 P1-6）。
+        """
+        body: dict = {"ok": True, "id": nid, "action": action}
+        if kind:
+            body["kind"] = kind
+            body["capabilities"] = node_capabilities(node)
+        self._json(body, 200)
 
     def _admin_nodes_unregister(self) -> None:
         """POST /admin/nodes/unregister —— 会话收工（enabled=false + unregistered_at，**不删**）。"""

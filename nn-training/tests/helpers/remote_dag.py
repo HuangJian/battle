@@ -194,6 +194,10 @@ LAYERS: dict[str, int] = {
     # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)
     # ⇒ 拓扑秩 **L1**；`common.*` 不在账本内，不计边。
     "remote.rollout_node": 1,
+    # 节点自动注册的**唯一实现**（2026-10-23，plan/push-mode-notebooks §4.3）：从
+    # `rollout_node` 下沉出的纯函数 + HTTP + `Registry`，只靠 stdlib ⇒ **L0**；采样 / GPU / 离线
+    # 三条腿都站在它上面（`rollout_node` 的 L1 秩不变，因为 push_register 更低）。
+    "remote.push_register": 0,
     # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
     # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
     # AST 看不见该边，这是有意的：引导文件集按 raw 拉取，不参与包内环账本）。

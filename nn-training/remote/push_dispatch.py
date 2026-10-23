@@ -47,6 +47,7 @@ from common.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
     BOTH_ROLE_KINDS,
+    CAP_GPU_PUSH,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
@@ -232,6 +233,11 @@ class PushWorkers:
       ② 运行时 `add()` 的条目（`POST /admin/push-workers`，volatile）；
       ③ `remove()` 的 id 进删除名单（覆盖面 ① 的条目，volatile）。
 
+    `capability`（2026-10-23，plan/push-mode-notebooks §6.6）：同一个类服务两种推送腿——GPU
+    派发器用缺省 `gpu_push`（行为逐字节不变），离线派发器传 `offline_push`。两条腿**共享**探活/
+    热重载/忙闲语义，只把「哪些节点算数」的参数化：第三份登记表会立刻漏掉一个修复（例如
+    “探活失败 ⇒ 当局忙”）。返回条目形状与能力无关。
+
     「在线」= 探活答过 200 且连续失败未达 `PUSH_DEAD_MISSES`。**从没答过 = 不在线**：
     宁可这一拍不推（等下一次探活），也不要往一台可能是死的机器上推几十 MB。
     探活失败但未达阈值时置 `busy=True`（状态未知 ⇒ 当它在忙）——否则一次隧道抖动就会
@@ -246,8 +252,10 @@ class PushWorkers:
         log: Any = _log_default,
         ping_sec: float = PUSH_PING_SEC,
         ping_timeout: float = 3.0,
+        capability: str = CAP_GPU_PUSH,
     ) -> None:
         self.path = Path(config_path) if config_path else DEFAULT_PUSH_CONFIG
+        self.capability = str(capability or CAP_GPU_PUSH)
         self.ping_sec = float(ping_sec)
         self.ping_timeout = float(ping_timeout)
         self._now = now_fn or time.time
@@ -286,7 +294,7 @@ class PushWorkers:
             return False
         fresh: dict[str, dict] = {}
         for n in nodes:
-            w = push_worker_from_node(n)
+            w = push_worker_from_node(n, self.capability)
             if w is not None:
                 fresh[w["id"]] = w
         with self._lock:
@@ -307,8 +315,12 @@ class PushWorkers:
         return True
 
     def add(self, rec: dict) -> dict:
-        """运行时登记一个 worker（id 缺省用 url）；返回归一条目。"""
-        w = push_worker_from_node({**rec, "gpu_push": True})
+        """运行时登记一个 worker（id 缺省用 url）；返回归一条目。
+
+        `capability` 由本登记表决定（不读 rec）：GPU 端点只能往 GPU 表里加、离线端点只能往
+        离线表里加 —— 否则一个 `POST /admin/offline-push-workers` 就能把离线节点塞进 GPU 派发器。
+        """
+        w = push_worker_from_node({**rec, self.capability: True}, self.capability)
         if w is None:
             raise ProtocolError("worker 条目需要非空 url（gpu_push 由本端点隐含）")
         with self._lock:
@@ -404,6 +416,7 @@ class PushWorkers:
         """`/admin/push-workers` 的观测体。"""
         return {
             "config": str(self.path),
+            "capability": self.capability,
             "config_mtime": self._mtime,
             "reloads": self.reloads,
             "last_ping_ago": round(self._now() - self._last_ping, 1) if self._last_ping else None,

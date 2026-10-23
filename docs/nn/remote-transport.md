@@ -6,6 +6,46 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §117 节点能力注册 + 代码优先的 push 启动（2026-10-23 · `plan/push-mode-notebooks.plan.md` · 决策 `DECISIONS.md` §2026-10-23-push-mode-notebooks）
+
+用户口径：worker 只注册一次，之后 hub 用出站连接经 worker 的稳定隧道推任务、拉产物。设计全文在
+plan（含评审的 5 个 P0 + 10 个 P1，已逐条写回）；本节只记**已落地**的 W0–W2 与三条最容易踩错的语义。
+
+**W1 能力注册（hub 面）**
+
+- `POST /admin/nodes/register` 新增可选 `kind`（`sampler`/`gpu_push`/`offline_push`）。**`kind` 缺席
+  = 一个能力键都不动**：老采样客户端每会话注册一次，把缺省当声明就会静默删掉控制台手工挂的
+  `gpu_push`（评审 P0-2）。显式 `kind` 才「先清 `NODE_CAPABILITIES` 全部键、再写本次那一个」。
+- 探活按 kind 分流：采样走 `distribution.node_ping`（`/v1/ping`），push 两态走新的
+  `distribution.push_node_ping`（`GET /ping`，Bearer）——打错端点会让每台都 422 或都通。
+- 三条 200 出口（`created`/`updated`/**`unchanged`**）都回显 `kind` + `capabilities`；`unchanged`
+  是 worker 重启最常命中的那条，漏了它就会每次重启喊一次 `old_hub` 假警报（评审 P1-6）。
+- `get /admin/nodes` 读面加两个能力键（仍不回 `authKey`）。`PushWorkers(capability=…)` 让 GPU 与
+  离线两条派发腿共用一个登记表类：能力只决定「哪些节点算数」，探活/热重载/忙闲语义一份。
+
+**W2 GPU 自动注册（worker 面）**
+
+- 注册客户端下沉到 `remote/push_register.py`（`rollout_node` 改为同名 re-export）：纯函数 +
+  `register`/`unregister` + `Registry`。退避 `2s→120s`、`auth`（401/403）立即放弃、应答缺
+  `capabilities` 记 `old_hub` 且 WARN 只一次（附可粘贴的 `nodes[]` 片段）。
+- `node_id` 按角色稳定（`gpu-<env>` / `offline-<env>`，CFG 可覆盖），与 `rollout-<env>` 同口径：
+  hub 的 unregister **不删条目**，随机 id 会让节点列表随 VM 重建线性增长（评审 P1-5）。
+- `run_push_worker` 在隧道 URL 到手（或 `already_serving`）后注册；主循环每 15s 用
+  `cloudflared.log` 检 URL 换名并重注册；`try/finally` 一律 `unregister()`（含 Ctrl-C / 会话到顶 /
+  serve 早退）。`/job`、`/ping`、结果拉取协议零改动。
+- `battle.cloudflared.ipynb` 的 **push 分支从 pull 分支拆开**（评审 P1-4）：原来共用同一段 `/code`
+  循环，把 push 的有界等待改在那里就会让 pull 从「等 1h」变成「10 分钟 FATAL」。现在 pull 逐字节
+  不变；push 走 `registry_url or hub_url` 的 `/code`（`code_wait_sec` 缺省 600s，401/403 转下一源）
+  → GitHub clone（日志打 `source=github @sha12`）→ 最后才是 `allow_push_first` 的内联 bootstrap +
+  内联注册。代码先到位再起服务/注册：否则 hub 不知道 URL、服务没起，job 永远不来（注册死锁）。
+
+**为什么 push 启动必须「代码优先」**（plan §1.2）：没有 code.zip ⇒ 只有 bootstrap server；没登记 ⇒
+hub 不知道 URL ⇒ 不推 job ⇒ code.zip 永远不来。所以 push-first 只是最后兜底，不是默认。
+
+**未落地**：W3 outbox 地基（`--outbox` 与 `--no-deliver` 的不变量、带 rev 的 ack、metrics 批、
+result body 进 `deliver_parts`）、W4 worker 服务端 + `push_mode`、W5 hub 离线派发器（缺包请导包、
+body 权威在 assignment、`proto` 门）、W6 韧性/观测。语义已按评审修正在 plan 就位。
+
 ## §116 云机掉线后本机自愈：采集裁决补两格 + 降级是**正交标记**（2026-10-23 · `plan/offline-hold-stale-fallback.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-hold-stale-fallback）
 
 用户口径：「接管掉线应该是自动的」，不该每门课每掉一次线就手工改 `rl-config.json`。现场形状：

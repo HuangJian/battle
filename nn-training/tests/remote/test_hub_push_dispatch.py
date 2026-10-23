@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import (
     AUTH_HEADER,
+    CAP_OFFLINE_PUSH,
     ProtocolError,
     normalize_manifest,
     pick_push_worker,
@@ -154,6 +155,41 @@ def test_push_worker_from_node_mirrors_trainer_side_filter() -> None:
     assert w is not None and w["id"] == "https://b" and w["concurrency"] == 3
 
 
+def test_push_workers_capability_filtering(tmp_path: Path) -> None:
+    """同一个登记表类服务两条推送腿（plan/push-mode-notebooks §6.6）。
+
+    `capability` 只决定「哪些节点算数」；条目形状不变。两种能力必须互不可见——
+    否则 GPU 派发器会把离线节点当 GPU 节点推几十 MB，而离线派发器会把 GPU 机拉进长段训练。
+    """
+    cfg = tmp_path / "push-config.json"
+    _write_cfg(
+        cfg,
+        [
+            {"id": "g1", "url": "https://g1", "gpu_push": True},
+            {"id": "o1", "url": "https://o1", "offline_push": True},
+            {"id": "both", "url": "https://both", "gpu_push": True, "offline_push": True},
+            {"id": "plain", "url": "https://plain"},
+        ],
+    )
+    gpu = PushWorkers(cfg, log=_quiet, ping_timeout=_PING_TIMEOUT)
+    assert gpu.reload(force=True) is True
+    assert [w["id"] for w in gpu.snapshot()] == ["g1", "both"]
+    assert gpu.state()["capability"] == "gpu_push"
+
+    off = PushWorkers(
+        cfg, log=_quiet, ping_timeout=_PING_TIMEOUT, capability=CAP_OFFLINE_PUSH
+    )
+    assert off.reload(force=True) is True
+    assert [w["id"] for w in off.snapshot()] == ["o1", "both"]
+    assert off.state()["capability"] == "offline_push"
+
+    # 运行时 add 的能力由**登记表**决定（端点不能把自己塞进别的腿）
+    off.add({"id": "extra", "url": "https://extra"})
+    assert {w["id"] for w in off.snapshot()} == {"o1", "both", "extra"}
+    assert {w["id"] for w in gpu.snapshot()} == {"g1", "both"}
+    assert set(gpu.state()["workers"][0]) & {"offline_push"} == set()
+
+
 def test_pick_push_worker_four_gates() -> None:
     """四道闸：在线、不忙、在飞 < 并发、不在避让名单；顺序 = 注册序（稳定可测）。"""
     ws = [
@@ -232,7 +268,7 @@ def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> No
     assert snap["g1"]["misses"] == 1 and snap["g1"]["busy"] is True, "未知状态必须当局忙"
     # 运行时增删（volatile）：add 立刻可派、remove 进删除名单（覆盖面①的配置条目）
     ws.add({"id": "extra", "url": live.url, "authKey": "k"})
-    assert "extra" in {w["id"] for w in ws.snapshot()}
+    assert {w["id"] for w in ws.snapshot()} == {"g1", "g2", "extra"}
     assert ws.remove("g1") is True
     assert {w["id"] for w in ws.snapshot()} == {"g2", "extra"}
     assert ws.remove("nope") is False

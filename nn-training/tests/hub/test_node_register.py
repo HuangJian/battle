@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from common import distribution
+from common.protocol import NODE_CAPABILITIES
 from hub.admin import AdminRoutes
 
 
@@ -379,5 +380,149 @@ def test_list_redacts_authkey_and_filters_managed(cfg_path: Path, ping_ok: None)
     assert body["count"] == 1
     assert body["nodes"][0]["id"] == "rollout-colab"
     # 清单只回这些键（`authKey` 不在其中 = 不回凭证）
-    listed = {"id", "url", "label", "enabled", "concurrency", "unregistered_at"}
+    listed = {
+        "id",
+        "url",
+        "label",
+        "enabled",
+        "concurrency",
+        "unregistered_at",
+        "gpu_push",
+        "offline_push",
+    }
     assert set(body["nodes"][0]) <= listed
+
+
+# ---------------------------------------------------------------- 能力键（kind）
+#
+# 2026-10-23（plan/push-mode-notebooks §4.2，评审 P0-2/P1-6）：能力键是派发器唯一认的事实，
+# 而 `kind` 只是**这一次注册的说法**。三条不可退让的语义：
+#   ① `kind` 缺席 ⇒ 能力键原样不动（采样节点每会话都注册，不许抹掉手工挂的 gpu_push）；
+#   ② 显式 `kind` ⇒ 先清全部能力键再写本次那一个（切角色不留残键）；
+#   ③ 三条 200 出口（created/updated/unchanged）都回显 `capabilities`。
+
+
+def _push_ping(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
+    """两个探活面各自记账：push kind 走 `push_node_ping`（`/ping`），采样 kind 走 `/v1/ping`。"""
+    push_called: list[str] = []
+    sample_called: list[str] = []
+
+    def _push(url: str, key: str, timeout: float = 3.0):
+        push_called.append(url)
+        return {"ok": True, "busy": False}
+
+    def _sample(url: str, key: str, timeout: float = 3.0):
+        sample_called.append(url)
+        return {"ok": True}
+
+    monkeypatch.setattr(distribution, "push_node_ping", _push)
+    monkeypatch.setattr(distribution, "node_ping", _sample)
+    return push_called, sample_called
+
+
+def test_gpu_push_kind_writes_the_capability_key(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called, sample = _push_ping(monkeypatch)
+    st = _reg_default(kind="gpu_push", label="gpu-colab")
+    assert st.last[2] == 200
+    assert st.last[1] == {
+        "ok": True,
+        "id": "rollout-colab",
+        "action": "created",
+        "kind": "gpu_push",
+        "capabilities": ["gpu_push"],
+    }
+    assert called == ["http://100.64.0.5:8443"], "push kind 必须走 /ping"
+    assert sample == [], "push kind 不该碰采样的 /v1/ping"
+    node = _nodes(cfg_path)[0]
+    assert node["gpu_push"] is True
+    assert set(node) & {"kind", "offline_push"} == set(), "kind 只是 wire 值不落盘；旧能力键不得残留"
+
+
+def test_sampler_registration_without_kind_keeps_capability_keys(
+    cfg_path: Path, ping_ok: None
+) -> None:
+    """P0-2 的回归：不带 kind 的普通注册**不许**抹掉 gpu_push。
+
+    现场形状：控制台手工挂了一台 `gpu_push`，同一台机器又跑采样节点、每会话注册一次。
+    """
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "id": "rollout-colab",
+                        "url": "http://100.64.0.5:8443",
+                        "authKey": "k1",
+                        "managed": True,
+                        "enabled": True,
+                        "gpu_push": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    st = _reg_default()  # 采样节点：payload 里没有 kind
+    assert st.last[1]["action"] == "unchanged"
+    assert _nodes(cfg_path)[0]["gpu_push"] is True, "缺席 kind ≠ 声明 sampler"
+    assert set(st.last[1]) == {"ok", "id", "action"}, "没带 kind 的旧形状必须逐字节不变"
+
+
+def test_switching_kind_replaces_the_old_capability_key(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _push_ping(monkeypatch)
+    _reg_default(kind="gpu_push")
+    assert _nodes(cfg_path)[0]["gpu_push"] is True
+
+    st = _reg_default(kind="offline_push", url="http://100.64.0.6:8791")
+    assert st.last[1]["capabilities"] == ["offline_push"]
+    node = _nodes(cfg_path)[0]
+    assert node["offline_push"] is True
+    assert "gpu_push" not in set(node), "旧能力键必须被清掉"
+
+    # 显式转回采样：两个能力键都清掉（否则 GPU 派发器会推离线节点），且探活回到 `/v1/ping`
+    _, sample = _push_ping(monkeypatch)
+    st = _reg_default(kind="sampler")
+    assert st.last[1]["capabilities"] == []
+    assert sample, "显式 sampler 必须走采样探活面"
+    node = _nodes(cfg_path)[0]
+    assert set(node) & set(NODE_CAPABILITIES) == set()
+
+
+@pytest.mark.parametrize("bad", ["gpu", "GPU_PUSH", "offline", "push", 1, True])
+def test_kind_domain(bad: Any, cfg_path: Path, ping_ok: None) -> None:
+    st = _reg_default(kind=bad)
+    assert st.last[2] == 400 and st.last[1]["error"].startswith("kind 非法")
+    assert _nodes(cfg_path) == [], "非法 kind 不得写盘"
+
+
+def test_unchanged_also_echoes_capabilities(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-6：worker 重启后 url/token 都没变 ⇒ 命中 unchanged，也必须回 capabilities。"""
+    _push_ping(monkeypatch)
+    _reg_default(kind="gpu_push")
+    before = cfg_path.read_bytes()
+    st = _reg_default(kind="gpu_push")
+    assert st.last[1] == {
+        "ok": True,
+        "id": "rollout-colab",
+        "action": "unchanged",
+        "kind": "gpu_push",
+        "capabilities": ["gpu_push"],
+    }
+    assert cfg_path.read_bytes() == before
+
+
+def test_list_exposes_capability_keys(cfg_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _push_ping(monkeypatch)
+    _reg_default(kind="offline_push")
+    st = _Stub()
+    st._admin_nodes_list()
+    node = st.last[1]["nodes"][0]
+    assert node["offline_push"] is True
+    assert "authKey" not in set(node)

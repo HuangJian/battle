@@ -225,6 +225,17 @@ stdout 行集合 —— 不是源码文本；同一批里能改成行为判据�
 同一批里能改成行为判据的都改了（3 条原本要撒在措辞上的断言 → `export_state` 等值），
 所以这一格是 **+1** 而不是 +5。
 
+**2026-10-23 抬 FORM 一格的账**（`plan/push-mode-notebooks` W0–W2；形态 1484 → **1490** = +6，
+SOURCE **未动** = 1099，比基线还低 1）：新增 `tests/remote/test_notebook_push_contract.py`。
+notebook **不在 pytest 里执行**（没有可调用的运行时入口），而这份 plan 的非目标就是「pull 行为逐字节
+不变」——只能读 cell 源码判：pull 分支仍是 1h + 401/403 FATAL、且不含 `code_wait_sec`；push 分支顺序
+`/code` → `git clone` → push-first；`allow_push_first` 关掉 ⇒ FATAL；push-first 内联注册带 `kind=gpu_push`
+并写回 `node_id`。同族先例 = 2026-10-10 的采样节点 notebook 接线守卫（`test_rollout_node_notebook.py`）。
+
+⚠ 同一批里能改成行为判据的都改了：注册/派发面 26 条新判据中 20 条是键集/字典等值/状态机行为
+（`set(p) == {…}`、`capabilities == ["gpu_push"]`、`reg.give_up`、真 hub loopback 落盘对账），
+notebook 的 12 条首版也合并成 5 条（同一语义相关项共一个 assert），所以这一格是 **+6** 而不是 +26。
+
 """
 
 from __future__ import annotations
@@ -247,8 +258,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   逐笔分摊见模块头）
 #: 2026-10-18 plan/eval-gap-honesty 抬到 1483（+3 收工/裁定行；理由见模块头）
 #: 2026-10-22 节流窗读面抬到 **1484**（+1 反探针 `"已经在导包了" not in trigger_note`；理由见模块头）
+#: 2026-10-23 push-mode-notebooks W0–W2 抬到 **1490**（+6 = notebook push/pull 契约；理由见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1484
+BASELINE_FORM = 1490
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

@@ -512,6 +512,24 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
     return None
 
 
+def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
+    """`GET /ping`（Bearer）→ dict；任何失败返回 None。
+
+    为什么不能复用 `node_ping`：push 类节点（`gpu_push` / `offline_push`）跑的是
+    `remote/worker_server.py`，它的探活面是 **`/ping`**（Bearer），不是 rollout agent 的
+    `/v1/ping`（query token）。同一个 hub 同时伺候两种节点，判据必须按 `kind` 分流
+    （`hub.admin._admin_nodes_register`）。
+    """
+    try:
+        status, body = _request(url.rstrip("/") + "/ping", auth_key, timeout)
+        if status == 200:
+            info: Any = json.loads(body.decode("utf-8"))
+            return info if isinstance(info, dict) else None
+    except Exception:
+        return None
+    return None
+
+
 # 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个
 # 分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把
 # 全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 = `current_upgrade_branch()`；

@@ -458,19 +458,42 @@ def push_worker_id_of(worker_id: str) -> str:
     return w if w.startswith(PUSH_WORKER_PREFIX) else f"{PUSH_WORKER_PREFIX}{w}"
 
 
-def push_worker_from_node(node: object) -> dict | None:
-    """rl-config `nodes[]` 条目 → push worker；不是 push 节点 → None。
+# ---- 节点能力键（2026-10-23，plan/push-mode-notebooks §3.2）---------------------
+#: push 类节点在 rl-config `nodes[]` 里的**能力键**（布尔字段）。能力键是唯一持久事实；
+#: 注册 wire 上的 `kind` 只是那一次请求的说法，不落盘（见 `hub.admin` 的合并语义）。
+CAP_GPU_PUSH = "gpu_push"
+CAP_OFFLINE_PUSH = "offline_push"
+#: 全部能力键（切换 kind 时按这份名单清理 ⇒ 新增能力不会漏清）。
+NODE_CAPABILITIES = (CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
+#: 注册 `kind` 的白名单。`sampler` = 采样节点（老客户端**根本不发** `kind`，见 §4.2-P0）。
+NODE_KINDS = ("sampler", CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
+#: 注册 wire 上的协议版本（worker 服务端在 `/ping` 里回；旧 worker 没有 ⇒ 不派发）。
+OFFLINE_PUSH_PROTO = "offline_push_v1"
 
-    判据与训练侧 `trainer/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
+
+def node_capabilities(node: object) -> list[str]:
+    """一个 `nodes[]` 条目声明了哪些能力键（读面/排障用；顺序稳定）。"""
+    if not isinstance(node, dict):
+        return []
+    return [cap for cap in NODE_CAPABILITIES if node.get(cap)]
+
+
+def push_worker_from_node(node: object, capability: str = CAP_GPU_PUSH) -> dict | None:
+    """rl-config `nodes[]` 条目 → push worker；不是该能力的 push 节点 → None。
+
+    判据与训练侧 `trainer/loop_steps._gpu_push_nodes` **同一把尺子**（能力键且
     `enabled` 缺省视为 true、url 非空）：两边若判据不同，就会出现「训练侧认为该推这台、
     hub 却认为一台都没有」——症状是 job 永远躺在队首（最难查的一种）。
+
+    `capability` 缺省 `gpu_push`（GPU 派发器的既有语义，返回形状不变）；离线派发器传
+    `CAP_OFFLINE_PUSH`。**返回值形状与能力无关**（`capability` 由登记表自己记）。
 
     返回 `{id, url, key, concurrency}`：`id` 缺省回落到 url（与训练侧日志口径一致），
     `concurrency` 缺省 1（gpu_push 节点线上就没有这个键——单 GPU 一次一份）。
     """
     if not isinstance(node, dict):
         return None
-    if not node.get("gpu_push") or not node.get("enabled", True):
+    if not node.get(capability) or not node.get("enabled", True):
         return None
     url = str(node.get("url") or "").rstrip("/")
     if not url:

@@ -149,7 +149,16 @@ def test_register_success_posts_to_the_admin_endpoint() -> None:
         {"id": "n"},
         lambda m: None,
     )
-    assert out == {"ok": True, "status": 200, "action": "created", "error": None, "kind": "ok"}
+    # 2026-10-23：返回体多了 `body` / `capabilities`（push 节点要用应答认「hub 听懂 kind 了吗」）。
+    assert out == {
+        "ok": True,
+        "status": 200,
+        "action": "created",
+        "body": {"ok": True, "action": "created"},
+        "capabilities": [],
+        "error": None,
+        "kind": "ok",
+    }
     assert len(calls) == 1
     req = calls[0]
     assert req.full_url == "http://hub:8787/admin/nodes/register"

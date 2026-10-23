@@ -8984,3 +8984,58 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `tests/{worker,trainer}/` 五份 + `dashboard/tests/server-api-overview.test.ts` · 全文 → `docs/nn/remote-transport.md §116`。
 - **验收**：`bun run check` 2617 pass / 0 fail · dashboard typecheck + 1799 pass / 0 fail · nn 子集 70 passed ·
   e2e supervisor 11 passed · ruff + mypy ✓ · `bun run build` ✓。
+
+## §2026-10-23-push-mode-notebooks（2026-10-23，用户口径「worker 注册一次，hub 主动来拉」）
+
+- **背景**：两条链方向相反。`battle.cloudflared`（GPU）已是「hub 推 job、hub 拉结果」，缺的只是
+  自动注册（登记靠人手把隧道 URL 抄进 `rl-config`）；`battle.offline` 是 pull（worker 领任务、
+  worker 回传产物），大流量正好穿在用户说的「hub 入站隧道不稳定」那一侧。直接的修法是把离线链
+  翻成 hub 拉取式 push：worker 只做一次很小的注册/注销，之后 hub 用自己的出站连接经 worker 稳定
+  的隧道推任务包、拉进度/每轮产物/段末结果。设计全文 `plan/push-mode-notebooks.plan.md`，
+  评审（5 个 P0 + 10 个 P1）已逐条写回该 plan。
+- **决定**（本次落地 W0–W2；W3–W6 的语义也一并定下）：
+  1. **能力键是唯一持久事实，`kind` 只是注册 wire 值**。`gpu_push` / `offline_push` 写进
+     `rl-config.nodes[]`；`kind` 白名单 `sampler|gpu_push|offline_push`，不落盘。**`kind` 缺席
+     ≠ `sampler`** —— 缺席时**一个能力键都不动**（老采样客户端每会话注册一次，把它当成声明会
+     静默删掉控制台手工挂的 `gpu_push`）；只有显式 `kind` 才「先清全部能力键、再写本次那一个」。
+  2. **push 节点的探活面是 `GET /ping`（Bearer），采样节点是 `GET /v1/ping`**，按 `kind` 分流
+     （`distribution.push_node_ping` 新增）；注册应答的**三条 200 出口**（含最常命中的 `unchanged`）
+     都回显 `kind` + `capabilities`，worker 用它区分「新 hub 听懂了」与「老 hub 静默忽略」。
+  3. **注册客户端只有一份**（`remote/push_register.py`，从 `rollout_node` 下沉，同名 re-export）：
+     采样 / GPU / 离线三条腿共用退避梯子（2→120s，`auth` 立即放弃）与 `manual_snippet`；
+     `Registry.ensure()` 只在 url/authKey 变化时发请求，退出 `unregister()`。
+  4. **node_id 按角色稳定**：`gpu-<env>` / `offline-<env>`（与 `rollout-<env>` 同口径，CFG 可覆盖）。
+     不落 `/tmp` 的随机 hex —— hub 的 unregister **不删条目**，随机 id 会让节点列表随 VM 重建线性增长。
+  5. **push 启动 = 代码优先**：`registry_url or hub_url` 的 `/code`（有界 `code_wait_sec`，缺省 600s）
+     → GitHub clone → 最后才是 push-first（`allow_push_first` 可关）。push-first 打头会死锁：
+     没代码 ⇒ 只有 bootstrap server；没登记 ⇒ hub 不知道 URL ⇒ 不推 job ⇒ code.zip 永远不来。
+     **push 与 pull 分支拆开**：pull 仍是 1h 等 `/code`、401/403 直接 FATAL（非目标：pull 不变）。
+  6. **离线 push 的 hub 侧是「拉」**：pump 线程按 `it` 拉 progress/round/final，ingest 与 HTTP 腿
+     共用同一份函数（不 loopback POST）；**body 的权威是 assignment**（course/run_id 由 hub 校验，
+     不一致 409 + `conflict`）；缺包 ⇒ 派发器调共享的「请导包」而不是跳过；outbox 每轮写**完整
+     body**（不做服务端按需重建）+ 迟到 eval 行（rev+1）+ metrics 批，ack **带 rev**。
+- **否决的备选**：① 继续 worker→hub 回传、只优化 hub 隧道 —— 正是用户说的不稳定方向；
+  ② `kind` 缺省当 `sampler` —— 一次普通注册抹掉 GPU 能力键（P0-2）；
+  ③ 新开 `remote/deliver_build.py` 抽 body 构造 —— 会把它顶到 L2、`offline_deliver` 升 L3 并级联
+  到 `plan_handoff`/`run_loop`（`test_every_layer_number_equals_its_topological_rank` 当场红），
+  而缺的只有 result body ⇒ 放进已有的 `deliver_parts`；
+  ④ 第三份注册客户端 —— 三套退避梯子必然漂开；
+  ⑤ push-first 当默认 —— 注册死锁；
+  ⑥ hub 拉到 body 后 loopback POST 给自己的 `/offline/artifact` —— 大 body 二次复制、耦合端口/token；
+  ⑦ ack 无条件删 `it<=upto_it` —— 迟到 eval 行没有落点；
+  ⑧ 离线 push 默认 `mode="push"` —— 老 hub/未开 `--push` 会静默空转（v1 只做 opt-in）。
+- **违反后果**：把 `kind` 缺省当声明 ⇒ 控制台手工能力键被静默清掉、GPU 派发器一台都看不见；
+  push kind 打 `/v1/ping` ⇒ 每台 422（或都通），注册永远不成；push 走共享 `/code` 循环 ⇒ pull 从
+  「等 1 小时」变成「10 分钟 FATAL」；`--outbox` 与 `--no-deliver` 互相抵消 ⇒ **没有报错**地一轮
+  产物都不出去（训练照跑、`/state` 永远空、最后被 hold stale 判掉线）。
+- **代价（诚实账）**：稳定 node_id 让「两台同角色并发」互相顶 URL（需要并发时显式给 `node_id`）；
+  push 模式多一份 outbox 权重副本（稳态 1–2 轮，WARN 2GiB / 上限 4GiB）；冷启动 hub 还没导
+  `code.zip` 时 `source=github` 是预期（两个源的 commit 可能不同，日志打 sha12 备查）；
+  真机收益（换方向后大流量成功率）没有数值证据 —— 按用户口径采信云机房 cloudflared 稳定，未复测。
+- **落点**：`nn-training/common/{protocol,distribution}.py` · `hub/admin.py` · `remote/push_dispatch.py` ·
+  `remote/push_register.py`（新）· `remote/rollout_node.py`（改为 re-export）· `remote/notebook_runtime.py` ·
+  `ipynb/battle.cloudflared.ipynb` · `tests/{hub,remote}/` 五份 + `tests/helpers/remote_dag.py`（`push_register`=L0）·
+  全文 → `docs/nn/remote-transport.md §117`；设计 → `plan/push-mode-notebooks.plan.md`。
+- **验收**：`bash tools/githook/nn-python-gate.sh`（ruff+mypy+pytest）· `bun run check` · `bun run build`；
+  注册面/注册客户端/notebook 契约共 40+ 用例（含真 hub loopback）。W3–W6（outbox 地基、worker 服务端、
+  hub 派发器、韧性、观测 API）未落地，语义已在 plan 就位。
