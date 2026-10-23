@@ -1,0 +1,131 @@
+// 课程 y30-tempo —— **单变量：停的「超额比例」定价**（`- wStop*max(stopTicks−stopBand*ticks,0)/(ticks+1)`）。
+// 其余 21 参 / formula / terminal / 训练参数 / 起点 / seed 流 **逐字 = y29-steady**。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// ── 0. 一句话（口径订正）──────────────────────────────────────────────────────
+// **停本身不是问题**：人类参照的 stop 密度是 **288.9/千**，比它现在 653/千 只差 2.3 倍，
+// 而人类赢得更多、更快。真正的问题是**停的比例**被推到 65% 且集中在中心。
+// ⇒ 本腿不罚"停"这个动作，只罚**超过 30% 的那部分比例**：人类水平（28.9%）一分不付。
+//
+// ── 1. 为什么旧写法错（2026-10-22 用户订正）────────────────────────────────────
+//   旧版 `- wStop*stopTicks/(ticks+1)` 是**线性绝对量**：每多停 1 千拍就多扣 wStop，
+//   于是"停下来预判一枪""等炮弹过线"这些**好的停顿**同样被收费。人类 288.9/千 的停里
+//   大部分属于这类，线性项会把它们一起压掉 ⇒ 方向对、形状错。
+//   改成**带宽式**：`max(stopTicks − stopBand*ticks, 0)` ⇒ 前 30% 免费，只对超额部分收钱。
+//   这也是本批唯一允许的"停"相关改动，**不再动任何绝对量**。
+//
+// ── 2. 立项依据（y29-steady **it220** vs 161 局人类，同 160 座；`reports/y30-vs-human-gap-20261022.md`）──
+//   | 读数（每千存活拍） | 人 | it220 | 比 |
+//   | 停（stopTicks） | 287.6 | 564.8 | 1.96× |
+//   | **停 ∧ 在地图中心 3 格** | **84.7** | **345.4** | **4.08×** |
+//   | 中心 3 格内（不论动不动） | 258.8 | 460.5 | 1.78× |
+//   | 中心 ∧ 6 格内无敌 | 164.9 | 270.4 | 1.64× |
+//   | 停着开火占比 | 14.3% | 29.9% | 2.09× |
+//   | 局长（拍） | 4975 | 8448 | 1.70× |
+//   ⇒ **判据落在"中心∧停"（4.08×）而不是"停"（1.96×）**：停是必要动作，位置才是问题。
+//
+// ── 3. 剂量 ─────────────────────────────────────────────────────────────────
+//   ★ 起点改 **it260**（2026-10-22 10:20 用户定）：eval anchor 200 局 stop 占比 **0.723**（723/千），
+//     比 it220 的 0.653 更差 ⇒ 超额 = 0.723 − 0.30 = **0.423**，wStop 按此重算。
+//     wStop 36 ⇒ **15.2 Φ/局 = 正项预算 135.4 的 11.2%**
+//   人类水平 0.289 < 0.30 ⇒ 本项 0 Φ（**与人同水平不付钱**，这是设计的核心）
+//   剂量阶梯：36 → 45 → 60。⚠ 60 时只要超过 60% 停就扣 18 Φ，会开始惩罚"守株待兔"之外
+//     的战术停顿（例如残血拉扯）⇒ 不建议一步到 60。
+//   目标读数（不是判据）：stop ≤ 0.45、中心∧停 ≤ 0.60×、局长 ≤ 7000 拍。
+//
+// ── 4. 判据（预注册）────────────────────────────────────────────────────────
+//   主判 = 与 **y29-steady 同窗口同座位配对**（anchor 860001-860050 × stage 2000-2003，
+//     it150-200 的 11 点；座位聚合后 McNemar）；禁用混合 `winRate`。
+//   T1 中心∧停/千 ≤ **0.60×**（主效应，345.4 → ≤207）· T2 stop 占比 ≤ 0.45
+//   T3 局长 ≤ 0.90× · T4 kills/千 ≥ 0.97× · T5 胜率 ≥ 0.8014（|Δ|<3pp 判分不出）
+//   杀腿：C1 kills/千 < 2.40 · C2 timeout > 5% · C3 it100 anchor_wr < 0.72
+//         C4 dmg/局 > 1.10 × 178 且 Δwin ≤ 0。
+//
+// ── 5. 已知局限 ────────────────────────────────────────────────────────────
+//   · 带宽式只压**比例**，压不动"在中心来回走"（走着不算 stop）。要直接打中心蹲守
+//     需要新列 `centerIdleTicks`（中心 3 格 ∧ 停 ∧ 6 格无敌），本批没有 ⇒ 靠 T1 间接看。
+//   · `stopTicks` 在 v6 里是 HOLD 动作；人类口径是"没按方向"。两者同源（`idle-rate.ts`）
+//     但**不完全同构**（人可能在瞄）——这也是为什么要留 30% 免费带。
+
+{
+  "version": 5,
+  "name": "y30-tempo",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y29-steady + 停的超额比例带（wStop 36 / band 0.30）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) - wStop*max(stopTicks-stopBand*ticks, 0)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wStop": 36.0,
+      "stopBand": 0.3,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270208,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y30-tempo/weights.json",
+  "traj": "tmp/y30-tempo",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y30-tempo",
+  "backup_prefix": "y30-tempo",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

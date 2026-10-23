@@ -1,0 +1,132 @@
+// 课程 y30-pickup —— **单变量组：道具价 + 冻/盾窗口内命中奖励**（两笔都在"身上有货时更值钱"这条线上）。
+// 其余 20 参 / terminal / 训练参数 / 起点 / seed 流 **逐字 = y29-steady**。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// 道具的真实毛病不是"捡不到"（转化率 61% = 人类 61%），而是**安全时站在道具旁边不动**
+// （"安全∧3格内∧站着" 12.70/千 vs 人 2.84，**4.48×**）；同时冻/盾这一段
+// **最便宜的安全杀敌窗口**几乎没被兑现（冻期开枪 0.13×、击杀 0.17×）。
+//
+// ── 1. 立项依据（`reports/y30-vs-human-gap-20261022.md`）──────────────────────
+//   | 读数 | 人 | it220 | 比 |
+//   | 道具出现/局 | 5.75 | 6.18 | 1.08× |
+//   | 道具捡到/局 | 3.48 | 3.80 | 1.09× |
+//   | 转化率 | 61% | 61% | 1.00× |
+//   | **安全∧3格∧停 /千** | **2.84** | **12.70** | **4.48×** |
+//   | 冻期开枪 /千冻拍 | 13.71 | **1.85** | **0.13×** |
+//   | 冻期击杀 /千冻拍 | 5.39 | **0.91** | **0.17×** |
+//   | 盾期开枪 /千盾拍 | 13.37 | 6.46 | 0.48× |
+//   | 盾期击杀 /千盾拍 | 5.24 | 2.85 | 0.54× |
+//
+// ── 2. 剂量 ─────────────────────────────────────────────────────────────────
+//   `wPickup 0.8 → 3.0`：实测 **5.71 次/局**（eval anchor **it260**）⇒ 每次多 2.2 Φ
+//     = **+12.6 Φ（正项的 9.3%）**；一个道具从 0.27 个击杀涨到 1.0 个击杀。
+//     梯度形状问题：`wApproach 0.008*dist`（逐拍）让"贴近"本身值钱、`wPickup` 只在吃到时给一次
+//     ⇒ 贴到 1 格后再走最后一步几乎无收益。
+//   `wWinHit 1.5 * hitsInFreezeShieldWindow`（列 idx77 既有）：实测窗内命中 **5.74/局**
+//     ⇒ **+8.6 Φ（6.4%）**。合计 **+21.2 Φ ≈ 15.7%**（见 `tmp/y30-doses.py`）。
+//   ⚠ 初稿按 3.8 次/局、1.6 窗内命中估的 +16.9 是**低配**：实测分别是 5.71 / 5.74，故把
+//     wPickup 从 4.0 回落到 3.0、wWinHit 从 2.0 回落到 1.5，保持总量 ≈16%。
+//   ⚠ 这是**故意重开 B6**。y28 的判决是：wWinHit 1.6 确实买到行为（窗内命中 +14.2%），
+//     但**零胜率回报**（Δ −1.5pp / p=0.798）。重开的理由不是"上次剂量不够"，而是：
+//     ① 本腿的作用是**把冻/盾窗口变成有价的进攻窗口**，不是指望它单独抬胜率；
+//     ② 它与 wPickup 4.0 同向（更多冻/盾道具 → 更多窗口 → 窗口内有价）。
+//     ⇒ 若最终胜率不涨，**不得**把它记成"B6 又失败一次"，只能记"窗口价在 stack 里无增益"。
+//
+// ── 3. 判据（预注册）────────────────────────────────────────────────────────
+//   主判 = 与 **y29-steady 同窗口同座位配对**（anchor 860001-860050 × stage 2000-2003，it150-200 的 11 点）；
+//   P1 道具/千拍 ≥ **1.25×**（现状 0.81/千）· P2 转化率 ≥ 0.95×
+//   P3 **安全∧3格∧停/千 ≤ 0.60×**（12.70 → ≤7.62；这是本腿的真目标）
+//   P4 冻期击杀/千冻拍 ≥ **2.0×**（0.91 → ≥1.82）· P5 承伤/局 ≤ 1.05×
+//   P6 胜率 ≥ 0.8014（|Δ|<3pp 判分不出）
+//   杀腿：C1 kills/千 < 2.40 · C2 timeout > 5% · C3 it100 anchor_wr < 0.72
+//         C4 dmg/局 > 1.10 × 178 且 Δwin ≤ 0。
+//
+// ── 4. 已知局限 ────────────────────────────────────────────────────────────
+//   · 只买"吃到"，**不买"别在旁边磨蹭"**。若 P1 涨而 P3 不降 ⇒ 驻留不是价钱问题，
+//     下一步要新列 `safePickupNearTicks`（安全 ∧ 2 格内有道具的拍数）给它负价。
+//   · `wWinHit` 的分母（`freezeShieldWindowTicks`）不参与本公式 ⇒ 会出现"窗口很短但命中多"
+//     的刷分路径（一进窗口就开一枪）。P4 用**密度**（每千冻拍）核对，不看绝对命中数。
+//   · 道具可能刷在危险位；本腿会让它更愿意去拿 ⇒ C4 是主止损。
+
+{
+  "version": 5,
+  "name": "y30-pickup",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y29-steady + wPickup 4.0 + wWinHit 2.0（窗内命中）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wWinHit*hitsInFreezeShieldWindow + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wWinHit": 1.5,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270208,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y30-pickup/weights.json",
+  "traj": "tmp/y30-pickup",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y30-pickup",
+  "backup_prefix": "y30-pickup",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

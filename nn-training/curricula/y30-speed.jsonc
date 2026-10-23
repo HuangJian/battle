@@ -1,0 +1,126 @@
+// 课程 y30-speed —— **单变量组：速度定价 + 过长局分段征税**（同一议题的两端：奖快、罚拖）。
+// 其余 20 参 / terminal / 训练参数 / 起点 / seed 流 **逐字 = y29-steady**。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// 现在「省 1000 拍」只值 **2.14 Φ**（0.7 个击杀），人类比 it220 快 **3473 拍**只值 7.4 Φ。
+// 本腿把速度价抬到 5.71 Φ/千拍，并对 **>5000 拍**的局分段加税（5000–7000 轻、>7000 重）。
+//
+// ── 1. 立项依据（`reports/y30-vs-human-gap-20261022.md`）──────────────────────
+//   局长 **8448 vs 4975 拍（1.70×）**；击杀 18.93 vs 17.63（1.07×）、出手 52.0 vs 53.7（0.97×）
+//   ⇒ 不是打得多，是**拖得久**。人类 90 分位 ≈ 7000 拍 ⇒ 分段刀口就切在 5000/7000。
+//
+// ── 2. 剂量（两段）──────────────────────────────────────────────────────────
+//   实测基准（eval anchor **it260** 200 局）：**7695 拍**；（人类 160 座探针面板 = 4975 拍，NN 同座 = 8448 拍）
+//   ⚠ it260 比 it210（7245 拍）**更慢 450 拍**、stop 占比 0.653→0.723 ⇒ 本腿剂量按 7695 重算。
+//   **奖快**：`wSpeed 3.0 → 8.0` ⇒ 每千拍 2.14 → **5.71 Φ**；
+//     7695 拍拿 30.3 Φ（原 11.4，**+18.9**）；4975 拍拿 45.9 Φ。
+//   **罚拖**（新增两项，**只在通关时结算**，`where(clearTick>=0, …)`）：
+//     `- wLong*clip(ticks−5000, 0, 2000)/1000`      wLong = 2.5  ⇒ 5000–7000 段每千拍 2.5 Φ，封顶 5 Φ
+//     `- wVeryLong*max(ticks−7000, 0)/1000`         wVeryLong = 5.0 ⇒ >7000 每千拍 5 Φ
+//     7695 拍 ⇒ **−8.48 Φ**（轻 5.00 + 重 3.47）；8448 拍 ⇒ −11.24；6000 拍 ⇒ −2.5；4975 拍 ⇒ **0**。
+//   合成边际（每省 1000 拍值多少）：**<5000 段 5.71** · **5000–7000 段 7.71** · **>7000 段 10.71 Φ**。
+//   本腿净值 = +18.9 −8.5 = **+10.4 Φ/局（正项的 7.7%）**，见 `tmp/y30-doses.py` 的输出。
+//
+// ── 3. ★ 为什么「过长税」必须低于 −35（超时/死亡同价）──────────────────────────
+//   预注册硬约束：**任何局的总 tick 税 < 35 Φ**。最坏情形 = 12900 拍极限通关：
+//     4 + (12900−7000)/1000×5 = **33.5 Φ < 35** ✓（wVeryLong 若取 6 就会破 35，**不要往上调**）
+//   并且两项都**只在 clearTick≥0 时结算**：输的局只付 terminal −35，不再叠加 tick 税
+//   （否则一个超时局会变成 −35 −33.5 = −68.5，"延长一局"会比"直接输"更贵，梯度会教它提前送死）。
+//
+// ── 4. 判据（预注册）────────────────────────────────────────────────────────
+//   主判 = 与 **y29-steady 同窗口同座位配对**（anchor 860001-860050 × stage 2000-2003，it150-200 的 11 点）；
+//   S1 局长 ≤ **0.85×**（7695 → ≤6541，主效应）· S2 kills/千 ≥ 0.97×
+//   S3 timeout ≤ 1%（速度价最坏失效 = 抢时间被打死/拖到超时）· S4 承伤/局 ≤ 1.05×
+//   S5 胜率 ≥ 0.8014（|Δ|<3pp 判分不出，≥5pp 且 p<0.05 才判有效/有害）
+//   杀腿：C1 kills/千 < 2.40 · C2 timeout > 5% · C3 it100 anchor_wr < 0.72
+//         C4 dmg/局 > 1.10 × 178 且 Δwin ≤ 0。
+//
+// ── 5. 已知局限 ────────────────────────────────────────────────────────────
+//   · 两项 tick 税都与 wSpeed **共线**（同一个 clearTick/ticks 轴）⇒ 本腿读不出"奖快"和"罚拖"
+//     各占多少；要拆得开两条腿，但用户已明确**不要单变量观察** ⇒ 只作合效应读。
+//   · 通关晚但赢的局（例如残血拉扯到最后）会被罚得比"快点赢"多，这与"稳"有张力；
+//     C4/T5 是这条张力的刹车。若 S1 达标而 S5 掉 ≥5pp ⇒ 说明节奏换胜率，判负。
+
+{
+  "version": 5,
+  "name": "y30-speed",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y29-steady + wSpeed 8 + 过长局分段税（band 5000/7000）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wLong*where(clearTick>=0, clip(ticks-5000, 0, 2000)/1000, 0) - wVeryLong*where(clearTick>=0, max(ticks-7000, 0)/1000, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 8.0,
+      "wLong": 2.5,
+      "wVeryLong": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270208,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y30-speed/weights.json",
+  "traj": "tmp/y30-speed",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y30-speed",
+  "backup_prefix": "y30-speed",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

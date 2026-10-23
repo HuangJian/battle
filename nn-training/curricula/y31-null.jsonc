@@ -1,0 +1,155 @@
+// 课程 y31-null —— **零改动对照**（奖励逐字 = y29-steady，起点 = it260）。
+// 状态：**部分（it28 停，2026-10-23）**——N4 已答（it5 下滑是共性），N1/N3 未达；**不续跑 500**。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// y30 四腿在 **it5–10 全部下滑 3.5–12.5pp**（含只改终局项的 speed），谁也没能解释这一段。
+// 本腿不回答"哪个奖励有用"，只回答一个前置问题：**从 it260 继续 PPO，本身会不会掉？**
+// 如果它掉了，那 y30 的四腿读数全是"漂移 + 处理"，处理效应一律不可读。
+//
+// ── 1. 立项依据（`reports/y30-four-legs-20261022.md` §3-③）────────────────────
+//   · 四腿 it5–10 同时下滑，幅度与"终局项改动的大小"同序（speed 把通关奖励 9.75→30.3，it5 掉 12.5pp；
+//     pickup 加稀疏小项，it10 只掉 4pp）⇒ 指向**回报尺度重置让价值头失配**，而不是某条机制。
+//   · 四腿 entropy 一起从 1.58 掉到 1.48–1.54，kl 只有 0.013–0.016（不是发散，是快速固化）。
+//   · y29 的实测：从收敛点继续 210 轮 = **−1.36pp（t=−1.65，分不出）**。
+//   ⇒ 需要一个"什么都不改"的臂来量这条基线；y21 的老结论也是「判决性实验 = 一条 null 腿」。
+//
+// ── 2. 判据（预注册）────────────────────────────────────────────────────────
+//   N1 本臂 it150-200 的 anchor_wr = **漂移基线 D**（起点 0.865，y29 同窗口 0.8014 仅作参考）。
+//   N2 |D − 0.865| ≥ 5pp ⇒ 底座不稳：**同批所有处理臂的 Δ 都要先减 D 再读**；
+//      D ≤ 0.80 ⇒ **整批停止**，先查训练面（价值头/尺度/数据），别读 treatment。
+//   N3 行为侧同步记：shots/千（起点 7.85）、局长（7695）、stop 占比（0.723）、承伤（131.2）。
+//      若 D 掉而 shots/千 也掉 ⇒ "继续跑"本身在削开火意图，这比任何奖励都重要。
+//   N4 逐段记录 it5/it10/it20 的单点，与 y30 四腿同一时点对齐（判断塌陷是否共同发生）。
+//
+// ── 3. 与 y29-steady 的差异（逐项，别多改）──────────────────────────────────
+//   name / out / traj / backup_* / bc(it260) / paired_rotate_seed(20270209)。
+//   ⇒ 与 y29-steady 的唯一区别是**起点**（it260 vs it300）与 seed 流；
+//     与 y30 四腿的唯一区别是**奖励**（不加减任何项）。
+//
+// ── 4. 预算 ────────────────────────────────────────────────────────────────
+//   `iters: 500` · `max_hours: 24`；参考轮速 16–18 轮/h。判据窗口 it150-200。
+
+// ── 结课报告（2026-10-23，it28 停；部分结课）──────────────────────────────────
+// 结论：**N4 已答；N1/N3 未达。**
+//   本臂要回答的前置问题是"y30 四腿在 it5–10 的共同下滑，是不是继续 PPO 的共性？"
+//   答案是**是**：本臂 it5 也是 0.795（与 y30-stack 的 it5 完全同点），但 it10 回到 0.855；
+//   四腿的区别是**不恢复**（it10 之后 0.72–0.76）。这把"共性塌陷"与"处理效应"分开了。
+//   预注册的 D（it150–200）没跑到；但 D 已经被 it5–25 均值 0.821（−4.4pp）与 y31-fire 尾段
+//   0.850（相对 0.865 基座 −1.5pp）夹住，**不会改变 y30 的判决**（处理臂 13–24pp）。
+//   ⇒ 不续跑 500；没有消费者（y32 的对照是 it380）。若将来要形式化 D，最多补到 it150–200（~1h）。
+//
+// 1. 设计（预注册）
+//   N1 D = it150–200 的 anchor_wr（起点 0.865）
+//   N2 |D−0.865| ≥5pp ⇒ 底座不稳；D ≤0.80 ⇒ 整批停，先查训练面
+//   N3 行为侧：shots/千（7.85）· 局长（7695）· stop（0.723）· 承伤（131.2）
+//   N4 it5/it10/it20 与 y30 四腿同点对齐
+//   奖励逐字 = y29-steady；起点 it260；唯一差异是 name/out/seed 流。
+//
+// 2. 读数（eval，400 局/点；行为列是 slim，shots/stop/window 全缺）
+//   | it   |  5   |  10  |  15  |  20  |  25  | 均值 | 起点 |
+//   | win  | .795 | .855 | .800 | .828 | .825 | .821 | .865 |
+//   | 局长 | 7943 | 7905 | 7764 | 7608 | 7539 | 7752 | 7695 |
+//   | 杀/局| 18.56| 18.84| 18.30| 18.52| 18.52| 18.55| 18.98|
+//   | 杀/千| 2.34 | 2.38 | 2.36 | 2.43 | 2.46 | 2.39 | 2.47 |
+//   | 承伤 | 148.2| 128.4| 143.1| 138.0| 140.1| 139.6| 131.2|
+//   | 伤/杀| 8.0  | 6.8  | 7.8  | 7.4  | 7.6  | 7.5  | 6.9  |
+//   | 道具 | 5.45 | 5.61 | 5.43 | 5.66 | 6.04 | 5.64 | 5.71 |
+//   训练侧 entropy 1.55–1.65、kl .010–.028：没有发散，也没有快速固化。
+//
+// 3. 判决
+//   N4 **PASS**（共性下滑、随后恢复）· N1 **未达** · N3 **不可读**（slim）· N2 不适用。
+//   D 的两个界都 ≤5pp，而 y30 处理臂 13–24pp ⇒ **N2 的"底座不稳"不成立**；
+//   y30 的"处理臂负"不依赖 D 的精确值。
+//
+// 4. 为什么不再跑
+//   · N1 的消费者只有 y30/y31 的判决；y30 已判负，y31-fire 尾段已给漂移代理，y32 用 it380。
+//   · 500 轮（~2.5h）只买一个没人用的常数；it150–200（~1h）也只买精度，不买结论。
+//   · 行为列跑到 200 仍是 slim；要 N3 得单独做本地全字段重评，不是"继续训练"能补的。
+//
+// 5. 复跑与数据
+//   全量 it28：`nn-training/weights/y31-null/y31-null.it28.20261023-0740.json`
+//     （394685 B / schema 6 / 44 张量，`load_weights_json` 实读）。
+//   `tmp/y31-null/weights.json` 是 wire 格式（`load_weights_json` 读不了），别拿它 resume。
+//   eval `tmp/y31-null/eval_log.jsonl`（5 点 ×400）· train `.../training_log.jsonl`（28 iter）。
+
+{
+  "version": 5,
+  "name": "y31-null",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：逐字 = y29-steady（21 参）──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270209,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y31-null/weights.json",
+  "traj": "tmp/y31-null",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y31-null",
+  "backup_prefix": "y31-null",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -1,0 +1,160 @@
+// 课程 y31-horizon —— **单变量（训练侧）：`lam 0.95 → 0.99` + `gamma 0.998 → 0.999`**。
+// 状态：**已停（it55，2026-10-23）· 判负**——H3/H4/H5/H6 触发，H1/H2 通过；不续跑。
+// 奖励**逐字 = y29-steady**、起点 it260、其余训练参数不动。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// 现在的 GAE 有效视野只有 **≈19 步**（γλ = 0.998×0.95 = 0.9481）。一局 7700 拍，
+// 而"该不该现在压上去/该不该绕过去"这种决策要**几百拍后**才结算 ⇒ 优势函数看不见。
+// 本腿不动奖励，只把优势的视野拉长 **4.7 倍（19 → 91 步）**，看行为会不会自己变快。
+//
+// ── 1. 立项依据 ─────────────────────────────────────────────────────────────
+//   · y30 四腿把"奖励侧"的三种买法（停占比、终局速度、道具/窗口）全部试死：
+//     停 → 命中率崩、速度项 → 局长反升、道具 → 承伤 +43%（`reports/y30-four-legs-20261022.md`）。
+//   · 唯一没试过的正交杠杆就是**信用分配**：回报的折扣 γ=0.998 意味着 1 拍后的奖励衰减到
+//     0.998^n；7700 拍的通关奖励权重 e^-15 ≈ 1e-7 ⇒ 终局项事实上只能靠 V 传播。
+//     GAE(λ) 的偏差视野 = 1/(1−γλ)：**现状 19.3 步，本腿 90.9 步**。
+//   · 训练侧可动是明确允许的（任务侧不可动）——本腿不碰任何任务定义与奖励语义。
+//
+// ── 2. 剂量与副作用 ─────────────────────────────────────────────────────────
+//   `lam 0.95 → 0.99`、`gamma 0.998 → 0.999`。
+//   · γ 变大 ⇒ 回报的方差变大（credit 摊到更远）⇒ 价值头的目标分布变宽；
+//   · λ 变大 ⇒ 偏差↓方差↑，是最直接的"看得更远"旋钮。
+//   ⚠ 这是**唯一会改 value 目标分布的腿**，所以它的第一道门是**稳定性**（entropy/kl），不是胜率。
+//   剂量阶梯：0.99/0.999 → 若不稳定回 0.98/0.9995 的组合；**不要**动到 lam 1.0（纯 Monte-Carlo，方差爆）。
+//
+// ── 3. 判据（预注册）────────────────────────────────────────────────────────
+//   H 门（稳定性，it1–60）：
+//     H1 entropy ≥ **1.50**（y30 四腿掉到 1.48–1.54，是快速固化的指纹）
+//     H2 kl ≤ **0.030**（现状 0.013–0.016；放大视野后 TD 误差变大是预期的，但别失控）
+//     H3 不出现单点 >5pp 的塌陷（y30 四腿在 it5–20 全塌）
+//   **主判（it150-200，anchor 11 点）**：
+//     H4 胜率 ≥ **0.850**（起点 0.865）
+//     H5 **局长 ≤ 7000**（7695 → −9%）**且** shots/千 ≥ 8.8（7.85 → +12%）
+//        ——两项必须同时过：只快不多打 = 早死；只多打不快 = 白打
+//     H6 承伤/局 ≤ 145
+//   杀腿：胜率 < 0.830 · kills/千 < 2.40 · timeout > 5% · entropy < 1.45
+//
+// ── 4. 为什么值得单开一腿 ─────────────────────────────────────────────────────
+//   如果 H5 过，说明"慢"的根因是**优化器看不见长程后果**，而不是价格没给够——
+//   那接下来所有课程都该先修信用分配，再谈奖励；反之若 H5 不过而 y31-fire 过，
+//   则确认瓶颈在"开火意愿"，两条腿的结论互相封口。
+
+// ── 结课报告（2026-10-23，it55 停；判负）──────────────────────────────────────
+// 结论：**长视野在该剂量下净负，不是慢启动。**
+//   H1/H2 通过（entropy 1.56–1.64、kl .012–.028），但 H3/H4/H5/H6 全部触发；
+//   与 null 同点（it5–25）低 5–10pp。伤/杀 7.8→12.3、局长只 −6%、承伤 200–211
+//   ⇒ 用更多的血换更少的时间。⇒ **不 resume**；若再试，开新腿 lam .98 / gamma .9995 + it30 闸。
+//
+// 1. 设计（预注册）
+//   H1 entropy ≥1.50 · H2 kl ≤0.030 · H3 无单点 >5pp 塌陷
+//   H4 胜率 ≥0.850（it150–200）· H5 局长 ≤7000 且 shots/千 ≥8.8 · H6 承伤 ≤145
+//   杀腿：win <0.830 · kills/千 <2.40 · timeout >5% · entropy <1.45
+//   奖励逐字 = y29-steady；起点 it260；只改 gamma .998→.999 / lam .95→.99（视野 19→91 步）。
+//
+// 2. 读数（eval，400 局/点；it0 全字段，it5+ slim）
+//   | it  | 0    | 5    | 10   | 15   | 20   | 25   | 30   | 35   | 40   | 45   | 50   | 55   |
+//   | win | .815 | .750 | .752 | .715 | .755 | .770 | .777 | .738 | .627 | .652 | .670 | .627 |
+//   | 局长| 7635 | 7764 | 7758 | 7189 | 7438 | 7643 | 7380 | 7543 | 7063 | 7151 | 7330 | 7175 |
+//   |杀/局|18.55 |18.34 |18.18 |18.05 |18.24 |18.20 |18.09 |17.79 |16.80 |17.51 |17.18 |17.07 |
+//   |承伤 |144.3 |171.9 |176.2 |175.0 |176.2 |172.3 |174.3 |176.1 |210.8 |200.0 |203.9 |209.5 |
+//   |伤/杀| 7.8  | 9.4  | 9.7  | 9.7  | 9.7  | 9.5  | 9.6  | 9.9  |12.6  |11.4  |11.9  |12.3  |
+//   训练侧：entropy 1.56–1.64、kl .012–.028（H1/H2 过）。
+//
+// 3. 判决（逐条）
+//   H1 PASS · H2 PASS · H3 FAIL（it40 −11.1pp；it5 的 −6.5pp 与 null 共有，不计入处理效应）
+//   H4 未达主窗，**杀腿已触发**：it40–55 .627–.670 < .830
+//   H5 FAIL（局长 7175：it0 7635 → −6%，未到 ≤7000；shots 列缺，无法判第二项）
+//   H6 FAIL（200–211 > 145）· timeout/max_ticks 0–0.75%，未触发 5%
+//   与 null 同点（it5–25）：.715–.770 vs .795–.855 ⇒ **−5 ~ −10pp**，处理效应明确为负。
+//
+// 4. 机制
+//   视野 19→91 步后价值目标方差更大，但 entropy/kl 稳定 ⇒ 不是发散；策略把"更远"读成了
+//   "更敢换血"：伤/杀 7.8→12.3，局长只 −6%，杀/局 −1.5。H5 的"更快 + 多打"一项都没兑现。
+//   这不是 H 门没调好，是这个剂量在本题上就是净负；更小剂量是**新腿**，不是续跑。
+//
+// 5. 数据与复跑
+//   eval `tmp/y31-horizon/eval_log.jsonl`（12 点 ×400）· train `.../training_log.jsonl`（55 iter）。
+//   backup 只有 delta（到 it55），没有全量 JSON；`tmp/y31-horizon/weights.json` 是 wire 格式。
+//   ⇒ 技术上也别 resume；若做新腿，从 y29-steady it260 重新起，别接这条权重。
+
+{
+  "version": 5,
+  "name": "y31-horizon",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：逐字 = y29-steady（21 参），本腿只改 gamma/lam ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.999,
+  "lam": 0.99,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270209,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y31-horizon/weights.json",
+  "traj": "tmp/y31-horizon",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y31-horizon",
+  "backup_prefix": "y31-horizon",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -1,0 +1,152 @@
+// 课程 y30-stack —— **主腿：三项一起上（停的超额比例带 + 速度/过长局税 + 道具与冻盾窗口价）**。
+// 目标不是单变量归因，是**冲胜率 + 加快节奏**（2026-10-22 用户拍板）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 状态：已跑满 500 轮（2026-10-23）· **判负**（全文 `reports/y30-stack-500-20261023.md`）
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// 把 **it260** 的三处"价目表漏洞"一起补上：①停超过人类水平才收费；②拖过 5000/7000 拍分段收费、
+// 快通关加价；③道具与冻/盾窗口内的命中各加价。全部**零新指标列**，只动 params 与 formula。
+//
+// ── 1. 三处漏洞与剂量（对 it260 实测行为逐项算账）────────────────────────────
+//   基准（eval anchor **it260**，200 局）：**7695 拍 · stop 占比 0.723 · 道具 5.71/局 · 窗内命中 5.74/局**
+//   （it250-270 合并 1000 局：wr 0.8400±2.27pp · 7596 拍 · stop 0.705 · dmg 147.4）
+//   | 项 | 参数 | 现状读数 | 本腿 Φ/局 | 占正项 |
+//   | 停超额 | `wStop 36 · stopBand 0.30` | 0.723 − 0.30 | **−15.23** | 11.2% |
+//   | 奖快 | `wSpeed 3 → 8` | 3.789×8 − 3.789×3 | **+18.95** | 14.0% |
+//   | 罚拖(轻) | `wLong 2.5`（5000–7000，封顶 2000 拍） | 7695 ⇒ 封顶 2000 | **−5.00** | 3.7% |
+//   | 罚拖(重) | `wVeryLong 5.0`（>7000） | 7695 ⇒ 695 拍 | **−3.48** | 2.6% |
+//   | 道具 | `wPickup 0.8 → 3.0` | 5.71 次/局 | **+12.56** | 9.3% |
+//   | 冻盾窗口 | `wWinHit 1.5`（列 idx77） | 5.74 命中/局 | **+8.61** | 6.4% |
+//   净值 **+16.41 Φ/局（正项 135.4 的 12.1%）**（`tmp/y30-doses.py` 逐项打印，数字从课程文件读，不手抄）。
+//   **梯度整体从"熬"搬到"快"**（stop 占比不变 0.723 的前提下）：
+//     7695 拍 = 30.3 − 15.2 − 8.5 + 12.6 + 8.6 = **+27.8**；
+//     4975 拍 = 45.9 − 15.2 − 0 + 12.6 + 8.6 = **+51.9**。
+//   ⇒ 光把速度提到人类水平（不改善停），这几项就多 **+24.0 Φ**（≈ 0.5 个通关奖励）。
+//
+// ── 2. 三条硬约束（改数前先过）──────────────────────────────────────────────
+//   ① **任何局的总 tick 税 < 35 Φ**（超时/死亡同价）：最坏 12900 拍通关 = 4 + 29.5 = **33.5 < 35** ✓
+//      ⇒ `wVeryLong` **不得超过 5.0**，否则"拖到极限"会比"直接输"更贵。
+//   ② tick 税**只在 `clearTick>=0` 结算**；输局只付 terminal −35，不叠加。
+//   ③ 停项是**比例带**（`max(stopTicks − 0.30*ticks, 0)`），人类水平 0.289 **一分不付**；
+//     绝不再用 `wStop*stopTicks` 这种绝对量写法（会把"停下来瞄一枪"一起罚掉）。
+//
+// ── 3. 判据（预注册；本腿为主判）─────────────────────────────────────────────
+//   **主判**：`anchor_wr`（anchor 860001-860050 × stage 2000-2003，it150-200 的 11 点，
+//   座位聚合后 McNemar）对 **y29-steady 同窗口 0.8014**。
+//     W1 胜率 **≥ 0.8314（+3pp）且 p<0.05** ⇒ 判"提升"；
+//     W2 |Δ| < 3pp ⇒ 判"分不出"（此时只允许宣称节奏改善，**不得**宣称胜率提升）；
+//     W3 Δ ≤ −3pp ⇒ **判负**，即使节奏读数变好。
+//   **节奏门**（必须同时满足，否则就算 W1 过也只是"更快地赢同样的局"）：
+//     R1 局长 ≤ **0.80×**（8448 → ≤6758 拍）· R2 stop 占比 ≤ 0.45 · R3 中心∧停/千 ≤ 0.60×
+//     R4 冻期击杀/千冻拍 ≥ 2.0×（0.91 → ≥1.82）· R5 道具/千 ≥ 1.25×
+//   **不许退**：kills/千 ≥ 0.97× · 承伤/局 ≤ 1.05×（162.3 → ≤170.4）· timeout ≤ 1%
+//   **杀腿**（任一命中即停）：C1 kills/千 < 2.40 · C2 timeout > 5% · C3 it100 anchor_wr < 0.72
+//     C4 dmg/局 > 1.10 × 178（≈196）且 Δwin ≤ 0。
+//
+// ── 4. ★ 本批没有 null 腿（用户 2026-10-22 决定去掉）⇒ 漂移风险自负 ─────────────
+//   y21 的实测：四腿全负 −8.9～−13.5pp 而同批**没有零改动臂**，最后才发现是底座漂移；
+//   y29 的实测：从收敛点继续 210 轮是 **−1.36pp（t=−1.65，分不出）**。
+//   ⇒ 本腿的 Δwin **包含"从 it260 继续跑"的漂移**，量级约 0～−3pp。判 W1 时按最坏 −3pp 打折：
+//     实测 Δ +6pp 才等价于 +3pp 的真实提升。**报告里必须写这一条**，别把漂移记成增益。
+//
+// ── 5. 已知局限 ────────────────────────────────────────────────────────────
+//   · 三项共线（stop 与 ticks 都与"节奏"同向）⇒ 读得出"合效应"，读不出"哪项管用"。
+//     需要归因时才拆 `y30-tempo` / `y30-speed` / `y30-pickup`（同起点同 seed，可直接配对）。
+//   · `wWinHit 2.0` 是**重开 B6**（y28 判过零胜率回报）。它的作用是把冻/盾窗口变成有价窗口；
+//     若 W2 且 R4 达标 ⇒ 记"窗口价买到行为、没买到胜率"，**不要**再单独加价重试。
+//   · 中心蹲守没有直接项（要新列 `centerIdleTicks`）；本腿靠停带 + tick 税间接压。
+//   · `threatTicks` 在冻/盾期**仍不豁免**（`danger-metrics.ts:139-141` 的无豁免 lineage）；
+//     这条不改代码，若 R4 压不上去，下一个杠杆是给它加豁免列（需先记 DECISIONS）。
+
+// ── 结算（2026-10-23 回填，it500 跑满）─────────────────────────────────────────
+// 判负：win 0.865 → 尾段 0.674（11 点窗最好 0.696，无恢复）；kill/局 18.98→16.64；
+// 伤/杀 6.9→12.2；stop 0.723→0.054；胜局 clear 8037→7248（总时长 −19% 里输局早死占一半）。
+// 净值 +16.4 Φ 是「卖胜率」的账面利润（胜负只值 48 Φ，税项 15–24 Φ）。
+// 行为列 it155 后被瘦行顶掉，机制读数只用 it0–150；全文 `reports/y30-stack-500-20261023.md`。
+
+{
+  "version": 5,
+  "name": "y30-stack",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y29-steady + 停超额带(30/0.30) + 速度(8)+过长税(2/5) + 道具(3.0)+窗口命中(1.5) ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wLong*where(clearTick>=0, clip(ticks-5000, 0, 2000)/1000, 0) - wVeryLong*where(clearTick>=0, max(ticks-7000, 0)/1000, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) - wStop*max(stopTicks-stopBand*ticks, 0)/(ticks+1) + wWinHit*hitsInFreezeShieldWindow + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.12,
+      "wMiss": 0.3,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 8.0,
+      "wLong": 2.5,
+      "wVeryLong": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wStop": 36.0,
+      "stopBand": 0.3,
+      "wWinHit": 1.5,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y29-steady/y29-steady.it260.20261022-095227.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 120, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270208,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y30-stack/weights.json",
+  "traj": "tmp/y30-stack",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y30-stack",
+  "backup_prefix": "y30-stack",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
