@@ -456,8 +456,8 @@ def ppo_update(
     # epochs× 白烧：本机 CPU 实测 ref 前向占单步 ~44%（tmp/bench-ppo-throughput.py 的
     # D-B 差：6.65 -> 9.59 s/step）。此处每个 chunk 只算一次并按索引复用，
     # ref 成本降到 1/epochs，数值与原实现逐位相同。
-    # 内存代价：len(chunks) x B x 7 floats ≈ 37x512x7x4B ≈ 0.5MB（可忽略）。
-    ref_cache: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(tensored)
+    # 内存代价：len(chunks) x B x 7（legacy）/ 9（v6）floats ≈ 37x512x9x4B ≈ 0.7MB（可忽略）。
+    ref_cache: list[tuple[torch.Tensor, ...] | None] = [None] * len(tensored)
     if ref_model is not None and kickstart_kl > 0:
         # 2026-09-11 慢 job（TPU 45~52 s/step，eta~5.9h）修复：落执行边界，否则
         # 这段惰性图一直挂着，会与首个训练步的图拼成巨型图（首步 ~24s 编译 +
@@ -477,12 +477,39 @@ def ppo_update(
         _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):
-                _rm, _rf, _ = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
+                # ★ B1 v6（2026-10-23）：ref 的**头数**与数据的**动作空间**必须同源。
+                #   旧实现写死 `_rm, _rf, _ = ref_model(...)`：v6 ref（`PPOStudent.forward`
+                #   在 `action_v6` 下返回 4-tuple）上直接
+                #   `ValueError: too many values to unpack (expected 3)`。
+                #   现场：y32-nohp / y32-tempo（起点 y31-fire.it370 的 arch.actionV6=true，
+                #   且两腿 `kickstart_ref: true`）——v6 落地后第一对开 kickstart 的腿。
+                #   判据用 `len(out)` 而不是模型属性：DataParallel 包装下属性代理不可靠。
+                #   并用数据的 `a_hold` 交叉校验——3 头 ref 配 7 宽掩码会让切片静默错位
+                #   （hold 两列被当 fire 的第 3 类），比崩掉更糟。
+                _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
                 _m = _e["mask"]
-                ref_cache[_i] = (
-                    masked_logsoftmax(_rm, _m[:, :MOVE_DIM]),
-                    masked_logsoftmax(_rf, _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
-                )
+                _ref_v6 = len(_ro) >= 4
+                _data_v6 = _e.get("a_hold") is not None
+                if _ref_v6 != _data_v6:
+                    raise ValueError(
+                        f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
+                        f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
+                        f"{'带' if _data_v6 else '不带'} a_hold（"
+                        f"{'v6' if _data_v6 else 'legacy'}）——掩码切片会静默错位，拒绝训练"
+                        "（ref 权重与 rollout 语料不是同一代）"
+                    )
+                if _ref_v6:
+                    # v6 掩码布局 [move4 | fire3 | hold2]（student.py 同源）。
+                    ref_cache[_i] = (
+                        masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
+                        masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
+                        masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
+                    )
+                else:
+                    ref_cache[_i] = (
+                        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
+                        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+                    )
                 xla_mark_step(device)
         # 注意：日志必须在 mark_step **之后**打——惰性 XLA 下循环里一次前向都没真跑，
         # 打在前面得到的是 0s 的假数字（这正是本次误判的由来）。
@@ -575,10 +602,15 @@ def ppo_update(
             if _ref is not None:
                 # 预计算缓存（见上方 ref_cache）：数值与「此处现算 ref_model」逐位相同，
                 # 但每 chunk 只付一次前向而非每 epoch 一次。
-                ref_move, ref_fire = _ref
-                kl_m = (move_logp.exp() * (move_logp - ref_move)).sum(dim=-1)
-                kl_f = (fire_logp.exp() * (fire_logp - ref_fire)).sum(dim=-1)
-                kick_mean = (kl_m + kl_f).mean()
+                # ★ v6：**三头都锚**。`hold` 是 v6 唯一新增的自由度，漏掉它等于
+                #   kickstart 对 hold 头完全不生效（策略可以第一时间把 hold 学坏，
+                #   而 move/fire 被钉住）——那就不是「BC-anchored」了。
+                kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(dim=-1)
+                kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(dim=-1)
+                kl_parts = kl_m + kl_f
+                if len(_ref) > 2 and hold_logp is not None:
+                    kl_parts = kl_parts + (hold_logp.exp() * (hold_logp - _ref[2])).sum(dim=-1)
+                kick_mean = kl_parts.mean()
                 loss = loss + kickstart_kl * kick_mean
             demo_bc_mean = torch.zeros((), device=device)
             if demo_on:
@@ -587,11 +619,14 @@ def ppo_update(
                 # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
                 # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
                 _didx_t = demo_index(demo_idx_dev, _didx)
-                _dm, _, _ = model(
+                # 只取 move 头（2026-10-23）：v6 模型的 forward 是 4-tuple，写死
+                # `_dm, _, _ = model(...)` 会在 demo_bc_coef>0 的 v6 腿上同样炸
+                # （与上面 ref 缓存同一处漏改；本条是潜伏的第二实例）。
+                _dm = model(
                     demo_t["obs"][_didx_t],
                     demo_t["scalars"][_didx_t],
                     demo_t["extra"][_didx_t] if "extra" in demo_t else None,
-                )
+                )[0]
                 _dmm = demo_t["masks"][_didx_t]
                 _dact = demo_t["actions"][_didx_t]
                 # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是

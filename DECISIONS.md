@@ -8944,3 +8944,37 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `plan/anchor-full-rounds.plan.md` · `docs/nn/remote-transport.md §115`。
 - **验收**：`tests/remote/test_round_forms.py` 16 passed；`tests/hub/test_offline_backfeed.py`、
   `tests/remote/test_offline_deliver.py` 子集、`tests/test_remote_dag.py` 全绿；`bun run check` 绿。
+
+## §2026-10-23-kickstart-v6-ref-cache（2026-10-23，y32-nohp / y32-tempo 两腿 it1 各 5/5 连炸后的修复）
+
+- **背景**：两条腿的每个 PPO job 都在 `grad` 段报**同一个**确定性错误
+  `ValueError: too many values to unpack (expected 3)`（内容决定性 ⇒ 重领同一份字节炸同一处，
+  hub 5/5 后 `aborted`）。根因：B1 v6 落地（`2f40560e`）把 `ppo_update` **主循环**迁到 4-tuple
+  （`mv, fr, hd, val = out`），但漏了**同一函数里的另外两处**：
+  ① `ref_cache` 预计算段 `_rm, _rf, _ = ref_model(...)`（`worker/ppo/engine.py:480` 旧号）——
+  v6 ref 返回 4 头，解包当场炸；② demo 混批段 `_dm, _, _ = model(...)`——v6 + `demo_bc_coef>0`
+  同样炸（潜伏，当日未触发）。v6 落地后 y26/y27/y28/y29/y30/y31 全部 `kickstart_ref: false`
+  ⇒ ①**从未被执行过**，直到 y32 是第一对「v6 起点（`y31-fire.it370`，`arch.actionV6=true`）+
+  `kickstart_ref: true`」的腿。日志侧指纹：`kickstart ref 已加载` 之后**没有**
+  `[ppo] kickstart ref 预计算完成`（该行在预计算循环之后）⇒ 死在预计算，不在训练步。
+- **决定**：① 头数判据用 `len(ref_out)`（**不**读模型属性：`DataParallel` 包装下属性代理不可靠），
+  并与数据的 `a_hold` 是否存在**交叉校验**，不同源 ⇒ `ValueError`（含「不同源」字样）；
+  ② 掩码切片随之分派：v6 `[move4|fire3|hold2]`（`MOVE4_DIM`/`FIRE3_DIM`），legacy `[move5|fire2]`；
+  ③ v6 的 kickstart KL **三头都锚**（`hold` 进 KL），legacy 路径逐位不变；④ demo 段取 `model(...)[0]`。
+- **否决的备选**：① **把 y32 两腿的 `kickstart_ref` 关掉**（绕开而非修复，且 kickstart 正是这两腿
+  与 y31 的唯一差别之一）；② **按 `ref_model.action_v6` 判**（DataParallel 包装后属性代理是否可用取决于
+  torch 版本；`len(out)` 是 forward 的直接事实）；③ **只改解包、不动切片**——v6 ref 的 fire 会被
+  legacy `[5:7]` 切到 hold 的两列，loss 照降、静默错位（比崩更糟）；④ **v6 跳过 hold KL**
+  （`hold` 是 v6 唯一新增的自由度，漏锚 = kickstart 对它完全不生效，那就不是「BC-anchored」）。
+- **违反后果**：任一 v6 + kickstart 的腿在 it1 必停（hub `consecutive=5/5` → `aborted`），
+  且 worker 侧表现为「准备完成后无任何 PPO 读数」，容易被读成超时/网络问题；
+  只改解包不改切片则会训出一个 hold 头完全自由、fire 头吃错列的模型。
+- **落点**：`nn-training/worker/ppo/engine.py`（ref 预计算 / `ref_cache` 注解 / KL 项 / demo 取头）·
+  `nn-training/tests/worker/test_ppo_kickstart_cache.py`（+4 例：v6 不崩且 per-chunk 缓存一次 /
+  hold 进 KL / 两个方向的「不同源」响亮拒绝）。
+- **验收**：`test_ppo_kickstart_cache.py` 8 passed · `test_ppo_common.py` + `test_student_model.py`
+  17 passed · `test_ppo_demo_mix.py` + `test_ppo_scalar_sync.py` 15 passed · ruff + mypy 单文件绿。
+- **⚠ 生效条件**：`code.zip` 是**会话冻结**的集群快照（`remote/code_snapshot.py::published_code_zip`
+  「快照在 ⇒ 用它」，`ensure_cluster_snapshot` 只在 hub/trainer **启动**时打包）⇒ 改本地代码
+  **不会**自动到 worker，必须**重启 hub / 控制台**让新快照锚定，再重开腿。`ppo/engine.py` **不在**
+  `tools/agent/codehash-files.txt` 集内（`nn-training/**` 被明文排除）⇒ 本修复不触发节点 stale 重启波。
