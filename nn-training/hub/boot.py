@@ -24,6 +24,7 @@ main()            argparse（单课程 / 多课程 / --discover / --push）→ �
 from __future__ import annotations
 
 import atexit
+import importlib.util
 import sys
 import time
 from http.server import ThreadingHTTPServer
@@ -105,6 +106,36 @@ def make_server(
     # 免得每个「只想拿个 server 发请求」的测试都被意外拉起一个后台拍。
     HubHandler.push = push
     return Server()
+
+def _landing_deps_warn() -> None:
+    """启动自检：**本进程能不能把回传的 delta 就地重建为整份**（缺 numpy/torch 就不行）。
+
+    ★ 2026-10-23 事故（y31-null，28/28 轮全中）：hub 由 dashboard 用 uv 的**基础解释器**起
+    （venv 的 site-packages 没挂进 PYTHONPATH）⇒ `hub/deltas.land_into_stage` 落地时
+    `remote.weights_delta` 要 numpy、`remote.opt_standard` 要 torch ⇒ 每轮回传都静默退回原样
+    `.delta`，**唯一痕迹是 42 MB 日志里的一行**，运维零感知；而链式 delta 里 it2 之后全部
+    连锁「基准不在本机」。
+
+    用 `find_spec` 而不是 `import`：torch 真导入要几秒 + 上 GB RSS，而 hub 的启动闭包**明确**
+    不许拉它（`tests/remote/test_hub_import_graph.py` 进程级判据）。
+    """
+    missing = [n for n in ("numpy", "torch") if importlib.util.find_spec(n) is None]
+    if not missing:
+        print("[hub-server] 整份重建能力：OK（numpy/torch 可见）", flush=True)
+        return
+    print(
+        f"[hub-server] WARN: 缺 {'/'.join(missing)} ⇒ **回传的 delta 不会被就地重建为整份**"
+        "（只能原样落 `.delta`，`resume_anchor` 会跳过那些轮，账本里 `landed_fp` 会等于原件 sha）。"
+        "链式 delta 还会连锁：it1 落不了，it2 起全部「基准不在本机」。",
+        flush=True,
+    )
+    print(
+        "[hub-server] WARN: 修法 —— 用 `nn-training/.venv` 的解释器启动，或把它的 site-packages "
+        "挂进 PYTHONPATH（控制台侧 `hubServerSpec` 自 2026-10-23 起已自动挂；"
+        "手工启动时 `PYTHONPATH=nn-training:$(…)/site-packages`）。",
+        flush=True,
+    )
+
 
 def main() -> None:
     ap = house_parser(description="hub-server: remote PPO job queue (stdlib)")
@@ -203,6 +234,10 @@ def main() -> None:
     except RuntimeError as e:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
+    # ★ 2026-10-23：**能力自检**放在一切服务活动之前（缺依赖时每一轮回传都会静默降级，
+    # 而那行提示以前只在 42 MB 日志里）。非致命：缺 numpy/torch 只影响「delta → 整份」，
+    # hub 的其余职责（派发/受理原件/账本）照旧 ⇒ 只 WARN，不退出。
+    _landing_deps_warn()
     # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
     # hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
     # 所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。

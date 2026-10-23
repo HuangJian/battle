@@ -134,12 +134,19 @@ export function hubImplementationFiles(): string[] {
  *  去），故用 REPO_ROOT 拼。 */
 export function hubServerSpec(cfg: RlConfig): ProcSpec {
   const port = sharedHubPort(cfg)
+  // ★ 2026-10-23：**venv 的 site-packages 必须挂上**（原来只挂 NN_TRAINING）。事故形状：
+  //   hub 的受理路径会把回传的 delta **就地重建为整份**（`hub/deltas.land_into_stage`，10-15 起），
+  //   那一步在函数体里 import `remote.weights_delta`（要 numpy）与 `remote.opt_standard`（要 torch）。
+  //   解释器是 `resolveVenvPython().python`（uv 跳板真身 = 基础解释器），拿不到 venv 的包 ⇒
+  //   每次都 `ProtocolError: 权重 delta 需要 numpy` ⇒ 静默回落成 `.delta`（y31-null 28/28 全中）。
+  //   与 `venvTorchReady()` 同规：第三方包靠 PYTHONPATH 挂 site-packages。
+  const { python, sitePackages } = resolveVenvPython()
   return {
     key: 'hubServer',
     name: 'hub-server (共享：服务所有课程)',
     course: '',
     cmd: [
-      resolveVenvPython().python,
+      python,
       '-u',
       '-m',
       'hub.server',
@@ -159,11 +166,14 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
     // cwd 钉死 REPO_ROOT：入口是包路径（`-m hub.server`）靠 PYTHONPATH，
     // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。
     cwd: REPO_ROOT,
-    // ★ hub 进程**不需要** venv 的 site-packages（2026-10-14）：reward 由 trainer 在打包端算、
-    // delta 重建由 trainer 落位时做 —— hub 只借 `remote.code_snapshot → remote.hub_client` 里的
-    // `pack_code_zip`，而两个吃 numpy/torch 的容器模块只在 hub_client 的**函数体内**局部 import
-    // ⇒ 不在 hub 的 import 闭包里。判据 = `nn-training/tests/remote/test_hub_import_graph.py`（进程级）。
-    env: { PYTHONPATH: NN_TRAINING },
+    // ★ 2026-10-23 修正一条**过时前提**：2026-10-14 的判断是「hub 不需要 venv 的 site-packages
+    //   （reward 由 trainer 在打包端算、delta 重建由 trainer 落位时做）」——**10-15 起不再成立**：
+    //   hub 自己就是回传 delta 的落地者。这里挂 site-packages 后，那两个容器模块仍然**只在函数体
+    //   内**被 import ⇒ 不在 hub 的 import 闭包里，`tests/remote/test_hub_import_graph.py` 的判据
+    //   （进程级扫 sys.modules）不受影响——它管的是「启动时不拉 numpy/torch」，不是「永远不许用」。
+    env: {
+      PYTHONPATH: sitePackages ? `${NN_TRAINING}${path.delimiter}${sitePackages}` : NN_TRAINING,
+    },
     // 共享实例 ⇒ 日志也唯一（不再 per-course；与 api 侧 resolver 两半同步）
     log: path.join(LOG_DIR, 'hub-server.out'),
     healthy: () => httpOk(`http://127.0.0.1:${port}/ping`, cfg.rl.remote_token),
