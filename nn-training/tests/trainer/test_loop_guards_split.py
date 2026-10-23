@@ -151,7 +151,9 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
     # 共享 sink：留根的就是因为它们被**多簇**调（三簇 9 处 + 轮内两处）。
     "_ledger_apply": {
         "loop_guards_gate.py": 2,
-        "loop_guards_leg.py": 4,
+        # ★ 2026-10-23：腿簇多一处写侧（notify 分支的 ABORT 判决要落账，供控制台
+        #   「实际生效」栏看到「判中了但没停腿」）。
+        "loop_guards_leg.py": 5,
         "loop_guards_trip.py": 3,
         "loop_round_steps.py": 1,
         # ★ 2026-10-19：`loop_steps` 多了一处写侧（`_record_rollout` 落 `rollout_end`）。
@@ -160,10 +162,12 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
         "loop_steps.py": 2,
     },
     "_is_soft_verdict": {"loop_guards.py": 1, "loop_guards_gate.py": 1},
-    "_gate_halt_mode": {"loop_guards.py": 1},
+    # ★ 2026-10-23：腿簇也要问停机模式（notify ⇒ 判据只提示、不停腿）。
+    "_gate_halt_mode": {"loop_guards.py": 1, "loop_guards_leg.py": 1},
     "_sync_cloud_halt": {
         "loop_guards_gate.py": 3,
-        "loop_guards_leg.py": 2,
+        # ★ 2026-10-23：notify 分支同样下发一次达令（云端该停就停，本地不停腿）。
+        "loop_guards_leg.py": 3,
         "loop_lifecycle.py": 1,
     },
 }
@@ -172,7 +176,8 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
 OUTBOUND_HANDS: dict[str, frozenset[str]] = {
     "loop_guards.py": frozenset(),
     "loop_guards_trip.py": frozenset({"_ledger_apply"}),
-    "loop_guards_leg.py": frozenset({"_ledger_apply", "_sync_cloud_halt"}),
+    # ★ 2026-10-23：腿簇读停机模式（notify ⇒ 只提示不停腿）——与 gate 簇同一根针。
+    "loop_guards_leg.py": frozenset({"_gate_halt_mode", "_ledger_apply", "_sync_cloud_halt"}),
     "loop_guards_gate.py": frozenset({"_is_soft_verdict", "_ledger_apply", "_sync_cloud_halt"}),
     "loop_guards_sweep.py": frozenset(),
 }
@@ -181,7 +186,13 @@ OUTBOUND_HANDS: dict[str, frozenset[str]] = {
 #: 它们必须在类体里声明 `Any`，否则 mypy 报 `attr-defined`（同 S22 的 HELPER_HANDS 口径）。
 BORROWED_METHODS: dict[str, dict[str, str]] = {
     "loop_guards_trip.py": {"_ledger_apply": "trainer.loop_guards"},
-    "loop_guards_leg.py": {"_ledger_apply": "trainer.loop_guards", "_sync_cloud_halt": "trainer.loop_guards"},
+    "loop_guards_leg.py": {
+        "_ledger_apply": "trainer.loop_guards",
+        "_sync_cloud_halt": "trainer.loop_guards",
+        # 2026-10-23：干烧熔断在 tripped 时要问「平台开关是 halt 还是 notify」——
+        # notify = 判据只提示、不停腿（此前只有云端达令守这条契约）。
+        "_gate_halt_mode": "trainer.loop_guards",
+    },
     "loop_guards_gate.py": {
         "_ledger_apply": "trainer.loop_guards",
         "_sync_cloud_halt": "trainer.loop_guards",
@@ -731,7 +742,8 @@ def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     obj = _obj(
-        args=_base_args(kickstart_ref=True),
+        # 2026-10-23：auto 不再回退 baseline ⇒ 要按自己的起点停腿必须显式 mode=baseline。
+        args=_base_args(kickstart_ref=True, kickstart_burn={"mode": "baseline"}),
         _jsonl_path=jsonl,
         _traj_root=tmp_path,
         _burn_streak=0,

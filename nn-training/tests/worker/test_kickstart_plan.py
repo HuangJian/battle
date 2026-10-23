@@ -324,7 +324,9 @@ def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_guard_stops_the_leg_and_writes_a_replayable_ledger_event(tmp_path: Path) -> None:
     """执行面接线：命中 ⇒ 停腿（True）+ 账本可回放；缰绳关着 ⇒ 零行为。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
-    g = _guards(tmp_path)
+    # 2026-10-23 契约：auto 解析不出对端**不再回退 baseline**（见 DEAD 注释/DECISIONS）
+    # ⇒ 要按「自己的起点」判必须显式写 mode=baseline。
+    g = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
     assert g._kickstart_burn(3) is True, "连续三点低于基线就该停腿"
 
     ledger = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
@@ -359,7 +361,12 @@ def test_guard_also_halts_the_cloud_on_the_same_course(
     monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake_set, raising=True)
     monkeypatch.setattr("trainer.loop_guards.common.distribution.course_name_of", lambda: "t5-kk", raising=True)
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
-    g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
+    g = _guards(
+        tmp_path,
+        remote_hub_url="http://hub",
+        remote_token="tok",
+        kickstart_burn={"mode": "baseline"},
+    )
     g._cloud_halted = False
 
     assert g._kickstart_burn(3) is True
@@ -369,7 +376,7 @@ def test_guard_also_halts_the_cloud_on_the_same_course(
 def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -> None:
     """未命中但有计数 ⇒ 落一行账（状态转移才写，不是每轮都写）。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28))
-    g = _guards(tmp_path)
+    g = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
     assert g._kickstart_burn(2) is False
     lines = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     burn = [json.loads(x) for x in lines if json.loads(x)["event"] == "kickstart_burn"]
@@ -537,7 +544,11 @@ def test_paired_wiring_stops_and_records_the_delta(
 
 
 def test_paired_wiring_refuses_a_mispaired_peer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ 前提闸：对端不在同一把 V 上 ⇒ 不拿错配读数判 ⇒ 退回 baseline 并响亮提示。"""
+    """★ 前提闸：对端不在同一把 V 上 ⇒ 不拿错配读数判；**也不回退 baseline**（不判 + 响亮提示）。
+
+    2026-10-23 契约变更：`auto`/`paired` 解析不出唯一对端时**不判**——baseline 参照的
+    零假设假阳性 49.3%（`worker/kickstart_burn.py` 头注回测），拿它停腿 = 定时炸弹。
+    """
     monkeypatch.setattr(
         paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V + 82), raising=True
     )
@@ -545,15 +556,15 @@ def test_paired_wiring_refuses_a_mispaired_peer(tmp_path: Path, monkeypatch: pyt
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V + 82)
 
-    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True, (
-        "退回 baseline ⇒ 按本腿起点停腿"
+    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is False, (
+        "错配对端 ⇒ 不判（不再拿自己的起点代打）"
     )
-    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
-    assert burn["mode"] == MODE_BASELINE
+    assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"]
 
 
-def test_ambiguous_peer_falls_back_to_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """多臂家族（≥2 条同 V 腿）里「谁是控」是实验设计 ⇒ 不猜，退回 baseline。"""
+def test_ambiguous_peer_does_not_judge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """多臂家族（≥2 条同 V 腿）里「谁是控」是实验设计 ⇒ 不猜；**也不拿 baseline 代打**
+    （2026-10-23：baseline 参照的零假设假阳性 49.3%，见 `worker/kickstart_burn.py` 头注回测）。"""
     d = _burn_curricula(tmp_path, peer_v=BURN_V)
     (d / "t-peer2.jsonc").write_text(
         json.dumps({"name": "t-peer2", "paired_rotate_seed": BURN_V}), "utf-8"
@@ -568,21 +579,25 @@ def test_ambiguous_peer_falls_back_to_baseline(tmp_path: Path, monkeypatch: pyte
             "utf-8",
         )
 
-    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True
-    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
-    assert burn["mode"] == MODE_BASELINE, "对端不唯一 ⇒ 不猜，退回本腿起点"
+    g = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})
+    assert g._kickstart_burn(3) is False, "对端不唯一 ⇒ 不猜，也不改判自己的起点"
+    assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"], (
+        "不判就不该落 kickstart_burn 台账（否则控制台会读到一条没发生过的判定）"
+    )
 
 
-def test_single_leg_keeps_the_baseline_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """未声明 `paired_rotate_seed` ⇒ 没有对端这种事，auto 就是 baseline（零行为）。"""
+def test_single_leg_auto_does_not_judge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未声明 `paired_rotate_seed` ⇒ 没有对端；auto 既不配对**也不回退 baseline** ⇒ 不判。
+
+    要用起点基线请显式写 `mode: baseline`（2026-10-23 契约变更）。
+    """
     monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V), raising=True)
     _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V)
 
-    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3) is True
-    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
-    assert burn["mode"] == MODE_BASELINE
+    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3) is False
+    assert not [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"]
 
 
 def test_guard_uses_the_course_block_and_module_defaults(tmp_path: Path) -> None:
@@ -593,5 +608,5 @@ def test_guard_uses_the_course_block_and_module_defaults(tmp_path: Path) -> None
     g.args.kickstart_burn = {"margin_pp": 100.0, "points": 3, "mode": MODE_BASELINE}
     assert g._kickstart_burn(3) is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
 
-    g2 = _guards(tmp_path)
-    assert g2._kickstart_burn(3) is True, "无块 ⇒ 模块常量（margin 5pp ⇒ 三点全命中）"
+    g2 = _guards(tmp_path, kickstart_burn={"mode": "baseline"})
+    assert g2._kickstart_burn(3) is True, "显式 baseline + 无 margin/points ⇒ 模块常量（5pp/3 点）"

@@ -8978,3 +8978,50 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   「快照在 ⇒ 用它」，`ensure_cluster_snapshot` 只在 hub/trainer **启动**时打包）⇒ 改本地代码
   **不会**自动到 worker，必须**重启 hub / 控制台**让新快照锚定，再重开腿。`ppo/engine.py` **不在**
   `tools/agent/codehash-files.txt` 集内（`nn-training/**` 被明文排除）⇒ 本修复不触发节点 stale 重启波。
+
+## §2026-10-23-kickstart-burn-scope（2026-10-23，两条改行为腿 18:06/18:23 双双被自己的熔断收官）
+
+- **触发事实**：`y32-tempo` it31（18:06:28）与 `y32-nohp` it41（18:23:12）先后打
+  `CRITICAL KICKSTART-BURN`（基线 90.2%，最新 79.5% / 84.0%），各写 `training PAUSED` + 收官
+  ⇒ trainer 不再发布 PPO job ⇒ **云端 worker 连续 2 小时领不到任务**（`tmp/hub-server.out`
+  18:23:13 → 20:26:05 无任何 `POST /jobs/priority`；只重启 trainer 即恢复，hub 全程无辜）。
+  两条腿当时带的是 `kickstart_ref: true`——**该开关会同时启用结果面干烧熔断**
+  （`worker/loop_guards_leg.py::_kickstart_burn` 首行 `if not kickstart_ref: return False`）。
+- **三条执行面缺陷**（判据本体 `worker/kickstart_burn.py` 一个字未改，改的是「何时允许判」与
+  「判中了停不停」）：
+  1. **`kk` 已退火到期仍在判**。判据的定义域是「锚主导更新把起点洗回去」；`kk=1.0×0.5^(it−1)`
+     到 it30 已 < 1e-9。现场：`kickstart 系数已衰减到期（kk=0.0000）` 之后 1 秒仍打 CRITICAL。
+  2. **平台开关 `gate_mode=notify` 时仍本地停车**。`trainer/loop_guards.py::_sync_cloud_halt`
+     的契约原话是「门判决只作用于远端云机，TrainingLoop 永不停车」，notify 分支也只守了
+     「不下发 cloud halt」；而腿簇自己 `training PAUSED` ⇒ 日志出现
+     「notify → 只提示」紧接「training PAUSED」的自相矛盾。
+  3. **`auto`/`paired` 解析不出唯一对端时回退 `baseline`**。`worker/kickstart_burn.py` 头注
+     自己的回测：baseline 参照在「训练本身在飘」时零假设假阳性 **49.3%**，paired 0.56%。
+     改行为类腿（抬血价 / 砍正项 / 落后税）**必然先掉胜率** ⇒ 缺 `kickstart_burn` 块 = 定时炸弹。
+- **决定**：
+  ① 缰绳不活跃（`kk ≤ NEGLIGIBLE_COEF`）⇒ **不判**，清空 streak 并说一次（`_rein_active`，
+     系数唯一来源仍是 `trainer/loop_transport.kickstart_coef`，**不重写公式**）；
+  ② `gate_mode == "notify"` ⇒ **只提示不停腿**（CRITICAL 只喊一次，`_burn_notified`；仍写
+     `gate_verdict`（带 `notify, 不停腿` 字样）与仍下发云端达令；streak 保留 ⇒ 开关拨到 halt
+     后下一次判定立即停）；
+  ③ `mode != baseline` 且解析不出唯一对端 ⇒ **不判**（不写 `kickstart_burn` 台账，WARN 一次）。
+     **要用起点基线必须显式 `mode: baseline`**。
+- **否决的备选**：① 「缺 `kickstart_burn` 块就拒开课」（`load_course` 抛错）——把配置不完备
+  升级成开不了课，且历史上 y4 之后无人开缰绳，代价大于收益；② 「把 `MODE_AUTO` 缺省改成
+  `baseline`」——正是缺陷 3 本身；③ 「只改 notify 不改 ①②」——两条腿的实测跌幅已经证明
+  baseline 判据对改行为腿无效（跌幅是设计的一部分），光改开关只会换成「halt 模式下照样炸」。
+- **违反后果**：把 `kickstart_ref: true` 用在改行为类腿上，且没有显式 `mode: baseline` 或
+  `peer` ⇒ 该腿在首次「连续 3 点低于起点 5pp」时被停（这次是 it31 / it41），
+  **表现为 worker 无活可领**，极易被读成 hub / 网络故障。
+- **落点**：`nn-training/worker/loop_guards_leg.py`（`_rein_active` + 三处闸）·
+  `nn-training/tests/worker/test_kickstart_burn_guard.py`（新，7 例）·
+  `test_kickstart_plan.py`（4 例随契约变更改写）· `tests/trainer/test_loop_guards_split.py`
+  （借用方法/入边/出边三张闭集表 +1 项，功能用例改显式 baseline）。
+- **验收**：新 7 例绿，且**回滚实测**（`git show HEAD:` 换回旧文件）`_kickstart_burn(15)` 返回
+  `True` ⇒ 用例是真红不是假红；`tests/worker/` **1307 passed**；`tests/trainer/test_loop_guards_split.py`
+  **29 passed**；ruff / mypy 单文件绿。
+- **⚠ 生效条件**：`worker/loop_guards_leg.py` 跑在 **trainer 进程**里 ⇒ **必须重启 trainer**
+  （`nn-training/**` 不在 `tools/agent/codehash-files.txt` 内，不触发节点 stale 重启波；
+  但 trainer 内存里是启动那刻的代码）。改课程文件同样只对**下一次**启动生效
+  （`kickstart_ref` 在 `biz/hot_reload.py::RESTART_ONLY_FIELDS`）——本次事故里 17:10 改文件、
+  18:06 第一条腿照旧被停，就是这条。
