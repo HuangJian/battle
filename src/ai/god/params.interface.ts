@@ -1415,6 +1415,12 @@ export interface GodAIParams {
   defenseCellResolve: number
 
   /**
+   * A12 (2026-10-23): multi-sector crossfire escape (see god/crossfire.ts).
+   * 0 = OFF (byte-identical), 1 = on.
+   */
+  crossfireSectorMode: number
+
+  /**
    * A5 (2026-10-20): probe `canMoveDir` / `canMoveOrBreak` along the movement
    * axis from the tank's REAL pixel coordinate instead of `snap()`-ing it to
    * the cell grid first.

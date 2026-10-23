@@ -494,6 +494,9 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // A8 (2026-10-21): 集合点必须是能站的格 —— (12,23) 在 35/35 关都是环砖，
   // A* 两种模式都返回空路径 ⇒ 所有回防指令都交给导航层一个到不了的目标。
   // 1 = 解析到 (12,22)（SHIPPED）· 0 = 原始格（仅 A/B 基线，字节等同）。
+  // A12 (2026-10-23): 多扇区交叉火逃逸（s14 死因：75% 致命拍 ≥2 发在飞，
+  // 单车道的垂直闪避等于从一条车道走进另一条）。0 = OFF。
+  crossfireSectorMode: 0,
   defenseCellResolve: 1,
   // A5 (2026-10-20): probe the movement axis un-snapped in canMoveDir /
   // canMoveOrBreak. 保留实现，默认 OFF —— 实测它让碰撞判定整体更保守，
