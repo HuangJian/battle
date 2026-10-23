@@ -458,6 +458,8 @@ class OfflineRoundsMixin:
                             "it": int(it),
                             "weights_fp": got,
                             "landed_fp": full_fp,
+                            # ★ 空串 = 整份到手；有值 = 没到手 + 原因（读方据此判断这一轮能不能直接用）
+                            "land_note": str(staged.get("note") or ""),
                             "opt_bytes": len(opt),
                             **(row if isinstance(row, dict) else {}),
                             # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
@@ -492,6 +494,17 @@ class OfflineRoundsMixin:
                 row=row,
                 advance_active=advance_active,
             )
+        # ★ 2026-10-23（现场教训）：**「这一轮没拿到整份」必须留痕**。两种形态：
+        #   ① `stage` 缺席（本进程没带整份落地器——hub 是 2026-10-15 之前启动的老进程就长这样）：
+        #      `staged` 是空、`note` 也是空 ⇒ 2026-10-23 实测 y31-null **28 轮全落成 `.delta`**，
+        #      而全程零提示，只能靠人去数文件才发现；
+        #   ② `stage` 在、但基准不在 hub 侧（`note` 非空，原有路径）。
+        # 两者都写进账本行与返回值（不只是 stdout）。
+        if not note and delta_files.named_for("weights.json", wj) != "weights.json" and full_fp == got:
+            note = (
+                "no-stage: 本 hub 进程没有整份落地器（stage 未接线 / 进程未重启到带它的代码）"
+                "——原件已保留；重启 hub 后跑 tools/offline-weights-restore.py 可补"
+            )
         if note:
             print(
                 f"[hub-server] 回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
@@ -503,6 +516,7 @@ class OfflineRoundsMixin:
             "run_id": run_id,
             "it": int(it),
             "landed": landed,
+            "land_note": note,
             "raw_fp": got,
             "weights_fp": full_fp,
         }

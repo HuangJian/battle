@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -210,6 +211,36 @@ def _archive_courses() -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
+def seed_base(course_dir: Path, run: str, weights: str | Path, *, log=print) -> str:
+    """把一份整份权重放进 hub 的**基准搜索面**，返回其 sha（幂等，不覆盖别人的基准）。
+
+    ★ 2026-10-23 新增：现场发现「基准不在 hub 侧」是离线段最常见的失败原因，而本工具原来
+    只能报「基准缺失」却**没法把基准放进去**（`--seed RUN=权重路径`，可重复）。
+
+    位置取 `remote.weights_standard._SEARCH_PATTERNS` 认的两个名字（**都是文件**）：
+      ① `<course>/remote-jobs/<run>/blob.init`（开课时 `hub_client` 落 init 权重就是这个名字）；
+      ② ① 已被别的字节占用 ⇒ `<run>/init_weights.json`（同一个模式表里的另一个名字）。
+    ⚠ 写成**目录**（`blob.init/<sha>/`）不在搜索模式里 ⇒ 等于没写（今天手工补历史时踩过）。
+    """
+    raw = Path(weights).read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    d = course_dir / "remote-jobs" / run
+    d.mkdir(parents=True, exist_ok=True)
+    for name in ("blob.init", "init_weights.json"):
+        p = d / name
+        if not p.exists():
+            p.write_bytes(raw)
+            log(f"[sweep] 基准已 seed：{p.relative_to(_ROOT)}（{len(raw)}B）")
+            return sha
+        try:
+            if hashlib.sha256(p.read_bytes()).hexdigest() == sha:
+                log(f"[sweep] 基准已在位（幂等）：{p.relative_to(_ROOT)}")
+                return sha
+        except OSError:
+            continue
+    raise ProtocolError(f"{d}/blob.init 与 init_weights.json 都被别的字节占着——不覆盖基准")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = house_parser(description="把 hub 树里已落下的 delta 容器就地补落成整份（缺省只报告）")
     ap.add_argument("--traj-root", default="tmp", help="训练轨迹根（缺省 tmp）")
@@ -221,6 +252,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--apply", action="store_true", help="真的落盘（缺省 = dry-run，只报告）")
     ap.add_argument("--no-archive", action="store_true", help="不扫 nn-training/weights/<课>/ 那一面")
+    ap.add_argument(
+        "--seed",
+        action="append",
+        default=[],
+        metavar="RUN=WEIGHTS",
+        help="★ 2026-10-23：把这份整份权重放进 <课>/remote-jobs/RUN/ 作为基准（可重复）",
+    )
     args = ap.parse_args(argv)
     # `.resolve()`：报告里的 `relative_to(_ROOT)` 与落地器的候选根都要绝对路径
     #（相对路径会让 `relative_to` 抛 ValueError，且候选根比较会退化成字符串比对）。
@@ -244,6 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     total = _round_counts()
     scratch = Path(tempfile.mkdtemp(prefix="delta-sweep-"))
     try:
+        # ★ seed 必须**先于**任何落地：基准不在位时，前面的轮会一条条报「基准缺失」。
+        for spec in args.seed:
+            if "=" not in spec:
+                raise SystemExit(f"--seed 要写成 RUN=权重路径（收到 {spec!r}）")
+            run_id, wpath = spec.split("=", 1)
+            w = Path(wpath)
+            if not w.is_file():
+                raise SystemExit(f"--seed 的权重文件不存在：{w}")
+            for c in (named or _courses(root)):
+                cd = _course_dir(root, c)
+                if cd.is_dir():
+                    seed_base(cd, run_id.strip(), w)
         for c in traj_courses:
             for k, v in sweep_rounds(root / c, c, apply=args.apply, scratch=scratch).items():
                 total[k] += v
