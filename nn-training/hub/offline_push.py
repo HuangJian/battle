@@ -53,7 +53,6 @@ from common.protocol import (
     OFFLINE_PUSH_PACK_DIR,
     OFFLINE_PUSH_PROTO,
     OFFLINE_PUSH_RESUME_DIR,
-    OFFLINE_PUSH_STATE_PATH,
     OFFLINE_PUSH_TASK_NAME,
     PUSH_DEAD_MISSES,
     ProtocolError,
@@ -66,10 +65,12 @@ from hub.offline_ingest import (
     ingest_offline_result,
     trigger_pack_export,
 )
+from hub.offline_pack_fresh import pack_still_fresh
 from hub.offline_push_assign import OfflinePushAssignments
+from hub.offline_push_workers import OfflinePushWorkers
 from hub.task_pack import pack_index_meta
 from remote import offline_push_client as client
-from remote.push_dispatch import PushWorkers, run_tick_loop
+from remote.push_dispatch import run_tick_loop
 
 #: 调度拍（秒）：与 GPU 派发器同一量级；hub 的派发延迟 = 一拍 + 一次 zip 组装。
 OFFLINE_PUSH_POLL_SEC = 10.0
@@ -92,8 +93,6 @@ OFFLINE_PUSH_DEAD_MISSES = PUSH_DEAD_MISSES * 4
 TMP_SWEEP_AGE_SEC = 3600.0
 #: 临时目录清扫的节流（秒）：每次调度拍都 rglob 一遍是白 IO。
 TMP_SWEEP_EVERY_SEC = 600.0
-#: proto 探测**失败**后的重试间隔（秒）：旧 worker 升级代码后不必等 hub 重启（评审 F11）。
-PROTO_RETRY_SEC = 60.0
 #: `settling` 的重试间隔（秒）：ack 没成时**不丢单**，但也不该每拍都撞一次。
 SETTLE_RETRY_SEC = 60.0
 
@@ -108,70 +107,6 @@ class _PumpState:
     stop: threading.Event = field(default_factory=threading.Event)
     misses: int = 0
     last_seq: int = -1
-
-
-class OfflinePushWorkers(PushWorkers):
-    """离线 push 的登记表（`capability="offline_push"`）+ **协议版本门**。
-
-    在线/忙闲/热重载/退避全部复用基类（第三份登记表会立刻漏掉一个修复）；这里只加一件
-    基类不该知道的事：`/state` 的 `proto`。GPU 的 `/ping` 体里没有这个字段，所以版本门
-    不能挂在探活上（评审 P1-7）——它要问那个**只有新 worker 才有的端点**。
-
-    探测结果记在每个条目的 `proto_ok` 上（`None` = 还没问过）：派发只看 `True`，
-    不知道就不推（与「从没答过 = 不在线」同一条保守方向）。
-    """
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("capability", CAP_OFFLINE_PUSH)
-        super().__init__(*args, **kwargs)
-
-    def probe_proto(self, *, timeout: float = 5.0) -> dict[str, bool]:
-        """对在线且还没结论的条目问一次 `/state`；返回 `id -> 兼容`。
-
-        **失败也会重试**（评审 F11）：`proto_ok=False` 只挡 `PROTO_RETRY_SEC`，不是终审 ——
-        云机上换个 notebook 代码就跑起来了，没有理由非得重启 hub 才认它。
-        """
-        out: dict[str, bool] = {}
-        now = self._now()
-        for w in self.snapshot():
-            wid = str(w.get("id") or "")
-            if not wid or not w.get("online"):
-                continue
-            ok = w.get("proto_ok")
-            if ok is True:
-                continue
-            at = float(w.get("proto_at") or 0.0)
-            if ok is False and at and now - at < PROTO_RETRY_SEC:
-                continue
-            res = client.call_json(
-                str(w.get("url") or ""),
-                str(w.get("key") or ""),
-                OFFLINE_PUSH_STATE_PATH,
-                timeout=timeout,
-            )
-            if res is None:
-                continue  # 这一次没答：探活已经记了 miss，别把「没答」判成「协议不符」
-            status, doc = res
-            got = str((doc if isinstance(doc, dict) else {}).get("proto") or "")
-            # ★ 有答且不是「200 + 版本键相符」才算不兼容：旧 worker 的 404 也是一种**有答**的
-            # 「没有这个端点」（评审 P1-7 的版本门），而连不上不该在这里落结论。
-            ok = status == 200 and got == OFFLINE_PUSH_PROTO
-            self.note_fields(wid, proto_ok=bool(ok), proto=got, proto_at=now)
-            out[wid] = bool(ok)
-            if not ok:
-                self._log(
-                    f"WARN worker {wid} 不支持离线 push（/offline/push/state 的 proto={got!r}）"
-                    f"——升级它的 notebook 代码后再启用；本拍不向它派单"
-                )
-        return out
-
-    def eligible(self) -> list[dict]:
-        """可接单的 worker：在线、不忙、`proto_ok=True`。"""
-        return [
-            w
-            for w in self.snapshot()
-            if bool(w.get("online")) and not bool(w.get("busy")) and w.get("proto_ok") is True
-        ]
 
 
 class OfflinePushDispatcher:
@@ -346,6 +281,13 @@ class OfflinePushDispatcher:
                 self._release(course, str(rec.get("lease_token") or ""))
                 self.assignments.drop(course)
                 continue
+            if phase == "dispatching":
+                # 提议阶段（云机还没应答 / hub 崩在受理与接管之间）⇒ **不 claim**：让 pump
+                # 重投同一单（确定性 task_id ⇒ 要么首次受理、要么 duplicate），受理后再接管。
+                self._start_pump(course, rec, url, key)
+                resumed.append(course)
+                self._log(f"提议续投 {course}（worker={wid}，等云机受理）")
+                continue
             lease, why = self.hub.claim_offline(course, wid)
             if why:
                 self._log(f"在途单 {course} 重新 claim 被拒（{why}）——丢账本，等下一拍")
@@ -392,9 +334,11 @@ class OfflinePushDispatcher:
                 pack = self._pack_for(course, row, wid, now)
                 if pack is None:
                     continue
-                lease, why = self.hub.claim_offline(course, push_worker_id_of(wid))
-                if why:
-                    continue
+                # ★ 2026-10-24（用户口径）：**包就绪 ≠ 接管**。这里只「提议」——录一笔
+                #   `dispatching` 的 assignment（**不 claim、不写 hold**），把包推给云机；
+                #   云机应答受理（202）之后才由 pump `claim_offline`，那才叫接管。
+                #   旧顺序是先 claim 再上传：上传失败/云机拒收时 hold 已经挂在身上，
+                #   控制台上显示「已被接管」而云机连包都没收到。
                 meta = self._pack_meta(pack)
                 pack_it = int(meta.get("it") or 0)
                 anchor = self._anchor(course, pack_it)
@@ -407,7 +351,7 @@ class OfflinePushDispatcher:
                     "pack_name": pack.name,
                     "pack_path": str(pack),
                     "run_id": str(meta.get("run_id") or ""),
-                    "lease_token": str(lease.get("token") or ""),
+                    "lease_token": "",
                     #: hub 这边已经有的最高一轮（= 任务包起点 / 续跑锚点）：worker 的 outbox
                     #: 以它为地板，不再物化这些轮（评审 F7）。
                     "resume_it": int(resume_it),
@@ -424,10 +368,10 @@ class OfflinePushDispatcher:
                 started.append(course)
                 self._start_pump(course, rec, str(worker["url"]), str(worker.get("key") or self.token))
                 self._log(
-                    f"派发 {course} -> {push_worker_id_of(wid)}"
-                    f"（pack={pack.name} run={rec['run_id'] or '-'}）"
+                    f"提议 {course} -> {push_worker_id_of(wid)}"
+                    f"（pack={pack.name} run={rec['run_id'] or '-'}）——等云机受理后才接管"
                 )
-                break  # 一台机器一次只接一单
+                break  # 一台机器一次只接一单（训练完一门才提议下一门）
         if started:
             self._wake.set()
         return started
@@ -616,7 +560,7 @@ class OfflinePushDispatcher:
         st.thread.start()
 
     def _pump(self, course: str, rec: dict, url: str, key: str, st: _PumpState) -> None:
-        """一条 assignment 的整条腿（上传 → 逐轮拉取 → ack → 收尾）。"""
+        """一条 assignment 的整条腿（提议 → **云机受理** → 接管 → 逐轮拉取 → ack → 收尾）。"""
         tmp_zip: Path | None = None
         try:
             rec = self.assignments.get(course) or rec
@@ -648,21 +592,57 @@ class OfflinePushDispatcher:
                         )
                         self._drop(course, rec, reason="task-id-mismatch")
                         return
+                    # 受理 ≠ 接管：先把 task_id 记上（cancel/ack 要带它），lease 仍然空着。
                     rec = self.assignments.set_fields(
                         course,
                         task_id=str(meta["task_id"]),
                         resume_it=int(meta["resume_it"]),
                         pack_sha256=str(meta["pack_sha256"]),
-                        phase="running",
                     ) or rec
-                    self.workers.note_fields(self._bare(str(rec.get("worker_id") or "")), busy=True)
                     self._log(
-                        f"{course}: 任务已受理（task={meta['task_id']}，"
-                        f"地板 it{meta['resume_it']}）"
+                        f"{course}: 云机已受理（task={meta['task_id']}，地板 it{meta['resume_it']}）"
+                        "——现在才接管"
                     )
                 else:
                     rec = self.assignments.get(course) or rec
                     self._log(f"{course}: worker 已在跑同一单（task={meta['task_id']}）——接管，不重传")
+            # ★ 接管（hold）**只**发生在这里：云机已受理（刚受理 / 早就受理 / 重启后捡回来）。
+            #   顺序是硬要求（用户口径 2026-10-24）：包就绪不接管，云机应答才接管。
+            if not rec.get("lease_token"):
+                # 需求 4（同日）：**导包结束 → 云机接管**这段里本机可能又跑完一轮。接管前拿
+                # 当下的清单复核一次：包过期 / 被重导过 ⇒ 不接管，先按最新进度重导，下一拍再提议。
+                fresh, stale_why = self._still_fresh(course, rec)
+                if not fresh:
+                    self._log(
+                        f"{course}: 云机已受理，但包在提议之后**过期**了（{stale_why}）"
+                        "——不接管：撤单并按最新进度重新导包，等下一拍用新包再提议"
+                    )
+                    out = trigger_pack_export(self.hub, course)
+                    self._log(f"{course}: 已请控制台重新导包（{out['state']}）：{out['note']}")
+                    self._settle_assignment(
+                        course, url, key, rec, cancel=True, free_worker=False, reason="pack-stale"
+                    )
+                    self._cool(course)
+                    return
+                lease, why = self._claim(course, rec)
+                if why:
+                    self._log(
+                        f"{course}: 云机已受理、但这门课本拍接管不到（{why}）——撤单"
+                        "（云机在轮边界停；本机从不曾持有它，不 release 别人的租约）"
+                    )
+                    # `free_worker=False`：**不**替云机删 outbox —— 它的子进程可能已经在跑，
+                    # result=True 的 ack 会在它脚下把 outbox 删掉。cancel 让它自己停在轮边界。
+                    self._settle_assignment(
+                        course, url, key, rec, cancel=True, free_worker=False, reason="claim-lost"
+                    )
+                    return
+                rec = self.assignments.set_fields(
+                    course,
+                    lease_token=str(lease.get("token") or ""),
+                    phase="running",
+                ) or rec
+                self.workers.note_fields(self._bare(str(rec.get("worker_id") or "")), busy=True)
+                self._log(f"{course}: 接管成立（云机已受理；本机开始逐轮拉取）")
             self._pump_loop(course, url, key, st)
         except Exception as e:  # 线程绝不静默死掉
             self._log(f"{course}: pump 异常 {type(e).__name__}: {e}")
@@ -673,6 +653,27 @@ class OfflinePushDispatcher:
             with self._lock:
                 if self._pumps.get(course) is st:
                     self._pumps.pop(course, None)
+
+    def _claim(self, course: str, rec: dict) -> tuple[dict, str]:
+        """接管一门课 ⇒ `(lease, "")` / `({}, 拒因)`。**只在云机受理之后调用**。
+
+        `claim_offline` 自己会把「同一 worker 续领 / 过期 / 别人 stale」都判成可领，
+        所以这里不做额外判断；异常一律折成拒因（pump 线程不许死）。
+        """
+        wid = str(rec.get("worker_id") or "")
+        try:
+            lease, why = self.hub.claim_offline(course, wid)
+            return dict(lease or {}), str(why or "")
+        except Exception as e:
+            return {}, f"claim 异常 {type(e).__name__}: {e}"
+
+    def _still_fresh(self, course: str, rec: dict) -> tuple[bool, str]:
+        """接管前复核：提议时那份包**现在**还是不是最新的（判据见 `hub.offline_pack_fresh`）。"""
+        try:
+            rows = self.hub.offline_tasks(worker=str(rec.get("worker_id") or ""))
+        except Exception:
+            return True, ""  # 清单读不到 ⇒ 不编：接管仍可能成功，claim 会给出真拒因
+        return pack_still_fresh(rows, {**rec, "course": course})
 
     @staticmethod
     def _bare(worker_id: str) -> str:
@@ -707,7 +708,7 @@ class OfflinePushDispatcher:
             task_id=tid,
             resume_it=int(meta.get("resume_it") or 0),
             pack_sha256=str(meta.get("pack_sha256") or ""),
-            phase="running",
+            # phase/lease 不动：接管由 `_pump` 在「云机已受理」之后统一做（用户口径 2026-10-24）。
         )
         return True
 
@@ -735,6 +736,10 @@ class OfflinePushDispatcher:
             self._log(f"{course}: 收摊（{reason}）")
 
     def _release(self, course: str, lease: str) -> None:
+        if not str(lease or ""):
+            # 提议还没走到接管 ⇒ 我们**从来没持有过**这门课：一次网络调用都不发。
+            # （`release_offline` 对「无租约」会顺手清 hold 镜像 —— 那在提议失败时是别人的东西。）
+            return
         try:
             self.hub.release_offline(course, lease)
         except Exception as e:

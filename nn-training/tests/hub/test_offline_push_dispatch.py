@@ -118,6 +118,7 @@ class _Worker:
         metrics: bool = False,
         oversize: bool = False,
         late_round: bool = False,
+        follow_task_identity: bool = False,
     ) -> None:
         self.run_id = run_id
         self.round_it = round_it
@@ -127,6 +128,9 @@ class _Worker:
         self.metrics = metrics
         self.oversize = oversize
         self.late_round = late_round
+        #: 多课程夹具用：假训练的产物按**收到的那一单的 (course, run_id)** 盖章（真 worker 就是这样）。
+        self.follow_task_identity = follow_task_identity
+        self.body_course = COURSE
         self._late_body: tuple[int, bytes] | None = None
         self.task: dict | None = None
         self.state = PushFaceState(work_dir=tmp_path / "worker", log=lambda _m: None)
@@ -137,6 +141,11 @@ class _Worker:
 
     def _starter(self, task: dict, task_dir: Path, outbox: Path) -> None:
         self.task = dict(task)
+        if self.follow_task_identity:
+            # 权威面（`store_offline_artifact`）按 assignment 的 (course, run_id) 校验体自报值：
+            # 假训练必须按**收到的那一单**盖章，否则会被判成「冲突」而不是「入账」。
+            self.body_run_id = str(task.get("run_id") or self.body_run_id)
+            self.body_course = str(task.get("course") or self.body_course)
         outbox.mkdir(parents=True, exist_ok=True)
         rounds = outbox / "rounds"
         rounds.mkdir(exist_ok=True)
@@ -151,7 +160,9 @@ class _Worker:
                 "oversize": True,
             }
         else:
-            body = _artifact_body(run_id=self.body_run_id, it=self.round_it)
+            body = _artifact_body(
+                run_id=self.body_run_id, it=self.round_it, course=self.body_course
+            )
             raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
             (rounds / f"it{self.round_it:04d}.json").write_bytes(raw)
             rounds_doc[str(self.round_it)] = {
@@ -167,7 +178,8 @@ class _Worker:
             # 账本先声明的第二轮，body 稍后才落（`write_late_round`）——F1 的积压形状。
             it2 = self.round_it + 1
             raw2 = json.dumps(
-                _artifact_body(run_id=self.body_run_id, it=it2), ensure_ascii=False
+                _artifact_body(run_id=self.body_run_id, it=it2, course=self.body_course),
+                ensure_ascii=False,
             ).encode("utf-8")
             self._late_body = (it2, raw2)
             rounds_doc[str(it2)] = {
@@ -203,7 +215,11 @@ class _Worker:
         )
         if self.write_final:
             (outbox / "final.json").write_text(
-                json.dumps(_result_body(run_id=self.run_id, it_end=self.round_it)),
+                json.dumps(
+                    _result_body(
+                        run_id=self.body_run_id, it_end=self.round_it, course=self.body_course
+                    )
+                ),
                 encoding="utf-8",
             )
         if self.finish_now:
@@ -234,12 +250,33 @@ class _Worker:
         it, raw = self._late_body
         (self.state.outbox / "rounds" / f"it{it:04d}.json").write_bytes(raw)
 
+    def write_round(self, it: int) -> None:
+        """训练又写完一轮（**hub 不在也照写**；需求 3「断线不耽误训练」的夹具动作）。"""
+        outbox = self.state.outbox
+        assert outbox is not None
+        raw = json.dumps(
+            _artifact_body(run_id=self.body_run_id, it=it, course=self.body_course),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        (outbox / "rounds" / f"it{it:04d}.json").write_bytes(raw)
+        doc = json.loads((outbox / "state.json").read_text(encoding="utf-8"))
+        doc["rounds"][str(it)] = {
+            "rev": 0,
+            "file": f"rounds/it{it:04d}.json",
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "oversize": False,
+        }
+        (outbox / "state.json").write_text(json.dumps(doc), encoding="utf-8")
+
     def finish(self) -> None:
         """补上段末（用于「hub 重启后还在拉」那条用例：先让 worker 停在运行态）。"""
         outbox = self.state.outbox
         assert outbox is not None
         (outbox / "final.json").write_text(
-            json.dumps(_result_body(run_id=self.run_id, it_end=self.round_it)),
+            json.dumps(
+                _result_body(run_id=self.body_run_id, it_end=self.round_it, course=self.body_course)
+            ),
             encoding="utf-8",
         )
         doc = json.loads((outbox / "state.json").read_text(encoding="utf-8"))
@@ -262,8 +299,15 @@ def _wait(pred, *, timeout: float = 30.0, step: float = 0.05) -> bool:
     return False
 
 
-def _dispatcher(hub: _HubQueue, tmp_path: Path) -> tuple[OfflinePushDispatcher, OfflinePushWorkers]:
+def _dispatcher(
+    hub: _HubQueue,
+    tmp_path: Path,
+    *,
+    client_mod: object = None,
+    cooldown_sec: float = 60.0,
+) -> tuple[OfflinePushDispatcher, OfflinePushWorkers]:
     workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
+    kw: dict = {} if client_mod is None else {"client_mod": client_mod}
     disp = OfflinePushDispatcher(
         hub,
         workers,
@@ -272,10 +316,28 @@ def _dispatcher(hub: _HubQueue, tmp_path: Path) -> tuple[OfflinePushDispatcher, 
         port=0,
         pump_sec=0.02,
         heartbeat_sec=0.02,
-        cooldown_sec=60.0,
+        cooldown_sec=cooldown_sec,
         log=lambda _m: None,
+        **kw,
     )
     return disp, workers
+
+
+def _mk_hub_multi(tmp_path: Path, courses: list[str]) -> _HubQueue:
+    """多门「在训 + 有包」的离线课程（一次只能接一门/一台机器的用例需要第二门）。"""
+    stores: dict = {}
+    for course in courses:
+        d = tmp_path / course
+        d.mkdir(parents=True, exist_ok=True)
+        (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+        with zipfile.ZipFile(d / f"task-{course}.zip", "w") as zf:
+            zf.writestr(
+                "tools.task.json",
+                json.dumps({"run_id": f"run-{course}", "it": 0, "commit": "c0ffee"}),
+            )
+            zf.writestr("plan.json", json.dumps({"start_it": 0, "end_it": 4}))
+        stores[course] = _JobStore(d / "remote-jobs", d / "training_log.jsonl")
+    return _HubQueue(stores, order=list(courses), discover_root=tmp_path)
 
 
 # ------------------------------------------------------------------ 主路径
@@ -356,6 +418,189 @@ def test_hub_restart_resumes_an_assignment_without_reuploading(tmp_path: Path) -
         assert worker.task is not None and worker.task["task_id"] == task_id
         disp2.stop()
     finally:
+        worker.close()
+
+
+# ------------------------------------------------------------------ 接管的四条口径（2026-10-24 用户指令）
+
+
+def test_takeover_happens_only_after_the_cloud_machine_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """需求 1：**包就绪 ≠ 接管**。提议阶段不写 hold；云机受理（202）之后才 claim。"""
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path)
+    disp, workers = _dispatcher(hub, tmp_path)
+    seen: list[tuple[bool, bool]] = []
+    real_claim = hub.claim_offline
+
+    def _spy(course: str, wid: str, **kw: object) -> tuple[dict, str]:
+        # 记「此刻云机受理了没有」+「此刻 hold 是不是空的」（这次调用才会写它）。
+        seen.append((worker.task is not None, bool(hub.hold_of(course))))
+        return real_claim(course, wid, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hub, "claim_offline", _spy)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: disp.assignments.get(COURSE) is None), "这一单没收摊"
+    finally:
+        disp.stop()
+        worker.close()
+    assert seen == [(True, False)], (
+        "接管必须发生在「云机已受理」之后，且那一刻 hold 还是空的（包就绪不接管）"
+    )
+
+
+def test_one_course_at_a_time_per_cloud_machine(tmp_path: Path) -> None:
+    """需求 2：一台云机同时只接一门；**跑完一门**之后下一拍才提议第二门。"""
+    a, b = "c-a", "c-b"
+    hub = _mk_hub_multi(tmp_path, [a, b])
+    worker = _Worker(tmp_path, write_final=False, finish_now=False, follow_task_identity=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: worker.task is not None), "一台机器都没接到单"
+        assert worker.task is not None
+        first = str(worker.task["course"])
+        other = b if first == a else a
+
+        # 第一门在跑：再拍两次，第二门连 assignment 都不许有（更不许被接管）
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert disp.assignments.get(other) is None
+        assert len(disp.assignments.snapshot()) == 1
+        assert hub.hold_of(other) == {}
+
+        # 第一门收尾 ⇒ 这台机器才空出来；下一拍提议**另一门**（先给第一门停课，模拟
+        # 「这一段跑完、换下一门」——否则轮转还会把同一门排在最前）。
+        worker.finish()
+        assert _wait(lambda: disp.assignments.get(first) is None), "第一门没收摊"
+        (tmp_path / first / COURSE_ENABLE_MARKER).unlink()
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: disp.assignments.get(other) is not None), "第一名跑完了却不提议第二门"
+    finally:
+        disp.stop()
+        worker.close()
+
+
+def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Path) -> None:
+    """需求 3：hub 断线 ⇒ 云机照跑照写（outbox 只增不减）；hub 回来后逐轮补传。"""
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, write_final=False, finish_now=False)
+    disp1, workers1 = _dispatcher(hub, tmp_path)
+    try:
+        workers1.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp1.tick(ping=True)
+        disp1.tick(ping=False)
+        it1 = _offline_root(hub) / "run-1" / "it-001"
+        assert _wait(lambda: it1.is_dir()), "第一轮没入账"
+
+        # ── hub 掉线（进程收线）──
+        disp1.stop()
+        for st in list(disp1._pumps.values()):
+            st.stop.set()
+        assert _wait(lambda: not disp1._pumps)
+
+        # 云机继续训练：又写完两轮，hub 那边一条都没有（也没人 ack ⇒ 一轮都没删）
+        worker.write_round(2)
+        worker.write_round(3)
+        outbox = worker.state.outbox
+        assert outbox is not None
+        assert (outbox / "rounds" / "it0003.json").exists()
+        assert not (_offline_root(hub) / "run-1" / "it-003").exists()
+
+        # ── hub 回来：同一份 assignment + 同一台 worker ⇒ 续跑，按 cursor 逐轮补传 ──
+        disp2, workers2 = _dispatcher(hub, tmp_path)
+        workers2.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp2.tick(ping=True)
+        assert _wait(lambda: (_offline_root(hub) / "run-1" / "it-003").is_dir()), "断线期间的轮没补传"
+        assert (_offline_root(hub) / "run-1" / "it-002").is_dir()
+        disp2.stop()
+    finally:
+        worker.close()
+
+
+class _GatedClient:
+    """`post_task` 拿到应答后**卡住**不返回：模拟「云机已受理、hub 还没记账」那个窗口。"""
+
+    def __init__(self, real: object) -> None:
+        self.real = real
+        self.uploaded = threading.Event()
+        self.release = threading.Event()
+
+    def post_task(self, *a: object, **kw: object):
+        out = self.real.post_task(*a, **kw)  # type: ignore[attr-defined]
+        self.uploaded.set()
+        assert self.release.wait(30.0), "用例没放行"
+        return out
+
+    def __getattr__(self, name: str):
+        return getattr(self.real, name)
+
+
+def test_a_pack_that_goes_stale_before_takeover_is_re_exported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """需求 4：导包结束 → 接管之间本机又跑完一轮 ⇒ **不接管**，按最新进度重导包。
+
+    窗口用 `_GatedClient` 卡住：包已上传、云机已受理（202 到手前），此时把课程的
+    `weights.json` 换一份 —— 包的起点就不再是本机当前起点，接管必须让位给重导包。
+    """
+    hub, pack_path = _mk_hub(tmp_path, pack=False)
+    weights = b"A" * 64
+    course_dir = tmp_path / COURSE
+    (course_dir / "weights.json").write_bytes(weights)  # 本机当前起点
+    with zipfile.ZipFile(pack_path, "w") as zf:
+        zf.writestr(
+            "tools.task.json",
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "it": 0,
+                    "commit": "c0ffee",
+                    # 索引里的 parts 是「包起点」的权威声明：过期判据拿它与本机当前权重比。
+                    "parts": {"init_weights.json": {"sha256": hashlib.sha256(weights).hexdigest()}},
+                }
+            ),
+        )
+        zf.writestr("plan.json", json.dumps({"start_it": 0, "end_it": 4}))
+        zf.writestr("init_weights.json", weights)  # 包起点 = 导包那一刻的权重
+
+    worker = _Worker(tmp_path, write_final=False, finish_now=False)
+    gated = _GatedClient(__import__("remote.offline_push_client", fromlist=["x"]))
+    exports: list[str] = []
+
+    def _fake_export(_hub: object, course: str) -> dict:
+        exports.append(course)
+        return {"state": "triggered", "note": "stub"}
+
+    monkeypatch.setattr(disp_mod, "trigger_pack_export", _fake_export)
+    disp, workers = _dispatcher(hub, tmp_path, client_mod=gated)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert gated.uploaded.wait(30.0), "pump 没把包传上去"
+        assert worker.task is not None, "云机还没受理就卡住了（窗口不对）"
+
+        # ★ 这个窗口里本机又跑完一轮：课程当前权重换了。
+        (course_dir / "weights.json").write_bytes(b"B" * 64)
+        gated.release.set()
+
+        assert _wait(lambda: disp.assignments.get(COURSE) is None), "过期了还接管"
+        assert exports == [COURSE], "过期必须请控制台重新导包"
+        assert hub.hold_of(COURSE) == {}, "包过期就不该写 hold"
+        assert hub.offline_lease(COURSE) is None
+        assert worker.state.task_dir is not None
+        assert (worker.state.task_dir / "stop").exists(), "云机那单要被撤（写 stop 文件）"
+    finally:
+        gated.release.set()
+        disp.stop()
         worker.close()
 
 
@@ -545,7 +790,9 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         assert disp._adopt_existing(COURSE, "http://w", "k", meta) is True
         rec = disp.assignments.get(COURSE)
         assert rec is not None
-        assert rec["task_id"] == tid and rec["phase"] == "running" and rec["resume_it"] == 2
+        # 认领的是**同一单**（task_id/resume_it）；`phase` 仍是 `dispatching` —— 接管由
+        # `_pump` 在「云机已受理」之后统一做（用户口径 2026-10-24，别在这里抢先写 running）。
+        assert rec["task_id"] == tid and rec["phase"] == "dispatching" and rec["resume_it"] == 2
 
         # 别人的单（id 不同）⇒ 不接管，账本原样
         disp.assignments.set_fields(COURSE, task_id="", phase="dispatching")

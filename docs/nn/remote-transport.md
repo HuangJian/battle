@@ -6,6 +6,44 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §126 接管的四条口径：包就绪 ≠ 接管 / 一次一门 / 断线照跑 / 提议后过期就重导（2026-10-24 用户指令）
+
+四条都是**接管语义**的收紧，落点全在 hub 侧（一处 dispatcher + 一处 pump），worker 侧一行没改
+（它的 409 busy 与 stop 文件已经是所需的两道闸）。文件：`hub/offline_push.py`（调度拍 + pump）·
+`hub/offline_pack_fresh.py`（接管前的新鲜度判据，纯函数；LOC 预算拆分）·
+`hub/offline_push_workers.py`（登记表 + 协议门；同批拆出，DAG 账本 L3/L4）。
+
+| # | 口径 | 落点 | 判据 |
+|---|---|---|---|
+| 1 | **包就绪 ≠ 接管**：云机应答受理（202）之后才 claim | `_dispatch`（不 claim）→ `_pump`（202 后 `_claim`） | `claim_offline` 被调用的那一刻 `worker.task` 已存在、`hold_of(course)` 仍为空 |
+| 2 | **一次一门**：一台云机同时只接一门 | `_dispatch` 的 `of_worker()` + `break`；worker 侧 409 busy | 第一门在途时第二门连 assignment 都没有 |
+| 3 | **断线照跑**：hub 掉线不影响训练；回来后逐轮补传 | 训练在子进程 + `LocalOutboxDeliverer` 只写本地；pump 续拉 | 收线后 worker 又写两轮 → 新 dispatcher 把 it2/it3 补进 hub |
+| 4 | **提议后过期就重导**：导包结束到接管之间本机又跑完一轮 ⇒ 不接管 | `_still_fresh()`（claim 前活清单复核） | 卡住 202 的窗口里换掉课程 `weights.json` ⇒ 无 hold、有导包、worker 收到 stop |
+
+**为什么第 1 条必须改顺序**：旧顺序 `claim → 上传` 让 hold 早于云机受理。上传失败/云机拒收（413
+容量、409 busy）时租约已经挂在身上 —— 控制台显示「已被接管」，而云机连包都没收到；更糟的是
+`_drop` 之后还会 `release` 一次并不属于自己的租约窗口。现在：提议只写 `phase=dispatching` 的
+assignment（不写 hold），受理后才 claim；**claim 不到**（被别人抢走/停课/worker busy）⇒ 撤单
+（`cancel` 写 stop 文件）**但 `free_worker=False`** —— 云机的子进程可能已经在跑，`ack(result=True)`
+会在它脚下删掉 outbox。
+
+**第 3 条不需要新代码，但需要说清「为什么」**：训练子进程（`remote.offline_push_task`）走
+`run_one_course(push_mode=True)`，那条路上**一个 hub 调用都没有**（`offline_boot.py:1710` 起）；
+产物由 `LocalOutboxDeliverer` 写 outbox，只增不减；删除只发生在 hub 的 `ack`（按 rev）。所以
+hub 不在 = 只是没人来收，训练与写盘完全不受影响。hub 回来后 `_resume_pumps` 用同一份 assignment
+重新 claim 并接着拉（`cursor_it` 只进不退，`revs` 保证不重传已入账的版本）。
+⚠ 唯一的容量边界在 **收新单** 那一侧（`OFFLINE_PUSH_OUTBOX_MAX_BYTES`，413）：满了就不接下一门，
+当前这门的训练照旧。
+
+**第 4 条的两条判据都取 hub 的活清单**（不做本地推断）：`stale_reason` 非空（包的 `init_weights`
+≠ 课程**当前**活动权重，`task_pack_stale_reason`）或包文件 sha 与提议时不同（中途被重导过）。
+命中 ⇒ 打一行、`trigger_pack_export` 立刻请控制台重导、撤单 + 冷却，下一拍用**新包**重新提议。
+
+**用例**：`tests/hub/test_offline_push_dispatch.py` 四条 —— `test_takeover_happens_only_after_the_
+cloud_machine_accepts` · `test_one_course_at_a_time_per_cloud_machine` · `test_training_keeps_going_
+while_the_hub_is_away_then_backfills` · `test_a_pack_that_goes_stale_before_takeover_is_re_exported`
+（窗口用 `_GatedClient` 卡住「已受理、未记账」那一刻，不靠 sleep 抢时序）。
+
 ## §125 离线 push 真机首测的三处断点：hub 从不挂 `--offline-push`、注册成功的 15s 静默、push 节点进采样表（2026-10-24 · `plan/push-mode-notebooks.plan.md` 真机验收 · 决策 `DECISIONS.md` §2026-10-24-push-mode-real-machine）
 
 **现场（Colab；notebook 日志是 UTC，本机 21:40）**：

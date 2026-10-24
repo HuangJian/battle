@@ -9426,3 +9426,32 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **另一条前提（实测活 hub）**：三门课 `state=no_pack` ⇒ 派发器首拍只会「请控制台导包」
   （`auto_handoff_decision` 三门都是 `trigger`），包好了才真正派单；且这三门都 `claimable`，
   包一就绪就会被 `claim_offline` **接管**（hold 压住本地派发）——不想被接管的课要先停掉。
+
+## §2026-10-24-push-mode-takeover-semantics（2026-10-24，接管四条口径：包就绪≠接管 / 一次一门 / 断线照跑 / 提议后过期重导）
+
+- **背景**：用户对离线 push 的接管语义下了四条口径 —— ① 包就绪不代表接管，**云机应答受理之后**
+  才接管；② 一台自主云机**一次只接管一门**，训练完一门再接下一门；③ 接管后全程全速训练，
+  传输独立、hub 断线训练照跑，hub 回来后逐轮回传；④ 导包结束到接管之间若又跑完一轮，
+  接管时必须**基于最新内容重新导包**。
+- **现状核查**：②③ 本来就成立（`of_worker` + `break`；训练在子进程走 `push_mode`，
+  一个 hub 调用都没有，`LocalOutboxDeliverer` 只往 outbox 写、删只发生在 hub 的 ack 之后）；
+  ①④ 不成立：旧顺序是 `claim → 上传`，hold 早于云机受理（413/409 时控制台显示「已被接管」而
+  云机连包都没收到），且接管前不复核包是否已经被本机新一轮推进甩下。
+- **决定**：`_dispatch` 只写 `phase=dispatching` 的 assignment（**不 claim**），`_pump` 在收到
+  202（`duplicate` 亦然）之后调 `_claim`；claim 不到 ⇒ `cancel` 撤单但 `free_worker=False`
+  （云机子进程可能已在跑，`ack(result=True)` 会在它脚下删 outbox）。接管前再跑一次
+  `_still_fresh`（活清单的 `stale_reason` / 包 sha ≠ 提议时的 sha）⇒ 命中就请控制台重导、
+  撤单并冷却，下一拍用新包重新提议。
+- **否决的备选**：① 保留先 claim 但「失败即 release」——release 窗口里别人也抢不到，且控制台
+  已经在显示「已接管」，读面仍然是假的；② 给 worker 加「受理预占」再两阶段确认——多一个状态机，
+  而 `claim_offline` 的 `mine/expired/stale` 已经覆盖「同一个 worker 回来续领」；
+  ③ 接管时用本地账本推 freshness——本机进度与活动权重是 hub 的事实，本地推会造第二事实源；
+  ④ 把四条口径塞进 worker 侧——worker 只有 409 busy 与 stop 文件两件武器，语义的归属在 hub。
+- **落点**：`nn-training/hub/offline_push.py` · `hub/offline_pack_fresh.py`（新，纯函数）·
+  `hub/offline_push_workers.py`（新，登记表拆出；LOC 预算触发，账本 L3）·
+  `tests/helpers/remote_dag.py`（层号 0/3、派发器 3→4）·
+  `tests/hub/test_offline_push_dispatch.py`（四条新用例，窗口用 `_GatedClient` 卡住不靠 sleep）·
+  `dashboard/src/web/app/panels/OfflinePushPanel.tsx`（`dispatching` 文案改成「提议中…受理后才接管」）·
+  `docs/nn/remote-transport.md §126`。
+- **验收**：四条用例绿（含「卡住 202 的窗口里换掉课程 weights.json ⇒ 无 hold、有导包、worker 收到
+  stop」）；nn python gate 全绿；dashboard `bun run test` 1805 绿。

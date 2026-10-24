@@ -74,9 +74,10 @@ function assignmentTone(a: OfflinePushAssignmentView): { tone: StatusTone; title
   }
   switch (a.phase) {
     case 'running':
-      return { tone: 'ok', title: 'worker 在跑，hub 逐轮拉取入账' }
+      return { tone: 'ok', title: '云机已受理并接管：它在跑，hub 逐轮拉取入账' }
     case 'dispatching':
-      return { tone: 'warn', title: '正在投任务包 / 等 worker 受理' }
+      // 2026-10-24（用户口径）：包就绪 ≠ 接管 —— 这一刻只是「提议」，hold 还没写。
+      return { tone: 'warn', title: '提议中：正在投任务包 / 等云机受理（受理之后才接管）' }
     case 'settling':
       return { tone: 'warn', title: '收摊重试中：ack / cancel 没答，hub 会按退避重放' }
     default:
