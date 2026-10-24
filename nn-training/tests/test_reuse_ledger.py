@@ -86,9 +86,19 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 这里按「当天实际读数」重标，并保留那条纪律：再涨必须在这里写清楚是哪个名字、为什么不是抄了一份。
 #: （本次自己消掉了 1 个：`ModeTracker.tick` → `tick_mode`，避免与 `push_dispatch` / `trainer_heartbeat`
 #: 的 `tick` 凑成新的同名组。）
+#: **2026-10-23 抬同名 4 格（89 → 93）的账**（`plan/push-mode-notebooks` W3：新增 `remote/deliver_outbox.py`）。
+#: 新增的 4 个名字全部是 `DelivererLike` 的**面名（契约镜像）**，与 2026-10-20 `take`/`prune`/`status` 同族：
+#:
+#: | 名字 | 成员 | 为什么不是「又抄一份」 |
+#: |---|---|---|
+#: | `submit_round` · `submit_eval_round` · `submit_final` | `deliver_outbox` + `deliver_proc` + `offline_deliver` | `deliver_worker` 的 tick 循环**只认这一种形状**（进程代理 / 进程内 HTTP 腿 / 进程内 outbox 腿三个实现）；改名就要在调用点写三路分派 |
+#: | `backup_pending` | 同上三个 | 同上（`plan_handoff` 每轮调一次；outbox 腿的实现是「恒 0 = outbox 本身就是耐久副本」的**策略**，不是抄来的体） |
+#:
+#: ⚠ 同一次改动里 `exact_groups` 没有上涨（`_log_default` 改用 `common.logutil.tag_logger`，而不是再写一份
+#: `print(msg, flush=True)`），`clone_groups` 也未动。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 89
+BASELINE_SAME_NAME_GE3 = 93
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

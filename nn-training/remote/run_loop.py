@@ -166,6 +166,9 @@ def run_standalone(
     #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里
     #: （消费方 = `remote/offline_deliver.py` 的备份腿）。空 = 不做备份（纯离线腿 / 老调用方）。
     backup_root: str | Path | None = None,
+    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：**本地 outbox**（push 模式）。
+    #: 非空 = 补传腿只往这个目录写 body（hub 自己来拉）；与 `deliver=False` 共存时 outbox 仍然活。
+    outbox_dir: str | Path | None = None,
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -223,6 +226,7 @@ def run_standalone(
         hub_course=hub_course,
         hub_lease=hub_lease,
         backup_root=backup_root,
+        outbox_dir=str(outbox_dir or ""),
         deliver=deliver,
         run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
         log=log,
@@ -473,7 +477,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--no-deliver",
         action="store_true",
-        help="显式关掉产物补传（纯离线：不探 hub、不推任何字节）",
+        help=(
+            "显式关掉 HTTP 产物补传（纯离线：不探 hub、不推任何字节）。"
+            "与 --outbox 同时给 = 「只关 HTTP，本地 outbox 照写」（push 模式的任务包就是这么调的）"
+        ),
+    )
+    ap.add_argument(
+        "--outbox",
+        default="",
+        help=(
+            "★ 2026-10-23（push 模式）：本地 outbox 目录 —— 每轮/段末的 body 只落盘，不连 hub"
+            "（hub 自己来拉）。给了它就不回填任务包里的 hub_url"
+        ),
     )
     ap.add_argument(
         "--eval-on-cloud",
@@ -540,7 +555,9 @@ def main(argv: list[str] | None = None) -> int:
         args.artifacts = got["artifacts_dir"]
         if not args.ts_root and got.get("ts_code_tree"):
             args.ts_root = got["ts_code_tree"]
-        if not args.hub_url and got.get("hub_url"):
+        # ★ P0-1：outbox 模式下**不得**回填包里的 hub_url —— 那会让这条腿变成 HTTP 补传
+        # （push 模式的任务包恰恰不带 token，于是「静默什么都不做」）。
+        if not args.hub_url and got.get("hub_url") and not args.outbox:
             args.hub_url = str(got["hub_url"])  # 包里记着地址（**不记 token**）
     root = Path(args.artifacts)
     hub_token = _resolve_hub_token(args.hub_token, args.hub_token_file)
@@ -567,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
             hub_course=args.hub_course,
             hub_lease=hub_lease,
             backup_root=Path(args.backup_root) if args.backup_root else None,
+            outbox_dir=args.outbox,
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

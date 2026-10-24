@@ -647,6 +647,11 @@ OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024
 OFFLINE_RESULT_BODY_MAX = 256 * 1024
 #: 产物目录里补传记账文件名（= 已投递项；重启续投靠它，不靠内存）。
 OFFLINE_DELIVERED_NAME = "delivered.json"
+#: ★ 2026-10-23（plan/push-mode-notebooks §6.4a）：push 腿的**本地 outbox** 容量闸。
+#: 正常 hub 每 15s 拉一次并 ack ⇒ 稳态只有 1–2 轮；hub 长时间离线时才会涨。
+#: WARN = 一行告警（不拦），MAX = worker 服务端**停止接新单**（当前任务照跑；不静默丢轮）。
+OFFLINE_PUSH_OUTBOX_WARN_BYTES = 2 * 1024 * 1024 * 1024
+OFFLINE_PUSH_OUTBOX_MAX_BYTES = 4 * 1024 * 1024 * 1024
 #: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
 #: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
 OFFLINE_TASK_PACK_PATH = "/offline/task-pack"

@@ -359,6 +359,10 @@ def open_run_context(
     #: 空 = 按 `resolve_backup_root` 的兜底链推（生产路径上由 `offline_boot` 显式传）。
     backup_root: str | Path | None = None,
     deliver: bool = True,
+    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **本地 outbox 模式**。
+    #: 这个分支**先于** `deliver` 判定：`--outbox` + `--no-deliver` 的语义是「只关 HTTP 补传，
+    #: outbox 必须活」（否则训练照跑、outbox 永远空、最后被 hold stale 判掉线）。
+    outbox_dir: str = "",
     #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
     deliverer: DelivererLike | None = None,
     run_job_fn: Callable[..., dict] | None = None,
@@ -452,9 +456,11 @@ def open_run_context(
                     # 网络侧**备份抽屉**（拍板-3）：产物没能回传成功的轮次写这里。
                     # 落点 = 上面 `resolve_backup_root` 的产物（生产路径 = `<网络产物根>/backup`）。
                     backup_root=backup,
+                    # ★ P0-1：outbox 分支在工厂里先于 hub_url/token 早退（见 `make_deliverer`）。
+                    outbox_dir=outbox_dir or None,
                     log=log,
                 )
-                if deliver
+                if (deliver or str(outbox_dir or "").strip())
                 else None
             )
         ),

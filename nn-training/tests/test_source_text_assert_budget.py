@@ -236,6 +236,15 @@ notebook **不在 pytest 里执行**（没有可调用的运行时入口），�
 （`set(p) == {…}`、`capabilities == ["gpu_push"]`、`reg.give_up`、真 hub loopback 落盘对账），
 notebook 的 12 条首版也合并成 5 条（同一语义相关项共一个 assert），所以这一格是 **+6** 而不是 +26。
 
+**2026-10-23 抬 FORM 一格的账**（`plan/push-mode-notebooks` W3；形态 1490 → **1493** = +3，SOURCE 未动）：
+新增的三条都是「响亮行」判据（文本**就是**被测对象）——
+① `tests/remote/test_offline_deliver_proc.py` 的 outbox 降级：`"降级为进程内线程模式" in logs`（该行是操作员
+唯一能区分「真进程」与「降级」的证据）；② 同文件的反探针 `"降级" not in logs`（进程真的起来时**不许**报降级）；
+③ `tests/remote/test_deliver_outbox.py::test_close_reports_unsent_work_loudly` 的 `"还有 1 轮没物化" in logs`
+（"静默收线"正是该用例要防的那个形态）。同族先例 = 2026-10-15 J3 / 2026-10-22 反探针那一笔：
+被测行为**只**表现为一行人读时，文本断言就是行为断言。同一批里能改成结构判据的都改了：
+outbox 的状态/rev/ack/字节对账全部读 `state.json` 与文件字节（不靠日志）。
+
 """
 
 from __future__ import annotations
@@ -259,8 +268,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-18 plan/eval-gap-honesty 抬到 1483（+3 收工/裁定行；理由见模块头）
 #: 2026-10-22 节流窗读面抬到 **1484**（+1 反探针 `"已经在导包了" not in trigger_note`；理由见模块头）
 #: 2026-10-23 push-mode-notebooks W0–W2 抬到 **1490**（+6 = notebook push/pull 契约；理由见模块头）
+#: 2026-10-23 push-mode-notebooks W3 抬到 **1493**（+3 = outbox 降级行 + 反探针 + 收线欠账行；理由见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1490
+BASELINE_FORM = 1493
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

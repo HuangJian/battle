@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import AUTH_HEADER, OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote import deliver_proc as dp
 from remote.artifacts import atomic_write_json
+from remote.deliver_outbox import FINAL_NAME, read_state, round_path
 from remote.deliver_proc import DelivererProcess
 from remote.offline_deliver import SEG_END_KIND_ENV
 from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
@@ -527,3 +528,74 @@ def test_ledger_reader_tolerates_atomic_rewrite_race(tmp_path: Path, hub: _HubSt
         t.join(timeout=5.0)
     assert seen, "写者一直在写，读面必须至少读到一次完整内容"
 
+
+
+# ─────────────────────────── 本地 outbox（push 腿，2026-10-23 W3） ───────────────────────────
+
+
+def test_outbox_mode_child_writes_the_files_and_needs_no_hub(tmp_path: Path) -> None:
+    """P0-1 的进程面：`--outbox` 是子进程**认得的**参数（不是 unrecognized ⇒ 不该降级）。
+
+    没有 hub、没有 token：只靠 `run_id` 就该把 body 写出来。这条用例同时钉住
+    `make_deliverer` 的「outbox 分支先于 hub_url/token 早退」那个判定的下游形态。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    out = tmp_path / "outbox"
+    logs: list[str] = []
+    d = DelivererProcess(
+        base_url="",
+        token="",
+        run_id=RUN,
+        artifacts_dir=root,
+        outbox_dir=out,
+        work_dir=tmp_path / "work",
+        log=logs.append,
+    )
+    try:
+        d.start()
+        assert d.status()["mode"] == "process", f"outbox 子进程没起来（降级了）：{logs}"
+        d.submit_round(1)
+        d.submit_round(2)
+        assert _wait_until(lambda: round_path(out, 2).exists(), timeout=25.0), f"outbox 空：{logs}"
+        d.submit_final(it_end=2, state="complete", seg_end_kind="course")
+        assert _wait_until(lambda: (out / FINAL_NAME).exists(), timeout=25.0), f"没有 final：{logs}"
+    finally:
+        d.close(timeout=15.0)
+    st = read_state(out)
+    assert [int(k) for k in st["rounds"]] == [1, 2]
+    assert st["rounds"]["1"]["rev"] == 1 and st["rounds"]["2"]["rev"] == 1
+    assert st["final_ready"] is True
+    assert not any("降级" in m for m in logs), logs
+
+
+def test_outbox_boot_failure_degrades_to_in_process_and_still_writes(tmp_path: Path) -> None:
+    """★ P1-10 的 outbox 版：旧 `code.zip` 不认 `--outbox` ⇒ 降级 —— **outbox 不能是空的**。
+
+    不测这一条就会看到「降级成功、outbox 空」：训练照跑、hub 永远拉不到东西，而日志一片绿。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    out = tmp_path / "outbox"
+    logs: list[str] = []
+    d = DelivererProcess(
+        base_url="",
+        token="",
+        run_id=RUN,
+        artifacts_dir=root,
+        outbox_dir=out,
+        work_dir=tmp_path / "work",
+        worker_module="remote.deliver_worker_missing_on_purpose",
+        log=logs.append,
+    )
+    try:
+        d.start()
+        assert d.status()["mode"] == "thread", f"没降级：{logs}"
+        assert any("降级为进程内线程模式" in m for m in logs), f"降级必须响亮：{logs}"
+        d.submit_round(1)
+        assert _wait_until(lambda: round_path(out, 1).exists(), timeout=25.0), (
+            f"降级之后 outbox 必须照样产出：{logs}"
+        )
+        assert d.status()["degrade_reason"], "降级理由要能看见（否则排障只能靠猜）"
+    finally:
+        d.close(timeout=15.0)
+    assert read_state(out)["rounds"]["1"]["rev"] == 1
+    assert d.pending() == [], "线程兜底也要把积压物化完"

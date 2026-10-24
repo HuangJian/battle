@@ -132,6 +132,10 @@ LAYERS: dict[str, int] = {
     # 统计批组装。依赖 `delta_files`(L0) / `artifacts`(L0) / `weights_delta`+`opt_delta`(L0，只取魔数)
     # ⇒ **L1**；读者只有 `offline_deliver`(L2)。
     "remote.deliver_parts": 1,
+    # push 腿的**本地 outbox**（2026-10-23，`plan/push-mode-notebooks` §6.4a）：body 只落盘、rev、
+    # 带 rev 的 ack、统计。装配器（`deliver_parts`）**注入**而不 import（同类注入：`land_provider`）
+    # ⇒ 依赖面只剩 `delta_files`(L0) + `common.*` ⇒ 拓扑秩 **L1**；`deliver_proc`(L3) 站在它上面，秩不变。
+    "remote.deliver_outbox": 1,
     # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
     # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
     "remote.control_pool": 0,

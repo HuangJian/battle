@@ -6,6 +6,64 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §118 本地 outbox：push 腿的落盘面（W3 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6.4a · 决策 `DECISIONS.md` §2026-10-23-push-mode-outbox）
+
+push 模式没有「节点 → hub」的 POST（hub 经隧道来拉），所以补传腿的产物要落成文件。本节点的是**已落地**
+的 W3 与四条"错了就静默丢数据"的语义。模块：`remote/deliver_outbox.py`（L1，`LocalOutboxDeliverer`）。
+
+**`--outbox` 与 `--no-deliver` 的不变量（P0-1）**
+
+- 这两道闸原来各管一边（`deliver=not args.no_deliver` 与 `make_deliverer` 的 hub_url 早退），push 段
+  正好两个都命中 ⇒ **没有报错**：训练照跑、outbox 永远空、最后被 hold stale 判掉线。现在
+  `make_deliverer` / `open_run_context` 的 outbox 分支**先于** hub_url/token 判定，`--outbox`（不管有没有
+  `--no-deliver`）一定有一条腿。
+- `run_loop.main` 在 `--outbox` 下**不回填**任务包里的 `hub_url`：回填它就变回 HTTP 腿，而包里不带 token
+  ⇒ 又落回"静默什么都不做"。
+- 正反两面都钉住了：`--outbox` 下 body 真的出现，且全程**没构造过** `OfflineDeliverer`（断言
+  "没有 `/offline/artifact` POST"太弱：探活、统计批、备份腿都不走那条路径）。
+
+**outbox 形态**
+
+- `state.json`：`rounds{it:{rev,file,bytes,sha256,weights_fp,acked_rev,oversize}}, owed_reposts,
+  final_ready/final_acked, floor_it`；`rounds/itNNNN.json` = **完整 wire body**（与 HTTP 腿同字节，因为两边都调
+  `deliver_parts.build_round_body`）；`metrics/itNNNN.json` = **每轮一份统计体**（亦是 `store_offline_metrics` 的入参）；
+  `final.json` = `build_result_body` 的输出。
+- 不做"服务端按需重建"（plan §6.4a）：服务端是启动期从 `/code` 拿的 boot 版本，按需重建会让"服务端代码"与
+  "训练代码"两个版本漂开。代价一份临时权重副本（WARN 2GiB / MAX 4GiB：`OFFLINE_PUSH_OUTBOX_{WARN,MAX}_BYTES`）。
+- `oversize`（> `OFFLINE_ARTIFACT_BODY_MAX`）的轮不写 body，但**统计照写**：y31-null 的教训是"没权重体的轮连 row
+  一起丢 ⇒ 控制台整段空白"。
+
+**rev 与 ack（P0-3）**
+
+- `rev` 只在重投时前进：`submit_eval_round`（迟到评估行）⇒ `rev+1` + 覆盖同名文件。
+- `ack(upto_it, result, revs)` **带 rev**：只删「本次 ack 的 rev == 当前 rev」的 body；hub 看到的旧版 ⇒ **不删**，
+  它下次按新 rev 重拉。`result=true` 才删 `final.json`。无条件删 `it<=upto_it` 的旧写法会把刚建好的"迟到评估行"
+  通道吃掉（HTTP 腿靠 `_degraded`/`owed_reposts`/`?parts=metrics` 撑着，push 腿没有那两条）。
+- `floor_it`（落地时补的判据）：`it <= floor_it` 不物化，值 = 派发时 hub 的 cursor（任务包的 resume 锚点）。
+  **缺省 0 = 全部物化**：地板给高了的代价是永久丢那几轮，给 0 只是多发几份 hub 按内容去重的重复体。
+
+**进程内降级是常态（P1-10）**
+
+- 任务包里的 `code.zip` 是导出那一刻的快照，旧 `remote/deliver_worker` 不认 `--outbox` ⇒ `unrecognized
+  arguments` ⇒ `DelivererProcess` 走既有的 sticky 降级。降级目标按模式选：outbox 腿 → `LocalOutboxDeliverer
+  (background=True)`（同一个目录、同一份实现），HTTP 腿 → `OfflineDeliverer`。
+- 因此 `LocalOutboxDeliverer` **同时**支持子进程（`background=False`，`deliver_worker` 的 tick 里 `sync()`）与进程内线程
+  （`start()` 起 daemon）+ 同步三态；两个模式写出来的文件逐字节一致。
+- 子进程循环**复用**：`sync/pending_anchors/unsent_reposts/mark_repost/deliver_result/close/status` 在两条腿上
+  同形，`deliver_worker` 只多一个构造分支。
+
+**装配与层号（P1-1 的延伸）**
+
+- `deliver_parts` 是唯一装配器：`rounds_with_rows` / `row_for` / `build_round_body` / `build_result_body` /
+  `build_metrics_body`。`row_for` 从 `OfflineDeliverer._row_for` 原样抽出（两边同判据）。
+- `deliver_outbox` 对 `deliver_parts` 是**注入**（`OutboxParts` Protocol）而不是 import：import 会让它变 L2，把
+  `deliver_proc` 顶到 L4 并级联 `plan_handoff`/`run_loop` 重排（`test_every_layer_number_equals_its_topological_rank`）。
+  现在它是 L1（`artifacts`/`delta_files`/`common.*`）。
+
+**用例**：`tests/remote/test_deliver_outbox.py`（13：字节对账 / rev+ack / 统计 / oversize / 地板 / 后台与收线）·
+`tests/remote/test_run_loop_outbox.py`（4：`run_standalone` 零 HTTP、`main` 不回填 hub_url、工厂兜底、注入边界）·
+`tests/remote/test_offline_deliver_proc.py`（+2：子进程真收 `--outbox`；起不来时进程内仍产出）。
+
 ## §117 节点能力注册 + 代码优先的 push 启动（2026-10-23 · `plan/push-mode-notebooks.plan.md` · 决策 `DECISIONS.md` §2026-10-23-push-mode-notebooks）
 
 用户口径：worker 只注册一次，之后 hub 用出站连接经 worker 的稳定隧道推任务、拉产物。设计全文在

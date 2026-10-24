@@ -9037,5 +9037,46 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `ipynb/battle.cloudflared.ipynb` · `tests/{hub,remote}/` 五份 + `tests/helpers/remote_dag.py`（`push_register`=L0）·
   全文 → `docs/nn/remote-transport.md §117`；设计 → `plan/push-mode-notebooks.plan.md`。
 - **验收**：`bash tools/githook/nn-python-gate.sh`（ruff+mypy+pytest）· `bun run check` · `bun run build`；
-  注册面/注册客户端/notebook 契约共 40+ 用例（含真 hub loopback）。W3–W6（outbox 地基、worker 服务端、
-  hub 派发器、韧性、观测 API）未落地，语义已在 plan 就位。
+  注册面/注册客户端/notebook 契约共 40+ 用例（含真 hub loopback）。W4–W6（worker 服务端、
+  hub 派发器、韧性、观测 API）未落地；**W3 outbox 地基已落地** → `§2026-10-23-push-mode-outbox`。
+
+## §2026-10-23-push-mode-outbox（2026-10-23，W3 落地：push 腿的本地 outbox）
+
+- **背景**：push 模式没有「节点 → hub」的 POST（hub 经隧道来拉），补传腿的产物必须落成文件。设计全文
+  `plan/push-mode-notebooks.plan.md` §6.4a（评审 P0-1/P0-3/P1-1/P1-3/P1-10）；本条只记**落地时新定 /
+  收紧**的四处语义（其余按 plan 写）。
+- **决定**：
+  1. **`--outbox` 与 `--no-deliver` 的叠合有明确语义**：「只关 HTTP 补传，outbox 必须活」。
+     `make_deliverer` / `open_run_context` 的 outbox 分支**先于** `hub_url/token` 早退与 `deliver`
+     判定；`run_loop.main` 在 `--outbox` 下**不回填**任务包里的 `hub_url`。理由：两道闸原本各管一边，
+     push 段两个都命中 ⇒ **没有报错**地一轮产物都不出去（训练照跑、`/state` 永远空、最后被 hold
+     stale 判掉线）。用例要正反两面：body 真的出现 **且** 全程没构造过 `OfflineDeliverer`。
+  2. **ack 带 rev，且「hub 看到的是旧版」= 不删**：`ack(upto_it, result, revs)` 只删 `revs[it] == 当前 rev`
+     的 body；`revs` 里没有这一轮也不删（删了就是替 hub 假装收到）。`result=true` 才删 `final.json`。
+     无条件删 `it <= upto_it` 已再次否决（迟到评估行的唯一落点会被吃掉）。
+  3. **地板 `floor_it`**（落地时补的判据）：`it <= floor_it` 的轮不物化，值 = 派发时 hub 的 cursor
+     （任务包的 resume 锚点）。**缺省 0 = 全部物化**：地板给高了的代价是**永久丢那几轮**，给 0 只是多发
+     几份 hub 会按内容去重的重复体 —— 错的方向必须选不丢数据的那个。地板第一次写进 `state.json` 就定终身
+     （重启不带参不会被冲回 0）。W4 的任务入口负责把 cursor 传进来（届时才接线，默认值语义不变）。
+  4. **统计是每轮一份完整体 `metrics/itNNNN.json`**（`build_metrics_body` 的输出 `{run_id, rows, course?}`），
+     不是 `.jsonl`：hub 侧拿它直接递给 `store_offline_metrics`（与 `?parts=metrics` 同一个入口）。`oversize`
+     的轮不写 body 但**统计照写**（y31-null 的教训：没权重的轮连 row 一起丢 ⇒ 控制台整段空白）。
+  5. **装配只此一处**：`deliver_parts.build_round_body` / `build_result_body`（`row_for` / `rounds_with_rows`
+     也从 `OfflineDeliverer` 原样抽出）——HTTP 腿与 outbox 腿逐字节一致是**构造性质**（用例仍对账一次，
+     防的是有人绕开装配器）。`deliver_outbox` 对 `deliver_parts` 用 **Protocol 注入**（不是 import）：
+     import 会让它变 L2、把 `deliver_proc` 顶到 L4 并级联 `plan_handoff`/`run_loop` 重排；注入后它是 L1。
+- **否决的备选**：① 无条件删 `it<=upto_it`（同一轮在 ack 后到达的评估行永久丢）；② 服务端按需重建 body
+  （boot 版本与训练包版本会漂开，字节一致没有保证）；③ 按产物目录里「有什么发什么」= 每次任务重发全部历史
+  轮（94 轮 × 1.8MB 压在计费会话的隧道上）；④ 给 `deliver_outbox` 升 L2（级联重排整张层号表，见上）；
+  ⑤ 再写一份 `print` 当日志缺省（`tests/test_reuse_ledger.py` 会把逐字节重复的实现当场标红）。
+- **违反后果**：`--outbox` 被 `--no-deliver` 抵消 ⇒ 一轮产物都不出去且**无报错**；ack 不看 rev ⇒ 迟到评估行
+  永久丢、控制台读数整段空白；`floor_it` 给高 ⇒ 那几轮**永久丢**（不出现在任何一条腿上）；让 outbox 腿 import
+  `deliver_parts` ⇒ 层号守卫红 + 依赖方向反转。
+- **代价（诚实账）**：outbox 多一份临时权重副本（稳态 1–2 轮；WARN 2GiB / MAX 4GiB，超 MAX 由 worker 服务端
+  停止接新单，当前任务照跑）；子进程降级到进程内时 body 构造（gzip+base64 ~1.2MB/轮）回到训练进程的
+  GIL 上——这是既有 HTTP 腿同款的降级代价，不是新增。
+- **落点**：`remote/deliver_outbox.py`（新，L1）· `remote/{deliver_parts,deliver_proc,deliver_worker,plan_handoff,run_loop,offline_deliver}.py` ·
+  `common/protocol.py`（`OFFLINE_PUSH_OUTBOX_{WARN,MAX}_BYTES`）· `tests/{helpers/remote_dag,remote/test_deliver_outbox,remote/test_run_loop_outbox,remote/test_offline_deliver_proc}.py` ·
+  全文 → `docs/nn/remote-transport.md §118`；设计 → `plan/push-mode-notebooks.plan.md` §6.4a。
+- **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）· `bun run check` · `bun run build`；
+  新增 19 个用例（13 outbox + 4 run_loop + 2 真子进程），其中逐字节对账 2 条、真子进程 2 条。

@@ -41,7 +41,9 @@ import time
 from pathlib import Path
 
 from common.cli import house_parser, run_main
+from remote import deliver_parts
 from remote.artifacts import atomic_write_json
+from remote.deliver_outbox import LocalOutboxDeliverer
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -131,7 +133,13 @@ def _watch_stdin(parent_gone: threading.Event) -> None:
     parent_gone.set()
 
 
-def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_at: float) -> None:
+def _write_status(
+    path: Path,
+    d: OfflineDeliverer | LocalOutboxDeliverer,
+    *,
+    ctl: CtlReader,
+    last_ctl_at: float,
+) -> None:
     """子进程 → 父侧的**状态面**（plan §10.2）：父侧 `status()` 只读它，不猜。
 
     1Hz 全量覆盖（小文件）；写不进去不致命（父侧会看到旧值/缺失，属于「降级但可见」）。
@@ -209,7 +217,15 @@ def build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--status", required=True, help="状态文件（本进程写；父侧读）")
     ap.add_argument("--artifacts", required=True, help="产物目录（唯一真相面）")
-    ap.add_argument("--hub-url", required=True, help="hub 地址")
+    ap.add_argument("--hub-url", default="", help="hub 地址（与 --outbox 二选一）")
+    ap.add_argument(
+        "--outbox",
+        default="",
+        help=(
+            "★ 2026-10-23（push 模式）：本地 outbox 目录 —— 只落盘 body，不连 hub"
+            "（给了它就**不需要** --hub-url；hub 自己来拉）"
+        ),
+    )
     ap.add_argument("--run-id", required=True, help="run_id（hub 侧目录名）")
     ap.add_argument("--course", default="", help="hub 侧课程键（多课程 hub 必需；空 = 单课程）")
     ap.add_argument(
@@ -250,23 +266,40 @@ def main(argv: list[str] | None = None) -> int:
     worker_name = (os.environ.get(WORKER_NAME_ENV) or "").strip()
     ctl = CtlReader(args.ctl, args.ctl_offset)
     status_path = Path(args.status)
-    d = OfflineDeliverer(
-        base_url=args.hub_url,
-        token=token,
-        run_id=args.run_id,
-        artifacts_dir=args.artifacts,
-        course=args.course,
-        hub_lease=lease,
-        worker_name=worker_name,
-        # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
-        background=False,
-        # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
-        # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
-        eval_every=int(args.eval_every or 0),
-        metrics_parts=bool(args.metrics_parts),
-        adaptive=bool(args.adaptive),
-        log=_log,
-    )
+    if args.outbox:
+        # ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：push 腿的**同一份实现**跑在子进程里
+        #（复用父侧的隔离/重启/收线机制）；这里一个 HTTP 客户端都不会被构造。
+        d: OfflineDeliverer | LocalOutboxDeliverer = LocalOutboxDeliverer(
+            outbox_dir=args.outbox,
+            artifacts_dir=args.artifacts,
+            run_id=args.run_id,
+            parts=deliver_parts,
+            course=args.course,
+            hub_lease=lease,
+            worker_name=worker_name,
+            background=False,
+            log=_log,
+        )
+    else:
+        if not args.hub_url:
+            build_argparser().error("需要 --hub-url 或 --outbox 之一")
+        d = OfflineDeliverer(
+            base_url=args.hub_url,
+            token=token,
+            run_id=args.run_id,
+            artifacts_dir=args.artifacts,
+            course=args.course,
+            hub_lease=lease,
+            worker_name=worker_name,
+            # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
+            background=False,
+            # ★ 2026-10-23（plan/offline-deliver-full-and-gaps §3.5/§3.3）：父侧把这两个开关
+            # 显式传进来，子进程的缺省保持旧行为（不传 = 老语义，谁都不改）。
+            eval_every=int(args.eval_every or 0),
+            metrics_parts=bool(args.metrics_parts),
+            adaptive=bool(args.adaptive),
+            log=_log,
+        )
     tick = max(0.05, float(args.tick_sec))
     idle = max(60.0, float(args.idle_timeout))
     parent_gone = threading.Event()
