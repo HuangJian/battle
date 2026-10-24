@@ -9491,3 +9491,47 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - 落点：`hub/offline_push.py`（`_pack_for` / `_cool` / `PACK_EXPORT_WAIT_SEC`）·
   `worker/iter_rollout.py` · `worker/iter_topup.py` · `remote/worker.py` ·
   `tests/worker/test_iter_topup.py`（替身收 `it` + 断言每批都带）· `docs/nn/remote-transport.md §127`。
+
+## §2026-10-25-offline-stall-age-zero-false-alarm（2026-10-25，「0 分钟没有新进度」是假警报：不可知 ≠ 0）
+
+- **现场**：控制台横幅 `y34-hitfix 接管卡住：push:colab-o 持有接管但 0 分钟 没有新进度`。那一刻云机
+  刚接管、一条进度都还没来 —— 不是「静默 0 分钟」，是「时长未知」。
+- **根因**：`hub/queue_offline.py::offline_stalled` 的 `age_sec = round(now - anchor, 1) if anchor else 0.0`
+  —— 从没有过产物、也没有导包意向 ⇒ `anchor == 0` ⇒ **0.0**；而判定侧用的是
+  `progress_age = … if last_progress_mtime > 0 else math.inf` ⇒ `inf > threshold` ⇒ 照样报警。
+  两边口径不同步：判据说「∞」，读数说「0」，控制台再把 0 渲染成「0 分钟」。
+- **决定**：`anchor` 缺失 ⇒ 用**接管那一刻**算（`holder.age_sec`，静默时长的下界，真实可判）；
+  控制台侧再兜一层：`ageSec <= 0` ⇒ 显示「（未知）」而不是「0 分钟」。
+  判据纪律：**不可知就说不可知，不许编 0**（与 `hold_progress_at` 的 `-1.0` 哨兵同一条理由：
+  `or` 链会把真值 0 吃成「没有」）。
+- **落点**：`nn-training/hub/queue_offline.py`（`offline_stalled`）·
+  `dashboard/src/web/view/alerts.ts`（`ageText`）· `tests/hub/test_auto_handoff.py`
+  （`test_stalled_age_is_the_hold_age_when_there_never_was_progress`：断言 `age_sec >= 1900`，先红后绿）。
+
+## §2026-10-25-progress-log-says-what-it-is-doing（2026-10-25，进度行说人话 + 停掉刷屏）
+
+- **背景（用户原话）**：「这一段 log 毫无信息量，而且还不停刷屏！」+「log 要写清楚：它在干什么
+  （rollout? ppo? eval?）？进度如何？有什么问题吗？」
+- **事实**：`进度 seq=8 iter it102 6/17` 被真机连读错两次（`seq` 当轮号、`iter it0` 当成在处理第 0 轮）；
+  且 supervisor 每 15s 无条件打一行**不变**的 `任务状态: phase=running …`（一分钟 8 行零信息）。
+  另外 PPO 与评估两段**一个进度事件都没有** ⇒ 云机上看起来「一直停在采集局」。
+- **决定**：
+  ① 新增 `common/progress_text.py`（**唯一实现**，hub 日志与云机日志共用）把一条事件翻成
+     `进度[第8条] 第102轮 采集局：6/17 局` / `… 训练 PPO：共 4 遍` / `… 评估：共 8 局` /
+     `… ⚠ 重试（第 2 次）`；`seq` 不再裸着给人看。
+  ② 补两段事件：`remote/train_core.py` 在 `on_ppo_start` 同一处报 `ppo`（给遍数）；
+     `remote/plan_run.py::_maybe_cloud_eval` 提交后报 `eval`（给局数）。**不按 epoch 逐条** ——
+     那要改 `ppo_update` 的 `on_epoch_done` 契约（`tests/hub/test_priority_schedule.py:700` 源码钉死），
+     收益不值这个风险。
+  ③ 状态行只在 `(phase/course/busy/rc)` **变化**时打，`STATUS_HEARTBEAT_SEC=300s` 兜底；
+     进度行在内容没变时也不重复打。
+- **否决的备选**：① 把 `seq` 从日志里删掉 —— hub 的 `?since=N` 增量游标要用它，删了要多传整份事件；
+  ② 给 supervisor 加 `--quiet` 开关 —— 问题不在开关在缺省值，缺省就该是可读的；
+  ③ 动 `ppo_update` 的 epoch 回调拿逐遍进度（见上）。
+- **落点**：`nn-training/common/progress_text.py`（新）· `nn-training/hub/offline_push.py` ·
+  `nn-training/remote/offline_push.py` · `nn-training/remote/train_core.py` ·
+  `nn-training/remote/plan_run.py` · `tests/common/test_progress_text.py`（新）·
+  `tests/remote/test_offline_push_supervisor.py`（去重用例）·
+  `docs/nn/remote-transport.md §128`。
+- **验收**：三条新用例（措辞四要素 / 状态行去重 / 停滞龄）；文本断言预算抬一格 1501 → 1503
+  （理由见 `tests/test_source_text_assert_budget.py` 模块头末段）。

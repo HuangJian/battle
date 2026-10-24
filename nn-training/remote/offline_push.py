@@ -40,6 +40,7 @@ from typing import Any
 from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
+from common.progress_text import progress_text
 from remote.offline_push_face import PushFaceState, make_face_server
 from remote.push_register import (
     Registry,
@@ -50,9 +51,15 @@ from remote.push_register import (
 )
 from remote.push_tunnel import find_cloudflared, start_quick_tunnel, stop_proc, tunnel_url_of
 
-#: 每拍（秒）：刷新隧道 URL / 重注册 / 打一行状态。hub 的派发拍是 10s —— 比它快没必要
-#: （注册是幂等的），比它慢会让「隧道换名」后多等一拍。
+#: 每拍（秒）：刷新隧道 URL / 重注册。**不再**每拍打状态 —— 状态只在变化时打（见下）。
+#: hub 的派发拍是 10s —— 比它快没必要（注册是幂等的），比它慢会让「隧道换名」后多等一拍。
 TICK_SEC = 15.0
+#: 状态行的前缀（`tests` 按它计数；改字就要改那一条断言 ⇒ 别顺手改）。
+STATUS_PREFIX = "任务状态"
+#: 状态行的兜底间隔（秒）：**只在状态变化时才打**，但也不能一整天不吭声 —— 每 N 秒报一次
+#: 「还活着」。用户口径（2026-10-25）：每 15s 一行 `任务状态: phase=running … wait=Ns`
+#: 是零信息量的刷屏（真机一分钟 8 行，全是同一个状态）。
+STATUS_HEARTBEAT_SEC = 300.0
 #: 取消时给子进程的收线时间（轮边界停：当前轮可能还在跑，太短会把它砍成半截）。
 CANCEL_GRACE_SEC = 120.0
 #: 不写进 `cfg.json` 的键（子进程不连 hub，凭据不该出现在它的环境/盘上）。
@@ -269,7 +276,9 @@ def run_push(
     t0 = time.time()
     last_tick = 0.0
     last_seq = -1
-    last_phase = ""
+    last_note = ""
+    last_status: tuple = ()
+    last_status_at = t0
     try:
         while True:
             if keepalive_stop is not None and bool(keepalive_stop.is_set()):
@@ -289,24 +298,41 @@ def run_push(
                     reg.ensure(cf_url, push_token)
                 snap = state.snapshot()
                 phase = str(snap.get("phase") or "")
+                task = snap.get("task") or {}
                 prog = state.progress(last_seq)
                 seq = int(prog.get("seq", 0) or 0)
                 if seq > last_seq and not prog.get("unchanged"):
                     last_seq = seq
-                    log(
-                        f"进度 seq={seq} {prog.get('kind') or ''} it{prog.get('it', 0)}"
-                        f" {prog.get('done', 0)}/{prog.get('total', 0)}"
+                    # 措辞与 hub 侧同一份实现（`common.progress_text`）：`seq` 是消息编号，
+                    # 不是轮号 —— 裸着给人看已经让真机把「it102 的轮」读成「在处理 it0」。
+                    note = progress_text(
+                        seq=seq,
+                        kind=str(prog.get("kind") or ""),
+                        it=int(prog.get("it", 0) or 0),
+                        done=int(prog.get("done", 0) or 0),
+                        total=int(prog.get("total", 0) or 0),
                     )
-                if phase != last_phase or phase in ("running", "cancelling"):
-                    task = snap.get("task") or {}
+                    # 内容没变就不重复打（真机：同一批 `2/2` 连打两拍，纯刷屏）。
+                    if note != last_note:
+                        last_note = note
+                        log(note)
+                # ★ 状态行**只在变化时才打**（2026-10-25 用户口径：每 15s 一行
+                #   `任务状态: phase=running …` 是零信息量的刷屏）；但也不能一整天不吭声
+                #   ⇒ `STATUS_HEARTBEAT_SEC` 兜底一次「还活着」。
+                cur = (
+                    phase,
+                    str(task.get("course") or "-"),
+                    bool(snap.get("busy")),
+                    snap.get("rc"),
+                )
+                if cur != last_status or now - last_status_at >= STATUS_HEARTBEAT_SEC:
                     log(
-                        f"任务状态: phase={phase} course={task.get('course') or '-'}"
-                        f" busy={snap.get('busy')} wait={int(now - t0)}s"
-                        + (f" rc={snap.get('rc')}" if snap.get("rc") is not None else "")
+                        f"{STATUS_PREFIX}: phase={phase} course={cur[1]} busy={cur[2]}"
+                        f" wait={int(now - t0)}s"
+                        + (f" rc={cur[3]}" if cur[3] is not None else "")
                     )
-                    last_phase = phase
-                elif int(now - t0) % 60 < int(tick_sec):
-                    log(f"守候中… phase={phase} wait={int(now - t0)}s")
+                    last_status = cur
+                    last_status_at = now
                 last_tick = now
             time.sleep(1.0)
     except KeyboardInterrupt:

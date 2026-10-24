@@ -1072,6 +1072,28 @@ def test_stalled_alert_covers_pending_export_window(tmp_path: Path, monkeypatch)
     assert st == 200 and _json(raw)["stalled"][0]["course"] == "c5-gae"
 
 
+def test_stalled_age_is_the_hold_age_when_there_never_was_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """2026-10-25 真机假警报：从没有过产物/进度时，`age_sec` 不能给 0。
+
+    0 会被控制台读成「0 分钟没有新进度」——真实语义是「接管之后一条进度都没有」，
+    静默时长正是**接管龄**（`holder.age_sec`）。
+    """
+    _stub_auto_handoff(monkeypatch)
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
+    assert st == 200, raw  # 接管成立（hold 落盘，at=1000）
+    clock[0] += 2000.0  # 超过停滞阈 1800s
+    stalled = hub.offline_stalled()
+    assert [s["course"] for s in stalled] == ["c5-gae"]
+    assert stalled[0]["why"] == "running-stale"
+    assert stalled[0]["age_sec"] >= 1900.0, f"age_sec={stalled[0]['age_sec']}（不许是 0）"
+
+
 def test_admin_courses_exposes_hold_and_release_hold_clears_it(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -488,7 +488,14 @@ function offlineStallAlerts(input: AlertInput): AlertItem[] {
     if (input.acks.includes(ackKey)) continue
     const silent = s.why === 'pending-export'
     const mins = Math.max(0, Math.round(s.ageSec / 60))
-    const ageText = mins >= 60 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : `${mins} 分钟`
+    // ★ 2026-10-25 真机：`age_sec` 为 0 曾被读成「0 分钟没有新进度」——那是假的
+    //   （真实语义是「时长未知 / 接管后一条进度都没有」）。不可知就说不可知，不编 0。
+    const known = s.ageSec > 0
+    const ageText = !known
+      ? '（未知）'
+      : mins >= 60
+        ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分`
+        : `${mins} 分钟`
     const who = s.holder ? `${s.holder} ` : ''
     // ★P2-1：租约两态的文案（stale-holder = 新盘可直接接管；revoked = 已撤租墓碑）。
     //   两态都**不是**「云机死透」——不点名会把可自愈的局面写成需要人处理的故障。

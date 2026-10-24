@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 from common.logutil import tag_logger
+from common.progress_text import progress_text
 from common.protocol import (
     CAP_OFFLINE_PUSH,
     OFFLINE_PUSH_PACK_DIR,
@@ -877,8 +878,14 @@ class OfflinePushDispatcher:
         if ok:
             st.last_seq = seq
             self._log(
-                f"{course}: 进度 seq={seq} {prog.get('kind') or ''} it{prog.get('it', 0)}"
-                f" {prog.get('done', 0)}/{prog.get('total', 0)}"
+                f"{course}: "
+                + progress_text(
+                    seq=seq,
+                    kind=str(prog.get("kind") or ""),
+                    it=int(prog.get("it", 0) or 0),
+                    done=int(prog.get("done", 0) or 0),
+                    total=int(prog.get("total", 0) or 0),
+                )
             )
         elif why in ("expired", "revoked", "taken"):
             st.stop.set()

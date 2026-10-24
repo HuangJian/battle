@@ -43,6 +43,7 @@ import remote.opt_delta as opt_delta
 import remote.opt_standard as opt_standard
 import remote.weights_delta as weights_delta
 from common.log_bundle import LogBundle
+from common.progress_hook import report as _report_progress
 from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
@@ -647,6 +648,16 @@ def run_training_core(
             on_ppo_start()
         except Exception:
             pass
+    # ★ 2026-10-25（用户口径）：日志必须说清**在干什么** —— 采集（iter）之外，PPO 这一段
+    #   此前一个事件都没有，云机上看起来就是「一直停在 it102 的 iter」。报一遍数（不按
+    #   epoch 逐条：那要动 `ppo_update` 的回调契约，见 `tests/hub/test_priority_schedule.py:700`）。
+    _report_progress(
+        "ppo",
+        it=int(manifest.get("it", 0) or 0),
+        done=0,
+        total=int(manifest.get("epochs", 0) or 0),
+        force=True,
+    )
 
     def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
         """epoch 边界查一次取消（R1-6；延迟判据 <20s）——由 hub 的 landed 驱动。"""

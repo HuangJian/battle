@@ -117,6 +117,42 @@ def test_run_push_registers_the_tunnel_then_unregisters_on_shutdown(
     assert logs  # 守候/收摊的日志面仍在（但不把判据挂在措辞上）
 
 
+def test_status_line_only_speaks_when_the_state_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用户口径（2026-10-25）：每 15s 一行**不变**的 `任务状态: phase=running …` 是刷屏。
+
+    状态行只在 (phase/course/busy/rc) 变化时才打，另有 `STATUS_HEARTBEAT_SEC` 兜底；
+    进度行在内容没变时也不重复打（真机：同一批 `2/2` 连打两拍）。
+    """
+    monkeypatch.setattr(sup, "find_cloudflared", lambda *a, **kw: "/bin/true")
+    proc = _Proc()
+    monkeypatch.setattr(
+        sup, "start_quick_tunnel", lambda *_a, **_kw: (proc, "https://abc-def.trycloudflare.com")
+    )
+    monkeypatch.setattr(sup, "probe_offline_dispatch", lambda *_a, **_kw: True)
+    logs: list[str] = []
+    stop = threading.Event()
+    threading.Timer(2.4, stop.set).start()  # 让循环真跑几拍（sleep 1s 一拍）
+    rc = sup.run_push(
+        {
+            "work_dir": str(tmp_path),
+            "push_port": 0,
+            "push_token": "t",
+            "node_id": "offline-test",
+            "session_budget_sec": 0,
+        },
+        logs.append,
+        keepalive_stop=stop,
+        face_state=PushFaceState(work_dir=tmp_path / "face", log=logs.append),
+        registry=_FakeReg(),  # type: ignore[arg-type]
+        tick_sec=0,
+    )
+    assert rc == 0
+    n = sum(1 for m in logs if m.startswith(sup.STATUS_PREFIX))
+    assert n == 1, f"状态没变却打了 {n} 条状态行（刷屏）：{logs}"
+
+
 def test_run_push_says_so_when_the_hub_has_no_dispatcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

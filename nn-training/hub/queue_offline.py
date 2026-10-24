@@ -1177,13 +1177,22 @@ class QueueOfflineMixin(QueuePeer):
             if not why:
                 continue
             anchor = max(last, float(pending.get("at") or 0.0))
+            if anchor > 0.0:
+                age = now - anchor
+            elif isinstance(holder, dict):
+                # 从没有过产物、也没有导包意向 ⇒ 锚 = **接管那一刻**（`holder.age_sec` 就是它）。
+                # ★ 不能给 0：0 会被控制台读成「0 分钟没有新进度」（2026-10-25 真机假警报——
+                #   实际是「接管之后一条进度都没有」，静默时长正是接管龄）。
+                age = float(holder.get("age_sec") or 0.0)
+            else:
+                age = 0.0
             out.append(
                 {
                     "course": course,
                     "why": why,
                     "holder": holder,
                     "last_progress_mtime": last,
-                    "age_sec": round(now - anchor, 1) if anchor else 0.0,
+                    "age_sec": round(max(0.0, age), 1),
                 }
             )
         return out
