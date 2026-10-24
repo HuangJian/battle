@@ -5,7 +5,7 @@ import { ActionError, ActionResult, done, guard, release } from './result'
 
 // ────────────────────────── 节点编辑（回写 rl-config.json） ──────────────────────────
 
-/** 启用/停用 rollout 节点。 */
+/** 启用/停用 rollout / push 节点。 */
 export async function setNodeEnabled(id: string, enabled: boolean): Promise<ActionResult> {
   guard(`node:${id}`)
   try {
@@ -14,7 +14,14 @@ export async function setNodeEnabled(id: string, enabled: boolean): Promise<Acti
     if (!n) throw new ActionError(`节点不存在: ${id}`)
     n.enabled = enabled
     saveConfig(cfg)
-    return done(true, `节点 ${id} 已${enabled ? '启用' : '停用'}（rl-config.json 已回写）`)
+    // push 类节点（gpu_push / offline_push）停用后 hub 会**立刻**停止向它派单/拉结果，并把
+    // 它抢占的课程释放回池子（2026-10-24 用户口径，hub/offline_push.py::_worker_registered）。
+    // 这句只是把后果说出来 —— 判据在 hub 侧，控制台不重复实现。
+    const push = Boolean(n.gpu_push || n.offline_push)
+    const tail = push
+      ? `；hub 将${enabled ? '恢复' : '停止'}向它派单/拉取结果${enabled ? '' : '并释放它抢占的课程'}`
+      : ''
+    return done(true, `节点 ${id} 已${enabled ? '启用' : '停用'}（rl-config.json 已回写${tail}）`)
   } finally {
     release(`node:${id}`)
   }

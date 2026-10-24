@@ -567,6 +567,11 @@ class OfflinePushDispatcher:
             if str(rec.get("phase")) == "settling":
                 self._settle_retry(course, url, key, rec)
                 return
+            if not self._worker_registered(rec):
+                # 需求 5：节点被停用/移除 ⇒ 连包都不该再推（这条提议从没成立过，不占用课程）。
+                self._log(f"{course}: 云机节点已停用/移除 —— 放弃这次提议（未接管）")
+                self._drop(course, rec, reason="worker-disabled")
+                return
             if not rec.get("task_id"):
                 tmp_zip, meta = self.build_task_zip(
                     course,
@@ -653,6 +658,18 @@ class OfflinePushDispatcher:
             with self._lock:
                 if self._pumps.get(course) is st:
                     self._pumps.pop(course, None)
+
+    def _worker_registered(self, rec: dict) -> bool:
+        """这台云机还在登记表里吗（控制台「停用」= 回写 `enabled:false` ⇒ 热重载后消失）。
+
+        **只看「在不在表里」，不看 `online`**：隧道抖一下（`online=False`）不该释放课程 ——
+        那正是需求 3「hub 断线训练照跑、回来补传」要保住的情形。停用/移除才会让它从
+        `snapshot()` 里彻底消失。
+        """
+        bare = self._bare(str(rec.get("worker_id") or ""))
+        if not bare:
+            return True
+        return any(str(w.get("id")) == bare for w in self.workers.snapshot())
 
     def _claim(self, course: str, rec: dict) -> tuple[dict, str]:
         """接管一门课 ⇒ `(lease, "")` / `({}, 拒因)`。**只在云机受理之后调用**。
@@ -756,6 +773,19 @@ class OfflinePushDispatcher:
                 if self._now() - float(rec.get("settle_at") or 0.0) < SETTLE_RETRY_SEC:
                     return  # 还没到重试窗口：让出线程，到点后 `_resume_pumps` 再起
                 self._settle_retry(course, url, key, rec)
+                return
+            if not self._worker_registered(rec):
+                # 需求 5（用户口径 2026-10-24）：控制台停用这台「自主云机」⇒ hub **立刻停止**
+                # 向它请求结果，并把抢占的课程释放回池子（`release_offline` 清 hold ⇒ 别人能领）。
+                # **不 cancel、不 ack(result)**：云机的子进程可能还在跑，它的 outbox 是证据，
+                # 别替它的下一任主人删。产物没入账的轮次留在那台机器上（按 task_id 分目录）。
+                self._log(
+                    f"{course}: 云机节点（{rec.get('worker_id')}）已被停用/移除 —— "
+                    "停止拉取结果并释放这门课（不 cancel；云机上的 outbox 留作证据）"
+                )
+                self._settle_assignment(
+                    course, url, key, rec, cancel=False, free_worker=False, reason="worker-disabled"
+                )
                 return
             if not self._still_mine(course, rec):
                 self._log(

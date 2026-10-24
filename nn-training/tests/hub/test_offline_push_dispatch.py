@@ -525,6 +525,66 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         worker.close()
 
 
+def test_disabling_the_node_stops_pulling_and_releases_the_course(tmp_path: Path) -> None:
+    """需求 5：控制台停用这台「自主云机」⇒ hub 停止请求结果 + 自动释放抢占的课程。
+
+    停用的真实链路：`setNodeEnabled` 回写 rl-config 的 `enabled:false` → hub 热重载后这台机器
+    从登记表消失。这里照同一条链走（写文件 + `reload(force=True)`），不调 `remove()`。
+    """
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, write_final=False, finish_now=False, follow_task_identity=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    cfg = tmp_path / "rl-config.json"
+
+    def _write_node(enabled: bool) -> None:
+        """控制台「启用/停用」的真实落点：rl-config 的 `nodes[].enabled`。"""
+        cfg.write_text(
+            json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "id": "w1",
+                            "url": worker.url,
+                            "authKey": TOKEN,
+                            "offline_push": True,
+                            "enabled": enabled,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    try:
+        _write_node(True)
+        disp.tick(ping=True)  # 热重载登记表 + 探活 + 协议门
+        disp.tick(ping=False)
+        assert _wait(lambda: (_offline_root(hub) / "run-1" / "it-001").is_dir()), "第一轮没入账"
+        assert hub.hold_of(COURSE) != {}, "接管之后本该持有这门课"
+
+        _write_node(False)
+        assert workers.reload(force=True) is True
+        assert workers.snapshot() == [], "停用后这台机器不该还在登记表里"
+
+        assert _wait(lambda: disp.assignments.get(COURSE) is None, timeout=5.0), "停用后还在拉结果"
+        assert hub.hold_of(COURSE) == {}, "抢占的课程没释放"
+        assert hub.offline_lease(COURSE) is None
+
+        # 停用 ≠ 撤单：云机的训练子进程可能还在跑，**不写 stop**、不 ack(result) ——
+        # 没入账的轮留在它自己的 outbox 里（按 task_id 分目录），别替下一任主人删。
+        assert worker.state.task_dir is not None
+        assert not (worker.state.task_dir / "stop").exists(), "停用不是撤单，别替云机停训练"
+
+        # 停用期间不再派单（不在登记表 ⇒ 不是候选），课程回到可领
+        disp.tick(ping=True)
+        assert disp.assignments.snapshot() == {}
+        rows = {r["course"]: r for r in hub.offline_tasks(worker="push:w1")}
+        assert rows[COURSE]["claimable"] is True
+    finally:
+        disp.stop()
+        worker.close()
+
+
 class _GatedClient:
     """`post_task` 拿到应答后**卡住**不返回：模拟「云机已受理、hub 还没记账」那个窗口。"""
 

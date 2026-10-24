@@ -9455,3 +9455,21 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/remote-transport.md §126`。
 - **验收**：四条用例绿（含「卡住 202 的窗口里换掉课程 weights.json ⇒ 无 hold、有导包、worker 收到
   stop」）；nn python gate 全绿；dashboard `bun run test` 1805 绿。
+
+### 补记（`§2026-10-24-push-mode-takeover-semantics` 第 5 条，22:56 用户指令：停用自主云机 = 停止请求 + 释放课程）
+
+- **口径**：控制台首页停用「自主云机」节点后，hub **立即停止**向它请求训练结果，并**自动释放**被它
+  抢占的课程。
+- **现场缺口**：`setNodeEnabled` 只回写 `rl-config.json` 的 `enabled:false`；hub 的登记表热重载后
+  该机器消失，但**已在跑的那条 pump 线程仍按捕获的 url 每 5s 拉一次** `/state` 与轮 body ——
+  「停用」只挡住了新提议，没挡住旧拉取；hold 也要等 TTL 才过期。
+- **决定**：`_pump_loop` 每拍先判 `_worker_registered(rec)`（**只看在不在登记表，不看 `online`**，
+  否则隧道抖动会被误判成停用、与第 3 条冲突）；不在 ⇒ `_settle_assignment(cancel=False,
+  free_worker=False)`：ack 已入账的 rev → `release_offline`（清 hold ⇒ 课程回到 `claimable`）→
+  丢账本，pump 线程退出。`_pump` 的提议阶段同样先判一次（节点在推包前被停用 ⇒ 连包都不推）。
+- **不 cancel 的理由**：停用 ≠ 撤单。云机子进程可能还在跑，它的 outbox 是证据；替它删未入账的轮
+  等于把还在跑的训练变成孤儿。遗留：那台机器上未 ack 的 outbox 留在它自己的盘（按 `task_id` 分
+  目录），等它自己收摊或被回收。
+- **落点**：`nn-training/hub/offline_push.py`（`_worker_registered` + 两处判定）·
+  `tests/hub/test_offline_push_dispatch.py::test_disabling_the_node_stops_pulling_and_releases_the_course`
+  （写 `enabled:false` + `reload(force=True)` 走真链路，不调 `remove()`）· `docs/nn/remote-transport.md §126`。

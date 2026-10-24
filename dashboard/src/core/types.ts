@@ -14,6 +14,11 @@ export interface NodeConf {
    *  队列）决定。`local_push` 标记已删除——本机伪节点与那套「一键本机 push」在 R3-7 全部退场
    *  （启动时由 `pruneLegacyCourseKnobs` 连同按课程的指针一并清理）。 */
   gpu_push?: boolean
+  /** **离线 push** 节点（`kind=offline_push` 自注册；plan/push-mode-notebooks §3.2）。
+   *
+   *  与 `gpu_push` 同构：都是「能力键」，hub 的两条派发腿各按自己的键挑机器。停用后 hub 会
+   *  停止向它拉结果并释放它抢占的课程（`hub/offline_push.py::_worker_registered`）。 */
+  offline_push?: boolean
   /** 云机**自注册**的条目（DECISIONS §2026-10-10-goalnn-rollout-node-auto-register）：
    *
    *  hub 的 `/admin/nodes/register` upsert 时打上；`managed` 不为真的条目云机不许覆盖（hub 侧 409）。

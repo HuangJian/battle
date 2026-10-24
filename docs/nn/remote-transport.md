@@ -6,11 +6,11 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
-## §126 接管的四条口径：包就绪 ≠ 接管 / 一次一门 / 断线照跑 / 提议后过期就重导（2026-10-24 用户指令）
+## §126 接管的五条口径：包就绪 ≠ 接管 / 一次一门 / 断线照跑 / 提议后过期就重导 / 停用即释放（2026-10-24 用户指令）
 
-四条都是**接管语义**的收紧，落点全在 hub 侧（一处 dispatcher + 一处 pump），worker 侧一行没改
-（它的 409 busy 与 stop 文件已经是所需的两道闸）。文件：`hub/offline_push.py`（调度拍 + pump）·
-`hub/offline_pack_fresh.py`（接管前的新鲜度判据，纯函数；LOC 预算拆分）·
+前四条都是**接管语义**的收紧，第五条是**退出语义**；落点全在 hub 侧（dispatcher + pump），worker
+侧一行没改（它的 409 busy 与 stop 文件已经是所需的两道闸）。文件：`hub/offline_push.py`（调度拍 +
+pump）· `hub/offline_pack_fresh.py`（接管前的新鲜度判据，纯函数；LOC 预算拆分）·
 `hub/offline_push_workers.py`（登记表 + 协议门；同批拆出，DAG 账本 L3/L4）。
 
 | # | 口径 | 落点 | 判据 |
@@ -19,6 +19,7 @@
 | 2 | **一次一门**：一台云机同时只接一门 | `_dispatch` 的 `of_worker()` + `break`；worker 侧 409 busy | 第一门在途时第二门连 assignment 都没有 |
 | 3 | **断线照跑**：hub 掉线不影响训练；回来后逐轮补传 | 训练在子进程 + `LocalOutboxDeliverer` 只写本地；pump 续拉 | 收线后 worker 又写两轮 → 新 dispatcher 把 it2/it3 补进 hub |
 | 4 | **提议后过期就重导**：导包结束到接管之间本机又跑完一轮 ⇒ 不接管 | `_still_fresh()`（claim 前活清单复核） | 卡住 202 的窗口里换掉课程 `weights.json` ⇒ 无 hold、有导包、worker 收到 stop |
+| 5 | **停用即释放**：控制台停用这台自主云机 ⇒ 停止拉结果 + 释放抢占的课程 | `_pump_loop` 每拍的 `_worker_registered()` | 写 `enabled:false` + 热重载后：assignment 消失、hold 清空、**没有** stop 文件、课程回到 `claimable` |
 
 **为什么第 1 条必须改顺序**：旧顺序 `claim → 上传` 让 hold 早于云机受理。上传失败/云机拒收（413
 容量、409 busy）时租约已经挂在身上 —— 控制台显示「已被接管」，而云机连包都没收到；更糟的是
@@ -39,10 +40,22 @@ hub 不在 = 只是没人来收，训练与写盘完全不受影响。hub 回来
 ≠ 课程**当前**活动权重，`task_pack_stale_reason`）或包文件 sha 与提议时不同（中途被重导过）。
 命中 ⇒ 打一行、`trigger_pack_export` 立刻请控制台重导、撤单 + 冷却，下一拍用**新包**重新提议。
 
-**用例**：`tests/hub/test_offline_push_dispatch.py` 四条 —— `test_takeover_happens_only_after_the_
+**为什么第 5 条不是「cancel 掉那一单」**：停用是「这台机器不再被使用」，不是「这一单作废」。云机的
+训练子进程可能还在跑，它的 outbox 是**证据**（与「租约被别人拿走」那条腿同一条规矩：
+`cancel=False, free_worker=False`）—— 替它删掉未入账的轮，等于把一个还在跑的训练变成孤儿。
+所以停用只做两件：**不再请求**（pump 退出线程）+ **释放 hold**（`release_offline` ⇒ 课程回到池子，
+`claimable=true` 给别人/给下一台）。⚠ 唯一遗留：那台机器上未 ack 的 outbox 会留在它自己的磁盘
+（按 `task_id` 分目录），等它自己收摊或被回收。
+
+**判据只看「在不在登记表」，不看 `online`**（`_worker_registered`）：隧道抖一下（`online=False`）
+绝不能释放课程 —— 那正是第 3 条要保住的情形。停用/移除会让节点从 `snapshot()` 里**彻底消失**
+（`push_worker_from_node` 要求 `enabled`），两者因此可区分。
+
+**用例**：`tests/hub/test_offline_push_dispatch.py` 五条 —— `test_takeover_happens_only_after_the_
 cloud_machine_accepts` · `test_one_course_at_a_time_per_cloud_machine` · `test_training_keeps_going_
 while_the_hub_is_away_then_backfills` · `test_a_pack_that_goes_stale_before_takeover_is_re_exported`
-（窗口用 `_GatedClient` 卡住「已受理、未记账」那一刻，不靠 sleep 抢时序）。
+· `test_disabling_the_node_stops_pulling_and_releases_the_course`（窗口用 `_GatedClient` 卡住
+「已受理、未记账」那一刻，不靠 sleep 抢时序）。
 
 ## §125 离线 push 真机首测的三处断点：hub 从不挂 `--offline-push`、注册成功的 15s 静默、push 节点进采样表（2026-10-24 · `plan/push-mode-notebooks.plan.md` 真机验收 · 决策 `DECISIONS.md` §2026-10-24-push-mode-real-machine）
 
