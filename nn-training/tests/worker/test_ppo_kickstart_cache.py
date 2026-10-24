@@ -195,7 +195,9 @@ def test_v6_kickstart_anchors_the_hold_head() -> None:
     ref_b = PPOStudent(h=8, d=1, action_v6=True).eval()
     with torch.no_grad():
         assert ref_b.hold_head is not None
-        ref_b.hold_head.bias.add_(3.0)  # 只有 hold 头不同（move/fire 逐位相同）
+        # 只抬**一类**：hold 是 2 类 softmax，给两类同加一个常数是平移不变变换
+        # （softmax 先减 max ⇒ 概率逐位相同），那样这个用例永远测不出漏锚。
+        ref_b.hold_head.bias[0].add_(3.0)
     for r in (ref_a, ref_b):
         for p in r.parameters():
             p.requires_grad_(False)
