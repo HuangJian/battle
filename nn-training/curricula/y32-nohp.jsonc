@@ -1,0 +1,195 @@
+// 课程 y32-nohp —— **y32-tempo 的单变量对照：只差 `wDmg 0.30 → 0.12`**。
+//   与 `y32-tempo.jsonc` **逐字相同**（同 formula / 同 8 个新价 / 同落后税 / 同 γ λ lr kl
+//   / 同 seed 流 / 同 kickstart_ref=false），唯一差别是**血价回到 y31-fire 原值**。
+//   状态：**待开课**（agent 只给文件；开课 = 人在控制台点；与 y32-tempo 同批并跑）。
+//
+// ── 0. 一句话 ────────────────────────────────────────────────────────────────
+// y32 两腿结算给出的唯一硬结论：**这套价目表买不到"安全"**（承伤 +80%、胜率 −17pp，
+// 配对 p<1e-4），而**血价只有一个数**（`wDmg 0.12 × 100 承伤 = 12Φ = 正项的 5.0%`）。
+// y32-tempo 的全部赌注就是把这个数抬到 0.30（→ 正项的 16%）。本腿 = **不抬**，其余全同。
+//   · 本腿拿到 0.90 ⇒ **血价不是杠杆**，tempo 的 2.9× 加价是白冒的险 ⇒ 下一腿回到 0.12，
+//     把预算全压到"时间/结构"上（落后税 + 砍正项）；
+//   · 本腿只拿到 0.85–0.87 而 tempo 拿到 0.90 ⇒ **血价是杠杆，且 0.30 这一档够**；
+//   · 本腿 < 0.85 且承伤 > 130 ⇒ 砍正项 + 落后税**自己在卖安全**（与 y30-stack 同形），
+//     那 tempo 的 0.90 就只是"用钱买回来的"，需要第三点（wDmg 0.45）才敢说剂量。
+//   ⇒ 一条腿、一个数，换掉主腿最大的不确定性。这是本批唯一值得为"归因"付的预算。
+//
+// ── 1. 与 y32-tempo 的差（构造上的配对，不是承诺）──────────────────────────────
+//   起点同 = `nn-training/weights/y31-fire/y31-fire.it370.20261023-030505.json`（394685 B）。
+//   同：formula（含 `- wBehind*max(0,ticks/350-kills)`）· `wShot 0.15 / wHit 0.45 / wMiss 0.70 /
+//   wDist 1.5 / wSideHits 0.12 / wPickup 3.2 / wWinHit 3.0 / wKill 3.0 / wWin 48 / wSpeed 3.0 /
+//   wThreat 120 / wHurt 150 / wNearSq 48 / wCorner 110 / wEncl 12.9 / wBlock 110 / wApproach 0.008`
+//   · `terminal −35/−35` · `γ 0.998 / λ 0.95 / lr 1.2e-4→8e-5 / kl_coef 0.05 / kl_cap 0.1 /
+//   epochs 4 / mb 1024 / target_transitions 24576 / eval 2000-2003×50 / eval_every 5 /
+//   paired_rotate_seed 20270210 / kickstart_ref **false** / warmup_iters 0`。
+//   唯一差：**`wDmg 0.12`（tempo 是 0.30）**。
+//   ⇒ 训练侧同 (stage, seed) 抽样序列（`paired_rotate_seed` 同 + `target_transitions` 同）；
+//     评估侧同 400 座（A 层固定池前缀，`worker/eval_track.py::a_eval_seed_list`，与 it/课程无关）
+//     ⇒ 两腿做**座级配对差**，差 = 血价那 0.18。
+//
+// ── 2. 剂量（Φ 口径：同六画像，只把 wDmg 换回 0.12；`tmp/y32-design.py`）───────────────
+//   | 画像 | wDmg 0.30（tempo） | wDmg 0.12（本腿） |
+//   | it370 | 124.1（血价 30.0 = 16.1%） | **142.1**（血价 12.0 = 6.4%） |
+//   | 目标 | **144.7**（第一） | **164.9**（第一） |
+//   | 保守（9000 拍） | 115.8 | 130.2 |
+//   | 刷满转化（205 承伤） | 94.5（垫底） | **131.4（第三）** |
+//   | lootwin 尾（血崩） | 97.6（倒数第二） | 130.2（倒数第二） |
+//   ⇒ **关键一行是"刷满转化"**：本腿的价目表把它摆到 **131.4**，只比 it370（142.1）低 **10.7Φ**；
+//     tempo 把它压到 94.5（比 it370 低 29.6Φ）。**这就是本腿与 tempo 的全部理论差别**，也是它要测的
+//     东西：0.18 的血价到底值不值得买 10.7 vs 29.6Φ 的排序分离度。
+//   ⇒ 排序仍对（目标第一），所以本腿不是"必输的对照"：它有机会自己达标，只是容错更小。
+//
+// ── 3. 判据（预注册；与 y32-tempo 同窗同座，便于直接配对）────────────────────────────
+//   F 门（it50-100 的 11 点均值）：
+//     F1 胜率 ≥ **0.870** · F2 承伤 ≤ **140**（本腿没有血价，容忍高 10）
+//     F3 转化 ≥ **0.72** 且 道具/千 ≥ **0.70** · F4 胜局拍 ≤ **7400**
+//     F5 窗内命中 ≥ **4.5/局** · F6 命中率 ≥ 0.745、kills/shot ≥ 0.290
+//  主判（it150-250）：
+//     W1 **胜率 ≥ 0.885**（与 it0 座级 McNemar，Δ ≥ −1.0pp 或 p > 0.05）
+//     W2 转化 ≥ 0.80、道具/千 ≥ 0.75 · W3 胜局拍 ≤ 7100
+//     W4 承伤 ≤ **130**、承伤/杀 ≤ **6.5**、余量 ≥ **1.60**（血价低 ⇒ 门槛也低，但必须报）
+//     W5 窗内命中 ≥ 5.0/局 · W6 kills/千 ≥ 2.60
+//     W7 Φ 自证：it150-250 实测 Φ ≥ Φ(it0) + 10（本腿价目表口径）
+//   杀腿（任一命中即停）：胜率 < 0.855（连续 2 点）· **承伤 > 160**（无血价时的硬顶）·
+//     胜局拍 > 8000 · 命中率 < 0.72 · kills/千 < 2.30 · 转化 < 0.62 @it100 且承伤没降 ·
+//     **Φ(it50-100) < Φ(it0)** · timeout > 1% · kl > 0.075 · entropy < 1.45
+//
+// ── 4. 判决表（两腿同批；唯一变量 = wDmg）────────────────────────────────────
+//   | y32-nohp | y32-tempo | 读法 | 下一腿 |
+//   | 达标 | 达标 | 血价在该区间内**冗余**；两条路都到 ⇒ 目标可达，取便宜的（0.12） | 把预算转到"结构"（obs s20 盾剩秒 / 人类 BC 辅助损失） |
+//   | 达标 | 未达标 | 0.30 **过度**（把速度/道具压死） | 取 0.20 再测一点，或直接用 nohp 权重续跑 |
+//   | 未达标 | 达标 | **血价是杠杆且 0.30 够** | 锁定 0.30；下一腿只动落后税（0.0008→0.0012） |
+//   | 都未达标 | — | 价格杠杆到顶 ⇒ 能力侧 | 人类 BC（`demo_bc_coef`，需先重铸 v5 bank）/ 修 `s20` 盾剩秒饱和 |
+//
+// ── 5. 已知风险与对冲 ───────────────────────────────────────────────────────
+//   · **本腿大概率"更快但更血"**：§2 的画像表已经算出这一点（血崩画像罚不住）。这不是缺陷——
+//     它是"血价值多少钱"的读数。若 W3 达标而 W1 差 3–5pp ⇒ 结论是"3–5pp 的血价 = 0.18/点"，
+//     这个换算比例以后所有腿都能用。
+//   · 与 y32-tempo 共用起点/种子流 ⇒ 两腿的结果**不独立**（这是配对要的），但**不能当两次
+//     独立实验**做显著性合并；报告里只做座级配对差，不做"两腿都显著"的叠加宣称。
+//   · 落后税与血价在本腿**没有对冲**（tempo 里 0.30 的血价部分承担了"别赶时间送死"），
+//     所以本腿的 stop 下限不设（F8 只报不判），但承伤 160 是硬杀腿。
+//   · 其余风险（砍 wShot 把出手砍回去、落后税推成赶时间、Φ 排序对画像敏感）与
+//     `y32-tempo.jsonc` §6 逐条相同，不再重复。
+//
+// ── 6. 预算与训练参数 ────────────────────────────────────────────────────────
+//   `iters 300` · `max_hours 24` · `lr 1.2e-4→8e-5` · `kl_coef 0.05` · `kl_cap 0.1`
+//   —— 与 y32-tempo 逐字同（唯一差别是 wDmg），便于配对。
+//   两腿并跑 = 两个 worker；只起一个 worker 时排队时间翻倍，这是调度问题，不改课程。
+//
+// ── 开工前置 / 诊断工具 / 结算 ────────────────────────────────────────────────
+//   同 `y32-tempo.jsonc` 同名小节；结算时**必须两腿同一张表**出（配对差 + 各自 Φ 分解）。
+
+{
+  "version": 5,
+  "name": "y32-nohp",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：y32-tempo 逐字，唯独 wDmg 回 0.12 ──
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.12,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 3.2,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wWinHit": 3.0,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/y31-fire/y31-fire.it370.20261023-030505.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 100, "kl_coef": 0.05, "lr": 0.00012, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.00008, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+
+  "paired_rotate_seed": 20270210,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/y32-nohp/weights.json",
+  "traj": "tmp/y32-nohp",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y32-nohp",
+  "backup_prefix": "y32-nohp",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课结算（2026-10-24）────────────────────────────────────────────────────
+//   数据：dashboard/data/course-metrics/y32-nohp/eval_log.jsonl（92 列全字段，
+//         101 个 eval 点 it0–500，每点 400 局）· 详表：reports/y32-four-legs-final-20261024.md
+//   OOD 对照（同 ckpt 在障碍图）：reports/obstruction-nohp470-vs-tempo420-20261024.md
+//
+//   收官：**it500 / 计划 500（100%）**。it1 ABORT（同 tempo，远端 PPO `ValueError`）→
+//         it41 `kickstart_burn` ABORT（连续 3 点低于基线 5pp）→ 三次重启。W 门 21 点完整 ✓
+//
+//   W 门（it150-250，21 点）· 起点同上
+//     W1 胜率 ≥0.885      → **0.7646 ✗**（差 12.0pp，四课最低）
+//     W2 转化 ≥0.80       → 0.918 ✓（四课最高）· 道具/千 ≥0.75 → 1.027 ✓（四课最高）
+//     W3 胜局拍 ≤7100     → **6609 ✓**（−19.5%，四课最快）
+//     W4 承伤 ≤130        → **178.7 ✗** · 伤/杀 ≤6.5 → **9.88 ✗** · 余量 ≥1.60 → **1.108 ✗**
+//     W5 窗内 ≥5.0/局     → 7.30 ✓（四课最高）
+//     W6 kills/千 ≥2.60   → 2.97 ✓（四课最高）· 道具/局 ≥5.2 → 6.26 ✓
+//     W7 Φ 自证           → **未算**（tmp/y32-phi.py 硬编码 it0 价目表，本课 params 不同，
+//                            直接跑会算错；待按本课价目表重算后才可判）
+//
+//   裁决：**对照腿，比 tempo 更差；但它的价值在 OOD**。
+//     · 本课 §0 预注册的三条判读，落在**第三条**：「本腿 <0.85 且承伤 >130 ⇒ 砍正项 + 落后税
+//       自己在卖安全」。0.7646 < 0.85 ✓、承伤 178.7 > 130 ✓ ⇒ **成立**。
+//     · 因此 tempo 的 0.90 只是「用钱（血价）买回来的」，不是这套价目表本身的能力。
+//     · 同 ckpt 在 obstruction 800 座上 **nohp 21.0% > tempo 10.8%（配对 +10.25pp，p=1.8e-8）**
+//       ⇒ **血价的收益是分布内的，跨关是负债**（它让策略在陌生地形上更不敢动：idle 66.2% vs 82.3%）。
+//   **该腿最优 ckpt 记录点 = `it470`**（W 窗胜率 0.8400、obstruction 21.0%），
+//         已挂进 nn-training/weights/y32-nohp/y32-nohp.it470.20261024-deliver.json。
+//
+//   ⚠ 本段注释改变了文件字节 ⇒ course_fp 已变（改前 02a4ea70；本课历史上另有 0b3a911e… /
+//     fce8cc8e… 两个，来自 mid-run course_edit）。本腿已结课、不再续跑。
