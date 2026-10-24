@@ -120,8 +120,22 @@ export function findMostDangerousBulletImpl(
       if (steelBlocked && !playerConstrained) continue
     }
 
-    if (dist < bestDist) {
-      bestDist = dist
+    // A13 (2026-10-25): select by TIME, not by lateral distance.
+    // Hit autopsy (hard, 350 games, 1386 hits): 96% of the shells that connect
+    // had been in flight for >20 ticks, 80% of hits land while the branch is
+    // already `dodge`, and 88% of those while the tank is moving — i.e. the
+    // dodge is running but aimed at the wrong shell. `bulletLaneDist` picks the
+    // laterally closest shell, which can be the one arriving LAST while a
+    // nearly-arrived shell connects.
+    let key = dist
+    if (self.params.dodgeThreatByTti > 0) {
+      const v2 = DIR_VECTORS[b.dir]
+      const axial = (pcx - bcx) * v2.dx + (pcy - bcy) * v2.dy
+      const speed = b.speed && b.speed > 0 ? b.speed : 4
+      key = axial > 0 ? axial / speed : 0
+    }
+    if (key < bestDist) {
+      bestDist = key
       best = b
     }
   }

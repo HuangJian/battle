@@ -1448,6 +1448,9 @@ export interface GodAIParams {
   /** A12: engage only when the earliest shell reaches the CURRENT cell within
    * this many ticks (urgency gate; avoids hijacking routine dodges). */
   crossfireMinTti: number
+  /** A13 (2026-10-25): pick the dodge threat by earliest arrival (TTI) instead
+   * of smallest lateral distance. 0 = OFF (byte-identical). */
+  dodgeThreatByTti: number
 
   /**
    * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.

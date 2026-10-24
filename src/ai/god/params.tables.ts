@@ -512,6 +512,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // t=1.78, kills +125）⇒ **三难度同号为正**。s14 单关 60 seed：43→45（71.7%→75.0%）。
   // 历史：v1「按轴计数」s14 −15pp（走进最急那发）；v2 TTI 无紧迫门全量 ±0（54/54）。
   crossfireSectorMode: 1,
+  // A13 (2026-10-25): dodge 选威胁弹按「到达时间(TTI)」而不是「横向距最近」。
+  // 尸检：96% 命中弹在飞 >20 拍、80% 命中发生在 dodge 分支、88% 还带移动 ⇒ 躲错了弹。
+  // 0 = OFF（按横向距，旧行为）· 1 = 按 TTI。
+  dodgeThreatByTti: 0,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,
