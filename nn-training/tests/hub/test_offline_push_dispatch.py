@@ -26,7 +26,13 @@ from pathlib import Path
 import pytest
 
 from common.http_respond import respond_json
-from common.protocol import COURSE_ENABLE_MARKER, OFFLINE_PUSH_PROTO
+from common.protocol import (
+    COURSE_ENABLE_MARKER,
+    OFFLINE_PUSH_PACK_DIR,
+    OFFLINE_PUSH_PROTO,
+    OFFLINE_PUSH_RESUME_DIR,
+    OFFLINE_PUSH_TASK_NAME,
+)
 from hub import offline_push as disp_mod
 from hub.offline_ingest import ingest_offline_artifact
 from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
@@ -107,12 +113,19 @@ class _Worker:
         body_run_id: str | None = None,
         write_final: bool = True,
         finish_now: bool = True,
+        metrics: bool = False,
+        oversize: bool = False,
+        late_round: bool = False,
     ) -> None:
         self.run_id = run_id
         self.round_it = round_it
         self.body_run_id = body_run_id or run_id
         self.write_final = write_final
         self.finish_now = finish_now
+        self.metrics = metrics
+        self.oversize = oversize
+        self.late_round = late_round
+        self._late_body: tuple[int, bytes] | None = None
         self.task: dict | None = None
         self.state = PushFaceState(work_dir=tmp_path / "worker", log=lambda _m: None)
         self.state.set_starter(self._starter)
@@ -125,20 +138,47 @@ class _Worker:
         outbox.mkdir(parents=True, exist_ok=True)
         rounds = outbox / "rounds"
         rounds.mkdir(exist_ok=True)
-        body = _artifact_body(run_id=self.body_run_id, it=self.round_it)
-        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        (rounds / f"it{self.round_it:04d}.json").write_bytes(raw)
+        rounds_doc: dict[str, dict] = {}
+        if self.oversize:
+            # 超 `OFFLINE_ARTIFACT_BODY_MAX` 的轮：没有权重体，只有统计（F5 的唯一读数面）。
+            rounds_doc[str(self.round_it)] = {
+                "rev": 0,
+                "file": "",
+                "bytes": 0,
+                "sha256": "",
+                "oversize": True,
+            }
+        else:
+            body = _artifact_body(run_id=self.body_run_id, it=self.round_it)
+            raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            (rounds / f"it{self.round_it:04d}.json").write_bytes(raw)
+            rounds_doc[str(self.round_it)] = {
+                "rev": 0,
+                "file": f"rounds/it{self.round_it:04d}.json",
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "oversize": False,
+            }
+        if self.metrics:
+            self._write_metrics(outbox, self.round_it)
+        if self.late_round:
+            # 账本先声明的第二轮，body 稍后才落（`write_late_round`）——F1 的积压形状。
+            it2 = self.round_it + 1
+            raw2 = json.dumps(
+                _artifact_body(run_id=self.body_run_id, it=it2), ensure_ascii=False
+            ).encode("utf-8")
+            self._late_body = (it2, raw2)
+            rounds_doc[str(it2)] = {
+                "rev": 0,
+                "file": f"rounds/it{it2:04d}.json",
+                "bytes": len(raw2),
+                "sha256": hashlib.sha256(raw2).hexdigest(),
+                "oversize": False,
+            }
         (outbox / "state.json").write_text(
             json.dumps(
                 {
-                    "rounds": {
-                        str(self.round_it): {
-                            "rev": 0,
-                            "file": f"rounds/it{self.round_it:04d}.json",
-                            "bytes": len(raw),
-                            "sha256": hashlib.sha256(raw).hexdigest(),
-                        }
-                    },
+                    "rounds": rounds_doc,
                     "final_ready": True,
                     "final_acked": False,
                     "updated_at": time.time(),
@@ -166,6 +206,31 @@ class _Worker:
             )
         if self.finish_now:
             self.state.note_child_exit(0)
+
+    def _write_metrics(self, outbox: Path, it: int) -> None:
+        """写这一轮的统计体（`/offline/push/metrics` 的读面；F5）。"""
+        fp = hashlib.sha256(b"W" * 64).hexdigest()
+        doc = {
+            "run_id": self.run_id,
+            "course": COURSE,
+            "rows": [
+                {
+                    "it": it,
+                    "weights_fp": fp,
+                    "row": {"it": it, "run_id": self.run_id, "weights_fp": fp},
+                }
+            ],
+        }
+        (outbox / "metrics").mkdir(exist_ok=True)
+        (outbox / "metrics" / f"it{it:04d}.json").write_text(
+            json.dumps(doc), encoding="utf-8"
+        )
+
+    def write_late_round(self) -> None:
+        """补上 `late_round` 那一轮的 body（模拟「训练刚写到第二轮」；F1 的积压解除点）。"""
+        assert self._late_body is not None and self.state.outbox is not None
+        it, raw = self._late_body
+        (self.state.outbox / "rounds" / f"it{it:04d}.json").write_bytes(raw)
 
     def finish(self) -> None:
         """补上段末（用于「hub 重启后还在拉」那条用例：先让 worker 停在运行态）。"""
@@ -290,6 +355,271 @@ def test_hub_restart_resumes_an_assignment_without_reuploading(tmp_path: Path) -
         disp2.stop()
     finally:
         worker.close()
+
+
+# ------------------------------------------------------------------ 积压 / 统计 / 续跑锚点
+
+
+def test_a_missing_round_body_blocks_the_final_until_caught_up(tmp_path: Path) -> None:
+    """F1：账本里已经有两轮、第二轮 body 还没落 ⇒ **不许**收 final。
+
+    final 一 ack 就会让 worker 删掉整个 outbox —— 还没拉的轮次会永久丢。
+    """
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, late_round=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        it1 = _offline_root(hub) / "run-1" / "it-001"
+        assert _wait(lambda: it1.is_dir()), "it1 没入账"
+
+        # 有界观察窗：settle 只需一拍（pump_sec=20ms）——它若没等积压，这里必然已经收摊。
+        time.sleep(0.5)  # sleep-ok: 夹具模拟 —— 让 pump 至少转十几拍，判据是「一直不收摊」
+        assert disp.assignments.get(COURSE) is not None, "第二轮还没拉到就收摊了（outbox 会被删）"
+        assert worker.state.outbox is not None
+        assert (worker.state.outbox / "final.json").exists(), "final 被提前 ack 删掉了"
+        assert not (_offline_root(hub) / "run-1" / "result.json").exists()
+        assert not (_offline_root(hub) / "run-1" / "it-002").exists()
+
+        worker.write_late_round()
+        assert _wait(lambda: disp.assignments.get(COURSE) is None), "补上 it2 后仍没收摊"
+        assert (_offline_root(hub) / "run-1" / "it-002").is_dir()
+        assert (_offline_root(hub) / "run-1" / "result.json").is_file()
+        assert not (worker.state.outbox / "final.json").exists()
+    finally:
+        disp.stop()
+        worker.close()
+
+
+def _metrics_lines(hub: _HubQueue) -> list[dict]:
+    mpath = _offline_root(hub) / "run-1" / "metrics.jsonl"
+    assert mpath.is_file(), f"没有 {mpath}"
+    return [json.loads(line) for line in mpath.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_round_metrics_are_pulled_alongside_the_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5：有权重体的轮也要拉统计腿（同 `(it, weights_fp)` 时 hub 侧幂等跳过，不重复记账）。"""
+    hub, _pack = _mk_hub(tmp_path)
+    calls: list[str] = []
+    orig = hub.store_offline_metrics
+
+    def spy(course: str, body: dict) -> dict:
+        calls.append(course)
+        return orig(course, body)
+
+    monkeypatch.setattr(hub, "store_offline_metrics", spy)
+    worker = _Worker(tmp_path, metrics=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: disp.assignments.get(COURSE) is None)
+
+        assert calls == [COURSE], "统计腿没被调用（旧行为：只拉权重体）"
+        rows = _metrics_lines(hub)
+        assert any(int(r["it"]) == 1 and r["weights_fp"] for r in rows)
+        # ack 按 rev 收下后统计体也被删（否则 outbox 永远清不掉）
+        outbox = worker.state.outbox
+        assert outbox is not None
+        assert not (outbox / "metrics" / "it0001.json").exists()
+    finally:
+        disp.stop()
+        worker.close()
+
+
+def test_an_oversize_round_still_delivers_its_metrics(tmp_path: Path) -> None:
+    """F5 的正身：`oversize` 的轮**没有** body，统计体是它唯一的读数面（y31-null 的教训）。"""
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, oversize=True, metrics=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: disp.assignments.get(COURSE) is None), "只有统计的轮把整单卡死了"
+
+        rows = _metrics_lines(hub)
+        assert [int(r["it"]) for r in rows] == [1]
+        assert rows[0]["event"] == "offline_metrics", "没有权重体的轮只能靠统计腿留读数"
+        # 没有权重 ⇒ 不建 `it-001/`（那是 `resume_anchor` 会误认的脏轮）
+        assert not (_offline_root(hub) / "run-1" / "it-001").exists()
+        assert (_offline_root(hub) / "run-1" / "result.json").is_file()
+    finally:
+        disp.stop()
+        worker.close()
+
+
+def test_task_zip_carries_resume_json_and_a_deterministic_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2 + F4：锚点要带 `resume.json`（`apply_resume_overlay` 的入口判据）；task_id 可复算。"""
+    import shutil
+
+    hub, pack = _mk_hub(tmp_path)
+    adir = tmp_path / "anchor" / "it-002"
+    adir.mkdir(parents=True)
+    weights = b'{"w":2}'
+    (adir / "weights.json").write_bytes(weights)
+    (adir / "opt.tar").write_bytes(b"OPT")
+    (adir / "row.json").write_text(json.dumps({"it": 2}), encoding="utf-8")
+    anchor = {
+        "course": COURSE,
+        "it": 2,
+        "run_id": "run-1",
+        "source": "artifact",
+        "weights_fp": hashlib.sha256(weights).hexdigest(),
+        "files": {"weights": "weights.json", "opt": "opt.tar", "row": "row.json"},
+        "opt_bytes": 3,
+        "metrics": {"it": 2},
+        "_dir": str(adir),
+    }
+    monkeypatch.setattr(hub, "resume_anchor", lambda _course: dict(anchor))
+    disp, _workers = _dispatcher(hub, tmp_path)
+    zpath = Path()
+    zpath2 = Path()
+    zpath0 = Path()
+    try:
+        zpath, meta = disp.build_task_zip(COURSE, pack, "run-1", resume_it=2)
+        assert meta["resume_it"] == 2
+        want = disp._task_id(COURSE, hashlib.sha256(pack.read_bytes()).hexdigest(), 2)
+        assert meta["task_id"] == want and len(want) == 16
+        with zipfile.ZipFile(zpath) as zf:
+            task = json.loads(zf.read(OFFLINE_PUSH_TASK_NAME).decode("utf-8"))
+            assert task["resume_it"] == 2 and task["task_id"] == want
+            assert task["run_id"] == "run-1"
+            assert zf.read(f"{OFFLINE_PUSH_PACK_DIR}/{pack.name}") == pack.read_bytes()
+            resume = json.loads(zf.read(f"{OFFLINE_PUSH_RESUME_DIR}/resume.json").decode("utf-8"))
+            assert resume["it"] == 2 and resume["weights_fp"] == anchor["weights_fp"]
+            assert resume["files"]["weights"] == "weights.json"
+            assert not any(str(k).startswith("_") for k in resume), "内部键（_dir）泄进了包"
+            base = f"{OFFLINE_PUSH_RESUME_DIR}/it-002"
+            assert zf.read(f"{base}/weights.json") == weights
+            assert zf.read(f"{base}/opt.tar") == b"OPT"
+            assert zf.read(f"{base}/row.json") == b'{"it": 2}'
+
+        # 同一份包 + 同一个地板 ⇒ 同一个 task_id（重派/重复投递不会被当成新单）
+        zpath2, meta2 = disp.build_task_zip(COURSE, pack, "run-1", resume_it=2)
+        assert meta2["task_id"] == meta["task_id"]
+        # 没有地板 ⇒ 不带锚点目录（也不该误读 hub 上的旧锚点）
+        zpath0, meta0 = disp.build_task_zip(COURSE, pack, "run-1")
+        assert meta0["task_id"] != meta["task_id"]
+        with zipfile.ZipFile(zpath0) as zf:
+            assert not any(n.startswith(f"{OFFLINE_PUSH_RESUME_DIR}/") for n in zf.namelist())
+    finally:
+        for z in (zpath, zpath2, zpath0):
+            if z.name:
+                shutil.rmtree(z.parent, ignore_errors=True)
+
+
+def test_adoption_accepts_only_the_same_unfinished_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9/F10：上传没拿到 202（超时/409）时，确定性 task_id 让「同一单」可判。"""
+    hub, _pack = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+    try:
+        disp.assignments.put(
+            {
+                "course": COURSE,
+                "worker_id": "push:w1",
+                "run_id": "run-1",
+                "lease_token": "L",
+                "phase": "dispatching",
+            }
+        )
+        tid, sha = "0123456789abcdef", "s" * 64
+        state: dict = {
+            "phase": "running",
+            "ack": False,
+            "task": {"task_id": tid, "course": COURSE, "pack_sha256": sha},
+        }
+        monkeypatch.setattr(disp._client, "get_state", lambda _url, _key: dict(state))
+        meta = {"task_id": tid, "pack_sha256": sha, "resume_it": 2}
+        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is True
+        rec = disp.assignments.get(COURSE)
+        assert rec is not None
+        assert rec["task_id"] == tid and rec["phase"] == "running" and rec["resume_it"] == 2
+
+        # 别人的单（id 不同）⇒ 不接管，账本原样
+        disp.assignments.set_fields(COURSE, task_id="", phase="dispatching")
+        state["task"] = {**state["task"], "task_id": "fedcba9876543210"}
+        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+        assert (disp.assignments.get(COURSE) or {}).get("task_id") == ""
+
+        # 同 id 但已收尾（ack=true 且非 running）⇒ 重投只会 duplicate，不接管
+        state["task"] = {**state["task"], "task_id": tid}
+        state.update(phase="done", ack=True)
+        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+    finally:
+        disp.stop()
+
+
+def test_settle_without_an_answer_is_parked_then_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3：收摊时 worker 没答（None/5xx）⇒ 记 `settling` 原样重放；有答（404/409）才算完。"""
+    hub, _pack = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+    try:
+        disp.assignments.put(
+            {
+                "course": COURSE,
+                "worker_id": "push:w1",
+                "task_id": "t" * 16,
+                "run_id": "run-1",
+                "lease_token": "L",
+                "phase": "running",
+                "cursor_it": 1,
+                "revs": {"1": 0},
+            }
+        )
+        rec = disp.assignments.get(COURSE)
+        assert rec is not None
+        monkeypatch.setattr(disp._client, "cancel_task", lambda *_a, **_k: None)
+        monkeypatch.setattr(disp._client, "post_ack", lambda *_a, **_k: None)
+        assert (
+            disp._settle_assignment(
+                COURSE,
+                "http://w",
+                "k",
+                rec,
+                cancel=True,
+                free_worker=True,
+                reason="conflict",
+                failed=True,
+            )
+            is False
+        )
+        parked = disp.assignments.get(COURSE)
+        assert parked is not None and parked["phase"] == "settling"
+        assert parked["settle_reason"] == "conflict"
+        assert parked["settle_cancel"] is True and parked["settle_free"] is True
+        assert parked["settle_failed"] is True and parked["settle_at"] > 0
+
+        calls: list[str] = []
+
+        def fake_cancel(_url: str, _key: str, **_kw):
+            calls.append("cancel")
+            return 200, {}
+
+        def fake_ack(_url: str, _key: str, _payload: dict, **_kw):
+            calls.append("ack")
+            return 200, {}
+
+        monkeypatch.setattr(disp._client, "cancel_task", fake_cancel)
+        monkeypatch.setattr(disp._client, "post_ack", fake_ack)
+        assert disp._settle_retry(
+            COURSE, "http://w", "k", disp.assignments.get(COURSE) or parked
+        ) is True
+        assert calls == ["cancel", "ack"]
+        assert disp.assignments.get(COURSE) is None
+    finally:
+        disp.stop()
 
 
 # ------------------------------------------------------------------ 拒绝面

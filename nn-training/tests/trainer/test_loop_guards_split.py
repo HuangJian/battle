@@ -229,8 +229,13 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
             "worker.gate_check",
             "worker.kickstart_burn",
             "common.log",
+            "common.protocol",
             "worker.paired",
             "worker.paired_kill",
+            # 2026-10-24：`_rein_active` 判「缰绳是否还活跃」要算 kickstart 系数。
+            # 公式唯一实现下沉到 L2 `worker/schedule.kickstart_coef`（trainer 侧只留薄包装）——
+            # worker 不得反向 import trainer（tests/test_layering.py），故这里是 L2 内入边。
+            "worker.schedule",
         }
     ),
     # 2026-10-22（DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：启动期「判决力够不够亮」

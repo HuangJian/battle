@@ -172,6 +172,9 @@ def run_standalone(
     #: ★ 2026-10-23（W4）：取消哨兵（push 腿的 `/offline/push/cancel` 写它）。
     #: 非空时 `plan_run` 在**轮边界**检查：命中 ⇒ 本段 `state="cancelled"`，产物自洽可续跑。
     stop_file: str | Path | None = None,
+    #: ★ 2026-10-24（F7）：outbox 地板（`it <= N` 的轮不物化 —— hub 已经有）。
+    #: 来自 push 任务包的 `resume_it`；缺省 0 = 全部物化。
+    floor_it: int = 0,
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -231,6 +234,7 @@ def run_standalone(
         backup_root=backup_root,
         outbox_dir=str(outbox_dir or ""),
         stop_file=str(stop_file or ""),
+        floor_it=int(floor_it or 0),
         deliver=deliver,
         run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
         log=log,
@@ -503,6 +507,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument(
+        "--floor-it",
+        type=int,
+        default=0,
+        help=(
+            "★ 2026-10-24（push 模式）：outbox 地板 —— `it <= N` 的轮不物化（hub 已经有"
+            "它们，来自任务包的 resume_it）；0 = 全部物化"
+        ),
+    )
+    ap.add_argument(
         "--eval-on-cloud",
         action="store_true",
         help="在云机跑 A 层评估（同 in-loop 语料/行口径，每 eval_every 轮）；结果落产物目录 eval_log.jsonl",
@@ -598,6 +611,7 @@ def main(argv: list[str] | None = None) -> int:
             backup_root=Path(args.backup_root) if args.backup_root else None,
             outbox_dir=args.outbox,
             stop_file=args.stop_file or None,
+            floor_it=int(args.floor_it or 0),
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

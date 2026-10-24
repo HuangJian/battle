@@ -156,8 +156,12 @@ class DelivererProcess:
         #: outbox 模式** —— 子进程只往 `<outbox>/` 写 body，一个字节也不往 hub 发（hub 自己来拉）。
         #: 这时 `base_url`/`token` 可以为空（`_enabled` 的判据换成本字段）。
         outbox_dir: str | Path | None = None,
+        #: ★ 2026-10-24（F7）：outbox 地板 —— `it <= floor_it` 的轮不物化（hub 已经有）。
+        #: 只在 outbox 模式有意义；非缺省才进 argv（老 `deliver_worker` 不认它 ⇒ 会降级）。
+        floor_it: int = 0,
     ) -> None:
         self.outbox = Path(outbox_dir) if outbox_dir else None
+        self._floor_it = int(floor_it or 0)
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or "")
         self._run_id_raw = str(run_id or "")
@@ -278,6 +282,8 @@ class DelivererProcess:
         #（也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
         if self.outbox is not None:
             argv += ["--outbox", str(self.outbox)]
+            if self._floor_it > 0:
+                argv += ["--floor-it", str(self._floor_it)]
         else:
             argv += ["--hub-url", self.base_url]
         if self.course:
@@ -447,6 +453,7 @@ class DelivererProcess:
                 course=self.course,
                 hub_lease=self.hub_lease,
                 worker_name=self.worker_name,
+                floor_it=self._floor_it,
                 background=True,
                 log=self.log,
             )
@@ -595,6 +602,7 @@ class DelivererProcess:
                 course=self.course,
                 hub_lease=self.hub_lease,
                 worker_name=self.worker_name,
+                floor_it=self._floor_it,
                 background=False,
                 log=lambda _m: None,
             )
@@ -779,6 +787,9 @@ def make_deliverer(
     #: 这个分支**先于** hub_url/token 早退判定 —— 否则 `--outbox` + `--no-deliver`（两个参数
     #: 恰好让 hub_url/token 都缺）会静默什么也不做：训练照跑、outbox 永远空、最后被判掉线。
     outbox_dir: str | Path | None = None,
+    #: ★ 2026-10-24（F7）：outbox 地板（`it <= floor_it` 的轮不物化；hub 已经有它们）。
+    #: 只在 outbox 模式生效；缺省 0 = 全部物化（错的方向必须是不丢数据）。
+    floor_it: int = 0,
     log: Callable[[str], None] = _log_default,
 ) -> DelivererLike | None:
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
@@ -813,6 +824,7 @@ def make_deliverer(
             course=course,
             hub_lease=hub_lease,
             worker_name=worker_name,
+            floor_it=int(floor_it or 0),
             background=kind == "thread",
             log=log,
         )
@@ -832,6 +844,7 @@ def make_deliverer(
             eval_every=int(eval_every or 0),
             metrics_parts=bool(metrics_parts),
             adaptive=bool(adaptive),
+            floor_it=int(floor_it or 0),
         )
     return OfflineDeliverer(
         base_url=hub_url,

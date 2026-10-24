@@ -1518,6 +1518,7 @@ def build_run_argv(
     backup_root: str | Path | None = None,
     outbox: str | Path = "",
     stop_file: str = "",
+    floor_it: int = 0,
 ) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
@@ -1572,6 +1573,10 @@ def build_run_argv(
         # 补传，outbox 必须活」（P0-1 的不变量，见 `deliver_proc.make_deliverer`）。
         # 同时**不传** `--hub-url`：传了就会把这条腿变回 HTTP 补传（而 push 包里不带 token）。
         argv += ["--outbox", str(outbox), "--no-deliver"]
+        if int(floor_it or 0) > 0:
+            # ★ 2026-10-24（F7）：hub 已有的最高一轮（任务包的 resume_it）——
+            # `it <= floor` 的轮不物化（否则整段重跑会白写几十 MB 的已知轮）。
+            argv += ["--floor-it", str(int(floor_it))]
     elif bool(cfg.get("live_backfeed", True)) and hub and token_file:
         argv += ["--hub-url", hub, "--hub-token-file", token_file]
         # 补传的**归位键**（多课程 hub 必需）：`CFG.course` 就是控制台里那门课的名字，
@@ -1609,6 +1614,7 @@ def run_one_course(
     assigned_resume: str | Path | None = None,
     push_outbox: str | Path = "",
     stop_file: str = "",
+    push_floor_it: int = 0,
 ) -> int:
     """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
@@ -1828,6 +1834,7 @@ def run_one_course(
         backup_root=None if push_mode else net / deliverable.BACKUP_DIR_NAME,
         outbox=push_outbox if push_mode else "",
         stop_file=stop_file if push_mode else "",
+        floor_it=int(push_floor_it or 0) if push_mode else 0,
     )
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成

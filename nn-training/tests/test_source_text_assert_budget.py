@@ -245,6 +245,14 @@ notebook 的 12 条首版也合并成 5 条（同一语义相关项共一个 ass
 被测行为**只**表现为一行人读时，文本断言就是行为断言。同一批里能改成结构判据的都改了：
 outbox 的状态/rev/ack/字节对账全部读 `state.json` 与文件字节（不靠日志）。
 
+**2026-10-24 抬 FORM 一格的账**（`tests/worker/test_kickstart_burn_guard.py` 随 `b9635cdc` 入库时漏记；
+形态 1493 → **1495** = +2，SOURCE 未动）：该用例原有的 5 条文本断言里 **3 条已改成结构化判据**
+（`gate_verdict` 的 `verdict/decider` 字段 + `reason.startswith("kickstart-burn(notify")`；
+第二次调用改为断言捕获输出**为空**；halt 改 `_halt_calls == ["ABORT"]`）。剩下 2 条是 notify 模式的
+**操作员交付物**：`CRITICAL KICKSTART-BURN` 告警行 +「判据只提示，本腿不停车」那句——
+行为面已由 `_stop_cause == ""` / `_burn_streak == 3` / 账本判决钉住，但「有没有响、为什么不停」
+只在日志行上（`LogBundle` 没有结构化出口）。同族先例 = 2026-10-23 W3 的 outbox 降级行那一笔。
+
 """
 
 from __future__ import annotations
@@ -269,8 +277,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-22 节流窗读面抬到 **1484**（+1 反探针 `"已经在导包了" not in trigger_note`；理由见模块头）
 #: 2026-10-23 push-mode-notebooks W0–W2 抬到 **1490**（+6 = notebook push/pull 契约；理由见模块头）
 #: 2026-10-23 push-mode-notebooks W3 抬到 **1493**（+3 = outbox 降级行 + 反探针 + 收线欠账行；理由见模块头）
+#: 2026-10-24 kickstart-burn 守卫抬到 **1495**（+2 = notify 告警/不停车两行；另 3 条已改结构判据；理由见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1493
+BASELINE_FORM = 1495
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

@@ -371,6 +371,9 @@ def open_run_context(
     #: ★ 2026-10-23（W4）：push 腿的取消哨兵（`--stop-file`，由 worker 服务的
     #: `/offline/push/cancel` 写）。空 = 无取消面。
     stop_file: str = "",
+    #: ★ 2026-10-24（F7）：outbox 的**地板** —— `it <= floor_it` 的轮不物化（hub 已经有的）。
+    #: 值来自 push 任务包的 `resume_it`；**缺省 0 = 全部物化**（错的方向必须是不丢数据）。
+    floor_it: int = 0,
     #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
     deliverer: DelivererLike | None = None,
     run_job_fn: Callable[..., dict] | None = None,
@@ -467,6 +470,7 @@ def open_run_context(
                     backup_root=backup,
                     # ★ P0-1：outbox 分支在工厂里先于 hub_url/token 早退（见 `make_deliverer`）。
                     outbox_dir=outbox_dir or None,
+                    floor_it=int(floor_it or 0),
                     log=log,
                 )
                 if (deliver or str(outbox_dir or "").strip())

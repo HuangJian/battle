@@ -41,7 +41,6 @@ from common.log import Tee as _Tee
 from common.log import log
 from common.pid_probe import pid_alive as _pid_alive_impl
 from common.platform_utils import force_utf8_stdio
-from common.protocol import coef_active
 from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
     REPO_ROOT,
     run_rollout_queue,
@@ -56,6 +55,7 @@ from worker.resume import (
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
 from worker.rl_config_schema import check_rl_config
+from worker.schedule import kickstart_coef
 from worker.train.loop_util import course_key_from_path
 
 
@@ -64,18 +64,9 @@ def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
     value 头）+ kickstarting KL 惩罚（系数按策略迭代衰减）。自 run_rl_intent 原样
     迁入（数学不变）。纯函数，可单测。"""
     warmup_epochs = args.epochs if (it - start_it) < args.warmup_iters else 0
-    policy_iter = (it - start_it) - args.warmup_iters + 1
-    kl_coef = (
-        args.kickstart_kl * (args.kickstart_decay ** max(0, policy_iter - 1))
-        if args.kickstart_kl > 0 and policy_iter >= 1
-        else 0.0
-    )
-    # 几何衰减永远到不了精确 0（实测 kl=2^-36=1.455e-11 时判据仍放行，白付 ref 权重
-    # 传输 + worker 每轮 3 s 预计算，而数学贡献 ≈1.8e-12 可忽略）。低于阈值直接归零。
-    # ⚠ 这一处是**唯一**的衰减源（`trainer/loop_steps.kickstart_coef` 只是它的薄包装），
-    #   故归零后：loop_steps 不再附 ref 字节 -> worker 不再加载 -> engine 的 `> 0` 自然为假。
-    if not coef_active(kl_coef):
-        kl_coef = 0.0
+    # 系数公式的**唯一**实现已下沉 `worker/schedule.kickstart_coef`（含阈值归零；
+    # worker 侧守卫也要用它）。这里只接结果，不重算。
+    kl_coef = kickstart_coef(args, it, start_it)
     return {
         "value_warmup_epochs": warmup_epochs,
         "ref_model": ref_model,

@@ -30,17 +30,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import remote.delta_files as delta_files
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.logutil import tag_logger
 from common.protocol import OFFLINE_ARTIFACT_BODY_MAX, OFFLINE_PUSH_OUTBOX_WARN_BYTES
 from remote.artifacts import ArtifactStore
+
+try:  # pragma: no cover - 平台分支
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+try:  # pragma: no cover - 平台分支
+    import msvcrt
+except ImportError:  # POSIX
+    msvcrt = None  # type: ignore[assignment]
 
 #: 状态文件（hub 的 `/state` 读面就是它 + `rounds/` 目录）。
 STATE_NAME = "state.json"
@@ -59,6 +70,83 @@ SYNC_BATCH_ROUNDS = 8
 OUTBOX_TICK_SEC = 2.0
 #: 单轮评估读数上界（与 `OfflineDeliverer.EVAL_ROWS_CAP` 同值；正常一轮 = 关数×种子数，双轨 100）。
 EVAL_ROWS_CAP = 400
+#: outbox 账本的**跨进程**闸文件（`ack_outbox` 与训练子进程各开一个 fd 抢它）。
+STATE_LOCK_NAME = ".state.lock"
+
+#: 每个 outbox 一把进程内可重入锁（跨线程）+ 持有深度/文件 fd（跨进程）。
+#: 深度 >0 时同线程再进闸不再 flock —— 同进程对同一文件再 flock 一个新 fd 会自锁。
+_GATES: dict[str, dict[str, Any]] = {}
+_GATES_LOCK = threading.Lock()
+
+
+def _lock_state_file(path: Path) -> int | None:
+    """打开并锁住闸文件；锁不上 ⇒ `None`（**降级不抛**：账本一致性不该换来训练停摆）。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError:
+        return None
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
+    return fd
+
+
+def _unlock_state_file(fd: int) -> None:
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _outbox_gate(root: str | Path) -> Any:
+    """outbox 账本/body 的写闸（进程内可重入 + 跨进程 `flock`）。
+
+    为什么必须有它（评审 F8）：训练子进程（`LocalOutboxDeliverer`）与 worker 的 HTTP 面
+    （`/offline/push/ack`）是**两个进程**，都在写 `state.json`、都在删 body：
+
+    * 子进程整份覆盖写会**复活** ack 刚删掉的 body（hub 永远 404 ⇒ 那一轮永远拉不到 ⇒ 永不收尾）；
+    * ack 可能在「body 已换成新 rev、账本还是旧 rev」之间把**新** body 删掉。
+
+    所以「换入 body + 写账本」与「读账本 + 删 body + 写账本」必须进同一把闸。
+    """
+    key = str(Path(root).resolve())
+    with _GATES_LOCK:
+        gate = _GATES.get(key)
+        if gate is None:
+            gate = {"lock": threading.RLock(), "depth": 0, "fd": None}
+            _GATES[key] = gate
+    with gate["lock"]:
+        if gate["depth"] == 0:
+            gate["fd"] = _lock_state_file(Path(root) / STATE_LOCK_NAME)
+        gate["depth"] += 1
+        try:
+            yield
+        finally:
+            gate["depth"] -= 1
+            if gate["depth"] == 0 and gate["fd"] is not None:
+                fd = gate["fd"]
+                gate["fd"] = None
+                _unlock_state_file(int(fd))
 
 #: 缺省日志（与 `remote/*` 其余模块同一个工厂：`tag_logger` + 本模块自己的 `time` 引用，假钟才拦得到）。
 #: 刻意**不**再写一份 `print` —— `tests/test_reuse_ledger.py` 会把逐字节重复的实现当场标红。
@@ -187,12 +275,22 @@ def ack_outbox(
     `/offline/push/ack`）——那个进程不跑补传腿（腿住在训练子进程里），只能读同一份
     `state.json`。两个进程各写一份「删哪些」的判据，就是两套 ack 语义（P0-3 要防的正是这个）。
 
-    跨进程竞态刻意**不锁**：唯一能同时发生的事是子进程刚写进新一轮、而服务进程手里的
-    `state.json` 还没它 —— 那种情况下这一轮会在 `pending()` 里重现并重新物化（幂等，
-    `rev` 从头算），代价是一份重复 body，不是丢数据。反过来的顺序（先锁后写）会拿服务进程
-    的旧快照覆盖 child 的新账本，那才会丢。
+    整个「读账本 → 删 body → 写账本」在 `_outbox_gate` 里（评审 F8）：训练子进程换入新 body
+    时也拿同一把闸，否则 ack 会在「body 已换新 rev、账本还是旧 rev」之间删掉新 body。
     """
     root = Path(outbox)
+    with _outbox_gate(root):
+        return _ack_outbox_locked(root, upto_it=upto_it, result=result, revs=revs, log=log)
+
+
+def _ack_outbox_locked(
+    root: Path,
+    *,
+    upto_it: int,
+    result: bool,
+    revs: Mapping[int, int] | None,
+    log: Callable[[str], None],
+) -> dict:
     doc = read_state(root)
     raw_rounds = doc.get("rounds")
     rounds: dict = dict(raw_rounds) if isinstance(raw_rounds, Mapping) else {}
@@ -309,6 +407,7 @@ class LocalOutboxDeliverer:
         self._last_log: dict[str, float] = {}
         self._manifest_cache: dict | None = None
         self._warned_bytes = False
+        self._size_check_at = 0.0
         #: 物化过的轮次（`{it: 条目}`，条目 = state.rounds 里那一份）。
         self._rounds: dict[int, dict] = {}
         #: 还没物化的重投（迟到评估行；与 `state.owed_reposts` 同源）。
@@ -335,18 +434,63 @@ class LocalOutboxDeliverer:
         return doc
 
     def _save_state(self) -> None:
-        """整份覆盖写（原子）；顺带做容量告警。**永不抛**（记账失败不该让训练停）。"""
+        """整份覆盖写（原子；**先与磁盘上的 ack 结果合并**）。**永不抛**。
+
+        合并是 F8 的另一半：ack 端点（另一个进程）会把 `acked_rev` / `file=""` /
+        `final_acked` 写进同一份 `state.json`。不先读回来合并，这次整份写就会把那些删除
+        「复活」——hub 会去拉一个已经不存在的 body，永远 404，pump 永不收尾。
+        """
         try:
-            atomic_write_json(self.outbox / STATE_NAME, self._state_doc())
+            with _outbox_gate(self.outbox):
+                with self._lock:
+                    self._merge_disk_acks()
+                    doc = self._state_doc()
+                atomic_write_json(self.outbox / STATE_NAME, doc)
         except OSError as e:
             self.log(f"WARN outbox 状态写失败（{type(e).__name__}: {e}）——本轮记账未落盘")
             return
         self._note_size()
 
+    def _merge_disk_acks(self) -> None:
+        """把另一个写者（ack 端点）已收下的部分并回内存（调用方必须持有闸）。"""
+        disk = read_state(self.outbox)
+        raw = disk.get("rounds")
+        rounds = raw if isinstance(raw, Mapping) else {}
+        for key, ent in rounds.items():
+            try:
+                it = int(key)
+            except (TypeError, ValueError):
+                continue
+            mine = self._rounds.get(it)
+            if mine is None or not isinstance(ent, Mapping):
+                continue
+            d_rev = int(ent.get("rev", 0) or 0)
+            d_acked = int(ent.get("acked_rev", 0) or 0)
+            mine["acked_rev"] = max(int(mine.get("acked_rev", 0) or 0), d_acked)
+            m_rev = int(mine.get("rev", 0) or 0)
+            if d_rev and d_rev == m_rev and d_acked >= d_rev:
+                # ack 收下的就是内存里这一版：body/统计已被它删掉，不能再登记 file（否则
+                # hub 永远 404）。rev 更新（迟到评估行重投）时走 else：body 还在。
+                mine["file"] = ""
+        if (
+            self._final_ready
+            and not self._final_acked
+            and bool(disk.get("final_acked"))
+            and not (self.outbox / FINAL_NAME).exists()
+        ):
+            # 段末摘要已被 ack 收下并删除；内存不许把它复活成 ready（hub 会一直来拉）。
+            self._final_ready = False
+            self._final_acked = True
+
     def _note_size(self) -> None:
-        """超 `OFFLINE_PUSH_OUTBOX_WARN_BYTES` 打**一行** WARN（每进程一次，别按拍刷屏）。"""
+        """超 `OFFLINE_PUSH_OUTBOX_WARN_BYTES` 打**一行** WARN（每进程一次；检查本身也节流）。"""
         if self._warned_bytes:
             return
+        now = float(self._now())
+        if now < self._size_check_at:
+            return
+        # 每轮落盘都会 save，rglob 整个 outbox 不能跟着变成每轮一次。
+        self._size_check_at = now + 60.0
         size = outbox_bytes(self.outbox)
         if size <= OFFLINE_PUSH_OUTBOX_WARN_BYTES:
             return
@@ -513,33 +657,37 @@ class LocalOutboxDeliverer:
             "oversize": False,
         }
         path = round_path(self.outbox, int(it))
-        if len(raw) > self._cap_bytes:
-            # 超限的轮：**不写 body**（hub 拿不走），但账与统计照记 ⇒ 控制台仍有这一轮。
-            entry["oversize"] = True
-            entry["file"] = ""
+        # ★ 换入 body + 写账本在同一把闸里（评审 F8）：否则 ack 会在「body 已换成新 rev、
+        # 账本还是旧 rev」之间把新 body 删掉 —— hub 永远 404，这一轮永远拉不到。
+        with _outbox_gate(self.outbox):
+            if len(raw) > self._cap_bytes:
+                # 超限的轮：**不写 body**（hub 拿不走），但账与统计照记 ⇒ 控制台仍有这一轮。
+                entry["oversize"] = True
+                entry["file"] = ""
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                self._throttled_log(
+                    f"oversize:{int(it)}",
+                    f"outbox it{int(it)} 体 {len(raw) / 1024 / 1024:.1f}MB 超上限 "
+                    f"{self._cap_bytes / 1024 / 1024:.0f}MB ⇒ 本轮只留统计（hub 会跳过 body）",
+                )
+            else:
+                atomic_write_bytes(path, raw)
+                entry["file"] = str(Path(ROUNDS_DIR) / ROUND_FILE_FMT.format(it=int(it)))
             try:
-                path.unlink()
-            except OSError:
-                pass
-            self._throttled_log(
-                f"oversize:{int(it)}",
-                f"outbox it{int(it)} 体 {len(raw) / 1024 / 1024:.1f}MB 超上限 "
-                f"{self._cap_bytes / 1024 / 1024:.0f}MB ⇒ 本轮只留统计（hub 会跳过 body）",
-            )
-        else:
-            atomic_write_bytes(path, raw)
-            entry["file"] = str(Path(ROUNDS_DIR) / ROUND_FILE_FMT.format(it=int(it)))
-        try:
-            self._write_metrics(int(it))
-        except OSError as e:
-            self.log(f"WARN outbox it{int(it)} 统计写失败（{type(e).__name__}: {e}）——权重体照落")
-        with self._lock:
-            prev_acked = int(old.get("acked_rev", 0) or 0)
-            if prev_acked and rev == prev_acked + 1 and not entry["oversize"]:
-                # 迟到评估行（或重投）让 rev 前进了一格：这正是 hub 要重拉的那一格（P0-3）。
-                self.log(f"outbox it{int(it)} 重投：rev {rev - 1} → {rev}（迟到评估行已并入）")
-            self._rounds[int(it)] = entry
-            self._owed.discard(int(it))
+                self._write_metrics(int(it))
+            except OSError as e:
+                self.log(f"WARN outbox it{int(it)} 统计写失败（{type(e).__name__}: {e}）——权重体照落")
+            with self._lock:
+                prev_acked = int(old.get("acked_rev", 0) or 0)
+                if prev_acked and rev == prev_acked + 1 and not entry["oversize"]:
+                    # 迟到评估行（或重投）让 rev 前进了一格：这正是 hub 要重拉的那一格（P0-3）。
+                    self.log(f"outbox it{int(it)} 重投：rev {rev - 1} → {rev}（迟到评估行已并入）")
+                self._rounds[int(it)] = entry
+                self._owed.discard(int(it))
+                self._save_state()
         if path.exists() and entry["file"]:
             self.log(f"outbox it{int(it)} 已落盘（rev{rev}，{len(raw) / 1024:.0f}KB）→ {path}")
         return True
@@ -562,10 +710,14 @@ class LocalOutboxDeliverer:
             course=self.course,
             now=float(self._now()),
         )
-        atomic_write_bytes(self.outbox / FINAL_NAME, raw)
-        with self._lock:
-            self._final_ready = True
-            self._final_obj = None
+        # 与 `_write_round` 同理（评审 F8）：body 与「ready」必须在同一把闸里，否则 ack 会
+        # 在两者之间删掉刚写的 final，而账本仍说它 ready —— hub 永远拉不到，永不收尾。
+        with _outbox_gate(self.outbox):
+            atomic_write_bytes(self.outbox / FINAL_NAME, raw)
+            with self._lock:
+                self._final_ready = True
+                self._final_obj = None
+                self._save_state()
         return True
 
     def _sync_once(self) -> int:
@@ -686,13 +838,14 @@ class LocalOutboxDeliverer:
 
         返回 `{"removed": [...], "kept": [...], "metrics_removed": n, "final_removed": bool}`。
         """
-        with self._lock:
-            out = ack_outbox(
-                self.outbox, upto_it=int(upto_it), result=bool(result), revs=revs, log=self.log
-            )
-            # 内存面必须跟 `state.json` 对齐：ack 是**另一个可能的写者**（服务进程）也会
-            # 触发的动作，拿旧快照回答 `pending()` 会把已收下的轮回物化一遍。
-            self.reload()
+        # 不在这里持 `self._lock`：`ack_outbox` 要拿 outbox 闸，而物化腿的顺序是「闸 → 账本锁」
+        # （评审 F8）——反着拿会与 `_write_round` 互相等死。
+        out = ack_outbox(
+            self.outbox, upto_it=int(upto_it), result=bool(result), revs=revs, log=self.log
+        )
+        # 内存面必须跟 `state.json` 对齐：ack 是**另一个可能的写者**（服务进程）也会
+        # 触发的动作，拿旧快照回答 `pending()` 会把已收下的轮回物化一遍。
+        self.reload()
         return out
 
     # ------------------------------------------------------------ 读面

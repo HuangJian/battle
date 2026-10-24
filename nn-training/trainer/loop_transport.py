@@ -32,6 +32,7 @@ from common.protocol import (
 )
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
+from worker.schedule import kickstart_coef as _kickstart_coef
 
 
 class BundleExportedError(Exception):
@@ -594,16 +595,13 @@ def kickstart_warn_kind(
 
 
 def kickstart_coef(args: Any, it: int) -> float:
-    """BC 缰绳系数：按 run 原点（it=1）衰减，loop 重启不复位。
+    """BC 缰绳系数（run 原点 `it=1` 的薄包装）：实现在 `worker/schedule.kickstart_coef`。
 
-    背景：`update_kwargs` 的衰减锚点是 `start_it`，而 resume 会把 start_it
-    推到断点——直接复用导致 kk 在每次重启回到满额（c4-margin it31 manifest
-    kk=1.0 实证；kb1 复跑 it53 KL 0.315 同源）。warmup 恒 0（kickstart 腿
-    validate_args 强制配对），故原点恒为 1，与 intent/goal 的 warmup 语义无交集。
+    公式下沉到 L2 的理由：`worker/loop_guards_leg.py` 也要判「缰绳是否还活着」，而
+    worker 不得反向 import trainer（tests/test_layering.py）。原签名与历史行为不变
+    （resume 不复位：锚点恒为 run 原点，见实现处 docstring）。
     """
-    from trainer.run_rl import update_kwargs  # 延迟导入：run_rl 侧持有 loop 入口，顶层互引成环
-
-    return float(update_kwargs(args, it, 1, None)["kl_coef"])
+    return _kickstart_coef(args, it, 1)
 
 
 #: 远端 HTTP 状态码里**重试不可能自愈**的几类：请求本身有问题 / token 不对 / IP 被闭锁。

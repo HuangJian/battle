@@ -91,10 +91,13 @@ def test_notify_mode_logs_but_does_not_stop_leg(tmp_path, capsys):
     assert "CRITICAL KICKSTART-BURN" in out1
     assert "不停车" in out1
     # 结论账照写（控制台要能看到判决），但带 notify 标记
-    assert any("notify" in str(rec) for rec in leg._ledger)
+    gate = [rec for rec in leg._ledger if rec.get("event") == "gate_verdict"]
+    assert len(gate) == 1
+    assert (gate[0]["verdict"], gate[0]["decider"]) == ("ABORT", "loop")
+    assert gate[0]["reason"].startswith("kickstart-burn(notify")
     # 第二次不再刷屏
     assert leg._kickstart_burn(15) is False
-    assert "CRITICAL KICKSTART-BURN" not in capsys.readouterr().out
+    assert capsys.readouterr().out == "", "notify 只喊一次——第二次一条输出都不该有"
 
 
 def test_halt_mode_still_stops_leg(tmp_path):
@@ -102,7 +105,7 @@ def test_halt_mode_still_stops_leg(tmp_path):
     leg = _tripped_leg(tmp_path, gate_mode="halt", block={"mode": "baseline"})
     assert leg._kickstart_burn(15) is True
     assert leg._stop_cause == "kickstart_burn"
-    assert "ABORT" in leg._halt_calls
+    assert leg._halt_calls == ["ABORT"]
 
 
 def test_auto_without_peer_does_not_fall_back_to_baseline(tmp_path):

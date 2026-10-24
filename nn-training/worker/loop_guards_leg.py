@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from common.log import log
+from common.protocol import coef_active
 from worker.events import write_gate_verdict, write_kickstart_burn, write_paired_kill
 from worker.gate_check import read_trend_rows
 from worker.kickstart_burn import (
@@ -33,6 +34,7 @@ from worker.paired_kill import (
     paired_kill_self_kill,
     paired_kill_verdict,
 )
+from worker.schedule import kickstart_coef
 
 
 def _rein_active(args: Any, it: int) -> bool:
@@ -42,16 +44,12 @@ def _rein_active(args: Any, it: int) -> bool:
     `kickstart 系数已衰减到期（kk=0.0000）`，一秒后仍打 `CRITICAL KICKSTART-BURN ... 疑似回锚`。
     判据的定义域是「锚主导更新把起点洗回去」——锚不在就没有这个形态，继续判只会误停腿。
 
-    系数**不在这里重算**（唯一来源 = `trainer/loop_transport.kickstart_coef`，它按 run 原点
-    衰减；第二份公式 = 第二个事实源）。延迟导入的理由同该模块：`loop_transport` 顶层经
-    `trainer.run_rl` 反向持有 loop 入口，顶层互引成环 ⇒ 只在调用点取。
+    系数**不在这里重算**：唯一实现在 `worker/schedule.kickstart_coef`（与
+    `trainer/run_rl.update_kwargs` 同源），第二份公式 = 第二个事实源。
 
-    取不到（导入/属性失败）⇒ 返回 True：**宁可照判，也不静默放过一次真回锚**。
+    取不到（属性/计算失败）⇒ 返回 True：**宁可照判，也不静默放过一次真回锚**。
     """
     try:
-        from common.protocol import coef_active
-        from trainer.loop_transport import kickstart_coef
-
         return bool(coef_active(kickstart_coef(args, it)))
     except Exception:
         return True
@@ -140,8 +138,8 @@ class TrainingGuardsLeg:
         # ★ 2026-10-23：**缰绳已退火到期就不判**。判据的前提是「锚主导更新把起点洗回去」，
         #   锚的系数归零之后这个形态不存在，再判就是拿一个不成立的前提停腿。
         #   现场（y32-nohp it41）：`kickstart 系数已衰减到期（kk=0.0000）` 之后 1 秒即
-        #   `CRITICAL KICKSTART-BURN`。系数与 `trainer/loop_transport.kickstart_coef`
-        #   **同源**（延迟导入，避免 worker↔trainer 顶层互引）；算不出来就照判（不静默放过真回锚）。
+        #   `CRITICAL KICKSTART-BURN`。系数与 `worker/schedule.kickstart_coef` **同源**；
+        #   算不出来就照判（不静默放过真回锚）。
         if not _rein_active(args, it):
             if int(getattr(self, "_burn_streak", 0) or 0):
                 log(

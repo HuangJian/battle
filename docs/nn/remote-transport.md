@@ -6,6 +6,74 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §122 离线 push 的实现审查：F1–F12 + P3 收口（2026-10-24 · 复核 W3–W5 · 设计 `plan/push-mode-notebooks.plan.md`）
+
+W3–W5 落地后按「绿着但不工作」的口径把 happy path 之外的边角逐个对账，修掉 12 项 + 3 个 P3
+小项。**协议形状一条没改**，改的全是「收摊/重试/落账时谁说了算」。逐条：
+
+**P0（会真丢产物）**
+
+- **F1 收摊前必须等积压拉完**：`_ingest_rounds` 现在返回 `(rec, backlog)`；body 还没拉到、本轮
+  5xx/网络失败、hub 打了 `OFFLINE_PUSH_ROUNDS_PER_PASS` 上限，任一成立 ⇒ **不**进
+  `_finish_if_ready` / `_settle_terminal`。旧行为：state 说 `final_ready` 就 ack(final) 收摊 ⇒
+  worker 删 outbox ⇒ 没拉的轮永久丢失。
+- **F2 任务包补 `resume/resume.json`**：`resume_anchor` 的锚点文件与元数据一起进 zip
+  （`resume/it-NNN/{weights,opt,row}` + `resume.json`）。`apply_resume_overlay` 的入口判据**就是**
+  这个文件，只带目录等于没带；`_write_resume` 剥掉 `_dir` 等内部键（只给 worker 路径可见面）。
+
+**P1（生命周期 / 幂等）**
+
+- **F3 收摊走完整三步**：`cancel`（**task_id 作用域**，防取消下一单的同名课）→ `ack(revs,
+  result=…)` → `release` → drop。没答（5xx/网络）⇒ **不丢单**：`phase="settling"` +
+  `settle_reason/settle_cancel/settle_free/settle_failed/settle_at`，`SETTLE_RETRY_SEC` 后重放；
+  404/409 = 已答，直接关；lease-lost / hub-drain 保住 assignment，只漏 ack。
+- **F4/F9/F10 `task_id` 确定性 + 受理幂等**：`sha256(course\0pack_sha\0floor_it)[:16]`（plan 原文）。
+  「worker 已受理、hub 还没记账」的窗口里重派 ⇒ `_adopt_existing` 用 `/state` 认领**同一单**
+  （同 id / 同课 / 同 pack_sha / 未完成才认）；派发失败进 cooldown，不再每拍重撞上传。
+- **F5 每轮统计体单独拉**：`/offline/push/metrics?it=N`。404 = 这轮没有（正常），5xx/网络 = 积压
+  （走 F1 的闸）。`oversize` 轮没有 body，但统计照落 —— 它是那轮**唯一**的读数面。普通轮的
+  metrics 与已落的 artifact 行按 `(it, weights_fp)` 去重，不会多一行。
+- **F6 worker outbox 上限**：接单前量 `tasks/*/outbox` 总量，超 `OFFLINE_PUSH_OUTBOX_MAX_BYTES`
+  ⇒ 413（**不删历史单**、拒收后不留半接状态）；正文 `"outbox 已用 …"` 点名上限。
+- **F7 `--floor-it` 接线**：`task.json.resume_it` → `push_floor_it` → `build_run_argv` 的
+  `--floor-it` → outbox 地板（`it <= floor` 的轮不物化，hub 已有）。只跟 push 的 `--outbox`
+  一起出现：HTTP 补传腿（每轮都要发）与 floor 0 都不带。
+- **F8 跨进程账本**：训练子进程（`LocalOutboxDeliverer`）与 HTTP 面（`ack_outbox`）会同时改
+  同一份 `state.json`。两层闸：进程内按 outbox 的 RLock 注册表 + 跨进程 `.state.lock`
+  （flock，Windows 走 msvcrt）；`_save_state` 写盘前把磁盘上的 ack（`acked_rev` / `file=""` /
+  `final_acked`）并回来 —— **旧快照整份写回也不许复活已删的 body**。body 写入 + 账本更新在
+  同一把闸里（否则 ack 会看到「新 rev、旧 body」）。
+
+**P2/P3（观测 / 卫生）**
+
+- **F11 proto 探测失败不是终审**：`proto_ok=False` 只挡 `PROTO_RETRY_SEC`，过后重探（旧 worker
+  升级代码后不必等 hub 重启）；连不上与「没有这个端点」分开落结论。
+- **F12 冲突要留得住**：冲突先 `mark` 再收摊（控制台能看出是哪门课），`done_total` 只对**首次**
+  ack 自增（重复 ack 不再虚高）。
+- **P3**：`_PumpState.misses` 从死计数变成闸（`OFFLINE_PUSH_DEAD_MISSES = PUSH_DEAD_MISSES*4`
+  ⇒ pump 5s 一拍约 60s；到闸停拉取/心跳并打一行）；`OFFLINE_PUSH_PROTO` 去重（单一来源）；
+  `_settle` 改名 `_settle_assignment`（避免与 `result_upload`/`upload_proc` 的同名组凑成 3）。
+
+**测试**（10 条新用例 / 5 个文件；主路径仍是真 face HTTP + 真 `_HubQueue`）：
+
+- `tests/hub/test_offline_push_dispatch.py` 6 条：F1 缺轮体 ⇒ assignment 一直不收摊、补上 body
+  才落 it-002 + result、worker 的 final 才删；F5 普通轮 metrics（spy `store_offline_metrics`）
+  与 oversize 轮（只有统计行、无 `it-NNN/`）；F2+F4 任务包内容逐字节 + 同输入同 id、无地板
+  ⇒ 无 `resume/` 且 id 不同；F9/F10 认领只收「同 id 未完成」；F3 无应答 ⇒ `settling` + 重放。
+- `tests/remote/test_deliver_outbox.py` 1 条（F8）：面进程 ack 后，训练子进程拿旧快照整份写回
+  ⇒ 不会复活已删的 body/final；迟到 eval 行 bump 出的 rev2 新体也不会被旧 ack 误删。
+- `tests/remote/test_offline_push_face.py` 1 条（F6）：历史 outbox 超限 ⇒ 新单 413、当前任务不受影响。
+- `tests/remote/test_offline_boot.py` 1 条（F7）：`--floor-it` 只随 `--outbox` 出现、值对。
+- `tests/remote/test_offline_push_supervisor.py` 补 1 条（F7）：`task.json.resume_it` 传成
+  `push_floor_it`；老包缺键 ⇒ 0。
+
+**门禁读数**：`nn-python-gate` 5079 passed / 2 skipped（ruff + mypy 绿）；文本断言口径 A 仍
+**1495**（本轮 5 条新断言全部改成行为形态：argv 计数/集合包含、zip 成员逐字节、错误串
+`startswith`）；复用账本同名 ≥3 仍 **96**（`_settle_assignment` 换名，不抬基线）。
+
+**仍未做（W6，不在本轮范围）**：worker 重启恢复同一 `task_id`（`PushFaceState.task` 只在内存
+里 ⇒ 重投会 `rmtree` 未 ack 的 outbox）、控制台行、真机 D1–D9 验收。
+
 ## §121 GPU push 的预推：worker 在跑时先推下一份（2026-10-24，用户指令「利用接单队列消除传输空转」· 决策 `DECISIONS.md` §2026-10-24-gpu-push-ahead）
 
 push 腿此前的形态是**严格串行**：`pick_push_worker` 只挑 `busy=false` 的机器，`run_one` 把
