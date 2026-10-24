@@ -472,8 +472,6 @@ CAP_OFFLINE_PUSH = "offline_push"
 NODE_CAPABILITIES = (CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
 #: 注册 `kind` 的白名单。`sampler` = 采样节点（老客户端**根本不发** `kind`，见 §4.2-P0）。
 NODE_KINDS = ("sampler", CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
-#: 注册 wire 上的协议版本（worker 服务端在 `/ping` 里回；旧 worker 没有 ⇒ 不派发）。
-OFFLINE_PUSH_PROTO = "offline_push_v1"
 
 
 def node_capabilities(node: object) -> list[str]:
@@ -700,6 +698,8 @@ OFFLINE_PUSH_PROTO = "offline_push_v1"
 OFFLINE_PUSH_STATE_PATH = "/offline/push/state"
 OFFLINE_PUSH_PROGRESS_PATH = "/offline/push/progress"
 OFFLINE_PUSH_ROUND_PATH = "/offline/push/round"
+#: 逐轮统计体（评审 P1-3）：与 round 分开取，因为 `oversize` 的轮没有权重体、只有它。
+OFFLINE_PUSH_METRICS_PATH = "/offline/push/metrics"
 OFFLINE_PUSH_RESULT_PATH = "/offline/push/result"
 OFFLINE_PUSH_TASK_PATH = "/offline/push/task"
 OFFLINE_PUSH_ACK_PATH = "/offline/push/ack"

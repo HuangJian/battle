@@ -74,8 +74,10 @@ def _task_zip(
 
 
 class _Server:
-    def __init__(self, tmp_path: Path, *, starter=None) -> None:
-        self.state = face.PushFaceState(work_dir=tmp_path / "face", log=lambda _m: None)
+    def __init__(self, tmp_path: Path, *, starter=None, **state_kw) -> None:
+        self.state = face.PushFaceState(
+            work_dir=tmp_path / "face", log=lambda _m: None, **state_kw
+        )
         self.state.set_starter(starter or (lambda _t, _d, _o: None))
         self.srv = face.make_face_server(self.state, 0, TOKEN, host="127.0.0.1")
         self.port = int(self.srv.server_address[1])
@@ -220,6 +222,21 @@ def test_oversize_body_is_413(tmp_path: Path, srv: _Server, monkeypatch) -> None
     monkeypatch.setattr(face, "OFFLINE_PUSH_TASK_BODY_MAX", 100)
     st, raw = _submit(srv, _task_zip(tmp_path))
     assert st == 413, raw
+
+
+def test_outbox_capacity_gate_stops_accepting_new_tasks(tmp_path: Path) -> None:
+    """F6：历史单的 outbox 已到上限 ⇒ 新单 413（**不删旧的**，当前任务照跑）。"""
+    s = _Server(tmp_path, outbox_cap_bytes=1)
+    try:
+        old = tmp_path / "face" / "tasks" / "old" / "outbox" / "rounds"
+        old.mkdir(parents=True)
+        (old / "it0001.json").write_bytes(b"x" * 32)  # 一个“没人来拉”的历史单
+        st, raw = _submit(s, _task_zip(tmp_path))
+        assert st == 413, raw
+        assert _json(raw)["error"].startswith("outbox 已用")
+        assert s.state.task is None and s.state.outbox is None, "拒收后不许留下半接的状态"
+    finally:
+        s.close()
 
 
 # ────────────────────────── 读面：round / result / progress ──────────────────────────

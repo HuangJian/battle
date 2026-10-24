@@ -35,7 +35,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import tempfile
 import threading
@@ -51,7 +53,9 @@ from common.protocol import (
     OFFLINE_PUSH_PACK_DIR,
     OFFLINE_PUSH_PROTO,
     OFFLINE_PUSH_RESUME_DIR,
+    OFFLINE_PUSH_STATE_PATH,
     OFFLINE_PUSH_TASK_NAME,
+    PUSH_DEAD_MISSES,
     ProtocolError,
     push_worker_id_of,
     rotation_order,
@@ -79,6 +83,19 @@ OFFLINE_PUSH_COOLDOWN_SEC = 120.0
 OFFLINE_PUSH_ROUNDS_PER_PASS = 8
 #: 任务包 zip 的临时前缀（`<tmp>/offline-push-*`）；上传完成后整目录删掉。
 _TMP_PREFIX = "offline-push-"
+#: pump 连续读不到 `/state` 这么多拍 ⇒ 本拍停止拉取/心跳（**不 release**：等 hold stale）。
+#: 基数是 ping 的 `PUSH_DEAD_MISSES=3`（30s 一拍），pump 是 5s 一拍 —— 直接复用只有 15s，
+#: 隧道抖一下就被判死；×4 ≈ 一分钟，仍远小于 hold stale（900s）。
+OFFLINE_PUSH_DEAD_MISSES = PUSH_DEAD_MISSES * 4
+#: 失败派发后的冷却已在 `cooldown_sec`；这里只给「临时 zip 目录」的清扫龄期：
+#: 正常路径 `_pump` 的 finally 会删，只有进程被杀才会遗留（计划 §6.3「失败/启动时清扫」）。
+TMP_SWEEP_AGE_SEC = 3600.0
+#: 临时目录清扫的节流（秒）：每次调度拍都 rglob 一遍是白 IO。
+TMP_SWEEP_EVERY_SEC = 600.0
+#: proto 探测**失败**后的重试间隔（秒）：旧 worker 升级代码后不必等 hub 重启（评审 F11）。
+PROTO_RETRY_SEC = 60.0
+#: `settling` 的重试间隔（秒）：ack 没成时**不丢单**，但也不该每拍都撞一次。
+SETTLE_RETRY_SEC = 60.0
 
 _log_default = tag_logger("hub-offline-push", lambda: time)
 
@@ -109,21 +126,41 @@ class OfflinePushWorkers(PushWorkers):
         super().__init__(*args, **kwargs)
 
     def probe_proto(self, *, timeout: float = 5.0) -> dict[str, bool]:
-        """对在线且没探过的条目问一次 `/state`；返回 `id -> 兼容`。"""
+        """对在线且还没结论的条目问一次 `/state`；返回 `id -> 兼容`。
+
+        **失败也会重试**（评审 F11）：`proto_ok=False` 只挡 `PROTO_RETRY_SEC`，不是终审 ——
+        云机上换个 notebook 代码就跑起来了，没有理由非得重启 hub 才认它。
+        """
         out: dict[str, bool] = {}
+        now = self._now()
         for w in self.snapshot():
             wid = str(w.get("id") or "")
             if not wid or not w.get("online"):
                 continue
-            if w.get("proto_ok") is not None:
+            ok = w.get("proto_ok")
+            if ok is True:
                 continue
-            st = client.get_state(str(w.get("url") or ""), str(w.get("key") or ""), timeout=timeout)
-            ok = bool(st) and str((st or {}).get("proto") or "") == OFFLINE_PUSH_PROTO
-            self.note_fields(wid, proto_ok=bool(ok), proto=str((st or {}).get("proto") or ""))
+            at = float(w.get("proto_at") or 0.0)
+            if ok is False and at and now - at < PROTO_RETRY_SEC:
+                continue
+            res = client.call_json(
+                str(w.get("url") or ""),
+                str(w.get("key") or ""),
+                OFFLINE_PUSH_STATE_PATH,
+                timeout=timeout,
+            )
+            if res is None:
+                continue  # 这一次没答：探活已经记了 miss，别把「没答」判成「协议不符」
+            status, doc = res
+            got = str((doc if isinstance(doc, dict) else {}).get("proto") or "")
+            # ★ 有答且不是「200 + 版本键相符」才算不兼容：旧 worker 的 404 也是一种**有答**的
+            # 「没有这个端点」（评审 P1-7 的版本门），而连不上不该在这里落结论。
+            ok = status == 200 and got == OFFLINE_PUSH_PROTO
+            self.note_fields(wid, proto_ok=bool(ok), proto=got, proto_at=now)
             out[wid] = bool(ok)
             if not ok:
                 self._log(
-                    f"WARN worker {wid} 不支持离线 push（/offline/push/state 不可用或 proto 不符）"
+                    f"WARN worker {wid} 不支持离线 push（/offline/push/state 的 proto={got!r}）"
                     f"——升级它的 notebook 代码后再启用；本拍不向它派单"
                 )
         return out
@@ -178,6 +215,7 @@ class OfflinePushDispatcher:
         self._lock = threading.Lock()
         self._pumps: dict[str, _PumpState] = {}
         self._cooldown: dict[str, float] = {}
+        self._tmp_swept_at = 0.0
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -233,7 +271,8 @@ class OfflinePushDispatcher:
         if due:
             pinged = self.workers.ping_all()
         probed = self.workers.probe_proto()
-        resumed = self._resume_pumps()
+        self._sweep_tmp(now)
+        resumed = self._resume_pumps(now)
         started = self._dispatch(now)
         self.ticks += 1
         return {
@@ -246,21 +285,59 @@ class OfflinePushDispatcher:
             "assignments": sorted(self.assignments.snapshot()),
         }
 
+    def _sweep_tmp(self, now: float) -> None:
+        """扫掉进程被杀遗留的任务包临时目录（计划 §6.3「启动/失败时清扫」）。
+
+        节流到 `TMP_SWEEP_EVERY_SEC`：每拍把系统临时目录 rglob 一遍是白 IO。正常路径由
+        `_pump` 的 finally 删，只有 SIGKILL / 断电才会留下（几百 MB 一份，不管会吃满盘）。
+        """
+        if now - self._tmp_swept_at < TMP_SWEEP_EVERY_SEC:
+            return
+        self._tmp_swept_at = now
+        root = Path(tempfile.gettempdir())
+        try:
+            entries = list(root.glob(f"{_TMP_PREFIX}*"))
+        except OSError:
+            return
+        for p in entries:
+            try:
+                if now - p.stat().st_mtime < TMP_SWEEP_AGE_SEC:
+                    continue
+                shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                continue
+
     # ------------------------------------------------------------ 续跑（hub 重启后）
-    def _resume_pumps(self) -> list[str]:
+    def _resume_pumps(self, now: float) -> list[str]:
         """盘上有在途 assignment 且没有活线程 ⇒ 重新 claim（`mine`）后接着拉。
 
         ★ 不重新上传任务包：worker 那边可能已经在跑了（`tasks/<id>/outbox` 里有轮次）。
-        重新派一遍会换 `task_id`，旧 outbox 就永远没人 ack。这里只做「换 token + 继续拉」——
+        重派会换 `task_id`，旧 outbox 就永远没人 ack。这里只做「换 token + 继续拉」——
         hub 重启换 token 不影响旧 worker 的产物（评审 §6.8 的 hub 重启那一行）。
+
+        `settling`（收摊重试，评审 F3）**不 claim**：它只剩 ack/release/drop 三件本地/幂等
+        动作，worker 的 ack 只认 task_id；抢租约反而可能把下一任持有人的单顶掉。
         """
         resumed: list[str] = []
         for course, rec in self.assignments.snapshot().items():
-            if str(rec.get("phase")) not in ("dispatching", "running"):
+            phase = str(rec.get("phase") or "")
+            if phase not in ("dispatching", "running", "settling"):
                 continue
             with self._lock:
                 live = course in self._pumps and self._pumps[course].thread is not None
             if live:
+                continue
+            if phase == "settling":
+                if now - float(rec.get("settle_at") or 0.0) < SETTLE_RETRY_SEC:
+                    continue
+                wid = str(rec.get("worker_id") or "")
+                url, key = self._endpoint_of(wid)
+                if not url:
+                    self._log(f"收摊重试 {course}：worker（{wid}）已不在登记表 —— 丢账本（worker 自会留档）")
+                    self.assignments.drop(course)
+                    continue
+                self._start_pump(course, rec, url, key)
+                resumed.append(course)
                 continue
             wid = str(rec.get("worker_id") or "")
             url, key = self._endpoint_of(wid)
@@ -299,6 +376,8 @@ class OfflinePushDispatcher:
         busy_courses = set(self.assignments.snapshot())
         for worker in free:
             wid = str(worker["id"])
+            if self._cooling(wid, now):
+                continue  # 这台机器刚被拒（413 容量 / 派发失败）：冷却窗内不重撞
             if self.assignments.of_worker(push_worker_id_of(wid)):
                 continue  # 这台机器名下已有在途单（一单一份 outbox，串行）
             rows = {str(r["course"]): r for r in self.hub.offline_tasks(worker=push_worker_id_of(wid))}
@@ -317,6 +396,9 @@ class OfflinePushDispatcher:
                 if why:
                     continue
                 meta = self._pack_meta(pack)
+                pack_it = int(meta.get("it") or 0)
+                anchor = self._anchor(course, pack_it)
+                resume_it = int(anchor.get("it") or 0) if anchor else pack_it
                 rec = {
                     "course": course,
                     "worker_id": push_worker_id_of(wid),
@@ -326,6 +408,9 @@ class OfflinePushDispatcher:
                     "pack_path": str(pack),
                     "run_id": str(meta.get("run_id") or ""),
                     "lease_token": str(lease.get("token") or ""),
+                    #: hub 这边已经有的最高一轮（= 任务包起点 / 续跑锚点）：worker 的 outbox
+                    #: 以它为地板，不再物化这些轮（评审 F7）。
+                    "resume_it": int(resume_it),
                     "cursor_it": 0,
                     "revs": {},
                     "phase": "dispatching",
@@ -402,70 +487,112 @@ class OfflinePushDispatcher:
         return pack
 
     # ------------------------------------------------------------ 外层任务包
-    def build_task_zip(self, course: str, pack: Path, run_id: str = "") -> Path:
-        """组外层 zip（`task.json` + `pack/` + 可选 `resume/`）→ 临时路径。
+    def build_task_zip(
+        self, course: str, pack: Path, run_id: str = "", *, resume_it: int = 0
+    ) -> tuple[Path, dict]:
+        """组外层 zip（`task.json` + `pack/` + 可选 `resume/`）→ `(临时路径, 元信息)`。
 
         `pack` 本身是 zip ⇒ `ZIP_STORED` 直写（再压一遍只是白烧 CPU）；`resume/` 取
         `hub.resume_anchor()` 里**比包更新**的那一轮（锚点只发整份：delta 只活在回传腿与
-        hub 落地器之间，云机拿回去也解不开）。
+        hub 落地器之间，云机拿回去也解不开），并**补上 `resume.json`**（评审 F2）——
+        `run_loop.apply_resume_overlay` 的入口判据就是它，少了它锚点文件全在也不会被采纳。
+
+        `task_id` 是**确定性**的（计划 §6.3：`sha256(course, pack_sha, resume_it)[:16]`）：
+        hub 在「上传成功、还没记账」之间崩掉后重派，worker 看到的是同一单 ⇒ 幂等 duplicate，
+        而不是把上一单的 outbox 变成孤儿（评审 F4/F9）。
         """
         meta = self._pack_meta(pack)
-        task_id = self._new_task_id()
+        pack_it = int(meta.get("it") or 0)
+        floor = int(resume_it) if int(resume_it or 0) > pack_it else pack_it
+        pack_sha = self._sha256(pack)
+        task_id = self._task_id(course, pack_sha, floor)
         tmp = Path(tempfile.mkdtemp(prefix=_TMP_PREFIX))
         out = tmp / f"task-{task_id}.zip"
-        resume = self._anchor_for(course, int(meta.get("it") or 0))
+        anchor = self._anchor(course, pack_it) if floor > pack_it else None
+        if anchor is not None and int(anchor.get("it") or 0) != floor:
+            # 派发与组包之间锚点前进了：这一单按派发时敲定的地板走（task_id 才会稳定）；
+            # 那些新轮 worker 没有也不吃亏 —— 极少数情形下它会从包起点重跑，outbox 地板
+            # 仍会把它们挡住（不重发已知轮）。
+            self._log(
+                f"{course}: 续跑锚点在派发后变了（it{floor} → it{anchor.get('it')}）"
+                "——本单仍按派发时的地板走，锚点不带"
+            )
+            anchor = None
         doc = {
             "proto": OFFLINE_PUSH_PROTO,
             "task_id": task_id,
             "course": course,
             "pack_name": pack.name,
-            "pack_sha256": self._sha256(pack),
+            "pack_sha256": pack_sha,
             "run_id": str(run_id or meta.get("run_id") or ""),
-            "it": int(meta.get("it") or 0),
+            "it": pack_it,
             "end_it": int(meta.get("end_it") or 0),
+            #: ★ 派发时 hub 已持有的最高一轮（F7）：worker 的 `--floor-it` 就是它。
+            "resume_it": int(floor),
             "created_at": float(self._now()),
         }
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_STORED) as zf:
             zf.writestr(OFFLINE_PUSH_TASK_NAME, json.dumps(doc, ensure_ascii=False))
             with open(pack, "rb") as src, zf.open(f"{OFFLINE_PUSH_PACK_DIR}/{pack.name}", "w") as dst:
                 shutil.copyfileobj(src, dst, 1 << 20)
-            if resume is not None:
-                it_dir, files = resume
-                for name in files:
-                    part = it_dir / name
-                    if not part.is_file():
-                        continue
-                    with open(part, "rb") as s2, zf.open(
-                        f"{OFFLINE_PUSH_RESUME_DIR}/it-{int(it_dir.name.split('-')[-1]):03d}/{name}", "w"
-                    ) as d2:
-                        shutil.copyfileobj(s2, d2, 1 << 20)
-        self.assignments.set_fields(course, task_id=task_id)
-        return out
+            if anchor is not None:
+                self._write_resume(zf, anchor)
+        return out, {
+            "task_id": task_id,
+            "resume_it": int(floor),
+            "pack_sha256": pack_sha,
+            "run_id": doc["run_id"],
+            "it": pack_it,
+            "end_it": int(meta.get("end_it") or 0),
+        }
 
-    def _anchor_for(self, course: str, pack_it: int) -> tuple[Path, list[str]] | None:
-        """比包更新的续跑锚点（`(it-目录, 件名)`）；没有/不比包新 ⇒ None。"""
+    def _write_resume(self, zf: zipfile.ZipFile, anchor: dict) -> int:
+        """把锚点铺进 `resume/`（`resume.json` + `it-NNN/{weights,opt,row}`）；返回件数。"""
+        it = int(anchor.get("it") or 0)
+        it_dir = Path(str(anchor.get("_dir") or ""))
+        raw_files = anchor.get("files")
+        files: dict = raw_files if isinstance(raw_files, dict) else {}
+        names = [str(n) for n in files.values() if str(n)] or ["weights.json", "opt.tar", "row.json"]
+        wrote = 0
+        for name in names:
+            part = it_dir / name
+            if not part.is_file():
+                continue
+            with open(part, "rb") as s2, zf.open(
+                f"{OFFLINE_PUSH_RESUME_DIR}/it-{it:03d}/{name}", "w"
+            ) as d2:
+                shutil.copyfileobj(s2, d2, 1 << 20)
+            wrote += 1
+        if not wrote:
+            self._log(f"续跑锚点 it{it} 的件一个都读不到（{it_dir}）——任务包不带锚点")
+            return 0
+        meta = {k: v for k, v in anchor.items() if not str(k).startswith("_")}
+        meta["fetched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        zf.writestr(
+            f"{OFFLINE_PUSH_RESUME_DIR}/resume.json",
+            json.dumps(meta, ensure_ascii=False, indent=1),
+        )
+        return wrote
+
+    def _anchor(self, course: str, pack_it: int) -> dict | None:
+        """比包更新的续跑锚点（**整份**）；没有/不比包新 ⇒ None。"""
         try:
             anchor = self.hub.resume_anchor(course)
-        except Exception:
+        except Exception as e:
+            self._log(f"{course}: 取续跑锚点失败（{type(e).__name__}: {e}）——本单从包起点跑")
             return None
         if not anchor or int(anchor.get("it") or 0) <= pack_it:
             return None
-        files = anchor.get("files") if isinstance(anchor.get("files"), dict) else {}
-        names = [str(n) for n in (files.values() if files else ()) if str(n)]
-        if not names:
-            names = ["weights.json", "opt.tar", "row.json"]
-        return Path(str(anchor.get("_dir") or "")), names
+        return dict(anchor)
 
     @staticmethod
-    def _new_task_id() -> str:
-        import secrets
-
-        return secrets.token_hex(8)
+    def _task_id(course: str, pack_sha: str, floor_it: int) -> str:
+        """`sha256(course, pack_sha, floor_it)[:16]`（计划 §6.3；形状闸要 16 位小写 hex）。"""
+        raw = f"{course}\x00{pack_sha}\x00{int(floor_it)}".encode()
+        return hashlib.sha256(raw).hexdigest()[:16]
 
     @staticmethod
     def _sha256(path: Path) -> str:
-        import hashlib
-
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -492,22 +619,50 @@ class OfflinePushDispatcher:
         """一条 assignment 的整条腿（上传 → 逐轮拉取 → ack → 收尾）。"""
         tmp_zip: Path | None = None
         try:
+            rec = self.assignments.get(course) or rec
+            if str(rec.get("phase")) == "settling":
+                self._settle_retry(course, url, key, rec)
+                return
             if not rec.get("task_id"):
-                tmp_zip = self.build_task_zip(course, Path(str(rec["pack_path"])), str(rec.get("run_id") or ""))
-                rec = self.assignments.get(course) or rec
+                tmp_zip, meta = self.build_task_zip(
+                    course,
+                    Path(str(rec["pack_path"])),
+                    str(rec.get("run_id") or ""),
+                    resume_it=int(rec.get("resume_it") or 0),
+                )
                 status, body = self._upload(url, key, tmp_zip, course)
-                if status != 202:
+                adopted = status != 202 and self._adopt_existing(course, url, key, meta)
+                if status != 202 and not adopted:
                     self._log(
                         f"{course}: 任务派发失败（HTTP {status}：{body.get('error') or body.get('status') or '-'}）"
                         "——释放租约，稍后换机/换课"
                     )
                     self._drop(course, rec, reason="dispatch-failed")
                     return
-                self.assignments.set_fields(course, phase="running")
-                self.workers.note_fields(
-                    str(rec.get("worker_id") or "").removeprefix("push:"), busy=True
-                )
-                self._log(f"{course}: 任务已受理（task={rec.get('task_id') or body.get('task_id')}）")
+                if status == 202:
+                    got = str(body.get("task_id") or "")
+                    if got and got != str(meta["task_id"]):
+                        self._log(
+                            f"{course}: worker 受理的 task_id（{got}）与派发的（{meta['task_id']}）不符"
+                            "——收摊（不 ack 别人的单）"
+                        )
+                        self._drop(course, rec, reason="task-id-mismatch")
+                        return
+                    rec = self.assignments.set_fields(
+                        course,
+                        task_id=str(meta["task_id"]),
+                        resume_it=int(meta["resume_it"]),
+                        pack_sha256=str(meta["pack_sha256"]),
+                        phase="running",
+                    ) or rec
+                    self.workers.note_fields(self._bare(str(rec.get("worker_id") or "")), busy=True)
+                    self._log(
+                        f"{course}: 任务已受理（task={meta['task_id']}，"
+                        f"地板 it{meta['resume_it']}）"
+                    )
+                else:
+                    rec = self.assignments.get(course) or rec
+                    self._log(f"{course}: worker 已在跑同一单（task={meta['task_id']}）——接管，不重传")
             self._pump_loop(course, url, key, st)
         except Exception as e:  # 线程绝不静默死掉
             self._log(f"{course}: pump 异常 {type(e).__name__}: {e}")
@@ -518,6 +673,43 @@ class OfflinePushDispatcher:
             with self._lock:
                 if self._pumps.get(course) is st:
                     self._pumps.pop(course, None)
+
+    @staticmethod
+    def _bare(worker_id: str) -> str:
+        wid = str(worker_id or "")
+        return wid[5:] if wid.startswith("push:") else wid
+
+    def _adopt_existing(self, course: str, url: str, key: str, meta: dict) -> bool:
+        """上传没拿到 202（超时 / 409 busy）时问一句：worker 是不是**已经在跑我们这一单**？
+
+        确定性 `task_id` 让这件事可判（评审 F4/F9）：hub 在「worker 已受理、hub 还没记账」
+        之间崩掉/断线，重派会撞 409 或超时 —— 那不是失败，是同一单的第二次握手。
+        """
+        state = self._client.get_state(url, key)
+        task = state.get("task") if isinstance(state, dict) else None
+        if not isinstance(task, dict):
+            return False
+        tid = str(task.get("task_id") or "")
+        if not (
+            tid == str(meta.get("task_id") or "")
+            and str(task.get("course") or "") == course
+            and str(task.get("pack_sha256") or "") == str(meta.get("pack_sha256") or "")
+        ):
+            return False
+        phase = str(state.get("phase") or "")
+        if phase not in ("running", "cancelling") and bool(state.get("ack")):
+            # 同 id 的上一单已经完整跑完并被 ack：worker 只是还记得它，重投只会 duplicate
+            # （不会重跑）⇒ 不可接管，照常收摊等下一拍。
+            self._log(f"{course}: worker 上的同 id 任务已收尾（task={tid}）——不接管")
+            return False
+        self.assignments.set_fields(
+            course,
+            task_id=tid,
+            resume_it=int(meta.get("resume_it") or 0),
+            pack_sha256=str(meta.get("pack_sha256") or ""),
+            phase="running",
+        )
+        return True
 
     def _upload(self, url: str, key: str, zip_path: Path, course: str) -> tuple[int, dict]:
         out = self._client.post_task(url, key, zip_path)
@@ -534,6 +726,11 @@ class OfflinePushDispatcher:
             self._release(course, lease)
         self.assignments.drop(course)
         self.failed += 1
+        # 失败过的课/机器冷却一窗：否则下一拍会立刻重撞同一个坑（413 容量 / 包坏了）。
+        self._cool(course)
+        wid = self._bare(str(rec.get("worker_id") or ""))
+        if wid:
+            self._cool(wid)
         if reason:
             self._log(f"{course}: 收摊（{reason}）")
 
@@ -545,17 +742,33 @@ class OfflinePushDispatcher:
 
     def _pump_loop(self, course: str, url: str, key: str, st: _PumpState) -> None:
         last_beat = 0.0
+        settle_on_exit = True
         while not self._stop.is_set() and not st.stop.is_set():
             rec = self.assignments.get(course)
             if rec is None:
                 return
+            if str(rec.get("phase")) == "settling":
+                if self._now() - float(rec.get("settle_at") or 0.0) < SETTLE_RETRY_SEC:
+                    return  # 还没到重试窗口：让出线程，到点后 `_resume_pumps` 再起
+                self._settle_retry(course, url, key, rec)
+                return
             if not self._still_mine(course, rec):
-                self._log(f"{course}: 租约已不属于我们（换主/停课）——停止拉取，不 cancel")
-                self.assignments.drop(course)
+                self._log(
+                    f"{course}: 租约已不属于我们（换主/停课）——收下已入账的轮后退出，不 cancel"
+                )
+                self._settle_assignment(course, url, key, rec, cancel=False, free_worker=False, reason="lease-lost")
                 return
             state = self._client.get_state(url, key)
             if state is None:
                 st.misses += 1
+                if st.misses >= OFFLINE_PUSH_DEAD_MISSES:
+                    # 不 release：租约到期由 hold 的 TTL 管，接管由 900s 无进度触发。
+                    self._log(
+                        f"{course}: 连续 {st.misses} 拍读不到 /state —— 本拍起停止拉取/心跳"
+                        "（不 release；等 hold stale 判死，或隧道恢复后下一拍续跑）"
+                    )
+                    settle_on_exit = False
+                    break
                 time.sleep(self.pump_sec)
                 continue
             st.misses = 0
@@ -565,25 +778,37 @@ class OfflinePushDispatcher:
                     f"{course}: worker 协议不符（{proto!r} ≠ {OFFLINE_PUSH_PROTO}）"
                     "——取消这一单并等它升级"
                 )
-                self._client.cancel_task(url, key)
-                self._drop(course, rec, reason="proto-mismatch")
+                self._settle_assignment(course, url, key, rec, cancel=True, free_worker=True, reason="proto-mismatch")
                 return
-            rec = self._ingest_rounds(course, url, key, rec)
+            rec, backlog = self._ingest_rounds(course, url, key, rec, state)
             if rec is None:
-                return  # 冲突/坏体：已在 _ingest_rounds 里收摊
+                return  # 冲突：已在 _ingest_rounds 里收摊
             now = self._now()
             if now - last_beat >= self.heartbeat_sec:
                 last_beat = now
                 _ttl, why = self.hub.heartbeat_offline(course, str(rec.get("lease_token") or ""))
                 if why in ("expired", "revoked", "taken"):
                     self._log(f"{course}: 心跳被拒（{why}）——hub 侧已换主，停止拉取")
-                    self.assignments.drop(course)
+                    self._settle_assignment(course, url, key, rec, cancel=False, free_worker=False, reason="lease-lost")
                     return
                 self._note_progress(course, url, key, rec, st)
-            if self._finish_if_ready(course, url, key, rec, state):
-                return
-            self._settle_terminal(course, url, key, rec, state)
+            # ★ 收尾必须等积压拉完（评审 F1）：final 一 ack，worker 就删 outbox —— 还没拉的
+            # 轮次会**永久丢**。顺序也重要：先拉轮、再判 final、最后才看 terminal。
+            if not backlog:
+                if self._finish_if_ready(course, url, key, rec, state):
+                    return
+                self._settle_terminal(course, url, key, rec, state)
             time.sleep(self.pump_sec)
+        if settle_on_exit:
+            rec = self.assignments.get(course)
+            if rec is not None and str(rec.get("phase")) in ("dispatching", "running"):
+                # hub 收线（进程退出/`stop()`）：把已入账的 rev 收下（腾 worker 的盘），
+                # **不 release、不丢账本、不 cancel** —— 重启后 `_resume_pumps` 要接着拉同一单；
+                # 先释放租约会让别人再派一遍（worker 还在跑），丢账本会让 outbox 变孤儿。
+                self._log(f"{course}: pump 收线 —— 收下已入账的轮（不 release；重启后续跑）")
+                status = self._ack(course, url, key, rec, result=False)
+                if status not in (200, 404, 409):
+                    self._log(f"{course}: 收线时 ack 没成（{status}）——已入账的轮重启后再收")
 
     def _still_mine(self, course: str, rec: dict) -> bool:
         """课程还开着、租约 token 还是我们的（**不调网络**：两个本地读面）。"""
@@ -611,72 +836,154 @@ class OfflinePushDispatcher:
         elif why in ("expired", "revoked", "taken"):
             st.stop.set()
 
-    def _ingest_rounds(self, course: str, url: str, key: str, rec: dict) -> dict | None:
-        """把 `state.rounds` 里**没入过账的 rev** 拉下来入账；返回更新后的 assignment。
+    def _ingest_rounds(
+        self, course: str, url: str, key: str, rec: dict, state: dict
+    ) -> tuple[dict | None, bool]:
+        """把 `state.rounds` 里**没入过账的 rev** 拉下来入账；返回 `(assignment, 有积压)`。
 
-        冲突（同轮不同字节 / 体自称的 run_id 不符）⇒ `conflict`：取消 worker 的该课、release、
-        丢账本，**不推进 cursor**（评审 §6.8 内容冲突那一行）。
+        **有积压** = 还有轮次没入账（下载失败 / 这一拍只拉了前 N 轮 / metrics 没到手）：
+        收尾（final / terminal）必须等它变 False（评审 F1）。冲突 ⇒ `(None, True)` 且已收摊。
+
+        每轮两件：权重体（`oversize` 的轮没有）+ 统计体（评审 F5：`oversize` 轮的唯一读数面）。
+        两件都到手（或统计体 404 = 这轮本来没有）才算 `done_revs[it]=rev` —— 只记权重不记
+        统计，会得到一个「hub 永远重拉、worker 永远删不掉」的死循环。
         """
-        state = self._client.get_state(url, key)
-        if state is None:
-            return rec
-        rounds = state.get("rounds") if isinstance(state.get("rounds"), dict) else {}
+        raw_rounds = state.get("rounds")
+        rounds: dict = raw_rounds if isinstance(raw_rounds, dict) else {}
         done_revs = {int(k): int(v) for k, v in (rec.get("revs") or {}).items()}
         cursor = int(rec.get("cursor_it") or 0)
         pulled = 0
+        backlog = False
         for key_it in sorted(rounds, key=lambda k: int(k)):
-            if pulled >= OFFLINE_PUSH_ROUNDS_PER_PASS:
-                break
             it = int(key_it)
+            ent = rounds[key_it] if isinstance(rounds[key_it], dict) else {}
             try:
-                rev = int((rounds[key_it] or {}).get("rev") or 0)
+                rev = int(ent.get("rev") or 0)
             except (TypeError, ValueError):
                 continue
             if it <= cursor and done_revs.get(it) == rev:
                 continue
-            dest = Path(tempfile.gettempdir()) / f"offline-push-round-{course}-{it}.json"
-            out = self._client.download_round(url, key, it, dest)
-            if out is None or out[0] != 200:
+            if pulled >= OFFLINE_PUSH_ROUNDS_PER_PASS:
+                backlog = True
+                break
+            # `file` 为空 = 这一轮没有权重体（oversize），但它仍有统计体可拉。
+            has_body = bool(str(ent.get("file") or "")) and not bool(ent.get("oversize"))
+            if has_body:
+                status, body = self._fetch_round(course, url, key, it)
+                if status is None:
+                    backlog = True
+                    continue
+                if status == 409:
+                    self._conflict(course, url, key, rec, f"it{it} 入账冲突")
+                    return None, True
+                if status != 200 or body is None:
+                    backlog = True
+                    continue
+                status, res = self._ingest_artifact(course, body, rec)
+                if status == 409:
+                    self._conflict(course, url, key, rec, f"it{it} 入账冲突（{res.get('error') or '-'}）")
+                    return None, True
+                if status != 200:
+                    backlog = True
+                    continue
+            mstat = self._ingest_metrics(course, url, key, it, rec)
+            if mstat is None or (mstat >= 500):
+                backlog = True
                 continue
-            try:
-                body = json.loads(dest.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
-                self._log(f"{course}: it{it} 的 body 读不动（{e}）——下一拍重试")
-                continue
-            finally:
-                try:
-                    dest.unlink()
-                except OSError:
-                    pass
-            if not isinstance(body, dict):
-                self._log(f"{course}: it{it} 的 body 不是对象——跳过")
-                continue
-            status, res = self._ingest_artifact(course, body, rec)
-            if status == 409:
-                self._client.cancel_task(url, key)
-                self.assignments.mark(course, "conflict", conflict=str(res.get("error") or "conflict"))
-                self.conflicts += 1
-                self._release(course, str(rec.get("lease_token") or ""))
-                self.assignments.drop(course)
-                self._log(f"{course}: it{it} 入账冲突 —— 取消这一单，等人裁决")
-                return None
-            if status != 200:
-                self._log(f"{course}: it{it} 入账被拒（HTTP {status}）——下一拍重试")
-                continue
+            if mstat == 409:
+                self._conflict(course, url, key, rec, f"it{it} 统计体权威冲突")
+                return None, True
             done_revs[it] = rev
             cursor = max(cursor, it)
             pulled += 1
-            rec = self.assignments.set_fields(course, cursor_it=cursor, revs={str(k): v for k, v in done_revs.items()}) or rec
-        if pulled:
+            rec = self.assignments.set_fields(
+                course, cursor_it=cursor, revs={str(k): v for k, v in done_revs.items()}
+            ) or rec
+        if pulled or rec.get("revs"):
+            # 每拍都 ack 一次（不只在新轮到手时）：上一次 ack 可能断在「hub 已入账、worker
+            # 没收到」之间 —— 不重发就永远腾不出空间（幂等，代价是一个小 JSON）。
             self._ack(course, url, key, rec, result=False)
-        return self.assignments.get(course) or rec
+        return self.assignments.get(course) or rec, backlog
 
-    def _ingest_artifact(self, course: str, body: dict, rec: dict) -> tuple[int, dict]:
+    def _fetch_round(
+        self, course: str, url: str, key: str, it: int
+    ) -> tuple[int | None, dict | None]:
+        dest = self._tmp_path("round", course, it)
+        out = self._client.download_round(url, key, it, dest)
+        if out is None:
+            return None, None
+        status = int(out[0])
+        if status != 200:
+            return status, None
+        try:
+            body = json.loads(dest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            self._log(f"{course}: it{it} 的 body 读不动（{e}）——下一拍重试")
+            return None, None
+        finally:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        if not isinstance(body, dict):
+            self._log(f"{course}: it{it} 的 body 不是对象——跳过")
+            return 400, None
+        return 200, body
+
+    def _ingest_metrics(self, course: str, url: str, key: str, it: int, rec: dict) -> int | None:
+        """这一轮的统计体 → 状态码（`404` = 本来没有；`None` = 网络失败，下一拍重试）。"""
+        dest = self._tmp_path("metrics", course, it)
+        out = self._client.download_metrics(url, key, it, dest)
+        if out is None:
+            return None
+        status = int(out[0])
+        if status == 404:
+            return 404
+        if status != 200:
+            return status
+        try:
+            body = json.loads(dest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            self._log(f"{course}: it{it} 的统计体读不动（{e}）——下一拍重试")
+            return None
+        finally:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        if not isinstance(body, dict):
+            self._log(f"{course}: it{it} 的统计体不是对象——跳过")
+            return 400
+        status, res = self._ingest_artifact(course, body, rec, parts="metrics")
+        if status not in (200, 404):
+            self._log(
+                f"{course}: it{it} 的统计体被拒（HTTP {status}：{res.get('error') or '-'}）"
+                "——权重体照收，这一轮仍算入账"
+            )
+        return status
+
+    @staticmethod
+    def _tmp_path(kind: str, course: str, it: int) -> Path:
+        tag = hashlib.sha256(str(course).encode("utf-8")).hexdigest()[:10]
+        return Path(tempfile.gettempdir()) / f"{_TMP_PREFIX}{kind}-{os.getpid()}-{tag}-{int(it)}.json"
+
+    def _conflict(self, course: str, url: str, key: str, rec: dict, text: str) -> None:
+        """权威/字节冲突：取消这一单 → ack（只带已入账 revs）→ release + 丢账本。"""
+        self.conflicts += 1
+        self._log(f"{course}: {text} —— 取消这一单，等人裁决")
+        self._settle_assignment(
+            course, url, key, rec, cancel=True, free_worker=True, reason="conflict", failed=True
+        )
+
+    def _ingest_artifact(
+        self, course: str, body: dict, rec: dict, *, parts: str = ""
+    ) -> tuple[int, dict]:
         try:
             return ingest_offline_artifact(
                 self.hub,
                 course,
                 body,
+                parts=parts,
                 run_id=str(rec.get("run_id") or ""),
                 lease_token=str(rec.get("lease_token") or ""),
                 source="push",
@@ -687,7 +994,8 @@ class OfflinePushDispatcher:
         except (ProtocolError, ValueError) as e:
             return 400, {"error": str(e)}
 
-    def _ack(self, course: str, url: str, key: str, rec: dict, *, result: bool) -> None:
+    def _ack(self, course: str, url: str, key: str, rec: dict, *, result: bool) -> int | None:
+        """`POST /ack` → 状态码（`None` = 没答）。`result=True` 会让 worker 删 final 并腾出 busy。"""
         payload = {
             "task_id": str(rec.get("task_id") or ""),
             "result": bool(result),
@@ -696,10 +1004,101 @@ class OfflinePushDispatcher:
         }
         out = self._client.post_ack(url, key, payload)
         if out is None:
-            self._log(f"{course}: ack 没答（worker 不可达）——下一拍重试（幂等）")
-            return
-        if out[0] != 200:
-            self._log(f"{course}: ack 返回 HTTP {out[0]}（{out[1].get('error') or '-'}）")
+            self._log(f"{course}: ack 没答（worker 不可达）——稍后重试（幂等）")
+            return None
+        return int(out[0])
+
+    def _close(self, course: str, rec: dict, *, reason: str, failed: bool = False) -> None:
+        """release + 丢账本（收摊的最后一步；不含 ack/cancel —— 那两件可能失败）。"""
+        self._release(course, str(rec.get("lease_token") or ""))
+        self.assignments.drop(course)
+        if failed:
+            self.failed += 1
+        if reason:
+            self._log(f"{course}: 收摊完成（{reason}）")
+
+    def _settle_assignment(
+        self,
+        course: str,
+        url: str,
+        key: str,
+        rec: dict,
+        *,
+        cancel: bool,
+        free_worker: bool,
+        reason: str,
+        failed: bool = False,
+    ) -> bool:
+        """收摊：可选 cancel → 按 rev ack → release → 丢账本；没答的那一步记成 `settling` 重试。
+
+        两处「有答的失败」不重试：
+        * cancel/ack **404/409** = worker 已经没有这一单（换单/重启丢了 outbox）——再发一万次
+          也是同一个答案，留着只会把账本卡死；
+        * 5xx / 连不上 = 没答，**不丢单**：记 `settling`（`settle_at` 起跳），由
+          `_resume_pumps` 在 `SETTLE_RETRY_SEC` 后原样重放（cancel/ack 都幂等）。
+
+        `free_worker` 决定 ack 带不带 `result`：只有它会让 worker 删 final、清 busy。租约丢了
+        / hub 收线（下一任还要接着拉）时传 False —— 那单的 outbox 是证据，不能替别人删。
+        """
+        if cancel:
+            out = self._client.cancel_task(url, key, task_id=str(rec.get("task_id") or ""))
+            if out is None or int(out[0]) >= 500:
+                return self._park_settling(
+                    course, reason, cancel=True, free=free_worker, failed=failed
+                )
+            if int(out[0]) not in (200, 202):
+                self._log(
+                    f"{course}: cancel 返回 HTTP {out[0]}（{out[1].get('error') or '-'}）"
+                    "——worker 已不在这一单上，不再重试"
+                )
+                self._close(course, rec, reason=reason, failed=failed)
+                return True
+        status = self._ack(course, url, key, rec, result=bool(free_worker))
+        if status in (404, 409):
+            self._log(f"{course}: ack 返回 HTTP {status}（worker 已换单/无此单）——不再重试")
+        elif status != 200:
+            return self._park_settling(
+                course, reason, cancel=False, free=free_worker, failed=failed
+            )
+        self._close(course, rec, reason=reason, failed=failed)
+        return True
+
+    def _park_settling(
+        self, course: str, reason: str, *, cancel: bool, free: bool, failed: bool = False
+    ) -> bool:
+        """收摊没答 ⇒ 把**重放所需**的四件事落到 assignment，返回 False（= 还没收完）。
+
+        返回 True 只发生在「账本已经没了」这一种情形（没什么可重试的，调用方可以停）。
+        """
+        rec = self.assignments.set_fields(
+            course,
+            phase="settling",
+            settle_reason=str(reason or ""),
+            settle_cancel=bool(cancel),
+            settle_free=bool(free),
+            settle_failed=bool(failed),
+            settle_at=float(self._now()),
+        )
+        if rec is None:
+            return True
+        self._log(
+            f"{course}: 收摊没答（{reason}）——记成 settling，"
+            f"{int(SETTLE_RETRY_SEC)}s 后重放（cancel={bool(cancel)} free={bool(free)}）"
+        )
+        return False
+
+    def _settle_retry(self, course: str, url: str, key: str, rec: dict) -> bool:
+        """`settling` 的重放（`_pump` 与 `_resume_pumps` 共用）；收完返回 True。"""
+        return self._settle_assignment(
+            course,
+            url,
+            key,
+            rec,
+            cancel=bool(rec.get("settle_cancel")),
+            free_worker=bool(rec.get("settle_free")),
+            reason=str(rec.get("settle_reason") or "settling"),
+            failed=bool(rec.get("settle_failed")),
+        )
 
     def _finish_if_ready(
         self, course: str, url: str, key: str, rec: dict, state: dict
@@ -707,7 +1106,7 @@ class OfflinePushDispatcher:
         """有段末 result ⇒ 拉回来入账（盖章 / 滚下一段）→ release → ack(result) → 收摊。"""
         if not bool(state.get("final_ready")):
             return False
-        dest = Path(tempfile.gettempdir()) / f"offline-push-result-{course}.json"
+        dest = self._tmp_path("result", course, 0)
         out = self._client.download_result(url, key, dest)
         if out is None or out[0] != 200:
             if out is not None and out[0] == 202:
@@ -729,22 +1128,21 @@ class OfflinePushDispatcher:
             return False
         status, _res = self._ingest_result(course, body, rec)
         if status == 409:
-            self.assignments.mark(course, "conflict", conflict="result authority mismatch")
             self.conflicts += 1
-            self._release(course, str(rec.get("lease_token") or ""))
-            self.assignments.drop(course)
+            self._log(f"{course}: 结果体权威不符——取消这一单（final 只能丢弃），等人裁决")
+            self._settle_assignment(
+                course, url, key, rec, cancel=True, free_worker=True,
+                reason="conflict-result", failed=True,
+            )
             return True
         if status != 200:
             self._log(f"{course}: 结果入账被拒（HTTP {status}）——下一拍重试")
             return False
-        self._release(course, str(rec.get("lease_token") or ""))
-        self.assignments.set_fields(course, phase="done")
-        self._ack(course, url, key, rec, result=True)
-        self.assignments.drop(course)
         self._log(
             f"{course}: 段末已入账（run={rec.get('run_id') or '-'}，"
             f"state={body.get('state') or '-'}）——release + ack，任务结束"
         )
+        self._settle_assignment(course, url, key, rec, cancel=False, free_worker=True, reason="done")
         return True
 
     def _ingest_result(self, course: str, body: dict, rec: dict) -> tuple[int, dict]:
@@ -773,14 +1171,12 @@ class OfflinePushDispatcher:
         self._log(
             f"{course}: worker 报 {phase}（rc={state.get('rc')}）"
             + (f"，run.log 尾：{tail[-1][:160]}" if tail else "")
-            + "——已收的轮已入账，release"
+            + "——已收的轮已入账，收摊"
         )
-        self._release(course, str(rec.get("lease_token") or ""))
-        self._ack(course, url, key, rec, result=True)
-        self.assignments.mark(course, "failed" if phase == "failed" else "done")
-        self.assignments.drop(course)
-        if phase == "failed":
-            self.failed += 1
+        self._settle_assignment(
+            course, url, key, rec,
+            cancel=False, free_worker=True, reason=phase, failed=(phase == "failed"),
+        )
 
     # ------------------------------------------------------------ 观测
     def state(self) -> dict:

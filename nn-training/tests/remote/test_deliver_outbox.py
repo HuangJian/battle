@@ -32,6 +32,7 @@ from remote.deliver_outbox import (
     FINAL_NAME,
     STATE_NAME,
     LocalOutboxDeliverer,
+    ack_outbox,
     metrics_path,
     read_state,
     round_path,
@@ -248,6 +249,44 @@ def test_final_is_deleted_only_when_result_is_acknowledged(tmp_path: Path) -> No
     assert ob.ack(1, result=True)["final_removed"] is True
     assert not (out / FINAL_NAME).exists() and ob.result_done() is True
     assert read_state(out)["final_acked"] is True
+
+
+def test_a_stale_save_cannot_resurrect_what_the_face_process_acked(tmp_path: Path) -> None:
+    """F8：训练子进程拿着 ack **之前**的快照再整份写 ⇒ 必须并回服务进程写的 ack。
+
+    真实窗口：`/offline/push/ack`（服务进程）删了 body/统计/final 并写账本；训练子进程的
+    `_save_state()`（任何一个 submit 都会走到）随后整份覆盖 —— 不合并就会把 `file`/`final_ready`
+    写回去，hub 再拉永远 404，pump 永不收尾。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    _add_matching_row(root, 1)
+    out = tmp_path / "outbox"
+    ob = _outbox(tmp_path, root)
+    assert ob.sync() == 1
+    ob.submit_final(it_end=1, state="complete")
+    assert round_path(out, 1).exists() and (out / FINAL_NAME).exists()
+
+    # 服务进程（另一个写者）收下 rev1：删 body + 统计 + final
+    got = ack_outbox(out, upto_it=1, result=True, revs={1: 1})
+    assert got["removed"] == [1] and got["final_removed"] is True
+    assert not round_path(out, 1).exists() and not (out / FINAL_NAME).exists()
+
+    # 训练子进程的旧快照（file / final_ready 都还在）整份写回
+    ob._save_state()
+
+    st = read_state(out)
+    ent = st["rounds"]["1"]
+    assert ent["file"] == "" and ent["acked_rev"] == 1
+    assert st["final_ready"] is False and st["final_acked"] is True
+    assert not round_path(out, 1).exists() and not (out / FINAL_NAME).exists()
+
+    # 但「rev 前进」的那一格不能被误抹：迟到评估行重投的新 body 必须留在盘上等 hub 重拉
+    _add_eval(root, 1)
+    ob.mark_repost(1)
+    assert ob.sync() == 1
+    ent = read_state(out)["rounds"]["1"]
+    assert ent["rev"] == 2 and ent["file"], "rev2 的新体被旧 ack 的合并误删了"
+    assert round_path(out, 1).exists()
 
 
 # ───────────────────────────── ③ 统计 / 超限 / 判据 ─────────────────────────────

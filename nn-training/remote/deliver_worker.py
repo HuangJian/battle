@@ -251,6 +251,12 @@ def build_argparser() -> argparse.ArgumentParser:
         action="store_true",
         help="★ 2026-10-23：档位自适应——网络顺畅就每轮回传（full/bulk），差档/断连退回评估轮",
     )
+    ap.add_argument(
+        "--floor-it",
+        type=int,
+        default=0,
+        help="★ 2026-10-24：outbox 地板 —— `it <= N` 的轮不物化（hub 已经有；0 = 全部物化）",
+    )
     return ap
 
 
@@ -277,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             course=args.course,
             hub_lease=lease,
             worker_name=worker_name,
+            floor_it=int(args.floor_it or 0),
             background=False,
             log=_log,
         )

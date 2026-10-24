@@ -51,6 +51,8 @@ from common.logutil import tag_logger
 from common.protocol import (
     OFFLINE_PUSH_ACK_PATH,
     OFFLINE_PUSH_CANCEL_PATH,
+    OFFLINE_PUSH_METRICS_PATH,
+    OFFLINE_PUSH_OUTBOX_MAX_BYTES,
     OFFLINE_PUSH_PACK_DIR,
     OFFLINE_PUSH_PROGRESS_NAME,
     OFFLINE_PUSH_PROGRESS_PATH,
@@ -67,6 +69,7 @@ from remote.deliver_outbox import (
     FINAL_NAME,
     ROUND_FILE_FMT,
     ack_outbox,
+    metrics_path,
     read_state,
 )
 
@@ -77,6 +80,10 @@ _READ_CHUNK = 1024 * 1024
 _ERROR_TAIL_LINES = 20
 #: `incoming/` 里超过这个时间还没换入的暂存目录 = 上次进程被杀留下的（启动清扫）。
 STALE_INCOMING_SEC = 3600.0
+
+
+class _CapacityError(Exception):
+    """outbox 总量超过上限 ⇒ 413（与「包坏了」的 400 分开：hub 的退避决策不同）。"""
 
 
 #: 缺省日志（`tag_logger` + 本模块自己的 `time`；名字与 `remote/*` 其余模块不重名）。
@@ -186,10 +193,14 @@ class PushFaceState:
         work_dir: str | Path,
         log: Callable[[str], None] = _log_face,
         clock: Callable[[], float] = time.time,
+        #: outbox 总容量闸（`OFFLINE_PUSH_OUTBOX_MAX_BYTES`）= 停止接新单的上界；
+        #: **当前任务照跑**（计划 §6.4a：不静默丢轮）。`<=0` = 不设闸（测试/人工排查用）。
+        outbox_cap_bytes: int = OFFLINE_PUSH_OUTBOX_MAX_BYTES,
     ) -> None:
         self.work = Path(work_dir)
         self.log = log
         self._now = clock
+        self._outbox_cap = int(outbox_cap_bytes or 0)
         self._lock = threading.RLock()
         #: 当前任务（`task.json` 的内容 + 派生的路径）。
         self.task: dict | None = None
@@ -315,6 +326,41 @@ class PushFaceState:
         except OSError:
             return None
 
+    def metrics_body(self, it: int) -> bytes | None:
+        """`/offline/push/metrics?it=N`：这一轮的统计体（`metrics/itNNNN.json`）。
+
+        它独立于权重体存在（评审 P1-3）：`oversize` 的轮**没有** round body，但统计照落 ——
+        少了这条腿，控制台就看不到那些轮（2026-10-23 y31-null 的教训）。
+        """
+        with self._lock:
+            out = self.outbox
+        if out is None:
+            return None
+        try:
+            return metrics_path(out, int(it)).read_bytes()
+        except OSError:
+            return None
+
+    def outbox_usage(self) -> int:
+        """所有任务 outbox 的**总字节**（容量闸的输入：一单一份，历史单也要算）。"""
+        root = self.work / "tasks"
+        try:
+            dirs = list(root.iterdir())
+        except OSError:
+            return 0
+        total = 0
+        for d in dirs:
+            out = d / "outbox"
+            if not out.is_dir():
+                continue
+            for p in out.rglob("*"):
+                try:
+                    if p.is_file():
+                        total += int(p.stat().st_size)
+                except OSError:
+                    continue
+        return total
+
     def result_body(self) -> bytes | None:
         with self._lock:
             out = self.outbox
@@ -354,6 +400,15 @@ class PushFaceState:
                         "task_id": str((self.task or {}).get("task_id") or ""),
                         "proto": OFFLINE_PUSH_PROTO,
                     }
+                # 容量闸（计划 §6.4a）：超过 `OFFLINE_PUSH_OUTBOX_MAX_BYTES` ⇒ **停止接新单**，
+                # 当前任务照跑。放在 busy/duplicate 之后：那两种都不占新空间。
+                used = self.outbox_usage()
+                if self._outbox_cap > 0 and used >= self._outbox_cap:
+                    raise _CapacityError(
+                        f"outbox 已用 {used / 1024**3:.2f}GiB（上限 "
+                        f"{self._outbox_cap / 1024**3:.2f}GiB）——停止接新单；"
+                        "等 hub 把已完成的轮 ack 掉再来"
+                    )
                 # 换入：先删旧的同 id 目录（理论上不存在；重复单在上面已早退），再 rename。
                 if tdir.exists():
                     shutil.rmtree(tdir, ignore_errors=True)
@@ -370,6 +425,10 @@ class PushFaceState:
                 f"受理任务 {tid}（course={meta['course']} it{task.get('it')}→it{task.get('end_it')}，"
                 f"{size / 1024**2:.1f}MB）→ {tdir}"
             )
+        except _CapacityError as e:
+            shutil.rmtree(staging, ignore_errors=True)
+            self.log(f"拒收任务包（容量）：{e}")
+            return 413, {"error": str(e), "proto": OFFLINE_PUSH_PROTO}
         except (ValueError, OSError, zipfile.BadZipFile) as e:
             shutil.rmtree(staging, ignore_errors=True)
             self.log(f"拒收任务包：{type(e).__name__}: {e}")
@@ -426,8 +485,12 @@ class PushFaceState:
         )
         if bool(body.get("result", True)):
             with self._lock:
+                # `done_total` 只在**这单第一次**被收下时 +1：hub 的 ack 是幂等重试，
+                # 每重试一次就把 `/ping.done` 抬一格会让控制台看到比真实完成数更多的单。
+                first = not bool((self.last_ack or {}).get("acked"))
                 self.last_ack = {"acked": True, "task_id": task.get("task_id"), **out_doc}
-                self.done_total += 1
+                if first:
+                    self.done_total += 1
                 self.phase = "idle" if phase in ("done", "failed", "cancelled") else phase
         return 200, {
             "ok": True,
@@ -437,13 +500,23 @@ class PushFaceState:
             **out_doc,
         }
 
-    def cancel(self) -> tuple[int, dict]:
-        """`POST /offline/push/cancel`：写 stop 文件（**轮边界**停，见 `plan_run._drive`）。"""
+    def cancel(self, body: Mapping | None = None) -> tuple[int, dict]:
+        """`POST /offline/push/cancel`：写 stop 文件（**轮边界**停，见 `plan_run._drive`）。
+
+        `body.task_id` 给了就必须是当前这单：hub 的 cancel 与 ack 一样是**网络重试**，
+        迟到的那次若落在下一单上，会取消一门正在跑的课（评审 F3）。
+        """
+        tid = str((body or {}).get("task_id") or "").strip()
         with self._lock:
             task = self.task
             tdir = self.task_dir
             if task is None or tdir is None:
                 return 404, {"error": "no task", "proto": OFFLINE_PUSH_PROTO}
+            if tid and tid != str(task.get("task_id")):
+                return 409, {
+                    "error": f"task_id 不符（当前 {task.get('task_id')}）",
+                    "proto": OFFLINE_PUSH_PROTO,
+                }
             if self.phase in ("done", "failed", "cancelled"):
                 return 202, {"status": self.phase, "proto": OFFLINE_PUSH_PROTO}
             try:
@@ -526,6 +599,14 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     self._send_bytes(raw)
                 return
+            if path == OFFLINE_PUSH_METRICS_PATH:
+                it = int((qs.get("it") or ["-1"])[0] or -1)
+                raw = self.state.metrics_body(it) if it >= 0 else None
+                if raw is None:
+                    self._json({"error": f"no metrics for it{it}", "proto": OFFLINE_PUSH_PROTO}, 404)
+                else:
+                    self._send_bytes(raw)
+                return
             if path == OFFLINE_PUSH_RESULT_PATH:
                 raw = self.state.result_body()
                 if raw is None:
@@ -590,7 +671,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(doc, status)
                 return
             if path == OFFLINE_PUSH_CANCEL_PATH:
-                status, doc = self.state.cancel()
+                raw = self.rfile.read(int(self.headers.get("Content-Length", "0") or 0))
+                try:
+                    body = json.loads(raw.decode("utf-8")) if raw else {}
+                except ValueError:
+                    body = {}
+                status, doc = self.state.cancel(body if isinstance(body, dict) else {})
                 self._json(doc, status)
                 return
             self._json({"error": "not found"}, 404)

@@ -39,6 +39,7 @@ from common.protocol import (
     AUTH_HEADER,
     OFFLINE_PUSH_ACK_PATH,
     OFFLINE_PUSH_CANCEL_PATH,
+    OFFLINE_PUSH_METRICS_PATH,
     OFFLINE_PUSH_PROGRESS_PATH,
     OFFLINE_PUSH_RESULT_PATH,
     OFFLINE_PUSH_ROUND_PATH,
@@ -222,6 +223,17 @@ def download_round(
     return _download(url, key, OFFLINE_PUSH_ROUND_PATH, {"it": int(it)}, dest, timeout=timeout)
 
 
+def download_metrics(
+    url: str, key: str, it: int, dest: str | Path, *, timeout: float = SMALL_TIMEOUT
+) -> tuple[int, int] | None:
+    """`GET /offline/push/metrics?it=N` → 落文件（评审 P1-3：oversize 轮的唯一读数面）。
+
+    小体（几十 KB），用 `SMALL_TIMEOUT`：它不该和几十 MB 的权重体共用五分钟的窗口。
+    404 = 这一轮本来就没有统计体（正常），**不是**网络失败。
+    """
+    return _download(url, key, OFFLINE_PUSH_METRICS_PATH, {"it": int(it)}, dest, timeout=timeout)
+
+
 def download_result(
     url: str, key: str, dest: str | Path, *, timeout: float = BIG_TIMEOUT
 ) -> tuple[int, int] | None:
@@ -234,7 +246,8 @@ def post_task(
 ) -> tuple[int, dict] | None:
     """`POST /offline/push/task`：流式上传外层 zip（显式 `Content-Length`）。
 
-    202 = 受理 / 409 = 它正忙（在跑别的单）/ 413 = 超对面 2GiB 上界 / 400 = 包坏了。
+    202 = 受理（含幂等的 `duplicate`）/ 409 = 它正忙（在跑别的单）/ 413 = 超对面 2GiB
+    上界**或** outbox 容量闸 / 400 = 包坏了。
     网络层失败 ⇒ None（由调用方 release + 冷却，不下结论）。
     """
     path = Path(zip_path)
@@ -271,9 +284,16 @@ def post_ack(url: str, key: str, payload: dict, *, timeout: float = 30.0) -> tup
     return call_json(url, key, OFFLINE_PUSH_ACK_PATH, method="POST", payload=payload, timeout=timeout)
 
 
-def cancel_task(url: str, key: str, *, timeout: float = 15.0) -> tuple[int, dict] | None:
-    """`POST /offline/push/cancel`：写 stop 文件（worker 在**轮边界**停，产物自洽）。"""
-    return call_json(url, key, OFFLINE_PUSH_CANCEL_PATH, method="POST", payload={}, timeout=timeout)
+def cancel_task(
+    url: str, key: str, *, task_id: str = "", timeout: float = 15.0
+) -> tuple[int, dict] | None:
+    """`POST /offline/push/cancel`：写 stop 文件（worker 在**轮边界**停，产物自洽）。
+
+    `task_id` 必须带（生产调用点一律带）：cancel 与 ack 一样会**重试**，迟到的那次落在
+    下一单上就会取消一门正在跑的课（评审 F3）。空串只为老调用方保留。
+    """
+    payload = {"task_id": str(task_id or "")} if task_id else {}
+    return call_json(url, key, OFFLINE_PUSH_CANCEL_PATH, method="POST", payload=payload, timeout=timeout)
 
 
 __all__ = [
@@ -281,6 +301,7 @@ __all__ = [
     "SMALL_TIMEOUT",
     "call_json",
     "cancel_task",
+    "download_metrics",
     "download_result",
     "download_round",
     "get_progress",

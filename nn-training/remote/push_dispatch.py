@@ -481,6 +481,10 @@ _KEEP_ON_RELOAD = (
     "last_err",
     "pushed_ok",
     "pushed_fail",
+    # 协议门的结果（离线 push 子类写的；重读配置不该让一台已确认兼容的机器重新「不知道」）：
+    "proto_ok",
+    "proto",
+    "proto_at",
 )
 
 

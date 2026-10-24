@@ -221,8 +221,30 @@ def test_task_entry_wires_push_mode_without_any_hub_credentials(
     assert Path(str(captured["push_outbox"])) == outbox
     assert Path(str(captured["assigned_resume"])) == t / "resume"
     assert captured["stop_file"] == str(t / "stop")
+    assert captured["push_floor_it"] == 0  # 老任务包没有 resume_it ⇒ 不跳轮
     cfg = captured["cfg"]
     assert isinstance(cfg, dict) and cfg["device"] == "cpu"
+
+
+def test_task_entry_passes_resume_it_as_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F7：任务包的 `resume_it`（hub 派发时的 cursor）→ `--floor-it` 的同一条链的起点。"""
+    import remote.offline_boot as boot
+
+    captured: dict[str, object] = {}
+
+    def fake_run(_cfg, _creds, _log, _stop, **kw):
+        captured.update(kw)
+        return 0
+
+    monkeypatch.setattr(boot, "run_one_course", fake_run)
+    t = _task_dir(tmp_path)
+    task = json.loads((t / "task.json").read_text(encoding="utf-8"))
+    task["resume_it"] = 3
+    (t / "task.json").write_text(json.dumps(task), encoding="utf-8")
+    rc = task_mod.main(["--task-dir", str(t), "--outbox", str(t / "outbox")])
+    assert rc == 0 and captured["push_floor_it"] == 3
 
 
 def test_task_entry_is_loud_when_the_cfg_is_missing(

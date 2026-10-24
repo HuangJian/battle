@@ -14,7 +14,8 @@
 
 `cursor_it` = **已入账的最高连续轮**（只进不退：产物是不可变快照，重拉只补 rev 变了的轮）；
 `revs` = 已入账那一轮当时的 rev —— 下次 `/ack` 要把它带回去（`ack_outbox` 只删 rev 相符的
-body，评审 P0-3）。`phase`：`dispatching` / `running` / `done` / `failed` / `conflict` / `lost`。
+body，评审 P0-3）。`phase`：`dispatching` / `running` / `settling` / `done` / `failed` /
+`conflict` / `lost`。`settling` = 收摊（cancel/ack/release）没答、`settle_*` 记着怎么重放。
 
 为什么写 `revs` 而不是 `acked_it` 一个数：迟到的评估行（`submit_eval_round`）会把同一 `it`
 的 rev +1，hub 必须能看出「这一轮我入过账的那版是 rev=0，现在 worker 上是 rev=1」——一个
@@ -37,7 +38,7 @@ from typing import Any
 __all__ = ["ASSIGN_PHASES", "OfflinePushAssignments", "assign_path"]
 
 #: assignment 的阶段（读面/日志共用一份；未知值原样保留 —— 不假装认识未来加的态）。
-ASSIGN_PHASES = ("dispatching", "running", "done", "failed", "conflict", "lost")
+ASSIGN_PHASES = ("dispatching", "running", "settling", "done", "failed", "conflict", "lost")
 
 
 def assign_path(root: str | Path, port: int) -> Path:

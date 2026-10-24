@@ -438,6 +438,30 @@ def test_build_run_argv_offline_packaging_switch(tmp_path: Path) -> None:
     assert "--no-deliver" not in default_on, "缺省是实时回传（用户口径）"
 
 
+def test_build_run_argv_floor_it_rides_with_the_push_outbox(tmp_path: Path) -> None:
+    """F7：`--floor-it` 只跟 push 的 `--outbox` 一起出现；0/无 outbox ⇒ 不带（run_loop 缺省 0）。"""
+    argv = offline_boot.build_run_argv(
+        {"course": "c5-gae"},
+        None,
+        tmp_path / "run",
+        "",
+        "",
+        outbox=tmp_path / "outbox",
+        floor_it=3,
+    )
+    assert {"--outbox", "--no-deliver"} <= set(argv)
+    assert argv[argv.index("--floor-it") + 1] == "3"
+    # HTTP 补传腿（没有 outbox）不许带它 —— 那边每轮都要发，跳轮会漏产物
+    assert offline_boot.build_run_argv(
+        {}, None, tmp_path / "run", "h", "f"
+    ).count("--floor-it") == 0
+    # push 腿但地板是 0 ⇒ 也不带（所有轮都物化）
+    zero = offline_boot.build_run_argv(
+        {}, None, tmp_path / "run", "", "", outbox=tmp_path / "outbox"
+    )
+    assert zero.count("--floor-it") == 0
+
+
 # ────────────────────── 引导 / 交付物 ──────────────────────
 
 

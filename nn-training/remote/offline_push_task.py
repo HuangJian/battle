@@ -73,10 +73,14 @@ def main(argv: list[str] | None = None) -> int:
     resume = task_dir / "resume"
     outbox = Path(args.outbox)
     outbox.mkdir(parents=True, exist_ok=True)
+    # ★ 2026-10-24（F7）：hub 已有的最高一轮（派发时的 resume 锚点）。老任务包没这个键 ⇒ 0
+    # （全部物化；多写几份 hub 会按内容去重的重复体，不丢数据）。
+    floor_it = int(task.get("resume_it") or 0)
 
     _child_log(
         f"course={course} task={task.get('task_id')} it{task.get('it')}→it{task.get('end_it')}"
         f" pack={pack.name} outbox={outbox}"
+        + (f" 地板=it{floor_it}" if floor_it > 0 else "")
     )
 
     # 延迟 import：`offline_boot` 会解 `code.zip` 并把整个仓塞进 sys.path（引导期不能提前）。
@@ -100,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             assigned_resume=resume if resume.is_dir() else None,
             push_outbox=outbox,
             stop_file=str(args.stop_file or ""),
+            push_floor_it=floor_it,
         )
         or 0
     )
