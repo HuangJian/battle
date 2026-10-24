@@ -1,4 +1,14 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# 采集：2026-10-24 @ A12 多扇区交叉火逃逸（DECISIONS §2026-10-24-godai-a12-crossfire）。
+#       `crossfireSectorMode=1` + `crossfireMinTti=12`：≥2 个来源扇区的敌弹同时覆盖时，
+#       接管 dodge，选「移动到新格后最早到弹 TTI 最大」的方向（v1 按轴计数会走进最急的那发）。
+#       三难度 35×60 串行配对（真实 stageIndex、CRN）：
+#         hard    80.0% → **80.5%**（Δ+0.52pp, t=1.61, kills +60）
+#         classic 84.2% → 84.3%（Δ+0.05pp, t=0.38）
+#         chaos   78.0% → **78.7%**（Δ+0.67pp, t=1.78, kills +125）⇒ 三难度同号为正
+#       v2（TTI 无紧迫门）全量 ±0（54 上/54 下）⇒ 紧迫门是必要的。
+#       相对上一钉 ab119977（A9 远程封线）。
+# --- 历史（A9 纪元，同一文件保留说明）---
 # 采集：2026-10-21 @ A9 远程来袭弹封线（DECISIONS §2026-10-21-godai-a9-base-lane-seal）。
 #       `baseLaneSealMode=1`（classic restore 0）：基地列上存在**直射基地**的远程射手
 #       （canShootBase，距离 ≥8）且玩家在 14 格内时，走到该列最靠近基地的可站格
@@ -45,4 +55,4 @@
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
 # ⚠ 本纪元另需连带重标：metrics-v11 评估链金标（lane 落 0 / 过脆 ⇒ 换 seed）与
 #    §168 navstuck OFF 复现腿（A4 已消除该 pin ⇒ 复现腿须显式关 hysteresis）。
-ab11997743ad9bdb15541a32ce8f4f0180308ba4f2ef0909e85a6221cb1a4815
+d9df72d6844cf9555ab119c650a3de408912686e97b4113f89f6727e0035e5e7

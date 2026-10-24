@@ -1445,6 +1445,9 @@ export interface GodAIParams {
    * 0 = OFF (byte-identical), 1 = on.
    */
   crossfireSectorMode: number
+  /** A12: engage only when the earliest shell reaches the CURRENT cell within
+   * this many ticks (urgency gate; avoids hijacking routine dodges). */
+  crossfireMinTti: number
 
   /**
    * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.
