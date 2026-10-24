@@ -42,6 +42,7 @@ from common.instance_lock import (
 from common.port_guard import ensure_port_free
 from common.protocol import (
     CLAIM_TTL_SEC,
+    PUSH_AHEAD_DEFAULT,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
     ProtocolError,
@@ -215,6 +216,12 @@ def main() -> None:
         help="单份 job 推送后的兜底上限（秒）；超时回落队首换 worker",
     )
     ap.add_argument(
+        "--push-ahead",
+        type=int,
+        default=PUSH_AHEAD_DEFAULT,
+        help="预推深度：worker 在跑时先推几份进它的接单队列（0 = 只推空闲机，回退档）",
+    )
+    ap.add_argument(
         "--offline-push",
         action="store_true",
         help="启用离线 push 派发：hub 出站去离线 worker 的隧道派任务、拉每轮产物"
@@ -368,12 +375,14 @@ def main() -> None:
             token,
             poll_sec=args.push_poll_sec,
             timeout_sec=args.push_timeout_sec,
+            push_ahead=args.push_ahead,
             log=lambda m: print(f"[{time.strftime('%H:%M:%S')}] [hub-server push] {m}", flush=True),
         )
         print(
             f"[hub-server] push 派发已启用：登记表={push_workers.path} "
             f"候选 worker={len(push_workers.snapshot())} "
-            f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s",
+            f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s "
+            f"ahead={max(0, args.push_ahead)}",
             flush=True,
         )
     # 离线 push 派发（2026-10-24，plan/push-mode-notebooks §6.6 / W5）：登记表与 GPU 共用

@@ -56,6 +56,7 @@ from common.protocol import (
     PRIORITY_HIGHEST,
     PRIORITY_LOW,
     PRIORITY_MEDIUM,
+    PUSH_AHEAD_DEFAULT,
     PUSH_DEAD_MISSES,
     PUSH_PING_SEC,
     PUSH_POLL_SEC,
@@ -80,6 +81,19 @@ DEFAULT_PUSH_CONFIG = Path(__file__).resolve().parents[1] / "rl-config.json"
 
 
 _log_default = tag_logger("hub-push", lambda: time)
+
+
+def _status_of(body: bytes) -> str:
+    """202 体里的 `status`（`queued` / `running` / …）；读不动 ⇒ 空串（= 旧行为）。
+
+    新 worker 对排队单回 `{"status": "queued"}`（`WorkerServerState.get` 认 `_pending`），
+    旧 worker 对排队单一律 404（它根本不会收到排队单：忙时回 409）。
+    """
+    try:
+        doc = json.loads(body.decode("utf-8")) if body else {}
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return str((doc or {}).get("status") or "") if isinstance(doc, dict) else ""
 
 
 def _http(
@@ -536,6 +550,7 @@ class PushDispatcher:
         timeout_sec: float = PUSH_TIMEOUT_SEC,
         push_attempts: int = 3,
         backups_per_course: int = 1,
+        push_ahead: int = PUSH_AHEAD_DEFAULT,
         now_fn: Any = time.time,
         log: Any = _log_default,
     ) -> None:
@@ -544,6 +559,9 @@ class PushDispatcher:
         self.token = token  # 保留（worker authKey 优先；缺 authKey 的节点用它）
         self.poll_sec = float(poll_sec)
         self.timeout_sec = float(timeout_sec)
+        #: GPU push 的**预推深度**（2026-10-24）：worker 在跑时先推几份进它的有界接单队列，
+        #: 单次传输不再裸奔在 GPU 空转上；`0` = 只推空闲机（回退档，`--push-ahead 0`）。
+        self.push_ahead = max(0, int(push_ahead))
         # 单次 job POST 的重试次数（透传给 push_client.submit_job）。生产缺省 3：
         # 409「队满」/428/5xx 这类瞬时拒绝退避重试（2s/4s），换台前先等一等。
         # **测试**里「409 ⇒ 回落队首换一台」是调度层行为，不该陪跑这条重试梯子：
@@ -686,6 +704,10 @@ class PushDispatcher:
         hub = self.hub
         # ★ 一拍只读一次自己的状态（见 `_snapshot` 的「为什么」）；下面每门课都用这一份。
         view = self._snapshot()
+        #: 本拍已推份数（自 `view.worker_counts` 起**就地**累加）。快照只回答「拍开始时」，
+        #: 同拍刚推出去的记录不会回到它 —— 不就地记账，多课程会全落到第一台机器上
+        #: （concurrency=1 也能一次收三份，正是预推最容易放大的那个错）。
+        counts = dict(view.worker_counts)
         for course in rotation_order(list(hub.courses()), getattr(hub, "_cursor", None)):
             # ★ 归属闸（2026-09-25，plan/online-offline-role-routing §2.2）：原来这里读
             # 「课程当前 mode」——模式一热切，历史 job 的归属就跳一次（事故本体）。
@@ -718,9 +740,15 @@ class PushDispatcher:
             except (OSError, ValueError):
                 continue
             avoid = set(view.avoid.get(jid, ()))
-            worker = pick_push_worker(self.workers.snapshot(), view.worker_counts, avoid)
+            # 备份不预推：它是保险，不是吞吐（预推一份备份 = 提前烧一张 GPU 的可能）。
+            worker = pick_push_worker(
+                self.workers.snapshot(),
+                counts,
+                avoid,
+                ahead=0 if mode == CLAIM_MODE_BACKUP else self.push_ahead,
+            )
             if worker is None:
-                continue  # 没有空闲 worker —— 等下一拍
+                continue  # 没有空闲 worker / 接单位 —— 等下一拍
             wid = str(worker["id"])
             lease = hub.claim(
                 jid,
@@ -746,6 +774,7 @@ class PushDispatcher:
             }
             with self._lock:
                 self._inflight[slot] = rec
+            counts[wid] = counts.get(wid, 0) + 1
             t = threading.Thread(
                 target=self._run_one,
                 args=(course, jid, worker, lease, manifest, jd, rec),
@@ -818,14 +847,15 @@ class PushDispatcher:
             )
             self.pushed += 1
             self.workers.note_push(wid, True)
-            if rec.get("mode") != CLAIM_MODE_BACKUP:
+            # 预推：节点收下但只是**排队**（它在跑上一份）——传输已经兑现，但一秒都没算。
+            queued = str(send.get("status") or "") == "queued"
+            if not queued and rec.get("mode") != CLAIM_MODE_BACKUP:
                 # R2-4a：GPU 机**从不连 hub**（hub 是出站客户端 + 轮询取结果），没人会替它
                 # 调 `/jobs/{id}/start` —— 不在这里落 computing_at，掉队救援在 push 腿永久沉默。
                 # 上传完成 = 节点已拿到活，就是「开算」的最近似时刻。
-                try:
-                    self.hub.start_job(jid, worker_id=push_worker_id_of(wid))
-                except Exception:
-                    pass
+                # ★ 排队单除外（2026-10-24）：它的「开算」时刻由 `_await_result` 在第一次
+                #   看到 running 时打点——提前打点会让 `job_priority` 把「排队」读成「掉队」。
+                self._mark_started(jid, wid)
             # 传输实测回写 job 的 wire 账（训练侧 `_wire_from_result(is_push=True)` 读它）：
             # 直推那条腿是训练侧自己记的，推经 hub 这条腿只能 hub 记——不记就是一轮
             # iteration 行的 up_bytes/up_sec 全空（多课程并行时无法按腿分组看流量）。
@@ -837,8 +867,23 @@ class PushDispatcher:
                 f"code={send['code_bytes']}B ts={send['ts_code_bytes']}B "
                 f"blob={send['blob_bytes']}B 上传 {send['upload_sec']}s attempts={send['attempts']}）"
             )
-            rec["state"] = "waiting"
-            self._await_result(course, jid, wid, url, key, lease, rec, t0)
+            if queued:
+                rec["state"] = "queued"
+                self._log(f"{jid} -> {wid}: 已入队（在跑的 job 结束后即顶上，传输已先做）")
+            else:
+                rec["state"] = "waiting"
+            self._await_result(
+                course,
+                jid,
+                wid,
+                url,
+                key,
+                lease,
+                rec,
+                t0,
+                # `started` = 「computing_at 已打（或不需要打）」；备份永不打点。
+                started=(not queued) or rec.get("mode") == CLAIM_MODE_BACKUP,
+            )
         except (RetryableError, ProtocolError) as e:
             # 推送本身没成：多半是这台 worker 此刻接不了（409 队满 / 428 缺缓存 /
             # 隧道抖动）——回落队首，换其它 worker 再试。
@@ -860,11 +905,37 @@ class PushDispatcher:
         lease: str,
         rec: dict,
         t0: float,
+        *,
+        started: bool = True,
     ) -> None:
-        """等 worker 出结果：续租 + 探活判死 + 到点回落。结果就地入账（两条腿同一函数）。"""
+        """等 worker 出结果：续租 + 探活判死 + 到点回落。结果就地入账（两条腿同一函数）。
+
+        `started=False`（预推单还排在别人的 job 后面）时两把时钟分开：
+          · **无结果预算**（`deadline`）只在真开算后计时——排队再久也不该被当成「节点失联」；
+          · **排队上限**（`queue_deadline`）从推送到现在，到点回落换台（不能无限等一个
+            永远跑不完的队首）。
+        第一次看到 `running` 才打 `computing_at` 并把无结果预算从那一刻重新起算：
+        `computing_at` 是 `job_priority` 的掉队阈时基，拿「在队里」当「在算」会给排队单
+        开出一份多余的备份；同理，排队时间也不该吃掉「推送后多久没结果」。
+        """
         deadline = self._now() + self.timeout_sec
+        queue_deadline = self._now() + self.timeout_sec
+        queue_logged = False
+        #: 上一次**看到**的状态是不是「在队里」。排队上限只在「最后一眼还在队里」时生效——
+        #: 不然「刚开算、但采样间隔跳过了 running 那一拍」的 job 会被队龄误杀。
+        last_queued = False
+
+        def _queue_expired() -> bool:
+            """队龄上限到了吗（到了就回落换台）。只在「刚看过/刚问不到」时调。"""
+            if self._now() <= queue_deadline:
+                return False
+            self._requeue(
+                jid, lease, wid, f"排队 {self.timeout_sec:.0f}s 仍未开算", avoid_worker=True
+            )
+            return True
+
         while not self._stop.is_set():
-            if self._now() > deadline:
+            if started and self._now() > deadline:
                 self._requeue(
                     jid, lease, wid, f"推送后 {self.timeout_sec:.0f}s 无结果", avoid_worker=True
                 )
@@ -882,10 +953,18 @@ class PushDispatcher:
             self.hub.heartbeat(jid, lease)
             res = _http(url, key, f"/job/{jid}/result", timeout=30.0)
             if res is None:
+                # 问不到：只有「最后一眼还在队里」才拿队龄兜底（隧道断了的排队单不该无限占租约）。
+                if last_queued and _queue_expired():
+                    return
                 time.sleep(self.poll_sec)
                 continue
             status, body = res
             if status == 200:
+                last_queued = False
+                if not started:
+                    started = True
+                    deadline = self._now() + self.timeout_sec
+                    self._mark_started(jid, wid)
                 try:
                     result = json.loads(body.decode("utf-8"))
                 except ValueError as e:
@@ -917,6 +996,23 @@ class PushDispatcher:
                 # 换台重推」会让每一拍都重推同一份活（并把它标进 `_avoid`，直到没有机器
                 # 能接），而 202 恰恰是推模式**正常**的在途答复（与 pull 侧
                 # `probe_job_result` 的 TRANSIENT 同义）。到点由上面的 deadline 兜底。
+                phase = _status_of(body)
+                if phase == "queued" and not started:
+                    # 排队不烧「推送后无结果」的预算（预算从第一次看到 running 起算）。
+                    last_queued = True
+                    if _queue_expired():
+                        return
+                    if not queue_logged:
+                        queue_logged = True
+                        self._log(f"{jid} 在 {wid} 排队中（开算前不计无结果超时）")
+                    time.sleep(self.poll_sec)
+                    continue
+                last_queued = False
+                if not started:
+                    started = True
+                    deadline = self._now() + self.timeout_sec
+                    self._mark_started(jid, wid)
+                    self._log(f"{jid} 在 {wid} 排队 {self._now() - t0:.0f}s 后开算")
                 time.sleep(self.poll_sec)
                 continue
             if status == 410:
@@ -940,6 +1036,17 @@ class PushDispatcher:
             self._requeue(jid, lease, wid, f"HTTP {status}", avoid_worker=True)
             return
         self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False)
+
+    def _mark_started(self, jid: str, wid: str) -> None:
+        """打 `computing_at`（掉队阈值的唯一时基）。
+
+        推模式里 GPU 机从不连 hub，`/jobs/{id}/start` 没别人会替它调。但「传输完成」
+        不等于「开算」：预推单可能还排在上一份后面。这里只做打点，不改任何调度判据。
+        """
+        try:
+            self.hub.start_job(jid, worker_id=push_worker_id_of(wid))
+        except Exception:
+            pass
 
     def _cancel_others(self, jid: str, winner: str) -> None:
         """landed（结果已入账）⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
@@ -987,6 +1094,7 @@ class PushDispatcher:
             "running": self._thread is not None and not self._stop.is_set(),
             "poll_sec": self.poll_sec,
             "timeout_sec": self.timeout_sec,
+            "push_ahead": self.push_ahead,
             "ticks": self.ticks,
             "pushed": self.pushed,
             "requeued": self.requeued,

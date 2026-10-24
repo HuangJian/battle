@@ -147,6 +147,17 @@ class _Srv:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read().decode())
 
+    def get_json(self, path: str):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
     def get_ping(self):
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/ping",
@@ -186,6 +197,12 @@ def test_http_queue_duplicate_and_full(tmp_path: Path) -> None:
         status, body = srv.post_job(_mini_manifest("j1", payload), payload)
         assert status == 202 and body["status"] == "queued" and body["position"] == 1
         assert srv.get_ping()["queued"] == 1
+        # 排队单必须可读（hub 预推要用）：`/status` = queued，`/result` = 202 queued。
+        # 旧版对排队单回 404 ⇒ 派发器把它读成「这台不要这份活」并当场回落换台。
+        status, body = srv.get_json("/job/j1/status")
+        assert status == 200 and body["state"] == "queued"
+        status, body = srv.get_json("/job/j1/result")
+        assert status == 202 and body["status"] == "queued"
         # 重发幂等
         status, body = srv.post_job(_mini_manifest("j1", payload), payload)
         assert status == 202 and body["status"] == "queued"

@@ -9169,3 +9169,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   ack 不看 rev ⇒ 迟到评估行永久丢；缺包静默跳过 ⇒ 该课永不推进；重启不续跑 ⇒ 几十轮产物成孤儿。
 - **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）绿；新增 12 个用例
   （7 派发器 loopback/恢复/版本门/缺包/冲突/权威 + 5 assignment 账本）。
+## §2026-10-24-gpu-push-ahead（2026-10-24，用户指令「让 GPU push 允许在 worker 忙时预推下一份 job，利用 worker 侧现有接单队列消除传输空转」）
+
+- **背景**：push 腿的派发只挑 `busy=false` 的机器，而 `run_one` 要把 payload（3–10MB，慢链路几十秒）
+  传完，worker 才开始跑下一份 ⇒ 每次换 job 都是一段「传完才开算」的 GPU 空转。worker 侧本来就有
+  一条有界接单队列（`remote/worker_server` 的 `WORKER_QUEUE_MAX=8`），只是正常调度从不提前用它。
+- **决定**：
+  1. **预推只在「一个空闲机都没有」时发生**（`pick_push_worker(..., ahead=N)` 第二轮）：忙机若自报
+     `queued < ahead` 且 `在飞 < concurrency + ahead` 才接。顺序口径（注册序、空闲优先）逐字节不变。
+     缺省 `PUSH_AHEAD_DEFAULT=1`，`hub-server --push-ahead 0` 是回退档。
+  2. **备份副本永不预推**：备份是保险不是吞吐，提前推一份备份 = 提前烧一张 GPU 的可能。
+  3. **worker 必须能回答「我在队里」**：`WorkerServerState.get()` 认 `_pending`，`/job/{id}/result` 对
+     排队单回 202 `{"status":"queued"}`。否则 hub 收到 404（`_await_result` 把它读成「这台不要这份活」）
+     ⇒ 当场回落换台，预推白传还把健康 worker 记进 avoid。`submit_job` 因此多回一个 `status`（纯加法）。
+  4. **两把时钟分开**：`computing_at` 只在第一次看到 running 时打（否则 `job_priority` 在
+     `STRAGGLER_SEC=180s` 后把排队读成掉队、给排队单开多余备份）；「推送后无结果」预算从开算起算，
+     排队另有一把 `queue_deadline`（同 `timeout_sec`）且只在「最后一眼还在队里」时生效 ——
+     采样间隔跳过 running 那一拍的 job 不被队龄误杀，隧道断了的排队单仍被兜住。
+  5. **一拍内的名额必须就地累加**（`_dispatch` 的 `counts`）：`_snapshot` 只回答拍开始时，不就地记账
+     多课程会全落到第一台机器上（`concurrency=1` 也能一次收三份——预推会放大这个错）。
+- **否决的备选**：① 忙机排第一轮（多课程时同一台吃掉全部课程，落点口径变了）；② 在 worker 侧对排队单
+  继续回 404、让 hub 重推（几十 MB 白传 + 误拉黑健康节点）；③ 预推时照旧打 `computing_at`（排队被读成
+  掉队，调度器自己制造备份副本）；④ 用固定 grace 代替排队时钟（没有判据，慢链路与长 job 都会被误杀）；
+  ⑤ 一次给每台排满队列（`WORKER_QUEUE_MAX` 是给多课程共享留的，预推吃满就等于换 job 前先堵死它）。
+- **违反后果**：退回 409/404 语义 ⇒ 预推变成「白传 + 回落」的抖动源；提前打 `computing_at` ⇒ 排队单被
+  判掉队、双开 GPU；排队时间计入无结果预算 ⇒ 长 job 后面的排队单被误杀、重派到别的机器再跑一遍。
+- **落点**：`common/protocol.py`（`PUSH_AHEAD_DEFAULT` + `pick_push_worker(ahead=)`）·
+  `remote/push_dispatch.py`（`push_ahead` / 就地计数 / `_mark_started` / `_await_result` 两把时钟）·
+  `remote/worker_server.py`（排队单可读）· `remote/push_client.py`（`status`）· `hub/boot.py`（`--push-ahead`）。
+  全文 → `docs/nn/remote-transport.md §121`。
+- **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）· `bun run check`；
+  新增 3 个用例（纯函数预推四闸 + 真 worker_server 的预推闭环（假时钟）+ 回退档）+ e2e 排队单可读性断言。

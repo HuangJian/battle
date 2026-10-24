@@ -444,6 +444,11 @@ PUSH_DEAD_MISSES = 3
 #: 单份 job 推送后的兜底上限（秒）：超过它无论如何回落队首（PPO 一轮 10–30min，
 #: 45min 足以覆盖慢链路 + 排队）。
 PUSH_TIMEOUT_SEC = 45 * 60.0
+#: GPU push 的**预推深度**（缺省 1，2026-10-24）：worker 在跑时它还有一条有界接单队列
+#: （`remote.worker_server.WORKER_QUEUE_MAX`）——允许 hub 先把下一份推过去，把 payload
+#: 传输叠到当前 job 的 PPO 上（否则每次换 job 都是「传完才开算」的纯空转）。
+#: `0` = 真旧行为（只推空闲机；回退档）。预推会把租约起点提前，故不写死、由 `--push-ahead` 定。
+PUSH_AHEAD_DEFAULT = 1
 #: 跑死过某份 job 的 worker 冷却时长（秒）：冷却期内不再给它派同一份 job
 #: （「改为推送其它 worker」的落地；过期自动解禁，不永久拉黑）。
 PUSH_COOLDOWN_SEC = 600.0
@@ -514,17 +519,32 @@ def pick_push_worker(
     workers: Sequence[dict],
     inflight: Mapping[str, int],
     avoid: Iterable[str] = (),
+    *,
+    ahead: int = 0,
 ) -> dict | None:
     """挑一个**现在就能接活**的 worker；没有空闲者 → None。
 
-    四个条件（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
+    四道闸（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
     探活通过且未达离场阈值）、自报不忙（`/ping` 的 busy）、在飞数 < concurrency、不在
     本次避让名单里（刚跑死这份 job 的那台）。
 
     顺序 = 注册序（稳定 ⇒ 行为可测）；**不按快慢排序**——「谁空谁接」是既定口径
     （EWMA 快慢 hold 已被用户裁定删除，见 `trainer/dispatch.py` 注释）。
+
+    `ahead > 0`（2026-10-24）追加**第二轮**：所有空闲机都接不了时，忙机若还有接单位
+    （自报 `queued < ahead` 且 `在飞 < concurrency + ahead`）也可以接——它的 payload 传输
+    叠在当前 job 的 PPO 上，worker 侧有界 FIFO 负责「当前 job 结束即顶上」。只在第一轮
+    无人可接时才走第二轮 ⇒ 有空闲机时位置口径逐字节不变。
+
+    为什么 `ahead` 缺省 0：预推把租约的起点提前到「job 还在队里」的时刻，这不是所有
+    调用方都愿意接受的时钟；GPU 派发器显式传 `--push-ahead`（缺省 1）。
     """
     blocked = set(avoid)
+
+    def _fits(w: dict, wid: str, boost: int) -> bool:
+        limit = int(w.get("concurrency") or 1) + int(boost)
+        return int(inflight.get(wid, 0)) < limit
+
     for w in workers:
         if not isinstance(w, dict):
             continue
@@ -535,7 +555,24 @@ def pick_push_worker(
             continue  # 从没答过 / 连续失败达阈值：不往它身上推
         if w.get("busy"):
             continue  # 节点自报在跑
-        if int(inflight.get(wid, 0)) >= int(w.get("concurrency") or 1):
+        if not _fits(w, wid, 0):
+            continue
+        return w
+    if int(ahead) <= 0:
+        return None
+    for w in workers:
+        if not isinstance(w, dict):
+            continue
+        wid = str(w.get("id") or "")
+        if not wid or wid in blocked:
+            continue
+        if not w.get("online"):
+            continue
+        if not w.get("busy"):
+            continue  # 第一轮已经处理过空闲机
+        if int(w.get("queued") or 0) >= int(ahead):
+            continue  # 接单队列已经够深（多推一份只是把它排得更长）
+        if not _fits(w, wid, int(ahead)):
             continue
         return w
     return None

@@ -6,6 +6,47 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §121 GPU push 的预推：worker 在跑时先推下一份（2026-10-24，用户指令「利用接单队列消除传输空转」· 决策 `DECISIONS.md` §2026-10-24-gpu-push-ahead）
+
+push 腿此前的形态是**严格串行**：`pick_push_worker` 只挑 `busy=false` 的机器，`run_one` 把
+payload 传完才开始等结果 ⇒ 上一份 PPO 收尾之后，下一份要先吃掉一次完整的大包上传（3–10MB，
+慢链路几十秒），这段时间 GPU 是空转的。worker 侧其实早有一条**有界接单队列**
+（`remote/worker_server.WorkerServerState`，`WORKER_QUEUE_MAX=8`），此前只有多课程同拍推送时才会
+被顺带用到。
+
+**现在的分工**：
+
+- `common.protocol.pick_push_worker(..., ahead=N)`：第一轮仍是「空闲机」（逐字节旧行为）；**只有当
+  一个空闲机都接不了时**才走第二轮——忙机若 `自报 queued < ahead` 且 `在飞 < concurrency + ahead`
+  也接。备选方案「忙机也排第一轮」被否：那会改变多课程时的落点口径（同一台吃掉全部课程）。
+- `PushDispatcher._dispatch`：名额判定改用**本拍就地累加**的计数（快照只回答拍开始时；不就地
+  记账，一拍内多课程会全落到第一台机器上——`concurrency=1` 也能一次收三份）。**备份副本永不预推**：
+  备份是保险不是吞吐，预推一份备份 = 提前烧一张 GPU 的可能。
+- `remote.worker_server`：`WorkerServerState.get()` 认 `_pending`（排队单答 `{"state":"queued"}`），
+  `/job/{id}/result` 对排队单回 **202 `{"status":"queued"}`**。不补这一格，hub 拿到的是 404，而 404 在
+  `_await_result` 里等于「这台不要这份活」⇒ 当场回落换台，预推白传几十 MB 还把健康 worker 记进 avoid。
+- `remote.push_client.submit_job` 回传 `status`（`accepted`/`queued`）——纯加法。
+
+**两把时钟必须分开**（这是预推最容易写错的一处）：
+
+1. `computing_at` 只在**第一次看到 running** 时打（`_mark_started`）。提前打点会让 `job_priority`
+   在 `STRAGGLER_SEC=180s` 后把「还在排队」读成「掉队」，进而给排队单开一份多余的备份副本 ——
+   用调度器的假时钟烧一张真 GPU。
+2. 「推送后无结果」预算（`timeout_sec`，缺省 45min）从**开算那一刻**起算；排队期另有一把
+   `queue_deadline`（同样是 `timeout_sec`），且只在「最后一眼还在队里」时生效（`last_queued`）：
+   采样间隔跳过 running 那一拍的 job 不会被队龄误杀；隧道断了、`/result` 一直没答的排队单仍会被
+   队龄兜住。排队期间 `heartbeat` 照常续租（hub 是租约持有人）。
+
+**兼容与回退**：旧 worker 忙时回 409 ⇒ `submit_job` 抛 `RetryableError` ⇒ 回落队首换台（与改造前
+同一条路，只是多一条日志）；旧 hub 不传 `ahead` ⇒ 逐字节旧行为。`hub-server --push-ahead 0` 是回退档；
+`disp.state()` 里能读到当前深度。已知上限：hub 要等下一次 `/ping`（`PUSH_PING_SEC=30s`）才知道
+「这台已经在跑」，所以预推最早在开跑后 ≤30s 发生——相对 10–30min 的 PPO 一轮可忽略。
+
+**测试**：`tests/remote/test_hub_push_dispatch.py` 新增 3 条 —— 纯函数四闸（空闲优先 / 排队深度 /
+`concurrency+ahead` 名额 / 避让）+ 真 `worker_server` 的预推闭环（假时钟：排队 8s、总龄 13s > timeout
+10s，断言 `computing_at` 排队期为空、开算后才有、`requeued=0`）+ 回退档 `ahead=0`；
+`e2e/test_worker_queue.py` 补排队单的 `/status`/`/result` 可读性。
+
 ## §120 hub 侧的离线 push 派发器（W5 落地，2026-10-24 · `plan/push-mode-notebooks.plan.md` §6.6/§6.7 · 决策 `DECISIONS.md` §2026-10-24-push-mode-w5）
 
 W4 把「谁在服务、谁在训练」立在 worker 侧；W5 补的是方向相反的那一半：**hub 用自己的出站

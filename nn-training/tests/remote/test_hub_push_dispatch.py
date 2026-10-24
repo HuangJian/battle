@@ -42,7 +42,8 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
-from tests.helpers.push_worker import PAYLOAD
+from remote.worker_server import WorkerServerState, make_worker_server
+from tests.helpers.push_worker import PAYLOAD, result_of
 
 # ------------------------------------------------------------------ 夹具与工具
 
@@ -207,6 +208,31 @@ def test_pick_push_worker_four_gates() -> None:
     # 并发 > 1 时同一台可接第二份
     assert (pick_push_worker(ws, {"full": 1, "ok1": 1}) or {})["id"] == "ok2"
     assert pick_push_worker(ws, {"full": 1, "ok1": 1, "ok2": 2}) is None
+
+
+def test_pick_push_worker_prefetch_ahead() -> None:
+    """`ahead > 0`：空闲机永远优先；没有空闲机时，忙机按它的**接单队列深度**再接一份。
+
+    预推（2026-10-24）的全部风险都在这一层：把「在跑」当「没空」是旧的保守方向，
+    把「队已满」当「还能接」就是往一台已经排满的机器上再传几十 MB。
+    """
+    idle = {"id": "idle", "online": True, "busy": False, "queued": 0, "concurrency": 1}
+    busy = {"id": "busy", "online": True, "busy": True, "queued": 0, "concurrency": 1}
+    busy_full = {**busy, "id": "busy-full", "queued": 1}
+    deeper = {**busy, "id": "deeper", "queued": 2}
+    inflight = {"busy": 1, "busy-full": 1, "deeper": 1}
+    # 旧行为（ahead=0，缺省）：忙机一律不接（四道闸的「不忙」原样保留）
+    assert pick_push_worker([busy], inflight) is None
+    assert pick_push_worker([busy_full, busy], inflight) is None
+    # 预推：只要还有空闲机，位置口径不变（忙机排队位不当成空闲位）
+    assert (pick_push_worker([busy, idle], inflight, ahead=1) or {})["id"] == "idle"
+    # 没有空闲机 ⇒ 只有「队列还没到 ahead」的忙机接
+    assert (pick_push_worker([busy_full, busy], inflight, ahead=1) or {})["id"] == "busy"
+    assert pick_push_worker([busy_full, deeper], inflight, ahead=1) is None
+    # 名额 = concurrency + ahead（忙机已经在跑一份）
+    assert pick_push_worker([{**busy, "id": "at-cap"}], {"at-cap": 2}, ahead=1) is None
+    # 避让名单对预推同样生效（刚跑死这份活的那台不再收）
+    assert pick_push_worker([busy], inflight, avoid={"busy"}, ahead=1) is None
 
 
 def test_push_want_and_holder_identity() -> None:
@@ -659,6 +685,141 @@ def test_no_idle_worker_leaves_job_at_head(tmp_path: Path, worker_factory) -> No
     assert disp.state()["started" if "started" in disp.state() else "pushed"] == 0
     assert hub.claimable_job_ids("x2") == ["j" * 16]
     assert disp.state()["inflight"] == []
+
+
+# ------------------------------------------------------------------ ⑤ 预推（2026-10-24）
+
+
+def _queue_worker(tmp_path: Path, started: list[str]):
+    """真 `worker_server`（真队列/真 HTTP 面），starter 换成只记账的假执行器。
+
+    预推的正确性一半在 worker 侧：`submit` 忙时入队、`/result` 对排队单回 202 `queued`、
+    `kick` 在上一份结束后拉起队首。这些都不能用假 handler 手搓——抄错的假体就是下一个 bug。
+    """
+    state = WorkerServerState(tmp_path / "queue-work")
+    srv = make_worker_server(state, 0, "sekret")
+    # 构造时注入的是真 starter（会跑 run_job/PPO）——在任何 POST 之前换掉。
+    state.set_starter(lambda jid, item: started.append(jid))
+    # `_manifest` 的 code_sha256 恒为 "z"*64：在节点侧造一个「已缓存」标记，
+    # 否则 `submit_job` 会因「节点无 code 缓存且本次未携带 code.zip」直接回落
+    # （那是另一条腿的契约，不该陪跑预推用例）。
+    cache = state.work_dir / "code_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / ("z" * 64)).write_bytes(b"fake-code")
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    return srv, state, th
+
+
+def _two_course_hub(tmp_path: Path) -> tuple[_HubQueue, dict[str, dict]]:
+    hub = _hub(tmp_path, ["a", "b"])
+    return hub, {"a": _publish(hub, "a", "a" * 16), "b": _publish(hub, "b", "b" * 16)}
+
+
+def _worker_registry(tmp_path: Path, url: str) -> PushWorkers:
+    ws = PushWorkers(
+        tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=_PING_TIMEOUT
+    )
+    ws.add({"id": "g1", "url": url, "authKey": "sekret"})
+    return ws
+
+
+def test_push_ahead_queues_the_next_job_and_defers_start_marker(tmp_path: Path) -> None:
+    """★ 预推：worker 在跑时也接下一份，传输叠到当前 PPO 上（不再「传完才开算」）。
+
+    三件事一起钉（它们任意一条错，预推就从「省空转」变成「烧 GPU」）：
+      ① 第二份真的进了 worker 的有界 FIFO（还没开算）；
+      ② `computing_at` 在排队期间为空（否则 `job_priority` 会把排队读成「掉队」并开备份）；
+      ③ 排队时间不烧「推送后无结果」预算（假时钟：总龄 13s > timeout 10s，开算才 5s）。
+    """
+    # 假时钟从**真实时刻**起跳（`tick` 的「到点探活」拿派发器时钟与登记表的 last_ping 比，
+    # 从 0 起跳会让探活永不 due，预推永远等不到「忙」这个事实）。
+    clock = [time.time()]
+    started: list[str] = []
+    srv, state, th = _queue_worker(tmp_path, started)
+    hub, ms = _two_course_hub(tmp_path)
+    disp = PushDispatcher(
+        hub,
+        _worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
+        "sekret",
+        poll_sec=0.01,
+        timeout_sec=10.0,
+        push_ahead=1,
+        now_fn=lambda: clock[0],
+        log=_quiet,
+    )
+    try:
+        # `ping=True`：假时钟是**冻结**的，靠它判「到点探活」永远不 due（那需要墙钟推进）。
+        disp.tick(ping=True)
+        assert _wait_until(lambda: len(started) == 1), disp.state()
+        first = started[0]
+        first_course = "a" if first == "a" * 16 else "b"
+        second_course = "b" if first_course == "a" else "a"
+        second = second_course * 16
+
+        disp.tick(ping=True)  # 忙机 + 还有接单位 ⇒ 预推第二份
+        assert _wait_until(
+            lambda: (state.get(second) or {}).get("state") == "queued"
+        ), disp.state()
+        assert state.queued() == 1
+        assert hub._stores[second_course].scheduling_facts(second)["computing_at"] is None
+
+        clock[0] += 8.0  # 排队 8s（< 10s 队龄上限）
+        state.set_result(first, result_of(ms[first_course]))
+        state.kick()
+        # 先把第一份收尾干净再跳钟（否则假时钟越过 a 的 10s 预算、而 hub 还没收到它的
+        # 结果时，会被「无结果」回落——那是测试自己挤出来的竞态，不是被测语义）。
+        assert _wait_until(lambda: hub._stores[first_course].get_result(first) is not None)
+        assert _wait_until(lambda: second in started), (started, disp.state())
+        clock[0] += 5.0  # 总龄 13s > timeout 10s，但开算后才 5s
+        assert _wait_until(
+            lambda: hub._stores[second_course].scheduling_facts(second)["computing_at"]
+            is not None
+        ), disp.state()
+        state.set_result(second, result_of(ms[second_course]))
+        assert _wait_until(
+            lambda: hub._stores[second_course].get_result(second) is not None
+        ), disp.state()
+        assert disp.state()["requeued"] == 0
+    finally:
+        disp.stop()
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_push_ahead_zero_keeps_the_busy_worker_untouched(tmp_path: Path) -> None:
+    """`--push-ahead 0` = 真旧行为：忙机一份都不多收，第二份留在队首（回退档）。"""
+    started: list[str] = []
+    srv, state, th = _queue_worker(tmp_path, started)
+    hub, _ms = _two_course_hub(tmp_path)
+    disp = PushDispatcher(
+        hub,
+        _worker_registry(tmp_path, f"http://127.0.0.1:{srv.server_address[1]}"),
+        "sekret",
+        poll_sec=0.01,
+        timeout_sec=10.0,
+        push_ahead=0,
+        log=_quiet,
+    )
+    try:
+        disp.tick()
+        assert _wait_until(lambda: len(started) == 1), disp.state()
+        for _ in range(3):
+            disp.tick()
+            # sleep-ok: 轮询步长（等的是「忙机没有被选」这个状态，不是墙钟）
+            time.sleep(0.05)
+        remaining_course = "b" if started[0] == "a" * 16 else "a"
+        remaining = remaining_course * 16
+        assert state.get(remaining) is None  # 忙机没有多收任何一份
+        assert state.queued() == 0
+        assert hub.claimable_job_ids(remaining_course) == [remaining]
+        assert disp.state()["push_ahead"] == 0
+    finally:
+        disp.stop()
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
 
 
 def test_trainer_publish_with_dispatch_flag_flows_through_hub_push(
