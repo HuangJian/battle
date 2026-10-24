@@ -87,7 +87,7 @@ from remote.deliver_ledger import (
     _num_or,
     _prune_reset_markers,
 )
-from remote.deliver_mode import eta_text
+from remote.deliver_mode import eta_text, need_bps
 from remote.deliver_parts import DeliverMetricsMixin
 from remote.deliver_wire import pick_anchors, read_eval_iters
 
@@ -325,8 +325,12 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         self._delivered: set[int] = set()
         #: ★ 2026-10-23：统计件已送达的轮次（与 `_delivered` 分开记账，见 `deliver_ledger`）。
         self._metrics_sent: set[int] = set()
+        #: 权重到了、但体里没有 row 的轮次（评审 P1-7）：统计欠账，随 `delivered.json` 跨会话。
+        self._metrics_owed: set[int] = set()
         #: 统计批的读数 `(本批轮数, 本批字节)`（S7 观测用）。
         self._metrics_stat: tuple[int, int] = (0, 0)
+        #: 上一趟权重体里**真的**带了账本行吗（评审 P1-7：只有带了才销 `_metrics_sent`）。
+        self._last_round_had_row = False
         # ★ 2026-10-23（`plan/anchor-full-rounds` S4）：**轮形态**读数（`(形态, 累计省字节,
         #   整份参照字节)`）。累加与判据在 `deliver_wire.note_opt_wire`（L0 纯函数，单元可测）；
         #   本类是唯一持有它的人，`status()` 原样转出。
@@ -576,9 +580,11 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             total += n
             if deadline and self._now() >= deadline:
                 break
-            # 推空判据是**锚点 + 重投**（不是 `pending()`）：非锚点轮不进实时体，
-            # 拿全量判「还有活」会让这一圈白跑一遍 `_sync`（2026-10-22）。
-            if not self.pending_anchors() and not self._repost:
+            # 推空判据必须跟**当前档位的候选集**一致：`every` 档下非锚点轮也在候选集里，
+            # 只判锚点会让积压每拍只前进 `sync_cap` 轮（评审 P1-5：D10 的补发上限就丢在这）。
+            # `anchors` 档下没有锚点/重投时，下一圈 `_sync` 自己会返回 0（n <= 0 提前 break），
+            # 不会多打任何 POST。
+            if not self.pending() and not self._repost:
                 break
         # 备份跑在自己的有界里（它不属「推积压」的预算）：推不完/推不动都要把账本看一遍
         self._guard(self.backup_pending)
@@ -594,10 +600,16 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         now = _cpu_seconds()
         dt = max(0.0, now - self._cpu_prev)
         self._cpu_prev = now
+        pending_n = len(self.pending())
+        avail = self._modes.avail_bps
         self.log(
             f"{kind}补传检查：cpu=+{dt:.2f}s ticks={self._drain_ticks} idle={self._idle_spins} "
-            f"pending={len(self.pending())} anchor={len(self.pending_anchors())} "
-            f"repost={len(self._repost)}"
+            f"pending={pending_n} anchor={len(self.pending_anchors())} "
+            f"repost={len(self._repost)} mode={self._modes.mode} "
+            f"avail={'-' if avail is None else f'{avail / 1024:.0f}K'}B/s "
+            f"period={self._modes.round_period_sec:.0f}s "
+            f"backlog={pending_n} "
+            f"eta={eta_text(pending_n, mode=self._modes.mode, avail_bps=avail)}"
         )
 
     def _guard(self, fn: Callable[..., object], *a: object, **kw: object) -> None:
@@ -1033,16 +1045,30 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         # 为什么不是 `pending()`（plan §4-W1-C/D）：实时链路只负责「把有读数的轮次送回去」，
         # 其余轮次的权重与账本行走抽屉 + 离线包（两条腿都是整份）。`pending()` 本身没收窄
         # （D-3）——抽屉 / `status()` / 重投判据照吃全量，安全网一格没少。
-        # ★ 2026-10-23（§3.0）：候选集由**档位**决定——
-        #   `anchors`（差档/断连/未开自适应）= 只发有 A 层读数的轮（旧行为）；
-        #   `full` / `bulk`（网络顺畅）= **每一轮都发**（用户口径：顺畅就该每轮回传）。
-        # 统计批不走这个集合（它在下面先发，见 §3.3）。段末把最新一轮提前由下面的通用段做。
+        # ★ 2026-10-24（评审 P0-1）：档位只剩两档——`every`（每一轮都发；形态在写盘时定，
+        #   锚点整份/其余 delta）与 `anchors`（只发有 A 层读数的轮）。`full`/`bulk` 已退场：
+        #   它们发的是同一批字节，留着只会让日志谎报「每轮整份」。
         mode = self._modes.tick_mode()
         todo = self.pending_anchors(with_newest=force_probe) if mode == "anchors" else self.pending()
         # 重投只服务**真轮次**（纵深防御：旧账本/旧会话里的起点或半截轮次不该被重投带出去）。
         rounds = self._ledger_its()
         todo += [it for it in repost if it not in todo and it in rounds]
-        if not todo:
+        # ★ 2026-10-24（评审 P0-3）：统计批**不能**被「没有锚点待发」的早退吃掉。
+        #   抖动期最常见的形状就是「锚点都发完了、非锚点轮还没发」——那几轮的 row 只能走统计批。
+        #   所以先算 gap，只有「权重也没活 + 统计也没活」才早退。
+        gap = (
+            self._metrics_gap()
+            if (self.metrics_parts and not self._metrics_unsupported)
+            else []
+        )
+        if mode != "anchors":
+            # `every` 档下权重体自带 row：这一拍就要发权重的轮次**不再单独发统计**，
+            # 否则同一轮既走统计批（~24 KB）又走权重体（row 内嵌），还会在课程账本里
+            # 落两条 `iteration`（一条 provisional、一条真权重）。抖动档相反：锚点轮的
+            # 权重可能发不出去，那几轮的统计必须先走（宁可重复一次，也不能等权重）。
+            todo_set = set(todo)
+            gap = [it for it in gap if it not in todo_set]
+        if not todo and not gap:
             self._retry_n = 0
             self._last_error = ""
             self._next_try = 0.0
@@ -1061,11 +1087,28 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         sent: list[int] = []
         changed = False
         fails = 0
-        # ★ S5（2026-10-23）：**统计批先走**（小件优先）。权重发不动时读数也要到（D11），
-        #   且它 ~1 KB/轮——25 KB/s 档也过得去。失败不销账 ⇒ 下一拍照旧再试。
-        if self._post_metrics_batch(self._metrics_gap(), budget_sec=budget_sec):
-            changed = True
+        #: 预算从**这一拍开头**算，统计批花掉的时间不能从下一件里再借一遍（评审 P1-9）。
         deadline = (self._now() + float(budget_sec)) if budget_sec is not None else None
+        # ★ S5（2026-10-23）：**统计批先走**（小件优先）。权重发不动时读数也要到（D11）。
+        #   失败不销账 ⇒ 下一拍照旧再试。
+        if gap and (deadline is None or self._now() < deadline):
+            remaining = (
+                max(0.0, deadline - self._now()) if deadline is not None else budget_sec
+            )
+            if self._post_metrics_batch(gap, budget_sec=remaining):
+                changed = True
+        if not todo:
+            # 这一拍只有统计可发：送达/失败都要把账落盘；没送达就留一句可观测的失败原因。
+            if changed:
+                self._save_ledger()
+                self._retry_n = 0
+                self._last_error = ""
+                self._next_try = 0.0
+            else:
+                self._retry_n += 1
+                self._last_error = "统计批没有送达（下拍再试）"
+                self._next_try = self._now() + LOG_THROTTLE_SEC
+            return 0
         # 段末（`force_probe`）：最新那一轮排最前 —— D-1「末轮强制补发」的落地形态。
         # 为什么不是「全部降序」：升序才是续跑进度的自然顺序，只有最后那一轮值是**整段**的终点。
         if force_probe and len(todo) > 1:
@@ -1097,10 +1140,20 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             if outcome == "ok":
                 done += 1
                 sent.append(it)
-                # `row` 已随这一趟到达 ⇒ 统计件也记上（否则下一拍会再单独发一遍同一轮的统计；
-                # 分开发只是为了让「权重发不动」时读数也能走，不是要发两次）。
-                if it not in self._metrics_sent:
-                    self._metrics_sent.add(it)
+                # `row` **真的**随这一趟到达才销统计账（评审 P1-7）：权重体可能因为账本行与
+                # 权重指纹不符而没有 `row`（`build_round_body` 宁可不带），那一轮必须留给
+                # 统计批再试——否则「权重到了、统计永久丢」且账本显示已送。
+                if self._last_round_had_row:
+                    if it not in self._metrics_sent:
+                        self._metrics_sent.add(it)
+                        changed = True
+                    if it in self._metrics_owed:
+                        self._metrics_owed.discard(it)
+                        changed = True
+                elif it not in self._metrics_owed:
+                    # 这一轮已进 `_delivered`，`pending()` 不会再列它 ⇒ 统计欠账必须单独记，
+                    # 否则下一拍 gap 看不见它，权重成功反而把统计静默丢定。
+                    self._metrics_owed.add(it)
                     changed = True
             # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推。
             # 拒收**本身也要落盘**（D6）：TTL/上限的年龄面就住在那条记录里，而「本拍只有拒收、
@@ -1172,8 +1225,10 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
           * ``"stop"`` —— 这一件这次没过去（没送达 / 5xx / 鉴权），**后面的轮次照推**；
           * ``"deferred"`` —— 带评估读数的大体没过去，已降级成「只发权重」并登记了一次重投。
         """
-        # 先归零：本轮若在读权重之前就早退（文件没了/空），别把**上一轮**的降级标记留给销账判据。
+        # 先归零：本轮若在读权重之前就早退（文件没了/空），别把**上一轮**的降级/销账标记
+        # 留给这一轮的判据。
         self._attempt_degraded = False
+        self._last_round_had_row = False
         # 降级档（§4-W1-B′）：这一轮**还在本会话降级过**且权重尚未送达 ⇒ 先只发「不评估读数」的小体。
         # 一旦权重到岸（`_delivered`），同一轮的重投（补评估读数）仍然带全量——两份职责分开。
         self._attempt_degraded = it in self._degraded and it not in self._delivered
@@ -1204,6 +1259,12 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         if built is None:
             return "stop"
         body, raw, wfp, opt_form, self._last_pergame_games = built
+        #: 这一趟的体里是否真的带了账本行（只有带了的轮次才能销统计账；见 `_sync`）。
+        row_obj = body.get("row")
+        self._last_round_had_row = isinstance(row_obj, dict) and bool(row_obj)
+        if self._last_round_had_row and isinstance(row_obj, dict):
+            # 轮周期读数（plan §7.1）：只认真投递里的 `wall_sec`，不另扫账本。
+            self._modes.note_round_period(row_obj.get("wall_sec"))
         # ★ 形态读数（S4）：这一轮盘上 opt 是整份还是容器（记账在体建好之后）。
         self._opt_wire = deliver_wire.note_opt_wire(
             self._opt_wire, opt_form, len(str(body.get("opt_tar_b64") or ""))
@@ -1404,11 +1465,18 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             "adaptive": self.adaptive,
             "avail_bps": self._modes.avail_bps,
             "disconnects": self._modes.disconnects,
+            #: 判档用的轮周期（最近 5 轮 `row.wall_sec` 中位数；冷启动 15s）与这一档的需求。
+            "round_period": round(float(self._modes.round_period_sec), 2),
+            "need_bps": round(
+                need_bps(self._modes.mode, round_period_sec=self._modes.round_period_sec), 1
+            ),
             "backlog": len(pending),
             "eta": eta_text(len(pending), mode=self._modes.mode, avail_bps=self._modes.avail_bps),
             # ★ 统计批（S5）：还剩多少轮的 `row` 没单独上行；`metrics_sent` = 已上行的轮数。
             "metrics_backlog": len(self._metrics_gap()),
             "metrics_sent": len(self._metrics_sent),
+            #: 权重已到岸但体里没 row 的轮次（统计欠账；`metrics_backlog` 的子集）。
+            "metrics_owed": len(self._metrics_owed),
             "metrics_unsupported": self._metrics_unsupported,
             "metrics_last": dict(zip(("rounds", "bytes"), self._metrics_stat, strict=True)),
             "rejected": dict(self._rejected),

@@ -104,6 +104,11 @@ def ingest_offline_artifact(
         # 而不是把它当 400 重试同一份体。HTTP 腿不会走到这里（它的 `run_id` 为空）。
         log(f"拒收（权威不符）：{e}")
         return 409, {"error": str(e), "status": "conflict", "course": course, "run_id": run_id}
+    if parts and parts not in ("metrics",):
+        # ★ 2026-10-24（评审 P2-2）：只实现了 `?parts=metrics`。未知值以前会静默落进
+        #   「整轮」分支，客户端以为按件发、hub 却按整轮校验（缺 weights_json ⇒ 400），
+        #   错误信息离真因很远。这里响亮拒收，新 part 落地时再显式加白名单。
+        return 400, {"error": f"未知 parts={parts!r}（当前只支持 metrics）"}
     if parts == "metrics":
         res = hub.store_offline_metrics(course, body)
         _merge_eval_rows(hub, course, body, log)

@@ -590,7 +590,7 @@ class OfflineRoundsMixin:
                 self._append_metrics_lines(mpath, lines)
                 for item in fresh:
                     self._land_round_metrics(
-                        item["row"], run_id=run_id, it=item["it"]
+                        item["row"], run_id=run_id, it=item["it"], weights_landed=False
                     )
         return {
             "status": "accepted",
@@ -609,7 +609,9 @@ class OfflineRoundsMixin:
         except OSError as e:
             raise ProtocolError(f"写 {path.name} 失败：{e}") from e
 
-    def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
+    def _land_round_metrics(
+        self, row: object, *, run_id: str, it: int, weights_landed: bool = True
+    ) -> None:
         """把这一轮的度量搬进**课程侧**（实时回传也能让控制台指标表动起来）。
 
         用户之问（2026-09-22）：「云机通过网络请求回传，会算这些数据回显吗？」——之前**不会**：
@@ -623,13 +625,26 @@ class OfflineRoundsMixin:
         （`<课程>/it<N>/per-game.json`），两路结果逐字段一致。
 
         只住课程目录（`jsonl_path` 的父目录）：hub 的 `--jsonl` 就是
-        `<traj_root>/training_log.jsonl`，课程侧与它是同一个根。重复投递（duplicate）根本走不到
-        这里---只有接新才写，所以同一轮不会出现两行。任何失败只记日志：回传的主价值是权重到岸。
+        `<traj_root>/training_log.jsonl`，课程侧与它是同一个根。权重轮（duplicate 之后）
+        走不到这里——只有接新才写。**统计批**则是另一回事：它没有权重，写进来的是一条
+        `weights_landed=false` 的**临时** `iteration`，不能参与「哪一轮已落权重」的判据
+        （否则一个跑在前面的统计行会把活动权重指针冻住，见 `_ledger_has_newer_iter`）。
+        任何失败只记日志：回传的主价值是权重到岸。
         """
         if not isinstance(row, dict):
             return
         try:
+            # 统计批的 row 是 `{"it": n, "row": {...}}` 里**内层**那一份（可能没有 `it`）；
+            # `ledger_row_from_metrics` 用 row["it"] 当轮号。**外层轮号是权威**，覆盖之——
+            # 否则统计行要么进不了课程账本（D2 的 `training_log.jsonl` 半边静默缺失），要么
+            # 按内层一个不一致的旧 it 落位。
+            row = {**row, "it": int(it)}
             ev = ledger_row_from_metrics(row, run_id=run_id, source="offline_backfeed")
+            if ev is not None and not weights_landed:
+                # 显式标记：这个 it 只有读数、没有权重。读方（活动指针 / resume / 门禁）
+                # 必须能把它与真正落过权重的那一轮分开。
+                ev["parts"] = "metrics"
+                ev["weights_landed"] = False
             traj = self.jsonl_path.parent
             it_dir = traj / f"it{it}"
             pg = row.get("perGame")
@@ -678,6 +693,11 @@ class OfflineRoundsMixin:
                 continue
             kind = ev.get("event")
             if kind == "iteration":
+                # ★ 2026-10-24（评审 P0-2）：统计批写的是 `weights_landed=false` 的临时行。
+                #   把它当「已落轮次」会让 `best > it` 永久成立（统计比权重跑得快时，
+                #   活动权重指针再也不会推进）。
+                if ev.get("weights_landed") is False:
+                    continue
                 v = ev.get("iter")
             elif kind == "offline_artifact":
                 v = ev.get("it")

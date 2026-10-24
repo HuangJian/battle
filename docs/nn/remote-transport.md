@@ -6,6 +6,38 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §124 补传两档 + 漏轮统计：`every`/`anchors`、`?parts=metrics`、统计行身份（2026-10-24 · `plan/offline-deliver-full-and-gaps.plan.md` · 决策 `DECISIONS.md` §2026-10-24-goalnn-offline-deliver-two-modes）
+
+**两档，不是三档**。`anchor-full-rounds` 把形态定在写盘时（锚点轮整份、其余 delta），投递侧
+不再有「每轮整份 / 每轮 delta」可选——`full`/`bulk` 发的是同一批字节，已退场。现在只剩：
+
+| 档 | 每轮线上（均值） | 需求（15 s/轮） | 绝对下限（×4/3） |
+|---|---|---|---|
+| `every` | 405 KB（1/5 锚点 900 KB + 4/5 非锚点 282 KB） | 27 KB/s | 36 000 B/s |
+| `anchors` | 203 KB（1/5 锚点 + 每轮统计 ~24 KB） | 13.5 KB/s | 19 000 B/s |
+
+* **断连是独立一维**：60 s 内 ≥3 次（建连失败/传输中断/超时/5xx）⇒ `anchors`，与带宽无关；
+  **窗口按当前时间过期**（旧实现只在「下一次失败」时裁剪 ⇒ 恢复后永久卡 `anchors`）。
+* **轮周期**取最近 5 轮 `row.wall_sec` 的中位数（冷启动 15 s），`status()` 出 `round_period` /
+  `need_bps`；`_log_diag` 每拍带 `mode`/`avail`/`backlog`/`eta`。
+* **积压不设上限**：`_push_backlog` 的继续判据是 `pending()`（不是锚点），`every` 档一次
+  `_push_backlog` 能越过 `sync_cap` 把积压推空。
+
+**`?parts=metrics`（只带统计）**
+
+* 客户端：`_sync` 在「权重 todo 为空」时**仍要尝试**统计批（抖动期最常见的形状就是锚点已发完、
+  非锚点轮还欠着）；每批 ≤100 轮 / ≤200 KB（`perGame` 保留，实际约 4–8 轮/批）。
+* hub：`store_offline_metrics` 只写 `<run>/metrics.jsonl` + 课程 `training_log.jsonl`，
+  **不创建 `it-N/`**；幂等按 `(it, weights_fp)`；未知 parts 返回 400。
+* **统计行的身份**：课程账本里写 `parts="metrics"` + `weights_landed=false`；
+  `_ledger_has_newer_iter` 必须忽略它，否则统计跑在权重前面时活动权重指针永久冻结。
+* **统计欠账**：权重体已送达但体里没有 row（指纹不符）⇒ 记进 `delivered.json.metrics_owed`，
+  不能因为 `pending()` 不再列它就把统计静默丢；统计批成功才销账。
+
+**用例**：`tests/remote/test_deliver_mode.py`（两档/断连过期/锚点饿死/积压越过 sync_cap/无 row
+  不销账）· `tests/hub/test_offline_metrics.py`（落点/幂等/`weights_landed=false` 不冻结指针/
+  未知 parts 400）。真机 `tc` 的 D9/D10 仍未跑（本机无限速环境）。
+
 ## §123 离线 push 的 W6 收口：worker 重启恢复 + 控制台读面（2026-10-24 · `plan/push-mode-notebooks.plan.md` §8-W6 · 决策 `DECISIONS.md` §2026-10-23-push-mode-notebooks）
 
 W6 的三件（重启恢复同一单、控制台行、读面脱敏）落地。**协议形状一条没改**；真机 D1–D9

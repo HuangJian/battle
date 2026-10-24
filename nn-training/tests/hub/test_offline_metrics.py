@@ -93,6 +93,38 @@ def test_metrics_is_idempotent_by_it_and_fingerprint(tmp_path: Path) -> None:
     assert third["rows"] == 1
 
 
+def test_metrics_only_rows_do_not_freeze_the_active_pointer(tmp_path: Path) -> None:
+    """★ 评审 P0：统计行进课程账本时必须是 `weights_landed=false` 的临时行。
+
+    否则 `_ledger_has_newer_iter` 会把「统计跑在前面」读成「权重已落」，活动权重指针永久
+    停在旧轮。
+    """
+    store = _store(tmp_path)
+    store.store_offline_metrics({"run_id": RUN, "rows": [_row(10)]})
+    ledger = [
+        json.loads(ln)
+        for ln in store.jsonl_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    iters = [r for r in ledger if r.get("event") == "iteration"]
+    assert iters and iters[-1]["iter"] == 10
+    assert iters[-1]["weights_landed"] is False, "统计行必须可被读方识别为没有权重"
+    assert store._ledger_has_newer_iter(5) is False, "统计行不能冻结活动权重"
+    assert store._ledger_has_newer_iter(10) is False
+
+
+def test_unknown_parts_is_rejected_loudly() -> None:
+    """★ 评审 P2：未实现的 `?parts=weights/opt` 不能静默落进整轮分支。"""
+    from hub.offline_ingest import ingest_offline_artifact
+
+    status, res = ingest_offline_artifact(
+        None, "", {"run_id": RUN, "rows": [_row(1)]}, parts="weights"
+    )
+    assert status == 400
+    # 精确形状（不用子串判据：`tests/test_source_text_assert_budget.py` 在数这个）
+    assert res == {"error": "未知 parts='weights'（当前只支持 metrics）"}
+
+
 def test_metrics_rejects_untrusted_input_without_writing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     for body in (

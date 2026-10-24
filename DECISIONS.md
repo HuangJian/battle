@@ -9280,3 +9280,39 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   但 trainer 内存里是启动那刻的代码）。改课程文件同样只对**下一次**启动生效
   （`kickstart_ref` 在 `biz/hot_reload.py::RESTART_ONLY_FIELDS`）——本次事故里 17:10 改文件、
   18:06 第一条腿照旧被停，就是这条。
+## §2026-10-24-goalnn-offline-deliver-two-modes（2026-10-24，补传两档 + 漏轮统计身份）
+
+- **背景**：`plan/offline-deliver-full-and-gaps` 原按「每轮整份权重+opt」设计，但 2026-10-23 08:56
+  用户口径已改为「首轮和 eval 轮整份、其它轮 delta」（`DECISIONS §2026-10-23-goalnn-anchor-full-rounds`）。
+  投递侧因此只剩两种行为：**每轮都发**（形态写盘时定）与**只发锚点 + 每轮统计**。旧 `full`/`bulk`
+  两档发同一批字节，只留标签；其阈值（896 KB/轮 ⇒ 59.7 KB/s）也与真实均值（~405 KB/轮）不符。
+  同期评审发现四个会破坏需求的缺陷：断连窗口永不失效、`anchors` 档统计被 `todo` 空早退吃掉、
+  统计行进课程账本会冻结活动权重指针、权重体没带 row 时仍把统计销账。
+- **决定**：
+  1. 档位收敛为 `every`（≥36 KB/s，SAFETY 4/3）/ `anchors`（≥19 KB/s 或断连 ≥3/60 s）。
+     每轮字节按真实形态：`every` 405 KB、`anchors` 203 KB（`perGame` 统计保留）。
+  2. 断连窗口在 `disconnects` 读数处按当前时间裁剪；不再等下一次失败。
+  3. `_sync` 先算统计 `gap`，`todo` 为空也要尝试统计批。
+  4. 统计行写课程账本时带 `parts="metrics"` + `weights_landed=false`；
+     `_ledger_has_newer_iter` 忽略它们（活动权重只认真正落过权重的轮）。
+  5. 权重体没有 row ⇒ 该轮进 `delivered.json.metrics_owed`，统计批成功才销账；
+     `_metrics_gap` = `pending()` ∪ `metrics_owed`。
+  6. `_push_backlog` 的继续判据改为 `pending()`（`every` 档积压不再被 `sync_cap` 截断）；
+     `deliver_proc` 降级到线程模式时照传 `adaptive`/`metrics_parts`/`eval_every`；
+     `plan_handoff` 用课程的 `eval_every` 构造补传器。
+  7. `?parts=` 只实现 `metrics`；未知值返回 400，不静默落进整轮分支。
+- **否决的备选**：① 保留三档但让 `full` 在投递时展开非锚点 delta —— 会把 `anchor-full-rounds` 的
+  ~36% 省量归零，且无人察觉；② 统计行不标身份、靠「读方按 it 取最后一条」——活动权重指针会被
+  跑在前面的统计行永久冻结；③ 权重体无 row 时直接丢统计 —— 违反 R3/D11；④ 只把统计批挪到
+  `probe` 之前 —— 断网时每拍多一次 POST，且没有解决 `todo` 空早退；⑤ 对未知 `parts` 继续走整轮
+  分支 —— 客户端以为按件发、hub 却按整轮校验，错误信息离真因很远。
+- **违反后果**：三档回归 ⇒ 日志谎报「每轮整份」且阈值高估 3 倍；断连窗口不裁剪 ⇒ 一次 3 连断
+  让整段永久停在 `anchors`；统计行不标身份 ⇒ 活动权重指针冻结；无 row 销账 ⇒ 该轮统计永久丢。
+- **落点**：`nn-training/remote/deliver_mode.py` · `remote/offline_deliver.py` ·
+  `remote/deliver_parts.py` · `remote/deliver_ledger.py` · `remote/deliver_proc.py` ·
+  `remote/plan_handoff.py` · `hub/store_offline.py` · `hub/offline_ingest.py` ·
+  `tests/remote/test_deliver_mode.py` · `tests/hub/test_offline_metrics.py` ·
+  `plan/offline-deliver-full-and-gaps.plan.md` · `docs/nn/remote-transport.md §124`。
+- **验收**：`tests/remote` + `tests/hub` **2136 passed**（含新增断连过期/统计饿死/积压越过
+  `sync_cap`/无 row 不销账/统计行不冻结指针/未知 parts 400）；本机无 `tc`，D9/D10 的真机限速
+  仍欠。

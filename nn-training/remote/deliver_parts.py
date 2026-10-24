@@ -409,8 +409,10 @@ class DeliverMetricsMixin:
     `_metrics_unsupported`。
     """
 
-    #: 一批最多带多少轮 / 多少字节。为什么先发它：抖动期权重发不动时**读数也要到**（D11），
-    #: 而它 ~1 KB/轮、25 KB/s 档也过得去。
+    #: 一批最多带多少轮 / 多少字节。为什么先发它：抖动期权重发不动时**读数也要到**（D11）。
+    #: ⚠ 行里保留 `perGame`（与 `anchor-full-rounds` S6 一致）⇒ 实际约 24 KB/轮，
+    #: 200 KB 的批上限通常先于「100 轮」生效（约 4–8 轮/批）。`perGame` 一旦再摘掉，
+    #: 这里的字节模型与 `deliver_mode.BYTES_PER_ROUND["anchors"]` 必须同步改。
     METRICS_BATCH_ROUNDS = 100
     METRICS_BATCH_BYTES = 200 * 1024
 
@@ -422,6 +424,8 @@ class DeliverMetricsMixin:
     enabled: bool
     log: Callable[[str], None]
     _metrics_sent: set
+    #: 权重已到岸但体里没有 row 的轮次（评审 P1-7）。
+    _metrics_owed: set
     _metrics_stat: tuple
     metrics_parts: bool
     _metrics_unsupported: bool
@@ -429,10 +433,15 @@ class DeliverMetricsMixin:
     def _metrics_gap(self) -> list:
         """还没把统计送上 hub 的轮（升序）——**不分档**：统计不能等权重。
 
-        `full`/`bulk` 档下权重体自带 `row`，那些轮在投递成功后就记进 `_metrics_sent`
-        （`_sync` 里），所以这里的缺口只剩「权重还没发出去」的那些轮——正是积压轮的读数。
+        两个来源缺一不可：
+          * `pending()`：权重还没发出去的轮；
+          * `_metrics_owed`：权重已发出去、但体里**没有 row** 的轮（评审 P1-7）。它们已经从
+            `pending()` 消失，只有这本欠账能把它们捞回来（跨会话随 `delivered.json`）。
         """
-        return [it for it in self.pending() if it not in self._metrics_sent]  # type: ignore[attr-defined]
+        sent = self._metrics_sent
+        pending = self.pending()  # type: ignore[attr-defined]
+        owed: set[int] = getattr(self, "_metrics_owed", set())
+        return [it for it in sorted(set(pending) | owed) if it not in sent]
 
     def _post_metrics_batch(self, its: list, *, budget_sec: float | None = None) -> int:
         """把一批轮的**统计**（`row`）单独送到 hub（`?parts=metrics`），返回送达轮数。
@@ -470,7 +479,10 @@ class DeliverMetricsMixin:
             return 0
         if status in (200, 201):
             for r in body["rows"]:
-                self._metrics_sent.add(int(r["it"]))
+                it = int(r["it"])
+                self._metrics_sent.add(it)
+                # 统计欠账销掉（P1-7）：这一轮终于把 row 送出去了。
+                getattr(self, "_metrics_owed", set()).discard(it)
             self._metrics_stat = (n, len(raw))
             first, last = body["rows"][0]["it"], body["rows"][-1]["it"]
             self.log(

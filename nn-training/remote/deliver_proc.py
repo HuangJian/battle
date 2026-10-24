@@ -467,6 +467,11 @@ class DelivererProcess:
                 hub_lease=self.hub_lease,
                 worker_name=self.worker_name,
                 background=True,
+                # ★ 2026-10-24（评审 P1-6）：降级**不能**把新能力一起丢掉——子进程起不来时
+                #   这三项若缺，就退回「只发锚点、不发统计」的旧行为，而 §8.1 写的是「功能不退」。
+                adaptive=self._adaptive,
+                metrics_parts=self._metrics_parts,
+                eval_every=self._eval_every,
                 log=self.log,
             )
         self._fallback.start()

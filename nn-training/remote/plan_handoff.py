@@ -471,6 +471,9 @@ def open_run_context(
                     # ★ P0-1：outbox 分支在工厂里先于 hub_url/token 早退（见 `make_deliverer`）。
                     outbox_dir=outbox_dir or None,
                     floor_it=int(floor_it or 0),
+                    # ★ 2026-10-24（评审 P1-4）：`anchors` 档的兜底步长必须是**本课程的**
+                    #   `eval_every`，不能吃工厂缺省 5——`eval_every=1` 的课会因此只发 1/5 的轮。
+                    eval_every=int(getattr(course, "eval_every", 5) or 5),
                     log=log,
                 )
                 if (deliver or str(outbox_dir or "").strip())

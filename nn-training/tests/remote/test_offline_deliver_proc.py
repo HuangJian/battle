@@ -38,7 +38,7 @@ from remote import deliver_proc as dp
 from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import FINAL_NAME, read_state, round_path
 from remote.deliver_proc import DelivererProcess
-from remote.offline_deliver import SEG_END_KIND_ENV
+from remote.offline_deliver import SEG_END_KIND_ENV, OfflineDeliverer
 from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
 
 TOKEN = "sekret-proc"
@@ -566,6 +566,30 @@ def test_outbox_mode_child_writes_the_files_and_needs_no_hub(tmp_path: Path) -> 
     assert st["rounds"]["1"]["rev"] == 1 and st["rounds"]["2"]["rev"] == 1
     assert st["final_ready"] is True
     assert not any("降级" in m for m in logs), logs
+
+
+def test_thread_fallback_keeps_the_new_flags(tmp_path: Path) -> None:
+    """★ 评审 P1-6：降级到线程模式不能把 `adaptive`/`metrics_parts`/`eval_every` 丢掉。
+
+    §8.1 写的是「功能不退、只慢一档」；旧 fallback 构造时三项都没传，实际会退回
+    「只发锚点、不发统计」的旧行为。这里直接调 `_degrade`，不真起子进程。
+    """
+    d = DelivererProcess(
+        base_url="",  # 空 ⇒ fallback 不启线程，单测不碰网络
+        token="",
+        run_id=RUN,
+        artifacts_dir=tmp_path / "art",
+        adaptive=True,
+        metrics_parts=True,
+        eval_every=7,
+        log=lambda _m: None,
+    )
+    d._degrade("unit-test")
+    fb = d._fallback
+    assert isinstance(fb, OfflineDeliverer)
+    assert fb.adaptive is True
+    assert fb.metrics_parts is True
+    assert fb.eval_every == 7
 
 
 def test_outbox_boot_failure_degrades_to_in_process_and_still_writes(tmp_path: Path) -> None:

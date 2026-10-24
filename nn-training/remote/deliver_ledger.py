@@ -77,6 +77,9 @@ class DeliverLedgerMixin:
     #: 与 `_delivered`（权重件）**必须分开**：共用一本时「metrics 成功」会把「权重没发」
     #: 掩盖掉（`pending()` 就再也列不出那一轮了）。
     _metrics_sent: set[int]
+    #: 权重已到岸、但**体里没有 row** 的轮次（评审 P1-7）：它们的统计还欠着，
+    #: 而 `pending()` 已经不再列它们 ⇒ 必须单独持久化，否则永远补不回来。
+    _metrics_owed: set[int]
     _repost: set[int]
     _rejected: dict[int, str]
     _rejected_at: dict[int, float]
@@ -114,6 +117,9 @@ class DeliverLedgerMixin:
         for it in data.get("metrics") or []:
             if isinstance(it, int) and not isinstance(it, bool):
                 self._metrics_sent.add(it)
+        for it in data.get("metrics_owed") or []:
+            if isinstance(it, int) and not isinstance(it, bool):
+                self._metrics_owed.add(it)
         self._result_done = bool(data.get("result_done"))
         # 跨会话的两笔欠账（必须落盘；§10.3）：
         #   * `owed_reposts` —— 上一段没送出去的重投，**本会话直接接手**（那些轮次早已记账，
@@ -186,6 +192,7 @@ class DeliverLedgerMixin:
         """
         self._delivered.clear()
         self._metrics_sent.clear()
+        self._metrics_owed.clear()
         self._rejected.clear()
         self._rejected_fp.clear()
         self._rejected_at.clear()
@@ -233,6 +240,8 @@ class DeliverLedgerMixin:
                 "artifacts": sorted(self._delivered),
                 # ★ 2026-10-23：统计件单独一本（权重件 = `artifacts`，两本互不相掩）。
                 "metrics": sorted(self._metrics_sent),
+                #: 权重到了但体里没 row 的轮次（评审 P1-7）：统计欠账，跨会话续。
+                "metrics_owed": sorted(self._metrics_owed),
                 "result_done": self._result_done,
                 # 欠账（§10.3）：`owed_reposts` = 还没送达的重投（送达即销账）；`rejected` = 内容
                 # 拒收过的轮次 + 当时的权重指纹。两者都是**磁盘状态**：_repost 只住内存时，

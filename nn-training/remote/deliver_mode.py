@@ -1,27 +1,30 @@
-"""remote/deliver_mode.py — 补传**档位机**（`plan/offline-deliver-full-and-gaps` §3.0，2026-10-23）。
+"""remote/deliver_mode.py — 补传**档位机**（`plan/offline-deliver-full-and-gaps` §3.0，2026-10-24 修订）。
 
-## 为什么有这个文件
+## 为什么只有两档
 
 用户口径：**「网络顺畅就每一轮都回传；抖动严重就自动只发评估轮（整份 w/opt + 漏轮统计）；
-网络恢复后继续每一轮都回传」」。 而原实现 `offline_deliver._sync:1038` 无条件只取
-`pending_anchors()` —— 那是**降级档**的选法被当成了常态。
+网络恢复后继续每一轮都回传」**。
 
-档位必须是**观测结论**而不是旋钮：每一拍拿「实测吞吐 vs 本档每轮字节」判能不能跟上。
-本模块只有纯函数（无 IO、无时钟、无随机），时钟与记账由调用方提供 —— 便于单测把三档
-与断连判据逐条钉住。
-
-## 三档
+但「每一轮发什么」在 **2026-10-23** 已由 `plan/anchor-full-rounds` 定在**写盘时**：
+锚点轮（首轮 ∪ `it % eval_every == 0`）= 整份 weight + 整份 opt；其余轮 = delta。
+所以投递侧不再有「full（每轮整份）/ bulk（每轮 delta）」两档可选 —— 那两档发的是同一批
+字节，只留一个标签没有意义。真正能选的是：
 
 | 档 | 每轮线上字节 | 需要（15 s/轮） | 什么时候用 |
 |---|---|---|---|
-| `full` | 896 072（整份 w + 整份 opt） | 59.7 KB/s | 正常档（用户口径 >500 KB/s） |
-| `bulk` | 276 852（delta w + delta opt + row） | 18.5 KB/s | 晚高峰（用户口径 <50 KB/s） |
-| `anchors` | ~180 000（每 5 轮整份 + 每轮 metrics） | 12 KB/s | 断连 / 更慢 |
+| `every` | ~405 KB（1/5 锚点 896 KB + 4/5 非锚点 277 KB，含 row） | ~27 KB/s | 网络能跟上产生速率 |
+| `anchors` | ~203 KB（每 5 轮一次整份 + **每轮**统计 ~24 KB） | ~13.5 KB/s | 抖动 / 断连 / 更慢 |
+
+（`SAFETY = 4/3` ⇒ 绝对阈值 36 KB/s / 19 KB/s，见 `EVERY_MIN_BPS` / `ANCHORS_MIN_BPS`。）
+
+⚠ **不要**把 `full` 档理解成「每一轮都整份」：那需要把非锚点轮的 delta 在投递时重新展开，
+会让 `anchor-full-rounds` 的 ~36% 省量当场归零（`deliver_parts.full_parts_for` 因此是死代码，
+两个 docstring 都钉死不接线）。
 
 ## 断连是**独立一维**
 
 带宽判据在断连时失效：一件 896 KB 的合体包在 80% 处断掉，带宽再高也要重来 896 KB。
-所以 `disconnects ≥ DISCONNECT_MAX` 时无条件 `anchors`（且调用方分件发送）。
+所以 `disconnects >= DISCONNECT_MAX` 时无条件 `anchors`（且调用方分件发送）。
 
 ## 积压不参与判据（用户 2026-10-23 拍板：不设上限）
 
@@ -31,25 +34,28 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from statistics import median
 
-#: 每档每轮的**线上**字节（gz+base64 之后；2026-10-22 按真 `encode_*` 函数实测）。
+#: 每档每轮的**线上**字节（gz+base64 之后）。
+#: `every` = 5 轮窗口（1 锚点整份 896 072 + 4 非锚点 delta 276 852）/ 5 ≈ 400 604，
+#: 再加 `anchor-full-rounds` S6 的逐局明细（~4.3 KB/轮）⇒ 405 KB。
+#: `anchors` = 1/5 锚点整份（~179 KB/轮均）+ 每轮统计批（`perGame` 保留，~24 KB/轮）。
 BYTES_PER_ROUND: Mapping[str, int] = {
-    "full": 896_072,
-    "bulk": 276_852,
-    "anchors": 180_000,
+    "every": 405_000,
+    "anchors": 203_000,
 }
 
 #: 由「最完整」到「最精简」；`choose_mode` 取可用档里最靠前的那个。
-MODE_ORDER: tuple[str, ...] = ("full", "bulk", "anchors")
+MODE_ORDER: tuple[str, ...] = ("every", "anchors")
 
-#: 升档/降档的余量系数（4/3）：实测吞吐要能覆盖本档需求的 1.33 倍才考虑待在这一档。
+#: 升/降档的余量系数（4/3）：实测吞吐要能覆盖本档需求的 1.33 倍才待在这一档。
 SAFETY: float = 4.0 / 3.0
 
-#: 各档的下限（`BYTES_PER_ROUND / 15 s × SAFETY` = 79 650.8 / 24 653.1，**上取整到整 KB/s**）。
-#: ⚠ 判档用的是 `need_bps × SAFETY`（随轮周期变），这两个常量只做**读数与 D9 的绝对数字验收**
-#: ——它们比动态判据略严（差几百 B/s），所以用它们验收不会得出「常量说行、动态说不行」。
-FULL_MIN_BPS: int = 80_000
-BULK_MIN_BPS: int = 25_000
+#: 各档的下限（`BYTES_PER_ROUND / 15 s × SAFETY`，**上取整到整 KB/s**）：
+#: `every` = 405 000 / 15 × 4/3 = 36 000；`anchors` = 203 000 / 15 × 4/3 ≈ 18 044 ⇒ 19 000。
+#: ⚠ 判档用的是 `need_bps × SAFETY`（随轮周期变），这两个常量只做**读数与 D9 的绝对数字验收**。
+EVERY_MIN_BPS: int = 36_000
+ANCHORS_MIN_BPS: int = 19_000
 
 #: 断连判据：最近 `DISCONNECT_WINDOW_SEC` 内「建连失败 / 传输中断 / 超时」的次数。
 #: ⚠ **内容错（409/413/422）不算断连** —— 那是数据问题，不是链路。
@@ -67,6 +73,7 @@ def need_bps(mode: str, *, round_period_sec: float) -> float:
     """这一档在这条腿上需要的**持续**吞吐（bytes/s）。
 
     `round_period_sec <= 0` ⇒ 退回 `DEFAULT_ROUND_PERIOD_SEC`（不除零、不返回 inf）。
+    未知 mode ⇒ 按 `anchors` 算（最保守的已知档）。
     """
     period = float(round_period_sec or 0.0)
     if period <= 0:
@@ -80,28 +87,23 @@ def choose_mode(
     disconnects: int = 0,
     round_period_sec: float = DEFAULT_ROUND_PERIOD_SEC,
 ) -> str:
-    """下一拍该用哪个档（`full` > `bulk` > `anchors`，取能跟上的最完整档）。
+    """下一拍该用哪个档（`every` 能跟上就 `every`，否则 `anchors`）。
 
-    * `disconnects >= DISCONNECT_MAX` ⇒ **无条件 `anchors`**（与带宽无关，见模块 docstring）；
-    * `avail_bps` 为 `None`（冷启动：一次成功投递都还没有）⇒ **`bulk`**：
-      先用 277 KB 探一次路把吞吐测出来，下一拍再决定升不升 `full`。直接上 `full` 的话
-      首次就要赌 896 KB，慢链路必然先付一次超时。
+    * `disconnects >= DISCONNECT_MAX` ⇒ **无条件 `anchors`**（与带宽无关）；
+    * `avail_bps` 为 `None`（冷启动：一次成功投递都还没有）⇒ **`every`**：
+      初始档本来就是 `every`（用户口径：顺畅就每轮发）；慢链路会在头几拍以失败/断连
+      自然降档，不需要一个「先赌 277 KB」的中间档（那个档已经随 `bulk` 一起退场）。
     * `avail_bps <= 0`（测出来是零/负数）⇒ `anchors`。
     """
     if int(disconnects or 0) >= DISCONNECT_MAX:
         return "anchors"
     if avail_bps is None:
-        return "bulk"
+        return "every"
     avail = float(avail_bps)
     if avail <= 0:
         return "anchors"
-    # 阈值是**动态的**（`need_bps` 随轮周期变）：一条 60 s/轮的慢腿不该被「15 s/轮」的绝对阈值
-    # 钉死。`FULL_MIN_BPS` / `BULK_MIN_BPS` 只是**缺省轮周期（15 s）下的等价绝对阈值**——
-    # 写在这里是为了读数与单测能对得上（D9 直接拿 500/50/5 KB/s 三档验收）。
-    for mode in ("full", "bulk"):
-        want = need_bps(mode, round_period_sec=round_period_sec) * SAFETY
-        if avail >= want:
-            return mode
+    if avail >= need_bps("every", round_period_sec=round_period_sec) * SAFETY:
+        return "every"
     return "anchors"
 
 
@@ -130,7 +132,7 @@ def eta_text(backlog: int, *, mode: str, avail_bps: float | None) -> str:
 
 
 class ModeTracker:
-    """档位机的**状态**（两个滑窗 + 当前档 + 滞回计数）。
+    """档位机的**状态**（吞吐滑窗 + 断连滑窗 + 轮周期 + 当前档 + 滞回计数）。
 
     为什么单独一个类：`offline_deliver` 的 LOC 预算是 1000 行，而「滑窗怎么维护、滞回怎么算」
     是纯状态机，跟「怎么 POST」没有关系。零 IO（时钟与日志由调用方注入）。
@@ -138,6 +140,8 @@ class ModeTracker:
 
     #: 吞吐滑窗：最近几次成功投递的 Σbytes/Σ秒。
     WINDOW = 8
+    #: 轮周期滑窗：最近几轮 `row.wall_sec` 的中位数（plan §7.1）。
+    PERIOD_WINDOW = 5
 
     def __init__(
         self,
@@ -149,9 +153,11 @@ class ModeTracker:
         self.adaptive = bool(adaptive)
         self._now = now_fn
         self._log = log
-        self.mode = "anchors"
+        #: 自适应开启就从 `every` 起跑（用户口径：顺畅即每轮）；关掉 = 旧行为 `anchors`。
+        self.mode = "every" if self.adaptive else "anchors"
         self._deliveries: list[tuple[float, int]] = []
         self._fails: list[float] = []
+        self._periods: list[float] = []
         self._want = ""
         self._want_n = 0
 
@@ -163,8 +169,25 @@ class ModeTracker:
 
     def note_disconnect(self) -> None:
         now = self._now()
-        self._fails.append(now)
-        cutoff = now - DISCONNECT_WINDOW_SEC
+        self._fails.append(float(now))
+        self._prune_fails(now)
+
+    def note_round_period(self, sec: object) -> None:
+        """记一轮的墙钟长度（`row.wall_sec`）；非法值忽略（不猜、不抛）。"""
+        if isinstance(sec, bool) or not isinstance(sec, (int, float, str)):
+            return
+        try:
+            v = float(sec)
+        except (TypeError, ValueError):
+            return
+        if v <= 0:
+            return
+        self._periods.append(v)
+        if len(self._periods) > self.PERIOD_WINDOW:
+            del self._periods[: len(self._periods) - self.PERIOD_WINDOW]
+
+    def _prune_fails(self, now: float) -> None:
+        cutoff = float(now) - DISCONNECT_WINDOW_SEC
         self._fails = [t for t in self._fails if t >= cutoff]
 
     # ---- 读数 ----
@@ -177,13 +200,25 @@ class ModeTracker:
 
     @property
     def disconnects(self) -> int:
+        # ★ 2026-10-24 评审 P0：窗口必须在这里按当前时间裁剪。只在 `note_disconnect()` 里裁剪
+        #   会让「3 次断连后网络恢复」永久停在 anchors —— 没有新失败就永远没有下一次裁剪。
+        self._prune_fails(self._now())
         return len(self._fails)
+
+    @property
+    def round_period_sec(self) -> float:
+        """最近 5 轮 `wall_sec` 的中位数；没有/全非法 ⇒ 缺省 15 s。"""
+        return float(median(self._periods)) if self._periods else DEFAULT_ROUND_PERIOD_SEC
 
     # ---- 每拍一次 ----
     def tick_mode(self) -> str:
         if not self.adaptive:
             return "anchors"
-        want = choose_mode(self.avail_bps, disconnects=self.disconnects)
+        want = choose_mode(
+            self.avail_bps,
+            disconnects=self.disconnects,
+            round_period_sec=self.round_period_sec,
+        )
         if want == self.mode:
             self._want, self._want_n = "", 0
             return self.mode
@@ -200,6 +235,7 @@ class ModeTracker:
             self._log(
                 f"补传档位切换：{old} → {self.mode}"
                 f"（avail={'-' if avail is None else f'{avail / 1024:.0f}K'}B/s"
+                f"｜周期 {self.round_period_sec:.0f}s"
                 f"｜断连 {self.disconnects}/{int(DISCONNECT_WINDOW_SEC)}s）"
             )
         return self.mode
