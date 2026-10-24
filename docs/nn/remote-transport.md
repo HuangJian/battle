@@ -23,6 +23,14 @@
 许可的启动入口（AGENTS §5），所以这条腿在现场**不可能**派单——注册 200 只是把节点写进 `nodes[]`，
 `enabled=true`、能力键也对，但没有派发器读它。W5 交付的 `--offline-push` 当时只存在于手工命令行。
 
+> **二次现场（同日 22:13，`colab-o`）**：worker 侧已修好（`★ 注册成功` → `★ 已自动注册` 都在），
+> 仍然零派单——因为 hub 是**旧控制台进程**拉起来的：`dashboard/src/stack/specs.ts` 改于 21:51，
+> 而控制台 bun 进程启动于 12:18 ⇒ 它按**旧代码**拼 argv（`-m hub.server … --discover`，无旗标）。
+> ⇒ **改 `dashboard/src/**` 之后，光重启 hub 不够：控制台自己也要重启**（它才是拼 argv 的那一方）。
+> 这条「重启了却没生效」现在两侧都有读数：hub 启动时**两态都打印**（`离线 push 派发已启用` /
+> `离线 push 派发**未挂载**（启动参数无 --offline-push）`），worker 注册成功后再探一次
+> `/admin/offline-push-workers`（404/409 ⇒ 一行「注册成功也不会收到派单 + 该怎么重启」）。
+
 * 修：`--offline-push` **恒带**（无开关）；`--push-config` 也从「仅 `hub_push`」改成**恒带**——
   两条腿共用同一份 `rl-config.json` 登记表，别再让离线腿吃模块路径推导出来的隐式缺省。
 * 为什么不需要开关：没有 `offline_push` 节点时 `eligible()` 为空 ⇒ 调度拍直接返回（10s 一拍空转）；
@@ -46,6 +54,12 @@ ping 它一次（push 节点的探活面是 `GET /ping`，**没有** `/v1/ping`�
 
 * 修：`common/protocol.sampler_nodes()`（能力键 ⇒ 剔），`trainer/dispatch.py`（rollout 节点门）与
   `trainer/eval_dispatch.py`（评估节点门）改用它。与 `push_worker_from_node()` 相反相成。
+
+**派单还差什么（2026-10-24 22:16 实测活 hub 的 `/offline/tasks?worker=push:colab-o`）**：三门课
+`y34-{trim,hitfix,loot0}` 都是 `claimable=true` 但 `state=no_pack`（`pending_export={}`）⇒ 即使派发器
+挂上，`_pack_for` 也只会先打「缺包 ⇒ 请控制台导包」并请控制台导一次包（`auto_handoff_decision` 三
+门实测都是 `trigger`）。⚠ 同时这三门课都 claimable ⇒ 一旦包就绪，派发器会**接管**它们（`claim_offline`
+= hold，协作派发被 hold 闸压住）；不想被接管的课要先停掉，只留要上云的那一门。
 
 **没做/未验证（不写成已做）**：重启 hub 后是否真能跑起来仍取决于业务侧——目标课程要 `claimable`、
 任务包要新鲜（`_pack_for` 缺包只会打印「请控制台导包」）；本机旁证要等真机重启 hub 后的

@@ -412,6 +412,15 @@ def main() -> None:
             f"在途={len(offline_disp.assignments.snapshot())}",
             flush=True,
         )
+    else:
+        # 不打印「没开」才是 2026-10-24 真机踩的坑：离线 worker 注册成功后一直 idle，
+        # 而 hub 日志里既没有「已启用」也没有「未启用」——两边都不说话。
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线 push 派发**未挂载**"
+            "（启动参数无 --offline-push）——离线 worker 注册进来也不会派单；"
+            "控制台节点页「离线 push」面板会显示「hub 未启用」",
+            flush=True,
+        )
     srv = make_server(
         hub, args.port, token, host=args.host, push=push_disp, offline_push=offline_disp
     )

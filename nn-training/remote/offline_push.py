@@ -41,7 +41,13 @@ from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
 from remote.offline_push_face import PushFaceState, make_face_server
-from remote.push_register import Registry, default_node_id, register_or_warn
+from remote.push_register import (
+    Registry,
+    default_node_id,
+    dispatch_mount_note,
+    probe_offline_dispatch,
+    register_or_warn,
+)
 from remote.push_tunnel import find_cloudflared, start_quick_tunnel, stop_proc, tunnel_url_of
 
 #: 每拍（秒）：刷新隧道 URL / 重注册 / 打一行状态。hub 的派发拍是 10s —— 比它快没必要
@@ -244,7 +250,10 @@ def run_push(
     cf_proc, cf_url = start_quick_tunnel(cf_bin, port, cf_log, log=log)
     if cf_url:
         log(f"★ 隧道 URL: {cf_url}")
-        _register_or_warn(reg, cf_url, push_token, log)
+        if _register_or_warn(reg, cf_url, push_token, log):
+            # 注册成功 ≠ 会派单：hub 没挂 `--offline-push` 时它会收下节点、写进 nodes[]，
+            # 然后一直不派（2026-10-24 真机）。这一句把「我在等活」与「没人能派活」分开。
+            _declare_dispatch_mount(reg, log)
     else:
         log(
             f"⚠ 隧道 URL 未取得（超时/出错）—— hub 推送将不可达；日志见 {cf_log}。"
@@ -314,13 +323,30 @@ def run_push(
     return 0
 
 
-def _register_or_warn(reg: Registry, url: str, push_token: str, log: Callable[[str], None]) -> None:
+def _register_or_warn(reg: Registry, url: str, push_token: str, log: Callable[[str], None]) -> bool:
     """首拍注册 + 人话横幅；失败给**可粘贴**的手工片段（与 GPU push 同一口径）。
 
     实现住在 `remote.push_register.register_or_warn`（**唯一一份**）：两条腿的差别只有 kind，
     而「注册失败该等多久 / 422 该怎么说」这种话术最容易被抄错一次就永远不同步。
     """
-    register_or_warn(reg, url, push_token, log)
+    return register_or_warn(reg, url, push_token, log)
+
+
+def _declare_dispatch_mount(reg: Registry, log: Callable[[str], None]) -> None:
+    """注册成功之后**再问一句**：hub 到底有没有派发器（没挂 = 本会话永远收不到派单）。
+
+    2026-10-24 真机：worker 侧一切正常（`★ 已自动注册` + `phase=idle`），而 hub 的 argv 里
+    没有 `--offline-push` ⇒ 派发器恒为 None ⇒ 云机上只剩「守候中…」。这条链上**没有任何
+    东西**会从 worker 的日志里看出「不是我在等活，是没人能派活」，所以这一句是必需的。
+    """
+    mounted = probe_offline_dispatch(
+        str(getattr(reg, "hub", "") or ""), str(getattr(reg, "hub_token", "") or "")
+    )
+    note = dispatch_mount_note(mounted)
+    if note:
+        log(note)
+    elif mounted:
+        log("★ hub 的离线 push 派发器在（/admin/offline-push-workers 200）——等它按能力键派单")
 
 
 __all__ = ["redacted_cfg", "run_push"]

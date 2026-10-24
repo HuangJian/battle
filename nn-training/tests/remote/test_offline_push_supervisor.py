@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 import remote.offline_push as sup
 import remote.offline_push_task as task_mod
 from remote.offline_push_face import PushFaceState
+from remote.push_register import NO_DISPATCH_NOTE
 
 
 class _FakeReg:
@@ -115,6 +116,59 @@ def test_run_push_registers_the_tunnel_then_unregisters_on_shutdown(
     assert proc.returncode is not None  # 隧道被收线
     assert logs  # 守候/收摊的日志面仍在（但不把判据挂在措辞上）
 
+
+def test_run_push_says_so_when_the_hub_has_no_dispatcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册成功 ≠ 会派单（2026-10-24 真机第二连击）。
+
+    hub 的 argv 没有 `--offline-push` 时，它会**收下**节点、写进 `nodes[]`、也能 ping 通本机，
+    然后一个单都不派；云机那边只剩「守候中…」。所以注册成功之后必须再问一句派发器在不在，
+    并把「确定没挂」翻成一行可操作的话（该怎么重启、为什么重启控制台）。
+    """
+    monkeypatch.setattr(sup, "find_cloudflared", lambda *a, **kw: "/bin/true")
+    proc = _Proc()
+    monkeypatch.setattr(
+        sup, "start_quick_tunnel", lambda *_a, **_kw: (proc, "https://abc-def.trycloudflare.com")
+    )
+    monkeypatch.setattr(sup, "probe_offline_dispatch", lambda *_a, **_kw: False)
+    logs: list[str] = []
+    stop = threading.Event()
+    stop.set()
+    rc = sup.run_push(
+        {"work_dir": str(tmp_path), "push_port": 0, "push_token": "t", "node_id": "offline-test"},
+        logs.append,
+        keepalive_stop=stop,
+        face_state=PushFaceState(work_dir=tmp_path / "face", log=logs.append),
+        registry=_FakeReg(),  # type: ignore[arg-type]
+        tick_sec=0,
+    )
+    assert rc == 0
+    assert NO_DISPATCH_NOTE in logs, "hub 没挂派发器时必须明说，别让人守着 idle 干等"
+
+
+def test_run_push_stays_quiet_when_the_dispatcher_is_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """挂载正常时**不**报那句警告（确定否定才说话，否则刷屏）。"""
+    monkeypatch.setattr(sup, "find_cloudflared", lambda *a, **kw: "/bin/true")
+    proc = _Proc()
+    monkeypatch.setattr(
+        sup, "start_quick_tunnel", lambda *_a, **_kw: (proc, "https://abc-def.trycloudflare.com")
+    )
+    monkeypatch.setattr(sup, "probe_offline_dispatch", lambda *_a, **_kw: True)
+    logs: list[str] = []
+    stop = threading.Event()
+    stop.set()
+    sup.run_push(
+        {"work_dir": str(tmp_path), "push_port": 0, "push_token": "t", "node_id": "offline-test"},
+        logs.append,
+        keepalive_stop=stop,
+        face_state=PushFaceState(work_dir=tmp_path / "face", log=logs.append),
+        registry=_FakeReg(),  # type: ignore[arg-type]
+        tick_sec=0,
+    )
+    assert NO_DISPATCH_NOTE not in logs
 
 def test_child_spawn_runs_a_real_process_and_reports_its_exit_code(tmp_path: Path) -> None:
     child = sup._Child()

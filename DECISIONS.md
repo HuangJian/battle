@@ -9411,3 +9411,18 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/remote-transport.md §125`。
 - **未验证（不写成已做）**：hub 重启后是否真派单还取决于业务侧（目标课程 `claimable` + 任务包
   新鲜）；真机旁证要等 `/admin/offline-push-workers` 与 `[hub-server offline-push]` 日志。
+
+### 补记（同日 22:13，`colab-o` 二次现场：注册成功仍然零派单）
+
+- **事实**：worker 侧修复已生效（`★ 注册成功 id=colab-o` + `★ 已自动注册` 两行都在），hub 仍零派发。
+  查现场：hub `--offline-push` 依旧缺席，但这次 hub 是 22:11 **经控制台**拉起的 —— 控制台 bun 进程
+  启动于 12:18，而 `dashboard/src/stack/specs.ts` 改于 21:51 ⇒ **它按旧代码拼 argv**。
+- **规则（补进本条）**：`dashboard/src/**` 的改动**不会热生效**；它启动的 hub/trainer 用的是旧参数。
+  ⇒ 改控制台代码后，**先重启控制台，再由它重启 hub**。只重启 hub 只会复现旧 argv。
+- **两侧都加读数（避免第三次）**：hub 启动时**两态都打印**（`离线 push 派发已启用` /
+  `离线 push 派发**未挂载**（启动参数无 --offline-push）`）；worker 注册成功后探一次
+  `/admin/offline-push-workers`（404/409 ⇒ 一行「注册成功也不会收到派单 + 该怎么重启」，
+  5xx/鉴权失败 ⇒ 不说话，不可知 ≠ 没有）。
+- **另一条前提（实测活 hub）**：三门课 `state=no_pack` ⇒ 派发器首拍只会「请控制台导包」
+  （`auto_handoff_decision` 三门都是 `trigger`），包好了才真正派单；且这三门都 `claimable`，
+  包一就绪就会被 `claim_offline` **接管**（hold 压住本地派发）——不想被接管的课要先停掉。

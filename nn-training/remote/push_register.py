@@ -534,15 +534,69 @@ def register_or_warn(
     return False
 
 
+# ---------------------------------------------------------------- 派发器是否挂载
+
+
+def probe_offline_dispatch(
+    hub: str,
+    token: str,
+    *,
+    timeout: float = 5.0,
+    urlopen: RegisterFn = urllib.request.urlopen,
+) -> bool | None:
+    """hub 上**离线 push 派发器**挂没挂（`GET /admin/offline-push-workers`）。
+
+    为什么 worker 要问这一句（2026-10-24 真机两连击）：注册成功只证明「hub 收下了节点、
+    能 ping 通你」——**不证明有人会派单**。hub 没带 `--offline-push` 时 `offline_push=None`，
+    这个读面回 **409**（老 hub 没有这条路由 ⇒ **404**），而 worker 那边会一直 `phase=idle`
+    地守候，日志上一个字都不提示。
+
+    返回：`True` = 已挂载；`False` = 没挂（404/409，注册进来也不会派单）；`None` = 问不到
+    （不可达/鉴权被拒）——不可知 ≠ 没有，调用方不许把 `None` 说成「没挂」。
+    """
+    base = _hub_base(hub)
+    if not base or not token:
+        return None
+    req = urllib.request.Request(
+        base + "/admin/offline-push-workers",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return int(getattr(resp, "status", 200) or 200) == 200
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 409):
+            return False
+        return None
+    except Exception:
+        return None
+
+
+#: 派发器没挂时给操作员的那句话（空串 = 不用说话）。**纯函数**：用例断返回值，不碰日志文本。
+NO_DISPATCH_NOTE = (
+    "⚠ hub 的离线 push 派发器**没挂载**（/admin/offline-push-workers 404/409）——"
+    "注册成功也**不会收到派单**：在控制台重启 hub-server（启动参数要带 --offline-push；"
+    "若控制台本身还是旧进程，先重启控制台——它按自己的代码拼 hub 的参数）"
+)
+
+
+def dispatch_mount_note(mounted: bool | None) -> str:
+    """探测结论 → 一句人话：没挂 ⇒ 那句警告；挂载/不知道 ⇒ 空串（不编、也不刷屏）。"""
+    return NO_DISPATCH_NOTE if mounted is False else ""
+
+
 __all__ = [
     "FIRST_REGISTER_STEP_SEC",
     "FIRST_REGISTER_WAIT_SEC",
+    "NO_DISPATCH_NOTE",
     "RETRY_LADDER",
     "Registry",
     "build_register_payload",
     "classify_error",
     "default_node_id",
+    "dispatch_mount_note",
     "manual_snippet",
+    "probe_offline_dispatch",
     "register",
     "register_or_warn",
     "should_register",

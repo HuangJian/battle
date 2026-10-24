@@ -21,7 +21,9 @@ from remote.push_register import (
     Registry,
     build_register_payload,
     default_node_id,
+    dispatch_mount_note,
     manual_snippet,
+    probe_offline_dispatch,
     register,
     register_or_warn,
     should_register,
@@ -458,3 +460,44 @@ def test_registry_first_attempt_success_stays_quiet() -> None:
     reg = _reg(_Steps(fails=0), clock, msgs)
     assert reg.ensure("https://t.trycloudflare.com", "sek", force=True) is True
     assert msgs == [], "首次成功不该有任何日志（横幅在调用方）"
+
+
+# ---------------------------------------------------------------- 派发器是否挂载
+
+
+def test_probe_offline_dispatch_reads_the_mount_as_a_three_state() -> None:
+    """`/admin/offline-push-workers` 的三种应答 ⇒ True / False / None（不可知 ≠ 没有）。"""
+    ok = probe_offline_dispatch("https://hub.example", "tok", urlopen=_opener(_Resp({"workers": []})))
+    assert ok is True
+    for code in (404, 409):
+        assert (
+            probe_offline_dispatch(
+                "https://hub.example", "tok", urlopen=_opener(exc=_http_error(code))
+            )
+            is False
+        ), code
+    # 5xx / 401 = 问不到：不许把「hub 有病」说成「没挂派发器」
+    for code in (500, 401, 403):
+        assert (
+            probe_offline_dispatch(
+                "https://hub.example", "tok", urlopen=_opener(exc=_http_error(code))
+            )
+            is None
+        ), code
+    assert (
+        probe_offline_dispatch(
+            "https://hub.example", "tok", urlopen=_opener(exc=urllib.error.URLError("down"))
+        )
+        is None
+    )
+    # 缺 hub/token ⇒ 不发请求
+    calls: list = []
+    assert probe_offline_dispatch("", "tok", urlopen=_opener(_Resp({}), calls=calls)) is None
+    assert calls == []
+
+
+def test_dispatch_mount_note_only_speaks_on_a_definite_negative() -> None:
+    """只有「确定没挂」才说话；挂载/不可知都闭嘴（纯函数 ⇒ 用例断返回值，不碰日志文本）。"""
+    assert dispatch_mount_note(False) != ""
+    assert dispatch_mount_note(True) == ""
+    assert dispatch_mount_note(None) == ""
