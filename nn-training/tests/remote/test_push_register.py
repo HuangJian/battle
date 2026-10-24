@@ -23,6 +23,7 @@ from remote.push_register import (
     default_node_id,
     manual_snippet,
     register,
+    register_or_warn,
     should_register,
     unregister,
 )
@@ -326,3 +327,134 @@ def test_registry_without_hub_token_warns_and_does_not_send() -> None:
     assert reg.ensure("https://a", "sek") is False
     assert calls == []
     assert msgs, "未配置时必须说一句（不能静默）"
+
+
+# ---------------------------------------------------------------- 首拍注册（就绪窗口）
+
+
+class _Steps:
+    """前 `fail` 次抛 422，之后 200（模拟 quick tunnel 边缘刚就绪）。"""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.calls = 0
+
+    def __call__(self, req, timeout=None):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise _http_error(422)
+        return _Resp({"action": "created", "capabilities": ["offline_push"]})
+
+
+class _ClockWithSleep(_Clock):
+    """可推进的钟：`sleep(n)` 直接把时间拨 n 秒（用例不真睡）。"""
+
+    def __init__(self, t: float = 1000.0) -> None:
+        super().__init__(t)
+        self.slept: list[float] = []
+
+    def sleep(self, n: float) -> None:
+        self.slept.append(float(n))
+        self.t += float(n)
+
+
+def _reg(opener, clock: _Clock, msgs: list[str], kind: str = "offline_push") -> Registry:
+    return Registry(
+        hub="https://hub.example",
+        hub_token="hub-secret",
+        node_id="offline-colab",
+        kind=kind,
+        log=msgs.append,
+        urlopen=opener,
+        now_fn=clock,
+    )
+
+
+def test_register_or_warn_retries_through_a_not_yet_ready_tunnel() -> None:
+    """2026-10-24 真机：首拍 422（边缘未就绪）→ 15s 后才成功且**打了一行都没有**。
+
+    现在：窗口内就地快重试，成功时给横幅；窗口内没退避就没有手工片段（别把人吓去手工登记）。
+    """
+    clock = _ClockWithSleep()
+    opener = _Steps(fails=2)
+    msgs: list[str] = []
+    reg = _reg(opener, clock, msgs)
+    assert (
+        register_or_warn(
+            reg, "https://t.trycloudflare.com", "sek", msgs.append, sleep=clock.sleep, now=clock
+        )
+        is True
+    )
+    assert opener.calls == 3, "两次 422 之后第三次就该成功（不是等主循环的 15s）"
+    assert len(clock.slept) == 2 and all(s > 0 for s in clock.slept)
+    joined = "\n".join(msgs)
+    assert "已自动注册" in joined
+    assert not any(line.strip().startswith('{"nodes"') for line in msgs), "窗口内成功不该再打手工片段"
+
+
+def test_register_or_warn_names_the_ping_gate_not_unreachable_hub() -> None:
+    """422 的文案必须是「hub 打不通你的隧道」，不是「hub 不可达/未配置」（现场就是这么误判的）。"""
+    clock = _ClockWithSleep()
+    opener = _Steps(fails=99)
+    msgs: list[str] = []
+    reg = _reg(opener, clock, msgs)
+    ok = register_or_warn(
+        reg,
+        "https://t.trycloudflare.com",
+        "sek",
+        msgs.append,
+        wait_sec=9.0,
+        step_sec=3.0,
+        sleep=clock.sleep,
+        now=clock,
+    )
+    assert ok is False
+    joined = "\n".join(msgs)
+    assert "探活门" in joined, "422 必须说成「hub 打不通你的隧道」而不是「不可达/未配置」"
+    assert "hub 不可达" not in joined
+    assert any(line.strip().startswith('{"nodes"') for line in msgs), "窗口用完要给可粘贴片段"
+    assert '"offline_push":true' in joined
+    # 窗口用完 ⇒ 退避梯子退回起点（后续主循环别继承这几次的步数）
+    assert reg._step == 0 and reg.next_at == 0.0
+    assert opener.calls >= 3
+
+
+def test_register_or_warn_says_nothing_about_hubs_when_it_is_not_configured() -> None:
+    """缺 hub/token = 配置错：不许烧就绪窗口，也不许说成「隧道没起来」。"""
+    clock = _ClockWithSleep()
+    calls: list = []
+    msgs: list[str] = []
+    reg = Registry(
+        hub="",
+        hub_token="",
+        node_id="offline-colab",
+        kind="offline_push",
+        log=msgs.append,
+        urlopen=_opener(_Resp({}), calls=calls),
+        now_fn=clock,
+    )
+    assert register_or_warn(reg, "https://t.trycloudflare.com", "sek", msgs.append) is False
+    assert calls == [], "配置不全时一次请求都不该发"
+    assert clock.slept == [], "不该烧就绪窗口"
+    assert any("未配置" in m for m in msgs)
+    assert any(line.strip().startswith('{"nodes"') for line in msgs)
+
+
+def test_registry_reports_success_after_a_failed_attempt() -> None:
+    """失败后转成功的那一拍必须自己说一句（原来静默 ⇒ 操作员在成功前 2s 掐了会话）。"""
+    clock = _ClockWithSleep()
+    opener = _Steps(fails=1)
+    msgs: list[str] = []
+    reg = _reg(opener, clock, msgs)
+    assert reg.ensure("https://t.trycloudflare.com", "sek", force=True) is False
+    assert reg.ensure("https://t.trycloudflare.com", "sek", force=True) is True
+    assert any("注册成功" in m for m in msgs), msgs
+
+
+def test_registry_first_attempt_success_stays_quiet() -> None:
+    """首次即成功不打「注册成功」——启动横幅由 `register_or_warn` 负责，同一件事不说两遍。"""
+    clock = _ClockWithSleep()
+    msgs: list[str] = []
+    reg = _reg(_Steps(fails=0), clock, msgs)
+    assert reg.ensure("https://t.trycloudflare.com", "sek", force=True) is True
+    assert msgs == [], "首次成功不该有任何日志（横幅在调用方）"

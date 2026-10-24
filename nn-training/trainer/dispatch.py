@@ -11,6 +11,7 @@ from collections import deque
 from pathlib import Path
 
 import common.distribution
+import common.protocol
 from common.log import log
 from common.platform_utils import rmtree_best_effort
 
@@ -216,7 +217,9 @@ class RolloutDispatcher:
                 f"({', '.join(dirty_files[:5])}{', …' if len(dirty_files) > 5 else ''}) — "
                 f"remote restart suppressed until committed+pushed"
             )
-        cfg_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+        # push 节点（`gpu_push` / `offline_push`）没有 `/v1/ping`：留在候选表里只会每轮换一条
+        # `ping failed — excluded this round`（判据见 `common/protocol.sampler_nodes`）。
+        cfg_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
         # F6：跨轮 dedup 计数（模块级 dict 的局部别名）
         dedup_streak = DEDUP_STREAK
 

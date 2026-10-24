@@ -41,7 +41,7 @@ from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
 from remote.offline_push_face import PushFaceState, make_face_server
-from remote.push_register import Registry, default_node_id, manual_snippet
+from remote.push_register import Registry, default_node_id, register_or_warn
 from remote.push_tunnel import find_cloudflared, start_quick_tunnel, stop_proc, tunnel_url_of
 
 #: 每拍（秒）：刷新隧道 URL / 重注册 / 打一行状态。hub 的派发拍是 10s —— 比它快没必要
@@ -315,15 +315,12 @@ def run_push(
 
 
 def _register_or_warn(reg: Registry, url: str, push_token: str, log: Callable[[str], None]) -> None:
-    """首拍注册 + 人话横幅；失败给**可粘贴**的手工片段（与 GPU push 同一口径）。"""
-    if reg.ensure(url, push_token, force=True):
-        log(f"★ 已自动注册节点 id={reg.node_id} kind=offline_push（hub 按能力键派发）")
-        return
-    if reg.give_up:
-        log("★ 自动注册已放弃（HUB_TOKEN 被拒）——用下面一条手工登记：")
-    else:
-        log("★ 自动注册未生效（hub 不可达/未配置）——用下面一条手工登记：")
-    log(f'  {{"nodes":[{manual_snippet(reg.node_id, url, push_token, "offline_push")}]}}')
+    """首拍注册 + 人话横幅；失败给**可粘贴**的手工片段（与 GPU push 同一口径）。
+
+    实现住在 `remote.push_register.register_or_warn`（**唯一一份**）：两条腿的差别只有 kind，
+    而「注册失败该等多久 / 422 该怎么说」这种话术最容易被抄错一次就永远不同步。
+    """
+    register_or_warn(reg, url, push_token, log)
 
 
 __all__ = ["redacted_cfg", "run_push"]

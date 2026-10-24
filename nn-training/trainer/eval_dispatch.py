@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
+import common.protocol
 from common.log import log
 from remote import weights_standard
 from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
@@ -974,7 +975,9 @@ class EvalDispatcher:
             alive = []
             # 并行 ping（保序）：串行墙钟 = Σ 每台延迟（两台超时即 ~7s），而节点门每轮
             # 重跑一次；并行 == 最慢一台（同 batch_eval，2026-09-19 审计 B2）。
-            enabled_nodes = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
+            # push 节点（`gpu_push` / `offline_push`）没有 `/v1/ping` ⇒ 不进评估候选
+            #（否则每轮评估都在日志里留一条「ping 失败/超时」，见 `sampler_nodes`）。
+            enabled_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
             pings = common.distribution.ping_nodes_parallel(enabled_nodes, timeout=status_timeout)
             for n, ping in zip(enabled_nodes, pings, strict=True):
                 nid = str(n.get("id") or n.get("url") or "?")

@@ -157,11 +157,21 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       '--traj-root',
       tmpLogsDir(),
       '--discover',
-      // hub 中介 push 派发（2026-09-18）：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给
-      // **登记在册**的 GPU worker（登记表 = rl-config 的 `gpu_push` 节点，控制台的 worker
-      // 登记入口回写的正是它 ⇒ 必须显式指向仓库那份 rl-config，而不是 per-course 目录）。
-      // 默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
-      ...(cfg.rl.hub_push ? ['--push', '--push-config', CONFIG_PATH] : []),
+      // 登记表来源（两条 push 腿共用一份）：GPU 中介 push（2026-09-18）与离线 push
+      // （2026-10-24）都读 rl-config 的 `nodes[]` —— 控制台的 worker 登记入口回写的正是它，
+      // 必须显式指向仓库那份，而不是 per-course 目录。**恒带**：以前只在 `hub_push` 时带，
+      // 于是离线腿只能吃 `DEFAULT_PUSH_CONFIG`（靠模块路径推导）这个隐式缺省。
+      '--push-config',
+      CONFIG_PATH,
+      // GPU 中介 push 派发：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给**登记在册**的
+      // GPU worker。默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
+      ...(cfg.rl.hub_push ? ['--push'] : []),
+      // 离线 push 派发（2026-10-24 真机事故）：`--offline-push` 此前**只存在于手工命令行**——
+      // 控制台起的 hub 从来不带它 ⇒ `hub.boot` 里 `offline_disp = None` ⇒ notebook 自动注册
+      // 成功、`nodes[]` 也写进去了，却永远零派单（现场：离线 worker 注册 200 后 2s 被掐）。
+      // 故这里**不设开关**：没有 `offline_push` 节点时这一路纯空转（`eligible()` 为空 ⇒ 直接
+      // 返回），而「有这台节点」本身就是操作员要派单的意图（节点表也是它自己注册进来的）。
+      '--offline-push',
     ],
     // cwd 钉死 REPO_ROOT：入口是包路径（`-m hub.server`）靠 PYTHONPATH，
     // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。

@@ -316,10 +316,18 @@ class Registry:
         self.capabilities: list[str] = []
         self.action = ""
         self.last_error = ""
+        #: 最近一次注册 HTTP 的应答码（0 = 没答）。**422 = hub 的 ping 门不过**（它连不到
+        #: 本节点，或 authKey 不符），与「hub 不可达」是两件事——调用方据此给人话。
+        self.last_status = 0
         self._warned = False
         self._closed = False
 
     # ---- 观测 ----
+    @property
+    def configured(self) -> bool:
+        """hub/token 齐不齐（缺任一把 = 自动注册不可用，重试也不会变好）。"""
+        return bool(self.hub and self.hub_token)
+
     def info(self) -> dict:
         return {
             "node_id": self.node_id,
@@ -356,6 +364,7 @@ class Registry:
         out = register(self._urlopen, self.hub, self.hub_token, payload, self._log)
         if not out["ok"]:
             self.last_error = str(out.get("error") or "")
+            self.last_status = int(out.get("status") or 0)
             if out.get("kind") == "auth":
                 self.give_up = True
                 self._log(
@@ -368,14 +377,27 @@ class Registry:
             self._log(f"注册未成功（{out.get('kind')}）——{int(wait)}s 后重试")
             return False
         # 成功：复位退避 + 记住「已注册的是什么」
+        # ★ 2026-10-24 真机事故：**失败后的成功必须自己说一句**。首拍撞上 quick tunnel 边缘
+        #   未就绪（hub 的 ping 门 422）时，重试成功的那个 tick 原来一行不打 —— 操作员只看到
+        #   「注册被拒 + 自动注册未生效」的横幅，然后在成功前 2s 把 cell 掐了。首次即成功不
+        #   打（启动横幅由调用方负责，别把同一件事说两遍）；url 变化与「失败后转成功」都打。
+        recovered = self._step > 0 or bool(self.last_error) or (
+            bool(self._state.get("url")) and self._state.get("url") != url
+        )
         self._step = 0
         self.next_at = 0.0
         self.registered = True
+        self.last_status = 0
         self.action = str(out.get("action") or "")
         self.last_error = ""
         self._state = {"url": url, "authKey": str(auth_key or "")}
         caps = list(out.get("capabilities") or [])
         self.capabilities = caps
+        if recovered:
+            self._log(
+                f"★ 注册成功 id={self.node_id}（{self.action or 'ok'}，caps="
+                f"{','.join(caps) or '-'}）——hub 已能经隧道到达本机"
+            )
         if self.kind and not caps:
             # 老 hub：认了请求（200）但不回能力回显 ⇒ 它没听懂 kind，能力键没写进去。
             self.old_hub = True
@@ -402,6 +424,12 @@ class Registry:
         self._log(f"unregister id={self.node_id}: {'ok' if ok else out.get('error')}")
         return ok
 
+    # ---- 退避 ----
+    def reset_backoff(self) -> None:
+        """把退避梯子退回起点（快重试窗口用完时用：别让一次密集重试抬高后续节拍）。"""
+        self._step = 0
+        self.next_at = 0.0
+
     # ---- 日志 ----
     def _warn_once(self, msg: str) -> None:
         if self._warned:
@@ -416,3 +444,107 @@ class Registry:
                     self.node_id, self._state.get("url", ""), self._state.get("authKey", ""), self.kind
                 )
             )
+
+
+# ---------------------------------------------------------------- 首拍注册（带就绪窗口）
+
+
+#: 首拍注册的就地快重试窗口（秒）。quick tunnel 的 URL 在 Cloudflare 边缘**注册完成前**就写进
+#: cloudflared 日志（`docs/nn/remote-transport.md` §7「quick tunnel 的 URL 在 edge 注册完成前就
+#: 写进日志」），而 hub 的探活门是**一发 3s** ⇒ 首拍必吃 422；主循环又要等 `TICK_SEC`(15s)。
+#: 2026-10-24 真机：13:40:21 拿到 URL → 13:40:23 422 → 13:40:38 才成功，操作员在 :40 掐了 cell。
+FIRST_REGISTER_WAIT_SEC = 45.0
+#: 窗口内的重试间隔（秒）。比 `RETRY_LADDER[0]`(2s) 略慢：hub 那发 3s ping 本身就要时间。
+FIRST_REGISTER_STEP_SEC = 3.0
+
+
+def register_or_warn(
+    reg: Any,
+    url: str,
+    auth_key: str,
+    log: Callable[[str], None],
+    *,
+    wait_sec: float = FIRST_REGISTER_WAIT_SEC,
+    step_sec: float = FIRST_REGISTER_STEP_SEC,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.time,
+) -> bool:
+    """首拍注册 + 人话横幅；失败 ⇒ 打印**可粘贴**的手工片段（GPU / 离线两条腿共用）。
+
+    为什么不是一个 `ensure(force=True)`（2026-10-24 真机事故）：quick tunnel 刚起来的几秒里 hub
+    的 ping 门必然 422，而「一次失败 + 一句『hub 不可达/未配置』」会让人以为整条链没配好——
+    真机现场就是这样把已经成功的注册当成失败掐掉的。这里给一个有界的就绪窗口（`wait_sec`），
+    窗口内就地快重试；窗口外才给手工片段，并按 **`last_status`** 说清楚是哪一类失败：
+
+    * `422` = 注册请求**到了** hub，但 hub 连不到本机隧道（或 authKey 不符）⇒ 不是 HUB_TOKEN；
+    * `auth`（401/403）= HUB_TOKEN 不对 ⇒ 重试无意义（`Registry` 已放弃）；
+    * 其余 = hub 不可达 / 没配。
+
+    返回是否注册成功（调用方不需要据此改变行为：注册是旁路）。
+
+    ★ 窗口只给 **422**：那是「hub 答了、但我的隧道还没在边缘就绪」，等几秒真会好；
+    「连不上 hub」（无应答 / 连接被拒 / 5xx）就地等没有信息增益 —— 交给主循环的退避梯子，
+    操作员也该立刻看到手工片段（真机上 hub 长时间不可达是另一类故障）。
+    """
+    if not url:
+        log("★ 没有隧道 URL，自动注册暂不可用——用下面一条手工登记：")
+        if reg.node_id:
+            log(f'  {{"nodes":[{manual_snippet(reg.node_id, "", auth_key, reg.kind)}]}}')
+        return False
+    if getattr(reg, "configured", True) is False:
+        # 缺 hub/token：重试一万次也不会好（`Registry.ensure` 只 WARN 一次）⇒ 直接给片段，
+        # 别把就绪窗口烧在这种「配置错」上（那 45s 里操作员以为在等隧道）。
+        log("★ 自动注册未配置（registry_url/hub_url 或 HUB_TOKEN 缺失）——用下面一条手工登记：")
+        log(f'  {{"nodes":[{manual_snippet(reg.node_id, url, auth_key, reg.kind)}]}}')
+        return False
+    deadline = now() + max(0.0, float(wait_sec))
+    told = False
+    while True:
+        if reg.ensure(url, auth_key, force=True):
+            log(
+                f"★ 已自动注册节点 id={reg.node_id} kind={reg.kind or '-'}"
+                "（hub 按能力键派发，无需手工登记）"
+            )
+            return True
+        if reg.give_up:
+            log("★ 自动注册已放弃（HUB_TOKEN 被拒）——用下面一条手工登记：")
+            break
+        status = int(getattr(reg, "last_status", 0) or 0)
+        if status != 422:
+            log("★ 自动注册未生效（hub 不可达/未配置）——用下面一条手工登记：")
+            break
+        if now() >= deadline:
+            log(
+                "★ 自动注册未生效：hub 收下了请求，但**它的探活门打不通本机隧道**"
+                f"（HTTP 422：{url}/ping 无应答，或 authKey 不符）——不是 HUB_TOKEN 的问题；"
+                "隧道就绪/换名后会自动重注册。要立刻接管就手工登记："
+            )
+            break
+        if not told:
+            told = True
+            log(
+                f"首拍注册未通过（HTTP {status}）——"
+                f"{int(wait_sec)}s 内快重试（quick tunnel 边缘就绪有延迟，先别手工介入）"
+            )
+        sleep(min(float(step_sec), max(0.2, deadline - now())))
+    # 窗口用完 ⇒ 退避梯子退回起点：后面由主循环按 2s→5s→… 接着试，别继承这 15 次的步数。
+    if hasattr(reg, "reset_backoff"):
+        reg.reset_backoff()
+    log(f'  {{"nodes":[{manual_snippet(reg.node_id, url, auth_key, reg.kind)}]}}')
+    return False
+
+
+__all__ = [
+    "FIRST_REGISTER_STEP_SEC",
+    "FIRST_REGISTER_WAIT_SEC",
+    "RETRY_LADDER",
+    "Registry",
+    "build_register_payload",
+    "classify_error",
+    "default_node_id",
+    "manual_snippet",
+    "register",
+    "register_or_warn",
+    "should_register",
+    "unregister",
+]

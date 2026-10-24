@@ -6,6 +6,51 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §125 离线 push 真机首测的三处断点：hub 从不挂 `--offline-push`、注册成功的 15s 静默、push 节点进采样表（2026-10-24 · `plan/push-mode-notebooks.plan.md` 真机验收 · 决策 `DECISIONS.md` §2026-10-24-push-mode-real-machine）
+
+**现场（Colab；notebook 日志是 UTC，本机 21:40）**：
+
+| 时刻 | 事实 | 出处 |
+|---|---|---|
+| 13:40:21 | quick tunnel URL 到手 | notebook 日志 |
+| 13:40:23 | 注册 **422**「节点 ping 不通」 | notebook 日志（hub 的 ping 门） |
+| **13:40:38** | 注册**其实成功了**（重试第二拍） | `tmp/hub-server.out`：`节点登记 id=offline-colab … action=updated（上轮干净收工 ⇒ 恢复 enabled=true）` |
+| 13:40:40 | worker 自己 `unregister`（操作员把 cell 掐了） | 同上：`节点收工 id=offline-colab` |
+| 之后 | **零派发**，`/admin/offline-push-workers` 不存在 | hub 进程 argv 无 `--offline-push` |
+
+**断点 1（阻塞整条腿）**：`dashboard/src/stack/specs.ts::hubServerSpec()` **从不追加 `--offline-push`**，
+而 `hub/boot.py:391` 只在 `args.offline_push` 为真时才构造 `OfflinePushDispatcher`。控制台是唯一
+许可的启动入口（AGENTS §5），所以这条腿在现场**不可能**派单——注册 200 只是把节点写进 `nodes[]`，
+`enabled=true`、能力键也对，但没有派发器读它。W5 交付的 `--offline-push` 当时只存在于手工命令行。
+
+* 修：`--offline-push` **恒带**（无开关）；`--push-config` 也从「仅 `hub_push`」改成**恒带**——
+  两条腿共用同一份 `rl-config.json` 登记表，别再让离线腿吃模块路径推导出来的隐式缺省。
+* 为什么不需要开关：没有 `offline_push` 节点时 `eligible()` 为空 ⇒ 调度拍直接返回（10s 一拍空转）；
+  而「`nodes[]` 里有这台节点」本身就是操作员要派单的意图（节点是它自己注册进来的）。
+
+**断点 2（观察面骗人）**：`Registry.ensure()` 在**失败后转成功**的那一拍**一行日志都不打**（只有启动
+那条横幅会说话），而 422 的横幅写的是「自动注册未生效（hub 不可达/未配置）」——真实现场是 hub
+**收到了**请求、只是它的 3s 探活门打不通刚起来的隧道（quick tunnel 的 URL 在边缘注册完成前就写进
+cloudflared 日志，见 §7）。操作员据此判定"失败"，在成功前 2s 掐了会话。
+
+* 修：`remote/push_register.py::register_or_warn()` 成为**唯一一份**首拍注册（GPU / 离线两腿共用，
+  各自只差 `reg.kind`）：**422 时**给 45s 就绪窗口就地快重试（窗口外按 `last_status` 说人话：
+  「hub 打不通你的隧道，不是 HUB_TOKEN」）；**连不上 hub / 5xx** 立刻给手工片段（就地等没有信息增益，
+  交给主循环的 2s→5s→… 退避梯子）；`auth`（401/403）直接放弃。
+* `Registry.ensure()` 增 `last_status`；失败后转成功（或换名重注册）由它自己打一行
+  `★ 注册成功 id=… caps=…`。首次即成功仍静默（启动横幅负责，同一件事不说两遍）。
+
+**断点 3（口径污染）**：自动注册把离线节点写进 `nodes[]` 之后，rollout 与 eval 的节点门每轮都去
+ping 它一次（push 节点的探活面是 `GET /ping`，**没有** `/v1/ping`），现场日志：
+`[dist] node offline-colab: ping failed — excluded this round` / `[eval] node offline-colab: ping 失败/超时`。
+
+* 修：`common/protocol.sampler_nodes()`（能力键 ⇒ 剔），`trainer/dispatch.py`（rollout 节点门）与
+  `trainer/eval_dispatch.py`（评估节点门）改用它。与 `push_worker_from_node()` 相反相成。
+
+**没做/未验证（不写成已做）**：重启 hub 后是否真能跑起来仍取决于业务侧——目标课程要 `claimable`、
+任务包要新鲜（`_pack_for` 缺包只会打印「请控制台导包」）；本机旁证要等真机重启 hub 后的
+`/admin/offline-push-workers` 与 `[hub-server offline-push]` 日志。
+
 ## §124 补传两档 + 漏轮统计：`every`/`anchors`、`?parts=metrics`、统计行身份（2026-10-24 · `plan/offline-deliver-full-and-gaps.plan.md` · 决策 `DECISIONS.md` §2026-10-24-goalnn-offline-deliver-two-modes）
 
 **两档，不是三档**。`anchor-full-rounds` 把形态定在写盘时（锚点轮整份、其余 delta），投递侧

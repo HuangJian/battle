@@ -39,6 +39,7 @@ from common.protocol import (
     push_job_wants_hub_push,
     push_worker_from_node,
     push_worker_id_of,
+    sampler_nodes,
 )
 from hub.admin import AdminRoutes
 from hub.server import _HubQueue, _JobStore, make_server
@@ -155,6 +156,27 @@ def test_push_worker_from_node_mirrors_trainer_side_filter() -> None:
     # id 缺省回落 url、concurrency 显式值生效（缺省 1 = 单 GPU 一次一份）
     w = push_worker_from_node({"url": "https://b", "gpu_push": True, "concurrency": 3})
     assert w is not None and w["id"] == "https://b" and w["concurrency"] == 3
+
+
+def test_sampler_nodes_drops_push_only_nodes() -> None:
+    """采样/评估候选表必须剔掉 push 节点（2026-10-24 真机：`offline-colab` 每轮被 ping 一次）。
+
+    push 节点（`gpu_push` / `offline_push`）的探活面是 `GET /ping`，**没有** `/v1/ping`；留在
+    候选表里只会让 rollout 每轮打一行 `ping failed — excluded this round`、eval 每轮打一行
+    `ping 失败/超时`。判据与 `push_worker_from_node` 相反相成（那边按能力键挑，这边按能力键剔）。
+    """
+    nodes = [
+        {"id": "self", "url": "http://127.0.0.1:8443"},
+        {"id": "kaggle", "url": "https://k.trycloudflare.com", "enabled": True},
+        {"id": "off", "url": "https://o.trycloudflare.com", "offline_push": True},
+        {"id": "gpu", "url": "https://g.trycloudflare.com", "gpu_push": True},
+        {"id": "off-disabled", "url": "https://o2", "offline_push": True, "enabled": False},
+        {"id": "plain-off", "url": "https://p", "enabled": False},
+        "nope",  # 形状不对的条目直接丢，不炸
+    ]
+    assert [n["id"] for n in sampler_nodes(nodes)] == ["self", "kaggle"]
+    assert sampler_nodes(None) == []
+    assert sampler_nodes({"nodes": []}) == []
 
 
 def test_push_workers_capability_filtering(tmp_path: Path) -> None:

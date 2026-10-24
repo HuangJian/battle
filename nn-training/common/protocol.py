@@ -481,6 +481,24 @@ def node_capabilities(node: object) -> list[str]:
     return [cap for cap in NODE_CAPABILITIES if node.get(cap)]
 
 
+def sampler_nodes(nodes: object) -> list[dict]:
+    """`nodes[]` 里**采样/评估侧能派活**的条目：`enabled` 且没声明任何 push 能力键。
+
+    为什么必须过滤（2026-10-24 真机）：push 节点跑的是 `remote/worker_server`（GPU）或离线
+    push 面，探活面是 `GET /ping`（Bearer），**没有** `/v1/ping`。自动注册把 `offline-colab`
+    写进 `nodes[]` 之后，rollout 与 eval 的每轮节点门都去 ping 它一次，换回一条
+    `ping failed — excluded this round` / `ping 失败/超时`——纯噪声，还把「节点表里有 6 台」
+    这种读数弄脏。判据与 `push_worker_from_node` 相反相成：那边按能力键挑，这边按能力键剔。
+    """
+    if not isinstance(nodes, (list, tuple)):
+        return []
+    return [
+        n
+        for n in nodes
+        if isinstance(n, dict) and n.get("enabled", True) and not node_capabilities(n)
+    ]
+
+
 def push_worker_from_node(node: object, capability: str = CAP_GPU_PUSH) -> dict | None:
     """rl-config `nodes[]` 条目 → push worker；不是该能力的 push 节点 → None。
 

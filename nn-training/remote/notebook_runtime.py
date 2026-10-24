@@ -426,21 +426,14 @@ def _push_registry(cfg: dict[str, Any], log) -> Any:
 
 
 def _register_or_warn(reg: Any, url: str, push_token: str, log) -> None:
-    """首拍注册 + 人话横幅；失败 ⇒ 打印**可粘贴**的 ★ 手工片段（而不是静默假成功）。"""
-    from remote.push_register import manual_snippet
+    """首拍注册 + 人话横幅；失败 ⇒ 打印**可粘贴**的 ★ 手工片段（而不是静默假成功）。
 
-    ok = reg.ensure(url, push_token, force=True)
-    if ok:
-        log(f"★ 已自动注册节点 id={reg.node_id} kind=gpu_push（hub 按能力键派发，无需手工登记）")
-        return
-    if reg.give_up:
-        log("★ 自动注册已放弃（HUB_TOKEN 被拒）——用下面一条手工登记：")
-    elif not url:
-        log("★ 没有隧道 URL，自动注册暂不可用——用下面一条手工登记：")
-    else:
-        log("★ 自动注册未生效（hub 不可达/未配置）——用下面一条手工登记：")
-    if url:
-        log(f'  {{"nodes":[{manual_snippet(reg.node_id, url, push_token, "gpu_push")}]}}')
+    实现住在 `remote.push_register.register_or_warn`（与离线 push 腿**同一份**）：两条腿的差别
+    只有 `reg.kind`，而「首拍 422 该不该重试 / 该怎么说」这种话术抄两份必然漂开。
+    """
+    from remote.push_register import register_or_warn
+
+    register_or_warn(reg, url, push_token, log)
 
 
 def _refresh_registration(reg: Any, cf_log: Path, cur_url: str, push_token: str, log) -> str:

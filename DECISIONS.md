@@ -9379,3 +9379,35 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （`test_landing_never_scans_the_os_temp_root`，先红后绿）· `docs/nn/engineering.md §86`。
 - **验收**：该用例 7.08s → 0.08s；`tests/hub/test_offline_backfeed.py` **15 passed**；nn python
   gate（pre-commit 全量）绿。
+
+## §2026-10-24-push-mode-real-machine（2026-10-24，离线 push 真机首测：派发器没接开机路径）
+
+- **背景**：`battle.offline.ipynb` 的 `mode=push` 真机首测"失败"（Colab，UTC 13:40 = 本机 21:40）。
+  现场日志停在「注册被拒 HTTP 422 → 自动注册未生效 → 手工片段」，之后什么都没有。
+- **根因（三处，按严重度）**：
+  1. **派发器根本没被启动**：`dashboard/src/stack/specs.ts::hubServerSpec()` 从不追加
+     `--offline-push`，而 `hub/boot.py:391` 只在它出现时才构造 `OfflinePushDispatcher`（现场 hub
+     argv 只有 `--discover`）⇒ 注册成功只是写进 `nodes[]`，没有任何东西会派单。控制台是唯一许可
+     启动入口 ⇒ 这条腿在真机上**结构上不可能**工作。W5 只交付了命令行旗标。
+  2. **成功是静默的、失败的话术是错的**：`Registry.ensure` 在「失败后转成功」那一拍不打日志，
+     而 422 的横幅写成「hub 不可达/未配置」。真机实录：13:40:23 被拒 → **13:40:38 已注册成功**
+     → 13:40:40 操作员把 cell 掐了。
+  3. **push 节点进了采样/评估候选表**：`offline_colab` 每轮被 `/v1/ping` 探一次（它只有 `/ping`），
+     `[dist] node offline-colab: ping failed — excluded this round`。
+- **决定**：① `--offline-push` **恒带**（`--push-config` 一并恒带，两条腿共用一份登记表）——
+  无 `offline_push` 节点时调度拍是纯空转，不设开关；② 首拍注册收敛成
+  `remote/push_register.register_or_warn()` 一份实现（GPU / 离线共用），带 45s 就绪窗口就地快重试，
+  按 `last_status` 分档说话（422 = 探活门，不是 token）；`Registry.ensure` 失败后转成功自己打一行；
+  ③ 新增 `common/protocol.sampler_nodes()`（按能力键剔），rollout 与 eval 的节点门改用它。
+- **否决的备选**：① 给离线派发加 `rl.offline_push` 开关（要动 rl-config schema + 控制台状态 +
+  迁移，而"节点存在"本身就是意图）；② worker 侧先自 ping 隧道做就绪门（多一条 HTTP 面，且
+  hub 的 422 本来就是同一件事的回声）；③ 靠主循环 15s 节拍重试（现场就是在这 15s 里被放弃的）；
+  ④ 手工登记 `skipPing`（把失败挪到派单时刻，还是打不通）。
+- **落点**：`dashboard/src/stack/specs.ts` · `dashboard/tests/hub-server-push-arg.test.ts` ·
+  `nn-training/remote/push_register.py` · `nn-training/remote/offline_push.py` ·
+  `nn-training/remote/notebook_runtime.py` · `nn-training/common/protocol.py` ·
+  `nn-training/trainer/dispatch.py` · `nn-training/trainer/eval_dispatch.py` ·
+  `tests/remote/test_push_register.py`（5 条新用例）· `tests/remote/test_hub_push_dispatch.py` ·
+  `docs/nn/remote-transport.md §125`。
+- **未验证（不写成已做）**：hub 重启后是否真派单还取决于业务侧（目标课程 `claimable` + 任务包
+  新鲜）；真机旁证要等 `/admin/offline-push-workers` 与 `[hub-server offline-push]` 日志。
