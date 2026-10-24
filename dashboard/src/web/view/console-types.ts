@@ -1,5 +1,5 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
-import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
+import { OfflinePushView, ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
 import { ContributionBrief, PpoWorkerLiveView } from './contribution'
 import { ErrorSummaryView } from './error-types'
 import { LoopQueueView } from './loop-queue'
@@ -397,6 +397,9 @@ export interface ConsoleStateView {
   loopQueue?: LoopQueueView | null
   /** push worker 登记视图（rl-config `nodes[].gpu_push` + 面板直探 + hub 侧探活）。 */
   workerRegistry?: PushWorkerRegistryView | null
+  /** 离线 push 派发器读面（hub `/admin/offline-push-workers`；W6-3）。`null` = 没有 hub 应答，
+   *  `mounted:false` = hub 在但没挂 `--offline-push`（两者都显空态，词不同）。 */
+  offlinePush?: OfflinePushView | null
   components: ComponentView[]
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：pill 行只读展示；无池/无槽位时缺省）。 */

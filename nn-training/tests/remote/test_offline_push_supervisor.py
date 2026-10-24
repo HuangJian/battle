@@ -255,3 +255,24 @@ def test_task_entry_is_loud_when_the_cfg_is_missing(
     with pytest.raises(SystemExit) as e:
         task_mod.main(["--task-dir", str(t), "--outbox", str(t / "outbox")])
     assert str(e.value).startswith("[offline-push] 读不到训练参数")
+
+
+def test_task_entry_validates_task_metadata_before_training(tmp_path: Path) -> None:
+    """子进程侧的元数据校验（plan §9.3 留的那条）：坏包在**开跑前**响亮退出。
+
+    两态都不得进 `run_one_course`：① 课名缺了（拿空课名开跑会把产物写到错误的落点）；
+    ② `task.json` 不是合法 JSON（服务端已校验过，但子进程是独立进程，坏文件只可能在两
+    者之间被换掉/写坏）。
+    """
+    t = _task_dir(tmp_path)
+    task = json.loads((t / "task.json").read_text(encoding="utf-8"))
+    del task["course"]
+    (t / "task.json").write_text(json.dumps(task), encoding="utf-8")
+    with pytest.raises(SystemExit) as e:
+        task_mod.main(["--task-dir", str(t), "--outbox", str(t / "outbox")])
+    assert str(e.value).startswith("[offline-push] task.json 缺 course")
+
+    (t / "task.json").write_text("{not-json", encoding="utf-8")
+    with pytest.raises(SystemExit) as e2:
+        task_mod.main(["--task-dir", str(t), "--outbox", str(t / "outbox")])
+    assert str(e2.value).startswith("[offline-push] 读不到任务元数据")

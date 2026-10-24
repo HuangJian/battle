@@ -838,3 +838,119 @@ export interface PushWorkerRegistryView {
 export function validWorkerId(id: string): boolean {
   return /^[A-Za-z0-9._-]{1,40}$/.test(id.trim())
 }
+
+// ────────────────────────── 离线 push 派发读面（W6） ──────────────────────────
+
+/** hub `/admin/offline-push-workers` 的一台离线 worker（`disp.state().workers.workers[]`）。
+ *
+ *  ★ 不含 `key`（authKey）：hub 侧读面已脱敏（plan/push-mode-notebooks §6.7）。控制台只回答
+ *  「哪台在线/忙、协议门过没过」，凭据回给浏览器没有任何用途。 */
+export interface OfflinePushWorkerView {
+  id: string
+  url: string
+  online: boolean
+  busy: boolean
+  queued: number
+  done: number
+  misses: number
+  /** 协议门（`/offline/push/state` 的 `proto`）：`null` = 还没问过 ⇒ 不派发（保守方向）。 */
+  protoOk: boolean | null
+  proto: string
+  lastErr: string
+}
+
+/** 一条在途 assignment（hub 侧账本；「谁在跑哪门课、拉到第几轮」的唯一读面）。 */
+export interface OfflinePushAssignmentView {
+  course: string
+  workerId: string
+  taskId: string
+  runId: string
+  phase: string
+  /** hub 已入账的最高一轮。 */
+  cursorIt: number
+  /** 已入账的轮数（`revs` 条目数；不与 `cursorIt` 混：地板以下的轮不算）。 */
+  rounds: number
+  updatedAt: number
+  conflict: string
+}
+
+/** 派发器本体（hub 应答脱敏后的投影）。 */
+export interface OfflinePushStateView {
+  capability: string
+  dispatched: number
+  failed: number
+  conflicts: number
+  assignments: OfflinePushAssignmentView[]
+  workers: OfflinePushWorkerView[]
+}
+
+/** 控制台视图：hub 基址 + 挂载判据 + 派发器状态。 */
+export interface OfflinePushView extends OfflinePushStateView {
+  /** hub 基址（null = 没有 hub 在应答——由调用方回 null，不构造本视图）。 */
+  hubUrl: string
+  /** hub-server 是否挂了离线 push 派发：`false` = hub 明确答了 409/404；`null` = 这条端点
+   *  本拍没答上（`/admin/queue` 有应答但派发器读面探测失败）——未知，不把没采到说成没启用。 */
+  mounted: boolean | null
+}
+
+/** 宽容解析 `/admin/offline-push-workers` 的派发器体；`capability` 缺失 ⇒ null（不是它的应答）。
+ *
+ *  hub 可能比控制台新/旧一个版本：坏条目跳过，不让整页 /api/state 500（与其余读面同规）。 */
+export function parseOfflinePushState(body: unknown): OfflinePushStateView | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = body as Record<string, unknown>
+  const capability = typeof raw.capability === 'string' ? raw.capability : ''
+  if (!capability) return null
+  const assignments: OfflinePushAssignmentView[] = []
+  if (Array.isArray(raw.assignments)) {
+    for (const item of raw.assignments) {
+      if (!item || typeof item !== 'object') continue
+      const r = item as Record<string, unknown>
+      const course = typeof r.course === 'string' ? r.course : ''
+      if (!course) continue
+      const revs = r.revs && typeof r.revs === 'object' ? (r.revs as Record<string, unknown>) : {}
+      assignments.push({
+        course,
+        workerId: typeof r.worker_id === 'string' ? r.worker_id : '',
+        taskId: typeof r.task_id === 'string' ? r.task_id : '',
+        runId: typeof r.run_id === 'string' ? r.run_id : '',
+        phase: typeof r.phase === 'string' ? r.phase : '',
+        cursorIt: num(r.cursor_it),
+        rounds: Object.keys(revs).length,
+        updatedAt: num(r.updated_at),
+        conflict: typeof r.conflict === 'string' ? r.conflict : '',
+      })
+    }
+  }
+  const workers: OfflinePushWorkerView[] = []
+  const reg =
+    raw.workers && typeof raw.workers === 'object' ? (raw.workers as Record<string, unknown>) : {}
+  const rows = Array.isArray(reg.workers) ? reg.workers : []
+  for (const item of rows) {
+    if (!item || typeof item !== 'object') continue
+    const w = item as Record<string, unknown>
+    const id = typeof w.id === 'string' ? w.id : ''
+    if (!id) continue
+    workers.push({
+      id,
+      url: typeof w.url === 'string' ? w.url : '',
+      online: w.online === true,
+      busy: w.busy === true,
+      queued: num(w.queued),
+      done: num(w.done),
+      misses: num(w.misses),
+      // 三态：只有显式 true/false 才算有结论（缺键 = 还没问过）。
+      protoOk: w.proto_ok === true ? true : w.proto_ok === false ? false : null,
+      proto: typeof w.proto === 'string' ? w.proto : '',
+      lastErr: typeof w.last_err === 'string' ? w.last_err : '',
+    })
+  }
+  return {
+    capability,
+    dispatched: num(raw.dispatched),
+    failed: num(raw.failed),
+    conflicts: num(raw.conflicts),
+    assignments,
+    workers,
+  }
+}

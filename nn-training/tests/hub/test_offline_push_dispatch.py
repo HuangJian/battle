@@ -19,6 +19,8 @@ import hashlib
 import json
 import threading
 import time
+import urllib.error
+import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,7 +38,7 @@ from common.protocol import (
 from hub import offline_push as disp_mod
 from hub.offline_ingest import ingest_offline_artifact
 from hub.offline_push import OfflinePushDispatcher, OfflinePushWorkers
-from hub.server import _HubQueue, _JobStore
+from hub.server import _HubQueue, _JobStore, make_server
 from remote.offline_push_face import PushFaceState, make_face_server
 
 TOKEN = "t0k3n"
@@ -736,3 +738,68 @@ def test_ingest_rejects_a_body_for_another_course_without_writing(tmp_path: Path
     )
     assert status == 409 and "course" in str(res.get("error") or "")
     assert not (_offline_root(hub) / "run-1").exists()
+
+
+# ------------------------------------------------------------------ 控制台读面（W6）
+
+
+def _admin_get(base: str, path: str) -> tuple[int, dict]:
+    req = urllib.request.Request(base + path, headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path) -> None:
+    """W6-3：控制台读面给「谁在跑哪门课 / 每台在不在线」，但**不回** authKey / 租约 token。"""
+    hub, _pack = _mk_hub(tmp_path)
+    disp, workers = _dispatcher(hub, tmp_path)
+    workers.add({"id": "w1", "url": "https://w1.example", "authKey": "sekret-key"})
+    disp.assignments.put(
+        {
+            "course": COURSE,
+            "worker_id": "w1",
+            "task_id": "0123456789abcdef",
+            "pack_sha256": "",
+            "pack_name": "",
+            "pack_path": "",
+            "run_id": "run-1",
+            "lease_token": "lease-secret",
+            "resume_it": 0,
+            "cursor_it": 3,
+            "revs": {"1": 0, "2": 0, "3": 0},
+            "phase": "running",
+            "conflict": "",
+            "created_at": 1.0,
+            "updated_at": 2.0,
+        }
+    )
+    srv = make_server(hub, 0, TOKEN, host="127.0.0.1", offline_push=disp)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        status, body = _admin_get(base, "/admin/offline-push-workers")
+        assert status == 200
+        assert body["capability"] == "offline_push"
+        rows = body["workers"]["workers"]
+        assert [w["id"] for w in rows] == ["w1"]
+        assert rows[0].keys().isdisjoint({"key"}), "读面不许回 authKey（plan §6.7）"
+        rec = body["assignments"][0]
+        assert rec["course"] == COURSE and rec["cursor_it"] == 3
+        assert rec.keys().isdisjoint({"lease_token"}), "租约 token 能续 TTL，不能回给读面"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        disp.stop()
+
+    # 没挂离线派发器的 hub ⇒ 409（控制台据此显示「未挂载」，不把整行画成空）
+    srv2 = make_server(hub, 0, TOKEN, host="127.0.0.1")
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    try:
+        base2 = f"http://127.0.0.1:{srv2.server_address[1]}"
+        assert _admin_get(base2, "/admin/offline-push-workers")[0] == 409
+    finally:
+        srv2.shutdown()
+        srv2.server_close()

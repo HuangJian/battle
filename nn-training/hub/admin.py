@@ -547,6 +547,47 @@ class AdminRoutes:
         self._json(info, 200)
 
     # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
+    #: 派发器读面**不回**的字段：`key` = worker 的 authKey（能直接调 worker 的凭据），
+    #: `lease_token`/`lease` = 租约（能续 TTL / 冒领活动起点；离线记前者、GPU 在途记后者）。
+    #: 控制台只需要「哪台在线/忙、协议门过没过」（plan/push-mode-notebooks §6.7「不回 authKey」）。
+    _PUSH_SECRET_FIELDS = ("key", "lease_token", "lease")
+
+    @staticmethod
+    def _scrub_rows(rows: list[Any]) -> list[Any]:
+        """逐行投影（非 dict 行原样保留：读面是观测面，一个坏行不该让整页 500）。"""
+        return [
+            {k: v for k, v in row.items() if k not in AdminRoutes._PUSH_SECRET_FIELDS}
+            if isinstance(row, dict)
+            else row
+            for row in rows
+        ]
+
+    @staticmethod
+    def _redact_push_state(doc: dict) -> dict:
+        """读面出口投影（浅拷贝到必要深度；不动派发器内部视图）。
+
+        **三种形状都要认**，少认一种就是「脱敏了但凭据照样出门」（2026-10-24 复核）：
+          · `PushWorkers.state()` 的 `workers` 是**列表**（`/admin/push-workers` 的 registry
+            与 `reload` 应答）；派发器 `state()` 里是 `{"workers": [...]}` 的**字典**；
+          · 派发器 `state()` 的 `inflight[]` 带 `key`/`lease`（在途推送的目标凭据）；
+          · 离线派发器 `state()` 的 `assignments[]` 带 `lease_token`。
+        """
+        out = dict(doc)
+        workers = out.get("workers")
+        if isinstance(workers, list):
+            out["workers"] = AdminRoutes._scrub_rows(workers)
+        elif isinstance(workers, dict):
+            w2 = dict(workers)
+            rows = w2.get("workers")
+            if isinstance(rows, list):
+                w2["workers"] = AdminRoutes._scrub_rows(rows)
+            out["workers"] = w2
+        for name in ("assignments", "inflight"):
+            rows = out.get(name)
+            if isinstance(rows, list):
+                out[name] = AdminRoutes._scrub_rows(rows)
+        return out
+
     def _admin_offline_push_workers(self) -> None:
         """`GET /admin/offline-push-workers`：在途 assignment + 每台 worker 的 proto/忙闲。
 
@@ -560,7 +601,7 @@ class AdminRoutes:
         if disp is None:
             self._json({"error": "离线 push 派发未启用（hub-server 需 --offline-push）"}, 409)
             return
-        self._json(disp.state(), 200)
+        self._json(self._redact_push_state(disp.state()), 200)
 
     def _admin_push_workers(self, set_action: bool = False) -> None:
         """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。
@@ -579,7 +620,15 @@ class AdminRoutes:
             self._json({"error": "push 派发未启用（hub-server 需 --push）"}, 409)
             return
         if not set_action:
-            self._json({"dispatcher": disp.state(), "registry": disp.workers.state()}, 200)
+            self._json(
+                {
+                    # 派发器 `state()` 的 `inflight[]` 带 `key`/`lease`，与登记表一样要脱敏。
+                    "dispatcher": self._redact_push_state(disp.state()),
+                    # 登记表带每台的 authKey（`key`）——读面出口一律脱敏（同 §6.7）。
+                    "registry": self._redact_push_state(disp.workers.state()),
+                },
+                200,
+            )
             return
         try:
             raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
@@ -594,7 +643,12 @@ class AdminRoutes:
         if action == "reload":
             changed = disp.workers.reload(force=True)
             self._json(
-                {"action": action, "changed": changed, "workers": disp.workers.snapshot()}, 200
+                {
+                    "action": action,
+                    "changed": changed,
+                    "workers": self._redact_push_state(disp.workers.state())["workers"],
+                },
+                200,
             )
             return
         if action == "add":

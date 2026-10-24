@@ -20,7 +20,14 @@ import { pidAlive } from '../../core/net'
 import { createSwrCache } from '../../core/swr-cache'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
-import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
+import {
+  type OfflinePushProbe,
+  hubOfflineAdmin,
+  hubOfflinePushWorkers,
+  hubPushWorkers,
+  liveHub,
+  withWorkerProbes,
+} from '../../stack/hub-admin'
 import { hubPushEnabled } from '../../stack/push-config'
 import { resolveRolloutSrc } from '../../stack/specs'
 import {
@@ -28,6 +35,7 @@ import {
   type HubPendingExportView,
   type HubQueueView,
   type OfflineLeaseView,
+  type OfflinePushView,
   type OfflineResultView,
   type OfflineRunView,
   type OfflineStalledView,
@@ -91,6 +99,9 @@ interface HubAdmin {
   /** 读面新鲜度（P1-11）：非 null = 这是**上一拍**的 hub 事实（探测失败但还在保值窗口内）。
    *  `null` = 本拍探测成功，或已经超窗退化（那时 `url === null`，显式未知）。 */
   stale: ReadStaleView | null
+  /** 离线 push 派发器读面（`/admin/offline-push-workers`；W6-3）。`null` = hub 不可达/探测失败
+   *  ——`mounted:false` 才是「hub 在应答但没挂 `--offline-push`」这个**确定**的否定事实。 */
+  offlinePush: OfflinePushProbe | null
   /** worker 行 = **当下 cfg** ⊕ 探活列（探活取自下面的探测缓存）。 */
   workers: PushWorkerView[]
 }
@@ -109,6 +120,8 @@ interface HubProbe {
   holds: Record<string, HubHoldView>
   pendingExports: Record<string, HubPendingExportView>
   offlineDisks: string[] | null
+  /** 离线 push 派发器读面（W6-3；`null` = 没探/不可达，`mounted:false` = hub 没挂派发）。 */
+  offlinePush: OfflinePushProbe | null
   /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
   workerPing: Map<string, { online: boolean | null; busy: boolean | null }>
 }
@@ -166,6 +179,10 @@ let hubLastGood: HubProbe | null = null
 let hubFailSince = 0
 /** 最近一次失败原因（诊断用；成功即清）。 */
 let hubLastError = ''
+/** 上一拍**真写过** `held` 缓存的探测对象（2026-10-24 复核：同一份快照里
+ *  `buildOverview`/`buildWorkerRegistry`/`buildOfflinePushView` 各调一次 `getHubAdmin`，
+ *  缓存命中时它们拿到的是**同一个** `HubProbe` ⇒ 按对象身份去重，`held` 缓存每拍只落盘一次。 */
+let heldWrittenProbe: HubProbe | null = null
 
 /** 陈旧保值窗口（P1-11）：连续失败超它就不再保旧值。取一个刷新周期（TTL）。 */
 export const HUB_KEEP_MS = OVERVIEW_TTL_MS
@@ -188,6 +205,7 @@ function emptyProbe(): HubProbe {
     holds: {},
     pendingExports: {},
     offlineDisks: null,
+    offlinePush: null,
     workerPing: new Map(),
   }
 }
@@ -237,9 +255,13 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
   // ★M4：接管面**就在这份探测里**（`/admin/queue` 每课行）——与面板同席写训练侧的
   // `held` 缓存（那个文件的写侧契约见 `actions/loop-control.ts` 末段：同一份事实两次读 =
   // 两个时刻的真相，所以必须与面板读的是同一拍）。写失败不抛（纯缓存，训练侧还有直问 hub 的主通道）。
-  writeHeldCache(
-    Object.entries(p.holds).map(([course, h]) => ({ course, lastProgressAt: h.lastProgressAt })),
-  )
+  // ★2026-10-24：一拍只写一次（同一份快照里有三个读面各调本函数，写的是同一份盘上文件）。
+  if (p !== heldWrittenProbe) {
+    writeHeldCache(
+      Object.entries(p.holds).map(([course, h]) => ({ course, lastProgressAt: h.lastProgressAt })),
+    )
+    heldWrittenProbe = p
+  }
   const inflightHolders = new Set<string>()
   for (const row of Object.values(p.queue?.courses ?? {})) {
     for (const d of row.inflightDetail) if (d.worker) inflightHolders.add(d.worker)
@@ -256,6 +278,7 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
     pendingExports: p.pendingExports,
     offlineDisks: p.offlineDisks,
     stale,
+    offlinePush: p.offlinePush,
     workers: workerRows(cfg).map((w) => ({
       ...w,
       online: p.workerPing.get(w.id)?.online ?? null,
@@ -274,11 +297,15 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
     withWorkerProbes(workerRows(cfg), cfg),
     liveHub(cfg, course),
   ])
-  // 两个 hub 端点**并行**探（登记表 + 离线进度）：串行会把冷算再拉一个超时窗口，
-  // 而它们互不依赖（同一个 hub 基址，各自独立问答）。
-  const [pushMap, offlineAdmin] = live
-    ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineAdmin(live.url, token)])
-    : [null, null]
+  // 三个 hub 端点**并行**探（登记表 + 离线进度 + 离线 push 派发）：串行会把冷算再拉一个
+  // 超时窗口，而它们互不依赖（同一个 hub 基址，各自独立问答）。
+  const [pushMap, offlineAdmin, offlinePush] = live
+    ? await Promise.all([
+        hubPushWorkers(live.url, token),
+        hubOfflineAdmin(live.url, token),
+        hubOfflinePushWorkers(live.url, token),
+      ])
+    : [null, null, null]
   const facts = holdFacts(live?.queue ?? null)
   return {
     url: live?.url ?? null,
@@ -293,6 +320,7 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
     // 的收官判据零新增网络、零新增探测；旧 hub 无 results 时 `parseOfflineAdmin` 已兜成 {}。
     offlineResults: offlineAdmin?.results ?? null,
     offlineStalled: offlineAdmin?.stalled ?? null,
+    offlinePush,
     workerPing: new Map(probed.map((w) => [w.id, { online: w.online, busy: w.busy }])),
   }
 }
@@ -317,6 +345,7 @@ export function invalidateHubAdmin(): void {
   hubLastGood = null
   hubFailSince = 0
   hubLastError = ''
+  heldWrittenProbe = null
 }
 
 /** **只读窥视**（`hubCache.peek()` 包装，**不触发探测**）——给「顺手要用上一拍的 hub 观测、
@@ -431,4 +460,26 @@ export async function buildWorkerRegistry(
       hubOnline: admin.pushMap ? (admin.pushMap.get(w.id) ?? null) : null,
     })),
   }
+}
+
+/** 离线 push 派发器的控制台读面（W6-3）：在途 assignment + 每台 worker 的忙闲/协议门。
+ *
+ *  `null` = 没有 hub 在应答（整块未知）；`mounted:false` 是 hub **明确**答了 409/404
+ *  （没挂 `--offline-push`）——两者在面板上词不同，别把「不可达」说成「没启用」。 */
+export async function buildOfflinePushView(
+  cfg: RlConfig,
+  viewing: string,
+): Promise<OfflinePushView | null> {
+  const admin = await getHubAdmin(cfg, viewing)
+  if (admin.url === null) return null
+  const probe = admin.offlinePush
+  const state = probe?.state ?? {
+    capability: '',
+    dispatched: 0,
+    failed: 0,
+    conflicts: 0,
+    assignments: [],
+    workers: [],
+  }
+  return { hubUrl: admin.url, mounted: probe ? probe.mounted : null, ...state }
 }

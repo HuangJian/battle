@@ -42,6 +42,7 @@ import { BcPanel } from './panels/BcPanel'
 import { CourseAdmin } from './panels/CourseAdmin'
 import { CourseMatrix } from './panels/CourseMatrix'
 import { WorkerRegistry } from './panels/WorkerRegistry'
+import { OfflinePushPanel } from './panels/OfflinePushPanel'
 
 import { WirePanel } from './panels/WirePanel'
 import { EvalSummary } from './panels/EvalSummary'
@@ -651,6 +652,9 @@ export function App({ initial }: AppProps) {
                 onAction={doAction}
                 readOnly={readOnly}
               />
+            </PanelErrorBoundary>
+            <PanelErrorBoundary>
+              <OfflinePushPanel view={stateView?.offlinePush ?? null} />
             </PanelErrorBoundary>
           </>
         ) : null}

@@ -74,9 +74,18 @@ def _task_zip(
 
 
 class _Server:
-    def __init__(self, tmp_path: Path, *, starter=None, **state_kw) -> None:
-        self.state = face.PushFaceState(
-            work_dir=tmp_path / "face", log=lambda _m: None, **state_kw
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        starter=None,
+        state: face.PushFaceState | None = None,
+        **state_kw,
+    ) -> None:
+        self.state = (
+            state
+            if state is not None
+            else face.PushFaceState(work_dir=tmp_path / "face", log=lambda _m: None, **state_kw)
         )
         self.state.set_starter(starter or (lambda _t, _d, _o: None))
         self.srv = face.make_face_server(self.state, 0, TOKEN, host="127.0.0.1")
@@ -242,7 +251,9 @@ def test_outbox_capacity_gate_stops_accepting_new_tasks(tmp_path: Path) -> None:
 # ────────────────────────── 读面：round / result / progress ──────────────────────────
 
 
-def _write_outbox(state: face.PushFaceState, *, it: int = 1, rev: int = 1) -> str:
+def _write_outbox(
+    state: face.PushFaceState, *, it: int = 1, rev: int = 1, final: bool = True
+) -> str:
     tdir = state.task_dir
     assert tdir is not None
     out = tdir / "outbox"
@@ -265,12 +276,13 @@ def _write_outbox(state: face.PushFaceState, *, it: int = 1, rev: int = 1) -> st
                         "oversize": False,
                     }
                 },
-                "final_ready": True,
+                "final_ready": final,
             }
         ),
         encoding="utf-8",
     )
-    (out / "final.json").write_text(json.dumps({"run_id": "r1", "it_end": it}), encoding="utf-8")
+    if final:
+        (out / "final.json").write_text(json.dumps({"run_id": "r1", "it_end": it}), encoding="utf-8")
     (out / "progress.json").write_text(
         json.dumps({"seq": 7, "at": 1.0, "kind": "round-done", "it": it, "done": 1, "total": 2}),
         encoding="utf-8",
@@ -379,6 +391,132 @@ def test_stale_incoming_dirs_are_swept(tmp_path: Path) -> None:
     state = face.PushFaceState(work_dir=work, log=lambda _m: None, clock=lambda: 10**9)
     assert state.task is None
     assert not stale.exists()
+
+
+# ────────────────────────── 重启恢复（W6） ──────────────────────────
+
+
+def _restarted(tmp_path: Path) -> face.PushFaceState:
+    """模拟进程重启：同一 work 目录再建一份状态（所有内存字段清零）。"""
+    return face.PushFaceState(work_dir=tmp_path / "face", log=lambda _m: None)
+
+
+def _ack(s: _Server, *, result: bool = True, upto_it: int = 1, revs: dict | None = None) -> int:
+    body = json.dumps(
+        {
+            "task_id": "0123456789abcdef",
+            "result": result,
+            "upto_it": upto_it,
+            "revs": revs if revs is not None else {"1": 1},
+        }
+    ).encode()
+    return s.req("/offline/push/ack", method="POST", data=body)[0]
+
+
+def test_restart_restores_the_unacked_task_and_duplicates_keep_its_outbox(tmp_path: Path) -> None:
+    """W6：重启后同一 task_id 的重投 = 202 duplicate，**不**删未 ack 的 outbox。"""
+    s1 = _Server(tmp_path)
+    try:
+        assert _submit(s1, _task_zip(tmp_path))[0] == 202
+        _write_outbox(s1.state)  # final_ready=True
+        out = s1.state.outbox
+        assert out is not None
+    finally:
+        s1.close()
+
+    s2 = _Server(tmp_path)
+    try:
+        assert s2.state.task is not None and s2.state.task["task_id"] == "0123456789abcdef"
+        assert s2.state.phase == "done" and s2.state.busy() is True
+        st, raw = s2.req("/offline/push/state")
+        doc = _json(raw)
+        assert st == 200 and doc["phase"] == "done" and doc["final_ready"] is True
+
+        st, raw = _submit(s2, _task_zip(tmp_path))
+        assert st == 202 and _json(raw)["status"] == "duplicate"
+        assert (out / "rounds" / "it0001.json").exists(), "未 ack 的轮次不许被重投删掉"
+        assert (out / "final.json").exists()
+
+        assert _ack(s2) == 200
+        assert s2.state.busy() is False
+    finally:
+        s2.close()
+
+    import remote.deliver_outbox as deliver_outbox
+
+    disk = deliver_outbox.read_state(out)
+    assert disk["final_acked"] is True and disk["result_acked"] is True
+    # 已收尾的目录 = 历史归档，再重启不再复活（否则会永远 busy）
+    assert _restarted(tmp_path).task is None
+
+
+def test_restart_marks_an_interrupted_task_failed_and_clears_it_after_ack(
+    tmp_path: Path,
+) -> None:
+    """没有 final 的中断单 ⇒ failed（不重跑）；hub 收完轮次 ack(result) 后跨重启不再复活。"""
+    s1 = _Server(tmp_path)
+    try:
+        assert _submit(s1, _task_zip(tmp_path))[0] == 202
+        _write_outbox(s1.state, final=False)
+    finally:
+        s1.close()
+
+    s2 = _Server(tmp_path)
+    try:
+        assert s2.state.phase == "failed" and s2.state.busy() is True
+        st, raw = s2.req("/offline/push/state")
+        doc = _json(raw)
+        assert doc["final_ready"] is False and doc["rounds"]["1"]["rev"] == 1
+        assert _ack(s2) == 200
+        assert s2.state.phase == "idle" and s2.state.busy() is False
+    finally:
+        s2.close()
+
+    assert _restarted(tmp_path).task is None, "result_acked 已落盘 ⇒ failed 单不该复活"
+
+
+def test_restart_reads_a_shutdown_stop_file_as_cancelled(tmp_path: Path) -> None:
+    """停机时 `_Child.request_stop` 写的 stop 文件 ⇒ 重启后是 cancelled（不是 failed）。"""
+    s1 = _Server(tmp_path)
+    try:
+        assert _submit(s1, _task_zip(tmp_path))[0] == 202
+        _write_outbox(s1.state, final=False)
+        tdir = s1.state.task_dir
+        assert tdir is not None
+        (tdir / "stop").write_text("shutdown\n", encoding="utf-8")
+    finally:
+        s1.close()
+    assert _restarted(tmp_path).phase == "cancelled"
+
+
+def test_restart_restores_only_the_newest_task_dir(tmp_path: Path) -> None:
+    """一次只跑一单 ⇒ 更老的未收尾目录是历史孤儿，不能拿它把 worker 钉死。"""
+    for name, ts in (("old", 1.0), ("new", 2.0)):
+        tdir = tmp_path / "face" / "tasks" / name
+        (tdir / "outbox").mkdir(parents=True)
+        (tdir / "task.json").write_text(
+            json.dumps({"task_id": name, "course": "c5-gae"}), encoding="utf-8"
+        )
+        (tdir / "outbox" / "state.json").write_text(
+            json.dumps({"rounds": {}, "final_ready": False}), encoding="utf-8"
+        )
+        os.utime(tdir / "task.json", (ts, ts))
+    state = face.PushFaceState(work_dir=tmp_path / "face", log=lambda _m: None)
+    assert state.task is not None and state.task["task_id"] == "new"
+    assert state.outbox == tmp_path / "face" / "tasks" / "new" / "outbox"
+
+
+def test_a_settled_task_can_be_dispatched_again_with_the_same_id(
+    tmp_path: Path, srv: _Server
+) -> None:
+    """已 ack 的同 id 重投是 hub 的**下一次派单**（锚点未前进时 id 不变），必须真收下。"""
+    assert _submit(srv, _task_zip(tmp_path))[0] == 202
+    srv.state.note_child_exit(0)
+    assert _ack(srv, upto_it=-1, revs={}) == 200
+    st, raw = _submit(srv, _task_zip(tmp_path))
+    assert st == 202, raw
+    assert _json(raw)["status"] == "accepted"
+    assert srv.state.phase == "running" and srv.state.busy() is True
 
 
 def test_course_parser_matches_the_export_convention() -> None:

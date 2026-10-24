@@ -251,6 +251,32 @@ def test_final_is_deleted_only_when_result_is_acknowledged(tmp_path: Path) -> No
     assert read_state(out)["final_acked"] is True
 
 
+def test_result_ack_without_a_final_is_a_terminal_marker_that_survives_a_restart(
+    tmp_path: Path,
+) -> None:
+    """W6：`result=true` 是**整单**的终态 —— failed/cancelled 没有 final 也走这条。
+
+    face 重启后按盘上的 `result_acked` 跳过已收摊的目录（否则废弃单被复活成 busy，worker
+    永远不接下一单）。所以记号必须落在**盘上**，且经得起另一个写者的整份覆盖：
+    `_save_state` 的合并（`_merge_disk_acks`）要保住它，新实例也要从盘上读出来。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    out = tmp_path / "outbox"
+    ob = _outbox(tmp_path, root)
+    assert ob.sync() == 1
+    # 没写 final 的收摊（failed / cancelled）：`upto_it=0` 不删任何轮
+    got = ack_outbox(out, upto_it=0, result=True, revs={})
+    assert got["final_removed"] is False
+    st = read_state(out)
+    assert st["result_acked"] is True and st["final_ready"] is False
+    assert st["final_acked"] is False, "没有 final 时不许把两件事混成同一个记号"
+
+    # 「重启」= 新实例读同一份 outbox；它自己的任何一次整份写都不许把终态冲回去
+    again = _outbox(tmp_path, root)
+    again._save_state()
+    assert read_state(out)["result_acked"] is True
+
+
 def test_a_stale_save_cannot_resurrect_what_the_face_process_acked(tmp_path: Path) -> None:
     """F8：训练子进程拿着 ack **之前**的快照再整份写 ⇒ 必须并回服务进程写的 ack。
 

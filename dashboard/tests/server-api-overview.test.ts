@@ -341,6 +341,8 @@ function fakeHub(opts: {
   offline?: unknown
   pushWorkers?: unknown
   pushStatus?: number
+  offlinePush?: unknown
+  offlinePushStatus?: number
 }): {
   url: string
   stop: () => void
@@ -363,6 +365,11 @@ function fakeHub(opts: {
       if (p === '/admin/push-workers') {
         return new Response(JSON.stringify(opts.pushWorkers ?? {}), {
           status: opts.pushStatus ?? 200,
+        })
+      }
+      if (p === '/admin/offline-push-workers') {
+        return new Response(JSON.stringify(opts.offlinePush ?? {}), {
+          status: opts.offlinePushStatus ?? 200,
         })
       }
       return new Response('{}', { status: 404 })
@@ -540,6 +547,103 @@ describe('buildWorkerRegistry（rl-config 为条目来源 + hub 侧探活列）'
     } finally {
       restore()
       hub.stop()
+    }
+  })
+})
+
+describe('buildOfflinePushView（hub 离线 push 派发器读面）', () => {
+  const PUSH_STATE = {
+    capability: 'offline_push',
+    dispatched: 3,
+    failed: 1,
+    conflicts: 0,
+    assignments: [
+      {
+        course: 'c4',
+        worker_id: 'gpu1',
+        task_id: 'abcdef0123456789',
+        run_id: 'run-1',
+        phase: 'running',
+        cursor_it: 7,
+        revs: { '1': {}, '2': {}, '7': {} },
+        updated_at: 1758000000,
+        conflict: '',
+      },
+    ],
+    workers: {
+      capability: 'offline_push',
+      workers: [
+        {
+          id: 'gpu1',
+          url: 'https://w1.example',
+          online: true,
+          busy: true,
+          queued: 1,
+          done: 2,
+          misses: 0,
+          proto_ok: true,
+          proto: 'offline-push/1',
+          last_err: '',
+        },
+      ],
+    },
+  }
+
+  it('在途单与 worker 投影：cursor/轮数来自账本，proto 三态原样透传', async () => {
+    const hub = fakeHub({ queue: QUEUE, offlinePush: PUSH_STATE })
+    const restore = withLiveHub(hub.url)
+    try {
+      const v = await api.buildOfflinePushView(cfg(hub.url), 'c4')
+      expect(v).not.toBeNull()
+      expect(v!.hubUrl).toBe(hub.url)
+      expect(v!.mounted).toBe(true)
+      expect(v!.capability).toBe('offline_push')
+      expect(v!.dispatched).toBe(3)
+      // rounds = revs 条目数（不与 cursor_it 混：地板以下的轮不算）
+      expect(v!.assignments[0]).toMatchObject({
+        course: 'c4',
+        workerId: 'gpu1',
+        cursorIt: 7,
+        rounds: 3,
+        phase: 'running',
+      })
+      expect(v!.workers[0]).toMatchObject({
+        id: 'gpu1',
+        online: true,
+        busy: true,
+        protoOk: true,
+        proto: 'offline-push/1',
+      })
+    } finally {
+      restore()
+      hub.stop()
+    }
+  })
+
+  it('409 ⇒ mounted=false（确定的否定）；200 但体不是派发器 ⇒ mounted=true + 空形状', async () => {
+    const noMount = fakeHub({ queue: QUEUE, offlinePushStatus: 409 })
+    const restore = withLiveHub(noMount.url)
+    try {
+      const v = await api.buildOfflinePushView(cfg(noMount.url), 'c4')
+      expect(v!.mounted).toBe(false)
+      expect(v!.assignments).toEqual([])
+      expect(v!.workers).toEqual([])
+    } finally {
+      restore()
+      noMount.stop()
+    }
+    // 端点答了 200 但不是派发器体（缺 capability）⇒ 挂载了，但状态读不懂 ⇒ 空形状（不编）
+    api.invalidateHubAdmin() // 换了一个假 hub：5s 缓存不能把上一拍的探测带过来
+    const badBody = fakeHub({ queue: QUEUE, offlinePush: {} })
+    const restore2 = withLiveHub(badBody.url)
+    try {
+      const v = await api.buildOfflinePushView(cfg(badBody.url), 'c4')
+      expect(v!.mounted).toBe(true)
+      expect(v!.capability).toBe('')
+      expect(v!.assignments).toEqual([])
+    } finally {
+      restore2()
+      badBody.stop()
     }
   })
 })

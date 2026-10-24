@@ -14,7 +14,13 @@ import { loadConfigSafe } from './config'
 import { courseFacts, discoverCourses, effectiveCourse } from './courses'
 import { getErrorSummary } from './error-registry'
 import { buildLoopQueueView } from './loop-queue'
-import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } from './overview'
+import {
+  buildOfflinePushView,
+  buildOverview,
+  buildWorkerRegistry,
+  getHubAdmin,
+  sharedTrainerAlive,
+} from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
@@ -118,9 +124,11 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
         paused: (loopQueue?.rows ?? []).some((r) => r.course === course && r.pausedIntent),
       }
     : null
-  const [overview, workerRegistry] = await Promise.all([
+  const [overview, workerRegistry, offlinePush] = await Promise.all([
     buildOverview(cfg, courses, course, training).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
+    // 离线 push 派发器读面（W6-3）：与上面两面共用同一份 5s 探测缓存，不新增网络。
+    buildOfflinePushView(cfg, course).catch(() => null),
   ])
   // 首页缩略（plan/worker-contribution-view W3b → plan/dashboard-reload-perf R1）：与
   // `/api/pool` **同一模块**的 compactSummary 输出（同一份聚合的裁剪，不是第二份计算）——
@@ -199,6 +207,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     trainingCourses: training,
     overview,
     workerRegistry,
+    offlinePush,
     loopQueue,
     courseLifecycle,
     components,

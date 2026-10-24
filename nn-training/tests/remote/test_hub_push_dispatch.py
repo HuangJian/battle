@@ -40,6 +40,7 @@ from common.protocol import (
     push_worker_from_node,
     push_worker_id_of,
 )
+from hub.admin import AdminRoutes
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from remote.worker_server import WorkerServerState, make_worker_server
@@ -921,6 +922,53 @@ def test_push_workers_admin_endpoint(tmp_path: Path, worker_factory) -> None:
         srv2.shutdown()
         srv2.server_close()
         th2.join(timeout=5)
+
+
+def test_admin_push_workers_read_face_never_returns_credentials(
+    tmp_path: Path, worker_factory
+) -> None:
+    """读面不回 `key`(authKey) / `lease` / `lease_token`（plan §6.7）。
+
+    2026-10-24 复核：`workers` 在**登记表**里是列表、在派发器 `state()` 里是字典 —— 只认一种
+    形状的脱敏等于没脱敏（第一版就是照字典写的，列表那条原样出门）。四种形状一起钉：GET 的
+    registry、`reload` 的 workers、派发器 `inflight[]`（`key`/`lease`）、离线 `assignments[]`。
+    """
+    hub = _hub(tmp_path, ["x2"])
+    ws = _workers_with(tmp_path, worker_factory)
+    ws.add({"id": "g1", "url": "https://w1.example", "authKey": "sekret-key"})
+    disp = _dispatcher(hub, ws)
+    srv = make_server(hub, 0, "sekret", host="127.0.0.1", push=disp)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        status, body = _get(base, "/admin/push-workers")
+        assert status == 200
+        row = body["registry"]["workers"][0]
+        assert set(row) & {"key", "authKey", "lease"} == set()
+        assert row["id"] == "g1" and row["url"] == "https://w1.example"  # 非凭据照旧
+        # `reload` 是读面的另一个出口（同一条登记表）：漏了它就是「刷新一下就把凭据带回家」
+        status, body = _post(base, "/admin/push-workers", {"action": "reload"})
+        assert status == 200 and set(body["workers"][0]) & {"key", "lease"} == set()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+    # 派发器 state() 的两种形状（纯投影，不启服务）：在途 rec / 离线 assignment
+    red = AdminRoutes._redact_push_state(
+        {
+            "workers": {"workers": [{"id": "g1", "key": "k1"}]},
+            "inflight": [{"job_id": "j", "key": "k2", "lease": "l2"}],
+            "assignments": [{"course": "x2", "lease_token": "lt"}],
+        }
+    )
+    assert set(red["workers"]["workers"][0]) & {"key"} == set()
+    assert set(red["inflight"][0]) & {"key", "lease"} == set()
+    assert set(red["assignments"][0]) & {"lease_token"} == set()
+    # 只删凭据，不连坐：id / job_id / course 这些读面要的字段必须还在
+    assert red["workers"]["workers"][0]["id"] == "g1"
+    assert red["inflight"][0]["job_id"] == "j" and red["assignments"][0]["course"] == "x2"
 
 
 # ------------------------------------------------------------------ hub HTTP 小工具

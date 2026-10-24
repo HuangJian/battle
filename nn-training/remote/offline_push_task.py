@@ -48,9 +48,14 @@ def _child_log(msg: str) -> None:
 
 
 def load_task(task_dir: Path) -> dict:
-    doc = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+    """读任务元数据；坏文件走与「读不到训练参数」同一条响亮出口（不是一段 traceback）。"""
+    path = task_dir / "task.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"[offline-push] 读不到任务元数据 {path}（{type(e).__name__}: {e}）") from e
     if not isinstance(doc, dict):
-        raise SystemExit(f"[offline-push] task.json 不是对象：{task_dir / 'task.json'}")
+        raise SystemExit(f"[offline-push] task.json 不是对象：{path}")
     return doc
 
 

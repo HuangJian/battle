@@ -53,6 +53,13 @@ try:  # pragma: no cover - 平台分支
 except ImportError:  # POSIX
     msvcrt = None  # type: ignore[assignment]
 
+#: POSIX 文件锁入口，**先取出来**再用（2026-10-24）：`fcntl` 在 win32 下不存在，新版 typeshed
+#: 也不给它 `flock`/`LOCK_*` ⇒ 直接 `fcntl.flock(...)` 会让跨平台 mypy 报「模块没有这个属性」
+#: （本仓门禁在 Windows 上跑）。取不到就走 msvcrt 分支，运行时语义不变。
+_FLOCK = getattr(fcntl, "flock", None) if fcntl is not None else None
+_LOCK_EX = getattr(fcntl, "LOCK_EX", 0) if fcntl is not None else 0
+_LOCK_UN = getattr(fcntl, "LOCK_UN", 0) if fcntl is not None else 0
+
 #: 状态文件（hub 的 `/state` 读面就是它 + `rounds/` 目录）。
 STATE_NAME = "state.json"
 #: 段末摘要的体（`result=true` 的 ack 才删）。
@@ -87,8 +94,8 @@ def _lock_state_file(path: Path) -> int | None:
     except OSError:
         return None
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+        if _FLOCK is not None:
+            _FLOCK(fd, _LOCK_EX)
         elif msvcrt is not None:
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
@@ -103,8 +110,8 @@ def _lock_state_file(path: Path) -> int | None:
 
 def _unlock_state_file(fd: int) -> None:
     try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+        if _FLOCK is not None:
+            _FLOCK(fd, _LOCK_UN)
         elif msvcrt is not None:
             os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
@@ -323,14 +330,20 @@ def _ack_outbox_locked(
         removed.append(it)
         rounds[key] = ent
     final_removed = False
-    if result and doc.get("final_ready"):
-        try:
-            (root / FINAL_NAME).unlink()
-            final_removed = True
-        except OSError:
-            final_removed = False
-        doc["final_acked"] = True
-        doc["final_ready"] = False
+    if result:
+        # ★W6：`result=true` = 「这单 hub 已全部收下」的**终态**（failed/cancelled 没有
+        # final 也走这条 ack）。在盘上留痕，face 重启时据此跳过已收尾的目录、不把废弃单
+        # 复活成 busy；与删 body 写在**同一次**原子落盘里（不存在中间崩溃窗口）。
+        doc["result_acked"] = True
+        doc["result_acked_at"] = float(time.time())
+        if doc.get("final_ready"):
+            try:
+                (root / FINAL_NAME).unlink()
+                final_removed = True
+            except OSError:
+                final_removed = False
+            doc["final_acked"] = True
+            doc["final_ready"] = False
     doc["rounds"] = rounds
     doc["updated_at"] = float(time.time())
     try:
@@ -415,6 +428,9 @@ class LocalOutboxDeliverer:
         self._final_obj: dict | None = None
         self._final_ready = False
         self._final_acked = False
+        #: hub 已对整单说了 result=true（含没有 final 的 failed/cancelled 收摊）——跨重启的
+        #: 终态记号，只由 `ack_outbox` 写、这里负责在整份覆盖写里保留它。
+        self._result_acked = False
         self._load_state()
 
     # ------------------------------------------------------------ 状态面（落盘 / 装载）
@@ -428,6 +444,7 @@ class LocalOutboxDeliverer:
             "owed_reposts": sorted(self._owed),
             "final_ready": bool(self._final_ready),
             "final_acked": bool(self._final_acked),
+            "result_acked": bool(self._result_acked),
             #: 本 outbox 的**地板**落盘（重启后不许因为「这次没传参」而把已跳过的历史轮重新物化）。
             "floor_it": int(self._floor_it),
         }
@@ -481,6 +498,8 @@ class LocalOutboxDeliverer:
             # 段末摘要已被 ack 收下并删除；内存不许把它复活成 ready（hub 会一直来拉）。
             self._final_ready = False
             self._final_acked = True
+        if disk.get("result_acked"):
+            self._result_acked = True
 
     def _note_size(self) -> None:
         """超 `OFFLINE_PUSH_OUTBOX_WARN_BYTES` 打**一行** WARN（每进程一次；检查本身也节流）。"""
@@ -518,6 +537,7 @@ class LocalOutboxDeliverer:
             }
         self._final_ready = bool(doc.get("final_ready"))
         self._final_acked = bool(doc.get("final_acked"))
+        self._result_acked = bool(doc.get("result_acked"))
         # 地板**第一次写入就定终身**（§6.4a）：构造参数只在 state 里还没有值时生效。
         saved = doc.get("floor_it")
         if isinstance(saved, int) and not isinstance(saved, bool):

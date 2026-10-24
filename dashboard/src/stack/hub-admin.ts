@@ -21,11 +21,13 @@ import type { RlConfig } from '../core/types'
 import {
   type HubQueueView,
   type OfflineAdminView,
+  type OfflinePushStateView,
   type PushWorkerView,
   type OfflineRunView,
   type WorkerErrorReport,
   parseHubQueue,
   parseOfflineAdmin,
+  parseOfflinePushState,
 } from '../web/view'
 
 /** GET 一个 hub 管理端点 → 解析后的 JSON；网络失败/非 2xx/坏 JSON → null。 */
@@ -177,6 +179,34 @@ export async function hubPushWorkers(
   return parsePushWorkerRegistry(
     await hubGet(`${url}/admin/push-workers`, token, HUB_PROBE_TIMEOUT_MS),
   )
+}
+
+/** `/admin/offline-push-workers` 的探测结果。
+ *
+ *  `mounted:false` 是**确定的否定事实**（hub 在应答但没带 `--offline-push`，409/404），
+ *  与 `null`（连不上/超时 = 不可知）分开：控制台对前者显示「未挂载」，对后者什么都不编。 */
+export interface OfflinePushProbe {
+  mounted: boolean
+  state: OfflinePushStateView | null
+}
+
+/** 离线 push 派发器读面（W6-3）：在途 assignment + 每台 worker 的 proto/忙闲。
+ *  鉴权/超时同其余读面；200 但形状不认识（旧 hub）⇒ `{mounted:true, state:null}`。 */
+export async function hubOfflinePushWorkers(
+  url: string,
+  token: string,
+): Promise<OfflinePushProbe | null> {
+  try {
+    const resp = await fetch(`${url}/admin/offline-push-workers`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(HUB_PROBE_TIMEOUT_MS),
+    })
+    if (resp.status === 409 || resp.status === 404) return { mounted: false, state: null }
+    if (resp.status !== 200) return null
+    return { mounted: true, state: parseOfflinePushState(await resp.json()) }
+  } catch {
+    return null
+  }
 }
 
 /** 让 hub **立刻**重读 rl-config（不等下一拍）。返回是否成功。

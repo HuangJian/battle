@@ -6,6 +6,62 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §123 离线 push 的 W6 收口：worker 重启恢复 + 控制台读面（2026-10-24 · `plan/push-mode-notebooks.plan.md` §8-W6 · 决策 `DECISIONS.md` §2026-10-23-push-mode-notebooks）
+
+W6 的三件（重启恢复同一单、控制台行、读面脱敏）落地。**协议形状一条没改**；真机 D1–D9
+仍未做（只有 loopback 与注入替身）。
+
+**① worker 重启恢复同一单**（`remote/offline_push_face.py::PushFaceState._restore_task`）
+
+- `tasks/<id>/` 跨进程活着：启动时从**最新**的 `task.json` 恢复 `task` / `phase`——
+  `final_ready` 未 ack ⇒ `done`；有 `stop` ⇒ `cancelled`；其余 ⇒ `failed`（**不重起子进程**：
+  续跑由 hub 带锚点重新派单）。只认最新目录：更老的未收尾目录是历史孤儿，拿它恢复会把
+  worker 永久钉死在 busy。
+- 重复投递一律 202 duplicate（不再走「先删同 id 目录」把未 ack 的 outbox 一起删掉）；
+  **已 ack 的同 id 重投 = 新一轮派单**（锚点没前进时 `task_id` 确定性不变）⇒ 真收下重跑。
+- `state.json` 新增 `result_acked` 终态（`deliver_outbox.ack_outbox`）：`result=true` = 整单
+  已收下（failed/cancelled 没有 final 也走它），与删 body 写在**同一次原子落盘**；
+  `_merge_disk_acks` 在另一个写者的整份覆盖里保住它。face 重启据此跳过已收摊的目录，
+  不把废弃单复活成 busy。**代价是明确的**：过期不 ack 的单会一直占住 worker 直到 hub 收摊
+  （重启不带参也不会解开，只有 hub ack 或清 work 目录）。
+
+**② 控制台读面**（W6-3）
+
+- `/api/state.offlinePush`（`server/api/overview.ts::buildOfflinePushView`）= hub
+  `/admin/offline-push-workers` 的投影，与总览**同一份 5s 探测缓存**（零新增网络）；
+  `held` 缓存的落盘按探测对象身份去重（同一拍三个读面各调一次 `getHubAdmin`，只写一次盘）。
+- 节点页「离线 push」面板（`web/app/panels/OfflinePushPanel.tsx`）：在途 assignment 的
+  phase / `cursor_it` / 已入账轮数（`revs` 条目数）/ `conflict`；每台 worker 的在线 / 忙闲 /
+  协议门（`proto_ok` 三态）/ `misses`。**只读**：撤销仍走 hub 动作面。
+- **挂载三态必须词不同**：`true`（hub 已挂 `--offline-push`）/ `false`（hub 明确答 409/404）/
+  `null`（这条端点这一拍没答上 = 未知）。把「不可达」说成「没启用」会让运维查错方向。
+
+**③ 读面脱敏（含复核修掉的一格）**：`hub/admin.py::AdminRoutes._redact_push_state` 滤掉
+`key`(authKey) / `lease_token` / `lease`，必须同时认三种形状——登记表 `state()["workers"]` 是
+**列表**、派发器 `state()["workers"]` 是**字典**、`inflight[]` 是在途推送的凭据。第一版只认
+字典 ⇒ `/admin/push-workers`（GET 与 `reload`）与 `dispatcher.inflight[]` 仍把 authKey 回给
+读面；W6 复核补齐，四种形状（列表/字典/inflight/assignment）一起钉。
+
+**测试**：`tests/remote/test_offline_push_face.py` +5（恢复 / 中断判 failed / stop 判 cancelled /
+只认最新目录 / 收尾后同 id 可重派）· `tests/remote/test_deliver_outbox.py` +1（没有 final 的
+`result_acked` 跨「重启」的整份覆盖仍在）· `tests/remote/test_offline_push_supervisor.py` +1
+（子进程侧元数据校验：缺 course / 坏 JSON 都走 `SystemExit`，不进 `run_one_course`）·
+`tests/remote/test_hub_push_dispatch.py` +1（GPU 读面不回首段凭据，四种形状）·
+`tests/hub/test_offline_push_dispatch.py` +1（`/admin/offline-push-workers` 脱敏 + 未挂载 409）·
+`dashboard/tests/web-app-offline-push.test.ts`（解析 + SSR 三态）·
+`dashboard/tests/server-api-overview.test.ts`（`buildOfflinePushView`）。
+
+**门禁读数**（Windows 本机）：`nn-python-gate` **5080 passed / 10 skipped / 0 failed**，
+ruff + mypy（全树 757 files）**绿** · `bun run check` 2634 pass / 8 skip · `bun run build` 过 ·
+`cd dashboard && bun run typecheck && bun run test` 1805 pass。
+
+> 顺手修掉一条**提交级拦截**：`deliver_outbox.py` 直接写 `fcntl.flock` / `fcntl.LOCK_*`，而
+> win32 的 typeshed 已经不再给 `fcntl` 这些属性 ⇒ 只要 staged 里有这个文件，pre-commit 的
+> mypy 归因就拦（且是平台性旧红，HEAD 上同样红）。改为模块头用 `getattr` 取一次
+> （`_FLOCK`/`_LOCK_EX`/`_LOCK_UN`），取不到走 msvcrt 分支：运行时语义不变，跨平台 mypy 两侧都绿。
+
+**仍未做**：真机 D1–D9（Colab/Kaggle 真实链路「自动注册 → 派发 → 拉取」一趟没跑过）。
+
 ## §122 离线 push 的实现审查：F1–F12 + P3 收口（2026-10-24 · 复核 W3–W5 · 设计 `plan/push-mode-notebooks.plan.md`）
 
 W3–W5 落地后按「绿着但不工作」的口径把 happy path 之外的边角逐个对账，修掉 12 项 + 3 个 P3

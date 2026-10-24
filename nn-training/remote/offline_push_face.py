@@ -26,6 +26,11 @@ cloudflared、**不**注册节点：那些是 supervisor（`remote/offline_push.
   * **ack 的判据只有一份**（`deliver_outbox.ack_outbox`）：服务进程不跑补传腿，它只读同一份
     `state.json`；两边各写一份「删哪些」就是两套 rev 语义（P0-3 要防的就是这个）。
 
+**重启不丢未收尾的单**（★W6）：`tasks/<id>/` 是跨进程活着的，启动时从**最新**的一份
+`task.json` 恢复 `task`/`phase`（`final_ready` 未 ack ⇒ `done`，有 `stop` ⇒ `cancelled`，
+否则 ⇒ `failed`）——hub 重投同一 `task_id` 走 duplicate 202，不会走「先删同 id 目录」把
+未 ack 的 outbox 一起删掉。恢复的任务**不重起子进程**：续跑由 hub 带锚点重新派单。
+
 本模块是 **L2**（`deliver_outbox`(L1) + `common.*` + stdlib）；它不 import `deliver_parts`
 （ack 不需要装配器）。
 """
@@ -217,6 +222,7 @@ class PushFaceState:
         #: 起子进程的钩子（supervisor 注入：真正 spawn 的是它，face 不碰 subprocess）。
         self._starter: Callable[[dict, Path, Path], None] | None = None
         self._prepare_dirs()
+        self._restore_task()
 
     # ------------------------------------------------------------ 路径
 
@@ -239,6 +245,68 @@ class PushFaceState:
                     shutil.rmtree(p, ignore_errors=True)
             except OSError:
                 continue
+
+    def _restore_task(self) -> None:
+        """从 `tasks/` 恢复上一进程留下的那一单（★W6：重启不该把未 ack 的 outbox 变孤儿）。
+
+        只认**最新**的一份 `task.json`：一次只跑一单 ⇒ 只有它可能是「上次在飞的那单」；
+        更老的未收尾目录是历史孤儿（W6 之前的重启会忘掉任务、之后又接了新单），拿它们
+        恢复只会把 worker 永久钉死在 busy 上。
+
+        `result_acked` / `final_acked` 已在盘上 ⇒ hub 早收下了，保持 idle。否则按盘上痕迹
+        判终态：`final_ready` ⇒ `done`（hub 会来拉结果再 ack）；有 `stop` 文件 ⇒ `cancelled`
+        （停机/取消时写的）；其余 ⇒ `failed`（子进程随上一进程一起没了，**不重启训练**——
+        续跑由 hub 带锚点重新派单）。
+
+        恢复的任务不重新起子进程：`/state`、round、result 照答，重复投递一律 202 duplicate
+        （与进程内重投同一语义），等 hub 收摊。
+        """
+        root = self.work / "tasks"
+        try:
+            dirs = [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            return
+        newest: tuple[float, str, Path, dict] | None = None
+        for tdir in dirs:
+            path = tdir / OFFLINE_PUSH_TASK_NAME
+            task = _read_json_doc(path)
+            tid = str(task.get("task_id") or "")
+            if not tid or tid != tdir.name:
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or (mtime, tdir.name) > (newest[0], newest[1]):
+                newest = (mtime, tdir.name, tdir, task)
+        if newest is None:
+            return
+        tdir, task = newest[2], newest[3]
+        tid = str(task.get("task_id") or "")
+        outbox = tdir / "outbox"
+        if not outbox.is_dir():
+            self.log(f"任务 {tid} 的目录在但 outbox 不在（受理中断的半单）——保持 idle，等 hub 重投")
+            return
+        st = read_state(outbox)
+        if bool(st.get("final_acked")) or bool(st.get("result_acked")):
+            return  # 已收尾：历史目录不占住 worker（同 id 新单可以直接换掉它）
+        if bool(st.get("final_ready")):
+            phase = "done"
+        elif (tdir / "stop").exists():
+            phase = "cancelled"
+        else:
+            phase = "failed"
+        with self._lock:
+            self.task = {**task, "task_id": tid, "course": str(task.get("course") or "")}
+            self.task_dir = tdir
+            self.outbox = outbox
+            self.phase = phase
+            self.rc = None
+            self.last_ack = None
+        self.log(
+            f"恢复未收尾的任务 {tid}（course={self.task['course'] or '-'}，phase={phase}）"
+            "——不重起子进程；重复投递将幂等受理，等 hub 收摊"
+        )
 
     def set_starter(self, starter: Callable[[dict, Path, Path], None]) -> None:
         self._starter = starter
@@ -386,7 +454,11 @@ class PushFaceState:
             tdir, outbox, _stop = self.task_paths(tid)
             with self._lock:
                 same = bool(self.task and self.task.get("task_id") == tid)
-                if same:
+                # 已收摊（ack 过）的同 id 重投**不是**网络重试，而是 hub 的下一次派单
+                # （锚点没前进时 task_id 确定性不变）——必须真收下重跑，否则 hub 会对着
+                # 一个 idle 的 worker 永远拉一个不会再有产物的任务。
+                acked = bool((self.last_ack or {}).get("acked"))
+                if same and not acked:
                     self.log(f"任务 {tid} 重复投递 —— 幂等受理（当前 {self.phase}）")
                     return 202, {
                         "status": "duplicate",
@@ -409,7 +481,8 @@ class PushFaceState:
                         f"{self._outbox_cap / 1024**3:.2f}GiB）——停止接新单；"
                         "等 hub 把已完成的轮 ack 掉再来"
                     )
-                # 换入：先删旧的同 id 目录（理论上不存在；重复单在上面已早退），再 rename。
+                # 换入：先删旧的同 id 目录（未收尾的重复单上面已早退；这里只可能是已 ack 的
+                # 历史目录，或上一进程受理中断的半单），再 rename。
                 if tdir.exists():
                     shutil.rmtree(tdir, ignore_errors=True)
                 tdir.parent.mkdir(parents=True, exist_ok=True)
