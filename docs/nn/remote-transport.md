@@ -6,6 +6,35 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §127 首派时两处「看着像很慢 / 看着像跑错轮」：导包等待套用了失败冷却 + `iter` 打点不带轮号（2026-10-24 真机）
+
+**① 注册成功 → 受理隔了 2 分 30 秒。** 现场（`tmp/hub-server.out`，本机时间）：
+
+```
+23:09:25  y34-hitfix: 缺包 ⇒ 请控制台导包（triggered）
+23:11:32  提议 y34-hitfix -> push:colab-o        ← 127s 后
+23:11:49  云机已受理（地板 it102）→ 接管成立
+```
+
+根因：`_pack_for` 触发导包之后调的是 `self._cool(course)` —— 那是**失败**用的窗（`cooldown_sec`
+= 120s），而导包本身在 ~2 分钟内就完成了，剩下的是白等。改法：导包在途（清单的 `pending_export`
+在窗内）⇒ **不重触发、也不冷却**，包一落地下一拍就走 `pack.is_file()` 分支派单；短窗
+`PACK_EXPORT_WAIT_SEC`(20s) 只留作「这次触发没递出去」的兜底。冷却因此支持自定义窗
+（`_cool(key, now, sec=)`）。
+
+**② `iter it0 2/17` 不是「在处理 it0」。** `worker/iter_rollout.py` 的轮内打点原样
+`progress_hook.report("iter", done=…, total=…)` —— **没传 `it`** ⇒ `it` 缺省 0。而 `seg-start`
+/ `round-start` / `round-done` 都带 `it`（`plan_run.py:741/774/778`），所以只有 `iter` 那一类
+显示成 `it0`（真机：`y34-hitfix` 在 it102，进度行一直 `iter it0 2/17`）。改法：`run_iter_rollout`
+加 `it` 参数（只用于打点标签，不参与任何判据），`remote/worker.py` 与补差批
+`worker/iter_topup.py` 都把它传下去（用例：`test_ctx_is_forwarded_to_every_batch` 补断言每批 `it`）。
+
+**③ `进度 seq=N` 是什么**：`<outbox>/progress.json` 的**单调递增序号**（`install_local_progress_sink`，
+跨进程重启续上），hub 用 `?since=N` 拉增量 —— 它是**事件游标**，不是轮号。日志里看到的跳号
+（0,2,4,5,6,8,…）是 supervisor 每 15s 采样一次的结果，中间的事件被采样跳过了。
+⚠ `seq=0 it0 0/0` 这一行是**默认读数**：`PushFaceState.progress()` 在进度文件还不存在时返回
+`{"seq":0, "it":0}`，那不是「在处理 it0」。
+
 ## §126 接管的五条口径：包就绪 ≠ 接管 / 一次一门 / 断线照跑 / 提议后过期就重导 / 停用即释放（2026-10-24 用户指令）
 
 前四条都是**接管语义**的收紧，第五条是**退出语义**；落点全在 hub 侧（dispatcher + pump），worker

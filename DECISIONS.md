@@ -9473,3 +9473,21 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落点**：`nn-training/hub/offline_push.py`（`_worker_registered` + 两处判定）·
   `tests/hub/test_offline_push_dispatch.py::test_disabling_the_node_stops_pulling_and_releases_the_course`
   （写 `enabled:false` + `reload(force=True)` 走真链路，不调 `remove()`）· `docs/nn/remote-transport.md §126`。
+
+### 补记（`§2026-10-24-push-mode-takeover-semantics` 之后的两处真机读数问题，23:20）
+
+- **① 首派慢 2 分 30 秒**：`hub-server.out` 实证 —— 23:09:25 「缺包 ⇒ 请控制台导包（triggered）」
+  → 23:11:32 才「提议」。导包 ~2 分钟完成，剩下的是白等：触发之后调的是 `self._cool(course)`
+  = **失败**用的 120s 窗。
+  * 决定：导包在途（`pending_export` 在窗内）⇒ 不重触发、**不冷却**；包一落地下一拍就派。
+    短窗 `PACK_EXPORT_WAIT_SEC=20s` 只兜「触发没递出去」。`_cool` 因此支持自定义窗。
+  * 否决：把全局 `cooldown_sec` 改成 20s —— 那把「413 容量 / 派发失败」的重撞间隔一起缩短了，
+    失败类冷却本来就该更长；两件事不该共用一把尺子。
+- **② `iter it0 2/17` 不是在处理 it0**：`worker/iter_rollout.py` 的轮内打点没传 `it`（缺省 0），
+  而 `seg-start`/`round-start`/`round-done` 都带。加 `it` 参数（**只用于打点标签，不参与判据**），
+  `remote/worker.py` 与 `worker/iter_topup.py` 补差批一起传下去。
+- **③ `seq=N` = 进度事件游标**（`progress.json` 的单调序号，跨重启续上，hub 用 `?since=N` 拉增量），
+  不是轮号；`seq=0 it0 0/0` 是文件还没写时的默认读数。
+- 落点：`hub/offline_push.py`（`_pack_for` / `_cool` / `PACK_EXPORT_WAIT_SEC`）·
+  `worker/iter_rollout.py` · `worker/iter_topup.py` · `remote/worker.py` ·
+  `tests/worker/test_iter_topup.py`（替身收 `it` + 断言每批都带）· `docs/nn/remote-transport.md §127`。

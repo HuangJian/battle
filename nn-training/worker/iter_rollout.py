@@ -933,6 +933,7 @@ def run_iter_rollout(
     ts_dir: str | Path | None = None,
     log=lambda msg: print(f"[iter] {msg}", flush=True),
     ctx: RoundContext | None = None,
+    it: int = 0,
 ) -> dict[str, Any]:
     """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
 
@@ -941,6 +942,10 @@ def run_iter_rollout(
 
     `ts_dir` = 解包后的 TS 代码根（带 `src/` `tools/`）；缺省 = job 目录（单测里桩脚本
     是绝对路径，不需要独立的 TS 根）。真实节点侧必须传，否则 `tools/sim/...` 找不到。
+
+    `it` = 本轮轮号（`manifest["it"]`），只用于**轮内打点的标签**：不传就报 `it0`，
+    云机/控制台的进度行会显示成「在处理第 0 轮」（2026-10-24 真机：`y34-hitfix` 已在
+    it102，进度行却一直是 `iter it0 2/17`）。它不参与任何判据。
     """
     from worker.reports import combine_reports, compact_per_game
 
@@ -1268,7 +1273,9 @@ def run_iter_rollout(
                         # ★M3 / Q2：轮内**打点**（每结算一局上报一个完成事件）。真正的 HTTP 与
                         # 时间节流在打点层（云机侧 `remote/offline_boot.py`，每 240s 最多一句）；
                         # 本机训练没有注册者 ⇒ `report` 立刻返回（一次 dict 查找，零副作用）。
-                        progress_hook.report("iter", done=settled_n, total=len(argvs))
+                        # `it=` 必须带上轮号：不带就是 `it0`（看着像在处理第 0 轮，
+                        # 而这一轮实际是 it102 —— 打点层只是照抄，不会替你补）。
+                        progress_hook.report("iter", it=int(it), done=settled_n, total=len(argvs))
                         if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
                             last_log_at = now
                             rb.beat("kind=iter rollout", now=now)

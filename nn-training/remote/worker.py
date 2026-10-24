@@ -692,7 +692,12 @@ def run_job(
             rctx = RoundContext()
             try:
                 iter_info = run_iter_rollout(
-                    job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log, ctx=rctx
+                    job_dir,
+                    manifest["rollout"],
+                    ts_dir=_ts_dir,
+                    log=log,
+                    ctx=rctx,
+                    it=int(manifest.get("it", 0) or 0),
                 )
                 shard_dirs = list(iter_info["shard_dirs"])
                 # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----

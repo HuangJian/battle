@@ -80,6 +80,10 @@ OFFLINE_PUSH_PUMP_SEC = 5.0
 OFFLINE_PUSH_HEARTBEAT_SEC = 60.0
 #: 派发失败后的冷却（秒）：同一门课/同一台机器不在每一拍上重撞。
 OFFLINE_PUSH_COOLDOWN_SEC = 120.0
+#: 「已请控制台导包」之后的**兜底**等待（秒）：导包通常是几十秒，拿失败那把 120s 的尺子
+#: 等量就是 2026-10-24 真机那 2 分半（注册成功 → 受理）。真正挡重触发的是 `pending_export`
+#: （在窗内就不重触发），这一个只是「触发没递出去」时的退路。
+PACK_EXPORT_WAIT_SEC = 20.0
 #: 一次 pump 循环里最多拉几轮（防「积压 200 轮」把一拍拖成十分钟）。
 OFFLINE_PUSH_ROUNDS_PER_PASS = 8
 #: 任务包 zip 的临时前缀（`<tmp>/offline-push-*`）；上传完成后整目录删掉。
@@ -149,7 +153,7 @@ class OfflinePushDispatcher:
         )
         self._lock = threading.Lock()
         self._pumps: dict[str, _PumpState] = {}
-        self._cooldown: dict[str, float] = {}
+        self._cooldown: dict[str, tuple[float, float]] = {}
         self._tmp_swept_at = 0.0
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -377,11 +381,12 @@ class OfflinePushDispatcher:
         return started
 
     def _cooling(self, key: str, now: float) -> bool:
-        at = float(self._cooldown.get(key, 0.0) or 0.0)
-        return at > 0.0 and now - at < self.cooldown_sec
+        at, sec = self._cooldown.get(key, (0.0, 0.0))
+        return at > 0.0 and now - at < (sec or self.cooldown_sec)
 
-    def _cool(self, key: str, now: float | None = None) -> None:
-        self._cooldown[key] = self._now() if now is None else float(now)
+    def _cool(self, key: str, now: float | None = None, *, sec: float = 0.0) -> None:
+        """冷却（可选**自定义窗**：导包等待不该套用「失败」那把 120s 的尺子）。"""
+        self._cooldown[key] = (self._now() if now is None else float(now), float(sec or 0.0))
 
     def _pack_meta(self, pack: Path) -> dict:
         try:
@@ -401,6 +406,12 @@ class OfflinePushDispatcher:
             self._log(f"{course}: 课程名不可用（{e}）——跳过")
             return None
         if not pack.is_file() or row.get("pack") is None:
+            # ★ 2026-10-24 真机：注册成功 → 受理等了 **2 分 30 秒**。原因是触发导包后被
+            #   `cooldown_sec`(120s) 挡住 —— 那是给「失败」用的窗，不该压在「导包在途」上。
+            #   导包在途（`pending_export` 在窗内）⇒ **不重触发、也不冷却**：包一落地，下一拍
+            #   就走上面的 `pack.is_file()` 分支立刻派单。
+            if row.get("pending_export"):
+                return None
             if self._cooling(course, now):
                 return None
             verdict, why = self.hub.begin_pending_export(course, push_worker_id_of(wid))
@@ -409,7 +420,8 @@ class OfflinePushDispatcher:
                 self._cool(course, now)
                 return None
             out = trigger_pack_export(self.hub, course)
-            self._cool(course, now)
+            # 短窗：只为「这次触发没递出去」兜底（递出去了上面那条 pending_export 就接住了）。
+            self._cool(course, now, sec=PACK_EXPORT_WAIT_SEC)
             self._log(f"{course}: 缺包 ⇒ 请控制台导包（{out['state']}）：{out['note']}")
             return None
         if not str(self._pack_meta(pack).get("run_id") or ""):

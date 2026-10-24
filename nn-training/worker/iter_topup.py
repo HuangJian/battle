@@ -301,7 +301,7 @@ def topup_rollout(
             f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局"
             f"（满铺 width={batch_width} → {sub.name}/，槽位={slot_txt}，games={plan_g}，cap={caps}，est_s={ests}）"
         )
-        info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx)
+        info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx, it=int(it))
         dirs_b = [str(d) for d in info["shard_dirs"]]
         added, games_b = _batch_totals(info, dirs_b)
         for s, v in added.items():

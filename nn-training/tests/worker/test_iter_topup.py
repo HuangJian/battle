@@ -91,7 +91,7 @@ class _FakeRunner:
         self.calls: list[dict] = []
 
     def __call__(
-        self, job_dir, spec, *, ts_dir=None, log=lambda msg: None, ctx=None
+        self, job_dir, spec, *, ts_dir=None, log=lambda msg: None, ctx=None, it=0
     ) -> dict:
         self.calls.append(
             {
@@ -99,6 +99,7 @@ class _FakeRunner:
                 "spec": spec,
                 "rows": [list(r) for r in spec["argv"]],
                 "ctx": ctx,
+                "it": int(it),
             }
         )
         dirs: list[str] = []
@@ -209,6 +210,8 @@ def test_ctx_is_forwarded_to_every_batch(tmp_path: Path) -> None:
     )
     assert run.calls[1:], "至少跑了一批补差"
     assert all(c["ctx"] is sentinel for c in run.calls[1:]), "每一批都要把 ctx 传下去"
+    # 轮号也要传下去：不传就会报 `iter it0`（真机：it102 的轮，进度行一直显示 it0）。
+    assert all(c["it"] == int(spec["volume"]["it"]) for c in run.calls[1:]), "补差批要带 it"
 
 
 def test_batch_totals_from_the_portrait_equal_the_disk_scan(tmp_path: Path) -> None:
