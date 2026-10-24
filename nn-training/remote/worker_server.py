@@ -185,8 +185,20 @@ class WorkerServerState:
         return bool(ev is not None and ev.is_set())
 
     def get(self, jid: str) -> dict | None:
+        """`jid` 的状态（含**排队中**）。
+
+        排队单必须能回答：hub 预推（`--push-ahead`，2026-10-24）会在上一份还没跑完时
+        就把下一份推来。旧版只看 `self.jobs` ⇒ 排队单在 `/job/{id}/result` 是 404，
+        而 404 在 `push_dispatch._await_result` 里等于「这台不要这份活」——派发器当场
+        回落换台，预推白传几十 MB，还把一台健康 worker 记进 avoid 名单。
+        """
         with self._lock:
-            return self.jobs.get(jid)
+            rec = self.jobs.get(jid)
+            if rec is not None:
+                return rec
+            if jid in self._pending:
+                return {"state": "queued"}
+            return None
 
     def busy(self) -> bool:
         with self._lock:
@@ -379,7 +391,9 @@ def make_worker_server(
                             410,
                         )
                     else:
-                        self._json({"status": "running"}, 202)
+                        # `queued` 也如实回答（预推单在队里）：hub 用它区分「还没开算」
+                        # 与「在跑」——前者不烧无结果超时、也不打 computing_at。
+                        self._json({"status": rec["state"]}, 202)
                 else:
                     self._json({"error": "not found"}, 404)
             except Exception as e:  # 单请求不崩服务

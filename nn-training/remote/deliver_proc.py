@@ -27,6 +27,8 @@ from typing import IO, Protocol
 
 from common.platform_utils import POPEN_NO_WINDOW
 from common.protocol import sanitize_run_id
+from remote import deliver_parts
+from remote.deliver_outbox import LocalOutboxDeliverer
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
@@ -150,7 +152,12 @@ class DelivererProcess:
         #: `eval_every` 与统计批开关显式传进子进程 argv；缺省 = 旧行为（不传 = 老语义）。
         eval_every: int = 0,
         metrics_parts: bool = False,
+        #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **push 腿的本地
+        #: outbox 模式** —— 子进程只往 `<outbox>/` 写 body，一个字节也不往 hub 发（hub 自己来拉）。
+        #: 这时 `base_url`/`token` 可以为空（`_enabled` 的判据换成本字段）。
+        outbox_dir: str | Path | None = None,
     ) -> None:
+        self.outbox = Path(outbox_dir) if outbox_dir else None
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or "")
         self._run_id_raw = str(run_id or "")
@@ -201,12 +208,15 @@ class DelivererProcess:
         self._seg_end_kind = ""
         self._mode = "process"
         self._degrade_reason = ""
-        self._fallback: OfflineDeliverer | None = None
-        self._mirror_obj: OfflineDeliverer | None = None
+        self._fallback: OfflineDeliverer | LocalOutboxDeliverer | None = None
+        self._mirror_obj: OfflineDeliverer | LocalOutboxDeliverer | None = None
 
     # ------------------------------------------------------------ 生命周期
 
     def _enabled(self) -> bool:
+        """要不要拉起子进程。outbox 模式只要求 run_id（没有 hub、没有 token 也要写盘）。"""
+        if self.outbox is not None:
+            return bool(self._run_id_raw)
         return bool(self.base_url and self.token and self._run_id_raw)
 
     def _new_state_path(self, prefix: str, suffix: str) -> Path:
@@ -257,8 +267,6 @@ class DelivererProcess:
             str(self._status_path),
             "--artifacts",
             str(self.root),
-            "--hub-url",
-            self.base_url,
             "--run-id",
             self._run_id_raw,
             "--idle-timeout",
@@ -266,6 +274,12 @@ class DelivererProcess:
             "--tick-sec",
             f"{self._tick_sec:g}",
         ]
+        # ★ 2026-10-23（P0-1）：两条腿的**唯一 argv 差别**。outbox 模式不传 `--hub-url`
+        #（也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
+        if self.outbox is not None:
+            argv += ["--outbox", str(self.outbox)]
+        else:
+            argv += ["--hub-url", self.base_url]
         if self.course:
             argv += ["--course", self.course]
         # ★ 2026-10-23：两个新开关只在**非缺省**时才进 argv（老 argv 逐字节不变）。
@@ -280,7 +294,9 @@ class DelivererProcess:
         env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
         # token **只走 env**（argv 会在 `/proc/<pid>/cmdline` 上全机可读）；而父侧手里的 token
         # 可能是 inline/文件来的（`run_loop` 的取值顺序 inline > token_file > env）⇒ 必须显式塞。
-        env["BATTLE_HUB_TOKEN"] = self.token
+        # outbox 模式**不塞**：那条腿不连 hub，凭据不该出现在一个不用的进程环境里。
+        if self.outbox is None:
+            env["BATTLE_HUB_TOKEN"] = self.token
         # 租约 token 同理只走 env（★M1b/P1-1）：空值不塞，免得子进程拿到一个空串当 token。
         if self.hub_lease:
             env[HUB_LEASE_ENV] = self.hub_lease
@@ -420,17 +436,32 @@ class DelivererProcess:
             f"补传子进程不可用（{why}）——**降级为进程内线程模式**"
             "（本段不再重试；训练不受影响，产物照常落本地）"
         )
-        self._fallback = OfflineDeliverer(
-            base_url=self.base_url,
-            token=self.token,
-            run_id=self._run_id_raw,
-            artifacts_dir=self.root,
-            course=self.course,
-            hub_lease=self.hub_lease,
-            worker_name=self.worker_name,
-            background=True,
-            log=self.log,
-        )
+        if self.outbox is not None:
+            # ★ P1-10：进程内降级是 push 腿的**常态**（旧 `code.zip` 不认 `--outbox`）。同一种
+            #   实现、同一个目录 ⇒ 降级后 outbox 照常产出；不测就会看到「降级成功、outbox 空」。
+            self._fallback = LocalOutboxDeliverer(
+                outbox_dir=self.outbox,
+                artifacts_dir=self.root,
+                run_id=self._run_id_raw,
+                parts=deliver_parts,
+                course=self.course,
+                hub_lease=self.hub_lease,
+                worker_name=self.worker_name,
+                background=True,
+                log=self.log,
+            )
+        else:
+            self._fallback = OfflineDeliverer(
+                base_url=self.base_url,
+                token=self.token,
+                run_id=self._run_id_raw,
+                artifacts_dir=self.root,
+                course=self.course,
+                hub_lease=self.hub_lease,
+                worker_name=self.worker_name,
+                background=True,
+                log=self.log,
+            )
         self._fallback.start()
 
     # ------------------------------------------------------------ 与 OfflineDeliverer 同接口
@@ -537,28 +568,48 @@ class DelivererProcess:
                 "已记进 delivered.json 的 owed_reposts，下次会话（同一产物目录）会自动补"
             )
         if self._final_submitted and not self._result_done_from_disk():
-            self.log("段末摘要未送达（final 已提交但 result_done=False）——留给下次会话")
+            if self.outbox is not None:
+                # outbox 腿的「送达」= hub 来拉并 ack。文件就位即任务完成 —— 不是丢，别说成丢。
+                self.log("段末摘要已落盘，等 hub 来拉（final.json 还在；不是丢）")
+            else:
+                self.log("段末摘要未送达（final 已提交但 result_done=False）——留给下次会话")
         self._proc = None
 
     # ------------------------------------------------------------ 只读面
 
-    def _mirror(self) -> OfflineDeliverer:
+    def _mirror(self) -> OfflineDeliverer | LocalOutboxDeliverer:
         """只读镜像（**只调 `pending()` / `status()`**）：`pending()` = 「磁盘有 − 账本无」这条定义
         （含拒收的指纹核对）只该有一份实现。父侧**绝不**在它上面 `sync()` / `_save_ledger()`：
         `delivered.json` 在进程模式下的**单写者是子进程**（§1-4）。
+
+        outbox 模式的只读面读的是 `state.json`（同样是子进程单写），**不碰网络**。
         """
-        if self._mirror_obj is None:
-            self._mirror_obj = OfflineDeliverer(
-                base_url=self.base_url,
-                token=self.token,
-                run_id=self._run_id_raw,
+        if self._mirror_obj is not None:
+            return self._mirror_obj
+        if self.outbox is not None:
+            self._mirror_obj = LocalOutboxDeliverer(
+                outbox_dir=self.outbox,
                 artifacts_dir=self.root,
+                run_id=self._run_id_raw,
+                parts=deliver_parts,
                 course=self.course,
+                hub_lease=self.hub_lease,
+                worker_name=self.worker_name,
                 background=False,
-                # ⚠ 镜像**不**带日志：它只该回答 `pending()`/`status()`（旧口径：子进程是
-                # `delivered.json` 的唯一写者）。备份那一笔要说话 ⇒ 走下面 `_backup()` 的专用镜像。
                 log=lambda _m: None,
             )
+            return self._mirror_obj
+        self._mirror_obj = OfflineDeliverer(
+            base_url=self.base_url,
+            token=self.token,
+            run_id=self._run_id_raw,
+            artifacts_dir=self.root,
+            course=self.course,
+            background=False,
+            # ⚠ 镜像**不**带日志：它只该回答 `pending()`/`status()`（旧口径：子进程是
+            # `delivered.json` 的唯一写者）。备份那一笔要说话 ⇒ 走下面 `_backup()` 的专用镜像。
+            log=lambda _m: None,
+        )
         return self._mirror_obj
 
     def backup_pending(self) -> int:
@@ -571,10 +622,11 @@ class DelivererProcess:
         fb = self._fallback
         if fb is not None:
             return fb.backup_pending()
-        if self.backup_root is None:
-            return 0
+        if self.backup_root is None or self.outbox is not None:
+            return 0  # outbox 本身就是耐久副本（hub 来拉的那一份），不另立抽屉
         try:
             mirror = self._reading()
+            assert isinstance(mirror, OfflineDeliverer)
             mirror.backup_root = Path(self.backup_root)
             mirror.log = self.log
             return int(mirror.backup_pending())
@@ -582,9 +634,15 @@ class DelivererProcess:
             self.log(f"WARN 备份腿异常（忽略）：{type(e).__name__}: {e}")
             return 0
 
-    def _reading(self) -> OfflineDeliverer:
-        """只读镜像 + **刷新账本**（见 `OfflineDeliverer.refresh_from_ledger` 的为什么）。"""
+    def _reading(self) -> OfflineDeliverer | LocalOutboxDeliverer:
+        """只读镜像 + **刷新账本**（见 `OfflineDeliverer.refresh_from_ledger` 的为什么）。
+
+        outbox 腿没有 `delivered.json`：它的账本就是 `state.json`（每次读都重新装载）。
+        """
         mirror = self._mirror()
+        if isinstance(mirror, LocalOutboxDeliverer):
+            mirror.reload()
+            return mirror
         mirror.refresh_from_ledger()
         return mirror
 
@@ -608,8 +666,12 @@ class DelivererProcess:
 
     def _owed_reposts_from_disk(self) -> list[int]:
         """`delivered.json` 里的欠账（子进程写的；`close()` 的响亮核对读它）。"""
+        if self.outbox is not None:
+            return [int(it) for it in self._reading().unsent_reposts()]
+        mirror = self._mirror()
+        assert isinstance(mirror, OfflineDeliverer)
         try:
-            data = json.loads(self._mirror().ledger_path.read_text(encoding="utf-8"))
+            data = json.loads(mirror.ledger_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
         rows = data.get("owed_reposts") if isinstance(data, dict) else None
@@ -627,8 +689,14 @@ class DelivererProcess:
 
         两边都没有结果时返回 False（= 「按没送处理」）：宁可重述（覆盖写幂等），也不赌它送过。
         """
+        if self.outbox is not None:
+            mirror = self._reading()
+            assert isinstance(mirror, LocalOutboxDeliverer)
+            return mirror.result_done()
+        mirror = self._mirror()
+        assert isinstance(mirror, OfflineDeliverer)
         try:
-            data = json.loads(self._mirror().ledger_path.read_text(encoding="utf-8"))
+            data = json.loads(mirror.ledger_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = None
         if isinstance(data, dict) and "result_done" in data:
@@ -707,6 +775,10 @@ def make_deliverer(
     eval_every: int = 5,
     metrics_parts: bool = True,
     adaptive: bool = True,
+    #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：非空 = **本地 outbox 模式**。
+    #: 这个分支**先于** hub_url/token 早退判定 —— 否则 `--outbox` + `--no-deliver`（两个参数
+    #: 恰好让 hub_url/token 都缺）会静默什么也不做：训练照跑、outbox 永远空、最后被判掉线。
+    outbox_dir: str | Path | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> DelivererLike | None:
     """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
@@ -719,7 +791,8 @@ def make_deliverer(
     子进程起不来（在老包里是**常态**：`code.zip` 是导出那一刻的快照）⇒ `DelivererProcess`
     自己 **sticky 降级**到 `thread`，调用方不需要知道这件事。
     """
-    if not str(hub_url or "").strip() or not str(hub_token or "").strip():
+    outbox = Path(outbox_dir) if outbox_dir else None
+    if outbox is None and (not str(hub_url or "").strip() or not str(hub_token or "").strip()):
         return None
     # 解析顺序（§3.6①）：显式参数 > `$NN_DELIVER_MODE` > 缺省 `process`（离线路径的缺省）。
     kind = (
@@ -730,8 +803,22 @@ def make_deliverer(
     if kind not in ("process", "thread", "sync"):
         log(f"未知的补传模式 {kind!r}（`${DELIVER_MODE_ENV}`）——按线程模式走")
         kind = "thread"
+    if outbox is not None and kind != "process":
+        # 线程/同步两种模式下没有隔离面可言：直接物化到同一个 outbox（与 HTTP 腿同形）。
+        return LocalOutboxDeliverer(
+            outbox_dir=outbox,
+            artifacts_dir=artifacts_dir,
+            run_id=run_id,
+            parts=deliver_parts,
+            course=course,
+            hub_lease=hub_lease,
+            worker_name=worker_name,
+            background=kind == "thread",
+            log=log,
+        )
     if kind == "process":
         return DelivererProcess(
+            outbox_dir=outbox,
             base_url=hub_url,
             token=hub_token,
             run_id=run_id,

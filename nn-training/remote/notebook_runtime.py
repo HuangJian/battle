@@ -7,6 +7,7 @@ code.zip 走，修运行时逻辑不用重发 notebook（重跑 cell 即拉到�
 
 cfg 键（cell 的 CFG dict）：
   mode ("pull"|"push") · hub_url · hub_token · push_port · push_token ·
+  registry_url (自动注册的 hub；留空用 hub_url) · node_id (留空 = `gpu-<env>`) · label ·
   cloudflared_path · device ("auto"|cuda|cuda-dp|tpu|cpu) · use_multi_gpu ·
   max_session_hours · poll_interval_sec · idle_floor_sec · max_worker_restarts ·
   keepalive_stop (threading.Event，cell 的保活线程停机柄) · log (callable) ·
@@ -28,7 +29,6 @@ import glob
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -36,9 +36,11 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
+from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_of
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
@@ -394,6 +396,63 @@ def _pid_alive(pid: int | None) -> bool:
     return pid_alive(pid)
 
 
+def _tunnel_url_of(path: Path) -> str:
+    """从 cloudflared 日志里取当前 quick tunnel URL（取不到 ⇒ 空串）。
+
+    实现已下沉到 `remote/push_tunnel.tunnel_url_of`（离线 push 同用一份）；保留本名是
+    为了让既有测试/调用点的 import 面不变。
+    """
+    return tunnel_url_of(path)
+
+
+def _push_registry(cfg: dict[str, Any], log) -> Any:
+    """GPU push 腿的注册器（`registry_url` > `hub_url`；缺 hub/token ⇒ 关闭态）。
+
+    两把 token 不要混：`hub_token` = 注册鉴权（hub 的 admin 面）；`push_token` = 本节点的
+    `authKey`（hub 用它调 worker 的 `/ping` 与 `/job`）。缺任何一把都不能假装注册成功。
+    """
+    from remote.push_register import Registry, default_node_id
+
+    hub = str(cfg.get("registry_url") or cfg.get("hub_url") or "").strip()
+    return Registry(
+        hub=hub,
+        hub_token=str(cfg.get("hub_token") or "").strip(),
+        node_id=str(cfg.get("node_id") or "").strip()
+        or default_node_id("gpu_push", probe_cloud_env()),
+        kind="gpu_push",
+        label=str(cfg.get("label") or ""),
+        log=log,
+    )
+
+
+def _register_or_warn(reg: Any, url: str, push_token: str, log) -> None:
+    """首拍注册 + 人话横幅；失败 ⇒ 打印**可粘贴**的 ★ 手工片段（而不是静默假成功）。"""
+    from remote.push_register import manual_snippet
+
+    ok = reg.ensure(url, push_token, force=True)
+    if ok:
+        log(f"★ 已自动注册节点 id={reg.node_id} kind=gpu_push（hub 按能力键派发，无需手工登记）")
+        return
+    if reg.give_up:
+        log("★ 自动注册已放弃（HUB_TOKEN 被拒）——用下面一条手工登记：")
+    elif not url:
+        log("★ 没有隧道 URL，自动注册暂不可用——用下面一条手工登记：")
+    else:
+        log("★ 自动注册未生效（hub 不可达/未配置）——用下面一条手工登记：")
+    if url:
+        log(f'  {{"nodes":[{manual_snippet(reg.node_id, url, push_token, "gpu_push")}]}}')
+
+
+def _refresh_registration(reg: Any, cf_log: Path, cur_url: str, push_token: str, log) -> str:
+    """每拍（15s）：隧道换名 ⇒ 重注册；未换 ⇒ 只在未注册时重试（退避由 Registry 自己管）。"""
+    url = _tunnel_url_of(cf_log) or cur_url
+    if url and url != cur_url:
+        log(f"★ 隧道换名（quick tunnel 重连）：{url} —— 将重注册")
+        cur_url = url
+    reg.ensure(cur_url, push_token)
+    return cur_url
+
+
 def run_push_worker(cfg: dict[str, Any], log) -> int:
     """启动 worker_server + cloudflared 隧道，等 hub 推 job。返回码同 pull。
 
@@ -402,18 +461,28 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     收下后入 sys.path、在新进程里跑）。
 
     already_serving（push-first 升级后）：bootstrap 已起好 worker_server/cloudflared，
-    本函数只做守候 + 日志，**不再**重复安装/拉起。"""
+    本函数只做守候 + 日志，**不再**重复安装/拉起；此时**也要**注册 —— bootstrap 的内联
+    注册只覆盖「服务已起、URL 已有」那一瞬，URL 换名/重启后的重注册住在这里。
+
+    自动注册（2026-10-23，plan/push-mode-notebooks §5.2）：URL 拿到后 `Registry.ensure()`；
+    退出（含 Ctrl-C / 会话到顶 / serve 早退）一律 `unregister()` ⇒ hub 上 `enabled=false`。
+    """
     already = cfg.get("already_serving") or None
     work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
     work_dir.mkdir(parents=True, exist_ok=True)
     boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
     serve_log = work_dir / "serve.log"
+    cf_log = work_dir / "cloudflared.log"
+    reg = _push_registry(cfg, log)
+    cfg["node_id"] = reg.node_id  # push-first 内联注册/升级后复用同一个 id
+    push_tok = str(cfg.get("push_token") or "")
 
     if already:
         serve_pid = int(already.get("serve_pid") or 0)
         cf_pid = already.get("cf_pid")
-        cf_url = already.get("cf_url")
+        cf_url = str(already.get("cf_url") or "") or _tunnel_url_of(cf_log)
         log(f"接管已就绪 push 服务（serve_pid={serve_pid} tunnel={cf_url or '?'}）")
+        _register_or_warn(reg, cf_url, push_tok, log)
         serve_tail_off = 0
         last_status_at = 0.0
         as_last_done = -1
@@ -465,6 +534,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                 _drain()
                 now = time.time()
                 if now - last_status_at >= 15:
+                    cf_url = _refresh_registration(reg, cf_log, cf_url, push_tok, log)
                     st = _ping()
                     if st is not None:
                         busy = bool(st.get("busy"))
@@ -501,26 +571,14 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                 except OSError:
                     pass
             return 0
+        finally:
+            # 会话收线：hub 上 enabled=false（下个会话注册时会恢复）。
+            reg.unregister()
 
-    # ── cloudflared 查找 / 自动安装 ──
-    cf_bin = str(cfg.get("cloudflared_path") or "") or subprocess.getoutput(
-        "where cloudflared 2>nul || which cloudflared 2>/dev/null"
-    ).strip()
+    # ── cloudflared 查找 / 自动安装（与离线 push 同一条实现：`remote/push_tunnel`）──
+    cf_bin = find_cloudflared(str(cfg.get("cloudflared_path") or ""), log=log)
     if not cf_bin:
-        log("cloudflared 未找到，自动安装…")
-        try:
-            cf_bin = "/usr/local/bin/cloudflared"
-            subprocess.run(
-                ["curl", "-fsSL",
-                 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
-                 "-o", cf_bin],
-                check=True, timeout=60,
-            )
-            os.chmod(cf_bin, 0o755)
-            log(f"cloudflared 已安装 -> {cf_bin}")
-        except Exception as e:
-            log(f"cloudflared 自动安装失败: {e}——push 模式需要它暴露端口；或改用 pull 模式")
-            return -2
+        return -2
 
     # ── 启动 worker_server ──
     serve_env = dict(os.environ)
@@ -557,32 +615,12 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     log("worker_server 就绪")
 
     # ── cloudflared 隧道 ──
-    cf_log = work_dir / "cloudflared.log"
-    with open(cf_log, "w") as log_f:
-        cf_proc = subprocess.Popen(
-            [cf_bin, "tunnel", "--url", f"http://localhost:{cfg['push_port']}", "--logfile", str(cf_log)],
-            stdout=log_f, stderr=subprocess.STDOUT,
-        )
-    cf_url = None
-    t0 = time.time()
-    while time.time() - t0 < 60:
-        try:
-            urls = re.findall(
-                r"https://[a-z0-9-]+\.trycloudflare\.com",
-                cf_log.read_text(encoding="utf-8", errors="replace"),
-            )
-            if urls:
-                cf_url = urls[-1]
-                break
-        except Exception:
-            pass
-        if cf_proc.poll() is not None:
-            log(f"cloudflared 提前退出 (code {cf_proc.returncode})")
-            break
-        time.sleep(2)
+    cf_proc, cf_url = start_quick_tunnel(
+        cf_bin, int(cfg["push_port"]), cf_log, wait_sec=60, log=log
+    )
     if cf_url:
         log(f"★ 隧道 URL: {cf_url}")
-        log("把它配到 hub 侧 rl-config 对应节点的 url（gpu_push 节点），job 会自动推送至此")
+        _register_or_warn(reg, cf_url, push_tok, log)
     else:
         log(f"⚠ 隧道 URL 未取得（超时/出错）——hub 推送将不可达；日志见 {cf_log}")
 
@@ -644,6 +682,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
             _drain_serve_log()
             now = time.time()
             if now - last_status_at >= 15:
+                cf_url = _refresh_registration(reg, cf_log, cf_url or "", push_tok, log)
                 st = _ping_status()
                 if st is not None:
                     busy = bool(st.get("busy"))
@@ -671,7 +710,8 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
         log("收到中断")
         return 0
     finally:
-        if cf_proc.poll() is None:
+        reg.unregister()
+        if cf_proc is not None and cf_proc.poll() is None:
             cf_proc.kill()
             log("cloudflared 已停")
         if serve_proc.poll() is None:

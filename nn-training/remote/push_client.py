@@ -176,6 +176,12 @@ def submit_job(
             log(
                 f"job {manifest['job_id']} 已推送到 {base_url}（code 上传={'是' if need_code else '否，缓存命中'}）"
             )
+            # worker 的受理态：`accepted` = 立刻开算；`queued` = 进了它的接单队列
+            # （hub 预推，2026-10-24）。旧 worker/旧形体读不到就当空串 = 旧语义。
+            try:
+                ack = json.loads(resp.decode("utf-8")) if resp else {}
+            except (ValueError, UnicodeDecodeError):
+                ack = {}
             return {
                 "body_bytes": len(body_bytes),
                 "payload_bytes": len(payload_zip),
@@ -186,6 +192,8 @@ def submit_job(
                 "blobs_sent": sorted(blob_needs),
                 "upload_sec": round(time.time() - t0, 3),
                 "attempts": attempt,
+                #: 节点侧受理态（`accepted` / `queued`）；纯加法，旧调用方忽略。
+                "status": str((ack or {}).get("status") or "") if isinstance(ack, dict) else "",
             }
         if status == 428:
             need_code = True  # 节点缓存未命中：下次重试带 code

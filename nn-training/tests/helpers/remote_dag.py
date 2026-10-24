@@ -132,6 +132,19 @@ LAYERS: dict[str, int] = {
     # 统计批组装。依赖 `delta_files`(L0) / `artifacts`(L0) / `weights_delta`+`opt_delta`(L0，只取魔数)
     # ⇒ **L1**；读者只有 `offline_deliver`(L2)。
     "remote.deliver_parts": 1,
+    # push 腿的**本地 outbox**（2026-10-23，`plan/push-mode-notebooks` §6.4a）：body 只落盘、rev、
+    # 带 rev 的 ack、统计。装配器（`deliver_parts`）**注入**而不 import（同类注入：`land_provider`）
+    # ⇒ 依赖面只剩 `delta_files`(L0) + `common.*` ⇒ 拓扑秩 **L1**；`deliver_proc`(L3) 站在它上面，秩不变。
+    "remote.deliver_outbox": 1,
+    # ★ 2026-10-23（plan/push-mode-notebooks W4）：离线 push 的四个新模块。
+    # `push_tunnel` 只碰 stdlib（subprocess/re/Path）⇒ **L0**；`offline_push_face` 站在
+    # `deliver_outbox`(L1) 上（收包/ack/读面）⇒ **L2**；supervisor `offline_push` 只 import
+    # 面(L2) + 注册(L0) + 隧道(L0) ⇒ **L3**；训练子进程入口 `offline_push_task` 站在
+    # `offline_boot`(L8) 上 ⇒ **L9**（与「入口模块只做接线」的先例一致）。
+    "remote.push_tunnel": 0,
+    "remote.offline_push_face": 2,
+    "remote.offline_push": 3,
+    "remote.offline_push_task": 9,
     # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
     # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
     "remote.control_pool": 0,
@@ -172,6 +185,17 @@ LAYERS: dict[str, int] = {
     # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
     "hub.task_pack": 0,
 
+    # ★ 2026-10-24（plan/push-mode-notebooks §6.6/§6.7，W5）：离线 push 的 hub 侧四件。
+    # `offline_ingest` 站在 `hub.task_pack`(L0) 上（共享入账 + 盖章/下一段）⇒ **L1**；
+    # `offline_push_assign` 与 `offline_push_client` 只碰 stdlib/common ⇒ **L0**；
+    # 派发器 `offline_push` 站在 `remote.push_dispatch`(L2) 上（登记表/探活复用）⇒ **L3**
+    # （与 `hub.offline` 同秩：两条腿互不 import）。
+    # `hub.offline`(L3) 反向 import `offline_ingest` 不改变它的秩（1 < 3）。
+    "hub.offline_ingest": 1,
+    "hub.offline_push_assign": 0,
+    "hub.offline_push": 3,
+    "remote.offline_push_client": 0,
+
     "remote.result_upload": 0,
     # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理
     # `UploaderProcess` + 工厂 `make_uploader`。依赖面 = `result_upload`(L0，共同接口/常量)
@@ -194,6 +218,10 @@ LAYERS: dict[str, int] = {
     # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)
     # ⇒ 拓扑秩 **L1**；`common.*` 不在账本内，不计边。
     "remote.rollout_node": 1,
+    # 节点自动注册的**唯一实现**（2026-10-23，plan/push-mode-notebooks §4.3）：从
+    # `rollout_node` 下沉出的纯函数 + HTTP + `Registry`，只靠 stdlib ⇒ **L0**；采样 / GPU / 离线
+    # 三条腿都站在它上面（`rollout_node` 的 L1 秩不变，因为 push_register 更低）。
+    "remote.push_register": 0,
     # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
     # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
     # AST 看不见该边，这是有意的：引导文件集按 raw 拉取，不参与包内环账本）。

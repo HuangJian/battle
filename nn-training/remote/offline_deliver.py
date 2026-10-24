@@ -70,12 +70,11 @@ from common.protocol import (
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_DELIVERED_NAME,
-    OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
     sanitize_run_id,
 )
 from remote import deliver_mode, deliver_parts, deliver_wire
-from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes, weights_fps
+from remote.artifacts import ArtifactStore, atomic_write_json
 from remote.backup_drawer import BackupDrawer
 
 # `as` 别名 = 显式再导出（测试/operator 脚本一直从本模块拿这个名字；定义已搬到
@@ -90,7 +89,7 @@ from remote.deliver_ledger import (
 )
 from remote.deliver_mode import eta_text
 from remote.deliver_parts import DeliverMetricsMixin
-from remote.deliver_wire import pick_anchors, read_eval_iters, wire_row
+from remote.deliver_wire import pick_anchors, read_eval_iters
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -921,52 +920,8 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         return self._manifest_cache
 
     def _row_for(self, it: int, weights_fp: str) -> dict | None:
-        """账本里**与本轮权重字节相符**的那一行（同名 it 有多行时取**最后一个**）。
-
-        2026-09-22 事故的两个关键点（旧的「返回第一条同 it 行」两者都错）：
-
-          * `metrics.jsonl` 是**跨会话追加**的：同一个目录续跑/重开时，同一个 it 会再落一行
-            （`ArtifactStore.checkpoint` 追加，不重写）。旧实现返回**第一条**⇒ 拿上一会话的
-            行去配这一会话的权重，hub 侧「账本行与权重不符」直接 400 拒收（现场：
-            `行记 bff93df1… 实得 5f099e55…`）。这与控制台「同 iter 取最后一条 = 最新对账结果」
-            是同一条口径（`dashboard/src/server/iters.ts`）；
-          * 只有 `weights_fp` **对得上本轮字节**的行才是这一轮的行——配不上就宁可不发：
-            一个指错轮次的行比没有行危险得多（读数看起来完全正常）。
-
-        配不上时记一笔 WARN（两个前缀摆在一起，一眼看出是拿错了行还是文件被动过）。
-
-        ★ 两态都认（2026-10-22，`plan/offline-full-weights-backup`）：落地过的产物目录里同一轮
-        会同时有 `weights.json`（**整份**）与 `weights.delta`（原件，行里记的就是它的 sha）⇒
-        直接拿 `weights_path` 的 sha 去配会一片“不符”（整轮不发 row）。先按传入的 fp 配，
-        配不上再看兄弟 `.delta`（只多读一次，且只在错配时读）。
-        """
-        p = self.root / ArtifactStore.METRICS_NAME
-        if not p.exists():
-            return None
-        cands: list[dict] = []
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict) and int(row.get("it", -1)) == int(it):
-                    cands.append(row)
-        except OSError:
-            return None
-        for fp in weights_fps(self.root, int(it), prefer=weights_fp):
-            for row in reversed(cands):  # 新→旧：最新的那一行最先被认
-                if fp and str(row.get("weights_fp", "") or "") == fp:
-                    return row
-        if cands:
-            self.log(
-                f"补传 it{it}: 账本行与权重不符（行记 {str(cands[-1].get('weights_fp', ''))[:16]}… "
-                f"实得 {weights_fp[:16]}…）——本轮**不发 row**（宁少不错：指错轮次的行比缺行危险）"
-            )
-        return None
+        """账本里与本轮权重字节相符的那一行（判据全在 `deliver_parts.row_for`，W3 抽出共用）。"""
+        return deliver_parts.row_for(self.root, int(it), weights_fp, log=self.log)
 
     # ------------------------------------------------------------ 投递
 
@@ -1219,58 +1174,40 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         """
         # 先归零：本轮若在读权重之前就早退（文件没了/空），别把**上一轮**的降级标记留给销账判据。
         self._attempt_degraded = False
-        d = ArtifactStore(self.root, run_id=self.run_id)
-        wp = d.weights_path(it)
-        try:
-            wj = wp.read_bytes()
-        except OSError as e:
-            # 扫描时还在、读时没了（会话被杀/人删了）＝瞬时状态：**不标记已投递**，
-            # 下轮重扫时它已经不在 `pending()` 里了（`pending` 只认存在的权重文件）。
-            self.log(f"补传 it{it} 本轮跳过：读不到权重 {wp}（{e}）")
-            return "stop"
-        if not wj:
-            self.log(f"补传 it{it} 本轮跳过：权重文件是空的（{wp}）")
-            return "stop"
-        opt = b""
-        op = d.opt_path(it)
-        if op.exists():
-            try:
-                opt = op.read_bytes()
-            except OSError:
-                opt = b""  # 动量缺失的代价是「hub 侧续跑 Adam 归零」，不是投递失败
-        m = self._manifest()
-        wfp = sha256_bytes(wj)
         # 降级档（§4-W1-B′）：这一轮**还在本会话降级过**且权重尚未送达 ⇒ 先只发「不评估读数」的小体。
         # 一旦权重到岸（`_delivered`），同一轮的重投（补评估读数）仍然带全量——两份职责分开。
         self._attempt_degraded = it in self._degraded and it not in self._delivered
         eval_rows = [] if self._attempt_degraded else self._eval_rows_for(it)
-        # ★ 2026-10-23（`plan/anchor-full-rounds` S6）：**补传体不摘逐局明细**。
+        # ★ 2026-10-23（`plan/anchor-full-rounds` S6）：**补传体不摘逐局明细**（`pergame=True`）。
         #   这条腿是云机逐局明细的**唯一**实时通道：权重体送出过的轮次会被记进 `_metrics_sent`
         #   （下面的销账分支），于是它们**不会**再走统计批 ⇒ 这里摘掉就是永久丢（现场 y31-null
         #   28 轮全走权重体、0 条 `offline_metrics`，控制台的耗时/击杀/承伤/残血/道具全空）。
         #   体积代价 4.3 KB/轮（实测 94 局 23.3KB 原 → 4.3KB 线上）。Q2 的摘键仍留在
         #   `wire_row` 的默认值上（在线实时体若恢复，那条面照旧只带聚合列）。
-        row, self._last_pergame_games = wire_row(self._row_for(it, wfp), keep_per_game=True)
-        # ★ 形态读数（S4）：这一轮盘上 opt 是整份还是容器（记账在体建好之后，见下面 `note_opt_wire`）。
-        opt_form = delta_files.form_of(opt)
-        body = deliver_parts.build_artifact_body(
-            run_id=self.run_id,
-            it=int(it),
-            weights_json=wj,
-            opt_tar=opt,
-            row=row,
-            eval_rows=eval_rows,
-            lineage=m,
-            source_dir=str(self.root),
+        # ★ 2026-10-23（W3）：**装配只此一处**——本腿与本地 outbox（`LocalOutboxDeliverer`）
+        #   都调 `deliver_parts.build_round_body`，字节一致是构造性质而不是测出来的巧合。
+        #   读权重失败/空文件 ⇒ `None`：扫描时还在、读时没了是瞬时状态，**不标记已投递**。
+        built = deliver_parts.build_round_body(
+            self.root,
+            self.run_id,
+            int(it),
             course=self.course,
             hub_lease=self.hub_lease,
             worker_name=self.worker_name,
+            eval_rows=eval_rows,
+            row_for=self._row_for,
+            lineage=self._manifest(),
+            pergame=True,
             now=self._now(),
+            log=self.log,
         )
+        if built is None:
+            return "stop"
+        body, raw, wfp, opt_form, self._last_pergame_games = built
+        # ★ 形态读数（S4）：这一轮盘上 opt 是整份还是容器（记账在体建好之后）。
         self._opt_wire = deliver_wire.note_opt_wire(
             self._opt_wire, opt_form, len(str(body.get("opt_tar_b64") or ""))
         )
-        raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
             return self._reject_round(
                 it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B", wfp
@@ -1365,30 +1302,21 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
                 return False
             if not self.probe():
                 return False
-            m = self._manifest()
-            body = {
-                "run_id": self.run_id,
-                "it_end": int(it_end),
-                "state": str(state),
-                "end_it_reached": bool(end_it_reached),
-                #: 段末三态（J2）：与 `end_it_reached` 同源同刻，**总是发**（空串 = 非段末/
-                #: 未知）——hub 的固定键集读它，缺席会被读成「旧形状」（容忍读）。
-                "seg_end_kind": str(seg_end_kind or ""),
-                "delivered": len(self._delivered),
-                "summary": dict(summary or {}),
-                "plan_sha256": str(m.get("plan_sha256", "") or ""),
-                "course_fp": str(m.get("course_fp", "") or ""),
-                "commit": str(m.get("commit", "") or ""),
-                "source_dir": str(self.root)[-300:],
-                "ts": self._now(),
-            }
-            if self.course:
-                body["course"] = self.course
-            raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            if len(raw) > OFFLINE_RESULT_BODY_MAX:
-                raw = json.dumps(
-                    {**body, "summary": {"truncated": True}}, ensure_ascii=False
-                ).encode("utf-8")
+            # ★ 2026-10-23（W3）：体装配搬到 `deliver_parts.build_result_body`（唯一实现）——
+            #   本地 outbox 的「进程内降级」要用**同一条**装配才能保证与 HTTP 腿同字节。
+            _body, raw = deliver_parts.build_result_body(
+                run_id=self.run_id,
+                it_end=int(it_end),
+                state=state,
+                summary=summary,
+                end_it_reached=end_it_reached,
+                seg_end_kind=seg_end_kind,
+                delivered=len(self._delivered),
+                lineage=self._manifest(),
+                source_dir=str(self.root),
+                course=self.course,
+                now=self._now(),
+            )
             status, _resp = self._post(OFFLINE_RESULT_PATH, raw)
             if not status:
                 return False  # 没送达（_post 已记一笔）

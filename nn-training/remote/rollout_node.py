@@ -33,7 +33,6 @@ import os
 import re
 import subprocess
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +42,16 @@ from typing import Any
 from common.env_probe import probe_cloud_env, worker_name
 from common.proc import run_capture
 from remote import tailscale_boot
+
+# 注册客户端住在 `remote/push_register.py`（2026-10-23，plan/push-mode-notebooks §4.3）：
+# 采样、GPU、离线三条腿共用同一份退避梯子/错误分类/★片段实现。这里 import 进来并**保留同名
+# 绑定**（`X as X` = 显式 re-export），`tests/remote/test_rollout_node.py` 的
+# `rn.build_register_payload(...)` / `rn.classify_error(...)` 等用法不变。
+from remote.push_register import build_register_payload as build_register_payload
+from remote.push_register import classify_error as classify_error
+from remote.push_register import register as register
+from remote.push_register import should_register as should_register
+from remote.push_register import unregister as unregister
 
 #: 通道名（与 hub/nodes 注册载荷里的 url 形态对应）。
 LINK_TAILSCALE = "tailscale"
@@ -84,146 +93,6 @@ def registry_url(hub_ip: str, hub_port: int, cfg_hub_url: str = "") -> str:
     return tailscale_boot.resolve_hub_url(
         cfg_hub_url=cfg_hub_url, hub_ip=hub_ip, hub_port=hub_port
     )
-
-
-def build_register_payload(
-    node_id: str, url: str, auth_key: str, workers: int | str | None = 0, label: str = ""
-) -> dict:
-    """注册载荷。
-
-    ★ `concurrency` **只在 `workers > 0` 时带上**（F2）：派发侧读
-    `n.get("concurrency") or ping.cpus`（`trainer/dispatch.py:343`），缺省 = 按节点核数；
-    写死一个 1 会把 96 核云机静默限成单核（旧 cell 口径 = 不填/0 = 不额外限流）。
-    """
-    payload: dict[str, Any] = {
-        "id": str(node_id or ""),
-        "url": str(url or ""),
-        "authKey": str(auth_key or ""),
-        "managed": True,
-    }
-    try:
-        w = int(workers or 0)
-    except (TypeError, ValueError):
-        w = 0
-    if w > 0:
-        payload["concurrency"] = w
-    lab = str(label or "").strip()
-    if lab:
-        payload["label"] = lab
-    return payload
-
-
-def should_register(state: dict | None, url: str, auth_key: str) -> bool:
-    """去重：只有 url / authKey 变化才值得重发（心跳每 60s 一次，不许周期性重写文件）。"""
-    st = state or {}
-    return str(url or "") != str(st.get("url") or "") or str(auth_key or "") != str(
-        st.get("authKey") or ""
-    )
-
-
-def classify_error(exc: BaseException) -> str:
-    """错误分类（驱动退避）：auth → 立即放弃；net/server → 退避重试。
-
-    ⚠ `HTTPError` 是 `URLError` **也是** `OSError` 的子类 ⇒ 必须先判它。
-    """
-    if isinstance(exc, urllib.error.HTTPError):
-        return "auth" if exc.code in (401, 403) else "server"
-    if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError)):
-        return "net"
-    return "unknown"
-
-
-# ---------------------------------------------------------------- 注册 HTTP（urlopen 注入）
-
-def _hub_base(hub: str) -> str:
-    return str(hub or "").strip().rstrip("/")
-
-
-def register(
-    urlopen: RegisterFn,
-    hub: str,
-    token: str,
-    payload: dict,
-    log: Callable[[str], None],
-    timeout: float = 15.0,
-) -> dict:
-    """`POST /admin/nodes/register`；返回 `{ok, status, action, error, kind}`（绝不抛）。
-
-    `status == 422` = hub 的 ping 门不过（它从 hub 侧连不到本节点）——调用方据此做
-    tailscale → cloudflared 的回落判定。
-    """
-    base = _hub_base(hub)
-    if not base or not token:
-        return {"ok": False, "status": 0, "action": None, "error": "hub/token 未配置", "kind": "net"}
-    req = urllib.request.Request(
-        base + "/admin/nodes/register",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8") or "{}")
-        return {
-            "ok": True,
-            "status": int(getattr(resp, "status", 200) or 200),
-            "action": str(body.get("action") or ""),
-            "error": None,
-            "kind": "ok",
-        }
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", "replace")[:300]
-        except Exception:  # 读体失败不改判定
-            pass
-        kind = classify_error(e)
-        log(f"注册被拒: HTTP {e.code}（{kind}）{detail}")
-        return {"ok": False, "status": int(e.code), "action": None, "error": detail, "kind": kind}
-    except Exception as e:  # 网络/超时/其它
-        kind = classify_error(e)
-        log(f"注册失败: {type(e).__name__}: {e}（{kind}）")
-        return {
-            "ok": False,
-            "status": 0,
-            "action": None,
-            "error": f"{type(e).__name__}: {e}",
-            "kind": kind,
-        }
-
-
-def unregister(
-    urlopen: RegisterFn,
-    hub: str,
-    token: str,
-    node_id: str,
-    log: Callable[[str], None],
-    timeout: float = 15.0,
-) -> dict:
-    """`POST /admin/nodes/unregister`（会话收线 best-effort；返回形状同 `register`）。"""
-    base = _hub_base(hub)
-    if not base or not token or not node_id:
-        return {"ok": False, "status": 0, "action": None, "error": "未配置", "kind": "net"}
-    req = urllib.request.Request(
-        base + "/admin/nodes/unregister",
-        data=json.dumps({"id": str(node_id)}, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8") or "{}")
-        return {
-            "ok": True,
-            "status": int(getattr(resp, "status", 200) or 200),
-            "action": str(body.get("action") or ""),
-            "error": None,
-            "kind": "ok",
-        }
-    except urllib.error.HTTPError as e:
-        return {"ok": False, "status": int(e.code), "action": None, "error": f"HTTP {e.code}", "kind": classify_error(e)}
-    except Exception as e:
-        return {"ok": False, "status": 0, "action": None, "error": f"{type(e).__name__}: {e}", "kind": classify_error(e)}
 
 
 # ---------------------------------------------------------------- 进程/网络小工具

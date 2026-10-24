@@ -63,6 +63,7 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
       lastProgressAt: 1758.5,
       at: 0,
       expiresIn: 870,
+      stateExplicit: true,
     })
     expect(q.courses.b!.hold).toBeNull()
     // 自主盘的「最近露面面」（P2-5）：旧 hub 没这一块 ⇒ null（不可知 ≠ 没盘）
@@ -115,9 +116,12 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
       lastProgressAt: 1758.5,
       at: 0,
       expiresIn: 0,
+      stateExplicit: true,
     })
     expect(q.courses.a!.pendingExport).toEqual({ by: 'tpu-2', at: 1750 })
     expect(q.courses.b!.hold!.state).toBe('stale')
+    // 缺 state 的行：派发侧按 stale（保守），但**横幅**不能吃这个默认值（stateExplicit=false）
+    expect(q.courses.b!.hold!.stateExplicit).toBe(false)
     expect(q.courses.b!.pendingExport).toBeNull()
     expect(q.courses.c!.hold).toBeNull()
     expect(q.courses.d!.hold).toBeNull()
@@ -296,6 +300,36 @@ describe('overviewCourseNames / buildCourseRows', () => {
     // hub 不可达（queue=null）⇒ 同样不可知，不编状态
     const [noHub] = view.buildCourseRows({ courses: ['a'], training: [], queue: null, iters: {} })
     expect(noHub!.peeked).toBeNull()
+  })
+
+  it('★2026-10-23：collectFallback 只认「配置 node + hub 显式答 stale」', () => {
+    // 判据的两个来源都在服务端手上（plan/offline-hold-stale-fallback §3-S1d）：
+    // ① rollout_src 与训练侧同一解析器；② hub 每课行的 hold.state（不另算窗口）。
+    const queue = view.parseHubQueue({
+      courses: {
+        stale: { hold: { worker_id: 'tpu-1', state: 'stale', last_progress_at: 1758 } },
+        // 旧 hub 没给 state：`parseHold` 为派发保守默认成 stale，但横幅不能吃这个默认值
+        legacy: { hold: { worker_id: 'tpu-1', last_progress_at: 1758 } },
+        live: { hold: { worker_id: 'tpu-1', state: 'live', last_progress_at: 1758 } },
+        // 没有进度读数 ⇒ 不编分钟
+        noprog: { hold: { worker_id: 'tpu-1', state: 'stale' } },
+      },
+    })!
+    const rows = view.buildCourseRows({
+      courses: ['stale', 'legacy', 'live', 'noprog', 'local', 'unknown'],
+      training: [],
+      queue,
+      iters: {},
+      rolloutSrc: { stale: 'node', legacy: 'node', live: 'node', noprog: 'node', local: 'local' },
+      nowSec: 2358,
+    })
+    const byName = Object.fromEntries(rows.map((r) => [r.course, r]))
+    expect(byName.stale!.collectFallback).toEqual({ silentSec: 600 })
+    expect(byName.legacy!.collectFallback).toBeNull() // state 是默认值，不是 hub 真给的
+    expect(byName.live!.collectFallback).toBeNull() // 云机在跑
+    expect(byName.noprog!.collectFallback).toEqual({ silentSec: null })
+    expect(byName.local!.collectFallback).toBeNull() // 本来就是本机采样
+    expect(byName.unknown!.collectFallback).toBeNull() // 配置不可知 ⇒ 不猜
   })
 })
 

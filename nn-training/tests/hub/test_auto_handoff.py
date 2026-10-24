@@ -51,6 +51,7 @@ from common.protocol import (
     OFFLINE_TASKS_PATH,
 )
 from hub import offline as offline_mod
+from hub import offline_ingest as ingest_mod
 from hub import task_pack as task_pack_mod
 from hub.queue_offline import (
     auto_claimable,
@@ -145,8 +146,11 @@ def _stub_auto_handoff(monkeypatch, result: tuple[bool, str] = (True, "ok")) -> 
         calls.append(course)
         return result
 
-    # patch 面 = `hub.offline`（调用点在离线段面；`hub_server` 只是门面转发名）。
+    # patch 面 = 两个调用点所在的模块：`hub.offline`（claim / 交接腿）与 `hub.offline_ingest`
+    # （段末滚下一段 + 缺包请导包 —— W5 把它们抽成共享入账面后住在这里）。两者都是真调用点，
+    # 只打一边会漏真发 HTTP。
     monkeypatch.setattr(offline_mod, "trigger_auto_handoff", fake)
+    monkeypatch.setattr(ingest_mod, "trigger_auto_handoff", fake)
     return calls
 
 

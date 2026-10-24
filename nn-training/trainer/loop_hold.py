@@ -23,9 +23,11 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from common import net_http
@@ -36,18 +38,23 @@ from common.protocol import AUTH_HEADER, OFFLINE_HOLD_PATH
 HOLD_QUERY_TIMEOUT_SEC = 3.0
 
 
-def hub_held(
+def hub_hold_doc(
     hub_url: str,
     token: str,
     course: str,
     *,
     timeout: float = HOLD_QUERY_TIMEOUT_SEC,
     opener: Any = None,
-) -> bool | None:
-    """直问 hub：`True` = 被接管、`False` = 没有被接管、`None` = **问不到**（退文件通道）。
+) -> dict[str, Any] | None:
+    """直问 hub 的**原始应答**（`GET /offline/hold?course=`）；`None` = **问不到**。
 
-    判据 = `held is True`（hub 侧 `state == "live"`，只认进度）——与 `/offline/tasks` 的
-    `held` 列同一把尺子（见 `hub/offline.py::_get_offline_hold`）。`hub_url`/`course` 空 ⇒ `None`。
+    为什么留原始 dict 而不是一步折成 bool：`/offline/hold` 同时给 `state`（live/stale）、
+    `progress_ago`、`last_progress_at`（`hub/offline.py::_get_offline_hold`）——
+    「云机掉线了」这个负事实**只有 hub 能说**（控制台缓存只说明控制台探过 hub），
+    而 2026-10-23 的降级判据（plan/offline-hold-stale-fallback §2-B）正需要它。
+
+    一次网络抖动不是错误路径：返回 `None` 让上层退文件通道（调用方按需记日志——
+    每轮边界一行「hub 问不到」会把日志刷爆，故本层不喊）。
     """
     base = str(hub_url or "").strip().rstrip("/")
     name = str(course or "").strip()
@@ -60,16 +67,107 @@ def hub_held(
         with open_fn(req, timeout=float(timeout)) as resp:
             raw = resp.read()
     except (urllib.error.URLError, OSError, ValueError):
-        # 一次网络抖动不是错误路径：返回 None 让上层退文件通道（调用方按需记日志——
-        # 每轮边界一行「hub 问不到」会把日志刷爆，故本层不喊）。
         return None
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(doc, dict):
+    return doc if isinstance(doc, dict) else None
+
+
+def hub_hold_state(doc: dict[str, Any] | None) -> str | None:
+    """原始应答 → 三态（纯函数）：`"live"` / `"stale"` / `""`（没有 hold）；`None` = 问不到。
+
+    `held is True` 优先于 `state`：旧 hub（只有 `held` 没有 `state`）的「live」不能因为缺字段
+    被读成「没有 hold」（那会让本机立刻开跑 = 双跑）。反过来，`state == "stale"` 是**显式**
+    负事实，只有它能让本机接管。
+    """
+    if doc is None:
         return None
-    return bool(doc.get("held") is True)
+    if doc.get("held") is True or str(doc.get("state") or "") == "live":
+        return "live"
+    if str(doc.get("state") or "") == "stale":
+        return "stale"
+    return ""
+
+
+def hub_held(
+    hub_url: str,
+    token: str,
+    course: str,
+    *,
+    timeout: float = HOLD_QUERY_TIMEOUT_SEC,
+    opener: Any = None,
+) -> bool | None:
+    """直问 hub：`True` = 被接管、`False` = 没有被接管（含 stale）、`None` = **问不到**。
+
+    判据 = `held is True`（hub 侧 `state == "live"`，只认进度）——与 `/offline/tasks` 的
+    `held` 列同一把尺子（见 `hub/offline.py::_get_offline_hold`）。`hub_url`/`course` 空 ⇒ `None`。
+    """
+    state = hub_hold_state(
+        hub_hold_doc(hub_url, token, course, timeout=timeout, opener=opener)
+    )
+    if state is None:
+        return None
+    return state == "live"
+
+
+def _float_or(value: object, default: float) -> float:
+    """宽容读一个数字（JSON 里的 int/float/字符串数字）；不合法 ⇒ `default`（不抛、不编）。"""
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass(frozen=True)
+class HoldFacts:
+    """「这门课现在归谁」的两个正交事实 + 静默时长（`trainer/loop_round_steps.step_course_iter` 用）。
+
+    · `held`   —— 被接管（hub live ∨ 控制文件缓存新鲜）；
+    · `lapsed` —— hub **明确**答 stale（云机掉线）。只认 hub：文件缓存的「条目过期」只等于
+      「控制台没探过 hub」，拿它判掉线会让本机与活着的云机双跑；
+    · `silent_sec` —— hub 报的进度静默秒数（`progress_ago`；没有就按 `last_progress_at` 算）；
+      `None` = 不可知（不编数字）。
+    """
+
+    held: bool = False
+    lapsed: bool = False
+    silent_sec: float | None = None
+
+
+def course_hold_facts(
+    args: Any, *, opener: Any = None, now: float | None = None
+) -> HoldFacts:
+    """一次 hub 查询 + 一次控制文件读 ⇒ `HoldFacts`（`course_held` 的完整版）。
+
+    判据与 `course_held` **逐条同源**（`hub_live ∨ file_live`）；多出来的只有两件事：
+    ① 若两通道都没说「被接管」，再看 hub 是否**显式**答 stale；② 顺手带出静默时长（WARN 用）。
+    hub 问不到 ⇒ `lapsed=False`（保守：此时 PPO 也走 hub 队列，本机采了也发不出去）。
+    """
+    course = course_key_of(args)
+    if not course:
+        return HoldFacts()
+    doc = hub_hold_doc(
+        str(getattr(args, "remote_hub_url", "") or ""),
+        hub_token_of(args),
+        course,
+        opener=opener,
+    )
+    state = hub_hold_state(doc)
+    if state == "live" or file_held(course, now=now):
+        return HoldFacts(held=True)
+    if state != "stale":
+        return HoldFacts()
+    silent: float | None = None
+    ago_f = _float_or((doc or {}).get("progress_ago"), -1.0)
+    if ago_f >= 0.0:
+        silent = ago_f
+    else:
+        last_f = _float_or((doc or {}).get("last_progress_at"), 0.0)
+        if last_f > 0.0:
+            silent = max(0.0, (float(now) if now is not None else time.time()) - last_f)
+    return HoldFacts(held=False, lapsed=True, silent_sec=silent)
 
 
 def hub_token_of(args: Any) -> str:
@@ -101,14 +199,12 @@ def course_key_of(args: Any) -> str:
 
 
 def course_held(args: Any, *, opener: Any = None, now: float | None = None) -> bool:
-    """这门课现在是不是**被接管**（云机在跑这一段）——`hub_live ∨ file_live`。"""
-    course = course_key_of(args)
-    if not course:
-        return False
-    hub = str(getattr(args, "remote_hub_url", "") or "")
-    if hub_held(hub, hub_token_of(args), course, opener=opener) is True:
-        return True
-    return file_held(course, now=now)
+    """这门课现在是不是**被接管**（云机在跑这一段）——`hub_live ∨ file_live`。
+
+    2026-10-23：实现搬进 `course_hold_facts`（同一判据 + 降级要用的两个旁证）——本函数保留为
+    读面/调度面既有的窄接口，语义一个字不变。
+    """
+    return course_hold_facts(args, opener=opener, now=now).held
 
 
 def file_held(course: str, *, now: float | None = None) -> bool:

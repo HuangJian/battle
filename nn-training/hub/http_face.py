@@ -69,6 +69,7 @@ import urllib.parse
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Any
 
 from common.http_respond import respond_json
 from common.protocol import (
@@ -201,6 +202,10 @@ class HubHandler(
     hub: _HubQueue = None  # type: ignore[assignment]  # 由 factory 注入
     #: hub 中介 push 派发器（`--push` 时注入；None = 未启用，端点 409）。
     push: PushDispatcher | None = None
+    #: 离线 push 派发器（`--offline-push` 时注入；None = 未启用，端点 409）。这里是 `Any`：
+    #: 为一个注解去 import L3 的 `hub.offline_push` 会把整条派发器拖进 HTTP 面的 import 图
+    #: （探活/网络/线程都在里面），而这里只调它的 `state()` —— 鸭子类型足够。
+    offline_push: Any = None
 
     #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
     _blocked_logged: dict[str, float] = {}
@@ -551,6 +556,8 @@ class HubHandler(
                 self._admin_queue()
             elif path == "/admin/push-workers":
                 self._admin_push_workers(set_action=False)
+            elif path == "/admin/offline-push-workers":
+                self._admin_offline_push_workers()
             elif path == "/admin/nodes":
                 self._admin_nodes_list()
             elif path == "/admin/courses":

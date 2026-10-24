@@ -28,7 +28,7 @@ from trainer.loop_remote_fail import TrainingRemoteFail
 from trainer.loop_remote_job import TrainingRemoteJob
 from trainer.loop_transport import fatal_remote_http, remote_retryable_exceptions
 from worker.events import write_gate_verdict
-from worker.loop_round import RemotePpoJob, RoundContext, StepResult, wait_for
+from worker.loop_round import ROUND_SKIP, RemotePpoJob, RoundContext, StepResult, wait_for
 
 #: ★M1（plan/ppo-job-lifecycle-ownership §2）看门狗：两次 `/jobs/{id}/status` 探询的最小
 #: 间隔（秒）——节流，防把 hub 变成新的轮询热点。
@@ -303,23 +303,29 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
             log=log,
         )
 
-    def _remote_iter(self, it: int, pairs: list[tuple[int, int]]) -> None:
+    def _remote_iter(self, it: int, pairs: list[tuple[int, int]]) -> str | None:
         """M3：**整轮上云**（kind=iter）——节点跑 rollout + PPO，hub 只发规格、收结果。
 
         与 `_remote_ppo` 共享整条发布/传输/三重校验/落位/埋点链（只换「发什么、收什么」）：
           * 发：rollout 规格（逐局 argv，job 目录内相对路径）+ TS 运行时 + init 权重；
           * 收：权重/opt/agg（同旧）+ **采集报告**（本机此时无 shard 可算）。
 
-        与动态采集（target_transitions）互斥：那套语义要求训练侧反复读本地 shard 补波，
-        而这里 shard 在节点上（跑完即毁）。配错就响亮失败，不静默降级。
+        返回：`None` = 正常推进；`ROUND_SKIP` = 本轮跳过（配置冲突，见下）。
+
+        与动态采集（target_transitions）不相容：那套语义要求训练侧反复读本地 shard 补波，
+        而本轮上云的 spec 不带 `volume` 块（`worker/iter_job.build_iter_spec`），shard 又在
+        节点上（跑完即毁）。**正常路径走不到这里**（`resolve_collect` 的 `node_ok` 已把这种课
+        改成本机 rollout）；这里是兜底：只跳本轮，由既有失败梯子（30s 退避 + 5 连击）收口，
+        不再 `SystemExit` 把整门课下线（2026-10-23，plan/offline-hold-stale-fallback §3-S3）。
         """
         args = self.args
         if int(getattr(args, "target_transitions", 0) or 0) > 0:
-            raise SystemExit(
-                "[run_rl] rollout_src=node 与 --target-transitions（动态采集）互斥："
+            log(
+                "[run_rl] rollout_src=node 与 --target-transitions（动态采集）不相容："
                 "补波需要训练侧反复读本地 shard，而上云轮的 shard 在节点上（跑完即毁）。"
-                "要动态采集就保持 rollout_src=local"
+                "本轮跳过；连续 5 轮仍冲突 ⇒ 该课下线（与其他失败同一架梯子）"
             )
+            return ROUND_SKIP
         from worker.iter_job import build_iter_spec
 
         wver = common.distribution.weights_fingerprint(args.out)
@@ -378,3 +384,4 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
             f"[run_rl] remote iter it{it}: 节点采集 {rep.get('games')} 局 "
             f"（{self._node_rollout_sec}s），往返 {round(time.time() - t_roll, 1)}s"
         )
+        return None

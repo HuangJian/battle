@@ -193,3 +193,77 @@ def test_hub_token_reads_the_same_source_as_the_remote_leg() -> None:
     """token 与远端派发**同源**（`remote_token`）——第二份来源必然分叉（401 → 静默退文件）。"""
     assert loop_hold.hub_token_of(_args(remote_token="tok")) == "tok"
     assert loop_hold.hub_token_of(SimpleNamespace()) == ""
+
+
+# ─────────── ③ 三态与降级事实（2026-10-23，plan/offline-hold-stale-fallback §2-B） ───────────
+#
+# 为什么单列一组：`hub_held` 把整份应答折成 bool，而「云机掉线了」是一个**显式负事实**
+# （`state == "stale"`）——控制台缓存里的条目过期只等于「控制台没探过 hub」，拿它判掉线
+# 会让本机与活着的云机**双跑**（评审 P0-2）。
+
+
+def test_hub_hold_state_classifies_live_stale_empty_and_unreachable() -> None:
+    """四态：`live` / `stale` / `""`（没有 hold）/ `None`（问不到）。
+
+    ★ `held is True` 优先于 `state`：旧 hub（只有 `held` 没有 `state`）的「live」不能因为
+    缺字段被读成「没有 hold」——那会让本机立刻开跑（双跑）。
+    """
+    assert loop_hold.hub_hold_state(None) is None
+    assert loop_hold.hub_hold_state({"held": True}) == "live"
+    assert loop_hold.hub_hold_state({"state": "live"}) == "live"
+    assert loop_hold.hub_hold_state({"state": "stale"}) == "stale"
+    # 显式 stale 压过 held=False；反过来 held=True 压过 stale（hub 自相矛盾时取保守）
+    assert loop_hold.hub_hold_state({"held": False, "state": "stale"}) == "stale"
+    assert loop_hold.hub_hold_state({"held": True, "state": "stale"}) == "live"
+    assert loop_hold.hub_hold_state({"held": False}) == ""
+    assert loop_hold.hub_hold_state({"hello": 1}) == ""
+
+
+def test_course_hold_facts_lapsed_comes_only_from_hub_explicit_stale(
+    _control_file: Path,
+) -> None:
+    """降级事实：**只认 hub 的显式 stale**；文件缓存/问不到都不算。"""
+    args = _args(remote_hub_url="http://hub:1", remote_token="tok")
+    # ① hub 答 stale（带 progress_ago）⇒ lapsed + 静默秒数
+    facts = loop_hold.course_hold_facts(
+        args, opener=_opener({"held": False, "state": "stale", "progress_ago": 6780.0})
+    )
+    assert (facts.held, facts.lapsed, facts.silent_sec) == (False, True, 6780.0)
+    # ② 文件里有**过期**条目、hub 答「没有 hold」⇒ 不降级（条目过期不是证据）
+    _control_file.write_text(
+        json.dumps({"held": [{"course": "c5", "last_progress_at": time.time() - 10_000}]}),
+        encoding="utf-8",
+    )
+    facts = loop_hold.course_hold_facts(args, opener=_opener({"held": False}))
+    assert (facts.held, facts.lapsed) == (False, False)
+    # ③ hub 问不到 ⇒ 不降级（保守；此时本机采了也发不出去——PPO 也走 hub）
+    facts = loop_hold.course_hold_facts(args, opener=_opener(OSError("connection refused")))
+    assert (facts.held, facts.lapsed) == (False, False)
+
+
+def test_course_hold_facts_held_wins_over_lapsed(_control_file: Path) -> None:
+    """两通道并集不变：文件说「接管中」时即便 hub 答 stale 也不降级（held 永远优先）。"""
+    _control_file.write_text(
+        json.dumps({"held": [{"course": "c5", "last_progress_at": time.time() - 1}]}),
+        encoding="utf-8",
+    )
+    args = _args(remote_hub_url="http://hub:1", remote_token="tok")
+    facts = loop_hold.course_hold_facts(
+        args, opener=_opener({"held": False, "state": "stale", "progress_ago": 900.0})
+    )
+    assert (facts.held, facts.lapsed, facts.silent_sec) == (True, False, None)
+
+
+def test_course_hold_facts_silent_falls_back_to_last_progress_at(_control_file: Path) -> None:
+    """`progress_ago` 缺失时按 `last_progress_at` 现算（WARN 里的「静默 N 分钟」）；都没有 ⇒ None。"""
+    args = _args(remote_hub_url="http://hub:1", remote_token="tok")
+    facts = loop_hold.course_hold_facts(
+        args,
+        opener=_opener({"held": False, "state": "stale", "last_progress_at": 3_100.0}),
+        now=10_000.0,
+    )
+    assert facts.silent_sec == 6_900.0
+    facts = loop_hold.course_hold_facts(
+        args, opener=_opener({"held": False, "state": "stale"}), now=10_000.0
+    )
+    assert (facts.lapsed, facts.silent_sec) == (True, None)

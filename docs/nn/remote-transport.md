@@ -6,6 +6,288 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §121 GPU push 的预推：worker 在跑时先推下一份（2026-10-24，用户指令「利用接单队列消除传输空转」· 决策 `DECISIONS.md` §2026-10-24-gpu-push-ahead）
+
+push 腿此前的形态是**严格串行**：`pick_push_worker` 只挑 `busy=false` 的机器，`run_one` 把
+payload 传完才开始等结果 ⇒ 上一份 PPO 收尾之后，下一份要先吃掉一次完整的大包上传（3–10MB，
+慢链路几十秒），这段时间 GPU 是空转的。worker 侧其实早有一条**有界接单队列**
+（`remote/worker_server.WorkerServerState`，`WORKER_QUEUE_MAX=8`），此前只有多课程同拍推送时才会
+被顺带用到。
+
+**现在的分工**：
+
+- `common.protocol.pick_push_worker(..., ahead=N)`：第一轮仍是「空闲机」（逐字节旧行为）；**只有当
+  一个空闲机都接不了时**才走第二轮——忙机若 `自报 queued < ahead` 且 `在飞 < concurrency + ahead`
+  也接。备选方案「忙机也排第一轮」被否：那会改变多课程时的落点口径（同一台吃掉全部课程）。
+- `PushDispatcher._dispatch`：名额判定改用**本拍就地累加**的计数（快照只回答拍开始时；不就地
+  记账，一拍内多课程会全落到第一台机器上——`concurrency=1` 也能一次收三份）。**备份副本永不预推**：
+  备份是保险不是吞吐，预推一份备份 = 提前烧一张 GPU 的可能。
+- `remote.worker_server`：`WorkerServerState.get()` 认 `_pending`（排队单答 `{"state":"queued"}`），
+  `/job/{id}/result` 对排队单回 **202 `{"status":"queued"}`**。不补这一格，hub 拿到的是 404，而 404 在
+  `_await_result` 里等于「这台不要这份活」⇒ 当场回落换台，预推白传几十 MB 还把健康 worker 记进 avoid。
+- `remote.push_client.submit_job` 回传 `status`（`accepted`/`queued`）——纯加法。
+
+**两把时钟必须分开**（这是预推最容易写错的一处）：
+
+1. `computing_at` 只在**第一次看到 running** 时打（`_mark_started`）。提前打点会让 `job_priority`
+   在 `STRAGGLER_SEC=180s` 后把「还在排队」读成「掉队」，进而给排队单开一份多余的备份副本 ——
+   用调度器的假时钟烧一张真 GPU。
+2. 「推送后无结果」预算（`timeout_sec`，缺省 45min）从**开算那一刻**起算；排队期另有一把
+   `queue_deadline`（同样是 `timeout_sec`），且只在「最后一眼还在队里」时生效（`last_queued`）：
+   采样间隔跳过 running 那一拍的 job 不会被队龄误杀；隧道断了、`/result` 一直没答的排队单仍会被
+   队龄兜住。排队期间 `heartbeat` 照常续租（hub 是租约持有人）。
+
+**兼容与回退**：旧 worker 忙时回 409 ⇒ `submit_job` 抛 `RetryableError` ⇒ 回落队首换台（与改造前
+同一条路，只是多一条日志）；旧 hub 不传 `ahead` ⇒ 逐字节旧行为。`hub-server --push-ahead 0` 是回退档；
+`disp.state()` 里能读到当前深度。已知上限：hub 要等下一次 `/ping`（`PUSH_PING_SEC=30s`）才知道
+「这台已经在跑」，所以预推最早在开跑后 ≤30s 发生——相对 10–30min 的 PPO 一轮可忽略。
+
+**测试**：`tests/remote/test_hub_push_dispatch.py` 新增 3 条 —— 纯函数四闸（空闲优先 / 排队深度 /
+`concurrency+ahead` 名额 / 避让）+ 真 `worker_server` 的预推闭环（假时钟：排队 8s、总龄 13s > timeout
+10s，断言 `computing_at` 排队期为空、开算后才有、`requeued=0`）+ 回退档 `ahead=0`；
+`e2e/test_worker_queue.py` 补排队单的 `/status`/`/result` 可读性。
+
+## §120 hub 侧的离线 push 派发器（W5 落地，2026-10-24 · `plan/push-mode-notebooks.plan.md` §6.6/§6.7 · 决策 `DECISIONS.md` §2026-10-24-push-mode-w5）
+
+W4 把「谁在服务、谁在训练」立在 worker 侧；W5 补的是方向相反的那一半：**hub 用自己的出站
+连接去派单、逐轮拉产物**。四个新件：`hub/offline_push.py`(L3，派发器) ·
+`hub/offline_push_assign.py`(L0，在途账本) · `hub/offline_ingest.py`(L1，共享入账面) ·
+`remote/offline_push_client.py`(L0，客户端)。接线：`hub/boot.py --offline-push`（与 `--push`
+相互独立、可同开）+ `GET /admin/offline-push-workers`（只读）。
+
+**登记表复用 + 版本门挂在 `/state` 上**：`OfflinePushWorkers(PushWorkers)` 只换
+`capability="offline_push"` —— 在线/忙闲/热重载/退避/`run_tick_loop` 全部与 GPU 派发器同一份实现
+（第三份登记表会立刻漏掉一个修复）。多出来的唯一一件事是 `probe_proto`：`/offline/push/state`
+的 `proto` 必须是 `offline_push_v1`，`proto_ok` 三态（`None` = 没问过）里派发只看 `True`。
+为什么不能挂在探活（`/ping`）上：旧 worker 的 `/ping` 逐字正常，只有新端点会 404 —— 版本门
+必须问那个**只有新 worker 才有的端点**，否则旧版本会收到一单它答不上的任务。
+
+**在途 assignment 必须落盘**（`<traj_root>/offline-push.<port>.json`）：hub 重启（OOM / 换 token /
+`systemctl restart`）之后要接着拉**同一单**。重派会换 `task_id`，worker 那边已跑完的轮次就成了
+孤儿（`tasks/<旧id>/outbox` 里躺着，没人 ack）。恢复路径刻意**不重新上传任务包**：worker 可能已在
+跑，`_resume_pumps` 只做「重新 claim（换 token）+ 继续拉」。文件里存 `cursor_it` 与 `revs`
+（已入账那一轮的 rev）：`revs` 让 hub 看得出「我入的是 rev=0，worker 上现在 rev=1」（迟到的评估行
+会把同一 `it` 的 rev +1），一个 `acked_it` 数字表达不了这件事（P0-3）。
+
+**权威 = assignment，不是体**（P0-5）：push 路径上 course / run_id / pack_sha 都是 hub 选的，
+worker 一个串包 bug 就能把权重写进另一门课/另一个 run —— 首写锁定与 409 都拦不住（它看起来
+是一次合法的新写入）。所以 `hub/offline_ingest._authority_body` 按 assignment 校验：体自报的
+`run_id`/`course` 有值且不符 ⇒ 409 + `conflict`，**不落盘、不推进 cursor**，并取消 worker 上那一单；
+体缺 `run_id` ⇒ 用 assignment 的（旧 outbox 没这个键）。同一函数也是云机 `POST /offline/artifact`
+的入账实现 —— 两条腿的校验与「段末盖章 / 滚下一段」不许各有一份。
+
+**缺包 ⇒ 请导包，不是跳过**（P0-4）：push-only 部署里没有 pull 盘，导包入口原本只在云机的 claim 上。
+派发器看见「没包」就跳过 ⇒ 那门课永远不会有包。这里接 `begin_pending_export` +
+`trigger_pack_export`（与 claim 缺包分支同一份实现），并给 `stale_reason` 的旧包一条独立的
+「请重导」腿 —— 旧包比没包更危险（云机会从旧起点重跑几十轮）。
+
+**段末 final**：worker 的 `state.final_ready` ⇒ 拉 `result` → `ingest_offline_result`（盖章 /
+滚下一段与云机 POST 同一条腿）→ `release` → ack(`result=true`) → 丢账本。worker 报
+`failed/cancelled/done` 却没有 result 体 ⇒ 先收完已完成的轮，再 release + 收摊（不当失败重试）。
+
+**ack 只看 rev**：`{task_id, result, upto_it, revs}` 交给 `deliver_outbox.ack_outbox` 的同一套语义
+（worker 侧唯一实现）—— 迟到评估行的 rev+1 不会被删掉。
+
+**每单一条 pump 线程**：几十 MB 的逐轮 body 绝不阻塞调度拍；一拍 = 重载 → 到点探活 → 版本门 →
+续跑 → 派发。心跳（60s）**只续 TTL**，活性仍只认 `progress_offline`（心跳不作活性，与
+`lease_verdict` 同一把尺子）；每拍最多拉 8 轮（积压 200 轮不会把一拍拖成十分钟）；派发失败按
+`course` 冷却 120s。
+
+**用例**：`tests/hub/test_offline_push_dispatch.py`（7：真 face loopback 主路径 —— 派发→两轮→
+段末→盖章；hub 重启续跑不重传；旧 worker 不派发；缺包请导包；权威冲突；run_id 补位；串课拒收）·
+`tests/hub/test_offline_push_assign.py`（5：落盘/重启/set_fields 不造单/drop/坏文件）。分层：
+`hub.offline_push`(L3) · `hub.offline_ingest`(L1) · `hub.offline_push_assign`/`remote.offline_push_client`(L0)。
+
+## §119 离线 push 的 worker 侧（W4 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6 · 决策 `DECISIONS.md` §2026-10-23-push-mode-w4）
+
+W3 把「产物怎么落盘」立住了；W4 立的是**谁在服务、谁在训练**。四个新件：
+`remote/offline_push_face.py`(L2，纯 HTTP 面) · `remote/offline_push.py`(L3，supervisor) ·
+`remote/offline_push_task.py`(子进程入口) · `remote/push_tunnel.py`(L0，quick tunnel 三件)。
+
+**一单一个 outbox**：`<work>/tasks/<task_id>/outbox`。共用一份 outbox 会把 A 课的轮次留在 B 课的
+`state.json` 里，hub 按 `it` 拉就会拿到别人的权重 —— 串课不可能发生是**目录结构**保证的，不是靠
+调用方自觉。`tasks/<id>` 只在整包校验通过后才出现（先落 `incoming/` 再 `replace`）。
+
+**收包的五道闸**（全部在「受理」之前，任一不过 ⇒ 400，且不污染 `tasks/`）：
+`Content-Length` 有界（2GiB，超限 413 且不落半截）· 防 zip-slip（拒绝绝对路径/`..`/符号链接）·
+`task.json` 的 `proto` 必须是 `offline_push_v1` · `pack_sha256` 逐字节对账 · 包名里的课程 ==
+`task.course`。重投同一 `task_id` = 202 duplicate（hub 超时重试不重复 spawn）；在跑时给别的单 = 409。
+
+**`busy` 的定义**（hub 据此不派下一单）：在跑**或**跑完但 `final` 未 ack。窗口里 `phase` 五态
+`running/cancelling/done/failed/cancelled`；只有 `result=true` 的 ack 把 phase 收回 `idle`。
+
+**ack 只有一个实现**：`deliver_outbox.ack_outbox()`（模块函数）。服务进程不跑补传腿（腿在训练
+子进程里），它只能读同一份 `state.json` —— 两边各写一份「删哪些」就是两套 rev 语义（P0-3 要防的）。
+跨进程**刻意不锁**：唯一竞态是子进程刚写的新轮还没进服务进程手里的账本，那一轮会在 `pending()`
+重现并重新物化（幂等，代价一份重复 body）；反过来的顺序（服务进程旧快照覆盖 child 新账本）才会丢。
+
+**supervisor 只装配，不训练**：face + `Registry`(kind=`offline_push`) + cloudflared；收到任务后起
+`remote.offline_push_task` 子进程（stdout/stderr → `<task>/run.log`，`/state.error` 带尾巴）。
+训练放子进程的理由是**状态面必须一直答得上话**：训练会吃满 CPU、注册进度钩子、解 `code.zip`，
+一次 OOM/`SystemExit` 不该把 `/state` 一起带走。取消 = 写 `stop` 文件 + 有界等（120s）→ terminate；
+`plan_run` 在**轮边界**看它（`state="cancelled"`，产物自洽可续跑）。
+
+**`push_mode` 不是第二条训练链**（P1-9）：差异全在 `run_one_course` 的入参（包/锚点/outbox 由任务
+给）——这条腿**不探 hub、不取包、不取锚点、不装 HTTP 打点、不打交付 zip**，产物写 `--outbox`
+（W3），进度写 `<outbox>/progress.json`（`seq` 跨重启续上）。用例把「不探 hub」钉成**抛异常的替身**
+（不是「没断言到」）—— 漏接一条就会静默发一个出站请求，而那正是 push 要逃离的那一侧。
+
+**notebook 的代码来源变了**：push 要**完整仓库代码**（4 个引导文件不够 import `remote.offline_push`），
+顺序是 hub `/code`（有界 `code_wait_sec`）→ GitHub clone → 本机任务包 `code.zip`，全失败 FATAL；
+这一段必须早于 `_load_boot`，且 `mode` 缺省仍是 `pull`（旧路径逐字节不动）。
+
+**共用 quick tunnel**：`find_cloudflared` / `start_quick_tunnel` / `tunnel_url_of` / `stop_proc` 下沉到
+`remote/push_tunnel.py`(L0)，GPU push 的 `run_push_worker` 改为调用同一份（安装逻辑只此一处）。
+
+**用例**：`tests/remote/test_offline_boot_push.py`（11：argv 形状 / 零 hub 调用 / 本机优先不复放包 /
+本地打点与撤销 / stop-file 接线）· `tests/remote/test_offline_push_face.py`（17：真 HTTP —— Bearer、
+版本门、收包五闸、zip-slip、409/413、round/result/progress、带 rev 的 ack、cancel、启动清扫）·
+`tests/remote/test_offline_push_supervisor.py`（7：脱敏 cfg、无 cloudflared 返 -2、注册/注销、真子
+进程 rc 与日志、任务入口接线）· `tests/remote/test_offline_notebook.py`（+2：push 代码早于 bootstrap、
+markdown 自述）。
+
+## §118 本地 outbox：push 腿的落盘面（W3 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6.4a · 决策 `DECISIONS.md` §2026-10-23-push-mode-outbox）
+
+push 模式没有「节点 → hub」的 POST（hub 经隧道来拉），所以补传腿的产物要落成文件。本节点的是**已落地**
+的 W3 与四条"错了就静默丢数据"的语义。模块：`remote/deliver_outbox.py`（L1，`LocalOutboxDeliverer`）。
+
+**`--outbox` 与 `--no-deliver` 的不变量（P0-1）**
+
+- 这两道闸原来各管一边（`deliver=not args.no_deliver` 与 `make_deliverer` 的 hub_url 早退），push 段
+  正好两个都命中 ⇒ **没有报错**：训练照跑、outbox 永远空、最后被 hold stale 判掉线。现在
+  `make_deliverer` / `open_run_context` 的 outbox 分支**先于** hub_url/token 判定，`--outbox`（不管有没有
+  `--no-deliver`）一定有一条腿。
+- `run_loop.main` 在 `--outbox` 下**不回填**任务包里的 `hub_url`：回填它就变回 HTTP 腿，而包里不带 token
+  ⇒ 又落回"静默什么都不做"。
+- 正反两面都钉住了：`--outbox` 下 body 真的出现，且全程**没构造过** `OfflineDeliverer`（断言
+  "没有 `/offline/artifact` POST"太弱：探活、统计批、备份腿都不走那条路径）。
+
+**outbox 形态**
+
+- `state.json`：`rounds{it:{rev,file,bytes,sha256,weights_fp,acked_rev,oversize}}, owed_reposts,
+  final_ready/final_acked, floor_it`；`rounds/itNNNN.json` = **完整 wire body**（与 HTTP 腿同字节，因为两边都调
+  `deliver_parts.build_round_body`）；`metrics/itNNNN.json` = **每轮一份统计体**（亦是 `store_offline_metrics` 的入参）；
+  `final.json` = `build_result_body` 的输出。
+- 不做"服务端按需重建"（plan §6.4a）：服务端是启动期从 `/code` 拿的 boot 版本，按需重建会让"服务端代码"与
+  "训练代码"两个版本漂开。代价一份临时权重副本（WARN 2GiB / MAX 4GiB：`OFFLINE_PUSH_OUTBOX_{WARN,MAX}_BYTES`）。
+- `oversize`（> `OFFLINE_ARTIFACT_BODY_MAX`）的轮不写 body，但**统计照写**：y31-null 的教训是"没权重体的轮连 row
+  一起丢 ⇒ 控制台整段空白"。
+
+**rev 与 ack（P0-3）**
+
+- `rev` 只在重投时前进：`submit_eval_round`（迟到评估行）⇒ `rev+1` + 覆盖同名文件。
+- `ack(upto_it, result, revs)` **带 rev**：只删「本次 ack 的 rev == 当前 rev」的 body；hub 看到的旧版 ⇒ **不删**，
+  它下次按新 rev 重拉。`result=true` 才删 `final.json`。无条件删 `it<=upto_it` 的旧写法会把刚建好的"迟到评估行"
+  通道吃掉（HTTP 腿靠 `_degraded`/`owed_reposts`/`?parts=metrics` 撑着，push 腿没有那两条）。
+- `floor_it`（落地时补的判据）：`it <= floor_it` 不物化，值 = 派发时 hub 的 cursor（任务包的 resume 锚点）。
+  **缺省 0 = 全部物化**：地板给高了的代价是永久丢那几轮，给 0 只是多发几份 hub 按内容去重的重复体。
+
+**进程内降级是常态（P1-10）**
+
+- 任务包里的 `code.zip` 是导出那一刻的快照，旧 `remote/deliver_worker` 不认 `--outbox` ⇒ `unrecognized
+  arguments` ⇒ `DelivererProcess` 走既有的 sticky 降级。降级目标按模式选：outbox 腿 → `LocalOutboxDeliverer
+  (background=True)`（同一个目录、同一份实现），HTTP 腿 → `OfflineDeliverer`。
+- 因此 `LocalOutboxDeliverer` **同时**支持子进程（`background=False`，`deliver_worker` 的 tick 里 `sync()`）与进程内线程
+  （`start()` 起 daemon）+ 同步三态；两个模式写出来的文件逐字节一致。
+- 子进程循环**复用**：`sync/pending_anchors/unsent_reposts/mark_repost/deliver_result/close/status` 在两条腿上
+  同形，`deliver_worker` 只多一个构造分支。
+
+**装配与层号（P1-1 的延伸）**
+
+- `deliver_parts` 是唯一装配器：`rounds_with_rows` / `row_for` / `build_round_body` / `build_result_body` /
+  `build_metrics_body`。`row_for` 从 `OfflineDeliverer._row_for` 原样抽出（两边同判据）。
+- `deliver_outbox` 对 `deliver_parts` 是**注入**（`OutboxParts` Protocol）而不是 import：import 会让它变 L2，把
+  `deliver_proc` 顶到 L4 并级联 `plan_handoff`/`run_loop` 重排（`test_every_layer_number_equals_its_topological_rank`）。
+  现在它是 L1（`artifacts`/`delta_files`/`common.*`）。
+
+**用例**：`tests/remote/test_deliver_outbox.py`（13：字节对账 / rev+ack / 统计 / oversize / 地板 / 后台与收线）·
+`tests/remote/test_run_loop_outbox.py`（4：`run_standalone` 零 HTTP、`main` 不回填 hub_url、工厂兜底、注入边界）·
+`tests/remote/test_offline_deliver_proc.py`（+2：子进程真收 `--outbox`；起不来时进程内仍产出）。
+
+## §117 节点能力注册 + 代码优先的 push 启动（2026-10-23 · `plan/push-mode-notebooks.plan.md` · 决策 `DECISIONS.md` §2026-10-23-push-mode-notebooks）
+
+用户口径：worker 只注册一次，之后 hub 用出站连接经 worker 的稳定隧道推任务、拉产物。设计全文在
+plan（含评审的 5 个 P0 + 10 个 P1，已逐条写回）；本节只记**已落地**的 W0–W2 与三条最容易踩错的语义。
+
+**W1 能力注册（hub 面）**
+
+- `POST /admin/nodes/register` 新增可选 `kind`（`sampler`/`gpu_push`/`offline_push`）。**`kind` 缺席
+  = 一个能力键都不动**：老采样客户端每会话注册一次，把缺省当声明就会静默删掉控制台手工挂的
+  `gpu_push`（评审 P0-2）。显式 `kind` 才「先清 `NODE_CAPABILITIES` 全部键、再写本次那一个」。
+- 探活按 kind 分流：采样走 `distribution.node_ping`（`/v1/ping`），push 两态走新的
+  `distribution.push_node_ping`（`GET /ping`，Bearer）——打错端点会让每台都 422 或都通。
+- 三条 200 出口（`created`/`updated`/**`unchanged`**）都回显 `kind` + `capabilities`；`unchanged`
+  是 worker 重启最常命中的那条，漏了它就会每次重启喊一次 `old_hub` 假警报（评审 P1-6）。
+- `get /admin/nodes` 读面加两个能力键（仍不回 `authKey`）。`PushWorkers(capability=…)` 让 GPU 与
+  离线两条派发腿共用一个登记表类：能力只决定「哪些节点算数」，探活/热重载/忙闲语义一份。
+
+**W2 GPU 自动注册（worker 面）**
+
+- 注册客户端下沉到 `remote/push_register.py`（`rollout_node` 改为同名 re-export）：纯函数 +
+  `register`/`unregister` + `Registry`。退避 `2s→120s`、`auth`（401/403）立即放弃、应答缺
+  `capabilities` 记 `old_hub` 且 WARN 只一次（附可粘贴的 `nodes[]` 片段）。
+- `node_id` 按角色稳定（`gpu-<env>` / `offline-<env>`，CFG 可覆盖），与 `rollout-<env>` 同口径：
+  hub 的 unregister **不删条目**，随机 id 会让节点列表随 VM 重建线性增长（评审 P1-5）。
+- `run_push_worker` 在隧道 URL 到手（或 `already_serving`）后注册；主循环每 15s 用
+  `cloudflared.log` 检 URL 换名并重注册；`try/finally` 一律 `unregister()`（含 Ctrl-C / 会话到顶 /
+  serve 早退）。`/job`、`/ping`、结果拉取协议零改动。
+- `battle.cloudflared.ipynb` 的 **push 分支从 pull 分支拆开**（评审 P1-4）：原来共用同一段 `/code`
+  循环，把 push 的有界等待改在那里就会让 pull 从「等 1h」变成「10 分钟 FATAL」。现在 pull 逐字节
+  不变；push 走 `registry_url or hub_url` 的 `/code`（`code_wait_sec` 缺省 600s，401/403 转下一源）
+  → GitHub clone（日志打 `source=github @sha12`）→ 最后才是 `allow_push_first` 的内联 bootstrap +
+  内联注册。代码先到位再起服务/注册：否则 hub 不知道 URL、服务没起，job 永远不来（注册死锁）。
+
+**为什么 push 启动必须「代码优先」**（plan §1.2）：没有 code.zip ⇒ 只有 bootstrap server；没登记 ⇒
+hub 不知道 URL ⇒ 不推 job ⇒ code.zip 永远不来。所以 push-first 只是最后兜底，不是默认。
+
+**未落地**：W3 outbox 地基（`--outbox` 与 `--no-deliver` 的不变量、带 rev 的 ack、metrics 批、
+result body 进 `deliver_parts`）、W4 worker 服务端 + `push_mode`、W5 hub 离线派发器（缺包请导包、
+body 权威在 assignment、`proto` 门）、W6 韧性/观测。语义已按评审修正在 plan 就位。
+
+## §116 云机掉线后本机自愈：采集裁决补两格 + 降级是**正交标记**（2026-10-23 · `plan/offline-hold-stale-fallback.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-hold-stale-fallback）
+
+用户口径：「接管掉线应该是自动的」，不该每门课每掉一次线就手工改 `rl-config.json`。现场形状：
+y31-null（`rollout_src=node` + `target_transitions=24576`）在云机 hold 静默 113 分钟后，每轮
+`_remote_iter` 的互斥守卫 `SystemExit` ⇒ **整门课下线**，只有人改配置才能回来。
+
+**采集裁决从「三选一」扩成四格**（`worker/loop_round.resolve_collect`）：
+
+```
+held（hub live ∨ 文件新鲜）        → COLLECT_HELD（本机完全不采样）
+lapsed（hub **显式**答 stale）      → LOCAL + fallback="hold_stale"
+node 与 target_transitions>0      → LOCAL + fallback="node_unavailable"（结构性，与 hold 历史无关）
+其余                               → 按 src 原样（含「从未有过 / 已交还 / hub 问不到」）
+```
+
+四条教训：
+
+1. **降级不能是第四个采集枚举**。`_node_rollout = mode != COLLECT_LOCAL` 决定本机**跑不跑 PPO**；
+   加一个 `COLLECT_FALLBACK_LOCAL` ⇒ 本机采样却跳过本机 PPO（iter 在涨、权重不变、不报错）。
+   所以 `mode` 只有三值，降级是旁证 `fallback`，日志/账本/读面各自读它。
+2. **「掉线」只认 hub 的显式负事实**。`tmp/loop-control.json` 的 `held` 是控制台**探 hub 时整份重写**
+   的缓存；拿它的「条目过期」判掉线 = 「控制台很久没探过 hub」，trainer↔hub 断网而云机正常时本机
+   就开跑 = **双跑**（比下线严重）。hub 问不到 ⇒ 不降级（PPO 也走 hub，采了也发不出去）。
+3. **结构性那一格必须与 hold 历史无关**。交还 / 强制解除会把 hold 清零，此时 `lapsed` 永远不触发，
+   而这类课的 node 轮在本机侧 build 不出 spec、云机也领不到 ⇒「等云机」= 永久停摆。
+   `node_volume_conflict` 是**能力判据**（`iter_job.build_iter_spec` 不带 volume），不是「永远互斥」：
+   离线计划那条路（`plan.iter_spec` + `_volume_plan_block`）已支持 volume，将来接进 live spec 时
+   本函数返回 `""` 即自动解除。
+4. **配置冲突只跳一轮，不拖垮整门课**。`_remote_iter` 返回 `ROUND_SKIP`（不再 `SystemExit`）⇒
+   `LoopRunner._map_outcome` 走**普通** RETRY（`RETRY_BACKOFF_SEC=30s` + 5 连击），**不能**复用
+   `same_iter`：那是 0 退避，毫秒级烧完三次重试再下线。开课处（`open_course`）只 WARN 不拒启——
+   serve 每次启动都会走那里，拒启 = trainer 一重启就把在跑的课打下线。
+
+**可见性（零新通道）**：trainer 日志一行（`fallback` 去重 ⇒ 同原因只喊一次，引擎重建后允许再喊）；
+`iteration.collect_fallback` 只在降级轮出现（普通轮逐字节不变）；控制台每课行 `collectFallback`
+来自 `rollout_src`（与训练侧同一解析器）+ hub `hold.state=="stale"`，**且要求 `state` 真的给过**
+（`stateExplicit`：`parseHold` 为派发把缺 `state` 默认成 stale，横幅吃那个默认值会在旧 hub 上误报）。
+
+**契约（不承诺「立刻」）**：hold 只在轮边界问一次 ⇒ 云机中途夺回时，本机最迟本轮结束退让；
+本轮已采 shard 带 `collect_fallback` 归本机批，不承诺采集中途停（要做得在批边界加 hold 检查）。
+
+**门禁**：nn `tests/{worker,trainer}` 子集 70 passed · e2e supervisor 11 passed · ruff/mypy ✓ ·
+`bun run check` 2617 pass / 0 fail · dashboard typecheck + 1799 pass / 0 fail · `bun run build` ✓。
+
 ## §115 轮形态在**写盘时**定：锚点轮（首轮 ∪ eval 轮）两件整份、其余 delta（2026-10-23 · `plan/anchor-full-rounds.plan.md` · 决策 `DECISIONS.md` §2026-10-23-goalnn-anchor-full-rounds）
 
 用户口径原话：「首轮和 eval 轮发整份 weight 和 opt，其它轮发 delta」。落地把它从**投递侧的档位

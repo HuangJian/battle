@@ -242,6 +242,10 @@ OFFLINE_CLAIM_PATH = "/offline/claim"
 OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
 OFFLINE_RELEASE_PATH = "/offline/release"
 OFFLINE_PROGRESS_PATH = "/offline/progress"
+#: push 腿的**本地**进度面文件名（`{seq, at, kind, it, done, total}`）。
+#: 与 `common/protocol.OFFLINE_PUSH_PROGRESS_NAME` 逐字相同（本文件是 notebook 从 GitHub raw
+#: 刷的那份，不能在顶层 import 仓内包；两字串由 `tests/remote/test_offline_boot_push.py` 钉住）。
+OFFLINE_PUSH_PROGRESS_NAME = "progress.json"
 #: **续跑锚点两条端点**（与 `common/protocol.py::OFFLINE_RESUME_PATH` /
 #: `OFFLINE_RESUME_BLOB_PATH` 逐字相同；对账用例 `tests/common/test_offline_task_queue.py`）：
 #: 前者递元信息（`it`/指纹/来源），后者递那一轮的**字节**
@@ -1512,6 +1516,8 @@ def build_run_argv(
     local_first: bool = False,
     lease_file: str = "",
     backup_root: str | Path | None = None,
+    outbox: str | Path = "",
+    stop_file: str = "",
 ) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
@@ -1560,7 +1566,13 @@ def build_run_argv(
     # 「这一轮的产物没能回传给 hub」是**唯一**该写网络盘的时机（每轮观测 + 段末 sweep）。
     if backup_root:
         argv += ["--backup-root", str(backup_root)]
-    if bool(cfg.get("live_backfeed", True)) and hub and token_file:
+    if outbox:
+        # ★ 2026-10-23（plan/push-mode-notebooks §6.4 / P1-9）：push 腿的**唯一**出口是本地
+        # outbox —— 与 `--no-deliver` 同时给是**有意**的：`--outbox` 的语义就是「只关 HTTP
+        # 补传，outbox 必须活」（P0-1 的不变量，见 `deliver_proc.make_deliverer`）。
+        # 同时**不传** `--hub-url`：传了就会把这条腿变回 HTTP 补传（而 push 包里不带 token）。
+        argv += ["--outbox", str(outbox), "--no-deliver"]
+    elif bool(cfg.get("live_backfeed", True)) and hub and token_file:
         argv += ["--hub-url", hub, "--hub-token-file", token_file]
         # 补传的**归位键**（多课程 hub 必需）：`CFG.course` 就是控制台里那门课的名字，
         # 也是 hub 侧 `<traj>/<课>/` 的目录名（hub 靠它把每一轮落进正确的课程目录）。
@@ -1575,6 +1587,9 @@ def build_run_argv(
             argv += ["--hub-lease-file", lease_file]
     else:
         argv += ["--no-deliver"]
+    # 取消（worker 的 `/offline/push/cancel` 写这个文件）：`plan_run` 在**轮边界**看它。
+    if stop_file:
+        argv += ["--stop-file", str(stop_file)]
     return argv
 
 
@@ -1589,6 +1604,11 @@ def run_one_course(
     run_loop_main: Callable[[list[str]], int] | None = None,
     lease: str = "",
     progress: dict | None = None,
+    push_mode: bool = False,
+    assigned_pack: str | Path | None = None,
+    assigned_resume: str | Path | None = None,
+    push_outbox: str | Path = "",
+    stop_file: str = "",
 ) -> int:
     """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
@@ -1598,6 +1618,15 @@ def run_one_course(
     空值只在「没领租约/老 hub」时出现。
     `progress` 非空时，本段结束会把打点层给出的**租约结局**写进去（`{"outcome": …}`，
     ★M3：`revoked` ⇒ 本会话别再领这一课）；不传就是纯观测腿。
+
+    ★ 2026-10-23（`plan/push-mode-notebooks` §6.4 / W4，P1-9）：`push_mode=True` 是**同一段代码**
+    的另一种起点 —— hub 已经把包/锚点/outbox 都给定了（worker 服务端收的任务包），所以这条腿
+    **不探 hub、不取包、不取锚点、不装 HTTP 打点、不打交付 zip**；训练进度写
+    `<outbox>/progress.json`，产物写进 `--outbox`（`LocalOutboxDeliverer`）。
+
+    为什么不另写一份 `run_push_course`：这两条路的差异是**输入来源**，而本函数里最容易出错的
+    东西（两个产物根、半截目录闸、本机优先、code.zip 引导、argv 装配）两边逐字相同 —— 复制一份
+    就等着两边漂开（P1-9 的原始动机就是「不要让 push 分支变成半成品」）。
     """
     deliverable = _load_deliverable()
     # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
@@ -1653,7 +1682,26 @@ def run_one_course(
 
     # 本机有产物（且人没显式点名包）⇒ 取包**不等待**：它是判据的输入，不是起点。
     has_local = local is not None and not force_pack
-    if has_local and local is not None:  # 写出来给类型收窄
+    # ★ 类型上显式可为空：push 分支给的是 `Path`，pull 分支给的是 `obtain_pack()`（可能 None）。
+    pack: Path | None = None
+    adopt = False
+    if push_mode:
+        # ★ W4（P1-9）：包与锚点由 hub 的任务包给 —— 这里一个网络调用都不发。
+        # 缺包是**任务侧的错误**（服务端已在收包时校验过 sha256），响亮拒而不是就地��包。
+        if not assigned_pack or not Path(assigned_pack).is_file():
+            raise SystemExit(
+                f"[offline-push] 任务包缺失（{assigned_pack or '未给'}）——push 腿不从 hub 取包；"
+                "这是服务端收包时该拦下的错误（删掉任务目录、让 hub 重派）"
+            )
+        pack = Path(assigned_pack)
+        # 同一段的中途重启（worker 重启 / 子进程重拉）⇒ 本机产物才是权威：不再回放包里的
+        # 计划/清单（与 `local_first` 同义），否则 `ArtifactStore.start` 会按包重开一段。
+        local_first = local is not None
+        log(
+            f"push 腿：使用 hub 派发的任务包 {pack.name}"
+            + ("（本机已有产物 ⇒ 沿用本机计划，包只作代码/TS 来源）" if local_first else "")
+        )
+    elif has_local and local is not None:  # 写出来给类型收窄
         log(
             f"本机已有产物 it{local['last_it']}（计划 it{local['start_it']} → it{local['end_it']}，"
             f"run={local['run_id'] or '-'}）——取包只为判一件事：它是不是本机进度的加长段"
@@ -1668,10 +1716,12 @@ def run_one_course(
             log(f"本机没有可续跑的产物（{dest}）——按老规矩取包起跑")
         pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, lease=lease)
 
-    adopt = False
-    if has_local and pack is not None and local is not None:
-        adopt = pack_extends_local(local, read_pack_plan(pack))
-    local_first = has_local and not adopt
+    if push_mode:
+        pass  # `local_first` 已在上面的分支定下（本机优先的判据不同：包是**任务**不是候选）
+    else:
+        if has_local and pack is not None and local is not None:
+            adopt = pack_extends_local(local, read_pack_plan(pack))
+        local_first = has_local and not adopt
     if adopt and local is not None:
         log(
             f"包是本机进度的**加长段**（同起点 it{local['last_it']}、终点更长）⇒ 收包："
@@ -1705,10 +1755,16 @@ def run_one_course(
     hub = ""
     # hub 探活**只做一次**：回传、续跑锚点、代码兜底三条腿共用同一个连通性结论（它们都是
     # 「hub 此刻在不在」的问题，探两次只会让日志里出现两个可能不一致的结论）。
-    for cand in hub_candidates(ccfg, creds):
-        if probe_hub(cand, token, log):
-            hub = cand
-            break
+    # ★ push 腿**不探**：这条链的方向是 hub 调 worker；在这里发一个出站探活只会在用户说的
+    # 「hub 入站隧道不稳定」那一侧多一次失败（而且它一旦偶然通了，就会把这条腿悄悄改回
+    # HTTP 补传 —— P0-1 的同一种病）。
+    if not push_mode:
+        for cand in hub_candidates(ccfg, creds):
+            if probe_hub(cand, token, log):
+                hub = cand
+                break
+    else:
+        log("push 腿：跳过 hub 探活（方向是 hub 来拉；本段零出站控制请求）")
 
     ensure_code(pack, log, dest=dest, hub=hub, token=token)
     ensure_ts_tree(pack, log, dest=dest)
@@ -1732,7 +1788,13 @@ def run_one_course(
         }
 
     resume_dir: Path | None = None
-    if hub:
+    if push_mode:
+        # 锚点由任务包给（hub 侧的 `resume_anchor` 已铺成 `resume/it-NNN/`）——不取。
+        anchor = Path(assigned_resume) if assigned_resume else None
+        if anchor is not None and anchor.is_dir():
+            resume_dir = anchor
+            log(f"push 腿：用任务包里的续跑锚点 {anchor}")
+    elif hub:
         # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
         # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
         resume_dir = fetch_resume(hub, token, course, work / "resume", log)
@@ -1740,7 +1802,9 @@ def run_one_course(
     #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
     tok_file = ""
     lease_file = ""
-    if bool(ccfg.get("live_backfeed", True)):
+    if push_mode:
+        log(f"push 腿：产物只落本地 outbox（{push_outbox or '未指定'}）——hub 自己来拉，不做 HTTP 回传")
+    elif bool(ccfg.get("live_backfeed", True)):
         if hub:
             tok_file = write_token_file(work, token)
             lease_file = write_lease_file(work, lease)
@@ -1760,8 +1824,10 @@ def run_one_course(
         local_first=local_first,
         lease_file=lease_file,
         # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
-        # ⇒ 传了也只是个路径，不写任何东西。
-        backup_root=net / deliverable.BACKUP_DIR_NAME,
+        # ⇒ 传了也只是个路径，不写任何东西。push 腿也不立抽屉：outbox 本身就是耐久副本。
+        backup_root=None if push_mode else net / deliverable.BACKUP_DIR_NAME,
+        outbox=push_outbox if push_mode else "",
+        stop_file=stop_file if push_mode else "",
     )
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
@@ -1769,7 +1835,13 @@ def run_one_course(
     # `common.progress_hook` 找到它。`finally` 里**必须撤销注册**：同一会话后面还要跑别的课，
     # 留着一个指向上一课的 URL 的打点层就会把下一段的进度报到别人账上。
     detach_progress: Callable[[], str] | None = None
-    if hub and lease:
+    if push_mode and push_outbox:
+        # push 腿的打点落**文件**（`/offline/push/progress` 的读面就是它）：不节流 ——
+        # 写几百字节比一次 HTTP POST 便宜几个数量级，节流只会让 hub 看到更慢的进度。
+        detach_progress = install_local_progress_sink(
+            Path(push_outbox) / OFFLINE_PUSH_PROGRESS_NAME, log
+        )
+    elif hub and lease:
         detach_progress = install_progress_pinger(
             hub,
             token,
@@ -1795,7 +1867,12 @@ def run_one_course(
     # `download_dir`（那块钱由人主动付）。
     drawer = Path(net) / deliverable.BACKUP_DIR_NAME
     explicit_dl = bool(str(ccfg.get("download_dir") or "").strip())
-    if hub and not explicit_dl and not drawer.exists():
+    if push_mode:
+        # 交付面 = outbox（hub 来拉）+ 本地产物目录；在慢挂点上再拷一个大 zip 只会多一次
+        # 「看起来挂住」的等待，而那正是 push 模式要移除的那类等待。
+        log(f"push 腿：本段产物在 {dest}；outbox 是交付面，不打 deliver zip")
+        got = None
+    elif hub and not explicit_dl and not drawer.exists():
         log(
             f"本段产物在本地根 {dest}（补传全成功 ⇒ 没有交付档）；要一份能导入控制台的 zip，"
             "点 notebook 底部那个「中途取回」cell（或显式给 CFG.download_dir）"
@@ -2262,6 +2339,76 @@ def install_progress_pinger(
             else:
                 sys.modules.pop(PROGRESS_HOOK_NAME, None)
         return str(state["outcome"])
+
+    return detach
+
+
+def install_local_progress_sink(
+    path: str | Path,
+    log: Callable[[str], None],
+    *,
+    clock: Callable[[], float] | None = None,
+) -> Callable[[], str]:
+    """push 腿的**本地**打点层：进度落 `<outbox>/progress.json`，等 hub 来拉。
+
+    与 `install_progress_pinger` **同一契约**（`common.progress_hook` 的
+    `note_progress(kind, it=, done=, total=, force=)`）——快照侧的上报口两边共用一份，
+    所以 `plan_run` / `iter_rollout` 不需要知道自己在哪条腿上。
+
+    两个刻意不跟 HTTP 腿一样的地方：
+
+      * **不节流**：写几百字节的原子覆盖比一次小 POST 便宜几个数量级，节流只会让 hub
+        看到更慢的进度（而 hold 活性只看进度）；
+      * **不重领租约**：push 腿的租约由 hub 的派发器持有与续期，worker 侧根本没有 claim 面。
+
+    `seq` 单调递增且**跨进程重启续上**（先读旧文件）：hub 用 `?since=N` 拉增量，重启把
+    seq 冲回 1 会让它永久错过那几拍。返回 `detach()`（push 腿没有「租约结局」，恒空串）。
+    """
+    p = Path(path)
+    now_fn = clock or time.time
+    state: dict[str, Any] = {"seq": 0}
+    try:
+        prev_doc = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(prev_doc, dict) and isinstance(prev_doc.get("seq"), int):
+            state["seq"] = int(prev_doc["seq"])
+    except (OSError, ValueError):
+        pass
+
+    def _note(
+        kind: str = "", *, it: int = 0, done: int = 0, total: int = 0, force: bool = False
+    ) -> bool:
+        state["seq"] = int(state["seq"]) + 1
+        doc = {
+            "seq": int(state["seq"]),
+            "at": float(now_fn()),
+            "kind": str(kind or ""),
+            "it": int(it),
+            "done": int(done),
+            "total": int(total),
+        }
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError as e:
+            log(f"[打点] 本地进度写失败（{type(e).__name__}: {e}）——训练继续")
+            return False
+        return True
+
+    mod = types.ModuleType(PROGRESS_HOOK_NAME)
+    mod.__dict__["note_progress"] = _note
+    prev = sys.modules.get(PROGRESS_HOOK_NAME)
+    sys.modules[PROGRESS_HOOK_NAME] = mod
+    log(f"轮内打点就绪（本地 {p}；hub 按 `{OFFLINE_PROGRESS_PATH}` 的读面来拉）")
+
+    def detach() -> str:
+        if sys.modules.get(PROGRESS_HOOK_NAME) is mod:
+            if prev is not None:
+                sys.modules[PROGRESS_HOOK_NAME] = prev
+            else:
+                sys.modules.pop(PROGRESS_HOOK_NAME, None)
+        return ""
 
     return detach
 

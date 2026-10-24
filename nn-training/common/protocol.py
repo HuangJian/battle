@@ -444,6 +444,11 @@ PUSH_DEAD_MISSES = 3
 #: 单份 job 推送后的兜底上限（秒）：超过它无论如何回落队首（PPO 一轮 10–30min，
 #: 45min 足以覆盖慢链路 + 排队）。
 PUSH_TIMEOUT_SEC = 45 * 60.0
+#: GPU push 的**预推深度**（缺省 1，2026-10-24）：worker 在跑时它还有一条有界接单队列
+#: （`remote.worker_server.WORKER_QUEUE_MAX`）——允许 hub 先把下一份推过去，把 payload
+#: 传输叠到当前 job 的 PPO 上（否则每次换 job 都是「传完才开算」的纯空转）。
+#: `0` = 真旧行为（只推空闲机；回退档）。预推会把租约起点提前，故不写死、由 `--push-ahead` 定。
+PUSH_AHEAD_DEFAULT = 1
 #: 跑死过某份 job 的 worker 冷却时长（秒）：冷却期内不再给它派同一份 job
 #: （「改为推送其它 worker」的落地；过期自动解禁，不永久拉黑）。
 PUSH_COOLDOWN_SEC = 600.0
@@ -458,19 +463,42 @@ def push_worker_id_of(worker_id: str) -> str:
     return w if w.startswith(PUSH_WORKER_PREFIX) else f"{PUSH_WORKER_PREFIX}{w}"
 
 
-def push_worker_from_node(node: object) -> dict | None:
-    """rl-config `nodes[]` 条目 → push worker；不是 push 节点 → None。
+# ---- 节点能力键（2026-10-23，plan/push-mode-notebooks §3.2）---------------------
+#: push 类节点在 rl-config `nodes[]` 里的**能力键**（布尔字段）。能力键是唯一持久事实；
+#: 注册 wire 上的 `kind` 只是那一次请求的说法，不落盘（见 `hub.admin` 的合并语义）。
+CAP_GPU_PUSH = "gpu_push"
+CAP_OFFLINE_PUSH = "offline_push"
+#: 全部能力键（切换 kind 时按这份名单清理 ⇒ 新增能力不会漏清）。
+NODE_CAPABILITIES = (CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
+#: 注册 `kind` 的白名单。`sampler` = 采样节点（老客户端**根本不发** `kind`，见 §4.2-P0）。
+NODE_KINDS = ("sampler", CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
+#: 注册 wire 上的协议版本（worker 服务端在 `/ping` 里回；旧 worker 没有 ⇒ 不派发）。
+OFFLINE_PUSH_PROTO = "offline_push_v1"
 
-    判据与训练侧 `trainer/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
+
+def node_capabilities(node: object) -> list[str]:
+    """一个 `nodes[]` 条目声明了哪些能力键（读面/排障用；顺序稳定）。"""
+    if not isinstance(node, dict):
+        return []
+    return [cap for cap in NODE_CAPABILITIES if node.get(cap)]
+
+
+def push_worker_from_node(node: object, capability: str = CAP_GPU_PUSH) -> dict | None:
+    """rl-config `nodes[]` 条目 → push worker；不是该能力的 push 节点 → None。
+
+    判据与训练侧 `trainer/loop_steps._gpu_push_nodes` **同一把尺子**（能力键且
     `enabled` 缺省视为 true、url 非空）：两边若判据不同，就会出现「训练侧认为该推这台、
     hub 却认为一台都没有」——症状是 job 永远躺在队首（最难查的一种）。
+
+    `capability` 缺省 `gpu_push`（GPU 派发器的既有语义，返回形状不变）；离线派发器传
+    `CAP_OFFLINE_PUSH`。**返回值形状与能力无关**（`capability` 由登记表自己记）。
 
     返回 `{id, url, key, concurrency}`：`id` 缺省回落到 url（与训练侧日志口径一致），
     `concurrency` 缺省 1（gpu_push 节点线上就没有这个键——单 GPU 一次一份）。
     """
     if not isinstance(node, dict):
         return None
-    if not node.get("gpu_push") or not node.get("enabled", True):
+    if not node.get(capability) or not node.get("enabled", True):
         return None
     url = str(node.get("url") or "").rstrip("/")
     if not url:
@@ -491,17 +519,32 @@ def pick_push_worker(
     workers: Sequence[dict],
     inflight: Mapping[str, int],
     avoid: Iterable[str] = (),
+    *,
+    ahead: int = 0,
 ) -> dict | None:
     """挑一个**现在就能接活**的 worker；没有空闲者 → None。
 
-    四个条件（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
+    四道闸（全部必要，任缺一个都会把「推送」退化成「往死机器上撞」）：在线（最近一次
     探活通过且未达离场阈值）、自报不忙（`/ping` 的 busy）、在飞数 < concurrency、不在
     本次避让名单里（刚跑死这份 job 的那台）。
 
     顺序 = 注册序（稳定 ⇒ 行为可测）；**不按快慢排序**——「谁空谁接」是既定口径
     （EWMA 快慢 hold 已被用户裁定删除，见 `trainer/dispatch.py` 注释）。
+
+    `ahead > 0`（2026-10-24）追加**第二轮**：所有空闲机都接不了时，忙机若还有接单位
+    （自报 `queued < ahead` 且 `在飞 < concurrency + ahead`）也可以接——它的 payload 传输
+    叠在当前 job 的 PPO 上，worker 侧有界 FIFO 负责「当前 job 结束即顶上」。只在第一轮
+    无人可接时才走第二轮 ⇒ 有空闲机时位置口径逐字节不变。
+
+    为什么 `ahead` 缺省 0：预推把租约的起点提前到「job 还在队里」的时刻，这不是所有
+    调用方都愿意接受的时钟；GPU 派发器显式传 `--push-ahead`（缺省 1）。
     """
     blocked = set(avoid)
+
+    def _fits(w: dict, wid: str, boost: int) -> bool:
+        limit = int(w.get("concurrency") or 1) + int(boost)
+        return int(inflight.get(wid, 0)) < limit
+
     for w in workers:
         if not isinstance(w, dict):
             continue
@@ -512,7 +555,24 @@ def pick_push_worker(
             continue  # 从没答过 / 连续失败达阈值：不往它身上推
         if w.get("busy"):
             continue  # 节点自报在跑
-        if int(inflight.get(wid, 0)) >= int(w.get("concurrency") or 1):
+        if not _fits(w, wid, 0):
+            continue
+        return w
+    if int(ahead) <= 0:
+        return None
+    for w in workers:
+        if not isinstance(w, dict):
+            continue
+        wid = str(w.get("id") or "")
+        if not wid or wid in blocked:
+            continue
+        if not w.get("online"):
+            continue
+        if not w.get("busy"):
+            continue  # 第一轮已经处理过空闲机
+        if int(w.get("queued") or 0) >= int(ahead):
+            continue  # 接单队列已经够深（多推一份只是把它排得更长）
+        if not _fits(w, wid, int(ahead)):
             continue
         return w
     return None
@@ -624,6 +684,35 @@ OFFLINE_ARTIFACT_BODY_MAX = 8 * 1024 * 1024
 OFFLINE_RESULT_BODY_MAX = 256 * 1024
 #: 产物目录里补传记账文件名（= 已投递项；重启续投靠它，不靠内存）。
 OFFLINE_DELIVERED_NAME = "delivered.json"
+#: ★ 2026-10-23（plan/push-mode-notebooks §6.4a）：push 腿的**本地 outbox** 容量闸。
+#: 正常 hub 每 15s 拉一次并 ack ⇒ 稳态只有 1–2 轮；hub 长时间离线时才会涨。
+#: WARN = 一行告警（不拦），MAX = worker 服务端**停止接新单**（当前任务照跑；不静默丢轮）。
+OFFLINE_PUSH_OUTBOX_WARN_BYTES = 2 * 1024 * 1024 * 1024
+OFFLINE_PUSH_OUTBOX_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
+# ---- 离线 push（hub 经隧道来拉，2026-10-23 plan/push-mode-notebooks §6.2）----
+#: 版本门（评审 P1-7）：GPU 的 `/ping` 没有 `proto`，`PushWorkers.ping_all` 也只读
+#: `busy/queued/done` —— 所以离线 push 的「对面听得懂吗」只能落在 **`/offline/push/state`**
+#: 的应答体上：没有 `proto` 或不等于这个值 ⇒ hub **不派发**（日志指路升级）。
+OFFLINE_PUSH_PROTO = "offline_push_v1"
+#: worker 侧 HTTP 面（全部 Bearer；方向 = hub 作为出站客户端来调）。
+#: 端点是**跨端契约**：hub 派发器（W5）与 worker 服务端（W4）各持一半，两边都只能从这里取。
+OFFLINE_PUSH_STATE_PATH = "/offline/push/state"
+OFFLINE_PUSH_PROGRESS_PATH = "/offline/push/progress"
+OFFLINE_PUSH_ROUND_PATH = "/offline/push/round"
+OFFLINE_PUSH_RESULT_PATH = "/offline/push/result"
+OFFLINE_PUSH_TASK_PATH = "/offline/push/task"
+OFFLINE_PUSH_ACK_PATH = "/offline/push/ack"
+OFFLINE_PUSH_CANCEL_PATH = "/offline/push/cancel"
+#: 任务外层 zip 上限（§6.3）：超限 413 且**不落半截**（流式写到临时文件，收完才改名）。
+OFFLINE_PUSH_TASK_BODY_MAX = 2 * 1024 * 1024 * 1024
+#: 外层 zip 的三件（`task.json` + 包 + 锚点）；名字是契约，worker/hub 两侧同源。
+OFFLINE_PUSH_TASK_NAME = "task.json"
+OFFLINE_PUSH_PACK_DIR = "pack"
+OFFLINE_PUSH_RESUME_DIR = "resume"
+#: 任务包在 worker 侧的进度面文件名（`{seq, at, kind, it, done, total}`）：
+#: push 腿没有「节点 → hub」的上行 POST，进度只能落盘等 hub 来读（`/offline/push/progress`）。
+OFFLINE_PUSH_PROGRESS_NAME = "progress.json"
 #: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
 #: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
 OFFLINE_TASK_PACK_PATH = "/offline/task-pack"

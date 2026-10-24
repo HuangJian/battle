@@ -74,6 +74,7 @@ from worker.loop_round import (
     ROUND_HELD_EXIT,
     ROUND_NEXT,
     ROUND_RETRY,
+    ROUND_SKIP,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
     ROUND_WAIT,
@@ -406,6 +407,11 @@ class TrainingLifecycle:
                 break
             if outcome.status == ROUND_RETRY:
                 it -= 1
+            if outcome.status == ROUND_SKIP:
+                # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：单课程前台没有
+                #   调度器的 resume_at，退避在这里自己给——下一轮问同一轮（it 不前跳）。
+                it -= 1
+                time.sleep(WAIT_RETRY_SEC)
             if outcome.status == ROUND_WAIT:
                 # 单课程驱动器的让位（RL 的 `run_one_round` 今天从不返回它——本分支是**语义
                 # 完整性**：等外部事实时不能把这一轮当成跑完（那会跳轮），也不能原地空转烧 CPU）。

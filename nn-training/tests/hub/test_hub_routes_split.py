@@ -146,7 +146,9 @@ ALLOWED_IMPORTS = {
     "hub.blob": {"common.protocol"},
     # 离线段面并入 origin 的新语义后要多两处：`hub.store`（构造/注解 `_JobStore`，并要它那里的
     # 租约/归属状态）与 `hub.task_pack`（任务包新鲜度门 / 缺包自愈门的纯判据）。
-    "hub.offline": {"common.protocol", "hub.store", "hub.task_pack"},
+    # ★ 2026-10-24（W5）：产物/段末入账抽进 `hub.offline_ingest`（两条入口共用一份）——
+    # 补传端点只剩「鉴权 → 读体 → 定位课程」，判据住那边，所以这里多这一条。
+    "hub.offline": {"common.protocol", "hub.store", "hub.task_pack", "hub.offline_ingest"},
     "hub.result": {"common.protocol", "remote.push_dispatch"},
     "hub.schedule": {"common.protocol"},
 }

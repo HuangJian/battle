@@ -72,6 +72,12 @@ export interface HubHoldView {
   at: number
   /** 距判掉线的剩余秒（hub `hold.expires_in` = min(进度余量, TTL 余量)；0 = 未知）。 */
   expiresIn: number
+  /** hub 应答里**真的给了** `state` 键（2026-10-23，plan/offline-hold-stale-fallback §3-S1d）。
+   *
+   *  为什么单列一个位：`parseHold` 为**派发**保守，把缺 `state` 的旧 hub 默认成 `'stale'`；
+   *  而「本机已接管 rollout」的横幅是一个**判断**，吃那个默认值会在旧 hub 上误报。
+   *  横幅只认 `stateExplicit === true`。 */
+  stateExplicit?: boolean
 }
 
 /** **导包软态**（`pending_export`）：有人正给这门课导包（claim 遇缺包/包旧）。
@@ -239,6 +245,8 @@ export function parseHold(raw: unknown): HubHoldView | null {
     lastProgressAt: num(o.last_progress_at),
     at: num(o.at),
     expiresIn: num(o.expires_in),
+    // 「state 真的给过」与「默认成 stale」分开——横幅判据要用前者（见 `HubHoldView`）。
+    stateExplicit: 'state' in o,
   }
 }
 
@@ -588,6 +596,13 @@ export interface CourseOverviewRow {
   nextJob: string | null
   /** 离线租约（`/admin/offline.leases`；`null`/缺省 = 没有租约 / 旧 hub）——stale/墓碑徽标用。 */
   lease?: OfflineLeaseView | null
+  /** **本机接管 rollout 的降级事实**（2026-10-23，plan/offline-hold-stale-fallback §3-S1d）。
+   *
+   *  判据= `rollout_src=='node'` ∧ hub 明确答 `state=='stale'`（不是「缓存里的条目过期」）。
+   *  `null` = 没降级 / 不可知（hub 不可达、旧 hub、或 state 是默认值而非 hub 真给的）。
+   *  `silentSec` = 云机静默秒数（`lastProgressAt` 已由服务端算成秒；null = 没有进度读数）。
+   *  缺省/`null` = 没降级（与 `lease` 同一宽容度：手搭的行不必人人补这个字段）。 */
+  collectFallback?: { silentSec: number | null } | null
 }
 
 /** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序：`training` 是服务端的
@@ -618,20 +633,36 @@ export function buildCourseRows(input: {
   offline?: Record<string, Record<string, OfflineRunView>> | null
   /** 逐课程的离线租约（`parseOfflineLeases` 的产物；缺 = 没读到 / 旧 hub）。 */
   leases?: Record<string, OfflineLeaseView> | null
+  /** 逐课程**生效的** rollout 位置（`resolveRolloutSrc` 已把 auto/retired 解成 local|node）。
+   *  缺 = 不可知 ⇒ `collectFallback` 恒 null（不猜）。 */
+  rolloutSrc?: Record<string, 'local' | 'node'>
+  /** 「现在」的墙钟秒（测试注入；缺省 `Date.now()/1000`）。 */
+  nowSec?: number
 }): CourseOverviewRow[] {
   const training = new Set(input.training)
+  const nowSec = input.nowSec ?? Date.now() / 1000
   return input.courses.map((course) => {
     const q = input.queue?.courses[course]
     const seg = offlineSummary(input.offline?.[course])
     const inflightDetail = q?.inflightDetail ?? []
+    // 降级（本机接管 rollout）：只认 hub **显式**答 stale 的 node 课（plan §3-S1d）。
+    const hold = q?.hold ?? null
+    const lapsed =
+      input.rolloutSrc?.[course] === 'node' &&
+      hold?.state === 'stale' &&
+      hold.stateExplicit === true
+    const collectFallback = lapsed
+      ? { silentSec: hold.lastProgressAt > 0 ? Math.max(0, nowSec - hold.lastProgressAt) : null }
+      : null
     // 最老那份的认领龄（「卡住」的判据输入）；全缺 `claimed_ago` ⇒ null（不编龄）。
     const claimed = inflightDetail.map((d) => d.claimedAgo).filter((x): x is number => x !== null)
     return {
       course,
       training: training.has(course),
       iter: input.iters[course] ?? null,
-      hold: q?.hold ?? null,
+      hold,
       pendingExport: q?.pendingExport ?? null,
+      collectFallback,
       hubSeen: q !== undefined,
       queuePending: q?.pending ?? 0,
       inflight: q?.inflight ?? 0,

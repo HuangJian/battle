@@ -20,8 +20,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import remote.delta_files as delta_files
-from common.protocol import OFFLINE_ARTIFACT_PATH
+from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_BODY_MAX
 from remote.artifacts import ArtifactStore
+from remote.deliver_wire import wire_row
 
 #: 整份展开器（调用方注入）：`(容器路径) -> 整份路径`。
 Expander = Callable[[Path], Path]
@@ -85,6 +86,202 @@ def full_parts_for(
                 "——本轮回落发原件（delta），hub 侧落地器照旧兜"
             )
     return wj, opt, ("delta" if is_container_bytes(wj) else "full")
+
+
+def rounds_with_rows(root: str | Path) -> set[int]:
+    """产物目录里**真轮次**的集合 = `metrics.jsonl` 里有行的那些 `it`（判据唯一实现）。
+
+    起点与真轮次的唯一结构差别就是「记不记账」：`ArtifactStore.checkpoint(row=None)` 是起点
+    专用，`else` 才追加行 ⇒ **有行 ⟺ 真轮次**（2026-10-11 事故 x24-stack5：把起点当成 it1 推
+    上去，hub 首写锁定 ⇒ 真 it1 永不到岸）。HTTP 腿与 outbox 必须同一把尺子。
+
+    不做缓存（outbox 每拍对一个段目录调一次；HTTP 腿的 `_ledger_its` 自己按 mtime 缓存）。
+    """
+    p = Path(root) / ArtifactStore.METRICS_NAME
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    its: set[int] = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # 半截行（被 kill）——与 `ArtifactStore.rows` 同口径地跳过
+        if isinstance(row, dict):
+            it = row.get("it")
+            if isinstance(it, int) and not isinstance(it, bool):
+                its.add(int(it))
+    return its
+
+
+def row_for(
+    root: str | Path,
+    it: int,
+    weights_fp: str,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    """账本里**与本轮权重字节相符**的那一行（同名 it 有多行时取**最后一个**）。
+
+    2026-09-22 事故的两个关键点（旧的「返回第一条同 it 行」两者都错）：
+
+      * `metrics.jsonl` 是**跨会话追加**的：同一个目录续跑/重开时，同一个 it 会再落一行
+        （`ArtifactStore.checkpoint` 追加，不重写）。旧实现返回**第一条** ⇒ 拿上一会话的行去配
+        这一会话的权重，hub 侧「账本行与权重不符」直接 400 拒收（现场：
+        `行记 bff93df1… 实得 5f099e55…`）。这与控制台「同 iter 取最后一条 = 最新对账结果」
+        是同一条口径（`dashboard/src/server/iters.ts`）；
+      * 只有 `weights_fp` **对得上本轮字节**的行才是这一轮的行——配不上就宁可不发：
+        一个指错轮次的行比没有行危险得多（读数看起来完全正常）。
+
+    ★ 2026-10-23（W3）：从 `OfflineDeliverer._row_for` 原样抽出（`deliver_outbox` 的本地 outbox
+    要用**同一份**判据，而它不能 import 本模块——见该模块 `OutboxParts` 的注释）。
+    """
+    from remote.artifacts import weights_fps
+
+    p = Path(root) / ArtifactStore.METRICS_NAME
+    if not p.exists():
+        return None
+    cands: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and int(row.get("it", -1)) == int(it):
+                cands.append(row)
+    except OSError:
+        return None
+    for fp in weights_fps(Path(root), int(it), prefer=weights_fp):
+        for row in reversed(cands):  # 新→旧：最新的那一行最先被认
+            if fp and str(row.get("weights_fp", "") or "") == fp:
+                return row
+    if cands and log is not None:
+        log(
+            f"补传 it{it}: 账本行与权重不符（行记 {str(cands[-1].get('weights_fp', ''))[:16]}… "
+            f"实得 {weights_fp[:16]}…）——本轮**不发 row**（宁少不错：指错轮次的行比缺行危险）"
+        )
+    return None
+
+
+def build_round_body(
+    root: str | Path,
+    run_id: str,
+    it: int,
+    *,
+    course: str = "",
+    hub_lease: str = "",
+    worker_name: str = "",
+    eval_rows: list[dict] | None = None,
+    row_for: Callable[[int, str], dict | None] | None = None,
+    lineage: Mapping | None = None,
+    pergame: bool = True,
+    now: float = 0.0,
+    log: Callable[[str], None] | None = None,
+) -> tuple[dict, bytes, str, str, int] | None:
+    """产物目录 → 一轮的完整 wire body：`(body, raw, weights_fp, opt_form, pergame_deferred)`。
+
+    **唯一装配实现**（2026-10-23，plan/push-mode-notebooks §6.5 / 评审 P1-1）：HTTP 腿
+    （`OfflineDeliverer._post_artifact`）与本地 outbox（`LocalOutboxDeliverer`）都调它 ⇒ 两边
+    的字节一致是**构造性质**，不是一个「看起来严格」的测试比较出来的。
+
+    权重读不到 / 为空 ⇒ `None`（那一轮本拍不投：扫描时还在、读时没了是瞬时状态，不标记已投）。
+    `row_for(it, weights_fp)` 由调用方给（配不上本轮字节就宁可不带行）；`eval_rows` 已由
+    调用方算好（需不需要评估读数、上界多少都是调用方的策略）。
+    """
+    d = ArtifactStore(Path(root), run_id=run_id)
+    wp = d.weights_path(int(it))
+    try:
+        wj = wp.read_bytes()
+    except OSError as e:
+        if log:
+            log(f"补传 it{int(it)} 本轮跳过：读不到权重 {wp}（{e}）")
+        return None
+    if not wj:
+        if log:
+            log(f"补传 it{int(it)} 本轮跳过：权重文件是空的（{wp}）")
+        return None
+    opt = b""
+    op = d.opt_path(int(it))
+    if op.exists():
+        try:
+            opt = op.read_bytes()
+        except OSError:
+            opt = b""  # 动量缺失的代价是「hub 侧续跑 Adam 归零」，不是投递失败
+    wfp = hashlib.sha256(wj).hexdigest()
+    row, pergame_n = wire_row(
+        row_for(int(it), wfp) if row_for is not None else None, keep_per_game=bool(pergame)
+    )
+    body = build_artifact_body(
+        run_id=run_id,
+        it=int(it),
+        weights_json=wj,
+        opt_tar=opt,
+        row=row,
+        eval_rows=list(eval_rows or []),
+        lineage=lineage or {},
+        source_dir=str(root),
+        course=course,
+        hub_lease=hub_lease,
+        worker_name=worker_name,
+        now=now,
+    )
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return body, raw, wfp, delta_files.form_of(opt), pergame_n
+
+
+def build_result_body(
+    *,
+    run_id: str,
+    it_end: int,
+    state: str,
+    summary: dict | None = None,
+    end_it_reached: bool = False,
+    seg_end_kind: str = "",
+    delivered: int = 0,
+    lineage: Mapping | None = None,
+    source_dir: str = "",
+    course: str = "",
+    now: float = 0.0,
+) -> tuple[dict, bytes]:
+    """段末摘要的体：`(body, raw)`——从 `offline_deliver.deliver_result` 原样搬来的**唯一实现**。
+
+    与逐轮产物的差别：摘要是**会变的**（同一 run 续跑后 `it_end` 更大），hub 覆盖写；它不是
+    不可变快照，而是「这条腿现在到哪了」的最新答案。超限时只换 `summary`（标 `truncated`），
+    其余字段原样——那正是旧实现的行为。
+    """
+    m = lineage or {}
+    body: dict = {
+        "run_id": run_id,
+        "it_end": int(it_end),
+        "state": str(state),
+        "end_it_reached": bool(end_it_reached),
+        #: 段末三态（J2）：与 `end_it_reached` 同源同刻，**总是发**（空串 = 非段末/未知）——
+        #: hub 的固定键集读它，缺席会被读成「旧形状」（容忍读）。
+        "seg_end_kind": str(seg_end_kind or ""),
+        "delivered": int(delivered),
+        "summary": dict(summary or {}),
+        "plan_sha256": str(m.get("plan_sha256", "") or ""),
+        "course_fp": str(m.get("course_fp", "") or ""),
+        "commit": str(m.get("commit", "") or ""),
+        "source_dir": str(source_dir)[-300:],
+        "ts": float(now),
+    }
+    if course:
+        body["course"] = course
+    raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > OFFLINE_RESULT_BODY_MAX:
+        raw = json.dumps({**body, "summary": {"truncated": True}}, ensure_ascii=False).encode(
+            "utf-8"
+        )
+    return body, raw
 
 
 def eval_rows_for(

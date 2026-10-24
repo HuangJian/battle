@@ -57,6 +57,12 @@ ROUND_BUNDLE_EXIT = "bundle_exit"
 #: ★M2（plan/worker-type-dispatch-model §3-M2）：判据从「rl-config 里的 `rollout_src=run`」
 #: 换成 **hub 的 hold**（`trainer/loop_hold.py` 的双通道），名字同步 `OFFLINE` → `HELD`。
 ROUND_HELD_EXIT = "held_exit"
+#: **本轮跳过**（配置冲突这类「这一轮没法跑、但下一轮可能就好了」的终态；
+#: plan/offline-hold-stale-fallback §3-S3）。与 `ROUND_RETRY` 的区别是**退避**：
+#: retry 在细粒度驱动里带 `same_iter`（0 退避，立刻重来），而 skip 走调度器的普通 RETRY 通道
+#: （`RETRY_BACKOFF_SEC=30s` + `resolve_failure` 的 5 连击上限）。为什么不复用 retry：
+#: 配置冲突不会在毫秒内自愈，0 退避只会在日志里烧掉三次重试再下线。
+ROUND_SKIP = "skip_round"
 
 
 @dataclass(frozen=True)
@@ -88,8 +94,54 @@ COLLECT_NODE = "node"
 #: （半离线整段）；2026-10-07 起判据从配置换成事实（`held` 参数）。
 COLLECT_HELD = "held"
 
+#: 降级原因（`CollectPlan.fallback` 的取值域；空串 = 没降级）。
+#: · `hold_stale`：hub 明确答「接管已 stale」⇒ 云机掉了，本机接手（plan §2-B）；
+#: · `node_unavailable`：`node` 与 `target_transitions>0` 在本轮上云路径上不相容（plan §2-D）。
+FALLBACK_HOLD_STALE = "hold_stale"
+FALLBACK_NODE_UNAVAILABLE = "node_unavailable"
 
-def resolve_collect_mode(source: str, seg: int, *, held: bool = False) -> str:
+
+@dataclass(frozen=True)
+class CollectPlan:
+    """采集裁决的**两个正交事实**：走哪条路（`mode`）与「为什么本机采」（`fallback`）。
+
+    为什么不是一个更细的枚举：`_node_rollout = mode != COLLECT_LOCAL` 决定「本机跑不跑 PPO」
+    （`step_ppo`）、零 shard 告警与 eval 放行档。把「降级」塞进同一个枚举 ⇒ 本机采样却跳过
+    本机 PPO（iter 在涨、权重不变，且不报错）。所以 `mode` 只有三值，降级是一个**旁证**。
+    """
+
+    mode: str
+    #: `""` = 不降级；否则见 `FALLBACK_*`（只用于日志/账本/读面）。
+    fallback: str = ""
+
+
+def resolve_collect(
+    source: str, seg: int, *, held: bool = False, lapsed: bool = False, node_ok: bool = True
+) -> CollectPlan:
+    """采集裁决：**被接管 > 整轮上云 > 本机采样**，外加两格自愈（plan §2）。
+
+    `lapsed` = hub **明确**答「这门课的 hold 已 stale」（不是「控制台缓存里的条目过期」——
+    后者只说明控制台没探过 hub，拿它判掉线会让本机与活着的云机**双跑**，见 plan §2-B）。
+
+    `node_ok` = **本轮上云这条路**能不能跑这门课（能力判据，与 hold 无关）：
+    `iter_job.build_iter_spec` 不带 `volume` 块 ⇒ `target_transitions>0` 的课在 node 轮上
+    build 不出 spec（`_remote_iter` 直接拒），云机也就永远领不到这一轮 ⇒「等云机」= 永久停摆。
+    这一格不依赖 hold 历史，所以交还 / 强制解除 / trainer 重启都照样自愈。
+    """
+    if held:
+        return CollectPlan(COLLECT_HELD)
+    if source == "node":
+        if lapsed:
+            return CollectPlan(COLLECT_LOCAL, FALLBACK_HOLD_STALE)
+        if not node_ok:
+            return CollectPlan(COLLECT_LOCAL, FALLBACK_NODE_UNAVAILABLE)
+        return CollectPlan(COLLECT_NODE)
+    return CollectPlan(COLLECT_LOCAL)
+
+
+def resolve_collect_mode(
+    source: str, seg: int, *, held: bool = False, lapsed: bool = False, node_ok: bool = True
+) -> str:
     """采集模式的**唯一**裁决点：被接管 > 整轮上云 > 本机采样。
 
     为什么单拎出来：这三条支路决定「本机到底采不采样」，而派发点（`step_rollout`）与
@@ -110,12 +162,11 @@ def resolve_collect_mode(source: str, seg: int, *, held: bool = False) -> str:
     `source` 取 `trainer/loop_steps.py::_rollout_source` 的返回值（auto 已解析过）；`seg` 取
     `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）——退役后 `seg` 只剩一个用途：
     `--export-bundle` 的「跑到哪停」。
+
+    2026-10-23：本函数变薄包装（保留旧签名给既有读者/用例），裁决与降级原因见
+    `resolve_collect`（plan/offline-hold-stale-fallback §3-S1）。
     """
-    if held:
-        return COLLECT_HELD
-    if source == "node":
-        return COLLECT_NODE
-    return COLLECT_LOCAL
+    return resolve_collect(source, seg, held=held, lapsed=lapsed, node_ok=node_ok).mode
 
 
 @dataclass
@@ -213,6 +264,9 @@ class RoundContext:
     seg: int = 0
     #: 采集模式（见 `COLLECT_*`）。
     collect_mode: str = COLLECT_LOCAL
+    #: 降级原因（见 `CollectPlan.fallback`；`""` = 没降级）。**与 `collect_mode` 正交**：
+    #: 降级轮 `collect_mode == COLLECT_LOCAL`（本机真采样、真跑 PPO），这里只回答「为什么」。
+    collect_fallback: str = ""
     #: 本轮是否派发干净评估（`_eval_on_round(it)` 的**同一次**求值结果）。
     eval_on_round: bool = False
     #: 本轮干净评估的回执（`_join_eval` 的产物；止损判定要用）。
