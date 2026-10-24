@@ -9359,3 +9359,23 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/engineering.md §85`。
 - **验收**：该用例连跑不再受秒边界影响；`tests/common/test_protocol_split.py` + `tests/remote/test_deliver_outbox.py`
   + `tests/remote/test_offline_deliver.py` 97 passed；nn python gate **5094 passed, 10 skipped**。
+
+## §2026-10-24-goalnn-backfeed-stage-off-temp-root（2026-10-24，回传落地不再扫系统临时区）
+
+- **背景**：全量 nn 门禁（`-n 8`）偶发红
+  `tests/hub/test_offline_backfeed.py::test_repeat_after_a_failed_landing_heals_the_round`
+  （客户端 10s 超时，单跑必绿，单跑 7.08s 只余 3s 余量）。
+- **根因**：`hub/deltas.land_into_stage` 的暂存件直接落在 `tempfile.mkdtemp()` 里，而基准搜索
+  （`remote.weights_standard._candidates` → `delta_files.search_roots`）把 `path.parent` 与
+  `path.parent.parent` 当「同目录 / 兄弟轮」候选根 ⇒ 暂存件的祖父 = **整个系统临时区**
+  （本机 64,912 条目）：每次回传多付 1.531s 的 glob（同组根去掉它 0.005s）。
+- **决定**：暂存区外面再套一层私有目录（`<hub-land-XXXX>/stage/…`）⇒ path 派生的两格只扫
+  自己的暂存区；清理改删外层。生产 hub 的每轮 delta 回传同享这份收益。
+- **否决的备选**：① 调大客户端超时（并跑下更慢的形状会回来，生产每轮仍付 1.5s）；② 给
+  `ensure_standard_weights` 加 `derive_roots=False` 贯穿两层（公开面多一个参数，别的调用点要
+  记住；暂存位置本来就是我们选的）；③ `search_roots` 特判「根 == 系统临时根」（判据藏进共享
+  启发式，只治这一处）；④ 候选 glob 惰性/截断（搜索语义变了，可能产出假的 `failed`）。
+- **落点**：`nn-training/hub/deltas.py` · `nn-training/tests/hub/test_offline_backfeed.py`
+  （`test_landing_never_scans_the_os_temp_root`，先红后绿）· `docs/nn/engineering.md §86`。
+- **验收**：该用例 7.08s → 0.08s；`tests/hub/test_offline_backfeed.py` **15 passed**；nn python
+  gate（pre-commit 全量）绿。

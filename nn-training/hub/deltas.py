@@ -104,10 +104,17 @@ def land_into_stage(raw_by_part: dict[str, bytes], *, traj: str | Path | None, c
     而落地要先把容器写到盘上（落地器的入口是路径，不是字节）⇒ 先在暂存目录里算完整份，
     再走原有的幂等/冲突判据，最后原子提交。
 
-    暂存目录在 `tempfile.mkdtemp`（系统临时区）——不往课程树里塞 `.stage-*` 垃圾；
-    落地器的候选根不受影响（它靠 `traj_root`/额外根找基准，不靠暂存目录的位置）。
+    暂存目录在 `tempfile.mkdtemp` 下（系统临时区）——不往课程树里塞 `.stage-*` 垃圾。
+    ★ 但**不能直接落在临时根下**：基准搜索（`remote.weights_standard._candidates` →
+    `delta_files.search_roots`）会把 `path.parent` 与 `path.parent.parent` 当「同目录 / 兄弟轮」
+    候选根 ⇒ 暂存件的祖父就是**整个系统临时区**（2026-10-24：本机 6.5 万条目，每轮回传多付
+    1.5s 的 glob；全量门禁八进程并跑时 10s 客户端超时直接红，见
+    `tests/hub/test_offline_backfeed.py::test_landing_never_scans_the_os_temp_root`）。外面套一层
+    私有目录后，path 派生的那两格只扫我们自己的暂存区（一个空目录 + 本轮文件）。
     """
-    stage = Path(tempfile.mkdtemp(prefix="hub-land-"))
+    root = Path(tempfile.mkdtemp(prefix="hub-land-"))
+    stage = root / "stage"
+    stage.mkdir()
     # 两件的键**恒定存在**（缺席 = 空字节）：调用方按 `staged["opt.tar"]` 取，不必各自判缺失。
     out: dict = {"landed": {}, "note": "", "weights.json": b"", "opt.tar": b"", "raw": {}}
     try:
@@ -134,4 +141,4 @@ def land_into_stage(raw_by_part: dict[str, bytes], *, traj: str | Path | None, c
         }
         return out
     finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)

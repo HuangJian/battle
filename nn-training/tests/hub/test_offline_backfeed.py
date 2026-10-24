@@ -19,6 +19,7 @@ import hashlib
 import json
 import struct
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -228,6 +229,49 @@ def test_repeat_after_a_failed_landing_heals_the_round(tmp_path: Path) -> None:
         assert hub.resume_anchor(COURSE)["it"] == 2  # type: ignore[index]
     finally:
         srv.shutdown()
+
+
+def test_landing_never_scans_the_os_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回传落地**不得**去扫系统临时根（暂存件的祖父目录不是产物树）。
+
+    2026-10-24 flake 现场：`hub/deltas.land_into_stage` 把暂存件直接落在 `tempfile.mkdtemp()`
+    里，而基准搜索（`remote.weights_standard._candidates` → `delta_files.search_roots`）会把
+    `path.parent` 与 `path.parent.parent` 当「同目录 / 兄弟轮」候选根 ⇒ 暂存件的祖父 = **整个
+    系统临时区**。本机 6.5 万条目，实测每次回传多付 1.5s 的 glob（八进程并跑更糟），把
+    `test_repeat_after_a_failed_landing_heals_the_round` 的 10s 客户端超时顶红。
+
+    判据不看墙钟：直接把落地器交给搜索的根接住，断言系统临时根**一个都不在**。
+    """
+    from remote import weights_standard
+
+    seen: list[Path] = []
+    real = weights_standard.delta_files.candidate_files
+
+    def spy(path, roots, patterns):  # type: ignore[no-untyped-def]
+        seen.extend(Path(r) for r in roots)
+        return real(path, roots, patterns)
+
+    monkeypatch.setattr(weights_standard.delta_files, "candidate_files", spy)
+    base, container = _container_pair()
+    base_url, _hub, srv = _boot(tmp_path)
+    try:
+        body = _round_body(2, container, run_id="run-a", opt=b"opt")
+        # 两次都过一遍：失败（基准不在）与成功（duplicate + 自愈）都会走候选根
+        st, res = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and res.get("landed", {}).get("weights") == "failed", (st, res)
+        prev = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-001"
+        prev.mkdir(parents=True, exist_ok=True)
+        (prev / "weights.json").write_bytes(base)
+        st2, res2 = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+        assert st2 == 200 and res2.get("landed", {}).get("weights") == "landed", (st2, res2)
+    finally:
+        srv.shutdown()
+    junk_root = Path(tempfile.gettempdir()).resolve()
+    assert seen, "落地器没跑（用例形状变了）"
+    junk = [r for r in seen if r.resolve() == junk_root]
+    assert not junk, f"落地搜索把系统临时根当候选根了（{junk_root}）——每次回传都要 glob 整个临时区"
 
 
 def test_legacy_container_round_repeat_is_duplicate_not_conflict(tmp_path: Path) -> None:

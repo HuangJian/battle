@@ -25,6 +25,43 @@
 
 ---
 
+## §86 回传落地去扫了整个系统临时区：暂存件的位置漏进了基准搜索（2026-10-24，flake）
+
+**症状**：全量 nn 门禁（`-n 8`）偶发红
+`tests/hub/test_offline_backfeed.py::test_repeat_after_a_failed_landing_heals_the_round`，报
+`TimeoutError: timed out`（客户端 `_post` 的 `timeout=10`），单跑必绿。单跑 7.08s —— 离 10s
+只剩 3s 余量，八进程并跑就顶红。
+
+**根因**：`hub/deltas.land_into_stage` 把暂存件直接落在 `tempfile.mkdtemp()`（= 系统临时根
+的子目录）。落地器的基准搜索（`remote.weights_standard._candidates` →
+`delta_files.search_roots`）会把 `path.parent` 与 `path.parent.parent` 当「同目录 / 兄弟轮」
+候选根 ⇒ 暂存件的**祖父就是整个系统临时区**。本机临时区 64,912 条目，`_SEARCH_PATTERNS`
+（`*.json` / `*.delta` / `it*/weights*` …）全要在它上面 glob：实测每次回传 **1.531s** 全花在
+这一格（同一组根去掉它：0.005s）。原 docstring 写的「候选根不受影响，它靠 `traj_root`/
+额外根找基准」是**假设，不是事实**。
+
+**改法**：暂存区外面再套一层私有目录（`<hub-land-XXXX>/stage/…`），path 派生的那两格只扫
+我们自己的暂存区（一个空目录 + 本轮文件）；`rmtree` 改删外层。测试之外的真实收益：生产 hub
+的**每一轮** delta 回传都少一次临时区全扫（临时区随跑时长而长大）。
+
+**否决的备选**：① 只调大客户端 `timeout=10` —— 并跑下更慢的形状会回来，生产每轮仍付
+1.5s；② 给 `ensure_standard_weights` 加 `derive_roots=False` 并贯穿 `_standard_bytes`/
+`_candidates` —— 语义更准，但公开面多一个参数、别的调用点要记住它，而暂存目录的位置本来就
+是我们自己选的；③ 在 `search_roots` 里特判「根 == 系统临时根」—— 把判据藏进共享启发式，
+且只治这一处 staging；④ 候选 glob 改惰性/截断 —— 搜索语义变了（可能漏掉真基准 ⇒ 假的
+`failed`，原件保留但锚点永远跳过）。
+
+**回归**：`tests/hub/test_offline_backfeed.py::test_landing_never_scans_the_os_temp_root` ——
+接住落地器交给搜索的每一组根，断言系统临时根**一个都不在**（不看墙钟；先红后绿），同一用例
+把失败与成功两条落地路径都走一遍。该文件 7.08s → 0.08s，15 例全绿。
+
+**同族教训**（与 §85 同根）：**产物以外的路径也会被当成产物树**。凡是「从路径反推语义」的
+启发式（同目录、兄弟轮、traj、归档根），只要输入里混进一个**我们自己的**暂存/临时路径，它
+就会去扫一堆无关的东西。选址即契约：暂存件要落在「它的祖父读起来也像暂存区」的地方。
+
+**落点**：`nn-training/hub/deltas.py` · `nn-training/tests/hub/test_offline_backfeed.py`。
+
+
 ## §85 线上体不是纯函数：`gzip` 头把墙钟写进了 `weights_json`（2026-10-24，flake）
 
 **症状**：`tests/remote/test_deliver_outbox.py::test_round_body_is_byte_identical_with_the_http_leg`
