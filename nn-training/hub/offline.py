@@ -32,21 +32,26 @@ from common.protocol import (
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESUME_BLOB_NAMES,
     OFFLINE_RESUME_BLOB_PATH,
-    PLAN_NAME,
     ProtocolError,
 )
 
 # 任务包新鲜度门 / 缺包自愈门 / 清单读数的纯判据与模块状态都住 `hub/task_pack.py`（叶子）——
 # 它有两个读者（本模块的取包端点 + `queue_offline` 的清单），所以**不**挂在本模块上（否则
 # 队列那一侧要向上 import，账本当场报反向边）。本模块因此从 L0 升为 L1。
+from hub.offline_ingest import (
+    end_seal_ok,
+    ingest_offline_artifact,
+    ingest_offline_result,
+    seg_end_kind,
+    seg_kind_text,
+    trigger_next_segment,
+    trigger_pack_export,
+)
 from hub.store import _JobStore
 from hub.task_pack import (
     _TASK_PACK_LOCK,
     _TASK_PACK_MISS_TRIGGERS,
     _TASK_PACK_TRIGGERS,
-    SEG_END_COURSE,
-    SEG_END_OPEN,
-    SEG_END_SEGMENT,
     TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
@@ -57,9 +62,7 @@ from hub.task_pack import (
     auto_handoff_failure,
     decide_task_pack,
     note_auto_handoff_trigger,
-    pack_index_meta,
     pack_index_part_sha,
-    pack_seg_end_kind,
     poll_console_export_status,
     reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
@@ -68,14 +71,6 @@ from hub.task_pack import (
     trigger_auto_handoff,
     trigger_task_bundle_export,
 )
-
-#: `offline_advance_ok` 的拒因 → 日志文案（★P1-1）。住这里而不是 hub 深层的理由：这句话是给
-#: **现场的人**看的（为什么这一轮没推进起点），而判据住在 `_HubQueue`（那里不打印）。
-#: ★M4b：`pinned_online` 那条腿随权威删除。
-_ADVANCE_SKIP_TEXT = {
-    "hold_stale": "持有人的进度已静默超阈（stale）——迟到回传不夺回起点",
-    "hold_token": "租约 token 不符（不是本课当前持有人）",
-}
 
 # 递字节端点允许的文件名 = 锚点三件（`OFFLINE_RESUME_BLOB_NAMES`），不再另立一个别名：
 # ★ 2026-10-15（用户口径）锚点**只发整份** —— hub 受理回传时已就地落地（`hub/deltas.py`），
@@ -317,6 +312,8 @@ class OfflineRoutes:
 
         鉴权与其他端点完全一致（Bearer）；**没有租约**——这条腿没有 job（全离线段连 hub
         都不需要就能跑完）。幂等/首写锁定/指纹校验见 `store_offline_artifact`。
+        入账本体住 `hub/offline_ingest.py`：push 派发器从 worker 的 outbox 拉到的**同一份体**
+        走的是同一个函数（评审 §6.7：两条腿的校验不可能一条有一份）。
         """
         if not self._auth_ok():
             return
@@ -336,88 +333,29 @@ class OfflineRoutes:
                     "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
-            # ★ 2026-10-23（`plan/offline-deliver-full-and-gaps` §3.4 / S4）：
-            # `?parts=metrics` = **只带统计**的补传（没有权重那一半）。抖动期权重发不动、
-            # `anchors` 档里锚点之间那些轮，只有这条路能把胜率/击杀送到控制台。
-            # 它**不推进活动起点、不创建 `it-N/`**（没有权重 ⇒ 不该让 `resume_anchor` 看见它）。
-            if self._query_str("parts") == "metrics":
-                res = self.hub.store_offline_metrics(course, body)
-                try:
-                    self.hub.merge_eval_rows(course, body.get("eval_rows"))
-                except Exception as e:
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] [hub-server] metrics 体的 eval 行并入失败"
-                        f"（忽略）: {type(e).__name__}: {e}",
-                        flush=True,
-                    )
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE-METRICS "
-                    f"course={course or '-'} run={res.get('run_id')} "
-                    f"rows={res.get('rows')} skip={res.get('skipped')} <- {len(raw)}B",
-                    flush=True,
-                )
-                self._json(res, 200)
-                return
-            # ★P1-1（M1b）：**盖章无条件、advance 要活+持准**——镜像/归档照落（算过什么的
-            # 证据），但活动起点只听**活跃 hold 的持有人**。判据三态见 `offline_advance_ok`。
-            advance, why = self.hub.offline_advance_ok(
-                course, str(body.get("lease_token") or "")
+            status, res = ingest_offline_artifact(
+                self.hub,
+                course,
+                body,
+                # ★ `?parts=metrics` = **只带统计**的补传（没有权重那一半）：抖动期只有这条路
+                # 能把胜率/击杀送到控制台，且它**不推进活动起点、不创建 `it-N/`**。
+                parts=self._query_str("parts"),
+                size=len(raw),
             )
-            res = self.hub.store_offline_artifact(course, body, advance_active=advance)
-            res["advance_active"] = bool(advance)
-            # ★ 2026-10-11 事故：同一轮已有**不同字节**的权重 ⇒ 409（不静默、不覆盖、不并账）。
-            # 这一支必须在 `merge_eval_rows` **之前**返回：那些 eval 行属于本次这一份权重，
-            # 把它们并进 hub 上那份**不同**的轮，等于伪造读数。
-            if res.get("status") == "conflict":
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 补传冲突（不覆盖）："
-                    f"course={course or '-'} run={res.get('run_id')} it{res.get('it')} "
-                    f"hub={str(res.get('have_fp') or '')[:12]}… "
-                    f"got={str(res.get('got_fp') or '')[:12]}…",
-                    flush=True,
-                )
-                self._json(res, 409)
-                return
-            if why:
-                res["advance_skipped"] = why
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 补传不推进活动起点"
-                    f"（course={course} run={res.get('run_id')} it{res.get('it')}）："
-                    f"{_ADVANCE_SKIP_TEXT.get(why, why)}",
-                    flush=True,
-                )
-            # 本轮随体重一并到达的云机评估行 → 课程账本（去重；失败只记一笔，
-            # **不影响**补传本身的成功与否：权重才是这一趟的硬要求）。
-            try:
-                n_games, n_sums = self.hub.merge_eval_rows(course, body.get("eval_rows"))
-                if n_games or n_sums:
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows +{n_games} "
-                        f"/ summary +{n_sums}（course={course} it{body.get('it')}）",
-                        flush=True,
-                    )
-            except Exception as e:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] eval rows 并入失败"
-                    f"（忽略）: {type(e).__name__}: {e}",
-                    flush=True,
-                )
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
-        if res["status"] == "accepted":
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
-                f"it{res['it']} run={res['run_id']} <- {len(raw)}B",
-                flush=True,
-            )
         # duplicate 也回 200：补传是重试友好的（重连/重启续投会重传），409 会让节点把它
         # 当成「没成功」每轮再传一遍——而首写锁定已经保证了内容不会变。
-        self._json(res)
+        self._json(res, status)
 
 
     def _post_offline_result(self) -> None:
-        """补传段末摘要（覆盖写：它是「这条腿现在到哪了」的最新答案）。"""
+        """补传段末摘要（覆盖写：它是「这条腿现在到哪了」的最新答案）。
+
+        盖章 / 「滚下一段」的判据住 `hub/offline_ingest.py`（与 push 派发器**同一份**：
+        旧包/旧会话把新包封死那类事故只该有一道闸）。
+        """
         if not self._auth_ok():
             return
         raw = self._read_capped_body(OFFLINE_RESULT_BODY_MAX)
@@ -433,133 +371,33 @@ class OfflineRoutes:
                     "段末摘要无法归属课程：体里带 course（或 course_name），或加 ?course=；"
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
-            res = self.hub.store_offline_result(course, body)
-            # T6（plan/auto-offline-handoff §3.6）：跑满自报 = 把当前包记为 completed
-            # ⇒ 该课**不可再领**（U6），直到人重导包（新 sha）自动解封。这是 T6 的
-            # hub 侧生产链接线——此前 `note_offline_completed` 只有测试直接调（死代码）。
-            # ★P1-7 / R3-f：盖章前校验「这份自报就是**当前包**的段末」（run_id / plan_sha256）：
-            # 旧包/旧会话的 `end_it_reached` 不得封住新包（否则重导后依旧不可领）。
-            if res.get("end_it_reached"):
-                sealed, why = self._end_seal_ok(course, body)
-                res["completed_sealed"] = sealed
-                if sealed:
-                    self.hub.note_offline_completed(course)
-                elif why:
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] [hub-server] 段末自报不盖章"
-                        f"（course={course} run={res['run_id']}）：{why}",
-                        flush=True,
-                    )
-                # ★ J2（plan §3.2.2/§3.2.3，P0-2/P0-3）：**盖章照旧**（上面一步一字不动——
-                #   `completed_pack_sha` 就是「这份包别再发了」的唯一机制），另起一条「滚下一段」
-                #   的腿：段末事件**主动**触发一次控制台出包（与 claim 无关 ⇒ 解掉「completed
-                #   死锁」：没有需求也有包），而**只有课末**（kind=course）才不发下一段。
-                #   自报对不上当前包（旧包/旧会话）⇒ 不触发：那时包已经换过了，不需要下一段。
-                if sealed:
-                    kind = self._seg_end_kind(course, str(res.get("seg_end_kind") or ""))
-                    res["seg_end_kind"] = kind
-                    # 只对**确实不是课末**的两态触发（`open`/`segment`）；`course` 不发下一段；
-                    # **未知**也不发——宁可少滚一次（退回今天的手动续段），也不要在课末白烧一次
-                    # 导出（每次触发 = 一次 code-snapshot + 一次 git push，而课已经跑完了）。
-                    if kind in (SEG_END_OPEN, SEG_END_SEGMENT):
-                        self._trigger_next_segment(course, kind)
-                    else:
-                        print(
-                            f"[{time.strftime('%H:%M:%S')}] [hub-server] "
-                            f"{self._seg_kind_text(kind)}完成（course={course}）"
-                            + ("——不触发下一段" if kind else "——段末种类不可知（旧云机 + 包读不到计划），不触发下一段"),
-                            flush=True,
-                        )
+            status, res = ingest_offline_result(self.hub, course, body)
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
-            f"result run={res['run_id']} it{res['it_end']}"
-            + ("（跑满）" if res.get("end_it_reached") else ""),
-            flush=True,
-        )
-        self._json(res)
+        self._json(res, status)
+
 
     def _seg_end_kind(self, course: str, reported: str) -> str:
-        """段末三态（J2）：优先云机自报，**缺席时从当前包里的计划反推**（P1-8 兜底）。
+        """段末三态（实现住 `hub/offline_ingest.seg_end_kind`；名字保留给读面与用例）。"""
+        return seg_end_kind(self.hub, course, reported)
 
-        为什么要有反推（而不是「没自报就当课末」）：三态是 v2 新键，而它在父/子进程之间走
-        控制文件 —— **在飞的 `code.zip` 是导出那一刻的快照**，老子进程不认新键 ⇒ 自报里
-        那个键静默缺席。若此时按旧行为（不触发），无限课的段末就永远滚不起来（而按课末
-        处理更坏：课被提前封死）。包里 `plan.json` 与云机读的是**同一份**只读事实
-        （`hub.task_pack.pack_seg_end_kind`），拿它当兜底不造第二份事实源。
-        """
-        if reported:
-            return reported
-        try:
-            pack = self.hub.task_pack_path(course)
-        except ProtocolError:
-            return ""
-        if not pack.is_file():
-            return ""
-        return pack_seg_end_kind(pack)
 
     def _trigger_next_segment(self, course: str, kind: str) -> None:
-        """段末（非课末）⇒ 请控制台出下一段（**事件驱动**，与 claim 无关）。
+        """段末（非课末）⇒ 请控制台出下一段（实现住 `hub/offline_ingest.trigger_next_segment`）。"""
+        trigger_next_segment(self.hub, course, kind)
 
-        与 `task_pack` 那两本触发账共用同一套判据（`auto_handoff_decision`：已知失败 /
-        上界 / 节流）——否则段末这条腿会绕过「导出失败就不再烧快照」的纪律。
-        控制台不可达 ⇒ 只记一行（§「不得在 claim 的临界区里同步等控制台」的反面：这里不是
-        临界区，但也不能因它挂住请求）；半状态由 `stalled` 告警兜住。
-        """
-        decision = auto_handoff_decision(course)
-        if decision != "trigger":
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] {self._seg_kind_text(kind)}完成（course={course}）"
-                f"——不触发下一段（{decision}）",
-                flush=True,
-            )
-            return
-        ok, note = trigger_auto_handoff(course)
-        if ok:
-            note_auto_handoff_trigger(course)
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] {self._seg_kind_text(kind)}完成"
-            f"（course={course}）——已触发控制台出下一段（{note}）",
-            flush=True,
-        )
 
     @staticmethod
     def _seg_kind_text(kind: str) -> str:
-        """段末三态的人读一句话（日志与读面同一口径；`""` = 未知）。"""
-        return {
-            SEG_END_COURSE: "课末",
-            SEG_END_OPEN: "开区间本段",
-            SEG_END_SEGMENT: "本段",
-        }.get(kind, "本段（段末种类未知）")
+        """段末三态的人读一句话（实现住 `hub/offline_ingest.seg_kind_text`）。"""
+        return seg_kind_text(kind)
+
 
     def _end_seal_ok(self, course: str, body: dict) -> tuple[bool, str]:
-        """段末自报能不能给「当前包」盖 completed 章（★P1-7 / R3-f）。只拦**有反证**的情形：
+        """段末自报能不能给「当前包」盖 completed 章（实现住 `hub/offline_ingest.end_seal_ok`）。"""
+        return end_seal_ok(self.hub, course, body)
 
-        判据 = 当前任务包的身份（`run_id` / `plan_sha256`，都是包里已有的字段）与自报逐项
-        对照。包读不到 / 自报缺该项 ⇒ **不判**（照旧盖章——不制造新的失败态，旧形状的用例
-        与旧 worker 不受影响）；只有「两侧都有值且不等」才拒章，那正是要拦的：旧包/旧会话的
-        `end_it_reached` 把**新包**封成 completed（重导后依旧不可领，U6 反着生效）。
-        """
-        try:
-            pack = self.hub.task_pack_path(course)
-        except ProtocolError:
-            return True, ""
-        if not pack.is_file():
-            return True, ""
-        meta = pack_index_meta(pack)
-        pack_run = str(meta.get("run_id") or "")
-        pack_plan = pack_index_part_sha(pack, PLAN_NAME)
-        got_run = str(body.get("run_id", "") or "")
-        got_plan = str(body.get("plan_sha256", "") or "")
-        if pack_run and got_run and pack_run != got_run:
-            return False, f"自报 run_id={got_run} ≠ 当前包 run_id={pack_run}"
-        if pack_plan and got_plan and pack_plan != got_plan:
-            return False, (
-                f"自报 plan_sha256={got_plan[:12]}… ≠ 当前包 {pack_plan[:12]}…"
-            )
-        return True, ""
 
     def _get_offline_tasks(self) -> None:
         """`GET /offline/tasks`（2026-09-25，`plan/offline-task-discovery.plan.md` §3.1）：可领任务清单。
@@ -948,14 +786,10 @@ class OfflineRoutes:
         #: `failed` / `not_started` 确认没起进程 / `unknown` 说不清（含试满 `give_up` 与旧控制台）。
         export_state = "unknown"
         if decision == "trigger":
-            note_auto_handoff_trigger(course)
-            ok, why2 = trigger_auto_handoff(course)
-            export_state = "triggered"
-            note = (
-                "已请控制台写配置并导包（导出约需数分钟）"
-                if ok
-                else f"想替这门课导包，但控制台不可达/不接受（{why2}）——请到控制台点一次「导出任务包」"
-            )
+            # 「判节流 + 记触发账 + 调控制台」只有一份实现（push 派发器缺包时也走它）。
+            trig = trigger_pack_export(self.hub, course)
+            export_state = str(trig["state"])
+            note = str(trig["note"])
         elif decision == "throttled":
             # ★ 2026-10-22（现场 22:33 y31-*）：这里原来写死「已经在导包了（节流窗内不重复触发）」
             #   ——那是**假陈述**：账本只记得「本窗口触发过」，不知道控制台到底起没起进程。

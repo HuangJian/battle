@@ -229,6 +229,9 @@ class AdminRoutes:
     # 由组合类提供的运行时状态与通用助手（声明类型供 mypy/阅读，实际赋值/实现在 HubHandler）。
     hub: Any
     push: Any
+    #: 离线 push 派发器（`--offline-push` 时注入；None = 未启用，端点 409）。类型是 `Any`：
+    #: `hub.admin` 是 L0，不许为了一个注解去 import L3 的派发器（会当场红分层账本）。
+    offline_push: Any
     # `BaseHTTPRequestHandler` / `StreamRequestHandler` 的属性——混入不继承它们，故需自行声明
     # （否则 mypy 报 attr-defined）。
     # ⚠ 类型必须与 typeshed **逐字一致**（`headers: email.message.Message`、
@@ -544,6 +547,21 @@ class AdminRoutes:
         self._json(info, 200)
 
     # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
+    def _admin_offline_push_workers(self) -> None:
+        """`GET /admin/offline-push-workers`：在途 assignment + 每台 worker 的 proto/忙闲。
+
+        只读（派发器自己的 `state()`）：没人会经这个端点改调度状态 —— 「取消某一单」走
+        `POST /offline/push/cancel`（worker 轮边界停），撤课走停课标记。三条读面各自回答
+        一件事，比一个什么都管的 POST 好排障。
+        """
+        if not self._auth_ok():
+            return
+        disp = self.offline_push
+        if disp is None:
+            self._json({"error": "离线 push 派发未启用（hub-server 需 --offline-push）"}, 409)
+            return
+        self._json(disp.state(), 200)
+
     def _admin_push_workers(self, set_action: bool = False) -> None:
         """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。
 

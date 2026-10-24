@@ -30,6 +30,7 @@ import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from typing import Any
 
 # 单实例锁 / 端口守卫（2026-09-17 双实例事故的两道闸）：与调度面无关，纯进程生命周期。
 from common.cli import house_parser
@@ -47,6 +48,11 @@ from common.protocol import (
     parse_course_arg,
 )
 from hub.http_face import HubHandler
+from hub.offline_push import (
+    OFFLINE_PUSH_POLL_SEC,
+    OfflinePushDispatcher,
+    OfflinePushWorkers,
+)
 from hub.queue import _HubQueue
 from hub.store import _JobStore
 from remote.code_snapshot import ensure_cluster_snapshot
@@ -86,6 +92,7 @@ def make_server(
     *,
     hub: _HubQueue | None = None,
     push: PushDispatcher | None = None,
+    offline_push: Any = None,
 ) -> ThreadingHTTPServer:
     """构造 server（handler 注入调度面 + token）。
 
@@ -105,6 +112,8 @@ def make_server(
     # push 派发器（可选）：只挂上，**不在此处启动** —— 起线程是启动器的动作，
     # 免得每个「只想拿个 server 发请求」的测试都被意外拉起一个后台拍。
     HubHandler.push = push
+    # 离线 push 派发器（可选；契约同上：只挂上，启动是 `main` 的事）。
+    HubHandler.offline_push = offline_push
     return Server()
 
 def _landing_deps_warn() -> None:
@@ -204,6 +213,12 @@ def main() -> None:
         type=float,
         default=PUSH_TIMEOUT_SEC,
         help="单份 job 推送后的兜底上限（秒）；超时回落队首换 worker",
+    )
+    ap.add_argument(
+        "--offline-push",
+        action="store_true",
+        help="启用离线 push 派发：hub 出站去离线 worker 的隧道派任务、拉每轮产物"
+        "（与 --push 相互独立；两者可同时开）",
     )
     args = ap.parse_args()
     token = args.token
@@ -361,9 +376,40 @@ def main() -> None:
             f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s",
             flush=True,
         )
-    srv = make_server(hub, args.port, token, host=args.host, push=push_disp)
+    # 离线 push 派发（2026-10-24，plan/push-mode-notebooks §6.6 / W5）：登记表与 GPU 共用
+    # 同一份 rl-config 来源（`nodes[]` 里能力键为 `offline_push` 的条目）。
+    offline_disp: OfflinePushDispatcher | None = None
+    if args.offline_push:
+        offline_workers = OfflinePushWorkers(
+            args.push_config or DEFAULT_PUSH_CONFIG,
+            log=lambda m: print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server offline-push] {m}", flush=True
+            ),
+        )
+        offline_workers.reload(force=True)  # 缺文件/空表不致命：只是没人可派
+        offline_disp = OfflinePushDispatcher(
+            hub,
+            offline_workers,
+            token,
+            port=args.port,
+            poll_sec=OFFLINE_PUSH_POLL_SEC,
+            log=lambda m: print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server offline-push] {m}", flush=True
+            ),
+        )
+        print(
+            f"[hub-server] 离线 push 派发已启用：登记表={offline_workers.path} "
+            f"候选 worker={len(offline_workers.snapshot())} poll={OFFLINE_PUSH_POLL_SEC:g}s "
+            f"在途={len(offline_disp.assignments.snapshot())}",
+            flush=True,
+        )
+    srv = make_server(
+        hub, args.port, token, host=args.host, push=push_disp, offline_push=offline_disp
+    )
     if push_disp is not None:
         push_disp.start()
+    if offline_disp is not None:
+        offline_disp.start()
     print(
         f"[hub-server] listening on {args.host}:{args.port} "
         f"courses={hub.courses()} claim_ttl={CLAIM_TTL_SEC}s",
@@ -376,3 +422,5 @@ def main() -> None:
     finally:
         if push_disp is not None:
             push_disp.stop()
+        if offline_disp is not None:
+            offline_disp.stop()

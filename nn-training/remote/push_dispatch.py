@@ -36,6 +36,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -363,6 +364,23 @@ class PushWorkers:
             w = self._workers.get(wid)
         return bool(w and w.get("online"))
 
+    def note_fields(self, wid: str, **fields: Any) -> None:
+        """记一笔与探活无关的观察值（派发器的即时回填 / 协议门的结果）。
+
+        为什么需要它：登记表条目的字段（`busy` / `proto_ok` …）只有本模块能安全改 —— 让调用方
+        直接碰 `_workers` 就等于把「谁写探活状态」这张表撕成两半。条目不在（被删/重读掉了）
+        ⇒ 空操作，不凭空造条目。
+        """
+        with self._lock:
+            rec = self._workers.get(str(wid))
+            if rec is not None:
+                rec.update(fields)
+            # 运行时 `add()` 的条目在 `snapshot()` 里优先取 `_extra`（且只保留
+            # `_KEEP_ON_RELOAD` 那一小组运行时字段）⇒ 两处都要写，否则探活结果只活一份影子。
+            extra = self._extra.get(str(wid))
+            if extra is not None:
+                extra.update(fields)
+
     def note_push(self, wid: str, ok: bool) -> None:
         """记一次推送结局（观测用；失败的那次会让 `misses` 之外的计数动起来）。"""
         with self._lock:
@@ -473,6 +491,30 @@ class _TickView:
     worker_counts: dict[str, int]
 
 
+def run_tick_loop(
+    *,
+    stop: threading.Event,
+    wake: threading.Event,
+    poll_sec: float,
+    tick: Callable[[], Any],
+    log: Callable[[str], None],
+) -> None:
+    """后台派发器的标准节拍（**唯一实现**：GPU 派发器与离线派发器共用）。
+
+    「跑一拍 → 记一笔异常 → 等下一拍」这三步看起来谁都会写，但写错的两种形态都很贵：
+    `except` 范围过窄 ⇒ 一次意外异常把线程打死（派发器静默停摆，界面上还显示「已启用」）；
+    把 `wake` 的 `clear()` 放到 `wait()` 之前 ⇒ 那一拍永远不醒。两个派发器各写一份，就是在
+    赌第二次不会写错。
+    """
+    while not stop.is_set():
+        try:
+            tick()
+        except Exception as e:  # 单拍异常绝不打死派发器
+            log(f"派发拍异常（不致命）：{type(e).__name__}: {e}")
+        wake.wait(poll_sec)
+        wake.clear()
+
+
 class PushDispatcher:
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
         挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
@@ -527,21 +569,24 @@ class PushDispatcher:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._loop, name="hub-push", daemon=True)
+        self._thread = threading.Thread(
+            target=run_tick_loop,
+            kwargs={
+                "stop": self._stop,
+                "wake": self._wake,
+                "poll_sec": self.poll_sec,
+                "tick": self.tick,
+                "log": self._log,
+            },
+            name="hub-push",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
 
-    def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception as e:  # 单拍异常绝不打死派发器
-                self._log(f"派发拍异常（不致命）：{type(e).__name__}: {e}")
-            self._wake.wait(self.poll_sec)
-            self._wake.clear()
 
     # ---- 单拍（可单测：不依赖线程） ----
     def tick(self, *, now: float | None = None, ping: bool | None = None) -> dict:

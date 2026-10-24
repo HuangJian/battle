@@ -6,6 +6,57 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §120 hub 侧的离线 push 派发器（W5 落地，2026-10-24 · `plan/push-mode-notebooks.plan.md` §6.6/§6.7 · 决策 `DECISIONS.md` §2026-10-24-push-mode-w5）
+
+W4 把「谁在服务、谁在训练」立在 worker 侧；W5 补的是方向相反的那一半：**hub 用自己的出站
+连接去派单、逐轮拉产物**。四个新件：`hub/offline_push.py`(L3，派发器) ·
+`hub/offline_push_assign.py`(L0，在途账本) · `hub/offline_ingest.py`(L1，共享入账面) ·
+`remote/offline_push_client.py`(L0，客户端)。接线：`hub/boot.py --offline-push`（与 `--push`
+相互独立、可同开）+ `GET /admin/offline-push-workers`（只读）。
+
+**登记表复用 + 版本门挂在 `/state` 上**：`OfflinePushWorkers(PushWorkers)` 只换
+`capability="offline_push"` —— 在线/忙闲/热重载/退避/`run_tick_loop` 全部与 GPU 派发器同一份实现
+（第三份登记表会立刻漏掉一个修复）。多出来的唯一一件事是 `probe_proto`：`/offline/push/state`
+的 `proto` 必须是 `offline_push_v1`，`proto_ok` 三态（`None` = 没问过）里派发只看 `True`。
+为什么不能挂在探活（`/ping`）上：旧 worker 的 `/ping` 逐字正常，只有新端点会 404 —— 版本门
+必须问那个**只有新 worker 才有的端点**，否则旧版本会收到一单它答不上的任务。
+
+**在途 assignment 必须落盘**（`<traj_root>/offline-push.<port>.json`）：hub 重启（OOM / 换 token /
+`systemctl restart`）之后要接着拉**同一单**。重派会换 `task_id`，worker 那边已跑完的轮次就成了
+孤儿（`tasks/<旧id>/outbox` 里躺着，没人 ack）。恢复路径刻意**不重新上传任务包**：worker 可能已在
+跑，`_resume_pumps` 只做「重新 claim（换 token）+ 继续拉」。文件里存 `cursor_it` 与 `revs`
+（已入账那一轮的 rev）：`revs` 让 hub 看得出「我入的是 rev=0，worker 上现在 rev=1」（迟到的评估行
+会把同一 `it` 的 rev +1），一个 `acked_it` 数字表达不了这件事（P0-3）。
+
+**权威 = assignment，不是体**（P0-5）：push 路径上 course / run_id / pack_sha 都是 hub 选的，
+worker 一个串包 bug 就能把权重写进另一门课/另一个 run —— 首写锁定与 409 都拦不住（它看起来
+是一次合法的新写入）。所以 `hub/offline_ingest._authority_body` 按 assignment 校验：体自报的
+`run_id`/`course` 有值且不符 ⇒ 409 + `conflict`，**不落盘、不推进 cursor**，并取消 worker 上那一单；
+体缺 `run_id` ⇒ 用 assignment 的（旧 outbox 没这个键）。同一函数也是云机 `POST /offline/artifact`
+的入账实现 —— 两条腿的校验与「段末盖章 / 滚下一段」不许各有一份。
+
+**缺包 ⇒ 请导包，不是跳过**（P0-4）：push-only 部署里没有 pull 盘，导包入口原本只在云机的 claim 上。
+派发器看见「没包」就跳过 ⇒ 那门课永远不会有包。这里接 `begin_pending_export` +
+`trigger_pack_export`（与 claim 缺包分支同一份实现），并给 `stale_reason` 的旧包一条独立的
+「请重导」腿 —— 旧包比没包更危险（云机会从旧起点重跑几十轮）。
+
+**段末 final**：worker 的 `state.final_ready` ⇒ 拉 `result` → `ingest_offline_result`（盖章 /
+滚下一段与云机 POST 同一条腿）→ `release` → ack(`result=true`) → 丢账本。worker 报
+`failed/cancelled/done` 却没有 result 体 ⇒ 先收完已完成的轮，再 release + 收摊（不当失败重试）。
+
+**ack 只看 rev**：`{task_id, result, upto_it, revs}` 交给 `deliver_outbox.ack_outbox` 的同一套语义
+（worker 侧唯一实现）—— 迟到评估行的 rev+1 不会被删掉。
+
+**每单一条 pump 线程**：几十 MB 的逐轮 body 绝不阻塞调度拍；一拍 = 重载 → 到点探活 → 版本门 →
+续跑 → 派发。心跳（60s）**只续 TTL**，活性仍只认 `progress_offline`（心跳不作活性，与
+`lease_verdict` 同一把尺子）；每拍最多拉 8 轮（积压 200 轮不会把一拍拖成十分钟）；派发失败按
+`course` 冷却 120s。
+
+**用例**：`tests/hub/test_offline_push_dispatch.py`（7：真 face loopback 主路径 —— 派发→两轮→
+段末→盖章；hub 重启续跑不重传；旧 worker 不派发；缺包请导包；权威冲突；run_id 补位；串课拒收）·
+`tests/hub/test_offline_push_assign.py`（5：落盘/重启/set_fields 不造单/drop/坏文件）。分层：
+`hub.offline_push`(L3) · `hub.offline_ingest`(L1) · `hub.offline_push_assign`/`remote.offline_push_client`(L0)。
+
 ## §119 离线 push 的 worker 侧（W4 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6 · 决策 `DECISIONS.md` §2026-10-23-push-mode-w4）
 
 W3 把「产物怎么落盘」立住了；W4 立的是**谁在服务、谁在训练**。四个新件：

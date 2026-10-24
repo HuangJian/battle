@@ -96,9 +96,25 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #:
 #: ⚠ 同一次改动里 `exact_groups` 没有上涨（`_log_default` 改用 `common.logutil.tag_logger`，而不是再写一份
 #: `print(msg, flush=True)`），`clone_groups` 也未动。
+#: **2026-10-24 抬同名 3 格（93 → 96）的账**（`plan/push-mode-notebooks` W5：新增
+#: `hub/offline_push{,_assign}.py`、`hub/offline_ingest.py`、`remote/offline_push_client.py`）。
+#: 新增的三个名字全部是**两条派发腿的契约名**（同一族：`remote/push_dispatch.PushDispatcher`
+#: 与 `hub/offline_push.OfflinePushDispatcher` 对外是同一个形状，读面 `/admin/*-push-workers`
+#: 按同一套键消费）：
+#:
+#: | 名字 | 成员 | 为什么不是「又抄一份」 |
+#: |---|---|---|
+#: | `start` · `stop` | 两个派发器（+ 既有 `deliver_outbox` / 进程代理各家） | 生命周期契约名：`hub/boot.py` 只认这一对（起/停线程），改名就要在引导链写两路分派 |
+#: | `tick` | `push_dispatch` + `offline_push` + `trainer_heartbeat` | 同一件事（一拍：重载 → 探活 → 派发）；节拍循环本体已抽成 `push_dispatch.run_tick_loop`（**唯一实现**），这里只是「这一拍做什么」 |
+#: | `state` | 同上 + `tailscale_boot` | 读面契约名：`/admin/push-workers` 与 `/admin/offline-push-workers` 都返回 `disp.state()`，控制台按同一族键读 |
+#:
+#: ⚠ 本次**没有**顺手多抬两格：`_headers`（客户端）改成了 `_auth_headers`，`update`（assignment
+#: 账本）改成了 `set_fields` —— 那两个名字与本改动无关，只是撞上了 ≥3 的计数，换名比抬基线便宜。
+#: `exact_groups` 未动（14）：新代码里唯一逐字节相同的两处（`run_tick_loop` 的循环体 / `_loop`）
+#: 已合成一份；`clone_groups` 15 → 16 仍低于基线 17。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 93
+BASELINE_SAME_NAME_GE3 = 96
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

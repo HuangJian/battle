@@ -185,6 +185,17 @@ LAYERS: dict[str, int] = {
     # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
     "hub.task_pack": 0,
 
+    # ★ 2026-10-24（plan/push-mode-notebooks §6.6/§6.7，W5）：离线 push 的 hub 侧四件。
+    # `offline_ingest` 站在 `hub.task_pack`(L0) 上（共享入账 + 盖章/下一段）⇒ **L1**；
+    # `offline_push_assign` 与 `offline_push_client` 只碰 stdlib/common ⇒ **L0**；
+    # 派发器 `offline_push` 站在 `remote.push_dispatch`(L2) 上（登记表/探活复用）⇒ **L3**
+    # （与 `hub.offline` 同秩：两条腿互不 import）。
+    # `hub.offline`(L3) 反向 import `offline_ingest` 不改变它的秩（1 < 3）。
+    "hub.offline_ingest": 1,
+    "hub.offline_push_assign": 0,
+    "hub.offline_push": 3,
+    "remote.offline_push_client": 0,
+
     "remote.result_upload": 0,
     # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理
     # `UploaderProcess` + 工厂 `make_uploader`。依赖面 = `result_upload`(L0，共同接口/常量)

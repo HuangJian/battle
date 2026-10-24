@@ -110,15 +110,17 @@ MIN_LOCK_SITES: Final = 60
 #: 涨了就把数字一起改，并当场回答：那个目标会不会回头拿同一把锁？
 #:
 #: 2026-10-09 全仓审计逐个回答完的 15 个（全是**注入的可调用属性**，不是方法，组内也解析不到）：
-#:   * `_now` ×10（hub 各混入 / `_AuthGuard` / `_JobStore`）—— `_AuthGuard.__init__` 的
-#:     `now_fn or time.time`，`_HubQueue.__init__` 的 `self._solo._now`（链尽头仍是时钟）；
+#:   * `_now` ×11（hub 各混入 / `_AuthGuard` / `_JobStore` / `OfflinePushAssignments`）——
+#:     `_AuthGuard.__init__` 的 `now_fn or time.time`，`_HubQueue.__init__` 的 `self._solo._now`
+#:     （链尽头仍是时钟）；`OfflinePushAssignments(now=time.time)` 同形（2026-10-24，W5）——
+#:     临界区里只读时钟写 `updated_at`，它拿不到这台机器的 `_lock`（构造参数，无回指）；
 #:   * `_clock` ×2（`BulkScheduler` / `PrefetchStore`）—— 构造参数 `clock=time.time`；
 #:   * `log` ×1（`CloudEvalRunner`）—— 生产不传 ⇒ `_log_default` → `log_line` → `print`（无锁）；
 #:   * `_build` ×1（`CloudEvalRunner`）—— `_eval_job_builder(ctx, ep)` 在 runner **之前**构造，
 #:     拿不到 runner 的 `_lock`（回调闭包只捕 `ctx`/`ep`）⇒ 不可能重入同一把；
 #:   * `InstallGate → 回调 InstallTicket` —— `ticket()` 持锁只造票（票只存 `_gate`）；
 #:     `_valid`/`_cancel`/`_install` 由 **copier 线程**在 `with` 之外调（跨线程，非重入）。
-MAX_OPAQUE_CALLS: Final = 15
+MAX_OPAQUE_CALLS: Final = 16
 
 LockKey = tuple[object, ...]
 

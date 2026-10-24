@@ -9131,3 +9131,41 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）· `bun run check`；
   新增 37 个用例（11 push_mode 接线 + 17 真 HTTP 面 + 7 supervisor/子进程 + 2 notebook 契约）。
   W5（hub 派发器）与 W6（韧性/观测）未落地；worker 服务端与训练入口的语义已在 plan 就位。
+
+## §2026-10-24-push-mode-w5（2026-10-24，W5 落地：hub 侧离线 push 派发器）
+
+- **背景**：W4 立在 worker 侧（HTTP 面 + supervisor + 训练子进程 + `push_mode`），W5 补方向相反的一半：
+  hub 用自己的**出站连接**去离线 worker 的隧道派单、按轮拉产物。新增 `hub/offline_push.py`(L3 派发器) ·
+  `hub/offline_push_assign.py`(L0 在途账本) · `hub/offline_ingest.py`(L1 共享入账面) ·
+  `remote/offline_push_client.py`(L0 客户端)；接线 `hub/boot.py --offline-push` +
+  `GET /admin/offline-push-workers`。设计全文 `plan/push-mode-notebooks.plan.md` §6.6/§6.7（评审 P0-3/P0-4/
+  P0-5/P1-7）；本条只记落地时**新定/收紧**的语义。
+- **决定**：
+  1. **登记表复用 `PushWorkers`，版本门挂在 `/state` 上（P1-7）**。子类只换 `capability="offline_push"`；
+     在线/忙闲/热重载/退避/节拍循环（`run_tick_loop`，从 GPU 派发器抽出）全部同一份实现。多出来的
+     唯一一件事是 `probe_proto`：`/offline/push/state` 的 `proto` 必须是 `offline_push_v1`，`proto_ok`
+     三态里派发只看 `True`。版本门**不能**挂 `/ping`：旧 worker 的 `/ping` 逐字正常，只有新端点 404。
+  2. **入账面抽成 `hub/offline_ingest.py`，两条入口共用**（云机 POST 与 push 拉取）。校验（首写锁定 /
+     指纹 / 409 冲突 / 评估行并入）与「段末盖章 + 滚下一段」是事故高发面，不许一条有一份；HTTP handler
+     只剩「鉴权 → 读 bounded body → 定位课程」。
+  3. **权威 = assignment，不是体（P0-5）**。push 路径显式传 `run_id`：体自报的 `run_id`/`course` 有值且
+     不符 ⇒ 409 + `conflict`，**不落盘、不推进 cursor**，并取消 worker 上那一单；体缺 `run_id` ⇒ 用
+     assignment 的（权威补位，旧 outbox 没这个键）。
+  4. **在途 assignment 落盘**（`<traj_root>/offline-push.<port>.json`，端口隔离）。hub 重启后
+     `_resume_pumps` 只做「重新 claim（换 token）+ 继续拉」，**不重新上传任务包** —— 重派会换
+     `task_id`，worker 已跑完的轮次就成孤儿（没人 ack，最终撞 outbox 容量闸）。存 `cursor_it` 与
+     `revs`：后者让 hub 看得出「我入的是 rev=0，worker 上现在 rev=1」（迟到的评估行）。
+  5. **缺包 ⇒ 请导包，不是跳过（P0-4）**。派发器接 `begin_pending_export` + `trigger_pack_export`
+     （与 claim 缺包分支同一份实现）；`stale_reason` 的旧包单列一条「请重导」腿（旧包比没包更危险）。
+  6. **每单一条 pump 线程 + 自带 ack**。几十 MB 逐轮 body 不阻塞调度拍；每拍最多拉 8 轮；心跳（60s）
+     **只续 TTL**，活性仍只认 `progress_offline`；ack 只看 `rev`（`ack_outbox` 的语义，迟到评估行不删）。
+  7. **段末 final 走同一条入账腿**：`final_ready` ⇒ 拉 result → `ingest_offline_result` → release →
+     ack(result=true) → 丢账本；worker 报 `failed/cancelled/done` 而无 result ⇒ 先收完已完成的轮再收摊。
+- **否决的备选**：① 让 worker 反向 POST 到 hub（push 的全部动机是免入站，评审 P0-1）；② 在 pump 线程里
+  直接调 `store_offline_*`（两条入口两份校验，P0-5 的入口）；③ 把版本门挂在 `/ping` 的字段上（旧 worker
+  应答正常 ⇒ 门形同虚设）；④ hub 重启后重传任务包（换 `task_id` ⇒ 孤儿 outbox）；⑤ 一个 `acked_it` 数字
+  代替 `revs`（表达不了「同轮 rev+1」）；⑥ 缺包跳过、等人工导包（push-only 部署里那门课永远没有包）。
+- **违反后果**：pump 拉体阻塞调度拍 ⇒ 所有课一起停摆；不校验 assignment ⇒ 串课/串 run 的权重静默入账；
+  ack 不看 rev ⇒ 迟到评估行永久丢；缺包静默跳过 ⇒ 该课永不推进；重启不续跑 ⇒ 几十轮产物成孤儿。
+- **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）绿；新增 12 个用例
+  （7 派发器 loopback/恢复/版本门/缺包/冲突/权威 + 5 assignment 账本）。
