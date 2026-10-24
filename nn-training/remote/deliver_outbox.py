@@ -173,6 +173,86 @@ def outbox_bytes(outbox: str | Path) -> int:
     return total
 
 
+def ack_outbox(
+    outbox: str | Path,
+    *,
+    upto_it: int,
+    result: bool = True,
+    revs: Mapping[int, int] | None = None,
+    log: Callable[[str], None] = _log_default,
+) -> dict:
+    """按 rev 收下并删 body（**唯一实现**；`LocalOutboxDeliverer.ack` 与服务端端点共用）。
+
+    为什么是模块函数、不只留类方法：ack 的**调用方是 worker 的 HTTP 服务进程**（W4 的
+    `/offline/push/ack`）——那个进程不跑补传腿（腿住在训练子进程里），只能读同一份
+    `state.json`。两个进程各写一份「删哪些」的判据，就是两套 ack 语义（P0-3 要防的正是这个）。
+
+    跨进程竞态刻意**不锁**：唯一能同时发生的事是子进程刚写进新一轮、而服务进程手里的
+    `state.json` 还没它 —— 那种情况下这一轮会在 `pending()` 里重现并重新物化（幂等，
+    `rev` 从头算），代价是一份重复 body，不是丢数据。反过来的顺序（先锁后写）会拿服务进程
+    的旧快照覆盖 child 的新账本，那才会丢。
+    """
+    root = Path(outbox)
+    doc = read_state(root)
+    raw_rounds = doc.get("rounds")
+    rounds: dict = dict(raw_rounds) if isinstance(raw_rounds, Mapping) else {}
+    removed: list[int] = []
+    kept: list[int] = []
+    metrics_removed = 0
+    for key in sorted(rounds, key=lambda k: int(k)):
+        it = int(key)
+        if it > int(upto_it):
+            continue
+        ent = dict(rounds[key]) if isinstance(rounds[key], Mapping) else {}
+        rev = int(ent.get("rev", 0) or 0)
+        seen = rev if revs is None else int(revs.get(it, -1))
+        if seen != rev:
+            kept.append(it)
+            continue
+        ent["acked_rev"] = rev
+        if ent.get("file"):
+            try:
+                round_path(root, it).unlink()
+            except OSError:
+                pass
+            ent["file"] = ""
+        if metrics_path(root, it).exists():
+            try:
+                metrics_path(root, it).unlink()
+                metrics_removed += 1
+            except OSError:
+                pass
+        removed.append(it)
+        rounds[key] = ent
+    final_removed = False
+    if result and doc.get("final_ready"):
+        try:
+            (root / FINAL_NAME).unlink()
+            final_removed = True
+        except OSError:
+            final_removed = False
+        doc["final_acked"] = True
+        doc["final_ready"] = False
+    doc["rounds"] = rounds
+    doc["updated_at"] = float(time.time())
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(root / STATE_NAME, doc)
+    except OSError as e:
+        log(f"WARN outbox ack 账本写失败（{type(e).__name__}: {e}）——下一拍会重试同一批")
+    if kept:
+        log(
+            f"outbox ack upto it{int(upto_it)}：{len(removed)} 轮收下，"
+            f"{len(kept)} 轮 rev 已前进（hub 需重拉 it{kept[0]}…it{kept[-1]}）"
+        )
+    return {
+        "removed": removed,
+        "kept": kept,
+        "metrics_removed": metrics_removed,
+        "final_removed": final_removed,
+    }
+
+
 class LocalOutboxDeliverer:
     """把补传产物**落成本地文件**的腿（`DelivererLike` 的同形面，不连任何网络）。
 
@@ -606,54 +686,14 @@ class LocalOutboxDeliverer:
 
         返回 `{"removed": [...], "kept": [...], "metrics_removed": n, "final_removed": bool}`。
         """
-        removed: list[int] = []
-        kept: list[int] = []
-        metrics_removed = 0
         with self._lock:
-            for it in sorted(self._rounds):
-                if it > int(upto_it):
-                    continue
-                ent = self._rounds[it]
-                rev = int(ent.get("rev", 0) or 0)
-                seen = rev if revs is None else int(revs.get(it, -1))
-                if seen != rev:
-                    kept.append(it)
-                    continue
-                ent["acked_rev"] = rev
-                if ent.get("file"):
-                    try:
-                        round_path(self.outbox, it).unlink()
-                    except OSError:
-                        pass
-                    ent["file"] = ""
-                if metrics_path(self.outbox, it).exists():
-                    try:
-                        metrics_path(self.outbox, it).unlink()
-                        metrics_removed += 1
-                    except OSError:
-                        pass
-                removed.append(it)
-            final_removed = False
-            if result and self._final_ready:
-                try:
-                    (self.outbox / FINAL_NAME).unlink()
-                    final_removed = True
-                except OSError:
-                    final_removed = False
-                self._final_acked = True
-                self._final_ready = False
-            self._save_state()
-        if kept:
-            self.log(
-                f"outbox ack upto it{int(upto_it)}：{len(removed)} 轮收下，"
-                f"{len(kept)} 轮 rev 已前进（hub 需重拉 it{kept[0]}…it{kept[-1]}）"
+            out = ack_outbox(
+                self.outbox, upto_it=int(upto_it), result=bool(result), revs=revs, log=self.log
             )
-        return {
-            "removed": removed,
-            "kept": kept,
-            "metrics_removed": metrics_removed,
-            "final_removed": final_removed,
-        }
+            # 内存面必须跟 `state.json` 对齐：ack 是**另一个可能的写者**（服务进程）也会
+            # 触发的动作，拿旧快照回答 `pending()` 会把已收下的轮回物化一遍。
+            self.reload()
+        return out
 
     # ------------------------------------------------------------ 读面
 

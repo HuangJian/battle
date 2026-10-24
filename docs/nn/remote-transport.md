@@ -6,6 +6,54 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §119 离线 push 的 worker 侧（W4 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6 · 决策 `DECISIONS.md` §2026-10-23-push-mode-w4）
+
+W3 把「产物怎么落盘」立住了；W4 立的是**谁在服务、谁在训练**。四个新件：
+`remote/offline_push_face.py`(L2，纯 HTTP 面) · `remote/offline_push.py`(L3，supervisor) ·
+`remote/offline_push_task.py`(子进程入口) · `remote/push_tunnel.py`(L0，quick tunnel 三件)。
+
+**一单一个 outbox**：`<work>/tasks/<task_id>/outbox`。共用一份 outbox 会把 A 课的轮次留在 B 课的
+`state.json` 里，hub 按 `it` 拉就会拿到别人的权重 —— 串课不可能发生是**目录结构**保证的，不是靠
+调用方自觉。`tasks/<id>` 只在整包校验通过后才出现（先落 `incoming/` 再 `replace`）。
+
+**收包的五道闸**（全部在「受理」之前，任一不过 ⇒ 400，且不污染 `tasks/`）：
+`Content-Length` 有界（2GiB，超限 413 且不落半截）· 防 zip-slip（拒绝绝对路径/`..`/符号链接）·
+`task.json` 的 `proto` 必须是 `offline_push_v1` · `pack_sha256` 逐字节对账 · 包名里的课程 ==
+`task.course`。重投同一 `task_id` = 202 duplicate（hub 超时重试不重复 spawn）；在跑时给别的单 = 409。
+
+**`busy` 的定义**（hub 据此不派下一单）：在跑**或**跑完但 `final` 未 ack。窗口里 `phase` 五态
+`running/cancelling/done/failed/cancelled`；只有 `result=true` 的 ack 把 phase 收回 `idle`。
+
+**ack 只有一个实现**：`deliver_outbox.ack_outbox()`（模块函数）。服务进程不跑补传腿（腿在训练
+子进程里），它只能读同一份 `state.json` —— 两边各写一份「删哪些」就是两套 rev 语义（P0-3 要防的）。
+跨进程**刻意不锁**：唯一竞态是子进程刚写的新轮还没进服务进程手里的账本，那一轮会在 `pending()`
+重现并重新物化（幂等，代价一份重复 body）；反过来的顺序（服务进程旧快照覆盖 child 新账本）才会丢。
+
+**supervisor 只装配，不训练**：face + `Registry`(kind=`offline_push`) + cloudflared；收到任务后起
+`remote.offline_push_task` 子进程（stdout/stderr → `<task>/run.log`，`/state.error` 带尾巴）。
+训练放子进程的理由是**状态面必须一直答得上话**：训练会吃满 CPU、注册进度钩子、解 `code.zip`，
+一次 OOM/`SystemExit` 不该把 `/state` 一起带走。取消 = 写 `stop` 文件 + 有界等（120s）→ terminate；
+`plan_run` 在**轮边界**看它（`state="cancelled"`，产物自洽可续跑）。
+
+**`push_mode` 不是第二条训练链**（P1-9）：差异全在 `run_one_course` 的入参（包/锚点/outbox 由任务
+给）——这条腿**不探 hub、不取包、不取锚点、不装 HTTP 打点、不打交付 zip**，产物写 `--outbox`
+（W3），进度写 `<outbox>/progress.json`（`seq` 跨重启续上）。用例把「不探 hub」钉成**抛异常的替身**
+（不是「没断言到」）—— 漏接一条就会静默发一个出站请求，而那正是 push 要逃离的那一侧。
+
+**notebook 的代码来源变了**：push 要**完整仓库代码**（4 个引导文件不够 import `remote.offline_push`），
+顺序是 hub `/code`（有界 `code_wait_sec`）→ GitHub clone → 本机任务包 `code.zip`，全失败 FATAL；
+这一段必须早于 `_load_boot`，且 `mode` 缺省仍是 `pull`（旧路径逐字节不动）。
+
+**共用 quick tunnel**：`find_cloudflared` / `start_quick_tunnel` / `tunnel_url_of` / `stop_proc` 下沉到
+`remote/push_tunnel.py`(L0)，GPU push 的 `run_push_worker` 改为调用同一份（安装逻辑只此一处）。
+
+**用例**：`tests/remote/test_offline_boot_push.py`（11：argv 形状 / 零 hub 调用 / 本机优先不复放包 /
+本地打点与撤销 / stop-file 接线）· `tests/remote/test_offline_push_face.py`（17：真 HTTP —— Bearer、
+版本门、收包五闸、zip-slip、409/413、round/result/progress、带 rev 的 ack、cancel、启动清扫）·
+`tests/remote/test_offline_push_supervisor.py`（7：脱敏 cfg、无 cloudflared 返 -2、注册/注销、真子
+进程 rc 与日志、任务入口接线）· `tests/remote/test_offline_notebook.py`（+2：push 代码早于 bootstrap、
+markdown 自述）。
+
 ## §118 本地 outbox：push 腿的落盘面（W3 落地，2026-10-23 · `plan/push-mode-notebooks.plan.md` §6.4a · 决策 `DECISIONS.md` §2026-10-23-push-mode-outbox）
 
 push 模式没有「节点 → hub」的 POST（hub 经隧道来拉），所以补传腿的产物要落成文件。本节点的是**已落地**

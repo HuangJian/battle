@@ -221,6 +221,10 @@ class RunContext:
         #: `EVAL_ALTERNATE_WAIT_SEC` 那条有界等保证（见它）。
         #: 0 = 按本机核数自动。
         rollout_workers: int = 0,
+        #: ★ 2026-10-23（plan/push-mode-notebooks §6.4 / W4）：取消哨兵文件（`--stop-file`）。
+        #: 非空时 `plan_run` 在**轮边界**（下一轮开始前）看它：命中 ⇒ 本段 `state="cancelled"`，
+        #: 产物自洽可续跑。空 = 没有取消面（pull / 本机训练）。
+        stop_file: str = "",
         ts_tree_dir: Path | None = None,
         #: 轮形态（`plan/anchor-full-rounds`）：None = 不分形（= 旧的「opt 每轮整份」）。
         #: 驱动侧据此按轮设 `w_fmt`（锚点轮要整份权重）；落盘侧由 `store.after_write` 动手。
@@ -249,6 +253,7 @@ class RunContext:
         self.eval_slots = int(eval_slots or 0)
         self.eval_game_timeout_sec = float(eval_game_timeout_sec or 0.0)
         self.rollout_workers = int(rollout_workers or 0)
+        self.stop_file = str(stop_file or "")
         self.round_forms = round_forms
         #: TS 运行时树的**实际根**（云机评估的 `cwd`：`tools/sim/export-eval-game.ts` 在那儿）。
         self.ts_tree_dir = Path(ts_tree_dir) if ts_tree_dir is not None else None
@@ -363,6 +368,9 @@ def open_run_context(
     #: 这个分支**先于** `deliver` 判定：`--outbox` + `--no-deliver` 的语义是「只关 HTTP 补传，
     #: outbox 必须活」（否则训练照跑、outbox 永远空、最后被 hold stale 判掉线）。
     outbox_dir: str = "",
+    #: ★ 2026-10-23（W4）：push 腿的取消哨兵（`--stop-file`，由 worker 服务的
+    #: `/offline/push/cancel` 写）。空 = 无取消面。
+    stop_file: str = "",
     #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
     deliverer: DelivererLike | None = None,
     run_job_fn: Callable[..., dict] | None = None,
@@ -427,6 +435,7 @@ def open_run_context(
             else cpu_worker_slots()
         ),
         round_forms=forms,
+        stop_file=stop_file,
         ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),
         deliverer=(
             deliverer

@@ -136,6 +136,15 @@ LAYERS: dict[str, int] = {
     # 带 rev 的 ack、统计。装配器（`deliver_parts`）**注入**而不 import（同类注入：`land_provider`）
     # ⇒ 依赖面只剩 `delta_files`(L0) + `common.*` ⇒ 拓扑秩 **L1**；`deliver_proc`(L3) 站在它上面，秩不变。
     "remote.deliver_outbox": 1,
+    # ★ 2026-10-23（plan/push-mode-notebooks W4）：离线 push 的四个新模块。
+    # `push_tunnel` 只碰 stdlib（subprocess/re/Path）⇒ **L0**；`offline_push_face` 站在
+    # `deliver_outbox`(L1) 上（收包/ack/读面）⇒ **L2**；supervisor `offline_push` 只 import
+    # 面(L2) + 注册(L0) + 隧道(L0) ⇒ **L3**；训练子进程入口 `offline_push_task` 站在
+    # `offline_boot`(L8) 上 ⇒ **L9**（与「入口模块只做接线」的先例一致）。
+    "remote.push_tunnel": 0,
+    "remote.offline_push_face": 2,
+    "remote.offline_push": 3,
+    "remote.offline_push_task": 9,
     # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
     # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
     "remote.control_pool": 0,

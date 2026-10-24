@@ -32,6 +32,7 @@ from typing import Any, Literal
 import pytest
 
 import remote.notebook_runtime as nbr
+import remote.push_tunnel as pt
 
 # ------------------------------------------------------------------ fakes
 
@@ -531,9 +532,11 @@ def test_pull_argv_carries_the_cache_dir_when_configured(
 def test_push_cloudflared_missing_and_install_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "")
+    # 两道门都要堵：PATH 查不到 → 自动安装也失败。只堵 getoutput 是不够的（W4 之后
+    # 「找 cloudflared」住 `push_tunnel`，用的是 `shutil.which`，且安装会真的走网络）。
+    monkeypatch.setattr(pt.shutil, "which", lambda _name: None)
     monkeypatch.setattr(
-        nbr.subprocess, "run", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no net"))
+        pt, "run_capture", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no net"))
     )
     assert nbr.run_push_worker(_base_cfg(tmp_path), lambda m: None) == -2
 
@@ -543,7 +546,6 @@ def test_push_serve_not_ready_returns_minus1_and_kills(
 ) -> None:
     clock = _FakeClock(step=10.0)
     monkeypatch.setattr(nbr, "time", clock)  # 只重绑本模块引用，不污染全局 time
-    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "/usr/bin/cloudflared")
     created: list[_FakeProc] = []
 
     def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
@@ -568,7 +570,9 @@ def test_push_tunnel_url_detected_and_reported(
 ) -> None:
     clock = _FakeClock(step=5.0)  # 步长必须 < 隧道 60s 窗口——60 会让循环体零执行
     monkeypatch.setattr(nbr, "time", clock)
-    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "/usr/bin/cloudflared")
+    # 隧道的等待循环已下沉到 `remote/push_tunnel`（与离线 push 共用）：假钟要绑**它**的
+    # `time` 引用，否则等待循环走真墙钟（2026-10-23 W4 拆模块后的必改点）。
+    monkeypatch.setattr(pt, "time", clock)
     serve = _FakeProc(poll_seq=[None, None, 0])
 
     def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
@@ -594,7 +598,7 @@ def test_push_serve_exits_with_rc_passthrough(
 ) -> None:
     clock = _FakeClock(step=5.0)
     monkeypatch.setattr(nbr, "time", clock)
-    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "/usr/bin/cloudflared")
+    monkeypatch.setattr(pt, "time", clock)  # 隧道等待循环住 `push_tunnel`（同上）
     serve = _FakeProc(poll_seq=[None, 3])
 
     def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
@@ -616,7 +620,7 @@ def test_push_wait_loop_logs_status_and_serve_tail(
     修「push 建隧道后 notebook 一直静默」。"""
     clock = _FakeClock(step=20.0)  # >15s status 周期，一进循环就 ping
     monkeypatch.setattr(nbr, "time", clock)
-    monkeypatch.setattr(nbr.subprocess, "getoutput", lambda cmd: "/usr/bin/cloudflared")
+    monkeypatch.setattr(pt, "time", clock)  # 隧道等待循环住 `push_tunnel`（同上）
     serve = _FakeProc(poll_seq=[None, None, 0])  # 两拍守候后退出
 
     def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:

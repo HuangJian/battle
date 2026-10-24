@@ -661,6 +661,17 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     stopped = "complete"
     try:
         for it in todo:
+            # ★ 2026-10-23（plan/push-mode-notebooks §6.4 / W4）：**轮边界**看取消哨兵。
+            # 位置刻意是「本轮开工之前」且**先于**预算闸：已落盘的轮一条不丢、当前轮不会跑成
+            # 半截；人点的取消优先于「预算刚好到点」（两者都停，但 `state` 要报真因），
+            # 而 `state="cancelled"` 会随 final 一起回传（hub 据此 release/换段，不当失败）。
+            if ctx.stop_file and Path(ctx.stop_file).exists():
+                stopped = "cancelled"
+                ctx.log(
+                    f"收到取消（{ctx.stop_file}）——在 it{it} **开始之前**干净停机"
+                    "（产物自洽，可续跑）"
+                )
+                break
             if ctx.budget_left() <= 0:
                 stopped = "budget"
                 ctx.log(

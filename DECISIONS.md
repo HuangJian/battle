@@ -9080,3 +9080,54 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   全文 → `docs/nn/remote-transport.md §118`；设计 → `plan/push-mode-notebooks.plan.md` §6.4a。
 - **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）· `bun run check` · `bun run build`；
   新增 19 个用例（13 outbox + 4 run_loop + 2 真子进程），其中逐字节对账 2 条、真子进程 2 条。
+
+## §2026-10-23-push-mode-w4（2026-10-23，W4 落地：离线 push 的 worker 侧）
+
+- **背景**：W3 给了「产物怎么落盘」，W4 回答「谁在服务、谁在训练」。新增
+  `remote/offline_push_face.py`（L2 纯 HTTP 面）· `remote/offline_push.py`（L3 supervisor）·
+  `remote/offline_push_task.py`（训练子进程入口）· `remote/push_tunnel.py`（L0 quick tunnel 三件）；
+  `offline_boot.run_one_course` 加 `push_mode`；`run_loop/plan_run` 加 `--stop-file`。设计全文
+  `plan/push-mode-notebooks.plan.md` §6（评审 P1-3/P1-9）；本条只记落地时**新定/收紧**的语义。
+- **决定**：
+  1. **`push_mode` 住进 `run_one_course`，不另写一条训练链**（P1-9 的原始动机就是「别让 push 分支
+     成为半成品」）。它只换输入来源：包 = 任务包给的、锚点 = 任务包给的、outbox = 任务包给的 ⇒ 不探
+     hub、不取包、不取锚点、不装 HTTP 打点、不打交付 zip。最容易出错的几段（两个产物根、半截目录闸、
+     code.zip 引导、argv 装配）两条腿逐字共用。用例把「不探 hub」钉成**抛异常的替身**（漏接一条就是
+     一次静默出站请求，而 P0-1 的病根正是「静默」）。
+  2. **一单一个 outbox**（`<work>/tasks/<task_id>/outbox`）。所有任务共用一份会让 A 课的轮留在 B 课
+     的 `state.json` 里，hub 按 `it` 拉就拿到别人的权重 —— 串课不可能发生由**目录结构**保证。
+  3. **受理前五道闸**：`Content-Length` 有界（2GiB，超限 413 且不落半截）· 防 zip-slip（绝对路径 /
+     `..` / 符号链接一律拒）· `proto == offline_push_v1` · `pack_sha256` 逐字节对账 · 包名课程 ==
+     `task.course`。整包校验通过前 `tasks/<id>` 根本不存在（先落 `incoming/` 再 rename）。重投同一
+     `task_id` = 202 duplicate（hub 超时重试不重复 spawn）。
+  4. **ack 只有一个实现**：从类方法抽出 `deliver_outbox.ack_outbox()`（模块函数）。服务进程不跑补传
+     腿（腿在训练子进程里），只能读同一份 `state.json` —— 两处各写「删哪些」就是两套 rev 语义。跨进程
+     **刻意不锁**：唯一竞态是「子进程刚写的新轮还没进服务进程账本」，那轮会在 `pending()` 重现并重新
+     物化（幂等，代价一份重复 body）；反向顺序（旧快照覆盖新账本）才会丢数据。
+  5. **supervisor 只装配、训练在子进程**。状态面（`/state` 是 hub 的版本门与 busy 判据）必须一直答得上
+     话，而训练会吃满 CPU、注册进度钩子、解 `code.zip`；一次 OOM/`SystemExit` 不该把状态面一起带走。
+     `busy` = 在跑 **或** 跑完但 final 未 ack；`result=true` 的 ack 才收回 `idle`。
+  6. **取消 = stop 文件 + 轮边界**（`plan_run._drive` 在本轮开工之前查，先于预算闸）：已落盘的轮一条
+     不丢、当前轮不成半截，`state="cancelled"` 随 final 回传（hub 据此 release/换段，不当失败）。
+     supervisor 写 stop 后有界等 120s 再 terminate。
+  7. **notebook 的 push 代码来源必须早于 `_load_boot`**：push 要完整仓库代码（4 个引导文件不够 import
+     `remote.offline_push`）—— hub `/code`（有界 `code_wait_sec`，401/403 转下一源）→ GitHub clone →
+     本机任务包 `code.zip`，全失败 FATAL；`mode` 缺省仍是 `pull`（旧路径逐字节不动）。
+  8. **quick tunnel 三件下沉 `remote/push_tunnel.py`(L0)**：GPU push 的 `run_push_worker` 改为调用同一份
+     （安装/起隧道/取 URL 只此一处）。代价 = 那条腿的假钟要绑 `push_tunnel.time`（用例已按新家改）。
+- **否决的备选**：① 另写 `run_push_course`（与 pull 腿逐项漂开，P1-9 的原病）；② 共用一份 outbox
+  （串课）；③ 训练跑在 supervisor 进程的线程里（状态面随训练一起死）；④ 受理时先建 `tasks/<id>` 再校
+  验（坏包会变成一单「已受理」）；⑤ ack 留在类方法里、服务端另写一份文件删除判据（两套 rev 语义）；
+  ⑥ 把 face 内联进 notebook cell（不可测，且跨端契约没有类型/测试面）。
+- **违反后果**：共用 outbox ⇒ 串课（权重接到别的课程账本）；受理前不校验 sha256 ⇒ 坏包跑成一段
+  「跑完了但没有产物」；ack 不看 rev ⇒ 迟到评估行永久丢；训练在 supervisor 进程 ⇒ 一次崩溃把
+  `/state` 一起带走（hub 只能判掉线）；push 代码来源晚于 `_load_boot` ⇒ ImportError 或半成品引导。
+- **落点**：`remote/{offline_push_face,offline_push,offline_push_task,push_tunnel}.py`（新）·
+  `remote/{offline_boot,run_loop,plan_run,plan_handoff,notebook_runtime,deliver_outbox}.py` ·
+  `common/protocol.py`（`OFFLINE_PUSH_PROTO` + 七个端点 + 2GiB 上限 + 三件名）·
+  `ipynb/battle.offline.ipynb`（CFG/代码来源/push 分支/markdown）·
+  `tests/{helpers/remote_dag,remote/test_offline_boot_push,remote/test_offline_push_face,remote/test_offline_push_supervisor,remote/test_offline_notebook,remote/test_notebook_runtime}.py` ·
+  全文 → `docs/nn/remote-transport.md §119`；设计 → `plan/push-mode-notebooks.plan.md` §6。
+- **验收**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest 全量）· `bun run check`；
+  新增 37 个用例（11 push_mode 接线 + 17 真 HTTP 面 + 7 supervisor/子进程 + 2 notebook 契约）。
+  W5（hub 派发器）与 W6（韧性/观测）未落地；worker 服务端与训练入口的语义已在 plan 就位。

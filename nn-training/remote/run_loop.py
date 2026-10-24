@@ -169,6 +169,9 @@ def run_standalone(
     #: ★ 2026-10-23（plan/push-mode-notebooks §6.4a / P0-1）：**本地 outbox**（push 模式）。
     #: 非空 = 补传腿只往这个目录写 body（hub 自己来拉）；与 `deliver=False` 共存时 outbox 仍然活。
     outbox_dir: str | Path | None = None,
+    #: ★ 2026-10-23（W4）：取消哨兵（push 腿的 `/offline/push/cancel` 写它）。
+    #: 非空时 `plan_run` 在**轮边界**检查：命中 ⇒ 本段 `state="cancelled"`，产物自洽可续跑。
+    stop_file: str | Path | None = None,
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -227,6 +230,7 @@ def run_standalone(
         hub_lease=hub_lease,
         backup_root=backup_root,
         outbox_dir=str(outbox_dir or ""),
+        stop_file=str(stop_file or ""),
         deliver=deliver,
         run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
         log=log,
@@ -491,6 +495,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument(
+        "--stop-file",
+        default="",
+        help=(
+            "★ 2026-10-23（push 模式）：取消哨兵文件 —— 存在 = 本段在**轮边界**干净停机"
+            "（state=cancelled，产物自洽可续跑）。由 worker 服务的 /offline/push/cancel 写"
+        ),
+    )
+    ap.add_argument(
         "--eval-on-cloud",
         action="store_true",
         help="在云机跑 A 层评估（同 in-loop 语料/行口径，每 eval_every 轮）；结果落产物目录 eval_log.jsonl",
@@ -585,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
             hub_lease=hub_lease,
             backup_root=Path(args.backup_root) if args.backup_root else None,
             outbox_dir=args.outbox,
+            stop_file=args.stop_file or None,
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

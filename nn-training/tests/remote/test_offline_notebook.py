@@ -56,6 +56,15 @@ CFG_KEYS = (
     "download_dir",
     "repo_url",
     "branch",
+    # ★ push 模式（2026-10-23，plan/push-mode-notebooks W4）：服务端/隧道/注册/自取代码。
+    "mode",
+    "registry_url",
+    "push_port",
+    "push_token",
+    "cloudflared_path",
+    "node_id",
+    "label",
+    "code_wait_sec",
 )
 
 
@@ -119,6 +128,24 @@ def test_cell_knows_the_code_zip_name(cell: str) -> None:
         f"cell 里找不到 {offline_boot.CODE_NAME} —— 重命名后离线引导会静默失效"
     )
     assert "_load_boot_from_pack" in cell and "sys.path.insert" in cell
+
+
+def test_push_mode_takes_code_before_the_pull_bootstrap(cell: str) -> None:
+    """push 要**完整仓库代码**（4 个引导文件不够）⇒ 取代码必须早于 `_load_boot`。
+
+    判据用 `index`/`count` 而不是子串成员：顺序本身才是契约（反过来会先装一份只有
+    `offline_boot` 的引导目录，再 import `remote.offline_push` 就会 ImportError）。
+    """
+    assert cell.count("from remote.offline_push import run_push") == 1
+    assert cell.index("_ensure_push_code(_log)") < cell.index("_boot = _load_boot(_log)")
+    assert cell.index('"mode": "pull"') > 0, "缺省必须仍是 pull（旧行为逐字不变）"
+
+
+def test_markdown_documents_the_push_mode() -> None:
+    """用户看的那一页必须能自己解释 `mode=push`（否则这个开关只存在于代码里）。"""
+    md = "\n".join(notebook_cells(NB, "markdown"))
+    assert md.index('CFG.mode = "push"') > 0
+    assert md.index("kind=offline_push") > 0
 
 
 def test_credentials_are_read_before_any_network_change() -> None:

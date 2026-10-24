@@ -29,7 +29,6 @@ import glob
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -41,6 +40,7 @@ from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
+from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_of
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
@@ -397,15 +397,12 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _tunnel_url_of(path: Path) -> str:
-    """从 cloudflared 日志里取当前 quick tunnel URL（取不到 ⇒ 空串）。"""
-    try:
-        urls = re.findall(
-            r"https://[a-z0-9-]+\.trycloudflare\.com",
-            path.read_text(encoding="utf-8", errors="replace"),
-        )
-    except OSError:
-        return ""
-    return urls[-1] if urls else ""
+    """从 cloudflared 日志里取当前 quick tunnel URL（取不到 ⇒ 空串）。
+
+    实现已下沉到 `remote/push_tunnel.tunnel_url_of`（离线 push 同用一份）；保留本名是
+    为了让既有测试/调用点的 import 面不变。
+    """
+    return tunnel_url_of(path)
 
 
 def _push_registry(cfg: dict[str, Any], log) -> Any:
@@ -578,25 +575,10 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
             # 会话收线：hub 上 enabled=false（下个会话注册时会恢复）。
             reg.unregister()
 
-    # ── cloudflared 查找 / 自动安装 ──
-    cf_bin = str(cfg.get("cloudflared_path") or "") or subprocess.getoutput(
-        "where cloudflared 2>nul || which cloudflared 2>/dev/null"
-    ).strip()
+    # ── cloudflared 查找 / 自动安装（与离线 push 同一条实现：`remote/push_tunnel`）──
+    cf_bin = find_cloudflared(str(cfg.get("cloudflared_path") or ""), log=log)
     if not cf_bin:
-        log("cloudflared 未找到，自动安装…")
-        try:
-            cf_bin = "/usr/local/bin/cloudflared"
-            subprocess.run(
-                ["curl", "-fsSL",
-                 "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
-                 "-o", cf_bin],
-                check=True, timeout=60,
-            )
-            os.chmod(cf_bin, 0o755)
-            log(f"cloudflared 已安装 -> {cf_bin}")
-        except Exception as e:
-            log(f"cloudflared 自动安装失败: {e}——push 模式需要它暴露端口；或改用 pull 模式")
-            return -2
+        return -2
 
     # ── 启动 worker_server ──
     serve_env = dict(os.environ)
@@ -633,28 +615,9 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     log("worker_server 就绪")
 
     # ── cloudflared 隧道 ──
-    with open(cf_log, "w") as log_f:
-        cf_proc = subprocess.Popen(
-            [cf_bin, "tunnel", "--url", f"http://localhost:{cfg['push_port']}", "--logfile", str(cf_log)],
-            stdout=log_f, stderr=subprocess.STDOUT,
-        )
-    cf_url = ""
-    t0 = time.time()
-    while time.time() - t0 < 60:
-        try:
-            urls = re.findall(
-                r"https://[a-z0-9-]+\.trycloudflare\.com",
-                cf_log.read_text(encoding="utf-8", errors="replace"),
-            )
-            if urls:
-                cf_url = urls[-1]
-                break
-        except Exception:
-            pass
-        if cf_proc.poll() is not None:
-            log(f"cloudflared 提前退出 (code {cf_proc.returncode})")
-            break
-        time.sleep(2)
+    cf_proc, cf_url = start_quick_tunnel(
+        cf_bin, int(cfg["push_port"]), cf_log, wait_sec=60, log=log
+    )
     if cf_url:
         log(f"★ 隧道 URL: {cf_url}")
         _register_or_warn(reg, cf_url, push_tok, log)
@@ -748,7 +711,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
         return 0
     finally:
         reg.unregister()
-        if cf_proc.poll() is None:
+        if cf_proc is not None and cf_proc.poll() is None:
             cf_proc.kill()
             log("cloudflared 已停")
         if serve_proc.poll() is None:

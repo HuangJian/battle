@@ -652,6 +652,30 @@ OFFLINE_DELIVERED_NAME = "delivered.json"
 #: WARN = 一行告警（不拦），MAX = worker 服务端**停止接新单**（当前任务照跑；不静默丢轮）。
 OFFLINE_PUSH_OUTBOX_WARN_BYTES = 2 * 1024 * 1024 * 1024
 OFFLINE_PUSH_OUTBOX_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
+# ---- 离线 push（hub 经隧道来拉，2026-10-23 plan/push-mode-notebooks §6.2）----
+#: 版本门（评审 P1-7）：GPU 的 `/ping` 没有 `proto`，`PushWorkers.ping_all` 也只读
+#: `busy/queued/done` —— 所以离线 push 的「对面听得懂吗」只能落在 **`/offline/push/state`**
+#: 的应答体上：没有 `proto` 或不等于这个值 ⇒ hub **不派发**（日志指路升级）。
+OFFLINE_PUSH_PROTO = "offline_push_v1"
+#: worker 侧 HTTP 面（全部 Bearer；方向 = hub 作为出站客户端来调）。
+#: 端点是**跨端契约**：hub 派发器（W5）与 worker 服务端（W4）各持一半，两边都只能从这里取。
+OFFLINE_PUSH_STATE_PATH = "/offline/push/state"
+OFFLINE_PUSH_PROGRESS_PATH = "/offline/push/progress"
+OFFLINE_PUSH_ROUND_PATH = "/offline/push/round"
+OFFLINE_PUSH_RESULT_PATH = "/offline/push/result"
+OFFLINE_PUSH_TASK_PATH = "/offline/push/task"
+OFFLINE_PUSH_ACK_PATH = "/offline/push/ack"
+OFFLINE_PUSH_CANCEL_PATH = "/offline/push/cancel"
+#: 任务外层 zip 上限（§6.3）：超限 413 且**不落半截**（流式写到临时文件，收完才改名）。
+OFFLINE_PUSH_TASK_BODY_MAX = 2 * 1024 * 1024 * 1024
+#: 外层 zip 的三件（`task.json` + 包 + 锚点）；名字是契约，worker/hub 两侧同源。
+OFFLINE_PUSH_TASK_NAME = "task.json"
+OFFLINE_PUSH_PACK_DIR = "pack"
+OFFLINE_PUSH_RESUME_DIR = "resume"
+#: 任务包在 worker 侧的进度面文件名（`{seq, at, kind, it, done, total}`）：
+#: push 腿没有「节点 → hub」的上行 POST，进度只能落盘等 hub 来读（`/offline/push/progress`）。
+OFFLINE_PUSH_PROGRESS_NAME = "progress.json"
 #: 任务包端点（hub → 云机）：把本机的整段任务包 `task-<课>.zip` 递出去。
 #: 云机 notebook 的第一条路径就是「先连 hub，能通就从 hub 取包」（用户口径 2026-09-19）。
 OFFLINE_TASK_PACK_PATH = "/offline/task-pack"

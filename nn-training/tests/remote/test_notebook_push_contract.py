@@ -101,7 +101,18 @@ def test_push_first_is_the_last_resort_and_registers_inline() -> None:
     ), "push-first 必须可关、内联注册带 kind、写回 node_id"
 
 
-def test_battle_offline_is_still_pull_only() -> None:
-    """离线 push 的 worker 服务端还没落（W4）⇒ 这块盘不许提前出现半成品 push 分支。"""
+def test_battle_offline_push_branch_lands_only_at_w4() -> None:
+    """W4 落地后：离线盘的 push 分支必须在，且 **pull 仍是缺省**（不可反向）。
+
+    这条原先是「W4 以前不许出现半成品 push 分支」的反向守卫（W0–W2 时 `assert ... not in src`）；
+    W4 把 `remote/offline_push` 与 `run_push(` 落到盘上后，同一条纪律翻面 = 两件事都要成立：
+
+      * `CFG.mode` 的**缺省值仍是 "pull"**（老路径逐字节不变 —— 这是非目标）；
+      * push 分支只在 `_PUSH_MODE` 为其时才接管，且代码来源（`_ensure_push_code`）**早于**
+        `_load_boot`（顺序反了就是 ImportError / 半成品引导）。
+    """
     src = _cell("battle.offline.ipynb")
-    assert "remote.offline_push" not in src and "run_push(" not in src
+    cfg = _cfg("battle.offline.ipynb")
+    assert cfg["mode"] == "pull", "缺省必须仍是 pull（push 是显式 opt-in）"
+    assert src.count("from remote.offline_push import run_push") == 1
+    assert src.index("_ensure_push_code(_log)") < src.index("_boot = _load_boot(_log)")
