@@ -25,6 +25,34 @@
 
 ---
 
+## §85 线上体不是纯函数：`gzip` 头把墙钟写进了 `weights_json`（2026-10-24，flake）
+
+**症状**：`tests/remote/test_deliver_outbox.py::test_round_body_is_byte_identical_with_the_http_leg`
+偶发红（全量门禁 ~1/3 次），单跑必绿；断言给出的差异位置在 base64 负载中段，长得像「两份权重不是
+同一份」。
+
+**根因**：`common/wire_codec._pack_wire` = `gzip.compress(raw, compresslevel=…)`，`mtime` 缺省
+（`None`）⇒ gzip 头第 4–7 字节写**当前墙钟秒**。同一份字节在同一秒内编码两次逐字节相同（所以单跑
+与快速循环复现不了），跨秒就不同。HTTP 腿与本地 outbox 各自调一次装配器——重载下的 xdist 正好让
+这两次落在秒边界两侧 ⇒ 「同字节」契约偶发破。连带受影响的是所有以**体字节**为身份的面：outbox
+`state.json` 的 `sha256`、`rev` 的换入判据、以及「同输入 ⇒ 同体」的任何对账。
+
+**改法**：`mtime=0`。gzip 的 mtime 只是元数据，读侧 `gzip.decompress` 从不看它 ⇒ 不破坏任何兼容
+（在途/旧体照常解），只把编码从「输入 + 当前秒」变回「输入」。`encode_weights_json` 与
+`encode_opt_tar` 共用这一处 ⇒ 两个都修好。实现走 `gzip.GzipFile(mtime=0)` 而不是
+`gzip.compress(..., mtime=0)`——后者 3.11 才有 `mtime` 参数，而 `requires-python` 到 3.10
+（云机/Colab 仍可能是 3.10）；依赖面因此多了 stdlib 的 `io`（`BytesIO`），同文件的白名单守卫
+同步加 **（stdlib，不是破例）**。
+
+**回归**：`tests/common/test_protocol_split.py::test_wire_pack_is_a_pure_function_of_the_bytes`——
+把 `gzip` 看到的时钟换两个值，要求两次编码**逐字节相等**，并直接检查头的 MTIME 字段 = 0；
+`test_round_body_is_byte_identical_with_the_http_leg` 继续作为端到端的字节守卫（现在不再看运气）。
+
+**同族教训**（与 §21 的「判据在测机器」同一根）：**编码器也属于被测面**——只要产物的身份是
+「字节」，任何随时间/环境变的元数据（gzip mtime、zip 时间戳、JSON 键序）都会在某些秒里把等价
+写成不等价。写编解码时默认「纯函数」：时间戳显式钉死，不靠调用方巧合地落在同一秒。
+
+
 ## §84 v6 三头落地漏了两处 3 元解包：y32 两腿 it1 各 5/5 连炸（2026-10-23）
 
 **症状**：`y32-nohp` / `y32-tempo` 的每个 PPO job 在 `grad` 段报同一个确定性错误

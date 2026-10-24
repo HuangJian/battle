@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import io
 import json
 import struct
 
@@ -237,8 +238,22 @@ def container_base_sha(raw: bytes, *, magic: bytes) -> str:
 
 
 def _pack_wire(raw: bytes) -> str:
-    """原始字节 → gzip → base64（JSON 安全的回传字段）。"""
-    return base64.b64encode(gzip.compress(raw, compresslevel=_WIRE_GZIP_LEVEL)).decode("ascii")
+    """原始字节 → gzip → base64（JSON 安全的回传字段）。
+
+    ★ 2026-10-24：`mtime=0`——gzip 头默认写**当前墙钟秒**，于是同一份字节跨秒编码出不同
+    的线上体（实测：outbox 落盘体与 HTTP 腿体在秒边界两侧逐字节不等；`sha256`/`rev`
+    与任何「同输入 ⇒ 同体」的对账都跟着抖）。mtime 只是元数据，读侧 `gzip.decompress`
+    从不看它 ⇒ 固定为 0 不影响兼容，只把编码变回纯函数。
+
+    为什么走 `GzipFile` 而不是 `gzip.compress(..., mtime=0)`：`mtime` 参数 3.11 才有，
+    而本包的 `requires-python` 到 3.10（云机/Colab 仍可能是 3.10）。
+    """
+    buf = io.BytesIO()
+    with gzip.GzipFile(
+        fileobj=buf, mode="wb", compresslevel=_WIRE_GZIP_LEVEL, mtime=0
+    ) as f:
+        f.write(raw)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _unpack_wire(b64: str) -> bytes:

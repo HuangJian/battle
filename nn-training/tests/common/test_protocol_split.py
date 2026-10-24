@@ -122,6 +122,7 @@ def test_wire_codec_only_depends_on_stdlib_and_errors() -> None:
         "__future__",
         "base64",
         "gzip",
+        "io",  # `_pack_wire` 的 BytesIO（`gzip.GzipFile(mtime=0)`，3.10 无 compress(mtime=…)）
         "json",
         "struct",
         "common.errors",
@@ -175,6 +176,24 @@ def test_v1_wire_roundtrip_and_legacy_compat() -> None:
     # 常量一致性：压缩级别就在本模块
     assert wire_mod.encode_opt_tar(raw) == wire_mod.encode_weights_json(raw)
     assert gzip.compress(raw, compresslevel=wire_mod._WIRE_GZIP_LEVEL) is not None
+
+
+def test_wire_pack_is_a_pure_function_of_the_bytes(monkeypatch) -> None:
+    """同一份字节的线上体**不随墙钟变**（`gzip` 头的 mtime 固定为 0）。
+
+    2026-10-24 现场：`gzip.compress` 默认把当前秒写进头 ⇒ outbox 落盘体与 HTTP 腿体在秒
+    边界两侧逐字节不等（`test_deliver_outbox` 的「同字节」断言偶发红，sha/rev 也跟着抖）。
+    """
+    raw = b'{"it": 1, "w": 1.5}'
+    monkeypatch.setattr("gzip.time.time", lambda: 1_700_000_000.0)
+    a = wire_mod.encode_weights_json(raw)
+    monkeypatch.setattr("gzip.time.time", lambda: 1_700_000_999.0)
+    b = wire_mod.encode_weights_json(raw)
+    assert a == b, "墙钟不该进线上字节"
+    head = base64.b64decode(a)
+    assert head[:2] == b"\x1f\x8b", "仍是 gzip（读侧按魔数走）"
+    assert int.from_bytes(head[4:8], "little") == 0, "gzip 头的 MTIME 字段必须是 0"
+    assert wire_mod.decode_weights_json(a) == raw
 
 
 def test_v2_result_roundtrip() -> None:

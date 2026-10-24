@@ -9316,3 +9316,46 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`tests/remote` + `tests/hub` **2136 passed**（含新增断连过期/统计饿死/积压越过
   `sync_cap`/无 row 不销账/统计行不冻结指针/未知 parts 400）；本机无 `tc`，D9/D10 的真机限速
   仍欠。
+
+## §2026-10-24-goalnn-offline-training-scale（2026-10-24，离线 notebook 训练放大）
+
+- **背景**：用户在高配云机跑 `battle.offline.ipynb` 时要提高每轮采样量与训练波次。不能在
+  导出任务包时写死——同一份包也会在普通机器/断点续跑上使用；也不能重写包里的 `plan.json`
+  （计划身份、hub 对账与产物指纹都绑在它上面）。
+- **决定**：新增两个**只在执行面生效**的倍数：`sample_mult`（每轮训练采样量）与
+  `epoch_mult`（每轮 PPO 遍数），缺省 1.0 = 原样；notebook 非缺省才通过
+  `--sample-mult`/`--epoch-mult` 传给 `run_loop`。
+  * volume 课用 `alloc_games_by_stage`/`target_per_stage` 同源重算 target、逐关配额与首批局数，
+    `topup.max_games_per_stage > 0` 时一起抬；老五字段块只放大标量目标与 `games_per_stage`
+    （形状不变，在飞计划照旧可重放）；
+  * 固定对集课补 `ceil(n×N)−n` 局新种子（步长 `2**30`），**不重跑**同一 `(stage, seed)`；
+  * epoch 取 `ceil(课程 epochs × N)`、最少 1，写进逐轮 manifest。
+- **否决的备选**：① 导出时改课程/计划——同一份包无法跨机器切换，且会撕掉包身份；② 固定
+  对集直接复制原对集——确定性仿真下只是白烧墙钟，不会增加有效样本；③ 只放大
+  `target_transitions` 不改配额/首批——`validate_runtime_volume` 会在节点第一道门拒收；
+  ④ 同时放大评估语料——评估是测量，放大后与其它机器/历史曲线不可比。
+- **落点**：`nn-training/ipynb/battle.offline.ipynb` · `remote/offline_boot.py` ·
+  `remote/run_loop.py` · `remote/plan_handoff.py`（`RunContext`）· `remote/plan_run.py` ·
+  `tests/remote/test_offline_notebook.py` · `tests/remote/test_offline_boot.py` ·
+  `tests/remote/test_run_loop.py` · `docs/nn/runtime-opt.md §37`。
+- **验收**：缺省 1.0 不产生任何新 argv（旧包逐字不变）；固定对集 1.5 倍补新种子；
+  volume 2 倍后 target/quota/首批与显式硬顶同源放大且过 `validate_volume_block_ext`；
+  端到端注入 `run_job` 看到下一轮 epochs 与 argv 局数都按倍数生效。
+## §2026-10-24-goalnn-wire-gzip-mtime-determinism（2026-10-24，线上体去墙钟）
+
+- **背景**：全量 nn 门禁偶发红 `tests/remote/test_deliver_outbox.py::test_round_body_is_byte_identical_with_the_http_leg`
+  （单跑必绿，断言差异落在 base64 负载中段）；而「outbox 落盘体 == HTTP 腿体」是 push 模式的字节契约。
+- **根因**：`common/wire_codec._pack_wire` 的 `gzip.compress(...)` 没给 `mtime`，缺省写**当前墙钟秒**到
+  gzip 头 ⇒ 同一份权重跨秒编码出不同线上体（同秒内两次才相等，所以只在重载/慢一拍时偶发）。
+  连带面：outbox `state.json` 的 `sha256`、换入 `rev` 的判据、任何「同输入 ⇒ 同体」对账。
+- **决定**：gzip 头的 `mtime` 固定为 0（`gzip.GzipFile(mtime=0)`——`gzip.compress` 的 `mtime`
+  参数 3.11 才有，本包到 3.10）。mtime 是纯元数据，`gzip.decompress` 不读它 ⇒ 旧体/在途体照常解，
+  只是把编码变回输入的纯函数。
+- **否决的备选**：① 放宽那条测试（比较解码后的权重而不管体字节）——它守的正是「装配器只有一份」的
+  字节契约，放宽等于让 sha/rev 的抖动继续存在；② 给测试注同一个秒的假时钟——只治症状，生产侧
+  outbox 与 HTTP 腿本来就不同刻；③ 换 zlib 裸压缩——改线上形态/兼容面，收益只有确定性一项。
+- **落点**：`nn-training/common/wire_codec.py` · `tests/common/test_protocol_split.py`
+  （`test_wire_pack_is_a_pure_function_of_the_bytes`，含 gzip 头 MTIME=0 的直接断言）·
+  `docs/nn/engineering.md §85`。
+- **验收**：该用例连跑不再受秒边界影响；`tests/common/test_protocol_split.py` + `tests/remote/test_deliver_outbox.py`
+  + `tests/remote/test_offline_deliver.py` 97 passed；nn python gate **5094 passed, 10 skipped**。
