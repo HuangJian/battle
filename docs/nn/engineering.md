@@ -25,6 +25,41 @@
 
 ---
 
+## §84 v6 三头落地漏了两处 3 元解包：y32 两腿 it1 各 5/5 连炸（2026-10-23）
+
+**症状**：`y32-nohp` / `y32-tempo` 的每个 PPO job 在 `grad` 段报同一个确定性错误
+`ValueError: too many values to unpack (expected 3)`，hub 重领 5 次后 `aborted`；worker 侧表现为
+「准备完成」之后**一条 `[ppo]` 读数都没有**就开始 polling（容易被读成超时/网络）。
+
+**日志指纹**（判「死在预计算」而不是训练步的唯一依据）：有 `kickstart ref 已加载（BC 冻结 master）`，
+**没有** `[ppo] kickstart ref 预计算完成：N chunks`——后者在 `ref_cache` 循环之后、epochs 循环之前。
+
+**根因**：B1 v6（`2f40560e`）把 `ppo_update` **主循环**迁到 4-tuple，漏了同函数另外两处：
+`ref_cache` 预计算的 `_rm, _rf, _ = ref_model(...)` 与 demo 混批的 `_dm, _, _ = model(...)`。
+v6 落地后所有 v6 腿（y26/y27/y28/y29/y30/y31）都是 `kickstart_ref: false` ⇒ 第一处**从未执行过**；
+y32 是第一对「v6 起点（`y31-fire.it370`）+ `kickstart_ref: true`」的腿。这是「同一个契约散落在
+多处解包」的典型：迁移时按**主路径**搜索，副路径（缓存 / demo / 诊断）全在视野外。
+
+**同段的第二、第三个错**（都在修复里一并做掉）：① 掩码切片写死 legacy `MOVE_DIM`/`FIRE_DIM`，
+v6 的 `[move4|fire3|hold2]` 会被切成 move=5 列、fire 吃 hold 的两列——**只改解包不改切片**会
+训出一个 fire 头吃错列、hold 头完全自由的模型，loss 照降；② kickstart KL 只算 move+fire，
+`hold` 是 v6 唯一新增的自由度，漏锚 = 对它完全不生效。
+
+**改法**：`len(ref_out)` 判头数（不读模型属性——`DataParallel` 包装下代理不可靠）+ 数据 `a_hold`
+交叉校验（不同源 ⇒ 响亮 `ValueError`）；掩码按 `MOVE4_DIM`/`FIRE3_DIM`/尾段分派；KL 三头都锚
+（legacy 逐位不变）；demo 取 `[0]`。
+
+**回归**：`tests/worker/test_ppo_kickstart_cache.py` +4 例——v6 不崩且 ref 仍只 per-chunk 前向一次 /
+只改 ref 的 hold 头 ⇒ kickstart 读数必须变（漏锚时逐位相同）/ 两个方向的「不同源」都拒绝。
+8 passed；相邻 `test_ppo_common` 17、`test_ppo_demo_mix`+`test_ppo_scalar_sync` 15 全绿。
+
+**⚠ 生效条件**：`code.zip` 是**会话冻结**的集群快照（`remote/code_snapshot.py::published_code_zip`
+「快照在 ⇒ 用它」；`ensure_cluster_snapshot` 只在 hub/trainer **启动**时打包）⇒ 改本地代码不会自动
+到 worker，**必须重启 hub/控制台**再重开腿。`ppo/engine.py` 不在 `tools/agent/codehash-files.txt`
+（`nn-training/**` 明文排除）⇒ 本修复不触发节点 stale 重启波。
+
+---
+
 ## §83 「取活 8 次」被悄悄写成「**窗内**取活 8 次」：回场上界用尽当收工信号（2026-10-22，用户指令「[504] -- 修！」）
 
 **症状**：`tests/trainer/test_rollout_dispatch_resilience.py::test_soft_streak_still_bounded_when_cluster_is_down[504]`

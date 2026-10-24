@@ -35,6 +35,28 @@ from worker.paired_kill import (
 )
 
 
+def _rein_active(args: Any, it: int) -> bool:
+    """BC 缰绳在这一轮**是否还值得算**（`kk > NEGLIGIBLE_COEF`）。
+
+    2026-10-23（y32-nohp it41 现场）：`kk` 已在 it30 前后退火到 ~1e-9 之下，日志白纸黑字
+    `kickstart 系数已衰减到期（kk=0.0000）`，一秒后仍打 `CRITICAL KICKSTART-BURN ... 疑似回锚`。
+    判据的定义域是「锚主导更新把起点洗回去」——锚不在就没有这个形态，继续判只会误停腿。
+
+    系数**不在这里重算**（唯一来源 = `trainer/loop_transport.kickstart_coef`，它按 run 原点
+    衰减；第二份公式 = 第二个事实源）。延迟导入的理由同该模块：`loop_transport` 顶层经
+    `trainer.run_rl` 反向持有 loop 入口，顶层互引成环 ⇒ 只在调用点取。
+
+    取不到（导入/属性失败）⇒ 返回 True：**宁可照判，也不静默放过一次真回锚**。
+    """
+    try:
+        from common.protocol import coef_active
+        from trainer.loop_transport import kickstart_coef
+
+        return bool(coef_active(kickstart_coef(args, it)))
+    except Exception:
+        return True
+
+
 class TrainingGuardsLeg:
     """结果面停腿 mixin（干烧回锚 / 配对杀臂）：读趋势，停腿 + 停云机。"""
 
@@ -52,6 +74,11 @@ class TrainingGuardsLeg:
     #: 共享 sink（真实现住组合根 `trainer/loop_guards.py`）：账本视图增量 / 判决 → 云机达令。
     _ledger_apply: Any
     _sync_cloud_halt: Any
+    #: 平台门禁停机模式（`halt` / `notify`；真实现住 `trainer/loop_guards.py`）。
+    #: 2026-10-23 起本簇也要读它：**notify = 判据只提示、不停腿**（此前只有云端达令守这条）。
+    _gate_halt_mode: Any
+    #: 「notify 模式已提示过」只喊一次（同 `_burn_fallback_logged` 的用处）。
+    _burn_notified: bool
 
     def _burn_paired_rows(self, peer_name: str) -> tuple[str, tuple] | None:
         """配对模式的参照账本：显式 `peer` 优先；否则要求**唯一**同 V 对端。
@@ -110,6 +137,19 @@ class TrainingGuardsLeg:
         args = self.args
         if not bool(getattr(args, "kickstart_ref", False)):
             return False
+        # ★ 2026-10-23：**缰绳已退火到期就不判**。判据的前提是「锚主导更新把起点洗回去」，
+        #   锚的系数归零之后这个形态不存在，再判就是拿一个不成立的前提停腿。
+        #   现场（y32-nohp it41）：`kickstart 系数已衰减到期（kk=0.0000）` 之后 1 秒即
+        #   `CRITICAL KICKSTART-BURN`。系数与 `trainer/loop_transport.kickstart_coef`
+        #   **同源**（延迟导入，避免 worker↔trainer 顶层互引）；算不出来就照判（不静默放过真回锚）。
+        if not _rein_active(args, it):
+            if int(getattr(self, "_burn_streak", 0) or 0):
+                log(
+                    f"[run_rl] kickstart-burn it{it}: 缰绳已退火到期（kk≈0）——"
+                    "清空落后计数，不再判「回锚」（锚不在，无锚可回）"
+                )
+                self._burn_streak = 0
+            return False
         # 读 **eval_log.jsonl**（per-tick 的评估行落这里；`training_log.jsonl` 是训练事件册
         # ——与 `_gate` 同一个源文件、同一个读者，不另开第二个读法）。
         try:
@@ -138,9 +178,18 @@ class TrainingGuardsLeg:
                 log(
                     f"[run_rl] WARN kickstart-burn: mode={mode} 但解析不出**唯一**同 V 对端"
                     + (f"（peer={peer_name}）" if peer_name else "（同 V 腿数 ≠ 1）")
-                    + "——本腿回退 `baseline`（参照 = 本腿自己的 it0）"
+                    + "——**本腿不判**（不拿 baseline 代打，理由见下一行注释）；"
+                    "要用起点基线请把 `mode` 显式写成 `baseline`"
                 )
                 self._burn_fallback_logged = True
+        # ★ 2026-10-23：**解析不出对端就不判，不再回退 baseline**。`biz/kickstart_burn.py`
+        #   头注自己的回测：baseline 参照在「训练本身在飘」时零假设假阳性 **49.3%**，
+        #   paired 只有 0.56%。拿 49.3% 假阳性的判据去停腿 = 自带定时炸弹——现场就是
+        #   y32-tempo（it31）/ y32-nohp（it41）双双被它收官，而两条腿的设计本来就是
+        #   「先掉胜率换行为」。显式 `mode: baseline` 仍然照判（操作者自己选的，认）。
+        if mode != MODE_BASELINE and peer_rows is None:
+            self._burn_streak = 0
+            return False
         v = burn_verdict(
             rows, points=points, margin_pp=margin_pp, peer_rows=peer_rows, peer_name=peer
         )
@@ -183,6 +232,30 @@ class TrainingGuardsLeg:
             )
         self._burn_streak = v.streak
         if not v.tripped:
+            return False
+        # ★ 2026-10-23：**平台开关 = notify ⇒ 只提示、不停腿**。`trainer/loop_guards.py`
+        #   `_sync_cloud_halt` 的契约原话是「门判决只作用于远端云机，TrainingLoop 永不停车」，
+        #   而本方法自己 `training PAUSED` + 收官 ⇒ 违反该契约，且日志会出现
+        #   「notify → 只提示」紧接「training PAUSED」的自相矛盾（现场 18:06:28/18:23:12）。
+        #   notify 的语义就是「只提示」：记账 + 喊一次，训练继续（切到 halt 立即生效）。
+        if self._gate_halt_mode() == "notify":
+            if not getattr(self, "_burn_notified", False):
+                log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
+                log(
+                    "[run_rl] 门禁动作为 notify（平台开关）→ **判据只提示，本腿不停车**；"
+                    "要真停腿请把平台开关拨到 halt（`tmp/gate-halt.json`）"
+                )
+                self._burn_notified = True
+            self._sync_cloud_halt(it, "ABORT")
+            self._ledger_apply(
+                write_gate_verdict(
+                    self._jsonl_path,
+                    it,
+                    "ABORT",
+                    f"kickstart-burn(notify, 不停腿): {v.reason}",
+                    decider="loop",
+                )
+            )
             return False
         log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
         log(

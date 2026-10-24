@@ -7,6 +7,42 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §41 干烧熔断的三个执行面缺陷 —— 「判据对了、作用域错了」把两条腿停成 worker 空转（2026-10-23）
+
+**现象**：18:00 后云端 PPO worker 连续 2 小时领不到任务，重启 trainer 才恢复。查 hub 日志
+（`tmp/hub-server.out`）18:23:13 → 20:26:05 **没有任何 publish**，只有 status 轮询 ⇒ 不是 hub 坏，
+是队列空。真凶在 trainer 日志：`[18:06:28] y32-tempo CRITICAL KICKSTART-BURN it31` /
+`[18:23:12] y32-nohp … it41`，各 `training PAUSED` + 收官。
+
+**根因链**：两条腿带 `kickstart_ref: true`（该开关**同时启用**结果面干烧熔断，
+`worker/loop_guards_leg.py::_kickstart_burn` 首行即 `if not kickstart_ref: return False`）；
+判据拿 **it0（= 课程 bc = it370，0.9025）** 当基线，连续 3 点低 5pp 就停。而两条腿的设计
+**就是先掉胜率换行为**（抬血价 2.9× / 砍 28% 无靶正项 / 落后税）⇒ 对改行为类腿是必炸形态。
+
+**三条缺陷（判据本体 `worker/kickstart_burn.py` 一字未改，改的是作用域）**：
+1. **`kk` 退火到期仍判**：现场 `kickstart 系数已衰减到期（kk=0.0000）` 之后 1 秒打 CRITICAL。
+   判据的定义域是「锚主导更新把起点洗回去」，锚不在就没有这个形态。
+2. **`gate_mode=notify` 仍本地停车**：`trainer/loop_guards.py::_sync_cloud_halt` 契约写着
+   「门判决只作用于远端云机，TrainingLoop 永不停车」，notify 只守了「不下发 cloud halt」，
+   腿簇自己 `training PAUSED` ⇒ 日志自相矛盾（「notify → 只提示」紧接「training PAUSED」）。
+3. **`auto` 解析不出唯一对端就回退 `baseline`**：模块头注自己的回测——baseline 参照在
+   「训练本身在飘」时零假设假阳性 **49.3%**（paired 0.56%）。拿它停腿 = 定时炸弹。
+
+**决定**：① `kk ≤ NEGLIGIBLE_COEF` ⇒ 不判（`_rein_active` 延迟导入 `kickstart_coef`，不重写公式）；
+② `notify` ⇒ 只提示不停腿（仍写 `gate_verdict`、仍发云端达令、保留 streak ⇒ 拨到 halt 立即停）；
+③ `mode != baseline` 且无唯一对端 ⇒ 不判、不写台账；**要用起点基线必须显式 `mode: baseline`**。
+全文与否决备选 → `DECISIONS §2026-10-23-kickstart-burn-scope`。
+
+**验收**：`tests/worker/test_kickstart_burn_guard.py` 7 例（**回滚实测**旧文件时 `_kickstart_burn(15)`
+返回 `True` ⇒ 真红）；`tests/worker/` 1307 passed、`tests/trainer/` + `tests/worker/` 合跑
+**1982 passed**；ruff / mypy 单文件绿。
+
+**教训**：① 一个 `True` 开关能连带的**不止它名字说的那件事**（`kickstart_ref` 顺手打开了熔断），
+加行为开关前先 grep 它的全部消费者；② `RESTART_ONLY_FIELDS`（`biz/hot_reload.py`）里的键改文件
+**对已开的腿无效**——本次 17:10 改 `kickstart_ref: false`、18:06 照旧被停，隔了 56 分钟没人察觉；
+③ 停腿类判据的**作用域**（谁参照、锚在不在、开关说 halt 还是 notify）必须与判据本身一起评审。
+
+---
 ## §40 自主机首批铺满撞「首批局数同源」校验 —— 宽度随块声明（`widen_width`；2026-10-22 事故修复）
 
 **触发**：y30-stack 离线自主段 it156 **一局没跑**就 `ProtocolError`，整条串行链停在第一门课（剩 4 门未执行）。
