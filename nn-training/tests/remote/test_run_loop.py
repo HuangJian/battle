@@ -446,6 +446,89 @@ def test_combined_rejects_result_without_any_report(tmp_path: Path) -> None:
     assert "iters 为空" in str(ei.value)
 
 
+# ────────────────────────── 高配云机：样本 / epoch 倍数 ──────────────────────────
+
+
+def test_sample_scale_adds_new_seeds_instead_of_rerunning_the_same_games() -> None:
+    pairs = [(0, 1), (1, 2)]
+    assert plan_run_mod._scaled_pairs(pairs, 1.0) is pairs  # 缺省逐字原样
+    got = plan_run_mod._scaled_pairs(pairs, 1.5)
+    assert got[:2] == pairs
+    assert len(got) == 3, "1.5 × 2 局 = 3 局（向上取整）"
+    assert got[2][0] == 0 and got[2][1] != 1, "多出来的一局必须是新种子，不是重跑"
+    assert plan_run_mod._scaled_pairs(pairs, 0.5) == pairs[:1], "倍数 <1 按原顺序截短"
+
+
+def test_sample_scale_rebuilds_volume_quota_and_games_consistently() -> None:
+    """volume 课的三件必须同源放大；`validate_volume_block_ext` 是节点侧第一道门。"""
+    from worker.volume_alloc import validate_volume_block_ext
+
+    block = {
+        "target_transitions": 1000,
+        "stages": [0, 1],
+        "per_stage_quota": 500,
+        "games_per_stage_by_stage": {0: 5, 1: 5},
+        "est_s_by_stage": {0: 100, 1: 100},
+        "est_hi_factor": 1.15,
+        "topup": {
+            "enabled": True,
+            "max_batches": 3,
+            "last_lo_factor": 0.85,
+            "max_games_per_stage": 10,
+        },
+    }
+    validate_volume_block_ext(block)  # 夹具本身合法
+    got = plan_run_mod._scaled_volume(block, 2.0)
+    assert got["target_transitions"] == 2000
+    assert got["per_stage_quota"] == 1000
+    assert got["games_per_stage_by_stage"] == {0: 9, 1: 9}
+    assert got["topup"]["max_games_per_stage"] == 20, "显式硬顶要跟着目标抬，否则放大被旧顶卡住"
+    validate_volume_block_ext(got)  # 放大后的块仍过同源校验
+
+
+def test_sample_scale_legacy_volume_block_keeps_its_shape() -> None:
+    """老五字段块（无分关字段，在飞/手写计划）：只放大标量目标与初波局数，形状不变。"""
+    block = {
+        "target_transitions": 1000,
+        "est_samples_per_game": 100,
+        "stages": [0, 1],
+        "games_per_stage": 5,
+        "per_stage_quota": 500,
+        "topup": {
+            "enabled": True,
+            "max_batches": 3,
+            "last_lo_factor": 0.85,
+            "max_games_per_stage": 0,
+        },
+    }
+    got = plan_run_mod._scaled_volume(block, 2.0)
+    assert got["target_transitions"] == 2000
+    assert got["per_stage_quota"] == 1000
+    assert got["games_per_stage"] == 10
+    assert set(got) == set(block), "形状逐字不变（老重放分支照旧读标量）"
+    assert got["topup"]["max_games_per_stage"] == 0, "0 = 无顶，不能被抬成正数"
+
+
+def test_run_standalone_applies_both_multipliers(tmp_path: Path) -> None:
+    """端到端（注入 run_job）：下一轮的采样局数与 PPO epochs 都按倍数生效。"""
+    plan, _m, _fake, _result, art = _run(tmp_path, iters=3, budget_sec=1e-9)
+    base_pairs = len(pairs_for(plan, planned_iters(plan)[1]))
+    fake = _FakeRunJob(tmp_path)
+    run_standalone(
+        artifacts_dir=art,
+        max_iters=0,
+        sample_mult=2.0,
+        epoch_mult=1.5,
+        code_cache_dir=_warm_code_cache(tmp_path),
+        run_job_fn=fake,
+        log=_quiet,
+    )
+    assert len(fake.calls) == 1, fake.calls
+    mm = fake.calls[0]["manifest"]
+    assert mm["epochs"] == 2, "1.5 × 1 向上取整到 2"
+    assert len(mm["rollout"]["argv"]) == base_pairs * 2
+
+
 # ────────────────────────── 预算 / 上限 / 续跑 ──────────────────────────
 
 

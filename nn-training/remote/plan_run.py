@@ -33,6 +33,7 @@ job 再喂回 `run_job`——离线轮与 hub 监管轮走的是字面同一条�
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -158,6 +159,79 @@ def with_rollout_workers(spec: dict, workers: int) -> dict:
     return {**spec, "workers": n}
 
 
+#: 固定对集课的「加样本」种子步长：原计划种子都落在 `[1, 2**30)`（`build_pairs` 的抽签
+#: 上界）⇒ 第 k 份副本的 seed + k×本步长必然与原集及其它副本不重叠，且仍是确定性纯函数。
+SAMPLE_SEED_STRIDE = 1 << 30
+
+
+def _scaled_pairs(
+    pairs: list[tuple[int, int]], mult: float
+) -> list[tuple[int, int]]:
+    """固定对集课的样本倍数：补 `ceil(n×mult) − n` 局**同分布的新种子**。
+
+    不复用原 `(stage, seed)`：同一局重跑只会得到逐字节相同的 shard（确定性），是白烧墙钟
+    而不是加样本。副本按原对集顺序轮转，第 k 份把 seed 平移 `k×SAMPLE_SEED_STRIDE`；
+    `mult=1.0` 逐字返回原列表（不分配、不改计划身份）。
+    """
+    n = len(pairs)
+    m = float(mult)
+    if n == 0 or m == 1.0:
+        return pairs
+    want = max(1, math.ceil(n * m))
+    if want < n:
+        return pairs[:want]  # 倍数 <1：按原顺序截短（仍是确定性的）
+    out = list(pairs)
+    for idx in range(n, want):
+        stage, seed = pairs[idx % n]
+        copy = idx // n
+        out.append((int(stage), int(seed) + copy * SAMPLE_SEED_STRIDE))
+    return out
+
+
+def _scaled_volume(volume: Mapping[str, Any], mult: float) -> dict:
+    """带 `volume` 块的课：把 `target_transitions` 与逐关配额/首批局数一起放大。
+
+    三者必须**同源重算**（`validate_runtime_volume` 会逐关核对）：只改 target 会让
+    `per_stage_quota`/`games_per_stage_by_stage` 与它不一致，节点侧第一道门就拒收。
+    这里直接用与计划导出同一个纯函数族重解，`widen_width`（若有）照旧复算。
+    """
+    from worker.volume_alloc import alloc_games_by_stage, est_hi, widen_by_width
+    from worker.volume_quota import target_per_stage
+
+    m = float(mult)
+    stages = [int(s) for s in volume["stages"]]
+    target = max(1, math.ceil(int(volume["target_transitions"]) * m))
+    # 显式逐关硬顶跟着目标一起抬（否则放大后的配额会被旧硬顶卡在半路）；0 = 无顶，保持 0。
+    topup = dict(volume["topup"])
+    cap = int(topup.get("max_games_per_stage", 0) or 0)
+    if cap > 0:
+        topup["max_games_per_stage"] = max(cap, math.ceil(cap * m))
+    out = {
+        **volume,
+        "target_transitions": target,
+        "per_stage_quota": target_per_stage(target, len(stages)),
+        "topup": topup,
+    }
+    per_stage = volume.get("games_per_stage_by_stage")
+    if not isinstance(per_stage, dict) or not per_stage:
+        # 老五字段块（在飞/手写计划）：没有分关估算可复算 ⇒ 只放大标量目标与初波局数，
+        # 形状逐字不变（`pairs_for` 的 `initial_wave_pairs` 分支照旧读它）。
+        out["games_per_stage"] = max(1, math.ceil(int(volume.get("games_per_stage", 1) or 1) * m))
+        return out
+    ests = {int(k): int(v) for k, v in volume["est_s_by_stage"].items()}
+    factor = float(volume["est_hi_factor"])
+    games = alloc_games_by_stage(
+        stages, target, ests_hi={s: est_hi(ests[s], factor=factor) for s in stages}
+    )
+    widen = int(volume.get("widen_width", 0) or 0)
+    if widen > 0:
+        games = widen_by_width(games, widen)
+    return {
+        **out,
+        "games_per_stage_by_stage": games,
+    }
+
+
 def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
 
@@ -213,6 +287,9 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     #   `widen_by_width(est 反解值, widen_width)`），只改 games 不声明宽度会被节点/`iter_spec`
     #   响亮拒收（现场：y30-stack it156，9 局/关被铺到 24 局/关 ⇒ ProtocolError 整段死）。
     vol_probe = ctx.plan.get("volume")
+    if isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
+        # 先放大再走本机宽度的「加宽」逻辑：两张牌都是纯函数，顺序不影响同源校验。
+        vol_probe = _scaled_volume(vol_probe, ctx.sample_mult)
     if isinstance(vol_probe, dict):
         from worker.volume_alloc import widen_by_width
 
@@ -230,10 +307,17 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
                 )
     _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
     pairs = pairs_for(_plan, it)
+    if not isinstance(vol_probe, dict):
+        # 固定对集课没有「训练侧配额」可放大 ⇒ 直接补同分布的**新种子**（不是重跑同一局）。
+        pairs = _scaled_pairs(pairs, ctx.sample_mult)
     spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)
     spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
     # 日志面用**重铺后的** plan（否则打出来的还是打包时的旧 G_s，与实采对不上）
     vol = vol_probe
+    epochs_eff = int(ctx.manifest.get("epochs") or 0)
+    if ctx.epoch_mult != 1.0:
+        # PPO 遍数是整数（`train_core` 直接拿去喂 `ppo_update`）：向上取整，最少 1。
+        epochs_eff = max(1, math.ceil(epochs_eff * ctx.epoch_mult))
     # ★ 2026-09-24（日志节食）：这几行与 `run_job` 自己的入口/设备/装载读数是**同一个阶段**
     # （本轮上云从拼 spec 到 PPO 开算），所以攒进同一个 bundle，由 `run_job` 在装载完成时
     # 打**一行**（原来这里是 1 行 + 它那边 9 行）。
@@ -248,6 +332,12 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
             else ""
         ),
     )
+    if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
+        prep_b.add(
+            "放大",
+            f"样本×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；"
+            f"PPO epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}",
+        )
     prep_b.add(
         "动量", "带 Adam 动量" if ctx.last_opt_sha else "无 opt：Adam 从头"
     )
@@ -257,6 +347,7 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         {
             "kind": "iter",
             "it": int(it),
+            "epochs": epochs_eff,
             "rollout": spec,
             "init_weights_fp": init_fp,
             "data_fp": iter_expected_data_fp(spec),

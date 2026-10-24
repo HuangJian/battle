@@ -106,6 +106,20 @@ _log_default = tag_logger("run", lambda: time)
 # ------------------------------------------------------------------ 计划交接
 
 
+def _positive_mult(value: object, name: str) -> float:
+    """训练放大倍数：有限且 > 0（缺省 1.0 原样）；非法值在**开跑之前**响亮拒绝。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{name} 必须是正数（当前 {value!r}）")
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name} 必须是正数（当前 {value!r}）") from e
+    # 不 import math：本模块的依赖面是闭集（`test_handoff_import_surface_is_closed`）。
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        raise ValueError(f"{name} 必须是有限正数（当前 {value!r}）")
+    return v
+
+
 def _assert_plan_manifest_aligned(plan: dict, manifest: dict) -> None:
     """★ 不变式：`manifest.it == plan.start_it + 1`。违反即拒收（未跑任何一局）。
 
@@ -202,6 +216,11 @@ class RunContext:
         course: Any = None,
         max_iters: int = 0,
         budget_sec: float = 0.0,
+        #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样）。样本倍数作用在
+        #: **每轮采样量**（volume 课放大 target/配额；固定对集课补新种子），epoch 倍数
+        #: 作用在**每轮 PPO 遍数**。两者都不碰评估语料，也不改盘上的 plan/manifest 身份。
+        sample_mult: float = 1.0,
+        epoch_mult: float = 1.0,
         #: 产物补传（「中途能连上 hub 就自动恢复在线回传」）：None = 这条腿没有补传
         #: （纯离线且没给 hub 地址，或用户显式关掉）——产物照常落本地。
         #: 类型是 `DelivererLike`：两种实现（进程内线程 / 独立子进程）同接口，换实现不动调用方。
@@ -247,6 +266,8 @@ class RunContext:
         self.course = course
         self.max_iters = int(max_iters or 0)
         self.budget_sec = float(budget_sec or plan.get("budget_sec", 0.0) or 0.0)
+        self.sample_mult = _positive_mult(sample_mult, "sample_mult")
+        self.epoch_mult = _positive_mult(epoch_mult, "epoch_mult")
         self.deliverer = deliverer
         self.run_job_fn = run_job_fn
         self.eval_on_cloud = bool(eval_on_cloud)
@@ -353,6 +374,10 @@ def open_run_context(
     eval_slots: int = 0,
     eval_game_timeout_sec: float = 0.0,
     rollout_workers: int = 0,
+    #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样）。只影响训练采样与
+    #: PPO 遍数，不改评估语料、不改计划身份。
+    sample_mult: float = 1.0,
+    epoch_mult: float = 1.0,
     # ---- 产物补传（可选；缺任一即关）----
     hub_url: str = "",
     hub_token: str = "",
@@ -437,6 +462,8 @@ def open_run_context(
             if int(rollout_workers or 0) > 0
             else cpu_worker_slots()
         ),
+        sample_mult=sample_mult,
+        epoch_mult=epoch_mult,
         round_forms=forms,
         stop_file=stop_file,
         ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),
@@ -483,6 +510,11 @@ def open_run_context(
         run_job_fn=run_job_fn,
         log=log,
     )
+    if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
+        log(
+            f"训练放大：样本×{ctx.sample_mult:g}、PPO epochs×{ctx.epoch_mult:g}"
+            "（只作用于训练采样/更新；评估语料与计划身份不变）"
+        )
     _setup_cloud_eval(ctx)
     last = int(state.get("last_it", plan["start_it"]))
     _seed_demo_blob_cache(

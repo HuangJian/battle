@@ -52,6 +52,9 @@ CFG_KEYS = (
     "eval_slots",
     "eval_game_timeout_sec",
     "rollout_workers",
+    # ★ 2026-10-24：高配云机的训练侧放大（缺省 1.0 = 任务包/课程原样）。
+    "sample_mult",
+    "epoch_mult",
     "work_dir",
     "download_dir",
     "repo_url",

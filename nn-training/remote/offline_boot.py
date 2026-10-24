@@ -58,6 +58,7 @@ import hashlib
 import importlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -1543,6 +1544,21 @@ def build_run_argv(
         argv += ["--max-iters", str(int(cfg["max_iters"]))]
     if float(cfg.get("budget_sec") or 0):
         argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
+    # ★ 2026-10-24（用户口径）：高配云机的两个**训练侧**放大旋钮。缺省 1.0 = 不传
+    #   （旧包/旧 argv 逐字不变）；只放大采样量与 PPO 更新遍数，不动评估语料。
+    for _key, _flag in (("sample_mult", "--sample-mult"), ("epoch_mult", "--epoch-mult")):
+        _raw = cfg.get(_key, 1.0)
+        if _raw is None or _raw == "":
+            _raw = 1.0
+        try:
+            _v = float(_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"CFG.{_key} 必须是正数（当前 {_raw!r}）") from e
+        if not math.isfinite(_v) or _v <= 0:
+            raise ValueError(f"CFG.{_key} 必须是有限正数（当前 {_raw!r}）")
+        if _v != 1.0:
+            # `:g` 去掉 `2.0` 这类无意义尾零；数值本身不做四舍五入。
+            argv += [_flag, f"{_v:g}"]
     # rollout 并行局数：缺省（不传）= 按云机核数 `cpu_worker_slots`（≤4 核全给，否则
     # max(cores−2, cores×0.8)），与云机 eval 同一口径。
     # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`

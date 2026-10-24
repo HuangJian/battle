@@ -8,6 +8,37 @@
 
 ---
 
+## §37 离线 notebook 的训练放大：`sample_mult` / `epoch_mult`（2026-10-24）
+
+**用户口径**：高配云机执行 `battle.offline.ipynb` 时，希望提高每轮采样量与 PPO 更新波次，
+加快收敛。两个旋钮都只在**训练侧**生效，缺省 `1.0` = 任务包/课程原样；评估语料不变
+（评估是测量，跟着放大就没有可比性）。
+
+| 旋钮 | 缺省 | 语义 |
+|---|---|---|
+| `CFG.sample_mult` | 1.0 | 每轮训练采样量 × N。带 `volume` 块的课重算 `target_transitions`、`per_stage_quota`、`games_per_stage_by_stage`（同一纯函数族，节点同源校验照过）；固定对集课补 `ceil(n×N)−n` 局**新种子**（`SAMPLE_SEED_STRIDE = 2**30`，不是重跑同一局） |
+| `CFG.epoch_mult` | 1.0 | 每轮 PPO `epochs × N`，向上取整、最少 1；只改逐轮 manifest 的 `epochs`，不改方针/关卡/命数 |
+
+* 传递链：notebook → `offline_boot.build_run_argv`（**非缺省才传** `--sample-mult`/`--epoch-mult`，
+  旧任务包 argv 逐字不变）→ `remote.run_loop` → `RunContext.sample_mult/epoch_mult` →
+  `remote.plan_run._run_iteration`。
+* **不改计划身份**：盘上的 `plan.json`/`manifest.json` 不重写；放大发生在逐轮执行面，因此
+  续跑、hub 对账、产物指纹的既有契约不动。同一组倍数 + 同一 `(plan, it)` 重放仍是确定性的
+  （固定对集的新种子是按序纯函数，volume 是同一 `alloc_games_by_stage` 重算）。
+* `volume.topup.max_games_per_stage > 0` 时跟着抬（否则放大后的配额会被旧硬顶卡住）；
+  `0 = 无顶` 保持 0。老五字段 `volume`（无 `est_s_by_stage`/分关局数，在飞计划）只放大
+  `target_transitions`/`per_stage_quota`/`games_per_stage`，块形状不变。
+* 观测：`offline_boot` 启动日志打印 `样本×N epochs×N`；每轮 `LogBundle` 有「放大」一行
+  （实际局数 + 生效 epochs）；`plan_handoff` 开段时也打一行。
+* 守卫：`tests/remote/test_offline_notebook.py`（CFG 键）·
+  `tests/remote/test_offline_boot.py`（缺省不传 / 非缺省原样 / 非法值拒）·
+  `tests/remote/test_run_loop.py`（固定对集补新种子、volume 三件同源放大、老五字段形状不变、
+  端到端倍率生效）。
+* **代价/边界**：放大直接增加墙钟与产物体积；`sample_mult` 只放大训练采样，不改
+  `eval_games_per_stage`；`epoch_mult` 不改变学习率/裁剪等 PPO 超参，只增加遍数。
+* **兼容**：只有**非缺省**才发新 flag；旧任务包（`run_loop` 还不认这两个参数）若显式设了
+  倍数会以 argparse 报错收尾——用当前分支重导任务包即可；缺省 1.0 的旧包行为逐字不变。
+
 ## §36 落点链再砍一刀：**删掉网络盘测速探针** —— 默认本地盘，网络盘只在回传失败时出现（2026-10-14）
 
 > ⚠ **本节推翻 §35.1（探针上界）与 §34.2 的速度闸（评审 F6）**。上游：`plan/offline-local-disk-first.plan.md`

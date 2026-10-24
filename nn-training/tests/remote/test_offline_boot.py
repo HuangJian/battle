@@ -438,6 +438,23 @@ def test_build_run_argv_offline_packaging_switch(tmp_path: Path) -> None:
     assert "--no-deliver" not in default_on, "缺省是实时回传（用户口径）"
 
 
+def test_build_run_argv_passes_training_scale_only_when_non_default(tmp_path: Path) -> None:
+    """★ 2026-10-24：样本/epoch 倍数缺省 1.0 **不传 flag**（旧包 argv 逐字不变）；
+    非缺省时原样传给 run_loop。非法值在构造 argv 时就响亮拒（不把坏值带进子进程）。"""
+    base = offline_boot.build_run_argv({}, None, tmp_path / "run", "", "")
+    assert not {"--sample-mult", "--epoch-mult"} & set(base)
+    scaled = offline_boot.build_run_argv(
+        {"sample_mult": 2, "epoch_mult": 1.5}, None, tmp_path / "run", "", ""
+    )
+    assert scaled[scaled.index("--sample-mult") + 1] == "2"
+    assert scaled[scaled.index("--epoch-mult") + 1] == "1.5"
+    for bad in (0, -1, float("nan"), "oops"):
+        with pytest.raises(ValueError, match="sample_mult"):
+            offline_boot.build_run_argv(
+                {"sample_mult": bad}, None, tmp_path / "run", "", ""
+            )
+
+
 def test_build_run_argv_floor_it_rides_with_the_push_outbox(tmp_path: Path) -> None:
     """F7：`--floor-it` 只跟 push 的 `--outbox` 一起出现；0/无 outbox ⇒ 不带（run_loop 缺省 0）。"""
     argv = offline_boot.build_run_argv(

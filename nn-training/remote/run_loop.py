@@ -151,6 +151,9 @@ def run_standalone(
     eval_game_timeout_sec: float = 0.0,
     #: rollout 并行局数（0 = 按本机核数自动；与 eval 同一口径，见 `RunContext.rollout_workers`）。
     rollout_workers: int = 0,
+    #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样；见 `RunContext.sample_mult`）。
+    sample_mult: float = 1.0,
+    epoch_mult: float = 1.0,
     #: hub 给的续跑锚点目录（`--resume-dir`；见 `apply_resume_overlay`）。
     resume_dir: str | Path | None = None,
     #: 产物补传（可选）：给了 hub 地址 + token 就会在每轮落盘后尽力推一份上去。
@@ -227,6 +230,8 @@ def run_standalone(
         eval_slots=eval_slots,
         eval_game_timeout_sec=eval_game_timeout_sec,
         rollout_workers=rollout_workers,
+        sample_mult=sample_mult,
+        epoch_mult=epoch_mult,
         hub_url=hub_url,
         hub_token=hub_token,
         hub_course=hub_course,
@@ -544,6 +549,21 @@ def main(argv: list[str] | None = None) -> int:
         "common/game_watch.py；>0 时每次尝试都用它）",
     )
     ap.add_argument(
+        "--sample-mult",
+        type=float,
+        default=1.0,
+        help=(
+            "样本倍数（缺省 1.0 = 计划原样）：每轮训练采样量 × N。带 volume 块的课"
+            "放大 target_transitions/逐关配额；固定对集课补同分布的新种子。不改评估语料"
+        ),
+    )
+    ap.add_argument(
+        "--epoch-mult",
+        type=float,
+        default=1.0,
+        help="epoch 倍数（缺省 1.0 = 课程原样）：每轮 PPO 更新遍数 × N（向上取整，最少 1）",
+    )
+    ap.add_argument(
         "--resume-dir",
         default="",
         help="hub 给的续跑锚点目录（含 resume.json + it-NNN/{weights.json,opt.tar,row.json}）",
@@ -603,6 +623,8 @@ def main(argv: list[str] | None = None) -> int:
             eval_slots=int(args.eval_slots),
             eval_game_timeout_sec=float(args.eval_game_timeout_sec),
             rollout_workers=int(args.rollout_workers),
+            sample_mult=float(args.sample_mult),
+            epoch_mult=float(args.epoch_mult),
             resume_dir=args.resume_dir or None,
             hub_url=args.hub_url,
             hub_token=hub_token,
