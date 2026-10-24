@@ -516,6 +516,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 尸检：96% 命中弹在飞 >20 拍、80% 命中发生在 dodge 分支、88% 还带移动 ⇒ 躲错了弹。
   // 0 = OFF（按横向距，旧行为）· 1 = 按 TTI。
   dodgeThreatByTti: 0,
+  // A14 (2026-10-25): 躲炮口 —— 敌人炮口已对准玩家且车道通畅时，不等子弹出现就横向离开
+  // 那条线（子弹出现后再躲需要 ~39 拍提前量，数学上来不及）。0 = OFF。
+  muzzleEscapeMode: 0,
+  muzzleWarnCells: 5,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,
@@ -906,6 +910,11 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
+  // A14 (2026-10-25): 开火对消（子弹打子弹）**只在 classic 开启** ——
+  // classic 是 instant 1-HP + bulletCap 1 + 慢弹速，对消的收益极大：
+  // 35×60 配对 **84.3% → 86.4%（Δ+2.14pp, t=3.67, kills +350）**，是全场最强单点。
+  // hard（−0.43pp, t=−0.67）与 chaos（+0.05pp）在 2100 局上都是噪声 ⇒ 保持 0。
+  dodgeCounterFire: 1,
   // A9 (2026-10-21): 远程封线在 classic 上实测**只坏不好** —— 35×60 配对里
   // 2100 局只有 3 局翻盘、全部向下（Δ−0.14pp, t=−1.73, +0/−3）。classic 是
   // bulletCap 1 的单发对枪，站上车道等于把每发都变成对射 ⇒ restore 0

@@ -9,6 +9,7 @@ import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
 import { dodgeDirectionImpl } from '../ThreatAssessor'
 import { crossfireEscapeDirImpl } from '../crossfire'
+import { muzzleEscapeDirImpl } from '../muzzle-threat'
 
 export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, threat } = ctx
@@ -148,6 +149,20 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     recordBranch(self, 'dodge')
     return true
+  }
+
+  // A14 (2026-10-25): MUZZLE threat — no shell in flight, but a barrel is
+  // already trained down a clear lane at us and the lane cannot be left in
+  // time once the shell exists (19px of travel + 12-tick turn cooldown).
+  // Leave the lane now, before the shot.
+  if (self.params.muzzleEscapeMode > 0 && !self.aggressive && p.alive) {
+    const dir = muzzleEscapeDirImpl(self, pcx, pcy)
+    if (dir !== null) {
+      self._moveDir = dir
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dir)
+      recordBranch(self, 'muzzleEscape')
+      return true
+    }
   }
 
   // No threat — reset reaction state (the dodge section's no-threat resets).

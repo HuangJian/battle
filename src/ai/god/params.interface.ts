@@ -1451,6 +1451,12 @@ export interface GodAIParams {
   /** A13 (2026-10-25): pick the dodge threat by earliest arrival (TTI) instead
    * of smallest lateral distance. 0 = OFF (byte-identical). */
   dodgeThreatByTti: number
+  /** A14 (2026-10-25): leave the lane of an AIMED muzzle before the shell
+   * exists (see god/muzzle-threat.ts). 0 = OFF (byte-identical). */
+  muzzleEscapeMode: number
+  /** A14: only enemies within this many cells of the player count as muzzle
+   * threats. */
+  muzzleWarnCells: number
 
   /**
    * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.
