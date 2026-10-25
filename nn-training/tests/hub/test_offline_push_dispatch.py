@@ -548,8 +548,10 @@ def test_a_delivered_round_is_announced_once_on_the_hub_log(tmp_path: Path) -> N
             lambda: any(disp_mod.ROUND_BACKFILL_NOTE in m for m in logs), timeout=10.0
         ), f"入账了却没写那一行：{logs}"
         # 已入账的轮不许每拍重播同一行（那正是「15s 刷屏」要治的东西）
-        disp.tick(ping=False)
-        time.sleep(0.3)  # sleep-ok: 夹具模拟 —— 让 pump 再转几拍，看它会不会重播
+        for _ in range(2):
+            disp.tick(ping=False)
+            # sleep-ok: 夹具模拟的工作量：让 pump 真转一拍，再看它会不会重播那一行
+            time.sleep(0.15)
         n = sum(1 for m in logs if disp_mod.ROUND_BACKFILL_NOTE in m)
         assert n == 1, f"回传完毕那一行应该只出现一次，实际 {n} 次：{logs}"
     finally:

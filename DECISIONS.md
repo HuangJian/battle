@@ -9548,3 +9548,20 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   与进度行的 `round-done` **不是同一件事**：后者是云机跑完那一轮，前者是 hub 收妥，中间隔着整段回传。
 - 用例：`tests/hub/test_offline_push_dispatch.py::test_a_delivered_round_is_announced_once_on_the_hub_log`
   （断言该行**只出现一次** —— 已入账的轮不许每拍重播）。
+
+## §2026-10-25-three-flakes-fixed-at-the-source（2026-10-25，修 flake：判据别等数量、别信 mtime、别把同步控制台腿当 10s 够用）
+
+一天之内三处红都带着「随机」的味道，逐个挖到了根，都是**判据选错了事实**（不是偶发环境）：
+
+1. **`e2e/test_auto_handoff_e2e.py::_http` 把超时吞成 `(0, {})`** ⇒ 现场 `assert 0 == 409`。
+   claim 是**同步**走控制台触发的（`trigger_auto_handoff`，某些主机单次可达 8s），`-n 8` 抢 CPU
+   时 10s 客户端超时太薄。改为 `timeout=30s` + 传输失败**重试一次**（claim/ack 都幂等：
+   同一 worker 再 claim 是 `mine`，不会换主）。
+2. **`worker/resume.py::trailing_stage_samples_per_game` 按目录 mtime 排序** ⇒ 分关 est 随机
+   取错轮（现场 `{0: 900}` vs `{0: 530}`）。`itN` 之间只差几次写盘，同一时间刻度内顺序会翻
+   （Windows 粗时间戳 / 有负载）。改成**按轮号排序**（mtime 只做同号兜底）——「轮号大 = 更近」
+   是硬事实，mtime 只是代理。用例 `test_latest_orders_by_round_number_not_mtime`（故意让 it1 的
+   mtime 更新 ⇒ 仍必须取 it2）。
+3. **新用例拿「日志条数 > N」当「已入账」的信号** ⇒ 进度行先于回传行到，断言当场为 0。
+   改成**有界等那一行本身**（`_wait(any(NOTE in m), timeout=10)`），再连拍两拍确认不重播。
+   教训：**判据要等事实，别等数量**。

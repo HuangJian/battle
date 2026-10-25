@@ -289,6 +289,15 @@ def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int =
     return 0
 
 
+def _iter_no_of(path: Path) -> int:
+    """`it17` → 17（解析不出来 ⇒ -1，排到最旧）。轮号是唯一稳定键；mtime 只做同号兜底。"""
+    name = path.name
+    try:
+        return int(name[2:]) if name.startswith("it") else -1
+    except ValueError:
+        return -1
+
+
 def trailing_stage_samples_per_game(
     traj_root: Path,
     stages: Sequence[int],
@@ -341,7 +350,16 @@ def trailing_stage_samples_per_game(
     # ★ 先剔除「正在跑的那一轮」再切窗口：否则窗口被一个空目录占掉一格
     #   （pooled 少读一轮、latest 直接空转）。名字比对而不是 mtime 比对——mtime 会被
     #   清场/续跑刷新，名字是唯一稳定键（`self._traj_dir = traj_root / f"it{it}"`）。
-    ordered = [p for _mt, p in sorted(it_cands, key=lambda t: t[0], reverse=True)]
+    # ★ 2026-10-25（修 flake）：**排序也按轮号**，mtime 只做同号兜底。旧实现按 mtime 排，
+    #   而 `it{N}` 之间只差几次写盘 ⇒ 同一时间刻度内（Windows 的粗时间戳 / 负载抖动）顺序
+    #   会翻：`it1(900)` 反压 `it2(530,423)` ⇒ 「最近一轮」取错 ⇒ 分关 est 被单关值盖掉。
+    #   语义上「轮号大 = 更近」是硬事实，mtime 只是代理。
+    ordered = [
+        p
+        for _mt, p in sorted(
+            it_cands, key=lambda t: (_iter_no_of(t[1]), t[0]), reverse=True
+        )
+    ]
     if exclude_it is not None:
         skip = f"it{int(exclude_it)}"
         ordered = [p for p in ordered if p.name != skip]

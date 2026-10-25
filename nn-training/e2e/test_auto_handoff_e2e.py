@@ -76,16 +76,22 @@ CONSOLE_HANDOFF_PATH = "/api/autoOfflineHandoff"
 
 
 def _http(
-    base: str, path: str, *, method: str = "GET", body: dict | None = None, token: str = TOKEN
+    base: str,
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    token: str = TOKEN,
+    attempts: int = 2,
 ) -> tuple[int, dict]:
-    """hub 管理端点（真 HTTP；4xx/5xx 也算「有答」，返回状态码与体）。"""
+    """hub 管理端点（真 HTTP；4xx/5xx 也算「有答」，返回状态码与体）。
+
+    **传输失败（连不上/超时）重试一次**（`2026-10-25` 修 flake）：claim 那条腿是**同步**走
+    控制台触发的（`trigger_auto_handoff`，某些主机单次可达 8s），`-n 8` 抢 CPU 时 10s 的
+    客户端超时是薄的 —— 现场表现就是 `assert 0 == 409`。重试安全：claim / ack 都幂等
+    （同一 worker 再 claim 是 `mine`，不会换主）。
+    """
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(
-        base + path,
-        data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method=method,
-    )
 
     def _as_dict(raw: bytes) -> dict:
         try:
@@ -94,14 +100,25 @@ def _http(
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
-    try:
-        # 回环绕开环境代理（本机若有 HTTP_PROXY，裸 urllib 会把 127.0.0.1 也送出去）
-        with net_http.urlopen(req, timeout=10.0) as resp:
-            return resp.status, _as_dict(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, _as_dict(e.read())
-    except Exception:
-        return 0, {}
+    last: tuple[int, dict] = (0, {})
+    for _attempt in range(max(1, int(attempts))):
+        req = urllib.request.Request(
+            base + path,
+            data=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        try:
+            # 回环绕开环境代理（本机若有 HTTP_PROXY，裸 urllib 会把 127.0.0.1 也送出去）
+            with net_http.urlopen(req, timeout=30.0) as resp:
+                return resp.status, _as_dict(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, _as_dict(e.read())
+        except Exception:
+            last = (0, {})
+            # 传输失败**立刻**重试一次：不睡 —— 固定时长既不是同步也不是退避语义
+            # （`tests/test_no_sleep_as_sync.py` 的两族里没有它，硬塞就是撒谎）。
+    return last
 
 
 def _wait_for(pred, timeout: float = 10.0, step: float = 0.05) -> bool:

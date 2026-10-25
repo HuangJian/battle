@@ -47,8 +47,8 @@ def _round(root: Path, it: int, samples: list[int], *, mtime: float) -> Path:
     it_dir.mkdir(parents=True, exist_ok=True)
     for seed, n in enumerate(samples, start=1):
         _shard(it_dir, 0, seed, n)
-    # `trailing_stage_samples_per_game` 按目录 mtime 选窗口 ⇒ 必须显式定序
-    # （同一测试进程里连续 mkdir 的 mtime 可能同毫秒）。
+    # 窗口排序**按轮号**（2026-10-25 起；mtime 只做同号兜底）——这里显式给 mtime 是为了
+    # 让「反序」那条用例有得可翻，正常用例不依赖它。
     os.utime(it_dir, (mtime, mtime))
     return it_dir
 
@@ -64,6 +64,23 @@ def test_latest_takes_only_the_newest_round(tmp_path: Path) -> None:
 
     assert pooled[0] == 667  # (900+600+500)/3
     assert latest[0] == 500, "latest 必须只读最近一轮；池进来就是把变短的局判高"
+
+
+def test_latest_orders_by_round_number_not_mtime(tmp_path: Path) -> None:
+    """★ 2026-10-25（修 flake）：轮号大 = 更近；mtime 只做同号兜底。
+
+    旧实现按目录 mtime 排序 —— 而 `itN` 之间只差几次写盘，同一时间刻度内顺序会翻
+    （Windows 粗时间戳 / 机器有负载）：`it1(900)` 反压 `it2(530)` ⇒ 「最近一轮」取错，
+    分关 est 被单关值盖掉。现场就是随机拿到 `{0: 900}` 或 `{0: 530}`。
+    """
+    root = tmp_path / "traj"
+    _round(root, 1, [900], mtime=1_700_000_900)  # 故意让 it1 的 mtime 更「新」
+    _round(root, 2, [530], mtime=1_700_000_100)
+    latest = trailing_stage_samples_per_game(root, [0], window_iters=3, fallback=1, agg="latest")
+    assert latest[0] == 530, f"按轮号该取 it2（530），实际 {latest}"
+    # pooled 的窗口也按轮号切：近 3 轮 = it2、it1（顺序无关求和，但窗口成员要确定）
+    pooled = trailing_stage_samples_per_game(root, [0], window_iters=1, fallback=1)
+    assert pooled[0] == 530, f"窗口只留最近一轮 ⇒ it2，实际 {pooled}"
 
 
 def test_latest_skips_the_in_progress_round(tmp_path: Path) -> None:
