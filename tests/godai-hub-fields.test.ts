@@ -21,7 +21,7 @@ import { join } from 'node:path'
  * Adding a field without touching a lifecycle method or the allowlist fails
  * here, at PR time — not as a heisenbug in a replay six weeks later.
  *
- * Parsing is textual (oxfmt-stable formatting); the sanity floors below make
+ * Parsing is textual (bun fmt-stable formatting); the sanity floors below make
  * parser rot loud instead of vacuous.
  */
 

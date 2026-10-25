@@ -49,18 +49,18 @@ cd dashboard && bun install     # 只需一次；按 bun.lock 还原
 bun run start        # 启动控制台（:8900；--port N 可改）
 bun run launch       # python 无头启动器：bun run launch --script trainer/run_rl.py --check
 bun run build:ui     # 手动重建客户端 bundle（--analyze 看模块体积 top10）
-bun run typecheck    # tsc --noEmit（独立于仓库根）
+bun run typecheck    # bun check --no-script（独立于仓库根）
 bun run test         # bun scripts/run-tests.ts → 组成见该文件：--parallel=<物理核数> --timeout=50000
                      #   + --preload ./tests/helpers/no-proxy.ts tests（顶层脚本串做不了算术，
                      #   故 worker 数由 launcher 现算；裸 --parallel 的缺省是逻辑核 16 ⇒ 假红）
                      #   预载 = 测试进程出网直连（代理环境下「hub 不可达」类用例从 ~3s 掉回 ~0.01s，见该文件头注）
 bun run lint         # oxlint
-bun run format       # oxfmt
+bun run format       # bun fmt（Bun ≥ 1.4.4，读仓库根 bunfig.toml 的 [fmt]）
 ```
 
 根仓库的 `bun run check` **不再**覆盖本项目（如上），所以本项目的门禁就是上面这两行。
 提交时不必记得手跑：pre-commit 在 staged 含 `dashboard/` 时会自动跑 `typecheck` + `test`
-（tsc 报错按 `dashboard/` 前缀归因，staged 命中才拦；逃生口 `SKIP_DASHBOARD_GATE=1`）。
+（typecheck 报错按 `dashboard/` 前缀归因，staged 命中才拦；逃生口 `SKIP_DASHBOARD_GATE=1`）。
 
 ## 目录结构
 

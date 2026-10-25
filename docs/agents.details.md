@@ -47,7 +47,7 @@ This is why the file was slimmed to **≤ ~9.0k chars** (2026-09-23: 35.4k → 9
     that kind of commit, so a suite-only gate would be blind precisely where it matters.
   - **Attribution follows the hook's usual rule**: the check measures the *working tree*; if it fails and
     `AGENTS.md` is in the staged list the commit is blocked, if it fails only in someone else's unstaged
-    edits it warns and lets the commit through (same semantics as the mypy/tsc blocks).
+    edits it warns and lets the commit through (same semantics as the mypy/typecheck blocks).
   - **Never raise `HARD_LIMIT`** to fit a new rule in — the cut is decided by the harness, not by us;
     relocate text instead (`tests/agents-budget.test.ts` pins the metric, the wiring and the behavior).
 - **Where text goes**: instruction → `AGENTS.md`; why / incident history / recipes / enumerations →
@@ -308,20 +308,24 @@ bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
 ### 5.1 Language & tooling
 TypeScript `strict: true` with `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`,
 `noFallthroughCasesInSwitch` (`tsconfig.json`) — the compiler is a reviewer; do not silence it with
-`any` or `@ts-ignore`. Bun is the all-in-one tool (runtime, `bun test`, package manager). Vite is
-dev server + build (target `es2020`). oxlint + oxfmt only — do not introduce ESLint/Prettier.
+`any` or `@ts-ignore`. Bun is the all-in-one tool (runtime, `bun test`, `bun check` type checking,
+package manager). Vite is dev server + build (target `es2020`). oxlint + `bun fmt` (built into Bun
+≥ 1.4.4) only — do not introduce ESLint/Prettier/oxfmt. Type checking is `bun check --no-script`
+(the built-in checker; no `typescript` package needed). **`bun check` without `--no-script` runs the
+`package.json` `check` script**, so scripts must always pass the flag or they recurse. The Bun floor is declared as `engines.bun = ">=1.4.4"` in both
+`package.json` files; Bun does not enforce it, so the pre-commit hook does (§5.5).
 
 ### 5.2 Commands (canonical)
 
 ```
 bun run dev          # vite dev server on :8956
-bun run build        # oxlint && tsc && vite build  (the gate before merge)
+bun run build        # oxlint && bun check --no-script && vite build  (the gate before merge)
 bun run test         # SCOPED: only tests tied to local git changes, prints only failures
 bun test --parallel --timeout=50000   # full suite — ALWAYS with both flags (*1)
-bun run typecheck    # tsc --noEmit --incremental
+bun run typecheck    # bun check --no-script
 bun run lint         # oxlint
-bun run format       # oxfmt
-bun run check        # full gate: tsc --noEmit --incremental && bun test（组成见 tools/run-root-tests.ts）
+bun run format       # bun fmt (options in bunfig.toml [fmt]; needs Bun ≥ 1.4.4)
+bun run check        # full gate: bun check --no-script && decisions/budget + bun test（组成见 tools/run-root-tests.ts）
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~4s) — red ⇒ new-era triple
 bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
@@ -336,7 +340,7 @@ bun run freeze:l2    # archived-candidate reachability audit over the same corpu
 **Freeze-gate cost, measured 2026-09-15** (21-combo full grid, 16-core Linux): `freeze:check` **3.6–5.0s**,
 `freeze:l2` **1.1–1.2s**. Both were documented as `~100s` and that figure drove real decisions (the
 `tests/**` + `src/assets/**` freeze exemptions were justified as "saving ~100s") — it was wrong by
-**~27×**. Neither gate "dominates" a root-TS commit; that commit costs tsc (~0.2s) + the non-heavy suite
+**~27×**. Neither gate "dominates" a root-TS commit; that commit costs bun check (~0.2s) + the non-heavy suite
 (~6s) + freeze (~3.7s) + lint/format (~1s) ≈ **11s**. The cost is now **self-reported**: the probe prints
 `elapsed: …ms`, pre-commit prints `✔ freeze gate …ms`, so never hard-code the number again — it already
 rotted once.
@@ -391,10 +395,13 @@ The dev server (`bun run dev`) is for the **human to playtest** — an agent mus
 spin up a browser) to validate its own changes.
 
 - Validation is the automated gates only: `bun run check` (typecheck + full suite), `bun run build`
-  (adds oxlint). For presentation/UI work unit tests can't assert, rely on `tsc --noEmit`, oxlint,
+  (adds oxlint). For presentation/UI work unit tests can't assert, rely on `bun check --no-script`, oxlint,
   and a successful `vite build`.
-- The pre-commit hook additionally runs oxfmt **in place** (it reformats files and re-stages, rather
-  than failing on `--check`) plus oxlint.
+- The pre-commit hook additionally runs `bun fmt --staged` **in place** (it reformats the staged files
+  and re-stages them, rather than failing on `--check`; files that also have unstaged edits are skipped
+  by the tool itself, exit 2) plus oxlint.
+- The hook **refuses to run on Bun < 1.4.4** (before the gates, `--selftest` excepted): `bun fmt` does not
+  exist there and the format step is `|| true`, so it would silently skip formatting. `bun upgrade` to fix.
 - If a visual check is wanted, the human opens it themselves. Never leave a dev server running as
   "proof" of work, and never present a localhost URL as a validation step.
 
@@ -463,13 +470,13 @@ here. Each pitfall below was hit and debugged (2026-08-27) — the "reproduce" o
    reliable: commit an ASCII one-liner (`git commit -m "commit-test"`), then
    `git commit --amend -F tmp/…`.
 3. **pre-commit hook output is invisible when the hook fails.** The hook
-   (`tools/githook/pre-commit`: typecheck, scoped tests, oxfmt in place, oxlint, freeze:check)
+   (`tools/githook/pre-commit`: typecheck, scoped tests, `bun fmt --staged`, oxlint, freeze:check)
    prints to its own stdout, which the command wrapper swallows on failing exit — exit 1 with empty
    output is indistinguishable from a real failure. Diagnose by running it directly:
    ```
    bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"
    ```
-   The hook reformats with oxfmt **in place and re-stages** — re-check `git status` / re-stage after
+   The hook reformats with bun fmt **in place and re-stages** — re-check `git status` / re-stage after
    it runs (a stale index is a common downstream confusion).
 4. **Verify, never assume.** After any commit run `git log -1 --pretty=fuller` + `git log --oneline -3`
    to confirm the intended message (and hash) landed — the silent exit-1 can leave a `commit-test`

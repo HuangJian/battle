@@ -181,7 +181,7 @@ Canvas 只画 416×416 战场（离屏缓冲 + DPR 缩放，视网膜屏像素�
 
 ## 8. 质量防线 —— 测试是弹药库
 
-Bun + TypeScript strict 全家桶。**`bun run check` = `tsc --noEmit` + 全量 `bun test --parallel --timeout=50000`**，是"绿灯"的唯一定义（lint/format 在 `bun run build` 的 oxlint/oxfmt 里）。127 个测试文件、~1400 个用例，专打要害，代表性岗哨：
+Bun + TypeScript strict 全家桶。**`bun run check` = `bun check --no-script` + 全量 `bun test --parallel --timeout=50000`**，是"绿灯"的唯一定义（lint 在 `bun run build` 的 oxlint 里，format = `bun run format` → `bun fmt`）。127 个测试文件、~1400 个用例，专打要害，代表性岗哨：
 
 | 测试 | 守护什么 |
 |---|---|

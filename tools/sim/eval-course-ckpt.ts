@@ -88,7 +88,7 @@ export function parseWeightSpec(spec: string): { path: string; label: string } {
 /**
  * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
  * 背景：Python 侧 common/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
- * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
+ * （bun fmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
  * 否则探针读课程文件直接崩（2026-09-12 实测）。只删 `]`/`}` 前的逗号，中部逗号不动。
  */
 export function stripTrailingCommas(text: string): string {

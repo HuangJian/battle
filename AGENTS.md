@@ -65,14 +65,14 @@ plan 与 MANIFEST 冲突 ⇒ MANIFEST 赢，先记进 DECISIONS 再动手。`doc
 
 ### Language & tooling
 
-- TS `strict`（编译器是评审：禁 `any` / `@ts-ignore` 消音）· Bun 一把梭 · Vite target `es2020` · 只用 oxlint + oxfmt。
+- TS `strict`（编译器是评审：禁 `any` / `@ts-ignore` 消音）· Bun 一把梭 · Vite target `es2020` · 只用 oxlint + bun fmt。
 - **nn python / pytest 一律 `bash tools/githook/nn-py-safe.sh …`；严禁裸 `python -m pytest`**（删除保护沙箱拦 python 内的删/写 ⇒ pytest 静默挂死）。60s/用例上限，`-m pytest` 另套 480s 外墙钟。
 
 ### Commands (canonical)
 
 ```
 bun run check   # green 的定义（只判根项目；组成见 §9 / details §5.2）
-bun run build   # oxlint && tsc && vite build（shipping gate）
+bun run build   # oxlint && bun check --no-script && vite build
 bun run test    # 按本地 git 改动跑，只打印失败  |  typecheck / lint / format / dev(:8956) / setup(装 hook)
 bun run freeze:check  # God-AI det 签名 vs golden（~4s）红 ⇒ 新纪元三件套（§6.3b）；freeze:l2 可达性审计
 cd dashboard && bun install && bun run typecheck && bun run test   |   bun run dashboard（:8900）

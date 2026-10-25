@@ -32,7 +32,7 @@ import { parseCourseJsonc } from './eval-course-ckpt'
 /** 该级当前 max_ticks（读关卡文件=单一事实来源）：teacherWR 离开 cap 就不可比。 */
 export function levelMaxTicks(level: string): number | null {
   try {
-    // 关卡文件是 JSONC（`.jsonc`；oxfmt `trailingComma: all` 会主动加尾逗号，
+    // 关卡文件是 JSONC（`.jsonc`；bun fmt `trailingComma: all` 会主动加尾逗号，
     // 2026-09-19 格式化后裸 JSON.parse 对全部 levels 抛错→返回 null）。
     // 与 Python `common/jsonc.py` / eval-course-ckpt 同口径：去注释 + 去尾逗号再 parse。
     const doc = parseCourseJsonc(readFileSync(levelFilePath(level), 'utf-8')) as {

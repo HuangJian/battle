@@ -1,0 +1,11 @@
+# 全仓格式化口径（`bun run format` / pre-commit 的 `bun fmt --staged`）。
+# 2026-10-25 从 .oxfmtrc.json 迁来 —— DECISIONS §2026-10-25-goalnn-bun-fmt。
+[fmt]
+printWidth = 100
+tabWidth = 2
+useTabs = false
+semi = false
+singleQuote = true
+trailingComma = "all"
+# Markdown 目前全仓未格式化（数百份文档，进格式化器 = 整树翻新）；dist/node_modules 另由 .gitignore 兜底。
+ignorePatterns = ["*.md", "dist", "node_modules"]
