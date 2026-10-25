@@ -351,17 +351,28 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
     }
   })
 
-  it('W4：冷启动保证在 `await reconcileWatch()` 链（先于 Bun.serve），不是刷新器首拍', () => {
+  it('W4：监督在 `await reconcileWatch()` 里先于 Bun.serve，且只吃结构（首帧不等探测）', () => {
     const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
     const lines = src.split('\n')
     const reconcileAt = lines.findIndex((l) => l.includes('await reconcileWatch()'))
     const serveAt = lines.findIndex((l) => l.includes('Bun.serve('))
     expect(reconcileAt).toBeGreaterThan(0)
     expect(serveAt).toBeGreaterThan(0)
-    // 冷启动首帧不撞冷算的**唯一保证**：await 链先于监听端口。
+    // 「先监督、再监听」的**唯一保证**：await 链先于监听端口。
     expect(reconcileAt).toBeLessThan(serveAt)
-    // 刷新器首拍是 fire-and-forget（`void run()`），不得被当保证——注释里点明这条分工。
-    expect(src).toContain('唯一保证')
+    // ★ 2026-10-25（首帧渐进）：这条链上的快照必须是 **firstPaint** —— 监督的判据全在结构
+    //   （registry/账本 pid），探测列（ping 1.5s ∥ hub 1.2s ∥ 隧道 2.5s）在这条链上只会把
+    //   「开始监听」往后推 2.3s，而且会旁路掉「没人在看就不刷」的空闲闸。
+    // 注意：`reconcileAt` 是**行号**（上面 lines.findIndex），取源码窗口要换成字符偏移。
+    const watchAt = src.indexOf('const reconcileWatch = ')
+    const awaitAt = src.indexOf('await reconcileWatch()')
+    expect(watchAt).toBeGreaterThan(0)
+    expect(awaitAt).toBeGreaterThan(watchAt)
+    const watchBody = src.slice(watchAt, awaitAt)
+    expect(watchBody).toContain('buildStateView(undefined, { firstPaint: true })')
+    expect(watchBody).not.toContain('await buildStateView()')
+    // SSR 页面首帧同理：结构先上屏，探测背景补（UI 据 probesPending 画「探测中」）。
+    expect(src).toContain('buildStateView(viewCourse || undefined, { firstPaint: true })')
   })
 
   it('A6 护栏：brief 产出路径不得 await hub 探测（用 peekHubAdmin，源码断言）', () => {

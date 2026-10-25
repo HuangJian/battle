@@ -85,6 +85,7 @@ import {
   invalidatesSnapshot,
   invalidateAfterAction,
   ladderTickAll,
+  markConsoleActivity,
   routeAction,
   sanitizeViewCourse,
   shouldStartLadderTicker,
@@ -103,6 +104,7 @@ import {
 import { runExitCheck } from './exit-watchdog'
 import { OFFLINE_EVAL_BACKFILL_INTERVAL_MS, runOfflineEvalBackfill } from './offline-eval-backfill'
 import { ensureBundle, type BundleTarget } from './build'
+import { CONSOLE_ROUTES, type RouteHandlers, buildRouteTable } from './route-table'
 import { livePageCss } from './theme-css'
 import {
   renderConsolePage,
@@ -243,7 +245,12 @@ async function main(): Promise<void> {
   // 监督单位 = (key, course)：多课程下同一组件有多份进程，按 key 单键会互相顶掉。
   const watched = new Set<string>()
   const reconcileWatch = async (): Promise<void> => {
-    const state = await buildStateView()
+    // ★ 2026-10-25：**首帧语义**——监督只用**结构**（账本 pid + registry），探测列（ping /
+    //   健康 / hub）在这里没有任何用处。以前这一路走完整快照 ⇒ 冷启动时、以及空闲超时后
+    //   每 15s 一拍都要等 2.3s 的探测预算（实测 Bun 1.4.4：冷 buildStateView 2299ms，其中
+    //   结构只有 28–33ms），而且会把「没人在看就不刷」的空闲闸从旁绕开（见
+    //   snapshot-refresher.refreshSnapshotTick）。
+    const state = await buildStateView(undefined, { firstPaint: true })
     // 账本原件（`startedAt` 在视图里没有，而判「跑的是不是旧码」只看它）。
     const entries = new Map<string, RegistryEntry>(
       registryComponents().map((e) => [`${e.key}|${e.course}`, e.entry]),
@@ -279,10 +286,10 @@ async function main(): Promise<void> {
       log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
     }
   }
-  // ★ 2026-10-03（plan/dashboard-reload-perf W4/A4）：这条 **await** 链是「冷启动首帧不撞
-  //   冷算」的**唯一保证** —— `reconcileWatch` → `buildStateView` → `getSlowSnapshot` →
-  //   `getFleetProbes` → `computeFleetProbes`（池历史聚合 + 贡献度缩略）在此**同步完成**，
-  //   早于下面 `Bun.serve`（:283）接收任何请求。
+  // ★ 2026-10-03（plan/dashboard-reload-perf W4/A4）：这条 **await** 链是「监督先到位、
+  //   再开始接收请求」的**唯一保证** —— 判据全在结构（registry/账本）；★ 2026-10-25 起它是
+  //   **首帧图**（`firstPaint`），不再为探测预算（节点 ping 1.5s ∥ hub 1.2s ∥ 隧道 2.5s）
+  //   把「开始监听」往后推——探测在后台自己落地，页面首帧拿到的是结构 + `probesPending`。
   //   下面 `startSnapshotRefresher()` 的首拍是 `void run()`（fire-and-forget），**不得**把
   //   它当冷启动保证（它只负责后续每拍续命）；两者分工见 W4 的用例断言。
   await reconcileWatch()
@@ -334,20 +341,37 @@ async function main(): Promise<void> {
   void runOfflineEvalBackfill()
 
   const { BUNDLES } = await import('./build')
-  const bundlesByPath = new Map(BUNDLES.map((b) => [`/${b.key}.js`, b]))
 
-  const server = Bun.serve({
-    // 局域网只读边界：绑 0.0.0.0 让局域网可访问，但动作（杀进程/改配置）经下方回环门控
-    // 只放行本机 localhost；无鉴权的前提是动作面绝不暴露给局域网。
-    hostname: '0.0.0.0',
-    port,
-    async fetch(req) {
+  // ────────────────────────── 路由表（Bun 原生 router，2026-10-25） ──────────────────────────
+  // ★ 把三十多个 `url.pathname === ...` 的比较换成 `Bun.serve({ routes })`（Bun 1.4 原生
+  //   router）：① 匹配在原生侧完成，静态路径不再逐条过 JS 判断链（每请求省的是微秒级，
+  //   但控制台是 3s 一拍的轮询面，CPU 是白给的）；② 路径/方法/入口变成**声明式**
+  //   （`route-table.ts` 是唯一事实源）——以前漏写一个 `if` 分支 = 该页/该接口静默 404，
+  //   现在「表里有、handler 缺席」在启动期就抛（`buildRouteTable`）。
+  //
+  //   语义与旧 if 链逐条对齐：
+  //     · 每条 handler 都过同一个 `guard`（markConsoleActivity → 只读门控 → 课程 sanitize
+  //       → 异常 500），顺序与旧 `fetch` 头部一致；
+  //     · 只登记**规范路径**；`/Metrics` `/metrics/` 这类宽松形态由 `/*` 兜底按 `pageForPath`
+  //       归一化（Bun 的匹配是字面/大小写敏感的，而旧的 `pageForPath` 接受两者）；
+  //     · 方法不匹配（例：POST `/`）不命中任何 GET handler ⇒ 落到 `/*` POST ⇒ 404「not found」，
+  //       与旧实现一致；`/api/*` POST 兜底 = 旧的 `routeAction` 分支。
+  type Ctx = { url: URL; viewCourse: string; loopback: boolean }
+  type RouteFn = (req: Request, ctx: Ctx) => Response | Promise<Response>
+  type RouteHandler = (req: Request, srv: Bun.Server<undefined>) => Promise<Response>
+
+  const guard =
+    (fn: RouteFn): RouteHandler =>
+    async (req, srv) => {
+      // 有人在看（2026-10-25）：刷新器的空闲闸判据就是这一行——没请求 = 没人开页，
+      // 后台不该每 5s 出去探一轮（探针是主动出网，不是空转）。见 snapshot-refresher。
+      markConsoleActivity()
       const url = new URL(req.url)
       try {
         // 只读门控：一切 POST 动作仅限回环来源（本机）；LAN 只能 GET 查看。
         // fail closed——requestIP 不可得（null）时视为非回环，动作被拒。
         // 判定抽在 net.ts::isReadonlyAction（纯函数，回归测试见 tests/server-lan-gate.test.ts）。
-        if (isReadonlyAction(req.method, server.requestIP(req)?.address)) {
+        if (isReadonlyAction(req.method, srv.requestIP(req)?.address)) {
           return json(
             {
               ok: false,
@@ -357,301 +381,10 @@ async function main(): Promise<void> {
             403,
           )
         }
-        const loopback = isLoopbackAddress(server.requestIP(req)?.address)
+        const loopback = isLoopbackAddress(srv.requestIP(req)?.address)
         // GET 只读课程覆盖（已 sanitize：真实课程 + 防路径穿越；空 = 自动/操作员课程）。
         const viewCourse = sanitizeViewCourse(url.searchParams.get('course'))
-        // 只读视图标记：服务端按来源判定（客户端无权自封）——LAN 首屏 SSR 即渲染只读角标。
-        const stampState = (s: Awaited<ReturnType<typeof buildStateView>>): typeof s => {
-          s.readOnly = !loopback
-          return s
-        }
-        // 控制台页面族（`/` · `/console` 别名 · `/metrics` · `/nodes` · `/wire`）：
-        // 同一 App + 服务端路由 SSR。路由真相只有一份（web/view/routes.ts）——server 不再
-        // 自己写一张 pathname 表，否则「新增页只加了客户端、忘了服务端」会 404。
-        const consolePage = req.method === 'GET' ? pageForPath(url.pathname) : null
-        if (consolePage) {
-          const state = stampState(await buildStateView(viewCourse || undefined))
-          // `css` = 现读的 theme.css（改样式不必重启；见 theme-css.ts）。
-          return new Response(renderConsolePage(state, { page: consolePage, css: livePageCss() }), {
-            headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          })
-        }
-        // 客户端 bundle（app.js / log.js；mtime 失效自动重建）
-        if (req.method === 'GET' && bundlesByPath.has(url.pathname)) {
-          return serveBundle(bundlesByPath.get(url.pathname)!)
-        }
-        if (req.method === 'GET' && url.pathname === '/api/state') {
-          return json(stampState(await buildStateView(viewCourse || undefined)))
-        }
-        if (req.method === 'GET' && url.pathname === '/api/pool') {
-          const fresh = url.searchParams.get('fresh') === '1'
-          // ★ 2026-09-26：`?days=` = 本地日窗口（today/yesterday/7/all/N，缺省 today）；
-          // 池视图与课程无关，`?course=` 已移除（plan/nodes-decouple-from-course.plan.md）。
-          const days = url.searchParams.get('days') ?? 'today'
-          return json(await buildPoolView(fresh, days))
-        }
-        // 逐调用计数器只读视图（plan/dashboard-pool-history-idle-cost P1-3）：空置内存取证
-        // ⇒ 隔一段取两次，`computes`/`fullRescans`/`bytesRead` 不得持续增长。纯读，不触发聚合。
-        if (req.method === 'GET' && url.pathname === '/api/poolCounters') {
-          return json(poolCountersView())
-        }
-        // 内存读数（2026-10-17）：控制台 RSS 在 645↔1104MB 之间锯齿（60s 采样，每 ~10s 一次
-        // +460MB 尖峰后立刻回落）时的**取证口** —— 「1.5GB 的提交里有多少是活对象」这个问题，
-        // 没有它只能靠任务管理器猜（同 hub 那次 `/admin/mem` 的由来）。
-        // 只读；`?gc=1` 额外跑一次**强制 GC**（回答「堆能不能缩」：若 GC 后 heapUsed 大幅下降
-        // 而 RSS 不降 ⇒ 是 JSC 不还页，不是泄漏）。
-        if (req.method === 'GET' && url.pathname === '/api/mem') {
-          const forced = url.searchParams.get('gc') === '1'
-          if (forced) Bun.gc(true)
-          // `?snapshot=1`：写一份 V8 格式的堆快照到 tmp/（用 Chrome DevTools 打开，或按
-          // "按类型聚合 self_size"离线分析）。加它的理由：`/api/mem` 能说"活对象 386MB"，
-          // 但说不出**是谁**——而"峰值 <300MB"这个目标必须先知道基线里那块是谁的。
-          if (url.searchParams.get('snapshot') === '1') {
-            const snapPath = path.join(tmpLogsDir(), `bun-heap-${Date.now()}.heapsnapshot`)
-            await Bun.write(snapPath, Bun.generateHeapSnapshot('v8'))
-            const mm = process.memoryUsage()
-            return json({ snapshot: snapPath, rss: mm.rss, heapUsed: mm.heapUsed })
-          }
-          const m = process.memoryUsage()
-          return json({
-            rss: m.rss,
-            heapUsed: m.heapUsed,
-            heapTotal: m.heapTotal,
-            external: m.external,
-            gcForced: forced,
-            pool: poolCountersView(),
-          })
-        }
-        if (req.method === 'GET' && url.pathname === '/api/evalboard') {
-          const fresh = url.searchParams.get('fresh') === '1'
-          // R4（接线 b）：开关关 ⇒ routes 直接给 disabled 形状，不调 buildEvalBoardView。
-          return json(evalboardApiPayload(viewCourse || undefined, fresh))
-        }
-        // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
-        if (req.method === 'GET' && url.pathname === '/api/bcEpochs') {
-          return json(await buildBcEpochsView(viewCourse || undefined))
-        }
-        // 备份库状态（plan/course-metrics-persistence §3.6）：热/冷逐课 + 冷存 memo 占用。
-        if (req.method === 'GET' && url.pathname === '/api/courseMetrics') {
-          return json(courseMetricsStatusPayload())
-        }
-        // R7：ckpt/iter 发现（只 stat 不读内容；?leg= 懒加载单腿明细）。
-        if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {
-          const leg = url.searchParams.get('leg') ?? ''
-          return json(buildEvalCkptsView(viewCourse || undefined, leg))
-        }
-        // I5（roadmap v2.0）：阶梯统一 identity 台账 LAN 只读渲染（与 God-AI
-        // evalboard ladder 无关）。
-        if (req.method === 'GET' && url.pathname === '/api/curriculumLadder') {
-          return json(curriculumLadderView())
-        }
-        // 导出 replay：最新 in-loop eval 逐局视图 / 轮选择器 / 导出任务态 / 单局 .replay 下载。
-        // 2026-10-06 换轮架构后，manifest 语义 = POST /api/replayExport 受理成功后落盘的 manifest（不再「最近一次」）。
-        if (req.method === 'GET' && url.pathname === '/api/evalGames') {
-          const iter = parseEvalIterParam(url.searchParams.get('iter'))
-          if (iter === null) return json({ ok: false, message: '?iter= 须为整数' }, 400)
-          return json(buildEvalGamesView(viewCourse || '', iter))
-        }
-        if (req.method === 'GET' && url.pathname === '/api/evalRounds') {
-          return json(buildEvalRoundsView(viewCourse || ''))
-        }
-        // 比较课程（plan/dashboard-compare-trends.plan.md）：跨课程指标对比的数据面。
-        // 弹窗打开期间自持轮询（节奏 = 顶栏全局间隔）——不进 /api/state 的 3s 路径。
-        if (req.method === 'GET' && url.pathname === '/api/compareTrends') {
-          const parsed = parseCompareQuery({
-            courses: url.searchParams.get('courses'),
-            metric: url.searchParams.get('metric'),
-            source: url.searchParams.get('source'),
-            from: url.searchParams.get('from'),
-            to: url.searchParams.get('to'),
-          })
-          if (!parsed.ok) return json({ ok: false, message: parsed.message }, 400)
-          return json(await buildCompareTrendsView(parsed.params))
-        }
-        if (req.method === 'GET' && url.pathname === '/api/evalReplayJob') {
-          // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后落盘的 manifest，
-          // 而不再是「最近一次导出的 manifest」。旧弹窗用法（此接口做轮选择）已废除——轮选择走 GET /api/evalRounds。
-          return json(buildEvalReplayJobView(viewCourse || ''))
-        }
-        if (req.method === 'GET' && url.pathname === '/api/evalReplayFile') {
-          const file = url.searchParams.get('file') ?? ''
-          return (
-            (await evalReplayFileResponse(viewCourse || '', file)) ??
-            json({ ok: false, message: '缺少 course' }, 400)
-          )
-        }
-        // R8：/eval 独立评估页（?courses=a,b 可分享 URL；?course= 兼容）。
-        if (req.method === 'GET' && url.pathname === '/eval') {
-          const all = discoverCourses()
-          const raw = url.searchParams.get('courses') ?? url.searchParams.get('course') ?? ''
-          const selected = raw
-            .split(',')
-            .map((s) => s.trim())
-            .filter((c) => c && all.includes(c))
-          const eff = selected.length > 0 ? selected : viewCourse ? [viewCourse] : all.slice(0, 1)
-          // R4（接线 b/d + W2′）：开关关 ⇒ 说明页（**不注入 /eval.js**，客户端不再打
-          // /api/evalboard）；文案与 API 的 { disabled } 同源。
-          const decision = evalboardPageDecision(eff)
-          if (decision.kind === 'notice') {
-            return new Response(renderEvalNoticePage(decision.message, { css: livePageCss() }), {
-              headers: { 'Content-Type': 'text/html; charset=utf-8' },
-            })
-          }
-          const payload = {
-            views: decision.views,
-            options: { courses: eff, allCourses: all, readOnly: !loopback },
-          }
-          return new Response(renderEvalPage(payload, { css: livePageCss() }), {
-            headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          })
-        }
-        if (req.method === 'GET' && url.pathname.startsWith('/api/log/')) {
-          const key = url.pathname.slice('/api/log/'.length) as Component
-          const lines = parseLogLines(url.searchParams.get('lines'))
-          const payload = await componentLogPayload(key, lines, viewCourse || undefined)
-          return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
-        }
-        if (req.method === 'GET' && url.pathname.startsWith('/log/')) {
-          const key = url.pathname.slice('/log/'.length) as Component
-          const lines = parseLogLines(url.searchParams.get('lines'))
-          const payload = await componentLogPayload(key, lines, viewCourse || undefined)
-          if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
-          const state = await buildStateView(viewCourse || undefined)
-          const follow = url.searchParams.get('follow') !== '0'
-          return new Response(
-            renderLogPage(
-              payload,
-              {
-                components: state.components.map((c) => ({
-                  key: c.key,
-                  label: c.label,
-                  status: c.status,
-                })),
-                follow,
-                lines,
-                course: viewCourse || undefined,
-              },
-              { css: livePageCss() },
-            ),
-            { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
-          )
-        }
-        // 组件错误登记表（plan/component-error-registry §4.6）：两个**纯读**入口。
-        //   `/api/errors`        → 列表投影（每 4s 轮询）+ `?fp=` 的单条 detail（展开时懒取）
-        //   `/errors`（SSR）     → 独立页（第 4 份 bundle，照 /log 范式）
-        // ★ 两条都只读登记表的 **SWR 缓存值**（`getErrorRegistry()`）——探测只在
-        //   `snapshot-refresher` 的 10s 节拍上，请求路径零网络（N9 / R1 结构闸）。
-        if (req.method === 'GET' && url.pathname === '/api/errors') {
-          const fp = url.searchParams.get('fp')
-          if (fp) {
-            const ev = findErrorEvent(fp)
-            if (!ev)
-              return json({ ok: false, message: '未知 fp（已被清理或不在本拍登记表里）' }, 404)
-            return json({
-              fp: ev.fp,
-              component: ev.component,
-              message: ev.message,
-              detail: ev.detail,
-              ref: ev.ref,
-              classification: ev.classification,
-              activity: ev.activity,
-            })
-          }
-          const summary = getErrorSummary()
-          return json({
-            items: summary.items,
-            resolvedItems: buildErrorSummary(getResolvedErrors()).items,
-            cursor: errorRegistryScannedAt(),
-          })
-        }
-        if (req.method === 'GET' && url.pathname === '/errors') {
-          const summary = getErrorSummary()
-          const scannedAt = errorRegistryScannedAt()
-          return new Response(
-            renderErrorsPage(
-              {
-                items: summary.items,
-                resolvedItems: buildErrorSummary(getResolvedErrors()).items,
-                scannedAt,
-              },
-              { readOnly: !loopback, scannedAt },
-              { css: livePageCss() },
-            ),
-            { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
-          )
-        }
-        // ── 产物导入（multipart 上传 + 自动评估）：体积是 zip，不走 JSON 动作层 ──
-        if (req.method === 'POST' && url.pathname === '/api/deliverUpload') {
-          const resp = await handleDeliverUpload(req, viewCourse || '')
-          // 与其它动作同一个处置：**课程级硬清 + 机群级软作废**。
-          // ★ 曾经这里是硬清（理由写的是「换了盘上的东西，先给旧值没有必要」）——但
-          //   硬清会连**机群级探测**（节点 ping 1.5s / 共享 hub 2.5s）一起丢掉，而导入
-          //   一个 zip 一点都改不了「哪些节点在线」，于是导入后的下一次 /api/state 反而
-          //   要冷算这几笔（本机实测 1575ms 冷 vs 6ms 暖）——「动作后首帧又卡几秒」的第
-          //   三个出入口。导入改的是**课程级**产物（权重/账本/eval_log），那一半本来就是
-          //   硬清的，动作结果（新 iter、评估行）下一帧就上屏。
-          invalidateAfterAction()
-          return resp
-        }
-        if (req.method === 'GET' && url.pathname === '/api/taskBundleInfo') {
-          const course = url.searchParams.get('course') || viewCourse || ''
-          if (!course) return json({ ok: false, message: '缺少 course' }, 400)
-          const info = taskBundleInfo(course)
-          const st = readTaskBundleStatus(course)
-          return json({
-            ok: true,
-            exists: info.exists,
-            name: info.name,
-            bytes: info.bytes,
-            mtimeMs: info.mtimeMs,
-            log: path.relative(REPO_ROOT, info.log).replace(/\\/g, '/'),
-            // ★ 2026-10-15（J3）：把上次导出的**成败**一起递出去（同一条 5s 轮询，不另起通道）。
-            //   四态必须分开：`status === null` = 不可知（还没跑完 / 被 kill），**不是**成功；
-            //   `running/stale/expired` 由 `readTaskBundleStatus` 统一收口（同一读面）。
-            statusLine: exportStatusLine(course),
-            status: st && {
-              ok: st.ok,
-              running: st.running,
-              stale: st.stale,
-              expired: st.expired,
-              reason: st.reason,
-              at: st.at,
-              pid: st.pid,
-              elapsedSec: st.elapsedSec,
-            },
-          })
-        }
-        // 任务包下载（`content-disposition: task-<课程>.zip`）
-        if (req.method === 'GET' && url.pathname === '/api/taskBundle') {
-          const course = url.searchParams.get('course') || viewCourse || ''
-          const resp = course ? taskBundleDownloadResponse(course) : null
-          return (
-            resp ?? json({ ok: false, message: '还没有导出过任务包（先点「导出任务包」）' }, 404)
-          )
-        }
-        if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-          const act = url.pathname.slice('/api/'.length)
-          let body: Record<string, unknown> = {}
-          try {
-            body = (await req.json()) as Record<string, unknown>
-          } catch {
-            /* empty body — actions that need params will 400 */
-          }
-          const resp = await routeAction(act, body)
-          // 动作改动组件/节点/课程 → 一次缓存处置（`api.invalidateAfterAction`）。
-          // **课程级硬清、机群级软作废**——动作后的第一帧也不冷算：结构（组件 running/stopped、
-          // 节点行的 enabled/url、worker 行、执行面 mode、暂停意图/生效回执）是现算的，动作结果
-          // 照样即时上屏；被软作废的只是探测列与调度器视图（ping / hub 应答 / 每课在等什么），
-          // 读路径先给旧值、重算丢后台（分工与理由见 snapshot-refresher.invalidateAfterAction）。
-          //
-          // ★ 视图态动作（setCourse / getGateHaltMode）**不作废**：它们不碰任何组件/节点
-          // 事实，而 setCourse 正是「切课」自己发的动作——一律作废 = 每切一次课都把机群级
-          // 探测（节点 ping 1.5s + 共享 hub 1.2s）丢掉重做，「切课要等几秒」有一半是它
-          // 自己造的（判据 = route.ts 的 VIEW_ONLY_ACTIONS/invalidatesSnapshot，门禁用例钉住）。
-          if (resp && invalidatesSnapshot(act)) invalidateAfterAction()
-          return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
-        }
-        return new Response('not found', { status: 404 })
+        return await fn(req, { url, viewCourse, loopback })
       } catch (e) {
         // 单行（把 stack 拆进文件会把「一行一决策」打散；定位靠 message + 请求行）
         error(
@@ -660,7 +393,369 @@ async function main(): Promise<void> {
         )
         return json({ ok: false, message: e instanceof Error ? e.message : String(e) }, 500)
       }
-    },
+    }
+
+  /** 只读视图标记：服务端按来源判定（客户端无权自封）——LAN 首屏 SSR 即渲染只读角标。 */
+  const stampState = (
+    s: Awaited<ReturnType<typeof buildStateView>>,
+    loopback: boolean,
+  ): typeof s => {
+    s.readOnly = !loopback
+    return s
+  }
+
+  // ── 页面族（同一 App + 服务端 SSR；路由真相只有一份 web/view/routes.ts）──
+  const pageRoute: RouteFn = async (_req, { url, viewCourse, loopback }) => {
+    const page = pageForPath(url.pathname)
+    if (!page) return new Response('not found', { status: 404 })
+    // 页面首帧：结构先上屏，探测背景补（首帧不等 1.2–2.5s 的探测；带 probesPending
+    // ⇒ UI 画「探测中」而不是红「离线」）。见 state-view.BuildStateOptions。
+    const state = stampState(
+      await buildStateView(viewCourse || undefined, { firstPaint: true }),
+      loopback,
+    )
+    // `css` = 现读的 theme.css（改样式不必重启；见 theme-css.ts）。
+    return new Response(renderConsolePage(state, { page, css: livePageCss() }), {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    })
+  }
+
+  // ── /eval 独立评估页（?courses=a,b 可分享 URL；?course= 兼容）──
+  const evalRoute: RouteFn = async (_req, { url, viewCourse, loopback }) => {
+    const all = discoverCourses()
+    const raw = url.searchParams.get('courses') ?? url.searchParams.get('course') ?? ''
+    const selected = raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((c) => c && all.includes(c))
+    const eff = selected.length > 0 ? selected : viewCourse ? [viewCourse] : all.slice(0, 1)
+    // R4（接线 b/d + W2′）：开关关 ⇒ 说明页（**不注入 /eval.js**，客户端不再打
+    // /api/evalboard）；文案与 API 的 { disabled } 同源。
+    const decision = evalboardPageDecision(eff)
+    if (decision.kind === 'notice') {
+      return new Response(renderEvalNoticePage(decision.message, { css: livePageCss() }), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })
+    }
+    const payload = {
+      views: decision.views,
+      options: { courses: eff, allCourses: all, readOnly: !loopback },
+    }
+    return new Response(renderEvalPage(payload, { css: livePageCss() }), {
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    })
+  }
+
+  // ── /errors 组件错误登记表（独立页，第 4 份 bundle，照 /log 范式）──
+  const errorsPageRoute: RouteFn = async (_req, { loopback }) => {
+    const summary = getErrorSummary()
+    const scannedAt = errorRegistryScannedAt()
+    return new Response(
+      renderErrorsPage(
+        {
+          items: summary.items,
+          resolvedItems: buildErrorSummary(getResolvedErrors()).items,
+          scannedAt,
+        },
+        { readOnly: !loopback, scannedAt },
+        { css: livePageCss() },
+      ),
+      { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+    )
+  }
+
+  // ── /log/<key> 日志页 SSR + 客户端 bundle（?lines= / ?follow=0）──
+  const logPageRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const key = url.pathname.slice('/log/'.length) as Component
+    const lines = parseLogLines(url.searchParams.get('lines'))
+    const payload = await componentLogPayload(key, lines, viewCourse || undefined)
+    if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
+    const state = await buildStateView(viewCourse || undefined, { firstPaint: true })
+    const follow = url.searchParams.get('follow') !== '0'
+    return new Response(
+      renderLogPage(
+        payload,
+        {
+          components: state.components.map((c) => ({
+            key: c.key,
+            label: c.label,
+            status: c.status,
+          })),
+          follow,
+          lines,
+          course: viewCourse || undefined,
+        },
+        { css: livePageCss() },
+      ),
+      { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+    )
+  }
+
+  // ── GET 数据面 ──
+  const stateRoute: RouteFn = async (_req, { viewCourse, loopback }) => {
+    return json(stampState(await buildStateView(viewCourse || undefined), loopback))
+  }
+
+  const poolRoute: RouteFn = async (_req, { url }) => {
+    const fresh = url.searchParams.get('fresh') === '1'
+    // ★ 2026-09-26：`?days=` = 本地日窗口（today/yesterday/7/all/N，缺省 today）；池视图与
+    // 课程无关，`?course=` 已移除（plan/nodes-decouple-from-course.plan.md）。
+    const days = url.searchParams.get('days') ?? 'today'
+    return json(await buildPoolView(fresh, days))
+  }
+
+  // 逐调用计数器只读视图（plan/dashboard-pool-history-idle-cost P1-3）：空置内存取证
+  // ⇒ 隔一段取两次，`computes`/`fullRescans`/`bytesRead` 不得持续增长。纯读，不触发聚合。
+  const poolCountersRoute: RouteFn = async () => json(poolCountersView())
+
+  // 内存读数（2026-10-17）：控制台 RSS 锯齿时的**取证口**——「1.5GB 的提交里有多少是
+  // 活对象」没有它只能靠任务管理器猜。只读；`?gc=1` 额外跑一次**强制 GC**；
+  // `?snapshot=1` 写一份 V8 格式堆快照到 tmp/。
+  const memRoute: RouteFn = async (_req, { url }) => {
+    const forced = url.searchParams.get('gc') === '1'
+    if (forced) Bun.gc(true)
+    if (url.searchParams.get('snapshot') === '1') {
+      const snapPath = path.join(tmpLogsDir(), `bun-heap-${Date.now()}.heapsnapshot`)
+      await Bun.write(snapPath, Bun.generateHeapSnapshot('v8'))
+      const mm = process.memoryUsage()
+      return json({ snapshot: snapPath, rss: mm.rss, heapUsed: mm.heapUsed })
+    }
+    const m = process.memoryUsage()
+    return json({
+      rss: m.rss,
+      heapUsed: m.heapUsed,
+      heapTotal: m.heapTotal,
+      external: m.external,
+      gcForced: forced,
+      pool: poolCountersView(),
+    })
+  }
+
+  const evalboardRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const fresh = url.searchParams.get('fresh') === '1'
+    // R4（接线 b）：开关关 ⇒ routes 直接给 disabled 形状，不调 buildEvalBoardView。
+    return json(evalboardApiPayload(viewCourse || undefined, fresh))
+  }
+
+  // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
+  const bcEpochsRoute: RouteFn = async (_req, { viewCourse }) =>
+    json(await buildBcEpochsView(viewCourse || undefined))
+
+  // 备份库状态（plan/course-metrics-persistence §3.6）：热/冷逐课 + 冷存 memo 占用。
+  const courseMetricsRoute: RouteFn = async () => json(courseMetricsStatusPayload())
+
+  // R7：ckpt/iter 发现（只 stat 不读内容；?leg= 懒加载单腿明细）。
+  const evalCkptsRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const leg = url.searchParams.get('leg') ?? ''
+    return json(buildEvalCkptsView(viewCourse || undefined, leg))
+  }
+
+  // I5（roadmap v2.0）：阶梯统一 identity 台账 LAN 只读渲染（与 God-AI evalboard ladder 无关）。
+  const curriculumLadderRoute: RouteFn = async () => json(curriculumLadderView())
+
+  // 导出 replay：最新 in-loop eval 逐局视图 / 轮选择器 / 导出任务态 / 单局 .replay 下载。
+  const evalGamesRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const iter = parseEvalIterParam(url.searchParams.get('iter'))
+    if (iter === null) return json({ ok: false, message: '?iter= 须为整数' }, 400)
+    return json(buildEvalGamesView(viewCourse || '', iter))
+  }
+
+  const evalRoundsRoute: RouteFn = async (_req, { viewCourse }) =>
+    json(buildEvalRoundsView(viewCourse || ''))
+
+  // 比较课程（plan/dashboard-compare-trends.plan.md）：跨课程指标对比的数据面。
+  // 弹窗打开期间自持轮询（节奏 = 顶栏全局间隔）——不进 /api/state 的 3s 路径。
+  const compareTrendsRoute: RouteFn = async (_req, { url }) => {
+    const parsed = parseCompareQuery({
+      courses: url.searchParams.get('courses'),
+      metric: url.searchParams.get('metric'),
+      source: url.searchParams.get('source'),
+      from: url.searchParams.get('from'),
+      to: url.searchParams.get('to'),
+    })
+    if (!parsed.ok) return json({ ok: false, message: parsed.message }, 400)
+    return json(await buildCompareTrendsView(parsed.params))
+  }
+
+  const evalReplayJobRoute: RouteFn = async (_req, { viewCourse }) => {
+    // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后
+    // 落盘的 manifest，而不再是「最近一次导出的 manifest」。旧弹窗用法（此接口做轮选择）已废除
+    // ——轮选择走 GET /api/evalRounds。
+    return json(buildEvalReplayJobView(viewCourse || ''))
+  }
+
+  const evalReplayFileRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const file = url.searchParams.get('file') ?? ''
+    return (
+      (await evalReplayFileResponse(viewCourse || '', file)) ??
+      json({ ok: false, message: '缺少 course' }, 400)
+    )
+  }
+
+  // 日志载荷（日志页 2s/4s 轮询）。
+  const apiLogRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const key = url.pathname.slice('/api/log/'.length) as Component
+    const lines = parseLogLines(url.searchParams.get('lines'))
+    const payload = await componentLogPayload(key, lines, viewCourse || undefined)
+    return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
+  }
+
+  // 组件错误登记表（plan/component-error-registry §4.6）：列表投影（每 4s 轮询）+ `?fp=` 单条 detail。
+  // ★ 两条都只读登记表的 **SWR 缓存值**——探测只在 `snapshot-refresher` 的 10s 节拍上，
+  //   请求路径零网络（N9 / R1 结构闸）。
+  const errorsApiRoute: RouteFn = async (_req, { url }) => {
+    const fp = url.searchParams.get('fp')
+    if (fp) {
+      const ev = findErrorEvent(fp)
+      if (!ev) return json({ ok: false, message: '未知 fp（已被清理或不在本拍登记表里）' }, 404)
+      return json({
+        fp: ev.fp,
+        component: ev.component,
+        message: ev.message,
+        detail: ev.detail,
+        ref: ev.ref,
+        classification: ev.classification,
+        activity: ev.activity,
+      })
+    }
+    const summary = getErrorSummary()
+    return json({
+      items: summary.items,
+      resolvedItems: buildErrorSummary(getResolvedErrors()).items,
+      cursor: errorRegistryScannedAt(),
+    })
+  }
+
+  // 任务包信息（5s 轮询）：把上次导出的**成败**一起递出去（四态分开，见下）。
+  const taskBundleInfoRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const course = url.searchParams.get('course') || viewCourse || ''
+    if (!course) return json({ ok: false, message: '缺少 course' }, 400)
+    const info = taskBundleInfo(course)
+    const st = readTaskBundleStatus(course)
+    return json({
+      ok: true,
+      exists: info.exists,
+      name: info.name,
+      bytes: info.bytes,
+      mtimeMs: info.mtimeMs,
+      log: path.relative(REPO_ROOT, info.log).replace(/\\/g, '/'),
+      // ★ 2026-10-15（J3）：四态必须分开：`status === null` = 不可知（还没跑完 / 被 kill），
+      //   **不是**成功；`running/stale/expired` 由 `readTaskBundleStatus` 统一收口（同一读面）。
+      statusLine: exportStatusLine(course),
+      status: st && {
+        ok: st.ok,
+        running: st.running,
+        stale: st.stale,
+        expired: st.expired,
+        reason: st.reason,
+        at: st.at,
+        pid: st.pid,
+        elapsedSec: st.elapsedSec,
+      },
+    })
+  }
+
+  // 任务包下载（`content-disposition: task-<课程>.zip`）
+  const taskBundleRoute: RouteFn = async (_req, { url, viewCourse }) => {
+    const course = url.searchParams.get('course') || viewCourse || ''
+    const resp = course ? taskBundleDownloadResponse(course) : null
+    return resp ?? json({ ok: false, message: '还没有导出过任务包（先点「导出任务包」）' }, 404)
+  }
+
+  // ── POST ──
+  // 产物导入（multipart 上传 + 自动评估）：体积是 zip，不走 JSON 动作层。
+  const deliverUploadRoute: RouteFn = async (req, { viewCourse }) => {
+    const resp = await handleDeliverUpload(req, viewCourse || '')
+    // 与其它动作同一个处置：**课程级硬清 + 机群级软作废**。
+    // ★ 曾经这里是硬清（理由写的是「换了盘上的东西，先给旧值没有必要」）——但硬清会连
+    //   **机群级探测**（节点 ping 1.5s / 共享 hub 2.5s）一起丢掉，而导入一个 zip 一点都
+    //   改不了「哪些节点在线」，于是导入后的下一次 /api/state 反而要冷算这几笔（本机实测
+    //   1575ms 冷 vs 6ms 暖）——「动作后首帧又卡几秒」的第三个出入口。
+    invalidateAfterAction()
+    return resp
+  }
+
+  // 动作兜底：`/api/<act>` 一律进 actions 层（busy 互斥在那一层）；本层只做 HTTP 语义映射。
+  const actionRoute: RouteFn = async (req, { url }) => {
+    const act = url.pathname.slice('/api/'.length)
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await req.json()) as Record<string, unknown>
+    } catch {
+      /* empty body — actions that need params will 400 */
+    }
+    const resp = await routeAction(act, body)
+    // 动作改动组件/节点/课程 → 一次缓存处置（`api.invalidateAfterAction`）。
+    // **课程级硬清、机群级软作废**——动作后的第一帧也不冷算：结构（组件 running/stopped、
+    // 节点行的 enabled/url、worker 行、执行面 mode、暂停意图/生效回执）是现算的，动作结果
+    // 照样即时上屏；被软作废的只是探测列与调度器视图（ping / hub 应答 / 每课在等什么），
+    // 读路径先给旧值、重算丢后台（分工与理由见 snapshot-refresher.invalidateAfterAction）。
+    //
+    // ★ 视图态动作（setCourse / getGateHaltMode）**不作废**：它们不碰任何组件/节点事实，
+    //   而 setCourse 正是「切课」自己发的动作——一律作废 = 每切一次课都把机群级探测
+    //   （节点 ping 1.5s + 共享 hub 1.2s）丢掉重做，「切课要等几秒」有一半是它自己造的
+    //   （判据 = route.ts 的 VIEW_ONLY_ACTIONS/invalidatesSnapshot，门禁用例钉住）。
+    if (resp && invalidatesSnapshot(act)) invalidateAfterAction()
+    return resp ?? json({ ok: false, message: `未知动作: ${act}` }, 404)
+  }
+
+  // 兜底：① 非规范路径的宽松页面解析（`/Metrics` `/metrics/` ⇒ 归一化后仍是那一页，
+  // 与旧 `pageForPath` 语义一致——Bun 的路由匹配是字面/大小写敏感的）；
+  // ② 其余一律 404（含 POST 到非 `/api/*` 的路径，与旧实现的最后一行一致）。
+  const fallbackRoute: RouteFn = async (req, ctx) => {
+    if (req.method === 'GET' && pageForPath(ctx.url.pathname)) return pageRoute(req, ctx)
+    return new Response('not found', { status: 404 })
+  }
+
+  const routeHandlers: RouteHandlers<RouteHandler> = {
+    '/': { GET: guard(pageRoute) },
+    '/console': { GET: guard(pageRoute) },
+    '/metrics': { GET: guard(pageRoute) },
+    '/nodes': { GET: guard(pageRoute) },
+    '/wire': { GET: guard(pageRoute) },
+    '/courses': { GET: guard(pageRoute) },
+    '/eval': { GET: guard(evalRoute) },
+    '/errors': { GET: guard(errorsPageRoute) },
+    '/api/state': { GET: guard(stateRoute) },
+    '/api/pool': { GET: guard(poolRoute) },
+    '/api/poolCounters': { GET: guard(poolCountersRoute) },
+    '/api/mem': { GET: guard(memRoute) },
+    '/api/evalboard': { GET: guard(evalboardRoute) },
+    '/api/bcEpochs': { GET: guard(bcEpochsRoute) },
+    '/api/courseMetrics': { GET: guard(courseMetricsRoute) },
+    '/api/evalCkpts': { GET: guard(evalCkptsRoute) },
+    '/api/curriculumLadder': { GET: guard(curriculumLadderRoute) },
+    '/api/evalGames': { GET: guard(evalGamesRoute) },
+    '/api/evalRounds': { GET: guard(evalRoundsRoute) },
+    '/api/compareTrends': { GET: guard(compareTrendsRoute) },
+    '/api/evalReplayJob': { GET: guard(evalReplayJobRoute) },
+    '/api/evalReplayFile': { GET: guard(evalReplayFileRoute) },
+    '/api/errors': { GET: guard(errorsApiRoute) },
+    '/api/taskBundleInfo': { GET: guard(taskBundleInfoRoute) },
+    '/api/taskBundle': { GET: guard(taskBundleRoute) },
+    '/api/log/*': { GET: guard(apiLogRoute) },
+    '/log/*': { GET: guard(logPageRoute) },
+    '/api/deliverUpload': { POST: guard(deliverUploadRoute) },
+    '/api/*': { POST: guard(actionRoute) },
+    '/*': { GET: guard(fallbackRoute), POST: guard(fallbackRoute) },
+  }
+
+  // 客户端 bundle（app.js / log.js；mtime 失效自动重建）——路径由构建产物决定，
+  // 不进静态路由表（表是给人读的契约；这些是构建期才知道的动态路径）。
+  const bundleRoutes: Record<string, Partial<Record<'GET', RouteHandler>>> = {}
+  for (const b of BUNDLES) {
+    bundleRoutes[`/${b.key}.js`] = { GET: guard(async () => serveBundle(b)) }
+  }
+
+  const server = Bun.serve({
+    // 局域网只读边界：绑 0.0.0.0 让局域网可访问，但动作（杀进程/改配置）经 `guard` 的
+    // 回环门控只放行本机 localhost；无鉴权的前提是动作面绝不暴露给局域网。
+    hostname: '0.0.0.0',
+    port,
+    routes: { ...buildRouteTable(CONSOLE_ROUTES, routeHandlers), ...bundleRoutes },
+    // 兜底（正常情况下 `/*` 已经吃掉全部请求；这里只防「路由表外的协议形态」，
+    // 例如带绝对形式的 request-target）。语义 = 与 `/*` 相同的宽松解析 + 404。
+    fetch: guard(fallbackRoute),
   })
   const cfgPath = path.relative(REPO_ROOT, CONFIG_PATH)
   log(`[console] NN 训练控制台: http://127.0.0.1:${server.port}/  (局域网只读 + localhost 控制)`)

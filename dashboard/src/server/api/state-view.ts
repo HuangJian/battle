@@ -19,6 +19,7 @@ import {
   buildOverview,
   buildWorkerRegistry,
   getHubAdmin,
+  peekHubHolds,
   sharedTrainerAlive,
 } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
@@ -27,11 +28,33 @@ import { buildGateHaltView } from '../../stack/gate-halt'
 import { collectLoopCompletes } from './loop-complete'
 import { readLogTail } from './logs'
 import { readClusterSnapshot } from '../bundles/snapshot'
-import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
+import {
+  consoleWatched,
+  getFirstPaintSnapshot,
+  getFleetProbes,
+  getSlowSnapshot,
+  peekFleetProbes,
+} from './snapshot-refresher'
 import { resolveTrainerHeartbeat } from '../../core/trainer-heartbeat'
 
-export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
+export interface BuildStateOptions {
+  /** **首帧**（2026-10-25）：结构先上屏、探测后台刷新。见 `getFirstPaintSnapshot`。
+   *
+   *  只有页面首帧（SSR / 启动时的监督回执）该开它；`/api/state` 轮询不开——那一路要
+   *  真值，且冷探测已在首帧被丢进后台了（在飞的算会被这一路 await 到）。
+   *  开着它时 `probesPending` 会告诉 UI「探测列是未知，不是离线」。 */
+  firstPaint?: boolean
+}
+
+export async function buildStateView(
+  courseOverride?: string,
+  opts: BuildStateOptions = {},
+): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
+  const firstPaint = opts.firstPaint === true
+  // 首帧的「后台起跑」过空闲闸：没人看时（启动后没人开页 / 关页两分钟后）不把探测丢回后台。
+  // 首帧路径本身永远是毫秒级的；`warm` 只决定「要不要顺手暖下一帧」。
+  const warm = firstPaint && consoleWatched()
   const state = loadConsoleState()
   // 封存读面只解析一次：`discoverCourses` 要按它排除已封存课，返回体也要它 ⇒ 同一份结果
   // 复用，别让 `/api/state` 每拍对同一批 manifest `JSON.parse` 两遍。
@@ -58,9 +81,22 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // ★ 2026-10-03（plan/dashboard-reload-perf R1）：贡献度缩略**不再**在这里算（它挂在
   //   `getFleetProbes` 的 SWR 值里，`computeFleetProbes` 顺手产出）；但 hub 探测的**提前起跑**
   //   保留——下面 `buildOverview`/`buildWorkerRegistry` 仍要它，去掉就丢掉这半秒重叠。
-  const hubProbe = getHubAdmin(cfg, course)
+  //  ★ 首帧（2026-10-25）：hub 观测面是 1.2–1.5s 的探测——首帧不等它。逐课接管事实
+  //    （`holds`）也只读缓存窥视：拿得到就用，拿不到就**不下结论**（`holdsKnown = false`，
+  //    这一帧不出 PPO 滞留红条——「不可知」不许冒充「滞留」）。
+  const holds = firstPaint ? peekHubHolds() : null
+  const holdsKnown = !firstPaint || holds !== null
+  const hubProbe: Promise<Awaited<ReturnType<typeof getHubAdmin>> | null> = firstPaint
+    ? Promise.resolve(null)
+    : getHubAdmin(cfg, course)
   void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
-  const { components, nodes, localNode, phase, pushFleet } = await getSlowSnapshot(cfg, course)
+  if (warm && holds === null) void getHubAdmin(cfg, course).catch(() => undefined)
+  const slow = firstPaint
+    ? await getFirstPaintSnapshot(cfg, course)
+    : await getSlowSnapshot(cfg, course)
+  const { components, nodes, localNode, phase, pushFleet } = slow
+  /** 本帧的探测列仍是未知（首帧结构壳）——不能画成「离线」。 */
+  const probesPending = slow.probesPending === true
   let metrics: MetricsView = { available: false, iters: [] }
   if (course) {
     try {
@@ -85,8 +121,11 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   //   同一次探测：`hubProbe` 已在上面起跑，这里 await 不会多探一次）。
   const hubForStall = await hubProbe.catch(() => null)
   const holdLive = course ? hubForStall?.holds[course]?.state === 'live' : false
+  // 接过管（或这一帧还不知道接没接管）⇒ 不出「≥5min 没人领」红条。
   const ppoQueueStall =
-    course && !holdLive ? detectPpoQueueStall(path.join(tmpCourseDir(course), 'remote-jobs')) : null
+    course && holdsKnown && !holdLive
+      ? detectPpoQueueStall(path.join(tmpCourseDir(course), 'remote-jobs'))
+      : null
   // 多课程并行总览 + push worker 登记 + 调度器队列（2026-09-18/R2c-3）：三个面各有一处
   // catch——观测面坏掉（无 hub / 账本不可读 / 只读 CLI 起不来）只该让那一块显空态
   // （视图自带 error 交 UI 显因），不该把整页 /api/state 带崩。
@@ -96,7 +135,13 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // 而总览与课程 select 高亮都要这份名单。代价：冷启动时多串一次（队列视图有 10s TTL，
   // 总览/worker 登记有 5s TTL，稳态下两者都在缓存里）。
   const trainerAlive = sharedTrainerAlive()
-  const loopQueue = await buildLoopQueueView(trainerAlive).catch(() => null)
+  //  ★ 首帧：调度器队列要起一个只读 python（毫秒～亚秒级）——不等它，丢后台。
+  let loopQueue: Awaited<ReturnType<typeof buildLoopQueueView>> | null = null
+  if (firstPaint) {
+    if (warm) void buildLoopQueueView(trainerAlive).catch(() => null)
+  } else {
+    loopQueue = await buildLoopQueueView(trainerAlive).catch(() => null)
+  }
   // 「在训课程」= **已开课**的课程（`tmp/<课>/training-enabled.txt`）。
   //
   // ★ 判据换过两次，两次都是事故驱动的（2026-09-20）：
@@ -124,12 +169,23 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
         paused: (loopQueue?.rows ?? []).some((r) => r.course === course && r.pausedIntent),
       }
     : null
-  const [overview, workerRegistry, offlinePush] = await Promise.all([
-    buildOverview(cfg, courses, course, training).catch(() => null),
-    buildWorkerRegistry(cfg, course).catch(() => null),
-    // 离线 push 派发器读面（W6-3）：与上面两面共用同一份 5s 探测缓存，不新增网络。
-    buildOfflinePushView(cfg, course).catch(() => null),
-  ])
+  //  ★ 首帧：三个观测面都挂在 hub 探针上（1.2–1.5s）——全不等，起跑后给 null。
+  //    非首帧照旧（热路径命中同一份 5s 缓存，不新增网络）。
+  const [overview, workerRegistry, offlinePush] = firstPaint
+    ? (() => {
+        if (warm) {
+          void buildOverview(cfg, courses, course, training).catch(() => null)
+          void buildWorkerRegistry(cfg, course).catch(() => null)
+          void buildOfflinePushView(cfg, course).catch(() => null)
+        }
+        return [null, null, null] as const
+      })()
+    : await Promise.all([
+        buildOverview(cfg, courses, course, training).catch(() => null),
+        buildWorkerRegistry(cfg, course).catch(() => null),
+        // 离线 push 派发器读面（W6-3）：与上面两面共用同一份 5s 探测缓存，不新增网络。
+        buildOfflinePushView(cfg, course).catch(() => null),
+      ])
   // 首页缩略（plan/worker-contribution-view W3b → plan/dashboard-reload-perf R1）：与
   // `/api/pool` **同一模块**的 compactSummary 输出（同一份聚合的裁剪，不是第二份计算）——
   // 但**产地在后台**：`computeFleetProbes` 顺手算好挂在 SWR 缓存值里，这里只读。
@@ -148,18 +204,31 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // ping，磁盘只是 ping 响应体里的加法字段 ⇒ 零新增探测），**只读缓存值**——
   // 不得在这里裸调 `/v1/pool` 那条 `fetchSelfStatus`（4s 超时 + 模块私有，违反本段 R1 结构闸）。
   let selfDisk: ConsoleStateView['selfDisk'] = null
-  try {
-    // 缩略口径住在产物处 `computeFleetProbes`（snapshot-cache.ts）：24h 滚动窗（用户 2026-10-03）
-    // + 采样 top-3 / PPO 全列（两侧 N 分开给）——这里只读缓存值，不裸调聚合（R1 结构闸）。
-    const probes = await getFleetProbes(cfg)
-    contributionBrief = probes.contributionBrief
-    ppoWorkerLive = probes.ppoWorkerLive
-    // self 行缺席（节点停用/未探）或旧 agent 无字段 ⇒ null ⇒ 告警坞**不出条目、不推算**。
-    selfDisk = probes.nodes.get('self')?.disk ?? null
-  } catch {
-    contributionBrief = null
-    ppoWorkerLive = null
-    selfDisk = null
+  //  ★ 首帧：只读缓存值（`peek`）。没有就给 null（缩略/告警不渲染——「不可知」≠「零」），
+  //    同时起一次真算给下一帧。非首帧照旧等（SWR：热路径本来就是同步返回）。
+  if (firstPaint) {
+    const probes = peekFleetProbes()
+    if (probes) {
+      contributionBrief = probes.contributionBrief
+      ppoWorkerLive = probes.ppoWorkerLive
+      selfDisk = probes.nodes.get('self')?.disk ?? null
+    } else if (warm) {
+      void getFleetProbes(cfg).catch(() => undefined)
+    }
+  } else {
+    try {
+      // 缩略口径住在产物处 `computeFleetProbes`（snapshot-cache.ts）：24h 滚动窗（用户 2026-10-03）
+      // + 采样 top-3 / PPO 全列（两侧 N 分开给）——这里只读缓存值，不裸调聚合（R1 结构闸）。
+      const probes = await getFleetProbes(cfg)
+      contributionBrief = probes.contributionBrief
+      ppoWorkerLive = probes.ppoWorkerLive
+      // self 行缺席（节点停用/未探）或旧 agent 无字段 ⇒ null ⇒ 告警坞**不出条目、不推算**。
+      selfDisk = probes.nodes.get('self')?.disk ?? null
+    } catch {
+      contributionBrief = null
+      ppoWorkerLive = null
+      selfDisk = null
+    }
   }
   // 组件错误登记表的**轻量投影**（plan/component-error-registry §4.5，告警坞第 9 类）。
   // ★ 只读登记表的 **SWR 缓存值**（`error-registry.getErrorSummary()`）——**不在此裸探 hub**
@@ -188,6 +257,8 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   return {
     time: new Date().toISOString(),
     course,
+    // 首帧的探测列是未知（不是离线）：structural 字段都已就位，探测列由后台补。
+    ...(probesPending ? { probesPending: true } : {}),
     // 首页 BC/RL 区互斥分流（2026-09-14）：isBc = 查看课程是否 *.bc.jsonc 课程。
     isBc: isBcCourse(course),
     // evalBoard 功能开关（2026-10-05，R4；plan/dashboard-memory-evalboard-off）：与 isBc 同机制

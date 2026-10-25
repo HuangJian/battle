@@ -38,8 +38,10 @@ export interface TopbarProps {
   pills?: ComponentChildren
   /** 课程总数。 */
   courseCount: number
-  /** 算力摘要（本机槽位计入在线）；null = 无节点可报。 */
-  nodeSummary: { online: number; total: number } | null
+  /** 算力摘要（本机槽位计入在线）；null = 无节点可报。
+   *  `pending` = 服务端首帧的探测还在后台（`ConsoleStateView.probesPending`）——此时
+   *  `online` 天然是 0，报 `0/N` 就是「全员离线」的假事实，故改报「探测中」。 */
+  nodeSummary: { online: number; total: number; pending?: boolean } | null
   /** 连接状态：off = 正常；retry = 单次失败重试中；down = 连续 3 次失败。 */
   connError?: 'off' | 'retry' | 'down'
   /** 断线重试（仅控制台有轮询连接概念）。 */
@@ -106,9 +108,15 @@ export function Topbar({
         {nodeSummary && nodeSummary.total > 0 ? (
           <span
             className="tc-top__ts"
-            title="算力节点在线数 / 已登记总数（本机直跑槽位计入在线；详尽统计见「节点」页）"
+            title={
+              nodeSummary.pending
+                ? '节点探测在后台进行中：这一帧还不知道谁在线（不是全部离线）；下一拍即出结果'
+                : '算力节点在线数 / 已登记总数（本机直跑槽位计入在线；详尽统计见「节点」页）'
+            }
           >
-            节点 {nodeSummary.online}/{nodeSummary.total}
+            {nodeSummary.pending
+              ? '节点 探测中'
+              : `节点 ${nodeSummary.online}/${nodeSummary.total}`}
           </span>
         ) : null}
         {connError !== 'off' ? (

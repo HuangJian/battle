@@ -429,6 +429,8 @@ export function App({ initial }: AppProps) {
       ? {
           online: nodes.filter((n) => n.online === true).length + (localNode ? 1 : 0),
           total: nodeTotal,
+          // 首帧探测还在后台：`online === 0` 不是「全离线」，chip 要报「探测中」。
+          pending: stateView?.probesPending === true,
         }
       : null
 
@@ -582,6 +584,7 @@ export function App({ initial }: AppProps) {
                 onAction={doAction}
                 onMore={() => navigate('nodes')}
                 readOnly={readOnly}
+                probesPending={stateView?.probesPending === true}
               />
             </PanelErrorBoundary>
             {/* 课程矩阵（**两区通用**，取代原「并行课程总览」+「训练调度器」两张表）：
