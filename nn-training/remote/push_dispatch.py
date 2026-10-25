@@ -279,6 +279,8 @@ class PushWorkers:
         self._workers: dict[str, dict] = {}
         self._extra: dict[str, dict] = {}
         self._removed: set[str] = set()
+        #: 有本能力键却没进派发表的节点（`id -> {id,url,why}`）；只服务读面与排障。
+        self._blocked: dict[str, dict] = {}
         self._mtime: float = -1.0
         self._last_ping: float = 0.0
         self.reloads = 0
@@ -308,11 +310,21 @@ class PushWorkers:
         if not isinstance(nodes, list):
             return False
         fresh: dict[str, dict] = {}
+        blocked: dict[str, dict] = {}
         for n in nodes:
             w = push_worker_from_node(n, self.capability)
             if w is not None:
                 fresh[w["id"]] = w
+                continue
+            why = node_block_reason(n, self.capability)
+            if why:
+                # ★ 2026-10-25：**有本能力键却没进派发表**的节点必须可见 —— 真机现场是
+                #   「云机注册成功、hub 一个单不派」，而 `/admin/offline-push-workers` 只显示
+                #   `workers: []`，看不出是被 `enabled=false` 挡住的。
+                bid = str((n or {}).get("id") or (n or {}).get("url") or "?")
+                blocked[bid] = {"id": bid, "url": str((n or {}).get("url") or ""), "why": why}
         with self._lock:
+            self._blocked = blocked
             # 运行时 add() 的条目必须在重载后仍在表里（它们住 `_extra` 就是为了这个）：
             # 否则控制台/冒烟临时挂的那台会在下一次 mtime 变化时静默消失。
             for wid, w in self._extra.items():
@@ -454,8 +466,25 @@ class PushWorkers:
             "last_ping_ago": round(self._now() - self._last_ping, 1) if self._last_ping else None,
             "ping_sec": self.ping_sec,
             "workers": self.snapshot(),
+            #: 有本能力键却**进不了派发表**的节点（`enabled=false` / url 空）+ 原因。
+            "blocked": sorted(self._blocked.values(), key=lambda r: str(r.get("id"))),
             "removed": sorted(self._removed),
         }
+
+
+def node_block_reason(node: object, capability: str = "gpu_push") -> str:
+    """有本能力键、但**进不了派发表**的原因（`""` = 不是这台的问题，不报）。
+
+    与 `push_worker_from_node` 互补：那边只回答「算不算」，这边回答「为什么不算」。
+    ⚠ 只对**带本能力键**的节点给理由 —— 否则离线派发器会把一堆 GPU 节点列成「被挡」。
+    """
+    if not isinstance(node, dict) or not node.get(capability):
+        return ""
+    if not node.get("enabled", True):
+        return "enabled=false（控制台停用 ⇒ hub 不派单；启用后立刻生效）"
+    if not str(node.get("url") or "").strip():
+        return "url 空"
+    return ""
 
 
 #: 条目的统一形状：任何来源（配置 / 运行时 add）进来都带这套字段——消费者（挑选器、

@@ -218,6 +218,10 @@ def register(
         }
     caps = out["body"].get("capabilities")
     out["capabilities"] = [str(c) for c in caps] if isinstance(caps, list) else []
+    # ★ 2026-10-25：hub 有没有把本机放进派发表（`enabled=false` 的节点照样 200/updated，
+    #   但**一个单都不会派**）。老 hub 没这个键 ⇒ None（不编）。
+    disp = out["body"].get("dispatchable")
+    out["dispatchable"] = disp if isinstance(disp, bool) else None
     return out
 
 
@@ -320,6 +324,7 @@ class Registry:
         #: 本节点，或 authKey 不符），与「hub 不可达」是两件事——调用方据此给人话。
         self.last_status = 0
         self._warned = False
+        self._disp_warned = False
         self._closed = False
 
     # ---- 观测 ----
@@ -393,6 +398,15 @@ class Registry:
         self._state = {"url": url, "authKey": str(auth_key or "")}
         caps = list(out.get("capabilities") or [])
         self.capabilities = caps
+        # ★ 2026-10-25 真机（云机日志一路正常、hub 一个单不派）：`enabled=false` 的节点
+        #   **注册照样成功**（200/updated），只是不进派发表。这里把它翻成一句能动手的话。
+        if out.get("dispatchable") is False and not self._disp_warned:
+            self._disp_warned = True
+            self._log(
+                "⚠ hub 已登记本机，但**不会派单**（hub 侧该节点 enabled=false）——"
+                '去控制台「节点」里启用它，或 POST /admin/nodes/register 时把它设为启用；'
+                "云机自己不能顶掉这个停用（会话进行中的停用归人）"
+            )
         if recovered:
             self._log(
                 f"★ 注册成功 id={self.node_id}（{self.action or 'ok'}，caps="

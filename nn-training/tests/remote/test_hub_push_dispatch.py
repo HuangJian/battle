@@ -287,6 +287,31 @@ def _write_cfg(cfg: Path, nodes: list[dict]) -> None:
     os.utime(cfg, (later, later))
 
 
+def test_blocked_nodes_are_visible_with_a_reason(tmp_path: Path) -> None:
+    """★ 2026-10-25 真机：云机注册成功、hub 一个单都不派，而读面只显示 `workers: []`。
+
+    `enabled=false` 的节点被 `push_worker_from_node` 的第一道闸挡在派发表外 —— 这件事必须在
+    读面里能看见（`blocked` + 原因），否则排障只能靠猜。**只报带本能力键的**节点：否则离线
+    派发器会把一堆 GPU 节点列成「被挡」。
+    """
+    cfg = tmp_path / "push-config.json"
+    _write_cfg(
+        cfg,
+        [
+            {"id": "ok", "url": "https://ok", "offline_push": True},
+            {"id": "off", "url": "https://off", "offline_push": True, "enabled": False},
+            {"id": "nourl", "url": "", "offline_push": True},
+            {"id": "gpu-only", "url": "https://g", "gpu_push": True, "enabled": False},
+        ],
+    )
+    ws = PushWorkers(cfg, log=_quiet, ping_timeout=_PING_TIMEOUT, capability=CAP_OFFLINE_PUSH)
+    assert ws.reload(force=True) is True
+    assert [w["id"] for w in ws.snapshot()] == ["ok"]
+    blocked = {r["id"]: r["why"] for r in ws.state()["blocked"]}
+    assert set(blocked) == {"off", "nourl"}, blocked
+    assert blocked["off"] and blocked["nourl"]
+
+
 def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> None:
     """rl-config 热重载（mtime）+ 探活写回在线/忙闲；失败未达阈值不算离场但必须「当它在忙」。"""
     cfg = tmp_path / "rl-config.json"

@@ -246,6 +246,42 @@ def test_registry_flags_old_hub_once() -> None:
     assert len([m for m in msgs if m.startswith("WARN")]) == 1
 
 
+def test_registry_says_when_the_hub_will_not_dispatch() -> None:
+    """★ 2026-10-25 真机：云机注册成功、日志一路正常，hub 一个单都不派。
+
+    根因是 `rl-config.json` 里该节点 `enabled=false`（控制台停用过）——`push_worker_from_node`
+    的第一道闸把它挡在派发表外，而注册**照样 200/updated**。云机这边以前完全看不出，
+    只能对着「等它按能力键派单」发呆。现在 hub 回显 `dispatchable=false`，这里翻成一句话，
+    **每会话一次**，且与 old_hub 的 WARN 互不吞没（各用一个开关）。
+    """
+    msgs: list[str] = []
+    reg = Registry(
+        hub="http://hub",
+        hub_token="tok",
+        node_id="offline-colab",
+        kind="offline_push",
+        log=msgs.append,
+        urlopen=_opener(
+            _Resp(
+                {
+                    "action": "updated",
+                    "kind": "offline_push",
+                    "capabilities": ["offline_push"],
+                    "enabled": False,
+                    "dispatchable": False,
+                }
+            )
+        ),
+        now_fn=_Clock(),
+    )
+    assert reg.ensure("https://a", "sek") is True
+    hits = [m for m in msgs if "不会派单" in m]
+    assert len(hits) == 1, msgs
+    # 换 URL 再注册一次：不再重复喊
+    assert reg.ensure("https://b", "sek", force=True) is True
+    assert len([m for m in msgs if "不会派单" in m]) == 1, msgs
+
+
 def test_registry_unregister_is_best_effort() -> None:
     calls: list = []
     reg = Registry(

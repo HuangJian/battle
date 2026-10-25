@@ -432,6 +432,11 @@ def test_gpu_push_kind_writes_the_capability_key(
         "action": "created",
         "kind": "gpu_push",
         "capabilities": ["gpu_push"],
+        # 2026-10-25：**声明了 kind** 的注册还要回显「hub 会不会派单」——
+        # `enabled=false` 的节点照样 200/updated，只是不进派发表（真机：云机注册成功、
+        # 日志一路正常，hub 一个单都不派）。
+        "enabled": True,
+        "dispatchable": True,
     }
     assert called == ["http://100.64.0.5:8443"], "push kind 必须走 /ping"
     assert sample == [], "push kind 不该碰采样的 /v1/ping"
@@ -514,6 +519,10 @@ def test_unchanged_also_echoes_capabilities(
         "action": "unchanged",
         "kind": "gpu_push",
         "capabilities": ["gpu_push"],
+        # 三条出口（created/updated/unchanged）共用同一个应答体 ⇒ `enabled`/`dispatchable`
+        # 也必须在这条最常见的路上出现（2026-10-25）。
+        "enabled": True,
+        "dispatchable": True,
     }
     assert cfg_path.read_bytes() == before
 

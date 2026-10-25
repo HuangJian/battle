@@ -9634,3 +9634,39 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `run.log` 仍是权威副本（`/offline/push/state` 的失败尾巴仍读它）。
 - 用例 `tests/remote/test_offline_push_supervisor.py::test_child_output_is_teed_into_the_supervisor_log`。
 - 注：子进程自带时间戳 + 单元 log 再加一个 ⇒ 行首会出现两个时间戳（相隔几秒），cosmetic，不改字节。
+
+## §2026-10-25-push-node-enabled-false-silent（2026-10-25，注册成功但 hub 一个单不派：`enabled=false` 静默）
+
+- **现场**（云机 10:20，`min-vinyl-broken-cord`）：注册 200/updated、`caps=offline_push`、派发器在、
+  之后 180s `phase=idle`；hub 侧 `/admin/offline-push-workers` 显示 `workers: []`。
+- **根因**：`rl-config.json` 的 `nodes[]` 里 `colab-o` 是 **`enabled: false`**
+  （且**没有** `unregistered_at` ⇒ 不是「会话正常收尾」写的，是**控制台停用**写的）。
+  `common/protocol.push_worker_from_node` 的第一道闸 `not node.get(capability) or not
+  node.get("enabled", True)` 直接把它剔除 ⇒ 派发表为空 ⇒ 一个单都不派。
+  **注册照样 200/updated**（`_merge_managed_node` 只在「上一轮干净收工」时恢复 enabled，
+  刻意不顶控制台的停用）⇒ 云机日志从「注册成功」到「等它按能力键派单」一路正常，看不出被停用。
+- **决定**：不改「云机不能自己顶掉停用」这条（那是控制台的所有权），改**可见性**：
+  ① `hub/admin._nodes_ack` 的 200 体加 `enabled` / `dispatchable`；
+  ② `remote/push_register` 读到 `dispatchable=false` ⇒ **每会话一次**的响亮一行（独立开关，
+     不与 old_hub 的 WARN 互相吞没）；
+  ③ `PushWorkers.reload` 记录「有本能力键却被挡住」的节点（`node_block_reason`），
+     `/admin/*-push-workers` 的 `state()` 增 `blocked: [{id,url,why}]`。
+- **现场处置**：把该节点 `enabled` 改回 `true`（等价控制台「启用」）⇒ 热重载后 `colab-o` 确实进了
+  派发表（`reloads=3`）。但当时代码还没重启（`blocked` 字段为 `null` 即旧进程），且该会话的
+  quick tunnel 已死（直连 `/ping` 得 **530**）⇒ 新会话重跑 notebook 即可；注册会保持 enabled=true。
+
+### 补记：push 模式加了一条**集成**用例（2026-10-25，用户口径「写个 e2e 覆盖完整工作流」）
+
+`nn-training/e2e/test_offline_push_e2e.py::test_push_mode_whole_workflow`（~12s）：
+
+* **真**：`hub.server --offline-push` **独立子进程**（含 `--push-config` / 归档根隔离 /
+  `--offline-push` 装配路径 —— 这条启动面以前没人跑过）、`OfflinePushDispatcher`
+  （提议 → 传包 → 202 → 接管 → 逐轮拉取 → 入账 → 归档 → 收摊）、`OfflinePushWorkers`
+  （能力键 + `enabled` + 热重载）、云机那侧 `PushFaceState` + `make_face_server`。
+* **假**：只假**训练**（CI 跑不了 rollout/PPO）—— 复用
+  `tests/hub/test_offline_push_dispatch._Worker`（按协议写 outbox，字节与真机同形）。
+* **断言链**：① 包到了云机（`task.course/resume_it`）→ ② `/offline/hold` 转 `live`
+  → ③ 产物树有 `it-001/`、课程账本有 `source=offline_backfeed` 行、归档有
+  `<课>/*.it1.*`、`/admin/offline-push-workers.dispatched >= 1`
+  → ④ 把节点改成 `enabled:false` ⇒ 课被释放（`held=false`）且该节点出现在 `blocked` 里。
+* 连跑 3 次稳定；首次即覆盖今天那两次事故（「注册成功不派单」与「停用即释放」）。

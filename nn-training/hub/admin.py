@@ -881,6 +881,14 @@ class AdminRoutes:
         if kind:
             body["kind"] = kind
             body["capabilities"] = node_capabilities(node)
+            body["enabled"] = bool(node.get("enabled", True))
+            body["dispatchable"] = body["enabled"] and bool(body["capabilities"])
+            # ★ 2026-10-25（真机：云机注册成功、日志一切正常，hub 一个单都不派）：
+            #   `enabled=false` 的节点**仍然是 200/updated**，只是不进派发表（
+            #   `protocol.push_worker_from_node` 的第一道闸）。应答必须把这件事说出来 ——
+            #   否则操作员只能对着「等它按能力键派单」发呆。
+            #   ⚠ 只对**声明了 kind** 的注册回显：采样节点（`kind` 缺席）的应答字节不变
+            #   （与「kind 缺席即旧形状」同一条纪律）。
         self._json(body, 200)
 
     def _admin_nodes_unregister(self) -> None:
