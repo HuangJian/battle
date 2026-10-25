@@ -347,7 +347,12 @@ class OfflinePushDispatcher:
                 meta = self._pack_meta(pack)
                 pack_it = int(meta.get("it") or 0)
                 anchor = self._anchor(course, pack_it)
-                resume_it = int(anchor.get("it") or 0) if anchor else pack_it
+                # ★ 2026-10-25 真机（y34-hitfix it126 训完却没回传）：`--floor-it` 的语义是
+                #   「hub 已持有、云机不必重发的**最高轮**」，而包起点 `it=N` 表示**从第 N 轮开始跑**
+                #   （`init_weights` 是 N-1 的输出）⇒ 地板的下界是 **N-1**，不是 N。
+                #   写错一位的后果：云机 outbox 的 `it <= floor` 跳过刚跑完的那一轮（`_disk_rounds`）
+                #   ⇒ 那一轮的产物**永远不上传**，hub 的 cursor 停在 0。
+                resume_it = int(anchor.get("it") or 0) if anchor else max(0, pack_it - 1)
                 rec = {
                     "course": course,
                     "worker_id": push_worker_id_of(wid),
@@ -467,7 +472,8 @@ class OfflinePushDispatcher:
         """
         meta = self._pack_meta(pack)
         pack_it = int(meta.get("it") or 0)
-        floor = int(resume_it) if int(resume_it or 0) > pack_it else pack_it
+        # 地板 = 「已持有的最高轮」，下界是包起点前一轮（见 `_dispatch` 里那段 off-by-one 注释）
+        floor = max(int(resume_it or 0), pack_it - 1, 0)
         pack_sha = self._sha256(pack)
         anchor = self._anchor(course, pack_it) if floor > pack_it else None
         if anchor is not None and int(anchor.get("it") or 0) != floor:

@@ -9709,3 +9709,21 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （造一份三件齐的 `it-002` 当锚点 + 把清单打上 stale ⇒ 断言**本拍就派**、`resume_it==2`、
   日志里**没有**「请控制台重导」）。
 - 生效条件：**重启 hub**（云机那份 code 快照与 hub 进程都是启动时锚定的）。
+
+## §2026-10-25-floor-it-off-by-one（2026-10-25，云机 it126 训完却「不回传」：`--floor-it` 高了一位，整轮被吞）
+
+- **现场**：云机 03:56:35(UTC) 已 `it126 落盘 … winRate=0.6364 wall=1264s`，但 hub 侧
+  `tmp/y34-hitfix/remote-jobs/offline/` **没有新 run 目录**、账本没有 `source=offline_backfeed` 的
+  it126 行、归档停在 `it125`；`/admin/offline-push-workers` 的 assignment 是
+  `phase=running, resume_it=126, cursor_it=0, revs={}`。
+- **根因（一位之差）**：包 `tools.task.json.it = 126` 的含义是「**从第 126 轮开始跑**」
+  （`init_weights` = it125 的输出），而 `--floor-it` 的含义是「hub **已持有**、云机不必重发的**最高轮**」。
+  `_dispatch` 在无锚点时把 `resume_it` 直接取成 `pack_it`（126）⇒ 云机 outbox 的
+  `_disk_rounds` 里 `it <= floor` 把 **126 自己**跳过 ⇒ 那一轮产物永远不上传，`cursor_it` 卡 0。
+  这不是传输问题：云机盘上 `/tmp/battle2-offline/y34-hitfix/it-126` 是好的，只是没人要。
+- **决定**：`resume_it` 缺省 = `max(0, pack_it - 1)`；`build_task_zip` 的 `floor` 同步改成
+  `max(resume_it, pack_it - 1, 0)`（两处必须同一把尺子，否则一个算地板一个算 doc）。
+- 用例 `test_floor_it_is_one_below_the_pack_start`：包起点 126、无锚点 ⇒ 下发 `resume_it == 125`。
+- **现场处置**：重启 hub（旧进程里那单的 `resume_it=126` 是内存态）⇒ 云机重注册（`enabled` 自动为
+  true）⇒ 重派新单（地板 125）⇒ 云机会把盘上已有的 it126 物化并回传（task_id 随地板变，outbox 换
+  目录，但 artifacts 根 `/tmp/battle2-offline/y34-hitfix` 跨单共享，产物不丢）。

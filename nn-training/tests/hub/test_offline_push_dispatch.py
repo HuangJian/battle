@@ -527,6 +527,37 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         worker.close()
 
 
+def test_floor_it_is_one_below_the_pack_start(tmp_path: Path) -> None:
+    """★ 2026-10-25 真机（y34-hitfix it126 训完却没回传）：`--floor-it` 写错一位，整轮被杀。
+
+    包起点 `it=N` 表示「**从第 N 轮开始跑**」（包里的 `init_weights` 是 N-1 的输出）⇒ 云机 outbox
+    的地板（`it <= floor` 一律不物化）下界必须是 **N-1**。写成 N 就会把云机**刚跑完的那一轮**
+    跳过：hub 的 `cursor_it` 永远停在 0，产物躺在云机的 outbox 里不上传。
+    """
+    hub, pack = _mk_hub(tmp_path)
+    # 把包的起点改成 126（重写 `tools.task.json`）——真机就是这份形状
+    with zipfile.ZipFile(pack, "w") as zf:
+        zf.writestr(
+            "tools.task.json", json.dumps({"run_id": "run-1", "it": 126, "commit": "c0ffee"})
+        )
+        zf.writestr("plan.json", json.dumps({"start_it": 126, "end_it": 300}))
+
+    worker = _Worker(tmp_path, round_it=126, write_final=False, finish_now=False,
+                     follow_task_identity=True)
+    disp, workers = _dispatcher(hub, tmp_path)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: worker.task is not None, timeout=15.0), "没派单"
+        task = worker.task or {}
+        assert int(task.get("resume_it") or 0) == 125, task
+        assert int(task.get("it") or 0) == 126, task
+    finally:
+        disp.stop()
+        worker.close()
+
+
 def test_a_stale_pack_is_dispatched_anyway_when_a_resume_anchor_exists(
     tmp_path: Path, monkeypatch
 ) -> None:
