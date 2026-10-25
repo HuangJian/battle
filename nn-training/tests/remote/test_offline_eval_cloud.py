@@ -318,7 +318,9 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
         game_timeout_sec=120.0,
         log=log,
     )
-    assert timeouts == [120.0, 120.0], timeouts
+    # 2026-10-25：显式档的**重试**也放宽（`EXPLICIT_RETRY_FACTOR`）——一条卡住的评估局
+    # 在云机 4 核上被同一个 120s 连杀三次，与 rollout 那条腿是同一个坑。
+    assert timeouts == [120.0, 120.0 * game_watch.EXPLICIT_RETRY_FACTOR], timeouts
 
 
 def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(

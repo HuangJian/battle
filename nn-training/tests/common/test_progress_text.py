@@ -33,6 +33,22 @@ def test_progress_text_names_what_it_is_doing() -> None:
     )
 
 
+def test_both_legs_share_the_same_sentence_only_the_cursor_differs() -> None:
+    """用户口径（2026-10-25）：pull / push 两条腿的 rollout/ppo/eval 日志**必须一致**，
+    只有网络传输模块不同。
+
+    push 腿多一截 `[第N条]`（那是 outbox 的游标，属传输面）；把这一截去掉之后，两者必须
+    逐字相同 —— 这样「同一件事在两条腿上长什么样」永远只有一个答案。
+    """
+    for kind, done, total in (("iter", 6, 17), ("ppo", 0, 4), ("eval", 0, 8)):
+        push = progress_text(kind=kind, it=_IT, done=done, total=total, seq=8)
+        pull = progress_text(kind=kind, it=_IT, done=done, total=total)
+        seq_no = 8
+        cursor = f"第{seq_no}条"
+        assert cursor in push and cursor not in pull, (push, pull)
+        assert push.replace(f"[{cursor}]", "") == pull, (kind, push, pull)
+
+
 def test_progress_text_marks_the_problem_and_the_empty_read() -> None:
     """问题是问题（带标记），「还没收到进度」不许读成「在处理 it0」。"""
     tries = 2

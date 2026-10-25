@@ -1427,7 +1427,12 @@ def test_plan_without_timeout_uses_node_fallback_cap(tmp_path: Path, monkeypatch
 def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """重试的上限：plan 没给 ⇒ ×4（兜底不让一次主机抖动判死整轮）；plan 给了 ⇒ 一字不改。"""
+    """重试的上限：plan 没给 ⇒ ×4；plan 给了 ⇒ 首次一字不改、**重试** ×`EXPLICIT_RETRY_FACTOR`。
+
+    2026-10-25 修正（真机 y34-hitfix 云机段）：plan 写死 20s、三次尝试全 20s ⇒ 一条 stage-2000
+    的慢局在 4 核云机上永远过不去 ⇒ 整轮 `RetryableError`、段末 failed。重试的语义是兜底，
+    不该被首次的配置锁死（放大比自定档保守一半）。
+    """
     _fast_watchdog(monkeypatch)
     # 基准硬顶 0.1 → 0.05（2026-09-29，§43）：判据是「**倍率**」（非显式 ⇒ ×RETRY_TIMEOUT_FACTOR，
     # 显式 ⇒ 一字不改），而硬顶值就是本用例的固有开销（两个 hang 子进程各要真跑满它）。
@@ -1452,7 +1457,8 @@ def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
             _one_game_spec(tmp_path, script, game_timeout_sec=0.05),
             log=msgs_explicit.append,
         )
-    assert any("本次上限 0.05s" in m for m in msgs_explicit), msgs_explicit
+    widened = 0.05 * game_watch.EXPLICIT_RETRY_FACTOR
+    assert any(f"本次上限 {widened:g}s" in m for m in msgs_explicit), msgs_explicit
 
 
 def test_round_logs_game_time_distribution(tmp_path: Path, monkeypatch) -> None:

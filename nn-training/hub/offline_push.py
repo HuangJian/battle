@@ -641,9 +641,39 @@ class OfflinePushDispatcher:
         wid = str(rec.get("worker_id") or "")
         try:
             lease, why = self.hub.claim_offline(course, wid)
+            if lease and not why:
+                self._warn_if_local_round_in_flight(course, int(rec.get("resume_it") or 0))
             return dict(lease or {}), str(why or "")
         except Exception as e:
             return {}, f"claim 异常 {type(e).__name__}: {e}"
+
+    def _warn_if_local_round_in_flight(self, course: str, floor: int) -> None:
+        """接管成立时，如果**本机已经在这一轮之后**（磁盘上有更大的 `it{N}`）⇒ 响亮提醒。
+
+        ★ 2026-10-25 真机（y34-hitfix it103–105）：本机在飞 it103/it104 时云机从 it102 接管，
+        两边各算一遍 ⇒ 本机那两轮白烧 ~20 分钟，且归档里同号出现两份不同分支的权重。
+        本机「被接管即让出」的机制本来是有的（`worker/loop_round.resolve_collect` 的
+        `COLLECT_HELD`，实测 it105 就被它挡住了），**挡不住的是已经在飞的那一轮**。
+        所以这里不假装能避免，只把它说清楚（含"归档会出现同号两份"的后果）。
+        判据只看盘上事实：课程根下 `it{N}` 的最大 N（本机开轮前就 mkdir，含空目录）。
+        """
+        try:
+            root = Path(str(self.hub.course_dir(course)))
+            nums = [
+                int(p.name[2:])
+                for p in root.glob("it*")
+                if p.is_dir() and p.name[2:].isdigit()
+            ]
+        except Exception:
+            return  # 读不到就不编（这条只是告警，不是判据）
+        newest = max(nums) if nums else 0
+        if newest <= floor:
+            return
+        self._log(
+            f"WARN {course}: 接管地板是 it{floor}，而本机盘上已到 it{newest} —— "
+            f"it{floor + 1}..it{newest} 这几轮**本机也在算**（在飞/刚落地）⇒ 云机会重算一遍，"
+            "归档里同号会出现两份不同分支的权重（按 fp 分辨，别按 it 号拼链）"
+        )
 
     def _still_fresh(self, course: str, rec: dict) -> tuple[bool, str]:
         """接管前复核：提议时那份包**现在**还是不是最新的（判据见 `hub.offline_pack_fresh`）。"""

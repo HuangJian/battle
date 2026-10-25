@@ -520,7 +520,7 @@ def _maybe_cloud_eval(ctx: RunContext, it: int) -> None:
         # ★ 2026-10-25（用户口径）：进度行要说清这一段在干**什么** —— 评估也是一段活，
         #   此前它在进度里完全不可见（`plan.games` 局数直接给出规模，不编）。
         games = int((getattr(plan, "plan", None) or {}).get("games", 0) or 0)
-        progress_hook.report("eval", it=int(it), done=0, total=games)
+        progress_hook.report("eval", it=int(it), done=0, total=games, force=True)
         wait_idle = getattr(runner, "wait_idle", None)
         if wait_idle is not None and not wait_idle(EVAL_ALTERNATE_WAIT_SEC):
             ctx.log(

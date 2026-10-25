@@ -1351,8 +1351,12 @@ def test_progress_ping_lands_on_the_wire_once_per_window() -> None:
     ] * 2
     assert all(t == "tok" for _u, t, _s in seen)
     assert all(0.0 < s <= offline_boot.PROGRESS_TIMEOUT_SEC for _u, _t, s in seen)
-    assert any("局 1/8" in ln for ln in lines), lines
-    assert any("it7" in ln for ln in lines), lines
+    # 措辞由 `common.progress_text` 一份实现提供（2026-10-25 两腿统一）⇒ 判据读它，不钉字面
+    from common.progress_text import progress_text
+
+    # 第一个事件没带轮号（调用方没给 it）⇒ 文本里也就不该出现「第0轮」
+    assert any(progress_text(kind="iter", it=0, done=1, total=8) in ln for ln in lines), lines
+    assert any(progress_text(kind="round-start", it=7, done=0, total=0) in ln for ln in lines), lines
 
 
 def test_progress_ping_opens_the_next_window_by_time() -> None:

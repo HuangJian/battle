@@ -46,6 +46,7 @@ from typing import Any
 # （`tests/remote/test_plan_handoff_split.py` 白名单逐条对账），写成点分名才能让白名单说清
 # 「用的是哪个 common 模块」。
 import common.game_watch as game_watch
+import common.progress_hook as progress_hook
 import common.scratch as scratch
 import remote.delta_files as delta_files
 import remote.land_provider as land_provider
@@ -969,6 +970,9 @@ def _eval_round_done(ctx: RunContext) -> Callable[[int, dict], None]:
         if ctx.deliverer is None:
             return
         ctx.deliverer.submit_eval_round(int(it))
+        # ★ 2026-10-25（用户口径：两条腿的 rollout/ppo/eval 日志一致）——pull 腿此前**没有**
+        #   评估事件，进度面因此看不到「在评估」这一段（push 腿有 `plan_run._maybe_cloud_eval`）。
+        progress_hook.report("eval", it=int(it), done=0, total=0, force=True)
         ctx.log(
             f"it{it} 评估落账 {result.get('settled')} 局——已请求重投该轮（补读数的幂等补传）"
         )

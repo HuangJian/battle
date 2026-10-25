@@ -707,6 +707,35 @@ class OfflineRoundsMixin:
                 best = v
         return best > int(it)
 
+    def _warn_archive_conflict(
+        self, bdir: Path, prefix: str, it: int, weights_json: bytes
+    ) -> None:
+        """归档里已有这一 it 的**另一份**权重 ⇒ 响亮点名（两条腿各算了一遍同一轮）。
+
+        为什么必须喊：归档名只带 `<it>.<时间戳>`，来源（本机 / 云机）不在名字里。真机
+        y34-hitfix it103/it104 就是这样：`it103.<ts>.json` 是本机的、`it103.<ts>.delta` 是云机的，
+        按 it 号取「最大 it 的整份」会把两条不同分支拼成一条链。这里只报事实、不改名字
+        （命名规则是控制台 evalA 选择器的契约，见 `remote/delta_files`）。
+        """
+        try:
+            mine = hashlib.sha256(weights_json).hexdigest()
+            others = []
+            for p in Path(bdir).glob(f"{prefix}.it{int(it)}.*"):
+                try:
+                    if hashlib.sha256(p.read_bytes()).hexdigest() != mine:
+                        others.append(p.name)
+                except OSError:
+                    continue
+        except OSError:
+            return
+        if not others:
+            return
+        print(
+            f"[hub-server] WARN it{it} 归档里已有另一份权重（{', '.join(sorted(others)[:3])}）"
+            f"——同一轮被两条腿各算了一遍；按 fp 分辨来源，别按 it 号拼链",
+            flush=True,
+        )
+
     def _course_backup_target(self, course: str) -> tuple[str, str]:
         """课程配置里的归档 `(prefix, dir)`；缺配置/读不动 ⇒ `(课名, <归档根>/<课>)`。
 
@@ -824,6 +853,10 @@ class OfflineRoundsMixin:
             wname = delta_files.named_for("weights.json", weights_json)
             if _archived(Path(bdir), prefix, int(it)):
                 print(f"[hub-server] 补传 it{it} 归档已在（跳过重复）", flush=True)
+                # ★ 2026-10-25：同号但**不是这一份** = 两条腿各算了一遍同一轮（真机 y34-hitfix
+                #   it103/it104：本机与本机并行的云机段）。归档里会同时存在两份不同分支的整份，
+                #   而按 it 号取「最大 it 的整份」会把两条链拼起来 ⇒ 这里必须响亮。
+                self._warn_archive_conflict(Path(bdir), prefix, int(it), weights_json)
             else:
                 dst = backup_weights(
                     str(it_dir / wname),

@@ -527,6 +527,32 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         worker.close()
 
 
+def test_takeover_warns_when_the_local_machine_is_ahead_of_the_floor(tmp_path: Path) -> None:
+    """★ 2026-10-25 真机（y34-hitfix it103–105）：本机在飞 it103/it104 时云机从 it102 接管
+    ⇒ 两边各算一遍，本机那两轮白烧，归档里同号出现两份不同分支的权重。
+
+    本机「被接管即让出」的机制本来有（`resolve_collect` 的 `COLLECT_HELD`，it105 就被挡住了），
+    **挡不住的是已经在飞的那一轮**。所以接管成立时必须把这件事说出来（不假装能避免）。
+    """
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, write_final=False, finish_now=False, follow_task_identity=True)
+    logs: list[str] = []
+    disp, workers = _dispatcher(hub, tmp_path, log=logs.append)
+    (tmp_path / COURSE / "it103").mkdir(parents=True, exist_ok=True)  # 本机正在这一轮里
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        # 判据是**结构**（告警出现且只出现一次），措辞由实现负责（文本断言预算不为此记账）
+        assert _wait(
+            lambda: any(m.startswith("WARN") and COURSE in m for m in logs), timeout=10.0
+        ), logs
+        assert sum(1 for m in logs if m.startswith("WARN")) == 1, logs
+    finally:
+        disp.stop()
+        worker.close()
+
+
 def test_a_delivered_round_is_announced_once_on_the_hub_log(tmp_path: Path) -> None:
     """用户口径（2026-10-25）：**一个 it 的回传完毕**要写一行，且只写一次。
 

@@ -34,10 +34,19 @@ def test_attempt_timeout_first_attempt_is_the_line_retry_is_relaxed() -> None:
     assert game_watch.attempt_timeout_sec(base, 3) == base * game_watch.RETRY_TIMEOUT_FACTOR
 
 
-def test_attempt_timeout_explicit_config_wins_verbatim() -> None:
-    """调用方显式给了上限 ⇒ 每次尝试都用它（配置说了算，不做解释、不放宽）。"""
+def test_attempt_timeout_explicit_config_wins_on_the_first_attempt() -> None:
+    """显式给了上限 ⇒ **首次**照它；**重试**仍放宽（×`EXPLICIT_RETRY_FACTOR`）。
+
+    2026-10-25 真机：plan 写死 `game_timeout_sec=20`，一条 stage-2000 慢局在云机 4 核上
+    连续三把都被 20s 杀掉 ⇒ 整轮 `RetryableError`、段末 failed。重试是兜底，不该被首次的
+    配置锁死。
+    """
     assert game_watch.attempt_timeout_sec(30.0, 1, explicit=True) == 30.0
-    assert game_watch.attempt_timeout_sec(30.0, 3, explicit=True) == 30.0
+    widened = 30.0 * game_watch.EXPLICIT_RETRY_FACTOR
+    assert game_watch.attempt_timeout_sec(30.0, 2, explicit=True) == widened
+    assert game_watch.attempt_timeout_sec(30.0, 3, explicit=True) == widened
+    # 比自定档保守：显式档的放大不得大于自定档
+    assert game_watch.EXPLICIT_RETRY_FACTOR < game_watch.RETRY_TIMEOUT_FACTOR
 
 
 def test_warn_is_redundant_only_when_cap_is_at_or_below_the_line() -> None:
@@ -128,9 +137,10 @@ def test_game_ceiling_covers_every_attempt_plus_the_pool_fallback() -> None:
     assert ceiling == game_watch.GAME_MAX_ATTEMPTS * (2 * max(caps) + plat.KILL_REAP_SEC) + (
         game_watch.GAME_IO_SLACK_SEC
     )
-    # 显式给了上限 ⇒ 每次尝试都用它（不再放大），上界跟着变
+    # 显式给了上限 ⇒ 首次照它、重试放大 `EXPLICIT_RETRY_FACTOR`（2026-10-25），上界按**最宽**那次算
+    widest = 30.0 * game_watch.EXPLICIT_RETRY_FACTOR
     assert game_watch.game_ceiling_sec(30.0, explicit=True) == game_watch.GAME_MAX_ATTEMPTS * (
-        2 * 30.0 + plat.KILL_REAP_SEC
+        2 * widest + plat.KILL_REAP_SEC
     ) + game_watch.GAME_IO_SLACK_SEC
     # 余量必须是**小正数**：它只兜「小的文件操作」，不是给机器卡住留的后门
     assert 0 < game_watch.GAME_IO_SLACK_SEC <= 60.0

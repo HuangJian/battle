@@ -2168,15 +2168,22 @@ def progress_url(hub: str, course: str, lease: str) -> str:
 
 
 def _progress_label(kind: str, *, it: int, done: int, total: int) -> str:
-    """打点日志的标签（`kind` + 有就带上的轮号/局计数）——**只进日志**，不上线。"""
-    bits = [str(kind or "ping")]
-    if it:
-        bits.append(f"it{int(it)}")
-    if total:
-        bits.append(f"局 {int(done)}/{int(total)}")
-    elif done:
-        bits.append(f"局 {int(done)}")
-    return " ".join(bits)
+    """打点日志的标签 —— **只进日志**，不上线。
+
+    ★ 2026-10-25（用户口径）：「自主云机不管 pull/push，rollout/ppo/eval 的输出日志应该一致，
+    仅仅网络传输模块各自不同」。所以这里**不再自己拼措辞**，直接转 `common.progress_text`
+    —— 与 push 腿（云机 supervisor / hub 侧）逐字同一份实现，唯一差别是这里没有 `seq`
+    （那是 push 腿 outbox 的游标，属于传输面）。
+    """
+    try:
+        # 延迟 import：本模块是 **standalone 引导文件**（notebook 逐文件从 raw 拉），顶层不能
+        # 假手 `common.*`；而 `run_one_course` 真正跑起来的形态里 `code.zip` 带了 `common/`。
+        from common.progress_text import progress_text
+    except Exception:  # 引导形态：没有 common 包 ⇒ 退回最小标签（日志面，不影响判据）
+        return str(kind or "ping")
+    return progress_text(
+        kind=str(kind or ""), it=int(it), done=int(done), total=int(total)
+    )
 
 
 def _reclaim_lease(

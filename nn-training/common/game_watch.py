@@ -24,7 +24,9 @@
     1.6s / p90 3.2~4.2s / p99 7~8s，见 `docs/nn/runtime-opt.md` §8），首次尝试 >5s 已属异常
     （用户口径）值得杀掉重来；但重试是**兜底**——若一次主机抖动把同一局连杀三次，代价是
     「整轮作废重发」或「评估少一局」（读数有偏），比多等十几秒贵得多。调用方**显式**给了
-    上限（>0）时对每次尝试一视同仁：配置说了算，不做解释。
+    上限（>0）时**首次**尝试一视同仁（配置说了算），**重试**仍放大 `EXPLICIT_RETRY_FACTOR`
+    （2026-10-25 修正：云机段 plan 写死 20s ⇒ 三次尝试全 20s，一条 stage-2000 的慢局永远过不去
+    ⇒ 整轮 `RetryableError`、段末 failed。重试的语义是兜底，不该被首次的配置锁死）。
   * ``GAME_MAX_ATTEMPTS`` (3) —— 一局最多跑几次：超时 / rc≠0 都**原地重跑同一 argv**
     （种子在 argv 里 ⇒ 同一局是确定性的：重跑要么拿到同一份结果，要么再次响亮失败）。
   * ``GAME_POLL_SEC`` (0.5) —— 轮询粒度：软告警与硬顶都靠它发现（一次 `wait(∞)` 什么都看不见）。
@@ -60,6 +62,9 @@ SLOW_GAME_WARN_SEC = 5.0
 DEFAULT_GAME_TIMEOUT_SEC = 5.0
 #: 重试尝试的上限倍数（首次 5s ⇒ 重试 20s）；调用方显式给上限时不放大。
 RETRY_TIMEOUT_FACTOR = 4.0
+#: **显式**配置档的重试放大（2026-10-25）：比自定档保守一半 —— 首次严格照配置，重试才放宽
+#: （云机 4 核上一条长局被 20s 连续杀三次 ⇒ 整轮作废，代价远大于多等 20s）。
+EXPLICIT_RETRY_FACTOR = 2.0
 #: 一局最多跑几次（首次 + 重试）。
 GAME_MAX_ATTEMPTS = 3
 #: 轮询粒度（秒）：软告警与硬顶都靠它发现。
@@ -142,12 +147,13 @@ STALL_WARN_SEC = 120.0
 def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -> float:
     """第 `attempt` 次尝试的硬顶（秒）。
 
-    `explicit=True`（调用方显式配了上限）⇒ 每次尝试都用它；否则**重试**尝试放宽
-    `RETRY_TIMEOUT_FACTOR` 倍（兜底尝试宁可多等，也不因为一次主机抖动丢掉这一局）。
+    首次尝试恒等于 `base_sec`；**重试**（attempt ≥ 2）放宽 —— 自定档 ×`RETRY_TIMEOUT_FACTOR`，
+    显式档 ×`EXPLICIT_RETRY_FACTOR`（2026-10-25：显式档也要留余量，否则一条慢局永远过不去）。
     """
-    if explicit or attempt <= 1:
+    if attempt <= 1:
         return float(base_sec)
-    return float(base_sec) * RETRY_TIMEOUT_FACTOR
+    factor = EXPLICIT_RETRY_FACTOR if explicit else RETRY_TIMEOUT_FACTOR
+    return float(base_sec) * factor
 
 
 def game_ceiling_sec(base_sec: float, explicit: bool = False, reap_sec: float | None = None) -> float:
@@ -350,6 +356,7 @@ __all__ = [
     "CLEAN_CEILING_SEC",
     "DEFAULT_GAME_TIMEOUT_SEC",
     "DRAIN_CEILING_SEC",
+    "EXPLICIT_RETRY_FACTOR",
     "GAME_IO_SLACK_SEC",
     "GAME_MAX_ATTEMPTS",
     "GAME_POLL_SEC",

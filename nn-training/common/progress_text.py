@@ -39,15 +39,18 @@ KIND_TEXT = {
 UNIT = {"iter": "局", "eval": "局", "ppo": "遍"}
 
 
-def progress_text(*, seq: int, kind: str, it: int, done: int, total: int) -> str:
+def progress_text(
+    *, kind: str, it: int, done: int, total: int, seq: int | None = None
+) -> str:
     """把一条进度事件翻成一句人话（`进度[第8条] 第102轮 采集局：6/17 局`）。
 
-    * `seq` = 第几条消息（**不是轮号**）：`progress.json` 的单调游标，跨重启续上，hub 用它
-      判断「有没有新动静」；跳号是采样间隔造成的，不是漏了轮次；
+    * `seq` = **传输侧**的游标（第几条消息），只有 push 腿有（`progress.json` 的单调序号）；
+      传 `None` 就整段不出现 —— 这一截是**唯一**允许两条腿不一样的地方（2026-10-25 用户口径：
+      「不管 pull/push，rollout/ppo/eval 的输出日志应该一致，仅仅网络传输模块各自不同」）。
     * `it` = 第几轮；`done/total` = 已完成 / 共多少（`iter`/`eval` 数局，`ppo` 数遍）；
     * `retry` 是**问题面** ⇒ 加 `⚠` 前缀。
     """
-    s = f"进度[第{int(seq)}条]"
+    s = "进度" if seq is None else f"进度[第{int(seq)}条]"
     k = KIND_TEXT.get(str(kind or ""), str(kind or ""))
     if not k and not int(it):
         return s + " 还没收到进度（子进程刚起）"

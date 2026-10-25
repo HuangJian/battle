@@ -9595,3 +9595,29 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   hook 归因零改动：`--no-pretty` 与 `tsc --pretty false` 同为 `path(l,c): error TSxxxx:`（红/绿两态实测）。
 - **违反后果**：漏 `--no-script` ⇒ 提交/检查递归；`bun check` 与 tsc 分歧属上游 bug（conformance 全过），
   用最小用例复现上报，别用 `@ts-ignore` 消音（Bun ≥ 1.4.3 的要求已被既有 ≥ 1.4.4 地板覆盖）。
+
+## §2026-10-25-audit-p1p2p3-fixes-and-one-log-face（2026-10-25，审计三问的修 + 「日志只有一份措辞」）
+
+审计见 `reports/y34-hitfix-push-103-105-audit-20261025.md`。用户指令：「三个问题 -> 修。另外，自主云机
+不管 pull/push，其 rollout/ppo/eval 的输出日志应该是一致的，仅仅网络传输模块各自不同！！」
+
+- **P3（段末 failed：单局 20s 硬顶）**：`common/game_watch.attempt_timeout_sec` 原来对**显式**配置
+  「每次尝试一视同仁」（配置说了算）⇒ plan 写死的 20s 把三次重试全锁在 20s，一条 stage-2000 的慢局
+  在 4 核云机上永远过不去（`RetryableError ×3` ⇒ 整轮作废 ⇒ 段末 failed）。
+  改为：**首次**照配置，**重试**放大 `EXPLICIT_RETRY_FACTOR = 2.0`（自定档仍是 4×；显式档刻意保守一半）。
+  否决：把 plan 的 20s 直接改成 60s —— 那是「用导出机的配置去猜云机的速度」，下一次换机器又错。
+- **P1（本机与云机重算同一轮）**：机制本来就有——`worker/loop_round.resolve_collect` 的
+  `COLLECT_HELD`（真机：本机 it105 确实被它挡住了）；挡不住的是**已经在飞的那一轮**（it103/it104
+  在接管发生时已在跑，两端各算一遍）。**不假装能避免**：接管成立时 `hub/offline_push._claim` →
+  `_warn_if_local_round_in_flight` 按**盘上事实**（课程根下最大 `it{N}`）响亮报一行，并说明
+  「归档里同号会出现两份不同分支的权重，按 fp 分辨」。
+- **P2（归档混链）**：`hub/store_offline` 落归档时若同 it 已有**不同 sha** 的文件 ⇒
+  `WARN … 同一轮被两条腿各算了一遍`。**不改归档命名**（`<课>.it<N>.<时间戳>.<json|delta>` 是控制台
+  evalA 选择器的契约，见 `remote/delta_files`）。
+- **★ 一份措辞（用户第二条硬要求）**：`common/progress_text.progress_text(seq=None)` 成为**唯一**
+  渲染器；`remote/offline_boot._progress_label` 不再自己拼（延迟 import，standalone 引导形态退回最小
+  标签），push 腿（supervisor / hub）传 `seq`、pull 腿不传 —— **`[第N条]` 是唯一允许的差异**，
+  因为它是 push 腿 outbox 的游标（传输面）。同时补齐 pull 腿缺的 **评估事件**
+  （`remote/plan_handoff._eval_round_done` 报 `eval`，push 腿在 `plan_run._maybe_cloud_eval`）。
+  用例 `tests/common/test_progress_text.py::test_both_legs_share_the_same_sentence_only_the_cursor_differs`
+  直接钉「去掉游标之后逐字相同」。
