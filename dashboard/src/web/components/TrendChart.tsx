@@ -17,9 +17,9 @@
  *  「只看 eval」另用 `color` 把唯一那条线染成 eval 橙——同一张图承担三种档位，
  *  不再各写一个组件。 */
 
-import { useState } from 'preact/hooks'
+import { useLayoutEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import { sliceSeries, trendHoverIndex, type Series, type TrendRange } from '../view'
+import { sliceSeries, trendHoverIndex, trendTipCenter, type Series, type TrendRange } from '../view'
 
 export interface TrendChartProps {
   /** 主序列（rollout）：全量时序（组件内部按 range 截取）。 */
@@ -40,6 +40,14 @@ export interface TrendChartProps {
   color?: string
   /** 叠加序列（eval）色：固定桁色系。 */
   color2?: string
+  /** 同组共享的悬停迭代号（Hero 用它联动六张图）。
+   *
+   *  `undefined` = 组件自持（单图/旧调用方）；`null` = 受控但当前无 hover。
+   *  受控时按 **iter** 对齐而不是按下标：eval 稀疏档里各图的可见点可能不同，
+   *  只有该图自己也有这一轮时才会亮准星（没有就诚实留空，不拿邻点冒充）。 */
+  hoverIter?: number | null
+  /** 受控模式的回报口：鼠标移入/移动/离开时给出当前迭代号（null = 离开）。 */
+  onHoverIter?: (it: number | null) => void
 }
 
 const VB_W = 260
@@ -110,8 +118,11 @@ export function TrendChart({
   yMin,
   color: colorProp,
   color2 = COLOR2_DEFAULT,
+  hoverIter,
+  onHoverIter,
 }: TrendChartProps) {
-  const [hover, setHover] = useState<number | null>(null)
+  const [localHover, setLocalHover] = useState<number | null>(null)
+  const controlled = hoverIter !== undefined
   const s = sliceSeries(series, range)
   const vals = s.vals
   const iters = s.iters
@@ -126,6 +137,30 @@ export function TrendChart({
     })
   }
 
+  // 受控 = 同组共享「鼠标所在的 iter」；本图按 iter 找回自己的下标。
+  // 该图没有这一轮（eval 稀疏档的可见点不同）⇒ 不亮准星，不拿邻点冒充。
+  const sharedIndex = controlled && hoverIter != null ? iters.indexOf(hoverIter) : -1
+  const hover = controlled ? (sharedIndex >= 0 ? sharedIndex : null) : localHover
+
+  const plotW = VB_W - PAD_L - PAD_R
+  const px = (i: number): number => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
+  const hx = hover != null ? px(hover) : null
+
+  // 提示框水平钳制：按实测图表/提示框宽度把中心拉回图内（右端 hover 自动左移）。
+  // 首帧（未量到宽度）走百分比定位，量到后由 layout effect 在绘制前换回 px。
+  const chartRef = useRef<HTMLDivElement | null>(null)
+  const tipRef = useRef<HTMLDivElement | null>(null)
+  const [tipCx, setTipCx] = useState<number | null>(null)
+  useLayoutEffect(() => {
+    if (hx == null) {
+      setTipCx(null)
+      return
+    }
+    const chartW = chartRef.current?.offsetWidth ?? 0
+    const tipW = tipRef.current?.offsetWidth ?? 0
+    setTipCx(trendTipCenter((hx / VB_W) * chartW, chartW, tipW))
+  }, [hx])
+
   const valid = vals.filter(Number.isFinite)
   const valid2 = vals2 ? vals2.filter(Number.isFinite) : []
   if (valid.length === 0 && valid2.length === 0) {
@@ -136,7 +171,6 @@ export function TrendChart({
     )
   }
 
-  const plotW = VB_W - PAD_L - PAD_R
   const plotH = height - PAD_T - PAD_B
   const all = [...valid, ...valid2]
   const dataMin = all.length ? Math.min(...all) : 0
@@ -145,7 +179,6 @@ export function TrendChart({
   const max = dataMax > min ? dataMax : min + Math.max(1, Math.abs(min) * 0.05)
   const span = max - min
 
-  const px = (i: number): number => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
   const py = (v: number): number =>
     PAD_T + (span === 0 ? plotH / 2 : (1 - (v - min) / span) * plotH)
 
@@ -173,17 +206,25 @@ export function TrendChart({
           ? 'var(--red)'
           : 'var(--accent)')
 
-  const hx = hover != null ? px(hover) : null
   const hv = hover != null ? vals[hover] : null
   const hy = hv != null && Number.isFinite(hv) ? py(hv) : null
   const hv2 = hover != null && vals2 ? vals2[hover] : null
   const hy2 = hv2 != null && Number.isFinite(hv2) ? py(hv2) : null
 
+  /** 受控模式回报「鼠标所在的 iter」而不是下标：各图的可见 iters / 下标可以不同。 */
+  const reportHover = (i: number | null): void => {
+    if (!controlled) {
+      setLocalHover(i)
+      return
+    }
+    onHoverIter?.(i == null ? null : (iters[i] ?? null))
+  }
+
   const onMove = (e: JSX.TargetedMouseEvent<SVGRectElement>) => {
     // 捕获 rect = plot 区（x=PAD_L, width=plotW）：屏幕比例 t∈[0,1] 直接映射下标。
     // 勿再按全 viewBox 宽换算后减 PAD_L（会在中段把选点推到鼠标左侧）。
     const rect = e.currentTarget.getBoundingClientRect()
-    setHover(trendHoverIndex(e.clientX, rect.left, rect.width, n))
+    reportHover(trendHoverIndex(e.clientX, rect.left, rect.width, n))
   }
 
   const tipParts: string[] = []
@@ -193,7 +234,7 @@ export function TrendChart({
   }
 
   return (
-    <div className="tc-trend" style={{ height }}>
+    <div className="tc-trend" style={{ height }} ref={chartRef}>
       <svg
         className="tc-trend__svg"
         width="100%"
@@ -359,13 +400,19 @@ export function TrendChart({
           height={plotH}
           fill="transparent"
           onMouseMove={onMove}
-          onMouseLeave={() => setHover(null)}
+          onMouseLeave={() => reportHover(null)}
         />
       </svg>
 
-      {/* 坐标提示（双口径并排；固定在图表顶部） */}
+      {/* 坐标提示（双口径并排；固定在图表顶部）。left 按实测宽度钳制：右端 it 不再溢出图外。 */}
       {hx != null && tipParts.length > 0 ? (
-        <div className="tc-trend__tip" style={{ left: `${(hx / VB_W) * 100}%` }}>
+        <div
+          className="tc-trend__tip"
+          ref={tipRef}
+          style={{
+            left: tipCx != null ? `${tipCx.toFixed(1)}px` : `${(hx / VB_W) * 100}%`,
+          }}
+        >
           <span className="tc-trend__tip-it">it{hover != null ? iters[hover] : ''}</span>
           <span className="tc-trend__tip-val">{tipParts.join(' · ')}</span>
         </div>

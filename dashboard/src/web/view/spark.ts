@@ -55,6 +55,21 @@ export function trendHoverIndex(
   return Math.max(0, Math.min(n - 1, i))
 }
 
+/**
+ * 趋势图提示框的**水平中心**（px）：把「以准星为中心」的浮层钳制在图表宽度内。
+ * 右端 hover ⇒ 中心左移（框的右缘贴住图表右内沿），左端对称；提示框比图表还宽时
+ * **不折行**，贴着 hover 所在的一侧（右侧 hover ⇒ 整框向左伸，右缘仍在图内）。
+ * 组件把结果交给 `left` + `translate(-50%, -100%)`，所以这里返回的是中心而不是左缘。
+ * `chartW <= 0`（隐藏/首帧）原样返回，由调用方退回百分比定位。
+ */
+export function trendTipCenter(x: number, chartW: number, tipW: number): number {
+  if (!(chartW > 0)) return x
+  const half = tipW / 2
+  // 太宽装不下：不折行，整框翻到准星另一侧（右端 hover ⇒ 框整体向左，右缘停在准星处）。
+  if (chartW <= tipW + 2) return x <= chartW / 2 ? x + half + 1 : x - half - 1
+  return Math.max(half + 1, Math.min(x, chartW - half - 1))
+}
+
 /** SSR/首屏用 SVG 字符串（客户端 <Sparkline> 组件与它同源，逐字节一致）。 */
 export function sparkline(values: number[], width = SPARK_W, height = SPARK_H): string {
   const sp = sparkPoints(values, width, height)

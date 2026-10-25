@@ -92,6 +92,8 @@ export function TrendCell({
   yFloor,
   yMin,
   title,
+  hoverIter,
+  onHoverIter,
 }: {
   series: Series | undefined
   seriesEval?: Series | undefined
@@ -105,6 +107,10 @@ export function TrendCell({
   yMin?: number
   /** 标签悬停提示（口径说明）。 */
   title?: string
+  /** 同组共享的悬停迭代号（Hero 六张图联动；见 `TrendChart` 同名 prop）。 */
+  hoverIter?: number | null
+  /** 受控悬停回报（鼠标移入/移动/离开）。 */
+  onHoverIter?: (it: number | null) => void
 }) {
   const evalOnly = source === 'eval'
   const main = evalOnly ? seriesEval : series
@@ -140,6 +146,8 @@ export function TrendCell({
           height={56}
           yFloor={yFloor}
           yMin={yMin}
+          hoverIter={hoverIter}
+          onHoverIter={onHoverIter}
         />
       ) : evalOnly && series ? (
         <span className="tc-muted tc-small">该课程暂无干净评估</span>
@@ -775,6 +783,8 @@ export function Hero({
     })
   }, [iters])
 
+  // 同组共享的悬停迭代号：六张趋势图读同一个 it（鼠标在哪张图上移动，全组一起亮）。
+  const [hoverIter, setHoverIter] = useState<number | null>(null)
   // 走势范围档位（全量 / 最近30 / 最近10）；持久化到 localStorage，hydrate 后恢复。
   const [range, setRange] = useState<TrendRange>('30')
   useEffect(() => {
@@ -902,6 +912,8 @@ export function Hero({
             fmt={fmtPct}
             toneOf={winTone}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yFloor={0.3}
             title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
           />
@@ -911,6 +923,8 @@ export function Hero({
             source={source}
             fmt={fmtPct}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yFloor={0}
             title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
           />
@@ -920,6 +934,8 @@ export function Hero({
             source={source}
             fmt={fmtInt}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
             title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
           />
@@ -930,6 +946,8 @@ export function Hero({
             source={source}
             fmt={fmtPct}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yFloor={0}
             title="歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）"
           />
@@ -939,6 +957,8 @@ export function Hero({
             source={source}
             fmt={fmtPct}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yFloor={0}
             title="胜局残血 / 该局可支配生命容量（rollout 实线 · eval 橙点）"
           />
@@ -948,6 +968,8 @@ export function Hero({
             source={source}
             fmt={(v) => (v != null ? `${v.toFixed(2)}` : '—')}
             range={range}
+            hoverIter={hoverIter}
+            onHoverIter={setHoverIter}
             yFloor={0}
             title="每局平均拾取/掉落（rollout 实线 · eval 橙点）"
           />

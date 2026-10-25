@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { trendHoverIndex } from '../src/web/view'
+import { trendHoverIndex, trendTipCenter } from '../src/web/view'
 
 /** 旧 onMove 公式（TrendChart 修复前）：plot rect 上误用 VB_W + PAD_L。 */
 function legacyBuggyIndex(
@@ -66,5 +66,34 @@ describe('trendHoverIndex：plot 捕获层坐标 → 数据下标', () => {
     // JS Math.round(43.5)=44（半值向上）；旧公式 ~37，系统性偏左
     expect(correct).toBe(Math.round(0.5 * (n - 1)))
     expect(buggy).toBeLessThan(correct - 3)
+  })
+})
+
+describe('trendTipCenter：浮动读数框钳制在趋势图内', () => {
+  it('正常位置：以准星为中心，原样返回', () => {
+    expect(trendTipCenter(130, 260, 100)).toBe(130)
+  })
+
+  it('右端 it：中心左移，框的右缘贴住图表内沿（不溢出）', () => {
+    const cx = trendTipCenter(254, 260, 100)
+    expect(cx).toBe(209) // 260 − 100/2 − 1
+    expect(cx + 50).toBeLessThanOrEqual(260)
+  })
+
+  it('左端对称：框的左缘也留在图内', () => {
+    const cx = trendTipCenter(2, 260, 100)
+    expect(cx).toBe(51) // 100/2 + 1
+    expect(cx - 50).toBeGreaterThanOrEqual(0)
+  })
+
+  it('提示框比图还宽：不折行，整框翻到 hover 的另一侧（右端 ⇒ 整体向左）', () => {
+    // 右侧（x=90 > 50）：右缘停在准星处（89），框向左伸
+    expect(trendTipCenter(90, 100, 120)).toBe(29)
+    // 左侧（x=10）：左缘停在准星处（11），框向右伸
+    expect(trendTipCenter(10, 100, 120)).toBe(71)
+  })
+
+  it('未量到图表宽度（隐藏/首帧）：原样返回，由调用方退回百分比定位', () => {
+    expect(trendTipCenter(42, 0, 100)).toBe(42)
   })
 })
