@@ -520,6 +520,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 那条线（子弹出现后再躲需要 ~39 拍提前量，数学上来不及）。0 = OFF。
   muzzleEscapeMode: 0,
   muzzleWarnCells: 5,
+  // A14b: 只在敌方**炮已就绪**（ticksUntilFire==0）时把炮口当威胁。0 = 旧行为（只要瞄准就躲）。
+  muzzleRequireReady: 1,
+  // A14c: 提前量（拍）。三档实测：无门 −3.00pp · 就绪即躲 **±0.00pp**（+75/−75）·
+  // 提前 27 拍 −1.29pp ⇒ 越提前越差（提前撤离=白白放弃站位，敌人未必开火）。
+  // 故取 0（= 只在「炮已就绪」这一拍躲），且 muzzleEscapeMode 保持 0 不启用。
+  muzzleLeadTicks: 0,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,

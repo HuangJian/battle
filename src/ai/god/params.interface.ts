@@ -1457,6 +1457,13 @@ export interface GodAIParams {
   /** A14: only enemies within this many cells of the player count as muzzle
    * threats. */
   muzzleWarnCells: number
+  /** A14b: treat a muzzle as a threat only when the enemy's gun is READY
+   * (`ticksUntilFire === 0`) — otherwise "aimed at me" is the normal combat
+   * state and escaping it wrecks positioning. 1 = on, 0 = legacy. */
+  muzzleRequireReady: number
+  /** A14c: how many ticks BEFORE the enemy's gun becomes ready we start leaving
+   * the lane (default 27 = the time needed to clear a lane). */
+  muzzleLeadTicks: number
 
   /**
    * A11 (2026-10-23): apply the base-HP emergency return in SINGLE player too.

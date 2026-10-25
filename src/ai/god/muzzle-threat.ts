@@ -15,6 +15,7 @@ import { TileMap } from '../../game/TileMap'
 import type { Direction } from '../../utils/direction'
 import { ALL_DIRS, DIR_VECTORS } from '../../utils/direction'
 import type { GodAIInput } from '../GodAIInput'
+import { ticksUntilFire } from './ThreatBudget'
 
 const BAND = TANK / 2 + BULLET / 2
 
@@ -64,6 +65,23 @@ export function muzzleEscapeDirImpl(self: GodAIInput, pcx: number, pcy: number):
     if (ahead <= 0) continue
     const cells = ahead / CELL
     if (cells > self.params.muzzleWarnCells) continue
+    // A14b (2026-10-25): only an ARMED muzzle is a threat. Without this the
+    // escape fires on almost every combat tick ("someone is aiming at me" is
+    // the normal state), which measured −3.00pp / kills −234 — the tank kept
+    // abandoning its position. `ticksUntilFire === 0` means the shell can leave
+    // the barrel THIS tick, which is exactly when the lane must already be clear
+    // (a shell that appears while we are in the lane cannot be outrun: 19px of
+    // travel = 27 ticks + 12-tick turn cooldown).
+    // A14c (2026-10-25): the shell must be PRE-EMPTED, not raced. "Gun ready
+    // RIGHT NOW" was exactly neutral (0.00pp, +75/−75): by then the lane cannot
+    // be left any more (19px of travel = 27 ticks + 12-tick turn cooldown).
+    // What matters is the gun that is ABOUT to be ready: start the lateral move
+    // `muzzleLeadTicks` before readiness so we are already out of the lane when
+    // the shot exists.
+    if (self.params.muzzleRequireReady > 0) {
+      const untilReady = ticksUntilFire(w, t)
+      if (untilReady > self.params.muzzleLeadTicks) continue
+    }
     const tc = self.tankCell(t)
     if (!laneClear(self, tc.col, tc.row, pcol, prow)) continue
     const speed = p.bulletSpeed > 0 ? p.bulletSpeed : 4
