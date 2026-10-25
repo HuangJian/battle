@@ -287,6 +287,19 @@ def next_eval_wait(
     return float(min(cap, max(0.1, float(deadline) - float(now))))
 
 
+#: 瞬断/404 回队的指数退避：`min(cap, base * 2**(leg-1))` 秒（原式写死在派发器里：
+#: `min(2**(leg-1), 8)`）。抽成常量只为一件事：**判据（到点才取）不该被墙钟惩罚** ——
+#: 用例把首档压到毫秒级后仍走同一条 `retry_at` → `next_eval_wait` → `_take_ready_locked`
+#: 的路，形状与封顶由 `requeue_backoff_sec` 单测钉住；生产默认就是原式的 1/2/4/8s。
+REQUEUE_BACKOFF_FIRST_SEC = 1.0
+REQUEUE_BACKOFF_CAP_SEC = 8.0
+
+
+def requeue_backoff_sec(leg: int) -> float:
+    """第 `leg` 次尝试失败后的退避秒数（`leg` 从 1 起；指数翻倍，8s 封顶）。"""
+    return float(min(REQUEUE_BACKOFF_CAP_SEC, REQUEUE_BACKOFF_FIRST_SEC * 2 ** max(0, leg - 1)))
+
+
 def inflight_grace_cap(task_timeout: float) -> float:
     """窗口到期后等「在飞局落账」的宽限上界（秒）：`min(taskTimeoutSec, EVAL_INFLIGHT_GRACE_SEC)`。
 

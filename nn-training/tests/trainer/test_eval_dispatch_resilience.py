@@ -25,6 +25,7 @@ import pytest
 
 import common.distribution
 import trainer.eval_dispatch as ed
+import worker.eval_yield as eval_yield
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
@@ -184,6 +185,12 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
     旧实现：404 不计瞬断 ⇒ attempt 打光即 `dropped`（丢局）+ 3 次熔断整轮。
     """
     h = _Harness(tmp_path, monkeypatch, games=2)
+    # 退避是**生产节拍**（1/2/4/8s 封顶），而这条用例的判据是「回队、不计故障、到点再取」——
+    # 把首档压到 20ms 后仍走同一条 `retry_at` → `next_eval_wait` → `_take_ready_locked` 的路，
+    # 形状与封顶由 `test_eval_yield_split.py::test_requeue_backoff_shape_and_cap` 钉住
+    # （改前真等 1s+2s）。常量住 `worker/eval_yield.py`：函数在**调用时**读它自己的模块全局。
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_FIRST_SEC", 0.02)
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_CAP_SEC", 0.04)
     forgotten: list[str] = []
     real_forget = common.distribution.forget_weights_node
 

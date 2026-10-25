@@ -26,6 +26,10 @@ HOUSE_EXIT = "run_main"
 MAIN_NAME = "main"
 MAIN_GUARD = "__main__"
 EXIT_ATTR = "exit"
+#: 廉价预筛：四个判据的命中形态都**必然**以这四个标识符之一出现在源码里
+#: （`ArgumentParser` 是属性名、`house_parser`/`run_main` 是裸名、`__main__` 是守卫字面量）
+#: ⇒ 一个都不出现的文件解析出来四个数都不会变，直接跳过（332 → 79 个文件，见 `_scan`）。
+PREFILTER_TOKENS = (PARSER_CTOR, HOUSE_CTOR, HOUSE_EXIT, MAIN_GUARD)
 
 
 def production_files() -> list[Path]:
@@ -35,9 +39,9 @@ def production_files() -> list[Path]:
     return out
 
 
-def _tree(p: Path) -> ast.Module | None:
+def _tree(text: str) -> ast.Module | None:
     try:
-        return ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        return ast.parse(text)
     except SyntaxError:
         return None
 
@@ -87,7 +91,10 @@ def _scan() -> _Scan:
     ctors = 0
     exits = 0
     for p in production_files():
-        tree = _tree(p)
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if not any(tok in text for tok in PREFILTER_TOKENS):
+            continue
+        tree = _tree(text)
         if tree is None:
             continue
         in_house = p == HOUSE_FILE

@@ -435,3 +435,16 @@ def test_next_eval_wait_sleeps_until_the_next_retry_is_due() -> None:
     # ⑤ 上界与剩余窗口都照样生效
     assert y.next_eval_wait(pending, {(1, 1): now + 99.0, (1, 2): now + 99.0}, deadline, now) == 5.0
     assert y.next_eval_wait((), {}, now + 0.5, now) == 0.5
+
+
+def test_requeue_backoff_shape_and_cap() -> None:
+    """回队的退避 = 指数翻倍 + 8s 封顶（原式 `min(2**(leg-1), 8)`，2026-10-25 抽成常量）。
+
+    抽常量的理由：`test_eval_dispatch_resilience` 那条「404 回队」用例要真等 1s+2s，
+    而这只是**生产节拍**——用例把它压到毫秒级后仍走 `retry_at` → `next_eval_wait` →
+    `_take_ready_locked` 的同一条路；形状与封顶改由这里钉住（云端一旦改退避，这条先红）。
+    """
+    y = eval_yield_mod
+    assert y.REQUEUE_BACKOFF_FIRST_SEC == 1.0
+    assert y.REQUEUE_BACKOFF_CAP_SEC == 8.0
+    assert [y.requeue_backoff_sec(leg) for leg in range(1, 7)] == [1.0, 2.0, 4.0, 8.0, 8.0, 8.0]

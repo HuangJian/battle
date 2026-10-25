@@ -18,6 +18,7 @@ import shutil
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -655,24 +656,34 @@ def test_codehash_bilingual_contract() -> None:
         print("  SKIP bun 不可用，跳过双语契约比对", flush=True)
         return
     agent = REPO / "tools" / "agent" / "sampler-agent.ts"
-    try:
-        proc = run_utf8([bun, str(agent), "--print-code-hash"], cwd=str(REPO), timeout=120)
-    except Exception as e:
-        check(False, f"bun --print-code-hash 执行失败: {e}")
-        return
+    # 两次 bun 调用互不依赖（同一条命令的两个读数），而每次都是「bun 启动 + 全仓 hash」——
+    # 串行跑把同一份启动付两遍（实测 3.2s 里约 1.5s 是第二次启动）。并发起，断言顺序不变；
+    # Python 侧 hash 在本进程算，正好与两个子进程重叠（它们在外面跑，不吃 GIL）。
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_hash = pool.submit(
+            run_utf8, [bun, str(agent), "--print-code-hash"], cwd=str(REPO), timeout=120
+        )
+        f_files = pool.submit(
+            run_utf8, [bun, str(agent), "--print-code-hash-files"], cwd=str(REPO), timeout=120
+        )
+        py_hash = common.distribution.compute_code_hash()
+        try:
+            proc = f_hash.result()
+        except Exception as e:
+            check(False, f"bun --print-code-hash 执行失败: {e}")
+            return
     if proc.returncode != 0:
         check(False, f"bun --print-code-hash 非零退出: {proc.stderr.strip()}")
         return
     # --print-code-hash 输出带 [HH:MM:SS] 时间戳前缀，取最后一个 token。
     ts_hash = proc.stdout.strip().split()[-1]
-    py_hash = common.distribution.compute_code_hash()
     check(
         len(ts_hash) == 64 and ts_hash == py_hash,
         f"双语 codeHash 一致 (TS={ts_hash[:12]}… Python={py_hash[:12]}…)",
     )
     # F3/F4 文件集逐文件对拍（2026-09-01 事故防线：hash 相同但集不同由这里兜底）——
     # --print-code-hash-files 输出与 Python 侧 _collect_code_hash_files 全等。
-    proc2 = run_utf8([bun, str(agent), "--print-code-hash-files"], cwd=str(REPO), timeout=120)
+    proc2 = f_files.result()
     if proc2.returncode != 0:
         check(False, f"bun --print-code-hash-files 非零退出: {proc2.stderr.strip()}")
         return

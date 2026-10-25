@@ -51,6 +51,7 @@ from worker.eval_yield import (
     local_release_due,
     next_eval_wait,
     release_local_gate_if_starved,
+    requeue_backoff_sec,
     reserve_local_slots,
 )
 from worker.sibling_reuse import REUSE_NODE, land_reused_eval, reuse_eval_round
@@ -704,7 +705,7 @@ class EvalDispatcher:
                                 or (transient and leg < EVAL_TASK_ATTEMPTS_TRANSIENT)
                             ) and task not in seen:
                                 if transient:
-                                    retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
+                                    retry_at[task] = time.time() + requeue_backoff_sec(leg)
                                 pending.append(task)
                                 log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued"
@@ -865,7 +866,7 @@ class EvalDispatcher:
                                         "（背压/瞬断，非节点故障）— 本轮停派"
                                     )
                                 if leg < EVAL_TASK_ATTEMPTS_TRANSIENT and task not in seen:
-                                    retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
+                                    retry_at[task] = time.time() + requeue_backoff_sec(leg)
                                     pending.append(task)
                                     log(
                                         f"[eval] s{task[0]}/seed{task[1]} failed ({err})"

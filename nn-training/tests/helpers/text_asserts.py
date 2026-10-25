@@ -478,6 +478,10 @@ def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
         rel = str(p.relative_to(root)).replace("\\", "/")
         text = p.read_text(encoding="utf-8")
         has_py_face = any(tok in text for tok in _PY_FACE_TOKENS)
+        # 廉价预筛：口径 A 需要 `Assert` 节点（源码里必有 `assert` 关键字），口径 B 需要生产
+        # 源码面字面量 —— 两个都没有的文件解析出来必然是 (0, 0)（2026-10-26，431 → 418 个）。
+        if not has_py_face and "assert" not in text:
+            continue
         form, py_src = _counts(ast.parse(text, filename=rel), has_py_face=has_py_face)
         if form or py_src:
             per_file[rel] = (form, py_src)
