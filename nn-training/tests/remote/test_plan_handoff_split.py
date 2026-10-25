@@ -83,11 +83,6 @@ ALLOWED_IMPORTS = {
     # 不许在本地再写两个数。`functools` 只为 `partial`（stdlib）。
     "common.game_watch",
     "common.logutil",
-    # ★ 2026-10-25（用户口径：pull/push 的 rollout/ppo/eval 日志必须一致，只有传输模块不同）：
-    #   评估落账时补一个 `eval` 进度事件 —— push 腿在 `plan_run._maybe_cloud_eval` 有、pull 腿
-    #   （本文件）此前没有，进度面因此看不到「在评估」这一段。`common.progress_hook` 是 L0 叶子
-    #   （只 stdlib），比这里已有的 `common.game_watch` 还薄。
-    "common.progress_hook",
     "common.protocol",
     "common.platform_utils",
     # 2026-10-08（plan/rollout-local-scratch §2 P0-5）：云机评估的三样热数据换到节点本地盘

@@ -2263,6 +2263,8 @@ def install_progress_pinger(
         "outcome": "",
         "cool": 0.0,
         "level": 0,
+        #: 上一条已打过的日志行（**只用于去重**：同内容不重播，跨事件变化才打）。
+        "note": "",
     }
 
     def _ping(
@@ -2282,13 +2284,20 @@ def install_progress_pinger(
             # 拿不到）——**连不上的「降频」不算死**，它走下面的 `cool` 窗。
             return False
         now = now_fn()
+        # ★ 2026-10-25（用户口径：pull / push 的 rollout/ppo/eval **日志**必须一致，只有传输不同）：
+        #   **日志行与发报解耦**。发报要节流（POST 有成本），日志不需要 —— 同一个事件在 pull 腿上
+        #   因为节流窗而不打，就等于「同一件事在两条腿上长什么样不一样」。所以：每次事件先打一行
+        #   （内容没变不打，防刷屏），节流只管「发不发出去」。
+        label = _progress_label(kind, it=int(it), done=int(done), total=int(total))
+        if label != state.get("note"):
+            state["note"] = label
+            log(label)
         if not force and float(state["cool"]) > now:
             return False  # 降频窗内（不是死；到点自己回来）
         # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
         if not force and (now - float(state["at"])) < float(interval):
             return False
         state["at"] = now
-        label = _progress_label(kind, it=int(it), done=int(done), total=int(total))
         code, doc = post_fn(url, token, log, timeout=timeout)
         if code == 200:
             if int(state["fails"]):
@@ -2297,7 +2306,7 @@ def install_progress_pinger(
             state["cool"] = 0.0
             state["level"] = 0
             state["outcome"] = ""  # 复活：本段结局不再是 unreachable
-            log(f"[打点] {label} → hub（hold 活性 = 进度；心跳只续 TTL）")
+            log("[打点] 已送达 hub（hold 活性 = 进度；心跳只续 TTL）")
             return True
         if code == 409:
             why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")

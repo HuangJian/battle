@@ -1329,6 +1329,32 @@ def _pinger(
     return detach, lines
 
 
+def test_progress_log_is_not_eaten_by_the_post_throttle() -> None:
+    """★ 2026-10-25（用户口径：pull / push 的 rollout/ppo/eval **日志**必须一致，只有传输不同）。
+
+    发报要节流（POST 有成本），**日志不需要**：同一个事件在 pull 腿上因为节流窗而不打，就等于
+    「同一件事在两条腿上长什么样不一样」。所以：每次事件都先打一行（内容没变才跳过），
+    节流只管「发不发出去」。
+    """
+    from common import progress_hook
+
+    posts: list[int] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        posts.append(1)
+        return 200, {}
+
+    detach, lines = _pinger("http://hub", post=fake_post, interval=3600.0)
+    try:
+        progress_hook.report("iter", it=7, done=1, total=8)
+        progress_hook.report("iter", it=7, done=2, total=8)  # 窗内：不发，但日志要打
+    finally:
+        detach()
+    assert len(posts) == 1, f"节流窗内只该发一次，实际 {len(posts)}"
+    notes = [ln for ln in lines if ln.startswith("进度")]
+    assert len(notes) == 2, f"两条事件都该有日志行（与发报无关）：{lines}"
+
+
 def test_progress_ping_lands_on_the_wire_once_per_window() -> None:
     """形状 + 节流：URL/参数逐字（hub 只吃这两个查询参），首拍恒发，窗内不重复。"""
     from common import progress_hook
@@ -1582,7 +1608,10 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
         assert detach() == ""
     finally:
         hub._now = real_now  # type: ignore[method-assign]
-    assert any("→ hub" in ln for ln in lines), lines
+    # 2026-10-25：日志行与发报解耦 —— 「进度」那一行由 `progress_text` 单独打，
+    # 送达另起一行（不再把 label 塞进送达行里重复一遍）。
+    assert any(offline_boot._progress_label("iter", it=0, done=1, total=4) in ln for ln in lines), lines
+    assert any(ln.startswith("[打点] 已送达") for ln in lines), lines
     # 错租约（别人接管了 / token 过期）⇒ 真端点回 409，层按 taken/expired 停手（不再瞎 ping）
     detach2, _l2 = _pinger(base, "not-my-token", token=TOKEN)
     try:
