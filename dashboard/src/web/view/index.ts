@@ -15,8 +15,8 @@
  *    component-groups 组件卡分组（服务 vs 课程）|  component-roles  服务角色名与用途释义
  *    pool-types     节点池视图      |  eval-types / eval-export  评估板
  *    log-view       日志页          |  cards  卡片注册表
- *    error-types    组件错误登记表契约（类型 + 上限常量；**指纹不在这里** —— 它要 `node:crypto`，
- *                   住在服务端 api 层的 `error-fingerprint.ts`）
+ *    error-types    组件错误登记表契约（类型 + 上限常量；**指纹不在这里** —— 它要服务端专有的
+ *                   hash（客户端无此能力），住在服务端 api 层的 `error-fingerprint.ts`）
  *    loop-queue     调度器每课队列视图（单例卡片的读面）
  *    course-status  课程状态**单一派生**（pill 与矩阵同源；P1-10）
  *    format / spark / series / phase / rows / interaction  纯函数工具

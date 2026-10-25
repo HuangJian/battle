@@ -4,7 +4,6 @@
  * （engine_epoch = sha256(codeHash)[0:16]，不再掺 git commit，也不再另立 GAMEPLAY_SPECS）。
  */
 import { describe, expect, it } from 'bun:test'
-import { createHash } from 'node:crypto'
 import {
   collectCodeHashEntries,
   computeCodeHash,
@@ -17,7 +16,7 @@ import {
 describe('engine_epoch (§2.5；2026-09-17 统一到 SSOT 清单)', () => {
   it('epoch = sha256(codeHash)[0:16]（与 common.distribution.compute_engine_epoch 同式）', () => {
     const ch = computeCodeHash()
-    const want = createHash('sha256').update(ch).digest('hex').slice(0, 16)
+    const want = new Bun.CryptoHasher('sha256').update(ch).digest('hex').slice(0, 16)
     expect(engineEpoch(ch)).toBe(want)
     expect(engineEpoch(ch)).toMatch(/^[0-9a-f]{16}$/)
     // 一次展开同时给出 epoch 与 codeHash（诊断时可比）

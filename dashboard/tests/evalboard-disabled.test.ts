@@ -205,14 +205,11 @@ describe('evalBoard 停用（R4）', () => {
 
 const SERVER_SRC = path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts')
 
+/** 递归列 `.ts(x)`（Bun.Glob 原生扫描；`dot: true` 与旧 walker 同面——它不跳点开头条目）。 */
 function walkFiles(dir: string): string[] {
-  const out: string[] = []
-  for (const ent of readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, ent.name)
-    if (ent.isDirectory()) out.push(...walkFiles(p))
-    else if (/\.(ts|tsx)$/.test(ent.name)) out.push(p)
-  }
-  return out
+  return [...new Bun.Glob('**/*.{ts,tsx}').scanSync({ cwd: dir, dot: true })].map((rel) =>
+    path.join(dir, rel),
+  )
 }
 
 describe('evalBoard 停用：源码守卫', () => {

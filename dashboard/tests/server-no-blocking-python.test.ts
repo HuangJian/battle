@@ -20,22 +20,19 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { readdirSync, readFileSync } from 'fs'
+import { readFileSync } from 'fs'
 import { join } from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 
-function walk(dir: string, out: string[]): string[] {
-  for (const ent of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, ent.name)
-    if (ent.isDirectory()) walk(p, out)
-    else if (ent.name.endsWith('.ts')) out.push(p)
-  }
-  return out
+/** 递归列 `.ts`（Bun.Glob 原生扫描）。`dot: true` = 与旧的 readdir 遍历**同面**：
+ *  旧 walker 不跳过任何点开头目录/文件，这里也不跳（比对过 80 个文件逐一对齐）。 */
+function walk(dir: string): string[] {
+  return [...new Bun.Glob('**/*.ts').scanSync({ cwd: dir, dot: true })].map((rel) => join(dir, rel))
 }
 
 describe('服务端不许同步子进程（事件循环是共享资源）', () => {
   it('src/server/** 无 spawnSync/execSync 调用（要结果就走 runRunPythonAsync*）', () => {
-    const files = walk(join(DASHBOARD_ROOT, 'src', 'server'), [])
+    const files = walk(join(DASHBOARD_ROOT, 'src', 'server'))
     expect(files.length).toBeGreaterThan(20) // 扫描面没空（路径搬迁后这个用例要立刻红）
     const offenders = files.filter((f) =>
       /\b(spawnSync|execSync)\s*\(/.test(readFileSync(f, 'utf8')),

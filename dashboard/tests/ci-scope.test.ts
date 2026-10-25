@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 
 /**
@@ -25,15 +25,15 @@ const WORKFLOW = resolve(ROOT, '.github/workflows/dashboard.yml')
 const IMPORT_RE = /from\s+['"]([^'"]+)['"]/g
 const EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
 
+/** 递归列 `.ts(x)`（Bun.Glob 原生扫描）。跳过规则与旧 walker 同面：`node_modules` 与
+ *  **点开头目录**不进；点开头的**文件**照收（旧 walker 只跳过目录）——
+ *  实测 src/tests/scripts 三个根逐个对拍，文件集合完全一致。 */
 function walk(dir: string, out: string[]): void {
-  for (const e of readdirSync(dir, { withFileTypes: true })) {
-    const p = resolve(dir, e.name)
-    if (e.isDirectory()) {
-      if (e.name === 'node_modules' || e.name.startsWith('.')) continue
-      walk(p, out)
-    } else if (/\.tsx?$/.test(e.name)) {
-      out.push(p)
-    }
+  for (const rel of new Bun.Glob('**/*.{ts,tsx}').scanSync({ cwd: dir, dot: true })) {
+    const segs = rel.split(/[\\/]/)
+    if (segs.includes('node_modules')) continue
+    if (segs.slice(0, -1).some((s) => s.startsWith('.'))) continue
+    out.push(resolve(dir, rel))
   }
 }
 

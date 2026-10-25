@@ -10,7 +10,6 @@
  * 隔离是 god/nn 不串键的唯一保证（A 层恒 nn，B/C 批内不混 policy）。
  */
 
-import { createHash } from 'node:crypto'
 import { BATCH_GAMES, seed0OfSegment, segmentOf } from './store'
 import { stageJsonOf, type LadderRung } from './ladder'
 
@@ -73,7 +72,7 @@ function unitOf(
     mapHash: rung.mapHash,
     policy,
     stageJson,
-    stageJsonHash: createHash('sha256').update(stageJson).digest('hex').slice(0, 16),
+    stageJsonHash: new Bun.CryptoHasher('sha256').update(stageJson).digest('hex').slice(0, 16),
     stageId: BATCH_STAGE_BASE + rung.idx,
     seed0: seed0OfSegment(seg),
     seeds: seedsOfSegment(seg),
@@ -119,5 +118,5 @@ export function batchIterId(runId: string, batchShort: string, unitIdx: number):
 
 /** batch_id 短码（iterId 用；全局 batch_id 太长）。 */
 export function batchShort(batch_id: string): string {
-  return createHash('sha256').update(batch_id).digest('hex').slice(0, 8)
+  return new Bun.CryptoHasher('sha256').update(batch_id).digest('hex').slice(0, 8)
 }

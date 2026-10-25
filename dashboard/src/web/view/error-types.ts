@@ -2,7 +2,8 @@
  *
  *  ★ 本文件在**客户端 bundle 里**（`web/view/**` 的目录纪律：只允许类型与纯函数，无 IO、
  *  无 `node:` 模块、无 Bun 全局 —— 见 `index.ts` 头注与 `tests/architecture-layering.test.ts`）。
- *  **指纹计算不在这里**：它要 `node:crypto` ⇒ 住服务端 api 层的 `error-fingerprint.ts`
+ *  **指纹计算不在这里**：它要服务端专有的 hash（客户端无此能力）⇒ 住服务端 api 层的
+ *  `error-fingerprint.ts`
  *  （plan/component-error-registry §4.1 P0-1；同类事故见 docs/nn/console.md §1443）。
  *  ⇒ 头注里**别写出那个路径字面**：本目录的禁词闸扫的是**文本**（注释也照扫，2026-10-16 实测
  *  红过一次）——用「服务端 api 层」指代即可。

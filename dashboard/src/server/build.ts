@@ -8,7 +8,7 @@
  */
 
 import { build } from 'bun'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'
 import { BUNDLE_DIR, DASHBOARD_ROOT } from '../core/paths'
 
@@ -64,22 +64,17 @@ export interface EnsureResult {
   gzipBytes: number
 }
 
-function walkTs(dir: string, out: string[]): string[] {
-  let names: string[] = []
+/** 递归列 `.ts(x)`（Bun.Glob 原生扫描）。跳过规则与旧 walker 同面：`.build` 与
+ *  `node_modules` 目录不进（点开头的**文件**照收——旧 walker 也只跳目录）。 */
+function walkTs(dir: string, out: string[] = []): string[] {
   try {
-    names = readdirSync(dir, { withFileTypes: true }).map((d) => d.name)
-  } catch {
-    return out
-  }
-  for (const name of names) {
-    if (name === '.build' || name === 'node_modules') continue
-    const p = path.join(dir, name)
-    try {
-      if (statSync(p).isDirectory()) walkTs(p, out)
-      else if (name.endsWith('.ts') || name.endsWith('.tsx')) out.push(p)
-    } catch {
-      /* stat race */
+    for (const rel of new Bun.Glob('**/*.{ts,tsx}').scanSync({ cwd: dir, dot: true })) {
+      const segs = rel.split(/[\\/]/)
+      if (segs.some((s) => s === '.build' || s === 'node_modules')) continue
+      out.push(path.join(dir, rel))
     }
+  } catch {
+    /* 目录不存在 / 读不了：沿用旧语义（返回已收集的） */
   }
   return out
 }
