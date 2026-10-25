@@ -309,7 +309,9 @@ bun tools/diag/run-forensics.ts --from-json tmp/fx-120.json \
 TypeScript `strict: true` with `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`,
 `noFallthroughCasesInSwitch` (`tsconfig.json`) — the compiler is a reviewer; do not silence it with
 `any` or `@ts-ignore`. Bun is the all-in-one tool (runtime, `bun test`, package manager). Vite is
-dev server + build (target `es2020`). oxlint + oxfmt only — do not introduce ESLint/Prettier.
+dev server + build (target `es2020`). oxlint + `bun fmt` (built into Bun ≥ 1.4.4) only — do not
+introduce ESLint/Prettier/oxfmt. The Bun floor is declared as `engines.bun = ">=1.4.4"` in both
+`package.json` files; Bun does not enforce it, so the pre-commit hook does (§5.5).
 
 ### 5.2 Commands (canonical)
 
@@ -320,7 +322,7 @@ bun run test         # SCOPED: only tests tied to local git changes, prints only
 bun test --parallel --timeout=50000   # full suite — ALWAYS with both flags (*1)
 bun run typecheck    # tsc --noEmit --incremental
 bun run lint         # oxlint
-bun run format       # oxfmt
+bun run format       # bun fmt (options in bunfig.toml [fmt]; needs Bun ≥ 1.4.4)
 bun run check        # full gate: tsc --noEmit --incremental && bun test（组成见 tools/run-root-tests.ts）
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~4s) — red ⇒ new-era triple
@@ -393,8 +395,11 @@ spin up a browser) to validate its own changes.
 - Validation is the automated gates only: `bun run check` (typecheck + full suite), `bun run build`
   (adds oxlint). For presentation/UI work unit tests can't assert, rely on `tsc --noEmit`, oxlint,
   and a successful `vite build`.
-- The pre-commit hook additionally runs oxfmt **in place** (it reformats files and re-stages, rather
-  than failing on `--check`) plus oxlint.
+- The pre-commit hook additionally runs `bun fmt --staged` **in place** (it reformats the staged files
+  and re-stages them, rather than failing on `--check`; files that also have unstaged edits are skipped
+  by the tool itself, exit 2) plus oxlint.
+- The hook **refuses to run on Bun < 1.4.4** (before the gates, `--selftest` excepted): `bun fmt` does not
+  exist there and the format step is `|| true`, so it would silently skip formatting. `bun upgrade` to fix.
 - If a visual check is wanted, the human opens it themselves. Never leave a dev server running as
   "proof" of work, and never present a localhost URL as a validation step.
 
@@ -463,13 +468,13 @@ here. Each pitfall below was hit and debugged (2026-08-27) — the "reproduce" o
    reliable: commit an ASCII one-liner (`git commit -m "commit-test"`), then
    `git commit --amend -F tmp/…`.
 3. **pre-commit hook output is invisible when the hook fails.** The hook
-   (`tools/githook/pre-commit`: typecheck, scoped tests, oxfmt in place, oxlint, freeze:check)
+   (`tools/githook/pre-commit`: typecheck, scoped tests, `bun fmt --staged`, oxlint, freeze:check)
    prints to its own stdout, which the command wrapper swallows on failing exit — exit 1 with empty
    output is indistinguishable from a real failure. Diagnose by running it directly:
    ```
    bash tools/githook/pre-commit > tmp/hook.txt 2>&1; echo "EXIT=$LASTEXITCODE"
    ```
-   The hook reformats with oxfmt **in place and re-stages** — re-check `git status` / re-stage after
+   The hook reformats with bun fmt **in place and re-stages** — re-check `git status` / re-stage after
    it runs (a stale index is a common downstream confusion).
 4. **Verify, never assume.** After any commit run `git log -1 --pretty=fuller` + `git log --oneline -3`
    to confirm the intended message (and hash) landed — the silent exit-1 can leave a `commit-test`

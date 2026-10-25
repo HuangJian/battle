@@ -68,6 +68,11 @@ jobs:
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
+        with:
+          # 钉在仓库地板版本（`package.json` engines.bun ≥ 1.4.4 + pre-commit 版本门禁 —
+          # DECISIONS §2026-10-25-goalnn-bun-fmt）：`bun fmt` 自 1.4.4 起才有；不钉 = setup-bun
+          # 装 latest，CI 与本机门禁会跑不同字节的 Bun。升级地板时三处一起改。
+          bun-version: '1.4.4'
 
       - name: Install deps (dashboard 自己的 node_modules；不入根)
         # bun.lock 已入库（dashboard 依赖自包含）⇒ --frozen-lockfile 保证可复现。

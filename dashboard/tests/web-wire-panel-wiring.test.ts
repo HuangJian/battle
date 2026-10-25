@@ -30,7 +30,7 @@ describe('「传输」页接线（/wire）', () => {
   const src = readFileSync(APP, 'utf8').replace(/\s+/g, ' ')
 
   it('page === wire 分派到 WirePanel（漏了就是空白页）', () => {
-    // ⚠ 不要写死括号/换行：pre-commit 的 oxfmt 会重排 JSX，把 `? ( <X/> )` 收成
+    // ⚠ 不要写死括号/换行：pre-commit 的 bun fmt 会重排 JSX，把 `? ( <X/> )` 收成
     // `? <X/>`——写死形状的断言会在别人提交时才第一次变红（本测试首版就踩了这个）。
     expect(src).toContain("page === 'wire' ?")
     expect(src).toContain('<WirePanel stateView={stateView} course={viewCourse} />')

@@ -9535,3 +9535,21 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/remote-transport.md §128`。
 - **验收**：三条新用例（措辞四要素 / 状态行去重 / 停滞龄）；文本断言预算抬一格 1501 → 1503
   （理由见 `tests/test_source_text_assert_budget.py` 模块头末段）。
+
+## §2026-10-25-goalnn-bun-fmt（2026-10-25，用户指定换格式化器）
+
+- **背景**：Bun v1.4.4 内置 `bun fmt`（Prettier 兼容），仓库不再需要 `oxfmt` 这个 devDependency；
+  根与 `dashboard/` 各锁了一份 oxfmt 及其平台绑定包。
+- **备选与否决**：① 继续用 oxfmt 0.59 —— 否，用户点名换，且那是仓库里唯一可省的第三方依赖；
+  ② 配置留在 `.oxfmtrc.json`（bun fmt 也认）—— 否，用户要求迁进 `bunfig.toml`，且没理由给一个
+  已删的工具留配置文件。
+- **决定**：`bun run format` = `bun fmt`（根 + dashboard）；删两份 `oxfmt` devDependency 与
+  `.oxfmtrc.json`，选项（含 `ignorePatterns = ["*.md", "dist", "node_modules"]`）迁进
+  `bunfig.toml [fmt]`；pre-commit 用 `bun fmt --staged`（MM 文件工具自己跳过 + 报错，自动 re-add）。
+  **Bun ≥ 1.4.4 是硬前提**：两个 `package.json` 声明 `engines.bun = ">=1.4.4"`（Bun 不强制，
+  只负责让人看见），CI 的 `dashboard.yml` 钉 `bun-version: '1.4.4'`（不钉 = latest，会漂），
+  实际执行由 hook 开局校验（`bun_fmt_supported`）——更早的版本没有 `fmt`
+  子命令，而格式化是 `|| true`，不拦就会静默跳过，所以旧 Bun **直接拒绝提交**（`bun upgrade`）。
+- **风格后果**：无 oxfmt 配置时 bun fmt 走 Prettier flavor ⇒ 与旧 oxfmt 输出有差（多行 union 会收
+  单行）。仓库本就有 181 个文件在 `bun fmt --check` 下不干净（格式化从不进门禁，历史漂移），不随本刀重排。
+- **违反后果**：回装 oxfmt / 新加 Prettier ⇒ 两份格式化器对同一棵树互相打脸；老 Bun 上格式化门禁静默失效。

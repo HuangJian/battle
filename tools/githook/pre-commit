@@ -39,9 +39,11 @@
 #                   判 stale。**只修纯行尾污染**（归一后逐字节 == 索引 blob ⇒
 #                   无任何真实内容改动，他人在途编辑绝不被碰）；有真实内容差异
 #                   的文件一律不碰，只报。永不阻断。
-#   oxfmt           逐 staged 文件格式化 + re-add；**另有未暂存改动（MM）的
-#                   文件跳过** —— 格式化工作树内容会把未暂存编辑折进提交
-#                   （2026-09-06 v1 事故教训）。永不阻断。
+#   bun 版本        开局校验 Bun ≥ 1.4.4（`bun fmt` 自该版本才有）；更旧的 Bun
+#                   直接拒绝提交 —— 格式化永不阻断（`|| true`），不拦就会静默跳过
+#   bun fmt         `bun fmt --staged`：格式化暂存文件并重新 git add；**另有未暂存
+#                   改动（MM）的文件由工具自己跳过并 exit 2** —— 不会把未暂存
+#                   编辑折进提交（2026-09-06 v1 事故教训）。永不阻断。
 #   oxlint          staged 文件，红即拦（不变）
 #   freeze          仅 staged 含 **根项目** TS/游戏代码（*.ts 等 / src/，
 #                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
@@ -58,7 +60,7 @@
 #   --no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #
-#   铁律：除 oxfmt 对「无未暂存改动的 staged 文件」的精确格式化，以及 eol 归一
+#   铁律：除 bun fmt 对「无未暂存改动的 staged 文件」的精确格式化，以及 eol 归一
 #   对「**纯行尾污染**文件」的工作树重写外，本 hook 对工作树 **零写操作**。历史
 #   教训：v1「临时摘除未暂存改动」在多 agent 并行
 #   下弄丢了他人在途工作；v2 影子树方案（junction/锁/守卫）因复杂危险被否决
@@ -136,6 +138,22 @@ attrib_mypy() {
 attrib_staged_hits() {
   grep -Fxf "$1" || true
 }
+# 版本门禁：`bun fmt` 自 Bun 1.4.4 起才有（DECISIONS §2026-10-25-goalnn-bun-fmt）。
+# 返回 0 = 支持；只比前三个数字段（`1.4.4-canary.1` ⇒ 1.4.4），非数字一律剥掉，
+# 空/不可解析 ⇒ 保守判不支持（宁可拦，也不静默跳过格式化）。
+bun_fmt_supported() {
+  _bun_major=$(printf '%s\n' "$1" | cut -d. -f1 | tr -cd '0-9')
+  _bun_minor=$(printf '%s\n' "$1" | cut -d. -f2 | tr -cd '0-9')
+  _bun_patch=$(printf '%s\n' "$1" | cut -d. -f3 | tr -cd '0-9')
+  [ -n "$_bun_major" ] || _bun_major=0
+  [ -n "$_bun_minor" ] || _bun_minor=0
+  [ -n "$_bun_patch" ] || _bun_patch=0
+  [ "$_bun_major" -gt 1 ] && return 0
+  [ "$_bun_major" -eq 1 ] || return 1
+  [ "$_bun_minor" -gt 4 ] && return 0
+  [ "$_bun_minor" -eq 4 ] || return 1
+  [ "$_bun_patch" -ge 4 ]
+}
 
 hook_selftest() {
   D="tmp/selftest-$$"
@@ -198,6 +216,17 @@ hook_selftest() {
   if [ -n "$(printf '%s\n' "$DASH_FILES" | attrib_staged_hits "$D/dash-other.txt")" ]; then
     echo "selftest FAIL: dashboard 归因与非 staged 路径不得有交集"; FAIL=1
   fi
+  # Bun 版本门禁（bun fmt 自 1.4.4 起才有）：边界两侧 + 空串保守拒绝
+  for __v in 1.4.3 1.3.9 0.9.0 ''; do
+    if bun_fmt_supported "$__v"; then
+      echo "selftest FAIL: Bun '${__v}' 不应判定支持 bun fmt"; FAIL=1
+    fi
+  done
+  for __v in 1.4.4 1.4.5 1.5.0 2.0.0 1.4.4-canary.1; do
+    if ! bun_fmt_supported "$__v"; then
+      echo "selftest FAIL: Bun '${__v}' 应判定支持 bun fmt"; FAIL=1
+    fi
+  done
   # EOL 归一器自检（分类判据：same / eol / real 三分支 + 端到端修复与「真实改动不动」）
   if ! "$BUN" tools/githook/normalize-lf.ts --selftest > "$D/eol-selftest.log" 2>&1; then
     echo "selftest FAIL: EOL 归一器自检未过（见 $D/eol-selftest.log）"; FAIL=1
@@ -216,7 +245,16 @@ if [ "${1:-}" = "--selftest" ]; then
   exit $?
 fi
 
-echo "▶ Running pre-commit checks (bun: $BUN)..."
+# ---------- Bun 版本门禁（bun fmt 需要 ≥ 1.4.4；旧版会静默跳过格式化） ----------
+BUN_VERSION=$("$BUN" --version 2>/dev/null | tr -d '[:space:]')
+if ! bun_fmt_supported "$BUN_VERSION"; then
+  echo "✗ Bun ${BUN_VERSION:-<unknown>} 太旧：本钩子的格式化用 'bun fmt'，需要 Bun ≥ 1.4.4。" >&2
+  echo "  更旧的 Bun 没有 fmt 子命令，而格式化永不阻断（|| true）⇒ 会静默跳过，所以这里直接拦。" >&2
+  echo "  升级后重试：bun upgrade。最后手段：git commit --no-verify（跳过全部门禁）。" >&2
+  exit 1
+fi
+
+echo "▶ Running pre-commit checks (bun: $BUN, $BUN_VERSION)..."
 
 # ---------- 提交内容清单（staged = 归因基准；dirty = 归因排除集） ----------
 STAGED_LIST="tmp/pre-commit-staged-$$.txt"
@@ -254,7 +292,7 @@ staged_paths > "$STAGED_LIST"
 #   全集群节点判 stale、mac 被排除在 rollout/eval 外。
 #   ⇒ 修法不是「让 git 提交时归一」（索引早就是 LF，坏的是**工作树**），而是把
 #      工作树拉回**索引字节**。索引 = 提交内容的唯一真相 ⇒ 拉回它零语义风险。
-# 写工作树的唯一新增例外（oxfmt 之外）：**纯行尾污染**的工作区文件 ——
+# 写工作树的唯一新增例外（bun fmt 之外）：**纯行尾污染**的工作区文件 ——
 #   归一后逐字节 == 索引 blob ⇒ 文件里没有任何真实内容改动，他人的在途编辑
 #   （真实内容差异）绝不会被覆盖（判据 = normalize-lf.ts::classifyDrift）。
 # 放在 dirty 清单**之前**：归一后「因行尾而不一致」的文件不再算未暂存改动。
@@ -459,23 +497,13 @@ else
   fi
 fi
 
-# ---------- format（oxfmt 逐 staged 文件；MM 文件跳过防折叠） ----------
-STAGED_TS=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" || true)
-if [ -n "$STAGED_TS" ]; then
-  echo " ▸ format (oxfmt, staged 逐文件；另有未暂存改动的文件跳过)"
-  for f in $STAGED_TS; do
-    if [ ! -f "$f" ]; then
-      echo "   ⚠ 跳过 $f（staged 删除/改名源——oxfmt/git add 对不存在的工作树文件会 fatal）"
-      continue
-    fi
-    if grep -Fxq "$f" "$DIRTY_LIST"; then
-      echo "   ⚠ 跳过 $f（MM：另有未暂存改动——格式化工作树内容会把未暂存编辑折进提交）；请自行格式化后 git add"
-    else
-      "$BUN" x oxfmt "$f" >/dev/null 2>&1 || true
-      git add -- "$f"
-    fi
-  done
-fi
+# ---------- format（`bun fmt --staged`：格式化暂存文件并重新 index） ----------
+# 旧实现逐个 staged TS/JS 文件格式化，自己维护两条保护；工具原生就有（2026-10-25 实测）：
+#   ① MM 文件（暂存 + 未暂存改动）**跳过并报错（exit 2）** —— 不会把未暂存编辑折进提交
+#      （2026-09-06 v1 事故的那条教训）；② staged 删除源（工作树已不存在）不 fatal。
+# 所以写入面仍是「staged 且无未暂存改动」的文件（钩子铁律不变）。永不阻断：`|| true`。
+echo " ▸ format (bun fmt --staged, 格式化暂存文件并重新 git add；MM 文件由工具跳过)"
+"$BUN" fmt --staged || true
 
 # ---------- lint（oxlint，staged 文件——红即拦） ----------
 # 只喂 oxlint 真正会解析的扩展名（TS/JS 系）。早期版本把 .json 也列进 grep，

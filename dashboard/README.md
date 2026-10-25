@@ -55,7 +55,7 @@ bun run test         # bun scripts/run-tests.ts → 组成见该文件：--paral
                      #   故 worker 数由 launcher 现算；裸 --parallel 的缺省是逻辑核 16 ⇒ 假红）
                      #   预载 = 测试进程出网直连（代理环境下「hub 不可达」类用例从 ~3s 掉回 ~0.01s，见该文件头注）
 bun run lint         # oxlint
-bun run format       # oxfmt
+bun run format       # bun fmt（Bun ≥ 1.4.4，读仓库根 bunfig.toml 的 [fmt]）
 ```
 
 根仓库的 `bun run check` **不再**覆盖本项目（如上），所以本项目的门禁就是上面这两行。

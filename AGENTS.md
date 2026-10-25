@@ -65,7 +65,7 @@ plan 与 MANIFEST 冲突 ⇒ MANIFEST 赢，先记进 DECISIONS 再动手。`doc
 
 ### Language & tooling
 
-- TS `strict`（编译器是评审：禁 `any` / `@ts-ignore` 消音）· Bun 一把梭 · Vite target `es2020` · 只用 oxlint + oxfmt。
+- TS `strict`（编译器是评审：禁 `any` / `@ts-ignore` 消音）· Bun 一把梭 · Vite target `es2020` · 只用 oxlint + bun fmt。
 - **nn python / pytest 一律 `bash tools/githook/nn-py-safe.sh …`；严禁裸 `python -m pytest`**（删除保护沙箱拦 python 内的删/写 ⇒ pytest 静默挂死）。60s/用例上限，`-m pytest` 另套 480s 外墙钟。
 
 ### Commands (canonical)

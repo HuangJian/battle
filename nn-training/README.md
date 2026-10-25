@@ -321,7 +321,7 @@ worker/scripts/* → worker/models/*, worker/ppo/*
 
 仓库 `tools/githook/pre-commit`（`core.hooksPath = tools/githook`）在提交时自动
 执行质量门禁。**当 staged 内容包含 `nn-training/` 下文件时**，除仓库既有的
-TS 门禁（typecheck / bun test / oxfmt / oxlint / freeze gate）外，额外跑 Python
+TS 门禁（typecheck / bun test / bun fmt / oxlint / freeze gate）外，额外跑 Python
 门禁（在 `nn-training/` 内、用 `.venv` 解释器）：
 
 ```sh
