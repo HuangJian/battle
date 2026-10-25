@@ -43,6 +43,7 @@ from common.protocol import (
     ROLE_HEADER,
 )
 from hub.store import _JobStore
+from tests.helpers.console_stub import NoHandoffConsole
 from tests.subproc_util import spawn_bound_port
 
 TOKEN = "e2e-holex-sekret"
@@ -165,6 +166,8 @@ class _Hub:
     def __init__(
         self, traj_root: Path, *, hold_stale_sec: float = 0.0, bc_stale_sec: float = 0.0
     ) -> None:
+        self._console = NoHandoffConsole()
+
         def _argv(port: int) -> list[str]:
             return [
                 sys.executable,
@@ -190,11 +193,13 @@ class _Hub:
             **os.environ,
             "PYTHONPATH": str(ROOT),
             # 隔离四件：权重归档根（否则回传轮写真 weights/）· 两个秒级窗 ·
-            # **控制台地址钉死到不可达端口**（2026-10-06 事故：hub 子进程没传它就回落
-            # `127.0.0.1:8900` = 开发机上正在跑的 dashboard，而那个动作会写本机配置；
-            # 这里 claim 会触发一次「请控制台核对包新鲜度」，端口 1 必拒、连不出去）。
+            # **控制台地址指到本进程起的假控制台**（2026-10-06 事故：hub 子进程没传它就回落
+            # `127.0.0.1:8900` = 开发机上正在跑的 dashboard，而那个动作会写本机配置）。
+            # 2026-10-25：从「死端口」改成「一切路径回 404 的假控制台」——语义等价（都是
+            # 「控制台不可达 ⇒ 降级为手动导出」），但 claim 会**同步**走这条腿，而死端口在
+            # 本机要 2.06s 才回 `ECONNREFUSED`（四条 claim = 8.2s 白等）。
             "BCITY_WEIGHTS_ARCHIVE_ROOT": str(traj_root / "weights-archive"),
-            "BCITY_CONSOLE_URL": "http://127.0.0.1:1/",
+            "BCITY_CONSOLE_URL": self._console.url,
         }
         if hold_stale_sec:
             env["BCITY_HOLD_PROGRESS_STALE_SEC"] = str(hold_stale_sec)
@@ -223,12 +228,15 @@ class _Hub:
         )
 
     def close(self) -> None:
-        self.proc.terminate()
         try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        finally:
+            self._console.close()
 
 
 # ──────────────────────── ① hold 全循环 ────────────────────────

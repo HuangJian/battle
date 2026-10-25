@@ -227,6 +227,15 @@ def main() -> None:
         help="启用离线 push 派发：hub 出站去离线 worker 的隧道派任务、拉每轮产物"
         "（与 --push 相互独立；两者可同时开）",
     )
+    # 2026-10-25（慢用例）：离线派发器的调度拍此前写死 `OFFLINE_PUSH_POLL_SEC=10s`，
+    # 而 `--push-poll-sec` 早就可调——两边本该同口径。提成 CLI 旋钮后，e2e 才能用
+    # 秒级拍跑「派单 → 停用 ⇒ 释放」全链（旧值下光等一拍就是 10s）。**生产缺省不变**。
+    ap.add_argument(
+        "--offline-push-poll-sec",
+        type=float,
+        default=OFFLINE_PUSH_POLL_SEC,
+        help=f"离线 push 派发器的调度拍（秒；缺省 {OFFLINE_PUSH_POLL_SEC:g}）",
+    )
     args = ap.parse_args()
     token = args.token
     if args.token_file:
@@ -401,14 +410,14 @@ def main() -> None:
             offline_workers,
             token,
             port=args.port,
-            poll_sec=OFFLINE_PUSH_POLL_SEC,
+            poll_sec=float(args.offline_push_poll_sec),
             log=lambda m: print(
                 f"[{time.strftime('%H:%M:%S')}] [hub-server offline-push] {m}", flush=True
             ),
         )
         print(
             f"[hub-server] 离线 push 派发已启用：登记表={offline_workers.path} "
-            f"候选 worker={len(offline_workers.snapshot())} poll={OFFLINE_PUSH_POLL_SEC:g}s "
+            f"候选 worker={len(offline_workers.snapshot())} poll={args.offline_push_poll_sec:g}s "
             f"在途={len(offline_disp.assignments.snapshot())}",
             flush=True,
         )

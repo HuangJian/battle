@@ -409,3 +409,29 @@ def test_inflight_grace_cap_semantics() -> None:
     assert y.inflight_grace_cap(900.0) == 120.0
     assert y.inflight_grace_cap(30.0) == 30.0
     assert y.inflight_grace_cap(120.0) == 120.0
+
+
+def test_next_eval_wait_sleeps_until_the_next_retry_is_due() -> None:
+    """★ 节点 worker「没取到局」的睡眠：退避中睡到**最近到期**，其余情况仍睡满上界。
+
+    这是 `trainer/eval_dispatch.py` 的固定 `sleep(5)` 被换掉的那条判据（2026-10-25）：
+    退避表非空时它把「队列里有活、只是还没到点」的等待从 5s 缩到真实剩余，**不改变
+    退避语义**（到点前 `_take_ready_locked` 仍取不到）。四类现场逐个钉：
+    """
+    y = eval_yield_mod
+    now, deadline = 1000.0, 1600.0
+    # ① 队列空 ⇒ 上界 5s（与旧式子 `min(5.0, max(0.1, deadline - now))` 同值）
+    assert y.next_eval_wait((), {}, deadline, now) == 5.0
+    # ② 全在退避、最近一局 0.75s 后到期 ⇒ 睡 0.75s（旧的固定 5s 就是白等的那几秒）
+    pending = ((1, 1), (1, 2))
+    retry_at = {(1, 1): now + 0.75, (1, 2): now + 7.0}
+    assert y.next_eval_wait(pending, retry_at, deadline, now) == 0.75
+    # ③ 有局已到期却没取走（尾段预留/竞态）⇒ 不缩到毫秒级（否则 worker 变热循环）
+    retry_at = {(1, 1): now - 0.5, (1, 2): now + 7.0}
+    assert y.next_eval_wait(pending, retry_at, deadline, now) == 5.0
+    # ④ 只有一部分在退避（另一局立刻可取的被 hold）⇒ 同样走老口径
+    retry_at = {(1, 1): now + 0.75}
+    assert y.next_eval_wait(pending, retry_at, deadline, now) == 5.0
+    # ⑤ 上界与剩余窗口都照样生效
+    assert y.next_eval_wait(pending, {(1, 1): now + 99.0, (1, 2): now + 99.0}, deadline, now) == 5.0
+    assert y.next_eval_wait((), {}, now + 0.5, now) == 0.5

@@ -151,6 +151,11 @@ class _Hub:
             "--offline-push",
             "--push-config",
             str(self.push_cfg),
+            # 调度拍调到 0.2s（生产缺省 10s，见 hub/boot.py 的 `--offline-push-poll-sec`）：
+            # 本用例的最后一步是「停用云机 ⇒ 派发器下一拍释放本课」，10s 拍 = 白等 10s。
+            # 拍长只决定「多久看一次登记表/在途」，没有一个判据建在它的具体取值上。
+            "--offline-push-poll-sec",
+            "0.2",
         ]
 
         def _argv(port: int) -> list[str]:

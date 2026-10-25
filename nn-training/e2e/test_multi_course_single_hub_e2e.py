@@ -49,6 +49,7 @@ from common.protocol import (
 )
 from remote.hub_client import mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
+from tests.helpers.console_stub import NoHandoffConsole
 from tests.subproc_util import spawn_bound_port
 
 #: hub 与 worker 共用的 Bearer（推模式下 worker 的 authKey 就是它）。
@@ -171,6 +172,10 @@ class _Hub:
     """真 `hub.server` 子进程（控制台实际启动的那条 argv）。"""
 
     def __init__(self, traj_root: Path, push_config: Path, *, extra: list[str] | None = None) -> None:
+        # claim 的**同步**控制台腿（`hub/task_pack.py`）：死端口在本机要 2s 才回
+        # `ECONNREFUSED`，本文件两条用例都走 claim ⇒ 用「一切回 404」的假控制台。
+        self._console = NoHandoffConsole()
+
         def _argv(port: int) -> list[str]:
             return [
                 sys.executable,
@@ -206,7 +211,13 @@ class _Hub:
         # 端口竞态由 helper 消化（裸的「探一个端口 → 交给子进程 bind」在 xdist 并行下
         # 会撞「禁止双监听」当场退出 ⇒ 假红；见 tests/subproc_util.py::spawn_bound_port）
         srv = spawn_bound_port(
-            _argv, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)}
+            _argv,
+            cwd=str(ROOT),
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "BCITY_CONSOLE_URL": self._console.url,
+            },
         )
         self.port = srv.port
         self.proc = srv.proc
@@ -267,12 +278,15 @@ class _Hub:
         assert st == 200, f"交还接管失败：{st} {body}"
 
     def close(self) -> None:
-        self.proc.terminate()
         try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        finally:
+            self._console.close()
 
 
 # ────────────────────────── 训练侧发布 ──────────────────────────

@@ -59,6 +59,7 @@ from remote import offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
+from tests.helpers.console_stub import NoHandoffConsole
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 from worker.iter_job import build_iter_spec
@@ -259,6 +260,11 @@ class _Hub:
     """真 `hub.server` 子进程（控制台实际启动的那条 argv：`--traj-root --discover`）。"""
 
     def __init__(self, traj_root: Path) -> None:
+        # 控制台腿是 claim 的**同步**分支（`hub/task_pack.py`）：死端口在本机要 2s 才回
+        # `ECONNREFUSED`，而本文件每条用例至少 claim 一次 ⇒ 换成「一切回 404」的假控制台
+        # （语义同为「控制台不可达，降级手动」；见 tests/helpers/console_stub.py）。
+        self._console = NoHandoffConsole()
+
         def _argv(port: int) -> list[str]:
             return [
                 sys.executable,
@@ -284,7 +290,13 @@ class _Hub:
         # 端口竞态由 helper 消化（裸的「探一个端口 → 交给子进程 bind」在 xdist 并行下会撞
         # 「禁止双监听」当场退出 ⇒ 假红；见 tests/subproc_util.py::spawn_bound_port）
         srv = spawn_bound_port(
-            _argv, cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)}
+            _argv,
+            cwd=str(ROOT),
+            env={
+                **os.environ,
+                "PYTHONPATH": str(ROOT),
+                "BCITY_CONSOLE_URL": self._console.url,
+            },
         )
         self.port = srv.port
         self.proc = srv.proc
@@ -333,12 +345,15 @@ class _Hub:
         return body
 
     def close(self) -> None:
-        self.proc.terminate()
         try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(timeout=5)
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        finally:
+            self._console.close()
 
 
 # ───────────── ① 队列里**遗留**的离线项：谁能领、谁不能（队列腿已退役，闸仍要对） ─────────────

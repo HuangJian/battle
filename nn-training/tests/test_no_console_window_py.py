@@ -138,17 +138,43 @@ def _subprocess_faces(tree: ast.Module) -> tuple[set[str], set[str]]:
     没有这一层时，`trainer/loop.py` 里一个叫 `run()` 的**局部/对象方法**会被误判成
     `subprocess.run`（首版 121 条违规里绝大多数是这么来的）。
     """
+    return _faces_of(tree)
+
+
+def _faces_of(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """同 `_subprocess_faces`（保留旧名给自检用例），实现见 `_index`。"""
+    mods, bare, _local, _calls = _index(tree)
+    return mods, bare
+
+
+def _index(
+    tree: ast.Module,
+) -> tuple[set[str], set[str], dict[str, ast.FunctionDef], list[ast.Call]]:
+    """**一遍 `ast.walk`** 收齐 collect() 要的四样东西（2026-10-25）。
+
+    为什么改：旧版对**每个文件**走三遍（`_subprocess_faces` + 建 `local` 表 + 找调用），
+    而全仓 338 个模块的节点量是百万级 —— 三遍就是 3× 的 `iter_child_nodes`
+    （实测 1.85M 节点 / 10.3s 里的 6.9s）。一遍收完语义不变：同一棵树、同一批 `ast.Call`
+    节点（顺序 = `ast.walk` 的 BFS 顺序，与旧版逐字相同）。
+    """
     mods = {"subprocess"}
     bare: set[str] = set()
+    local: dict[str, ast.FunctionDef] = {}
+    calls: list[ast.Call] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
                 if a.name == "subprocess":
                     mods.add(a.asname or "subprocess")
-        elif isinstance(node, ast.ImportFrom) and (node.module or "") == "subprocess":
-            for a in node.names:
-                bare.add(a.asname or a.name)
-    return mods, bare
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "") == "subprocess":
+                for a in node.names:
+                    bare.add(a.asname or a.name)
+        elif isinstance(node, ast.FunctionDef):
+            local[node.name] = node
+        elif isinstance(node, ast.Call):
+            calls.append(node)
+    return mods, bare, local, calls
 
 
 def _span(node: ast.Call) -> str:
@@ -188,27 +214,32 @@ def collect(virtual: str | None = None) -> tuple[list[str], int]:
     if virtual is not None:
         files.append(("__virtual__.py", virtual))
     else:
-        for p in sorted(ROOT.rglob("*.py")):
-            if any(part in SKIP_DIRS for part in p.parts):
+        # 只读**扫描面**（`SCAN_DIRS`）：旧版把全仓 899 个 `.py` 全读进内存再按目录前缀
+        # 丢掉大半（tests/、tmp/、tools/ 那些），读盘与内存全是白付（2026-10-25）。
+        for d in SCAN_DIRS:
+            base = ROOT / d
+            if not base.is_dir():
                 continue
-            rel = p.relative_to(ROOT).as_posix()
-            files.append((rel, p.read_text(encoding="utf-8")))
+            for p in sorted(base.rglob("*.py")):
+                if any(part in SKIP_DIRS for part in p.parts):
+                    continue
+                rel = p.relative_to(ROOT).as_posix()
+                text = p.read_text(encoding="utf-8")
+                # 子串预筛（§43 规矩一）：`is_sub` 只可能由「`subprocess` 的 alias」或
+                # 「`from subprocess import …` 的裸名」成立 —— 两种绑定都必然让源码里出现
+                # 字面量 `subprocess`。不是的子串 ⇒ 无论怎么写都不可能命中 ⇒ 不必解析。
+                if "subprocess" not in text:
+                    continue
+                files.append((rel, text))
     for rel, src in files:
         if rel in ALLOWED_FILES or rel in EXEMPT:
-            continue
-        if virtual is None and not any(rel.startswith(d + "/") for d in SCAN_DIRS):
             continue
         try:
             tree = ast.parse(src)
         except SyntaxError:
             continue
-        sp_mods, sp_bare = _subprocess_faces(tree)
-        local: dict[str, ast.FunctionDef] = {
-            n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-        }
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
+        sp_mods, sp_bare, local, call_nodes = _index(tree)
+        for node in call_nodes:
             name = _dotted(node.func)
             short = name.split(".")[-1]
             head, _, tail = name.rpartition(".")

@@ -49,6 +49,7 @@ from worker.eval_yield import (
     hold_for_local,
     inflight_grace_cap,
     local_release_due,
+    next_eval_wait,
     release_local_gate_if_starved,
     reserve_local_slots,
 )
@@ -589,8 +590,7 @@ class EvalDispatcher:
                                     f"node={nd['id']} — race lane"
                                 )
                     if task is None:
-                        all_wait = min(5.0, max(0.1, deadline - time.time()))
-                        time.sleep(all_wait)
+                        time.sleep(next_eval_wait(tuple(pending), retry_at, deadline, time.time()))
                         continue
                     ok = False
                     err = ""

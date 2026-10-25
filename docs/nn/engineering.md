@@ -25,6 +25,115 @@
 
 ---
 
+## §87 pytest 最慢用例第三轮：四种「白等」⇒ 8 条 −40s（2026-10-25，用户指令「找出耗时最长的 10 个 pytest，优化！」）
+
+**一句话**：同一套配方（§43/§72：4 连跑 `--durations=0` 取 min → 被点名的单进程串行复测 →
+`cProfile` 定位），**最慢 10 条里有 8 条是真能改的**，合计 **94.4s → 54.4s**（同一批 14 条的并行
+min 口径；其中被点名那 10 条 **71.0 → 38.4s，−46%**）。根因四种，全部是「**白等**」而不是「算得慢」：
+
+| # | 用例 | 改前 | 改后 | 根因 / 修法 |
+|---|---|---|---|---|
+| 1 | `e2e/test_offline_push_e2e.py::test_push_mode_whole_workflow` | 11.53 | **1.71** | 调度拍写死 10s（下详①） |
+| 2 | `tests/trainer/test_eval_dispatch_resilience.py::test_task_lost_404_…` | 10.03 | **3.03** | 节点 worker 固定 `sleep(5)`（下详②） |
+| 3 | `e2e/test_hold_e2e.py::test_full_hold_cycle_recovery_then_takeover_then_revoke` | 9.55 | **5.37** | 死端口控制台 2s × 2（下详③）；**剩下 4s 是两个真 2s 窗**（不动） |
+| 4 | `e2e/test_hold_e2e.py::test_bc_exclusivity_chain_end_to_end` | 7.01 | **2.88** | 同上（1 次 claim + 1.5s 真 BC 窗） |
+| 5 | `tests/test_source_text_assert_budget.py::test_text_assert_counts_only_go_down` | 5.85 | 4.95 | **已到底**：430 个测试文件的一次全量解析 + A/B 两口径统计（§72 已把内部重复遍历砍过；剩下的就是 parse 本身） |
+| 6 | `tests/test_lock_reentrancy.py::test_no_rerun_of_an_owned_lock_…` | 5.00 | 4.61 | **已到底**：`_needs_index` 预筛后仍有 467 文件要 parse + 大 AST visitor（§72 同判） |
+| 7 | `tests/test_no_console_window_py.py::test_no_bare_subprocess_in_nn_training` | 4.38 | **0.54** | 三遍 `ast.walk` + 读全仓 .py（下详④） |
+| 8 | `e2e/test_offline_training_e2e.py::test_task_pack_endpoint_hands_over_the_console_export` | 5.40 | **1.25** | 同 ③ |
+| 9 | `…::test_transient_502_does_not_trip_node_and_games_settle` | 5.03 | **1.03** | 同 ② |
+| 10 | `…::test_wver_409_reposts_weights_and_keeps_node` | 5.03 | **1.02** | 同 ② |
+
+> 口径：改前/改后各 2 次**单进程串行**连跑取 min（`pytest <14 nodeid> --durations=0`，无 xdist
+> 争用）。并行口径（`-n 8` 4 连跑）同向：那 10 条 **76.5 → 33.9s**。
+
+### ① 离线 push 派发器的调度拍写死在 `hub/boot.py`（−9.9s）
+
+`--push-poll-sec` 早就是 CLI 旋钮，而**离线**那条腿（`OfflinePushDispatcher`）在 `hub/boot.py`
+里被写死 `poll_sec=OFFLINE_PUSH_POLL_SEC`（10s）。该 e2e 的最后一步是「停用云机 ⇒ 派发器下一拍
+释放本课」⇒ 光等一拍就是 9.9s。**提成 `--offline-push-poll-sec`（缺省仍 10s，生产零变化）**，
+e2e 传 `0.2`。拍长只决定「多久看一次登记表/在途」，没有一个判据建在它的取值上。
+
+### ② 评估派发器「没取到局」的固定 `sleep(5)`（三处共 −15s）
+
+`EvalDispatcher.run` 的节点 worker 里：`task is None ⇒ time.sleep(min(5.0, deadline - now))`。
+但进程里有 `retry_at`（瞬断回队的指数退避 1/2/4/8s）——**队列里有活、只是还没到点**时，那 5s
+是白等；两个游戏中各退避两轮 = 10s，全落在评估墙钟上（生产上就是「每轮评估莫名多几秒」）。
+修法：`worker/eval_yield.next_eval_wait(...)` 算「睡到最近一局到期」，**判据/上界都不动**
+（到点前 `_take_ready_locked` 照样取不到，5s 仍是上界）。两个保守口子写进公式：pending 里还有
+**已到期却取不到**的局（尾段预留 hold 把队尾留给本机）、或最近到期已过（竞态）⇒ 一律回老口径
+5s，**不让 worker 变热循环**。语义由 `tests/worker/test_eval_yield_split.py::
+test_next_eval_wait_sleeps_until_the_next_retry_is_due` 五类现场钉住。
+
+### ③ 死端口控制台：claim 的**同步**腿每次 2s（四处共 −17s）
+
+§81 已经把这条规矩写在单测层（`tests/common/test_offline_task_queue.py` 换拒绝替身），但 **e2e
+还留在「死端口」**：`e2e/test_hold_e2e.py` 把 `BCITY_CONSOLE_URL` 钉到 `http://127.0.0.1:1/`
+（安全网：防打到开发机上真在跑的控制台，本机 8900 此刻**真的开着**），而 claim 成功分支会**同步**
+请一次控制台核对包新鲜度。本机实测这个「死端口」不是快速失败：
+
+```
+127.0.0.1:1      ConnectionRefusedError 2.059s
+127.0.0.1:9      ConnectionRefusedError 2.054s   ← conftest 的 TEST_CONSOLE_URL
+127.0.0.1:59999  ConnectionRefusedError 2.058s   ← 与端口号无关，是本机 TCP 行为
+127.0.0.1:8900   open 0.001s                      ← 有人真在听
+```
+
+⇒ 每条走过 claim 的 e2e 白付 N×2s（hold 两条用例共 4 次 claim = 8.2s，占其墙钟 45%）。
+修法：把 `e2e/test_auto_handoff_e2e.py` 里 2026-10-20 就写好的 `_NoAutoHandoffConsole`（真起一个
+`ThreadingHTTPServer`、**一切路径回 404** = 「控制台不在/太旧」的确定性降级）提到
+`tests/helpers/console_stub.py::NoHandoffConsole`，hold / offline_training / multi_course 三条
+e2e 改用它（`_Hub.__init__` 起、`close()` 收）。语义与死端口**逐字相同**（都落到「控制台不可达
+⇒ 降级为手动导出」），但零等待、与主机 TCP 行为无关。
+
+### ④ `test_no_console_window_py.collect()`：三遍遍历 + 读全仓（−5.5s）
+
+守卫本身没问题，浪费在三处：① 先把**全仓 899 个 .py 全读进内存**，再按 `SCAN_DIRS`
+前缀把 tests/tmp/tools 那大半丢掉；② 每个文件 `ast.walk` **三遍**（`_subprocess_faces` + 建
+`local` 表 + 找调用）；③ 没有任何子串预筛。修法与 §43 两条规矩同源：
+
+* 只读扫描面（`ROOT/<SCAN_DIRS>/**.py`）；
+* **子串预筛**：`is_sub` 只可能由「`subprocess` 的 alias」或「`from subprocess import …` 的裸名」
+  成立 —— 两种绑定都必然让源码出现字面量 `subprocess` ⇒ 没有这个子串就不必 parse（充分条件）；
+* **一遍 `ast.walk`** 收齐「模块别名 + 裸名 + 本地 def 表 + 全部 `ast.Call`」(`_index`)，
+  调用节点的顺序 = 旧版 BFS 顺序（逐字相同）。
+
+对账（不许「看起来更快了」就收）：旧实现从 `git show HEAD:` 取出，与新实现在**同一个仓库**上
+跑 `collect()` ⇒ `offenders 0 / calls 24` **逐字段相同**（`sorted(off)==sorted(off2)`）。
+
+### 两条「已到底」（写下来，免得下一个人再试一遍）
+
+* `test_source_text_assert_budget::test_text_assert_counts_only_go_down`：一次全量 430 文件
+  parse + A/B 两口径（§72 已砍掉内部重复遍历与不动点重走）。能再省的只有口径本身（改判据 = 改
+  护栏含义），不做。
+* `test_lock_reentrancy::test_no_rerun_of_an_owned_lock_…`：`_needs_index` 预筛后仍 467 文件，
+  parse 1.7s（profiler 口径）+ 大 `_Indexer` visitor。重写 visitor 的收益/风险比不划算（它是
+  §74 死锁事故的守卫，自带反探针）。
+
+### 效果与口径注意
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 被点名的 10 条（串行 min） | 71.0s | **38.4s（−46%）** |
+| 同批 14 条（并行 `-n 8` min） | 94.4s | **54.4s（−42%）** |
+| 同批 14 条（串行 min） | 84.5s | **46.0s** |
+
+> **`--durations=0` 在 `-q` 下有 5ms 地板**（`_pytest/runner.py`：`durations_min = 0.005 if
+> verbose < 2`）⇒ 每次跑「看得见」的用例数会漂（本机实测 2498 vs 2651），**整包 `sum_min` 不能
+> 直接跨批次比**。要对账就取**共同用例集**（本轮实测：共同 2473 条，558.0 → 559.9s）——而那一版
+> 的 after 批跑在明显更重的负载下（`sum_mean` 758.9s vs 612.4s），被两条**没动过的** torch 用例
+> 的负载漂移吃掉了全部收益（`test_ppo_save_load` +4.2s / `test_bc_epoch_resume` +4.1s）。
+> 结论以**被点名用例自己的 min** 为准。
+
+### 被否决
+
+* **把 `test_source_text_assert_budget` 的扫描面缩到「有 assert 的文件」**：430 个里只有 23 个
+  不含 `assert`（省 5%），却给护栏加一条「口径依赖子串」的暗耦合。
+* **给 e2e 的 hub 子进程加一个 `--console-url` 之类的新参数**：`BCITY_CONSOLE_URL` 已经是唯一
+  入口，缺的是「一个真在听、确定性拒绝」的替身（③）。
+* **把评估退避本身调到 0**（测试更快）：那是生产重试语义（1/2/4/8s），测试要测的正是它；本轮
+  只去掉「到期前多睡的那几秒」。
+
 ## §86 回传落地去扫了整个系统临时区：暂存件的位置漏进了基准搜索（2026-10-24，flake）
 
 **症状**：全量 nn 门禁（`-n 8`）偶发红
