@@ -24,6 +24,7 @@ import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -305,6 +306,7 @@ def _dispatcher(
     *,
     client_mod: object = None,
     cooldown_sec: float = 60.0,
+    log: Any = None,
 ) -> tuple[OfflinePushDispatcher, OfflinePushWorkers]:
     workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
     kw: dict = {} if client_mod is None else {"client_mod": client_mod}
@@ -317,7 +319,7 @@ def _dispatcher(
         pump_sec=0.02,
         heartbeat_sec=0.02,
         cooldown_sec=cooldown_sec,
-        log=lambda _m: None,
+        log=log or (lambda _m: None),
         **kw,
     )
     return disp, workers
@@ -522,6 +524,36 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         assert (_offline_root(hub) / "run-1" / "it-002").is_dir()
         disp2.stop()
     finally:
+        worker.close()
+
+
+def test_a_delivered_round_is_announced_once_on_the_hub_log(tmp_path: Path) -> None:
+    """用户口径（2026-10-25）：**一个 it 的回传完毕**要写一行，且只写一次。
+
+    这一行与进度行的 `round-done` 是两件事：后者是云机**跑完那一轮**的时刻，这一行是
+    hub **收妥**（权重 + 统计两件都入了账）的时刻 —— 中间隔着整段回传。
+    """
+    hub, _pack = _mk_hub(tmp_path)
+    worker = _Worker(tmp_path, write_final=False, finish_now=False, follow_task_identity=True)
+    logs: list[str] = []
+    disp, workers = _dispatcher(hub, tmp_path, log=logs.append)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: (_offline_root(hub) / "run-1" / "it-001").is_dir()), "第一轮没入账"
+        # 等那一行出现（有界）：入账落盘与写日志是同一条腿，但进度行可能先于它到 ⇒ 不能拿
+        # 「日志条数」当信号（真机 -n 8 下就是那么闪的）。
+        assert _wait(
+            lambda: any(disp_mod.ROUND_BACKFILL_NOTE in m for m in logs), timeout=10.0
+        ), f"入账了却没写那一行：{logs}"
+        # 已入账的轮不许每拍重播同一行（那正是「15s 刷屏」要治的东西）
+        disp.tick(ping=False)
+        time.sleep(0.3)  # sleep-ok: 夹具模拟 —— 让 pump 再转几拍，看它会不会重播
+        n = sum(1 for m in logs if disp_mod.ROUND_BACKFILL_NOTE in m)
+        assert n == 1, f"回传完毕那一行应该只出现一次，实际 {n} 次：{logs}"
+    finally:
+        disp.stop()
         worker.close()
 
 

@@ -42,7 +42,6 @@ import shutil
 import tempfile
 import threading
 import time
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,10 +50,7 @@ from common.logutil import tag_logger
 from common.progress_text import progress_text
 from common.protocol import (
     CAP_OFFLINE_PUSH,
-    OFFLINE_PUSH_PACK_DIR,
     OFFLINE_PUSH_PROTO,
-    OFFLINE_PUSH_RESUME_DIR,
-    OFFLINE_PUSH_TASK_NAME,
     PUSH_DEAD_MISSES,
     ProtocolError,
     push_worker_id_of,
@@ -68,6 +64,8 @@ from hub.offline_ingest import (
 )
 from hub.offline_pack_fresh import pack_still_fresh
 from hub.offline_push_assign import OfflinePushAssignments
+from hub.offline_push_pack import TMP_PREFIX
+from hub.offline_push_pack import build_task_zip as _build_task_zip
 from hub.offline_push_workers import OfflinePushWorkers
 from hub.task_pack import pack_index_meta
 from remote import offline_push_client as client
@@ -88,10 +86,12 @@ PACK_EXPORT_WAIT_SEC = 20.0
 #: 一次 pump 循环里最多拉几轮（防「积压 200 轮」把一拍拖成十分钟）。
 OFFLINE_PUSH_ROUNDS_PER_PASS = 8
 #: 任务包 zip 的临时前缀（`<tmp>/offline-push-*`）；上传完成后整目录删掉。
-_TMP_PREFIX = "offline-push-"
 #: pump 连续读不到 `/state` 这么多拍 ⇒ 本拍停止拉取/心跳（**不 release**：等 hold stale）。
 #: 基数是 ping 的 `PUSH_DEAD_MISSES=3`（30s 一拍），pump 是 5s 一拍 —— 直接复用只有 15s，
 #: 隧道抖一下就被判死；×4 ≈ 一分钟，仍远小于 hold stale（900s）。
+#: 「一个 it 的回传完毕」那一行的标记（用户口径 2026-10-25：这一行必须写，且每轮只一次）。
+#: 测试按它计数（常量 ⇒ 不新增文本断言）。
+ROUND_BACKFILL_NOTE = "本轮回传完毕"
 OFFLINE_PUSH_DEAD_MISSES = PUSH_DEAD_MISSES * 4
 #: 失败派发后的冷却已在 `cooldown_sec`；这里只给「临时 zip 目录」的清扫龄期：
 #: 正常路径 `_pump` 的 finally 会删，只有进程被杀才会遗留（计划 §6.3「失败/启动时清扫」）。
@@ -236,7 +236,7 @@ class OfflinePushDispatcher:
         self._tmp_swept_at = now
         root = Path(tempfile.gettempdir())
         try:
-            entries = list(root.glob(f"{_TMP_PREFIX}*"))
+            entries = list(root.glob(f"{TMP_PREFIX}*"))
         except OSError:
             return
         for p in entries:
@@ -449,22 +449,14 @@ class OfflinePushDispatcher:
     ) -> tuple[Path, dict]:
         """组外层 zip（`task.json` + `pack/` + 可选 `resume/`）→ `(临时路径, 元信息)`。
 
-        `pack` 本身是 zip ⇒ `ZIP_STORED` 直写（再压一遍只是白烧 CPU）；`resume/` 取
-        `hub.resume_anchor()` 里**比包更新**的那一轮（锚点只发整份：delta 只活在回传腿与
-        hub 落地器之间，云机拿回去也解不开），并**补上 `resume.json`**（评审 F2）——
-        `run_loop.apply_resume_overlay` 的入口判据就是它，少了它锚点文件全在也不会被采纳。
-
-        `task_id` 是**确定性**的（计划 §6.3：`sha256(course, pack_sha, resume_it)[:16]`）：
-        hub 在「上传成功、还没记账」之间崩掉后重派，worker 看到的是同一单 ⇒ 幂等 duplicate，
-        而不是把上一单的 outbox 变成孤儿（评审 F4/F9）。
+        实现在 `hub/offline_push_pack.build_task_zip`（LOC 预算拆出；那边只做文件 IO）。
+        这里只负责三件**需要 hub 状态**的事：包元信息、地板（`max(包起点, 锚点)`）、锚点本身。
+        判据与完整 docstring 在那边 —— 别在这里抄第二份。
         """
         meta = self._pack_meta(pack)
         pack_it = int(meta.get("it") or 0)
         floor = int(resume_it) if int(resume_it or 0) > pack_it else pack_it
         pack_sha = self._sha256(pack)
-        task_id = self._task_id(course, pack_sha, floor)
-        tmp = Path(tempfile.mkdtemp(prefix=_TMP_PREFIX))
-        out = tmp / f"task-{task_id}.zip"
         anchor = self._anchor(course, pack_it) if floor > pack_it else None
         if anchor is not None and int(anchor.get("it") or 0) != floor:
             # 派发与组包之间锚点前进了：这一单按派发时敲定的地板走（task_id 才会稳定）；
@@ -475,61 +467,17 @@ class OfflinePushDispatcher:
                 "——本单仍按派发时的地板走，锚点不带"
             )
             anchor = None
-        doc = {
-            "proto": OFFLINE_PUSH_PROTO,
-            "task_id": task_id,
-            "course": course,
-            "pack_name": pack.name,
-            "pack_sha256": pack_sha,
-            "run_id": str(run_id or meta.get("run_id") or ""),
-            "it": pack_it,
-            "end_it": int(meta.get("end_it") or 0),
-            #: ★ 派发时 hub 已持有的最高一轮（F7）：worker 的 `--floor-it` 就是它。
-            "resume_it": int(floor),
-            "created_at": float(self._now()),
-        }
-        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_STORED) as zf:
-            zf.writestr(OFFLINE_PUSH_TASK_NAME, json.dumps(doc, ensure_ascii=False))
-            with open(pack, "rb") as src, zf.open(f"{OFFLINE_PUSH_PACK_DIR}/{pack.name}", "w") as dst:
-                shutil.copyfileobj(src, dst, 1 << 20)
-            if anchor is not None:
-                self._write_resume(zf, anchor)
-        return out, {
-            "task_id": task_id,
-            "resume_it": int(floor),
-            "pack_sha256": pack_sha,
-            "run_id": doc["run_id"],
-            "it": pack_it,
-            "end_it": int(meta.get("end_it") or 0),
-        }
-
-    def _write_resume(self, zf: zipfile.ZipFile, anchor: dict) -> int:
-        """把锚点铺进 `resume/`（`resume.json` + `it-NNN/{weights,opt,row}`）；返回件数。"""
-        it = int(anchor.get("it") or 0)
-        it_dir = Path(str(anchor.get("_dir") or ""))
-        raw_files = anchor.get("files")
-        files: dict = raw_files if isinstance(raw_files, dict) else {}
-        names = [str(n) for n in files.values() if str(n)] or ["weights.json", "opt.tar", "row.json"]
-        wrote = 0
-        for name in names:
-            part = it_dir / name
-            if not part.is_file():
-                continue
-            with open(part, "rb") as s2, zf.open(
-                f"{OFFLINE_PUSH_RESUME_DIR}/it-{it:03d}/{name}", "w"
-            ) as d2:
-                shutil.copyfileobj(s2, d2, 1 << 20)
-            wrote += 1
-        if not wrote:
-            self._log(f"续跑锚点 it{it} 的件一个都读不到（{it_dir}）——任务包不带锚点")
-            return 0
-        meta = {k: v for k, v in anchor.items() if not str(k).startswith("_")}
-        meta["fetched_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        zf.writestr(
-            f"{OFFLINE_PUSH_RESUME_DIR}/resume.json",
-            json.dumps(meta, ensure_ascii=False, indent=1),
+        return _build_task_zip(
+            course=course,
+            pack=pack,
+            run_id=str(run_id or meta.get("run_id") or ""),
+            resume_it=int(floor),
+            task_id=self._task_id(course, pack_sha, floor),
+            pack_sha256=pack_sha,
+            anchor=anchor,
+            now=self._now(),
+            log=self._log,
         )
-        return wrote
 
     def _anchor(self, course: str, pack_it: int) -> dict | None:
         """比包更新的续跑锚点（**整份**）；没有/不比包新 ⇒ None。"""
@@ -953,6 +901,15 @@ class OfflinePushDispatcher:
             rec = self.assignments.set_fields(
                 course, cursor_it=cursor, revs={str(k): v for k, v in done_revs.items()}
             ) or rec
+            # ★ 2026-10-25（用户口径）：「一个 it 的训练结果回传完毕」要写**一行** —— 这是这一轮
+            #   唯一确定性的里程碑（权重 + 统计两件都入了 hub 的账）。它与进度行的 `round-done`
+            #   不是同一件事：后者是云机**跑完**那一轮，这里是 hub **收妥**，中间隔着整段回传。
+            #   走到这里说明本轮第一次凑齐两件（`done_revs[it]` 之前没有这个 rev）⇒ 每轮一次。
+            parts = "权重+统计" if has_body else "统计（权重体超限，未随轮传）"
+            self._log(
+                f"{course}: it{it} {ROUND_BACKFILL_NOTE}（{parts} 已入账；rev={rev}）"
+                "——云机那边这一轮可以清了"
+            )
         if pulled or rec.get("revs"):
             # 每拍都 ack 一次（不只在新轮到手时）：上一次 ack 可能断在「hub 已入账、worker
             # 没收到」之间 —— 不重发就永远腾不出空间（幂等，代价是一个小 JSON）。
@@ -1019,7 +976,7 @@ class OfflinePushDispatcher:
     @staticmethod
     def _tmp_path(kind: str, course: str, it: int) -> Path:
         tag = hashlib.sha256(str(course).encode("utf-8")).hexdigest()[:10]
-        return Path(tempfile.gettempdir()) / f"{_TMP_PREFIX}{kind}-{os.getpid()}-{tag}-{int(it)}.json"
+        return Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{kind}-{os.getpid()}-{tag}-{int(it)}.json"
 
     def _conflict(self, course: str, url: str, key: str, rec: dict, text: str) -> None:
         """权威/字节冲突：取消这一单 → ack（只带已入账 revs）→ release + 丢账本。"""
@@ -1250,6 +1207,8 @@ __all__ = [
     "OFFLINE_PUSH_HEARTBEAT_SEC",
     "OFFLINE_PUSH_POLL_SEC",
     "OFFLINE_PUSH_PUMP_SEC",
+    "PACK_EXPORT_WAIT_SEC",
+    "ROUND_BACKFILL_NOTE",
     "OfflinePushDispatcher",
     "OfflinePushWorkers",
 ]

@@ -9535,3 +9535,16 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `docs/nn/remote-transport.md §128`。
 - **验收**：三条新用例（措辞四要素 / 状态行去重 / 停滞龄）；文本断言预算抬一格 1501 → 1503
   （理由见 `tests/test_source_text_assert_budget.py` 模块头末段）。
+
+### 补记（`§2026-10-25-progress-log-says-what-it-is-doing`，07:33 用户两次追加口径）
+
+- **①「不要每 15s 刷一次屏！！！有进展写一行，没进展就三分钟写一行表示自己还活着！」**
+  ⇒ `STATUS_HEARTBEAT_SEC` 300s → **180s**（三分钟）；`TICK_SEC` 仍是 15s（它只做隧道 URL 刷新 /
+  重注册，不再产出日志）。进度行本来就是「内容有变才打」，状态行本来就是「四字段有变才打」。
+- **②「一个 it 的训练结果回传完毕，也要写一行 log」**
+  ⇒ `hub/offline_push.py::_ingest_rounds` 在**某一轮第一次**变成 done（权重 + 统计两件都入了
+  hub 的账）时打 `… itN 本轮回传完毕（权重+统计 已入账；rev=R）——云机那边这一轮可以清了`
+  （`ROUND_BACKFILL_NOTE`，每轮一次；`oversize` 轮降级成「统计（权重体超限，未随轮传）」）。
+  与进度行的 `round-done` **不是同一件事**：后者是云机跑完那一轮，前者是 hub 收妥，中间隔着整段回传。
+- 用例：`tests/hub/test_offline_push_dispatch.py::test_a_delivered_round_is_announced_once_on_the_hub_log`
+  （断言该行**只出现一次** —— 已入账的轮不许每拍重播）。

@@ -201,6 +201,9 @@ LAYERS: dict[str, int] = {
     # ⇒ 拓扑秩 **L3**（与派发器同秩；派发器 import 它，方向是 3 > 3 —— 同秩不算边）。
     "hub.offline_pack_fresh": 0,
     "hub.offline_push_workers": 3,
+    # ★ 2026-10-25（LOC 预算拆出）：外层任务包组装（`build_task_zip` / `write_resume`）——
+    # 只做文件 IO + 常量拼装，依赖 `hub.task_pack`(L0) 与 `common.protocol`(L0) ⇒ 拓扑秩 **L1**。
+    "hub.offline_push_pack": 1,
 
     "remote.result_upload": 0,
     # 回传腿的**进程模式**（2026-10-20，`plan/ppo-worker-transfer-isolation`）：父侧代理
