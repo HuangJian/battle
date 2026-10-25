@@ -165,6 +165,7 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   // A15 (2026-10-25): fire-gate audit counters — diagnostic only, written by
   // isFiring(), never read by gameplay and never reset (per-run probe data).
   _fireGateAudit: { cls: 'B', why: 'A15 fire-gate diagnostic counters (accumulated per run)' },
+  _lastFireWasFacing: { cls: 'B', why: 'A15b diagnostic: frame of the last facing-branch shot' },
   _defCellCol: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellRow: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellKeyCol: { cls: 'C', why: 'A8 requested-cell key of _defCellValid' },

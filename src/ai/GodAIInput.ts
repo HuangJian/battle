@@ -386,6 +386,8 @@ export class GodAIInput implements InputLike {
    * aligned but nothing fired" ticks to a specific gate.
    */
   _fireGateAudit: Record<string, number> = {}
+  /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
+  _lastFireWasFacing = -1
 
   /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
@@ -1318,6 +1320,8 @@ export class GodAIInput implements InputLike {
             }
             if (ok) {
               a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
+              // Diagnostic: tag the shot so a probe can measure ITS hit rate.
+              this._lastFireWasFacing = this.world.frame
               return true
             }
           }
