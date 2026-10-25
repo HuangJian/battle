@@ -7,10 +7,10 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "oxlint && tsc && vite build",
+    "build": "oxlint && bun check --no-script && vite build",
     "preview": "vite build && vite preview",
     "test": "bun tools/test-silent.ts",
-    "typecheck": "tsc --noEmit --incremental",
+    "typecheck": "bun check --no-script",
     "bench": "bun tools/sim/bench-sim.ts",
     "perf:sim": "bun tools/perf/sim-bench.ts",
     "perf:render": "bun tools/perf/render-bench-all.ts",
@@ -26,7 +26,7 @@
     "lint": "oxlint",
     "format": "bun fmt",
     "dashboard": "cd dashboard && bun run start",
-    "check": "tsc --noEmit --incremental && bun tools/check-decisions.ts && bun tools/check-agents-budget.ts && bun tools/run-root-tests.ts",
+    "check": "bun check --no-script && bun tools/check-decisions.ts && bun tools/check-agents-budget.ts && bun tools/run-root-tests.ts",
     "budget:check": "bun tools/check-agents-budget.ts",
     "freeze:check": "bash tools/probe-det-baseline.sh --golden",
     "freeze:l2": "bun tools/diag/archived-reach-audit.ts",
@@ -37,7 +37,6 @@
     "@napi-rs/canvas": "^1.0.3",
     "@types/bun": "^1.3.14",
     "oxlint": "^1.74.0",
-    "typescript": "7.0.2",
     "vite": "8.1.5"
   }
 }

@@ -9553,3 +9553,16 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **风格后果**：无 oxfmt 配置时 bun fmt 走 Prettier flavor ⇒ 与旧 oxfmt 输出有差（多行 union 会收
   单行）。仓库本就有 181 个文件在 `bun fmt --check` 下不干净（格式化从不进门禁，历史漂移），不随本刀重排。
 - **违反后果**：回装 oxfmt / 新加 Prettier ⇒ 两份格式化器对同一棵树互相打脸；老 Bun 上格式化门禁静默失效。
+
+## §2026-10-25-goalnn-bun-check（2026-10-25，用户指定换类型检查器）
+
+- **背景**：Bun v1.4.3 内置 `bun check`（typescript-go 移植，官方称 100% 通过 TS 7.0.2 conformance；
+  本仓 644 文件实测 ~0.2s，`tsc --noEmit --incremental` 需秒级），且不需要 `typescript` 包。
+- **备选与否决**：① 继续用 `tsc` —— 否，用户点名换，且只要读类型、不要 emit/LSP，`typescript` 纯属冗余；
+  ② 改走 `bun build --check` —— 否，本仓构建是 vite，不是 bun build。
+- **决定**：`typecheck` / `build` / `check` 全改 `bun check --no-script`；两个 `package.json` 删掉
+  `typescript` devDependency（hoisted + dashboard 各少一份锁条目）。**必须带 `--no-script`**：仓库有
+  `check` 脚本，裸 `bun check` 会去执行它，而脚本里再调 `bun check` 就是无限递归（实测）。
+  hook 归因零改动：`--no-pretty` 与 `tsc --pretty false` 同为 `path(l,c): error TSxxxx:`（红/绿两态实测）。
+- **违反后果**：漏 `--no-script` ⇒ 提交/检查递归；`bun check` 与 tsc 分歧属上游 bug（conformance 全过），
+  用最小用例复现上报，别用 `@ts-ignore` 消音（Bun ≥ 1.4.3 的要求已被既有 ≥ 1.4.4 地板覆盖）。

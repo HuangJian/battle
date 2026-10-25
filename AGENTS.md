@@ -72,7 +72,7 @@ plan 与 MANIFEST 冲突 ⇒ MANIFEST 赢，先记进 DECISIONS 再动手。`doc
 
 ```
 bun run check   # green 的定义（只判根项目；组成见 §9 / details §5.2）
-bun run build   # oxlint && tsc && vite build（shipping gate）
+bun run build   # oxlint && bun check --no-script && vite build
 bun run test    # 按本地 git 改动跑，只打印失败  |  typecheck / lint / format / dev(:8956) / setup(装 hook)
 bun run freeze:check  # God-AI det 签名 vs golden（~4s）红 ⇒ 新纪元三件套（§6.3b）；freeze:l2 可达性审计
 cd dashboard && bun install && bun run typecheck && bun run test   |   bun run dashboard（:8900）

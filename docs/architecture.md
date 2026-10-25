@@ -32,7 +32,7 @@ This is an architectural decision, recorded here so future changes know which si
 | Concern | Choice | Rationale |
 |---|---|---|
 | Language | **TypeScript** (`strict`, `noUnusedLocals`, `noUnusedParameters`, `noImplicitReturns`) | The compiler is treated as a reviewer; `any` and `@ts-ignore` are banned. |
-| Runtime / toolchain | **Bun** | One tool for runtime, `bun test`, and package management. No npm/ts-node split. |
+| Runtime / toolchain | **Bun** | One tool for runtime, `bun test`, `bun check` (type checking, no `typescript` package) and package management. No npm/ts-node split. |
 | Build / dev server | **Vite** (target `es2020`) | Fast HMR for the loop-on-`:8956` dev experience; `vite build` ships the bundle. |
 | Rendering | **Canvas 2D** (playfield only) | HUD/menu/overlays are HTML/CSS; the canvas stays a 416×416 battle surface. |
 | Styling | **CSS Custom Properties** | Themes are injected as variables at runtime; UI reacts without a re-render of the game. |

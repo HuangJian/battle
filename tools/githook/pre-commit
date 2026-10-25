@@ -17,15 +17,16 @@
 #                   mypy 报错按文件归因：staged 归因 → 拦；全部未暂存 → 放行；
 #                   pytest 红 → 拦 + 归因指引（因果由提交 agent 判定：自己的修，
 #                   他人的汇报后定向跳过重试 NN_GATE_SKIP=pytest）
-#   tsc             **仅当 staged 含根项目 TS/JS（排除 dashboard/）时**全量运行；
+#   typecheck       **仅当 staged 含根项目 TS/JS（排除 dashboard/）时**全量运行
+#                   （`bun check --no-script`，输出与 tsc 同格式）；
 #                   纯 md / nn-training / 仅 dashboard 提交不触发（2026-09-15）。
 #                   报错按文件归因，staged → 拦；全部未暂存/未跟踪 → 放行；
 #                   无法归因到文件的错误 → 拦（保守）
 #   dashboard       仅 staged 含 dashboard/ 时运行（dashboard 是独立 bun
 #                   项目，不属根 tsconfig / 根套件 —— 见 DECISIONS
-#                   §2026-09-14-goalnn-dashboard-project）；tsc 报错前缀
+#                   §2026-09-14-goalnn-dashboard-project）；bun check 报错前缀
 #                   dashboard/ 归因，staged → 拦；bun test 红 → 拦 + 归因指引。
-#                   **只改 dashboard 时不会连带跑根 bun test / 根 tsc / python /
+#                   **只改 dashboard 时不会连带跑根 bun test / 根 typecheck / python /
 #                   freeze**（外部套件与 dashboard 无归因交集）
 #   bun test        仅当 staged 含根项目 TS/JS（排除 dashboard/）时运行；
 #                   跑的是**全量**（非 heavy）——test-silent 已删除 basename 窄跑
@@ -124,7 +125,8 @@ TOP=$(git rev-parse --show-toplevel)
 cd "$TOP"
 
 # ------------------------------------------------------------------ 归因解析器
-# tsc 错误行：tools/x.ts(32,21): error TS2440: ... → 文件路径（正斜杠）
+# TS 错误行（bun check --no-pretty 与 tsc --pretty false 同格式）：
+# tools/x.ts(32,21): error TS2440: ... → 文件路径（正斜杠）
 attrib_tsc() {
   grep -E '^[^ (]+\([0-9]+,[0-9]+\): error TS[0-9]+:' "$1" \
     | cut -d'(' -f1 | sed 's|\\|/|g' | sort -u
@@ -166,10 +168,10 @@ hook_selftest() {
     > "$D/tsc.log"
   TSC_OUT=$(attrib_tsc "$D/tsc.log")
   if ! printf '%s\n' "$TSC_OUT" | grep -Fqx 'tools/agent/sampler-agent.ts'; then
-    echo "selftest FAIL: tsc 路径提取缺失"; FAIL=1
+    echo "selftest FAIL: TS 路径提取缺失"; FAIL=1
   fi
   if ! printf '%s\n' "$TSC_OUT" | grep -Fqx 'src/bar.ts'; then
-    echo "selftest FAIL: tsc 路径提取缺失(src/bar.ts)"; FAIL=1
+    echo "selftest FAIL: TS 路径提取缺失(src/bar.ts)"; FAIL=1
   fi
   printf '%s\n' \
     'tests\test_rl_remote_fixes.py:73: error: "object" has no attribute "_course_iter"  [attr-defined]' \
@@ -197,9 +199,9 @@ hook_selftest() {
   if [ -n "$HITS2" ]; then
     echo "selftest FAIL: 非 staged 命中应为空"; FAIL=1
   fi
-  # dashboard 门禁块（独立 bun 项目）：dashboard 内 tsc 输出的是**相对它自己**的
-  # 路径，必须前缀 dashboard/ 才能与 staged 清单（仓库相对）求交 —— 漏了这一步，
-  # 归因永远为空，dashboard 的 tsc 红会被当成「他人未暂存改动」而放行。
+  # dashboard 门禁块（独立 bun 项目）：dashboard 内 bun check 输出的是**相对它自己**
+  # 的路径，必须前缀 dashboard/ 才能与 staged 清单（仓库相对）求交 —— 漏了这一步，
+  # 归因永远为空，dashboard 的 typecheck 红会被当成「他人未暂存改动」而放行。
   printf '%s\n' \
     'src/server/build.ts(12,3): error TS2345: Argument of type x is not assignable' \
     'tests/evalboard-board.test.ts(4,1): error TS2554: Expected 1 arguments' \
@@ -307,7 +309,7 @@ DIRTY_N=$(wc -l < "$DIRTY_LIST" | tr -d ' ')
 echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY_N} 文件（他人改动，不参与拦截）"
 
 # 根项目 TS/JS（**排除 dashboard/**）：dashboard 是独立 bun 项目；只改
-# dashboard / 纯 md / nn-training 时根 tsc、根 bun test、freeze 都无归因
+# dashboard / 纯 md / nn-training 时根 typecheck、根 bun test、freeze 都无归因
 # 交集，不应触发（2026-09-15 用户口径）。
 ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '^dashboard/' || true)
 # freeze 敏感面：根项目 TS/JS + src/（游戏/det 路径），同样排除 dashboard/
@@ -328,7 +330,7 @@ FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" \
 # 为什么放这里而不是只放 `bun run check`：**纯文档提交会整跳根套件**（test-silent 对
 # 纯 md 改动直接跳过）——而往 AGENTS.md 里追加文字正是最典型的那种提交，只靠套件
 # 等于在这个门禁最该生效的场景里不生效。
-# 归因（与 mypy/tsc 块同一语义）：量的是**工作树**内容，失败时看 AGENTS.md 在不在
+# 归因（与 mypy/typecheck 块同一语义）：量的是**工作树**内容，失败时看 AGENTS.md 在不在
 # 暂存清单里 —— 在 ⇒ 拦下你的提交；只在他人未暂存改动里 ⇒ 告警放行，由对方后继自理。
 echo " ▸ AGENTS.md budget (char count vs injection cut)"
 if ! "$BUN" tools/check-agents-budget.ts; then
@@ -411,7 +413,7 @@ fi
 # dashboard/ 自带 package.json / bun.lock / node_modules，且**不在**根 tsconfig 与根
 # 套件之内（DECISIONS §2026-09-14-goalnn-dashboard-project · 全文 → docs/nn/console.md §11）。因此它必须有自己的
 # 门禁块：否则「把 dashboard 切出根门禁」会静默降级为「没人跑 dashboard 门禁」。
-# 归因语义与上方 mypy / 下方 tsc 块一致：报错前缀 dashboard/ 后与 staged 求交。
+# 归因语义与上方 mypy / 下方 typecheck 块一致：报错前缀 dashboard/ 后与 staged 求交。
 DASH_STAGED=$(grep '^dashboard/' "$STAGED_LIST" || true)
 if [ -z "$DASH_STAGED" ]; then
   echo " ▸ dashboard gate skipped（staged 无 dashboard/ 改动）"
@@ -438,11 +440,11 @@ else
     DASH_TS_FILES=$(attrib_tsc "$DASH_TSC_LOG" | sed 's|^|dashboard/|' | sort -u)
     DASH_TSC_BLOCK=$(printf '%s\n' "$DASH_TS_FILES" | attrib_staged_hits "$STAGED_LIST")
     if [ -n "$DASH_TSC_BLOCK" ]; then
-      echo "✗ dashboard tsc 错误落在 staged 文件（提交被拦）:"
+      echo "✗ dashboard typecheck 错误落在 staged 文件（提交被拦）:"
       printf '    %s\n' $DASH_TSC_BLOCK
       exit 1
     fi
-    echo "⚠ dashboard tsc 错误全部落在未暂存/未跟踪文件（他人改动，本次不拦；对方后继自理）:"
+    echo "⚠ dashboard typecheck 错误全部落在未暂存/未跟踪文件（他人改动，本次不拦；对方后继自理）:"
     printf '    %s\n' $DASH_TS_FILES
   fi
 
@@ -454,13 +456,13 @@ else
   fi
 fi
 
-# ---------- typecheck（tsc 全量；报错按文件归因；无根 TS 时跳过） ----------
+# ---------- typecheck（bun check 全量；报错按文件归因；无根 TS 时跳过） ----------
 if [ -z "$ROOT_TS_STAGED" ]; then
   echo " ▸ typecheck skipped（staged 无根项目 TS/JS——dashboard/ 与纯 md/nn-training 不触发）"
 elif [ -n "$SKIP_TSC" ]; then
   echo "▸ skip typecheck (SKIP_TSC set)"
 else
-  echo " ▸ typecheck (tsc --noEmit) — 报错按文件归因，staged 才拦"
+  echo " ▸ typecheck (bun check --no-script) — 报错按文件归因，staged 才拦"
   TSC_RC=0
   "$BUN" run typecheck > "$TSC_LOG" 2>&1 || TSC_RC=$?
   cat "$TSC_LOG"
@@ -473,7 +475,7 @@ else
     TSC_FILES=$(attrib_tsc "$TSC_LOG")
     TSC_BLOCK=$(printf '%s\n' "$TSC_FILES" | attrib_staged_hits "$STAGED_LIST")
     if [ -n "$TSC_BLOCK" ]; then
-      echo "✗ tsc 错误落在 staged 文件（提交被拦）:"
+      echo "✗ typecheck 错误落在 staged 文件（提交被拦）:"
       printf '    %s\n' $TSC_BLOCK
       exit 1
     fi

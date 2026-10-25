@@ -15,7 +15,7 @@
 # `dashboard/tests/ci-scope.test.ts` 自动核对（新增 import 没加进 paths ⇒ 该测试红，
 # 而它正好在 dashboard 门禁里跑）。**允许**清单比 import 宽（多触发是浪费，不是漏洞）。
 #
-# 只跑 ubuntu：这三步（tsc / bun test / bundle 预算）与平台无关，而 Windows 侧的
+# 只跑 ubuntu：这三步（bun check / bun test / bundle 预算）与平台无关，而 Windows 侧的
 # dashboard 门禁由开发者本机的 pre-commit 承担（staged 含 dashboard/ 时自动跑）。
 name: dashboard
 
