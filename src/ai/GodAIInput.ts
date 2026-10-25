@@ -381,6 +381,13 @@ export class GodAIInput implements InputLike {
   _defCellValid = false
 
   /**
+   * Diagnostic only (no gameplay effect, no RNG): why `isFiring()` said no.
+   * Populated on every call so a probe can attribute the "gun ready + target
+   * aligned but nothing fired" ticks to a specific gate.
+   */
+  _fireGateAudit: Record<string, number> = {}
+
+  /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
    * locked for a lease with expiry/progress/threat revalidation, or null.
    * Written/read only when params.intentMode > 0; reset() clears. Default
@@ -1283,7 +1290,27 @@ export class GodAIInput implements InputLike {
         if (lead > 0) return true
       }
     }
-    if (!this._fire) return false
+    if (!this._fire) {
+      const a = this._fireGateAudit
+      a.noFire = (a.noFire ?? 0) + 1
+      // A15 (2026-10-25): FIRE ALONG THE FACING. Candidates compute `_fire`
+      // against their MOVEMENT direction, so while the tank walks anywhere the
+      // shot on its current facing is simply never taken. Measured (hard, 175
+      // games): the gun is ready with a clear shot along `p.dir` for **493
+      // ticks/game**, while only ~50 shots are fired per game. Firing does not
+      // change the movement decision (bullets leave along the committed facing,
+      // A1), so this is a pure addition, not a trade.
+      if (this.params.fireAlongFacing > 0) {
+        const p2 = this.controlledTank(this.world)
+        if (p2 && p2.alive) {
+          if (this.shouldFireInDir(p2.x + p2.w / 2, p2.y + p2.h / 2, p2.dir)) {
+            a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
+            return true
+          }
+        }
+      }
+      return false
+    }
     // A2 (plan/godai-post-a1-retune.plan.md §3.1): the single choke point for
     // every candidate's fire decision. After A1 a shot always leaves along the
     // COMMITTED facing, so firing on a tick whose turn gets rejected by the
@@ -1298,8 +1325,16 @@ export class GodAIInput implements InputLike {
       // different direction, firing now would shoot a lane nobody aimed at.
       // Keeping the shot set identical is what makes this knob a clean test of
       // "less standing still", not "more shooting".
-      if (d !== this._moveDir) return false
-      if (!turnWillCommit(this.world, p, d)) return false
+      if (d !== this._moveDir) {
+        const a = this._fireGateAudit
+        a.effectiveDirMismatch = (a.effectiveDirMismatch ?? 0) + 1
+        return false
+      }
+      if (!turnWillCommit(this.world, p, d)) {
+        const a = this._fireGateAudit
+        a.turnNotCommit = (a.turnNotCommit ?? 0) + 1
+        return false
+      }
     }
     return this._fire
   }

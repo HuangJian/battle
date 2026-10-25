@@ -162,6 +162,9 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   _playerCellCache: { cls: 'C', why: 'payload of _playerCellValid' },
   // A8 (2026-10-21): resolved standable defense cell — flag `_defCellValid` is
   // cleared in reset(), the payload/key ride behind it.
+  // A15 (2026-10-25): fire-gate audit counters — diagnostic only, written by
+  // isFiring(), never read by gameplay and never reset (per-run probe data).
+  _fireGateAudit: { cls: 'B', why: 'A15 fire-gate diagnostic counters (accumulated per run)' },
   _defCellCol: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellRow: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellKeyCol: { cls: 'C', why: 'A8 requested-cell key of _defCellValid' },
