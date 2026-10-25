@@ -1448,6 +1448,9 @@ export interface GodAIParams {
   /** A15 (2026-10-25): fire along the COMMITTED facing when no candidate asked
    * to fire (candidates only test their movement direction). 0 = OFF. */
   fireAlongFacing: number
+  /** A16 (2026-10-25): require the arrival-time hit predicate inside
+   * `shouldFireInDir` (candidate fire decisions), not just the static scan. */
+  fireLeadHitGate: number
   /** A12: engage only when the earliest shell reaches the CURRENT cell within
    * this many ticks (urgency gate; avoids hijacking routine dodges). */
   crossfireMinTti: number

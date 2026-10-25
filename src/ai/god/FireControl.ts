@@ -1,4 +1,5 @@
 import type { GodAIInput } from '../GodAIInput'
+import { leadHitForDir } from './lead-fire'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
@@ -773,6 +774,22 @@ export function shouldFireInDirImpl(
     // owns the timing window. Note this only fires when the scan enemy is
     // MOVING perpendicular — a stationary target's arrival window never
     // closes.
+    // A16 (2026-10-25): UNIFIED arrival-time gate. §193-D only covers enemies
+    // that are MOVING PERPENDICULAR — a parallel mover or a slow drift still
+    // passes, and the shot dies on nothing. `leadHitForDir` is the same
+    // predicate the NN sees (`leadHitD`) and the same one A15b uses: it
+    // extrapolates the enemy's lateral velocity to the shell's arrival tick and
+    // requires the hit band + a clear lane. Gating the CANDIDATE's own fire
+    // decision with it is what A15b exposed: when the facing branch took the
+    // good moments, the remaining candidate shots hit only 41.2% (vs 60.7%
+    // baseline) — i.e. those decisions were spending cooldowns on shots that
+    // could not land.
+    if (result.enemy && self.params.fireLeadHitGate > 0) {
+      if (leadHitForDir(self.world, dir, pcx, pcy) <= 0) {
+        self._predictiveFireBlocks++
+        return false
+      }
+    }
     if (result.enemy && self.params.predictiveFireGate > 0) {
       if (enemySlidesOffLineByArrivalImpl(self, pcx, pcy, dir, result.enemyDist * CELL) >= 0) {
         self._predictiveFireBlocks++
