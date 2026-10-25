@@ -1303,9 +1303,23 @@ export class GodAIInput implements InputLike {
       if (this.params.fireAlongFacing > 0) {
         const p2 = this.controlledTank(this.world)
         if (p2 && p2.alive) {
-          if (this.shouldFireInDir(p2.x + p2.w / 2, p2.y + p2.h / 2, p2.dir)) {
-            a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
-            return true
+          const pcx2 = p2.x + p2.w / 2
+          const pcy2 = p2.y + p2.h / 2
+          if (this.shouldFireInDir(pcx2, pcy2, p2.dir)) {
+            // A15b (2026-10-25): `shouldFireInDir` is a STATIC ray scan — it says
+            // "somebody is on the line now", not "this shot lands". Firing on it
+            // alone measured −5.43pp / kills −629: shots were spent on enemies
+            // that had already drifted out of the lane by arrival. Mode ≥2 also
+            // requires the arrival-time predicate (`leadHitForDir`, the same one
+            // the NN sees as `leadHitD`) to agree.
+            let ok = true
+            if (this.params.fireAlongFacing >= 2) {
+              ok = leadHitForDir(this.world, p2.dir, pcx2, pcy2) > 0
+            }
+            if (ok) {
+              a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
+              return true
+            }
           }
         }
       }
