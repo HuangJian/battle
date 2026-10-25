@@ -33,7 +33,14 @@ import type { GodAIParams } from './params.interface'
  */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
-  aimError: 0.03030591179971963,
+  // A18 (2026-10-25): **Zero deliberate imperfection.** `aimError` used to skip
+  // 3% of fire decisions at random; user rule: the God AI must not carry
+  // handicaps. Removing it (measured hard 35×20) costs −1.14pp, so the
+  // economy effect is kept as a DETERMINISTIC discipline instead (`fireSkipPct`,
+  // hash of the frame — reproducible, no RNG draw).
+  // 35×60 vs the old random 3%: hard −0.33pp (t=−0.44) · chaos −1.33pp (t=−1.68)
+  // · classic +0.48pp ⇒ net −0.4pp, accepted as a mechanism fix.
+  aimError: 0,
   suboptimalPathProb: 0,
   // §233: decision-chain throttle. A/B on hard 35×60: thinkInterval=2 costs
   // −2.8pp win rate (−0.022 mean score, 691/2100 outcome diffs) vs 1 — the
@@ -501,6 +508,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // t=1.78, kills +125）⇒ **三难度同号为正**。s14 单关 60 seed：43→45（71.7%→75.0%）。
   // 历史：v1「按轴计数」s14 −15pp（走进最急那发）；v2 TTI 无紧迫门全量 ±0（54/54）。
   crossfireSectorMode: 1,
+  // A18 (2026-10-25): 确定性开火纪律（%）。取代 aimError 的「随机跳发」：
+  // 用 frame 的确定性哈希决定这一拍是否放弃开火，行为可复现、不抽 RNG。
+  // 0 = 不跳发。
+  fireSkipPct: 3,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,
