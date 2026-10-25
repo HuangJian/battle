@@ -388,6 +388,12 @@ export class GodAIInput implements InputLike {
   _fireGateAudit: Record<string, number> = {}
   /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
   _lastFireWasFacing = -1
+  /** A15: per-tick memo so `isFiring()` is IDEMPOTENT inside one tick. The
+   * recorder calls it AFTER the tick (world already advanced) while the sim
+   * called it DURING the tick; without the memo the two answers differ and the
+   * recorded frame no longer reproduces the run (replay round-trip off by a tick). */
+  _facingFireTick = -1
+  _facingFireOk = false
 
   /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
@@ -1303,6 +1309,12 @@ export class GodAIInput implements InputLike {
       // change the movement decision (bullets leave along the committed facing,
       // A1), so this is a pure addition, not a trade.
       if (this.params.fireAlongFacing > 0) {
+        if (this._facingFireTick === this.world.frame) {
+          if (this._facingFireOk) return true
+          return false
+        }
+        this._facingFireTick = this.world.frame
+        this._facingFireOk = false
         const p2 = this.controlledTank(this.world)
         if (p2 && p2.alive) {
           const pcx2 = p2.x + p2.w / 2
@@ -1346,6 +1358,7 @@ export class GodAIInput implements InputLike {
               ok = this.params.fireAlongFacing >= 4 ? !(atFullHp && !near) : atFullHp && !near
             }
             if (ok) {
+              this._facingFireOk = true
               a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
               // Diagnostic: tag the shot so a probe can measure ITS hit rate.
               this._lastFireWasFacing = this.world.frame

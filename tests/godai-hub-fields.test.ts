@@ -166,6 +166,8 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   // isFiring(), never read by gameplay and never reset (per-run probe data).
   _fireGateAudit: { cls: 'B', why: 'A15 fire-gate diagnostic counters (accumulated per run)' },
   _lastFireWasFacing: { cls: 'B', why: 'A15b diagnostic: frame of the last facing-branch shot' },
+  _facingFireTick: { cls: 'B', why: 'A15 per-tick memo key (isFiring idempotence)' },
+  _facingFireOk: { cls: 'B', why: 'A15 per-tick memo value (isFiring idempotence)' },
   _defCellCol: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellRow: { cls: 'C', why: 'A8 payload of _defCellValid' },
   _defCellKeyCol: { cls: 'C', why: 'A8 requested-cell key of _defCellValid' },
