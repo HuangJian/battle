@@ -1448,6 +1448,10 @@ export interface GodAIParams {
   /** A15 (2026-10-25): fire along the COMMITTED facing when no candidate asked
    * to fire (candidates only test their movement direction). 0 = OFF. */
   fireAlongFacing: number
+  /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
+   * down the same lane toward the same target (deterministic fire economy).
+   * 0 = OFF (byte-identical). */
+  dedupeOwnShot: number
   /** A16 (2026-10-25): require the arrival-time hit predicate inside
    * `shouldFireInDir` (candidate fire decisions), not just the static scan. */
   fireLeadHitGate: number

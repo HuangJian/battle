@@ -525,6 +525,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 都出现不一致（34 vs 45、4654 vs …），说明这条支路的子弹在评估链里没有被正确归类。
   // 在把评估链口径修好之前**不发货**（评估链是 NN 训练的地基）。默认 0。
   fireAlongFacing: 0,
+  // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
+  // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，
+  // 说明起作用的是「偶尔不打」，不是「瞄偏」）。0 = OFF。
+  dedupeOwnShot: 0,
   // A16 (2026-10-25): 候选自己的开火判据也用「到达时命中」（leadHitForDir），
   // 而不是只看「现在线上有人」。0 = OFF（旧行为）。
   fireLeadHitGate: 0,

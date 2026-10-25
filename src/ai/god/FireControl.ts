@@ -743,6 +743,21 @@ export function shouldFireInDirImpl(
 
   // Enemy in line of fire — fire.
   if (result.enemy) {
+    // A17 (2026-10-25): DETERMINISTIC fire economy — a second shell into a lane
+    // that already has OUR shell in flight is a wasted cooldown (the first one
+    // will land first). This replaces the accidental 3% random skip that
+    // `aimError` was providing (aimError 0→0.03 measured +1.14pp, and the skip —
+    // not the "inaccuracy" — is what paid). Pure predicate: no RNG.
+    if (self.params.dedupeOwnShot > 0) {
+      const vx = dir === 'left' ? -1 : dir === 'right' ? 1 : 0
+      const vy = dir === 'up' ? -1 : dir === 'down' ? 1 : 0
+      for (let i = 0; i < self.world.bullets.length; i++) {
+        const b = self.world.bullets[i]
+        if (!b.alive || !b.isPlayer || b.dir !== dir) continue
+        const ahead = (b.x - pcx) * vx + (b.y - pcy) * vy
+        if (ahead > 0 && ahead < result.enemyDist * CELL) return false
+      }
+    }
     // §193-A/C: center-line fire gate. The dual ±8px offset scan can report
     // enemy=true (seen on one offset line) with wall=true (brick on the other
     // line). The real 6px bullet travels the CENTER line — if the center
