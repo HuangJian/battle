@@ -1,4 +1,5 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# --- 历史（A14 纪元，同一文件保留说明）---
 # 采集：2026-10-25 @ A14 开火对消（仅 classic）。`CLASSIC_OVERRIDES.dodgeCounterFire=1`：
 #       classic 是 instant 1-HP + bulletCap 1 + 慢弹速，子弹打子弹的收益极大 ——
 #       35×60 **84.3% → 86.4%（Δ+2.14pp, t=3.67, kills +350, suite 0.6689→0.6933）**。

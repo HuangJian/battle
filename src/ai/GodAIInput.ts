@@ -1318,6 +1318,29 @@ export class GodAIInput implements InputLike {
             if (this.params.fireAlongFacing >= 2) {
               ok = leadHitForDir(this.world, p2.dir, pcx2, pcy2) > 0
             }
+            // A15c (mode ≥3): SAFE PERIODS ONLY. A15b took the good moments away
+            // from the candidate chain and the *remaining* candidate shots fell
+            // to 41.2%, so the branch was competing with the shots that matter.
+            // Restrict it to ticks where nothing is pressing: base at full HP and
+            // no enemy within 3 cells — i.e. when the cooldown has no better use.
+            if (ok && this.params.fireAlongFacing >= 3) {
+              const w2 = this.world
+              const atFullHp = w2.baseHp >= w2.baseMaxHp
+              let near = false
+              for (const e of w2.tanks) {
+                if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
+                const ex = e.x + e.w / 2
+                const ey = e.y + e.h / 2
+                if (Math.abs(ex - pcx2) + Math.abs(ey - pcy2) <= 3 * 16) {
+                  near = true
+                  break
+                }
+              }
+              // mode 3 = safe periods only · mode 4 = the INVERSE (danger only):
+              // A15c (safe-only) was the worst of the three, which says these
+              // shots earn their cooldown exactly when something is pressing.
+              ok = this.params.fireAlongFacing >= 4 ? !(atFullHp && !near) : atFullHp && !near
+            }
             if (ok) {
               a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
               // Diagnostic: tag the shot so a probe can measure ITS hit rate.

@@ -112,6 +112,9 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
         // （OFF 档 dwell 422 → 373）。本腿要复现的是 §168 记录的原始 pin，
         // 固定在 A8 纪元之前的口径。
         defenseCellResolve: 0,
+        // A15d (2026-10-25) 沿朝向补射也会顺带缩短这个 pin（275 拍）——
+        // 本腿要复现的是 §168 记录的原始 pin，固定回 A15d 之前的口径。
+        fireAlongFacing: 0,
       },
       STAGE,
       SEED,
