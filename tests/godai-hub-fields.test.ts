@@ -165,6 +165,10 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
   // A15 (2026-10-25): fire-gate audit counters — diagnostic only, written by
   // isFiring(), never read by gameplay and never reset (per-run probe data).
   _fireGateAudit: { cls: 'B', why: 'A15 fire-gate diagnostic counters (accumulated per run)' },
+  _fireReason: {
+    cls: 'B',
+    why: 'A21 diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall)',
+  },
   _lastFireWasFacing: { cls: 'B', why: 'A15b diagnostic: frame of the last facing-branch shot' },
   _facingFireTick: { cls: 'B', why: 'A15 per-tick memo key (isFiring idempotence)' },
   _facingFireOk: { cls: 'B', why: 'A15 per-tick memo value (isFiring idempotence)' },

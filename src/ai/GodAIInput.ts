@@ -386,6 +386,8 @@ export class GodAIInput implements InputLike {
    * aligned but nothing fired" ticks to a specific gate.
    */
   _fireGateAudit: Record<string, number> = {}
+  /** A21 (2026-10-25) diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall). */
+  _fireReason: Record<string, number> = {}
   /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
   _lastFireWasFacing = -1
   /** A15: per-tick memo so `isFiring()` is IDEMPOTENT inside one tick. The

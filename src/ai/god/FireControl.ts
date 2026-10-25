@@ -826,6 +826,7 @@ export function shouldFireInDirImpl(
     // good moments, the remaining candidate shots hit only 41.2% (vs 60.7%
     // baseline) — i.e. those decisions were spending cooldowns on shots that
     // could not land.
+    if (result.enemy) self._fireReason.enemy = (self._fireReason.enemy ?? 0) + 1
     if (result.enemy && self.params.fireLeadHitGate > 0) {
       if (leadHitForDir(self.world, dir, pcx, pcy) <= 0) {
         self._predictiveFireBlocks++
@@ -843,6 +844,7 @@ export function shouldFireInDirImpl(
 
   // Steel with level ≥ 3 (no enemy found): fire to pierce.
   if (result.steel) {
+    self._fireReason.steel = (self._fireReason.steel ?? 0) + 1
     return aimOk(self)
   }
 
@@ -858,6 +860,7 @@ export function shouldFireInDirImpl(
     const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, BULLET_ALIGN_NEXT_CELL)
     if (d < 0) continue
     if (d < TANK * 4) {
+      self._fireReason.intercept = (self._fireReason.intercept ?? 0) + 1
       return aimOk(self)
     }
   }
@@ -868,6 +871,7 @@ export function shouldFireInDirImpl(
   // fast enemies that dodge bullets by moving sideways.
   if (!result.wall && self.params.predictiveCrossingFire > 0) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
+      self._fireReason.crossing = (self._fireReason.crossing ?? 0) + 1
       return aimOk(self)
     }
   }
@@ -880,6 +884,7 @@ export function shouldFireInDirImpl(
   // classic bulletCap mode), skip wall-firing to reserve the bullet cap
   // for enemies and enemy bullets.
   if (allowWallFire && result.wall && !result.baseWall && !result.steel) {
+    self._fireReason.wall = (self._fireReason.wall ?? 0) + 1
     return aimOk(self)
   }
 
