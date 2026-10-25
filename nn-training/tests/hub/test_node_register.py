@@ -336,6 +336,64 @@ def test_upsert_preserves_console_intent_and_restores_after_clean_shutdown(
     assert node["enabled"] is True and node["url"] == "http://100.64.0.8:8443"
 
 
+def test_push_registration_reenables_after_a_manual_disable(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-25 用户口径（两个方向都要）：
+
+    * **人工停用必须保留** —— 云机配额用完时它**不会来注销节点**，人只能手动停；
+    * **停用之后再来注册 ⇒ 自动启用** —— 那说明有新的云机/新的传输通道，就绪可用了。
+
+    现场（10:20）：`colab-o` 被停用后重新起会话注册，hub 只回 `updated` 而不翻 enabled，
+    ⇒ 派发表空、一个单不派，而云机日志一路正常。
+
+    判据落点：`kind` 缺席（采样节点）**不**翻回（人按过的停用不该被每会话一次的注册顶掉）；
+    声明了 push 角色才翻。
+    """
+    _push_ping(monkeypatch)
+    _reg_default(kind="offline_push", label="offline-colab")
+    node = _nodes(cfg_path)[0]
+    assert node["enabled"] is True and node["offline_push"] is True
+
+    # 人按了停用（控制台整份回写；没有 unregistered_at）
+    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw["nodes"][0]["enabled"] = False
+    raw["nodes"][0]["concurrency"] = 8  # 控制台手工值，注册不该顶
+    cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    # 新会话/新隧道 ⇒ 真注册（带 kind）⇒ 自动启用
+    st = _Stub(
+        {
+            "id": "rollout-colab",
+            "url": "http://100.64.0.9:8443",
+            "authKey": "k9",
+            "kind": "offline_push",
+        }
+    )
+    st._admin_nodes_register()
+    assert st.last[2] == 200 and st.last[1]["action"] == "updated", st.last
+    assert st.last[1]["dispatchable"] is True, st.last
+    node = _nodes(cfg_path)[0]
+    assert node["enabled"] is True, node
+    assert node["concurrency"] == 8, "控制台手工并发不该被注册顶掉"
+    assert node["offline_push"] is True
+
+
+def test_sampler_registration_does_not_override_a_manual_disable(
+    cfg_path: Path, ping_ok: None
+) -> None:
+    """反面：`kind` 缺席（采样节点每会话都注册）**不得**顶掉人工停用。"""
+    _reg_default()
+    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw["nodes"][0]["enabled"] = False
+    cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    st = _Stub({"id": "rollout-colab", "url": "http://100.64.0.10:8443", "authKey": "k10"})
+    st._admin_nodes_register()
+    assert st.last[1]["action"] == "updated"
+    assert _nodes(cfg_path)[0]["enabled"] is False
+
+
 def test_unchanged_does_not_rewrite(cfg_path: Path, ping_ok: None) -> None:
     _reg_default()
     before = cfg_path.read_bytes()

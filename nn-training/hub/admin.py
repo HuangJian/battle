@@ -145,8 +145,10 @@ def _deterministic_fill(n: int) -> bytes:
 # plan/rollout-node-auto-register v2：云机（采样节点）自报 {id,url,authKey} 到 hub，hub 是
 # rl-config.json 的**第二作者**（控制台之外唯一持久写者）。约定（S3 用例钉住）：
 #   * 只动 `nodes[]` 一项 + 原子写 + 无变化不写盘；
-#   * `enabled` 归控制台：新条目 true；既有 managed 条目只在「上一轮干净收工」（带
-#     `unregistered_at`）时恢复 true —— 云机**不顶**控制台在会话进行中的停用；
+#   * `enabled` 归控制台：新条目 true；既有 managed 条目**只在两种情形**恢复 true：
+#     ① 上一轮干净收工（带 `unregistered_at`）；② **本次注册声明了 push 角色（带 `kind`）**——
+#     后者是 2026-10-25 用户口径（见 `_merge_managed_node` 里那段长注释：配额用完的云机不会
+#     来注销，人只能手动停；而新会话/新通道一起来就必须能自己翻回）。
 #   * `concurrency` 只在**新条目**且 body 给值时才写（F2：缺省不写键 = 派发按 `ping.cpus`）；
 #   * ping 门：`common.distribution.node_ping` 不通 ⇒ 422 不写盘（`skipPing=true` 可绕过，日志响亮）。
 
@@ -217,6 +219,17 @@ def _merge_managed_node(prev: dict | None, payload: dict) -> dict:
             node.pop(cap, None)
         for cap in _kind_caps(str(payload["kind"])):
             node[cap] = True
+        # ★ 2026-10-25（用户口径）：「人工停用要有（云机配额用完不会来注销节点），停用完再注册
+        #   就要启用（说明这时候有新的云机/新的传输通道，就绪可用了）」。
+        #   所以：**声明了 push 角色的注册 ⇒ 无条件 `enabled=true`**，覆盖人工停用。
+        #   不对称是刻意的 ——
+        #     · 停用**立刻生效**且本会话内不会被自己顶掉：`Registry.ensure` 在 url/token 没变时
+        #       **不发请求**（`should_register`），所以只有「新会话 / 换了隧道」才真的再注册；
+        #     · 那一拍正是「新的云机就绪」的时刻，翻回 true 才对得上事实。
+        #   采样节点（`kind` 缺席）不受影响：它们的旧语义（只在 `unregistered_at` 时恢复）
+        #   保持不变 —— 采样节点每会话都注册一次，顶掉控制台意图会让人白按。
+        if _kind_caps(str(payload["kind"])):
+            node["enabled"] = True
     if node.pop("unregistered_at", None) is not None:
         node["enabled"] = True  # 上轮干净收工 ⇒ 本轮回来即恢复启用
     node["managed"] = True
@@ -860,10 +873,20 @@ class AdminRoutes:
             new_nodes.append(merged)
         atomic_write_json(path, {**cfg, "nodes": new_nodes}, indent=2)
         action = "created" if idx < 0 else "updated"
-        restored = prev is not None and "unregistered_at" in prev
+        was_off = prev is not None and not bool(prev.get("enabled", True))
+        now_on = bool(merged.get("enabled", True))
+        if was_off and now_on:
+            why = (
+                "上轮干净收工 ⇒ 恢复 enabled=true"
+                if "unregistered_at" in (prev or {})
+                else "声明了 push 角色 ⇒ 覆盖人工停用（新通道就绪）"
+            )
+            note = f"（{why}）"
+        else:
+            note = ""
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点登记 id={nid} url={url} action={action}"
-            + ("（上轮干净收工 ⇒ 恢复 enabled=true）" if restored else "")
+            + note
             + f"（来源 {self.client_address[0]}）",
             flush=True,
         )

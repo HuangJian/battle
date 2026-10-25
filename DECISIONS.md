@@ -9670,3 +9670,22 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `<课>/*.it1.*`、`/admin/offline-push-workers.dispatched >= 1`
   → ④ 把节点改成 `enabled:false` ⇒ 课被释放（`held=false`）且该节点出现在 `blocked` 里。
 * 连跑 3 次稳定；首次即覆盖今天那两次事故（「注册成功不派单」与「停用即释放」）。
+
+## §2026-10-25-push-register-reenables（2026-10-25，push 云机**注册即启用**；人工停用仍有效）
+
+- **用户口径**（原话）：「人工停用要有（因为云机配额用完不会来注销节点！），停用完再注册就要启用
+  （说明这时候有新的云机使用新的传输通道，就绪可用了！）」。
+- **决定**：`hub/admin._merge_managed_node` —— 既有 managed 条目在**本次注册声明了 push 角色
+  （带 `kind`）**时，**无条件** `enabled = true`（覆盖人工停用）。
+  不对称是刻意的、且靠既有去重成立：
+  * 人工停用**立刻生效**，且**本会话内不会被自己顶掉** —— `Registry.ensure` 在 url/token 没变时
+    **不发请求**（`should_register`），只有「新会话 / 换了隧道」才真注册；
+  * 那一拍正是「新机器就绪」的事实，翻回 true 才对；
+  * **采样节点（`kind` 缺席）不受影响** —— 它们每会话都注册一次，顶掉控制台意图等于让人白按。
+- 日志：注册行按**结果**说明是谁翻回来的（「上轮干净收工 ⇒ 恢复 enabled=true」/
+  「声明了 push 角色 ⇒ 覆盖人工停用（新通道就绪）」）。
+- 用例（两向都钉）：`test_push_registration_reenables_after_a_manual_disable`
+  （停用后带 kind 注册 ⇒ enabled=true，且控制台手工 `concurrency` 保留）·
+  `test_sampler_registration_does_not_override_a_manual_disable`（kind 缺席 ⇒ 仍 false）。
+- 注：e2e 里注册写的是 `distribution.rl_config_path()`，而 e2e 的派发器读 `--push-config`
+  （两者在 e2e 里刻意分离），所以这条语义的落点只能是 `hub/admin` 的单测。
