@@ -23,6 +23,11 @@ import { physicalCores } from '../../tools/lib/cores'
 const DASH = dirname(dirname(fileURLToPath(import.meta.url)))
 
 const n = physicalCores()
+const extra = process.argv.slice(2)
+// 有 positional 参数（`bun run test tests/foo.test.ts` / 裸 `bun test <file>` 的转交）⇒
+// 用**它们**当根，不再追加缺省的 `tests`——Bun 的 positional 是「路径含子串」的**或**关系，
+// 追加 `tests` 会把范围放大回全量（实测 8 条的 scoped 跑变成 1838 条）。
+const hasPositional = extra.some((a) => !a.startsWith('-'))
 const args = [
   'test',
   `--parallel=${n}`,
@@ -31,9 +36,15 @@ const args = [
   './tests/helpers/no-proxy.ts',
   '--preload',
   './tests/helpers/isolate-paths.ts',
-  'tests',
-  ...process.argv.slice(2),
+  ...(hasPositional ? [] : ['tests']),
+  ...extra,
 ]
 console.log(`[gate] bun ${args.join(' ')}`)
-const r = spawnSync('bun', args, { stdio: 'inherit', cwd: DASH })
+// `BCITY_TEST_GATE=1`：告诉 `tests/helpers/gate-entry.ts`（bunfig 的 [test] preload）
+// 「已经在门禁里」——用于区分「裸 bun test 被转交进来」与「门禁自己的子进程」，不设就会套娃。
+const r = spawnSync('bun', args, {
+  stdio: 'inherit',
+  cwd: DASH,
+  env: { ...process.env, BCITY_TEST_GATE: '1' },
+})
 process.exit(r.status ?? 1)

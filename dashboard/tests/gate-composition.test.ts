@@ -53,4 +53,16 @@ describe('dashboard 门禁命令组成', () => {
     expect(launcher).toContain('./tests/helpers/isolate-paths.ts')
     expect(existsSync(resolve(DASH, 'tests/helpers/isolate-paths.ts'))).toBe(true)
   })
+
+  /** 2026-10-25：Bun 1.4 的 bunfig `[test]` 没有 isolate/parallel 键（oven-sh/bun#38215）,
+   *  裸 `bun test` 无法靠配置拿到文件级隔离 ⇒ 由预载把它**转交**给门禁。这条闸钉三件事：
+   *  预载登记着、转交的是同一个门禁、门禁设了「已在隔离里」的标记（缺它 = 无限套娃）。 */
+  it('裸 `bun test` 被 bunfig 转交给门禁（缺任一环 = 76 red / 套娃）', () => {
+    const bunfig = readFileSync(resolve(DASH, 'bunfig.toml'), 'utf8')
+    expect(bunfig).toContain('./tests/helpers/gate-entry.ts')
+    const entry = readFileSync(resolve(DASH, 'tests/helpers/gate-entry.ts'), 'utf8')
+    expect(entry).toContain('scripts/run-tests.ts')
+    expect(entry).toContain('BUN_TEST_WORKER_ID')
+    expect(launcher).toContain('BCITY_TEST_GATE')
+  })
 })
