@@ -12,11 +12,28 @@ from __future__ import annotations
 import json
 import os
 import time
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from remote import code_snapshot as cs
+
+#: 会话级命令行指纹缓存（key = pid）。
+_cmdline = cache(cs.proc_cmdline)
+
+
+@pytest.fixture(autouse=True)
+def _memo_cmdline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`proc_cmdline` 按 pid 记忆（本文件内整个会话共用）。
+
+    Windows 上它是「wmic → PowerShell `Get-CimInstance`」两道子进程探测：新机没有 wmic，
+    于是每次探测 ~1s，而本文件**每条**用例都要探 1–3 次（实测 1.2–1.9s/条，全花在这里）。
+    同一 pid 的命令行在一次测试进程的生命周期内不会变，记忆不改变任何判据；
+    「指纹不符 ⇒ 判复用」「读不到 ⇒ fail-closed」两条语义仍由显式打桩的用例钉住
+    （`test_pid_reuse_fingerprint_mismatch_repacks` / `test_unreadable_cmdline_is_fail_closed`）。
+    """
+    monkeypatch.setattr(cs, "proc_cmdline", _cmdline)
 
 
 def _fake_repo(tmp_path: Path) -> Path:

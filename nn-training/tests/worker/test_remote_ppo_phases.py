@@ -98,6 +98,10 @@ class _Rig:
         _stub(self.step, "_remote_ppo_fetch", fetch)
         _stub(self.step, "_remote_ppo_land", land)
         _stub(self.step, "_handle_remote_failure", policy)
+        # 看门狗（M1）不是本文件的被测物：它真去问 hub（`hub_url="http://hub.invalid"`）
+        # ⇒ 用例里串的是**本机代理/DNS 的超时**（实测 2×4.4s，随机器与代理配置漂）。
+        # 判据（404 宽限 / 账本终局 / lost 后重发）在 `test_ppo_redo` 与看门狗用例里钉。
+        _stub(self.step, "_remote_ppo_lost", lambda sess, it: False)
 
 
 def test_not_ready_and_resumable_yields_without_fetch() -> None:

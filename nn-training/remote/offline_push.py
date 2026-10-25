@@ -201,6 +201,7 @@ def run_push(
     registry: Registry | None = None,
     tick_sec: float = TICK_SEC,
     session_budget_sec: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """跑离线 push 服务（阻塞直到会话到顶/中断）。返回 0 = 干净收摊。
 
@@ -364,7 +365,8 @@ def run_push(
                     last_status = cur
                     last_status_at = now
                 last_tick = now
-            time.sleep(1.0)
+            # 一拍一醒（注入口 = 用例把「真墙钟」换成拍数，见 `tests/remote/test_offline_push_supervisor.py`）。
+            sleep(1.0)
     except KeyboardInterrupt:
         log("收到中断")
     finally:

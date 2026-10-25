@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,14 +46,6 @@ def _rel(p: Path) -> str:
     return p.relative_to(ROOT).as_posix()
 
 
-def _name_calls(tree: ast.AST, name: str) -> list[ast.Call]:
-    return [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
-    ]
-
-
 def is_main_guard(test: ast.expr) -> bool:
     return (
         isinstance(test, ast.Compare)
@@ -62,23 +56,76 @@ def is_main_guard(test: ast.expr) -> bool:
     )
 
 
-def bare_parser_sites() -> list[str]:
-    """还有谁在直接构造 `argparse.ArgumentParser`（定义点除外）。"""
-    out: list[str] = []
+@dataclass(frozen=True)
+class _Scan:
+    """四个判据一次扫出来的「小结果」（字符串/整数，GC 友好 —— 不缓存 AST，见 `source_scan` 头部）。"""
+
+    bare_parsers: tuple[str, ...]
+    old_exits: tuple[str, ...]
+    house_ctors: int
+    house_exits: int
+
+
+@cache
+def _scan() -> _Scan:
+    """一遍 `ast.walk` 出四个数（2026-10-25）。
+
+    原先是**四条用例各扫一遍** 332 个生产文件（每条 ~0.9s，一个文件 4 个 `pytest`
+    用例 = 3.6s）：判据一模一样，只是过滤器不同。这里把「遍历/命中形状」合成一次，
+    结果缓存成小对象——每个用例仍然只断言自己那一项（失败指向不变）。
+
+    逐条对应旧实现（语义不得漂）：
+      · `bare_parsers`：`<p>.ArgumentParser(...)` 的调用点，**跳过 `common/cli.py` 自己**；
+      · `old_exits`：`__main__` 守卫块内（**含嵌套**，如 `try: sys.exit(main())`）的裸
+        `main()` / `sys.exit(main())` 表达式语句——只认 `ast.Expr`，作为实参出现的不算；
+      · `house_ctors`：`house_parser(...)` 的裸名调用数（**跳过 `common/cli.py`**）；
+      · `house_exits`：`run_main(...)` 的裸名调用数（**包含 `common/cli.py`**，与旧版一致）。
+    顺序：文件序 → 该文件内 `ast.walk`（BFS）序，与旧版逐项拼接同序。
+    """
+    bare: list[str] = []
+    old: list[str] = []
+    ctors = 0
+    exits = 0
     for p in production_files():
-        if p == HOUSE_FILE:
-            continue
         tree = _tree(p)
         if tree is None:
             continue
+        in_house = p == HOUSE_FILE
+        rel = _rel(p)
         for n in ast.walk(tree):
-            if (
-                isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
-                and n.func.attr == PARSER_CTOR
-            ):
-                out.append(f"{_rel(p)}:{n.lineno}")
-    return out
+            if isinstance(n, ast.Call):
+                fn = n.func
+                if isinstance(fn, ast.Attribute):
+                    if fn.attr == PARSER_CTOR and not in_house:
+                        bare.append(f"{rel}:{n.lineno}")
+                elif isinstance(fn, ast.Name):
+                    if fn.id == HOUSE_CTOR and not in_house:
+                        ctors += 1
+                    elif fn.id == HOUSE_EXIT:
+                        exits += 1
+            elif isinstance(n, ast.If) and is_main_guard(n.test):
+                # 只认可执行语句（`ast.Expr`）——`run_main(lambda: main(...))` 里作实参的不算。
+                for block in n.body:
+                    for st in ast.walk(block):
+                        if not isinstance(st, ast.Expr) or not isinstance(st.value, ast.Call):
+                            continue
+                        inner = st.value
+                        if isinstance(inner.func, ast.Name) and inner.func.id == MAIN_NAME:
+                            old.append(f"裸 main(): {rel}:{st.lineno}")
+                        if (
+                            isinstance(inner.func, ast.Attribute)
+                            and inner.func.attr == EXIT_ATTR
+                            and inner.args
+                            and isinstance(inner.args[0], ast.Call)
+                            and getattr(inner.args[0].func, "id", "") == MAIN_NAME
+                        ):
+                            old.append(f"sys.exit(main()): {rel}:{st.lineno}")
+    return _Scan(tuple(bare), tuple(old), ctors, exits)
+
+
+def bare_parser_sites() -> list[str]:
+    """还有谁在直接构造 `argparse.ArgumentParser`（定义点除外）。"""
+    return list(_scan().bare_parsers)
 
 
 def old_style_exit_sites() -> list[str]:
@@ -87,43 +134,12 @@ def old_style_exit_sites() -> list[str]:
     嵌套面是实测漏洞：旧版只看 `__main__` 的顶层语句，`hub/tunnel_ab_probe.py` 的
     `try: sys.exit(main())` 整块漏过（2026-10-11 全迁复核补齐）。
     """
-    out: list[str] = []
-    for p in production_files():
-        tree = _tree(p)
-        if tree is None:
-            continue
-        for n in ast.walk(tree):
-            if not isinstance(n, ast.If) or not is_main_guard(n.test):
-                continue
-            # walk 到块内所有节点；只认 **表达式语句**（`ast.Expr`），这样
-            # `run_main(lambda: main(...))` 里作为实参出现的 main(...) 不会被误报。
-            for st in (node for block in n.body for node in ast.walk(block)):
-                if not isinstance(st, ast.Expr) or not isinstance(st.value, ast.Call):
-                    continue
-                fn = st.value.func
-                if isinstance(fn, ast.Name) and fn.id == MAIN_NAME:
-                    out.append(f"裸 main(): {_rel(p)}:{st.lineno}")
-                if (
-                    isinstance(fn, ast.Attribute)
-                    and fn.attr == EXIT_ATTR
-                    and st.value.args
-                    and isinstance(st.value.args[0], ast.Call)
-                    and getattr(st.value.args[0].func, "id", "") == MAIN_NAME
-                ):
-                    out.append(f"sys.exit(main()): {_rel(p)}:{st.lineno}")
-    return out
+    return list(_scan().old_exits)
 
 
 def house_ctor_calls() -> int:
-    return sum(
-        len(_name_calls(_tree(p) or ast.Module(body=[], type_ignores=[]), HOUSE_CTOR))
-        for p in production_files()
-        if p != HOUSE_FILE
-    )
+    return _scan().house_ctors
 
 
 def house_exit_calls() -> int:
-    return sum(
-        len(_name_calls(_tree(p) or ast.Module(body=[], type_ignores=[]), HOUSE_EXIT))
-        for p in production_files()
-    )
+    return _scan().house_exits

@@ -133,7 +133,15 @@ def test_status_line_only_speaks_when_the_state_changes(
     monkeypatch.setattr(sup, "probe_offline_dispatch", lambda *_a, **_kw: True)
     logs: list[str] = []
     stop = threading.Event()
-    threading.Timer(2.4, stop.set).start()  # 让循环真跑几拍（sleep 1s 一拍）
+    # 让循环真跑几拍：原先靠 `threading.Timer(2.4, stop.set)` 等真墙钟（sleep 1s 一拍 ⇒
+    # 白烧 2.4s）。现在把拍子本身注入进来——拍数就是判据需要的「多拍」，与机器快慢无关。
+    pinned: dict[str, int] = {"n": 0}
+
+    def _fast_sleep(_s: float) -> None:
+        pinned["n"] += 1
+        if pinned["n"] >= 3:
+            stop.set()
+
     rc = sup.run_push(
         {
             "work_dir": str(tmp_path),
@@ -147,8 +155,10 @@ def test_status_line_only_speaks_when_the_state_changes(
         face_state=PushFaceState(work_dir=tmp_path / "face", log=logs.append),
         registry=_FakeReg(),  # type: ignore[arg-type]
         tick_sec=0,
+        sleep=_fast_sleep,
     )
     assert rc == 0
+    assert pinned["n"] >= 3, "循环没走够拍（状态行去重需要多拍才可证伪）"
     n = sum(1 for m in logs if m.startswith(sup.STATUS_PREFIX))
     assert n == 1, f"状态没变却打了 {n} 条状态行（刷屏）：{logs}"
 

@@ -25,6 +25,82 @@
 
 ---
 
+## §88 pytest 最慢用例第四轮：范围扩到前 30 条 ⇒ 五种「假网络 / 假拍子」（2026-10-25，用户指令「范围扩大到前 30 个测试，优化其它未处理过的」）
+
+**口径**：§87 同一套（`b*` 四连跑 `--durations=0` 取 min → 被点名单进程串行复测），
+同一条命令（34 个 nodeid、单进程串行）**93.1s → 47.7s（−49%）**；nn python 门禁
+**5128 passed / 77s**（§87 记 92s，更早 95–119s）。
+
+### ① 生产侧默认参数把 `urlopen` 钉死在 import 时（最贵的那个）
+
+`remote/push_register.py` 两处 `urlopen: RegisterFn = urllib.request.urlopen`：默认值在
+**def 时**求值 ⇒ 用例里 `monkeypatch.setattr("urllib.request.urlopen", …)`（push 腿
+`tests/remote/test_notebook_runtime.py` 早就这么写，注释也写明是「mock 路径」）**整条失效**，
+于是「注册」真发 HTTP 到 `127.0.0.1:1`。本机一次回环拒绝 **2.02s**，`run_push_worker` 的
+首拍注册 + 每拍重注册把三条用例烧成 4.08/4.08/2.02s（文件 10.2s）。
+
+**改法**：默认 `None`，在 `__init__` / `probe_offline_dispatch` **调用时**取真实现
+（`urlopen or urllib.request.urlopen`）。生产语义不变（同一函数、同一时刻解析），
+而用例的既有打桩意图重新生效 → 文件 **10.2s → 0.2s**。
+
+### ② 假会话 + 真看门狗 = 每条用例 2s×N（`hub.invalid` 走代理）
+
+`_remote_ppo_step` 的让位路会走 `_remote_ppo_lost`（`job_liveness`）与 `_remote_wait_report`
+（`_wait_state_note`）。别人给假会话 `hub_url="http://hub.invalid"` 时这两条**是真发请求**：
+本机 `HTTP_PROXY=127.0.0.1:7890` 在场，`.invalid` 由代理解析 ⇒ **~2s/次**。
+
+| 用例 | 改前 | 改后 | 改法 |
+|---|---|---|---|
+| `tests/worker/test_remote_ppo_phases.py`（2 条） | 4.40 / 4.39 | ≤0.01 | `_Rig` 打桩 `_remote_ppo_lost`（看门狗判据住 `test_ppo_redo`/watchdog 族） |
+| `e2e/test_loop_supervisor_integration.py::test_step_mode_yields…` | 4.48 | 0.05 | autouse fixture 把 `hub_http.job_liveness` 钉成 `JOB_ALIVE`、`TrainingLoop._remote_wait_report` 钉空（该文件 750 行早有一条用例这么干） |
+
+**规矩**：**假会话必须同时假掉看门狗**。只换 publish/probe/land 不够——让位路会自己去问 hub。
+
+### ③ 「没人听的端口」在本机 = 2.02s（不是毫秒）
+
+同一台 Windows 上实测 `connect` 到 `127.0.0.1` 的 :1 / :9 / 一个刚关闭的临时端口，
+**全部 2.020s** 才回 `WinError 10061`（过滤驱动/安全产品，不是应用层）。§81/§87 记过
+「死端口不是快速失败」，这轮补一个更硬的数字：**它慢在内核，和代码无关，且所有死端口都一样**。
+
+| 用例 | 改前 | 改后 | 死端口在哪 |
+|---|---|---|---|
+| `tests/remote/test_ts_offline_install.py::test_ensure_passes_tarball_from_cfg` | 4.02 | 0.09 | `ensure()` 的 `already` 分支探 `localhost:1055`（userspace SOCKS）→ `_port_listening` 两族各一次 |
+| `e2e/test_bc_epoch_e2e.py::test_e2e_wait_bc_round_…`（cfg 里的 dead 节点） | 4.40 | 0.33 | `eval_capable_nodes` 每轮 ping 一次（2 次边界 eval） |
+
+两处都只把**不可达那一下**换成瞬时替身（`_port_listening → False`；`dead` URL 的
+`node_ping → None`），判据不动（「ping 不到 ⇒ 跳过、不炸」「已经跑着的不是 userspace」）。
+
+### ④ 测试可见的「真拍子」要能注入
+
+`remote/offline_push.py::run_push` 每拍 `time.sleep(1.0)` 写死 ⇒ 用例只能 `threading.Timer(2.4)`
+等真墙钟（3.02s）。加 `sleep=` 注入点（与 `register_or_warn` 同款），用例把「拍数」当判据
+（≥3 拍才可证伪去重），**3.02 → 0.14**。
+
+### ⑤ 其余「顺手的副作用」
+
+| 用例 | 改前 | 改后 | 副作用是什么 |
+|---|---|---|---|
+| `tests/trainer/test_serve_wiring.py`（2 条 CLI 接线） | 2.06 / 1.07 | 0.02 / 0.58 | `--serve` 入口会 `ensure_cluster_snapshot()`（整仓 zip，1.1–2.1s/次）；文件级 autouse 打桩，快照语义住 `test_code_snapshot.py` |
+| `tests/remote/test_code_snapshot.py`（22 条） | 1.74–1.92/条 | 0.68–1.21/条 | `proc_cmdline` 在 Windows 是「wmic → PowerShell `Get-CimInstance`」≈1s/次；用例内**按 pid 记忆**（命令行在会话内不变） |
+| `tests/test_entry_scripts_in_place.py` | 2.24 | 0.70 | 10 个入口各起一次解释器（0.22s/个），互不相干 ⇒ 4 路并行 |
+| `tests/test_cli_house.py`（4 条） | 1.48–1.58/条（合 6.2） | 合 1.6 | 四条用例对 332 个生产文件各扫一遍 AST ⇒ `cli_surface._scan()` 一次遍历出四个数并缓存小结果（不缓存 AST，§source_scan 的教训） |
+
+### 没动的与为什么
+
+- `e2e/test_hold_e2e.py`（5.33/2.77）、`e2e/test_auto_handoff_e2e.py`（3.4×3 + 2.45）里的
+  `HOLD_STALE=2.0` / `hold_stale_sec=2.0`：**被测语义就是「静默超过这个窗」**，压到 1s 以下会把
+  「live 期间断言」变成负载型 flake（§77 口径）。hub 子进程启动（~1.4–2.4s/次）同理。
+- `tests/trainer/test_eval_dispatch_resilience.py`（3.02）：`retry_at` 的指数退避 1/2/4s 是
+  **生产节拍**（`next_eval_wait` 只把「固定 5s」换成「睡到到期」）；改语料要动调度语义。
+- 三条全仓 AST 守卫（`test_source_text_assert_budget` 3.52、`test_lock_reentrancy` 3.36、
+  `test_no_sleep_as_sync` 1.23）：时间全在 `ast.parse` 本身（468 文件 ~1.4s compile + 遍历）。
+- `tests/worker/test_bc_epoch_resume.py`（2.39）：真 torch 两轮 BC（首算子初始化 ~1s），不是等待。
+- `tests/common/test_upgrade.py::test_codehash_bilingual_contract`（3.08）：两次 bun 子进程 + 全仓
+  hash；可并行但收益 ~1.2s，留待下次。
+
+**一句话规矩**：慢用例先问「它在等谁」——**假件没假干净**（默认参数钉死/看门狗没桩）与
+**死端口**（2s）是这一轮 19 条用例、−45s 串行墙钟的主要来源（≈38s）；其余 ≈6s 来自重复扫描与串行起子进程。
+
 ## §87 pytest 最慢用例第三轮：四种「白等」⇒ 8 条 −40s（2026-10-25，用户指令「找出耗时最长的 10 个 pytest，优化！」）
 
 **一句话**：同一套配方（§43/§72：4 连跑 `--durations=0` 取 min → 被点名的单进程串行复测 →

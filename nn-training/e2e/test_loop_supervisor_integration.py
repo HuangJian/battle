@@ -277,6 +277,17 @@ def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_a, **_kw: None)
+    # 会看门狗（M1 `_remote_ppo_lost`）问一句「这份 job 还在不在」——会话里的 `hub_url` 是
+    # `http://hub.invalid`（假件只建会话、不建服务），真发出去就是本机代理/DNS 的超时：
+    # 一次 2s，本文件实测 4.4s 全在这（6 次 recv 全是它）。假云的默认现场就该是「hub 认识它、
+    # 没丢」；要別的脸的用例（如 750 行那条）自己覆盖同一别名。
+    import remote.hub_http as hub_http
+
+    monkeypatch.setattr(hub_http, "job_liveness", lambda *_a, **_kw: hub_http.JOB_ALIVE)
+    # 让位期间的「在等什么」打点同样会直问 hub 的状态端（`_wait_state_note` → `_request`）：
+    # 它只是**观测**（生产里也是 best-effort，失败不影响等待语义），本文件逐条钉的是调度形状。
+    # 打点自带的节流/文案由 `tests/trainer/test_ppo_watchdog.py` 与 wait-starvation 那批钉住。
+    monkeypatch.setattr(TrainingLoop, "_remote_wait_report", lambda _self, sess, now: None)
 
 
 def _ledger_iters(course_dir: Path) -> list[int]:

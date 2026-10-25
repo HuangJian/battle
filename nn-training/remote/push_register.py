@@ -299,7 +299,11 @@ class Registry:
         workers: int | str | None = 0,
         label: str = "",
         log: Callable[[str], None] = lambda _m: None,
-        urlopen: RegisterFn = urllib.request.urlopen,
+        #: 缺省 = 调用时再取 `urllib.request.urlopen`（**不是** def 时的绑定）。
+        #: 2026-10-25：写成默认参数值会把函数对象在 import 时就钉死 ⇒ 用例里
+        #: `monkeypatch.setattr("urllib.request.urlopen", …)`（push 腿早有此约定）整条失效，
+        #: 于是「注册」真发 HTTP 到 `127.0.0.1:1`、每条用例白等 2s×N。
+        urlopen: RegisterFn | None = None,
         now_fn: Callable[[], float] = time.time,
     ) -> None:
         self.hub = _hub_base(hub)
@@ -309,7 +313,7 @@ class Registry:
         self.workers = workers
         self.label = str(label or "")
         self._log = log
-        self._urlopen = urlopen
+        self._urlopen: RegisterFn = urlopen or urllib.request.urlopen
         self._now = now_fn
         self._state: dict[str, str] = {"url": "", "authKey": ""}
         self._step = 0
@@ -556,7 +560,7 @@ def probe_offline_dispatch(
     token: str,
     *,
     timeout: float = 5.0,
-    urlopen: RegisterFn = urllib.request.urlopen,
+    urlopen: RegisterFn | None = None,
 ) -> bool | None:
     """hub 上**离线 push 派发器**挂没挂（`GET /admin/offline-push-workers`）。
 
@@ -571,12 +575,13 @@ def probe_offline_dispatch(
     base = _hub_base(hub)
     if not base or not token:
         return None
+    open_fn: RegisterFn = urlopen or urllib.request.urlopen
     req = urllib.request.Request(
         base + "/admin/offline-push-workers",
         headers={"Authorization": f"Bearer {token}"},
     )
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with open_fn(req, timeout=timeout) as resp:
             return int(getattr(resp, "status", 200) or 200) == 200
     except urllib.error.HTTPError as e:
         if e.code in (404, 409):

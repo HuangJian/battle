@@ -37,7 +37,30 @@ from hub.server import _JobStore, make_server
 from remote import worker as worker_mod
 from tests.helpers.hub_poll import hub_poll
 from trainer import bc_loop
+from worker import bc_eval as bc_eval_mod
 from worker.bc_config import BcEvalBlock, load_bc_course
+
+#: 「没人听的端口」的约定地址（cfg 里那个 dead 节点）。
+DEAD_NODE_URL = "http://127.0.0.1:1"
+
+
+@pytest.fixture(autouse=True)
+def _fast_dead_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不可达节点的 ping 用**瞬时**替身（只挡那一个 URL）。
+
+    本机（Windows 回环 + 安全产品过滤驱动）对「没人听的端口」要 ~2.0s 才回 WinError 10061
+    ——实测 127.0.0.1 的 :1 / :9 / 一个刚关闭的临时端口全部 2.02s。cfg 里的 dead 节点
+    用来钉「ping 不到 ⇒ 跳过它、不炸」（`eval_capable_nodes` 的 None 分支），这 2s 连接
+    不是被测物，且随机器/代理环境漂。真连接行为由 `tests/remote/` 那族用本地 stub 服务钉。
+    """
+    real = bc_eval_mod.node_ping
+
+    def fast(url: str, auth_key: str = "", *args: Any, **kw: Any) -> dict | None:
+        if str(url).rstrip("/") == DEAD_NODE_URL:
+            return None
+        return real(url, auth_key, *args, **kw)
+
+    monkeypatch.setattr(bc_eval_mod, "node_ping", fast)
 
 TOKEN = "test-token"
 COURSE_FP = "course-fp-e2e"
@@ -403,7 +426,7 @@ def test_e2e_wait_bc_round_ledger_ingest_and_eval(
         "nodes": [
             {"id": "fake-1", "url": node_base, "authKey": "", "concurrency": 2},
             # 不可达节点：eval 节点筛选必须跳过它而不炸
-            {"id": "dead", "url": "http://127.0.0.1:1", "authKey": "", "concurrency": 1},
+            {"id": "dead", "url": DEAD_NODE_URL, "authKey": "", "concurrency": 1},
         ]
     }
     try:

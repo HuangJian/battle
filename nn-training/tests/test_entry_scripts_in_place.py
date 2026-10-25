@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from tests.subproc_util import run_utf8
@@ -49,10 +50,31 @@ FILE_ENTRIES = (
 MODULE_ENTRIES = ("remote.remote_worker", "remote.remote_worker_serve")
 
 
-def _spawn(argv: list[str]) -> None:
+def _probe(argv: list[str]) -> tuple[int, str]:
+    """真起一次入口，回 `(退出码, stderr)`。"""
     out = run_utf8(argv, cwd=str(NN_ROOT), timeout=120)
-    assert out.returncode == 0, f"{argv} 退出码 {out.returncode}\nstderr:\n{out.stderr[-2000:]}"
-    assert "Traceback" not in out.stderr, f"{argv} 抛了栈：\n{out.stderr[-2000:]}"
+    return out.returncode, out.stderr
+
+
+def _expect_ok(argv: list[str], rc: int, err: str) -> None:
+    assert rc == 0, f"{argv} 退出码 {rc}\nstderr:\n{err[-2000:]}"
+    assert "Traceback" not in err, f"{argv} 抛了栈：\n{err[-2000:]}"
+
+
+def _spawn_all(argvs: list[list[str]]) -> None:
+    """并行真起多个入口（每个都是**同一条** `python <入口> --help`，只是不排队等）。
+
+    串行时 10 个入口 = 10 × 解释器启动（本机 ~0.22s/个，合计 ~2.2s）；这些进程互不相干
+    （只打 `--help`、不绑端口、不写 tmp），并发不改变判据。失败信息按输入顺序报，
+    不因调度顺序给出不确定的报错。
+    """
+    if len(argvs) == 1:
+        _expect_ok(argvs[0], *_probe(argvs[0]))
+        return
+    with ThreadPoolExecutor(max_workers=min(4, len(argvs))) as pool:
+        outcomes = list(pool.map(_probe, argvs))
+    for argv, (rc, err) in zip(argvs, outcomes, strict=True):
+        _expect_ok(argv, rc, err)
 
 
 def test_nn_training_top_level_has_no_entry_scripts() -> None:
@@ -65,11 +87,9 @@ def test_file_entries_run_as_scripts_from_the_repo_root() -> None:
     """`python nn-training/<入口> --help` 必须起得来（脚本模式下 sys.path[0] 是脚本目录）。"""
     missing = [e for e in FILE_ENTRIES if not (NN_ROOT / e).is_file()]
     assert missing == [], f"入口不在约定位置：{missing}"
-    for rel in FILE_ENTRIES:
-        _spawn([sys.executable, str(NN_ROOT / rel), "--help"])
+    _spawn_all([[sys.executable, str(NN_ROOT / rel), "--help"] for rel in FILE_ENTRIES])
 
 
 def test_module_entries_are_importable_by_their_contract_names() -> None:
     """`-m remote.remote_worker[_serve]`：控制台与 notebook 照这个名字起进程。"""
-    for mod in MODULE_ENTRIES:
-        _spawn([sys.executable, "-m", mod, "--help"])
+    _spawn_all([[sys.executable, "-m", mod, "--help"] for mod in MODULE_ENTRIES])

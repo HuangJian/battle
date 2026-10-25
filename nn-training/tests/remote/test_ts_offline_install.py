@@ -116,5 +116,9 @@ def test_ensure_passes_tarball_from_cfg(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(ts, "state", lambda: "Running")
     monkeypatch.setattr(ts, "start_daemon", lambda log, order="": "already-running")
     monkeypatch.setattr(ts, "self_ip", lambda: "100.64.0.9")
+    # `already` 分支会探 `localhost:1055`（userspace SOCKS）——两个地址族各一次真
+    # `connect`，本机/沙箱回环被丢包时每次烧 2s（实测本用例 4.02s 全在这里）。
+    # 本用例的被测物是「cfg 的 tarball 有没有传到 install」，与代理端口无关 ⇒ 直接钉死。
+    monkeypatch.setattr(ts, "_port_listening", lambda _addr: False)
     ts.ensure({"ts_authkey": "k", "ts_tarball": "/data/tailscale.tgz"}, lambda m: None)
     assert seen.get("tarball") == "/data/tailscale.tgz"

@@ -725,6 +725,18 @@ def test_missing_or_broken_control_file_keeps_training(
     assert rep2.stop_reason == "all_settled"
 
 
+@pytest.fixture(autouse=True)
+def _no_cluster_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI 接线用例不打集群代码快照。
+
+    `--serve` 入口**在解析完参数后**会 `ensure_cluster_snapshot()`（把整仓 zip 成 code.zip，
+    实测 1.1–2.1s/次；同一份内容第二次走复用，但本文件的用例各自 temp 锁/不同 argv）。
+    本文件的被测物是 argparse → `serve()` 的转发形状与单实例锁，快照语义另有
+    `tests/remote/test_code_snapshot.py` 逐条钉（含 ensure 的复用与 heal）。
+    """
+    monkeypatch.setattr("remote.code_snapshot.ensure_cluster_snapshot", lambda **_kw: None)
+
+
 # --------------------------------------------------------------- CLI 接线
 
 
