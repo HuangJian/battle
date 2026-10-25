@@ -512,6 +512,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 用 frame 的确定性哈希决定这一拍是否放弃开火，行为可复现、不抽 RNG。
   // 0 = 不跳发。
   fireSkipPct: 3,
+  // A19 (2026-10-25): P2.4 预测穿越开火开关。尸检：每局 **29.5 发（57.6% 的发次）**
+  // 是在「车道上没有敌人」的情况下打出的，命中率只有 36.6%（有目标时 90.5%）。
+  // 这批里几乎全是「提前打敌人将要穿过的地方」与破砖。0 = 关闭 P2.4。
+  predictiveCrossingFire: 1,
+  // A20 (2026-10-25): 预测穿越的时间容差（拍）。越小 = 只打「时间刚好」的穿越，
+  // 发数少但命中率高。默认 6（历史值）。
+  crossingSlackTicks: 6,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,

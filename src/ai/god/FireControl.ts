@@ -508,7 +508,11 @@ function predictEnemyCrossingImpl(
 
     // Tolerance: the time it takes for half the tank body to cross the
     // line, plus a few ticks of slack for sub-pixel jitter.
-    const tolerance = TANK / (2 * enemySpeed) + 6
+    // A20 (2026-10-25): slack is a knob. `+6` ticks of slop on top of the
+    // half-body crossing time means we fire up to ~17 ticks off the crossing —
+    // these shots are only 36.6% accurate (vs 90.5% for aimed shots). Tighter
+    // slack = fewer but better prediction shots.
+    const tolerance = TANK / (2 * enemySpeed) + self.params.crossingSlackTicks
     if (Math.abs(enemyTimeToCross - bulletTimeToReach) <= tolerance) {
       return true // pure check — caller handles RNG
     }
@@ -830,7 +834,7 @@ export function shouldFireInDirImpl(
   // line of fire, check if an enemy moving perpendicular will cross
   // the bullet's path at the right time. This lets the player hit
   // fast enemies that dodge bullets by moving sideways.
-  if (!result.wall) {
+  if (!result.wall && self.params.predictiveCrossingFire > 0) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
       return aimOk(self)
     }
