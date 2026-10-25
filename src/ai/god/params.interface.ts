@@ -1451,6 +1451,12 @@ export interface GodAIParams {
   /** A18 (2026-10-25): deterministic fire-discipline throttle in percent
    * (hash of the frame; no RNG draw). 0 = never skip. */
   fireSkipPct: number
+  /** A19 (2026-10-25): P2.4 predictive-crossing fire (shoot where a strafing
+   * enemy WILL cross). 0 = off. */
+  predictiveCrossingFire: number
+  /** A20 (2026-10-25): slack (ticks) added to the half-body crossing time when
+   * deciding that a strafing enemy will cross our line in time. */
+  crossingSlackTicks: number
   /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
    * down the same lane toward the same target (deterministic fire economy).
    * 0 = OFF (byte-identical). */
