@@ -33,6 +33,7 @@ afterAll(() => {
 })
 
 import { REPO_ROOT } from '../src/core/paths'
+import { deadPort } from './helpers/dead-endpoint'
 import { unfreezeJob, jobIdError } from '../src/server/actions'
 import { hubUnfreeze } from '../src/stack/hub-admin'
 import { routeAction } from '../src/server/api/route'
@@ -191,10 +192,14 @@ describe('unfreezeJob：四种 hub 答复必须可区分', () => {
   })
 
   it('hub 不可达 → 失败并点名试过的地址（不是静默成功）', async () => {
-    // 端口 1 → 立即连接拒绝。
+    // 死端点（accept 后立刻 reset）→ 毫秒级失败；不用 port 1（丢回环 SYN 的内核上要等满 3s）。
     writeFileSync(
       process.env.BCITY_RL_CONFIG!,
-      JSON.stringify({ version: 1, nodes: [], rl: { hub_port: 1, remote_token: 'tok-x' } }),
+      JSON.stringify({
+        version: 1,
+        nodes: [],
+        rl: { hub_port: deadPort(), remote_token: 'tok-x' },
+      }),
       'utf-8',
     )
     const r = await unfreezeJob('c', 'job-ok-1')
@@ -239,7 +244,7 @@ describe('路由接线：unfreeze-job', () => {
     // hub 不可达：仍 200 + ok:false（横幅一句人话，而不是 5xx）
     writeFileSync(
       process.env.BCITY_RL_CONFIG!,
-      JSON.stringify({ version: 1, nodes: [], rl: { hub_port: 1, remote_token: 'x' } }),
+      JSON.stringify({ version: 1, nodes: [], rl: { hub_port: deadPort(), remote_token: 'x' } }),
       'utf-8',
     )
     const fail = await routeAction('unfreeze-job', { course: 'c', jobId: 'job-ok-3' })

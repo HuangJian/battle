@@ -39,10 +39,13 @@ import {
   triggerCloudHalt,
 } from '../src/server/actions'
 import { consoleStatePath } from '../src/core/paths'
+import { deadPort } from './helpers/dead-endpoint'
 import type { RlConfig } from '../src/core/types'
 
-// hub 不可达（port 1 → 立即连接拒绝）→ 下发失败路径可离线断言。
-const CFG = { rl: { hub_port: 1, remote_token: 'x' } } as unknown as RlConfig
+// hub 不可达 → 下发失败路径可离线断言。
+// 端点用 `helpers/dead-endpoint`（accept 后立刻 reset，毫秒级 ECONNRESET），不用 port 1：
+// 丢回环 SYN 的内核上「没人监听」既不报错也不返回，每条用例要白等满 httpOk 的 5s 超时。
+const CFG = { rl: { hub_port: deadPort(), remote_token: 'x' } } as unknown as RlConfig
 
 function resetState(): void {
   saveConsoleState({ cloudHalts: {} })

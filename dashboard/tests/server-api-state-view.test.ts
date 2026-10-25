@@ -17,6 +17,7 @@ import type { TrainerHeartbeatView } from '../src/web/view'
 import { invalidatePpoAttributionMemo } from '../src/server/contribution'
 import * as pool from '../src/server/pool-history'
 import * as poolView from '../src/web/view'
+import { deadHttpsUrl } from './helpers/dead-endpoint'
 
 describe('console/api.buildStateView', () => {
   it('快照包含五个受管组件（含 2026-09-15 独立出来的 localWorker）、节点表与模式区块', async () => {
@@ -128,7 +129,8 @@ describe('console/api.buildStateView', () => {
         ...((cfg.nodes as unknown[]) ?? []),
         {
           id: 'probe-cloud',
-          url: 'https://127.0.0.1:1',
+          // 死端点（即时 ECONNRESET）——写死 port 1 在丢回环 SYN 的内核上要等满 1.5s 超时。
+          url: deadHttpsUrl(),
           authKey: 'k',
           concurrency: 1,
           enabled: true,
@@ -147,7 +149,7 @@ describe('console/api.buildStateView', () => {
       // 执行面 = 登记事实：有 gpu_push 节点 ⇒ hub 派发/直推（不再有「这门课指向谁」）。
       expect(['hub-dispatch', 'direct-push']).toContain(s.pushFleet?.mode ?? '')
       expect(s.pushFleet?.nodes).toBeGreaterThan(0)
-      // 逐节点探活结果在队列里（127.0.0.1:1 无人监听 → false）
+      // 逐节点探活结果在队列里（死端点探不通 → false）
       const probe = s.pushFleet?.probes.find((p) => p.id === 'probe-cloud')
       expect(probe?.healthy).toBe(false)
     } finally {

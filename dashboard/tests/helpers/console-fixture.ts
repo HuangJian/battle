@@ -29,6 +29,7 @@ import { afterAll } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+import { deadPort } from './dead-endpoint'
 
 /** rl-config.json 的节点行（测试补丁用；线上 schema 以 src/core/config.ts 为准）。 */
 export interface TestNode {
@@ -59,45 +60,48 @@ export const scratchState = path.join(scratchDir, 'console-state.json')
 // 机器上（2026-09-15 事故：线上首个 enabled 节点是 gpu_push 节点、没有 concurrency
 // 字段 ⇒ 「并发回写」用例算出 NaN 直接红）。字段只留测试真正读到的那些：
 // nodes（push-only / 采集 / 停用 三种形态）+ rl（端口、local_slots、stream、token）。
+//
+// 所有「探不通」的地址都指向**同一个死端点**（`tests/helpers/dead-endpoint.ts`：
+// accept 后立刻 reset）。早先写 `127.0.0.1:1` / `:8443` 这类没人监听的端口，前提是
+// 「内核立刻回 RST」——丢回环 SYN 的内核上（本仓 Linux 沙箱）每个冷探测要白等满
+// 1.5s 超时：`buildStateView` 系用例实测 1.5s/条，`bun run test` 墙钟被它拖到 21s。
+const DEAD = deadPort()
 const SEED_CONFIG = {
   version: 1,
   nodes: [
     // 线上形态：gpu_push 节点不参与并发配额，故没有 concurrency 字段
     {
       id: 'gpu1',
-      // 死回环端口（**不用 `*.fixture.invalid`**）：不存在的域名要靠 DNS 解析失败来"不通"，
-      // 那是一段依机器/解析器而变的墙钟（本仓实测注释曾记 1500ms/用例，还有 0.1–0.8s 的抖动），
-      // 而「端口 1 没人听」是即时 ECONNREFUSED——同样的「走不通」，确定性且零等待。
-      url: 'https://127.0.0.1:1',
+      url: `https://127.0.0.1:${DEAD}`,
       authKey: 'fixture-push-key',
       gpu_push: true,
       enabled: true,
     },
     {
       id: 'self',
-      url: 'http://127.0.0.1:8443',
+      url: `http://127.0.0.1:${DEAD}`,
       authKey: 'fixture-self-key',
       concurrency: 4,
       enabled: true,
     },
     {
       id: 'mac',
-      url: 'http://127.0.0.1:8444',
+      url: `http://127.0.0.1:${DEAD}`,
       authKey: 'fixture-mac-key',
       concurrency: 2,
       enabled: true,
     },
     {
       id: 'lite',
-      url: 'http://127.0.0.1:8445',
+      url: `http://127.0.0.1:${DEAD}`,
       authKey: 'fixture-lite-key',
       concurrency: 1,
       enabled: false,
     },
   ],
   rl: {
-    hub_port: 18787,
-    agent_port: 8443,
+    hub_port: DEAD,
+    agent_port: DEAD,
     local_slots: 0,
     stream: 0,
     double_buffer: 0,
