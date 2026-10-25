@@ -1307,17 +1307,21 @@ export class GodAIInput implements InputLike {
         if (p2 && p2.alive) {
           const pcx2 = p2.x + p2.w / 2
           const pcy2 = p2.y + p2.h / 2
-          if (this.shouldFireInDir(pcx2, pcy2, p2.dir)) {
+          // ⚠ 这里必须用**纯**判据：`shouldFireInDir` 内部会抽一次 `rng.next()`
+          // （aimError 判定），而 `isFiring()` 是查询函数，评估器/runner 每拍调用它的
+          // 次数不同 ⇒ 多抽的随机数会让 AI 的随机流分叉，两边跑出不同的游戏
+          // （`eval-game-parity` / `aim-dodge-buckets` 就是这么红的）。
+          // `leadHitForDir` 只读 World：到达时命中 + 车道无遮挡（base/砖/钢都算遮挡，
+          // 因此不会穿基地），无需再叠加静态扫描。
+          if (leadHitForDir(this.world, p2.dir, pcx2, pcy2) > 0) {
             // A15b (2026-10-25): `shouldFireInDir` is a STATIC ray scan — it says
             // "somebody is on the line now", not "this shot lands". Firing on it
             // alone measured −5.43pp / kills −629: shots were spent on enemies
             // that had already drifted out of the lane by arrival. Mode ≥2 also
             // requires the arrival-time predicate (`leadHitForDir`, the same one
             // the NN sees as `leadHitD`) to agree.
+            // 到达时命中判据已在上面成立（纯函数），这里只处理「时段」维度的门。
             let ok = true
-            if (this.params.fireAlongFacing >= 2) {
-              ok = leadHitForDir(this.world, p2.dir, pcx2, pcy2) > 0
-            }
             // A15c (mode ≥3): SAFE PERIODS ONLY. A15b took the good moments away
             // from the candidate chain and the *remaining* candidate shots fell
             // to 41.2%, so the branch was competing with the shots that matter.
