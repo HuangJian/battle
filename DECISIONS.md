@@ -9621,3 +9621,16 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （`remote/plan_handoff._eval_round_done` 报 `eval`，push 腿在 `plan_run._maybe_cloud_eval`）。
   用例 `tests/common/test_progress_text.py::test_both_legs_share_the_same_sentence_only_the_cursor_differs`
   直接钉「去掉游标之后逐字相同」。
+
+### 补记（`§2026-10-25-audit-p1p2p3-fixes-and-one-log-face`，10:05 用户之问：为什么 push 腿看不到 rollout/ppo 日志）
+
+- **事实**：代码是同一份（`run_one_course` → `run_loop` → `plan_run` → `run_iter_rollout` /
+  `train_core` / `offline_eval`），但**进程拓扑不同**：pull 腿 `run_loop_main(argv)` 是**同进程**
+  调用 ⇒ 明细天然落在 notebook 单元输出；push 腿 `_Child.spawn` 把子进程
+  `stdout=log_f` **整段重定向进 `tasks/<id>/run.log`** ⇒ 单元输出里只剩 supervisor 的
+  注册/状态/进度行。所以「同一份代码，两条腿能看到的明细天差地别」。
+- **修**：`remote/offline_push._Child.spawn` 改 `stdout=PIPE` + **tee 线程**，同一份字节
+  **同时**进 `run.log` 与 supervisor 日志（逐字透出、不加前缀 —— 子进程自己带 `[HH:MM:SS]`）。
+  `run.log` 仍是权威副本（`/offline/push/state` 的失败尾巴仍读它）。
+- 用例 `tests/remote/test_offline_push_supervisor.py::test_child_output_is_teed_into_the_supervisor_log`。
+- 注：子进程自带时间戳 + 单元 log 再加一个 ⇒ 行首会出现两个时间戳（相隔几秒），cosmetic，不改字节。

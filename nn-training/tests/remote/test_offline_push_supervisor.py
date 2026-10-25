@@ -229,6 +229,36 @@ def test_child_spawn_runs_a_real_process_and_reports_its_exit_code(tmp_path: Pat
     assert child.running() is False
 
 
+def test_child_output_is_teed_into_the_supervisor_log(tmp_path: Path) -> None:
+    """★ 2026-10-25（用户之问）：「为什么 push 腿看不到 pull 那样子的 rollout/ppo 日志？」
+
+    以前 `stdout=log_f` ⇒ 子进程整段输出被关进 `run.log`，notebook 里只剩 supervisor 的状态行；
+    而 pull 腿是同进程跑，明细天然落在单元输出里。现在 tee：同一份字节**同时**进 run.log 与
+    supervisor 日志（逐字、不加前缀）。
+    """
+    child = sup._Child()
+    done = threading.Event()
+    lines: list[str] = []
+
+    child.spawn(
+        [sys.executable, "-c", "print('rollout 进度 it103 采集局 6/17 局'); print('ppo 训练 4 遍')"],
+        log_path=tmp_path / "run.log",
+        env=dict(os.environ),
+        on_exit=lambda _rc: done.set(),
+        task_id="t2",
+        log=lines.append,
+    )
+    assert done.wait(30), "子进程 30s 内没退出"
+    # 等 tee 线程把最后一行写完（子进程退出与 tee 收尾是两个事件）
+    end = time.time() + 10.0
+    while time.time() < end and not any(m.startswith("rollout ") for m in lines):
+        # sleep-ok: 轮询步长（等的是 tee 线程把那行写完）
+        time.sleep(0.05)
+    assert any(m.startswith("rollout ") for m in lines), lines
+    assert any(m.startswith("ppo ") for m in lines), lines
+    assert len((tmp_path / "run.log").read_text(encoding="utf-8").splitlines()) >= 2
+
+
 def test_child_stop_writes_the_stop_file_and_terminates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

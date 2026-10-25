@@ -109,18 +109,49 @@ class _Child:
         log: Callable[[str], None],
     ) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_f = open(log_path, "a", encoding="utf-8")
+        # ★ 2026-10-25（用户之问：「为什么 push 腿看不到 pull 那样子的 rollout/ppo 日志？」）：
+        #   以前是 `stdout=log_f` —— 子进程的整段输出被关进 `run.log`，notebook 里只剩 supervisor
+        #   的注册/状态/进度行。而 pull 腿是**同进程**跑（`run_loop_main` 直接调），输出天然落在
+        #   单元输出里 ⇒ 同一份代码，两条腿看到的明细天差地别。
+        #   现在用一根 **tee 线程**：同一份字节**同时**进 `run.log` 与 supervisor 日志，逐字透出、
+        #   不加前缀（子进程自己带 `[HH:MM:SS]`）—— 因为"日志面只有一份措辞"（2026-10-25 口径）。
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
         try:
             proc = subprocess.Popen(
-                argv, stdout=log_f, stderr=subprocess.STDOUT, env=env, cwd=str(log_path.parent),
-                **POPEN_NO_WINDOW,
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                cwd=str(log_path.parent), **POPEN_NO_WINDOW,
             )
-        finally:
+        except Exception:
             log_f.close()
+            raise
         with self._lock:
             self.proc = proc
             self.task_id = task_id
         log(f"训练子进程已启动（pid={proc.pid}，task={task_id}，日志 {log_path}）")
+
+        def _tee() -> None:
+            """子进程输出 → `run.log` **且** supervisor 日志（`proc.stdout` 由本线程独占读）。"""
+            stream = proc.stdout
+            try:
+                if stream is not None:
+                    for raw in iter(stream.readline, b""):
+                        text = raw.decode("utf-8", "replace").rstrip("\r\n")
+                        try:
+                            log_f.write(text + "\n")
+                            log_f.flush()
+                        except OSError:
+                            pass
+                        if text:
+                            log(text)
+            finally:
+                for closable in (stream, log_f):
+                    try:
+                        if closable is not None:
+                            closable.close()
+                    except OSError:
+                        pass
+
+        threading.Thread(target=_tee, name=f"push-child-tee-{task_id}", daemon=True).start()
 
         def _wait() -> None:
             rc = int(proc.wait())
