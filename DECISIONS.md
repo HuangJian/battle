@@ -9689,3 +9689,23 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `test_sampler_registration_does_not_override_a_manual_disable`（kind 缺席 ⇒ 仍 false）。
 - 注：e2e 里注册写的是 `distribution.rl_config_path()`，而 e2e 的派发器读 `--push-config`
   （两者在 e2e 里刻意分离），所以这条语义的落点只能是 `hub/admin` 的单测。
+
+## §2026-10-25-stale-pack-waits-for-reexport（2026-10-25，注册到受理 163s：包「过期」是常态，别等控制台重导）
+
+- **现场**：云机 03:32:41(UTC) 注册成功 → 03:35:24 才受理，**163 秒**。hub 日志只有三行：
+  `11:33:04 [offline-push] y34-hitfix: 包过期（包起点 sha12=8029f566c65c… ≠ 课程当前权重
+  sha12=33ea5cd05654…）⇒ 请控制台重导（triggered）——本拍不派`，11:35:10 才 `提议`。
+  3.9MB 的 zip 本地组包是毫秒级 —— 163s **全耗在「等控制台导包」**。
+- **根因（口径错了）**：`_pack_for` 把 `stale_reason` 当**故障**处理（重导 + `_cool`）。可本机一直在训，
+  包起点**必然**落后于课程当前权重 —— 这是稳态，不是异常。而 hubs 手里本来就有**比包更新那一轮的
+  整份锚点**（`resume_anchor`），`build_task_zip` 早就支持把 `resume/` 铺进包、把地板抬到锚点
+  ⇒ 「旧包 + 锚点」是**设计好的续跑路径**，却被 stale 闸挡在门外。
+- **决定**：
+  ① `_pack_for`：stale 时先取锚点 —— **有锚点就直接派**（打一行「用续跑锚点 itN 补齐，不等重导」）；
+     没有锚点才请控制台重导（那时旧包确实更危险）。
+  ② `pack_still_fresh(..., resume_ok=)`：接管前复核也放过「过期但有锚点」。否则本机每几分钟推进一轮，
+     复核必然看到 stale ⇒ 又白等一轮重导。`_resume_ok` 由 `pack_path` 的包起点 + `_anchor` 现算。
+- 用例：`tests/hub/test_offline_push_dispatch.py::test_a_stale_pack_is_dispatched_anyway_when_a_resume_anchor_exists`
+  （造一份三件齐的 `it-002` 当锚点 + 把清单打上 stale ⇒ 断言**本拍就派**、`resume_it==2`、
+  日志里**没有**「请控制台重导」）。
+- 生效条件：**重启 hub**（云机那份 code 快照与 hub 进程都是启动时锚定的）。

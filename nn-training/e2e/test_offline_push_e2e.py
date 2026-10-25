@@ -174,7 +174,13 @@ class _Hub:
             `spawn_bound_port` 用 `text=True` 起进程，而别处可能给 bytes。"""
             assert self.proc is not None and self.proc.stdout is not None
             while True:
-                raw = self.proc.stdout.readline()
+                try:
+                    raw = self.proc.stdout.readline()
+                except (ValueError, OSError, SystemError):
+                    # 子进程被 terminate 之后管道会先于线程关闭 —— 读已关闭的管道是**收尾**，
+                    # 不是失败（Windows 上表现为 `SystemError: error return without exception set`，
+                    # pytest 会把它升成 `PytestUnhandledThreadExceptionWarning` ⇒ 并行跑时假红）。
+                    return
                 if not raw:
                     return
                 text = raw if isinstance(raw, str) else raw.decode("utf-8", "replace")
@@ -239,17 +245,23 @@ def test_push_mode_whole_workflow(tmp_path: Path) -> None:
         assert _wait(lambda: any(p.name == "it-001" for p in off.rglob("it-001")), 60.0), (
             hub.output()
         )
-        ledger = (traj / COURSE / "training_log.jsonl").read_text(encoding="utf-8").splitlines()
-        backfeed = [
-            json.loads(ln)
-            for ln in ledger
-            if ln.strip() and json.loads(ln).get("source") == "offline_backfeed"
-        ]
-        assert backfeed, ledger[-5:]
-        assert {int(r.get("iter") or 0) for r in backfeed} >= {1}, backfeed
+
+        def _backfeed() -> list:
+            lines = (traj / COURSE / "training_log.jsonl").read_text(encoding="utf-8").splitlines()
+            return [
+                json.loads(ln)
+                for ln in lines
+                if ln.strip() and json.loads(ln).get("source") == "offline_backfeed"
+            ]
+
+        # 入账与归档是**同一段**里的先后两步（`store_offline_artifact`）⇒ 各自有界等，
+        # 不能拿「产物目录出现」当「后面两步都完了」（`-n 8` 下就是这么闪的）。
+        assert _wait(lambda: bool(_backfeed()), 30.0), _backfeed()
+        assert {int(r.get("iter") or 0) for r in _backfeed()} >= {1}, _backfeed()
         # 归档形状：`<归档根>/<课>/<prefix>.it<N>.<时间戳>.json`（`biz.archive.backup_weights` 的契约）
-        archived = list((traj / "weights-archive").rglob("*.it1.*"))
-        assert archived, list((traj / "weights-archive").glob("*"))
+        assert _wait(
+            lambda: any((traj / "weights-archive").rglob("*.it1.*")), 30.0
+        ), sorted((traj / "weights-archive").rglob("*"))
         # 派发计数（读面自证：这条链真的走过 dispatcher，不是测试手搓的产物）
         st, doc = _http(hub.base, "/admin/offline-push-workers")
         assert st == 200 and int(doc.get("dispatched") or 0) >= 1, doc

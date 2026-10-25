@@ -432,15 +432,27 @@ class OfflinePushDispatcher:
             self._log(f"{course}: 任务包 {pack.name} 缺 run_id —— 本拍不派（重导一份包）")
             return None
         if str(row.get("stale_reason") or ""):
-            # 旧包比没包更危险（云机会从旧起点重跑几十轮）⇒ 先重导，这一拍不派。
-            if not self._cooling(course, now):
-                out = trigger_pack_export(self.hub, course)
-                self._cool(course, now)
+            # ★ 2026-10-25（真机：注册 → 受理 **163s**，日志 11:33:04「包过期 ⇒ 请控制台重导」）：
+            #   包起点落后于课程当前权重**是常态**（本机一直在训），不是故障。hub 手里有比包
+            #   更新的**整份锚点**（`resume_anchor`）时，「旧包 + `resume/`」就是设计好的续跑
+            #   路径（地板抬到锚点那一轮，`build_task_zip` 负责铺进去）⇒ **直接派，不等重导**。
+            #   只有拿不到锚点（还没有任何完整轮）时才请控制台重导 —— 那时旧包确实更危险。
+            pack_it = int(self._pack_meta(pack).get("it") or 0)
+            anchor = self._anchor(course, pack_it)
+            if anchor is not None:
                 self._log(
-                    f"{course}: 包过期（{row.get('stale_reason')}）⇒ 请控制台重导"
-                    f"（{out['state']}）——本拍不派"
+                    f"{course}: 包起点落后（{row.get('stale_reason')}）⇒ 用**续跑锚点** "
+                    f"it{anchor.get('it')} 补齐（地板抬到该轮），不等重导"
                 )
-            return None
+            else:
+                if not self._cooling(course, now):
+                    out = trigger_pack_export(self.hub, course)
+                    self._cool(course, now)
+                    self._log(
+                        f"{course}: 包过期且无续跑锚点（{row.get('stale_reason')}）⇒ 请控制台重导"
+                        f"（{out['state']}）——本拍不派"
+                    )
+                return None
         return pack
 
     # ------------------------------------------------------------ 外层任务包
@@ -676,12 +688,28 @@ class OfflinePushDispatcher:
         )
 
     def _still_fresh(self, course: str, rec: dict) -> tuple[bool, str]:
-        """接管前复核：提议时那份包**现在**还是不是最新的（判据见 `hub.offline_pack_fresh`）。"""
+        """接管前复核：提议时那份包**现在**还是不是最新的（判据见 `hub.offline_pack_fresh`）。
+
+        `resume_ok=True`（有比包更新的整份锚点）时，「包过期」不致命：本机每几分钟推进一轮，
+        复核必然看到 stale —— 那不是「要重导」，是「用锚点补齐」。
+        """
         try:
             rows = self.hub.offline_tasks(worker=str(rec.get("worker_id") or ""))
         except Exception:
             return True, ""  # 清单读不到 ⇒ 不编：接管仍可能成功，claim 会给出真拒因
-        return pack_still_fresh(rows, {**rec, "course": course})
+        return pack_still_fresh(
+            rows, {**rec, "course": course}, resume_ok=self._resume_ok(course, rec)
+        )
+
+    def _resume_ok(self, course: str, rec: dict) -> bool:
+        """有没有**比包更新**的整份续跑锚点（有 ⇒ 「包过期」能靠 `resume/` 补齐，不必重导）。"""
+        try:
+            pack = Path(str(rec.get("pack_path") or ""))
+            if not pack.is_file():
+                return False
+            return self._anchor(course, int(self._pack_meta(pack).get("it") or 0)) is not None
+        except Exception:
+            return False
 
     @staticmethod
     def _bare(worker_id: str) -> str:

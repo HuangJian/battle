@@ -20,8 +20,13 @@ from typing import Any
 __all__ = ["pack_still_fresh"]
 
 
-def pack_still_fresh(rows: Any, rec: Any) -> tuple[bool, str]:
-    """`(可接管, 不行的原因)`；原因只在**确定**时给（空串 = 没查出问题）。"""
+def pack_still_fresh(rows: Any, rec: Any, *, resume_ok: bool = False) -> tuple[bool, str]:
+    """`(可接管, 不行的原因)`；原因只在**确定**时给（空串 = 没查出问题）。
+
+    `resume_ok`（2026-10-25）：调用方算好「有没有比包更新的整份续跑锚点」。有它时**包过期
+    不算问题** —— 那是常态（本机一直在训，包起点必然落后），组包时 `resume/` 会把地板抬到
+    锚点那一轮。真机：注册到受理 163s，全耗在「等控制台重导」上。
+    """
     course = str((rec or {}).get("course") or "")
     was = str((rec or {}).get("pack_sha256") or "")
     if not course or not isinstance(rows, (list, tuple)):
@@ -30,7 +35,7 @@ def pack_still_fresh(rows: Any, rec: Any) -> tuple[bool, str]:
         if not isinstance(row, dict) or str(row.get("course") or "") != course:
             continue
         why = str(row.get("stale_reason") or "")
-        if why:
+        if why and not resume_ok:
             return False, why
         sha = str((row.get("pack") or {}).get("sha256") or "")
         if sha and was and sha != was:

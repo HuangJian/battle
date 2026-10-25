@@ -527,6 +527,52 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         worker.close()
 
 
+def test_a_stale_pack_is_dispatched_anyway_when_a_resume_anchor_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 2026-10-25 真机：注册 → 受理 **163s**，日志只有三行「包过期 ⇒ 请控制台重导」。
+
+    包起点落后于课程当前权重**是常态**（本机一直在训，每几分钟推进一轮）——hub 手里有比包
+    更新的**整份**锚点时，「旧包 + `resume/`」就是设计好的续跑路径（地板抬到锚点那一轮）
+    ⇒ 本拍就派，**不等重导**。只有拿不到锚点时才请控制台重导。
+    """
+    hub, _pack = _mk_hub(tmp_path)
+    # 一份「同轮齐全」的整份轮（`resume_anchor` 只认三件齐且非容器的那一轮）
+    it2 = tmp_path / COURSE / "remote-jobs" / "offline" / "run-1" / "it-002"
+    it2.mkdir(parents=True)
+    (it2 / "weights.json").write_text("{}", encoding="utf-8")
+    (it2 / "opt.tar").write_bytes(b"o")
+    (it2 / "row.json").write_text("{}", encoding="utf-8")
+    assert int((hub.resume_anchor(COURSE) or {}).get("it") or 0) == 2, hub.resume_anchor(COURSE)
+
+    real = hub.offline_tasks
+
+    def _stale_tasks(**kw):
+        rows = real(**kw)
+        for r in rows:
+            if r.get("course") == COURSE:
+                r["stale_reason"] = "包起点 sha12=8029f566c65c… ≠ 课程当前权重 sha12=33ea5cd0…"
+        return rows
+
+    monkeypatch.setattr(hub, "offline_tasks", _stale_tasks)
+
+    worker = _Worker(tmp_path, write_final=False, finish_now=False, follow_task_identity=True)
+    logs: list[str] = []
+    disp, workers = _dispatcher(hub, tmp_path, log=logs.append)
+    try:
+        workers.add({"id": "w1", "url": worker.url, "authKey": TOKEN})
+        disp.tick(ping=True)
+        disp.tick(ping=False)
+        assert _wait(lambda: worker.task is not None, timeout=15.0), logs
+        # 地板抬到锚点那一轮（= hub 已持有的最高轮），云机不再从包起点重跑
+        task = worker.task or {}
+        assert int(task.get("resume_it") or 0) == 2, task
+        assert not any("请控制台重导" in m for m in logs), logs
+    finally:
+        disp.stop()
+        worker.close()
+
+
 def test_takeover_warns_when_the_local_machine_is_ahead_of_the_floor(tmp_path: Path) -> None:
     """★ 2026-10-25 真机（y34-hitfix it103–105）：本机在飞 it103/it104 时云机从 it102 接管
     ⇒ 两边各算一遍，本机那两轮白烧，归档里同号出现两份不同分支的权重。
