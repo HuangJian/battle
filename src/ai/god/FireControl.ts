@@ -680,6 +680,29 @@ export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction
  * T6: base protection bricks are never fired at.
  * T11: steel is only fired at if player level ≥ 3 (can pierce steel).
  */
+
+/**
+ * A18 (2026-10-25): single fire-permission roll for the whole fire gate.
+ *
+ * `aimError` used to be sampled here (5 sites). It never bent a trajectory — it
+ * simply declined that many fire decisions. User rule (2026-10-25): the God AI
+ * must not carry deliberate handicaps. So:
+ *   · aimError <= 0  ⇒ return true WITHOUT drawing RNG (no imperfection, and the
+ *     AI's RNG stream stays untouched by the fire gate);
+ *   · fireSkipPct > 0 ⇒ a DETERMINISTIC fire-discipline throttle (hash of the
+ *     frame), used to reproduce the economy effect without randomness.
+ */
+function aimOk(self: GodAIInput): boolean {
+  const err = self.params.aimError
+  const skip = self.params.fireSkipPct
+  if (skip > 0) {
+    const h = (Math.imul(self.world.frame + 1, 2654435761) >>> 0) % 100
+    if (h < skip) return false
+  }
+  if (err <= 0) return true
+  return self.rng.next() >= err
+}
+
 export function shouldFireInDirImpl(
   self: GodAIInput,
   pcx: number,
@@ -811,12 +834,12 @@ export function shouldFireInDirImpl(
         return false
       }
     }
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   // Steel with level ≥ 3 (no enemy found): fire to pierce.
   if (result.steel) {
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   // Check for enemy bullet to intercept (T5).
@@ -831,7 +854,7 @@ export function shouldFireInDirImpl(
     const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, BULLET_ALIGN_NEXT_CELL)
     if (d < 0) continue
     if (d < TANK * 4) {
-      return self.rng.next() >= self.params.aimError
+      return aimOk(self)
     }
   }
 
@@ -841,7 +864,7 @@ export function shouldFireInDirImpl(
   // fast enemies that dodge bullets by moving sideways.
   if (!result.wall) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
-      return self.rng.next() >= self.params.aimError
+      return aimOk(self)
     }
   }
 
@@ -853,7 +876,7 @@ export function shouldFireInDirImpl(
   // classic bulletCap mode), skip wall-firing to reserve the bullet cap
   // for enemies and enemy bullets.
   if (allowWallFire && result.wall && !result.baseWall && !result.steel) {
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   return false

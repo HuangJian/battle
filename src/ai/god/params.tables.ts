@@ -33,7 +33,14 @@ import type { GodAIParams } from './params.interface'
  */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
-  aimError: 0.03030591179971963,
+  // A18 (2026-10-25): **Zero deliberate imperfection.** `aimError` used to skip
+  // 3% of fire decisions at random; user rule: the God AI must not carry
+  // handicaps. Removing it (measured hard 35×20) costs −1.14pp, so the
+  // economy effect is kept as a DETERMINISTIC discipline instead (`fireSkipPct`,
+  // hash of the frame — reproducible, no RNG draw).
+  // 35×60 vs the old random 3%: hard −0.33pp (t=−0.44) · chaos −1.33pp (t=−1.68)
+  // · classic +0.48pp ⇒ net −0.4pp, accepted as a mechanism fix.
+  aimError: 0,
   suboptimalPathProb: 0,
   // §233: decision-chain throttle. A/B on hard 35×60: thinkInterval=2 costs
   // −2.8pp win rate (−0.022 mean score, 691/2100 outcome diffs) vs 1 — the
@@ -525,6 +532,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 都出现不一致（34 vs 45、4654 vs …），说明这条支路的子弹在评估链里没有被正确归类。
   // 在把评估链口径修好之前**不发货**（评估链是 NN 训练的地基）。默认 0。
   fireAlongFacing: 0,
+  // A18 (2026-10-25): 确定性开火纪律（%）。取代 aimError 的「随机跳发」：
+  // 用 frame 的确定性哈希决定这一拍是否放弃开火，行为可复现、不抽 RNG。
+  // 0 = 不跳发。
+  fireSkipPct: 3,
   // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
   // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，
   // 说明起作用的是「偶尔不打」，不是「瞄偏」）。0 = OFF。

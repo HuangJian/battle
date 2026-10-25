@@ -1448,6 +1448,9 @@ export interface GodAIParams {
   /** A15 (2026-10-25): fire along the COMMITTED facing when no candidate asked
    * to fire (candidates only test their movement direction). 0 = OFF. */
   fireAlongFacing: number
+  /** A18 (2026-10-25): deterministic fire-discipline throttle in percent
+   * (hash of the frame; no RNG draw). 0 = never skip. */
+  fireSkipPct: number
   /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
    * down the same lane toward the same target (deterministic fire economy).
    * 0 = OFF (byte-identical). */

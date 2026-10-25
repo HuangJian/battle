@@ -124,7 +124,14 @@ function fallbackStats(
 // A8（2026-10-21）把集合点解析到可站的 (12,22) 之后，fallback 的触发次数整体下降
 // （s35 seed1002：543 → 149），本用例的「相对下降」比例被稀释。这里固定在 A8 之前
 // 的口径，测的是 A7 承诺机制本身，而不是当前关卡分布的混合效果。
-const ERA = { ...DEFAULT_GOD_AI_PARAMS, defenseCellResolve: 0 }
+// A18 纪元：本用例测的是 A7 的 fallback 承诺机制，与「开火纪律/瞄准不完美」无关
+// ⇒ 固定回 A18 之前的开火口径，避免两条机制在同一批 seeds 上互相干扰。
+const ERA = {
+  ...DEFAULT_GOD_AI_PARAMS,
+  defenseCellResolve: 0,
+  aimError: 0.03030591179971963,
+  fireSkipPct: 0,
+}
 const OFF = { ...ERA }
 const ON = { ...ERA, directMoveFallbackHold: 40 }
 
