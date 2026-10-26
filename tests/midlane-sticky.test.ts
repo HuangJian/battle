@@ -47,6 +47,8 @@ function runRiverbed(
     world,
     {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
       // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
       turnToFireMode: 0,
       ...params,

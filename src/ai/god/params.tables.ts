@@ -529,7 +529,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 直接朝最近残敌走（贪心一步）。0 = OFF。
   // A24b (2026-10-26, 按用户裁定细化：残敌 ≤3 + 只在开火冷却中推进)：
   // 35×60 hard **+1.57pp**(t=1.48, kills +293) · classic **+0.19pp** · chaos −0.67pp(t=−0.61)
-  lateHuntMode: 0,
+  lateHuntMode: 1,
   lateHuntKills: 14,
   // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
   lateHuntMaxAlive: 3,
