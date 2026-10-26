@@ -94,6 +94,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
   // guard the mechanism for a future revival (see DECISIONS §168).
   const ON = {
     ...DEFAULT_GOD_AI_PARAMS,
+    // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+    lateHuntMode: 0,
     // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
     // 本用例钉的是自己的机制 ⇒ 固定回 26。
     maxPlayerDistFromBase: 26,
@@ -108,6 +110,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     const dwell = maxZoneDwell(
       {
         ...DEFAULT_GOD_AI_PARAMS,
+        // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+        lateHuntMode: 0,
         // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
         // 本用例钉的是自己的机制 ⇒ 固定回 26。
         maxPlayerDistFromBase: 26,
@@ -161,6 +165,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     const dwell = maxZoneDwell(
       {
         ...DEFAULT_GOD_AI_PARAMS,
+        // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+        lateHuntMode: 0,
         // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
         // 本用例钉的是自己的机制 ⇒ 固定回 26。
         maxPlayerDistFromBase: 26,
