@@ -366,6 +366,26 @@ export class GodAIInput implements InputLike {
   _defCellValid = false
 
   /**
+   * Diagnostic only (no gameplay effect, no RNG): why `isFiring()` said no.
+   * Populated on every call so a probe can attribute the "gun ready + target
+   * aligned but nothing fired" ticks to a specific gate.
+   */
+  _fireGateAudit: Record<string, number> = {}
+  /** A21 (2026-10-25) diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall). */
+  _fireReason: Record<string, number> = {}
+  /** A29 (2026-10-26): true while the on-field HP pool is above `qualityFireHp`
+   * (fire-quality mode: no P2.4 crossing shots, corridor-verified targets only). */
+  _hpPressureActive = false
+  /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
+  _lastFireWasFacing = -1
+  /** A15: per-tick memo so `isFiring()` is IDEMPOTENT inside one tick. The
+   * recorder calls it AFTER the tick (world already advanced) while the sim
+   * called it DURING the tick; without the memo the two answers differ and the
+   * recorded frame no longer reproduces the run (replay round-trip off by a tick). */
+  _facingFireTick = -1
+  _facingFireOk = false
+
+  /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
    * locked for a lease with expiry/progress/threat revalidation, or null.
    * Written/read only when params.intentMode > 0; reset() clears. Default

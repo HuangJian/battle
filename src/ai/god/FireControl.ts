@@ -834,7 +834,7 @@ export function shouldFireInDirImpl(
   // line of fire, check if an enemy moving perpendicular will cross
   // the bullet's path at the right time. This lets the player hit
   // fast enemies that dodge bullets by moving sideways.
-  if (!result.wall && self.params.predictiveCrossingFire > 0) {
+  if (!result.wall && self.params.predictiveCrossingFire > 0 && !self._hpPressureActive) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
       return aimOk(self)
     }

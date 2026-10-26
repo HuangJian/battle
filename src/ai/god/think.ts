@@ -367,6 +367,20 @@ export function thinkImpl(self: GodAIInput): void {
     }
   }
 
+  // ============ A29 (2026-10-26): HP-PRESSURE FIRE DISCIPLINE ============
+  // 逐关尸检：胜率与「本关敌人总血量」的相关性 **−0.472**（比 armor 占比 −0.461 更强；
+  // 地形全部 ≈0）。机制：每局射速上限固定（~64 发），血量池越大，每一发低质量弹的机会成本
+  // 越高。而三成命中率的「预测穿越」弹在低血关是赚的，在高血关就是在烧预算。
+  // ⇒ 当**场上存活总 HP ≥ 阈值**时进入「质量模式」：关掉 P2.4 预测穿越 + 只打真正覆盖
+  //    19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  if (self.params.qualityFireHp > 0) {
+    let pool = 0
+    for (let i = 0; i < self._enemies.length; i++) pool += self._enemies[i].hp ?? 1
+    self._hpPressureActive = pool >= self.params.qualityFireHp
+  } else {
+    self._hpPressureActive = false
+  }
+
   // ---- Scan for enemy targets (global vision, T9 priority) ----
   let aimDir = findEnemyDirectionImpl(self, pcx, pcy)
 
