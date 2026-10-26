@@ -9727,3 +9727,33 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **现场处置**：重启 hub（旧进程里那单的 `resume_it=126` 是内存态）⇒ 云机重注册（`enabled` 自动为
   true）⇒ 重派新单（地板 125）⇒ 云机会把盘上已有的 it126 物化并回传（task_id 随地板变，outbox 换
   目录，但 artifacts 根 `/tmp/battle2-offline/y34-hitfix` 跨单共享，产物不丢）。
+
+## §2026-10-26-goalnn-bun-native-sweep（2026-10-26，Bun 原生 API 落 `tools/` + `tests/`，并给开发回路加快道；实测：API 换用是口径统一，不是提速）
+
+- **决定**：`tools/` + `tests/` 的 sha256 一律 `new Bun.CryptoHasher('sha256')`（18 文件 27 处，含
+  `tools/probe-det-baseline.sh` 的 Windows 兜底内联）；新代码的树扫描用 `Bun.Glob`、文件读用
+  `Bun.file`/`Bun.write`、子进程用 `Bun.spawn`。dashboard 2026-10-26 早先已按同一口径迁移。
+- **实测（Bun 1.4.4，16 vCPU Linux）—— 这些迁移不带来速度**：node:crypto 1.40ms vs
+  `Bun.CryptoHasher` 1.36ms（159 文件 / 2.4MB 一遍 sha256）；readdir 递归 0.42ms vs `Bun.Glob`
+  0.35ms（src 树 199 个 `.ts`）；`spawnSync` 5.1ms vs `Bun.spawn` 5.0ms（`bun -e 0`）。
+  所以任何文档/汇报都不得把它们写成「提速 N 倍」—— 采纳理由是口径统一与少一层 node shim。
+- **正确性对拍**：CryptoHasher 与 node:crypto 在 ascii / CJK / 空串 / latin1 / Buffer 多段 update /
+  base64 / `copy()` / raw digest 全等；codeHash 另用**独立 node:crypto 重实现**按同一清单重算
+  （159 文件逐字节同一个串）。注意 `tools/agent/codehash-files.ts` 自己在清单内 ⇒ 改它必然换
+  codeHash（集群判 stale 是预期升级波）。
+- **保留手写递归**：`tools/agent/codehash-files.ts` 的 walker 与 `nn-training/common/distribution.py`
+  是逐字节契约，skip 规则改 glob 会静默改文件集 ⇒ 不动。其余 `readdirSync` 命中经审计是**单层
+  目录列举**（不是 walker），换 `Bun.Glob` 零收益。
+- **`src/` 不适用**：它是浏览器代码（Vite 打包，`lib` 含 DOM），Bun API 只活在 `tools/` + `tests/`；
+  唯一碰 `node:` 的 src 文件是 Node 侧 native adapter（`src/nn/conv/conv_native_adapter.ts`）。
+- **开发回路快道**：`bun run test:changed`（= `tools/test-silent.ts --changed`）把文件选择交给
+  `bun test --changed` 的**真实 import 图**。实测：21 文件 `tools/**` 改动 → 37/247 文件、10.7s
+  （全量 15–17s）；改 `src/game/World.ts` 仍选 164/247。**门禁与 pre-commit 保持全量**：测试运行时
+  读的夹具/语料/权重不在 import 图里，`--changed` 天然欠采样。
+- **被否备选（都实测过）**：① `--timings` 最慢先跑（15.4/15.8/18.2s vs 基线 15.0/16.8/17.4s =
+  噪声内）；② `--no-isolate`（18.9s，且破坏 §5.4 要求的文件级隔离）；③ `--parallel=12`
+  （15.9s ≈ 物理核 8）；④ 把 `--changed` 塞进 `bun run check`（欠采样，见上）。
+- **为什么没有更大的提速**：套件是**算力墙**不是调度问题 —— 247 文件、单跑合计 115.5s、8 worker
+  地板 14.4s，实测 15–17s，top-10 文件占 52.9%（`sim/eval-game-parity` 12.7s）。同一天的
+  `bun --cpu-prof-md` 剖面显示 sim/AI 自身也很平（最大 self 3.7%），没有单点。要再快只能改仿真
+  计算本身（新纪元三件套），不属于「换 Bun API」的范围。

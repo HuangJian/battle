@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'bun:test'
-import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -236,7 +235,7 @@ describe('codeHash SSOT manifest (tools/agent/codehash-files.txt)', () => {
 
   it('engine_epoch = sha256(codeHash)[0:16]（eval 门与 rollout 门同源，不掺 git commit）', () => {
     const ch = computeCodeHash()
-    const want = createHash('sha256').update(ch).digest('hex').slice(0, 16)
+    const want = new Bun.CryptoHasher('sha256').update(ch).digest('hex').slice(0, 16)
     expect(engineEpochFromCodeHash(ch)).toBe(want)
     expect(computeEngineEpoch()).toBe(want)
     expect(computeEngineEpoch()).toMatch(/^[0-9a-f]{16}$/)
@@ -274,7 +273,7 @@ describe('权重磁盘回查（agent 重启后不再对盘上已有的权重答 
   /** 每次唯一内容 ⇒ 每次唯一 sha（避免同进程内复用桶缓存，测试相互独立）。 */
   const fresh = (tag: string): { sha: string; body: Buffer } => {
     const body = Buffer.from(`${tag}-${Date.now()}-${Math.random()}`)
-    return { sha: createHash('sha256').update(body).digest('hex'), body }
+    return { sha: new Bun.CryptoHasher('sha256').update(body).digest('hex'), body }
   }
 
   it('readWeightsFile：命中要求**内容** sha 全量一致；不符/缺文件/非法键一律未命中', () => {

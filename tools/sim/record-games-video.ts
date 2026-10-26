@@ -15,7 +15,6 @@
  *       --games s1010:860011,s1011:860012 --mode rollout \
  *       --difficulty hard --max-ticks 3600 --dpr 2 --out tmp/vrecord
  */
-import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
@@ -298,7 +297,7 @@ async function main(): Promise<void> {
   const dodgeMode: 'off' | 'l0' =
     dodgeArg === 'off' || dodgeArg === 'l0' ? dodgeArg : isArenaId(games[0].stage) ? 'l0' : 'off'
   const weightsText = readFileSync(weightsPath, 'utf8')
-  const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 12)
+  const weightsSha = new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 12)
   mkdirSync(outDir, { recursive: true })
 
   installHeadlessShims()

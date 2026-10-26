@@ -21,7 +21,6 @@
  *
  * Exit code 1 on any mismatch, so it can be wired into the same gate as the bench.
  */
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { installHeadlessShims, loadSpritesFromDisk } from './headless-canvas'
@@ -54,7 +53,7 @@ function hashPixels(ctx: any, w: number, h: number): string {
     img.data.byteOffset,
     img.data.byteLength,
   )
-  return createHash('sha256').update(bytes).digest('hex').slice(0, 32)
+  return new Bun.CryptoHasher('sha256').update(bytes).digest('hex').slice(0, 32)
 }
 
 async function main(): Promise<void> {

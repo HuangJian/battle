@@ -34,7 +34,6 @@
  * 放进去 = 触发节点升级波）。本文件在 `tools/perf/`（不在 codehash 集内），提交安全。
  */
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { NATIVE_TARGETS, nativeFlags, nativeLinkArgs } from '../../src/nn/conv/native-prebuilt'
@@ -182,7 +181,7 @@ for (const v of variants) {
     const buf = fs.readFileSync(out)
     console.log(
       `  ✓ ${t.id.padEnd(12)} ${path.relative(ROOT, out).replace(/\\/g, '/')}  ` +
-        `sha256=${createHash('sha256').update(buf).digest('hex').slice(0, 16)}  ${buf.length}B`,
+        `sha256=${new Bun.CryptoHasher('sha256').update(buf).digest('hex').slice(0, 16)}  ${buf.length}B`,
     )
   }
 }

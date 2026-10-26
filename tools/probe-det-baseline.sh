@@ -49,7 +49,7 @@ hash256() {
   elif command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | cut -d' ' -f1
   else
-    bun -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");process.stdout.write(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$1"
+    bun -e 'const h=new Bun.CryptoHasher("sha256");h.update(require("node:fs").readFileSync(process.argv[1]));process.stdout.write(h.digest("hex"))' "$1"
   fi
 }
 # NB: `set -- $combo` inside the loop clobbers positional params — capture flags first.

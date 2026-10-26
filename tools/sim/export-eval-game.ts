@@ -38,7 +38,6 @@ import { Simulation } from '../../src/game/Simulation'
 import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { createHash } from 'node:crypto'
 import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
@@ -833,7 +832,7 @@ export function runEvalOne(
         model!.forward(encoder.obs, encoder.scalars, encoder.extra)
         if (t === 0 && process.env.EVAL_DEBUG) {
           console.error(
-            `[dbg] weightsSha=${createHash('sha256').update(weightsText).digest('hex').slice(0, 12)} move=[${Array.from(model!.moveLogits).map((x) => x.toFixed(2))}] fire=[${Array.from(model!.fireLogits).map((x) => x.toFixed(2))}]`,
+            `[dbg] weightsSha=${new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 12)} move=[${Array.from(model!.moveLogits).map((x) => x.toFixed(2))}] fire=[${Array.from(model!.fireLogits).map((x) => x.toFixed(2))}]`,
           )
         }
         // v6：掩码 9 宽（move4/fire3/hold2）；legacy 7 宽（move5/fire2）。
@@ -1440,7 +1439,7 @@ export function main(argv: string[]): void {
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。
-  const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 12)
+  const weightsSha = new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 12)
   const report = {
     weightsSha,
     collector: 'RL-eval',

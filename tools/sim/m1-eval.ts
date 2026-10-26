@@ -43,7 +43,6 @@ import { AdaptiveSimWorkerPool, physicalCores } from './sim-pool'
 import type { RunTelemetry } from './simulation-runner'
 import type { SimTask, SimTaskResult } from './sim-worker'
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   scoreRun,
@@ -132,13 +131,7 @@ async function main(): Promise<void> {
   const maxTicks = parseInt(arg('max-ticks', '36000')!, 10)
   const policy =
     (arg('policy', 'nn') as
-      | 'god'
-      | 'nn'
-      | 'intent'
-      | 'intent-exec'
-      | 'intent-oracle'
-      | 'goal'
-      | 'goal-god') ?? 'nn'
+      'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god') ?? 'nn'
   const weightsDir = arg('weights-dir')
   const intentWeights = arg('intent-weights')
   const goalWeights = arg('goal-weights')
@@ -243,7 +236,9 @@ async function main(): Promise<void> {
   if (policy === 'goal' && goalWeights) wverBytes = readFileSync(goalWeights)
   else if (policy === 'intent-exec' && intentWeights) wverBytes = readFileSync(intentWeights)
   else if (policy === 'god' || policy === 'goal-god') wverBytes = Buffer.from('{}')
-  const wver = wverBytes ? createHash('sha256').update(wverBytes).digest('hex') : `local-${policy}`
+  const wver = wverBytes
+    ? new Bun.CryptoHasher('sha256').update(wverBytes).digest('hex')
+    : `local-${policy}`
   const ledger = noFresh && !distNodesPath ? new BatchLedger(`${outPath}.ledger.jsonl`, wver) : null
   if (distNodesPath)
     process.stderr.write(

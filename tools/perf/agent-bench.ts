@@ -18,7 +18,6 @@
  *
  * 注意：**每个 (iterId, stage, seed) 只能领一次**（agent 结果缓存按 taskKey，重复会被秒回）。
  */
-import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { unpackContainer } from '../sim/pack-container'
 
@@ -49,7 +48,7 @@ async function status(): Promise<Record<string, unknown>> {
 /** 上传权重，返回 wver（= 未压缩字节的 sha256）。 */
 async function pushWeights(file: string): Promise<string> {
   const raw = readFileSync(file)
-  const sha = createHash('sha256').update(raw).digest('hex')
+  const sha = new Bun.CryptoHasher('sha256').update(raw).digest('hex')
   const gz = Bun.gzipSync(raw)
   const t0 = performance.now()
   const r = await fetch(`${url}/v1/weights`, {

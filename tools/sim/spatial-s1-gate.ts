@@ -26,7 +26,6 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
-import { createHash } from 'crypto'
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { DIFFICULTIES } from '../../src/config/difficulty'
@@ -183,7 +182,7 @@ function relDelta(a: Float32Array, b: Float32Array): number {
 }
 
 function sha16(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(text).digest('hex').slice(0, 16)
 }
 
 function main(): void {

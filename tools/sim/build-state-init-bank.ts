@@ -46,7 +46,6 @@ import {
   statSync,
   writeFileSync,
 } from 'fs'
-import { createHash } from 'crypto'
 import { dirname, join } from 'path'
 
 /**
@@ -114,7 +113,7 @@ export function hashIndexFor(tick: number, hashInterval: number): number {
 }
 
 export function sha256Bytes(b: Uint8Array | string): string {
-  return createHash('sha256').update(b).digest('hex')
+  return new Bun.CryptoHasher('sha256').update(b).digest('hex')
 }
 
 interface CutRef {

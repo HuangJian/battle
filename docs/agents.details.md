@@ -315,12 +315,26 @@ package manager). Vite is dev server + build (target `es2020`). oxlint + `bun fm
 `package.json` `check` script**, so scripts must always pass the flag or they recurse. The Bun floor is declared as `engines.bun = ">=1.4.4"` in both
 `package.json` files; Bun does not enforce it, so the pre-commit hook does (§5.5).
 
+**Bun-native APIs in `tools/` + `tests/`** (2026-10-26 sweep; dashboard did the same earlier):
+`Bun.CryptoHasher` instead of `node:crypto`'s `createHash` (identical digests — verified across
+string/Buffer/multi-update/`copy()`/base64), `Bun.file()`/`Bun.write()` for file IO,
+`Bun.Glob` for **new** tree scans, `Bun.spawn` for new child processes. Two rules:
+① **`src/` stays Bun-free** — it is browser code bundled by Vite; only the Node-side native adapter
+(`src/nn/conv/conv_native_adapter.ts`) touches `node:` builtins. ② tree walkers whose skip rules are a
+**cross-language contract** (e.g. `tools/agent/codehash-files.ts` must byte-match
+`nn-training/common/distribution.py`) keep their hand-rolled recursion — a glob rewrite can silently
+change the file set and break the cluster's codeHash. Measured 2026-10-26 on Bun 1.4.4: these swaps are
+**parity, not speedup** (`node:crypto` 1.40ms vs `Bun.CryptoHasher` 1.36ms per 159-file sha256 pass;
+`readdir` walk 0.42ms vs `Bun.Glob` 0.35ms; `spawnSync` 5.1ms vs `Bun.spawn` 5.0ms for `bun -e 0`) —
+adopt them for consistency, never claim a speedup without re-measuring.
+
 ### 5.2 Commands (canonical)
 
 ```
 bun run dev          # vite dev server on :8956
 bun run build        # oxlint && bun check --no-script && vite build  (the gate before merge)
 bun run test         # SCOPED: only tests tied to local git changes, prints only failures
+bun run test:changed # DEV LOOP: only test files whose import graph reaches the change (`--changed`)
 bun test --parallel --timeout=50000   # full suite — ALWAYS with both flags (*1)
 bun run typecheck    # bun check --no-script
 bun run lint         # oxlint
@@ -360,6 +374,15 @@ heuristic ran only the tests whose basename matched a changed file, and it **und
 `src/config/combat.ts` 3 of 13. A non-heavy full run costs ~6s (tools-only subset ~5s), so narrowing
 bought ~1s in exchange for a silent blind spot. **Do not re-add it** — make the suite faster instead.
 
+**`bun run test:changed` is the fast loop, never the gate** (2026-10-26): it delegates selection to
+`bun test --changed`, which uses Bun's real **import graph** (not the removed basename heuristic) and
+prints `--changed: N changed file(s), running K/M test files`. It is precise about imports but blind to
+anything a test reads at runtime (fixtures, corpora, weights, `codehash-files.txt`), so it under-samples
+by construction — that is why `bun run check` and pre-commit keep running the full suite. Measured on a
+21-file `tools/**` change: 37/247 files, 10.7s vs 16s full; a leaf-file edit drops to 1–3s. Extremely
+broad edits still select most of the suite (a `src/game/World.ts` touch → 164/247), so it is a
+convenience, not a guarantee.
+
 **Heavy gate tests are excluded by default:** the fast runner skips `godai-score-gate` — the
 worker-pool score gate (3 difficulties × 35 stages × 10 seeds). Exercise it with `bun run test --heavy`
 or the full suite.
@@ -378,6 +401,22 @@ gate is a standalone file, it is only exercised by the full suite or `--heavy` �
 is landing, run `bun test --parallel --timeout=50000` before committing** to validate the floors.
 `tests/test-silent-scope.test.ts` hard-fails if a `HEAVY_TESTS` name no longer matches a real test file
 (the in-runner ⚠ hint alone is invisible: it rides on a green summary line).
+
+**2026-10-26 re-measure (same tool, 16 vCPU Linux):** the suite is now **247 files, 115.5s of per-file
+CPU, floor = 14.4s at 8 workers**, observed 15–17s. Two numbers in the paragraph above had rotted:
+`godai-score-gate` measures **237ms** because the test has been `test.skip`d since 2026-10-19 (its
+exclusion therefore no longer buys anything — it costs a 0.2s no-op at most); the suite itself grew
+from 179 → 247 files, so "~6s" is now ~16s. Top-10 files are 52.9% of the CPU sum
+(`sim/eval-game-parity` 12.7s, `sim/eval-move-hist` 6.9s, `nn/intent-rl-rollout` 6.6s, …) — the suite
+is compute-bound in the simulation, so **no scheduler flag makes it faster**; measured `--timings`
+(slowest-first scheduling) 15.4/15.8/18.2s vs baseline 15.0/16.8/17.4s = inside noise, `--no-isolate`
+18.9s (and it breaks the per-file isolation §5.4 mandates), `--parallel=12` 15.9s ≈ 8 workers.
+
+**Profiling recipe (Bun ≥ 1.4.4)** — `bun --cpu-prof-md --cpu-prof-dir=tmp/prof <script>` writes a
+grep-friendly markdown profile (self time + call tree). For the suite use
+`bun tools/measure-suite.ts` (per-file wall time) first; only profile a single file when one dominates.
+The sim/AI profile is flat (max self-time 3.7%, spread over perception/combat/pathfinding) — treat any
+"make the sim faster" plan as a measured project, not a hot-spot fix.
 
 ### 5.4 `bun test` flags are mandatory
 - **`--parallel`**: bun does not parallelize files by default; per-FILE parallelism across the suite

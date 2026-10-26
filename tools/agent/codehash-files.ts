@@ -9,7 +9,6 @@
  * 本文件**必须在 codehash-files.txt 集内**（它决定 codeHash 的取值规则，不在集内则
  * 单独改动不触发升级波——与 2026-09-01 事故同源的风险）。
  */
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -36,10 +35,10 @@ export function computeCodeHashFromFiles(entries: { relPath: string; content: Bu
   const sorted = [...entries].sort((a, b) =>
     a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0,
   )
-  const h = createHash('sha256')
+  const h = new Bun.CryptoHasher('sha256')
   for (const e of sorted) {
     h.update(e.relPath.replace(/\\/g, '/'))
-    h.update(createHash('sha256').update(e.content).digest())
+    h.update(new Bun.CryptoHasher('sha256').update(e.content).digest())
   }
   return h.digest('hex')
 }
@@ -107,7 +106,7 @@ export function computeCodeHash(manifestPath?: string): string {
  * /v1/ping 也不再有 engineEpoch 字段。
  */
 export function engineEpochFromCodeHash(codeHash: string): string {
-  return createHash('sha256').update(codeHash).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(codeHash).digest('hex').slice(0, 16)
 }
 
 export function computeEngineEpoch(manifestPath?: string): string {
@@ -124,7 +123,7 @@ export function codeHashReport(manifestPath?: string): string {
   )
   const lines = sorted.map(
     (e) =>
-      `${createHash('sha256').update(e.content).digest('hex').slice(0, 8)}\t${e.content.length}\t${e.relPath}`,
+      `${new Bun.CryptoHasher('sha256').update(e.content).digest('hex').slice(0, 8)}\t${e.content.length}\t${e.relPath}`,
   )
   lines.push(`codeHash=${computeCodeHashFromFiles(sorted)}`)
   return lines.join('\n')

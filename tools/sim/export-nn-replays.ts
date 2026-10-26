@@ -47,7 +47,6 @@ import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { serializeReplayFile, buildReplayFilename } from '../../src/replay/file'
 import type { SimOutcome } from './simulation-runner'
-import { createHash } from 'node:crypto'
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs'
 
 /** 掩码 argmax：并列取最小索引（确定性）；全掩码时退化为末位（对齐 eval-game）。 */
@@ -209,7 +208,7 @@ function main(): void {
   }
   const weightsText = readFileSync(weightsPath, 'utf8')
   const model = buildModel(weightsText)
-  const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 12)
+  const weightsSha = new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 12)
   mkdirSync(outDir, { recursive: true })
 
   for (const r of runs) {

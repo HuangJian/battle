@@ -24,7 +24,7 @@
  * 首启生成随机 authKey 写同目录 agent.auth 并打印一次；运维复制到 rl-config.json。
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -509,8 +509,7 @@ async function loadPoolPage(): Promise<typeof import('./pool-page') | null> {
 
 /** rl-config 节点清单与 local 槽位（pool 页用；从 monitor 侧同规则读取）。 */
 function poolNodes():
-  | { id: string; url: string; authKey: string; enabled: boolean; concurrency: number }[]
-  | null {
+  { id: string; url: string; authKey: string; enabled: boolean; concurrency: number }[] | null {
   try {
     const cfgPath = path.join(REPO_ROOT, 'nn-training', 'rl-config.json')
     if (!fs.existsSync(cfgPath)) return null
@@ -615,7 +614,7 @@ export function readWeightsFile(
   const file = path.join(dir, weightFileBase(kind, sha))
   try {
     const bytes = fs.readFileSync(file)
-    if (createHash('sha256').update(bytes).digest('hex') !== sha) return null
+    if (new Bun.CryptoHasher('sha256').update(bytes).digest('hex') !== sha) return null
     // iterId 只在 POST 时记账（无消费方）——回查来的权重没有它，置空。
     return { sha, iterId: '', file }
   } catch {
@@ -711,7 +710,7 @@ function latestWeightsOnDisk(kind: string, dir: string): WeightsState | null {
   if (cands.length > 1) cands.sort((a, b) => b.mtimeMs - a.mtimeMs) // 空/单元素不 sort
   for (const c of cands) {
     try {
-      const sha = createHash('sha256').update(fs.readFileSync(c.file)).digest('hex')
+      const sha = new Bun.CryptoHasher('sha256').update(fs.readFileSync(c.file)).digest('hex')
       if (sha.slice(0, 16) !== c.prefix) continue
       return { sha, iterId: '', file: c.file }
     } catch {
@@ -1881,7 +1880,7 @@ async function handle(req: Request): Promise<Response> {
     } catch {
       return jsonResponse({ error: 'body is not valid gzip' }, 400)
     }
-    const actualSha = createHash('sha256').update(weightsBytes).digest('hex')
+    const actualSha = new Bun.CryptoHasher('sha256').update(weightsBytes).digest('hex')
     if (actualSha !== claimedSha) {
       rejectedCount++
       return jsonResponse({ error: `sha mismatch: header=${claimedSha} actual=${actualSha}` }, 400)
@@ -2131,7 +2130,7 @@ async function handle(req: Request): Promise<Response> {
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
     // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
     const sjHash = stageJson
-      ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
+      ? new Bun.CryptoHasher('sha256').update(stageJson).digest('hex').slice(0, 16)
       : ''
     const key = taskKey(
       iterId,

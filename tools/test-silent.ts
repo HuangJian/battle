@@ -27,11 +27,13 @@
  *   bun tools/test-silent.ts                 # 代码改动 → 全量（非 heavy）；无关改动 → 跳过
  *   bun tools/test-silent.ts --heavy         # also run heavy gate/integration sims
  *   bun tools/test-silent.ts -- fileA.test.ts fileB.test.ts   # explicit files
+ *   bun tools/test-silent.ts --changed[=<ref>]  # 只跑 import 图受影响的文件（开发回路快道）
  *
- * 重负载 gate（见 `HEAVY_TESTS` 的判据注释）默认排除 —— `godai-score-gate` 单文件
- * ~12s，与非 heavy 全量套件（~6s）同量级，带上它会把每次提交的测试步翻 3 倍；
- * 这是**唯一**达标条目（判据 = 单跑墙钟 ≥ 整份套件）。显式跑用 `bun test` 或
- * `bun run test --heavy`。
+ * 重负载 gate（见 `HEAVY_TESTS` 的判据注释）默认排除。**2026-10-26 重测**：名单里只剩
+ * `godai-score-gate`，而它自 2026-10-19 起是 `test.skip`（单跑 237ms = 地板的 0.01×），
+ * 豁免已不省任何时间（留着无害：它只把一仃 no-op 挡在快跑外）。同次重测：套件 247 文件
+ * / 8 worker 地板 14.4s / 实测 15–17s —— 要提速只能改仿真计算，不是调度旋钮。
+ * 显式跑全量用 `bun test` 或 `bun run test --heavy`。
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
@@ -247,6 +249,15 @@ export interface SilentTestOptions {
   files?: string[]
   /** If true, include heavy gate/integration sim tests that are skipped by default. */
   heavy?: boolean
+  /**
+   * 只跑「受本次改动影响的」测试文件（`bun test --changed[=ref]`，Bun ≥ 1.4）。
+   *
+   * 选择走 bun 的真实 **import 图**，比旧的 basename 映射精确得多（那个方向是欠采样，
+   * 见文件头）。但它仍**只用于开发回路**：运行时读的文件（夹具 / 语料 / 权重）不在
+   * import 图里，门禁与提交前的判定必须保持全量 —— 见 DECISIONS
+   * §2026-10-26-goalnn-bun-native-sweep。
+   */
+  changed?: boolean | string
   timeoutMs?: number
 }
 
@@ -260,11 +271,22 @@ export async function runSilentTest(
   const label = opts.label ?? 'tests'
   const timeoutMs = opts.timeoutMs ?? 0
 
+  // 0. `--changed` 快道：文件选择交给 bun 的 import 图，本文件不再自己枚举。
+  const changedFlag =
+    opts.changed === true
+      ? '--changed'
+      : typeof opts.changed === 'string' && opts.changed !== ''
+        ? `--changed=${opts.changed}`
+        : null
+
   // 1. Decide which test files to run.
-  let files: string[]
+  let files: string[] = []
   let mode: string
   let advisory = ''
-  if (opts.files && opts.files.length) {
+  if (changedFlag) {
+    const ref = changedFlag.slice('--changed'.length).replace(/^=/, '')
+    mode = `changed (${ref === '' ? 'vs HEAD' : ref})`
+  } else if (opts.files && opts.files.length) {
     files = opts.files
     mode = 'explicit'
   } else {
@@ -317,7 +339,7 @@ export async function runSilentTest(
   // `bun test` or when `--heavy` is passed. Heavy tests are never filtered when
   // the caller passed explicit files (user intent).
   let skippedHeavy = 0
-  if (!opts.heavy && !(opts.files && opts.files.length)) {
+  if (!opts.heavy && !changedFlag && !(opts.files && opts.files.length)) {
     const before = files.length
     files = files.filter((f) => !isHeavyFile(f))
     skippedHeavy = before - files.length
@@ -329,7 +351,7 @@ export async function runSilentTest(
   // Drop files that no longer exist (e.g. a deleted test file still in git diff).
   files = files.map((f) => f.replace(/\\/g, '/')).filter((f) => existsSync(resolve(cwd, f)))
 
-  if (files.length === 0) {
+  if (!changedFlag && files.length === 0) {
     return { ok: true, summary: 'no tests to run', detail: `${label}: no test files resolved\n` }
   }
 
@@ -338,14 +360,25 @@ export async function runSilentTest(
   // cross-file module state leaks surface as order-dependent failures.
   // worker 数显式给物理核数（2026-10-03）：裸 `--parallel` 的缺省 = 逻辑核（含超线程），
   // 16 worker 会把 Windows 提交上限顶穿 ⇒ worker 崩 + 连环 abort 的假红（见 tools/lib/cores.ts）。
+  // 门禁口径不变：并行度 = 物理核、超时 50s、dashboard/ 由它自己的门禁跑。
+  const gateArgs = [`--parallel=${physicalCores()}`, '--timeout=50000']
   const first = await spawnCapture(
     'bun',
-    ['test', `--parallel=${physicalCores()}`, '--timeout=50000', ...files],
+    changedFlag
+      ? ['test', changedFlag, ...gateArgs, '--path-ignore-patterns=dashboard/**']
+      : ['test', ...gateArgs, ...files],
     cwd,
     timeoutMs,
   )
-  const summary = extractSummary(first.output)
+  // bun 把 `--changed: N changed file(s), running K/M test files` 打在输出里 —— 直接用它
+  // 当选择面证据（不重新实现一遍 git/import 图推断）。
+  if (changedFlag) {
+    const sel = /(\d+) changed files?, running (\d+)\/(\d+) test files/.exec(first.output)
+    if (sel) mode = `changed (${sel[1]} file → ${sel[2]}/${sel[3]} tests)`
+  }
+  let summary = extractSummary(first.output)
   const failures = parseFailures(first.output)
+  if (changedFlag && first.code === 0 && summary === 'unknown') summary = '0 tests'
 
   if (first.code === 0 && failures.length === 0) {
     return { ok: true, summary: `${summary} [${mode}]${advisory}`, detail: '' }
@@ -377,15 +410,24 @@ const isMain: boolean = (import.meta as { main?: boolean }).main === true
 if (isMain) {
   const argv = process.argv.slice(2)
   const heavy = argv.includes('--heavy')
+  // `--changed` 可带 ref（`--changed=HEAD~1`）；`--` 只是分隔符，`bun run` 会把它剥掉。
+  const changedArg = argv.find((a) => a === '--changed' || a.startsWith('--changed='))
+  const changed =
+    changedArg === undefined
+      ? false
+      : changedArg.slice('--changed'.length).replace(/^=/, '') || true
   // Collect non-flag positional args as explicit files. `--` is only a separator;
   // `bun run` strips it when invoked as `bun run test -- file`, so we must not
   // rely on it being present.
-  const explicit = argv.filter((a) => a !== '--' && a !== '--heavy')
+  const explicit = argv.filter(
+    (a) => a !== '--' && a !== '--heavy' && a !== '--changed' && !a.startsWith('--changed='),
+  )
   const result = await runSilentTest({
     cwd: CWD,
     label: 'local tests',
     files: explicit,
     heavy,
+    changed,
   })
   if (result.ok) {
     console.log(`✓ ${result.summary}`)
