@@ -525,6 +525,15 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // chaos 77.4%→**81.1%**（**+3.67pp, t=3.32**, kills +1077）· classic 86.9%→87.3%（+0.43pp）
   // ⇒ **三难度同号为正**（SHIPPED）。
   turnToFireMode: 1,
+  // A24 (2026-10-26): 晚期残敌狩猎 —— 击杀数 ≥ lateHuntKills 且四方向无射门、基地不告急时，
+  // 直接朝最近残敌走（贪心一步）。0 = OFF。
+  // A24b (2026-10-26, 按用户裁定细化：残敌 ≤3 + 只在开火冷却中推进)：
+  // 35×60 hard **+1.57pp**(t=1.48, kills +293) · classic **+0.19pp** · chaos −0.67pp(t=−0.61)
+  lateHuntMode: 0,
+  lateHuntKills: 14,
+  // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
+  lateHuntMaxAlive: 3,
+  lateHuntMinDist: 6,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,

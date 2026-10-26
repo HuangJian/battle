@@ -1431,6 +1431,15 @@ export interface GodAIParams {
   /** A23 (2026-10-26): when the gun is ready and nothing is aligned on the
    * current facing, turn to the nearest hittable enemy and fire. 0 = OFF. */
   turnToFireMode: number
+  /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
+   * enemy when nothing is hittable and the base is safe. 0 = OFF. */
+  lateHuntMode: number
+  /** A24: kills threshold that marks the late game. */
+  lateHuntKills: number
+  /** A24b: trigger when at most this many enemies are alive on the field. */
+  lateHuntMaxAlive: number
+  /** A24: only hunt when the nearest enemy is farther than this many cells. */
+  lateHuntMinDist: number
   /** A12: engage only when the earliest shell reaches the CURRENT cell within
    * this many ticks (urgency gate; avoids hijacking routine dodges). */
   crossfireMinTti: number
