@@ -49,6 +49,15 @@ from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_
 #: `lambda: time` 保留「每次重读本模块 `time`」的注入缝（7 处假钟用例钉着）。
 _log_default = tag_logger("battle-rl", lambda: time)
 
+#: push 守候期「过程日志静默多久才补一行心跳」（秒）。job 在跑（`busy=true`）而 serve.log
+#: 还在往外吐时，那行 `守候中… busy=True` 只是刷屏（2026-10-26 用户口径）——但**完全静默**
+#: 也不能当作正常（长 PPO 步 / 卡死），所以留一条补位心跳。
+_SERVE_QUIET_SEC = 60.0
+
+#: 心跳行的最小间隔（秒）。2026-10-26 用户口径：「不 busy 的时候，每三分钟刷一次」——
+#: 空等时那行 15s 一条毫无信息量（busy/queued/done 一个都不变），三分钟够证明「还活着」。
+_HEARTBEAT_SEC = 180.0
+
 
 def _hub_open(req: Any, timeout: float = 15) -> Any:
     """显式 ProxyHandler —— Colab userspace 模式下 urlopen() 不读 HTTP_PROXY（2026-09-16 实测）。
@@ -495,6 +504,16 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker-serve"))
     work_dir.mkdir(parents=True, exist_ok=True)
     boot_dir = Path(str(cfg.get("code_dir") or "/tmp/worker-code"))
+    if cfg.get("code_dir") and not (boot_dir / "remote").is_dir():
+        # 2026-10-26 真机（battle.cloudflared push + source=github）：cell 把**仓库根**铺进
+        # code_dir，而 `remote/` 实际住 `nn-training/` 下 ⇒ 子进程 `-m remote.remote_worker_serve`
+        # 一条 ImportError，宿主要白等满 wait_ping 的 30s 才判死，日志只剩「serve 未就绪」。
+        # code_dir 的契约只有一条：根 = `nn-training/` 的内容。不满足按配置致命处理（-2 = 不重启）。
+        log(
+            f"FATAL: code_dir={boot_dir} 下没有 remote/ 包（契约：根 = nn-training/ 的内容）"
+            "—— 引导阶段把代码铺错层了，检查 cell 的代码来源"
+        )
+        return -2
     serve_log = work_dir / "serve.log"
     cf_log = work_dir / "cloudflared.log"
     reg = _push_registry(cfg, log)
@@ -510,30 +529,39 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
         serve_tail_off = 0
         last_status_at = 0.0
         as_last_done = -1
+        as_last_queued = -1
         as_last_busy: bool | None = None
+        #: 同主分支：忙且过程日志还在流 ⇒ 不刷「守候中…」（见那里的注释）。
+        last_serve_line_at = 0.0
+        last_beat_at = 0.0
         deadline = time.time() + int(cfg["max_session_hours"]) * 3600
         t0 = time.time()
 
-        def _drain() -> None:
-            nonlocal serve_tail_off
+        def _drain() -> int:
+            nonlocal serve_tail_off, last_serve_line_at
             try:
                 size = serve_log.stat().st_size
             except OSError:
-                return
+                return 0
             if size < serve_tail_off:
                 serve_tail_off = 0
             if size <= serve_tail_off:
-                return
+                return 0
             try:
                 with open(serve_log, encoding="utf-8", errors="replace") as f:
                     f.seek(serve_tail_off)
                     chunk = f.read()
                 serve_tail_off = size
             except OSError:
-                return
+                return 0
+            n = 0
             for line in chunk.splitlines():
                 if line.strip():
                     log(f"[serve] {line.rstrip()}")
+                    n += 1
+            if n:
+                last_serve_line_at = time.time()
+            return n
 
         def _ping() -> dict | None:
             try:
@@ -555,6 +583,16 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                     _drain()
                     log(f"worker_server 退出 (pid {serve_pid})")
                     return 0
+                if cf_pid and not _pid_alive(int(cf_pid)):
+                    # 2026-10-26 真机：这里只 ping 127.0.0.1、只看 serve 存活 ⇒ 隧道死了完全看不出来
+                    # （hub 侧是 Cloudflare 1033/530，本机日志一路「守候中」）。bootstrap 起的
+                    # cloudflared 没了只能重开 cell（重建隧道 + 重注册），故按配置致命收摊。
+                    _drain()
+                    log(
+                        f"⚠ cloudflared 已退出 (pid {cf_pid}) —— 隧道没了，hub 再也够不到本机"
+                        "（本机只 ping 127.0.0.1，看不出隧道死活）⇒ 请重跑本 cell"
+                    )
+                    return -2
                 _drain()
                 now = time.time()
                 if now - last_status_at >= 15:
@@ -564,13 +602,16 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                         busy = bool(st.get("busy"))
                         queued = int(st.get("queued") or 0)
                         done = int(st.get("done") or 0)
-                        if done != as_last_done or busy != as_last_busy or queued > 0:
+                        if done != as_last_done or busy != as_last_busy or queued != as_last_queued:
                             log(
                                 f"worker 状态: busy={busy} queued={queued} done={done}"
                                 + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
                             )
-                            as_last_done, as_last_busy = done, busy
-                        else:
+                            as_last_done, as_last_busy, as_last_queued = done, busy, queued
+                        elif busy and now - last_serve_line_at < _SERVE_QUIET_SEC:
+                            pass  # 过程日志还在流 ⇒ 不刷「守候中…」（同主分支口径）
+                        elif now - last_beat_at >= _HEARTBEAT_SEC:
+                            last_beat_at = now
                             log(
                                 f"守候中… busy={busy} queued={queued} done={done}"
                                 f" wait={int(now - t0)}s"
@@ -657,29 +698,42 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     serve_tail_off = 0
     last_status_at = 0.0
     last_done = -1
+    #: `queued` 也按**变化**报（原来是 `queued > 0` 就报 ⇒ push_ahead 预推一份时每拍一条，同族刷屏）。
+    last_queued = -1
     last_busy: bool | None = None
+    #: 最近一次转发 serve.log 的时刻（2026-10-26 用户口径：PPO 在跑时**过程日志已经在刷**，
+    #: 别在下面再叠一行「守候中… busy=True」把现场淹掉）。反过来它也是判据：忙但过程日志
+    #: **静默够久**（`_SERVE_QUIET_SEC`）时心跳照打，别把「卡住」当成正常。
+    last_serve_line_at = 0.0
+    #: 上一行心跳的时刻（`_HEARTBEAT_SEC` 限流；0 ⇒ 第一拍就来一条，别让人干等三分钟）。
+    last_beat_at = 0.0
 
-    def _drain_serve_log() -> None:
-        nonlocal serve_tail_off
+    def _drain_serve_log() -> int:
+        nonlocal serve_tail_off, last_serve_line_at
         try:
             size = serve_log.stat().st_size
         except OSError:
-            return
+            return 0
         if size < serve_tail_off:
             serve_tail_off = 0  # 日志被截断/重开
         if size <= serve_tail_off:
-            return
+            return 0
         try:
             with open(serve_log, encoding="utf-8", errors="replace") as f:
                 f.seek(serve_tail_off)
                 chunk = f.read()
             serve_tail_off = size
         except OSError:
-            return
+            return 0
+        n = 0
         for line in chunk.splitlines():
             line = line.rstrip()
             if line:
                 log(f"[serve] {line}")
+                n += 1
+        if n:
+            last_serve_line_at = time.time()
+        return n
 
     def _ping_status() -> dict | None:
         try:
@@ -703,6 +757,16 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                 _drain_serve_log()
                 log(f"worker_server 退出 (code {serve_proc.returncode})")
                 return serve_proc.returncode or 0
+            if cf_proc is not None and cf_proc.poll() is not None:
+                # 2026-10-26 真机（kaggleO）：cloudflared 死了而 cell 一路打「守候中 busy=False」——
+                # 本地 /ping 全绿、hub 侧却是 Cloudflare 1033/530，且 `_refresh_registration` 只在
+                # **URL 换名**时才重注册（进程死了日志不动 ⇒ 永远是那条死 URL）。
+                # 返回 -1 ⇒ `run_notebook` 整体重启本 runner：换新隧道 + 重新注册。
+                log(
+                    f"⚠ cloudflared 已退出 (code {cf_proc.returncode}) —— 隧道没了，hub 再也够不到本机"
+                    "；整体重启（换一条隧道并重注册）"
+                )
+                return -1
             _drain_serve_log()
             now = time.time()
             if now - last_status_at >= 15:
@@ -712,13 +776,18 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                     busy = bool(st.get("busy"))
                     queued = int(st.get("queued") or 0)
                     done = int(st.get("done") or 0)
-                    if done != last_done or busy != last_busy or queued > 0:
+                    if done != last_done or busy != last_busy or queued != last_queued:
                         log(
                             f"worker 状态: busy={busy} queued={queued} done={done}"
                             + ("（在跑 job）" if busy else "（空闲，等 hub 推送）")
                         )
-                        last_done, last_busy = done, busy
-                    else:
+                        last_done, last_busy, last_queued = done, busy, queued
+                    elif busy and now - last_serve_line_at < _SERVE_QUIET_SEC:
+                        # PPO 在跑且过程日志还在流 ⇒ 不刷「守候中…」（2026-10-26 用户口径）。
+                        pass
+                    elif now - last_beat_at >= _HEARTBEAT_SEC:
+                        # 没过程日志可转（空闲 / 忙但静默）⇒ 心跳限流到三分钟一条。
+                        last_beat_at = now
                         log(
                             f"守候中… busy={busy} queued={queued} done={done}"
                             f" wait={int(now - t_wait0)}s"

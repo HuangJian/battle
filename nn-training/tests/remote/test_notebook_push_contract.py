@@ -89,6 +89,32 @@ def test_push_takes_code_before_starting_the_service() -> None:
     ), "push 分支必须带：有界 /code、兜底开关、两种来源日志"
 
 
+def test_github_fallback_lays_the_nn_training_root() -> None:
+    """2026-10-26 真机：push + `source=github` 之后 `ModuleNotFoundError: No module named 'remote'`。
+
+    hub 的 code.zip 根是 **`nn-training/`**（`remote/hub_client.pack_code_zip` 走
+    `os.walk(nn_root)` + `relative_to(nn_root)`），所以 `/tmp/worker-code` 里必须铺
+    `nn-training/` 的**内容**。GitHub clone 那条路原来把**仓库根**整个拷进去 ⇒
+    `remote` 落在 `worker-code/nn-training/remote` ⇒ `sys.path` 上根本找不到它。
+    """
+    src = _cell("battle.cloudflared.ipynb")
+    assert '_src = _tmp / "nn-training"' in src
+    assert '(_src / "remote").is_dir()' in src, "clone 完要验证 remote/ 就在解析出的根下"
+    assert "shutil.copytree(_src, _code_dir" in src
+    assert "shutil.copytree(_tmp, _code_dir" not in src, "不许再拷仓库根（remote/ 不在它下面）"
+
+
+def test_both_code_sources_are_verified_as_a_code_root() -> None:
+    """两条来源（hub /code、GitHub）过同一条判据：`<code_dir>/remote` 必须存在。
+
+    顺手钉住「缺 registry_url/hub_token 时不许静默跳过 hub」——旧版一声不响降级 GitHub，
+    既拿不到 hub 的代码快照，也把自动注册整条关掉（节点起得来、hub 派不到活）。
+    """
+    src = _cell("battle.cloudflared.ipynb")
+    assert '(Path(_code_dir) / "remote").is_dir()' in src
+    assert "if not (_code_base and _hub_tok):" in src
+
+
 def test_push_first_is_the_last_resort_and_registers_inline() -> None:
     src = _cell("battle.cloudflared.ipynb")
     # 显式开关：关掉时直接 FATAL（不再静默卡在「等 code 的 job」）
