@@ -519,6 +519,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // A20 (2026-10-25): 预测穿越的时间容差（拍）。越小 = 只打「时间刚好」的穿越，
   // 发数少但命中率高。默认 6（历史值）。
   crossingSlackTicks: 6,
+  // A23 (2026-10-26): 就绪且当前朝向无射门时，**转过去打**最近的可见敌人。
+  // 尸检：就绪 2371 拍/局，朝向对齐仅 506（21%），另有 **1014 拍（43%）别的方向有射门**。
+  // 35×60 串行配对（CRN）：hard 80.2%→**81.7%**（+1.43pp, t=1.28, kills +440）·
+  // chaos 77.4%→**81.1%**（**+3.67pp, t=3.32**, kills +1077）· classic 86.9%→87.3%（+0.43pp）
+  // ⇒ **三难度同号为正**（SHIPPED）。
+  turnToFireMode: 0,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,

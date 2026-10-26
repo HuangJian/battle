@@ -13,7 +13,8 @@ import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
-import { scanAheadImpl } from './FireControl'
+import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
+import { turnWillCommit } from './turn-gate'
 import { runChain, type Candidate } from './DecisionCore'
 import { updateEnemyModel } from './EnemyModel'
 import { superItemPressesImpl } from './SuperItems'
@@ -280,6 +281,36 @@ export function thinkImpl(self: GodAIInput): void {
 
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   self.aggressive = frozen
+
+  // ============ A23 (2026-10-26): FACE THE SHOT ============
+  // Autopsy: the gun is ready 2371 ticks/game but only 506 of those (21%) have a
+  // hittable enemy on the CURRENT facing; a further **1014 ticks (43%) have a
+  // hittable enemy in another direction** — the AI simply never turns to it.
+  // That is the single largest block of wasted fire opportunities. When the gun
+  // is ready and nothing is aligned where we look, turn to the nearest hittable
+  // enemy and shoot (the turn is committed, so A2's fire gate stays satisfied).
+  if (self.params.turnToFireMode > 0 && !onCooldown && !frozen && !shielded) {
+    if (!shouldFireInDirImpl(self, pcx, pcy, p.dir)) {
+      let bestDir: Direction | null = null
+      let bestDist = Infinity
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (d === p.dir) continue
+        if (!turnWillCommit(w, p, d)) continue
+        const sc = scanAheadImpl(self, pcx, pcy, d)
+        if (!sc.enemy || sc.enemyDist >= bestDist) continue
+        if (!shouldFireInDirImpl(self, pcx, pcy, d)) continue
+        bestDist = sc.enemyDist
+        bestDir = d
+      }
+      if (bestDir !== null) {
+        self._moveDir = bestDir
+        self._fire = true
+        recordBranch(self, 'engage')
+        return
+      }
+    }
+  }
 
   // ---- Scan for enemy targets (global vision, T9 priority) ----
   let aimDir = findEnemyDirectionImpl(self, pcx, pcy)

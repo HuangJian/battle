@@ -1428,6 +1428,9 @@ export interface GodAIParams {
   /** A20 (2026-10-25): slack (ticks) added to the half-body crossing time when
    * deciding that a strafing enemy will cross our line in time. */
   crossingSlackTicks: number
+  /** A23 (2026-10-26): when the gun is ready and nothing is aligned on the
+   * current facing, turn to the nearest hittable enemy and fire. 0 = OFF. */
+  turnToFireMode: number
   /** A12: engage only when the earliest shell reaches the CURRENT cell within
    * this many ticks (urgency gate; avoids hijacking routine dodges). */
   crossfireMinTti: number
