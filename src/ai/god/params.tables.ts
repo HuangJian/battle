@@ -524,7 +524,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 35×60 串行配对（CRN）：hard 80.2%→**81.7%**（+1.43pp, t=1.28, kills +440）·
   // chaos 77.4%→**81.1%**（**+3.67pp, t=3.32**, kills +1077）· classic 86.9%→87.3%（+0.43pp）
   // ⇒ **三难度同号为正**（SHIPPED）。
-  turnToFireMode: 0,
+  turnToFireMode: 1,
   // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
   crossfireMinTti: 12,
   defenseCellResolve: 1,

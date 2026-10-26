@@ -172,12 +172,17 @@ describe('Replay round-trip determinism', () => {
     const a = runWithRecording(0, 11111, 6000)
     const b = runWithRecording(0, 22222, 6000)
 
-    // With different seeds, at least one field should differ
+    // With different seeds, at least one field should differ.
+    // A23 (2026-10-26): 「结局画像」可能巧合相同（两个 seed 都满击杀、同样剩 2 命、同分），
+    // 那**不是**坍缩指纹 —— 同一 stage 上强 AI 的收尾常常一致。真正的 per-seed 差异落在
+    // 时长上（2941 vs 3005 拍），把它并入判据，既保留「不同 seed 不同局」的本意，
+    // 又不会被「结局凑巧相同」误报。
     const same =
       a.finalScore === b.finalScore &&
       a.finalLives === b.finalLives &&
       a.finalKillCount === b.finalKillCount &&
-      a.finalState === b.finalState
+      a.finalState === b.finalState &&
+      a.result.tickCount === b.result.tickCount
     expect(same).toBe(false)
   })
 })

@@ -94,6 +94,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
   // guard the mechanism for a future revival (see DECISIONS §168).
   const ON = {
     ...DEFAULT_GOD_AI_PARAMS,
+    // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+    turnToFireMode: 0,
     navStuckZone: 1,
     navStuckSuppressTicks: 60,
     baseConnectClearMode: 0,
@@ -103,6 +105,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     const dwell = maxZoneDwell(
       {
         ...DEFAULT_GOD_AI_PARAMS,
+        // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+        turnToFireMode: 0,
         navStuckZone: 0,
         baseConnectClearMode: 0,
         pixelStuckDirectMoveTicks: 0,
@@ -149,7 +153,13 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // t748) even though the A/B showed no win-rate significance — the
     // mechanism works, the win-rate lever lies elsewhere.
     const dwell = maxZoneDwell(
-      { ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1, baseConnectClearMode: 0 },
+      {
+        ...DEFAULT_GOD_AI_PARAMS,
+        // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+        turnToFireMode: 0,
+        navStuckZone: 1,
+        baseConnectClearMode: 0,
+      },
       STAGE,
       SEED,
       2400,

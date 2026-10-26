@@ -43,7 +43,16 @@ function runRiverbed(
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params }, godRng)
+  const input = new GodAIInput(
+    world,
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
+      ...params,
+    },
+    godRng,
+  )
   const sim = new Simulation(world, input)
   world.loadStageData(STAGES[7], 7)
   input.reset()
