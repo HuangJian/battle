@@ -323,7 +323,12 @@ export function thinkImpl(self: GodAIInput): void {
   // 直接朝最近的残敌走（贪心一步），把「跑路」换成「接战」；接上后被 A23 接管转身开火。
   if (
     self.params.lateHuntMode > 0 &&
-    w.killCount >= self.params.lateHuntKills &&
+    // A24b (2026-10-26, 用户裁定)：触发改为「场上残敌 ≤ N」，而不是击杀数阈值。
+    self._enemies.length > 0 &&
+    self._enemies.length <= self.params.lateHuntMaxAlive &&
+    // 只在**开火冷却中**推进：枪就绪时的每一拍都值得留在原地等射门（A23 会转身打）。
+    // 冷却期本来就打不出子弹，用它来走位是纯赚。
+    onCooldown &&
     !frozen &&
     !self.isBaseUnderThreat()
   ) {

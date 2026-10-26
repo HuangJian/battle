@@ -558,8 +558,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   turnToFireMode: 1,
   // A24 (2026-10-26): 晚期残敌狩猎 —— 击杀数 ≥ lateHuntKills 且四方向无射门、基地不告急时，
   // 直接朝最近残敌走（贪心一步）。0 = OFF。
+  // A24b (2026-10-26, 按用户裁定细化：残敌 ≤3 + 只在开火冷却中推进)：
+  // 35×60 hard **+1.57pp**(t=1.48, kills +293) · classic **+0.19pp** · chaos −0.67pp(t=−0.61)
+  // ⇒ 两正一中性的净正收益，但打开后 18 个门禁用例需重钉（A23 已耗掉本轮重钉预算）
+  // ⇒ 暂不发货，默认 0。
   lateHuntMode: 0,
   lateHuntKills: 14,
+  // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
+  lateHuntMaxAlive: 3,
   lateHuntMinDist: 6,
   // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
   // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，

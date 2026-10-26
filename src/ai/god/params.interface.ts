@@ -1468,6 +1468,8 @@ export interface GodAIParams {
   lateHuntMode: number
   /** A24: kills threshold that marks the late game. */
   lateHuntKills: number
+  /** A24b: trigger when at most this many enemies are alive on the field. */
+  lateHuntMaxAlive: number
   /** A24: only hunt when the nearest enemy is farther than this many cells. */
   lateHuntMinDist: number
   /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
