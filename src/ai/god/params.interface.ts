@@ -1478,6 +1478,9 @@ export interface GodAIParams {
   /** A29 (2026-10-26): on-field HP pool at or above which fire-quality mode kicks
    * in (no P2.4 crossing shots; corridor-verified targets only). 0 = OFF. */
   qualityFireHp: number
+  /** A31 (2026-10-26): treat the respawn shield as an aggressive window (it is
+   * invulnerability, but the AI currently fires LESS during it). 0 = OFF. */
+  shieldAggressive: number
   /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
    * enemy when nothing is hittable and the base is safe. 0 = OFF. */
   lateHuntMode: number

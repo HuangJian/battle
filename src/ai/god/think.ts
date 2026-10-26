@@ -282,7 +282,11 @@ export function thinkImpl(self: GodAIInput): void {
   const shielded = (p.shieldTimer ?? 0) > 0
 
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
-  self.aggressive = frozen
+  // A31 (2026-10-26): 尸检显示**盾牌期反而打得更少**（射击 7.8/千拍 vs 全局 10.1，
+  // 击杀 2.94 vs 3.61）—— 因为这里刻意把 shield 排除在 aggressive 之外（怕丢基地）。
+  // 但盾牌是**无敌窗口**：不掉命的前提下，它是最该压上去换击杀/换位置的时候。
+  // `shieldAggressive` > 0 时把盾牌也纳入 aggressive。0 = 原行为（字节等同）。
+  self.aggressive = frozen || (self.params.shieldAggressive > 0 && shielded)
 
   // ============ A23 (2026-10-26): FACE THE SHOT ============
   // Autopsy: the gun is ready 2371 ticks/game but only 506 of those (21%) have a
