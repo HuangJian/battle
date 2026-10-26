@@ -148,11 +148,13 @@ def test_cloud_eval_is_wired_as_a_background_runner(
         assert calls[0]["eval_jsonl"] == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
         assert calls[0]["course_fp"] == "f" * 16
         # 0 = **原样传「没指定」**（不在这里提前解析）：由 `run_cloud_eval` 按 game_watch 解析成
-        # 「首次尝试 5s（用户口径：单局 >5s 肯定不正常）、重试 ×4」——提前解析就丢掉「显式 vs
-        # 兜底」这个区别，而它决定重试要不要放宽。旧值 900s 会让一个卡住的局占着 slot 15 分钟
+        # 「首次尝试 = DEFAULT_GAME_TIMEOUT_SEC、重试 ×4」——提前解析就丢掉「显式 vs 兜底」
+        # 这个区别，而它决定重试要不要放宽。旧值 900s 会让一个卡住的局占着 slot 15 分钟
         # （本轮 drain 只有 600s ⇒ 整轮读数丢），2026-09-22 收掉。
+        # 2026-10-26：兜底硬顶 5s → 30s（经典 35 关 3 命的长局在 4 核 CPU 上常态 6–15s，
+        # 5s 会把每局都杀掉重跑）；点名线同步 20s，重试仍 ×4 ⇒ 120s。
         assert calls[0]["game_timeout_sec"] == 0.0
-        assert DEFAULT_GAME_TIMEOUT_SEC == 5.0
+        assert DEFAULT_GAME_TIMEOUT_SEC == 30.0
         # 缺省并发在装配时解析成**真实数字**（与 rollout 同一口径），日志里报的也是它
         assert ctx.eval_slots == offline_eval.default_slots() > 0
         assert calls[0]["slots"] == ctx.eval_slots

@@ -704,6 +704,39 @@ def test_clean_attempt_scans_both_roots_and_nothing_else(tmp_path: Path) -> None
     assert elsewhere.exists() and (elsewhere / "manifest.json").exists(), "越界路径一个都不删"
 
 
+def test_clean_attempt_survives_rglob_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理的 `rglob` 与并发 `rmtree` 竞态 ⇒ **必须吞掉 OSError，不许杀死整轮**。
+
+    2026-10-26 云机现场（4 核 · 35 关 · 41 批补差后）：同批两局同时打到 5s 硬顶 ⇒ 两个
+    worker 各跑一次 `_clean_attempt`；一个 `rmtree` 掉 `topup41/r/w196` 的同时，另一个的
+    `rglob` 正 stat 到那一层 ⇒ Python 3.10 的 `rglob` 抛 `FileNotFoundError` ⇒ 异常穿过
+    `run_iter_rollout` 的 try（`ok` 停在 False）⇒ `kind=iter rollout 中断` ⇒ 冒到
+    `run_loop` 顶层，整条腿当场死（日志：`FileNotFoundError: …/topup41/r/w196`）。
+
+    判据：清理是 best-effort —— 扫不到就当没有。这一条钉住「清理不许反向杀死这一轮」。
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "r").mkdir()
+    _half_shard(job / "r" / "w196", stage=2012, seed=5)
+    argv = ["stub.py", "--out", "r/w196", "--stages", "2012", "--seeds", "5"]
+
+    real_rglob = Path.rglob
+
+    def racing_rglob(self: Path, pattern: str):  # type: ignore[no-untyped-def]
+        # 只在扫 job 根时模拟「并发 rmtree 把目录删了」的窗口
+        if self == job:
+            raise FileNotFoundError(2, "No such file or directory", str(self / "r" / "w196"))
+        return real_rglob(self, pattern)
+
+    monkeypatch.setattr(Path, "rglob", racing_rglob)
+    iter_rollout._clean_attempt(job, argv)  # 不得抛
+
+    # out 目录那一支仍然清掉了（rglob 挂了不代表整次清理失效）
+    monkeypatch.undo()
+    assert not (job / "r" / "w196").exists(), "out 目录必须照清（半截产出不许留在盘上）"
+
+
 def test_clean_partial_shape_is_unchanged_on_the_fallback_path(tmp_path: Path) -> None:
     """回退档的调用形状与今天**逐字相同**（连关键字都不多传一个）。
 

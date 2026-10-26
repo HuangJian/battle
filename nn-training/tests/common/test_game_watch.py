@@ -18,9 +18,21 @@ from common import game_watch
 
 
 def test_defaults_are_the_user_line() -> None:
-    """默认口径 = 用户 2026-09-22 的判据：单局 >5s 肯定不正常。"""
-    assert game_watch.SLOW_GAME_WARN_SEC == 5.0
-    assert game_watch.DEFAULT_GAME_TIMEOUT_SEC == 5.0  # 首次尝试就按这条线杀
+    """默认口径 = 用户 2026-10-26 的判据（**由 5s 放宽**，见下）。
+
+    旧口径「单局 >5s 肯定不正常」是 2026-09-22 在 obstruction（13×13 空地、8000 拍）上
+    标定的。换成经典 35 关 + 3 命后，一局要跑满 26×26 迷宫（实测 s2034 18057 拍、
+    s2013 16151 拍），4 核 CPU 云机上常态 6–15s ⇒ 5s 会把**每一局**都杀掉重跑
+    （2026-10-26 08:37 现场：35 局里 7 次超时、重试打满仍不过）。
+
+    新口径：点名线 20s（「慢」）/ 硬顶 30s（「不再等」）。两者**不同值是有意的** ——
+    20~30s 那一段要打 WARN 但不杀（`warn_is_redundant` 因此不再恒为「同值」）。
+    """
+    assert game_watch.SLOW_GAME_WARN_SEC == 20.0
+    assert game_watch.DEFAULT_GAME_TIMEOUT_SEC == 30.0  # 首次尝试：长局不许再被 5s 误杀
+    assert game_watch.SLOW_GAME_WARN_SEC < game_watch.DEFAULT_GAME_TIMEOUT_SEC, (
+        "点名线必须在硬顶之下，否则「慢」永远来不及说出口就被杀了"
+    )
     assert game_watch.RETRY_TIMEOUT_FACTOR == 4.0  # 重试放宽（兜底尝试宁可多等）
     assert game_watch.GAME_MAX_ATTEMPTS == 3
     assert 0 < game_watch.GAME_POLL_SEC <= 1.0  # 轮询必须比告警线细，否则杀不到点上
@@ -50,10 +62,14 @@ def test_attempt_timeout_explicit_config_wins_on_the_first_attempt() -> None:
 
 
 def test_warn_is_redundant_only_when_cap_is_at_or_below_the_line() -> None:
-    """软告警与硬顶同值（默认 5s=5s）时不该多打一行 WARN（超时行自己带局身份）。"""
-    assert game_watch.warn_is_redundant(game_watch.DEFAULT_GAME_TIMEOUT_SEC) is True
+    """软告警与硬顶同值（或硬顶更严）时不该多打一行 WARN；硬顶比点名线**宽**时必须多打。
+
+    2026-10-26：默认档两线不再同值（点名 20s / 硬顶 30s）⇒ **默认就要打 WARN** ——
+    20~30s 那段「跑完了但慢」是这条线唯一的发声机会（旧口径 5s=5s 靠「同值」省掉它）。
+    """
     assert game_watch.warn_is_redundant(game_watch.SLOW_GAME_WARN_SEC) is True
     assert game_watch.warn_is_redundant(0.5) is True
+    assert game_watch.warn_is_redundant(game_watch.DEFAULT_GAME_TIMEOUT_SEC) is False
     assert game_watch.warn_is_redundant(30.0) is False
 
 
@@ -70,12 +86,17 @@ def test_lines_name_the_game_and_the_cap() -> None:
 
 
 def test_game_time_summary_reports_distribution_slowest_and_retries() -> None:
-    """轮末分布行：分位数 + ≥5s 计数 + 重试次数 + **最慢 3 局点名**（读数要能追溯）。"""
-    items = [(0.4, "s0/d1"), (0.5, "s0/d2"), (0.6, "s0/d3"), (1.0, "s0/d4"), (9.0, "s3/d7")]
+    """轮末分布行：分位数 + 慢局计数 + 重试次数 + **最慢 3 局点名**（读数要能追溯）。
+
+    ⚠ 计数阈值走 `SLOW_GAME_WARN_SEC` 常量（2026-10-26 从 5 改成 20 —— 硬编码 `≥5s`
+    会让这条用例在口径变更时变成假红，而它要守的是「分布行有分位数/计数/点名三件事」）。
+    """
+    over = game_watch.SLOW_GAME_WARN_SEC + 5.0
+    items = [(0.4, "s0/d1"), (0.5, "s0/d2"), (0.6, "s0/d3"), (1.0, "s0/d4"), (over, "s3/d7")]
     line = game_watch.game_time_summary("rollout", items, retried=2)
-    assert "5 局" in line and "p50=" in line and "max=9.00s" in line
-    assert "≥5s 有 1 局" in line and "重试过的局 2 个" in line
-    assert "s3/d7=9.00s" in line  # 最慢那局被点名（光有 p99 没法查是哪几局）
+    assert "5 局" in line and "p50=" in line and f"max={over:.2f}s" in line
+    assert f"≥{game_watch.SLOW_GAME_WARN_SEC:g}s 有 1 局" in line and "重试过的局 2 个" in line
+    assert f"s3/d7={over:.2f}s" in line  # 最慢那局被点名（光有 p99 没法查是哪几局）
 
 
 def test_game_time_summary_empty_is_not_a_crash() -> None:

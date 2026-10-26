@@ -1,0 +1,124 @@
+// 课程 y35-classic —— **经典 35 关迁移的第一批**（2026-10-25）
+//
+// ── 这条腿要回答什么 ────────────────────────────────────────────────────────
+//   it195（y34-hitfix 终点，A 层 obstruction 400 局 73.5%）在**经典 35 关**上只有 **1.9%**
+//   （700 局：hard / 3 命 / 0 星 / seeds 1-20，reports/y34-hitfix-it195-classic35-20261025.md）。
+//   本腿 = 把训练面板从 obstruction（13×13 空地玩具场，砖/钢/树/冰各 1 块）换成经典 35 关
+//   （26×26 真实布局），同时补掉两个**硬伤**（不是实验变量）：
+//     ① `terminal` 补 `base_destroyed`（原来基地被毁 = 0 分、自己死 = −35 ⇒ 教出「弃基地」；
+//        实测 530/700 局 0 死 + 基地被拆，形状对上）。三种输法现在同价 −35。
+//     ② `player.lives: 3`（obstruction 是 1 命 ⇒ 第 2/3 条命从未进训练分布，
+//        观测 `s[2]=clamp01(lives/3)` 训练里恒 0.333）。
+//   **formula 与 params 逐字不动**（与 y34-hitfix 完全一致）⇒ 相对旧基线唯一的真变量是「面板」。
+//
+// ── 相对旧基线的变量账（为什么这不是「多条腿混在一起」）──────────────────────────
+//   · 公式/系数：一字未动。
+//   · `lives 1→3`：只改环境，不改任何项的量纲（wKill/wDmg 都不乘 lives）。
+//   · `terminal.base_destroyed`：把一个**漏项**补成与另外两终局同价（−35）——修 bug 不是调参。
+//   ⇒ 「面板」是唯一的设计变量。
+//
+// ── 后续四批（都以本腿为起点，逐批单变量叠加）────────────────────────────────
+//   第二批 `y35-passive`  = 本腿 + `wPassive`（反苟；`wBlock` 只罚撞墙、主动 STOP 免费）
+//   第三批 `y35-brick`    = 第二批 + `wBrick`（`aimBricks` 列 68 已在 metrics 里、零项消费；
+//                           经典关有墙，obstruction 上 aimBricks≈0 ⇒ 这一项只在 35 关上有效）
+//   第四批 `y35-blood`    = 第三批 + `wDmg 0.18→0.10` 或 `wKill 3→5`（**二选一**）
+//   第五批 `y35-life`     = 第四批 + `wLife1/2/3` 命价阶梯（必须与 lives:3 同批才有载体）
+//   命价与反苟的 formula 片段已用 tmp/check-reward-frag.py 编译 + 语义钉死（可照抄）。
+//
+// ── 采样（为什么 target_transitions 抬到 61440）────────────────────────────────
+//   配额是**分关**的：每关 ceil(target/关数) samples（worker/volume_quota.py:58），
+//   而 35 关 = 每关 1756 samples。samples/局 = ticks/局 ÷ decision_k 10：
+//   现状 0 星 35 关实测 4834 拍 ⇒ 483；学会打后 8000–12000 拍 ⇒ 800–1200。
+//   ⇒ 每关 1.5–2.2 局/轮。**不够就抬 target，不能靠轮换**——`target_transitions>0` ⇒ volume 模式，
+//   `build_pairs` 的 curriculum/rotate/explicit 三条路径全短路（biz/plan.py::pairs_for），
+//   且 `rotate_stages`/`curriculum_*` 不在 CourseConfig.flat_overrides 表里 ⇒ 写课程 JSON 会被静默丢。
+//   ⚠ 61440 = 60×1024（须为 mb 整倍数，否则 np_core.py:489 丢尾部 ragged 块）。
+//   ⚠ 墙钟：24576 ≈ 2.3 min/轮（本地 GPU）⇒ 61440 ≈ 5.75 min/轮 ⇒ 400 轮 ≈ 38 h ⇒ max_hours 45。
+//
+// ── 评估面板 ────────────────────────────────────────────────────────────────
+//   `eval_stages "2000-2007"` = 经典 35 关的前 8 关（2000+i = 第 i 关，CUSTOM_STAGE_BASE=2000）。
+//   25 局/关 ⇒ 200 局/次，与 obstruction 的 4×50=200 同价（照抄 50 局 ⇒ 1750 局/次，比一轮训练还贵）。
+//   ⚠ **这是哨兵面板，不是逐关判据**：单关 25 局 ⇒ σ≈0.09，只能看趋势。
+//     逐关诊断走离线 `bun tmp/eval35.ts`（700 局 / 4m52s），每 20–30 轮跑一次。
+//   ⚠ 换 level ⇒ A 层编号从 2000-2003 变成 2000-2034 ⇒ **旧 eval_log 曲线作废**，
+//     本腿用独立 traj/out 目录，不续 y34-hitfix 的账本。
+{
+  "version": 5,
+  "name": "y35-classic",
+  "mode": "per-tick",
+  "level": "classic35",
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.18,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 1.4,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wWinHit": 1.2,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/y34-hitfix/y34-hitfix.it195.20261025-152659.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 45.0,
+  "lr": 0.00012,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 100,
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+    {
+      "kl_coef": 0.05,
+      "lr": 8e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 122880,
+  "paired_rotate_seed": 20270225,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/y35-classic/weights.json",
+  "traj": "tmp/y35-classic",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y35-classic",
+  "backup_prefix": "y35-classic",
+  "eval_stages": "2000-2007",
+  "eval_games_per_stage": 25,
+  "eval_every": 5,
+}

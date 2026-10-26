@@ -1919,7 +1919,14 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   const lpMove = new Float32Array(N)
   const lpFire = new Float32Array(N)
   const value = new Float32Array(N)
-  const metrics = new Float64Array((N + 1) * METRICS_DIM)
+  // ★ 2026-10-26（payload 瘦身 A）：`Float64Array` → `Float32Array`（配下方 `'f4'`）。
+  //   理由（实测 `tmp/probe-payload-mix.py`）：metrics 是 79 列**整型计数器**（ticks ≤36000、
+  //   kills ≤20、tick 类 ≤36000、enemyDist ≤400），f4 尾数 24 位（精确到 16 777 216）足以
+  //   逐值表示 ⇒ **零语义损失**，而 f8→f4 让这块从 payload 的 2.62 MB 降到 1.31 MB（−50%）。
+  //   读侧不用改：`biz/reward_library.RewardFn.__call__` 一进来就 `np.asarray(..., float64)`，
+  //   所以公式引擎看到的仍是 f8；`data_fp` 只哈希 `(目录名, wver, stage, seed)`、不含 npy 字节
+  //   （`common/manifest.py::data_fp_entries`）⇒ 声明集/验收口径不受影响。
+  const metrics = new Float32Array((N + 1) * METRICS_DIM)
   const done = new Uint8Array(N)
   const maskDim = maskDimFor(v6)
   const mask = new Uint8Array(N * maskDim)
@@ -1951,7 +1958,9 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },
     { name: 'lp_fire.npy', data: npyBytes(lpFire, [N], 'f4') },
     { name: 'value.npy', data: npyBytes(value, [N], 'f4') },
-    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f8') },
+    // ★ 2026-10-26：`'f8'` → `'f4'`（payload 瘦身 A）。79 列全是整型计数器，f4 精确；
+    //   读侧 `np.asarray(float64)` 一进来就升回 f8 ⇒ 公式引擎与旧语料逐位等价。
+    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4') },
     { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
     { name: 'mask.npy', data: npyBytes(mask, [N, maskDim], 'u1') },
   ]

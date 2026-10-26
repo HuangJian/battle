@@ -320,7 +320,9 @@ def test_argv_width_degradation_is_loud(tmp_path: Path) -> None:
     )
     assert extra2 is not None
     assert not any("宽度退化" in m for m in msgs2), msgs2
-    assert any("满铺 width=4" in m and "槽位=4" in m for m in msgs2), msgs2
+    # 批日志报槽位值（2026-10-26：文案不再写「满铺」—— 有实测 est 时走流式解缺口，
+    # 只有冷启动兜底才每关 1 局；断言只认「槽位」这个稳定字段）。
+    assert any("槽位=4" in m for m in msgs2), msgs2
 
 
 def test_topup_is_off_without_volume_block(tmp_path: Path) -> None:
@@ -344,8 +346,10 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     assert len(spec["argv"]) == 27
     assert data_fp(info1["shard_dirs"]) == iter_expected_data_fp(spec)
 
-    # ⑥ 满铺：本批 = width 局（不再是缺口方程）。显式给 width = 6（生产里由首批 workers 给）
-    # ⇒ 两关轮转均分 3/3；缺口本只需 1+2 局，铺满后过采 500 样本 —— 那是**预期的**（软指标）。
+    # ⑥ 流式（2026-10-26 用户口径）：按**本轮实测** est 解缺口，一次派准 ——
+    #   首批实测 2000 是 200 samples/局、2001 是 100 ⇒ 缺口各 200 ⇒ 1 局 + 2 局 = 3 局。
+    #   不再按机器宽度铺满（那会过采 500 样本，也会把 35 关拆成 44 批）。
+    #   `width` 现在只当冷启动兜底的池宽，有实测时不参与分配。
     extra = topup_rollout(
         job_dir=job,
         spec=spec,
@@ -357,9 +361,9 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     assert extra is not None
     assert extra["volume"]["batches"] == 1
     assert extra["volume"]["shortfall_by_stage"] == {}
-    assert extra["volume"]["wasted_samples"] == 500
-    assert extra["volume"]["collected_by_stage"] == {2000: 2400, 2001: 2100}
-    assert sum(c["rows"].__len__() for c in run.calls[1:]) == 6, "批大小 == width（满铺）"
+    assert extra["volume"]["wasted_samples"] == 0, "按实测 est 精确派 ⇒ 不超采"
+    assert extra["volume"]["collected_by_stage"] == {2000: 2000, 2001: 2000}
+    assert sum(c["rows"].__len__() for c in run.calls[1:]) == 3, "批大小 = 逐关缺口局数之和"
     assert extra["volume"]["rule"] == "per-stage-v3"
     # 补差批跑在子目录（隔离 = 逐位对账不失真），且权重被拷进去了。
     assert run.calls[1]["job_dir"].endswith("topup1")
@@ -368,7 +372,7 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     assert data_fp(extra["shard_dirs"]) == iter_expected_data_fp(
         next_batch_spec(
             spec,
-            {2000: 3, 2001: 3},
+            {2000: 1, 2001: 2},
             start_idx={2000: 9, 2001: 18},
             out_base=27,
             rotate_seed=ROTATE,
@@ -379,18 +383,21 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     outs = [_flag_value(r, "--out") for r in spec["argv"]] + [
         _flag_value(r, "--out") for c in run.calls[1:] for r in c["rows"]
     ]
-    assert len(outs) == len(set(outs)) == 33
-    assert sorted(int(o[1:]) for o in outs) == list(range(33))
+    # 首批 9+18=27 局；流式补差 1+2=3 局 ⇒ 合计 30（`--out` 全局续号，不重号）
+    n_first, n_topup = 27, 3
+    assert len(outs) == len(set(outs)) == n_first + n_topup
+    assert sorted(int(o[1:]) for o in outs) == list(range(n_first + n_topup))
     # 种子 = 连续流前缀 `[0, K_s)`（不重抽、不漏局）。
     produced = _seed_pairs([*info1["shard_dirs"], *extra["shard_dirs"]])
-    assert produced[2000] == sorted(stage_seeds(ROTATE, 7, 2000, 0, 12))
-    assert produced[2001] == sorted(stage_seeds(ROTATE, 7, 2001, 0, 21))
+    assert produced[2000] == sorted(stage_seeds(ROTATE, 7, 2000, 0, 9 + 1))
+    assert produced[2001] == sorted(stage_seeds(ROTATE, 7, 2001, 0, 18 + 2))
     # 轮报合并：games/样本相加、逐局画像拼接（漏了这一条 = 云机轮账少算一批）。
     merged = merge_iter_reports(dict(info1["report"]), list(extra["reports"]))
-    assert merged["games"] == 33
-    assert merged["totalSamples"] == 2400 + 2100
-    assert merged["shards"] == 33
-    assert len(merged["perGame"]) == 33
+    assert merged["games"] == n_first + n_topup
+    # 2000: 1800+200=2000；2001: 1800+200=2000（流式精确派 ⇒ 刚好到配额）
+    assert merged["totalSamples"] == 2000 + 2000
+    assert merged["shards"] == n_first + n_topup
+    assert len(merged["perGame"]) == n_first + n_topup
     assert merged["elapsedSec"] == pytest.approx(1.0)
 
 
@@ -488,10 +495,11 @@ def test_topup_records_waste_and_skips_met_stages(tmp_path: Path) -> None:
         width=5,
     )
     assert extra is not None
-    # 2000：9 局 × 260 = 2340 > 2000（过采 340，已达标 ⇒ 不再进 eligible）；2001 还需补，
-    # 满铺给 5 局（width）⇒ collected 2300（比缺口多很多，浪费 640 是**预期的**）。
-    assert extra["volume"]["wasted_samples"] == 640
-    assert extra["volume"]["collected_by_stage"] == {2000: 2340, 2001: 2300}
+    # 2000：9 局 × 260 = 2340 > 2000（过采 340，已达标 ⇒ 不再进 eligible）。
+    # 2001：实测 est 100/局、缺口 200 ⇒ 流式派 2 局 = 200 ⇒ 恰好到配额，**补差不产生浪费**。
+    # ⇒ 浪费只剩首波那次过采（340），旧「满铺 width=5」版本会额外多烧 300（640）。
+    assert extra["volume"]["wasted_samples"] == 340
+    assert extra["volume"]["collected_by_stage"] == {2000: 2340, 2001: 2000}
     assert extra["volume"]["shortfall_by_stage"] == {}
 
 

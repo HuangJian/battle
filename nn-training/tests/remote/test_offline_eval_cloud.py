@@ -296,8 +296,11 @@ def test_run_cloud_eval_watchdog_caps_and_retries_in_place(
         log=log,
     )
     assert out["settled"] == 1 and out["failed"] == 0, "重跑成功 ⇒ 这局算落账，不是失败"
-    assert timeouts == [game_watch.DEFAULT_GAME_TIMEOUT_SEC, 20.0], timeouts
-    assert any("单局重试 2/3" in m and "本次上限 20s" in m for m in logs), logs
+    # 首次 = 兜底硬顶；重试 = ×RETRY_TIMEOUT_FACTOR（2026-10-26 硬顶 5→30 ⇒ 重试 20→120s。
+    # 两个数都从常量拼，不再写死 —— 上次口径变更时这个 `20.0` 就是唯一的假红来源）。
+    retry_cap = game_watch.DEFAULT_GAME_TIMEOUT_SEC * game_watch.RETRY_TIMEOUT_FACTOR
+    assert timeouts == [game_watch.DEFAULT_GAME_TIMEOUT_SEC, retry_cap], timeouts
+    assert any("单局重试 2/3" in m and f"本次上限 {retry_cap:g}s" in m for m in logs), logs
     assert any("单局耗时" in m for m in logs), logs
     rows = [json.loads(ln) for ln in (tmp_path / "eval_log.jsonl").read_text().splitlines()]
     assert next(r for r in rows if r["event"] == "eval")["wallSec"] is not None, "两腿同字段可比"
