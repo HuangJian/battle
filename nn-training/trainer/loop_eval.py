@@ -251,25 +251,11 @@ class TrainingEval:
                 f"[eval] it{m}: 归档缺席（backup 失败？）——回落活指针 {src_path} 派发"
                 "（wver 与离线复跑不可比，本轮 eval 仅供参考）"
             )
-        from worker.eval_yield import eval_local_early_epochs, local_gate_release_plan
-
-        self._eval_gate = threading.Event()
         # 尾巴的窗口起点（收拢时判“是否跑过自己的窗口”）；只作时间基准，不参与等待。
         self._eval_tail_start = time.time()
-        # 本机份额放行档（2026-09-17）：本轮本机不跑 PPO（远端 PPO / 整轮上云 / stream
-        # 已在轮内跑完）⇒ 立刻放行（核心空闲，预留尾段即时开跑）；本机 PPO ⇒ 末 epoch
-        # 放行（early=0 时维持 R6：_join_eval 才放行）。
-        plan = local_gate_release_plan(
-            # ★ 2026-09-21（§3）：PPO 恒在节点上跑（本机不跑 PPO）⇒ 恒为 immediate 档。
-            # 不再从 `args.ppo` 推导（旗标已删，旧写法会恒判本机 PPO 而错拿 on_join）。
-            ppo_remote=True,
-            node_rollout=bool(getattr(self, "_node_rollout", False)),
-            stream_round=getattr(self, "_stream_meta", None) is not None,
-            early_epochs=eval_local_early_epochs(self._eval_policy_cfg()),
-        )
-        if plan == "immediate":
-            self._eval_gate.set()
-            log("[eval] 本机份额提前放行（本轮 PPO 不在本机跑）——reserved 尾段立即开跑")
+        # in-loop eval 的本机只做兜底（2026-10-26）：不建 local_gate、不预孵化、不留队尾。
+        # `EvalDispatcher` 只在 `nodes_ok` 为空时才启动本机线程；健康集群纯远端。
+        self._eval_gate = None
         self._eval_thread = dispatch_eval_bg(
             self.bun,
             src_path,
@@ -279,7 +265,8 @@ class TrainingEval:
             f"{RUN_ID}.{it}",
             m,
             (self._report or {}).get("winRate"),
-            local_gate=self._eval_gate,
+            local_gate=None,
+            local_fallback_only=True,
         )
         log(
             f"[eval] it{m} dispatched from "
@@ -373,11 +360,9 @@ class TrainingEval:
             def _drain_rounds() -> None:
                 for m in cand:
                     try:
-                        self._eval_gate = threading.Event()
-                        # 收官 drain 没有并发训练：立刻开闸，否则 local_worker 会等 gate 到
-                        # deadline（2026-09-15 x3-power it30：远端全 mismatch + gate 未开 →
-                        # 600s 零局）。每轮新 gate：各自派发、各自放行本地份额。
-                        self._eval_gate.set()
+                        # 收官 drain 同样走兜底模式：没有本机 gate；节点全不可用时
+                        # EvalDispatcher 才启动本机线程。
+                        self._eval_gate = None
                         self._eval_thread = dispatch_eval_bg(
                             self.bun,
                             arch_m[m],
@@ -387,7 +372,8 @@ class TrainingEval:
                             f"{RUN_ID}.{m}",
                             m,
                             None,
-                            local_gate=self._eval_gate,
+                            local_gate=None,
+                            local_fallback_only=True,
                         )
                         budget = min(
                             float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0,

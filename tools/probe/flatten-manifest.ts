@@ -44,7 +44,6 @@
  * CI re-runs this command and byte-compares the result.
  */
 
-import { createHash } from 'node:crypto'
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { World } from '../../src/game/World'
@@ -103,7 +102,7 @@ export function stableStringify(value: unknown, indent = 2): string {
 
 /** sha256 of the level file with CRLF normalised (checkout-stable). */
 export function courseShaOf(text: string): string {
-  return createHash('sha256').update(text.replace(/\r\n/g, '\n'), 'utf8').digest('hex')
+  return new Bun.CryptoHasher('sha256').update(text.replace(/\r\n/g, '\n'), 'utf8').digest('hex')
 }
 
 export interface FlattenResult {

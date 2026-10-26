@@ -78,8 +78,6 @@ READERS = {
     "trainer/loop_eval.py": (
         "eval_join_soft_sec",
         "eval_tail_overran",
-        "eval_local_early_epochs",
-        "local_gate_release_plan",
     ),
     "trainer/batch_runner.py": ("EVAL_LOCAL_SLOTS_DEFAULT",),
 }
@@ -227,7 +225,7 @@ def test_eval_dispatch_inline_formulas_are_gone() -> None:
     ):
         assert old not in src, f"判决点没提干净：{old.strip()[:48]!r}"
     for new in (
-        "reserved = reserve_local_slots(",
+        "reserved = reserve_local_slots(",  # 份额分支仍调用；兜底模式靠 gate_wired=False 归零
         "local_release_due(time.time(), deadline),",
         "grace_end = time.time() + inflight_grace_cap(task_timeout)",
     ):

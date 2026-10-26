@@ -24,7 +24,6 @@
  *     --stages 2000-2003 --seed0 810000 --seeds 10 --out tmp/spatial-probe/hu150
  */
 import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'fs'
-import { createHash } from 'crypto'
 import { join } from 'path'
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -124,7 +123,7 @@ function main(): void {
   const playerLevel = level.player?.level ?? 0
 
   const weightsText = readFileSync(weightsPath, 'utf8')
-  const weightsSha = createHash('sha256').update(weightsText).digest('hex').slice(0, 16)
+  const weightsSha = new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 16)
   const model: ModelLike = buildModelFromText(weightsText)
   const pooledView = (model as unknown as { pooled?: Float32Array }).pooled
   if (!pooledView) throw new Error('dump: 模型没有 pooled 缓冲（架构不符，需 StudentModel）')

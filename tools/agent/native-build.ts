@@ -34,7 +34,6 @@
  *   native-build.json            指纹
  */
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -137,7 +136,7 @@ export interface NativeManifest {
 }
 
 export function sha256File(p: string): string {
-  return createHash('sha256').update(fs.readFileSync(p)).digest('hex')
+  return new Bun.CryptoHasher('sha256').update(fs.readFileSync(p)).digest('hex')
 }
 
 export function nativeOutDir(repoRoot: string, outDir?: string): string {

@@ -2755,10 +2755,9 @@ a.tc-btn {
 /* ══════════════════════════════════════════════════════════════════════════
    应用外壳：侧栏 + 顶栏 + 主内容（docs/dashboard-redesign.md §3.1 / §4.3）
    ─────────────────────────────────────────────────────────────────────────
-   三档响应式（§7 O3）：
-     ≥1280px        侧栏常驻 216px + 12 栏栅格（8/4 分栏）
-     1024–1279px    侧栏收为 56px 图标条；hover/聚焦时浮层展开（**不推出内容**，
-                    故用 position: fixed 而非改宽度——栅格列宽恒为 56px，零重排）
+   两档布局：
+     ≥1024px        侧栏常驻 216px；可**手动**折叠为 56px 图标条（品牌行的折叠键，
+                    唯一入口；不再按视口宽度自动收起、也不靠 hover 自动展开）
      <1024px        侧栏变顶部横向条；主内容单列
    ══════════════════════════════════════════════════════════════════════════ */
 
@@ -2804,10 +2803,37 @@ a.tc-btn {
   background: var(--err-fg);
 }
 .tc-side__name {
+  flex: 1 1 auto;
   font-size: var(--fs-md);
   font-weight: 700;
   letter-spacing: 0.2px;
   white-space: nowrap;
+}
+/* 折叠键：侧栏折叠/展开的**唯一**入口（不自动——2026-10-26 用户指令）。 */
+.tc-side__toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+}
+.tc-side__toggle:hover {
+  color: var(--info-fg);
+  border-color: var(--info-fg);
+}
+.tc-side__toggle:focus-visible {
+  outline: 2px solid var(--info-fg);
+  outline-offset: 1px;
 }
 /* 只读锁（常驻、不可关闭）：局域网只读的**可见面**放在这里而不是横幅 */
 .tc-lock {
@@ -3101,58 +3127,38 @@ a.tc-btn {
 }
 
 @media (max-width: 1279px) {
-  /* 图标条：栅格列宽恒为 56px（零重排），展开靠 fixed 浮层 */
-  .tc-shell {
-    grid-template-columns: var(--sidebar-w-rail) minmax(0, 1fr);
-  }
-  .tc-side {
-    width: var(--sidebar-w-rail);
-    padding: var(--sp-3) 6px;
-  }
-  .tc-side:hover,
-  .tc-side:focus-within {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: var(--sidebar-w);
-    height: 100vh;
-    padding: var(--sp-3) var(--sp-2);
-    z-index: 80;
-    box-shadow: var(--sh-2);
-    overflow-y: auto;
-  }
-  .tc-side__name,
-  .tc-nav__label,
-  .tc-side__glabel,
-  .tc-side__sec {
-    display: none;
-  }
-  .tc-side:hover .tc-side__name,
-  .tc-side:hover .tc-nav__label,
-  .tc-side:hover .tc-side__glabel,
-  .tc-side:hover .tc-side__sec,
-  .tc-side:focus-within .tc-side__name,
-  .tc-side:focus-within .tc-nav__label,
-  .tc-side:focus-within .tc-side__glabel,
-  .tc-side:focus-within .tc-side__sec {
-    display: flex;
-  }
-  .tc-side:hover .tc-side__glabel,
-  .tc-side:focus-within .tc-side__glabel {
-    display: block;
-  }
-  .tc-nav {
-    justify-content: center;
-  }
-  .tc-side:hover .tc-nav,
-  .tc-side:focus-within .tc-nav {
-    justify-content: flex-start;
-  }
   /* 中档：8/4 分栏退为堆叠 */
   .tc-col-8,
   .tc-col-6,
   .tc-col-4 {
     grid-column: span 12;
+  }
+}
+
+/* ── 侧栏折叠态（`.tc-side--rail`，只由品牌行的折叠键切换） ────────────────
+   列宽跟着 aside 一起收：`:has` 只改外壳栅格，DOM 结构不因折叠分叉。
+   **没有** hover 展开、也没有按视口宽度自动收起——展开只走同一个键。 */
+@media (min-width: 1024px) {
+  .tc-shell:has(> .tc-side--rail) {
+    grid-template-columns: var(--sidebar-w-rail) minmax(0, 1fr);
+  }
+  .tc-side--rail {
+    padding: var(--sp-3) 6px;
+  }
+  .tc-side--rail .tc-side__brand {
+    justify-content: center;
+    gap: var(--sp-1);
+    padding: 0 0 var(--sp-2);
+  }
+  .tc-side--rail .tc-side__name,
+  .tc-side--rail .tc-lock,
+  .tc-side--rail .tc-side__glabel,
+  .tc-side--rail .tc-nav__label,
+  .tc-side--rail .tc-side__sec {
+    display: none;
+  }
+  .tc-side--rail .tc-nav {
+    justify-content: center;
   }
 }
 
@@ -3173,6 +3179,10 @@ a.tc-btn {
     border-right: none;
     border-bottom: 1px solid var(--border);
     overflow: visible;
+  }
+  /* 顶部横向条没有「折叠」这回事（也不是可折叠的纵条）——折叠键不上屏。 */
+  .tc-side__toggle {
+    display: none;
   }
   .tc-side__brand {
     border-bottom: none;
@@ -3207,14 +3217,6 @@ a.tc-btn {
   }
   .tc-side__sec .tc-sel {
     width: auto;
-  }
-  .tc-side:hover,
-  .tc-side:focus-within {
-    position: static;
-    width: auto;
-    height: auto;
-    padding: var(--sp-2) var(--sp-3);
-    box-shadow: none;
   }
   .tc-top {
     padding: var(--sp-2) var(--sp-3);

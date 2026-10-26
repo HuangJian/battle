@@ -275,6 +275,7 @@ class _LaneHarness:
         post_delay: float = 0.0,
         gate_open: bool = True,
         window_sec: float = 60.0,
+        fallback_only: bool = False,
     ) -> None:
         import threading
         import time
@@ -314,6 +315,7 @@ class _LaneHarness:
         }
         self.gate = threading.Event()
         self.window_sec = window_sec
+        self.fallback_only = fallback_only
         #: `play()` 开跑时刻 —— 用例可以用它表达「窗口已过期」这类**事件**，而不是猜时长。
         self.play_t0 = 0.0
         if gate_open:
@@ -397,8 +399,15 @@ class _LaneHarness:
         t0 = self.time.monotonic()
         self.play_t0 = t0
         ed.dispatch_eval_round(
-            "bun", str(self.weights), self.traj, self.args, self.cfg, "rid.lane", 7,
+            "bun",
+            str(self.weights),
+            self.traj,
+            self.args,
+            self.cfg,
+            "rid.lane",
+            7,
             local_gate=self.gate,
+            local_fallback_only=self.fallback_only,
         )
         elapsed = self.time.monotonic() - t0
         ledger = self.work / "eval_log.jsonl"
@@ -483,6 +492,85 @@ def test_all_weight_posts_failed_falls_back_to_local(tmp_path, monkeypatch) -> N
     joined = "\n".join(h.logs)
     assert "all weight POSTs failed — local-only eval this round" in joined
     assert "— skipped this round" not in joined
+
+
+def test_fallback_only_healthy_node_never_starts_local(tmp_path, monkeypatch) -> None:
+    """兜底模式 + 健康节点 ⇒ 本机零线程、零局、零预留（in-loop 的正题）。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=nodes,
+        local_slots=2,
+        fallback_only=True,
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2 and {r["node"] for r in played} == {"a97"}, played
+    assert h.local_games == [], f"健康集群不得跑本机局（实际 {h.local_games}）"
+    summ = [r for r in rows if r.get("event") == "eval_summary"][-1]
+    assert (summ.get("nodes") or {}).get("local") is None, summ
+
+
+def test_fallback_only_no_nodes_runs_local(tmp_path, monkeypatch) -> None:
+    """兜底模式 + 无节点 ⇒ 本机启动并落 local 行（集群全挂时的唯一执行面）。"""
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=2, nodes=[], local_slots=2, fallback_only=True
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2 and {r["node"] for r in played} == {"local"}, played
+    assert len(h.local_games) == 2
+
+
+def test_fallback_only_all_weight_posts_failed_runs_local(tmp_path, monkeypatch) -> None:
+    """兜底模式 + 节点 ping 通过但权重全发不出去 ⇒ 等同集群不可用，本机兜底。"""
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=nodes,
+        local_slots=2,
+        post_ok=False,
+        fallback_only=True,
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2 and {r["node"] for r in played} == {"local"}, played
+
+
+def test_fallback_only_partial_post_success_is_remote_only(tmp_path, monkeypatch) -> None:
+    """两个节点只有一个权重下发成功 ⇒ `nodes_ok` 非空，仍纯远端、不启动本机。"""
+    nodes = [
+        {"id": "a97", "url": "http://a97.local", "concurrency": 1},
+        {"id": "a96", "url": "http://a96.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=2, nodes=nodes, local_slots=1, fallback_only=True
+    )
+    h.mp.setattr(
+        common.distribution,
+        "post_weights_parallel",
+        lambda alive, *a, **k: [
+            {"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in alive[:1]
+        ],
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2 and {r["node"] for r in played} == {"a97"}, played
+    assert h.local_games == [], "只要还有一个可用节点，本机就不参与"
+
+
+def test_fallback_only_slots_zero_skips_without_local(tmp_path, monkeypatch) -> None:
+    """兜底模式 + 无节点 + evalLocalSlots=0 ⇒ 不跑本机，按既有 skip 路径收工。"""
+    h = _LaneHarness(
+        tmp_path, monkeypatch, games=2, nodes=[], local_slots=0, fallback_only=True
+    )
+    rows, _ = h.play(_fast_fetch(h))
+    assert [r for r in rows if r.get("event") == "eval"] == []
+    assert h.local_games == []
 
 
 def test_weight_post_failure_without_local_still_skips(tmp_path, monkeypatch) -> None:

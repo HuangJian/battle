@@ -10,6 +10,7 @@
     "build": "oxlint && bun check --no-script && vite build",
     "preview": "vite build && vite preview",
     "test": "bun tools/test-silent.ts",
+    "test:changed": "bun tools/test-silent.ts --changed",
     "typecheck": "bun check --no-script",
     "bench": "bun tools/sim/bench-sim.ts",
     "perf:sim": "bun tools/perf/sim-bench.ts",

@@ -7,15 +7,25 @@
  *  消失了。
  *
  *  分工（与 Sidebar.tsx 的边界）：
- *    - 本组件只说**去哪**（导航 + 当前查看课程带来的 `?course=` 透传 + 只读标识）。
+ *    - 本组件只说**去哪**（导航 + 当前查看课程带来的 `?course=` 透传 + 只读标识），
+ *      并自持**折叠态**（品牌行的折叠键，唯一入口；不随视口/hover 自动切换）。
  *    - 控制台专有的「当前课程选择器 / 触发门禁 / 刷新间隔」留在 `Sidebar.tsx`，由 `footer` 插槽注入。
  *    独立页没有这些全局设置的所有权（它们各自的轮询节奏是页面自己的），所以不传 footer。
  *
  *  零依赖图标：`NavItem.icon` 是单字符几何符号（不引图标库，§9 非目标）。
  */
 
+import { useEffect, useState } from 'preact/hooks'
 import type { ComponentChildren, JSX } from 'preact'
-import { isNavActive, NAV_GROUPS, NAV_ITEMS, withCourse, type PageKey } from '../../view'
+import {
+  isNavActive,
+  NAV_GROUPS,
+  NAV_ITEMS,
+  TC_SIDE_COLLAPSED,
+  withCourse,
+  type PageKey,
+} from '../../view'
+import { readLocal, writeLocal } from '../lib/storage'
 
 export interface NavSidebarProps {
   /** 导航激活判定的路径 = 当前页面的规范路径（`canonicalPath(page)`）。
@@ -44,8 +54,22 @@ export function NavSidebar({
   footer,
   onNavigate,
 }: NavSidebarProps) {
+  // 折叠态（手动）：唯一入口 = 品牌行的折叠键——**不**随视口宽度或 hover 自动切换
+  // （2026-10-26 用户指令）。SSR 首帧恒展开（与 hydrate 一致），偏好 mount 后恢复。
+  const [collapsed, setCollapsed] = useState(false)
+  useEffect(() => {
+    if (readLocal(TC_SIDE_COLLAPSED) === '1') setCollapsed(true)
+  }, [])
+  const onToggleCollapse = (): void => {
+    setCollapsed((c) => {
+      const next = !c
+      writeLocal(TC_SIDE_COLLAPSED, next ? '1' : '0')
+      return next
+    })
+  }
+
   return (
-    <aside className="tc-side" aria-label="控制台导航">
+    <aside className={`tc-side${collapsed ? ' tc-side--rail' : ''}`} aria-label="控制台导航">
       <div className="tc-side__brand">
         <span className="tc-side__logo" aria-hidden="true" />
         <span className="tc-side__name">炼丹炉</span>
@@ -57,6 +81,16 @@ export function NavSidebar({
             🔒 只读
           </span>
         ) : null}
+        <button
+          type="button"
+          className="tc-side__toggle"
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? '展开侧栏' : '折叠侧栏'}
+          title={collapsed ? '展开侧栏' : '折叠侧栏'}
+          onClick={onToggleCollapse}
+        >
+          {collapsed ? '»' : '«'}
+        </button>
       </div>
 
       <nav className="tc-side__nav" aria-label="主导航">

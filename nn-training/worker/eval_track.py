@@ -53,6 +53,27 @@ EVAL_DAILY_SEEDS = 100
 #: 账上只留前 20 条（按 seed 升序）；完整缺口看 `dropped` 计数与收工「三本账」行。
 MISSING_MAX = 20
 
+
+def course_logger(course: str, base_log):
+    """把模块级 `log` 包成**本轮专属**的显式课程标签（plan/eval-gap-honesty §6-1）。
+
+    为什么不能用 `_PREFIX`：eval 跑在后台线程里，活过 `prefix_scope` 的作用域 ⇒ 它每行
+    读到的是别的课程线程最后置的前缀。`base_log` 由调用方传入（保持可 monkeypatch）。
+    2026-10-26 从 `trainer/eval_dispatch.py` 迁来（LOC 预算）。
+    """
+
+    def _log(msg: str) -> None:
+        if course:
+            try:
+                base_log(msg, course=course)
+                return
+            except TypeError:
+                pass
+        base_log(msg)
+
+    return _log
+
+
 def a_eval_seed_list(it: int, n_seeds: int, *, baseline: bool = False) -> tuple[int, ...]:
     """A 层语料种子（in-loop / evalA / 云侧共用的唯一入口，防几侧口径漂移）。
 

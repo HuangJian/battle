@@ -175,8 +175,9 @@ def dispatch_rollout_phase(
       - stream 路径：eval_thread 经 report['_eval_thread'] 回传（on_collect_done
         回调返回值），collect_child/spawned_early 由 _on_epoch_done 回调写入、
         返回时对外可见（原 nonlocal 语义）。
-      - 串行/纯本地路径：eval_thread 直接回传；eval_gate 由调用方随后 set 放行
-        本地 eval 参与（R6）；collect_child/spawned_early 恒 None/False。
+      - in-loop eval 的本机只做兜底（2026-10-26）：不再创建/回传 eval_gate；
+        `local_fallback_only=True` 只在节点全部不可用时启动本机。
+      - 串行/纯本地路径：eval_thread 直接回传；collect_child/spawned_early 恒 None/False。
     """
     stream_meta: dict | None = None
     eval_thread: threading.Thread | None = None
@@ -187,8 +188,7 @@ def dispatch_rollout_phase(
         iter_id = f"{RUN_ID}.{it}"
         enabled = [n for n in dist_cfg["nodes"] if n.get("enabled", True)]
         log(f"[dist] queue mode iterId={iter_id} nodes={[n.get('id') for n in enabled]}")
-        # 本地 eval 参与的门控事件：派发即创建，ppo_backend/采集收尾时 set 放行
-        eval_gate = threading.Event()
+        # 本地 eval 不再有「份额门」：in-loop 只在集群全部不可用时兜底（2026-10-26）。
         if int(getattr(args, "stream", 0) or 0):
             # 吞吐 T3：非 eval 轮不派发（返回 None → 无 eval_thread → 调用方
             # join 跳过，集群尾段留给下一轮采集/双缓冲）。
@@ -206,7 +206,8 @@ def dispatch_rollout_phase(
                         dist_cfg,
                         iter_id,
                         it,
-                        local_gate=eval_gate,
+                        local_gate=None,
+                        local_fallback_only=True,
                     )
                 # intent/goal：m1-eval 固定语料整批路线（trainer/eval_m1.py）。
                 return dispatch_eval_bg_m1(bun, args.out, args, it, jsonl_path, args.baseline)

@@ -14,7 +14,6 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
-import { createHash } from 'crypto'
 import { buildModelFromText } from '../../src/nn/infer'
 import {
   featuresEngine,
@@ -106,7 +105,7 @@ function main(): void {
   const outPath = arg('out', 'tmp/spatial-s0a/golden-readings.json')!
   const trials = parseInt(arg('trials', '4')!, 10)
   const weightsText = readFileSync(weightsPath, 'utf8')
-  const sha16 = createHash('sha256').update(weightsText).digest('hex').slice(0, 16)
+  const sha16 = new Bun.CryptoHasher('sha256').update(weightsText).digest('hex').slice(0, 16)
 
   const sp = BOARD * BOARD
   const rng = makeRng(20261005)

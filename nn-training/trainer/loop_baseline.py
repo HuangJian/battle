@@ -38,7 +38,6 @@ class TrainingBaseline:
     args: Any
     bun: Any
     _traj_dir: Any
-    _eval_gate: Any
     _eval_every: Any
     _baseline_eval_thread: Any
     _baseline_landed_wver: Any
@@ -81,9 +80,10 @@ class TrainingBaseline:
         `_baseline_landed_wver`）；summary 带 dropped 也算落账（缺口在控制台诚实
         显示为「缺N」，不为填缺口无限重跑失败局）。
 
-        本地参与：复用当轮 `self._eval_gate`（与 A-eval 同一把门，PPO 收官
-        `_join_eval` 置位）——基线本地局与 A-eval 一样让位 PPO，且快照文件名按流
-        分流（eval_dispatch 侧），并发重试轮不互相覆写。
+        本地参与（2026-10-26 改判）：走 `local_fallback_only=True`——不建/不复用
+        `local_gate`，只有本轮没有任何可用 eval 节点（`nodes_ok` 为空）时由派发器
+        启动本机兜底；健康集群纯远端。快照文件名仍按流分流（eval_dispatch 侧），
+        并发重试轮不互相覆写。
 
         缺口重派（2026-10-08，plan/eval-baseline-undispatched §2 P1-1）：落账判据多一条
         阈值例外——`baseline_needs_retry` 看**最后一条**同 wver 的 it0 summary，
@@ -91,12 +91,6 @@ class TrainingBaseline:
         由**账本行数**导出 ⇒ 跨重启成立）。缺口小（如单局节点失败 1/400 = 0.25%）照旧
         落账，不因噪声重派。人工补基线那道门（`trainer/eval_a_once.py` 的幂等早退）
         用同一个 `baseline_needs_retry`（判据单点）。
-
-        本机门（2026-10-08，§2 P0-4）：`self._eval_gate is None` 时就地建一把**已置位**的
-        门 —— it0 那一轮的 A-eval 还没派过，`_dispatch_delayed_eval` 的建门点（`m` 非
-        None 之后）走不到 ⇒ 门是 None、本机槽位结构性缺席，远端线程一退光，`pending`
-        里剩下的局就无声蒸发（收工循环只看 `live_workers`）。PPO 恒在节点上跑（单一
-        PPO 路径）⇒ 本机核心空闲，放行没有代价。既有门（哪怕未置位）一字不动。
 
         幂等：在飞线程即跳过；跨重启/重试由 `iter == 0` 的已评估键去重，只补缺口。
         失败绝不抛出——基线是观测设施，不得拖垮训练主线。
@@ -131,18 +125,6 @@ class TrainingBaseline:
                     f"[eval] it0 基线 summary 在但缺口 > {BASELINE_DROP_FRAC_MAX:.0%} "
                     f"（重派预算 {BASELINE_RETRY_MAX} 轮，计数按 wver 记在账本里）——重派补缺口"
                 )
-            # P0-4（plan/eval-baseline-undispatched §2）：门缺席 = 本机槽位结构性缺席。
-            # `threading` 就地 import：本模块的**顶层 import 面是闭集**（S4 拆分守卫
-            # `tests/trainer/test_loop_core_tail_split.py::test_top_level_imports_closed_no_reverse_edges`
-            # 钉死），与它那两处 DI seam 同款走函数体延迟 import。
-            import threading
-
-            gate = self._eval_gate
-            if gate is None:
-                gate = threading.Event()
-                gate.set()
-                self._eval_gate = gate
-                log("[eval] it0 基线：本机门缺席（本轮还没派过 A-eval）——自建并放行")
             from trainer.eval_dispatch import dispatch_eval_bg
             from worker.eval_local import BASELINE_EVAL_ITER
 
@@ -154,8 +136,9 @@ class TrainingBaseline:
                 dist_cfg or {},
                 iter_id=f"{RUN_ID}.{BASELINE_EVAL_ITER}",
                 it=BASELINE_EVAL_ITER,
-                local_gate=gate,
+                local_gate=None,
                 baseline=True,
+                local_fallback_only=True,
             )
             log(
                 f"[eval] it0 baseline dispatched（bc 权重：{bc}）——"

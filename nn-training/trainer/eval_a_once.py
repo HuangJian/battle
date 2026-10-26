@@ -310,6 +310,8 @@ def main() -> int:
         rollout_winrate=None,
         local_gate=gate,
         baseline=args.baseline,
+        # 手动 evalA 保留份额语义（本机与节点同池）；in-loop 的兜底模式不在这里开启。
+        local_fallback_only=False,
     )
     summary = _read_summary(eval_jsonl, key16, args.iter)
     if summary is None:

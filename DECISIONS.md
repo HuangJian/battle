@@ -9758,3 +9758,60 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`nn-python-gate` **5155 passed / 10 skipped（128s）**；根 `bun run check` **2634 pass / 0 fail**。
 - **部署**：hub 需重启才有新端点；云机 serve 进程需重启才会发通知。纯增量——旧 worker 不发通知
   也能被轮询取回，旧 hub 收到通知只会 404（worker 记一行后回落轮询）。
+## §2026-10-26-goalnn-bun-native-sweep（2026-10-26，Bun 原生 API 落 `tools/` + `tests/`，并给开发回路加快道；实测：API 换用是口径统一，不是提速）
+
+- **决定**：`tools/` + `tests/` 的 sha256 一律 `new Bun.CryptoHasher('sha256')`（18 文件 27 处，含
+  `tools/probe-det-baseline.sh` 的 Windows 兜底内联）；新代码的树扫描用 `Bun.Glob`、文件读用
+  `Bun.file`/`Bun.write`、子进程用 `Bun.spawn`。dashboard 2026-10-26 早先已按同一口径迁移。
+- **实测（Bun 1.4.4，16 vCPU Linux）—— 这些迁移不带来速度**：node:crypto 1.40ms vs
+  `Bun.CryptoHasher` 1.36ms（159 文件 / 2.4MB 一遍 sha256）；readdir 递归 0.42ms vs `Bun.Glob`
+  0.35ms（src 树 199 个 `.ts`）；`spawnSync` 5.1ms vs `Bun.spawn` 5.0ms（`bun -e 0`）。
+  所以任何文档/汇报都不得把它们写成「提速 N 倍」—— 采纳理由是口径统一与少一层 node shim。
+- **正确性对拍**：CryptoHasher 与 node:crypto 在 ascii / CJK / 空串 / latin1 / Buffer 多段 update /
+  base64 / `copy()` / raw digest 全等；codeHash 另用**独立 node:crypto 重实现**按同一清单重算
+  （159 文件逐字节同一个串）。注意 `tools/agent/codehash-files.ts` 自己在清单内 ⇒ 改它必然换
+  codeHash（集群判 stale 是预期升级波）。
+- **保留手写递归**：`tools/agent/codehash-files.ts` 的 walker 与 `nn-training/common/distribution.py`
+  是逐字节契约，skip 规则改 glob 会静默改文件集 ⇒ 不动。其余 `readdirSync` 命中经审计是**单层
+  目录列举**（不是 walker），换 `Bun.Glob` 零收益。
+- **`src/` 不适用**：它是浏览器代码（Vite 打包，`lib` 含 DOM），Bun API 只活在 `tools/` + `tests/`；
+  唯一碰 `node:` 的 src 文件是 Node 侧 native adapter（`src/nn/conv/conv_native_adapter.ts`）。
+- **开发回路快道**：`bun run test:changed`（= `tools/test-silent.ts --changed`）把文件选择交给
+  `bun test --changed` 的**真实 import 图**。实测：21 文件 `tools/**` 改动 → 37/247 文件、10.7s
+  （全量 15–17s）；改 `src/game/World.ts` 仍选 164/247。**门禁与 pre-commit 保持全量**：测试运行时
+  读的夹具/语料/权重不在 import 图里，`--changed` 天然欠采样。
+- **被否备选（都实测过）**：① `--timings` 最慢先跑（15.4/15.8/18.2s vs 基线 15.0/16.8/17.4s =
+  噪声内）；② `--no-isolate`（18.9s，且破坏 §5.4 要求的文件级隔离）；③ `--parallel=12`
+  （15.9s ≈ 物理核 8）；④ 把 `--changed` 塞进 `bun run check`（欠采样，见上）。
+- **为什么没有更大的提速**：套件是**算力墙**不是调度问题 —— 247 文件、单跑合计 115.5s、8 worker
+  地板 14.4s，实测 15–17s，top-10 文件占 52.9%（`sim/eval-game-parity` 12.7s）。同一天的
+  `bun --cpu-prof-md` 剖面显示 sim/AI 自身也很平（最大 self 3.7%），没有单点。要再快只能改仿真
+  计算本身（新纪元三件套），不属于「换 Bun API」的范围。
+
+## §2026-10-26-goalnn-eval-local-fallback-only（2026-10-26，in-loop eval 的本机只做兜底）
+
+- **背景**：用户口径「训练课程时 in-loop eval 总是启用 local，不符合设计；应该 rollout/eval
+  集群全部不可用时才启用 local 兜底」。根因不是单行 bug：`_dispatch_delayed_eval` 恒建并置位
+  `local_gate`（单一 PPO 路径下 `ppo_remote=True` ⇒ `local_gate_release_plan` 恒 `immediate`），
+  `EvalDispatcher` 又把「有 gate + slots>0」当成固定本机份额（快照 / 尾段预留 / 预先孵化
+  `eval-local`），于是健康集群上每轮都有 4 条本机线程与 `node=local` 行。
+- **决定**：① in-loop eval（per-tick A-eval / it0 基线 / 收官 drain / stream 旧路径）走
+  `local_fallback_only=True`：只有 `len(nodes_ok) == 0`（无可用 eval 节点或全部权重 POST 失败）
+  才启动本机兜底；健康集群本机 0 线程 / 0 局，不再预留尾巴；② `policy.evalLocalSlots` 在
+  **in-loop** 读作「兜底线程上限」（缺省 4；0 = 不兜底），手动 / B/C 仍按份额读取；③
+  `evalLocalEarlyEpochs` / `local_gate_release_plan` 不再被 in-loop 读取（份额模式 / 手动 evalA
+  保留）；④ 手动 evalA、B/C evalboard、离线 eval / m1 eval 的份额语义**不变**；⑤ 不在轮中
+  接管：派发后节点全掉，由下一轮幂等派发与收官 drain 补缺口。**本条取代**
+  §2026-09-17-goalnn-eval-wallclock 中「in-loop 本机份额按 PPO 是否在本机分档」的适用范围。
+- **备选与否决**：`policy.evalLocalSlots=0` 一刀切 —— 否（连兜底也没有，集群全挂时 0 局）；
+  只删 `local_gate` 不删预留/预孵化 —— 否（本机仍会被预留尾巴并先抓局）；轮中接管 —— 否
+  （半途切换执行面引入竞态，下一轮/drain 已能补）；把手动 evalA 一起改 —— 否（不在用户口径内，
+  且手动评估的份额语义是独立产品决定）。
+- **落地**：`trainer/eval_dispatch.py`（`local_fallback_only` 模式 + 快照/预留/孵化分派）、
+  `trainer/loop_eval.py` / `trainer/loop_baseline.py` / `trainer/rollout_phase.py`（四个派发点）、
+  `worker/eval_yield.py`（注释/判据归属）；为守 `eval_dispatch.py` 的 1000 行 LOC 预算，
+  `find_archive_weights` / `select_delayed_eval_it` / `course_logger` 分别迁到
+  `worker/archive.py` / `worker/eval_yield.py` / `worker/eval_track.py` 并在原模块 re-export
+  （行为不变；旧 import 路径保持）；回归：`tests/trainer/test_eval_dispatch_resilience.py`、
+  `tests/trainer/test_eval_local_fallback_guard.py`、`tests/worker/test_eval_timing.py`、
+  `tests/worker/test_baseline_eval.py`、`e2e/test_run_rl.py`。

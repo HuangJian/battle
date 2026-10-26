@@ -27,7 +27,6 @@
  * ≥ NODE_FAIL_LIMIT 次 → 永久退回 bun（`--no-node` 可强制）。
  */
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { buildNative, nativeStaleReason, resolveNativeLib } from './native-build'
@@ -296,7 +295,7 @@ export interface EngineChoice {
 export type BenchArm = 'native' | 'wasm' | 'ts' | 'unknown'
 
 function sha256File(p: string): string {
-  return createHash('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(fs.readFileSync(p)).digest('hex').slice(0, 16)
 }
 
 /** 缩短展示用指纹（native 库）。 */

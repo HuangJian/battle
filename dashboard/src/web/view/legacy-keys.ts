@@ -16,6 +16,8 @@ export const TC_ALERT_ACKS = `${TC_KEY_PREFIX}cloudHalt.ack`
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 /** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
 export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
+/** 侧栏折叠态（'1' = 图标条；**只由品牌行的折叠键写**，不随视口/hover 自动切换）。 */
+export const TC_SIDE_COLLAPSED = `${TC_KEY_PREFIX}side.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 /** hero 走势图数据源档位（'all' 全部叠加 / 'rollout' 只看采样 / 'eval' 只看干净评估）。 */
 export const TC_TREND_SOURCE = `${TC_KEY_PREFIX}trend.source`

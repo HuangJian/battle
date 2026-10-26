@@ -28,7 +28,6 @@
  * 退出码：0=全 PASS；1=有字节不一致或执行失败；2=用法/前置错误。
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
@@ -97,7 +96,7 @@ if (!Number.isFinite(PARALLEL) || PARALLEL < 1) die('--parallel ≥ 1')
 // ---------------- 依赖 ----------------
 const BUN = process.execPath // 本脚本由 bun 执行 → 打包与跑组都用它
 const shaOf = (p: string): string =>
-  createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)
+  new Bun.CryptoHasher('sha256').update(readFileSync(p)).digest('hex').slice(0, 16)
 
 function enginePairs(): Array<[string, string]> {
   const pairs: Array<[string, string]> = [['bun', BUN]]
@@ -278,7 +277,9 @@ function fingerprint(tag: string, outDir: string): void {
       const p = path.join(dir, f.name)
       if (f.isDirectory()) walk(p, `${rel}/${f.name}`)
       else
-        lines.push(`${rel}/${f.name} ${createHash('sha256').update(readFileSync(p)).digest('hex')}`)
+        lines.push(
+          `${rel}/${f.name} ${new Bun.CryptoHasher('sha256').update(readFileSync(p)).digest('hex')}`,
+        )
     }
   }
   for (const d of readdirSync(outDir, { withFileTypes: true }).filter((x) => x.isDirectory())) {

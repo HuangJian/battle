@@ -3,6 +3,11 @@
 
 族的两半：
 
+> **2026-10-26 适用范围**：本族的「份额 / 尾巴预留 / 放行档」只服务**份额模式**（手动
+> `evalA`、B/C evalboard、旧调用方）。in-loop eval（per-tick A-eval / it0 基线 / drain /
+> stream 旧路径）改走 `EvalDispatcher(local_fallback_only=True)`：只有 `nodes_ok` 为空时
+> 才用本机，健康集群不预留队尾、不读 `evalLocalEarlyEpochs` / `local_gate_release_plan`。
+
 * **本机份额与让位**：`EVAL_LOCAL_SLOTS_DEFAULT`（份额缺省）/ `EVAL_LOCAL_RELEASE_GRACE`
   （宽限期）/ `reserve_local_slots`（尾段预留量公式）/ `hold_for_local`（节点是否该把队尾
   留给本机）/ `local_release_due`（宽限强制放行公式）/ `release_local_gate_if_starved`
@@ -53,6 +58,19 @@ EVAL_JOIN_SOFT_SEC_DEFAULT = 0.0  # policy.evalJoinSoftSec 缺省值（0 = 不�
 EVAL_LOCAL_EARLY_EPOCHS_DEFAULT = 1  # policy.evalLocalEarlyEpochs 缺省值（0=严格 R6）
 
 
+def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
+    """延迟 eval 派发轮选择（P0 修复：in-loop eval 曾恒取 W(N-1) 却标 itN）。
+
+    第 dispatch_it 轮采集收官后，可评估的最新已完成权重是 W(dispatch_it-1)
+    （本轮 PPO 尚未跑）。返回应评估的权重轮 M，无则 None。
+    M 从 1 起：W(0)=init 权重由 it0 基线流覆盖，A-eval 不重复。
+    """
+    m = dispatch_it - 1
+    if m < 1:
+        return None
+    return m if is_eval_round(m) else None
+
+
 def eval_join_soft_sec(policy_cfg: dict | None) -> float:
     """PPO 收官后站等上限（秒）：应急旋钮 policy.evalJoinSoftSec，**缺省 0 = 不站等**。
 
@@ -81,7 +99,10 @@ def eval_tail_overran(t_start: float, window_sec: float, now: float) -> bool:
 
 
 def eval_local_early_epochs(policy_cfg: dict | None) -> int:
-    """本机 PPO 路径提前放行本机份额的 epoch 数（policy.evalLocalEarlyEpochs；0=不放行）。"""
+    """本机 PPO 路径提前放行本机份额的 epoch 数（policy.evalLocalEarlyEpochs；0=不放行）。
+
+    ⚠ 2026-10-26 起 **in-loop 不读**（兜底模式没有份额门）；只服务份额模式 / 手动 evalA。
+    """
     raw = (policy_cfg or {}).get("evalLocalEarlyEpochs", EVAL_LOCAL_EARLY_EPOCHS_DEFAULT)
     try:
         val = int(raw)

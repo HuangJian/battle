@@ -2545,6 +2545,31 @@ ruff + mypy 干净。
 另：stream 路径「标签超前一轮 + 同 iter 双点」的缺陷**未动**（`--ppo remote` 下不可达，本地
 stream 腿才可见），已在上一轮的流检查中记录，待单独处置。
 
+### §1.2 in-loop eval 的本机只做兜底（2026-10-26 改判）
+
+**用户口径**：训练课程时 in-loop eval 只有在 rollout/eval 集群**全部不可用**时才启用本机；
+健康集群上本机不参与。**本条取代 §1 中「本机份额按 PPO 是否在本机分档放行」的 in-loop 适用范围**：
+`local_gate_release_plan` / `evalLocalEarlyEpochs` 与尾段预留（`[local tail-reserved ×N]`）
+收窄为**份额模式 / 手动 evalA / B/C** 专用；in-loop 走 `local_fallback_only=True`。
+
+**根因（不是单行写错）**：`_dispatch_delayed_eval` 在单一 PPO 路径下恒建并置位 `local_gate`
+（`ppo_remote=True` ⇒ `local_gate_release_plan` 恒 `immediate`），`EvalDispatcher` 把
+「有 gate + slots>0」当作固定本机份额 ⇒ 每轮先建冻结快照、预留 `min(4,total)` 局、在节点门之前
+孵化 4 条 `eval-local`；节点 worker 的 `hold_for_local` 又把最后 4 局留给本机。
+
+**改判后的判据**：只认 `nodes_ok`（通过 eval 能力门 + 权重 POST 成功的节点）。
+`len(nodes_ok) > 0` ⇒ 本机 0 线程 / 0 局 / 不预留；`len(nodes_ok) == 0` ⇒ 才按
+`policy.evalLocalSlots`（缺省 4，0 = 连兜底也不跑）启动本机，读派发时冻结快照。
+**不在轮中接管**：派发后节点全掉，由下一轮幂等派发或收官 drain 补缺口。
+手动 `evalA` / B/C / 离线 eval 的份额语义不变。
+
+**落地**：`trainer/eval_dispatch.py` 新增 `local_fallback_only`；`trainer/loop_eval.py`（per-tick /
+drain）、`trainer/loop_baseline.py`（it0）、`trainer/rollout_phase.py`（stream 旧路径）四处接线。
+**回归**：`tests/trainer/test_eval_dispatch_resilience.py`（健康纯远端 / 无节点兜底 / POST 全败兜底 /
+slots=0 skip）、`tests/trainer/test_eval_local_fallback_guard.py`（四个派发点源码守卫）、
+`tests/worker/test_eval_timing.py`、`tests/worker/test_baseline_eval.py`、
+`e2e/test_run_rl.py::test_eval_fallback_only_healthy_remote`。
+
 ---
 
 
