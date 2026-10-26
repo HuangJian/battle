@@ -15,6 +15,8 @@
   POST /jobs/priority           job 边界优先级问询（软持有 / 掉队救援的判据）
   POST /jobs/{id}/claim         认领（mode=exclusive 设租约 / mode=backup 显式备份副本）
   POST /jobs/{id}/start|ready|abandon   开算打点（computing_at）/ 算完待传 / 合法放弃
+  POST /jobs/{id}/result-ready  push worker 的结果就绪通知（只叫醒 hub 的等待线程；
+                                丢了回落 `PUSH_POLL_SEC` 定时轮询）
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
@@ -620,6 +622,9 @@ class HubHandler(
                 self._post_start()
             elif path.startswith("/jobs/") and path.endswith("/ready"):
                 self._post_ready()
+            elif path.startswith("/jobs/") and path.endswith("/result-ready"):
+                # 2026-10-26：worker 的 PPO 一收口就敲一下，派发器的等待线程立刻取回。
+                self._post_result_ready()
             elif path.startswith("/jobs/") and path.endswith("/abandon"):
                 self._post_abandon()
             elif path.startswith("/jobs/") and path.endswith("/release"):
@@ -690,6 +695,19 @@ class HubHandler(
         """租约令牌头（H2）。两种写法都认——历史客户端的大小写不一致。"""
         return self.headers.get("X-Lease-Token", "") or self.headers.get("lease-token", "")
 
+    def _known_job_or_404(self) -> str | None:
+        """取 `job_id` + 要求 `manifest.json` 已知，否则 404。None = 已回过响应。
+
+        鉴权**不**在这里做：`POST /jobs/{id}/result-ready` 认的是 worker 的 push token
+        而不是 hub 管理 token（`hub/schedule.py::_push_auth_ok`），与 `_job_or_404` 的
+        `_auth_ok` 是两条路；但「jid 写错」与「job 不存在」同答 404 的形状只留这一份。
+        """
+        jid = self._job_id()
+        if jid is None or not (self.hub._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": "not found"}, 404)
+            return None
+        return jid
+
     def _job_or_404(self, *, known: bool = False) -> str | None:
         """鉴权 + 取 `job_id` + 404。返回 None = **已经回过响应**（调用方直接 `return`）。
 
@@ -698,8 +716,10 @@ class HubHandler(
         """
         if not self._auth_ok():
             return None
+        if known:
+            return self._known_job_or_404()
         jid = self._job_id()
-        if jid is None or (known and not (self.hub._job_dir(jid) / "manifest.json").exists()):
+        if jid is None:
             self._json({"error": "not found"}, 404)
             return None
         return jid

@@ -782,6 +782,14 @@ ADMIN_WORKER_PREFETCH_PATH = "/admin/worker-prefetch"
 #: 200 + `{"cancelled": true|false, "inflight": bool, "why": …}`（幂等可重放；
 #: 判据与全池版同源，见 `hub/store_ledger.cancel_job`）。
 ADMIN_CANCEL_JOB_PATH = "/admin/cancel-job"
+#: **推腿结果就绪通知**（worker → hub；2026-10-26）：push worker 的 PPO 一出结果就敲一下
+#: hub，让派发器的等待线程**立刻**来取（不必等 `PUSH_POLL_SEC = 10s` 的下一拍）。
+#:
+#: 它是**性能提示，不是协议事实**：丢了 / 被拒不改变任何结果——真相仍以
+#: `GET /jobs/{id}/result` 为准，定时轮询继续兜底（本仓对弱链路的既有纪律）。
+#: 鉴权用 worker 自己的 push token（`nodes[].authKey`，它本来就有）：这个端点唯一的
+#: 能力是「叫醒等待线程」，不该为了省 10s 把 hub 的管理 token 发给云机。
+RESULT_READY_PATH = "/jobs/{jid}/result-ready"
 #: 上报的存活窗口（秒）：超窗即剔除（worker 死后不留下幽灵「已下载」）。
 #: 取值 = 12 × 预取节拍（`remote/job_round.PREFETCH_ROUND_SEC = 5s`）——形状未变时 worker 不发，
 #: 窗口必须宽到「一轮空转」不至于把还活着的持有显示成过期。

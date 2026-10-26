@@ -32,6 +32,7 @@ store_job_failure/_job_dir`；★M4b：`mode_of` 随模式退役）。
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 import time
 import urllib.error
@@ -608,6 +609,9 @@ class PushDispatcher:
         self._lock = Lock()
         self._inflight: dict[str, dict] = {}
         self._avoid: dict[str, set[str]] = {}
+        #: jid -> 「worker 说结果就绪」的信号（2026-10-26）。等待线程用 `Event.wait(poll_sec)`
+        #: 代替 `sleep(poll_sec)`，通知一到就立刻取回；通知丢了也只多等一拍（定时轮询不变）。
+        self._ready: dict[str, threading.Event] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -926,6 +930,9 @@ class PushDispatcher:
         finally:
             with self._lock:
                 self._inflight.pop(str(rec.get("slot") or jid), None)
+                # 同一 jid 的主/备副本共用一个 Event：只在最后一条在飞记录消失时收掉。
+                if not any(str(r.get("job_id")) == jid for r in self._inflight.values()):
+                    self._ready.pop(jid, None)
             self._wake.set()
 
     def _await_result(
@@ -989,7 +996,7 @@ class PushDispatcher:
                 # 问不到：只有「最后一眼还在队里」才拿队龄兜底（隧道断了的排队单不该无限占租约）。
                 if last_queued and _queue_expired():
                     return
-                time.sleep(self.poll_sec)
+                self._wait_next_poll(jid)
                 continue
             status, body = res
             if status == 200:
@@ -1038,7 +1045,7 @@ class PushDispatcher:
                     if not queue_logged:
                         queue_logged = True
                         self._log(f"{jid} 在 {wid} 排队中（开算前不计无结果超时）")
-                    time.sleep(self.poll_sec)
+                    self._wait_next_poll(jid)
                     continue
                 last_queued = False
                 if not started:
@@ -1046,7 +1053,7 @@ class PushDispatcher:
                     deadline = self._now() + self.timeout_sec
                     self._mark_started(jid, wid)
                     self._log(f"{jid} 在 {wid} 排队 {self._now() - t0:.0f}s 后开算")
-                time.sleep(self.poll_sec)
+                self._wait_next_poll(jid)
                 continue
             if status == 410:
                 # 节点判定「这份活在这台机器上跑不成」（能力缺失类）：终局，落 fail.json，
@@ -1064,11 +1071,67 @@ class PushDispatcher:
                               avoid_worker=True)
                 return
             if status >= 500:
-                time.sleep(self.poll_sec)
+                self._wait_next_poll(jid)
                 continue
             self._requeue(jid, lease, wid, f"HTTP {status}", avoid_worker=True)
             return
         self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False)
+
+    def worker_token_ok(self, token: str) -> bool:
+        """这个 Bearer 是不是**某台已登记 push worker** 的 authKey（或派发器缺省 token）。
+
+        只服务 `/jobs/{id}/result-ready`（见 `hub/schedule.py::_push_auth_ok`）：worker 手上
+        只有自己的 push token，不该为了「叫醒」把 hub 管理 token 发给云机。
+        """
+        tok = str(token or "")
+        if not tok:
+            return False
+        if self.token and secrets.compare_digest(tok, str(self.token)):
+            return True
+        for w in self.workers.snapshot():
+            key = str(w.get("key") or "")
+            if key and secrets.compare_digest(tok, key):
+                return True
+        return False
+
+    def note_ready(self, jid: str) -> bool:
+        """worker 说「这份的结果已经在了」⇒ 叫醒正在等它的线程。返回是否真有在飞记录。
+
+        **只叫醒，不做取结果**：取回仍由等待线程走既有的 `/job/{id}/result` + `accept_result`
+        （校验/首写锁定一条不少）。非在飞的 jid（已落地 / 已回落）返回 False，也不创建
+        Event —— 避免端点被反复打时在派发器里堆垃圾。
+
+        同一 jid 的主/备副本共用一个 Event：叫醒后两条腿都会各自去问，谁先回谁入账，
+        输的那份仍由首写锁定丢掉（§2.9）。
+        """
+        key = str(jid or "")
+        if not key:
+            return False
+        with self._lock:
+            if not any(str(r.get("job_id")) == key for r in self._inflight.values()):
+                return False
+            ev = self._ready.get(key)
+            if ev is None:
+                ev = threading.Event()
+                self._ready[key] = ev
+            ev.set()
+        return True
+
+    def _wait_next_poll(self, jid: str) -> None:
+        """等到下一拍，或者被 worker 的 `result-ready` 提前叫醒。
+
+        语义等价于原来的 `time.sleep(poll_sec)`（最差多等一拍），只是把那一拍变成可打断。
+        先 wait 后 clear：若通知正好在本次 wait 期间到达，醒来先 clear 再回到循环顶部
+        发 GET——结果已在盘上，不会白叫；若在 clear 之后到达，下一拍 `notify` 会重新置位
+        （或那一发 GET 已经取到结果）。
+        """
+        with self._lock:
+            ev = self._ready.get(jid)
+            if ev is None:
+                ev = threading.Event()
+                self._ready[jid] = ev
+        ev.wait(self.poll_sec)
+        ev.clear()
 
     def _mark_started(self, jid: str, wid: str) -> None:
         """打 `computing_at`（掉队阈值的唯一时基）。

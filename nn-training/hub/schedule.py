@@ -7,6 +7,8 @@ worker 侧「我该干哪一份、还拿着没有、算到哪了」的全部端�
     POST /jobs/{id}/claim     认领（exclusive 设租约 / backup 显式备份副本）
     POST /jobs/{id}/start     打 computing_at（掉队阈值的唯一时基）
     POST /jobs/{id}/ready     算完待回传（P0 小包，**永不**触发取消）
+    POST /jobs/{id}/result-ready  worker 说「结果已经在了」——**只叫醒** hub 的等待线程
+                                （性能提示；丢了就回落 `PUSH_POLL_SEC` 定时轮询）
     POST /jobs/{id}/abandon   合法放弃（release 租约 + 零 reclaim，幂等）
     POST /jobs/{id}/heartbeat 心跳续租（60s；H2：仅租约持有人）
     POST /jobs/{id}/release   瞬时失败主动还租约（job 立即回池）
@@ -34,6 +36,7 @@ from io import BufferedIOBase
 from typing import Any
 
 from common.protocol import (
+    AUTH_HEADER,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     PEEK_MAX,
@@ -56,11 +59,16 @@ class ScheduleRoutes:
     headers: Message
     path: str
     rfile: BufferedIOBase
+    #: hub 中介推的派发器（`--push` 时由 boot 注入；None = 未启用）。本混入只调
+    #: `worker_token_ok` / `note_ready` 两个只读/叫醒方法，不碰派发状态。
+    push: Any
 
     # 由组合类提供（实现都在 `hub.server.HubHandler`）——混入只声明类型。
     _auth_ok: Any
     _job_body: Any
+    _job_id: Any
     _job_or_404: Any
+    _known_job_or_404: Any
     _json: Any
     _lease_token: Any
     _log_claim: Any
@@ -218,6 +226,48 @@ class ScheduleRoutes:
         self.hub.set_ready(jid, str(body.get("worker_id") or self._worker_id()))
         self._json({"job_id": jid, "status": "ready"})
 
+
+    def _post_result_ready(self) -> None:
+        """`POST /jobs/{id}/result-ready` —— worker 侧 PPO 出结果后敲的一下（2026-10-26）。
+
+        只做「叫醒 `_await_result` 的等待线程」：它被叫醒后走**既有**的
+        `GET /job/{id}/result` 取回，校验/入账仍只有 `accept_result` 一条路。所以：
+          · 通知丢了、端点 404/409、worker 根本没配 hub URL —— 只回落 `PUSH_POLL_SEC`
+            定时轮询（≤10s），**不改变任何结果**；
+          · 不读 body（worker 发的是空体），也不改 job 状态——一个早到/伪造的通知最多
+            让 hub 多问一次，看到的仍是 202。
+        鉴权刻意不用 hub 管理 token：worker 只持有自己的 push token（`nodes[].authKey`），
+        而这个端点能做的只有「叫醒」。
+        """
+        push = getattr(self, "push", None)
+        if push is None:
+            # 先答「这台 hub 没开派发器」再验 token：否则 worker 只看到 401，分不清
+            # 「token 配错」与「hub 没起 --push」（而两者都只是退回轮询，但排障方向相反）。
+            self._json({"error": "push dispatcher not enabled"}, 409)
+            return
+        if not self._push_auth_ok():
+            return
+        # 鉴权已过（push token）：这里只要「jid + 已知 job」那半段，形状与 `_job_or_404(known=True)` 同一份。
+        jid = self._known_job_or_404()
+        if jid is None:
+            return
+        notified = bool(push.note_ready(jid))
+        self._json({"job_id": jid, "notified": notified})
+
+    def _push_auth_ok(self) -> bool:
+        """推腿通知的鉴权（Bearer = 任一登记 worker 的 authKey，或派发器缺省 token）。
+
+        刻意**不**走 `_auth_ok`：那条路只认 hub 管理 token，且失败会计入 IP 封禁。
+        通知是 best-effort（每个 job 至多一次），一条陈旧的 authKey 不该把整台云机的
+        其它请求（注册 / 取包）连坐封掉一小时；token 本身是长随机串，不存在爆破面。
+        """
+        auth = self.headers.get(AUTH_HEADER, "")
+        token = auth[len("Bearer ") :] if auth.startswith("Bearer ") else ""
+        push = getattr(self, "push", None)
+        if push is not None and token and push.worker_token_ok(token):
+            return True
+        self._json({"error": "unauthorized"}, 401)
+        return False
 
     def _post_abandon(self) -> None:
         """`POST /jobs/{id}/abandon` —— 合法放弃（R1-3）：release 租约 + 零 reclaim，幂等。"""

@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import (
     AUTH_HEADER,
     CAP_OFFLINE_PUSH,
+    RESULT_READY_PATH,
     ProtocolError,
     normalize_manifest,
     pick_push_worker,
@@ -1040,6 +1041,21 @@ def _post(base: str, path: str, body: dict) -> tuple[int, dict]:
         headers={AUTH_HEADER: "Bearer sekret", "Content-Type": "application/json"},
         method="POST",
     )
+    return _send(req)
+
+
+def _post_ready(base: str, jid: str, token: str) -> tuple[int, dict]:
+    """worker 侧 `result-ready` 的**空体** POST（形状必须与 `notify_result_ready` 一致）。"""
+    req = urllib.request.Request(
+        base + RESULT_READY_PATH.format(jid=jid),
+        data=b"",
+        headers={AUTH_HEADER: f"Bearer {token}"},
+        method="POST",
+    )
+    return _send(req)
+
+
+def _send(req: urllib.request.Request) -> tuple[int, dict]:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -1048,3 +1064,88 @@ def _post(base: str, path: str, body: dict) -> tuple[int, dict]:
             return e.code, json.loads(e.read().decode("utf-8"))
         except ValueError:
             return e.code, {}
+
+
+# ------------------------------------------------------------------ 结果就绪通知（2026-10-26）
+
+
+def test_result_ready_wakes_the_waiter_within_one_poll(
+    tmp_path: Path, worker_factory
+) -> None:
+    """worker 敲一下 ⇒ 派发器**立刻**来取（不必等满 `poll_sec`）。
+
+    旧行为（只有定时轮询）在这里必红：worker 侧第一次 GET 已回 202，随后睡满 5s；
+    结果是在那之后才放进假 worker 的，所以没有唤醒时要 ~5s 才落地。
+    """
+    w1 = worker_factory(complete=False)
+    hub = _hub(tmp_path, ["x2"])
+    jid = "r" * 16
+    m = _publish(hub, "x2", jid)
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    disp = _dispatcher(hub, ws, poll_sec=5.0, timeout_sec=60.0)
+
+    disp.tick()
+    assert _wait_until(lambda: jid in w1.received), "派发器应把活推给假 worker"
+    assert _wait_until(lambda: jid in w1.polled), "等待线程应先问过一次（拿到 202）"
+
+    # 第一下：只叫醒、不造结果——被叫醒的 GET 仍应看到 202（结果还没放）。
+    assert disp.note_ready(jid) is True
+    assert _wait_until(
+        lambda: w1.polled.count(jid) >= 2, timeout=3.0
+    ), "通知应让等待线程立刻再问一次（旧行为要等满 5s 的那一拍）"
+    assert hub._stores["x2"].get_result(jid) is None, "通知本身绝不能入账"
+
+    with w1._lock:
+        w1.results[jid] = result_of(m)
+    assert disp.note_ready(jid) is True
+    t0 = time.monotonic()
+    assert _wait_until(
+        lambda: hub._stores["x2"].get_result(jid) is not None, timeout=3.0
+    ), "通知后结果应在 3s 内落地（旧行为要等满 5s 的那一拍）"
+    # timing-ok: 夹具模拟——poll_sec=5s，「3s 内落地」区分「被叫醒」与「等满一拍」。
+    assert time.monotonic() - t0 < 3.0
+
+
+def test_result_ready_endpoint_auth_and_shapes(tmp_path: Path, worker_factory) -> None:
+    """端点只做三件事：验 push token、认已知 job、叫醒在飞等待线程。
+
+    未启用派发器 ⇒ 409（先于鉴权，否则 worker 分不清「token 错」与「hub 没起 --push」）；
+    错 token ⇒ 401（**不**计入 IP 封禁——通知是 best-effort，一条陈旧 authKey 不该连坐封机）；
+    未知 job / 已落地 job ⇒ 404 / 200+notified=false（不创建 Event，不堆垃圾）。
+    """
+    hub = _hub(tmp_path, ["x2"])
+    jid = "e" * 16
+    _publish(hub, "x2", jid)
+    ws = _workers_with(tmp_path, worker_factory, (worker_factory(), {"id": "g1"}))
+    disp = _dispatcher(hub, ws)
+    srv = make_server(hub, 0, "sekret", host="127.0.0.1", push=disp)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        # 已发布但不在飞：200 + notified=false（幂等、无副作用）
+        assert _post_ready(base, jid, "sekret") == (200, {"job_id": jid, "notified": False})
+        # 未知 job 响亮 404
+        assert _post_ready(base, "nope", "sekret")[0] == 404
+        # 错 token 401（且不影响随后的正确调用）
+        assert _post_ready(base, jid, "wrong")[0] == 401
+        assert _post_ready(base, jid, "sekret")[0] == 200
+        # 派发器缺省 token 之外，任一登记 worker 的 authKey 也认（`_workers_with` 写的是 sekret）
+        assert disp.worker_token_ok("sekret") is True
+        assert disp.worker_token_ok("wrong") is False
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+    # 没开 push 派发器的 hub：409（先答「本机没这能力」再谈 token）
+    srv2 = make_server(hub, 0, "sekret", host="127.0.0.1")
+    th2 = threading.Thread(target=srv2.serve_forever, daemon=True)
+    th2.start()
+    try:
+        base2 = f"http://127.0.0.1:{srv2.server_address[1]}"
+        assert _post_ready(base2, jid, "sekret")[0] == 409
+    finally:
+        srv2.shutdown()
+        srv2.server_close()
+        th2.join(timeout=5)

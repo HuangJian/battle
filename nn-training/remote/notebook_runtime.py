@@ -469,6 +469,15 @@ def _tunnel_url_of(path: Path) -> str:
     return tunnel_url_of(path)
 
 
+def _hub_base_of(cfg: dict[str, Any]) -> str:
+    """worker 眼里的 hub 基址（`registry_url` > `hub_url`，去尾斜杠）。
+
+    注册与「结果就绪通知」用**同一个**地址：两条都是 worker → hub 的小消息，注册能通的
+    地址通知也能通；多一个旋钮只会在隧道换名时漂开（一个换了一个没换）。
+    """
+    return str(cfg.get("registry_url") or cfg.get("hub_url") or "").strip().rstrip("/")
+
+
 def _push_registry(cfg: dict[str, Any], log) -> Any:
     """GPU push 腿的注册器（`registry_url` > `hub_url`；缺 hub/token ⇒ 关闭态）。
 
@@ -477,7 +486,7 @@ def _push_registry(cfg: dict[str, Any], log) -> Any:
     """
     from remote.push_register import Registry, default_node_id
 
-    hub = str(cfg.get("registry_url") or cfg.get("hub_url") or "").strip()
+    hub = _hub_base_of(cfg)
     return Registry(
         hub=hub,
         hub_token=str(cfg.get("hub_token") or "").strip(),
@@ -677,12 +686,16 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     # ── 启动 worker_server ──
     serve_env = dict(os.environ)
     serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
+    # 结果就绪通知的目标（与注册同址）；缺 hub 地址 ⇒ 不传，服务端回落纯轮询。
+    hub_base = _hub_base_of(cfg)
     with open(serve_log, "w") as log_f:
         serve_argv = [sys.executable, "-u", "-m", "remote.remote_worker_serve",
                       "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
                       "--work", str(work_dir), "--device", str(cfg["device_resolved"])]
         if epoch_mult != 1.0:
             serve_argv += ["--epoch-mult", f"{epoch_mult:g}"]
+        if hub_base:
+            serve_argv += ["--hub-url", hub_base]
         serve_proc = subprocess.Popen(
             serve_argv,
             stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,

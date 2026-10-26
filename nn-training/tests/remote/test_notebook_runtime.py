@@ -1036,6 +1036,78 @@ def test_sha12_matches_sha256_prefix() -> None:
     assert len(nbr.sha12(raw)) == 12
 
 
+# ------------------------------------------------------------------ 结果就绪通知（2026-10-26）
+
+
+def test_hub_base_prefers_registry_url() -> None:
+    """通知与注册**同一个**地址：`registry_url` > `hub_url`，去尾斜杠。"""
+    assert nbr._hub_base_of({"hub_url": "http://a/", "registry_url": "https://b/"}) == "https://b"
+    assert nbr._hub_base_of({"hub_url": "http://a/"}) == "http://a"
+    assert nbr._hub_base_of({}) == ""
+
+
+def test_push_worker_passes_result_ready_hub_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """完整 worker_server 拿到 `--hub-url`（与注册同址）⇒ 出结果后能敲 hub。
+
+    缺这条接线时语义变成「纯轮询」——不报错、只是每轮白等 `PUSH_POLL_SEC`，
+    正是 2026-10-26 用户说的那段落灰时间。
+    """
+    clock = _FakeClock(step=5.0)  # 步长必须 < 隧道 60s 窗口（同既有用例）
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)
+    seen: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        seen.append(list(cmd))
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "2026-09-13 INF | https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+            return _FakeProc(poll_seq=[None])
+        return _FakeProc(poll_seq=[0])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    cfg = _base_cfg(
+        tmp_path,
+        cloudflared_path="/usr/bin/cloudflared",
+        registry_url="https://hub.example/",
+        hub_url="http://127.0.0.1:1",
+    )
+    assert nbr.run_push_worker(cfg, lambda m: None) == 0
+    serve = next(c for c in seen if "--port" in c)
+    assert serve[serve.index("--hub-url") + 1] == "https://hub.example"
+
+
+def test_push_worker_without_hub_address_keeps_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有 hub 地址（手动起服务/旧部署）⇒ 不传 `--hub-url`，行为与旧版逐字节一致。"""
+    clock = _FakeClock(step=5.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)
+    seen: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        seen.append(list(cmd))
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "2026-09-13 INF | https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+            return _FakeProc(poll_seq=[None])
+        return _FakeProc(poll_seq=[0])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    cfg = _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared")
+    cfg.pop("hub_url")
+    assert nbr.run_push_worker(cfg, lambda m: None) == 0
+    serve = next(c for c in seen if "--port" in c)
+    assert serve.count("--hub-url") == 0
+
+
 # ------------------------------------------------------------------ 训练侧放大（2026-10-26）
 
 

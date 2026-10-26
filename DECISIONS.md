@@ -9727,3 +9727,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **现场处置**：重启 hub（旧进程里那单的 `resume_it=126` 是内存态）⇒ 云机重注册（`enabled` 自动为
   true）⇒ 重派新单（地板 125）⇒ 云机会把盘上已有的 it126 物化并回传（task_id 随地板变，outbox 换
   目录，但 artifacts 根 `/tmp/battle2-offline/y34-hitfix` 跨单共享，产物不丢）。
+
+## §2026-10-26-result-ready-wakeup（2026-10-26，PPO 一出结果 hub 立刻来取：通知只叫醒，交付路径不变）
+
+- **动机**：push 腿的结果由 hub 派发器的 `_await_result` **定时轮询**取回（`GET /job/{id}/result`，
+  间隔 `PUSH_POLL_SEC`）。PPO 收口与下一拍之间那段纯等（最多一拍）没有任何进展，且它发生在
+  **云端已经算完**之后——用户口径：能不能让 worker 算完就敲一下 hub？
+- **做法**：worker `_execute_job` 在 `state.set_result()` **之后**调 `notify_result_ready`
+  （`POST /jobs/{jid}/result-ready`，空体，3s 超时，永不抛）→ hub `_post_result_ready` 只调
+  `PushDispatcher.note_ready(jid)`（置该 jid 的 `threading.Event`）→ 等待线程用
+  `Event.wait(poll_sec)` 代替 `time.sleep(poll_sec)`，醒来照旧发 `GET /result`。
+  **通知不携带结果、不写任何 job 状态**；入账仍只有 `accept_result` 一条路，定时轮询一行未删。
+- **鉴权刻意用 worker 自己的 push token**（`nodes[].authKey`，它本来就有）：这个端点唯一的能力是
+  「叫醒等待线程」，不值得为省一拍把 hub 管理 token 发给云机；也**不走** `_auth_ok`——那条路失败
+  会计入 IP 封禁，一条陈旧 authKey 不该把整台云机的注册/取包连坐封一小时。
+  hub 未启用派发器时**先答 409 再验 token**：worker 才能分清「token 配错」与「hub 没起 `--push`」。
+- **worker 侧接线**：`--hub-url`（与注册同址：`registry_url` > `hub_url`，去尾斜杠）只在非空时进
+  argv；notebook push 腿与 push-first 升级两条路都传。缺地址 ⇒ 不传，纯轮询（旧行为逐字不变）。
+  400/401/404/409 与网络错误分开记一行（都是 best-effort 回落，但排障方向相反）。
+- **备选（被否）**：① hub 侧长轮询（每个 job 占一条请求线程 + 超时/重连状态，收益只是同一拍）；
+  ② 把 `PUSH_POLL_SEC` 调小（全池每 job 都多打请求，且治不了「刚好错过一拍」）；
+  ③ worker 直接 POST 结果给 hub（等于另开一条交付路径，校验/首写锁定要抄第二份）。
+- **不变式**：通知早到/伪造/重复最多让 hub 多问一次（看到 202）；`note_ready` 对非在飞 jid 返回
+  False 且**不创建** Event；`_ready` 在该 jid 最后一条在飞记录消失时清掉。
+- **用例**（先红后绿）：`tests/remote/test_result_ready.py`（路径/空体/Bearer、缺 hub 地址、
+  连接被拒、409 只发一次不重试、**先落结果后通知**的顺序、bootstrap argv）；
+  `test_hub_push_dispatch.py::test_result_ready_wakes_the_waiter_within_one_poll`（把
+  `_wait_next_poll` 临时改回 `time.sleep(5)` 时必红，已实测）、端点鉴权/形状、晚到通知不入账；
+  `test_notebook_runtime.py` 的 `_hub_base_of` 与 `--hub-url` argv。
+- **门禁**：`nn-python-gate` **5155 passed / 10 skipped（128s）**；根 `bun run check` **2634 pass / 0 fail**。
+- **部署**：hub 需重启才有新端点；云机 serve 进程需重启才会发通知。纯增量——旧 worker 不发通知
+  也能被轮询取回，旧 hub 收到通知只会 404（worker 记一行后回落轮询）。

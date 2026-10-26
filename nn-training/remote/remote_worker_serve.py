@@ -23,6 +23,15 @@ def main() -> None:
         "--work", default="tmp/remote-worker-serve", help="job/payload/code_cache 工作目录"
     )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
+    ap.add_argument(
+        "--hub-url",
+        default="",
+        help=(
+            "hub 基址（如 http://100.x:8787）。非空时每个 job 出结果后给 hub 发一条"
+            " result-ready 通知（用 --token 鉴权），让 hub 立即来取；"
+            "空 = 纯轮询（旧行为）。通知失败不影响结果"
+        ),
+    )
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
     ap.add_argument(
         "--epoch-mult",
@@ -55,6 +64,7 @@ def main() -> None:
         device=args.device,
         torch_threads=args.threads,
         epoch_mult=args.epoch_mult,
+        hub_url=args.hub_url,
         lock_file=args.lock_file,
     )
 

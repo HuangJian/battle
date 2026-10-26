@@ -55,6 +55,9 @@ class FakeWorker:
         self.complete = complete
         self.tamper = tamper
         self.received: list[str] = []
+        #: `/job/{id}/result` 被问过的 jid（按次追加）——「通知是否真的省掉了那一拍」
+        #: 的判据：先看到一次 202，再把结果放进去，旧行为要等满 poll_sec 才会再问。
+        self.polled: list[str] = []
         self.results: dict[str, dict] = {}
         self._manifests: dict[str, dict] = {}
         self._lock = threading.Lock()
@@ -105,6 +108,7 @@ class FakeWorker:
                 if path.startswith("/job/") and path.endswith("/result"):
                     jid = path[len("/job/") : -len("/result")]
                     with outer._lock:
+                        outer.polled.append(jid)
                         res = outer.results.get(jid)
                         known = jid in outer._manifests
                     if res is not None:

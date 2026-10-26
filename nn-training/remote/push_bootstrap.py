@@ -188,11 +188,15 @@ def spawn_full_worker_server(
     log_path: Path,
     *,
     epoch_mult: float = 1.0,
+    hub_url: str = "",
 ) -> subprocess.Popen:
     """在已解包的 code_dir 上起完整 remote_worker_serve。
 
     `epoch_mult`：训练侧放大（PPO 每轮更新遍数 × N，缺省 1.0 = manifest 原样）。
     **非缺省才传** `--epoch-mult`（与离线盘 `build_run_argv` 同一条纪律）。
+
+    `hub_url`：hub 基址（与注册同址）。**非空才传** `--hub-url` —— 完整服务据此在
+    PPO 出结果后给 hub 发 result-ready 通知（hub 立即来取）；空 = 纯轮询（旧行为）。
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(code_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -213,6 +217,9 @@ def spawn_full_worker_server(
     ]
     if float(epoch_mult or 1.0) != 1.0:
         argv += ["--epoch-mult", f"{float(epoch_mult):g}"]
+    hub = str(hub_url or "").strip().rstrip("/")
+    if hub:
+        argv += ["--hub-url", hub]
     return subprocess.Popen(
         argv,
         stdout=log_f,
@@ -353,6 +360,8 @@ def run_push_first(cfg: dict[str, Any], log: Callable[[str], None]) -> int:
         device,
         code_dir,
         work / "serve.log",
+        # 与注册同址（`registry_url` > `hub_url`）：通知只是「叫醒 hub」，地址不能是第二个旋钮。
+        hub_url=str(cfg.get("registry_url") or cfg.get("hub_url") or "").strip().rstrip("/"),
     )
     if not wait_ping(port, token, 30):
         # 失败必须自解释：真因在子进程的 stdout/stderr 里（被重定向到 serve.log），

@@ -30,12 +30,16 @@ import os
 import secrets
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import deque
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from common import net_http
 from common.http_respond import respond_json
 from common.instance_lock import (
     acquire_instance_lock,
@@ -45,6 +49,7 @@ from common.instance_lock import (
 from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
+    RESULT_READY_PATH,
     WIRE_JOB_MAGIC,
     CodeChangedError,
     ProtocolError,
@@ -257,6 +262,52 @@ class WorkerServerState:
         starter(jid, item)
 
 
+def notify_result_ready(
+    hub_url: str,
+    token: str,
+    jid: str,
+    *,
+    timeout: float = 3.0,
+    log=None,
+) -> bool:
+    """PPO 结果就绪 ⇒ 敲一下 hub，让它的派发器**立刻**来取（2026-10-26）。
+
+    这是**延迟优化，不是交付路径**：结果仍只由 hub 的 `GET /job/{id}/result` 取回，
+    所以本函数**永不抛**、超时只 3s；未配置 `--hub-url` / 网络不通 / hub 未开派发器
+    （404/409）都只回落 `PUSH_POLL_SEC=10s` 的定时轮询。
+
+    鉴权用 worker 自己的 push token（`--token`，hub 的 `nodes[].authKey`）——该端点唯一的
+    能力是「叫醒等待线程」，不必把 hub 管理 token 发给云机。
+    """
+    base = str(hub_url or "").strip().rstrip("/")
+    if not base or not jid:
+        return False
+    url = base + RESULT_READY_PATH.format(jid=urllib.parse.quote(str(jid)))
+    req = urllib.request.Request(
+        url,
+        data=b"",
+        method="POST",
+        headers={AUTH_HEADER: f"Bearer {token}"},
+    )
+    try:
+        with net_http.urlopen(req, timeout=timeout) as resp:
+            status = int(resp.status)
+            ok = status == 200
+    except urllib.error.HTTPError as e:
+        # 401/409/404 是**配置**信号（token 配错 / hub 没开 --push / jid 未知），
+        # 与「网络没通」分开报：两者都只回落轮询，但排障方向相反。
+        if log:
+            log(f"hub 结果通知被拒 HTTP {e.code}——定时轮询仍会取回")
+        return False
+    except Exception as e:
+        if log:
+            log(f"hub 结果通知未送达（{type(e).__name__}）——定时轮询仍会取回")
+        return False
+    if not ok and log:
+        log(f"hub 结果通知被拒 HTTP {status}——定时轮询仍会取回")
+    return ok
+
+
 def _execute_job(
     state: WorkerServerState,
     manifest: dict,
@@ -268,6 +319,10 @@ def _execute_job(
     device: str,
     torch_threads: int,
     echo: bool,
+    #: hub 的基址（`--hub-url`）；空 = 不发通知，纯轮询（手动起服务/旧部署）。
+    hub_url: str = "",
+    #: 本节点的 push token（= `--token`）；通知用它鉴权，与 hub→worker 的 Bearer 同一把。
+    push_token: str = "",
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     epoch_mult: float = 1.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True),
@@ -299,7 +354,9 @@ def _execute_job(
             should_cancel=lambda: state.is_cancelled(jid),
         )
         state.set_result(jid, result)
-        log(f"job {jid} done — result ready for pickup")
+        # 先落结果再敲 hub：通知到时 `GET /job/{id}/result` 必然读得到（顺序不可颠倒）。
+        notified = notify_result_ready(hub_url, push_token, jid, log=log)
+        log(f"job {jid} done — result ready for pickup" + ("（已通知 hub）" if notified else ""))
     except CodeChangedError as e:
         # push 模式是长驻服务进程：execv 自重启会打断在跑的 job —— 只能拒收 + 喊人。
         state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__, detail=exc_tail(e))
@@ -324,6 +381,7 @@ def make_worker_server(
     device: str = "cpu",
     torch_threads: int = 0,
     epoch_mult: float = 1.0,
+    hub_url: str = "",
     host: str = "0.0.0.0",
 ) -> ThreadingHTTPServer:
     # 校验只在这里做一次：HTTP 面拿到的永远是合法倍数（非法值启动即停，不静默当 1.0）。
@@ -518,6 +576,8 @@ def make_worker_server(
                 item["echo"],
                 # `threading.Thread(args=…)` 只收位置参数：缺省参数必须按形参顺序放进来
                 # （写成 `epoch_mult=…` 会让整个文件语法错误）。
+                hub_url,
+                token,
                 epoch_mult,
                 log,
             ),
@@ -537,6 +597,7 @@ def serve_forever(
     device: str = "cpu",
     torch_threads: int = 0,
     epoch_mult: float = 1.0,
+    hub_url: str = "",
     lock_file: str = "",
 ) -> None:
     """阻塞运行（调用方负责进程生命周期）；token 缺失响亮报错。"""
@@ -567,11 +628,13 @@ def serve_forever(
         device=device,
         torch_threads=torch_threads,
         epoch_mult=epoch_mult,
+        hub_url=hub_url,
     )
     print(
         f"[{time.strftime('%H:%M:%S')}] [worker-serve] listening on 0.0.0.0:{port} "
         f"work={state.work_dir} pid={os.getpid()}"
-        + (f" PPO epochs×{epoch_mult:g}" if epoch_mult != 1.0 else ""),
+        + (f" PPO epochs×{epoch_mult:g}" if epoch_mult != 1.0 else "")
+        + (f" notify={hub_url}" if hub_url else " notify=off"),
         flush=True,
     )
     try:
