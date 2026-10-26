@@ -57,7 +57,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // for the instant/classic restore table (91% gate byte-identical).
   defenseColSpread: 3,
   threatRangeCells: 23,
-  maxPlayerDistFromBase: 26,
+  maxPlayerDistFromBase: 40,
   // P4: race-to-base emergency defense (see interface docs). Range 18 /
   // margin 2 — M4 search widened the race window (earlier, more committed
   // defense before the enemy reaches the base).
