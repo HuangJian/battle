@@ -55,6 +55,10 @@ from common.protocol import (
 from common.text import exc_tail
 from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import _wire_start as worker_wire_start
+
+#: `epoch_mult_of` 也在这里转出：`remote_worker_serve`（L7）只依赖本模块（L6），
+#: 命令行校验与 `serve_forever` 用**同一份**判据（别各写一遍）。
+from remote.worker import epoch_mult_of as epoch_mult_of
 from remote.worker import run_job
 
 AUTH_HEADER = "Authorization"
@@ -264,6 +268,8 @@ def _execute_job(
     device: str,
     torch_threads: int,
     echo: bool,
+    #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
+    epoch_mult: float = 1.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True),
 ) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
@@ -278,6 +284,7 @@ def _execute_job(
             work_dir=work_dir,
             device=device,
             torch_threads=torch_threads,
+            epoch_mult=epoch_mult,
             echo=echo,
             preloaded={
                 "payload_zip": payload_zip,
@@ -316,8 +323,12 @@ def make_worker_server(
     *,
     device: str = "cpu",
     torch_threads: int = 0,
+    epoch_mult: float = 1.0,
     host: str = "0.0.0.0",
 ) -> ThreadingHTTPServer:
+    # 校验只在这里做一次：HTTP 面拿到的永远是合法倍数（非法值启动即停，不静默当 1.0）。
+    epoch_mult = epoch_mult_of(epoch_mult)
+
     def log(msg: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True)
 
@@ -505,6 +516,9 @@ def make_worker_server(
                 device,
                 torch_threads,
                 item["echo"],
+                # `threading.Thread(args=…)` 只收位置参数：缺省参数必须按形参顺序放进来
+                # （写成 `epoch_mult=…` 会让整个文件语法错误）。
+                epoch_mult,
                 log,
             ),
             daemon=True,
@@ -522,6 +536,7 @@ def serve_forever(
     *,
     device: str = "cpu",
     torch_threads: int = 0,
+    epoch_mult: float = 1.0,
     lock_file: str = "",
 ) -> None:
     """阻塞运行（调用方负责进程生命周期）；token 缺失响亮报错。"""
@@ -544,10 +559,19 @@ def serve_forever(
     except RuntimeError as e:
         raise SystemExit(f"[worker-serve] ERROR: {e}") from None
     state = WorkerServerState(work_dir)
-    srv = make_worker_server(state, port, token, device=device, torch_threads=torch_threads)
+    epoch_mult = epoch_mult_of(epoch_mult)
+    srv = make_worker_server(
+        state,
+        port,
+        token,
+        device=device,
+        torch_threads=torch_threads,
+        epoch_mult=epoch_mult,
+    )
     print(
         f"[{time.strftime('%H:%M:%S')}] [worker-serve] listening on 0.0.0.0:{port} "
-        f"work={state.work_dir} pid={os.getpid()}",
+        f"work={state.work_dir} pid={os.getpid()}"
+        + (f" PPO epochs×{epoch_mult:g}" if epoch_mult != 1.0 else ""),
         flush=True,
     )
     try:

@@ -127,6 +127,45 @@ def test_push_first_is_the_last_resort_and_registers_inline() -> None:
     ), "push-first 必须可关、内联注册带 kind、写回 node_id"
 
 
+def test_cloud_notebooks_expose_epoch_mult_only() -> None:
+    """2026-10-26 用户口径：cloudflared / tailscale 与离线盘同一条 `epoch_mult`
+    （PPO 每轮更新遍数 × N，缺省 1.0 = 课程原样）。
+
+    **不接** `sample_mult`：它改的是训练采样量（= 改训练语料），云机这一轮只要
+    「同一份 rollout 多重训几遍」——与课程/教师口径都不打架。
+    """
+    for name in ("battle.cloudflared.ipynb", "battle.tailscale.ipynb"):
+        cfg = _cfg(name)
+        assert cfg.get("epoch_mult") == 1.0, f"{name} 缺 epoch_mult=1.0（缺省 = 课程原样）"
+        assert cfg.get("sample_mult") is None, f"{name} 不该有 sample_mult（只放大更新遍数）"
+
+
+def test_inline_fallbacks_forward_epoch_mult() -> None:
+    """两条**内联回退**（不经过 notebook_boot/notebook_runtime 的 spawn 路径）也要带倍数。
+
+    cloudflared 的 push-first 自己 `spawn_full_worker_server`，tailscale 的内联回退自己
+    拼 `run_notebook({...})`——少了这个关键字，旋钮只在这条路上静默失效（无报错）。
+    用 AST 判关键字而不是拼文本：措辞改了不该红。
+    """
+    cf = ast.parse(_cell("battle.cloudflared.ipynb"))
+    spawns = [
+        n for n in ast.walk(cf)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "spawn_full_worker_server"
+    ]
+    assert [kw.arg for kw in spawns[0].keywords] == ["epoch_mult"], "push-first 的 spawn 漏传 epoch_mult"
+
+    ts = ast.parse(_cell("battle.tailscale.ipynb"))
+    calls = [
+        n for n in ast.walk(ts)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "run_notebook"
+    ]
+    assert len(calls) == 1, "内联回退应当只有一处 run_notebook({...})"
+    fallback = calls[0].args[0]
+    assert isinstance(fallback, ast.Dict), "run_notebook 的第一个实参应是 cfg 字典字面量"
+    keys = {k.value for k in fallback.keys if isinstance(k, ast.Constant)}
+    assert {"epoch_mult"} <= keys, "tailscale 内联回退的 run_notebook 漏传 epoch_mult"
+
+
 def test_battle_offline_push_branch_lands_only_at_w4() -> None:
     """W4 落地后：离线盘的 push 分支必须在，且 **pull 仍是缺省**（不可反向）。
 

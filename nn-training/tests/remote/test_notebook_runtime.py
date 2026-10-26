@@ -1034,3 +1034,39 @@ def test_sha12_matches_sha256_prefix() -> None:
     raw = b"battle-code-zip-bytes"
     assert nbr.sha12(raw) == hashlib.sha256(raw).hexdigest()[:12]
     assert len(nbr.sha12(raw)) == 12
+
+
+# ------------------------------------------------------------------ 训练侧放大（2026-10-26）
+
+
+@pytest.mark.parametrize(("mult", "flag"), [(2.0, "2"), (1.5, "1.5"), (1.0, None)])
+def test_push_worker_passes_epoch_mult(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mult: float, flag: str | None
+) -> None:
+    """push 主路径（code 已到位 ⇒ 完整服务）：`CFG.epoch_mult` 变成 `--epoch-mult N`。
+
+    缺省 1.0 时 argv 里不出现——旧 cfg/旧部署逐字不变（非目标守卫）。
+    """
+    clock = _FakeClock(step=5.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)
+    seen: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        seen.append(list(cmd))
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "2026-09-13 INF | https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+            return _FakeProc(poll_seq=[None])
+        return _FakeProc(poll_seq=[0])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    cfg = _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared", epoch_mult=mult)
+    assert nbr.run_push_worker(cfg, lambda m: None) == 0
+    serve = next(c for c in seen if "--port" in c)
+    if flag is None:
+        assert serve.count("--epoch-mult") == 0
+    else:
+        assert serve[serve.index("--epoch-mult") + 1] == flag

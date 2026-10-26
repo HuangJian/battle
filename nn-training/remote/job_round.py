@@ -377,6 +377,9 @@ def run_one_round(
     cache_root: Path | None = None,
     device: str,
     torch_threads: int,
+    #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
+    #: 纯执行面旋钮，原样交给宿主的 `run_job_fn`（本模块不认识它的语义）。
+    epoch_mult: float = 1.0,
     echo: bool,
     restart_argv: list[str] | None,
     role: str = ROLE_ONLINE,
@@ -392,7 +395,7 @@ def run_one_round(
 
       · 作业身份 —— `job` · `part_dir` · `code_cache_dir` · `pf_store` · `polls_since_accept`；
       · 传输/身份 —— `base_url` · `token` · `worker_id`；
-      · 训练旋钮 —— `device` · `torch_threads` · `echo` · `role` · `prefetch_depth` · `prefetch_unpack`；
+      · 训练旋钮 —— `device` · `torch_threads` · `epoch_mult` · `echo` · `role` · `prefetch_depth` · `prefetch_unpack`；
       · 上报与生命周期 —— `restart_argv`（热替换）· `uploader` · `log`；
       · **注入点** —— `run_job_fn`（不能反向 import `worker`）。
 
@@ -523,6 +526,7 @@ def run_one_round(
             work_dir=part_dir,
             device=device,
             torch_threads=torch_threads,
+            epoch_mult=epoch_mult,
             echo=echo,
             code_cache_dir=code_cache_dir,
             lease_token=lease_token,

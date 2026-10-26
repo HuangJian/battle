@@ -435,6 +435,24 @@ from worker.iter_topup import merge_iter_reports, topup_rollout
 # ------------------------------------------------------------------ PPO 执行
 
 
+def epoch_mult_of(value: object) -> float:
+    """`--epoch-mult` 的取值：**PPO 每轮更新遍数**的放大倍数（训练侧旋钮）。
+
+    与离线盘 `CFG.epoch_mult` 同一口径：有限正数、缺省 `1.0` = manifest/课程原样；
+    只放大 PPO 遍数（向上取整、最少 1），不改采样量/评估语料，也不改 manifest 身份。
+    非法值在**开跑之前**拒绝（argparse 报错 / `serve_forever` 启动即停）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）")
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）") from e
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        raise ValueError(f"epoch_mult 必须是有限正数（当前 {value!r}）")
+    return v
+
+
 # D14 比对规则的**唯一实现**住 `common.protocol`（发布端 `hub_client.iter_shard_dirs`
 # 打包时用同一条规则挑选 shard）——这里只做名字转发，保持既有 import/调用面不变。
 d14_corpus_match = protocol_d14_corpus_match
@@ -448,6 +466,10 @@ def run_job(
     work_dir: Path,
     device: str = "cpu",
     torch_threads: int = 0,
+    #: ★ 2026-10-26（用户口径）：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest
+    #: 原样）。与离线盘的 `CFG.epoch_mult` 同义：只改更新遍数，不改 rollout 采样/评估语料，
+    #: 也不改 manifest 身份（hub 对账仍按发布时那份）。
+    epoch_mult: float = 1.0,
     echo: bool = False,
     preloaded: dict | None = None,
     code_cache_dir: Path | None = None,
@@ -831,6 +853,7 @@ def run_job(
             ts_code_hit=ts_code_hit,
             device=device,
             torch_threads=torch_threads,
+            epoch_mult=epoch_mult,
             preloaded=preloaded,
             # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
             init_w=init_w,
@@ -902,6 +925,7 @@ def worker_loop(
     work_dir: Path,
     device: str = "cpu",
     torch_threads: int = 0,
+    epoch_mult: float = 1.0,
     poll_sec: float = 5.0,
     once: bool = False,
     echo: bool = False,
@@ -1122,6 +1146,7 @@ def worker_loop(
                 worker_id=worker_id,
                 device=device,
                 torch_threads=torch_threads,
+                epoch_mult=epoch_mult,
                 echo=echo,
                 restart_argv=restart_argv,
                 # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
@@ -1230,6 +1255,15 @@ def main() -> None:
     )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
+    ap.add_argument(
+        "--epoch-mult",
+        type=epoch_mult_of,
+        default=1.0,
+        help=(
+            "PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样；向上取整、最少 1）。"
+            "训练侧旋钮：不改采样量/评估语料"
+        ),
+    )
     ap.add_argument("--poll-sec", type=float, default=5.0)
     ap.add_argument("--once", action="store_true", help="处理一个 job 后退出")
     # P2.5（2026-09-22）：回传模式。async（缺省）= 回传与下一份 job 并发（把 `out`
@@ -1332,6 +1366,7 @@ def main() -> None:
             work_dir=out,
             device=args.device,
             torch_threads=args.threads,
+            epoch_mult=args.epoch_mult,
             poll_sec=args.poll_sec,
             once=args.once,
             echo=args.echo,

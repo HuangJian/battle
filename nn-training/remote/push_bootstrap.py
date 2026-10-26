@@ -186,26 +186,35 @@ def spawn_full_worker_server(
     device: str,
     code_dir: Path,
     log_path: Path,
+    *,
+    epoch_mult: float = 1.0,
 ) -> subprocess.Popen:
-    """在已解包的 code_dir 上起完整 remote_worker_serve。"""
+    """在已解包的 code_dir 上起完整 remote_worker_serve。
+
+    `epoch_mult`：训练侧放大（PPO 每轮更新遍数 × N，缺省 1.0 = manifest 原样）。
+    **非缺省才传** `--epoch-mult`（与离线盘 `build_run_argv` 同一条纪律）。
+    """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(code_dir) + os.pathsep + env.get("PYTHONPATH", "")
     log_f = open(log_path, "w", encoding="utf-8")
+    argv = [
+        sys.executable,
+        "-u",
+        "-m",
+        "remote.remote_worker_serve",
+        "--port",
+        str(port),
+        "--token",
+        token,
+        "--work",
+        str(work_dir),
+        "--device",
+        device,
+    ]
+    if float(epoch_mult or 1.0) != 1.0:
+        argv += ["--epoch-mult", f"{float(epoch_mult):g}"]
     return subprocess.Popen(
-        [
-            sys.executable,
-            "-u",
-            "-m",
-            "remote.remote_worker_serve",
-            "--port",
-            str(port),
-            "--token",
-            token,
-            "--work",
-            str(work_dir),
-            "--device",
-            device,
-        ],
+        argv,
         stdout=log_f,
         stderr=subprocess.STDOUT,
         env=env,
@@ -338,7 +347,12 @@ def run_push_first(cfg: dict[str, Any], log: Callable[[str], None]) -> int:
         time.sleep(0.5)
     device = str(cfg.get("device_resolved") or cfg.get("device") or "cpu")
     real = spawn_full_worker_server(
-        port, token, work, device, code_dir, work / "serve.log"
+        port,
+        token,
+        work,
+        device,
+        code_dir,
+        work / "serve.log",
     )
     if not wait_ping(port, token, 30):
         # 失败必须自解释：真因在子进程的 stdout/stderr 里（被重定向到 serve.log），

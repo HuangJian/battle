@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from common.cli import house_parser, run_main
-from remote.worker_server import serve_forever
+from remote.worker_server import epoch_mult_of, serve_forever
 
 
 def main() -> None:
@@ -24,6 +24,15 @@ def main() -> None:
     )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
+    ap.add_argument(
+        "--epoch-mult",
+        type=epoch_mult_of,
+        default=1.0,
+        help=(
+            "PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样；向上取整、最少 1）。"
+            "训练侧旋钮：不改采样量/评估语料"
+        ),
+    )
     ap.add_argument(
         "--lock-file",
         default="",
@@ -45,6 +54,7 @@ def main() -> None:
         work,
         device=args.device,
         torch_threads=args.threads,
+        epoch_mult=args.epoch_mult,
         lock_file=args.lock_file,
     )
 

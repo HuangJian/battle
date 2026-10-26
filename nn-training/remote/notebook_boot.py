@@ -129,6 +129,8 @@ def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str)
         "device": cfg["device"], "use_multi_gpu": True,
         "max_session_hours": cfg["max_session_hours"], "poll_interval_sec": 1,
         "idle_floor_sec": 3600, "max_worker_restarts": 5,
+        # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N；缺省 1.0 = 课程原样）。
+        "epoch_mult": cfg.get("epoch_mult", 1.0),
         "keepalive_stop": keepalive_stop, "log": log, "code_dir": CODE_DIR,
     })
 
@@ -217,12 +219,15 @@ def _push(cfg: dict, log, secret, keepalive_stop, ip: str, tok: str) -> int:
         "device": cfg["device"], "use_multi_gpu": True,
         "max_session_hours": cfg["max_session_hours"], "poll_interval_sec": 1,
         "idle_floor_sec": 3600, "max_worker_restarts": 5,
+        # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N；缺省 1.0 = 课程原样）。
+        "epoch_mult": cfg.get("epoch_mult", 1.0),
         "keepalive_stop": keepalive_stop, "log": log, "code_dir": CODE_DIR,
     }
     # 设备必须在 spawn 之前解析：spawn 传 --device，给 "auto" 会当场炸（2026-09-15 事故）
     rl_cfg["device_resolved"] = resolve_device(rl_cfg, log)
     real = spawn_full_worker_server(
-        port, tok, work, str(rl_cfg["device_resolved"]), cdir, work / "serve.log")
+        port, tok, work, str(rl_cfg["device_resolved"]), cdir, work / "serve.log",
+        epoch_mult=float(cfg.get("epoch_mult") or 1.0))
     if not wait_ping(port, tok, 30):
         log("worker_server 30s 未就绪——serve.log 尾部:")
         try:

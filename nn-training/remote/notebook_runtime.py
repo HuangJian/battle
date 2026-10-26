@@ -28,6 +28,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -48,6 +49,24 @@ from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_
 #: 2026-10-11（plan/nn-training-reuse-and-deps §S2）：4 份同形 `_log_default` 收敛为工厂；
 #: `lambda: time` 保留「每次重读本模块 `time`」的注入缝（7 处假钟用例钉着）。
 _log_default = tag_logger("battle-rl", lambda: time)
+
+def _epoch_mult_of(cfg: dict[str, Any]) -> float:
+    """`CFG.epoch_mult`：PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样）。
+
+    与离线盘 `offline_boot.build_run_argv` 同一条校验：有限正数，非法值**开跑前**拒绝；
+    空值/None 当作缺省 1.0。
+    """
+    raw = cfg.get("epoch_mult", 1.0)
+    if raw is None or raw == "":
+        raw = 1.0
+    try:
+        v = float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"CFG.epoch_mult 必须是正数（当前 {raw!r}）") from e
+    if not math.isfinite(v) or v <= 0:
+        raise ValueError(f"CFG.epoch_mult 必须是有限正数（当前 {raw!r}）")
+    return v
+
 
 #: push 守候期「过程日志静默多久才补一行心跳」（秒）。job 在跑（`busy=true`）而 serve.log
 #: 还在往外吐时，那行 `守候中… busy=True` 只是刷屏（2026-10-26 用户口径）——但**完全静默**
@@ -306,6 +325,11 @@ def worker_restart_argv(
         argv += ["--cache-dir", str(cfg["cache_dir"])]
     if cfg.get("offline_worker"):
         argv.append("--offline")
+    # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N）。**非缺省才传** ⇒ 旧 cfg 的 argv
+    #   逐字不变（与离线盘 `build_run_argv` 同一条纪律）。
+    _em = _epoch_mult_of(cfg)
+    if _em != 1.0:
+        argv += ["--epoch-mult", f"{_em:g}"]
     return argv
 
 
@@ -519,6 +543,11 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     reg = _push_registry(cfg, log)
     cfg["node_id"] = reg.node_id  # push-first 内联注册/升级后复用同一个 id
     push_tok = str(cfg.get("push_token") or "")
+    # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N）——它在**起服务时**定下，
+    #   所以 push-first 升级前就得校验；非缺省才进 argv（旧 cfg 行为逐字不变）。
+    epoch_mult = _epoch_mult_of(cfg)
+    if epoch_mult != 1.0:
+        log(f"训练放大：PPO epochs×{epoch_mult:g}（只改更新遍数；不改采样/评估）")
 
     if already:
         serve_pid = int(already.get("serve_pid") or 0)
@@ -649,10 +678,13 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     serve_env = dict(os.environ)
     serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
     with open(serve_log, "w") as log_f:
+        serve_argv = [sys.executable, "-u", "-m", "remote.remote_worker_serve",
+                      "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
+                      "--work", str(work_dir), "--device", str(cfg["device_resolved"])]
+        if epoch_mult != 1.0:
+            serve_argv += ["--epoch-mult", f"{epoch_mult:g}"]
         serve_proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "remote.remote_worker_serve",
-             "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
-             "--work", str(work_dir), "--device", str(cfg["device_resolved"])],
+            serve_argv,
             stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,
         )
     log(f"worker_server 启动 (PID {serve_proc.pid})，等就绪…")
@@ -835,8 +867,9 @@ def run_notebook(cfg: dict[str, Any]) -> int:
     t_session = time.time()
     rc = 0
     print("\n" + "=" * 62)
+    _em = _epoch_mult_of(cfg)
     print(f"  Battle GPU Worker | mode={cfg['mode']} device={cfg.get('device_resolved')} "
-          f"| 任务类型 ppo+bc")
+          f"| 任务类型 ppo+bc" + (f" | PPO epochs×{_em:g}" if _em != 1.0 else ""))
     print(f"  会话上限 {cfg['max_session_hours']}h | 停止 = 中断本 cell")
     print("=" * 62 + "\n")
     try:

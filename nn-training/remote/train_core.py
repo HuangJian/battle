@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import time
 from collections.abc import Callable
@@ -66,6 +67,19 @@ from remote.download import (
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
 from remote.wire import _wire_block, _wire_time
+
+
+def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
+    """本轮真正要跑的 PPO 遍数（纯函数）：`ceil(课程 epochs × N)`、最少 1；1.0 = 原样。
+
+    只放大**更新遍数**：采样量/评估语料/关卡/命数都不动（与 `remote/plan_run` 的
+    离线口径同一条）。`manifest_epochs <= 0` 时原样返回 0 —— 放大不制造训练量。
+    """
+    base = int(manifest_epochs or 0)
+    # 0/缺省 = 这单本来就不训（非 PPO 腿）⇒ 放大不许凭空造出 1 遍。
+    if base <= 0 or epoch_mult == 1.0:
+        return base
+    return max(1, math.ceil(base * epoch_mult))
 
 
 def kick_kl_value(manifest: dict) -> float:
@@ -183,6 +197,9 @@ def run_training_core(
     ts_code_hit: bool,
     device: Any,
     torch_threads: int,
+    #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
+    #: 与离线盘 `CFG.epoch_mult` 同义：只改遍数，不改采样量/评估语料，也不改 manifest 身份。
+    epoch_mult: float = 1.0,
     preloaded: dict | None,
     # opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：初始权重由**作业壳**
     # 在 rollout **之前**解析好传进来（`_resolve_weights` 现在住 `remote/download.py`）。
@@ -242,6 +259,16 @@ def run_training_core(
         identity={"course": course.name, "formula_hash": manifest["formula_hash"]},
     )
     prep_b.add("课程", f"{time.time() - t_course:.1f}s（load_course+reward）")
+    # ★ 2026-10-26（用户口径）：高配云机的训练侧放大 —— 只改 PPO **更新遍数**。
+    #   manifest 本身**不重写**（hub 对账/产物指纹都绑在它上面）；缺省 1.0 时不打任何
+    #   新日志，旧路径逐字不变。
+    epochs_eff = effective_epochs(int(manifest.get("epochs") or 0), epoch_mult)
+    if epoch_mult != 1.0:
+        prep_b.add(
+            "训练放大",
+            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs_eff}"
+            f"（manifest {int(manifest.get('epochs') or 0)}）",
+        )
 
     # ---- 延迟导入 torch / ppo 后端（B7 同款；本模块顶层零 torch） ----
     import torch
@@ -655,7 +682,7 @@ def run_training_core(
         "ppo",
         it=int(manifest.get("it", 0) or 0),
         done=0,
-        total=int(manifest.get("epochs", 0) or 0),
+        total=epochs_eff,
         force=True,
     )
 
@@ -700,7 +727,7 @@ def run_training_core(
             model,
             opt,
             chunks,
-            int(manifest["epochs"]),
+            epochs_eff,
             device_t,
             kl_coef=float(manifest["kl_coef"]),
             # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
@@ -788,7 +815,7 @@ def run_training_core(
         #   地址是「整份」还是「delta」，本机都不会重传自己已经持有的字节。
         _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
     ckpt_dir = job_dir / "ppo_final"
-    _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
+    _ppo_save(str(ckpt_dir), raw_model, opt, epochs_eff)
     # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身
     opt_tar_raw = pack_opt_tar(ckpt_dir)
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
