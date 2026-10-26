@@ -58,6 +58,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   defenseColSpread: 3,
   threatRangeCells: 23,
   maxPlayerDistFromBase: 40,
+  // A30 (2026-10-26): 基地血量 ≤ 该比例时，回防距离阈值收紧到 `leashShrinkTo`。
+  // 0 = OFF（始终用 maxPlayerDistFromBase）。
+  leashShrinkHpFrac: 0,
+  leashShrinkTo: 26,
   // P4: race-to-base emergency defense (see interface docs). Range 18 /
   // margin 2 — M4 search widened the race window (earlier, more committed
   // defense before the enemy reaches the base).

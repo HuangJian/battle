@@ -41,6 +41,11 @@ export interface GodAIParams {
   threatRangeCells: number
   /** Player returns to base if farther than this from the base. */
   maxPlayerDistFromBase: number
+  /** A30 (2026-10-26): when baseHp <= this fraction of max, the return-to-base
+   * leash tightens to `leashShrinkTo`. 0 = OFF. */
+  leashShrinkHpFrac: number
+  /** A30: the tightened leash value used when baseHp is low. */
+  leashShrinkTo: number
   /**
    * P4: race-to-base check range. An enemy within this Manhattan distance
    * of the base triggers emergency defense IF the player would lose the

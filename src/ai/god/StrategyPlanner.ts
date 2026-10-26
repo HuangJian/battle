@@ -2157,7 +2157,15 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // leaving the (immediate) entry threshold untouched. With hysteresis 0 the
   // margin is always 0 ⇒ byte-identical to pre-A4.
   const distMargin = self._defenseReturnLatch ? self.params.defenseReturnHysteresis : 0
-  if (baseUnderThreat && playerDistToBase + distMargin > self.params.maxPlayerDistFromBase) {
+  // A30 (2026-10-26): 基地血量驱动的「收紧回防」—— 逐关尸检显示高血关（armor/HP pool 大）
+  // 的失败几乎全是**基地被磨死**，而击杀清场在算术上不可能（射速 64 vs 血量池 40-54）。
+  // 于是把「离基地多远才强制回防」做成基地血量的函数：满血时放宽（A25 已证 +0.71/+1.57），
+  // 掉血后收紧回 26，优先保命保基地。
+  const leash =
+    self.params.leashShrinkHpFrac > 0 && w.baseHp <= self.params.leashShrinkHpFrac * w.baseMaxHp
+      ? self.params.leashShrinkTo
+      : self.params.maxPlayerDistFromBase
+  if (baseUnderThreat && playerDistToBase + distMargin > leash) {
     self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
