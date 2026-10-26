@@ -47,6 +47,9 @@ function runRiverbed(
     world,
     {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
+      // 本用例钉的是自己的机制 ⇒ 固定回 26。
+      maxPlayerDistFromBase: 26,
       // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
       lateHuntMode: 0,
       // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
