@@ -1457,6 +1457,9 @@ export interface GodAIParams {
   /** A20 (2026-10-25): slack (ticks) added to the half-body crossing time when
    * deciding that a strafing enemy will cross our line in time. */
   crossingSlackTicks: number
+  /** A22 (2026-10-26): require an enemy whose body actually overlaps the 6px
+   * bullet corridor (the ±8px offset scan over-reports). 0 = OFF. */
+  corridorEnemyGate: number
   /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
    * down the same lane toward the same target (deterministic fire economy).
    * 0 = OFF (byte-identical). */

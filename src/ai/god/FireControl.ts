@@ -2,7 +2,7 @@ import type { GodAIInput } from '../GodAIInput'
 import { leadHitForDir } from './lead-fire'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
-import { CELL, TANK, FIELD, GRID, BASE_POS } from '../../constants'
+import { CELL, TANK, BULLET, FIELD, GRID, BASE_POS } from '../../constants'
 import { snap, bulletInFrontDist } from '../../utils/helpers'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
@@ -770,6 +770,39 @@ export function shouldFireInDirImpl(
 
   // Enemy in line of fire — fire.
   if (result.enemy) {
+    // A22 (2026-10-26): CENTER-CORRIDOR enemy check. `scanAhead` reads two lines
+    // offset ±8px from the barrel and reports an enemy when its BODY touches
+    // either line — so it "sees" enemies up to ~24px off-centre. The bullet is
+    // 6px wide and travels the CENTRE line: its real hit window is
+    // (TANK + BULLET)/2 = 19px. In the 19–24px band the AI fires at nothing:
+    // measured 20.4 shots/game that neither hit an enemy nor break a brick
+    // (≈40% of the shot budget). Require an enemy that actually overlaps the
+    // corridor the bullet travels.
+    if (self.params.corridorEnemyGate > 0) {
+      const vertical = dir === 'up' || dir === 'down'
+      const half = (TANK + BULLET) / 2
+      let hittable = false
+      for (let ti = 0; ti < w.tanks.length; ti++) {
+        const t = w.tanks[ti]
+        if (!t.alive || t.allegiance === 'player' || t.spawnTimer > 0) continue
+        const cx = t.x + t.w / 2
+        const cy = t.y + t.h / 2
+        const lat = vertical ? Math.abs(cx - pcx) : Math.abs(cy - pcy)
+        if (lat > half) continue
+        const ahead = vertical
+          ? dir === 'down'
+            ? cy - pcy
+            : pcy - cy
+          : dir === 'right'
+            ? cx - pcx
+            : pcx - cx
+        if (ahead > 0) {
+          hittable = true
+          break
+        }
+      }
+      if (!hittable) return false
+    }
     // A17 (2026-10-25): DETERMINISTIC fire economy — a second shell into a lane
     // that already has OUR shell in flight is a wasted cooldown (the first one
     // will land first). This replaces the accidental 3% random skip that
