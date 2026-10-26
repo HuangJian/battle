@@ -580,6 +580,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   freezeHuntMode: 0,
   // A34 (2026-10-26): 不对消 —— 射线上有敌弹且敌人 >3 格时不开火（省冷却）。
   skipCancelShot: 0,
+  // A35 (2026-10-26): 「打肩膀」—— 冷却中侧移 7~19px，让炮弹绕过敌弹但仍命中敌人。
+  // 0 = OFF（字节等同）；shoulderShotPx = 目标侧移像素（默认 10）。
+  shoulderShotMode: 0,
+  shoulderShotPx: 10,
   // A24 (2026-10-26): 晚期残敌狩猎 —— 击杀数 ≥ lateHuntKills 且四方向无射门、基地不告急时，
   // 直接朝最近残敌走（贪心一步）。0 = OFF。
   // A24b (2026-10-26, 按用户裁定细化：残敌 ≤3 + 只在开火冷却中推进)：

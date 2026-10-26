@@ -170,6 +170,12 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
     why: 'A21 diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall)',
   },
   _lastFireWasFacing: { cls: 'B', why: 'A15b diagnostic: frame of the last facing-branch shot' },
+  // A35b (2026-10-26): shoulder-shot maneuver state (idle unless shielded + same line).
+  _shPhase: { cls: 'B', why: 'A35b shoulder-shot phase (0 idle / 1 strafe / 2 turn back)' },
+  _shTicks: { cls: 'B', why: 'A35b strafe tick counter' },
+  _shDir: { cls: 'B', why: 'A35b strafe direction' },
+  _shBaseLat: { cls: 'B', why: 'A35b lateral origin (px)' },
+  _shAimDir: { cls: 'B', why: 'A35b facing to restore after the strafe' },
   // A29 (2026-10-26): fire-quality mode flag (on-field HP pool >= qualityFireHp).
   _hpPressureActive: {
     cls: 'B',

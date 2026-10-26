@@ -415,6 +415,83 @@ export function thinkImpl(self: GodAIInput): void {
     self._hpPressureActive = false
   }
 
+  // ============ A35b (2026-10-26): SHOULDER SHOT（打肩膀）============
+  // 触发条件只有三条（用户裁定，别加戏）：
+  //   ① 护盾期（`shielded` —— 20 秒无敌，站着对射不会死）；
+  //   ② 敌人与我**同线**（横向偏差 < 命中窗 19px）；
+  //   ③ 它的**炮口朝向我**（它下一发就是朝我来的）。
+  // 此时**同线开火会被对消**（两弹相撞，两败俱伤）。解法：侧移半格（~10px）再打它肩膀 ——
+  // 子弹只有 6px 宽（3+3 才相撞），而命中窗有 19px ⇒ 错开 7~19px 时我方弹从它的弹旁边过去、
+  // 仍落在它身体里。原版无横移，人类用「转身 → 侧移 → 转回 → 开火」这条时序实现。
+  if (self.params.shoulderShotMode > 0 && shielded) {
+    const perpOf: Record<
+      string,
+      ['up' | 'down' | 'left' | 'right', 'up' | 'down' | 'left' | 'right']
+    > = {
+      up: ['left', 'right'],
+      down: ['left', 'right'],
+      left: ['up', 'down'],
+      right: ['up', 'down'],
+    }
+    if (self._shPhase === 0) {
+      // 找一个「同线 + 炮口朝我」的敌人
+      for (let i = 0; i < self._enemies.length; i++) {
+        const e = self._enemies[i]
+        const ex = e.x + e.w / 2
+        const ey = e.y + e.h / 2
+        const eVert = e.dir === 'up' || e.dir === 'down'
+        const lat = eVert ? Math.abs(ex - pcx) : Math.abs(ey - pcy)
+        if (lat >= 19) continue
+        // 炮口是否朝我（轴向一致 + 我在它前方）
+        const towardMe = eVert
+          ? e.dir === 'up'
+            ? pcy < ey
+            : pcy > ey
+          : e.dir === 'left'
+            ? pcx < ex
+            : pcx > ex
+        if (!towardMe) continue
+        // 我也得能打到它（同一轴向、它在射程内）
+        if (!scanAheadImpl(self, pcx, pcy, p.dir).enemy) continue
+        const [a, b] = perpOf[p.dir]
+        const side = self.canMoveDir(p, a) ? a : self.canMoveDir(p, b) ? b : null
+        if (side) {
+          self._shPhase = 1
+          self._shTicks = 0
+          self._shDir = side
+          self._shAimDir = p.dir
+          const sideVert = side === 'left' || side === 'right'
+          self._shBaseLat = sideVert ? p.y + p.h / 2 : p.x + p.w / 2
+        }
+        break
+      }
+    }
+    if (self._shPhase === 1 && self._shDir) {
+      const sideVert = self._shDir === 'left' || self._shDir === 'right'
+      const latNow = sideVert ? p.y + p.h / 2 : p.x + p.w / 2
+      const moved = Math.abs(latNow - self._shBaseLat)
+      if (moved >= self.params.shoulderShotPx || self._shTicks > 16) {
+        self._shPhase = 2 // 错开够了 ⇒ 转回
+      } else {
+        self._moveDir = self._shDir
+        self._fire = false
+        self._shTicks++
+        recordBranch(self, 'navigate')
+        return
+      }
+    }
+    if (self._shPhase === 2) {
+      if (p.dir === self._shAimDir || !shielded) {
+        self._shPhase = 0 // 已转回（或护盾结束）⇒ 交给 A23 开火
+      } else {
+        self._moveDir = self._shAimDir
+        self._fire = false
+        recordBranch(self, 'navigate')
+        return
+      }
+    }
+  }
+
   // ============ A32 (2026-10-26): FREEZE-WINDOW ROLL-CALL ============
   // 用户裁定：冰冻期敌人**不能移动躲弹**，射击/击杀率应该比全局高 30~50%，
   // 而实测只有 +8%/+9% —— 说明冻结窗口被浪费在走位上。

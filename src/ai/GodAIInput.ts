@@ -388,6 +388,15 @@ export class GodAIInput implements InputLike {
   _fireGateAudit: Record<string, number> = {}
   /** A21 (2026-10-25) diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall). */
   _fireReason: Record<string, number> = {}
+  /** A35 (2026-10-26): 「打肩膀」动作序列状态机。
+   *   0 = idle · 1 = 侧移 (turn+move 垂直) · 2 = 转回 (turn back) · 3 = 收尾。
+   * 触发：冷却中 + 我方射线上有敌弹 + 更远处有可打敌人。 */
+  _shPhase = 0
+  _shTicks = 0
+  _shDir: 'up' | 'down' | 'left' | 'right' | null = null
+  _shBaseLat = 0
+  /** A35b: 侧移前我方朝向（阶段 2 转回用）。 */
+  _shAimDir: 'up' | 'down' | 'left' | 'right' | null = null
   /** A29 (2026-10-26): true while the on-field HP pool is above `qualityFireHp`
    * (fire-quality mode: no P2.4 crossing shots, corridor-verified targets only). */
   _hpPressureActive = false

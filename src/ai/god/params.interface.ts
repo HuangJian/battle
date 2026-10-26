@@ -1487,6 +1487,11 @@ export interface GodAIParams {
   /** A34 (2026-10-26): don't spend a shell that will be cancelled by an incoming
    * enemy bullet (skip unless the enemy is within 3 cells). 0 = OFF. */
   skipCancelShot: number
+  /** A35 (2026-10-26): shoulder shot — strafe 7..19px during cooldown so our shell
+   * slips past the incoming one but still hits the enemy body. 0 = OFF. */
+  shoulderShotMode: number
+  /** A35: lateral offset (px) the strafe aims for. */
+  shoulderShotPx: number
   /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
    * enemy when nothing is hittable and the base is safe. 0 = OFF. */
   lateHuntMode: number
