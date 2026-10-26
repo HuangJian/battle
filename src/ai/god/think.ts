@@ -448,8 +448,12 @@ export function thinkImpl(self: GodAIInput): void {
         const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
         for (let i = 0; i < order.length; i++) {
           if (self.canMoveDir(p, order[i])) {
-            self._moveDir = order[i]
-            self._fire = false
+            const mv = order[i]
+            self._moveDir = mv
+            // A33 (2026-10-26)：A32 的失败点之一就是这里把 `_fire` 硬关成 false ——
+            // 冻结期「边走边打」才是正确形态（敌人不能动，走位几乎没有代价）。
+            // 因此移动方向上只要能开火就开：不丢任何一发。
+            self._fire = shouldFireInDirImpl(self, pcx, pcy, mv)
             recordBranch(self, 'navigate')
             return
           }
