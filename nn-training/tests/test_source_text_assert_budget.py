@@ -309,8 +309,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-25 进度行人读化抬到 **1503**（+2，全在 `tests/common/test_progress_text.py`：那个模块的
 #:   **存在意义就是措辞**（一行说清在干什么/进度/有没有问题），期望串已尽量改成插值，只剩
 #:   「⚠ 标记在不在」与「不许出现第0轮」两条必须看文本；理由见模块头末段）。
+#: 2026-10-26 抬到 **1504**（+1，`tests/remote/test_notebook_runtime.py` 的
+#:   `test_resolve_device_torch_broken_is_fatal_not_cpu`：torch 装坏时的 FATAL 文案必须**逐字**
+#:   含 `libcudart`（现场证据）、`白烧`（为什么要早停）、`pip install torch`（修法）——
+#:   那是操作员在云机断连后唯一的自救信息，只能用文本判据钉）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1503
+BASELINE_FORM = 1504
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

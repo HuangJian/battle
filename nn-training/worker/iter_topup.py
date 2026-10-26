@@ -44,9 +44,11 @@ from worker.volume_alloc import (
     shortfall_by_stage,
     spread_games_by_stage,
     stage_totals,
+    topup_games_by_stage,
     validate_runtime_volume,
     wasted_samples,
 )
+from worker.volume_quota import target_per_stage
 
 #: 补差批的 job 子目录前缀（`topup1` / `topup2` …）——与首批同目录会让逐位对账失真。
 BATCH_DIR_PREFIX = "topup"
@@ -179,6 +181,47 @@ def merge_iter_reports(base: dict, extra: list[dict]) -> dict:
     return out
 
 
+def _measured_est_per_stage(
+    stages: list[int],
+    collected: dict[int, int],
+    games: dict[int, int],
+    *,
+    fallback: dict[int, int] | None = None,
+) -> dict[int, int] | None:
+    """本轮**实测**的局均样本（samples/局 = 本关 collected ÷ games）。
+
+    返回 `None` = 一局实测都没有（首波零产出 / 全被清）⇒ 调用方回退「不猜档」。
+
+    为什么不用 plan 里的 `est_s_by_stage`：那是**打包时**的旧值，新腿首轮恒 0。而首波一跑完，
+    `collected/games` 就是这一轮真正的局均（现场：35 关 × 1 局 = 12010 samples ⇒ 343/局）。
+    用 0 算缺口 ⇒ `topup_games_by_stage` 会直接拒（`est <= 0`）⇒ 旧代码只能走「每关 1 局」
+    的铺满档 ⇒ 35 关 ÷ 4 核 = 44 批 ⇒ 一轮 15 分钟。这就是 2026-10-26 那 41 批的来路。
+
+    * 本关有实测 ⇒ 用本关的（关间 samples/局 能差 1.75×，池化会系统性偏）；
+    * 本关零产出 ⇒ 退化到**全池**均值（`Σcollected/Σgames`），再不济才用 `fallback`。
+    """
+    need = [int(s) for s in stages]
+    per: dict[int, int] = {}
+    tot_s = tot_g = 0
+    for s in need:
+        g = int(games.get(s, 0) or 0)
+        c = int(collected.get(s, 0) or 0)
+        tot_s += c
+        tot_g += g
+        if g > 0 and c > 0:
+            per[s] = max(1, round(c / g))
+    if not per:
+        return None
+    pooled = max(1, round(tot_s / tot_g)) if tot_g > 0 else 0
+    out: dict[int, int] = {}
+    for s in need:
+        v = per.get(s) or pooled or int((fallback or {}).get(s, 0) or 0)
+        if v <= 0:
+            return None  # 有的关连兜底都没有 ⇒ 不猜，交回不猜档
+        out[s] = int(v)
+    return out
+
+
 def topup_rollout(
     *,
     job_dir: str | Path,
@@ -264,15 +307,35 @@ def topup_rollout(
     reports: list[dict] = []
     batches = 0
     while batches < max_batches:
-        # 满铺：本批恰好 `batch_width` 局（不再解缺口方程 —— 见 volume_alloc.spread_games_by_stage）
-        plan_g = spread_games_by_stage(
-            stages=stages,
-            collected=collected,
-            games_done=games,
-            target_transitions=target,
-            game_caps=caps,
-            width=batch_width,
-        )
+        # ★ 流式（2026-10-26 用户口径）：「采完一局就判差额最大的关卡，用空出的 worker 采它，
+        #   直到所有关满额」。实现 = **一次按本轮实测 est 把全部缺口派进 worker 池**，
+        #   池子谁空谁领 ⇒ 不再切成「关数×每关局数/宽度」批（35 关 ÷ 4 核 = 44 批那种）。
+        #
+        #   为什么必须用**实测** est：plan 里的 `est_s_by_stage` 是打包时的旧值，首轮恒 0
+        #   ⇒ 旧路径只能走 `spread_games_by_stage` 的「不猜档」（每批每关 1 局）⇒ 44 批
+        #   ⇒ 一轮 15 分钟 ⇒ 撞满 `OFFLINE_LEASE_TTL_SEC`（900s）。首波一跑完就有
+        #   `collected/games`，那才是这一轮真正的局均样本。
+        est_now = _measured_est_per_stage(stages, collected, games, fallback=ests)
+        if est_now is not None:
+            plan_g = topup_games_by_stage(
+                stages=stages,
+                collected=collected,
+                games_done=games,
+                target_transitions=target,
+                ests=est_now,
+                game_caps=caps,
+                batches_left=max_batches - batches,
+            )
+        else:
+            # 冷启动兜底：连一局实测都没有（首波零产出 / 全被清）⇒ 按机器宽度铺满、每关 1 局。
+            plan_g = spread_games_by_stage(
+                stages=stages,
+                collected=collected,
+                games_done=games,
+                target_transitions=target,
+                game_caps=caps,
+                width=batch_width,
+            )
         if not plan_g:
             break
         batches += 1
@@ -297,9 +360,26 @@ def topup_rollout(
                 f"但 {src_w} 不存在——拒收（宁可不补，也不能跑一批读不到权重的局）"
             )
         shutil.copyfile(src_w, sub / INIT_WEIGHTS_NAME)
+        # 日志口径（2026-10-26）：**不再打 `est_s`** —— `spread_games_by_stage` 明确「不吃 est」
+        # （只问机器能同时跑几局），那一列对判断「为什么还在补」零信息量（35 关首轮全 0，
+        # 看起来像死循环，实际是「关数 35 ≫ 机器宽度 4」在推进）。改成**实际进度 + 逐关缺口**：
+        #   · 已采 = Σ collected（samples，与 quota 同量纲）
+        #   · 缺口 = Σ max(0, quota − collected)（= shortfall_by_stage，硬指标）
+        #   · 本批关 = 这一批真正要跑的关各自的 `collected/quota`（看得到「同一组关补了几轮」）
+        quota = target_per_stage(target, len(stages))
+        got_now = sum(int(collected.get(s, 0) or 0) for s in stages)
+        short_now = shortfall_by_stage(stages=stages, collected=collected, target_transitions=target)
+        left_now = sum(int(v) for v in short_now.values())
+        batch_txt = " ".join(f"s{s}:{int(collected.get(s, 0) or 0)}/{quota}" for s in plan_g)
+        # `cap` 只在课程真的给了逐关硬顶时才打（y35-classic 没给 ⇒ 恒 `cap={}` 是纯噪音；
+        # 给了就必须可见——「别再烧了」生效与否全靠它）。
+        cap_txt = f"，cap={caps}" if caps else ""
         log(
             f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局"
-            f"（满铺 width={batch_width} → {sub.name}/，槽位={slot_txt}，games={plan_g}，cap={caps}，est_s={ests}）"
+            f"｜已采 {got_now}/{target}（{100.0 * got_now / target:.1f}%），缺口 {left_now}"
+            f"｜本批关 {batch_txt}"
+            f"（{'流式·按实测 est 解缺口' if est_now else '不猜档·每关 1 局'}，"
+            f"width={batch_width} → {sub.name}/，槽位={slot_txt}{cap_txt}）"
         )
         info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx, it=int(it))
         dirs_b = [str(d) for d in info["shard_dirs"]]

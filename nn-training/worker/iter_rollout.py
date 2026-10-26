@@ -43,8 +43,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-# 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 5s、首次尝试硬顶
-# 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
+# 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 20s、首次尝试硬顶
+# 30s（2026-10-26 由 5s 放宽：经典 35 关 3 命的长局在 4 核 CPU 上常态 6–15s，5s 是误杀）、
+# 重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
 from common import game_watch, progress_hook, scratch
@@ -302,8 +303,19 @@ def _clean_attempt(job_dir: Path, argv: list[str], *, exec_root: Path | None = N
         name = shard_name(stage, seed)
         # 递归扫：`scan_shard_dirs` 认的是「job 目录下任何位置的合法 shard 目录」，这里必须**同口径**
         # （宽一边就是半截 shard 留在盘上被当成产出）。
+        #
+        # ★ 2026-10-26（云机 4 核 41 批后实测崩进程）：**`rglob` 必须自己兜 OSError**。
+        #   同批多 worker 并发，两局同时超时 ⇒ 两个线程各清一次；一个 `rmtree` 掉 shard
+        #   目录的同时，另一个的 `rglob` 正 stat 到那一层 ⇒ Python 3.10 的 `rglob` **抛
+        #   FileNotFoundError（不是静默跳过）**。后果不是「少清一个目录」，而是异常穿过
+        #   `run_iter_rollout` 的 try ⇒ `ok` 停在 False ⇒ 打一行 `kind=iter rollout 中断`
+        #   ⇒ 冒到 `run_loop` 顶层，整条腿当场死（现场：`FileNotFoundError: …/topup41/r/w196`）。
+        #   清理是 best-effort：扫不到就当没有，绝不能反过来杀死这一轮。
         for r in roots:
-            targets += list(r.rglob(name))
+            try:
+                targets += list(r.rglob(name))
+            except OSError:
+                pass
     for t in targets:
         try:
             if not t.exists():

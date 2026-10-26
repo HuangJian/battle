@@ -108,16 +108,31 @@ def _probe_cuda(log) -> dict | None:
     子进程后，最坏情况只是探测子进程退一层 → 按无 CUDA 落 TPU/CPU，kernel 照常继续；
     与「内核绝不 import torch_xla」是同一纪律的延伸。
 
-    返回 {"v": torch 版本, "n": 可见卡数, "names": [卡名...]}；torch 未装 / 子进程
-    崩溃 / 输出不可解析 → None。
+    返回：
+      * `{"v": 版本, "n": 卡数, "names": [...]}` —— torch 正常（n=0 就是真没 GPU）；
+      * `{"err": "<原因>"}` —— **torch 本身装坏了**（import 就崩，例如
+        `OSError: libcudart.so.11.0: cannot open shared object file`）。★ 2026-10-26 加：
+        旧实现把这一档和「无 CUDA」混成一个 `None`，于是设备判定照常回 CPU、训练照常开跑，
+        直到一轮 rollout 采完（云机 35 关 · 47 批 · 十几分钟）进 PPO 才 `OSError` 崩——
+        **一整轮采集白烧**。调用方（`resolve_device`）必须 FATAL，不是回落。
+      * `None` —— 探测子进程起不来 / 输出不可解析（真·未知）。
     """
     import json as _json
 
     _probe = (
-        "import json, torch\n"
-        "n = torch.cuda.device_count() if torch.cuda.is_available() else 0\n"
-        "print(json.dumps({'v': torch.__version__, 'n': n,"
-        " 'names': [torch.cuda.get_device_name(i) for i in range(n)]}), flush=True)\n"
+        "import json\n"
+        "try:\n"
+        "    import torch\n"
+        "except BaseException as e:\n"
+        "    print(json.dumps({'err': type(e).__name__ + ': ' + str(e)}), flush=True)\n"
+        "    raise SystemExit(0)\n"
+        "try:\n"
+        "    n = torch.cuda.device_count() if torch.cuda.is_available() else 0\n"
+        "    names = [torch.cuda.get_device_name(i) for i in range(n)]\n"
+        "except BaseException as e:\n"
+        "    print(json.dumps({'err': 'cuda probe: ' + type(e).__name__ + ': ' + str(e)}), flush=True)\n"
+        "    raise SystemExit(0)\n"
+        "print(json.dumps({'v': torch.__version__, 'n': n, 'names': names}), flush=True)\n"
     )
     try:
         # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
@@ -127,8 +142,10 @@ def _probe_cuda(log) -> dict | None:
         log(f"torch 探测子进程异常（{type(e).__name__}: {e}）—— 按无 CUDA 处理")
         return None
     if r.returncode != 0:
-        log(f"torch 探测子进程退出 rc={r.returncode} —— 按无 CUDA 处理")
-        return None
+        # 子进程非零退出：把它的 stderr 尾巴带出来 —— 这就是「torch 装坏了」最直接的证据
+        tail = ((r.stderr or "") or (r.stdout or "")).strip().splitlines()[-1:] or [""]
+        log(f"torch 探测子进程退出 rc={r.returncode}（{tail[0][:200]}）")
+        return {"err": f"probe exit rc={r.returncode}: {tail[0][:200]}"}
     try:
         return cast(dict[str, Any], _json.loads((r.stdout or "").strip().splitlines()[-1]))
     except (ValueError, IndexError):
@@ -144,6 +161,20 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     """
     log(f"设备探测中（device={cfg['device']}）…")
     info = _probe_cuda(log)
+    # ★ 2026-10-26：**torch 装坏了必须在开跑前就 FATAL**，不能回落 CPU。
+    #   现场（云机 python 3.10）：`torch` 装了但 CUDA runtime 缺 ⇒ `import torch` 抛
+    #   `OSError: libcudart.so.11.0: cannot open shared object file`。旧实现把这档并进
+    #   「无 CUDA」⇒ 设备判 CPU、训练照常开跑 ⇒ 35 关采了 47 批（十几分钟）到 PPO
+    #   `import torch` 才崩 ⇒ 整轮采集白烧，且日志最后一行的锅甩给 PPO。
+    #   torch 是 PPO 的硬依赖：import 不了就等于这条路完全不可跑，早停是唯一正确处置。
+    if info is not None and info.get("err"):
+        raise SystemExit(
+            f"[FATAL] torch 不可用（{info['err']}）——拒绝开始训练。\n"
+            "  继续跑只会白烧一轮采集：rollout 不需要 torch，但 PPO 一 import 就崩。\n"
+            "  修法：装上与本机 python/cuda 匹配的 torch（`pip install torch --index-url "
+            "https://download.pytorch.org/whl/cpu` 走 CPU 版最省事），或补上被缺的 CUDA runtime，"
+            "然后重跑本 cell。"
+        )
     if info is not None and int(info.get("n") or 0) > 0:
         n_gpu = int(info["n"])
         # ★ 2026-10-21：把卡数交给下游 argv 生成（`worker_restart_argv` 判「一卡一 worker」

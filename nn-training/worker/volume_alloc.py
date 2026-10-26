@@ -242,10 +242,14 @@ def topup_games_by_stage(
 ) -> dict[int, int]:
     """补差批：逐关 `max(0, ceil((quota − collected) / est))`，`game_cap` 截断。
 
-    ⚠ **无生产调用点（2026-10-11）**：`kind=iter` 的补差路径已改走 `spread_games_by_stage`
-    （机器宽度铺满，见其 docstring）；本函数唯一的调用点是它自己，保留是因为它是
-    「缺口解算」语义的**唯一可执行规格**（对账 `volume_waves.plan_topup` 的单 est 老口径）。
-    若将来 `volume_waves` 的口径并进本模块 ⇒ 同笔删（连同它在 `tests/worker/` 的用例）。
+    ★ **2026-10-26 起是本模块的生产路径**（`iter_topup.topup_rollout` 的第一选择）。
+    旧的「一批恰好机器宽度」铺满（`spread_games_by_stage`）在「关数 ≫ 机器宽度」时会把
+    一轮拆成 `关数×每关局数/宽度` 批（35 关 × 6 局 ÷ 4 核 = 44 批），而用户口径是**流式**：
+    「采完一局就判差额最大的关卡，用空出的 worker 采它，直到所有关满额」——
+    等价于「一次按实测 est 把全部缺口派进池子，谁空谁领」。本函数给的就是那个局数。
+    est 必须用**本轮实测**（首波一跑就有 `collected/games`），不是 plan 打包时的旧值
+    （首轮恒 0 ⇒ 只能走「不猜档」每关 1 局 ⇒ 44 批就是这么来的，2026-10-26 云机现场）。
+    调用方在**完全没有实测**（首波零产出）时才回退到 `spread_games_by_stage`。
 
     * 已达标的关**不进结果**（`collected ≥ quota`）；
     * 触 `game_cap`（`games_done ≥ cap`）的关**不进结果**（调用方负责把「未达标 + 触顶」
@@ -281,7 +285,12 @@ def topup_games_by_stage(
         if n <= 0:
             continue
         out[stage] = n
-    return out
+    # 输出按**缺口降序**（缺口相同 ⇒ stage 升序，确定性）：调用方按这个顺序生成 argv，
+    # 派进 worker 池的先后就跟着它走 —— 「差额最大的关卡先采」是用户口径（2026-10-26），
+    # 按 stage 升序发会把小号关永远排在前面（现场：41 批里前 9 批一直在补 2000-2003）。
+    return dict(
+        sorted(out.items(), key=lambda kv: (-(quota - int(collected.get(kv[0], 0) or 0)), kv[0]))
+    )
 
 
 def pool_games_by_stage(

@@ -142,6 +142,31 @@ def test_resolve_device_no_cuda_no_tpu_returns_cpu(
     assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
 
 
+def test_resolve_device_torch_broken_is_fatal_not_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """torch **装坏了** ⇒ 开跑前 FATAL，绝不回落 CPU。
+
+    2026-10-26 云机现场：python 3.10 + torch 缺 CUDA runtime ⇒ `import torch` 抛
+    `OSError: libcudart.so.11.0`。旧实现把这一档并进「无 CUDA」⇒ 设备判 CPU、训练照常开跑
+    ⇒ 35 关采了 47 批（十几分钟）到 PPO `import torch` 才崩 ⇒ **整轮采集白烧**。
+
+    判据：`{"err": ...}`（探测明确拿到 import 失败）⇒ SystemExit；`None`（探不起来，
+    真未知）仍然回落 CPU —— 两者不能混。
+    """
+    monkeypatch.setattr(
+        nbr,
+        "_probe_cuda",
+        lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"},
+    )
+    with pytest.raises(SystemExit) as ei:
+        nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)
+    msg = str(ei.value.code)
+    assert "torch 不可用" in msg and "libcudart" in msg, msg
+    # 说清「继续跑会白烧一轮」和修法（否则下一次还是靠人猜）
+    assert "白烧" in msg and "pip install torch" in msg
+
+
 def test_resolve_device_cuda_single_and_multi(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
