@@ -316,6 +316,54 @@ export function thinkImpl(self: GodAIInput): void {
     }
   }
 
+  // ============ A24 (2026-10-26): LATE-GAME HUNT ============
+  // 晚期尸检（hard 280 局，A23 纪元）：「就绪但四方向都没人」344 拍/局，其中
+  //   navigate 61.7%（交通时间）· **powerup 25.9%（去捡道具）** · aggressive 9.7%。
+  // 残敌少而远时，AI 会把晚期时间花在跑路/捡道具上。A24：晚期且无射门 + 基地不告急时，
+  // 直接朝最近的残敌走（贪心一步），把「跑路」换成「接战」；接上后被 A23 接管转身开火。
+  if (
+    self.params.lateHuntMode > 0 &&
+    w.killCount >= self.params.lateHuntKills &&
+    !frozen &&
+    !self.isBaseUnderThreat()
+  ) {
+    let hittable = false
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const sc = scanAheadImpl(self, pcx, pcy, ALL_DIRS[di])
+      if (sc.enemy) {
+        hittable = true
+        break
+      }
+    }
+    if (!hittable) {
+      let target: (typeof w.tanks)[number] | null = null
+      let bestD = Infinity
+      for (let i = 0; i < self._enemies.length; i++) {
+        const e = self._enemies[i]
+        const d = Math.abs(e.x + e.w / 2 - pcx) + Math.abs(e.y + e.h / 2 - pcy)
+        if (d < bestD) {
+          bestD = d
+          target = e
+        }
+      }
+      if (target && bestD > self.params.lateHuntMinDist * CELL) {
+        const dx = target.x + target.w / 2 - pcx
+        const dy = target.y + target.h / 2 - pcy
+        const horiz: Direction = dx > 0 ? 'right' : 'left'
+        const vert: Direction = dy > 0 ? 'down' : 'up'
+        const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
+        for (let i = 0; i < order.length; i++) {
+          if (self.canMoveDir(p, order[i])) {
+            self._moveDir = order[i]
+            self._fire = false
+            recordBranch(self, 'navigate')
+            return
+          }
+        }
+      }
+    }
+  }
+
   // ---- Scan for enemy targets (global vision, T9 priority) ----
   let aimDir = findEnemyDirectionImpl(self, pcx, pcy)
 

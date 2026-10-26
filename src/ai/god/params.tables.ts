@@ -556,6 +556,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // different results` 出现「两个不同 seed 得到完全相同结局」的坍缩指纹 —— 未查清前
   // 不发货。默认 0（OFF），实现与数据保留。
   turnToFireMode: 1,
+  // A24 (2026-10-26): 晚期残敌狩猎 —— 击杀数 ≥ lateHuntKills 且四方向无射门、基地不告急时，
+  // 直接朝最近残敌走（贪心一步）。0 = OFF。
+  lateHuntMode: 0,
+  lateHuntKills: 14,
+  lateHuntMinDist: 6,
   // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
   // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，
   // 说明起作用的是「偶尔不打」，不是「瞄偏」）。0 = OFF。
