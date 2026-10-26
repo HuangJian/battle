@@ -308,7 +308,9 @@ export function thinkImpl(self: GodAIInput): void {
       if (bestDir !== null) {
         self._moveDir = bestDir
         self._fire = true
-        recordBranch(self, 'engage')
+        // 词表契约：细分支标签必须存在于 `intent/vocab.ts` 的 STATIC_FORWARD
+        // （'engage' 不在表里会让 NN intent 管线直接抛错）。't2a' 就是交战分支。
+        recordBranch(self, 't2a')
         return
       }
     }

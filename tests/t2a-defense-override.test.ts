@@ -31,7 +31,16 @@ function setupWorld(params: Partial<typeof DEFAULT_GOD_AI_PARAMS> = {}): {
   const world = seedWorld(42)
   // Give the AI a FRESH rng so startGame/reset don't consume its stream.
   const aiRng = new RNG(999)
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params }, aiRng)
+  const input = new GodAIInput(
+    world,
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
+      ...params,
+    },
+    aiRng,
+  )
   const sim = new Simulation(world, new Input())
   world.startGame('hard', 'modern', 0)
   // Clear the grid to empty.

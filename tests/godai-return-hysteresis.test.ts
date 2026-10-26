@@ -62,6 +62,8 @@ function countObjectiveFlips(
     // 反映 A4 自身的滞后效果。本测试只隔离 A4，因此固定在 A4 纪元的口径。
     {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
       defenseReturnHysteresis: hyst,
       defensePosStandable: 0,
       defenseCellResolve: 0,
@@ -170,6 +172,8 @@ describe('A4 回防目标滞后 — 离散格距离阈值上的目标翻转', ()
     // 都是同一批"破局"机制，开着会掩盖 pin，钉住时长不可比。
     const base = {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
       navStuckZone: 0,
       baseConnectClearMode: 0,
       pixelStuckDirectMoveTicks: 0,
@@ -189,6 +193,8 @@ describe('A4 回防目标滞后 — 离散格距离阈值上的目标翻转', ()
     // 带上 latch 时（hyst>0 且已 latched）阈值只会更低，绝不会更高。
     const g = new GodAIInput(new World(), {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
       defenseReturnHysteresis: 3,
     })
     expect(g._defenseReturnLatch).toBe(false)

@@ -37,7 +37,12 @@ function setupWorld(
   const world = seedWorld(42)
   // Explicit clone (NOT the DEFAULT singleton) — mutating input.params must
   // not leak into DEFAULT_GOD_AI_PARAMS (DECISIONS §98).
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params })
+  const input = new GodAIInput(world, {
+    ...DEFAULT_GOD_AI_PARAMS,
+    // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+    turnToFireMode: 0,
+    ...params,
+  })
   const sim = new Simulation(world, new Input())
   // 'hard' = POOL combat model. §115: on 'classic' (instant), reset() restores
   // selfFireBaseGuard→0 from CLASSIC_MODEL_PARAMS, so shipped-default tests

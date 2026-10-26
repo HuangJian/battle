@@ -292,7 +292,12 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
       stage: STAGES[33],
       difficulty: 'hard',
       stageIndex: 0,
-      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 0 },
+      godAIParams: {
+        ...DEFAULT_GOD_AI_PARAMS,
+        // A23 纪元：本用例测 action contract 自身，与转身开火无关。
+        turnToFireMode: 0,
+        actionContractMode: 0,
+      },
       maxTicks: 8000,
     })
     const b = runSimulation({
@@ -300,7 +305,7 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
       stage: STAGES[33],
       difficulty: 'hard',
       stageIndex: 0,
-      godAIParams: { ...DEFAULT_GOD_AI_PARAMS },
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, turnToFireMode: 0 },
       maxTicks: 8000,
     })
     expect(a.outcome).toBe(b.outcome)
@@ -314,7 +319,12 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
       stage: STAGES[33],
       difficulty: 'hard',
       stageIndex: 0,
-      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 0 },
+      godAIParams: {
+        ...DEFAULT_GOD_AI_PARAMS,
+        // A23 纪元：本用例测 action contract 自身，与转身开火无关。
+        turnToFireMode: 0,
+        actionContractMode: 0,
+      },
       maxTicks: 8000,
     })
     const on = runSimulation({
@@ -322,7 +332,12 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
       stage: STAGES[33],
       difficulty: 'hard',
       stageIndex: 0,
-      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, actionContractMode: 1 },
+      godAIParams: {
+        ...DEFAULT_GOD_AI_PARAMS,
+        // A23 纪元：本用例测 action contract 自身，与转身开火无关。
+        turnToFireMode: 0,
+        actionContractMode: 1,
+      },
       maxTicks: 8000,
     })
     expect(on.ticks).not.toBe(off.ticks)

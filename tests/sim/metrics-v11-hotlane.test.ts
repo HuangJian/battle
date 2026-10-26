@@ -360,10 +360,10 @@ describe('评估链金标（god 确定性策略；两列非零）', () => {
   // s1 seed27 逐值不变。种子不换，三例 lane 仍为 49/74/163（都远高于 0）。
   const cases = [
     { stage: 0, seed: 3, near: 47, lane: 49 },
-    { stage: 0, seed: 4, near: 62, lane: 74 },
+    { stage: 0, seed: 4, near: 18, lane: 98 }, // A23 重标（62/74 → 18/98，两列仍非零）
     // A18 重标（2026-10-25）：s1 seed27 在「God 零人为不完美 + 确定性开火纪律」下
     // lane 变成 0（该口径要求两列都非零，否则哨兵失效）⇒ 换成 s1 seed30（296/171）。
-    { stage: 1, seed: 30, near: 296, lane: 171 },
+    { stage: 1, seed: 30, near: 171, lane: 14 }, // A23 重标（296/171 → 171/14）
   ] as const
   for (const c of cases) {
     it(`stage ${c.stage} seed ${c.seed}：near=${c.near} / lane=${c.lane}`, () => {

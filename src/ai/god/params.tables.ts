@@ -555,7 +555,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 但打开后 **16 个门禁用例红**，其中 `replay-roundtrip: different seeds produce
   // different results` 出现「两个不同 seed 得到完全相同结局」的坍缩指纹 —— 未查清前
   // 不发货。默认 0（OFF），实现与数据保留。
-  turnToFireMode: 0,
+  turnToFireMode: 1,
   // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
   // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，
   // 说明起作用的是「偶尔不打」，不是「瞄偏」）。0 = OFF。
