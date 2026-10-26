@@ -324,3 +324,35 @@ describe('NodePills · local（本机直跑）', () => {
     expect(row).not.toContain('tc-dot--on')
   })
 })
+
+describe('NodePills · 首帧「探测中」（2026-10-25：未知 ≠ 离线）', () => {
+  it('probesPending + 贡献未知：灰环 + 悬停「探测中」，绝不画红方「离线」', () => {
+    const n = mkNode({ lastContrib: -1, online: null })
+    const pending = renderToString(
+      h(NodePills, { nodes: [n], probesPending: true, onAction: () => {}, onMore: () => {} }),
+    )
+    expect(pending).toContain('tc-dot--empty')
+    expect(pending).toContain('探测中')
+    expect(pending).not.toContain('tc-dot--dead')
+    // 同一份数据、探测已就位 ⇒ 仍是离线：语义分叉由服务端标志决定，不由数据形状猜。
+    const known = renderToString(h(NodePills, { nodes: [n], onAction: () => {}, onMore: () => {} }))
+    expect(known).toContain('tc-dot--dead')
+    expect(known).not.toContain('探测中')
+  })
+
+  it('本机直跑行同规：探测中 = 灰环；停用仍是停用（配置事实优先）', () => {
+    const pending = renderToString(
+      h(LocalRow, { local: mkLocal({ lastContrib: -1 }), probesPending: true }),
+    )
+    expect(pending).toContain('tc-dot--empty')
+    expect(pending).toContain('探测中')
+    const off = renderToString(
+      h(LocalRow, {
+        local: mkLocal({ slots: 0, lastContrib: -1 }),
+        off: true,
+        probesPending: true,
+      }),
+    )
+    expect(off).toContain('>停用</span>')
+  })
+})

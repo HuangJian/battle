@@ -17,7 +17,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { describe, expect, it } from 'bun:test'
-import { parseJsonc, stripComments } from '../src/core/jsonc'
+import { dropTrailingCommas, normalizeJsonc, parseJsonc, stripComments } from '../src/core/jsonc'
 import { CURRICULA_DIR, NN_TRAINING } from '../src/core/paths'
 import { actions } from './helpers/console-fixture'
 
@@ -98,5 +98,58 @@ describe('core/jsonc（与 python common/jsonc.py 同语义）', () => {
       }
     }
     expect(bad).toEqual([])
+  })
+})
+
+/** 单趟快路（`normalizeJsonc`）与两步参考实现的**逐字节等价**。
+ *
+ *  快路是为了性能而重写的（实测 223 个真实文件 28.5ms → 3.6ms），但它的语义必须与
+ *  `stripComments` + `dropTrailingCommas` 一字不差——那两个函数是「与 python 同语义」
+ *  的**可读参考实现**，也是后续任何改动的对照物。所以拿真仓语料 + 已知边角逐条对拍，
+ *  而不是只断言「能 parse」。
+ *
+ *  另注：**不用** `Bun.JSONC.parse`（实测它是更宽的超集：块注释 / 单引号 / BOM / 前导零 /
+ *  十六进制 / 尾随垃圾都接受），所以下面还有一条「块注释仍响亮报错」的语义钉子。 */
+describe('jsonc-fastpath：单趟规范化 ≡ 参考实现（逐字节）', () => {
+  it('仓内 223 个真实课程文件（1.35MB）逐字节相同，且解析结果不变', () => {
+    const files = readdirSync(CURRICULA_DIR)
+      .filter((f) => f.endsWith('.jsonc'))
+      .map((f) => path.join(CURRICULA_DIR, f))
+    expect(files.length).toBeGreaterThan(100) // 语料真的在（别让它静默变成空跑）
+    const diffs: string[] = []
+    for (const f of files) {
+      const src = readFileSync(f, 'utf-8')
+      const ref = dropTrailingCommas(stripComments(src))
+      if (normalizeJsonc(src) !== ref) diffs.push(f)
+      if (JSON.stringify(parseJsonc(src)) !== JSON.stringify(JSON.parse(ref))) diffs.push(f)
+    }
+    expect(diffs).toEqual([])
+  })
+
+  it('边角：注释夹在尾逗号与闭合括号之间（两趟写法的顺序语义）', () => {
+    const cases = [
+      '{\n  "a": 1, // 注\n}',
+      '{\n  "a": 1,\n  // 注\n}',
+      '{\n  "a": 1,    \n\n  }',
+      '[1, 2 , ]',
+      'a\n// x\nb',
+      'a // x\nb',
+      '{ "a": [1, 2,], "b": "x\\"//y", }',
+      "{ 'a': 'http://x' } // 尾部注释",
+      '{\n  "u": "src/**/*.ts",\n  "n": 1,\n}',
+      '{ "a": "未闭合, }',
+      '{\n  // 全注释\n}',
+    ]
+    for (const src of cases) {
+      const ref = dropTrailingCommas(stripComments(src))
+      expect(normalizeJsonc(src)).toBe(ref)
+    }
+  })
+
+  it('语义钉子：块注释 / 单引号 / 前导零 / 尾随垃圾仍然响亮报错（不被 `Bun.JSONC` 的宽松带上）', () => {
+    expect(() => parseJsonc('{ "a": 1 /* 块 */ }')).toThrow()
+    expect(() => parseJsonc("{ 'a': 1 }")).toThrow()
+    expect(() => parseJsonc('[01]')).toThrow()
+    expect(() => parseJsonc('{} {}')).toThrow()
   })
 })

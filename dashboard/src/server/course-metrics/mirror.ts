@@ -8,7 +8,6 @@
  *   · 单课/单文件失败只记数不抛；锁拿不到抛 `LockBusyError`（调用方决定跳过还是重试）。
  */
 
-import { createHash } from 'crypto'
 import {
   closeSync,
   existsSync,
@@ -533,7 +532,7 @@ function syncRewrite(course: string, f: SourceFile, meta: MirrorMeta, stats: Syn
   const buf = readFileSync(f.path)
   stats.sourceBytesRead += buf.byteLength
   JSON.parse(buf.toString('utf8')) // 坏 JSON 不镜像（避免把半份缓存当事实）
-  const sha = createHash('sha256').update(buf).digest('hex')
+  const sha = new Bun.CryptoHasher('sha256').update(buf).digest('hex')
   const prev = meta.files[f.rel]
   const action = decideRewrite(prev, sha)
   const dest = path.join(courseMirrorDir(course), f.rel)
@@ -571,7 +570,7 @@ export interface VerifyIssue {
 function hashFile(p: string, size: number): string {
   const CHUNK = 1024 * 1024
   const buf = Buffer.alloc(CHUNK)
-  const h = createHash('sha256')
+  const h = new Bun.CryptoHasher('sha256')
   let fh: number | null = null
   try {
     fh = openSync(p, 'r')

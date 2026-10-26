@@ -1,19 +1,17 @@
 /** error-fingerprint.ts — 错误指纹（服务端专用）。
  *
- *  ★ 为什么住这里而不是 `web/view/error-types.ts`（plan §4.1 P0-1）：它要 `node:crypto`，
- *  而 `dashboard/src/web/**` 有**禁词**闸（`tests/architecture-layering.test.ts:37-49`：
- *  `from 'node:'`）与 bundle 禁词闸（`server/build.ts:44-52` 的 `FORBIDDEN /node:/`），
- *  且 `web/view/index.ts` 头注把这条写成了目录纪律（「本目录内只允许类型与纯函数：无
- *  `node:` 模块」）。同类事故有案：`docs/nn/console.md:1443`（客户端里写 `node:` 对象键
- *  ⇒ 三份 bundle 全红）。客户端只需要服务端投影里的 `fp` 字符串，所以拆分零代价。
+ *  ★ 为什么住这里而不是 `web/view/error-types.ts`（plan §4.1 P0-1）：它要 `Bun.CryptoHasher`
+ *  （Bun 专有全局），而 `dashboard/src/web/**` 有**禁词**闸（`tests/architecture-layering.test.ts`：
+ *  `from 'node:'` 与 `Bun.`）与 bundle 禁词闸（`server/build.ts` 的 `FORBIDDEN`：`node:` 与
+ *  `Bun.`），且 `web/view/index.ts` 头注把这条写成了目录纪律（「本目录内只允许类型与纯函数：
+ *  无 `node:` 模块、无 Bun 全局」）。同类事故有案：`docs/nn/console.md:1443`（客户端里写
+ *  `node:` 对象键 ⇒ 三份 bundle 全红）。客户端只需要服务端投影里的 `fp` 字符串，所以拆分零代价。
  *
- *  短 hash 沿用仓库既有惯用法（`createHash('sha256').update(s).digest('hex').slice(0, 16)`）：
- *  同款见 `evalboard/ladder.ts:66`、`evalboard/runner.ts:122`、`server/offline-eval-backfill.ts:285`
+ *  短 hash 用 `new Bun.CryptoHasher('sha256').update(s).digest('hex').slice(0, 16)`：
+ *  同款见 `evalboard/ladder.ts:65`、`evalboard/runner.ts:121`、`server/offline-eval-backfill.ts:284`
  *  ——**不**新造第三种 hash，也**不**去复用 `core/fingerprint-cache.ts`（那是「按 key 缓存重算」
  *  的原语，不是 hash 工具：复用它拿到的是一个缓存而不是一个函数）。
  */
-
-import { createHash } from 'node:crypto'
 
 /** 十六进制串（sha1/sha256/短 sha 前缀都吃；≥8 位才动 —— 太短会误伤普通词）。 */
 const HEX_RE = /\b[0-9a-f]{8,}\b/gi
@@ -50,5 +48,5 @@ export function normalizeErrorText(s: string): string {
  *  仍是当下那门课）。 */
 export function errorFingerprint(source: string, component: string, message: string): string {
   const canon = `${source}|${component}|${normalizeErrorText(message)}`
-  return createHash('sha256').update(canon).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(canon).digest('hex').slice(0, 16)
 }

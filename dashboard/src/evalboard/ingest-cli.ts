@@ -11,7 +11,6 @@
  */
 
 import { existsSync, readFileSync } from 'fs'
-import { createHash } from 'node:crypto'
 import { EVALBOARD_DATA_DIR } from '../core/paths'
 import { ingestRows, type IngestCtx, type RawEvalRow } from './ingest'
 
@@ -22,7 +21,7 @@ function arg(argv: string[], k: string, dft = ''): string {
 
 function sha16OfFile(p: string): string {
   try {
-    return createHash('sha1').update(readFileSync(p)).digest('hex').slice(0, 16)
+    return new Bun.CryptoHasher('sha1').update(readFileSync(p)).digest('hex').slice(0, 16)
   } catch {
     return 'missing0000000000'.slice(0, 16)
   }

@@ -14,12 +14,13 @@ import os from 'os'
 import path from 'path'
 import type { RlConfig } from '../src/core/types'
 import { api, loadConfig, scratchConfig, view } from './helpers/console-fixture'
+import { deadHttpUrl } from './helpers/dead-endpoint'
 
 /** 夹具配置 → 被测函数要的 rl-config 形状（只读消费，不写盘）。
  *
  *  `workerUrl` 把 gpu_push 那台指到**假 hub**：本文件的用例要看的是「探过、有结论」（200 /
- *  404 / 无应答三条不同的观测面），而夹具缺省的 `https://127.0.0.1:1` 是死回环端口——只给
- *  「连不上」一个结论（速率上它反而最快：即时 ECONNREFUSED，不欠 DNS 的墙钟）。 */
+ *  404 / 无应答三条不同的观测面），而夹具缺省的地址是**死端点**（accept 后立刻 reset，
+ *  `helpers/dead-endpoint.ts`）——只给「连不上」一个结论，且毫秒级返回，不欠超时的墙钟。 */
 function cfg(workerUrl?: string): RlConfig {
   const c = loadConfig() as unknown as RlConfig
   if (workerUrl) {
@@ -498,7 +499,7 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
     const prev = process.env.BCITY_REGISTRY_FILE
     process.env.BCITY_REGISTRY_FILE = path.join(os.tmpdir(), 'bcity-ovw-absent.json')
     try {
-      const ov = await api.buildOverview(cfg('http://127.0.0.1:1'), ['c4'], 'c4')
+      const ov = await api.buildOverview(cfg(deadHttpUrl()), ['c4'], 'c4')
       expect(ov.hubUrl).toBeNull()
       expect(ov.hubOnline).toBe(false)
       expect(ov.rows.map((r) => r.course)).toEqual(['c4'])

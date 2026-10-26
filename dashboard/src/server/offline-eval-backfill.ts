@@ -30,7 +30,6 @@
  *  本模块**不碰 python**、不写训练账本——只读 hub 观测面 / 课程配置 / 回传产物 / eval 账本。
  */
 
-import { createHash } from 'crypto'
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../core/config'
@@ -282,7 +281,10 @@ function ckptAt(weightsFile: string): RoundCkpt | null {
   if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs)
     return { path: weightsFile, key16: cached.key16 }
   try {
-    const key16 = createHash('sha256').update(readFileSync(weightsFile)).digest('hex').slice(0, 16)
+    const key16 = new Bun.CryptoHasher('sha256')
+      .update(readFileSync(weightsFile))
+      .digest('hex')
+      .slice(0, 16)
     fpCache.set(weightsFile, { size: st.size, mtimeMs: st.mtimeMs, key16 })
     return { path: weightsFile, key16 }
   } catch {

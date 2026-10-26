@@ -12,7 +12,6 @@
  */
 
 import { afterAll, afterEach, describe, expect, it } from 'bun:test'
-import { createHash } from 'crypto'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
@@ -92,7 +91,7 @@ function appendLedger(course: string, lines: unknown[]): void {
 
 /** 权重文件的 W16（与 evalA 同定义：字节 sha256 前 16 位）。 */
 function w16Of(file: string): string {
-  return createHash('sha256').update(readFileSync(file)).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(readFileSync(file)).digest('hex').slice(0, 16)
 }
 
 function runView(its: number[]): OfflineRunView {

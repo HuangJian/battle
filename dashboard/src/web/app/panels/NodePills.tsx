@@ -61,6 +61,9 @@ export interface NodePillsProps {
   onMore: () => void
   /** 局域网只读视图：行无点击语义（编辑/启用/冒烟仅本机），悬停提示说明。 */
   readOnly?: boolean
+  /** 探测列**还在后台**（服务端首帧 `probesPending`）：贡献数未知 ⇒ 画中性「探测中」，
+   *  不画红「离线」（未知 ≠ 贡献 0）。见 `ConsoleStateView.probesPending`。 */
+  probesPending?: boolean
 }
 
 /** 只读视图的节点行提示。 */
@@ -72,10 +75,12 @@ export function disabledSummary(disabled: number): string {
 }
 
 /** 行的领域状态（2026-09-20 用户指令：**只由最近完成轮贡献 vs 并发数**判定，ping 出局）。 */
-type RowState = 'healthy' | 'slow' | 'offline' | 'disabled'
+type RowState = 'healthy' | 'slow' | 'offline' | 'disabled' | 'probing'
 
-function rowState(n: NodeView): RowState {
+function rowState(n: NodeView, probesPending?: boolean): RowState {
   if (!n.enabled) return 'disabled'
+  // 首帧的贡献数还没探（`contribById` 空 ⇒ -1）：这是「未知」，不是「0 局」。
+  if (probesPending && n.lastContrib < 0) return 'probing'
   return nodeHealth(n.lastContrib, n.concurrency)
 }
 
@@ -85,6 +90,7 @@ const STATE_TONE: Record<RowState, StatusTone> = {
   slow: 'warn',
   offline: 'err',
   disabled: 'off',
+  probing: 'off', // 灰环 = 中性/未知（不是红方「离线」）
 }
 
 /** 非健康态的行级 modifier（三重区分里的行级一重：颜色 + 形状 + 文案）。 */
@@ -93,6 +99,7 @@ const STATE_CLS: Record<RowState, string> = {
   slow: 'tc-row--slow',
   offline: '',
   disabled: 'tc-row--off',
+  probing: '',
 }
 
 /** 「停用」是唯一上屏的状态词：它不是健康度（是 `enabled=false` 的**配置事实**），
@@ -102,6 +109,7 @@ const DISABLED_WORD = '停用'
 /** 判据原文（悬停解释 = 把「贡献 vs 并发」当面写出来，颜色不是唯一信息载体）。 */
 function judgeText(state: RowState, contrib: number, concurrency: number): string {
   const c = `最近完成轮贡献 ${contribNum(contrib)}`
+  if (state === 'probing') return '探测中：后台正在探（还没出结果，不是离线）'
   if (state === 'slow') return `缓慢：${c} < 并发 ${concurrency}`
   if (state === 'offline') return offlineJudge(contrib, concurrency)
   if (state === 'healthy') return `健康：${c} ≥ 并发 ${concurrency}`
@@ -150,19 +158,22 @@ export function NodeRow({
   onSave,
   onToggleEnabled,
   onSmoke,
+  probesPending,
 }: {
   n: NodeView
   /** 展开态（并发编辑详情）。 */
   open: boolean
   draft: string
   readOnly?: boolean
+  /** 探测列还在后台（首帧）：贡献数未知 ⇒ 灰环「探测中」（不是红「离线」）。 */
+  probesPending?: boolean
   onToggle: () => void
   onDraft: (v: string) => void
   onSave: () => void
   onToggleEnabled: (v: boolean) => void
   onSmoke: () => void
 }) {
-  const state = rowState(n)
+  const state = rowState(n, probesPending)
   const disabled = state === 'disabled'
   const judge = judgeText(state, n.lastContrib, n.concurrency)
   const toggler = (
@@ -184,7 +195,10 @@ export function NodeRow({
       valueTitle={disabled ? judge : `并发数 ${n.concurrency}（判据：最近完成轮贡献 ≥ 它 ⇒ 健康）`}
       // 状态不写字（见文件头注）：四档元信息都只是那个数（离线也一样），判据全归悬停。
       meta={[
-        { text: contribText(n), title: state === 'offline' ? judge : contribTitle(n.lastContrib) },
+        {
+          text: contribText(n),
+          title: state === 'offline' || state === 'probing' ? judge : contribTitle(n.lastContrib),
+        },
       ]}
       onToggle={onToggle}
       expanded={open}
@@ -234,8 +248,20 @@ export function NodeRow({
 
 /** 本机直跑行（只读：无点击/编辑语义——启用与否由 rl-config `rl.local_slots` 决定）。
  *  `off` = 直跑未启用（slots = 0），并入「停用」折叠桶。 */
-export function LocalRow({ local, off }: { local: NodeLocalView; off?: boolean }) {
-  const state: RowState = off ? 'disabled' : nodeHealth(local.lastContrib, local.slots)
+export function LocalRow({
+  local,
+  off,
+  probesPending,
+}: {
+  local: NodeLocalView
+  off?: boolean
+  probesPending?: boolean
+}) {
+  const state: RowState = off
+    ? 'disabled'
+    : probesPending && local.lastContrib < 0
+      ? 'probing'
+      : nodeHealth(local.lastContrib, local.slots)
   const judge = judgeText(state, local.lastContrib, local.slots)
   return (
     <StatusRow
@@ -272,6 +298,7 @@ export function NodePills({
   onAction,
   onMore,
   readOnly,
+  probesPending,
 }: NodePillsProps) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -283,7 +310,8 @@ export function NodePills({
   const offline: NodeView[] = []
   for (const n of nodes) {
     if (!n.enabled) continue
-    const h = nodeHealth(n.lastContrib, n.concurrency)
+    // 「探测中」与「缓慢/离线」同样默认展开（它们都需要被看见），只是色/形中性。
+    const h = rowState(n, probesPending)
     if (h === 'healthy') healthy.push(n)
     else if (h === 'slow') slow.push(n)
     else offline.push(n)
@@ -324,6 +352,7 @@ export function NodePills({
       onSave={() => saveConcurrency(n)}
       onToggleEnabled={(v) => onAction('setNodeEnabled', { id: n.id, enabled: v })}
       onSmoke={() => onAction('nodeSmoke', { id: n.id })}
+      probesPending={probesPending}
     />
   )
 
@@ -335,7 +364,7 @@ export function NodePills({
       />
       {/* 分区纪律（2026-10-03）：本节 = 采样块（行 + 末尾份额），PPO 在自己的子块里。
           两类的身份、单位、口径都不同，绝不落在同一行。 */}
-      {localLive ? <LocalRow local={localLive} /> : null}
+      {localLive ? <LocalRow local={localLive} probesPending={probesPending} /> : null}
       {healthy.map((n) => row(n))}
       {/* 缓慢/离线始终展开（用户指令：不要自动折叠）；仅停用可折叠。 */}
       {[...slow, ...offline].map((n) => row(n))}

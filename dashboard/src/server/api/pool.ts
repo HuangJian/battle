@@ -106,9 +106,20 @@ async function localCodeHash(): Promise<string> {
   }
 }
 
+/** `/v1/status` 的探测预算（毫秒）。**账本新旧同值**（评审 F1：不给「账本陈旧」这一档
+ *  更小的预算，否则又是「用不可信的 pid 决定行为」）。
+ *
+ *  ★ 2026-10-25：提成常量并交给探针当第三参——预算本身是要被断言的**事实**；旧用例只能
+ *  「让探针睡 1500ms 看它答不答」，白等 1.5s 且只证明「预算 ≥1500」（改小到 1600ms 也照样绿）。 */
+export const SELF_STATUS_TIMEOUT_MS = 4000
+
 /** `fetchSelfStatus` 的注入面（单测用；默认真实 `fetch`）。 */
 export interface SelfStatusIO {
-  probe?: (url: string, init: RequestInit) => Promise<Response>
+  /** 探针。第三参 = 本次预算的毫秒数（与 `views.ComponentHealthIO.probe` 同规：预算是判据，
+   *  不该只能靠真的等满 4s 才看得见）。 */
+  probe?: (url: string, init: RequestInit, timeoutMs: number) => Promise<Response>
+  /** 预算覆盖（**单测用**：缩放同一份预算做行为验证；生产调用方不传 ⇒ `SELF_STATUS_TIMEOUT_MS`）。 */
+  timeoutMs?: number
 }
 
 /** 拉 selfNode 的 `/v1/status`；**探不通** → null（UI 显示「agent 未启动」占位，不伪造）。
@@ -118,20 +129,28 @@ export interface SelfStatusIO {
  *  （11:47:31 由 `/v1/restart` 换代，正常服务、达标 10/10），而这条闸让 `/api/pool.selfStatus`
  *  恒 `null` ⇒ 面板「agent 未启动」+ 磁盘徽标消失，与**同一页**的 `nodes.self.online=true` 自相矛盾。
  *
- *  代价：账本为空/陈旧时也照探一次（超时恒 4000，与正常路径同值——后台 SWR 探测，不给「账本陈旧」
- *  这一档更小的预算，否则又是一个「用不可信的 pid 决定行为」的角落，评审 F1）。
+ *  代价：账本为空/陈旧时也照探一次（超时恒 `SELF_STATUS_TIMEOUT_MS` = 4000，与正常路径同值——
+ *  后台 SWR 探测，不给「账本陈旧」这一档更小的预算，否则又是一个「用不可信的 pid 决定行为」的
+ *  角落，评审 F1）。
  *  `export` 只为单测（本模块的既有两个消费者都走 `computePoolProbes`）。 */
 export async function fetchSelfStatus(
   cfg: RlConfig,
   io: SelfStatusIO = {},
 ): Promise<SelfStatus | null> {
   const auth = cfg.nodes.find((n) => n.id === 'self')?.authKey ?? ''
-  const probe = io.probe ?? fetch
+  // 预算只有一个来源：`io.timeoutMs`（单测缩放）或常量本身。**不存在**按账本新旧分档的第二条路径。
+  const budget = io.timeoutMs ?? SELF_STATUS_TIMEOUT_MS
+  const probe: (url: string, init: RequestInit, timeoutMs: number) => Promise<Response> =
+    io.probe ?? ((url, init) => fetch(url, init))
   try {
-    const resp = await probe(`http://127.0.0.1:${cfg.rl.agent_port}/v1/status`, {
-      headers: auth ? { Authorization: `Bearer ${auth}` } : {},
-      signal: AbortSignal.timeout(4000),
-    })
+    const resp = await probe(
+      `http://127.0.0.1:${cfg.rl.agent_port}/v1/status`,
+      {
+        headers: auth ? { Authorization: `Bearer ${auth}` } : {},
+        signal: AbortSignal.timeout(budget),
+      },
+      budget,
+    )
     if (!resp.ok) return null
     const b = (await resp.json()) as {
       workers?: number

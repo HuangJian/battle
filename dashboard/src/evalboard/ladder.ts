@@ -5,7 +5,6 @@
  * rung 自带可执行 stage 载荷 + mapHash（§4.2）；门控推进是纯函数（§4.3/§4.4）。
  */
 
-import { createHash } from 'node:crypto'
 import { STAGES } from '../../../src/config/stages'
 import { makeArena } from '../../../src/nn/arena-ladder'
 import type { StageJson } from '../../../src/nn/config-stage'
@@ -63,7 +62,7 @@ export function mapHashOf(stage: StageData): string {
     playerSpawn: stage.playerSpawn ?? null,
     enemySpawns: stage.enemySpawns ?? null,
   })
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
+  return new Bun.CryptoHasher('sha256').update(canonical).digest('hex').slice(0, 16)
 }
 
 /** 经典第 1 关去基地实体（§4.2：由 ladder.ts 从 src/config/stages 派生并冻结存 JSON）。 */

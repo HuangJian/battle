@@ -91,6 +91,10 @@ export interface SlowSnapshot {
   nodes: NodeView[]
   localNode: NodeLocalView | null
   phase: PhaseInfo
+  /** 探测列**还在后台**（首帧渐进；2026-10-25）：`true` = 这一帧的节点 ping / 组件健康 /
+   *  push 探活是**未知**，不是「离线」。承载到视图上就是 `ConsoleStateView.probesPending`
+   *  ——UI 据此渲染灰色「探测中」，绝不把「还没探」画成红「离线」（观测面里最贵的一种谎言）。 */
+  probesPending?: boolean
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅）。 */
   courseEdit: CourseEdit | null
@@ -198,6 +202,8 @@ export async function computeSlowSnapshot(
   cfg: RlConfig,
   course: string,
   probes: FleetProbes,
+  /** 首帧：结构现算、探测留空（见 `getFirstPaintSnapshot`）。缺省 false = 探测已就位。 */
+  probesPending = false,
 ): Promise<SlowSnapshot> {
   const components = await componentViews(cfg, course, probes.componentHealth)
   // 当前训练阶段（训练循环日志尾解析）。
@@ -234,9 +240,26 @@ export async function computeSlowSnapshot(
     nodes,
     localNode,
     phase,
+    ...(probesPending ? { probesPending: true } : {}),
     courseEdit,
     pushFleet: assemblePushFleet(cfg, probes.pushProbes),
   }
+}
+
+/** 「探测列一律未知」的机群探测值：首帧的结构壳用（`getFirstPaintSnapshot`）。
+ *
+ *  空的 maps 在合并层就是**未知**语义——节点 `online = null`、组件 `healthy = null`、
+ *  push `probes = null`（见 `mergeNodeProbes` / `componentViews` / `assemblePushFleet`），
+ *  而不是「全离线」。这正是「先上结构、探测后台刷新」需要的形状。 */
+export const EMPTY_FLEET_PROBES: FleetProbes = {
+  nodes: new Map(),
+  slowById: new Map(),
+  contribById: new Map(),
+  localContrib: -1,
+  pushProbes: new Map(),
+  componentHealth: new Map(),
+  contributionBrief: null,
+  ppoWorkerLive: null,
 }
 
 /** 账本中最近一条 course_edit 事件 → 热加载判决；无则 null（纯函数，可单测）。

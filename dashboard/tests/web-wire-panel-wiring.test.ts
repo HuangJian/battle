@@ -52,7 +52,8 @@ describe('「传输」页接线（/wire）', () => {
     expect(server).toContain('pageForPath(url.pathname)')
     // `page` 从共享路由表来、经 renderConsolePage 下发即算数——选项对象允许长出新键
     // （写死整个字面量会替新功能背锅；本测试首版就是被这个坑过一次，见上条注释）。
-    expect(server).toMatch(/renderConsolePage\(state, \{ page: consolePage[,}]/)
+    // ★ 2026-10-25：页面路由改为原生 `routes` 后 `page` 由 handler 内解析（`page` 键名不变）。
+    expect(server).toMatch(/renderConsolePage\(state, \{ page[,:]/)
   })
 })
 

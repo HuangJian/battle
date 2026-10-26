@@ -367,6 +367,11 @@ export interface TrainerHeartbeatView {
 export interface ConsoleStateView {
   time: string
   course: string
+  /** 探测列**还在后台**（2026-10-25，首帧渐进）：`true` = 节点 ping / 组件健康 / push 探活
+   *  这一帧是**未知**，不是「离线」也不是「贡献 0」。UI 必须据此渲染中性「探测中」，
+   *  不得把 `lastContrib === -1` 画成红§离线——观测面里「还没探」与「探了不通」是两件事。
+   *  缺省/旧视图 = 探测已就位（旧语义）。 */
+  probesPending?: boolean
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]

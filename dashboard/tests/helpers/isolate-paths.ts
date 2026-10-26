@@ -27,6 +27,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { deadPort } from './dead-endpoint'
 
 /** 本进程的隔离根（每 worker 一份）。导出仅供守卫测试断言，测试代码不拿它写真实路径。 */
 export const ISOLATED_ROOT: string = mkdtempSync(join(tmpdir(), 'bcity-isolated-'))
@@ -67,12 +68,17 @@ for (const [name, rel] of Object.entries(REDIRECTS)) {
  *  「一份什么都不是的配置」，而不是线上真配置。要特定配置的用例照旧自己写（`console-fixture`
  *  的四节点种子就是那么用的，它后设 env ⇒ 赢过本预载）。
  */
+// `hub_port` / `agent_port` 指向**死端点**（accept 后立刻 reset，见 `./dead-endpoint.ts`）：
+// 默认种子下每个冷探测（`buildStateView` / `componentViews` / push 探活）都会真去连它们，
+// 写死没人监听的端口在丢回环 SYN 的内核上要白等满 1.5s 超时（实测 `bun run test` 里
+// 十来个没用 console-fixture 的文件各白等 1.5s）。测试要特定配置时照旧自己写（后设 env 赢）。
+const DEAD = deadPort()
 const SEED_RL_CONFIG = {
   version: 1,
   nodes: [],
   rl: {
-    hub_port: 18787,
-    agent_port: 8443,
+    hub_port: DEAD,
+    agent_port: DEAD,
     local_slots: 0,
     stream: 0,
     double_buffer: 0,

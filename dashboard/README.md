@@ -54,6 +54,8 @@ bun run test         # bun scripts/run-tests.ts → 组成见该文件：--paral
                      #   + --preload ./tests/helpers/no-proxy.ts tests（顶层脚本串做不了算术，
                      #   故 worker 数由 launcher 现算；裸 --parallel 的缺省是逻辑核 16 ⇒ 假红）
                      #   预载 = 测试进程出网直连（代理环境下「hub 不可达」类用例从 ~3s 掉回 ~0.01s，见该文件头注）
+bun test             # 与上一行等价：bunfig.toml 的 [test] preload 把它转交给门禁
+                     #   （文件级隔离是必须的；Bun 1.4 的 [test] 没有 isolate/parallel 键）
 bun run lint         # oxlint
 bun run format       # bun fmt（Bun ≥ 1.4.4，读仓库根 bunfig.toml 的 [fmt]）
 ```
@@ -170,7 +172,15 @@ describe / 6 个用例，靠 `it(` 标题逐项 diff 找回）。
   永远禁止。
 - **测试出网直连**：门禁脚本预载 `tests/helpers/no-proxy.ts`（代理机上「连不上」的用例会白等
   1.5–4s：Bun 只认 NO_PROXY 的精确主机，不认 `127.*`）。新用例别假设「连不上 = 立刻」；
-  这个预载只在 `bun run test` 里挂，裸 `bun test <file>` 不复现门禁读数。
+  预载由门禁脚本挂，`bunfig.toml` 只登记 `tests/helpers/gate-entry.ts`（裸 `bun test` 会被它
+  转交给门禁 ⇒ 读数与 `bun run test` 一致）。
 - **测试不写墙钟等待**：等待一律由**可观测事件**触发（探测注册 `probeStub.nextProbe()` / 回调计数 /
-  子进程打 `READY`），不拿定值 `sleep` 猜「该到了」；夹具主机用死回环端口（`http://127.0.0.1:1`）
-  而不是 `*.invalid`——后者的「不通」要靠 DNS 失败，那段墙钟依机器而变（实测 1500ms/用例）。
+  子进程打 `READY`），不拿定值 `sleep` 猜「该到了」。
+- **「探不通」的夹具地址用 `tests/helpers/dead-endpoint.ts`**（accept 后立刻 reset ⇒ 毫秒级
+  ECONNRESET）：不要写 `http://127.0.0.1:1` 或 `*.invalid`——前者的「不通」要靠内核立刻回 RST
+  （丢回环 SYN 的主机上要等满调用方的超时，实测 1.5–5s/用例），后者要靠 DNS 失败（墙钟依机器而变）。
+- **端口「空 / 占」的判据用 bind，不用 connect**（写法见 `tests/training-port-reclaim.test.ts::portFree`）：
+  `Bun.serve({ port })` 绑得上 ⇒ 一定空，`EADDRINUSE` ⇒ 一定被占，两种结局都是毫秒级。
+  别用 `portListen` 断「连不上」——丢回环 SYN 的主机上那是等满 `PORT_PROBE_TIMEOUT_MS`（500ms）
+  才返回的 `false`：既白等，又不是证据。同理，**让被测端口真的有人监听**远比「断言没人听」
+  快且强：占用者列举（lsof/netstat）是毫秒级，空口才会掉进 TCP 探测超时。

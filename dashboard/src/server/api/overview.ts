@@ -367,6 +367,15 @@ export function peekHubAdmin(): {
   return p ? { queue: p.queue, offline: p.offline } : null
 }
 
+/** 只读窥视**逐课接管事实**（同一次 hub 探测的 `holds`；`null` = 还没探过）。
+ *
+ *  首帧用（2026-10-25）：`buildStateView(firstPaint)` 不能为 `holds` 等一次 1.2–1.5s 的
+ *  hub 探测，而「被接管的课不该报 PPO 滞留」这条判据又必须只陈述**已知**的事实——
+ *  拿不到就返回 null，调用方据此**不下结论**（宁可这一帧不出红条，也不凭空报滞留）。 */
+export function peekHubHolds(): Record<string, HubHoldView> | null {
+  return hubCache.peek()?.holds ?? null
+}
+
 // ────────────────────────── 组装 ──────────────────────────
 
 /** 该课账本尾行的最新轮次（**只认 iteration 事件**；多写者账本见 `latestIterFromLedgerTail`）。

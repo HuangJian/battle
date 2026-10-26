@@ -14,7 +14,8 @@
  *
  *   ① **运行时路径全部落在隔离根内**（且不在仓根 tmp / dashboard data / nn-training 之下）；
  *   ② **生产代码不再硬编码 `REPO_ROOT/tmp`**（源码级扫描；新写一处即红）；
- *   ③ **预载确实挂着**（`bun run test` 之外裸跑 `bun test <file>` 会在①上红）。
+ *   ③ **预载确实挂着**（`bun run test` 与裸 `bun test` 都挂：后者由 `tests/helpers/gate-entry.ts`
+ *      经 bunfig 的 [test] preload 转交给门禁；若那层被删，全量裸跑会因跨文件污染在①上红）。
  *
  * 边界：`curriculaDir()` **刻意不隔离** —— `nn-training/curricula/` 是入库源数据（与 `src/`
  * 同级的只读事实源），重定向它会让"读课程配置"的用例整体失去对象。它与 `tmp/` 这类**运行时**

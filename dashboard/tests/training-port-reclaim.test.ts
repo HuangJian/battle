@@ -17,7 +17,7 @@ import { readFileSync } from 'fs'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import { portOwnedBy, portOwnerPids } from '../src/core/proc'
-import { killPid, pidAlive, portListen } from '../src/core/net'
+import { killPid, pidAlive } from '../src/core/net'
 import { reclaimPort } from '../src/stack/hub'
 import { cloudflaredSpec, hubServerSpec } from '../src/stack/specs'
 import { sharedHubPort } from '../src/core/slots'
@@ -109,10 +109,14 @@ async function portFree(port: number): Promise<boolean> {
   }
 }
 
-/** 取一个本机空闲高端口（bind 探测触发，无固定等待；为什么不用 connect 见 `portFree`）。 */
-async function freePort(): Promise<number> {
+/** 取一个本机空闲高端口（bind 探测触发，无固定等待；为什么不用 connect 见 `portFree`）。
+ *
+ *  `exclude` = 已经在用的口（同一用例要两个互不相同的口时用；撞上就换一个重探，
+ *  而不是先取完再断言不同——那样红的是前置条件，不是被测行为）。 */
+async function freePort(exclude: number[] = []): Promise<number> {
   for (let i = 0; i < 20; i++) {
     const p = 21000 + Math.floor(Math.random() * 8000)
+    if (exclude.includes(p)) continue
     if (await portFree(p)) return p
   }
   throw new Error('找不到空闲测试端口')
@@ -170,7 +174,10 @@ describe('reclaimPort（真实监听进程）', () => {
 
     const struck = await reclaimPort(port)
     expect(struck).toContain(child.pid)
-    expect(await portListen(port)).toBe(false)
+    // 释放判据用 **bind**（同 `portFree`）：能绑上 ⇒ 端口一定空了。
+    // 别用 `portListen` 断「连不上」——丢回环 SYN 的环境里它要等满 500ms 探测上界
+    // （`core/net.ts::PORT_PROBE_TIMEOUT_MS`），且「连不上」本是它的超时结局，不是证据。
+    expect(await portFree(port)).toBe(true)
     expect(pidAlive(child.pid)).toBe(false)
   })
 })
@@ -254,13 +261,15 @@ describe('接线：启动步骤在 spawn 前回收端口', () => {
 
 // ────────────────────────── 夹具 ──────────────────────────
 
-/** 最小 RlConfig（只含 spec 构造真正读的字段）；basePort 可注入以对准测试端口。 */
-function cfgFixture(basePort: number): RlConfig {
+/** 最小 RlConfig（只含 spec 构造真正读的字段）；端口可注入以对准测试端口。
+ *
+ *  hub_port 与 cloudflared 的 metrics 端口**必须错开**（否则两条 spec 核的是同一个口，
+ *  「各看各的口」这条断言就失去意义）；缺省沿用 base+1000 的推导。 */
+function cfgFixture(basePort: number, hubPort = basePort + 1000): RlConfig {
   return {
     version: 1,
     nodes: [],
-    // hub_port 与下面 cloudflared 用的 metrics 端口必须错开（spec 的端口由槽位推导）
-    rl: { hub_port: basePort + 1000, agent_port: basePort + 2000, remote_token: 'fixture-token' },
+    rl: { hub_port: hubPort, agent_port: basePort + 2000, remote_token: 'fixture-token' },
     courses: { 'course-a': { slot: 0 } },
   } as unknown as RlConfig
 }
@@ -314,23 +323,35 @@ describe('portOwnedBy（真实监听进程）', () => {
 
   integrationIt('spec.ownsResource = 「新进程确实持有它要独占的端口」（真监听）', async () => {
     // 监督器（变更检测重启）的就绪复核靠它：旧僵尸可能替新进程答健康检查。
-    const port = await freePort()
-    const child = spawnListener(port)
-    started.push(child.pid)
-    expect(await child.ready).toBe(true)
-    if (portOwnerPids(port).length === 0) return
+    //
+    // 两个真实监听者（各占一个口）：cloudflared 的 metrics 口 与 **共享** hub 口。
+    // 为什么两个口都必须有人听：`portOwnedBy` 在「列不出占用者」时会退回 TCP 探测，
+    // 而丢回环 SYN 的环境里到闭口的 connect 要等满探测上界（500ms/次，see
+    // `core/net.ts::PORT_PROBE_TIMEOUT_MS`）——旧写法「hub 口没人听 ⇒ 应判 false」光是
+    // 等超时就吃掉 1s。改成两边都真占着之后，判据全走 lsof（毫秒级），而且**更强**：
+    // 每条 spec 都必须对「自己的监听者」答 true、对「另一条 spec 的监听者」答 false
+    // （旧写法只能证明 hub 没认 metrics 口，证明不了它认的是哪个口）。
+    const metricsPort = await freePort()
+    const hubPort = await freePort([metricsPort])
+    const cfChild = spawnListener(metricsPort)
+    const hubChild = spawnListener(hubPort)
+    started.push(cfChild.pid, hubChild.pid)
+    expect(await cfChild.ready).toBe(true)
+    expect(await hubChild.ready).toBe(true)
+    if (portOwnerPids(metricsPort).length === 0) return // 平台探测不可信 → 跳过判定
 
-    const cfg = cfgFixture(port)
-    const cf = cloudflaredSpec(cfg, { pid: 0, slot: 0, course: 'course-a', metrics: port })
+    const cfg = cfgFixture(metricsPort, hubPort)
+    expect(sharedHubPort(cfg)).toBe(hubPort) // 前置：两个口不撞，否则下面两条恒假
+    const cf = cloudflaredSpec(cfg, { pid: 0, slot: 0, course: 'course-a', metrics: metricsPort })
     expect(typeof cf.ownsResource).toBe('function')
-    expect(await cf.ownsResource!(child.pid)).toBe(true)
-    expect(await cf.ownsResource!(process.pid)).toBe(false)
+    expect(await cf.ownsResource!(cfChild.pid)).toBe(true)
+    expect(await cf.ownsResource!(hubChild.pid)).toBe(false) // 不是「有进程就行」
+    expect(await cf.ownsResource!(process.pid)).toBe(false) // console 自己更不算
 
-    // hub-server 同理（它核的是**共享** hub 端口，本用例里没人监听 ⇒ 应判 false）
+    // hub-server 同理：核的是**共享** hub 端口
     const hub = hubServerSpec(cfg)
     expect(typeof hub.ownsResource).toBe('function')
-    expect(sharedHubPort(cfg)).not.toBe(port) // 前置：两者不能撞口，否则断言无意义
-    expect(await hub.ownsResource!(child.pid)).toBe(false)
-    expect(await hub.ownsResource!(process.pid)).toBe(false)
+    expect(await hub.ownsResource!(hubChild.pid)).toBe(true)
+    expect(await hub.ownsResource!(cfChild.pid)).toBe(false)
   })
 })

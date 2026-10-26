@@ -29,6 +29,7 @@ import { sharedHubPort, sharedHubUrl, sharedTunnelMetricsPort, slotPort } from '
 import { componentViews } from '../src/server/api/views'
 import { restartSpecFor } from '../src/server/actions'
 import { hubServerSpec } from '../src/stack/specs'
+import { deadPort } from './helpers/dead-endpoint'
 import type { RlConfig, RegistryEntry } from '../src/core/types'
 
 const SCRATCH: string[] = []
@@ -42,14 +43,17 @@ afterAll(() => {
   }
 })
 
-/** 双课程夹具（两课各占一个槽位；hub 端口另有基数）。 */
+/** 双课程夹具（两课各占一个槽位；hub 端口另有基数）。
+ *
+ *  hub / agent 端口都指向死端点（accept 后立刻 reset）：`componentViews` 会真去探它们，
+ *  写死一个没人听的端口在丢回环 SYN 的内核上要白等满 1.5s/次（本文件一处用例调了两次）。 */
 function dualCfg(): RlConfig {
   return {
     version: 1,
     nodes: [],
     rl: {
-      hub_port: 27789,
-      agent_port: 27940,
+      hub_port: deadPort(),
+      agent_port: deadPort(),
       remote_token: 'fixture-token',
       local_slots: 0,
       workers: 8,

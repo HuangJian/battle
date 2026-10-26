@@ -19,20 +19,16 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 
 /** 子进程调用点：`spawn(` / `spawnSync(` / `execFileSync(` / `execSync(` / `exec(`（可带 Bun. 前缀）。 */
 const CALL = /(?<![\w.$])(?:Bun\.)?(?:spawn|spawnSync|execFileSync|execSync|exec)\s*\(/g
 
-function walk(dir: string, out: string[]): string[] {
-  for (const ent of readdirSync(dir, { withFileTypes: true })) {
-    const p = join(dir, ent.name)
-    if (ent.isDirectory()) walk(p, out)
-    else if (ent.name.endsWith('.ts')) out.push(p)
-  }
-  return out
+/** 递归列 `.ts`（Bun.Glob 原生扫描；`dot: true` 与旧 walker 同面——它不跳点开头条目）。 */
+function walk(dir: string): string[] {
+  return [...new Bun.Glob('**/*.ts').scanSync({ cwd: dir, dot: true })].map((rel) => join(dir, rel))
 }
 
 /** 剥掉行注释 / 块注释 / 字符串字面量（保留换行数，行号才准）。 */
@@ -93,7 +89,7 @@ function callSpan(src: string, openParen: number): string {
 
 describe('Windows 子进程不许弹黑窗', () => {
   it('dashboard/src 的每个子进程调用都显式带 windowsHide', () => {
-    const files = walk(join(DASHBOARD_ROOT, 'src'), [])
+    const files = walk(join(DASHBOARD_ROOT, 'src'))
     expect(files.length).toBeGreaterThan(50) // 扫描面没空（目录搬迁后要立刻红）
     const offenders: string[] = []
     let calls = 0

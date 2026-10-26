@@ -1,0 +1,9 @@
+# dashboard 的 bun 配置。
+#
+# `bun test` 的唯一入口 = `tests/helpers/gate-entry.ts`：本套件依赖**文件级隔离**（同进程
+# 共享 global ⇒ 死一个用例的 env 会漏给后面所有文件），而 Bun 1.4 的 [test] 没有
+# isolate/parallel/timeout 键（oven-sh/bun#38215 / #38728，写了静默忽略）。故裸 `bun test`
+# 由该预载**转交**给门禁 `scripts/run-tests.ts`（与 `bun run test` 同一读数、同一退出码）。
+# 理由与实测数字见 gate-entry.ts 文件头。
+[test]
+preload = ["./tests/helpers/gate-entry.ts"]

@@ -35,7 +35,7 @@ afterAll(() => {
 
 import { pidAlive } from '../src/core/net'
 import type { Component, Registry, RegistryEntry, RlConfig } from '../src/core/types'
-import { fetchSelfStatus } from '../src/server/api/pool'
+import { SELF_STATUS_TIMEOUT_MS, fetchSelfStatus } from '../src/server/api/pool'
 import { componentViews, computeComponentHealth } from '../src/server/api/views'
 import { stepSelfNode } from '../src/stack/hub'
 import { SELF_NODE_ENTRY } from '../src/stack/specs'
@@ -94,15 +94,50 @@ describe('T1 fetchSelfStatus：账本 pid 不是判决（G1）', () => {
     expect(s!.workers).toBe(1)
   })
 
-  it('探针 1500ms 才应答 ⇒ 仍非 null（预算不给「账本陈旧」这一档更小的值，评审 F1）', async () => {
+  it('★ 账本陈旧不缩预算（评审 F1）：两条路径拿到的预算都恰是 SELF_STATUS_TIMEOUT_MS', async () => {
+    // 判据直接打在**预算值**上（探针第三个参数），而不是「让探针睡 1500ms 看它答不答」：
+    // 后种写法白等 1.5s，而且只证明「预算 ≥1500」——改小到 1600ms 也照样绿，评审 F1 说的
+    // 「不许给账本陈旧这一档更小的预算」根本抓不住。这里比的是**同一个数**。
+    const budgets: number[] = []
+    const capture = async (_url: string, _init: RequestInit, budget: number): Promise<Response> => {
+      budgets.push(budget)
+      return statusResp({ workers: 1 })
+    }
+    writeRegistry({ selfNode: { pid: STALE_PID, entry: SELF_NODE_ENTRY } })
+    expect(await fetchSelfStatus(CFG, { probe: capture })).not.toBeNull()
+    writeRegistry({})
+    expect(await fetchSelfStatus(CFG, { probe: capture })).not.toBeNull()
+    expect(budgets).toEqual([SELF_STATUS_TIMEOUT_MS, SELF_STATUS_TIMEOUT_MS])
+    expect(SELF_STATUS_TIMEOUT_MS).toBe(4000) // F1 的数字本身也要钉住（改它是显式决定）
+  })
+
+  it('慢探针在预算内应答 ⇒ 仍拿到数据（预算不提前收口）', async () => {
+    // 预算是 4000，但用例不该真的等 4s：用 `timeoutMs` **等比缩放同一份预算**（300ms），
+    // 探针“慢”到 50ms——留 6× 余量，机器抖动也不会红。这个 50ms 是被测刺激（一个慢探针），
+    // 不是拿 sleep 去猜「该到了」。
     writeRegistry({})
     const s = await fetchSelfStatus(CFG, {
+      timeoutMs: 300,
       probe: async () => {
-        await new Promise((r) => setTimeout(r, 1500))
+        await new Promise((r) => setTimeout(r, 50))
         return statusResp({ workers: 2 })
       },
     })
     expect(s?.workers).toBe(2)
+  })
+
+  it('探针不答 ⇒ 到预算按 null 收（证明预算真的挂在 signal 上，上一条不是空转）', async () => {
+    // 零定时器：探针只做一件事——监听 abort。所以这条的墙钟 = 预算本身（40ms），
+    // 而一旦有人把 `timeoutMs` 从 signal 上摘掉（这个注入面就成了摆设），它会挂到用例超时。
+    writeRegistry({})
+    const s = await fetchSelfStatus(CFG, {
+      timeoutMs: 40,
+      probe: (_url, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal!.reason))
+        }),
+    })
+    expect(s).toBeNull()
   })
 
   it('探针不通 ⇒ null（真死仍是 null，G5 不引入新假绿）', async () => {
