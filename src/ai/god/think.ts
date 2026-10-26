@@ -415,6 +415,49 @@ export function thinkImpl(self: GodAIInput): void {
     self._hpPressureActive = false
   }
 
+  // ============ A32 (2026-10-26): FREEZE-WINDOW ROLL-CALL ============
+  // 用户裁定：冰冻期敌人**不能移动躲弹**，射击/击杀率应该比全局高 30~50%，
+  // 而实测只有 +8%/+9% —— 说明冻结窗口被浪费在走位上。
+  // 战术：从近到远**逐个点名**；优先朝「对基地威胁最高」的敌人方向走，路上能杀就顺手杀。
+  // 实现：冻结期若四方向都没有可打的敌人 ⇒ 朝「最近敌人」走一步（接上后由 A23 转身开火）；
+  // 若已有可打目标 ⇒ 不干预（让正常候选链开火，A23 负责转身）。
+  if (self.params.freezeHuntMode > 0 && frozen) {
+    let hittable = false
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      if (scanAheadImpl(self, pcx, pcy, ALL_DIRS[di]).enemy) {
+        hittable = true
+        break
+      }
+    }
+    if (!hittable) {
+      let target: (typeof w.tanks)[number] | null = null
+      let bestD = Infinity
+      for (let i = 0; i < self._enemies.length; i++) {
+        const e = self._enemies[i]
+        const d = Math.abs(e.x + e.w / 2 - pcx) + Math.abs(e.y + e.h / 2 - pcy)
+        if (d < bestD) {
+          bestD = d
+          target = e
+        }
+      }
+      if (target) {
+        const dx = target.x + target.w / 2 - pcx
+        const dy = target.y + target.h / 2 - pcy
+        const horiz: Direction = dx > 0 ? 'right' : 'left'
+        const vert: Direction = dy > 0 ? 'down' : 'up'
+        const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
+        for (let i = 0; i < order.length; i++) {
+          if (self.canMoveDir(p, order[i])) {
+            self._moveDir = order[i]
+            self._fire = false
+            recordBranch(self, 'navigate')
+            return
+          }
+        }
+      }
+    }
+  }
+
   // ---- Scan for enemy targets (global vision, T9 priority) ----
   let aimDir = findEnemyDirectionImpl(self, pcx, pcy)
 
