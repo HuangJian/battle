@@ -128,9 +128,15 @@ function fallbackStats(
 // ⇒ 固定回 A18 之前的开火口径，避免两条机制在同一批 seeds 上互相干扰。
 const ERA = {
   ...DEFAULT_GOD_AI_PARAMS,
+  // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+  lateHuntMode: 0,
   defenseCellResolve: 0,
   aimError: 0.03030591179971963,
   fireSkipPct: 0,
+  // A23/A25 纪元的默认值也会挪动本用例的基座 ⇒ 一并固定回写用例时的口径，
+  // 让「fallback 承诺把 stuck episode 砍半」这条守卫保持严格（不放松阈值）。
+  turnToFireMode: 0,
+  maxPlayerDistFromBase: 26,
 }
 const OFF = { ...ERA }
 const ON = { ...ERA, directMoveFallbackHold: 40 }

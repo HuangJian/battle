@@ -565,7 +565,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   lateHuntMode: 1,
   lateHuntKills: 14,
   // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
-  lateHuntMaxAlive: 3,
+  lateHuntMaxAlive: 8,
   lateHuntMinDist: 6,
   // A17 (2026-10-25): 同车道已有我方在飞弹 ⇒ 不再补射（确定性开火经济学，
   // 用来替代 aimError 那个「3% 随机跳发」——实测 aimError 0.03→0 会让胜率 −1.14pp，
