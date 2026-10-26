@@ -24,6 +24,7 @@ from remote import weights_standard
 from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
 from trainer.queue_local import pick_race_target, register_inflight
 from worker import node_identity
+from worker.archive import find_archive_weights  # noqa: F401 — 兼容旧引用
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from worker.eval_local import (
@@ -39,7 +40,7 @@ from worker.eval_local import (
     run_local_eval_game,
     settle_eval_summary,
 )
-from worker.eval_track import lost_by_node
+from worker.eval_track import course_logger, lost_by_node
 
 # 让位/份额（尾巴）策略在 `biz/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
@@ -53,6 +54,7 @@ from worker.eval_yield import (
     release_local_gate_if_starved,
     requeue_backoff_sec,
     reserve_local_slots,
+    select_delayed_eval_it,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
 )
 from worker.sibling_reuse import REUSE_NODE, land_reused_eval, reuse_eval_round
 
@@ -65,45 +67,6 @@ from worker.sibling_reuse import REUSE_NODE, land_reused_eval, reuse_eval_round
 #: 协议侧 kind 是不透明字符串（POST x-kind / GET X-Kind / task ?kind= 三处同源）⇒
 #: 旧节点无需任何改动，本改动不触 codeHash（nn-training/** 不在 SSOT 内）。
 EVAL_WEIGHTS_KIND = "eval"
-
-
-def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
-    """延迟 eval 派发轮选择（P0 修复：in-loop eval 曾恒取 W(N-1) 却标 itN）。
-
-    第 dispatch_it 轮采集收官后，可评估的最新已完成权重是 W(dispatch_it-1)
-    （本轮 PPO 尚未跑）。返回应评估的权重轮 M，无则 None。
-    M 从 1 起：W(0)=init 权重由 it0 基线流覆盖，A-eval 不重复。
-    纯函数（可单测）；调用方（loop）负责实际派发与对账。
-    """
-    m = dispatch_it - 1
-    if m < 1:
-        return None
-    return m if is_eval_round(m) else None
-
-
-def _course_logger(course: str):
-    """把模块级 `log` 包成**本轮专属**的显式课程标签（plan/eval-gap-honesty §6-1）。
-
-    为什么不能用 `_PREFIX`：eval 跑在 `dispatch_eval_bg` 的 daemon 线程里，活过
-    `prefix_scope` 的作用域 ⇒ 它每行读到的是别的课程线程最后置的前缀（实测 4 条
-    `it5 DONE` 里 3 条是错的，镜像还会写进别的课的日志文件）。
-
-    为什么要做成模块级工厂（而不是 `run()` 里的 `def log`）：同名的局部函数会让整个
-    `run` 作用域把 `log` 当局部变量，`_raw = log` 直接 UnboundLocalError；工厂里的 `log`
-    是模块全局，`monkeypatch.setattr(ed, "log", …)` 仍然生效（测试夹具换成 `list.append`
-    这类只收一个位置的 callable 时退回旧形，日志不得反过来杀死训练）。
-    """
-
-    def _log(msg: str) -> None:
-        if course:
-            try:
-                log(msg, course=course)
-                return
-            except TypeError:
-                pass
-        log(msg)
-
-    return _log
 
 
 def _record_failed_meta(
@@ -138,37 +101,6 @@ def _record_failed_meta(
     )
 
 
-def find_archive_weights(backup_dir: str, backup_prefix: str, it: int) -> str | None:
-    """归档目录里定位 itN 权重（`{prefix}.it{N}.*.json`，取最新）。
-
-    P0 修复：延迟派发读不可变归档而非活指针——wver 与离线复跑同源，
-    且天然免疫 PPO 落盘竞态与断点续跑后的指针前移。缺席返回 None
-    （归档失败是非致命的；调用方回落活指针 + 响亮日志）。
-    """
-    if not backup_dir or not backup_prefix:
-        return None
-    _repo_root: Any = None
-    try:
-        from worker.archive import REPO_ROOT
-
-        _repo_root = REPO_ROOT
-    except Exception:
-        pass
-    import os
-
-    bdir = backup_dir
-    if _repo_root is not None and not os.path.isabs(bdir):
-        bdir = str(_repo_root / bdir)
-    try:
-        cands = sorted(
-            Path(bdir).glob(f"{backup_prefix}.it{it}.*.json"),
-            key=lambda p: p.stat().st_mtime,
-        )
-    except OSError:
-        return None
-    return str(cands[-1]) if cands else None
-
-
 class EvalDispatcher:
     """固定语料干净评估的单轮派发器（阻塞版，调用方放后台线程跑）。
 
@@ -177,9 +109,14 @@ class EvalDispatcher:
     节点门：enabled ∧ ping ∧ ping.evalSupport ∧ bun major.minor 一致——旧 agent 无
     能力声明即跳过（它会静默忽略 mode 参数把评估局跑成采样局），逐节点灰度点亮。
 
-    本地参与（R6 补丁）：local_gate 由调用方在「训练侧已无梯度步可做」（PPO/采集
-    收尾）时 set——此前本机算力让位训练，此后 idle CPU 经 run_local_eval_game 直跑
-    剩余局（读派发时刻的冻结权重快照）。None = 不参与本地（旧路径行为不变）。
+    本地参与有两种模式：
+
+    * **份额模式**（`local_fallback_only=False`，缺省）：R6 语义——local_gate 由调用方在
+      「训练侧已无梯度步可做」（PPO/采集收尾）时 set，本机槽位在节点门前先开工并预留
+      队尾。手动 evalA / B/C / 旧调用方走这里。
+    * **兜底模式**（`local_fallback_only=True`，in-loop）：只有本轮 **没有任何可用节点**
+      （`nodes_ok` 为空：无 enabled 节点 / 全部 ping 或能力门失败 / 权重 POST 全败）才启动
+      本机线程；健康集群上本机 0 线程、不预留队尾。local_gate 不参与。
     """
 
     def __init__(
@@ -194,6 +131,7 @@ class EvalDispatcher:
         rollout_winrate: float | None = None,
         local_gate: threading.Event | None = None,
         baseline: bool = False,
+        local_fallback_only: bool = False,
     ) -> None:
         self.bun = bun
         self.rl_path = rl_path
@@ -207,9 +145,11 @@ class EvalDispatcher:
         #: it0 基线模式：`rl_path` 是课程 bc 权重、`it` 是 0；已评估账本按 iter 去重
         #: （见 eval_done_keys 的 iter_filter），不与 A-eval 共用 wver 键发生互吞。
         self.baseline = baseline
+        #: True = 本机只做「集群全部不可用」的兜底（in-loop 四个派发点）。
+        self.local_fallback_only = local_fallback_only
 
     def run(self) -> None:
-        """原 dispatch_eval_round 主体：run() 内局部别名，行为逐字节不变。"""
+        """原 dispatch_eval_round 主体：run() 内局部别名；份额模式行为逐字节保留。"""
         bun = self.bun
         rl_path = self.rl_path
         traj_dir = self.traj_dir
@@ -219,10 +159,10 @@ class EvalDispatcher:
         it = self.it
         rollout_winrate = self.rollout_winrate
         local_gate = self.local_gate
-        baseline = self.baseline
         # D5（plan/eval-gap-honesty §6-1）：本轮所有 eval 行自带课程标签、不经 `_PREFIX`。
         # 嵌套函数（worker / local_worker / record）自然闭包到这个局部名。
-        log = _course_logger(str(getattr(args, "course", "") or ""))
+        # 别叫 `log`：同名赋值会让模块全局变局部；`_log` 仍闭包到模块全局（tests patch `ed.log`）。
+        _log = course_logger(str(getattr(args, "course", "") or ""), log)
 
         # D1b（§2b）：eval 的私有 scratch **不是** it<N>/——轮转删 it<N>/ 时不会带走在飞的评估。
         eval_dir = traj_dir.parent / f"_eval-{traj_dir.name}"
@@ -264,7 +204,7 @@ class EvalDispatcher:
             # 固定池外语料（2026-10-22，DECISIONS §2026-10-22-fixed-offpool-eval-seeds）：
             # `a_eval_seed_list` 与 it 无关 ⇒ 每轮、每门同 level 的课都评同一批
             # (stage,seed)，it 之间/课程之间逐点可比。小 n_seeds（冒烟/单测）照旧切片。
-            seed_list = a_eval_seed_list(it, n_seeds, baseline=baseline)
+            seed_list = a_eval_seed_list(it, n_seeds, baseline=self.baseline)
             pairs = [(s, sd) for s in eval_stages for sd in seed_list]
             if not pairs:
                 return
@@ -274,14 +214,14 @@ class EvalDispatcher:
             # it1 的 args.out 指纹偶同时，it1 的 A-eval 不得被 it0 行整轮跳过）。
             done = (
                 eval_done_keys(eval_jsonl, key16, BASELINE_EVAL_ITER)
-                if baseline
+                if self.baseline
                 else eval_done_keys(eval_jsonl, key16, min_iter=1)
             )
             todo = [p for p in pairs if p not in done]
             if not todo:
-                log(
+                _log(
                     f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip"
-                    + ("（it0 基线）" if baseline else "")
+                    + ("（it0 基线）" if self.baseline else "")
                 )
                 return
             # ---- 同族课程的现成读数（plan/episode-reuse.plan.md）----
@@ -297,27 +237,29 @@ class EvalDispatcher:
             # 撞上 eval 轮），同盘同名会互相覆写、后启动的本地局读到错权重。
             snapshot_path: str | None = None
             local_slots = max(0, int(policy.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
-            if local_gate is not None and local_slots > 0:
+            # 兜底模式的快照也必须在节点门之前建：rl_path 可能随后被 PPO 原地覆盖，
+            # 不能等 nodes_ok 出来再读活指针。
+            if (local_gate is not None or self.local_fallback_only) and local_slots > 0:
                 try:
                     eval_dir.mkdir(parents=True, exist_ok=True)
                     snap = eval_dir / (
                         "_eval_frozen_weights-baseline.json"
-                        if baseline
+                        if self.baseline
                         else "_eval_frozen_weights.json"
                     )
                     shutil.copyfile(rl_path, snap)
                     snapshot_path = str(snap)
                 except OSError as e:
-                    log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
+                    _log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
 
             total = len(todo) + len(reused)  # 借来的局也进收工口径（行照落，只是不占节点）
-            # 尾段预留量（公式在 biz/eval_yield.reserve_local_slots）：gate 接线且本地可用时，
-            # 节点不取最后 reserved 局（留给本机直跑）
+            # 尾段预留量（公式在 worker/eval_yield.reserve_local_slots）：只在份额模式生效。
+            # 兜底模式健康集群上本机不参与 ⇒ gate_wired=False ⇒ 恒 0，节点不白留队尾。
             reserved = reserve_local_slots(
                 total,
                 local_slots,
                 snapshot_ready=snapshot_path is not None,
-                gate_wired=local_gate is not None,
+                gate_wired=not self.local_fallback_only and local_gate is not None,
             )
             pending: deque[tuple[int, int]] = deque(todo)
             lock = threading.Lock()
@@ -465,7 +407,7 @@ class EvalDispatcher:
                                 },
                             )
                     except Exception as e:
-                        log(
+                        _log(
                             f"[eval] WARN record meta 写入失败（忽略）"
                             f": {type(e).__name__}: {str(e)[:160]}"
                         )
@@ -497,7 +439,7 @@ class EvalDispatcher:
                         break
                     except Exception as e:  # eval_row 缺键 / 写盘失败（行未落盘）
                         last_err = e
-                        log(
+                        _log(
                             f"[eval] s{task[0]}/seed{task[1]} 落盘失败"
                             f"（attempt {attempt}/{1 + EVAL_RECORD_RETRY_MAX}）"
                             f": {type(e).__name__}: {str(e)[:160]}"
@@ -523,11 +465,11 @@ class EvalDispatcher:
                             },
                         )
                     except Exception as e2:
-                        log(
+                        _log(
                             f"[eval] WARN record-failed meta 写入失败（忽略）"
                             f": {type(e2).__name__}: {str(e2)[:160]}"
                         )
-                    log(
+                    _log(
                         f"[eval] s{task[0]}/seed{task[1]} 落盘失败 ×{1 + EVAL_RECORD_RETRY_MAX}"
                         f" —— dropped（本局计入缺口，收官 drain 可补）"
                     )
@@ -586,7 +528,7 @@ class EvalDispatcher:
                                 fanout_copy = True
                                 leg = leg_tries.get((task, nd["id"]), 0) + 1
                                 leg_tries[(task, nd["id"])] = leg
-                                log(
+                                _log(
                                     f"[eval] tail-race s{task[0]}/seed{task[1]} "
                                     f"node={nd['id']} — race lane"
                                 )
@@ -656,7 +598,7 @@ class EvalDispatcher:
                                 timeout=min(300.0, max(60.0, task_timeout)),
                                 kind=EVAL_WEIGHTS_KIND,
                                 err=err,
-                                log=log,
+                                log=_log,
                             )
                         ):
                             transient = True
@@ -673,7 +615,7 @@ class EvalDispatcher:
                         if ok:
                             if task in seen:
                                 _pop_inflight(task, nd["id"])
-                                log(
+                                _log(
                                     f"[eval] dup settle s{task[0]}/seed{task[1]} "
                                     f"node={nd['id']} — dropped"
                                 )
@@ -693,7 +635,7 @@ class EvalDispatcher:
                             if transient:
                                 soft_streaks[nd["id"]] = soft_streaks.get(nd["id"], 0) + 1
                                 if soft_streaks[nd["id"]] == soft_streak_max:
-                                    log(
+                                    _log(
                                         f"[eval] node {nd['id']}: 连续 {soft_streak_max} 次瞬时失败"
                                         f"（背压/瞬断，非节点故障）— 本轮停派"
                                     )
@@ -707,7 +649,7 @@ class EvalDispatcher:
                                 if transient:
                                     retry_at[task] = time.time() + requeue_backoff_sec(leg)
                                 pending.append(task)
-                                log(
+                                _log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued"
                                     + (
                                         "（任务丢失·节点重启，已回队、不计故障）"
@@ -719,7 +661,7 @@ class EvalDispatcher:
                                 )
                             elif task not in seen:
                                 _record_failed_meta(meta_path, it, task, nd["id"], err)
-                                log(
+                                _log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err}) "
                                     f"— dropped"
                                 )
@@ -738,7 +680,7 @@ class EvalDispatcher:
                         if not record_ok:
                             continue  # 失败已 WARN + record-failed meta；本局计入缺口
                         el = manifest.get("elapsedSec")
-                        log(
+                        _log(
                             f"[eval] {len(landed)}/{total} s{task[0]}/seed{task[1]} "
                             f"node={nd['id']} outcome={manifest.get('outcome')} "
                             f"ticks={manifest.get('ticks')} "
@@ -753,7 +695,7 @@ class EvalDispatcher:
                     if local_stopped.is_set():
                         return  # 连续瞬断熔断：N 条本机线程共享同一个事件
                     t_task_start = None
-                    if local_gate is not None and not local_gate.is_set():
+                    if not self.local_fallback_only and local_gate is not None and not local_gate.is_set():
                         remaining = deadline - time.time()
                         if remaining <= 0:
                             return
@@ -784,7 +726,7 @@ class EvalDispatcher:
                                 fanout_copy = True
                                 leg = leg_tries.get((task, "local"), 0) + 1
                                 leg_tries[(task, "local")] = leg
-                                log(
+                                _log(
                                     f"[eval] tail-race s{task[0]}/seed{task[1]} "
                                     f"node=local — race lane"
                                 )
@@ -839,7 +781,7 @@ class EvalDispatcher:
                         if ok:
                             if task in seen:
                                 _pop_inflight(task, "local")
-                                log(
+                                _log(
                                     f"[eval] dup settle s{task[0]}/seed{task[1]} "
                                     f"node=local — dropped"
                                 )
@@ -861,14 +803,14 @@ class EvalDispatcher:
                                 soft_streaks["local"] = soft_streaks.get("local", 0) + 1
                                 if soft_streaks["local"] == soft_streak_max:
                                     local_stopped.set()
-                                    log(
+                                    _log(
                                         f"[eval] local: 连续 {soft_streak_max} 次瞬时失败"
                                         "（背压/瞬断，非节点故障）— 本轮停派"
                                     )
                                 if leg < EVAL_TASK_ATTEMPTS_TRANSIENT and task not in seen:
                                     retry_at[task] = time.time() + requeue_backoff_sec(leg)
                                     pending.append(task)
-                                    log(
+                                    _log(
                                         f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
                                         " — requeued（瞬断/背压，不计节点故障）"
                                     )
@@ -882,7 +824,7 @@ class EvalDispatcher:
                                         err_errno,
                                         err_msg_head,
                                     )
-                                    log(
+                                    _log(
                                         f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err})"
                                         " — dropped（瞬断预算用尽）"
                                     )
@@ -894,13 +836,13 @@ class EvalDispatcher:
                                 # 是死代码，评审时特意去掉；改派一手性用例钉的是取任务侧那条 skip）。
                                 redispatched.add(task)
                                 pending.appendleft(task)
-                                log(
+                                _log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
                                     f" — 改派给在线节点（本机第 {leg} 次）"
                                 )
                             elif leg < EVAL_TASK_ATTEMPTS and task not in seen:
                                 pending.append(task)
-                                log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                                _log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
                             elif task not in seen:
                                 _record_failed_meta(
                                     meta_path,
@@ -911,7 +853,7 @@ class EvalDispatcher:
                                     err_errno,
                                     err_msg_head,
                                 )
-                                log(
+                                _log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err})"
                                     " — dropped"
                                 )
@@ -930,16 +872,17 @@ class EvalDispatcher:
                         if not record_ok:
                             continue  # 失败已 WARN + record-failed meta；本局计入缺口
                         el = manifest.get("elapsedSec")
-                        log(
+                        _log(
                             f"[eval] {len(landed)}/{total} s{task[0]}/seed{task[1]} "
                             f"node=local outcome={manifest.get('outcome')} "
                             f"ticks={manifest.get('ticks')} "
                             f"elapsed={str(el) + 's' if el is not None else '-'}"
                         )
 
-            # —— 本机槽位先开工（不等节点门/权重门，审计 B3）——
+            # —— 份额模式：本机槽位先开工（不等节点门/权重门，审计 B3）——
             # 本地权重就是本机冻结快照，无需下发；节点门（并行 ping）与权重 POST 都是
-            # 秒级开销，让本机槽位干等纯属白丢吞吐。
+            # 秒级开销，让本机槽位干等纯属白丢吞吐。兜底模式没有确定要跑的本机槽位，
+            # 必须等 `nodes_ok` 出来再孵化（健康集群上本机 0 线程）。
             def _spawn_tracked(fn, *a: Any, name: str = "") -> threading.Thread:
                 """孵化消费线程并计入 live_workers（线程必须先计数再启动：主线程在
                 spawn 完才看计数，晚计数会让收工判断误以为「消费线程全退」）。"""
@@ -957,7 +900,8 @@ class EvalDispatcher:
                 return t
 
             threads: list[threading.Thread] = []
-            if snapshot_path is not None and local_slots > 0:
+            # 份额模式：本机在节点门前先开工；兜底模式等 nodes_ok 出来再决定。
+            if not self.local_fallback_only and snapshot_path is not None and local_slots > 0:
                 for _ in range(local_slots):
                     threads.append(_spawn_tracked(local_worker, name="eval-local"))
 
@@ -985,19 +929,19 @@ class EvalDispatcher:
                 if ping is None:
                     # 留痕：旧实现静默 continue——节点被丢时日志里既看不出是谁、也看不出
                     # 为什么（2026-09-19 审计 B4）。
-                    log(
+                    _log(
                         f"[eval] node {nid}: ping 失败/超时（并行探测，预算 {status_timeout}s）"
                         f" — 本轮不参与"
                     )
                     continue
                 if not ping.get("evalSupport"):
-                    log(
+                    _log(
                         f"[eval] node {nid}: agent lacks evalSupport — skipped "
                         f"(sync code + restart agent to enable)"
                     )
                     continue
                 if need_sj and not ping.get("stageJsonSupport"):
-                    log(
+                    _log(
                         f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
@@ -1007,7 +951,7 @@ class EvalDispatcher:
                 if bool(getattr(args, "decision_events", False)) and not ping.get(
                     "decisionEventsSupport"
                 ):
-                    log(
+                    _log(
                         f"[eval] node {nid}: 事件课程 eval 需 decisionEventsSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
@@ -1015,17 +959,17 @@ class EvalDispatcher:
                 # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 课程的局同样只派给能力位节点
                 # （旧 agent 静默跑 K=10 混入，同规 fail-closed；缺席/10 = 不查）。
                 if int(getattr(args, "decision_k", 10)) != 10 and not ping.get("decisionKSupport"):
-                    log(
+                    _log(
                         f"[eval] node {nid}: K≠10 课程 eval 需 decisionKSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
                     continue
                 if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
-                    log(f"[eval] node {nid}: bun version mismatch — skipped")
+                    _log(f"[eval] node {nid}: bun version mismatch — skipped")
                     continue
                 ch_why = common.distribution.check_code_hash(ping, code_hash_local)
                 if ch_why:
-                    log(f"[eval] node {nid}: {ch_why} — skipped")
+                    _log(f"[eval] node {nid}: {ch_why} — skipped")
                     continue
                 # 本轮（本 eval 轮）bootId 钉 + 核（与 rollout 同判据，按**腿**分账本：
                 # 同一 iterId 的 eval 与 rollout 是两轮采集，不能共用一个键）。
@@ -1033,7 +977,7 @@ class EvalDispatcher:
                     node_identity.round_key("eval", eval_iter_id), nid, ping
                 )
                 if boot_why:
-                    log(f"[eval] node {nid}: {boot_why} — skipped")
+                    _log(f"[eval] node {nid}: {boot_why} — skipped")
                     _record_agent_meta(
                         meta_path,
                         {
@@ -1051,14 +995,14 @@ class EvalDispatcher:
             # 本机槽位可用 ⇔ snapshot_path 已建（见上方快照段）⇒ 门失败不再整轮空转。
             if not alive:
                 if snapshot_path is None:
-                    log("[eval] no eval-capable node — skipped this round")
+                    _log("[eval] no eval-capable node — skipped this round")
                     return
-                log("[eval] no eval-capable node — local-only eval this round")
+                _log("[eval] no eval-capable node — local-only eval this round")
 
             # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
             # ★ 2026-10-15：与 rollout 腿同一口径——推之前先把 delta 容器落地成整份
             #   （评估节点自己也 `JSON.parse` 这个文件）。
-            weights_standard.ensure_standard_weights(rl_path, log=log)
+            weights_standard.ensure_standard_weights(rl_path, log=_log)
             with open(rl_path, "rb") as f:
                 weights_bytes = f.read()
             nodes_ok = (
@@ -1069,7 +1013,7 @@ class EvalDispatcher:
                     weights_bytes,
                     timeout=min(300.0, max(60.0, task_timeout)),
                     kind=EVAL_WEIGHTS_KIND,
-                    log=log,
+                    log=_log,
                 )
                 if alive
                 else []
@@ -1077,22 +1021,45 @@ class EvalDispatcher:
             if alive and not nodes_ok:
                 # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。
                 if snapshot_path is None:
-                    log("[eval] all weight POSTs failed — skipped this round")
+                    _log("[eval] all weight POSTs failed — skipped this round")
                     return
-                log("[eval] all weight POSTs failed — local-only eval this round")
+                _log("[eval] all weight POSTs failed — local-only eval this round")
 
-            log(
+            # 兜底模式的唯一本机入口：只有 `nodes_ok` 为空才孵化；健康集群本机 0 线程、
+            # reserved=0，summary 不会出现 local。
+            if self.local_fallback_only and nodes_ok:
+                _log(
+                    f"[eval] it{it}: remote-only（nodes={[n['id'] for n in nodes_ok]}）"
+                    "——本机不参与"
+                )
+            elif self.local_fallback_only:
+                if snapshot_path is None or local_slots <= 0:
+                    _log(
+                        "[eval] no usable eval node"
+                        f"（snapshot={'yes' if snapshot_path else 'no'}, slots={local_slots}）"
+                        " — skipped this round"
+                    )
+                    return
+                for _ in range(local_slots):
+                    threads.append(_spawn_tracked(local_worker, name="eval-local"))
+                _log(
+                    f"[eval] it{it}: local fallback ×{local_slots}"
+                    "（no usable remote eval node）"
+                )
+
+            _log(
                 f"[eval] it{it}: dispatch {total} greedy games "
                 f"(corpus={len(pairs)}, done={len(pairs) - total})"
-                + (" [it0 基线 · bc 权重]" if baseline else "")
+                + (" [it0 基线 · bc 权重]" if self.baseline else "")
                 + f" -> {[(n['id'], n['c']) for n in nodes_ok]}"
                 + (f" [local tail-reserved ×{reserved}]" if reserved else "")
             )
 
             # 收官 drain / 远端全员 mismatch 时：gate 若仍关着，local_worker 会空等到
             # deadline 才放行——终轮 eval 等 600s 却 0 局。没有节点可派时立刻开闸。
-            if release_local_gate_if_starved(local_gate, nodes_ok):
-                log(
+            # 兜底模式没有 gate，也没有「已孵化但等门」的本机线程 ⇒ 不调用。
+            if not self.local_fallback_only and release_local_gate_if_starved(local_gate, nodes_ok):
+                _log(
                     f"[eval] it{it}: no remote nodes — local_gate released immediately"
                     f"（local_slots={local_slots} snapshot={'yes' if snapshot_path else 'no'}）"
                 )
@@ -1151,7 +1118,7 @@ class EvalDispatcher:
             # settled 满 = 断连（收工只等「正在写行」的赢家落盘）。
             closing = common.distribution.abort_active_requests(req_scope)
             if all_done.is_set():
-                log(
+                _log(
                     f"[eval] it{it}: settled 满（{len(landed)}/{total}）— 断连 {closing} 条"
                     f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{tail}"
                 )
@@ -1160,27 +1127,27 @@ class EvalDispatcher:
                 top_errno = (
                     max(lost_errnos.items(), key=lambda kv: kv[1])[0] if lost_errnos else "-"
                 )
-                log(
+                _log(
                     f"[eval] it{it}: 机器级故障收工 —— {top_node} 独占 {top_n}/{lost_n} 局"
                     f"（errno={top_errno}）；缺口不进本轮判决，收官 drain 会补"
                     f"— 断连 {closing} 条在飞连接{tail}"
                 )
             elif close_reason == "workers-gone":
-                log(
+                _log(
                     f"[eval] it{it}: 收工（worker 线程归零，未全落盘 {len(landed)}/{total}）"
                     f"— 断连 {closing} 条在飞连接（在途局丢弃，下次续跑）{tail}"
                 )
             else:
-                log(
+                _log(
                     f"[eval] it{it}: 收工（窗口到期 {window - remain:.0f}s，"
                     f"未全落盘 {len(landed)}/{total}）— 断连 {closing} 条在飞连接"
                     f"（在途局丢弃，下次续跑）{tail}"
                 )
             if left_pending > 0:
-                # 可读性行（**不是**验收通道：log() 只在 prefix_scope 内镜像课程日志，
+                # 可读性行（**不是**验收通道：_log() 只在 prefix_scope 内镜像课程日志，
                 # eval 跑在后台线程 ⇒ 落盘的验收面只有 summary 的 close_reason/left_pending，
                 # 2026-10-08 评审 F10）。
-                log(
+                _log(
                     f"[eval] it{it}: WARN 有 {left_pending} 局未落盘 —— 从未派出 {never_n} 局"
                     f"（never-dispatched）、派出未落盘 {left_pending - never_n} 局（lost）"
                     f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
@@ -1195,7 +1162,7 @@ class EvalDispatcher:
             with lock:
                 pending_writers = writers[0]
             if pending_writers > 0:
-                log(
+                _log(
                     f"[eval] it{it}: 收工仍有 {pending_writers} 个写行者未落盘"
                     f"（1s 预算用尽，行可能晚于本行 summary 落账）"
                 )
@@ -1209,13 +1176,13 @@ class EvalDispatcher:
                 claimed_n = len(seen)
                 landed_n = len(landed)
                 gap_preview = [f"s{s}/seed{sd}" for (s, sd) in todo if (s, sd) not in landed][:8]
-            log(
+            _log(
                 f"[eval] it{it}: 派出={total} 认领={claimed_n} 落盘={landed_n} "
                 f"缺口={total - landed_n}"
                 + (f"（{'、'.join(gap_preview)}…）" if gap_preview else "")
             )
             if claimed_n != landed_n:
-                log(
+                _log(
                     f"[eval] it{it}: WARN 认领≠落盘（{claimed_n} vs {landed_n}）"
                     f"— 未落盘局带 missing 原因进 summary，收官 drain 可补"
                 )
@@ -1245,7 +1212,7 @@ class EvalDispatcher:
                 close_reason=close_reason,
             )
         except Exception as e:
-            log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")
+            _log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")
 
 
 def dispatch_eval_round(
@@ -1259,6 +1226,7 @@ def dispatch_eval_round(
     rollout_winrate: float | None = None,
     local_gate: threading.Event | None = None,
     baseline: bool = False,
+    local_fallback_only: bool = False,
 ) -> None:
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
@@ -1266,7 +1234,17 @@ def dispatch_eval_round(
     runner 的 monkeypatch 需落在本模块全局名上，见 e2e/test_run_rl.py）。
     """
     EvalDispatcher(
-        bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate, baseline
+        bun,
+        rl_path,
+        traj_dir,
+        args,
+        cfg,
+        iter_id,
+        it,
+        rollout_winrate,
+        local_gate,
+        baseline,
+        local_fallback_only,
     ).run()
 
 
@@ -1281,6 +1259,7 @@ def dispatch_eval_bg(
     rollout_winrate: float | None = None,
     local_gate: threading.Event | None = None,
     baseline: bool = False,
+    local_fallback_only: bool = False,
 ) -> threading.Thread:
     t_ = threading.Thread(
         target=dispatch_eval_round,
@@ -1295,6 +1274,7 @@ def dispatch_eval_bg(
             rollout_winrate,
             local_gate,
             baseline,
+            local_fallback_only,
         ),
         daemon=True,
         name=f"eval-it{it}" + ("-baseline" if baseline else ""),

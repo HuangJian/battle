@@ -205,12 +205,8 @@ def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None
     assert loop._baseline_landed_wver == wver
 
 
-def test_baseline_self_makes_gate_when_absent(tmp_path, monkeypatch) -> None:
-    """P0-4：it0 那一轮 A-eval 还没派过 ⇒ `_eval_gate` 是 None ⇒ 本机槽位结构性缺席。
-
-    自建一把**已置位**的门（PPO 恒在节点上跑 ⇒ 本机核心空闲）。不放行的后果：
-    远端线程一退光，收工循环就 `break`，队列里剩下的局无声蒸发（x21-psh-b0 it0 的 95 局）。
-    """
+def test_baseline_does_not_build_a_local_gate(tmp_path, monkeypatch) -> None:
+    """it0 基线也走兜底模式：不建份额门，本机只在节点全不可用时才启动。"""
     bc = tmp_path / "bc.json"
     bc.write_text("{}", encoding="utf-8")
     loop = _loop(tmp_path, bc=str(bc))
@@ -224,13 +220,13 @@ def test_baseline_self_makes_gate_when_absent(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
     loop._maybe_dispatch_baseline_eval(NODES)
     assert len(calls) == 1
-    gate = calls[0]["local_gate"]
-    assert gate is not None and gate.is_set(), "门缺席 ⇒ 自建并放行"
-    assert loop._eval_gate is gate
+    assert calls[0]["local_gate"] is None
+    assert calls[0]["local_fallback_only"] is True
+    assert loop._eval_gate is None, "基线不再自建并置位 local 份额门"
 
 
-def test_baseline_reuses_unset_gate(tmp_path, monkeypatch) -> None:
-    """既有的门（哪怕未置位）一字不动 —— 「本机让位训练」的策略归 A-eval 那条路管。"""
+def test_baseline_ignores_existing_gate(tmp_path, monkeypatch) -> None:
+    """既有的门不论状态都不参与基线派发（不传给派发器、不偷偷置位）。"""
     bc = tmp_path / "bc.json"
     bc.write_text("{}", encoding="utf-8")
     loop = _loop(tmp_path, bc=str(bc))
@@ -244,8 +240,9 @@ def test_baseline_reuses_unset_gate(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
     loop._maybe_dispatch_baseline_eval(NODES)
-    assert calls and calls[0]["local_gate"] is gate
-    assert not gate.is_set(), "未置位的既有门不得被基线偷偷放行"
+    assert calls and calls[0]["local_gate"] is None
+    assert calls[0]["local_fallback_only"] is True
+    assert not gate.is_set(), "既有门不得被基线偷偷放行"
 
 
 def test_start_it_zero_rejected() -> None:
@@ -308,7 +305,6 @@ def test_dispatch_retries_until_landed(
     bc.write_text("{}", encoding="utf-8")
     loop = _loop(tmp_path, bc=str(bc))
     loop._start_it = 1
-    loop._eval_gate = threading.Event()  # 生产路径：基线复用当轮 A-eval 的本地门
     calls: list[dict] = []
 
     def _fake_bg(bun, rl_path, traj_dir, args, cfg, **kw):
@@ -325,7 +321,9 @@ def test_dispatch_retries_until_landed(
     assert c["baseline"] is True
     assert c["iter_id"].endswith(f".{BASELINE_EVAL_ITER}")  # 与 A-eval 的缓存键空间隔离
     assert c["cfg"] == NODES
-    assert c["local_gate"] is loop._eval_gate  # 本地兜底可用（生产语义钉死）
+    assert c["local_gate"] is None  # 不再有份额门
+    assert c["local_fallback_only"] is True  # 只在集群全不可用时本机兜底
+    assert loop._eval_gate is None
 
     loop._maybe_dispatch_baseline_eval(NODES)  # 尚未落账 → 重试（不再要求 it == start_it）
     assert len(calls) == 2

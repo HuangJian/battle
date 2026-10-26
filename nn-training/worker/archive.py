@@ -27,6 +27,28 @@ WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（tools/weights_prune.py）的参考配额；backup_weights 不自动删
 
 
+def find_archive_weights(backup_dir: str, backup_prefix: str, it: int) -> str | None:
+    """归档目录里定位 itN 权重（`{prefix}.it{N}.*.json`，取最新）。
+
+    延迟派发读不可变归档而非活指针——wver 与离线复跑同源，且天然免疫 PPO 落盘
+    竞态与断点续跑后的指针前移。缺席返回 None（归档失败是非致命的；调用方回落
+    活指针 + 响亮日志）。2026-10-26 从 `trainer/eval_dispatch.py` 迁来（LOC 预算）。
+    """
+    if not backup_dir or not backup_prefix:
+        return None
+    bdir = Path(backup_dir)
+    if not bdir.is_absolute():
+        bdir = REPO_ROOT / bdir
+    try:
+        cands = sorted(
+            bdir.glob(f"{backup_prefix}.it{it}.*.json"),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError:
+        return None
+    return str(cands[-1]) if cands else None
+
+
 def backup_weights(
     weights_path: str,
     it: int,

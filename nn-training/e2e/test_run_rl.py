@@ -1305,7 +1305,12 @@ def test_backup_weights(tmp: Path) -> None:
 
 
 def test_eval_local_gate(tmp: Path) -> None:
-    """R6 补丁：eval 本地参与——gate 放行后本机直跑全部/尾局；gate 不放行则让位。"""
+    """份额模式回归（手动 evalA/B/C 的 R6 语义）：gate 放行后本机直跑；不放行则让位。
+
+    in-loop 的兜底模式见下方 `test_eval_fallback_only_healthy_remote` 与
+    `tests/trainer/test_eval_dispatch_resilience.py` 的 fallback-only 用例：健康集群
+    本机零参与，只有无可用节点时才走这里这条本机路径。
+    """
     import trainer.eval_dispatch as ed
 
     work = tmp / "eval-local"
@@ -1369,12 +1374,18 @@ def test_eval_local_gate(tmp: Path) -> None:
         check(not ed.hold_for_local(2, 2, False, True), "reserve: release grace forces flow")
         check(not ed.hold_for_local(0, 2, False, False), "reserve: empty pending → no hold")
         check(not ed.hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior")
-        # A：gate 放行（无可用节点）→ 3 关 ×2 种子全部由 local 结算并聚合进 summary
+        # A：兜底模式 + 无可用节点 → 3 关 ×2 种子全部由 local 结算并聚合进 summary
         traj_a = work / "trajA"
-        gate = threading.Event()
-        gate.set()
         ed.dispatch_eval_round(
-            "bun", str(rl), traj_a, mk_args(30), cfg, "rid.1", 1, local_gate=gate
+            "bun",
+            str(rl),
+            traj_a,
+            mk_args(30),
+            cfg,
+            "rid.1",
+            1,
+            local_gate=None,
+            local_fallback_only=True,
         )
         rows = [
             json.loads(line)
@@ -1455,6 +1466,51 @@ def test_eval_local_gate(tmp: Path) -> None:
         )
     finally:
         ed.run_local_eval_game = orig
+
+
+def test_eval_fallback_only_healthy_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """兜底模式 + 健康节点 ⇒ 纯远端：本机 runner 零调用，行全在 fake 节点。"""
+    import trainer.eval_dispatch as ed
+
+    srv, weights, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    local_calls: list[tuple[int, int]] = []
+
+    def fake_local(*_a, stage: int, seed: int, **_kw):
+        local_calls.append((stage, seed))
+        raise AssertionError("健康集群不该启动本机 eval")
+
+    monkeypatch.setattr(ed, "run_local_eval_game", fake_local)
+    traj = tmp_path / "fb"
+    traj.mkdir()
+    ns = types.SimpleNamespace(
+        **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-0", "eval_window_sec": 30}
+    )
+    try:
+        ed.dispatch_eval_round(
+            bun,
+            str(weights),
+            traj,
+            ns,
+            cfg,
+            "fb.e",
+            1,
+            local_fallback_only=True,
+        )
+    finally:
+        srv.shutdown()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    played = [r for r in rows if r.get("event") == "eval"]
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    check(len(played) == 2, f"healthy remote settles 2 games (got {len(played)})")
+    check(all(r.get("node") == "fake" for r in played), "all rows attributed to the remote node")
+    check(bool(summ) and "local" not in (summ[-1].get("nodes") or {}), "summary has no local")
+    check(local_calls == [], f"local runner never called (got {local_calls})")
 
 
 def test_race_tier_ok() -> None:
@@ -1583,6 +1639,7 @@ def main() -> None:
             test_it_local_suspend,
             test_it_longtail_race,
             test_it_eval_deferred,
+            test_eval_fallback_only_healthy_remote,
             test_it_precollect_resume,
             test_it_early_race_v314,
         ]

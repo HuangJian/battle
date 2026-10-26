@@ -9757,3 +9757,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   地板 14.4s，实测 15–17s，top-10 文件占 52.9%（`sim/eval-game-parity` 12.7s）。同一天的
   `bun --cpu-prof-md` 剖面显示 sim/AI 自身也很平（最大 self 3.7%），没有单点。要再快只能改仿真
   计算本身（新纪元三件套），不属于「换 Bun API」的范围。
+
+## §2026-10-26-goalnn-eval-local-fallback-only（2026-10-26，in-loop eval 的本机只做兜底）
+
+- **背景**：用户口径「训练课程时 in-loop eval 总是启用 local，不符合设计；应该 rollout/eval
+  集群全部不可用时才启用 local 兜底」。根因不是单行 bug：`_dispatch_delayed_eval` 恒建并置位
+  `local_gate`（单一 PPO 路径下 `ppo_remote=True` ⇒ `local_gate_release_plan` 恒 `immediate`），
+  `EvalDispatcher` 又把「有 gate + slots>0」当成固定本机份额（快照 / 尾段预留 / 预先孵化
+  `eval-local`），于是健康集群上每轮都有 4 条本机线程与 `node=local` 行。
+- **决定**：① in-loop eval（per-tick A-eval / it0 基线 / 收官 drain / stream 旧路径）走
+  `local_fallback_only=True`：只有 `len(nodes_ok) == 0`（无可用 eval 节点或全部权重 POST 失败）
+  才启动本机兜底；健康集群本机 0 线程 / 0 局，不再预留尾巴；② `policy.evalLocalSlots` 在
+  **in-loop** 读作「兜底线程上限」（缺省 4；0 = 不兜底），手动 / B/C 仍按份额读取；③
+  `evalLocalEarlyEpochs` / `local_gate_release_plan` 不再被 in-loop 读取（份额模式 / 手动 evalA
+  保留）；④ 手动 evalA、B/C evalboard、离线 eval / m1 eval 的份额语义**不变**；⑤ 不在轮中
+  接管：派发后节点全掉，由下一轮幂等派发与收官 drain 补缺口。**本条取代**
+  §2026-09-17-goalnn-eval-wallclock 中「in-loop 本机份额按 PPO 是否在本机分档」的适用范围。
+- **备选与否决**：`policy.evalLocalSlots=0` 一刀切 —— 否（连兜底也没有，集群全挂时 0 局）；
+  只删 `local_gate` 不删预留/预孵化 —— 否（本机仍会被预留尾巴并先抓局）；轮中接管 —— 否
+  （半途切换执行面引入竞态，下一轮/drain 已能补）；把手动 evalA 一起改 —— 否（不在用户口径内，
+  且手动评估的份额语义是独立产品决定）。
+- **落地**：`trainer/eval_dispatch.py`（`local_fallback_only` 模式 + 快照/预留/孵化分派）、
+  `trainer/loop_eval.py` / `trainer/loop_baseline.py` / `trainer/rollout_phase.py`（四个派发点）、
+  `worker/eval_yield.py`（注释/判据归属）；为守 `eval_dispatch.py` 的 1000 行 LOC 预算，
+  `find_archive_weights` / `select_delayed_eval_it` / `course_logger` 分别迁到
+  `worker/archive.py` / `worker/eval_yield.py` / `worker/eval_track.py` 并在原模块 re-export
+  （行为不变；旧 import 路径保持）；回归：`tests/trainer/test_eval_dispatch_resilience.py`、
+  `tests/trainer/test_eval_local_fallback_guard.py`、`tests/worker/test_eval_timing.py`、
+  `tests/worker/test_baseline_eval.py`、`e2e/test_run_rl.py`。

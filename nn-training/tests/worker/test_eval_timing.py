@@ -103,7 +103,14 @@ def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.Monkey
     calls: list[dict] = []
 
     def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
-        calls.append({"rl_path": rl_path, "it": it})
+        calls.append(
+            {
+                "rl_path": rl_path,
+                "it": it,
+                "local_gate": k.get("local_gate"),
+                "local_fallback_only": k.get("local_fallback_only"),
+            }
+        )
         th = threading.Thread()
         return th
 
@@ -112,8 +119,14 @@ def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.Monkey
     a5 = _archive(ts, 5, '{"w":5}')
     ts._dispatch_delayed_eval(6, {})
     assert len(calls) == 1
-    assert calls[0] == {"rl_path": str(a5), "it": 5}
-    assert ts._eval_thread is not None and ts._eval_gate is not None
+    assert calls[0] == {
+        "rl_path": str(a5),
+        "it": 5,
+        "local_gate": None,
+        "local_fallback_only": True,
+    }
+    assert ts._eval_thread is not None
+    assert ts._eval_gate is None, "in-loop 不再建 local 份额门（只在集群全不可用时兜底）"
 
 
 def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,25 +220,33 @@ def test_early_epoch_reached() -> None:
     assert early_epoch_reached(4, 4, 1) is True
 
 
-def test_dispatch_always_immediate_in_single_ppo_path(
+def test_dispatch_delayed_eval_never_builds_a_local_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """派发期本机份额**恒**立即放行（§3 单一 PPO 路径：本机没有 PPO 窗口可争）。
+    """in-loop 派发不再建/置位 local_gate：本机只在 `nodes_ok` 为空时由派发器兜底。
 
-    历史（HEAD 之前）：这里分两档——远端 PPO ⇒ 立刻放行；本机 PPO ⇒ 让位到末 epoch
-    （`_local_gate_epoch_hook`）/ `_join_eval`。PPO 恒在 worker 上跑之后本机永不自己
-    训练，两档合并为恒 immediate（配套的 `_regate_local_eval` 也删了）。
+    历史：这条路径曾恒建 `threading.Event()` 并按 `local_gate_release_plan` 放行，
+    `EvalDispatcher` 于是每轮固定预留队尾、预孵化本机线程。2026-10-26 改为
+    `local_fallback_only=True` + `local_gate=None`。
 
-    为什么用**裸 args**（连 `ppo` 键都没有）钉：旧实现读的就是 `args.ppo`，那条读路径
-    一旦复活，这个用例当场红。
+    为什么用**裸 args**（连 `ppo` 键都没有）钉：旧实现读的就是 `args.ppo` 附近的分档，
+    那条读路径一旦复活，这个用例当场红。
     """
     import trainer.eval_dispatch as ed
 
-    monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
+    seen: list[dict] = []
+
+    def _fake_bg(*_a, **kw):
+        seen.append(kw)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
     ts = _steps(tmp_path, epochs=4)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})
-    assert ts._eval_gate is not None and ts._eval_gate.is_set()
+    assert ts._eval_gate is None
+    assert ts._eval_thread is not None
+    assert seen == [{"local_gate": None, "local_fallback_only": True}]
     # ★ 两个本机 PPO 专属方法随 §3 删除：复活即红（它们是「本机核心留给 PPO」的残留）
     assert not hasattr(ts, "_regate_local_eval")
     assert not hasattr(ts, "_local_gate_epoch_hook")
