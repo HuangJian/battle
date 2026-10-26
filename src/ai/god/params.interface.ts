@@ -1463,6 +1463,10 @@ export interface GodAIParams {
   /** A23 (2026-10-26): when the gun is ready and nothing is aligned on the
    * current facing, turn to the nearest hittable enemy and fire. 0 = OFF. */
   turnToFireMode: number
+  /** A27 (2026-10-26): extra cells of "penalty" for targets that need more than
+   * one hit when choosing which direction to turn-and-fire (kill the finishers
+   * first; armour soaks the whole shot budget). 0 = OFF. */
+  finisherBias: number
   /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
    * enemy when nothing is hittable and the base is safe. 0 = OFF. */
   lateHuntMode: number

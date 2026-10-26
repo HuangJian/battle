@@ -300,9 +300,37 @@ export function thinkImpl(self: GodAIInput): void {
         if (d === p.dir) continue
         if (!turnWillCommit(w, p, d)) continue
         const sc = scanAheadImpl(self, pcx, pcy, d)
-        if (!sc.enemy || sc.enemyDist >= bestDist) continue
+        if (!sc.enemy) continue
+        // A27 (2026-10-26)：**先杀能一枪打死的**。尸检发现「装甲占比」与胜率的相关性是
+        // 全场最强信号（−0.461；地形全部≈0），最差 6 关全是 armor ≥20%。装甲要 4 发，
+        // 按 74 拍/发 的冷却要 ~300 拍，等于把射速预算全吃掉；先把小兵清掉才能真正解围。
+        // 评分 = 距离 + (目标不是一枪死 ? finisherBias : 0) 格。
+        let score = sc.enemyDist
+        if (self.params.finisherBias > 0) {
+          const vertical = d === 'up' || d === 'down'
+          for (let ei = 0; ei < self._enemies.length; ei++) {
+            const e = self._enemies[ei]
+            const lat = Math.abs(
+              (vertical ? e.x + e.w / 2 : e.y + e.h / 2) - (vertical ? pcx : pcy),
+            )
+            if (lat > 19) continue
+            const ahead = vertical
+              ? d === 'down'
+                ? e.y + e.h / 2 - pcy
+                : pcy - (e.y + e.h / 2)
+              : d === 'right'
+                ? e.x + e.w / 2 - pcx
+                : pcx - (e.x + e.w / 2)
+            if (ahead <= 0) continue
+            const dCells = Math.abs(ahead) / CELL
+            if (dCells > sc.enemyDist + 0.5) continue
+            if ((e.hp ?? 1) > 1) score += self.params.finisherBias
+            break
+          }
+        }
+        if (score >= bestDist) continue
         if (!shouldFireInDirImpl(self, pcx, pcy, d)) continue
-        bestDist = sc.enemyDist
+        bestDist = score
         bestDir = d
       }
       if (bestDir !== null) {
