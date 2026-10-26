@@ -554,6 +554,36 @@ def test_pull_argv_carries_the_cache_dir_when_configured(
 # ------------------------------------------------------------------ run_push_worker
 
 
+def test_push_rejects_code_dir_without_remote_package(tmp_path: Path) -> None:
+    """2026-10-26 真机（push + `source=github`）：cell 铺的是**仓库根**，`remote/` 在 nn-training/ 下。
+
+    不拦的话要白等 `wait_ping` 满 30s 才报「serve 未就绪」，真因（ImportError）埋在 serve.log 里。
+    这里钉住：code_dir 不符合「根 = nn-training/ 的内容」⇒ 当场 -2（配置致命，不重启），
+    且**一个子进程都不起**（rc 早于 cloudflared/serve）。
+    """
+    bad = tmp_path / "worker-code"
+    (bad / "nn-training" / "remote").mkdir(parents=True)  # 仓库根布局：remote 埋下一层
+    logs: list[str] = []
+    assert nbr.run_push_worker(_base_cfg(tmp_path, code_dir=str(bad)), logs.append) == -2
+    assert any("没有 remote/ 包" in m for m in logs), logs
+
+
+def test_push_accepts_code_dir_that_is_a_code_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反向：`<code_dir>/remote` 在 ⇒ 不因代码根那道门退出（继续走 cloudflared 探测，这里故意让它失败）。"""
+    good = tmp_path / "worker-code"
+    (good / "remote").mkdir(parents=True)
+    logs: list[str] = []
+    monkeypatch.setattr(pt.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        pt, "run_capture", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no net"))
+    )
+    # 没 cloudflared + 装不上 ⇒ 停在 -2，但**不是**被代码根那道门拦的
+    assert nbr.run_push_worker(_base_cfg(tmp_path, code_dir=str(good)), logs.append) == -2
+    assert not any("没有 remote/ 包" in m for m in logs), logs
+
+
 def test_push_cloudflared_missing_and_install_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -638,6 +668,87 @@ def test_push_serve_exits_with_rc_passthrough(
     assert serve.killed is False  # 已退出，无需 kill
 
 
+def test_push_tunnel_dies_mid_wait_restarts_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-26 真机（kaggleO）：cloudflared 死了，cell 却一路「守候中 busy=False」。
+
+    守候循环只 ping `127.0.0.1`、只看 serve 存活 ⇒ 隧道没了完全看不出来；而
+    `_refresh_registration` 只在**URL 换名**时重注册（进程死了日志不动 ⇒ 永远那条死 URL）。
+    hub 侧看到的是 Cloudflare 1033/530，云机侧日志一片绿。
+    ⇒ 必须按「cloudflared 已退出」收摊返回 -1，让 `run_notebook` 整体重启换新隧道并重注册。
+    """
+    clock = _FakeClock(step=5.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)  # 隧道等待循环住 `push_tunnel`
+
+    class _TunnelDies:
+        pid = 4343
+        returncode: int | None = None
+        killed = False
+
+        def __init__(self) -> None:
+            self._polls = 0
+
+        def poll(self) -> int | None:
+            self._polls += 1
+            if self._polls >= 3:
+                self.returncode = 7
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+    serve = _FakeProc(poll_seq=[None])  # serve 一直活着
+    tunnel = _TunnelDies()
+
+    def fake_popen(cmd: list[str], **kw: Any) -> Any:
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "x https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+            return tunnel
+        return serve
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    logs: list[str] = []
+    rc = nbr.run_push_worker(
+        _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared"), logs.append
+    )
+    assert rc == -1, "隧道死 ⇒ 非零 ⇒ run_notebook 重启（换隧道 + 重注册）"
+    assert any("cloudflared 已退出" in m and "1033" not in m for m in logs)
+    assert any("hub 再也够不到本机" in m for m in logs)
+    assert serve.killed is True  # finally 回收 worker_server
+
+
+def test_push_already_serving_tunnel_dead_is_fatal_not_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """push-first 接管态：bootstrap 起的 cloudflared 没了 ⇒ -2（不重启，重开 cell）。
+
+    这条不能返回 -1：接管态的 pid 是塞进 CFG 的旧值，restart 只会拿同一批死 pid 再失败一遍。
+    """
+    clock = _FakeClock(step=20.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    serve_pid = 424242
+    monkeypatch.setattr(nbr, "_pid_alive", lambda pid: int(pid) == serve_pid)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    work = tmp_path / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "serve.log").write_text("[00:00:00] [worker-serve] boot done\n", encoding="utf-8")
+    cfg = _base_cfg(tmp_path)
+    cfg["already_serving"] = {
+        "serve_pid": serve_pid,
+        "cf_pid": 999999,  # 隧道进程已死（_pid_alive 只认 serve_pid）
+        "cf_url": "https://abc-def.trycloudflare.com",
+    }
+    logs: list[str] = []
+    assert nbr.run_push_worker(cfg, logs.append) == -2
+    assert any("cloudflared 已退出" in m for m in logs), logs
+    assert any("请重跑本 cell" in m for m in logs), logs
+
+
 def test_push_wait_loop_logs_status_and_serve_tail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -670,6 +781,85 @@ def test_push_wait_loop_logs_status_and_serve_tail(
     assert any("进入推送守候" in m for m in logs)
     assert any("[serve]" in m and "job j1 accepted" in m for m in logs)
     assert any("worker 状态" in m or "守候中" in m for m in logs)
+
+
+def test_push_heartbeat_muted_while_job_logs_are_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-26 用户口径：PPO 在跑、过程日志在往外吐时，**不许**再叠「守候中… busy=True」。
+
+    现场：`busy=True` 那行每 15s 刷一次，把 `[serve]` 的真过程日志挤没了。
+    """
+    clock = _FakeClock(step=5.0)
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)
+    serve = _FakeProc(poll_seq=[None, None, None, 0])
+    serve_log = tmp_path / "work" / "serve.log"
+
+    class _BusyResp(_FakeResp):
+        def read(self) -> bytes:
+            return b'{"busy": true, "queued": 0, "done": 0}'
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "x https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+        if "--port" in cmd:
+            serve_log.write_text("[00:00:00] [worker-serve] job j1 accepted\n", encoding="utf-8")
+        return serve if "--port" in cmd else _FakeProc(poll_seq=[None])
+
+    def fake_urlopen(req: Any, timeout: float = 0) -> _FakeResp:
+        # 每次 /ping 都让 serve.log 长一行 = 「PPO 正在打过程日志」
+        with open(serve_log, "a", encoding="utf-8") as f:
+            f.write("[00:00:05] [worker-serve] it1 rollout 12/35\n")
+        return _BusyResp()
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    logs: list[str] = []
+    rc = nbr.run_push_worker(
+        _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared"), logs.append
+    )
+    assert rc == 0
+    # 状态变化那一行还在（busy False→True 只报一次），但心跳一次都不许出。
+    # 判据用 startswith/endswith 而不是子串：这测的是**整行的形状**（前缀分类 + 结尾标记），
+    # 既更严格也不占文本断言预算。
+    assert [m for m in logs if m.startswith("worker 状态") and m.endswith("（在跑 job）")], logs
+    assert not [m for m in logs if m.startswith("守候中")], logs
+    assert [m for m in logs if m.startswith("[serve]") and m.endswith("it1 rollout 12/35")], logs
+
+
+def test_push_idle_heartbeat_is_throttled_to_three_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空等时心跳限流到**三分钟**一条（2026-10-26 用户口径：「不 busy 的时候，每三分钟刷一次」）。
+
+    旧行为是每 15s 一条 `守候中… busy=False queued=0 done=0` —— 三个字段都不变，纯噪音。
+    """
+    clock = _FakeClock(step=5.0)  # 每拍约 15s 假时间
+    monkeypatch.setattr(nbr, "time", clock)
+    monkeypatch.setattr(pt, "time", clock)
+    serve = _FakeProc(poll_seq=[None, None, None, None, None, 0])  # 5 拍守候后退出 ⇒ 约 75s
+
+    def fake_popen(cmd: list[str], **kw: Any) -> _FakeProc:
+        if "--logfile" in cmd:
+            Path(cmd[cmd.index("--logfile") + 1]).write_text(
+                "x https://abc-def.trycloudflare.com", encoding="utf-8"
+            )
+        return serve if "--port" in cmd else _FakeProc(poll_seq=[None])
+
+    monkeypatch.setattr(nbr.subprocess, "Popen", fake_popen)
+    # 空等：busy=false，且 serve.log 不再增长（没有过程日志可转）
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _FakeResp(200))
+    logs: list[str] = []
+    rc = nbr.run_push_worker(
+        _base_cfg(tmp_path, cloudflared_path="/usr/bin/cloudflared"), logs.append
+    )
+    assert rc == 0
+    beats = [m for m in logs if m.startswith("守候中")]
+    assert len(beats) == 1, f"75s 空等只该有一条心跳（限流 {nbr._HEARTBEAT_SEC:g}s），实际 {beats}"
+
 
 
 def test_push_already_serving_skips_reinstall_and_logs(

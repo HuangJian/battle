@@ -19,6 +19,7 @@ import {
 import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
+import { hubPushEnabled } from './push-config'
 import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
@@ -163,9 +164,15 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       // 于是离线腿只能吃 `DEFAULT_PUSH_CONFIG`（靠模块路径推导）这个隐式缺省。
       '--push-config',
       CONFIG_PATH,
-      // GPU 中介 push 派发：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给**登记在册**的
-      // GPU worker。默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
-      ...(cfg.rl.hub_push ? ['--push'] : []),
+      // GPU 中介 push 派发：`rl.hub_push` 生效时（**缺省开**，见 `hubPushEnabled`），hub 按队列
+      // 顺序把 job 推给**登记在册**的 GPU worker。
+      // ★ 2026-10-26 真机事故：这里原来读的是**裸键** `cfg.rl.hub_push`（缺省 = 不传 `--push`），
+      //   而训练侧 `loop_transport._hub_push_opt_in` / 控制台读模型 `pushConfig.hubPushEnabled`
+      //   都是**缺省 true** ⇒ trainer 发布 `dispatch="push"` 的 job、在原地等 hub 来推，而 hub
+      //   起的时候没带 `--push` ⇒ `hub.boot` 里 `push_disp = None` ⇒ job 永远躺在队首
+      //   （现场：云机 `busy=False queued=0 done=0` 一直等到超时，`/admin/queue` 里 pending=1）。
+      //   一个键两个缺省值 = 必死缝隙 ⇒ 一律走 `hubPushEnabled`（唯一判据源）。
+      ...(hubPushEnabled(cfg) ? ['--push'] : []),
       // 离线 push 派发（2026-10-24 真机事故）：`--offline-push` 此前**只存在于手工命令行**——
       // 控制台起的 hub 从来不带它 ⇒ `hub.boot` 里 `offline_disp = None` ⇒ notebook 自动注册
       // 成功、`nodes[]` 也写进去了，却永远零派单（现场：离线 worker 注册 200 后 2s 被掐）。

@@ -279,6 +279,21 @@ outbox 的状态/rev/ack/字节对账全部读 `state.json` 与文件字节（�
 PPO/eval 的规模断言读 `total` 字段而不是文本，所以这一格是 **+2** 而不是 +9。
 同族先例 = 2026-10-24 离线 push 那 6 行操作员读数。
 
+**2026-10-26 抬 FORM 一格的账**（push 引导第二起真机事故：`--push` 缺省分歧 + 隧道死了看不出来；
+形态 1504 → **1516** = +12，SOURCE 未动 = 1099）：两笔，全部是「被测物**没有**可调用的运行时入口」：
+
+  · **+6 `tests/remote/test_notebook_push_contract.py`**（notebook **不在 pytest 里执行**，只能读 cell 源码）：
+    GitHub 兜底必须只拷 `<clone>/nn-training`（拷仓库根就是那条 `ModuleNotFoundError: No module named
+    'remote'`）、两个来源都要过「`<code_dir>/remote` 存在」同一道门、缺 `registry_url`/`hub_token` 时
+    不许静默降级。这 6 条都已合并成最小条数（同语义共一个 assert），语义相同的另一条用例没再加。
+  · **+6 `tests/remote/test_notebook_runtime.py`**：4 条是**反静默**读数行（`cloudflared 已退出…hub 再也
+    够不到本机` / `请重跑本 cell` / `没有 remote/ 包` —— 云机断连后操作员唯一能看到的证据就是这几行，
+    `LogBundle` 没有结构化出口），2 条是「隧道死 ⇒ 返回 -1 / 接管态 ⇒ -2」的判据里的日志面那一半
+    （返回码本身另有断言，已不是文本判据）。
+
+⚠ 同一批里能改成行为判据的都改了：`rc == -1 / -2`、「一个子进程都不起」、「不接受仓库根布局」
+全部读返回值与文件系统事实；notebook 那 6 条确实只能读文本（同族先例 = 2026-10-23 W0–W2 的 +6）。
+
 """
 
 from __future__ import annotations
@@ -313,8 +328,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   `test_resolve_device_torch_broken_is_fatal_not_cpu`：torch 装坏时的 FATAL 文案必须**逐字**
 #:   含 `libcudart`（现场证据）、`白烧`（为什么要早停）、`pip install torch`（修法）——
 #:   那是操作员在云机断连后唯一的自救信息，只能用文本判据钉）。
+#: 2026-10-26 再抬到 **1516**（+12 = notebook push 契约 6 + 反静默读数行 6；逐笔见模块头末段）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1504
+BASELINE_FORM = 1516
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

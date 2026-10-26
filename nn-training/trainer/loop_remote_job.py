@@ -42,6 +42,57 @@ from trainer.loop_transport import (
 from worker.loop_round import RemotePpoJob
 
 
+def _trim_shards_to_quota(
+    shard_dirs: list[Path], quota: int
+) -> tuple[list[Path], int, int]:
+    """按 `per_stage_quota` **裁掉超采的 shard**（整局取舍）→ `(保留集, 丢了几局, 保留 samples)`。
+
+    为什么必须裁（2026-10-26 实测）：rollout 的超采是**必要保险**——局的长度方差极大
+    （it15 实测 mean 331 / median 247 / p90 625 / max 2832 samples），采集侧按 `est` 反解
+    局数必然系统性偏高。但**超采的字节不能打包传过去再在 PPO 侧丢**：
+    it15 采了 689 局 / 227,962 samples，配额只有 `ceil(122880/35)×35 = 122,885`
+    ⇒ **46% 的 dist（约 1.2 GB）白打包、白压缩、白传输**，而 `per_stage_quota` 的截断点
+    在 `worker/ppo/np_core.py:602`（PPO 装载时）—— 那已经是云机内存里了。
+
+    为什么按 **samples** 累加而不是按局数：关间局均差 2–3×（s2007 均 182 / s2006 均 532），
+    按局数裁会让长局关严重欠采、短局关严重超采。
+
+    为什么**整局取舍**（不切行）：`(stage, seed)` 是 `data_fp` 的身份成分，切行会让
+    「声明集 == 实产集」这条对账前提失效；一局 ~331 samples、配额 3511 ⇒ 整局误差
+    ≤ 331（9%），比 46% 的白传好一个量级。
+
+    顺序：每个 stage 内按目录名（`rl_s{stage}_seed{seed}` ⇒ seed 序）取，无偏；
+    跨 stage 无关（配额本来就是逐关的）。
+    """
+    import json as _json
+
+    by_stage: dict[int, list[tuple[Path, int]]] = {}
+    for d in shard_dirs:
+        p = Path(d)
+        try:
+            mm = _json.loads((p / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        st = int(mm.get("stage", -1))
+        n = int(mm.get("nSamples") or mm.get("totalSamples") or 0)
+        if n <= 0:
+            continue
+        by_stage.setdefault(st, []).append((p, n))
+    kept: list[Path] = []
+    trimmed = 0
+    kept_samples = 0
+    for st in sorted(by_stage):
+        acc = 0
+        for p, n in sorted(by_stage[st], key=lambda t: t[0].name):
+            if acc >= quota:
+                trimmed += 1
+                continue
+            kept.append(p)
+            acc += n
+            kept_samples += n
+    return kept, trimmed, kept_samples
+
+
 class TrainingRemoteJob(TrainingRemotePush):
     """一个远端 PPO job 的四步 + 组合入口。"""
 
@@ -249,6 +300,20 @@ class TrainingRemoteJob(TrainingRemotePush):
             it=it,
             it_dir=str(it_dir),
         )
+        # ★ 2026-10-26：**打包前**按 per_stage_quota 裁掉超采（见 `_trim_shards_to_quota`
+        #   的 docstring）。裁在发布端 ⇒ payload / data_fp / 云机装载集三者**同时变小且自洽**；
+        #   PPO 侧 `per_stage_quota` 的截断保留作第二道保险（裁后几乎不会再有触发）。
+        #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
+        quota = self._per_stage_quota()
+        if quota > 0 and export_path is None:
+            kept, n_trimmed, n_kept = _trim_shards_to_quota(shard_dirs, quota)
+            if n_trimmed:
+                log(
+                    f"it{it}: 打包前按配额裁剪 shard —— 丢 {n_trimmed} 局未传"
+                    f"（每关 ≤{quota} samples）；保留 {len(kept)} 局 / {n_kept} samples"
+                    f"（共采 {len(shard_dirs)} 局）"
+                )
+            shard_dirs = kept
 
         commit = git_head()
         # 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）：「只要不重启，所有
@@ -314,6 +379,12 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
         #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。
         weights_standard.ensure_standard_weights(args.out, log=log)
+        # ★ 2026-10-26 分段计时（**纯观测，跑一轮就撤**）：`pack_sec` 一直是黑盒——
+        #   实测 `pack_payload_zip` 在 2.3 GB / 666 shard 上只要 54 s（`tmp/probe-it8-pack.py`），
+        #   而现场 `pack_sec` = 161 s（it2）/ 243 s（it1）⇒ **约 93 s 不在这三段里的某一段**。
+        #   三个时间点各一行 log，写清「标准权重整份化 / publish_job（含打包）/ journal attach」
+        #   各占多少。不改 manifest、不写盘、失败也不影响流程（`time.time()` 不会抛）。
+        t_std = time.time()
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -385,6 +456,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             ts_code_zip_path=getattr(self, "_ts_code_zip_path", None) if rollout_spec else None,
             log=log,
         )
+        t_pub = time.time()  # publish_job 返回点（= 打包 + 落盘 job 目录 + 写 blob/manifest 全部完成）
         jid = manifest["job_id"]
         # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
         # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
@@ -402,6 +474,13 @@ class TrainingRemoteJob(TrainingRemotePush):
                 ts=time.time(),
             )
         pack_sec = round(time.time() - t_pack, 3)
+        t_jend = time.time()
+        log(
+            f"[pack-breakdown] it{it}: 标准权重整份化 {t_std - t_pack:.1f}s"
+            f"｜publish_job(含打包) {t_pub - t_std:.1f}s"
+            f"｜journal+收尾 {t_jend - t_pub:.1f}s"
+            f"｜合计 {pack_sec:.1f}s｜{len(shard_dirs)} shard"
+        )
         if export_path is not None:
             # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。
             from remote.bundle import export_bundle
