@@ -1460,6 +1460,9 @@ export interface GodAIParams {
   /** A22 (2026-10-26): require an enemy whose body actually overlaps the 6px
    * bullet corridor (the ±8px offset scan over-reports). 0 = OFF. */
   corridorEnemyGate: number
+  /** A23 (2026-10-26): when the gun is ready and nothing is aligned on the
+   * current facing, turn to the nearest hittable enemy and fire. 0 = OFF. */
+  turnToFireMode: number
   /** A17 (2026-10-25): skip a shot when one of OUR shells is already in flight
    * down the same lane toward the same target (deterministic fire economy).
    * 0 = OFF (byte-identical). */
