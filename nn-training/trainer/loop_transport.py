@@ -381,6 +381,31 @@ def resolve_transport(
     )
 
 
+def resolve_route(
+    mode: str,
+    hub_url: str,
+    token: str,
+    gpu_nodes: list[dict],
+    opt_in: bool,
+) -> tuple[list[dict], bool]:
+    """一处裁决「(直推节点清单, 是否走 hub 中介推送)」——两者**互斥**。
+
+    为什么必须合成一个返回值：`gpu_push` 登记项同时就是 hub 派发器的登记项（控制台写的是
+    同一份 `rl-config.nodes[]`）。`auto` 下若各自裁决，两条腿会同时成立——发布带
+    `dispatch="push"` 交给 hub，训练侧又直推同一份 job，并且 `sess.transport` 只看节点
+    （`push`）⇒ hub 已经取回的结果被无视。
+
+    2026-10-26 it72 事故：直推 POST 的应答在隧道里丢了，训练侧卡在 `submit_job(timeout=600)`
+    的读超时里空等 600s；同一时刻 hub 在 worker 完成后 6s 就把结果落盘了
+    （`job_result_accepted`）。双推还意味着每轮多传一份 ~10MB payload。
+    """
+    hub_push = resolve_hub_push(mode, hub_url, token, opt_in)
+    nodes = resolve_transport(mode, hub_url, token, gpu_nodes)
+    # hub 赢 ⇒ 直推清单清空。`mode="push"` / `"pull"` 下 hub_push 恒 False，显式压过不受影响；
+    # `"hubpush"` 本来就返空 ⇒ 只有 `auto` 的这条线会变（那是 bug 所在）。
+    return ([] if hub_push else nodes), hub_push
+
+
 def require_remote_transport(
     hub_url: str,
     token: str,

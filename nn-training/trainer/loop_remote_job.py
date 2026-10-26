@@ -36,8 +36,7 @@ from trainer.loop_transport import (
     kickstart_coef,
     kickstart_warn_kind,
     require_remote_transport,
-    resolve_hub_push,
-    resolve_transport,
+    resolve_route,
 )
 from worker.loop_round import RemotePpoJob
 
@@ -225,11 +224,12 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
         # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
         transport = str(getattr(args, "remote_transport", "auto") or "auto")
-        gpu_nodes = resolve_transport(transport, hub_url, token, _gpu_push_nodes(token))
-        # hub 中介推送（2026-09-18）：发布带 manifest.dispatch="push"，由 hub 按登记表
-        # 推给空闲 GPU worker——训练侧不直连节点，于是「队列顺序/空闲判定/超时回落/
-        # 多课程公平」全住在一处。与 gpu_nodes 互斥（resolve_transport hubpush 恒返空）。
-        hub_push = resolve_hub_push(transport, hub_url, token, _hub_push_opt_in())
+        # 直推清单与 hub 中介推送由**同一处**裁决（`resolve_route`）：gpu_push 登记项同时是
+        # hub 派发器的登记项 ⇒ auto 下两者会同时成立；hub 赢时直推清单必须清空，否则同一
+        # jid 被推两份，而 `sess.transport` 只看节点（2026-10-26 it72 白等 600s，见该函数）。
+        gpu_nodes, hub_push = resolve_route(
+            transport, hub_url, token, _gpu_push_nodes(token), _hub_push_opt_in()
+        )
         require_remote_transport(hub_url, token, gpu_nodes)
         log(
             f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "

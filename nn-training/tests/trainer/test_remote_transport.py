@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from trainer.loop_steps import REMOTE_TRANSPORTS, resolve_hub_push, resolve_transport
+from trainer.loop_transport import resolve_route
 from worker.cli import build_argparser
 
 NODE = {"url": "https://gpu.example", "authKey": "k"}
@@ -116,6 +117,23 @@ def test_hubpush_has_no_direct_nodes() -> None:
     """hubpush 下训练侧不直连节点：即使 config 里有本课 gpu_push 也交回空清单
     （空清单 = 走 `wait_job` 等 hub 回传，不是「推给全部节点」）。"""
     assert resolve_transport("hubpush", "https://hub", "tok", [NODE]) == []
+
+
+def test_auto_with_hub_ready_has_no_direct_nodes() -> None:
+    """auto + hub 就绪 ⇒ **只走 hub**，直推清单必须清空。
+
+    2026-10-26 it72 事故（`1ce99b04f5aa4da8`）：`gpu_push` 节点同时是 hub 派发器的登记项
+    （同一份 `rl-config.nodes[]`）⇒ 各自裁决会两条腿同时成立——发布带 `dispatch="push"`
+    交给 hub，训练侧又直推同一份 job，且 `sess.transport` 只看节点（`push`）。直推 POST 的
+    应答在隧道里丢了，训练侧卡在 `submit_job(timeout=600)` 的读超时里空等 600s；而 hub 早在
+    worker 完成后 6s（21:15:02）就把结果落盘了——`job_result_accepted` 在账本里。
+    """
+    assert resolve_route("auto", "https://hub", "tok", [NODE], True) == ([], True)
+    # hub 未就绪（auto 不成立）⇒ 历史直推一字不变；显式 push/hubpush 的语义也不动。
+    assert resolve_route("auto", "", "tok", [NODE], True) == ([NODE], False)
+    assert resolve_route("auto", "https://hub", "", [NODE], True) == ([NODE], False)
+    assert resolve_route("push", "https://hub", "tok", [NODE], True) == ([NODE], False)
+    assert resolve_route("hubpush", "https://hub", "tok", [NODE], True) == ([], True)
 
 
 # ────────────────── BC（trainer/bc_loop.resolve_transport；R3-4 引擎化后移出 run_bc） ──────────────────
