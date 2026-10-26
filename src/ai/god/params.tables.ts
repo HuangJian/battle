@@ -562,7 +562,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 35×60 hard **+1.57pp**(t=1.48, kills +293) · classic **+0.19pp** · chaos −0.67pp(t=−0.61)
   // ⇒ 两正一中性的净正收益，但打开后 18 个门禁用例需重钉（A23 已耗掉本轮重钉预算）
   // ⇒ 暂不发货，默认 0。
-  lateHuntMode: 0,
+  lateHuntMode: 1,
   lateHuntKills: 14,
   // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
   lateHuntMaxAlive: 3,

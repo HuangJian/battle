@@ -46,7 +46,16 @@ function makeWorld(
   const p = world.player!
   p.spawnTimer = 0
   p.shieldTimer = 0
-  const ai = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...over }, new RNG(0x1234))
+  const ai = new GodAIInput(
+    world,
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
+      ...over,
+    },
+    new RNG(0x1234),
+  )
   ai.reset()
   return { world, ai }
 }

@@ -99,6 +99,8 @@ const STATIC_FORWARD: Record<string, Exclude<IntentId, 'CRUISE'> | typeof COMBAT
   baseConnectClear: 'CLEAR',
   powerup: 'PICKUP',
   midLaneDefense: 'HOLD_LANE',
+  // 远程封线（站在基地列挡弹+向上射击线）：语义属守车道。
+  baseLaneSeal: 'HOLD_LANE',
   midLaneHold: 'HOLD_LANE',
   t2a: COMBAT_CHAIN,
   navigate: COMBAT_CHAIN,
@@ -176,6 +178,7 @@ export const WHITELISTS: Record<IntentId, readonly WhitelistEntry[]> = {
   HOLD_LANE: [
     { branch: 'midLaneDefense', layer: 'window' },
     { branch: 'midLaneHold', layer: 'window' },
+    { branch: 'baseLaneSeal', layer: 'overlay' },
     { branch: 'powerup', layer: 'overlay' },
     { branch: 'dodge', layer: 'reflex' },
   ],
@@ -230,6 +233,7 @@ export const LABEL_TO_CANDIDATE: Record<string, readonly string[]> = {
   baseConnectClear: ['baseConnectClear'],
   powerup: ['pickupLow', 'pickupMid', 'pickupHigh', 'closePickup'],
   midLaneDefense: ['midLaneDefense'],
+  baseLaneSeal: ['baseLaneSeal'],
   midLaneHold: ['midLaneHold'],
   t2a: ['engage'],
   navigate: ['hunt'],

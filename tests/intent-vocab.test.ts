@@ -53,6 +53,7 @@ const OBSERVED_FINE_BRANCH_LABELS: readonly string[] = [
   'baseConnectClear',
   'midLaneDefense',
   'midLaneHold',
+  'baseLaneSeal',
   'suicideReturn',
 ]
 
