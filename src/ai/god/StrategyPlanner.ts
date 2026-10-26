@@ -1887,7 +1887,21 @@ function huntModeTarget(
     const tc = self.tankCell(t)
     const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     // Prefer bonus enemies (they drop power-ups) when distances are close.
-    let adjustedDist = coopAdjustDist(d - (t.bonus ? 2 : 0), d, tc, coopActive, partnerCell)
+    // A28 (2026-10-26): armour chase penalty. Autopsy: `armor` ratio is the only
+    // strong predictor of a weak stage (corr −0.461; every terrain feature ≈0)
+    // and an armour body eats 4 shots ≈ 300 ticks of cooldown, i.e. the whole
+    // fire budget while the rest of the wave advances. Penalise it in the
+    // CHASE score (not in the fire-direction choice — A27 showed that site never
+    // has two candidates to compare). 0 = OFF (byte-identical).
+    const armorPen =
+      self.params.armorChasePenalty > 0 && (t.hp ?? 1) > 1 ? self.params.armorChasePenalty : 0
+    let adjustedDist = coopAdjustDist(
+      d - (t.bonus ? 2 : 0) + armorPen,
+      d,
+      tc,
+      coopActive,
+      partnerCell,
+    )
     if (adjustedDist < bestDist) {
       bestDist = adjustedDist
       best = t

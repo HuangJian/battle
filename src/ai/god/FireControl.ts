@@ -778,7 +778,7 @@ export function shouldFireInDirImpl(
     // measured 20.4 shots/game that neither hit an enemy nor break a brick
     // (≈40% of the shot budget). Require an enemy that actually overlaps the
     // corridor the bullet travels.
-    if (self.params.corridorEnemyGate > 0) {
+    if (self.params.corridorEnemyGate > 0 || self._hpPressureActive) {
       const vertical = dir === 'up' || dir === 'down'
       const half = (TANK + BULLET) / 2
       let hittable = false
@@ -902,7 +902,7 @@ export function shouldFireInDirImpl(
   // line of fire, check if an enemy moving perpendicular will cross
   // the bullet's path at the right time. This lets the player hit
   // fast enemies that dodge bullets by moving sideways.
-  if (!result.wall && self.params.predictiveCrossingFire > 0) {
+  if (!result.wall && self.params.predictiveCrossingFire > 0 && !self._hpPressureActive) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
       self._fireReason.crossing = (self._fireReason.crossing ?? 0) + 1
       return aimOk(self)

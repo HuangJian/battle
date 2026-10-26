@@ -1467,6 +1467,12 @@ export interface GodAIParams {
    * one hit when choosing which direction to turn-and-fire (kill the finishers
    * first; armour soaks the whole shot budget). 0 = OFF. */
   finisherBias: number
+  /** A28 (2026-10-26): cells of chase-score penalty for targets that need more
+   * than one hit (kill the finishers first). 0 = OFF. */
+  armorChasePenalty: number
+  /** A29 (2026-10-26): on-field HP pool at or above which fire-quality mode kicks
+   * in (no P2.4 crossing shots; corridor-verified targets only). 0 = OFF. */
+  qualityFireHp: number
   /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
    * enemy when nothing is hittable and the base is safe. 0 = OFF. */
   lateHuntMode: number

@@ -388,6 +388,9 @@ export class GodAIInput implements InputLike {
   _fireGateAudit: Record<string, number> = {}
   /** A21 (2026-10-25) diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall). */
   _fireReason: Record<string, number> = {}
+  /** A29 (2026-10-26): true while the on-field HP pool is above `qualityFireHp`
+   * (fire-quality mode: no P2.4 crossing shots, corridor-verified targets only). */
+  _hpPressureActive = false
   /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
   _lastFireWasFacing = -1
   /** A15: per-tick memo so `isFiring()` is IDEMPOTENT inside one tick. The

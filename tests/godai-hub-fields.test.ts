@@ -170,6 +170,11 @@ const ALLOWLIST: Record<string, { cls: string; why: string }> = {
     why: 'A21 diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall)',
   },
   _lastFireWasFacing: { cls: 'B', why: 'A15b diagnostic: frame of the last facing-branch shot' },
+  // A29 (2026-10-26): fire-quality mode flag (on-field HP pool >= qualityFireHp).
+  _hpPressureActive: {
+    cls: 'B',
+    why: 'A29 fire-quality mode flag (derived from the HP pool each tick)',
+  },
   _facingFireTick: { cls: 'B', why: 'A15 per-tick memo key (isFiring idempotence)' },
   _facingFireOk: { cls: 'B', why: 'A15 per-tick memo value (isFiring idempotence)' },
   _defCellCol: { cls: 'C', why: 'A8 payload of _defCellValid' },
