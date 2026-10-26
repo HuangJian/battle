@@ -1,5 +1,6 @@
 import type { GodAIInput } from '../GodAIInput'
 import { leadHitForDir } from './lead-fire'
+import { enemyBulletOnRay } from './ActionContract'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, BULLET, FIELD, GRID, BASE_POS } from '../../constants'
@@ -770,6 +771,14 @@ export function shouldFireInDirImpl(
 
   // Enemy in line of fire — fire.
   if (result.enemy) {
+    // A34 (2026-10-26, 用户裁定)：**不要用一发去对消**。护盾/常态都一样：
+    // 若我们的射线上正有敌弹飞来，这一发十有八九先和它相撞（两弹皆消），
+    // 等于用整段冷却换掉对方一发；只有在敌人很近（≤3 格，能抢在相撞前命中）时才值得。
+    // 这条是「护盾期错半格」战术的判据侧等价物：不打注定被对消的弹。
+    if (self.params.skipCancelShot > 0 && result.enemyDist > 3 && enemyBulletOnRay(w, p, dir)) {
+      self._fireGateAudit.cancelSkip = (self._fireGateAudit.cancelSkip ?? 0) + 1
+      return false
+    }
     // A22 (2026-10-26): CENTER-CORRIDOR enemy check. `scanAhead` reads two lines
     // offset ±8px from the barrel and reports an enemy when its BODY touches
     // either line — so it "sees" enemies up to ~24px off-centre. The bullet is

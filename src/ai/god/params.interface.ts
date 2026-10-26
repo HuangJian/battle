@@ -1484,6 +1484,9 @@ export interface GodAIParams {
   /** A32 (2026-10-26): during a freeze window, walk to the nearest enemy when
    * nothing is hittable (enemies cannot dodge — every window should convert). */
   freezeHuntMode: number
+  /** A34 (2026-10-26): don't spend a shell that will be cancelled by an incoming
+   * enemy bullet (skip unless the enemy is within 3 cells). 0 = OFF. */
+  skipCancelShot: number
   /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
    * enemy when nothing is hittable and the base is safe. 0 = OFF. */
   lateHuntMode: number
