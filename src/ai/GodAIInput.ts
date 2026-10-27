@@ -27,6 +27,7 @@ import {
   detectCentralBreachRisk,
 } from './god/params'
 import type { GodAIParams } from './god/params'
+import { ENEMY_MODEL_DEFAULT_WINDOW_TICKS } from './god/EnemyModel'
 export {
   DEFAULT_GOD_AI_PARAMS,
   SKILLED_HUMAN_PARAMS,
@@ -950,6 +951,17 @@ export class GodAIInput implements InputLike {
     // gate's S25 result from 1/20 to 0/20 — a silent global corruption of
     // every later simulation in the process). DECISIONS §98.
     this._baseParams = { ...params }
+    // M3 (2026-10-27): arm the model window on the BASE params, before any
+    // reset reads it. `reset()` resolves `_enemyModel.active` from
+    // `this.params` at its top (line ~1167) — i.e. BEFORE the stage-adapted
+    // params are computed at the bottom. A caller that only sets
+    // `enemyModelMode` (window ships at 0) therefore left `active=false` for
+    // the whole run: measured `enemyModelMode: 1` alone = 0/350 games.
+    // Defaulting here fixes BOTH the missing companion and the stale-capture
+    // ordering; the reset-time guard below covers stage adaptations.
+    if (this._baseParams.enemyModelMode > 0 && this._baseParams.enemyModelWindowTicks <= 0) {
+      this._baseParams.enemyModelWindowTicks = ENEMY_MODEL_DEFAULT_WINDOW_TICKS
+    }
     this.params = this._baseParams
     this._orderedCandidates = orderedCandidates(CANDIDATES, this._baseParams.actionWeights)
     // M3: initialize the EnemyModel (active flag resolved in reset() from the
@@ -1178,6 +1190,16 @@ export class GodAIInput implements InputLike {
       }
     }
     this.params = computeStageAdaptedParams(baseForAdapt, this.world)
+    // M3 (2026-10-27): `enemyModelMode` was a **dead gate** — both its update
+    // site (think.ts) and every consumer require a non-zero window
+    // (`enemyModelMode > 0 && enemyModelWindowTicks > 0`), and the window
+    // ships at 0. Measured: `enemyModelMode: 1` alone changed **0/350 games**.
+    // One knob must mean one mechanism, so a non-zero mode now arms the
+    // default window; an explicit caller value still wins. Default mode 0 ⇒
+    // nothing changes (byte-identical).
+    if (this.params.enemyModelMode > 0 && this.params.enemyModelWindowTicks <= 0) {
+      this.params.enemyModelWindowTicks = ENEMY_MODEL_DEFAULT_WINDOW_TICKS
+    }
     // M2: rebuild the candidate chain in effective-weight order from the
     // (possibly stage-adapted) params. Default = M1 chain order.
     this._orderedCandidates = orderedCandidates(CANDIDATES, this.params.actionWeights)
