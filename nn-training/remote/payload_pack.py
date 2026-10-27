@@ -26,9 +26,11 @@ hub_client 已到 993 行，wire-diet 的钩子面（+~9 行）必越线。拆�
 from __future__ import annotations
 
 import hashlib
+import threading
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from common.payload import (
     PAYLOAD_PERTURB_NAME,
@@ -41,6 +43,7 @@ from common.payload import (
 )
 from common.platform_utils import rmtree_best_effort
 from common.protocol import ProtocolError, pack_payload, unpack_payload
+from common.shard import manifest_bytes
 
 #: 发布端自检的重打上限（plan/accident.plan.md §4.5/§4.6，2026-09-21）。
 #:
@@ -117,6 +120,114 @@ def _payload_reader_selfcheck(
 
 
 
+def compress_segment(seg: bytes) -> bytes:
+    """一段 tar → 已压好的段（`preset` 的**唯一**来源：分块打包与零落盘入口同口径）。
+
+    同内容必同字节（lzma 确定性）⇒ 「收到就压」的段与打包时现压的段可以直接互换，
+    这也是 `ShardSegments` 的段能被 `presegmented` **原样采用**的前提。
+    """
+    import lzma as _lzma
+
+    return _lzma.compress(seg, preset=PAYLOAD_XZ_PRESET)
+
+
+class ShardSegments:
+    """本轮 shard 段的**内存账**（shard 名 → 已压好的 tar 段）—— payload 零落盘。
+
+    plan/payload-zero-disk §3 的落地：dispatch 腿（sampler 节点 HTTP 回传）的 shard 字节本来
+    就在内存里（`fetch_task` 的 `files`），旧流程落盘、打包时再读回来重压一遍。这里在**收到
+    那一刻**就打段 + 压好（`add` 跑在 dispatch 线程里，天然与后续取活并行），打包时
+    `_pack_segmented` 只做「拼接 + sha256」。
+
+    四条不变量（`tests/remote/test_payload_parts.py` 钉着）：
+
+    1. **段 == 盘**：同一 shard，内存段与「从落盘目录重打」逐字节相同 ⇒ 零落盘不改变 payload。
+       所以 `manifest.json` 的字节必须走 `common.shard.manifest_bytes`（与 `write_shard` 同一处）。
+    2. **每轮一份**：`begin(it)` 换轮即清空。上一轮的段漏进这一轮会是「`data_fp` 对不上但字节
+       合法」的静默错包 —— 本类最危险的失败形态。
+    3. **开关同源**：段里有没有 `reward.npy` / f16 是**建账时**的 `wire_diet` 决定的，`take()`
+       拿它跟读的时候比 —— 热改开关后旧段一律不用（退回读盘，宁可慢也不发一份与 manifest
+       自述不符的字节）。
+    4. **一个 shard 只归一个线程**：`add` 里对 slim 的变换与写入都在锁内（slim 的计数器是共享
+       可变状态）；lzma 压缩在锁外（那是最贵的一段，别把 dispatch 线程串起来）。
+
+    缺的 shard（local 兜底腿 / 预采子进程 / 配额裁剪后补漏）**不需要**在这里处理：
+    `_pack_segmented` 按名取不到段就现场读盘，同一个 `shard_segment` 函数体。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._parts: dict[str, bytes] = {}
+        self._slim: Any = None
+        #: 这份账属于哪一轮（-1 = 还没有轮）。`take()` 只认同一个 it。
+        self.it = -1
+        #: 建账时的 `wire_diet`（见不变量 3）。
+        self.wire_diet = False
+
+    # ------------------------------------------------------------ 轮生命周期
+    def begin(self, it: int, *, wire_diet: bool, slim: Any = None) -> None:
+        """切到第 `it` 轮（同一 it 重复调用无副作用 —— 动态采集一轮里有多次派发）。
+
+        `slim` 由调用方（`trainer/rollout_phase.begin_payload_parts`）建好传进来：本模块是
+        payload **字节**的叶子所有者，不反过来依赖 `remote.payload_slim`（那会把 DAG 层号
+        抬起来、连坐一串上位模块；`tests/test_remote_dag.py` 会当场红）。
+
+        每轮**只一份** slim：rollout 期 `add` 用它算变换/计数，打包期 `take` 把同一个实例交给
+        `publish_job` ⇒ `payload_fmt` / `fmt_line()` 描述的是真正发出去的那份字节（段全部命中时
+        打包腿一个成员变换都不走，另建一份会报「未改」——日志骗人）。
+        """
+        it = int(it)
+        if it == self.it:
+            return
+        with self._lock:
+            self._parts.clear()
+            self._slim = slim
+            self.it = it
+            self.wire_diet = bool(wire_diet)
+
+    # ------------------------------------------------------------ dispatch 回调
+    def add(self, name: str, files: Mapping[str, bytes], manifest: Mapping) -> None:
+        """收到一个 shard：当场打段 + 压好存住（`RolloutDispatcher.on_shard` 的实现）。
+
+        `name` 是 `rl_s{stage}_seed{seed}`（= 落盘目录名 = `_pack_segmented` 的键），三处
+        必须逐字相同，否则 `presegmented` 静默查不到（不报错，只是白干一场）。
+        """
+        members = {str(k): bytes(v) for k, v in files.items()}
+        # `write_shard` 落盘时补写 manifest.json ⇒ 段里必须有同一份字节（不变量 1）。
+        members["manifest.json"] = manifest_bytes(dict(manifest))
+        with self._lock:
+            slim = self._slim
+            on_member: Callable[[str, str, bytes], MemberBytes] | None = None
+            extra: Mapping[str, bytes] | None = None
+            if slim is not None:
+                # ★ 交给 slim 的是 `members`（含 `manifest.json`）而不是 dispatch 的 `files`：
+                #   `fetch_task` 回传的文件集**不含** manifest（它单独作为返回值的第一个），
+                #   而 P1（打包端算 reward）要从 manifest 取 outcome/score/metrics_version。
+                #   内存源缺这个成员时 `_reward_bytes` 会响亮抛 ProtocolError —— 实测踩过。
+
+                def on_member(_nm: str, fname: str, _data: bytes) -> MemberBytes:
+                    got: MemberBytes = slim.member_bytes_of(name, members, fname)
+                    return got
+
+                extra = slim.shard_extra_of(name, members)
+            seg = shard_segment(name, members, on_member=on_member, extra_members=extra)
+        comp = compress_segment(seg)  # 锁外（不变量 4）
+        with self._lock:
+            self._parts[name] = comp
+
+    # ------------------------------------------------------------ 打包读取
+    def take(self, it: int, *, wire_diet: bool) -> tuple[Mapping[str, bytes], Any] | None:
+        """本轮可用的 `(presegmented, slim)`；轮号或开关对不上 / 一个段都没有 ⇒ `None`。
+
+        返回的是**浅拷贝**（值是不可变 bytes，拷贝只复制引用）：调用方（`publish_job`）
+        不该拿到一个还在被 dispatch 线程写的字典。
+        """
+        with self._lock:
+            if int(it) != self.it or bool(wire_diet) != self.wire_diet or not self._parts:
+                return None
+            return dict(self._parts), self._slim
+
+
 def _pack_segmented(
     shard_dirs: Sequence[Path],
     zip_path: Path,
@@ -140,7 +251,6 @@ def _pack_segmented(
     **同一个 `shard_segment` 函数体**，没有第二条变换逻辑。
     """
     import concurrent.futures as cf
-    import lzma as _lzma
 
     dirs = {Path(d).name: Path(d) for d in shard_dirs}
     names = sorted(dirs)  # 确定性：同内容必同字节序 ⇒ 同 sha
@@ -158,7 +268,7 @@ def _pack_segmented(
 
         extra = shard_extra(d) if shard_extra is not None else None
         seg = shard_segment(nm, shard_dir=d, on_member=on_member, extra_members=extra)
-        return _lzma.compress(seg, preset=PAYLOAD_XZ_PRESET)
+        return compress_segment(seg)
 
     parts: list[bytes] = []
     if names:
@@ -173,8 +283,8 @@ def _pack_segmented(
     if perturb is not None:
         root[PAYLOAD_PERTURB_NAME] = bytes(perturb)
     if root:
-        parts.append(_lzma.compress(root_segment(root), preset=PAYLOAD_XZ_PRESET))
-    parts.append(_lzma.compress(TAR_END, preset=PAYLOAD_XZ_PRESET))
+        parts.append(compress_segment(root_segment(root)))
+    parts.append(compress_segment(TAR_END))
 
     tmp = zip_path.with_suffix(zip_path.suffix + ".tmp")
     h = hashlib.sha256()
@@ -226,9 +336,10 @@ def pack_payload_zip(
     last_why = ""
     for attempt in range(1, PAYLOAD_SELFCHECK_ATTEMPTS + 1):
         perturb = None if attempt == 1 else f"repack-{attempt}".encode("ascii")
-        if chunks > 1 or presegmented:
+        if chunks > 1:
             # ★ 2026-10-27：分块并行（默认 8 块）—— 见 `_pack_segmented` 的 docstring。
-            #   `chunks == 1` 且无 presegmented ⇒ 走下面 `pack_payload` 的逐字节旧行为。
+            #   `chunks == 1` 是**逐字节旧行为的总开关**：分块与 `presegmented` 一起跳过
+            #   （plan/payload-zero-disk §4 判据 6：改回 1 就回到单流 tarfile）。
             #   **自检照走**（外层 for attempt 循环把它俩同等对待，否则分块路径没有护栏）。
             sha = _pack_segmented(
                 shard_dirs,

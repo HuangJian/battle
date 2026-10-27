@@ -59,7 +59,7 @@ from typing import Any
 
 from biz.course import build_pairs
 from common.log import log
-from trainer.rollout_phase import dispatch_rollout_phase
+from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
 from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
 
@@ -116,6 +116,9 @@ class TrainingVolume:
 
     # ---- 本簇自己的状态（S4 第十八刀随簇搬来；只被这一簇读写）----------------------
     #: 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式。
+    #: 零落盘（plan/payload-zero-disk）：本轮 shard 段账（`ShardSegments`，组合根建）。
+    #: 补波与首波共用同一份——`begin` 对同一 it 重入无副作用。
+    _payload_parts: Any
     _volume_target: int | None
     _volume_collected: int | None
     #: 本轮已跑的波次/批次数（初波 = 1）与初波每关局数（硬顶默认值依赖后者）。
@@ -291,6 +294,8 @@ class TrainingVolume:
         ⇒ 调用方实时更新逐关账本；`halt_event` 一置位，dispatcher 的 worker 立即停止
         取新任务（池里没派出去的候选**从不运行**），在飞副本按既有 dedup 路径丢弃。
         """
+        # 零落盘（plan/payload-zero-disk §3.2）：补波与首波记同一份段账（同一 it ⇒ 不清）。
+        begin_payload_parts(self.args, it, self._payload_parts)
         (report, stream_meta, _thread, _gate, _child, _early) = dispatch_rollout_phase(
             self.args,
             self.bun,
@@ -312,6 +317,7 @@ class TrainingVolume:
             corpus_fp=self._corpus_fp,
             halt_event=halt_event,
             on_result=on_result,
+            on_shard=self._payload_parts.add,
         )
         if stream_meta is not None:
             raise SystemExit("[volume] 补波落到 stream 路径——v1 只支持串行路径")

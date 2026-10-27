@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
@@ -139,6 +140,37 @@ def join_precollect_child(
     return None
 
 
+def begin_payload_parts(args, it: int, parts: Any) -> None:
+    """本轮开始：把 shard 段的**内存账**切到 `it`（并建本轮唯一那份 slim）。
+
+    plan/payload-zero-disk §3.2：两个派发入口（`_rollout_phase` 首波 / `_dispatch_volume_wave`
+    补波）共用这一份——wire-diet 的三件套口径必须与 `publish_job` **同源**
+    （`args.wire_diet` / 课程 `reward_spec()` / `METRICS_VERSION`），否则段里带不带
+    `reward.npy`、f16 与否会与 manifest 的自述（`payload_fmt`）分叉。
+
+    `formula_hash` 故意留空：`build_slim` 会从 spec 自取（它带「取不到就不做 P1」的降级），
+    在这里现算反而会把那条降级变成一次 AttributeError。
+    同一 `it` 重入无副作用（补波一轮里会反复进来）。
+
+    slim 在这里建（而不是在 `ShardSegments.begin` 里）：那个模块是 payload 字节的叶子，
+    不依赖 `remote.payload_slim`（否则 DAG 层号会抬起来连坐上位模块）。
+    """
+    if not int(getattr(args, "wire_diet", 1) or 0):
+        parts.begin(int(it), wire_diet=False)
+        return
+    from biz.reward_library import METRICS_VERSION
+    from remote.payload_slim import build_slim
+
+    course = getattr(args, "course_obj", None)
+    spec = course.reward_spec() if course is not None else None
+    slim = build_slim(
+        reward_spec=spec,
+        it=int(it),
+        metrics_version=int(METRICS_VERSION),
+    )
+    parts.begin(int(it), wire_diet=True, slim=slim)
+
+
 def dispatch_rollout_phase(
     args,
     bun: str,
@@ -161,6 +193,9 @@ def dispatch_rollout_phase(
     halt_event: threading.Event | None = None,
     on_result=None,
     pool_halt: bool = False,
+    # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 时的回调（`ShardSegments.add`）。
+    # 两条路（stream / 串行）都经 `run_rollout_queue` ⇒ 同一个注入点，这里只透传。
+    on_shard=None,
 ) -> tuple[
     dict,
     dict | None,
@@ -286,6 +321,7 @@ def dispatch_rollout_phase(
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                on_shard=on_shard,
                 **_stream_kwargs,
             )
             stream_meta = report
@@ -312,6 +348,7 @@ def dispatch_rollout_phase(
                 on_result=on_result,
                 # 候选池语义：`halt` = 逐关满额 ⇒ 没派的候选不算缺口（外部熔断不带这个标记）
                 pool_halt=pool_halt,
+                on_shard=on_shard,
             )
             # 串行：rollout 返回即 collector 收官。per-tick A-eval 不在此派发——
             # P0 修复：此处派发读到的活指针还是 W(it-1)（本轮 PPO 未跑）却标 itN。

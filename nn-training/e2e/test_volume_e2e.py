@@ -59,6 +59,10 @@ from common.schema import (
     POLICY_EXTRA_DIM,
     SCALAR_DIM,
 )
+
+# 下一行的 import 为「本轮 shard 段账」：生产上由 `TrainingLoop.__init__` 建，
+# 本夹具用真 `_dispatch_volume_wave` ⇒ 状态契约得补齐（plan/payload-zero-disk §3.2）。
+from remote.payload_pack import ShardSegments
 from trainer.loop_core import TrainingLoop
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
@@ -403,6 +407,8 @@ class _Loop:
         self._spawned_early = False
         self._eval_thread = None
         self._eval_gate = None
+        # 零落盘（plan/payload-zero-disk）：真 `_dispatch_volume_wave` 会 begin/填这份段账。
+        self._payload_parts = ShardSegments()
         # 每波真派发的 pairs（真调用边界，供重启一致性断言）
         self.waves: list[list[tuple[int, int]]] = []
         self.wave0: list[tuple[int, int]] = []

@@ -169,14 +169,37 @@ def validate_result(
     return None
 
 
-def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
+def manifest_bytes(manifest: dict) -> bytes:
+    """shard 的 `manifest.json` 字节 —— **唯一**序列化口径（落盘与 payload 段共用）。
+
+    为什么必须只有一处（2026-10-27，plan/payload-zero-disk）：零落盘方案在 dispatch 腿
+    收到内存里的 shard 时就打好 tar 段，成员里必须有 `manifest.json`（`unpack_payload`
+    只把**带 manifest.json 的子目录**当 shard，`worker.resume.walk_shard_dirs` 同理）。
+    那份字节必须与 `write_shard` 落盘的**逐字节相同**，否则「内存段 == 盘段」这条判据只在
+    Linux 成立：文本模式的 `\n` 在 Windows 上会翻成 `\r\n`。所以这里显式产出 LF 字节、
+    `write_shard` 以二进制写 —— 同一份 manifest 在任何平台字节相同（payload 的 sha 不再随
+    打包机漂）；JSON 读取端（resume / metrics_stats / iter_shard_dirs）只看解析值。
+    """
+    return json.dumps(dict(manifest), indent=2).encode("utf-8")
+
+
+def write_shard(files: dict, manifest: dict, out_dir: str, on_receive=None) -> None:
     """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。
+
+    `on_receive(name, files, manifest)`（2026-10-27，plan/payload-zero-disk §3.1）：在**落盘
+    之前**把字节交出去一次（`name` = `os.path.basename(out_dir)` = `rl_s{stage}_seed{seed}`）。
+    dispatch 腿的 shard 本来就在内存里（`fetch_task` 的 `files`）——调用方（`ShardSegments.add`）
+    可以当场打段+压好，打包时不必再读回来重压。放在本函数而不是调用点：①「唯一落盘出口」
+    是「哪份字节进了 shard 目录」的唯一定义处，挂在这里的读者不可能漏掉某条写盘路；
+    ② 顺序天然是「先交字节、后写盘」。缺省 `None` = 逐字节旧行为。
 
     2026-09-03 修正：补写 manifest.json——M1 metrics 方案下 engine 加载器
     （ppo.engine.load_shard → _reward_from_metrics）需要 outcome/score/metrics_version
     在**落盘目录内**（分布式/self-node 局的单局 manifest 此前只存在于 fetch 返回的
-    内存对象，落盘即丢 → 被当成 timeout 错标，奖励错算）。queue_local 路径由 exporter
-    直接写盘不受影响；此处补齐 dist 路径两侧同规。
+    内存对象，落盘即丢 → 被当成 timeout 错标，奖励错算）。
+    queue_local 路径由 exporter 直接写盘不受影响；此处补齐 dist 路径两侧同规。
+
+    manifest.json 的字节口径见 `manifest_bytes`（二进制写：跨平台同字节）。
     """
     os.makedirs(out_dir, exist_ok=True)
     # ★ B1 v6（2026-10-20）：**可选项也要落盘**。
@@ -188,6 +211,8 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     #  若没有那条校验，worker 会按 7 宽读 9 宽 mask，静默错位。）
     names = list(_shard_files_for(manifest))
     names += [n for n in OPTIONAL_SHARD_FILES if n in files]
+    if on_receive is not None:
+        on_receive(os.path.basename(out_dir), files, manifest)
     for name in names:
         val = files[name]
         raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
@@ -197,5 +222,7 @@ def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
     # manifest.json（先紧凑再 indent=2，第二次覆盖第一次）——冗余 IO + 双写窗口
     # 无谓暴露（中途崩溃留半写文件）。只保留 indent=2 写（与 TS 侧 exporter 同规），
     # 磁盘产物字节不变（旧代码最终落盘的就是 indent=2 版本）。
-    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+    # 2026-10-27：改二进制写（见 `manifest_bytes`）——Windows 上不再把 `\n` 翻成 `\r\n`，
+    # 解析值不变；换来的是「同一份 manifest 在任何平台字节相同」。
+    with open(os.path.join(out_dir, "manifest.json"), "wb") as f:
+        f.write(manifest_bytes(manifest))

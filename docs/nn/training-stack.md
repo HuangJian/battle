@@ -7,6 +7,57 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §44 payload 零落盘：dispatch 腿收到就压，打包只剩拼接（2026-10-27）
+
+**触发**：`plan/payload-zero-disk.plan.md`（立项 2026-10-27，分块并行打包的底座 `15c973d2` 已 ship）。
+`pack_sec` 是每轮最长的串行段（现场 68–161 s @ 2.3 GB / 666 shard）；分块并行只把「边打边压」那一半
+按下去，**读盘 + 重压**仍在。而这些 shard 的字节在 dispatch 腿**本来就在 trainer 内存里**
+（`fetch_task` 的 `files`）——落盘只是为了打包时再读回来重压一遍。
+
+**落点（四处；判据同源：段的字节 == 落盘那份）**
+
+- `common/shard.py`：`write_shard(..., on_receive=)` 在**写盘之前**把 `(name, files, manifest)` 交出去
+  一次。挂「唯一落盘出口」而不是调用点：那条路径是「哪份字节进了 shard 目录」的唯一定义处，
+  挂这里读者不可能漏掉某条写盘路；顺序也天然是「先交字节、后写盘」。新增 `manifest_bytes()`，
+  落盘与段共用**同一序列化口径**（二进制 LF —— 文本模式在 Windows 上会把 `\n` 翻成 `\r\n`，
+  那样「内存段 == 盘段」只在 Linux 成立，payload sha 也会随打包机漂）。
+- `remote/payload_pack.py`：`ShardSegments`（一轮一份的段账）——`begin(it, wire_diet, …)` 换轮清空、
+  `add(name, files, manifest)` 收到就打段 + 压好、`take(it, wire_diet)` 取本轮那份（浅拷贝）；
+  `compress_segment()` 收口 preset（分块与零落盘同一口径）；`PAYLOAD_XZ_CHUNKS == 1` 变成**逐字节
+  旧行为的总开关**（分块与 `presegmented` 一起跳过，方案 §4 判据 6）。
+- `remote/hub_client.publish_job(..., presegmented=, diet_slim=)`：命中的段原样拼接，缺的（local 兜底腿 /
+  预采子进程 / 配额裁剪后补漏）现场读盘 —— **同一个** `shard_segment` 函数体，没有第二条变换逻辑。
+  `diet_slim` 必须是产出那些段的**同一实例**：段全部命中时打包腿一次成员变换都不会走，另建一份
+  会把 `payload_fmt` / `fmt_line()` 报成「未改」（字节对、日志骗人）。
+- dispatch → trainer：`RolloutDispatcher(on_shard=…)` 经 `run_rollout_queue` / `run_rollout_stream` /
+  `dispatch_rollout_phase` 一路透传（串行与流式腿**同一个**注入点）；首波与补波共用
+  `begin_payload_parts(args, it, parts)`（`trainer/rollout_phase.py`，wire-diet 三件套与 `publish_job`
+  同源），段账挂在组合根 `TrainingLoop._payload_parts`。
+
+**四条不变量**（`tests/remote/test_payload_parts.py`，7 例）：①**段 == 盘**（含 `manifest.json`，
+逐字节）；②`begin` 换轮即清空（上一轮的段漏进这一轮 = `data_fp` 对不上但字节合法的**静默错包**）；
+③`take()` 比 `it` 与 `wire_diet`（热改开关后旧段一律不用，宁可退回读盘）；④缺段从盘补（local 兜底
+腿 / 预采子进程走的就是这条）。注入点另有一例
+（`tests/trainer/test_rollout_dispatch_resilience.py::test_on_shard_gets_the_memory_bytes_before_the_disk_write`）：
+名字是 `rl_s{stage}_seed{seed}`（= 落盘目录名 = `_pack_segmented` 的键，对不上只会安静地退回读盘）、
+回调先于写盘、拿到的是内存字节。
+
+**踩到的真坑**：`fetch_task` 回传的 `files` **不含** `manifest.json`，而 P1（打包端算 reward）要从
+manifest 取 outcome/score/metrics_version ⇒ 交给 slim 的必须是「`files` + `manifest.json`」那份成员表；
+用裸 `files` 时 `_reward_bytes` 响亮抛「缺成员 manifest.json」（新用例当场抓到，已修）。
+
+**刻意未做（方案 §3.3 的 S3）**：`iteration` 落盘之后删掉本轮 shard 目录。三个读者今天还在盘上读：
+`metrics_stats`（本轮逐维统计，排在 `_record_iteration` 之后）· `trailing_stage_samples_per_game`
+（**最近一轮**的 manifest 是分关 est 的最新来源 ⇒ 删了会让 `est_agg=latest` 静默退回全局 est）·
+`biz/course_archive`（`it<N>/dist/**` 就是待归档语料）。方案 §8 本就把 S3 归为「省磁盘、可单独排期」，
+而**全部收益（打包不再读盘/重压）在 S1 已经拿满** ⇒ 另起一笔（要么保留 `manifest.json`、要么给 est
+另建账）。
+
+**待取的真机读数**：下一轮在线训练的 `[pack-breakdown]`（`publish_job(含打包)` 是否到方案 §4 的
+< 5 s 量级）· `iteration.wire.payload_bytes` 与上一轮比（±2%）· 发布日志的
+`[publish] zero-disk it<N>: packed <hits>/<total> presegmented shard`（纯分布式腿两个数该相等）。
+
+---
 ## §43 Paddle worker 接入 `kind=ppo` 生命周期：后端开关只看本机，产物一律 torch 格式（2026-10-27）
 
 **触发**：§42 的对账全 PASS 后，用户给出三条接入裁决（原话）：① **Paddle 侧优化器状态/断点

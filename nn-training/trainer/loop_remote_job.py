@@ -108,6 +108,10 @@ class TrainingRemoteJob(TrainingRemotePush):
     _chunks_n: int
     _agg: Any
     _kl_cum: Any
+    #: 零落盘（plan/payload-zero-disk §3.2）：本轮 dispatch 腿已打好的 shard 段账
+    #: （`remote.payload_pack.ShardSegments`，组合根建、派发注入点填）。本模块只读：
+    #: `_remote_ppo_publish` 用 `take(it, wire_diet=…)` 取本轮那份，交给 `publish_job`。
+    _payload_parts: Any
     # 仅由方法体内自赋值产生（从未显式声明）；跨方法读到时需要类型可见。
     _bundle_index: Any
     _code_sha256: Any
@@ -372,6 +376,12 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 批 `reward_spec` 显式传下去（不读 biz.reward_context 的模块级 holder——打包点不止
         # 本进程一处，读 holder 会在重发路径上按 it=1 静默算错整轮奖励，评审 P1-4）。
         wire_diet = bool(int(getattr(args, "wire_diet", 1) or 0))
+        # ★ 零落盘（plan/payload-zero-disk §3.2）：本轮 dispatch 腿**收到就压好**的 shard 段。
+        #   命中即不再读盘/重压（打包只剩拼接 + sha256）；缺的（local 兜底腿 / 预采子进程 /
+        #   配额裁剪后补漏）由 `_pack_segmented` 现场读盘。轮号或 `wire_diet` 对不上 ⇒ `None`
+        #   （宁可慢一轮，也不发一份与 manifest 自述不符的字节）。
+        _taken = self._payload_parts.take(it, wire_diet=wire_diet)
+        presegmented, diet_slim = _taken if _taken is not None else (None, None)
         if rollout_spec:
             # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
             self._ensure_ts_code(job_root, log=log)
@@ -435,6 +445,9 @@ class TrainingRemoteJob(TrainingRemotePush):
             # wire-diet：真正生效的开关 + 本轮的奖励规格（课程公式的**显式**来源）。
             wire_diet=wire_diet,
             reward_spec=(course.reward_spec() if wire_diet else None),
+            # 零落盘：本轮已经压好的段 + 产出它们的那份 slim（`payload_fmt` 与读数同源）。
+            presegmented=presegmented,
+            diet_slim=diet_slim,
             # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
             # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
             #

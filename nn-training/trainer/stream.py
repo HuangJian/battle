@@ -106,6 +106,7 @@ def run_rollout_stream(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    on_shard=None,
 ) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
@@ -258,6 +259,9 @@ def run_rollout_stream(
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                # 零落盘（plan/payload-zero-disk）：串行/流式两条腿的注入点**同一个**
+                # （都走 run_rollout_queue → RolloutDispatcher），这里只负责透传。
+                on_shard=on_shard,
             )
             # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
             _fire_eval_once("collector done")

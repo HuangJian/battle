@@ -9877,3 +9877,39 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   由 18/18 收回 14/17，账在 `tests/test_reuse_ledger.py`）。
 - **未决**：真 AI Studio 任务上的端到端（需云端机器）· Paddle 侧 `--threads` 等价旋钮（Paddle 3.3 无
   `set_num_threads`）· 控制台展示 backend（按口径②刻意不做）。
+
+## §2026-10-27-goalnn-payload-zero-disk（2026-10-27，payload 零落盘：dispatch 腿收到就压，打包只剩拼接）
+
+- **背景**：`plan/payload-zero-disk.plan.md`（立项 2026-10-27，底座 `15c973d2` 分块并行打包已 ship）。
+  `pack_sec` 是每轮最长的串行段（现场 68–161 s @ 2.3 GB / 666 shard），其中「读盘 + 重压」占掉大头
+  （分块后仍 ~2.1 s 读盘 + ~7.6 s 打段压缩，而现场读数被 CPU 争抢放大）。而这些 shard 的字节在
+  dispatch 腿**本来就在 trainer 内存里**（`fetch_task` 的 `files`）——落盘只是为了打包时再读回来重压。
+- **决定**：① `common.shard.write_shard(..., on_receive=)` 在**写盘之前**把 `(name, files, manifest)`
+  交出去（挂「唯一落盘出口」而不是调用点 ⇒ 没有哪条写盘路能漏掉）；② `ShardSegments`（住
+  `remote/payload_pack.py`，与「payload 字节」同一所有者）按轮记段：`begin(it, wire_diet, …)` 换轮
+  清空、`add` 收到就打段+压好、`take(it, wire_diet)` 取本轮那份；③ `publish_job(..., presegmented=,
+  diet_slim=)`：命中的段原样拼接，缺的（local 兜底 / 预采子进程 / 配额补漏）现场读盘 —— **同一个**
+  `shard_segment`，没有第二条变换逻辑；④ `PAYLOAD_XZ_CHUNKS == 1` 是**逐字节旧行为的总开关**
+  （分块与 presegmented 一起跳过，方案 §4 判据 6）；⑤ `manifest_bytes()` 让落盘与段共用同一序列化
+  口径（二进制 LF：文本模式在 Windows 上会翻 `\r\n`，那样「内存段 == 盘段」只在 Linux 成立）。
+- **备选与否决**：把段账挂在 dispatch 进程内（`RolloutDispatcher` 自己攒）—— 否（打包在训练循环里，
+  两个对象生命周期不同；且 `--export-bundle` 腿也要同一份）；**段里不带 `manifest.json`**，让打包端
+  从盘补 —— 否（`unpack_payload` / `walk_shard_dirs` 只把**带 manifest.json 的目录**当 shard，缺它
+  云端会看到一份「零 shard」的 payload）；交给 slim 的成员表用 `files`（不带 manifest）—— 否
+  （实测当场红：P1 要从 manifest 取 outcome/score/metrics_version，`_reward_bytes` 抛「缺成员
+  manifest.json」）；**按方案 §3.3 在 `iteration` 之后删掉本轮 shard 目录** —— ★ 本次**不做**（见下）。
+- **落地**：`nn-training/common/shard.py`（`write_shard` 的 `on_receive` + `manifest_bytes`）·
+  `remote/payload_pack.py`（`ShardSegments` / `compress_segment` / 总开关）·
+  `remote/hub_client.py`（`publish_job` 的两个新参数 + `zero-disk` 读数）·
+  `trainer/{dispatch,dispatch_queue,stream,rollout_phase,loop_core,loop_dispatch,loop_volume,loop_remote_job}.py`
+  （一路透传 + 首波/补波共用 `begin_payload_parts`）。守卫：`tests/remote/test_payload_parts.py`(7) ·
+  `tests/trainer/test_rollout_dispatch_resilience.py::test_on_shard_gets_the_memory_bytes_before_the_disk_write`。
+  全文 → `docs/nn/training-stack.md` §44。
+- **不删盘的理由（方案 §3.3 的 S3 推迟）**：三个读者今天还在盘上读 —— `metrics_stats`（本轮逐维统计，
+  排在 `_record_iteration` 之后）· `trailing_stage_samples_per_game`（**最近一轮**的 manifest 是分关
+  est 的最新来源，删了会让 `est_agg=latest` 静默退回全局 est ⇒ 分关分配退化）· `biz/course_archive`
+  （`it<N>/dist/**` 就是待归档语料）。方案 §8 本来就把 S3 归为「省那 2.9 GB 磁盘、价值小得多、可单独
+  排期」，而**全部收益（打包不再读盘/重压）在 S1 已经拿满** ⇒ 留待另起一笔（届时要么保留
+  manifest.json、要么给 est 另建账）。
+- **未决**：真机读数（`[pack-breakdown]` 的 `publish_job(含打包)` 是否到方案 §4 的 < 5 s 量级）——
+  下一轮在线训练才能取；`tmp` 侧的磁盘占用仍未回收。

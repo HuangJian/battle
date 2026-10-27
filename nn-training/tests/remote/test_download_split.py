@@ -343,11 +343,18 @@ def test_progress_logger_still_has_exactly_two_production_copies() -> None:
     **不可能**定义它，预筛不丢判据。原来对 653 个文件全量 `ast.parse`（冷启动 ~2.7s，
     大头是 GC 在遍历刚建出来的 AST —— 见 `tests/helpers/source_scan.py` 的 2026-09-29 改判）。
     """
+    # 2026-10-27（flake）：**跳过 `tmp/`**。它是仓库的 scratch 根 —— venv、A/B worktree、
+    # 评审用的整树副本都住那里，两类事故同时命中过：
+    #   ① 耗时：`tmp/paddle-venv` 躺着 2723 个 site-packages `.py`，本用例实测 40.11s
+    #      顶穿 30s 预算（同一次会话里单跑只要 ~1s）；
+    #   ② 判据：整树副本里当然也有 `def _progress_logger`，会把「恰好两份」变成三份。
+    # 判据本身不限「谁不许多一份」 —— 只是扫描面限定在**源码**（与
+    # `source_scan.logic_py_files` / `py_files(<包>)` 的取法同口径）。
+    skip = {".venv", "__pycache__", "tmp"}
     found = sorted(
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("*.py")
-        if ".venv" not in path.parts
-        and "__pycache__" not in path.parts
+        if not (skip & set(path.parts))
         and "_progress_logger" in source_scan.read_text(str(path))
         and "_progress_logger" in _defined(path)
     )
