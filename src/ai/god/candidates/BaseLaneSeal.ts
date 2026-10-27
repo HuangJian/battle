@@ -50,7 +50,15 @@ export function evalBaseLaneSeal(self: GodAIInput, ctx: DecisionContext): boolea
   if (prm.baseLaneSealMode <= 0 || !self.hasBase || self.aggressive) return false
   // mode 2 (2026-10-27) is a different mechanism, not a tweak: see
   // `evalPreSeal`. Mode 1 keeps this body byte-for-byte.
-  if (prm.baseLaneSealMode >= 2) return evalPreSeal(self, ctx)
+  //
+  // STAGE GATE (user's rule): the pre-seal is only meaningful on stages whose
+  // two base columns carry NO steel — steel is permanent for enemies, so on
+  // every other stage a shell can never reach the eagle down the column.
+  // ⚠ It must FALL THROUGH to this body (not return false): mode 2 is an
+  // addition to the shipped seal, not a replacement. Returning false here
+  // disables the shipped seal on 31 stages (measured: Brickworks −4 /
+  // Twin Spires −6 / Brick Maze −6 purely from losing the mode-1 seal).
+  if (prm.baseLaneSealMode >= 2 && !baseColumnsHaveSteel(self)) return evalPreSeal(self, ctx)
   const { p, pcx, pcy, onCooldown } = ctx
   const pc = self.playerCell()
   const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
@@ -167,7 +175,10 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
     const sealRow = sealRowFor(col, row)
     if (sealRow < 0) continue
     const csb = enemyCanShootBase(self, t)
-    const cbr = prm.baseLaneSealCbr > 0 && !csb && enemyCanBreachRing(self, t)
+    // mode 2 arms the ring-breach class itself: a breacher on the column is
+    // the thing that OPENS the lane in the first place.
+    const cbr =
+      !csb && (prm.baseLaneSealMode >= 2 || prm.baseLaneSealCbr > 0) && enemyCanBreachRing(self, t)
     const openLane = !csb && !cbr && columnClearToTop(self.world, col)
     if (!csb && !cbr && !openLane) continue
     // THE LEASH (the only real knob here): measured on the distance to the seal
@@ -201,6 +212,34 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, move)
   recordBranch(self, 'baseLaneSeal')
   return true
+}
+
+/**
+ * Stage-level gate for the pre-seal: BOTH base columns free of steel.
+ *
+ * Only s8 Riverbed / s14 Steel Web / s21 Checkers / s34 Battlement qualify.
+ * Per-column gating is not enough: a stage that shields only one column still
+ * leaks through the other.
+ */
+function baseColumnsHaveSteel(self: GodAIInput): boolean {
+  return columnHasSteel(self.world, BASE_POS.col) || columnHasSteel(self.world, BASE_POS.col + 1)
+}
+
+/**
+ * Any steel on `col` between the top edge and the base's top row?
+ *
+ * Steel is permanent for enemies (only a ★3 player pierces it), so a column
+ * with steel is NOT a sniper lane in the mode-2 sense — the shell dies on the
+ * metal. This is the structural gate the user asked for: "only use the
+ * pre-seal on stages whose mid lane has no steel". Measured steel counts in
+ * the base columns across the 35 stages: only **s8 Riverbed / s14 Steel Web /
+ * s21 Checkers / s34 Battlement** are steel-free.
+ */
+function columnHasSteel(world: GodAIInput['world'], col: number): boolean {
+  for (let r = 0; r <= BASE_POS.row - 1; r++) {
+    if (world.tileMap.get(col, r) === 'steel') return true
+  }
+  return false
 }
 
 /** Is `col` clear from the top edge down to the base's top row? (a sniper lane) */

@@ -81,6 +81,15 @@ describe('A9 mode 2 — pre-seal leashes on the lane cell, not the shooter', () 
     expect(evalBaseLaneSeal(input, ctx)).toBe(false)
   })
 
+  it('mode 2 is inert on stages whose base columns contain steel (user gate)', () => {
+    const { world, input, ctx } = scenario({ baseLaneSealMode: 2 })
+    // One steel in the LEFT base column is enough to disqualify the stage.
+    world.tileMap.grid[6][BASE_POS.col] = 'steel'
+    placeSniper(world, BASE_POS.col + 1, 4)
+    // Falls back to the shipped mode-1 body, which refuses a 15+ cell sniper.
+    expect(evalBaseLaneSeal(input, ctx)).toBe(false)
+  })
+
   it('mode 2 leaves a broken (brick-blocked) column alone — no sniper lane', () => {
     const { world, input, ctx } = scenario({ baseLaneSealMode: 2 })
     placeSniper(world, BASE_POS.col + 1, 4)

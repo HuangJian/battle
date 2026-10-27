@@ -1,4 +1,15 @@
 # God AI 冻结签名 golden — tools/probe-det-baseline.sh 全量语料 sha256
+# --- 当前（A9 mode2 无钢中路纪元）---
+# 采集：2026-10-27 @ A9 `baseLaneSealMode: 2`（预封线：leash 按「到封线格」，
+#       目标含破环者与停滞在通透列上的敌人；**仅在基地两列都没有钢的关卡生效**）。
+#       用户裁定：只在"中路无钢"的关卡使用 —— 钢对敌人永久，其余关卡不存在狙击列。
+#       35 关里只有 s8 Riverbed / s14 Steel Web / s21 Checkers / s34 Battlement 过门，
+#       其余 31 关逐关字节一致（CLASSIC_OVERRIDES 仍 restore 0）。
+#       35×60：hard 85.8%→**86.1%**（+0.14pp, t=0.43, kills +60）·
+#              classic 88.3%（override 0，不变）· chaos 82.5%→**83.2%**（+0.71pp, t=2.35, kills +214）
+#       **Riverbed hard 58% → 65%（+7pp）**；Steel Web 88→87 · Checkers 82→82 · Battlement 50→50。
+#       实现踩坑：关卡门必须「回落」而不是「短路」（短路会在 31 关把已发货的 mode-1 封线一起关掉）。
+#       相对上一钉 a492627b（A28 焦点火力）。
 # --- 当前（A28 修正纪元）---
 # 采集：2026-10-27 @ A28 `armorChasePenalty: 1`（焦点火力：追击评分按「还需几发 − 1」加格）。
 #       上一轮 agent 判它「机制空转（700/700 逐局相同）」而否决，实为两处实现错误：
@@ -119,4 +130,4 @@
 # 更新流程（新纪元三件套）：新 DECISIONS 条目 + 重跑 60-seed 基线 + 替换本文件，三者缺一不可
 # ⚠ 本纪元另需连带重标：metrics-v11 评估链金标（lane 落 0 / 过脆 ⇒ 换 seed）与
 #    §168 navstuck OFF 复现腿（A4 已消除该 pin ⇒ 复现腿须显式关 hysteresis）。
-a492627b5301d5cf60bcd567003a3571a68a027e04cdf7344500cef67f209362
+ea915876c496b70605d24b5ea4d49e2f7e3428d132d41eb1761fa2a2b121b719
