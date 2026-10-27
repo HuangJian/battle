@@ -40,10 +40,11 @@ from __future__ import annotations
 import hashlib
 import shutil
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import partial
 from pathlib import Path
 
+import common.torch_pickle as torch_pickle
 import remote.delta_files as delta_files
 import remote.opt_delta as opt_delta
 from common.errors import ProtocolError
@@ -57,6 +58,7 @@ __all__ = [
     "is_delta_opt_file",
     "land_opt_bytes",
     "landed_opt_sha",
+    "rebuild_opt_tar_np",
     "seed_opt_blob",
     "standard_opt_copy",
 ]
@@ -116,6 +118,7 @@ def _base_tar_bytes(
     depth: int = 0,
     seen: frozenset[str] = frozenset(),
     log,
+    rebuild: Callable[..., bytes] | None = None,
 ) -> bytes:
     """容器要的**基准整份 tar 字节**（`base_sha` 逐字节对上才算数；找不到 ⇒ `ProtocolError`）。
 
@@ -174,6 +177,7 @@ def _base_tar_bytes(
                 depth=depth + 1,
                 seen=seen,
                 log=log,
+                rebuild=rebuild,
             )
         except ProtocolError as e:
             searched.append(f"{cand}（{e}）")
@@ -200,6 +204,35 @@ def _base_tar_bytes(
     )
 
 
+def _rebuild_opt_tar_torch(
+    container: bytes, base_p: Path, *, out_dir: Path, log
+) -> bytes:
+    """`(容器, 基准 opt.pt 路径) → 整份 tar` —— **torch 版**（默认落地器）。"""
+    import torch
+
+    return opt_delta.rebuilt_opt_tar(
+        container, torch.load(base_p, map_location="cpu"), out_dir=out_dir, log=log
+    )
+
+
+def rebuild_opt_tar_np(
+    container: bytes, base_p: str | Path, *, out_dir: str | Path, log=print
+) -> bytes:
+    """`(容器, 基准 opt.pt 路径) → 整份 tar` —— **numpy 版**（Paddle worker 的读侧落地）。
+
+    与 `_rebuild_opt_tar_torch` 同签名、同语义，只换两端的编解码：`opt.pt` 由
+    `common.torch_pickle.load_torch_pickle` 读成 numpy 叶子，`apply_opt_delta_np` 加回 delta
+    （消毒点在内），再用 `dump_torch_pickle` 写回 **torch 的 zip 格式** —— hub 机统一 torch
+    格式，Paddle worker 自己转，这是那条口径的读侧一半。
+    """
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    base = torch_pickle.load_torch_pickle(Path(base_p).read_bytes())
+    rebuilt = opt_delta.apply_opt_delta_np(base, container, log=log)
+    (d / "opt.pt").write_bytes(torch_pickle.dump_torch_pickle(rebuilt))
+    return opt_delta.pack_tar_from_dir(d, ["opt.pt"])
+
+
 def _landed_bytes_for(
     container: bytes,
     path: Path | None,
@@ -210,12 +243,16 @@ def _landed_bytes_for(
     depth: int = 0,
     seen: frozenset[str] = frozenset(),
     log,
+    rebuild: Callable[..., bytes] | None = None,
 ) -> bytes:
     """容器 ⇒ 整份 tar 字节（`path` 给定时用它所在目录当候选根；只读，不落盘）。
 
     `depth`/`seen` 是**链上防环**那两个计数器（`_base_tar_bytes` 的老问题：它们原先没被传下去，
     成环就是 RecursionError）—— 递归入口一律 `depth+1` + 把当前文件并进 `seen`。
+    `rebuild` 是「基准 opt.pt 怎么读、delta 怎么加回」的接缝：默认 torch，Paddle worker 传
+    `rebuild_opt_tar_np`（同一段链上递归也要用同一个，故它一路透传）。
     """
+    rebuild = rebuild or _rebuild_opt_tar_torch
     scratch = Path(work_dir) if work_dir is not None else Path(tempfile.mkdtemp(prefix="opt-land-"))
     made = work_dir is None
     try:
@@ -228,6 +265,7 @@ def _landed_bytes_for(
             depth=depth,
             seen=seen,
             log=log,
+            rebuild=rebuild,
         )
         base_dir = scratch / "base"
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -235,14 +273,7 @@ def _landed_bytes_for(
         base_p = base_dir / "opt.pt"
         if not base_p.exists():
             raise ProtocolError(f"opt delta 基准 tar 里没有 opt.pt（{base_dir}）——拒收")
-        import torch
-
-        landed = opt_delta.rebuilt_opt_tar(
-            container,
-            torch.load(base_p, map_location="cpu"),
-            out_dir=scratch / "out",
-            log=log,
-        )
+        landed = rebuild(container, base_p, out_dir=scratch / "out", log=log)
         log(
             f"[opt] 读侧落地：容器 {len(container)}B → 整份 {len(landed)}B"
             f"（基准 sha 已逐字节对上）"
@@ -262,12 +293,13 @@ def land_opt_bytes(
     traj_root: str | Path | None = None,
     work_dir: str | Path | None = None,
     log=print,
+    rebuild: Callable[..., bytes] | None = None,
 ) -> bytes:
     """**字节级入口**：容器 ⇒ 整份 tar 字节；本来就是整份 ⇒ 原样返回（零成本）。
 
     给「手边只有字节、没有文件」的消费者用（`train_core` 的 restore 段：`opt_init` 内联 /
     blob 解析出来的那份都可能是容器）。`path` 可选：容器**所在文件**（知道就传，它所在目录
-    会成为候选根之一——链上的基准往往就在隔壁那一轮里）。
+    会成为候选根之一——链上的基准往往就在隔壁那一轮里）。`rebuild` 见 `_landed_bytes_for`。
     """
     if not opt_delta.is_container(raw):
         return raw
@@ -279,6 +311,7 @@ def land_opt_bytes(
         extra_roots=extra,
         work_dir=work_dir,
         log=log,
+        rebuild=rebuild,
     )
 
 

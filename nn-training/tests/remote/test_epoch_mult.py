@@ -26,7 +26,7 @@ import pytest
 
 from remote import notebook_runtime as nbr
 from remote import push_bootstrap as pb
-from remote.train_core import effective_epochs
+from remote.train_common import effective_epochs
 from remote.worker import epoch_mult_of
 
 # ------------------------------------------------------------------ 语义

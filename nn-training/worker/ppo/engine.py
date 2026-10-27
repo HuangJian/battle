@@ -53,7 +53,10 @@ import torch.nn.functional as F
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
 from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
-from worker.data.weights_io import load_weights_json, save_weights_json
+from worker.data.weights_io import save_weights_json
+
+# 转发名：PPO 模型的 arch 驱动构建**只有一份实现**（`worker/models/arch_meta.py`，与 Paddle 双生共用）。
+from worker.models.arch_meta import build_ppo as build_ppo_from_arch
 from worker.models.student import PPOStudent
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -131,31 +134,14 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
     ⚠ arch 从 weights 文件读（remote/worker.py §3.2 的同一契约）：新腿的起点权重必须
     先由 `worker/scripts/init_spatial_leg.py` 转出（带 arch 标志），否则静默退回旧架构。
+    B1 v6 的 `actionV6`（hold2/move4/fire3）同理**跟着权重走**：TS 用 `hold_head.*` 键是否
+    存在判（`src/nn/infer.ts:443`），Python 用 `arch.actionV6` —— 不许翻全局常量，否则归档的
+    5/2 ckpt 会静默按新头宽重建（头宽错 ⇒ load_state_into 全缺键 ⇒ 随机初始化）。
+
+    实现只有 `worker/models/arch_meta.py` 一份（Paddle 双生 `student_paddle.build_ppo`
+    是它的另一个转发名）——两份实现曾逐字节各存一份，arch 判据分叉就是混跑换形。
     """
-    h = d = head_hidden = None
-    policy_extra = spatial_tower = action_v6 = False
-    if weights_path and os.path.exists(weights_path):
-        meta, _ = load_weights_json(weights_path)
-        a = meta.get("arch", {})
-        h = a.get("h", 64)
-        d = a.get("d", 8)
-        head_hidden = a.get("head_hidden", 128)
-        policy_extra = bool(a.get("policyExtra", False))
-        spatial_tower = bool(a.get("spatialTower", False))
-        # B1 v6 三头（hold2/move4/fire3）—— 与 TS 侧"开关随权重走"同一契约：
-        # TS 用 `hold_head.*` 键是否存在判（`src/nn/infer.ts:443`），Python 用
-        # `arch.actionV6`。**必须由权重驱动，不能翻全局常量**——否则归档的 5/2
-        # ckpt 会静默按新头宽重建（头宽错 ⇒ load_state_into 全缺键 ⇒ 随机初始化）。
-        # 写入方 = `PPOStudent.arch()`（`student.py:230-231`）。
-        action_v6 = bool(a.get("actionV6", False))
-    return PPOStudent(
-        h=h or 64,
-        d=d or 8,
-        head_hidden=head_hidden or 128,
-        policy_extra=policy_extra,
-        spatial_tower=spatial_tower,
-        action_v6=action_v6,
-    )
+    return build_ppo_from_arch(PPOStudent, weights_path)
 
 
 # 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）

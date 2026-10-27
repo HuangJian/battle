@@ -380,6 +380,9 @@ def run_one_round(
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     #: 纯执行面旋钮，原样交给宿主的 `run_job_fn`（本模块不认识它的语义）。
     epoch_mult: float = 1.0,
+    #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle，空串 = auto）。与
+    #: `epoch_mult` 同一条路：纯执行面旋钮，原样转交给 `run_job_fn`。
+    backend: str = "",
     echo: bool,
     restart_argv: list[str] | None,
     role: str = ROLE_ONLINE,
@@ -527,6 +530,7 @@ def run_one_round(
             device=device,
             torch_threads=torch_threads,
             epoch_mult=epoch_mult,
+            backend=backend,
             echo=echo,
             code_cache_dir=code_cache_dir,
             lease_token=lease_token,

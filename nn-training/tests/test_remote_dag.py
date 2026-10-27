@@ -369,6 +369,11 @@ def test_detector_does_not_see_a_relative_import_as_nothing(tmp_path: Path, monk
     # 账本跨两个包（刀 1）⇒ hub 侧也必须指向空目录：否则真 `hub/*.py` 会带着它们的
     # `common.instance_lock` 等边一起入场，而合成包只声明了 `remote.pkg.*` ⇒ 无端 unresolved。
     monkeypatch.setattr(dag, "HUB_DIR", tmp_path / "hub")
+    # 账本第三个包（刀 3 的 `worker/`）同理：真 worker 模块会带着它们的 `remote.*` 边入场，
+    # 而合成 `known` 里没有那些目标 ⇒ 无端 unresolved（2026-10-27 真被 worker 侧的
+    # remote 边抓到过一次；那条边随后按分层纪律下沉到 `common/`）。
+    (tmp_path / "worker").mkdir()
+    monkeypatch.setattr(dag, "WORKER_DIR", tmp_path / "worker")
     monkeypatch.setattr(dag, "LAYERS", {"remote.pkg.a": 1, "remote.pkg.b": 0})
     top, _, unresolved = dag.graph()
     assert top["remote.pkg.a"] == {"remote.pkg.b"}, top

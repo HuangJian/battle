@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
@@ -70,6 +71,22 @@ def validate_weights_meta(meta: Any, path: str, allow_legacy_schema: bool = Fals
             f"[weights] WARN warm-start 态：{path} schema_major={sm} < 当前 {OBS_SCHEMA_MAJOR}"
             f"——按部分装载处理（缺失/换形张量随机初始化，须显式 --allow-partial-init 开启）"
         )
+
+
+def read_weights_meta(path: str, allow_legacy_schema: bool = False) -> dict:
+    """只读**清单**（json + 强校验），**不解码** base64 张量。
+
+    存在的理由：`arch` 判据（h/d/head_hidden/policyExtra/spatialTower/actionV6）只需要清单 ——
+    而 `load_weights_json` 会把整份权重（数百 KB）解码成张量再丢掉。模型构建
+    （`worker/models/arch_meta.read_arch_kwargs`）走这一条；真正的权重装载仍走
+    `load_state_into`（那里本来就要整份解码，校验也在同一处）。
+
+    校验面与 `load_weights_json` **同一份**（`validate_weights_meta`）：坏文件在这里就响亮失败。
+    """
+    with open(path, encoding="utf-8") as f:
+        meta: dict = json.load(f)  # `json.load` 是 Any：显式标注把返回类型钉住（no-any-return）
+    validate_weights_meta(meta, path, allow_legacy_schema=allow_legacy_schema)
+    return meta
 
 
 # --- auto-discovery of the latest weights (plan: no manual rename on restore) ---

@@ -55,6 +55,7 @@ from worker.data.weights_meta import (  # noqa: F401  (re-export：既有调用�
     COVERAGE_WARN,
     FORMAT,
     latest_weights_path,
+    read_weights_meta,
     validate_weights_meta,
 )
 
@@ -126,9 +127,7 @@ def load_weights_json(
     `allow_legacy_schema=True` = warm-start 态（v4 S0-c；旧 schema 起点权重按部分
     装载，配合调用方 `--allow-partial-init` 显式开关）。
     """
-    with open(path, encoding="utf-8") as f:
-        meta = json.load(f)
-    validate_weights_meta(meta, path, allow_legacy_schema=allow_legacy_schema)
+    meta = read_weights_meta(path, allow_legacy_schema=allow_legacy_schema)
     params = {k: _b64_to_tensor(v["data"], v["shape"]) for k, v in meta["params"].items()}
     return meta, params
 

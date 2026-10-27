@@ -235,8 +235,9 @@ def test_run_job_refusal_and_order_anchors() -> None:
     core = Path(train_core_mod.__file__).read_text(encoding="utf-8")
     both = src + core
     assert "四源皆尽" in both
-    # 三处拒绝都带源清单：① kind=iter/run 的提前拒绝；② 有 tar 但无 model.pt；③ 无 tar 首轮
-    assert both.count("{'/'.join(WEIGHT_SOURCES[:4])}") == 3, "三处拒绝都要带源清单"
+    # 五处拒绝都带源清单：① kind=iter/run 的提前拒绝；② 有 tar 但无 model.pt；③ 无 tar 首轮
+    # （②③ 在 torch 核与 paddle 核各一份——两条核共用同一口径，2026-10-27 Paddle 双生）
+    assert both.count("{'/'.join(WEIGHT_SOURCES[:4])}") == 5, "五处拒绝都要带源清单"
     assert "WEIGHT_SOURCES: tuple[str, ...] = (" in Path(download_mod.__file__).read_text(
         encoding="utf-8"
     )

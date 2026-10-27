@@ -260,6 +260,9 @@ LAYERS: dict[str, int] = {
     # 守卫连函数内 `import torch` 也算「碰上层」，理由见模块头）。
     "remote.opt_delta": 0,
     "remote.weights_delta": 0,
+    # ★ 2026-10-27：torch.save 的 zip 容器读写已搬去 `common/torch_pickle.py`（不在本账本包里）——
+    # 两侧读者（`remote.opt_standard` L1 与 `worker.ppo.checkpoint_paddle` L2）都要向下取，
+    # 而 `worker → remote` 是 `tests/test_layering.py` 的硬禁；`common/` 是唯一合法交叉点。
     # 两份**读侧落地器**（`weights_standard` / `opt_standard`）的共用零件（2026-10-15）：
     # 魔数判形 / 兄弟名 / traj 认根 / 候选扫描——抽出来之前两处各留一份逐字节相同的实现，
     # 复用账本当场多出 4 组。顶层只 import stdlib（连 `common.*` 都不碰）⇒ **L0**。
@@ -368,6 +371,11 @@ LAYERS: dict[str, int] = {
     # `_wire_take` 把传输账交回父侧) + `result_upload`(L0) ⇒ 拓扑秩 **L4**。
     # 与 `deliver_worker` 同理它**不是** standalone 引导文件（不进 `STANDALONE_BOOT_MODULES`）。
     "remote.upload_worker": 4,
+    # 训练核的**框架无关半场**（2026-10-27，Paddle 双生）：有效遍数 / kick 开关 / blob 需求 /
+    # 课程装配 / demo bank 校验。顶层只碰 `common.protocol`（不在账本内）；`worker.config`(L1)
+    # 与 `biz.reward_*` 都是**函数内**延迟 import ⇒ 拓扑秩 = 1 + 1 = **L2**。
+    # 读它的是 `remote.train_core`(L4)；两核必须共用同一份判据（分叉 = 混跑时一边收一边拒）。
+    "remote.train_common": 2,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，
@@ -445,6 +453,9 @@ LAYERS: dict[str, int] = {
     "worker.loop_tasks": 0,
     "worker.metrics_stats": 0,
     "worker.models.rl_model": 0,
+    # 2026-10-27（Paddle 双生）：纯 numpy 的 torch⇄Paddle Adam 状态翻译 + 逐次 f32 幂重放
+    # ——只 import numpy + `common.errors` ⇒ **L0**。
+    "worker.ppo.ckpt_convert": 0,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,
@@ -511,6 +522,19 @@ LAYERS: dict[str, int] = {
     "worker.eval_replays_once": 2,
     "worker.gate_judges": 2,
     "worker.models.student": 2,
+    # 2026-10-27（Paddle 双生 · 评审收敛）：模型族的**框架中立**共用面（arch 元数据 /
+    # 头宽 / `build_ppo` 一份实现 + 两个转发名）。顶层只 import `worker.data.weights_meta`(L0)
+    # ⇒ **L1**。torch 侧（`worker.models.student` L2）与 Paddle 侧（L1→**L2**）都从它取；
+    # 三处逐字节重复的实现（`arch` / `policy_input_dim` / `value_anchor_slices`）+ 一处
+    # `build_ppo` 就此收敛。
+    "worker.models.arch_meta": 1,
+    # 2026-10-27（Paddle 双生）：`student` 的 Paddle 版（同键名/同形状/同布局）；顶层只
+    # import `common.schema` 与 `worker.data.weights_meta`(L0) ⇒ **L1**。
+    "worker.models.student_paddle": 2,
+    # Paddle worker 的 torch 格式 checkpoint I/O（model.pt/opt.pt/state.json）：靠 `common.torch_pickle`
+    # / `common.adam_sq`（都不在账本内）+ `worker.ppo.ckpt_convert`(L0) 与 `worker.ppo.np_core`(L1)
+    # ⇒ **L2**。零 `remote.*` 依赖（分层硬禁：worker → remote）。
+    "worker.ppo.checkpoint_paddle": 2,
     # 2026-10-11（S3）：`load_episode_from_shard` 的骨架提到 `worker.ppo._episode`(L0)
     # （np-core 不再自含那两行）⇒ 从 L0 升为 **L1**。
     "worker.ppo.np_core": 1,
@@ -536,6 +560,9 @@ LAYERS: dict[str, int] = {
     "worker.models.goal_net": 3,
     "worker.models.intent_net": 3,
     "worker.ppo.engine": 3,
+    # 2026-10-27（Paddle 双生）：`engine` 的 Paddle 版（update 数学逐行对应）；顶层靠
+    # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L2) ⇒ **L3**。
+    "worker.ppo.engine_paddle": 3,
     # v4（plan/policy-spatial-head.plan.md S0-c）：腿 A/B 起点权重转换（一次性 CLI；
     # 函数内 import worker.models.student（L2）⇒ 拓扑秩 = L3）。
     "worker.scripts.init_spatial_leg": 3,

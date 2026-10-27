@@ -65,15 +65,19 @@ from common.schema import (
 )
 from worker.models._common import param_count as param_count
 
-DEFAULT_H = 64
-DEFAULT_D = 8
-DEFAULT_HEAD_HIDDEN = 128
-
-# 空间塔冻结值（plan/policy-spatial-head.plan.md §3.3；TS 孪生 src/nn/spatial-tower.ts）。
-SPATIAL_TOWER_C = 8
-SPATIAL_TOWER_POOL = 4
-SPATIAL_TOWER_FC_OUT = 112
-SPATIAL_TOWER_FEAT = SPATIAL_TOWER_C * SPATIAL_TOWER_POOL * SPATIAL_TOWER_POOL  # 128
+# 架构默认档 / 空间塔冻结值 / 架构元数据面 —— 与 Paddle 双生**同一份**（`worker/models/arch_meta.py`）。
+# 这里的名字是**转发名**：`tests/worker/test_policy_new_rms.py` / `test_value_anchor.py` 仍按
+# 老位置 `from worker.models.student import SPATIAL_TOWER_FC_OUT` 取值（名字是契约，位置不是）。
+from worker.models.arch_meta import (
+    DEFAULT_D,
+    DEFAULT_H,
+    DEFAULT_HEAD_HIDDEN,
+    SPATIAL_TOWER_C,
+    SPATIAL_TOWER_FC_OUT,
+    SPATIAL_TOWER_FEAT,
+    SPATIAL_TOWER_POOL,
+    StudentArchMixin,
+)
 
 
 class ConvMixerBlock(nn.Module):
@@ -98,7 +102,7 @@ def coord_channels(board: int, device) -> torch.Tensor:
     return (ch * 255).round().to(torch.uint8)
 
 
-class StudentNet(nn.Module):
+class StudentNet(StudentArchMixin, nn.Module):
     """
     CoordConv-ConvMixer-Lite student (plan §4.3), BN-free.
 
@@ -170,40 +174,8 @@ class StudentNet(nn.Module):
         with torch.no_grad():
             self.stem.weight.mul_(1.0 / 255.0)
 
-    @property
-    def policy_input_dim(self) -> int:
-        """策略头输入 `pf` 的宽度（obs-v5 起 value 头也吃同一份）。
-
-          · legacy（无 extra、无塔）= `head_hidden`（128）；
-          · 腿 A（policy_extra）= `head_hidden + POLICY_EXTRA_DIM`（128+37=165）；
-          · 腿 B（spatial_tower）= `SPATIAL_TOWER_FC_OUT + scalar_dim + POLICY_EXTRA_DIM`
-            （112+40+37=189）。
-
-        单一来源：`move_head`/`fire_head`（以及 obs-v5 的 `value_head`）全部由本属性派生，
-        不许再在别处写 165/189 字面量（plan §2.6）。
-        """
-        if self.spatial_tower:
-            return SPATIAL_TOWER_FC_OUT + self.scalar_dim + POLICY_EXTRA_DIM
-        if self.policy_extra:
-            return self.head_hidden + POLICY_EXTRA_DIM
-        return self.head_hidden
-
-    def value_anchor_slices(self) -> list[tuple[int, int]]:
-        """value 头里 v5 新列的列区间（门控牵引只拴这些列）。
-
-        x26-obs it90 诊断：冷 critic 吃 pf 后在新列上 35 倍爆炸（0.0086→0.30），
-        advantage 污染→暖策略游走；旧列 drift 仅 0.015。
-          · 腿 A：value 165 列里 critic 从没见过 extra ⇒ [128,165) 全拴
-            （含迁移来的 extra9 旧列——对 critic 而言位置也是新的）；
-          · 腿 B：整头相对旧 128 无前缀 ⇒ 全拴；
-          · legacy：value 全是旧 hidden ⇒ 空（不碰）。
-        区间一律由 arch 派生，不写字面量（与 `policy_input_dim` 同纪律）。
-        """
-        if self.spatial_tower:
-            return [(0, self.policy_input_dim)]
-        if self.policy_extra:
-            return [(self.head_hidden, self.policy_input_dim)]
-        return []
+    # 架构元数据面（`arch` / `policy_input_dim` / `value_anchor_slices`）在
+    # `worker/models/arch_meta.py`：与 Paddle 双生共用同一份实现（本类经 `StudentArchMixin` 继承）。
 
     def _init_weights(self) -> None:
         for m in self.modules():
@@ -211,25 +183,6 @@ class StudentNet(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-
-    def arch(self) -> dict:
-        d = {
-            "kind": "student",
-            "in_ch": self.in_ch,
-            "board": self.board,
-            "scalar_dim": self.scalar_dim,
-            "h": self.h,
-            "d": self.d,
-            "head_hidden": self.head_hidden,
-        }
-        # v4：只在开启时写入（旧 arch 字典逐字节不变 ⇒ 旧权重/旧消费方零影响）。
-        if self.policy_extra:
-            d["policyExtra"] = True
-        if self.spatial_tower:
-            d["spatialTower"] = True
-        if self.action_v6:
-            d["actionV6"] = True
-        return d
 
     def _spatial(self, obs: torch.Tensor) -> torch.Tensor:
         """obs → bufA (B,h,26,26)（GAP 前的空间特征；tower 与 pooled 共用一次前向）。"""

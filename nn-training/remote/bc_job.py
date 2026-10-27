@@ -27,6 +27,7 @@ worker 侧那份是 `common.protocol.d14_corpus_match` 的**转发别名**（`ru
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import time
@@ -46,6 +47,7 @@ from remote.http import _request
 from remote.job_fs import _persist_result
 
 __all__ = [
+    "PPO_BACKENDS",
     "_bc_device",
     "_bc_fetch_resume",
     "_bc_load_local_resume",
@@ -54,7 +56,9 @@ __all__ = [
     "_bc_store_local_resume",
     "_run_bc_job",
     "normalize_ppo_device",
+    "paddle_cuda_available",
     "resolve_bc_seed",
+    "resolve_ppo_backend",
 ]
 
 def _bc_fetch_resume(
@@ -208,6 +212,63 @@ def normalize_ppo_device(device: object, *, cuda_available: bool | None = None) 
         except Exception:  # torch 缺失 / 驱动异常 → 按无 CUDA 处理
             cuda_available = False
     return "cuda" if cuda_available else "cpu"
+
+
+#: 训练后端的取值域（`--backend`）。**这是节点本地的能力开关**：不进 manifest、不上报 hub ——
+#: 用户口径 2026-10-27 ②「hub 不需要知道 worker 运行在 torch 或 paddle」。
+PPO_BACKENDS = ("auto", "torch", "paddle")
+#: ★ 2026-10-27（评审）：**没有** env 通道。曾经那个 `NN_PPO_BACKEND` 撞上 2026-09-21
+#: 事故后立的守卫（`tests/worker/test_single_ppo_path.py`：训练落点/方式不许是「没人传也
+#: 生效」的隐形开关）。守卫的**行为**判据现在钉两件事：① 载荷是显式参数（`--backend` →
+#: `worker_loop` → `run_one_round` → `run_job`，与 `--device`/`--epoch-mult` 同一条路，
+#: 热替换重放 `sys.argv[1:]` ⇒ 重拉后照样成立）；② 光设一个同名环境变量什么都不改。
+
+
+def _module_available(name: str) -> bool:
+    """本机能不能 import 这个顶层模块（**不真 import**：paddle/torch 的 import 都很贵）。"""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):  # 父包缺失 / name 非法 —— 都按「没有」处理
+        return False
+
+
+def resolve_ppo_backend(requested: str) -> str:
+    """`--backend` → 实际训练后端（`"torch"` / `"paddle"`）。
+
+    `auto` = 看本机装了什么，**torch 优先**：混合机（两个框架都有）保持今天的行为不变，
+    只有纯 Paddle 机（AI Studio 训练任务）才落到 paddle。两个都没有时返回 torch ——
+    让 `import torch` 在训练核里响亮失败，不在这里猜一个更听不懂的替代品。
+
+    显式值原样返回（**不**做可用性兜底）：想要 paddle 却装不上，就该在那台机器上报错，
+    而不是悄悄换回 torch 跑出一份看起来一样的产物。
+    """
+    req = str(requested or "auto").strip().lower()
+    if req not in PPO_BACKENDS:
+        raise ProtocolError(
+            f"未知 PPO backend={requested!r}（只认 {'/'.join(PPO_BACKENDS)}）"
+        )
+    if req != "auto":
+        return req
+    if _module_available("torch"):
+        return "torch"
+    if _module_available("paddle"):
+        return "paddle"
+    return "torch"
+
+
+def paddle_cuda_available() -> bool:
+    """本机 Paddle 能不能用 GPU（编译带 CUDA **且** 看得见卡）。
+
+    存在的理由：`normalize_ppo_device` 的 `auto` 问的是 **torch**（Paddle-only 机器上恒
+    False）⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成 `cpu`（慢两个数量级，
+    日志上一切正常）。异常一律按 False（CPU 机/驱动异常都只是「没有 GPU」）。
+    """
+    try:
+        import paddle
+
+        return bool(paddle.is_compiled_with_cuda()) and int(paddle.device.cuda.device_count()) > 0
+    except Exception:
+        return False
 
 
 def bc_init_resume_path(job_dir: str | Path, resume_epoch: int) -> str | None:

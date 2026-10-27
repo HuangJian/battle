@@ -70,6 +70,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from common.adam_sq import ADAM_SQ_FLOOR_K, sanitize_adam_sq_np
 from common.errors import ProtocolError
 from common.hashing import sha256_bytes
 from common.wire_codec import container_base_sha, fmt_bit
@@ -79,6 +80,7 @@ __all__ = [
     "OPT_DELTA_FMT",
     "OPT_DELTA_MAGIC",
     "apply_opt_delta",
+    "apply_opt_delta_np",
     "base_sha_of",
     "is_container",
     "land_opt_delta",
@@ -88,6 +90,7 @@ __all__ = [
     "pack_tar_from_dir",
     "rebuilt_opt_tar",
     "sanitize_adam_sq",
+    "sanitize_adam_sq_np",
 ]
 
 #: 容器魔数（旧端拿到它先撞这个，不会把 delta 当权重落盘）。
@@ -122,6 +125,29 @@ def _torch():
     return torch
 
 
+def _np():
+    """惰性取 numpy（同 `_torch`：顶层零第三方依赖，hub 的启动闭包才拉得动本模块）。"""
+    try:
+        import numpy
+    except ImportError as e:  # pragma: no cover - Paddle 机器必有 numpy
+        raise ProtocolError(f"opt 状态转换需要 numpy（{e}）") from None
+    return numpy
+
+
+def _family(x: Any) -> str:
+    """叶子的张量族：`"numpy"` / `"torch"` / `""`（非张量）。
+
+    不用 `isinstance(x, numpy.ndarray)`：本模块顶层零第三方依赖（hub 的启动闭包要拉得动它），
+    而 numpy 叶子只可能来自**已经 import 了 numpy** 的 Paddle worker ⇒ 按类型的模块名判定即可，
+    不为一次判定把 numpy 拉进来。torch 张量的 `.detach`/`.dim` 是两族的分界（numpy 数组没有）。
+    """
+    if type(x).__module__.split(".", 1)[0] == "numpy" and hasattr(x, "tobytes"):
+        return "numpy"
+    if hasattr(x, "detach") and hasattr(x, "dtype") and hasattr(x, "dim"):
+        return "torch"
+    return ""
+
+
 def _opt_items(obj: Any, prefix: str = "") -> list[tuple[str, Any]]:
     """（可嵌套的）state_dict 摊平成 `(path, leaf)`；顺序 = 遍历顺序（**两侧同一份规则**）。"""
     out: list[tuple[str, Any]] = []
@@ -147,10 +173,6 @@ def _raw_bytes(t, tensor: Any) -> bytes:
     读端 `reshape(shape)` 原样还原成 0-dim）。形状不丢，读数不变。
     """
     return bytes(tensor.detach().contiguous().reshape(-1).view(t.uint8).numpy().tobytes())
-
-
-#: `exp_avg_sq` 下溢消毒的下限系数 K（`sanitize_adam_sq` 的唯一调参）。
-ADAM_SQ_FLOOR_K = 10.0
 
 
 def sanitize_adam_sq(state: Any) -> int:
@@ -215,8 +237,12 @@ def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
     「我拿哪份当基准」的记录（hub 无法核对，靠 `manifest.opt_from` 的身份闸，见 plan §12）。
 
     路径缺口一律 `ProtocolError`：结构性不一致时**拒绝**，而不是猜一个基准。
+
+    ★ 叶子可以是 **torch 张量**（torch worker 的 `opt.state_dict()`）或 **numpy 数组**
+    （Paddle worker：`worker.ppo.ckpt_convert.paddle_state_to_torch` 译出来的那份，基准则是
+    `common.torch_pickle` 读出来的）——**两族逐条同规则**（浮点且非 0-dim 且同形 ⇒ delta-f16，
+    其余原样），容器格式只有一个。两族**混用**一律拒（那是「基准与新版不是同一份状态」）。
     """
-    t = _torch()
     known: dict[str, Any] = dict(_opt_items(base))
     items: list[dict] = []
     blobs: list[bytes] = []
@@ -224,16 +250,40 @@ def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
         if path not in known:
             raise ProtocolError(f"delta：基准里没有 {path}（结构不一致——拒发而不是猜）")
         b = known[path]
-        leaf_is_t = t.is_tensor(leaf)
-        if leaf_is_t != t.is_tensor(b):
-            raise ProtocolError(f"delta：{path} 两侧类型不一致（张量 vs 非张量）")
-        if not leaf_is_t:
+        fam = _family(leaf)
+        if fam != _family(b):
+            raise ProtocolError(
+                f"delta：{path} 两侧类型不一致（{fam or '非张量'} vs {_family(b) or '非张量'}）"
+            )
+        if fam == "numpy":
+            np = _np()
+            dtype = str(leaf.dtype)
+            shape = [int(x) for x in leaf.shape]
+            # 与 torch 分支同一条两段判据：dtype 门 + `ndim > 0`（0-dim 的 Adam `step` 走 exact）。
+            if dtype in _DELTA_DTYPES and leaf.ndim > 0 and b.shape == leaf.shape:
+                raw = np.ascontiguousarray(
+                    (leaf.astype(np.float32) - b.astype(np.float32)).astype(np.float16)
+                ).tobytes()
+                items.append(
+                    {"path": path, "kind": "delta-f16", "dtype": "float16", "shape": shape,
+                     "nbytes": len(raw)}
+                )
+            else:
+                raw = np.ascontiguousarray(leaf).tobytes()
+                items.append(
+                    {"path": path, "kind": "exact", "dtype": dtype, "shape": shape,
+                     "nbytes": len(raw)}
+                )
+            blobs.append(raw)
+            continue
+        if fam == "":
             try:
                 json.dumps(leaf)
             except (TypeError, ValueError) as e:
                 raise ProtocolError(f"delta：{path} 既不是张量也不是 JSON 值（{e}）") from None
             items.append({"path": path, "kind": "json", "value": leaf})
             continue
+        t = _torch()
         dtype = str(leaf.dtype).replace("torch.", "")
         shape = [int(x) for x in leaf.shape]
         # `leaf.dim() > 0` 是同一条合约的第二半（2026-10-14）：`_DELTA_DTYPES` 只排**整数**
@@ -274,25 +324,15 @@ def is_container(raw: bytes) -> bool:
     return raw.startswith(OPT_DELTA_MAGIC)
 
 
-def apply_opt_delta(
-    base: dict,
-    raw: bytes,
-    *,
-    expect_base_sha: str = "",
-    log: Callable[[str], None] | None = None,
-) -> dict:
-    """hub 侧：delta 容器加回 `base`（本机那份 base opt 的 state_dict）⇒ **新的** state_dict。
+def _parse_delta_header(
+    raw: bytes, expect_base_sha: str
+) -> dict[str, tuple[str, Any, str, tuple[int, ...]]]:
+    """容器 → `{path: (kind, payload, dtype, shape)}`（`payload` 是 bytes 或 json 值）。
 
-    调用方拿到后 `opt.load_state_dict(...)`（形状/键与 `base` 逐字相同）。`expect_base_sha` 非空时
-    逐字节对账基准（exact 档用；identity 档留空，理由见 plan §12）。
-
-    重建后调用 `sanitize_adam_sq`（f16 下溢消毒）；`log` 非空且抬了项时打一行计数。
-    注意：`apply_opt_delta` 也被读侧落地（`opt_standard`）调用 ⇒ 本函数是 **hub 与读侧共用** 的消毒点。
-
-    响亮拒收（**不**静默降级）：缺 torch · 魔数/头/长度不符 · `ofmt` 不认 · `base_sha` 与期望不符 ·
-    项结构（path/shape）与 `base` 对不上 · 基准不是映射 · 尾部多余字节。
+    **两族共用**（torch 的 `apply_opt_delta` 与 numpy 的 `apply_opt_delta_np`）：魔数/头长/`ofmt`/
+    `base_sha`/项结构/尾部多余字节的拒收面只此一处，改一处两边同时变 —— 各写一份必然分叉。
+    不碰 torch/numpy（叶子值原样交出，由各自的 rebuild 解释）。
     """
-    t = _torch()
     if not raw.startswith(OPT_DELTA_MAGIC):
         raise ProtocolError("delta 容器缺 BOD1 魔数")
     off = len(OPT_DELTA_MAGIC)
@@ -338,6 +378,29 @@ def apply_opt_delta(
         )
     if off != len(raw):
         raise ProtocolError(f"delta 尾部有 {len(raw) - off} 字节多余数据")
+    return declared
+
+
+def apply_opt_delta(
+    base: dict,
+    raw: bytes,
+    *,
+    expect_base_sha: str = "",
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """hub 侧：delta 容器加回 `base`（本机那份 base opt 的 state_dict）⇒ **新的** state_dict。
+
+    调用方拿到后 `opt.load_state_dict(...)`（形状/键与 `base` 逐字相同）。`expect_base_sha` 非空时
+    逐字节对账基准（exact 档用；identity 档留空，理由见 plan §12）。
+
+    重建后调用 `sanitize_adam_sq`（f16 下溢消毒）；`log` 非空且抬了项时打一行计数。
+    注意：`apply_opt_delta` 也被读侧落地（`opt_standard`）调用 ⇒ 本函数是 **hub 与读侧共用** 的消毒点。
+
+    响亮拒收（**不**静默降级）：缺 torch · 魔数/头/长度不符 · `ofmt` 不认 · `base_sha` 与期望不符 ·
+    项结构（path/shape）与 `base` 对不上 · 基准不是映射 · 尾部多余字节。
+    """
+    t = _torch()
+    declared = _parse_delta_header(raw, expect_base_sha)
 
     def rebuild(node: Any, prefix: str = "") -> Any:
         if isinstance(node, dict):
@@ -372,6 +435,66 @@ def apply_opt_delta(
     if raised and log is not None:
         log(
             f"opt delta 重建：exp_avg_sq 下溢消毒抬高 {raised} 个元素"
+            "（v=0/m≠0 动量炸弹，DECISIONS §2026-10-17-goalnn-opt-delta-f16-underflow）"
+        )
+    return out
+
+
+def apply_opt_delta_np(
+    base: dict,
+    raw: bytes,
+    *,
+    expect_base_sha: str = "",
+    log: Callable[[str], None] | None = None,
+) -> dict:
+    """`apply_opt_delta` 的 **numpy 版**（Paddle worker 读侧落地用，torch 免费的机器也能跑）。
+
+    语义逐条同源：同一个 `_parse_delta_header`（魔数/头/`base_sha`/项结构/尾部字节）· 同一条
+    `delta-f16` 相加规则 · 同一个 `sanitize_adam_sq_np` 消毒点。差别只在容器类型：`base` 的叶子
+    是 numpy 数组（`common.torch_pickle.load_torch_pickle` 从 hub 的 `opt.pt` 读出来的），
+    重建结果也是 numpy 数组 —— 直接喂 `worker.ppo.ckpt_convert.paddle_state_to_torch`。
+
+    `dtype` 头里写的是 torch 的拼写（`float32` / `float16` / `bfloat16`…）：numpy 只认前两类，
+    **bfloat16 无法在 numpy 里落成数组** ⇒ 响亮拒收（绝不静默降精度：那是改语义）。
+    """
+    np = _np()
+    declared = _parse_delta_header(raw, expect_base_sha)
+
+    def rebuild(node: Any, prefix: str = "") -> Any:
+        if isinstance(node, dict):
+            return node.__class__(
+                (k, rebuild(v, f"{prefix}.{k}" if prefix else str(k))) for k, v in node.items()
+            )
+        if isinstance(node, (list, tuple)):
+            return node.__class__(rebuild(v, f"{prefix}.{i}") for i, v in enumerate(node))
+        got = declared.pop(prefix, None)
+        if got is None:
+            raise ProtocolError(f"delta 缺 {prefix}（结构不一致——拒收而不是猜）")
+        kind, payload, dtype, shape = got
+        if kind == "json":
+            return payload
+        try:
+            dt = np.dtype(dtype)
+        except TypeError:
+            raise ProtocolError(
+                f"delta {prefix} 的 dtype={dtype!r} numpy 落不了（bfloat16？）——拒收"
+            ) from None
+        arr = np.frombuffer(bytearray(payload), dtype=dt).reshape(shape).copy()
+        if kind == "exact":
+            return arr
+        if tuple(node.shape) != shape:
+            raise ProtocolError(f"delta {prefix} 形状不符：容器 {shape} != 本机 {tuple(node.shape)}")
+        return node.astype(np.float32) + arr.astype(np.float32)
+
+    out = rebuild(base)
+    if declared:
+        raise ProtocolError(f"delta 多出 base 里没有的项：{sorted(declared)[:3]}… —— 拒收")
+    if not isinstance(out, dict):
+        raise ProtocolError("delta 基准不是映射（state_dict 应为 dict）——拒收")
+    raised = sanitize_adam_sq_np(out)
+    if raised and log is not None:
+        log(
+            f"opt delta 重建（numpy）：exp_avg_sq 下溢消毒抬高 {raised} 个元素"
             "（v=0/m≠0 动量炸弹，DECISIONS §2026-10-17-goalnn-opt-delta-f16-underflow）"
         )
     return out

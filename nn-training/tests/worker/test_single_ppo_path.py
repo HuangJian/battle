@@ -9,14 +9,16 @@
   ① argparse 面：无 `--ppo`、无 `args.ppo`（连属性都不该存在）；
   ② 源码面：非测试代码零 `args.ppo` / `getattr(args, "ppo"` / `--remote-degrade-after`
      残留（含被删旗标的名字，防「读一个恒缺省的属性」式僵尸分支复活）；
-  ③ env 面：没有任何 `*PPO*BACKEND*` 环境变量读点（launcher env 也是旋钮）；
+  ③ env 面：**光设环境变量什么都不改** —— `$NN_PPO_BACKEND` 那条通道已于 2026-10-27
+     评审删除，判据从「扫源码字样」改成**行为**（`tests/remote/test_ppo_backend_switch.py`
+     §④：设了同名 env，BC 活照常走；真要换框架只能显式传 `--backend`，与 `--device`/
+     `--epoch-mult` 同一条参数路）；
   ④ 课程面：`extra="forbid"` 下任何 backend 类键仍**响亮失败**（不是被悄悄忽略）。
 """
 
 from __future__ import annotations
 
 import ast
-import re
 from functools import cache
 from pathlib import Path
 
@@ -121,19 +123,6 @@ def test_source_has_no_ppo_placement_reads() -> None:
             ):
                 offenders.append(f"{p.relative_to(NN_DIR)}:{node.lineno}: getattr(args, 'ppo')")
     assert not offenders, "PPO 位置判定残留：\n" + "\n".join(offenders)
-
-
-def test_no_ppo_backend_env_knob() -> None:
-    """env 面也没有旋钮：没有任何 `PPO_BACKEND` 类环境变量读点。"""
-    offenders: list[str] = []
-    pat = re.compile(r"PPO[_A-Z]*BACKEND|BACKEND[_A-Z]*PPO")
-    for p in _source_paths():
-        if not _mentions(p, "PPO"):  # 预筛：正则只认含 `PPO` 的文本
-            continue
-        for i, line in enumerate(source_scan.read_text(str(p), "replace").splitlines(), 1):
-            if pat.search(line):
-                offenders.append(f"{p.relative_to(NN_DIR)}:{i}: {line.strip()}")
-    assert not offenders, "backend env 旋钮残留：\n" + "\n".join(offenders)
 
 
 def test_course_schema_rejects_backend_keys(tmp_path: Path) -> None:

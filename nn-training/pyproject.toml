@@ -55,8 +55,14 @@ torch-cu128 = ["torch==2.7.1"]
 # `pytorch-triton-xpu==3.3.1`（该 index 只服务被显式钉住的包）⇒ **任何触发重新解析的改动**
 # 都会让 `uv lock` 直接失败（实测 2026-10-11：一次触发重解析的改动即复现；不改则命中缓存不重解析）。
 # 这正是本块上面那条注释想表达的意思，只是漏在了 `torch` 上。
-torch-rocm = ["torch==2.7.1 ; sys_platform == 'linux'", "pytorch-triton-rocm==3.3.1 ; sys_platform == 'linux'"]
-torch-xpu = ["torch==2.7.1 ; sys_platform == 'linux'", "pytorch-triton-xpu==3.3.1 ; sys_platform == 'linux'"]
+torch-rocm = [
+  "torch==2.7.1 ; sys_platform == 'linux'",
+  "pytorch-triton-rocm==3.3.1 ; sys_platform == 'linux'",
+]
+torch-xpu = [
+  "torch==2.7.1 ; sys_platform == 'linux'",
+  "pytorch-triton-xpu==3.3.1 ; sys_platform == 'linux'",
+]
 
 # ---------------------------------------------------------------------------
 # uv — 环境与变体解析
@@ -167,15 +173,7 @@ py-modules = []
 # 2026-09-30（刀 7）：14 个入口脚本归位（`trainer/` · `tools/` · `remote/` · `worker/`）——
 # 全部落在**已声明**的包内，故清单本身无新增；`nn-training/` 顶层从此只剩 `conftest.py`。
 [tool.setuptools.packages.find]
-include = [
-  "trainer*",
-  "biz*",
-  "tools*",
-  "common*",
-  "remote*",
-  "hub*",
-  "worker*",
-]
+include = ["trainer*", "biz*", "tools*", "common*", "remote*", "hub*", "worker*"]
 
 # ---------------------------------------------------------------------------
 # ruff - lint + format (replaces flake8/black/isort)
@@ -230,16 +228,16 @@ unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-e
 # 与本次改动无关）——「狼来了」久了就没人看门禁了。改名 `tpu_probe.py` 是另一条路，
 # 但要动 docs / 命令行引用，不值当。
 "tools/tpu-probe.py" = ["N999"]
-  # 2026-10-02：`tools/backtest-burn-rule.py` 同款（干烧熔断回测的一次性 CLI，全仓无人
-  # `import`）——它自 fa843e8f 起就在让全量 ruff 多一条 N999，本次合并按同一先例登记豁免。
-  "tools/backtest-burn-rule.py" = ["N999"]
-  # 2026-10-05（plan/policy-spatial-head.plan.md S0′）：三份一次性 CLI 探针同款豁免。
-  "tools/spatial-probe.py" = ["N999"]
-  "tools/spatial-probe-flatcv.py" = ["N999"]
-  "tools/spatial-tower-parity.py" = ["N999"]
-  # 2026-10-11（plan/rollout-topup-fastpath.plan.md §5 取证 1）：同款一次性 CLI 探针
-  # （把 rollout 墙钟拆成「跑局 vs 固定开销」，全仓无人 `import`）。
-  "tools/analyze-rollout-wall.py" = ["N999"]
+# 2026-10-02：`tools/backtest-burn-rule.py` 同款（干烧熔断回测的一次性 CLI，全仓无人
+# `import`）——它自 fa843e8f 起就在让全量 ruff 多一条 N999，本次合并按同一先例登记豁免。
+"tools/backtest-burn-rule.py" = ["N999"]
+# 2026-10-05（plan/policy-spatial-head.plan.md S0′）：三份一次性 CLI 探针同款豁免。
+"tools/spatial-probe.py" = ["N999"]
+"tools/spatial-probe-flatcv.py" = ["N999"]
+"tools/spatial-tower-parity.py" = ["N999"]
+# 2026-10-11（plan/rollout-topup-fastpath.plan.md §5 取证 1）：同款一次性 CLI 探针
+# （把 rollout 墙钟拆成「跑局 vs 固定开销」，全仓无人 `import`）。
+"tools/analyze-rollout-wall.py" = ["N999"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -275,7 +273,9 @@ exclude = ["\\.venv/", "weights/", "tmp/"]
 # 2026-10-03：加 `sympy.*` —— `worker/ppo/np_core._ensure_sympy_printing` 需要在 import
 # torch_xla 前探一次 sympy（它无 py.typed，静态 import 会报 import-untyped）。与 torch/numpy
 # 同册：第三方无 stubs 的包一律走这条豁免，而不是在调用点撒 type: ignore。
-module = ["torch.*", "numpy.*", "torch_xla.*", "sympy.*"]
+# 2026-10-27：加 `paddle.*` —— Paddle 双生实现（`worker/*_paddle.py`）只在本机没装 paddle
+# 的开发机上走不到；本仓 PyPI 依赖里没有 paddle，缺 stubs 属预期，不是类型缺口。
+module = ["torch.*", "numpy.*", "torch_xla.*", "sympy.*", "paddle.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
@@ -316,7 +316,4 @@ addopts = "-ra -q --tb=short -x --timeout=60"
 # Markers（2026-09-15：标记**不再承担分层职责** —— 层由路径决定，tests/ = 单测层、
 # e2e/ = 集成层；全仓已无 `-m "not heavy"` 调用方，原 tests/ 里 heavy 标记实测 0 个。
 # 保留注册只为「将来再引入标记时不报 unknown marker」，不要在 gate/CI 里拿它分层）：
-markers = [
-  "heavy: (legacy, 无人过滤) 重型/集成用例的说明性标记",
-  "slow: (legacy, 无人过滤) 慢用例的说明性标记",
-]
+markers = ["heavy: (legacy, 无人过滤) 重型/集成用例的说明性标记", "slow: (legacy, 无人过滤) 慢用例的说明性标记"]

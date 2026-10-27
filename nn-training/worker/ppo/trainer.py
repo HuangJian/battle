@@ -52,3 +52,13 @@ def aggregate_stats(stats: list[dict[str, float]], keys: list[str]) -> dict[str,
 def empty_agg(keys: list[str]) -> dict[str, Any]:
     """空 chunk 时的零聚合（各后端 update 的空输入回退）。"""
     return {k: 0.0 for k in keys}
+
+
+def cat_entropy(logp: Any) -> Any:
+    """类别分布的熵（`-(p·log p)` 按最后一维求和再平均）——**两个框架通用**的写法。
+
+    为什么用位置参数 `sum(-1)`：torch 的形参名是 `dim`、Paddle 是 `axis`，只有位置形式两边
+    都收 ⇒ 同一份实现能同时喂 `worker.ppo.common`（torch 侧，那里再导出）与
+    `worker.ppo.engine_paddle`（Paddle 侧）。数值逐位相同（exp / 乘 / sum / mean 同序）。
+    """
+    return -(logp.exp() * logp).sum(-1).mean()

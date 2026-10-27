@@ -67,6 +67,13 @@ from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
 
+# PPO 后端（2026-10-27，Paddle 双生）：**节点本地能力**，hub 不可见（用户口径②）；取值域 /
+# 设备归一化同住 `remote/bc_job.py`（PPO 作业的纯判据簇）。`PPO_BACKENDS` 现在只喂 argparse
+# 的 `choices`（显式参数的取值域）——env 那条通道已删，见 bc_job 头部。
+from remote.bc_job import (
+    PPO_BACKENDS as PPO_BACKENDS,
+)
+
 # BC 作业（S4 第六步之二 → `remote/bc_job.py`）：**显式转发**（e2e / tests 直接 import
 # 这些名字，见该模块头部；本组无 monkeypatch 接缝）。
 from remote.bc_job import (
@@ -94,7 +101,13 @@ from remote.bc_job import (
     normalize_ppo_device as normalize_ppo_device,
 )
 from remote.bc_job import (
+    paddle_cuda_available as paddle_cuda_available,
+)
+from remote.bc_job import (
     resolve_bc_seed as resolve_bc_seed,
+)
+from remote.bc_job import (
+    resolve_ppo_backend as resolve_ppo_backend,
 )
 
 # bulk 让路策略的库层常量（plan/transfer-residual W1/S5）：装配在 `worker_loop` 里做，
@@ -466,6 +479,11 @@ def run_job(
     work_dir: Path,
     device: str = "cpu",
     torch_threads: int = 0,
+    #: ★ 2026-10-27（评审）：本节点用哪个框架跑 PPO（`""`/`auto` = 看本机，torch 优先）。
+    #: **显式参数**，与 `--device`/`--epoch-mult` 同路（`--backend` → `worker_loop` →
+    #: `run_one_round` → 这里）；不放 env —— 「没人传也生效」的隐形开关正是 2026-09-21
+    #: 事故的形状（`tests/worker/test_single_ppo_path.py` 的守卫）。
+    backend: str = "",
     #: ★ 2026-10-26（用户口径）：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest
     #: 原样）。与离线盘的 `CFG.epoch_mult` 同义：只改更新遍数，不改 rollout 采样/评估语料，
     #: 也不改 manifest 身份（hub 对账仍按发布时那份）。
@@ -523,6 +541,17 @@ def run_job(
             f"job {jid}: kind=run（半离线整段）这条腿已于 2026-09-25 退役 —— 离线课由云机"
             "取任务包接手：battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包）。"
             "本 worker 拒收这份活。"
+        )
+
+    # ---- PPO 后端（2026-10-27，Paddle 双生）：**节点本地能力开关**，hub 不可见（用户口径②）----
+    # paddle 后端只跑 kind=ppo（迁移范围 = 只 PPO）：BC / 节点侧 rollout 仍是 torch/bun 语义。
+    # 在**任何下载之前**拒单 —— 别让 AI Studio 机器传完 payload 才炸 "No module named torch"。
+    # 载荷是**入参**（`--backend` 一路传下来）；空串 = auto（看本机，torch 优先，逐字节旧行为）。
+    backend = resolve_ppo_backend(backend)
+    if backend == "paddle" and str(manifest["kind"]) != "ppo":
+        raise ProtocolError(
+            f"job {jid}: 本 worker 是 Paddle 后端，只跑 kind=ppo；这份活是 "
+            f"kind={manifest['kind']}——拒收（BC/rollout 仍是 torch/bun 语义）"
         )
 
     # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
@@ -612,6 +641,10 @@ def run_job(
     # 第一次只改了 PPO 的分派条件（else 仍 `torch.device(device)`），第二次才发现
     # BC 分叉也是直接透传原始 device。
     _raw_dev = str(device or "cpu").strip().lower()
+    if backend == "paddle" and _raw_dev == "auto":
+        # Paddle-only 机器上 `normalize_ppo_device` 问的是 torch（恒 False）⇒ 先替它问 paddle，
+        # 否则 AI Studio 的 GPU 任务会被静默判成 cpu（慢两个数量级，日志一切正常）。
+        device = "cuda" if paddle_cuda_available() else "cpu"
     device = normalize_ppo_device(device)
     if device != _raw_dev:
         log(
@@ -854,6 +887,7 @@ def run_job(
             device=device,
             torch_threads=torch_threads,
             epoch_mult=epoch_mult,
+            backend=backend,
             preloaded=preloaded,
             # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
             init_w=init_w,
@@ -936,6 +970,9 @@ def worker_loop(
     # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
     # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
     role: str = ROLE_ONLINE,
+    #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle），原样交给宿主 `run_job`
+    #: （本模块不认识它的语义，与 `epoch_mult` 同一条路）。空串 = auto。
+    backend: str = "",
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
     # 下行腿跑在哪里（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
@@ -1147,6 +1184,7 @@ def worker_loop(
                 device=device,
                 torch_threads=torch_threads,
                 epoch_mult=epoch_mult,
+                backend=backend,
                 echo=echo,
                 restart_argv=restart_argv,
                 # 注：半离线（kind=run）腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
@@ -1254,6 +1292,12 @@ def main() -> None:
         help="内容寻址缓存的持久根（code/ts_code/blob 跨会话复用）；空=住 --out 下（旧行为）",
     )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
+    ap.add_argument(
+        "--backend",
+        choices=PPO_BACKENDS,
+        default="",
+        help="PPO 训练后端：auto=看本机（torch 优先，缺省）/ torch / paddle（AI Studio 训练任务）",
+    )
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
     ap.add_argument(
         "--epoch-mult",
@@ -1367,6 +1411,7 @@ def main() -> None:
             device=args.device,
             torch_threads=args.threads,
             epoch_mult=args.epoch_mult,
+            backend=args.backend,
             poll_sec=args.poll_sec,
             once=args.once,
             echo=args.echo,

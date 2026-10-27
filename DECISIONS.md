@@ -9815,3 +9815,65 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （行为不变；旧 import 路径保持）；回归：`tests/trainer/test_eval_dispatch_resilience.py`、
   `tests/trainer/test_eval_local_fallback_guard.py`、`tests/worker/test_eval_timing.py`、
   `tests/worker/test_baseline_eval.py`、`e2e/test_run_rl.py`。
+
+## §2026-10-27-goalnn-paddle-ppo-twin（2026-10-27，AI Studio 只有 Paddle ⇒ PPO 双生，PoC 通过）
+
+- **背景**：用户指出 AI Studio 训练任务镜像只提供 Paddle、没有 PyTorch。现有 `kind=ppo` 的 torch
+  训练面（`worker/models/student.py` + `worker/ppo/engine.py` + `remote/train_core.py`）在那里跑不了；
+  rollout/eval 在本机 TS/bun，不受影响。
+- **决定**：① 范围只承接 **PPO**（BC/rollout 不迁）；② 用「双生」而不是抽象层：新增
+  `worker/models/student_paddle.py` / `worker/ppo/engine_paddle.py`，state_dict 与 `nn-weights-json`
+  交换格式保持逐字节兼容，torch 生产路径零改动；③ 先跑 `tools/paddle_parity.py` 的
+  fixture(torch) → check(Paddle) → verify(torch 读回) 三步对账，**对账不过不接 hub**；④ 四条 Paddle
+  语义陷阱只在 Paddle 侧局部修正（Linear 权重布局 / gather axis / log_softmax 下限 / Adam 归约噪声的
+  判据），不改权重格式、不改 torch 数值口径；⑤ 接入顺序（优化器状态格式 / 路由 / 混跑）留待对账后的
+  单独决定，本条不预先承诺。
+- **备选与否决**：抽跨框架后端层（torch+paddle 共用一套引擎）—— 否（PPO 引擎里 XLA/profiler/
+  checkpoint 都是 torch 专属，抽象层会把两边热路径都拖慢；双生只重复模型定义与一步数学）；先迁
+  BC/rollout —— 否（AI Studio 无 bun，rollout 仍须本机，迁了也拿不到端到端）；直接上 hub 路由再对账
+  —— 否（数值不等价时无法区分是路由问题还是框架问题）。
+- **落地**：`nn-training/worker/models/student_paddle.py`、`nn-training/worker/ppo/engine_paddle.py`、
+  `nn-training/tools/paddle_parity.py`；7 用例四架构全 PASS（forward ≤2.80e-6 · stats ≤4.46e-5 ·
+  权重 ≤4.21e-5 · 更新后前向 ≤2.07e-5 · Paddle→torch 权重 4.63e-6）。全文 →
+  `docs/nn/training-stack.md` §42。
+- **未决（下次决策点）**：Paddle 侧优化器状态 / checkpoint（现 `ckpt_path` 抛 `NotImplementedError`）·
+  hub 能力注册与新 `kind` / 路由 · torch 与 Paddle worker 能否混跑同一门课。
+
+## §2026-10-27-goalnn-paddle-worker（2026-10-27，Paddle worker 接入 `kind=ppo`：格式统一 torch、hub 无感、可混跑）
+
+- **背景**：§2026-10-27-goalnn-paddle-ppo-twin 的 PoC 对账全 PASS 后，用户给出三条接入裁决：
+  ① 优化器状态/断点续训**统一用 torch 格式**、Paddle worker 自己转换；② hub **不需要知道** worker
+  跑在 torch 还是 paddle；③ 两类 worker **混跑同一门课**。
+- **决定**：① 新增 `common/torch_pickle.py`（无 torch 的 save/load zip 编解码）+ `worker/ppo/ckpt_convert.py`
+  （纯 numpy 状态翻译）+ `worker/ppo/checkpoint_paddle.py`（torch 布局落盘）；Paddle 的 Adam 无 `step`，
+  由 `state.json` 的 `steps_done` 显式记账，torch `_ppo_load` 不读它 ⇒ 混跑时动量/bias correction 连续。
+  ② 后端是**节点本地能力开关**：`python -m remote.worker --backend auto|torch|paddle`（缺省 auto），
+  **不进 manifest、不上报 hub**；auto = torch 优先，显式值不兜底、未知值拒。★ 2026-10-27 评审：
+  删掉曾计划的 env `NN_PPO_BACKEND` 通道（撞 2026-09-21 守卫）⇒ 值只走 argv 逐参数显式传到
+  `run_job`，守卫从扫源码字样改成行为判据。③ 训练核在
+  同一入口分流（`backend=…`），框架无关判据下沉 `remote/train_common.py`(L2)，两核共用
+  `_resolve_opt_init`/`_fetch_ref`/`_fetch_demo`/`_load_opt_state`/`_ppo_done_log`/`_agg_block` ⇒
+  调用面/产物/`agg` 读数逐字段相同。
+- **备选与否决**：manifest 带 `backend` 字段 / hub 按能力路由 —— 否（用户口径②；且会让「换节点」变成
+  协议变更，混跑课每轮都要改派单）；新增 `kind=ppo-paddle` —— 否（下游 role/校验/池形状全要分叉，
+  与「hub 无感」相反）；**同一条 argv 直通到训练核、不经 env** —— ★ 2026-10-27 评审改判：原稿让值经
+  env `NN_PPO_BACKEND` 传给子进程（当时理由是「热替换只重放 `sys.argv[1:]`、env 更稳」），但它撞上
+  2026-09-21 守卫「训练落点/方式不许是没人传也生效的隐形开关」⇒ 改成 argv 逐参数显式传、env
+  通道删除）；显式 `paddle` 而本机没装时静默回 torch
+  —— 否（会产出「看起来一样」的假绿产物，故障从 AI Studio 漂到 hub 侧才暴露）。
+- **落地**：`nn-training/remote/{train_core,train_common,worker,bc_job}.py` · `common/torch_pickle.py` ·
+  `worker/ppo/{ckpt_convert,checkpoint_paddle,engine_paddle}.py` · `worker/models/student_paddle.py` ·
+  `tools/paddle_parity.py`（`ckpt_resume` 用例）。守卫：`tests/remote/test_ppo_backend_switch.py`(15) ·
+  `tests/worker/test_ckpt_convert.py`(10) · `tests/common/test_torch_pickle.py`(8) · DAG/调用面/源清单
+  锚点已同步。全量 ruff+mypy+pytest 绿。全文 → `docs/nn/training-stack.md` §43。
+- **副作用（已修）**：拆 helper 时 `_fetch_ref` 返回 3 元组、调用点解 4 —— mypy 的
+  `Need more than 3 values to unpack` 抓住；ref/kickstart 路径此前无测试直接覆盖。
+- **评审补修（2026-10-27，同一批）**：① 后端通道从 env 改成 argv 显式传（见上 ②）；
+  ② **tower 架构 Paddle 续训缺项**：torch Adam 惰性建 state ⇒ `spatial_tower` 的 `fc.*`（死分支）
+  不在 `opt.pt` 里，而 Paddle `set_state_dict` 收半份表第一步就 assert ⇒ `ckpt_convert` 按
+  「走过 t 步、动量恒零」补齐，回传侧 `drop_vacuous_nodes` 按基准节点集投影（动量非零则拒）；
+  ③ 双生共用件收敛：`arch` / `policy_input_dim` / `value_anchor_slices` / `build_ppo` →
+  `worker/models/arch_meta.py`，`cat_entropy` → `worker/ppo/trainer.py`（reuse 账本 exact/clone
+  由 18/18 收回 14/17，账在 `tests/test_reuse_ledger.py`）。
+- **未决**：真 AI Studio 任务上的端到端（需云端机器）· Paddle 侧 `--threads` 等价旋钮（Paddle 3.3 无
+  `set_num_threads`）· 控制台展示 backend（按口径②刻意不做）。

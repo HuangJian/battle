@@ -112,9 +112,26 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 账本）改成了 `set_fields` —— 那两个名字与本改动无关，只是撞上了 ≥3 的计数，换名比抬基线便宜。
 #: `exact_groups` 未动（14）：新代码里唯一逐字节相同的两处（`run_tick_loop` 的循环体 / `_loop`）
 #: 已合成一份；`clone_groups` 15 → 16 仍低于基线 17。
+#: **2026-10-27 抬同名 7 格（96 → 103）的账**（Paddle 双生落地 + 同年同日评审的收敛；
+#: `exact` 与 `clone` **都没抬** —— 这次是把它们从 18/18 收敛回 14/17）。
+#: 新跨过 ≥3 门槛的 7 个名字，逐条理由：
+#:
+#: | 名字 | 成员 | 为什么不是「又拄一份」 |
+#: |---|---|---|
+#: | `_np` | `common/torch_pickle` · `remote/opt_delta` · `remote/weights_delta` | 各模块自己的**延迟 import numpy 助手**（一行 `return np`；三处取的是不同的 numpy 面，如 dtype/frombuffer vs delta 量化）⇒ 合并要新建第三个模块只为省 3 行 |
+#: | `cat_logprob` · `masked_logsoftmax` | `tools/tpu-probe.py` · `worker/ppo/common` · `worker/ppo/engine_paddle` | 两个框架的**算子形状不同**（`dim=`/`axis=`、`gather`/`take_along_axis`）⇒ 无法共享；tpu-probe 那份是自包含探针（它不许 import ppo 包） |
+#: | `coord_channels` · `features` · `predict` | `tpu-probe`/`student`/`student_paddle` · `models/core`/`student`/`student_paddle` | **模型类自己的方法/属性面**：两个框架上返回的对象族不同（`torch.Tensor` vs `paddle.Tensor`），而「同一个架构名」正是双生要保证的契约 |
+#: | `build_ppo` | `worker/models/arch_meta` · `student_paddle` · `worker/ppo/engine` | ★ 这正是**本次收敛**：原来 engine 与 student_paddle 各存一份**逐字节相同**的实现（一条 exact 欠账）—— 现在 = 一份实现 + 两个转发名 ⇒ 名字多一格、实现少一份 |
+#:
+#: ⚠ 工作树上还有**另一次在飞的改动**（payload 分块，未入本次提交）多出 1 格
+#: （`remote/payload_pack.py` 的 `one`）：那笔账由那次改动自己在本文件记，
+#: 本基线只覆盖到「Paddle 双生 + 2026-10-27 评审收敛」这一份（工作树读数因此可比 103 多）。
+#: 收敛前后对照：`worker/models/student.py` ↔ `student_paddle.py` 的 `arch` /
+#: `policy_input_dim` / `value_anchor_slices`（×3 组逐字节）与 `build_ppo`（×1）全部收进
+#: `worker/models/arch_meta.py`；`cat_entropy`（1 组结构克隆）收进 `worker/ppo/trainer.py`。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 96
+BASELINE_SAME_NAME_GE3 = 103
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

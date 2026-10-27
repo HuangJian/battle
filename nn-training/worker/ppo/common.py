@@ -74,6 +74,11 @@ from worker.ppo.np_core import (  # noqa: F401  (re-export：既有调用点不�
     xla_world_size,
 )
 
+# `cat_entropy` 的实现是**两个框架通用**的位置参数写法（torch 的 `dim=` / Paddle 的 `axis=`
+# 只有位置形式两边都收）⇒ 单一实现住在 `worker.ppo.trainer`(L0，免框架)，这里再导出：
+# Paddle 双生（`worker.ppo.engine_paddle`）从同一个地方取，不再各存一份。
+from worker.ppo.trainer import cat_entropy as cat_entropy
+
 
 # ---------------- 标量同步（N 次 device→host 同步收成 1 次） ----------------
 def sync_scalars(values: dict[str, torch.Tensor]) -> dict[str, float]:
@@ -109,10 +114,6 @@ def masked_logsoftmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 def cat_logprob(action: torch.Tensor, logp: torch.Tensor) -> torch.Tensor:
     return logp.gather(1, action.unsqueeze(1)).squeeze(1)
-
-
-def cat_entropy(logp: torch.Tensor) -> torch.Tensor:
-    return -(logp.exp() * logp).sum(dim=-1).mean()
 
 
 def approx_kl_est(lp_old: torch.Tensor, lp_new: torch.Tensor) -> torch.Tensor:

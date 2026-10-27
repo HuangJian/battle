@@ -52,7 +52,7 @@ if str(ROOT) not in sys.path:
 import remote.train_core as core_mod
 import remote.worker as worker_mod
 import remote.worker_proc as proc_mod
-from common.protocol import BLOB_OPT, BLOB_REF
+from common.protocol import BLOB_OPT, BLOB_REF, coef_active
 from remote import download as download_mod
 from remote import wire as wire_mod
 from tests.helpers import remote_dag as dag
@@ -246,6 +246,8 @@ def test_the_core_touches_only_downward_clusters() -> None:
         # 2026-10-15（离线 opt delta 的读侧落地）：restore 段拿到的 `opt_init`/blob 也可能是
         # BOD1 容器（现场 it-237）⇒ 装载前落地成整份。L1 模块，站在本核（L4）下面。
         "remote.opt_standard",
+        # 2026-10-27（Paddle 双生）：框架无关判据/课程装配拆到 L2（两条核共用一份）。
+        "remote.train_common",
         "remote.weights_delta",
         "remote.wire",
     ], tops
@@ -458,7 +460,7 @@ def test_the_kick_gate_is_a_pure_read_of_the_manifest() -> None:
     """
     assert core_mod.kick_kl_value({}) == 0.0
     assert core_mod.kick_kl_value({"kickstart_kl": 0.0}) == 0.0
-    tiny = core_mod.coef_active(1.0)  # 阈值判据与生产同源（同一函数，不抄一份）
+    tiny = coef_active(1.0)  # 阈值判据与生产同源（同一函数，不抄一份）
     assert isinstance(tiny, bool)
     assert core_mod.kick_kl_value({"kickstart_kl": 1e-12}) == 0.0, "低到阈值以下 ⇒ 按关闭处理"
     assert core_mod.kick_kl_value({"kickstart_kl": 1.0}) == 1.0, "够大 ⇒ 原值（不改写）"

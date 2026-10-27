@@ -7,6 +7,144 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §43 Paddle worker 接入 `kind=ppo` 生命周期：后端开关只看本机，产物一律 torch 格式（2026-10-27）
+
+**触发**：§42 的对账全 PASS 后，用户给出三条接入裁决（原话）：① **Paddle 侧优化器状态/断点
+续训格式：hub 机统一使用 torch 格式，Paddle worker 自己负责转换**；② **hub 不需要知道 worker
+运行在 torch 或 paddle**；③ **torch 与 Paddle worker 会混跑同一门课**。本条是这三条在代码里的落点。
+
+**① 格式统一：hub 只收发 torch 字节，转换在节点**
+- 新增 `common/torch_pickle.py`：**不 import torch** 的 torch.save/load zip 编解码（纯 stdlib +
+  numpy）。读侧把 `model.pt`/`opt.pt` 读成 numpy 叶子，写侧产出 `torch.load` 能直接接受的
+  归档（layout 由 `tests/common/test_torch_pickle.py::test_archive_layout_matches_torch_contract`
+  与真 torch 对拍）。
+- 新增 `worker/ppo/ckpt_convert.py`（纯 numpy 状态翻译）+ `worker/ppo/checkpoint_paddle.py`
+  （文件层：`model.pt`/`opt.pt`/`state.json` 布局与 torch 侧逐项相同）。**Paddle 的 Adam 没有
+  `step`**，只有 `beta1_pow_acc`（t 步后 = β^(t+1)）⇒ 反向必须由 `state.json` 的 `steps_done`
+  显式记账（从 pow 反解在大 t 上会因 f32 下溢失真）；torch 侧 `_ppo_load` 只读
+  `epochs_done`/`rng`，多这个键不改变任何 torch 行为。
+- 拒收面（都在 `ckpt_convert`）：半截节点（有 m 无 v）· amsgrad 节点（Paddle plain Adam 没有
+  `max_exp_avg_sq`，静默丢 = 换算法）· 节点间 step 不齐 · 形状/下标越界。
+- ★ **2026-10-27 评审补的真缺口（`spatial_tower`）**：torch 的 Adam **谁有梯度才给谁建
+  state** ⇒ `fc.weight`/`fc.bias`（塔路径里的死分支、永远 `grad=None`）根本不在 `opt.pt` 里，
+  而 Paddle 的 `set_state_dict` 收半份表第一步就 assert（实测
+  `conv2d_18.w_0_moment1_0 should in state dict`）。修法：`ckpt_convert.torch_state_to_paddle`
+  按 torch 语义**补齐**缺项（零动量 + 同一个 pow = 「走过 t 步、动量一直是 0」，与那边
+  `exp_avg=0, exp_avg_sq=0, step=t` 的节点逐字段同义）；回传侧 `drop_vacuous_nodes` 再按
+  **基准的节点集**投影（基准里没有且恒为零的摘掉 —— delta 容器不收凭空多的路径；动量非零
+  则响亮拒，那是真的结构分歧）。
+- opt 的 **delta 容器**（BOD1）也有 numpy 实现：`opt_standard.rebuild_opt_tar_np`（读侧重建）
+  与 `torch_pickle.load_torch_pickle` 给 `pack_opt_delta` 做 base（写侧 diff）——容器契约不变，
+  只是不经 torch。
+
+**② hub 无感：后端是节点本地能力开关，不进 manifest / 不上报**
+- `python -m remote.worker --backend auto|torch|paddle`（缺省 auto）。值**只走 argv** ——
+  `--backend` → `worker_loop` → `run_one_round` → `run_job` 逐参数显式传（与 `--device` /
+  `--epoch-mult` 同一条路）；supervisor 热替换重放 `sys.argv[1:]` ⇒ 重拉后照样成立。
+  ★ **2026-10-27 评审删掉了曾计划的 `NN_PPO_BACKEND` env 通道**：它撞 2026-09-21 事故后立的
+  守卫（**训练落点 / 方式不许是「没人传也生效」的隐形开关**）。守卫也随之从「扫源码字样」
+  改成**行为判据**（`tests/remote/test_ppo_backend_switch.py` ④：设了同名 env，BC 活照常走；
+  真要换框架只能显式传 `--backend`）。
+- `auto` = 看本机装了什么，**torch 优先**（混合机行为不变），只有纯 Paddle 机才落到 paddle；
+  两个都没有 ⇒ 返回 torch，让 `import torch` 在训练核里响亮失败。**显式值不兜底**（想要
+  paddle 却没装 ⇒ 就该在那台机器上报错，而不是悄悄换回 torch 跑一份看起来一样的产物）。
+- paddle 后端**只接 `kind=ppo`**（= §42 定的迁移范围），BC/iter 在**任何下载之前**拒单——
+  别让 AI Studio 机器传完 payload 才炸 "No module named torch"。
+- `--device auto` 在 paddle 后端先问 `paddle_cuda_available()`（`normalize_ppo_device` 的 auto
+  问的是 torch，Paddle-only 机上恒 False ⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成
+  cpu，慢两个数量级且日志一切正常）。`normalize_ppo_device` 仍只有**一个**调用点。
+- 训练核里 paddle 侧响亮拒收 XLA/DataParallel/MPS（torch 专属实验臂）；`--threads` 在 Paddle
+  3.3 无等价旋钮（保留形参、值被忽略，`prep` 行可读）。
+
+**③ 混跑：两核同调用面、同产物、同读数**
+- `run_training_core(..., backend=…)` 在**同一入口**分流到 `_run_training_core_paddle`；作业壳
+  （`remote/worker.py`）的五源解析 / 取消 / 进度 / 结果落盘全在框架之外，逐字节不分叉。
+- 框架无关的一半拆到 `remote/train_common.py`（L2）：`effective_epochs` / `kick_kl_value` /
+  `blob_wanted` / `ppo_shards_root` / `course_prep` / `decode_demo_bank` / `check_demo_bank`；
+  `train_core.py` 里两核共用 `_resolve_opt_init` / `_fetch_ref` / `_fetch_demo` /
+  `_load_opt_state` / `_ppo_done_log` / `_agg_block`（日志措辞与 `agg` 字段同源 ⇒ 混跑时
+  hub/控制台读到的结果形状没有「哪台机器产的」这个维度）。
+- 步数连续性：paddle 核从 torch `opt.pt` 的 `step` 读 `steps_init`，本轮
+  `steps_total = steps_init + epochs_eff × len(chunks)` 写回 `state.json` ⇒ torch→paddle→torch
+  三连跑动量与 bias correction 一路连续（`tools/paddle_parity.py` 的 `ckpt_resume` 用例端到端对账）。
+- LOC 预算（<1000/文件）逼出的形状：`train_core.py` 987 行（含两核）、`worker.py` 996 行。
+  想再拆模块会被 DAG 账本挡住（任何 import `remote.download`(L3) 的新模块秩也是 4，与
+  `train_core` 平级 = 违反「严格向下」）⇒ 共用判据下沉 `train_common`(L2) 是唯一合法方向。
+- **分层落点（守卫逼出来的第二次搬家）**：`torch_pickle` 最初住 `remote/`，被
+  `tests/test_layering.py::test_worker_never_reaches_the_transport_the_hub_or_the_orchestration`
+  当场拦下（`worker → remote` 是硬禁，DAG 账本只按秩判、允许这条边——两套守卫口径不同，
+  以更严的为准）。它和 `sanitize_adam_sq_np` 都是**两侧都要向下取**的叶子 ⇒ 下沉
+  `common/torch_pickle.py` / `common/adam_sq.py`。`common/` 的层规约是「**模块顶层**零第三方」
+  （`tests/common/test_common_layer.py`），numpy 惰性 import 与「hub 启动闭包没有 numpy」的
+  既有纪律一致 ⇒ 合规。
+
+**守卫与验收（本批新增/改动）**：`tests/remote/test_ppo_backend_switch.py`（15 例：auto 三态 /
+显式不兜底 / 未知值拒 / paddle_cuda 两态 / 非 ppo 拒单先于下载 / ppo 放行 / torch 保持 BC /
+auto 设备问 paddle / 显式设备不问）· `tests/worker/test_ckpt_convert.py`（10 例：pow 重放 /
+形状 / 往返 / Paddle 公式续跑 == torch / 四种拒收）· `tests/common/test_torch_pickle.py`（8 例，
+含「模块级 import 零 torch/numpy」）· `test_train_core_split`（调用面关键字集合 == 核形参，
+漏传 `backend` 当场红）· `test_remote_dag`（`train_common` = L2）· `test_opt_blob_shape`（源
+清单拒绝点 3 → 5：两核同口径）。全量门禁 ruff + mypy + pytest `tests/ e2e/` 绿。
+
+**顺带修的真 bug**：`_fetch_ref` 返回 3 元组而两个调用点解 4（`_, ref_path, _h, _m`）——
+mypy 的 `Need more than 3 values to unpack` 抓住的；ref/kickstart 路径一旦真跑就会 ValueError。
+教训：**拆 helper 时「返回元数」与「调用点解包」没有测试直接覆盖时，类型检查是唯一的守门人**。
+
+**边界（未做）**：真 AI Studio 任务上的端到端（需云端机器 + 登录态；本机用
+`tmp/paddle-venv` 的 parity harness 代替）· 控制台侧「按节点选 backend」的展示（用户口径②说
+hub 不必知道，故刻意不做）· Paddle 侧的 `--threads` 等价旋钮。
+
+---
+
+---
+## §42 Paddle 双生实现 + 一步更新对账：模型与 PPO 数学可移植，四条「同形不同义」陷阱（2026-10-27）
+
+**触发**：AI Studio 训练任务镜像只装 Paddle（无 torch），用户问「模型能不能在 Paddle 上训练」。
+范围定案：**只承接 PPO**（rollout/eval 仍在本机 TS/bun，不进 Paddle）· 训练任务运行期可长期联网 ·
+先 PoC 对账，hub 路由与混跑等对账通过后再裁。
+
+**落点（三个新文件，现有文件零改动）**：`worker/models/student_paddle.py`（`StudentNet`/`PPOStudent`
+双生，state_dict 键名/形状与 `nn-weights-json` 载荷（含 `arch`/`schema_major`/f32 base64）和 torch 版逐字节兼容）·
+`worker/ppo/engine_paddle.py`（`ppo_update` 双生：clip / value / entropy / `kl_coef` / kickstart-KL 的 ref 缓存 /
+demo-BC / value-anchor / policy rms 遥测 / Adam + 全局范数裁剪）· `tools/paddle_parity.py`
+（三模式：fixture = torch 写盘 · check = Paddle 跑同一份 · verify = torch 读回 Paddle 写出的权重）。
+
+**四条陷阱（全是「同名 API 语义不同」，只在 Paddle 侧修，不动交换格式）**：
+1. **`nn.Linear.weight` 是 `(in,out)`**（torch 是 `(out,in)`）⇒ 权重灌进去静默算错。改用 `TorchLinear`
+   自建 `(out,in)` 参数 + `matmul(x, W, transpose_y=True)`，state_dict 键/形状与 torch 逐位一致。
+2. **`paddle.gather` 的 axis 语义 ≠ `torch.gather`**（本例返回 `(B,B,1)` 而非逐行）⇒ `policy` 算成 5.8e17。
+   改用 `take_along_axis(...).squeeze(1)`。
+3. **Paddle `log_softmax` 把极小 log-prob 夹在 ≈−64.3**，torch 保留真值（−124）⇒ 合法低概率动作的 ratio
+   变 e^60（`policy` 8.7e24 / `gnorm=inf`）。改手写稳定 masked log-softmax（减 max − logsumexp）；
+   torch 侧本来就是手写掩码版，两边同源。
+4. **一步更新后权重差 ≤4.2e-5** 曾疑似 bug：隔离实验（同一梯度喂两边 Adam）max diff **1.49e-8** ⇒
+   差全来自 float32 归约顺序噪声被 Adam 逐元素归一化放大，且只落在近零梯度元素。判据改成
+   「前向/统计量用相对误差 + 权重容差 = 1/3 个 lr 步（3e-4）」，代码不动。
+
+**对账口径**：7 用例 = 四架构（legacy / extra 165 / v6 三头 / tower）× plain · kl+ent · kickstart-KL ·
+demo-BC · value-anchor；`SEED=20261027`、B=8、demo 32 条。`lp_old` 必须由**初始模型真实 logits ±0.1**
+生成（早期合成值把 ratio 推到 e^30、梯度全被 clip，读数是假绿）。三模式命令（Paddle venv 在 `tmp/paddle-venv`）：
+
+```
+bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py fixture --out nn-training/tmp/paddle-parity
+cd nn-training && ../tmp/paddle-venv/Scripts/python.exe tools/paddle_parity.py check --dir tmp/paddle-parity
+bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py verify --dir nn-training/tmp/paddle-parity
+```
+
+**读数（全 PASS）**：forward 相对误差 ≤2.80e-6 · 一步 stats ≤4.46e-5 · 权重绝对差 ≤4.21e-5 ·
+更新后前向 ≤2.07e-5 · Paddle 写出的权重 JSON 被 torch 读回 ≤4.63e-6（verify 对的是 Paddle 自己的
+更新后前向；拿 torch 参考对账会把「更新后函数差」混进来，出过 2.05e-5 的假红）。
+
+**顺带发现**：`spatialTower` 架构里 `fc` 两支都不吃梯度（torch 同样）—— 死分支是既有形态，不是移植 bug。
+
+**边界（未做，等用户裁）**：① `opt.pt`/`model.pt` 是 torch pickle，Paddle 侧 `ckpt_path` 直接
+`NotImplementedError` ⇒ 优化器状态 / 断点续训格式未定；② hub 路由（能力注册 / 新 kind）与 torch+Paddle
+混跑未动；③ `remote/train_core.py` 未接 Paddle 分支（该文件整段依赖 torch）。
+
+**验收**：ruff check/format 绿；fixture → check → verify 全 PASS（读数如上）。决策 →
+`DECISIONS.md` §2026-10-27-goalnn-paddle-ppo-twin。
+
+---
 ## §41 干烧熔断的三个执行面缺陷 —— 「判据对了、作用域错了」把两条腿停成 worker 空转（2026-10-23）
 
 **现象**：18:00 后云端 PPO worker 连续 2 小时领不到任务，重启 trainer 才恢复。查 hub 日志

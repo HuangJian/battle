@@ -32,7 +32,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 import time
 from collections.abc import Callable
@@ -51,7 +50,6 @@ from common.protocol import (
     BLOB_REF,
     JobCancelledError,
     ProtocolError,
-    coef_active,
     encode_opt_tar,
     encode_weights_json,
     job_seed,
@@ -66,33 +64,15 @@ from remote.download import (
 )
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
+from remote.train_common import (
+    blob_wanted,
+    check_demo_bank,
+    course_prep,
+    decode_demo_bank,
+    kick_kl_value,
+    ppo_shards_root,
+)
 from remote.wire import _wire_block, _wire_time
-
-
-def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
-    """本轮真正要跑的 PPO 遍数（纯函数）：`ceil(课程 epochs × N)`、最少 1；1.0 = 原样。
-
-    只放大**更新遍数**：采样量/评估语料/关卡/命数都不动（与 `remote/plan_run` 的
-    离线口径同一条）。`manifest_epochs <= 0` 时原样返回 0 —— 放大不制造训练量。
-    """
-    base = int(manifest_epochs or 0)
-    # 0/缺省 = 这单本来就不训（非 PPO 腿）⇒ 放大不许凭空造出 1 遍。
-    if base <= 0 or epoch_mult == 1.0:
-        return base
-    return max(1, math.ceil(base * epoch_mult))
-
-
-def kick_kl_value(manifest: dict) -> float:
-    """`kickstart_kl` 的**有效值**（纯函数）：低于 `coef_active` 阈值一律按 0（= 关）处理。
-
-    抽出来的理由：B1 要把 opt/ref 合成一次 GET，就必须**在批量之前**知道 ref 要不要 ——
-    而这个判据是纯 manifest 读（不依赖任何计算）。抽成函数后判据可单测，不用去源码里
-    找字符串（那类判据改个变量名就红，而行为没变）。
-    """
-    kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    if kl != 0.0 and not coef_active(kl):
-        return 0.0
-    return kl
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -107,29 +87,6 @@ def _load_opt_state(path: str | Path) -> tuple[Any, int]:
     state = torch.load(path, map_location="cpu")
     raised = opt_delta.sanitize_adam_sq(state)
     return state, raised
-
-
-def blob_wanted(
-    manifest: dict, *, kick_kl: float, skip: frozenset[str] = frozenset()
-) -> dict[str, str]:
-    """本轮**要向 hub 要哪几件** blob（纯函数）→ `{name: sha}`。
-
-    * `opt` —— 只要有 sha 就必进批（每轮都有的那一件）；
-    * `ref` —— **只在 kick 打开时**进批（关了就不该为它付一次取字节的代价）；
-    * sha 为空的名字**不进本批**（那走 `_resolve_blob` 的 inline/legacy 路径）。
-    * `skip` —— 调用方已经**本机**拿到、确定不需要下行的名字（今天只有 opt：身份命中）。
-      它是纯参数（不读环境/不写盘），所以「命中就不下」可以单测；`ref` 不在 skip 里——
-      kick 打开时它是另一件字节。
-    """
-    wanted: dict[str, str] = {}
-    opt_sha = str(manifest.get("opt_sha", "") or "")
-    if opt_sha and BLOB_OPT not in skip:
-        wanted[BLOB_OPT] = opt_sha
-    if float(kick_kl) > 0.0:
-        ref_sha = str(manifest.get("ref_sha", "") or "")
-        if ref_sha:
-            wanted[BLOB_REF] = ref_sha
-    return wanted
 
 
 def _resolved(
@@ -167,17 +124,230 @@ def _resolved(
     )
 
 
-def ppo_shards_root(job_dir: str | Path, iter_info: dict | None) -> str:
-    """PPO 的**装载根**（`plan/rollout-topup-fastpath` §3.5 / 评审 P0-1）。
+def _resolve_opt_init(
+    *,
+    jid: str,
+    manifest: dict,
+    job_dir: Path,
+    blob_root: Path,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log: Callable[[str], None],
+    rebuild: Callable[..., bytes] | None = None,
+) -> tuple[bytes, str, float, dict[str, str], dict, int, int]:
+    """opt 初始状态的**字节解析**（身份命中 / 批量 GET / 单取 / BOD1 落地）——两条核共用。
 
-    产出方（`worker.iter_rollout`）显式给出它：换根档下 rollout 的 shard 住在节点本地盘的
-    轮 scratch 目录里（**不再搬回** job 目录），与本轮所有批的产出同在一个轮目录下
-    （`topup{k}/` 镜像在里面）⇒ 递归扫一次就全拿。
+    返回 `(raw, src, kick_kl, wanted, batch, hits, miss)`。★ 它同时是 **B1 那次合成 GET 的
+    装配点**（plan/aistudio-transfer-hardening §3.4）：`wanted`/`batch` 还给 ref 段复用，
+    ref 不再各发一次 GET。
 
-    回落 `job_dir` 的两个面：① 回退档（`shards_root` 就是 job 目录，逐字老行为）；
-    ② 老调用方/老 hub（`iter_info is None` 或没这个键）——不吃「空串键」当根。
+    判定顺序有硬约束（plan/ppo-worker-wallclock §4.3 W1b）：身份命中必须在批量解析**之前**
+    ——`resolve_blobs_batch` 不是惰性的（剩下的当场下载落盘），判晚了即使命中，opt 的下行
+    也已经付掉。`rebuild` 只给 Paddle 核：那台机器没有 torch，BOD1 容器要用 numpy 落地。
     """
-    return str((iter_info or {}).get("shards_root") or job_dir)
+    opt_sha = str(manifest.get("opt_sha", "") or "")
+    # ---- B1：kick 开关是**纯 manifest 读** ⇒ 可以在取字节之前判（ref 进不进本批）----
+    raw_kick = float(manifest.get("kickstart_kl", 0.0) or 0.0)
+    kick_kl = kick_kl_value(manifest)
+    if raw_kick != 0.0 and kick_kl == 0.0:
+        log(f"job {jid}: kickstart_kl={raw_kick:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
+    local = course_cache.hit(
+        cache_root=course_cache.cache_root_of(blob_root),
+        blob_root=blob_root,
+        course_fp=str(manifest.get("course_fp", "") or ""),
+        opt_from=str(manifest.get("opt_from", "") or ""),
+        expect_it=int(manifest.get("it", 0) or 0) - 1,
+        log=log,
+    )
+    # 身份命中 ⇒ opt 不进本批（`skip` 是纯参数；`ref` 照旧进批——kick 打开时它是另一件）。
+    wanted = blob_wanted(
+        manifest,
+        kick_kl=kick_kl,
+        skip=frozenset({BLOB_OPT}) if local is not None else frozenset(),
+    )
+    batch = (
+        resolve_blobs_batch(
+            wanted=wanted,
+            blob_root=blob_root,
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+        if wanted
+        else {}
+    )
+    hits = miss = 0
+    if local is not None:
+        opt_raw, src = local["opt"], "course_cache"
+        log(
+            f"job {jid}: opt 身份命中（course_cache）——本机 f32 副本，零字节"
+            "（hub 权威链的延续点，由回传受理时确认）"
+        )
+        # 身份命中也是命中（`src=course_cache`）——漏记会让 wire 账看不见这一笔。
+        hits += 1
+    else:
+        opt_raw, opt_hit, src = _resolved(
+            jid=jid,
+            name=BLOB_OPT,
+            sha=opt_sha,
+            inline_b64=str(manifest.get("opt_init", "") or ""),
+            base_url=base_url,
+            token=token,
+            blob_root=blob_root,
+            preloaded=preloaded,
+            batch=batch,
+            log=log,
+        )
+        if opt_hit and src == "cache":
+            hits += 1
+        if src == "download":
+            miss += len(opt_raw)
+    # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
+    # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
+    if opt_sha and not opt_raw:
+        raise ProtocolError(
+            f"job {jid}: opt_sha={opt_sha[:12]}… 存在但 blob 不可得——拒收"
+            "（不许静默退回 warm-start，D5）"
+        )
+    if opt_raw and opt_delta.is_container(opt_raw):
+        # BOD1 容器（离线 delta 读侧，2026-10-15）：装载前落成整份。基准找不到就**响亮拒**
+        # （拿错动量 = 形状对、数值错的静默降质，比拒收危险）。
+        opt_raw = opt_standard.land_opt_bytes(
+            opt_raw,
+            blob_roots=(blob_root,),
+            extra_roots=(job_dir, Path(job_dir).parent),
+            log=log,
+            rebuild=rebuild,
+        )
+        log(
+            f"job {jid}: opt init 是 BOD1 容器 ⇒ 本机读侧落地成整份后再装载"
+            + ("" if rebuild is None else "（numpy）")
+        )
+    return opt_raw, src, kick_kl, wanted, batch, hits, miss
+
+
+def _fetch_ref(
+    *,
+    jid: str,
+    manifest: dict,
+    job_dir: Path,
+    blob_root: Path,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    batch: dict,
+    wanted: dict[str, str],
+    kick_kl: float,
+    log: Callable[[str], None],
+) -> tuple[Path, int, int] | None:
+    """kickstart ref 的**字节**获取 + 两道校验（系数 0 ⇒ `None`，零开销）。
+
+    模型构建留在两条核里（各用各的 `build_ppo`）：本函数只保证「同一份字节、同一套安全阀」
+    ——有系数没尺子＝静默裸奔，缺字节/指纹不符都**响亮拒**。`sha` 的唯一来源是本轮装批的
+    结果（`wanted`），不再读一次 manifest（两份读法 = 未来会分叉）。
+    """
+    if kick_kl <= 0:
+        return None
+    ref_raw, ref_hit, ref_src = _resolved(
+        jid=jid,
+        name=BLOB_REF,
+        sha=wanted.get(BLOB_REF, ""),
+        inline_b64=str(manifest.get("ref_weights_b64", "") or ""),
+        base_url=base_url,
+        token=token,
+        blob_root=blob_root,
+        preloaded=preloaded,
+        batch=batch,
+        log=log,
+    )
+    if not ref_raw:
+        raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
+    ref_fp = str(manifest.get("ref_weights_fp", "") or "")
+    if ref_fp and hashlib.sha256(ref_raw).hexdigest() != ref_fp:
+        raise ProtocolError(f"job {jid}: ref_weights 指纹不符——拒收")
+    ref_path = job_dir / "ref_weights.json"
+    ref_path.write_bytes(ref_raw)
+    hit = 1 if (ref_hit and ref_src == "cache") else 0
+    miss = len(ref_raw) if ref_src == "download" else 0
+    return ref_path, hit, miss
+
+
+def _fetch_demo(
+    *,
+    jid: str,
+    manifest: dict,
+    blob_root: Path,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log: Callable[[str], None],
+) -> tuple[float, int, bytes, str, int, int]:
+    """demo bank 的**字节**获取（系数/每 mb 任一为 0 ⇒ 全零 = 不加载，零开销）。
+
+    安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO（那会让 demo 腿
+    的整轮更新在日志一切正常下丢失 demo 项）。
+    """
+    coef = float(manifest.get("demo_bc_coef", 0.0) or 0.0)
+    per_mb = int(manifest.get("demo_per_mb", 0) or 0)
+    if not (coef > 0 and per_mb > 0):
+        return coef, per_mb, b"", "", 0, 0
+    demo_sha = str(manifest.get("demo_sha", "") or "")
+    if not demo_sha:
+        raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
+    demo_raw, demo_hit, demo_src = _resolve_blob(
+        blob_root=blob_root,
+        name=BLOB_DEMO,
+        sha=demo_sha,
+        inline_b64="",
+        jid=jid,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    if not demo_raw:
+        raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")
+    hit = 1 if (demo_hit and demo_src == "cache") else 0
+    miss = len(demo_raw) if demo_src == "download" else 0
+    return coef, per_mb, demo_raw, demo_src, hit, miss
+
+
+def _ppo_done_log(
+    jid: str, t_ppo: float, train_b: LogBundle, chunks: list, total_steps: int, agg: dict
+) -> float:
+    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。"""
+    ppo_sec = round(time.time() - t_ppo, 1)
+    _wire_time(jid, "ppo", time.time() - t_ppo)
+    train_b.add("steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）")
+    train_b.add("chunks", len(chunks))
+    train_b.add("kl", agg.get("kl"))
+    train_b.emit(f"job {jid}: PPO done in {ppo_sec}s")
+    return ppo_sec
+
+
+def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
+    """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
+
+    value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
+    ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
+    """
+    return {
+        "policy": float(agg.get("policy", 0.0)),
+        "value": float(agg.get("value", 0.0)),
+        "entropy": float(agg.get("entropy", 0.0)),
+        "kl": float(agg.get("kl", 0.0)),
+        "kickstart": float(agg.get("kickstart", 0.0)),
+        "demo_bc": float(agg.get("demo_bc", 0.0)),
+        "mean_ret": float(agg.get("mean_ret", 0.0)),
+        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
+        "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
+        "steps": int(sum(c["obs"].shape[0] for c in chunks)),
+        "steps_pooled": int(total_steps),
+        "chunks": len(chunks),
+    }
 
 
 def run_training_core(
@@ -200,6 +370,10 @@ def run_training_core(
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     #: 与离线盘 `CFG.epoch_mult` 同义：只改遍数，不改采样量/评估语料，也不改 manifest 身份。
     epoch_mult: float = 1.0,
+    #: ★ 2026-10-27（用户口径②③）：本节点用哪个框架跑这段训练核（`"torch"` / `"paddle"`）。
+    #: 它是**节点本地事实**（作业壳的 `--backend` 显式参数一路传下来），不进 manifest、
+    #: 不上报 hub —— hub 只看到「谁认领、回传了什么」，两类 worker 混跑同一门课。
+    backend: str = "torch",
     preloaded: dict | None,
     # opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：初始权重由**作业壳**
     # 在 rollout **之前**解析好传进来（`_resolve_weights` 现在住 `remote/download.py`）。
@@ -229,46 +403,45 @@ def run_training_core(
 
     `base_url` / `token` 只为 blob 内容寻址下载（cache miss 时）——命中即零网络。
     """
+    if backend == "paddle":
+        # ★ Paddle 核是**独立函数**（下面）而不是本函数里的分支：本函数第一段就 `import torch`，
+        #   而 AI Studio 的训练任务镜像里根本没有 torch ⇒ 必须在它之前分出去。
+        return _run_training_core_paddle(
+            base_url,
+            token,
+            jid=jid,
+            job_dir=job_dir,
+            work_dir=work_dir,
+            manifest=manifest,
+            iter_info=iter_info,
+            blob_root=blob_root,
+            payload_bytes=payload_bytes,
+            payload_dl_sec=payload_dl_sec,
+            unpack_sec=unpack_sec,
+            ts_code_bytes=ts_code_bytes,
+            ts_code_hit=ts_code_hit,
+            device=device,
+            torch_threads=torch_threads,
+            epoch_mult=epoch_mult,
+            preloaded=preloaded,
+            init_w=init_w,
+            weights_src=weights_src,
+            weights_wire_bytes=weights_wire_bytes,
+            blob_hits=blob_hits,
+            blob_miss_bytes=blob_miss_bytes,
+            prep=prep,
+            t_prep=t_prep,
+            should_cancel=should_cancel,
+            on_ppo_start=on_ppo_start,
+            log=log,
+        )
+    if backend != "torch":
+        raise ProtocolError(f"未知训练后端 backend={backend!r}（只认 torch / paddle）")
     prep_b = LogBundle(log) if prep is None else prep
-    # ---- 课程上下文：快照全文 → CourseConfig → reward_fn（D1/D6/D13） ----
-    # E1 同规（plan/prefetch-stage-unpack §5）：准备段的剩余时间要能分锅，这一段也计时。
-    t_course = time.time()
     import numpy as np
 
-    course_text = manifest["course"]
-    course_path = job_dir / "course.jsonc"
-    course_path.write_text(course_text, encoding="utf-8")
-    from worker.config import load_course
-
-    course = load_course(str(course_path))
-    if course.reward_spec().identity() != manifest["formula_hash"]:
-        raise ProtocolError(
-            f"course formula_hash 与快照不符：manifest={manifest['formula_hash']} "
-            f"本地算={course.reward_spec().identity()}"
-        )
-    from biz.reward_context import update as ctx_update
-    from biz.reward_library import build_reward_fn
-
-    reward_fn = build_reward_fn(course.reward_spec())
-    ctx_update(
-        reward_fn=reward_fn,
-        gamma=float(manifest["gamma"]),
-        lam=float(manifest["lam"]),
-        it=int(manifest["it"]),
-        metrics_version=int(manifest["metrics_version"]),
-        identity={"course": course.name, "formula_hash": manifest["formula_hash"]},
-    )
-    prep_b.add("课程", f"{time.time() - t_course:.1f}s（load_course+reward）")
-    # ★ 2026-10-26（用户口径）：高配云机的训练侧放大 —— 只改 PPO **更新遍数**。
-    #   manifest 本身**不重写**（hub 对账/产物指纹都绑在它上面）；缺省 1.0 时不打任何
-    #   新日志，旧路径逐字不变。
-    epochs_eff = effective_epochs(int(manifest.get("epochs") or 0), epoch_mult)
-    if epoch_mult != 1.0:
-        prep_b.add(
-            "训练放大",
-            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs_eff}"
-            f"（manifest {int(manifest.get('epochs') or 0)}）",
-        )
+    # ---- 课程上下文：快照全文 → CourseConfig → reward_fn（D1/D6/D13）+ 本轮有效遍数 ----
+    course, epochs_eff = course_prep(manifest, job_dir, epoch_mult, prep_b)
 
     # ---- 延迟导入 torch / ppo 后端（B7 同款；本模块顶层零 torch） ----
     import torch
@@ -376,99 +549,21 @@ def run_training_core(
             f"{'' if _cu else ' (cpu)'}｜[0]={_gpu_name}｜cap={_gpu_cap}｜"
             f"dp={use_dp}｜threads={torch.get_num_threads()}",
         )
-    # ---- M2 B3：opt 内容寻址解析（cache / preloaded / download / inline）----
-    # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
-    # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
-    opt_sha = str(manifest.get("opt_sha", "") or "")
-    # ---- B1（plan/aistudio-transfer-hardening §3.4）：opt 与 ref 合成**一次** GET ----
-    # 省的是**建连 + TCP 慢启动**（不是字节：字节数逐字不变）。为此必须把 ref 的开关提前
-    # 判：ref 的加载条件 `kickstart_kl > 0` 是**纯 manifest 读**（不依赖上面任何计算），
-    # 所以上提是安全的——判据原文（阈值 + coef_active）逐字照搬，只是换个位置求值。
-    # ref_sha 为空 / kick 关闭 ⇒ ref 不进本批，仍走下面原位的 `_resolve_blob`（含 inline 兜底）。
-    #: 「这轮要不要 ref」与「本批要哪几件」抽成**两个纯函数**（判据可单测，不必读源码）：
-    #: 判据与旧写法逐字同源（阈值 `coef_active` + `kickstart_kl > 0`），只是换个位置求值。
-    _raw_kick = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    _kick_kl = kick_kl_value(manifest)
-    if _raw_kick != 0.0 and _kick_kl == 0.0:
-        log(f"job {jid}: kickstart_kl={_raw_kick:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
-    # ---- R0（M0）：opt 也先试**身份**命中（本机 f32 全量副本，零字节、零降质）----
-    # 判据全在 `course_cache.hit`；不成立就直接落回下面的内容寻址路径（逐字节旧行为）。
-    # ★ 2026-10-21（plan/ppo-worker-wallclock §4.3 W1b）：判定必须在批量解析**之前**。
-    #   `resolve_blobs_batch` 不是惰性的（`download.py:resolve_blobs_batch`：cache →
-    #   preloaded → **剩下的当场 `download_blobs` 并落盘**）⇒ 判晚了即使命中，opt 的
-    #   0.60MB / 0.7s 也已经付掉，下回来的字节直接被丢弃。命中判据只读 manifest + 本机
-    #   缓存、无副作用 ⇒ 上提安全。
-    _local = course_cache.hit(
-        cache_root=course_cache.cache_root_of(blob_root),
+    # ---- M2 B3 / R0 / B1：opt 解析（身份命中 → 批量 GET → 单取 → BOD1 落地）----
+    # `blob_hits` / `blob_miss_bytes` 的 init 那一手账在作业壳的权重解析处建；本模块只在它
+    # 上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
+    opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
         blob_root=blob_root,
-        course_fp=str(manifest.get("course_fp", "") or ""),
-        opt_from=str(manifest.get("opt_from", "") or ""),
-        expect_it=int(manifest.get("it", 0) or 0) - 1,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
         log=log,
     )
-    # 身份命中 ⇒ opt 不进本批（`skip` 是纯参数；`ref` 照旧进批——kick 打开时它是另一件）。
-    _wanted = blob_wanted(
-        manifest, kick_kl=_kick_kl, skip=frozenset({BLOB_OPT}) if _local is not None else frozenset()
-    )
-    _batch = (
-        resolve_blobs_batch(
-            wanted=_wanted,
-            blob_root=blob_root,
-            jid=jid,
-            base_url=base_url,
-            token=token,
-            preloaded=preloaded,
-            log=log,
-        )
-        if _wanted
-        else {}
-    )
-    # `blob_hits` / `blob_miss_bytes` 的值由入参传来（init 那一手账在作业壳的权重解析处建）
-    # —— 本模块只在它上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
-    if _local is not None:
-        opt_raw, opt_hit, opt_src = _local["opt"], True, "course_cache"
-        log(
-            f"job {jid}: opt 身份命中（course_cache）——本机 f32 副本，零字节"
-            "（hub 权威链的延续点，由回传受理时确认）"
-        )
-    else:
-        opt_raw, opt_hit, opt_src = _resolved(
-            jid=jid,
-            name=BLOB_OPT,
-            sha=opt_sha,
-            inline_b64=str(manifest.get("opt_init", "") or ""),
-            base_url=base_url,
-            token=token,
-            blob_root=blob_root,
-            preloaded=preloaded,
-            batch=_batch,
-            log=log,
-        )
-    # ★ 2026-10-21：身份命中也是命中（`src=course_cache`）——漏记会让 wire 账看不见这一笔
-    #   （init 侧早已计入，见 `worker.py` 的 `weights_src in ("cache", "course_cache")`）。
-    if opt_hit and opt_src in ("cache", "course_cache"):
-        blob_hits += 1
-    if opt_src == "download":
-        blob_miss_bytes += len(opt_raw)
-    if opt_sha and not opt_raw:
-        raise ProtocolError(
-            f"job {jid}: opt_sha={opt_sha[:12]}… 存在但 blob 不可得——拒收"
-            "（不许静默退回 warm-start，D5）"
-        )
-    if opt_raw and opt_delta.is_container(opt_raw):
-        # ★ 2026-10-15（离线 opt delta 的**消费者界面**）：形态位命中时回传的是 BOD1 容器
-        #   （离线腿逐轮原样回传、hub 原样落位）——hub 侧落地（`land_opt_delta`）只是 published
-        #   腿那一半；喂进 `unpack_opt_tar` 就是 `ReadError: invalid header`（现场 it-237 复现）。
-        #   这里在装载之前落成整份：基准优先取本机内容寻址缓存（上一轮自己那份整份 / 上一轮的
-        #   落地件，键就是 `base_sha`），其次 job 目录里的 `opt.tar`。找不到基准就**响亮拒**
-        #   （拿错动量 = 形状对、数值错的静默降质，比拒收危险）。
-        opt_raw = opt_standard.land_opt_bytes(
-            opt_raw,
-            blob_roots=(blob_root,),
-            extra_roots=(job_dir, Path(job_dir).parent),
-            log=log,
-        )
-        log(f"job {jid}: opt init 是 BOD1 容器 ⇒ 本机读侧落地成整份后再装载")
+    blob_hits += _h
+    blob_miss_bytes += _m
     opt = None
     opt_restore_sec = 0.0
     # ★ §4.2（2026-09-21）：restore 段的崩溃归确定性失败（带 traceback 摘要）——
@@ -556,44 +651,27 @@ def run_training_core(
 
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
-    #
     # ★ B1：判据**已上提**到 opt 解析之前（那里要用它决定 ref 进不进批量 GET）；这里只把
-    #   上提算出的 `_kick_kl` 落回 `kick_kl`（下面的引用点一个字不改）。判据原文逐字照搬。
+    #   上提算出的 `_kick_kl` 落回 `kick_kl`，字节获取走两核共用的 `_fetch_ref`。
     kick_kl = _kick_kl
     ref_model: torch.nn.Module | None = None
-    if kick_kl > 0:
-        import hashlib as _hl
-
-        ref_b64 = str(manifest.get("ref_weights_b64", "") or "")
-        ref_fp = str(manifest.get("ref_weights_fp", "") or "")
-        # B1：sha 的**唯一来源**是本轮装批的结果（`blob_wanted` 读 manifest 的同一处）——
-        # 这里取回来给 `_resolved`，而不是再读一次 manifest（两份读法 = 未来会分叉）。
-        ref_sha = _wanted.get(BLOB_REF, "")
-        # M2 B3：ref 也走内容寻址（ref_sha = sha256(raw 权重) = ref_weights_fp）。
-        # B1：ref 与 opt 已在上面那一次批量 GET 里一起取回（`_batch`）；`ref_sha` 为空 /
-        # kick 关闭 / 旧 hub 回退单取等形状仍由 `_resolved` 逐字退回 `_resolve_blob`。
-        ref_raw, ref_hit, ref_src = _resolved(
-            jid=jid,
-            name=BLOB_REF,
-            sha=ref_sha,
-            inline_b64=ref_b64,
-            base_url=base_url,
-            token=token,
-            blob_root=blob_root,
-            preloaded=preloaded,
-            batch=_batch,
-            log=log,
-        )
-        if not ref_raw:
-            raise ProtocolError(f"job {jid}: kickstart_kl={kick_kl} 但无 ref_weights——拒收")
-        if ref_fp and _hl.sha256(ref_raw).hexdigest() != ref_fp:
-            raise ProtocolError(f"job {jid}: ref_weights 指纹不符——拒收")
-        if ref_hit and ref_src == "cache":
-            blob_hits += 1
-        if ref_src == "download":
-            blob_miss_bytes += len(ref_raw)
-        ref_path = job_dir / "ref_weights.json"
-        ref_path.write_bytes(ref_raw)
+    _ref = _fetch_ref(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        batch=_batch,
+        wanted=_wanted,
+        kick_kl=kick_kl,
+        log=log,
+    )
+    if _ref is not None:
+        ref_path, _h, _m = _ref
+        blob_hits += _h
+        blob_miss_bytes += _m
         # ★ §4.2：ref 装载同属 restore——ref 与 policy 的架构/形状不合会在每一份字节上
         # 重演（而它只会被写成一行云机日志，训练侧看到的是超时）。
         try:
@@ -616,50 +694,27 @@ def run_training_core(
     # ---- demo 混 batch（x20 后续）：bank 内容寻址 + 装载校验 ----
     # 安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO
     # （那会让 demo 腿的整轮更新在日志一切正常下丢失 demo 项）。
-    demo_coef = float(manifest.get("demo_bc_coef", 0.0) or 0.0)
-    demo_per_mb = int(manifest.get("demo_per_mb", 0) or 0)
+    demo_coef, demo_per_mb, demo_raw, demo_src, _h, _m = _fetch_demo(
+        jid=jid,
+        manifest=manifest,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    blob_hits += _h
+    blob_miss_bytes += _m
     demo_bank: dict | None = None
-    if demo_coef > 0 and demo_per_mb > 0:
-        import io as _io
-
-        import numpy as _np
-
-        demo_sha = str(manifest.get("demo_sha", "") or "")
-        if not demo_sha:
-            raise ProtocolError(f"job {jid}: demo_bc_coef>0 但无 demo_sha——拒收")
-        demo_raw, demo_hit, demo_src = _resolve_blob(
-            blob_root=blob_root,
-            name=BLOB_DEMO,
-            sha=demo_sha,
-            inline_b64="",
-            jid=jid,
-            base_url=base_url,
-            token=token,
-            preloaded=preloaded,
-            log=log,
-        )
-        if demo_hit and demo_src == "cache":
-            blob_hits += 1
-        if demo_src == "download":
-            blob_miss_bytes += len(demo_raw)
-        if not demo_raw:
-            raise ProtocolError(f"job {jid}: demo_sha 存在但 blob 不可得——拒收")
+    if demo_raw:
         try:
-            demo_bank = {k: _np.asarray(v) for k, v in dict(_np.load(_io.BytesIO(demo_raw))).items()}
+            bank = decode_demo_bank(demo_raw)
         except ProtocolError:
             raise
         except Exception as e:
             raise job_body_error("restore（demo bank 装载）", e) from e
-        need = {"obs", "scalars", "extra", "actions", "masks"}
-        if not need.issubset(demo_bank.keys()):
-            raise ProtocolError(
-                f"job {jid}: demo bank 缺字段 {sorted(need - set(demo_bank.keys()))}——拒收"
-            )
-        prep_b.add(
-            "demo bank",
-            f"N={demo_bank['obs'].shape[0]} coef={demo_coef:g} "
-            f"per_mb={demo_per_mb} src={demo_src}",
-        )
+        check_demo_bank(jid, bank, demo_coef, demo_per_mb, demo_src, prep_b)
+        demo_bank = bank
 
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
     # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
@@ -758,17 +813,9 @@ def run_training_core(
         raise
     except Exception as e:
         raise job_body_error("grad（PPO 更新）", e) from e
-    ppo_sec = round(time.time() - t_ppo, 1)
     # P0.5：T_ppo 进传输账（与 T_in/T_out 同一条 `wire` 行 ⇒ 占比可复算，不用人肉拼日志）。
-    _wire_time(jid, "ppo", time.time() - t_ppo)
-    train_b.add(
-        "steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）"
-    )
-    train_b.add("chunks", len(chunks))
-    train_b.add("kl", agg.get("kl"))
-    train_b.emit(f"job {jid}: PPO done in {ppo_sec}s")
-    # ---- P1-4（2026-10-21）：产物段自己的账（save_weights_json / _ppo_save / pack_*）----
-    # 这一段在关键路径上、**不属于 `ppo=`**（`t_ppo` 在 `ppo_update` 之后就已结束），
+    ppo_sec = _ppo_done_log(jid, t_ppo, train_b, chunks, total_steps, agg)
+    # ---- P1-4（2026-10-21）：产物段自己的账（save_weights_json / _ppo_save / pack_*）----    # 这一段在关键路径上、**不属于 `ppo=`**（`t_ppo` 在 `ppo_update` 之后就已结束），
     # 但日志的 `other=` 格又被当成「准备段 CPU」解释了 ⇒ 归因不闭合。读数只在
     # `PPO_CUDA_DIAG=1` 时打一行（稳态不增行，日志节食的约束不变）。
     _t_art = time.time()
@@ -869,30 +916,406 @@ def run_training_core(
         # R1 形态位命中时这里是 delta 容器（本机那份全量仍是 `wj_raw`，见上面产物段）。
         "weights_json": encode_weights_json(wj_sent_raw),
         "opt_tar_b64": opt_tar_b64,
-        "agg": {
-            "policy": float(agg.get("policy", 0.0)),
-            "value": float(agg.get("value", 0.0)),
-            "entropy": float(agg.get("entropy", 0.0)),
-            "kl": float(agg.get("kl", 0.0)),
-            "kickstart": float(agg.get("kickstart", 0.0)),
-            "demo_bc": float(agg.get("demo_bc", 0.0)),
-            "mean_ret": float(agg.get("mean_ret", 0.0)),
-            # value 门控遥测（x26-obs it90 诊断；同 kickstart additive）。
-            "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
-            # policy 接线遥测（x27 冻结判决 §2026-10-13-goalnn-x27-frozen：行为由 policy 解释；
-            # 同上 additive；旧 worker 无此键 → 0.0，精确零连击另有告警欠账）。
-            "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
-            # mb 对齐（2026-09-23）后 = **实际训练**的步数（≤池子，差尾部 n%mb）。
-            # 池子总量另有 transitions_collected 一栏，不靠这里兼职。
-            "steps": int(sum(c["obs"].shape[0] for c in chunks)),
-            "steps_pooled": int(total_steps),
-            "chunks": len(chunks),
-        },
+        "agg": _agg_block(agg, chunks, total_steps),
         "commit_echo": manifest["commit"],
         "ppo_sec": ppo_sec,
     }
     if iter_info is not None:
         # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
+        result["report"] = iter_info["report"]
+    result["wire"] = _wire_block(
+        payload_bytes=payload_bytes,
+        payload_dl_sec=payload_dl_sec,
+        unpack_sec=unpack_sec,
+        opt_restore_sec=opt_restore_sec,
+        grad_sec=ppo_sec,
+        blob_hits=blob_hits,
+        blob_miss_bytes=blob_miss_bytes,
+        weights_src=weights_src,
+        weights_bytes=weights_wire_bytes,
+        ts_code_bytes=ts_code_bytes,
+        ts_code_hit=ts_code_hit,
+        rollout_sec=(iter_info or {}).get("rollout_sec"),
+        bun_version=(iter_info or {}).get("bun_version"),
+    )
+    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    return result, course
+
+
+def _run_training_core_paddle(
+    base_url: str,
+    token: str,
+    *,
+    jid: str,
+    job_dir: Path,
+    work_dir: Path,
+    manifest: dict,
+    iter_info: dict | None,
+    blob_root: Path,
+    payload_bytes: int,
+    payload_dl_sec: float,
+    unpack_sec: float,
+    ts_code_bytes: int,
+    ts_code_hit: bool,
+    device: Any,
+    torch_threads: int,
+    epoch_mult: float = 1.0,
+    preloaded: dict | None,
+    init_w: Path | None,
+    weights_src: str,
+    weights_wire_bytes: int,
+    blob_hits: int,
+    blob_miss_bytes: int,
+    prep: Any = None,
+    t_prep: float = 0.0,
+    should_cancel: Callable[[], bool] | None = None,
+    on_ppo_start: Callable[[], None] | None = None,
+    log: Callable[[str], None] = lambda _msg: None,
+) -> tuple[dict, Any]:
+    """`run_training_core` 的 **Paddle 双生**（2026-10-27，AI Studio 训练任务镜像无 torch）。
+
+    调用面、产物、结果字典与 torch 版**逐字段相同**：hub 侧不认识框架，落盘/对账/回传只认
+    字节。差别只在框架那一半：
+
+    * 模型/权重 JSON：`worker.models.student_paddle`（键名/形状与 torch 模型逐一对应）；
+    * opt 的**文件格式仍是 torch 的**（用户口径①）：hub 的 `opt.pt` 由 `common.torch_pickle`
+      读成 numpy 叶子，经 `paddle_state_to_torch` 译进 Paddle Adam；写出时
+      `checkpoint_paddle.save_ckpt` 再译回 torch 形状 —— 第 1 轮 torch 跑、第 2 轮 Paddle
+      跑、第 3 轮 torch 跑，动量与 `step` 一路连续；
+    * BOD1 delta 的重建走 `opt_standard.rebuild_opt_tar_np`（同一份容器契约的 numpy 实现）；
+    * Paddle 的 Adam 没有 `step`：步数由 `steps_init`（torch ckpt 的 step）+ 本轮
+      `epochs_eff × len(chunks)` 记账（引擎每 minibatch +1，见 `engine_paddle.ppo_update`）；
+    * 设备字符串由 Paddle 自己归一（`cuda` → `gpu`）；XLA / DataParallel / MPS 是 torch 专属
+      实验臂 ⇒ **响亮拒收**，不静默退回 CPU（那会看起来一切正常、只是慢两个数量级）；
+    * `torch_threads` 在这里没有等价旋钮（Paddle 3.3 无 `set_num_threads`）——保留形参只为
+      与调用面一致，值被忽略。
+
+    顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
+    """
+    prep_b = LogBundle(log) if prep is None else prep
+    import numpy as np
+    import paddle
+
+    # ---- 课程上下文 + 本轮有效遍数（与 torch 版共用同一个实现）----
+    course, epochs_eff = course_prep(manifest, job_dir, epoch_mult, prep_b)
+
+    # ---- 设备：XLA / DataParallel / MPS 是 torch 实验臂，Paddle 侧响亮拒 ----
+    dev_str = str(device)
+    if dev_str in ("tpu", "xla", "cuda-dp", "dp", "mps"):
+        raise ProtocolError(
+            f"job {jid}: paddle 后端不支持 --device {dev_str!r}"
+            "（XLA / DataParallel / Apple MPS 是 torch 专属实验臂）—— 用 cpu / cuda"
+        )
+    try:
+        paddle.set_device(dev_str)
+    except Exception as e:
+        raise ProtocolError(
+            f"job {jid}: paddle 设备 {dev_str!r} 不可用（{e}）——"
+            "检查 --device 与本机是否编译了 CUDA"
+        ) from None
+    prep_b.add("设备", f"{paddle.get_device()}｜backend=paddle｜cuda→gpu 由 paddle 归一")
+
+    # ---- per-job 确定性种子（D5）：与 torch 版同一条公式、同一个播种点 ----
+    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
+    np.random.seed(int(seed_hex[:8], 16))
+
+    import worker.models.student_paddle as student_paddle
+    import worker.ppo.checkpoint_paddle as checkpoint_paddle
+    import worker.ppo.engine_paddle as engine_paddle
+    import worker.ppo.np_core as ppo_np
+    from common import torch_pickle
+
+    t_build = time.time()
+    model = student_paddle.build_ppo(
+        str(init_w) if (init_w is not None and init_w.exists()) else None
+    )
+    prep_b.add("建模型", f"{time.time() - t_build:.1f}s（student_paddle.build_ppo）")
+
+    # ---- opt 解析（与 torch 版共用 `_resolve_opt_init`；只是 BOD1 落地换成 numpy 实现）----
+    opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+        rebuild=opt_standard.rebuild_opt_tar_np,
+    )
+    blob_hits += _h
+    blob_miss_bytes += _m
+
+    opt = None
+    opt_restore_sec = 0.0
+    steps_init = 0
+    opt_dir = job_dir / "opt_init"
+    try:
+        if opt_raw:
+            t_opt = time.time()
+            unpack_opt_tar(opt_raw, opt_dir)
+            legacy_model = opt_dir / "model.pt"
+            if init_w is not None and init_w.exists():
+                student_paddle.load_state_into(model, str(init_w))
+            elif legacy_model.exists():
+                checkpoint_paddle.load_model_pt(model, legacy_model)
+                weights_src = "legacy_tar"
+            else:
+                raise ProtocolError(
+                    "opt tar 无 model.pt 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
+            opt = paddle.optimizer.Adam(
+                learning_rate=float(manifest["lr"]), parameters=model.parameters()
+            )
+            steps_init = checkpoint_paddle.load_opt_pt(model, opt, opt_dir / "opt.pt")
+            opt_restore_sec = round(time.time() - t_opt, 3)
+            prep_b.add(
+                "opt", f"从 opt_init（{opt_src}）恢复 {opt_restore_sec:.1f}s（Adam 动量延续，D5）"
+            )
+        else:
+            if init_w is None or not init_w.exists():
+                raise ProtocolError(
+                    "无 opt_init 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
+            t_warm = time.time()
+            student_paddle.load_state_into(model, str(init_w))
+            opt = paddle.optimizer.Adam(
+                learning_rate=float(manifest["lr"]), parameters=model.parameters()
+            )
+            prep_b.add(
+                "opt", f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam"
+            )
+    except ProtocolError:
+        raise
+    except Exception as e:
+        raise job_body_error("restore（model/opt 恢复）", e) from e
+
+    # ---- BC kickstart ref（同一条安全阀：系数>0 而字节缺失 ⇒ 拒收；字节走共用的 `_fetch_ref`）----
+    kick_kl = _kick_kl
+    ref_model = None
+    _ref = _fetch_ref(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        batch=_batch,
+        wanted=_wanted,
+        kick_kl=kick_kl,
+        log=log,
+    )
+    if _ref is not None:
+        ref_path, _h, _m = _ref
+        blob_hits += _h
+        blob_miss_bytes += _m
+        try:
+            t_ref = time.time()
+            ref_model = student_paddle.build_ppo(str(ref_path))
+            student_paddle.load_state_into(ref_model, str(ref_path))
+            for p in ref_model.parameters():
+                p.requires_grad = False
+            ref_model.eval()
+            prep_b.add("ref", f"{time.time() - t_ref:.1f}s（build+load）")
+            log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（kickstart ref 装载）", e) from e
+
+    # ---- demo 混 batch（bank 内容寻址 + 装载校验，与 torch 版共用同一组 helper）----
+    demo_coef, demo_per_mb, demo_raw, demo_src, _h, _m = _fetch_demo(
+        jid=jid,
+        manifest=manifest,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    blob_hits += _h
+    blob_miss_bytes += _m
+    demo_bank: dict | None = None
+    if demo_raw:
+        try:
+            bank = decode_demo_bank(demo_raw)
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（demo bank 装载）", e) from e
+        check_demo_bank(jid, bank, demo_coef, demo_per_mb, demo_src, prep_b)
+        demo_bank = bank
+
+    # ---- PPO：load → chunk → update（numpy 装载 + paddle 更新）----
+    shards_root = ppo_shards_root(job_dir, iter_info)
+    if on_ppo_start is not None:
+        try:
+            on_ppo_start()
+        except Exception:
+            pass
+    _report_progress(
+        "ppo",
+        it=int(manifest.get("it", 0) or 0),
+        done=0,
+        total=epochs_eff,
+        force=True,
+    )
+
+    def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
+        if should_cancel is None or not should_cancel():
+            return
+        raise JobCancelledError(
+            f"job {jid}: 结果已 landed（别人先赢）——epoch {_ep_done} 边界停算丢弃"
+        )
+
+    if should_cancel is not None and should_cancel():
+        raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
+
+    t_ppo = time.time()
+    train_b = LogBundle(log)
+    #: 引擎把**它自己数出来的**步数写回这里（`steps_out`）：调用方不许重算，见下面
+    #: `steps_total` 那一段。
+    steps_box: dict[str, int] = {}
+    try:
+        episodes = ppo_np.load_episodes(
+            shards_root,
+            float(manifest["gamma"]),
+            float(manifest["lam"]),
+            normalize_adv=str(manifest["adv_norm"]) != "none",
+            normalize_ret=bool(manifest.get("normalize_ret", False)),
+            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+            bundle=prep_b,
+        )
+        prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
+        total_steps = sum(e["obs"].shape[0] for e in episodes)
+        chunks = ppo_np.chunk_episodes(
+            episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
+        )
+        agg = engine_paddle.ppo_update(
+            model,
+            opt,
+            chunks,
+            epochs_eff,
+            # `ckpt_path=None`：model/opt 已在本函数上半场按「hub 的 opt tar」恢复过；
+            # 再传一遍会让引擎按 state.json 二次 resume（那是离线盘的续跑口径）。
+            ckpt_path=None,
+            kl_coef=float(manifest["kl_coef"]),
+            ent_coef=(
+                None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
+            ),
+            ref_model=ref_model,
+            kickstart_kl=kick_kl,
+            demo_bank=demo_bank,
+            demo_bc_coef=demo_coef,
+            demo_per_mb=demo_per_mb,
+            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+            on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
+            progress=train_b,
+            progress_head=f"job {jid}: PPO 训练中",
+            steps_out=steps_box,
+            log=log,
+        )
+    except ProtocolError:
+        raise
+    except JobCancelledError:
+        raise
+    except Exception as e:
+        raise job_body_error("grad（PPO 更新）", e) from e
+    ppo_sec = _ppo_done_log(jid, t_ppo, train_b, chunks, total_steps, agg)
+    _t_art = time.time()
+
+    # ---- 产物：weights JSON + **torch 格式** ckpt（hub 只认 torch 字节，见模块头口径①）----
+    wj_path = job_dir / "weights.json"
+    student_paddle.save_weights_json(model, str(wj_path))
+    wj_raw = wj_path.read_bytes()
+    _cache_produced_weights(blob_root, wj_raw, log)
+    wj_sent_raw = wj_raw
+    if weights_delta.w_fmt_of(manifest) == weights_delta.W_DELTA_FMT:
+        if init_w is None or not init_w.exists():
+            raise ProtocolError(
+                "形态位是权重 delta 但本轮没有 base 权重（init_weights.json 不在）——拒发"
+            )
+        base_w = init_w.read_bytes()
+        wj_sent_raw = weights_delta.pack_weights_delta(
+            base_w, wj_raw, base_sha=hashlib.sha256(base_w).hexdigest()
+        )
+        _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
+    ckpt_dir = job_dir / "ppo_final"
+    # Paddle 的 Adam 没有 `step`：本轮步数 = 载入时的 step + 引擎真正走的步数。
+    # 起点与 torch 侧同一条（`_load_opt_state` 读到的 torch `step`），所以混跑时它连续递增。
+    # ★ 2026-10-27（评审）：**不许**在这里重算 `steps_init + epochs × len(chunks)` ——
+    # 那个式子是引擎内部循环的复本，一旦哪天跳 chunk / 从 ckpt 中途起步就静默漂移，
+    # 而它要写进 `state.json` 与回传 opt 的 `step`（bias correction 的时基）。
+    # 单源 = 引擎经 `steps_out` 回传（`engine_paddle.ppo_update` 的收尾）。
+    steps_total = int(steps_box.get("steps_done", steps_init))
+    checkpoint_paddle.save_ckpt(
+        model, opt, str(ckpt_dir), epochs_done=epochs_eff, steps_done=steps_total
+    )
+    opt_tar_raw = pack_opt_tar(ckpt_dir)
+    _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
+    opt_sent_raw = opt_tar_raw
+    if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
+        if not opt_raw:
+            raise ProtocolError(
+                "形态位是 delta 但本轮没有 base opt（manifest.opt_init/opt_sha 为空）——拒发"
+            )
+        # 基准 = **盘上那份**（消毒只发生在活优化器上；base 两边必须逐字节同源），
+        # 与 torch 版 `torch.load(opt_dir / "opt.pt")` 读的是同一个文件。
+        base_state = torch_pickle.load_torch_pickle((opt_dir / "opt.pt").read_bytes())
+        sent_state = checkpoint_paddle.torch_opt_state(
+            model, opt, steps_done=steps_total, node_ref=base_state
+        )
+        if len(sent_state["state"]) != len(base_state["state"]):
+            # 缺项补齐会在活优化器里留下「基准里没有的零动量节点」⇒ 回传前按基准投影掉
+            # （`drop_vacuous_nodes`；动量非零会拒发）。留一行读数，免得它成为静默动作。
+            prep_b.add(
+                "opt delta",
+                f"节点 {len(base_state['state'])}→{len(sent_state['state'])}"
+                "（惰性节点按基准投影）",
+            )
+        opt_sent_raw = opt_delta.pack_opt_delta(
+            base_state,
+            sent_state,
+            base_sha=hashlib.sha256(opt_raw).hexdigest(),
+        )
+    opt_tar_b64 = encode_opt_tar(opt_sent_raw)
+    course_cache.record_pending(
+        course_cache.cache_root_of(blob_root),
+        str(manifest.get("course_fp", "") or ""),
+        job_id=jid,
+        it=int(manifest.get("it", 0) or 0),
+        run_id=str(manifest.get("runId", "") or ""),
+        weights=(hashlib.sha256(wj_raw).hexdigest(), len(wj_raw)),
+        opt=(hashlib.sha256(opt_tar_raw).hexdigest(), len(opt_tar_raw)),
+        log=log,
+    )
+
+    if os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
+        log(
+            f"job {jid}: 产物落盘 {time.time() - _t_art:.2f}s"
+            "（save/pack/identity——不计入 ppo=，与 prep 分开看）"
+        )
+
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        "weights_json": encode_weights_json(wj_sent_raw),
+        "opt_tar_b64": opt_tar_b64,
+        "agg": _agg_block(agg, chunks, total_steps),
+        "commit_echo": manifest["commit"],
+        "ppo_sec": ppo_sec,
+    }
+    if iter_info is not None:
         result["report"] = iter_info["report"]
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
