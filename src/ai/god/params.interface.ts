@@ -120,6 +120,11 @@ export interface GodAIParams {
    * cost 0.33 kills/game while blocking 0.00 shells/game. 0 = no gate.
    */
   baseLaneSealPreMinDist: number
+  /**
+   * A9 mode 2 (2026-10-27): anti-wedge. If the player's cell does not change for
+   * this many ticks while walking to the seal cell, yield for 120 ticks. 0 = OFF.
+   */
+  baseLaneSealAntiStuckTicks: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
   /**

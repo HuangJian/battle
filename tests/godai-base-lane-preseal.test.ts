@@ -81,6 +81,20 @@ describe('A9 mode 2 — pre-seal leashes on the lane cell, not the shooter', () 
     expect(evalBaseLaneSeal(input, ctx)).toBe(false)
   })
 
+  it('anti-wedge: yields after N ticks without progress, then stays quiet', () => {
+    // Traced on Checkers seed 8: the candidate claimed 100+ ticks while the
+    // tank sat wedged 15 cells from the eagle and the base died.
+    const { world, input, ctx } = scenario({
+      baseLaneSealMode: 2,
+      baseLaneSealAntiStuckTicks: 2,
+    })
+    placeSniper(world, BASE_POS.col + 1, 4)
+    expect(evalBaseLaneSeal(input, ctx)).toBe(true) // tick 1 — starts walking
+    expect(evalBaseLaneSeal(input, ctx)).toBe(true) // tick 2 — still ≤ N-1
+    expect(evalBaseLaneSeal(input, ctx)).toBe(false) // tick 3 — wedge detected
+    expect(evalBaseLaneSeal(input, ctx)).toBe(false) // suppressed window
+  })
+
   it('seal cell rule: nearest-eagle walks down, fastest/region hold where we stand', () => {
     // Player already ON the sniper's column, half-way up the corridor.
     const at = (params: Partial<typeof DEFAULT_GOD_AI_PARAMS>) => {

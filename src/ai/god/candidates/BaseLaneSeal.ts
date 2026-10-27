@@ -160,6 +160,12 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   const { p, pcx, pcy, onCooldown } = ctx
   const pc = self.playerCell()
   const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  // Anti-wedge (2026-10-27): traced on Checkers seed 8 the candidate claimed
+  // 100+ consecutive ticks while the tank sat wedged at (4,17), 15 cells from
+  // the eagle, and never arrived — the base died with the player "sealing"
+  // nothing. Once the walk stops making progress, yield for a while and let
+  // the normal chain fight.
+  if (self.world.frame < self._sealSuppressUntil) return false
 
   // Seal cell = the cell on that column we can REACH fastest (user's rule,
   // 2026-10-27). ANY standable cell strictly between the shooter and the eagle
@@ -280,6 +286,21 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   }
   const move = self.navigateTowards({ col: bestCol, row: bestSealRow })
   if (move === null) return false
+  if (prm.baseLaneSealAntiStuckTicks > 0) {
+    if (pc.col === self._sealLastCol && pc.row === self._sealLastRow) {
+      if (++self._sealStillTicks >= prm.baseLaneSealAntiStuckTicks) {
+        self._sealSuppressUntil = self.world.frame + 120
+        self._sealStillTicks = 0
+        self._sealLastCol = -1
+        self._sealLastRow = -1
+        return false
+      }
+    } else {
+      self._sealLastCol = pc.col
+      self._sealLastRow = pc.row
+      self._sealStillTicks = 0
+    }
+  }
   self._moveDir = move
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, move)
   recordBranch(self, 'baseLaneSeal')

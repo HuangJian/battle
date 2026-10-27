@@ -101,6 +101,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSealCellRange: 14,
   baseLaneSealCellMode: 0,
   baseLaneSealPreMinDist: 0,
+  baseLaneSealAntiStuckTicks: 20,
   // §193-B/§198: 卫位导航 — SHIPPED（2026-08-15）。默认 1 = ON。
   // 当前基线（含 §195 sticky=90）决定性 60-seed paired A/B：
   // hard 净 +3（1591→1594，8 L→W / 5 W→L）、classic 净 0（byte-identical —
