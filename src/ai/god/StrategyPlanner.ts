@@ -2112,6 +2112,48 @@ function normalSelectionTarget(
   return self.tankCell(best)
 }
 
+/**
+ * 基地带优先 (user rule, 2026-10-27): the nearest enemy standing in the BASE
+ * BAND — rows `base-4 .. base`, cols `base±5`. Such an enemy is closer to the
+ * eagle than to anything else and is the only thing that can end the stage
+ * without a fight.
+ *
+ * Why this exists: the base-loss forensics show the last 180 ticks before a
+ * loss are **68% `navigate`** — the player is walking to some other target
+ * while a band enemy chews the ring. Every defensive candidate is reactive
+ * (shell in flight / aligned shooter / csb), so nothing owns "there is a tank
+ * 3 cells from the eagle, go kill it".
+ *
+ * Returns the cell of the closest band enemy to the PLAYER (shared tank-cell
+ * buffer — the caller copies it immediately, same contract as the rest of this
+ * function).
+ */
+function nearestBaseBandEnemy(self: GodAIInput, playerCell: Cell, enemies: Tank[]): Cell | null {
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  let best: Tank | null = null
+  let bestD = Infinity
+  for (let i = 0; i < enemies.length; i++) {
+    const t = enemies[i]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    const col = tc.col
+    const row = tc.row
+    if (row < br - 4) continue
+    // mode 1 restricts the band to the base columns (±5); mode 2 is the whole
+    // bottom band — the forensics show the killers run in along the BOTTOM ROW
+    // from the far left/right (Checkers: player at (4,17), target at (1,24);
+    // Battlement breach sides left 6 / right 7), so a column window misses them.
+    if (self.params.baseBandTargetMode < 2 && (col < bc - 5 || col > bc + 5)) continue
+    const d = manhattan(col, row, playerCell.col, playerCell.row)
+    if (d < bestD) {
+      bestD = d
+      best = t
+    }
+  }
+  return best ? self.tankCell(best) : null
+}
+
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
   // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
@@ -2170,6 +2212,14 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // the queue, spending 85% of the game turtling. Now reads from params:
   //   huntAllyCount (default 4 = MAX_ENEMIES_ALIVE) — field count gate
   //   endgameEnemyThreshold (default 6) — queue count gate
+  // 基地带优先 (user rule, 2026-10-27) — placed AFTER every retreat/defend
+  // gate so "come home" still wins when the player is far, and BEFORE the
+  // hunt/engage cascade so a band enemy outranks a distant chase.
+  if (self.params.baseBandTargetMode > 0) {
+    const bandTarget = nearestBaseBandEnemy(self, playerCell, enemies)
+    if (bandTarget) return bandTarget
+  }
+
   const canHunt =
     enemies.length <= self.params.huntAllyCount &&
     w.enemiesRemaining <= self.params.endgameEnemyThreshold

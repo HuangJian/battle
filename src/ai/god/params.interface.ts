@@ -133,6 +133,13 @@ export interface GodAIParams {
    * case). 0 = OFF.
    */
   baseLaneSentryPointBlank: number
+  /**
+   * 2026-10-27 (user rule): target an enemy standing in the BASE BAND
+   * (rows base-4..base, cols base±5) ahead of any distant chase.
+   * 0 = OFF (shipped behaviour — measured 68% `navigate` in the last 180 ticks
+   * before a base loss).
+   */
+  baseBandTargetMode: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家
    * 与敌人不同列时，横移到敌人同列（colGap ≤ 3，保持当前行）堵口；到位后由
    * 上方对齐开火段接管。补站台导航（仅服务带外 row 20-22）的带内空白

@@ -109,6 +109,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 与 §193-B 原 A/B（S34 +1 / 全关 +6 / classic 0 / chaos +2）三轮证据链一致。
   baseLaneSentryStation: 1,
   baseLaneSentryPointBlank: 0,
+  baseBandTargetMode: 0,
   // §225-A: 带内应急进 lane — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
   baseLaneSentryInBandNav: 0,
   // §225-B: 危局拾取抑制 — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
