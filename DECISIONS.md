@@ -9969,3 +9969,33 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`nn-python-gate` 5286 passed / 2 skipped（mypy 792 文件）· `bun run check` 2617 pass / 17 skip / 0 fail。
 - **未决**：判据 7「窗口外的关在 35 关全 eval 下不掉」需一轮真实训练（700 局），不在门禁内；模式 3 / carry_over 见「否决」。
   全文 → `plan/it-stage-ratation.plan.md`（v2 评审修订版）。
+
+## §2026-10-28-goalnn-stage-rotation-console（2026-10-28，窗口可观测性：账本读数 + 控制台上屏 + 课程前置校验）
+
+- **背景**：轮换（`rotation_mode`）落地后「本轮采哪些关」只活在进程日志的 `describe()` 一行与
+  `volume_stage_stats.stages` 的键上 ⇒ 控制台里开着轮换的课与全关课程长得一模一样
+  （用户口径 2026-10-28：「每轮窗口与各关进度可见」）。
+- **决定**：① 账本新增 `rotation` 子字典（`{mode, per_it, pinned, all, window}`），
+  `iteration` 与 `rollout_end` **激活时**都写（缺席 ⇒ 不写键，老行逐字节不变）；产出 =
+  `worker/stage_rotation.event_from_args`（与窗口本身同一个 `window_from_args`；`rotate_seed` 用
+  循环实例上解析后的 `self._rotate_seed`）。② 分关进度**不加新字段**：`volume_stage_stats` 本
+  就按窗口关集算 ⇒ 读面与 `rotation` 并排读。③ 控制台只**搬运**（`parseIterRotation` /
+  `parseIterVolume` → `IterRow.rotation` / `.volume` / `.capped`），**不重算窗口**（重算需要
+  课程配置 + rotate_seed，控制台拿不到 ⇒ 第二条真相）；上屏 = 「指标」页两列（`窗口` / `各关进度`，
+  列模型唯一一份） + 顶部 `StageRotationPanel`（最新一轮读数 + 逐关表 + 最近 12 轮一览，
+  **无读数 ⇒ 整块不渲染**）。④ `CourseConfig` 加跨字段校验：`rotation_mode` 非空 ⇒ 必须
+  `target_transitions > 0` 且 `mode == per-tick`（窗口只在动态采集链上生效，缺前置就是「配了轮换
+  却每轮全关采、且账本/日志都不说」）。
+- **否决**：把窗口写进首页六轮速览表列（`MAIN_ROW_KEYS`，横向空间不够，且只有动态采集课有读数）；
+  新开一页 `/sampling`（逐轮读数该与逐轮指标同屏）；控制台重算窗口（第二条真相）；控制台解析云机
+  轮报的 `volumeTopup`（v1 轮换到不了云机 —— 控制台导出腿走 `--run-iters -1`，多轮包已被拒收）。
+- **约束**：读面严格口径 —— 字符串数字/缺 `window`/缺 `stages` 一律不收；缺哪一格显 `—`，
+  绝不编 0（0 在配额语义里是「真的没采到」）。
+- **落地**：`worker/stage_rotation.py` · `worker/events.py` · `trainer/loop_steps.py` ·
+  `biz/course_spec.py`；控制台 `src/server/iters.ts` · `src/web/view/{metric-types,metric-columns,rotation}.ts` ·
+  `src/web/app/panels/{StageRotationPanel,MetricsTable}.tsx` · `src/web/app/app.tsx`；
+  守卫 `tests/worker/test_stage_rotation_events.py`(5) · `test_rotation_ledger_fields.py`(5) ·
+  `dashboard/tests/server-iters-rotation.test.ts`(8) · `web-stage-rotation-panel.test.ts`(10)。
+- **未决**：云机/离线单轮包的分关账（搬 `iter_info.volumeTopup` 进 `LEDGER_FIELDS`，见 §45「不做」）；
+  真机读数（窗口逐轮换批、`达标 N/N` 收敛）。全文 → `docs/nn/training-stack.md` §45 +
+  `docs/nn/console.md` §42 + `plan/it-stage-ratation.plan.md` §9。

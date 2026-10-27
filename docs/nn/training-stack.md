@@ -7,6 +7,59 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §45 轮换窗口的账本读数：窗口与分关进度上屏 + 课程侧前置校验（2026-10-28）
+
+**触发**：逐轮采样子集（`rotation_mode`，全文 `plan/it-stage-ratation.plan.md`）落地后，「本轮采
+哪些关」只活在两个地方：进程日志里 `describe()` 的**一行**（滚走就没了）与 `volume_stage_stats.stages`
+的**键**。控制台里没有任何 `rotation` 读数 ⇒ 开着轮换的课在「指标」页与全关课程长得一模一样：
+「某关连着几轮没被采到 / 一直补不满」这种账只能靠人翻 jsonl 才发现。
+
+**落点（写侧）**
+
+- `worker/stage_rotation.event_from_args(args, it, rotate_seed=)`：窗口的**账本读数**
+  （`{mode, per_it, pinned, all, window}`）。与窗口本身**同一个** `window_from_args` ⇒ 读数不可能
+  与采集用的窗口两说；`rotate_seed` 传循环实例上解析后的 `self._rotate_seed`（与种子流同键）。
+  配置非法照旧 `ValueError`（本模块统一纪律）。
+- `worker/events.write_iteration`：`m["rotation"]` 非空才写键（缺席 ⇒ 老账本行逐字节不变）。
+- `worker/events.write_rollout_end(..., rotation=, volume_stage_stats=)`：**采集收官行也带**窗口与
+  分关账 —— 两者都是采集侧事实，采集一收官就该上屏（等 PPO 回传 = 又回到「看起来卡住」）。
+- `trainer/loop_steps._rotation_event`（模块级函数，不是方法：两个落账点在测试里以 unbound 形式
+  驱动）捕 `ValueError` 后**留一行日志**再返 None —— 采集侧 `_volume_stages` 已经 SystemExit 过同一份
+  配置，这里再炸只会把账本写入拖下水；但绝不静默（否则「账本缺 `rotation` 键」会被读成「没配轮换」）。
+- 分关进度**不加新字段**：连续配额链收官写的 `volume_stage_stats` 本来就是按窗口关集算的
+  （`_volume_stages(it)` 三条腿共用）⇒ 读面把 `rotation` 与它**并排读**。
+
+**课程侧前置校验（防「配了轮换却没在轮换」）**
+
+窗口只在动态采集链上生效（配额分母 = `ceil(target / 窗口关数)`），而 `build_pairs` / `biz/course`
+一个字都不认 `rotation_*` ⇒ 课程写了 `rotation_mode` 却漏了 `target_transitions`（或 `mode != per-tick`）
+时，每轮照旧全关采，**账本与日志都不会说什么**。`CourseConfig._rotation_requires_dynamic_volume`
+（`model_validator(mode="after")`）在加载期响亮拒课；既有课程全不带 `rotation_*` ⇒ 零影响。
+
+**控制台读面（`dashboard/`，只搬运不重算）**
+
+- `server/iters.ts`：`parseIterRotation` / `parseIterVolume` → `IterRow.rotation` / `.volume`
+  （+ `.capped` ← `transitions_capped`）；additive，缺键 ⇒ null。重算要课程配置 + `rotate_seed`，
+  控制台两样都没有 ⇒ 重算就是第二条真相。
+- 「指标」页两列 `窗口`（`12/35`）与 `各关进度`（`达标 11/12`，hover 逐关 收到/达标线/缺口/est）
+  —— 列模型在 `view/metric-columns.ts`，**不**进首页六轮速览表；顶部
+  `panels/StageRotationPanel.tsx` 给最新一轮窗口 + 逐关表 + 最近 12 轮窗口一览。
+  **无轮换/分关读数 ⇒ 整块不渲染**（老课程页零变化）；缺哪一格显 `—`（0 = 真的没采到）。
+
+**不做（本版）**：云机腿（`--export-bundle` 单轮包）的分关账 —— delivered 行不带它
+（`remote/artifacts.LEDGER_FIELDS` 没收 `volumeTopup`）。理由：控制台的导出腿走 `--run-iters -1`
+（多轮包已被轮换拒收）⇒ 轮换课程今天到不了云机；真要用时搬 `iter_info.volumeTopup`（`train_core`
+两处 + `plan_run._checkpoint` + `LEDGER_FIELDS`）即可。按关曲线 / 覆盖进度条同样不做：先把读数
+搬上屏，看几轮真数据再谈图形化。
+
+**守卫**：`tests/worker/test_stage_rotation_events.py`(5) ·
+`tests/worker/test_rotation_ledger_fields.py`(5) · `test_stage_rotation_course.py`（+1 跨字段）·
+`dashboard/tests/server-iters-rotation.test.ts`(8) · `dashboard/tests/web-stage-rotation-panel.test.ts`(10)。
+
+**未决**：真机读数（一轮开着轮换的课：面板里窗口应逐轮换批、`达标 N/N` 应收敛；`触硬顶` 只应
+出现在长局关）。
+
+---
 ## §44 payload 零落盘：dispatch 腿收到就压，打包只剩拼接（2026-10-27）
 
 **触发**：`plan/payload-zero-disk.plan.md`（立项 2026-10-27，分块并行打包的底座 `15c973d2` 已 ship）。

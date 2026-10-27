@@ -187,11 +187,15 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
 
     m: {rollout_sec, ppo_sec, total_steps, chunks_n, agg, kl_cum, halted,
         dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec,
-        volume_alloc_rule, volume_stage_stats, collect_fallback}
+        volume_alloc_rule, volume_stage_stats, collect_fallback, rotation}
 
     `collect_fallback`（2026-10-23，plan/offline-hold-stale-fallback §3-S1e）：本轮是**降级**轮
     （采集模式本是 node，实际由本机采样）的原因 `hold_stale` / `node_unavailable`。
     **只在非空时写键**——普通轮的事件逐字节不变（账本/门禁/回归基线都靠这条）。
+
+    `rotation`（2026-10-28，plan/it-stage-ratation §9.1）：本轮采样子集的读数
+    （mode/per_it/pinned/all/window，由 `worker.stage_rotation.event_from_args` 产出）。
+    同样是**只在非空时写键**：`rotation_mode` 缺席的课程一个键都不多。
     """
     agg = m["agg"]
     return write_event(
@@ -246,6 +250,8 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             # 「哪一轮起换了分配口径」只在这里可读（§15.5：不静默漂移）。
             "volume_alloc_rule": m.get("volume_alloc_rule"),
             "volume_stage_stats": m.get("volume_stage_stats"),
+            # 采样子集（plan/it-stage-ratation §9.1）：`rotation_mode` 缺席 ⇒ 不写键。
+            **({"rotation": m["rotation"]} if m.get("rotation") else {}),
             # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：
             # `hold_stale` = 云机接管已 stale；`node_unavailable` = node 路径带不了 volume。
             # 只在降级轮出现（普通轮无此键 ⇒ 既有行逐字节不变）。
@@ -293,7 +299,14 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
 
 
 def write_rollout_end(
-    jsonl_path: Path, args, it: int, report: dict, rollout_sec: float
+    jsonl_path: Path,
+    args,
+    it: int,
+    report: dict,
+    rollout_sec: float,
+    *,
+    rotation: dict | None = None,
+    volume_stage_stats: dict | None = None,
 ) -> dict:
     """`rollout_end` 事件：本轮**采集收官即刻**落账（不等 PPO / 权重回传）。
 
@@ -307,6 +320,11 @@ def write_rollout_end(
     mean_ret / ppo_sec / dist_phase_sec / wire …）此刻还不存在 ⇒ 一律**不写键**
     （缺键 = 空，读面按 NaN 缺口处理，**不冒充 0**）。本轮的 `iteration` 行落账后，
     它自然被覆盖（同 iter 取文件里最后一条）。
+
+    `rotation` / `volume_stage_stats`（2026-10-28，plan/it-stage-ratation §9.1）：两者都是
+    **采集侧**事实 ⇒ 这一行也带（缺省 None = 不写键，老调用方/老课程逐字节不变）。
+    为什么必须在 `rollout_end` 就带：控制台的窗口/分关进度不该等 PPO 回来——采集完那一刻
+    就已成定局（与 2026-10-19「采集收官即多一点」同一口径）。
     """
     dm = report.get("dimMeans") or {}
     return write_event(
@@ -329,6 +347,9 @@ def write_rollout_end(
             "ticks": report.get("totalTicks", 0),
             "rollout_sec": rollout_sec,
             "pure_collect_sec": report.get("pure_collect_sec"),
+            # 采样子集 + 分关账（采集侧事实；None ⇒ 不写键）。
+            **({"rotation": rotation} if rotation else {}),
+            **({"volume_stage_stats": volume_stage_stats} if volume_stage_stats else {}),
             # 权重下发墙钟属**采集侧**（report 里本来就有）⇒ 这一行也带。
             "dist_phase_sec": report.get("dist_phase_sec"),
             # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）

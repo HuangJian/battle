@@ -34,6 +34,31 @@ from trainer.loop_export import TrainingExport
 from trainer.loop_remote import TrainingRemote
 from worker.events import write_iteration, write_rollout_end
 
+
+def _rotation_event(args: Any, it: int, rotate_seed: Any) -> dict | None:
+    """本轮采样子集的账本读数（plan/it-stage-ratation §9.1；`rotation_mode` 缺席 ⇒ None）。
+
+    模块级函数而不是方法：两个落账点（`_record_rollout` / `_record_iteration`）在测试里以
+    `TrainingSteps._record_iteration(SimpleNamespace(...), it)` 的 unbound 形式驱动
+    （`tests/worker/test_iteration_collect_fallback.py`），那种宿主上没有本方法。
+
+    `rotate_seed` 传**循环实例上解析后的**那把键（`self._rotate_seed`）——与种子流同源；
+    拿不到（旧宿主/旧测试）时退到 0，与 `window_from_args` 的缺省口径一致。
+
+    配置非法（未知 mode / pinned 不在 `--stages`）在采集侧 `_volume_stages` 已经**响亮
+    SystemExit** 过同一份配置；这里再炸一次只会把「账本写入」拖下水（本轮已经采完了）。
+    所以捕住并留一行日志——**绝不静默**：否则「账本里没有 `rotation` 键」会被读成
+    「这门课没配轮换」，那是两件完全不同的事。
+    """
+    from worker.stage_rotation import event_from_args
+
+    try:
+        return event_from_args(args, int(it), rotate_seed=int(rotate_seed or 0))
+    except ValueError as e:
+        log(f"[run_rl] it{it}: rotation 读数生成失败（{e}）——该轮账本缺 rotation 键")
+        return None
+
+
 if TYPE_CHECKING:
     from worker.commit_journal import CommitJournal
 
@@ -553,7 +578,19 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         if seen is not None and it in seen:
             return
         self._ledger_apply(
-            write_rollout_end(self._jsonl_path, self.args, it, self._report, self._rollout_sec)
+            write_rollout_end(
+                self._jsonl_path,
+                self.args,
+                it,
+                self._report,
+                self._rollout_sec,
+                # 采集侧事实：收官那一刻窗口与分关账已成定局（不等 PPO）。关闭时两者都是 None
+                # ⇒ `write_rollout_end` 不写键（老账本行逐字节不变）。
+                rotation=_rotation_event(
+                    self.args, it, getattr(self, "_rotate_seed", 0)
+                ),
+                volume_stage_stats=getattr(self, "_volume_stage_stats", None),
+            )
         )
 
     def _record_iteration(self, it: int) -> None:
@@ -597,6 +634,10 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                         self._volume_stage_stats.get("rule") if self._volume_stage_stats else None
                     ),
                     "volume_stage_stats": self._volume_stage_stats,
+                    # 采样子集读数（plan §9.1；`rotation_mode` 缺席 ⇒ None ⇒ 不写键）。
+                    "rotation": _rotation_event(
+                        self.args, it, getattr(self, "_rotate_seed", 0)
+                    ),
                 },
             )
         )

@@ -10,7 +10,10 @@ import type {
   EvalRoundOption,
   EvalSummary,
   IterActuals,
+  IterRotation,
   IterRow,
+  IterVolume,
+  IterVolumeStage,
   IterWire,
   PairedCompare,
   PairedReferee,
@@ -64,6 +67,85 @@ export function parseIterWire(raw: unknown): IterWire | null {
     slim: typeof w.slim === 'boolean' ? w.slim : null,
     rolloutSrc: strOrNull(w.rollout_src),
     worker: Object.keys(worker).length > 0 ? worker : null,
+  }
+}
+
+// ---------------- 采样子集（窗口）与分关采集账（plan/it-stage-ratation §9） ----------------
+
+/** 整数才收（与 `numOrNull` 同口径：字符串数字不算——那是写端 bug，不该被读面掩盖）。 */
+function intOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) ? v : null
+}
+
+/** 整数数组；非数组或含非整数项 ⇒ null（不半渲染）。 */
+function intList(v: unknown): number[] | null {
+  if (!Array.isArray(v)) return null
+  const out: number[] = []
+  for (const x of v) {
+    const n = intOrNull(x)
+    if (n === null) return null
+    out.push(n)
+  }
+  return out
+}
+
+/** `rotation` 子字典 → 窗口读数；缺键/坏形状 ⇒ null。
+ *
+ *  读面**只搬运**、不重算：控制台 import 不到 `nn-training/`，而重算需要课程配置 +
+ *  `rotate_seed`（都不在账本里）——那会是第二条真相。 */
+export function parseIterRotation(raw: unknown): IterRotation | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  const mode = strOrNull(r.mode)
+  const window = intList(r.window)
+  const all = intOrNull(r.all)
+  if (!mode || !window || all === null) return null
+  return {
+    mode,
+    perIt: intOrNull(r.per_it) ?? 0,
+    pinned: intList(r.pinned) ?? [],
+    all,
+    window,
+  }
+}
+
+/** `volume_stage_stats` → 分关采集账；缺 `stages` 或一关都读不出 ⇒ null。
+ *
+ *  口径：`stages` 的**键就是本轮窗口**（`_volume_stages(it)` 是三条腿共用的那一份）——
+ *  所以控制台不需要「关集」这第二个字段。逐关 `shortfall` 由 `quota − collected` 现算
+ *  （账本里那份只含未达标的关，是同一个数）。 */
+export function parseIterVolume(raw: unknown): IterVolume | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const v = raw as Record<string, unknown>
+  const rawStages = v.stages
+  if (!rawStages || typeof rawStages !== 'object' || Array.isArray(rawStages)) return null
+  const quota = intOrNull(v.quota)
+  const stages: IterVolumeStage[] = []
+  for (const [k, val] of Object.entries(rawStages as Record<string, unknown>)) {
+    const stage = Number(k)
+    if (!Number.isInteger(stage)) continue
+    if (!val || typeof val !== 'object' || Array.isArray(val)) continue
+    const s = val as Record<string, unknown>
+    const collected = intOrNull(s.collected)
+    if (collected === null) continue // 没这一格 = 不是分关账（不编 0）
+    stages.push({
+      stage,
+      collected,
+      quota,
+      games: intOrNull(s.games),
+      capGames: intOrNull(s.cap_games),
+      estS: intOrNull(s.est_s),
+      shortfall: quota === null ? null : Math.max(0, quota - collected),
+    })
+  }
+  if (stages.length === 0) return null
+  stages.sort((a, b) => a.stage - b.stage)
+  return {
+    rule: strOrNull(v.rule),
+    quota,
+    estSrc: strOrNull(v.est_src),
+    halted: typeof v.halted === 'boolean' ? v.halted : null,
+    stages,
   }
 }
 
@@ -1388,6 +1470,11 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
           loot: Number(dm.loot ?? 0),
           kills: +(Number(dm.progress ?? 0) * 20).toFixed(2),
           actuals,
+          // 采样子集（窗口）+ 分关采集账 + 触顶标记：与 rollout 读数同为采集侧事实
+          // （`rollout_end` 行也带）⇒ 采集一收官就上屏，不等 PPO 回传。
+          rotation: parseIterRotation(r.rotation),
+          volume: parseIterVolume(r.volume_stage_stats),
+          capped: r.transitions_capped === true ? true : null,
           evalData: withPaired(evalSummaries.get(iter), pairedByIter.get(iter) ?? null),
         })
       } catch {

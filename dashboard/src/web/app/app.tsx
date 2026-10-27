@@ -45,6 +45,7 @@ import { WorkerRegistry } from './panels/WorkerRegistry'
 import { OfflinePushPanel } from './panels/OfflinePushPanel'
 
 import { WirePanel } from './panels/WirePanel'
+import { StageRotationPanel } from './panels/StageRotationPanel'
 import { EvalSummary } from './panels/EvalSummary'
 import {
   bootstrapPage,
@@ -634,13 +635,20 @@ export function App({ initial }: AppProps) {
 
         {/* ══════════════════ 指标 ══════════════════ */}
         {page === 'metrics' ? (
-          <PanelErrorBoundary>
-            <MetricsTable
-              stateView={stateView}
-              onRefresh={() => void refreshState()}
-              readOnly={readOnly}
-            />
-          </PanelErrorBoundary>
+          <>
+            {/* 采集窗口（2026-10-28，plan/it-stage-ratation §9.3）：只在账本有轮换/分关账读数时渲染
+                （老课程页零变化）——「每轮采了哪批关、各关进度多少」要能一眼看见，不是翻 jsonl。 */}
+            <PanelErrorBoundary>
+              <StageRotationPanel stateView={stateView} />
+            </PanelErrorBoundary>
+            <PanelErrorBoundary>
+              <MetricsTable
+                stateView={stateView}
+                onRefresh={() => void refreshState()}
+                readOnly={readOnly}
+              />
+            </PanelErrorBoundary>
+          </>
         ) : null}
 
         {/* ══════════════════ 节点 ══════════════════ */}

@@ -149,6 +149,37 @@ def window_from_args(
     )
 
 
+def event_from_args(args: Any, it: int, *, rotate_seed: int | None = None) -> dict | None:
+    """`iteration` / `rollout_end` 事件的 `rotation` 子字典（plan §9.1；关闭 ⇒ None）。
+
+    为什么要有这一格（2026-10-28，用户口径「每轮窗口与各关进度可见」）：窗口此前只活在
+    进程日志的 `describe()` 那**一行**里（滚走就没了）与 `volume_stage_stats` 的**键**上 ⇒
+    控制台里「开着轮换的课」与「全关课程」长得一模一样，采了多少/差多少要人翻 jsonl。
+
+    口径：
+      * 与窗口本身**同一个** `window_from_args`（不可能两说）；`rotate_seed` 语义同它
+        （调用方传循环实例上解析后的 `self._rotate_seed` = 种子流那把钥匙）。
+      * `window` 排序（与 `volume.stages` 同规）；`all` = `--stages` 全关数（显示 `12/35`）。
+      * `rotation_mode` 缺席 ⇒ None（调用方**不写键**，老账本行逐字节不变）。
+      * 配置非法（`--stages` 缺失/不可解析、未知 mode、pinned 不在关集）**照旧响亮**
+        `ValueError`（本模块的统一纪律）；落账点的处理见 `trainer/loop_steps._rotation_event`
+        （采集侧 `_volume_stages` 已经 SystemExit 过同一份配置）。
+    """
+    mode = str(getattr(args, "rotation_mode", "") or "").strip()
+    if not mode:
+        return None
+    stages = parse_stages_arg(str(getattr(args, "stages", "") or ""))
+    window = window_from_args(args, int(it), stages, rotate_seed=rotate_seed)
+    raw = str(getattr(args, "rotation_pinned", "") or "").strip()
+    return {
+        "mode": mode,
+        "per_it": int(getattr(args, "rotation_per_it", 0) or 0),
+        "pinned": parse_stages_arg(raw) if raw else [],
+        "all": len(sorted({int(s) for s in stages})),
+        "window": [int(s) for s in window],
+    }
+
+
 def describe(window: Sequence[int], all_stages: Sequence[int]) -> str:
     """一行读数（每轮打一条，不逐局）：`rotation even 12/35 关 [..]`。"""
     return (

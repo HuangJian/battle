@@ -25,7 +25,11 @@ import {
   phaseSecsTitle,
   retTone,
   TC_METRICS_FILTER,
+  volumeText,
+  volumeTitle,
   winTone,
+  windowText,
+  windowTitle,
   type EvalABanner,
   type EvalCkptFile,
   type EvalSummary,
@@ -405,6 +409,36 @@ function buildMetricCols(
     },
     scoreCol,
     ...klEntropyCols(),
+    // 采样范围压尾：不搅动既有读序（窗口/进度是新事实，要时往右扫一眼；列显隐可持久化）。
+    ...samplingCols(),
+  ]
+}
+
+/** 采样范围两列（动态采集/轮换专属；eval 行/非动态采集轮显—，不编读数）。
+ *
+ *  为什么单独两列而不是并进胜率列：窗口（采了哪些关）与各关进度（采够了没）是**采样**
+ *  事实，与「练得好不好」正交；混在一格会让两个问题互相淹没（「某关连着几轮没被采到」
+ *  这种账正是要一眼看得见）。 */
+function samplingCols(): Col<MetricRow>[] {
+  return [
+    {
+      ...colDef('window'),
+      cell: (r) =>
+        r.kind === 'main' ? (
+          <span title={windowTitle(r.main.rotation)}>{windowText(r.main.rotation)}</span>
+        ) : (
+          <span className="tc-muted">-</span>
+        ),
+    },
+    {
+      ...colDef('stageProgress'),
+      cell: (r) =>
+        r.kind === 'main' && r.main.volume ? (
+          <span title={volumeTitle(r.main.volume)}>{volumeText(r.main.volume)}</span>
+        ) : (
+          <span className="tc-muted">-</span>
+        ),
+    },
   ]
 }
 

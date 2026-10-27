@@ -13,6 +13,35 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §42 「采集窗口」面板与两列：窗口/分关进度从账本搬运，不重算（2026-10-28）
+
+**触发**：`plan/it-stage-ratation.plan.md` §9（用户口径「每轮窗口与各关进度可见」）。写侧全文见
+`docs/nn/training-stack.md` §45；本节只讲 dashboard 侧的四个决定。
+
+**读面**：`server/iters.ts::parseIterRotation` / `parseIterVolume` —— 把 `iteration` / `rollout_end`
+事件的 `rotation` 子字典与 `volume_stage_stats` 搬成 `IterRow.rotation` / `.volume`
+（+ `.capped` ← `transitions_capped`）。additive：缺键 ⇒ null，老账本行零变化（先例 `parseIterWire`）。
+
+**为什么不重算窗口**：窗口 = `(rotate_seed, it)` + 课程配置的纯函数，而这两样控制台都没有
+（`rotate_seed` 只在 `run_start` 行里，课程文件又可以在跑后改）⇒ 重算等于造第二条真相，还会在
+「改了课程文件但没重启」时显示一个**不是**当时采样的窗口。所以读面只搬运。
+
+**上屏**：`view/rotation.ts`（展示纯函数：`windowText` / `stageRangeText` / `volumeText` /
+`metStages` / `volumeTitle` —— 两处渲染器共用一份文案，先例 `metric-columns.ts`）+
+`panels/StageRotationPanel.tsx`（`/metrics` 页顶部）+ `MetricsTable` 两列
+（列模型进 `view/metric-columns.ts`，**不**进 `MAIN_ROW_KEYS`）。面板三块：最新一轮读数 ·
+逐关表（收到/达标线/局数/硬顶/est/缺口） · 最近 12 轮窗口一览。
+
+**空态与诚实**：无轮换且无分关读数 ⇒ 面板整块不渲染（老课程页零变化）；缺哪一格显 `—`
+（0 在配额语义里是「真的没采到」，不能拿来冒充「没有数据」）；云机/离线轮没有分关账 ⇒ 面板只出
+窗口那一行（成因见 `docs/nn/training-stack.md` §45「不做」）。
+
+**被否决**：① 进首页六轮速览表（`MAIN_ROW_KEYS`）—— 速览表要横向空间，而这两列只在开了动态
+采集（`target_transitions>0`）/轮换的课上才有读数；② 新开一页 `/sampling` —— 逐轮读数本来就该与
+逐轮指标同屏（同一门课的同一个「轮」，另起一页要把这个共同维度复制一遍）；③ 控制台解析云机轮报的
+`volumeTopup` 形状 —— v1 轮换到不了云机，多养一种形状不划算（真要用时见 §45 的三处搬法）。
+
+---
 ## §41 端口探测必须带上界：`portOwnedBy` 的 connect 兜底会把「没人听」等成挂死（2026-10-20）
 
 **触发**：`dashboard/tests/training-port-reclaim.test.ts` 的「真监听」第三条恒红

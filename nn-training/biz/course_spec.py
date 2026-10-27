@@ -834,6 +834,30 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 模式 2 的 pinned 关号规格串（与 `--stages`/`--seeds` 同一个 `parse_stages_arg`，例 `"2033-2034"`）。
     #: 刻意不用 list：`flat_overrides` 只产出**扁平标量** dest（argparse 侧没有 dict/list 型 dest 先例）。
     rotation_pinned: str = ""
+
+    @model_validator(mode="after")
+    def _rotation_requires_dynamic_volume(self) -> CourseConfig:
+        """窗口只在**动态采集**链上生效 ⇒ 缺前置就在加载期响亮拒课（plan/it-stage-ratation §9.4）。
+
+        为什么必须拦：`rotation_mode` 的三个消费者（`_volume_stages` / `_per_stage_quota` /
+        导出侧 volume 块）**全部**住在 `target_transitions > 0` 的链上；而 `build_pairs`
+        （非动态采集的采样路径）一个字都不认 `rotation_*`。配了轮换却漏了目标量 ⇒ 每轮照旧
+        全关采，**而账本/日志都不会说什么**（正是最难发现的那种静默失效）。`mode` 同理：
+        动态采集只对 per-tick 有意义（intent/goal 走另一套报告与采样）。
+
+        既有课程全不带 `rotation_*` ⇒ 本校验零影响（在场才判）。
+        """
+        if self.rotation_mode and self.mode != "per-tick":
+            raise ValueError(
+                f"rotation_mode={self.rotation_mode!r} 只在 mode=per-tick 下生效（当前 mode={self.mode!r}）"
+                "——窗口的配额分母就是 per-tick 专属的 target_transitions"
+            )
+        if self.rotation_mode and int(self.target_transitions) <= 0:
+            raise ValueError(
+                "rotation_mode 需要 target_transitions > 0：窗口的达标线 = ceil(target / 窗口关数)，"
+                "没有它窗口一个函数都不会被调到（采样照旧全关，且不报错）"
+            )
+        return self
     seeds: str = "0-3"
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""

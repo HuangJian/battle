@@ -22,7 +22,9 @@ from worker.volume_waves import parse_stages_arg
 
 
 def _course(**kw: Any) -> CourseConfig:
-    return CourseConfig(name="rot", mode="per-tick", stages="0-34", **kw)
+    # `target_transitions` 是窗口的**前置**（§9.4：没有它 `_volume_stages` / `_per_stage_quota` /
+    # 导出侧三个消费者一个都不会被调到）⇒ 带轮换的合法课程必然带它；本文件全按合法形态构造。
+    return CourseConfig(name="rot", mode="per-tick", stages="0-34", target_transitions=600_000, **kw)
 
 
 def _args(**over: object) -> SimpleNamespace:
@@ -90,3 +92,27 @@ def test_identity_changes_only_when_active() -> None:
 def test_negative_per_it_is_rejected_at_config_time() -> None:
     with pytest.raises(ValueError, match="rotation_per_it"):
         _course(rotation_mode="even", rotation_per_it=-1)
+
+
+def test_rotation_without_dynamic_volume_is_rejected() -> None:
+    """★ §9.4：窗口只在动态采集链上生效 —— 缺前置就在加载期响亮拒课（不是静默全关采）。
+
+    静默版的形态：课程写了 `rotation_mode`，而 `build_pairs` 一个字都不认 `rotation_*` ⇒
+    每轮照旧全关采，账本/日志都没异常（「最难发现那种」）。两条前置各钉一次：
+    `target_transitions > 0`（配额分母）与 `mode == per-tick`（动态采集唯一的模式）。
+    """
+    with pytest.raises(ValueError, match="target_transitions"):
+        CourseConfig(
+            name="rot", mode="per-tick", stages="0-34", rotation_mode="even", rotation_per_it=12
+        )
+    with pytest.raises(ValueError, match="per-tick"):
+        CourseConfig(
+            name="rot",
+            mode="intent",
+            stages="0-34",
+            target_transitions=600_000,
+            rotation_mode="even",
+            rotation_per_it=12,
+        )
+    # 关闭态不受影响（老课程逐字节不变）
+    assert CourseConfig(name="plain", mode="intent", stages="0-34").rotation_mode == ""

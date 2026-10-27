@@ -169,6 +169,9 @@ payload["stage_rotation"] = {
 | 5 | **老行为不变**：`rotation_mode` 缺席 ⇒ 块/pairs/配额逐字节同今天 | 既有 `test_volume_plan_block.py` 全绿 |
 | 6 | **多轮段拒收**：轮换 + `n>1` 导出 ⇒ 响亮 SystemExit | 单测（假 args + `_export_offline_bundle` 入口或直接测判据函数） |
 | 7 | **未采关不退化**：窗口外的关在 35 关全 eval 下不掉 | 实验（每次 eval 700 局），不在门禁内 |
+| 8 | **窗口可见**：激活课程的事件行带 `rotation`（mode/all/window）；未激活的行**无此键** | 单测（`write_iteration` / `write_rollout_end` 两种输入逐键对比） |
+| 9 | **控制台上屏**：`readIterMetrics` 出 `rotation` / `volume`，两列与面板同源渲染；缺数据显 `—`（不编 0） | dashboard 用例（真 JSONL → 读面 → 面板） |
+| 10 | **静默空转被拦**：`rotation_mode` + 无 `target_transitions`（或非 per-tick）⇒ 课程加载期 `ValueError` | 单测 |
 
 ## 6. 测试
 
@@ -187,6 +190,17 @@ payload["stage_rotation"] = {
 10. `test_per_stage_quota_follows_the_window`（判据 3：`_per_stage_quota(it)` 与块同源；用 `TrainingSteps` 的既有最小 harness 或直接调 mixin 方法）
 11. `test_check_plan_against_args_accepts_a_rotated_window` / `..._rejects_a_window_outside_stages`
     （评审 A5：窗口计划必须过发布期自检；关集 ⊄ `--stages` ⇒ `ProtocolError`）
+
+S4（§9）新增：
+
+12. `tests/worker/test_stage_rotation_events.py`：`event_from_args` 三态（缺席 ⇒ None；even ⇒ window/all 正确；
+    pinned ⇒ pinned 原样进读数）+ 与 `window_from_args` 同源（同 args 同 it 两路逐元素相同）
+13. `tests/worker/test_rotation_ledger_fields.py`：`write_iteration` / `write_rollout_end` 在轮换激活时
+    带 `rotation`（+ `rollout_end` 带 `volume_stage_stats`）；未激活 ⇒ **键不存在**（逐字节老行为）
+14. `tests/worker/test_stage_rotation_course.py` 追加：跨字段校验（无 `target_transitions` / 非 per-tick ⇒ 拒课）
+15. `dashboard/tests/server-iters-rotation.test.ts`：本机形状 → `IterRow.rotation` / `volume`（逐关排序 +
+    达标数）；缺键/坏形状 ⇒ null；`rollout_end` 行也带
+16. `dashboard/tests/web-stage-rotation-panel.test.ts`：面板只在有轮换读数时渲染；两列写进 `METRIC_COLS`
 
 ## 7. 不做 / 明确排除
 
@@ -208,3 +222,70 @@ payload["stage_rotation"] = {
 | S2 | `volume_block(stages_override)` + `loop_export` 窗口/est + `loop_volume` 退役 guard + `_per_stage_quota(it)` 同源 | 判据 2/3/5 |
 | S3 | 身份（`_identity_payload` 激活时）+ 多轮段拒收 | 判据 6 |
 | S3′ | ~~模式 3~~ / ~~carry_over~~ | 后置（§7） |
+| S4 | 可观测性（§9）：账本 `rotation` + 分关进度上屏 + 课程前置校验 | 判据 8/9/10 |
+
+## 9. 可观测性：控制台看得见窗口（2026-10-28）
+
+**触发**：S1–S3 落地后，「本轮采哪些关」只活在两个地方 —— 进程日志里 `describe()` 那**一行**
+（滚走就没了）、以及 `volume_stage_stats.stages` 的**键**。而这两处都要人主动去捞：控制台里没有
+`rotation` 一个字，**开着轮换的课在「指标」页与全关课程长得一模一样**；采了多少/差多少要翻账本 jsonl。
+窗口不可见 ⇒ 出了「某关连着几轮没采到」这种账，没有人会在第一时间发现（§15.1 的覆盖承诺全靠人记）。
+
+### 9.1 账本读数（写侧）
+
+`iteration` 与 `rollout_end` 事件在**激活时**多一个 `rotation` 子字典（缺席 ⇒ 一个键都不写，老行逐字节不变）：
+
+```jsonc
+"rotation": {"mode": "even", "per_it": 12, "pinned": [], "all": 35, "window": [2000, 2001, …]}
+```
+
+- 产出 = `worker/stage_rotation.event_from_args(args, it, rotate_seed=)`（与窗口本身**同一个**
+  `window_from_args` ⇒ 账本读数与采集用的窗口不可能两说）；`rotate_seed` 取循环实例上解析后的
+  `self._rotate_seed`（与种子流同键）。
+- `window` **排序**（与 `volume.stages` 同规）；`all` = `--stages` 全关数（控制台要显示 `12/35`）。
+- **`rollout_end` 也带**它 + `volume_stage_stats`：窗口与分关账是**采集侧**事实，采集一收官就该上屏
+  （与 2026-10-19「采集收官即多一点」同一口径），不必等 PPO 回传。
+- 分关进度**不加新字段**：本机连续配额链收官时写的 `volume_stage_stats`（quota / 逐关
+  collected·games·est·cap / shortfall / halted）本来就是按窗口关集算的（§3.4：`_volume_stages(it)`
+  是三条腿共用的那一份）⇒ 控制台把 `rotation` 与它**并排读**即可。
+
+### 9.2 控制台读面（dashboard 侧）
+
+- `dashboard/src/server/iters.ts`：`parseIterRotation(raw)` / `parseIterVolume(raw)` 两个纯解析器，
+  挂在既有 `buildIterRows` 上（`rollout_end` 行也走同一份）⇒ `IterRow.rotation` / `IterRow.volume`
+  （additive，缺键 = null；与 `wire` 同规）。**读面只认账本**：窗口不重算（控制台 import 不到
+  `nn-training/`，且重算 = 第二条真相）。
+- 解析口径：坏形状（数组 / 缺 window / 关号非整数）⇒ `null`（不半渲染），逐关账按键升序。
+- 类型住 `dashboard/src/web/view/metric-types.ts`（`IterRotation` / `IterVolume`），与 `IterWire` 并排。
+
+### 9.3 上屏（两处，都只在有轮换读数时出现）
+
+1. **「指标」页新列**：`窗口`（`12/35`；hover 列出关号）与 `各关进度`（`达标 11/12`；hover 列逐关
+   `collected/quota` 与缺口）。列模型进 `view/metric-columns.ts`（表头文字唯一一份），**不**进
+   首页速览表（`MAIN_ROW_KEYS` —— 六轮速览放不下窗口）。
+2. **「指标」页顶部面板**（`app/panels/StageRotationPanel.tsx`）：① 最新一轮的窗口读数（mode /
+   窗口/all / 达标 / halted·capped）；② 该轮逐关表（关 / 收到 / 达标线 / 局数 / 硬顶 / est / 缺口）；
+   ③ 最近 ~12 轮的窗口一览（判「每轮换到哪批关、有没有长期缺口」）。无任何轮换读数 ⇒ 面板整块不渲染
+   （老课程页零变化）。
+
+### 9.4 课程侧前置校验（拦「配了轮换却没在轮换」）
+
+窗口只在**动态采集**链上生效：配额分母 = `ceil(target / 窗口关数)`（§3.5），关集 = `_volume_stages(it)`（§3.4）。
+而 `build_pairs` / `biz/course` 完全不认 `rotation_*` ⇒ 课程若只写 `rotation_mode` 而没写
+`target_transitions`（或 `mode != per-tick`），那一轮**照旧全关采**，且账本/日志都不会说什么 —— 正是
+「最难发现那种」的静默失效。修法：`CourseConfig` 加一条跨字段校验，加载期响亮拒课：
+
+```
+rotation_mode 非空 ⇒ 必须 target_transitions > 0 且 mode == "per-tick"
+```
+
+（既有课程全不带 `rotation_*` ⇒ 零影响；先例 = `_margin_pp_or_raise` 一类的「脏值拒课」。）
+
+### 9.5 不做（本版）
+
+- **云机腿（`--export-bundle` 单轮包）的分关账**：delivered 行不带它（`remote/artifacts.LEDGER_FIELDS`
+  没收 `volumeTopup`），控制台对这类轮只显示 `—`。理由：控制台的导出腿走 `--run-iters -1`（多轮包
+  已被 §3.7 拒收）⇒ 轮换课程今天到不了云机；真要用时把 `iter_info.volumeTopup` 搬进行账即可
+  （`train_core` 两处 + `plan_run._checkpoint` + `LEDGER_FIELDS`，另立项）。
+- **按关曲线 / 覆盖进度条**：先把窗口与分关账搬上屏，看几轮真读数再谈图形化（避免在没有真数据时
+  猜什么形状最有用）。

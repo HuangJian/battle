@@ -102,6 +102,56 @@ export interface IterWire {
   worker: Record<string, number | null> | null
 }
 
+/** 逐轮采样子集（窗口）读数 —— 事件里的 `rotation` 子字典（2026-10-28，plan/it-stage-ratation §9）。
+ *
+ *  为什么需要它：窗口此前只活在进程日志的一行文字里与 `volume_stage_stats` 的**键**上 ⇒
+ *  开着轮换的课在控制台与全关课程长得一模一样（「某关连着几轮没被采到」只能靠人翻 jsonl）。
+ *  老账本行 / 未配置轮换 ⇒ `IterRow.rotation` 为 null（消费方一律 `?? null` 归一）。
+ */
+export interface IterRotation {
+  /** `even` | `pinned`（账本原样；未知取值的存量行也照收，UI 显示原文）。 */
+  mode: string
+  /** 每轮窗口关数（`pinned` 下 = pinned **之外**的余额关数）。 */
+  perIt: number
+  /** `pinned` 模式恒采的关号（其余模式空数组）。 */
+  pinned: number[]
+  /** `--stages` 全关数（读面显示 `12/35` 的分母）。 */
+  all: number
+  /** 本轮窗口（**排序**；与采集侧 `volume.stages` 同规）。 */
+  window: number[]
+}
+
+/** 逐关采集账的一行（本机连续配额链收官时写的 `volume_stage_stats.stages[*]`）。 */
+export interface IterVolumeStage {
+  stage: number
+  /** 已结算样本量（= shard `nSamples` 之和，与 `target_transitions` 同单位）。 */
+  collected: number
+  /** 本关达标线 `ceil(target / 窗口关数)`；账本缺 `quota` ⇒ null（不编 0）。 */
+  quota: number | null
+  /** 本关已结算局数；null = 账本没这一格。 */
+  games: number | null
+  /** 本关局数硬顶（无估计的关不设默认顶 ⇒ null）。 */
+  capGames: number | null
+  /** 本关局均样本量估计（盘上历史派生量；0 = 无估计 = 不猜档）。 */
+  estS: number | null
+  /** 缺口 = `max(0, quota − collected)`；quota 未知 ⇒ null（不是 0）。 */
+  shortfall: number | null
+}
+
+/** 本轮分关采集账（`volume_stage_stats`）—— **关集就是窗口**（窗口一换它就跟着走）。 */
+export interface IterVolume {
+  /** 分配规则版本（`per-stage-v3` …；旧行/缺格 ⇒ null）。 */
+  rule: string | null
+  /** 逐关达标线（与 `stages[].quota` 同一份；缺 ⇒ null）。 */
+  quota: number | null
+  /** est 来源（`trailing` / `mixed` / `none` …）。 */
+  estSrc: string | null
+  /** 逐关配额全部达成 ⇒ 池里剩下的候选没派出去；null = 账本没这一格。 */
+  halted: boolean | null
+  /** 逐关账（**按关号升序**，与窗口读数同序）。 */
+  stages: IterVolumeStage[]
+}
+
 export interface IterRow {
   iter: number
   time: string
@@ -142,6 +192,13 @@ export interface IterRow {
   /** M0 传输账；**additive**：旧账本行无 `wire` 键，测试直构的 fixture 通常也不带
    *  （与控制台视图的 `activeCourse?` / `isBc?` 同口径）→ 消费方一律用 `?? null` 归一。 */
   wire?: IterWire | null
+  /** 本轮窗口读数（`rotation` 子字典）；未配置轮换/旧账本行 ⇒ null。 */
+  rotation?: IterRotation | null
+  /** 本轮分关采集账（`volume_stage_stats`）；非动态采集轮/云机腿 ⇒ null。 */
+  volume?: IterVolume | null
+  /** 触单关局数硬顶而配额未满（账本 `transitions_capped`，**只在为真时落账**）
+   *  ⇒ true = 这轮有缺口是「顶到了」而不是「还没补」；null = 没这一格。 */
+  capped?: boolean | null
 }
 
 /** eval 逐局类型（导出 replay 弹窗「类型」列）：win→胜利；outcome=max_ticks→超时；其余→失败。 */

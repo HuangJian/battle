@@ -12,6 +12,7 @@
  *
  *  模块地图（按数据来源分组）：
  *    console-types  控制台整页视图  |  metric-types / bc-types  训练指标与 BC 账本行
+    rotation       采样子集（窗口）与分关采集账的展示纯函数（两处渲染器共用一份文案）
  *    component-groups 组件卡分组（服务 vs 课程）|  component-roles  服务角色名与用途释义
  *    pool-types     节点池视图      |  eval-types / eval-export  评估板
  *    log-view       日志页          |  cards  卡片注册表
@@ -39,6 +40,7 @@ export * from './component-roles'
 export * from './bc-types'
 export * from './log-view'
 export * from './metric-types'
+export * from './rotation'
 export * from './pool-types'
 export * from './eval-types'
 export * from './eval-export'

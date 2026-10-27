@@ -64,8 +64,13 @@ export type EvalRowColKey =
   | 'evalSec'
   | 'wver'
 
+/** `/metrics` 完整表**独有**的列键（首页「最新 6 轮」速览表不放：窗口/逐关账要横向空间，
+ *  而且只有开了动态采集（`target_transitions>0`）/轮换的课才有读数——速览表为这几列
+ *  常驻两格空位不划算）。 */
+export type IterExtraColKey = 'window' | 'stageProgress'
+
 /** 全部列键（两个表与 `MetricsTable` 的并集）。 */
-export type MetricColKey = MainRowColKey | EvalRowColKey
+export type MetricColKey = MainRowColKey | EvalRowColKey | IterExtraColKey
 
 // ────────────────────────── 模型 ──────────────────────────
 
@@ -118,6 +123,19 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
     num: true,
   },
   loot: { key: 'loot', label: '道具', title: '每局平均拾取数/掉落数', num: true },
+
+  // ── 采样范围（动态采集/轮换专属；读数一律从账本搬运，不重算） ──
+  window: {
+    key: 'window',
+    label: '窗口',
+    title:
+      '本轮采样子集 = 窗口关数 / --stages 全关数（rotation_mode 只采窗口里的关）；hover 列关号',
+  },
+  stageProgress: {
+    key: 'stageProgress',
+    label: '各关进度',
+    title: '本轮逐关配额进度（达标关数 / 窗口关数）；hover 列逐关 收到/达标线/缺口',
+  },
 
   // ── 训练诊断（rollout 行专属） ──
   phaseSecs: {
