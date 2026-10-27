@@ -48,6 +48,9 @@ const standable = (self: GodAIInput, c: number, r: number): boolean => {
 export function evalBaseLaneSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   const prm = self.params
   if (prm.baseLaneSealMode <= 0 || !self.hasBase || self.aggressive) return false
+  // mode 2 (2026-10-27) is a different mechanism, not a tweak: see
+  // `evalPreSeal`. Mode 1 keeps this body byte-for-byte.
+  if (prm.baseLaneSealMode >= 2) return evalPreSeal(self, ctx)
   const { p, pcx, pcy, onCooldown } = ctx
   const pc = self.playerCell()
   const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
@@ -105,6 +108,107 @@ export function evalBaseLaneSeal(self: GodAIInput, ctx: DecisionContext): boolea
   self._moveDir = move
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, move)
   recordBranch(self, 'baseLaneSeal')
+  return true
+}
+
+/**
+ * mode 2 (2026-10-27): PRE-SEAL an already-open base column.
+ *
+ * Autopsy (Battlement / Riverbed, hard 60 seeds, base-loss forensics):
+ *   · every failure is `base_destroyed` (0 lives-out);
+ *   · the first enemy breach is on the TOP side of the ring in 17/30 (hard)
+ *     and 29/38 (chaos) of Battlement losses, 11/17 Riverbed;
+ *   · the killer shell is fired from **row 2-5** (11/17 Riverbed, 8/19
+ *     Battlement) straight down the base column — 19-22 cells of flight ≈
+ *     80 ticks of warning;
+ *   · `enemyCanShootBase` is true on **9.9%** of all ticks, yet
+ *     `baseLaneSeal` claims 1.5% and `baseLaneSentry` 0.0-0.2% — both leash on
+ *     the distance to the SHOOTER (6 / 14 cells), so the far sniper is
+ *     outside every defense envelope.
+ *
+ * The leash is wrong: time-to-impact is set by the shooter's distance, but the
+ * player's job is to reach the LANE. mode 2 therefore leashes on the distance
+ * to the seal CELL, and also treats "enemy standing on a clear-to-top base
+ * column" as a target (it becomes a sniper the moment it stops).
+ */
+function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
+  const prm = self.params
+  const { p, pcx, pcy, onCooldown } = ctx
+  const pc = self.playerCell()
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+
+  // Seal cell: the standable cell closest to the base on that column, strictly
+  // below the shooter (between it and the eagle) AND inside the base band
+  // (rows `row-5 .. row-2`). The band matters: scanning all the way up to the
+  // shooter sends the player to a cell 10+ rows above the eagle to "seal" a
+  // lane at its far end — blocking works from anywhere on the line, but
+  // leaving the base area for a cell deep in the maze measured −10pp on
+  // Brickworks / −8pp on Twin Towers. Sealing must be a base-side job.
+  const sealRowFor = (col: number, row: number): number => {
+    const low = Math.max(BASE_POS.row - 5, row + 1)
+    for (let r = BASE_POS.row - 2; r >= low && r >= 0; r--) {
+      if (standable(self, col, r)) return r
+    }
+    return -1
+  }
+
+  let bestCol = -1
+  let bestRow = -1
+  let bestSealRow = -1
+  let bestKey = Infinity
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    const col = tc.col
+    const row = tc.row
+    if (col !== BASE_POS.col && col !== BASE_POS.col + 1) continue
+    if (row >= BASE_POS.row - 1) continue
+    const sealRow = sealRowFor(col, row)
+    if (sealRow < 0) continue
+    const csb = enemyCanShootBase(self, t)
+    const cbr = prm.baseLaneSealCbr > 0 && !csb && enemyCanBreachRing(self, t)
+    const openLane = !csb && !cbr && columnClearToTop(self.world, col)
+    if (!csb && !cbr && !openLane) continue
+    // THE LEASH (the only real knob here): measured on the distance to the seal
+    // CELL, not to the shooter. Time-to-impact is set by the shooter's distance
+    // (a 20-cell sniper gives ~80 ticks), but the player's job is only to reach
+    // the lane — and the median loss takes 3 shell hits, so the seal's value is
+    // denying the REPEAT fire, not the first shell.
+    const dSeal = manhattan(pc.col, pc.row, col, sealRow)
+    if (dSeal > prm.baseLaneSealCellRange) continue
+    // Live base shot > imminent ring breach > "standing on an open column".
+    const key = (csb ? 0 : cbr ? 1000 : 1500) + dSeal
+    if (key < bestKey) {
+      bestKey = key
+      bestCol = col
+      bestRow = row
+      bestSealRow = sealRow
+    }
+  }
+  if (bestCol < 0) return false
+
+  const dir: Direction = bestRow < bestSealRow ? 'up' : 'down'
+  if (pc.col === bestCol && pc.row === bestSealRow) {
+    self._moveDir = p.dir === dir ? null : dir
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dir)
+    recordBranch(self, 'baseLaneSeal')
+    return true
+  }
+  const move = self.navigateTowards({ col: bestCol, row: bestSealRow })
+  if (move === null) return false
+  self._moveDir = move
+  self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, move)
+  recordBranch(self, 'baseLaneSeal')
+  return true
+}
+
+/** Is `col` clear from the top edge down to the base's top row? (a sniper lane) */
+function columnClearToTop(world: GodAIInput['world'], col: number): boolean {
+  for (let r = 0; r <= BASE_POS.row - 1; r++) {
+    const t = world.tileMap.get(col, r)
+    if (t === 'brick' || t === 'steel' || t === 'base') return false
+  }
   return true
 }
 

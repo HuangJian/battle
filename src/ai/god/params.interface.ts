@@ -100,6 +100,13 @@ export interface GodAIParams {
   baseLaneSentryMode: number
   /** §X: 哨兵站位搜索半径与开火距离上限（曼哈顿格数）。 */
   baseLaneSentryRange: number
+  /**
+   * A9 mode 2 (2026-10-27): leash for the PRE-SEAL, measured on the distance to
+   * the seal CELL (not to the shooter). Time-to-impact is set by the shooter's
+   * distance; the player's job is only to reach the lane. 6 cells ≈ 66 ticks —
+   * the same order as a shell's flight from a 15-cell sniper.
+   */
+  baseLaneSealCellRange: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家

@@ -8752,3 +8752,40 @@ classic −0.14pp（只有 3 局翻盘且全向下）⇒ classic restore 0。
 `bun run check` 2626 pass / 0 fail · `bun run build` 过 · `freeze:check` 绿
 （`a492627b…` 不变：新代码只在 `enemyModelMode > 0` 时生效）。
 普查全文：`docs/godai-off-knobs-census.md`。
+
+## §2026-10-27-godai-battlement-riverbed — 两关顽疾尸检：败因是"已开通的中路列 + 远距狙击"，预封线未过关（默认仍 1）
+
+**结论先行**：Battlement / Riverbed 的失败 **100% 是丢基地**（hard 60 局：30/25 负，
+0 局命数耗尽）。致命弹不是贴脸凿穿打出来的：丢基地那一刻基地 3 格内敌人中位数 **0**，
+发射点在 **row 2–5**（Riverbed 11/17、Battlement 8/19），方向 `down`，沿**敌人自己挖通的
+中路列**飞 19–22 格（≈80 拍）。两关每局被敌人拆掉基地列 12.8 / 18.4 块砖（9.6 块在
+row 0–15），玩家自己只拆 0.2 / 1.8 块。
+
+**防线为何空转**：`enemyCanShootBase` 占 **9.9%** tick、`isBaseUnderThreat` 14–33%，
+但 `baseLaneSentry` 只占 **0.0–0.2%**、`baseLaneSeal` 1.5%。两者都按**到射手**的距离
+设 leash（6 / 14 格），20 格外的狙击手在包线之外；sentry 的站位分支还写死 `!bestCsb`。
+即：**现有防线是"射手包线"，而威胁是"已开通的列"**。
+
+**试过的修法（`baseLaneSealMode: 2`，实现保留、默认关）**：leash 改为"到封线格"，
+并把"敌人站在通透列上"纳入目标。35×60：
+
+| 难度 | Δ胜率 | t |
+|---|---|---|
+| hard | **−0.86pp** | **−2.09** |
+| classic | −0.05pp | −0.33 |
+| chaos | +0.52pp | +1.29 |
+
+宽松触发版曾给出硬数据：全局 0.00pp、**Riverbed 58→65（+7pp）**、Battlement 50→50，
+但 **Brickworks 88→78 / Twin Towers 98→90** —— "把击杀让给守线"的等价交换，不是免费收益。
+变体（基地受损才封 / 只封朝基地挖的 / sentry range 10）在 4 关上都回到 −0.8pp 量级。
+⇒ **不发货**，`baseLaneSealMode` 默认保持 1。
+
+**下一步（本轮未做，已量化）**：① `fence` 会把环换成钢 15s、每局已拾取 0.42–0.57 次，
+但拾取即生效 —— 把 fence 的**路线优先级**接到"环已破/列已通透"上，比让玩家堵枪眼便宜；
+② 贴脸 csb（Battlement 7/19）需要一条"先对齐再打"的最短动作，现有候选全部短路；
+③ Riverbed 只有中路一条故事线，①若成立收益应集中在这里。
+
+**实现**：`BaseLaneSeal.ts` 新增 `evalPreSeal` + `columnClearToTop`（mode 1 函数体逐字未动）；
+新增 `baseLaneSealCellRange`（14）；`tests/godai-base-lane-preseal.test.ts` 4 例。
+`freeze:check` 绿（默认签名不变）· `bun run check` 全绿。
+尸检全文：`docs/godai-battlement-riverbed.md`。
