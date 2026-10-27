@@ -145,19 +145,42 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   const pc = self.playerCell()
   const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
 
-  // Seal cell: the standable cell closest to the base on that column, strictly
-  // below the shooter (between it and the eagle) AND inside the base band
-  // (rows `row-5 .. row-2`). The band matters: scanning all the way up to the
-  // shooter sends the player to a cell 10+ rows above the eagle to "seal" a
-  // lane at its far end — blocking works from anywhere on the line, but
-  // leaving the base area for a cell deep in the maze measured −10pp on
-  // Brickworks / −8pp on Twin Towers. Sealing must be a base-side job.
+  // Seal cell = the cell on that column we can REACH fastest (user's rule,
+  // 2026-10-27). ANY standable cell strictly between the shooter and the eagle
+  // blocks its shell — the body is 16px wide, the shell 6px — so the closest-
+  // to-the-base rule was never necessary, and it was actively harmful: on
+  // Battlement the route to the base-side cell detours around the plaza walls
+  // (traced: 90 ticks from (20,13) to (21,17), never arrived, base died).
+  //
+  // Constraints kept: never stand in the cell right in front of the muzzle
+  // (`row + 2`), and only standable terrain. Ties resolve toward the base
+  // (larger row = safer, more cover behind us).
   const sealRowFor = (col: number, row: number): number => {
-    const low = Math.max(BASE_POS.row - 5, row + 1)
-    for (let r = BASE_POS.row - 2; r >= low && r >= 0; r--) {
-      if (standable(self, col, r)) return r
+    const low = Math.max(row + 2, 0) // never stand in the muzzle cell
+    const hi = BASE_POS.row - 2
+    if (prm.baseLaneSealCellMode !== 1) {
+      // SHIPPED: the standable cell nearest the EAGLE. Measured better than the
+      // "any cell on the line" alternatives (see the mode table below) even
+      // though the geometry allows any of them.
+      for (let r = hi; r >= low; r--) if (standable(self, col, r)) return r
+      return -1
     }
-    return -1
+    // mode 1 (A/B, NEGATIVE): the cell we can reach fastest. Any cell on the
+    // line blocks the shell, so this arrives sooner — but it measured −10pp on
+    // Riverbed / −7pp on Battlement (hard 60) and −0.29pp over all 35 stages,
+    // because the seal then claims 3× more ticks mostly WALKING (2.6%→8.0% of
+    // the run, on-station still ~1%) and the base takes MORE damage (54→63).
+    let best = -1
+    let bestD = Infinity
+    for (let r = hi; r >= low; r--) {
+      if (!standable(self, col, r)) continue
+      const d = manhattan(pc.col, pc.row, col, r)
+      if (d < bestD) {
+        bestD = d
+        best = r
+      }
+    }
+    return best
   }
 
   let bestCol = -1
@@ -200,7 +223,16 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   if (bestCol < 0) return false
 
   const dir: Direction = bestRow < bestSealRow ? 'up' : 'down'
-  if (pc.col === bestCol && pc.row === bestSealRow) {
+  // On station? mode 2 (A/B, NEGATIVE) treats ANY cell of the shooter's column
+  // between it and the eagle as on-station — the geometry allows it (body 16px
+  // vs shell 6px) — and it measured −4pp Riverbed / −5pp Battlement: holding
+  // high up the lane is exposed, and the base-side cell also doubles as "walk
+  // home". Modes 0/1 require the exact cell.
+  const onStation =
+    prm.baseLaneSealCellMode === 2
+      ? pc.col === bestCol && pc.row > bestRow && pc.row <= BASE_POS.row - 1
+      : pc.col === bestCol && pc.row === bestSealRow
+  if (onStation) {
     self._moveDir = p.dir === dir ? null : dir
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dir)
     recordBranch(self, 'baseLaneSeal')

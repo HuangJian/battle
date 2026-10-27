@@ -107,6 +107,12 @@ export interface GodAIParams {
    * the same order as a shell's flight from a 15-cell sniper.
    */
   baseLaneSealCellRange: number
+  /**
+   * A9 mode 2 (2026-10-27): how the seal cell is chosen on the shooter's column.
+   * 0 = nearest the eagle (shipped; ties to safety, walls behind us).
+   * 1 = fastest to reach from the player (any cell on the line blocks the shell).
+   */
+  baseLaneSealCellMode: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家

@@ -99,6 +99,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §146 C: 哨兵站位搜索半径（曼哈顿格数）与开火距离上限。
   baseLaneSentryRange: 6,
   baseLaneSealCellRange: 14,
+  baseLaneSealCellMode: 0,
   // §193-B/§198: 卫位导航 — SHIPPED（2026-08-15）。默认 1 = ON。
   // 当前基线（含 §195 sticky=90）决定性 60-seed paired A/B：
   // hard 净 +3（1591→1594，8 L→W / 5 W→L）、classic 净 0（byte-identical —

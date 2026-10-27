@@ -81,6 +81,37 @@ describe('A9 mode 2 — pre-seal leashes on the lane cell, not the shooter', () 
     expect(evalBaseLaneSeal(input, ctx)).toBe(false)
   })
 
+  it('seal cell rule: nearest-eagle walks down, fastest/region hold where we stand', () => {
+    // Player already ON the sniper's column, half-way up the corridor.
+    const at = (params: Partial<typeof DEFAULT_GOD_AI_PARAMS>) => {
+      const sc = scenario({ baseLaneSealMode: 2, ...params })
+      sc.world.player!.x = (BASE_POS.col + 1) * CELL
+      sc.world.player!.y = (BASE_POS.row - 12) * CELL
+      sc.input.reset()
+      placeSniper(sc.world, BASE_POS.col + 1, 4)
+      const p = sc.world.player!
+      const ctx = {
+        ...sc.ctx,
+        p,
+        pcx: p.x + p.w / 2,
+        pcy: p.y + p.h / 2,
+      }
+      return { claimed: evalBaseLaneSeal(sc.input, ctx), move: sc.input._moveDir }
+    }
+    // 0 = nearest the eagle: still walks DOWN to the base-side cell.
+    const c0 = at({ baseLaneSealCellMode: 0 })
+    expect(c0.claimed).toBe(true)
+    expect(c0.move).not.toBeNull()
+    // 1 = fastest cell: the cell we are standing on ⇒ hold in place.
+    const c1 = at({ baseLaneSealCellMode: 1 })
+    expect(c1.claimed).toBe(true)
+    expect(c1.move).toBeNull()
+    // 2 = nearest-eagle cell + region hold: already in the corridor ⇒ hold.
+    const c2 = at({ baseLaneSealCellMode: 2 })
+    expect(c2.claimed).toBe(true)
+    expect(c2.move).toBeNull()
+  })
+
   it('mode 2 is inert on stages whose base columns contain steel (user gate)', () => {
     const { world, input, ctx } = scenario({ baseLaneSealMode: 2 })
     // One steel in the LEFT base column is enough to disqualify the stage.
