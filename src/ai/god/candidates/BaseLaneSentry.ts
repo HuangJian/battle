@@ -99,6 +99,31 @@ export function evalBaseLaneSentry(self: GodAIInput, ctx: DecisionContext): bool
     }
     return false
   }
+  // 近身搏击 (user's rule, 2026-10-27): a `csb` enemy already at the eagle's
+  // edge that we are NOT aligned with currently falls through EVERY defensive
+  // candidate — baseLaneSentry needs alignment, defenseIntercept needs a shared
+  // row/col, midLaneDefense is shell-driven, baseLaneSeal excludes row ≥ 23.
+  // Measured: in-band csb 3.5-5.3% of ticks, of which unaligned 3.1-4.5%.
+  // Answer it the only way that works: step onto its row or column, then shoot.
+  if (
+    prm.baseLaneSentryPointBlank > 0 &&
+    bestCsb &&
+    !aligned &&
+    tc.row >= BASE_POS.row - 4 &&
+    sentryDist <= prm.baseLaneSentryRange + 2
+  ) {
+    const dCol = tc.col - ccol
+    const dRow = tc.row - crow
+    const step: Direction =
+      Math.abs(dCol) < Math.abs(dRow) ? (dCol > 0 ? 'right' : 'left') : dRow > 0 ? 'down' : 'up'
+    if (self.canMoveDir(p, step) && !selfFireBaseGuardBlocks(self, pcx, pcy, step)) {
+      self._moveDir = step
+      self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, step)
+      recordBranch(self, 'baseLaneSentry')
+      return true
+    }
+  }
+
   // §192 v6: 卫位导航（station-approach）— 非对齐或中线被挡时（含 dig 不可行、
   // csb 敌人不给挖等让位情形），走向相邻「清晰射击列」站位：站台 = 敌人列
   // ±1 列、玩家当前行、竖直到敌人行无砖、站台格可站。到达后由上方对齐开火

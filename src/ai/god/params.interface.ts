@@ -113,8 +113,21 @@ export interface GodAIParams {
    * 1 = fastest to reach from the player (any cell on the line blocks the shell).
    */
   baseLaneSealCellMode: number
+  /**
+   * A9 mode 2 (2026-10-27): only pre-seal against shooters at least this many
+   * cells from the base. Near-band enemies (the ones that actually kill it, from
+   * rows 23-25) are a MELEE job — sealing in front of them spends ticks that
+   * cost 0.33 kills/game while blocking 0.00 shells/game. 0 = no gate.
+   */
+  baseLaneSealPreMinDist: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
+  /**
+   * 2026-10-27: answer a POINT-BLANK `csb` enemy we are not aligned with by
+   * stepping onto its row/column (every other defensive candidate skips this
+   * case). 0 = OFF.
+   */
+  baseLaneSentryPointBlank: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家
    * 与敌人不同列时，横移到敌人同列（colGap ≤ 3，保持当前行）堵口；到位后由
    * 上方对齐开火段接管。补站台导航（仅服务带外 row 20-22）的带内空白

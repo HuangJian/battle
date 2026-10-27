@@ -218,6 +218,16 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
     if (row >= BASE_POS.row - 1) continue
     const sealRow = sealRowFor(col, row)
     if (sealRow < 0) continue
+    // NEAR-BAND GATE (user's rule, 2026-10-27): seal only against shooters that
+    // are still FAR up the lane. Once an enemy is at the eagle's edge, the play
+    // is melee — standing in the lane in front of a point-blank enemy just
+    // spends ticks not killing it (measured on Checkers: seal ticks cost 0.33
+    // kills/game while blocking 0.00 shells/game, because the fatal shots come
+    // from rows 23-25, i.e. CLOSER to the eagle than any seal cell).
+    if (prm.baseLaneSealPreMinDist > 0) {
+      const dBase = manhattan(col, row, BASE_POS.col, BASE_POS.row)
+      if (dBase < prm.baseLaneSealPreMinDist) continue
+    }
     const csb = enemyCanShootBase(self, t)
     // mode 2 arms the ring-breach class itself: a breacher on the column is
     // the thing that OPENS the lane in the first place.

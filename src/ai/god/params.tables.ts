@@ -100,12 +100,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSentryRange: 6,
   baseLaneSealCellRange: 14,
   baseLaneSealCellMode: 0,
+  baseLaneSealPreMinDist: 0,
   // §193-B/§198: 卫位导航 — SHIPPED（2026-08-15）。默认 1 = ON。
   // 当前基线（含 §195 sticky=90）决定性 60-seed paired A/B：
   // hard 净 +3（1591→1594，8 L→W / 5 W→L）、classic 净 0（byte-identical —
   // classic sentry mode=0 自关）、chaos 净 +10（1520→1530，17 L→W / 7 W→L）。
   // 与 §193-B 原 A/B（S34 +1 / 全关 +6 / classic 0 / chaos +2）三轮证据链一致。
   baseLaneSentryStation: 1,
+  baseLaneSentryPointBlank: 0,
   // §225-A: 带内应急进 lane — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
   baseLaneSentryInBandNav: 0,
   // §225-B: 危局拾取抑制 — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
