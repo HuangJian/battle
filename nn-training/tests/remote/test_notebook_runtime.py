@@ -5,6 +5,10 @@ GPU/网络/子进程；work_dir 经 cfg 注入 tmp_path，绝不写仓库外 /tm
   * resolve_device：torch 缺失 → cpu；无 CUDA 无 TPU → cpu；CUDA 多卡 +
     use_multi_gpu → cuda-dp；CUDA 单卡 → cuda；TPU（find_spec 注入）→ tpu +
     PJRT_DEVICE 环境位 + 占用者诊断；显式 device 覆盖。
+  * resolve_device 的**后端分派**（2026-10-27）：后端由 worker 的同一个
+    `resolve_ppo_backend("auto")` 定；落到 paddle 就探 paddle（GPU → cuda / CPU-only →
+    cpu / import 崩 → FATAL / torch 专属臂 → 开跑前拒）。
+  * _run_probe：三态（可用 JSON / rc≠0 的 err / 不可解析的 None）—— run_capture 注入 fake。
   * _tpu_holders：/proc/*/fd 解析（readlink 命中 / 非vfio 跳过 / cmdline 解析）。
   * run_pull_worker：ping 401 → -2（不重启）；ping OK → supervise_worker 参数
     快照（--poll/--token-file 内容/--max-idle-sec = max(idle_floor, (hours-1)h)）；
@@ -33,6 +37,10 @@ import pytest
 
 import remote.notebook_runtime as nbr
 import remote.push_tunnel as pt
+
+#: autouse fixture `_torch_backend` 会把 `_resolve_backend` 换成「torch」假货 ⇒
+#: 钉「真货只调用 worker 那一份判据」的用例要留一份原始引用（模块级取，fixture 还没生效）。
+_REAL_RESOLVE_BACKEND = nbr._resolve_backend
 
 # ------------------------------------------------------------------ fakes
 
@@ -125,6 +133,18 @@ def _fake_urlopen_401(req: Any, timeout: float = 0) -> _FakeResp:
 
 
 # ------------------------------------------------------------------ resolve_device
+
+
+@pytest.fixture(autouse=True)
+def _torch_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本模块的老用例讲的都是 **torch 腿** ⇒ 后端显式钉成 torch。
+
+    2026-10-27 起 `resolve_device` 先问后端（`_resolve_backend` → worker 的
+    `resolve_ppo_backend("auto")`）：不钉住的话，这组用例在**没装 torch** 的机器上会
+    走到 paddle 腿（真子进程探测），用例名与行为脱节。paddle 腿的用例在自己的用例体里
+    再 `setattr` 覆盖（后设的赢）。
+    """
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "torch")
 
 
 def test_resolve_device_torch_missing_returns_cpu(
@@ -231,6 +251,166 @@ def test_resolve_device_tpu_present_but_cpu_requested(
         lambda name: (object() if name == "torch_xla" else real_find_spec(name)),
     )
     assert nbr.resolve_device(_base_cfg(tmp_path, device="cpu"), lambda m: None) == "cpu"
+
+
+# ------------------------------------------------------------------ resolve_device：paddle 腿
+
+
+def _paddle_probe(n: int = 0, names: list[str] | None = None, v: str = "3.3.1") -> dict:
+    return {"v": v, "n": n, "names": names or []}
+
+
+def test_resolve_device_paddle_gpu_is_cuda_and_never_probes_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-27 现场：AI Studio 训练镜像只有 paddle ⇒ 不该探测 torch，更不该 FATAL。
+
+    用户口径原话：「ipynb 探测不到 torch 就直接报错？？？不应该是继续探测 paddle 是否可用吗」。
+    判据：后端落 paddle ⇒ ① torch 探测**一次都不跑**（跑了就是没必要的 60s 子进程 + 噪音）；
+    ② device = cuda 且 `gpu_count` 写回（下游 `worker_restart_argv` 靠它判一卡一 worker）。
+    """
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+    monkeypatch.setattr(
+        nbr, "_probe_cuda", lambda log: pytest.fail("paddle 后端不该探测 torch")
+    )
+    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=1, names=["A100"]))
+    cfg = _base_cfg(tmp_path)
+    assert nbr.resolve_device(cfg, lambda m: None) == "cuda"
+    assert cfg["gpu_count"] == 1
+    assert cfg["backend_resolved"] == "paddle"
+
+
+def test_resolve_device_paddle_cpu_only_stays_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=0))
+    cfg = _base_cfg(tmp_path)
+    assert nbr.resolve_device(cfg, lambda m: None) == "cpu"
+    # 没卡就别留个 gpu_count=0 让下游当「未知」和「0 张」混用（结构化判据，不数文本）
+    assert set(cfg) - set(_base_cfg(tmp_path)) == {"backend_resolved"}
+
+
+def test_resolve_device_paddle_probe_unknown_falls_back_to_cpu_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探测子进程没起来/输出不可解析 ⇒ 与 torch 腿同口径：按 cpu 开跑但留日志。"""
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: None)
+    logs: list[str] = []
+    assert nbr.resolve_device(_base_cfg(tmp_path), logs.append) == "cpu"
+    assert any("未知" in m and "CPU" in m for m in logs), logs
+
+
+def test_resolve_device_paddle_broken_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """paddle 装了但 import 崩 ⇒ 与 torch 腿同一处置：开跑前 FATAL，绝不回落 CPU。"""
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+    monkeypatch.setattr(
+        nbr,
+        "_probe_paddle",
+        lambda log: {"err": "OSError: libcudart.so.11.0: cannot open shared object file"},
+    )
+    with pytest.raises(SystemExit) as ei:
+        nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)
+    msg = str(ei.value.code)
+    # 这一条断的是**云机上操作员看到的那段话**：不可用 + 真因 + 「会白烧一轮」+ 修法。
+    # 被测物只有 SystemExit 的字符串，没有结构化出口 ⇒ 只能看文本（同族先例：torch 腿那条）。
+    assert (
+        "paddle 不可用" in msg
+        and "libcudart" in msg
+        and "白烧" in msg
+        and "paddlepaddle-gpu" in msg
+    ), msg
+
+
+def test_resolve_device_paddle_rejects_torch_only_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cuda-dp` / `tpu` 这些 torch 专属实验臂：开跑前拒，别等 PPO 里才
+    `paddle_env.check_device` 抛（那要 hub 推完 job 才看得见）。"""
+    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: pytest.fail("被拒的设备不该探测"))
+    for dev in ("tpu", "cuda-dp", "mps"):
+        monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+        with pytest.raises(SystemExit) as ei:
+            nbr.resolve_device(_base_cfg(tmp_path, device=dev), lambda m: None)
+        assert "torch 专属实验臂" in str(ei.value.code), dev
+
+
+def test_resolve_device_paddle_explicit_cpu_wins_on_gpu_box(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(nbr, "_resolve_backend", lambda: "paddle")
+    monkeypatch.setattr(nbr, "_probe_paddle", lambda log: _paddle_probe(n=2))
+    assert nbr.resolve_device(_base_cfg(tmp_path, device="cpu"), lambda m: None) == "cpu"
+
+
+def test_backend_comes_from_the_worker_resolver_not_a_local_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 后端判据只许有一份：`_resolve_backend` 必须真的调用
+    `remote.bc_job.resolve_ppo_backend("auto")`。
+
+    钉这个是因为「notebook 自己抄一份 torch/paddle 判断」正是 2026-10-27 那类缝隙的
+    温床（两份判据各自绿、合起来错位）。判据：改 bc_job 的那份 ⇒ notebook 跟着变。
+    """
+    from remote import bc_job
+
+    real = bc_job.resolve_ppo_backend
+    monkeypatch.setattr(
+        nbr, "_resolve_backend", _REAL_RESOLVE_BACKEND
+    )  # 撤掉 autouse 的 torch 假货
+    monkeypatch.setattr(bc_job, "resolve_ppo_backend", lambda req: f"paddle:{req}")
+    assert nbr._resolve_backend() == "paddle:auto"
+    monkeypatch.setattr(bc_job, "resolve_ppo_backend", real)
+
+
+# ------------------------------------------------------------------ _run_probe 三态
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_probe_reads_last_json_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        nbr,
+        "run_capture",
+        lambda argv, timeout=0: _FakeCompleted(
+            stdout="一些噪声\n" + '{"v": "3.3.1", "n": 1, "names": ["A100"]}\n'
+        ),
+    )
+    assert nbr._run_probe(lambda m: None, "code", "paddle") == {
+        "v": "3.3.1",
+        "n": 1,
+        "names": ["A100"],
+    }
+
+
+def test_run_probe_nonzero_rc_is_err_not_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rc≠0 = 「装了但崩」这一档的证据 ⇒ 必须是 `{"err"}`，不能混进 `None`（未知）。
+
+    判据只钉**结构**（err 字典 / 键集），不钉 err 文案 —— 文案是内部串，不是交付物。
+    """
+    monkeypatch.setattr(
+        nbr,
+        "run_capture",
+        lambda argv, timeout=0: _FakeCompleted(returncode=3, stderr="boom\n"),
+    )
+    out = nbr._run_probe(lambda m: None, "code", "paddle")
+    assert out is not None and set(out) == {"err"}
+    assert out["err"] != ""
+
+
+def test_run_probe_unparsable_output_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        nbr, "run_capture", lambda argv, timeout=0: _FakeCompleted(stdout="not json\n")
+    )
+    assert nbr._run_probe(lambda m: None, "code", "paddle") is None
 
 
 # ------------------------------------------------------------------ _tpu_holders
