@@ -529,9 +529,19 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 起因：装甲占比与胜率的相关性 −0.461（地形全部 ≈0），最差 6 关全是 armor ≥20%。
   // 0 = OFF（纯最近优先，A23 原行为）。
   finisherBias: 0,
-  // A28 (2026-10-26): 追「要打好几发」的目标时在**追击评分**里加这么多格的惩罚
-  // （先清一枪能打死的）。0 = OFF（逐字节等同）。
-  armorChasePenalty: 0,
+  // A28 (2026-10-26, 修正并 SHIPPED 2026-10-27): 追「要打好几发」的目标时，在**追击评分**
+  // 里按「还需几发 − 1」× 本值加格数惩罚 —— 优先清掉快死的，别让 4 发装甲把射速预算吃光
+  // （装甲占比与胜率相关性 −0.461，最差 6 关全 armor ≥20%）。
+  //
+  // 两次实现错误的复盘（`docs/godai-failed-ideas-audit.md`）：
+  //   ① `hp` 是**伤害点**（100..500）不是发数 ⇒ 原判据 `hp > 1` 对每个敌人都成立，
+  //      惩罚被加给所有人 ⇒ 排序不变（实测 700/700 逐局相同）；
+  //   ② 惩罚只挂在 `huntModeTarget`（canHunt 残局分支），而 90% 的选目标走
+  //      `normalSelectionTarget` 的最近敌级联 ⇒ 即使修好单位也照样空转（350/350）。
+  // 修好后 35×60 配对：hard **83.5%→85.8%（+2.24pp, t=2.70）**、kills +380、
+  // suite 0.6567→0.6909；classic −0.62pp(t=−0.88) ⇒ 由 CLASSIC_OVERRIDES 还原 0；
+  // chaos −0.10pp(t=−0.11) ⇒ 噪声，保留 1。
+  armorChasePenalty: 1,
   // A29 (2026-10-26): 场上存活总 HP ≥ 此值时进入「质量模式」（不放开火预算：关 P2.4
   // 预测穿越 + 只打覆盖走廊的目标）。0 = OFF。逐关相关性：win vs 总 HP = −0.472。
   qualityFireHp: 0,
@@ -903,6 +913,11 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // god-merge 移植注记：原提交 1e115eb4 同捆的「躲炮口」（muzzleEscapeMode）
   // 三档实测全负/中性、方向已关闭，未移植。
   dodgeCounterFire: 1,
+  // A28: the focus-fire chase surcharge is a POOL-model win (+2.24pp on hard)
+  // and a small loss under `instant` (classic −0.62pp, t=−0.88) — the 1-bullet
+  // cap already forces every shot to be a commitment, so spending travel time
+  // to pick a weaker target does not pay. Same pattern as §115's M4 restore.
+  armorChasePenalty: 0,
   replanInterval: 50,
   // §233: decision-chain throttle is a pool-model (hard/chaos) perf fix —
   // classic instant 1-HP 未 A/B，restore 1（byte-identical classic gate）。
@@ -1086,6 +1101,9 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   navStuckSuppressTicks: 0,
   // §186: guards don't use powerup stuck detection.
   powerupStuckTicks: 0,
+  // A28: the guard profile stays byte-identical to the pre-A28 era — guard
+  // behaviour is replay-locked by the SP regression line (§159/§160 yield).
+  armorChasePenalty: 0,
   // §169: guards keep the raw (non-sticky) threat signal — their defense
   // behavior is replay-locked (same reason navBreakStuck is zeroed above).
   threatStickyTicks: 0,

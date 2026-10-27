@@ -96,6 +96,23 @@ export const COUNTER_FIRE_RANGE_CELLS = 5
  *  arithmetic where fractional ticks are intentional. */
 export const msToTicksFloat = (ms: number): number => Math.max(0, ms / TICK_MS)
 
+/**
+ * Shots-to-kill from a tank's raw `hp`.
+ *
+ * ⚠ UNIT TRAP (2026-10-27): `Tank.hp` is in **damage points**, not in shots —
+ * a basic enemy carries `hitsToKill.basic × referenceDamage` = 100..500 HP
+ * while one player shell deals ~100. Three shipped-then-rejected experiments
+ * (A27 finisherBias, A28 armorChasePenalty, A29 qualityFireHp) compared raw
+ * `hp` against shot-sized thresholds (`hp > 1`, `pool >= 30`), which is
+ * *always true* — so one of them was silently "always ON" and the other two
+ * were provably inert (A28 measured byte-identical 700/700). Always convert
+ * through this helper. Measured hard alive-pool: p50 = 7 shots, p90 = 10.
+ */
+export function shotsToKill(hp: number, referenceDamage: number): number {
+  const dmg = referenceDamage > 0 ? referenceDamage : 100
+  return Math.max(1, Math.ceil(hp / dmg))
+}
+
 /** Integer ms→ticks (rounded, min 1). Used by CoveragePlanner and
  *  ActionCandidates for ETA models where whole-tick precision suffices. */
 export const msToTicksInt = (ms: number): number => Math.max(1, Math.round(ms / TICK_MS))

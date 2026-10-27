@@ -11,7 +11,7 @@
 // order, so behavior under default params is byte-identical to pre-M1.
 import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS, TANK, RESPAWN_SHIELD_MS } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
 import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
 import { turnWillCommit } from './turn-gate'
@@ -42,6 +42,7 @@ import { SUICIDE_RETURN } from './candidates/SuicideReturn'
 
 import { manhattan } from '../../utils/helpers'
 import { findEnemyDirectionImpl } from './FireControl'
+import { shotsToKill } from './constants'
 import type { GodAIParams } from './params.interface'
 
 /**
@@ -279,6 +280,17 @@ export function thinkImpl(self: GodAIInput): void {
   // undefended (the #1 cause of 330-tick base losses in classic).
   const shielded = (p.shieldTimer ?? 0) > 0
 
+  // A31b (2026-10-27): `shieldTimer` is shared by THREE sources with very
+  // different meanings — respawn shield (3s, `RESPAWN_SHIELD_MS`), star-grace
+  // (1.5s) and the SHIELD POWER-UP (20s, `POWERUP_DURATION_MS`, additive).
+  // A31/A35b were written against "the 20-second invincible window" but gated
+  // on `shieldTimer > 0`, so ~45% of their triggers fired in the 3-second
+  // window right after a DEATH — the worst possible moment to abandon the
+  // defence (measured hard: 374 respawn/star ticks vs 456 power-up ticks per
+  // game). `shieldTimer > RESPAWN_SHIELD_MS` is exact: only the power-up can
+  // push the timer above the respawn cap.
+  const powerupShielded = (p.shieldTimer ?? 0) > RESPAWN_SHIELD_MS
+
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   self.aggressive = frozen
 
@@ -371,11 +383,15 @@ export function thinkImpl(self: GodAIInput): void {
   // 逐关尸检：胜率与「本关敌人总血量」的相关性 **−0.472**（比 armor 占比 −0.461 更强；
   // 地形全部 ≈0）。机制：每局射速上限固定（~64 发），血量池越大，每一发低质量弹的机会成本
   // 越高。而三成命中率的「预测穿越」弹在低血关是赚的，在高血关就是在烧预算。
-  // ⇒ 当**场上存活总 HP ≥ 阈值**时进入「质量模式」：关掉 P2.4 预测穿越 + 只打真正覆盖
-  //    19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  // ⇒ 当**场上存活总 HP ≥ 阈值（按「发数」计）** 时进入「质量模式」：关掉 P2.4 预测穿越 +
+  //    只打真正覆盖 19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  // ⚠ 2026-10-27 修正：`hp` 是伤害点，原实现 `pool += hp` 后与 10/16/30 比 ⇒ 恒真，
+  //   三档实测 **350/350 逐局一致** = 悄悄变成「质量模式永远开」。改成
+  //   `hp / referenceDamage`（发数）后阈值才有梯度；hard 存活池实测 p50=7、p90=10。
   if (self.params.qualityFireHp > 0) {
+    const ref = w.rules.referenceDamage
     let pool = 0
-    for (let i = 0; i < self._enemies.length; i++) pool += self._enemies[i].hp ?? 1
+    for (let i = 0; i < self._enemies.length; i++) pool += (self._enemies[i].hp ?? 1) / ref
     self._hpPressureActive = pool >= self.params.qualityFireHp
   } else {
     self._hpPressureActive = false
