@@ -25,11 +25,20 @@ hub_client 已到 993 行，wire-diet 的钩子面（+~9 行）必越线。拆�
 
 from __future__ import annotations
 
+import hashlib
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from common.payload import MemberBytes
+from common.payload import (
+    PAYLOAD_PERTURB_NAME,
+    PAYLOAD_XZ_CHUNKS,
+    PAYLOAD_XZ_PRESET,
+    TAR_END,
+    MemberBytes,
+    root_segment,
+    shard_segment,
+)
 from common.platform_utils import rmtree_best_effort
 from common.protocol import ProtocolError, pack_payload, unpack_payload
 
@@ -107,6 +116,75 @@ def _payload_reader_selfcheck(
     return True, ""
 
 
+
+def _pack_segmented(
+    shard_dirs: Sequence[Path],
+    zip_path: Path,
+    *,
+    extra_files: Sequence[Path],
+    perturb: bytes | None,
+    member_bytes: Callable[[Path, str], MemberBytes] | None,
+    shard_extra: Callable[[Path], Mapping[str, bytes]] | None,
+    chunks: int,
+    presegmented: Mapping[str, bytes] | None,
+) -> str:
+    """分块并行打包：每 shard 一段 tar → 各自 lzma → 按名排序拼接 + 根级段 + `TAR_END`。
+
+    **为什么这段在 remote/ 而不是 common/payload.py**：`common.payload` 的 import 面是
+    **闭集**（`tests/common/test_payload_split.py` 钉着），不许引 `lzma` / `concurrent.futures`；
+    而分块并行同时需要这两个。字节构造（`ustar_header` / `shard_segment` / `root_segment`）
+    留在 common（纯 stdlib 基础），调度留在这一层。
+
+    `presegmented`（shard 名 → **已压好的段字节**）= dispatch 腿的零落盘入口：那边收到
+    sampler 回传的字节就把段压好存住，这里直接取用；缺的（local 兜底腿 / 补漏）现场从盘补，
+    **同一个 `shard_segment` 函数体**，没有第二条变换逻辑。
+    """
+    import concurrent.futures as cf
+    import lzma as _lzma
+
+    dirs = {Path(d).name: Path(d) for d in shard_dirs}
+    names = sorted(dirs)  # 确定性：同内容必同字节序 ⇒ 同 sha
+
+    def seg_one(nm: str) -> bytes:
+        pre = (presegmented or {}).get(nm)
+        if pre is not None:
+            return pre
+        d = dirs[nm]
+        on_member: Callable[[str, str, bytes], MemberBytes] | None = None
+        if member_bytes is not None:
+
+            def on_member(_nm: str, fname: str, _data: bytes, _d: Path = d) -> MemberBytes:
+                return member_bytes(_d, fname)
+
+        extra = shard_extra(d) if shard_extra is not None else None
+        seg = shard_segment(nm, shard_dir=d, on_member=on_member, extra_members=extra)
+        return _lzma.compress(seg, preset=PAYLOAD_XZ_PRESET)
+
+    parts: list[bytes] = []
+    if names:
+        with cf.ThreadPoolExecutor(max_workers=max(1, min(chunks, len(names)))) as ex:
+            parts = list(ex.map(seg_one, names))
+
+    root: dict[str, bytes] = {}
+    for xf in extra_files:
+        fx = Path(xf)
+        if fx.is_file():
+            root[fx.name] = fx.read_bytes()
+    if perturb is not None:
+        root[PAYLOAD_PERTURB_NAME] = bytes(perturb)
+    if root:
+        parts.append(_lzma.compress(root_segment(root), preset=PAYLOAD_XZ_PRESET))
+    parts.append(_lzma.compress(TAR_END, preset=PAYLOAD_XZ_PRESET))
+
+    tmp = zip_path.with_suffix(zip_path.suffix + ".tmp")
+    h = hashlib.sha256()
+    with open(tmp, "wb") as fh:
+        for b in parts:
+            fh.write(b)
+            h.update(b)
+    tmp.replace(zip_path)
+    return h.hexdigest()
+
 def pack_payload_zip(
     shard_dirs: list[Path],
     extra_files: list[Path],
@@ -115,6 +193,8 @@ def pack_payload_zip(
     *,
     member_bytes: Callable[[Path, str], MemberBytes] | None = None,
     shard_extra: Callable[[Path], Mapping[str, bytes]] | None = None,
+    chunks: int = PAYLOAD_XZ_CHUNKS,
+    presegmented: Mapping[str, bytes] | None = None,
     log=lambda msg: None,
 ) -> str:
     """把 shard 目录 + 额外文件（有 opt blob 时仅 shard；否则含 init_weights.json）
@@ -146,12 +226,27 @@ def pack_payload_zip(
     last_why = ""
     for attempt in range(1, PAYLOAD_SELFCHECK_ATTEMPTS + 1):
         perturb = None if attempt == 1 else f"repack-{attempt}".encode("ascii")
-        sha = pack_payload(
-            shard_dirs,
-            manifest,
-            zip_path,
-            extra_files=list(extra_files),
-            perturb=perturb,
+        if chunks > 1 or presegmented:
+            # ★ 2026-10-27：分块并行（默认 8 块）—— 见 `_pack_segmented` 的 docstring。
+            #   `chunks == 1` 且无 presegmented ⇒ 走下面 `pack_payload` 的逐字节旧行为。
+            #   **自检照走**（外层 for attempt 循环把它俩同等对待，否则分块路径没有护栏）。
+            sha = _pack_segmented(
+                shard_dirs,
+                Path(zip_path),
+                extra_files=list(extra_files),
+                perturb=perturb,
+                member_bytes=member_bytes,
+                shard_extra=shard_extra,
+                chunks=int(chunks),
+                presegmented=presegmented,
+            )
+        else:
+            sha = pack_payload(
+                shard_dirs,
+                manifest,
+                zip_path,
+                extra_files=list(extra_files),
+                perturb=perturb,
             member_bytes=member_bytes,
             shard_extra=shard_extra,
         )
