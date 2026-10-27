@@ -492,7 +492,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // t=−1.73，但整张表只有 3 局翻盘且全向下）⇒ classic 经 CLASSIC_OVERRIDES restore 0
   // （与 baseLaneSentry §198 / defenseIntercept §134 同规）。机制侧证据：把「本该被
   // 反应式拦截（t8）的子弹」提前消掉 —— t8 触发 45 → 2 次 / 140 局。
-  baseLaneSealMode: 1,
+  //
+  // mode 2 (2026-10-27, SHIPPED): 预封线 —— leash 从「到射手」改成「到封线格」，
+  // 并把「破环者 / 停滞在通透列上的敌人」纳入目标；**只在基地两列都没有钢的关卡**
+  // 生效（钢对敌人永久，其余关卡本就不存在狙击列）。35 关里只有 s8 Riverbed /
+  // s14 Steel Web / s21 Checkers / s34 Battlement 过门。
+  // 35×60：hard +0.14pp(t=0.43, kills +60) · classic −0.05pp(t=−0.45, 36 局变化) ·
+  // chaos **+0.71pp(t=2.35, kills +214)**；**Riverbed hard 58%→65%**，其余 31 关逐关不变。
+  baseLaneSealMode: 2,
   baseLaneSealMinDist: 8,
   baseLaneSealRange: 14,
   // csb-only（只封「直射基地」的射手，不提前封拆环者）：35×20 上 +0.71pp(t=0.66)

@@ -59,7 +59,8 @@ function ctxOf(w: World): DecisionContext {
 
 describe('A9 — baseLaneSeal', () => {
   it('ships ON (classic restore 0) and sits between closePickup(540) and midLaneDefense(545)', () => {
-    expect(DEFAULT_GOD_AI_PARAMS.baseLaneSealMode).toBe(1)
+    // A9 mode2 纪元（2026-10-27）：默认升级为预封线（只在无钢中路生效）。
+    expect(DEFAULT_GOD_AI_PARAMS.baseLaneSealMode).toBe(2)
     // classic 是 bulletCap 1 的单发对枪，实测只坏不好 ⇒ 覆盖表里回退 0。
     expect(CLASSIC_MODEL_PARAMS.baseLaneSealMode).toBe(0)
     // 默认只封「直射基地」的射手。

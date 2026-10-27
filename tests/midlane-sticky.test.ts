@@ -54,6 +54,9 @@ function runRiverbed(
       lateHuntMode: 0,
       // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
       turnToFireMode: 0,
+      // A9 mode2 纪元（2026-10-27）：预封线在 Riverbed（无钢列）会改变本 seed 的走向；
+      // 本用例钉的是 midLaneSticky 自己的机制 ⇒ 固定回 mode-1 口径（同上面三条的隔离惯例）。
+      baseLaneSealMode: 1,
       ...params,
     },
     godRng,

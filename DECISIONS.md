@@ -12377,3 +12377,84 @@ classic −0.14pp（只有 3 局翻盘且全向下）⇒ classic restore 0。
 `bun run check` 2626 pass / 0 fail · `bun run build` 过 · `freeze:check` 绿
 （`a492627b…` 不变：新代码只在 `enemyModelMode > 0` 时生效）。
 普查全文：`docs/godai-off-knobs-census.md`。
+
+## §2026-10-27-godai-battlement-riverbed — 两关顽疾尸检：败因是"已开通的中路列 + 远距狙击"，预封线未过关（默认仍 1）
+
+**结论先行**：Battlement / Riverbed 的失败 **100% 是丢基地**（hard 60 局：30/25 负，
+0 局命数耗尽）。致命弹不是贴脸凿穿打出来的：丢基地那一刻基地 3 格内敌人中位数 **0**，
+发射点在 **row 2–5**（Riverbed 11/17、Battlement 8/19），方向 `down`，沿**敌人自己挖通的
+中路列**飞 19–22 格（≈80 拍）。两关每局被敌人拆掉基地列 12.8 / 18.4 块砖（9.6 块在
+row 0–15），玩家自己只拆 0.2 / 1.8 块。
+
+**防线为何空转**：`enemyCanShootBase` 占 **9.9%** tick、`isBaseUnderThreat` 14–33%，
+但 `baseLaneSentry` 只占 **0.0–0.2%**、`baseLaneSeal` 1.5%。两者都按**到射手**的距离
+设 leash（6 / 14 格），20 格外的狙击手在包线之外；sentry 的站位分支还写死 `!bestCsb`。
+即：**现有防线是"射手包线"，而威胁是"已开通的列"**。
+
+**试过的修法（`baseLaneSealMode: 2`，实现保留、默认关）**：leash 改为"到封线格"，
+并把"敌人站在通透列上"纳入目标。35×60：
+
+| 难度 | Δ胜率 | t |
+|---|---|---|
+| hard | **−0.86pp** | **−2.09** |
+| classic | −0.05pp | −0.33 |
+| chaos | +0.52pp | +1.29 |
+
+宽松触发版曾给出硬数据：全局 0.00pp、**Riverbed 58→65（+7pp）**、Battlement 50→50，
+但 **Brickworks 88→78 / Twin Towers 98→90** —— "把击杀让给守线"的等价交换，不是免费收益。
+变体（基地受损才封 / 只封朝基地挖的 / sentry range 10）在 4 关上都回到 −0.8pp 量级。
+⇒ **不发货**，`baseLaneSealMode` 默认保持 1。
+
+**下一步（本轮未做，已量化）**：① `fence` 会把环换成钢 15s、每局已拾取 0.42–0.57 次，
+但拾取即生效 —— 把 fence 的**路线优先级**接到"环已破/列已通透"上，比让玩家堵枪眼便宜；
+② 贴脸 csb（Battlement 7/19）需要一条"先对齐再打"的最短动作，现有候选全部短路；
+③ Riverbed 只有中路一条故事线，①若成立收益应集中在这里。
+
+**实现**：`BaseLaneSeal.ts` 新增 `evalPreSeal` + `columnClearToTop`（mode 1 函数体逐字未动）；
+新增 `baseLaneSealCellRange`（14）；`tests/godai-base-lane-preseal.test.ts` 4 例。
+`freeze:check` 绿（默认签名不变）· `bun run check` 全绿。
+尸检全文：`docs/godai-battlement-riverbed.md`。
+
+## §2026-10-27-godai-a9-preseal-steelgate — A9 mode2 预封线「只在无钢中路」发货：Riverbed 58%→65%，hard 86.1% / chaos 83.2%
+
+**用户裁定**：预封线只用于**中路没有钢铁障碍**的关卡。成立，已发货。
+
+### 一、为什么这个门是对的
+
+钢对敌人**永久**（只有 ★3 玩家能击穿）⇒ 有钢的列根本不存在"狙击列"，预封线在那里的
+唯一作用是把玩家从战场拽到一条打不通的列上。35 关基地两列（c12/c13, rows 0–23）的钢数：
+
+```
+s8 Riverbed 0 · s14 Steel Web 0 · s21 Checkers 0 · s34 Battlement 0
+其余 31 关 2–24 块（Iron Curtain 24 / Ramparts 22 / Brick Maze 12 …）
+```
+
+宽触发版亏得最惨的 **Brickworks（钢 4）−10pp / Twin Towers（钢 8）−8pp** 正好在门外。
+
+### 二、两个实现细节（都踩过，写进注释）
+
+1. **门必须「回落」，不能「短路」**：第一版在门不通过时 `return false`，等于在 31 关
+   把已发货的 mode-1 封线一起关掉 —— 于是 Brickworks −4 / Twin Spires −6 / Brick Maze −6
+   全是"丢了 mode-1"的假损失。改成门不过就继续跑原函数体后，31 关逐关字节一致。
+2. **关卡级、不是列级**：只挡"当前这一列"时，另一列照样漏（Twin Spires −6 / Brick Maze −6）。
+
+### 三、实测（35×60，真实 stageIndex、CRN）
+
+| 难度 | Δ胜率 | t | kills | suite |
+|---|---|---|---|---|
+| hard | **+0.14pp** | 0.43 | +60 | 0.6909 → 0.6947 |
+| classic | 0（`CLASSIC_OVERRIDES` 仍 restore 0） | — | — | — |
+| chaos | **+0.71pp** | **2.35** | +214 | 0.6435 → 0.6556 |
+
+逐关（hard）：**Riverbed 58%→65%（+7pp）** · Steel Web 88→87 · Checkers 82→82 ·
+Battlement 50→50（mean 0.571→0.573）；其余 31 关逐关字节一致（133/2100 局变化）。
+2100 局的 +0.14pp 是"4 关的账 ÷ 35"，统计上是噪声 —— **价值在 Riverbed，不在均值**；
+chaos 的 +0.71pp(t=2.35) 是附带真信号。
+
+新纪元基线：**hard 86.1% / 0.6976 / 0.8541** · **classic 88.3% / 0.7321 / 0.8730** ·
+**chaos 83.2% / 0.6548 / 0.8344**；golden `a492627b… → ea915876…`。
+`GUARD_GOD_AI_PARAMS` 无基地 ⇒ 该候选不参与；classic 走 override 0。
+
+**门禁**：`bun run check` 全绿 · `build` 过 · `freeze:check` 绿（新钉）。
+新增用例：钢门（左列一块钢 ⇒ 预封线不接管、回落到 mode-1 行为）。
+尸检与追加分析：`docs/godai-battlement-riverbed.md`。
