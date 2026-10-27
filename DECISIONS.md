@@ -8707,3 +8707,48 @@ classic −0.14pp（只有 3 局翻盘且全向下）⇒ classic restore 0。
 `freeze:check` 绿（新钉 `a492627b…`）· 新增 `tests/godai-armor-chase.test.ts`
 （4 例：单位换算 ×2 + 选目标排序 ×2，后者直接钉住「惩罚 0 追最近的 5 发装甲 /
 惩罚 1 改追 3 格外的 1 发残兵」）。
+
+## §2026-10-27-godai-off-knobs-census — 37 个历史 OFF 旋钮普查：24 个真开过、8 个是死开关、0 个能翻正
+
+**结论先行**：按 `ARCHIVED_KNOB_GROUPS` 的文档开启值把 37 个旋钮全部跑了一遍
+（hard 35×4 = 140 局 CRN 配对，可疑项再上 60 seeds）。与 A28 那批不同：
+**历史判词这次基本正确**——没有任何一个 OFF 想法在 60-seed 上翻正
+（carvePath +0.71@140 → −0.86@2100；actionContractMode +1.43@140 → −0.52@2100）。
+真正的发现是 **8 个旋钮从来没被真正打开过**（0–2/140 局变化）。
+
+### 一、死开关（不是想法无效，是代码路径没走到）
+
+| 旋钮 | 死法 | 证据 |
+|---|---|---|
+| `enemyModelMode` | ① `enemyModelWindowTicks` 出厂 0，而更新点与所有消费方都要求 >0；② `reset()` 顶部用**自适应前**的 `this.params` 解析 `_enemyModel.active`（同一函数里先读后写） | 0/350 → **已修，23/350** |
+| `defensePosStandable` | **0 个读取点**（A8 `defenseCellResolve` 无条件取代） | 0/140 |
+| `playerHpAwareness` | 只在 `dodgeHorizonCommit`（M9，默认关）内部被读 ⇒ 寄生在输掉的父机制里 | 0/140 |
+| `defenseInterceptPredictCells` | 判据被 §134 包含（能进预测窗的敌人早已 `enemyCanShootBase`） | 0/140 |
+| `defenseInterceptDigBricks` | 预测窗 ≤3 格 ⇒ 挡道砖必然是基地环砖 ⇒ `!scan.baseWall` 恒假 | 0/140 |
+| `suicideReturnMode` | 五条件合取实测 **0.02 tick/局**（「弹打我」∩「弹打基地」几乎互斥） | 1/140 |
+| `dodgeCentroidMode` / `dodgeClearanceScore` | ≥2 弹同域才生效，且解与默认 dodge 同向 | 0/140 |
+
+### 二、修复（唯一的代码改动，默认行为不变）
+
+- `GodAIInput` 构造函数：`enemyModelMode > 0 && enemyModelWindowTicks <= 0` ⇒ 补
+  `ENEMY_MODEL_DEFAULT_WINDOW_TICKS`（120）。`reset()` 保留同一条兜底（覆盖阶段自适应）。
+- 修后 `enemyModelMode:1 + tierWeightScale:1` = **23/350 局变化、胜负中性**
+  （+0.00pp / kills 0 / suite +0.004）⇒ 机制真的在跑，只是不赚钱。
+- `params.interface` + `ARCHIVED_KNOB_GROUPS`：`defensePosStandable` 标 **RETIRED**
+  （0 读取点，勿再接线）。
+- 新增 `tests/godai-enemy-model-wiring.test.ts`（3 例：mode 自启窗口 / mode 0 惰性 /
+  显式窗口优先）。
+
+### 三、真负向（重新确认，含剂量修正）
+
+`candidateMode` −13.6pp · `firingLaneMode` −18.6pp · `baseGuardAnchorMode` −9.3pp ·
+`pathTargetMode` −8.6pp · `huntCommitTicks` −6.4pp · `intentMode` −5.7pp ·
+`coverageMode` −4.3pp · `brickHeavy*` −4.0pp · `dodgeHorizonScore` −3.6pp ·
+`midLaneHold` −2.9pp · `evasionSteelOcclusion` −2.9pp · `direItemMode` −1.4pp ·
+`defenseBreachBonus:300` −1.1pp · `defenseInterceptPredict6+Dig` −1.1pp。
+
+### 四、门禁
+
+`bun run check` 2626 pass / 0 fail · `bun run build` 过 · `freeze:check` 绿
+（`a492627b…` 不变：新代码只在 `enemyModelMode > 0` 时生效）。
+普查全文：`docs/godai-off-knobs-census.md`。

@@ -546,10 +546,13 @@ export interface GodAIParams {
   /** §164: enemy within this many cells of the lane keeps the hold active when no shell is in the column. */
   midLaneHoldEnemyDist: number
   /**
-   * §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12,
-   * 24-offset) 在全部 35 关都是环砖格，A* 到砖格目标返回空路径 → 回防路由失效
-   * （S8 实测 corridor=0 breakBrick=0）。开启时：默认点不可站则在小盒内扫最近
-   * 可站格。0 默认 OFF → byte-identical。
+   * ⚠ RETIRED (2026-10-27 audit) — **zero read sites**. A8 (`defenseCellResolve`,
+   * shipped 1) replaced this path unconditionally: the defense cell is resolved
+   * to a standable cell for every caller. Measured `defensePosStandable: 1` =
+   * 0/140 games different, because the field is never read.
+   *
+   * Kept only so old A/B scripts / archived profiles still typecheck; setting
+   * it has no effect. Do NOT re-wire it — use `defenseCellResolve`.
    */
   defensePosStandable: number
   /** 远位触发阈值：仅当玩家距基地超过该格数时启用集合点回退（近基 byte-identical）。 */
@@ -2835,7 +2838,7 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   { gate: 'defenseInterceptDigBricks', note: '方向 D 破砖版 (§136, byte-identical)' },
   {
     gate: 'defensePosStandable',
-    note: 'A8 取代 —— 见 defenseCellResolve（§146B 收窄版外全关, §149 边际≈0）',
+    note: 'RETIRED：0 个读取点（A8 defenseCellResolve 已无条件取代）。实测 0/140 局变化，勿再接线',
   },
   { gate: 'iceGlideControl', note: '+ minSpeed 子参数 (§145, S24 难度地板关)' },
   { gate: 'defenseBreachBonus', note: 'D2 拆环威胁评分 (§141)' },
