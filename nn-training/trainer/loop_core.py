@@ -29,6 +29,7 @@ from typing import Any
 
 from common.log import log
 from common.proc import run_capture
+from remote.payload_pack import ShardSegments
 from trainer.dispatch_queue import REPO_ROOT
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_lifecycle import TrainingLifecycle
@@ -165,6 +166,10 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._save_weights_json: Any = None
         self._traj_root = Path(args.traj)
         self._jsonl_path: Path = self._traj_root / "training_log.jsonl"
+        #: 零落盘（plan/payload-zero-disk §3）：本轮 dispatch 腿收到的 shard 段账。
+        #: 生命周期 = 一轮（`begin(it)` 换轮即清空）；rollout 期填、打包期取。
+        #: 放组合根是因为两个派发入口（首波/补波）与远端发布分属三个混入。
+        self._payload_parts = ShardSegments()
         #: M3（plan/ppo-job-lifecycle-ownership §4）：重发意图的「坏文件只喊一次」去重。
         self._redo_err_note = ""
         # M2（plan/ppo-job-lifecycle-ownership §3）：腿启动 = 上一代 runId 的活整体作废

@@ -68,6 +68,14 @@ PAYLOAD_PERTURB_NAME = "payload.perturb"
 #    2,074,996 B → 仅打 shard 后 1,198,096/1,187,392/1,227,432 B（**−41.4%/−41.6%/−40.8%**）。
 PAYLOAD_XZ_PRESET: Literal[3] = 3
 
+#: payload 分块并行的**块数**（2026-10-27）。`1` = 逐字节旧行为（tarfile 边打边压、单流）。
+#: 为什么默认 8：`tarfile.addfile`/`TarInfo.tobuf()` 是纯 Python 持 GIL（实测 648 shard
+#: 打段 8.5 s，比 lzma 压缩 5.0 s 还贵）；换成手写头 + 线程池后**打段+压 7.6 s**
+#: （单流基线 50.0 s，6.6×），体积只 +1.8%（同口径比 tarfile 版）。xz 支持串联流，
+#: 所以分块对**解包侧零改动**（实测 648 段：成员 9072/9072、字节逐位一致）。
+#: 块数不是越大越好：块越小 → 每块字典重建 → 压缩率越差（8 块 +0.4%、16 块 +0.6%）。
+PAYLOAD_XZ_CHUNKS = 8
+
 
 #: 「这个成员**不要**进归档」的哨兵（与 `bytes` / `None` 分列：`None` = 原样保留）。
 #: 为什么要有第三种结局：wire-diet（`plan/wire-diet.plan.md` §3 P1）要**丢掉** metrics.npy、
@@ -102,6 +110,124 @@ def _add_bytes(tf: tarfile.TarFile, name: str, data: bytes) -> None:
     ti = tarfile.TarInfo(name)
     ti.size = len(data)
     tf.addfile(ti, io.BytesIO(data))
+
+
+# ---------------------------------------------------------------- 手写 ustar 段（2026-10-27）
+# 为什么不用 `tarfile` 打段：`TarInfo.tobuf()` + `addfile` 是纯 Python 且持 GIL
+# （实测 8424 个头 8.1 s，比 lzma 压缩 5.0 s 还贵），`addfile` 还会 `copyfileobj` 一遍、
+# `BytesIO.getvalue()` + 切片各复制一遍。改成「手写 512B 头 + bytearray 直接拼」后
+# 648 shard 打段 8.47 s → **3.42 s**（其中 2.1 s 是读盘），且与 `TarInfo`（固定字段口径）
+# **逐字节相同**（`tests/common/test_payload_segment.py` 钉着）。
+
+#: ustar 头的固定字段（**统一固定**，不模仿 `tf.add` 的源文件 mtime/mode/uid/uname）。
+#: 代价：payload 字节与旧路径不同；收益：**同内容必同 sha**（旧路径受文件 mtime 影响会漂）。
+TAR_MTIME = 0
+TAR_MODE = 0o644
+
+
+def ustar_header(name: str, size: int) -> bytes:
+    """一个 512B ustar 成员头（与 `TarInfo(name, size, mtime=0, mode=0o644, uid=gid=0,
+    uname=gname='').tobuf()` 逐字节相同）。
+
+    超过 100 字节的名字要走 PAX 扩展头 —— 本实现**响亮拒绝**（不静默降级成错误的头）：
+    我们的成员名最长是 `rl_s{stage}_seed{seed}/{file}`，实测 25–38 字节。
+    """
+    nb = name.encode()
+    if len(nb) > 100:
+        raise ValueError(f"tar 成员名超过 100 字节（需 PAX 扩展头，本实现不支持）：{name!r}")
+    h = bytearray(512)
+    h[0 : len(nb)] = nb
+    h[100:108] = b"%07o\x00" % TAR_MODE
+    h[108:116] = b"%07o\x00" % 0  # uid
+    h[116:124] = b"%07o\x00" % 0  # gid
+    h[124:136] = b"%011o\x00" % size
+    h[136:148] = b"%011o\x00" % TAR_MTIME
+    h[148:156] = b" " * 8  # checksum 先填空格，再按「空格参与求和」补回
+    h[156] = 0x30  # typeflag '0' = 普通文件
+    h[257:263] = b"ustar\x00"
+    h[263:265] = b"00"
+    h[148:156] = b"%06o\x00 " % sum(h)
+    return bytes(h)
+
+
+def shard_segment(
+    shard_name: str,
+    members: Mapping[str, bytes] | None = None,
+    *,
+    shard_dir: str | Path | None = None,
+    on_member: Callable[[str, str, bytes], bytes | _DropMember | None] | None = None,
+    extra_members: Mapping[str, bytes] | None = None,
+) -> bytes:
+    """把一个 shard 打成 **一段 tar 字节**（成员头 + 数据 + 512 对齐；**无结尾 1024B 标记**）。
+
+    为什么是「一段」而不是整份 tar：分块并行压缩 + 「收到就压」都要求段边界稳定。
+    xz 支持**串联流**，把 N 段各自压完按序拼接仍是合法 `.tar.xz`
+    （实测 648 段：`tarfile` 完整解回 8424/8424 成员、字节逐位一致）。
+
+    `members` 给了 = 用内存 dict（dispatch 腿，shard 还没落盘）；否则从 `shard_dir` 读盘
+    （local 兜底腿 / 打包时补漏）。**两条腿走同一行代码**，只差数据来源。
+
+    `on_member(name, filename, data)` 是逐成员变换（`member_bytes` 的 slim 语义）：
+    返回 `bytes` = 替换、`None` = 原样、`DROP_MEMBER` = 丢弃。
+    `extra_members` = 该 shard 额外要加的成员（`shard_extra` 现算的 `reward.npy` 等），
+    与磁盘成员**同名即拒**（重复 arcname 会由解包顺序决定训练吃哪份）。
+    """
+    if members is None:
+        if shard_dir is None:
+            raise ValueError("shard_segment 需要 members（内存）或 shard_dir（读盘）之一")
+        p = Path(shard_dir)
+        if not p.is_dir():
+            raise ProtocolError(f"shard_segment: shard 目录不存在 {p}")
+        members = {f.name: f.read_bytes() for f in sorted(p.iterdir()) if f.is_file()}
+
+    out = bytearray()
+    seen: set[str] = set()
+    for fname in sorted(members):
+        data = members[fname]
+        got = on_member(shard_name, fname, data) if on_member is not None else None
+        if isinstance(got, _DropMember):
+            continue
+        seen.add(fname)
+        payload = data if got is None else got
+        out += ustar_header(f"{shard_name}/{fname}", len(payload))
+        out += payload
+        pad = (-len(payload)) % 512
+        if pad:
+            out += bytes(pad)
+    for xname, xdata in sorted((extra_members or {}).items()):
+        if xname in seen:
+            raise ProtocolError(
+                f"shard_segment: shard {shard_name} 的额外成员 {xname} 与盘上成员同名"
+                "——重复 arcname 会由解包顺序决定训练吃哪份（偶然语义），拒绝打包"
+            )
+        xb = bytes(xdata)
+        out += ustar_header(f"{shard_name}/{xname}", len(xb))
+        out += xb
+        pad = (-len(xb)) % 512
+        if pad:
+            out += bytes(pad)
+    return bytes(out)
+
+
+#: tar 的结尾标记（两段 512B 零块）—— 串联流的**最后一段**必须带上它。
+TAR_END = bytes(1024)
+
+
+def root_segment(members: Mapping[str, bytes]) -> bytes:
+    """归档**根级**成员的一段 tar（`extra_files` / `perturb`：arcname 不带 shard 前缀）。
+
+    与 `shard_segment` 同一个头/对齐口径，只是名字没有 `{shard}/` 前缀。
+    顺序 = 成员名排序（确定性）。
+    """
+    out = bytearray()
+    for name in sorted(members):
+        data = bytes(members[name])
+        out += ustar_header(name, len(data))
+        out += data
+        pad = (-len(data)) % 512
+        if pad:
+            out += bytes(pad)
+    return bytes(out)
 
 
 def _extract_archive(src: Path, dest: Path) -> None:
@@ -236,6 +362,7 @@ def pack_payload(
         # 只为调用方签名兼容（不再进字节）。
     tmp.replace(zpath)
     return hashlib.sha256(zpath.read_bytes()).hexdigest()
+
 
 
 def unpack_payload(payload_path: str | Path, dest: str | Path) -> tuple[dict, list[str]]:

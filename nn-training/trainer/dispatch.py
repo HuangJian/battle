@@ -117,6 +117,11 @@ class RolloutDispatcher:
         course_fp: str | None = None,
         corpus_fp: str | None = None,
         pool_halt: bool = False,
+        # 零落盘（plan/payload-zero-disk §3.1）：`(shard 名, files, manifest)` 回调，
+        # 经 `common.distribution.write_shard(on_receive=…)` 在**落盘之前**交出去 ——
+        # dispatch 腿的字节本来就在内存里，调用方（`ShardSegments.add`）当场打段+压好。
+        # 缺省 None = 逐字节旧行为（其它调用方无感）。
+        on_shard=None,
     ):
         self.bun = bun
         self.rl_path = rl_path
@@ -137,7 +142,7 @@ class RolloutDispatcher:
         # ★ `pool_halt`（2026-10-21 用户口径）：`halt` 是**候选池铺满后逐关满额**的停 ⇒
         #   池里没派出去的候选不算「缺口」（它们从不运行）。外部熔断（KL halt 等）不置位
         #   本标记 ⇒ `missing` 保持旧语义（没派的局照旧报出来，e2e 的 halt preset 钉着它）。
-        self.pool_halt = bool(pool_halt)
+        self.pool_halt, self.on_shard = bool(pool_halt), on_shard
         #: 本机槽的长驻池（`_run` 里按需建；生命周期 = 这一轮，见 `run`）。
         self._pool: serve_pool.ServePool | None = None
 
@@ -168,7 +173,6 @@ class RolloutDispatcher:
         iter_id = self.iter_id
         on_result = self.on_result
         local_slots_max = self.local_slots_max
-        tail_dispatch = self.tail_dispatch  # noqa: F841 — API 兼容保留；2026-09-16 起不再用于 hold
         halt_event = self.halt_event
         on_queue_drained = self.on_queue_drained
         local_suspend = self.local_suspend
@@ -822,7 +826,11 @@ class RolloutDispatcher:
                         if why:
                             raise common.distribution.DistError(0, why)
                         out_dir = traj_dir / "dist" / nd_id / f"rl_s{task[0]}_seed{task[1]}"
-                        common.distribution.write_shard(files, manifest, str(out_dir))
+                        # ★ 零落盘（plan/payload-zero-disk §3.1）：`write_shard` 在落盘**之前**
+                        #   把 `(out_dir.name, files, manifest)` 交给本轮段账（收到就压好）。
+                        #   `out_dir.name` = `rl_s{stage}_seed{seed}` 必须与 `_pack_segmented` 的
+                        #   键（`Path(d).name`）逐字相同——对不上只会安静地退回读盘（白干）。
+                        common.distribution.write_shard(files, manifest, str(out_dir), self.on_shard)
                         manifest["_dir"] = str(out_dir)
                         summary = manifest
                 except Exception as e:

@@ -86,6 +86,9 @@ def run_rollout_queue(
     course_fp: str | None = None,
     corpus_fp: str | None = None,
     pool_halt: bool = False,
+    # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 字节时按名回调
+    # （trainer 侧 `ShardSegments.add` 当场打段+压好）。缺省 None = 旧行为。
+    on_shard=None,
 ) -> dict:
     """中央队列调度（薄包装：RolloutDispatcher 构造 + run，OO 实现在 trainer/dispatch.py）。"""
     from trainer.dispatch import RolloutDispatcher
@@ -108,4 +111,5 @@ def run_rollout_queue(
         course_fp,
         corpus_fp,
         pool_halt,
+        on_shard=on_shard,
     ).run()

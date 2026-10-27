@@ -165,7 +165,7 @@ def _stub_packer(
 
     def pack(
         shard_dirs, manifest, out_path, *, extra_files=None, perturb=None, member_bytes=None,
-        shard_extra=None,
+        shard_extra=None, chunks=1, presegmented=None,
     ):
         # 形参必须与 `common.payload.pack_payload` **逐名对齐**（本仓「接口双向一致」纪律）：
         # 生产侧加一个形参而这里不收，就是一条只在重打路径上炸的哑弹（2026-10-14 实测）。
@@ -203,7 +203,9 @@ def test_misjudged_payload_triggers_perturbed_repack(tmp_path: Path, monkeypatch
     monkeypatch.setattr(payload_pack, "pack_payload", pack)
     msgs: list[str] = []
 
-    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+    # `chunks=1` ⇒ 走被打桩的旧打包器（重打循环与被测判据跟打包实现无关；
+    # 分块路径与旧路径的字节等价性由 test_payload_chunks 钉）。
+    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, chunks=1, log=msgs.append)
 
     assert len(calls) == 2, f"应恰好重打一次，实得 {len(calls)} 次"
     assert calls == [None, b"repack-2"], f"重打必须**显式扰动**字节：{calls}"
@@ -227,7 +229,7 @@ def test_reader_selfcheck_failure_also_repacks(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(payload_pack, "pack_payload", pack)
     msgs: list[str] = []
 
-    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, chunks=1, log=msgs.append)
 
     assert len(calls) == 2
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest()
@@ -247,7 +249,7 @@ def test_attempt_cap_gives_up_loudly_with_distinct_bytes(tmp_path: Path, monkeyp
     msgs: list[str] = []
 
     with pytest.raises(ProtocolError) as ei:
-        payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+        payload_pack.pack_payload_zip([shard], [], payload, {}, chunks=1, log=msgs.append)
 
     n = payload_pack.PAYLOAD_SELFCHECK_ATTEMPTS
     assert n == 3, "上限变了就同步改本用例的措辞（这里是「三次」的语义钉子）"

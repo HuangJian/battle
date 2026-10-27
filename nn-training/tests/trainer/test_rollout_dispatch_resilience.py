@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 import common.distribution
+import common.shard
 import trainer.dispatch as disp
 import trainer.queue_local as ql
 
@@ -134,7 +135,7 @@ class _Harness:
 
         monkeypatch.setattr(common.distribution, "post_weights_parallel", fake_post)
 
-    def run(self, fetch, halt_event=None) -> dict:
+    def run(self, fetch, halt_event=None, on_shard=None) -> dict:
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.distribution, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
@@ -148,6 +149,7 @@ class _Harness:
             "rid.7",
             local_slots_max=0,
             halt_event=halt_event,
+            on_shard=on_shard,
         ).run()
 
     def stop_when_rearm_exhausted(self, monkeypatch) -> threading.Event:
@@ -180,6 +182,47 @@ class _Harness:
             "elapsedSec": 0.001,
             "_dir": str(self.work),
         }
+
+
+def test_on_shard_gets_the_memory_bytes_before_the_disk_write(tmp_path, monkeypatch) -> None:
+    """零落盘注入点（plan/payload-zero-disk §3.1）：**收到就交出去，再落盘**。
+
+    三件事一起钉：①名字是 `rl_s{stage}_seed{seed}`（= 落盘目录名 = `_pack_segmented` 的键——
+    对不上就只是安静地退回读盘，白干一场）；②拿到的是 `fetch_task` 回传的**内存字节**；
+    ③回调在 `write_shard` **内部**、写盘之前触发（段里的成员集必须就是将要落盘的那份，
+    `manifest.json` 由回调按 `common.shard.manifest_bytes` 补——先写盘再打段只会多一次读盘）。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    order: list[tuple[str, str]] = []
+    got: list[tuple[str, dict, dict]] = []
+
+    def on_shard(name, files, manifest):
+        got.append((name, dict(files), dict(manifest)))
+        order.append(("on_shard", name))
+
+    # 包**真** write_shard（不是替身）：回调顺序是判据的一部分。它写盘要整套 shard 文件集，
+    # 所以 fetch 回传的 `files` 给齐（内容无关——本用例只看名字/字节/顺序）。
+    from common.shard import write_shard as real_write_shard
+
+    def spy(files, man, out, on_receive=None):
+        real_write_shard(files, man, out, on_receive)
+        order.append(("write_shard", Path(out).name))
+
+    monkeypatch.setattr(common.distribution, "write_shard", spy)
+
+    def fetch(*_a, **_kw):
+        files = {name: b"filler" for name in common.shard.SHARD_FILES}
+        files["obs.npy"] = b"mem-bytes"
+        return h.manifest(), files
+
+    report = h.run(fetch, on_shard=on_shard)
+    assert report["missing"] == [], report.get("missing")
+    assert len(got) == 2, got
+    for name, files, _man in got:
+        assert name.startswith("rl_s2000_seed"), name
+        assert files["obs.npy"] == b"mem-bytes", "必须是内存里那份，不是落盘后的副本"
+        # 同一 shard：回调先于「写盘完成」（两条线程并发不影响各自 shard 的内部顺序）
+        assert order.index(("on_shard", name)) < order.index(("write_shard", name)), order
 
 
 def test_transient_502_does_not_circuit_break_node(tmp_path, monkeypatch) -> None:

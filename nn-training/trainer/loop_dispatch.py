@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from trainer.rollout_phase import dispatch_rollout_phase
+from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
 
 
 class TrainingDispatch:
@@ -60,6 +60,9 @@ class TrainingDispatch:
     _eval_at_set: Any
     _eb_window: Any
     _eb_thread: Any
+    #: 零落盘（plan/payload-zero-disk）：本轮 shard 段账（`ShardSegments`，组合根建）。
+    #: 两个入口都碰它：首波/补波在这里 `begin`+传回调，远端发布在 `loop_remote_job` 取。
+    _payload_parts: Any
 
     #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
     ppo_backend: Any
@@ -101,6 +104,9 @@ class TrainingDispatch:
     ) -> None:
         """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地），结果落 self._report。"""
         args = self.args
+        # 零落盘（plan/payload-zero-disk §3.2）：本轮段的账从这一轮开始记（换轮即清空）。
+        # 必须在派发**之前**：dispatch 线程一回传就会往里面写。
+        begin_payload_parts(args, it, self._payload_parts)
         (report, stream_meta, eval_thread, eval_gate, collect_child, spawned_early) = (
             dispatch_rollout_phase(
                 args,
@@ -121,6 +127,8 @@ class TrainingDispatch:
                 eval_on_round,
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
+                # 收到就压（手工段）：缺的 shard（local 腿/预采子进程）打包时再读盘补。
+                on_shard=self._payload_parts.add,
             )
         )
         self._report = report

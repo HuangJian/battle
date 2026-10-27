@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -724,6 +725,15 @@ def publish_job(
     # None = 不做 P1（照旧带 metrics.npy），只做 P2。
     wire_diet: bool = False,
     reward_spec: object | None = None,
+    # 零落盘（plan/payload-zero-disk §3.2，2026-10-27）：`presegmented` = shard 名 → **已压好的
+    # tar 段**（dispatch 腿收到 sampler 回传的字节时就压好的那些，`ShardSegments.add`）。
+    # 命中即不再读盘/重压；缺的（local 兜底腿 / 预采子进程 / 配额裁剪后补漏）由
+    # `_pack_segmented` 现场从盘补 —— **同一个** `shard_segment` 函数体，不是第二条变换逻辑。
+    # `diet_slim` = 产出这些段的**那份** `ShardSlim`（`ShardSegments.take` 给）；不传就按
+    # `wire_diet` 自建。为什么要传：`payload_fmt` 与 `fmt_line()` 必须描述**真正发出去的字节**
+    # —— 段全部命中时打包腿一次成员变换都不会走，自建的 slim 会报「未改」（日志骗人）。
+    presegmented: Mapping[str, bytes] | None = None,
+    diet_slim: ShardSlim | None = None,
     # demo 混 batch（x20 后续）：demo bank npz 原始字节（调用方读文件一次，见 loop_steps；
     # 3MB 级，blob 走内容寻址，worker 首轮下载后缓存命中）。空 = 关。
     demo_bank_bytes: bytes | None = None,
@@ -1021,15 +1031,17 @@ def publish_job(
     zip_path = jd / PAYLOAD_NAME
     _slim: ShardSlim | None = None
     if wire_diet:
-        from remote.payload_slim import build_slim
+        _slim = diet_slim
+        if _slim is None:
+            from remote.payload_slim import build_slim
 
-        _slim = build_slim(
-            reward_spec=reward_spec,
-            it=it,
-            metrics_version=metrics_version,
-            formula_hash=formula_hash,
-            log=log,
-        )
+            _slim = build_slim(
+                reward_spec=reward_spec,
+                it=it,
+                metrics_version=metrics_version,
+                formula_hash=formula_hash,
+                log=log,
+            )
     sha = pack_payload_zip(
         shard_dirs,
         extra_files,
@@ -1037,9 +1049,17 @@ def publish_job(
         m,
         member_bytes=(_slim.member_bytes if _slim is not None else None),
         shard_extra=(_slim.shard_extra if _slim is not None else None),
+        presegmented=presegmented,
         log=log,
     )
     m["payload_sha256"] = sha
+    if presegmented:
+        # 验收判据 3（plan §4）：纯分布式腿下两个数该相等（每个 shard 都在 rollout 期压过）。
+        _hit = sum(1 for d in shard_dirs if Path(d).name in presegmented)
+        log(
+            f"[publish] zero-disk it{it}: packed {_hit}/{len(shard_dirs)} presegmented shard"
+            "（命中段直接拼接，未读盘/未重压）"
+        )
     if _slim is not None:
         # 形态自述（旧端忽略未知键）：读取端以「盘上有哪些文件」为准，这个键是发布端记录/取证面。
         # 什么都没改时**不添键**（对外发布路径的 manifest 逐字节不变）。
