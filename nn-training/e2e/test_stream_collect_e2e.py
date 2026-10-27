@@ -65,7 +65,22 @@ HOLD_MAX_SEC = 15.0
 
 
 class _Trace:
-    """一局的开跑/收工事件（时间戳只为判「谁先谁后」，不做绝对时长断言）。"""
+    """一局的开跑/收工事件 —— **「谁先谁后」只许用事件序号判**（2026-10-27 修）。
+
+    ★ 为什么不能用时间戳：`time.monotonic()` 在系统上是**有颗粒度**的（Windows 实测
+    15.6ms 一档），而本文件的两条事件是同一条因果链上的**相邻**事件 —— 第三局开跑
+    ⇒ `release.set()` ⇒ 被按住的慢局醒来收工。它们之间的真实间隔常常只有几十微秒 ⇒
+    两次采样落在**同一个刻度** ⇒ `start3 < end_slow` 因为**相等**而红（全量并发下实测
+    `assert 655668.75 < 655668.75`）。
+
+    ★ 为什么序号是可靠的：慢局的 `end` **只能**发生在 `release.set()` 之后，而 set 与
+    「第 N 次 start 的登记」同属一个临界区 ⇒ `events` 里第三局 start 的下标**严格小于**
+    慢局 end 的下标。这条由因果保证，与墙钟、颗粒度、机器负载全部无关。
+
+    ★ 顺带：`n_starts` 原来是裸 `+=`（多线程重串口计数会丢一次 ⇒ 要等第 4 局才放行，
+    而第 4 局可能永远不来 ⇒ 慢局撑到 `HOLD_MAX_SEC` 超时 ⇒ 用例偶发红）。现在与
+    events 的 append 共用一把锁。
+    """
 
     def __init__(self) -> None:
         self.events: list[tuple[str, int, int, float]] = []
@@ -81,21 +96,54 @@ class _Trace:
         self.n_starts = 0
         #: 「按满了 HOLD_MAX_SEC 才结算」的局：这就是「槽位没被及时补上」的直接证据。
         self.hold_timeouts: list[str] = []
+        self._lock = threading.Lock()
+
+    def _append(self, kind: str, stage: int, seed: int) -> int:
+        """登记一条事件，返回「这是第几次 start」（0 = 这是一条 end）。"""
+        with self._lock:
+            self.events.append((kind, int(stage), int(seed), time.monotonic()))
+            if kind != "start":
+                return 0
+            self.n_starts += 1
+            n = self.n_starts
+        # ★ set 在**锁外**：它是「这一局的 start 已完整登记」之后的事；放在锁内会让
+        #   慢局线程醒来时可能挤在同一个时间片里抢锁（不改变正确性，但扰动时序）。
+        if self.release_after_starts is not None and n >= self.release_after_starts:
+            self.release.set()
+        return n
 
     def start(self, stage: int, seed: int) -> None:
-        self.events.append(("start", int(stage), int(seed), time.monotonic()))
-        self.n_starts += 1
-        if self.release_after_starts is not None and self.n_starts >= self.release_after_starts:
-            self.release.set()
+        self._append("start", stage, seed)
 
     def end(self, stage: int, seed: int) -> None:
-        self.events.append(("end", int(stage), int(seed), time.monotonic()))
+        self._append("end", stage, seed)
+
+    def start_index(self, nth: int) -> int:
+        """第 `nth` 次开跑（1 起）在 `events` 里的下标 —— 「谁先谁后」的唯一可靠判据。"""
+        hits = [i for i, e in enumerate(self.events) if e[0] == "start"]
+        assert len(hits) >= nth, f"只开跑了 {len(hits)} 局，取不到第 {nth} 次：{_fmt(self.events)}"
+        return hits[nth - 1]
+
+    def first_end_index(self, stage: int) -> int:
+        """该关第一次收工在 `events` 里的下标（`AssertionError` = 这一关一局都没收工）。"""
+        for i, e in enumerate(self.events):
+            if e[0] == "end" and e[1] == stage:
+                return i
+        raise AssertionError(f"stage {stage} 一局都没收工：{_fmt(self.events)}")
+
+    def timeline(self) -> str:
+        """诊断面：`0:start@2000/seed… 1:end@2001/seed…`（序号 + 事件 + 关/seed）。"""
+        return _fmt(self.events)
 
     def starts(self) -> list[tuple[int, int, float]]:
         return [(s, d, t) for kind, s, d, t in self.events if kind == "start"]
 
     def ends(self) -> list[tuple[int, int, float]]:
         return [(s, d, t) for kind, s, d, t in self.events if kind == "end"]
+
+
+def _fmt(events: list[tuple[str, int, int, float]]) -> str:
+    return " | ".join(f"{i}:{kind}@{s}/{d}" for i, (kind, s, d, _t) in enumerate(events))
 
 
 def _fake_game(trace: _Trace) -> Any:
@@ -217,8 +265,12 @@ def test_a_freed_slot_is_refilled_before_the_other_game_lands(
 
     ★ 慢局不是「固定睡 0.5s」而是**被夹具按住**：放行的条件是「第 3 局已经开跑」这个事件，
     按满了 `HOLD_MAX_SEC` 才结算就直接判红（`hold_timeouts` 非空 = 空出的槽位没被及时补上）。
-    判据因此是**事件先后**，不是墙钟还剩多少余量 —— 0.5s 余量式在 −n 8 满载机器上时间片
-    一抖就红（本用例 2026-10-27 就按余量式写过，改前先读这段）。
+
+    ★★ 「第三局早于慢局结算」这条判**只能看事件序号**，不能看时间戳（2026-10-27 修）：
+    放行是第三局开跑的**直接后果**，两者的真实间隔常常 < `time.monotonic()` 的一档
+    （Windows 15.6ms）⇒ `t_start3 < t_slow_end` 会因**相等**而偶发红（全量并发下实测两次）。
+    序号不存在这个问题：慢局的 `end` 只能登记在 `release.set()` 之后，而 set 与「第 3 次
+    start 的登记」同属一个临界区 ⇒ 下标严格有序（因果保证，与负载无关）。
     """
     stages = [2000, 2001]
     vol = volume_block(stages=stages, ests={2000: 100, 2001: 100}, target=600)
@@ -231,15 +283,17 @@ def test_a_freed_slot_is_refilled_before_the_other_game_lands(
     info, _logs, collector = _run_round(tmp_path, trace, vol=vol, workers=2)
 
     starts = trace.starts()
-    ends = trace.ends()
     assert not trace.hold_timeouts, (
         f"慢局被按满 {HOLD_MAX_SEC:g}s 才结算：第三局没在慢局结算前开跑 —— 这不是流式"
-        f"（槽位空出就得补）：{trace.hold_timeouts}"
+        f"（槽位空出就得补）：{trace.hold_timeouts}｜事件序列 {trace.timeline()}"
     )
-    assert len(starts) >= 3, f"应当派了 3 局以上（2000×1 + 2001×3）：{starts}"
-    first_slow_end = min(t for s, _d, t in ends if s == 2001)
-    assert starts[2][2] < first_slow_end, (
+    assert len(starts) >= 3, f"应当派了 3 局以上（2000×1 + 2001×3）：{trace.timeline()}"
+    # 事件序列上的先后（见上面的 ★★）：第三局必须登在「慢局第一次收工」**之前**。
+    idx_third_start = trace.start_index(3)
+    idx_slow_end = trace.first_end_index(2001)
+    assert idx_third_start < idx_slow_end, (
         "第三局是在慢局结算**之后**才开跑的 —— 这不是流式（槽位空出就该补）"
+        f"｜事件序列 {trace.timeline()}"
     )
     assert collector.next_game() is None
     assert info["report"]["shards"] == len(starts)
