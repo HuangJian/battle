@@ -41,6 +41,7 @@ from typing import Any
 import remote.course_cache as course_cache
 import remote.opt_delta as opt_delta
 import remote.opt_standard as opt_standard
+import remote.paddle_env as paddle_env
 import remote.weights_delta as weights_delta
 from common.log_bundle import LogBundle
 from common.progress_hook import report as _report_progress
@@ -348,6 +349,7 @@ def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
         "steps_pooled": int(total_steps),
         "chunks": len(chunks),
     }
+
 
 
 def run_training_core(
@@ -989,12 +991,15 @@ def _run_training_core_paddle(
       `epochs_eff × len(chunks)` 记账（引擎每 minibatch +1，见 `engine_paddle.ppo_update`）；
     * 设备字符串由 Paddle 自己归一（`cuda` → `gpu`）；XLA / DataParallel / MPS 是 torch 专属
       实验臂 ⇒ **响亮拒收**，不静默退回 CPU（那会看起来一切正常、只是慢两个数量级）；
-    * `torch_threads` 在这里没有等价旋钮（Paddle 3.3 无 `set_num_threads`）——保留形参只为
-      与调用面一致，值被忽略。
+    * `torch_threads` 没有 `set_num_threads` 可用（Paddle 3.3 无此 API）⇒ 翻译成
+      `OMP_NUM_THREADS` / `MKL_NUM_THREADS`，**在 import paddle/numpy 之前**写入
+      （`_apply_thread_env`；已有值不覆盖，平台配额优先）。
 
     顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
     """
     prep_b = LogBundle(log) if prep is None else prep
+    # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
+    paddle_env.apply(torch_threads, prep_b)
     import numpy as np
     import paddle
 
@@ -1002,12 +1007,7 @@ def _run_training_core_paddle(
     course, epochs_eff = course_prep(manifest, job_dir, epoch_mult, prep_b)
 
     # ---- 设备：XLA / DataParallel / MPS 是 torch 实验臂，Paddle 侧响亮拒 ----
-    dev_str = str(device)
-    if dev_str in ("tpu", "xla", "cuda-dp", "dp", "mps"):
-        raise ProtocolError(
-            f"job {jid}: paddle 后端不支持 --device {dev_str!r}"
-            "（XLA / DataParallel / Apple MPS 是 torch 专属实验臂）—— 用 cpu / cuda"
-        )
+    dev_str = paddle_env.check_device(jid, device)
     try:
         paddle.set_device(dev_str)
     except Exception as e:

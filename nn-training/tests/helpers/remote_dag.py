@@ -276,6 +276,12 @@ LAYERS: dict[str, int] = {
     # （叶子）+ `remote.opt_delta`(L0) ⇒ **L1**；读者是 `remote.plan_run`(L6/`_run_iteration`)、
     # `remote.plan_handoff`(L5/起点播种) 与 `remote.train_core`(restore 段) —— 边一律严格向下。
     "remote.opt_standard": 1,
+    # Paddle 运行环境适配（2026-10-27：`--threads` 在 Paddle 侧只能落成 OMP/MKL 环境变量，
+    # 且必须早于 import paddle/numpy）。只 import `os` / `typing` / `common.protocol`（叶子）
+    # ⇒ 拓扑秩 **L0**；读者只有 `remote.train_core`(L4)，边向下。
+    # 为什么独立成模块：核的有效 LOC 已到 996（预算 1000），这段只服务「进程启动期」、
+    # 不碰训练状态 ⇒ 独立所有者（与 opt/课程装配同一条拆法）。
+    "remote.paddle_env": 0,
     # 轮形态（2026-10-23，`plan/anchor-full-rounds`）：判据（`deliver_wire` L0）+ 两个落地器（L1）
     # + `opt_delta`/`delta_files`(L0) ⇒ 拓扑秩 **L2**；torch 惰性。装配点 `plan_handoff`(L5) 与
     # 驱动侧 `plan_run`(L6) 都在它上面，边严格向下。`artifacts`(L0) **不** import 它 ——

@@ -246,6 +246,11 @@ def test_the_core_touches_only_downward_clusters() -> None:
         # 2026-10-15（离线 opt delta 的读侧落地）：restore 段拿到的 `opt_init`/blob 也可能是
         # BOD1 容器（现场 it-237）⇒ 装载前落地成整份。L1 模块，站在本核（L4）下面。
         "remote.opt_standard",
+        # 2026-10-27（Paddle 线程旋钮）：进程级运行环境适配（OMP/MKL 环境变量 + 设备归一）。
+        # 为什么必须独立成模块而不是留在核里：核的有效 LOC 已 996（预算 1000），而这段
+        # 只服务「进程启动期」、不碰任何训练状态 ⇒ 独立所有者。L0（只 import os/typing/
+        # common.protocol），站在核下面。
+        "remote.paddle_env",
         # 2026-10-27（Paddle 双生）：框架无关判据/课程装配拆到 L2（两条核共用一份）。
         "remote.train_common",
         "remote.weights_delta",
