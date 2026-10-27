@@ -6,6 +6,37 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §129 进度**日志行**按 25% 一桶节流：发报不节流，日志才节流（2026-10-27 用户口径）
+
+**用户口径**：「自主云机的 log 要精简要节制」。触发场景：一轮 46 局、采集按**逐局**调度
+（→ `docs/nn/runtime-opt.md` §38）⇒ 每条结算都是一条 `进度 第197轮 采集局：9/46 局`，而
+云机 pull 腿 + push 腿 + hub 三条通道各打一份 ⇒ 网页日志面板被同一件事的碎行塞满。
+
+**修法**：`common/progress_text.should_log_progress(prev, kind=…, it=…, done=…, total=…)`
+（纯函数）作为**三条腿共用的一份判据**，只吞日志行、不碰发报：
+
+| 情形 | 打不开 |
+|---|---|
+| 第一句（`prev is None`） | 打 |
+| 换阶段 / 换轮（`kind` 或 `it` 变） | 打（新的一段开跑必须立刻可见） |
+| `retry` | **恒打**（问题面，不许被节流吃掉） |
+| 完成那一句（`done >= total`） | 打 |
+| 跨过 `LOG_PERCENT_STEP = 25` 的百分比桶 | 打（46 局一轮 ⇒ 最多 4 句） |
+
+⚠ **`total` 不进「换阶段」判据**：逐局流式档的 `total` 每派一局 +1（= 已派发局数），拿它作
+变化键就等于每局打一行——那正是要治的形态。`total` 只参与百分比桶。
+
+**落点（三条腿同一份）**：`remote/offline_boot.install_progress_pinger` 的 `_ping`（pull 腿；
+走 `_should_log_progress` 的**延迟 import + 兑底**，因为该文件是 standalone 引导，`common/` 要到
+`code.zip` 解开后才在 `sys.path` 上——裸 import 会让「永不抛」的打点在第一拍就炸）·
+`remote/offline_push.run_push`（push 腿 supervisor，看 face 的 `/progress`）·
+`hub/offline_push.OfflinePushDispatcher._on_progress`（hub 通道）。**发报一律照旧**：
+`remote/worker.py` 的 `progress_hook.report` 仍每结算一局报一次（hold 活性），hub 的
+`progress_offline` 仍每条都发。
+
+守卫：`tests/common/test_progress_text.py`（节流判据的纯函数用例：首句/换轮/retry/完成/桶边界/
+`total` 不进键）。
+
 ## §128 进度行说人话 + 停掉刷屏（2026-10-25 用户口径）
 
 **用户两句原话**：「这一段 log 毫无信息量，而且还不停刷屏！！！」「log 要写清楚：它在干什么

@@ -214,7 +214,12 @@ class _Hub:
 #: 这条 e2e 起**真 hub 子进程**（~2s 就绪）+ 走完「派单 → 受理 → 接管 → 拉轮到账」，
 #: 再等一次「停用 ⇒ 释放」（hub 的派发拍是 10s 级）⇒ 40s 上下。放宽到 120s：
 #: 抓的是「挂死」，不是「够不够快」——墙钟本身由 hub 的拍长决定，与本机性能无关。
+#: ⚠ **两个标记都要**（2026-10-27 修 flake）：`time_budget` 只改 conftest 的耗时预算，
+#: 不改 pytest-timeout 的**硬顶**（`addopts` 里的 `--timeout=60`）。只写 `time_budget(120)` 时
+#: 本用例的 60s `_wait` 必然撞硬顶 —— 而它自己的预算（120s）永远用不上；`-n 16` 或机器有负载时
+#: 就是「间歇性红」（实测单跑 61s 红、放开硬顶就绿）。`@pytest.mark.timeout(180)` 才是那条硬顶。
 @pytest.mark.time_budget(120)
+@pytest.mark.timeout(180)
 def test_push_mode_whole_workflow(tmp_path: Path) -> None:
     """一台**已启用**的自主云机接手一门课：派单 → 受理 → 接管 → 拉一轮 → 归档/入账 →
     停用 ⇒ 立刻释放并出现在 `blocked` 里。
@@ -239,11 +244,27 @@ def test_push_mode_whole_workflow(tmp_path: Path) -> None:
         assert str(task.get("course")) == COURSE, task
         assert int(task.get("resume_it") or 0) >= 0, task
 
-        # ② 接管成立（`/offline/hold` 的 live 只认进度；受理 = 已 claim）
-        assert _wait(
-            lambda: _http(hub.base, f"/offline/hold?course={COURSE}")[1].get("state") == "live",
-            60.0,
-        ), hub.output() + "\n" + str(_http(hub.base, f"/offline/hold?course={COURSE}"))
+        def _took_over() -> bool:
+            """② 接管成立：live hold **或** 这一轮已经入账。
+
+            ⚠ 2026-10-27 修的 flake（基线也能复现，不是本批改动引入）：`_claim → 拉轮 →
+            settle` 全在**同一个 pump 趟**里跑完时，`/offline/hold` 的 live 窗口只有几毫秒，
+            0.1s 的轮询会整段错过（`-n 8` 下必现；单跑就绿）。而「it-001 已入账」是**更强**
+            的判据：`_pump_loop`（唯一入账路径）只在 `_claim` 成功之**后**才被调用
+            ⇒ 产物出现 ⇔ 接管确实发生过。这样钉的还是「202 受理后才接管」那个顺序，
+            只是不再采样一个亚秒的瞬时状态。
+            """
+            hold = _http(hub.base, f"/offline/hold?course={COURSE}")[1]
+            if hold.get("state") == "live":
+                return True
+            off = traj / COURSE / "remote-jobs" / "offline"
+            return any(p.name == "it-001" for p in off.rglob("it-001"))
+
+        assert _wait(_took_over, 60.0), (
+            hub.output()
+            + "\n"
+            + str(_http(hub.base, f"/offline/hold?course={COURSE}"))
+        )
 
         # ③ 拉轮入账：产物树有 `it-001/`，课程账本有 `offline_backfeed` 行，归档有件
         off = traj / COURSE / "remote-jobs" / "offline"

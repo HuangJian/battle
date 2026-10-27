@@ -111,7 +111,7 @@ class TrainingExport:
             前提：现算会让两侧解出不同的语料指纹）。
             ★ 2026-10-12（plan/rollout-estfree-worksteal §4.1）：**课程/CLI 的声明值已退场**
             ⇒ 无历史（首轮）时 est = **0 = 无估计**，计划钉 `G_s = 1`（不猜）；缺口与
-            「批 = 机器宽度」全交给 `iter_topup` 的 est-free 满铺补差批。
+            「下一局派哪一关」全交给云机的逐局流式调度（`worker/stream_collect`）。
           * **mode 门与 `_per_stage_quota` 同源**：`target_transitions` 只对 per-tick 有意义
             ⇒ 非 per-tick 返 None（= 老口径，逐字节不变）。
 

@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from common.logutil import tag_logger
-from common.progress_text import progress_text
+from common.progress_text import progress_text, should_log_progress
 from common.protocol import (
     CAP_OFFLINE_PUSH,
     OFFLINE_PUSH_PROTO,
@@ -112,6 +112,10 @@ class _PumpState:
     stop: threading.Event = field(default_factory=threading.Event)
     misses: int = 0
     last_seq: int = -1
+    #: 上一条**打过日志**的进度四元组（`common.progress_text.should_log_progress` 的判据面）：
+    #: 2026-10-27 用户口径 —— `采集局 9/46 → 10/46` 每局一行把网页日志面板撑爆。
+    #: 它只管**日志**：`progress_offline`（hold 活性）依旧每条都发。
+    shown: tuple[str, int, int, int] | None = None
 
 
 class OfflinePushDispatcher:
@@ -889,16 +893,18 @@ class OfflinePushDispatcher:
         ok, why = self.hub.progress_offline(course, str(rec.get("lease_token") or ""))
         if ok:
             st.last_seq = seq
-            self._log(
-                f"{course}: "
-                + progress_text(
-                    seq=seq,
-                    kind=str(prog.get("kind") or ""),
-                    it=int(prog.get("it", 0) or 0),
-                    done=int(prog.get("done", 0) or 0),
-                    total=int(prog.get("total", 0) or 0),
+            kind = str(prog.get("kind") or "")
+            it = int(prog.get("it", 0) or 0)
+            done = int(prog.get("done", 0) or 0)
+            total = int(prog.get("total", 0) or 0)
+            # 活性（上面那行 `progress_offline`）**每条都发**；只有日志行节流 ——
+            # 判据与另外两条腿同一份（`should_log_progress`）。
+            if should_log_progress(st.shown, kind=kind, it=it, done=done, total=total):
+                st.shown = (kind, it, done, total)
+                self._log(
+                    f"{course}: "
+                    + progress_text(seq=seq, kind=kind, it=it, done=done, total=total)
                 )
-            )
         elif why in ("expired", "revoked", "taken"):
             st.stop.set()
 

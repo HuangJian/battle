@@ -8,6 +8,84 @@
 
 ---
 
+## §38 逐局流式采集：采完一局就判差额最大的关（2026-10-27 用户口径）
+
+**用户口径原话**（2026-10-07 起第 N 次重申，所以这次直接钉成集成用例）：
+
+> 采完一局，立即判断差额最大的关卡，立即用空出来的 worker 采集该差额关卡的样本，
+> 直到所有关卡样本量满额。**不需要一轮一轮的补。**
+
+### 病：前几版都错在「批」这个粒度
+
+旧形态 = `worker/iter_topup.topup_rollout` 的 `while batches < max_batches`：初波
+（`games_per_stage_by_stage` 预排）→ 整批跑完 → 重算缺口 → 再一批。三件事一起错：
+
+1. **不是「采完一局就判」**——批里最慢的那局（35 关 6–15s、偶尔 30s 撞硬顶）决定下一次决策
+   的时刻，短局关交出的槽位只能干等；
+2. **局均 est 只能事后校准**——批尾才知道真实的 `samples/局`，于是批次越补越小、越补越偏
+   （现场 41–47 批，一轮撞满 `OFFLINE_LEASE_TTL_SEC=900`）；
+3. **账目按批走**（`topup{k}/` 子目录、逐批 spec/data_fp/报告合并）⇒ 每批重扫盘、重新聚合，
+   `merge_iter_reports` 还要在调用方手工装配四个轮级键。
+
+### 修法：一个调度器 + 一个池，整轮只有一段
+
+```
+槽位空出 → 问调度器「下一局派哪一关」→ 派一局 → 它结算 → 立刻回到第一步
+```
+
+* 新模块 `worker/stream_collect.StreamCollector`（纯逻辑 + 轻量账本：无 IO / 无子进程 / 无随机）：
+  判据是**已结算样本的差额** `quota − collected`，最大的先派，同额按 stage 升序（确定性）。
+* `next_game()` **三态**，混了就是静默短采：`[argv]` 派这一局；**空列表** = 本拍没活（在飞的
+  局预计就补齐，供给不关）；`None` = **终局**（所有关满额或撞硬顶）。冷启动（无局均估计、每关
+  已有一局在飞）返回空列表——返回 `None` 会让调用方关掉供给、只采到「关数」局。
+* **在飞的局也算账**（`collected + unsettled × est ≥ quota` ⇒ 本关先不派）：否则宽槽位会在同一
+  关上叠派，过采放大到「槽位数 × 局均样本」。没有估计时只留一局在飞（它回来就有估计）。
+* **不猜局数**：本模块只回答「下一局是哪一关」；满额是每局结算后重算出来的。硬顶只作兜底
+  （显式 `max_games_per_stage` → 计划 est 反解 → 本关实测 est 反解 → `DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN`，
+  先到先冻），触顶的关进 `capped_stages`（响亮，不静默短采）。
+* **同一条连续流**：第 k 局 = `stage_seeds(rotate_seed, it, stage, start=k, n=1)`，与
+  `volume_waves.initial_wave_pairs_by_stage` / `volume_quota.continuous_pairs` 同一个 `0x5EED`
+  流 ⇒ 「接着抽」是构造性的；`--out` 全局续号（`w{i}` 不与计划里任何一条重号）。
+* 接线：`worker/iter_rollout.run_iter_rollout` 新增 `next_game` / `on_game_settled` 两个钩子；
+  `next_game` 缺席 ⇒ **逐字老行为**（argv 就是全部要跑的局）。流式档里 `workers` = 槽位
+  （不再被「本批局数」夹小，否则 4 核只跑 1 局）。`remote/worker.py` 用
+  `StreamCollector.from_spec(manifest["rollout"])` 一处接线，`volume` 缺席（在线 kind=iter /
+  老计划）= 不开流。
+
+### 「实产 == 声明」一个字没放宽
+
+计划里的 argv 在流式档只当**每关一条模板**（自定义关的 `--stage-json` 只在自己模板里，
+跨关取模板会把它删掉/带错）。轮末的声明集 = **实际派出去**的那一组，`iter_rollout` 用它重建
+spec 再算 `data_fp`，`verify_shards` 逐位不变。
+
+⚠ **判据必须是内容不是条数**（本轮实撞）：局数与计划**恰好相等**时（每关计划 1 局、实测就满额
+的冷启动轮），计划与现场只差 `--out`，按 `len()` 判会漏掉重建 ⇒ `collect_reports` 去
+`job/w0/_rl_report.json` 读一份不存在的报告、整轮拒收。复现用例：
+`e2e/test_stream_collect_e2e.py::test_declaration_is_the_dispatched_set_even_when_the_count_matches_the_plan`
+（旧写法在它下面必红，已当场验过）。
+
+### 否决的备选
+
+* **继续调批次宽度 / 批数上限**——批的粒度决定了「慢局顶住决策时刻」，调参数治不了；
+* **让 hub 算下一局**（服务端下发逐局 argv）——每局一个 HTTP 往返，且把「节点本地槽位」这个
+  只有节点知道的事实搬到服务端；
+* **按 est 反解每关要采几局**——误差 ±40%，多派/少派都变成过采或短采（反探针见
+  `plan/rollout-estfree-worksteal.plan.md` §4.1）；
+* **保留 `iter_topup` 作降级路径**——两套采集形态各有一份账本，正是「一批一轮」被写回来的入口；
+  离线任务包版本门（`code.zip` 与 worker 同源）保证没有在飞的旧包要兼容。
+
+### 落地与守卫
+
+* 新：`worker/stream_collect.py`、`tests/worker/test_stream_collect.py`(12)、
+  `tests/helpers/stream_spec.py`（单测与 e2e 共用一份 spec 工厂）、`e2e/test_stream_collect_e2e.py`(4)。
+* 改：`worker/iter_rollout.py`（钩子 + 动态 argv + 按内容重建声明集）、`remote/worker.py`（接线）、
+  `worker/{plan,volume_alloc,rollout_argv}.py`（注释/`retarget_argv` 的下沉与续号）、
+  `trainer/{loop_export,loop_transport}.py`。
+* 删：`worker/iter_topup.py` + `tests/worker/test_iter_topup.py`（含 `merge_iter_reports`）。
+* 轮报 `volumeTopup` 键与旧形态同源（`rule`/逐关账/缺口/浪费/触顶），另加 `mode=per-game-stream`、
+  `dispatched_games`、`planned_games`（计划局数留作读数面：证明「计划 46 局 / 实采 52 局」这类差额）。
+* 日志：开场一行 + 收尾一行（`StreamCollector.summary_line()`），不逐局打。
+
 ## §37 离线 notebook 的训练放大：`sample_mult` / `epoch_mult`（2026-10-24）
 
 **用户口径**：高配云机执行 `battle.offline.ipynb` 时，希望提高每轮采样量与 PPO 更新波次，

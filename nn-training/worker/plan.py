@@ -39,8 +39,8 @@ from common.protocol import (
 from worker.cmd import build_rollout_cmd
 
 #: argv 重定向原语：2026-10-07 **下沉**到 L0 叶子 `worker/rollout_argv.py` ——
-#: `worker.iter_topup`（L2，节点侧有界多批补差）也要用它，而本模块是 L4（靠 `worker.cmd`），
-#: L2 import L4 是**上向边**（而 `remote/worker.py` L5 顶层 import 那个补差模块）。
+#: 节点侧的采集调度器（`worker.stream_collect`，L3）也要用它，而本模块是 L4（靠 `worker.cmd`），
+#: L3 import L4 是**上向边**（而 `remote/worker.py` L5 顶层 import 那个调度器）。
 #: 本模块继续以同名转发，`worker.plan.retarget_argv` 对读者不变（同一个函数对象）。
 from worker.rollout_argv import retarget_argv
 
@@ -497,7 +497,7 @@ def iter_spec(plan: dict, it: int, pairs: list[tuple[int, int]], *, wver: str, c
     （协议白名单 + 相对路径 + 逐局 stage/seed）——模板损坏/被篡改在这里被抓住。
 
     计划带 `volume` 块（`target_transitions > 0`）时，把它**注入 spec**（补上运行时键
-    `it`/`rotate_seed` 并过一遍同源校验）——节点侧的有界多批补差（`worker/iter_topup`）
+    `it`/`rotate_seed` 并过一遍同源校验）——节点侧的逐局流式采集（`worker/stream_collect`）
     就靠它：节点没有 hub 的 jsonl，配额/分关 est/硬顶必须随轮钉在 spec 里。缺席 ⇒ 老行为。
     """
     from common.protocol import validate_rollout_spec

@@ -9877,3 +9877,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   由 18/18 收回 14/17，账在 `tests/test_reuse_ledger.py`）。
 - **未决**：真 AI Studio 任务上的端到端（需云端机器）· Paddle 侧 `--threads` 等价旋钮（Paddle 3.3 无
   `set_num_threads`）· 控制台展示 backend（按口径②刻意不做）。
+
+## §2026-10-27-goalnn-stream-collect（2026-10-27，云机 rollout 改成**逐局流式采集**：采完一局就判差额最大的关，满额即停）
+
+- **背景**：用户口径从 2026-10-07 起是同一句话：「采完一局，立即判断差额最大的关卡，立即用空出来
+  的 worker 采集该差额关卡的样本，直到所有关卡样本量满额。**不需要一轮一轮的补。**」而实现一直是
+  「批」（`worker/iter_topup.topup_rollout` 的 `while batches < max_batches`）：批里最慢的那局决定
+  下一次决策时刻（短局关交出的槽位干等）、局均 est 只能批尾校准（越补越偏，现场 41–47 批、撞满
+  900s 租约）、账目按批走（每批重扫盘 + `merge_iter_reports` 手工装配）。
+- **决定**：① 采集粒度换成**一局一拍**：新增 `worker/stream_collect.StreamCollector`（纯逻辑账本），
+  判据 = `quota − collected` 最大的关先派，同额按 stage 升序；在飞的局按 est 折进预算（不叠派、
+  不过采），没有估计时每关只留一局在飞；**不猜局数**，满额是每局结算后重算的。② 
+  `next_game()` **三态**（`[argv]` / **空列表 = 本拍没活但供给不关** / `None` = 终局），三态混写就是
+  静默短采。③ 接线走 `run_iter_rollout` 的两个钩子（`next_game` / `on_game_settled`），钩子缺席 = 老
+  行为逐字不变；流式档并发 = 槽位（不再被「本批局数」夹小）。④ 计划里的 `argv` 降级为**每关一条
+  模板**（自定义关的 `--stage-json` 只在自己模板里），轮末声明集 = **实际派发**的那一组，按**内容**
+  （不是条数）重建 spec 再算 `data_fp`；`verify_shards` 的「实产 == 声明」逐位不放宽。⑤ 删掉
+  `worker/iter_topup.py`（含 `merge_iter_reports`）及其用例：两套采集形态各有一份账本正是「一批一轮」
+  被写回来的入口。
+- **备选与否决**：继续调批次宽度/批数上限 —— 否（批的粒度决定「慢局顶住决策时刻」，调参治不了）；
+  让 hub 算下一局 —— 否（每局一个往返，且把「节点本地槽位」这个只有节点知道的事实搬到服务端）；
+  按 est 反解每关局数 —— 否（误差 ±40% ⇒ 过采/短采，反探针见 `plan/rollout-estfree-worksteal.plan.md`）；
+  保留 `iter_topup` 作降级路径 —— 否（离线包与 worker 同源，没有在飞的旧包要兼容）。
+- **落地**：`nn-training/worker/stream_collect.py` · `worker/iter_rollout.py` · `remote/worker.py` ·
+  `worker/{plan,volume_alloc,rollout_argv}.py` · `trainer/{loop_export,loop_transport}.py`；
+  守卫 `tests/worker/test_stream_collect.py`(12) + `e2e/test_stream_collect_e2e.py`(4)（含
+  「局数等于计划但 `--out` 不同」的声明集复现用例）+ 三腿共用的进度行节流
+  `common/progress_text.should_log_progress`。全文 → `docs/nn/runtime-opt.md` §38（节流 →
+  `docs/nn/remote-transport.md` §129）。
+- **踩到的坑（已修）**：声明集重建最初按 `len(argvs) != len(templates)` 判 ⇒ 局数与计划恰好相等时
+  沿用计划 argv，`collect_reports` 去 `job/w0/` 读不存在的报告、整轮拒收；改成内容比较，并补
+  e2e 复现用例（旧写法在该用例下当场红）。

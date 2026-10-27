@@ -147,8 +147,8 @@ def test_volume_block_refuses_incomplete_knobs(over: dict, frag: str) -> None:
 def test_volume_block_no_estimate_pins_one_game_per_stage() -> None:
     """★ 冷启动（无估计）：计划钉 `G_s = 1` + 补差批数上界换防跑飞档；分关字段同样每关 1 局。
 
-    这是 plan/rollout-estfree-worksteal §4.1 冷启动表的可执行形式：**不猜**，缺口交给 est-free
-    的满铺补差批（云机侧 `iter_topup.spread_games_by_stage`）。
+    这是 plan/rollout-estfree-worksteal §4.1 冷启动表的可执行形式：**不猜**，缺口交给云机侧
+    的逐局流式调度（`worker/stream_collect`：没有估计就先每关一局，回来一局就有估计）。
     """
     from worker.volume_alloc import (
         DEFAULT_TOPUP_MAX_BATCHES,

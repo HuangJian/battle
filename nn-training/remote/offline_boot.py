@@ -2186,6 +2186,27 @@ def _progress_label(kind: str, *, it: int, done: int, total: int) -> str:
     )
 
 
+def _should_log_progress(
+    shown: tuple[str, int, int, int] | None, *, kind: str, it: int, done: int, total: int
+) -> bool:
+    """这条进度事件要不要打日志行（`common.progress_text.should_log_progress` 的引导形态）。
+
+    与 `_progress_label` 同一套**延迟 + 兜底** import：本文件是 standalone 引导（notebook
+    逐文件从 raw 拉，`common/` 要到 `code.zip` 解开后才在 `sys.path` 上）。引导形态里读不到
+    那份判据 ⇒ **恒打**（宁可多说一句，也不能把进度行吞光）。
+    """
+    try:
+        from common.progress_text import should_log_progress
+    except Exception:
+        return True
+    try:
+        return bool(
+            should_log_progress(shown, kind=str(kind or ""), it=int(it), done=int(done), total=int(total))
+        )
+    except Exception:
+        return True
+
+
 def _reclaim_lease(
     hub: str, token: str, course: str, work: Path, log: Callable[[str], None]
 ) -> str:
@@ -2263,8 +2284,10 @@ def install_progress_pinger(
         "outcome": "",
         "cool": 0.0,
         "level": 0,
-        #: 上一条已打过的日志行（**只用于去重**：同内容不重播，跨事件变化才打）。
-        "note": "",
+        #: 上一条**打过日志**的进度四元组 `(kind, it, done, total)`（节流口径见
+        #: `common.progress_text.should_log_progress`：25% 一桶 + 换阶段/换轮 + 完成 + retry）。
+        #: 2026-10-27 用户口径：`采集局 9/46 → 10/46 → …` 每局一行把网页日志面板撑爆。
+        "shown": None,
     }
 
     def _ping(
@@ -2288,10 +2311,19 @@ def install_progress_pinger(
         #   **日志行与发报解耦**。发报要节流（POST 有成本），日志不需要 —— 同一个事件在 pull 腿上
         #   因为节流窗而不打，就等于「同一件事在两条腿上长什么样不一样」。所以：每次事件先打一行
         #   （内容没变不打，防刷屏），节流只管「发不发出去」。
-        label = _progress_label(kind, it=int(it), done=int(done), total=int(total))
-        if label != state.get("note"):
-            state["note"] = label
-            log(label)
+        # 日志行**先节流再打**（2026-10-27）：`should_log_progress` 是两条腿 + hub 共用的
+        # 那一份判据（25% 一桶 / 换阶段 / 完成 / retry），发报不受它影响（下面照常走）。
+        # 走 `_should_log_progress`（延迟 import + 兜底）：`_ping` 承诺**永不抛**，而本文件
+        # 在引导形态下没有 `common/` ⇒ 裸 import 会让第一条进度事件就炸掉打点。
+        if _should_log_progress(
+            state.get("shown"),
+            kind=str(kind or ""),
+            it=int(it),
+            done=int(done),
+            total=int(total),
+        ):
+            state["shown"] = (str(kind or ""), int(it), int(done), int(total))
+            log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
         if not force and float(state["cool"]) > now:
             return False  # 降频窗内（不是死；到点自己回来）
         # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
@@ -2356,7 +2388,10 @@ def install_progress_pinger(
                 f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
             )
         elif force:
-            log(f"[打点] {label} 没成功（HTTP {code or '连不上'}）——下一拍再试")
+            log(
+                f"[打点] {_progress_label(kind, it=int(it), done=int(done), total=int(total))} "
+                f"没成功（HTTP {code or '连不上'}）——下一拍再试"
+            )
         return False
 
     # 写模块命名空间而不是 `mod.note_progress = …`：后者在 mypy 眼里是「Module 没有这个

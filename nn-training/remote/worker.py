@@ -443,7 +443,7 @@ from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
 from worker.iter_rollout import RoundContext, resolve_bun, run_iter_rollout
-from worker.iter_topup import merge_iter_reports, topup_rollout
+from worker.stream_collect import StreamCollector
 
 # ------------------------------------------------------------------ PPO 执行
 
@@ -740,11 +740,15 @@ def run_job(
         if echo:
             log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
         else:
-            # 轮级资源（落点/TS 树/长驻池）在**首批**建、补差批复用（plan/rollout-topup-fastpath §3.2）：
-            # 池在 `finally` 里收（补差之后、PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
-            # ⚠ **ctx 的所有权在这里** ⇒ 收池必须罩住**整段**（含首批自己抛的那些路径）：
+            # 轮级资源（落点/TS 树/长驻池）在整轮共用：池在 `finally` 里收（rollout 之后、
+            # PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
+            # ⚠ **ctx 的所有权在这里** ⇒ 收池必须罩住**整段**（含 rollout 自己抛的那些路径）：
             #   rollout 失败（D14/verify/超界……）时若没人收，94 个常驻 bun 会一直挂着。
             rctx = RoundContext()
+            # ★ 逐局流式采集（2026-10-27，用户口径）：`volume` 块在 ⇒ 本轮采哪几局由调度器
+            # **每结算一局重算一次**（差额最大的关先派，槽位空出即补，满额即停）——不再有
+            # 「一批跑完再算下一批」。`volume` 缺席（在线 kind=iter / 老计划）= 老行为逐字不变。
+            collector = StreamCollector.from_spec(manifest["rollout"], log=log)
             try:
                 iter_info = run_iter_rollout(
                     job_dir,
@@ -753,43 +757,16 @@ def run_job(
                     log=log,
                     ctx=rctx,
                     it=int(manifest.get("it", 0) or 0),
+                    next_game=None if collector is None else collector.next_game,
+                    on_game_settled=None if collector is None else collector.observe,
                 )
                 shard_dirs = list(iter_info["shard_dirs"])
-                # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
-                # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
-                # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
-                # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
-                # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
-                _extra = topup_rollout(
-                    job_dir=job_dir,
-                    spec=manifest["rollout"],
-                    shard_dirs=shard_dirs,
-                    ts_dir=_ts_dir,
-                    log=log,
-                    # 补差批按**轮级槽位**铺满（plan/offline-code-authority-and-width A1）：
-                    # `iter_info["slots"]` = 本机能同时跑的局数上限（不吃首批 argv 条数）。
-                    # 旧写法传首批实际 workers ⇒ 首批 1 局时「下一批铺多少局」被上界成 1
-                    # （现场：64 批 × 1 局、`满铺 width=1`）。缺口方程那套已在 §1.7 否决。
-                    width=int(iter_info.get("slots") or 0),
-                    # 复用首批的轮级资源（探针结论 / TS 树家 / 长驻池）
-                    ctx=rctx,
-                )
             finally:
-                rctx.close()  # 池：补差跑完就收（PPO 之前）；失败路径也收
-            if _extra is not None:
-                # ★ 轮级报告装配（plan/rollout-topup-fastpath §3.4 写死的契约）：这四个**由收尾步骤产生**
-                # 的键（`shards` / `perGame` / `perGameSecs` / `elapsedSec`）由**调用方**在这里一次装配，
-                # 与逐批报告**同键同型**。它们有仓库外读方：`remote/artifacts.py` 读 `perGame`
-                # （控制台「耗时/击杀/残血/道具」四列的数据源），`merge_iter_reports` 显式相加这四个键。
-                # （`clean_sec` / `搬回` 两个键已核无 TS 读方（`dashboard/src/**` 无命中）⇒ 前者从未
-                #   落库、后者随 §3.5 取消搬回删除。）
-                shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]
-                iter_info["shard_dirs"] = list(shard_dirs)
-                iter_info["report"] = merge_iter_reports(
-                    dict(iter_info.get("report") or {}), list(_extra["reports"])
-                )
-                iter_info["volumeTopup"] = dict(_extra["volume"])
-                iter_info["rollout_sec"] = float(iter_info["report"].get("elapsedSec") or 0.0)
+                rctx.close()  # 池：rollout 跑完就收（PPO 之前）；失败路径也收
+            if collector is not None:
+                # 轮报的 `volumeTopup`（读数面；`rule`/逐关账/缺口/浪费/触顶 与旧形态同键）。
+                iter_info["volumeTopup"] = collector.volume()
+                log(collector.summary_line())
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

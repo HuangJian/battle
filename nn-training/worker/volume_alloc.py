@@ -19,8 +19,13 @@
 **已结算 shard 的 `nSamples` 之和**（samples，不是 ticks）。节点侧补差的分母取**产出集**
 （未裁剪：it168 实测 Σ=48 080 > kept 44 747），裁剪后的数会让估计量随配额有偏。
 
+★ 2026-10-27：云机侧的采集调度改成**逐局流式**（`worker/stream_collect.py`：每结算一局就
+判「差额最大的关」，下一局派它，不再一次反解「这一关要几局」）。本模块因此只剩
+**计划/同源校验**身份：`alloc_games_by_stage`（计划侧首批局数）、`spread_games_by_stage`
+（本机 trainer 的铺满档）、`widen_by_width`（自主机按 worker 数铺满）与几个纯账本函数。
+
 本模块只有纯函数与常量（无 IO、无 torch、无随机）；IO（扫 shard 目录、跑子进程）在
-`worker/iter_topup.py`。
+`worker/iter_rollout.py` / `worker/stream_collect.py`。
 """
 
 from __future__ import annotations
@@ -242,14 +247,13 @@ def topup_games_by_stage(
 ) -> dict[int, int]:
     """补差批：逐关 `max(0, ceil((quota − collected) / est))`，`game_cap` 截断。
 
-    ★ **2026-10-26 起是本模块的生产路径**（`iter_topup.topup_rollout` 的第一选择）。
-    旧的「一批恰好机器宽度」铺满（`spread_games_by_stage`）在「关数 ≫ 机器宽度」时会把
-    一轮拆成 `关数×每关局数/宽度` 批（35 关 × 6 局 ÷ 4 核 = 44 批），而用户口径是**流式**：
-    「采完一局就判差额最大的关卡，用空出的 worker 采它，直到所有关满额」——
-    等价于「一次按实测 est 把全部缺口派进池子，谁空谁领」。本函数给的就是那个局数。
+    ⚠ **2026-10-27 起云机侧不再走它**：逐局流式调度（`worker/stream_collect.py`）不回答
+    「这一关要几局」，因此也不需要 est 反解（误差 ±40% ⇒ 多派/少派，正是「一批一批补」
+    的根源）。本函数保留为**对账/回归规格**身份（它的公式就是「缺口 ÷ 局均样本」这句话的
+    字面量，测试与取证仍拿它对账）。
+
     est 必须用**本轮实测**（首波一跑就有 `collected/games`），不是 plan 打包时的旧值
     （首轮恒 0 ⇒ 只能走「不猜档」每关 1 局 ⇒ 44 批就是这么来的，2026-10-26 云机现场）。
-    调用方在**完全没有实测**（首波零产出）时才回退到 `spread_games_by_stage`。
 
     * 已达标的关**不进结果**（`collected ≥ quota`）；
     * 触 `game_cap`（`games_done ≥ cap`）的关**不进结果**（调用方负责把「未达标 + 触顶」

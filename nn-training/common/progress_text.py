@@ -17,7 +17,14 @@
 
 from __future__ import annotations
 
-__all__ = ["KIND_TEXT", "UNIT", "WARN_MARK", "progress_text"]
+__all__ = [
+    "KIND_TEXT",
+    "LOG_PERCENT_STEP",
+    "UNIT",
+    "WARN_MARK",
+    "progress_text",
+    "should_log_progress",
+]
 
 #: 问题面的标记（`retry` 之类）：判据不许挂在它上面（`tests/helpers/text_asserts.py` 的口径），
 #: 它只是给**人**看的那一眼。
@@ -37,6 +44,13 @@ KIND_TEXT = {
 
 #: 各类型的计数单位（缺席 ⇒ 只给数字）：iter/eval 是局，ppo 是遍。
 UNIT = {"iter": "局", "eval": "局", "ppo": "遍"}
+
+#: 进度**日志行**的百分比步长（2026-10-27 用户口径：「自主云机的 log 要精简要节制」）。
+#: 一轮 46 局的采集 = 46 条 `进度 第197轮 采集局：9/46 局`，而云机 + hub 两条腿各打一份
+#: ⇒ 网页日志面板被「同一件事」的碎行塞满。每 `LOG_PERCENT_STEP`% 说一句（外加完成那一句、
+#: 阶段/轮号变化那几句）就够人判断「在动 / 还剩多少」；事故信号（`retry`）一律照打。
+#: ⚠ 只管**日志行**：发报（`/offline/progress`，hold 活性）按事件全量走，节流在打点层的时间窗。
+LOG_PERCENT_STEP = 25
 
 
 def progress_text(
@@ -63,3 +77,38 @@ def progress_text(
         tail = f"{int(done)}/{int(total)}" if int(done) else f"共 {int(total)}"
         out += f"：{tail} {unit}".rstrip()
     return out
+
+
+def _bucket(done: int, total: int) -> int:
+    """进度落在哪个 `LOG_PERCENT_STEP` 宽的桶里（`total <= 0` ⇒ 0；不抛）。"""
+    if int(total) <= 0:
+        return 0
+    return (int(done) * 100 // int(total)) // LOG_PERCENT_STEP
+
+
+def should_log_progress(
+    prev: tuple[str, int, int, int] | None, *, kind: str, it: int, done: int, total: int
+) -> bool:
+    """这一条进度事件**要不要打一行日志**（纯函数；`prev` = 上一条打过的那四个值）。
+
+    打的条件（其余一律吞掉，发报不受影响）：
+
+    * 第一句（`prev is None`）；
+    * **换阶段 / 换轮**（`kind`、`it` 变了）——新的一段开始必须立刻可见；
+    * `retry`（问题面：每次都要看见，不许被节流吃掉）；
+    * 完成那一句（`done >= total`）；
+    * 跨过 `LOG_PERCENT_STEP` 的桶（25% ⇒ 46 局一轮最多 4 句，而不是 46 句）。
+
+    `total` **不进**判据里的「换阶段」那一条：流式采集的 `total` 每派一局就 +1，拿它当
+    变化键 = 每局都打一行（那正是要治的那个形态）。`total` 只参与百分比桶的计算。
+    """
+    if prev is None:
+        return True
+    pkind, pit, pdone, ptotal = prev
+    if (str(kind or ""), int(it)) != (str(pkind or ""), int(pit)):
+        return True
+    if str(kind or "") == "retry":
+        return True
+    if int(total) > 0 and int(done) >= int(total):
+        return True
+    return _bucket(done, total) > _bucket(pdone, ptotal)

@@ -171,7 +171,7 @@ def node_volume_conflict(args: Any, *, source: str | None = None) -> str:
     """`node` 与动态采集在本轮上云路径上是否**不相容** → `""`（相容）或一句人话。
 
     事实（不是猜测）：逐轮上云的 `worker/iter_job.build_iter_spec` **不带** `volume` 块，
-    而动态采集要的是「按关配额、可补差」的批次（`worker/iter_topup` 只在 spec 里真有
+    而动态采集要的是「按关配额、可补差」的采集（`worker/stream_collect` 只在 spec 里真有
     `volume` 时才跑）。所以 `rollout_src=node && target_transitions>0` 时本机既 build 不出
     spec（`_remote_iter` 的守卫），云机也永远领不到这一轮 ⇒「等云机」= 永久停摆。
 

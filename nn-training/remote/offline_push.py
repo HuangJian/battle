@@ -40,7 +40,7 @@ from typing import Any
 from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
-from common.progress_text import progress_text
+from common.progress_text import progress_text, should_log_progress
 from remote.offline_push_face import PushFaceState, make_face_server
 from remote.push_register import (
     Registry,
@@ -307,7 +307,10 @@ def run_push(
     t0 = time.time()
     last_tick = 0.0
     last_seq = -1
-    last_note = ""
+    #: 上一条**打过日志**的进度四元组（`common.progress_text.should_log_progress` 的判据面：
+    #: 25% 一桶 + 换阶段/换轮 + 完成 + retry）——2026-10-27 用户口径：`采集局 9/46 → 10/46`
+    #: 每局一行把网页日志面板撑爆。发报（face 的 `/progress`）不受它影响。
+    last_shown: tuple[str, int, int, int] | None = None
     last_status: tuple = ()
     last_status_at = t0
     try:
@@ -334,19 +337,17 @@ def run_push(
                 seq = int(prog.get("seq", 0) or 0)
                 if seq > last_seq and not prog.get("unchanged"):
                     last_seq = seq
-                    # 措辞与 hub 侧同一份实现（`common.progress_text`）：`seq` 是消息编号，
-                    # 不是轮号 —— 裸着给人看已经让真机把「it102 的轮」读成「在处理 it0」。
-                    note = progress_text(
-                        seq=seq,
-                        kind=str(prog.get("kind") or ""),
-                        it=int(prog.get("it", 0) or 0),
-                        done=int(prog.get("done", 0) or 0),
-                        total=int(prog.get("total", 0) or 0),
-                    )
-                    # 内容没变就不重复打（真机：同一批 `2/2` 连打两拍，纯刷屏）。
-                    if note != last_note:
-                        last_note = note
-                        log(note)
+                    kind = str(prog.get("kind") or "")
+                    it = int(prog.get("it", 0) or 0)
+                    done = int(prog.get("done", 0) or 0)
+                    total = int(prog.get("total", 0) or 0)
+                    # 日志行先过**两条腿共用**的那份节流（`should_log_progress`），
+                    # 措辞再走同一份 `progress_text`（`seq` 是消息编号，不是轮号）。
+                    if should_log_progress(
+                        last_shown, kind=kind, it=it, done=done, total=total
+                    ):
+                        last_shown = (kind, it, done, total)
+                        log(progress_text(seq=seq, kind=kind, it=it, done=done, total=total))
                 # ★ 状态行**只在变化时才打**（2026-10-25 用户口径：每 15s 一行
                 #   `任务状态: phase=running …` 是零信息量的刷屏）；但也不能一整天不吭声
                 #   ⇒ `STATUS_HEARTBEAT_SEC` 兜底一次「还活着」。

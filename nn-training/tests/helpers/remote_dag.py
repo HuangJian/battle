@@ -555,12 +555,12 @@ LAYERS: dict[str, int] = {
     # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
     # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
     "worker.volume_waves": 3,
-    # 节点侧**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）：顶层靠
-    # `worker.volume_alloc`(L2) 与 `worker.volume_math`(L0)，函数内延迟靠
-    # `worker.iter_rollout` / `worker.reports` ⇒ 2026-10-11 S3 起秩 3。
+    # 节点侧**逐局流式采集**的调度器（2026-10-27；取代了旧的「有界多批补差」
+    # `worker.iter_topup`）：顶层靠 `worker.volume_alloc`(L2) / `worker.volume_quota`(L1) /
+    # `worker.rollout_argv`(L0) ⇒ 秩 **3**。
     # ⚠ 它**不得** import `worker.plan`(L4)：唯一的顶层读者 `remote/worker.py` 是 L5
     # （只能向下指）而 L5 → L3 才是向下边；为此把 `retarget_argv` 下沉到 L0。
-    "worker.iter_topup": 3,
+    "worker.stream_collect": 3,
     "worker.cmd": 3,
     "worker.gate_check": 3,
     "worker.models.goal_net": 3,

@@ -3,9 +3,10 @@
 ## 为什么单独一个模块（而不是留在 `worker/plan.py`）
 
 `retarget_argv` 原先住在 `worker/plan.py`（账本 **L4**：它要 `worker.cmd` 的 `build_rollout_cmd`）。
-2026-10-07 起它多了一个读者 —— `worker.iter_topup`（节点侧有界多批补差，账本 **L2**，只靠
-`worker.volume_alloc` / `worker.iter_rollout` 这两个 L1 邻居）。**L2 模块 import L4 模块 = 上向边**，
-而 `remote/worker.py`（L5）又必须在顶层 import 补差实现 ⇒ 补差模块的秩只能 ≤ L4。留原地无解，
+2026-10-07 起它多了一个读者 —— 节点侧的采集调度器（当时叫 `worker.iter_topup`，2026-10-27
+换成 `worker.stream_collect`：逐局流式，账本 **L3**，只靠 `worker.volume_alloc` /
+`worker.volume_quota` 这两个 L1/L2 邻居）。**L3 模块 import L4 模块 = 上向边**，
+而 `remote/worker.py`（L5）又必须在顶层 import 调度器 ⇒ 它的秩只能 ≤ L4。留原地无解，
 故按本仓既定手段「把共同依赖**下沉**」（`tests/helpers/remote_dag.py` 的环处理只有「下沉」与
 「参数注入」两种）：纯替换逻辑下沉成 L0 叶子，`worker/plan.py` 顶层再引回来（对读者是同一个
 函数对象，`worker.plan.retarget_argv` 这个名字保持可用）。
