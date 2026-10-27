@@ -1,0 +1,169 @@
+// 课程 y34-loot0 —— **道具价的剂量点**：在 `y34-hitfix` 之上只把 `wPickup` 从 1.4 砍到 0.5。
+//   替换已判死的 `y34-gammaonly`（只改 γ，−9.6pp）。
+//   状态：**已结课（2026-10-27 回填）· 判负**：`wPickup` 1.4→0.5 没有改变道具/局（5.36），道具轴不由价驱动。见文末结课报告。
+//
+// ── 0. 为什么要这条 ────────────────────────────────────────────────────────────
+//   `y34-trim` 已经证明「砍正项能把伤速从 35.05 压到 **29.00/千**」，但它的哨兵 F2「道具/局 ≤5.0」**没过**
+//   （5.48，起点 5.56）—— 说明 **`wPickup 1.4` 还没把"捡"的价砍痛**：道具数量几乎没动，伤速却是靠
+//   `wWinHit 1.2` 与 `wDmg 0.18` 拿到的。
+//
+//   ⇒ 本课把 `wPickup` 再砍到 **0.5（起点 3.2 的 1/6.4）**，看两件事：
+//     ① 道具/局会不会真的掉（剂量是否到了"痛"的位置）
+//     ② 掉之后伤速能不能再降（道具少 ⇒ 少绕路 ⇒ 少暴露？还是道具少 ⇒ 少掩体/少火力 ⇒ 更危险？）
+//   **这是唯一能把"道具"从"参与度"里单独拆出来的剂量点。**
+//
+// ── 1. 与 y34-hitfix 的差异（1 个值）───────────────────────────────────────────
+//   | 字段 | y34-hitfix | y34-loot0 |
+//   |---|---|---|
+//   | `name` / `out` / `traj` / `backup_*` | `y34-hitfix*` | `y34-loot0*` |
+//   | **`wPickup`** | **1.4** | **0.5**（起点 3.2 的 15.6%） |
+//   逐字不动：`wHit 0.45 / wWinHit 1.2 / wDmg 0.18 / wKill 3.0 / wMiss 0.7 / wShot 0.15 / wSpeed 3.0 /
+//   wWin 48 / terminal −35 / gamma **0.998**` · 全部税项 · `kl_coef 0.05 / value_anchor 0.001 / epochs 6 /
+//   lam 0.95 / lr 1.2e-4→8e-5 / mb 1024 / target_transitions 24576 / decision_k 10 / iters 300 / max_hours 30`。
+//   ⇒ **与 `y34-hitfix` 的单变量差 = `wPickup`**；与 `y34-trim` 的差 = `wHit` + `wPickup`（两点）。
+//
+// ── 2. 三点剂量链（这是本批最有结构的一处）──────────────────────────────────────
+//   | 腿 | wPickup | wWinHit | wHit | wDmg | 它回答什么 |
+//   |---|---|---|---|---|---|
+//   | `y34-trim`（在跑） | 1.4 | 1.2 | **0.28** | 0.18 | 基准：伤速 29.0，杀速 2.27 |
+//   | **`y34-hitfix`** | 1.4 | 1.2 | **0.45** | 0.18 | **单变量 wHit**：杀速能不能回 2.6 |
+//   | **`y34-loot0`** | **0.5** | 1.2 | 0.45 | 0.18 | **单变量 wPickup**：道具价到 0.5 会不会痛 |
+//   → 三点成链 ⇒ 能读出「伤速 / 杀速 / 道具量」三者的**控制权各在哪个价上**。
+//
+// ── 3. 判据（预注册）──────────────────────────────────────────────────────────
+//   L0 起点复核（it0）：A 层胜率 ≈ **63.75% ± 3pp**。
+//   F 门（it25-75 的 11 点均值）：
+//     F1 **道具/局 ≤ 3.5**（hitfix 预期 ~5.5 · trim 5.48 · 起点 5.56）← **主读数：剂量到了没有**
+//        若仍是 5.0+ ⇒ **0.5 还是不痛**，道具的拾取由"路径顺手"驱动，不由价驱动 ⇒ 这条轴该放弃
+//     F2 伤速 ≤ 32.0/千 且 **≤ hitfix 的值**（看砍道具对伤速的方向：降 = 少暴露；升 = 少掩体）
+//     F3 杀速 ≥ 2.40/千（道具少 ⇒ 火力/掩体少，允许再掉一点）
+//     F4 星级拾取/局 ≥ 0.3（`starsCollected`；道具价砍到 0.5 时等级会不会塌）
+//   W 门（it150-250，≥11 点）：
+//     W1 胜率 ≥ 0.68
+//     W2 余量 ≥ 0.90
+//     W3 道具/局 ≥ **1.5**（防"完全不发育"：低于 1.5 说明它连顺手捡都不做）
+//   **判读（写死）**：
+//     · F1 过（道具 ≤3.5）且 F2 伤速降 ⇒ **砍道具 = 少暴露**，是安全的直接来源 ⇒ 主攻这条
+//     · F1 过但 F2 伤速升 ⇒ **道具是掩体/火力**，砍它反而危险 ⇒ 道具价要**反向抬**（这条很反直觉但有可能）
+//     · F1 不过 ⇒ 道具的拾取不由价驱动 ⇒ 该轴放弃，回 hitfix 的结论去做杀速
+//
+// ── 4. 风险 ───────────────────────────────────────────────────────────────────
+//   1. `wPickup 0.5` 可能让策略**完全不捡**（道具/局 → 0.x）⇒ 等级不涨、无 freeze/shield ⇒ 中后期更脆。
+//      观察 F4（星级）与 W3（道具下限）。
+//   2. 本课的期望是"探剂量"，**不是"冲 80%"**。它最有价值的产出是"道具价的控制力有多大"这个数。
+//   3. 与 `y34-trim` / `y34-hitfix` 必须同窗配对（it25-75 / it150-250），三者 iters 不同但**前 250 轮对齐**。
+{
+  "version": 5,
+  "name": "y34-loot0",
+  "mode": "per-tick",
+  "level": "obstruction",
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.18,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 0.5,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wWinHit": 1.2,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/y33-nohp/y33-nohp.it425.20261024-deliver.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 30.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "until_iter": 100,
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+    {
+      "kl_coef": 0.05,
+      "lr": 8e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20270210,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/y34-loot0/weights.json",
+  "traj": "tmp/y34-loot0",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y34-loot0",
+  "backup_prefix": "y34-loot0",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 结课报告（2026-10-27 回填；数据 it0–240，A 层 400 局/点）──────────────────
+//   **裁决：判负（主判 F1 明确不过）。道具拾取不由价驱动 —— 这是本课唯一的、也是决定性的产出。**
+//
+//   | 读数 | it0 | F 窗 it25-75 | W 窗 it150-240 | 尾窗 it190-240 | it225（峰值） |
+//   |---|---|---|---|---|---|
+//   | 道具/局 | 5.56 | **5.357** | 5.313 | 5.323 | 5.628 |
+//   | 胜率 | 63.75% | 61.20% | 62.75% | 64.64% | 74.25% |
+//   | 杀速 · 伤速 | 2.70 · 35.05 | 2.47 · 32.33 | 2.47 · 30.26 | 2.40 · 28.51 | 2.34 · 25.60 |
+//   | 余量 | 0.844 | 0.836 | 0.894 | 0.923 | 1.002 |
+//   ⇒ `wPickup 1.4→0.5（−64%）` 只把 F 窗道具/局从 trim 的 **5.415 拉到 5.357（−1.1%）**；
+//     与 hitfix（1.4）的 W 窗 5.67 比也只低 6% ⇒ **剂量到 0.5 仍然不痛**。
+//     **预注册分支命中**：「F1 不过 ⇒ 道具的拾取不由价驱动 ⇒ 该轴放弃，回 hitfix 的结论去做杀速。」
+//
+//   **F 门**：F1 道具 5.357 >3.5 ✗（主判）· F2 伤速 32.33 >32 ✗（差 0.33；但优于 hitfix F 的 36.97，方向"略降"）·
+//     F3 杀速 2.4686 ≥2.40 ✓ · F4 星级 0.537 ≥0.3 ✓。
+//   **W 门**：W1 胜率 62.75% <0.68 ✗（尾窗 64.64%；it225 74.25%）· W2 余量 0.8941 <0.90 ✗（差 0.006；尾窗 0.923 ✓）·
+//     W3 道具 5.31 ≥1.5 ✓。
+//   ⇒ 除主判外，W1/W2 都只差一点；但 F1 的失败是数量级的（5.36 vs 3.5），不是门槛抖动。
+//
+//   **与 hitfix 的同窗配对（唯一差 = `wPickup`；it150-205 各 12 点）**：
+//     win 59.40 vs **67.83（−8.4pp）**· 杀速 2.553 vs 2.504 · 伤速 **33.19 vs 28.61（+16%）**· 余量 0.842 vs 0.958 ·
+//     道具 **5.24 vs 5.67（−7.5%）**。
+//     ⇒ 道具量只掉 7.5%，伤速却升 16%、胜率掉 8.4pp。若这是因果，方向与预注册的
+//       「F1 过 + F2 升 ⇒ 道具是掩体/火力」一致；但单对运行无法区分因果与轨迹发散
+//       ⇒ **不下结论，记为待复验假设**（复验要重跑一条 `wPickup=0.5`，同 seed 配对；不能再靠单腿）。
+//
+//   **对价目表的结论（确定部分）**：`wPickup` 从 3.2→1.4→0.5，成熟窗道具/局始终 **5.3–5.7** ⇒
+//     道具收入（y33 的 17.8 Φ）是"路径顺手"的副产品，不是策略的驱动项；
+//     想控制道具量只能改路径/地图/道具位置，不能改价。**后续不要再在 wPickup 上做剂量。**
+//
+//   **B 类改课**：it78 `epochs 6→4`（另 applied 默认项）⇒ F 窗 6-epoch / W 窗 4-epoch。
+//   **覆盖**：243/300 轮（2026-10-25 16:01 停在 it244 的 job_pending）；末点 it240。
+//
+//   ⚠ 本段注释改变了文件字节 ⇒ course_fp 已变（改前 a2202bde）。
+//     本腿已结课；若强行续跑，shard 血缘要按新 fp 重建。
