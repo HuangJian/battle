@@ -156,6 +156,9 @@ DELAYED_IMPORTS = frozenset(
         "worker.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
         "worker.resume",  # `_volume_plan_block` → trailing_samples_per_game
         "worker.volume_waves",  # `_volume_plan_block` → volume_block
+        # 2026-10-27（plan/it-stage-ratation §3.3）：窗口在**建块之前**算好（`window_from_args`）
+        # —— 三条腿共用一份；本模块只读，不反向被 worker 依赖。
+        "worker.stage_rotation",
     }
 )
 #: 注：`biz.modes`（`_MODE_BACKUP_PREFIX`）是**顶层** import，不在上面那张表里（那张表只要

@@ -150,12 +150,18 @@ class TrainingVolume:
         """本课程是否开了动态采集（`target_transitions > 0`；缺席 = 一个函数都不调）。"""
         return int(getattr(self.args, "target_transitions", 0) or 0) > 0
 
-    def _volume_stages(self) -> list[int]:
-        """动态采集的关集 = 课程声明的 stages（分关配额的分母）。
+    def _volume_stages(self, it: int) -> list[int]:
+        """本轮动态采集的关集（分关配额的分母）= `--stages` 的**本轮窗口**。
 
-        门控窗口（curriculum/rotate）与配额分关 v1 不兼容：两者的「本轮实际采样关」
-        是 it 的函数，而配额按固定关集反解——硬凑会让分关达标线与现实不符。响亮
-        SystemExit 而不是静默取一个关集（静默错分 = 采集量对不上目标，最难发现那种）。
+        ★ 2026-10-27（plan/it-stage-ratation §3.4，评审 A2）：允许**逐轮窗口**
+        （`rotation_mode`）。窗口由 `worker.stage_rotation.window_from_args` 算 —— 与导出侧
+        （`loop_export` 的 volume 块）和裁剪侧（`_per_stage_quota`）**同一份**，所以
+        「本轮采哪些关」在三处不可能各说各话；`rotation_mode` 缺席 ⇒ 原样全集（老行为）。
+
+        旧门控（`--curriculum-stages` / `--rotate-stages`）仍**响亮拒收**（v1 边界保留）：
+        那是**另一套** pair 构造（`build_pairs` 的事），与 volume 的「按关配额」混用无解 ——
+        它们的「窗口」是逐轮扩关/epoch 重排，与本模块的采样窗口不是同一件事，硬凑等于
+        同一轮两套关集。要轮换请用 `rotation_mode`（它会同时管住配额分母）。
         """
         args = self.args
         if (
@@ -190,7 +196,15 @@ class TrainingVolume:
             ) from exc
         if not stages:
             raise SystemExit(f"[volume] --stages={raw!r} 解析为空集，无法分关配额（请显式传关号）")
-        return stages
+        # ★ 窗口（三条腿共用一份）：`rotation_mode` 缺席 ⇒ 原样返回全集（逐字节老行为）。
+        from worker.stage_rotation import window_from_args
+
+        try:
+            return window_from_args(
+                args, int(it), stages, rotate_seed=int(getattr(self, "_rotate_seed", 0) or 0)
+            )
+        except ValueError as exc:  # 未知 mode / pinned 不在 --stages / per_it 非法
+            raise SystemExit(f"[volume] it{it}: rotation 配置非法（{exc}）") from exc
 
     def _volume_est_samples(self) -> int:
         """局均 **samples** 估计：jsonl 的 trailing 均值（可 replay）；**无历史 ⇒ `0`（无估计）**。
@@ -219,7 +233,7 @@ class TrainingVolume:
         from worker.volume_waves import initial_games, initial_wave_pairs
 
         args = self.args
-        stages = self._volume_stages()
+        stages = self._volume_stages(it)
         est = self._volume_est_samples()
         target = int(args.target_transitions)
         g0 = initial_games(target, len(stages), est)
@@ -235,7 +249,7 @@ class TrainingVolume:
         pairs = initial_wave_pairs(self._rotate_seed, it, stages=stages, games_per_stage=g0)
         log(
             f"[volume] it{it}: continuous quota mode target={target} "
-            f"per_stage={target_per_stage(target, len(stages))} est_global={est} "
+            f"stages={stages} per_stage={target_per_stage(target, len(stages))} est_global={est} "
             f"（node/export 预排表 {len(pairs)} 局；串行路径按差额实时派发）"
         )
         return pairs
@@ -249,15 +263,12 @@ class TrainingVolume:
         把分关估计静默抹平（plan/rollout-corpus-supply 评审 P0，2026-10-21）。
         """
         from worker.resume import trailing_stage_samples_per_game
-        from worker.volume_waves import parse_stages_arg
 
-        stages = self._volume_stages()
+        # ⚠ 关集**只**来自 `_volume_stages(it)`（= 本轮窗口）。2026-10-27 起删掉了下面那段
+        #   「按 `--stages` 全集再解析一次」的旧代码：它会把窗口静默抹回全集，于是 est 按
+        #   全集取、配额按窗口算 —— 正是要防的那类「同一轮两份反解」（评审 B4）。
+        stages = self._volume_stages(it)
         fallback = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
-        raw = str(getattr(self.args, "stages", "") or "")
-        try:
-            stages = parse_stages_arg(raw) if raw else stages
-        except ValueError:
-            pass
         # `agg` 可选（`--est-agg`，2026-10-21 评审 #8）：latest = 最近一个真有 shard 的轮（缺省）；
         # pooled = 近 3 轮池化（旧口径）。两侧（本链 / `loop_export`）必须同值——不一致
         # 就是「同一轮两份反解」（云机拿到的 G_s 与本地派局不同源）。
@@ -383,7 +394,7 @@ class TrainingVolume:
             wave_round_key,
         )
 
-        stages = self._volume_stages()
+        stages = self._volume_stages(it)
         est = self._volume_est
         cap = int(getattr(args, "max_games_per_stage", 0) or 0)
         target = int(args.target_transitions)
@@ -530,7 +541,7 @@ class TrainingVolume:
             target_per_stage,
         )
 
-        stages = self._volume_stages()
+        stages = self._volume_stages(it)
         target = int(args.target_transitions)
         quota = target_per_stage(target, len(stages))
         est_global = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）

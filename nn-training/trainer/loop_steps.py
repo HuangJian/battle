@@ -468,8 +468,13 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         except Exception as e:  # 取证失败不阻断训练（诊断手段不是新故障面）
             log(f"[forensics] {tag} 快照失败（{type(e).__name__}: {e}）")
 
-    def _per_stage_quota(self) -> int:
-        """逐关严格样本量配额 = `ceil(target_transitions / 关数)`；**0 = 全收 = 老行为**。
+    def _per_stage_quota(self, it: int) -> int:
+        """逐关严格样本量配额 = `ceil(target_transitions / **本轮窗口关数**)`；**0 = 全收 = 老行为**。
+
+        ★ 2026-10-27（plan/it-stage-ratation §3.5，评审 A3）：分母必须与采集侧**同一个窗口**。
+        旧写法按 `--stages` 全集算 `target/35`，而窗口采集时云机按 `target/12` 采 ⇒ 打包前
+        裁剪（`loop_remote_job._trim_shards_to_quota`）与 PPO 装载截断（`np_core`）会把窗口的
+        样本裁回 `1/(35/12)`，**约 2/3 白采**（而且日志只会说「丢 N 局未传」）。
 
         与 `_volume_topup` 共用 `target_per_stage`（同一个数，两侧不会漂），
         也共用 `parse_stages_arg` 解析 `--stages`（见其 docstring：**策略可以不同，
@@ -490,15 +495,22 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         target = int(getattr(self.args, "target_transitions", 0) or 0)
         if target <= 0:
             return 0
+        from worker.stage_rotation import window_from_args
         from worker.volume_waves import parse_stages_arg, target_per_stage
 
         try:
-            n_stages = len(parse_stages_arg(getattr(self.args, "stages", "")))
+            stages = parse_stages_arg(getattr(self.args, "stages", ""))
+            # 配置错（未知 mode / pinned 不在 --stages）不在这里重复炸：采集侧 `_volume_stages`
+            # 先跑且 SystemExit 带可操作文案（本方法的既有约定：响亮报错留在采集侧）。
+            # ★ 与采集侧同一个键（`self._rotate_seed` = 解析后的实际 rotateSeed）。
+            window = window_from_args(
+                self.args, int(it), stages, rotate_seed=int(getattr(self, "_rotate_seed", 0) or 0)
+            )
         except ValueError:
             return 0
-        if n_stages <= 0:
+        if not window:
             return 0
-        return int(target_per_stage(target, n_stages))
+        return int(target_per_stage(target, len(window)))
 
     # ---- 产物出包：已搬到 `trainer/loop_export.py::TrainingExport`（S4 第二十一刀）------
     #

@@ -434,6 +434,7 @@ def volume_block(
     ests_by_stage: Mapping[int, int] | None = None,
     est_hi_factor: float | None = None,
     topup: Mapping[str, Any] | None = None,
+    stages_override: Sequence[int] | None = None,
 ) -> dict | None:
     """args → 计划里的动态采集块；**None = 未开动态采集**（老口径 `build_pairs`）。
 
@@ -461,6 +462,18 @@ def volume_block(
             "（缺它就只能静默按固定关集猜，采集量必然与目标不符）"
         )
     stages = parse_stages_arg(raw)
+    # 逐轮采样子集（2026-10-27，plan/it-stage-ratation §3.2）：窗口**由调用方算好传进来**
+    # （`worker.stage_rotation.window_from_args`，三条腿共用一份），本函数只负责「按这个
+    # 关集反解」。⚠ 必须校验它是 `--stages` 的子集：rotation 配置里打错一个关号，静默
+    # 当成真关集 = 采一关不存在的关（局局零样本、还把配额吃光）。
+    if stages_override is not None:
+        window = sorted({int(s) for s in stages_override})
+        if not window:
+            raise ValueError("stages_override（本轮窗口）不能为空")
+        unknown = [s for s in window if s not in set(stages)]
+        if unknown:
+            raise ValueError(f"stages_override 里有不在 --stages 的关号：{unknown}（--stages={stages}）")
+        stages = window
     # est 已从课程/CLI 面退场（2026-10-12）：**不再**读 `args.est_samples_per_game` 兜底；
     # 调用方给的 trailing 估计就是唯一输入，0 = 无估计（不猜档）。
     est = int(est_samples_per_game or 0)
@@ -613,6 +626,7 @@ def volume_pairs_from_args(
     est_samples_per_game: int = 0,
     ests_by_stage: Mapping[int, int] | None = None,
     est_hi_factor: float | None = None,
+    stages_override: Sequence[int] | None = None,
 ) -> list[tuple[int, int]] | None:
     """args → 本轮初波对集（`None` = 未开动态采集）；计划发布期自检用它对照重放结果。
 
@@ -625,6 +639,7 @@ def volume_pairs_from_args(
         est_samples_per_game=est_samples_per_game,
         ests_by_stage=ests_by_stage,
         est_hi_factor=est_hi_factor,
+        stages_override=stages_override,
     )
     if block is None:
         return None

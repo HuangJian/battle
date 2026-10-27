@@ -9943,3 +9943,29 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   manifest.json、要么给 est 另建账）。
 - **未决**：真机读数（`[pack-breakdown]` 的 `publish_job(含打包)` 是否到方案 §4 的 < 5 s 量级）——
   下一轮在线训练才能取；`tmp` 侧的磁盘占用仍未回收。
+
+## §2026-10-27-goalnn-stage-rotation（2026-10-27，逐轮采样子集 + 关间轮换：模式 1/2 落地，模式 3 与 carry_over 后置）
+
+- **背景**：现在每轮 35 关全采 ⇒ 每关 `ceil(target/35)` 步。要的是「每关样本密度更高 + `ceil(35/N)` 轮内
+  覆盖一遍」。既有 `--rotate-stages` 只能从 CLI 给（`flat_overrides` 无映射）且与 volume **互斥**
+  （`trainer/loop_volume._volume_stages` 曾响亮拒收）——「机制已有一半」这句只对了一半。
+- **决定**：① 三个**扁平标量**课程键 `rotation_mode`（`""`/`even`/`pinned`）· `rotation_per_it` · `rotation_pinned`
+  （关号规格串，与 `--stages` 同一个 `parse_range`）——不引入嵌套模型（`flat_overrides` 只产出扁平 dest）。
+  ② 窗口 = `worker/stage_rotation.window_for` 的 `(rotate_seed, it)` 纯函数（resume-safe；按**位置**排列再映射到
+  排序关集，所以自定义关的 `2000+i` 也成立）。③ **同一个窗口**喂四处：导出 `volume_block(stages_override=)` ·
+  本机 `_volume_stages(it)` · 裁剪与 PPO `_per_stage_quota(it)` · 发布期自检 `volume_pairs_from_args(stages_override=块关集)`。
+  ④ 身份：`stage_rotation` **仅激活时**进 `corpus_identity_fp`（老课程指纹零漂移）。
+- **否决**：改 `worker/plan.py:pairs_for` —— 那行是**老五字段回退**分支，当前分关形态不经过它（改它零行为变化）；
+  靠「按全集算配额 + 打包前裁剪」兜 —— 窗口采到的 2/3 会被裁掉且日志像正常行为；模式 3（逐关不同配额）本版做 ——
+  它要改 PPO 引擎 argv / manifest / `train_core` / `plan_run` / `stream_collect.quota`（标量）7 处，且正确形态是新键
+  `per_stage_quota_by_stage`，另立项；`carry_over` —— 同一 `(stage, seed)` 跨轮复用就是 §15.1 的「重磨固定集」，
+  且要跨零落盘/裁剪/保留边界另存字节。
+- **约束**：多轮离线包 + 轮换 = **响亮拒收**（`plan["volume"]` 是单份块，一份块配多个窗口必然静默错）；
+  旧门控 `--curriculum-stages` / `--rotate-stages` 仍拒收（另一套 pair 构造，混用 = 同一轮两套关集）。
+- **落地**：`worker/stage_rotation.py`（新，账本 L4）· `worker/{volume_waves,plan}.py` ·
+  `trainer/{loop_export,loop_volume,loop_steps,loop_remote_job}.py` · `biz/{course_spec,corpus_fp}.py`；
+  守卫 `tests/worker/test_stage_rotation.py`(8) + `test_stage_rotation_course.py`(5) +
+  `tests/trainer/test_stage_rotation_wiring.py`(6) + 计划块/发布自检用例（含「窗口计划必须过自检」）。
+- **门禁**：`nn-python-gate` 5286 passed / 2 skipped（mypy 792 文件）· `bun run check` 2617 pass / 17 skip / 0 fail。
+- **未决**：判据 7「窗口外的关在 35 关全 eval 下不掉」需一轮真实训练（700 局），不在门禁内；模式 3 / carry_over 见「否决」。
+  全文 → `plan/it-stage-ratation.plan.md`（v2 评审修订版）。

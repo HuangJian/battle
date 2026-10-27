@@ -308,7 +308,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   的 docstring）。裁在发布端 ⇒ payload / data_fp / 云机装载集三者**同时变小且自洽**；
         #   PPO 侧 `per_stage_quota` 的截断保留作第二道保险（裁后几乎不会再有触发）。
         #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
-        quota = self._per_stage_quota()
+        quota = self._per_stage_quota(it)
         if quota > 0 and export_path is None:
             kept, n_trimmed, n_kept = _trim_shards_to_quota(shard_dirs, quota)
             if n_trimmed:
@@ -438,7 +438,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             schedule_raw=course.ppo_schedule_dicts(),
             # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
             # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
-            per_stage_quota=self._per_stage_quota(),
+            per_stage_quota=self._per_stage_quota(it),
             # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
             slim=slim,
             keep_init_weights=bool(getattr(args, "smoke", False)),

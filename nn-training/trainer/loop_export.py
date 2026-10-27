@@ -144,11 +144,29 @@ class TrainingExport:
             stages = parse_stages_arg(str(getattr(args, "stages", "") or ""))
         except ValueError as e:
             raise SystemExit(f"[run_rl] 动态采集无法写进离线计划（--stages {e}）") from e
+        # ★ 逐轮采样子集（2026-10-27，plan/it-stage-ratation §3.3）：窗口必须在**下面三步之前**
+        #   算好 —— `trailing_stage_samples_per_game` 的关集、`volume_block` 的 `stages`、
+        #   以及由它们派生的 `per_stage_quota` / `games_per_stage_by_stage` 全部按窗口走。
+        #   关集与配额分开算 = 采集按窗口、裁剪按全集（2/3 样本白采，评审 A3）。
+        #   `rotation_mode` 缺席 ⇒ `window` **就是全集**（老路径逐字节不变）。
+        from worker.stage_rotation import describe as _describe_window
+        from worker.stage_rotation import window_from_args as _window_from_args
+
+        try:
+            # ★ 窗口键 = **本轮实际用的** rotateSeed（`self._rotate_seed`，resume 后是继承值）；
+            #   直接读 `args.rotate_seed` 会是「声明值」——与种子流的键不是同一个数。
+            window = _window_from_args(
+                args, int(it), stages, rotate_seed=int(getattr(self, "_rotate_seed", 0) or 0)
+            )
+        except ValueError as e:
+            raise SystemExit(f"[run_rl] it{it}: rotation 配置非法（{e}）——修好课程再导出") from e
+        if str(getattr(args, "rotation_mode", "") or ""):
+            log(f"[run_rl] it{it}: {_describe_window(window, stages)}（采集/配额按窗口）")
         # `agg` 与本地链同源（`--est-agg`，2026-10-21 评审 #8）：两侧不同值 = 同一轮两份反解。
         agg = str(getattr(args, "est_agg", "latest") or "latest")
         per_stage = trailing_stage_samples_per_game(
             self._traj_root,
-            stages,
+            window,
             window_iters=3,
             fallback=est,
             agg=agg,
@@ -164,6 +182,7 @@ class TrainingExport:
                 est_samples_per_game=est,
                 ests_by_stage=per_stage or None,
                 topup={"max_games_per_stage": int(getattr(args, "max_games_per_stage", 0) or 0)},
+                stages_override=window,
             )
         except ValueError as e:
             raise SystemExit(
@@ -189,6 +208,17 @@ class TrainingExport:
         （`plan.open_ended=true`，终点 = 段长）。有限模式的算术与包内容逐字节不变。
         """
         args = self.args
+        # ★ 2026-10-27（评审 A4）：轮换的窗口是 `it` 的函数，而计划里的 `volume` 块是**单份**
+        #   （块内钉着 `it`/`rotate_seed`，`plan_pairs_fp` 要对区间内**每一轮**重放同一块）
+        #   ⇒ 一份块配多个窗口必然错，且错法是**静默**的（第 2 轮起还在用第 1 轮的窗口）。
+        #   v1 只支持逐轮下发的计划：多轮包一律拒导（不是降级，是不知道该怎么问）。
+        rotation_mode = str(getattr(args, "rotation_mode", "") or "")
+        if rotation_mode and int(n) > 1:
+            raise SystemExit(
+                f"[run_rl] --export-bundle 要导 {int(n)} 轮，但 rotation_mode="
+                f"{rotation_mode!r} 的采样子集是**逐轮**的，而包里的"
+                "volume 块只能钉一轮 —— 请按轮拆包（每包 1 轮），或关掉轮换"
+            )
         # ★ 2026-09-21（§3）：原先这里拒绝「非 remote」——`--ppo` 删除后该判据恒真、会把
         #   整条导出路径误拒。单一 PPO 路径下「PPO 在节点上跑」是唯一形态，导出天然成立。
         iters_total = int(getattr(args, "iters", 0) or 0)

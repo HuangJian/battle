@@ -387,5 +387,16 @@ def test_unbound_lookup_through_the_composition_class_still_works() -> None:
     assert TrainingLoop._volume_active(on) is True
     # 关集解析缺席/坏值 → 响亮 SystemExit（不是静默取一个关集）
     assert TrainingLoop._volume_stages(
-        cast(Any, SimpleNamespace(args=SimpleNamespace(stages="0-3", curriculum_stages="", rotate_stages=0)))
+        cast(
+            Any,
+            SimpleNamespace(
+                args=SimpleNamespace(
+                    stages="0-3",
+                    curriculum_stages="",
+                    rotate_stages=0,
+                    # 2026-10-27 起关集带 `it`：窗口是 `(rotate_seed, it)` 的函数
+                )
+            ),
+        ),
+        1,
     ) == [0, 1, 2, 3]

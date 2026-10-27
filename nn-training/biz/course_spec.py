@@ -770,6 +770,14 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             raise ValueError("动态采集键非法（≥0；0 = 关闭/默认规则）")
         return v
 
+    @field_validator("rotation_per_it")
+    @classmethod
+    def _rotation_nonneg(cls, v: int) -> int:
+        """窗口关数非负（`0` 在 `pinned` 下合法 = 只采 pinned；`even` 需要 ≥1，由窗口函数拦）。"""
+        if v < 0:
+            raise ValueError("rotation_per_it 不得为负（0 = pinned 只采 pinned；even 需要 ≥1）")
+        return v
+
     # ⚠ 2026-10-12（plan/rollout-estfree-worksteal §4.2 E1）：原 `_check_volume_keys`
     # 门禁（`target_transitions > 0` 必须带 `est_samples_per_game ≥ 1`）**已删**。
     # 为什么：est 从「课程必填旋钮」退场成「盘上历史派生量」（trailing），首轮无历史
@@ -814,6 +822,18 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 单关单轮局数硬顶（0 = 默认规则：初波 G0 × DEFAULT_GAME_CAP_MULT）。
     #: 防短局 pathological 下局数爆炸；触顶 = 配额未满但停采 + 响亮日志。
     max_games_per_stage: int = 0
+    # ---- 逐轮采样子集（窗口；plan/it-stage-ratation.plan.md，2026-10-27）----
+    #: 每轮只采一个**窗口**的关，`ceil(关数 / rotation_per_it)` 轮覆盖一遍 ⇒ 每关样本密度
+    #: 提高 `关数/窗口` 倍。`""` = 关闭（老课程逐字节不变：一个 `stage_rotation` 函数都不调）。
+    #: 窗口只由 `(rotate_seed, it)` 决定（resume-safe，`worker.stage_rotation`）。
+    #: 进 `corpus_identity_fp`（**仅激活时**：换采样计划 = 新实验，AGENTS §15.5；缺席不进 ⇒
+    #: 老课程指纹零漂移，与 `target_transitions` / `paired_rotate_seed` 同待遇）。
+    rotation_mode: Literal["", "even", "pinned"] = ""
+    #: 每轮窗口关数：`even` 必须 ≥1；`pinned` 下 = pinned **之外**的余额关数（0 = 只采 pinned）。
+    rotation_per_it: int = 0
+    #: 模式 2 的 pinned 关号规格串（与 `--stages`/`--seeds` 同一个 `parse_stages_arg`，例 `"2033-2034"`）。
+    #: 刻意不用 list：`flat_overrides` 只产出**扁平标量** dest（argparse 侧没有 dict/list 型 dest 先例）。
+    rotation_pinned: str = ""
     seeds: str = "0-3"
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""
@@ -1067,6 +1087,12 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 漏映射即静默失效是历史前科（ent_break / paired_rotate_seed）——这里是**故意**删。
             "target_transitions": "target_transitions",
             "max_games_per_stage": "max_games_per_stage",
+            # 逐轮采样子集（2026-10-27，plan/it-stage-ratation）：三个扁平标量键。
+            # 漏映射 = 静默失效（ent_break / paired_rotate_seed 前科）——配了轮换却不生效，
+            # 表现为「每关密度没变」，而账本上看不出任何异常。
+            "rotation_mode": "rotation_mode",
+            "rotation_per_it": "rotation_per_it",
+            "rotation_pinned": "rotation_pinned",
             "seeds": "seeds",
             "dodge": "dodge",
             # 决策事件补充（§6 R2；漏映射 = 静默失效，ent_break/paired_rotate_seed 前科）：

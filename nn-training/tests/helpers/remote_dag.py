@@ -555,6 +555,11 @@ LAYERS: dict[str, int] = {
     # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
     # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
     "worker.volume_waves": 3,
+    # 逐轮采样子集（窗口，2026-10-27，plan/it-stage-ratation）：顶层只靠
+    # `worker.volume_waves`(L3) 的 `parse_stages_arg`（pinned 规格串与 `--stages` 同一个解析器）
+    # ⇒ 秩 4。消费者全在 `trainer/`（导出 / 本机连续配额 / `_per_stage_quota`），
+    # 三条腿**只在这一个地方**算窗口（错法静默：采集 12 关、裁剪 35 关 ⇒ 2/3 样本白采）。
+    "worker.stage_rotation": 4,
     # 节点侧**逐局流式采集**的调度器（2026-10-27；取代了旧的「有界多批补差」
     # `worker.iter_topup`）：顶层靠 `worker.volume_alloc`(L2) / `worker.volume_quota`(L1) /
     # `worker.rollout_argv`(L0) ⇒ 秩 **3**。

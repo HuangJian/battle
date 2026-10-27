@@ -274,7 +274,10 @@ def test_check_plan_against_args_catches_target_drift() -> None:
 
     with pytest.raises(ProtocolError, match="重放对集"):
         check_plan_against_args(_args(**{**X20, "target_transitions": 96000}), plan)
-    with pytest.raises(ProtocolError, match="重放对集"):
+    # 关集漂移（args 比块少一关）现在在**更早**一步就被拦下（2026-10-27 逐轮采样子集：
+    # 重解用计划块里的关集，于是「块 ⊄ args」是直接的子集断言，而不是算完两套对集再比）。
+    # 判据（拒发 + 点出哪一关）与以前一致，只是文案从「重放对集」换成更具体的「不自洽」。
+    with pytest.raises(ProtocolError, match="不自洽"):
         check_plan_against_args(_args(**{**X20, "stages": "2000-2002"}), plan)
     # 计划带块而 args 已经关了动态采集 ⇒ 也是同一类漂移，响亮拒
     with pytest.raises(ProtocolError, match="target_transitions ≤ 0"):
@@ -454,3 +457,79 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
             stage = int(row[row.index("--stages") + 1])
             per_stage[stage] = per_stage.get(stage, 0) + 1
         assert per_stage == {s: X20_G0 for s in X20_STAGES}, per_stage
+
+
+# ────────────────────── 5. 逐轮采样子集（窗口）的接线点（2026-10-27） ──────────────────────
+
+
+def test_volume_block_window_override_matches_plan_side() -> None:
+    """窗口交给 `volume_block` ⇒ 块里的 stages/配额/分关局数**全按窗口**反解。
+
+    这是评审 A1 的修法点：轮换**不能**在 `worker/plan.py:pairs_for` 里改（那行是「老五字段
+    回退」分支，当前分关形态根本不经过它）。唯一的缝是块构造处 —— 块自动按 `len(stages)`
+    派生 `per_stage_quota` / `games_per_stage`，所以只要 stages 是窗口，三者天然自洽。
+    """
+    args = SimpleNamespace(target_transitions=1200, stages="0-34", max_games_per_stage=0)
+    window = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+    block = volume_block(
+        args, est_samples_per_game=200, ests_by_stage={s: 200 for s in window}, stages_override=window
+    )
+    assert block is not None
+    assert block["stages"] == window
+    assert block["per_stage_quota"] == target_per_stage(1200, len(window))
+    assert sorted(block["games_per_stage_by_stage"]) == window
+    # 计划侧的形状校验（同源等式）必须认这个块
+    assert validate_volume_block(block)["per_stage_quota"] == target_per_stage(1200, len(window))
+
+
+def test_volume_block_window_must_be_a_subset() -> None:
+    """窗口里打错一个关号 ⇒ 响亮 `ValueError`（静默采纳 = 采一关不存在的关，局局零样本）。"""
+    args = SimpleNamespace(target_transitions=1200, stages="0-34", max_games_per_stage=0)
+    with pytest.raises(ValueError, match="不在 --stages"):
+        volume_block(args, est_samples_per_game=0, stages_override=[99])
+    with pytest.raises(ValueError, match="不能为空"):
+        volume_block(args, est_samples_per_game=0, stages_override=[])
+
+
+def _windowed_plan() -> tuple[SimpleNamespace, dict, list[int]]:
+    """窗口计划（4 关的课、每轮 2 关）+ 它的窗口。"""
+    from worker.plan import build_plan as _build_plan
+    from worker.stage_rotation import window_from_args
+    from worker.volume_waves import parse_stages_arg
+
+    args = _args(**{**X20, "rotation_mode": "even", "rotation_per_it": 2, "rotation_pinned": ""})
+    args.rotate_seed = 4242
+    window = window_from_args(args, 1, parse_stages_arg(str(args.stages)), rotate_seed=4242)
+    assert len(window) == 2
+    block = volume_block(
+        args,
+        est_samples_per_game=X20["est_samples_per_game"],
+        ests_by_stage={s: X20["est_samples_per_game"] for s in window},
+        stages_override=window,
+    )
+    assert block is not None
+    plan = _build_plan(
+        args, it=0, iters_total=1, rotate_seed=4242, volume=block, log=lambda _m: None
+    )
+    return args, plan, window
+
+
+def test_check_plan_against_args_accepts_a_rotated_window() -> None:
+    """★ 窗口计划必须过发布期自检（实测的坑：自检按 `args.stages` **全集**重解）。
+
+    旧形状：`pairs_for` 用块里的窗口（12 关）重放，`volume_pairs_from_args` 却按 `--stages`
+    全集（35 关）重解 ⇒ `mine != real` ⇒ **每份窗口计划在发布期被拒**（而且文䈈是「重放与
+    args 不一致」，指向完全错误的方向）。修法 = 重解用**计划块里的关集**（块是权威）。
+    """
+    args, plan, window = _windowed_plan()
+    check_plan_against_args(args, plan)  # 一致 ⇒ 静默通过
+    assert {s for s, _ in pairs_for(plan, 1)} == set(window)
+
+
+def test_check_plan_against_args_rejects_a_window_outside_stages() -> None:
+    """块里的关集不是 `args.stages` 的子集 ⇒ ProtocolError（不是静默采一个不存在的关）。"""
+    args, plan, window = _windowed_plan()
+    plan["volume"]["stages"] = [*window[:1], 99]
+    with pytest.raises(ProtocolError, match="不自洽"):
+        check_plan_against_args(args, plan)

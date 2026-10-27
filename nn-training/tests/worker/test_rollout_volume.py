@@ -595,8 +595,8 @@ class _StubLoop:
     def _volume_active(self) -> bool:
         return TrainingLoop._volume_active(cast(Any, self))
 
-    def _volume_stages(self) -> list[int]:
-        return TrainingLoop._volume_stages(cast(Any, self))
+    def _volume_stages(self, it: int) -> list[int]:
+        return TrainingLoop._volume_stages(cast(Any, self), it)
 
     def _volume_est_samples(self) -> int:
         return TrainingLoop._volume_est_samples(cast(Any, self))
@@ -810,14 +810,14 @@ def test_volume_stages_rejects_missing_or_empty_stages(tmp_path: Path) -> None:
         stub = _StubLoop(tmp_path, target=600000)
         stub.args.stages = bad
         with pytest.raises(SystemExit):
-            stub._volume_stages()
+            stub._volume_stages(1)
 
 
 def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
     """显式 --stages 正常解析（回归：P2-c 改动不得误伤正常路径）。"""
     stub = _StubLoop(tmp_path, target=600000)
     stub.args.stages = "2000-2003"
-    assert stub._volume_stages() == [2000, 2001, 2002, 2003]
+    assert stub._volume_stages(1) == [2000, 2001, 2002, 2003]
 
 
 def test_continuous_restart_quota_met_backfills_winrate_from_shards(

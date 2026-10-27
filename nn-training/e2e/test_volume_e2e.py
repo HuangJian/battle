@@ -290,8 +290,8 @@ class _Loop:
     def _volume_active(self) -> bool:
         return TrainingLoop._volume_active(cast(Any, self))
 
-    def _volume_stages(self) -> list[int]:
-        return TrainingLoop._volume_stages(cast(Any, self))
+    def _volume_stages(self, it: int) -> list[int]:
+        return TrainingLoop._volume_stages(cast(Any, self), it)
 
     def _volume_est_samples(self) -> int:
         return TrainingLoop._volume_est_samples(cast(Any, self))

@@ -158,6 +158,23 @@ def _identity_payload(course: CourseConfig, *, drop_reward: bool = False) -> dic
     # shard 判成异身份，先例 `tests/worker/test_rollout_volume.py:492-499`）。
     if course.paired_rotate_seed is not None:
         payload["paired_rotate_seed"] = int(course.paired_rotate_seed)
+    # 逐轮采样子集（plan/it-stage-ratation.plan.md，2026-10-27）：**决定抽哪些样本**
+    # （每轮只采窗口内的关）⇒ 与 seed_rotate/target_transitions 同类，进身份。
+    # ⚠ 同样**仅激活时**（`rotation_mode` 非空）：无条件加入会让所有既有课程指纹全体漂移。
+    # 换策略（even↔pinned、改 per_it）而不换账 = 两份基准不可比，故三个键一起进。
+    if str(getattr(course, "rotation_mode", "") or ""):
+        # ⚠ 不能用 `worker.volume_waves.parse_stages_arg`：`biz/` 是 **L1**，
+        #   `tests/test_layering.py` 不许它碰上层包面。那个函数本身就是
+        #   `biz.course.parse_range` 的薄封装（同一份解析），直接用它即可。
+        from biz.course import parse_range
+
+        pinned_raw = str(getattr(course, "rotation_pinned", "") or "").strip()
+        payload["stage_rotation"] = {
+            "mode": str(course.rotation_mode),
+            "per_it": int(getattr(course, "rotation_per_it", 0) or 0),
+            # 哈希**解析后**的值（规格串的写法不该改身份）
+            "pinned": sorted(parse_range(pinned_raw)) if pinned_raw else [],
+        }
     # 起始分布（plan/x20-state-init.plan.md P2/P3.5，2026-09-25）：**决定一个样本从哪个世界
     # 开始**，与 seed_rotate/mode 同类——「标准开局 300 tick 后的观察」与「中段状态交棒后的
     # 观察」不是同一种货，混进同一轮训练/dimension 统计就是换实验而不换账。故进身份：

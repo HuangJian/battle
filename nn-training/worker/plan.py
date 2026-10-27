@@ -396,14 +396,22 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
             # 分关 G 是「est 决定的局数」这类运行参数：args 侧无法独立复算 ⇒ 把块里的
             # 分关数字**注入**重解（自检此时守 stages/target/模板恒等；块自身的同源校验
             # 在 validate_volume_block 里已经拦过一次）。
-            real = volume_pairs_from_args(
-                args,
-                it,
-                int(plan["rotate_seed"]),
-                est_samples_per_game=int(vol["est_samples_per_game"]),
-                ests_by_stage=vol.get("est_s_by_stage"),
-                est_hi_factor=vol.get("est_hi_factor"),
-            )
+            try:
+                real = volume_pairs_from_args(
+                    args,
+                    it,
+                    int(plan["rotate_seed"]),
+                    est_samples_per_game=int(vol["est_samples_per_game"]),
+                    ests_by_stage=vol.get("est_s_by_stage"),
+                    est_hi_factor=vol.get("est_hi_factor"),
+                    # ★ 2026-10-27（逐轮采样子集）：重解必须用**计划块里的关集**（= 本轮窗口）。
+                    #   不传 ⇒ 按 `args.stages` 全集重解 ⇒ 窗口轮次被判成「重放与 args 不一致」
+                    #   （实测：12 关窗口 vs 35 关全集 ⇒ 每份计划在发布期被拒）。子集关系由
+                    #   `volume_block` 自己校验（打错关号在这里也响亮）。
+                    stages_override=vol.get("stages"),
+                )
+            except ValueError as e:
+                raise ProtocolError(f"计划自检失败：volume 块与 args 不自洽（{e}）") from e
             if real is None:
                 raise ProtocolError(
                     "计划自检失败：计划带 volume 块，但 args 的 target_transitions ≤ 0"
