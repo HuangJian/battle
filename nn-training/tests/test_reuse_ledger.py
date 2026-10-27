@@ -123,9 +123,10 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: | `coord_channels` · `features` · `predict` | `tpu-probe`/`student`/`student_paddle` · `models/core`/`student`/`student_paddle` | **模型类自己的方法/属性面**：两个框架上返回的对象族不同（`torch.Tensor` vs `paddle.Tensor`），而「同一个架构名」正是双生要保证的契约 |
 #: | `build_ppo` | `worker/models/arch_meta` · `student_paddle` · `worker/ppo/engine` | ★ 这正是**本次收敛**：原来 engine 与 student_paddle 各存一份**逐字节相同**的实现（一条 exact 欠账）—— 现在 = 一份实现 + 两个转发名 ⇒ 名字多一格、实现少一份 |
 #:
-#: ⚠ 工作树上还有**另一次在飞的改动**（payload 分块，未入本次提交）多出 1 格
-#: （`remote/payload_pack.py` 的 `one`）：那笔账由那次改动自己在本文件记，
-#: 本基线只覆盖到「Paddle 双生 + 2026-10-27 评审收敛」这一份（工作树读数因此可比 103 多）。
+#: ⚠ 另一次在飞的改动（payload 分块并行，2026-10-27 评审时**移出工作树**，停在
+#: `nn-training/tmp/wip-keep/`）恢复后会在 `remote/payload_pack.py` 多出 1 格（`one`）——
+#: 那笔账由那次改动自己在本文件记。本基线只覆盖「Paddle 双生 + 评审收敛」这一份 ⇒
+#: **现状读数 = 103**（`tools/reuse_audit.py` 实测，停放后已对过账）。
 #: 收敛前后对照：`worker/models/student.py` ↔ `student_paddle.py` 的 `arch` /
 #: `policy_input_dim` / `value_anchor_slices`（×3 组逐字节）与 `build_ppo`（×1）全部收进
 #: `worker/models/arch_meta.py`；`cat_entropy`（1 组结构克隆）收进 `worker/ppo/trainer.py`。
