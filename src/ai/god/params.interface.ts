@@ -95,6 +95,31 @@ export interface GodAIParams {
   baseLaneSentryMode: number
   /** §X: 哨兵站位搜索半径与开火距离上限（曼哈顿格数）。 */
   baseLaneSentryRange: number
+  /**
+   * A9 mode 2 (2026-10-27): leash for the PRE-SEAL, measured on the distance to
+   * the seal CELL (not to the shooter). Time-to-impact is set by the shooter's
+   * distance; the player's job is only to reach the lane. 6 cells ≈ 66 ticks —
+   * the same order as a shell's flight from a 15-cell sniper.
+   */
+  baseLaneSealCellRange: number
+  /**
+   * A9 mode 2 (2026-10-27): how the seal cell is chosen on the shooter's column.
+   * 0 = nearest the eagle (shipped; ties to safety, walls behind us).
+   * 1 = fastest to reach from the player (any cell on the line blocks the shell).
+   */
+  baseLaneSealCellMode: number
+  /**
+   * A9 mode 2 (2026-10-27): only pre-seal against shooters at least this many
+   * cells from the base. Near-band enemies (the ones that actually kill it, from
+   * rows 23-25) are a MELEE job — sealing in front of them spends ticks that
+   * cost 0.33 kills/game while blocking 0.00 shells/game. 0 = no gate.
+   */
+  baseLaneSealPreMinDist: number
+  /**
+   * A9 mode 2 (2026-10-27): anti-wedge. If the player's cell does not change for
+   * this many ticks while walking to the seal cell, yield for 120 ticks. 0 = OFF.
+   */
+  baseLaneSealAntiStuckTicks: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家

@@ -932,6 +932,11 @@ export class GodAIInput implements InputLike {
   _enemyModel: EnemyModelState = initEnemyModel(false)
   /** M3: previous-tick player HP — hit detection for the accuracy feature. */
   _enemyModelLastHp = 0
+  /** A9 seal anti-wedge: last cell while walking to the seal + no-progress count. */
+  _sealLastCol = -1
+  _sealLastRow = -1
+  _sealStillTicks = 0
+  _sealSuppressUntil = 0
 
   constructor(
     world: World,
@@ -1072,6 +1077,13 @@ export class GodAIInput implements InputLike {
   reset(): void {
     this._moveDir = null
     this._fire = false
+    // A9 seal anti-wedge is keyed on `world.frame`, which restarts at 0 per
+    // stage — a stale `_sealSuppressUntil` from the previous stage would mute
+    // the seal for the whole next stage.
+    this._sealLastCol = -1
+    this._sealLastRow = -1
+    this._sealStillTicks = 0
+    this._sealSuppressUntil = 0
     this._thought = false
     this._effectiveDirCache = null
     this._effectiveDirCacheValid = false
