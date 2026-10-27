@@ -28,7 +28,13 @@ export function evalMidLaneHold(self: GodAIInput, ctx: DecisionContext): boolean
   const dist = manhattan(hold.col, hold.row, pc.col, pc.row)
   // 中路繁忙：列内有向下敌弹（§163 laneShellInColumnImpl — 真实凿穿信号），
   // 或敌人临近基地列（凿墙者即将到达）。两者皆无 = 中路无威胁 → 放行。
-  const busy = laneShellInColumnImpl(self) || enemyNearLaneImpl(self, prm.midLaneHoldEnemyDist)
+  // midLaneHold = 2 (2026-10-27 修正)：A30 实测 −4.57pp、kills −396，原因不是
+  // 「守线无用」，而是 `busy` 用了 `enemyNearLane`（敌人只要**靠近**基地列就算忙）。
+  // hard 的敌人几乎总在往基地压 ⇒ 该候选几乎全程劫持 hunt，玩家不追不打。守线的
+  // 本意是**对消凿穿弹**（A9/§163 的信号），因此 mode 2 只认列内真实来袭弹。
+  const busy =
+    laneShellInColumnImpl(self) ||
+    (prm.midLaneHold < 2 && enemyNearLaneImpl(self, prm.midLaneHoldEnemyDist))
   if (dist === 0) {
     // 已在对消格上：无威胁则放行 hunt（击杀边路），有威胁则驻守向上对消。
     // 注意只允许 dist===0 — dist≤range(1) 时玩家还在邻格，强制面朝上会

@@ -1,10 +1,10 @@
 import type { GodAIInput } from '../GodAIInput'
 import { leadHitForDir } from './lead-fire'
-import { enemyBulletOnRay } from './ActionContract'
 import type { Direction } from '../../constants'
 import type { Tank, TankKind } from '../../types'
 import { CELL, TANK, BULLET, FIELD, GRID, BASE_POS } from '../../constants'
 import { snap, bulletInFrontDist } from '../../utils/helpers'
+import { opposite } from '../../utils/direction'
 import { AIM_RANGE_CELLS, kindThreatWeight } from './constants'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../config/combat'
 import { isBaseRingCell } from './ThreatBudget'
@@ -708,6 +708,50 @@ function aimOk(self: GodAIInput): boolean {
   return self.rng.next() >= err
 }
 
+/**
+ * A34 (2026-10-26, fixed 2026-10-27): would a shell fired NOW along `dir` be
+ * cancelled head-on before it reaches the target?
+ *
+ * The original predicate was `enemyBulletOnRay`, which only matches enemy
+ * bullets heading toward the BASE along the same axis (`b.dir === 'down'` for a
+ * vertical ray) — i.e. bullets flying *away* from the muzzle. A shot fired
+ * after such a bullet can only CHASE it, never collide head-on, so the knob
+ * measured the wrong geometry and read "neutral (593/593 identical)".
+ *
+ * A real cancellation needs the opposite heading: an enemy shell coming AT the
+ * muzzle, laterally overlapping the bullet's 6px band, closer than the target.
+ * (Bullets are 3px half-width each ⇒ contact at |Δlateral| < BULLET.)
+ */
+function enemyBulletHeadOn(
+  self: GodAIInput,
+  p: Tank,
+  dir: Direction,
+  enemyDistCells: number,
+): boolean {
+  const w = self.world
+  const vertical = dir === 'up' || dir === 'down'
+  const sign = dir === 'down' || dir === 'right' ? 1 : -1
+  const pcx = p.x + p.w / 2
+  const pcy = p.y + p.h / 2
+  const limit = enemyDistCells * CELL
+  const bullets = w.bullets
+  for (let i = 0; i < bullets.length; i++) {
+    const b = bullets[i]
+    if (!b.alive || b.allegiance !== 'enemy' || b.speed <= 0) continue
+    // Head-on only: the shell must travel opposite to our shot.
+    if (b.dir !== opposite(dir)) continue
+    const bx = b.x + b.w / 2
+    const by = b.y + b.h / 2
+    const lat = vertical ? bx - pcx : by - pcy
+    if (Math.abs(lat) >= BULLET) continue
+    const ahead = (vertical ? by - pcy : bx - pcx) * sign
+    // Must be in front of the muzzle and closer than the intended target.
+    if (ahead <= 0 || ahead >= limit) continue
+    return true
+  }
+  return false
+}
+
 export function shouldFireInDirImpl(
   self: GodAIInput,
   pcx: number,
@@ -775,7 +819,11 @@ export function shouldFireInDirImpl(
     // 若我们的射线上正有敌弹飞来，这一发十有八九先和它相撞（两弹皆消），
     // 等于用整段冷却换掉对方一发；只有在敌人很近（≤3 格，能抢在相撞前命中）时才值得。
     // 这条是「护盾期错半格」战术的判据侧等价物：不打注定被对消的弹。
-    if (self.params.skipCancelShot > 0 && result.enemyDist > 3 && enemyBulletOnRay(w, p, dir)) {
+    if (
+      self.params.skipCancelShot > 0 &&
+      result.enemyDist > 3 &&
+      enemyBulletHeadOn(self, p, dir, result.enemyDist)
+    ) {
       self._fireGateAudit.cancelSkip = (self._fireGateAudit.cancelSkip ?? 0) + 1
       return false
     }

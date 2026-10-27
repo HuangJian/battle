@@ -8650,3 +8650,60 @@ classic −0.14pp（只有 3 局翻盘且全向下）⇒ classic restore 0。
 `bun run check` 全绿 · `freeze:check` 绿（`ab119977…` 不变，`leadFireMode` 默认 0 =
 字节等同）· 新增 `tests/godai-lead-fire.test.ts`（4 例：静止敌人 32px 打不中 / 同一敌人
 横移 16px 打得中 / 钢墙取消 / 枪口后方忽略）。
+
+## §2026-10-27-godai-a28-fix — 失败思路复审：A28 的两次实现错误（修好 +2.24pp，SHIPPED）+ 12 条同批复核
+
+**结论先行**：上一轮把 A28（追击时给「要打好几发」的目标加惩罚）判成「机制空转」
+（700/700 逐局相同）是**实现错误**，不是想法错误。两处 bug：
+① `Tank.hp` 是**伤害点**（basic 250 / armor 500，玩家一发 ≈100），判据 `hp > 1` 恒真
+⇒ 惩罚加给所有目标、排序不变；② 惩罚只挂在 `huntModeTarget`（`canHunt` 残局分支），
+而 90% 的选目标走 `normalSelectionTarget` 的最近敌级联 ⇒ 即使修好单位也照样空转。
+修好后 hard 35×60：**83.5% → 85.8%（Δ+2.24pp, t=2.70）· kills +380 · suite 0.6567→0.6909**。
+
+同批复审 12 条失败思路，**6 条是误读/实现错误，6 条是真负向**（详见
+`docs/godai-failed-ideas-audit.md`）。
+
+### 一、A28 的修法
+
+- `god/constants.ts` 新增 `shotsToKill(hp, referenceDamage)`（单位换算唯一入口）。
+- `StrategyPlanner.ts`：`armorChasePen(self, t) = (shotsToKill − 1) × armorChasePenalty`，
+  挂到**全部**最近敌级联：`huntModeTarget` / `targetValueMode` / `pathTargetMode` / 普通最近敌。
+- 惩罚系数：1 最好（+2.24pp），2 更弱（+1.05pp, t=1.13）—— 2 格会让 AI 为残兵多走太多路。
+- 三难度：hard **+2.24pp** · classic −0.62pp(t=−0.88) ⇒ `CLASSIC_OVERRIDES` 还原 0
+  （instant 1 弹上限，走位换目标不划算）· chaos −0.10pp(t=−0.11) 噪声保留。
+- `GUARD_GOD_AI_PARAMS.armorChasePenalty = 0`：护卫行为逐字节不变（SP 回归线锁定 §159/§160）。
+
+新纪元基线（35×60，真实 stageIndex，CRN）：
+**hard 85.8% / suite 0.6909 / score 0.8512** · **classic 88.3% / 0.7321 / 0.8730** ·
+**chaos 82.5% / 0.6435 / 0.8293**。golden 重钉 `ee8cfef2… → a492627b…`。
+
+### 二、同批复核（12 条，全部重跑）
+
+| # | 定性 | 修后实测（hard） |
+|---|---|---|
+| A13 dodge 按 TTI 选弹 | **误读**：`bulletLaneDist` 返回**轴向**距离，不是横向；同速弹下排序恒等 | 探针 717 个多弹 tick：分歧 **0** |
+| A27 先杀一枪死的 | 单位错误（`hp>1` 恒真） | 350 局仅 1 局翻转 ⇒ 无杠杆（多方向可打极少） |
+| A29 血量池质量模式 | 单位错误（池 ≈700 点 vs 阈值 30 ⇒ 恒真） | 阈值 8 生效后 +22/−22、score +0.0011 ⇒ 中性 |
+| A30 站桩守中路 | 判据过宽（`enemyNearLane` 几乎恒真） | mode 2（只认列内来袭弹）−0.86pp ⇒ 仍负 |
+| A31 盾牌期激进 | **盾源错**（3s 复活盾当 20s 道具盾，45% 触发错窗）+ `aggressive` 连防线一起关 | mode 2（基地安全才激进）**+0.19pp(t=0.44)** |
+| A32/A33 冰冻期点名 | 缺 cooldown/基地门，A32 还硬关火 | mode 2 −1.14pp ⇒ 仍负（冰冻期已在 81% 射速上限） |
+| A34 不对消 | **判据方向反了**：`enemyBulletOnRay` 只匹配朝基地飞的弹 | 上限实测 **2.0 发/局**被对消（63 发/局） |
+| A35b 打肩膀 | 盾源错（同 A31）+ 前提高估 | 24 拍转向 ≫ 2 发/局 ⇒ 方向关闭 |
+| A10.9 parting shot | **派发落穿**：mode 7 落到 mode 6 分支，从未只在转身拍开火 | 真正实现后 **−6.00pp(t=−2.35)** ⇒ 更糟 |
+| A15 沿朝向补射 | **落点错**：只在 `!_fire` 试，A3 替换/A2 否决窗口（≈49 拍/局）全丢 | mode 4 **+0.05pp(t=0.06)** · kills +104 ⇒ 中性 |
+| A7 rank 2 让 A* 选路 | **结果被覆盖**：`pick` 非空走 legacy 扫描 | 修后 −0.57pp(t=−0.24) ⇒ 中性 |
+| A16 到达时命中门 | 实现忠实；预测器噪声 > 滤掉的空弹 | 不复测（−2.29pp 成立） |
+
+### 三、四个可复用的判据
+
+1. **先验单位**：`hp`（点）/ 发数 / 格 三套单位混用是这类 bug 的主源；任何阈值先打印分布。
+2. **「逐局相同」是实现空转的指纹，不是想法无效的证据**（本轮 6 条里 4 条被它误判过）。
+3. **状态字段 ≠ 机制**：`shieldTimer` 三源合一（复活 3s / 星盾 1.5s / 道具 20s）。
+4. **负向结论先算天花板**：A34/A35b 的收益上限 = 2 发/局；A32/A33 的射速上限 = +24%。
+
+### 四、门禁
+
+`bun run check` 全绿 · `bun run build` 过 · `bun test godai` 325 pass / 0 fail ·
+`freeze:check` 绿（新钉 `a492627b…`）· 新增 `tests/godai-armor-chase.test.ts`
+（4 例：单位换算 ×2 + 选目标排序 ×2，后者直接钉住「惩罚 0 追最近的 5 发装甲 /
+惩罚 1 改追 3 格外的 1 发残兵」）。

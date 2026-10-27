@@ -11,7 +11,7 @@
 // order, so behavior under default params is byte-identical to pre-M1.
 import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS, TANK, RESPAWN_SHIELD_MS } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
 import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
 import { turnWillCommit } from './turn-gate'
@@ -43,6 +43,7 @@ import { SUICIDE_RETURN } from './candidates/SuicideReturn'
 
 import { manhattan } from '../../utils/helpers'
 import { findEnemyDirectionImpl } from './FireControl'
+import { shotsToKill } from './constants'
 import type { GodAIParams } from './params.interface'
 
 /**
@@ -281,12 +282,33 @@ export function thinkImpl(self: GodAIInput): void {
   // undefended (the #1 cause of 330-tick base losses in classic).
   const shielded = (p.shieldTimer ?? 0) > 0
 
+  // A31b (2026-10-27): `shieldTimer` is shared by THREE sources with very
+  // different meanings — respawn shield (3s, `RESPAWN_SHIELD_MS`), star-grace
+  // (1.5s) and the SHIELD POWER-UP (20s, `POWERUP_DURATION_MS`, additive).
+  // A31/A35b were written against "the 20-second invincible window" but gated
+  // on `shieldTimer > 0`, so ~45% of their triggers fired in the 3-second
+  // window right after a DEATH — the worst possible moment to abandon the
+  // defence (measured hard: 374 respawn/star ticks vs 456 power-up ticks per
+  // game). `shieldTimer > RESPAWN_SHIELD_MS` is exact: only the power-up can
+  // push the timer above the respawn cap.
+  const powerupShielded = (p.shieldTimer ?? 0) > RESPAWN_SHIELD_MS
+
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   // A31 (2026-10-26): 尸检显示**盾牌期反而打得更少**（射击 7.8/千拍 vs 全局 10.1，
   // 击杀 2.94 vs 3.61）—— 因为这里刻意把 shield 排除在 aggressive 之外（怕丢基地）。
   // 但盾牌是**无敌窗口**：不掉命的前提下，它是最该压上去换击杀/换位置的时候。
   // `shieldAggressive` > 0 时把盾牌也纳入 aggressive。0 = 原行为（字节等同）。
-  self.aggressive = frozen || (self.params.shieldAggressive > 0 && shielded)
+  //
+  // A31b (2026-10-27)：两处修正 —— ① 只认**道具盾**（见上）；
+  // ② 模式 2 要求基地不受威胁才激进。`aggressive` 会让 DEFENSE_INTERCEPT /
+  // MID_LANE_DEFENSE / BASE_LANE_SENTRY / SURVIVE 全部 return false，也就是
+  // **放弃守家**；A31 的原设计注释是「skip dodge but DON'T abandon defense」，
+  // 实现却把防线一起关了 —— 20 秒不守基地，负向是必然的。
+  self.aggressive =
+    frozen ||
+    (self.params.shieldAggressive > 0 &&
+      powerupShielded &&
+      (self.params.shieldAggressive < 2 || !self.isBaseUnderThreat()))
 
   // ============ A23 (2026-10-26): FACE THE SHOT ============
   // Autopsy: the gun is ready 2371 ticks/game but only 506 of those (21%) have a
@@ -305,13 +327,18 @@ export function thinkImpl(self: GodAIInput): void {
         if (!turnWillCommit(w, p, d)) continue
         const sc = scanAheadImpl(self, pcx, pcy, d)
         if (!sc.enemy) continue
-        // A27 (2026-10-26)：**先杀能一枪打死的**。尸检发现「装甲占比」与胜率的相关性是
+        // A27 (2026-10-26)：**先杀快死的**。尸检发现「装甲占比」与胜率的相关性是
         // 全场最强信号（−0.461；地形全部≈0），最差 6 关全是 armor ≥20%。装甲要 4 发，
         // 按 74 拍/发 的冷却要 ~300 拍，等于把射速预算全吃掉；先把小兵清掉才能真正解围。
-        // 评分 = 距离 + (目标不是一枪死 ? finisherBias : 0) 格。
+        // 评分 = 距离 + (还需几发 − 1) × finisherBias 格。
+        //
+        // ⚠ 2026-10-27 修正：原实现用 `hp > 1` 判「不是一枪死」——`hp` 是**伤害点**
+        // （basic 100..500），恒 > 1 ⇒ 所有方向同加一份偏置 ⇒ 排序不变。这是 A27 在
+        // 2100 局只有 +0.05pp 的真因（不是「只有一个方向可选」）。改为按**发数**计。
         let score = sc.enemyDist
         if (self.params.finisherBias > 0) {
           const vertical = d === 'up' || d === 'down'
+          const ref = w.rules.referenceDamage
           for (let ei = 0; ei < self._enemies.length; ei++) {
             const e = self._enemies[ei]
             const lat = Math.abs(
@@ -328,7 +355,7 @@ export function thinkImpl(self: GodAIInput): void {
             if (ahead <= 0) continue
             const dCells = Math.abs(ahead) / CELL
             if (dCells > sc.enemyDist + 0.5) continue
-            if ((e.hp ?? 1) > 1) score += self.params.finisherBias
+            score += (shotsToKill(e.hp ?? 1, ref) - 1) * self.params.finisherBias
             break
           }
         }
@@ -405,11 +432,15 @@ export function thinkImpl(self: GodAIInput): void {
   // 逐关尸检：胜率与「本关敌人总血量」的相关性 **−0.472**（比 armor 占比 −0.461 更强；
   // 地形全部 ≈0）。机制：每局射速上限固定（~64 发），血量池越大，每一发低质量弹的机会成本
   // 越高。而三成命中率的「预测穿越」弹在低血关是赚的，在高血关就是在烧预算。
-  // ⇒ 当**场上存活总 HP ≥ 阈值**时进入「质量模式」：关掉 P2.4 预测穿越 + 只打真正覆盖
-  //    19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  // ⇒ 当**场上存活总 HP ≥ 阈值（按「发数」计）** 时进入「质量模式」：关掉 P2.4 预测穿越 +
+  //    只打真正覆盖 19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  // ⚠ 2026-10-27 修正：`hp` 是伤害点，原实现 `pool += hp` 后与 10/16/30 比 ⇒ 恒真，
+  //   三档实测 **350/350 逐局一致** = 悄悄变成「质量模式永远开」。改成
+  //   `hp / referenceDamage`（发数）后阈值才有梯度；hard 存活池实测 p50=7、p90=10。
   if (self.params.qualityFireHp > 0) {
+    const ref = w.rules.referenceDamage
     let pool = 0
-    for (let i = 0; i < self._enemies.length; i++) pool += self._enemies[i].hp ?? 1
+    for (let i = 0; i < self._enemies.length; i++) pool += (self._enemies[i].hp ?? 1) / ref
     self._hpPressureActive = pool >= self.params.qualityFireHp
   } else {
     self._hpPressureActive = false
@@ -417,13 +448,14 @@ export function thinkImpl(self: GodAIInput): void {
 
   // ============ A35b (2026-10-26): SHOULDER SHOT（打肩膀）============
   // 触发条件只有三条（用户裁定，别加戏）：
-  //   ① 护盾期（`shielded` —— 20 秒无敌，站着对射不会死）；
+  //   ① **道具盾**期（`powerupShielded` —— 20 秒无敌，站着对射不会死；
+  //      不是 3 秒复活盾：A35b 原先用 `shielded`，45% 的触发落在刚死的 3 秒里）；
   //   ② 敌人与我**同线**（横向偏差 < 命中窗 19px）；
   //   ③ 它的**炮口朝向我**（它下一发就是朝我来的）。
   // 此时**同线开火会被对消**（两弹相撞，两败俱伤）。解法：侧移半格（~10px）再打它肩膀 ——
   // 子弹只有 6px 宽（3+3 才相撞），而命中窗有 19px ⇒ 错开 7~19px 时我方弹从它的弹旁边过去、
   // 仍落在它身体里。原版无横移，人类用「转身 → 侧移 → 转回 → 开火」这条时序实现。
-  if (self.params.shoulderShotMode > 0 && shielded) {
+  if (self.params.shoulderShotMode > 0 && powerupShielded) {
     const perpOf: Record<
       string,
       ['up' | 'down' | 'left' | 'right', 'up' | 'down' | 'left' | 'right']
@@ -481,7 +513,7 @@ export function thinkImpl(self: GodAIInput): void {
       }
     }
     if (self._shPhase === 2) {
-      if (p.dir === self._shAimDir || !shielded) {
+      if (p.dir === self._shAimDir || !powerupShielded) {
         self._shPhase = 0 // 已转回（或护盾结束）⇒ 交给 A23 开火
       } else {
         self._moveDir = self._shAimDir
@@ -498,41 +530,53 @@ export function thinkImpl(self: GodAIInput): void {
   // 战术：从近到远**逐个点名**；优先朝「对基地威胁最高」的敌人方向走，路上能杀就顺手杀。
   // 实现：冻结期若四方向都没有可打的敌人 ⇒ 朝「最近敌人」走一步（接上后由 A23 转身开火）；
   // 若已有可打目标 ⇒ 不干预（让正常候选链开火，A23 负责转身）。
+  //
+  // freezeHuntMode = 2 (2026-10-27 修正)：A32/A33 的原实现有两个结构缺陷 —
+  //   ① 没有 `onCooldown` 门：枪**就绪**时也强制移动。枪一响就要沿新朝向出膛，
+  //      而转向要 12 拍冷却 ⇒ 走一步等于把「已经对齐的那一发」作废（实测冰冻期
+  //      射击 −26%、击杀 −32%，而冰冻期本来已用掉 81% 射速上限）。
+  //   ② 没有 `isBaseUnderThreat` 门：基地告急时仍然离家出走。
+  //   mode 2 保留 A24b 验证过的形态（只在冷却期推进 + 基地不告急），并沿用
+  //   `hittable` 前置（任一方向可打就不干预，交给 A23）。
   if (self.params.freezeHuntMode > 0 && frozen) {
-    let hittable = false
-    for (let di = 0; di < ALL_DIRS.length; di++) {
-      if (scanAheadImpl(self, pcx, pcy, ALL_DIRS[di]).enemy) {
-        hittable = true
-        break
-      }
-    }
-    if (!hittable) {
-      let target: (typeof w.tanks)[number] | null = null
-      let bestD = Infinity
-      for (let i = 0; i < self._enemies.length; i++) {
-        const e = self._enemies[i]
-        const d = Math.abs(e.x + e.w / 2 - pcx) + Math.abs(e.y + e.h / 2 - pcy)
-        if (d < bestD) {
-          bestD = d
-          target = e
+    if (self.params.freezeHuntMode >= 2 && (onCooldown !== true || self.isBaseUnderThreat())) {
+      // fall through — 枪就绪或基地告急时不做 freeze 走位
+    } else {
+      let hittable = false
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        if (scanAheadImpl(self, pcx, pcy, ALL_DIRS[di]).enemy) {
+          hittable = true
+          break
         }
       }
-      if (target) {
-        const dx = target.x + target.w / 2 - pcx
-        const dy = target.y + target.h / 2 - pcy
-        const horiz: Direction = dx > 0 ? 'right' : 'left'
-        const vert: Direction = dy > 0 ? 'down' : 'up'
-        const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
-        for (let i = 0; i < order.length; i++) {
-          if (self.canMoveDir(p, order[i])) {
-            const mv = order[i]
-            self._moveDir = mv
-            // A33 (2026-10-26)：A32 的失败点之一就是这里把 `_fire` 硬关成 false ——
-            // 冻结期「边走边打」才是正确形态（敌人不能动，走位几乎没有代价）。
-            // 因此移动方向上只要能开火就开：不丢任何一发。
-            self._fire = shouldFireInDirImpl(self, pcx, pcy, mv)
-            recordBranch(self, 'navigate')
-            return
+      if (!hittable) {
+        let target: (typeof w.tanks)[number] | null = null
+        let bestD = Infinity
+        for (let i = 0; i < self._enemies.length; i++) {
+          const e = self._enemies[i]
+          const d = Math.abs(e.x + e.w / 2 - pcx) + Math.abs(e.y + e.h / 2 - pcy)
+          if (d < bestD) {
+            bestD = d
+            target = e
+          }
+        }
+        if (target) {
+          const dx = target.x + target.w / 2 - pcx
+          const dy = target.y + target.h / 2 - pcy
+          const horiz: Direction = dx > 0 ? 'right' : 'left'
+          const vert: Direction = dy > 0 ? 'down' : 'up'
+          const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
+          for (let i = 0; i < order.length; i++) {
+            if (self.canMoveDir(p, order[i])) {
+              const mv = order[i]
+              self._moveDir = mv
+              // A33 (2026-10-26)：A32 的失败点之一就是这里把 `_fire` 硬关成 false ——
+              // 冻结期「边走边打」才是正确形态（敌人不能动，走位几乎没有代价）。
+              // 因此移动方向上只要能开火就开：不丢任何一发。
+              self._fire = shouldFireInDirImpl(self, pcx, pcy, mv)
+              recordBranch(self, 'navigate')
+              return
+            }
           }
         }
       }

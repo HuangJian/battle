@@ -590,9 +590,24 @@ export function directMoveImpl(self: GodAIInput, playerCell: Cell): Direction | 
     // the blind scan cannot handle. `navigateTowards` is per-tick cached and
     // is the same call the long-range branch makes, so this reuses the routing
     // machinery instead of inventing a second one.
-    pick = self.navigateTowards(target)
+    //
+    // ⚠ 2026-10-27 修正：原代码把结果存进 `pick`，紧接着的 `if (pick === null &&
+    // rank > 0)` 在 pick 非空时走 **else 分支（legacy 扫描）**，把 A* 的答案原地
+    // 覆盖掉 ⇒ rank=2 只有在 A* 返回 null 时才「不是」rank=1，而那种时刻 A* 也
+    // 没给出答案。实测「rank=2 与 rank=1 逐字节相同」正是这个覆盖造成的，不是
+    // A* 无用。这里改为命中即提交返回。
+    const routed = self.navigateTowards(target)
+    if (routed !== null) {
+      if (self.params.directMoveFallbackHold > 0) {
+        self._dmEscDir = routed
+        self._dmEscCol = playerCell.col
+        self._dmEscRow = playerCell.row
+        self._dmEscUntil = w.frame + self.params.directMoveFallbackHold
+      }
+      return routed
+    }
   }
-  if (pick === null && self.params.directMoveFallbackRank > 0) {
+  if (self.params.directMoveFallbackRank > 0) {
     let best: Direction | null = null
     let bestScore = Infinity
     let revBest: Direction | null = null

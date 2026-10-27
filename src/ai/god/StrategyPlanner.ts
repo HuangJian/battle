@@ -4,7 +4,7 @@ import type { World } from '../../game/World'
 import { findPath, type Cell } from './pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID, TICK_MS } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
-import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
+import { POWERUP_PRIORITY, kindThreatWeight, shotsToKill } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 import { targetValue, enemyDeadline, killAssessment, countRingBrickCells } from './ThreatBudget'
@@ -29,6 +29,29 @@ function coopAdjustDist(
   if (!coopActive || !partnerCell) return adjustedDist
   const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
   return pd < d - 3 ? adjustedDist + 5 : adjustedDist
+}
+
+/**
+ * A28 (2026-10-26, fixed 2026-10-27): chase-cost surcharge for a body that
+ * eats more than one shell.
+ *
+ * Autopsy: the `armor` share of a wave is the strongest predictor of a weak
+ * stage (corr −0.461; every terrain feature ≈0), and an armor body costs
+ * 4 shots ≈ 300 ticks of cooldown while the rest of the wave advances.
+ *
+ * The penalty is scaled by **shots still needed** (`shotsToKill − 1`), not by
+ * a boolean `hp > 1`: `Tank.hp` is in damage points (100..500), so `hp > 1`
+ * is true for every enemy and the penalty cancelled out of the ordering —
+ * measured 700/700 byte-identical games before the fix.
+ *
+ * Placement note: the original sat only in `huntModeTarget` (the `canHunt`
+ * endgame path, rarely reached), which is why even the unit fix measured
+ * 350/350 identical. It is now applied on every nearest-enemy cascade.
+ */
+function armorChasePen(self: GodAIInput, t: Tank): number {
+  if (self.params.armorChasePenalty <= 0) return 0
+  const shots = shotsToKill(t.hp ?? 1, self.world.rules.referenceDamage)
+  return (shots - 1) * self.params.armorChasePenalty
 }
 
 // ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
@@ -1893,8 +1916,12 @@ function huntModeTarget(
     // fire budget while the rest of the wave advances. Penalise it in the
     // CHASE score (not in the fire-direction choice — A27 showed that site never
     // has two candidates to compare). 0 = OFF (byte-identical).
-    const armorPen =
-      self.params.armorChasePenalty > 0 && (t.hp ?? 1) > 1 ? self.params.armorChasePenalty : 0
+    //
+    // ⚠ 2026-10-27 修正：原判据 `(t.hp ?? 1) > 1` 把**伤害点**当发数用 ⇒ hard 下
+    // 每个敌人都 > 1 ⇒ 全员同加一份惩罚 ⇒ 排序不变（实测 700/700 逐局一致，A28
+    // 因此被判「机制空转」）。惩罚必须按「还需几发」缩放，才真的把 4 发装甲排到
+    // 1 发残兵之后。
+    const armorPen = armorChasePen(self, t)
     let adjustedDist = coopAdjustDist(
       d - (t.bonus ? 2 : 0) + armorPen,
       d,
@@ -2006,7 +2033,7 @@ function normalSelectionTarget(
         adjustedDist = coopAdjustDist(adjustedDist, d, tc, coopActive, partnerCell)
       } else {
         adjustedDist = coopAdjustDist(
-          d - (t.bonus ? self.params.bonusHuntBias : 0),
+          d - (t.bonus ? self.params.bonusHuntBias : 0) + armorChasePen(self, t),
           d,
           tc,
           coopActive,
@@ -2042,7 +2069,8 @@ function normalSelectionTarget(
       const tc = self.tankCell(t)
       let adjustedDist =
         huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
-        (t.bonus ? self.params.bonusHuntBias : 0)
+        (t.bonus ? self.params.bonusHuntBias : 0) +
+        armorChasePen(self, t)
       adjustedDist = coopAdjustDist(
         adjustedDist,
         manhattan(tc.col, tc.row, playerCell.col, playerCell.row),
@@ -2063,7 +2091,7 @@ function normalSelectionTarget(
       // §172: bonus preference is the bonusHuntBias knob (default 2 =
       // the historical constant, byte-identical).
       let adjustedDist = coopAdjustDist(
-        d - (t.bonus ? self.params.bonusHuntBias : 0),
+        d - (t.bonus ? self.params.bonusHuntBias : 0) + armorChasePen(self, t),
         d,
         tc,
         coopActive,

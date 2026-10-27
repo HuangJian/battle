@@ -1276,39 +1276,45 @@ export class GodAIInput implements InputLike {
       const p = this.controlledTank(this.world)
       if (p && p.alive) {
         const mode = this.params.leadFireMode
-        const lead =
-          // A10.8: the user's counterfactual — a lead shot does NOT have to
-          // beat "wait 1–2 ticks", because the tank is not going to sit there:
-          // it fires and then uses the whole cooldown to reposition / return to
-          // base / leave the lane. So take the shot whenever the tank is going
-          // to MOVE anyway (the movement is already decided this tick).
-          // A10.9 PARTING SHOT (mode 7): the movement decision is about to turn
-          // the tank AWAY from the lane it is facing (`_moveDir !== p.dir`), so
-          // this is the last tick the muzzle can cover it. Take the lead shot
-          // now and spend the whole cooldown executing that move — the shot
-          // costs nothing that the move needed. Fires at most on the turn tick.
-          mode >= 7 && this._moveDir !== null && this._moveDir !== p.dir
-            ? leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
-            : mode >= 6 && this._moveDir !== null
-              ? leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
-              : mode === 3
-                ? // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
-                  leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                    inboundOnly: true,
-                    maxAxialCells: 6,
-                    bandPx: 10,
-                  })
-                : mode >= 4
-                  ? // A10.4: only when waiting would NOT give an aligned shot.
-                    leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                      waitWindowTicks: 74,
-                    })
-                  : mode === 2
-                    ? // A10.2: only enemies drifting INTO the lane.
-                      leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2, {
-                        inboundOnly: true,
-                      })
-                    : leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2)
+        const px = p.x + p.w / 2
+        const py = p.y + p.h / 2
+        // A10.8: the user's counterfactual — a lead shot does NOT have to beat
+        // "wait 1–2 ticks", because the tank is not going to sit there: it fires
+        // and then uses the whole cooldown to reposition / return to base /
+        // leave the lane. So take the shot whenever the tank is going to MOVE
+        // anyway (the movement is already decided this tick).
+        //
+        // A10.9 PARTING SHOT (mode 7): the movement decision is about to turn
+        // the tank AWAY from the lane it is facing (`_moveDir !== p.dir`), so
+        // this is the last tick the muzzle can cover it.
+        //
+        // ⚠ 2026-10-27 修正：原三元链在 mode≥7 且 parting 条件为假时**落进
+        // `mode >= 6 && _moveDir !== null` 分支**，于是 mode 7 与 mode 6 行为
+        // 完全相同（每一拍都开火）——「只在转身那一拍补射」这个设计从来没被
+        // 真正测过。这里改为互斥门。
+        const partingOnly = mode >= 7
+        const mayFire = partingOnly ? this._moveDir !== null && this._moveDir !== p.dir : true
+        let lead = 0
+        if (mayFire) {
+          if (mode >= 6) {
+            lead = this._moveDir !== null ? leadHitForDir(this.world, p.dir, px, py) : 0
+          } else if (mode === 3) {
+            // A10.3: only inbound drifters, short flight (≤6 cells), tight band.
+            lead = leadHitForDir(this.world, p.dir, px, py, {
+              inboundOnly: true,
+              maxAxialCells: 6,
+              bandPx: 10,
+            })
+          } else if (mode >= 4) {
+            // A10.4: only when waiting would NOT give an aligned shot.
+            lead = leadHitForDir(this.world, p.dir, px, py, { waitWindowTicks: 74 })
+          } else if (mode === 2) {
+            // A10.2: only enemies drifting INTO the lane.
+            lead = leadHitForDir(this.world, p.dir, px, py, { inboundOnly: true })
+          } else {
+            lead = leadHitForDir(this.world, p.dir, px, py)
+          }
+        }
         if (lead > 0) return true
       }
     }
@@ -1323,61 +1329,42 @@ export class GodAIInput implements InputLike {
       // change the movement decision (bullets leave along the committed facing,
       // A1), so this is a pure addition, not a trade.
       if (this.params.fireAlongFacing > 0) {
-        if (this._facingFireTick === this.world.frame) {
-          if (this._facingFireOk) return true
-          return false
-        }
-        this._facingFireTick = this.world.frame
-        this._facingFireOk = false
-        const p2 = this.controlledTank(this.world)
-        if (p2 && p2.alive) {
-          const pcx2 = p2.x + p2.w / 2
-          const pcy2 = p2.y + p2.h / 2
-          // ⚠ 这里必须用**纯**判据：`shouldFireInDir` 内部会抽一次 `rng.next()`
-          // （aimError 判定），而 `isFiring()` 是查询函数，评估器/runner 每拍调用它的
-          // 次数不同 ⇒ 多抽的随机数会让 AI 的随机流分叉，两边跑出不同的游戏
-          // （`eval-game-parity` / `aim-dodge-buckets` 就是这么红的）。
-          // `leadHitForDir` 只读 World：到达时命中 + 车道无遮挡（base/砖/钢都算遮挡，
-          // 因此不会穿基地），无需再叠加静态扫描。
-          if (leadHitForDir(this.world, p2.dir, pcx2, pcy2) > 0) {
-            // A15b (2026-10-25): `shouldFireInDir` is a STATIC ray scan — it says
-            // "somebody is on the line now", not "this shot lands". Firing on it
-            // alone measured −5.43pp / kills −629: shots were spent on enemies
-            // that had already drifted out of the lane by arrival. Mode ≥2 also
-            // requires the arrival-time predicate (`leadHitForDir`, the same one
-            // the NN sees as `leadHitD`) to agree.
-            // 到达时命中判据已在上面成立（纯函数），这里只处理「时段」维度的门。
-            let ok = true
-            // A15c (mode ≥3): SAFE PERIODS ONLY. A15b took the good moments away
-            // from the candidate chain and the *remaining* candidate shots fell
-            // to 41.2%, so the branch was competing with the shots that matter.
-            // Restrict it to ticks where nothing is pressing: base at full HP and
-            // no enemy within 3 cells — i.e. when the cooldown has no better use.
-            if (ok && this.params.fireAlongFacing >= 3) {
-              const w2 = this.world
-              const atFullHp = w2.baseHp >= w2.baseMaxHp
-              let near = false
-              for (const e of w2.tanks) {
-                if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
-                const ex = e.x + e.w / 2
-                const ey = e.y + e.h / 2
-                if (Math.abs(ex - pcx2) + Math.abs(ey - pcy2) <= 3 * 16) {
-                  near = true
-                  break
-                }
+        // A15b (2026-10-25): `shouldFireInDir` is a STATIC ray scan — it says
+        // "somebody is on the line now", not "this shot lands". Firing on it
+        // alone measured −5.43pp / kills −629. `facingLeadShot()` uses the
+        // arrival-time predicate (`leadHitForDir`, the same one the NN sees as
+        // `leadHitD`) and is PURE — `shouldFireInDir` draws one `rng.next()`
+        // for the aimError roll, and forking the AI stream between callers is
+        // what broke the replay round-trip in A15.
+        if (this.facingLeadShot()) {
+          let ok = true
+          // A15c (mode ≥3): SAFE PERIODS ONLY (base at full HP, no enemy within
+          // 3 cells) · mode ≥4 is the INVERSE (danger only). A15c safe-only was
+          // the worst of the three, which says these shots earn their cooldown
+          // exactly when something is pressing.
+          if (this.params.fireAlongFacing >= 3) {
+            const w2 = this.world
+            const p2 = this.controlledTank(w2)!
+            const pcx2 = p2.x + p2.w / 2
+            const pcy2 = p2.y + p2.h / 2
+            const atFullHp = w2.baseHp >= w2.baseMaxHp
+            let near = false
+            for (const e of w2.tanks) {
+              if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
+              const ex = e.x + e.w / 2
+              const ey = e.y + e.h / 2
+              if (Math.abs(ex - pcx2) + Math.abs(ey - pcy2) <= 3 * 16) {
+                near = true
+                break
               }
-              // mode 3 = safe periods only · mode 4 = the INVERSE (danger only):
-              // A15c (safe-only) was the worst of the three, which says these
-              // shots earn their cooldown exactly when something is pressing.
-              ok = this.params.fireAlongFacing >= 4 ? !(atFullHp && !near) : atFullHp && !near
             }
-            if (ok) {
-              this._facingFireOk = true
-              a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
-              // Diagnostic: tag the shot so a probe can measure ITS hit rate.
-              this._lastFireWasFacing = this.world.frame
-              return true
-            }
+            ok = this.params.fireAlongFacing >= 4 ? !(atFullHp && !near) : atFullHp && !near
+          }
+          if (ok) {
+            a.fireAlongFacing = (a.fireAlongFacing ?? 0) + 1
+            // Diagnostic: tag the shot so a probe can measure ITS hit rate.
+            this._lastFireWasFacing = this.world.frame
+            return true
           }
         }
       }
@@ -1397,18 +1384,61 @@ export class GodAIInput implements InputLike {
       // different direction, firing now would shoot a lane nobody aimed at.
       // Keeping the shot set identical is what makes this knob a clean test of
       // "less standing still", not "more shooting".
+      //
+      // A15d-fix (2026-10-27): BOTH vetoes below drop the shot while the muzzle
+      // still points along `p.dir` — and `leadHitForDir(p.dir)` is a *pure*
+      // predicate, so the shot that survives is exactly the one the shell can
+      // land. This is the window A10/A15 were aiming at and never got: measured
+      // hard, the A3 substitution alone suppresses `effectiveDirMismatch` ≈ 49
+      // candidate-fire ticks per game (vs 64 shots fired), and A10/A15 only ran
+      // when NO candidate wanted to fire (`!_fire`), i.e. never here.
+      // NOTE the ordering trap: with `turnEconomyMode > 0` the A3 substitution
+      // fires first, so the `turnNotCommit` branch below is **unreachable** —
+      // any test that counts it will read 0 and wrongly conclude the gate is
+      // dead. Both sites must therefore get the fallback.
       if (d !== this._moveDir) {
+        if (this.params.fireAlongFacing > 0 && p && p.alive && this.facingLeadShot()) {
+          const a = this._fireGateAudit
+          a.facingOnVeto = (a.facingOnVeto ?? 0) + 1
+          return true
+        }
         const a = this._fireGateAudit
         a.effectiveDirMismatch = (a.effectiveDirMismatch ?? 0) + 1
         return false
       }
       if (!turnWillCommit(this.world, p, d)) {
+        if (this.params.fireAlongFacing > 0 && p && p.alive && this.facingLeadShot()) {
+          const a = this._fireGateAudit
+          a.facingOnVeto = (a.facingOnVeto ?? 0) + 1
+          return true
+        }
         const a = this._fireGateAudit
         a.turnNotCommit = (a.turnNotCommit ?? 0) + 1
         return false
       }
     }
     return this._fire
+  }
+
+  /**
+   * A15d-fix (2026-10-27): is there a **lead-verified** shot along the tank's
+   * committed facing right now? Pure (`leadHitForDir` reads World only), so it
+   * is safe to call from `isFiring()` — unlike `shouldFireInDir`, which draws
+   * one `rng.next()` for the aimError roll and would fork the AI's random
+   * stream between callers (the §A15 replay-roundtrip bug).
+   *
+   * Memoized per tick on `_facingFireTick/_facingFireOk` because `isFiring()`
+   * is queried several times per tick (sim + recorder) and must be idempotent.
+   */
+  private facingLeadShot(): boolean {
+    if (this._facingFireTick === this.world.frame) return this._facingFireOk
+    this._facingFireTick = this.world.frame
+    this._facingFireOk = false
+    const p = this.controlledTank(this.world)
+    if (p && p.alive) {
+      this._facingFireOk = leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2) > 0
+    }
+    return this._facingFireOk
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
