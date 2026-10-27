@@ -60,6 +60,14 @@ _FLOCK = getattr(fcntl, "flock", None) if fcntl is not None else None
 _LOCK_EX = getattr(fcntl, "LOCK_EX", 0) if fcntl is not None else 0
 _LOCK_UN = getattr(fcntl, "LOCK_UN", 0) if fcntl is not None else 0
 
+#: Windows 那一半同理（2026-10-27）：`msvcrt.locking` / `LK_LOCK` / `LK_UNLCK` 在 typeshed 里
+#: 住在 stub 的 `if sys.platform == "win32":` 分支内 ⇒ 在 Linux 上跑 mypy 时整段被剪掉、报
+#: 「模块没有这个属性」（`fcntl` 半边是反方向同一个坑）。取出来再用，运行时语义不变——
+#: POSIX 上 `_FLOCK` 恒非空、这半边本来就到不了；Windows 上 `msvcrt` 在 ⇒ 三个名字都在。
+_MS_LOCKING = getattr(msvcrt, "locking", None) if msvcrt is not None else None
+_MS_LK_LOCK = getattr(msvcrt, "LK_LOCK", 0) if msvcrt is not None else 0
+_MS_LK_UNLCK = getattr(msvcrt, "LK_UNLCK", 0) if msvcrt is not None else 0
+
 #: 状态文件（hub 的 `/state` 读面就是它 + `rounds/` 目录）。
 STATE_NAME = "state.json"
 #: 段末摘要的体（`result=true` 的 ack 才删）。
@@ -96,9 +104,9 @@ def _lock_state_file(path: Path) -> int | None:
     try:
         if _FLOCK is not None:
             _FLOCK(fd, _LOCK_EX)
-        elif msvcrt is not None:
+        elif _MS_LOCKING is not None:
             os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            _MS_LOCKING(fd, _MS_LK_LOCK, 1)
     except OSError:
         try:
             os.close(fd)
@@ -112,9 +120,9 @@ def _unlock_state_file(fd: int) -> None:
     try:
         if _FLOCK is not None:
             _FLOCK(fd, _LOCK_UN)
-        elif msvcrt is not None:
+        elif _MS_LOCKING is not None:
             os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            _MS_LOCKING(fd, _MS_LK_UNLCK, 1)
     except OSError:
         pass
     finally:

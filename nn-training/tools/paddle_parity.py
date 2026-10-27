@@ -155,7 +155,9 @@ def _fill_lp_old(chunk: dict, outs, arch: str, rng: np.random.Generator) -> None
 
 
 def _masked_logsoftmax_np(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    z = logits.astype(np.float64) + (1.0 - mask.astype(np.float64)) * (-1e9)
+    # 声明类型是给 mypy 的（`warn_return_any`）：`ndarray.max` / `.sum` 在 numpy 的 stub 里
+    # 返回 `Any`，不给 `z` 挂类型的话它一路 Any 到 `return` ⇒ 「Returning Any」。运行时不变。
+    z: np.ndarray = logits.astype(np.float64) + (1.0 - mask.astype(np.float64)) * (-1e9)
     z = z - z.max(axis=-1, keepdims=True)
     z = z - np.log(np.exp(z).sum(axis=-1, keepdims=True))
     return z
