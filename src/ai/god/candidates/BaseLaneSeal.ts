@@ -45,6 +45,22 @@ const standable = (self: GodAIInput, c: number, r: number): boolean => {
   return t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
 }
 
+/**
+ * A TANK occupies a **2×2 block** (`TANK = CELL * 2`), so "this cell is
+ * standable" is not enough — the whole footprint must be free.
+ *
+ * This was a real bug in the seal cell search (modes 0-2): on Riverbed the cell
+ * resolved to (12,22), whose footprint (rows 22-23) runs into the base-ring
+ * brick at (12,23). The tank could never occupy it, so it pressed down against
+ * the wall forever: measured on-station **2%** of the candidate's own ticks.
+ * Mode 3 fixes that — and measures WORSE, see the A/B note in `sealRowFor`.
+ */
+const tankFits = (self: GodAIInput, c: number, r: number): boolean =>
+  standable(self, c, r) &&
+  standable(self, c + 1, r) &&
+  standable(self, c, r + 1) &&
+  standable(self, c + 1, r + 1)
+
 export function evalBaseLaneSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   const prm = self.params
   if (prm.baseLaneSealMode <= 0 || !self.hasBase || self.aggressive) return false
@@ -159,10 +175,15 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
     const low = Math.max(row + 2, 0) // never stand in the muzzle cell
     const hi = BASE_POS.row - 2
     if (prm.baseLaneSealCellMode !== 1) {
-      // SHIPPED: the standable cell nearest the EAGLE. Measured better than the
-      // "any cell on the line" alternatives (see the mode table below) even
-      // though the geometry allows any of them.
-      for (let r = hi; r >= low; r--) if (standable(self, col, r)) return r
+      // SHIPPED (modes 0/2): the standable cell nearest the EAGLE. Measured
+      // better than the "any cell on the line" alternatives (see the mode table
+      // below) even though the geometry allows any of them.
+      // mode 3 uses the 2×2 footprint instead (the tank can actually stand
+      // there) — A/B on hard 35×60: overall 0.00pp at 2100 games is the wrong
+      // read; per-stage this HURT (Checkers 82%→75%) ⇒ the tank arrives
+      // (on-station 2% → 30%) and it does NOT pay.
+      const fits = prm.baseLaneSealCellMode >= 3 ? tankFits : standable
+      for (let r = hi; r >= low; r--) if (fits(self, col, r)) return r
       return -1
     }
     // mode 1 (A/B, NEGATIVE): the cell we can reach fastest. Any cell on the
@@ -235,6 +256,15 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   if (onStation) {
     self._moveDir = p.dir === dir ? null : dir
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, dir)
+    recordBranch(self, 'baseLaneSeal')
+    return true
+  }
+  // mode 3: same column ⇒ go STRAIGHT down/up. The router re-tie-breaks every
+  // tick (traced: left/right alternating two rows above the cell), and each
+  // flip costs a 12-tick turn, so the tank paced sideways instead of closing.
+  if (prm.baseLaneSealCellMode >= 3 && pc.col === bestCol && pc.row !== bestSealRow) {
+    self._moveDir = bestSealRow > pc.row ? 'down' : 'up'
+    self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir)
     recordBranch(self, 'baseLaneSeal')
     return true
   }
