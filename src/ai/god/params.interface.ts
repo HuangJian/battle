@@ -140,6 +140,12 @@ export interface GodAIParams {
    * before a base loss).
    */
   baseBandTargetMode: number
+  /**
+   * 2026-10-27 (user decision #1): pick the defense post from the current
+   * threat direction (share its row/col inside the band around the eagle)
+   * instead of the fixed cell above it. 0 = OFF.
+   */
+  defensePosDynamic: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家
    * 与敌人不同列时，横移到敌人同列（colGap ≤ 3，保持当前行）堵口；到位后由
    * 上方对齐开火段接管。补站台导航（仅服务带外 row 20-22）的带内空白

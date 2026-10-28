@@ -110,6 +110,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSentryStation: 1,
   baseLaneSentryPointBlank: 0,
   baseBandTargetMode: 0,
+  defensePosDynamic: 0,
   // §225-A: 带内应急进 lane — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。
   baseLaneSentryInBandNav: 0,
   // §225-B: 危局拾取抑制 — 候选（默认 0 = OFF, byte-identical）。A/B 后升格。

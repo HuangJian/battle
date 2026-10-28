@@ -1270,8 +1270,88 @@ export function findDualCentralHoldImpl(self: GodAIInput): Cell | null {
  * Gap B: when the stage has no base, returns the player's current cell
  * (stay put — there's nothing to defend).
  */
+/**
+ * 动态防守位 (2026-10-27, user decision #1): stand where the current threat is,
+ * not at a fixed cell above the eagle.
+ *
+ * Why: the base-loss forensics show the killers arrive along the BOTTOM rows
+ * from the far left/right (Battlement ring breaches: top 17 / left 6 / right 7;
+ * Checkers fatal shells mostly `right`), while the shipped post is a fixed
+ * `(base.col, base.row - defenseRowOffset)` = straight above the eagle. The AI
+ * walks to the top of the eagle while the threat comes around the side.
+ *
+ * Scoring, among standable 2×2 cells in the band around the eagle
+ * (rows base-4..base-1, cols base±4):
+ *   1. cells that share the threat's row OR column (can shoot it immediately)
+ *   2. then closer to the threat
+ *   3. then closer to the eagle (don't wander)
+ * Returns null when no enemy is near the base (keep the shipped post).
+ */
+function findDynamicDefensePost(self: GodAIInput): Cell | null {
+  const w = self.world
+  const bc = BASE_POS.col
+  const br = BASE_POS.row
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  let tx = -1
+  let ty = -1
+  let bestD = Infinity
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0) continue
+    const tc = self.tankCell(t)
+    const d = manhattan(tc.col, tc.row, bc, br)
+    if (d < bestD) {
+      bestD = d
+      tx = tc.col
+      ty = tc.row
+    }
+  }
+  // No threat near the eagle ⇒ keep the shipped post.
+  if (tx < 0 || bestD > 10) return null
+
+  const free = (c: number, r: number): boolean => {
+    if (c < 0 || r < 0 || c + 1 >= GRID || r + 1 >= GRID) return false
+    for (let dr = 0; dr < 2; dr++) {
+      for (let dc = 0; dc < 2; dc++) {
+        const tile = w.tileMap.get(c + dc, r + dr)
+        if (tile === 'brick' || tile === 'steel' || tile === 'water' || tile === 'base')
+          return false
+      }
+    }
+    return true
+  }
+
+  let bestC = -1
+  let bestR = -1
+  let bestKey = Infinity
+  for (let r = br - 4; r <= br - 1; r++) {
+    for (let c = bc - 4; c <= bc + 4; c++) {
+      if (!free(c, r)) continue
+      const aligned = c === tx || r === ty
+      const dT = manhattan(c, r, tx, ty)
+      const dB = manhattan(c, r, bc, br)
+      const key = (aligned ? 0 : 1000) + dT * 10 + dB
+      if (key < bestKey) {
+        bestKey = key
+        bestC = c
+        bestR = r
+      }
+    }
+  }
+  if (bestC < 0) return null
+  _dynPost.col = bestC
+  _dynPost.row = bestR
+  return _dynPost
+}
+
+const _dynPost: Cell = { col: 0, row: 0 }
+
 export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
   if (!self.hasBase) return self.playerCell()
+  if (self.params.defensePosDynamic > 0) {
+    const dyn = findDynamicDefensePost(self)
+    if (dyn) return dyn
+  }
   // When guard anchor mode is on, use the standable anchor as the base
   // defense position. The default (12, 23) is always a ring brick — A*
   // can't route there, so P1 gets stuck on directMove when returning to
