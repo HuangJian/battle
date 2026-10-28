@@ -47,6 +47,17 @@ MOVED_NAMES = {
     "course_from_args",
 }
 
+#: 2026-10-28（docs/nn/training-stack.md §49）：解析面**自己新增**的名字（不是从 `config.py` 搬来的）
+#: ⇒ 合法落点只有本文件（消费方 = 两条课程加载链），**不**进 `worker.config` 门面——没有历史
+#: import 方，转发只会给门面背上四个死名。`_defined(NEW_FILE)` 的闭集断言仍覆盖它们。
+LOCAL_HELPERS = {
+    "_LEVEL_OVERRIDE_KEYS",
+    "_coerce_override_int",
+    "_parse_stage_select",
+    "_apply_level",
+    "apply_level_file",
+}
+
 ALLOWED_IMPORTS = {
     "__future__",
     "pathlib",
@@ -93,8 +104,8 @@ def _top_level_imports(path: Path) -> set[str]:
 
 
 def test_moved_names_are_defined_in_course_resolve_and_not_in_config() -> None:
-    """定义唯一：搬走的名字只在新家实现（门面只许转发）。"""
-    assert _defined(NEW_FILE) == MOVED_NAMES
+    """定义唯一：搬走的名字只在新家实现（门面只许转发）；新增名也不许外溢。"""
+    assert _defined(NEW_FILE) == MOVED_NAMES | LOCAL_HELPERS
     leftovers = MOVED_NAMES & _defined(CONFIG_FILE)
     assert leftovers == set(), f"config.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 

@@ -143,3 +143,30 @@ def test_inline_stages_course_still_loads() -> None:
     assert c.level == ""
     assert len(c.stages) == 1 and c.stages[0].count == 6
     assert c.reward.params["wChip"] == 0.03
+
+
+# ── 环境覆盖到 args 的端到端（2026-10-28，docs/nn/training-stack.md §49）──────────────
+# 解析层把覆盖**消费**进 stages/player 后，训练链只经 `flat_overrides` → args 一条路读环境：
+# 这里钉的是「课程写的东西真的到了 args」（无新 plumbing、无第二份事实）。
+
+
+def test_env_overrides_reach_args_end_to_end(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from worker.config import apply_course
+
+    d = {
+        "name": "ov-e2e",
+        "mode": "per-tick",
+        "level": "classic35",
+        "stage_select": "9,23",
+        "enemies": 5,
+        "lives": 2,
+        "star": 1,
+        "max_ticks": 6000,
+    }
+    args = SimpleNamespace(mode="per-tick", kickstart_ref=False)
+    apply_course(args, load_course(_write_course(tmp_path, d)))
+    assert args.stages == "2000,2001"
+    assert args.max_ticks == 6000
+    assert args.lives_override == 2 and args.player_level == 1

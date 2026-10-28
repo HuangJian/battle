@@ -10069,3 +10069,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `test_loop_core_tail_split.py::CLUSTERS`（`_finalize_returned_shards`）。
 - **未做**：历史轮次不回删（y36 91 轮 / `tmp` 7.3 GB，属既有产物与归档语料）；改动要重启 trainer 生效。
   全文 → `docs/nn/training-stack.md` §46。
+
+## §2026-10-28-goalnn-course-env-override（2026-10-28，课程可覆盖敌数/命/星 + 从关卡挑关：不再为每门新课复制关卡 jsonc）
+
+- **背景**：`z0-ramparts` / `z0-mix4` 各写了一份 `levels/z0-*.jsonc`，只是因为旧硬规则「引用
+  `level` 后课程不得再声明 stages/difficulty/max_ticks/player」⇒「只练某几关」的合法做法只剩
+  「建只含那几关的关卡文件」。每换关集/敌数/命/星就复制一份 35 关地图：改一处地图要改 N 份，
+  课程文件也看不出它跟 classic35 的哪几关同源。用户口径：课程文件应能 overwrite 敌人数 / lives /
+  star，并选 level 里的部分关卡。
+- **决定**：`"level"` 课程新增 `stage_select`（1-based **位置**串，顺序 = 新关序，id 仍 `2000+i`）/
+  `enemies`（写回每关 `count`，`forces` 不动）/ `lives` / `star`（写回 `player`）；`max_ticks`
+  放开为课程可覆盖。五个键全部由 `biz.course_resolve.apply_level_file` 在模型构造前**消费**
+  ⇒ 无第二份事实、无新 argparse dest；`_LEVEL_ENV_KEYS` 收窄为 stages/difficulty/player。
+  脏值（`lives<1` / `star<0` / `enemies` 非整数或超兵力 / 无 `level` 却写覆盖键）解析期响亮拒
+  （模型 `Field(ge=)` 看不到这些键）。BC 课程改调同一份 `apply_level_file`——删掉
+  `worker/bc_config._BC_LEVEL_ENV_KEYS` 的重复实现（两份规则必然漂移，`ent_break` 前科）。
+- **备选与否决**：`stage_select` 写 stage id（`"2022"`）—— 子集重编号后自相矛盾（子集第一关又是
+  2000），位置才是稳定量；允许课程内联 `stages`/`player` 块 —— 那就是第二份事实；`enemies` 改
+  `forces` 串 —— forces 是敌种队列（长度 20 有校验），敌数的唯一载体是 `count`；只给 RL 课程做
+  —— BC 课程会立刻分叉成另一套规则。
+- **边界**：覆盖只对 **list 型** `stages` 生效（范围串关卡直接写范围）；`enemies` 上限 = 该关
+  `forces` 长度；重复位置照写（同一关占两个 id = 采样权重 ×2）；覆盖改变 `corpus_identity_fp`
+  （stages/player/max_ticks 本来就在身份里）⇒ 新实验，`course_fp` 仍是课程文件整份字节。
+- **落地**：`biz/course_resolve.py` · `biz/course_spec.py` · `worker/bc_config.py` ·
+  `tests/biz/test_course_env_override.py` · `tests/worker/test_bc_course.py` ·
+  `tests/worker/test_course_level.py`。全文 → `docs/nn/training-stack.md` §49。

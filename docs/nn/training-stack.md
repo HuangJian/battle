@@ -7,6 +7,48 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §49 课程可覆盖敌数/命/星 + 从关卡挑关：不再为每门新课复制一份关卡 jsonc（2026-10-28）
+
+**触发**：`z0-ramparts`（只练 classic35 第 23 关 Ramparts）与 `z0-mix4`（四关）各写了一份
+`levels/z0-s23.jsonc` / `levels/z0-mix4.jsonc`。原因不是它们想改地图，而是旧硬规则「课程引用
+`level` 后不得再声明 stages/difficulty/max_ticks/player」——「只练某几关」的合法做法只剩「建
+只含那几关的关卡文件」。每换一次关集/敌数/命/星就复制一份 35 关地图 ⇒ 改一处地图要改 N 份，
+课程文件本身还看不出它跟 classic35 的哪几关同源。用户口径：**「让课程文件也可以 overwrite
+敌人数、lives、star，以及选择 level 里的部分关卡，不要每开一个新课程都要写新的 level jsonc。」**
+
+**决定**（新增四个课程键 + 放开 `max_ticks`，只在 `"level": ...` 课程上生效；全部在解析期被
+**消费**，不留第二份事实）：
+
+| 键 | 形态 | 消费结果 |
+|---|---|---|
+| `stage_select` | 1-based **位置**串：`"23"` / `"23,9,18,10"` / `"1-8"`（空格/逗号都认，顺序 = 新关序） | 从关卡 `stages` 挑子集 → 新 `stages`（id 按 `CUSTOM_STAGE_BASE+i` 重编号，子集第 1 关仍是 **2000**） |
+| `enemies` | int ≥1 | 写回每关 `count`（`forces` 串不动 = 敌种队列不变；上限 = forces 长度 20） |
+| `lives` | int ≥1 | 写回 `player.lives`（→ `flat_overrides` 的 `lives_override`） |
+| `star` | int ≥0 | 写回 `player.level`（→ `player_level`） |
+| `max_ticks` | int | 课程显式值赢过关卡值（旧规则里它也属「只能来自关卡」） |
+
+- `_LEVEL_ENV_KEYS` 收窄为 `("stages", "difficulty", "player")`：这三键仍是「另一份事实」，
+  课程侧重复声明照旧**响亮拒**（DECISIONS §2026-09-13-level-extraction 不变）。
+- **拒绝面**（全部启动期 raise，不静默）：`stage_select` 越界 / 区间倒序 / 解析出 0 关；
+  `stages` 不是内联关列表（范围串型关卡不吃 `stage_select`）；`enemies` 超过该关兵力、或该关
+  没有 `forces` 串（自建 grid 关）；`lives < 1` / `star < 0` / 非整数；**没有 `level` 却写覆盖键**。
+- 为什么脏值要自己判：这些键在 `CourseConfig` 构造**之前**就被 `_apply_level` 消费掉，
+  `Field(ge=...)` 永远看不到它们（写 `lives: 0` 会静默变成 0 命）⇒ `_coerce_override_int` 兜住。
+- **语料身份**：`stages`（解析后）/`player`/`max_ticks` 本来就在 `corpus_identity_fp` 里
+  ⇒ 覆盖 = 新语料身份（AGENTS §15.5：新实验）；`course_fp` 仍是课程文件整份字节。
+- **BC 课程同规**：`worker/bc_config.load_bc_course` 不再自己 merge，改调
+  `biz.course_resolve.apply_level_file`（与 `load_course` 同一份实现）——两份实现必然漂移
+  （`ent_break` 漏映射前科），而「环境语义归关卡文件唯一持有」没有 BC 特例。
+- **落地**：`biz/course_resolve.py`（`_parse_stage_select` · `_coerce_override_int` ·
+  `_apply_level` · `apply_level_file`）· `biz/course_spec.py`（四个字段 + 文档）·
+  `worker/bc_config.py` · 测试 `tests/biz/test_course_env_override.py` ·
+  `tests/worker/{test_bc_course,test_course_level}.py`。
+- **备选与否决**：① `stage_select` 写 stage id（`"2022"`）——否：子集重编号后 id 自相矛盾
+  （子集第一关又是 2000），位置才是稳定量；② 允许课程内联 `stages`/`player` 块——否：那就是
+  第二份事实，冲突永远无法判定；③ `enemies` 改 `forces` 串——否：forces 是敌种队列（长度 20
+  有校验），「敌数」的唯一载体是 `count`；④ 只给 RL 课程做——否：BC 课程会立刻分叉成另一套规则。
+
+---
 ## §48 零落盘：sampler 回传的 shard **根本不落盘**（2026-10-28）
 
 **触发**：用户查 y36 最新 it 目录 —— `tmp/y36-active/it91/dist/{a97,gcs,kaggle}/rl_s*_seed*` 仍躺着

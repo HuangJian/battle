@@ -6,9 +6,11 @@ mode 红线 / gates / ppo_schedule / 热加载字段全不适用，且 `CourseCo
 
 与 CourseConfig 共享的语义：
   - JSONC 子集（`//` 行注释，common/jsonc.py）；`extra="forbid"` 拼错即响亮报错；
-  - `"level"` 关卡引用：stages/difficulty/max_ticks/player 四类环境键**只能**来自关卡
-    文件（levels/*.jsonc），课程侧重复声明 = 配置冲突 raise（DECISIONS
-    §2026-09-13-level-extraction 同规则）；
+  - `"level"` 关卡引用：stages/difficulty/player 三类环境键**只能**来自关卡文件
+    （levels/*.jsonc），课程侧重复声明 = 配置冲突 raise（DECISIONS
+    §2026-09-13-level-extraction 同规则）；四类环境覆盖（`stage_select` / `enemies` /
+    `lives` / `star`）与 `max_ticks` 照写可用——两条加载链走**同一份** `apply_level_file`
+    （2026-10-28，docs/nn/training-stack.md §49）；
   - D14 语料身份：`bc_corpus_identity_fp` = 语料决定字段（env + corpus 参数）的解析值
     语义哈希；train 超参 / 预算 / 路径刻意排除——改它们不构成语料变化。
 
@@ -24,6 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from biz.course_resolve import apply_level_file
 from biz.course_spec import CustomStagesMixin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,9 +34,6 @@ CURRICULA_DIR = Path(__file__).resolve().parent.parent / "curricula"
 LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"
 
 BC_SUFFIX = ".bc.jsonc"
-
-#: level 引用持有后、课程侧禁止重复声明的环境键（与 biz/config._LEVEL_ENV_KEYS 同表）
-_BC_LEVEL_ENV_KEYS = ("stages", "difficulty", "max_ticks", "player")
 
 
 class BcPlayerBlock(BaseModel):
@@ -152,7 +152,8 @@ class BcCourseConfig(BaseModel, CustomStagesMixin):
     name: str = "unnamed-bc"
     #: 文件种类自述（与 .bc.jsonc 后缀双保险；编排器校验一致）
     kind: Literal["bc"] = "bc"
-    #: 关卡引用（`nn-training/levels/<name>.jsonc` 或路径）；设置后四类环境键只能来自关卡
+    #: 关卡引用（`nn-training/levels/<name>.jsonc` 或路径）；设置后 stages/difficulty/player
+    #: 只能来自关卡；四类环境覆盖 + `max_ticks` 可在课程侧覆盖（§49，同 RL 课程）
     level: str = ""
 
     # ---- 环境（无 level 引用时内联；语义与 RL 课程同表） ----
@@ -274,23 +275,17 @@ def is_bc_course(name_or_path: str) -> bool:
 
 
 def load_bc_course(path_or_name: str | Path) -> BcCourseConfig:
-    """读 JSONC BC 课程 → `BcCourseConfig`（level 注入规则与 RL 课程同表）。"""
+    """读 JSONC BC 课程 → `BcCourseConfig`。
+
+    level 注入 + 环境覆盖（`stage_select` / `enemies` / `lives` / `star` / `max_ticks`）与
+    RL 课程走**同一份** `biz.course_resolve.apply_level_file`（§49）——两份实现会漂移，
+    而「环境语义归关卡文件唯一持有」这条规则没有 BC 特例。
+    """
     from common.jsonc import load as _load_jsonc
 
     p = resolve_bc_course(str(path_or_name))
     d = _load_jsonc(str(p))
-    if d.get("level"):
-        from worker.config import resolve_level
-
-        lvl = _load_jsonc(str(resolve_level(str(d["level"]))))
-        for k in _BC_LEVEL_ENV_KEYS:
-            if k in d:
-                raise ValueError(
-                    f"BC 课程 '{d.get('name', path_or_name)}' 引用 level='{d['level']}' 后不得再声明 "
-                    f"`{k}`（环境语义归关卡文件唯一持有）"
-                )
-            if k in lvl:
-                d[k] = lvl[k]
+    apply_level_file(d, str(d.get("name", path_or_name)))
     course = BcCourseConfig(**d)
     if course.kind != "bc":  # pragma: no cover — Literal 已挡，双保险
         raise ValueError(f"BC 课程 kind 必须是 'bc'（收到 {course.kind!r}）")

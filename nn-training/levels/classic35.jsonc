@@ -12,7 +12,9 @@
 //   ⇒ 与浏览器里的 35 关**逐格同源**，不存在人工誊抄误差。
 //   校验：tmp/verify-classic35.ts 逐关 decodeStageGrid ⇒ 35/35 通过，且 tiles 与 STAGES[i] 逐格相同。
 //
-// ── 环境语义（本文件唯一持有；课程不得再声明 stages/difficulty/max_ticks/player）──────
+// ── 环境语义（本文件唯一持有；课程不得再声明 stages/difficulty/player）────────────────
+//   课程可取：`max_ticks` + 四个覆盖键 `stage_select`/`enemies`/`lives`/`star`（解析期消费，
+//   docs/nn/training-stack.md §49）；重复声明 stages/difficulty/player = 配置冲突 raise。
 //   difficulty hard（敌人 AI 层级分布按难度抽签）· max_ticks 36000（仓库默认口径，
 //   simulation-runner.ts::MAX_TICKS；**任务侧不可动**）· player {lives 3, level 0}
 //

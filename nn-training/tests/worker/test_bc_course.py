@@ -599,3 +599,57 @@ def test_bc_train_init_from_parses(tmp_path: Path) -> None:
     c = load_bc_course(str(p))
     assert c.train.init_from == str(w)
     assert c.auto_stop is True
+
+
+# ── 环境覆盖（2026-10-28，docs/nn/training-stack.md §49）──────────────────────────
+# BC 课程与 RL 课程共用 `biz.course_resolve.apply_level_file`：挑关/敌数/命/星/max_ticks
+# 四个覆盖键 + max_ticks 在两条加载链上逐字同规。分叉的两份实现会在下一次改动时漂移
+# （2026-09-07 ent_break 前科：漏映射 = 静默失效），所以这里锁的是「同一份规则」。
+
+
+def test_bc_course_env_overrides_share_rl_rule(tmp_path: Path) -> None:
+    p = tmp_path / "ov.bc.jsonc"
+    p.write_text(
+        json.dumps(
+            {
+                "kind": "bc",
+                "name": "ov-bc",
+                "level": "classic35",
+                "stage_select": "23,9",
+                "enemies": 5,
+                "lives": 2,
+                "star": 1,
+                "max_ticks": 5000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    c = load_bc_course(str(p))
+    assert c.stage_ids == [2000, 2001]  # 顺序即新关序，id 从 2000 重编号
+    stages = c.stages
+    assert isinstance(stages, list)
+    assert [s.get("name") for s in stages if isinstance(s, dict)] == [
+        "Ramparts",
+        "Twin Towers",
+    ]
+    assert all(isinstance(s, dict) and s.get("count") == 5 for s in stages)
+    assert c.player.lives == 2 and c.player.level == 1
+    assert c.max_ticks == 5000
+
+    plain = tmp_path / "plain.bc.jsonc"
+    plain.write_text(
+        json.dumps({"kind": "bc", "name": "plain-bc", "level": "classic35"}),
+        encoding="utf-8",
+    )
+    assert bc_corpus_identity_fp(c) != bc_corpus_identity_fp(load_bc_course(str(plain)))
+
+
+def test_bc_course_overrides_without_level_raise(tmp_path: Path) -> None:
+    """没有 `level` 却写覆盖键 ⇒ 响亮拒（它们是「从关卡取环境」的修饰语）。"""
+    p = tmp_path / "no-lvl.bc.jsonc"
+    p.write_text(
+        json.dumps({"kind": "bc", "name": "x", "stages": "0-1", "lives": 1}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="没有 `level`"):
+        load_bc_course(str(p))

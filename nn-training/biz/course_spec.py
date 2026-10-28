@@ -21,7 +21,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from biz.reward_library import OUTCOMES
 
@@ -755,8 +755,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     name: str = "unnamed"
     mode: Literal["per-tick", "intent", "goal"] = "per-tick"
     #: 关卡引用（`nn-training/levels/<name>.jsonc` 或路径）。设置后 stages/difficulty/
-    #: max_ticks/player 四类环境键**只能**来自关卡文件（load_course 合并；课程侧重复
-    #: 声明 = 配置冲突 raise）。缺席 = 内联 stages 旧用法，逐字节兼容。
+    #: player 三类环境键**只能**来自关卡文件（load_course 合并；课程侧重复声明 = 配置冲突
+    #: raise）；四类环境覆盖（`stage_select`/`enemies`/`lives`/`star`）与 `max_ticks` 可由
+    #: 课程覆盖（§49）。缺席 = 内联 stages 旧用法，逐字节兼容。
     level: str = ""
 
     # ---- 环境 ----
@@ -859,6 +860,18 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             )
         return self
     seeds: str = "0-3"
+    #: 只对 `"level": ...` 课程生效的四类**环境覆盖**（2026-10-28，docs/nn/training-stack.md §49）。
+    #: 目的：不必为「换几关 / 改敌数 / 改命 / 改星」各写一份关卡 jsonc。
+    #: * `stage_select`：从关卡里挑哪几关（**1-based 位置**，`"23"` / `"23,9,18,10"` / `"1-8"`；
+    #:   顺序即新的关序 ⇒ id 仍按 `CUSTOM_STAGE_BASE+i` 重编号）。空 = 全关。
+    #: * `enemies`：每关敌人总数（写回 stage 的 `count`；上限 = 该关 `forces` 长度）。
+    #: * `lives` / `star`：`player.lives` / `player.level` 的覆盖。
+    #: ⚠ 这些值在 `load_course` 里**被消费并写进 stages/player**（不是另存一份事实）——
+    #:   直接 `CourseConfig(**d)` 绕开 `load_course` 时它们不会生效，与 `level` 本身同一条语义。
+    stage_select: str = ""
+    enemies: int | None = Field(default=None, ge=1)
+    lives: int | None = Field(default=None, ge=1)
+    star: int | None = Field(default=None, ge=0)
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""
     #: 决策事件补充（plan/new-era-stop.plan.md §6 R2：均匀 K ∪ threat-ONSET 沿 + Δt≥3）。
