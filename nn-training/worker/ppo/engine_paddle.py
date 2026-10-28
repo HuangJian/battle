@@ -351,17 +351,6 @@ def ppo_update(
             save_ckpt(model, opt, ckpt_path, epochs_done=ep + 1, steps_done=steps_done)
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
-        _n = 32
-        recent = stats[-_n:]
-        if recent:
-            log(
-                f"[ppo-paddle] ep {ep + 1}/{epochs} "
-                f"kl={sum(s['kl'] for s in recent) / len(recent):.4f} "
-                f"entropy={sum(s['entropy'] for s in recent) / len(recent):.4f} "
-                f"policy={sum(s['policy'] for s in recent) / len(recent):.4f} "
-                f"value={sum(s['value'] for s in recent) / len(recent):.4f} "
-                f"gnorm={sum(s['gnorm'] for s in recent) / len(recent):.3f}"
-            )
     if steps_out is not None:
         # 正常收尾与「0 步」早返回都从这里出去（唯一口径）。
         steps_out["steps_done"] = int(steps_done)
