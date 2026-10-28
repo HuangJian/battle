@@ -280,10 +280,6 @@ class PrefetchStore:
                 f"prefetch {jid[:8]}: 解包失败（{type(e).__name__}: {e}）——退回字节形状"
             )
             return False, 0, 0.0
-        self._log_line(
-            f"prefetch {jid[:8]}: 解包 {len(payload) / 1048576:.1f}MB → {nbytes / 1048576:.1f}MB / "
-            f"{len(shard_dirs)} shard / {unpack_sec:.1f}s（命中则不在关键路径上解）"
-        )
         return True, nbytes, unpack_sec
 
     # ---------------------------------------------------------------- 读
@@ -369,10 +365,6 @@ class PrefetchStore:
                 return None
             self.hits += 1
             self.taken_bytes += int(it.get("bytes") or 0)
-            self._log_line(
-                f"prefetch {jid[:8]}: 命中（{int(it.get('bytes') or 0)} bytes，解包 "
-                f"{float(it.get('unpack_sec') or 0.0):.1f}s 已就绪——零下载开算）"
-            )
             return {
                 "staged_dir": str(staged),
                 "payload_nbytes": int(it.get("bytes") or 0),
@@ -399,7 +391,6 @@ class PrefetchStore:
         self._drop_dir(jid)
         self.hits += 1
         self.taken_bytes += len(payload)
-        self._log_line(f"prefetch {jid[:8]}: 命中（{len(payload)} bytes 零下载开算）")
         return {"payload_zip": payload, "blob_sha": sha, "summary": it.get("summary") or {}}
 
     def drop(self, jid: str) -> None:

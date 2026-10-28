@@ -73,7 +73,7 @@ from remote.train_common import (
     kick_kl_value,
     ppo_shards_root,
 )
-from remote.wire import _wire_block, _wire_time
+from remote.wire import _wire_block, _wire_time, note_ppo_tail
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -319,13 +319,19 @@ def _fetch_demo(
 def _ppo_done_log(
     jid: str, t_ppo: float, train_b: LogBundle, chunks: list, total_steps: int, agg: dict
 ) -> float:
-    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。"""
+    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。
+
+    不再单列 `job … PPO done in …` 一行：steps/chunks/kl + engine 折叠读数并入下游 wire
+    总账行（`wire._wire_flush` 读取 `_WIRE[jid]["ppo_line"]` 拼到行尾，2026-10-28）。
+    """
     ppo_sec = round(time.time() - t_ppo, 1)
     _wire_time(jid, "ppo", time.time() - t_ppo)
     train_b.add("steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）")
     train_b.add("chunks", len(chunks))
     train_b.add("kl", agg.get("kl"))
-    train_b.emit(f"job {jid}: PPO done in {ppo_sec}s")
+    ppo_line = train_b.text()
+    if ppo_line:
+        note_ppo_tail(jid, ppo_line)
     return ppo_sec
 
 
@@ -924,12 +930,10 @@ def run_training_core(
     }
     if iter_info is not None:
         # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
-        result["report"] = iter_info["report"]
-        # ★ 2026-10-28（云机轮换）：分关采集账随结果回传（控制台「各关进度」读的就是它）；
+        # ★ 2026-10-28（云机轮换）：分关采集账一并回传（控制台「各关进度」读的就是它）——
         #   不在这里搬一手，`iter_info` 里那份就随函数返回被丢了（老产物行没这个键 = 留空）。
-        _vstats = iter_info.get("volume_stage_stats")
-        if isinstance(_vstats, dict) and _vstats:
-            result["volume_stage_stats"] = _vstats
+        #   两条后端腿（本函数 / `_run_training_core_paddle`）各一行：同一份 `iter_info`。
+        result.update({k: iter_info[k] for k in ("report", "volume_stage_stats") if k in iter_info})
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,
@@ -1321,7 +1325,8 @@ def _run_training_core_paddle(
         "ppo_sec": ppo_sec,
     }
     if iter_info is not None:
-        result["report"] = iter_info["report"]
+        # 与 torch 腿同一行（M3 的 report 必带；★ 分关采集账可选，缺则不给键）。
+        result.update({k: iter_info[k] for k in ("report", "volume_stage_stats") if k in iter_info})
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,

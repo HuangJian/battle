@@ -304,6 +304,9 @@ def _wire_bucket(jid: str) -> dict:
             "waits": 0.0,
             "sched0": _BULK.stats(),  # 本 job 起点的调度器快照（flush 时算增量）
             "t0": time.time(),  # 建账时刻（claim 时会被 `_wire_start` 重写）
+            # PPO 收尾读数（steps/chunks/kl + engine 折叠读数）：由 `train_core._ppo_done_log`
+            # 在 PPO 完成后写入，`_wire_flush` 拼到总账行尾，避免单列一行 `job … PPO done`（2026-10-28）。
+            "ppo_line": None,
         }
     return w
 
@@ -440,6 +443,20 @@ def _wire_note_preempt(jid: str, wasted: int) -> None:
     w["preempt_wasted"] += int(wasted)
 
 
+def note_ppo_tail(jid: str, text: str) -> None:
+    """PPO 收尾读数（steps/chunks/kl + engine 折叠读数）并入本 job 的 wire 总账行尾（2026-10-28）。
+
+    由 `train_core._ppo_done_log` 在 PPO 完成后调用；`_wire_flush` 读取 `_WIRE[jid]["ppo_line"]`
+    拼到总账行末尾。这样 `job … PPO done in …｜steps=…｜chunks=…｜kl=…` 不再单列一行，而是
+    与传输账合为一行（ppo 秒数已在 `phases … ppo=` 里）。
+    """
+    if not text:
+        return
+    w = _WIRE.get(jid)
+    if w is not None:
+        w["ppo_line"] = text
+
+
 def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
     """打**一行**本 job 的传输账并清掉：`wire payload=… code=cache-hit reroll=1 合计=…`。
 
@@ -514,6 +531,7 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
     wall = max(crit_end - float(w.get("t0") or crit_end), phase_sum)
     other = max(wall - phase_sum, 0.0)
     rate_all = tot_b / tot_s / 1024.0 if tot_s > 0 else 0.0
+    ppo_line = w.get("ppo_line")
     log(
         f"job {jid}: wire "
         + " ".join(parts)
@@ -521,4 +539,5 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
         + f" phases in={in_sec:.1f}s out={out_sec:.1f}s ppo={ppo_sec:.1f}s"
         f" failed={failed_sec:.1f}s"
         f" other={other:.1f}s wall={wall:.1f}s overlap={overlap:.1f}s"
+        + (f" {ppo_line}" if ppo_line else "")
     )

@@ -241,7 +241,15 @@ def _prefetch_fill(
                     jid,
                     bulk_prio=BULK_P2_PREFETCH,
                     wire_jid=PREFETCH_WIRE_ID,  # 账记在合成 id 上，不污染在跑 job 的账
-                    log=lambda m, _j=jid: log(f"prefetch {_j[:8]}: {m}"),
+                    # prefetch 是后台预热：逐进度/重抽日志全进总账（wire flush 的 `reroll=`
+                    # `failed=` `phases`——用户 2026-10-28 报障：prefetch 阶段哗哗刷十几行）。
+                    # 这里吞掉 `下载中`/`re-roll` 噪声，只放行异常（BulkPreempt/协议错误由
+                    # 外层 catch 单独打，不经此包装器）。正式 job 走别的 log 路径，不受影响。
+                    log=lambda m, _j=jid: (
+                        None
+                        if any(_k in m for _k in ("下载中", "re-roll"))
+                        else log(f"prefetch {_j[:8]}: {m}")
+                    ),
                 )
             except BulkPreemptError as e:
                 log(f"prefetch {jid[:8]}: {e}")
@@ -260,11 +268,7 @@ def _prefetch_fill(
             # 日志带**档位 + 命中索引**（plan §2.4 的档位读数，评审 P2-1）：§7-2 的「−2s」要归因到
             # 「命中的就是被解的那几份」，没有索引这一列，收益与白解包分不开。
             want_unpack = i < int(unpack_n)
-            if store.store(jid, payload, cand, unpack=want_unpack):
-                log(
-                    f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes「第 {i + 1}/{len(picked)} 份，"
-                    f"{'解包就绪' if want_unpack else '只存字节'}」（软持有，无租约）"
-                )
+            store.store(jid, payload, cand, unpack=want_unpack)
         # 预取状态上报（plan/dashboard-ppo-live-rows）：规范化形状没变就不发 HTTP
         # （常态 0 命中/0 下载 ⇒ 一个进程生命周期只发首轮那一笔）。
         snap = store.snapshot()

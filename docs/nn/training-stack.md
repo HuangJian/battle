@@ -7,6 +7,59 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §47 云机设备探测按后端分派：没有 torch ≠ 不能训练（2026-10-27）
+
+**触发**：AI Studio 训练镜像（`paddlepaddle-gpu` 在、**没有** torch）跑 `battle.cloudflared.ipynb`
+的 push 腿 —— `code.zip` 到位、隧道注册正常，然后在「设备探测中」这一行直接
+`SystemExit: [FATAL] torch 不可用（ModuleNotFoundError: No module named 'torch'）——拒绝开始训练。`
+用户原话：「训练已经增加了 paddle 的训练环境支持，为什么 ipynb 探测不到 torch 就直接报错？？？
+不应该是继续探测 paddle 是否可用吗」。
+
+**根因（两处，正是 §43 末尾「边界（未做）」那一行）**：
+1. `remote/notebook_runtime.py::resolve_device` 只认 torch —— 那套「CUDA → TPU → CPU」是
+   2026-09-16 的形状，**后端这个概念根本不在里面**。`_probe_cuda` 的 2026-10-26 FATAL 档
+   （torch 装了但 import 崩 ⇒ 别白烧一轮采集）把「**没装** torch」也一起 FATAL 掉了 ——
+   那一档在有 paddle 的机器上不是死路，只是探测没往下走。
+2. notebook 这条腿**没有任何地方能传 `--backend`**：pull 的 `worker_restart_argv` 不带、
+   push 的 `remote_worker_serve` 没这个参数 ⇒ worker 恒按 `auto` 解析。所以
+   「先定后端、再探测对应框架」这件事只能问 `resolve_ppo_backend("auto")` 本人。
+
+**修法（一个判据，两条腿）**
+- `_resolve_backend()` = `remote.bc_job.resolve_ppo_backend("auto")`，**不抄第二份判断**；
+  `resolve_device` 先拿后端、写回 `cfg["backend_resolved"]`，再分派。
+  `test_backend_comes_from_the_worker_resolver_not_a_local_copy` 用 monkeypatch 钉住
+  「改了 bc_job 那份 ⇒ notebook 跟着变」（两份判据各自绿、合起来错位，正是这类缝隙的温床）。
+- **后端 torch**：行为原样（CUDA→TPU→CPU），`{"err"}` 仍 FATAL，但消息现在说清
+  「auto 只在**没装** torch 时才改走 paddle；这份 torch 装是装了、import 就崩」并给两条修法
+  （修 torch / 卸掉这份坏 torch 让 auto 落到 paddle）。
+- **后端 paddle**：新增 `_probe_paddle`（子进程，同一条「kernel 本体永不 import 框架」纪律；
+  `paddle.device.cuda.get_device_name` 在 CPU-only 构建上会抛 ⇒ 逐个 try，拿不到就 `?`）+
+  `_resolve_device_paddle`（auto → 有卡 `cuda` / 没卡 `cpu`；写回可见卡数 `gpu_count`；
+  `cuda-dp`/`tpu`/`xla`/`mps` 与训练核 `paddle_env.check_device` **同一份名单**
+  `TORCH_ONLY_DEVICES` ⇒ 开跑前就拒，不用等 hub 推完 job、采完一轮才发现）。
+- `_probe_cuda` / `_probe_paddle` 的「rc≠0 / 解析失败 / 子进程异常」三态收敛到 `_run_probe`
+  —— 原来只有 torch 一份，照抄一遍就是两个事实源。
+- `paddle.set_device` 认 `cuda` / `cuda:N`（本机实测：CPU-only 构建报的是
+  `not compiled with CUDA`，说明正则先匹配到了 `gpu:0`）⇒ `worker_restart_argv` 的
+  「一卡一 worker」写法对 paddle 原样有效，不用改。
+
+**为什么不给 notebook 加 `--backend` 通道**：加了要一路穿 `remote_worker_serve` → `worker_server`
+→ `run_job`（四处签名），而 `auto` 本身就是「torch 装了就是 torch，没装才 paddle」，与 notebook
+侧问的是同一个函数 ⇒ 两边**按构造**一致。真要换框架的那台机器，卸掉 torch 即可；
+`python -m remote.worker --backend paddle` 仍是唯一的显式通道（§43 的守卫没动）。
+
+**顺带**：`run_pull_worker` 那行 `threads=… torch缺省` 改成 `框架缺省`（paddle 机上它是假话）。
+
+**守卫**：`tests/remote/test_notebook_runtime.py` +9 例 —— paddle GPU → `cuda` 且**一次都不探
+torch** / CPU-only → `cpu` 且不留 `gpu_count` / 探测未知 → `cpu`+日志 / import 崩 → FATAL /
+torch 专属臂 → 开跑前拒 / 显式 `cpu` 优先 / 后端判据来自 bc_job / `_run_probe` 三态。新增模块级
+autouse fixture `_torch_backend` 把老用例钉在 torch 腿（否则它们在 paddle-only 机器上行为漂移：
+真去起 paddle 探测子进程）。
+
+**边界**：真 AI Studio 任务上的端到端仍未跑（需云端机器；本机 `tmp/paddle-venv` 只验到
+probe 的设备字符串与 `paddle.set_device` 解析）。`battle.offline.ipynb` 走
+`remote/offline_boot.py` → 复用**同一个** `resolve_device`，自动跟着修好；但整段离线
+`run_loop` 的后端仍由 `run_job` 缺省（auto）决定，§43「paddle 只接 `kind=ppo`」不变。
 ## §46 云机 rollout 支持轮换：配方进计划 + 逐轮派生 + 笔记本三态开关（2026-10-28）
 
 **触发**：用户口径 2026-10-28「云机 rollout 也要支持轮换。ipynb 加个配置开关来决定是否开启轮换。」

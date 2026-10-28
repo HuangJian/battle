@@ -510,11 +510,6 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
         # 丢弃会得到 0 个 chunk ⇒ 静默不训练，比多付一次小 shape 编译糟得多。
         log(f"[chunk] WARN 池子 {n} 步 < mb={mb} ⇒ 不裁剪（单独一块 ragged）")
         n_used = n
-    elif n_used < n:
-        log(
-            f"[chunk] mb 对齐：pooled={n} 步 → 丢弃尾部 {n - n_used} 步"
-            f"（{n_used // mb} 块 × {mb}；无 ragged 末块 ⇒ XLA 图签名恒定、不重编）"
-        )
     return [
         {k: v[idx[s : s + mb]] for k, v in flat.items()} for s in range(0, n_used, mb)
     ]

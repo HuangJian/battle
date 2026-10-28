@@ -6,6 +6,41 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §130 push 节点的注册 HTTP 必须走 **tailnet 代理那条 opener**（2026-10-28 真机）
+
+**现场**：`battle.tailscale.ipynb`（Colab，`mode=rl/push`，userspace Tailscale）连同一个 hub
+（tailnet 上的 `http://100.124.208.62:8787`）——`GET /code` 成功（1.58MB / 4.2s），而
+`POST /admin/nodes/register` **一路 `URLError: timed out`**，最后退化成「每次会话手工粘 `nodes[]`」。
+
+**根因**：同一 hub 的两条 HTTP 走了两条 opener。
+
+| 请求 | 走哪条 | 结果 |
+|---|---|---|
+| `/code`（下载代码） | `remote/notebook_boot._build_opener` —— 显式 `ProxyHandler(http://localhost:1055)` | 通 |
+| `/admin/nodes/register` · `/admin/nodes/unregister` | `Registry` 的**缺省** `urllib.request.urlopen`（`remote/notebook_runtime.py:629` 没传 `urlopen=`） | 超时 |
+
+userspace 引导把 tailnet 出站压在 `localhost:1055`，而 **Colab 上 `urlopen()` 不读 `HTTP_PROXY`**
+（2026-09-16 实测，`_hub_open` 的 docstring 就是这条；默认 opener 即便带 `ProxyHandler` 也不等同于
+「本机推荐的那个代理」）⇒ 注册请求裸连 tailnet IP ⇒ 必超时。`/code` 之所以能下下来，只因为它那条
+路手工挂了代理——**`/code` 下得下来 ≠ 网络通了**，只说明那一条路对了；另一条在同一时刻是死的。
+
+**修法**：`notebook_runtime._push_registry` 显式传 `urlopen=_hub_open`（与 `run_pull_worker` 的
+`/ping`、下载同一份实现）。`_hub_open` 在**没有代理变量时逐字节回落** `urllib.request.urlopen`
+⇒ cloudflared 盘 / 本机 / 非 tailnet 部署行为不变，只有「确有代理」这一档才切过去。
+
+**纪律**：同一 hub 上的所有 HTTP 必须**共用一条 opener**。判据不再是「能不能连上」，而是
+「这条 HTTP 走的是不是那一条 opener」——下游 errno（`timed out`）区分不出「没走代理」与「hub 挂了」。
+
+守卫：`tests/remote/test_notebook_runtime.py::test_push_registry_register_goes_through_proxy_aware_opener`
+（把 `urllib.request.urlopen` 换成计数器 + `ProxyHandler` 换成 spy ⇒ 旧实现必红：`default_urlopen`
+计数 > 0）。
+
+**顺带钉住的口径（为什么 tailscale 盘 push 仍要装 cloudflared）**：push 的方向是 **hub → 云机入站**，
+而 userspace Tailscale **只有出站**（无 TUN，本地 8790 不暴露到 tailnet）⇒ Tailscale 负责「拉代码」，
+cloudflared quick tunnel 负责「给 hub 一个能推进来的 URL」，两者互补不是冗余。真正免 cloudflared 的
+push 只在 `notebook_boot._push`（push-first，`node url = http://<TS_IP>:8790`）且 **kernel 模式 +
+hub_url 为空**——Colab 上 kernel 模式恒 `rc=1`（无 TUN 权限），这条路等于不存在。
+
 ## §129 进度**日志行**按 25% 一桶节流：发报不节流，日志才节流（2026-10-27 用户口径）
 
 **用户口径**：「自主云机的 log 要精简要节制」。触发场景：一轮 46 局、采集按**逐局**调度

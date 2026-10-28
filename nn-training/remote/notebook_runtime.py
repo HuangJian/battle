@@ -14,6 +14,11 @@ cfg 键（cell 的 CFG dict）：
   code_dir (已解包的 code.zip 目录，push 模式起服务用) ·
   work_dir (可选覆盖 /tmp 工作目录——单测注入 tmp_path 用)
 
+★ 后端不在这里选：`resolve_device` 用 `remote.bc_job.resolve_ppo_backend("auto")` 问出
+「worker 会落在哪个框架」，再探测**那个**框架的设备（notebook 没有 `--backend` 通道，
+worker 恒按 auto 解析 ⇒ 两边按构造是同一份判据）。写回：`device_resolved` ·
+`backend_resolved` · 可见卡数 `gpu_count`（下游 `worker_restart_argv` 用）。
+
 TPU 硬约束（2026-09-10/11 线上事故，勿退化）：
   1. torch / torch_xla 版本严格配对（镜像自带）——绝不 pip 覆盖；
   2. PJRT_DEVICE=TPU 只影响 worker 子进程；
@@ -99,7 +104,7 @@ def _hub_open(req: Any, timeout: float = 15) -> Any:
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-# ════════════════════════ 设备探测：CUDA → TPU → CPU ════════════════════════
+# ════════════════════════ 设备探测：backend → CUDA → TPU → CPU ════════════════════════
 
 
 def _tpu_device_nodes() -> list[str]:
@@ -127,6 +132,40 @@ def _tpu_holders() -> list[tuple[int, str, str]]:
     return out
 
 
+def _run_probe(log, code: str, what: str) -> dict | None:
+    """在**子进程**里跑一段「最后打印一行 JSON」的探测代码，返回解析结果。
+
+    为什么一律走子进程（2026-09-16 Kaggle 实测）：引导（tailscale 登录）后 **kernel 进程内**
+    `import torch` 会无声杀死整个会话——`import torch` 前一行的日志还在、无任何 traceback 即
+    断连；拆到子进程后同环境 import 正常（S2/S4/D1-D3 全部存活）。paddle 走同一条纪律：
+    CUDA 上下文一旦在 kernel 里建起来，worker 子进程继承的是脏状态。
+
+    返回三态（`_probe_cuda` / `_probe_paddle` 共用同一契约）：
+      * `{"v","n","names"}` —— 框架可用（`n=0` 就是真没 GPU）；
+      * `{"err"}` —— **装了但 import 崩**（FATAL 档，不能当「无 GPU」回落）；
+      * `None` —— 探测子进程起不来 / 输出不可解析（真·未知）。
+    """
+    import json as _json
+
+    try:
+        # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
+        # 裸 text=True 会在读线程里抛 UnicodeDecodeError ⇒ stdout 变成 None（§19）。
+        r = run_capture([sys.executable, "-u", "-c", code], timeout=60)
+    except BaseException as e:  # 子进程起不来/超时——探测失败按未知
+        log(f"{what} 探测子进程异常（{type(e).__name__}: {e}）—— 按未知处理")
+        return None
+    if r.returncode != 0:
+        # 子进程非零退出：把它的 stderr 尾巴带出来 —— 这就是「装坏了」最直接的证据
+        tail = ((r.stderr or "") or (r.stdout or "")).strip().splitlines()[-1:] or [""]
+        log(f"{what} 探测子进程退出 rc={r.returncode}（{tail[0][:200]}）")
+        return {"err": f"probe exit rc={r.returncode}: {tail[0][:200]}"}
+    try:
+        return cast(dict[str, Any], _json.loads((r.stdout or "").strip().splitlines()[-1]))
+    except (ValueError, IndexError):
+        log(f"{what} 探测子进程输出不可解析：{(r.stdout or '').strip()[:200]!r} —— 按未知处理")
+        return None
+
+
 def _probe_cuda(log) -> dict | None:
     """子进程探测 torch/CUDA 可见性（kernel 本体永不 import torch）。
 
@@ -145,8 +184,6 @@ def _probe_cuda(log) -> dict | None:
         **一整轮采集白烧**。调用方（`resolve_device`）必须 FATAL，不是回落。
       * `None` —— 探测子进程起不来 / 输出不可解析（真·未知）。
     """
-    import json as _json
-
     _probe = (
         "import json\n"
         "try:\n"
@@ -162,32 +199,122 @@ def _probe_cuda(log) -> dict | None:
         "    raise SystemExit(0)\n"
         "print(json.dumps({'v': torch.__version__, 'n': n, 'names': names}), flush=True)\n"
     )
-    try:
-        # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
-        # 裸 text=True 会在读线程里抛 UnicodeDecodeError ⇒ stdout 变成 None（§19）。
-        r = run_capture([sys.executable, "-u", "-c", _probe], timeout=60)
-    except BaseException as e:  # 子进程起不来/超时——探测失败按无 CUDA
-        log(f"torch 探测子进程异常（{type(e).__name__}: {e}）—— 按无 CUDA 处理")
-        return None
-    if r.returncode != 0:
-        # 子进程非零退出：把它的 stderr 尾巴带出来 —— 这就是「torch 装坏了」最直接的证据
-        tail = ((r.stderr or "") or (r.stdout or "")).strip().splitlines()[-1:] or [""]
-        log(f"torch 探测子进程退出 rc={r.returncode}（{tail[0][:200]}）")
-        return {"err": f"probe exit rc={r.returncode}: {tail[0][:200]}"}
-    try:
-        return cast(dict[str, Any], _json.loads((r.stdout or "").strip().splitlines()[-1]))
-    except (ValueError, IndexError):
-        log(f"torch 探测子进程输出不可解析：{(r.stdout or '').strip()[:200]!r} —— 按无 CUDA 处理")
-        return None
+    return _run_probe(log, _probe, "torch")
+
+
+def _probe_paddle(log) -> dict | None:
+    """子进程探测 paddle 可见性（kernel 本体永不 import paddle）。
+
+    ★ 2026-10-27：这条腿是补的。旧版 `resolve_device` 只认 torch —— `import torch` 失败就
+    FATAL，哪怕本机 paddle 装得好好的、`auto` 后端本来就会落到 paddle（AI Studio 训练镜像
+    正是这个形态：paddlepaddle-gpu 在、torch 根本不存在）。用户口径：「不应该继续探测 paddle
+    吗」。现在后端先由 `_resolve_backend` 定，再探测**那个**框架。
+
+    `paddle.device.cuda.get_device_name` 在 CPU-only 构建上会抛（实测
+    `ValueError: ... not supported in CPU-only PaddlePaddle`）⇒ 逐个 try，拿不到就 `?`。
+    """
+    _probe = (
+        "import json\n"
+        "try:\n"
+        "    import paddle\n"
+        "except BaseException as e:\n"
+        "    print(json.dumps({'err': type(e).__name__ + ': ' + str(e)}), flush=True)\n"
+        "    raise SystemExit(0)\n"
+        "try:\n"
+        "    n = int(paddle.device.cuda.device_count()) if paddle.is_compiled_with_cuda() else 0\n"
+        "    names = []\n"
+        "    for i in range(n):\n"
+        "        try:\n"
+        "            names.append(str(paddle.device.cuda.get_device_name(i)))\n"
+        "        except BaseException:\n"
+        "            names.append('?')\n"
+        "except BaseException as e:\n"
+        "    print(json.dumps({'err': 'cuda probe: ' + type(e).__name__ + ': ' + str(e)}), flush=True)\n"
+        "    raise SystemExit(0)\n"
+        "print(json.dumps({'v': paddle.__version__, 'n': n, 'names': names}), flush=True)\n"
+    )
+    return _run_probe(log, _probe, "paddle")
+
+
+def _resolve_backend() -> str:
+    """本机 `auto` 会落到哪个训练后端 —— **问 worker 的同一个函数**，不另立判据。
+
+    notebook 这条腿没有任何地方能传 `--backend`：pull 的 `worker_restart_argv` 不带它，
+    push 的 `remote_worker_serve` 也没有这个参数 ⇒ worker 恒按 **auto** 解析。这里同样问
+    auto，两边的框架选择**按构造**相同（torch 装了就是 torch，没装才 paddle）。
+    哪天给 notebook 加了 `--backend` 通道，这里必须改成读 cfg —— 否则日志上的 backend
+    和实际跑的框架会分叉（那就是第二个事实源）。
+    """
+    from remote.bc_job import resolve_ppo_backend
+
+    return resolve_ppo_backend("auto")
+
+
+def _resolve_device_paddle(cfg: dict[str, Any], log) -> str:
+    """Paddle 后端的设备解析（AI Studio 训练镜像：paddlepaddle-gpu 在、torch 不存在）。
+
+    与 torch 腿同形：`auto` = 有卡 `cuda` / 没卡 `cpu`；显式值原样返回（不悄悄改）。
+    torch 专属实验臂（`cuda-dp` 的 DataParallel、`tpu`/`xla` 的 XLA、`mps`）与训练核
+    `paddle_env.check_device` **同一份名单** ⇒ 在开跑前就拒，而不是等 hub 推完 job、
+    采完一轮才在 PPO 里炸。`paddle.set_device` 认 `cuda` / `cuda:N`（实测正则匹配 gpu），
+    所以 `worker_restart_argv` 的一卡一 worker 写法原样可用。
+    """
+    from remote.paddle_env import TORCH_ONLY_DEVICES
+
+    d = str(cfg["device"])
+    if d in TORCH_ONLY_DEVICES:
+        raise SystemExit(
+            f"[FATAL] device={d!r} 是 torch 专属实验臂，paddle 后端没有对应实现"
+            "（DataParallel / XLA / MPS）—— 用 auto / cuda / cpu。\n"
+            '  多卡请走 CFG["workers"]（一卡一 worker），不要用 cuda-dp。'
+        )
+    info = _probe_paddle(log)
+    if info is not None and info.get("err"):
+        raise SystemExit(
+            f"[FATAL] paddle 不可用（{info['err']}）——拒绝开始训练。\n"
+            "  本机 `auto` 后端 = paddle（没装 torch），设备也只能由 Paddle 判；\n"
+            "  继续跑只会在 PPO `import paddle` 时崩掉，照样白烧一轮采集。\n"
+            "  修法：装与本机 CUDA 匹配的 paddlepaddle-gpu"
+            "（`python -m pip install paddlepaddle-gpu`），或装上 torch 让 auto 回到 torch 后端，"
+            "然后重跑本 cell。"
+        )
+    if info is not None and int(info.get("n") or 0) > 0:
+        n_gpu = int(info["n"])
+        # 与 torch 腿同一个理由：卡数交给下游 argv（`worker_restart_argv` 判一卡一 worker）。
+        cfg["gpu_count"] = n_gpu
+        log(f"paddle {info.get('v')}，CUDA 可见 {n_gpu} 张 GPU")
+        names = list(info.get("names") or [])
+        for i in range(n_gpu):
+            log(f"  [{i}] {names[i] if i < len(names) else '?'}")
+        if d == "auto":
+            if n_gpu > 1 and cfg.get("use_multi_gpu"):
+                log('  paddle 没有 DataParallel 实验臂 —— 多卡走 CFG["workers"]（一卡一 worker）')
+            elif n_gpu > 1:
+                log('  -> 只用第 0 张卡（多卡走 CFG["workers"]）')
+            return "cuda"
+        log(f"  显式指定 {d}（按指定执行）")
+        return d
+    if info is None:
+        log("paddle 探测未知（子进程没起来/输出不可解析）→ 按 CPU 开跑")
+    else:
+        log("Paddle 无 CUDA（CPU-only 构建或没卡）→ CPU")
+    return "cpu" if d == "auto" else d
 
 
 def resolve_device(cfg: dict[str, Any], log) -> str:
-    """设备解析：显式指定优先；auto = CUDA（多卡按 use_multi_gpu）→ TPU → CPU。
+    """设备解析：**先定后端**（auto → torch / paddle），再按后端探测设备。
 
-    torch 探测走子进程（`_probe_cuda`）；TPU 探测仍用 find_spec + /dev 扫描——
-    两条路 kernel 本体都不 import torch/ torch_xla。
+    · 后端 torch：显式指定优先；auto = CUDA（多卡按 use_multi_gpu）→ TPU → CPU。
+    · 后端 paddle：见 `_resolve_device_paddle`。
+
+    探测一律走子进程；TPU 探测仍用 find_spec + /dev 扫描 —— 三条路 kernel 本体都不
+    import torch / paddle / torch_xla。
     """
-    log(f"设备探测中（device={cfg['device']}）…")
+    backend = _resolve_backend()
+    cfg["backend_resolved"] = backend
+    log(f"设备探测中（device={cfg['device']}，backend=auto→{backend}）…")
+    if backend == "paddle":
+        return _resolve_device_paddle(cfg, log)
     info = _probe_cuda(log)
     # ★ 2026-10-26：**torch 装坏了必须在开跑前就 FATAL**，不能回落 CPU。
     #   现场（云机 python 3.10）：`torch` 装了但 CUDA runtime 缺 ⇒ `import torch` 抛
@@ -196,12 +323,24 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     #   `import torch` 才崩 ⇒ 整轮采集白烧，且日志最后一行的锅甩给 PPO。
     #   torch 是 PPO 的硬依赖：import 不了就等于这条路完全不可跑，早停是唯一正确处置。
     if info is not None and info.get("err"):
+        # ★ 2026-10-27：这条 FATAL 现在只在「torch **装了**（find_spec 看得到 ⇒ auto 选它）
+        #   但 import 就崩」时触发。**没装** torch 的机器走不到这里 —— auto 已经落到 paddle。
+        #   所以修法要给出两条路：修 torch，或让 auto 落到 paddle（卸掉这份坏 torch）。
+        import importlib.util as _iu
+
+        try:
+            has_paddle = _iu.find_spec("paddle") is not None
+        except (ImportError, ValueError):
+            has_paddle = False
         raise SystemExit(
             f"[FATAL] torch 不可用（{info['err']}）——拒绝开始训练。\n"
             "  继续跑只会白烧一轮采集：rollout 不需要 torch，但 PPO 一 import 就崩。\n"
-            "  修法：装上与本机 python/cuda 匹配的 torch（`pip install torch --index-url "
-            "https://download.pytorch.org/whl/cpu` 走 CPU 版最省事），或补上被缺的 CUDA runtime，"
-            "然后重跑本 cell。"
+            "  backend=auto 只在 **没装** torch 时才改走 paddle；这份 torch 装是装了、import 就崩"
+            f" ⇒ auto 选不到 paddle（本机 paddle：{'有' if has_paddle else '没有'}）。\n"
+            "  修法：① 装上与本机 python/cuda 匹配的 torch（`pip install torch --index-url "
+            "https://download.pytorch.org/whl/cpu` 走 CPU 版最省事），或补上被缺的 CUDA runtime；\n"
+            "        ② 本机有可用 paddle 时，卸掉/改名这份坏 torch（`pip uninstall torch`）"
+            "让 auto 落到 paddle。然后重跑本 cell。"
         )
     if info is not None and int(info.get("n") or 0) > 0:
         n_gpu = int(info["n"])
@@ -413,7 +552,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     log(
         f"worker 启动（max_idle={max_idle}s, poll={cfg['poll_interval_sec']}s, "
         f"device={cfg['device_resolved']}, workers={n_workers}, "
-        f"threads={int(cfg.get('threads') or 0) or 'torch缺省'}）"
+        f"threads={int(cfg.get('threads') or 0) or '框架缺省'}）"
     )
     if n_workers == 1:
         try:
@@ -495,6 +634,14 @@ def _push_registry(cfg: dict[str, Any], log) -> Any:
         kind="gpu_push",
         label=str(cfg.get("label") or ""),
         log=log,
+        # ★ 2026-10-28：必须是**代理感知**的那条 opener，不能用缺省的 `urlopen`。
+        #   真机（Colab + userspace Tailscale，hub 在 tailnet 上 `100.124.208.62:8787`）：
+        #   `/code` 下载成功而 `POST /admin/nodes/register` 一路 timed out——差别只在下载那侧显式
+        #   挂了 `localhost:1055` 的 tailnet 代理（`notebook_boot._build_opener`），注册却走默认
+        #   opener（`urlopen()` 不读 HTTP_PROXY，2026-09-16 实测）。注册/注销与下载共用同一条
+        #   opener，`_hub_open` 无代理时本就回落 `urlopen` ⇒ 非 tailnet 部署逐字节不变。
+        #   守门：`tests/remote/test_notebook_runtime.py::test_push_registry_register_goes_through_proxy_aware_opener`
+        urlopen=_hub_open,
     )
 
 
@@ -882,6 +1029,7 @@ def run_notebook(cfg: dict[str, Any]) -> int:
     print("\n" + "=" * 62)
     _em = _epoch_mult_of(cfg)
     print(f"  Battle GPU Worker | mode={cfg['mode']} device={cfg.get('device_resolved')} "
+          f"backend={cfg.get('backend_resolved') or '?'} "
           f"| 任务类型 ppo+bc" + (f" | PPO epochs×{_em:g}" if _em != 1.0 else ""))
     print(f"  会话上限 {cfg['max_session_hours']}h | 停止 = 中断本 cell")
     print("=" * 62 + "\n")
