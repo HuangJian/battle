@@ -1,0 +1,87 @@
+// 课程 z2-r5 —— 第 5 级：同一组 4 图 · **20 敌 · 3 命**（2026-10-28）
+//
+// ── 本级只改一件事 ─────────────────────────────────────────────────────
+//   敌数 8 → 20 = 经典单关的完整兵力（`forces` 全串上场）。任务侧与 classic35 **完全同构**，
+//   唯一差 = 只有 4 张图 ⇒ 这一级与 r6 的差是**纯泛化**（同样 20 敌 3 命，4 图 → 35 图）。
+//   起点 = `tmp/z2-r4/weights.json`。
+//
+// ── 晋级 ───────────────────────────────────────────────────────────────
+//   clearRate ≥50% ×2、zero_kill ≤0.10 ⇒ 开 z2-r6（35 关原题）。
+//   ⚠ 本级 20 敌的局长远大于前四级：`target_transitions 24576` 下 4 关各 ~6144 samples，
+//     约 15–25 局/关/轮；读数看分关，不看四关平均（AGENTS §15.2）。
+
+// ── 奖励：全阶梯逐字相同 ────────────────────────────────────────────────
+//   +15*kills +60*clear +3*wallIntact -0.12*dmg -18*death -8*pace +0.25*min(bricks,12)
+//   反苟：墙价（丢一圈 -24）+ pace（没击杀按拍计费，封顶 8）+ **无移动/探索项**。
+//   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」也亏；三输 -35。
+//   汇率账与算例（完胜 +76 / 苟 -63 / 莽 -59）→ docs/nn/training-stack.md §50.3。
+//
+// ── 晋级 / 停腿 ─────────────────────────────────────────────────────────
+//   · 晋级下一级：in-loop eval **连续 2 个评估点** clearRate ≥ 50% 且 zero_kill_frac ≤ 0.10。
+//   · 停腿：40 轮内 clearRate 始终 0 ⇒ 停，**先查任务侧再谈奖励**（§50.4 的 commander floor）。
+//   · it0 的 greedy 是恒定动作（近均匀初始化的正常形态），判据从 it20+ 读。
+
+{
+  "version": 5,
+  "name": "z2-r5",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - wPace*max(0, 1 - kills*paceTicks/(ticks+paceTicks)) + wBrick*min(aimBricks, brickCap)",
+    "params": {
+      "wKill": 15.0,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 8.0,
+      "paceTicks": 350.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "tmp/z2-r4/weights.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 240,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5/weights.json",
+  "traj": "tmp/z2-r5",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5",
+  "backup_prefix": "z2-r5",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

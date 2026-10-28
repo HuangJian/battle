@@ -1,0 +1,99 @@
+// 课程 z2-r1 —— 新的从零线 · 第 1 级：4 张最简图 · **1 敌 · 1 命**（2026-10-28）
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────
+//   z0/z1 四条腿判死（0 胜、被训到 0 杀 → docs/nn/training-stack.md §50），这是重设计：
+//   随机权重 + **可赢的最小任务**，然后按「敌数 × 命数 × 关集」逐级加，r6 = 经典 35 关原题。
+//
+// ── 1. 任务（本级的唯一变量）────────────────────────────────────────────
+//   level classic35 · stage_select "16,22,3,6"（Crossroads / Oasis / Steel Fortress / Brickworks）
+//   · enemies 1 · lives 1 · max_ticks 6000。
+//   关卡选择规则（预注册，结构化、**不看教师**——AGENTS §0.2 四禁令）：
+//     ① 首敌必须是 `a`（basic）——`enemies: N` 取 forces 前 N 个，1 敌 = 最弱的那种；
+//     ② 不含 water / ice（移动/打滑是另一种技能，不与「学会打」混在一起）；
+//     ③ 全连通、无死胡同（26×26 BFS 覆盖 = 可走格）；
+//     ④ 按 brick+steel 升序取 4 张（要拆的墙最少 ⇒ 射界最容易打开）。
+//   ⇒ 本组：Crossroads 72 墙 / Oasis 80 / Steel Fortress 156 / Brickworks 174。
+//   ⚠ 与 z0 的选法相反：z0 按「god-AI 胜率 >95%」挑关，那正是 §0.2 禁的教师口径。
+//
+// ── 2. 为什么 1 敌 1 命（z0/z1 的病根，实测 → §50）──────────────────────
+//   20 敌 3 命 + 随机权重 ⇒ 基地每局必碎 ⇒ `base_destroyed -35` 是**常数**、没有梯度；
+//   能学的只剩「承伤 / 掉命」⇒ 最优 = 不接触。四条腿各自找到一种苟：
+//     冻住（z0-ramparts it10: idle 100%、cells 1、0 射）· 站桩盲射（z0-mix4: idle 100%、
+//     cells 1、3.66 杀）· 贴墙（z1-ladder: cells 1、0 射）· 游走盲射（z1-graze: 0.16 杀）。
+//   1 敌 1 命把「清关」压到**一次击杀**可达 ⇒ 清关奖第一次有信号；命少 ⇒ 学不会拿命换杀。
+
+// ── 奖励：全阶梯逐字相同 ────────────────────────────────────────────────
+//   +15*kills +60*clear +3*wallIntact -0.12*dmg -18*death -8*pace +0.25*min(bricks,12)
+//   反苟：墙价（丢一圈 -24）+ pace（没击杀按拍计费，封顶 8）+ **无移动/探索项**。
+//   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」也亏；三输 -35。
+//   汇率账与算例（完胜 +76 / 苟 -63 / 莽 -59）→ docs/nn/training-stack.md §50.3。
+//
+// ── 晋级 / 停腿 ─────────────────────────────────────────────────────────
+//   · 晋级下一级：in-loop eval **连续 2 个评估点** clearRate ≥ 50% 且 zero_kill_frac ≤ 0.10。
+//   · 停腿：40 轮内 clearRate 始终 0 ⇒ 停，**先查任务侧再谈奖励**（§50.4 的 commander floor）。
+//   · it0 的 greedy 是恒定动作（近均匀初始化的正常形态），判据从 it20+ 读。
+
+{
+  "version": 5,
+  "name": "z2-r1",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": "wKill*kills + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - wPace*max(0, 1 - kills*paceTicks/(ticks+paceTicks)) + wBrick*min(aimBricks, brickCap)",
+    "params": {
+      "wKill": 15.0,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 8.0,
+      "paceTicks": 350.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z0-scratch/scratch-init.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 120,
+  "max_hours": 24.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r1/weights.json",
+  "traj": "tmp/z2-r1",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r1",
+  "backup_prefix": "z2-r1",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

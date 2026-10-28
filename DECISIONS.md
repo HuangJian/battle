@@ -10094,3 +10094,36 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落地**：`biz/course_resolve.py` · `biz/course_spec.py` · `worker/bc_config.py` ·
   `tests/biz/test_course_env_override.py` · `tests/worker/test_bc_course.py` ·
   `tests/worker/test_course_level.py`。全文 → `docs/nn/training-stack.md` §49。
+
+## §2026-10-28-goalnn-z2-ladder（2026-10-28，z0/z1 判死 → z2 阶梯：1 敌 1 命起，只加任务不加价）
+
+- **背景（四条腿的实测）**：`z0-ramparts`（105 轮）/ `z0-mix4`（64）/ `z1-ladder`（79）/ `z1-graze`（79）
+  **全部 0 胜、0 清关**，且 z0-ramparts 与 z1-ladder 被训到 **0 杀**（z0-ramparts it0 还有 1.00 杀/局）。
+  行为指纹是三种「苟」：冻住（idle 100%、0 射）/ 站桩盲射（cells 1、18 射/千、3.66 杀）/ 贴墙
+  （cells 1、0 射）。病根不在剂量：① 20 敌 × 3 命 + 随机权重 ⇒ 基地每局必碎 ⇒ `base_destroyed −35`
+  是**常数**、终局项零梯度（四条腿终点 82–100% 的局是基地被毁）；② 价格表只给「不挨打」定价
+  （`−0.18/HP` + 命价）⇒ 最优 = 不接触；③ `baseWallIntact`/`basePressure` 有列无项 ⇒ 基地在终局前
+  零价；④ 首杀要导航+瞄准+躲同时成立，而起点命中率 2%。
+- **决定**：新建 `curricula/z2-r1..r6` 六级阶梯（z0/z1 留档不续跑）。**唯一自变量 = 任务**：
+  4 张预注册图（classic35 的 16/22/3/6：首敌 basic、无 water/ice、全连通、按 brick+steel 升序）
+  × 敌数 1→2→4→8→20 × 命 1→1→2→3→3 → 最后一级 `stage_select`/`enemies`/`lives` 全不写 =
+  经典 35 关原题；`bc` 链：r1 = `z0-scratch/scratch-init.json`（随机权重），rN = r(N−1) 的
+  `tmp/z2-r(N−1)/weights.json`。**奖励一条走完六级**（逐字相同）：
+  `+15*kills +60*clear +3*baseWallIntact −0.12*dmg −18*death −8*pace(max 8) +0.25*min(bricks,12)`，
+  三输 −35。反苟 = 墙价 + pace + 零移动项；反莽 = 命价 18 > 一杀 15 + 血价 + 墙价。
+  汇率算例：完胜 +76 / 清关 4 杀 +96 / 苟 −63 / 莽 −59 / 半途 −48。
+- **晋级判据（预注册）**：in-loop eval 连续 2 点 `clearRate ≥50%` 且 `zero_kill_frac ≤0.10`
+  ⇒ 开下一级（清关本身就是反苟闸）；40 轮 0 清关 ⇒ 停，先改任务侧（见边界）**不许加价**。
+- **备选与否决**：继续 20 敌 3 命只调奖励（z0/z1 已证两条价格轴都试过，病灶是任务）；保留
+  `wExplore`/`cellsVisited`（z0 实测白给 30 分教出「逛」）；空射税 `−wMiss`（2% 命中率下 0.05/发
+  就把开火压成负期望 ⇒ 教「不敢开火」）；`+wHit*aimHits`（basic 一炮一个，与 wKill 双重计数）；
+  击杀台阶（z1 的 5/10/15 从未兑现，只制造「到台阶就停」）；每级一套奖励（跨级不可比）；
+  按 god-AI 胜率挑关（AGENTS §0.2 明令禁止的教师口径）。
+- **边界**：① `hard` 的 `COMMANDER_FLOOR=2` 会把 ≤2 敌的关**全部**变成 commander 档
+  （`remainingSpawns <= quota ⇒ 强制`）⇒ r1/r2 是「指挥官决斗」（既有规则，arena S1 同形）。
+  预注册处置：r1 40 轮 0 清关 ⇒ 改 `enemies: 3` 重跑（floor 外留一个自然档），仍 0 ⇒ 停整条线。
+  ② 4 图定集 = 记忆化风险，只有 r5→r6 检验泛化；跨级读数只用于晋级。③ 首杀仍是稀疏信号，
+  本设计只把它变**可达**。④ 动作/观测/schema 未动，arch 与既有 checkpoint 逐字兼容。
+- **落地**：`curricula/z2-r1..r6.jsonc` · `tests/biz/test_z2_ladder_courses.py`（奖励逐字相同 /
+  指标与参数集合 / 阶梯单调 / 预注册关集 / r6 零覆盖 / 六级身份各异 / 权重链）。全文 →
+  `docs/nn/training-stack.md` §50。
