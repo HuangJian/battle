@@ -9,10 +9,12 @@
 //   同 r1 的双点判据（clearRate ≥50% ×2、zero_kill ≤0.10）⇒ 开 z2-r3。
 
 // ── 奖励：全阶梯逐字相同 ────────────────────────────────────────────────
-//   +15*kills +60*clear +3*wallIntact -0.12*dmg -18*death -8*pace +0.25*min(bricks,12)
-//   反苟：墙价（丢一圈 -24）+ pace（没击杀按拍计费，封顶 8）+ **无移动/探索项**。
-//   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」也亏；三输 -35。
-//   汇率账与算例（完胜 +76 / 苟 -63 / 莽 -59）→ docs/nn/training-stack.md §50.3。
+//   +15*kills +60*clear +3*墙块(0–8) -0.12*dmg -18*death -min(36, 6*未支付千拍) +0.25*min(bricks,12)
+//   反苟：墙价（丢一圈 -24）+ **按拍**的 pace（每杀赠 1200 拍，超出每千拍 -6、封顶 -36）
+//         + **无移动/探索项**。超时 -50 = 唯一「没打完」的结局，比任何输法都贵。
+//   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」也亏；命尽/基毁 -35。
+//   汇率（真 RewardFn 的 Φ 差分，§50.3）：完胜 +72.7 · 清关 4 杀 +92.5 · 基地被毁 3 杀 -30.5
+//         · 莽（1 杀后死）-73.5 · 苟（超时满墙）-86.0 ⇒ **苟比莽更贵**，赢比两者高 140+。
 //
 // ── 晋级 / 停腿 ─────────────────────────────────────────────────────────
 //   · 晋级下一级：in-loop eval **连续 2 个评估点** clearRate ≥ 50% 且 zero_kill_frac ≤ 0.10。
@@ -29,20 +31,22 @@
   "lives": 1,
   "max_ticks": 8000,
   "reward": {
-    "formula": "wKill*kills + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - wPace*max(0, 1 - kills*paceTicks/(ticks+paceTicks)) + wBrick*min(aimBricks, brickCap)",
+    "formula": "wKill*kills + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap)",
     "params": {
       "wKill": 15.0,
       "wWin": 60.0,
       "wBase": 3.0,
       "wDmg": 0.12,
       "wDeath": 18.0,
-      "wPace": 8.0,
-      "paceTicks": 350.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
       "wBrick": 0.25,
       "brickCap": 12.0,
     },
     "terminal": {
-      "timeout": -35.0,
+      "timeout": -50.0,
       "lives_exhausted": -35.0,
       "base_destroyed": -35.0,
       "stage_clear": 0.0,

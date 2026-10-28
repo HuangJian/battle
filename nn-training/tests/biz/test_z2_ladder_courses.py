@@ -20,12 +20,13 @@ import json
 from itertools import pairwise
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from biz.corpus_fp import corpus_identity_fp
 from biz.course_resolve import load_course
 from biz.course_spec import CourseConfig, StageSpec
-from biz.reward_library import parse_formula
+from biz.reward_library import METRIC_INDEX, METRICS_DIM, build_reward_fn, parse_formula
 from common.jsonc import load as load_jsonc
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +50,9 @@ STAGE_SET = ("16,22,3,6",)
 #: 奖励引用的指标列（结构判据：多一列 = 多一项定价，必须审）。
 REWARD_METRICS = {
     "kills",
+    # 2026-10-29：`aimHits`（命中敌人）—— 把「打中」从稀疏（只有击杀）变密集。
+    # 它是**战斗**列，不是移动/探索列（本测试禁的是 cellsVisited 那一类）。
+    "aimHits",
     "clearTick",
     "baseWallIntact",
     "playerDamageTaken",
@@ -60,12 +64,15 @@ REWARD_METRICS = {
 #: 奖励引用的参数（价格表全文）。
 REWARD_PARAMS = {
     "wKill",
+    "wHit",
     "wWin",
     "wBase",
     "wDmg",
     "wDeath",
     "wPace",
     "paceTicks",
+    "paceWindow",
+    "paceCap",
     "wBrick",
     "brickCap",
 }
@@ -73,6 +80,24 @@ REWARD_PARAMS = {
 
 def _raw(name: str) -> dict:
     return load_jsonc(str(CURRICULA / f"{name}.jsonc"))
+
+
+def _metrics_row(**kw: float) -> np.ndarray:
+    m = np.zeros((1, METRICS_DIM), dtype=np.float64)
+    for k, v in kw.items():
+        m[0, METRIC_INDEX[k]] = v
+    return m
+
+
+def _pay(*, outcome: str, **kw: float) -> float:
+    """一局的净奖励 Σr = Φ 逐行差分 + terminal —— 与训练循环同一条路径（`scheme: toy`）。
+
+    `baseWallIntact` 是**块数**（0–8，见 `reward_validation` 的 range），不是比例。
+    """
+    fn = build_reward_fn(load_course("z2-r1").reward_spec())
+    start = _metrics_row(baseWallIntact=8.0, clearTick=-1.0)
+    end = _metrics_row(**kw)
+    return float(fn(np.concatenate([start, end]), outcome, 0.0, 1).sum())
 
 
 def _stage_specs(c: CourseConfig) -> list[StageSpec]:
@@ -131,6 +156,50 @@ def test_reward_prices_defence_and_never_pays_for_movement() -> None:
     parsed = parse_formula(r.formula, r.params)
     assert parsed.metric_names == REWARD_METRICS
     assert parsed.param_names == REWARD_PARAMS
+
+
+def test_timeout_is_the_priciest_loss() -> None:
+    """**更要避免苟**：超时（敌人还活着 = 你从没把仗打完）必须比其它输法贵。
+
+    命尽/基毁都是「被打死」，已经被命价与墙价计过；只有超时是「选择不接触」
+    —— z0/z1 冻住/贴墙/站桩的病根就在这一格的价格。
+    """
+    for name in NAMES:
+        t = load_course(name).reward.terminal
+        assert t["timeout"] < t["lives_exhausted"] == t["base_destroyed"] < t["stage_clear"]
+
+
+def test_price_table_keeps_progress_rewarding_and_turtling_the_worst() -> None:
+    """价格表的排序不变量（§50.3 的算例；走真 RewardFn，不是手算）：
+
+    · 赢 ≫ 一切输法；
+    · 任何**带击杀**的输法 > 苟到超时（进度必须有梯度）；
+    · 苟（超时满墙）**贵于**莽（1 杀后死）—— 用户口径「避免莽，更要避免苟」。
+    """
+    win = _pay(
+        outcome="stage_clear", kills=1, clearTick=900, ticks=900,
+        baseWallIntact=8, playerDamageTaken=30, aimBricks=5,
+    )
+    turtle = _pay(outcome="timeout", kills=0, clearTick=-1, ticks=6000, baseWallIntact=8)
+    reckless = _pay(
+        outcome="lives_exhausted", kills=1, clearTick=-1, ticks=700,
+        baseWallIntact=4, playerDamageTaken=200, playerDeaths=1, aimBricks=2,
+    )
+    no_kill_death = _pay(
+        outcome="lives_exhausted", kills=0, clearTick=-1, ticks=900,
+        baseWallIntact=6, playerDamageTaken=200, playerDeaths=1,
+    )
+    base_lost_with_kills = _pay(
+        outcome="base_destroyed", kills=3, clearTick=-1, ticks=3000,
+        baseWallIntact=0, playerDamageTaken=150, aimBricks=6,
+    )
+
+    assert win > 60
+    for loss in (turtle, reckless, no_kill_death, base_lost_with_kills):
+        assert win - loss > 100
+    assert turtle < reckless  # 苟比莽更贵
+    assert base_lost_with_kills > turtle  # 带击杀的输法优于苟
+    assert reckless > no_kill_death  # 击杀让同样的死更值钱
 
 
 def test_first_five_rungs_share_the_preregistered_stage_set() -> None:
