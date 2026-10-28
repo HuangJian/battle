@@ -398,22 +398,28 @@ def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dic
     return str(shard_manifest.get("course_fp", "")) == job_course_fp
 
 
-def data_fp(shard_dirs: Sequence[str | Path]) -> str:
+def data_fp(shard_dirs: Sequence[str | Path], *, mem: Mapping[str, dict] | None = None) -> str:
     """D1 data_fp：sha256(按字典序排列的 shard 相对路径 + 各 manifest {wver,stage,seed})。
 
     shard_dirs：本轮应训 shard 目录（绝对/相对路径均可，按 basename 字典序排序——
     排序以 shard 目录名（rl_s{stage}_seed{seed}）为键，与打包/装载口径一致）。
     任一侧重算必须得到同一值（hub 打包时写入、验收时本地重算比对——防 ABA，D12）。
+
+    `mem`（零落盘，2026-10-28）：`name → manifest`。dispatch 腿回传的 shard 从来不在盘上，
+    占位路径的 `.name` 就是键——命中 `mem` 直接取元数据，不去读一个不存在的
+    `manifest.json`（否则每轮发布都抛 `ProtocolError`）。缺省 `None` = 逐字节旧行为。
     """
     entries: list[tuple[str, str, int, int]] = []
     for d in shard_dirs:
         p = Path(d)
-        mp = p / "manifest.json"
-        try:
-            with open(mp, encoding="utf-8") as f:
-                mm = json.load(f)
-        except (OSError, ValueError) as e:
-            raise ProtocolError(f"data_fp: 读 {mp} 失败: {e}") from e
+        mm = (mem or {}).get(p.name)
+        if mm is None:
+            mp = p / "manifest.json"
+            try:
+                with open(mp, encoding="utf-8") as f:
+                    mm = json.load(f)
+            except (OSError, ValueError) as e:
+                raise ProtocolError(f"data_fp: 读 {mp} 失败: {e}") from e
         entries.append(
             (
                 p.name,  # rl_s{stage}_seed{seed}

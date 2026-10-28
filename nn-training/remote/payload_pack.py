@@ -158,6 +158,11 @@ class ShardSegments:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._parts: dict[str, bytes] = {}
+        #: 本轮回传 shard 的 **manifest**（name → dict）。零落盘后磁盘上没有目录可读，
+        #: 发布端的 `iter_shard_dirs` / `data_fp` / 配额裁剪 / 分关 est 全改读这里。
+        self._manifests: dict[str, dict] = {}
+        #: 本轮回传 shard 的 `metrics.npy` 字节（`metrics_stats` 的唯一来源；~22 MB/轮）。
+        self._metrics: dict[str, bytes] = {}
         self._slim: Any = None
         #: 这份账属于哪一轮（-1 = 还没有轮）。`take()` 只认同一个 it。
         self.it = -1
@@ -181,6 +186,8 @@ class ShardSegments:
             return
         with self._lock:
             self._parts.clear()
+            self._manifests.clear()
+            self._metrics.clear()
             self._slim = slim
             self.it = it
             self.wire_diet = bool(wire_diet)
@@ -214,6 +221,34 @@ class ShardSegments:
         comp = compress_segment(seg)  # 锁外（不变量 4）
         with self._lock:
             self._parts[name] = comp
+            # 零落盘：磁盘上没有这份 shard 了，发布/裁剪/est/统计要的元数据全留在这里。
+            self._manifests[name] = dict(manifest)
+            mb = members.get("metrics.npy")
+            if mb:
+                self._metrics[name] = mb
+
+    def names(self) -> frozenset[str]:
+        """本轮段账里的 shard 名（只读快照；派发线程可能还在 `add`）。
+
+        零落盘 S3（2026-10-28）的**删除面**：只删在这份账上的目录 —— local 兜底腿 /
+        预采子进程的 shard 不经过 `add`，它们的目录不归「回传零落盘」管。
+        """
+        with self._lock:
+            return frozenset(self._parts)
+
+    def manifests(self) -> dict[str, dict]:
+        """本轮回传 shard 的 manifest 快照（name → dict）。
+
+        零落盘后的**唯一目录替代物**：发布端 `iter_shard_dirs` / `data_fp` / 配额裁剪 /
+        分关 est 都从这里取（磁盘上根本没有这些目录）。
+        """
+        with self._lock:
+            return {k: dict(v) for k, v in self._manifests.items()}
+
+    def metrics_blobs(self) -> list[bytes]:
+        """本轮回传 shard 的 `metrics.npy` 原始字节（`metrics_stats` 的唯一来源）。"""
+        with self._lock:
+            return list(self._metrics.values())
 
     # ------------------------------------------------------------ 打包读取
     def take(self, it: int, *, wire_diet: bool) -> tuple[Mapping[str, bytes], Any] | None:

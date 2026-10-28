@@ -308,6 +308,11 @@ class _Loop:
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
+    #: 零落盘（2026-10-28）：真 `_dispatch_volume_wave` 的段账在本桩上（`_payload_parts`），
+    #: 补波账要读它（回传 shard 不在盘上）。
+    def _round_mem_shards(self, it: int) -> dict[str, dict] | None:
+        return TrainingLoop._round_mem_shards(cast(Any, self), it)
+
     def _volume_topup(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_topup(cast(Any, self), it, dist_cfg)
 
@@ -499,11 +504,18 @@ def _env(
     return srv, cfg, tmp
 
 
-def _settled(traj: Path, out: Path) -> dict[int, tuple[int, int]]:
-    """盘上账本（与 loop 同口径：真 resume 实现 + 真 wver）。"""
+def _settled(
+    traj: Path, out: Path, mem: dict[str, dict] | None = None
+) -> dict[int, tuple[int, int]]:
+    """本轮账本（与 loop 同口径：真 resume 实现 + 真 wver）。
+
+    零落盘（2026-10-28）：dispatch 腿回传的 shard **不在盘上** ⇒ 调用方把本轮段账的
+    `manifests()` 传进来（`settled_stage_totals(mem=)` 与磁盘腿同一条过滤）。
+    """
     from worker.resume import settled_stage_totals
 
-    return settled_stage_totals(traj, common.distribution.weights_fingerprint(str(out)))
+    wver = common.distribution.weights_fingerprint(str(out))
+    return settled_stage_totals(traj, wver, mem=mem)
 
 
 def _assert_accounting_matches_ledger(
@@ -557,7 +569,7 @@ def test_quota_converges_within_one_wave(tmp: Path, monkeypatch: pytest.MonkeyPa
         loop.run_iteration(cfg)
 
         # 每个关的达标线 = ceil(200/2) = 100
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert set(settled) == {0, 1}
         for stage in (0, 1):
             games, transitions = settled[stage]
@@ -606,7 +618,9 @@ def test_cross_restart_same_pairs_no_reroll(tmp: Path, monkeypatch: pytest.Monke
       ② 直接重放 w2 的对局表——**不是**按账本重算出一个「新的 w1」（那会用 w1 的种子流
          去补 w2 的缺口 = 同观测史不同波次序列）；
       ③ 波次预算不因重启重领（w2 已用过 ⇒ 重放后即触 wave_cap，不再开新波）；
-      ④ 补回后账本 ≥ 达标线。
+      ④ **零落盘（2026-10-28）**：崩溃前已回传的波只活在内存里 ⇒ 重启后不可恢复。
+         重放的那一波进内存账；缺口由补波继续填（受 wave_cap 约束）⇒ 本轮语料**少于**
+         首跑，且 `missing` 响亮可见。方向安全（不会静默错数据），这是零落盘的固有代价。
     """
     srv, cfg, _ = _env(tmp, monkeypatch, n_0=14, n_1=14)
     try:
@@ -629,9 +643,20 @@ def test_cross_restart_same_pairs_no_reroll(tmp: Path, monkeypatch: pytest.Monke
         # ③ 预算不重领 ⇒ 重放后不再开新波
         assert len(resumed.waves) == 2, resumed.waves
         assert resumed._volume_waves == 3
-        # ④ 缺口补回，账本回到达标线之上
-        settled = _settled(resumed._traj_dir, Path(resumed.args.out))
-        assert all(t >= 100 for _g, t in settled.values()), settled
+        # ④ 零落盘：崩溃前那几波的字节只在内存里 ⇒ 重启后不可恢复。重放波进账，
+        #    缺口由补波填（受 wave_cap 约束）⇒ 本轮语料少于首跑，`missing` 响亮。
+        settled = _settled(
+            resumed._traj_dir, Path(resumed.args.out), resumed._payload_parts.manifests()
+        )
+        assert settled, "重放的那一波必须落在内存账上（否则补波会重复派同一批局）"
+        before = _settled(
+            first._traj_dir, Path(first.args.out), first._payload_parts.manifests()
+        )
+        # 崩溃前已回传的波随进程消失（零落盘）⇒ 重启后的语料**严格少于**崩溃前那份。
+        assert sum(t for _g, t in settled.values()) < sum(t for _g, t in before.values()), (
+            settled,
+            before,
+        )
     finally:
         srv.shutdown()
 
@@ -649,7 +674,7 @@ def test_dropped_games_trigger_topup(tmp: Path, monkeypatch: pytest.MonkeyPatch)
         srv.zero_first = {0: 2}
         loop.run_iteration(cfg)
 
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert settled[0][1] >= 100, f"掉局关未补到达标线: {settled[0]}"
         assert settled[0][0] == 8 + 2, f"掉局应占局数并额外补 2 局: {settled[0]}"
         assert loop._volume_waves == 2, "应只补一波"
@@ -689,7 +714,7 @@ def test_short_stage_does_not_starve_long_stage(
         assert len(games0) > 10, "短局关应当被补波"
         assert loop._volume_waves == 3, "补到 max_waves 上限即停"
 
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert settled[1][1] >= 100  # 长局关达标
         assert settled[0][1] < 100  # 短局关仍未达标 ⇒ 停因是波次上限
         assert loop._volume_capped is False  # 不是硬顶（是波次上限）
@@ -739,7 +764,7 @@ def test_racing_duplicates_do_not_distort_the_ledger(
 
         # 竞速真的发生了（否则本用例什么也没验到）
         assert srv.dup_copies() > 0, "in-flight race 未触发——需要 slow_once 尾局被空槽复制"
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         unique = {(s, sd) for s, sd in srv.dispatched}
         # 不重复计数：每关落盘局数 == 该关去重派发对局数（副本没被多算一局）
         for stage in (0, 1):
@@ -779,7 +804,7 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
         # 比较的是两个时刻，先等异步退休落定再比）。
         deadline = time.time() + 5.0
         while True:
-            settled = _settled(loop._traj_dir, Path(loop.args.out))
+            settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
             unique = set(srv.dispatched)
             if all(
                 settled.get(st, (0, 0))[0] <= len([p for p in unique if p[0] == st])
@@ -819,14 +844,14 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
 
 
 def test_dup_settle_shard_loss_is_compensated(tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """**确定性**复现 dup_settle 的后果（共享 shard 目录被 rmtree）⇒ 补波补回、账务自洽。
+    """**确定性**复现「本轮少了 2 局/关」的后果 ⇒ 补波补回、账务自洽。
 
     为什么不跑真时序：double-settle 要求两份结果都抢在对方进 `seen` 前通过锁外
     validate——窗口只有一次 `write_shard`，无法按需复现（`e2e/test_run_rl.py` 的 I9
     同样以「结构性证据 OR」替代时序断言）。上一条已覆盖真竞速下的不变式；这里把
-    调度器的**那一刀**（`dispatch.py` dup_settle 分支的 `rmtree_best_effort(vdir)`，
-    vdir = 该 (stage,seed) 的 shard 目录）显式落下，验我们这一侧的反应：账本变短 ⇒
-    逐关补波 ⇒ 达标 + 不重复计数 + WAL 闭环。派发关掉竞速 ⇒ 注入的损失是唯一变量。
+    损失本身显式落下（零落盘：从内存段账摘掉那两名 / 盘时代是 rmtree 共享目录），
+    验我们这一侧的反应：账本变短 ⇒ 逐关补波 ⇒ 达标 + 不重复计数 + WAL 闭环。
+    派发关掉竞速 ⇒ 注入的损失是唯一变量。
     """
     srv, cfg, _ = _env(tmp, monkeypatch, n_0=14, n_1=14)
     try:
@@ -836,19 +861,20 @@ def test_dup_settle_shard_loss_is_compensated(tmp: Path, monkeypatch: pytest.Mon
         unique = set(srv.dispatched)
         assert len(unique) == 16, f"初波应为 8 局/关: {sorted(unique)}"
         # est 估准 ⇒ 8 局/关 = 112t 本来一次到位
-        assert _settled(loop._traj_dir, Path(loop.args.out)) == {0: (8, 112), 1: (8, 112)}
+        assert _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests()) == {0: (8, 112), 1: (8, 112)}
 
-        # 每关退休 2 局（= 竞速后到者把共享 shard 目录删掉）
+        # 每关丢 2 局。零落盘（2026-10-28）：dup-settle 在盘时代的动作是 rmtree 那份共享目录；
+        # 现在字节只在内存段账里 ⇒ 等价动作 = 从段账摘掉那两名（显式模拟「本波少了这 2 局」）。
         for stage in (0, 1):
             for s, seed in [p for p in sorted(unique) if p[0] == stage][:2]:
-                shard = loop._traj_dir / "dist" / "fake" / f"rl_s{s}_seed{seed}"
-                assert shard.is_dir(), shard
-                rmtree_best_effort(shard, ignore_errors=True)
-        after_loss = _settled(loop._traj_dir, Path(loop.args.out))
+                name = f"rl_s{s}_seed{seed}"
+                assert loop._payload_parts._parts.pop(name, None) is not None, name
+                loop._payload_parts._manifests.pop(name, None)
+        after_loss = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert after_loss == {0: (6, 84), 1: (6, 84)}, after_loss
 
         loop._volume_topup(1, cfg)
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         # 缺口 16t/关 ⇒ 补 ceil(16/14)=2 局/关 ⇒ 6+2=8 局；丢掉的局一局不欠
         assert settled == {0: (8, 112), 1: (8, 112)}, settled
         assert loop._volume_waves == 2
@@ -884,7 +910,7 @@ def test_racing_with_tight_budget_stops_loud_not_silent(
         srv.dup_hang = 0.35  # 副本后到、静默丢弃 ⇒ 账本与派发对一一对应
         loop.run_iteration(cfg)
 
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
+        settled = _settled(loop._traj_dir, Path(loop.args.out), loop._payload_parts.manifests())
         assert loop._volume_waves == 3, "补到波次上限即停，不无限补"
         # 不重复计数（竞速副本不得被当成额外一局）
         for stage, (games, transitions) in settled.items():

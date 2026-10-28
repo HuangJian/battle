@@ -7,6 +7,50 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §48 零落盘：sampler 回传的 shard **根本不落盘**（2026-10-28）
+
+**触发**：用户查 y36 最新 it 目录 —— `tmp/y36-active/it91/dist/{a97,gcs,kaggle}/rl_s*_seed*` 仍躺着
+**2912 个 npy**（820 MB，`obs.npy` 759 MB / 224 份）；it90 = 3068 个。第一版按「写完再删」补 S3，
+用户当场否掉：「**不是删！！！是根本就不需要保存到硬盘！！！**」——判据是**目录从未被创建**。
+
+**根因**：S1/S2（2026-10-27）只做到「收到就压」——`write_shard(on_receive=)` 把字节交给
+`ShardSegments` 压成段，打包只剩拼接；`write_shard` 本身照旧把整份 npy 写盘。没敢直接不写，是因为
+磁盘上的目录还有读者：`metrics_stats`（读 `**/metrics.npy`）· 发布端的 `iter_shard_dirs` /
+`data_fp` / 配额裁剪 · `trailing_stage_samples_per_game`（读 manifest）。
+
+**修法：把「目录」换成内存账，磁盘上从头到尾没有它**
+
+| 原来的读盘路 | 现在读什么 |
+|---|---|
+| `write_shard` 写 npy + manifest.json | `write_shard(..., materialize=False)`：**连目录都不建**，回调一交完就返回 |
+| `iter_shard_dirs` 扫 `it<N>/dist/*/rl_s*` | 新增 `mem=`（`name → manifest`）：占位路径 `<it>/dist/@mem/<name>` 只提供 `.name`（`MEM_SHARD_NODE`） |
+| `data_fp(shard_dirs)` 读每家 `manifest.json` | `data_fp(..., mem=)`：命中内存直接取（与盘上算出的指纹**逐字相同**） |
+| `_trim_shards_to_quota` 读 manifest | `mem=` 同款 |
+| `settled_stage_totals` / `resumed_manifests`（补波与报告） | `mem=` 同款，过滤口径（wver/D14/state_init/only/exclude）逐条同源 |
+| `metrics_stats` 扫 `metrics.npy` | `extra_metrics=`（`ShardSegments.metrics_blobs()`，~22 MB/轮 留在内存） |
+| `trailing_stage_samples_per_game` 扫 manifest | `it<N>/stage_est.json`（`trainer/zero_disk.finalize_round_shards`，轮末写，几百字节） |
+
+- **段账** = `remote/payload_pack.ShardSegments`：`_parts`（已压好的 tar 段，打包原样拼接）+
+  `_manifests`（元数据）+ `_metrics`（逐维统计源）。
+- **顺序契约**：`finalize_round_shards` 在 `step_record_iteration` 的**最后**（`_record_iteration` →
+  `_write_iter_stats` → 巡检之后）——前三步都要读内存账 / local 腿的盘上 shard。
+- **边界**：local 兜底腿 / 预采子进程的 shard 由本机 bun 直接写盘（不经过 `on_shard`）⇒ 照旧落盘、
+  照旧被扫盘读到。课程声明 `archive_keep_shards` 在零落盘腿上失去意义（语料只在 payload 里）。
+- **resume 的固有代价**（e2e `test_cross_restart_same_pairs_no_reroll` 已改成钉这条）：回传 shard
+  不在盘上 ⇒ 崩溃重启后**崩溃前那几波不可恢复**；WAL 只重放未完成的那一波，缺口由补波继续填
+  （受 `wave_cap` 约束）⇒ 本轮语料**可能少于计划**，`[dist] missing pairs` 响亮可见。
+  方向安全（不会静默错数据），但**不是**「整轮重采」——别把它写成更乐观的说法。
+
+**未做**：历史轮次不回删 —— y36 已 91 轮，`tmp/` 合计 7.3 GB / 18,486 个 npy，属既有产物与
+`biz/course_archive` 的语料来源；清不清由用户定。**代码改动要重启 trainer 才生效**。
+
+**守卫**：`tests/trainer/test_zero_disk_shards.py`（8 例：`materialize=False` 连目录都不建 ·
+`iter_shard_dirs(mem=)` 与 mver 过滤 · `data_fp` 内存/磁盘逐字相同 · 裁剪 · 补波账 · 统计 ·
+`stage_est` · `_pack_segmented` 对着不存在的占位目录打出同一份字节）·
+`tests/trainer/test_rollout_dispatch_resilience.py`（加「目录一个都不存在」）·
+`tests/test_layering.py::TRAINER_ORCHESTRATION`（`zero_disk`）· `test_loop_core_tail_split.py::CLUSTERS`。
+
+---
 ## §47 云机设备探测按后端分派：没有 torch ≠ 不能训练（2026-10-27）
 
 **触发**：AI Studio 训练镜像（`paddlepaddle-gpu` 在、**没有** torch）跑 `battle.cloudflared.ipynb`

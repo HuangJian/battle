@@ -213,6 +213,10 @@ TRAINER_ORCHESTRATION = frozenset(
         "run_rl",
         "run_rl_cluster",
         "stream",
+        #: 2026-10-28（plan/payload-zero-disk §3.3 S3 落地）：回传 shard 用完即删 —— 顶层拿
+        #: `worker.resume`（`walk_shard_dirs` / `STAGE_EST_NAME`）与 `common.platform_utils`
+        #: （`rmtree_best_effort`），函数内拿 `biz.course_archive`（`archive_keep_shards` 判据）。
+        "zero_disk",
     }
 )
 

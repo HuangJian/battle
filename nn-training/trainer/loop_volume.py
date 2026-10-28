@@ -137,6 +137,18 @@ class TrainingVolume:
     #: 与 `TrainingSteps` 一侧的 `dict | None` 冲突（`trainer/loop_core.py` 多继承合并报错）。
     _volume_stage_stats: dict | None
 
+    # ------------------------------------------------- 零落盘（按轮）
+    def _round_mem_shards(self, it: int) -> dict[str, dict] | None:
+        """零落盘：本轮 dispatch 腿回传 shard 的内存 manifest（轮号不符 ⇒ `None`）。
+
+        dispatch 腿的 shard **从不落盘**（`write_shard` 见到段账就只交字节）——补波的
+        「本波已采多少」只能读这份账，否则 `settled_stage_totals` 恒 0 ⇒ 白烧到波次上限。
+        """
+        parts = self._payload_parts
+        if int(getattr(parts, "it", -1)) != int(it):
+            return None
+        return parts.manifests() or None
+
     # ------------------------------------------------- 动态采集（按样本量）
     #
     # plan/dynamic-rollout-volume.plan.md：课程用 target_transitions 代替固定局数做
@@ -420,6 +432,7 @@ class TrainingVolume:
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
                 state_init=self._state_init,
+                mem=self._round_mem_shards(it),
             )
             collected = {s: totals.get(s, (0, 0))[1] for s in stages}
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
@@ -616,6 +629,7 @@ class TrainingVolume:
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
                 state_init=self._state_init,
+                mem=self._round_mem_shards(it),
             )
             collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
@@ -735,6 +749,7 @@ class TrainingVolume:
             course_fp=course_fp,
             corpus_fp=corpus_fp,
             state_init=self._state_init,
+            mem=self._round_mem_shards(it),
         )
         collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
         unmet = {
@@ -804,6 +819,7 @@ class TrainingVolume:
             extra_wver=extra_wver,
             course_fp=course_fp,
             state_init=self._state_init,
+            mem=self._round_mem_shards(it),
         )
         if stages:
             stage_set = {int(s) for s in stages}

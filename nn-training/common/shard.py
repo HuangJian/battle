@@ -183,8 +183,14 @@ def manifest_bytes(manifest: dict) -> bytes:
     return json.dumps(dict(manifest), indent=2).encode("utf-8")
 
 
-def write_shard(files: dict, manifest: dict, out_dir: str, on_receive=None) -> None:
+def write_shard(
+    files: dict, manifest: dict, out_dir: str, on_receive=None, *, materialize: bool | None = None
+) -> None:
     """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。
+
+    零落盘（2026-10-28，用户口径「sampler agent 返回的结果**根本**不需要保存到硬盘」）：
+    给了 `on_receive`（= 调用方手里有一份内存段账）就**只交字节、不写盘**（连目录都不建）；
+    `materialize=True` 可强制落盘（local 兜底腿 / 队列腿），`False` 显式不落盘。
 
     `on_receive(name, files, manifest)`（2026-10-27，plan/payload-zero-disk §3.1）：在**落盘
     之前**把字节交出去一次（`name` = `os.path.basename(out_dir)` = `rl_s{stage}_seed{seed}`）。
@@ -201,7 +207,6 @@ def write_shard(files: dict, manifest: dict, out_dir: str, on_receive=None) -> N
 
     manifest.json 的字节口径见 `manifest_bytes`（二进制写：跨平台同字节）。
     """
-    os.makedirs(out_dir, exist_ok=True)
     # ★ B1 v6（2026-10-20）：**可选项也要落盘**。
     # 原先这里只写 `_shard_files_for(manifest)`（必需清单）⇒ 节点上传的
     # `a_hold.npy`/`lp_hold.npy` 被**静默丢弃**，落盘的 shard 于是有 9 宽 mask
@@ -213,6 +218,14 @@ def write_shard(files: dict, manifest: dict, out_dir: str, on_receive=None) -> N
     names += [n for n in OPTIONAL_SHARD_FILES if n in files]
     if on_receive is not None:
         on_receive(os.path.basename(out_dir), files, manifest)
+    # ★ 零落盘（2026-10-28 用户口径：「sampler agent 返回的结果根本就不需要保存到硬盘」）：
+    #   缺省 `materialize=None` ⇒ **有段账就不落盘**（dispatch 腿的字节在内存里，打包按
+    #   `presegmented` 拼）；`True` = 强制落盘（local 兜底腿 / 队列腿 / 既有调用方无感）。
+    if materialize is None:
+        materialize = on_receive is None  # 有段账 ⇒ 字节已在内存，**不**落盘
+    if not materialize:
+        return
+    os.makedirs(out_dir, exist_ok=True)
     for name in names:
         val = files[name]
         raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)

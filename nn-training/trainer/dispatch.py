@@ -826,10 +826,8 @@ class RolloutDispatcher:
                         if why:
                             raise common.distribution.DistError(0, why)
                         out_dir = traj_dir / "dist" / nd_id / f"rl_s{task[0]}_seed{task[1]}"
-                        # ★ 零落盘（plan/payload-zero-disk §3.1）：`write_shard` 在落盘**之前**
-                        #   把 `(out_dir.name, files, manifest)` 交给本轮段账（收到就压好）。
-                        #   `out_dir.name` = `rl_s{stage}_seed{seed}` 必须与 `_pack_segmented` 的
-                        #   键（`Path(d).name`）逐字相同——对不上只会安静地退回读盘（白干）。
+                        # ★ 零落盘（2026-10-28）：有段账 ⇒ `write_shard` 一个字节都不写
+                        #   （打包按名拼 `presegmented`）；没有段账 ⇒ 落盘，字节不能丢。
                         common.distribution.write_shard(files, manifest, str(out_dir), self.on_shard)
                         manifest["_dir"] = str(out_dir)
                         summary = manifest

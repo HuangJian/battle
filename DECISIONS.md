@@ -10038,3 +10038,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **未决**：判据 7（窗口外的关在 35 关全 eval 下不掉）仍待一轮真实训练；真机上「控制台窗口逐轮换批 +
   云机轮 `各关进度` 有读数」待验。全文 → `docs/nn/training-stack.md` §46 +
   `docs/nn/console.md` §43 + `plan/it-stage-ratation.plan.md` §9.6。
+## §2026-10-28-goalnn-zero-disk-s3（2026-10-28，零落盘：sampler 回传的 shard **不落盘**，目录由内存账替代）
+
+- **背景**：用户查 y36 最新 it 目录 —— `tmp/y36-active/it91/dist/{a97,gcs,kaggle}/rl_s*_seed*` 仍有
+  **2912 个 npy / 820 MB**（`obs.npy` 759 MB），与 `plan/payload-zero-disk` 的「零落盘」要求相反。
+  第一版按「写完再删」补 S3，用户当场否掉：**「不是删！！！是根本就不需要保存到硬盘！！！」**
+  ⇒ 判据是**目录从未被创建**。
+- **根因**：S1/S2（§2026-10-27-goalnn-payload-zero-disk）只做到「收到就压」——`write_shard` 的
+  `on_receive` 把字节交给 `ShardSegments` 压段，打包只剩拼接；但 `write_shard` 本身照旧写整份 npy。
+- **决定**：`common.shard.write_shard(..., materialize=False)` —— dispatch 腿**连目录都不建**。
+  磁盘上的「目录」由三样内存账替代（`ShardSegments`）：`_parts`（已压好的段，打包原样拼接）·
+  `_manifests`（`name → manifest`）· `_metrics`（`metrics.npy` 字节）。所有原读盘点加可选
+  `mem=` / `extra_metrics=`：`iter_shard_dirs`（占位路径 `<it>/dist/@mem/<name>`，只提供 `.name`）·
+  `data_fp` · `_trim_shards_to_quota` · `settled_stage_totals` · `resumed_manifests` · `metrics_stats`。
+  分关 est 落 `it<N>/stage_est.json`（轮末 `finalize_round_shards` 写，几百字节元数据）。
+- **备选与否决**：写完再删（S3 原方案）—— 否（用户明确否掉：数据不该碰盘）；只写 `manifest.json`
+  保留目录 —— 否（`iter_shard_dirs` 要求 `obs.npy`/`metrics.npy` 在场，且 `walk_shard_dirs` 会把
+  「只有 manifest 的目录」当完整 shard，重启后打包读到缺 npy 的半份语料 ⇒ 静默坏包）；
+  把 `metrics_stats` 直接跳过 —— 否（本轮统计恒报 `shards=0`，日志看起来像「没采样」）。
+- **边界**：local 兜底腿 / 预采子进程（本机 bun 直写盘，不经过 `on_shard`）照旧落盘；课程显式声明
+  `archive_keep_shards: true` ⇒ dispatch 腿也落盘（`RolloutDispatcher.materialize_shards`）。
+- **固有代价**：回传 shard 不在盘上 ⇒ 崩溃重启后**崩溃前那几波不可恢复**（WAL 只重放未完成的那一波，
+  缺口由补波继续填、受 `wave_cap` 约束）⇒ 本轮语料可能少于计划，`[dist] missing pairs` 响亮可见。
+  方向安全（不会静默错数据），但不是「整轮重采」。
+- **落地**：`common/{shard,manifest}.py` · `remote/{hub_client,payload_pack}.py` ·
+  `trainer/{dispatch,loop_dispatch,loop_remote_job,loop_round_steps,loop_steps,loop_volume,zero_disk}.py` ·
+  `worker/{metrics_stats,resume}.py`。
+- **守卫**：`tests/trainer/test_zero_disk_shards.py`(8) · `test_rollout_dispatch_resilience.py`
+  （目录一个都不存在）· `tests/test_layering.py::TRAINER_ORCHESTRATION`（`zero_disk`）·
+  `test_loop_core_tail_split.py::CLUSTERS`（`_finalize_returned_shards`）。
+- **未做**：历史轮次不回删（y36 91 轮 / `tmp` 7.3 GB，属既有产物与归档语料）；改动要重启 trainer 生效。
+  全文 → `docs/nn/training-stack.md` §46。

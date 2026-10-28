@@ -175,6 +175,9 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     _chunks_n: int
     _agg: Any
     _kl_cum: Any
+    #: 零落盘（2026-10-28）：本轮回传 shard 的内存账（`ShardSegments`）——`metrics_stats`
+    #: 从这里取 `metrics.npy` 字节（磁盘上没有这些 shard）。
+    _payload_parts: Any
     _halted_flag: bool
     #: 远端连续失败 → 写 ABORT 后停腿（loop 在 PPO 步后检查）。
     _leg_abort: bool
@@ -388,7 +391,15 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                 "course": course.name,
                 "formula_hash": course.reward_spec().identity(),
             }
-            rec = metrics_stats(str(self._traj_dir), it=it, identity=identity)
+            # 零落盘：dispatch 腿的 shard 只在内存账里 —— 逐维统计必须把它们一起算上，
+            # 否则本轮恒报 `shards=0`（日志看起来像「本轮没采样」）。
+            parts = self._payload_parts
+            extra = (
+                parts.metrics_blobs() if int(getattr(parts, "it", -1)) == int(it) else []
+            )
+            rec = metrics_stats(
+                str(self._traj_dir), it=it, identity=identity, extra_metrics=extra
+            )
             log(
                 f"[run_rl] metrics_stats it{it}: shards={rec['shards']} "
                 f"steps={rec['decision_steps']} elapsed_ms={rec['elapsed_ms']}"

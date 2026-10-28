@@ -616,6 +616,13 @@ class _StubLoop:
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
+    #: 零落盘（2026-10-28）：桩上没有段账 ⇒ `settled_stage_totals` 只读盘上 shard
+    #: （本文件测的正是「重启后从盘上回填」那条老路径）。
+    _payload_parts = None
+
+    def _round_mem_shards(self, it: int) -> None:
+        return None
+
     def __init__(
         self,
         tmp: Path,

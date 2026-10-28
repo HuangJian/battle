@@ -132,6 +132,8 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
     _record_rollout: Any
     _record_iteration: Any
     _write_iter_stats: Any
+    #: 零落盘（`trainer/loop_dispatch.py`）：轮末写本轮回传 shard 的分关账。
+    _finalize_returned_shards: Any
     _rotate_cleanup: Any
     _auto_inspect: Any
     _run_inspect: Any
@@ -523,6 +525,10 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         # per-tick 仅默认 traj）
         if self._auto_inspect:
             self._run_inspect(self.bun, it, traj_dir=self._traj_root)
+        # 零落盘（2026-10-28）：本轮回传的 shard **从未落盘**，这里只补一份几百字节的分关账
+        # （`stage_est.json`）。必须排在 `_record_iteration` / `_write_iter_stats` / 巡检**之后**
+        # ——那三步还要读内存账与 local 腿的盘上 shard。
+        self._finalize_returned_shards(it)
         return None
 
     # --------------------------------------------------------- ⑪ 门禁

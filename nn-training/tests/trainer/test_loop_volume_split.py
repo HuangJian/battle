@@ -71,6 +71,8 @@ CLUSTER = (
     "_volume_journal_replay",
     "_volume_topup",
     "_volume_collect_continuous",
+    # 2026-10-28（零落盘）：补波的「本波已采多少」要读本轮内存账（回传 shard 不在盘上）。
+    "_round_mem_shards",
 )
 
 #: 随簇搬走的七个槽位（新家 = `TrainingVolume`）。
@@ -181,7 +183,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_volume_only() -> None:
-    """9 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
+    """10 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingVolume` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。
@@ -191,7 +193,7 @@ def test_cluster_is_defined_in_loop_volume_only() -> None:
     assert set(CLUSTER) <= in_volume, sorted(set(CLUSTER) - in_volume)
     crept_back = sorted(set(CLUSTER) & in_core)
     assert crept_back == [], f"这些方法又回到 TrainingLoop 了：{crept_back}"
-    # 闭集：新家只装这 9 个方法（顺手往里塞 helper 会在这里红）
+    # 闭集：新家只装这 10 个方法（顺手往里塞 helper 会在这里红）
     assert in_volume == set(CLUSTER), sorted(in_volume ^ set(CLUSTER))
     # 旧模块里只剩**指路注释**（不是实现）：读者找 `_volume_topup` 时不会两手空空。
     core_src = CORE_PY.read_text(encoding="utf-8")

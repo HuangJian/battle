@@ -42,7 +42,7 @@ from worker.loop_round import RemotePpoJob
 
 
 def _trim_shards_to_quota(
-    shard_dirs: list[Path], quota: int
+    shard_dirs: list[Path], quota: int, *, mem: dict[str, dict] | None = None
 ) -> tuple[list[Path], int, int]:
     """按 `per_stage_quota` **裁掉超采的 shard**（整局取舍）→ `(保留集, 丢了几局, 保留 samples)`。
 
@@ -68,10 +68,12 @@ def _trim_shards_to_quota(
     by_stage: dict[int, list[tuple[Path, int]]] = {}
     for d in shard_dirs:
         p = Path(d)
-        try:
-            mm = _json.loads((p / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+        mm = (mem or {}).get(p.name)
+        if mm is None:
+            try:
+                mm = _json.loads((p / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
         st = int(mm.get("stage", -1))
         n = int(mm.get("nSamples") or mm.get("totalSamples") or 0)
         if n <= 0:
@@ -112,6 +114,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     #: （`remote.payload_pack.ShardSegments`，组合根建、派发注入点填）。本模块只读：
     #: `_remote_ppo_publish` 用 `take(it, wire_diet=…)` 取本轮那份，交给 `publish_job`。
     _payload_parts: Any
+    #: 零落盘：发布那一刻的 `name → manifest` 快照（验收相位的活目录对账用）。
+    _published_mem: Any
     # 仅由方法体内自赋值产生（从未显式声明）；跨方法读到时需要类型可见。
     _bundle_index: Any
     _code_sha256: Any
@@ -285,6 +289,14 @@ class TrainingRemoteJob(TrainingRemotePush):
         from biz.reward_library import METRICS_VERSION
         from worker.resume import state_init_enabled
 
+        # ★ 零落盘（2026-10-28）：dispatch 腿回传的 shard **从来不在盘上** —— 本轮的内存账
+        #   就是它们的「目录替代物」（名字 + manifest）。轮号对不上（旧轮/没派发）⇒ 空表，
+        #   下面每条腿都退回读盘（local 腿 / 旧轮次逐字节旧行为）。
+        mem: dict[str, dict] = (
+            self._payload_parts.manifests()
+            if int(getattr(self._payload_parts, "it", -1)) == int(it)
+            else {}
+        )
         local_shards = iter_shard_dirs(
             args.traj,
             it,
@@ -296,6 +308,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             # metrics 行宽与云端读取口径不符 ⇒ 发布端按 shard 自己的声明拦下，不把
             # 「必炸的字节」送去占 GPU。判据同源 = 本进程的 METRICS_VERSION。
             metrics_version=int(METRICS_VERSION),
+            mem=mem,
         )
         shard_dirs = _gate_round_shards(
             local_shards=local_shards,
@@ -310,7 +323,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
         quota = self._per_stage_quota(it)
         if quota > 0 and export_path is None:
-            kept, n_trimmed, n_kept = _trim_shards_to_quota(shard_dirs, quota)
+            kept, n_trimmed, n_kept = _trim_shards_to_quota(shard_dirs, quota, mem=mem)
             if n_trimmed:
                 log(
                     f"it{it}: 打包前按配额裁剪 shard —— 丢 {n_trimmed} 局未传"
@@ -318,6 +331,11 @@ class TrainingRemoteJob(TrainingRemotePush):
                     f"（共采 {len(shard_dirs)} 局）"
                 )
             shard_dirs = kept
+        # 零落盘：发布/验收只认**保留集**的内存账 —— 被配额裁掉的段不进 payload，
+        # 也不该出现在「活目录 == 发布快照」的对账里（否则每轮都报一条假 WARN）。
+        mem = {p.name: mem[p.name] for p in shard_dirs if p.name in mem}
+        #: 验收相位（`_remote_ppo_land`）的活目录对账要用的同一份内存账。
+        self._published_mem = mem
 
         commit = git_head()
         # 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）：「只要不重启，所有
@@ -381,6 +399,12 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   配额裁剪后补漏）由 `_pack_segmented` 现场读盘。轮号或 `wire_diet` 对不上 ⇒ `None`
         #   （宁可慢一轮，也不发一份与 manifest 自述不符的字节）。
         _taken = self._payload_parts.take(it, wire_diet=wire_diet)
+        if mem and _taken is None:
+            # 零落盘轮没有盘上副本可回退（`take` 的降级路只在有磁盘 shard 时成立）。
+            raise SystemExit(
+                f"[run_rl] it{it}: 零落盘轮但段账不可用（轮号/`wire_diet` 对不上）——"
+                "盘上没有 shard 可退回读盘，拒绝发一份缺语料的包"
+            )
         presegmented, diet_slim = _taken if _taken is not None else (None, None)
         if rollout_spec:
             # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
@@ -402,6 +426,8 @@ class TrainingRemoteJob(TrainingRemotePush):
             it=it,
             traj_dir=args.traj,
             shard_dirs=shard_dirs,
+            # 零落盘：dispatch 腿的 shard 只在内存账里（`data_fp` / 验收对账读它）。
+            mem=mem,
             init_weights_path=args.out,
             ckpt_remote_dir=ckpt_remote,
             commit=commit,
@@ -603,6 +629,9 @@ class TrainingRemoteJob(TrainingRemotePush):
             #   的活动指针也不再带着容器。基准不在本机时会**响亮**抛（那是要人看的数据问题，
             #   不是能静默把容器当权重用的场景）。
             weights_standard.ensure_standard_weights(args.out, log=log)
+            # 零落盘：发布那一刻的内存账快照（`_remote_ppo_publish` 存在实例上）。活目录
+            # 对账要把本轮回传的 shard 算进去，否则每轮都报一条假的「活目录不一致」。
+            published_mem = getattr(self, "_published_mem", None)
             verify_and_land(
                 result,
                 sess.manifest,
@@ -613,6 +642,7 @@ class TrainingRemoteJob(TrainingRemotePush):
                 # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
                 # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
                 state_init=state_init_enabled(args),
+                mem=published_mem,
                 log=log,
             )
         except TripleCheckError as e:

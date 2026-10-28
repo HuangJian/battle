@@ -134,6 +134,8 @@ SLOT_WRITERS: dict[str, frozenset[str]] = {
     "_kl_cum": frozenset({"loop_remote_job.py"}),
     "_ppo_cloud_sec": frozenset({"loop_remote_job.py"}),
     "_ppo_sec": frozenset({"loop_remote_job.py"}),
+    # 零落盘（2026-10-28）：发布那一刻的 `name → manifest` 快照，验收相位的活目录对账要读它。
+    "_published_mem": frozenset({"loop_remote_job.py"}),
     "_total_steps": frozenset({"loop_remote_job.py"}),
     "_wire": frozenset({"loop_remote_job.py"}),
     # 停腿标记与连败计数：判据（Fail）与驱动（Drive）都要碰——这是**有意**的两处。

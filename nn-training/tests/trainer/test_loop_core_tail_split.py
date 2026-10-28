@@ -71,7 +71,7 @@ EVAL_PY = NN_ROOT / "trainer/loop_eval.py"
 CLUSTERS = {
     "trainer/loop_baseline.py": ("TrainingBaseline", ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval")),
     "trainer/loop_iter_dir.py": ("TrainingIterDir", ("_check_quota_incident", "_prepare_iter_dir")),
-    "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase")),
+    "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase", "_finalize_returned_shards")),
 }
 
 #: 组合根**只许**留这两个成员（`__init__` = 槽位持有者；`_run_inspect` = 结构性例外）。

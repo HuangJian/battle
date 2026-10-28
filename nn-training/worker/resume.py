@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from common.log import log
@@ -17,6 +17,12 @@ from common.protocol import d14_corpus_match
 MANIFEST_NAME = "manifest.json"
 #: shard 目录名（一局一目录，`common.distribution.write_shard` / TS 导出器同形）。
 SHARD_DIR_GLOB = "rl_s*_seed*"
+#: 轮级分关 est 账（零落盘删 shard 目录**之前**写，2026-10-28）。
+#: 形态 = `{"3": {"games": 12, "samples": 34567}, ...}`（stage 为字符串键：JSON 没有 int 键）。
+#: 为什么需要它：`trailing_stage_samples_per_game` 原来靠扫 shard 的 manifest —— 零落盘轮的
+#: 目录在 `step_record_iteration` 之后就被删了，没有这份账 `est_agg=latest` 会静默退回全局
+#: est（分关分配退化）。轮级账只有一份、删前统算（含 local 腿），读时**取代**扫盘。
+STAGE_EST_NAME = "stage_est.json"
 
 
 def state_init_enabled(args) -> bool:
@@ -199,6 +205,60 @@ def _scan_shards(
     return res
 
 
+#: 零落盘回传 shard 的占位「节点」目录名（**永不创建**）：只承载 `.name`，让发布端
+#: （`iter_shard_dirs` / `_pack_segmented` / `data_fp`）用与磁盘腿**同一个名字键**取内存账。
+MEM_SHARD_NODE = "@mem"
+
+
+def merge_memory_shards(
+    it_dir: Path,
+    cands: dict[str, list[Path]],
+    mem: Mapping[str, dict],
+    *,
+    counters: tuple[int, int, int, str, str],
+    mver_bad: dict[int | None, int],
+    course_fp: str = "",
+    corpus_fp: str = "",
+    state_init: bool = False,
+    metrics_version: int | None = None,
+) -> tuple[int, int, int, str, str]:
+    """把内存账 `mem`（`name → manifest`）并入发布端的 `cands`（`name → [path]`）。
+
+    零落盘（2026-10-28）：dispatch 腿回传的 shard **不在盘上** —— 占位路径只提供 `.name`
+    （`_pack_segmented` 按名从 `presegmented` 取段、`data_fp` / 配额裁剪按 `mem[name]` 取
+    元数据），目录本身不存在也不该存在。过滤口径与 `iter_shard_dirs` 的磁盘腿逐条同源
+    （D14 / state_init / metrics 版本），同名以盘上为准。
+
+    `counters` = 发布端已有的 `(skipped, skipped_init, skipped_mver, first_init, first_mver)`，
+    返回**并进之后**的同形元组；`mver_bad` 原地累加（行宽漂移的逐版本点名要用）。
+
+    ⚠ 为什么住本模块而不是 `remote/`：本模块是 L0（`worker.resume` 在 DAG 账本里 L0），
+    `remote.hub_client`(L1) 已经在它上面 ⇒ 不新增边、不改层号；放 `remote/` 会逼 hub_client
+    升到 L2 并连坐一串（`tests/test_remote_dag.py` 当场红）。
+    """
+    skipped, skipped_init, skipped_mver, first_init, first_mver = counters
+    for name, mm in sorted(mem.items()):
+        if name in cands:
+            continue
+        if (course_fp or corpus_fp) and not d14_corpus_match(course_fp, corpus_fp, mm):
+            skipped += 1
+            continue
+        if state_init and not shard_state_init_ok(mm, True):
+            skipped_init += 1
+            first_init = first_init or name
+            continue
+        if metrics_version is not None:
+            raw = mm.get("metrics_version")
+            got = raw if isinstance(raw, int) else None
+            if got != metrics_version:
+                skipped_mver += 1
+                first_mver = first_mver or name
+                mver_bad[got] = mver_bad.get(got, 0) + 1
+                continue
+        cands[name] = [it_dir / "dist" / MEM_SHARD_NODE / name]
+    return skipped, skipped_init, skipped_mver, first_init, first_mver
+
+
 def settled_stage_totals(
     traj_dir: Path,
     wver: str,
@@ -206,6 +266,7 @@ def settled_stage_totals(
     course_fp: str | None = None,
     corpus_fp: str | None = None,
     state_init: bool = False,
+    mem: Mapping[str, dict] | None = None,
 ) -> dict[int, tuple[int, int]]:
     """stage → (games, transitions)：已结算 shard 的局数与 `nSamples` 之和。
 
@@ -223,9 +284,11 @@ def settled_stage_totals(
     的关永远“零样本” ⇒ 补波永不达标（白烧到波次上限）。
     """
     out: dict[int, tuple[int, int]] = {}
+    seen: set[str] = set()
     for (stage, _seed), d in _scan_shards(
         traj_dir, wver, extra_wver, course_fp, corpus_fp, state_init=state_init
     ):
+        seen.add(d.name)
         try:
             mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -235,6 +298,33 @@ def settled_stage_totals(
             n = mm.get("totalSamples")
         games, trans = out.get(stage, (0, 0))
         out[stage] = (games + 1, trans + (int(n) if isinstance(n, int) else 0))
+    # ★ 零落盘（2026-10-28）：dispatch 腿回传的 shard 不在盘上 —— `mem`（name → manifest）
+    #   是它们的账。过滤口径与 `_scan_shards` 逐条同源（wver / D14 / state_init），
+    #   同名（盘上已有）以盘上那份为准（避免重复计数）。
+    if mem:
+        ok_wver = {str(wver)} | ({str(extra_wver)} if extra_wver else set())
+        for name, mm in mem.items():
+            if name in seen:
+                continue
+            if wver and str(mm.get("wver", "")) not in ok_wver:
+                continue
+            if (course_fp or corpus_fp) and not d14_corpus_match(
+                str(course_fp or ""), str(corpus_fp or ""), mm
+            ):
+                continue
+            if state_init and not shard_state_init_ok(mm, True):
+                continue
+            st = mm.get("stage")
+            if not isinstance(st, int):
+                continue
+            n_samples: object = mm.get("nSamples")
+            if not isinstance(n_samples, int):
+                n_samples = mm.get("totalSamples")
+            games, trans = out.get(int(st), (0, 0))
+            out[int(st)] = (
+                games + 1,
+                trans + (int(n_samples) if isinstance(n_samples, int) else 0),
+            )
     return out
 
 
@@ -296,6 +386,33 @@ def _iter_no_of(path: Path) -> int:
         return int(name[2:]) if name.startswith("it") else -1
     except ValueError:
         return -1
+
+
+def _stage_est_rows(it_dir: Path) -> dict[int, tuple[int, int]] | None:
+    """读 `it<N>/stage_est.json` → `{stage: (games, samples)}`。
+
+    不存在 / 坏 / 不是字典 ⇒ `None`（**退回扫 shard 目录**：老轮次与 local 腿仍走原路）。
+    存在但某行坏 ⇒ 只丢那一行（其余关照用），不整体回退 —— 否则一行脏数据会让整轮
+    `est_agg=latest` 退回全局 est。
+    """
+    try:
+        doc = json.loads((it_dir / STAGE_EST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    out: dict[int, tuple[int, int]] = {}
+    for key, row in doc.items():
+        try:
+            st = int(key)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        g, s = row.get("games"), row.get("samples")
+        if isinstance(g, int) and isinstance(s, int) and g > 0 and s > 0:
+            out[st] = (int(g), int(s))
+    return out
 
 
 def trailing_stage_samples_per_game(
@@ -371,23 +488,34 @@ def trailing_stage_samples_per_game(
     samples: dict[int, int] = defaultdict(int)
     for it_dir in it_dirs:
         added = 0
-        for d in walk_shard_dirs(it_dir, with_manifest=True):
-            mp = d / MANIFEST_NAME
-            try:
-                mm = json.loads(mp.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            st = mm.get("stage")
-            if st not in stage_set:
-                continue
-            n = mm.get("nSamples")
-            if not isinstance(n, int):
-                n = mm.get("totalSamples")
-            if not isinstance(n, int) or n <= 0:
-                continue
-            games[int(st)] += 1
-            samples[int(st)] += int(n)
-            added += 1
+        est = _stage_est_rows(it_dir)
+        if est is not None:
+            # 零落盘轮：shard 目录已删，分关账本就是唯一来源（删前统算，含 local 腿）⇒
+            # **不再扫盘**。两份都读会把同几局算两遍（目录还在的 local 腿）。
+            for st, (g, s) in est.items():
+                if st not in stage_set:
+                    continue
+                games[st] += g
+                samples[st] += s
+                added += g
+        else:
+            for d in walk_shard_dirs(it_dir, with_manifest=True):
+                mp = d / MANIFEST_NAME
+                try:
+                    mm = json.loads(mp.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                st = mm.get("stage")
+                if st not in stage_set:
+                    continue
+                n = mm.get("nSamples")
+                if not isinstance(n, int):
+                    n = mm.get("totalSamples")
+                if not isinstance(n, int) or n <= 0:
+                    continue
+                games[int(st)] += 1
+                samples[int(st)] += int(n)
+                added += 1
         if agg == "latest" and added > 0:
             break  # 只读这一轮（它真有 shard）
     out: dict[int, int] = {}
@@ -402,6 +530,29 @@ def trailing_stage_samples_per_game(
     return out
 
 
+def _manifest_report(mm: dict, stage: int, seed: int) -> dict:
+    """单局 shard manifest → `combine_reports` 消费的聚合 schema（见 `resumed_manifests`）。"""
+    if isinstance(mm.get("totalSamples"), int) and "outcomes" in mm:
+        # 远端 agent 写回的 manifest 即单局聚合报告（games=1 + outcomes/
+        # totalSamples/scoreList/dimLists），combine_reports 直接可消费，透传。
+        return mm
+    score = mm.get("score")
+    return {
+        "games": 1,
+        # stage/seed 回填：让转换产物自识别（combine_reports 忽略附加键，
+        # 测试与排查按身份对账时不再依赖目录遍历顺序）。
+        "stage": stage,
+        "seed": seed,
+        "outcomes": {str(mm.get("outcome", "unknown")): 1},
+        "totalSamples": int(mm.get("nSamples") or 0),
+        "totalTicks": int(mm.get("ticks") or 0),
+        "scoreList": [score] if isinstance(score, (int, float)) else [],
+        # dims 细分维度暂不回填（单局 dims→dimLists 映射待统一 schema），只保
+        # 证 games/outcomes/ticks/score 口径完整。
+        "dimLists": {},
+    }
+
+
 def resumed_manifests(
     traj_dir: Path,
     wver: str,
@@ -411,6 +562,7 @@ def resumed_manifests(
     course_fp: str | None = None,
     corpus_fp: str | None = None,
     state_init: bool = False,
+    mem: Mapping[str, dict] | None = None,
 ) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
@@ -424,53 +576,43 @@ def resumed_manifests(
     exclude=本轮 results 已覆盖的 (stage,seed)。此前不排除也不转换：整轮完成后
     本轮 shard 被原样并入 → combine_reports KeyError('games') 秒崩 → 主循环吞掉
     后 it+=1 静默跳轮（2026-08-24 it2/it3 根因）。
+
+    `mem`（零落盘，2026-10-28）：dispatch 腿回传的 shard **不在盘上** —— 它们的 manifest
+    走这条并入报告（否则本轮报告少掉整批局，samples/outcomes 全偏低）。过滤口径与磁盘腿
+    逐条同源（wver / D14 / state_init / only / exclude），同一 (stage,seed) 只收一次。
     """
     out: list[dict] = []
-    if not traj_dir.exists():
-        return out
+    seen: set[tuple[int, int]] = set()
     skip = exclude or set()
-    for d in walk_shard_dirs(traj_dir, with_manifest=True):
-        m = d / MANIFEST_NAME
-        try:
-            mm = json.loads(m.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+
+    def _take(mm: dict) -> None:
         st, sd = mm.get("stage"), mm.get("seed")
         wv = mm.get("wver")
         if (wv != wver and wv != extra_wver) or not isinstance(st, int) or not isinstance(sd, int):
-            continue
+            return
         if (course_fp or corpus_fp) and not d14_corpus_match(
             str(course_fp or ""), str(corpus_fp or ""), mm
         ):
-            continue  # D14：跨语料绝不并入本轮报告（判据同源，见 _scan_shards）
+            return  # D14：跨语料绝不并入本轮报告（判据同源，见 _scan_shards）
         if not shard_state_init_ok(mm, state_init):
-            continue  # 起始分布血缘（P3.5）：别把标准开局的局并进本轮报告
-        if (int(st), int(sd)) in skip:
-            continue
-        if only is not None and (int(st), int(sd)) not in only:
-            continue
-        if isinstance(mm.get("totalSamples"), int) and "outcomes" in mm:
-            # 远端 agent 写回的 manifest 即单局聚合报告（games=1 + outcomes/
-            # totalSamples/scoreList/dimLists），combine_reports 直接可消费，透传。
-            out.append(mm)
-            continue
-        score = mm.get("score")
-        out.append(
-            {
-                "games": 1,
-                # stage/seed 回填：让转换产物自识别（combine_reports 忽略附加键，
-                # 测试与排查按身份对账时不再依赖目录遍历顺序）。
-                "stage": int(st),
-                "seed": int(sd),
-                "outcomes": {str(mm.get("outcome", "unknown")): 1},
-                "totalSamples": int(mm.get("nSamples") or 0),
-                "totalTicks": int(mm.get("ticks") or 0),
-                "scoreList": [score] if isinstance(score, (int, float)) else [],
-                # dims 细分维度暂不回填（单局 dims→dimLists 映射待统一 schema），只保
-                # 证 games/outcomes/ticks/score 口径完整。
-                "dimLists": {},
-            }
-        )
+            return  # 起始分布血缘（P3.5）：别把标准开局的局并进本轮报告
+        key = (int(st), int(sd))
+        if key in skip or key in seen:
+            return
+        if only is not None and key not in only:
+            return
+        seen.add(key)
+        out.append(_manifest_report(mm, int(st), int(sd)))
+
+    if traj_dir.exists():
+        for d in walk_shard_dirs(traj_dir, with_manifest=True):
+            try:
+                mm = json.loads((d / MANIFEST_NAME).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            _take(mm)
+    for _name, mm in (mem or {}).items():
+        _take(mm)
     return out
 
 

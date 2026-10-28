@@ -50,6 +50,7 @@ def metrics_stats(
     it: int = 0,
     identity: dict[str, Any] | None = None,
     write: bool = True,
+    extra_metrics: Sequence[bytes] = (),
 ) -> dict[str, Any]:
     """对 `iter_dir` 下全部 shard 的 metrics.npy 聚合统计。
 
@@ -73,6 +74,21 @@ def metrics_stats(
             continue
         m_list.append(m)
         n_shards += 1
+    # ★ 零落盘（2026-10-28）：dispatch 腿回传的 shard **根本没落盘** —— 它们的 `metrics.npy`
+    #   原始字节由调用方从内存段账里传进来（`ShardSegments.metrics_blobs()`）。不接这条
+    #   会让本轮统计恒报 `shards=0`，在日志里看起来像「本轮没采样」。
+    if extra_metrics:
+        import io
+
+        for blob in extra_metrics:
+            try:
+                m = np.load(io.BytesIO(bytes(blob)))
+            except Exception:  # 单份坏了只丢那一份，不拖垮整轮统计
+                continue
+            if m.ndim != 2 or m.shape[1] != len(METRICS):
+                continue
+            m_list.append(m)
+            n_shards += 1
     if not m_list:
         return {"it": it, "shards": 0, "elapsed_ms": 0.0}
     stacked = np.concatenate([m[:-1] for m in m_list], axis=0)  # 决策步行（终局行除外）

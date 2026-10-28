@@ -200,12 +200,14 @@ def test_on_shard_gets_the_memory_bytes_before_the_disk_write(tmp_path, monkeypa
         got.append((name, dict(files), dict(manifest)))
         order.append(("on_shard", name))
 
-    # 包**真** write_shard（不是替身）：回调顺序是判据的一部分。它写盘要整套 shard 文件集，
-    # 所以 fetch 回传的 `files` 给齐（内容无关——本用例只看名字/字节/顺序）。
+    # 包**真** write_shard（不是替身）：回调顺序 + **materialize 透传**是判据的一部分。
     from common.shard import write_shard as real_write_shard
 
-    def spy(files, man, out, on_receive=None):
-        real_write_shard(files, man, out, on_receive)
+    outs: list[Path] = []
+
+    def spy(files, man, out, on_receive=None, **kw):
+        outs.append(Path(out))
+        real_write_shard(files, man, out, on_receive, **kw)
         order.append(("write_shard", Path(out).name))
 
     monkeypatch.setattr(common.distribution, "write_shard", spy)
@@ -223,6 +225,9 @@ def test_on_shard_gets_the_memory_bytes_before_the_disk_write(tmp_path, monkeypa
         assert files["obs.npy"] == b"mem-bytes", "必须是内存里那份，不是落盘后的副本"
         # 同一 shard：回调先于「写盘完成」（两条线程并发不影响各自 shard 的内部顺序）
         assert order.index(("on_shard", name)) < order.index(("write_shard", name)), order
+    # ★ 2026-10-28 用户口径（「根本就不需要保存到硬盘」）：有段账 ⇒ materialize=False，
+    #   这些目录一个都不该存在（不是「写过再删」）。
+    assert outs and not any(p.exists() for p in outs), outs
 
 
 def test_transient_502_does_not_circuit_break_node(tmp_path, monkeypatch) -> None:

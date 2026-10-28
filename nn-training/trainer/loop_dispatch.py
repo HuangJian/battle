@@ -137,3 +137,21 @@ class TrainingDispatch:
         self._eval_gate = eval_gate
         self._collect_child = collect_child
         self._spawned_early = spawned_early
+
+    def _finalize_returned_shards(self, it: int) -> None:
+        """零落盘：轮末把本轮 dispatch 腿（sampler agent）的分关账写盘（2026-10-28）。
+
+        回传 shard 本身**从未落盘**（`common.shard.write_shard` 见到段账就只交字节、不写盘），这里只写
+        几百字节的 `it<N>/stage_est.json` —— `trailing_stage_samples_per_game` 在盘上没有
+        shard 目录时靠它（`est_agg=latest` 才不会静默退回全局 est）。
+
+        **顺序契约**：调用点固定在 `step_record_iteration` 的**最后**（`_record_iteration` →
+        `_write_iter_stats` → 巡检之后）——前三步还要读内存账 / local 腿的盘上 shard。
+        """
+        parts = self._payload_parts
+        if int(getattr(parts, "it", -1)) != int(it):
+            return
+        from trainer.zero_disk import finalize_round_shards
+
+        finalize_round_shards(self._traj_dir, parts.manifests(), it=int(it))
+

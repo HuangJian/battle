@@ -76,7 +76,7 @@ from common.protocol import (
 # 门面不同：后者只依赖 stdlib + `common.*`，留在顶层对 hub 的闭包无害）。
 # 发布端 payload 封装已下沉 `remote.payload_pack`（2026-10-14）：实现搬家、名字留门面。
 from remote.payload_pack import pack_payload_zip as pack_payload_zip
-from worker.resume import shard_state_init_ok, walk_shard_dirs
+from worker.resume import merge_memory_shards, shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -184,6 +184,7 @@ def iter_shard_dirs(
     corpus_fp: str = "",
     state_init: bool = False,
     metrics_version: int | None = None,
+    mem: Mapping[str, dict] | None = None,
 ) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
     `_serial_ppo` 的 load_episodes 装载口径一致——D1「wver 过滤 + resume 剔除
@@ -216,7 +217,7 @@ def iter_shard_dirs(
     结算赢家），退役者响亮日志。
     """
     it_dir = Path(traj_dir) / f"it{it}"
-    if not it_dir.exists():
+    if not it_dir.exists() and not mem:
         return []
     expected_mver = int(metrics_version) if metrics_version is not None else None
     cands: dict[str, list[Path]] = {}
@@ -247,6 +248,13 @@ def iter_shard_dirs(
                 mver_bad[got_mver] = mver_bad.get(got_mver, 0) + 1
                 continue
         cands.setdefault(d.name, []).append(d)
+    if mem:
+        skipped, skipped_init, skipped_mver, first_init_miss, first_mver_miss = merge_memory_shards(
+            it_dir, cands, mem,
+            counters=(skipped, skipped_init, skipped_mver, first_init_miss, first_mver_miss),
+            mver_bad=mver_bad, course_fp=course_fp, corpus_fp=corpus_fp,
+            state_init=state_init, metrics_version=expected_mver,
+        )
     if skipped:
         log(
             f"[publish] D14: 剔除 {skipped} 个异血缘 shard（it{it} 内混入了别的课程版本/runId 的语料）"
@@ -734,6 +742,8 @@ def publish_job(
     # —— 段全部命中时打包腿一次成员变换都不会走，自建的 slim 会报「未改」（日志骗人）。
     presegmented: Mapping[str, bytes] | None = None,
     diet_slim: ShardSlim | None = None,
+    # 零落盘（2026-10-28）：dispatch 腿回传 shard 的 `name → manifest`（磁盘上没有这些目录）。
+    mem: Mapping[str, dict] | None = None,
     # demo 混 batch（x20 后续）：demo bank npz 原始字节（调用方读文件一次，见 loop_steps；
     # 3MB 级，blob 走内容寻址，worker 首轮下载后缓存命中）。空 = 关。
     demo_bank_bytes: bytes | None = None,
@@ -828,7 +838,7 @@ def publish_job(
         if rollout_spec is None:
             raise HubClientError("kind='run' 必须带 rollout_spec（本 job 自己那一轮的采集规格）")
     # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}；iter = 声明集）
-    fp = iter_expected_data_fp(rollout_spec) if rollout_spec else data_fp(shard_dirs)
+    fp = iter_expected_data_fp(rollout_spec) if rollout_spec else data_fp(shard_dirs, mem=mem)
     # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
     #    BC 无 warm-start → 恒 "bc" 占位）
     init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
@@ -1376,6 +1386,7 @@ def verify_and_land(
     it: int,
     out_weights: str,
     state_init: bool = False,
+    mem: Mapping[str, dict] | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> str:
     """三重校验（D12）+ 落盘（weights_json → args.out；opt tar → ppo_ckpt_remote）。
@@ -1426,8 +1437,11 @@ def verify_and_land(
                 course_fp=str(m.get("course_fp") or ""),
                 corpus_fp=str(m.get("corpus_fp") or ""),
                 state_init=state_init,
+                # 零落盘：本轮回传的 shard 不在盘上 —— 活目录对账必须把内存账算进去，
+                # 否则每轮都报一条假的「活目录与发布快照不一致」。
+                mem=mem,
             )
-            live_fp = data_fp(live_dirs)
+            live_fp = data_fp(live_dirs, mem=mem)
         except Exception as e:  # 目录被清/被删都不该阻断落位
             log(f"WARN: it{it} 活目录对账不可做（{e}）——不阻断落位")
         else:
