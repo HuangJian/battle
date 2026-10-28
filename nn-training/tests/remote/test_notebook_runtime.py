@@ -30,8 +30,10 @@ import os
 import sys
 import threading
 import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -1322,3 +1324,64 @@ def test_push_worker_passes_epoch_mult(
         assert serve.count("--epoch-mult") == 0
     else:
         assert serve[serve.index("--epoch-mult") + 1] == flag
+
+
+# ------------------------------------------------------------------ push 注册：必须走 tailnet 代理
+
+
+def test_push_registry_register_goes_through_proxy_aware_opener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GPU push 的注册 HTTP 必须走**显式 ProxyHandler**，不能用默认 opener 的 `urlopen`。
+
+    2026-10-28 真机（`battle.tailscale.ipynb` + userspace Tailscale，node url = cloudflared
+    隧道）：同一台机器、同一个 hub（tailnet 上的 `http://100.124.208.62:8787`）——`/code`
+    下载成功（1.58MB/4.2s），而 `POST /admin/nodes/register` 一路 `URLError: timed out`。
+    差别只有一处：下载走 `notebook_boot._build_opener`（显式挂 `localhost:1055` 的 tailnet
+    代理），注册用的是 `Registry` 的缺省 `urllib.request.urlopen`（`notebook_runtime.py:629`
+    没传 `urlopen=`），而 Colab 上那个默认 opener 到不了 tailnet IP —— `_hub_open` docstring
+    记的就是这条 2026-09-16 实测：`urlopen()` 不读 HTTP_PROXY。
+    ⇒ 注册与下载必须共用同一条 opener；否则「拉得到代码、注册不上」这种一半通的现象会重演，
+    退化成每会话手工粘 `nodes[]` 片段。
+    """
+    real_proxy_handler = urllib.request.ProxyHandler
+    seen: dict[str, Any] = {"proxies": [], "reqs": [], "default_urlopen": 0}
+
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:1055")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    def _spy_proxy_handler(proxies: dict[str, str] | None = None) -> Any:
+        seen["proxies"].append(dict(proxies or {}))
+        return real_proxy_handler(proxies)
+
+    class _FakeOpener:
+        def open(self, req: Any, timeout: float = 0) -> _FakeResp:
+            seen["reqs"].append(req)
+            return _FakeResp(200)
+
+    monkeypatch.setattr(urllib.request, "ProxyHandler", _spy_proxy_handler)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a: _FakeOpener())
+
+    def _count_default_urlopen(*_a: Any, **_kw: Any) -> Any:
+        seen["default_urlopen"] += 1
+        raise AssertionError("注册用了默认 opener：tailnet 代理根本没参与")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _count_default_urlopen)
+
+    cfg = _base_cfg(tmp_path, hub_url="http://100.124.208.62:8787", push_port=8790)
+    reg = nbr._push_registry(cfg, lambda _m: None)
+
+    assert reg.ensure("https://abc-def.trycloudflare.com", "push-tok") is True
+    reg.unregister()  # 会话收线的那条同样要走代理
+
+    assert seen["default_urlopen"] == 0, (
+        "注册/注销不能走 `urllib.request.urlopen`：Colab userspace 下它读不到 tailnet 代理"
+    )
+    assert seen["proxies"] and seen["proxies"][0].get("http") == "http://127.0.0.1:1055", (
+        f"没有把代理显式喂进 ProxyHandler：{seen['proxies']}"
+    )
+    # 结构判据（不是措辞判据）：两条必到的路由按名字对账，别拿子串去捞（护栏 `tests/
+    # test_source_text_assert_budget.py` 的口径 A 就是给这种断言准备的，这里用不着它）
+    paths = [urlsplit(str(getattr(r, "full_url", ""))).path for r in seen["reqs"]]
+    assert paths == ["/admin/nodes/register", "/admin/nodes/unregister"], paths

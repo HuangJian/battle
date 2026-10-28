@@ -634,6 +634,14 @@ def _push_registry(cfg: dict[str, Any], log) -> Any:
         kind="gpu_push",
         label=str(cfg.get("label") or ""),
         log=log,
+        # ★ 2026-10-28：必须是**代理感知**的那条 opener，不能用缺省的 `urlopen`。
+        #   真机（Colab + userspace Tailscale，hub 在 tailnet 上 `100.124.208.62:8787`）：
+        #   `/code` 下载成功而 `POST /admin/nodes/register` 一路 timed out——差别只在下载那侧显式
+        #   挂了 `localhost:1055` 的 tailnet 代理（`notebook_boot._build_opener`），注册却走默认
+        #   opener（`urlopen()` 不读 HTTP_PROXY，2026-09-16 实测）。注册/注销与下载共用同一条
+        #   opener，`_hub_open` 无代理时本就回落 `urlopen` ⇒ 非 tailnet 部署逐字节不变。
+        #   守门：`tests/remote/test_notebook_runtime.py::test_push_registry_register_goes_through_proxy_aware_opener`
+        urlopen=_hub_open,
     )
 
 
