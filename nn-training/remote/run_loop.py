@@ -37,6 +37,7 @@ from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.error_report import report_error
+from remote.plan_handoff import ROTATION_POLICIES as ROTATION_POLICIES
 from remote.plan_run import (
     TS_TREE_DIR as TS_TREE_DIR,
 )
@@ -154,6 +155,9 @@ def run_standalone(
     #: ★ 2026-10-24：高配云机的训练侧放大（1.0 = 计划/课程原样；见 `RunContext.sample_mult`）。
     sample_mult: float = 1.0,
     epoch_mult: float = 1.0,
+    #: ★ 2026-10-28（云机轮换）：笔记本开关（`CFG["rotation"]` → `--rotation`）；
+    #: auto = 跟随计划，on = 计划没带就拒跑，off = 降级全关采样（见 `ROTATION_POLICIES`）。
+    rotation: str = "auto",
     #: hub 给的续跑锚点目录（`--resume-dir`；见 `apply_resume_overlay`）。
     resume_dir: str | Path | None = None,
     #: 产物补传（可选）：给了 hub 地址 + token 就会在每轮落盘后尽力推一份上去。
@@ -232,6 +236,7 @@ def run_standalone(
         rollout_workers=rollout_workers,
         sample_mult=sample_mult,
         epoch_mult=epoch_mult,
+        rotation=rotation,
         hub_url=hub_url,
         hub_token=hub_token,
         hub_course=hub_course,
@@ -564,6 +569,16 @@ def main(argv: list[str] | None = None) -> int:
         help="epoch 倍数（缺省 1.0 = 课程原样）：每轮 PPO 更新遍数 × N（向上取整，最少 1）",
     )
     ap.add_argument(
+        "--rotation",
+        default="auto",
+        choices=ROTATION_POLICIES,
+        help=(
+            "云机轮换开关（缺省 auto = 跟随计划）：auto = 包带轮换就逐轮换窗口；"
+            "on = 计划没带就拒跑（不猜）；off = 把轮换降级为**全关采样**"
+            "（语料面变了 ⇒ 账本 rotation.override 留痕）"
+        ),
+    )
+    ap.add_argument(
         "--resume-dir",
         default="",
         help="hub 给的续跑锚点目录（含 resume.json + it-NNN/{weights.json,opt.tar,row.json}）",
@@ -625,6 +640,7 @@ def main(argv: list[str] | None = None) -> int:
             rollout_workers=int(args.rollout_workers),
             sample_mult=float(args.sample_mult),
             epoch_mult=float(args.epoch_mult),
+            rotation=str(args.rotation),
             resume_dir=args.resume_dir or None,
             hub_url=args.hub_url,
             hub_token=hub_token,

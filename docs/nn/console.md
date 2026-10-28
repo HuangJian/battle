@@ -13,6 +13,30 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §43 云机轮的窗口/分关读数：控制台**零代码**，同一条读面（2026-10-28）
+
+**触发**：`docs/nn/training-stack.md` §46（云机 rollout 支持轮换）。此前云机轮在控制台上
+「窗口 / 各关进度」两列恒为 `—`：产物行走 `remote/artifacts.LEDGER_FIELDS`，而那张搬运表���收
+`rotation` / 分关账 —— 同一条曲线两条腿不可比。
+
+**决定**：**不改 dashboard 任何代码**。云机侧把两个键按**本机腿同一形状**写进产物行：
+`plan_run._row_extra` → `rotation`（`event_from_recipe`，§42 那个解析器的原形）+
+`volume_stage_stats`（`worker/stream_collect.stage_stats()`，与 `trainer/loop_volume` 的收官账同键：
+`rule`/`quota`/`halted`/逐关 `collected`·`games`·`est_s`·`cap_games`·`shortfall`）；
+`LEDGER_FIELDS` 两个新行把它们搬进账本 ⇒ `parseIterRotation` / `parseIterVolume` 原样命中。
+
+**云机轮会多出来的读法**
+
+- `est_src = "plan"`：分关 est 是**导出时钉进计划**的（节点没有 hub jsonl 现算），不是 `learned`/
+  `trailing`——同列不同值不是 bug。
+- `mode = "off"` + `override: "off"`：笔记本 `CFG["rotation"]="off"` 把窗口降级成全关采样。
+  UI 上就是「35/35」+ 原文 `off`，不需要新组件；原始账本行里 `override` 一格是审计锚点。
+- 旧产物行/未开轮换 ⇒ 两格**不存在**（不是 null/0）⇒ 照旧显 `—`。
+
+**不做**：控制台重算云机窗口（拿不到配方 + rotate_seed）；给 `off` 做专用横幅（原文 `off` +
+窗口 35/35 已经能读出来）。
+
+---
 ## §42 「采集窗口」面板与两列：窗口/分关进度从账本搬运，不重算（2026-10-28）
 
 **触发**：`plan/it-stage-ratation.plan.md` §9（用户口径「每轮窗口与各关进度可见」）。写侧全文见

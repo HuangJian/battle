@@ -9999,3 +9999,42 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **未决**：云机/离线单轮包的分关账（搬 `iter_info.volumeTopup` 进 `LEDGER_FIELDS`，见 §45「不做」）；
   真机读数（窗口逐轮换批、`达标 N/N` 收敛）。全文 → `docs/nn/training-stack.md` §45 +
   `docs/nn/console.md` §42 + `plan/it-stage-ratation.plan.md` §9。
+
+## §2026-10-28-goalnn-cloud-stage-rotation（2026-10-28，云机 rollout 支持轮换 + notebook 三态开关）
+
+- **背景**：轮换（`rotation_mode`）在 S1–S3 后仍**到不了云机**：`plan["volume"]` 是单份块（钉着导出
+  那一轮的窗口），而窗口是 `it` 的函数 ⇒ 多轮包第 2 轮起会静默复用第 1 轮的关集；v1 用「轮换 ×
+  多轮包一律拒导」（§3.7）挡住，控制台导出腿偏偏走 `--run-iters -1`（多轮）⇒ 轮换课永远发不出去。
+  用户口径 2026-10-28：「云机 rollout 也要支持轮换。ipynb 加个配置开关来决定是否开启轮换。」
+- **决定**：① **配方进计划**（additive）：`plan["rotation"] = {mode, per_it, pinned}` + `volume.est_s_all`
+  （全关 est 表，导出时刻钉住）；窗口键 = 计划既有 `rotate_seed`（与种子流同键）。② **唯一派生器**
+  `worker/volume_waves.volume_block_for_window`（按窗口重解关集/局数/达标线/分关 est，同一分配器；
+  缺关响亮）；`worker/plan` 新增 `rotation_recipe` / `round_window` / `volume_for_round` / `rotation_event`，
+  `pairs_for` 改成「先取当轮块再重放」，`validate_plan` 四道门（配方形状 · 需要 volume · 每轮可解 ·
+  `est_s_all` 覆盖全关），`check_plan_against_args` 逐轮自检。③ **导出腿**删 §3.7 拒收：
+  `_volume_plan_block` 开了轮换时一次按全关取 est（窗口切出的值与旧调用逐字节相同），
+  `build_plan(rotation=recipe_from_args(args))`。④ **笔记本三态开关** `CFG["rotation"] = auto|on|off`
+  → `--rotation`（`run_loop` → `RunContext.rotation`；缺省 auto **不进 argv** ⇒ 旧包 argv 逐字不变）：
+  auto 跟随计划；on 计划没带就**拒跑**；off 把窗口**降级成全关**并在账本 `rotation.override="off"` 留痕
+  （语料分布变了 = 另一个实验面）。⑤ **云机读数进行账**：`plan_run._row_extra` 写 `rotation` +
+  `volume_stage_stats`（后者由 `worker/stream_collect.stage_stats()` 产出，与本机腿**同形**，
+  `est_src="plan"`）→ `remote/artifacts.LEDGER_FIELDS` 两个新键 ⇒ 控制台**零代码**（§42 的解析器原样命中）。
+  ⑥ **分层**：窗口数学下沉 `worker/volume_waves`(L3)，`worker/stage_rotation`(L4) 同名转发（否则
+  `worker/plan`(L4) → L4 是上向边，DAG 守卫当场红）。
+- **否决**：继续拒收多轮包（功能关掉不等于修好）；把窗口/块按轮**逐份**写进计划（500 轮硬上界 ⇒
+  计划膨胀一个量级，且 `plan_fp` 变成「轮数指纹」）；云机侧「重新发明」窗口（不读配方 ⇒ 两侧各一套，
+  `pairs_fp` 失去意义）；`on` 缺包时静默按全关采（正是最难发现那种）；给 `off` 另开 CLI 子命令
+  （三态一个旋钮足够，多一个入口 = 多一个没人配的键）；控制台重算云机轮窗口（拿不到配方 + rotate_seed）。
+- **约束**：est 仍是**导出时钉住**（冻结包语义）；`off` 覆盖只能靠账本 `rotation.override` 审计
+  （离线段不跑 `verify_plan_file`——那是已退役的 kind=run 门）；未开轮换/老产物行 ⇒ 两个键**都不存在**
+  （不是 null/0）。模式 3（逐关配额）· `carry_over` 仍不做。
+- **落地**：`worker/{volume_waves,stage_rotation,plan,stream_collect}.py` · `trainer/loop_export.py` ·
+  `remote/{plan_run,plan_handoff,run_loop,worker,train_core,artifacts,offline_boot}.py` ·
+  `ipynb/battle.offline.ipynb`；守卫 `tests/worker/test_plan_rotation_multiround.py`(12) ·
+  `test_stream_collect_stats.py`(3) · `tests/remote/test_plan_rotation_cloud.py`(7) ·
+  `tests/trainer/test_stage_rotation_export.py`(3) · `tests/remote/test_offline_boot.py` 的 `--rotation` 用例。
+- **门禁**：nn-python-gate **5322 passed / 2 skipped**（ruff + mypy 0 错）· 根 `bun run check`
+  **2617 pass / 17 skip / 0 fail** · dashboard typecheck + **1857 pass / 0 fail** · `bun run build` ✓。
+- **未决**：判据 7（窗口外的关在 35 关全 eval 下不掉）仍待一轮真实训练；真机上「控制台窗口逐轮换批 +
+  云机轮 `各关进度` 有读数」待验。全文 → `docs/nn/training-stack.md` §46 +
+  `docs/nn/console.md` §43 + `plan/it-stage-ratation.plan.md` §9.6。

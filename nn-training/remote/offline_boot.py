@@ -1559,6 +1559,14 @@ def build_run_argv(
         if _v != 1.0:
             # `:g` 去掉 `2.0` 这类无意义尾零；数值本身不做四舍五入。
             argv += [_flag, f"{_v:g}"]
+    # ★ 2026-10-28（云机轮换）：笔记本开关（`CFG["rotation"]`，三态）。
+    #   缺省 `auto`（= 跟随计划）**不进 argv** —— 旧包/旧 argv 逐字不变；只有显式
+    #   `on` / `off` 才传（`off` 会把计划里的轮换降级成全关采样，并在账本里留痕）。
+    _rot = str(cfg.get("rotation") or "auto").strip().lower() or "auto"
+    if _rot not in ("auto", "on", "off"):
+        raise ValueError(f"CFG.rotation 只认 auto / on / off（当前 {_rot!r}）")
+    if _rot != "auto":
+        argv += ["--rotation", _rot]
     # rollout 并行局数：缺省（不传）= 按云机核数 `cpu_worker_slots`（≤4 核全给，否则
     # max(cores−2, cores×0.8)），与云机 eval 同一口径。
     # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`

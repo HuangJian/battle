@@ -7,6 +7,63 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §46 云机 rollout 支持轮换：配方进计划 + 逐轮派生 + 笔记本三态开关（2026-10-28）
+
+**触发**：用户口径 2026-10-28「云机 rollout 也要支持轮换。ipynb 加个配置开关来决定是否开启轮换。」
+§45 的「未决」正是这一面：轮换课程**到不了云机**（控制台导出腿走 `--run-iters -1` = 多轮包，
+被 §3.7 拒收；就算单轮包到了云机，云机轮的分关账也没进账本）。
+
+**根因**：`plan["volume"]` 是**一份**块（钉着导出那一轮的窗口），而窗口是 `it` 的函数；
+`worker/plan.pairs_for(plan, it)` 与 `remote/plan_run` 的逐局采集规格都从这一份块重放 ⇒
+第 2 轮起还在用第 1 轮的关集。v1 的解法是拒收多轮包（§3.7）—— 那是把功能关掉，不是修好。
+
+**决定**
+
+1. **配方进计划**（additive，仅激活时）：`plan["rotation"] = {mode, per_it, pinned}`；窗口键 = 计划既有的
+   `rotate_seed`（与种子流同键，不另立一个）。`volume` 块多一格 `est_s_all`（**全关** est 表，
+   导出那一刻从盘上历史钉下来）—— 非导出轮的窗口靠它反解。缺席 ⇒ 一个键都不多（老包逐字节不变）。
+2. **唯一派生器**：`worker/volume_waves.volume_block_for_window(block, *, window)` ——
+   `stages` / `games_per_stage` / `per_stage_quota` / `est_s_by_stage` / `games_per_stage_by_stage`
+   按窗口重解（`alloc_games_by_stage` 同一份分配器；缺关/缺 `est_s_all` **响亮**）；`widen_width`
+   一律弹掉（加宽是运行时的事）。
+3. **计划层的四个入口**：`rotation_recipe` / `round_window` / `volume_for_round` / `rotation_event`；
+   `pairs_for` 改成「先取当轮块再重放」（非轮换路径零重算）；`validate_plan` 加四道门
+   （配方形状 · 需要 `volume` · **每一轮**都能解出窗口 · `est_s_all` 覆盖全关）；
+   `check_plan_against_args` 逐轮用当轮窗口/当轮 est 重解自检。
+4. **导出腿**：删 §3.7 的「轮换 × 多轮包 ⇒ 拒导」；`_volume_plan_block` 开了轮换时**一次按全关**
+   取 est（窗口切出来的值与原调用逐字节相同 —— `trailing_stage_samples_per_game` 逐关独立）；
+   `build_plan(rotation=recipe_from_args(args))`。
+5. **云机三态开关**：`--rotation auto|on|off`（`run_loop` CLI / `RunContext.rotation`）。
+   `battle.offline.ipynb` 的 `CFG["rotation"]`（缺省 `auto` **不进 argv** ⇒ 旧包 argv 逐字不变）：
+   auto = 跟随计划；on = 计划没带轮换就**拒跑**（不猜）；off = 把窗口**降级成全关**并在账本
+   `rotation.override = "off"` 留痕（语料分布变了 = 另一个实验面）。`plan_run` 每轮
+   `volume_for_round(plan, it)` 拿当轮块，后面的加宽/放大/逐局规格全部自动跟着窗口走。
+6. **读数**：`plan_run._row_extra` 把 `rotation`（`event_from_recipe`，形状与 §45 一字不差）与
+   `volume_stage_stats` 写进产物行；`worker/stream_collect.stage_stats()` 产出与本机腿**同形**的
+   分关账（`rule`/`quota`/`halted`/逐关 `collected`·`games`·`est_s`·`cap_games`·`shortfall`，
+   `est_src="plan"`）；`remote/worker` → `train_core` 搬出 `iter_info` → `remote/artifacts.LEDGER_FIELDS`
+   两个新键 ⇒ 控制台**不改代码**（§43 那条解析器同时吃两条腿）。
+7. **分层**：窗口数学（`window_for` / `window_from_recipe` / `event_from_recipe` / `MODES`）下沉到
+   `worker/volume_waves`（L3）；`worker/stage_rotation`（L4）只留 args 门面并**同名转发**。
+   理由：`worker/plan`(L4) 要按轮解窗口 —— 留 L4 门面就是 L4→L4 的上向边（DAG 守卫当场红）。
+
+**口径 / 边界**
+
+- est 仍是**导出时钉住**（冻结包语义）：非导出轮的逐关局数由 `est_s_all` + 同一分配器解出，
+  两侧（导出/云机）对同一 `(stage)` 拿到同一个数。
+- `off` 覆盖会改变语料分布 ⇒ 账本 `rotation.override` 是唯一审计面（离线段不跑 `verify_plan_file`；
+  那是已退役的 kind=run 说门）。日志另打一行 WARN（带原 mode / per_it）。
+- 仍不做：模式 3（逐关不同配额）· `carry_over`（见 §7 的否决）。
+
+**守卫**：`tests/worker/test_plan_rotation_multiround.py`(12) · `tests/worker/test_stream_collect_stats.py`(3) ·
+`tests/remote/test_plan_rotation_cloud.py`(7) · `tests/trainer/test_stage_rotation_export.py`(3) ·
+`tests/remote/test_offline_boot.py::test_build_run_argv_rotation_switch_only_when_non_default`；
+旧用例 `test_multi_round_bundle_with_rotation_is_refused` 随拒收面一起退役（新保证在计划形状上钉）。
+
+**门禁**：nn-python-gate **5322 passed / 2 skipped**（ruff + mypy 0 错）· 根 `bun run check`
+ **2617 pass / 17 skip / 0 fail** · dashboard typecheck + **1857 pass / 0 fail** · `bun run build` ✓。
+
+---
 ## §45 轮换窗口的账本读数：窗口与分关进度上屏 + 课程侧前置校验（2026-10-28）
 
 **触发**：逐轮采样子集（`rotation_mode`，全文 `plan/it-stage-ratation.plan.md`）落地后，「本轮采

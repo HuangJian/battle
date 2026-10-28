@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -67,10 +68,130 @@ def pair_args(args: Any) -> dict:
     return {k: getattr(args, k, None) for k in PAIR_ARG_FIELDS}
 
 
+# ------------------------------------------------------------------ 轮换（逐轮窗口）
+
+
+def rotation_recipe(plan: dict) -> dict | None:
+    """计划的**轮换配方**（`plan["rotation"]`；未开轮换/老计划 ⇒ None）。
+
+    2026-10-28（plan/it-stage-ratation §9.5，云机轮换）：配方 = `mode` / `per_it` /
+    `pinned` 三个标量，窗口键是计划既有的 `rotate_seed` —— 两侧用同一个
+    `stage_rotation.window_for` 解出每一轮的窗口。缺席 ⇒ 一个函数都不调（老计划逐字节不变）。
+    """
+    raw = plan.get("rotation")
+    if isinstance(raw, dict) and str(raw.get("mode") or "").strip():
+        return raw
+    return None
+
+
+def normalize_rotation(recipe: object) -> dict:
+    """轮换配方归一（形状 + 值域；畸形 ⇒ `ProtocolError`，绝不半信半疑地存进计划）。"""
+    from worker.volume_waves import ROTATION_MODES
+
+    if not isinstance(recipe, dict):
+        raise ProtocolError(f"rotation 配方必须是对象，收到 {type(recipe).__name__}")
+    mode = str(recipe.get("mode") or "").strip()
+    if mode not in ROTATION_MODES:
+        raise ProtocolError(
+            f"rotation.mode={mode!r} 未知（支持 {' / '.join(ROTATION_MODES)}）"
+        )
+    raw_per = recipe.get("per_it", 0)
+    if isinstance(raw_per, bool) or not isinstance(raw_per, int) or int(raw_per) < 0:
+        raise ProtocolError(f"rotation.per_it 必须是非负整数，收到 {raw_per!r}")
+    raw_pin = recipe.get("pinned", [])
+    if not isinstance(raw_pin, (list, tuple)):
+        raise ProtocolError(f"rotation.pinned 必须是数组，收到 {type(raw_pin).__name__}")
+    pinned: list[int] = []
+    for s in raw_pin:
+        if isinstance(s, bool) or not isinstance(s, int):
+            raise ProtocolError(f"rotation.pinned 必须是整数数组，收到 {s!r}")
+        pinned.append(int(s))
+    return {"mode": mode, "per_it": int(raw_per), "pinned": sorted(set(pinned))}
+
+
+def plan_all_stages(plan: dict) -> list[int]:
+    """计划覆盖的**全关集**（`pair_args.stages` 解析；缺/坏 ⇒ 空表，调用方按缺省处理）。"""
+    raw = str((plan.get("pair_args") or {}).get("stages") or "").strip()
+    if not raw:
+        return []
+    from worker.volume_waves import parse_stages_arg
+
+    try:
+        return parse_stages_arg(raw)
+    except ValueError:
+        return []
+
+
+def round_window(
+    plan: dict, it: int, *, window_override: Sequence[int] | None = None
+) -> list[int]:
+    """第 `it` 轮该采哪些关（排序）：轮换激活 ⇒ 配方解出的窗口；否则块里的 `stages`。
+
+    `window_override` 优先（云机开关的降级面：`--rotation off` 把窗口换成全集）。
+    配方在场但全关集取不到（`pair_args.stages` 缺/坏）⇒ `ProtocolError`：那说明计划不是
+    本设计写出来的，猜一个关集去采样正是要防的事。
+    """
+    if window_override is not None:
+        return sorted({int(s) for s in window_override})
+    recipe = rotation_recipe(plan)
+    vol = plan.get("volume")
+    if recipe is None:
+        raw = vol.get("stages") if isinstance(vol, dict) else None
+        return sorted({int(s) for s in raw}) if raw else []
+    stages = plan_all_stages(plan)
+    if not stages:
+        raise ProtocolError(
+            "计划带 rotation 配方但 `pair_args.stages` 缺/不可解析——解不出窗口（拒收）"
+        )
+    from worker.volume_waves import window_from_recipe
+
+    try:
+        return window_from_recipe(recipe, int(it), stages, rotate_seed=int(plan["rotate_seed"]))
+    except ValueError as e:
+        raise ProtocolError(f"计划 rotation 配方非法：{e}") from e
+
+
+def volume_for_round(
+    plan: dict, it: int, *, window_override: Sequence[int] | None = None
+) -> dict | None:
+    """计划 → **第 `it` 轮**的 `volume` 块（轮换激活 ⇒ 按当轮窗口重解；否则**原样**同一对象）。
+
+    这是「云机每轮有自己那一份块」的唯一入口：`pairs_for`（对集重放）与 `remote/plan_run`
+    （逐局流式采集/加宽/训练侧配额）都读它，所以三处不可能各用一个窗口。
+    """
+    vol = plan.get("volume")
+    if not isinstance(vol, dict):
+        return None
+    if window_override is None and rotation_recipe(plan) is None:
+        return vol  # 老课程/未开轮换：零重算（逐字节不变）
+    from worker.volume_waves import volume_block_for_window
+
+    try:
+        return volume_block_for_window(vol, window=round_window(plan, it, window_override=window_override))
+    except ValueError as e:
+        raise ProtocolError(f"计划 it{it} 的窗口块解不出来：{e}") from e
+
+
+def rotation_event(
+    plan: dict, it: int, *, window: Sequence[int], override: str = ""
+) -> dict | None:
+    """云机轮的 `rotation` 读数（§9.1 同一形状；未开轮换且无 override ⇒ None）。"""
+    from worker.volume_waves import event_from_recipe
+
+    stages = plan_all_stages(plan)
+    if not stages:
+        vol = plan.get("volume")
+        if isinstance(vol, dict):
+            stages = [int(s) for s in vol.get("stages") or ()]
+    return event_from_recipe(
+        rotation_recipe(plan), window, all_stages=stages, override=override
+    )
+
+
 def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
     """重放第 `it` 轮的对集（计划是唯一的输入）。
 
-    三条口径（同一个计划里互斥，由 `volume` 块的有无/形状决定）：
+    四条口径（同一个计划里互斥，由 `volume` 块的有无/形状 + `rotation` 配方的有无决定）：
 
       * **无 `volume`**（老课程）：`build_pairs` 纯函数重放 —— 与 hub 侧逐字节一致；
       * **有 `volume` + 分关字段**（2026-10-07，plan/rollout-stage-balance §4.3）：
@@ -79,13 +200,18 @@ def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
       * **有 `volume`（老五字段）**：`initial_wave_pairs` = 每关 G0 局的
         **初波**对集，与本地集群 `TrainingLoop._iteration_pairs` 的 volume 分支**同函数**
         —— 云机采的这批种子与本地集群该轮初波逐位相同（2026-09-22，见 `biz/volume_waves`
-        的「计划里的动态采集块」节）。
+        的「计划里的动态采集块」节）；
+      * **有 `rotation` 配方**（2026-10-28，云机轮换）：块先按**当轮窗口**重解
+        （`volume_for_round`），再走上面同一条分关路径 —— 多轮段里每轮的关集/局数都是
+        当轮那一份（一份块配多个窗口的静默错法从此不可达）。
     """
     vol = plan.get("volume")
     if isinstance(vol, dict):
         from worker.volume_waves import initial_wave_pairs, initial_wave_pairs_by_stage
 
-        per_stage = vol.get("games_per_stage_by_stage")
+        block = volume_for_round(plan, it)
+        assert isinstance(block, dict)  # vol 是 dict ⇒ 这里必有块
+        per_stage = block.get("games_per_stage_by_stage")
         if isinstance(per_stage, dict) and per_stage:
             return initial_wave_pairs_by_stage(
                 int(plan["rotate_seed"]), int(it), games_by_stage=per_stage
@@ -93,8 +219,8 @@ def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
         return initial_wave_pairs(
             int(plan["rotate_seed"]),
             int(it),
-            stages=[int(s) for s in vol["stages"]],
-            games_per_stage=int(vol["games_per_stage"]),
+            stages=[int(s) for s in block["stages"]],
+            games_per_stage=int(block["games_per_stage"]),
         )
     ns = SimpleNamespace(**plan["pair_args"])
     return build_pairs(ns, int(it), int(plan["rotate_seed"]))
@@ -188,6 +314,10 @@ def build_plan(
     #: 只有注释没有 argparse——D1 把它补上）。语义是**只能降不能抬**：硬上界是防「手写/
     #: 损坏的计划把节点按一整天」的那道闸，抬它等于拆闸（本计划 §6 已否决）。
     max_segment_iters: int = 0,
+    #: ★ 轮换配方（2026-10-28，plan/it-stage-ratation §9.5）：`stage_rotation.recipe_from_args`
+    #: 的产出（`mode`/`per_it`/`pinned`）或 None。带上它 ⇒ 计划覆盖的**每一轮**都由
+    #: `pairs_for` 按当轮窗口重解（`volume` 块不再是一份块配多个窗口）；None ⇒ 老行为。
+    rotation: dict | None = None,
     log=lambda msg: None,
 ) -> dict:
     """组装计划（hub 侧）。`it` = 计划区间左端点 = **本 job 要跑的上一轮**
@@ -270,6 +400,12 @@ def build_plan(
             plan["volume"] = validate_volume_block(volume)
         except ValueError as e:
             raise ProtocolError(f"build_plan: 动态采集块非法（拒发）：{e}") from e
+    if rotation is not None:
+        # 轮换只在动态采集下生效（课程侧已有同义校验）；没有块 ⇒ 拒发而不是发一份
+        # 「配了轮换但全关采」的静默计划。
+        if volume is None:
+            raise ProtocolError("build_plan: 带 rotation 配方但没有 volume 块（轮换需要按样本量的配额）")
+        plan["rotation"] = normalize_rotation(rotation)
     # 目标轮（= 本 job 之后那一轮）：argv 模板的目标就是它。
     tmpl_it = it + 1
     tmpl_pairs = pairs_for(plan, tmpl_it)
@@ -368,6 +504,34 @@ def validate_plan(plan: object) -> dict:
             plan["volume"] = validate_volume_block(vol)
         except ValueError as e:
             raise ProtocolError(f"计划 volume 块非法：{e}") from e
+    if plan.get("rotation") is not None:
+        # ★ 轮换配方（2026-10-28，云机轮换）：形状 + 值域 + 「每一轮都能解出窗口」+
+        #   全关 est 表覆盖——四道都在**交接之前**响亮失败（跑到第 2 轮才发现关集错了
+        #   时，已经产了一批不可信 shard）。
+        plan["rotation"] = normalize_rotation(plan["rotation"])
+        if vol is None:
+            raise ProtocolError(
+                "计划带 rotation 配方但没有 volume 块——轮换只在动态采集（按样本量配额）下生效"
+            )
+        all_stages = plan_all_stages(plan)
+        if not all_stages:
+            raise ProtocolError(
+                "计划带 rotation 配方但 pair_args.stages 缺/不可解析——全关集是窗口的分母（拒收）"
+            )
+        for it in planned_iters(plan):
+            round_window(plan, it)  # 配置非法/关号打错 ⇒ 在这里响亮
+        raw_ests = (vol or {}).get("est_s_all")
+        if not isinstance(raw_ests, dict):
+            raise ProtocolError(
+                "计划带 rotation 配方但 volume 缺 est_s_all（派生非导出轮的窗口要用全关 est 表）"
+            )
+        missing_ests = [
+            s for s in all_stages if str(s) not in raw_ests and s not in raw_ests
+        ]
+        if missing_ests:
+            raise ProtocolError(
+                f"volume.est_s_all 缺关: {missing_ests}（窗口里的每一关都要有估计）"
+            )
     argv = plan["argv_template"]
     if not isinstance(argv, list) or not argv or not all(isinstance(a, list) for a in argv):
         raise ProtocolError("计划 argv_template 必须是非空二维数组")
@@ -388,6 +552,7 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
     stages/target/G0 与 args 说的不一致」这类错（例如导出时用了别的课程的 --stages）。
     """
     vol = plan.get("volume")
+    rotation = rotation_recipe(plan)
     for it in planned_iters(plan):
         mine = pairs_for(plan, it)
         if isinstance(vol, dict):
@@ -396,19 +561,26 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
             # 分关 G 是「est 决定的局数」这类运行参数：args 侧无法独立复算 ⇒ 把块里的
             # 分关数字**注入**重解（自检此时守 stages/target/模板恒等；块自身的同源校验
             # 在 validate_volume_block 里已经拦过一次）。
+            #
+            # ★ 2026-10-28（云机轮换）：开了轮换时**每一轮注入的都是当轮那一份** ——
+            #   关集 = 当轮窗口（否则按导出轮的窗口重解 ⇒ 第 2 轮起每份计划在发布期被拒），
+            #   分关 est 从全关表里取当轮窗口那几关（`volume_block` 的 `or est` 回退同规）。
+            round_block = volume_for_round(plan, it) if rotation is not None else vol
+            assert isinstance(round_block, dict)
+            ests = round_block.get("est_s_by_stage")
             try:
                 real = volume_pairs_from_args(
                     args,
                     it,
                     int(plan["rotate_seed"]),
-                    est_samples_per_game=int(vol["est_samples_per_game"]),
-                    ests_by_stage=vol.get("est_s_by_stage"),
-                    est_hi_factor=vol.get("est_hi_factor"),
-                    # ★ 2026-10-27（逐轮采样子集）：重解必须用**计划块里的关集**（= 本轮窗口）。
-                    #   不传 ⇒ 按 `args.stages` 全集重解 ⇒ 窗口轮次被判成「重放与 args 不一致」
-                    #   （实测：12 关窗口 vs 35 关全集 ⇒ 每份计划在发布期被拒）。子集关系由
-                    #   `volume_block` 自己校验（打错关号在这里也响亮）。
-                    stages_override=vol.get("stages"),
+                    est_samples_per_game=int(round_block["est_samples_per_game"]),
+                    ests_by_stage=ests,
+                    est_hi_factor=round_block.get("est_hi_factor"),
+                    # 重解必须用**当轮块里的关集**（= 本轮窗口）。不传 ⇒ 按 `args.stages`
+                    # 全集重解 ⇒ 窗口轮次被判成「重放与 args 不一致」（实测：12 关窗口 vs
+                    # 35 关全集 ⇒ 每份计划在发布期被拒）。子集关系由 `volume_block` 自己
+                    # 校验（打错关号在这里也响亮）。
+                    stages_override=round_block.get("stages"),
                 )
             except ValueError as e:
                 raise ProtocolError(f"计划自检失败：volume 块与 args 不自洽（{e}）") from e

@@ -347,6 +347,40 @@ class StreamCollector:
             "capped_stages": [int(s) for s in capped],
         }
 
+    def stage_stats(self) -> dict:
+        """**分关采集账**（与 `trainer/loop_volume._volume_stage_stats` 同一形状）。
+
+        为什么要点这一格（2026-10-28，plan/it-stage-ratation §9.5）：控制台的「各关进度」
+        列/面板读的是账本里的 `volume_stage_stats`（本机腿收官时写），而云机轮此前什么都没
+        写 ⇒ 云机段那几列恒为 `—`。同一个形状 ⇒ 读面一份解析器适配两条腿
+        （`dashboard/src/server/iters.ts::parseIterVolume`），不必在控制台里写第二个分支。
+
+        差异只在两格（且都是读数面，进不了判据）：
+          * `est_src` = `"plan"`：云机的分关 est 是**导出时钉进计划**的（节点没有 hub 的
+            jsonl 现算）；本机腿的 `learned`/`trailing` 在这里不成立。
+          * `halted` = 逐关配额全部达成（= 采集器停止派局的同一个判据）。
+        """
+        short = shortfall_by_stage(
+            stages=self.stages, collected=self.collected, target_transitions=self.target
+        )
+        return {
+            "rule": VOLUME_ALLOC_RULE,
+            "est_src": "plan",
+            "halted": not short,
+            "quota": int(self.quota),
+            "stages": {
+                str(int(s)): {
+                    "collected": int(self.collected.get(s, 0)),
+                    "games": int(self.games.get(s, 0)),
+                    # `est_s` = 计划钉的本关估计（与训练侧分母同源）；`cap_games` = 同一份硬顶。
+                    "est_s": int(self.ests.get(s, 0)),
+                    "cap_games": int(self._plan_caps.get(s, 0)),
+                }
+                for s in self.stages
+            },
+            "shortfall": {str(int(s)): int(v) for s, v in short.items()},
+        }
+
     def summary_line(self) -> str:
         """**一行**收尾读数（不逐局打：用户口径 2026-10-27「log 要精简要节制」）。
 

@@ -164,9 +164,14 @@ class TrainingExport:
             log(f"[run_rl] it{it}: {_describe_window(window, stages)}（采集/配额按窗口）")
         # `agg` 与本地链同源（`--est-agg`，2026-10-21 评审 #8）：两侧不同值 = 同一轮两份反解。
         agg = str(getattr(args, "est_agg", "latest") or "latest")
-        per_stage = trailing_stage_samples_per_game(
+        # ★ 2026-10-28（云机轮换）：开了轮换 ⇒ est 一次按**全关**取（窗口外的关也要有估计，
+        #   否则云机第 2 轮换到别的窗口时无表可查）；然后从里面切出本轮窗口 ——
+        #   `trailing_stage_samples_per_game` 是逐关独立的，切出来的值与原调用逐字节相同
+        #   （`tests/trainer/test_stage_rotation_export.py` 钉住）。
+        rotation_on = bool(str(getattr(args, "rotation_mode", "") or "").strip())
+        ests = trailing_stage_samples_per_game(
             self._traj_root,
-            window,
+            stages if rotation_on else window,
             window_iters=3,
             fallback=est,
             agg=agg,
@@ -176,8 +181,9 @@ class TrainingExport:
             #   云机 `est_s_by_stage` 退化成「每关同一个 G」（评审 P0，2026-10-21）。
             exclude_it=int(it),
         )
+        per_stage = {s: v for s, v in (ests or {}).items() if s in set(window)}
         try:
-            return volume_block(
+            block = volume_block(
                 args,
                 est_samples_per_game=est,
                 ests_by_stage=per_stage or None,
@@ -189,6 +195,11 @@ class TrainingExport:
                 f"[run_rl] 动态采集无法写进离线计划（{e}）——修好课程/参数再导出："
                 "盘里没有的采集量规则，云机无法自行补上"
             ) from e
+        if block is not None and rotation_on:
+            # 全关 est 表（additive；只有开了轮换才写）：计划覆盖的**每一轮**都靠它反解
+            # 自己那几关的局数（`worker/volume_waves.volume_block_for_window`）。
+            block["est_s_all"] = {int(s): int(v) for s, v in (ests or {}).items()}
+        return block
 
     def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
         """`--export-bundle`：把 it..it+n-1 打成**可上传云机**的全离线任务包（本轮不训练）。
@@ -208,17 +219,13 @@ class TrainingExport:
         （`plan.open_ended=true`，终点 = 段长）。有限模式的算术与包内容逐字节不变。
         """
         args = self.args
-        # ★ 2026-10-27（评审 A4）：轮换的窗口是 `it` 的函数，而计划里的 `volume` 块是**单份**
-        #   （块内钉着 `it`/`rotate_seed`，`plan_pairs_fp` 要对区间内**每一轮**重放同一块）
-        #   ⇒ 一份块配多个窗口必然错，且错法是**静默**的（第 2 轮起还在用第 1 轮的窗口）。
-        #   v1 只支持逐轮下发的计划：多轮包一律拒导（不是降级，是不知道该怎么问）。
+        # ★ 2026-10-27（评审 A4）/ 2026-10-28（云机轮换）：轮换的窗口是 `it` 的函数，而计划里的
+        #   `volume` 块是**单份**（块内钉着导出那一轮的 `stages`/`rotate_seed`）⇒ 一份块配多个
+        #   窗口必然错，且错法是**静默**的（第 2 轮起还在用第 1 轮的窗口）。
+        #   v1 在这里拒导多轮包；现在改为把**轮换配方**（mode/per_it/pinned + 全关 est 表）
+        #   写进计划 —— 云机用同一个 `window_for` 逐轮解出自己的窗口（`worker/plan.volume_for_round`），
+        #   所以多轮包仍然只带一份块，但每一轮都拿得到自己那一份。
         rotation_mode = str(getattr(args, "rotation_mode", "") or "")
-        if rotation_mode and int(n) > 1:
-            raise SystemExit(
-                f"[run_rl] --export-bundle 要导 {int(n)} 轮，但 rotation_mode="
-                f"{rotation_mode!r} 的采样子集是**逐轮**的，而包里的"
-                "volume 块只能钉一轮 —— 请按轮拆包（每包 1 轮），或关掉轮换"
-            )
         # ★ 2026-09-21（§3）：原先这里拒绝「非 remote」——`--ppo` 删除后该判据恒真、会把
         #   整条导出路径误拒。单一 PPO 路径下「PPO 在节点上跑」是唯一形态，导出天然成立。
         iters_total = int(getattr(args, "iters", 0) or 0)
@@ -240,6 +247,7 @@ class TrainingExport:
             )
         from worker.iter_job import build_iter_spec
         from worker.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
+        from worker.stage_rotation import recipe_from_args
 
         wver = common.distribution.weights_fingerprint(args.out)
         # 节点并发（2026-10-09，plan/course-workers-removal §3-S2-3）：**0 = 节点自定**
@@ -268,6 +276,8 @@ class TrainingExport:
             game_timeout_sec=game_timeout,
             budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
             volume=self._volume_plan_block(it),
+            # 配方缺席（`rotation_mode` 空）⇒ None ⇒ 计划不长这个键（老包逐字节不变）。
+            rotation=recipe_from_args(args),
             # 段长上界的再降档（`--run-max-iters`；0 = 硬上界）——与 `common/manifest.py`
             # 的注释、控制台的静态预判读的是同一件事（D1：两边不得漂）。
             max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),
@@ -276,6 +286,11 @@ class TrainingExport:
         log(
             f"[run_rl] 全离线导出：it{it} → it{plan['end_it']}"
             f"（{len(planned_iters(plan))} 轮）——本轮不训练、不等待"
+            + (
+                f"｜轮换 {rotation_mode}：配方进计划，云机逐轮换窗口"
+                if rotation_mode
+                else ""
+            )
         )
         # export_path 非空 ⇒ `_remote_ppo` 只建 job 目录（打包源）+ 写包 + 抛 BundleExportedError。
         self._remote_ppo(it, spec, plan_bytes=dump_plan(plan), export_path=str(args.export_bundle))

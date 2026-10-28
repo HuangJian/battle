@@ -522,6 +522,220 @@ def volume_block(
     return block
 
 
+# ------------------------------------------------------------------ 逐轮窗口
+#
+# 窗口数学（`window_for` 等）**住在这一层**（2026-10-28）：`worker.plan`(L4) 要按轮重解窗口，
+# 而 `worker.stage_rotation` 是本层之上的 L4 门面 ⇒ 核心下沉到这里，L4→L4 的上向边不存在。
+# `worker.stage_rotation` 继续以同名转发（`X as X`），读者一行不改；窗口仍只有一个定义。
+
+#: 窗口排列的流标签（与 `biz/course.py` 的 `--rotate-stages` 同一个常量：同一个
+#: `(rotate_seed, epoch_idx)` 在两处抽出同一个排列，便于把老旋钮与新模式对账）。
+EPOCH_TAG = 0xA11CE
+
+#: 支持的模式（`""` = 关闭；关闭时调用方拿到**全集**，无需分支）。
+ROTATION_MODES = ("even", "pinned")
+
+
+def _window_positions(rotate_seed: int, epoch_idx: int, n: int) -> list[int]:
+    """`0..n-1` 的一个确定性排列（epoch 键控：同一 epoch 内的所有窗口共用一个排列）。"""
+    rng = np.random.default_rng([int(rotate_seed), EPOCH_TAG, int(epoch_idx)])
+    return [int(i) for i in rng.permutation(int(n))]
+
+
+def _rotate_window(
+    stages: Sequence[int], *, it: int, rotate_seed: int, k: int
+) -> list[int]:
+    """在 `stages` 上取第 `it` 轮的窗口（`ceil(n/k)` 轮铺满一遍，窗口间不重叠）。"""
+    n = len(stages)
+    if n <= 0:
+        return []
+    if n == 1:
+        return [int(stages[0])]
+    per_epoch = -(-n // k)
+    pos = (int(it) - 1) % per_epoch
+    epoch_idx = (int(it) - 1) // per_epoch
+    perm = _window_positions(rotate_seed, epoch_idx, n)
+    return [int(stages[i]) for i in perm[pos * k : (pos + 1) * k]]
+
+
+def window_for(
+    *,
+    mode: str,
+    it: int,
+    all_stages: Sequence[int],
+    rotate_seed: int,
+    per_it: int = 0,
+    pinned: Sequence[int] = (),
+) -> list[int]:
+    """第 `it` 轮该采哪些关（**排序**；确定性；`mode` 空 ⇒ 全集）。
+
+    * `even`：每轮 `per_it` 关，`ceil(n/per_it)` 轮覆盖一遍（`per_it >= 1` 必须显式给）；
+    * `pinned`：`pinned` 每轮恒在，余额 `per_it` 关从「其余关」里轮换（`per_it = 0` 合法
+      = 每轮只采 pinned）；
+    * `mode` 为空 ⇒ 返回全集（关闭窗口）。
+
+    失败一律 `ValueError`（调用方转 SystemExit / ProtocolError —— 静默取一个窗口 = 采集量
+    对不上目标，最难发现那种）。
+    """
+    stages = sorted({int(s) for s in all_stages})
+    if not stages:
+        raise ValueError("stage_rotation 需要至少一个 stage（all_stages 为空）")
+    if int(it) <= 0:
+        raise ValueError(f"stage_rotation 的 it 必须 >= 1（收到 {it}）")
+    mode = str(mode or "").strip()
+    if not mode:
+        return stages
+    if mode not in ROTATION_MODES:
+        raise ValueError(
+            f"未知的 rotation_mode={mode!r}（支持 {' / '.join(ROTATION_MODES)}；空 = 关闭）"
+        )
+
+    stage_set = set(stages)
+    pin = sorted({int(s) for s in pinned})
+    unknown = [s for s in pin if s not in stage_set]
+    if unknown:
+        raise ValueError(f"rotation_pinned 里有不在 --stages 的关号：{unknown}")
+
+    if mode == "even":
+        if int(per_it) < 1:
+            raise ValueError("rotation_mode=even 需要 rotation_per_it >= 1")
+        return sorted(
+            _rotate_window(stages, it=int(it), rotate_seed=int(rotate_seed), k=int(per_it))
+        )
+
+    # pinned：pinned 恒在 + 余额轮换（per_it=0 ⇒ 只采 pinned，合法）
+    rest = [s for s in stages if s not in set(pin)]
+    k = int(per_it or 0)
+    if k <= 0:
+        return pin
+    return sorted(pin + _rotate_window(rest, it=int(it), rotate_seed=int(rotate_seed), k=k))
+
+
+def window_from_recipe(
+    recipe: Any, it: int, all_stages: Sequence[int], *, rotate_seed: int
+) -> list[int]:
+    """计划里的配方 → 第 `it` 轮的窗口（与 `window_from_args` 同一个 `window_for`）。
+
+    配方缺席/`mode` 为空 ⇒ 全集（关闭窗口；调用方无需分支）。配置非法（未知 mode、
+    `pinned` 不在关集）照旧 `ValueError`——计划层的调用方转 `ProtocolError`（拒收而不是
+    跑到半途）。
+    """
+    if not isinstance(recipe, Mapping):
+        return sorted({int(s) for s in all_stages})
+    mode = str(recipe.get("mode") or "").strip()
+    if not mode:
+        return sorted({int(s) for s in all_stages})
+    return window_for(
+        mode=mode,
+        it=int(it),
+        all_stages=all_stages,
+        rotate_seed=int(rotate_seed),
+        per_it=int(recipe.get("per_it") or 0),
+        pinned=[int(s) for s in (recipe.get("pinned") or ())],
+    )
+
+
+def event_from_recipe(
+    recipe: Any,
+    window: Sequence[int],
+    *,
+    all_stages: Sequence[int],
+    override: str = "",
+) -> dict | None:
+    """**云机轮**的 `rotation` 读数（形状与 `stage_rotation.event_from_args` 一字不差）。
+
+    `override` 非空 = 本轮的窗口不是配方解出来的，而是笔记本开关强制的：账本里记
+    `mode = override`（例 `off` = 笔记本把轮换降级成全关采样）+ `override` 一格
+    ——语料分布变了就必须留痕（§15.5 的精神：不许静默漂移）；没有窗口可记
+    （配方缺席且没有 override）⇒ None（调用方不写键，老账本行逐字节不变）。
+    """
+    mode = str(override or "").strip() or str(
+        (recipe or {}).get("mode") if isinstance(recipe, Mapping) else ""
+    ).strip()
+    if not mode:
+        return None
+    if override:
+        per_it, pinned = 0, []
+    else:
+        per_it = int((recipe or {}).get("per_it") or 0)
+        pinned = [int(s) for s in ((recipe or {}).get("pinned") or ())]
+    ev: dict = {
+        "mode": mode,
+        "per_it": per_it,
+        "pinned": pinned,
+        "all": len(sorted({int(s) for s in all_stages})),
+        "window": [int(s) for s in window],
+    }
+    if override:
+        ev["override"] = str(override)
+    return ev
+
+
+def volume_block_for_window(block: Mapping[str, Any], *, window: Sequence[int]) -> dict:
+    """计划里的 `volume` 块 → **指定窗口**那一轮的块（逐关局数按同一分配器重解）。
+
+    为什么需要它（2026-10-28，云机轮换 · plan/it-stage-ratation §9.5）：`plan["volume"]` 是
+    **一份**块（钉着导出那一轮的窗口），而窗口是 `it` 的函数 ⇒ 多轮段里每轮都得按**当轮
+    窗口**重解一遍，否则第 2 轮起还在用第 1 轮的关集（`pairs_fp` 逐轮重放会当场抓住）。
+
+    分关局数的唯一来源 = `alloc_games_by_stage(window, target, est_hi(est_s))`（与
+    `volume_block` 同一个分配器）：`est_s` 取块里的全关 est 表（`est_s_all`，导出那一刻从
+    盘上历史钉下来）——**缺关响亮报错**，静默回退全局 est 会让「这一关铺几局」与本机链不同源。
+
+    返回值：`stages` / `games_per_stage` / `per_stage_quota` / `est_s_by_stage` /
+    `games_per_stage_by_stage` 按新窗口重解，其余字段（`target_transitions` /
+    `est_samples_per_game` / `est_hi_factor` / `topup` / `est_s_all`）原样带过；
+    `widen_width` 一律**弹掉**（加宽是运行时的事：`remote/plan_run` 每轮按本机宽度重铺）。
+    """
+    stages = sorted({int(s) for s in window})
+    if not stages:
+        raise ValueError("volume_block_for_window: 窗口不能为空")
+    target = int(block["target_transitions"])
+    est = int(block.get("est_samples_per_game", 0) or 0)
+    raw_all = block.get("est_s_all")
+    if not isinstance(raw_all, Mapping):
+        raise ValueError(
+            "volume 块缺 est_s_all（开了轮换的计划必须钉**全关** est 表——派生非导出轮的窗口要用它）"
+        )
+    ests_all: dict[int, int] = {}
+    for k, v in raw_all.items():
+        if isinstance(v, bool) or not isinstance(v, int) or int(v) < 0:
+            raise ValueError(f"volume.est_s_all[{k!r}] 必须是非负整数（0 = 无估计），收到 {v!r}")
+        ests_all[int(k)] = int(v)
+    missing = [s for s in stages if s not in ests_all]
+    if missing:
+        raise ValueError(f"volume.est_s_all 缺关: {missing}（窗口里的每一关都要有估计）")
+    from worker.volume_alloc import (
+        DEFAULT_EST_HI_FACTOR,
+        alloc_games_by_stage,
+        est_hi,
+    )
+
+    factor = float(block.get("est_hi_factor") or DEFAULT_EST_HI_FACTOR)
+    # `or est` 与 `volume_block` 逐字同规（est_s_all 里的 0 = 该关无估计 ⇒ 回退全局 est）。
+    est_s = {s: int(ests_all[s] or est) for s in stages}
+    out = dict(block)
+    out.update(
+        {
+            "stages": stages,
+            "games_per_stage": int(initial_games(target, len(stages), est)),
+            "per_stage_quota": int(target_per_stage(target, len(stages))),
+            "est_s_by_stage": est_s,
+            "est_hi_factor": factor,
+            "games_per_stage_by_stage": {
+                int(s): int(n)
+                for s, n in alloc_games_by_stage(
+                    stages,
+                    target,
+                    ests_hi={s: est_hi(est_s[s], factor=factor) for s in est_s},
+                ).items()
+            },
+        }
+    )
+    out.pop("widen_width", None)
+    return out
+
+
 def initial_wave_pairs_by_stage(
     rotate_seed: int, it: int, *, games_by_stage: Mapping[int, int]
 ) -> list[tuple[int, int]]:

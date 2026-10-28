@@ -115,9 +115,9 @@ def test_bad_rotation_config_is_a_system_exit_not_a_traceback() -> None:
         _Vol(rotation_mode="pinned", rotation_pinned="99")._volume_stages(1)
 
 
-def test_multi_round_bundle_with_rotation_is_refused() -> None:
-    """评审 A4：轮换 + 多轮包 = 一份 `volume` 块配多个窗口 ⇒ 拒导（不是静默用第 1 轮的窗口）。"""
-    stub = _Quota()
-    with pytest.raises(SystemExit, match="按轮拆包"):
-        stub._export_offline_bundle(1, [], 2)
-    # n == 1 的路径不在这里验：过了守卫就会进真导出（起权重/打包），那是另一批用例的地盘。
+# ★ 2026-10-28：原先这里钉的是「轮换 + 多轮包 ⇒ 拒导」（评审 A4 / §3.7）。云机轮换落地后
+#   拒收面换成「配方进计划、每轮按配方重解」——一条计划带一份块但每轮有自己的窗口，
+#   用例在 `tests/worker/test_plan_rotation_multiround.py`（每轮窗口 / 同源 / 拒收）与
+#   `tests/trainer/test_stage_rotation_export.py`（全关 est 表 + 多轮包不再拒）。
+#   这里不再重钉旧文案：那个拒收点已经删了，继续断言「必须抛 SystemExit」只会把
+#   已退役的行为焊回测试里。

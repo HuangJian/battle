@@ -925,6 +925,11 @@ def run_training_core(
     if iter_info is not None:
         # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
         result["report"] = iter_info["report"]
+        # ★ 2026-10-28（云机轮换）：分关采集账随结果回传（控制台「各关进度」读的就是它）；
+        #   不在这里搬一手，`iter_info` 里那份就随函数返回被丢了（老产物行没这个键 = 留空）。
+        _vstats = iter_info.get("volume_stage_stats")
+        if isinstance(_vstats, dict) and _vstats:
+            result["volume_stage_stats"] = _vstats
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,

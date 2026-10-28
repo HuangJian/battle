@@ -455,6 +455,27 @@ def test_build_run_argv_passes_training_scale_only_when_non_default(tmp_path: Pa
             )
 
 
+def test_build_run_argv_rotation_switch_only_when_non_default(tmp_path: Path) -> None:
+    """★ 2026-10-28：`CFG["rotation"]` 三态；缺省 `auto` **不传 flag**（旧包 argv 逐字不变），
+    `on`/`off` 原样传给 run_loop；非法值在构造 argv 时就响亮拒。"""
+    base = offline_boot.build_run_argv({}, None, tmp_path / "run", "", "")
+    assert not {"--rotation"} & set(base)
+    auto = offline_boot.build_run_argv(
+        {"rotation": "auto"}, None, tmp_path / "run", "", ""
+    )
+    assert not {"--rotation"} & set(auto)
+    for value in ("on", "off"):
+        argv = offline_boot.build_run_argv(
+            {"rotation": value}, None, tmp_path / "run", "", ""
+        )
+        assert argv[argv.index("--rotation") + 1] == value
+    for bad in ("yes", 1, "offf"):
+        with pytest.raises(ValueError, match="rotation"):
+            offline_boot.build_run_argv(
+                {"rotation": bad}, None, tmp_path / "run", "", ""
+            )
+
+
 def test_build_run_argv_floor_it_rides_with_the_push_outbox(tmp_path: Path) -> None:
     """F7：`--floor-it` 只跟 push 的 `--outbox` 一起出现；0/无 outbox ⇒ 不带（run_loop 缺省 0）。"""
     argv = offline_boot.build_run_argv(

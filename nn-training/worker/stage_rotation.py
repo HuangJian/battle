@@ -1,4 +1,4 @@
-"""worker/stage_rotation.py —— 逐轮采样子集（**窗口**）的唯一定义（纯函数，账本 L4）。
+"""worker/stage_rotation.py —— 逐轮采样子集（**窗口**）的 args 门面（账本 L4）。
 
 plan/it-stage-ratation.plan.md §3.1。为什么要单独一个模块（2026-10-27 评审 A3）：
 
@@ -10,6 +10,15 @@ plan/it-stage-ratation.plan.md §3.1。为什么要单独一个模块（2026-10-
 
 三处各算一次 = 三条腿可能各用一个窗口，而错法是**静默**的：采集按 12 关、裁剪按 35 关
 ⇒ 约 2/3 的样本被裁掉还照常打「丢 N 局未传」。所以窗口只在这里算，三处都调它。
+
+## 分层（2026-10-28，云机轮换）
+
+窗口的**数学**（`window_for` / `window_from_recipe` / `event_from_recipe`）已下沉到
+`worker/volume_waves.py`（L3）：`worker/plan.py`（L4）也要按轮解窗口，而计划里重放窗口
+正是云机轮换的基础 —— 留着 L4 门面会让 L4→L4 变成上向边。本模块保留 args 面
+（课程/CLI 的 `rotation_*` 键 → 配方/窗口/账本读数），并以**同名转发**暴露核心
+（`window_for` / `window_from_recipe` / `event_from_recipe` / `MODES` / `EPOCH_TAG`），
+旧读者一行不改；窗口仍然**只有一个定义**。
 
 ## 判据
 
@@ -28,89 +37,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-import numpy as np
-
+# 窗口核心在本层之下（`worker/volume_waves`，L3）：同名转发（`X as X` = 显式 re-export）。
+# 这里**不重写**任何窗口数学 —— 两份实现 = 两条真相。
+from worker.volume_waves import EPOCH_TAG as EPOCH_TAG
+from worker.volume_waves import ROTATION_MODES as MODES
+from worker.volume_waves import event_from_recipe as event_from_recipe
 from worker.volume_waves import parse_stages_arg
-
-#: 窗口排列的流标签（与 `biz/course.py` 的 `--rotate-stages` 同一个常量：同一个
-#: `(rotate_seed, epoch_idx)` 在两处抽出同一个排列，便于把老旋钮与新模式对账）。
-EPOCH_TAG = 0xA11CE
-
-#: 支持的模式（`""` = 关闭；关闭时调用方拿到**全集**，无需分支）。
-MODES = ("even", "pinned")
-
-
-def _positions(rotate_seed: int, epoch_idx: int, n: int) -> list[int]:
-    """`0..n-1` 的一个确定性排列（epoch 键控：同一 epoch 内的所有窗口共用一个排列）。"""
-    rng = np.random.default_rng([int(rotate_seed), EPOCH_TAG, int(epoch_idx)])
-    return [int(i) for i in rng.permutation(int(n))]
-
-
-def _rotate_window(
-    stages: Sequence[int], *, it: int, rotate_seed: int, k: int
-) -> list[int]:
-    """在 `stages` 上取第 `it` 轮的窗口（`ceil(n/k)` 轮铺满一遍，窗口间不重叠）。"""
-    n = len(stages)
-    if n <= 0:
-        return []
-    if n == 1:
-        return [int(stages[0])]
-    per_epoch = -(-n // k)
-    pos = (int(it) - 1) % per_epoch
-    epoch_idx = (int(it) - 1) // per_epoch
-    perm = _positions(rotate_seed, epoch_idx, n)
-    return [int(stages[i]) for i in perm[pos * k : (pos + 1) * k]]
-
-
-def window_for(
-    *,
-    mode: str,
-    it: int,
-    all_stages: Sequence[int],
-    rotate_seed: int,
-    per_it: int = 0,
-    pinned: Sequence[int] = (),
-) -> list[int]:
-    """第 `it` 轮该采哪些关（**排序**；确定性；`mode` 空 ⇒ 全集）。
-
-    * `even`：每轮 `per_it` 关，`ceil(n/per_it)` 轮覆盖一遍（`per_it >= 1` 必须显式给）；
-    * `pinned`：`pinned` 每轮恒在，余额 `per_it` 关从「其余关」里轮换（`per_it = 0` 合法
-      = 每轮只采 pinned）；
-    * `mode` 为空 ⇒ 返回全集（关闭窗口）。
-
-    失败一律 `ValueError`（调用方转 SystemExit / ProtocolError —— 静默取一个窗口 = 采集量
-    对不上目标，最难发现那种）。
-    """
-    stages = sorted({int(s) for s in all_stages})
-    if not stages:
-        raise ValueError("stage_rotation 需要至少一个 stage（all_stages 为空）")
-    if int(it) <= 0:
-        raise ValueError(f"stage_rotation 的 it 必须 >= 1（收到 {it}）")
-    mode = str(mode or "").strip()
-    if not mode:
-        return stages
-    if mode not in MODES:
-        raise ValueError(f"未知的 rotation_mode={mode!r}（支持 {' / '.join(MODES)}；空 = 关闭）")
-
-    stage_set = set(stages)
-    pin = sorted({int(s) for s in pinned})
-    unknown = [s for s in pin if s not in stage_set]
-    if unknown:
-        raise ValueError(f"rotation_pinned 里有不在 --stages 的关号：{unknown}")
-
-    if mode == "even":
-        if int(per_it) < 1:
-            raise ValueError("rotation_mode=even 需要 rotation_per_it >= 1")
-        return sorted(
-            _rotate_window(stages, it=int(it), rotate_seed=int(rotate_seed), k=int(per_it))
-        )
-
-    # pinned：pinned 恒在 + 余额轮换（per_it=0 ⇒ 只采 pinned，合法）
-    rest = [s for s in stages if s not in set(pin)]
-    k = int(per_it or 0)
-    if k <= 0:
-        return pin
-    return sorted(pin + _rotate_window(rest, it=int(it), rotate_seed=int(rotate_seed), k=k))
+from worker.volume_waves import window_for as window_for
+from worker.volume_waves import window_from_recipe as window_from_recipe
 
 
 def window_from_args(
@@ -147,6 +81,28 @@ def window_from_args(
         per_it=int(getattr(args, "rotation_per_it", 0) or 0),
         pinned=parse_stages_arg(raw) if raw else (),
     )
+
+
+def recipe_from_args(args: Any) -> dict | None:
+    """args → 计划里的**轮换配方**（`rotation_mode` 为空 ⇒ None = 不落键）。
+
+    为什么配方要进计划（2026-10-28，云机轮换）：全离线/半离线腿的逐轮语料由计划重放，
+    而窗口是 `(rotate_seed, it)` 的函数 —— 计划只带**一份** `volume` 块（导出那一轮的窗口）
+    时，云机跑到第 2 轮就没有「这一轮该采哪些关」的可信来源了。配方进计划 ⇒ 两侧用
+    同一个 `window_for` 解出每一轮的窗口（`worker/plan.volume_for_round`）。
+
+    只带三个标量（`mode` / `per_it` / `pinned`）；种子键用计划既有的 `rotate_seed`
+    （与种子流同键，不另立一个）。
+    """
+    mode = str(getattr(args, "rotation_mode", "") or "").strip()
+    if not mode:
+        return None
+    raw = str(getattr(args, "rotation_pinned", "") or "").strip()
+    return {
+        "mode": mode,
+        "per_it": int(getattr(args, "rotation_per_it", 0) or 0),
+        "pinned": parse_stages_arg(raw) if raw else [],
+    }
 
 
 def event_from_args(args: Any, it: int, *, rotate_seed: int | None = None) -> dict | None:
@@ -186,3 +142,17 @@ def describe(window: Sequence[int], all_stages: Sequence[int]) -> str:
         f"rotation {len(window)}/{len(sorted({int(s) for s in all_stages}))} 关"
         f"={list(int(s) for s in window)}"
     )
+
+
+# 供 `plan.py` 等 L4 读者用的显式再导出（`Mapping`/`Any` 在上面已 import，仅类型面）。
+__all__ = [
+    "EPOCH_TAG",
+    "MODES",
+    "describe",
+    "event_from_args",
+    "event_from_recipe",
+    "recipe_from_args",
+    "window_for",
+    "window_from_args",
+    "window_from_recipe",
+]

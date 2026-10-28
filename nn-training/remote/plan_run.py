@@ -135,7 +135,14 @@ from remote.plan_handoff import (
 from remote.plan_handoff import (
     verify_plan_file as verify_plan_file,
 )
-from worker.plan import iter_spec, pairs_for
+from worker.plan import (
+    iter_spec,
+    pairs_for,
+    plan_all_stages,
+    rotation_event,
+    rotation_recipe,
+    volume_for_round,
+)
 
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2
@@ -286,7 +293,21 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     #   `games_per_stage_by_stage` 要过 `validate_runtime_volume` 的同源复算（首批局数 =
     #   `widen_by_width(est 反解值, widen_width)`），只改 games 不声明宽度会被节点/`iter_spec`
     #   响亮拒收（现场：y30-stack it156，9 局/关被铺到 24 局/关 ⇒ ProtocolError 整段死）。
-    vol_probe = ctx.plan.get("volume")
+    # ★ 2026-10-28（云机轮换，plan/it-stage-ratation §9.5）：本轮采哪些关 = **当轮窗口**。
+    #   `ctx.plan["volume"]` 是导出那一轮的那一份（一份块），开了轮换后每轮都要按配方
+    #   重解（`worker/plan.volume_for_round`）——否则第 2 轮起还在采第 1 轮的关集。
+    #   笔记本开关（`ctx.rotation`，三态）在这里落地：
+    #     auto = 跟随计划；on = 计划没带轮换就拒跑（不猜）；off = 把窗口降级成全关（记账）。
+    _policy = str(getattr(ctx, "rotation", "auto") or "auto")
+    window_override, rotation_override = rotation_window_for_round(ctx.plan, it, _policy)
+    if rotation_override:
+        recipe = rotation_recipe(ctx.plan) or {}
+        ctx.log(
+            f"WARN it{it}: 笔记本 --rotation off —— 本段把计划里的轮换"
+            f"（mode={recipe.get('mode')!r} per_it={recipe.get('per_it')}）降级为**全关采样**；"
+            "语料分布与导包时不同（账本 rotation.override=off 留痕）"
+        )
+    vol_probe = volume_for_round(ctx.plan, it, window_override=window_override)
     if isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
         # 先放大再走本机宽度的「加宽」逻辑：两张牌都是纯函数，顺序不影响同源校验。
         vol_probe = _scaled_volume(vol_probe, ctx.sample_mult)
@@ -306,6 +327,9 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
                     vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
                 )
     _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
+    if window_override is not None:
+        # 降级轮：块已经按全关解好，**不要再**让 `pairs_for` 按配方派生一次（那会解回窗口）。
+        _plan.pop("rotation", None)
     pairs = pairs_for(_plan, it)
     if not isinstance(vol_probe, dict):
         # 固定对集课没有「训练侧配额」可放大 ⇒ 直接补同分布的**新种子**（不是重跑同一局）。
@@ -415,6 +439,17 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         log=ctx.log,
     )
     validate_result(result, m, commit_echo_must_match=False)
+    # ★ 2026-10-28（云机轮换）：本轮窗口读数随结果带回落账（`_checkpoint` 写进行）。
+    #   云机轮此前只有 `volume_stage_stats` 的键可看（而它本身还没进行账）⇒ 账本里
+    #   看不出「这段在轮换、这一轮采了哪 12 关」；`override` 非空 = 笔记本开关改过语料面。
+    _rot = rotation_event(
+        ctx.plan,
+        int(it),
+        window=[int(s) for s in (vol_probe or {}).get("stages", ())],
+        override=rotation_override,
+    )
+    if _rot is not None:
+        result["rotation"] = _rot
     raw = _opt_bytes_from_result(result)
     ctx.last_opt_sha = sha256_bytes(raw) if raw else ""
     return result
@@ -452,6 +487,54 @@ def _weight_bytes(result: dict) -> bytes:
     return bytes(decode_weights_json(str(result.get("weights_json") or "")))
 
 
+def rotation_window_for_round(
+    plan: dict, it: int, policy: str
+) -> tuple[list[int] | None, str]:
+    """笔记本开关（`--rotation` 三态）→ `(窗口覆盖, 留痕标记)`。
+
+    * `auto`：不覆盖 —— 计划带轮换就按配方逐轮解（`worker/plan.volume_for_round`）；
+    * `on`：计划没带配方 ⇒ **拒跑**（`ProtocolError`，不猜「那就不轮换吧」）；
+    * `off`：计划带配方 ⇒ 把窗口降级成**全关** + 留痕 `"off"`（账本 `rotation.override`；
+      语料分布变了 = 另一个实验面，必须可读）；计划本来就没轮换 ⇒ 不覆盖（没有可降级的），
+      老行为逐字节不变。
+    """
+    recipe = rotation_recipe(plan)
+    if policy == "on":
+        if recipe is None:
+            raise ProtocolError(
+                "--rotation on 但计划里没有 rotation 配方（课程没开轮换/包是旧的）——"
+                "要么重新导包，要么把开关改回 auto（拒跑而不是静默按全关采）"
+            )
+        return None, ""
+    if policy == "off" and recipe is not None:
+        stages = plan_all_stages(plan)
+        if not stages:
+            raise ProtocolError(
+                f"--rotation off 需要计划里的全关集（pair_args.stages）才能降级（it{it}）"
+            )
+        return stages, "off"
+    return None, ""
+
+
+def _row_extra(result: dict, phase: str) -> dict | None:
+    """账本行的附加格（additive）：`phase` + 云机轮换/分关读数（plan/it-stage-ratation §9.5）。
+
+    为什么在**行**上：控制台读的是账本（`remote/artifacts.ledger_row_from_metrics`），
+    而云机轮此前连 `rotation` 一个字都没有 ⇒ 轮换课在云机段上看起来与全关课一样。
+    缺数据一律不给键（不编 0）——老产物行/未开轮换的轮逐字节不变。
+    """
+    extra: dict = {}
+    if phase != "train":
+        extra["phase"] = phase
+    rot = result.get("rotation")
+    if isinstance(rot, dict) and rot:
+        extra["rotation"] = rot
+    vstats = result.get("volume_stage_stats")
+    if isinstance(vstats, dict) and vstats:
+        extra["volume_stage_stats"] = vstats
+    return extra or None
+
+
 def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phase: str = "train") -> dict:
     """把一轮结果落进产物目录（权重 + opt + 账本行），返回账本行。"""
     agg = dict(result.get("agg", {}) or {})
@@ -465,7 +548,7 @@ def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phas
         rollout_sec=float(wire.get("rollout_sec", 0.0) or 0.0),
         steps=int(agg.get("steps", 0) or 0),
         chunks=int(agg.get("chunks", 0) or 0),
-        extra={"phase": phase} if phase != "train" else None,
+        extra=_row_extra(result, phase),
     )
     # 字节先取到外面（`_weight_bytes` / `_opt_bytes_from_result` 对坏载荷抛 `ValueError`——那是
     # 「结果不可用」，不是「盘写不下去」，两者不能混成同一条归因）。

@@ -608,6 +608,12 @@ LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     ("dim_means", "report", "dimMeans"),
     ("score_mean", "report", ("scoreStats", "mean")),
     ("score_std", "report", ("scoreStats", "std")),
+    # 逐轮窗口与分关账（2026-10-28，plan/it-stage-ratation §9.5）：本机腿由
+    # `biz/events.write_iteration` 写，云机腿由 `remote/plan_run._row_extra` 写 ——
+    # 两条腿**同一个键名、同一个形状**（控制台 `parseIterRotation` / `parseIterVolume`
+    # 一份解析器适配两边，不写「这条曲线来自哪条腿」的分支）。缺数据 ⇒ 不给键（不编 0）。
+    ("rotation", "row", "rotation"),
+    ("volume_stage_stats", "row", "volume_stage_stats"),
 )
 
 

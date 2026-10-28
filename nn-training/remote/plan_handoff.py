@@ -106,6 +106,19 @@ _log_default = tag_logger("run", lambda: time)
 # ------------------------------------------------------------------ 计划交接
 
 
+#: 云机轮换开关的三态（`RunContext.rotation` / `--rotation`）：
+#: auto = 跟随计划；on = 强制（计划没带就拒跑）；off = 降级全关采样。
+ROTATION_POLICIES = ("auto", "on", "off")
+
+
+def rotation_policy(value: object) -> str:
+    """`--rotation` 归一（三态；非法值在**开跑之前**响亮拒绝，不猜一个默认）。"""
+    s = str(value if value is not None else "auto").strip().lower() or "auto"
+    if s not in ROTATION_POLICIES:
+        raise ValueError(f"--rotation 只认 {' / '.join(ROTATION_POLICIES)}，收到 {value!r}")
+    return s
+
+
 def _positive_mult(value: object, name: str) -> float:
     """训练放大倍数：有限且 > 0（缺省 1.0 原样）；非法值在**开跑之前**响亮拒绝。"""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
@@ -221,6 +234,10 @@ class RunContext:
         #: 作用在**每轮 PPO 遍数**。两者都不碰评估语料，也不改盘上的 plan/manifest 身份。
         sample_mult: float = 1.0,
         epoch_mult: float = 1.0,
+        #: ★ 2026-10-28（云机轮换）：笔记本开关（`--rotation auto|on|off`）。
+        #: auto = 跟随计划（包带轮换就逐轮换窗口）；on = 计划没带就拒跑（不猜）；
+        #: off = 把计划里的轮换降级成全关采样（账本 `rotation.override` 留痕）。
+        rotation: str = "auto",
         #: 产物补传（「中途能连上 hub 就自动恢复在线回传」）：None = 这条腿没有补传
         #: （纯离线且没给 hub 地址，或用户显式关掉）——产物照常落本地。
         #: 类型是 `DelivererLike`：两种实现（进程内线程 / 独立子进程）同接口，换实现不动调用方。
@@ -268,6 +285,7 @@ class RunContext:
         self.budget_sec = float(budget_sec or plan.get("budget_sec", 0.0) or 0.0)
         self.sample_mult = _positive_mult(sample_mult, "sample_mult")
         self.epoch_mult = _positive_mult(epoch_mult, "epoch_mult")
+        self.rotation = rotation_policy(rotation)
         self.deliverer = deliverer
         self.run_job_fn = run_job_fn
         self.eval_on_cloud = bool(eval_on_cloud)
@@ -378,6 +396,8 @@ def open_run_context(
     #: PPO 遍数，不改评估语料、不改计划身份。
     sample_mult: float = 1.0,
     epoch_mult: float = 1.0,
+    #: ★ 2026-10-28（云机轮换）：三态开关（见 `ROTATION_POLICIES`）。
+    rotation: str = "auto",
     # ---- 产物补传（可选；缺任一即关）----
     hub_url: str = "",
     hub_token: str = "",
@@ -464,6 +484,7 @@ def open_run_context(
         ),
         sample_mult=sample_mult,
         epoch_mult=epoch_mult,
+        rotation=rotation,
         round_forms=forms,
         stop_file=stop_file,
         ts_tree_dir=_ts_tree_root(ts_code_cache_dir, manifest),

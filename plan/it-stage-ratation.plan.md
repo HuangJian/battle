@@ -139,7 +139,9 @@ payload["stage_rotation"] = {
 
 缺席不进（老课程指纹零漂移）。`course_fp`（文件字节）自动变，无需改。
 
-### 3.7 拒绝面（A4）
+### 3.7 拒绝面（A4）—— ~~已退役~~（2026-10-28，见 §9.6）
+
+> 本节保留为**当时**的拒收方案；多轮包现在允许（配方进计划 + 逐轮派生）。
 
 `trainer/loop_export._export_offline_bundle`：`rotation_mode` 有效且 `n > 1` ⇒ **SystemExit**
 （「轮换的窗口是 `it` 的函数，一份计划只能钉一轮；多轮请逐轮下发或先按轮拆包」）。
@@ -155,7 +157,8 @@ payload["stage_rotation"] = {
    （没被采到的关有没有退化，只有它看得见）。**不许**把评估关集从窗口池里剔掉，也**不许**把评估 seed
    喂进训练抽签（A 层 `EVAL_SEEDS_BASE` 池外池、B/C 层 `EVAL_SEED0` 段，均不得触碰）。
 4. **身份**：`stage_rotation` 只在激活时进 `corpus_identity_fp`（换策略 = 新实验，AGENTS §15.5）。
-5. **单轮计划**：轮换只支持逐轮下发的计划；多轮段响亮拒收（§3.7）。
+5. ~~**单轮计划**：轮换只支持逐轮下发的计划；多轮段响亮拒收（§3.7）。~~
+   **已被 §9.6 取代（2026-10-28）**：多轮段改成「配方进计划、每轮按窗口重解」，不再拒收。
 6. `per_stage_quota` 的**类型不变**（仍是 `int`）：本版不做加权逐关配额（§7）。
 
 ## 5. 验收判据
@@ -223,6 +226,7 @@ S4（§9）新增：
 | S3 | 身份（`_identity_payload` 激活时）+ 多轮段拒收 | 判据 6 |
 | S3′ | ~~模式 3~~ / ~~carry_over~~ | 后置（§7） |
 | S4 | 可观测性（§9）：账本 `rotation` + 分关进度上屏 + 课程前置校验 | 判据 8/9/10 |
+| S5 | 云机轮换（§9.6，2026-10-28）：配方进计划 + 逐轮派生 + notebook 三态开关 + 云机读数进行账 | 多轮包每轮窗口 / 开关三态 / 账本两键 |
 
 ## 9. 可观测性：控制台看得见窗口（2026-10-28）
 
@@ -283,9 +287,34 @@ rotation_mode 非空 ⇒ 必须 target_transitions > 0 且 mode == "per-tick"
 
 ### 9.5 不做（本版）
 
-- **云机腿（`--export-bundle` 单轮包）的分关账**：delivered 行不带它（`remote/artifacts.LEDGER_FIELDS`
-  没收 `volumeTopup`），控制台对这类轮只显示 `—`。理由：控制台的导出腿走 `--run-iters -1`（多轮包
-  已被 §3.7 拒收）⇒ 轮换课程今天到不了云机；真要用时把 `iter_info.volumeTopup` 搬进行账即可
-  （`train_core` 两处 + `plan_run._checkpoint` + `LEDGER_FIELDS`，另立项）。
+- ~~**云机腿（`--export-bundle` 单轮包）的分关账**~~ —— **已落地（2026-10-28，见 §9.6）**。
 - **按关曲线 / 覆盖进度条**：先把窗口与分关账搬上屏，看几轮真读数再谈图形化（避免在没有真数据时
   猜什么形状最有用）。
+
+### 9.6 云机 rollout 支持轮换（2026-10-28，用户口径「云机 rollout 也要支持轮换。ipynb 加个配置开关」）
+
+**根因**：`plan["volume"]` 是**一份**块（钉着导出那一轮的窗口），而窗口是 `it` 的函数 ⇒
+`pairs_for` / `plan_run` 在第 2 轮起还在用第 1 轮的关集。v1 用 §3.7 拒收多轮包——功能关掉了，没修。
+
+**做法**（全文 `docs/nn/training-stack.md` §46；控制台侧 §43）
+
+1. **配方进计划**（additive）：`plan["rotation"] = {mode, per_it, pinned}`（窗口键 = 计划既有
+   `rotate_seed`）+ `volume.est_s_all`（全关 est 表，导出时刻钉住）。缺席 ⇒ 键一个不多。
+2. **唯一派生器** `worker/volume_waves.volume_block_for_window`：按窗口重解 stages / 逐关局数 /
+   达标线 / 分关 est（同一分配器）；缺关响亮。`worker/plan` 新增 `rotation_recipe` / `round_window` / `volume_for_round` / `rotation_event`，
+   `pairs_for` 改成「先取当轮块再重放」；`validate_plan` 四道门（形状 · 需要 volume · 每轮可解 ·
+   est_s_all 覆盖）；`check_plan_against_args` 逐轮用当轮窗口/est 重解。
+3. **导出腿**：删 §3.7 拒收；`_volume_plan_block` 一次按全关取 est（窗口切出的值与旧调用逐字节相同）；
+   `build_plan(rotation=…)`。
+4. **笔记本三态开关**：`CFG["rotation"] = auto|on|off` → `--rotation`（缺省 auto **不进 argv**）；
+   `plan_run` 逐轮 `volume_for_round`；`off` 降级全关 + 账本 `rotation.override` 留痕；`on` 计划没带
+   轮换则拒跑。
+5. **读数**：`plan_run._row_extra`（rotation + volume_stage_stats）→ `LEDGER_FIELDS` 两个新键；
+   `stream_collect.stage_stats()` 与本机腿同形（`est_src="plan"`）⇒ 控制台**零代码**。
+
+**验收**：`tests/worker/test_plan_rotation_multiround.py`(12) · `test_stream_collect_stats.py`(3) ·
+`tests/remote/test_plan_rotation_cloud.py`(7) · `tests/trainer/test_stage_rotation_export.py`(3) ·
+`tests/remote/test_offline_boot.py` 的 `--rotation` argv 用例。判据 7（窗口外关不退化）仍待真实验。
+
+**边界**：est 仍是导出时钉住（冻结包）；`off` 覆盖 = 另一个语料分布（只能靠账本留痕）；
+离线段不跑 `verify_plan_file`（已退役的 kind=run 门）⇒ 覆写不会撞指纹。

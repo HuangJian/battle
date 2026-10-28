@@ -766,6 +766,10 @@ def run_job(
             if collector is not None:
                 # 轮报的 `volumeTopup`（读数面；`rule`/逐关账/缺口/浪费/触顶 与旧形态同键）。
                 iter_info["volumeTopup"] = collector.volume()
+                # ★ 2026-10-28（plan/it-stage-ratation §9.5）：另带一份**本机腿同形状**的分关账
+                #   （`trainer/loop_volume._volume_stage_stats`），随产物行回到账本 ⇒ 控制台的
+                #   「各关进度」列/面板在云机轮上也有读数（同一个解析器，不写第二个分支）。
+                iter_info["volume_stage_stats"] = collector.stage_stats()
                 log(collector.summary_line())
 
     # ---- mode 红线（v1：仅 per-tick） ----
