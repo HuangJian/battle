@@ -279,12 +279,25 @@ def _os_kill_zero_lines(path: Path) -> list[int]:
     return out
 
 
+#: 扫描面要跳过的 scratch 根（2026-10-28 flake）：`tmp/` 是仓库的 scratch 根 —— venv
+#: （`tmp/paddle-venv` 躺着 2723 个 `.py`）、A/B worktree、评审用的整树副本都住那里。
+#: 两类事故同时命中过（`tests/remote/test_download_split.py` 同款）：
+#:   ① 耗时：本用例单跑 5.07s（已踩警告线），xdist 8 并发下顶穿 60s 预算 ⇒ worker 被掐
+#:      （`[gw2] node down: Not properly terminated`）；
+#:   ② 判据：整树副本里当然也有 `os.kill(pid, 0)`，会把「恰好一处」变成多处。
+#: 判据本身不限「谁不许多一份」——只是扫描面限定在**源码**（与
+#: `source_scan.logic_py_files` / `py_files(<包>)` 的取法同口径）。
+_SCRATCH_PARTS = frozenset({"tmp"})
+
+
 def _production_py_files() -> list[Path]:
-    """nn-training 的生产 .py（排除点目录/.venv、__pycache__、tests/、e2e/）。"""
+    """nn-training 的生产 .py（排除点目录/.venv、__pycache__、tests/、e2e/、tmp/）。"""
     out: list[Path] = []
     for path in sorted(NN_ROOT.rglob("*.py")):
         parts = path.relative_to(NN_ROOT).parts
         if any(p.startswith(".") for p in parts) or "__pycache__" in parts:
+            continue
+        if _SCRATCH_PARTS & set(parts):
             continue
         if parts[0] in {"tests", "e2e"}:
             continue
