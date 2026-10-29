@@ -232,18 +232,27 @@ def optimizer_step(opt, device) -> None:
 
 
 def xla_mark_step(device) -> None:
-    """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。"""
+    """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。
+
+    慢过 5s 会打一行（2026-10-29：`art=` 在有动量的轮里 31s，而批量取回没报警 ⇒ 先把
+    「图执行边界」这一步单独量出来——它是产物段的第 0 步，此前完全不可见）。
+    """
     if is_xla(device):
         import torch_xla
         import torch_xla.core.xla_model as xm
 
+        t0 = time.monotonic()
         # 2.5+ 把 mark_step 改名为 sync()；两个都探，兼容旧版。
         for _name in ("sync", "mark_step"):
             _fn = getattr(torch_xla, _name, None)
             if callable(_fn):
                 _fn()
-                return
-        xm.mark_step()
+                break
+        else:
+            xm.mark_step()
+        dt = time.monotonic() - t0
+        if dt >= 5.0:
+            log(f"[art] xla sync {dt:.1f}s")
 
 
 #: 设备自检的缓存（同一进程只测一次——它含一次 XLA 编译，按 job 跑会白付 300 次）。

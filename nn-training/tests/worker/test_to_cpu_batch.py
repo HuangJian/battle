@@ -175,3 +175,16 @@ def test_host_module_writes_the_same_bytes_as_the_module(tmp_path) -> None:
     save_weights_json(module, str(a))
     save_weights_json(common.HostModule(module), str(b))
     assert a.read_bytes() == b.read_bytes(), "权重字节变了 ⇒ 每轮 init_weights_fp 都会漂"
+
+
+def test_log_if_slow_only_when_over_threshold(monkeypatch) -> None:
+    """产物段的**分段读数**：慢过 5s 才打一行，且带张量数（`art` 只有一个总数时靠它分家）。"""
+    clock = {"t": 100.0}
+    logs: list[str] = []
+    monkeypatch.setattr(common.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(common, "log", logs.append)
+    assert common._log_if_slow("快", 100.0, 42) < 5.0
+    assert logs == [], "没超阈值不许打"
+    clock["t"] = 140.0
+    common._log_if_slow("慢", 100.0, 126)
+    assert logs == ["[art] 慢 40.0s（126 个张量）"], logs

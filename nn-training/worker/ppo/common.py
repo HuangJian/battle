@@ -189,6 +189,19 @@ def demo_index(buf: torch.Tensor | None, didx: npt.NDArray[np.int64]) -> Any:
 
 
 
+def _log_if_slow(tag: str, t0: float, n: int = 0) -> float:
+    """量一步耗时；慢过 `FETCH_SLOW_WARN_SEC` 打一行（`art` 只有总数时靠它分家）。
+
+    2026-10-29 云机第三轮：`art=` 在「有动量」的轮里 31s、无动量的首轮 3.7s，而批量取回
+    **没有**报警 ⇒ 31s 不在取回里。这一段有六步（sync / 权重取回 / 写 json / opt 取回 /
+    torch.save / pack + 缓存写），一个总数分不出谁 ⇒ 逐步带标签量。
+    """
+    dt = time.monotonic() - t0
+    if dt >= FETCH_SLOW_WARN_SEC:
+        log(f"[art] {tag} {dt:.1f}s" + (f"（{n} 个张量）" if n else ""))
+    return dt
+
+
 def _xla_fetch_cat(tensors: list) -> list:
     """一串 XLA 张量 → CPU：按 dtype 分组，每组 **一次 `cat` + 一次 `.cpu()`**（便携路径）。
 
@@ -300,7 +313,10 @@ class HostModule(torch.nn.Module):
         super().__init__()
         self._src = module
         #: 一次批量 D2H（`to_cpu_batch`）；之后所有下游读的都是它。
-        self._sd = _to_cpu_state(module.state_dict())
+        t0 = time.monotonic()
+        sd = module.state_dict()
+        self._sd = _to_cpu_state(sd)
+        _log_if_slow("权重取回", t0, len(sd))
 
     def state_dict(self, *args, **kwargs):  # type: ignore[override]
         """已物化的 CPU 副本（`*args/**kwargs` 只为签名兼容：`_ppo_save` 会无参调用）。"""
@@ -360,8 +376,18 @@ def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
     """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
     恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
     os.makedirs(ckpt_path, exist_ok=True)
-    torch.save(_to_cpu_state(model.state_dict()), os.path.join(ckpt_path, "model.pt"))
-    torch.save(_to_cpu_state(opt.state_dict()), os.path.join(ckpt_path, "opt.pt"))
+    t0 = time.monotonic()
+    model_cpu = _to_cpu_state(model.state_dict())
+    _log_if_slow("权重取回(ckpt)", t0)
+    t0 = time.monotonic()
+    opt_sd = opt.state_dict()
+    n_opt = sum(1 for v in opt_sd.get("state", {}).values() for x in v.values() if torch.is_tensor(x))
+    opt_cpu = _to_cpu_state(opt_sd)
+    _log_if_slow("opt 状态取回", t0, n_opt)
+    torch.save(model_cpu, os.path.join(ckpt_path, "model.pt"))
+    t0 = time.monotonic()
+    torch.save(opt_cpu, os.path.join(ckpt_path, "opt.pt"))
+    _log_if_slow("opt torch.save", t0)
     with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)
 
