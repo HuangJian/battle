@@ -1,0 +1,282 @@
+// 课程 y36-active —— 把 y35-classic 学到的「站桩炮台」掰回「动 + 打 + 捡」（2026-10-27）
+//
+// ── 0. 一句话 ──────────────────────────────────────────────────────────────
+//   起点 it270 是一个**停在原地开火**的策略（idle 99.2% / 单局踩 1 格 / 拾取 0.29）；
+//   本腿只改**奖励包三处**（反苟 / 探索 / 道具），其余公式与全部超参逐字沿用 y35-classic，
+//   要求策略在**不丢打击能力**的前提下动起来。
+//
+// ── 1. 立项依据：y35-classic 停腿时的实测（700 局 hard·3 命·0 星·seeds1-20）──────
+//   | 口径 | it195（起点） | it92（谷底） | it270（终点） |
+//   | WIN  | 1.86%        | 0.29%       | **4.86%**     |
+//   | kills/局 | 3.43     | 3.42        | 5.68          |
+//   | cells/局 | 29.4     | 15.9        | **2.93**      |
+//   | idle / stop | 0.639 / 0.659 | 0.894 / 0.893 | **0.992 / 0.991** |
+//   | 拾取/局  | 0.84     | 0.61        | **0.29**      |
+//   ⇒ 胜率涨了 2.6×，但**全部由「站着打」买单**：35 关里 21 关 0 胜，起点唯一稳定关
+//   stage 23（6/20）掉到 1/20（kills 反而 11.3→13.4：杀得多、追不上最后一个）。
+//
+//   **机制（可逐字定位）**：`curricula/y35-classic.jsonc:51` 的 `- wBlock*(idleTicks-stopTicks)`。
+//   实测 `stopTicks/ticks == idleTicks/ticks == 0.991` ⇒ 不动的拍数**全是主动 hold**，
+//   而 hold 的拍数被这个减号**从罚项里扣掉了** ⇒ `wBlock=110` 一分也扣不到，站着打免费。
+//   这不是新发现：y35 文件头 `:21-22` 已写明「第二批 y35-passive 补 wPassive；wBlock 只罚撞墙、
+//   主动 STOP 免费」。本腿就是那一批，只是名字换成 y36-active（同时补探索与道具两项）。
+//
+// ── 2. it0 实测（本腿起点 = y35-classic.it270）────────────────────────────────
+//   · 700 局（seeds1-20）：WIN 4.86% (34/700) · kills 5.68 · cells 2.93 · idle 0.992 ·
+//     拾取 0.29 · stuck 0.331 · deaths 0.191 · score 0.200
+//   · 280 局（seeds1-8，与中间检查点同口径）：WIN 3.6% (10/280) · cells 3.2
+//   · 权重指纹 `sha256=c101e7bebfbb5d25…` == 训练账本 it270 `eval_summary.wver`（已对账）
+//   · 同口径的「会走」参照 it195：WIN 2.1% (6/280) · cells 29.4 · idle 0.665 · kills 3.24
+//
+// ── 3. 剂量标定（唯一合法口径：真引擎在**真实语料**上算整局 EV）──────────────────
+//   语料 = 上面三份 `_eval_report.json`（91 字段，与 METRICS 79 列同源）；
+//   脚本 `tmp/y36-dose.py`（EV = Φ(终局) − Φ(起点) + terminal，走 `reward_from_spec` 真引擎）。
+//
+//   **y35 公式下（这就是它为什么坐）**：
+//   | 语料 | EV(all) | EV(输局) | idle |
+//   | it195（走） | −53.17 | −55.71 | 0.665 |
+//   | it270（坐） | **−20.03** | **−25.29** | 0.990 |
+//   ⇒ 坐着高 **+33.1**；且 it270 内部按 cells 分档：0-1 格 −18.8 > 10+ 格 −25.6（走得越多越亏）。
+//
+//   **本腿包（下面 §4 的参数）**：
+//   | 语料 | EV(all) | EV(输局) |
+//   | it195（走） | −87.63 | −91.53 |
+//   | it270（坐） | −105.60 | −110.92 |
+//   ⇒ 排序翻正（走 − 坐 = **+18.0**）；it270 内部 0-1 格 −107.3 vs 10+ 格 −93.3（**+14.0**）。
+//
+//   敏感性（it270 语料，cells0-1 与 cells10+ 的差）：
+//     wExplore 0 → +0.0 ｜ 0.5 → +7.0 ｜ **1.0 → +14.0** ｜ 2.0 → +28.0
+//     wPassive 0 → +8.7 ｜ 45 → +11.3 ｜ **90 → +14.0** ｜ 135 → +16.7  （wExplore 恒 1.0）
+//   ⇒ 两个旋钮都单调且同号，取 **wExplore=1.0 / wPassive=90**（各自离开 0 一个量级，
+//     又不是最激进档；135/2.0 那两档留给「剂量不足」时的加档预案，见 §6）。
+//
+//   ⚠ 边际算术（为什么 1.0 够）：走 vs 坐每多 1 格的成本 = Δ(wDmg 项 + wCorner + wThreat + wNearSq)
+//     ≈ 0.61/格（it195 相对 it270：承伤 +35.8×0.18、corner +7.5、threat +1.0、nearSq +1.3，÷26.5 格）
+//     ⇒ wExplore=1.0 净赚 0.39/格。**剂量是在起点分布上标的**（不是随机权重的分布）。
+//
+// ── 4. 奖励：只改三处，其余逐字沿用 y35-classic ────────────────────────────────
+//   ① 反苟（换项，不是加项）：`- wBlock*(idleTicks-stopTicks)/(ticks+1)`
+//                          → `- wPassive*idleTicks/(ticks+1)`，wPassive=90
+//      · 用一个项、一个含义：「这一拍没换格就扣分」。原先「撞墙磨」也算在里面（旧项的意图保留），
+//        不再有「hold 免罚」的旁路。
+//      · 为什么不像 y35 plan 那样写 `max(0, stopTicks-fireHeldTicks)`：实测 fireHeldTicks ≡ K×shots
+//        （it270 88 发 × 10 = 880 / 9893 拍），它270 的绝大多数 hold 拍**都在等敌人进射界**，
+//        这个豁免会把病根原样放回去。
+//   ② 探索（新项）：`+ wExplore*where(cellsVisited>40, 40, cellsVisited)`，wExplore=1.0
+//      · 每踩一个**新**格 +1.0（`cellsVisited` 是累计量，Φ 差分后天然是「每格一次」）。
+//      · **封顶 40** = 防 Goodhart：不封顶时「绕圈刷格子」上限约 600 分，是 wWin 48 的 12 倍；
+//        封顶后探索满分 40 < 一次通关 48 ⇒ 「赢」永远压得住「逛」。
+//   ③ 道具（改价 + 补两型）：`wPickup 1.4 → 3.0`（= 一次击杀的价钱）；
+//      并补 `+ wPuTank*puGotTank + wPuShield*puGotShield`（3.0 each）——
+//      y35 只给 freeze/bomb 记类型奖，tank/shield 两型**完全没有项**（四项里空两项）。
+//   · **不动**的：wKill 3.0 / wHit .45 / wDmg .18 / wMiss .7 / wShot .15 / wAcc 2.0 /
+//     wDist 1.5 / wWin 48 / wSpeed 3.0 / wHurt 150 / wEncl 12.9 / wCorner 110 / wThreat 120 /
+//     wNearSq 48 / wWinHit 1.2 / wBehind .0008 / wFrFreeze 3 / wFrBomb 3 / wFrStar 4 /
+//     wBackHits 1.2 / wSideHits .12 / **wApproach .008**（见 §7-②）。
+//   · `terminal` 四结局显式列全（`stage_clear: 0` 由 wWin 承担，写出来只为不让读者猜）。
+//
+// ── 5. 起点与缰绳 ─────────────────────────────────────────────────────────
+//   · `bc` = y35-classic.it270（**学到的策略**，不是随机初始化）。它只是**起跑权重**，
+//     **不开 kickstart 锚**（`kickstart_ref: false`）。三个理由，都可落到代码/账本：
+//       a) 本腿的全部目的就是**离开** it270 的站桩行为，而 kickstart 是 loss 里的一项
+//          `+ kk·KL(π‖π_bc)`（`worker/ppo/engine.py:600`），`kk = 1.0×0.5^(it−1)`
+//          ⇒ **it1 的锚强度 1.0 是 PPO 信赖域（kl_coef 0.05）的 20 倍**，前 3–4 轮
+//          等于把策略按在桩上，正好抵消新罚项。
+//       b) 这个组合**已经烧过一次**：`worker/kickstart_burn.py` 头部记的 C 双臂事故
+//          = 「**从收敛权重（it175）起跑 + kk(1)=1**」⇒ it1 kl=0.90、锚主导更新连烧 30 轮、
+//          两臂从 ~34 洗回 ~50，「锚释放后平摆、又跑 140 轮没爬出来」，两臂 ×12h 无结论。
+//          本腿的起点与它同形（收敛策略 + 满锚），没有理由再赌一次。
+//       c) 同面板的 y35 也是从收敛权重起跑、且 `kickstart_ref: false`，it1 kl=0.0255、
+//          熵 1.674 平稳，没有任何炸裂迹象 ⇒ 这层保险在这条面板上不需要，而它在本腿
+//          的作用是**反向的**。
+//     kickstart 只在「bc 是本腿要**保住**的技能源」（BC 蒸馏产物 / 早期 ckpt）时才开；
+//     本腿要的是改行为，不是保行为。省掉的还有一份 `ref_weights` 上行 blob
+//     （`remote/train_core.py:268` 要求它必在）+ 每个 minibatch 多一次 ref 前向。
+//   · `warmup_iters: 0`（非 0 直接启动失败）。
+//   · **超参平铺，不做分段表**：`ppo_schedule` 只留**一段**兜底
+//     `{lr 8e-5, kl_coef .05, kl_cap .1}`（`worker/schedule.py:33 resolve_ppo_schedule`：
+//     末段无 `until_iter` ⇒ 覆盖 (0, ∞)，it1..300 查表返回同一份）。三条理由：
+//       a) 抄 y35 的两段表在这里是**恒等空操作** —— 两段数值相同，`until_iter: 100` 那条边界
+//          在查表里没有任何可观察后果（实测 it1/50/100/101/300 返回值逐字相同）；
+//       b) 本腿只有一个假设（奖励包），任何 lr/kl 分段 = 再塞一个变量，判决时归因不清；
+//       c) 每轮只有 120 个 Adam 步（30 chunk × 4 epoch），曲线本来就被采样噪声主导，
+//          没有分辨率去识别「分段前 vs 分段后」这种二阶效应。
+//     ⇒ 要动 lr 就**整段改一个值**（单变量），不切段。
+//   · `lr 8e-5` = y35 后半段的值（扰动一个已收敛的局部最优，不用 1.2e-4）。
+//   · `kl_cap .1` 显式写是纪律不是装饰：本路径（remote/serial）**未接线**，但缺席会让
+//     读侧（`trainer/loop_steps.py` 每轮整体重赋）悄悄依赖 rl-config 与运行路径
+//     —— 这类「不写也生效、生效成什么看环境」的键一律写死。
+//   · `ent_break` **主动关**（0.0）：起点熵已 0.93，熔断只会误停（y35 it93 就有一次 ABORT）。
+//     熵的看守放离线读数里（§6）。
+//
+// ── 6. 判据与止损（不预设绝对 DoD，全部对照 it0 两口径）────────────────────────
+//   离线 700 局（每 30 轮一次，`bun tmp/eval35.ts … --seeds 1-20`，~4.5 min）：
+//     · **达标**：idle ≤ 0.85 且 cells ≥ 8 且 WIN ≥ 4.9%（不崩，it0 是 4.86%）且 拾取 ≥ 0.5。
+//     · **过量反苟**（wandering without fighting）：WIN < 2.5% 且 idle < 0.55 ⇒ 降 wPassive 到 45。
+//     · **剂量不足**（吸引子太深）：it60 时 idle > 0.95 ⇒ wPassive 90→135、wExplore 1.0→2.0，
+//       其余不动；**只加一档，再加就停腿**（连续加档 = 没有假设，只有折腾）。
+//     · **停腿线**：it120 时 cells 仍 < 5 ⇒ 结论「这条吸引子在此面板上掰不动」，归档判负。
+//   在环 A 层（全 35 关 × **20 seeds = 700 局**，每 5 轮）：σ≈0.8pp（p≈5%），与离线 700 局同量级
+//     但**不同种子空间**（A 层 = `2_000_000_001+` 池外池；离线 = seeds 1-20）⇒ 两条独立读数，不可互减。
+//     ⚠ 成本：700 局/次 ≈ **44s**（实测 y35 的 200 局 12.5s ⇒ 16 局/s），按 5 轮摊 ≈ +9s/轮（+7% 墙钟）。
+//
+// ── 7. 已知局限（勿外推）──────────────────────────────────────────────────
+//   ① 跨政策比较的混杂：§3 的 it195 vs it270 是两个**不同权重**的语料，不是同策略反事实；
+//      真正干净的同 seed 换策略（强制移动）没做（要改 `export-eval-game` ⇒ 动 codeHash 集，不做）。
+//   ② `wApproach` 未标定：`pickupDist` 不在 `_eval_report.json` 里，只能用 it92 的本地 shard
+//      粗测（均值 0.26 格/步、仅 11.7% 的步有道具在场）⇒ 它是**距离梯度**不是每拍成本，
+//      量级本来就只有 0.008×Δdist。故**不动**，道具的驱动力放 wPickup + wExplore。
+//   ③ `cellsVisited` 封顶 40 是二选一：不封顶会被「刷格子」套利，封顶后「探索的边际收益」
+//      在 40 格处归零（通关要走 60–100 格的关，后半程没有探索分）。
+//   ④ **A 层语料换了**（8 关×25 → **35 关×20**）：与 y35 的 eval 曲线**不可相减**（AGENTS §15.5），
+//      本腿自己的 it0 基线由 it0 那一轮给出。
+//   ⑤ 只改奖励、不改位移包（gamma/lam/lr 之外）：归因只能到「奖励包 vs 奖励包」。
+//
+// ── 8. 预算 ─────────────────────────────────────────────────────────────
+//   · **target_transitions 122 880 → 30 720**（用户口径 2026-10-27：35 关**至少 1 局、平均 2 局**）。
+//     标尺全部取自 y35 **最后一个 it 的 rollout 实测**（`training_log` it270）：
+//       642 局 / 286 390 samples / 2 861 042 ticks / 35 关
+//       ⇒ **局均 samples ≈ 425–446**（÷ outcomes 合计 673 = 425；÷ expectedGames 642 = 446）、
+//       局均 18.3 局/关。
+//     配额是分关的：`worker/volume_quota.py:63 target_per_stage = ceil(target/关数)`、
+//     `:118 n = ceil(差额/est_s)`、`:112 软停` ⇒ 每关 2 局 ⇔ per_stage ∈ (est_s, 2·est_s]。
+//     用**真代码** `alloc_games_by_stage`（`worker/volume_alloc.py:138`）拿 it270 的**分关**
+//     局均 samples（280…2538，中位 535）代入：
+//       | target | per_stage | 计划局数 | 局/关 |
+//       | 122 880 | 3511 | 264 | 7.5 |（y35 实跑 642 局 = 18.3/关：连续路径比计划表高 2.4×）
+//       | **30 720** | **878** | **79** | **2.3** |
+//       | 15 360 | 439 | 49 | 1.4 |
+//     30 720 = 30 × mb(1024)，`n_used` 整除无 ragged 尾块（`np_ppo/np_core.py:489`）。
+//     首轮无历史（est=0）走「不猜」档：**每关恰 1 局**（35 局）；次轮起按 est_s 反解。
+//     硬顶 = 4×G0 = **8 局/关**（280 局上限），配额未满触顶会响亮记 `capped`。
+//     ⚠ 若前 5 轮实测 >4 局/关（连续路径的 2.4× 偏差复现），**把 target 砍半到 15 360**，
+//       别的都不用动。
+//   · **样本量代价（明账）**：~30 k samples/轮（30 chunk × 4 epoch = 120 个 Adam 步），
+//     对 y35 的 245 k/轮是 1/8。300 轮 ≈ 9 M 步 ≈ y35 270 轮的 1/7 ⇒ 若要与 y35 同训练量，
+//     `iters` 应抬到 ~900（每轮 ~15 s，900 轮 ≈ 4 h，仍比 y35 便宜）。本文件先按 300 起。
+//   · **epochs 6 → 4**（本腿起点的策略已收敛，6 遍过拟合旧数据的收益抵不上墙钟）。
+//     配额缩小后每轮 Adam 步 = 30 chunk × 4 epoch = **120**（y35 是 240×6 = 1440）。
+//   · 墙钟（估算）：rollout ~79 局 ≈ 5s ＋ PPO 120 步 ≈ 12s ＋ A 层评估摊薄 9s ⇒ **~26s/轮**。
+//     300 轮 ≈ **2.2 h**；`max_hours 40` 是护栏，实际用不到（留着重启与云机抖动）。
+//   · ⚠ 每轮只有 ~30 k steps ⇒ 单轮梯度噪声比 y35 大得多；靠**多轮**补（§8 上一条）。
+//     若 it30 的哨兵曲线抖到看不出趋势，先抬 `iters`（不抬 target）。
+//
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+//   ① `bash tools/githook/nn-py-safe.sh -c "…load_course('y36-active')…"` 必须打得出 flat_overrides；
+//   ② 控制台开课（`bun run dashboard` → :8900 → 选 y36-active → 开课）；
+//   ③ 开训 30 秒自检：`grep -h "hub=" tmp/y36-active/training-loop.log | tail -1` 必须等于
+//      rl-config 里当时活着的那个 hub URL（quick tunnel 换名 ⇒ 全天 HTTP 530 且不自愈）。
+//   ④ **agent 不得启动训练**（本文件只到「可开课」为止）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+//   `bun tmp/eval35.ts --weights <ckpt> --level 0 --lives 3 --seeds 1-20 --difficulty hard
+//      --concurrency 10 --out tmp/eval36-<it>`（700 局，看 idle/cells/拾取/WIN 四列）
+//   `tmp/y36-dose.py`（换 ckpt 重算 EV 与敏感性）｜`tmp/eval35.ts` 的 rows.jsonl（逐局）
+//
+// ── 结算节（2026-10-28 07:25 结课）─────────────────────────────────────────
+//   结课原因：it90 完成后 it91 的 job（`bf03a222a8e0e254`）自 02:45 起无回，卡 4h+；
+//     与 y36-explore **卡在同一分钟** ⇒ 云机侧断，非配置问题。本腿不再续跑，
+//     由 `y36-taxcorner` / `y36-taxboth` 接替（见 `reports/y36-new-pair-20261028.md`）。
+//
+//   离线 700 局（hard · 3 命 · 0 星 · seeds 1-20，`tmp/eval36-active-it90`，0 error）：
+//     | 口径 | it0（= y35.it270） | **it90（终点）** |
+//     | WIN | 4.9% (34/700) | **0.1% (1/700)** |
+//     | kills/局 | 5.68 | **1.69** |
+//     | cells/局 | 2.93 | **29.81** |
+//     | idle / stop | 99.1% / 99.1% | **8.4% / 7.8%** |
+//     | 拾取/局 | 0.29 | 0.20 |
+//     | 死/局 | 0.19 | **0.48** |
+//     | ticks/局 | 6987 | 4121 |
+//     | 承伤/局 | 90.0 | **176.3** |
+//   在环 A 层（700 局/5 轮）同步：it0 `win .0500 / kills 5.50 / phits .174` →
+//     it90 `win .0029 / kills 1.85 / phits .471`。两口径同向，互相印证。
+//
+//   ★ 判决：**过量反苟，判负归档** —— 命中课程 §6 判据「WIN < 2.5% 且 idle < 0.55」
+//     （实测 WIN 0.1%、idle 0.084，两条都严重越线）。
+//   ★ 但**机制假说成立**：修掉免费 STOP 洞确实能把 idle 从 99.1% 砸到 8.4%
+//     ⇒ `wPassive` 那一项**有效**，只是 **90 这一档过量**（0 不够 / 90 太猛，45 未探）。
+//   ★ 教训（写死，别重犯）：
+//     1. 反苟是「拉」，移动税是「挡」；**只加拉、不减挡** ⇒ 策略变成「乱跑送死」
+//        （kills −70%、死 ×2.5、承伤 ×2.0、拾取不涨反降）。
+//     2. **idle 必须和 WIN / kills 一起看**：只看 idle 会以为「成功了，它不动了」。
+//     3. 单臂的「走了」不构成成功；成功 = 走了 **且** 打得动。
+//   ★ 后续：wPassive 的可用区间（0～90）未探明 —— 45 档留作**单变量补点**；
+//     主线已转向减税：`y36-taxcorner`（wCorner 110→40）/ `y36-taxboth`（再 + wDmg .18→.12）。
+{
+  "version": 5,
+  "name": "y36-active",
+  "mode": "per-tick",
+  "level": "classic35",
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wPassive*idleTicks/(ticks+1) + wExplore*where(cellsVisited>40, 40, cellsVisited) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wPuTank*puGotTank + wPuShield*puGotShield + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.18,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wPassive": 90.0,
+      "wExplore": 1.0,
+      "wWinHit": 1.2,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wPuTank": 3.0,
+      "wPuShield": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/y35-classic/y35-classic.it270.20261027-193618.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 40.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 30720,
+  "paired_rotate_seed": 20270225,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/y36-active/weights.json",
+  "traj": "tmp/y36-active",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y36-active",
+  "backup_prefix": "y36-active",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

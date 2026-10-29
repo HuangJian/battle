@@ -1,0 +1,227 @@
+// 课程 y36-taxcorner —— 替代 y36-active/explore 的新双臂之一：**只减最贵的那项移动税（角罚）**
+//                        （2026-10-28；与本批 `y36-taxboth` 同时开，两臂共享云机）
+//
+// ── 0. 一句话 ──────────────────────────────────────────────────────────────
+//   前两臂已经把问题定位清楚了：不是「不给钱 / 不罚站」，是**移动税**。
+//   本臂 = y36-explore 的奖励包（`wExplore 1.0` + 道具 + wBlock 原样）**只改一个数**：
+//   `wCorner 110 → 40`。不动反苟项、不动其它税。
+//
+// ── 1. 立项依据：前两臂的实测（离线 700 局 · hard · 3 命 · 0 星 · seeds1-20）──────
+//   | 指标 | 起点 y35.it270 | y36-active.it90 | y36-explore.it91 |
+//   | WIN | 4.9% (34) | **0.1% (1)** | 2.1% (15) |
+//   | kills/局 | 5.68 | **1.69** | 4.96 |
+//   | cells/局 | 2.93 | **29.81** | 12.77 |
+//   | idle | 99.1% | **8.4%** | 92.2% |
+//   | 拾取/局 | 0.29 | 0.20 | 0.43 |
+//   | 死/局 | 0.19 | **0.48** | 0.23 |
+//   | **角占比** | 0.007 | 0.044 | **0.053**（×7.6） |
+//   | 承伤/千拍 | 12.88 | **42.78** | 15.95 |
+//   ① **洞是真的**：修掉它（active）就把 idle 从 99.1% 砸到 8.4% —— 机制假说成立。
+//   ② **但 90 那一档过量**（WIN 0.1%、kills −70%、死 ×2.5）⇒ 命中课程 §6「过量反苟」判据。
+//   ③ **真正卡住的是税**：explore 臂把税增量拆开 ——
+//      角罚 (0.053−0.007)×110 = **+5.06**（最贵）｜承伤 (103.2−90.0)×0.18 = +2.4｜威胁 0
+//      ⇒ 每多走一格要付约 0.76 税，而 `wExplore 1.0` 只给 +1.0 ⇒ **策略停在 cells≈12.8 是理性的**。
+//
+// ── 2. 减税剂量的预测（真引擎，it270 语料，按 cells 分档的整局 EV）────────────────
+//   脚本 `tmp/y36-tax.py`；判据 = `EV(cells10+) − EV(cells0-1)`（越大越鼓励走）：
+//   | 税档 | EV(cells0-1) | EV(cells10+) | 差 |
+//   | 原税（= explore 现状）| −17.41 | −8.80 | **+8.62** |
+//   | **wCorner 110→40（本臂）** | −17.41 | −4.37 | **+13.04** |
+//   | wCorner 110→20 | −17.41 | −3.11 | +14.30 |
+//   | 角40 + wDmg .12（= y36-taxboth）| −14.22 | +9.77 | **+23.99** |
+//   | 角40 + wDmg .10 | −13.16 | +14.49 | +27.64 |
+//   ⇒ 取 **40**（不是 20）：20 只再多 1.3 分，却把 y34 时代「贴角苟」的护栏削到几乎没有。
+//
+// ── 3. it0 基线 ───────────────────────────────────────────────────────────
+//   起点 = `y35-classic.it270`（`sha256=c101e7bebfbb5d25…`，与账本 `wver` 已对账）
+//   · 700 局：**WIN 4.86% (34/700)** · kills 5.68 · cells 2.93 · **idle 99.1%** · 拾取 0.29 ·
+//     死 0.19 · 承伤 90.0/局 · 角占比 0.007
+//   · 参照：y36-explore.it91 = WIN 2.1% · cells 12.77 · idle 92.2% · kills 4.96 · 拾取 0.43
+//     ⇒ **本臂要回答的就是：同一套探索钱，把角税砍掉后，cells 能不能从 12.8 再往上走。**
+//
+// ── 4. 奖励：= y36-explore 的公式，只改 `wCorner` 一个数 ──────────────────────────
+//   · **改**：`wCorner 110 → 40`
+//   · 不动：`wBlock*(idleTicks-stopTicks)`（y35 原样，洞**故意留着** —— 本臂测的是减税，不是罚站）、
+//     `wExplore 1.0`（`where(cellsVisited>40, 40, cellsVisited)` 封顶 40 < wWin 48）、
+//     `wPickup 3.0` + `wPuTank/wPuShield 3.0`、`wDmg 0.18`、`wThreat 120`、`wHurt 150`、
+//     其余 20 个参数与 terminal 逐字沿用。
+//   · 为什么不动反苟项：active 已证 90 过量、explore 已证 0 不够；**中间档 45 是备选不是主线**
+//     （主线判定：先解决"移动税"这个更硬的门槛；45 那档留作下一轮的单变量补点）。
+//
+// ── 5. 起点与缰绳 ─────────────────────────────────────────────────────────
+//   · `bc` 只当起跑权重，**`kickstart_ref: false`**（本腿要离开起点行为；`worker/kickstart_burn.py`
+//     记的 C 双臂事故 = 「收敛权重起跑 + kk(1)=1」）。
+//   · `warmup_iters 0` · `lr 8e-5` · `epochs 4` · `ppo_schedule` **单段**兜底
+//     `{lr 8e-5, kl_coef .05, kl_cap .1}`（两段同值的表是空操作）。
+//   · `ent_break 0`（起点熵 0.93，熔断只会误停）。
+//   · `iters 300`（每轮 ~26s ⇒ ~2.2 h；便宜，够跑出趋势）。
+//
+// ── 6. 判据与止损（与 `y36-taxboth` 合起来读）─────────────────────────────────
+//   离线 700 局（每 30 轮，`bun tmp/eval35.ts … --seeds 1-20`）。四列：cells / idle / kills / WIN。
+//   | 观察 | 结论 | 动作 |
+//   | 本臂 cells ≥ 20 且 kills ≥ 4.5 且 WIN ≥ 4.0% | **减税解锁了移动且没掉战斗** | 采纳，下一条腿考虑再动 wDmg |
+//   | cells 涨到 20+ 但 kills < 2.5 | 又走成 active 的失败形 | 停本臂，回到 explore 包 |
+//   | cells 仍 < 15 | 只减角税不够 | 直接看 `y36-taxboth`（再减承伤税）那臂 |
+//   | WIN < 1% | 崩了 | 停 |
+//
+// ── 7. 已知局限 ───────────────────────────────────────────────────────────
+//   ① `wCorner` 是 y34 时代为「贴角苟」加的护栏，降到 40 可能把那个老毛病放回来 ——
+//      监控列就是 `cornerWeightTicks/ticks`（离线 `rows.jsonl` 有），若它涨到 >0.10 且 WIN 掉，就是它。
+//   ② §2 的 EV 表是**整局**口径、语料来自**旧策略**（it270 的站桩分布），
+//      只能给方向与档位，不能当精确预测。
+//   ③ A 层语料 35 关 × 20 seeds = 700 局，与离线 seeds 1-20 不同批次，不可互减。
+//   ④ 两臂共用一台云机：若某臂 `job_pending` 长期不转 `job_result_accepted` ⇒ 停弱的那条
+//      （前两臂就是这么卡了 4 小时，见 `reports/y36-pair-check-it90-20261028.md` §0）。
+//
+// ── 8. 预算 ─────────────────────────────────────────────────────────────
+//   `target_transitions 30 720`（30 chunk）⇒ 计划 **79 局/轮 = 2.3 局/关**
+//   （真代码 `alloc_games_by_stage` + it270 分关局均 samples）；首轮无 est ⇒ 每关 1 局（35 局），
+//   硬顶 8 局/关。每轮 ~30 k steps（30 chunk × 4 epoch = 120 个 Adam 步），~26s/轮，300 轮 ≈ 2.2 h。
+//   若前 5 轮实测 >4 局/关 ⇒ target 砍半到 15 360。
+//   · ⚠ **`--epoch-mult 1.5`（节点 argv，不在本文件里）**：本腿实际跑 **6 遍**（`ceil(4×1.5)`），
+//     每轮 **180** 个 Adam 步而不是 120（`remote/train_common.py:31 effective_epochs`）。
+//     ⇒ ① 有效学习率 ×1.5（实测参数漂移 **2.19e-4/轮** vs torch 腿的 1.38e-4，比 1.59）；
+//        ② 下列以 it 计的锚点全部"前移"：§6 的 it60 / it120 实际是 1.5 倍训练量；
+//        ③ 日志与控制台的 `epochs` 恒显示 **4**（`worker/events.py:262` 落 `args.epochs`，不落 `epochs_eff`）
+//           —— 别拿面板的 4 判断每轮更新量；
+//        ④ **同一份 manifest 换默认 argv 重跑会得到 4 遍**，结果不同 ⇒ 复现性缺口在这里；
+//        ⑤ 这台机器上以后任何腿都继承 1.5×（argv 是机器级），**切 torch 时记得显式对齐**。
+//    跨腿比较只能按 Adam 更新步数对齐（explore it91 = 10,920 步 ≈ 本腿 it61），不能按轮号。
+//
+// ── 9. 结课报告（2026-10-29 回填；实跑 it1–it66 = 预算 300 的 22%；末评估点 it65；2026-10-28 10:20 停）──
+//   **结论：不采纳。** §6 采纳线（cells ≥20 且 kills ≥4.5 且 WIN ≥4.0%）**未达**：cells 峰 11.02、
+//   末点 WIN 1.7%（kills 4.73 是唯一达标项），并命中「cells 仍 <15 ⇒ 只减角税不够，直接看 `y36-taxboth`」
+//   这一行 ⇒ 本臂的定位就是减税阶梯的下半级，不是候选。
+//
+//   ① 逐点（in-loop A 层 700 局/点 · 固定语料 `2000-2034 × 20 seeds` · 每 5 轮）
+//   | it | 0 | 5 | 10 | 15 | 20 | 25 | 30 | 35 | 40 | 45 | 50 | 55 | 60 | 65 |
+//   | WIN% | 5.0 | 6.3 | 6.0 | 4.7 | 5.1 | 5.0 | 3.6 | 3.0 | 4.0 | 3.6 | 2.7 | 1.7 | 2.9 | 1.7 |
+//   | cells | 2.8 | 3.5 | 4.0 | 4.0 | 5.2 | 6.0 | 6.9 | 7.7 | 7.5 | 7.6 | 10.2 | **11.0** | 7.7 | 7.4 |
+//   | idle% | 99.4 | 99.0 | 98.9 | 98.7 | 98.0 | 97.6 | 97.3 | 96.6 | 96.3 | 96.7 | 94.5 | 94.4 | 96.1 | 96.4 |
+//   | kills | 5.50 | 5.79 | 5.58 | 5.72 | 5.58 | 5.55 | 5.16 | 5.09 | 5.19 | 4.90 | 5.17 | 4.65 | 4.79 | 4.73 |
+//   | 拾取 | .26 | .30 | .27 | .30 | .33 | .35 | .34 | .39 | .36 | .35 | .36 | .35 | .35 | .29 |
+//   | 承伤/千拍 | 12.3 | 12.6 | 12.2 | 12.1 | 13.0 | 12.5 | 11.9 | 13.6 | 12.8 | 12.9 | 14.6 | 14.8 | 13.7 | 14.8 |
+//   | 角占比 | .010 | .015 | .009 | .015 | .018 | .032 | .025 | .033 | .034 | .058 | .048 | .050 | .039 | .046 |
+//
+//   ② 三行读数
+//   · **动了，但没一直动**：cells ×2.7（峰 ×4.0）、idle −3pp；it65 仍有 **44%** 的局 cells≤1（it0 62%）。
+//   · **打了，但出手少了**：kills −14%，而 **k/shot 0.218→0.217 没掉**、shots 25.2→21.8 ⇒ 掉的是开火窗口，不是准头。
+//   · **赢少了，代价是挨打**：WIN −3.3pp、承伤/千拍 +20%、死/局 +24%、ticks −4%；拾取 +12%（it35 峰 +50%，末点回吐到 .29）。
+//   · 角占比 ×4.6（.010→.046）：§7① 的护栏被削开，但没到 >0.10 的告警线。
+//
+//   ③ 与 `y36-taxboth` 的配对（同 (it,stage,seed)；n=7699，it5 语料事故已剔）
+//   | 指标 | A=本臂 | B=taxboth | Δ(B−A) | t |
+//   | 承伤/局 | 91.2 | 99.0 | **+8.6%** | 4.57 |
+//   | clear | 3.8% | 3.0% | −0.8pp | −3.38 |
+//   | kills | 5.21 | 4.77 | −0.44 | −8.50 |
+//   | cells | 6.97 | 13.27 | +6.30 | 33.7 |
+//   | 拾取 | .340 | .427 | +0.087 | 8.48 |
+//   | idle | 96.6% | 91.4% | −5.2pp | −42.4 |
+//   末 5 点（it40–60，n=3500）同向：承伤 +7.9/局（t=2.84）、cells 8.8→16.2、clear 3.0→2.2%（t=−2.33）、kills −0.53。
+//   ⇒ **wDmg 0.18→0.12 这一格的全部作用**：cells ×1.9、拾取 +25%、承伤 +8.6%、胜率 −0.8pp。两臂之差只有这一个数。
+//
+//   ④ 新发现（修正离线报告的因果读法）：**「多走 ⇒ 多赢」是分档 + 时长的合成**
+//   it50–60 合并 2100 局，按 cells 分档（占比/胜率）：0–1 **35%/2.5%** ｜ 2–4 14%/1.4% ｜ 5–9 20%/1.2%
+//   ｜ 10–19 16%/2.1% ｜ 20+ 16%/**5.2%**。20+ 档同时是最长的一档（10.1k 拍 vs 5.4–7.3k）。
+//   换成「格/千拍」（只看 ticks≥2000 的 1777 局）：0–0.5 档 **4.3%** → 1.5–3 档 2.1% → 6+ 档 **0.0%**
+//   ⇒ 本臂胜率随移动强度**下降**。r(cells,ticks)=0.23、r(ticks,win)=0.29、r(kills,win)=0.46
+//   ⇒ 胜场跟着「活得久 + 杀得多」，不跟「走得多」；离线 §4「高档 4.8% vs 低档 2.0%」是分档口径的合成，
+//   **不能**当「削平双峰就会涨分」的依据。
+//
+//   ⑤ 训练侧：entropy .896→1.025（tail10 1.010）· kl 4.5–6.0e-3 · value 0.4–0.5 · rollout win tail10 1.43%（26/1820）。
+//   墙钟 2.73h/66 轮 = **2.5 min/轮**（预算 26s ⇒ 慢 5.7×，全是云机排队：`ppo_sec` 中位 98.9s、it1 曾 571s）。
+//   Adam 步 66×180 = **11,880**（`--epoch-mult 1.5`）≈ explore it91 的 1.09×。
+//
+//   ⑥ 数据卫生：it35 评估丢 1 局（`node-failed`，stage 2017 / seed 2000000010）⇒ 699，其余各点 700 整；
+//   3 次 `run_start`（07:25:59 / 08:40:35 / 09:23:38，两次是清理上一 runId 的遗留 job），迭代号连续、无重复评估点；
+//   it0 是 `node=reuse` 的历史基线（wver c101e7bebfbb5d25 = bc it270），其余各点全部现评；末点 700 局分布在
+//   self/mac/a95/a97 四节点，分节点胜率 1.2–6.1%（n=33–404）⇒ 无单节点失真。
+//   归档 `y36-taxcorner.it65.20261028-101745.json` 的 sha256 前 16 = 6724363e900fb8fb = it65 的 wver ✅；
+//   末轮 it66（bbc15db20743d929）**没有**对应评估点。
+//
+//   ⑦ 收尾：离线报告 §5 建议的 `y36-steady`（taxboth + `wPassive 45`）与 `y36-taxboth` §6 兜底的
+//   「抬 `wExplore` 1.0→2.0」**都没开课**；本线 2026-10-28 11:35 被 z0 接续、当晚转 z2
+//   ⇒ 两条 y36 腿只作为「移动税」的取证保留，不再续跑。
+//
+// ── 开工前置 / 诊断 / 结算 ────────────────────────────────────────────────
+//   ① `load_course` + 控制台开课（**agent 不起训练**）；② 与 `y36-taxboth` 同时开才有配对价值；
+//   ③ 开训 30 秒自检 `grep -h "hub=" tmp/y36-taxcorner/training-loop.log | tail -1`；
+//   ④ 结算节：已回填 → 见 §9（判决行：不采纳，命中「cells 仍 <15」分支）。
+{
+  "version": 5,
+  "name": "y36-taxcorner",
+  "mode": "per-tick",
+  "level": "classic35",
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wExplore*where(cellsVisited>40, 40, cellsVisited) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wPuTank*puGotTank + wPuShield*puGotShield + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.18,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 40.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wExplore": 1.0,
+      "wWinHit": 1.2,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wPuTank": 3.0,
+      "wPuShield": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/y35-classic/y35-classic.it270.20261027-193618.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 40.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 30720,
+  "paired_rotate_seed": 20270225,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/y36-taxcorner/weights.json",
+  "traj": "tmp/y36-taxcorner",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y36-taxcorner",
+  "backup_prefix": "y36-taxcorner",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

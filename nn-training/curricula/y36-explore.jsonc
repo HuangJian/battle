@@ -1,0 +1,204 @@
+// 课程 y36-explore —— y36-active 的**配对臂**：拆掉「反苟罚项」，只留「探索 + 道具」
+//                        （2026-10-27，与 y36-active 同时开，两臂共享同一台云机）
+//
+// ── 0. 一句话 ──────────────────────────────────────────────────────────────
+//   去掉 y36-active 里那项 `- wPassive*idleTicks`（本臂**恢复 y35 原样**的
+//   `- wBlock*(idleTicks-stopTicks)`），其余**逐字不动** ⇒ 两臂之差 = **一项**，
+//   用来回答：让 NN 动起来，到底是「按格给探索钱」就够，还是必须外加「罚站桩」。
+//
+// ── 1. 为什么是这一项（EV 表已经把结论算出来了）──────────────────────────────
+//   在同一份真实语料上（it270 的 700 局 `_eval_report.json`，真引擎 `reward_from_spec`，
+//   脚本 `tmp/y36-dose.py`），按 cells 分档算整局 EV：
+//
+//   | wPassive | wExplore | EV(cells 0-1) | EV(cells 10+) | 差（走得多的 − 坐着的） |
+//   | 0        | 0        | −18.41 | −23.76 | **−5.35**（= y35 原版：坐更划算）|
+//   | **90**   | 0        | −108.33 | −108.31 | **+0.02**（只罚站桩：**打平**，翻不动）|
+//   | 0        | **1.0**  | −17.41 | −8.76  | **+8.65**（只给探索钱：**就翻了**）|
+//   | 90       | 1.0      | −107.33 | −93.31 | **+14.02**（本课 y36-active）|
+//
+//   ⇒ ① 「探索按格给钱」是翻排序的**主力**（+8.65）；② 「罚站桩」单独用**翻不动**
+//     （+0.02：idle 0.999 vs 0.939 只差 0.06，×90 = 5.4，抵不过既定税），
+//     它只在 explore 之上再加 5.4；
+//   ③ 所以本臂的预测是「会动，但推力比 y36-active 弱一档」——这正是要量的东西。
+//
+//   ⚠ 口径：这是**整局 EV**（Φ(终局)−Φ(起点)+terminal），不是逐拍梯度。逐拍上
+//     `wPassive*idle` 每拍都扣，梯度确实存在；整局 EV 说的是「两局比大小」，
+//     两者不矛盾，但**判决要看真实训练**，本臂就是去测那个「梯度够不够」。
+//
+// ── 2. 与 y36-active 的差（唯一变量）────────────────────────────────────────
+//   | 项 | y36-active | **y36-explore（本臂）** |
+//   | 反苟 | `- wPassive*idleTicks/(ticks+1)`，wPassive=90 | **`- wBlock*(idleTicks-stopTicks)/(ticks+1)`，wBlock=110（y35 原样）** |
+//   | 探索 | `+ wExplore*where(cellsVisited>40, 40, cellsVisited)`，1.0 | **同** |
+//   | 道具 | `wPickup 3.0` + `wPuTank/wPuShield 3.0` | **同** |
+//   | 其余 24 个参数 / terminal / 起点 / 超参 / 评估 / 配额 | — | **逐字相同** |
+//   ★ 两臂 `paired_rotate_seed` 也相同（20270225）⇒ 连续配额的种子流
+//     `(rotate_seed, it, stage, k)` 逐位一致 ⇒ **每一轮两臂打的是同一批 (stage, seed)**，
+//     配对 Δ 的方差远小于两条独立腿（与仓库 `worker/paired_kill.py` 的配对判据同源）。
+//     实测 diff（`tmp/y36-diff.py`）：公式只差 `Passive*idleTicks` ↔ `Block*(idleTicks-stopTicks)`
+//     这一段，params 只差 wPassive/wBlock 两个键，其余 22 个键与 23 项配置全等。
+//   §2.7 三关：**更好玩**（动起来才好玩）· **架构更简**（少一项罚）· **原作精神**（不被罚项规训）
+//
+// ── 3. it0 实测（两臂同一起点，直接可比）─────────────────────────────────────
+//   起点 = `y35-classic.it270`（`sha256=c101e7bebfbb5d25…`，与账本 `wver` 已对账）
+//   · 700 局（seeds1-20 · hard · 3 命 · 0 星）：**WIN 4.86% (34/700)** · kills 5.68 ·
+//     cells 2.93 · **idle 0.992 / stop 0.991** · 拾取 0.29 · deaths 0.191
+//   · 280 局（seeds1-8）：WIN 3.6% (10/280) · cells 3.2
+//
+// ── 4. 奖励（= y36-active 的公式，把那一个项换回 y35 的写法）───────────────────
+//   `- wBlock*(idleTicks-stopTicks)/(ticks+1)`：hold 的拍数仍被扣掉 ⇒ **站着打在本臂里
+//     仍然免费**。这是**故意的**：本臂就是要留着一个已知旁路，好让「探索」单独去拉。
+//   其余（wKill 3.0 / wHit .45 / wDmg .18 / wMiss .7 / wShot .15 / wPickup **3.0** /
+//   wApproach .008 / wAcc 2.0 / wDist 1.5 / wWin 48 / wSpeed 3 / wHurt 150 / wEncl 12.9 /
+//   wCorner 110 / wThreat 120 / wNearSq 48 / wWinHit 1.2 / wBehind .0008 / wFrFreeze 3 /
+//   wFrBomb 3 / wPuTank 3 / wPuShield 3 / wFrStar 4 / wBackHits 1.2 / wSideHits .12）
+//   与 y36-active **逐字相同**。
+//
+// ── 5. 起点与缰绳 ─────────────────────────────────────────────────────────
+//   · `bc` 只当起跑权重，**`kickstart_ref: false`**（理由同 y36-active §5：本腿要**离开**
+//     起点的行为；`worker/kickstart_burn.py` 记的 C 双臂事故就是「收敛权重 + kk(1)=1」）。
+//   · `warmup_iters: 0` · `lr 8e-5` · `epochs 4` · **`ppo_schedule` 只留一段**兜底
+//     `{lr 8e-5, kl_coef .05, kl_cap .1}`（两段同值的表是空操作，见 y36-active §5）。
+//   · `ent_break 0`（起点熵 0.93，熔断只会误停）。
+//
+// ── 6. 判据与止损（**两臂合起来读**，单臂的数字没有意义）──────────────────────
+//   离线 700 局（每 30 轮，`bun tmp/eval35.ts … --seeds 1-20`，~4.5 min），只看三列：
+//   **idle / cells / WIN**。判决表（两臂在同一 it 上比，或各自与 it0 比）：
+//
+//   | 观察 | 结论 | 下一步 |
+//   | A 臂达标（idle≤0.85 且 cells≥8）、E 臂也达标 | **wPassive 多余**：探索钱就够 | 下一条腿砍掉反苟项，少一个旋钮 |
+//   | A 臂达标、E 臂没达标（idle>0.95） | **wPassive 必要**（+5.4 那档是阈值） | 保留 y36-active 设计，剂量不动 |
+//   | 两臂都没达标 | 探索剂量不够 or 吸引子太深 | 按 y36-active §6 只加一档（explore→2.0） |
+//   | 任一臂 WIN < 2.5% 且 idle < 0.55 | 过量反苟（乱走不打） | 该臂降档/停 |
+//
+//   ⚠ 两臂共用一个云机 ⇒ 若发现只有一条在推进（另一条整轮没 job），停掉弱的那条，
+//     别让两条互相饿死（判据：`tmp/<课>/training_log.jsonl` 里 `job_pending` 长期不转
+//     `job_result_accepted`）。
+//
+// ── 7. 已知局限 ───────────────────────────────────────────────────────────
+//   ① 「整局 EV」判据与「逐拍梯度」不是一回事（§1 末注）：本臂的真正读数只能来自训练。
+//   ② 两臂的 `- wBlock*(idle-stop)` 与 `- wPassive*idle` 不是同一个量的两个剂量，
+//      而是**两种形状**（前者含 hold 豁免，后者不含）⇒ 结论只能表述成「哪种形状更有效」，
+//      不能反解成「罚多少分才够」。
+//   ③ `cellsVisited` 封顶 40（同 y36-active）：探索边际收益在 40 格处归零。
+//   ④ A 层语料 35 关 × 20 seeds（700 局），与离线 seeds 1-20 不同批次，不可互减。
+//
+// ── 8. 预算 ─────────────────────────────────────────────────────────────
+//   与 y36-active **完全相同**（同配额才可比）：`target_transitions 30 720`（30 chunk）
+//   ⇒ 计划 **79 局/轮 = 2.3 局/关**（真代码 `alloc_games_by_stage` + it270 分关局均 samples），
+//   首轮无 est ⇒ 每关 1 局（35 局），硬顶 8 局/关；每轮 ~30 k steps（120 个 Adam 步），
+//   ~26s/轮，300 轮 ≈ 2.2 h。若前 5 轮 >4 局/关 ⇒ target 砍半到 15 360。
+//
+// ── 开工前置 / 诊断 / 结算 ────────────────────────────────────────────────
+//   ① `load_course` + 控制台开课（agent 不起训练）；
+//   ② 与 y36-active **同时开**才有配对价值；单开也能跑，只是失去对照；
+//   ③ 开训 30 秒自检 `grep -h "hub=" tmp/y36-explore/training-loop.log | tail -1`；
+//   ④ **结算节见下（2026-10-28 07:25 结课）**：
+//
+// ── 结算节（2026-10-28 07:25 结课）─────────────────────────────────────────
+//   结课原因：it91 完成后 it92 的 job（`d096851143ecdbd5`）自 02:48 起无回，卡 4h+；
+//     与 y36-active **卡在同一分钟** ⇒ 云机侧断，非配置问题。本腿不再续跑，
+//     由 `y36-taxcorner` / `y36-taxboth` 接替（**本臂的奖励包是那两臂的共同基线**）。
+//
+//   离线 700 局（`tmp/eval36-explore-it91`，0 error）：
+//     | 口径 | it0 | **it91（终点）** |
+//     | WIN | 4.9% (34/700) | **2.1% (15/700)** |
+//     | kills/局 | 5.68 | **4.96**（−13%） |
+//     | cells/局 | 2.93 | **12.77** |
+//     | idle / stop | 99.1% / 99.1% | **92.2% / 92.2%** |
+//     | 拾取/局 | 0.29 | **0.43**（+48%） |
+//     | 死/局 | 0.19 | 0.23 |
+//     | ticks/局 | 6987 | 6471 |
+//     | **角占比** | 0.007 | **0.053**（×7.6） |
+//   在环 A 层同步：it0 `win .0500 / kills 5.50` → it90 `win .0214 / kills 5.04 / 拾取 .45`。
+//
+//   ★ 判决：**未达标，但形状正确** —— §6 四条判据：cells≥8 ✓（12.77）、
+//     idle≤0.85 ✗（0.922）、WIN≥4.9% ✗（2.1%）、拾取≥0.5 ✗（0.43）。
+//     它不在「过量反苟」也不在「剂量不足」格子里，是**卡在中间**。
+//   ★ 两条硬结论（这是本臂作为对照臂的全部价值）：
+//     1. **只给探索钱不足以真正动起来**（idle 仍 92.2%）⇒ `wPassive` 那一项**不是多余的**。
+//     2. **卡住的不是激励，是税**。把税增量拆开（相对起点）：
+//        角 (0.053−0.007)×110 = **+5.06** ｜ 承伤 (103.2−90.0)×0.18 = +2.4 ｜ 威胁 0
+//        ⇒ 每多走一格约付 **0.76** 税，而 wExplore 只给 **+1.0**；再扣掉战斗损失
+//        （WIN −2.8pp、kills −0.72）⇒ **净为负**
+//        ⇒ **策略停在 cells≈12.8 是理性的**，不是没学会。
+//   ★ 后续：主线改为**减移动税** —— `y36-taxcorner`（wCorner 110→40，单变量）与
+//     `y36-taxboth`（再 + wDmg .18→.12），两臂之差 = wDmg 一项；
+//     与已有 explore 数据构成减税阶梯 0 < 角 < 角+承伤。
+{
+  "version": 5,
+  "name": "y36-explore",
+  "mode": "per-tick",
+  "level": "classic35",
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wExplore*where(cellsVisited>40, 40, cellsVisited) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wPuTank*puGotTank + wPuShield*puGotShield + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.45,
+      "wDmg": 0.18,
+      "wMiss": 0.7,
+      "wShot": 0.15,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 2.0,
+      "wDist": 1.5,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wExplore": 1.0,
+      "wWinHit": 1.2,
+      "wBehind": 0.0008,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wPuTank": 3.0,
+      "wPuShield": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.12,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/y35-classic/y35-classic.it270.20261027-193618.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 40.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 30720,
+  "paired_rotate_seed": 20270225,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/y36-explore/weights.json",
+  "traj": "tmp/y36-explore",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y36-explore",
+  "backup_prefix": "y36-explore",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

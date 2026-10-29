@@ -38,6 +38,8 @@
   ③ `test_z2_ladder_courses.py`：同价断言六级 → r2–r6；`..._never_pays_for_movement` →
      `..._paid_but_capped`（`walkCap ≤20`、`wWalk < wKill`、`wWalk*walkCap ≤ wWin/3`）；
      权重链测试改为「r2 的 bc 必须匹配冻结归档形态」——**活指针禁令写进测试**；
+     ⚠ **同日 14:25 用户删除整个文件**（判为「垃圾测试」）⇒ 上述约束现在只剩课程注释与本档文字，
+     pytest 不再检查。删前 15 passed / biz 230 passed；要恢复从 `5bfb654c` 之后的 git 历史取；
   ④ `docs/nn/training-stack.md` §50.3 表格与价格表、`z2-r1walk.jsonc` §5④/§7 结算节回填。
 - **为什么不是教条**：z0 判死的是「**无封顶**的探索款」（走 60 格与 20 格同价不算刷）。把移动那一格
   彻底留空，代价就是教出站桩。封顶 20 = 1.33 个击杀 = 清关奖的 1/3，是这两者之间的唯一平衡点。
