@@ -239,7 +239,9 @@ def _scaled_volume(volume: Mapping[str, Any], mult: float) -> dict:
     }
 
 
-def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
+def _run_iteration(
+    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
+) -> dict:
     """跑第 `it` 轮：合成 kind=iter job → 喂回 `run_job`（生产链路的字面复用）。
 
     `prev_it` = 上一轮（其产物权重就是本轮 init_weights）。返回本轮 result。
@@ -438,6 +440,10 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         code_cache_dir=ctx.code_cache_dir,
         ts_code_cache_dir=ctx.ts_code_cache_dir,
         prep=prep_b,
+        # ★ 2026-10-29（用户口径「eval 藏进 PPO 墙钟」）：PPO **开跑那一刻**是提交上一轮评估的
+        #   唯一好时机——rollout 已经收工（不与它抢 94 个 CPU 槽），PPO 在 TPU 上跑 26s，
+        #   评估（~2.5s）整个藏在里面。`on_ppo_start` 由 `train_core` 在 PPO 之前一刻回调。
+        on_ppo_start=on_ppo_start,
         log=ctx.log,
     )
     validate_result(result, m, commit_echo_must_match=False)
@@ -596,37 +602,68 @@ def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phas
     return entry
 
 
-def _maybe_cloud_eval(ctx: RunContext, it: int) -> None:
-    """该轮该评就把评估**丢给后台**（`eval_on_cloud`）：不阻塞下一轮 rollout/PPO。**永不抛**。
+def _eval_due(ctx: RunContext, it: int) -> bool:
+    """这一轮该不该评（`eval_every` 的判据在 `ctx.eval_plan` 里）。**纯查表，不提交**。"""
+    plan = getattr(ctx, "eval_plan", None)
+    if not ctx.eval_on_cloud or getattr(ctx, "eval_runner", None) is None or plan is None:
+        return False
+    try:
+        return bool(plan.due(it))
+    except Exception as e:  # 评估是旁路：任何意外都不能影响训练
+        ctx.log(f"WARN: 云机评估判据异常（忽略）：{type(e).__name__}: {e}")
+        return False
 
-    到点的那一轮还要再看一眼「上一轮评完没」——这点观测在 `CloudEvalRunner.submit` 里
-    （有界等一小会，仍不空闲就跳过本轮），所以这里只负责「该不该评」。
 
-    **提交后要有界等它收线**（`EVAL_ALTERNATE_WAIT_SEC`）：评估与下一轮的 rollout 同时开跑
-    就是「2× 超订 ⇒ 成批踩 5s 硬顶」的成因（见那个常量的注释）。等它跑完，「交替」才真的
-    是交替；等超时也照常放行（评估永不按住训练）。
+def _submit_cloud_eval(ctx: RunContext, it: int) -> None:
+    """提交第 `it` 轮评估（**不等待**）。调用点 = **下一轮 PPO 开跑那一刻**（见 `_drive`）。
+
+    为什么不在轮边界提交（2026-10-29 用户口径「eval 要并行藏进 ppo 墙钟里」）：轮边界提交 +
+    就地等待 = 评估卡在「下一轮 rollout 之前」，而 rollout 要 94 个 CPU 槽、评估要 80 个
+    ⇒ 真重叠会成批踩单局硬顶。放到 PPO 开跑那一刻，rollout 已收工、PPO 在 TPU 上跑几十秒，
+    评估（~2.5s）整个藏在它的墙钟里，**轮墙钟一分不涨**。**永不抛**。
     """
     runner = getattr(ctx, "eval_runner", None)
-    plan = getattr(ctx, "eval_plan", None)
-    if not ctx.eval_on_cloud or runner is None or plan is None:
+    if not _eval_due(ctx, it) or runner is None:
         return
     try:
-        if not plan.due(it):
-            return
         if not runner.submit(it):
-            return  # 本轮没提交（上一轮还在飞）——`submit` 自己已记过一笔
-        # ★ 2026-10-25（用户口径）：进度行要说清这一段在干**什么** —— 评估也是一段活，
-        #   此前它在进度里完全不可见（`plan.games` 局数直接给出规模，不编）。
-        games = int((getattr(plan, "plan", None) or {}).get("games", 0) or 0)
+            return  # 上一轮还在飞（`submit` 自己已记过一笔）
+        # ★ 2026-10-25（用户口径）：进度行要说清这一段在干**什么**。
+        games = int((getattr(getattr(ctx, "eval_plan", None), "plan", None) or {}).get("games", 0) or 0)
         progress_hook.report("eval", it=int(it), done=0, total=games, force=True)
-        wait_idle = getattr(runner, "wait_idle", None)
-        if wait_idle is not None and not wait_idle(EVAL_ALTERNATE_WAIT_SEC):
+    except Exception as e:
+        ctx.log(f"WARN: 云机评估提交失败（忽略）：{type(e).__name__}: {e}")
+
+
+def _drain_cloud_eval(ctx: RunContext, it: int) -> None:
+    """轮边界收线：评估已在**上一轮的 PPO** 里跑了几十秒 ⇒ 这里通常零等待。
+
+    仍是**有界**等（`EVAL_ALTERNATE_WAIT_SEC`）：等超时也照常放行（评估永不按住训练）。
+    """
+    runner = getattr(ctx, "eval_runner", None)
+    if runner is None:
+        return
+    wait_idle = getattr(runner, "wait_idle", None)
+    if wait_idle is None:
+        return
+    try:
+        if not wait_idle(EVAL_ALTERNATE_WAIT_SEC):
             ctx.log(
                 f"WARN: 云机评估 it{it} 超过 {EVAL_ALTERNATE_WAIT_SEC:.0f}s 未收线 —— 训练继续"
                 "（评估仍在后台，会与接下来的 rollout 抢 CPU；真要缩短就降 --eval-slots/语料）"
             )
-    except Exception as e:  # 评估是旁路：任何意外都不能影响训练
-        ctx.log(f"WARN: 云机评估提交失败（忽略）：{type(e).__name__}: {e}")
+    except Exception as e:
+        ctx.log(f"WARN: 云机评估收线异常（忽略）：{type(e).__name__}: {e}")
+
+
+def _maybe_cloud_eval(ctx: RunContext, it: int) -> None:
+    """提交 + 立刻有界收线（**旧口径**：调用方在轮边界上，等评估落地才走）。
+
+    ⚠ 生产路径（`_drive`）已改成「PPO 开跑时 `_submit_cloud_eval`、轮边界 `_drain_cloud_eval`」；
+    本函数留给「调用点自己就在轮边界、且要一次做完」的宿主与既有用例。
+    """
+    _submit_cloud_eval(ctx, it)
+    _drain_cloud_eval(ctx, it)
 
 
 def runner_timeout(ctx: RunContext) -> float:
@@ -853,6 +890,20 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     progress_hook.report("seg-start", it=todo[0], force=True)
     prev = start_from
     stopped = "complete"
+    #: 待评的轮次（**一个**）：本节点拍完这一轮后登记，**下一轮 PPO 开跑那一刻**才提交 ——
+    #: 于是评估整个藏在那个 PPO 的墙钟里（它不与 rollout 抢 CPU，也不占轮边界）。
+    pending_eval: list[int] = []
+    #: 本拍提交给评估的是哪一轮（收线时只用来写日志）。
+    submitted_eval: list[int] = []
+
+    def _submit_pending_eval() -> None:
+        """`on_ppo_start` 回调：PPO 开跑的那一刻把上一轮的评估丢出去（不等待）。"""
+        if not pending_eval:
+            return
+        eit = int(pending_eval.pop())
+        submitted_eval.append(eit)
+        _submit_cloud_eval(ctx, eit)
+
     try:
         for it in todo:
             # ★ 2026-10-23（plan/push-mode-notebooks §6.4 / W4）：**轮边界**看取消哨兵。
@@ -875,11 +926,18 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
                 break
             t0 = time.time()
             progress_hook.report("round-start", it=it, force=True)
-            result = _run_with_retries(ctx, it, prev_it=prev)
+            result = _run_with_retries(
+                ctx, it, prev_it=prev, on_ppo_start=_submit_pending_eval
+            )
             session.append(_checkpoint(ctx, it, result, wall_sec=round(time.time() - t0, 2)))
             # 轮边界「上传前」那一句：落盘/补传都已完成（`_checkpoint` 内部先落盘再尽力出网）。
             progress_hook.report("round-done", it=it, force=True)
-            _maybe_cloud_eval(ctx, it)
+            # 收线：这一拍提交的评估已经在**本轮 PPO** 里跑了几十秒 ⇒ 通常零等待（有界兜底）。
+            if submitted_eval:
+                _drain_cloud_eval(ctx, submitted_eval.pop())
+            # 本轮该评 ⇒ 登记，**下一轮 PPO 开跑时**提交（那一秒 rollout 已收工、TPU 空转）。
+            if _eval_due(ctx, it):
+                pending_eval.append(int(it))
             prev = it
     except (ProtocolError, RetryableError) as e:
         fail_summary = {"last_it": prev, "error": f"{type(e).__name__}: {e}"}
@@ -913,12 +971,14 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     return _combined(ctx, last_it=prev, session=session, state=stopped)
 
 
-def _run_with_retries(ctx: RunContext, it: int, *, prev_it: int) -> dict:
+def _run_with_retries(
+    ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
+) -> dict:
     """单轮 + 有限重试（自主模式没有 hub 兜底：瞬时失败重试，确定性失败直接上抛）。"""
     last: BaseException | None = None
     for attempt in range(1, ITER_RETRIES + 2):
         try:
-            return _run_iteration(ctx, it, prev_it=prev_it)
+            return _run_iteration(ctx, it, prev_it=prev_it, on_ppo_start=on_ppo_start)
         except RetryableError as e:  # 瞬时（单局超时 / rc≠0 / 传输）——重试值得
             last = e
             ctx.log(f"it{it} 第 {attempt} 次失败（瞬时）：{e}")

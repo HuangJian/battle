@@ -308,8 +308,13 @@ def test_eval_alternate_wait_dual_namespace(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_dual_readers_read_their_own_home() -> None:
-    """读点所在的**家**要分开：`_maybe_cloud_eval` 在引擎、`_setup_cloud_eval` 在交接面。"""
-    assert "EVAL_ALTERNATE_WAIT_SEC" in _func_loads(ENGINE_FILE, "_maybe_cloud_eval")
+    """读点所在的**家**要分开：`_drain_cloud_eval` 在引擎、`_setup_cloud_eval` 在交接面。
+
+    ⚠ 2026-10-29：引擎侧的读者从 `_maybe_cloud_eval` 移到了 `_drain_cloud_eval`——生产者拆成
+    「PPO 开跑时提交」（`_submit_cloud_eval`，不等）与「轮边界收线」（`_drain_cloud_eval`，读
+    这个常量做有界兜底）。`_maybe_cloud_eval` 仍是二者的合体（老调用点），但它自己不再直接读。
+    """
+    assert "EVAL_ALTERNATE_WAIT_SEC" in _func_loads(ENGINE_FILE, "_drain_cloud_eval")
     assert "EVAL_ALTERNATE_WAIT_SEC" in _func_loads(HANDOFF_FILE, "_setup_cloud_eval")
     assert "EVAL_ALTERNATE_WAIT_SEC" not in _func_loads(HANDOFF_FILE, "verify_plan_file")
 
