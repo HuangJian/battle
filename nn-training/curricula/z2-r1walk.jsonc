@@ -1,0 +1,151 @@
+// 课程 z2-r1walk —— `z2-r1` 的**走动版**：同样的任务，只多一项「走到新格子给钱」（2026-10-29）
+//
+// ── 0. 一句话 ──────────────────────────────────────────────────────────────
+//   r1 学会了**站着一格不动**、靠 72.5% 的胜率过掉这一级（80/80 局 `cellsVisited=1`）。
+//   本课只动一个数：`+ wWalk*min(cellsVisited, 20)`，把「站着」和「走二十格」的价差拉到 **19 分**，
+//   看它能不能在不丢清关的前提下动起来。
+//
+// ── 1. 为什么（r1 it10 的实测，80 局）──────────────────────────────────────
+//   | 指标 | 值 |
+//   | `cellsVisited` | **1.00**（min 1 / max 1）—— 80/80 局从未离开出生格 |
+//   | `idleTicks` / `ticks` | **2471 / 2471** —— 每一拍都没换格 |
+//   | clearRate | 72.5%（58/80），中位 **1778 拍** |
+//   | 开火 | 43.25 发 / 命中 2.49 / 落空 36.36 ⇒ 命中率 **5.7%** |
+//   ⇒ 它靠「站在出生点朝一个方向倾泻，等 commander 走进火线」赢的。
+//     机制：1 敌 + `attackBase 2.0` ⇒ 敌人必来；而**删掉 wExplore 之后没有任何项为"移动"付钱**
+//     ⇒ 站着是成本最低的解。**站桩不是没学会，是当前价格下的最优。**
+//
+// ── 2. 剂量算账（真 RewardFn，两臂同场景只差 wWalk）────────────────────────
+//   | 情形 | r1 | **r1walk** | 差 |
+//   | 站桩·赢 1778 拍（cells 1） | +73.03 | +74.03 | +1.00 |
+//   | 走 5 格·赢 | +69.30 | +74.30 | +5.00 |
+//   | **走 20 格·赢** | +65.70 | **+85.70** | **+20.00** |
+//   | 走 60 格·赢（封顶） | +65.70 | +85.70 | +20.00 |
+//   | 站桩·超时 | −86.00 | −85.00 | +1.00 |
+//   ⇒ **走满 20 格比站桩多 11.7 分**（85.7 vs 74.0），是清关奖(60)的 20% ⇒ 平局一定翻。
+//   ⇒ **封顶 20 是关键**：60 格和 20 格同价 ⇒ 「绕圈刷格子」的边际收益在 20 格处归零
+//     （z0 的"逛"就是无封顶的探索款；这里上限只有 **1.33 个击杀**、清关的 1/3）。
+//   ⇒ 校准依据：`cellsVisited` 行 0 = **0**（实测 shard）⇒ 没有"tick0 白送"的假奖励；
+//     且**随机权重的策略一局就能走 14 格**（实测 1528 拍）⇒ 20 格不是高难度行为。
+//
+// ── 3. 与 z2-r1 的唯一差异 ────────────────────────────────────────────────
+//   | 项 | z2-r1 | **本课** |
+//   | formula 尾 | `… + wBrick*min(aimBricks,12)` | `… + wBrick*min(aimBricks,12) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)` |
+//   | params | — | 多 `wWalk 1.0` / `walkCap 20.0` |
+//   | 其余 13 参数 / terminal / 关集 / 敌数 1 / 命 1 / max_ticks 6000 / 起点 scratch-init / 超参 / 配额 / 种子流 | — | **逐字相同** |
+//   ⚠ 公式变了 = **新实验**（AGENTS §15.5）⇒ 新 `out`/`traj`，不与 r1 共用任何账本。
+//
+// ── 4. 判据（两条同时满足才算"动起来了"）──────────────────────────────────
+//   · **`cellsVisited` 均值 ≥ 12** —— 刻度取「随机策略的移动水平」（随机 14 格）。
+//     **不要用 ≥5**：5 格可以是原地抖（在出生点周围绕 5 个格子就够），那不算走。
+//   · **clearRate ≥ 50%（连续 2 个评估点）** —— 动起来但不能把清关丢了。
+//   · 对照读法：与 r1 同 it 比。r1 的基线是 cells 1.00 / clearRate 72.5%。
+//   · 止损：it40 前 cells 仍 ≤3 ⇒ 剂量不够，`wWalk → 2.0`；cells 上去了但 clearRate <30%
+//     ⇒ 剂量过头（走取代了打），`wWalk → 0.5`。**两个方向都只调 wWalk，不动别的。**
+//
+// ── 5. 已知风险 ───────────────────────────────────────────────────────────
+//   ① **"原地抖"**：`cellsVisited` 只数新格，不辨方向。绕出生点 20 格也能拿满分 ⇒ 必须有 §4 的 ≥12 门槛，
+//      而且读的时候要同时看 `ticks`：抖动通常伴随长局（不敢接触敌人）。
+//   ② **清关率的容忍边界**：走 20 格 +20 vs 站桩 +1，净 19 分优势；而 clearRate 每掉 10pp 约损 **13.6 分**
+//      （85.7 与 −50 的差 × 0.10）⇒ **clearRate 掉超过 ~8pp，站桩就重新更划算**。这就是本课的平衡点。
+//   ③ 1 敌关的移动不必然可迁移：本课只回答"能不能让它动"，**不回答"动了会不会赢 20 敌"**。
+//   ④ ~~不属于 z2-r1..r6 的晋级链，也不能当 r2 的起点。~~ **2026-10-29 改判**：r1 判负
+//      （it5/it10 是同一份读数、it15 起 clearRate 0%、停在 it33）⇒ 本课是**事实上的 r1**：
+//      r2 的 `bc` 指向 `weights/z2-r1walk/z2-r1walk.it170.20261029-125213.json`，
+//      `wWalk 1.0 / walkCap 20` 随之固化进 r2–r6 的价格表。仍不进 `NAMES`（晋级链第一级是 r2）。
+//
+// ── 6. 预算 / 开工 ───────────────────────────────────────────────────────
+//   与 r1 完全一致：`target_transitions 24576`（24 chunk）· 4 关 ⇒ 6144 samples/关/轮 ·
+//   96 Adam 步/轮 · 起点 `weights/z0-scratch/scratch-init.json` · `paired_rotate_seed 20261028`。
+//   控制台开课（**agent 不起训练**），与 r1 同时开才是配对臂（同种子流，逐 it 可比）。
+//   ~~结算节待回填~~ → **已回填（2026-10-29 13:00，it174 在跑）**，见 §7。
+//
+// ── 7. 结算（真机读数）────────────────────────────────────────────────────
+//   | it | rollout win | eval clear | cells(反推) | zero_kill |
+//   | 5  | 8.6%        | 0%         | 6.5         | 1.00      |
+//   | 15 | 4.6%        | 1.3%       | 21.7        | 0.99      |
+//   | 125| 39.5%       | 72.5%      | 38.8        | 0.275     |
+//   | 140| 54.7%       | 90.0%      | 32.8        | 0.100     |
+//   | 165| 80.3%       | **98.8%**  | 33.9        | **0.0125**|
+//   | 170| 76.2%       | **98.8%**  | 38.9        | **0.0125**|
+//   **判据达成**：it165+it170 连续两点 clear 98.8% / zero_kill 0.0125；cells 30±5 ≥ 12。
+//   **cells 不必等逐局字段**：云机 eval 行只有 19 键（`cellsVisited` 缺），但
+//     `dims.mobility = clamp01(cellsVisited / mobilityRef)`（`tools/eval/godai-score.ts:202`），
+//     自定义关走默认 `mobilityRef = 110`（同文件 :99）⇒ cells = mobility × 110。
+//     校准：it0/5/10/15 四点「反推/实测」= **1.000**（34.89/6.50/6.50/21.70）。
+//   **没有"抖动型长局"**：it165/it170 `timeout_frac=0`、均值 824/801 拍清关
+//     （r1 站桩 1778 拍）⇒ 是真走真打，不是在出生点绕圈。
+//   ⚠ **it15–it70 的评估点不可用于判据**：it15/25/30/35/40/50/55/60/70 这 9 个点的 80 局
+//     **逐字段完全相同**（时间戳与 wver 各自不同），it20/45/65 各一份；同段 `weights/` 里
+//     W(it) 的 max|Δ| = 0.13–0.27 ⇒ 评估所评的权重与本机归档的 W(it) 不同源。
+//     该段 cells 恒定 21.7、clear ≤37.5% 是**管道读数**，不是策略读数。
+//     机制指向 `remote/plan_handoff.py:1083` 的 `_land_weights`（delta→整份还原），未定位。
+{
+  "version": 5,
+  "name": "z2-r1walk",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z0-scratch/scratch-init.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r1walk/weights.json",
+  "traj": "tmp/z2-r1walk",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r1walk",
+  "backup_prefix": "z2-r1walk",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

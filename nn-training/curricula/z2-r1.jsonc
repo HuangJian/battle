@@ -1,5 +1,11 @@
 // 课程 z2-r1 —— 新的从零线 · 第 1 级：4 张最简图 · **1 敌 · 1 命**（2026-10-28）
 //
+// ⛔ **2026-10-29 判负，不要再开**：`it5`/`it10` 是同一份 eval 读数（80/80 局逐字段相同），
+//    `it15` 起 clearRate 0%，停 `it33`；唯一学到的形态是**站桩**（`cellsVisited` 1.00、
+//    `idleTicks == ticks`）—— 不是"没学会"，是这套价目表下的最优解。后继 = `z2-r1walk`
+//    （事实上的 r1）；r2 从它的 it170 冻结归档起。判决全文见 `docs/nn/experiments.md` §126。
+//    本文件的奖励段保持原样（**历史价，不参与同价断言**）。
+//
 // ── 0. 一句话 ───────────────────────────────────────────────────────────
 //   z0/z1 四条腿判死（0 胜、被训到 0 杀 → docs/nn/training-stack.md §50），这是重设计：
 //   随机权重 + **可赢的最小任务**，然后按「敌数 × 命数 × 关集」逐级加，r6 = 经典 35 关原题。
@@ -8,12 +14,24 @@
 //   level classic35 · stage_select "16,22,3,6"（Crossroads / Oasis / Steel Fortress / Brickworks）
 //   · enemies 1 · lives 1 · max_ticks 6000。
 //   关卡选择规则（预注册，结构化、**不看教师**——AGENTS §0.2 四禁令）：
-//     ① 首敌必须是 `a`（basic）——`enemies: N` 取 forces 前 N 个，1 敌 = 最弱的那种；
-//     ② 不含 water / ice（移动/打滑是另一种技能，不与「学会打」混在一起）；
+//     ① forces 首位必须是 `a`（basic 档，`enemies: N` 取前 N 个）；
+//        ⚠ **但 hard 的 commander floor 会把它顶掉**，本批实际吃到的是 commander（见 §1b）；
+//     ② 不含 water(13) / ice(12)——按 `src/config/stages.ts:45` 的 CODE 表逐关核过（4 关都没有）；
 //     ③ 全连通、无死胡同（26×26 BFS 覆盖 = 可走格）；
 //     ④ 按 brick+steel 升序取 4 张（要拆的墙最少 ⇒ 射界最容易打开）。
-//   ⇒ 本组：Crossroads 72 墙 / Oasis 80 / Steel Fortress 156 / Brickworks 174。
+//   ⇒ 本组（**子块口径**：WHOLE=4、半格=2，脚本算的不是手写）：
+//     Crossroads 砖44+钢30=**74** / Oasis 54+28=**82** / Steel Fortress 132+26=**158** / Brickworks 144+32=**176**。
+//     （原稿写的 72/80/156/174 每项差 +2，是计数口径不同；**升序关系一致**，故按实测算的值回填。）
 //   ⚠ 与 z0 的选法相反：z0 按「god-AI 胜率 >95%」挑关，那正是 §0.2 禁的教师口径。
+//
+// ── 1b. **已知且故意保留**：本级那唯一一只敌人是 commander 档（2026-10-29 拍板）──
+//   `COMMANDER_FLOOR = {classic:0, relax:1, hard:2, chaos:4}`（src/ai/config.ts:180）+
+//   `remainingSpawns <= commanderQuotaRemaining ⇒ 强制 commander`（src/game/SimulationSpawn.ts:139-146）
+//   ⇒ `enemies: 1` 时 remaining=1 ≤ 2，**那一只必是 commander**（dodge 0.9 / aimError 0.05 /
+//   predictionDepth 8，src/ai/config.ts:126-136），即全场最强档，不是 basic。
+//   ⇒ 本级的真实难度 = 「1 只最强敌 + 1 命 + 6000 拍」。**用户决定先不改，看效果**。
+//     要真拿到弱敌只有 `difficulty: classic`（floor 0），但它同时把基地改成一击即碎 —— 本批不做。
+//   ⇒ 补偿：奖励里加 `+wHit*aimHits`（命中即给 1.5），让「打中」在拿到击杀之前就有密集信号。
 //
 // ── 2. 为什么 1 敌 1 命（z0/z1 的病根，实测 → §50）──────────────────────
 //   20 敌 3 命 + 随机权重 ⇒ 基地每局必碎 ⇒ `base_destroyed -35` 是**常数**、没有梯度；
@@ -23,12 +41,25 @@
 //   1 敌 1 命把「清关」压到**一次击杀**可达 ⇒ 清关奖第一次有信号；命少 ⇒ 学不会拿命换杀。
 
 // ── 奖励：全阶梯逐字相同 ────────────────────────────────────────────────
-//   +15*kills +60*clear +3*墙块(0–8) -0.12*dmg -18*death -min(36, 6*未支付千拍) +0.25*min(bricks,12)
+//   +15*kills +1.5*命中 +60*clear +3*墙块(0–8) -0.12*dmg -18*death
+//   -min(36, 6*未支付千拍) +0.25*min(bricks,12)
 //   反苟：墙价（丢一圈 -24）+ **按拍**的 pace（每杀赠 1200 拍，超出每千拍 -6、封顶 -36）
 //         + **无移动/探索项**。超时 -50 = 唯一「没打完」的结局，比任何输法都贵。
 //   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」也亏；命尽/基毁 -35。
-//   汇率（真 RewardFn 的 Φ 差分，§50.3）：完胜 +72.7 · 清关 4 杀 +92.5 · 基地被毁 3 杀 -30.5
-//         · 莽（1 杀后死）-73.5 · 苟（超时满墙）-86.0 ⇒ **苟比莽更贵**，赢比两者高 140+。
+//   汇率（**2026-10-29 用真 RewardFn 复算**，起始 Φ 含 `baseWallIntact=8` 的 +24；括号内是假设）：
+//     | 情形 | Φ |
+//     | 完胜（1 杀·1 命中·无伤·2400 拍） | **+69.3** |
+//     | 清关 4 杀（6 命中·100 伤·5000 拍） | **+117.3** |
+//     | 基地被毁·3 杀（150 伤·墙掉到 4） | −13.9 |
+//     | 莽（1 杀后死·200 伤·1500 拍） | **−60.8** |
+//     | 苟（超时·满墙·0 杀） | **−86.0** |
+//     | 苟（超时·墙掉到 2·120 伤） | −118.4 |
+//   ⇒ **赢 ≫ 苟 > 莽** 的排序成立（苟 −86 比莽 −60.8 更贵；赢比两者高 130+）。
+//   ⚠ 局限 ①：**pace 项在击杀瞬间会额外给一次"回血"** —— `max(0, ticks-kills*1200)` 在 `kills`
+//      跳变时归零，Φ 上跳最多 `6*1200/1000 = +7.2` ⇒ **一次击杀实际值 15 + ≤7.2**，不是 15。
+//      不是 bug（"每杀赠 1200 拍"本来就是它的语义），但汇率表按实际算。
+//   ⚠ 局限 ②：`timeout -50` 在本级**几乎不触发** —— 敌人的权重是 `attackBase 2.0`，它会去拆基地
+//      而不是跟你对射 ⇒ 结局大概率 `base_destroyed`。这条设计要到 r4+ 才真正起作用。
 //
 // ── 晋级 / 停腿 ─────────────────────────────────────────────────────────
 //   · 晋级下一级：in-loop eval **连续 2 个评估点** clearRate ≥ 50% 且 zero_kill_frac ≤ 0.10。
@@ -45,9 +76,10 @@
   "lives": 1,
   "max_ticks": 6000,
   "reward": {
-    "formula": "wKill*kills + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap)",
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap)",
     "params": {
       "wKill": 15.0,
+      "wHit": 1.5,
       "wWin": 60.0,
       "wBase": 3.0,
       "wDmg": 0.12,
@@ -72,7 +104,7 @@
   "kickstart_ref": false,
   "warmup_iters": 0,
   "value_anchor": 0.001,
-  "iters": 120,
+  "iters": 500,
   "max_hours": 24.0,
   "lr": 0.00012,
   "epochs": 4,

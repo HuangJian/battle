@@ -7,6 +7,47 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §126 z2-r1 判负：站桩不是「没学会」而是「当前价格下的最优」；r1walk 上位为事实上的 r1，`wWalk` 固化进 r2–r6（2026-10-29）
+
+- **触发**：用户拍板「r1 判负」，并明确**不许拿"课程文件里写的不能当起点"当挡箭牌**。
+- **r1 的判决证据**（`dashboard/data/course-metrics/z2-r1/eval_log.jsonl`，80 局/点）：
+  ① `it5` 与 `it10` 的 80 局**逐字段完全相同** ⇒ 所谓「连续两点 72.5%」是同一份读数记了两次；
+  ② `it15` 起 clearRate **0%**（`it15` 与 `it20` 也互为同一份），`it25` 局均 357 拍，停 `it33`；
+  ③ `zero_kill_frac` 在唯二有分的两点是 **0.275 > 0.10** ⇒ 晋级判据**从未成立**。
+- **r1 学到的是什么**（`it10` 实测 80 局）：`cellsVisited` **1.00**（min=max=1）、`idleTicks == ticks`
+  （2471=2471）、开火 43.25 发 / 命中 2.49（5.7%）⇒ **站桩倾泻、等 commander 走进火线**。
+  机制：1 敌 + `attackBase 2.0` ⇒ 敌人必来；而删掉 `wExplore` 后没有任何项为移动付钱
+  ⇒ **站着是成本最低的解**。这一条是本节的结论句：**别把退化解读成"还没学会"**。
+- **r1walk 的读数**（`curricula/z2-r1walk.jsonc`，唯一差 = `+1.0*min(cellsVisited,20)`）：
+
+  | it | rollout win | eval clear | cells(反推) | zero_kill |
+  |---|---|---|---|---|
+  | 5 | 8.6% | 0% | 6.5 | 1.00 |
+  | 15 | 4.6% | 1.3% | 21.7 | 0.99 |
+  | 125 | 39.5% | 72.5% | 38.8 | 0.275 |
+  | 165 | 80.3% | **98.8%** | 33.9 | **0.0125** |
+  | 170 | 76.2% | **98.8%** | 38.9 | **0.0125** |
+
+  `cellsVisited` 不必等逐局字段：`dims.mobility = clamp01(cells/ref)`、自定义关 `ref=110`
+  （`tools/eval/godai-score.ts:99,202`），it0/5/10/15 四点「反推/实测」= **1.000**。
+  `timeout_frac=0`、824 拍清关（站桩 1778 拍）⇒ 不是「原地抖」型长局。
+- **改判动作**（4 处，全部落盘）：
+  ① `z2-r2.jsonc` 的 `bc` → `nn-training/weights/z2-r1walk/z2-r1walk.it170.20261029-125213.json`
+     （整份 JSON，非 delta，不随训练滚动）；
+  ② `wWalk 1.0 / walkCap 20` 固化进 **r2–r6** 的 formula+params（r1 保留历史价，不参与同价断言）；
+  ③ `test_z2_ladder_courses.py`：同价断言六级 → r2–r6；`..._never_pays_for_movement` →
+     `..._paid_but_capped`（`walkCap ≤20`、`wWalk < wKill`、`wWalk*walkCap ≤ wWin/3`）；
+     权重链测试改为「r2 的 bc 必须匹配冻结归档形态」——**活指针禁令写进测试**；
+  ④ `docs/nn/training-stack.md` §50.3 表格与价格表、`z2-r1walk.jsonc` §5④/§7 结算节回填。
+- **为什么不是教条**：z0 判死的是「**无封顶**的探索款」（走 60 格与 20 格同价不算刷）。把移动那一格
+  彻底留空，代价就是教出站桩。封顶 20 = 1.33 个击杀 = 清关奖的 1/3，是这两者之间的唯一平衡点。
+- **遗留（必须修，否则 r2 的"连续两点"同样不可信）**：r1walk 的 `it15/25/30/35/40/50/55/60/70`
+  这 **9 个评估点的 80 局逐字段完全相同**（时间戳与 wver 各自不同），`it20/45/65` 各一份；
+  同段 `weights/` 里 W(it) 的 max|Δ| = 0.13–0.27 ⇒ **评估所评的权重与本机归档的 W(it) 不同源**。
+  机制指向 `remote/plan_handoff.py:1083` 的 `_land_weights`（delta→整份还原），**未定位**。
+  另：云端 eval 行只有 19 键（`cellsVisited`/`playerShots`/`aimHits` 全缺，`self` 行 91 键）
+  —— `worker/eval_rows.py:348` 本来写得出，说明云端 manifest 缺键。
+
 ---
 
 ## §125 y29 两臂：从 `y28-steady.it300` 续爬（对照）+ `wDmg` 减半（2026-10-21，`y28-dmg-half` 判停后重开）
