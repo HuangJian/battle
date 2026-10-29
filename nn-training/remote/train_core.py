@@ -830,16 +830,18 @@ def run_training_core(
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
     # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
-    from worker.ppo.common import _ppo_save, materialize_to_cpu, xla_mark_step
+    from worker.ppo.common import HostModule, _ppo_save, xla_mark_step
 
     xla_mark_step(device_t)
     # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），写出去会让
-    #   ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享参数对象，物化对两者等价。
+    #   ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享参数对象，视图对两者等价。
     # ★ 2026-10-29：原来是 `raw_model.to("cpu")` —— torch_xla 上那是**逐张量**设备同步
     #   （42 参数 + `_ppo_save` 的 126 个 Adam 状态 = 168 次 × ~0.25s ≈ 42s，字节只有 1MB）。
-    materialize_to_cpu(raw_model)
+    #   这里取**主机视图**（一次批量 D2H，模块本身不动）：给 Parameter 赋 CPU 张量会被
+    #   autograd 拒（`set_data ... incompatible tensor type`，2026-10-29 真机）。
+    host = HostModule(raw_model)
     wj_path = job_dir / "weights.json"
-    save_weights_json(raw_model, str(wj_path))
+    save_weights_json(host, str(wj_path))
     # ★ opt-blob-diet（2026-09-24，§3.2 W1 / §3.6-8）：把本轮产出的 weights.json **原始
     # 字节**也写进 blob_cache（键 = sha256）。下一轮 hub 的 `init_weights_fp` =
     # `sha256(args.out)` = 同一份字节的 sha（`verify_and_land` 落的就是它解码后的原字节）
@@ -870,7 +872,7 @@ def run_training_core(
         #   地址是「整份」还是「delta」，本机都不会重传自己已经持有的字节。
         _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
     ckpt_dir = job_dir / "ppo_final"
-    _ppo_save(str(ckpt_dir), raw_model, opt, epochs_eff)
+    _ppo_save(str(ckpt_dir), host, opt, epochs_eff)
     # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身
     opt_tar_raw = pack_opt_tar(ckpt_dir)
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的

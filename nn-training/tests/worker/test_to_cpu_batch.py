@@ -78,17 +78,45 @@ def test_to_cpu_state_returns_object_when_no_tensor(monkeypatch):
     assert common._to_cpu_state(obj) == obj
 
 
-def test_materialize_to_cpu_keeps_values(fake_xla):
+def test_host_module_batches_once_and_keeps_values(fake_xla):
+    """`HostModule` 的 `state_dict()` = 一次批量取回的 CPU 副本（值逐字相同）。"""
     module = torch.nn.Linear(3, 2)
     before = {k: v.detach().clone() for k, v in module.state_dict().items()}
-    common.materialize_to_cpu(module)
+    host = common.HostModule(module)
+    assert isinstance(host, torch.nn.Module), "写权重的入参契约是 Module（零 cast）"
     assert fake_xla == [len(before)], f"params+buffers 一次取回（{len(before)} 个），实际 {fake_xla}"
-    after = module.state_dict()
+    sd = host.state_dict()
     for k, v in before.items():
-        assert torch.equal(after[k], v), f"{k} 的值被改了"
+        assert torch.equal(sd[k], v), f"{k} 的值被改了"
+    assert all(t.device.type == "cpu" for t in sd.values())
 
 
-def test_materialize_to_cpu_empty_module(monkeypatch):
-    monkeypatch.setattr(common, "is_xla", lambda _dev: True)
-    monkeypatch.setattr(common, "_xla_fetch_cpu", lambda ts: pytest.fail("不该被调用"))
-    common.materialize_to_cpu(torch.nn.Module())
+def test_host_module_never_writes_the_source_module(monkeypatch, fake_xla):
+    """★ 2026-10-29 云机现场：XLA 上 `p.data = <CPU 张量>` 必炸
+    （`RuntimeError: Attempted to call variable.set_data(tensor), but variable and tensor have
+    incompatible tensor type`）⇒ 视图这条路**一次都不许**走源模块的写入面。
+
+    钉法：把 `Module._apply`（`.to()` 的实现，也是唯一会碰 Parameter 的入口）改成必抛，
+    视图仍要能出完整的 CPU 副本。改动前那条 `p.data = c` 在这里会以同样的方式炸。
+    """
+    module = torch.nn.Linear(3, 2)
+
+    def boom(self, fn):
+        raise RuntimeError("Attempted to call `variable.set_data(tensor)` …")
+
+    monkeypatch.setattr(torch.nn.Module, "_apply", boom)
+    host = common.HostModule(module)
+    assert host.state_dict()["weight"].shape == (2, 3)
+    assert len(list(host.parameters())) == 2, "`num_params` 那一格要的是源模块的参数"
+    assert host.arch() == {}, "源模块没有 arch ⇒ 空 dict（`save_weights_json` 的既有兜底）"
+
+
+def test_host_module_writes_the_same_bytes_as_the_module(tmp_path) -> None:
+    """`weights.json` 必须**逐字节相同**：视图不许改产物身份（`init_weights_fp` 就是它）。"""
+    from worker.data.weights_io import save_weights_json
+
+    module = torch.nn.Linear(3, 2)
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    save_weights_json(module, str(a))
+    save_weights_json(common.HostModule(module), str(b))
+    assert a.read_bytes() == b.read_bytes(), "权重字节变了 ⇒ 每轮 init_weights_fp 都会漂"

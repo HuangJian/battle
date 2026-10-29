@@ -235,24 +235,36 @@ def to_cpu_batch(tensors: list) -> list:
     return out
 
 
-def materialize_to_cpu(module) -> None:
-    """把 Module 的 params/buffers **就地**搬回 CPU（XLA 上 = 一次批量 D2H）。
+class HostModule(torch.nn.Module):
+    """`Module` 的**只读主机视图**：`state_dict()` 是已批量物化到 CPU 的副本，其余原样转发。
 
-    替代 `Module.to("cpu")`：后者在 torch_xla 上是逐张量搬（本模型 42 个参数 ⇒ 42 次
-    设备同步）。搬完 downstream（`save_weights_json` 的逐张量 isfinite、`torch.save`）
-    就全是主机操作。任何意外都退回 `module.to("cpu")`（= 改动前的行为，绝不抛：这条路
-    在训练收尾的关键路径上）。
+    为什么不是 `module.to("cpu")`、也不是逐个 `p.data = cpu_t`（2026-10-29 云机现场）：
+    torch_xla 的 Parameter 是 lazy tensor，给它的 `.data` 赋一个 **CPU** 张量会被 autograd 拒
+    ——`RuntimeError: Attempted to call variable.set_data(tensor), but variable and tensor have
+    incompatible tensor type`（`Module.to()` 能过是因为 torch_xla 给 `Module._apply` 打了补丁，
+    而那是**逐张量**设备同步：本模型 42 个参数 = 42 次 × ~0.25s）。
+
+    下游真正需要的只有 `state_dict()` / `arch()` / `parameters()` 三样（`save_weights_json` 与
+    `_ppo_save` 的入参面）⇒ 给一个视图就够，**源模块一个字节都不动**（也就没有那条会炸的赋值）。
+    继承 `Module` 只为让「写权重的入参是 Module」这条既有契约继续成立（零 `cast`/`Any`）。
     """
-    items = list(module.named_parameters()) + list(module.named_buffers())
-    if not items:
-        return
-    try:
-        cpus = to_cpu_batch([p for _, p in items])
-        for (_, p), c in zip(items, cpus, strict=True):
-            p.data = c
-    except Exception as e:
-        log(f"WARN: 批量物化失败（回退逐张量 .to('cpu')）：{type(e).__name__}: {e}")
-        module.to("cpu")
+
+    def __init__(self, module: torch.nn.Module) -> None:
+        super().__init__()
+        self._src = module
+        #: 一次批量 D2H（`to_cpu_batch`）；之后所有下游读的都是它。
+        self._sd = _to_cpu_state(module.state_dict())
+
+    def state_dict(self, *args, **kwargs):  # type: ignore[override]
+        """已物化的 CPU 副本（`*args/**kwargs` 只为签名兼容：`_ppo_save` 会无参调用）。"""
+        return self._sd
+
+    def arch(self):
+        """架构元信息（源模块没有就给空 dict——`save_weights_json` 的既有兜底口径）。"""
+        return getattr(self._src, "arch", dict)()
+
+    def parameters(self, recurse: bool = True):
+        return self._src.parameters()
 
 
 def _to_cpu_state(obj):
