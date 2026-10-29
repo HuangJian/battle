@@ -30,7 +30,7 @@ from common.shard import SHARD_FILES, write_shard
 from remote.hub_client import iter_shard_dirs
 from remote.payload_pack import _pack_segmented, compress_segment, shard_segment
 from trainer.loop_remote_job import _trim_shards_to_quota
-from trainer.zero_disk import finalize_round_shards
+from trainer.zero_disk import PER_GAME_NAME, finalize_round_shards, write_iter_actuals
 from worker.metrics_stats import metrics_stats
 from worker.resume import (
     MEM_SHARD_NODE,
@@ -51,6 +51,43 @@ def _mem() -> dict[str, dict]:
         "rl_s3_seed11": _manifest(3, 11, 100),
         "rl_s3_seed12": _manifest(3, 12, 200),
         "rl_s4_seed13": _manifest(4, 13, 999),
+    }
+
+
+def _rich_manifest(stage: int, seed: int, n: int, *, outcome: str = "stage_clear") -> dict:
+    """真实 rollout shard 画像的子集：覆盖控制台四列所需的全部 `_PER_GAME_FIELDS`。
+
+    `mem`（`ShardSegments._manifests`）里存的正是这份字典（与落盘 `manifest.json` 同源），
+    `compact_per_game` / 读方 `entryFromManifest` 都按这些字段名取数。
+    """
+    return {
+        "stage": stage,
+        "seed": seed,
+        "nSamples": n,
+        "kills": 12,
+        "ticks": 400,
+        "outcome": outcome,
+        "powerUpsCollected": 3,
+        "playerDamageTaken": 50,
+        "playerDeaths": 0,
+        "puGotTank": 1,
+        "startLives": 1,
+        "enemyTotal": 20,
+        "puSpawnStar": 1,
+        "dims": {"loot": 0.7},
+        "score": 1234,
+    }
+
+
+def _rich_mem() -> dict[str, dict]:
+    return {
+        # 同 (stage,seed) 两份（重试）→ 全采集：两份都写，去重交给读方 pickBest。
+        "rl_s3_seed11": _rich_manifest(3, 11, 300),
+        "rl_s3_seed11_retry": _rich_manifest(3, 11, 280),
+        "rl_s3_seed12": _rich_manifest(3, 12, 200, outcome="base_destroyed"),
+        "rl_s4_seed13": _rich_manifest(4, 13, 999),
+        # 缺 (stage,seed) 的脏行：compact_per_game 必须丢弃（不能污染配对）。
+        "rl_s9_bad": {"nSamples": 50, "kills": 5},
     }
 
 
@@ -146,6 +183,59 @@ def test_finalize_writes_stage_est_and_estimator_reads_it(tmp_path: Path) -> Non
         3: 150,
         4: 999,
     }
+
+
+def test_write_iter_actuals_writes_full_collection(tmp_path: Path) -> None:
+    """零落盘腿的逐局画像落 `it<N>/per-game.json`：读方（dashboard）优先读它出四列。
+
+    验证点：
+    · 一个 it 一份文件（全采集，不去重——同 (stage,seed) 重试两份都留，去重交给读方 pickBest）；
+    · 字段名与 `entryFromManifest` 逐字相同（`kills`/`ticks`/`playerDamageTaken`/`dims`…）；
+    · 缺 (stage,seed) 的脏行被 `compact_per_game` 丢弃，不污染配对。
+    """
+    it_dir = tmp_path / "it7"
+    it_dir.mkdir()
+
+    pg = write_iter_actuals(it_dir, _rich_mem())
+
+    assert pg is not None
+    pg_path, pg_n = pg
+    assert pg_path == it_dir / PER_GAME_NAME
+    assert pg_n == 4
+    rows = json.loads(pg_path.read_text(encoding="utf-8"))
+    assert len(rows) == 4, "两份重试的 (3,11) + (3,12) + (4,13)；缺身份的脏行被丢"
+    by_key = {(r["stage"], r["seed"]): r for r in rows}
+    assert (3, 11) in by_key and (3, 12) in by_key and (4, 13) in by_key
+    # 全采集：两份 (3,11) 都在（compact_per_game 不去重，读方 pickBest 才去重）。
+    assert sum(1 for r in rows if (r["stage"], r["seed"]) == (3, 11)) == 2
+    e = by_key[(3, 12)]
+    assert e["kills"] == 12 and e["ticks"] == 400 and e["outcome"] == "base_destroyed"
+    assert e["playerDamageTaken"] == 50 and e["startLives"] == 1 and e["enemyTotal"] == 20
+    # dims.loot 以 {loot:...} 形态保留（读方推道具掉落用）。
+    assert e["dims"] == {"loot": 0.7}
+
+
+def test_write_iter_actuals_skips_when_no_data(tmp_path: Path) -> None:
+    """纯离线回传轮 `mem` 为空、盘上无 shard ⇒ 不写（绝不拿空数组覆盖回传腿已写好的文件）。"""
+    it_dir = tmp_path / "it3"
+    it_dir.mkdir()
+    # 模拟回传腿已落好的 per-game.json，不能被空写覆盖。
+    existing = it_dir / PER_GAME_NAME
+    existing.write_text("[{\"stage\":1,\"seed\":1}]", encoding="utf-8")
+
+    assert write_iter_actuals(it_dir, {}) is None
+    assert existing.read_text(encoding="utf-8") == "[{\"stage\":1,\"seed\":1}]"
+
+
+def test_finalize_also_writes_per_game_for_zero_disk(tmp_path: Path) -> None:
+    """`finalize_round_shards` 现在顺带写逐局画像（零落盘腿四列的唯一数据源）。"""
+    it_dir = tmp_path / "it8"
+    it_dir.mkdir()
+
+    finalize_round_shards(it_dir, _rich_mem(), it=8)
+
+    rows = json.loads((it_dir / PER_GAME_NAME).read_text(encoding="utf-8"))
+    assert len(rows) == 4
 
 
 def test_pack_segmented_never_reads_the_placeholder_dir(tmp_path: Path) -> None:

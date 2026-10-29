@@ -36,6 +36,11 @@ from typing import Any
 from common.log import log
 from worker.resume import MANIFEST_NAME, STAGE_EST_NAME, walk_shard_dirs
 
+#: 逐局压缩画像的落盘名（与 `remote/artifacts.py::ArtifactStore.PER_GAME_NAME`、
+#: `dashboard/src/server/iters.ts::PER_GAME_NAME` 三处必须逐字相同：读方按文件优先，
+#: 在线/dist 零落盘腿原本不写它 ⇒ 控制台「耗时/击杀/残血/道具」四列恒空，见 z2-r3 it20+）。
+PER_GAME_NAME = "per-game.json"
+
 
 def _add_row(rows: dict[int, tuple[int, int]], mm: Mapping[str, Any]) -> None:
     """把一份 manifest 累加进 `{stage: (games, samples)}`（量纲与 `worker.resume` 同源）。"""
@@ -85,6 +90,52 @@ def write_stage_est(it_dir: Path, rows: Mapping[int, tuple[int, int]]) -> Path:
     return path
 
 
+def write_iter_actuals(it_dir: Path, mem: Mapping[str, dict]) -> tuple[Path, int] | None:
+    """轮末把本轮**全部** shard 的逐局压缩画像写成 `it<N>/per-game.json`（一个 it 一份）。
+
+    返回 `(path, 局数)`；无数据可写时返回 `None`（不在盘上留空文件）。
+
+    在线/dist 零落盘腿的 shard 从不落盘（`common.shard.write_shard` 见到段账即只交字节、不写盘），
+    而控制台的「耗时/击杀/残血/道具」四列是逐局聚合出来的，依赖单局 manifest —— 它只活在回传进程的
+    `ShardSegments._manifests` 内存里，随进程回收。`finalize_round_shards` 恰好在本轮回传账还在时调用
+    （裁剪 `_trim_shards_to_quota` 在随后的 publish 阶段才发生），所以在此把它压成只读画像落盘，
+    读方（`dashboard/src/server/iters.ts::readPerGameFileEntries`）优先读这个文件，与离线回传腿同口径、
+    零改动。
+
+    收集范围 = **全采集**（盘上 shard 目录 + 内存 manifest，两份源与 `stage_est_rows` 同）：
+    `mem` 在调用时仍是裁剪前的全量 ⇒ 四列统计覆盖所有被采样的局，不止 PPO 实际装载的保留集
+    （用户口径 2026-10-29「写全采集」）。同 (stage,seed) 重复不去重（读方 `pickBest` 才去重）。
+
+    只在有数据时才写：纯离线回传轮 `mem` 为空且盘上无 shard ⇒ 跳过，绝不拿空数组覆盖回传腿
+    已写好的 `per-game.json`。
+    """
+    from worker.reports import compact_per_game
+
+    all_mm: list[dict] = []
+    # 盘上 shard（非零落盘 / local 兜底腿）：直接扫目录。
+    for d in walk_shard_dirs(it_dir, with_manifest=True):
+        try:
+            mm = json.loads((d / MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(mm, dict):
+            all_mm.append(mm)
+    # 内存回传 manifest（零落盘腿）：与盘上合并。
+    for mm in (mem or {}).values():
+        if isinstance(mm, dict):
+            all_mm.append(mm)
+    if not all_mm:
+        return None
+    rows = compact_per_game(all_mm)
+    if not rows:
+        return None
+    path = it_dir / PER_GAME_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path, len(rows)
+
+
 def finalize_round_shards(
     it_dir: Path,
     mem: Mapping[str, dict],
@@ -92,7 +143,7 @@ def finalize_round_shards(
     it: int = -1,
     emit: Callable[[str], None] | None = None,
 ) -> Path:
-    """轮末收尾：把本轮分关账写盘（**唯一**落盘的东西，几百字节）。
+    """轮末收尾：把本轮分关账 + 逐局画像写盘（**唯一**落盘的东西，几百字节 + 压缩画像）。
 
     必须在 `_record_iteration` / `_write_iter_stats` / 巡检**之后**调（它们还要读内存账与
     local 腿的盘上 shard）。`mem` 为空（纯 local 轮）⇒ 只写账，不喊「零落盘」。
@@ -104,5 +155,12 @@ def finalize_round_shards(
         say(
             f"[zero-disk] it{it}: {len(mem)} 个回传 shard 全程未落盘"
             f"（打包走 presegmented 段），分关账 → {path}"
+        )
+    pg = write_iter_actuals(it_dir, mem)
+    if pg is not None:
+        pg_path, pg_n = pg
+        say(
+            f"[zero-disk] it{it}: 逐局画像 → {pg_path}"
+            f"（全采集 {pg_n} 局，控制台的耗时/击杀/残血/道具列据此出数）"
         )
     return path
