@@ -19,6 +19,7 @@ import hashlib
 import json
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 import zipfile
@@ -1026,8 +1027,15 @@ def test_settle_without_an_answer_is_parked_then_replayed(
         )
         rec = disp.assignments.get(COURSE)
         assert rec is not None
-        monkeypatch.setattr(disp._client, "cancel_task", lambda *_a, **_k: None)
-        monkeypatch.setattr(disp._client, "post_ack", lambda *_a, **_k: None)
+        # ⚠ **私有 client 替身，不要 monkeypatch `disp._client`**：它缺省就是**模块对象**
+        # （`hub/offline_push.py`: `self._client = client_mod`，进程内所有 dispatcher 共享）。
+        # 打补丁会让**别的用例留下的 pump 线程**也打到这里的假函数上 —— 2026-10-29 门禁
+        # 红现场：`calls == ["cancel", "ack", "ack"]`（第三个 ack 不属于本单）。替身只属于
+        # 本用例（构造期就有 `client_mod` 这个缝）。
+        client = types.SimpleNamespace(
+            cancel_task=lambda *_a, **_k: None, post_ack=lambda *_a, **_k: None
+        )
+        monkeypatch.setattr(disp, "_client", client)
         assert (
             disp._settle_assignment(
                 COURSE,
@@ -1057,8 +1065,8 @@ def test_settle_without_an_answer_is_parked_then_replayed(
             calls.append("ack")
             return 200, {}
 
-        monkeypatch.setattr(disp._client, "cancel_task", fake_cancel)
-        monkeypatch.setattr(disp._client, "post_ack", fake_ack)
+        client.cancel_task = fake_cancel
+        client.post_ack = fake_ack
         assert disp._settle_retry(
             COURSE, "http://w", "k", disp.assignments.get(COURSE) or parked
         ) is True

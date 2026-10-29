@@ -44,10 +44,58 @@ if sys.platform == "win32" and os.environ.get("NN_NO_IGNORE_CTRL_C") != "1":
     ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
 
 
-#: 测试期的控制台地址（**死端口**）——见下面 `_production_isolation` 与
+#: 候选「死端口」（按顺序探测）。9/1/7 是传统 discard/echo，正常机器上没人监听。
+_DEAD_PORT_CANDIDATES = (9, 1, 7, 45871, 45872, 45873)
+
+
+def _port_refuses_fast(port: int) -> bool:
+    """本机回环的该端口是否**当场拒绝**（`ECONNREFUSED`，<1ms）。
+
+    ⚠ 「没人监听」不等于「连接被拒」：某些容器/防火墙把未监听端口做成**黑洞**（SYN 被丢，
+    等到超时才报错）。2026-10-29 实测本仓容器：`127.0.0.1:9` **8.008s 超时**，而
+    `hub/task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC` 就是 8.0s ⇒ 每一处「控制台不可达」降级
+    都白等 8s（`--durations` 里 `test_task_pack_missing_is_actionable_404` /
+    `test_end_it_reached_must_match_the_current_pack_identity` 各 8.02s，两处全在等它）。
+    探一次 ~0ms（拒绝是即时的），换掉每秒级的空等。
+    """
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.05)
+    try:
+        sock.connect(("127.0.0.1", port))
+    except ConnectionRefusedError:
+        return True
+    except OSError:  # 超时 / 被丢包 / 无路由 —— 都不是「当场被拒」
+        return False
+    finally:
+        sock.close()
+    return False  # 连上了 = 有服务在听，绝不能拿它当死桩
+
+
+def _dead_console_url() -> str:
+    """选一个**连接当场被拒**的回环端口当死桩（不变量见 `_port_refuses_fast`）。"""
+    for _port in _DEAD_PORT_CANDIDATES:
+        if _port_refuses_fast(_port):
+            return f"http://127.0.0.1:{_port}"
+    # 兜底：bind 一个随机端口再立刻 close ⇒ 回到「没人监听」（本进程内刚验证过可用）。
+    import socket
+
+    _probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _probe.bind(("127.0.0.1", 0))
+        _port = int(_probe.getsockname()[1])
+    finally:
+        _probe.close()
+    return f"http://127.0.0.1:{_port}"
+
+
+#: 测试期的控制台地址（**死端口**：连接当场被拒）——见下面 `_production_isolation` 与
 #: `tests/test_production_isolation.py`（2026-10-06 事故：门禁跑完，本机 `bun run dashboard` 的
 #: 命令行刷出 21 行 `[action] autoOfflineHandoff …` —— 是测试里的真 hub 子进程打过去的）。
-TEST_CONSOLE_URL = "http://127.0.0.1:9"
+#: 具体端口**按机器探测**（见 `_dead_console_url`）：固定写 `9` 在某些容器里是黑洞端口，
+#: 「不可达」就会退化成「等满 8s 超时」。
+TEST_CONSOLE_URL = _dead_console_url()
 
 #: 测试期必须钉进**本用例自己的 `tmp_path`** 的生产状态面（env 名 → tmp 下的相对路径）。
 #: 这些开关的缺省全都指向操作员正在用的活状态（`worker/gate_halt.py::intent_path` 等）：

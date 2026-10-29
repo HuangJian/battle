@@ -210,9 +210,19 @@ def _norm_source(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: list[str])
 
 
 def _shape(node: ast.AST) -> str:
-    """AST 骨架：擦掉标识符名与常量值，只留结构（找结构克隆）。"""
-    clone = ast.parse(ast.unparse(node))
-    for sub in ast.walk(clone):
+    """AST 骨架：擦掉标识符名与常量值，只留结构（找结构克隆）。
+
+    ⚠ **原地擦除 + 直接 `ast.dump`**（2026-10-29 提速，6.7s → 4.4s 全仓扫描）：旧版先
+    `ast.parse(ast.unparse(node))` 再擦——`unparse` 2.7s + 重解析 1.4s 纯属白付。节点本身
+    只有 `_fields` 参与 `dump`（`lineno`/`col_offset` 是 attributes，缺省 `include_attributes=False`），
+    所以「重解析出来的新树」与「原树擦完」逐字符等价：全仓 344 文件 / 3817 个函数逐一对账
+    **0 处不一致**（`tools/reuse_audit.py` 的这个形态由 `tests/test_reuse_ledger.py` 的
+    指纹/克隆计数基线守着，改坏当场红）。
+
+    原地改的代价：调用方必须在取完 `_norm_source`（它按**子语句位置**切源码，且靠
+    `Constant.value` 是 `str` 认 docstring）之后才能调本函数 —— 见 `_funcs()` 的两趟写法。
+    """
+    for sub in ast.walk(node):
         if isinstance(sub, ast.Name):
             sub.id = "_"
         elif isinstance(sub, ast.Attribute):
@@ -225,7 +235,7 @@ def _shape(node: ast.AST) -> str:
             sub.value = None
         elif isinstance(sub, ast.ClassDef):
             sub.name = "_"
-    return ast.dump(clone)
+    return ast.dump(node)
 
 
 def prod_files(root: Path = ROOT) -> list[Path]:
@@ -254,16 +264,18 @@ def _funcs(path: Path) -> list[tuple[str, str, str, int]]:
     except (SyntaxError, UnicodeDecodeError, OSError):
         return []
     lines = _split_lines(src)  # 每文件只切一次（逐语句重切 = 94s，见 `_split_lines`）
+    nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    # ⚠ **两趟**：`_shape` 原地擦常量（`Constant.value = None`），而 `_norm_source` 靠
+    # 「首条语句是 `Constant(str)`」认 docstring、按位置切源码 ⇒ 内容指纹必须先全部取完。
+    # 单趟（父函数先擦、子函数后取）会把**嵌套函数**的 docstring 算进指纹（顺序错位）。
+    contents = [(n.name, _norm_source(n, lines), n.lineno) for n in nodes]
     out: list[tuple[str, str, str, int]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for (name, content, lineno), node in zip(contents, nodes, strict=True):
         try:
-            # 骨架在**原节点**上算：docstring 是常量，本来就会被骨架的「擦常量」抹掉。
             shape = _shape(node)
-        except Exception:  # `unparse` 对个别语法（新版 match 等）可能失败 ⇒ 不因此丢整份文件
+        except Exception:  # 个别语法（新版 match 等）擦不动 ⇒ 不因此丢整份文件
             shape = ""
-        out.append((node.name, _norm_source(node, lines), shape, node.lineno))
+        out.append((name, content, shape, lineno))
     return out
 
 

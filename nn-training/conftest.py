@@ -81,6 +81,31 @@ def pytest_addoption(parser) -> None:
     )
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """门禁的 forkdist **在收集完成后** fork 出 worker ⇒ 这里先把「每个 worker 都会重算一遍」的
+    整仓扫描算好，所有 worker 经 COW 直接命中缓存。
+
+    为什么必须在这个钩子里（2026-10-29 实测）：模块级夹具（如
+    `tests/test_remote_dag.py::_load_graph`）只在**执行相**跑，而分发是逐条动态派发的 ⇒ 同一份
+    扫描被 **9 个 worker 各付一次**（0.35s 静默 / 满载 ~4s，合计占全套件 ~35s，且全在长尾上）。
+    预热的代价只在 master 付一次（~0.35s 串行）。
+
+    清单本身住 `tests/helpers/warmup.py`（加一项 = 加一行；**进/不进的判据**也在那里：只有一个
+    worker 会付的扫描**不进**清单——那只是把成本从并行的执行相搬到串行的收集相）。
+    每一项各自计时并打一行，某一项抛异常就跳过它（退回「每 worker 自算」），不影响其余项。
+
+    xdist（Windows 门禁）下本钩子是空转：那边每个 worker 都是**新进程**且各自重新收集，master
+    里的预热不共享 —— 非 forkdist 不预热，行为与以前一致。
+    """
+    if not session.config.pluginmanager.hasplugin("tools.forkdist"):
+        return
+
+    from tests.helpers import warmup
+
+    warmup.warm_all()
+
+
 def pytest_configure(config) -> None:
     config.addinivalue_line(
         "markers",

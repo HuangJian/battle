@@ -528,8 +528,13 @@ def test_guard_fires_inside_two_idle_timeouts_on_a_dripping_link(monkeypatch) ->
         ):
             http_mod._read_body(resp, idle_timeout=idle, total_timeout=30.0, allow_reroll=True)
         dt = time.time() - t0
-        # timing-ok: 相对判据（上界由场景推出：2 × 空闲超时，不是绝对墙钟常数）
-        assert dt <= 2 * idle + 0.5, f"判据没在 2×空闲超时内动手（用了 {dt:.2f}s）"
+        # 余量为什么是 2s（2026-10-29 门禁红现场：`2.76s > 2*1.0+0.5`）：判据本身只花
+        # 2 × WIRE_PROBE_SEC = 0.6s，但本用例在**满核并行的门禁**里跑，滴流线程（每 0.1s
+        # 一字节）与判据线程都会被调度器排队；0.5s 的余量在 16 worker 负载下不够，而这
+        # 里要证的**不是**「机器多快」，而是「判据按时间窗动手、不等整份 body」（对着
+        # total_timeout=30s）。2s 仍把它钉在 30s 的 1/7 以内，退化（回到块粒度）依然红。
+        # timing-ok: 相对判据（上界由场景推出：2 × 空闲超时 + 调度余量，不是绝对墙钟常数）
+        assert dt <= 2 * idle + 2.0, f"判据没在 2×空闲超时内动手（用了 {dt:.2f}s）"
         assert ei.value.bytes_read >= 1
         assert ei.value.remain_sec > worker_mod.WIRE_REROLL_BUDGET_SEC
     finally:

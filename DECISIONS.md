@@ -10133,3 +10133,35 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落地**：`curricula/z2-r1..r6.jsonc` · `tests/biz/test_z2_ladder_courses.py`（奖励逐字相同 /
   指标与参数集合 / 阶梯单调 / 预注册关集 / r6 零覆盖 / 六级身份各异 / 权重链）。全文 →
   `docs/nn/training-stack.md` §50。
+
+## §2026-10-29-pygate-wallclock（2026-10-29，pygate 墙钟：同一份扫描不许按 worker 重付 · 死端口须「当场被拒」）
+
+- **背景**：`bun run pygate` 70s（pytest 65.10s / CPU 402s）。前 20 慢用例里 12 条是同一件事被
+  重复付钱：forkdist/xdist **逐条动态派发** ⇒ 同模块用例落到不同 worker，而 `scope="module"` 的
+  夹具只在一个进程内共享（`reuse_audit.scan()` 被付 3 次 = 61.7s CPU、`_repo_report()` 2 次 =
+  34.1s、`test_no_sleep_as_sync` 的三条规则各 parse 一遍、`dag.graph()` 被 9 个 worker 各付一次 ≈ 35s）。
+- **决定**：① 判据共享**同一个**昂贵输入的用例合并成一条（断言各带消息；`reuse_ledger` / `lock`
+  / `no_sleep`）；② 模块级重活改在**根 conftest `pytest_collection_finish`** 预热 —— forkdist 在
+  收集后 fork，预热结果经 COW 共享；xdist 不预热（新进程、不共享）；③ 全仓扫描去白付
+  （`reuse_audit._shape` 原地擦除替掉 `unparse` 往返；`text_asserts._walk` 自写 BFS + 类型预筛）；
+  ④ 测试死桩端口**按机器探测**（要求 `ECONNREFUSED` 立即返回，兜底 bind+close），不再写死 `9`。
+- **备选与否决**：把扫描结果做跨进程磁盘缓存（worker 同时启动 ⇒ 冷启动全 miss，无收益）；
+  forkdist 改成「按模块整批派发」（动分发语义，收益面只覆盖少数文件）；给 CPU 密集用例配紧
+  `time_budget`（AGENTS/conftest 头部的铁律明令禁止）。
+- **读数**：**70s → 52~64s**（15 次连跑全绿；区间宽 = 本机后台负载 0.3~7 核）/ CPU 402s → 302s；`--durations` 里
+  `test_reuse_ledger` 61.7s CPU → 14.1s、`test_lock_reentrancy` 34.1s → 12.3s、hub 两条控制台
+  降级 8.02s → 0.01s、`test_remote_dag` 的夹具 3.5~4.8s/worker → 0.07s。
+- **同批修掉**：HEAD 上就红的 `test_z2_ladder_courses::test_reward_prices_defence_and_
+  never_pays_for_movement`（期望集混进未落地的 `aimHits`/`wHit`）；两个门禁 flake
+  （`test_body_transfer_guard` 的墙钟上界余量 0.5s 不够；`test_offline_push_dispatch` 用
+  `monkeypatch` 改**共享模块** `disp._client` ⇒ 别的用例的 pump 线程也会打进假函数）。
+- **2026-10-29 补（预热清单）**：预热从钩子里的硬编码收成 `tests/helpers/warmup.py` 的清单
+  （每项计时一行 + 合计；加一项 = 加一行）。**判据写死在模块头 = 部署值 / 预热成本 ≥ 3**：
+  预热是 fork 之前的**串行**加法，而它替掉的是各 worker **并行**的重复。按这条实测**否决**了
+  `source_scan` 整树 sweep（`test_layering` 那族：用户 CPU 33→18s，墙钟却稳慢 ~2s，4 组交错
+  A/B 同向）—— 每个 worker 只扫自己那条用例的文件（0.3~1.0s），本来就和别的用例重叠。
+  单个 worker 才付的扫描（`reuse_audit.scan()` / `text_asserts.totals()` / `cli_surface._scan()`）
+  一律不进清单。全文 → `docs/nn/engineering.md` §91 ④。
+- **边界**：① 「合并用例」只对**同一份昂贵输入**成立，不同输入不许合并；② `# timing-ok:` 必须
+  紧贴断言行（隔 ≥2 行查不到）；③ 预热钩子只在 forkdist 生效，Windows/xdist 走原路径。全文 →
+  `docs/nn/engineering.md` §91。

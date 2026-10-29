@@ -25,6 +25,96 @@
 
 ---
 
+## §91 pygate 墙钟：模块级夹具按 worker 重付 · 死端口黑洞 · 全仓扫描的白付（2026-10-29）
+
+**读数**（本机 AMD 5800H / 8 物理核 16 逻辑核，门禁用 `physical_cores()` = 16 worker）：
+`bun run pygate` **70s → 52~64s**（pytest 65.10s → 50~62s，15 次连跑全绿；区间宽是因为本机
+后台（`freebuff` / zed 服务）本身吃掉 0.3~7 个核——负载 7+ 时同一套件要慢 ~10s，改前那个 70s
+也是在低负载窗口取的）；CPU（user+sys）**402s → 302s**。前 20 名慢用例里有 12 条是**同一件事
+被重复付钱**，三类根因：
+
+### ① forkdist 下 module 级夹具是**每 worker 一份**，拆成多条用例就会重复付
+
+门禁的分发器（`tools/forkdist.py` / xdist）按**逐条动态派发**：同一模块的几条用例几乎同时落到
+**不同 worker**，而 `@pytest.fixture(scope="module")` 只在一个进程内共享 ⇒ 夹具里那份整仓扫描
+被付 N 次。实测：
+
+| 文件 | 夹具/代码 | 拆成多条用例时 | 合并后 |
+|---|---|---|---|
+| `tests/test_reuse_ledger.py` | `reuse_audit.scan()` 344 文件 / 3817 函数 | **61.7s CPU（3 次）** | 14.1s（1 次） |
+| `tests/test_lock_reentrancy.py` | `_repo_report()` 390 文件进索引 | **34.1s（2 次）** | 12.3s（1 次） |
+| `tests/test_no_sleep_as_sync.py` | 三条规则各扫一遍 `tests/`+`e2e/` | 12.6s（3 次 parse） | 7.5s（1 次 parse） |
+| `tests/test_remote_dag.py` | `dag.graph()` 0.35s 静默 | **9 个 worker × 3.5~4.8s ≈ 35s** | 每个 worker 0.07s |
+
+**做法**：前三个文件把「同一份扫描的几个断言」合并成一条用例（每条断言各带消息，红了照样
+一眼看出是哪一类）；`remote_dag` 不动用例，改在**根 conftest 的 `pytest_collection_finish`**
+里预热（forkdist 在收集后 fork ⇒ 预热结果经 COW 被所有 worker 共享；xdist 不预热，因为那边
+每个 worker 都是新进程、不共享）。
+
+⚠ 这类「合并」只在**判据共享同一个昂贵输入**时成立；不同输入的用例合并会把失败定位变糊。
+
+### ② 「没人监听」≠「连接被拒」：死端口可能是黑洞
+
+`tests/conftest.py` 把控制台地址钉成死桩（生产隔离，2026-10-06 事故）。它原来写死
+`http://127.0.0.1:9`，而**本容器把 9 号端口做成黑洞**（SYN 被丢，`connect` 要等满超时才报错）：
+`hub/task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC = 8.0` ⇒ 每一处「控制台不可达」降级白等 8s
+（`--durations`：`test_task_pack_missing_is_actionable_404` / `test_end_it_reached_must_match_
+_the_current_pack_identity` 各 **8.02s**）。改法 = **按机器探测**：找一个 `ECONNREFUSED` 立即
+返回的回环端口（`_port_refuses_fast`，兜底 bind+close），两处 8.02s → 0.01s。
+
+### ③ 全仓扫描的白付：`unparse` 往返、三层遍历套壳、重复 parse
+
+* `tools/reuse_audit._shape()` 原来 `ast.parse(ast.unparse(node))` 再擦名字 —— `ast.dump` 只看
+  `_fields`（不含 lineno），**原树擦完与重解析逐字符等价**（全仓 3817 函数对账 0 处不一致），
+  扫描 **6.7s → 4.8s**。代价是 `_shape` 改成原地擦 ⇒ `_funcs()` 必须**两趟**（先取
+  `_norm_source`，它靠 `Constant(str)` 认 docstring）。
+* `tests/helpers/text_asserts._walk()`：自写 BFS 替 `ast.walk → iter_child_nodes → iter_fields`
+  （同顺序，80 万节点对账 0 处不一致），`ast.walk` 1.17s → 0.83s；再给 `_index()` 加类型预筛，
+  `totals()` 3.94s → 2.64s。
+* `_producer_funcs` 只在「有裸名调用型断言」时才跑（`_needs_producers`）。
+
+### ④ 预热清单收进 `tests/helpers/warmup.py` —— 并**实测否决**了 `source_scan` 那一项
+
+早间版本把 `remote_dag.graph()` 直接写在 `pytest_collection_finish` 里。现在清单收进
+`tests/helpers/warmup.py`：钩子只调 `warm_all()`，每项各打一行 `[warmup] <name> <秒>` + 合计
+（§16.3 的可观测性；卡住时一眼看出是哪一项）。加一项 = 加一行，但**判据写在模块头**：
+
+    进：部署值 / 预热成本 ≥ 3（≈ 至少 3 个 worker 会各自再算一遍，且单份不便宜）
+
+因为预热把成本从**并行的执行相**搬到**串行的收集相**（fork 之前，谁也不能重叠）。
+
+**被否决的那一项**（`test_layering` + 30 份 `*/test_*_split.py` 触发的 `source_scan` 整树 sweep：
+`imports()` + `_module_facts()`，1.8~2.5s）：4 组交错 A/B（同一批 30 个文件 / 402 例，
+`--forkdist 16`）—— 开 **6.8 / 8.9 / 9.8 / 6.8s**，关 **4.8 / 8.4 / 4.8 / 4.3s**；用户 CPU
+**33 → 18s**（省得很干净）但**墙钟稳定慢 ~2s**。根因：每个 worker 只扫**自己那条用例需要的**
+文件（0.3~1.0s），这部分与其它 worker 的用例完全重叠；而 1.8s 预热是纯串行的加法。整条门禁
+3 组 A/B 同向（同负载窗口内 +1.2s / ±0.3s）。
+
+COW 机制本身没问题（孤立探针，8 个子进程各扫一遍）：冷 **21.0s 孩子 CPU** vs 预热
+**1.81s + 孩子 0.0s** —— 共享成立，否决的是**这一项的换算**。对照进来的那一项：`dag.graph()`
+0.9s 静默 / 3.5~4.8s 满载，9 个 worker 各付一次，省 ~35s CPU —— 部署值/成本 ≈ 9~40，
+远超门槛。
+
+**也不进**：只有**一个** worker 会付的扫描 —— `reuse_audit.scan()` 4.5s（`test_reuse_ledger`
+合并后只剩一条用例）· `text_asserts.totals()` 2.6s · `cli_surface._scan()` 0.37s。它们本来就只
+付一次，预热只会更慢；要加速得改用例结构（合并断言 / 缓存派生小结果），不是往清单里塞。
+
+### 同批修掉的 flake / 假红
+
+1. `tests/biz/test_z2_ladder_courses.py::test_reward_prices_defence_and_never_pays_for_movement`
+   在 HEAD 就红：`REWARD_METRICS/REWARD_PARAMS` 混进了 `aimHits`/`wHit`（未落地的密集命中实验），
+   而六级 `curricula/z2-r*.jsonc` 的 formula 里没有它 ⇒ 结构判据当场红。按文档价格表
+   （`docs/nn/training-stack.md` §50）回退期望值。
+2. `tests/remote/test_body_transfer_guard.py` 的墙钟上界 `2*idle + 0.5` 在 16 worker 满载下测出
+   2.76s（判据本身只花 0.6s，其余是调度排队）⇒ 余量放大到 `+2.0`（仍钉在 `total_timeout=30s`
+   的 1/7 以内）。**注意 `# timing-ok:` 必须紧贴断言那行**（隔 2 行以上就查不到理由）。
+3. `tests/hub/test_offline_push_dispatch.py` 用 `monkeypatch.setattr(disp._client, …)` 改的是
+   **模块对象**（`hub/offline_push.py`: `self._client = client_mod`）⇒ 别的用例留下的 pump 线程
+   也会打到假函数上（门禁红现场 `calls == ["cancel", "ack", "ack"]`）。改成构造期就有的
+   `client_mod` 缝，给本用例一个私有 `SimpleNamespace`。
+
+---
+
 ## §90 同进程跨线程的「谁先谁后」不许用时间戳比（2026-10-27，flake）
 
 **触发**：`e2e/test_stream_collect_e2e.py::test_a_freed_slot_is_refilled_before_the_other_game_lands`

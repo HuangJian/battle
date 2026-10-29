@@ -142,7 +142,7 @@ def _stems(modules: frozenset[str]) -> frozenset[str]:
 
 @pytest.fixture(scope="module")
 def report() -> reuse_audit.Report:
-    """整仓扫一次（module 级：一次扫描供三条断言共用）。"""
+    """整仓扫一次（module 级：一次扫描供下面的断言共用）。"""
     return reuse_audit.scan()
 
 
@@ -150,25 +150,32 @@ def _counts(report: reuse_audit.Report) -> dict[str, int]:
     return report.to_json()["counts"]  # type: ignore[no-any-return]
 
 
-def test_exact_duplicate_groups_only_go_down(report: reuse_audit.Report) -> None:
-    n = _counts(report)["exact_groups"]
+def test_ledger_counts_only_go_down(report: reuse_audit.Report) -> None:
+    """三类计数**只许降**（涨上去当场红）+ 账本必须真的扫到了东西。
+
+    为什么四条断言在一个用例里（2026-10-29 门禁提速）：`report` 是 **module 级**夹具，
+    而门禁的分发器（forkdist / xdist）是**逐条动态派发**的——同模块的几条用例几乎同时
+    落到**不同 worker**，每个 worker 各付一次整仓扫描（344 文件 / 3817 函数，静默 4.8s，
+    满载实测 14~20s）。拆成多条时实测同一份扫描在门禁里**付了 3 次**（61.7s → 一份 ~20s）；
+    「一次扫描供多条断言共用」的意图只在单进程里成立。合并不是放弃可读性：每条断言自带
+    消息与基线常量，红了照样一眼看出是哪一类涨了。
+    """
+    # 覆盖判据先断言：路径写错后「全跳过 ⇒ 全分组为空」是最危险的假绿。
+    assert report.files > 200, report.files
+    assert report.functions > 2000, report.functions
+    counts = _counts(report)
+    n = counts["exact_groups"]
     assert n <= BASELINE_EXACT, (
         f"逐字节重复的实现在变多：{n} > 基线 {BASELINE_EXACT}。"
         f"新增的见 {[list(g.modules) for g in report.exact_groups]}"
         "—— 抽到共用模块，别停在「再抄一份」。"
     )
-
-
-def test_structural_clone_groups_only_go_down(report: reuse_audit.Report) -> None:
-    n = _counts(report)["clone_groups"]
+    n = counts["clone_groups"]
     assert n <= BASELINE_CLONE, (
         f"结构克隆在变多：{n} > 基线 {BASELINE_CLONE}"
         f"（新增见 {[list(g.modules) for g in report.clone_groups]}）。"
     )
-
-
-def test_same_name_spread_only_goes_down(report: reuse_audit.Report) -> None:
-    n = _counts(report)["same_name_ge3"]
+    n = counts["same_name_ge3"]
     assert n <= BASELINE_SAME_NAME_GE3, (
         f"同名散落（≥3 模块）在变多：{n} > 基线 {BASELINE_SAME_NAME_GE3}。"
         "注意：同名**不是**欠账的充分条件（门面转发 / handler 约定名合法），"
@@ -176,19 +183,17 @@ def test_same_name_spread_only_goes_down(report: reuse_audit.Report) -> None:
     )
 
 
-def test_ledger_covers_the_production_tree(report: reuse_audit.Report) -> None:
-    """账本必须真的扫到了东西（防止路径判据写错后「全跳过 ⇒ 全绿」的假绿）。"""
-    assert report.files > 200, report.files
-    assert report.functions > 2000, report.functions
+def test_standalone_boot_modules_are_exempt_not_invisible() -> None:
+    """R2 豁免**不是橡皮擦**：三个引导模块仍在扫描面里（只不进「欠账」计数），且文件真实存在。
 
-
-def test_standalone_boot_modules_are_exempt_not_invisible(report: reuse_audit.Report) -> None:
-    """R2 豁免**不是橡皮擦**：三个引导模块仍在扫描面里（只不进「欠账」计数），且文件真实存在。"""
+    不开口 `report` 夹具（= 不另付一次整仓扫描）："仍在扫描面里" 由
+    `reuse_audit.STANDALONE_BOOT_MODULES`（扫描面的**输入**）与文件存在性钉住，而「扫描
+    真的跑过」由上面那条用例的 `files/functions` 覆盖——本模块只需要**一份**扫描。
+    """
     assert _stems(reuse_audit.STANDALONE_BOOT_MODULES) == _EXPECTED_EXEMPT_STEMS
     assert all(
         (reuse_audit.ROOT / rel).is_file() for rel in reuse_audit.STANDALONE_BOOT_MODULES
     ), "豁免表里有点不出来的文件（账本腐烂）"
-    assert report.files > 200, report.files
 
 
 # ─────────────────────────── 账本自身的自证（合成源码）───────────────────────────
