@@ -118,6 +118,18 @@ def test_row_extra_carries_rotation_and_volume_stats() -> None:
     assert _row_extra({"rotation": {}, "volume_stage_stats": None}, "train") is None
 
 
+def test_row_extra_carries_art_sec() -> None:
+    """产物段秒数进账本行（2026-10-29）：云机轮 `产物落盘 43.4s` 此前在日志里**没有打点**。
+
+    判据：只在 `result.wire.art_sec` 是正数时给键（老 worker 没有这个键 ⇒ 老行为逐字不变）。
+    """
+    assert _row_extra({"wire": {"art_sec": 43.43}}, "train") == {"art_sec": 43.43}
+    assert _row_extra({"wire": {"art_sec": 0}}, "train") is None  # 0 = 没测到，不编
+    assert _row_extra({"wire": {"art_sec": None}}, "train") is None
+    assert _row_extra({"wire": {}}, "train") is None
+    assert _row_extra({}, "train") is None
+
+
 def test_ledger_row_maps_rotation_and_volume_stats() -> None:
     """★ 产物行 → 课程账本事件：两个键原样搬（控制台 `parseIterRotation/parseIterVolume` 读它）。"""
     rot = {"mode": "off", "per_it": 0, "pinned": [], "all": 4, "window": ALL_STAGES, "override": "off"}

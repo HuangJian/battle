@@ -32,7 +32,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -831,13 +830,14 @@ def run_training_core(
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
     # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
-    from worker.ppo.common import _ppo_save, xla_mark_step
+    from worker.ppo.common import _ppo_save, materialize_to_cpu, xla_mark_step
 
     xla_mark_step(device_t)
-    # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），
-    #   写出去会让 ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享
-    #   同一批参数对象，.to("cpu") 对两者等价。
-    raw_model.to("cpu")
+    # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），写出去会让
+    #   ckpt 与单卡路径互不兼容（课程 resume 会炸）。raw_model 与 DP 共享参数对象，物化对两者等价。
+    # ★ 2026-10-29：原来是 `raw_model.to("cpu")` —— torch_xla 上那是**逐张量**设备同步
+    #   （42 参数 + `_ppo_save` 的 126 个 Adam 状态 = 168 次 × ~0.25s ≈ 42s，字节只有 1MB）。
+    materialize_to_cpu(raw_model)
     wj_path = job_dir / "weights.json"
     save_weights_json(raw_model, str(wj_path))
     # ★ opt-blob-diet（2026-09-24，§3.2 W1 / §3.6-8）：把本轮产出的 weights.json **原始
@@ -910,12 +910,8 @@ def run_training_core(
         log=log,
     )
 
-    if os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
-        log(
-            f"job {jid}: 产物落盘 {time.time() - _t_art:.2f}s"
-            "（save/pack/identity——不计入 ppo=，与 prep 分开看）"
-        )
-
+    # 产物段的秒数不再靠 `PPO_CUDA_DIAG`（那要人记得开）：随 `wire.art_sec` 进账本行，
+    # 由 `plan_run` 拼进既有的落盘行（零新增行、每轮都有读数）。
     result = {
         "job_id": jid,
         "data_fp": manifest["data_fp"],
@@ -940,6 +936,8 @@ def run_training_core(
         unpack_sec=unpack_sec,
         opt_restore_sec=opt_restore_sec,
         grad_sec=ppo_sec,
+        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
+        art_sec=time.time() - _t_art,
         blob_hits=blob_hits,
         blob_miss_bytes=blob_miss_bytes,
         weights_src=weights_src,
@@ -1308,12 +1306,8 @@ def _run_training_core_paddle(
         log=log,
     )
 
-    if os.environ.get("PPO_CUDA_DIAG", "0") not in ("", "0"):
-        log(
-            f"job {jid}: 产物落盘 {time.time() - _t_art:.2f}s"
-            "（save/pack/identity——不计入 ppo=，与 prep 分开看）"
-        )
-
+    # 产物段的秒数不再靠 `PPO_CUDA_DIAG`（那要人记得开）：随 `wire.art_sec` 进账本行，
+    # 由 `plan_run` 拼进既有的落盘行（零新增行、每轮都有读数）。
     result = {
         "job_id": jid,
         "data_fp": manifest["data_fp"],
@@ -1333,6 +1327,8 @@ def _run_training_core_paddle(
         unpack_sec=unpack_sec,
         opt_restore_sec=opt_restore_sec,
         grad_sec=ppo_sec,
+        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
+        art_sec=time.time() - _t_art,
         blob_hits=blob_hits,
         blob_miss_bytes=blob_miss_bytes,
         weights_src=weights_src,

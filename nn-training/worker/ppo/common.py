@@ -188,23 +188,113 @@ def demo_index(buf: torch.Tensor | None, didx: npt.NDArray[np.int64]) -> Any:
 
 
 
+def _xla_fetch_cpu(tensors: list) -> list:
+    """XLA 张量 → CPU 张量的**一次**批量取回（torch_xla 内部 API；不可用即抛，由调用方回退）。
+
+    为什么存在：逐个 `.cpu()` 在 torch_xla 上是**逐次**设备同步。2026-10-29 云机实录
+    `产物落盘 43.4s` = 168 个张量（model 42 + Adam 状态 42×3）× ~0.25s/次，而字节只有
+    1MB —— 那 40 秒买的是「同步次数」，不是带宽/算力。
+    """
+    import torch_xla
+
+    fn = getattr(getattr(torch_xla, "_XLAC", None), "_xla_get_cpu_tensors", None)
+    if fn is None:
+        raise RuntimeError("torch_xla 无 _XLAC._xla_get_cpu_tensors")
+    # 一次图执行边界（同步只付一次；之后那次批量传输不再逐张量等设备）。
+    xla_mark_step(tensors[0].device)
+    return list(fn(list(tensors)))
+
+
+def to_cpu_batch(tensors: list) -> list:
+    """一串张量 → 一串 CPU 张量；XLA 那部分**一批一次** D2H，非 XLA 逐张量 `.detach().cpu()`。
+
+    回退路径 = 改动前的行为（逐张量），**绝不抛**：这条路在训练收尾的关键路径上，
+    宁可变慢也不能让一整轮白跑（批量 API 是 torch_xla 内部件，跨版本不保证）。
+    """
+    out: list = [None] * len(tensors)
+    idx = []
+    for i, t in enumerate(tensors):
+        if torch.is_tensor(t) and is_xla(getattr(t, "device", None)):
+            idx.append(i)
+        else:
+            out[i] = t.detach().cpu() if torch.is_tensor(t) else t
+    if idx:
+        ok = False
+        try:
+            got = _xla_fetch_cpu([tensors[i] for i in idx])
+            if len(got) != len(idx):
+                raise RuntimeError(f"批量取回数量不符：{len(got)} != {len(idx)}")
+            for i, t in zip(idx, got, strict=True):
+                out[i] = t.detach() if torch.is_tensor(t) else t
+            ok = True
+        except Exception:
+            ok = False
+        if not ok:  # 逐张量回退（今天的行为）
+            for i in idx:
+                out[i] = tensors[i].detach().cpu()
+    return out
+
+
+def materialize_to_cpu(module) -> None:
+    """把 Module 的 params/buffers **就地**搬回 CPU（XLA 上 = 一次批量 D2H）。
+
+    替代 `Module.to("cpu")`：后者在 torch_xla 上是逐张量搬（本模型 42 个参数 ⇒ 42 次
+    设备同步）。搬完 downstream（`save_weights_json` 的逐张量 isfinite、`torch.save`）
+    就全是主机操作。任何意外都退回 `module.to("cpu")`（= 改动前的行为，绝不抛：这条路
+    在训练收尾的关键路径上）。
+    """
+    items = list(module.named_parameters()) + list(module.named_buffers())
+    if not items:
+        return
+    try:
+        cpus = to_cpu_batch([p for _, p in items])
+        for (_, p), c in zip(items, cpus, strict=True):
+            p.data = c
+    except Exception as e:
+        log(f"WARN: 批量物化失败（回退逐张量 .to('cpu')）：{type(e).__name__}: {e}")
+        module.to("cpu")
+
+
 def _to_cpu_state(obj):
     """state_dict（可嵌套）→ 张量全部物化到 CPU 的副本，容器类型保持不变。
 
     CPU/CUDA 上 .detach().cpu() 是 no-op（同一 storage）⇒ torch.save 输出不变；
     XLA 上把 XLATensor 拉回主机，避免 pickle 设备张量导致跨机还原失败。
     容器类型必须保留（state_dict 是 OrderedDict，改成 dict 会改变 pickle 字节）。
+
+    两遍走（2026-10-29）：先收集全部叶子、**一次**批量取回，再按原容器重建 ——
+    逐张量递归时每个叶子各付一次设备同步，Adam 状态（126 个张量）就是 126 次。
     """
-    if isinstance(obj, dict):
-        out = obj.__class__()
-        for k, v in obj.items():
-            out[k] = _to_cpu_state(v)
-        return out
-    if isinstance(obj, (list, tuple)):
-        return obj.__class__(_to_cpu_state(v) for v in obj)
-    if torch.is_tensor(obj):
-        return obj.detach().cpu()
-    return obj
+    leaves: list = []
+
+    def _collect(o):
+        if isinstance(o, dict):
+            for v in o.values():
+                _collect(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                _collect(v)
+        elif torch.is_tensor(o):
+            leaves.append(o)
+
+    _collect(obj)
+    if not leaves:
+        return obj
+    cpus = iter(to_cpu_batch(leaves))
+
+    def _build(o):
+        if isinstance(o, dict):
+            out = o.__class__()
+            for k, v in o.items():
+                out[k] = _build(v)
+            return out
+        if isinstance(o, (list, tuple)):
+            return o.__class__(_build(v) for v in o)
+        if torch.is_tensor(o):
+            return next(cpus)
+        return o
+
+    return _build(obj)
 
 
 def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:

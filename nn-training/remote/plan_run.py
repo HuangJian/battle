@@ -532,6 +532,15 @@ def _row_extra(result: dict, phase: str) -> dict | None:
     vstats = result.get("volume_stage_stats")
     if isinstance(vstats, dict) and vstats:
         extra["volume_stage_stats"] = vstats
+    # ★ 2026-10-29（云机轮墙钟）：产物段（save/pack/identity）的秒数。它是 `wall=` 里除了
+    #   `rollout_sec`/`ppo_sec` 之外最大的一块，此前**一行打点都没有**（只有临时开关
+    #   `PPO_CUDA_DIAG=1` 才打）——真机 43.4s/轮，占一轮的一半，日志里完全看不见。
+    #   缺键（老 worker）就不给，不编 0。
+    wire = result.get("wire")
+    if isinstance(wire, dict):
+        art = wire.get("art_sec")
+        if isinstance(art, (int, float)) and float(art) > 0:
+            extra["art_sec"] = round(float(art), 2)
     return extra or None
 
 
@@ -575,7 +584,11 @@ def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phas
         ) from e
     ctx.log(
         f"it{it} 落盘：kl={agg.get('kl')} mean_ret={agg.get('mean_ret')} "
-        f"winRate={(report or {}).get('winRate')} wall={row['wall_sec']}s → {ctx.store.dir_for(it)}"
+        f"winRate={(report or {}).get('winRate')} wall={row['wall_sec']}s"
+        # 产物段秒数（零新增行：拼在既有的落盘行上）。`wall - rollout - ppo - art`
+        # 才是「其余」；没有它，那 40 秒在日志里既不是 rollout 也不是 PPO。
+        + (f" art={row['art_sec']}s" if "art_sec" in row else "")
+        + f" → {ctx.store.dir_for(it)}"
     )
     ctx.deliver_round(it)  # 补传在落盘之后（先自洽，再尽力出网）
     return entry
