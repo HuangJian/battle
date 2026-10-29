@@ -97,3 +97,51 @@ def test_boot_side_reports_through_the_common_hook() -> None:
         assert detach() == ""
     assert calls and "lease=lease1" in calls[0]
     assert progress_hook.hook() is None, "detach() 之后不能再有注册者（下一门课会装自己的）"
+
+
+def test_iter_progress_logs_at_most_once_a_minute() -> None:
+    """`iter`（采集局）**日志行**：一轮 3s 的采集一行都不打；跑久了每分钟一行（2026-10-29 瘦身）。
+
+    现场：一轮 239 局只要 3s，`should_log_progress` 的 25% 一桶打 5 行
+    （1/94 → 31/124 → 93/186 → 180/239 → 239/239），而它们说的同一件事已经写在轮末那行
+    （`进度=239/239 games settled`）。**发报不受这层窗影响**：`interval=0` 时每句都发
+    ——「发不发」仍只有打点层一处决定，这里只压日志行。
+    """
+    lines: list[str] = []
+    posts: list[str] = []
+    now = [1000.0]
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        posts.append(url)
+        return 200, {}
+
+    detach = offline_boot.install_progress_pinger(
+        "http://hub",
+        "tok",
+        "c5-gae",
+        "lease1",
+        lines.append,
+        interval=0.0,  # 只看日志窗：发报一律放行
+        post=fake_post,
+        clock=lambda: now[0],
+    )
+    try:
+        # 一轮 3s 的采集：一行都不打（换轮即重置窗口 + 该轮第一条不打）
+        for done, total in [(1, 94), (31, 124), (93, 186), (180, 239), (239, 239)]:
+            now[0] += 0.5
+            progress_hook.report("iter", it=111, done=done, total=total)
+        # 别的 kind 不受这个窗影响（轮边界那几句必须照旧出现）
+        progress_hook.report("round-done", it=111, force=True)
+        # 同一轮跑过一分钟 ⇒ 采集局再开口一行（长 rollout 仍然看得见活着）
+        now[0] += offline_boot.ITER_LOG_MIN_SEC + 1
+        progress_hook.report("iter", it=111, done=300, total=400)
+        # 换到下一轮：又回到「一条不打」
+        progress_hook.report("iter", it=112, done=1, total=94)
+    finally:
+        detach()
+
+    iter_lines = [m for m in lines if "采集局" in m]
+    assert len(iter_lines) == 1 and "第111轮" in iter_lines[0], iter_lines
+    assert "第112轮" not in "".join(iter_lines), "换轮第一条（1/94）没有信息量，不该打"
+    assert any("本轮完成" in m for m in lines), "非 iter 的进度行不许被这个窗吃掉"
+    assert len(posts) == 8, f"发报照旧逐事件（8 句），实际 {len(posts)}"

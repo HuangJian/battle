@@ -384,17 +384,19 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     )
     # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
     # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
-    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走，
-    # 不一致时响亮记一笔（两个数不同 = 采集侧与训练侧对「目标」的理解已经漂了）。
+    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
+    # ★ 2026-10-29（日志瘦身）：漂移**不再单打一行 WARN**（值恒定 ⇒ 390 轮 390 条一样的话），
+    #   改成拼进 prep 那行的「动态采集」字段（同一句读数里既有生效值也有被覆盖的原值）。
+    drift = 0
+    want = 0
     if isinstance(vol, dict):
         want = int(vol["per_stage_quota"])
         have = int(m.get("per_stage_quota", 0) or 0)
-        if have and have != want:
-            ctx.log(
-                f"WARN it{it}: manifest per_stage_quota={have} 与计划 {want} 不一致"
-                "——按计划走（采集量由计划反解）"
-            )
+        drift = have if (have and have != want) else 0
         m["per_stage_quota"] = want
+    if drift:
+        # 与 prep 那行同一个 bundle（装载完成时一次性打），不再每轮一条 WARN。
+        prep_b.add("配额漂移", f"manifest {drift}/关 → 按计划 {want}/关")
     # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
     # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
     # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
@@ -835,19 +837,20 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
         ctx.close_delivery()
         _close_eval(ctx)
         return _combined(ctx, last_it=start_from, session=session, state="noop")
-    ctx.log(f"自主段开始：{len(todo)} 轮待跑（it{todo[0]} → it{todo[-1]}）")
+    # rollout 并行度与段边界同**一行**（2026-10-29 日志瘦身）：它是每段一次的本机规模派生值，
+    # 计划里钉着的是**导出机**的值——两者不同时说出来，「明明改大了并发却不见快」没法归因。
+    # 口径（`cpu_worker_slots`：≤4 核全给，否则 max(cores−2, cores×0.8)）留在那个函数里，
+    # 行上只给「可用几核 + 核数怎么来的」。
+    pinned = int(ctx.plan.get("workers", 0) or 0)
+    ctx.log(
+        f"自主段开始：{len(todo)} 轮待跑（it{todo[0]} → it{todo[-1]}）"
+        f"｜rollout 并发={ctx.rollout_workers} 局"
+        + (f"（计划钉着 {pinned} = 导出机规模，已按本机覆盖）" if pinned and pinned != ctx.rollout_workers else "")
+        + f"｜核数出处 {cores_note()}"
+    )
     # ★M3 / Q2：轮边界的第二层打点（第一层在 `worker/iter_rollout.py` 的每结算一局）。
     # 段开工先报一句：一条长轮次（rollout+PPO）里 hub 的 hold 活性全靠这些完成事件。
     progress_hook.report("seg-start", it=todo[0], force=True)
-    # rollout 并行度**在这里**报一次（每段一次，不是每轮）：它是本机规模派生的，而计划里
-    # 钉着的是**导出机**的值——两者不同时说出来，否则「明明改大了并发却不见快」没法归因。
-    pinned = int(ctx.plan.get("workers", 0) or 0)
-    ctx.log(
-        f"rollout 并发局数：{ctx.rollout_workers} 局"
-        + (f"（计划里钉着 {pinned}——那是导出机的规模，已按本机核数覆盖）" if pinned and pinned != ctx.rollout_workers else "")
-        + f"；与云机评估同一口径 cpu_worker_slots（≤4 核全给，否则 max(cores−2, cores×0.8)）；"
-        f"本机核数出处：{cores_note()}"
-    )
     prev = start_from
     stopped = "complete"
     try:

@@ -286,6 +286,15 @@ PROGRESS_TIMEOUT_SEC = 5.0
 PROGRESS_FAIL_LIMIT = 3
 #: 降频窗（秒）：按连丢次数取，封顶最后一档；**下一个成功即复位**。
 PROGRESS_COOLDOWN_SEC = (240.0, 480.0, 900.0)
+#: `iter`（采集局）这族**日志行**的最短间隔（秒）：口径与 `common/game_watch.PROGRESS_LOG_SEC`
+#: / `ppo/engine.py` 的 HB_SEC 同一个「每分钟一句」。2026-10-29 用户口径（log 瘦身）：一轮 239 局
+#: 的采集只要 3s，而 `should_log_progress` 的 25% 一桶会打 5 行（1/94、31/124、93/186、180/239、
+#: 239/239）——它们说的同一件事已经写在轮末那行（`进度=239/239 games settled`）。
+#: 实现：**换轮即重置窗口且第一条不打**（那条必然是 `1/94`）⇒ 3s 的一轮 0 行；真跑超一分钟的
+#: 一轮仍然每分钟 1 行（长了要看得见活着）。`should_log_progress` 照旧先过（25% 桶/换阶段）。
+#: ⚠ 只管**日志行**：发报仍按 `PROGRESS_MIN_INTERVAL_SEC` 走（「发不发」只有一处决定，
+#: 上报口永远只报事实）。
+ITER_LOG_MIN_SEC = 60.0
 #: 打点层在 `sys.modules` 里的注册名（与 `common/progress_hook.HOOK_NAME` 逐字相同；测试守——
 #: 本模块不许 import 本仓代码，理由见文件头）。快照侧（`plan_run` / `iter_rollout`）就靠这个
 #: 名字找到这一层：`common/progress_hook.report(kind, it=…, done=…, total=…)`。
@@ -2232,6 +2241,28 @@ def _should_log_progress(
         return True
 
 
+def _iter_log_due(state: dict, kind: str, now: float, it: int = 0) -> bool:
+    """`iter`（采集局）那族的**日志行**节流：一轮只在该轮跑超过 `ITER_LOG_MIN_SEC` 后才开口。
+
+    为什么不并进 `_should_log_progress`：那份判据是**纯函数**（`(prev, kind, it, done, total)`），
+    没有时钟也不该有时钟（hub / push / pull 三条腿共用同一份）。时间窗只有打点层有 —— 所以
+    「25% 一桶」照旧决定**要不要**，这一层只决定「这一轮先别打」。
+
+    一轮的**第一条**恒不打（它必然是 `1/94 局`：没有信息量，最终数在轮末那行）；换轮即重置窗口
+    ⇒ 3s 的一轮 0 行，跑了一分钟以上的一轮每分钟 1 行（长了仍然看得见活着）。
+    """
+    if str(kind or "") != "iter":
+        return True
+    if int(it) != int(state.get("iter_it", 0)):
+        state["iter_it"] = int(it)
+        state["iter_shown_at"] = now
+        return False
+    if (now - float(state.get("iter_shown_at", float("-inf")))) < ITER_LOG_MIN_SEC:
+        return False
+    state["iter_shown_at"] = now
+    return True
+
+
 def _reclaim_lease(
     hub: str, token: str, course: str, work: Path, log: Callable[[str], None]
 ) -> str:
@@ -2313,6 +2344,10 @@ def install_progress_pinger(
         #: `common.progress_text.should_log_progress`：25% 一桶 + 换阶段/换轮 + 完成 + retry）。
         #: 2026-10-27 用户口径：`采集局 9/46 → 10/46 → …` 每局一行把网页日志面板撑爆。
         "shown": None,
+        #: `iter` 那族上一次**打日志**的时刻（monotonic）；换轮时重置 —— 见 `_iter_log_due`。
+        "iter_shown_at": float("-inf"),
+        #: `iter` 那族上一次打日志时的轮号（换轮 ⇒ 重置窗口、且该轮第一条不打）。
+        "iter_it": 0,
     }
 
     def _ping(
@@ -2346,7 +2381,7 @@ def install_progress_pinger(
             it=int(it),
             done=int(done),
             total=int(total),
-        ):
+        ) and _iter_log_due(state, str(kind or ""), now, int(it)):
             state["shown"] = (str(kind or ""), int(it), int(done), int(total))
             log(_progress_label(kind, it=int(it), done=int(done), total=int(total)))
         if not force and float(state["cool"]) > now:

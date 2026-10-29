@@ -2219,3 +2219,36 @@ def test_rollout_reports_every_settled_game_to_the_progress_hook(
     job_dir2 = tmp_path / "job2"
     job_dir2.mkdir()
     assert run_iter_rollout(job_dir2, spec, log=lambda _m: None)["report"]["games"] == 3
+
+
+def test_volume_line_merges_into_the_rollout_line(tmp_path: Path, monkeypatch) -> None:
+    """流式采集的收官读数并进**轮末那一行**（2026-10-29 日志瘦身）。
+
+    现场：一轮里 `流式采集：动态加采 239 局｜逐关配额 …` 自己一行，而 `kind=iter rollout done`
+    那行本来就带着 `进度=239/239 games settled` —— 同一件事说两遍。
+    """
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    spec = _stub_spec(tmp_path, [(3, 7), (4, 1)])
+    run_iter_rollout(
+        job_dir, spec, log=msgs.append, volume_line=lambda: "流式采集：动态加采 2 局｜过采 0"
+    )
+    done = [m for m in msgs if "kind=iter rollout done in" in m]
+    assert len(done) == 1, msgs
+    assert "流式采集：动态加采 2 局｜过采 0" in done[0], done[0]
+    assert not any(m.startswith("流式采集：") for m in msgs), "不许再单起一行"
+
+    # 读数拼接自己坏了 ⇒ 只记一行 WARN，轮末那行照打（观测腿不许把一轮弄挂）
+    msgs2: list[str] = []
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+
+    def boom() -> str:
+        raise RuntimeError("分关账读坏了")
+
+    run_iter_rollout(job_dir2, _stub_spec(tmp_path, [(3, 7)]), log=msgs2.append, volume_line=boom)
+    assert any("读数拼接失败" in m for m in msgs2), msgs2
+    assert any("kind=iter rollout done in" in m for m in msgs2), msgs2

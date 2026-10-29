@@ -352,13 +352,20 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   `test_run_one_course_code_changed_says_restart_session`：那条 `SystemExit` 正文**就是产品**
 #:   —— 操作员在 ipynb 里看到「代码已变更」后唯一该做的事是 Restart session；两个 sha 必须能
 #:   直接对账、且必须写明「重跑本 cell 没用」。三句都是给人读的，行为断言替不了）。
+#: 2026-10-29 再抬到 **1528**（+6，日志瘦身那两处**行为**只能靠文本钉：`iter` 族日志行
+#:   60s 窗（`test_progress_hooks` 的 `test_iter_progress_logs_at_most_once_a_minute`）与
+#:   「流式采集收官读数并进轮末那一行」（`test_remote_iter` 的
+#:   `test_volume_line_merges_into_the_rollout_line`）——「打了几行、打在哪一行」就是判据本身）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1522
+BASELINE_FORM = 1528
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
 #: 2026-10-21 第三条静态守卫（比较两个事件时间戳）抬到 **1100**（+4；理由见模块头末段）。）
-BASELINE_SRC = 1100
+#: 2026-10-29 抬到 **1105**（+5，与上一格同一批改动：`test_remote_iter.py` 是「写桩 .py 再跑」的文件
+#:   （口径 B 的 `.py` 门对它整体成立）⇒ 那 3 条「并进同一行 / 不许单起一行 / 拼接坏了仍打轮末行」
+#:   全计进 B；另 2 条在 `test_progress_hook.py`。判据是「打了几行、打在哪一行」，只能看文本）。
+BASELINE_SRC = 1105
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 

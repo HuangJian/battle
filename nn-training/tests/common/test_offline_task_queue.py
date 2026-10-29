@@ -1346,8 +1346,11 @@ def test_progress_log_is_not_eaten_by_the_post_throttle() -> None:
 
     detach, lines = _pinger("http://hub", post=fake_post, interval=3600.0)
     try:
-        progress_hook.report("iter", it=7, done=1, total=8)
-        progress_hook.report("iter", it=7, done=2, total=8)  # 窗内：不发，但日志要打
+        # 用**非 iter** 的两条事件（换轮 ⇒ 恒打）：`iter`（采集局）自 2026-10-29 起另有自己的
+        # 60s 日志窗（`ITER_LOG_MIN_SEC`，3s 的 rollout 不再刷 5 行），判据见
+        # `tests/common/test_progress_hook.py::test_iter_progress_logs_at_most_once_a_minute`。
+        progress_hook.report("ppo", it=7, done=1, total=8)
+        progress_hook.report("ppo", it=8, done=1, total=8)  # 窗内：不发，但日志要打
     finally:
         detach()
     assert len(posts) == 1, f"节流窗内只该发一次，实际 {len(posts)}"

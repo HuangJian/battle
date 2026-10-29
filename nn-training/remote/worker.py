@@ -759,6 +759,8 @@ def run_job(
                     it=int(manifest.get("it", 0) or 0),
                     next_game=None if collector is None else collector.next_game,
                     on_game_settled=None if collector is None else collector.observe,
+                    # 收官读数并进轮末那一行（2026-10-29 日志瘦身：原来它自己一行）。
+                    volume_line=None if collector is None else collector.summary_line,
                 )
                 shard_dirs = list(iter_info["shard_dirs"])
             finally:
@@ -770,7 +772,7 @@ def run_job(
                 #   （`trainer/loop_volume._volume_stage_stats`），随产物行回到账本 ⇒ 控制台的
                 #   「各关进度」列/面板在云机轮上也有读数（同一个解析器，不写第二个分支）。
                 iter_info["volume_stage_stats"] = collector.stage_stats()
-                log(collector.summary_line())
+                # `collector.summary_line()` 已并进轮末那行（`volume_line=` 入参），不再单打。
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

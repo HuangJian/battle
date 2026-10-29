@@ -949,6 +949,10 @@ def run_iter_rollout(
     it: int = 0,
     next_game: Callable[[], list[str] | None] | None = None,
     on_game_settled: Callable[[list[str], int], None] | None = None,
+    #: 轮末想并进**同一行**的读数（流式采集的 `summary_line`）。在 `emit` 前一刻调用 ⇒
+    #: 拿到的是收官后的数；异常只记一行（读数不许把一轮 rollout 弄挂）。
+    #: 2026-10-29 日志瘦身：`流式采集：动态加采 …` 原来是独立一行，现在并进轮末那行。
+    volume_line: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
 
@@ -1376,6 +1380,10 @@ def run_iter_rollout(
                         # 而这一轮实际是 it102 —— 打点层只是照抄，不会替你补）。
                         # 流式档的 `total` = **已派发**局数（每派一局 +1）；它只参与百分比桶，
                         # 日志行另有节流（`common.progress_text.should_log_progress`）。
+                        # ★ 2026-10-29（日志瘦身）：这里**照旧每局一报**（事件粒度不变），
+                        #   日志/发报的节流仍只在打点层做（`progress_hook` 的契约：上报口
+                        #   只报事实）。3s 的 rollout 之所以不再刷 5 行，是打点层给 `iter`
+                        #   这族加了「最多每分钟一行」（见 `remote/offline_boot._ping`）。
                         progress_hook.report("iter", it=int(it), done=settled_n, total=len(argvs))
                         if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
                             last_log_at = now
@@ -1500,6 +1508,12 @@ def run_iter_rollout(
         ),
         final_only=True,
     )
+    if volume_line is not None:
+        # 流式采集的收官读数并进这一行（`final_only`：心跳里不该出现半个分关账）。
+        try:
+            rb.note(volume_line(), final_only=True)
+        except Exception as e:
+            log(f"WARN 流式采集读数拼接失败（忽略）：{type(e).__name__}: {e}")
     rb.emit(f"kind=iter rollout done in {report['elapsedSec']}s")
     return {
         "report": report,
