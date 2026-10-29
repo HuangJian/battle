@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import numpy as np
@@ -188,28 +189,59 @@ def demo_index(buf: torch.Tensor | None, didx: npt.NDArray[np.int64]) -> Any:
 
 
 
-def _xla_fetch_cpu(tensors: list) -> list:
-    """XLA 张量 → CPU 张量的**一次**批量取回（torch_xla 内部 API；不可用即抛，由调用方回退）。
+def _xla_fetch_cat(tensors: list) -> list:
+    """一串 XLA 张量 → CPU：按 dtype 分组，每组 **一次 `cat` + 一次 `.cpu()`**（便携路径）。
 
-    为什么存在：逐个 `.cpu()` 在 torch_xla 上是**逐次**设备同步。2026-10-29 云机实录
-    `产物落盘 43.4s` = 168 个张量（model 42 + Adam 状态 42×3）× ~0.25s/次，而字节只有
-    1MB —— 那 40 秒买的是「同步次数」，不是带宽/算力。
+    为什么不是内部 API（`_xla_get_cpu_tensors`）：2026-10-29 云机实测——同一个进程里
+    **它能把 42 个参数一次带走（0.8s），却在带 126 个 Adam 状态时按张量付费**（30s ≈ 126×0.24s，
+    与逐张量一模一样，且不报错）。它到底是一次传输还是 N 次，取决于张量在设备上的形态（图节点
+    vs 数据缓冲），不可控。`cat` 只有一个结果张量 ⇒ **无论内部怎么实现，D2H 都只发生一次**。
+
+    分组键 = dtype（`cat` 只收同 dtype）；每组的 `n` 与 `shape` 先记下来，主机侧按同样顺序切回。
+    """
+    out: list = [None] * len(tensors)
+    groups: dict[torch.dtype, list[int]] = {}
+    for i, t in enumerate(tensors):
+        groups.setdefault(t.dtype, []).append(i)
+    for idx in groups.values():
+        shapes = [tuple(tensors[i].shape) for i in idx]
+        sizes = [int(tensors[i].numel()) for i in idx]
+        with torch.no_grad():
+            flat = torch.cat([tensors[i].reshape(-1) for i in idx])
+            host = flat.cpu()  # ← 唯一的设备→主机传输
+        for i, shp, piece in zip(idx, shapes, torch.split(host, sizes), strict=True):
+            out[i] = piece.reshape(shp)
+    return out
+
+
+def _xla_fetch_cpu(tensors: list) -> list:
+    """torch_xla 内部批量 API（`_XLAC._xla_get_cpu_tensors`）—— **第二选择**，见 `_xla_fetch_cat`。
+
+    保留它是因为它在部分形态上确实是一次传输（同上实测：42 个参数 0.8s）；`cat` 失败时才知道
+    还能试它（例如某天 `cat` 被 XLA 拒绝支持）。
     """
     import torch_xla
 
     fn = getattr(getattr(torch_xla, "_XLAC", None), "_xla_get_cpu_tensors", None)
     if fn is None:
         raise RuntimeError("torch_xla 无 _XLAC._xla_get_cpu_tensors")
-    # 一次图执行边界（同步只付一次；之后那次批量传输不再逐张量等设备）。
-    xla_mark_step(tensors[0].device)
     return list(fn(list(tensors)))
 
 
-def to_cpu_batch(tensors: list) -> list:
-    """一串张量 → 一串 CPU 张量；XLA 那部分**一批一次** D2H，非 XLA 逐张量 `.detach().cpu()`。
+#: 批量取回慢过这个秒数就**说出来**（否则它会以「art= 莫名其妙 30s」的形式静默存在）。
+FETCH_SLOW_WARN_SEC = 5.0
 
-    回退路径 = 改动前的行为（逐张量），**绝不抛**：这条路在训练收尾的关键路径上，
-    宁可变慢也不能让一整轮白跑（批量 API 是 torch_xla 内部件，跨版本不保证）。
+
+def to_cpu_batch(tensors: list) -> list:
+    """一串张量 → 一串 CPU 张量；XLA 那部分**一次** D2H，非 XLA 逐张量 `.detach().cpu()`。
+
+    取回策略按顺序试（谁先成功用谁，全失败才逐张量——`绝不抛`：这条路在训练收尾的关键路径上）：
+      ① `cat` 路径（便携、D2H 恒一次）；
+      ② torch_xla 内部批量 API；
+      ③ 逐张量 `.detach().cpu()`（改动前的行为，慢但是对的）。
+
+    ①②③ 的**耗时都记账**：慢过 `FETCH_SLOW_WARN_SEC` 打一行，失败/回退也打一行 —— 2026-10-29
+    的现场就是「批量静默退化成逐张量」把 30s 藏在了 `art=` 里。
     """
     out: list = [None] * len(tensors)
     idx = []
@@ -218,20 +250,35 @@ def to_cpu_batch(tensors: list) -> list:
             idx.append(i)
         else:
             out[i] = t.detach().cpu() if torch.is_tensor(t) else t
-    if idx:
-        ok = False
+    if not idx:
+        return out
+    picked = [tensors[i] for i in idx]
+    xla_mark_step(picked[0].device)  # 一次图执行边界（之后的取回不再各自等设备）
+    got: list | None = None
+    for name, fn in (("cat", _xla_fetch_cat), ("xlac", _xla_fetch_cpu)):
+        t0 = time.monotonic()
         try:
-            got = _xla_fetch_cpu([tensors[i] for i in idx])
-            if len(got) != len(idx):
-                raise RuntimeError(f"批量取回数量不符：{len(got)} != {len(idx)}")
-            for i, t in zip(idx, got, strict=True):
-                out[i] = t.detach() if torch.is_tensor(t) else t
-            ok = True
-        except Exception:
-            ok = False
-        if not ok:  # 逐张量回退（今天的行为）
-            for i in idx:
-                out[i] = tensors[i].detach().cpu()
+            fetched = fn(picked)
+            if len(fetched) != len(picked):
+                raise RuntimeError(f"取回数量不符：{len(fetched)} != {len(picked)}")
+        except Exception as e:
+            log(f"WARN 批量取回[{name}]失败（{len(picked)} 个张量）：{type(e).__name__}: {e}")
+            continue
+        dt = time.monotonic() - t0
+        if dt >= FETCH_SLOW_WARN_SEC:
+            log(
+                f"WARN 批量取回[{name}]慢：{len(picked)} 个张量 {dt:.1f}s"
+                f"（逐张量约 {len(picked) * 0.25:.0f}s 量级，别当正常——查是否每次新图编译）"
+            )
+        got = fetched
+        break
+    if got is None:
+        log(f"WARN 批量取回全失败 ⇒ 回退逐张量（{len(picked)} 个，约 {len(picked) * 0.25:.0f}s）")
+        for i in idx:
+            out[i] = tensors[i].detach().cpu()
+        return out
+    for i, t in zip(idx, got, strict=True):
+        out[i] = t.detach() if torch.is_tensor(t) else t
     return out
 
 
