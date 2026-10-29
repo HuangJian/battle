@@ -348,8 +348,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-26 再抬到 **1516**（+12 = notebook push 契约 6 + 反静默读数行 6；逐笔见模块头末段）。
 #: 2026-10-28 并 `origin/goal-nn` 的「设备探测按后端分派」抬到 **1519**（+3 是**合并账**：两支各自
 #:   恰好都停在 1516，合起来 1519；逐笔见模块头末段）。
+#: 2026-10-29 抬到 **1522**（+3，`tests/remote/test_offline_local_first.py` 的
+#:   `test_run_one_course_code_changed_says_restart_session`：那条 `SystemExit` 正文**就是产品**
+#:   —— 操作员在 ipynb 里看到「代码已变更」后唯一该做的事是 Restart session；两个 sha 必须能
+#:   直接对账、且必须写明「重跑本 cell 没用」。三句都是给人读的，行为断言替不了）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1519
+BASELINE_FORM = 1522
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

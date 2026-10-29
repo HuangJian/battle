@@ -1883,7 +1883,24 @@ def run_one_course(
             reclaim=lambda: _reclaim_lease(hub, token, course, work, log),
         )
     try:
-        rc = int(run_loop_main(argv) or 0)
+        try:
+            rc = int(run_loop_main(argv) or 0)
+        except Exception as e:
+            # ★ 2026-10-29（现场：同 kernel 重跑 cell ⇒ `CodeChangedError` 裸抛，看着像崩溃）：
+            #   `remote/worker.py` 的 `_ACTIVE_CODE_SHA` 是**进程级**的——本 kernel 上一段导入的
+            #   代码若与这一段的任务包/commit 不同，第一轮就被守卫拒跑（它拒得对：继续跑会用旧
+            #   代码产出「看似正常」的结果）。但 remedy 在日志里从来没写过，而人第一反应是
+            #   「重跑这一格」。这里翻成一句可执行的：**必须换进程**。
+            #   按类名判而不 import：本模块是 standalone 运输单元（顶层不许 import 本仓代码）。
+            if type(e).__name__ == "CodeChangedError":
+                raise SystemExit(
+                    "[offline] 本 kernel 已经 import 过**上一段的代码**（"
+                    f"{str(getattr(e, 'loaded_sha', ''))[:12]}…），本段要求 "
+                    f"{str(getattr(e, 'job_sha', ''))[:12]}…——同 kernel 重跑本 cell **不会**"
+                    "重新导入模块。处置：Runtime → Restart session（或换新会话）后再跑本格；"
+                    "本地产物与会话无关（/tmp 若被清，本机会从网络盘备份或任务包锚点续跑）。"
+                ) from e
+            raise
         log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
     finally:
         if detach_progress is not None:

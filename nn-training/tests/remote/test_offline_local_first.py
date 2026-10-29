@@ -1133,3 +1133,46 @@ def test_fetch_task_pack_prints_the_409_body(
     offline_boot.fetch_task_pack("http://hub", "tok", "c5-gae", tmp_path, lines.append)
     joined = "\n".join(lines)
     assert "409" in joined and "起点权重 sha 不符" in joined
+
+
+def test_run_one_course_code_changed_says_restart_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同 kernel 重跑 cell ⇒ `CodeChangedError` 必须翻成**可执行**的一句（2026-10-29 现场）。
+
+    现场：ipynb 停掉后再跑训练格，`remote/worker.py::_ACTIVE_CODE_SHA` 仍是上一段的
+    （进程级），新任务包/commit 一变，第一轮就被守卫拒跑；日志只有「代码已变更：…」，
+    人的第一反应是「重跑这一格」——而那正是**没用**的那个动作（`sys.modules` 不会重读）。
+    """
+    from common.errors import CodeChangedError
+
+    _artifacts(_local(tmp_path))
+    monkeypatch.setattr(offline_boot, "obtain_pack", lambda *a, **kw: None)
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg2, creds: [])
+    monkeypatch.setattr(offline_boot, "ensure_code", lambda *a, **kw: None)
+    monkeypatch.setattr(offline_boot, "ensure_ts_tree", lambda *a, **kw: None)
+
+    def boom(argv: list[str]) -> int:
+        raise CodeChangedError("a" * 64, "b" * 64)
+
+    logs: list[str] = []
+    with pytest.raises(SystemExit) as ei:
+        offline_boot.run_one_course(
+            {
+                "course": "c5-gae",
+                "work_dir": str(tmp_path / "w"),
+                "local_root": str(_local(tmp_path)),
+                "device": "cpu",
+                "live_backfeed": False,
+            },
+            {},
+            logs.append,
+            None,
+            course="c5-gae",
+            multi=False,
+            run_loop_main=boom,
+        )
+    msg = str(ei.value)
+    assert "Restart session" in msg, msg
+    assert "aaaaaaaaaaaa" in msg and "bbbbbbbbbbbb" in msg, "两个 sha 都要露出来（能直接对账）"
+    assert "重跑本 cell **不会**" in msg, "要写清「重跑这一格」不是 remedy"
