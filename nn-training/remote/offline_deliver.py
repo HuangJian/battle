@@ -96,6 +96,12 @@ from remote.deliver_wire import pick_anchors, read_eval_iters
 PROBE_TTL_SEC = 60.0
 #: 探活**失败**时的负缓存秒数（比成功短）：抖动恢复的窗口按秒算，而 60s 的负缓存会让
 #: 「隧道刚回来」这段最该补投的时间白白跳过（plan §4.2-1；评审 F2：别把 60s 的平坦重试换成年级退避）。
+#: 抽屉（网络盘）的**宽限**（秒）：一轮要在盘上躺这么久还没送出去，才值得备一份。
+#: 2026-10-29 用户口径「只在回传失败时才写网络盘」——而「一次探活没应答 / 隧道抖 60 秒」不算
+#: 失败：旧口径下每轮都会先写 1.5MB 到网络盘、投递成功后 60 秒再删掉（纯 churn，现场
+#: `art` 从 1.1s 抖到 88s 就是它）。判据用**产物年龄**（文件 mtime）而不是内存里的失败计数：
+#: 父侧补传器每拍新建一个只读镜像（`deliver_proc._reading`），内存态在它眼里永远是空的。
+BACKUP_GRACE_SEC = 300.0
 PROBE_FAIL_TTL_SEC = 15.0
 #: `_disable`（401/403）后的**冷却**（秒）：到点自动清空停用状态并重探一次。
 #: 为什么不是「一停到底」（2026-10-16，评审 F1/C1）：token 轮换 / hub 换实例都会让 401 变成
@@ -206,6 +212,8 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         #: 网络侧**备份抽屉**的落点（`<网络产物根>/backup`；空 = 不做备份 —— 纯离线腿 / 老调用方）。
         #: 拍板-3：**回传失败的那些轮**才写这里（每轮观测 + 段末 sweep，幂等、有界、绝不抛）。
         backup_root: str | Path | None = None,
+        #: 抽屉宽限（秒，见 `BACKUP_GRACE_SEC`）；参数化只为让用例把窗口拨短。
+        backup_grace: float = BACKUP_GRACE_SEC,
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         #: 探活**失败**的负缓存（只对**失败**生效，且被 `probe_ttl` 封顶 ⇒ 只会更短、绝不更长）。
@@ -260,6 +268,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
         self.backup_root = Path(backup_root) if backup_root else None
+        self.backup_grace = float(backup_grace)
         #: 课程 `eval_every`（`anchors` 档锚点兜底的步长；见 `__init__` 的同一条注释）。
         self.eval_every = int(eval_every or 0)
         #: 统计批开关（见 `__init__`）；`_metrics_unsupported` = 探测到 hub 不支持后本会话关掉。
@@ -866,8 +875,10 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             )
         return self._drawer
 
-    def backup_pending(self) -> int:
-        """把「磁盘上有、账本里没有」的轮次各备份一份到网络侧抽屉；返回本轮**新写**的轮数。
+    def backup_pending(self, *, force: bool = False) -> int:
+        """把「磁盘上有、账本里没有、**且卡过宽限期**」的轮次各备份一份到网络侧抽屉。
+
+        `force=True` = 段末 sweep（最后一次机会）：欠着的全备，不看年龄。
 
         为什么是这条判据（`pending()`）：它就是「回传失败」的**持久化**定义（重启会话照样成立），
         不需要新状态源。拷贝策略（拷哪些件 / 何时跳 / 失败算什么）在 `remote/backup_drawer`
@@ -882,6 +893,9 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         except Exception as e:  # 判据面坏了也只记一笔
             self._throttled_log("backup-pending", f"备份跳过：算不出待投轮次（{e}）")
             return 0
+        if not force:
+            # ★ 2026-10-29：宽限判据（见 `BACKUP_GRACE_SEC`）——**送达中的轮次一个字节都不碰**。
+            rounds = [it for it in rounds if self._round_age(it) >= self.backup_grace]
         if rounds:
             r = drawer.backup_rounds(rounds)
             self._backup_stat = (r.made, r.bytes, r.failed, r.skipped)
@@ -892,6 +906,12 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             )
         self._prune_drawer(drawer)
         return self._backup_stat[0]
+
+    def _round_age(self, it: int) -> float:
+        """这一轮在盘上躺了多久（秒）。读不到 ⇒ 0（当「刚写下」，绝不抢先备份）。"""
+        d = self.root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}"
+        f = delta_files.find_existing(d, "weights.json")
+        return 0.0 if f is None else max(0.0, self._now() - f.stat().st_mtime)
 
     def _prune_drawer(self, drawer: BackupDrawer) -> None:
         """判据化删除抽屉里**已确认送达**的轮次（D3：回传成功即删）。

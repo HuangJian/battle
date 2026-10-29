@@ -96,7 +96,7 @@ class DelivererLike(Protocol):
     def pending(self) -> list[int]: ...
 
     #: 把「没送出去」的轮次备进网络侧抽屉（拍板-3）；返回本轮新写的轮数。
-    def backup_pending(self) -> int: ...
+    def backup_pending(self, *, force: bool = False) -> int: ...
 
 
 class DelivererProcess:
@@ -484,9 +484,10 @@ class DelivererProcess:
         if fb is not None:
             fb.submit_round(it)
             return
-        # 每轮观测一次账本（拍板-3 ①）：**先观测再入队** —— 上一轮已经过了一个交付窗口，
-        # 此刻还 pending 的才是真欠账（否则会把「刚入队、马上就推上去」的轮次也备一份）。
-        self.backup_pending()
+        # ★ 2026-10-29（用户口径「传输进程不要阻塞训练进程」）：这里**曾经**每轮先
+        #   `backup_pending()` —— 那是**训练线程**上的一次网络盘写入（1.5MB/轮，写完 60 秒后
+        #   投递成功再删掉；现场 `art` 从 1.1s 抖到 88s 就是它）。备份的时机归**子进程**
+        #   （`_push_backlog` 推完一轮之后）与段末 sweep（`close()`），那里不在训练线程上。
         self._append({"round": int(it)})
 
     def submit_eval_round(self, it: int) -> None:
@@ -561,7 +562,8 @@ class DelivererProcess:
             fb.close(timeout)
             return
         # 段末**强制 sweep**（拍板-3 ②）：这是最后一次备份机会（子进程可能已经收线）。
-        self.backup_pending()
+        # `force=True`：欠着的全备，不看宽限期（宽限只防「送达中的轮次被抢先备一份」）。
+        self.backup_pending(force=True)
         proc = self._proc
         if proc is None or self._ctl is None:
             return
@@ -625,7 +627,7 @@ class DelivererProcess:
         )
         return self._mirror_obj
 
-    def backup_pending(self) -> int:
+    def backup_pending(self, *, force: bool = False) -> int:
         """父侧备份（**只读产物 + 只写抽屉**，与子进程零共享）。
 
         为什么在父侧做（而不是让子进程做）：子进程可能是**老快照**（导出那一刻的 code.zip）
@@ -634,7 +636,7 @@ class DelivererProcess:
         """
         fb = self._fallback
         if fb is not None:
-            return fb.backup_pending()
+            return fb.backup_pending(force=force)
         if self.backup_root is None or self.outbox is not None:
             return 0  # outbox 本身就是耐久副本（hub 来拉的那一份），不另立抽屉
         try:
@@ -642,7 +644,7 @@ class DelivererProcess:
             assert isinstance(mirror, OfflineDeliverer)
             mirror.backup_root = Path(self.backup_root)
             mirror.log = self.log
-            return int(mirror.backup_pending())
+            return int(mirror.backup_pending(force=force))
         except Exception as e:  # 备份绝不抛（它本就是第二份拷贝）
             self.log(f"WARN 备份腿异常（忽略）：{type(e).__name__}: {e}")
             return 0

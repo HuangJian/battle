@@ -200,6 +200,10 @@ def _weights_fp(root: Path, it: int) -> str:
 
 
 def _deliverer(base: str, root: Path, *, token: str = "sekret", **kw: object) -> OfflineDeliverer:
+    #: `backup_grace=0`（本文件默认）：这里验的是**抽屉机制**（幂等/重写/两账本/读数），
+    #: 不是「什么时候该备份」——触发时机由 `e2e/test_deliver_backup_contract_e2e.py` 钉
+    #: （宽限期内一个字节都不许写网络盘）。
+    kw.setdefault("backup_grace", 0.0)
     return OfflineDeliverer(
         base_url=base, token=token, run_id=RUN, artifacts_dir=root, log=_quiet, **kw  # type: ignore[arg-type]
     )
@@ -326,6 +330,7 @@ def test_backup_failure_is_only_a_warning(tmp_path: Path) -> None:
     logs: list[str] = []
     d = OfflineDeliverer(
         base_url="", token="", run_id=RUN, artifacts_dir=root, backup_root=blocker / "backup",
+        backup_grace=0.0,  # 这条验的是「抽屉建不出来」的容错，与触发时机无关
         log=logs.append,
     )
     assert d.backup_pending() == 0

@@ -476,10 +476,14 @@ def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
         backup_root=drawer,
         log=lambda _m: None,
     )
-    assert d.backup_pending() == 2, "没起子进程也能扫（只读账本 + 写抽屉）"
+    # ★ 2026-10-29（用户口径「只在回传失败时才写网络盘」）：**正常的每轮那条路不写**——
+    #   轮次还新，宽限期内一个字节都不许碰（旧实现每轮写 1.5MB，投递成功后再删）。
+    assert d.backup_pending() == 0, "新鲜轮次不备份"
+    # 段末 sweep（`force=True`）才是「欠着的全备」那一档
+    assert d.backup_pending(force=True) == 2, "没起子进程也能扫（只读账本 + 写抽屉）"
     assert (drawer / "it-001" / "weights.json").is_file()
     assert (drawer / "it-002" / "opt.tar").is_file()
-    assert d.backup_pending() == 0, "幂等：已备的轮次不重写"
+    assert d.backup_pending(force=True) == 0, "幂等：已备的轮次不重写"
     # 没配抽屉（纯离线腿 / 老调用方）⇒ 空操作
     plain = DelivererProcess(
         base_url="http://127.0.0.1:9/",

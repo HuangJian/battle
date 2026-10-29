@@ -849,8 +849,11 @@ class LocalOutboxDeliverer:
 
     deliver_result = submit_final  # 与 `OfflineDeliverer.deliver_result` 同义（子进程循环用它）
 
-    def backup_pending(self) -> int:
-        """outbox **本身就是**耐久副本（hub 来拉的那一份），不再另立抽屉 ⇒ 恒 0。"""
+    def backup_pending(self, *, force: bool = False) -> int:
+        """outbox **本身就是**耐久副本（hub 来拉的那一份），不再另立抽屉 ⇒ 恒 0。
+
+        `force` 只为与 `OfflineDeliverer`（`DelivererLike`）同签名——段末 sweep 也不该另立抽屉。
+        """
         return 0
 
     # ------------------------------------------------------------ hub 侧 ack

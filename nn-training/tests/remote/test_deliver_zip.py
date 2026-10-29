@@ -468,6 +468,9 @@ def test_a_backup_drawer_is_importable_with_its_ledgers(tmp_path: Path) -> None:
         run_id="seg-1",
         artifacts_dir=src,
         backup_root=drawer,
+        # 本用例验「抽屉里的两账本可导入」，与触发时机无关 ⇒ 关掉宽限（时机见
+        # e2e/test_deliver_backup_contract_e2e.py）。
+        backup_grace=0.0,
         log=lambda _m: None,
     )
     assert d.backup_pending() == 2
