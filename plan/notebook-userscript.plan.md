@@ -1053,3 +1053,14 @@ direct → shadow root 的 `deepQuery` 并缓存 notebook 根；桥在 attach �
 `status{notebook:true}`（30s 上界），host 收到后把「等待笔记本」切成「笔记本就绪」。cell 列表晚出现时，
 observer 给没有游标的 cell 补标脏，保证首批输出仍会走一次 reset。
 
+**2026-10-30 三修（多开页签 + 「打开日志」报未知组件）**：两个独立问题，都是操作员实机报障。
+① 两条日志路由直接拿 `url.pathname` 切片当键，而客户端拼链接时做了 `encodeURIComponent` ⇒
+`notebook%3A<session>` 不是虚拟键、被当组件查表 ⇒ `未知组件: notebook%3A…`。修法：键先过
+`decodeLogKey()`（畸形 `%` 原样返回，交给查表 404），页面与 `/api/log/*` 两条路由都改。
+② 会话名只由 owner/slug/runId 推出，同一 notebook 多开两个页签会抢同一份日志（协议 v2 把后到的
+判成 `writer-conflict` 被动），两台 worker 的输出搅成一条流、分不出哪份是哪台。修法：frame 侧给
+会话名加**页面标签**（`bnc:pageTag`，`sessionStorage` 在 iframe 里按顶层标签页分区 ⇒ 本页刷新不变、
+换页签必不同；拿不到存储就每次加载随机），`session = <base>-<tag>`；host 从 bridge 的
+`ready/status.session` 采纳**这一页**的键（不再拿外层 URL 猜），面板直接显示 `日志 notebook:<session>`。
+旧的无标签会话不再续写，7 天 prune 自然清掉。
+

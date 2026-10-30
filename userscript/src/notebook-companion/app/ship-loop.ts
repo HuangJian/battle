@@ -9,7 +9,7 @@ import { normalizeNewlines, utf8Bytes } from '../../utils'
 import type { BncConfig } from '../config'
 import { createShipState, shipOnce, type ShipReport, type ShipState } from '../log-shipper'
 import type { NotebookChunk, NotebookResponse, NotebookSite } from '../protocol'
-import { parseKaggleSession } from '../sites/kaggle'
+import { parseKaggleSession, withPageTag } from '../sites/kaggle'
 import { createOutputObserver, type OutputObserver } from '../observer'
 import type { FrameAdapter } from '../sites/types'
 
@@ -21,6 +21,8 @@ export interface ShipLoopOptions {
   runtime: Runtime
   adapter: FrameAdapter
   site?: NotebookSite
+  /** 本标签页的短标签：多开同一 notebook 时各自的日志互不覆盖（boot 从 sessionStorage 取）。 */
+  pageTag?: string
   writer?: string
   now?: () => number
   onReport?: (report: ShipReport, state: ShipState) => void
@@ -54,7 +56,8 @@ function randomWriter(): string {
 export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const site = opts.site ?? 'kaggle'
   const writer = opts.writer ?? randomWriter()
-  const session = parseKaggleSession(opts.referrer || opts.href)
+  const baseSession = parseKaggleSession(opts.referrer || opts.href)
+  const session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())
   const state = createShipState(0)
   const dirty = new Set<string>()

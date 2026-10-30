@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   appendNotebookChunk,
+  decodeLogKey,
   missingLogMessage,
   notebookLogPayload,
   type NotebookChunk,
@@ -44,6 +45,21 @@ function chunk(o: Partial<NotebookChunk> = {}): NotebookChunk {
 }
 
 describe('W1 接线：活动闸 / 路由顺序 / 虚拟键', () => {
+  it('日志键先 URL 解码：`notebook%3A…` 不是组件名（2026-10-30 多开页签点「打开日志」）', () => {
+    // 客户端 `encodeURIComponent('notebook:<session>')` ⇒ `%3A`；不解码就拿它查组件表
+    expect(decodeLogKey('/log/notebook%3Akaggle-a-b-edit', '/log/')).toBe(
+      'notebook:kaggle-a-b-edit',
+    )
+    expect(decodeLogKey('/api/log/notebook%3Akaggle-a-b-edit', '/api/log/')).toBe(
+      'notebook:kaggle-a-b-edit',
+    )
+    // 未编码的路径照旧；畸形 % 不抛（原样交给查表 404）
+    expect(decodeLogKey('/log/notebook:kaggle-a-b-edit', '/log/')).toBe('notebook:kaggle-a-b-edit')
+    expect(decodeLogKey('/log/bad%E0%A4%A', '/log/')).toBe('bad%E0%A4%A')
+    // 两个 handler（页面 + API）都必须走它
+    expect(SERVER.match(/decodeLogKey\(url\.pathname/g)?.length ?? 0).toBe(2)
+  })
+
   it('空 notebook 会话的 404 说人话（不是 unknown component）', () => {
     expect(missingLogMessage('notebook')).toContain('还没有 notebook 会话')
     expect(missingLogMessage('notebook:kaggle-a-b-edit')).toContain('还没有 notebook 会话')

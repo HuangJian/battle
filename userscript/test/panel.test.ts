@@ -55,6 +55,17 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     expect(w.document.querySelector('#bnc-panel-host')).toBeNull()
   })
 
+  it('setSession：面板上能看见本页写哪份日志（多开页签时靠它认页面）', () => {
+    const w = dom()
+    const panel = mountPanel(docOf(w), {})
+    const sess = panel.host.shadowRoot!.querySelector('[data-sess]') as HTMLElement
+    expect(sess.textContent).toBe('') // 未连上 frame 之前不编名字
+    panel.setSession('notebook:kaggle-a-b-edit-ab12cd')
+    expect(sess.textContent).toContain('notebook:kaggle-a-b-edit-ab12cd')
+    expect(sess.title).toBe('notebook:kaggle-a-b-edit-ab12cd')
+    panel.destroy()
+  })
+
   it('忙态禁用全部按钮，handler 完成后恢复；异常写红字', async () => {
     const w = dom()
     let release: () => void = () => {}

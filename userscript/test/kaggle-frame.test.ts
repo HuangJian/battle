@@ -6,6 +6,7 @@ import {
   KaggleFrameAdapter,
   KaggleSessionAdapter,
   parseKaggleSession,
+  withPageTag,
 } from '../src/notebook-companion/sites/kaggle'
 
 const FRAME = readFileSync(join(import.meta.dir, 'fixtures/kaggle-frame.html'), 'utf8')
@@ -316,6 +317,19 @@ describe('KaggleSessionAdapter：会话名与停止', () => {
     expect(
       parseKaggleSession('https://www.kaggle.com/code/a/b/edit/run/1').length,
     ).toBeLessThanOrEqual(64)
+  })
+
+  it('withPageTag：同一 notebook 多开页签各一份会话名，总长 ≤64', () => {
+    const base = parseKaggleSession('https://www.kaggle.com/code/a/b/edit')
+    expect(withPageTag(base, 'ab12cd')).toBe('kaggle-a-b-edit-ab12cd')
+    expect(withPageTag(base, 'AB-12')).toBe('kaggle-a-b-edit-ab12') // 非法字符先归一
+    expect(withPageTag(base, 'ab12cd')).not.toBe(withPageTag(base, 'zz99xx'))
+    const long = parseKaggleSession(
+      `https://www.kaggle.com/code/${'x'.repeat(80)}/${'y'.repeat(80)}/edit`,
+    )
+    expect(long.length).toBe(64)
+    expect(withPageTag(long, 'abcd1234').length).toBeLessThanOrEqual(64)
+    expect(withPageTag(long, 'abcd1234').endsWith('-abcd1234')).toBe(true)
   })
 
   it('sessionState：Draft Session ⇒ idle；Stopped ⇒ stopped；无按钮 ⇒ unknown', () => {

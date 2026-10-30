@@ -78,6 +78,7 @@ describe('bridge：host ⇄ frame', () => {
     const bridge = createFrameBridge(f.win, {
       hostOrigins: [KAGGLE],
       isReady: () => true,
+      session: () => 'notebook:kaggle-a-b-edit-ab12cd',
       handle: async (name) => {
         handled.push(name)
         return { ok: true, value: name }
@@ -90,7 +91,13 @@ describe('bridge：host ⇄ frame', () => {
     f.fire({ data: { __bnc: 1, kind: 'attach', nonce: 'n1' }, origin: KAGGLE })
     expect(f.sent[0]!.origin).toBe(KAGGLE)
     expect(f.sent[0]!.target).toBe('parent') // ready 必须回给 parent，不是自己
-    expect(f.sent[0]!.msg).toMatchObject({ kind: 'ready', nonce: 'n1', notebook: true })
+    // 会话键必须随 ready 一起回来：host 的「打开日志」只能指这一页的，不能拿外层 URL 猜
+    expect(f.sent[0]!.msg).toMatchObject({
+      kind: 'ready',
+      nonce: 'n1',
+      notebook: true,
+      session: 'notebook:kaggle-a-b-edit-ab12cd',
+    })
     expect(bridge.nonce).toBe('n1')
 
     f.fire({

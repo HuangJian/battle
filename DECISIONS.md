@@ -10243,4 +10243,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   机制指纹 2.09~2.62s → 0.03~0.06s）；(c) `lock_reentrancy` / `no_sleep_as_sync` 判为结构性，本轮不动。
 - **违反后果**：再为提速改指纹/克隆口径 ⇒ 护栏基线漂（涨了红、松了静默）；新增「首次算子 / 懒加载」而预热不跟 ⇒
   每个 worker 各付一次，并被 `--durations` 记到随机一条用例头上，下一轮清算又白查一遍。
+
+## §2026-10-30-notebook-userscript-multi-page（2026-10-30，多开 Kaggle 页签：日志键要解码 + 每页一份会话名）
+
+- **背景**：操作员实机报障 —— 同时开了多个 Kaggle 页面时点面板「打开日志」⇒
+  `未知组件: notebook%3Akaggle-huangjian2026-battle-offline-edit`。两条独立根因：① `/log/<key>` 与
+  `/api/log/<key>` 直接拿 `url.pathname` 切片当键，而客户端拼链接时做了 `encodeURIComponent`
+  （`: `→`%3A`），`URL.pathname` 保留百分号编码 ⇒ 虚拟键 `notebook:<session>` 变成不认识的组件名；
+  ② 会话名只由 owner/slug/runId 推出，同一 notebook 多开两个页签写同一份日志（协议 v2 把后到的判成
+  `writer-conflict` 被动），两台 worker 的输出搅成一条流、对不上页面。
+- **决定**：① 路径键先过 `decodeLogKey(pathname, prefix)`（畸形 `%` 原样返回，让查表去 404），
+  `logPageRoute` / `apiLogRoute` 两条同改，客户端编码不变；② frame 侧给会话名加**页面标签**
+  （`bnc:pageTag`：`sessionStorage` 在 iframe 里按顶层标签页分区 ⇒ 本页刷新不变、换页签必不同；
+  拿不到存储就每次加载随机），`session = <base>-<tag>`（标签占尾部，base 让位，仍 ≤64 字符）；
+  host 从 bridge 的 `ready/status.session` 采纳**这一页**的键，面板显示 `日志 notebook:<session>`。
+- **否决的备选**：把 `:` 从链接里去掉不编码（只绕开这一个字符，别的仍需解码，且服务端照样是错的）·
+  按 `writer` 分文件（同页刷新就换文件，一次 run 断成几截）· 用 iframe `?session=` JWT 的哈希当标签
+  （JWT 已定不入日志/探测，且 host 读不到它）· 让 host 生成标签再经 bridge 下发（frame 在 attach 前
+  就开始搬运，中途换键会把一份 run 拆成两个文件）。
+- **边界**：同一 notebook 的两个页签 = 两份独立日志（本意）；旧的无标签会话不再续写、7 天 prune 清掉；
+  标签是随机短码（页面身份，不是 worker 角色名）。
+- **落地**：`dashboard/src/server/api/notebook-log.ts::decodeLogKey` · `dashboard/src/server/server.ts` 两条路由 ·
+  `userscript/src/notebook-companion/sites/kaggle.ts::withPageTag` · `app/{ship-loop,bridge,boot}.ts` ·
+  `ui/panel.ts`；用例 `dashboard/tests/notebook-wiring.test.ts`、`userscript/test/{kaggle-frame,bridge,panel}.test.ts`。
 —— 全文（方法 · 满载/空载读数表 · 三类分类 · 两处 A/B 明细）→ `docs/nn/engineering.md` §93

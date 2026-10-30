@@ -557,6 +557,22 @@ export function parseKaggleSession(href: string): string {
   return safe || 'kaggle-unknown-edit'
 }
 
+/**
+ * 给会话名加**页面标签**：同一个 notebook 多开几个标签页时各写各的日志。
+ *
+ * 为什么需要：`session` 只由 owner/slug/runId 决定，两个 `/edit` 页签拿到同一个名字 ⇒
+ * 两组 writer 抢同一份日志（协议 v2 会把后来的判成 writer-conflict 被动），两台 worker 的
+ * 输出也搅成一条流、分不出哪份是哪台的。标签占尾部，base 让位（服务端 session 上限 64）。
+ */
+export function withPageTag(session: string, tag: string): string {
+  const safe = tag
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .slice(0, 8)
+  if (!safe) return session.slice(0, 64)
+  return `${session.slice(0, 64 - safe.length - 1)}-${safe}`
+}
+
 export class KaggleSessionAdapter implements SessionAdapter {
   readonly site = 'kaggle' as const
   private readonly wait: (ms: number) => Promise<void>

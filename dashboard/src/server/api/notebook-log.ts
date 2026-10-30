@@ -775,6 +775,23 @@ export function listNotebookSessions(dir: string): NotebookSessionInfo[] {
   return out.sort((a, b) => b.mtime - a.mtime)
 }
 
+/**
+ * `/log/<key>` / `/api/log/<key>` 的键要从 **URL 编码**里解出来。
+ *
+ * 客户端把键拼进路径时做了 `encodeURIComponent`（`notebook:<session>` → `notebook%3A…`），
+ * 而 `URL.pathname` 保留百分号编码 ⇒ 不解码就拿 `notebook%3A…` 去查组件表，好端端一个
+ * 会话被报成「未知组件」（2026-10-30 多开 Kaggle 页面时点「打开日志」触发）。
+ * 畸形 `%` 不抛：原样返回，让查表那边去 404。
+ */
+export function decodeLogKey(pathname: string, prefix: string): string {
+  const raw = pathname.slice(prefix.length)
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
 /** 虚拟键：`notebook`（最近一个会话）或 `notebook:<session>`。 */
 export function isNotebookLogKey(key: string): boolean {
   return key === 'notebook' || key.startsWith('notebook:') || key === 'probe'

@@ -19,6 +19,8 @@ export interface BridgeMessage {
   reason?: string
   href?: string
   notebook?: boolean
+  /** frame 实际写入的日志会话键（含页面标签）；host 用它做「打开日志」链接。 */
+  session?: string
 }
 
 export interface BridgeEvent {
@@ -152,6 +154,8 @@ export interface FrameBridgeHooks {
   ) => Promise<{ ok: boolean; value?: unknown; reason?: string }>
   /** ready 里的 `notebook`：宿主据此判断「frame 里真的出现笔记本了」。 */
   isReady?: () => boolean
+  /** ready/status 里回报本页的会话键（多开页签时 host 必须拿到**这一页**的，不是自己猜的）。 */
+  session?: () => string
   /** ready 后等笔记本渲染的轮询间隔（默认 500ms；测试可调小）。 */
   statusPollMs?: number
   onAttach?: (msg: BridgeMessage) => void
@@ -182,9 +186,17 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
     const started = Date.now()
     statusTimer = setInterval(() => {
       if (hooks.isReady?.() ?? false) {
+        const session = hooks.session?.()
         win.postMessage(
           win.parent,
-          { __bnc: 1, kind: 'status', nonce, notebook: true, href: safeHref() },
+          {
+            __bnc: 1,
+            kind: 'status',
+            nonce,
+            notebook: true,
+            href: safeHref(),
+            ...(session ? { session } : {}),
+          },
           hostOrigin,
         )
         stopStatus()
@@ -214,9 +226,17 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
       nonce = m.nonce
       hostOrigin = e.origin
       hooks.onAttach?.(m)
+      const session = hooks.session?.()
       win.postMessage(
         win.parent,
-        { __bnc: 1, kind: 'ready', nonce, href: safeHref(), notebook: hooks.isReady?.() ?? false },
+        {
+          __bnc: 1,
+          kind: 'ready',
+          nonce,
+          href: safeHref(),
+          notebook: hooks.isReady?.() ?? false,
+          ...(session ? { session } : {}),
+        },
         hostOrigin,
       )
       watchReady()

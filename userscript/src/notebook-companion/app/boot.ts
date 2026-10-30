@@ -3,7 +3,12 @@ import { loadConfig, type BncConfig } from '../config'
 import { detectRole, type Role } from '../selectors'
 import { KaggleFrameAdapter, KaggleSessionAdapter, parseKaggleSession } from '../sites/kaggle'
 import { mountPanel, PANEL_POS_KEY, readPanelPosition, type Panel } from '../ui/panel'
-import { createFrameBridge, createHostBridge, type BridgeWindow } from './bridge'
+import {
+  createFrameBridge,
+  createHostBridge,
+  type BridgeMessage,
+  type BridgeWindow,
+} from './bridge'
 import { runFrameCommand } from './commands'
 import { createShipLoop } from './ship-loop'
 
@@ -47,6 +52,38 @@ export function boot(
     return { role, hasRuntime: true }
   }
   return { role, hasRuntime: true, dispose: start() }
+}
+
+const PAGE_TAG_KEY = 'bnc:pageTag'
+
+/**
+ * 本标签页的短标签（4–6 位 a–z0–9）：同一个 notebook 多开几个页签，各写各的日志。
+ *
+ * `sessionStorage` 在 iframe 里按**顶层标签页**分区 ⇒ 本页刷新后标签不变（接着写同一份
+ * 日志），另一个页签必然拿到不同的值；存储拿不到（第三方帧被禁）就退成「每次加载随机」——
+ * 页面之间仍分得开，只是刷新会开一份新日志。
+ */
+function pageTag(win: Window): string {
+  const gen = (): string => {
+    const c = (win as unknown as { crypto?: { getRandomValues?: (a: Uint8Array) => void } }).crypto
+    const buf = new Uint8Array(4)
+    let n = 0
+    if (typeof c?.getRandomValues === 'function') {
+      c.getRandomValues(buf)
+      n = ((buf[0]! << 24) | (buf[1]! << 16) | (buf[2]! << 8) | buf[3]!) >>> 0
+    } else n = Math.floor(Math.random() * 0x1_0000_0000)
+    return n.toString(36).slice(0, 6).padStart(4, '0')
+  }
+  try {
+    const store = win.sessionStorage
+    const saved = store.getItem(PAGE_TAG_KEY)
+    if (saved && /^[a-z0-9]{4,8}$/.test(saved)) return saved
+    const tag = gen()
+    store.setItem(PAGE_TAG_KEY, tag)
+    return tag
+  } catch {
+    return gen()
+  }
 }
 
 function makeLog(scope: Record<string, unknown>): (msg: string) => void {
@@ -94,6 +131,7 @@ function startFrame(
     config,
     runtime,
     adapter,
+    pageTag: pageTag(win),
     onError: (message) => log(`ship: ${message}`),
   })
   loop.start()
@@ -114,6 +152,7 @@ function startFrame(
     handle: (name, args) =>
       runFrameCommand({ loop, adapter, session, openLog, openConfig }, name, args),
     isReady: () => adapter.ready,
+    session: () => loop.session,
     onAttach: (m) => log(`bridge attach（nonce=${m.nonce ?? '∅'}）`),
     onError: (reason) => log(`bridge: ${reason}`),
   })
@@ -131,7 +170,9 @@ function startFrame(
   })
   runtime.registerMenuCommand('Notebook: 打开日志', openLog)
   runtime.registerMenuCommand('Notebook: 复制配置', openConfig)
-  log(`frame 启动（notebook=${adapter.ready ? 'yes' : 'waiting'}）`)
+  log(
+    `frame 启动（session=notebook:${loop.session} notebook=${adapter.ready ? 'yes' : 'waiting'}）`,
+  )
 
   return () => {
     loop.stop()
@@ -148,17 +189,30 @@ function startHost(
   log: (msg: string) => void,
 ): () => void {
   const session = parseKaggleSession(href)
+  /** frame 回报的会话键（含页面标签）：多开页签时必须用**这一页**的，不能拿外层 URL 猜。 */
+  let frameSession = ''
+  const logKey = (): string => `notebook:${frameSession || session}`
   let ready = false
   let panel: Panel | null = null
+
+  const adoptSession = (m: BridgeMessage): void => {
+    if (!m.session || m.session === frameSession) return
+    frameSession = m.session
+    panel?.setSession(logKey())
+  }
 
   const bridge = createHostBridge(hostBridgeWindow(win), {
     timeoutMs: Math.max(5000, config.claimSettleMs + 4000),
     onReady: (m) => {
       ready = true
-      log(`bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true}）`)
+      adoptSession(m)
+      log(
+        `bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true} session=${frameSession || '∅'}）`,
+      )
       panel?.setStatus(m.notebook ? '已连接（笔记本就绪）' : '已连接（等待笔记本）', 'ok')
     },
     onStatus: (m) => {
+      adoptSession(m)
       log(`bridge status（notebook=${m.notebook === true}）`)
       if (m.notebook === true) {
         ready = true
@@ -197,7 +251,7 @@ function startHost(
       scrollBottom: () => run('scrollBottom'),
       openLog: () => {
         win.open(
-          `${config.dashboardBase}/log/${encodeURIComponent(`notebook:${session}`)}`,
+          `${config.dashboardBase}/log/${encodeURIComponent(logKey())}`,
           '_blank',
           'noopener',
         )
@@ -213,6 +267,9 @@ function startHost(
       onMove: (position) => runtime.setValue(PANEL_POS_KEY, position),
     },
   )
+
+  // 先显示外层 URL 推出的键；frame 一连上就用它回报的（含页面标签）覆盖。
+  panel.setSession(logKey())
 
   // 外层 iframe 可能在 open shadow root 里（探针同款 deepQuery）；只查 light DOM 会漏。
   const findFrame = (): HTMLIFrameElement | null => {

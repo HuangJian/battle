@@ -87,6 +87,7 @@ import {
   ladderTickAll,
   markConsoleActivity,
   appendNotebookChunk,
+  decodeLogKey,
   isNotebookLogKey,
   listNotebookSessions,
   missingLogMessage,
@@ -476,7 +477,8 @@ async function main(): Promise<void> {
 
   // ── /log/<key> 日志页 SSR + 客户端 bundle（?lines= / ?follow=0）──
   const logPageRoute: RouteFn = async (_req, { url, viewCourse }) => {
-    const key = url.pathname.slice('/log/'.length) as Component
+    // 先解码：导航里的 `notebook%3A<session>` 不解码就成了「未知组件」（见 decodeLogKey）。
+    const key = decodeLogKey(url.pathname, '/log/') as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
     // 虚拟键必须在 `as Component` / `componentLogPayload` **之前**分支（后者的 key 是联合类型）。
     const payload = isNotebookLogKey(key)
@@ -607,7 +609,7 @@ async function main(): Promise<void> {
 
   // 日志载荷（日志页 2s/4s 轮询）。
   const apiLogRoute: RouteFn = async (_req, { url, viewCourse }) => {
-    const key = url.pathname.slice('/api/log/'.length) as Component
+    const key = decodeLogKey(url.pathname, '/api/log/') as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
     const payload = isNotebookLogKey(key)
       ? notebookLogPayload(notebookLogsDir(), key, lines)

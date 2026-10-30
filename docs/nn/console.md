@@ -35,6 +35,12 @@ origin+pathname（`?session=` 是 JWT，绝不入日志）；Colab/AI Studio 仅
 **边界**：Gate 0（注入/握手/回环）已人工通过；W4 定时器 UI 与 W5 探测入口/双站点适配器尚未接线；
 真实 Kaggle 上的按钮点验仍需操作员开浏览器。计划 §14、决策 `DECISIONS.md §2026-10-30-notebook-userscript-w1-w5`。
 
+**2026-10-30 修（多开页签 / 「打开日志」报未知组件）**：日志键先用 `decodeLogKey` 从 URL 编码里解出来
+（`encodeURIComponent('notebook:<session>')` 的 `%3A` 不是组件名），页面与 `/api/log/*` 两条路由都改；
+会话名尾加**页面标签**（frame 侧 `bnc:pageTag`，`sessionStorage` 按顶层标签页分区）⇒ 同一 notebook
+多开页签各有各的日志文件、不再互相 `writer-conflict`；host 从 bridge 的 `ready/status.session` 采纳
+这一页的键，面板上直接显示 `日志 notebook:<session>`。旧的无标签会话不再续写，7 天 prune 自然清掉。
+
 ## §43 云机轮的窗口/分关读数：控制台**零代码**，同一条读面（2026-10-28）
 
 **触发**：`docs/nn/training-stack.md` §46（云机 rollout 支持轮换）。此前云机轮在控制台上

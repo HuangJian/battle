@@ -25,6 +25,8 @@ export type PanelHandlers = Partial<Record<PanelAction, () => void | Promise<unk
 export interface Panel {
   readonly host: HTMLElement
   setStatus(text: string, tone?: 'ok' | 'warn' | 'error'): void
+  /** 本页写的是哪一份日志（`notebook:<session>`；多开页签时只有它能把页面和日志对上）。 */
+  setSession(text: string): void
   setBusy(busy: boolean): void
   destroy(): void
 }
@@ -157,6 +159,8 @@ button:hover { background: #24354b; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button[data-act="saveAndClear"] { background: #1e5a3a; border-color: #2f8a58; flex-basis: 100px; }
 button[data-act="stopSession"] { background: #4a1f26; border-color: #7d3340; }
+.sess { margin: 0 0 6px; color: #7f93ad; font-size: 10px; line-height: 1.3; word-break: break-all; }
+.sess:empty { display: none; }
 .status { margin-top: 6px; min-height: 16px; color: #9fb3cc; word-break: break-all; }
 .status[data-tone="ok"] { color: #7fd6a2; }
 .status[data-tone="warn"] { color: #e6c36a; }
@@ -176,6 +180,7 @@ export function mountPanel(
     `<style>${STYLE}</style><div class="bnc" role="group" aria-label="Notebook Companion">` +
     `<div class="hd" data-drag title="拖动移动面板"><span class="grip">⠿</span>` +
     `<span class="title">Notebook Companion</span><span class="hint">拖动</span></div>` +
+    `<div class="sess" data-sess></div>` +
     GROUPS.map(
       (g) =>
         `<div class="group"><div class="glabel">${g.label}</div><div class="row">${g.buttons
@@ -190,6 +195,7 @@ export function mountPanel(
   const bnc = shadow.querySelector('.bnc') as HTMLElement
   const handle = shadow.querySelector('[data-drag]') as HTMLElement
   const status = shadow.querySelector('.status') as HTMLElement
+  const sess = shadow.querySelector('[data-sess]') as HTMLElement
   let busy = false
 
   // 拖拽只在标题栏起手；move/up 挂在 document 上（配合指针捕获），指针移出面板也能继续拖。
@@ -301,9 +307,15 @@ export function mountPanel(
     status.setAttribute('data-tone', tone)
   }
 
+  function setSession(text: string): void {
+    sess.textContent = text ? `日志 ${text}` : ''
+    sess.title = text
+  }
+
   return {
     host,
     setStatus,
+    setSession,
     setBusy(next: boolean) {
       busy = next
       setButtonsDisabled(next)
