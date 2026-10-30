@@ -1,0 +1,188 @@
+// 课程 z2-r5guard —— r5 防守报警腿：v2 价格表 + **预算式 basePressure 税**（2026-10-30）
+//
+// ── 起点（与 z2-r5lam 共用同一个锚，两臂唯一可比处）────────────────────────
+//   bc = `nn-training/weights/z2-r5base/z2-r5base.it270.20261030-082517.json`
+//   （sha256 前 16 位 `63e5e4e0a4fbb422` = eval_log it270 的 `wver`，逐字对账通过）。
+//   该点 80 局 = 清 32 / 基毁 38 / 命尽 10（clear 40.0%、基毁 47.5%），是 r5base 全部评估点里的最高点。
+//
+// ── 便宜归因（决定这条腿打哪一格；起点策略 it270 的 80 局 eval 语料逐局回放）──────
+//   · 基毁局基地命中 **114/115 是敌弹**（basic 85 / fast 16 / armor 8 / power 5；玩家误伤 1 次）；
+//     护墙事件 409 次里玩家 30 次（7.3%；基毁局内 16/188）⇒ 不是自杀、不是「墙脆」。
+//   · 命中时玩家到基地曼哈顿距离中位 **6.2/6.9/7.8** 格（现在 / 30 拍前 / 120 拍前），
+//     分关现在值 6.6/5.0/6.5/9.0；115 次里只有 6 次在 3 格内、40 次 ≥8 格；
+//     **69%** 的命中发生时最近敌人已在 6 格内（中位 4.75 格）
+//     ⇒ 比 it240 更贴身的漏法：玩家通常在 6 格内，但站位没卡住敌人到基地的线。
+//   · 破墙→基毁中位 **3858/2221/1028/1255** 拍（n=6/10/15/7）；基毁时击杀 **17/6/2/6**（满 20）
+//     ⇒ 2000 属「打赢了但漏家」（17 杀），2002 属「打不动」（2 杀），2001/2003 居中。
+//   · 价格侧已两次证伪：r4threat（威胁税 ×2）基毁率 35.4% vs 35.7%；
+//     r5base（wBase 3→8，n=3360）基毁率 60.5% vs 60.5%（p≈0.96）、clear 23.6% vs 22.5%（p≈0.27）。
+//   ⇒ 缺的不是「基毁更贵」，是**泄漏发生那一刻的局部价**：墙价在破墙拍一次性给、基毁 −35 在终局给，
+//     而 GAE 迹长 = 1/(1−γλ) = 19 个决策步（≈190 拍）⇒ 305–5323 拍前的因果没有梯度。
+//
+// ── 机制：预算式 basePressure 税（稠密、局部、挂率不挂时长）─────────────────
+//   Φ_def = −wDef · min(capDef, max(0, basePressureSum − pDef·basePressureSamples))
+//   两列都是现成指标（idx14/15，每 6 拍采样，训练与 eval 同源；`world.tanks` 只含敌车
+//   ⇒ 不含玩家自己的位置，不存在「回防反而被罚」的自伤）。每样本边际价 = wDef·(P−pDef)。
+//   · P = max over 敌车 (1 − 到基地曼哈顿距离/12)（12 格半径覆盖地图下半）。
+//   · 为什么必须挂「率」：it270 上总压力量**反向**（清 109.8 > 基毁 88.0，清关局长 2.1x 把差值翻过来），
+//     但**压力率之差稳定**（0.102 vs 0.166，1.6x）⇒ 挂在总量上 = 平税（又一次 r5base 式空转），
+//     挂在率上才有区分度。
+//   · 预算式：每样本 pDef 的免费额度，越线才收钱 ⇒ 正常交战时敌人路过的零散压力不罚。
+//   · capDef 让 Φ 有界（value 尺度 + `reward_validation` 静态包络同时受益）。
+//
+// ── 剂量（起点策略 it270 的 80 局 eval 语料实测，同关同 seed；真 RewardFn 逐局实算）────────
+//     pDef=0.15, wDef=2.5, capDef=80 ⇒ 清关局 −14.9（中位 0，19% 的局触发）/ 基毁局 −35.0
+//     （中位 16.8，63% 触发）/ 命尽 −13.2 ⇒「基毁 vs 清关」价差 **20.1 分 ≈ 1.3 杀**
+//     （一杀 15；基毁终局本身 −35）。
+//   ⚠ 换锚后剂量重标定：it270 的两结局率差只有 1.6x（it240 是 1.9x），旧档 1.5/0.12 在这批局上
+//     只剩 Δ14.7（≈1 杀）⇒ 抬权重（1.5→2.5）并把免费额度提到清关侧率分布之外（0.12→0.15），
+//     才在「清关局中位仍为 0」的前提下拿回 ~1.3 杀的价差。
+//   ⚠ 公式是 wDef*min(capDef, ·) ⇒ 单局上限 = 200；cap 在 0/80 局咬到（观测最大 189），
+//     capDef 是包络保险，不是调节旋钮。
+//   相邻档（同一批局）：wDef 2.0 → 11.9 / 28.0（Δ16.1）· wDef 3.0 → 17.8 / 42.0（Δ24.2）·
+//     pDef 0.14 → 19.6 / 43.1（Δ23.5，但 2001 清关局均价被抬到 51）· pDef 0.16 → 10.5 / 28.4（Δ17.9）
+//     ⇒ 取清关侧中位 0、2001 清关不过 40 的中间档 2.5/0.15。
+//   边际价（每决策步 = 10 拍 / 6 拍采样，P=0.25/0.5/0.67/0.75/1.0）≈ 0.42/1.46/2.17/2.50/3.54 分：
+//   一个贴家敌人持续 ~10 决策（100 拍）才约等于一杀的价 ⇒ **只补贴到「值得回防」的门槛，
+//   压不过击杀收入**（防「变怂」）。
+//   分关基毁局平均价（括号=该关清关局价）：2000 18（17）· 2001 67（36）· 2002 36（0）· 2003 3（0）
+//   ⇒ 2001 是本腿主目标、2002 也吃到真价差；2000 的漏家局靠 17 杀撑赢面（价格分不开）、
+//     2003 的基毁局压力本就低 —— 这两关的读数只看有没有被拖坏。
+//
+// ── 与 z2-r5 的差（单变量）─────────────────────────────────────────────
+//   ① reward.formula 追加 Φ_def 一项 + 三参数 wDef/pDef/capDef；② 起点 bc 换 it270；
+//   ③ name/out/traj/backup_dir/backup_prefix 换新（fresh，绝不复用别腿目录）。
+//   其余（stage_select/enemies/lives/max_ticks/难度/全部其它价格/terminal/lr/epochs/mb/γ/λ/
+//   kl 计划/target_transitions/paired_rotate_seed/decision_k/eval 配置）与 z2-r5 逐字相同。
+//   ⚠ 价格表用 **wBase 3.0（v2 主腿）**，不是 r5base 的 8.0：wBase 8 已证伪（n=3360 双窗持平），
+//     不能把它的效应混进本腿读数。也**不叠 λ**（那是 z2-r5lam 的格子）。
+//
+// ── 判据（旁路 A/B，预注册，不晋级）──────────────────────────────────────
+//   · 主：in-loop eval **基毁率相对 it270 基线（38/80 = 47.5%）下降 ≥20%**（即 ≤38%），
+//        且 clear 不掉 >5pp（基线 32/80 = 40.0%）。
+//   · 配对：eval 语料固定 20 seed/关 ⇒ 与 it270 的 80 局逐 (stage,seed) 配对（McNemar）。
+//   · 反向（剂量过头/变怂）：clear −5pp、timeout +5pp、kills −0.5、cellsVisited −10 任一出现 ⇒ 停腿。
+//   · 分关读数（AGENTS §15.2）：2001 看基毁率（目标关）· 2002 看基毁率（价差 36，但清关样本只 3 局）·
+//     2000/2003 只看有没有被拖坏（价在这两关分不开）。
+//   · 调参只动 wDef（2.0/2.5/3.0）与 pDef（0.14/0.15/0.16）；capDef 只在包络报警时降。
+//   · it0 的 greedy 是恒定动作（均匀初始化的正常形态），判据从 it20+ 读。
+//
+// ── 停腿 ───────────────────────────────────────────────────────────────
+//   40 轮内 clearRate 始终 ≤ 基线 −5pp ⇒ 停，先查奖励包络再谈任务侧。
+//   若基毁率不动而 2001 的 kills 反升 ⇒ 价被「多杀」替代，按 §15.2 分关复核再定。
+
+// ── ★ 结课结算（2026-10-30 15:23 跑满 500 轮；**判负**，主判据两项全败）──────
+//   终点权重 `nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json`
+//     （wver `0c8795f767f161e1` = evalA it500 的 wver，逐字对账）。
+//   同语料 80 局（4 关 × 20 seed，`EVAL_SEEDS_BASE 2000000001` 起，逐 (stage,seed) 可比）：
+//     it0（= it270）清 32 / 基毁 38 / 命尽 10 ⇒ 40.0% / 47.5% / 12.5%
+//     it500         清 23 / 基毁 48 / 命尽  9 ⇒ 28.7% / 60.0% / 11.2%
+//     ⚠ `eval_summary` 的 wins=24 / clearRate 0.30 比逐局 `stage_clear` 多 1 局：那是
+//       s2000/seed2000000014（kills 20、ticks 4343、baseIntegrity 0）——第 20 杀与基毁同窗，
+//       `win=1` 但 `outcome=gameover`。**基毁率一律用逐局口径（48/80）。**
+//   主判据：基毁 ≤38% 且 clear 不掉 >5pp ⇒ **60.0% / −11.3pp，两项全败**。
+//   配对（n=80）：新清 12 / 丢清 21，exact 双侧 p=0.163；基毁→清 10 / 清→基毁 14 / 基毁保持 27
+//     ⇒ **方向为负但分不出**，不能写成"已证变差"。
+//   反向停腿三条（clear −5pp / kills −0.5 / cells −10）**全部触发**，且 it20 就已触发
+//     （清 20.0% / kills 10.15 / cells 99.0）⇒ 按预注册本应在 it20 停，跑满 500 是执行失误。
+//   分关（it0 → it500，清/基毁，kills）：
+//     2000 11/6 → 12/8（18.1→16.1）—— 唯一没被拖坏的关
+//     2001  8/10 → 4/15（12.9→9.7）—— 本腿主目标，**反向**
+//     2002  3/15 → 1/18（7.0→7.0）—— 地板；本课头 §剂量 已预告此关价差分不开
+//     2003 10/7 → 6/7（13.9→12.3）
+//   伴随量（全体 80 局）：kills 13.01→11.25 · dmg 516→407 · walk 111.7→94.9 · ticks 4833→4057
+//     **命中率 0.665→0.719、shots/千 9.31→8.78、kill/千 2.69→2.77**
+//     ⇒ 射术反而变好、出手更省 ⇒ 它不是"打不动"，是**局更早被打断**（基毁局 tick 3369→2995）。
+//   训练侧（`training_log.jsonl`，502 个 iteration）：rollout clear 28.2%(it1) → 峰 43.4%(it439)
+//     → 33.1%(it500)；基毁 54.1%→50.9%；entropy 1.031→0.701（末 20 轮 0.711）·
+//     value 305→388 · kl 末 20 轮 0.0027 ⇒ **entropy 坍缩 32%**。
+//     greedy eval 28.7% 低于同权重 rollout 33.1%（基毁率差更大：60.0% vs 50.9%）
+//     ⇒ 判腿只读 greedy（AGENTS §15.3）。
+//   判据本身不可判（摆幅证据）：it475 = 清 34(42.5%) / 基毁 31(**38.8%**，差 4 局到线)
+//     → it500 = 清 23 / 基毁 48。80 局配对差 SE≈5.5pp，而判据只要求 −9.5pp（**1.7 SE**）
+//     ⇒ 这套 eval 规模下单点判定接近抛硬币；后继腿先把 eval 扩到 200 局/点再谈读数。
+//   机制结论（两条已确证，写进价格侧诊断）：
+//     ① 累积型 Φ（`basePressureSum/Samples`，`biz/reward_library.py:74-75`）挂在**持有量**上
+//        ⇒ 是不可观测隐藏状态（value 只看当前帧，学不到"已欠多少"），advantage 掺入与动作
+//        无关的常数偏移；cap 饱和后边际税归零，且能被"提前结束"规避。
+//     ② 税率改不动序：单局税上限 200、实测基毁局均价 −35（§剂量），而
+//        1 命 = wDeath 18 + 血罚 0.12×219 ≈ 26 = **44 分 ≈ 3 杀** ⇒ 「弃家保命」仍是局部最优。
+//   引用纪律：本腿与 `z2-r5lam` 共用同一 anchor（it270）与同一 80 局语料，**必须成对读**；
+//     单读本腿会把"λ 的伤害"误记成"税的无效"。
+
+{
+  "version": 5,
+  "name": "z2-r5guard",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5base/z2-r5base.it270.20261030-082517.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5guard/weights.json",
+  "traj": "tmp/z2-r5guard",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5guard",
+  "backup_prefix": "z2-r5guard",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

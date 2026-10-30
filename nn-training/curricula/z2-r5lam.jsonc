@@ -1,0 +1,167 @@
+// 课程 z2-r5lam —— r5 信用视野腿：v2 价格表逐字不动，**只把 λ 0.95 → 0.99**（2026-10-30）
+//
+// ── 起点（与 z2-r5guard 共用同一个锚，两臂唯一可比处）────────────────────────
+//   bc = `nn-training/weights/z2-r5base/z2-r5base.it270.20261030-082517.json`
+//   （sha256 前 16 位 `63e5e4e0a4fbb422` = eval_log it270 的 `wver`，逐字对账通过）。
+//   该点 80 局 = 清 32 / 基毁 38 / 命尽 10（clear 40.0%、基毁 47.5%），是 r5base 全部评估点里的最高点。
+//
+// ── 为什么挑 λ（同一条便宜归因的另一半；完整归因见 z2-r5guard.jsonc 头）────────
+//   · 基毁局基地命中 114/115 是敌弹、破墙 409 次里玩家 30 次 ⇒ 漏家在「敌人贴身」的时刻，
+//     不在玩家自杀；价格侧两次证伪（r4threat 威胁税 ×2 基毁 35.4% vs 35.7%；
+//     r5base wBase 3→8，n=3360，基毁 60.5% vs 60.5%）⇒ 缺的可能是**信用分配**，不是价格高低。
+//   · 破墙→基毁间隔（it270 38 局）：305 / 639(Q1) / **1446(中位)** / 3554(Q3) / 5323 拍。
+//   · GAE 迹长 = 1/(1−γλ)，每决策 10 拍（decision_k 10）：
+//       λ 0.95 → 19.3 决策 ≈ 193 拍 ⇒ 覆盖 **0/38** 个破墙→基毁间隔；
+//       λ 0.99 → 83.5 决策 ≈ 835 拍 ⇒ 覆盖 **12/38（32%）**，正好是短间隔那三分之一。
+//   · 局长对照：清关中位 629 决策（6290 拍）/ 基毁 301（3011）/ 命尽 547
+//     ⇒ 0.99 的迹只占一局 13–28%，仍是带指数遗忘的 TD 估计，**不是** Monte Carlo。
+//
+// ── 与 c5-gae / c6-gae 的反证，以及为什么本局域不同 ─────────────────────────
+//   项目先例是 λ 0.99→0.95 修好了 c5/c6（value 0.75→0.50–0.62，配对胜 39%→55–57%）。
+//   但那批局只有 ~115 决策：0.99 的迹 = 100 步 ≈ 一局 87% ⇒ 实质 MC、advantage 标准差 +25%
+//   （0.961→1.199）。本课 0.99 只占一局 13–28%，方差增量应远小于 c5；而 0.95 的 193 拍窗口
+//   在 38 个基毁局里**一次都够不着** ⇒ 「加长窗口」是本局域唯一没试过的方向。
+//   代价是方差：0.99 让 value 目标更接近回报本身，value loss 允许小幅上升；
+//   只有「value 恶化且 clear 不涨」才算病（停损见下）。
+//
+// ── 分关预期（预注册，防事后编故事）────────────────────────────────────────
+//   835 拍窗口在各关的覆盖：2002 **7/15**（间隔中位 1028，主目标关）· 2003 3/7（1255）·
+//   2001 1/10（2221）· 2000 1/6（3858）⇒ 读数预期 **2002 先动**；
+//   2000/2001 不动属预期内（间隔在窗口外，那部分要靠稠密价——z2-r5guard 的格子）。
+//
+// ── 与 z2-r5 的差（单变量）─────────────────────────────────────────────
+//   ① `lam` 0.95 → 0.99；② bc 换 it270；③ name/out/traj/backup_dir/backup_prefix 换新
+//   （fresh，绝不复用别腿目录）。其余（stage_select/enemies/lives/max_ticks/难度/
+//   **reward 全参数与 terminal 逐字相同**/lr/epochs/mb/γ 0.998/kl 计划/target_transitions/
+//   paired_rotate_seed/decision_k/eval 配置）与 z2-r5 逐字相同。
+//   ⚠ 价格表用 **wBase 3.0**（r5base 的 8.0 已证伪，不混进来）；**不叠 basePressure 税**
+//     （那是 z2-r5guard 的格子）⇒ 本课相对 it270 基线是干净的 λ 单变量。
+//   ⚠ 两臂（guard / lam）互相比**不是**单变量对照；各自只与 it270 零样本基线比。
+//
+// ── 判据（旁路 A/B，预注册，不晋级）──────────────────────────────────────
+//   · 主：in-loop eval **基毁率相对 it270 基线（38/80 = 47.5%）下降 ≥20%**（≤38%），
+//        且 clear 不掉 >5pp（基线 32/80 = 40.0%）。
+//   · 配对：eval 语料固定 20 seed/关 ⇒ 与 it270 的 80 局逐 (stage,seed) 配对（McNemar）。
+//   · 分关（AGENTS §15.2）：先看 2002 的基毁率；2000/2001 不动不判负（窗口外）。
+//   · 反向（方差病/变怂）：clear −5pp、timeout +5pp、kills −0.5、cellsVisited −10 任一 ⇒ 停腿。
+//   · 调参只动 λ（0.97 / 0.99 / 0.995）；0.995 的迹长 143 决策（1430 拍）覆盖 19/38，
+//     只在 0.99 有信号但幅度不足时上。本课没有可调的价格参数。
+//   · it0 的 greedy 是恒定动作（均匀初始化的正常形态），判据从 it20+ 读。
+//
+// ── 停腿 ───────────────────────────────────────────────────────────────
+//   40 轮内 clearRate 始终 ≤ 基线 −5pp ⇒ 停。
+//   value 头坏掉的签名：value 持续 > 1.3× it270（282.6 → ~367）**且** clear 不升；
+//   entropy < 0.70 且无回升（it270 = 1.045；过早同质化）⇒ 任一出现即停，λ 回退 0.97 再评。
+//   kl 护栏沿用 kl_cap 0.1（it270 kl = 0.0033，离护栏很远）。
+
+// ── ★ 结课结算（2026-10-30 18:01 跑满 500 轮；**判负**，本批唯一显著负结果）────
+//   终点权重 `nn-training/weights/z2-r5lam/z2-r5lam.it500.20261030-180032.json`
+//     （wver `e24a6f16df9e4611`）。
+//   同语料 80 局：it0（= it270）清 32 / 基毁 38 / 命尽 10 ⇒ 40.0 / 47.5 / 12.5
+//                it500         清 16 / 基毁 56 / 命尽  8 ⇒ 20.0 / 70.0 / 10.0
+//   主判据：基毁 ≤38% 且 clear 不掉 >5pp ⇒ **70.0% / −20.0pp，两项全败**。
+//   配对（n=80，同 (stage,seed)）：新清 10 / 丢清 26，exact 双侧 **p=0.0113**
+//     ⇒ r4threat / r5base / r5guard / 本腿四条奖励腿里**唯一统计显著**的结果，方向为负。
+//     基毁→清 8 / 清→基毁 21 / 基毁保持 28。
+//   分关（it0 → it500，清/基毁，kills）：2000 11/6 → 4/13（18.1→12.7，崩得最多）·
+//     2001 8/10 → 4/16（12.9→10.3）· 2002 3/15 → **0/19**（7.0→7.9）· 2003 10/7 → 8/8（13.9→11.9）
+//     ⇒ 四关全负，无"拆东墙补西墙"。
+//   退化的形状（本腿最有价值的产出，比"阴性"有用；全体 80 局）：
+//     | 指标        | it0   | it500     |
+//     | 命中率      | 0.665 | **0.467** |
+//     | shots/千    | 9.31  | **13.22** |
+//     | idleTicks   | 274   | **435**   |
+//     | kills       | 13.01 | 10.71     |
+//     | kill/千     | 2.69  | 2.57      |
+//     | walk        | 111.7 | 100.3     |
+//   ⇒ **「狂开火 + 站桩」**：出手 +46%、静止 +59%、命中率 −30%。
+//     同 anchor、同 batch、唯一差 λ —— 而 `z2-r5guard` 同期命中率**升**到 0.719、出手降到 8.78
+//     ⇒ λ 0.99 对射术的负效应是**可辨的因果**，不是两臂共同的底座漂移。
+//   机制：λ 拉长 ⇒ λ-return 方差放大 ⇒「等角度、瞄一下再打」这类延迟回报的精细动作学不动，
+//     策略退化成高频粗动作（开火）。而空枪零成本（`aimMisses` 只观测不定价，
+//     `biz/reward_library.py:190`）⇒ 多开火是免费选项，λ 给了它一条滑道。
+//   value 头病态（硬证据）：同一份 it270 权重，λ 一开腿 value 就从 **305 跳到 1018**（it1），
+//     500 轮全程 800–1200 不收敛（末 20 轮 1031.5），而 mean_ret 只有 50–70 ⇒ **差 15 倍**。
+//     本课 §停腿 的「value 持续 > 1.3× it270（282.6 → ~367）」在 **it1 就成立** ——
+//     条款与 λ 自相矛盾（λ 改 value 尺度，绝对阈值不可用），**白跑 500 轮**；
+//     后继课程若要动 λ，停损线必须改成「相对同 λ 的 it1 基线」或改用 advantage 方差。
+//   rollout（采样）clear 19.8%(it1) → 27.2%(it500)、基毁 59.3%→52.0%；greedy 20.0% / 70.0%
+//     ⇒ 采样比 greedy 高 **7.2pp**（基毁率低 18pp），entropy 稳在 0.88–1.04 **未坍缩**
+//     ⇒ 策略是变"散"不是"收敛到坏解"，greedy 取众数时踩空。§15.3 的又一实证。
+//   归档结论：**λ 0.99 在这套 stack 上不可用**（第 3 次：c5-gae / c6-gae / 本腿）。
+//     后继一律 λ 0.95；要动信用视野只能走稠密价，不能走 λ。
+//   引用纪律：与 `z2-r5guard` 共用同一 anchor 与同一 80 局语料，必须成对读。
+
+{
+  "version": 5,
+  "name": "z2-r5lam",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap)",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5base/z2-r5base.it270.20261030-082517.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.99,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5lam/weights.json",
+  "traj": "tmp/z2-r5lam",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5lam",
+  "backup_prefix": "z2-r5lam",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

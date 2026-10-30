@@ -1,0 +1,140 @@
+// 课程 z2-r5base —— r5 的并行臂：同任务同价格表，只把**基墙价**放大（2026-10-29）
+//
+// ── 先答「r5 主腿要不要调激励」：**不要** ───────────────────────────────
+//   价格表 v2 的活跃项在 20 敌下仍然成立；退化的几项都是**常数**（不给梯度也不误导）：
+//     · walk：r4 已 80/80 触顶（+20 常数）；20 敌只会更满 ⇒ 常数 +20。
+//     · threat cap 500：r4 greedy 只有 33/320 触顶（10.3%），20 敌暴露密度约 2.5x ⇒ 预计大半触顶，
+//       退化成常数 −5；**但 r4 的基毁局 threat 反而更低**（214 vs 清关 347）⇒ 加威胁税
+//       打不中主失败模式（r4threat 实测：承伤 −9.0%、clear −4.7pp、基毁率 35.4% vs 35.7% 没降）。
+//     · brick cap 12 / pace：brick 触顶即 +3 常数；pace 预算 20×1200=24000 > max_ticks 20000
+//       ⇒ 清关局永远不罚，只有低杀超时局才咬（超时 −50 已是主罚）。
+//     · win +60 相对 20 杀 300 变小，但「杀满 20 才 clear」+ 超时 −50 仍把清关顶在最前。
+//   ⇒ 主腿**逐字不动**；要测的是唯一与主失败模式同向的杠杆：**基墙价**。
+//
+// ── 为什么是基墙价（r4 的 8 敌读数，in-loop eval it135–it150 合并 320 局）──
+//   · 失败构成：输 132 局里 **基毁 128 + 命尽 4 = 97%**；rollout it120–149 基毁 35–36% /
+//     命尽 2–3%。基毁是唯一的主失败模式。
+//   · 基毁局不是「冲出去丢基地」：**2550 拍 / 3.03 杀 / 承伤 217 / threat 214 / cells 59**；
+//     清关局 3672 拍 / 8.00 杀 / 承伤 354 / threat 347 / cells 90（同一批 320 局）
+//     ⇒ 基毁局**更短、更少杀、更少挨打、走得更少** = 低交战时被慢慢拆，不是拿命换杀也非暴露过多。
+//   · 现有基墙价：`wBase 3 × 8 块`，丢一圈 −24；奖励引擎是势塑形 ⇒ 这是**每丢一块 −3**
+//     的即时价，不是终局一次性加分；加终局基毁 −35，基毁总代价 59。
+//     r4 实测（同一批 320 局）基墙项平均只贡献 **−11.6/局**（清关局丢 1.2 块 ⇒ +20.4，
+//     基毁局丢满 8 块 ⇒ 0；全体均值 +12.4/满额 24）⇒ 在主失败模式上，这个价码明显偏轻。
+//
+// ── 与 z2-r5 的唯一差 ─────────────────────────────────────────────────
+//   `wBase 3.0 → 8.0`（formula 逐字相同；其余参数逐字相同）。2.67x。
+//   为什么不是 2x：基墙项在 r4 的实际贡献（−11.6/局，约占整局 10%）是威胁税（约 −2.9）
+//   的 4 倍；2x 只挪 ~12 分，8.0 才把基毁局多罚 40 分（≈2.7 杀），足以检验「价格是否
+//   是约束」而不是「能力上限」。
+//
+// ── 价格表实算（真 `RewardFn`，20 敌口径；假设局面只作**排序体检**，不作难度判据）──
+//   完胜 20 杀/12000 拍/承伤 600/0 死/满墙；带击杀输法 16 杀/9000 拍/承伤 700/1 死/基毁；
+//   苟 4 杀/20000 拍/承伤 200/0 死；莽 10 杀/6000 拍/承伤 800/3 死/基毁。
+//   （脚本 `nn-training/tmp/_z2r5_pay_table.py`，两臂各跑一遍）
+//     v2 主腿：完胜 **+355.5** ≫ 带击杀输法 **+134.0** > 莽 **−20.5** > 苟(基毁) **−45.0**
+//     本臂  ：完胜 **+355.5** ≫ 带击杀输法 **+94.0**  > 莽 **−60.5** > 苟(基毁) **−85.0**
+//   势塑形 ⇒ 满墙在两端相消、基墙项记 0；本臂每丢一块 −8 ⇒ 丢满 8 块比主腿多 −40。
+//   ⚠ 20 敌下「苟且满墙」= **不可达状态**（r4 的 132 局输法里 128 局是基毁；被动局必丢家）。
+//     满墙苟的价两臂相同（主腿 −21.0 / 本臂 −21.0）—— 基墙项势差为 0 ⇒ 本臂不会额外奖励守家。
+//   ⇒ 可达排序两臂一致：完胜 ≫ 带击杀输法 > 莽 > 苟；本臂只把「丢墙/基毁」一侧变贵。
+//
+// ── 判据（本腿**不晋级**，是旁路 A/B）──────────────────────────────────
+//   · 主：同 it 与 `z2-r5` 比，**基毁率相对下降 ≥25%**（rollout 末 N 轮；eval 用
+//     gameover 且 playerDeaths<3 判基毁）且 clearRate 不掉 >5pp。
+//   · 反向：clearRate 掉 >5pp / timeout 涨 >5pp / kills 掉 >0.5 ⇒ **剂量过头**（变怂）。
+//   · 止损：只动 `wBase`（3.0 主腿 ↔ 8.0 本臂 ↔ 6.0 轻档 ↔ 12.0 重档）；其余参数不动。
+//   · 读数看分关（2002/2003 是 r4 的瓶颈，AGENTS §15.2）。
+//
+// ── 起点：与 `z2-r5` **同一份**（否则两臂不可比）────────────────────────
+//   `bc` = `nn-training/weights/z2-r4/z2-r4.it150.20261029-194823.json`
+//   （r4 当前末次有评估支撑的归档，sha256 前 16 位 = `81449bc95872cb69` = eval_log it150 的 `wver`）。
+//   r4 仍在跑 ⇒ 开课前**两臂同步换到 r4 停课点的最后一个评估归档**（同一条规则 + wver 对账）；只准改这一处。
+
+// ── 奖励：价格表 **v2 + 基墙 8.0**（其余与 r5 主腿逐字相同）──────────────
+//   +15*kills +1.5*命中 +60*clear **+8*墙块(0–8)** -0.12*dmg -18*death
+//   -min(36, 6*未支付千拍) +0.25*min(bricks,12) +1.0*min(cells,20)
+//   +4.0*min(powerUps,6) -0.01*min(threatTicks,500)
+//   反苟：墙价（丢一圈 **-64**）+ 按拍 pace（每杀赠 1200 拍，超出每千拍 -6、封顶 -36）
+//         + 移动项封顶 20 格 + 威胁税封顶 500 拍。超时 -50 = 唯一「没打完」的结局。
+//   反莽：命价 18 > 一杀 15、血价 0.12/HP、墙价让「冲出去丢基地」更亏；命尽/基毁 -35。
+//   v2 的剂量与量纲见 `z2-r3.jsonc` §价格表 v2；全表见 `docs/nn/training-stack.md` §50.3。
+
+// ── 晋级 / 停腿 ─────────────────────────────────────────────────────────
+//   · 本腿不晋级（旁路 A/B，只回答「基墙价是不是约束」）。
+//   · 停腿：40 轮内 clearRate 始终 0 ⇒ 停，**先查任务侧再谈奖励**（§50.4 的 commander floor）。
+//   · it0 的 greedy 是恒定动作（近均匀初始化的正常形态），判据从 it20+ 读。
+
+{
+  "version": 5,
+  "name": "z2-r5base",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap)",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r4/z2-r4.it150.20261029-194823.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5base/weights.json",
+  "traj": "tmp/z2-r5base",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5base",
+  "backup_prefix": "z2-r5base",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
