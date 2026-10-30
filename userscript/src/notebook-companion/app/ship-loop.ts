@@ -233,6 +233,8 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
           /* 虚拟化进出只影响读取面；offset 键是 uuid，不动 */
         },
       )
+      // 打开页面时已有的输出不会触发 MutationObserver ⇒ 首拍必须把全部 code cell 标脏。
+      for (const ref of cells()) dirty.add(ref.id)
       timer = setInterval(
         () => {
           void tick().then(() => autoClearIfNeeded())

@@ -8,17 +8,18 @@ import {
 
 interface FakeWindow {
   win: BridgeWindow
-  sent: Array<{ msg: unknown; origin: string }>
+  sent: Array<{ target: unknown; msg: unknown; origin: string }>
   fire: (e: { data: unknown; origin: string; source?: unknown }) => void
 }
 
 function fakeWindow(self: unknown = 'frame-self', parent: unknown = 'frame-parent'): FakeWindow {
   const listeners: Array<(e: BridgeEvent) => void> = []
-  const sent: Array<{ msg: unknown; origin: string }> = []
+  const sent: Array<{ target: unknown; msg: unknown; origin: string }> = []
   return {
     win: {
+      parent,
       addEventListener: (_type, fn) => listeners.push(fn),
-      postMessage: (msg, origin) => sent.push({ msg, origin }),
+      postMessage: (target, msg, origin) => sent.push({ target, msg, origin }),
     },
     sent,
     fire(e) {
@@ -37,8 +38,9 @@ describe('bridge：host ⇄ frame', () => {
     const f = fakeWindow()
     let readyCount = 0
     const host = createHostBridge(f.win, { timeoutMs: 60, onReady: () => (readyCount += 1) })
-    host.attach(FRAME, 'n1')
+    host.attach(FRAME, 'frame-window', 'n1')
     expect(f.sent[0]!.origin).toBe(FRAME)
+    expect(f.sent[0]!.target).toBe('frame-window') // 必须给 iframe.contentWindow，不能发给自己
     expect((f.sent[0]!.msg as { nonce?: string }).nonce).toBe('n1')
 
     f.fire({ data: { __bnc: 1, kind: 'ready', nonce: 'wrong' }, origin: FRAME })
@@ -63,7 +65,7 @@ describe('bridge：host ⇄ frame', () => {
   it('host：frame 不回 ⇒ 超时是失败（不假装成功）', async () => {
     const f = fakeWindow()
     const host = createHostBridge(f.win, { timeoutMs: 20 })
-    host.attach(FRAME, 'n1')
+    host.attach(FRAME, 'frame-window', 'n1')
     const r = await host.send('flush')
     expect(r.ok).toBe(false)
     expect(r.reason).toContain('超时')
@@ -87,6 +89,7 @@ describe('bridge：host ⇄ frame', () => {
 
     f.fire({ data: { __bnc: 1, kind: 'attach', nonce: 'n1' }, origin: KAGGLE })
     expect(f.sent[0]!.origin).toBe(KAGGLE)
+    expect(f.sent[0]!.target).toBe('parent') // ready 必须回给 parent，不是自己
     expect(f.sent[0]!.msg).toMatchObject({ kind: 'ready', nonce: 'n1', notebook: true })
     expect(bridge.nonce).toBe('n1')
 

@@ -32,7 +32,10 @@ export interface BridgeEvent {
 
 export interface BridgeWindow {
   addEventListener(type: 'message', fn: (e: BridgeEvent) => void): void
-  postMessage(msg: unknown, origin: string): void
+  /** `window.parent`（frame 侧回发目标；host 侧不用）。 */
+  readonly parent?: unknown
+  /** 向 `target` 定向发送：host 传 `iframe.contentWindow`，frame 传 `parent`。 */
+  postMessage(target: unknown, msg: unknown, origin: string): void
 }
 
 export function isBridgeMessage(data: unknown): data is BridgeMessage {
@@ -59,7 +62,8 @@ export interface HostBridgeHooks {
 
 export interface HostBridge {
   readonly nonce: string
-  attach(origin: string, nonce?: string): void
+  /** `target` 必须是 iframe 的 `contentWindow`（`window.postMessage` 只发给自己，不发子帧）。 */
+  attach(origin: string, target: unknown, nonce?: string): void
   send(name: string, args?: unknown): Promise<{ ok: boolean; value?: unknown; reason?: string }>
   destroy(): void
 }
@@ -67,6 +71,7 @@ export interface HostBridge {
 /** host 侧：attach → ready/status → cmd/result。`self` 只用于日志，不做匹配。 */
 export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {}): HostBridge {
   let nonce = ''
+  let frameTarget: unknown = null
   const pending = new Map<
     string,
     { resolve: (r: { ok: boolean; value?: unknown; reason?: string }) => void; timer: number }
@@ -107,11 +112,16 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
     get nonce() {
       return nonce
     },
-    attach(origin: string, next = randomNonce()) {
+    attach(origin: string, target: unknown, next = randomNonce()) {
+      frameTarget = target
       nonce = next
-      win.postMessage({ __bnc: 1, kind: 'attach', nonce } satisfies BridgeMessage, origin)
+      win.postMessage(target, { __bnc: 1, kind: 'attach', nonce } satisfies BridgeMessage, origin)
     },
     send(name: string, args?: unknown) {
+      if (frameTarget === null) {
+        return Promise.resolve({ ok: false, reason: `cmd ${name} 尚未 attach（没有 frame 目标）` })
+      }
+      const target = frameTarget
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
@@ -120,6 +130,7 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
         }, timeoutMs) as unknown as number
         pending.set(id, { resolve, timer })
         win.postMessage(
+          target,
           { __bnc: 1, kind: 'cmd', nonce, id, name, args } satisfies BridgeMessage,
           '*',
         )
@@ -177,6 +188,7 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
       hostOrigin = e.origin
       hooks.onAttach?.(m)
       win.postMessage(
+        win.parent,
         { __bnc: 1, kind: 'ready', nonce, href: safeHref(), notebook: hooks.isReady?.() ?? false },
         hostOrigin,
       )
@@ -189,9 +201,16 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
     }
     void hooks
       .handle(m.name ?? '', m.args)
-      .then((r) => win.postMessage({ __bnc: 1, kind: 'result', nonce, id: m.id, ...r }, hostOrigin))
+      .then((r) =>
+        win.postMessage(
+          win.parent,
+          { __bnc: 1, kind: 'result', nonce, id: m.id, ...r },
+          hostOrigin,
+        ),
+      )
       .catch((err: unknown) =>
         win.postMessage(
+          win.parent,
           {
             __bnc: 1,
             kind: 'result',

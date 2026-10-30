@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   appendNotebookChunk,
+  missingLogMessage,
   notebookLogPayload,
   type NotebookChunk,
 } from '../src/server/api/notebook-log'
@@ -43,6 +44,12 @@ function chunk(o: Partial<NotebookChunk> = {}): NotebookChunk {
 }
 
 describe('W1 接线：活动闸 / 路由顺序 / 虚拟键', () => {
+  it('空 notebook 会话的 404 说人话（不是 unknown component）', () => {
+    expect(missingLogMessage('notebook')).toContain('还没有 notebook 会话')
+    expect(missingLogMessage('notebook:kaggle-a-b-edit')).toContain('还没有 notebook 会话')
+    expect(missingLogMessage('bogus')).toContain('bogus')
+  })
+
   it('POST /api/notebookLog 用 guard({activity:false})；清单 GET 仍算有人看', () => {
     expect(SERVER).toContain("'/api/notebookLogs': { GET: guard(notebookLogsRoute) }")
     expect(SERVER).toContain(

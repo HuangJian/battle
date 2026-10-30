@@ -54,20 +54,26 @@ function makeLog(scope: Record<string, unknown>): (msg: string) => void {
   return (msg) => info?.(`[bnc] ${msg}`)
 }
 
-/** lib.dom Window → 桥的最小接口（`postMessage`/`message` 两个方向都在这里收口）。 */
-function bridgeWindow(win: Window): BridgeWindow {
+/** host 侧：监听自己的 window，但**定向发给 iframe.contentWindow**。 */
+function hostBridgeWindow(win: Window): BridgeWindow {
   return {
     addEventListener: (_type, fn) =>
       win.addEventListener('message', (e: MessageEvent) => {
-        fn({
-          data: e.data,
-          origin: e.origin,
-          source: e.source,
-          self: win,
-          parent: win.parent,
-        })
+        fn({ data: e.data, origin: e.origin, source: e.source, self: win, parent: win.parent })
       }),
-    postMessage: (msg, origin) => win.postMessage(msg, origin),
+    postMessage: (target, msg, origin) => (target as Window | null)?.postMessage(msg, origin),
+  }
+}
+
+/** frame 侧：监听自己的 window，所有回发都走 `window.parent`。 */
+function frameBridgeWindow(win: Window): BridgeWindow {
+  return {
+    parent: win.parent,
+    addEventListener: (_type, fn) =>
+      win.addEventListener('message', (e: MessageEvent) => {
+        fn({ data: e.data, origin: e.origin, source: e.source, self: win, parent: win.parent })
+      }),
+    postMessage: (_target, msg, origin) => (win.parent as Window).postMessage(msg, origin),
   }
 }
 
@@ -104,10 +110,11 @@ function startFrame(
     log('配置已复制到剪贴板（改完写回 GM 存储 bnc:config）')
   }
 
-  const bridge = createFrameBridge(bridgeWindow(win), {
+  const bridge = createFrameBridge(frameBridgeWindow(win), {
     handle: (name, args) =>
       runFrameCommand({ loop, adapter, session, openLog, openConfig }, name, args),
     isReady: () => adapter.ready,
+    onAttach: (m) => log(`bridge attach（nonce=${m.nonce ?? '∅'}）`),
     onError: (reason) => log(`bridge: ${reason}`),
   })
 
@@ -144,10 +151,11 @@ function startHost(
   let ready = false
   let panel: Panel | null = null
 
-  const bridge = createHostBridge(bridgeWindow(win), {
+  const bridge = createHostBridge(hostBridgeWindow(win), {
     timeoutMs: Math.max(5000, config.claimSettleMs + 4000),
     onReady: (m) => {
       ready = true
+      log(`bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true}）`)
       panel?.setStatus(m.notebook ? '已连接（笔记本就绪）' : '已连接（等待笔记本）', 'ok')
     },
     onStatus: (m) => panel?.setStatus(m.ok === false ? 'frame 报错' : '状态更新', 'warn'),
@@ -185,10 +193,23 @@ function startHost(
     stopSession: () => run('stopSession'),
   })
 
-  const findFrame = (): HTMLIFrameElement | null =>
-    [...doc.querySelectorAll('iframe')].find((f) =>
-      (f.getAttribute('src') ?? '').includes('jupyter-proxy.kaggle.net'),
-    ) ?? null
+  // 外层 iframe 可能在 open shadow root 里（探针同款 deepQuery）；只查 light DOM 会漏。
+  const findFrame = (): HTMLIFrameElement | null => {
+    const sel = 'iframe[src*="jupyter-proxy.kaggle.net"]'
+    const direct = doc.querySelector(sel)
+    if (direct) return direct as HTMLIFrameElement
+    const stack: ParentNode[] = [doc]
+    while (stack.length > 0) {
+      const root = stack.pop()!
+      for (const el of root.querySelectorAll('*')) {
+        if (!el.shadowRoot) continue
+        const hit = el.shadowRoot.querySelector(sel)
+        if (hit) return hit as HTMLIFrameElement
+        stack.push(el.shadowRoot)
+      }
+    }
+    return null
+  }
 
   let current: HTMLIFrameElement | null = null
   const attach = (): void => {
@@ -205,10 +226,11 @@ function startHost(
       ready = false
       frame.addEventListener('load', () => {
         ready = false
-        bridge.attach(origin)
+        log('iframe load → 重新 attach')
+        if (frame.contentWindow) bridge.attach(origin, frame.contentWindow)
       })
     }
-    if (!ready) bridge.attach(origin)
+    if (!ready && frame.contentWindow) bridge.attach(origin, frame.contentWindow)
   }
   attach()
   // iframe 出现/更换是常事（换 run 会重建）；1s 轮询只在未就绪时真的发 attach。

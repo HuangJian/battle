@@ -780,6 +780,14 @@ export function isNotebookLogKey(key: string): boolean {
   return key === 'notebook' || key.startsWith('notebook:') || key === 'probe'
 }
 
+/** 日志键没有可读载荷时的 404 文案：notebook 是「还没会话」，不是「未知组件」。 */
+export function missingLogMessage(key: string): string {
+  if (isNotebookLogKey(key)) {
+    return `还没有 notebook 会话：${key}（先打开 Kaggle notebook 并确认伴生脚本面板显示「已连接」；会话清单见 /api/notebookLogs）`
+  }
+  return `未知组件: ${key}`
+}
+
 function resolveSession(dir: string, key: string): NotebookSessionInfo | null {
   const sessions = listNotebookSessions(dir)
   if (key === 'notebook') return sessions[0] ?? null

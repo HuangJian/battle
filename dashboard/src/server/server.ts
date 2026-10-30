@@ -89,6 +89,7 @@ import {
   appendNotebookChunk,
   isNotebookLogKey,
   listNotebookSessions,
+  missingLogMessage,
   notebookLogPayload,
   notebookNavEntry,
   parseNotebookChunk,
@@ -481,7 +482,7 @@ async function main(): Promise<void> {
     const payload = isNotebookLogKey(key)
       ? notebookLogPayload(notebookLogsDir(), key, lines)
       : await componentLogPayload(key, lines, viewCourse || undefined)
-    if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
+    if (!payload) return new Response(missingLogMessage(key), { status: 404 })
     const state = await buildStateView(viewCourse || undefined, { firstPaint: true })
     const follow = url.searchParams.get('follow') !== '0'
     const components = state.components.map((c) => ({
@@ -611,7 +612,7 @@ async function main(): Promise<void> {
     const payload = isNotebookLogKey(key)
       ? notebookLogPayload(notebookLogsDir(), key, lines)
       : await componentLogPayload(key, lines, viewCourse || undefined)
-    return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
+    return payload ? json(payload) : json({ ok: false, message: missingLogMessage(key) }, 404)
   }
 
   // ── notebook 伴生脚本（plan/notebook-userscript §4.5）──

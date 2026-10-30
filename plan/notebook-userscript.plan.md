@@ -1029,3 +1029,9 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 ③ 真实 Kaggle 上「保存并清空」的端到端点验（需要操作员开浏览器，Gate 0 只证明了注入/握手/回环）。
 以上三项都已有纯函数/模块与用例，接线前不得当成可用功能。
 
+**2026-10-30 修正（面板一直「连接中」）**：host 曾用 `window.postMessage` 发 attach —— 该 API 只投递给
+**当前窗口**，不会广播到子帧；frame 的 ready/result 同错。改为 host 定向 `iframe.contentWindow`、frame
+定向 `window.parent`，bridge 用例补 target 断言。另修两处窗口：首拍把打开页面时**已有**的 code cell
+标脏（MutationObserver 不会为旧输出补事件）；`/log/notebook` 空会话的 404 从 `unknown component`
+改成「还没有 notebook 会话 + 去哪看清单」。
+
