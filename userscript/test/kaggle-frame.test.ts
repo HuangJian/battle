@@ -52,6 +52,19 @@ describe('KaggleFrameAdapter：cells / output / source', () => {
     expect(a.outputText(a.cells()[0]!)).toBe('')
   })
 
+  it('notebook 在 open shadow root 里也能 ready/cells/output（JupyterLab 4）', () => {
+    const w = dom('<html><body><div id="host"></div></body></html>')
+    const host = w.document.querySelector('#host') as unknown as {
+      attachShadow(init: { mode: 'open' }): { innerHTML: string }
+    }
+    const shadow = host.attachShadow({ mode: 'open' })
+    shadow.innerHTML = `<div class="jp-Notebook"><div class="jp-Cell jp-CodeCell" data-uuid="shadow-1" data-windowed-list-index="0"><div class="jp-InputArea"></div><div class="jp-OutputArea"><div class="jp-OutputArea-child" data-mime-type="application/vnd.jupyter.stdout"><pre>shadow out</pre></div></div></div></div>`
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    expect(a.ready).toBe(true)
+    expect(a.cells()).toEqual([{ id: 'shadow-1', index: 0, kind: 'code' }])
+    expect(a.outputText(a.cells()[0]!)).toContain('shadow out')
+  })
+
   it('sourceText 读 `.cm-content`（折叠时仍可读，不用 innerText）', () => {
     const a = new KaggleFrameAdapter(docOf(dom(FRAME)), fast)
     expect(a.sourceText(a.cells()[1]!)).toContain('CFG = {')

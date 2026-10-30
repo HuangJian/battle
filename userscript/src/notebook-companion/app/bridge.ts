@@ -152,6 +152,8 @@ export interface FrameBridgeHooks {
   ) => Promise<{ ok: boolean; value?: unknown; reason?: string }>
   /** ready 里的 `notebook`：宿主据此判断「frame 里真的出现笔记本了」。 */
   isReady?: () => boolean
+  /** ready 后等笔记本渲染的轮询间隔（默认 500ms；测试可调小）。 */
+  statusPollMs?: number
   onAttach?: (msg: BridgeMessage) => void
   onError?: (reason: string) => void
 }
@@ -166,6 +168,31 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
   const origins = hooks.hostOrigins ?? KAGGLE_HOST_ORIGINS
   let nonce = ''
   let hostOrigin = ''
+  let statusTimer: ReturnType<typeof setInterval> | null = null
+
+  const stopStatus = (): void => {
+    if (statusTimer !== null) clearInterval(statusTimer)
+    statusTimer = null
+  }
+
+  /** attach 时 notebook 还没渲染 ⇒ 等它出现后补一条 status（探针同款时序）。 */
+  const watchReady = (): void => {
+    stopStatus()
+    if (hooks.isReady?.() ?? false) return
+    const started = Date.now()
+    statusTimer = setInterval(() => {
+      if (hooks.isReady?.() ?? false) {
+        win.postMessage(
+          win.parent,
+          { __bnc: 1, kind: 'status', nonce, notebook: true, href: safeHref() },
+          hostOrigin,
+        )
+        stopStatus()
+      } else if (Date.now() - started > 30_000) {
+        stopStatus()
+      }
+    }, hooks.statusPollMs ?? 500)
+  }
 
   const listener = (e: BridgeEvent): void => {
     if (!isBridgeMessage(e.data)) return
@@ -192,6 +219,7 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
         { __bnc: 1, kind: 'ready', nonce, href: safeHref(), notebook: hooks.isReady?.() ?? false },
         hostOrigin,
       )
+      watchReady()
       return
     }
     if (m.kind !== 'cmd' || !m.id) return
@@ -229,6 +257,7 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
       return nonce
     },
     destroy() {
+      stopStatus()
       /* 无 removeEventListener 的最小接口；页面卸载即回收 */
     },
   }

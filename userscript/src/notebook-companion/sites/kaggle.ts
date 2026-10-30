@@ -5,7 +5,7 @@
  * 于是 happy-dom 用例能验证「选择器找对元素 + 点击顺序对」，而不假装有布局。
  */
 import { normalizeNewlines } from '../../utils'
-import { MIME, SEL } from '../selectors'
+import { deepQuery, deepQueryAll, MIME, SEL } from '../selectors'
 import type { CellRef, CmdResult, FrameAdapter, SessionAdapter } from './types'
 
 export interface KaggleHooks {
@@ -49,9 +49,9 @@ function clickElement(el: Element): void {
   ).shadowRoot?.querySelector<HTMLButtonElement>('button')
   ;(shadowButton ?? (el as HTMLElement)).click()
 }
-
 export class KaggleFrameAdapter implements FrameAdapter {
   readonly site = 'kaggle' as const
+  private notebookEl: Element | null = null
   private readonly hooks: Required<
     Pick<KaggleHooks, 'isVisible' | 'wait' | 'nextFrame' | 'maxScanSteps' | 'selectTimeoutMs'>
   >
@@ -69,12 +69,23 @@ export class KaggleFrameAdapter implements FrameAdapter {
     }
   }
 
+  /** `.jp-Notebook` 可能晚于 attach 渲染，也可能在 open shadow root 里。 */
+  private notebook(): Element | null {
+    if (this.notebookEl?.isConnected) return this.notebookEl
+    this.notebookEl = deepQuery(this.doc, SEL.notebook)
+    return this.notebookEl
+  }
+
+  private root(): ParentNode {
+    return this.notebook() ?? this.doc
+  }
+
   get ready(): boolean {
-    return q(this.doc, SEL.notebook) !== null
+    return this.notebook() !== null
   }
 
   cells(): CellRef[] {
-    return qa<HTMLElement>(this.doc, SEL.cell)
+    return qa<HTMLElement>(this.root(), SEL.cell)
       .map((el, i) => {
         const rawIndex = el.getAttribute('data-windowed-list-index')
         const index = rawIndex === null ? i : Number(rawIndex)
@@ -93,7 +104,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   }
 
   private cellEl(cell: CellRef): HTMLElement | null {
-    for (const el of qa<HTMLElement>(this.doc, SEL.cell)) {
+    for (const el of qa<HTMLElement>(this.root(), SEL.cell)) {
       const index = Number(el.getAttribute('data-windowed-list-index') ?? -1)
       if (el.getAttribute('data-uuid') === cell.id) return el
       if (el.getAttribute('data-uuid') === null && index === cell.index) return el
@@ -134,7 +145,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
 
   /** 当前 Jupyter 选中/激活的 cell；面板的「折叠当前」用它。 */
   activeCell(): CellRef | null {
-    const el = q<HTMLElement>(this.doc, '.jp-Cell.jp-mod-active, .jp-Cell.jp-mod-selected')
+    const el = q<HTMLElement>(this.root(), '.jp-Cell.jp-mod-active, .jp-Cell.jp-mod-selected')
     if (!el) return null
     const id = el.getAttribute('data-uuid')
     return this.cells().find((c) => (id ? c.id === id : false)) ?? null
@@ -144,7 +155,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   async ensureRendered(index: number): Promise<CellRef | null> {
     const found = this.cells().find((c) => c.index === index)
     if (found) return found
-    const scroller = q<HTMLElement>(this.doc, SEL.scrollOuter)
+    const scroller = q<HTMLElement>(this.root(), SEL.scrollOuter)
     if (!scroller) return null
     const viewport = scroller.clientHeight
     if (!viewport || viewport <= 0) return null // 无布局（happy-dom）⇒ 不假装能滚
@@ -179,7 +190,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   }
 
   private clickCommand(id: string): 'visible' | 'hidden' | null {
-    const els = qa<HTMLElement>(this.doc, SEL.command(id))
+    const els = deepQueryAll(this.doc, SEL.command(id)) as HTMLElement[]
     if (els.length === 0) return null
     const visible = els.find((el) => this.hooks.isVisible(el))
     clickElement(visible ?? els[0]!)
@@ -194,7 +205,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     }
     const first = this.clickCommand(id)
     if (first) return { ok: true, detail: `clicked:${first}` }
-    const palette = q<HTMLElement>(this.doc, '[aria-label="Open command palette"]')
+    const palette = deepQuery(this.doc, '[aria-label="Open command palette"]') as HTMLElement | null
     if (palette) {
       palette.click()
       await this.hooks.wait(50)
@@ -263,7 +274,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   }
 
   scroll(to: 'top' | 'bottom'): CmdResult {
-    const scroller = q<HTMLElement>(this.doc, SEL.scrollOuter)
+    const scroller = q<HTMLElement>(this.root(), SEL.scrollOuter)
     if (!scroller) return { ok: false, reason: '找不到滚动容器 .jp-WindowedPanel-outer' }
     scroller.scrollTop = to === 'top' ? 0 : scroller.scrollHeight
     this.fireScroll(scroller)

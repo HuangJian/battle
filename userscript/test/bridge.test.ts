@@ -106,6 +106,25 @@ describe('bridge：host ⇄ frame', () => {
     expect(f.sent[1]!.msg).toMatchObject({ kind: 'result', id: 'b', nonce: 'n1', ok: true })
   })
 
+  it('frame：attach 时 notebook 未就绪 ⇒ 出现后补 status（notebook=true）', async () => {
+    const f = fakeWindow('self', 'parent')
+    let ready = false
+    const bridge = createFrameBridge(f.win, {
+      hostOrigins: [KAGGLE],
+      handle: async () => ({ ok: true }),
+      isReady: () => ready,
+      statusPollMs: 10,
+    })
+    f.fire({ data: { __bnc: 1, kind: 'attach', nonce: 'n1' }, origin: KAGGLE })
+    expect(f.sent[0]!.msg).toMatchObject({ kind: 'ready', notebook: false })
+    ready = true
+    await new Promise((r) => setTimeout(r, 35))
+    const status = f.sent.find((s) => (s.msg as { kind?: string }).kind === 'status')
+    expect(status?.msg).toMatchObject({ kind: 'status', nonce: 'n1', notebook: true })
+    expect(status?.target).toBe('parent')
+    bridge.destroy()
+  })
+
   it('frame：顶层打开（self === parent）不接受 attach', () => {
     const f = fakeWindow('same', 'same')
     const errors: string[] = []

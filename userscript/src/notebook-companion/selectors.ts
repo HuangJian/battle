@@ -19,6 +19,37 @@ export const MIME = {
   stderr: 'application/vnd.jupyter.stderr',
 } as const
 
+/** 先直查，再穿 open shadow root（JupyterLab 4 的部分面板在影子树里）。 */
+export function deepQuery(root: ParentNode, selector: string): Element | null {
+  const direct = root.querySelector(selector)
+  if (direct) return direct
+  const stack: ParentNode[] = [root]
+  while (stack.length > 0) {
+    const scope = stack.pop()!
+    for (const el of scope.querySelectorAll('*')) {
+      if (!el.shadowRoot) continue
+      const hit = el.shadowRoot.querySelector(selector)
+      if (hit) return hit
+      stack.push(el.shadowRoot)
+    }
+  }
+  return null
+}
+
+export function deepQueryAll(root: ParentNode, selector: string): Element[] {
+  const out = [...root.querySelectorAll(selector)]
+  const stack: ParentNode[] = [root]
+  while (stack.length > 0) {
+    const scope = stack.pop()!
+    for (const el of scope.querySelectorAll('*')) {
+      if (!el.shadowRoot) continue
+      out.push(...el.shadowRoot.querySelectorAll(selector))
+      stack.push(el.shadowRoot)
+    }
+  }
+  return out
+}
+
 export type Role = 'host' | 'frame'
 
 /**

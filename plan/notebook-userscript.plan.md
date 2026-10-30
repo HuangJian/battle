@@ -1035,3 +1035,9 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 标脏（MutationObserver 不会为旧输出补事件）；`/log/notebook` 空会话的 404 从 `unknown component`
 改成「还没有 notebook 会话 + 去哪看清单」。
 
+**2026-10-30 二修（握手通了但 `notebook=false`）**：实机日志显示 attach/ready 已同 nonce 贯通，但
+`.jp-Notebook` 在 ready 时还没渲染（JupyterLab 4 也可能把它放在 open shadow root 里）。适配器改用
+direct → shadow root 的 `deepQuery` 并缓存 notebook 根；桥在 attach 后按 500ms 轮询，就绪时补一条
+`status{notebook:true}`（30s 上界），host 收到后把「等待笔记本」切成「笔记本就绪」。cell 列表晚出现时，
+observer 给没有游标的 cell 补标脏，保证首批输出仍会走一次 reset。
+

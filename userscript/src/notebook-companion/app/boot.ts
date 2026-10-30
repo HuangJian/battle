@@ -158,7 +158,15 @@ function startHost(
       log(`bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true}）`)
       panel?.setStatus(m.notebook ? '已连接（笔记本就绪）' : '已连接（等待笔记本）', 'ok')
     },
-    onStatus: (m) => panel?.setStatus(m.ok === false ? 'frame 报错' : '状态更新', 'warn'),
+    onStatus: (m) => {
+      log(`bridge status（notebook=${m.notebook === true}）`)
+      if (m.notebook === true) {
+        ready = true
+        panel?.setStatus('已连接（笔记本就绪）', 'ok')
+      } else {
+        panel?.setStatus('已连接（等待笔记本）', 'warn')
+      }
+    },
     onError: (reason) => {
       ready = false
       log(`bridge: ${reason}`)

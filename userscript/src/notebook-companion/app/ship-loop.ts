@@ -230,7 +230,11 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
         opts.doc,
         (id) => dirty.add(id),
         () => {
-          /* 虚拟化进出只影响读取面；offset 键是 uuid，不动 */
+          // 笔记本/虚拟化 cell 晚出现：没有游标的 cell 补标脏（首次整段 reset）；
+          // 已有游标的虚拟化进出不重读全文（offset 键是 uuid，不动）。
+          for (const ref of cells()) {
+            if (!state.cursors.has(ref.id)) dirty.add(ref.id)
+          }
         },
       )
       // 打开页面时已有的输出不会触发 MutationObserver ⇒ 首拍必须把全部 code cell 标脏。
