@@ -41,12 +41,25 @@ WVER16 = WVER[:16]
 
 
 @pytest.fixture(autouse=True)
-def _reuse_on(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reuse_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """本文件测的就是开关打开时的行为；全局隔离夹具把它钉成 0（见 tests/conftest.py）。
 
     开关本身的语义由 `test_switch_off_disables_every_scan` 显式钉。
+
+    **扫描面钉成本文件用到的三门课**（2026-10-29 提速）：`sibling_courses()` 每次调用都要把
+    `curricula/` 下**全部 243 个**课程 `load_course`（jsonc 去注释 + 尾逗号 + 关卡注入 + pydantic
+    校验），实测 488 次解析 = 2.6s，而 `test_rollout_source_requires_same_wver` 要调两次
+    `rollout_sources` ⇒ 整条用例 2.7s / 2.74s 全花在这上面（扫描本身与命中断言都在毫秒级）。
+    收窄**不改任何判据**：本文件只断言这三门课的入选/排除，而 `_wire_trajs` 只给这三门建了
+    traj 根 ⇒ 其余 240 门课即便身份相同，`_resolve_dir` 也会返回 `None` 被跳过，扫不扫结果逐字一样
+    （`MAX_SOURCES=100` 也远够：映射里的候选最多 1 个）。
     """
     monkeypatch.delenv("NN_REUSE_SIBLINGS", raising=False)
+    lib = tmp_path / "curricula"
+    lib.mkdir()
+    for _name in (LEG_A, LEG_B, OTHER):
+        (lib / f"{_name}.jsonc").write_bytes((CURRICULA / f"{_name}.jsonc").read_bytes())
+    monkeypatch.setattr(sr, "CURRICULA_DIR", lib)
 
 
 def _course(name: str):  # type: ignore[no-untyped-def]
