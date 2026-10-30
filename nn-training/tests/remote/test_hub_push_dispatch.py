@@ -647,6 +647,159 @@ def test_worker_refusing_job_requeues_to_another(tmp_path: Path, worker_factory)
     assert disp.state()["requeued"] >= 1
 
 
+def test_single_worker_cooldown_expires_and_job_is_retried(
+    tmp_path: Path, worker_factory
+) -> None:
+    """单 worker 池里的避让必须**会过期**（★2026-10-30 真机：z2-r5g2lr 停在 it15 94 分钟）。
+
+    事故链：gpu_push 池只有一台 kaggleC → 推 it15 那一下撞上 trycloudflare 换 URL
+    （`TimeoutError` / HTTP 530，纯瞬时）→ `_requeue(avoid_worker=True)` 把它记进 `_avoid`
+    → 那份记录**没有 TTL、也没有第二个清理点** ⇒ 之后每拍 `pick_push_worker` 都返回 None、
+    `_dispatch` 静默 `continue`（hub 日志 94 分钟零行、`/admin/push-workers` 里
+    `avoid: {25d7…: [kaggleC]}` 一直挂着）⇒ 训练腿空等，而另一门课的**新** jid 照跑。
+
+    `PUSH_COOLDOWN_SEC`（`common/protocol.py`，注释原文「过期自动解禁，不永久拉黑」）
+    此前**全仓无读者**——本用例钉住它真的生效，且「本拍没推出去」必须留一行可查日志
+    （事故现场只有训练侧的「等待认领中 … 在线 worker = 0」，把人引向「去起 worker」）。
+    """
+    flaky = worker_factory(refuse=True)
+    hub = _hub(tmp_path, ["x2"])
+    _publish(hub, "x2", "j" * 16)
+    ws = _workers_with(tmp_path, worker_factory, (flaky, {"id": "g1"}))
+    clock = {"t": 1000.0}  # 假钟：冷却窗由它推进，不与墙钟/负载赛跑
+    logs: list[str] = []
+    disp = PushDispatcher(
+        hub,
+        ws,
+        "sekret",
+        poll_sec=0.02,
+        timeout_sec=5.0,
+        push_attempts=1,
+        cooldown_sec=600.0,
+        now_fn=lambda: clock["t"],
+        log=logs.append,
+    )
+
+    disp.tick()  # 推给唯一那台 → 409 拒收 → 回落 + 避让
+    assert _wait_until(lambda: disp.state()["requeued"] >= 1)
+    assert disp.state()["avoid"]["j" * 16] == ["g1"]
+
+    flaky.refuse = False  # 节点恢复（当晚的等价物：tunnel 已换到新 URL）
+    for _ in range(3):
+        disp.tick()
+    assert flaky.received == [], "冷却窗内不得重推同一台（否则一次抖动会变成热循环）"
+    assert any("冷却" in ln for ln in logs), f"跳过时必须留一行可查的日志：{logs[-6:]}"
+
+    clock["t"] += 601.0  # 冷却到期
+    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None), (
+        "冷却到期必须重试——否则单 worker 机群会把一次瞬时抖动变成本课程的永久停摆"
+    )
+    assert flaky.received == ["j" * 16]
+    assert disp.state()["avoid"] == {}, "过期条目要就地清掉，别让读面一直挂着一个假的避让"
+
+
+def test_slow_upload_logs_a_loud_line(tmp_path: Path, worker_factory, monkeypatch) -> None:
+    """单个运输段超阈值必须**响亮**（★2026-10-30：上传 45–215s 全程静默，只剩「训练变慢」）。
+
+    事故里 hub 日志对这一整段一个字都没有：只在 `pushed=kaggleC（上传 151.884s）` 这种
+    正常记账行的括号里，没人会去比。判据只看**运输**时长（节点自报 `grad_sec` 一直 35s），
+    所以这一行能直接把人指向隧道，而不是算力/课程。
+    """
+    import remote.push_client as pc
+
+    w1 = worker_factory()
+    hub = _hub(tmp_path, ["x2"])
+    _publish(hub, "x2", "j" * 16)
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    logs: list[str] = []
+    disp = PushDispatcher(hub, ws, "sekret", poll_sec=0.02, timeout_sec=5.0, log=logs.append)
+    real_submit = pc.submit_job
+
+    def slow_submit(*a, **kw):
+        out = real_submit(*a, **kw)
+        out["upload_sec"] = 45.0  # 真机实测档位（it43–45：45.5 / 46.0 / 55.1s）
+        return out
+
+    monkeypatch.setattr(pc, "submit_job", slow_submit)
+    disp.tick()
+    assert _wait_until(lambda: disp.state()["slow_upload"] >= 1), logs[-5:]
+
+
+def test_slow_result_fetch_logs_a_loud_line(tmp_path: Path, worker_factory, monkeypatch) -> None:
+    """取结果腿退化也要有一行（真机：`result-ready` 到了之后又花了 234s 才取回 220KB）。
+
+    这条腿的耗时**不含算力**：从「推送完成」（有 `result-ready` 时用它更准）到结果入账。
+    用例用假钟把这条腿拉长到 80s，真 worker 仍然秒回，判据只落在日志上。
+    """
+    import remote.push_dispatch as pd
+
+    w1 = worker_factory()
+    hub = _hub(tmp_path, ["x2"])
+    _publish(hub, "x2", "j" * 16)
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    clock = {"t": 1000.0}
+    logs: list[str] = []
+    disp = PushDispatcher(
+        hub,
+        ws,
+        "sekret",
+        poll_sec=0.02,
+        timeout_sec=600.0,  # 不跟假钟的 deadline 抢戏：本用例只看告警
+        now_fn=lambda: clock["t"],
+        log=logs.append,
+    )
+    real_http = pd._http
+    state = {"slow": 2}
+
+    def slow_http(url, key, path, **kw):
+        if path.endswith("/result") and state["slow"] > 0:
+            state["slow"] -= 1
+            clock["t"] += 40.0  # 两次「问不到/在跑」，累计 80s
+            return 202, b'{"status": "running"}'
+        return real_http(url, key, path, **kw)
+
+    monkeypatch.setattr(pd, "_http", slow_http)
+    disp.tick()
+    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None)
+    assert disp.state()["slow_result"] >= 1, logs[-5:]
+
+
+def test_cache_probe_failure_reuses_last_hit(monkeypatch) -> None:
+    """缓存探针**失败 ≠ 没缓存**（★2026-10-30：慢链路上探针 15s 超时 ⇒ 每轮多传 2.7MB）。
+
+    `submit_job` 的探针失败一律返回 False（保守上传），在隧道劣化时变成正反馈：
+    探针超时 ⇒ 判 miss ⇒ 多传 `code.zip` 1.69MB + `opt` 1MB ⇒ 链路更慢 ⇒ 下次更必然超时。
+    真机账：it45 起 `up_bytes` 3.2MB→5.0MB、每轮 `code 上传=是`，而 **code sha 全程没变**。
+    口径：失败时沿用「这台节点、这个 sha 上一次**探到命中**」的记忆；从没命中过仍按 miss
+    （保守上传不变）。节点真丢了缓存时 worker 会 428 拒收，`submit_job` 当场补传并调
+    `forget_cache_hit` 把记忆清掉——所以「沿用命中」不会把漏传变成静默失败。
+    """
+    import remote.push_client as pc
+
+    state = {"hit": 1}
+
+    def fake_request(base_url, token, path, **_kw):
+        if "/code-sha" in path:
+            if state["hit"]:
+                state["hit"] = 0
+                return 200, b'{"cached": true}'
+            raise TimeoutError("tunnel slow")
+        raise AssertionError(f"意外的路径：{path}")
+
+    monkeypatch.setattr(pc, "_request", fake_request)
+    url, tok, sha = "http://node.local", "tok", "a" * 64
+    assert pc.code_cached_on_node(url, tok, sha) is True
+    assert pc.code_cached_on_node(url, tok, sha) is True, (
+        "探针失败必须沿用上次命中；否则慢链路上每轮重传 1.69MB，把已慢的链路压得更慢"
+    )
+    # 从没命中过的 sha：失败仍按未命中（保守上传的语义不变）
+    state["hit"] = 0
+    assert pc.code_cached_on_node(url, tok, "b" * 64) is False
+    # 节点说缺（428）⇒ 记忆必须能清掉，否则会一直跳过补传
+    pc.forget_cache_hit(url, "code", sha)
+    assert pc.code_cached_on_node(url, tok, sha) is False
+
+
 def test_submit_job_transient_retry_ladder(monkeypatch) -> None:
     """push_client.submit_job：409「队满」等瞬时拒绝按 2s/4s 退避重试，试满仍失败抛
     `RetryableError`（零墙钟：把 sleep 换成记录）。

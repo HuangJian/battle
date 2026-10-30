@@ -391,7 +391,7 @@ def main() -> None:
             f"[hub-server] push 派发已启用：登记表={push_workers.path} "
             f"候选 worker={len(push_workers.snapshot())} "
             f"poll={args.push_poll_sec:g}s timeout={args.push_timeout_sec:g}s "
-            f"ahead={max(0, args.push_ahead)}",
+            f"ahead={max(0, args.push_ahead)} cooldown={push_disp.cooldown_sec:g}s",
             flush=True,
         )
     # 离线 push 派发（2026-10-24，plan/push-mode-notebooks §6.6 / W5）：登记表与 GPU 共用

@@ -6,6 +6,97 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §132 单段运输没有告警 + 缓存探针「失败即重传」：链路退化被静默放大（2026-10-30 真机）
+
+**背景**：同一晚 `z2-r5g2` it43–46 的墙钟从 ~80s 涨到 306–408s，而节点自报 `grad_sec` 一直是
+35.3–37.9s、`unpack_sec` ~0.95s、rollout 21–25s ⇒ **慢的全是运输**。两处让这件事既看不见、
+又自我加重。
+
+**① 看不见：`_dispatch` / `_await_result` 只记流水，不判快慢。**
+一段 151.9s 的 2.2MB 上传只出现在 `已推送 kaggleC（… 上传 151.884s attempts=2）` 这条**正常记账行**
+的括号里；取结果腿更彻底——`result-ready` 21:56:24 就到了，结果 22:00:18 才入账，中间 234s
+（≈6×[30s 单请求超时+10s 轮询]）**一行日志都没有**。训练侧唯一的症状是「变慢」，于是排查
+先怀疑算力/课程/调度，绕一圈才回到隧道。
+
+修法（`remote/push_dispatch.py`）：两条腿各加一个**单段阈值**（`common/protocol.py`
+`PUSH_SLOW_UPLOAD_SEC=30` / `PUSH_SLOW_RESULT_SEC=60`，正常档 3–6s / 5–15s，留 5×/4× 余量防 LAN 抖动误报）：
+
+* `_warn_slow_upload()`：`★ <jid> -> <wid> 上传 45s / 2.17MB（48KB/s）超 30s —— 是链路退化，不是算力`；
+* `_warn_slow_result()`：参照点优先用 `result-ready` 时刻（`_ready_at`，**纯运输**），没有 ready
+  信号才退回「推送完成」（含算力，行里写明口径）；超 60s 打一行 ★。
+
+两行都是 best-effort，不参与任何控制流；判据只看运输，所以它把「链路」和「算力」当场分开。
+
+**② 自我加重：缓存探针失败 = 判 miss = 重传 2.7MB。**
+`push_client.code_cached_on_node / blob_cached_on_node / ts_code_cached_on_node` 旧语义是
+「查询失败 → False（保守上传）」，超时 15s。慢链路上探针**必然**超时 ⇒ 每轮多传 `code.zip`
+1.69MB + `opt` 1MB ⇒ 链路更慢 ⇒ 下次更必然超时。真机账：it45 起 `up_bytes` 3.2MB→5.0MB、
+每轮 `code 上传=是`，而 `code_sha256` 全程是 `2f538c061ac7…`（**代码没变**，纯粹探针超时）。
+
+修法：新增 `_cached_or_last_hit()` —— 探针返回 `bool | None`（`None` = 问不到 ≠ 没有），
+失败时沿用「**这台节点 + 这个 sha 上次探到命中**」的记忆（`_CACHE_HITS`，cap 512 整片清），
+从没命中过仍按 miss（保守上传不变）。安全性靠 428 兜底：节点真丢了缓存会 428 拒收，
+`submit_job` 当场补字节并 `forget_cache_hit()` 让记忆翻面 —— 漏传退化成一次可重试往返，
+不是静默失败。**明确的 miss（`False`）永远覆盖记忆**，不会粘住。
+
+**读数口径**（下次判「是链路还是算力」只看这三行）：
+`ppo_sec - ppo_cloud_sec` = 运输+排队；`wire.up_sec` = 上传单段；hub 日志的
+`结果已回灌（Ns）` = 推送→入账全长（含算力）。三者一起看，别再拿 `ppo_sec` 当算力。
+
+---
+
+## §131 推送避让名单没有 TTL：单 worker 机群上一份 job 永久停摆（94 分钟，2026-10-30 真机）
+
+**现场**：`z2-r5g2` 与 `z2-r5g2lr` 并行（同 hub、同 runId、同起点 `z2-r5guard.it500`）。前者一路跑到
+it45，后者**停在 it15** 正好 94 分钟：`training_log.jsonl` 最后一行是 `job_pending it15`，
+trainer 每 2 分钟喊一句 `job 25d7f6cbdc534dde 等待认领中（state=pending，已等 3750s；hub 在线 worker = 0）`。
+trainer 进程活着（CPU 852s），job 目录 `payload.tar.xz`/`manifest.json`/`blob.init`/`blob.opt` 齐全。
+
+**排查路径（三跳，每跳都推翻一个直觉）**：
+
+| 直觉 | 读数 | 结论 |
+|---|---|---|
+| 「没有 worker 在线」 | `/jobs/peek` 实测**返回**这份 job（`mode=exclusive`、`priority=highest`）；`/jobs/{id}/status` = `pending` | hub 侧正常挂牌，不是 store/账本问题 |
+| 「worker 不够，去起一台」 | `/admin/queue` 的 `active_workers=0`，但同一时刻另一门课的 job 正被 `push:kaggleC` 跑 | `active_workers` 是 **pull 登记表**（peek 喂的），push 节点从不 peek ⇒ 恒 0，**这一行是误导** |
+| 「worker 挂了」 | `/admin/push-workers`：`kaggleC online=true busy=false`，`done=29 pushed_ok=30` | 机器好着，是**派发器不肯给它** |
+
+决定性的一行就在那里：`"avoid": {"25d7f6cbdc534dde": ["kaggleC"]}`。
+
+**时间线**：20:55:02 发布 it15 → hub claim 给**唯一**的 gpu_push 节点 kaggleC（当时它的
+trycloudflare URL 还是 `genres-shirt-geneva-llp`）→ 上传卡住（trainer 看到 `state=leased`，
+租约 177.8s→57.3s 倒数）→ 期间节点换 tunnel（→ `alarm-nat-dig-biggest`）→ 21:05:15/21/28
+三次推送全部瞬时失败（`TimeoutError` / `HTTP 530`）→ `_requeue(avoid_worker=True)` 写下
+`_avoid[jid] = {"kaggleC"}` → **之后 hub 日志对这个 jid 一行都没有**（每拍 10s，静默 `continue`）。
+
+**根因**：`remote/push_dispatch.py` 的 `_avoid` 是 `dict[str, set[str]]`——只有 `_requeue` 一个写点、
+**零清理点**、无时间戳。`pick_push_worker` 的四道闸里「不在避让名单」是**永久**的，而 gpu_push 池
+只有一台机器（kaggleO 在控制台停用）⇒ 一次隧道抖动把「这份 jid」和**唯一**那台绑死。
+`common/protocol.PUSH_COOLDOWN_SEC = 600` 的注释写的就是这件事（「冷却期内不再给它派同一份 job，
+过期自动解禁，**不永久拉黑**」），但它当时**全仓无读者**——离线派发器实现了同名冷却
+（`hub/offline_push.py` 的 `_cooldown: dict[str, tuple[float, float]]`），GPU 腿是漏项。
+r5g2 之所以没事：每轮都是**新 jid**，新 jid 没有避让记录——这个 bug 只在「job 恒定 + 池只有一台」时现形。
+
+**修法**（先红后绿，`tests/remote/test_hub_push_dispatch.py::test_single_worker_cooldown_expires_and_job_is_retried`）：
+
+1. `_avoid` 改 `dict[str, dict[str, float]]`（jid → {wid: 解禁时刻}），`cooldown_sec` 走构造参数
+   （缺省 `PUSH_COOLDOWN_SEC`）；`_live_avoid_locked()` 惰性过期并**就地收敛**字典，`_snapshot()` 与
+   `state()` 同源经过它 ⇒ 读面不会一直挂着一个假的避让。
+2. 因避让而没推出去时打一行（每份 job 节流 60s）：「避让 X 冷却中（剩 Ns），池里没有其它可派机器」
+   ——事故现场最难的不是修，是**一小时里日志零行**，只能靠 `/admin/push-workers` 反推。
+3. 用例用**假钟**（`now_fn`）推进冷却窗，不跟墙钟/机器负载赛跑；顺带钉住「冷却窗内不得重推」
+   （否则一次抖动会变成 10s 一拍的热循环）与「过期后读面清空」。
+
+**为什么不是「池里没别的机器就不避让」**：那会把上面的热循环风险引进来（节点真坏时每拍重推
+几十 MB）。冷却到期自动重试是**有界**的：单 worker 机群最多停 10 分钟，而永久停摆是无穷大。
+同型判据在 pull 侧已有（`may_avoid_stale_holder`：机群只剩一个活跃 worker 时不避让），两条腿
+不必强求同一形状——那边避让的代价是「等一份必然落空的结果」，这边是「重传一份 2MB payload」。
+
+**排障口径（下次直接照这四行读）**：`/admin/push-workers` 看 `registry.workers` 的
+`online/busy/queued` + `dispatcher.avoid`；`/admin/queue` 的 `active_workers` **不是** push 在线数；
+训练侧的「hub 在线 worker = 0」只说明「没人 peek」；hub 日志 `[hub-server push]` 前缀是推送腿的唯一实录。
+
+---
+
 ## §130 push 节点的注册 HTTP 必须走 **tailnet 代理那条 opener**（2026-10-28 真机）
 
 **现场**：`battle.tailscale.ipynb`（Colab，`mode=rl/push`，userspace Tailscale）连同一个 hub

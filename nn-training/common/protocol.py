@@ -452,6 +452,12 @@ PUSH_AHEAD_DEFAULT = 1
 #: 跑死过某份 job 的 worker 冷却时长（秒）：冷却期内不再给它派同一份 job
 #: （「改为推送其它 worker」的落地；过期自动解禁，不永久拉黑）。
 PUSH_COOLDOWN_SEC = 600.0
+#: **单段运输**的告警阈值（秒，2026-10-30）。链路退化时训练只会「变慢」，不会报错——
+#: 真机那一晚：2.2MB 上传 3.5s→45~215s、220KB 结果取回 ~9s→234s，而 hub 日志对这两段
+#: 一个字都没有（只有「已推送（上传 151.884s）」这种正常记账行的括号）。判据分开给：
+#: 正常档 upload ≈ 3–6s、结果取回 ≈ 5–15s，取 5×/4× 余量，避免 LAN 抖动误报。
+PUSH_SLOW_UPLOAD_SEC = 30.0
+PUSH_SLOW_RESULT_SEC = 60.0
 #: 租约持有人身份前缀：`push:<worker id>`。带前缀是为了让 `/admin/queue` 的
 #: inflight 持有人、避让记录一眼能分清「云机自己报的名字」与「hub 代持的推送」。
 PUSH_WORKER_PREFIX = "push:"

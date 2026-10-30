@@ -58,9 +58,12 @@ from common.protocol import (
     PRIORITY_LOW,
     PRIORITY_MEDIUM,
     PUSH_AHEAD_DEFAULT,
+    PUSH_COOLDOWN_SEC,
     PUSH_DEAD_MISSES,
     PUSH_PING_SEC,
     PUSH_POLL_SEC,
+    PUSH_SLOW_RESULT_SEC,
+    PUSH_SLOW_UPLOAD_SEC,
     PUSH_TIMEOUT_SEC,
     ROLE_ONLINE,
     TS_CODE_NAME,
@@ -574,6 +577,9 @@ class PushDispatcher:
     不推主副本。不越过它推后面的——那会把轮次跑成乱序（pull 侧一直在按序取队首）。
     """
 
+    #: 「因避让冷却没推出去」那行的节流窗（秒）：一拍 10s，同一份 job 一分钟喊一次足够。
+    STARVE_REPORT_SEC = 60.0
+
     def __init__(
         self,
         hub: Any,
@@ -585,6 +591,7 @@ class PushDispatcher:
         push_attempts: int = 3,
         backups_per_course: int = 1,
         push_ahead: int = PUSH_AHEAD_DEFAULT,
+        cooldown_sec: float = PUSH_COOLDOWN_SEC,
         now_fn: Any = time.time,
         log: Any = _log_default,
     ) -> None:
@@ -608,10 +615,21 @@ class PushDispatcher:
         self._log = log or _log_default
         self._lock = Lock()
         self._inflight: dict[str, dict] = {}
-        self._avoid: dict[str, set[str]] = {}
+        #: jid -> {worker_id: 解禁时刻}。**必须带时间**：条目只在 `_requeue` 写一次，没有第二个
+        #: 清理点；不带 TTL 时「这台跑死过这份活」= 永久拉黑（2026-10-30 z2-r5g2lr 事故：
+        #: 单 worker 池 ⇒ 一份 job 卡 94 分钟，hub 每拍静默 `continue`）。到期由
+        #: `_live_avoid_locked` 惰性丢弃，口径 = `PUSH_COOLDOWN_SEC`。
+        self._avoid: dict[str, dict[str, float]] = {}
+        #: `push:cooldown_sec`（构造参数，可注入；生产 = 协议层那 600s）。
+        self.cooldown_sec = float(cooldown_sec)
+        #: (course, jid) -> 上次打「本拍没推出去」那行日志的时刻（节流；每拍 10s 不许刷屏）。
+        self._starved_at: dict[tuple[str, str], float] = {}
         #: jid -> 「worker 说结果就绪」的信号（2026-10-26）。等待线程用 `Event.wait(poll_sec)`
         #: 代替 `sleep(poll_sec)`，通知一到就立刻取回；通知丢了也只多等一拍（定时轮询不变）。
         self._ready: dict[str, threading.Event] = {}
+        #: jid -> 收到 `result-ready` 的时刻（秒）。只服务**取结果腿**的耗时告警：
+        #: 有它就能把「算力」从「运输」里切出去（2026-10-30：ready 到了之后又取了 234s）。
+        self._ready_at: dict[str, float] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -619,6 +637,10 @@ class PushDispatcher:
         self.pushed = 0
         self.requeued = 0
         self.gave_up = 0
+        #: 单段超阈值的计数（`/admin/push-workers` 读它们）：日志会滚，计数不会。
+        #: 判「这一小时到底是算力慢还是链路慢」时看这两个从 0 起跳没。
+        self.slow_upload = 0
+        self.slow_result = 0
 
     # ---- 生命周期 ----
     def start(self) -> None:
@@ -678,14 +700,44 @@ class PushDispatcher:
         （别人的活/租约/结算）根本无法被快照—— 那一半的权威判据是 `claim`（写入口的唯一临界区，
         见 `hub/store_leases._claim_locked`）。本快照只保证「我不会自相矛盾地挑人和挑活」。
         """
+        # 时钟在**锁外**取（`_now` 是注入点，`tests/test_lock_reentrancy.py` 把「持锁调注入函数」
+        # 记成待确认站点；这里不需要原子性——过期判定差一拍无影响）。
+        now = self._now()
         with self._lock:
             records = tuple((slot, dict(rec)) for slot, rec in self._inflight.items())
-            avoid = {jid: tuple(sorted(ws)) for jid, ws in self._avoid.items()}
+            avoid = self._live_avoid_locked(now)
         counts: dict[str, int] = {}
         for _slot, rec in records:
             wid = str(rec.get("worker") or "")
             counts[wid] = counts.get(wid, 0) + 1
         return _TickView(records=records, avoid=avoid, worker_counts=counts)
+
+    def _live_avoid_locked(self, now: float) -> dict[str, tuple[str, ...]]:
+        """**生效中**的避让名单（调用方持 `self._lock`）：过 `cooldown_sec` 的条目就地丢弃。
+
+        为什么必须惰性过期（★2026-10-30 事故，z2-r5g2lr it15 空等 94 分钟）：`_avoid` 只有
+        `_requeue` 一个写点、**零清理点**。而 gpu_push 池只有一台机器是常态 ⇒ 一次瞬时抖动
+        （tunnel 换 URL 时的 `TimeoutError` / HTTP 530）就把「这份 jid」和**唯一**那台绑死：
+        `pick_push_worker` 恒 None、`_dispatch` 静默 `continue`，日志一行都没有，直到有人读
+        `/admin/push-workers` 才看得见 `avoid: {jid: [wid]}`。
+
+        语义与 `common/protocol.PUSH_COOLDOWN_SEC` 的注释一致：「冷却期内不再给它派同一份
+        job（改为推送其它 worker），过期自动解禁，**不永久拉黑**」。同机群只剩一台时冷却
+        会让腿最多停 10 分钟——这比「永久停摆」好，也比「零冷却热循环撞坏节点」好。
+        """
+        out: dict[str, tuple[str, ...]] = {}
+        expired: list[str] = []
+        for jid, by_wid in self._avoid.items():
+            live = {w: t for w, t in by_wid.items() if t >= now}
+            if live:
+                by_wid.clear()
+                by_wid.update(live)  # 就地收敛：字典不随历史失败单调增长
+                out[jid] = tuple(sorted(live))
+            else:
+                expired.append(jid)
+        for jid in expired:
+            del self._avoid[jid]
+        return out
 
     @staticmethod
     def _course_records(view: _TickView, course: str) -> list[dict]:
@@ -785,6 +837,7 @@ class PushDispatcher:
                 ahead=0 if mode == CLAIM_MODE_BACKUP else self.push_ahead,
             )
             if worker is None:
+                self._note_starved(course, jid, avoid)
                 continue  # 没有空闲 worker / 接单位 —— 等下一拍
             wid = str(worker["id"])
             lease = hub.claim(
@@ -821,6 +874,74 @@ class PushDispatcher:
             t.start()
             started.append(jid)
         return started
+
+    def _note_starved(self, course: str, jid: str, avoid: set[str]) -> None:
+        """因**避让冷却**而没推出去时留一行（每份 job 节流 `STARVE_REPORT_SEC`）。
+
+        事故现场（★2026-10-30）hub 日志在这一整个小时里**一行都没有**：`_dispatch` 静默
+        `continue`，运维只能从训练侧那句「等待认领中 … hub 在线 worker = 0」反推，而它把人
+        引向「去控制台起 worker」——真相是「唯一那台机器正躺在这份 job 的冷却名单里」。
+        这一行就是补那个洞：冷却是谁、还剩多久、有没有别的机器。
+
+        只报 `avoid` 非空的那种「没推出去」：机器都在忙是**正常节流**，不该刷日志。
+        """
+        if not avoid:
+            return
+        now = self._now()
+        key = (course, jid)
+        with self._lock:
+            if now - self._starved_at.get(key, float("-inf")) < self.STARVE_REPORT_SEC:
+                return
+            if len(self._starved_at) > 4096:  # 长命 hub：这份记账永不无界增长
+                self._starved_at.clear()
+            self._starved_at[key] = now
+            left = max(
+                (t - now for w, t in self._avoid.get(jid, {}).items() if w in avoid),
+                default=0.0,
+            )
+        self._log(
+            f"{jid}（{course}）本拍未推：避让 {('、'.join(sorted(avoid)))} 冷却中"
+            f"（剩 {max(0.0, left):.0f}s），池里没有其它可派机器——到期自动重试"
+        )
+
+    def _warn_slow_upload(self, jid: str, wid: str, send: dict) -> None:
+        """上传单段超阈值 ⇒ 一行 ★（2026-10-30：45–215s 的上传只在记账行括号里，没人比）。
+
+        判据只看**运输**：节点自报的 `grad_sec` 一直是 35s，慢的是把 2–5MB 送过去这件事。
+        这一行把「链路退化」和「算力/课程」当场分开 —— 事故里两者被混为一谈，绕了一圈。
+        """
+        try:
+            up = float(send.get("upload_sec") or 0.0)
+            body = float(send.get("body_bytes") or 0) / 1e6
+        except (TypeError, ValueError):
+            return
+        if up <= PUSH_SLOW_UPLOAD_SEC:
+            return
+        self.slow_upload += 1  # int += 在 GIL 下足够；两侧读数只用于判「链路还是算力」
+        kbs = (body * 1e6 / up / 1024.0) if up > 0 else 0.0
+        self._log(
+            f"★ {jid} -> {wid} 上传 {up:.0f}s / {body:.2f}MB（{kbs:.0f}KB/s）"
+            f"超 {PUSH_SLOW_UPLOAD_SEC:.0f}s —— 是链路退化，不是算力（节点 grad 另算）"
+        )
+
+    def _warn_slow_result(self, jid: str, wid: str, t_pushed: float, t_done: float) -> None:
+        """结果取回腿超阈值 ⇒ 一行 ★（真机：`result-ready` 之后又取了 234s 才拿到 220KB）。
+
+        参照点优先级：`result-ready` 时刻（= 纯运输）> 推送完成时刻（含算力，会偏宽松）。
+        没有 ready 信号时用后者并把口径写在行里，别让人拿它当纯运输读数。
+        """
+        with self._lock:
+            ready_at = self._ready_at.get(jid)
+        t_ref = ready_at if ready_at is not None else t_pushed
+        lag = t_done - t_ref
+        if lag <= PUSH_SLOW_RESULT_SEC:
+            return
+        self.slow_result += 1
+        why = "结果就绪后" if ready_at is not None else "推送完成后（含算力）"
+        self._log(
+            f"★ {jid} <- {wid} {why} {lag:.0f}s 才取回"
+            f"（> {PUSH_SLOW_RESULT_SEC:.0f}s）—— 取结果腿在退化，查隧道"
+        )
 
     def _pick_primary(self, course: str) -> tuple[str, str]:
         """主副本候选：claimable 队首（且必须是 push job）；无 → `("", "exclusive")`。"""
@@ -904,6 +1025,7 @@ class PushDispatcher:
                 f"code={send['code_bytes']}B ts={send['ts_code_bytes']}B "
                 f"blob={send['blob_bytes']}B 上传 {send['upload_sec']}s attempts={send['attempts']}）"
             )
+            self._warn_slow_upload(jid, wid, send)
             if queued:
                 rec["state"] = "queued"
                 self._log(f"{jid} -> {wid}: 已入队（在跑的 job 结束后即顶上，传输已先做）")
@@ -920,6 +1042,7 @@ class PushDispatcher:
                 t0,
                 # `started` = 「computing_at 已打（或不需要打）」；备份永不打点。
                 started=(not queued) or rec.get("mode") == CLAIM_MODE_BACKUP,
+                t_pushed=self._now(),
             )
         except (RetryableError, ProtocolError) as e:
             # 推送本身没成：多半是这台 worker 此刻接不了（409 队满 / 428 缺缓存 /
@@ -933,6 +1056,7 @@ class PushDispatcher:
                 # 同一 jid 的主/备副本共用一个 Event：只在最后一条在飞记录消失时收掉。
                 if not any(str(r.get("job_id")) == jid for r in self._inflight.values()):
                     self._ready.pop(jid, None)
+                    self._ready_at.pop(jid, None)
             self._wake.set()
 
     def _await_result(
@@ -947,6 +1071,7 @@ class PushDispatcher:
         t0: float,
         *,
         started: bool = True,
+        t_pushed: float | None = None,
     ) -> None:
         """等 worker 出结果：续租 + 探活判死 + 到点回落。结果就地入账（两条腿同一函数）。
 
@@ -1018,6 +1143,9 @@ class PushDispatcher:
                 )
                 if code_ == 200:
                     self._log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
+                    self._warn_slow_result(
+                        jid, wid, t0 if t_pushed is None else t_pushed, self._now()
+                    )
                     # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
                     self._cancel_others(jid, wid)
                 elif code_ == 409:
@@ -1107,6 +1235,7 @@ class PushDispatcher:
         key = str(jid or "")
         if not key:
             return False
+        now = self._now()  # 锁外取时钟（守卫：持锁不调注入点）
         with self._lock:
             if not any(str(r.get("job_id")) == key for r in self._inflight.values()):
                 return False
@@ -1114,6 +1243,7 @@ class PushDispatcher:
             if ev is None:
                 ev = threading.Event()
                 self._ready[key] = ev
+            self._ready_at[key] = now
             ev.set()
         return True
 
@@ -1176,25 +1306,33 @@ class PushDispatcher:
             self.hub.release(jid, lease)
         self.requeued += 1
         if avoid_worker and wid:
+            until = self._now() + self.cooldown_sec
             with self._lock:
-                self._avoid.setdefault(jid, set()).add(wid)
+                self._avoid.setdefault(jid, {})[wid] = until
             self.workers.note_push(wid, False)
         self._log(f"{jid} 回落队首（{why}）—— 改推其它 worker（避免 {wid if avoid_worker else '-'}）")
 
     # ---- 观测 ----
     def state(self) -> dict:
+        now = self._now()  # 锁外取时钟（同 `_snapshot`；守卫钉着「持锁不调注入点」）
         with self._lock:
             inflight = [dict(r) for r in self._inflight.values()]
-            avoid = {k: sorted(v) for k, v in self._avoid.items()}
+            # 读面只报**生效中**的避让：过期条目挂在 `/admin/push-workers` 上会让人以为
+            # 「这份活还被人挡着」（2026-10-30 事故里那一行正是唯一线索，不能变成噪声）。
+            avoid = {k: list(v) for k, v in self._live_avoid_locked(now).items()}
         return {
             "running": self._thread is not None and not self._stop.is_set(),
             "poll_sec": self.poll_sec,
             "timeout_sec": self.timeout_sec,
             "push_ahead": self.push_ahead,
+            "cooldown_sec": self.cooldown_sec,
             "ticks": self.ticks,
             "pushed": self.pushed,
             "requeued": self.requeued,
             "gave_up": self.gave_up,
+            # 单段运输超阈值的累计（2026-10-30）：这一小时是链路慢还是算力慢，看它从 0 起跳没。
+            "slow_upload": self.slow_upload,
+            "slow_result": self.slow_result,
             "inflight": inflight,
             "avoid": avoid,
         }

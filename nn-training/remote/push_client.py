@@ -33,41 +33,78 @@ def _default_log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [push] {msg}", flush=True)
 
 
-def code_cached_on_node(base_url: str, token: str, code_sha256: str, timeout: float = 15.0) -> bool:
-    """节点 code 缓存是否已含 sha（缓存未知/查询失败 → False 保守上传）。"""
+#: (base_url, kind, sha) -> True 的**只记命中**记忆（2026-10-30）：探针失败时沿用它。
+#: 用 dict 而非 set：`cap` 到了整片清掉（这份记账永不无界增长，且命中最坏只是重传一次）。
+_CACHE_HITS: dict[tuple[str, str, str], bool] = {}
+_CACHE_HITS_CAP = 512
+
+
+def forget_cache_hit(base_url: str, kind: str, sha: str) -> None:
+    """忘掉「这台节点有这个 sha」的记忆。
+
+    **节点 428 说缺之后必须调**（`submit_job` 的三条 428 分支各调一次）：记忆不翻面的话，
+    下一次推送又会认为缓存命中而跳过补传，428 来回打转。
+    """
+    _CACHE_HITS.pop((str(base_url or ""), str(kind or ""), str(sha or "")), None)
+
+
+def _probe_sha(base_url: str, token: str, path: str, timeout: float) -> bool | None:
+    """一次内容寻址探针：`True/False` = 节点明说了；`None` = **问不到**（不是「没有」）。"""
     try:
-        status, body = _request(base_url, token, f"/code-sha?sha={code_sha256}", timeout=timeout)
+        status, body = _request(base_url, token, path, timeout=timeout)
         if status == 200:
             return bool(json.loads(body.decode("utf-8")).get("cached"))
     except Exception:
         pass
-    return False
+    return None
+
+
+def _cached_or_last_hit(
+    kind: str, base_url: str, token: str, sha: str, path: str, timeout: float
+) -> bool:
+    """探针 → 「要不要再传」；**失败沿用上次命中**，从没命中过才按 miss（保守上传）。
+
+    为什么不能「失败 = 没缓存」（旧语义，★2026-10-30 真机）：慢链路上 `/code-sha` 15s 超时
+    是常态，失败 ⇒ 判 miss ⇒ 多传 `code.zip` 1.69MB + `opt` 1MB ⇒ 链路更慢 ⇒ 下次更必然
+    超时。z2-r5g2 it45–49 的 `up_bytes` 3.2MB→5.0MB、每轮 `code 上传=是` 全是这条正反馈
+    （code sha `2f538c06…` 全程没变，纯粹是探针超时）。一次上传 45–215s，代价是分钟级。
+
+    为什么这样安全：探针只回答「要不要再传一份」。真丢了缓存时 worker 会 428 拒收，
+    `submit_job` 当场把字节补上并把记忆清掉（`forget_cache_hit`）—— 漏传退化成一次
+    可重试的往返，而不是静默失败。`False`（明确的 miss）永远覆盖记忆，不会粘住。
+    """
+    key = (str(base_url or ""), str(kind or ""), str(sha or ""))
+    hit = _probe_sha(base_url, token, path, timeout)
+    if hit is None:
+        return bool(_CACHE_HITS.get(key))
+    if hit:
+        if len(_CACHE_HITS) > _CACHE_HITS_CAP:
+            _CACHE_HITS.clear()
+        _CACHE_HITS[key] = True
+    else:
+        _CACHE_HITS.pop(key, None)
+    return hit
+
+
+def code_cached_on_node(base_url: str, token: str, code_sha256: str, timeout: float = 15.0) -> bool:
+    """节点 code 缓存是否已含 sha（**探针失败**时沿用上次命中；从没命中过 ⇒ False 保守上传）。"""
+    return _cached_or_last_hit(
+        "code", base_url, token, code_sha256, f"/code-sha?sha={code_sha256}", timeout
+    )
 
 
 def blob_cached_on_node(base_url: str, token: str, sha: str, timeout: float = 15.0) -> bool:
-    """M2 B3：节点 blob 缓存（opt/ref raw）是否已含 sha（未知/失败 → False 保守上传）。"""
+    """M2 B3：节点 blob 缓存（opt/ref/init raw）是否已含 sha（失败语义同上）。"""
     if not sha:
         return True
-    try:
-        status, body = _request(base_url, token, f"/blob-sha?sha={sha}", timeout=timeout)
-        if status == 200:
-            return bool(json.loads(body.decode("utf-8")).get("cached"))
-    except Exception:
-        pass
-    return False
+    return _cached_or_last_hit("blob", base_url, token, sha, f"/blob-sha?sha={sha}", timeout)
 
 
 def ts_code_cached_on_node(base_url: str, token: str, sha: str, timeout: float = 15.0) -> bool:
-    """M3：节点 TS 运行时缓存（ts_code_cache）是否已含 sha（未知/失败 → False 保守上传）。"""
+    """M3：节点 TS 运行时缓存（ts_code_cache）是否已含 sha（失败语义同上）。"""
     if not sha:
         return True
-    try:
-        status, body = _request(base_url, token, f"/ts-code-sha?sha={sha}", timeout=timeout)
-        if status == 200:
-            return bool(json.loads(body.decode("utf-8")).get("cached"))
-    except Exception:
-        pass
-    return False
+    return _cached_or_last_hit("ts", base_url, token, sha, f"/ts-code-sha?sha={sha}", timeout)
 
 
 def submit_job(
@@ -197,6 +234,8 @@ def submit_job(
             }
         if status == 428:
             need_code = True  # 节点缓存未命中：下次重试带 code
+            # 记忆必须翻面：否则下一轮探针"沿用命中"又会跳过补传（见 `_cached_or_last_hit`）。
+            forget_cache_hit(base_url, "code", manifest.get("code_sha256", ""))
             # M2 B3：节点说缺 blob → 把本次携带的 blob 全补上（命中缓存的不必传）。
             if b"blob-missing" in resp:
                 for name, raw in blob_src.items():
@@ -204,6 +243,9 @@ def submit_job(
                     # 重试仍然 428（而 `need_blobs` 已经点名了它）。
                     if name in ("opt", "ref", BLOB_INIT) and raw:
                         blob_needs[name] = raw
+                for name in ("opt", "ref"):
+                    forget_cache_hit(base_url, "blob", manifest.get(f"{name}_sha", ""))
+                forget_cache_hit(base_url, "blob", manifest.get("init_weights_fp", ""))
                 last = "428 blob-missing"
             elif b"ts-code-missing" in resp:
                 # M3：节点没有 TS 运行时缓存 → 下次重试带上（调用方必须提供字节；
@@ -213,6 +255,7 @@ def submit_job(
                 # False ⇒ 不置真就会一直重发不带 ts 的体，白烧满重试预算后整轮失败。
                 # 与上面 code-missing 的 `need_code = True` 同规。
                 need_ts = True
+                forget_cache_hit(base_url, "ts", _ts_sha)
                 last = "428 ts-code-missing"
             else:
                 last = "428 code-missing"
