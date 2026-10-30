@@ -89,4 +89,8 @@ __pycache__/
 # dashboard 是独立 bun 项目，bun.lock 是它可复现安装的唯一保证（同上条逻辑：
 # 上面的 *.lock 本意是运行时 PID 锁文件，不该连带把真依赖锁文件也挡在外面）。
 !dashboard/bun.lock
+
+# userscript 同理（独立 bun 项目，锁文件是它可复现安装的唯一保证）
+!userscript/bun.lock
+
 nn-training/rl-config.json

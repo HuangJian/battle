@@ -4,6 +4,7 @@ import {
   allTestFiles,
   isDashboardOnly,
   isHeavyFile,
+  isIndependentOnly,
   isRootSuiteTestPath,
   staleHeavyEntries,
 } from '../tools/test-silent'
@@ -43,6 +44,38 @@ describe('根套件范围 — dashboard 是独立项目', () => {
     expect(isDashboardOnly(['src/game/World.ts'])).toBe(false)
     // 前缀相近但不同的目录不应误命中
     expect(isDashboardOnly(['dashboard-old/x.ts'])).toBe(false)
+  })
+})
+
+/**
+ * `userscript/` 是第二个独立 bun 项目（plan/notebook-userscript.plan.md §4.1）：自带
+ * package.json / bun.lock / node_modules，测试由它自己的门禁跑。根套件若枚举它，新克隆
+ * 只跑根 `bun install` 时 happy-dom 解析失败 ⇒ 根 `bun run check` 直接红。
+ */
+describe('根套件范围 — userscript 也是独立项目', () => {
+  it('枚举测试文件时从不出现在 userscript/ 下', () => {
+    const files = allTestFiles(joinRoot())
+    expect(files.filter((f) => f.startsWith('userscript/'))).toEqual([])
+  })
+
+  it('isRootSuiteTestPath 排除 userscript/，但保留根测试', () => {
+    expect(isRootSuiteTestPath('userscript/test/utils.test.ts')).toBe(false)
+    expect(isRootSuiteTestPath('userscript\\test\\utils.test.ts')).toBe(false)
+    expect(isRootSuiteTestPath('tests/test-silent-scope.test.ts')).toBe(true)
+  })
+
+  it('isIndependentOnly 识别 dashboard-only / userscript-only / 两者混合', () => {
+    expect(isIndependentOnly(['userscript/src/utils.ts'])).toBe(true)
+    expect(isIndependentOnly(['dashboard/src/server/server.ts', 'userscript/package.json'])).toBe(
+      true,
+    )
+    expect(isIndependentOnly([])).toBe(false)
+    expect(isIndependentOnly(['userscript/src/utils.ts', 'src/game/World.ts'])).toBe(false)
+    expect(isIndependentOnly(['userscript-old/x.ts'])).toBe(false)
+  })
+
+  it('isDashboardOnly 仍然只认 dashboard（userscript-only 不算）', () => {
+    expect(isDashboardOnly(['userscript/src/utils.ts'])).toBe(false)
   })
 })
 

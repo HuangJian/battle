@@ -13,6 +13,28 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §44 Notebook 伴生脚本：跨域子帧搬运 + 单写者租约（plan/notebook-userscript，2026-10-30）
+
+**触发**：Kaggle 的 notebook 跑在跨域 iframe（`*.jupyter-proxy.kaggle.net`），外层 `www.kaggle.com` 拿不到
+它的 DOM；训练日志只能人肉回看。伴生 userscript 把 cell 输出增量搬到本机 dashboard，并可在面板一次性
+「保存并清空」。
+
+**服务端**（`dashboard/src/server/api/notebook-log.ts`）：`POST /api/notebookLog` 是第二个 typed POST（自定义头
+`X-Notebook-Companion: 1` + 端点自读 512 KiB 上限），`GET /api/notebookLogs` 只列会话；日志页复用虚拟键
+`/log/notebook:<session>`，不新增 Component。协议 v2：`writer` 是 fencing token，单写者租约 180s；409 分
+`writer-conflict` / `stale-epoch` / `offset-mismatch`（带 `{seq, chars, tail}` 让客户端续写，不重发历史）；
+append 幂等（同 seq+offset 直接 200），clear/rotate 两阶段 + 启动回滚未提交尾巴。落盘前 `redactSecrets`，
+轮转 + 7 天 prune；搬运请求走 `guard({activity:false})`（5s 一条不算「有人在看」）。
+
+**客户端**（`userscript/src/notebook-companion/`）：frame 侧只观察 `.jp-OutputArea`（输入区打字不标脏），
+尾锚 diff（尾部 256 字符 FNV）→ 48 KiB 分块；确认后才前进，网络错误下一拍同 seq 重发，400/413 永久停发该 cell。
+host⇄frame 用 per-attach nonce（attach 只认 parent + kaggle origin），面板经桥下发保存/折叠/滚动/停会话。
+自动清空有「最近 10s 有交互」闸与积压闸：`saveAndClear` 只要 drain 不全就**拒绝清空**。探测模式只留
+origin+pathname（`?session=` 是 JWT，绝不入日志）；Colab/AI Studio 仅骨架，命令明确 `{ok:false}`。
+
+**边界**：Gate 0（注入/握手/回环）已人工通过；W4 定时器 UI 与 W5 探测入口/双站点适配器尚未接线；
+真实 Kaggle 上的按钮点验仍需操作员开浏览器。计划 §14、决策 `DECISIONS.md §2026-10-30-notebook-userscript-w1-w5`。
+
 ## §43 云机轮的窗口/分关读数：控制台**零代码**，同一条读面（2026-10-28）
 
 **触发**：`docs/nn/training-stack.md` §46（云机 rollout 支持轮换）。此前云机轮在控制台上

@@ -793,13 +793,18 @@ passes after your change.**
 ## §9 Quality gates — Definition of Done
 
 **Most of this list is enforced automatically** — the pre-commit hook runs typecheck / tests / lint /
-format / freeze / the dashboard gate / the nn python gate and **attributes failures to staged files**
-(escape hatches: `SKIP_BUN_TEST=1`, `SKIP_TSC=1`, `SKIP_DASHBOARD_GATE=1`, `NN_GATE_SKIP=<tool>`,
-`NN_GATE_SKIP_E2E=1`, `--no-verify`; full table in the hook's header). `bun run check` (root) and
+format / freeze / the dashboard gate / the userscript gate / the nn python gate and **attributes
+failures to staged files** (escape hatches: `SKIP_BUN_TEST=1`, `SKIP_TSC=1`, `SKIP_DASHBOARD_GATE=1`,
+`SKIP_USERSCRIPT_GATE=1`, `NN_GATE_SKIP=<tool>`, `NN_GATE_SKIP_E2E=1`, `--no-verify`; full table in the
+hook's header). `bun run check` (root) and
 `bun tools/check-decisions.ts` cover the rest. **Each gate prints its own fix guidance**, including the
 `AGENTS.md` § it enforces — so a red gate should tell you which rule you broke without a doc lookup:
 DECISIONS numbering → `docs/decisions/HOW-TO-ADD.md`; freeze/golden red → `AGENTS §6.3b` (new-era
 triple); nn python timeout/hang → `AGENTS §5`; dashboard bundle budget / forbidden words → `AGENTS §9`.
+`dashboard/` and `userscript/` are independent bun projects: the root suite and root tsconfig exclude both,
+and pre-commit runs each one's gate only when staged files touch it (`cd dashboard && bun run typecheck &&
+bun run test`; `cd userscript && bun run check`). A subproject gate red without touching that subproject is
+someone else's in-flight work — report it, don't "fix" it by weakening the gate.
 When you add a new gate, make its failure output name the rule and the fix.
 
 A task is done when **all** hold:

@@ -47,6 +47,14 @@ export function tmpLogsDir(): string {
 export function tmpCourseDir(course: string): string {
   return path.join(tmpLogsDir(), course)
 }
+/** notebook 伴生脚本日志根（`tmp/notebook-logs/<site>/<session>.log`）。
+ *
+ *  走 `tmpLogsDir()`（同一套 `BCITY_TMP_LOGS_DIR` 重定向），单测另支持
+ *  `BCITY_NOTEBOOK_LOGS_DIR` 直接指向临时目录：这些用例要造 8 MiB 轮转/7 天 prune，
+ *  不能写进操作员真 `tmp/`。惰性取值，默认行为零变化。 */
+export function notebookLogsDir(): string {
+  return process.env.BCITY_NOTEBOOK_LOGS_DIR || path.join(tmpLogsDir(), 'notebook-logs')
+}
 /** 池历史（各训练流的 `dist-agent-meta.jsonl`）扫描根。
  *
  *  单测以 `BCITY_POOL_DIR` 重定向到临时目录——聚合要用**真目录树 + 真账本**才能验

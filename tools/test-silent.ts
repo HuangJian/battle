@@ -61,8 +61,12 @@ const TEST_RE = /\.test\.(ts|tsx|js|jsx)$/
  * （`cd dashboard && bun run test`，pre-commit 里的 dashboard 门禁块）。根套件若
  * 继续枚举它，就会把「两份 node_modules 互不重叠」重新耦合回去 —— 根门禁将反过来
  * 依赖 dashboard 的安装状态。镜像关系：根 tsconfig 的 include 同样不含 dashboard。
+ *
+ * `userscript/` 同理（2026-10-29，plan/notebook-userscript.plan.md §4.1）：第二个独立
+ * bun 项目（自带 package.json / bun.lock / node_modules），根套件不跑它的测试；它的门禁
+ * 由 `cd userscript && bun run check` 与 pre-commit 的 userscript 块承担。
  */
-const SKIP_RE = /^(tmp|node_modules|dist|\.git|dashboard)([\\/]|$)/
+const SKIP_RE = /^(tmp|node_modules|dist|\.git|dashboard|userscript)([\\/]|$)/
 
 /**
  * 重负载 gate —— 默认排除，`--heavy` 显式带上。
@@ -139,16 +143,38 @@ export function isRootSuiteTestPath(rel: string): boolean {
   return TEST_RE.test(p) && !SKIP_RE.test(p)
 }
 
+/** 独立 bun 项目（根套件不覆盖；各自的门禁跑自己的测试）。 */
+const INDEPENDENT_PROJECTS = ['dashboard', 'userscript'] as const
+
 /**
- * 改动是否**全部**落在 `dashboard/` 下（独立 bun 项目）。
+ * 改动**全部**落在同一组独立 bun 项目下的哪些项目（`[]` = 不是独立项目专属改动）。
  *
- * 命中时代替 "fallback:all" —— 否则一个只改 dashboard 的提交会白烧一整轮根套件。
- * 空集不算（没改动≠只改 dashboard）。
+ * 空集不算（没改动≠只改独立项目）；混入任何根文件 ⇒ `[]`（仍要跑根套件）。
+ */
+export function independentProjects(changed: string[]): string[] {
+  if (changed.length === 0) return []
+  const hits = new Set<string>()
+  for (const f of changed) {
+    const top = f.split('\\').join('/').split('/')[0] ?? ''
+    if (!(INDEPENDENT_PROJECTS as readonly string[]).includes(top)) return []
+    hits.add(top)
+  }
+  return [...hits].sort()
+}
+
+/** 改动是否全部落在独立 bun 项目下（dashboard / userscript）。 */
+export function isIndependentOnly(changed: string[]): boolean {
+  return independentProjects(changed).length > 0
+}
+
+/**
+ * 改动是否**全部**落在 `dashboard/` 下。
+ *
+ * 保留旧名：只认 dashboard（userscript 专属改动不等于 dashboard-only）。
  */
 export function isDashboardOnly(changed: string[]): boolean {
-  return (
-    changed.length > 0 && changed.every((f) => f.split('\\').join('/').startsWith('dashboard/'))
-  )
+  const projects = independentProjects(changed)
+  return projects.length === 1 && projects[0] === 'dashboard'
 }
 
 /** Enumerate every root-suite test file (repo-relative, forward slashes). */
@@ -300,17 +326,19 @@ export async function runSilentTest(
     if (staleHeavy.length > 0) {
       advisory += ` ⚠ HEAVY_TESTS stale (no matching test file): ${staleHeavy.join(', ')}`
     }
-    if (isDashboardOnly(changed) && !process.env.BATTLE_TEST_FORCE_ALL) {
-      // dashboard 专属改动：根套件与它无关（见 SKIP_RE 注释），而且**绝不能**走
-      // fallback 全量 —— 一个只改 dashboard 的提交会白烧一整轮根套件，撞上那些
-      // spawn 真实 CLI 的慢测试。dashboard 的门禁由它自己承担（pre-commit 已挂）。
+    const projects = independentProjects(changed)
+    if (projects.length > 0 && !process.env.BATTLE_TEST_FORCE_ALL) {
+      // 独立 bun 项目专属改动：根套件与它们无关（见 SKIP_RE 注释），而且**绝不能**走
+      // fallback 全量 —— 一个只改 dashboard/userscript 的提交会白烧一整轮根套件，撞上
+      // 那些 spawn 真实 CLI 的慢测试。它们的门禁由自己承担（pre-commit 已挂）。
+      const names = projects.map((p) => `${p}/`).join(' + ')
       return {
         ok: true,
-        summary: 'no relevant tests (dashboard-only)',
+        summary: `no relevant tests (${projects.join('+')}-only)`,
         detail:
-          `${label}: ${changed.length} changed file(s) are all under dashboard/ — a separate\n` +
-          `  bun project the root suite does not cover.\n` +
-          `  Run its gate instead:  cd dashboard && bun run test\n` +
+          `${label}: ${changed.length} changed file(s) are all under ${names} — separate\n` +
+          `  bun project(s) the root suite does not cover.\n` +
+          `  Run their gates instead:  cd dashboard && bun run test  ·  cd userscript && bun run check\n` +
           `  Set BATTLE_TEST_FORCE_ALL=1 to run the root suite anyway.\n`,
       }
     } else if (

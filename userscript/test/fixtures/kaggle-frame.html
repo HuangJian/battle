@@ -1,0 +1,153 @@
+<!doctype html>
+<!--
+  Kaggle 笔记本子帧夹具（脱敏）。
+  来源：2026-10-29 从本机 Kaggle 编辑页抓取的 mhtml 存档（tmp/，.gitignore 已忽略，永不入库）；
+  2026-10-30 按存档里的真实结构手工重写为可测夹具（结构忠实优先于最小）。
+  保真点：3 个 cell（1 markdown + 2 code，data-uuid 各不同）/ run 只在笔记本工具栏的隐藏 popup 里
+  （cell 不挂 run，复刻实测）/ 一个 cell 同时有 stdout 与 stderr / tqdm 的孤立 CR / CRLF /
+  .jp-InputCollapser / .jp-OutputCollapser / .jp-WindowedPanel-outer / 10 条 li[data-command]。
+  明确标注 synthetic：stderr 的 traceback 形状真实但内容是合成的；cell 源码与输出为示例文本。
+  脱敏：无 token / JWT / 会话 id / 用户名 / kernel 元数据。
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Notebook</title>
+  </head>
+  <body>
+    <div class="jp-NotebookPanel">
+      <div class="jp-NotebookPanel-toolbar">
+        <jp-toolbar class="jp-Toolbar jp-Notebook-toolbar">
+          <div class="jp-Toolbar-responsive">
+            <div class="jp-Toolbar-responsive-popup lm-mod-hidden">
+              <div data-jp-item-name="run">
+                <jp-button
+                  data-command="runmenu:run"
+                  aria-label="Run this cell and advance (Shift+Enter)"
+                ></jp-button>
+              </div>
+              <div data-jp-item-name="collapse-all">
+                <jp-button data-command="toc:toggle-collapse" aria-label="Collapse All Headings">
+                </jp-button>
+              </div>
+            </div>
+          </div>
+        </jp-toolbar>
+      </div>
+      <div class="jp-Notebook jp-WindowedPanel jp-mod-scrollPastEnd">
+        <div class="jp-WindowedPanel-outer">
+          <div class="jp-WindowedPanel-inner">
+            <div class="jp-WindowedPanel-viewport">
+              <div
+                class="jp-Cell jp-MarkdownCell"
+                data-uuid="11111111-1111-4111-8111-111111111111"
+                data-windowed-list-index="0"
+              >
+                <div class="jp-InputArea">
+                  <div class="jp-RenderedMarkdown"><p>rollout</p></div>
+                </div>
+              </div>
+              <div
+                class="jp-Cell jp-CodeCell"
+                data-uuid="22222222-2222-4222-8222-222222222222"
+                data-windowed-list-index="1"
+              >
+                <div class="jp-Cell-inputWrapper">
+                  <jp-toolbar class="jp-cell-menu jp-cell-toolbar"></jp-toolbar>
+                  <div class="jp-InputArea jp-Cell-inputArea">
+                    <div class="jp-InputPrompt jp-InputArea-prompt">[1]:</div>
+                    <div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor">
+                      <div class="cm-editor">
+                        <div class="cm-scroller">
+                          <div class="cm-content" contenteditable="true">
+                            <div class="cm-line"># @title rollout</div>
+                            <div class="cm-line">CFG = {</div>
+                            <div class="cm-line">'lr': 0.0003,</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="jp-InputCollapser jp-Cell-inputCollapser">
+                      <div class="jp-Collapser-child"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="jp-Cell-outputWrapper">
+                  <div class="jp-OutputArea jp-Cell-outputArea">
+                    <div class="jp-OutputArea-child">
+                      <div class="jp-OutputPrompt jp-OutputArea-prompt">[1]:</div>
+                      <div class="jp-RenderedText" data-mime-type="application/vnd.jupyter.stdout">
+                        <pre>
+start rollout&#13;&#10;[06:23:04] alive (0 min)[06:23:09] alive (0 min)&#13;&#10;step 1/10&#13;step 2/10&#13;</pre>
+                      </div>
+                    </div>
+                    <div class="jp-OutputArea-child">
+                      <div class="jp-OutputPrompt jp-OutputArea-prompt">[1]:</div>
+                      <div class="jp-RenderedText" data-mime-type="application/vnd.jupyter.stderr">
+                        <pre>
+Traceback (most recent call last):&#13;&#10;  File "&lt;stdin&gt;", line 1, in &lt;module&gt;&#13;&#10;RuntimeError: boom&#13;&#10;</pre>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="jp-OutputCollapser jp-Cell-outputCollapser">
+                    <div class="jp-Collapser-child"></div>
+                  </div>
+                </div>
+              </div>
+              <div
+                class="jp-Cell jp-CodeCell"
+                data-uuid="33333333-3333-4333-8333-333333333333"
+                data-windowed-list-index="2"
+              >
+                <div class="jp-Cell-inputWrapper">
+                  <div class="jp-InputArea jp-Cell-inputArea">
+                    <div class="jp-InputPrompt jp-InputArea-prompt">[2]:</div>
+                    <div class="jp-CodeMirrorEditor jp-Editor jp-InputArea-editor">
+                      <div class="cm-editor">
+                        <div class="cm-scroller">
+                          <div class="cm-content" contenteditable="true">
+                            <div class="cm-line">print('bye')</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="jp-InputCollapser jp-Cell-inputCollapser">
+                      <div class="jp-Collapser-child"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="jp-Cell-outputWrapper">
+                  <div class="jp-OutputArea jp-Cell-outputArea">
+                    <div class="jp-OutputArea-child">
+                      <div class="jp-OutputPrompt jp-OutputArea-prompt">[2]:</div>
+                      <div class="jp-RenderedText" data-mime-type="application/vnd.jupyter.stdout">
+                        <pre>10%&#13;20%&#13;30%&#13;</pre>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="jp-OutputCollapser jp-Cell-outputCollapser">
+                    <div class="jp-Collapser-child"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="lm-CommandPalette" style="display: none">
+      <ul>
+        <li data-command="notebook:hide-all-cell-code">Hide All Code</li>
+        <li data-command="notebook:show-all-cell-code">Show All Code</li>
+        <li data-command="notebook:hide-all-cell-outputs">Hide All Outputs</li>
+        <li data-command="notebook:show-all-cell-outputs">Show All Outputs</li>
+        <li data-command="notebook:clear-all-cell-outputs">Clear All Outputs</li>
+        <li data-command="notebook:clear-cell-output">Clear Cell Output</li>
+        <li data-command="notebook:run-cell">Run Cell</li>
+        <li data-command="notebook:run-all-cells">Run All Cells</li>
+        <li data-command="notebook:hide-cell-code">Hide Cell Code</li>
+        <li data-command="notebook:show-cell-code">Show Cell Code</li>
+      </ul>
+    </div>
+  </body>
+</html>

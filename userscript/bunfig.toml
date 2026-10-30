@@ -1,0 +1,10 @@
+# userscript 的 bun 配置（与仓库根同口径：无分号/单引号/printWidth 100）。
+# 测试各自 new Window（见 happydom.ts），不注册全局，因此没有 [test] preload。
+[fmt]
+printWidth = 100
+tabWidth = 2
+useTabs = false
+semi = false
+singleQuote = true
+trailingComma = "all"
+ignorePatterns = ["*.md", "dist", "node_modules"]

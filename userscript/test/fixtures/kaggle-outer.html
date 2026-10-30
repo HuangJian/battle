@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  Kaggle 编辑页外层夹具（脱敏）。
+  来源：2026-10-29 从本机 Kaggle 编辑页抓取的 mhtml 存档（tmp/，.gitignore 已忽略，永不入库）；
+  2026-10-30 手工重写（类名与文案照存档，用户/组织名换成 example）。
+  保真点：iframe[name="notebook-editor-cells"] 指向 jupyter-proxy / Stop session / Factory reset /
+  Stop execution / 会话状态文案 / 「Schedule a notebook to run」占位（Kaggle 原生定时）。
+  脱敏：iframe src 的 ?session= 只留合成占位 SYNTHETIC-NOT-A-TOKEN（无 JWT、无 token）。
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rollout | Kaggle</title>
+  </head>
+  <body>
+    <div id="root">
+      <header class="site-header">
+        <a href="/code/example/rollout/edit/run/123">Code</a>
+        <span class="session-status">Draft Session (5h:55m)</span>
+      </header>
+      <main>
+        <div class="session-actions">
+          <button aria-label="Stop session">Stop session</button>
+          <button aria-label="Factory reset">Factory reset</button>
+          <button aria-label="Stop execution">Stop execution</button>
+          <button aria-label="Run current cell">Run current cell</button>
+        </div>
+        <div data-testid="notebook-editor-jl-frame-render-tid" id="frame-container-element">
+          <iframe
+            name="notebook-editor-cells"
+            title="Notebook editor cells"
+            src="https://kkb-production.jupyter-proxy.kaggle.net/static/assets/jupyterlab-v4/jupyterlab-index-deadbeef.html?session=SYNTHETIC-NOT-A-TOKEN"
+          ></iframe>
+        </div>
+        <aside aria-label="Session options">
+          <h2>Session options</h2>
+          <p>Schedule a notebook to run</p>
+        </aside>
+      </main>
+    </div>
+  </body>
+</html>

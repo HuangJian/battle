@@ -42,7 +42,7 @@
 
 import { statSync } from 'fs'
 import path from 'path'
-import { CONFIG_PATH, REPO_ROOT, tmpLogsDir } from '../core/paths'
+import { CONFIG_PATH, notebookLogsDir, REPO_ROOT, tmpLogsDir } from '../core/paths'
 import { createSupervisor } from '../core/reload'
 import {
   isLoopbackAddress,
@@ -86,6 +86,13 @@ import {
   invalidateAfterAction,
   ladderTickAll,
   markConsoleActivity,
+  appendNotebookChunk,
+  isNotebookLogKey,
+  listNotebookSessions,
+  notebookLogPayload,
+  notebookNavEntry,
+  parseNotebookChunk,
+  readBoundedJson,
   routeAction,
   sanitizeViewCourse,
   shouldStartLadderTicker,
@@ -361,11 +368,13 @@ async function main(): Promise<void> {
   type RouteHandler = (req: Request, srv: Bun.Server<undefined>) => Promise<Response>
 
   const guard =
-    (fn: RouteFn): RouteHandler =>
+    (fn: RouteFn, opts: { activity?: boolean } = {}): RouteHandler =>
     async (req, srv) => {
       // 有人在看（2026-10-25）：刷新器的空闲闸判据就是这一行——没请求 = 没人开页，
       // 后台不该每 5s 出去探一轮（探针是主动出网，不是空转）。见 snapshot-refresher。
-      markConsoleActivity()
+      // `activity:false` 只给「后台搬运」用（notebook 日志 POST）：5s 一条若点亮活动，
+      // 会把「没人看就停刷」永久变成「有人看」（plan/notebook-userscript §4.6 / 评审 B8）。
+      if (opts.activity !== false) markConsoleActivity()
       const url = new URL(req.url)
       try {
         // 只读门控：一切 POST 动作仅限回环来源（本机）；LAN 只能 GET 查看。
@@ -468,23 +477,26 @@ async function main(): Promise<void> {
   const logPageRoute: RouteFn = async (_req, { url, viewCourse }) => {
     const key = url.pathname.slice('/log/'.length) as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
-    const payload = await componentLogPayload(key, lines, viewCourse || undefined)
+    // 虚拟键必须在 `as Component` / `componentLogPayload` **之前**分支（后者的 key 是联合类型）。
+    const payload = isNotebookLogKey(key)
+      ? notebookLogPayload(notebookLogsDir(), key, lines)
+      : await componentLogPayload(key, lines, viewCourse || undefined)
     if (!payload) return new Response(`unknown component: ${key}`, { status: 404 })
     const state = await buildStateView(viewCourse || undefined, { firstPaint: true })
     const follow = url.searchParams.get('follow') !== '0'
+    const components = state.components.map((c) => ({
+      key: c.key,
+      label: c.label,
+      status: c.status,
+    }))
+    if (isNotebookLogKey(key)) {
+      const entry = notebookNavEntry(notebookLogsDir(), key)
+      if (entry) components.push(entry)
+    }
     return new Response(
       renderLogPage(
         payload,
-        {
-          components: state.components.map((c) => ({
-            key: c.key,
-            label: c.label,
-            status: c.status,
-          })),
-          follow,
-          lines,
-          course: viewCourse || undefined,
-        },
+        { components, follow, lines, course: viewCourse || undefined },
         { css: livePageCss() },
       ),
       { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
@@ -596,9 +608,35 @@ async function main(): Promise<void> {
   const apiLogRoute: RouteFn = async (_req, { url, viewCourse }) => {
     const key = url.pathname.slice('/api/log/'.length) as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
-    const payload = await componentLogPayload(key, lines, viewCourse || undefined)
+    const payload = isNotebookLogKey(key)
+      ? notebookLogPayload(notebookLogsDir(), key, lines)
+      : await componentLogPayload(key, lines, viewCourse || undefined)
     return payload ? json(payload) : json({ ok: false, message: `未知组件: ${key}` }, 404)
   }
+
+  // ── notebook 伴生脚本（plan/notebook-userscript §4.5）──
+  // 搬运不算「有人在看」：guard activity:false（否则 5s 一条永久点亮空闲闸）。
+  // body 在 JSON.parse 前有界读（413 零副作用），自定义头挡跨源网页（无 CORS 头）。
+  const notebookLogRoute: RouteFn = async (req) => {
+    if (req.headers.get('X-Notebook-Companion') !== '1') {
+      return json(
+        { ok: false, reason: '缺少 X-Notebook-Companion: 1（跨源网页发不了这个头）' },
+        403,
+      )
+    }
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) {
+      return json({ ok: false, reason: 'Content-Type 必须是 application/json' }, 400)
+    }
+    const bounded = await readBoundedJson(req)
+    if (!bounded.ok) return json({ ok: false, reason: bounded.reason }, bounded.status)
+    const parsed = parseNotebookChunk(bounded.value)
+    if (!parsed.ok) return json({ ok: false, reason: parsed.reason }, parsed.status)
+    const result = appendNotebookChunk(notebookLogsDir(), parsed.chunk, Date.now())
+    return json(result.body, result.status)
+  }
+
+  const notebookLogsRoute: RouteFn = async () =>
+    json({ ok: true, sessions: listNotebookSessions(notebookLogsDir()) })
 
   // 组件错误登记表（plan/component-error-registry §4.6）：列表投影（每 4s 轮询）+ `?fp=` 单条 detail。
   // ★ 两条都只读登记表的 **SWR 缓存值**——探测只在 `snapshot-refresher` 的 10s 节拍上，
@@ -733,6 +771,9 @@ async function main(): Promise<void> {
     '/api/errors': { GET: guard(errorsApiRoute) },
     '/api/taskBundleInfo': { GET: guard(taskBundleInfoRoute) },
     '/api/taskBundle': { GET: guard(taskBundleRoute) },
+    // 静态先于通配：两条都必须在 `/api/log/*` 之前（且 `/api/notebookLog` 是第二个 typed POST）。
+    '/api/notebookLogs': { GET: guard(notebookLogsRoute) },
+    '/api/notebookLog': { POST: guard(notebookLogRoute, { activity: false }) },
     '/api/log/*': { GET: guard(apiLogRoute) },
     '/log/*': { GET: guard(logPageRoute) },
     '/api/deliverUpload': { POST: guard(deliverUploadRoute) },

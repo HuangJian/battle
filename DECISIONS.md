@@ -10130,6 +10130,50 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   预注册处置：r1 40 轮 0 清关 ⇒ 改 `enemies: 3` 重跑（floor 外留一个自然档），仍 0 ⇒ 停整条线。
   ② 4 图定集 = 记忆化风险，只有 r5→r6 检验泛化；跨级读数只用于晋级。③ 首杀仍是稀疏信号，
   本设计只把它变**可达**。④ 动作/观测/schema 未动，arch 与既有 checkpoint 逐字兼容。
-- **落地**：`curricula/z2-r1..r6.jsonc` · `tests/biz/test_z2_ladder_courses.py`（奖励逐字相同 /
+- **落地**：`curricula/z2-r1..r6.jsonc` ·  `tests/biz/test_z2_ladder_courses.py`（奖励逐字相同 /
   指标与参数集合 / 阶梯单调 / 预注册关集 / r6 零覆盖 / 六级身份各异 / 权重链）。全文 →
   `docs/nn/training-stack.md` §50。
+
+## §2026-10-30-notebook-userscript-w0（2026-10-30，第三个独立 bun 项目：userscript 骨架 + 根门禁边界）
+
+- **背景**：`plan/notebook-userscript.plan.md` 要在 Kaggle 跨域子帧里跑 userscript，把 notebook 输出搬到本机
+  dashboard。它自带 package.json / bun.lock / node_modules（happy-dom 只在它的 devDeps 里），与根项目、dashboard
+  都没有 import 关系。W0 只落骨架 + 夹具 + 门禁边界，不改任何生产行为。
+- **决定**：`userscript/` 作为**第三个独立 bun 项目**；根侧显式排除，`tools/run-root-tests.ts` 追加第二个
+  `--path-ignore-patterns=userscript/**`（Bun 1.4.4 实测：重复 flag 生效，**逗号分隔不生效**）；
+  `tools/test-silent.ts` 的 `SKIP_RE` 加 userscript、`isDashboardOnly` 泛化为 `isIndependentOnly`（旧名留别名）；
+  pre-commit 的 `ROOT_TS_STAGED` / `FREEZE_STAGED` 都 `grep -v '^userscript/'`，并新增
+  `SKIP_USERSCRIPT_GATE=1` 可逃生的 userscript 块（typecheck 按 `userscript/` 前缀归因，test 红即拦）；
+  `.gitignore` 加 `!userscript/bun.lock`（照 dashboard 先例：`*.lock` 本意是 PID 锁，不该挡真依赖锁）。
+- **否决的备选**：把 userscript 并进根套件。新克隆只跑根 `bun install` 时 happy-dom 解析失败 ⇒ 根 `bun run check`
+  直接红；而根 tsconfig 又只 include `src/tests/tools`（typecheck 覆盖不到）⇒ 等于用根门禁给一个它不检查的项目判生死。
+- **落地**：`userscript/{package.json,tsconfig.json,bunfig.toml,happydom.ts,scripts/*,src/*,test/*}`；
+  `tests/test-silent-scope.test.ts` 加同构断言（枚举不含 `userscript/`；`isIndependentOnly` 认 dashboard/userscript
+  及其混合；`isDashboardOnly` 仍只认 dashboard）；脱敏夹具 `test/fixtures/kaggle-{outer,frame}.html`（3 cell、run 只在
+  工具栏隐藏 popup、stdout+stderr、CRLF/孤立 CR、10 条命令面板项；`?session=` 只留合成占位；原始 mhtml 在 `tmp/`
+  已被 ignore），来源与脱敏由用例钉住（头部注记 + 无 JWT/token 正则）。
+- **边界**：① 协议两条端点（`POST /api/notebookLog`、`GET /api/notebookLogs`）不在 W0，落地于同计划 W1，仍属本
+  条决策；② Gate 0（跨域子帧是否真的注入）是**人工闸**，agent 不开浏览器 ⇒ W0 全绿**不**代表端到端可用；
+  ③ 夹具「必红自查」两条依赖 W3 用例，W0 只做了「删 clear-all 的 `<li>` ⇒ 夹具用例红」。
+
+## §2026-10-30-notebook-userscript-w1-w5（2026-10-30，notebook 伴生脚本：服务端协议 v2 + frame 搬运 + 面板/桥）
+
+- **背景**：Gate 0 人工通过（host attach → frame ready `notebook=true`，回环 `GET /api/state → 200`）后，按
+  `plan/notebook-userscript.plan.md` 自主落 W1–W5。目标不变：Kaggle 跨域子帧的输出定期落到本机 dashboard，
+  面板可「保存并清空」，且任何失败都可见。
+- **决定**：① 协议 v2 用 `writer` 作 fencing token（每次页面加载随机）+ 单写者租约 + `epoch`；409 分支
+  `writer-conflict` / `stale-epoch` / `offset-mismatch`（带 `{seq, chars, tail}` 续写），**不**按 writer 分槽；
+  ② 服务端 handler 读完 body 后全同步（Bun 单线程串行），ack 顺序 append → meta → 200；虚拟键走既有
+  `/log/notebook:<session>`，日志搬运 `guard({activity:false})`（不算「有人在看」）；③ 客户端只把 `.jp-OutputArea`
+  变化标脏，offset 键是 cell uuid（虚拟化进出不换键）；④ host⇄frame 用 per-attach nonce，attach 只认 parent +
+  kaggle origin，ready/result 校验 nonce；⑤ 探测 URL 只留 origin+pathname（`?session=` 绝不进日志）；Colab/AI
+  Studio 只落 `{ok:false}` 骨架，不加 `@match`。
+- **否决的备选**：跨标签 `BroadcastChannel` 派发（沙箱透传未验证，持久 claim 已足够）· 按 writer 分槽（同 DOM
+  双写只会全重复）· 自动清空到点抢焦点（清非 active cell 必须先选中，抢选区比延期更糟）· 把 notebook 变成受管
+  Component（日志页零改动优先）。
+- **边界**：W4 调度只有纯函数 + DST 用例，定时器 UI/GM 持久化**未接线**；W5 探测入口与 Colab/AI Studio
+  适配器**未接线**；W3 面板/桥未在真实 Kaggle 点验。`userscript` 检查绿（83 用例）≠ 浏览器端到端可用。
+- **落地**：`dashboard/src/server/api/notebook-log.ts`、`dashboard/tests/notebook-{log,recovery,body,wiring}.test.ts`；
+  `userscript/src/notebook-companion/{protocol,config,log-shipper,observer,schedule,probe}.ts`、`sites/{kaggle,stub,types}.ts`、
+  `app/{boot,bridge,commands,ship-loop}.ts`、`ui/panel.ts`、`test/*.test.ts`；计划 §14 状态表与 `docs/nn/console.md §44`。
+

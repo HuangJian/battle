@@ -17,7 +17,7 @@
 #                   mypy 报错按文件归因：staged 归因 → 拦；全部未暂存 → 放行；
 #                   pytest 红 → 拦 + 归因指引（因果由提交 agent 判定：自己的修，
 #                   他人的汇报后定向跳过重试 NN_GATE_SKIP=pytest）
-#   typecheck       **仅当 staged 含根项目 TS/JS（排除 dashboard/）时**全量运行
+#   typecheck       **仅当 staged 含根项目 TS/JS（排除 dashboard/ 与 userscript/）时**全量运行
 #                   （`bun check --no-script`，输出与 tsc 同格式）；
 #                   纯 md / nn-training / 仅 dashboard 提交不触发（2026-09-15）。
 #                   报错按文件归因，staged → 拦；全部未暂存/未跟踪 → 放行；
@@ -28,6 +28,9 @@
 #                   dashboard/ 归因，staged → 拦；bun test 红 → 拦 + 归因指引。
 #                   **只改 dashboard 时不会连带跑根 bun test / 根 typecheck / python /
 #                   freeze**（外部套件与 dashboard 无归因交集）
+#   userscript      仅 staged 含 userscript/ 时运行（同样独立 bun 项目，不属根
+#                   tsconfig / 根套件 —— plan/notebook-userscript.plan.md §4.1）；
+#                   typecheck 前缀 userscript/ 归因，test 红 → 拦。
 #   bun test        仅当 staged 含根项目 TS/JS（排除 dashboard/）时运行；
 #                   跑的是**全量**（非 heavy）——test-silent 已删除 basename 窄跑
 #                   （它欠采样：改 stages.ts 只跑 1 个而 50 个依赖它；
@@ -47,8 +50,8 @@
 #                   编辑折进提交（2026-09-06 v1 事故教训）。永不阻断。
 #   oxlint          staged 文件，红即拦（不变）
 #   freeze          仅 staged 含 **根项目** TS/游戏代码（*.ts 等 / src/，
-#                   排除 dashboard/）时运行；dashboard TS 与纯 md/nn-training
-#                   不可能改变 det 签名。
+#                   排除 dashboard/ 与 userscript/）时运行；子项目的 TS 与纯
+#                   md/nn-training 不可能改变 det 签名。
 #                   2026-09-15 再收窄：`tests/**` 与 `src/assets/**` 也豁免——签名闭包
 #                   只含 src/** 与 tools/lib/**，不可能被测试文件或精灵图移动。该理由由
 #                   tests/freeze-scope.test.ts 钉住（算传递闭包并断言与这两个目录零交集，
@@ -58,7 +61,7 @@
 #   逃生口：NN_GATE_SKIP=<tools>（python 单工具，已有）、NN_GATE_SKIP_E2E=1
 #   （只退 python 门禁里的 e2e 集成层，单测层照跑——e2e 有竞速/负载敏感用例，
 #   见 docs/nn/engineering.md §7）、SKIP_BUN_TEST=1、SKIP_DASHBOARD_GATE=1、
-#   --no-verify（全跳，最后手段）。
+#   SKIP_USERSCRIPT_GATE=1、--no-verify（全跳，最后手段）。
 #   --selftest：不跑门禁，只对归因解析器跑内置断言（改本 hook 必跑）。
 #
 #   铁律：除 bun fmt 对「无未暂存改动的 staged 文件」的精确格式化，以及 eol 归一
@@ -264,13 +267,14 @@ DIRTY_LIST="tmp/pre-commit-dirty-$$.txt"
 TSC_LOG="tmp/pre-commit-tsc-$$.log"
 GATE_LOG="tmp/pre-commit-nn-$$.log"
 DASH_TSC_LOG="tmp/pre-commit-dash-$$.log"
+US_TSC_LOG="tmp/pre-commit-userscript-$$.log"
 # EXIT 清理 = **截断不删除**（2026-09-15，进程树免疫的兜底铁律）：`rm -f` 是删除
 # syscall，会被沙箱识别（配额 FAIL_CLOSED / 弹人工删除审批）——v1 实测门禁全绿提交
 # 却被静默丢弃（2026-09-14：`✓ All pre-commit checks passed` 紧跟
 # `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] count=182 threshold=50`）。
 # `: > file` 是写入不是删除，任何删除拦截都对其失效；残留 0 字节文件在 gitignored
 # tmp/ 下由 periodic 清理兜底。清理自己的临时文件失败/被拦，没有任何理由决定提交成败。
-trap 'for __f in "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG"; do [ -e "$__f" ] && : > "$__f"; done' EXIT
+trap 'for __f in "$STAGED_LIST" "$DIRTY_LIST" "$TSC_LOG" "$GATE_LOG" "$DASH_TSC_LOG" "$US_TSC_LOG"; do [ -e "$__f" ] && : > "$__f"; done' EXIT
 # `--diff-filter=ACMR`（2026-09-21 修）：**删除的路径不能进归因清单** —— 各 linter 都是
 # 「按路径打开文件」，路径不存在就是硬错（实测：删掉 `nn-training/tests/test_remote_degrade.py`
 # 后被 ruff 判 `E902 The system cannot find the file specified` ⇒ 整次提交被拦，而代码本身全绿）。
@@ -311,7 +315,8 @@ echo "  staged ${STAGED_N} 文件（门禁拦截归因集）；未暂存 ${DIRTY
 # 根项目 TS/JS（**排除 dashboard/**）：dashboard 是独立 bun 项目；只改
 # dashboard / 纯 md / nn-training 时根 typecheck、根 bun test、freeze 都无归因
 # 交集，不应触发（2026-09-15 用户口径）。
-ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '^dashboard/' || true)
+ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" \
+  | grep -v '^dashboard/' | grep -v '^userscript/' || true)
 # freeze 敏感面：根项目 TS/JS + src/（游戏/det 路径），同样排除 dashboard/
 # 豁免 tests/** 与 src/assets/**（2026-09-15）：签名 = tools/probe-det-baseline.sh 跑
 # tools/diag/per-seed-diff.ts dump 出的文本哈希，其 import 传递闭包只含 src/**（游戏/
@@ -320,7 +325,7 @@ ROOT_TS_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$' "$STAGED_LIST" | grep -v '
 # （错 ~27×）。旧数字正是「豁免值不值」的唯一论据，所以别再引用它——下方 freeze 块会
 # 自报每次的真实 elapsed。安全性不靠注释：tests/freeze-scope.test.ts 算闭包并断言零交集。
 FREEZE_STAGED=$(grep -E '\.(ts|js|mjs|cjs|tsx|jsx)$|^src/' "$STAGED_LIST" \
-  | grep -v '^dashboard/' | grep -vE '^(tests/|src/assets/)' || true)
+  | grep -v '^dashboard/' | grep -v '^userscript/' | grep -vE '^(tests/|src/assets/)' || true)
 
 # ---------- AGENTS.md 注入预算（无触发条件：单文件量字符，微秒级） ----------
 # 规则：`AGENTS.md` 必须整份短于 harness 的**注入截断点**（≈9,205 字符，2026-09-10 实测），
@@ -452,6 +457,50 @@ else
     echo "✗ dashboard bun test 红——按多 agent 协作语义判定归因后重试："
     echo "   · 失败由你 staged 的改动造成 → 修复后重新 commit；"
     echo "   · 失败源自他人未暂存改动 → 汇报对方，并以 SKIP_DASHBOARD_GATE=1 重试本次 commit。"
+    exit 1
+  fi
+fi
+
+# ---------- userscript 门禁（独立 bun 项目；仅在 staged 含 userscript/ 时跑） ----------
+# userscript/ 自带 package.json / bun.lock / node_modules，不在根 tsconfig 与根套件之内
+# （plan/notebook-userscript.plan.md §4.1）。没有这一块，「把它切出根门禁」会静默降级为
+# 「没人跑它的门禁」。归因语义与 dashboard 块一致：报错前缀 userscript/ 后与 staged 求交。
+US_STAGED=$(grep '^userscript/' "$STAGED_LIST" || true)
+if [ -z "$US_STAGED" ]; then
+  echo " ▸ userscript gate skipped（staged 无 userscript/ 改动）"
+elif [ -n "$SKIP_USERSCRIPT_GATE" ]; then
+  echo "▸ skip userscript gate (SKIP_USERSCRIPT_GATE set——请确保失败已归因并汇报)"
+else
+  US_N=$(printf '%s\n' "$US_STAGED" | wc -l | tr -d ' ')
+  echo " ▸ userscript gate（独立项目，$US_N staged 文件）"
+  if [ ! -d "$TOP/userscript/node_modules" ]; then
+    echo "   ⚠ userscript/node_modules 缺失——先 cd userscript && bun install"
+  fi
+
+  US_TSC_RC=0
+  ( cd "$TOP/userscript" && "$BUN" run typecheck ) > "$US_TSC_LOG" 2>&1 || US_TSC_RC=$?
+  if [ "$US_TSC_RC" -ne 0 ]; then
+    cat "$US_TSC_LOG"
+    US_TSC_TOTAL=$(grep -cE ': error TS[0-9]+:' "$US_TSC_LOG" || true)
+    if [ "$US_TSC_TOTAL" -eq 0 ]; then
+      echo "✗ userscript typecheck 失败但无 TS 错误行（无法归因，保守拦截）"
+      exit 1
+    fi
+    US_TS_FILES=$(attrib_tsc "$US_TSC_LOG" | sed 's|^|userscript/|' | sort -u)
+    US_TSC_BLOCK=$(printf '%s\n' "$US_TS_FILES" | attrib_staged_hits "$US_STAGED")
+    if [ -n "$US_TSC_BLOCK" ]; then
+      echo "✗ userscript typecheck 错误落在 staged 文件（提交被拦）:"
+      printf '    %s\n' $US_TSC_BLOCK
+      exit 1
+    fi
+    echo "⚠ userscript typecheck 错误全部落在未暂存/未跟踪文件（他人改动，本次不拦）:"
+    printf '    %s\n' $US_TS_FILES
+  fi
+
+  if ! ( cd "$TOP/userscript" && "$BUN" run test ); then
+    echo "✗ userscript bun test 红——按多 agent 协作语义判定归因后重试："
+    echo "   · 失败由你 staged 的改动造成 → 修复后重新 commit；"
+    echo "   · 失败源自他人未暂存改动 → 汇报对方，并以 SKIP_USERSCRIPT_GATE=1 重试本次 commit。"
     exit 1
   fi
 fi

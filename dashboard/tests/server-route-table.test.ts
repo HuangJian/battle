@@ -31,12 +31,20 @@ describe('路由表：完整性（与旧 if 链的路径/方法逐条对齐）',
 
   it('方法逐条声明：GET 面不得接受 POST，动作面只走 `/api/*` POST', () => {
     for (const r of CONSOLE_ROUTES) {
-      if (r.path.startsWith('/api/') && r.path !== '/api/deliverUpload' && r.path !== '/api/*') {
+      if (
+        r.path.startsWith('/api/') &&
+        r.path !== '/api/deliverUpload' &&
+        r.path !== '/api/notebookLog' &&
+        r.path !== '/api/*'
+      ) {
         expect(r.methods).toEqual(['GET'])
       }
     }
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/*')?.methods).toEqual(['POST'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/deliverUpload')?.methods).toEqual(['POST'])
+    // 第二个 typed POST：notebook 日志搬运（清单端点仍是 GET）
+    expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLog')?.methods).toEqual(['POST'])
+    expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLogs')?.methods).toEqual(['GET'])
     // 兜底同时接两种方法（GET = 宽松页面/404；POST = 非 API 路径的 404）。
     expect(CONSOLE_ROUTES.find((r) => r.path === '/*')?.methods).toEqual(['GET', 'POST'])
   })
@@ -130,6 +138,8 @@ describe('路由表：Bun 原生匹配（优先级 / 方法 / 兜底）', () => 
   it('动作面：POST /api/<act> → /api/*；静态 POST 端点优先', async () => {
     expect(await post('/api/nodeSmoke')).toBe('POST /api/*')
     expect(await post('/api/deliverUpload')).toBe('POST /api/deliverUpload')
+    expect(await post('/api/notebookLog')).toBe('POST /api/notebookLog')
+    expect(await get('/api/notebookLogs')).toBe('GET /api/notebookLogs')
   })
 
   it('方法不匹配 ⇒ 落兜底（不是 405/静默成功）：POST 页面 / GET 动作端点', async () => {

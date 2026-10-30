@@ -63,8 +63,14 @@ export const COMPONENT_ROLES: Record<string, ComponentRole> = {
   },
 }
 
-/** 页面名（未知 key ⇒ **回落 key 本身**：组件永不在 UI 上变成空白，只是没有别名）。 */
+/** 页面名（未知 key ⇒ **回落 key 本身**：组件永不在 UI 上变成空白，只是没有别名）。
+ *
+ *  notebook 伴生脚本的虚拟键（plan/notebook-userscript §4.6）不是受管组件，但会出现在
+ *  日志页导航里：`notebook:<session>` → `Notebook · <session>`，否则导航会把 key 原文
+ *  （`notebook:kaggle-…`）直接上屏（导航读的是 componentName，不是 label）。 */
 export function componentName(key: string): string {
+  if (key === 'notebook' || key === 'probe') return 'Notebook'
+  if (key.startsWith('notebook:')) return `Notebook · ${key.slice('notebook:'.length)}`
   return COMPONENT_ROLES[key]?.name ?? key
 }
 

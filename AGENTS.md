@@ -112,7 +112,7 @@ cd dashboard && bun install && bun run typecheck && bun run test   |   bun run d
 
 （多数由 pre-commit / `bun run check` 自动判定，失败指引见门禁输出 → details §9）
 
-- [ ] `bun run check` 绿（只判根项目）· 动过 `dashboard/**` ⇒ `cd dashboard && bun run typecheck && bun run test` 也绿 · `bun run build` 过
+- [ ] `bun run check` 绿（只判根项目）· 子项目（`dashboard/**`、`userscript/**`）改动 ⇒ 各自门禁也绿（details §9）· `bun run build` 过
       （动过 `dashboard/src/web/**` ⇒ `bun dashboard/src/server/build.ts` 三份 bundle 也过）。
 - [ ] 无新增 Simulation `Math.random()` / 模块级可变玩法状态 / canvas UI（§2.3/§2.2/§2.5）。
 - [ ] plan DoD 满足 · 新决策已记（§6）· bugfix 有复现用例（§7）· 60 FPS · 内存有界（保留策略 → plan/Snapshot-Management-Framework.md）。

@@ -70,6 +70,10 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
   { path: '/api/taskBundle', methods: ['GET'] },
   // 产物导入（multipart）：静态路径，仍是 POST——排在通配之前（静态 > 通配）。
   { path: '/api/deliverUpload', methods: ['POST'] },
+  // notebook 伴生脚本（plan/notebook-userscript §4.5）：第二个 typed POST（自定义头 + 有界 body）；
+  // 会话清单仍是 GET。两条都必须排在 `/api/log/*` 之前（静态先于通配）。
+  { path: '/api/notebookLogs', methods: ['GET'] },
+  { path: '/api/notebookLog', methods: ['POST'] },
   // ── 通配（日志载荷 + 整页；`*` 段由 handler 从 pathname 里切）──
   { path: '/api/log/*', methods: ['GET'] },
   { path: '/log/*', methods: ['GET'] },
