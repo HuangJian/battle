@@ -316,6 +316,10 @@ class HostModule(torch.nn.Module):
         t0 = time.monotonic()
         sd = module.state_dict()
         self._sd = _to_cpu_state(sd)
+        #: **参数**名（不含 buffer）：`parameters()` 只按它从 CPU 副本里挑。绝不能把源模块的
+        #: XLA 参数交出去——`save_weights_json` 会 for 一遍算 `num_params`，而 XLA 张量上的
+        #: `.numel()` 是一次**设备查询**（2026-10-30 现场：42 个 ⇒ 该段吃掉 33s，且时快时慢）。
+        self._param_names = tuple(n for n, _ in module.named_parameters())
         _log_if_slow("权重取回", t0, len(sd))
 
     def state_dict(self, *args, **kwargs):  # type: ignore[override]
@@ -327,7 +331,8 @@ class HostModule(torch.nn.Module):
         return getattr(self._src, "arch", dict)()
 
     def parameters(self, recurse: bool = True):
-        return self._src.parameters()
+        """CPU 副本里的**参数**（不是源模块的 XLA 参数）——见 `_param_names` 上的注释。"""
+        return iter([self._sd[n] for n in self._param_names])
 
 
 def _to_cpu_state(obj):
@@ -372,6 +377,17 @@ def _to_cpu_state(obj):
     return _build(obj)
 
 
+def _save_buffered(path: str, obj) -> None:
+    """`torch.save` 走**1MB 缓冲**的文件句柄。
+
+    2026-10-30 真机：这台机器**每次 write syscall ~100ms**（dd 32×1MiB = 3.13s ⇒ 98ms/次），
+    而 `torch.save` 是「一个 tensor 一个 zip 成员」地写 ⇒ model 42 + opt 126 次小写。
+    同一个实现 + 同一个文件，只把缓冲从 8KB 提到 1MB（字节语义不变：仍是 torch zip 格式）。
+    """
+    with open(path, "wb", buffering=1 << 20) as f:
+        torch.save(obj, f)
+
+
 def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
     """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
     恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
@@ -384,9 +400,9 @@ def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
     n_opt = sum(1 for v in opt_sd.get("state", {}).values() for x in v.values() if torch.is_tensor(x))
     opt_cpu = _to_cpu_state(opt_sd)
     _log_if_slow("opt 状态取回", t0, n_opt)
-    torch.save(model_cpu, os.path.join(ckpt_path, "model.pt"))
+    _save_buffered(os.path.join(ckpt_path, "model.pt"), model_cpu)
     t0 = time.monotonic()
-    torch.save(opt_cpu, os.path.join(ckpt_path, "opt.pt"))
+    _save_buffered(os.path.join(ckpt_path, "opt.pt"), opt_cpu)
     _log_if_slow("opt torch.save", t0)
     with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
         json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)

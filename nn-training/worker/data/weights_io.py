@@ -47,6 +47,7 @@ import json
 import os
 from typing import Any
 
+import numpy as np
 import torch
 
 from common.schema import OBS_SCHEMA_MAJOR
@@ -87,12 +88,20 @@ def save_weights_json(
     """
     params: dict[str, Any] = {}
     for name, p in model.state_dict().items():
-        if not torch.isfinite(p).all():
+        # ★ 2026-10-30（真机：这一段的 `w=` 时快时慢 0.0s↔33s，而写盘探针全是 <1ms）：
+        #   原来每个张量都做一次 `torch.isfinite(p).all()` —— 42 次 ATen 调用，机器被 94 个
+        #   bun + 评估腿挤满时，每次都要 join 一遍线程池；改成**一次 numpy** 检查（同一份
+        #   `<f4` 数组，判据与报错文案逐字不变）。
+        arr = p.detach().cpu().contiguous().numpy().astype("<f4")
+        if not np.isfinite(arr).all():
             raise ValueError(
                 f"[weights] 参数 {name} 含非有限值（NaN/Inf）——拒绝写出坏权重；"
                 f"请检查训练是否发散（loss/gnorm 爆炸），不要用坏权重续跑"
             )
-        params[name] = {"shape": list(p.shape), "data": tensor_to_b64(p)}
+        params[name] = {
+            "shape": list(p.shape),
+            "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+        }
     meta = {
         "format": FORMAT,
         "version": 1,
@@ -105,8 +114,11 @@ def save_weights_json(
         meta.update(extra_meta)
     abs_path = os.path.abspath(path)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    # ★ 2026-10-30（真机：每次 write syscall ~100ms —— dd 32×1MiB=3.13s）：**加大写缓冲**，
+    #   把 394KB 的 JSON 从「8KB 一次 ⇒ 约 50 次 write」压到「1MB 一次 ⇒ 1~2 次」。
+    #   只改 buffering，不动编码/换行语义 ⇒ 与旧实现**逐字节相同**（Windows 上仍是 CRLF）。
     tmp_path = abs_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
+    with open(tmp_path, "w", encoding="utf-8", buffering=1 << 20) as f:
         json.dump(meta, f, indent=2)
     # Atomic on the same volume: a crash mid-write never leaves a truncated
     # weights file behind (matters for long unattended RL loops that overwrite

@@ -840,8 +840,10 @@ def run_training_core(
     #   这里取**主机视图**（一次批量 D2H，模块本身不动）：给 Parameter 赋 CPU 张量会被
     #   autograd 拒（`set_data ... incompatible tensor type`，2026-10-29 真机）。
     host = HostModule(raw_model)
+    _a0 = time.time()
     wj_path = job_dir / "weights.json"
     save_weights_json(host, str(wj_path))
+    _a1 = time.time()
     # ★ opt-blob-diet（2026-09-24，§3.2 W1 / §3.6-8）：把本轮产出的 weights.json **原始
     # 字节**也写进 blob_cache（键 = sha256）。下一轮 hub 的 `init_weights_fp` =
     # `sha256(args.out)` = 同一份字节的 sha（`verify_and_land` 落的就是它解码后的原字节）
@@ -878,6 +880,7 @@ def run_training_core(
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
     # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
     _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
+    _a2 = time.time()
     # ---- R3（M4）：形态位命中 ⇒ 回传 **delta 容器**（基准 = 本轮**实际载入**的那份 opt）----
     # 基准字节 = `opt_raw`（上面解析出来的那份：exact 档 = hub 发的 blob；identity 档 = 本机
     # 自己那条 f32 链）⇒ `base_sha` 就是「我拿哪份当基准」的记录（hub 侧的档位读数）。
@@ -914,6 +917,11 @@ def run_training_core(
 
     # 产物段的秒数不再靠 `PPO_CUDA_DIAG`（那要人记得开）：随 `wire.art_sec` 进账本行，
     # 由 `plan_run` 拼进既有的落盘行（零新增行、每轮都有读数）。
+    # 分段读数（2026-10-30）：只在**慢**的时候打一行 —— 健康的一轮 `art<1s`，落盘行的 `art=`
+    # 已经够看；一旦又出现几十秒的抖动，这行会当场指出是 w（写 json+缓存）/ opt（ckpt+pack）/
+    # 还是 io（编码+记账）。治它的那次真机证据：w=33.7s / opt=18.4s ⇒ 写盘与 XLA 调用。
+    if time.time() - _t_art >= 1.0:
+        log(f"[art] 分段 w={_a1 - _a0:.1f}s opt={_a2 - _a1:.1f}s io={time.time() - _a2:.1f}s")
     result = {
         "job_id": jid,
         "data_fp": manifest["data_fp"],

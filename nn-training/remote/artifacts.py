@@ -454,7 +454,11 @@ class ArtifactStore:
     def _refresh_latest(self, it: int, entry: dict) -> None:
         """最新一轮的小包（人可以在会话中途下载、看两眼）。失败不致命（只是便利件）。"""
         try:
-            with zipfile.ZipFile(self.root / self.LATEST_ZIP, "w", zipfile.ZIP_DEFLATED) as z:
+            # ★ 2026-10-30：每次 write syscall ~100ms（真机 dd 32×1MiB=3.13s）⇒ 加大写缓冲，
+            #   zip 的成员写从「几十次 syscall」压到「一两次」。字节不变（同一 zipfile 实现）。
+            with open(self.root / self.LATEST_ZIP, "wb", buffering=1 << 20) as fh, zipfile.ZipFile(
+                fh, "w", zipfile.ZIP_DEFLATED
+            ) as z:
                 z.writestr("metrics_row.json", json.dumps(entry, ensure_ascii=False, indent=1))
                 for p in (self.weights_path(it), self.opt_path(it)):
                     if p.exists():
