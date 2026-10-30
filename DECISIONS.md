@@ -10177,3 +10177,70 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `userscript/src/notebook-companion/{protocol,config,log-shipper,observer,schedule,probe}.ts`、`sites/{kaggle,stub,types}.ts`、
   `app/{boot,bridge,commands,ship-loop}.ts`、`ui/panel.ts`、`test/*.test.ts`；计划 §14 状态表与 `docs/nn/console.md §44`。
 
+## §2026-10-29-pygate-wallclock（2026-10-29，pygate 墙钟：同一份扫描不许按 worker 重付 · 死端口须「当场被拒」）
+
+- **背景**：`bun run pygate` 70s（pytest 65.10s / CPU 402s）。前 20 慢用例里 12 条是同一件事被
+  重复付钱：forkdist/xdist **逐条动态派发** ⇒ 同模块用例落到不同 worker，而 `scope="module"` 的
+  夹具只在一个进程内共享（`reuse_audit.scan()` 被付 3 次 = 61.7s CPU、`_repo_report()` 2 次 =
+  34.1s、`test_no_sleep_as_sync` 的三条规则各 parse 一遍、`dag.graph()` 被 9 个 worker 各付一次 ≈ 35s）。
+- **决定**：① 判据共享**同一个**昂贵输入的用例合并成一条（断言各带消息；`reuse_ledger` / `lock`
+  / `no_sleep`）；② 模块级重活改在**根 conftest `pytest_collection_finish`** 预热 —— forkdist 在
+  收集后 fork，预热结果经 COW 共享；xdist 不预热（新进程、不共享）；③ 全仓扫描去白付
+  （`reuse_audit._shape` 原地擦除替掉 `unparse` 往返；`text_asserts._walk` 自写 BFS + 类型预筛）；
+  ④ 测试死桩端口**按机器探测**（要求 `ECONNREFUSED` 立即返回，兜底 bind+close），不再写死 `9`。
+- **备选与否决**：把扫描结果做跨进程磁盘缓存（worker 同时启动 ⇒ 冷启动全 miss，无收益）；
+  forkdist 改成「按模块整批派发」（动分发语义，收益面只覆盖少数文件）；给 CPU 密集用例配紧
+  `time_budget`（AGENTS/conftest 头部的铁律明令禁止）。
+- **读数**：**70s → 52~64s**（15 次连跑全绿；区间宽 = 本机后台负载 0.3~7 核）/ CPU 402s → 302s；`--durations` 里
+  `test_reuse_ledger` 61.7s CPU → 14.1s、`test_lock_reentrancy` 34.1s → 12.3s、hub 两条控制台
+  降级 8.02s → 0.01s、`test_remote_dag` 的夹具 3.5~4.8s/worker → 0.07s。
+- **同批修掉**：HEAD 上就红的 `test_z2_ladder_courses::test_reward_prices_defence_and_
+  never_pays_for_movement`（期望集混进未落地的 `aimHits`/`wHit`）；两个门禁 flake
+  （`test_body_transfer_guard` 的墙钟上界余量 0.5s 不够；`test_offline_push_dispatch` 用
+  `monkeypatch` 改**共享模块** `disp._client` ⇒ 别的用例的 pump 线程也会打进假函数）。
+- **2026-10-29 补（预热清单）**：预热从钩子里的硬编码收成 `tests/helpers/warmup.py` 的清单
+  （每项计时一行 + 合计；加一项 = 加一行）。**判据写死在模块头 = 部署值 / 预热成本 ≥ 3**：
+  预热是 fork 之前的**串行**加法，而它替掉的是各 worker **并行**的重复。按这条实测**否决**了
+  `source_scan` 整树 sweep（`test_layering` 那族：用户 CPU 33→18s，墙钟却稳慢 ~2s，4 组交错
+  A/B 同向）—— 每个 worker 只扫自己那条用例的文件（0.3~1.0s），本来就和别的用例重叠。
+  单个 worker 才付的扫描（`reuse_audit.scan()` / `text_asserts.totals()` / `cli_surface._scan()`）
+  一律不进清单。全文 → `docs/nn/engineering.md` §91 ④。
+- **边界**：① 「合并用例」只对**同一份昂贵输入**成立，不同输入不许合并；② `# timing-ok:` 必须
+  紧贴断言行（隔 ≥2 行查不到）；③ 预热钩子只在 forkdist 生效，Windows/xdist 走原路径。全文 →
+  `docs/nn/engineering.md` §91。
+
+## §2026-10-29-goalnn-slow-test-scan-scope（2026-10-29，三条 >5s 警告：只收窄用例成本，不动耗时预算口径）
+
+- **背景**：门禁点名三条 `conftest >5s` 警告（5.92 / 7.12 / 6.59s）。其中 `test_lock_reentrancy`
+  是纯 CPU 全仓扫描（结构性下限 ~3.5s，预筛 `class OR 锁词` 已是充分条件）；另两条各有一处**白付**。
+- **备选与否决**：① 改 `conftest` 警告口径（按 `wall − CPU` 空闲时间判 ⇒ 三条全消，也更贴「预算
+  专抓不占 CPU 的空等」的原始理由）—— 否，用户四选一里选了「只做能做的优化」，>5s 警告照旧按
+  wall-clock 留痕、>30s 报错不动（§77）；② 给三条加 `time_budget` —— 否，conftest 头部铁律
+  （CPU 密集用例不得配比口径更紧的 budget，marker 还会把警告静音）；③ `text_asserts` 上进程级 AST
+  缓存或分进程 —— 否（AST 不常驻红线 + 门禁里只是把 CPU 再抢一遍）。
+- **决定**：只收窄用例自己的成本 —— (a) **用例扫全库时把扫描面钉到用例涉及的对象**（`test_sibling_reuse`
+  的 autouse 夹具把 `sr.CURRICULA_DIR` 钉到本文件三门课：243 → 3，12 条用例 1.4~2.95s → 0.02s；
+  收窄不改判据，其余 240 门本就被 `_wire_trajs → None` 跳过）；(b) 扫描口径内部只加**充分性**预筛
+  （`text_asserts._producers_of`：断言裸名 ∩ 本文件函数名不相交 ⇒ 生产者必空，177 → 15 个文件走那趟
+  全树遍历，同进程 A/B −20~25%，`totals()` 逐文件明细改前改后 266 文件全等）。
+- **违反后果**：新用例又在 `sibling_courses` 这类入口上跑全库 `load_course` ⇒ 单条用例秒级；预筛写成
+  「近似」而非充分条件 ⇒ A/B 计数漂、护栏基线失真（抬基线前必须逐文件对账）。
+—— 全文（读数表 / 三条各自的账 / 顺带发现的 `_Indexer.visit_With` 判据盲区）→ `docs/nn/engineering.md` §92
+
+## §2026-10-30-goalnn-top30-durations-round（2026-10-30，用户指令「再跑一轮前 30 条最慢用例的耗时清算」）
+
+- **背景**：满载 top30 合计 103.2s（全套件 432.5s）。分「满载/空载」两套口径后，三类根因里有两类是**白付**：
+  `reuse_audit.scan()` 同一棵子树走两趟，以及 torch **首次算子**的初始化被记到「第一个碰到它的用例」名下
+  （满载 2.09~2.62s ↔ 热进程 0.01~0.02s，100~250×）。
+- **备选与否决**：① 把内容指纹换成「AST dump 等价」口径 —— 否，AST 等价比 token 等价**更粗**（隐式字符串拼接 /
+  冗余括号同树不同 token）⇒ `exact_groups` 涨、基线当场红，且语义不再是「逐字节重复」；② 把
+  `reuse_audit.scan()` 塞进预热清单 —— 否，合并后只有 **1 个 worker** 付，预热只是把它搬到串行收集相（§91 判据）；
+  ③ torch 首次算子靠「把 import 挪到顶层 / 加 `time_budget`」—— 否，前者改生产依赖时序不为提速让路，后者撞
+  conftest 铁律（CPU 密集用例不得配比口径更紧的 budget）。
+- **决定**：(a) 扫描实现只做**字节等价**提速（`_shape` 单趟直书 + `_split_lines` 正则切行；全仓 344 文件 /
+  3824 函数四元组改前改后对账 **0 差异**，同进程交错 A/B −20~36%）；(b) torch 首次算子按 **≥3 判据**进
+  `tests/helpers/warmup.py` 清单（fork COW 继承实测 1.761s → 0.014s；3 对 on/off 交错 A/B 全同向，
+  机制指纹 2.09~2.62s → 0.03~0.06s）；(c) `lock_reentrancy` / `no_sleep_as_sync` 判为结构性，本轮不动。
+- **违反后果**：再为提速改指纹/克隆口径 ⇒ 护栏基线漂（涨了红、松了静默）；新增「首次算子 / 懒加载」而预热不跟 ⇒
+  每个 worker 各付一次，并被 `--durations` 记到随机一条用例头上，下一轮清算又白查一遍。
+—— 全文（方法 · 满载/空载读数表 · 三类分类 · 两处 A/B 明细）→ `docs/nn/engineering.md` §93

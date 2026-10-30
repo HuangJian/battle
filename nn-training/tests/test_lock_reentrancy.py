@@ -39,8 +39,10 @@
   `# lock-reentrant-ok: <理由>` ⇒ 跳过该点。今天 0 处 —— 新加一处必须写明「为什么同一线程重入安全」。
 * **廉价预筛（2026-10-10 提速）**：**无类且无锁词**的文件不进 `ast.parse` —— 判据见
   `_needs_index` 的注释（充分条件，不是近似）：锁点必然含 lock/cv/cond/sem 词，跨文件可达只走
-  组合组（类继承）。扫描面 622 文件里 249 个（40%）命中此条件，而两个全仓用例各要扫一遍
-  （`_REPO_CACHE` 只在**同一进程**内共享，forkdist 下它们常被分到不同 worker）。
+  组合组（类继承）。扫描面 622 文件里 249 个（40%）命中此条件。
+* **一个用例、三条断言（2026-10-29）**：`_REPO_CACHE` 只在**同一进程**内共享，而 forkdist/xdist
+  逐条动态派发 ⇒ 同文件的两条用例几乎同时落到两个 worker、各付一次扫描。合并成一条后门禁里
+  只扫一次（实测这份扫描占本文件 CPU 的 100%，`--durations` 里 34.1s 全是它）。
 
 ## 红检（本用例自带反探针）
 
@@ -774,7 +776,19 @@ def test_checker_sees_mixin_locks_across_files() -> None:
 # 备选与否决（为什么不是抬到 60 / 优化扫描 / 改 CPU 时间口径）：`docs/nn/engineering.md` §77。
 # 铁律（全仓）：CPU 密集用例不得配比 per-test 口径更紧的 `time_budget` —— 见 `conftest.py` 头部。
 def test_no_rerun_of_an_owned_lock_through_the_critical_section() -> None:
-    """全仓硬判据：非可重入锁的临界区里，不许可达「也拿同一把锁」的函数。"""
+    """全仓硬判据：非可重入锁的临界区里，不许可达「也拿同一把锁」的函数。
+
+    **回调面棘轮也在这里**（2026-10-29 合并）：临界区里「看得到调用、看不到目标」的
+    **目标面**只许有意地涨。合并理由与 `tests/test_reuse_ledger.py` 同款：`_REPO_CACHE`
+    只在**同一进程**里共享，而门禁的分发器是逐条动态派发的——两条同文件的用例几乎同时
+    落到两个 worker，于是各付一次全仓扫描（实测 34.1s 里有一半是重复付的）。三条断言
+    各带消息，红了照样一眼看出是哪一类。
+    2026-10-09 升级后棘轮按「哪个类上的哪个目标」去重（同一目标多调一次不重复计数），
+    已审查的目标（全部是**注入的可调用属性**，不是方法，组内也解析不到）见
+    `MAX_OPAQUE_CALLS` 旁的清单：`_now` / `_clock` / `log` / `_build` 都是构造时注入的
+    时钟/日志/回调函数（构造点逐个看过：`time.time` / 日志函数 / 已审的构建回调）。
+    新目标出现 ⇒ 当场回答「它会不会回头拿同一把锁」，答完再改常量。
+    """
     rep = _repo_report()
     assert rep.sites >= MIN_LOCK_SITES, (
         f"只认出 {rep.sites} 个锁点（下限 {MIN_LOCK_SITES}）—— 解析面或构造识别坏了，"
@@ -785,18 +799,6 @@ def test_no_rerun_of_an_owned_lock_through_the_critical_section() -> None:
         + "\n  ".join(rep.problems)
         + "\n（确属设计如此 ⇒ 在临界区那一行加 `# lock-reentrant-ok: <理由>`）"
     )
-
-
-def test_opaque_targets_under_a_lock_stay_a_short_ledger() -> None:
-    """回调面棘轮：临界区里「看得到调用、看不到目标」的**目标面**只许有意地涨。
-
-    2026-10-09 升级后棘轮按「哪个类上的哪个目标」去重（同一目标多调一次不重复计数），
-    已审查的目标（全部是**注入的可调用属性**，不是方法，组内也解析不到）见
-    `MAX_OPAQUE_CALLS` 旁的清单：`_now` / `_clock` / `log` / `_build` 都是构造时注入的
-    时钟/日志/回调函数（构造点逐个看过：`time.time` / 日志函数 / 已审的构建回调）。
-    新目标出现 ⇒ 当场回答「它会不会回头拿同一把锁」，答完再改常量。
-    """
-    rep = _repo_report()
     assert len(rep.opaque) <= MAX_OPAQUE_CALLS, (
         f"锁内「看不到目标」的目标面从 {MAX_OPAQUE_CALLS} 涨到 {len(rep.opaque)}：\n  "
         + "\n  ".join(f"{k}  @ {v[0]}" for k, v in sorted(rep.opaque.items()))

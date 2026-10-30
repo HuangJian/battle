@@ -25,6 +25,223 @@
 
 ---
 
+## §93 前 30 条最慢用例的耗时清算：满载/空载两套口径 · 两类白付已修 · 一条结构性不动（2026-10-30，用户指令「再跑一轮前 30 条最慢用例的耗时清算」）
+
+**方法**（两套口径，缺一不可）：① **满载** = 门禁同参（`forkdist $NPROC --timeout=60`）连跑 2 次
+`--durations=0`，逐用例取 **min** —— 这是门禁真正看到的数；② **空载** = 同一批 30 条**单进程串行**跑一遍
+—— 排除争用后剩下的才是「用例自己」。两者相除 = **放大倍数**，把「真慢」与「被负载吹起来」分开。
+
+**改前基线读数**：满载 top30 合计 **103.2s**（全套件 432.5s，wall 56.92 / 39.15s）· 空载 top30 合计
+**61.9s**。三类根因（top30 逐条）：
+
+| 类 | 特征 | 代表（空载 → 满载） |
+|---|---|---|
+| **A 真慢**（空载就慢） | AST 守卫本体 · e2e 真等待 · 子进程启动 · 真算力 | `lock_reentrancy` 4.46→8.75 · `no_sleep` 4.63→4.99 · `hold_e2e` 5.11→4.53 · `forkdist` 1.80→3.86 · `bc_epoch_resume` 3.67→4.54 |
+| **B 负载放大**（2~6×） | CPU/内存带宽型扫描在 16 worker 下互相踩 | `capture_site` 0.47→2.94（6.3×） · `bc_train_on_epoch` 0.47→3.49（7.4×） · `layering` 1.06→2.58 · `cli_house` 0.92→2.32 |
+| **C 首次算子记在别人头上**（100~250×） | 进程**第一次真的算**时才发生的内部初始化 | `ckpt_convert` 0.02→2.62（131×） · `opt_delta` 0.01→2.09（209×） · `opt_delta_sanitize` 0.02→2.47 |
+
+⚠ **C 不是用例慢**：同一条用例在热进程里只要 0.01~0.02s。谁第一个碰到 torch 算子，谁的 `--durations`
+就多出 2~2.6s —— 它和别人付了同一份钱，只是付在了自己名下。
+
+### 修 ① `reuse_audit.scan()`：两处白付，**输出逐字节不变**（top1，满载 11.44s / 空载 7.44s 的 setup）
+
+* `_shape`：旧实现是「`ast.walk` 先擦一遍 + `ast.dump` 重走一遍」（同一棵子树两趟）+ `ast.dump` **逐层**
+  `', '.join` 返回串（拷贝量 ∝ 节点数 × 深度）。改成**单趟直书**：下行时擦、把文本追加进平铺 list、
+  最后只 `join` 一次；并逐字复刻 `ast.dump` 的两条隐藏规则（缺字段跳过 · **值为 None 且类默认也是
+  None** 的字段不写 —— 少写/多写会直接改分组基线）。
+* `_split_lines`：逐字符 Python 循环 → 单条正则 `\r\n|\r|\n` 的 `finditer`（交替序保证 CRLF 成对，
+  `\f` 照旧不切，等价性仍由 `test_split_lines_and_segment_match_stdlib` 逐字节钉住）。
+
+**验证不是「跑一遍绿了就算」**：先把改前全仓 `_funcs()` 四元组 dump 成 JSON，改后逐条对账 ——
+**344 文件 / 3824 函数 0 处不一致**（唯一 delta 是 `reuse_audit.py` 自己的 `lineno` +1，因为多了
+`import re`）；同进程交错 A/B 三对：**6.52→4.19 · 5.17→3.83 · 4.94→3.96（−20~36%）**；
+`tests/test_reuse_ledger.py` 9 条全绿（计数基线一字未动）。
+
+### 修 ② torch **首次算子**进预热清单（判据 ≥3，3 对交错 A/B 全同向）
+
+**机制实测**（`OMP=1`）：`import torch` 1.94s 早在**收集相**就付掉（测试模块顶层 import，COW 共享）；
+贵的是**首次算子的内部初始化** —— 整一班训练步 1.761s，第二班 0.005s。**fork 继承实测**：父进程先算
+一步 1.761s → `os.fork()` 出的孩子再算一步 **0.014s** ⇒ 状态经 COW 传递，预热在 master 付一次、
+16 个 worker 白拿（16 × 1.76 ≈ 28s ÷ 预热自付 1.25s ≈ **16× ≥ 3**）。
+
+**3 对交错 A/B**（on/off 交替，同一份代码只差 `warmup.py` 那一行；本机后台 `freebuff` 常驻 1 核、
+负载 0.3↔16 波动，故必须交错）：
+
+| 对 | 预热 ON wall / user | 预热 OFF wall / user | Δ |
+|---|---|---|---|
+| 1 | 50.2s / 276s | 58.1s / 388s | −7.9s / −112s |
+| 2 | 61.4s / 354s | 68.2s / 441s | −6.8s / −87s |
+| 3 | 70.0s / 368s | 97.9s / 454s* | −28.0s / −86s |
+
+\* 第 3 对 OFF 撞上当天峰值负载，且被一条 **30s 耗时预算**判红（`test_bootstrap_variant::
+test_detect_cuda_without_runtime_falls_through`：call 30.35s，**空载单跑绿、ON 三对全绿** ⇒ 纯饿死
+不是逻辑坏）→ 该对只取方向，另两对取数。**机制指纹**（比墙钟更硬）：`ckpt_convert`/`opt_delta` 四条
+2.09~2.62s → **0.03~0.06s**（从 top30 里消失），总 warnings **14/19/39 → 3/8/6**。
+
+### 没做的（口径，都是结构性）
+
+* `test_lock_reentrancy`（空载 4.46s）：§92 已判到底，预筛 `class OR 锁词` 已是充分条件，不动。
+* `test_no_sleep_as_sync`（空载 3.5~4.6s）：三条规则**已共用**一次 `ast.parse` + 各自文本预筛（§43/§91），
+  剩下的钱是「每条规则各走一遍全树」——其中 rule 3 还走两遍（`_timestamp_names` + 断言遍历）。合并成
+  单趟估可再省 ~15-20%（0.5~0.7s），但它有三条红检（sleep/墙钟/时间戳）守着，收益小于风险 ⇒ **本轮不动**，
+  下轮要动先按 §7 写红用例。
+* **满载数字不可跨轮相减**：本节改前基线（wall 56.9/39.2s）与改后（46~70s）隔着完全不同的负载窗口，
+  同一命令安静 wall 实测差 1.7× ⇒ 一切收益按**同进程交错 A/B** 记（与 §92 同口径）。
+
+---
+
+## §92 三条 >5s 警告清算：一条是用例替全库付钱、一条差一道预筛、一条结构性到底（2026-10-29，用户指令「处理高耗时 pytest」点名三条）
+
+**读数**（本机 16 逻辑核；改前 = 用户门禁现场的 5.92/7.12/6.59s + 本机安静复测；改后 = 安静三连跑）：
+
+| 用例 | 改前 | 改后 | 账 |
+|---|---|---|---|
+| `test_sibling_reuse::test_rollout_source_requires_same_wver` | 6.59s（负载）/ 1.39~2.95s（安静） | **0.02~0.03s** | 用例在替**全库**付钱（①） |
+| `test_source_text_assert_budget::test_text_assert_counts_only_go_down` | 5.92s（负载）/ 3.36s（安静） | 2.03~2.09s（安静） | 生产者预筛差一道**名字交集**（②） |
+| `test_lock_reentrancy::test_no_rerun_of_an_owned_lock_…` | 7.12s（负载）/ 3.31~3.77s（安静） | **不变** 3.31~3.37s | 结构性下限，预筛已最优（③） |
+
+⚠ 本机同一命令的安静 wall 本身就能差 **1.7×**（同一份 `totals()` 分相实测：`parse` 1.47s ↔ 0.81s）
+—— 所以下面的收益一律用**同进程交错 A/B** 记，不拿跨时段的两次绝对值相减。
+
+### ① `test_sibling_reuse`：`sibling_courses()` 每次调用把 `curricula/` **全部 243 门**课 `load_course`
+
+cProfile（单条用例 2.735s 的 call 相）：`rollout_sources → sibling_courses → load_course` **488 次**
+（2 次调用 × 243 门）= 2.6s，其中 `common.jsonc.strip_comments` 1.22s + `_drop_trailing_commas`
+1.09s（每门课还要再读一次关卡 jsonc）。**命中断言本身是毫秒级** —— 又一条「它和谁付了同一份钱」。
+
+**改法（只动测试，生产扫描一字未动）**：文件级 autouse 夹具把 `sr.CURRICULA_DIR` 钉到 `tmp_path`
+下**本文件用到的三门课**（`y30-pickup` / `y30-speed` / `x20-clutch` 的字节拷贝）。收窄不改任何判据：
+`_wire_trajs` 只给这三门建了 traj 根 ⇒ 其余 240 门即便身份相同也会被 `_resolve_dir → None` 跳过，
+扫不扫结果逐字一样（`MAX_SOURCES=100`，映射里最多 1 个候选）。文件内 12 条用例**全部** 1.4~2.95s → 0.02~0.03s。
+
+### ② `text_asserts`：`_producer_funcs` 的前置预筛差了一道「名字交集」
+
+`_needs_producers` 只挡「断言里连裸名调用都没有」的文件，177 个文件仍要走那趟**全树遍历 + 调用图不动点**
+（占 `totals()` 的 1.05s / 4.19s）。但 `producers` 的两个来源（`direct.add(fn.name)` 与不动点的
+`calls[fn.name]`）**全是本文件的函数定义名** ⇒ 断言里的裸名与本文件函数名不相交时 `direct` 必然为假。
+加 `_producers_of()` 这道**充分性**预筛（不是近似）后：177 → **15 个**文件真走它，0.95s / 1.10s 被省掉。
+
+**验证不是「跑一遍绿了就算」**：改前先把 `totals()` 的三元组（form/src/逐文件明细）dump 成 JSON，
+改后逐文件对账 —— **266 个文件全等**（form 1528 / src 1102）；同进程交错 A/B 两轮：
+`2.35→1.76s`、`2.29→1.82s`（**−20~25%**）。剩余的 `parse` 0.81 + `_index` 0.57 是判据本体，不可再省。
+
+### ③ `test_lock_reentrancy`：预筛已到最优，这轮**不动**
+
+gather 0.32（读 0.08 + 正则预筛）+ parse 1.88 + `_Indexer.visit` 1.35 ≈ 3.5s；预筛 `class OR 锁词`
+是**充分条件**（无类 ⇒ 不贡献类图/跨文件可达，无锁词 ⇒ 不可能有锁点），655 → 481 个文件，再紧就是近似。
+`visit_With` 里那两次 `ast.walk` 实测只占 0.09s（3465 次），也不值当。⇒ 结论：**这条的 >5s 警告在负载下
+就是会响**，按 §77 的口径它本来就是「留痕」。
+
+### 顺带发现（**未处理**，属判据缺口不是耗时）：`_Indexer.visit_With` 不派发子节点
+
+`visit_With` 在 `fn is not None` 时**不调 `generic_visit`**（子树改由 `ast.walk` 手工收调用）⇒ NodeVisitor
+对 `with` 体内的节点**一个都不再派发**：体内嵌套的 `with` **不登记锁点**、体内定义的函数/类**不进索引**、
+体内赋的锁**不注册**。合成探针实测：`with ctx(): lock=Lock(); def g(): with lock:` ⇒ `mod.fns` 只有 `f`、
+`g` 与内层锁点全丢。同段还有一次白付的重复 `ast.walk(node.items)`（`_check` 已按 (kind,name,行) 去重，
+所以只是浪费不是错判）。`_register_sites` 的注释写着「嵌套的由 generic_visit 登记」——**注释与实现不一致**
+（意图是递归，实现没递）。这是**漏报**（与仓位「宁可漏报不错杀」同向，但不是有意的）；
+修它可能让 `sites`/`opaque` 棘轮当场变红 ⇒ 按 §7 要先写红用例再动，本轮未动。
+
+### 没做的（口径，用户 2026-10-29 拍板）
+
+**不改 `conftest` 的耗时预算口径**（曾评估「警告改按 `wall − CPU` 空闲时间判」，能让三条警告全消且更贴
+「预算专抓不占 CPU 的空等」的原始理由）—— 用户在四个选项里选了「只做能做的优化」：>5s 警告照旧按
+wall-clock 留痕、>30s 报错不动、`time_budget` 铁律不动（§77）。⇒ 下次这三条（或新用例）再响，先问
+「它在等谁 / 它和谁付了同一份钱」，而不是先抬阈值。全文与本节读数 → `DECISIONS.md`
+§2026-10-29-goalnn-slow-test-scan-scope。
+
+---
+
+## §91 pygate 墙钟：模块级夹具按 worker 重付 · 死端口黑洞 · 全仓扫描的白付（2026-10-29）
+
+**读数**（本机 AMD 5800H / 8 物理核 16 逻辑核，门禁用 `physical_cores()` = 16 worker）：
+`bun run pygate` **70s → 52~64s**（pytest 65.10s → 50~62s，15 次连跑全绿；区间宽是因为本机
+后台（`freebuff` / zed 服务）本身吃掉 0.3~7 个核——负载 7+ 时同一套件要慢 ~10s，改前那个 70s
+也是在低负载窗口取的）；CPU（user+sys）**402s → 302s**。前 20 名慢用例里有 12 条是**同一件事
+被重复付钱**，三类根因：
+
+### ① forkdist 下 module 级夹具是**每 worker 一份**，拆成多条用例就会重复付
+
+门禁的分发器（`tools/forkdist.py` / xdist）按**逐条动态派发**：同一模块的几条用例几乎同时落到
+**不同 worker**，而 `@pytest.fixture(scope="module")` 只在一个进程内共享 ⇒ 夹具里那份整仓扫描
+被付 N 次。实测：
+
+| 文件 | 夹具/代码 | 拆成多条用例时 | 合并后 |
+|---|---|---|---|
+| `tests/test_reuse_ledger.py` | `reuse_audit.scan()` 344 文件 / 3817 函数 | **61.7s CPU（3 次）** | 14.1s（1 次） |
+| `tests/test_lock_reentrancy.py` | `_repo_report()` 390 文件进索引 | **34.1s（2 次）** | 12.3s（1 次） |
+| `tests/test_no_sleep_as_sync.py` | 三条规则各扫一遍 `tests/`+`e2e/` | 12.6s（3 次 parse） | 7.5s（1 次 parse） |
+| `tests/test_remote_dag.py` | `dag.graph()` 0.35s 静默 | **9 个 worker × 3.5~4.8s ≈ 35s** | 每个 worker 0.07s |
+
+**做法**：前三个文件把「同一份扫描的几个断言」合并成一条用例（每条断言各带消息，红了照样
+一眼看出是哪一类）；`remote_dag` 不动用例，改在**根 conftest 的 `pytest_collection_finish`**
+里预热（forkdist 在收集后 fork ⇒ 预热结果经 COW 被所有 worker 共享；xdist 不预热，因为那边
+每个 worker 都是新进程、不共享）。
+
+⚠ 这类「合并」只在**判据共享同一个昂贵输入**时成立；不同输入的用例合并会把失败定位变糊。
+
+### ② 「没人监听」≠「连接被拒」：死端口可能是黑洞
+
+`tests/conftest.py` 把控制台地址钉成死桩（生产隔离，2026-10-06 事故）。它原来写死
+`http://127.0.0.1:9`，而**本容器把 9 号端口做成黑洞**（SYN 被丢，`connect` 要等满超时才报错）：
+`hub/task_pack.TASK_PACK_TRIGGER_TIMEOUT_SEC = 8.0` ⇒ 每一处「控制台不可达」降级白等 8s
+（`--durations`：`test_task_pack_missing_is_actionable_404` / `test_end_it_reached_must_match_
+_the_current_pack_identity` 各 **8.02s**）。改法 = **按机器探测**：找一个 `ECONNREFUSED` 立即
+返回的回环端口（`_port_refuses_fast`，兜底 bind+close），两处 8.02s → 0.01s。
+
+### ③ 全仓扫描的白付：`unparse` 往返、三层遍历套壳、重复 parse
+
+* `tools/reuse_audit._shape()` 原来 `ast.parse(ast.unparse(node))` 再擦名字 —— `ast.dump` 只看
+  `_fields`（不含 lineno），**原树擦完与重解析逐字符等价**（全仓 3817 函数对账 0 处不一致），
+  扫描 **6.7s → 4.8s**。代价是 `_shape` 改成原地擦 ⇒ `_funcs()` 必须**两趟**（先取
+  `_norm_source`，它靠 `Constant(str)` 认 docstring）。
+* `tests/helpers/text_asserts._walk()`：自写 BFS 替 `ast.walk → iter_child_nodes → iter_fields`
+  （同顺序，80 万节点对账 0 处不一致），`ast.walk` 1.17s → 0.83s；再给 `_index()` 加类型预筛，
+  `totals()` 3.94s → 2.64s。
+* `_producer_funcs` 只在「有裸名调用型断言」时才跑（`_needs_producers`）。
+
+### ④ 预热清单收进 `tests/helpers/warmup.py` —— 并**实测否决**了 `source_scan` 那一项
+
+早间版本把 `remote_dag.graph()` 直接写在 `pytest_collection_finish` 里。现在清单收进
+`tests/helpers/warmup.py`：钩子只调 `warm_all()`，每项各打一行 `[warmup] <name> <秒>` + 合计
+（§16.3 的可观测性；卡住时一眼看出是哪一项）。加一项 = 加一行，但**判据写在模块头**：
+
+    进：部署值 / 预热成本 ≥ 3（≈ 至少 3 个 worker 会各自再算一遍，且单份不便宜）
+
+因为预热把成本从**并行的执行相**搬到**串行的收集相**（fork 之前，谁也不能重叠）。
+
+**被否决的那一项**（`test_layering` + 30 份 `*/test_*_split.py` 触发的 `source_scan` 整树 sweep：
+`imports()` + `_module_facts()`，1.8~2.5s）：4 组交错 A/B（同一批 30 个文件 / 402 例，
+`--forkdist 16`）—— 开 **6.8 / 8.9 / 9.8 / 6.8s**，关 **4.8 / 8.4 / 4.8 / 4.3s**；用户 CPU
+**33 → 18s**（省得很干净）但**墙钟稳定慢 ~2s**。根因：每个 worker 只扫**自己那条用例需要的**
+文件（0.3~1.0s），这部分与其它 worker 的用例完全重叠；而 1.8s 预热是纯串行的加法。整条门禁
+3 组 A/B 同向（同负载窗口内 +1.2s / ±0.3s）。
+
+COW 机制本身没问题（孤立探针，8 个子进程各扫一遍）：冷 **21.0s 孩子 CPU** vs 预热
+**1.81s + 孩子 0.0s** —— 共享成立，否决的是**这一项的换算**。对照进来的那一项：`dag.graph()`
+0.9s 静默 / 3.5~4.8s 满载，9 个 worker 各付一次，省 ~35s CPU —— 部署值/成本 ≈ 9~40，
+远超门槛。
+
+**也不进**：只有**一个** worker 会付的扫描 —— `reuse_audit.scan()` 4.5s（`test_reuse_ledger`
+合并后只剩一条用例）· `text_asserts.totals()` 2.6s · `cli_surface._scan()` 0.37s。它们本来就只
+付一次，预热只会更慢；要加速得改用例结构（合并断言 / 缓存派生小结果），不是往清单里塞。
+
+### 同批修掉的 flake / 假红
+
+1. `tests/biz/test_z2_ladder_courses.py::test_reward_prices_defence_and_never_pays_for_movement`
+   在 HEAD 就红：`REWARD_METRICS/REWARD_PARAMS` 混进了 `aimHits`/`wHit`（未落地的密集命中实验），
+   而六级 `curricula/z2-r*.jsonc` 的 formula 里没有它 ⇒ 结构判据当场红。按文档价格表
+   （`docs/nn/training-stack.md` §50）回退期望值。
+2. `tests/remote/test_body_transfer_guard.py` 的墙钟上界 `2*idle + 0.5` 在 16 worker 满载下测出
+   2.76s（判据本身只花 0.6s，其余是调度排队）⇒ 余量放大到 `+2.0`（仍钉在 `total_timeout=30s`
+   的 1/7 以内）。**注意 `# timing-ok:` 必须紧贴断言那行**（隔 2 行以上就查不到理由）。
+3. `tests/hub/test_offline_push_dispatch.py` 用 `monkeypatch.setattr(disp._client, …)` 改的是
+   **模块对象**（`hub/offline_push.py`: `self._client = client_mod`）⇒ 别的用例留下的 pump 线程
+   也会打到假函数上（门禁红现场 `calls == ["cancel", "ack", "ack"]`）。改成构造期就有的
+   `client_mod` 缝，给本用例一个私有 `SimpleNamespace`。
+
+---
+
 ## §90 同进程跨线程的「谁先谁后」不许用时间戳比（2026-10-27，flake）
 
 **触发**：`e2e/test_stream_collect_e2e.py::test_a_freed_slot_is_refilled_before_the_other_game_lands`

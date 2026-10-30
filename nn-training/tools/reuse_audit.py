@@ -25,6 +25,7 @@ import collections
 import hashlib
 import io
 import json
+import re
 import sys
 import tokenize
 from dataclasses import dataclass, field
@@ -119,6 +120,10 @@ def _body_without_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef) -> lis
     return body or [ast.Pass()]
 
 
+#: 行终止符（顺序即优先级：`\r\n` 必须排在 `\r` 之前，否则 CRLF 会被切成两行）。
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
+
+
 def _split_lines(src: str) -> list[str]:
     """把源码切成「解析器口径」的行 —— `ast._splitlines_no_ff` 的等价实现。
 
@@ -132,22 +137,19 @@ def _split_lines(src: str) -> list[str]:
 
     与 `str.splitlines()` 的差别：只认 `\n` 与 `\r`（`\r\n` 成对）；**不认** `\f` / `\x85`
     等 —— 它们在 Python 源码里不是换行（`\f` 合法地当空白），照 `splitlines()` 切会把行号切歪。
+
+    实现 = 单条正则 `\r\n|\r|\n` 的 `finditer`（2026-10-30 提速：原先是逐字符 Python 循环，
+    占整份扫描 ~1s / 344 文件）。**换行口径一个字节没动**：交替序 `\r\n` 在前保证 CRLF 成对，
+    `\f` 等不在式里 ⇒ 照旧不切；等价性仍由 `test_split_lines_and_segment_match_stdlib` 对着
+    stdlib 的逐字节对账钉住（CRLF / 裸 CR / 换页符 / 非 ASCII 字节偏移）。
     """
     lines: list[str] = []
     start = 0
-    idx = 0
-    total = len(src)
-    while idx < total:
-        c = src[idx]
-        idx += 1
-        if c == "\r":
-            if idx < total and src[idx] == "\n":  # \r\n 不拆开
-                idx += 1
-        elif c != "\n":
-            continue
-        lines.append(src[start:idx])
-        start = idx
-    if start < total:
+    for m in _LINE_END_RE.finditer(src):
+        end = m.end()
+        lines.append(src[start:end])
+        start = end
+    if start < len(src):
         lines.append(src[start:])
     return lines
 
@@ -210,22 +212,90 @@ def _norm_source(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: list[str])
 
 
 def _shape(node: ast.AST) -> str:
-    """AST 骨架：擦掉标识符名与常量值，只留结构（找结构克隆）。"""
-    clone = ast.parse(ast.unparse(node))
-    for sub in ast.walk(clone):
-        if isinstance(sub, ast.Name):
-            sub.id = "_"
-        elif isinstance(sub, ast.Attribute):
-            sub.attr = "_"
-        elif isinstance(sub, (ast.arg, ast.keyword)):
-            sub.arg = "_"
-        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            sub.name = "_"
-        elif isinstance(sub, ast.Constant):
-            sub.value = None
-        elif isinstance(sub, ast.ClassDef):
-            sub.name = "_"
-    return ast.dump(clone)
+    """AST 骨架：擦掉标识符名与常量值，只留结构（找结构克隆）。
+
+    ⚠ **原地擦除 + `ast.dump` 同款单趟直书**（2026-10-30 提速，全仓扫描 −2s）：上一版是
+    「`ast.walk` 先擦一遍 + 再 `ast.dump` 重走一遍」，同一棵子树被遍历两次（walk 的
+    `iter_child_nodes`/`deque` 占 2.2s）；且 `ast.dump` **逐层** `', '.join` 返回串，父层再拼
+    一次 ⇒ 拷贝量 ∝ 节点数 × 深度。这里改成一趟递归：**下行时擦、同时把文本追加进平铺列表**，
+    最后只 `"".join` 一次。
+
+    输出与 `ast.dump(擦完的树)` **逐字节相同**（默认参数口径：`annotate_fields=True` /
+    `include_attributes=False`，缺失字段 `AttributeError` 跳过，非 AST 非 list 走 `repr`）——
+    全仓 344 文件 / 3824 函数改前改后逐条对账 0 处不一致（对账脚本：比 `_funcs()` 四元组）；
+    分组只看字符串相等，字节相同 ⇒ 分组、计数、基线必然一致，改坏由
+    `tests/test_reuse_ledger.py` 的计数基线与合成自证用例当场抓住。
+
+    上一版提速的记事（别回退）：旧旧版先 `ast.parse(ast.unparse(node))` 再擦——`unparse` 2.7s
+    + 重解析 1.4s 纯属白付；节点本身只有 `_fields` 参与 dump（`lineno`/`col_offset` 是
+    attributes，缺省不带）⇒ 「重解析的新树」与「原树擦完」逐字符等价。
+
+    原地改的代价：调用方必须在取完 `_norm_source`（它按**子语句位置**切源码，且靠
+    `Constant.value` 是 `str` 认 docstring）之后才能调本函数 —— 见 `_funcs()` 的两趟写法。
+    """
+    out: list[str] = []
+    _shape_into(node, out)
+    return "".join(out)
+
+
+def _blank_identifiers(node: ast.AST) -> None:
+    """原地擦除（与旧版 `ast.walk` 里的六条分支逐字对齐，顺序也一致）。"""
+    if isinstance(node, ast.Name):
+        node.id = "_"
+    elif isinstance(node, ast.Attribute):
+        node.attr = "_"
+    elif isinstance(node, (ast.arg, ast.keyword)):
+        node.arg = "_"
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        node.name = "_"
+    elif isinstance(node, ast.Constant):
+        node.value = None
+    elif isinstance(node, ast.ClassDef):
+        node.name = "_"
+
+
+def _shape_into(node: ast.AST, out: list[str]) -> None:
+    """`ast.dump(node)` 的文本追加进 `out`（**先擦自己，再写字段**）。"""
+    _blank_identifiers(node)
+    cls = type(node)
+    out.append(cls.__name__)
+    out.append("(")
+    first = True
+    for name in node._fields:
+        try:
+            value = getattr(node, name)
+        except AttributeError:  # ast.dump 同款：缺字段跳过
+            continue
+        # ast.dump 同款：「值为 None 且**类上**的默认值也是 None」的字段不写（`arg.type_comment` /
+        # `arguments.vararg` / `Constant.kind` 都靠这条隐掉）——少写/多写会直接改分组基线。
+        if value is None and getattr(cls, name, ...) is None:
+            continue
+        if first:
+            first = False
+        else:
+            out.append(", ")
+        out.append(name)
+        out.append("=")
+        _shape_value(value, out)
+    out.append(")")
+
+
+def _shape_value(value: object, out: list[str]) -> None:
+    """字段值 → 文本（三分支与 `ast.dump` 的 `_format` 同构：AST / list / repr）。"""
+    if isinstance(value, ast.AST):
+        _shape_into(value, out)
+    elif isinstance(value, list):
+        if not value:
+            out.append("[]")
+            return
+        out.append("[")
+        for i, item in enumerate(value):
+            if i:
+                out.append(", ")
+            _shape_value(item, out)
+        out.append("]")
+    else:
+        out.append(repr(value))
 
 
 def prod_files(root: Path = ROOT) -> list[Path]:
@@ -254,16 +324,18 @@ def _funcs(path: Path) -> list[tuple[str, str, str, int]]:
     except (SyntaxError, UnicodeDecodeError, OSError):
         return []
     lines = _split_lines(src)  # 每文件只切一次（逐语句重切 = 94s，见 `_split_lines`）
+    nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    # ⚠ **两趟**：`_shape` 原地擦常量（`Constant.value = None`），而 `_norm_source` 靠
+    # 「首条语句是 `Constant(str)`」认 docstring、按位置切源码 ⇒ 内容指纹必须先全部取完。
+    # 单趟（父函数先擦、子函数后取）会把**嵌套函数**的 docstring 算进指纹（顺序错位）。
+    contents = [(n.name, _norm_source(n, lines), n.lineno) for n in nodes]
     out: list[tuple[str, str, str, int]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for (name, content, lineno), node in zip(contents, nodes, strict=True):
         try:
-            # 骨架在**原节点**上算：docstring 是常量，本来就会被骨架的「擦常量」抹掉。
             shape = _shape(node)
-        except Exception:  # `unparse` 对个别语法（新版 match 等）可能失败 ⇒ 不因此丢整份文件
+        except Exception:  # 个别语法（新版 match 等）擦不动 ⇒ 不因此丢整份文件
             shape = ""
-        out.append((node.name, _norm_source(node, lines), shape, node.lineno))
+        out.append((name, content, shape, lineno))
     return out
 
 

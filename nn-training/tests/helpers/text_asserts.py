@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import ast
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -219,6 +220,54 @@ class _Index:
     asserts: tuple[ast.Assert, ...]
 
 
+def _walk(tree: ast.AST) -> list[ast.AST]:
+    """`ast.walk` 的等价物（**BFS、逐节点同一顺序**），去掉三层生成器套壳。
+
+    为什么要有：口径 A/B 每次全仓扫描要过 ~80 万个节点，而 `ast.walk → iter_child_nodes →
+    iter_fields` 每节点三层生成器 + 一次 `getattr` 的 AttributeError 兜底。实测同一语料
+    （459 文件 / 80 万节点）**1.17s → 0.83s**（2026-10-29）。语义等价的前提：
+      · 按 `node._fields` 的**字段顺序**展开，list 字段内按元素顺序（= `ast.iter_child_nodes`）；
+      · 先进先出（BFS）——`funcs` 的顺序依赖它（同名函数「后者覆盖前者」是语义的一部分）。
+    `tests/test_source_text_assert_budget.py` 的 A/B 总量基线与
+    `_split`/计数用例钉住这些输出；换遍历方式必须先对账。
+    """
+    out: list[ast.AST] = []
+    append = out.append
+    todo: deque[ast.AST] = deque((tree,))
+    popleft = todo.popleft
+    while todo:
+        node = popleft()
+        append(node)
+        kids: list[ast.AST] = []
+        for field_name in node._fields:
+            value = getattr(node, field_name, None)
+            if value.__class__ is list:
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        kids.append(item)
+            elif isinstance(value, ast.AST):
+                kids.append(value)
+        todo.extend(kids)
+    return out
+
+
+#: `_index` 真正要看的节点类型（其余 ~99% 直接跳过：省掉一排 isinstance）。
+_INDEXED_TYPES = frozenset(
+    {
+        ast.Assert,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Assign,
+        ast.AnnAssign,
+        ast.NamedExpr,
+        ast.AugAssign,
+        ast.For,
+        ast.AsyncFor,
+        ast.withitem,
+    }
+)
+
+
 def _index(tree: ast.Module) -> _Index:
     """一遍遍历收全三个清单（2026-10-10 提速：原来 A/B 各走一遍、B 内部又各走几遍）。
 
@@ -229,7 +278,9 @@ def _index(tree: ast.Module) -> _Index:
     binds: list[tuple[tuple[ast.expr, ...], ast.expr]] = []
     funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     asserts: list[ast.Assert] = []
-    for node in ast.walk(tree):
+    for node in _walk(tree):
+        if type(node) not in _INDEXED_TYPES:  # 廉价预筛：省掉下面一整排 isinstance
+            continue
         if isinstance(node, ast.Assert):
             asserts.append(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -352,6 +403,45 @@ def _producer_funcs(
     return frozenset(out)
 
 
+def _needs_producers(idx: _Index) -> bool:
+    """口径 B 的「生产者函数」那一支是否可能命中（**便宜的充分性预筛**）。
+
+    `direct` 只在断言表达式是**裸名调用**（`assert _prod_sources() in …`）时才可能为真；
+    一个这样的断言都没有的文件，`_producer_funcs` 的结果必然是「谁也用不上」——
+    它是本模块里最贵的一趟全树遍历（每个节点一次 `isinstance` + 调用图不动点），
+    白跑遍整个 `tests/` 就是秒级（2026-10-29：`totals()` 3.94s → 2.6s）。
+    判据是**充分**的：`direct` 要求的那两个类型条件与这里逐字相同。
+    """
+    return any(
+        isinstance(node.test, ast.Call) and isinstance(node.test.func, ast.Name)
+        for node in idx.asserts
+    )
+
+
+def _producers_of(tree: ast.Module, idx: _Index) -> frozenset[str]:
+    """口径 B 的「生产者函数」—— `_needs_producers` 之后再过一道**名字交集**预筛。
+
+    `direct` 的判据是「`assert <裸名>(…)` 且那个裸名 ∈ producers」，而 `producers` 的两个来源
+    （`_producer_funcs` 的 `direct.add(fn.name)` 与不动点的 `calls[fn.name]`）**全是本文件的
+    函数定义名** ⇒ 断言里的裸名与本文件函数名不相交时 `direct` 必然为假，那趟全树遍历
+    （每节点一次 `isinstance` + 调用图不动点，`_needs_producers` 里点名的「最贵的一趟」）
+    就是白跑。2026-10-29 实测：177 个走到这一步的文件里 **162 个**可跳，占该趟 0.95s / 1.10s
+    （`totals()` 单跑 4.19s → 3.24s）。
+    跳过的判据是**充分**的（`direct` 恒假 ⇒ B 计数逐字不变），不是近似；`_is_py_source`
+    那一支（`names` 闭包）不受影响，仍照旧算。
+    """
+    if not _needs_producers(idx):
+        return frozenset()
+    targets: set[str] = set()
+    for node in idx.asserts:
+        test = node.test
+        if isinstance(test, ast.Call) and isinstance(test.func, ast.Name):
+            targets.add(test.func.id)
+    if not any(fn.name in targets for fn in idx.funcs):
+        return frozenset()
+    return _producer_funcs(tree, idx.funcs)
+
+
 def source_asserts(tree: ast.Module) -> tuple[TextAssert, ...]:
     """口径 B 的全部命中（按行号排序）。"""
     return _source_hits(tree, _index(tree))
@@ -360,7 +450,7 @@ def source_asserts(tree: ast.Module) -> tuple[TextAssert, ...]:
 def _source_hits(tree: ast.Module, idx: _Index) -> tuple[TextAssert, ...]:
     """口径 B 的命中（吃已算好的索引 —— 一次遍历供 A/B 两口径）。"""
     names = _derived_names(idx.binds)
-    producers = _producer_funcs(tree, idx.funcs)
+    producers = _producers_of(tree, idx)
     out: list[TextAssert] = []
     for node in idx.asserts:
         test = node.test
@@ -453,7 +543,7 @@ def _counts(tree: ast.Module, *, has_py_face: bool) -> tuple[int, int]:
     if not has_py_face:
         return form, 0
     names = _derived_names(idx.binds)
-    producers = _producer_funcs(tree, idx.funcs)
+    producers = _producers_of(tree, idx)
     py_src = 0
     for node in idx.asserts:
         test = node.test

@@ -126,11 +126,15 @@ def _named_duration(node: ast.AST) -> bool:
     return False
 
 
-def _sleep_calls(src: str) -> list[tuple[int, str]]:
-    """所有 `.sleep(...)` 调用点 → (行号, 该行源码)。字符串里的同名字样不算。"""
+def _sleep_calls(src: str, tree: ast.Module | None = None) -> list[tuple[int, str]]:
+    """所有 `.sleep(...)` 调用点 → (行号, 该行源码)。字符串里的同名字样不算。
+
+    `tree` 给了就不再解析（调用方已为别的规则解析过同一份源码，见 `_file_problems`）。
+    """
     if not _DOT_SLEEP_RE.search(src):  # 预筛：本文件的 sleep 只会出现在桩子源码字符串里
         return []
-    tree = ast.parse(src)
+    if tree is None:
+        tree = ast.parse(src)
     lines = src.splitlines()
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -162,13 +166,13 @@ def _rel(py: Path) -> str:
         return py.name
 
 
-def _problems(py: Path) -> list[str]:
-    """该文件里每一处不合格 sleep 的 `路径:行: 源码 → 问题`。"""
-    src = source_scan.read_text(str(py))
+def _problems(py: Path, src: str | None = None, tree: ast.Module | None = None) -> list[str]:
+    """该文件里每一处不合格 sleep 的 `路径:行: 源码 → 问题`（`src`/`tree` 可由调用方预热）。"""
+    src = source_scan.read_text(str(py)) if src is None else src
     lines = src.splitlines()
     rel = _rel(py)
     out: list[str] = []
-    for lineno, text in _sleep_calls(src):
+    for lineno, text in _sleep_calls(src, tree):
         why = _reason(lines, lineno)
         if why is None:
             out.append(f"{rel}:{lineno}: {text.strip()} → 未标注（缺 `# sleep-ok: …`）")
@@ -180,19 +184,66 @@ def _problems(py: Path) -> list[str]:
     return out
 
 
-def test_every_sleep_in_tests_declares_a_reason_from_the_two_families() -> None:
-    """`tests/` + `e2e/` 里每一处 `.sleep(...)` 都要有落进两族的 `# sleep-ok: <理由>`。"""
-    problems: list[str] = []
+def _file_problems(py: Path) -> tuple[list[str], list[str], list[str]]:
+    """一个文件的三类问题：`(sleep 标注, 上界墙钟标注, 时间戳对比标注)`。
+
+    **一次 `ast.parse` 供三条规则**（2026-10-29 门禁提速）：三条规则看的是同一批文件、
+    同一份 AST，拆成三条用例时实测在门禁里各付一次全仓解析（共 12.6s CPU，其中 2/3 是
+    重付的）。预筛仍然是三条各自的超集预筛（并集不命中才跳过解析）。
+    """
+    src = source_scan.read_text(str(py))
+    need_sleep = bool(_DOT_SLEEP_RE.search(src))
+    need_timing = "assert" in src and bool(
+        _TIME_CALL_RE.search(src) or _DURATION_WORD_RE.search(src)
+    )
+    need_order = "assert" in src and bool(_TIME_CALL_RE.search(src))
+    if not (need_sleep or need_timing or need_order):
+        return [], [], []
+    tree = ast.parse(src)
+    return (
+        _problems(py, src, tree),
+        _timing_problems(py, src, tree),
+        _order_problems(py, src, tree),
+    )
+
+
+def test_tests_declare_their_timing_and_sync_reasons() -> None:
+    """`tests/` + `e2e/` 的**三条规则一次跑完**（分条说明见模块头与各规则小节）：
+
+    ① 每一处 `.sleep(...)` 要有落进「轮询步长 / 夹具模拟」两族的 `# sleep-ok: <理由>`；
+    ② 每一处**上界型**墙钟断言要有落进四族的 `# timing-ok: <理由>`；
+    ③ 每一处「比较两个事件时间戳」要有落进两族的 `# order-ok: <理由>`。
+    三条均为独立断言（消息各自指向对应规则与文档），红了一眼能看出是哪一条。
+    """
+    sleep_problems: list[str] = []
+    timing_problems: list[str] = []
+    order_problems: list[str] = []
     for root in SCAN_ROOTS:
         for py in sorted(root.rglob("*.py")):
             if "__pycache__" in py.parts:
                 continue
-            problems += _problems(py)
-    assert not problems, (
+            got_sleep, got_timing, got_order = _file_problems(py)
+            sleep_problems += got_sleep
+            timing_problems += got_timing
+            order_problems += got_order
+    assert not sleep_problems, (
         "tests/ 里的 sleep 必须标注理由，且理由要落进「轮询步长」/「夹具模拟」两族"
         "（说明它等的是谓词或模拟的工作量，而不是「等对方先跑」）：\n  "
-        + "\n  ".join(problems)
+        + "\n  ".join(sleep_problems)
         + "\n规则与背景：docs/nn/engineering.md §21"
+    )
+    assert not timing_problems, (
+        "上界型墙钟断言（`assert elapsed < N`）必须标注理由，且理由落进「上界兜底 / 契约上界 /"
+        " 夹具模拟 / 相对判据」四族（它是真兜挂起、契约上界、量夹具、还是相对判据 —— 而不是"
+        "「赌机器够快」）：\n  "
+        + "\n  ".join(timing_problems)
+        + "\n规则与背景：docs/nn/engineering.md §21"
+    )
+    assert not order_problems, (
+        "跨进程比较两个事件时间戳的断言必须标 `# order-ok:` 理由（两族）——Windows 的"
+        " `time.time()` 量化到 15.6ms，两个读数比大小会落到负数（假红）：\n  "
+        + "\n  ".join(order_problems)
+        + "\n规则与背景：docs/nn/engineering.md §21 ③"
     )
 
 
@@ -272,12 +323,13 @@ def _upper_bounded(node: ast.Compare) -> ast.AST | None:
     return None
 
 
-def _timing_asserts(src: str) -> list[tuple[int, str]]:
+def _timing_asserts(src: str, tree: ast.Module | None = None) -> list[tuple[int, str]]:
     """文件里每一处**上界型墙钟断言** → (行号, 该行源码)。字符串里的同名字样不算（AST）。"""
     # 预筛（超集）：要命中就得有一个 `assert` 语句，且它的比较式里带墙钟名/调用。
     if "assert" not in src or not (_TIME_CALL_RE.search(src) or _DURATION_WORD_RE.search(src)):
         return []
-    tree = ast.parse(src)
+    if tree is None:
+        tree = ast.parse(src)
     lines = src.splitlines()
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -303,13 +355,13 @@ def _timing_reason(lines: list[str], lineno: int) -> str | None:
     return None
 
 
-def _timing_problems(py: Path) -> list[str]:
+def _timing_problems(py: Path, src: str | None = None, tree: ast.Module | None = None) -> list[str]:
     """该文件里每一处不合格上界墙钟断言的 `路径:行: 源码 → 问题`。"""
-    src = source_scan.read_text(str(py))
+    src = source_scan.read_text(str(py)) if src is None else src
     lines = src.splitlines()
     rel = _rel(py)
     out: list[str] = []
-    for lineno, text in _timing_asserts(src):
+    for lineno, text in _timing_asserts(src, tree):
         why = _timing_reason(lines, lineno)
         if why is None:
             out.append(f"{rel}:{lineno}: {text.strip()} → 未标注（缺 `# timing-ok: …`）")
@@ -319,23 +371,6 @@ def _timing_problems(py: Path) -> list[str]:
                 f"（须以 {' / '.join(TIMING_FAMILIES)} 开头）"
             )
     return out
-
-
-def test_every_wallclock_upper_bound_assert_declares_a_reason() -> None:
-    """`tests/` + `e2e/` 里每一处上界墙钟断言都要有落进四族的 `# timing-ok: <理由>`。"""
-    problems: list[str] = []
-    for root in SCAN_ROOTS:
-        for py in sorted(root.rglob("*.py")):
-            if "__pycache__" in py.parts:
-                continue
-            problems += _timing_problems(py)
-    assert not problems, (
-        "上界型墙钟断言（`assert elapsed < N`）必须标注理由，且理由落进「上界兜底 / 契约上界 /"
-        " 夹具模拟 / 相对判据」四族（它是真兜挂起、契约上界、量夹具、还是相对判据 —— 而不是"
-        "「赌机器够快」）：\n  "
-        + "\n  ".join(problems)
-        + "\n规则与背景：docs/nn/engineering.md §21"
-    )
 
 
 def test_the_guard_actually_catches_wallclock_asserts(tmp_path: Path) -> None:
@@ -480,11 +515,12 @@ def _is_ts_read(node: ast.AST, names: set[str]) -> bool:
     )
 
 
-def _ts_pair_asserts(src: str) -> list[tuple[int, str]]:
+def _ts_pair_asserts(src: str, tree: ast.Module | None = None) -> list[tuple[int, str]]:
     """断言里**比较两个时间戳读数**的位置 → (行号, 该行源码)。"""
     if "assert" not in src or not _TIME_CALL_RE.search(src):
         return []
-    tree = ast.parse(src)
+    if tree is None:
+        tree = ast.parse(src)
     names = _timestamp_names(tree)
     if not names:
         return []
@@ -523,13 +559,13 @@ def _order_reason(lines: list[str], lineno: int) -> str | None:
     return None
 
 
-def _order_problems(py: Path) -> list[str]:
+def _order_problems(py: Path, src: str | None = None, tree: ast.Module | None = None) -> list[str]:
     """该文件里每一处不合格「比较两个时间戳」的 `路径:行: 源码 → 问题`。"""
-    src = source_scan.read_text(str(py))
+    src = source_scan.read_text(str(py)) if src is None else src
     lines = src.splitlines()
     rel = _rel(py)
     out: list[str] = []
-    for lineno, text in _ts_pair_asserts(src):
+    for lineno, text in _ts_pair_asserts(src, tree):
         why = _order_reason(lines, lineno)
         if why is None:
             out.append(f"{rel}:{lineno}: {text.strip()} → 未标注（缺 `# order-ok: …`）")
@@ -539,30 +575,6 @@ def _order_problems(py: Path) -> list[str]:
                 f"（须以 {' / '.join(ORDER_FAMILIES)} 开头）"
             )
     return out
-
-
-def test_every_two_timestamp_comparison_declares_a_reason() -> None:
-    """`tests/` + `e2e/` 里每一处「比较两个事件时间戳」都要有落进两族的 `# order-ok: <理由>`。
-
-    为什么单独立一条（前两条都抓不到它）：**跨进程比两个时间戳**的缝只有几毫秒，而 Windows
-    的 `time.time()` 量化到 **15.6ms** ⇒ 量出来的差值能落到**负数** ⇒ 断言假红
-    （2026-10-21 实测：`test_start_batches_spawns` 每三次全量门禁红一次；单跑绿 ⇒ 看着像回归）。
-    前两条只管「睡固定时长」与「拿绝对数字当上界」，这条管「拿两个时间戳比大小」——
-    同一个反模式（`docs/nn/engineering.md` §21 ③）的第三个面。
-    """
-    problems: list[str] = []
-    for root in SCAN_ROOTS:
-        for py in sorted(root.rglob("*.py")):
-            if "__pycache__" in py.parts:
-                continue
-            problems += _order_problems(py)
-    assert not problems, (
-        "比较两个事件时间戳（`assert spawns[2] >= ready[0]`）必须标注理由，且理由落进"
-        "「粗序事实」/「契约即时间」两族（它是不是只信先后、还是契约本身就是时间）——"
-        "跨进程的时间戳缝只有几毫秒，比大小就是拿机器速度当契约：\n  "
-        + "\n  ".join(problems)
-        + "\n规则与背景：docs/nn/engineering.md §21"
-    )
 
 
 def test_the_guard_actually_catches_two_timestamp_comparisons(tmp_path: Path) -> None:
