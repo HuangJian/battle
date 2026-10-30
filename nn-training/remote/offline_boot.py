@@ -2375,7 +2375,9 @@ def install_progress_pinger(
         # 那一份判据（25% 一桶 / 换阶段 / 完成 / retry），发报不受它影响（下面照常走）。
         # 走 `_should_log_progress`（延迟 import + 兜底）：`_ping` 承诺**永不抛**，而本文件
         # 在引导形态下没有 `common/` ⇒ 裸 import 会让第一条进度事件就炸掉打点。
-        if _should_log_progress(
+        # 轮边界「本轮开始」只上发报、不单独打日志行（每轮一条、与 PPO/eval 阶段头重复，
+        # 属刷屏；hub 活性不受影响——发报在下面照常走）。
+        if str(kind or "") != "round-start" and _should_log_progress(
             state.get("shown"),
             kind=str(kind or ""),
             it=int(it),
@@ -2398,7 +2400,6 @@ def install_progress_pinger(
             state["cool"] = 0.0
             state["level"] = 0
             state["outcome"] = ""  # 复活：本段结局不再是 unreachable
-            log("[打点] 已送达 hub（hold 活性 = 进度；心跳只续 TTL）")
             return True
         if code == 409:
             why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")

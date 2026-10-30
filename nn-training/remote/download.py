@@ -56,6 +56,7 @@ from typing import Any, NamedTuple
 
 import remote.course_cache as course_cache
 import remote.weights_standard as weights_standard
+from common.logutil import kb, secs
 from common.protocol import (
     BLOB_INIT,
     BLOB_OPT,
@@ -730,6 +731,7 @@ class PayloadLanded(NamedTuple):
     * `dl_sec` —— 取到字节的墙钟（push 携带 / 预取命中时为 `0.0`：本轮没走网络）。
     * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）；`staged` 时它是**预取时**的读数。
     * `staged` —— 本次是「预取已解好、只搬入」（plan/prefetch-stage-unpack §2.2）。
+    * `pruned_dirs` —— 本次轮转掉几个旧 job 目录（**不进人读的那一行**，进 `wire.prune_dirs`）。
     """
 
     payload_nbytes: int
@@ -738,6 +740,7 @@ class PayloadLanded(NamedTuple):
     dl_sec: float
     unpack_sec: float
     staged: bool = False
+    pruned_dirs: int = 0
 
 
 def _scan_shard_dirs(dest: Path) -> list[str]:
@@ -798,7 +801,7 @@ def _adopt_staged(
         log(f"job {jid}: 预取暂存搬入失败（{type(e).__name__}: {e}）——回退关键下载")
         return None
     # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（与字节路径同一个口径）
-    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)
+    pruned = prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
     shard_dirs = _scan_shard_dirs(job_dir)
     if bundle is not None:
         bundle.add("payload", f"预取命中（{nbytes} bytes，解包已就绪，未写 payload）")
@@ -811,6 +814,7 @@ def _adopt_staged(
         dl_sec=0.0,
         unpack_sec=unpack_sec,
         staged=True,
+        pruned_dirs=pruned,
     )
 
 
@@ -874,12 +878,14 @@ def _ensure_payload(
     t_dl = time.time()
     if preloaded is not None and "payload_zip" in preloaded:
         raw = preloaded["payload_zip"]
-        _line = f"push {len(raw)} bytes"
+        # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：字节数用 KB（十进制）——
+        # 人读的是量级，精确字节数在 wire 账里（payload_bytes）没少。
+        _line = f"push {kb(len(raw))}"
         payload_dl_sec = 0.0
     else:
         raw = download_payload(base_url, token, jid)
         payload_dl_sec = round(time.time() - t_dl, 3)
-        _line = f"下载 {len(raw)} bytes / {payload_dl_sec:.1f}s"
+        _line = f"下载 {kb(len(raw))} / {secs(payload_dl_sec)}s"
     # 日志节食（2026-09-24）：给了 bundle 就攒进调用方那一行（短口径，见 common.log_bundle）；
     # 不传时逐字节保持改造前的输出。
     if bundle is not None:
@@ -899,7 +905,7 @@ def _ensure_payload(
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
     # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（放开头 = 失败轮也照样清理）
-    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)
+    pruned = prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log)
     zip_path = job_dir / PAYLOAD_NAME
     zip_path.write_bytes(raw)
     # zip 内 manifest 是占位副本，解包仅取 shard 目录；权威校验全走 job 记录 manifest。
@@ -914,6 +920,7 @@ def _ensure_payload(
         shard_dirs=shard_dirs,
         dl_sec=payload_dl_sec,
         unpack_sec=unpack_sec,
+        pruned_dirs=pruned,
     )
 
 
@@ -969,7 +976,7 @@ def _ensure_code(
         sys.path.insert(0, str(cache_dir))
         _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
         if bundle is not None:
-            bundle.add("code", f"cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
+            bundle.add("code", f"cache 命中（{manifest['code_sha256'][:12]}…）")
         else:
             log(f"job {jid}: code cache 命中（{manifest['code_sha256'][:12]}…）——跳过下载解压")
     else:
@@ -1006,7 +1013,7 @@ def _ensure_code(
     t_prune = time.time()
     prune_caches(code_root.parent, log=log)
     if bundle is not None:
-        bundle.add("cache prune", f"{time.time() - t_prune:.2f}s")
+        bundle.add("cache prune", f"{secs(time.time() - t_prune)}s")
     return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
 
 
@@ -1040,7 +1047,7 @@ def _ensure_ts_code(
         _touch(cache)
         _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
         if bundle is not None:
-            bundle.add("ts_code", f"cache 命中（{sha[:12]}…）——跳过下载解压")
+            bundle.add("ts_code", f"cache 命中（{sha[:12]}…）")
         else:
             log(f"job {jid}: ts_code cache 命中（{sha[:12]}…）——跳过下载解压")
         return cache, 0, True
@@ -1081,5 +1088,5 @@ def _ensure_ts_code(
     t_prune = time.time()
     prune_caches(ts_root.parent, log=log)
     if bundle is not None:
-        bundle.add("cache prune", f"{time.time() - t_prune:.2f}s")
+        bundle.add("cache prune", f"{secs(time.time() - t_prune)}s")
     return cache, len(raw), False

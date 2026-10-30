@@ -25,6 +25,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from common.log import log
 
@@ -196,6 +197,12 @@ def settle_eval_summary(
     left_pending: int = 0,
     left_pairs: set[tuple[int, int]] | None = None,
     close_reason: str | None = None,
+    # duck-typed：调用方（remote/offline_eval）传入 `common.log_bundle.LogBundle`，本模块刻意不
+    # import 它——`eval_track` 是纯逻辑底座，分层守卫不允许依赖 `common.log_bundle`（见
+    # `tests/worker/test_eval_track_split.py::test_eval_track_imports_only_stdlib_and_the_log_primitive`）。
+    # 标注用 `Any`（**全仓既有口径**：train_core / train_common / np_core 的 bundle 形参都这么写）
+    # ——既不 import 那个类，也不给它再起一个名字（那会把「同名散落」账本顶过门槛）。
+    eval_bundle: Any = None,
 ) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
@@ -374,9 +381,8 @@ def settle_eval_summary(
     with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as jf:
         jf.write(json.dumps(summary) + "\n")
     if n:
-        done_msg = (
-            f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="
-            f"{clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
+        winrate_part = (
+            f"clean winRate={clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
             + (
                 f"（never_dispatched={never_dispatched} lost={lost} carried={carried}）"
                 if dropped > 0
@@ -386,6 +392,14 @@ def settle_eval_summary(
             + (f" vs rollout(sampled)={rollout_winrate:.1%}" if rollout_winrate is not None else "")
             + f" outcomes={json.dumps(outcomes)}"
         )
-        log(done_msg)
+        if eval_bundle is not None:
+            # 并进取云机 eval 的同一行（Cat 3 日志节食）；in-loop 路径不传 bundle ⇒ 照旧单独打。
+            eval_bundle.add("winRate", winrate_part)
+        else:
+            log(f"[eval] it{it} DONE wver={key16[:12]}… {winrate_part}")
     else:
-        log(f"[eval] it{it}: no game settled within window — nothing recorded")
+        note = f"[eval] it{it}: no game settled within window — nothing recorded"
+        if eval_bundle is not None:
+            eval_bundle.note(note)
+        else:
+            log(note)

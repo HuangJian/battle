@@ -434,7 +434,9 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
         return "已停用（XLA_PERSISTENT_CACHE=0）"
     prev = _XLA_CACHE_STATE.get("dir")
     if prev is not None:
-        return f"已开启（幂等：本进程已在用 {prev}）"
+        # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：路径是**本机**细节，
+        #   每轮打一遍纯噪声；「已开启 + 幂等」两个事实才是读数要回答的。
+        return "已开启（幂等在用）"
     # ★ 2026-10-03：训练路径上 torch_xla 的**第一次** import 往往就是这里（train_core 先开
     #   编译缓存、再取设备）——早于 xla_device 踩同一个 sympy.printing 缺绑定 ⇒ 先补再 import，
     #   否则本函数会把真因吞成「无 torch_xla」（错误文案见下）。
@@ -453,7 +455,8 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
     except Exception as err:
         return f"初始化失败（{type(err).__name__}: {err}）"
     _XLA_CACHE_STATE["dir"] = path_s
-    return f"已开启 → {path_s}（缓存被挤出时读盘而非重编，不改变数值）"
+    # 首启用：路径同样不进日志（每进程只报一次，但仍不是「准备完成」那行要回答的问题）。
+    return "已开启（缓存被挤出时读盘而非重编，不改变数值）"
 
 def xla_metrics_delta(prev: dict[str, float], cur: dict[str, float]) -> dict[str, float]:
     """两次快照的差（prev 缺项按 0）；cur 缺项不产生键。"""
@@ -585,7 +588,9 @@ def load_episodes_common(
     # 的那**一行**（见 `common/log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
     # 本机三条线共用本函数，行为不变）。
     if bundle is not None:
-        bundle.add("shards", f"{len(shards)} {shard_kind} ← {data_root}")
+        # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：`← {data_root}` 是本机路径，
+        #   每轮打一遍纯噪声（shard 目录在哪，看盘就知道）；「几片」才是读数。
+        bundle.add("shards", f"{len(shards)} {shard_kind}")
     else:
         log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
 

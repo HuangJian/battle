@@ -68,6 +68,9 @@ MOVED_NAMES = {
 #: 物料落地三兄弟（宿主 `run_job` 按裸名字读它们 ⇒ 它们是**活**的 `remote.worker` 转发名）。
 LANDING_NAMES = ("_ensure_payload", "_ensure_code", "_ensure_ts_code")
 ALLOWED_IMPORTS = {
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：`common.logutil`（L0 stdlib-only）
+    # 提供**秒数/字节**的紧凑口径（`secs` / `kb`）——两处各写一种小数位就是两种口径。
+    "common.logutil",
     "common.protocol",
     "remote.bulk_sched",
     "remote.course_cache",

@@ -517,8 +517,4 @@ def standard_weights_copy(
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(cached, standard)
-    log(
-        f"[weights] 云机侧整份副本：{p.name} → {cached}（{len(standard)}B；"
-        f"store 本体保持 delta {len(raw)}B 供 deliver 腿）"
-    )
     return cached

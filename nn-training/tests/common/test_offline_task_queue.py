@@ -1385,7 +1385,10 @@ def test_progress_ping_lands_on_the_wire_once_per_window() -> None:
 
     # 第一个事件没带轮号（调用方没给 it）⇒ 文本里也就不该出现「第0轮」
     assert any(progress_text(kind="iter", it=0, done=1, total=8) in ln for ln in lines), lines
-    assert any(progress_text(kind="round-start", it=7, done=0, total=0) in ln for ln in lines), lines
+    # 「本轮开始」只上发报、不单独打日志行（省一条刷屏；hub 活性在 1375 的 report 返回值已钉）
+    assert not any(
+        progress_text(kind="round-start", it=7, done=0, total=0) in ln for ln in lines
+    ), lines
 
 
 def test_progress_ping_opens_the_next_window_by_time() -> None:
@@ -1614,7 +1617,9 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
     # 2026-10-25：日志行与发报解耦 —— 「进度」那一行由 `progress_text` 单独打，
     # 送达另起一行（不再把 label 塞进送达行里重复一遍）。
     assert any(offline_boot._progress_label("iter", it=0, done=1, total=4) in ln for ln in lines), lines
-    assert any(ln.startswith("[打点] 已送达") for ln in lines), lines
+    # ★ 2026-10-30（云机 log 节食）：「[打点] 已送达 hub」那一行**删掉了**（每轮一句、
+    # 零新信息——送达这件事上面那句 `state == "live"` 已经用**行为**证明了：hold 被刷活
+    # 只可能是这一记打点 POST 干的）。原来这里还有一条文本断言钉它 ⇒ 跟着删（判据归位到行为面）。
     # 错租约（别人接管了 / token 过期）⇒ 真端点回 409，层按 taken/expired 停手（不再瞎 ping）
     detach2, _l2 = _pinger(base, "not-my-token", token=TOKEN)
     try:

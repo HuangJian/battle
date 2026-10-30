@@ -28,7 +28,6 @@ import json
 import os
 import tarfile
 from pathlib import Path
-from typing import Any
 
 from common.fs import extract_tar_bytes
 from common.proc import run_capture
@@ -121,7 +120,7 @@ def backup_failed_result(
 
 
 def prune_job_dirs(
-    work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None, bundle: Any = None
+    work_dir: Path, keep: int = JOB_DIR_KEEP, log=lambda msg: None
 ) -> int:
     """按 mtime 保留最近 `keep` 个 job 目录，其余删除。返回删除个数。
 
@@ -175,13 +174,11 @@ def prune_job_dirs(
                 removed += 1
         except BaseException as e:  # 含 SystemExit：沙箱删除守卫会打死调用线程
             log(f"prune: 跳过 {d.name}（{type(e).__name__}）")
-    if removed:
-        # 日志节食：给了 bundle 就攒进调用方那一行（prune 与 payload/设备/装载同属
-        # 「本 job 准备」阶段）。
-        if bundle is not None:
-            bundle.add("prune", f"删 {removed} 个旧 job 目录（保留最近 {keep} 个）")
-        else:
-            log(f"prune: 删除 {removed} 个旧 job 目录（保留最近 {keep} 个）")
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：**不进人读的那一行**——
+    # 「删 N 个旧 job 目录」是每轮都在发生的家务事（keep=2 ⇒ 稳态每轮删 1 个），
+    # 打进「准备完成」那行就是每轮一句重复。**计数进机器可读的 wire 账**
+    # （`wire.prune_dirs`）——人读的那一行只留「这一轮要回答的事」。
+    # 真正的异常（某个目录删不掉）仍然响亮记日志（上面那句 `prune: 跳过 …`）。
     return removed
 
 

@@ -219,12 +219,15 @@ def _drive_ppo_to_core(
     monkeypatch.setattr(
         worker,
         "_ensure_payload",
-        lambda *_a, **_k: SimpleNamespace(
+        # 用**真的** `PayloadLanded`（不是手搓的替身）：真类型加了字段，这个替身不会跟着变
+        # ⇒ 替身与真类型脱节是**静默**的漂移源（上一轮给 `PayloadLanded` 加 `pruned_dirs`
+        # 时它就当场红了 —— 那正是它该响的时候）。
+        lambda *_a, **_k: DL.PayloadLanded(
+            payload_nbytes=0,
             job_dir=job_dir,
             shard_dirs=[],
             dl_sec=0.0,
             unpack_sec=0.0,
-            payload_nbytes=0,
             staged=False,
         ),
     )

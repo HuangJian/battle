@@ -148,7 +148,6 @@ def _base_tar_bytes(
         except OSError:
             continue
         if hashlib.sha256(raw).hexdigest() == base_sha:
-            log(f"[opt] 基准命中内容寻址缓存：{p}（{len(raw)}B）")
             return raw
     searched: list[str] = []
     key0 = str(path.resolve()) if path is not None else ""
@@ -274,10 +273,6 @@ def _landed_bytes_for(
         if not base_p.exists():
             raise ProtocolError(f"opt delta 基准 tar 里没有 opt.pt（{base_dir}）——拒收")
         landed = rebuild(container, base_p, out_dir=scratch / "out", log=log)
-        log(
-            f"[opt] 读侧落地：容器 {len(container)}B → 整份 {len(landed)}B"
-            f"（基准 sha 已逐字节对上）"
-        )
         return landed
     finally:
         if made:
@@ -391,7 +386,6 @@ def ensure_standard_opt(
         except OSError as e:  # 旁存失败不挡主路（明细仍在产物链/hub 树里）
             log(f"[opt] 容器旁存失败（忽略）：{type(e).__name__}: {e}")
     atomic_write_bytes(target, standard)
-    log(f"[opt] 读侧落地：{target.name} ← {len(standard)}B 整份（容器 {len(raw)}B 在 {aside.name}）")
     return target
 
 
@@ -430,10 +424,6 @@ def standard_opt_copy(
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(cached, standard)
-    log(
-        f"[opt] 产物侧整份副本：{p.name} → {cached}（{len(standard)}B；"
-        f"产物本体保持容器 {len(raw)}B 供 deliver 腿）"
-    )
     return cached
 
 
@@ -456,7 +446,6 @@ def seed_opt_blob(
                 return sha
             Path(root).mkdir(parents=True, exist_ok=True)
             atomic_write_bytes(p, tar_bytes)
-            log(f"[opt] 整份种子进内容寻址缓存：{p}（{len(tar_bytes)}B）——本轮 opt_sha 可解析")
             return sha
         except OSError as e:
             log(f"[opt] 种子写缓存失败（换下一个根）：{type(e).__name__}: {e}")

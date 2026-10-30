@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.logutil import secs
 from common.protocol import BLOB_OPT, BLOB_REF, ProtocolError, coef_active
 
 
@@ -118,7 +119,7 @@ def course_prep(manifest: dict, job_dir: Path, epoch_mult: float, prep_b: Any) -
         metrics_version=int(manifest["metrics_version"]),
         identity={"course": course.name, "formula_hash": manifest["formula_hash"]},
     )
-    prep_b.add("课程", f"{time.time() - t0:.1f}s（load_course+reward）")
+    prep_b.add("课程", f"{secs(time.time() - t0)}s（load_course+reward）")
     # ★ 2026-10-26（用户口径）：训练侧放大只改 PPO **更新遍数**；manifest 本身**不重写**
     #   （hub 对账/产物指纹都绑在它上面），缺省 1.0 时不打任何新日志。
     epochs = effective_epochs(int(manifest.get("epochs") or 0), epoch_mult)

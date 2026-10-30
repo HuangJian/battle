@@ -304,6 +304,10 @@ class RunContext:
         self.t0 = time.time()
         #: 上一轮结果的 opt 原始字节的 sha（→ 下一轮 manifest.opt_sha，命中 blob_cache）
         self.last_opt_sha: str = ""
+        #: 已报过的「配额漂移」原值（manifest 与计划不一致）——同值不重复报。
+        #: 2026-10-30（用户口径「prep 行只留必要读数」）：漂移不再进 prep 那行，
+        #: 改成「值变了才报一行」——静默会让人以为两边一致。
+        self.quota_drift_reported: str = ""
 
     def planned_range(self) -> list[int]:
         """本次实际要跑的轮次（计划区间 ∩ CLI 上限）。"""
@@ -989,10 +993,8 @@ def _eval_round_done(ctx: RunContext) -> Callable[[int, dict], None]:
             return
         if ctx.deliverer is None:
             return
+        # 幂等补传：首次投递时这一轮的逐局行还没产生，重投一次把读数补齐（见本函数 docstring）。
         ctx.deliverer.submit_eval_round(int(it))
-        ctx.log(
-            f"it{it} 评估落账 {result.get('settled')} 局——已请求重投该轮（补读数的幂等补传）"
-        )
 
     return on_done
 

@@ -1493,8 +1493,6 @@ def run_iter_rollout(
     rb.add("shards", len(shard_dirs))
     rb.add("games", report["games"])
     rb.add("winRate", report["winRate"])
-    rb.add("samples", report["totalSamples"])
-    rb.add("逐局画像", f"{len(report['perGame'])}/{len(shard_dirs)} 行")
     if not report["perGame"]:
         # 四列数据源没了是**要看的**（控制台耗时/击杀/残血/道具会恒空）。
         rb.note("逐局画像 0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest")

@@ -369,6 +369,11 @@ def ppo_update(
     # 组 2 的落点：设备/口径/预物化/逐 epoch 汇总/最慢窗口… 全攒进这一个 bundle，
     # 在 update 收尾打**一行**（用户口径 2026-09-24：「整合到一行，完成时打印」）。
     diag_b = LogBundle(log)
+    # ★ 2026-10-30（修上一刀的回归）：逐 epoch 的汇总**攒成一条系列**，收尾时作**一个字段**
+    # 打进那一行（原来每个 epoch 各自 `add` 一个字段 ⇒ N 个 epoch = N 段，那一行越收越长；
+    # 上一刀索性整段删掉，连「编译税总额」和「逐 epoch 系列」这两个判决要素一起丢了）。
+    # 现在：系列仍完整（编译税是逐 epoch 涨还是稳定，一眼能看出来），但只占**一段**。
+    diag_epoch_series: list[str] = []
     # 环境开关关掉时一次快照都不取（非 XLA 机器上快照本身也返空）。
     _diag_base = (
         xla_metrics_snapshot()
@@ -789,19 +794,21 @@ def ppo_update(
             log(f"[ppo] {_ep_line}")
         if diag_on:
             # 按 chunk batch 形状汇总（累计）：若 B 只有一个值却仍「每步新编译」⇒ 形状不是原因。
-            # ★ 2026-09-24：不再单独打，改成**一个 epoch 一个字段**留在诊断行里 —— 系列还在
-            # （编译税是逐 epoch 涨还是稳定，一眼能看出来），但一行不增。
+            # ★ 2026-10-30：这条**不再逐 epoch 单独占一个字段**（N 个 epoch = N 段），
+            # 改成往**系列**里追加一句，收尾时合成**一个字段**（判决要素一个不少）。
             _sum = " ".join(
                 f"B={_b}:{int(_a['iters'])}步/墙钟{_a['wall']:.0f}s"
                 for _b, _a in sorted(diag_by_b.items(), key=lambda kv: -kv[1]["wall"])
             )
-            diag_b.add(
-                f"到 epoch {ep + 1}",
-                f"{_sum} | 累计编译={diag_compile:.0f}s（新编译 {diag_uncached:.0f} 次）/ "
-                f"总墙钟={time.time() - t0:.0f}s",
+            diag_epoch_series.append(
+                f"到 epoch {ep + 1}: {_sum} | 累计编译={diag_compile:.0f}s"
+                f"（新编译 {diag_uncached:.0f} 次）/ 总墙钟={time.time() - t0:.0f}s"
             )
     # ---- 组 2 收尾：诊断一行（完成为止的读数集合，等价替换原来的 ~25 行/轮）----
     if diag_on:
+        if diag_epoch_series:
+            # 逐 epoch 的汇总系列（编译税是逐 epoch 涨还是稳定 ⇒ 一眼看穿）。
+            diag_b.add("到 epoch", " ｜ ".join(diag_epoch_series))
         _sw = diag_worst.get("span", 0.0)
         if _sw:
             diag_b.add(

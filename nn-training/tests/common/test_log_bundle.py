@@ -117,3 +117,21 @@ def test_beat_uses_injected_now_argument(rig: tuple[LogBundle, list[str], dict[s
     b.add("进度", "5/10 5s")
     assert b.beat("x", now=clock["t"] + 61.0) is True
     assert lines[-1] == "x｜进度=5/10 5s"
+
+
+def test_add_raw_renders_a_bare_sentence_at_its_own_place(
+    rig: tuple[LogBundle, list[str], dict[str, float]],
+) -> None:
+    """`add_raw`：天生整句的读数**不带** `k=` 前缀，位置按加入顺序（不排到行尾）。
+
+    为什么要它：「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」是**一句话**（样本放大与 PPO 遍数是同一件事
+    的两个数）——硬塞成 `放大=…` 那个等号会让读者误以为「放大」和「×2 ⇒ …」是两件独立的事。
+    """
+    b, lines, _ = rig
+    b.add("it245", "105 局（4 关）")
+    b.add_raw("放大×2 ⇒ 105 局；epochs×1 ⇒ 4")
+    b.add("payload", "push 305 KB")
+    assert b.emit("job j1: 准备完成 6.4s") is True
+    assert lines == [
+        "job j1: 准备完成 6.4s｜it245=105 局（4 关）｜放大×2 ⇒ 105 局；epochs×1 ⇒ 4｜payload=push 305 KB"
+    ], lines

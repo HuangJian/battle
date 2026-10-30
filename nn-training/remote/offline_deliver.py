@@ -1186,11 +1186,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             self._retry_n = 0
             self._last_error = ""
             self._next_try = 0.0
-            left = len(self.pending_anchors())
-            self.log(
-                f"补传 {done} 轮（it{sent[0]}…it{sent[-1]}）→ {self.base_url}"
-                + (f"；锚点仍欠 {left} 轮，下轮继续" if left else "")
-            )
+            # 成功投递**不打日志**（每轮一句、纯刷屏）；失败那条（投递异常 / 连丢）才响。
         elif not changed:
             # 这一拍一轮都没送出去（且没有别的脏东西要落盘）⇒ 记进可观测面：连续失败 + 原因。
             self._retry_n += 1

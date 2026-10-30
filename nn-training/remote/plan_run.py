@@ -344,29 +344,25 @@ def _run_iteration(
     if ctx.epoch_mult != 1.0:
         # PPO 遍数是整数（`train_core` 直接拿去喂 `ppo_update`）：向上取整，最少 1。
         epochs_eff = max(1, math.ceil(epochs_eff * ctx.epoch_mult))
-    # ★ 2026-09-24（日志节食）：这几行与 `run_job` 自己的入口/设备/装载读数是**同一个阶段**
-    # （本轮上云从拼 spec 到 PPO 开算），所以攒进同一个 bundle，由 `run_job` 在装载完成时
-    # 打**一行**（原来这里是 1 行 + 它那边 9 行）。
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：it{it} 段只留
+    # 「本轮采了多少 / 采了哪几关 / 起点权重 / 训练侧配额」四件事。
+    # 「动态采集：每关初波 N 局」删掉（那是**计划**的形状，不是本轮的实际读数——
+    # 它每轮都一样 ⇒ 每轮重复一遍纯噪音；真实采到多少局在下一段「配额=… kept N steps」里）。
+    # ⚠ 顺带修掉一个隐患：老口径读 `vol['games_per_stage']`，而新形态的 volume 块只有
+    # `games_per_stage_by_stage` ⇒ 那个键可能不存在（读它会 KeyError）。新口径不读它了。
     prep_b = LogBundle(ctx.log)
     prep_b.add(
         f"it{it}",
         f"{len(pairs)} 局（{len({s for s, _ in pairs})} 关）wver={init_fp[:12]}…"
-        + (
-            f" 动态采集：每关初波 {vol['games_per_stage']} 局，训练侧配额 "
-            f"{vol['per_stage_quota']}/关"
-            if isinstance(vol, dict)
-            else ""
-        ),
+        + (f" 配额 {vol['per_stage_quota']}/关" if isinstance(vol, dict) else ""),
     )
+    # 「放大」是**一句话**（样本放大与 PPO 遍数是同一件事的两个数）⇒ 用 add_raw：
+    # 渲染成「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」而不是「放大=样本×2 ⇒ …」（那个等号会让
+    # 读者误以为「放大」和「×2 ⇒ …」是两件独立的事）。旧的「样本」「PPO 」两个前缀词删掉。
     if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
-        prep_b.add(
-            "放大",
-            f"样本×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；"
-            f"PPO epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}",
+        prep_b.add_raw(
+            f"放大×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}"
         )
-    prep_b.add(
-        "动量", "带 Adam 动量" if ctx.last_opt_sha else "无 opt：Adam 从头"
-    )
     # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
     m = dict(ctx.manifest)
     m.update(
@@ -387,8 +383,10 @@ def _run_iteration(
     # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
     # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
     # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
-    # ★ 2026-10-29（日志瘦身）：漂移**不再单打一行 WARN**（值恒定 ⇒ 390 轮 390 条一样的话），
-    #   改成拼进 prep 那行的「动态采集」字段（同一句读数里既有生效值也有被覆盖的原值）。
+    # ★ 2026-10-30（用户口径「prep 行只留必要读数」）：漂移**不进 prep 那行**了
+    #   （那一行只留「这一轮发生了什么」）⇒ 改成**值变了才报一行**（首轮必报；同值不再报）。
+    #   为什么不静默：manifest 与计划对不上是**真异常**（节点按计划值跑，hub 按 manifest 值算），
+    #   全程静默就没人知道两边不一致 ⇒ 但也不能每轮报一行（值恒定 ⇒ 390 轮 390 条一样的话）。
     drift = 0
     want = 0
     if isinstance(vol, dict):
@@ -397,8 +395,10 @@ def _run_iteration(
         drift = have if (have and have != want) else 0
         m["per_stage_quota"] = want
     if drift:
-        # 与 prep 那行同一个 bundle（装载完成时一次性打），不再每轮一条 WARN。
-        prep_b.add("配额漂移", f"manifest {drift}/关 → 按计划 {want}/关")
+        _drift_note = f"manifest {drift}/关 → 按计划 {want}/关"
+        if _drift_note != ctx.quota_drift_reported:
+            ctx.quota_drift_reported = _drift_note
+            ctx.log(f"WARN 配额漂移：{_drift_note}（本轮按计划值生效）")
     # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
     # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
     # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。

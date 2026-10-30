@@ -110,13 +110,20 @@ def training_running() -> bool:
 def _last_write(p: Path) -> float:
     """目录最后写入 = 内部最新文件 mtime（目录自身 mtime 不随内容变化，不可靠）。"""
     latest = 0.0
+    seen = False
     for root, _dirs, files in os.walk(p):
         for name in files:
             try:
-                latest = max(latest, os.stat(os.path.join(root, name)).st_mtime)
+                mtime = os.stat(os.path.join(root, name)).st_mtime
             except OSError:
-                pass
-    return latest or p.stat().st_mtime
+                continue
+            seen = True
+            latest = max(latest, mtime)
+    # ⚠ 「有没有文件」与「最新 mtime 是多少」是**两件事**：全零 mtime 的文件（mtime=0）
+    #   让 `latest` 停在 0.0，而 `0.0 or 目录mtime` 会**兜底到目录 mtime**（那是「现在」）⇒
+    #   一批明明很旧的文件被当成「刚刚写过」⇒ 那个目录永远回收不掉。
+    #   判据改成「见到过文件就用文件的时间」（`seen`），目录 mtime 只在**一个文件都没有**时兜底。
+    return latest if seen else p.stat().st_mtime
 
 
 def _dir_size(p: Path) -> int:

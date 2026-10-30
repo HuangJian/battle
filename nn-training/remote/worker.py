@@ -45,6 +45,7 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
+from common.logutil import secs
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
@@ -587,7 +588,9 @@ def run_job(
     # E1（plan/aistudio-transfer-hardening §4）：准备段的**计时**拆出来。
     # 为什么值得：慢链路上「准备 95s」分不清是**在传**还是在**本地处理**；解包/blob 解析
     # 是纯 CPU，把它们从准备合计里切出来，剩下的差额就是链路（而链路正是本 plan 的病灶）。
-    t_land = time.time()
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：「物料落地」**合计**段删掉——
+    #   它是「下载 + 解包 + code」三项的加总，而三项各自都已单独报（解包/blob 解析/payload），
+    #   每轮再打一遍加总只是重复。分项秒数仍进 wire 账（机器可读的那份没少）。
     landed = _ensure_payload(
         base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=prep_b
     )
@@ -595,13 +598,16 @@ def run_job(
     shard_dirs = landed.shard_dirs
     payload_dl_sec, unpack_sec = landed.dl_sec, landed.unpack_sec
     payload_nbytes = landed.payload_nbytes
-    # 解包这半场的读数照打（别写 0.0——那是诊断读数）；staged 时注明它**不在关键路径上**，
-    # 关键路径的诚实性由 wall 保证（`other = wall − in − out − ppo`，解包已不在 wall 里）。
+    # ★ 2026-10-30：prune 计数**不进人读的那一行**（每轮一句家务事 ⇒ 纯重复），
+    #   改由 wire 账带着（`wire.prune_dirs`）。
+    pruned_dirs = landed.pruned_dirs
+    # 解包这半场的读数照打（别写 0.0——那是诊断读数）；staged 时它**不在关键路径上**
+    # （关键路径的诚实性由 wall 保证：`other = wall − in − out − ppo`，解包已不在 wall 里）。
+    # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：括号里的解释删掉——秒数本身
+    # 就是读数，「不含传输」这类口径说明属于注释（代码里已写清），不该每轮重打一遍。
     prep_b.add(
         "解包",
-        f"{unpack_sec:.1f}s（预取时已完成，不在关键路径）→ {len(shard_dirs)} shard"
-        if landed.staged
-        else f"{unpack_sec:.1f}s → {len(shard_dirs)} shard（CPU，不含传输）",
+        f"{secs(unpack_sec)}s → {len(shard_dirs)} shard",
     )
     # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
     code = _ensure_code(
@@ -617,10 +623,6 @@ def run_job(
         bundle=prep_b,
     )
     code_root, code_cache_dir, blob_root = code.code_root, code.code_cache_dir, code.blob_root
-    prep_b.add(
-        "物料落地",
-        f"{time.time() - t_land:.1f}s（下载 {payload_dl_sec:.1f}s + 解包 {unpack_sec:.1f}s + code）",
-    )
 
     # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
     # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
@@ -629,7 +631,7 @@ def run_job(
     _job_sha = str(manifest["code_sha256"])
     if _ACTIVE_CODE_SHA is None:
         _ACTIVE_CODE_SHA = _job_sha
-        prep_b.add("进程代码 sha", f"{_job_sha[:12]}…（后续 job 若变化将自重启）")
+        prep_b.add("进程代码 sha", f"{_job_sha[:12]}…")
     elif _job_sha != _ACTIVE_CODE_SHA:
         raise CodeChangedError(_ACTIVE_CODE_SHA, _job_sha)
 
@@ -697,7 +699,7 @@ def run_job(
         preloaded=preloaded,
         log=log,
     )
-    prep_b.add("blob 解析", f"{time.time() - t_blob:.1f}s src={weights_src}")
+    prep_b.add("blob 解析", f"{secs(time.time() - t_blob)}s src={weights_src}")
     if weights_src in ("cache", "course_cache"):
         blob_hits += 1
     elif weights_src == "download":
@@ -840,6 +842,7 @@ def run_job(
             payload_bytes=payload_nbytes,
             payload_dl_sec=payload_dl_sec,
             unpack_sec=unpack_sec,
+            prune_dirs=pruned_dirs,
         )
         # 两遍收敛：result_bytes 自己的十进制位数要算进体长（第一遍以占位 0 计）。
         result["wire"]["result_bytes"] = len(pack_result_v2(result))
@@ -865,6 +868,7 @@ def run_job(
             payload_bytes=payload_nbytes,
             payload_dl_sec=payload_dl_sec,
             unpack_sec=unpack_sec,
+            prune_dirs=pruned_dirs,
             ts_code_bytes=ts_code_bytes,
             ts_code_hit=ts_code_hit,
             device=device,

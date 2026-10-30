@@ -52,7 +52,18 @@ TRACK_ONLY_NAMES = {
 }
 
 #: `eval_track.py` 允许的 import 面（stdlib + 本仓唯一的日志原语 `biz.log`；多一个即红）。
-ALLOWED_IMPORTS = {"__future__", "json", "threading", "time", "collections.abc", "pathlib", "common.log"}
+#: ⚠ `typing` 是 **stdlib**（Protocol 的形状声明用）——放进 stdlib 那一侧**不放宽**仓内依赖面
+#: （仓内依赖仍然只有 `common.log` 一个）；「纯逻辑底座不许拖进运行器/torch/numpy」的闸不变。
+ALLOWED_IMPORTS = {
+    "__future__",
+    "json",
+    "threading",
+    "time",
+    "collections.abc",
+    "pathlib",
+    "typing",
+    "common.log",
+}
 
 
 def _tree(path: Path) -> ast.Module:

@@ -39,6 +39,7 @@ from typing import Any
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
 from common.log import log as _rl_log
+from common.log_bundle import LogBundle
 from common.platform_utils import call_bounded, cpu_worker_slots, rmtree_best_effort
 from common.protocol import UnreapableChildError
 from worker import serve_pool
@@ -396,6 +397,9 @@ def run_cloud_eval(
     报错）仍归 `failed`（响亮记一笔，读数少一局）——那是这一轮该留的出路。
     """
     log = log or _rl_log
+    # 本轮 eval 的所有阶段读数攒成**一行**（Cat 3 日志节食）：开评 / 长驻 worker 池 /
+    # serve_pool 计数 / 单局耗时 / summary winRate / 落账，轮末 `eb.emit` 一次打完。
+    eb = LogBundle(log)
     out: dict[str, Any] = {
         "ran": False,
         "games": 0,
@@ -446,9 +450,10 @@ def run_cloud_eval(
         # 调用方（`plan_run._setup_cloud_eval`）通常已经把缺省解析成具体数；直接调本函数时
         # 退回 `default_slots()`——同一口径，不依赖任何「对方在抢」的估算。
         n_slots = max(1, int(slots or 0) or default_slots())
-        log(
-            f"[eval-cloud] it{it}: 开评 {len(todo)}/{len(pairs)} 局"
-            f"（语料 {len(plan.stages)} 关 × {plan.n_seeds} 种，wver={key16[:12]}…，并发 {n_slots}）"
+        eb.add(
+            "开评",
+            f"{len(todo)}/{len(pairs)} 局（语料 {len(plan.stages)} 关 × {plan.n_seeds} 种，"
+            f"wver={key16[:12]}…，并发 {n_slots}）",
         )
         # 长驻 worker 池（`docs/nn/runtime-opt.md` §22.7）：逐局 spawn 时每局重付一次 bun 启动 +
         # wasm 编译 + 首用 attestation×3 + 权重解析。收益 ∝ **每 lane 局数**（§22.2）：本地 16 核
@@ -463,13 +468,16 @@ def run_cloud_eval(
         if pool is not None:
             ready_n = pool.start()
             if ready_n:
-                log(
-                    f"[eval-cloud] it{it} 长驻 worker 池：{ready_n}/{min(n_slots, len(todo))} 就绪"
-                    f"（同质入口 {serve_pool.SERVE_ANY_SCRIPT}，mode=eval）"
-                    "——逐局进程启动/权重解析只付一次，单局失败自动回退一次性 spawn"
+                eb.add(
+                    "worker池",
+                    f"长驻 worker 池：{ready_n}/{min(n_slots, len(todo))} 就绪（同质入口 "
+                    f"{serve_pool.SERVE_ANY_SCRIPT}，mode=eval）——逐局进程启动/权重解析只付一次，"
+                    "单局失败自动回退一次性 spawn",
                 )
             else:
-                log(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
+                eb.note(
+                    f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn"
+                )
                 pool.close()
                 pool = None
         lock = threading.Lock()
@@ -672,13 +680,14 @@ def run_cloud_eval(
                     )
         finally:
             if pool is not None:
-                log(f"[eval-cloud] it{it} " + pool.summary())
+                eb.add("servePool", pool.summary())
                 pool.close()
 
         # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
-        log(
-            f"[eval-cloud] it{it} "
-            + game_watch.game_time_summary("eval", game_walls, retried=len(retried_games))
+        eb.add(
+            "单局耗时",
+            game_watch.game_time_summary("eval", game_walls, retried=len(retried_games)),
+            final_only=True,
         )
         out["servePool"] = (
             None
@@ -714,6 +723,7 @@ def run_cloud_eval(
             t0,
             rollout_winrate,
             course_fp=course_fp or "",
+            eval_bundle=eb,
         )
         out["ran"] = True
     except Exception as e:  # 评估是旁路：任何意外都只是「这一轮没有读数」
@@ -724,11 +734,14 @@ def run_cloud_eval(
             pool.close()  # 幂等：内层 finally 已关过就是空操作（防「创建后、执行前」抛出的漏）
         out["sec"] = round(time.time() - t0, 2)
     if out["ran"]:
-        log(
-            f"[eval-cloud] it{it} DONE：{out['settled']}/{out['games']} 局落账"
-            f"（失败 {out['failed']}，{out['sec']}s，wver={out['wver'][:12]}…"
+        eb.add(
+            "落账",
+            f"{out['settled']}/{out['games']} 局（失败 {out['failed']}，{out['sec']}s，"
+            f"wver={out['wver'][:12]}…"
             # 正常轮恒空（机器卡过才留痕，与 rollout 腿的「整轮重投」同一个口径）
             + (f"，整轮重投 {out['roundRetries']} 次" if out.get("roundRetries") else "")
-            + "）"
+            + "）",
         )
+        # 整轮 eval 的读数合成一行（开评 / worker池 / servePool / 单局耗时 / winRate / 落账）。
+        eb.emit(f"[eval-cloud] it{it} 评估")
     return out

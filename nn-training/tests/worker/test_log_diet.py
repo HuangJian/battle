@@ -85,7 +85,7 @@ def test_load_folds_four_lines_into_the_bundle(monkeypatch: pytest.MonkeyPatch) 
     assert len(eps) == 2
     assert logs == [], "给了 bundle 就不该再逐行打（节食的全部意义）"
     text = b.text()
-    for part in ("shards=2 RL ← R", "装载=2/2", "episodes=2 eps（GAE 已算）"):
+    for part in ("shards=2 RL", "装载=2/2", "episodes=2 eps（GAE 已算）"):
         assert part in text, text
     assert "配额" not in text, "无配额路线不该凭空多一栏"
 
@@ -221,17 +221,21 @@ def test_iter_abort_still_prints_the_watchdog_contract(
 # ------------------------------------------------------ ④ worker 侧两个攒行出口
 
 
-def test_prune_reports_into_the_bundle(tmp_path: Path) -> None:
+def test_prune_count_stays_out_of_the_human_line(tmp_path: Path) -> None:
+    """★ 2026-10-30（用户口径「准备完成行只留必要读数」）：prune 是**每轮都在发生的家务事**
+    （keep=2 ⇒ 稳态每轮删 1 个）⇒ 打进人读的那一行就是每轮一句重复。
+
+    计数由**返回值**带走（最终落 `wire.prune_dirs`，机器可读的那份没少）；人读的日志里
+    不再出现它，也不再为此单起一行。
+    """
     from remote.worker import prune_job_dirs
 
     for i in range(3):
         (tmp_path / f"j{i}").mkdir()
-    b, lines = _rig()
     logs: list[str] = []
-    removed = prune_job_dirs(tmp_path, keep=1, log=logs.append, bundle=b)
-    assert removed == 2
-    assert logs == [], "给了 bundle 就不该再单独打一行"
-    assert "prune=删 2 个旧 job 目录（保留最近 1 个）" in b.text(), b.text()
+    removed = prune_job_dirs(tmp_path, keep=1, log=logs.append)
+    assert removed == 2, "删除计数必须照旧返回（wire 账要靠它）"
+    assert logs == [], "prune 不再单独打一行（计数走返回值 ⇒ wire 账）"
 
 
 def test_ts_code_cache_hit_reports_into_the_bundle(tmp_path: Path) -> None:

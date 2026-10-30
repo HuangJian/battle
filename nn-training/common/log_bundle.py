@@ -18,6 +18,9 @@ Kaggle / Colab 上的一次离线整段训练要跑几小时，控制台的日�
 
 * `add(key, value)`：按 key **就地替换**（同一件事的后续读数覆盖前一个，位置不变）——所以
   「装载 128/336 → 256/336 → 336/336」最终只剩最后那个值。
+* `add_raw(text)`：记一段**整句**读数（渲染时**不加** `k=` 前缀）。给「天生是一句话」的
+  读数用——如「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」：硬塞进 `k=v` 会多一个等号、读起来像
+  两件独立的事。位置按 parts 顺序（`note()` 也是裸文本，但它排到行**尾**，位置不对）。
 * `final_only=True`：只在 `emit`（阶段完成）里出现，**心跳不带**（如「单局耗时分布」在跑完
   之前根本不存在）。
 * `emit(head)`：打一行 `head｜k=v｜k=v` 并**清空**、标记完成（之后再 `beat` 不会打）。
@@ -87,6 +90,22 @@ class LogBundle:
                 # 一旦标过 final_only 就不再降级（同一件事的后一次读数是「更完整」的那个）
                 self._parts[i][2] = bool(self._parts[i][2]) or final_only
 
+    def add_raw(self, text: str, *, final_only: bool = False) -> None:
+        """记一段**整句**读数（渲染时**不加** `k=` 前缀），位置按 parts 顺序。
+
+        为什么需要它：有些读数天生是**一句话**而不是「键=值」——
+        如「放大×2 ⇒ 105 局；epochs×1 ⇒ 4」。硬塞进 `add()` 会渲染成
+        `放大=×2 ⇒ …`，那个等号让读者误以为「放大」和「×2 ⇒ …」是两件独立的事。
+        `note()` 也是裸文本，但它排到行**尾**（那是补充说明的位置），而这里
+        要留在它自己的位置上（跟它前后的事实相邻才读得懂）。
+
+        与 `add()` 不同：raw 段**没有键** ⇒ 不可按 key 替换（重复调用即追加两段）。
+        """
+        if not text:
+            return
+        with self._lock:
+            self._parts.append([None, text, final_only])
+
     def note(self, text: str, *, final_only: bool = False) -> None:
         """无键自由文本（如看门狗口径）；同内容只留一份，保序。"""
         if not text:
@@ -145,7 +164,10 @@ class LogBundle:
     def _join(self, *, include_final: bool) -> str:
         """调用方持锁（`_parts`/`_notes` 的读契约）。"""
         chunks = [
-            f"{row[0]}={row[1]}" for row in self._parts if include_final or not row[2]
+            # 键为 None = 整句读数（`add_raw`）⇒ 裸文本，不带 `k=` 前缀。
+            str(row[1]) if row[0] is None else f"{row[0]}={row[1]}"
+            for row in self._parts
+            if include_final or not row[2]
         ]
         chunks += [str(row[0]) for row in self._notes if include_final or not row[1]]
         return self._sep.join(chunks)

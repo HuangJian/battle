@@ -329,7 +329,10 @@ def test_eval_landing_triggers_a_repost_of_that_round(
     _setup_cloud_eval(ctx)
     _maybe_cloud_eval(ctx, 2)
     assert ctx.eval_runner is not None and ctx.eval_runner.wait_idle(10.0)
-    assert deliv.reposts == [2] and any("重投" in m for m in logs)
+    # 重投动作由 `deliv.reposts` 实证（幂等补传，把刚产生的逐局行补齐）。原先那行
+    # `已请求重投该轮` 人类可读日志在 2026-10 的 log 节食里被删（动作本身才是信号，
+    # 日志串不再钉它）——见 `remote/plan_handoff.py::_eval_round_done`。
+    assert deliv.reposts == [2]
 
 
 def test_close_eval_drains_and_is_safe_when_disabled(

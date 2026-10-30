@@ -79,6 +79,10 @@ def _wire_block(**over: object) -> dict:
         "payload_bytes": 0,
         "payload_dl_sec": 0.0,
         "unpack_sec": 0.0,
+        # 磁盘轮转：本 job 落地时删掉几个旧 job 目录（keep=2 ⇒ 稳态每轮删 1 个）。
+        # ★ 2026-10-30：它**不进人读的那一行**（每轮一句家务事 ⇒ 纯重复），
+        # 计数只留在这份机器可读的账里。缺省 0 = 本轮没轮转（旧 job 目录还没超 keep）。
+        "prune_dirs": 0,
         "opt_restore_sec": 0.0,
         "grad_sec": 0.0,
         "blob_hits": 0,

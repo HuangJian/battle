@@ -43,6 +43,7 @@ import remote.opt_standard as opt_standard
 import remote.paddle_env as paddle_env
 import remote.weights_delta as weights_delta
 from common.log_bundle import LogBundle
+from common.logutil import secs
 from common.progress_hook import report as _report_progress
 from common.protocol import (
     BLOB_DEMO,
@@ -374,6 +375,9 @@ def run_training_core(
     ts_code_hit: bool,
     device: Any,
     torch_threads: int,
+    #: ★ 2026-10-30：本次落地时轮转掉几个旧 job 目录（`wire.prune_dirs`）。
+    #: 它**不进人读的那一行**——「准备完成」那行只留这一轮要回答的事。
+    prune_dirs: int = 0,
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     #: 与离线盘 `CFG.epoch_mult` 同义：只改遍数，不改采样量/评估语料，也不改 manifest 身份。
     epoch_mult: float = 1.0,
@@ -429,6 +433,7 @@ def run_training_core(
             ts_code_hit=ts_code_hit,
             device=device,
             torch_threads=torch_threads,
+            prune_dirs=prune_dirs,
             epoch_mult=epoch_mult,
             preloaded=preloaded,
             init_w=init_w,
@@ -475,7 +480,7 @@ def run_training_core(
     model: torch.nn.Module = ppo_engine.build_ppo(
         str(init_w) if (init_w is not None and init_w.exists()) else None
     )
-    prep_b.add("建模型", f"{time.time() - t_build:.1f}s（build_ppo）")
+    prep_b.add("建模型", f"{secs(time.time() - t_build)}s（build_ppo）")
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
@@ -510,12 +515,17 @@ def run_training_core(
         prep_b.add(
             "设备",
             f"{device_t}｜device_type={_fp['device_type']}｜"
-            f"XLA 设备数={_fp['global_device_count']}（本进程可见 {_fp['addressable_device_count']}）｜"
+            f"XLA {_fp['global_device_count']}/{_fp['addressable_device_count']}｜"
             f"replication={_fp['replication_devices']}｜attrs={_fp['attrs']}｜"
-            f"world_size={xla_world_size()}（无复制时恒 1，**别拿它当 TPU 判据**）｜"
-            f"2048² matmul {(_spd * 1000) if _spd is not None else float('nan'):.1f} ms"
-            "（TPU 量级 ~ms；~10ms+ = 后端是 CPU）",
+            f"world_size={xla_world_size()}｜"
+            f"2048² matmul {(_spd * 1000) if _spd is not None else float('nan'):.1f} ms",
         )
+        # ★ 2026-10-30（用户口径「准备完成行只留必要读数」）：这一行**删掉**了两处
+        #   「怎么读这个数」的注解——`world_size=1` 不是 TPU 判据（真机 TPU 上它就是 1，
+        #   判据是 device_type + global_device_count，见 `worker/ppo/np_core.py::xla_fingerprint`
+        #   与 `tests/worker/test_tpu_backend_guard.py`）；`2048² matmul` 的量级判据
+        #   （TPU ~ms；~10ms+ = 后端是 CPU）同样留在代码注释与那两处权威出处里。
+        #   **注解留在代码里，不留在人读的日志里**——日志每轮打一遍，注解只值一次。
         _why = tpu_backend_missing_reason(_fp)
         if _why:
             # 拒跑是**要看的**：把攒着的设备读数先落下来（否则这行永远不出现）。
@@ -609,7 +619,9 @@ def run_training_core(
             opt_state, opt_raised = _load_opt_state(opt_dir / "opt.pt")
             opt.load_state_dict(opt_state)
             opt_restore_sec = round(time.time() - t_opt, 3)
-            prep_b.add("opt", f"从 opt_init（{opt_src}）恢复 {opt_restore_sec:.1f}s（Adam 动量延续，D5）")
+            # ★ 2026-10-30：动量延续这件事由**文案本身**承载（「动量延续」），不再另起一段
+            #   「动量=带 Adam 动量」——同一件事说两遍。
+            prep_b.add("opt", f"{opt_src}恢复 {secs(opt_restore_sec)}s 动量延续")
             if opt_raised:
                 prep_b.add(
                     "opt",
@@ -944,6 +956,7 @@ def run_training_core(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,
         unpack_sec=unpack_sec,
+        prune_dirs=prune_dirs,
         opt_restore_sec=opt_restore_sec,
         grad_sec=ppo_sec,
         # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
@@ -980,6 +993,7 @@ def _run_training_core_paddle(
     ts_code_hit: bool,
     device: Any,
     torch_threads: int,
+    prune_dirs: int = 0,
     epoch_mult: float = 1.0,
     preloaded: dict | None,
     init_w: Path | None,
@@ -1048,7 +1062,7 @@ def _run_training_core_paddle(
     model = student_paddle.build_ppo(
         str(init_w) if (init_w is not None and init_w.exists()) else None
     )
-    prep_b.add("建模型", f"{time.time() - t_build:.1f}s（student_paddle.build_ppo）")
+    prep_b.add("建模型", f"{secs(time.time() - t_build)}s（student_paddle.build_ppo）")
 
     # ---- opt 解析（与 torch 版共用 `_resolve_opt_init`；只是 BOD1 落地换成 numpy 实现）----
     opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
@@ -1092,7 +1106,7 @@ def _run_training_core_paddle(
             steps_init = checkpoint_paddle.load_opt_pt(model, opt, opt_dir / "opt.pt")
             opt_restore_sec = round(time.time() - t_opt, 3)
             prep_b.add(
-                "opt", f"从 opt_init（{opt_src}）恢复 {opt_restore_sec:.1f}s（Adam 动量延续，D5）"
+                "opt", f"{opt_src}恢复 {secs(opt_restore_sec)}s 动量延续"
             )
         else:
             if init_w is None or not init_w.exists():
@@ -1335,6 +1349,7 @@ def _run_training_core_paddle(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,
         unpack_sec=unpack_sec,
+        prune_dirs=prune_dirs,
         opt_restore_sec=opt_restore_sec,
         grad_sec=ppo_sec,
         # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。

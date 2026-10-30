@@ -25,7 +25,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-__all__ = ["Clock", "log_line", "stamp", "tag_logger"]
+__all__ = ["Clock", "kb", "log_line", "secs", "stamp", "tag_logger"]
 
 
 class Clock(Protocol):
@@ -41,6 +41,29 @@ STAMP_FMT = "%H:%M:%S"
 def stamp(clock: Clock = time) -> str:
     """`[HH:MM:SS]`（含方括号，与 `biz/log.py` 的历史输出逐字节一致）。"""
     return f"[{clock.strftime(STAMP_FMT)}]"
+
+
+def secs(v: float) -> str:
+    """秒数的**紧凑**口径：整数秒不带 `.0`（`0.0` → `0`、`6.4` → `6.4`）。
+
+    为什么：准备段那一行的读数多半是 `0.0s`（快路径命中）——小数位是纯噪声；
+    而 `6.4` 这类**真读数**必须留住（判「慢在哪一段」靠它）。全仓统一走这里，
+    免得同一栏在不同调用点各写一种小数位。
+    """
+    s = f"{float(v):.1f}"
+    return s[:-2] if s.endswith(".0") else s
+
+
+def kb(n: int) -> str:
+    """字节 → KB（**十进制**；`< 1000` 给字节本身）。
+
+    为什么用 1000 而不是 1024：这一栏是给人**粗读量级**的（payload 多大），
+    十进制 KB 与云控制台的账单口径一致，不会出现「305 KB 却对不上 298 KiB」。
+    """
+    n = int(n)
+    if n < 1000:
+        return f"{n} B"
+    return f"{round(n / 1000)} KB"
 
 
 def log_line(tag: str, msg: str, *, clock: Clock = time, stream: Any = None) -> None:
