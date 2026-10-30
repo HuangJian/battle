@@ -41,6 +41,17 @@ origin+pathname（`?session=` 是 JWT，绝不入日志）；Colab/AI Studio 仅
 多开页签各有各的日志文件、不再互相 `writer-conflict`；host 从 bridge 的 `ready/status.session` 采纳
 这一页的键，面板上直接显示 `日志 notebook:<session>`。旧的无标签会话不再续写，7 天 prune 自然清掉。
 
+**2026-10-30 W4 接线（定时启停）**：host 侧 `app/scheduler.ts` 把任务存 GM（`bnc:tasks`），occurrence
+claim 存 `bnc:occurrences`（1s 沉淀窗后转正；claim 后不重试）；20s 墙钟轮询 + `visibilitychange` 立即补
+一拍，`run-*` 迟到 10 分钟、停止按 `stopGraceMs`。面板「定时」组只设**下一次**（不设重复日期）：24 小时
+制 `HH:MM`（早于现在 = 明天）+ 动作（运行选中 cell·运行全部·停会话·中断内核），执行一次即从任务表移除；
+`run-cell` 的目标在创建时捕获（uuid/index/前 200 字符指纹），执行时指纹不符不跑，目标 cell **顶部挂醒目
+徽标**（帧内渲染，amber 横幅 + 整段描边，虚拟化后由 observer 补回）；到点前 10 分钟起面板提示区
+每秒刷新「距…还有 M:SS」；添加停会话必须先勾确认。host 还会自动点掉 Kaggle 的「是否仍需编辑 /
+配额超限」弹窗：只认 `Continue editing` / `Continue working` 两个文案（「Turn off TPU」绝不点），
+每弹窗一次 + 1.5s 冷却（`app/auto-continue.ts`）。停止走**外层** `Stop session`（先 drain，失败也停但写日志）；到点可见
+时 10s 倒数 + 取消，后台页按预授权执行；浏览器关掉就不跑（用 Kaggle 原生 Schedule 才是关页面可跑）。
+
 ## §43 云机轮的窗口/分关读数：控制台**零代码**，同一条读面（2026-10-28）
 
 **触发**：`docs/nn/training-stack.md` §46（云机 rollout 支持轮换）。此前云机轮在控制台上

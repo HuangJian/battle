@@ -22,11 +22,30 @@ export type PanelAction =
 
 export type PanelHandlers = Partial<Record<PanelAction, () => void | Promise<unknown>>>
 
+export interface PanelScheduleRow {
+  id: string
+  text: string
+  next: string
+  enabled: boolean
+}
+
+export interface PanelScheduleInput {
+  /** `HH:MM`（下一次；已过则明天）。只跑一次。 */
+  at: string
+  action: string
+}
+
 export interface Panel {
   readonly host: HTMLElement
   setStatus(text: string, tone?: 'ok' | 'warn' | 'error'): void
   /** 本页写的是哪一份日志（`notebook:<session>`；多开页签时只有它能把页面和日志对上）。 */
   setSession(text: string): void
+  /** 定时任务列表（存储与调度在 app/scheduler，面板只负责上屏）。 */
+  setSchedule(rows: PanelScheduleRow[]): void
+  /** 提示区的「距下一次还有 N:SS」倒计时；null = 隐藏。 */
+  setNext(text: string | null): void
+  /** 到点倒数 + 「取消」；返回 false = 用户取消（面板销毁也算取消）。 */
+  countdown(text: string, seconds: number): Promise<boolean>
   setBusy(busy: boolean): void
   destroy(): void
 }
@@ -57,6 +76,12 @@ export interface PanelOptions {
   position?: PanelPosition | null
   /** 拖拽结束（真的移动过）回报**夹取后**的坐标，调用方负责落存储。 */
   onMove?: (position: PanelPosition) => void
+  /** 添加定时任务：返回错误文案（null/void = 成功）。run-cell 的目标由调用方捕获。 */
+  onScheduleAdd?: (
+    input: PanelScheduleInput,
+  ) => string | null | void | Promise<string | null | void>
+  onScheduleRemove?: (id: string) => void
+  onScheduleToggle?: (id: string, enabled: boolean) => void
 }
 
 interface ButtonSpec {
@@ -165,6 +190,33 @@ button[data-act="stopSession"] { background: #4a1f26; border-color: #7d3340; }
 .status[data-tone="ok"] { color: #7fd6a2; }
 .status[data-tone="warn"] { color: #e6c36a; }
 .status[data-tone="error"] { color: #ff8d8d; }
+.srow { display: flex; gap: 4px; margin-bottom: 4px; }
+.srow input[type="time"], .srow select {
+  flex: 1 1 auto; min-width: 0; padding: 3px 4px; color: #dbe7ff;
+  background: #1b2738; border: 1px solid #2d4a70; border-radius: 6px; font: inherit;
+}
+.srow button { flex: 0 0 auto; min-width: 48px; }
+.sack { display: flex; gap: 4px; align-items: center; color: #e6c36a; font-size: 10px; margin-bottom: 4px; }
+.sack[hidden] { display: none; }
+.slist { display: flex; flex-direction: column; gap: 3px; }
+.sitem { display: flex; gap: 4px; align-items: center; font-size: 11px; }
+.sitem .stext { flex: 1 1 auto; word-break: break-all; }
+.sitem .snext { color: #7f93ad; font-size: 10px; white-space: nowrap; }
+.sitem button { flex: 0 0 auto; min-width: 0; padding: 1px 5px; }
+.snote { margin-top: 3px; color: #7f93ad; font-size: 10px; }
+.next {
+  margin-top: 6px; color: #ffd27a; font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; word-break: break-all;
+}
+.next:empty { display: none; }
+.ask {
+  display: flex; gap: 6px; align-items: center; margin-top: 6px; padding: 4px 6px;
+  border: 1px solid #7d6b33; border-radius: 6px; background: rgba(125, 107, 51, .18);
+  color: #e6c36a; font-size: 11px;
+}
+.ask[hidden] { display: none; }
+.ask span { flex: 1 1 auto; }
+.ask button { flex: 0 0 auto; min-width: 44px; }
 `
 
 export function mountPanel(
@@ -190,13 +242,48 @@ export function mountPanel(
           )
           .join('')}</div></div>`,
     ).join('') +
-    `<div class="status" data-tone="warn">连接中…</div></div>`
+    `<div class="group"><div class="glabel">定时（一次性 · <span data-tz></span> · 页面开着才跑）</div>` +
+    `<div class="srow"><input type="text" data-sched="at" value="09:00" maxlength="5" inputmode="numeric"` +
+    ` title="24 小时制 HH:MM；早于现在就是明天" placeholder="HH:MM">` +
+    `<select data-sched="action" title="到点做什么">` +
+    `<option value="run-cell">运行选中的 cell</option><option value="run-all">运行全部</option>` +
+    `<option value="stop-session">停会话</option><option value="interrupt">中断内核</option></select></div>` +
+    `<div class="srow"><button type="button" data-sched="add">设为下一次</button></div>` +
+    `<label class="sack" data-ack hidden><input type="checkbox" data-sched="ack">` +
+    ` 我确认到点会停止会话</label>` +
+    `<div class="slist" data-sched="list"></div>` +
+    `<div class="snote">只跑一次（执行后自动移除）；24 小时制，早于现在 = 明天；` +
+    `运行 cell = 添加时选中的那一段（内容变了不跑）。</div></div>` +
+    `<div class="next" data-next></div>` +
+    `<div class="status" data-tone="warn">连接中…</div>` +
+    `<div class="ask" data-ask hidden><span data-ask-text></span>` +
+    `<button type="button" data-ask-cancel>取消</button></div></div>`
 
   const bnc = shadow.querySelector('.bnc') as HTMLElement
   const handle = shadow.querySelector('[data-drag]') as HTMLElement
   const status = shadow.querySelector('.status') as HTMLElement
+  const next = shadow.querySelector('[data-next]') as HTMLElement
   const sess = shadow.querySelector('[data-sess]') as HTMLElement
+  const tzEl = shadow.querySelector('[data-tz]') as HTMLElement
+  const schedAt = shadow.querySelector('[data-sched="at"]') as HTMLInputElement
+  const schedAction = shadow.querySelector('[data-sched="action"]') as HTMLSelectElement
+  const schedAckWrap = shadow.querySelector('[data-ack]') as HTMLElement
+  const schedAck = shadow.querySelector('[data-sched="ack"]') as HTMLInputElement
+  const schedAdd = shadow.querySelector('[data-sched="add"]') as HTMLElement
+  const schedList = shadow.querySelector('[data-sched="list"]') as HTMLElement
+  const ask = shadow.querySelector('[data-ask]') as HTMLElement
+  const askText = shadow.querySelector('[data-ask-text]') as HTMLElement
+  const askCancel = shadow.querySelector('[data-ask-cancel]') as HTMLElement
+  let askFinish: ((ok: boolean) => void) | null = null
   let busy = false
+
+  // 本地时区（任务用墙钟，不存 UTC）：显示出来，操作员不用猜
+  const offsetMin = -new Date().getTimezoneOffset()
+  const offSign = offsetMin >= 0 ? '+' : '-'
+  const offAbs = Math.abs(offsetMin)
+  tzEl.textContent = `UTC${offSign}${String(Math.floor(offAbs / 60)).padStart(2, '0')}:${String(
+    offAbs % 60,
+  ).padStart(2, '0')}`
 
   // 拖拽只在标题栏起手；move/up 挂在 document 上（配合指针捕获），指针移出面板也能继续拖。
   const view = doc.defaultView
@@ -312,15 +399,115 @@ export function mountPanel(
     sess.title = text
   }
 
+  function setNext(text: string | null): void {
+    next.textContent = text ?? ''
+    next.title = text ?? ''
+  }
+
+  function setSchedule(rows: PanelScheduleRow[]): void {
+    schedList.textContent = ''
+    for (const row of rows) {
+      const item = doc.createElement('div')
+      item.className = 'sitem'
+      const cb = doc.createElement('input')
+      cb.type = 'checkbox'
+      cb.checked = row.enabled
+      cb.title = row.enabled ? '停用（到点不再执行）' : '启用'
+      cb.addEventListener('change', () => options.onScheduleToggle?.(row.id, cb.checked))
+      const text = doc.createElement('span')
+      text.className = 'stext'
+      text.textContent = row.text
+      const next = doc.createElement('span')
+      next.className = 'snext'
+      next.textContent = row.next
+      const del = doc.createElement('button')
+      del.type = 'button'
+      del.textContent = '✕'
+      del.title = '删除这个定时任务'
+      del.addEventListener('click', () => options.onScheduleRemove?.(row.id))
+      item.append(cb, text, next, del)
+      schedList.append(item)
+    }
+    if (rows.length === 0) {
+      const empty = doc.createElement('div')
+      empty.className = 'snote'
+      empty.textContent = '没有定时任务'
+      schedList.append(empty)
+    }
+  }
+
+  /** 到点倒数 + 取消：`seconds<=0` 立即放行（测试与「隐藏页预授权」都走这条）。 */
+  function countdown(text: string, seconds: number): Promise<boolean> {
+    askFinish?.(false) // 同拍只留一个倒计时（新的覆盖旧的）
+    ask.hidden = false
+    let left = Math.max(0, Math.floor(seconds))
+    askText.textContent = left > 0 ? `${text}（${left}s）` : text
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setInterval> | null = null
+      const finish = (ok: boolean): void => {
+        if (askFinish !== finish) return
+        askFinish = null
+        if (timer !== null) clearInterval(timer)
+        ask.hidden = true
+        askCancel.removeEventListener('click', onCancel)
+        resolve(ok)
+      }
+      const onCancel = (): void => finish(false)
+      askFinish = finish
+      askCancel.addEventListener('click', onCancel)
+      if (left <= 0) {
+        finish(true)
+        return
+      }
+      timer = setInterval(() => {
+        left -= 1
+        if (left <= 0) {
+          finish(true)
+          return
+        }
+        askText.textContent = `${text}（${left}s）`
+      }, 1000)
+    })
+  }
+
+  schedAction.addEventListener('change', () => {
+    schedAckWrap.hidden = schedAction.value !== 'stop-session'
+  })
+  schedAdd.addEventListener('click', () => {
+    const input: PanelScheduleInput = {
+      at: schedAt.value,
+      action: schedAction.value,
+    }
+    if (input.action === 'stop-session' && !schedAck.checked) {
+      setStatus('先勾选「我确认到点会停止会话」', 'error')
+      return
+    }
+    const ret = options.onScheduleAdd?.(input)
+    if (ret === undefined) {
+      setStatus('定时未接线', 'warn')
+      return
+    }
+    void Promise.resolve(ret)
+      .then((err) => {
+        if (typeof err === 'string' && err) setStatus(err, 'error')
+        else setStatus(`已添加定时：${input.at}`, 'ok')
+      })
+      .catch((e: unknown) => setStatus(e instanceof Error ? e.message : String(e), 'error'))
+  })
+
   return {
     host,
     setStatus,
     setSession,
+    setSchedule,
+    setNext,
+    countdown,
     setBusy(next: boolean) {
       busy = next
       setButtonsDisabled(next)
     },
     destroy() {
+      askFinish?.(false) // 销毁时把待确认的倒计时按「取消」收口（不留下永不 resolve 的 Promise）
       handle.removeEventListener('pointerdown', onPointerDown)
       moveTarget.removeEventListener('pointermove', onPointerMove)
       moveTarget.removeEventListener('pointerup', endDrag)

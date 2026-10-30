@@ -82,6 +82,30 @@ const FOLD_STYLE = `
 }
 `
 
+const SCHED_STYLE_ID = 'bnc-sched-style'
+const SCHED_CLASS = 'bnc-sched'
+const SCHED_ATTR = 'data-bnc-sched'
+
+/** 定时徽标：cell 顶部整条横幅 + 整段描边（计时器已设的目标一眼可辨）。 */
+const SCHED_STYLE = `
+.jp-Cell[${SCHED_ATTR}="1"] {
+  outline: 2px solid #ff9f43 !important;
+  outline-offset: -2px;
+}
+.${SCHED_CLASS} {
+  margin: 2px 6px 4px; padding: 3px 10px; border-radius: 6px;
+  display: flex; align-items: center; gap: 6px;
+  background: linear-gradient(90deg, #ffb020, #ff7a45);
+  color: #1a1206; font: 700 12px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: .02em;
+  animation: bnc-sched-pulse 1.8s ease-in-out infinite;
+}
+@keyframes bnc-sched-pulse {
+  0%, 100% { box-shadow: 0 2px 10px rgba(255, 122, 69, .30); }
+  50% { box-shadow: 0 2px 18px rgba(255, 122, 69, .85); }
+}
+`
+
 const defaultWait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 const defaultNextFrame = (): Promise<void> =>
   new Promise((r) => {
@@ -123,6 +147,8 @@ export class KaggleFrameAdapter implements FrameAdapter {
     disconnect(): void
   } | null = null
   private unfoldSyncQueued = false
+  /** 已设「运行 cell」定时器的目标（帧内渲染；宿主经桥下发）。 */
+  private schedMarks: Array<{ id: string; label: string; uuid?: string; index?: number }> = []
 
   constructor(
     private readonly doc: Document,
@@ -386,6 +412,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     const run = (): void => {
       this.unfoldSyncQueued = false
       this.syncUnfoldButtons()
+      this.syncScheduledBadges()
     }
     const view = this.doc.defaultView as unknown as {
       queueMicrotask?: (fn: () => void) => void
@@ -406,6 +433,70 @@ export class KaggleFrameAdapter implements FrameAdapter {
       if (folded && !btn) this.addUnfoldButton(el)
       else if (!folded && btn) btn.remove()
     }
+  }
+
+  private ensureSchedStyle(): boolean {
+    if (!this.doc.getElementById(SCHED_STYLE_ID)) {
+      const parent = this.doc.head ?? this.doc.documentElement
+      if (!parent) return false
+      const style = this.doc.createElement('style')
+      style.id = SCHED_STYLE_ID
+      style.textContent = SCHED_STYLE
+      parent.append(style)
+    }
+    return true
+  }
+
+  private markForCell(el: HTMLElement): { id: string; label: string } | null {
+    const uuid = el.getAttribute('data-uuid')
+    const index = Number(el.getAttribute('data-windowed-list-index') ?? NaN)
+    for (const m of this.schedMarks) {
+      if (m.uuid && uuid && m.uuid === uuid) return m
+      if (m.index !== undefined && Number.isInteger(index) && m.index === index) return m
+    }
+    return null
+  }
+
+  /** 定时目标徽标：目标 cell 顶部一条醒目横幅；不是目标 / 标记被清掉的 cell 移除。 */
+  private syncScheduledBadges(): void {
+    const nb = this.notebook()
+    if (!nb) return
+    for (const el of qa<HTMLElement>(nb, SEL.cell)) {
+      const mark = this.markForCell(el)
+      const badge = q<HTMLElement>(el, `.${SCHED_CLASS}`)
+      if (!mark) {
+        if (badge) badge.remove()
+        el.removeAttribute(SCHED_ATTR)
+        continue
+      }
+      el.setAttribute(SCHED_ATTR, '1')
+      const text = `⏰ 已定时 ${mark.label}`
+      if (badge) {
+        if (badge.textContent !== text) badge.textContent = text
+        continue
+      }
+      const b = this.doc.createElement('div')
+      b.className = SCHED_CLASS
+      b.textContent = text
+      b.title = '已设置定时执行（只跑一次；在面板「定时」组删除或停用）'
+      el.prepend(b)
+    }
+  }
+
+  /** 宿主下发「运行 cell」的定时目标（uuid 优先，index 兜底）。 */
+  setScheduledMarks(
+    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number }>,
+  ): CmdResult {
+    this.schedMarks = marks.map((m) => ({
+      id: typeof m.id === 'string' ? m.id : '',
+      label: typeof m.label === 'string' && m.label ? m.label : '已设置',
+      ...(typeof m.uuid === 'string' && m.uuid ? { uuid: m.uuid } : {}),
+      ...(typeof m.index === 'number' && Number.isInteger(m.index) ? { index: m.index } : {}),
+    }))
+    if (!this.ensureSchedStyle()) return { ok: false, reason: '无法注入定时徽标样式（没有 head）' }
+    this.watchFold() // 复用同一个 observer：虚拟化重渲染后把徽标补回来
+    this.syncScheduledBadges()
+    return { ok: true, detail: `marks:${this.schedMarks.length}` }
   }
 
   private addUnfoldButton(el: HTMLElement): void {
@@ -571,6 +662,17 @@ export function withPageTag(session: string, tag: string): string {
     .slice(0, 8)
   if (!safe) return session.slice(0, 64)
   return `${session.slice(0, 64 - safe.length - 1)}-${safe}`
+}
+
+/** `code/<owner>/<slug>/…` ⇒ `<owner>/<slug>`（跨 run 稳定）；不是 notebook 页 ⇒ ''。 */
+export function parseKaggleNotebookKey(href: string): string {
+  try {
+    const parts = new URL(href).pathname.split('/').filter(Boolean)
+    if (parts[0] === 'code' && parts.length >= 3) return `${parts[1]}/${parts[2]}`
+  } catch {
+    /* 非 URL ⇒ 交给调用方判空 */
+  }
+  return ''
 }
 
 export class KaggleSessionAdapter implements SessionAdapter {

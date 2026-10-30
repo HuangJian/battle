@@ -1033,13 +1033,12 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 | W1 | 绿 | `dashboard/src/server/api/notebook-log.ts`（epoch/租约/meta 恢复/脱敏/轮转/clear/prune）+ 两条路由 + 虚拟键 `notebook:<session>` / `notebook` + 4 份用例（append 幂等、409 tail 续写、恢复、body 413、接线顺序） |
 | W2 | 绿 | `log-shipper.ts`（尾锚 diff/48 KiB 分块/单写者 409/预算/413 停发）· `sites/kaggle.ts`（cells/outputText/sourceText/命令阶梯/选中后置条件/session 停止）· `observer.ts`（只标脏输出区）· `ship-loop.ts`（tick / drain / saveAndClear / 自动清空闸） |
 | W3 | 绿（未实机点验） | `app/bridge.ts`（per-attach nonce、origin/parent 白名单、command 超时）· `ui/panel.ts`（保存并清空/折叠/滚动/日志/CFG/停会话）· `app/commands.ts` · `app/boot.ts` 接线；**真实 Kaggle 上的按钮点击不在 Gate 0 范围内，未点验** |
-| W4 | 纯函数绿，**未接线** | `schedule.ts`：`nextFireAt` / `dueOccurrence` / `occurrenceKey`，DST 用真实分钟扫描（春进跳过、秋回只一次），本地时区由调用方注入。定时器 UI 与 GM 任务持久化尚未接进 boot |
+| W4 | 绿（2026-10-30 接线，未实机点验） | `schedule.ts`（`nextFireAt` / DST 用真实分钟扫描）· `app/scheduler.ts`（**一次性「下一次」**：GM 任务 + occurrence claim + 墙钟轮询 + 10s 取消）· `ui/panel.ts` 定时组（24h `HH:MM`）· `app/boot.ts` 接线 · `app/commands.ts` 的 run/interrupt/captureTarget/setScheduleMarks · `sites/kaggle.ts` 的目标徽标 |
 | W5 | 纯函数绿，**未接线** | `probe.ts`（URL 去 query/hash、只读计数、不抛）· `sites/stub.ts`（Colab/AI Studio 每个命令明确 `{ok:false}`）。探测模式入口与 `@match` 仍只开 Kaggle（v1 决策） |
 | W6 | 本文档 | `DECISIONS.md` 追加实现条目；`docs/nn/console.md §44` 记录控制台侧；`.workbuddy/memory/2026-10-30.md` 续写 |
 
-**遗留（不宣称完成）**：① W4 的定时创建/停止 UI 与 GM 持久化；② W5 的探测按钮与二次确认 POST；
-③ 真实 Kaggle 上「保存并清空」的端到端点验（需要操作员开浏览器，Gate 0 只证明了注入/握手/回环）。
-以上三项都已有纯函数/模块与用例，接线前不得当成可用功能。
+**遗留（不宣称完成）**：① 定时任务与「保存并清空」的真实点验（需要操作员开浏览器，Gate 0 只证明了
+注入/握手/回环）；② W5 的探测按钮与二次确认 POST。两项都已有模块与用例，未点验前不得当成可用功能。
 
 **2026-10-30 修正（面板一直「连接中」）**：host 曾用 `window.postMessage` 发 attach —— 该 API 只投递给
 **当前窗口**，不会广播到子帧；frame 的 ready/result 同错。改为 host 定向 `iframe.contentWindow`、frame
@@ -1063,4 +1062,22 @@ observer 给没有游标的 cell 补标脏，保证首批输出仍会走一次 r
 换页签必不同；拿不到存储就每次加载随机），`session = <base>-<tag>`；host 从 bridge 的
 `ready/status.session` 采纳**这一页**的键（不再拿外层 URL 猜），面板直接显示 `日志 notebook:<session>`。
 旧的无标签会话不再续写，7 天 prune 自然清掉。
+
+**2026-10-30 W4 接线（定时启停/执行 cell）**：`app/scheduler.ts` 落任务存储（`bnc:tasks`）与 occurrence
+claim（`bnc:occurrences`，`claimSettleMs` 沉淀窗后转正；claim 后不自动重试）；计时只靠墙钟轮询（20s +
+`visibilitychange` 立即补一拍），迟到窗口按动作分（`run-*` 10 分钟、`stop/interrupt` = `stopGraceMs`）。
+面板新「定时」组只设**下一次**（**不设重复日期**）：24 小时制 `HH:MM` + 动作（运行选中 cell·运行全部·
+停会话·中断内核），早于现在就是**明天**的那一拍；到点执行**一次即消耗**（成功/失败/取消/过期都从任务表
+移除，occurrence 留 7 天），添加 stop-session 必须先勾「我确认到点会停止会话」。运行类绑 notebook
+（`owner/slug`）、停止/中断绑创建时的会话（含页面标签），到点前换页/换 run 一律 skipped（fail closed）。
+`run-cell` 的目标在创建时用 `captureTarget` 捕获（uuid/index/前 200 字符指纹），执行时指纹不符不跑；
+目标 cell **顶部挂醒目徽标**（`setScheduleMarks` 下发到帧内，amber 横幅 + 整段描边，虚拟化重渲染由
+observer 补回；任务删除/执行后徽标随之消失）。到点前 **10 分钟**起，面板提示区每秒刷新
+`⏰ 距<动作>还有 M:SS（HH:MM）`（`setNext`；>10 分钟不占地方，到点变成「即将开始」）。
+
+**2026-10-30 自动确认弹窗**：Kaggle 外层的「是否仍需编辑 / 配额超限」弹窗会卡住训练页；host 监听
+`[role="dialog"]`，只点**文案白名单**（`Continue editing` / `Continue working`；「Turn off TPU」绝不点），
+每弹窗一次 + 同文案 1.5s 冷却（`app/auto-continue.ts`，DOM 变更合到一拍里再扫）。停止走**外层** `Stop session`（先让 frame drain，
+失败也停但写日志）。到点可见时面板 10s 倒数 + 取消；后台页按创建时预授权执行并留 log。**浏览器关掉/
+标签页被丢弃不会执行**——「关页面也能跑」用 Kaggle 原生 `Schedule a notebook to run`。
 

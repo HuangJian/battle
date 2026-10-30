@@ -62,6 +62,17 @@ describe('定时：下一次 / 欠不欠（DST 用真实分钟扫描）', () => 
     expect(dueOccurrence(job({ catchUp: true }), at + 5 * 60_000, null, ny)?.at).toBe(at)
   })
 
+  it('迟到窗口由调用方给（run-* 10min / stop 用 stopGraceMs）', () => {
+    const at = Date.UTC(2026, 9, 30, 14, 30) // 10:30 EDT
+    expect(dueOccurrence(job(), at + 9 * 60_000, null, ny, 10 * 60_000)?.key).toBe(
+      '2026-10-30@10:30',
+    )
+    expect(dueOccurrence(job(), at + 11 * 60_000, null, ny, 10 * 60_000)).toBeNull()
+    expect(dueOccurrence(job(), at + 11 * 60_000, null, ny, 20 * 60_000)?.key).toBe(
+      '2026-10-30@10:30',
+    )
+  })
+
   it('禁用 / 非法时间 ⇒ null；normalizeAt 补零并拒绝越界', () => {
     expect(nextFireAt(job({ enabled: false }), Date.UTC(2026, 9, 30), ny)).toBeNull()
     expect(nextFireAt(job({ at: '24:00' }), Date.UTC(2026, 9, 30), ny)).toBeNull()

@@ -10266,4 +10266,30 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **落地**：`dashboard/src/server/api/notebook-log.ts::decodeLogKey` · `dashboard/src/server/server.ts` 两条路由 ·
   `userscript/src/notebook-companion/sites/kaggle.ts::withPageTag` · `app/{ship-loop,bridge,boot}.ts` ·
   `ui/panel.ts`；用例 `dashboard/tests/notebook-wiring.test.ts`、`userscript/test/{kaggle-frame,bridge,panel}.test.ts`。
+
+## §2026-10-30-notebook-scheduler-w4（2026-10-30，notebook 伴生脚本 W4 接线：定时启停 / 执行 cell）
+
+- **背景**：plan §3.3 的定时能力此前只有 `schedule.ts` 纯函数（`nextFireAt` / `dueOccurrence`），UI、
+  GM 持久化与执行都没接线（§14 W4「纯函数绿，未接线」）。用户要求开发「定时启动/停止」。
+- **决定**：① 计时=**墙钟轮询**（20s + `visibilitychange` 立即补一拍），不建 setTimeout 链；迟到窗口按
+  动作分（`run-*` 10 分钟、`stop/interrupt` = `config.stopGraceMs`）；② occurrence claim 落 GM
+  （`bnc:occurrences`）+ `claimSettleMs` 沉淀窗后转正，**claim 之后不自动重试**（页面崩在动作里 = 结果
+  未知）；③ 任务住 `bnc:tasks`：运行类绑 `<owner>/<slug>`、停止/中断绑创建时的会话（含页面标签），
+  到点身份不符一律 skipped（fail closed）；④ `run-cell` 的目标在**创建时** `captureTarget` 捕获
+  `{uuid,index,前 200 字符 FNV}`，执行时指纹不符不跑；⑤ 可见页到点给 10s 倒数 + 取消，隐藏页按创建时
+  预授权执行并留 log；⑥ 停止在 **host** 点外层 `Stop session`（先让 frame drain，失败也停但写日志）。
+- **否决的备选**：setTimeout 计时器链（睡眠/后台节流会漏拍，刷新还要重建状态）；每页各跑一份不 claim
+  （两个标签会同时执行）；只按 index 定位 cell（插删后会跑错代码）；到点弹 `confirm()`（后台页弹不出，
+  定时关机在最常见的「跑着训练、标签页在后台」场景下永不执行）。
+- **边界**：浏览器关掉 / 标签页被丢弃**不执行**（Kaggle 原生 `Schedule a notebook to run` 才是「关页面
+  也能跑」的正解）；claim 是 best-effort 互斥（GM 存储没有 CAS）。
+- **2026-10-30 收窄（用户口径）**：定时器**只设「下一次」**（24 小时制 `HH:MM`；早于现在就是明天），不设
+  重复日期；到点执行一次即消耗（成功/失败/取消/过期都从任务表移除，occurrence 留 7 天）。「运行选中
+  cell」的目标在帧内 cell **顶部挂醒目徽标**（`setScheduleMarks` 下发；amber 横幅 + 整段描边，虚拟化重渲染
+  由 observer 补回；任务删除/执行后随之消失）。到点前 10 分钟，面板提示区每秒倒计时（距…还有 M:SS）。
+- **2026-10-30 追加（弹窗自动确认）**：host 监听 `[role="dialog"]`，只点文案白名单（`Continue editing` /
+  `Continue working`），每弹窗一次 + 同文案 1.5s 冷却；「Turn off TPU」等其它按钮绝不点（`app/auto-continue.ts`）。
+- **落地**：`userscript/src/notebook-companion/app/scheduler.ts` · `ui/panel.ts`（定时组 + `countdown`）·
+  `app/{boot,commands}.ts` · `sites/kaggle.ts::parseKaggleNotebookKey` · `schedule.ts`（`graceMs`）；
+  用例 `userscript/test/{scheduler,schedule-commands,panel,schedule}.test.ts`。
 —— 全文（方法 · 满载/空载读数表 · 三类分类 · 两处 A/B 明细）→ `docs/nn/engineering.md` §93

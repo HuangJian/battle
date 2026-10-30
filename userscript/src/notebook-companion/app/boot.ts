@@ -1,7 +1,12 @@
 import { createRuntime, type Runtime } from '../../runtime'
 import { loadConfig, type BncConfig } from '../config'
 import { detectRole, type Role } from '../selectors'
-import { KaggleFrameAdapter, KaggleSessionAdapter, parseKaggleSession } from '../sites/kaggle'
+import {
+  KaggleFrameAdapter,
+  KaggleSessionAdapter,
+  parseKaggleNotebookKey,
+  parseKaggleSession,
+} from '../sites/kaggle'
 import { mountPanel, PANEL_POS_KEY, readPanelPosition, type Panel } from '../ui/panel'
 import {
   createFrameBridge,
@@ -9,7 +14,15 @@ import {
   type BridgeMessage,
   type BridgeWindow,
 } from './bridge'
+import { installAutoContinue } from './auto-continue'
 import { runFrameCommand } from './commands'
+import {
+  actionLabel,
+  createScheduler,
+  type ScheduleAction,
+  type ScheduleTarget,
+  type Scheduler,
+} from './scheduler'
 import { createShipLoop } from './ship-loop'
 
 export interface BootEnv {
@@ -55,6 +68,8 @@ export function boot(
 }
 
 const PAGE_TAG_KEY = 'bnc:pageTag'
+/** 提示区倒计时的起点（还剩 10 分钟开始显示）。 */
+const NEXT_HINT_MS = 10 * 60_000
 
 /**
  * 本标签页的短标签（4–6 位 a–z0–9）：同一个 notebook 多开几个页签，各写各的日志。
@@ -189,6 +204,8 @@ function startHost(
   log: (msg: string) => void,
 ): () => void {
   const session = parseKaggleSession(href)
+  const sessionAdapter = new KaggleSessionAdapter(doc, href)
+  const notebookKey = parseKaggleNotebookKey(href)
   /** frame 回报的会话键（含页面标签）：多开页签时必须用**这一页**的，不能拿外层 URL 猜。 */
   let frameSession = ''
   const logKey = (): string => `notebook:${frameSession || session}`
@@ -210,9 +227,11 @@ function startHost(
         `bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true} session=${frameSession || '∅'}）`,
       )
       panel?.setStatus(m.notebook ? '已连接（笔记本就绪）' : '已连接（等待笔记本）', 'ok')
+      syncMarks()
     },
     onStatus: (m) => {
       adoptSession(m)
+      syncMarks()
       log(`bridge status（notebook=${m.notebook === true}）`)
       if (m.notebook === true) {
         ready = true
@@ -238,6 +257,62 @@ function startHost(
     panel?.setStatus(`${name} ✓${detail}`, 'ok')
   }
 
+  const fromBridge = (r: { ok: boolean; reason?: string }): { ok: boolean; reason?: string } =>
+    r.ok ? { ok: true } : { ok: false, reason: r.reason ?? 'bridge 无应答' }
+
+  /** 停会话：先让 frame 排空日志（失败也停，但说出来），再点外层 Stop。 */
+  const stopNow = async (): Promise<{ ok: boolean; reason?: string }> => {
+    if (ready) {
+      const f = await bridge.send('flush')
+      if (!f.ok) log(`停会话前未能保存：${f.reason ?? '未排空'}`)
+    }
+    return sessionAdapter.stopSession()
+  }
+
+  let sched: Scheduler | null = null
+
+  /** 到点前 10 分钟开始，在面板提示区每秒倒计时（到点后交给 tick 的 10s 取消窗）。 */
+  function updateNextHint(): void {
+    if (!panel || !sched) return
+    const due = sched.nextDue()
+    if (!due) {
+      panel.setNext(null)
+      return
+    }
+    const left = due.nextAt - Date.now()
+    if (left > NEXT_HINT_MS) {
+      panel.setNext(null)
+      return
+    }
+    const label = actionLabel(due.action)
+    if (left <= 0) {
+      panel.setNext(`⏰ ${label} 即将开始`)
+      return
+    }
+    const sec = Math.ceil(left / 1000)
+    const d = new Date(due.nextAt)
+    const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    panel.setNext(
+      `⏰ 距${label}还有 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}（${clock}）`,
+    )
+  }
+
+  /** 把「运行 cell」的定时目标下发给帧内渲染（跨域 DOM 宿主碰不到）。 */
+  function syncMarks(): void {
+    if (!sched) return
+    const nextById = new Map(sched.rows().map((r) => [r.id, r.next]))
+    const marks = sched
+      .tasks()
+      .filter((t) => t.action === 'run-cell' && t.target)
+      .map((t) => ({
+        id: t.id,
+        label: nextById.get(t.id) ?? '已定时',
+        ...(t.target?.uuid ? { uuid: t.target.uuid } : {}),
+        ...(t.target?.index !== undefined ? { index: t.target.index } : {}),
+      }))
+    void bridge.send('setScheduleMarks', { marks })
+  }
+
   panel = mountPanel(
     doc,
     {
@@ -260,16 +335,92 @@ function startHost(
         runtime.setClipboard(JSON.stringify(config, null, 2))
         panel?.setStatus('配置已复制到剪贴板', 'ok')
       },
-      stopSession: () => run('stopSession'),
+      stopSession: () =>
+        stopNow().then((r) =>
+          panel?.setStatus(
+            r.ok ? '停止会话 ✓' : `stopSession ✗ ${r.reason ?? '失败'}`,
+            r.ok ? 'ok' : 'error',
+          ),
+        ),
     },
     {
       position: readPanelPosition(runtime),
       onMove: (position) => runtime.setValue(PANEL_POS_KEY, position),
+      onScheduleAdd: async (input) => {
+        if (!sched) return '调度未就绪'
+        let target: ScheduleTarget | undefined
+        if (input.action === 'run-cell') {
+          const cap = await bridge.send('captureTarget')
+          if (!cap.ok) {
+            return `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+          }
+          const v = cap.value as ScheduleTarget | undefined
+          if (!v || (v.uuid === undefined && v.index === undefined)) return '没拿到目标 cell 的位置'
+          target = v
+        }
+        const r = sched.add({
+          at: input.at,
+          action: input.action as ScheduleAction,
+          ...(target ? { target } : {}),
+        })
+        return r.ok ? null : r.reason
+      },
+      onScheduleRemove: (id) => sched?.remove(id),
+      onScheduleToggle: (id, enabled) => sched?.setEnabled(id, enabled),
     },
   )
 
   // 先显示外层 URL 推出的键；frame 一连上就用它回报的（含页面标签）覆盖。
   panel.setSession(logKey())
+
+  // Kaggle 的「是否仍需编辑 / 配额超限」弹窗会卡住训练页：自动点白名单里的继续键
+  const autoContinue = installAutoContinue(doc, {
+    onConfirm: (label) => log(`[auto] 已点击「${label}」（Kaggle 弹窗）`),
+  })
+
+  // ── 定时启停（plan §3.3 / W4）：任务住 GM 存储，轮询墙钟，到点后 10s 可取消 ──
+  sched = createScheduler({
+    store: runtime,
+    writer: `host-${Math.random().toString(36).slice(2, 8)}`,
+    now: () => Date.now(),
+    claimSettleMs: config.claimSettleMs,
+    runGraceMs: 10 * 60_000,
+    stopGraceMs: config.stopGraceMs,
+    // 会话必须用 frame 回报的那个（含页面标签）——停止类任务靠它 fail closed；
+    // 还没连上时 identity.session 为空 ⇒ add 会响亮拒绝（「等面板显示已连接」）。
+    identity: () => ({ notebookKey, session: frameSession }),
+    confirm: async (task, occurrence) => {
+      const d = new Date(task.nextAt)
+      const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      const text = `${actionLabel(task.action)}（${clock} · ${occurrence}）`
+      // 后台页弹不出确认框：按创建时的预授权执行，但必须留一行证据
+      if (doc.hidden) {
+        log(`后台按预授权执行：${text}`)
+        return true
+      }
+      return panel ? panel.countdown(`即将${text}`, 10) : true
+    },
+    run: async (task) => {
+      if (task.action === 'stop-session') return stopNow()
+      if (!ready) return { ok: false, reason: '笔记本未连接（iframe 不可达）' }
+      if (task.action === 'interrupt') return fromBridge(await bridge.send('interrupt'))
+      if (task.action === 'run-all') return fromBridge(await bridge.send('runAllCells'))
+      return fromBridge(await bridge.send('runCell', task.target ?? {}))
+    },
+    onChange: () => {
+      panel?.setSchedule(sched?.rows() ?? [])
+      syncMarks()
+      updateNextHint()
+    },
+  })
+  panel.setSchedule(sched.rows())
+  sched.start()
+  updateNextHint()
+  const nextHintTimer = setInterval(updateNextHint, 1000)
+  const onVisibility = (): void => {
+    void sched?.tick()
+  }
+  doc.addEventListener('visibilitychange', onVisibility)
 
   // 外层 iframe 可能在 open shadow root 里（探针同款 deepQuery）；只查 light DOM 会漏。
   const findFrame = (): HTMLIFrameElement | null => {
@@ -315,6 +466,10 @@ function startHost(
   const timer = setInterval(attach, 1000)
   return () => {
     clearInterval(timer)
+    clearInterval(nextHintTimer)
+    autoContinue.dispose()
+    sched?.stop()
+    doc.removeEventListener('visibilitychange', onVisibility)
     bridge.destroy()
     panel?.destroy()
   }

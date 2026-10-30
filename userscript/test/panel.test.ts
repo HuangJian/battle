@@ -66,6 +66,86 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
+  it('setSchedule：行上屏；勾选/删除回调带 id', () => {
+    const w = dom()
+    const removed: string[] = []
+    const toggled: Array<[string, boolean]> = []
+    const panel = mountPanel(
+      docOf(w),
+      {},
+      {
+        onScheduleRemove: (id) => removed.push(id),
+        onScheduleToggle: (id, enabled) => toggled.push([id, enabled]),
+      },
+    )
+    const shadow = panel.host.shadowRoot!
+    panel.setSchedule([])
+    expect(shadow.querySelector('.slist')!.textContent).toContain('没有定时任务')
+    panel.setSchedule([
+      { id: 't1', text: '09:00 每天 · 运行全部', next: '今天 09:00', enabled: true },
+    ])
+    const item = shadow.querySelector('.sitem')!
+    expect(item.textContent).toContain('09:00 每天 · 运行全部')
+    expect(item.textContent).toContain('今天 09:00')
+    const cb = item.querySelector('input') as HTMLInputElement
+    cb.checked = false
+    cb.dispatchEvent(new w.Event('change') as unknown as Event)
+    expect(toggled).toEqual([['t1', false]])
+    ;(item.querySelector('button') as HTMLButtonElement).click()
+    expect(removed).toEqual(['t1'])
+    panel.destroy()
+  })
+
+  it('setNext：提示区倒计时上屏；null 清空', () => {
+    const w = dom()
+    const panel = mountPanel(docOf(w), {})
+    const shadow = panel.host.shadowRoot!
+    const el = shadow.querySelector('[data-next]') as HTMLElement
+    expect(el.textContent).toBe('')
+    panel.setNext('⏰ 距运行全部还有 9:32（18:00）')
+    expect(el.textContent).toContain('9:32')
+    panel.setNext(null)
+    expect(el.textContent).toBe('')
+    panel.destroy()
+  })
+
+  it('countdown：0 秒立即放行；点「取消」⇒ false', async () => {
+    const w = dom()
+    const panel = mountPanel(docOf(w), {})
+    const shadow = panel.host.shadowRoot!
+    expect(await panel.countdown('x', 0)).toBe(true)
+    const pending = panel.countdown('即将停会话', 30)
+    ;(shadow.querySelector('[data-ask-cancel]') as HTMLButtonElement).click()
+    expect(await pending).toBe(false)
+    panel.destroy()
+  })
+
+  it('添加定时：stop-session 未勾确认 ⇒ 红字不回调；勾了才回调', () => {
+    const w = dom()
+    const calls: Array<{ at: string; action: string }> = []
+    const panel = mountPanel(
+      docOf(w),
+      {},
+      {
+        onScheduleAdd: (input) => {
+          calls.push(input)
+          return null
+        },
+      },
+    )
+    const shadow = panel.host.shadowRoot!
+    const action = shadow.querySelector('[data-sched="action"]') as HTMLSelectElement
+    action.value = 'stop-session'
+    action.dispatchEvent(new w.Event('change') as unknown as Event)
+    ;(shadow.querySelector('[data-sched="add"]') as HTMLButtonElement).click()
+    expect(calls).toEqual([])
+    expect(shadow.querySelector('.status')!.textContent).toContain('勾选')
+    ;(shadow.querySelector('[data-sched="ack"]') as HTMLInputElement).checked = true
+    ;(shadow.querySelector('[data-sched="add"]') as HTMLButtonElement).click()
+    expect(calls).toEqual([{ at: '09:00', action: 'stop-session' }])
+    panel.destroy()
+  })
+
   it('忙态禁用全部按钮，handler 完成后恢复；异常写红字', async () => {
     const w = dom()
     let release: () => void = () => {}
@@ -139,13 +219,15 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
-  it('按钮按功能分区：日志 / 折叠 / 跳转 / 配置 / 会话', () => {
+  it('按钮按功能分区：日志 / 折叠 / 跳转 / 配置 / 会话 + 定时', () => {
     const panel = mountPanel(docOf(dom()), {})
     const shadow = panel.host.shadowRoot!
     const labels = [...shadow.querySelectorAll('.glabel')].map((el) => el.textContent)
-    expect(labels).toEqual(['日志', '折叠', '跳转', '配置', '会话'])
+    // 时区标签随时区变（UTC±HH:MM），只钉「有这一组」
+    expect(labels.slice(0, 5)).toEqual(['日志', '折叠', '跳转', '配置', '会话'])
+    expect(labels[5]).toContain('定时（一次性')
     const groups = [...shadow.querySelectorAll('.group')]
-    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 2, 1, 1])
+    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 2, 1, 1, 1])
     expect(shadow.querySelectorAll('[data-act]').length).toBe(11)
     panel.destroy()
   })

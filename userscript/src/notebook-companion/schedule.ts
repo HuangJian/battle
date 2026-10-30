@@ -87,13 +87,15 @@ export function nextFireAt(
 
 /**
  * 当前「欠不欠」：返回今天的触发点与去重键；已跑过 ⇒ null。
- * `catchUp=false` 时，错过超过 2 分钟不再补（避免半夜开机一次性狂跑）。
+ * `catchUp=false` 时错过超过 `graceMs` 不再补（默认 2 分钟——避免半夜开机一次性狂跑）。
+ * 迟到窗口由调用方给：`run-*` 10 分钟、`stop-session` 用 stopGraceMs（plan §3.3）。
  */
 export function dueOccurrence(
   job: DailyJob,
   nowMs: number,
   lastFiredKey: string | null,
   parts: PartsFn = defaultParts,
+  graceMs = 2 * MINUTE,
 ): { key: string; at: number } | null {
   const at = normalizeAt(job.at)
   if (!at || !job.enabled) return null
@@ -104,7 +106,7 @@ export function dueOccurrence(
     if (p.time !== at || !dayAllowed(job, p.weekday)) continue
     const key = occurrenceKey(p)
     if (key === lastFiredKey) return null
-    if (!job.catchUp && nowMs - ms > 2 * MINUTE) return null
+    if (!job.catchUp && nowMs - ms > graceMs) return null
     return { key, at: ms }
   }
   return null

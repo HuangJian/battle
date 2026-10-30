@@ -32,6 +32,10 @@ export interface FrameAdapter {
   scroll(to: 'top' | 'bottom'): CmdResult
   scrollOuter(to: 'top' | 'bottom'): CmdResult
   flash(cell: CellRef): void
+  /** 已设「运行 cell」定时器的目标：在 cell 顶部挂醒目徽标（跨域 DOM 只有帧内能改）。 */
+  setScheduledMarks(
+    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number }>,
+  ): CmdResult
 }
 
 export interface SessionAdapter {

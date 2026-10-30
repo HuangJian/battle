@@ -4,8 +4,57 @@
  * 命令只做「可观测的副作用」；失败必须带原因（不静默）。`saveAndClear` 的语义完全由
  * ship-loop 决定：drain 不全 ⇒ 拒绝清空。
  */
-import type { CmdResult, FrameAdapter, SessionAdapter } from '../sites/types'
+import { hashRange } from '../../utils'
+import type { CellRef, CmdResult, FrameAdapter, SessionAdapter } from '../sites/types'
 import type { ShipLoop } from './ship-loop'
+
+/** 目标指纹只看**前 200 字符**（plan §3.3：uuid 失效后按 index 兜底时必须验指纹）。 */
+const TARGET_FP_CHARS = 200
+
+/** 定时任务的 cell 目标（创建时捕获；执行时验指纹，绝不跑错代码）。 */
+interface TargetArgs {
+  uuid?: unknown
+  index?: unknown
+  fingerprint?: unknown
+}
+
+function fingerprintOf(source: string): string {
+  return hashRange(source, 0, Math.min(TARGET_FP_CHARS, source.length))
+}
+
+/**
+ * 解析目标 cell：uuid 命中且指纹一致 ⇒ 用；uuid 缺失/不匹配 ⇒ index 命中且指纹一致；
+ * 多处命中、指纹不符、找不到 ⇒ 不执行（fail closed）。
+ */
+async function resolveTarget(
+  adapter: FrameAdapter,
+  args: TargetArgs,
+): Promise<{ ok: true; cell: CellRef } | { ok: false; reason: string }> {
+  const uuid = typeof args.uuid === 'string' && args.uuid ? args.uuid : ''
+  const index = typeof args.index === 'number' && Number.isInteger(args.index) ? args.index : null
+  const fp = typeof args.fingerprint === 'string' && args.fingerprint ? args.fingerprint : ''
+  const codeCells = adapter.cells().filter((c) => c.kind === 'code')
+  const matches = (cell: CellRef): boolean =>
+    fp === '' || fingerprintOf(adapter.sourceText(cell)) === fp
+  if (uuid) {
+    const hit = codeCells.filter((c) => c.id === uuid)
+    if (hit.length === 1) {
+      if (!matches(hit[0]!)) return { ok: false, reason: `目标 cell 内容已变（指纹不符）：${uuid}` }
+      return { ok: true, cell: hit[0]! }
+    }
+  }
+  if (index !== null) {
+    const hit = codeCells.filter((c) => c.index === index)
+    if (hit.length === 1) {
+      if (!matches(hit[0]!)) return { ok: false, reason: `第 ${index} 段内容已变（指纹不符）` }
+      return { ok: true, cell: hit[0]! }
+    }
+    const rendered = await adapter.ensureRendered(index)
+    if (rendered && rendered.kind === 'code' && matches(rendered))
+      return { ok: true, cell: rendered }
+  }
+  return { ok: false, reason: `找不到目标 cell（uuid=${uuid || '∅'} index=${index ?? '∅'}）` }
+}
 
 export interface CommandDeps {
   loop: ShipLoop
@@ -29,7 +78,7 @@ const fromCmd = (r: CmdResult): CommandReply =>
 export async function runFrameCommand(
   deps: CommandDeps,
   name: string,
-  _args?: unknown,
+  args?: unknown,
 ): Promise<CommandReply> {
   switch (name) {
     case 'saveAndClear': {
@@ -85,6 +134,35 @@ export async function runFrameCommand(
       return fromCmd(deps.adapter.scrollOuter('bottom'))
     case 'stopSession':
       return fromCmd(await deps.session.stopSession())
+    case 'runCell': {
+      const r = await resolveTarget(deps.adapter, (args ?? {}) as TargetArgs)
+      if (!r.ok) return r
+      deps.adapter.flash(r.cell)
+      return fromCmd(await deps.adapter.runCell(r.cell))
+    }
+    case 'runAllCells':
+      return fromCmd(await deps.adapter.command('notebook:run-all-cells'))
+    case 'interrupt':
+      return fromCmd(await deps.adapter.command('notebook:interrupt-kernel'))
+    case 'captureTarget': {
+      const cell = deps.adapter.activeCell()
+      if (!cell || cell.kind !== 'code') return { ok: false, reason: '当前没有选中 code cell' }
+      return {
+        ok: true,
+        value: {
+          uuid: cell.id,
+          index: cell.index,
+          fingerprint: fingerprintOf(deps.adapter.sourceText(cell)),
+        },
+      }
+    }
+    case 'setScheduleMarks': {
+      const marks = (args ?? {}) as { marks?: unknown }
+      const list = Array.isArray(marks.marks)
+        ? (marks.marks as Array<{ id?: string; label?: string; uuid?: string; index?: number }>)
+        : []
+      return fromCmd(deps.adapter.setScheduledMarks(list))
+    }
     case 'openLog':
       deps.openLog()
       return { ok: true }

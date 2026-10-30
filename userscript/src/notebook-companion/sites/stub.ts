@@ -57,6 +57,9 @@ export class StubFrameAdapter implements FrameAdapter {
     return notYet(this.site)
   }
   flash(): void {}
+  setScheduledMarks(): CmdResult {
+    return notYet(this.site)
+  }
 }
 
 export class StubSessionAdapter implements SessionAdapter {
