@@ -41,6 +41,12 @@ export class StubFrameAdapter implements FrameAdapter {
   async toggleCell(_cell: CellRef, _part: 'input' | 'output'): Promise<CmdResult> {
     return notYet(this.site)
   }
+  async setFoldedAll(_collapsed: boolean): Promise<CmdResult> {
+    return notYet(this.site)
+  }
+  async setFolded(_cell: CellRef, _collapsed: boolean): Promise<CmdResult> {
+    return notYet(this.site)
+  }
   async command(_id: string, _args?: { cell?: CellRef }): Promise<CmdResult> {
     return notYet(this.site)
   }

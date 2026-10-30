@@ -142,11 +142,167 @@ describe('KaggleFrameAdapter：命令阶梯与后置条件', () => {
     expect(target.classList.contains('jp-mod-selected')).toBe(true)
   })
 
-  it('scroll：容器存在即写 scrollTop 并补发 scroll；不存在 ⇒ 失败', () => {
+  it('scroll：默认容器无效时兜底 scrollIntoView；完全没有 cell ⇒ 失败', () => {
     const a = new KaggleFrameAdapter(docOf(dom(FRAME)), fast)
     expect(a.scroll('top').ok).toBe(true)
     const empty = new KaggleFrameAdapter(docOf(dom('<html><body></body></html>')), fast)
     expect(empty.scroll('bottom').ok).toBe(false)
+  })
+
+  it('scroll：读回 scrollTop 验证；顶 = 0，底 = scrollHeight - clientHeight', () => {
+    const w = dom(FRAME)
+    const doc = docOf(w)
+    const scroller = doc.querySelector<HTMLElement>('.jp-WindowedPanel-outer')!
+    let top = 500
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 400, configurable: true })
+    Object.defineProperty(scroller, 'scrollTop', {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v
+      },
+    })
+    const a = new KaggleFrameAdapter(doc, fast)
+    const rTop = a.scroll('top')
+    expect(rTop).toMatchObject({ ok: true })
+    expect(top).toBe(0)
+    if (rTop.ok) expect(rTop.detail).toContain('jp-WindowedPanel-outer')
+    expect(a.scroll('bottom')).toMatchObject({ ok: true })
+    expect(top).toBe(1600)
+  })
+
+  it('scroll：赋值无效的容器不算成功（继续找下一个）', () => {
+    const w = dom(FRAME)
+    const doc = docOf(w)
+    const outer = doc.querySelector<HTMLElement>('.jp-WindowedPanel-outer')!
+    Object.defineProperty(outer, 'scrollHeight', { value: 2000, configurable: true })
+    Object.defineProperty(outer, 'clientHeight', { value: 400, configurable: true })
+    Object.defineProperty(outer, 'scrollTop', {
+      configurable: true,
+      get: () => 300,
+      set: () => {},
+    })
+    const nb = doc.querySelector<HTMLElement>('.jp-Notebook')!
+    let nbTop = 100
+    Object.defineProperty(nb, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(nb, 'clientHeight', { value: 200, configurable: true })
+    Object.defineProperty(nb, 'scrollTop', {
+      configurable: true,
+      get: () => nbTop,
+      set: (v: number) => {
+        nbTop = v
+      },
+    })
+    const r = new KaggleFrameAdapter(doc, fast).scroll('bottom')
+    expect(r).toMatchObject({ ok: true })
+    expect(nbTop).toBe(800)
+    if (r.ok) expect(r.detail).toContain('jp-Notebook')
+  })
+})
+
+describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
+  it('setFoldedAll：先还原原生折叠 → 根属性 + 样式只注入一次；单 cell 的 off 会被清掉', async () => {
+    const w = dom(FRAME)
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const nb = w.document.querySelector('.jp-Notebook')!
+    let native = 0
+    w.document
+      .querySelector('[data-command="notebook:show-all-cell-code"]')!
+      .addEventListener('click', () => {
+        native += 1
+      })
+
+    expect(await a.setFoldedAll(true)).toMatchObject({ ok: true })
+    expect(native).toBe(1)
+    expect(nb.getAttribute('data-bnc-fold')).toBe('all')
+    const style = w.document.getElementById('bnc-cell-fold-style')!
+    expect(style.textContent).toContain('max-height: calc(2lh + 4px)')
+    expect(style.textContent).toContain('.jp-CodeCell')
+    expect(style.textContent).toContain('.jp-MarkdownCell')
+    expect(style.textContent).toContain('.bnc-unfold')
+    expect(style.textContent).toContain('content: "CODE "')
+    expect(style.textContent).toContain('content: "MD "')
+
+    expect((await a.setFoldedAll(true)).ok).toBe(true)
+    expect(w.document.querySelectorAll('#bnc-cell-fold-style').length).toBe(1)
+
+    // 全局折叠时单独展开一段 ⇒ cell 上的 off 覆盖
+    const md = a.cells()[0]!
+    expect(await a.setFolded(md, false)).toMatchObject({ ok: true })
+    expect(w.document.querySelector(`[data-uuid="${md.id}"]`)!.getAttribute('data-bnc-fold')).toBe(
+      'off',
+    )
+
+    expect((await a.setFoldedAll(false)).ok).toBe(true)
+    expect(nb.hasAttribute('data-bnc-fold')).toBe(false)
+    expect(w.document.querySelector(`[data-uuid="${md.id}"]`)!.hasAttribute('data-bnc-fold')).toBe(
+      false,
+    )
+  })
+
+  it('setFolded：code / markdown 同一套属性；未渲染 ⇒ 失败（不假装成功）', async () => {
+    const w = dom(FRAME)
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const md = a.cells()[0]!
+    const code = a.cells()[1]!
+    expect(await a.setFolded(md, true)).toMatchObject({ ok: true })
+    expect(w.document.querySelector(`[data-uuid="${md.id}"]`)!.getAttribute('data-bnc-fold')).toBe(
+      'on',
+    )
+    expect(await a.setFolded(code, true)).toMatchObject({ ok: true })
+    expect(
+      w.document.querySelector(`[data-uuid="${code.id}"]`)!.getAttribute('data-bnc-fold'),
+    ).toBe('on')
+    expect((await a.setFolded({ id: 'gone', index: 9, kind: 'code' }, true)).ok).toBe(false)
+  })
+
+  it('折叠后每个 cell 都有「展开」按钮；点一下只展开这一段', async () => {
+    const w = dom(FRAME)
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    expect(await a.setFoldedAll(true)).toMatchObject({ ok: true })
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(3)
+
+    const mdEl = docOf(w).querySelector<HTMLElement>(`[data-uuid="${a.cells()[0]!.id}"]`)!
+    const btn = mdEl.querySelector('.bnc-unfold') as HTMLElement
+    expect(btn.textContent).toBe('展开')
+    btn.click()
+    expect(mdEl.getAttribute('data-bnc-fold')).toBe('off')
+    expect(mdEl.querySelector('.bnc-unfold')).toBeNull()
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(2)
+
+    expect(await a.setFoldedAll(false)).toMatchObject({ ok: true })
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(0)
+  })
+
+  it('单段折叠只给该 cell 加展开按钮；面板展开后按钮消失', async () => {
+    const w = dom(FRAME)
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const [md, code] = a.cells()
+    expect(await a.setFolded(md!, true)).toMatchObject({ ok: true })
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(1)
+    expect(await a.setFolded(code!, true)).toMatchObject({ ok: true })
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(2)
+    expect(await a.setFolded(md!, false)).toMatchObject({ ok: true })
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(1)
+  })
+
+  it('cell 重新渲染/新进 DOM ⇒ observer 把展开按钮补回来', async () => {
+    const w = dom(FRAME)
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    await a.setFoldedAll(true)
+    const first = docOf(w).querySelector<HTMLElement>('.bnc-unfold')!
+    first.remove()
+
+    const extra = w.document.createElement('div')
+    extra.className = 'jp-Cell jp-CodeCell'
+    extra.setAttribute('data-uuid', 'extra-1')
+    extra.setAttribute('data-windowed-list-index', '9')
+    extra.innerHTML = '<div class="jp-InputArea"></div>'
+    w.document.querySelector('.jp-WindowedPanel-viewport')!.append(extra)
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(4)
   })
 })
 

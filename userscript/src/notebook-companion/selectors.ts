@@ -5,6 +5,7 @@ export const SEL = {
   scrollOuter: '.jp-WindowedPanel-outer',
   cell: '.jp-Cell',
   codeCell: '.jp-CodeCell',
+  markdownCell: '.jp-MarkdownCell',
   inputArea: '.jp-InputArea',
   cmContent: '.cm-content',
   outputArea: '.jp-OutputArea',

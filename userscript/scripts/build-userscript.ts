@@ -8,7 +8,7 @@ import { extractMeta } from './meta'
  * 元数据只留一份：入口文件顶部是唯一来源，打包后把它剥掉再前置（minify 会剥注释，
  * debug 不一定，所以两条腿都走同一套「剥了再拼」）。产物：
  *   dist/notebook-companion.user.js         （压缩，交付）
- *   dist/notebook-companion.debug.user.js   （未压缩 + inline sourcemap，排查）
+ *   dist/notebook-companion.debug.user.js   （未压缩，排查）
  */
 const ROOT = join(import.meta.dir, '..')
 const ENTRY = join(ROOT, 'src', 'notebook-companion', 'index.user.ts')
@@ -21,7 +21,7 @@ async function build(minify: boolean, name: string): Promise<void> {
     target: 'browser',
     format: 'iife',
     minify,
-    sourcemap: minify ? 'none' : 'inline',
+    sourcemap: 'none',
   })
   if (!result.success) {
     for (const log of result.logs) console.error(log.message)

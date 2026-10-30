@@ -14,6 +14,11 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps {
   } as unknown as ShipLoop
   const adapter = {
     command: async (id: string) => ({ ok: true, detail: `clicked:${id}` }),
+    setFoldedAll: async (collapsed: boolean) => ({ ok: true, detail: `folded:${collapsed}` }),
+    setFolded: async (cell: { id: string }, collapsed: boolean) => ({
+      ok: true,
+      detail: `folded:${cell.id}:${collapsed}`,
+    }),
     activeCell: () => ({ id: 'c1', index: 1, kind: 'code' as const }),
     scroll: (to: string) => ({ ok: true, detail: to }),
     scrollOuter: (to: string) => ({ ok: true, detail: to }),
@@ -45,16 +50,46 @@ describe('frame 命令表', () => {
     expect(() => JSON.stringify(r)).not.toThrow()
   })
 
-  it('折叠当前 ⇒ 作用到 activeCell；没有 active cell ⇒ 失败', async () => {
-    expect(await runFrameCommand(deps(), 'collapseCurrent')).toMatchObject({
-      ok: true,
-      value: 'clicked:notebook:hide-cell-code',
-    })
+  it('折叠/展开当前 ⇒ 走 setFolded（代码与 markdown 同一套）；没有 active cell ⇒ 失败', async () => {
+    const calls: string[] = []
+    const d = deps()
+    const adapter = d.adapter as unknown as {
+      setFolded: (cell: { id: string }, collapsed: boolean) => { ok: boolean }
+    }
+    adapter.setFolded = (cell: { id: string }, collapsed: boolean) => {
+      calls.push(`fold:${cell.id}:${collapsed}`)
+      return { ok: true }
+    }
+    expect((await runFrameCommand(d, 'collapseCurrent')).ok).toBe(true)
+    expect((await runFrameCommand(d, 'expandCurrent')).ok).toBe(true)
+    expect(calls).toEqual(['fold:c1:true', 'fold:c1:false'])
+
     const none = deps()
     ;(none.adapter as { activeCell: () => null }).activeCell = () => null
     expect(await runFrameCommand(none, 'expandCurrent')).toEqual({
       ok: false,
       reason: '没有选中的 cell',
+    })
+  })
+
+  it('折叠/展开全部 ⇒ setFoldedAll；失败原因原样带回', async () => {
+    const calls: string[] = []
+    const d = deps()
+    const adapter = d.adapter as unknown as {
+      setFoldedAll: (collapsed: boolean) => Promise<{ ok: boolean; reason?: string }>
+    }
+    adapter.setFoldedAll = async (collapsed: boolean) => {
+      calls.push(`fold-all:${collapsed}`)
+      return { ok: true }
+    }
+    expect((await runFrameCommand(d, 'collapseAll')).ok).toBe(true)
+    expect((await runFrameCommand(d, 'expandAll')).ok).toBe(true)
+    expect(calls).toEqual(['fold-all:true', 'fold-all:false'])
+
+    adapter.setFoldedAll = async () => ({ ok: false, reason: 'notebook 未就绪' })
+    expect(await runFrameCommand(d, 'collapseAll')).toEqual({
+      ok: false,
+      reason: 'notebook 未就绪',
     })
   })
 

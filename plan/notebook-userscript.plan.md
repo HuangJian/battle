@@ -277,12 +277,24 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
   这是**模型级**命令，对未渲染的 cell 也生效——虚拟化不影响「全部」的语义。
 - **单个**：直接点该 cell 的 `.jp-InputCollapser` / `.jp-OutputCollapser`；无效果（DOM 变化即后置条件不成立）⇒
   退化为「选中该 cell（点 `.jp-InputArea`）→ 命令 `notebook:hide-cell-code` / `show-cell-code`」。
+- **折叠形态**（用户 2026-10-30 追加）：折叠后每段**保留顶部两行**，代码段蓝色、Markdown 段琥珀色，
+  右上角分别带 `CODE` / `MD` 标签。`hide/show-*-cell-code` 会把输入整段藏掉（留不下两行）⇒ 折叠改由脚本
+  自己的样式接管（`#bnc-cell-fold-style` + `data-bnc-fold`）：`全部` 写 notebook 根的
+  `data-bnc-fold="all"`（虚拟化后渲染的 cell 也生效）；`单个` 写 cell 的 `on|off`，`off` 在全局折叠时
+  覆盖成展开；样式用 `max-height: calc(2lh + 4px)` 裁出两行。折叠态的每个 cell 右上角有真实的
+  「展开」按钮（`bnc-unfold`，同时充当 CODE/MD 标签），点一下只展开这一段；MutationObserver 在
+  虚拟化重渲染/新 cell 进 DOM 时把按钮补回来。切换折叠前先发
+  `notebook:show-all-cell-code` / `show-cell-code` 还原 Jupyter 原生折叠，避免两种折叠叠在一起。
+  只加脚本私有属性，不改站点 DOM 结构。
 - **目标 cell**：默认 `.jp-Cell.jp-mod-selected`，没有则 `.jp-mod-active`；面板给「当前 cell」字样，不猜用户意图。
   未渲染的目标先 `ensureRendered(index)`（§3.6 的同一套步进滚动）。
 
 ### 3.5 滚动到顶/底
 
 - 容器：`.jp-WindowedPanel-outer`；`scrollTop = 0` / `scrollHeight`，再补发一次 `scroll` 事件（虚拟化据此重算）。
+  容器不唯一（不同布局/版本可能是 `.jp-Notebook` 或文档本身）⇒ 按候选列表逐个试，**读回 `scrollTop` 验证**
+  （overflow 非 auto/scroll 的容器赋值无效，不算成功）；全失败再对首/末个已渲染 cell `scrollIntoView`。面板状态
+  打好给实际命中的容器（`scrollTop → jp-WindowedPanel-outer@0`），否则无法定位「点了没反应」。
 - 平滑可选（`behavior:'smooth'`），但**后置条件**用 `scrollTop` 判定，不等动画结束。
 - 外层页也提供「滚动外层到顶/底」（`window.scrollTo`）——Kaggle 侧栏/输出面板很长时有用，与 notebook 滚动分两个按钮。
 

@@ -61,9 +61,10 @@ export async function runFrameCommand(
       }
     }
     case 'collapseAll':
-      return fromCmd(await deps.adapter.command('notebook:hide-all-cell-code'))
+      // 代码 + markdown 都走适配器：命令会把输入整段藏掉，留不下顶部两行（plan §3.4）
+      return fromCmd(await deps.adapter.setFoldedAll(true))
     case 'expandAll':
-      return fromCmd(await deps.adapter.command('notebook:show-all-cell-code'))
+      return fromCmd(await deps.adapter.setFoldedAll(false))
     case 'collapseAllOutputs':
       return fromCmd(await deps.adapter.command('notebook:hide-all-cell-outputs'))
     case 'expandAllOutputs':
@@ -72,8 +73,7 @@ export async function runFrameCommand(
     case 'expandCurrent': {
       const cell = deps.adapter.activeCell()
       if (!cell) return { ok: false, reason: '没有选中的 cell' }
-      const id = name === 'collapseCurrent' ? 'notebook:hide-cell-code' : 'notebook:show-cell-code'
-      return fromCmd(await deps.adapter.command(id, { cell }))
+      return fromCmd(await deps.adapter.setFolded(cell, name === 'collapseCurrent'))
     }
     case 'scrollTop':
       return fromCmd(deps.adapter.scroll('top'))

@@ -2,7 +2,7 @@ import { createRuntime, type Runtime } from '../../runtime'
 import { loadConfig, type BncConfig } from '../config'
 import { detectRole, type Role } from '../selectors'
 import { KaggleFrameAdapter, KaggleSessionAdapter, parseKaggleSession } from '../sites/kaggle'
-import { mountPanel, type Panel } from '../ui/panel'
+import { mountPanel, PANEL_POS_KEY, readPanelPosition, type Panel } from '../ui/panel'
 import { createFrameBridge, createHostBridge, type BridgeWindow } from './bridge'
 import { runFrameCommand } from './commands'
 import { createShipLoop } from './ship-loop'
@@ -175,31 +175,44 @@ function startHost(
 
   const run = async (name: string): Promise<void> => {
     const r = await bridge.send(name)
-    panel?.setStatus(r.ok ? `${name} ✓` : `${name} ✗ ${r.reason ?? '失败'}`, r.ok ? 'ok' : 'error')
+    if (!r.ok) {
+      panel?.setStatus(`${name} ✗ ${r.reason ?? '失败'}`, 'error')
+      return
+    }
+    // 字符串 value 是适配器的 detail（实际滚到的容器等），打到状态栏便于定位
+    const detail = typeof r.value === 'string' ? ` ${r.value}` : ''
+    panel?.setStatus(`${name} ✓${detail}`, 'ok')
   }
 
-  panel = mountPanel(doc, {
-    saveAndClear: () => run('saveAndClear'),
-    flush: () => run('flush'),
-    collapseAll: () => run('collapseAll'),
-    expandAll: () => run('expandAll'),
-    collapseCurrent: () => run('collapseCurrent'),
-    expandCurrent: () => run('expandCurrent'),
-    scrollTop: () => run('scrollTop'),
-    scrollBottom: () => run('scrollBottom'),
-    openLog: () => {
-      win.open(
-        `${config.dashboardBase}/log/${encodeURIComponent(`notebook:${session}`)}`,
-        '_blank',
-        'noopener',
-      )
+  panel = mountPanel(
+    doc,
+    {
+      saveAndClear: () => run('saveAndClear'),
+      flush: () => run('flush'),
+      collapseAll: () => run('collapseAll'),
+      expandAll: () => run('expandAll'),
+      collapseCurrent: () => run('collapseCurrent'),
+      expandCurrent: () => run('expandCurrent'),
+      scrollTop: () => run('scrollTop'),
+      scrollBottom: () => run('scrollBottom'),
+      openLog: () => {
+        win.open(
+          `${config.dashboardBase}/log/${encodeURIComponent(`notebook:${session}`)}`,
+          '_blank',
+          'noopener',
+        )
+      },
+      config: () => {
+        runtime.setClipboard(JSON.stringify(config, null, 2))
+        panel?.setStatus('配置已复制到剪贴板', 'ok')
+      },
+      stopSession: () => run('stopSession'),
     },
-    config: () => {
-      runtime.setClipboard(JSON.stringify(config, null, 2))
-      panel?.setStatus('配置已复制到剪贴板', 'ok')
+    {
+      position: readPanelPosition(runtime),
+      onMove: (position) => runtime.setValue(PANEL_POS_KEY, position),
     },
-    stopSession: () => run('stopSession'),
-  })
+  )
 
   // 外层 iframe 可能在 open shadow root 里（探针同款 deepQuery）；只查 light DOM 会漏。
   const findFrame = (): HTMLIFrameElement | null => {
