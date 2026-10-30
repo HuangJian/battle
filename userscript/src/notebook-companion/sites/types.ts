@@ -16,6 +16,8 @@ export interface FrameAdapter {
   cells(): CellRef[]
   outputText(cell: CellRef): string
   sourceText(cell: CellRef): string
+  /** 跳到并聚焦代码里的配置行（CFG）；标记按顺序匹配，找不到必须带原因。 */
+  focusConfig(markers: string[]): Promise<CmdResult>
   /** 当前选中/激活的 cell（没有 ⇒ null）；命令只作用于 active cell。 */
   activeCell(): CellRef | null
   ensureRendered(index: number): Promise<CellRef | null>
@@ -32,9 +34,12 @@ export interface FrameAdapter {
   scroll(to: 'top' | 'bottom'): CmdResult
   scrollOuter(to: 'top' | 'bottom'): CmdResult
   flash(cell: CellRef): void
-  /** 已设「运行 cell」定时器的目标：在 cell 顶部挂醒目徽标（跨域 DOM 只有帧内能改）。 */
+  /**
+   * 定时徽标：带 uuid/index 的挂目标 cell 顶部；带 `action`（非 run-cell）的挂帧顶部悬浮条
+   * （跨域 DOM 只有帧内能改）。`label` 由宿主算好（含倒计时）。
+   */
   setScheduledMarks(
-    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number }>,
+    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number; action?: string }>,
   ): CmdResult
 }
 

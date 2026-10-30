@@ -32,6 +32,8 @@ export interface ShipLoopOptions {
 export interface ShipLoop {
   readonly state: ShipState
   readonly session: string
+  /** host 掌握外层 notebook URL：用它替换 frame 自己推出的会话基（修 kaggle-unknown-edit）。 */
+  setSessionBase(base: string): void
   readonly dirty: Set<string>
   tick(): Promise<ShipReport | null>
   flushAll(deadlineMs?: number): Promise<{ ok: boolean; bytes: number; reason?: string }>
@@ -56,8 +58,8 @@ function randomWriter(): string {
 export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const site = opts.site ?? 'kaggle'
   const writer = opts.writer ?? randomWriter()
-  const baseSession = parseKaggleSession(opts.referrer || opts.href)
-  const session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
+  let baseSession = parseKaggleSession(opts.referrer || opts.href)
+  let session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())
   const state = createShipState(0)
   const dirty = new Set<string>()
@@ -217,7 +219,23 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
 
   return {
     state,
-    session,
+    get session() {
+      return session
+    },
+    setSessionBase(base: string) {
+      const next = base.trim()
+      // host 传来的基已由 parseKaggleSession 归一；这里只收安全字符，非法一律忽略
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(next) || next === baseSession) return
+      baseSession = next
+      session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
+      // 换键 = 换一份日志：游标/序号归零，重新从各 cell 当前输出开始写
+      state.epoch = 0
+      state.cursors.clear()
+      state.seqs.clear()
+      state.passiveUntil = 0
+      state.stopped.clear()
+      state.lastError = null
+    },
     dirty,
     tick,
     flushAll,

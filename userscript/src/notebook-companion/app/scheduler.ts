@@ -129,6 +129,40 @@ export function actionLabel(action: ScheduleAction): string {
   }
 }
 
+/**
+ * 任务是否属于这一页：运行类绑 notebook；停止/中断绑创建时的会话（与 tick 的 binding 同口径）。
+ * 面板的 cell 徽标/顶部倒计时用它过滤，别把另一页签的任务画到本页。
+ */
+export function taskBelongsTo(
+  task: Pick<SchedulerTask, 'action' | 'notebookKey' | 'sessionAtCreate'>,
+  ident: { notebookKey: string; session: string },
+): boolean {
+  if (task.action === 'run-cell' || task.action === 'run-all') {
+    return task.notebookKey !== '' && task.notebookKey === ident.notebookKey
+  }
+  return task.sessionAtCreate !== '' && task.sessionAtCreate === ident.session
+}
+
+/** cell 徽标倒计时起点：还剩 10 分钟开始逐秒显示（更早就只给静态文案）。 */
+export const COUNTDOWN_WINDOW_MS = 10 * 60_000
+
+/**
+ * cell 徽标上的倒计时文案：> 10 分钟用静态 `fallback`（如「今天 09:05」），进入窗口变成
+ * 「还有 M:SS」，到点以后「即将运行」。纯函数：`now` 由调用方给，测试不碰墙钟。
+ */
+export function countdownLabel(nextAt: number, now: number, fallback: string): string {
+  const left = nextAt - now
+  if (left <= 0) return '即将运行'
+  if (left > COUNTDOWN_WINDOW_MS) return fallback
+  const sec = Math.ceil(left / 1000)
+  return `还有 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
+}
+
+/** 任务表变化后的状态栏文案：删空后必须改口，不能留着「已添加定时：…」。 */
+export function scheduleStatusText(count: number): string {
+  return count === 0 ? '没有定时任务' : `定时任务 ${count} 个`
+}
+
 function relativeNext(ms: number, now: number, parts: PartsFn): string {
   const p = parts(ms)
   const today = parts(now)

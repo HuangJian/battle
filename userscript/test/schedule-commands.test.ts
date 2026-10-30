@@ -46,7 +46,14 @@ function makeDeps(): { w: DomHandle; doc: Document; deps: CommandDeps } {
   return {
     w,
     doc,
-    deps: { loop, adapter, session, openLog: () => {}, openConfig: () => {} },
+    deps: {
+      loop,
+      adapter,
+      session,
+      openLog: () => {},
+      openConfig: () => {},
+      configMarkers: ['CFG = {'],
+    },
   }
 }
 
@@ -125,6 +132,33 @@ describe('frame 命令：定时任务的 cell 目标', () => {
     expect((await runFrameCommand(deps, 'setScheduleMarks', { marks: [] })).ok).toBe(true)
     expect(cell.querySelector('.bnc-sched')).toBeNull()
     expect(cell.getAttribute('data-bnc-sched')).toBeNull()
+  })
+
+  it('setScheduleMarks：非 cell 任务挂帧顶部横幅并逐秒改文案；清空后移除', async () => {
+    const { doc, deps } = makeDeps()
+    const set = await runFrameCommand(deps, 'setScheduleMarks', {
+      marks: [
+        { id: 'b1', label: '运行全部 · 还有 2:59', action: 'run-all' },
+        { id: 'b2', label: '中断内核 · 即将运行', action: 'interrupt' },
+      ],
+    })
+    expect(set.ok).toBe(true)
+    const banner = doc.getElementById('bnc-sched-banner')
+    expect(banner).not.toBeNull()
+    expect(banner!.textContent).toContain('运行全部 · 还有 2:59')
+    expect(banner!.textContent).toContain('中断内核 · 即将运行')
+    expect(banner!.querySelectorAll('[data-bnc-banner]').length).toBe(2)
+
+    // 每秒只更新文案/行集，不重建整个横幅
+    await runFrameCommand(deps, 'setScheduleMarks', {
+      marks: [{ id: 'b1', label: '运行全部 · 还有 2:58', action: 'run-all' }],
+    })
+    expect(banner!.textContent).toContain('还有 2:58')
+    expect(banner!.textContent).not.toContain('中断内核')
+    expect(banner!.querySelectorAll('[data-bnc-banner]').length).toBe(1)
+
+    expect((await runFrameCommand(deps, 'setScheduleMarks', { marks: [] })).ok).toBe(true)
+    expect(doc.getElementById('bnc-sched-banner')).toBeNull()
   })
 
   it('runAllCells 点得到；interrupt 在夹具里没有 ⇒ 响亮失败（不假装成功）', async () => {

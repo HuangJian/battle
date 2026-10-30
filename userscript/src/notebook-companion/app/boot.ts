@@ -7,7 +7,13 @@ import {
   parseKaggleNotebookKey,
   parseKaggleSession,
 } from '../sites/kaggle'
-import { mountPanel, PANEL_POS_KEY, readPanelPosition, type Panel } from '../ui/panel'
+import {
+  mountPanel,
+  PANEL_POS_KEY,
+  readPanelPosition,
+  type Panel,
+  type PanelHistoryRow,
+} from '../ui/panel'
 import {
   createFrameBridge,
   createHostBridge,
@@ -18,10 +24,14 @@ import { installAutoContinue } from './auto-continue'
 import { runFrameCommand } from './commands'
 import {
   actionLabel,
+  countdownLabel,
   createScheduler,
+  scheduleStatusText,
+  taskBelongsTo,
   type ScheduleAction,
   type ScheduleTarget,
   type Scheduler,
+  type SchedulerTask,
 } from './scheduler'
 import { createShipLoop } from './ship-loop'
 
@@ -68,8 +78,6 @@ export function boot(
 }
 
 const PAGE_TAG_KEY = 'bnc:pageTag'
-/** 提示区倒计时的起点（还剩 10 分钟开始显示）。 */
-const NEXT_HINT_MS = 10 * 60_000
 
 /**
  * 本标签页的短标签（4–6 位 a–z0–9）：同一个 notebook 多开几个页签，各写各的日志。
@@ -149,7 +157,16 @@ function startFrame(
     pageTag: pageTag(win),
     onError: (message) => log(`ship: ${message}`),
   })
-  loop.start()
+
+  // 先别 start：等 host 在 attach 里送进 notebook 身份再搬运，否则首拍会写进
+  // kaggle-unknown-edit 的日志（改名后那份日志还缺开头）。兜底 3s 让单独打开的 frame 照常跑。
+  let started = false
+  const startLoop = (): void => {
+    if (started) return
+    started = true
+    loop.start()
+  }
+  const startFallback = setTimeout(startLoop, 3000)
 
   const openLog = (): void => {
     win.open(
@@ -165,10 +182,18 @@ function startFrame(
 
   const bridge = createFrameBridge(frameBridgeWindow(win), {
     handle: (name, args) =>
-      runFrameCommand({ loop, adapter, session, openLog, openConfig }, name, args),
+      runFrameCommand(
+        { loop, adapter, session, openLog, openConfig, configMarkers: config.configMarkers },
+        name,
+        args,
+      ),
     isReady: () => adapter.ready,
     session: () => loop.session,
-    onAttach: (m) => log(`bridge attach（nonce=${m.nonce ?? '∅'}）`),
+    onAttach: (m) => {
+      if (m.sessionBase) loop.setSessionBase(m.sessionBase)
+      startLoop()
+      log(`bridge attach（nonce=${m.nonce ?? '∅'}）`)
+    },
     onError: (reason) => log(`bridge: ${reason}`),
   })
 
@@ -190,6 +215,7 @@ function startFrame(
   )
 
   return () => {
+    clearTimeout(startFallback)
     loop.stop()
     bridge.destroy()
   }
@@ -245,6 +271,9 @@ function startHost(
       log(`bridge: ${reason}`)
     },
   })
+  // frame 的 iframe URL 是 jupyter-proxy（解析不出 owner/slug）：把外层 notebook 身份送过去，
+  // 让日志键用 notebook 名，而不是 kaggle-unknown-edit。
+  bridge.setSessionBase(session)
 
   const run = async (name: string): Promise<void> => {
     const r = await bridge.send(name)
@@ -271,45 +300,50 @@ function startHost(
 
   let sched: Scheduler | null = null
 
-  /** 到点前 10 分钟开始，在面板提示区每秒倒计时（到点后交给 tick 的 10s 取消窗）。 */
-  function updateNextHint(): void {
-    if (!panel || !sched) return
-    const due = sched.nextDue()
-    if (!due) {
-      panel.setNext(null)
-      return
-    }
-    const left = due.nextAt - Date.now()
-    if (left > NEXT_HINT_MS) {
-      panel.setNext(null)
-      return
-    }
-    const label = actionLabel(due.action)
-    if (left <= 0) {
-      panel.setNext(`⏰ ${label} 即将开始`)
-      return
-    }
-    const sec = Math.ceil(left / 1000)
-    const d = new Date(due.nextAt)
-    const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-    panel.setNext(
-      `⏰ 距${label}还有 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}（${clock}）`,
-    )
+  /** 本次页面的执行历史（内存，刷新即清空）。 */
+  const history: PanelHistoryRow[] = []
+  const HISTORY_MAX = 5
+  function recordHistory(task: SchedulerTask, result: { ok: boolean; reason?: string }): void {
+    const d = new Date()
+    const pad2 = (n: number): string => String(n).padStart(2, '0')
+    history.unshift({
+      at: `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`,
+      text: actionLabel(task.action),
+      ok: result.ok,
+      ...(result.reason ? { reason: result.reason } : {}),
+    })
+    if (history.length > HISTORY_MAX) history.length = HISTORY_MAX
+    panel?.setHistory(history)
   }
 
-  /** 把「运行 cell」的定时目标下发给帧内渲染（跨域 DOM 宿主碰不到）。 */
+  /** 只显示属于这一页的任务：运行类看 notebook，停止/中断看本页会话（与调度器同口径）。 */
+  function belongsHere(task: SchedulerTask): boolean {
+    return taskBelongsTo(task, { notebookKey, session: frameSession })
+  }
+
+  /**
+   * 把定时任务 + 倒计时下发到帧内（跨域 DOM 宿主碰不到）：
+   * `run-cell` 挂目标 cell 的徽标，其余动作挂帧顶部悬浮徽标。
+   */
   function syncMarks(): void {
-    if (!sched) return
+    if (!sched || !ready) return
+    const now = Date.now()
     const nextById = new Map(sched.rows().map((r) => [r.id, r.next]))
     const marks = sched
       .tasks()
-      .filter((t) => t.action === 'run-cell' && t.target)
-      .map((t) => ({
-        id: t.id,
-        label: nextById.get(t.id) ?? '已定时',
-        ...(t.target?.uuid ? { uuid: t.target.uuid } : {}),
-        ...(t.target?.index !== undefined ? { index: t.target.index } : {}),
-      }))
+      .filter(belongsHere)
+      .map((t) => {
+        const left = countdownLabel(t.nextAt, now, nextById.get(t.id) ?? '已定时')
+        if (t.action === 'run-cell' && t.target) {
+          return {
+            id: t.id,
+            label: left,
+            ...(t.target.uuid ? { uuid: t.target.uuid } : {}),
+            ...(t.target.index !== undefined ? { index: t.target.index } : {}),
+          }
+        }
+        return { id: t.id, label: `${actionLabel(t.action)} · ${left}`, action: t.action }
+      })
     void bridge.send('setScheduleMarks', { marks })
   }
 
@@ -331,17 +365,7 @@ function startHost(
           'noopener',
         )
       },
-      config: () => {
-        runtime.setClipboard(JSON.stringify(config, null, 2))
-        panel?.setStatus('配置已复制到剪贴板', 'ok')
-      },
-      stopSession: () =>
-        stopNow().then((r) =>
-          panel?.setStatus(
-            r.ok ? '停止会话 ✓' : `stopSession ✗ ${r.reason ?? '失败'}`,
-            r.ok ? 'ok' : 'error',
-          ),
-        ),
+      jumpConfig: () => run('jumpConfig'),
     },
     {
       position: readPanelPosition(runtime),
@@ -401,22 +425,28 @@ function startHost(
       return panel ? panel.countdown(`即将${text}`, 10) : true
     },
     run: async (task) => {
-      if (task.action === 'stop-session') return stopNow()
-      if (!ready) return { ok: false, reason: '笔记本未连接（iframe 不可达）' }
-      if (task.action === 'interrupt') return fromBridge(await bridge.send('interrupt'))
-      if (task.action === 'run-all') return fromBridge(await bridge.send('runAllCells'))
-      return fromBridge(await bridge.send('runCell', task.target ?? {}))
+      let result: { ok: boolean; reason?: string }
+      if (task.action === 'stop-session') result = await stopNow()
+      else if (!ready) result = { ok: false, reason: '笔记本未连接（iframe 不可达）' }
+      else if (task.action === 'interrupt') result = fromBridge(await bridge.send('interrupt'))
+      else if (task.action === 'run-all') result = fromBridge(await bridge.send('runAllCells'))
+      else result = fromBridge(await bridge.send('runCell', task.target ?? {}))
+      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）
+      recordHistory(task, result)
+      return result
     },
     onChange: () => {
-      panel?.setSchedule(sched?.rows() ?? [])
+      const rows = sched?.rows() ?? []
+      panel?.setSchedule(rows)
+      // 增删/执行后状态栏跟着任务表改口：删空后不再留着「已添加定时：HH:MM」
+      panel?.setStatus(scheduleStatusText(rows.length), 'ok')
       syncMarks()
-      updateNextHint()
     },
   })
   panel.setSchedule(sched.rows())
   sched.start()
-  updateNextHint()
-  const nextHintTimer = setInterval(updateNextHint, 1000)
+  // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）
+  const markTimer = setInterval(syncMarks, 1000)
   const onVisibility = (): void => {
     void sched?.tick()
   }
@@ -466,7 +496,7 @@ function startHost(
   const timer = setInterval(attach, 1000)
   return () => {
     clearInterval(timer)
-    clearInterval(nextHintTimer)
+    clearInterval(markTimer)
     autoContinue.dispose()
     sched?.stop()
     doc.removeEventListener('visibilitychange', onVisibility)

@@ -1,8 +1,10 @@
 /**
- * auto-continue.ts — Kaggle 外层弹窗的自动确认（2026-10-30 用户要求）。
+ * auto-continue.ts — Kaggle 外层弹窗的自动点掉（2026-10-30 用户要求）。
  *
- * 「是否仍需编辑」这类弹窗会卡住正在跑的训练页，必须点掉才能继续。这里只点
- * **白名单文案**：「Continue editing」，以及配额弹窗里同族的「Continue working」。
+ * 两类弹窗会卡住正在跑的训练页：
+ *   ① 「是否仍需编辑」/ 配额：点白名单里的「Continue editing」/「Continue working」；
+ *   ② 「notebook 在别处被改过、保存失败」警告：**只在这种弹窗里**点「Cancel」
+ *      （Download 不碰；「Cancel」这个文案别处也有，不能进通用白名单）。
  * 其余按钮一律不碰——尤其「Turn off TPU」：点错等于把训练环境拆了。
  *
  * 三条防误伤：
@@ -11,6 +13,9 @@
  *   ③ 弹窗内按钮必须**整段文案**命中（不是子串），`span` 包裹也按 textContent 归一。
  */
 const CONFIRM_LABELS = ['continue editing', 'continue working']
+/** 保存冲突警告的正文片段：两个都命中才认（只出现一个太常见）。 */
+const CONFLICT_MARKERS = ['unable to save your notebook', 'modified in another location']
+const CANCEL_LABELS = ['cancel']
 const CLICK_COOLDOWN_MS = 1500
 
 export interface AutoContinueHooks {
@@ -30,12 +35,24 @@ interface ObserverLike {
   disconnect(): void
 }
 
-function findConfirm(dialog: Element): { el: HTMLElement; label: string } | null {
+const normalized = (el: Element): string => (el.textContent ?? '').trim().toLowerCase()
+
+function buttonByLabel(
+  dialog: Element,
+  labels: string[],
+): { el: HTMLElement; label: string } | null {
   for (const el of dialog.querySelectorAll('button, [role="button"]')) {
-    const label = (el.textContent ?? '').trim().toLowerCase()
-    if (CONFIRM_LABELS.includes(label)) return { el: el as HTMLElement, label }
+    const label = normalized(el)
+    if (labels.includes(label)) return { el: el as HTMLElement, label }
   }
   return null
+}
+
+/** 保存冲突警告：只点 Cancel；别的弹窗即使有 Cancel 也不碰。 */
+function findClickTarget(dialog: Element): { el: HTMLElement; label: string } | null {
+  const text = normalized(dialog)
+  if (CONFLICT_MARKERS.every((m) => text.includes(m))) return buttonByLabel(dialog, CANCEL_LABELS)
+  return buttonByLabel(dialog, CONFIRM_LABELS)
 }
 
 /** 安装自动确认。返回的 `dispose` 会断开 observer 并让后续 scan 变成 no-op。 */
@@ -51,7 +68,7 @@ export function installAutoContinue(doc: Document, hooks: AutoContinueHooks = {}
     if (disposed) return
     for (const dialog of doc.querySelectorAll('[role="dialog"]')) {
       if (seen.has(dialog)) continue
-      const hit = findConfirm(dialog)
+      const hit = findClickTarget(dialog)
       if (!hit) continue
       const stamp = now()
       const prev = lastClickAt.get(hit.label)

@@ -17,8 +17,7 @@ export type PanelAction =
   | 'scrollTop'
   | 'scrollBottom'
   | 'openLog'
-  | 'config'
-  | 'stopSession'
+  | 'jumpConfig'
 
 export type PanelHandlers = Partial<Record<PanelAction, () => void | Promise<unknown>>>
 
@@ -35,6 +34,15 @@ export interface PanelScheduleInput {
   action: string
 }
 
+export interface PanelHistoryRow {
+  /** `HH:MM:SS` */
+  at: string
+  /** 动作名（如「运行全部」） */
+  text: string
+  ok: boolean
+  reason?: string
+}
+
 export interface Panel {
   readonly host: HTMLElement
   setStatus(text: string, tone?: 'ok' | 'warn' | 'error'): void
@@ -42,8 +50,8 @@ export interface Panel {
   setSession(text: string): void
   /** 定时任务列表（存储与调度在 app/scheduler，面板只负责上屏）。 */
   setSchedule(rows: PanelScheduleRow[]): void
-  /** 提示区的「距下一次还有 N:SS」倒计时；null = 隐藏。 */
-  setNext(text: string | null): void
+  /** 本次页面内的执行历史（内存；刷新即清空）。 */
+  setHistory(rows: PanelHistoryRow[]): void
   /** 到点倒数 + 「取消」；返回 false = 用户取消（面板销毁也算取消）。 */
   countdown(text: string, seconds: number): Promise<boolean>
   setBusy(busy: boolean): void
@@ -90,10 +98,9 @@ interface ButtonSpec {
   title: string
 }
 
-/** 按功能分区：一行一组，组名在上；按钮顺序 = 使用频率。 */
-const GROUPS: Array<{ label: string; buttons: ButtonSpec[] }> = [
+/** 按功能分区：一行一组，组名在上；按钮顺序 = 使用频率。首组不写组名（日志键已说明用途）。 */
+const GROUPS: Array<{ label?: string; buttons: ButtonSpec[] }> = [
   {
-    label: '日志',
     buttons: [
       {
         act: 'saveAndClear',
@@ -122,15 +129,8 @@ const GROUPS: Array<{ label: string; buttons: ButtonSpec[] }> = [
     buttons: [
       { act: 'scrollTop', label: '顶', title: '笔记本滚动到顶' },
       { act: 'scrollBottom', label: '底', title: '笔记本滚动到底' },
+      { act: 'jumpConfig', label: 'CFG', title: '跳转并聚焦到代码里的 CFG 行（不复制）' },
     ],
-  },
-  {
-    label: '配置',
-    buttons: [{ act: 'config', label: 'CFG', title: '复制当前配置到剪贴板' }],
-  },
-  {
-    label: '会话',
-    buttons: [{ act: 'stopSession', label: '停会话', title: '停止 Kaggle session（需二次确认）' }],
   },
 ]
 
@@ -183,7 +183,6 @@ button {
 button:hover { background: #24354b; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 button[data-act="saveAndClear"] { background: #1e5a3a; border-color: #2f8a58; flex-basis: 100px; }
-button[data-act="stopSession"] { background: #4a1f26; border-color: #7d3340; }
 .sess { margin: 0 0 6px; color: #7f93ad; font-size: 10px; line-height: 1.3; word-break: break-all; }
 .sess:empty { display: none; }
 .status { margin-top: 6px; min-height: 16px; color: #9fb3cc; word-break: break-all; }
@@ -191,10 +190,15 @@ button[data-act="stopSession"] { background: #4a1f26; border-color: #7d3340; }
 .status[data-tone="warn"] { color: #e6c36a; }
 .status[data-tone="error"] { color: #ff8d8d; }
 .srow { display: flex; gap: 4px; margin-bottom: 4px; }
-.srow input[type="time"], .srow select {
-  flex: 1 1 auto; min-width: 0; padding: 3px 4px; color: #dbe7ff;
+.srow input[data-sched="at"], .srow select {
+  padding: 3px 4px; color: #dbe7ff;
   background: #1b2738; border: 1px solid #2d4a70; border-radius: 6px; font: inherit;
 }
+/* 只要 HH:MM：定宽居中，别把动作下拉挤到下一行 */
+.srow input[data-sched="at"] {
+  flex: 0 0 auto; box-sizing: border-box; width: 60px; min-width: 0; text-align: center;
+}
+.srow select { flex: 1 1 auto; min-width: 0; }
 .srow button { flex: 0 0 auto; min-width: 48px; }
 .sack { display: flex; gap: 4px; align-items: center; color: #e6c36a; font-size: 10px; margin-bottom: 4px; }
 .sack[hidden] { display: none; }
@@ -204,11 +208,13 @@ button[data-act="stopSession"] { background: #4a1f26; border-color: #7d3340; }
 .sitem .snext { color: #7f93ad; font-size: 10px; white-space: nowrap; }
 .sitem button { flex: 0 0 auto; min-width: 0; padding: 1px 5px; }
 .snote { margin-top: 3px; color: #7f93ad; font-size: 10px; }
-.next {
-  margin-top: 6px; color: #ffd27a; font-size: 11px; font-weight: 600;
-  letter-spacing: .02em; word-break: break-all;
-}
-.next:empty { display: none; }
+.hist { margin-top: 6px; padding-top: 4px; border-top: 1px solid rgba(120, 170, 255, .18); }
+.hist[hidden] { display: none; }
+.hist .hlabel { color: #7f93ad; font-size: 10px; letter-spacing: .08em; margin-bottom: 3px; }
+.hitem { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; font-size: 11px; }
+.hitem .hat { color: #7f93ad; font-size: 10px; white-space: nowrap; }
+.hitem[data-ok="0"] { color: #ff8d8d; }
+.hitem .hwhy { color: #7f93ad; font-size: 10px; word-break: break-all; }
 .ask {
   display: flex; gap: 6px; align-items: center; margin-top: 6px; padding: 4px 6px;
   border: 1px solid #7d6b33; border-radius: 6px; background: rgba(125, 107, 51, .18);
@@ -235,7 +241,7 @@ export function mountPanel(
     `<div class="sess" data-sess></div>` +
     GROUPS.map(
       (g) =>
-        `<div class="group"><div class="glabel">${g.label}</div><div class="row">${g.buttons
+        `<div class="group">${g.label ? `<div class="glabel">${g.label}</div>` : ''}<div class="row">${g.buttons
           .map(
             (b) =>
               `<button type="button" data-act="${b.act}" title="${b.title}">${b.label}</button>`,
@@ -252,9 +258,9 @@ export function mountPanel(
     `<label class="sack" data-ack hidden><input type="checkbox" data-sched="ack">` +
     ` 我确认到点会停止会话</label>` +
     `<div class="slist" data-sched="list"></div>` +
+    `<div class="hist" data-hist hidden></div>` +
     `<div class="snote">只跑一次（执行后自动移除）；24 小时制，早于现在 = 明天；` +
     `运行 cell = 添加时选中的那一段（内容变了不跑）。</div></div>` +
-    `<div class="next" data-next></div>` +
     `<div class="status" data-tone="warn">连接中…</div>` +
     `<div class="ask" data-ask hidden><span data-ask-text></span>` +
     `<button type="button" data-ask-cancel>取消</button></div></div>`
@@ -262,7 +268,6 @@ export function mountPanel(
   const bnc = shadow.querySelector('.bnc') as HTMLElement
   const handle = shadow.querySelector('[data-drag]') as HTMLElement
   const status = shadow.querySelector('.status') as HTMLElement
-  const next = shadow.querySelector('[data-next]') as HTMLElement
   const sess = shadow.querySelector('[data-sess]') as HTMLElement
   const tzEl = shadow.querySelector('[data-tz]') as HTMLElement
   const schedAt = shadow.querySelector('[data-sched="at"]') as HTMLInputElement
@@ -271,6 +276,7 @@ export function mountPanel(
   const schedAck = shadow.querySelector('[data-sched="ack"]') as HTMLInputElement
   const schedAdd = shadow.querySelector('[data-sched="add"]') as HTMLElement
   const schedList = shadow.querySelector('[data-sched="list"]') as HTMLElement
+  const hist = shadow.querySelector('[data-hist]') as HTMLElement
   const ask = shadow.querySelector('[data-ask]') as HTMLElement
   const askText = shadow.querySelector('[data-ask-text]') as HTMLElement
   const askCancel = shadow.querySelector('[data-ask-cancel]') as HTMLElement
@@ -399,11 +405,6 @@ export function mountPanel(
     sess.title = text
   }
 
-  function setNext(text: string | null): void {
-    next.textContent = text ?? ''
-    next.title = text ?? ''
-  }
-
   function setSchedule(rows: PanelScheduleRow[]): void {
     schedList.textContent = ''
     for (const row of rows) {
@@ -433,6 +434,35 @@ export function mountPanel(
       empty.className = 'snote'
       empty.textContent = '没有定时任务'
       schedList.append(empty)
+    }
+  }
+
+  /** 执行历史：只在内存里（刷新页面即清空），条数由调用方控制。 */
+  function setHistory(rows: PanelHistoryRow[]): void {
+    hist.textContent = ''
+    hist.hidden = rows.length === 0
+    if (rows.length === 0) return
+    const label = doc.createElement('div')
+    label.className = 'hlabel'
+    label.textContent = '执行历史（本页）'
+    hist.append(label)
+    for (const row of rows) {
+      const item = doc.createElement('div')
+      item.className = 'hitem'
+      item.setAttribute('data-ok', row.ok ? '1' : '0')
+      const at = doc.createElement('span')
+      at.className = 'hat'
+      at.textContent = row.at
+      const text = doc.createElement('span')
+      text.textContent = `${row.text}${row.ok ? ' ✓' : ' ✗'}`
+      item.append(at, text)
+      if (!row.ok && row.reason) {
+        const why = doc.createElement('span')
+        why.className = 'hwhy'
+        why.textContent = row.reason
+        item.append(why)
+      }
+      hist.append(item)
     }
   }
 
@@ -500,7 +530,7 @@ export function mountPanel(
     setStatus,
     setSession,
     setSchedule,
-    setNext,
+    setHistory,
     countdown,
     setBusy(next: boolean) {
       busy = next

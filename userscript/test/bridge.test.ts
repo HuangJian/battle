@@ -62,6 +62,19 @@ describe('bridge：host ⇄ frame', () => {
     host.destroy()
   })
 
+  it('host：setSessionBase 后 attach 带上 notebook 基（frame 不必再猜 unknown）', () => {
+    const f = fakeWindow()
+    const host = createHostBridge(f.win)
+    host.setSessionBase('kaggle-Huang-rollout-edit')
+    host.attach(FRAME, 'frame-window', 'n1')
+    expect(f.sent[0]!.msg).toMatchObject({
+      kind: 'attach',
+      nonce: 'n1',
+      sessionBase: 'kaggle-Huang-rollout-edit',
+    })
+    host.destroy()
+  })
+
   it('host：frame 不回 ⇒ 超时是失败（不假装成功）', async () => {
     const f = fakeWindow()
     const host = createHostBridge(f.win, { timeoutMs: 20 })
@@ -111,6 +124,28 @@ describe('bridge：host ⇄ frame', () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(handled).toEqual(['flush'])
     expect(f.sent[1]!.msg).toMatchObject({ kind: 'result', id: 'b', nonce: 'n1', ok: true })
+  })
+
+  it('frame：attach 里的 sessionBase 交给 onAttach（boot 用它改日志键）', () => {
+    const f = fakeWindow('self', 'parent')
+    const seen: string[] = []
+    createFrameBridge(f.win, {
+      hostOrigins: [KAGGLE],
+      handle: async () => ({ ok: true }),
+      onAttach: (m) => {
+        if (m.sessionBase) seen.push(m.sessionBase)
+      },
+    })
+    f.fire({
+      data: {
+        __bnc: 1,
+        kind: 'attach',
+        nonce: 'n1',
+        sessionBase: 'kaggle-Huang-rollout-edit',
+      },
+      origin: KAGGLE,
+    })
+    expect(seen).toEqual(['kaggle-Huang-rollout-edit'])
   })
 
   it('frame：attach 时 notebook 未就绪 ⇒ 出现后补 status（notebook=true）', async () => {

@@ -22,11 +22,20 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps {
     activeCell: () => ({ id: 'c1', index: 1, kind: 'code' as const }),
     scroll: (to: string) => ({ ok: true, detail: to }),
     scrollOuter: (to: string) => ({ ok: true, detail: to }),
+    focusConfig: async (markers: string[]) => ({ ok: true, detail: `cfg:${markers.join('|')}` }),
   } as unknown as FrameAdapter
   const session = {
     stopSession: async () => ({ ok: true, detail: 'stopped' }),
   } as unknown as SessionAdapter
-  return { loop, adapter, session, openLog: () => {}, openConfig: () => {}, ...over }
+  return {
+    loop,
+    adapter,
+    session,
+    openLog: () => {},
+    openConfig: () => {},
+    configMarkers: ['CFG = {'],
+    ...over,
+  }
 }
 
 describe('frame 命令表', () => {
@@ -90,6 +99,21 @@ describe('frame 命令表', () => {
     expect(await runFrameCommand(d, 'collapseAll')).toEqual({
       ok: false,
       reason: 'notebook 未就绪',
+    })
+  })
+
+  it('jumpConfig ⇒ 把 configMarkers 交给适配器定位 CFG 行；失败原因原样带回', async () => {
+    expect(await runFrameCommand(deps(), 'jumpConfig')).toEqual({
+      ok: true,
+      value: 'cfg:CFG = {',
+    })
+    const bad = deps()
+    ;(
+      bad.adapter as unknown as { focusConfig: () => Promise<{ ok: false; reason: string }> }
+    ).focusConfig = async () => ({ ok: false, reason: '找不到 CFG 行' })
+    expect(await runFrameCommand(bad, 'jumpConfig')).toEqual({
+      ok: false,
+      reason: '找不到 CFG 行',
     })
   })
 

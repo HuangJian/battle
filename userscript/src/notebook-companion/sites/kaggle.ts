@@ -85,6 +85,8 @@ const FOLD_STYLE = `
 const SCHED_STYLE_ID = 'bnc-sched-style'
 const SCHED_CLASS = 'bnc-sched'
 const SCHED_ATTR = 'data-bnc-sched'
+const SCHED_BANNER_ID = 'bnc-sched-banner'
+const SCHED_BANNER_ROW = 'bnc-sched-brow'
 
 /** 定时徽标：cell 顶部整条横幅 + 整段描边（计时器已设的目标一眼可辨）。 */
 const SCHED_STYLE = `
@@ -103,6 +105,20 @@ const SCHED_STYLE = `
 @keyframes bnc-sched-pulse {
   0%, 100% { box-shadow: 0 2px 10px rgba(255, 122, 69, .30); }
   50% { box-shadow: 0 2px 18px rgba(255, 122, 69, .85); }
+}
+/* 非 cell 任务（运行全部/停会话/中断内核）没有目标 cell ⇒ 帧顶部悬浮徽标 + 倒计时 */
+.bnc-sched-banner {
+  position: fixed; top: 6px; left: 50%; transform: translateX(-50%);
+  z-index: 2147483645; display: flex; flex-direction: column; gap: 3px;
+  max-width: min(92vw, 560px); pointer-events: none;
+}
+.bnc-sched-banner .bnc-sched-brow {
+  padding: 4px 12px; border-radius: 999px; text-align: center;
+  background: linear-gradient(90deg, #ffb020, #ff7a45);
+  color: #1a1206; font: 700 12px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  box-shadow: 0 2px 12px rgba(255, 122, 69, .45);
+  animation: bnc-sched-pulse 1.8s ease-in-out infinite;
 }
 `
 
@@ -149,6 +165,8 @@ export class KaggleFrameAdapter implements FrameAdapter {
   private unfoldSyncQueued = false
   /** 已设「运行 cell」定时器的目标（帧内渲染；宿主经桥下发）。 */
   private schedMarks: Array<{ id: string; label: string; uuid?: string; index?: number }> = []
+  /** 非 cell 定时任务（运行全部/停会话/中断）：帧顶部悬浮徽标。 */
+  private schedBanners: Array<{ id: string; label: string }> = []
 
   constructor(
     private readonly doc: Document,
@@ -229,6 +247,91 @@ export class KaggleFrameAdapter implements FrameAdapter {
   sourceText(cell: CellRef): string {
     const el = this.cellEl(cell)
     return el ? (q<HTMLElement>(el, SEL.cmContent)?.textContent ?? '') : ''
+  }
+
+  /** 在已渲染的 code cell 里按行找配置标记（启发式优先：CFG 开头且含 `{`）。 */
+  private findConfigLine(
+    markers: string[],
+  ): { cell: CellRef; line: HTMLElement; marker: string; lineNo: number } | null {
+    const scan = (match: (text: string) => boolean) => {
+      for (const cell of this.cells()) {
+        if (cell.kind !== 'code') continue
+        const el = this.cellEl(cell)
+        const content = el ? q<HTMLElement>(el, SEL.cmContent) : null
+        if (!content) continue
+        const lines = qa<HTMLElement>(content, '.cm-line')
+        if (lines.length === 0) {
+          // CM 行虚拟化/别的编辑器：没有逐行元素时退到整块内容
+          if (match(content.textContent ?? '')) return { cell, line: content, lineNo: 0 }
+          continue
+        }
+        for (let i = 0; i < lines.length; i++) {
+          if (match(lines[i]!.textContent ?? '')) return { cell, line: lines[i]!, lineNo: i + 1 }
+        }
+      }
+      return null
+    }
+    // ① 内置启发式：某行以 CFG 开头且含 `{`（覆盖 `CFG = {` / `CFG={` / 多空格）
+    const guess = scan((text) => /^\s*CFG\b.*\{/.test(text))
+    if (guess) return { ...guess, marker: 'CFG 行' }
+    // ② 配置的字面标记按顺序（默认 CFG = { → CFG={ → # @title）
+    for (const marker of markers) {
+      const hit = scan((text) => text.includes(marker))
+      if (hit) return { ...hit, marker }
+    }
+    return null
+  }
+
+  /**
+   * 面板「CFG」：滚到并聚焦配置行（不复制）。先找已渲染的 cell；找不到就回顶再扫 10 帧
+   * （虚拟化下顶部的 cell 要下一帧才挂回 DOM），仍找不到必须带原因失败。
+   */
+  async focusConfig(markers: string[]): Promise<CmdResult> {
+    const wanted = markers.filter((m) => typeof m === 'string' && m.trim().length > 0)
+    if (wanted.length === 0) return { ok: false, reason: 'configMarkers 为空（没有可定位的标记）' }
+    let hit = this.findConfigLine(wanted)
+    if (!hit) {
+      this.scroll('top')
+      for (let i = 0; i < 10 && !hit; i++) {
+        await this.hooks.nextFrame()
+        hit = this.findConfigLine(wanted)
+      }
+    }
+    if (!hit) return { ok: false, reason: `找不到 CFG 行（标记：${wanted.join(' / ')}）` }
+    return this.focusLine(hit.cell, hit.line, hit.marker, hit.lineNo)
+  }
+
+  /** 展开（折叠态下这行被裁掉）+ 点一下让 CM6 把光标落到该行 + 滚进视口中央。 */
+  private focusLine(cell: CellRef, line: HTMLElement, marker: string, lineNo: number): CmdResult {
+    const el = this.cellEl(cell)
+    if (el) {
+      const all = this.notebook()?.getAttribute(FOLD_ATTR) === 'all'
+      const own = el.getAttribute(FOLD_ATTR)
+      if (own === 'on' || (all && own !== 'off')) {
+        el.setAttribute(FOLD_ATTR, 'off')
+        this.syncUnfoldButtons()
+      }
+    }
+    const Ctor = (this.doc.defaultView?.MouseEvent ?? MouseEvent) as typeof MouseEvent
+    const box = line.getBoundingClientRect()
+    const at: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: box.left + 4,
+      clientY: box.top + Math.max(1, box.height / 2),
+    }
+    // CM6 只在（合成）指针事件里定位光标；三重事件与真实点击一致
+    for (const type of ['mousedown', 'mouseup', 'click'] as const) {
+      line.dispatchEvent(new Ctor(type, at))
+    }
+    const content = line.closest(SEL.cmContent) as HTMLElement | null
+    content?.focus()
+    if (typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'center' })
+    const where = lineNo > 0 ? `第 ${cell.index} 段第 ${lineNo} 行` : `第 ${cell.index} 段`
+    // `# @title` 这类弱标记必须自曝（plan §3.6 / S10）
+    const label = marker.startsWith('#') ? `按 ${marker} 命中，可能不是 CFG cell` : marker
+    return { ok: true, detail: `${where} · ${label}` }
   }
 
   /** 事件构造器取自文档窗口（跨 realm 用全局 `Event` 会 TypeError）。 */
@@ -413,6 +516,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
       this.unfoldSyncQueued = false
       this.syncUnfoldButtons()
       this.syncScheduledBadges()
+      this.syncScheduleBanner()
     }
     const view = this.doc.defaultView as unknown as {
       queueMicrotask?: (fn: () => void) => void
@@ -470,7 +574,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
         continue
       }
       el.setAttribute(SCHED_ATTR, '1')
-      const text = `⏰ 已定时 ${mark.label}`
+      const text = `⏰ 已定时 · ${mark.label}`
       if (badge) {
         if (badge.textContent !== text) badge.textContent = text
         continue
@@ -483,20 +587,72 @@ export class KaggleFrameAdapter implements FrameAdapter {
     }
   }
 
-  /** 宿主下发「运行 cell」的定时目标（uuid 优先，index 兜底）。 */
+  /** 顶部悬浮徽标：只列非 cell 任务（运行全部/停会话/中断内核），按 id 增量更新。 */
+  private syncScheduleBanner(): void {
+    const existing = this.doc.getElementById(SCHED_BANNER_ID) as HTMLElement | null
+    if (this.schedBanners.length === 0) {
+      existing?.remove()
+      return
+    }
+    const parent = this.doc.body ?? this.doc.documentElement
+    if (!parent) return
+    let box = existing
+    if (!box) {
+      box = this.doc.createElement('div')
+      box.id = SCHED_BANNER_ID
+      box.className = 'bnc-sched-banner'
+      parent.append(box)
+    }
+    const seen = new Set<string>()
+    for (const b of this.schedBanners) {
+      seen.add(b.id)
+      let row = qa<HTMLElement>(box, '[data-bnc-banner]').find(
+        (el) => el.getAttribute('data-bnc-banner') === b.id,
+      )
+      if (!row) {
+        row = this.doc.createElement('div')
+        row.className = SCHED_BANNER_ROW
+        row.setAttribute('data-bnc-banner', b.id)
+        box.append(row)
+      }
+      const text = `⏰ ${b.label}`
+      if (row.textContent !== text) row.textContent = text
+    }
+    for (const row of qa<HTMLElement>(box, '[data-bnc-banner]')) {
+      if (!seen.has(row.getAttribute('data-bnc-banner') ?? '')) row.remove()
+    }
+  }
+
+  /**
+   * 宿主下发的定时徽标：`run-cell` 目标（uuid 优先，index 兜底）挂 cell；
+   * 其余动作（运行全部/停会话/中断）挂帧顶部悬浮条。
+   */
   setScheduledMarks(
-    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number }>,
+    marks: Array<{ id?: string; label?: string; uuid?: string; index?: number; action?: string }>,
   ): CmdResult {
-    this.schedMarks = marks.map((m) => ({
-      id: typeof m.id === 'string' ? m.id : '',
-      label: typeof m.label === 'string' && m.label ? m.label : '已设置',
-      ...(typeof m.uuid === 'string' && m.uuid ? { uuid: m.uuid } : {}),
-      ...(typeof m.index === 'number' && Number.isInteger(m.index) ? { index: m.index } : {}),
-    }))
+    const cells: Array<{ id: string; label: string; uuid?: string; index?: number }> = []
+    const banners: Array<{ id: string; label: string }> = []
+    for (const m of marks) {
+      const id = typeof m.id === 'string' ? m.id : ''
+      const label = typeof m.label === 'string' && m.label ? m.label : '已设置'
+      if (typeof m.action === 'string' && m.action && m.action !== 'run-cell') {
+        banners.push({ id, label })
+        continue
+      }
+      cells.push({
+        id,
+        label,
+        ...(typeof m.uuid === 'string' && m.uuid ? { uuid: m.uuid } : {}),
+        ...(typeof m.index === 'number' && Number.isInteger(m.index) ? { index: m.index } : {}),
+      })
+    }
+    this.schedMarks = cells
+    this.schedBanners = banners
     if (!this.ensureSchedStyle()) return { ok: false, reason: '无法注入定时徽标样式（没有 head）' }
     this.watchFold() // 复用同一个 observer：虚拟化重渲染后把徽标补回来
     this.syncScheduledBadges()
-    return { ok: true, detail: `marks:${this.schedMarks.length}` }
+    this.syncScheduleBanner()
+    return { ok: true, detail: `marks:${this.schedMarks.length}+${this.schedBanners.length}` }
   }
 
   private addUnfoldButton(el: HTMLElement): void {

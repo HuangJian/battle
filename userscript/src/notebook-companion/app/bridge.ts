@@ -21,6 +21,8 @@ export interface BridgeMessage {
   notebook?: boolean
   /** frame 实际写入的日志会话键（含页面标签）；host 用它做「打开日志」链接。 */
   session?: string
+  /** host 侧已知的日志会话基（attach 下发）：frame 的 iframe URL 解析不出 notebook。 */
+  sessionBase?: string
 }
 
 export interface BridgeEvent {
@@ -66,6 +68,8 @@ export interface HostBridge {
   readonly nonce: string
   /** `target` 必须是 iframe 的 `contentWindow`（`window.postMessage` 只发给自己，不发子帧）。 */
   attach(origin: string, target: unknown, nonce?: string): void
+  /** 外层 URL 推出的 notebook 会话基：随 attach 下发，frame 用它替换自己猜出的 unknown。 */
+  setSessionBase(base: string): void
   send(name: string, args?: unknown): Promise<{ ok: boolean; value?: unknown; reason?: string }>
   destroy(): void
 }
@@ -74,6 +78,7 @@ export interface HostBridge {
 export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {}): HostBridge {
   let nonce = ''
   let frameTarget: unknown = null
+  let sessionBase = ''
   const pending = new Map<
     string,
     { resolve: (r: { ok: boolean; value?: unknown; reason?: string }) => void; timer: number }
@@ -117,7 +122,19 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
     attach(origin: string, target: unknown, next = randomNonce()) {
       frameTarget = target
       nonce = next
-      win.postMessage(target, { __bnc: 1, kind: 'attach', nonce } satisfies BridgeMessage, origin)
+      win.postMessage(
+        target,
+        {
+          __bnc: 1,
+          kind: 'attach',
+          nonce,
+          ...(sessionBase ? { sessionBase } : {}),
+        } satisfies BridgeMessage,
+        origin,
+      )
+    },
+    setSessionBase(base: string) {
+      sessionBase = base
     },
     send(name: string, args?: unknown) {
       if (frameTarget === null) {

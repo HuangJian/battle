@@ -62,6 +62,8 @@ export interface CommandDeps {
   session: SessionAdapter
   openLog: () => void
   openConfig: () => void
+  /** 面板「CFG」定位用：按顺序在代码里找配置行的字面标记。 */
+  configMarkers: string[]
 }
 
 export interface CommandReply {
@@ -159,7 +161,13 @@ export async function runFrameCommand(
     case 'setScheduleMarks': {
       const marks = (args ?? {}) as { marks?: unknown }
       const list = Array.isArray(marks.marks)
-        ? (marks.marks as Array<{ id?: string; label?: string; uuid?: string; index?: number }>)
+        ? (marks.marks as Array<{
+            id?: string
+            label?: string
+            uuid?: string
+            index?: number
+            action?: string
+          }>)
         : []
       return fromCmd(deps.adapter.setScheduledMarks(list))
     }
@@ -169,6 +177,8 @@ export async function runFrameCommand(
     case 'config':
       deps.openConfig()
       return { ok: true }
+    case 'jumpConfig':
+      return fromCmd(await deps.adapter.focusConfig(deps.configMarkers))
     default:
       return { ok: false, reason: `未知命令：${name}` }
   }

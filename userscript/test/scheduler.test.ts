@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  countdownLabel,
   createScheduler,
   OCCURRENCES_KEY,
+  scheduleStatusText,
+  taskBelongsTo,
   TASKS_KEY,
   type Occurrence,
   type SchedulerDeps,
@@ -105,6 +108,23 @@ function occurrences(h: Harness): Record<string, Occurrence> {
   return (h.mem.get(OCCURRENCES_KEY) ?? {}) as Record<string, Occurrence>
 }
 
+describe('定时状态栏文案（删空后不留「已添加」旧话）', () => {
+  it('0 个 ⇒ 没有定时任务；其余给计数', () => {
+    expect(scheduleStatusText(0)).toBe('没有定时任务')
+    expect(scheduleStatusText(1)).toBe('定时任务 1 个')
+    expect(scheduleStatusText(3)).toBe('定时任务 3 个')
+  })
+})
+
+describe('cell 徽标倒计时文案', () => {
+  it('>10 分钟用静态文案；进入窗口变成 M:SS；到点/过期说即将运行', () => {
+    expect(countdownLabel(at(9), at(8, 40), '今天 09:00')).toBe('今天 09:00')
+    expect(countdownLabel(at(9), at(8, 57), '今天 09:00')).toBe('还有 3:00')
+    expect(countdownLabel(at(9), at(9), '今天 09:00')).toBe('即将运行')
+    expect(countdownLabel(at(9), at(9, 1), '今天 09:00')).toBe('即将运行')
+  })
+})
+
 describe('定时任务：只设「下一次」（一次性）', () => {
   it('add：HH:MM → 今天/明天的 nextAt，落盘；rows 给人话', () => {
     const h = harness()
@@ -131,6 +151,26 @@ describe('定时任务：只设「下一次」（一次性）', () => {
     const early = h.sched.tasks().find((t) => t.action === 'stop-session')!
     h.sched.setEnabled(early.id, false)
     expect(h.sched.nextDue()?.action).toBe('run-all')
+  })
+
+  it('taskBelongsTo：运行类看 notebook；停止/中断看本页会话（另一页签不显示徽标）', () => {
+    const ident = { notebookKey: 'a/b', session: 'kaggle-a-b-edit-tab1' }
+    const base = { notebookKey: 'a/b', sessionAtCreate: ident.session }
+    expect(taskBelongsTo({ ...base, action: 'run-all' }, ident)).toBe(true)
+    expect(taskBelongsTo({ ...base, action: 'run-cell', notebookKey: 'other/b' }, ident)).toBe(
+      false,
+    )
+    // 同一 notebook 的另一页签：stop/interrupt 的会话不同 ⇒ 不属于本页
+    expect(
+      taskBelongsTo(
+        { ...base, action: 'stop-session', sessionAtCreate: 'kaggle-a-b-edit-tab2' },
+        ident,
+      ),
+    ).toBe(false)
+    expect(taskBelongsTo({ ...base, action: 'interrupt' }, ident)).toBe(true)
+    expect(
+      taskBelongsTo({ notebookKey: '', sessionAtCreate: '', action: 'stop-session' }, ident),
+    ).toBe(false)
   })
 
   it('add：非法时间 / 动作 / run-cell 缺目标 / 没连上 ⇒ 都不落盘', () => {

@@ -202,6 +202,57 @@ describe('KaggleFrameAdapter：命令阶梯与后置条件', () => {
   })
 })
 
+describe('KaggleFrameAdapter：面板 CFG 键（定位并聚焦，不复制）', () => {
+  it('命中 CFG 行：点该行让编辑器拿焦点、滚进视口、回报段/行号', async () => {
+    const w = dom(FRAME)
+    const doc = docOf(w)
+    const cell = doc.querySelectorAll('.jp-CodeCell')[0]!
+    const line = cell.querySelectorAll<HTMLElement>('.cm-line')[1]!
+    const content = cell.querySelector('.cm-content') as HTMLElement
+    let clicked = 0
+    let focused = 0
+    let scrolled = 0
+    line.addEventListener('mousedown', () => {
+      clicked += 1
+    })
+    line.scrollIntoView = () => {
+      scrolled += 1
+    }
+    content.focus = () => {
+      focused += 1
+    }
+    const r = await new KaggleFrameAdapter(doc, fast).focusConfig(['CFG = {', 'CFG={', '# @title'])
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.detail).toContain('第 1 段第 2 行')
+    expect(clicked).toBe(1)
+    expect(focused).toBe(1)
+    expect(scrolled).toBe(1)
+  })
+
+  it('折叠态只展开命中的那一段；弱标记自曝；没标记/找不到 ⇒ 带原因失败', async () => {
+    const w = dom(FRAME)
+    const doc = docOf(w)
+    const a = new KaggleFrameAdapter(doc, fast)
+    await a.setFoldedAll(true)
+    expect((await a.focusConfig(['CFG = {'])).ok).toBe(true)
+    expect(doc.querySelector('.jp-CodeCell')!.getAttribute('data-bnc-fold')).toBe('off')
+
+    const onlyTitle = dom(
+      '<html><body><div class="jp-Notebook"><div class="jp-Cell jp-CodeCell" data-uuid="t" data-windowed-list-index="0"><div class="jp-InputArea"><div class="cm-content"><div class="cm-line"># @title only</div></div></div></div></div></body></html>',
+    )
+    const weak = await new KaggleFrameAdapter(docOf(onlyTitle), fast).focusConfig(['# @title'])
+    expect(weak.ok).toBe(true)
+    if (weak.ok) expect(weak.detail).toContain('可能不是 CFG cell')
+
+    // 没有 CFG 行、标记也不命中 ⇒ 响亮失败（启发式优先，默认标记不是唯一入口）
+    const none = new KaggleFrameAdapter(docOf(onlyTitle), fast)
+    const missing = await none.focusConfig(['NO_SUCH_MARKER'])
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) expect(missing.reason).toContain('找不到 CFG 行')
+    expect((await none.focusConfig([])).ok).toBe(false)
+  })
+})
+
 describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
   it('setFoldedAll：先还原原生折叠 → 根属性 + 样式只注入一次；单 cell 的 off 会被清掉', async () => {
     const w = dom(FRAME)

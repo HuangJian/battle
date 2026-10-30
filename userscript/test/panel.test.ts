@@ -61,7 +61,7 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     const sess = panel.host.shadowRoot!.querySelector('[data-sess]') as HTMLElement
     expect(sess.textContent).toBe('') // 未连上 frame 之前不编名字
     panel.setSession('notebook:kaggle-a-b-edit-ab12cd')
-    expect(sess.textContent).toContain('notebook:kaggle-a-b-edit-ab12cd')
+    expect(sess.textContent).toBe('日志 notebook:kaggle-a-b-edit-ab12cd')
     expect(sess.title).toBe('notebook:kaggle-a-b-edit-ab12cd')
     panel.destroy()
   })
@@ -96,16 +96,25 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
-  it('setNext：提示区倒计时上屏；null 清空', () => {
-    const w = dom()
-    const panel = mountPanel(docOf(w), {})
+  it('setHistory：执行历史上屏（成功/失败+原因），清空后隐藏', () => {
+    const panel = mountPanel(docOf(dom()), {})
     const shadow = panel.host.shadowRoot!
-    const el = shadow.querySelector('[data-next]') as HTMLElement
-    expect(el.textContent).toBe('')
-    panel.setNext('⏰ 距运行全部还有 9:32（18:00）')
-    expect(el.textContent).toContain('9:32')
-    panel.setNext(null)
-    expect(el.textContent).toBe('')
+    const hist = shadow.querySelector('[data-hist]') as HTMLElement
+    expect(hist.hidden).toBe(true)
+    panel.setHistory([
+      { at: '22:45:03', text: '运行全部', ok: true },
+      { at: '22:46:10', text: '停会话', ok: false, reason: '找不到 Stop session 按钮' },
+    ])
+    expect(hist.hidden).toBe(false)
+    expect(hist.textContent).toContain('执行历史')
+    expect(hist.textContent).toContain('22:45:03')
+    expect(hist.textContent).toContain('运行全部 ✓')
+    expect(hist.textContent).toContain('停会话 ✗')
+    expect(hist.textContent).toContain('找不到 Stop session 按钮')
+    expect(hist.querySelector('.hitem[data-ok="0"]')).not.toBeNull()
+    panel.setHistory([])
+    expect(hist.hidden).toBe(true)
+    expect(hist.textContent).toBe('')
     panel.destroy()
   })
 
@@ -154,7 +163,7 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
         new Promise<void>((resolve) => {
           release = resolve
         }),
-      config: () => {
+      jumpConfig: () => {
         throw new Error('boom')
       },
     })
@@ -166,7 +175,7 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     await new Promise((r) => setTimeout(r, 0))
     expect(flush.hasAttribute('disabled')).toBe(false)
 
-    ;(shadow.querySelector('[data-act="config"]') as HTMLElement).click()
+    ;(shadow.querySelector('[data-act="jumpConfig"]') as HTMLElement).click()
     await new Promise((r) => setTimeout(r, 0))
     expect(shadow.querySelector('.status')!.textContent).toContain('boom')
     expect(shadow.querySelector('.status')!.getAttribute('data-tone')).toBe('error')
@@ -219,16 +228,22 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
-  it('按钮按功能分区：日志 / 折叠 / 跳转 / 配置 / 会话 + 定时', () => {
+  it('按钮按功能分区：首组无组名 / 折叠 / 跳转（顶 · 底 · CFG）+ 定时', () => {
     const panel = mountPanel(docOf(dom()), {})
     const shadow = panel.host.shadowRoot!
     const labels = [...shadow.querySelectorAll('.glabel')].map((el) => el.textContent)
-    // 时区标签随时区变（UTC±HH:MM），只钉「有这一组」
-    expect(labels.slice(0, 5)).toEqual(['日志', '折叠', '跳转', '配置', '会话'])
-    expect(labels[5]).toContain('定时（一次性')
+    // 首组（保存/打开日志）不再有「日志」组标题；时区标签随时区变，只钉「有这一组」
+    expect(labels.slice(0, 2)).toEqual(['折叠', '跳转'])
+    expect(labels[2]).toContain('定时（一次性')
     const groups = [...shadow.querySelectorAll('.group')]
-    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 2, 1, 1, 1])
-    expect(shadow.querySelectorAll('[data-act]').length).toBe(11)
+    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 3, 1])
+    expect(groups[0]!.querySelector('.glabel')).toBeNull()
+    const jump = [...groups[2]!.querySelectorAll('[data-act]')].map((el) =>
+      el.getAttribute('data-act'),
+    )
+    expect(jump).toEqual(['scrollTop', 'scrollBottom', 'jumpConfig'])
+    expect(shadow.querySelectorAll('[data-act]').length).toBe(10)
+    expect(shadow.querySelector('[data-act="stopSession"]')).toBeNull()
     panel.destroy()
   })
 

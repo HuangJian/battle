@@ -14,18 +14,19 @@ afterEach(() => {
   for (const w of opened.splice(0)) w.close()
 })
 
-/** 用户贴的 Kaggle 配额弹窗形状（MUI paper + span 包文案）。 */
+/** 用户贴的 Kaggle 弹窗形状（MUI paper + span 包文案）。 */
 function dialog(
   doc: Document,
   labels: string[],
   id: string,
+  bodyText = 'You have exceeded the number of hours allowed.',
 ): { root: HTMLElement; clicks: string[] } {
   const root = doc.createElement('div')
   root.setAttribute('role', 'dialog')
   root.setAttribute('aria-labelledby', ':ro:')
   root.id = id
   const body = doc.createElement('div')
-  body.textContent = 'You have exceeded the number of hours allowed.'
+  body.textContent = bodyText
   root.append(body)
   const row = doc.createElement('div')
   const clicks: string[] = []
@@ -61,6 +62,31 @@ describe('Kaggle 弹窗自动确认（只点白名单）', () => {
     const d = dialog(doc, ['Cancel', 'Continue editing'], 'edit')
     auto.scan()
     expect(d.clicks).toEqual(['Continue editing'])
+    auto.dispose()
+  })
+
+  it('保存冲突警告（notebook 在别处被改过）⇒ 只点 Cancel，不碰 Download', () => {
+    const { doc } = dom()
+    const auto = installAutoContinue(doc)
+    const d = dialog(
+      doc,
+      ['Download', 'Cancel'],
+      'conflict',
+      "We're unable to save your notebook because it may have been modified in another " +
+        'location. Refreshing the page may fix this issue.<br><br>We suggest downloading a ' +
+        'copy of your notebook to avoid losing your work.',
+    )
+    auto.scan()
+    expect(d.clicks).toEqual(['Cancel'])
+    auto.dispose()
+  })
+
+  it('普通弹窗里的 Cancel 不点（避免误关别的对话框）', () => {
+    const { doc } = dom()
+    const auto = installAutoContinue(doc)
+    const d = dialog(doc, ['Download', 'Cancel'], 'plain', 'Are you sure you want to leave?')
+    auto.scan()
+    expect(d.clicks).toEqual([])
     auto.dispose()
   })
 
