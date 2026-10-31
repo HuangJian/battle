@@ -6,6 +6,7 @@ import { loadDom, type DomHandle } from '../happydom'
 const FRAME = readFileSync(join(import.meta.dir, 'fixtures/kaggle-frame.html'), 'utf8')
 const OUTER = readFileSync(join(import.meta.dir, 'fixtures/kaggle-outer.html'), 'utf8')
 const COLAB = readFileSync(join(import.meta.dir, 'fixtures/colab.html'), 'utf8')
+const AISTUDIO = readFileSync(join(import.meta.dir, 'fixtures/aistudio.html'), 'utf8')
 
 const opened: DomHandle[] = []
 function dom(html: string, url?: string): DomHandle {
@@ -80,9 +81,30 @@ describe('Kaggle 夹具（结构忠实优先于最小）', () => {
     expect(iframe?.getAttribute('src')).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}/)
   })
 
-  it('三份夹具都带来源/日期注记，且不含任何 token（脱敏不靠人工复查）', () => {
+  it('AI Studio：JupyterLab 分支面板、Monaco 行、输出区、折叠器、命令项', () => {
+    const d = dom(AISTUDIO).document
+    expect(d.querySelector('.jp-NotebookPanel')).not.toBeNull()
+    expect(d.querySelectorAll('.jp-Cell').length).toBe(6)
+    expect(d.querySelectorAll('.jp-CodeCell').length).toBe(5)
+    expect(d.querySelectorAll('.jp-Cell .view-line').length).toBeGreaterThan(0)
+    expect(d.querySelectorAll('.jp-OutputArea-child').length).toBeGreaterThan(0)
+    expect(d.querySelectorAll('.jp-InputCollapser').length).toBeGreaterThan(0)
+    expect(d.querySelector('.jp-Notebook-ExecutionIndicator')).not.toBeNull()
+    for (const id of [
+      'notebook:run-cell',
+      'notebook:run-all-cells',
+      'notebook:clear-cell-output',
+      'notebook:show-all-cell-code',
+    ]) {
+      expect(d.querySelector(`[data-command="${id}"]`)).not.toBeNull()
+    }
+    // 输出已脱敏：真实存档里的训练日志绝不入库
+    expect(AISTUDIO).not.toContain('opt 身份命中')
+  })
+
+  it('四份夹具都带来源/日期注记，且不含任何 token（脱敏不靠人工复查）', () => {
     // 注释要求「来源 + 提取/入库日期」（plan §5-W0）；文档化在头部，测试把它变成约束。
-    for (const html of [FRAME, OUTER, COLAB]) {
+    for (const html of [FRAME, OUTER, COLAB, AISTUDIO]) {
       expect(html).toContain('夹具（脱敏）')
       expect(html).toMatch(/来源：2026-10-\d{2}/)
       expect(html).toMatch(/mhtml 存档/)

@@ -372,7 +372,7 @@ export class ColabAdapter implements FrameAdapter {
     return this.focusLine(hit.cell, hit.line, hit.marker, hit.lineNo)
   }
 
-  /** 展开（折叠态下这行被裁掉）+ 点一下让 Monaco 把光标落到该行 + 滚进视口中央。 */
+  /** 展开（折叠态下这行被裁掉）+ 滚进视口中央并聚焦编辑器 —— **不派发指针事件**。 */
   private focusLine(cell: CellRef, line: HTMLElement, marker: string, lineNo: number): CmdResult {
     const el = this.cellEl(cell)
     if (el) {
@@ -380,8 +380,8 @@ export class ColabAdapter implements FrameAdapter {
       const own = el.getAttribute(FOLD_ATTR)
       if (own === 'on' || (all && own !== 'off')) el.setAttribute(FOLD_ATTR, 'off')
     }
-    const box = line.getBoundingClientRect()
-    clickAt(this.doc, line, box)
+    // 不派发 mousedown/up/click：Monaco 会把合成 mousedown 当成选区起点，之后鼠标一动
+    // 就把 CFG 内容选上（选中是多余的副作用，用户明确要求去掉）。
     ;(line.closest('.editor') as HTMLElement | null)?.focus()
     if (typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'center' })
     const where = lineNo > 0 ? `第 ${cell.index} 段第 ${lineNo} 行` : `第 ${cell.index} 段`

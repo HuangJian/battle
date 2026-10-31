@@ -52,6 +52,28 @@ export function deepQueryAll(root: ParentNode, selector: string): Element[] {
 }
 
 export type Role = 'host' | 'frame' | 'single'
+/** 同文档站点（cell 与面板同页，不建 iframe 桥）。 */
+export type SingleSite = 'colab' | 'aistudio'
+
+/**
+ * 同文档站点判定：Colab 与 AI Studio（BML Codelab 的 notebook 帧）。
+ * AI Studio 只认 `/user/<uid>/<pid>/lab/…` 这层——外层 `/vscode/` 工作台不接（面板无处安放）。
+ */
+export function singleSite(rawUrl: string): SingleSite | null {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'https:') return null
+  const host = url.hostname.toLowerCase()
+  if (host === 'colab.research.google.com') return 'colab'
+  if (host === 'aistudio.baidu.com' && /\/user\/[^/]+\/\d+\/lab(\/|$)/.test(url.pathname)) {
+    return 'aistudio'
+  }
+  return null
+}
 
 /**
  * Kaggle 编辑页 = 外层 `www.kaggle.com/code/*`；notebook = `*.jupyter-proxy.kaggle.net`；
@@ -73,6 +95,6 @@ export function detectRole(rawUrl: string): Role | null {
   if (host === 'jupyter-proxy.kaggle.net' || host.endsWith('.jupyter-proxy.kaggle.net')) {
     return 'frame'
   }
-  if (host === 'colab.research.google.com') return 'single'
+  if (singleSite(rawUrl) !== null) return 'single'
   return null
 }

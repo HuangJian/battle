@@ -6,7 +6,7 @@
  */
 import { normalizeNewlines } from '../../utils'
 import { deepQuery, deepQueryAll, MIME, SEL } from '../selectors'
-import type { CellRef, CmdResult, FrameAdapter, SessionAdapter } from './types'
+import type { CellRef, CmdResult, FrameAdapter, SessionAdapter, SiteId } from './types'
 
 export interface KaggleHooks {
   /** 默认：元素在布局里可见（happy-dom 无布局 ⇒ 用例注入）。 */
@@ -96,9 +96,13 @@ const SCHED_STYLE = `
   outline: 2px solid #ff9f43 !important;
   outline-offset: -2px;
 }
+/* 定时徽标：横向居中挂在 cell 顶部。左侧 0 处是 CODE/MD 折叠按键（纵向中心压在顶边、一半探出），
+   所以上边留 16px 让位、宽度用 max-content 收窄 —— 两者不再遮挡。 */
 .${SCHED_CLASS} {
-  margin: 2px 6px 4px; padding: 3px 10px; border-radius: 6px;
-  display: flex; align-items: center; gap: 6px;
+  box-sizing: border-box;
+  width: max-content; max-width: min(calc(100% - 96px), 520px);
+  margin: 16px auto 6px; padding: 3px 12px; border-radius: 999px;
+  display: flex; align-items: center; justify-content: center; gap: 6px; text-align: center;
   background: linear-gradient(90deg, #ffb020, #ff7a45);
   color: #1a1206; font: 700 12px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   letter-spacing: .02em;
@@ -155,7 +159,8 @@ function clickElement(el: Element): void {
   ;(shadowButton ?? (el as HTMLElement)).click()
 }
 export class KaggleFrameAdapter implements FrameAdapter {
-  readonly site = 'kaggle' as const
+  /** 子类（AI Studio 的 JupyterLab 分支）换站点名；默认 Kaggle。 */
+  readonly site: SiteId = 'kaggle'
   private notebookEl: Element | null = null
   private readonly hooks: Required<
     Pick<KaggleHooks, 'isVisible' | 'wait' | 'nextFrame' | 'maxScanSteps' | 'selectTimeoutMs'>
@@ -173,7 +178,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   private schedBanners: Array<{ id: string; label: string }> = []
 
   constructor(
-    private readonly doc: Document,
+    protected readonly doc: Document,
     hooks: KaggleHooks = {},
   ) {
     this.hooks = {
@@ -186,13 +191,13 @@ export class KaggleFrameAdapter implements FrameAdapter {
   }
 
   /** `.jp-Notebook` 可能晚于 attach 渲染，也可能在 open shadow root 里。 */
-  private notebook(): Element | null {
+  protected notebook(): Element | null {
     if (this.notebookEl?.isConnected) return this.notebookEl
     this.notebookEl = deepQuery(this.doc, SEL.notebook)
     return this.notebookEl
   }
 
-  private root(): ParentNode {
+  protected root(): ParentNode {
     return this.notebook() ?? this.doc
   }
 
@@ -220,7 +225,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
       .sort((a, b) => a.index - b.index)
   }
 
-  private cellEl(cell: CellRef): HTMLElement | null {
+  protected cellEl(cell: CellRef): HTMLElement | null {
     for (const el of qa<HTMLElement>(this.root(), SEL.cell)) {
       const index = Number(el.getAttribute('data-windowed-list-index') ?? -1)
       if (el.getAttribute('data-uuid') === cell.id) return el
@@ -306,7 +311,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     return this.focusLine(hit.cell, hit.line, hit.marker, hit.lineNo)
   }
 
-  /** 展开（折叠态下这行被裁掉）+ 点一下让 CM6 把光标落到该行 + 滚进视口中央。 */
+  /** 展开（折叠态下这行被裁掉）+ 滚进视口中央并聚焦编辑器 —— **不派发指针事件**。 */
   private focusLine(cell: CellRef, line: HTMLElement, marker: string, lineNo: number): CmdResult {
     const el = this.cellEl(cell)
     if (el) {
@@ -317,19 +322,8 @@ export class KaggleFrameAdapter implements FrameAdapter {
         this.syncFoldButtons()
       }
     }
-    const Ctor = (this.doc.defaultView?.MouseEvent ?? MouseEvent) as typeof MouseEvent
-    const box = line.getBoundingClientRect()
-    const at: MouseEventInit = {
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-      clientX: box.left + 4,
-      clientY: box.top + Math.max(1, box.height / 2),
-    }
-    // CM6 只在（合成）指针事件里定位光标；三重事件与真实点击一致
-    for (const type of ['mousedown', 'mouseup', 'click'] as const) {
-      line.dispatchEvent(new Ctor(type, at))
-    }
+    // 不派发 mousedown/up/click：CM6 会把合成的 mousedown 当成选区起点，之后鼠标一动
+    // 就把 CFG 内容选上（选中是多余的副作用，用户明确要求去掉）。只滚动 + 聚焦。
     const content = line.closest(SEL.cmContent) as HTMLElement | null
     content?.focus()
     if (typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'center' })
@@ -530,7 +524,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     else setTimeout(run, 0)
   }
 
-  private ensureFoldUi(): void {
+  protected ensureFoldUi(): void {
     if (this.foldUiReady) return
     if (!this.ensureFoldStyle()) return
     this.foldUiReady = true
@@ -578,7 +572,12 @@ export class KaggleFrameAdapter implements FrameAdapter {
 
   private markForCell(el: HTMLElement): { id: string; label: string } | null {
     const uuid = el.getAttribute('data-uuid')
-    const index = Number(el.getAttribute('data-windowed-list-index') ?? NaN)
+    const attrIndex = Number(el.getAttribute('data-windowed-list-index') ?? NaN)
+    // 没有虚拟化属性（AI Studio 的 JupyterLab 分支：不虚拟化、无 data-uuid）⇒ 退到 DOM 序号，
+    // 与 cells() 的 id 同一口径；否则定时目标永远匹配不上（徽标/倒计时一个都不显示）。
+    const index = Number.isInteger(attrIndex)
+      ? attrIndex
+      : qa<HTMLElement>(this.root(), SEL.cell).indexOf(el)
     for (const m of this.schedMarks) {
       if (m.uuid && uuid && m.uuid === uuid) return m
       if (m.index !== undefined && Number.isInteger(index) && m.index === index) return m
@@ -732,6 +731,8 @@ export class KaggleFrameAdapter implements FrameAdapter {
     const nb = this.notebook()
     push(nb ? q(nb, SEL.scrollOuter) : null)
     push(nb)
+    // 谁在滚各布局不同（AI Studio 是 dock 面板，Kaggle 是 windowed 外层）⇒ 把祖先全列上
+    for (let cur = nb?.parentElement ?? null; cur; cur = cur.parentElement) push(cur)
     push(q(this.doc, '.jp-NotebookPanel'))
     push(this.doc.scrollingElement)
     push(this.doc.documentElement)

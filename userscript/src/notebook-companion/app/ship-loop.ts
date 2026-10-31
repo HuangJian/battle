@@ -11,6 +11,7 @@ import { createShipState, shipOnce, type ShipReport, type ShipState } from '../l
 import type { NotebookChunk, NotebookResponse, NotebookSite } from '../protocol'
 import { parseKaggleSession, withPageTag } from '../sites/kaggle'
 import { parseColabSession } from '../sites/colab'
+import { parseAistudioSession } from '../sites/aistudio'
 import {
   COLAB_OBSERVER,
   KAGGLE_OBSERVER,
@@ -72,8 +73,14 @@ function randomWriter(): string {
 export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const site = opts.site ?? 'kaggle'
   const writer = opts.writer ?? randomWriter()
-  // 会话键按站点解析：Colab 的 URL 是 /drive/<fileId>，拿 Kaggle 那套只会得到 unknown
-  const parseSession = site === 'colab' ? parseColabSession : parseKaggleSession
+  // 会话键按站点解析：Colab 的 URL 是 /drive/<fileId>，AI Studio 是 /user/<uid>/<pid>/lab/
+  // tree/<nb>，拿 Kaggle 那套只会得到 unknown
+  const parseSession =
+    site === 'aistudio'
+      ? parseAistudioSession
+      : site === 'colab'
+        ? parseColabSession
+        : parseKaggleSession
   let baseSession = parseSession(opts.referrer || opts.href)
   let session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())

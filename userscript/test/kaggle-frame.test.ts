@@ -206,18 +206,16 @@ describe('KaggleFrameAdapter：命令阶梯与后置条件', () => {
 })
 
 describe('KaggleFrameAdapter：面板 CFG 键（定位并聚焦，不复制）', () => {
-  it('命中 CFG 行：点该行让编辑器拿焦点、滚进视口、回报段/行号', async () => {
+  it('命中 CFG 行：滚进视口、编辑器拿焦点、回报段/行号；不派发指针事件（不会选中内容）', async () => {
     const w = dom(FRAME)
     const doc = docOf(w)
     const cell = doc.querySelectorAll('.jp-CodeCell')[0]!
     const line = cell.querySelectorAll<HTMLElement>('.cm-line')[1]!
     const content = cell.querySelector('.cm-content') as HTMLElement
-    let clicked = 0
+    const seen: string[] = []
     let focused = 0
     let scrolled = 0
-    line.addEventListener('mousedown', () => {
-      clicked += 1
-    })
+    for (const t of ['mousedown', 'mouseup', 'click']) line.addEventListener(t, () => seen.push(t))
     line.scrollIntoView = () => {
       scrolled += 1
     }
@@ -227,7 +225,7 @@ describe('KaggleFrameAdapter：面板 CFG 键（定位并聚焦，不复制）',
     const r = await new KaggleFrameAdapter(doc, fast).focusConfig(['CFG = {', 'CFG={', '# @title'])
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.detail).toContain('第 1 段第 2 行')
-    expect(clicked).toBe(1)
+    expect(seen).toEqual([])
     expect(focused).toBe(1)
     expect(scrolled).toBe(1)
   })

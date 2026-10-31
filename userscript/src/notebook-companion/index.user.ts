@@ -6,6 +6,7 @@
 // @match        https://www.kaggle.com/code/*
 // @match        https://*.jupyter-proxy.kaggle.net/*
 // @match        https://colab.research.google.com/*
+// @match        https://aistudio.baidu.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue

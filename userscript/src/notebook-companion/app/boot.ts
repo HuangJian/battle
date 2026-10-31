@@ -1,6 +1,6 @@
 import { createRuntime, type Runtime } from '../../runtime'
 import { loadConfig, saveConfig, type BncConfig } from '../config'
-import { detectRole, type Role } from '../selectors'
+import { detectRole, singleSite, type Role } from '../selectors'
 import {
   createTabTitleSync,
   KaggleFrameAdapter,
@@ -9,6 +9,11 @@ import {
   parseKaggleSession,
 } from '../sites/kaggle'
 import { ColabAdapter, ColabSessionAdapter, parseColabNotebookKey } from '../sites/colab'
+import {
+  AistudioAdapter,
+  AistudioSessionAdapter,
+  parseAistudioNotebookKey,
+} from '../sites/aistudio'
 import {
   mountPanel,
   PANEL_POS_KEY,
@@ -123,7 +128,7 @@ function pageTag(win: Window): string {
  * 持有搬运权」）。存进 sessionStorage ⇒ 刷新沿用同一个 writer，第一笔就顺手续租；真另有
  * 页签时它有自己的标签与日志键，互不干扰。
  */
-function writerTag(win: Window, role: 'host' | 'frame' | 'colab'): string {
+function writerTag(win: Window, role: 'host' | 'frame' | 'colab' | 'aistudio'): string {
   const key = `${WRITER_KEY}:${role}`
   const gen = (): string => `${role}-${randomTag(win)}`
   try {
@@ -578,9 +583,14 @@ function startSingle(
   runtime: Runtime,
   log: (msg: string) => void,
 ): () => void {
-  const adapter = new ColabAdapter(doc)
-  const sessionAdapter = new ColabSessionAdapter(doc, href)
-  const notebookKey = parseColabNotebookKey(href)
+  // 同文档站点：Colab 与 AI Studio（BML Codelab）。cell 都在本帧里 —— 不建桥，差别只在
+  // 适配器、日志键与会话实现。
+  const site = singleSite(href) ?? 'colab'
+  const adapter = site === 'aistudio' ? new AistudioAdapter(doc) : new ColabAdapter(doc)
+  const sessionAdapter =
+    site === 'aistudio' ? new AistudioSessionAdapter(doc, href) : new ColabSessionAdapter(doc, href)
+  const notebookKey =
+    site === 'aistudio' ? parseAistudioNotebookKey(href) : parseColabNotebookKey(href)
   const loop = createShipLoop({
     doc,
     href,
@@ -588,8 +598,10 @@ function startSingle(
     config,
     runtime,
     adapter,
-    site: 'colab',
+    site,
     pageTag: pageTag(win),
+    // 写者身份跨刷新稳定（与 host/frame 同口径）：刷新后不被自己的旧租约挡住
+    writer: writerTag(win, site),
     onError: (message) => log(`ship: ${message}`),
   })
 
@@ -748,7 +760,7 @@ function startSingle(
 
   sched = createScheduler({
     store: runtime,
-    writer: writerTag(win, 'colab'),
+    writer: writerTag(win, site),
     now: () => Date.now(),
     claimSettleMs: config.claimSettleMs,
     runGraceMs: 10 * 60_000,

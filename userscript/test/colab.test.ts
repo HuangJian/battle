@@ -144,7 +144,7 @@ describe('Colab 适配器：结构来自真实页面存档', () => {
     expect(a.activeCell()).toBeNull()
   })
 
-  it('focusConfig：启发式命中 CFG 行，三重指针事件落到该行', async () => {
+  it('focusConfig：启发式命中 CFG 行，只滚动聚焦（不派发指针事件 ⇒ 不会选中内容）', async () => {
     const w = dom()
     const a = adapter(w)
     const line = docOf(w).querySelector('.cell.code .view-line:nth-child(3)')!
@@ -153,7 +153,7 @@ describe('Colab 适配器：结构来自真实页面存档', () => {
     const r = await a.focusConfig(['CFG = {'])
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.detail).toBe('第 1 段第 3 行 · CFG 行')
-    expect(seen).toEqual(['mousedown', 'mouseup', 'click'])
+    expect(seen).toEqual([])
   })
 
   it('focusConfig：标记表为空 ⇒ 不猜、带原因失败', async () => {

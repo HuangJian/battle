@@ -76,6 +76,21 @@ describe('ship-loop：日志会话键用 notebook 身份', () => {
     l.stop()
   })
 
+  it('site=aistudio：会话键从 /user/<uid>/<pid>/lab/tree/<nb> 解析', () => {
+    const l = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://aistudio.baidu.com/bj-cpu-01/user/20267332/10818538/lab/tree/main.ipynb',
+      referrer: '',
+      config: DEFAULT_CONFIG,
+      runtime: {} as unknown as Runtime,
+      adapter: new StubFrameAdapter('aistudio'),
+      site: 'aistudio',
+      pageTag: 'ab12cd',
+    })
+    expect(l.session).toBe('aistudio-10818538-main.ipynb-ab12cd')
+    l.stop()
+  })
+
   it('site=colab：会话键从 /drive/<fileId> 解析，不套 Kaggle 的 owner/slug 规则', () => {
     const l = createShipLoop({
       doc: {} as unknown as Document,

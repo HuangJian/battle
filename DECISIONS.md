@@ -10318,3 +10318,33 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `selectors.ts::detectRole` · `observer.ts`（Colab observer 配置）· `app/ship-loop.ts`（按 site 选会话/键解析）·
   `index.user.ts`（`@match`）；用例 `userscript/test/{colab,boot-single,selectors,ship-loop,meta,fixtures}.test.ts` +
   夹具 `test/fixtures/colab.html`。
+## §2026-10-31-notebook-aistudio（2026-10-31，notebook 伴生脚本接 AI Studio：复用 JupyterLab 适配器 + 只认 notebook 帧）
+
+- **背景**：plan §5-W5 / O5 把 AI Studio 列为「等采样」；用户 2026-10-31 给出真实页面存档
+  `tmp/aistudio.mhtml`（百度 AI Studio · BML Codelab）。采样后发现它**不是** Google AI Studio，
+  而是外层 `/vscode/` 工作台 + 内层 JupyterLab 4 分支（Monaco 编辑器）的 notebook 帧。
+- **决定**：
+  1. **复用而非重写**：notebook 帧的 `.jp-Cell` / `.jp-InputArea` / `.jp-OutputArea` / 折叠器 /
+     `data-command` 命令 id 与 Kaggle 同构 ⇒ `AistudioAdapter extends KaggleFrameAdapter`，只覆盖
+     四件真不同的事：cell 无 `data-uuid`（不虚拟化 ⇒ id 用 DOM 序号）、源码在 Monaco `.view-line`
+     而非 `.cm-line`、`focusConfig` 改扫 Monaco 行、`scroll` 找可滚祖先（无 `jp-WindowedPanel`）。
+     为此把基类的 `doc` / `notebook()` / `root()` / `cellEl()` / `ensureFoldUi()` 由 private 放宽为
+     protected（纯可见性改动，行为不变）。
+  2. **只接 notebook 帧**：`singleSite()` 认 `aistudio.baidu.com` 且路径形如 `/user/<uid>/<pid>/lab/**`；
+     外层 `/vscode/` 工作台返回 null（面板无处安放，也不该在文件树界面上出现）。
+     `@match` 加 `https://aistudio.baidu.com/*`（帧 URL 同域，脚本会注入到两处，只有 notebook 帧 boot）。
+  3. **日志键**：`aistudio/<pid>/<nb 路径>`、会话 `aistudio-<pid>-<nb>`（`[a-z0-9._-]` 归一），
+     定时任务按它归属页面；拿不到工程 id ⇒ 空串/`aistudio-unknown`（任务 fail closed）。
+  4. **停止会话 fail closed**：AI Studio 的「停止运行」在外层工作台，notebook 帧里没有按钮、存档里
+     也没有对应命令 ⇒ `stopSession()` 带原因失败，不点「看起来像」的东西。
+  5. **采样先于实现**：夹具 `test/fixtures/aistudio.html` 由 `tmp/build_aistudio_fixture.py` 从存档抽
+     `.jp-NotebookPanel` + 命令面板里的 `notebook:*` 项，源码/输出换成合成文本（原输出有训练日志，
+     绝不入库）。
+- **否决的备选**：为 AI Studio 单独写一份适配器（≈350 行重复，且以后 JupyterLab 升级要改两处）；
+  接外层 `/vscode/` 工作台 + 桥（外层 DOM 无 cell，纯开销）；用 Monaco 的内部 API 读源码
+  （未验证存在；`.view-line` 逐行都在 DOM）；把 stopSession 接到外层页面的「停止」按钮
+  （跨帧 + 文案未实测 = 赌）。
+- **落地**：`userscript/src/notebook-companion/sites/aistudio.ts` · `kaggle.ts`（protected 放宽）·
+  `selectors.ts::singleSite` · `app/boot.ts::startSingle`（按站点选适配器/会话/writer）·
+  `app/ship-loop.ts`（AI Studio 会话键）；用例 `userscript/test/aistudio.test.ts` +
+  `{fixtures,selectors,ship-loop,meta}.test.ts` 的 AI Studio 分支。
