@@ -256,7 +256,7 @@ describe('KaggleFrameAdapter：面板 CFG 键（定位并聚焦，不复制）',
   })
 })
 
-describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
+describe('KaggleFrameAdapter：折叠（每段留顶部四行）', () => {
   it('setFoldedAll：先还原原生折叠 → 根属性 + 样式只注入一次；单 cell 的 off 会被清掉', async () => {
     const w = dom(FRAME)
     const a = new KaggleFrameAdapter(docOf(w), fast)
@@ -272,10 +272,10 @@ describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
     expect(native).toBe(1)
     expect(nb.getAttribute('data-bnc-fold')).toBe('all')
     const style = w.document.getElementById('bnc-cell-fold-style')!
-    expect(style.textContent).toContain('max-height: calc(2lh + 4px)')
+    expect(style.textContent).toContain('max-height: calc(4lh + 4px)')
     expect(style.textContent).toContain('.jp-CodeCell')
     expect(style.textContent).toContain('.jp-MarkdownCell')
-    expect(style.textContent).toContain('.bnc-unfold')
+    expect(style.textContent).toContain('.bnc-fold')
     expect(style.textContent).toContain('content: "CODE "')
     expect(style.textContent).toContain('content: "MD "')
 
@@ -312,41 +312,58 @@ describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
     expect((await a.setFolded({ id: 'gone', index: 9, kind: 'code' }, true)).ok).toBe(false)
   })
 
-  it('折叠后每个 cell 都有「展开」按钮；点一下只展开这一段', async () => {
+  it('每个 cell 常驻 CODE/MD 按键：折叠态点「展开」，展开态点「折叠」', async () => {
     const w = dom(FRAME)
     const a = new KaggleFrameAdapter(docOf(w), fast)
-    expect(await a.setFoldedAll(true)).toMatchObject({ ok: true })
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(3)
+    // 第一次取 cells 就装上按键（不必先折叠）
+    const cells = a.cells()
+    const total = cells.filter((c) => c.kind !== 'raw').length
+    expect(w.document.querySelectorAll('.bnc-fold').length).toBe(total)
 
-    const mdEl = docOf(w).querySelector<HTMLElement>(`[data-uuid="${a.cells()[0]!.id}"]`)!
-    const btn = mdEl.querySelector('.bnc-unfold') as HTMLElement
-    expect(btn.textContent).toBe('展开')
-    btn.click()
+    const mdEl = docOf(w).querySelector<HTMLElement>(`[data-uuid="${cells[0]!.id}"]`)!
+    const label = (): string =>
+      (mdEl.querySelector('.bnc-fold') as HTMLButtonElement).textContent ?? ''
+    expect(label()).toBe('折叠')
+
+    expect(await a.setFoldedAll(true)).toMatchObject({ ok: true })
+    expect(label()).toBe('展开')
+    // 折叠态点一下 = 只展开这一段（按键常驻，文案反而变「折叠」）
+    ;(mdEl.querySelector('.bnc-fold') as HTMLButtonElement).click()
     expect(mdEl.getAttribute('data-bnc-fold')).toBe('off')
-    expect(mdEl.querySelector('.bnc-unfold')).toBeNull()
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(2)
+    expect(label()).toBe('折叠')
+    // 再点 = 折叠回来
+    ;(mdEl.querySelector('.bnc-fold') as HTMLButtonElement).click()
+    expect(mdEl.getAttribute('data-bnc-fold')).toBe('on')
+    expect(label()).toBe('展开')
 
     expect(await a.setFoldedAll(false)).toMatchObject({ ok: true })
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(0)
+    expect(label()).toBe('折叠')
+    expect(w.document.querySelectorAll('.bnc-fold').length).toBe(total)
   })
 
-  it('单段折叠只给该 cell 加展开按钮；面板展开后按钮消失', async () => {
+  it('单段折叠/展开只改该 cell 的按键文案，其余 cell 常驻不动', async () => {
     const w = dom(FRAME)
     const a = new KaggleFrameAdapter(docOf(w), fast)
-    const [md, code] = a.cells()
+    const [md] = a.cells()
+    const total = w.document.querySelectorAll('.bnc-fold').length
+    const mdEl = docOf(w).querySelector<HTMLElement>(`[data-uuid="${md!.id}"]`)!
+    const label = (): string =>
+      (mdEl.querySelector('.bnc-fold') as HTMLButtonElement).textContent ?? ''
+
     expect(await a.setFolded(md!, true)).toMatchObject({ ok: true })
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(1)
-    expect(await a.setFolded(code!, true)).toMatchObject({ ok: true })
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(2)
+    expect(label()).toBe('展开')
+    expect(w.document.querySelectorAll('.bnc-fold').length).toBe(total)
+
     expect(await a.setFolded(md!, false)).toMatchObject({ ok: true })
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(1)
+    expect(label()).toBe('折叠')
+    expect(w.document.querySelectorAll('.bnc-fold').length).toBe(total)
   })
 
-  it('cell 重新渲染/新进 DOM ⇒ observer 把展开按钮补回来', async () => {
+  it('cell 重新渲染/新进 DOM ⇒ observer 把按键补回来', async () => {
     const w = dom(FRAME)
     const a = new KaggleFrameAdapter(docOf(w), fast)
     await a.setFoldedAll(true)
-    const first = docOf(w).querySelector<HTMLElement>('.bnc-unfold')!
+    const first = docOf(w).querySelector<HTMLElement>('.bnc-fold')!
     first.remove()
 
     const extra = w.document.createElement('div')
@@ -357,7 +374,7 @@ describe('KaggleFrameAdapter：折叠（每段留顶部两行）', () => {
     w.document.querySelector('.jp-WindowedPanel-viewport')!.append(extra)
     await new Promise((r) => setTimeout(r, 0))
 
-    expect(w.document.querySelectorAll('.bnc-unfold').length).toBe(4)
+    expect(w.document.querySelectorAll('.bnc-fold').length).toBe(4)
   })
 })
 

@@ -126,10 +126,10 @@ const GROUPS: Array<{ label?: string; buttons: ButtonSpec[] }> = [
       {
         act: 'collapseAll',
         label: '折叠全部',
-        title: '每段保留顶部两行：代码 = 蓝、Markdown = 琥珀',
+        title: '每段保留顶部四行：代码 = 蓝、Markdown = 琥珀',
       },
       { act: 'expandAll', label: '展开全部', title: '代码 + Markdown 段全部展开' },
-      { act: 'collapseCurrent', label: '折叠当前', title: '当前 cell 只留顶部两行' },
+      { act: 'collapseCurrent', label: '折叠当前', title: '当前 cell 只留顶部四行' },
       { act: 'expandCurrent', label: '展开当前', title: '展开当前 cell' },
     ],
   },

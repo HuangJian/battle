@@ -768,6 +768,9 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 - `single` 角色 boot；两个适配器 `detect()` + 全部 `{ok:false}`；探测导出 JSON（含 `/api/sessions` 可达性）；
 - **v1 不加** Colab / AI Studio 的 `@match`（评审 S13）：加了就会在那边出现一个全灰面板 = 承诺了「看起来支持」。
   README 写明「当前只 Kaggle；要试 Colab 请自己改元数据块的 `@match`」。
+  - **2026-10-31 更新**：用户给出真实 Colab 页面存档（`tmp/rollout.ipynb-Colab.mhtml`），采样先于实现的门槛
+    已满足 ⇒ Colab 已接真适配器（`sites/colab.ts` + `single` 角色 + `@match`），AI Studio 未采样、**仍未加**
+    `@match`。见 `DECISIONS.md` §2026-10-31-notebook-colab-single。
 - **不**做伪选择器；不把未验证的能力写进面板。
 
 ### W6 — 文档与记忆
@@ -904,7 +907,7 @@ attach，frame 回 `ready` 并在 `.jp-Notebook` 渲染后补 `status`（同一 
 | O2 | 定时「启动」是否要支持「整页刷新后自动跑」？ | 第一版不做（刷新后 GM 存储能恢复任务，但会话可能已断）；先看真实使用 |
 | O3 | 日志是否要高亮/过滤/告警？ | 不做（dashboard 日志页已有搜索/等级过滤）；本脚本只负责搬运 |
 | O4 | 是否给 dashboard 日志页加「清空」按钮？ | 第一版只在脚本面板做；若用户常从 dashboard 侧清空，再加一个只对虚拟键生效的动作 |
-| O5 | Colab / AI Studio 何时接？ | 等用户用探测模式导出一份真实结构；在此之前**不加 `@match`**、不猜选择器 |
+| O5 | Colab / AI Studio 何时接？ | 等用户用探测模式导出一份真实结构；在此之前**不加 `@match`**、不猜选择器。**Colab 已于 2026-10-31 接**（用户给的 mhtml 存档 = 实测结构）；AI Studio 仍等采样 |
 | O6 | 内核 iopub WebSocket 读日志（评审 §5.1） | 不换主方案（DOM 简单、与所见一致）；探测 JSON 只记 `/api/sessions` 是否 200。**R3 真咬人时**再做 channels attach（那是唯一高保真补救腿） |
 
 ---

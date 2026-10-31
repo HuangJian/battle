@@ -5,6 +5,7 @@ import { loadDom, type DomHandle } from '../happydom'
 
 const FRAME = readFileSync(join(import.meta.dir, 'fixtures/kaggle-frame.html'), 'utf8')
 const OUTER = readFileSync(join(import.meta.dir, 'fixtures/kaggle-outer.html'), 'utf8')
+const COLAB = readFileSync(join(import.meta.dir, 'fixtures/colab.html'), 'utf8')
 
 const opened: DomHandle[] = []
 function dom(html: string, url?: string): DomHandle {
@@ -79,9 +80,9 @@ describe('Kaggle 夹具（结构忠实优先于最小）', () => {
     expect(iframe?.getAttribute('src')).not.toMatch(/eyJ[A-Za-z0-9_-]{8,}/)
   })
 
-  it('两份夹具都带来源/日期注记，且不含任何 token（脱敏不靠人工复查）', () => {
+  it('三份夹具都带来源/日期注记，且不含任何 token（脱敏不靠人工复查）', () => {
     // 注释要求「来源 + 提取/入库日期」（plan §5-W0）；文档化在头部，测试把它变成约束。
-    for (const html of [FRAME, OUTER]) {
+    for (const html of [FRAME, OUTER, COLAB]) {
       expect(html).toContain('夹具（脱敏）')
       expect(html).toMatch(/来源：2026-10-\d{2}/)
       expect(html).toMatch(/mhtml 存档/)
@@ -89,6 +90,7 @@ describe('Kaggle 夹具（结构忠实优先于最小）', () => {
       expect(html).not.toMatch(/gh[pousr]_[A-Za-z0-9]{20,}/) // GitHub token
       expect(html).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{20,}/)
       expect(html).not.toMatch(/(?:api[_-]?key|access[_-]?token|secret)\s*[:=]\s*[A-Za-z0-9]{16,}/i)
+      expect(html).not.toContain('authKey=') // 原存档日志里有采样节点的 authKey
     }
     // 占位只表明 URL 形状（带 query），不冒充真会话：不含 JWT 前缀。
     expect(OUTER).toContain('SYNTHETIC-NOT-A-TOKEN')

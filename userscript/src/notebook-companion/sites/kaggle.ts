@@ -22,26 +22,26 @@ export interface KaggleHooks {
 /**
  * 折叠开关：代码与 markdown 段都走这里。
  *
- * 不用 Jupyter 的 `hide-*-cell-code`：它会把输入整段藏掉，留不下「顶部两行」。改成
+ * 不用 Jupyter 的 `hide-*-cell-code`：它会把输入整段藏掉，留不下「顶部四行」。改成
  * `data-bnc-fold` 属性 + 一条注入样式：`.jp-Notebook[data-bnc-fold="all"]` 管全部，
  * 单 cell 用 `on|off`（`off` 在全局折叠时覆盖成展开）。只加脚本私有属性，虚拟化后
  * 重新渲染的 cell 也自动生效。
  */
 const FOLD_ATTR = 'data-bnc-fold'
 const FOLD_STYLE_ID = 'bnc-cell-fold-style'
-const UNFOLD_CLASS = 'bnc-unfold'
+const FOLD_CLASS = 'bnc-fold'
 const FOLD_STYLE = `
-/* 折叠态：每段保留顶部两行（2lh = 两倍行高；代码 = 源码前两行，markdown = 渲染内容前两行） */
+/* 折叠态：每段保留顶部四行（4lh = 四倍行高；代码 = 源码前四行，markdown = 渲染内容前四行） */
 .jp-Notebook[${FOLD_ATTR}="all"] .jp-CodeCell .jp-InputArea,
 .jp-CodeCell[${FOLD_ATTR}="on"] .jp-InputArea {
-  max-height: calc(2lh + 4px) !important;
+  max-height: calc(4lh + 4px) !important;
   overflow: hidden !important;
 }
 .jp-Notebook[${FOLD_ATTR}="all"] .jp-MarkdownCell .jp-RenderedMarkdown,
 .jp-Notebook[${FOLD_ATTR}="all"] .jp-MarkdownCell .jp-MarkdownOutput,
 .jp-MarkdownCell[${FOLD_ATTR}="on"] .jp-RenderedMarkdown,
 .jp-MarkdownCell[${FOLD_ATTR}="on"] .jp-MarkdownOutput {
-  max-height: calc(2lh + 4px) !important;
+  max-height: calc(4lh + 4px) !important;
   overflow: hidden !important;
 }
 /* 代码段 = 蓝，Markdown 段 = 琥珀；折叠后一眼看出一段是什么 */
@@ -57,18 +57,20 @@ const FOLD_STYLE = `
   border-left: 3px solid #d9a441 !important;
   background: rgba(217, 164, 65, .08) !important;
 }
-/* 折叠后的展开按键（右上角，同时充当 CODE / MD 标签） */
-.bnc-unfold {
-  position: absolute; top: 2px; right: 6px; z-index: 6;
+/* 折叠/展开按键（同时充当 CODE / MD 标签）：左边线对齐 cell，纵向中心压在 cell 顶边上。
+   右上角是 Jupyter 的浮动工具条（运行/更多），所以走左上。 */
+.jp-Cell { position: relative; }
+.${FOLD_CLASS} {
+  position: absolute; top: 0; left: 0; transform: translateY(-50%); z-index: 6;
   font: 10px/1.4 system-ui, -apple-system, sans-serif; letter-spacing: .04em;
   color: #9dbdff; background: rgba(10, 14, 20, .78);
   border: 1px solid currentColor; border-radius: 999px; padding: 0 5px;
-  cursor: pointer;
+  cursor: pointer; white-space: nowrap;
 }
-.bnc-unfold:hover { background: rgba(10, 14, 20, .95); }
-.bnc-unfold::before { content: "CODE "; opacity: .7; }
-.jp-MarkdownCell .bnc-unfold { color: #e6c36a; }
-.jp-MarkdownCell .bnc-unfold::before { content: "MD "; opacity: .7; }
+.${FOLD_CLASS}:hover { background: rgba(10, 14, 20, .95); }
+.${FOLD_CLASS}::before { content: "CODE "; opacity: .7; }
+.jp-MarkdownCell .${FOLD_CLASS} { color: #e6c36a; }
+.jp-MarkdownCell .${FOLD_CLASS}::before { content: "MD "; opacity: .7; }
 /* 全局折叠时单独展开一段：cell 上的 off 覆盖根属性 */
 .jp-Notebook[${FOLD_ATTR}="all"] :is(.jp-CodeCell, .jp-MarkdownCell)[${FOLD_ATTR}="off"] {
   border-left: none !important;
@@ -163,6 +165,8 @@ export class KaggleFrameAdapter implements FrameAdapter {
     disconnect(): void
   } | null = null
   private unfoldSyncQueued = false
+  /** 折叠按键是否已常驻（首次取 cells 时装样式 + observer）。 */
+  private foldUiReady = false
   /** 已设「运行 cell」定时器的目标（帧内渲染；宿主经桥下发）。 */
   private schedMarks: Array<{ id: string; label: string; uuid?: string; index?: number }> = []
   /** 非 cell 定时任务（运行全部/停会话/中断）：帧顶部悬浮徽标。 */
@@ -197,6 +201,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
   }
 
   cells(): CellRef[] {
+    this.ensureFoldUi()
     return qa<HTMLElement>(this.root(), SEL.cell)
       .map((el, i) => {
         const rawIndex = el.getAttribute('data-windowed-list-index')
@@ -309,7 +314,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
       const own = el.getAttribute(FOLD_ATTR)
       if (own === 'on' || (all && own !== 'off')) {
         el.setAttribute(FOLD_ATTR, 'off')
-        this.syncUnfoldButtons()
+        this.syncFoldButtons()
       }
     }
     const Ctor = (this.doc.defaultView?.MouseEvent ?? MouseEvent) as typeof MouseEvent
@@ -514,7 +519,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     this.unfoldSyncQueued = true
     const run = (): void => {
       this.unfoldSyncQueued = false
-      this.syncUnfoldButtons()
+      this.syncFoldButtons()
       this.syncScheduledBadges()
       this.syncScheduleBanner()
     }
@@ -525,17 +530,37 @@ export class KaggleFrameAdapter implements FrameAdapter {
     else setTimeout(run, 0)
   }
 
-  /** 折叠态的 cell 各带一个「展开」按钮（点一下只展开这一段）；展开态的清掉。 */
-  private syncUnfoldButtons(): void {
+  private ensureFoldUi(): void {
+    if (this.foldUiReady) return
+    if (!this.ensureFoldStyle()) return
+    this.foldUiReady = true
+    this.syncFoldButtons()
+  }
+
+  /** 这个 cell 现在是折叠态吗（全局 all + 单段 on/off 覆盖）。 */
+  private isFolded(el: Element): boolean {
+    const own = el.getAttribute(FOLD_ATTR)
+    const all = this.notebook()?.getAttribute(FOLD_ATTR) === 'all'
+    return own === 'on' || (all && own !== 'off')
+  }
+
+  /**
+   * 每个代码 / markdown cell 顶边常驻一个 CODE/MD 按键：
+   * 折叠态点 = 只展开这一段，展开态点 = 折叠这一段（不必回面板）。
+   */
+  private syncFoldButtons(): void {
     const nb = this.notebook()
     if (!nb) return
-    const all = nb.getAttribute(FOLD_ATTR) === 'all'
     for (const el of qa<HTMLElement>(nb, SEL.cell)) {
-      const own = el.getAttribute(FOLD_ATTR)
-      const folded = own === 'on' || (all && own !== 'off')
-      const btn = q<HTMLElement>(el, `.${UNFOLD_CLASS}`)
-      if (folded && !btn) this.addUnfoldButton(el)
-      else if (!folded && btn) btn.remove()
+      if (!el.classList.contains('jp-CodeCell') && !el.classList.contains('jp-MarkdownCell')) {
+        continue
+      }
+      const btn = q<HTMLElement>(el, `.${FOLD_CLASS}`) ?? this.addFoldButton(el)
+      const folded = this.isFolded(el)
+      const label = folded ? '展开' : '折叠'
+      if (btn.textContent !== label) btn.textContent = label
+      const title = folded ? '展开这个 cell（其余保持原样）' : '折叠这个 cell（只留顶部四行）'
+      if (btn.title !== title) btn.title = title
     }
   }
 
@@ -655,24 +680,23 @@ export class KaggleFrameAdapter implements FrameAdapter {
     return { ok: true, detail: `marks:${this.schedMarks.length}+${this.schedBanners.length}` }
   }
 
-  private addUnfoldButton(el: HTMLElement): void {
+  private addFoldButton(el: HTMLElement): HTMLElement {
     const btn = this.doc.createElement('button')
     btn.type = 'button'
-    btn.className = UNFOLD_CLASS
-    btn.textContent = '展开'
-    btn.title = '展开这个 cell（其他 cell 保持折叠）'
+    btn.className = FOLD_CLASS
     btn.addEventListener('click', (ev) => {
       ev.preventDefault()
       ev.stopPropagation()
-      el.setAttribute(FOLD_ATTR, 'off')
-      this.syncUnfoldButtons()
+      el.setAttribute(FOLD_ATTR, this.isFolded(el) ? 'off' : 'on')
+      this.syncFoldButtons()
     })
     el.append(btn)
+    return btn
   }
 
   /**
    * 全部折叠/展开。先 `notebook:show-all-cell-code` 还原 Jupyter 原生折叠（原生折叠会把
-   * 输入整段藏掉，留不下顶部两行），再由根属性 + 注入样式接管。
+   * 输入整段藏掉，留不下顶部四行），再由根属性 + 注入样式接管。
    */
   async setFoldedAll(collapsed: boolean): Promise<CmdResult> {
     const nb = this.notebook()
@@ -683,7 +707,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
     else nb.removeAttribute(FOLD_ATTR)
     // 全部切换时清掉单 cell 覆盖，否则「展开全部」会被之前的 off/on 拦住
     for (const el of qa<HTMLElement>(nb, SEL.cell)) el.removeAttribute(FOLD_ATTR)
-    this.syncUnfoldButtons()
+    this.syncFoldButtons()
     return { ok: true, detail: collapsed ? 'folded:all' : 'unfolded:all' }
   }
 
@@ -692,10 +716,10 @@ export class KaggleFrameAdapter implements FrameAdapter {
     const el = this.cellEl(cell)
     if (!el) return { ok: false, reason: `cell 未渲染：${cell.id}` }
     if (!this.ensureFoldStyle()) return { ok: false, reason: '无法注入折叠样式（没有 head）' }
-    // 原生折叠只能整段隐藏 ⇒ 先还原，再由属性接管「顶部两行」
+    // 原生折叠只能整段隐藏 ⇒ 先还原，再由属性接管「顶部四行」
     await this.command('notebook:show-cell-code', { cell })
     el.setAttribute(FOLD_ATTR, collapsed ? 'on' : 'off')
-    this.syncUnfoldButtons()
+    this.syncFoldButtons()
     return { ok: true, detail: collapsed ? 'folded' : 'unfolded' }
   }
 

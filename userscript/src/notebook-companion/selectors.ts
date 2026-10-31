@@ -51,11 +51,12 @@ export function deepQueryAll(root: ParentNode, selector: string): Element[] {
   return out
 }
 
-export type Role = 'host' | 'frame'
+export type Role = 'host' | 'frame' | 'single'
 
 /**
- * Kaggle 编辑页 = 外层 `www.kaggle.com/code/*`；notebook = `*.jupyter-proxy.kaggle.net`。
- * 其余（数据集页、http、伪域名、非 URL）一律 null —— 角色判定只认这两个入口。
+ * Kaggle 编辑页 = 外层 `www.kaggle.com/code/*`；notebook = `*.jupyter-proxy.kaggle.net`；
+ * Colab = 单文档（cell 与面板同页、无跨域 iframe ⇒ `single`）。
+ * 其余（数据集页、http、伪域名、非 URL）一律 null —— 角色判定只认这三个入口。
  */
 export function detectRole(rawUrl: string): Role | null {
   let url: URL
@@ -72,5 +73,6 @@ export function detectRole(rawUrl: string): Role | null {
   if (host === 'jupyter-proxy.kaggle.net' || host.endsWith('.jupyter-proxy.kaggle.net')) {
     return 'frame'
   }
+  if (host === 'colab.research.google.com') return 'single'
   return null
 }

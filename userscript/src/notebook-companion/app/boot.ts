@@ -8,6 +8,7 @@ import {
   parseKaggleNotebookKey,
   parseKaggleSession,
 } from '../sites/kaggle'
+import { ColabAdapter, ColabSessionAdapter, parseColabNotebookKey } from '../sites/colab'
 import {
   mountPanel,
   PANEL_POS_KEY,
@@ -22,7 +23,7 @@ import {
   type BridgeWindow,
 } from './bridge'
 import { installAutoContinue } from './auto-continue'
-import { runFrameCommand } from './commands'
+import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
 import {
   actionLabel,
   countdownLabel,
@@ -66,10 +67,11 @@ export function boot(
   const win = (scope.window ?? (doc.defaultView as Window | null)) as Window | null
   if (!win) return { role, hasRuntime: true }
 
-  const start = (): (() => void) =>
-    role === 'frame'
-      ? startFrame(doc, win, href, config, runtime, log)
-      : startHost(doc, win, href, config, runtime, log)
+  const start = (): (() => void) => {
+    if (role === 'frame') return startFrame(doc, win, href, config, runtime, log)
+    if (role === 'single') return startSingle(doc, win, href, config, runtime, log)
+    return startHost(doc, win, href, config, runtime, log)
+  }
 
   if (doc.body === null) {
     doc.addEventListener('DOMContentLoaded', () => start(), { once: true })
@@ -79,6 +81,19 @@ export function boot(
 }
 
 const PAGE_TAG_KEY = 'bnc:pageTag'
+const WRITER_KEY = 'bnc:writer'
+
+/** 4–6 位 a–z0–9；crypto 拿不到就退 Math.random（此处不是玩法随机）。 */
+function randomTag(win: Window): string {
+  const c = (win as unknown as { crypto?: { getRandomValues?: (a: Uint8Array) => void } }).crypto
+  const buf = new Uint8Array(4)
+  let n = 0
+  if (typeof c?.getRandomValues === 'function') {
+    c.getRandomValues(buf)
+    n = ((buf[0]! << 24) | (buf[1]! << 16) | (buf[2]! << 8) | buf[3]!) >>> 0
+  } else n = Math.floor(Math.random() * 0x1_0000_0000)
+  return n.toString(36).slice(0, 6).padStart(4, '0')
+}
 
 /**
  * 本标签页的短标签（4–6 位 a–z0–9）：同一个 notebook 多开几个页签，各写各的日志。
@@ -88,22 +103,35 @@ const PAGE_TAG_KEY = 'bnc:pageTag'
  * 页面之间仍分得开，只是刷新会开一份新日志。
  */
 function pageTag(win: Window): string {
-  const gen = (): string => {
-    const c = (win as unknown as { crypto?: { getRandomValues?: (a: Uint8Array) => void } }).crypto
-    const buf = new Uint8Array(4)
-    let n = 0
-    if (typeof c?.getRandomValues === 'function') {
-      c.getRandomValues(buf)
-      n = ((buf[0]! << 24) | (buf[1]! << 16) | (buf[2]! << 8) | buf[3]!) >>> 0
-    } else n = Math.floor(Math.random() * 0x1_0000_0000)
-    return n.toString(36).slice(0, 6).padStart(4, '0')
-  }
   try {
     const store = win.sessionStorage
     const saved = store.getItem(PAGE_TAG_KEY)
     if (saved && /^[a-z0-9]{4,8}$/.test(saved)) return saved
-    const tag = gen()
+    const tag = randomTag(win)
     store.setItem(PAGE_TAG_KEY, tag)
+    return tag
+  } catch {
+    return randomTag(win)
+  }
+}
+
+/**
+ * 写者身份：**必须跨刷新稳定**。
+ *
+ * 服务端按 writer 的租约（180s）fencing：同一份日志换了 writer，就得等旧租约过期才能写。
+ * 若每次加载都随机一个，刷新后本页会被**自己上一次**的租约挡三分钟（面板报「另一个标签
+ * 持有搬运权」）。存进 sessionStorage ⇒ 刷新沿用同一个 writer，第一笔就顺手续租；真另有
+ * 页签时它有自己的标签与日志键，互不干扰。
+ */
+function writerTag(win: Window, role: 'host' | 'frame' | 'colab'): string {
+  const key = `${WRITER_KEY}:${role}`
+  const gen = (): string => `${role}-${randomTag(win)}`
+  try {
+    const store = win.sessionStorage
+    const saved = store.getItem(key)
+    if (saved && new RegExp(`^${role}-[a-z0-9]{4,8}$`).test(saved)) return saved
+    const tag = gen()
+    store.setItem(key, tag)
     return tag
   } catch {
     return gen()
@@ -156,6 +184,7 @@ function startFrame(
     runtime,
     adapter,
     pageTag: pageTag(win),
+    writer: writerTag(win, 'frame'),
     onError: (message) => log(`ship: ${message}`),
   })
 
@@ -433,7 +462,7 @@ function startHost(
   // ── 定时启停（plan §3.3 / W4）：任务住 GM 存储，轮询墙钟，到点后 10s 可取消 ──
   sched = createScheduler({
     store: runtime,
-    writer: `host-${Math.random().toString(36).slice(2, 8)}`,
+    writer: writerTag(win, 'host'),
     now: () => Date.now(),
     claimSettleMs: config.claimSettleMs,
     runGraceMs: 10 * 60_000,
@@ -533,6 +562,263 @@ function startHost(
     sched?.stop()
     doc.removeEventListener('visibilitychange', onVisibility)
     bridge.destroy()
+    panel?.destroy()
+  }
+}
+
+/**
+ * `single` 角色（Colab）：cell 与面板在同一份文档里 ⇒ 不建桥，命令直接调 `runFrameCommand`。
+ * 面板 / 定时 / 执行历史 / 徽标的口径与 host 完全一致，差别只有「跨帧发送」变成「本地调用」。
+ */
+function startSingle(
+  doc: Document,
+  win: Window,
+  href: string,
+  config: BncConfig,
+  runtime: Runtime,
+  log: (msg: string) => void,
+): () => void {
+  const adapter = new ColabAdapter(doc)
+  const sessionAdapter = new ColabSessionAdapter(doc, href)
+  const notebookKey = parseColabNotebookKey(href)
+  const loop = createShipLoop({
+    doc,
+    href,
+    referrer: doc.referrer,
+    config,
+    runtime,
+    adapter,
+    site: 'colab',
+    pageTag: pageTag(win),
+    onError: (message) => log(`ship: ${message}`),
+  })
+
+  const openLog = (): void => {
+    win.open(
+      `${config.dashboardBase}/log/${encodeURIComponent(`notebook:${loop.session}`)}`,
+      '_blank',
+      'noopener',
+    )
+  }
+  const openConfig = (): void => {
+    runtime.setClipboard(JSON.stringify(config, null, 2))
+    log('配置已复制到剪贴板（改完写回 GM 存储 bnc:config）')
+  }
+  const deps: CommandDeps = {
+    loop,
+    adapter,
+    session: sessionAdapter,
+    openLog,
+    openConfig,
+    configMarkers: config.configMarkers,
+  }
+
+  let panel: Panel | null = null
+  let sched: Scheduler | null = null
+
+  /** 命令分发：Kaggle 那边跨帧 postMessage，这里同一文档直接调（失败带原因，不静默）。 */
+  const send = async (name: string, args?: unknown): Promise<CommandReply> => {
+    try {
+      return await runFrameCommand(deps, name, args)
+    } catch (e) {
+      return { ok: false, reason: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  const run = async (name: string, args?: unknown): Promise<void> => {
+    const r = await send(name, args)
+    if (!r.ok) {
+      panel?.setStatus(`${name} ✗ ${r.reason ?? '失败'}`, 'error')
+      return
+    }
+    const detail = typeof r.value === 'string' ? ` ${r.value}` : ''
+    panel?.setStatus(`${name} ✓${detail}`, 'ok')
+  }
+
+  const toCmd = (r: CommandReply): { ok: boolean; reason?: string; detail?: string } =>
+    r.ok
+      ? { ok: true, ...(typeof r.value === 'string' ? { detail: r.value } : {}) }
+      : { ok: false, reason: r.reason ?? '失败' }
+
+  /** 本页的执行历史（内存，刷新即清空）。 */
+  const history: PanelHistoryRow[] = []
+  const HISTORY_MAX = 5
+  function recordHistory(task: SchedulerTask, result: { ok: boolean; reason?: string }): void {
+    const d = new Date()
+    const pad2 = (n: number): string => String(n).padStart(2, '0')
+    history.unshift({
+      at: `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`,
+      text: actionLabel(task.action),
+      ok: result.ok,
+      ...(result.reason ? { reason: result.reason } : {}),
+    })
+    if (history.length > HISTORY_MAX) history.length = HISTORY_MAX
+    panel?.setHistory(history)
+  }
+
+  /** 只显示属于这一页的任务（GM 存储跨页共享，与 host 同口径）。 */
+  function belongsHere(task: SchedulerTask): boolean {
+    return taskBelongsTo(task, { notebookKey, session: loop.session })
+  }
+
+  /** 定时徽标：没有桥，直接贴在本页 DOM；每秒重贴 ⇒ cell 重渲染后下一拍自愈。 */
+  function syncMarks(): void {
+    if (!sched) return
+    const now = Date.now()
+    const nextById = new Map(sched.rows().map((r) => [r.id, r.next]))
+    const marks = sched
+      .tasks()
+      .filter(belongsHere)
+      .map((t) => {
+        const left = countdownLabel(t.nextAt, now, nextById.get(t.id) ?? '已定时')
+        if (t.action === 'run-cell' && t.target) {
+          return {
+            id: t.id,
+            label: left,
+            ...(t.target.uuid ? { uuid: t.target.uuid } : {}),
+            ...(t.target.index !== undefined ? { index: t.target.index } : {}),
+          }
+        }
+        return { id: t.id, label: `${actionLabel(t.action)} · ${left}`, action: t.action }
+      })
+    adapter.setScheduledMarks(marks)
+  }
+
+  panel = mountPanel(
+    doc,
+    {
+      saveAndClear: () => run('saveAndClear'),
+      flush: () => run('flush'),
+      collapseAll: () => run('collapseAll'),
+      expandAll: () => run('expandAll'),
+      collapseCurrent: () => run('collapseCurrent'),
+      expandCurrent: () => run('expandCurrent'),
+      scrollTop: () => run('scrollTop'),
+      scrollBottom: () => run('scrollBottom'),
+      openLog,
+      jumpConfig: () => run('jumpConfig'),
+    },
+    {
+      position: readPanelPosition(runtime),
+      onMove: (position) => runtime.setValue(PANEL_POS_KEY, position),
+      autoSave: {
+        enabled: config.autoSaveEnabled,
+        intervalMin: Math.max(1, Math.round(config.autoSaveIntervalSec / 60)),
+      },
+      onAutoSaveChange: async (value) => {
+        const intervalSec = Math.min(24 * 3600, Math.max(60, Math.round(value.intervalMin * 60)))
+        config.autoSaveEnabled = value.enabled
+        config.autoSaveIntervalSec = intervalSec
+        saveConfig(runtime, config)
+        const r = await send('setAutoSave', {
+          enabled: config.autoSaveEnabled,
+          intervalSec,
+        })
+        return r.ok ? null : `自动保存已写入配置，但当前页未生效（${r.reason ?? '无应答'}）`
+      },
+      onScheduleAdd: async (input) => {
+        if (!sched) return '调度未就绪'
+        let target: ScheduleTarget | undefined
+        if (input.action === 'run-cell') {
+          const cap = await send('captureTarget')
+          if (!cap.ok) {
+            return `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+          }
+          const v = cap.value as ScheduleTarget | undefined
+          if (!v || (v.uuid === undefined && v.index === undefined)) return '没拿到目标 cell 的位置'
+          target = v
+        }
+        const r = sched.add({
+          at: input.at,
+          action: input.action as ScheduleAction,
+          ...(target ? { target } : {}),
+        })
+        return r.ok ? null : r.reason
+      },
+      onScheduleRemove: (id) => sched?.remove(id),
+      onScheduleToggle: (id, enabled) => sched?.setEnabled(id, enabled),
+    },
+  )
+
+  panel.setSession(`notebook:${loop.session}`)
+  panel.setStatus(
+    adapter.ready ? '已连接（笔记本就绪）' : '已连接（等待笔记本）',
+    adapter.ready ? 'ok' : 'warn',
+  )
+
+  sched = createScheduler({
+    store: runtime,
+    writer: writerTag(win, 'colab'),
+    now: () => Date.now(),
+    claimSettleMs: config.claimSettleMs,
+    runGraceMs: 10 * 60_000,
+    stopGraceMs: config.stopGraceMs,
+    identity: () => ({ notebookKey, session: loop.session }),
+    confirm: async (task, occurrence) => {
+      const d = new Date(task.nextAt)
+      const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      const text = `${actionLabel(task.action)}（${clock} · ${occurrence}）`
+      // 后台页弹不出确认框：按创建时的预授权执行，但必须留一行证据
+      if (doc.hidden) {
+        log(`后台按预授权执行：${text}`)
+        return true
+      }
+      return panel ? panel.countdown(`即将${text}`, 10) : true
+    },
+    run: async (task) => {
+      const name =
+        task.action === 'stop-session'
+          ? 'stopSession'
+          : task.action === 'interrupt'
+            ? 'interrupt'
+            : task.action === 'run-all'
+              ? 'runAllCells'
+              : 'runCell'
+      const result = toCmd(
+        await send(name, task.action === 'run-cell' ? (task.target ?? {}) : undefined),
+      )
+      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）
+      recordHistory(task, result)
+      return result
+    },
+    onChange: () => {
+      const rows = sched?.rows() ?? []
+      panel?.setSchedule(rows)
+      panel?.setStatus(scheduleStatusText(rows.length), 'ok')
+      syncMarks()
+    },
+  })
+  panel.setSchedule(sched.rows())
+  sched.start()
+  const markTimer = setInterval(syncMarks, 1000)
+  const onVisibility = (): void => {
+    void sched?.tick()
+  }
+  doc.addEventListener('visibilitychange', onVisibility)
+
+  // 自动清空的「近 10s 有交互」闸：捕获阶段，不改页面行为。
+  const touch = (): void => loop.lastInteractionAt(Date.now())
+  const EVENTS = ['keydown', 'pointerdown', 'wheel', 'scroll'] as const
+  for (const ev of EVENTS) win.addEventListener(ev, touch, { capture: true, passive: true })
+
+  runtime.registerMenuCommand('Notebook: 保存并清空', () => {
+    void loop.saveAndClear().then((r) => {
+      log(r.ok ? `已保存并清空（${r.bytes}B）` : `未清空：${r.reason ?? '保存未完成'}`)
+    })
+  })
+  runtime.registerMenuCommand('Notebook: 打开日志', openLog)
+  runtime.registerMenuCommand('Notebook: 复制配置', openConfig)
+
+  loop.start()
+  syncMarks()
+  log(`single 启动（session=notebook:${loop.session} ready=${adapter.ready ? 'yes' : 'waiting'}）`)
+
+  return () => {
+    clearInterval(markTimer)
+    doc.removeEventListener('visibilitychange', onVisibility)
+    for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })
+    sched?.stop()
+    loop.stop()
     panel?.destroy()
   }
 }

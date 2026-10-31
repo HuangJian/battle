@@ -10293,3 +10293,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `app/{boot,commands}.ts` · `sites/kaggle.ts::parseKaggleNotebookKey` · `schedule.ts`（`graceMs`）；
   用例 `userscript/test/{scheduler,schedule-commands,panel,schedule}.test.ts`。
 —— 全文（方法 · 满载/空载读数表 · 三类分类 · 两处 A/B 明细）→ `docs/nn/engineering.md` §93
+## §2026-10-31-notebook-colab-single（2026-10-31，notebook 伴生脚本接 Colab：采样先于实现 + single 角色 + fail-closed）
+
+- **背景**：plan §5-W5 / 评审 S13 与 O5 规定 v1 只做 Kaggle，Colab/AI Studio 只留 `Stub` 骨架且**不加 `@match`**
+  （理由：DOM 未实测 ⇒ 加了等于交付一个「看起来支持」的全灰面板）。用户 2026-10-31 给出真实页面存档
+  `tmp/rollout.ipynb-Colab.mhtml`，并在随后要求「把 userscript 扩展到 Colab」⇒ 采样门槛已满足。
+- **决定**：
+  1. **采样先于实现**：从存档抽出 `#top-toolbar` + `#notebook-main` 两棵子树入库为
+     `userscript/test/fixtures/colab.html`（id/class/`<template shadowmode="open">` 原样，源码与输出换成合成文本）；
+     存档本身含 authKey 等凭据，**绝不入库**。测试把夹具还原成真影子根再断言 —— 适配器不靠猜选择器。
+  2. **新增 `single` 角色**（`selectors.ts::detectRole` 认 `colab.research.google.com`）：cell 与面板同一文档
+     ⇒ **不建 iframe 桥**，`boot.startSingle` 直接调 `runFrameCommand`；面板/定时/历史/倒计时/徽标与 host 同口径。
+  3. **`@match` 加 Colab**，推翻 S13 的「v1 不加」——其前提（没有实测结构）已不成立；AI Studio 仍未采样 ⇒ **依旧不加**。
+  4. **没实测过的动作一律 fail closed**：`stopSession`（Colab 只有「Disconnect and delete runtime」，会连运行时文件
+     一起删）与逐 cell 清空（输出操作菜单不在存档里）返回**带原因的**失败；未知 `notebook:*` 命令同理。面板红字可见。
+  5. **命令按实测属性定位**：菜单用 `md-menu-item[command="interrupt"|"clear-outputs"]` + 后置条件校验；
+     点 md-* 组件要钻 open shadow root（宿主 `click()` 传不进去）。折叠用 Colab 自带的 cell 折叠按钮，
+     不自己插样式（避免与 vm/编辑器抢 DOM）。
+- **否决的备选**：按印象猜选择器直接实现（S13 明令禁止，会交付假绿）；把 host/frame 那套 postMessage 桥复用到
+  Colab（同文档纯开销）；把 `startHost` 重构成通用 shell 再接两站（boot 没有测试网，动在跑着的 Kaggle 路径上
+  风险大于收益，待有 boot 用例后再收口）；用 `window.monaco` / 内部 API 读源码（未验证存在；实测整 cell 不内滚 ⇒
+  `.view-line` 逐行都在 DOM，直接比对即可）。
+- **落地**：`userscript/src/notebook-companion/sites/colab.ts` · `app/boot.ts::startSingle` ·
+  `selectors.ts::detectRole` · `observer.ts`（Colab observer 配置）· `app/ship-loop.ts`（按 site 选会话/键解析）·
+  `index.user.ts`（`@match`）；用例 `userscript/test/{colab,boot-single,selectors,ship-loop,meta,fixtures}.test.ts` +
+  夹具 `test/fixtures/colab.html`。

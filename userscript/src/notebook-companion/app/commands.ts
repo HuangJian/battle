@@ -112,7 +112,7 @@ export async function runFrameCommand(
       }
     }
     case 'collapseAll':
-      // 代码 + markdown 都走适配器：命令会把输入整段藏掉，留不下顶部两行（plan §3.4）
+      // 代码 + markdown 都走适配器：命令会把输入整段藏掉，留不下顶部四行（plan §3.4）
       return fromCmd(await deps.adapter.setFoldedAll(true))
     case 'expandAll':
       return fromCmd(await deps.adapter.setFoldedAll(false))

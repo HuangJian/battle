@@ -2,9 +2,10 @@
 // @name         Battle City Notebook Companion
 // @namespace    battle-city-web
 // @version      0.1.0
-// @description  把 Kaggle notebook 的 cell 输出定期保存到本机 dashboard（W0 骨架）
+// @description  把 Kaggle / Colab notebook 的 cell 输出定期保存到本机 dashboard
 // @match        https://www.kaggle.com/code/*
 // @match        https://*.jupyter-proxy.kaggle.net/*
+// @match        https://colab.research.google.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue

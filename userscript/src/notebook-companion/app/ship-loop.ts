@@ -10,7 +10,13 @@ import type { BncConfig } from '../config'
 import { createShipState, shipOnce, type ShipReport, type ShipState } from '../log-shipper'
 import type { NotebookChunk, NotebookResponse, NotebookSite } from '../protocol'
 import { parseKaggleSession, withPageTag } from '../sites/kaggle'
-import { createOutputObserver, type OutputObserver } from '../observer'
+import { parseColabSession } from '../sites/colab'
+import {
+  COLAB_OBSERVER,
+  KAGGLE_OBSERVER,
+  createOutputObserver,
+  type OutputObserver,
+} from '../observer'
 import type { FrameAdapter } from '../sites/types'
 
 export interface ShipLoopOptions {
@@ -50,6 +56,10 @@ export interface ShipLoop {
 }
 
 const MAX_DRAIN_BYTES = 64 * 1024 * 1024
+/** 409 的三个自愈分支：下一轮会重发（游标前进/归零），不该让整次保存失败。 */
+const TRANSIENT_ERRORS = new Set(['offset-resume', 'offset-reset', 'stale-epoch'])
+/** 连续这么多轮「没发出字节且输出长度不变」⇒ 真 offset 冲突。 */
+const STALL_ROUNDS = 3
 
 function randomWriter(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto
@@ -62,7 +72,9 @@ function randomWriter(): string {
 export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const site = opts.site ?? 'kaggle'
   const writer = opts.writer ?? randomWriter()
-  let baseSession = parseKaggleSession(opts.referrer || opts.href)
+  // 会话键按站点解析：Colab 的 URL 是 /drive/<fileId>，拿 Kaggle 那套只会得到 unknown
+  const parseSession = site === 'colab' ? parseColabSession : parseKaggleSession
+  let baseSession = parseSession(opts.referrer || opts.href)
   let session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())
   /** 上次周期保存的时刻；从创建起算，避免打开页面就清空一次。 */
@@ -135,22 +147,52 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   ): Promise<{ ok: boolean; bytes: number; reason?: string }> => {
     const started = now()
     let bytes = 0
+    /** 连续「没发出字节且游标没动」的轮数；输出还在长则归零（那是流式，不是冲突）。 */
+    let stalled = 0
+    let lastShape = ''
     for (let round = 0; round < 64; round++) {
       const ids = cells().map((c) => c.id)
       const report = await runOnce(ids)
       bytes += report.sentBytes
-      if (report.errors.length > 0 || state.stopped.size > 0) {
-        return { ok: false, bytes, reason: report.errors[0] ?? [...state.stopped.values()][0] }
+      // 另一个标签持有租约：本标签整轮不发 ⇒ 说清是「被动」，不能冒充 offset 冲突
+      if (report.passive) {
+        const left = Math.max(0, state.passiveUntil - now())
+        return {
+          ok: false,
+          bytes,
+          reason: `另一个页签持有搬运权（writer 冲突，约 ${Math.ceil(left / 1000)}s 后释放）：等它关掉或租约过期再保存`,
+        }
       }
+      // 409 的 resume/reset 与 stale-epoch 会在下一轮自动补发，不算「保存失败」
+      const fatal = report.errors.find((e) => !TRANSIENT_ERRORS.has(e))
+      if (fatal !== undefined) return { ok: false, bytes, reason: fatal }
+      const stopped = [...state.stopped.values()][0]
+      if (stopped !== undefined) return { ok: false, bytes, reason: stopped }
       if (bytes > MAX_DRAIN_BYTES)
         return { ok: false, bytes, reason: `drain 超 ${MAX_DRAIN_BYTES}B` }
-      const still = ids.some((id) => (state.cursors.get(id)?.offset ?? 0) < textOf(id).length)
-      if (!still && report.sentBytes === 0) return { ok: true, bytes }
+
+      const lens = ids.map((id) => textOf(id).length)
+      const behind = ids.filter((id, i) => (state.cursors.get(id)?.offset ?? 0) < (lens[i] ?? 0))
+      if (behind.length === 0 && report.sentBytes === 0) return { ok: true, bytes }
       if (now() - started > deadlineMs)
         return { ok: false, bytes, reason: `drain 超时 ${deadlineMs}ms` }
-      if (report.sentBytes === 0 && !still) break
-      if (report.sentBytes === 0 && still)
-        return { ok: false, bytes, reason: '没有新字节但游标未追上（offset 冲突）' }
+
+      // 这一轮没发出字节但游标还在后面：输出可能刚在这拍的窗口里长出来（流式输出常见）
+      // ⇒ 下一轮接着发；只有长度连续几轮不变才是真的 offset 冲突。
+      const shape = lens.join(',')
+      if (report.sentBytes === 0 && behind.length > 0) {
+        stalled = shape === lastShape ? stalled + 1 : 0
+        if (stalled >= STALL_ROUNDS) {
+          return {
+            ok: false,
+            bytes,
+            reason: `游标卡住：${behind.join(',')} 没有新字节也追不上（offset 冲突）`,
+          }
+        }
+      } else {
+        stalled = 0
+      }
+      lastShape = shape
     }
     return { ok: false, bytes, reason: 'drain 未排空（64 轮）' }
   }
@@ -301,6 +343,7 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
             if (!state.cursors.has(ref.id)) dirty.add(ref.id)
           }
         },
+        site === 'colab' ? COLAB_OBSERVER : KAGGLE_OBSERVER,
       )
       // 打开页面时已有的输出不会触发 MutationObserver ⇒ 首拍必须把全部 code cell 标脏。
       for (const ref of cells()) dirty.add(ref.id)

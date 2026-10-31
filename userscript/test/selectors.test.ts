@@ -16,6 +16,16 @@ describe('detectRole', () => {
     expect(detectRole('https://jupyter-proxy.kaggle.net/static/x.html')).toBe('frame')
   })
 
+  it('Colab = single（cell 与面板同文档，无跨域帧）', () => {
+    expect(
+      detectRole('https://colab.research.google.com/drive/1VUDX_hyHVvzc2kQxrAOSgsPvzwcuXD7n'),
+    ).toBe('single')
+    expect(detectRole('https://colab.research.google.com/github/u/r/blob/main/nb.ipynb')).toBe(
+      'single',
+    )
+    expect(detectRole('https://www.colab.research.google.com/drive/x')).toBeNull()
+  })
+
   it('其他页面 / 非 https / 伪域名一律 null', () => {
     expect(detectRole('https://www.kaggle.com/datasets/x')).toBeNull()
     expect(detectRole('http://www.kaggle.com/code/x')).toBeNull()

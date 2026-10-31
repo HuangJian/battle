@@ -25,7 +25,7 @@ export interface FrameAdapter {
   runCell(cell: CellRef): Promise<CmdResult>
   clearCellOutput(cell: CellRef): Promise<CmdResult>
   toggleCell(cell: CellRef, part: 'input' | 'output'): Promise<CmdResult>
-  /** 全部折叠：代码 / markdown 每段都保留顶部两行（原生折叠会整段藏掉，先还原）。 */
+  /** 全部折叠：代码 / markdown 每段都保留顶部四行（原生折叠会整段藏掉，先还原）。 */
   setFoldedAll(collapsed: boolean): Promise<CmdResult>
   /** 单个 cell 折叠：`off` 在全局折叠时覆盖成展开。 */
   setFolded(cell: CellRef, collapsed: boolean): Promise<CmdResult>

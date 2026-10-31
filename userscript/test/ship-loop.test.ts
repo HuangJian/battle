@@ -75,6 +75,106 @@ describe('ship-loop：日志会话键用 notebook 身份', () => {
     expect(l.session).toBe('kaggle-huang-rollout-edit-geooms')
     l.stop()
   })
+
+  it('site=colab：会话键从 /drive/<fileId> 解析，不套 Kaggle 的 owner/slug 规则', () => {
+    const l = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://colab.research.google.com/drive/1AbC-dEf',
+      referrer: '',
+      config: DEFAULT_CONFIG,
+      runtime: {} as unknown as Runtime,
+      adapter: new StubFrameAdapter('colab'),
+      site: 'colab',
+      pageTag: 'ab12cd',
+    })
+    expect(l.session).toBe('colab-1abc-def-ab12cd')
+    l.stop()
+  })
+})
+
+describe('ship-loop：saveAndClear 的失败归因', () => {
+  /** 输出按脚本逐次取（用完停在上一个值）：模拟「发送窗口里输出还在长」。 */
+  function growingAdapter(script: string[]): { adapter: FrameAdapter; clears: () => number } {
+    let i = 0
+    let clears = 0
+    const next = (): string => {
+      const v = script[Math.min(i, script.length - 1)] ?? ''
+      i += 1
+      return v
+    }
+    return {
+      adapter: {
+        site: 'kaggle',
+        ready: true,
+        cells: () => [{ id: 'c1', index: 0, kind: 'code' as const }],
+        outputText: next,
+        sourceText: () => '',
+        activeCell: () => null,
+        ensureRendered: async () => null,
+        select: async () => ({ ok: true }),
+        runCell: async () => ({ ok: true }),
+        clearCellOutput: async () => ({ ok: true }),
+        toggleCell: async () => ({ ok: true }),
+        setFoldedAll: async () => ({ ok: true }),
+        setFolded: async () => ({ ok: true }),
+        command: async () => {
+          clears += 1
+          return { ok: true }
+        },
+        scroll: () => ({ ok: true }),
+        scrollOuter: () => ({ ok: true }),
+        flash: () => {},
+        focusConfig: async () => ({ ok: true }),
+        setScheduledMarks: () => ({ ok: true }),
+      },
+      clears: () => clears,
+    }
+  }
+
+  function loopWith(adapter: FrameAdapter, runtime: Runtime) {
+    return createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://www.kaggle.com/code/a/b/edit',
+      config: DEFAULT_CONFIG,
+      runtime,
+      adapter,
+      now: () => 1_000_000,
+      writer: 'w1',
+    })
+  }
+
+  it('另一个标签持租约 ⇒ 报 writer 冲突（本标签被动），不冒充 offset 冲突、绝不清空', async () => {
+    const { adapter, clears } = growingAdapter(['a'])
+    const runtime = {
+      gmRequest: async () => ({
+        status: 409,
+        statusText: 'Conflict',
+        responseText: JSON.stringify({
+          ok: false,
+          reason: 'writer-conflict',
+          leaseRemainingMs: 1000,
+        }),
+        responseHeaders: '',
+      }),
+    } as unknown as Runtime
+    const l = loopWith(adapter, runtime)
+    const r = await l.saveAndClear()
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain('writer 冲突')
+    expect(clears()).toBe(0)
+    l.stop()
+  })
+
+  it('发送窗口里输出继续长 ⇒ 下一轮接着发，不报 offset 冲突', async () => {
+    // 调用序（每轮 runOnce 一次 + 判游标一次）：round2 读到 'a'（无新字节）后
+    // 判游标时已是 'ab' —— 旧逻辑在这里直接失败，正解是下一轮把 'b' 发出去。
+    const { adapter, clears } = growingAdapter(['a', 'a', 'a', 'ab'])
+    const l = loopWith(adapter, okRuntime)
+    const r = await l.saveAndClear()
+    expect(r).toEqual({ ok: true, bytes: 2 })
+    expect(clears()).toBe(1)
+    l.stop()
+  })
 })
 
 describe('ship-loop：周期性自动保存并清空', () => {

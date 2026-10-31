@@ -17,12 +17,14 @@ describe('userscript metadata', () => {
     expect(BLOCK.trimEnd().endsWith('// ==/UserScript==')).toBe(true)
   })
 
-  it('只匹配 Kaggle 外层 + 笔记本帧（v1 不给 Colab/AI Studio 加 @match）', () => {
+  it('匹配 Kaggle 外层/帧 + Colab；AI Studio 未接 ⇒ 不加 @match', () => {
     expect(META.matches).toEqual([
       'https://www.kaggle.com/code/*',
       'https://*.jupyter-proxy.kaggle.net/*',
+      'https://colab.research.google.com/*',
     ])
-    expect(META.matches.some((m) => /colab|aistudio|google/i.test(m))).toBe(false)
+    // Colab 已有实测夹具；AI Studio 结构仍未采样，加了就是「看起来支持」的灰面板
+    expect(META.matches.some((m) => /aistudio/i.test(m))).toBe(false)
   })
 
   it('GM 权限覆盖回环请求、存储、菜单与剪贴板', () => {
