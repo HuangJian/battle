@@ -159,29 +159,79 @@ export class AistudioSessionAdapter implements SessionAdapter {
   constructor(
     private readonly doc: Document,
     private readonly href: string,
+    /** 关内核后等 Running Sessions 清空的上限（测试注入小值）。 */
+    private readonly stopTimeoutMs = 8000,
   ) {}
 
   sessionId(): string {
     return parseAistudioSession(this.href)
   }
 
-  /** 工具栏的执行指示器：`data-status="busy" | "idle"`；认不出的状态一律 unknown（不猜）。 */
+  /**
+   * 工具栏的执行指示器：`data-status="busy" | "idle"`；认不出的状态一律 unknown（不猜）。
+   * 「内核段在、但一个内核都没有」⇒ stopped（AI Studio 停会话 = 关内核，见 stopSession）。
+   */
   sessionState(): 'running' | 'idle' | 'stopped' | 'unknown' {
     const ind = this.doc.querySelector('.jp-Notebook-ExecutionIndicator')
     const status = (ind?.getAttribute('data-status') ?? '').toLowerCase()
     if (status === 'busy' || status === 'running') return 'running'
+    const section = this.kernelSection()
+    if (section && this.kernelItems(section).length === 0) return 'stopped'
     if (status === 'idle') return 'idle'
     return 'unknown'
   }
 
+  /** Running Sessions 侧栏的「内核」段（存档实测：`h2` 文案是「内核」）。 */
+  private kernelSection(): Element | null {
+    for (const section of this.doc.querySelectorAll('.jp-RunningSessions-section')) {
+      if (/内核|kernels/i.test(section.querySelector('h2')?.textContent ?? '')) return section
+    }
+    return null
+  }
+
+  private kernelItems(section: Element): HTMLElement[] {
+    return [...section.querySelectorAll<HTMLElement>('li.jp-RunningSessions-item')]
+  }
+
   /**
-   * 未接：AI Studio 的「停止运行」在外层工作台（`/vscode/`），notebook 帧里没有这个按钮；
-   * 存档里也没出现对应命令 ⇒ 带原因失败，绝不点一个「看起来像」的东西。
+   * 停会话 = **关内核**：AI Studio 的机器随内核释放（省配额）。
+   *
+   * 入口在 Running Sessions 侧栏的「内核」段（存档实测：每行 `button.jp-RunningSessions-itemShutdown`，
+   * title「关闭」）。点完之后**必须看到内核条目全部消失**才算成功；还在就带原因失败（可能有确认框挡住）。
+   * 侧栏没渲染出来 ⇒ fail closed（不点「看起来像」的东西）。
    */
   async stopSession(): Promise<CmdResult> {
+    const section = this.kernelSection()
+    if (!section) {
+      return {
+        ok: false,
+        reason: '找不到 Running Sessions 的「内核」段（先打开该侧栏，或 AI Studio 结构变了）',
+      }
+    }
+    const items = this.kernelItems(section)
+    if (items.length === 0) return { ok: true, detail: 'already-stopped' }
+    for (const item of items) {
+      const btn = item.querySelector<HTMLElement>('button.jp-RunningSessions-itemShutdown')
+      if (!btn) return { ok: false, reason: '内核条目里找不到「关闭」按钮（AI Studio 结构变了）' }
+      btn.click()
+    }
+    const deadline = Date.now() + this.stopTimeoutMs
+    while (Date.now() <= deadline) {
+      if (this.kernelItems(section).length === 0) {
+        return {
+          ok: true,
+          detail: `已关闭全部 ${items.length} 个内核（Running Sessions 已无内核）`,
+        }
+      }
+      await this.sleep(100)
+    }
     return {
       ok: false,
-      reason: 'AI Studio 的停止入口在外层工作台（notebook 帧内未实测）—— 请在外层页面手动停止',
+      reason: '点了内核「关闭」但内核仍在（可能有确认框挡住，或按钮没点中）',
     }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 }

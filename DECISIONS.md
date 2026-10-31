@@ -10348,3 +10348,145 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `selectors.ts::singleSite` · `app/boot.ts::startSingle`（按站点选适配器/会话/writer）·
   `app/ship-loop.ts`（AI Studio 会话键）；用例 `userscript/test/aistudio.test.ts` +
   `{fixtures,selectors,ship-loop,meta}.test.ts` 的 AI Studio 分支。
+## §2026-10-31-notebook-colab-stop（2026-10-31，Colab「停会话」改走中断：只断开不删文件没有入口）
+
+- **背景**：§2026-10-31-notebook-colab-single 把 Colab 的 `stopSession` 定为 fail closed（Runtime 菜单里
+  唯一入口是「Disconnect and delete runtime」，会连 `/content` 里的运行时文件一起删）。实机报障：定时
+  「停会话」在 Colab 上直接失败，等于定时器在 Colab 上不可用。
+- **决定**：`stopSession` = **中断当前执行**（`notebook:interrupt-kernel`；菜单项按实测属性
+  `md-menu-item[command="interrupt"]` 定位）。仍**绝不**点「Disconnect and delete runtime」；成功时
+  `detail` 写明「Colab 断开必删运行时文件，未执行」，执行历史/面板看得到实际做了什么。没接线时仍带原因失败。
+- **否决的备选**：① 静默点「Disconnect and delete runtime」（定时任务删用户运行时文件 = 不可撤销的破坏，
+  哪怕用户当时不在场）；② 继续 fail closed（用户真正要的是「别再烧机器」，中断已满足，且失败等于功能缺席）；
+  ③ 加「允许删运行时」的配置开关（先看真实使用；真要断开时人工点一次更安全，不值得多一个危险开关）。
+- **落地**：`sites/colab.ts::ColabSessionAdapter`（构造参数新增运行侧适配器）· `app/boot.ts::startSingle`
+  接线；用例 `userscript/test/colab.test.ts::Colab 会话`（中断真被点到 / 未接线必须失败）。
+## §2026-10-31-notebook-colab-powerwash（2026-10-31，Colab「停会话」= 关运行时；推翻同日的「只中断」口径）
+
+- **背景**：§2026-10-31-notebook-colab-stop 把 Colab 的 `stopSession` 映射成「中断执行」，理由是
+  「Disconnect and delete runtime」会删 `/content` 运行时文件。用户明确否决：**需求就是关运行时、停机省配额**，
+  中断既不释放机器也不省额度，等于功能没做。
+- **决定**：`stopSession` = 菜单栏 **Runtime →「Disconnect and delete runtime」**
+  （实测 `command="powerwash-current-vm"`，在 `#runtime-menu` 里；工具栏「更多操作」没有这一项）。
+  点到之后**必须看到连接条变成未连接**（`#connect` 的 `tooltiptext`/文案命中 stopped）才算成功，
+  否则带原因失败（可能有确认弹窗挡住 / 菜单没点中）。已断开的页签直接 `already-stopped`，不重复点。
+  会连 `/content` 一起删：这是用户点名的语义，面板的定时任务在执行历史里记一条，事后可查。
+- **否决的备选**：继续「只中断」（用户已否决：不省配额）；加一个「允许删运行时」的开关（需求是默认就这样，
+  多一个默认关闭的开关 = 又把功能藏起来）；改用 Colab 的 HTTP API 释放运行时（未实测，不猜）。
+- **落地**：`sites/colab.ts::ColabSessionAdapter.stopSession`（`#runtime-menu-button` → powerwash 项 →
+  轮询 `sessionState()`；`stopTimeoutMs` 可注入）· 夹具新增菜单栏 `#top-menubar` / `#runtime-menu` 两棵子树；
+  用例 `userscript/test/colab.test.ts::Colab 会话`（点开菜单 + 点中项 + 连接条翻转才算成功；没断必须失败）。
+## §2026-10-31-notebook-stop-release（2026-10-31，停会话＝释放运行时：Kaggle 真实停止 / AI Studio 关内核 / 历史写明删了运行时文件）
+
+- **背景**：用户要求「Kaggle / AI Studio 上也确认停会话真能释放运行时」，并给关运行时的执行历史加明确文案。
+  Colab 已是关运行时（§2026-10-31-notebook-colab-powerwash）；AI Studio 此前是 fail closed（拒绝执行）。
+- **决定**：① **Kaggle 不变**——`[aria-label="Stop session"]` → 处理确认框 → 轮询到 `Stopped` 才算成功
+  （Kaggle 的 Stop session 结束会话、释放机器；既有用例已覆盖「状态不变必须失败」）。
+  ② **AI Studio 改为关内核**——Running Sessions 侧栏「内核」段逐条点 `button.jp-RunningSessions-itemShutdown`
+  （存档实测 `li.jp-RunningSessions-item` + title「关闭」）；点完**必须看到内核条目全部消失**才算 ok，
+  超时带原因失败；侧栏没渲染 ⇒ fail closed（不点「看起来像」的东西）。`sessionState()` 把「内核段在但空」判成 stopped。
+  ③ **执行历史**：新增 `scheduler.historyText()`，停会话成功且 detail 提到运行时文件时写成
+  「停会话 · 关运行时（运行时文件已删除）」，关内核写成「停会话 · 关闭内核」；`recordHistory` 开始接收 detail。
+- **证据等级**：AI Studio 的「机器随内核释放」推断自 JupyterLab 语义（内核结束即 session 结束），DOM 侧只能验证
+  内核从 Running Sessions 消失；因此不点命令面板的 `kernelmenu:shutdownAll`（弹确认框、且是全局操作），也不在文案里
+  承诺文件删除（AI Studio 不删文件）。
+- **落地**：`sites/aistudio.ts`（constructor 加 `stopTimeoutMs`、`kernelSection`/`kernelItems`/`stopSession`）·
+  `app/scheduler.ts::historyText` · `app/boot.ts`（两处 `recordHistory` + host `stopNow` 透传 detail）·
+  夹具 `test/fixtures/aistudio.html` 追加 Running Sessions 内核段 · 用例 `test/aistudio.test.ts`（关内核 /
+  already-stopped / 缺段失败）+ `test/scheduler.test.ts::执行历史文案`。
+## §2026-10-31-notebook-colab-menu-press（2026-10-31，Colab 关运行时实机失败：菜单靠 mousedown 展开，旧实现只派发 click）
+
+- **背景**：用户实机报「点了 Disconnect and delete runtime，但连接条仍显示已连接」。复盘：`#runtime-menu-button`
+  是 Closure 的 `goog-menu-button`，靠 **mousedown** 展开；旧实现 `clickDeep` 只 `.click()`，菜单没开，
+  `[command="powerwash-current-vm"]` 是隐藏项，点了没有任何动作 —— 于是只能等到超时，报出「可能有确认弹窗挡住」
+  （把「菜单没点开」误诊成「被挡住」）。
+- **决定**：停会话改用真实三连 `clickAt`（mousedown/mouseup/click）。点完先等菜单**真的展开**
+  （菜单项不再隐藏，或按钮 `aria-expanded="true"`），2s 内没开就再按一次然后**快速失败**（绝不点隐藏项）；
+  点中后处理危险动作确认框（只点明确确认键，取消键绝不点）；失败原因带上连接条当时的文案，下次一眼可判。
+- **否决的备选**：① 把 `clickDeep` 全局换成三连（CFG 已经因为指针事件被 Monaco 当成选区起点而改回只滚动，用户明确去掉选中）；
+  ② 用键盘导航菜单（方向键+回车；存档没实测焦点路径）；③ 加长超时/多点几次碰运气（掩盖「没点中」，用户分不清成功还是卡住）。
+- **落地**：`sites/colab.ts`（新增 `isHidden` / `connectText` / `waitUntil` / `confirmDangerDialog`；`stopSession` 每次现查菜单项、
+  确认展开后才点）· 用例 `test/colab.test.ts`（mousedown 才展开 ⇒ 必须点中；菜单打不开 ⇒ 快速失败且隐藏项点击次数为 0；
+  点中但连接没断 ⇒ 必须带原因失败）。
+## §2026-10-31-notebook-colab-hover-slot（2026-10-31，补充 §…-colab-menu-press：菜单项要先 hover 激活；确认键是 slot=primaryAction）
+
+- **背景**：装上三连点击后实机复测：Runtime 菜单**打开了**，但「Disconnect and delete runtime」没被触发，菜单一直留着。
+  用户同时给出确认框结构：Material `mdc-dialog`，确认键在 **`slot="primaryAction"`**（取消键是 `slot="secondaryAction"`）。
+- **根因**：① Closure 的 `goog.ui.Menu` 靠 `mouseover`/`mousemove` 把菜单项设成 **activeItem**，只有 active 时
+  `mouseup`/`click` 才派发动作 —— 只发 mousedown/mouseup/click 等于「按在一个非活动项上」，动作不触发、菜单也不关；
+  ② 旧确认框逻辑只找 `button`/`[role="button"]`，Material 的 `md-text-button`（带 slot 属性）不是这两种，永远找不到。
+- **决定**：菜单项改用 `clickMenuEntry`（`mouseover → mousemove → mousedown → mouseup → click`，点最里层）；
+  确认框改为「先找 `[slot="primaryAction"]`，找不到再按文案兜底」，只在标题匹配 disconnect/delete runtime 的弹框里点，
+  取消键（secondaryAction / Cancel）绝不点；弹框最多等 3s（有动画），600ms 没出现就认为这次不弹。
+- **否决的备选**：① 只重试点击菜单项（没有 active 依旧无效，且会反复开合菜单）；② 直接按坐标点（无头环境没有布局信息，无法测试）；
+  ③ 跳过确认框只轮询状态（弹框会一直挡住，状态也永远不会变）。
+- **落地**：`sites/colab.ts`（`clickMenuEntry`；`confirmDangerDialog` 重写）· 用例 `test/colab.test.ts`
+  （mousedown 开菜单 + hover 才激活 + 点主按钮才断开；取消键点击次数必须为 0；缺任一步都必须红）。
+## §2026-10-31-notebook-colab-dialog-scope（2026-10-31，确认键改为「限定当前弹框 + 点后验证关闭 + 候选重试」）
+
+- **背景**：实机复测：弹框出现了，但 Yes（`slot="primaryAction"`）没点中，弹框一直留着。旧实现是在**整个文档**里找
+  第一个可见的 `[slot="primaryAction"]` 并直接点 —— Colab 的对话框组件会在文档里预渲染隐藏副本，点到的是看不见的那个；
+  点完也没有任何验证，于是永远不知道点错了。
+- **根因**：① 候选没**限定在当前打开的那个弹框**（按文档顺序取第一个）；② 可点性用 `isHidden` 判定，它把 `aria-hidden`
+  也算隐藏 —— 弹框打开时 Colab 会把背后内容标成 aria-hidden，但确认键本身可见；③ 点完没验证弹框是否真的关闭。
+- **决定**：① `openDialog()` 只认「打开着的断运行时弹框」（role=alertdialog / `.mdc-dialog--open` / md-dialog，
+  标题或 aria-label 匹配，`displayHidden` 判可见，`open === false` 算关闭）；② 候选按「当前弹框宿主 → 整个文档的 slot →
+  文案兜底」排序，`displayHidden` 不吸收 aria-hidden，隐藏副本一律跳过；③ 点完等「弹框关闭或已断开」，没关就换下一个候选，
+  最多 5s；④ `clickAt` 补 `pointerdown/pointerup`（Material Web 的按钮只派发 click 不一定认）；⑤ 失败原因区分
+  「确认框还开着（Yes 没点中）」与「连接条仍显示已连接」。
+- **否决的备选**：① 继续全文档取第一个但加长超时（点错元素永远不会生效）；② 只按文案找 Yes（i18n 会变，且页面上别处也有 Yes）；
+  ③ 跳过确认框直接轮询（弹框会一直挡住，状态永远不变）。
+- **落地**：`sites/colab.ts`（`displayHidden` / `openDialog` / `primaryCandidates` / `confirmDangerDialog` / `clickAt` 补 pointer）·
+  用例 `test/colab.test.ts`（文档里更早的位置放一个隐藏的 primaryAction 诱饵，验证它点击次数为 0；确认键是
+  `md-text-button` + shadow 里的真 `<button>`，验证点在真按钮上）。
+## §2026-10-31-notebook-colab-dialog-candidates（2026-10-31，确认键候选扩到「任意叶子文案」+ 命中测试兜底 + 失败带诊断）
+
+- **背景**：实机仍报「确认框还开着（Yes 没点中），连接条仍是 Connecting」。说明 `slot="primaryAction"` 这条路在真机上没命中
+  （或命中了一个不可用的副本），而失败原因里只有一句结论，看不出「候选到底找没找到」。
+- **决定**：① 候选扩三层：当前弹框宿主 / 文档里的 `[slot="primaryAction"]` → 已知按钮标签（含 md-filled-tonal-button /
+  md-outlined-button / mwc-button / paper-button / colab-button）→ **任意可见叶子元素的短文案**（Yes/OK/确定/删除/断开…，
+  取消永不入选；只认叶子，容器的 textContent 也是 Yes 但点它不会冒泡到子元素）；② 点候选时同时点「阴影内真按钮」和宿主
+  （自定义元素可能把处理挂在宿主上）；③ 真实浏览器里用 `elementFromPoint(弹框右下角)` 做命中测试兜底（穿过 closed shadow）；
+  ④ 失败原因带「候选 N 个 + 看得见的按钮标签」，下一次直接能判是没找到还是点了没反应。
+- **否决的备选**：① 继续加超时（点错元素永远不会生效）；② 用 Escape 关弹框（等于取消，运行时不会删）；
+  ③ 按屏幕坐标盲点（无头环境无法验证，且多屏/缩放会偏）。
+- **落地**：`sites/colab.ts`（`primaryCandidates` 三层候选、`actionLabels`、`hitTestPrimary`、点宿主兜底、失败原因带诊断）·
+  用例 `test/colab.test.ts`（确认键是不带 slot 的自定义元素 `x-yes` ⇒ 按文案兜底也能点中）。
+## §2026-10-31-notebook-colab-composed-click（2026-10-31，根因：合成事件缺 `composed`，点击穿不出影子边界）
+
+- **背景**：用户保存了弹框打开时的真实页面（`tmp/colab-delete-runtime.mhtml`，不入库）。实测结构：
+  `<mwc-dialog class="yes-no-dialog" open>` 的 shadow 里是 `role="alertdialog"`，确认键是 light DOM 的
+  `<md-text-button slot="primaryAction" dialogaction="ok" dialoginitialfocus="">Yes`，真正的 `<button id="button">`
+  在它的 **open shadow root** 里；MWC 把动作监听挂在 **宿主/弹框** 上。存档里 `#connect` 是 `disabled`、`tooltiptext=""`。
+- **根因**：`clickAt` 用 `new MouseEvent(type, { bubbles, cancelable, button, clientX, clientY })` 构造事件，
+  **没有 `composed: true`** ⇒ 在 `md-text-button` 影子根里派发的 click 无法穿越影子边界，冒泡不到宿主和 `mwc-dialog`，
+  动作永远不触发，弹框一直开着。菜单项能点中是因为它们在 light DOM（不跨影子边界）。
+- **决定**：`clickAt` 与 `clickMenuEntry` 的事件初始化一律加 `composed: true`；同时删掉上一轮「点完内层再点宿主」的兜底
+  （composed 修好后内层点击会以宿主为 target 冒泡上去，再点一次反而会重复触发）。
+- **否决的备选**：① 继续两边都 `.click()`（掩盖 composed 问题，且可能双触发确认）；② 只点宿主不点内层
+  （Shadow DOM 里的真按钮收不到，MWC/Material 的按下态也不对）；③ 用 `elementFromPoint` 走命中测试
+  （无辜，但没解释为什么内层点击失效；保留为兜底候选即可）。
+- **落地**：`sites/colab.ts::clickAt` / `clickMenuEntry`（`composed: true`）· 用例 `test/colab.test.ts`
+  把确认键监听移到 **`md-text-button` 宿主** 上（真实 MWC 的挂法）；旧实现（缺 composed）连接收都收不到，已先跑红。
+## §2026-10-31-notebook-colab-dialog-fixture（2026-10-31，夹具换成存档里的真实 mwc-dialog 结构）
+
+- **背景**：确认框用例一直是手写模拟（`md-dialog` + `<button slot>`），与真机结构（`mwc-dialog` +
+  `md-text-button`，真按钮在 open shadow root）不一致。正因为结构漂移，前几轮「缺 composed」「找不到候选」这类 bug
+  在测试里全绿、实机全红。
+- **决定**：从 `tmp/colab-delete-runtime.mhtml`（不入库）抽 `<mwc-dialog class="yes-no-dialog">` 整棵子树：
+  去注释、压标签间空白、`open=""` 换成 `hidden=""`（测试里 `removeAttribute('hidden')` 打开）。夹具只增约 2KB；
+  生成脚本 `tmp/add_colab_dialog.py`（带结构断言，重复执行会拒绝）。
+- **否决的备选**：① 继续手写模拟（结构漂移正是这次 bug 的来源）；② 把整页存档入库（页面里有账号与私有内容）。
+- **落地**：`userscript/test/fixtures/colab.html` · `test/colab.test.ts` 主用例改为直接打开夹具里的真实弹框，
+  断言 `md-text-button[slot="primaryAction"][dialogaction="ok"]` 与影子里的 `button#button`；
+  手写模拟只保留在「确认键是不带 slot 的自定义元素 ⇒ 按文案兜底」那条用例（它测的本来就不是真结构）。
+## §2026-10-31-notebook-colab-connect-wording（2026-10-31，Colab 断开文案补「Click to connect / Reconnect」）
+
+- **背景**：实机停会话**成功**（运行时已删），面板却报失败：连接条文案是 `Click to connect Reconnect`，
+  不在 stopped 正则（只有 `Connect to a runtime`）里，于是轮询超时、把成功判成失败。
+- **决定**：stopped 判据加入 `click to connect` 与 `\breconnect\b`。用词边界是故意的：`Reconnecting` 不能算断开
+  （机器可能正在重新拉起，算了就是谎报省配额）；资源文案（backend / RAM / Disk）仍判 running，认不出的继续 unknown。
+- **否决的备选**：① 只要文案含 `connect` 就算断开（`Connected` 也会中，会把运行中判成已停）；② 忽略文案、只看按钮
+  `disabled`（弹框打开时也是 disabled，实测存档里就如此）；③ 只加 `Reconnect` 子串（会连带 `Reconnecting` 误判）。
+- **落地**：`sites/colab.ts::sessionState` · 用例 `test/colab.test.ts` 新增「`Click to connect Reconnect` ⇒ stopped
+  且 stopSession 直接 already-stopped」；旧实现先跑红（unknown）再转绿。

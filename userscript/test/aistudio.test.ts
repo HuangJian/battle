@@ -275,10 +275,38 @@ describe('AI Studio 会话', () => {
     expect(s.sessionState()).toBe('unknown')
   })
 
-  it('stopSession 未接 ⇒ 必须带原因失败（不点看起来像的东西）', async () => {
+  it('停会话 = 关内核：点 Running Sessions 的「关闭」，内核条目消失才算成功', async () => {
     const w = dom()
-    const r = await new AistudioSessionAdapter(docOf(w), HREF).stopSession()
+    const s = new AistudioSessionAdapter(docOf(w), HREF, 400)
+    expect(s.sessionState()).toBe('idle')
+    const item = docOf(w).querySelector('li.jp-RunningSessions-item')!
+    const btn = item.querySelector('button.jp-RunningSessions-itemShutdown') as HTMLElement
+    let clicked = 0
+    btn.addEventListener('click', () => {
+      clicked += 1
+      item.remove()
+    })
+
+    const r = await s.stopSession()
+    expect(r).toMatchObject({ ok: true })
+    if (r.ok) expect(r.detail).toContain('已关闭全部 1 个内核')
+    expect(clicked).toBe(1)
+    expect(s.sessionState()).toBe('stopped')
+  })
+
+  it('内核已经关了 ⇒ already-stopped，不点按钮', async () => {
+    const w = dom()
+    docOf(w).querySelector('li.jp-RunningSessions-item')!.remove()
+    const s = new AistudioSessionAdapter(docOf(w), HREF, 100)
+    expect(s.sessionState()).toBe('stopped')
+    expect(await s.stopSession()).toMatchObject({ ok: true, detail: 'already-stopped' })
+  })
+
+  it('找不到 Running Sessions 的内核段 ⇒ 带原因失败（不假装停机）', async () => {
+    const w = dom()
+    docOf(w).querySelector('.jp-RunningSessions')!.remove()
+    const r = await new AistudioSessionAdapter(docOf(w), HREF, 100).stopSession()
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.reason).toContain('外层工作台')
+    if (!r.ok) expect(r.reason).toContain('内核')
   })
 })

@@ -336,13 +336,139 @@ describe('Colab 适配器：结构来自真实页面存档', () => {
 })
 
 describe('Colab 会话', () => {
-  it('连接条上有后端与资源占用 ⇒ running；stopSession 未接 ⇒ 必须带原因失败', async () => {
+  it('停会话 = 关运行时：mousedown 开菜单 → hover 激活项 → 点中 → 确认框主按钮', async () => {
     const w = dom()
-    const s = new ColabSessionAdapter(docOf(w), HREF)
+    const s = new ColabSessionAdapter(docOf(w), HREF, 800)
     expect(s.sessionId()).toBe('colab-1vudx_hyhvvzc2kqxraosgspvzwcuxd7n')
     expect(s.sessionState()).toBe('running')
+
+    const doc = docOf(w)
+    const btn = doc.querySelector('#runtime-menu-button')!
+    const menu = doc.getElementById('runtime-menu')!
+    const item = doc.querySelector('[command="powerwash-current-vm"]')!
+    // 真实 Colab：菜单初始隐藏，goog-menu-button 靠 mousedown 展开（只派发 click 打不开）
+    menu.setAttribute('aria-hidden', 'true')
+    let opened = 0
+    let hovered = 0
+    let clicked = 0
+    let cancelled = 0
+    let primary = 0
+    let decoyClicks = 0
+    // 诱饵：文档更早的位置也有一个看不见的 primaryAction（Colab 会预渲染隐藏副本）
+    const decoy = doc.createElement('button')
+    decoy.setAttribute('data-decoy', '1')
+    decoy.setAttribute('slot', 'primaryAction')
+    decoy.style.display = 'none'
+    decoy.textContent = 'Yes'
+    decoy.addEventListener('click', () => (decoyClicks += 1))
+    doc.body.prepend(decoy)
+    // 真实弹框（存档实抽）：mwc-dialog 宿主 + light DOM 的 md-text-button[slot=primaryAction]
+    const dialog = doc.querySelector('mwc-dialog.yes-no-dialog') as HTMLElement
+    expect(dialog).not.toBeNull()
+    expect(dialog.hasAttribute('hidden')).toBe(true)
+    const primaryHost = dialog.querySelector('[slot="primaryAction"]') as HTMLElement
+    const secondary = dialog.querySelector('[slot="secondaryAction"]') as HTMLElement
+    expect(primaryHost.tagName.toLowerCase()).toBe('md-text-button')
+    expect(primaryHost.getAttribute('dialogaction')).toBe('ok')
+    // 真正的 <button> 在 md-text-button 的 shadow root 里
+    expect(primaryHost.shadowRoot?.querySelector('button#button')).not.toBeNull()
+    secondary.addEventListener('click', () => (cancelled += 1))
+    // MWC 把动作监听挂在宿主/弹框上：影子里的点击必须 composed 才冒得出来
+    primaryHost.addEventListener('click', () => {
+      primary += 1
+      deepQuery(doc, '#connect')!.setAttribute('tooltiptext', 'Connect to a runtime')
+      dialog.remove()
+    })
+    btn.addEventListener('mousedown', () => {
+      opened += 1
+      menu.setAttribute('aria-hidden', 'false')
+    })
+    // Closure：mouseover/mousemove 才把项变成 active；没有 active 时 click 不触发动作
+    item.addEventListener('mouseover', () => {
+      hovered += 1
+      item.setAttribute('data-active', '1')
+    })
+    item.addEventListener('click', () => {
+      if (!item.hasAttribute('data-active')) return
+      clicked += 1
+      menu.setAttribute('aria-hidden', 'true')
+      // 打开夹具里的真实弹框（结构来自存档，不再手写模拟）
+      dialog.removeAttribute('hidden')
+    })
+
     const r = await s.stopSession()
-    expect(r).toMatchObject({ ok: false, reason: expect.stringContaining('Colab') })
+    expect(r).toMatchObject({ ok: true })
+    if (r.ok) expect(r.detail).toContain('已断开')
+    expect(opened).toBe(1)
+    expect(hovered).toBeGreaterThanOrEqual(1)
+    expect(clicked).toBe(1)
+    expect(primary).toBe(1)
+    expect(cancelled).toBe(0)
+    expect(decoyClicks).toBe(0)
+    expect(dialog.isConnected).toBe(false)
+  })
+
+  it('菜单打不开 ⇒ 不点隐藏项，带原因快速失败（不烧 8s 假装点过）', async () => {
+    const w = dom()
+    docOf(w).getElementById('runtime-menu')!.setAttribute('aria-hidden', 'true')
+    const item = docOf(w).querySelector('[command="powerwash-current-vm"]')!
+    let clicked = 0
+    item.addEventListener('click', () => (clicked += 1))
+
+    const r = await new ColabSessionAdapter(docOf(w), HREF, 150).stopSession()
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain('没有展开')
+    expect(clicked).toBe(0)
+  })
+
+  it('确认键不在 slot 上、也不是 button（自定义元素）⇒ 按文案兜底也能点中', async () => {
+    const w = dom()
+    const doc = docOf(w)
+    const s = new ColabSessionAdapter(doc, HREF, 1200)
+    const item = doc.querySelector('[command="powerwash-current-vm"]')!
+    let primary = 0
+    item.addEventListener('click', () => {
+      const dialog = doc.createElement('md-dialog')
+      dialog.setAttribute('role', 'alertdialog')
+      dialog.innerHTML =
+        '<div class="mdc-dialog__surface"><h2 class="mdc-dialog__title">Disconnect and delete runtime</h2><footer></footer></div>'
+      const btn = doc.createElement('x-yes')
+      btn.textContent = 'Yes'
+      btn.addEventListener('click', () => {
+        primary += 1
+        deepQuery(doc, '#connect')!.setAttribute('tooltiptext', 'Connect to a runtime')
+        dialog.remove()
+      })
+      dialog.querySelector('footer')!.append(btn)
+      doc.body.append(dialog)
+    })
+
+    const r = await s.stopSession()
+    expect(r).toMatchObject({ ok: true })
+    expect(primary).toBe(1)
+  })
+
+  it('点了菜单项但连接没断 ⇒ 带原因失败（不假装停机）', async () => {
+    const w = dom()
+    const r = await new ColabSessionAdapter(docOf(w), HREF, 150).stopSession()
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain('仍显示已连接')
+  })
+
+  it('已经断开 ⇒ already-stopped，不点菜单', async () => {
+    const w = dom()
+    deepQuery(docOf(w), '#connect')!.setAttribute('tooltiptext', 'Connect to a runtime')
+    const s = new ColabSessionAdapter(docOf(w), HREF, 100)
+    expect(s.sessionState()).toBe('stopped')
+    expect(await s.stopSession()).toMatchObject({ ok: true, detail: 'already-stopped' })
+  })
+
+  it('断开后的真实文案是「Click to connect Reconnect」⇒ 必须认 stopped（否则成功也报失败）', async () => {
+    const w = dom()
+    deepQuery(docOf(w), '#connect')!.setAttribute('tooltiptext', 'Click to connect Reconnect')
+    const s = new ColabSessionAdapter(docOf(w), HREF, 100)
+    expect(s.sessionState()).toBe('stopped')
+    expect(await s.stopSession()).toMatchObject({ ok: true, detail: 'already-stopped' })
   })
 })
 

@@ -130,6 +130,22 @@ export function actionLabel(action: ScheduleAction): string {
 }
 
 /**
+ * 执行历史一行的文案：停会话成功时把「到底停掉了什么」写清楚 —— Colab 的关运行时会连同
+ * `/content` 里的运行时文件一起删，事后必须能从历史里认出来（用户要求）。
+ */
+export function historyText(
+  action: ScheduleAction,
+  result: { ok: boolean; detail?: string },
+): string {
+  const base = actionLabel(action)
+  if (action !== 'stop-session' || !result.ok) return base
+  const detail = result.detail ?? ''
+  if (/运行时文件/.test(detail)) return '停会话 · 关运行时（运行时文件已删除）'
+  if (/内核/.test(detail)) return '停会话 · 关闭内核'
+  return base
+}
+
+/**
  * 任务是否属于这一页：运行类绑 notebook；停止/中断绑创建时的会话（与 tick 的 binding 同口径）。
  * 面板的 cell 徽标/顶部倒计时用它过滤，别把另一页签的任务画到本页。
  */

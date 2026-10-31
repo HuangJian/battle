@@ -16,7 +16,7 @@
  * 没实测过的能力一律 fail closed（带原因的 `{ok:false}`），绝不静默假装成功。
  */
 import { normalizeNewlines } from '../../utils'
-import { deepQuery } from '../selectors'
+import { deepQuery, deepQueryAll } from '../selectors'
 import type { CellRef, CmdResult, FrameAdapter, SessionAdapter } from './types'
 
 export const COL_SEL = {
@@ -83,22 +83,90 @@ function clickDeep(el: Element): void {
   ;(innermostClickable(el) as HTMLElement).click()
 }
 
-/** 三重指针事件（与真实点击一致）；构造器取自文档窗口（跨 realm 用全局会 TypeError）。 */
+/**
+ * 元素是否被隐藏（顺着 open shadow root 的宿主链往上走）。只看属性 / 内联样式，
+ * 不读布局 —— 无头环境里 `offsetParent` 永远为 null，拿它判可见性只会误伤。
+ */
+function isHidden(el: Element | null): boolean {
+  for (let node: Element | null = el; node;) {
+    const style = (node as HTMLElement).style
+    if ((node as HTMLElement).hidden) return true
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) return true
+    if (node.getAttribute('aria-hidden') === 'true') return true
+    node = node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null
+  }
+  return false
+}
+
+/**
+ * 只看「显示层面」的隐藏（hidden / 内联样式 / 计算样式）。**不吸收 `aria-hidden`**：
+ * 弹框打开时 Colab 会把它背后的内容标成 aria-hidden，但确认键本身是可见的（用户看到的 Yes）。
+ */
+function displayHidden(el: Element | null): boolean {
+  for (let node: Element | null = el; node;) {
+    if ((node as HTMLElement).hidden) return true
+    const style = (node as HTMLElement).style
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) return true
+    const view = node.ownerDocument?.defaultView
+    if (view && typeof view.getComputedStyle === 'function') {
+      try {
+        const cs = view.getComputedStyle(node as HTMLElement)
+        if (cs.display === 'none' || cs.visibility === 'hidden') return true
+      } catch {
+        // 游离节点 / 无样式环境：忽略，交给属性判断
+      }
+    }
+    const root = node.getRootNode() as ShadowRoot
+    node = node.parentElement ?? ('host' in root ? (root.host as unknown as Element) : null)
+  }
+  return false
+}
+
+/**
+ * Closure 菜单项：先 `mouseover`/`mousemove` 把它变成 active，再按下/抬起。
+ * 只派发 mousedown/mouseup/click 时菜单认不到 activeItem ⇒ 动作不触发，菜单也一直开着。
+ */
+function clickMenuEntry(doc: Document, el: Element): void {
+  const Ctor = (doc.defaultView?.MouseEvent ?? MouseEvent) as typeof MouseEvent
+  const at: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button: 0,
+    clientX: 8,
+    clientY: 8,
+  }
+  const target = innermostClickable(el) as HTMLElement
+  for (const type of ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'] as const)
+    target.dispatchEvent(new Ctor(type, at))
+}
+
+/**
+ * 真实按下序列（pointer + mouse + click）—— Material Web 的按钮只派发 click 不一定认；
+ * 构造器取自文档窗口（跨 realm 用全局会 TypeError）。
+ */
 function clickAt(
   doc: Document,
   el: HTMLElement,
   box?: { left: number; top: number; height: number },
 ): void {
-  const Ctor = (doc.defaultView?.MouseEvent ?? MouseEvent) as typeof MouseEvent
+  const view = doc.defaultView
+  const Mouse = (view?.MouseEvent ?? MouseEvent) as typeof MouseEvent
+  const Pointer = (view?.PointerEvent ?? view?.MouseEvent ?? MouseEvent) as typeof MouseEvent
   const at: MouseEventInit = {
     bubbles: true,
     cancelable: true,
+    // 必须 composed：真实按钮在 md-text-button 的影子根里，事件不穿影子边界就到不了宿主/弹框
+    composed: true,
     button: 0,
     clientX: box ? box.left + 4 : 0,
     clientY: box ? box.top + Math.max(1, box.height / 2) : 0,
   }
-  for (const type of ['mousedown', 'mouseup', 'click'] as const)
-    el.dispatchEvent(new Ctor(type, at))
+  el.dispatchEvent(new Pointer('pointerdown', at))
+  el.dispatchEvent(new Mouse('mousedown', at))
+  el.dispatchEvent(new Pointer('pointerup', at))
+  el.dispatchEvent(new Mouse('mouseup', at))
+  el.dispatchEvent(new Mouse('click', at))
 }
 
 // ────────────────────────── 折叠 / 徽标（脚本私有属性 + 注入样式） ──────────────────────────
@@ -917,30 +985,256 @@ export class ColabSessionAdapter implements SessionAdapter {
   constructor(
     private readonly doc: Document,
     private readonly href: string,
+    /** 断开后等连接条变「未连接」的上限（测试注入小值）。 */
+    private readonly stopTimeoutMs = 8000,
   ) {}
 
   sessionId(): string {
     return parseColabSession(this.href)
   }
 
-  /**
-   * 连接条 `#connect` 的状态文案在 **`tooltiptext` 属性**里（存档实测：元素可见部分只有
-   * 资源占用图形）；文案没实测过的状态一律 unknown，不猜。
-   */
-  sessionState(): 'running' | 'idle' | 'stopped' | 'unknown' {
+  /** 连接条的状态文案：`tooltiptext` 属性优先（存档实测：可见部分只有资源占用图形）。 */
+  private connectText(): string {
     const el = deepQuery(this.doc, '#connect')
-    if (!el) return 'unknown'
-    const text = `${el.getAttribute('tooltiptext') ?? ''} ${el.textContent ?? ''}`
-    if (/not connected|disconnected|connect to runtime|no runtime/i.test(text)) return 'stopped'
+    if (!el) return ''
+    return `${el.getAttribute('tooltiptext') ?? ''} ${el.textContent ?? ''}`
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  /** 文案没实测过的状态一律 unknown，不猜。 */
+  sessionState(): 'running' | 'idle' | 'stopped' | 'unknown' {
+    const text = this.connectText()
+    // 实测的未连接文案有三种：`Connect to a runtime`、`Click to connect`、`Reconnect`
+    // （`\breconnect\b` 不能匹配 `Reconnecting`，否则会把「正在重连」误判成已断开）
+    if (
+      /click to connect|connect to (a )?runtime|\breconnect\b|not connected|disconnected|no runtime/i.test(
+        text,
+      )
+    ) {
+      return 'stopped'
+    }
     if (/backend|ram:|disk:|python \d/i.test(text)) return 'running'
     return 'unknown'
   }
 
+  /**
+   * 停会话 = **关运行时**（省配额）：菜单栏 Runtime →「Disconnect and delete runtime」
+   * （实测 `command="powerwash-current-vm"`，不在工具栏的「更多操作」里）。
+   *
+   * 它会连 `/content` 里的运行时文件一起删 —— 用户明确要求「关运行时、停机省配额」，这是主路径。
+   * 点到之后必须看到连接条变成未连接才算成功；没断就带原因失败（不假装停机）。
+   */
   async stopSession(): Promise<CmdResult> {
+    if (this.sessionState() === 'stopped') return { ok: true, detail: 'already-stopped' }
+    const runtimeBtn = deepQuery(this.doc, '#runtime-menu-button') as HTMLElement | null
+    if (!runtimeBtn) return { ok: false, reason: '找不到菜单栏「Runtime」按钮（Colab 结构变了）' }
+    // 菜单会重渲染：每次现查，别拿旧引用点
+    const findItem = (): HTMLElement | null =>
+      deepQuery(this.doc, '[command="powerwash-current-vm"]') as HTMLElement | null
+    if (!findItem()) {
+      return {
+        ok: false,
+        reason: 'Runtime 菜单里没有「Disconnect and delete runtime」（结构变了）',
+      }
+    }
+
+    // Closure 的 `goog-menu-button` 认 **mousedown**：只派发 `.click()` 打不开菜单（实机就是这条），
+    // 而菜单没开时点隐藏项不会有任何动作 —— 所以必须是真实三连，并等到菜单真的展开。
+    // 展开判据取两者之一：菜单项不再隐藏，或按钮 `aria-expanded="true"`（Closure 自己维护）。
+    const isMenuOpen = (): boolean => {
+      const it = findItem()
+      if (!it) return false
+      if (!isHidden(it)) return true
+      return deepQuery(this.doc, '#runtime-menu-button')?.getAttribute('aria-expanded') === 'true'
+    }
+    clickAt(this.doc, runtimeBtn)
+    const opened = await this.waitUntil(
+      isMenuOpen,
+      Math.min(2000, this.stopTimeoutMs),
+      () => clickAt(this.doc, runtimeBtn), // 600ms 仍关着 ⇒ 再按一次（不全局重试）
+    )
+    if (!opened) {
+      return {
+        ok: false,
+        reason:
+          'Runtime 菜单没有展开（点不开；Colab 的菜单结构变了），未点「Disconnect and delete runtime」',
+      }
+    }
+
+    const item = findItem()
+    if (!item) return { ok: false, reason: 'Runtime 菜单刚展开又没了（Colab 结构在变）' }
+    clickMenuEntry(this.doc, item)
+    await this.confirmDangerDialog()
+    if (await this.waitUntil(() => this.sessionState() === 'stopped', this.stopTimeoutMs)) {
+      return { ok: true, detail: '已断开并释放运行时（Colab 删掉了运行时文件）' }
+    }
+    const seen = this.connectText()
+    const left = this.openDialog()
+    if (left) {
+      // 把候选数与按钮标签带进原因：下一次失败就能直接判断是「没找到」还是「点了没反应」
+      const labels = this.actionLabels(left)
+      return {
+        ok: false,
+        reason: `确认框「Disconnect and delete runtime」还开着（候选 ${this.primaryCandidates(left).length} 个；按钮：${labels.join(' / ') || '没找到'}），连接条仍是「${(seen || '状态为空').slice(0, 40)}」`,
+      }
+    }
     return {
       ok: false,
-      reason:
-        'Colab 未接「停止会话」：Runtime 菜单里只有「Disconnect and delete runtime」（会删运行时文件），需手动操作',
+      reason: `点了「Disconnect and delete runtime」但连接条仍显示已连接：「${(seen || '状态为空').slice(0, 80)}」（菜单没点中或确认框未处理）`,
     }
+  }
+
+  /** 当前打开的「断开并删运行时」确认框（Colab = Material `mdc-dialog`，role 为 alertdialog）。 */
+  private openDialog(): Element | null {
+    const list = deepQueryAll(
+      this.doc,
+      '[role="alertdialog"], .mdc-dialog--open, md-dialog, colab-dialog',
+    )
+    for (const dialog of list) {
+      if (displayHidden(dialog)) continue
+      // md-dialog 的 open 属性已经是 false ⇒ 已经关了
+      if ((dialog as unknown as { open?: unknown }).open === false) continue
+      const label = `${dialog.getAttribute('aria-label') ?? ''} ${textOf(dialog)}`
+      if (/disconnect|delete runtime|断开|删除/i.test(label)) return dialog
+    }
+    return null
+  }
+
+  /**
+   * 确认框里可点的按钮，按可靠度排序：
+   *   ① 当前对话框宿主 / 自身里的 `slot="primaryAction"`（Colab 的确认键就在这个 slot 上）；
+   *   ② 文档里其它位置的同一个 slot（兜底：组件把按钮挂到别处）；
+   *   ③ 按文案认的确认按钮（Yes/OK/Disconnect…，取消键永不入选）。
+   * 隐藏") 的副本一律跳过——它们点不出任何效果。
+   */
+  private primaryCandidates(dialog: Element): Element[] {
+    const hosts: Element[] = [dialog]
+    const root = dialog.getRootNode() as ShadowRoot
+    if ('host' in root && root.host) hosts.push(root.host as Element)
+    const out: Element[] = []
+    const add = (el: Element): void => {
+      if (!out.includes(el) && !displayHidden(el)) out.push(el)
+    }
+    for (const host of hosts) deepQueryAll(host, '[slot="primaryAction"]').forEach(add)
+    deepQueryAll(this.doc, '[slot="primaryAction"]').forEach(add)
+    for (const host of hosts) {
+      for (const btn of deepQueryAll(
+        host,
+        'button, [role="button"], md-text-button, md-filled-button, md-elevated-button, md-filled-tonal-button, md-outlined-button, mwc-button, paper-button, colab-button',
+      )) {
+        const label = `${btn.getAttribute('aria-label') ?? ''} ${textOf(btn)}`.trim()
+        if (/cancel|取消|\bno\b/i.test(label)) continue
+        if (/(yes|ok|disconnect|delete|确定|是|删除|断开)/i.test(label)) add(btn)
+      }
+    }
+    // ③ 文案兜底：不认标签（Colab 可能把动作包成自定义元素），只看可见、短文案
+    for (const host of hosts) {
+      for (const el of deepQueryAll(host, '*')) {
+        if (displayHidden(el)) continue
+        // 只认叶子（容器元素的 textContent 也是「Yes」，但点容器不会冒泡到子元素）
+        if (el.children.length > 0) continue
+        const own = textOf(el).trim()
+        if (own.length === 0 || own.length > 24) continue
+        if (/cancel|取消|\bno\b/i.test(own)) continue
+        if (!/^(yes|ok|确定|是|delete|disconnect|删除|断开)$/i.test(own)) continue
+        add(el)
+        if (out.length >= 8) return out
+      }
+    }
+    return out
+  }
+
+  /** 诊断用：弹框里看得见的按钮标签（失败原因里带出来）。 */
+  private actionLabels(dialog: Element): string[] {
+    const hosts: Element[] = [dialog]
+    const root = dialog.getRootNode() as ShadowRoot
+    if ('host' in root && root.host) hosts.push(root.host as Element)
+    const out: string[] = []
+    for (const host of hosts) {
+      for (const el of deepQueryAll(
+        host,
+        'button, [role="button"], md-text-button, mwc-button, [slot]',
+      )) {
+        if (displayHidden(el)) continue
+        const label = (textOf(el).trim() || el.getAttribute('aria-label') || '∅').slice(0, 12)
+        out.push(`${el.tagName.toLowerCase()}:${label}`)
+        if (out.length >= 6) return out
+      }
+    }
+    return out
+  }
+
+  /**
+   * 终极兜底：按弹框右下角做命中测试（真实浏览器才有布局；无头环境 rect 为 0 ⇒ 返回 null）。
+   * 这样即便按钮在 closed shadow root 里，也能拿到用户真正会点到的那一层元素。
+   */
+  private hitTestPrimary(dialog: Element): Element | null {
+    const fromPoint = this.doc.elementFromPoint?.bind(this.doc)
+    if (typeof fromPoint !== 'function') return null
+    const surface = (deepQueryAll(dialog, '.mdc-dialog__surface')[0] ?? dialog) as HTMLElement
+    const rect = surface.getBoundingClientRect?.()
+    if (!rect || rect.width < 40 || rect.height < 40) return null
+    const hit = fromPoint(rect.right - 24, rect.bottom - 20)
+    if (!hit || hit === surface) return null
+    return hit
+  }
+
+  /**
+   * 危险动作的确认框：点确认键并**验证弹框真的关了**；没关就换下一个候选重试。
+   * 最多 5s（弹框有动画，断开请求也要时间）；取消键永不点。
+   */
+  private async confirmDangerDialog(): Promise<boolean> {
+    const started = Date.now()
+    const deadline = started + 5000
+    let tried = 0
+    while (Date.now() <= deadline) {
+      if (this.sessionState() === 'stopped') return true
+      const dialog = this.openDialog()
+      if (!dialog) {
+        // 前 600ms 一直没弹框 ⇒ 这次动作不需要确认（别烧满 5s）
+        if (tried === 0 && Date.now() - started >= 600) return false
+        await this.sleep(150)
+        continue
+      }
+      const candidates = this.primaryCandidates(dialog)
+      const hit = this.hitTestPrimary(dialog)
+      if (hit && !candidates.includes(hit)) candidates.push(hit)
+      const target = candidates[tried]
+      if (!target) {
+        await this.sleep(150)
+        continue
+      }
+      tried += 1
+      clickAt(this.doc, innermostClickable(target) as HTMLElement)
+      // 点完等：弹框关了，或者已经断开。都没发生 ⇒ 换下一个候选（可能是隐藏副本/错元素）
+      const done = await this.waitUntil(
+        () => this.openDialog() === null || this.sessionState() === 'stopped',
+        2500,
+      )
+      if (done) return true
+    }
+    return false
+  }
+
+  /** 轮询到条件成立；`onMiss` 只在第 6 拍（约 600ms）调用一次，不用来刷动作。 */
+  private async waitUntil(
+    check: () => boolean,
+    timeoutMs: number,
+    onMiss?: () => void,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    let miss = 0
+    while (Date.now() <= deadline) {
+      if (check()) return true
+      await this.sleep(100)
+      miss += 1
+      if (miss === 6) onMiss?.()
+    }
+    return check()
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 }

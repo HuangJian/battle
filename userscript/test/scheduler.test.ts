@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   countdownLabel,
   createScheduler,
+  historyText,
   OCCURRENCES_KEY,
   scheduleStatusText,
   taskBelongsTo,
@@ -311,5 +312,28 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     const keys = Object.keys(occurrences(h))
     expect(keys.some((k) => k.startsWith('old|'))).toBe(false)
     expect(keys).toContain(`tid1|${OCC_KEY}`)
+  })
+})
+
+describe('执行历史文案', () => {
+  it('停会话 · 关运行时：写明运行时文件已删除（事后能从历史里认出来）', () => {
+    expect(
+      historyText('stop-session', {
+        ok: true,
+        detail: '已断开并释放运行时（Colab 删掉了运行时文件）',
+      }),
+    ).toBe('停会话 · 关运行时（运行时文件已删除）')
+  })
+
+  it('其它停会话/失败 ⇒ 回到动作名，不编细节', () => {
+    expect(
+      historyText('stop-session', {
+        ok: true,
+        detail: '已关闭全部 1 个内核（Running Sessions 已无内核）',
+      }),
+    ).toBe('停会话 · 关闭内核')
+    expect(historyText('stop-session', { ok: true, detail: 'stopped' })).toBe('停会话')
+    expect(historyText('stop-session', { ok: false, detail: 'x' })).toBe('停会话')
+    expect(historyText('run-all', { ok: true })).toBe('运行全部')
   })
 })

@@ -33,6 +33,7 @@ import {
   actionLabel,
   countdownLabel,
   createScheduler,
+  historyText,
   scheduleStatusText,
   taskBelongsTo,
   type ScheduleAction,
@@ -337,7 +338,7 @@ function startHost(
     r.ok ? { ok: true } : { ok: false, reason: r.reason ?? 'bridge 无应答' }
 
   /** 停会话：先让 frame 排空日志（失败也停，但说出来），再点外层 Stop。 */
-  const stopNow = async (): Promise<{ ok: boolean; reason?: string }> => {
+  const stopNow = async (): Promise<{ ok: boolean; reason?: string; detail?: string }> => {
     if (ready) {
       const f = await bridge.send('flush')
       if (!f.ok) log(`停会话前未能保存：${f.reason ?? '未排空'}`)
@@ -350,12 +351,15 @@ function startHost(
   /** 本次页面的执行历史（内存，刷新即清空）。 */
   const history: PanelHistoryRow[] = []
   const HISTORY_MAX = 5
-  function recordHistory(task: SchedulerTask, result: { ok: boolean; reason?: string }): void {
+  function recordHistory(
+    task: SchedulerTask,
+    result: { ok: boolean; reason?: string; detail?: string },
+  ): void {
     const d = new Date()
     const pad2 = (n: number): string => String(n).padStart(2, '0')
     history.unshift({
       at: `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`,
-      text: actionLabel(task.action),
+      text: historyText(task.action, result),
       ok: result.ok,
       ...(result.reason ? { reason: result.reason } : {}),
     })
@@ -487,7 +491,7 @@ function startHost(
       return panel ? panel.countdown(`即将${text}`, 10) : true
     },
     run: async (task) => {
-      let result: { ok: boolean; reason?: string }
+      let result: { ok: boolean; reason?: string; detail?: string }
       if (task.action === 'stop-session') result = await stopNow()
       else if (!ready) result = { ok: false, reason: '笔记本未连接（iframe 不可达）' }
       else if (task.action === 'interrupt') result = fromBridge(await bridge.send('interrupt'))
@@ -655,12 +659,15 @@ function startSingle(
   /** 本页的执行历史（内存，刷新即清空）。 */
   const history: PanelHistoryRow[] = []
   const HISTORY_MAX = 5
-  function recordHistory(task: SchedulerTask, result: { ok: boolean; reason?: string }): void {
+  function recordHistory(
+    task: SchedulerTask,
+    result: { ok: boolean; reason?: string; detail?: string },
+  ): void {
     const d = new Date()
     const pad2 = (n: number): string => String(n).padStart(2, '0')
     history.unshift({
       at: `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`,
-      text: actionLabel(task.action),
+      text: historyText(task.action, result),
       ok: result.ok,
       ...(result.reason ? { reason: result.reason } : {}),
     })
