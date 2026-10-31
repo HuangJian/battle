@@ -117,6 +117,23 @@ describe('frame 命令表', () => {
     })
   })
 
+  it('setAutoSave ⇒ 交给 loop 立即生效；间隔夹到 0–24h', async () => {
+    const calls: Array<{ enabled: boolean; intervalSec: number }> = []
+    const d = deps()
+    ;(d.loop as unknown as { setAutoSave: (enabled: boolean, sec: number) => void }).setAutoSave = (
+      enabled,
+      intervalSec,
+    ) => calls.push({ enabled, intervalSec })
+    expect(await runFrameCommand(d, 'setAutoSave', { enabled: true, intervalSec: 120 })).toEqual({
+      ok: true,
+      value: { enabled: true, intervalSec: 120 },
+    })
+    expect(calls).toEqual([{ enabled: true, intervalSec: 120 }])
+    expect(
+      await runFrameCommand(d, 'setAutoSave', { enabled: false, intervalSec: 999_999 }),
+    ).toEqual({ ok: true, value: { enabled: false, intervalSec: 86_400 } })
+  })
+
   it('脚本/页面菜单共用的打开动作有副作用；未知命令失败', async () => {
     let opened = 0
     const d = deps({ openLog: () => (opened += 1) })

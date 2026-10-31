@@ -1,7 +1,8 @@
 import { createRuntime, type Runtime } from '../../runtime'
-import { loadConfig, type BncConfig } from '../config'
+import { loadConfig, saveConfig, type BncConfig } from '../config'
 import { detectRole, type Role } from '../selectors'
 import {
+  createTabTitleSync,
   KaggleFrameAdapter,
   KaggleSessionAdapter,
   parseKaggleNotebookKey,
@@ -232,6 +233,18 @@ function startHost(
   const session = parseKaggleSession(href)
   const sessionAdapter = new KaggleSessionAdapter(doc, href)
   const notebookKey = parseKaggleNotebookKey(href)
+
+  // Kaggle 把标签页标题写死成「Kaggle Notebook Editor」：多开 notebook 分不出哪个是哪个。
+  // 每秒把 document.title 钉成本 notebook 的名字；URL 用当前的（SPA 换页跟着走）。
+  const syncTabTitle = createTabTitleSync(doc, () => {
+    try {
+      return doc.location.href || href
+    } catch {
+      return href
+    }
+  })
+  syncTabTitle()
+
   /** frame 回报的会话键（含页面标签）：多开页签时必须用**这一页**的，不能拿外层 URL 猜。 */
   let frameSession = ''
   const logKey = (): string => `notebook:${frameSession || session}`
@@ -370,6 +383,21 @@ function startHost(
     {
       position: readPanelPosition(runtime),
       onMove: (position) => runtime.setValue(PANEL_POS_KEY, position),
+      autoSave: {
+        enabled: config.autoSaveEnabled,
+        intervalMin: Math.max(1, Math.round(config.autoSaveIntervalSec / 60)),
+      },
+      onAutoSaveChange: async (value) => {
+        const intervalSec = Math.min(24 * 3600, Math.max(60, Math.round(value.intervalMin * 60)))
+        config.autoSaveEnabled = value.enabled
+        config.autoSaveIntervalSec = intervalSec
+        saveConfig(runtime, config)
+        const r = await bridge.send('setAutoSave', {
+          enabled: config.autoSaveEnabled,
+          intervalSec,
+        })
+        return r.ok ? null : `自动保存已写入配置，但当前帧未连上（${r.reason ?? '无应答'}）`
+      },
       onScheduleAdd: async (input) => {
         if (!sched) return '调度未就绪'
         let target: ScheduleTarget | undefined
@@ -445,8 +473,12 @@ function startHost(
   })
   panel.setSchedule(sched.rows())
   sched.start()
-  // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）
-  const markTimer = setInterval(syncMarks, 1000)
+  // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）；
+  // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案）。
+  const markTimer = setInterval(() => {
+    syncMarks()
+    syncTabTitle()
+  }, 1000)
   const onVisibility = (): void => {
     void sched?.tick()
   }

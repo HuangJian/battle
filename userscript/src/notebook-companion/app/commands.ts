@@ -171,6 +171,16 @@ export async function runFrameCommand(
         : []
       return fromCmd(deps.adapter.setScheduledMarks(list))
     }
+    case 'setAutoSave': {
+      const a = (args ?? {}) as { enabled?: unknown; intervalSec?: unknown }
+      const enabled = a.enabled === true
+      const intervalSec =
+        typeof a.intervalSec === 'number' && Number.isFinite(a.intervalSec)
+          ? Math.min(24 * 3600, Math.max(0, Math.round(a.intervalSec)))
+          : 0
+      deps.loop.setAutoSave(enabled, intervalSec)
+      return { ok: true, value: { enabled, intervalSec } }
+    }
     case 'openLog':
       deps.openLog()
       return { ok: true }

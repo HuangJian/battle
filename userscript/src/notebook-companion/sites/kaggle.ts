@@ -831,6 +831,58 @@ export function parseKaggleNotebookKey(href: string): string {
   return ''
 }
 
+/**
+ * notebook 名 = URL 里的 slug（Kaggle 按 notebook 名生成，`rollout` ⇒ `/code/owner/rollout/`）；
+ * 不是 notebook 页 ⇒ ''（调用方别动标题）。
+ */
+export function parseKaggleNotebookName(href: string): string {
+  try {
+    const parts = new URL(href).pathname.split('/').filter(Boolean)
+    if (parts[0] === 'code' && parts.length >= 3) return decodeURIComponent(parts[2]!)
+  } catch {
+    /* 非 URL / 坏转义 ⇒ 交给调用方判空 */
+  }
+  return ''
+}
+
+/** Kaggle 首屏的 `<名> | Kaggle`；命中才算页面自己给了名字。 */
+const KAGGLE_TITLE = /^(.+?)\s*\|\s*Kaggle$/
+
+/** 这两种名字没有区分度（Kaggle 覆写标题时的固定文案）。 */
+const GENERIC_TITLES = /^(kaggle( notebook editor)?)$/i
+
+/**
+ * 标签页标题取哪个名字：页面自己的 `<名> | Kaggle` 优先（带原始大小写与空格），
+ * 拿不到（运行中被覆写成「Kaggle Notebook Editor」就是拿不到）⇒ 退回 URL slug。
+ */
+export function preferredNotebookTitle(currentTitle: string, href: string): string {
+  const name = KAGGLE_TITLE.exec(currentTitle.trim())?.[1]?.trim() ?? ''
+  if (name && !GENERIC_TITLES.test(name)) return name
+  return parseKaggleNotebookName(href)
+}
+
+/**
+ * 每拍调用一次：把 host 页的 `document.title` 钉成本 notebook 的名字。
+ *
+ * 为什么需要：Kaggle 把编辑页标题写死成「Kaggle Notebook Editor」，多开几个 notebook
+ * 页签时标签栏上分不出哪个是哪个。名字按当前 URL 记忆——页面自己给过名字就一直用它，
+ * 免得每拍在「页面给的名字 / slug」之间来回跳；SPA 换到别的 notebook（URL 变）才重新解析。
+ * 非 notebook 页（解析不出名字）⇒ 不动标题。
+ */
+export function createTabTitleSync(doc: { title: string }, getHref: () => string): () => string {
+  let key: string | null = null
+  let name = ''
+  return () => {
+    const href = getHref()
+    if (href !== key) {
+      key = href
+      name = preferredNotebookTitle(doc.title, href)
+    }
+    if (name && doc.title !== name) doc.title = name
+    return name
+  }
+}
+
 export class KaggleSessionAdapter implements SessionAdapter {
   readonly site = 'kaggle' as const
   private readonly wait: (ms: number) => Promise<void>

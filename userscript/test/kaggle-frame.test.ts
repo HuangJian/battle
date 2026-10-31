@@ -3,9 +3,12 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadDom, type DomHandle } from '../happydom'
 import {
+  createTabTitleSync,
   KaggleFrameAdapter,
   KaggleSessionAdapter,
+  parseKaggleNotebookName,
   parseKaggleSession,
+  preferredNotebookTitle,
   withPageTag,
 } from '../src/notebook-companion/sites/kaggle'
 
@@ -411,5 +414,50 @@ describe('KaggleSessionAdapter：会话名与停止', () => {
     const stuck = dom(OUTER, href)
     const b = new KaggleSessionAdapter(docOf(stuck), href, { wait: async () => {} })
     expect((await b.stopSession()).ok).toBe(false)
+  })
+})
+
+describe('标签页标题：写死的「Kaggle Notebook Editor」换成本 notebook 名', () => {
+  it('parseKaggleNotebookName：URL slug 即名字；非 notebook 页 ⇒ 空串', () => {
+    expect(parseKaggleNotebookName('https://www.kaggle.com/code/Huang/rollout/edit/run/1')).toBe(
+      'rollout',
+    )
+    expect(parseKaggleNotebookName('https://www.kaggle.com/code/a/b%20c/edit')).toBe('b c')
+    expect(parseKaggleNotebookName('https://www.kaggle.com/datasets/a/b')).toBe('')
+    expect(parseKaggleNotebookName('not a url')).toBe('')
+  })
+
+  it('preferredNotebookTitle：页面给的 `<名> | Kaggle` 优先，通用文案退回 slug', () => {
+    const href = 'https://www.kaggle.com/code/a/rollout/edit'
+    expect(preferredNotebookTitle('rollout | Kaggle', href)).toBe('rollout')
+    expect(preferredNotebookTitle('Kaggle Notebook Editor', href)).toBe('rollout')
+    expect(preferredNotebookTitle('Kaggle', 'https://www.kaggle.com/datasets/a/b')).toBe('')
+  })
+
+  it('createTabTitleSync：钉住标题；被覆写回来下一拍纠回；SPA 换 notebook 跟着换', () => {
+    const doc = { title: 'Kaggle Notebook Editor' }
+    let href = 'https://www.kaggle.com/code/a/rollout/edit'
+    const sync = createTabTitleSync(doc, () => href)
+    expect(sync()).toBe('rollout')
+    expect(doc.title).toBe('rollout')
+    doc.title = 'Kaggle Notebook Editor' // Kaggle 又覆写回去
+    sync()
+    expect(doc.title).toBe('rollout')
+    href = 'https://www.kaggle.com/code/a/other/edit' // SPA 换到另一个 notebook
+    expect(sync()).toBe('other')
+    expect(doc.title).toBe('other')
+  })
+
+  it('页面自己给了 `<名> | Kaggle`（外层夹具就是这样）；非 notebook 页不动标题', () => {
+    const href = 'https://www.kaggle.com/code/example/rollout/edit/run/123'
+    const doc = docOf(dom(OUTER, href))
+    expect(doc.title).toBe('rollout | Kaggle')
+    const sync = createTabTitleSync(doc, () => href)
+    expect(sync()).toBe('rollout')
+    expect(doc.title).toBe('rollout')
+
+    const plain = { title: 'keep me' }
+    expect(createTabTitleSync(plain, () => 'https://www.kaggle.com/datasets/a/b')()).toBe('')
+    expect(plain.title).toBe('keep me')
   })
 })

@@ -40,6 +40,10 @@ export interface ShipLoop {
   saveAndClear(): Promise<{ ok: boolean; reason?: string; bytes: number }>
   clearDashboardSession(): Promise<{ ok: boolean; reason?: string }>
   autoClearIfNeeded(): Promise<{ cleared: string[]; deferred: boolean }>
+  /** 周期性「保存并清空」：到间隔且空闲才做（config.autoSaveIntervalSec；0 = 关闭）。 */
+  autoSaveIfNeeded(): Promise<{ saved: boolean; bytes: number; reason?: string }>
+  /** 面板切换「自动保存并清空」：立即生效，周期从此刻重新起算。 */
+  setAutoSave(enabled: boolean, intervalSec: number): void
   start(): void
   stop(): void
   lastInteractionAt(lastAt: number): void
@@ -61,6 +65,8 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   let baseSession = parseKaggleSession(opts.referrer || opts.href)
   let session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())
+  /** 上次周期保存的时刻；从创建起算，避免打开页面就清空一次。 */
+  let lastAutoSaveAt = now()
   const state = createShipState(0)
   const dirty = new Set<string>()
   let observer: OutputObserver | null = null
@@ -217,6 +223,38 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
     return { cleared, deferred }
   }
 
+  /**
+   * 周期性自动保存并清空：到间隔 + 近 10s 无交互 + 确有输出才做；
+   * 没有输出就只重置计时；失败也等下一个周期（不每拍重试同一错误）。
+   */
+  const autoSaveIfNeeded = async (): Promise<{
+    saved: boolean
+    bytes: number
+    reason?: string
+  }> => {
+    if (!opts.config.autoSaveEnabled) return { saved: false, bytes: 0 }
+    const intervalMs = opts.config.autoSaveIntervalSec * 1000
+    if (intervalMs <= 0) return { saved: false, bytes: 0 }
+    const t = now()
+    if (t - lastAutoSaveAt < intervalMs) return { saved: false, bytes: 0 }
+    // 用户正在操作（键盘/指针/滚动）：不抢清空，下一拍再看
+    if (t - lastInteraction < 10_000) return { saved: false, bytes: 0, reason: 'deferred' }
+    if (!cells().some((c) => textOf(c.id) !== '')) {
+      lastAutoSaveAt = t
+      return { saved: false, bytes: 0 }
+    }
+    let r: { ok: boolean; bytes: number; reason?: string }
+    try {
+      r = await saveAndClear()
+    } catch (e) {
+      r = { ok: false, bytes: 0, reason: e instanceof Error ? e.message : String(e) }
+    }
+    lastAutoSaveAt = now()
+    if (r.ok) return { saved: true, bytes: r.bytes }
+    opts.onError?.(`自动保存并清空失败：${r.reason ?? '未排空'}`)
+    return { saved: false, bytes: r.bytes, ...(r.reason ? { reason: r.reason } : {}) }
+  }
+
   return {
     state,
     get session() {
@@ -242,6 +280,12 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
     saveAndClear,
     clearDashboardSession,
     autoClearIfNeeded,
+    autoSaveIfNeeded,
+    setAutoSave(enabled: boolean, intervalSec: number) {
+      opts.config.autoSaveEnabled = enabled
+      opts.config.autoSaveIntervalSec = Math.min(24 * 3600, Math.max(0, Math.round(intervalSec)))
+      lastAutoSaveAt = now()
+    },
     lastInteractionAt(at: number) {
       lastInteraction = at
     },
@@ -262,7 +306,9 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
       for (const ref of cells()) dirty.add(ref.id)
       timer = setInterval(
         () => {
-          void tick().then(() => autoClearIfNeeded())
+          void tick()
+            .then(() => autoSaveIfNeeded())
+            .then(() => autoClearIfNeeded())
         },
         Math.max(1, opts.config.shipIntervalSec) * 1000,
       )

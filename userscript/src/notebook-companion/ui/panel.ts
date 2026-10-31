@@ -79,6 +79,12 @@ export function readPanelPosition(runtime: Runtime): PanelPosition | null {
   return parsePanelPosition(runtime.getValue(PANEL_POS_KEY, null))
 }
 
+export interface PanelAutoSave {
+  enabled: boolean
+  /** 周期（分钟；面板按分钟展示）。 */
+  intervalMin: number
+}
+
 export interface PanelOptions {
   /** 上次拖到的位置；挂载时会重新夹进当前视口。 */
   position?: PanelPosition | null
@@ -90,6 +96,9 @@ export interface PanelOptions {
   ) => string | null | void | Promise<string | null | void>
   onScheduleRemove?: (id: string) => void
   onScheduleToggle?: (id: string, enabled: boolean) => void
+  /** 当前「自动保存并清空」设置（只上屏；改动走 onAutoSaveChange）。 */
+  autoSave?: PanelAutoSave
+  onAutoSaveChange?: (value: PanelAutoSave) => string | null | void | Promise<string | null | void>
 }
 
 interface ButtonSpec {
@@ -200,6 +209,13 @@ button[data-act="saveAndClear"] { background: #1e5a3a; border-color: #2f8a58; fl
 }
 .srow select { flex: 1 1 auto; min-width: 0; }
 .srow button { flex: 0 0 auto; min-width: 48px; }
+.arow { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.arow input[type="number"] {
+  width: 54px; box-sizing: border-box; padding: 2px 4px; text-align: center;
+  color: #dbe7ff; background: #1b2738; border: 1px solid #2d4a70; border-radius: 6px; font: inherit;
+}
+.arow input[type="number"]:disabled { opacity: .45; }
+.arow input[type="checkbox"] { accent-color: #4c8dff; }
 .sack { display: flex; gap: 4px; align-items: center; color: #e6c36a; font-size: 10px; margin-bottom: 4px; }
 .sack[hidden] { display: none; }
 .slist { display: flex; flex-direction: column; gap: 3px; }
@@ -248,6 +264,10 @@ export function mountPanel(
           )
           .join('')}</div></div>`,
     ).join('') +
+    `<div class="group"><div class="glabel">自动</div>` +
+    `<label class="arow"><input type="checkbox" data-auto="enabled"> 每 ` +
+    `<input type="number" data-auto="minutes" min="1" max="1440" step="1" inputmode="numeric">` +
+    ` 分钟保存并清空</label></div>` +
     `<div class="group"><div class="glabel">定时（一次性 · <span data-tz></span> · 页面开着才跑）</div>` +
     `<div class="srow"><input type="text" data-sched="at" value="09:00" maxlength="5" inputmode="numeric"` +
     ` title="24 小时制 HH:MM；早于现在就是明天" placeholder="HH:MM">` +
@@ -277,11 +297,18 @@ export function mountPanel(
   const schedAdd = shadow.querySelector('[data-sched="add"]') as HTMLElement
   const schedList = shadow.querySelector('[data-sched="list"]') as HTMLElement
   const hist = shadow.querySelector('[data-hist]') as HTMLElement
+  const autoEnabled = shadow.querySelector('[data-auto="enabled"]') as HTMLInputElement
+  const autoMinutes = shadow.querySelector('[data-auto="minutes"]') as HTMLInputElement
   const ask = shadow.querySelector('[data-ask]') as HTMLElement
   const askText = shadow.querySelector('[data-ask-text]') as HTMLElement
   const askCancel = shadow.querySelector('[data-ask-cancel]') as HTMLElement
   let askFinish: ((ok: boolean) => void) | null = null
   let busy = false
+
+  const autoSave = options.autoSave ?? { enabled: false, intervalMin: 30 }
+  autoEnabled.checked = autoSave.enabled
+  autoMinutes.value = String(autoSave.intervalMin)
+  autoMinutes.disabled = !autoSave.enabled
 
   // 本地时区（任务用墙钟，不存 UTC）：显示出来，操作员不用猜
   const offsetMin = -new Date().getTimezoneOffset()
@@ -499,6 +526,27 @@ export function mountPanel(
       }, 1000)
     })
   }
+
+  function applyAutoSave(): void {
+    const enabled = autoEnabled.checked
+    autoMinutes.disabled = !enabled
+    const minutes = clamp(Math.round(Number(autoMinutes.value) || 30), 1, 1440)
+    autoMinutes.value = String(minutes)
+    const value: PanelAutoSave = { enabled, intervalMin: minutes }
+    const ret = options.onAutoSaveChange?.(value)
+    if (ret === undefined) {
+      setStatus('自动保存未接线', 'warn')
+      return
+    }
+    void Promise.resolve(ret)
+      .then((err) => {
+        if (typeof err === 'string' && err) setStatus(err, 'error')
+        else setStatus(enabled ? `自动保存：每 ${minutes} 分钟` : '自动保存已关闭', 'ok')
+      })
+      .catch((e: unknown) => setStatus(e instanceof Error ? e.message : String(e), 'error'))
+  }
+  autoEnabled.addEventListener('change', applyAutoSave)
+  autoMinutes.addEventListener('change', applyAutoSave)
 
   schedAction.addEventListener('change', () => {
     schedAckWrap.hidden = schedAction.value !== 'stop-session'

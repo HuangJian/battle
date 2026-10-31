@@ -155,6 +155,41 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
+  it('自动保存：开关/周期回传；关闭时分钟框禁用', async () => {
+    const w = dom()
+    const calls: Array<{ enabled: boolean; intervalMin: number }> = []
+    const panel = mountPanel(
+      docOf(w),
+      {},
+      {
+        autoSave: { enabled: true, intervalMin: 30 },
+        onAutoSaveChange: (value) => {
+          calls.push(value)
+          return null
+        },
+      },
+    )
+    const shadow = panel.host.shadowRoot!
+    const enabled = shadow.querySelector('[data-auto="enabled"]') as HTMLInputElement
+    const minutes = shadow.querySelector('[data-auto="minutes"]') as HTMLInputElement
+    expect(enabled.checked).toBe(true)
+    expect(minutes.value).toBe('30')
+
+    minutes.value = '15'
+    minutes.dispatchEvent(new w.Event('change') as unknown as Event)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(calls).toEqual([{ enabled: true, intervalMin: 15 }])
+    expect(shadow.querySelector('.status')!.textContent).toContain('15 分钟')
+
+    enabled.checked = false
+    enabled.dispatchEvent(new w.Event('change') as unknown as Event)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(calls.at(-1)).toEqual({ enabled: false, intervalMin: 15 })
+    expect(minutes.disabled).toBe(true)
+    expect(shadow.querySelector('.status')!.textContent).toContain('已关闭')
+    panel.destroy()
+  })
+
   it('忙态禁用全部按钮，handler 完成后恢复；异常写红字', async () => {
     const w = dom()
     let release: () => void = () => {}
@@ -228,15 +263,15 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
-  it('按钮按功能分区：首组无组名 / 折叠 / 跳转（顶 · 底 · CFG）+ 定时', () => {
+  it('按钮按功能分区：首组无组名 / 折叠 / 跳转（顶 · 底 · CFG）/ 自动 + 定时', () => {
     const panel = mountPanel(docOf(dom()), {})
     const shadow = panel.host.shadowRoot!
     const labels = [...shadow.querySelectorAll('.glabel')].map((el) => el.textContent)
     // 首组（保存/打开日志）不再有「日志」组标题；时区标签随时区变，只钉「有这一组」
-    expect(labels.slice(0, 2)).toEqual(['折叠', '跳转'])
-    expect(labels[2]).toContain('定时（一次性')
+    expect(labels.slice(0, 3)).toEqual(['折叠', '跳转', '自动'])
+    expect(labels[3]).toContain('定时（一次性')
     const groups = [...shadow.querySelectorAll('.group')]
-    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 3, 1])
+    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 3, 0, 1])
     expect(groups[0]!.querySelector('.glabel')).toBeNull()
     const jump = [...groups[2]!.querySelectorAll('[data-act]')].map((el) =>
       el.getAttribute('data-act'),

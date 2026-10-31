@@ -45,6 +45,16 @@ describe('config：非法存储值逐字段回默认（不抛）', () => {
     }
   })
 
+  it('autoSave：默认开、30 分钟；0 = 关闭间隔；上限 24h', () => {
+    expect(DEFAULT_CONFIG.autoSaveEnabled).toBe(true)
+    expect(DEFAULT_CONFIG.autoSaveIntervalSec).toBe(30 * 60)
+    expect(sanitizeConfig({}).autoSaveIntervalSec).toBe(30 * 60)
+    expect(sanitizeConfig({ autoSaveEnabled: false }).autoSaveEnabled).toBe(false)
+    expect(sanitizeConfig({ autoSaveEnabled: 'no' }).autoSaveEnabled).toBe(true)
+    expect(sanitizeConfig({ autoSaveIntervalSec: 0 }).autoSaveIntervalSec).toBe(0)
+    expect(sanitizeConfig({ autoSaveIntervalSec: 10 * 86_400 }).autoSaveIntervalSec).toBe(86_400)
+  })
+
   it('数值夹取 + 布尔只认布尔', () => {
     const c = sanitizeConfig({
       shipIntervalSec: 0,

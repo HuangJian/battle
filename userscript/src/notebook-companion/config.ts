@@ -14,6 +14,10 @@ export interface BncConfig {
   autoClearForceBytes: number
   largeCellBytes: number
   largeCellIntervalSec: number
+  /** 周期性「保存并清空」间隔（秒）；0 = 关闭。 */
+  autoSaveIntervalSec: number
+  /** 周期性「保存并清空」总开关（面板可切换）。 */
+  autoSaveEnabled: boolean
   claimSettleMs: number
   stopGraceMs: number
   confirmStopOnCreate: boolean
@@ -35,6 +39,8 @@ export const DEFAULT_CONFIG: BncConfig = {
   autoClearForceBytes: 8 * 1024 * 1024,
   largeCellBytes: 8 * 1024 * 1024,
   largeCellIntervalSec: 30,
+  autoSaveIntervalSec: 30 * 60,
+  autoSaveEnabled: true,
   claimSettleMs: 1000,
   stopGraceMs: 600_000,
   confirmStopOnCreate: true,
@@ -92,6 +98,8 @@ export function sanitizeConfig(raw: unknown): BncConfig {
     autoClearForceBytes: num(o, 'autoClearForceBytes', 1024 * 1024, 64 * 1024 * 1024),
     largeCellBytes: num(o, 'largeCellBytes', 1024 * 1024, 64 * 1024 * 1024),
     largeCellIntervalSec: num(o, 'largeCellIntervalSec', 5, 300),
+    autoSaveIntervalSec: num(o, 'autoSaveIntervalSec', 0, 24 * 3600),
+    autoSaveEnabled: bool(o, 'autoSaveEnabled'),
     claimSettleMs: num(o, 'claimSettleMs', 200, 5000),
     stopGraceMs: num(o, 'stopGraceMs', 60_000, 30 * 60_000),
     confirmStopOnCreate: bool(o, 'confirmStopOnCreate'),

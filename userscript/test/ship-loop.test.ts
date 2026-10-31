@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { createShipLoop } from '../src/notebook-companion/app/ship-loop'
 import { DEFAULT_CONFIG } from '../src/notebook-companion/config'
 import { StubFrameAdapter } from '../src/notebook-companion/sites/stub'
+import type { FrameAdapter } from '../src/notebook-companion/sites/types'
 import type { Runtime } from '../src/runtime'
 
 function loop(referrer = '') {
@@ -15,6 +16,44 @@ function loop(referrer = '') {
     pageTag: 'geooms',
   })
 }
+
+/** 一个 code cell + 固定输出；`command()` 记一次「清空」。 */
+function fakeAdapter(output: string, onClear: () => void): FrameAdapter {
+  return {
+    site: 'kaggle',
+    ready: true,
+    cells: () => [{ id: 'c1', index: 0, kind: 'code' as const }],
+    outputText: () => output,
+    sourceText: () => '',
+    activeCell: () => null,
+    ensureRendered: async () => null,
+    select: async () => ({ ok: true }),
+    runCell: async () => ({ ok: true }),
+    clearCellOutput: async () => ({ ok: true }),
+    toggleCell: async () => ({ ok: true }),
+    setFoldedAll: async () => ({ ok: true }),
+    setFolded: async () => ({ ok: true }),
+    command: async () => {
+      onClear()
+      return { ok: true }
+    },
+    scroll: () => ({ ok: true }),
+    scrollOuter: () => ({ ok: true }),
+    flash: () => {},
+    focusConfig: async () => ({ ok: true }),
+    setScheduledMarks: () => ({ ok: true }),
+  }
+}
+
+/** 搬运接口永远 200（auto-save 只关心 drain 成功后才清空）。 */
+const okRuntime = {
+  gmRequest: async () => ({
+    status: 200,
+    statusText: 'OK',
+    responseText: JSON.stringify({ ok: true, epoch: 1 }),
+    responseHeaders: '',
+  }),
+} as unknown as Runtime
 
 describe('ship-loop：日志会话键用 notebook 身份', () => {
   it('frame 自己只能推出 unknown；host 的基替换它并保留页签', () => {
@@ -35,5 +74,111 @@ describe('ship-loop：日志会话键用 notebook 身份', () => {
     l.setSessionBase('')
     expect(l.session).toBe('kaggle-huang-rollout-edit-geooms')
     l.stop()
+  })
+})
+
+describe('ship-loop：周期性自动保存并清空', () => {
+  it('到间隔才执行；近 10s 有交互就延后；空转不重复清', async () => {
+    let t = 1_000_000
+    let clears = 0
+    const l = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://www.kaggle.com/code/a/b/edit',
+      config: { ...DEFAULT_CONFIG, autoSaveIntervalSec: 60 },
+      runtime: okRuntime,
+      adapter: fakeAdapter('hello', () => {
+        clears += 1
+      }),
+      now: () => t,
+      writer: 'w1',
+    })
+
+    // 刚创建：还没到第一个周期
+    expect(await l.autoSaveIfNeeded()).toEqual({ saved: false, bytes: 0 })
+
+    t += 61_000
+    const first = await l.autoSaveIfNeeded()
+    expect(first.saved).toBe(true)
+    expect(first.bytes).toBeGreaterThan(0)
+    expect(clears).toBe(1)
+
+    t += 1_000
+    expect((await l.autoSaveIfNeeded()).saved).toBe(false)
+
+    // 下一次到点但用户刚操作过 ⇒ 延后；计时不前进，空闲后同一次到点补做
+    t += 60_000
+    l.lastInteractionAt(t - 1_000)
+    const deferred = await l.autoSaveIfNeeded()
+    expect(deferred).toEqual({ saved: false, bytes: 0, reason: 'deferred' })
+    expect(clears).toBe(1)
+
+    t += 10_000
+    expect((await l.autoSaveIfNeeded()).saved).toBe(true)
+    expect(clears).toBe(2)
+    l.stop()
+  })
+
+  it('setAutoSave：立即切换开关/周期，并从此刻重新计时', async () => {
+    let t = 1_000_000
+    let clears = 0
+    const l = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://www.kaggle.com/code/a/b/edit',
+      config: { ...DEFAULT_CONFIG, autoSaveEnabled: false, autoSaveIntervalSec: 60 },
+      runtime: okRuntime,
+      adapter: fakeAdapter('hello', () => {
+        clears += 1
+      }),
+      now: () => t,
+    })
+    t += 61_000
+    expect((await l.autoSaveIfNeeded()).saved).toBe(false) // 总开关关着
+
+    l.setAutoSave(true, 120)
+    t += 61_000 // 新周期 120s 未到
+    expect((await l.autoSaveIfNeeded()).saved).toBe(false)
+    t += 60_000 // 距切换 121s
+    expect((await l.autoSaveIfNeeded()).saved).toBe(true)
+    expect(clears).toBe(1)
+
+    l.setAutoSave(false, 60)
+    t += 61_000
+    expect((await l.autoSaveIfNeeded()).saved).toBe(false)
+    expect(clears).toBe(1)
+    l.stop()
+  })
+
+  it('间隔 0 = 关闭；没有输出 ⇒ 只重置计时、不清空', async () => {
+    let t = 5_000_000
+    let clears = 0
+    const off = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://www.kaggle.com/code/a/b/edit',
+      config: { ...DEFAULT_CONFIG, autoSaveIntervalSec: 0 },
+      runtime: okRuntime,
+      adapter: fakeAdapter('hello', () => {
+        clears += 1
+      }),
+      now: () => t,
+    })
+    t += 3_600_000
+    expect((await off.autoSaveIfNeeded()).saved).toBe(false)
+    expect(clears).toBe(0)
+
+    const empty = createShipLoop({
+      doc: {} as unknown as Document,
+      href: 'https://www.kaggle.com/code/a/b/edit',
+      config: { ...DEFAULT_CONFIG, autoSaveIntervalSec: 60 },
+      runtime: okRuntime,
+      adapter: fakeAdapter('', () => {
+        clears += 1
+      }),
+      now: () => t,
+    })
+    t += 61_000
+    expect((await empty.autoSaveIfNeeded()).saved).toBe(false)
+    expect(clears).toBe(0)
+    off.stop()
+    empty.stop()
   })
 })
