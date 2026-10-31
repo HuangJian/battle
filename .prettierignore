@@ -1,0 +1,4 @@
+# 真实页面存档抽出的 DOM 夹具必须逐字节保真：格式化会把长行拆开、重排空白，
+# 直接改变夹具的 DOM 语义（Colab 的 .view-line 一行 = 源码一行，拆开就多出空行）。
+# 生成器：tmp/build_colab_fixture.py（从 tmp/*.mhtml 重抽）。
+userscript/test/fixtures/

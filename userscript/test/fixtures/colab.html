@@ -5,1336 +5,801 @@
   脱敏：删掉脚本/菜单/tooltip 等无关子树，源码与输出换成合成文本——原存档的输出里有
   运行日志与 authKey，绝不入库。
 -->
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>rollout.ipynb - Colab</title>
-  </head>
-  <body>
-    <colab-notebook-toolbar id="top-toolbar" class="horizontal layout center noshrink">
-      <colab-toolbar-button
-        icon="search"
-        id="toolbar-show-command-palette"
-        command="show-command-palette"
-        ><template shadowmode="open"
-          ><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""
-            ><template shadowmode="open" shadowdelegatesfocus="">
-              <div class="background"></div>
-
-              <button id="button" class="button">
-                <span class="touch"></span>
-                <slot name="icon"></slot>
-                <span class="label"><slot></slot></span>
-              </button>
-            </template>
-            <md-icon slot="icon" aria-hidden="true"
-              ><template shadowmode="open"><slot></slot></template>search</md-icon
-            >
-            <span class="button-content"><slot></slot></span>
-            <span class="screenreader-only">Show command palette Ctrl+Shift+P</span>
-          </md-text-button>
-        </template>
-        Commands
-      </colab-toolbar-button>
-      <span class="toolbar-add-code-split"
-        ><colab-toolbar-button
-          command="insert-cell-below"
-          icon="add"
-          id="toolbar-add-code"
-          class="split-button"
-          ><template shadowmode="open"
-            ><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <div class="background"></div>
-
-                <button id="button" class="button">
-                  <span class="touch"></span>
-                  <slot name="icon"></slot>
-                  <span class="label"><slot></slot></span>
-                </button>
-              </template>
-              <md-icon slot="icon" aria-hidden="true"
-                ><template shadowmode="open"><slot></slot></template>add</md-icon
-              >
-              <span class="button-content"><slot></slot></span>
-              <span class="screenreader-only">Insert code cell below Ctrl+M B</span>
-            </md-text-button>
-          </template>
-          Code
+<html><head><meta charset="utf-8"><title>rollout.ipynb - Colab</title></head><body><colab-notebook-toolbar id="top-toolbar" class="horizontal layout center noshrink"> 
+    <colab-toolbar-button icon="search" id="toolbar-show-command-palette" command="show-command-palette"><template shadowmode="open"><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+        <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>search</md-icon>
+        <span class="button-content"><slot></slot></span>
+        <span class="screenreader-only">Show command palette Ctrl+Shift+P</span>
+      </md-text-button>
+       </template>
+          Commands
         </colab-toolbar-button>
-        <md-icon-button
-          touch-target="none"
-          data-aria-expanded="false"
-          data-aria-haspopup="menu"
-          id="top-toolbar-add-code-dropdown-button"
-          data-aria-label="Insert code cell options"
-          value=""
-          ><template shadowmode="open" shadowdelegatesfocus=""
-            ><button
-              id="button"
-              class="icon-button standard"
-              aria-label="Insert code cell options"
-              aria-haspopup="menu"
-              aria-expanded="false"
-            >
-              <span class="icon"><slot></slot></span>
-
-              <span class="touch"></span></button
-          ></template>
-          <md-icon aria-hidden="true"
-            ><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon
-          >
-        </md-icon-button>
-      </span>
-      <colab-toolbar-button command="add-text" icon="add" id="toolbar-add-text"
-        ><template shadowmode="open"
-          ><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""
-            ><template shadowmode="open" shadowdelegatesfocus="">
-              <div class="background"></div>
-
-              <button id="button" class="button">
-                <span class="touch"></span>
-                <slot name="icon"></slot>
-                <span class="label"><slot></slot></span>
-              </button>
-            </template>
-            <md-icon slot="icon" aria-hidden="true"
-              ><template shadowmode="open"><slot></slot></template>add</md-icon
-            >
-            <span class="button-content"><slot></slot></span>
-            <span class="screenreader-only">Add text cell </span>
-          </md-text-button>
-        </template>
-        Text
-      </colab-toolbar-button>
-      <span class="colab-separator"></span>
-      <colab-notebook-toolbar-run-button
-        ><template shadowmode="open"
-          ><colab-toolbar-button
-            class="split-button"
-            icon="play_arrow"
-            tooltipid="toolbar-run-button-tooltip"
-            id="toolbar-run-button"
-            tooltiptext="Run all cells in notebook"
-            ><template shadowmode="open"
-              ><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""
-                ><template shadowmode="open" shadowdelegatesfocus="">
-                  <div class="background"></div>
-
-                  <button id="button" class="button">
-                    <span class="touch"></span>
-                    <slot name="icon"></slot>
-                    <span class="label"><slot></slot></span>
-                  </button>
-                </template>
-                <md-icon slot="icon" aria-hidden="true"
-                  ><template shadowmode="open"><slot></slot></template>play_arrow</md-icon
-                >
-                <span class="button-content"><slot></slot></span>
-                <span class="screenreader-only">Run all cells in notebook </span>
-              </md-text-button>
-            </template>
-            Run all
+    <span class="toolbar-add-code-split"><colab-toolbar-button command="insert-cell-below" icon="add" id="toolbar-add-code" class=" split-button "><template shadowmode="open"><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+        <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>add</md-icon>
+        <span class="button-content"><slot></slot></span>
+        <span class="screenreader-only">Insert code cell below Ctrl+M B</span>
+      </md-text-button>
+       </template>
+              Code
+            </colab-toolbar-button>
+            <md-icon-button touch-target="none" data-aria-expanded="false" data-aria-haspopup="menu" id="top-toolbar-add-code-dropdown-button" data-aria-label="Insert code cell options" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Insert code cell options" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+      <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon>
+    </md-icon-button>
+    </span>
+          <colab-toolbar-button command="add-text" icon="add" id="toolbar-add-text"><template shadowmode="open"><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+        <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>add</md-icon>
+        <span class="button-content"><slot></slot></span>
+        <span class="screenreader-only">Add text cell </span>
+      </md-text-button>
+       </template>
+            Text
           </colab-toolbar-button>
-          <md-icon-button
-            touch-target="none"
-            data-aria-haspopup="menu"
-            data-aria-expanded="false"
-            id="toolbar-run-button-more-actions"
-            data-aria-label="More actions"
-            value=""
-            ><template shadowmode="open" shadowdelegatesfocus=""
-              ><button
-                id="button"
-                class="icon-button standard"
-                aria-label="More actions"
-                aria-haspopup="menu"
-                aria-expanded="false"
-              >
-                <span class="icon"><slot></slot></span>
+    <span class="colab-separator"></span>
+    <colab-notebook-toolbar-run-button><template shadowmode="open"><colab-toolbar-button class="split-button" icon="play_arrow" tooltipid="toolbar-run-button-tooltip" id="toolbar-run-button" tooltiptext="Run all cells in notebook"><template shadowmode="open"><md-text-button id="button" data-aria-disabled="false" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+        <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>play_arrow</md-icon>
+        <span class="button-content"><slot></slot></span>
+        <span class="screenreader-only">Run all cells in notebook </span>
+      </md-text-button>
+       </template>
+        Run all
+      </colab-toolbar-button>
+      <md-icon-button touch-target="none" data-aria-haspopup="menu" data-aria-expanded="false" id="toolbar-run-button-more-actions" data-aria-label="More actions" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="More actions" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon>
+      </md-icon-button>
+      
+      <md-menu positioning="popover" quick="" aria-labelledby="toolbar-run-button-more-actions" anchor="toolbar-run-button-more-actions" aria-hidden="true"><template shadowmode="open">
+      <div class="menu   " popover="manual">
+        <md-elevation part="elevation" aria-hidden="true"><template shadowmode="open"><span class="shadow"></span></template></md-elevation>
+        <div class="items">
+          <div class="item-padding"> <slot></slot> </div>
+        </div>
+      </div>
+    </template>
+    <md-menu-item command="restart" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" role="menuitem" class="list-item" tabindex="0">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Restart session</span>
+  </md-menu-item><md-menu-item command="restart-and-run-all" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" role="menuitem" class="list-item" tabindex="0">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Restart session and run all</span>
+  </md-menu-item><md-menu-item command="runafter" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" role="menuitem" class="list-item" tabindex="0">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Run focused cell and all cells below</span>
+  </md-menu-item><md-divider><template shadowmode="open"></template></md-divider><md-menu-item command="interrupt" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" role="menuitem" class="list-item" tabindex="0">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Interrupt execution</span>
+  </md-menu-item><md-menu-item command="clear-outputs" md-menu-item="" tabindex="0"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" role="menuitem" class="list-item   " tabindex="0">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Clear all outputs</span>
+  </md-menu-item>
+  </md-menu></template>
+    </colab-notebook-toolbar-run-button>
+    
+    
+    
+    
+     <span class="collapsed-options">
+          <colab-last-saved-indicator aria-live="polite" aria-atomic="true"><template shadowmode="open"><md-icon-button id="button" data-aria-label="All changes saved" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="All changes saved">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template><md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>cloud_done</md-icon></md-icon-button></template></colab-last-saved-indicator>
+        </span>
 
-                <span class="touch"></span></button
-            ></template>
-            <md-icon aria-hidden="true"
-              ><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon
-            >
+    <span class="flex"></span>
+    
+    <colab-connect-warning-button><template shadowmode="open"></template></colab-connect-warning-button>
+    <colab-connect-button><template shadowmode="open"> <md-icon-button id="connect-icon" class="icon-okay" data-aria-label="Focus the last run cell" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Focus the last run cell">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+            <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>more_horiz</md-icon>
           </md-icon-button>
-
-          <md-menu
-            positioning="popover"
-            quick=""
-            aria-labelledby="toolbar-run-button-more-actions"
-            anchor="toolbar-run-button-more-actions"
-            aria-hidden="true"
-            ><template shadowmode="open">
-              <div class="menu" popover="manual">
-                <md-elevation part="elevation" aria-hidden="true"
-                  ><template shadowmode="open"><span class="shadow"></span></template
-                ></md-elevation>
-                <div class="items">
-                  <div class="item-padding"><slot></slot></div>
-                </div>
-              </div>
-            </template>
-            <md-menu-item command="restart" md-menu-item="" tabindex="-1"
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <li id="item" role="menuitem" class="list-item" tabindex="0">
-                  <md-item
-                    ><template shadowmode="open">
-                      <slot name="container"></slot>
-                      <slot class="non-text" name="start"></slot>
-                      <div class="text">
-                        <slot name="overline"></slot>
-                        <slot class="default-slot"></slot>
-                        <slot name="headline"></slot>
-                        <slot name="supporting-text"></slot>
-                      </div>
-                      <slot class="non-text" name="trailing-supporting-text"></slot>
-                      <slot class="non-text" name="end"></slot>
-                    </template>
-                    <div slot="container"></div>
-                    <slot name="start" slot="start"></slot>
-                    <slot name="end" slot="end"></slot>
-
-                    <slot></slot>
-                    <slot name="overline" slot="overline"></slot>
-                    <slot name="headline" slot="headline"></slot>
-                    <slot name="supporting-text" slot="supporting-text"></slot>
-                    <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
-                  </md-item>
-                </li>
-              </template>
-              <span slot="headline">Restart session</span> </md-menu-item
-            ><md-menu-item command="restart-and-run-all" md-menu-item="" tabindex="-1"
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <li id="item" role="menuitem" class="list-item" tabindex="0">
-                  <md-item
-                    ><template shadowmode="open">
-                      <slot name="container"></slot>
-                      <slot class="non-text" name="start"></slot>
-                      <div class="text">
-                        <slot name="overline"></slot>
-                        <slot class="default-slot"></slot>
-                        <slot name="headline"></slot>
-                        <slot name="supporting-text"></slot>
-                      </div>
-                      <slot class="non-text" name="trailing-supporting-text"></slot>
-                      <slot class="non-text" name="end"></slot>
-                    </template>
-                    <div slot="container"></div>
-                    <slot name="start" slot="start"></slot>
-                    <slot name="end" slot="end"></slot>
-
-                    <slot></slot>
-                    <slot name="overline" slot="overline"></slot>
-                    <slot name="headline" slot="headline"></slot>
-                    <slot name="supporting-text" slot="supporting-text"></slot>
-                    <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
-                  </md-item>
-                </li>
-              </template>
-              <span slot="headline">Restart session and run all</span> </md-menu-item
-            ><md-menu-item command="runafter" md-menu-item="" tabindex="-1"
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <li id="item" role="menuitem" class="list-item" tabindex="0">
-                  <md-item
-                    ><template shadowmode="open">
-                      <slot name="container"></slot>
-                      <slot class="non-text" name="start"></slot>
-                      <div class="text">
-                        <slot name="overline"></slot>
-                        <slot class="default-slot"></slot>
-                        <slot name="headline"></slot>
-                        <slot name="supporting-text"></slot>
-                      </div>
-                      <slot class="non-text" name="trailing-supporting-text"></slot>
-                      <slot class="non-text" name="end"></slot>
-                    </template>
-                    <div slot="container"></div>
-                    <slot name="start" slot="start"></slot>
-                    <slot name="end" slot="end"></slot>
-
-                    <slot></slot>
-                    <slot name="overline" slot="overline"></slot>
-                    <slot name="headline" slot="headline"></slot>
-                    <slot name="supporting-text" slot="supporting-text"></slot>
-                    <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
-                  </md-item>
-                </li>
-              </template>
-              <span slot="headline">Run focused cell and all cells below</span> </md-menu-item
-            ><md-divider><template shadowmode="open"></template></md-divider
-            ><md-menu-item command="interrupt" md-menu-item="" tabindex="-1"
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <li id="item" role="menuitem" class="list-item" tabindex="0">
-                  <md-item
-                    ><template shadowmode="open">
-                      <slot name="container"></slot>
-                      <slot class="non-text" name="start"></slot>
-                      <div class="text">
-                        <slot name="overline"></slot>
-                        <slot class="default-slot"></slot>
-                        <slot name="headline"></slot>
-                        <slot name="supporting-text"></slot>
-                      </div>
-                      <slot class="non-text" name="trailing-supporting-text"></slot>
-                      <slot class="non-text" name="end"></slot>
-                    </template>
-                    <div slot="container"></div>
-                    <slot name="start" slot="start"></slot>
-                    <slot name="end" slot="end"></slot>
-
-                    <slot></slot>
-                    <slot name="overline" slot="overline"></slot>
-                    <slot name="headline" slot="headline"></slot>
-                    <slot name="supporting-text" slot="supporting-text"></slot>
-                    <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
-                  </md-item>
-                </li>
-              </template>
-              <span slot="headline">Interrupt execution</span> </md-menu-item
-            ><md-menu-item command="clear-outputs" md-menu-item="" tabindex="0"
-              ><template shadowmode="open" shadowdelegatesfocus="">
-                <li id="item" role="menuitem" class="list-item" tabindex="0">
-                  <md-item
-                    ><template shadowmode="open">
-                      <slot name="container"></slot>
-                      <slot class="non-text" name="start"></slot>
-                      <div class="text">
-                        <slot name="overline"></slot>
-                        <slot class="default-slot"></slot>
-                        <slot name="headline"></slot>
-                        <slot name="supporting-text"></slot>
-                      </div>
-                      <slot class="non-text" name="trailing-supporting-text"></slot>
-                      <slot class="non-text" name="end"></slot>
-                    </template>
-                    <div slot="container"></div>
-                    <slot name="start" slot="start"></slot>
-                    <slot name="end" slot="end"></slot>
-
-                    <slot></slot>
-                    <slot name="overline" slot="overline"></slot>
-                    <slot name="headline" slot="headline"></slot>
-                    <slot name="supporting-text" slot="supporting-text"></slot>
-                    <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
-                  </md-item>
-                </li>
-              </template>
-              <span slot="headline">Clear all outputs</span>
-            </md-menu-item>
-          </md-menu></template
-        >
-      </colab-notebook-toolbar-run-button>
-
-      <span class="collapsed-options">
-        <colab-last-saved-indicator aria-live="polite" aria-atomic="true"
-          ><template shadowmode="open"
-            ><md-icon-button id="button" data-aria-label="All changes saved" value=""
-              ><template shadowmode="open" shadowdelegatesfocus=""
-                ><button id="button" class="icon-button standard" aria-label="All changes saved">
-                  <span class="icon"><slot></slot></span>
-
-                  <span class="touch"></span></button></template
-              ><md-icon aria-hidden="true"
-                ><template shadowmode="open"><slot></slot></template>cloud_done</md-icon
-              ></md-icon-button
-            ></template
-          ></colab-last-saved-indicator
-        >
-      </span>
-
-      <span class="flex"></span>
-
-      <colab-connect-warning-button
-        ><template shadowmode="open"></template
-      ></colab-connect-warning-button>
-      <colab-connect-button
-        ><template shadowmode="open">
-          <md-icon-button
-            id="connect-icon"
-            class="icon-okay"
-            data-aria-label="Focus the last run cell"
-            value=""
-            ><template shadowmode="open" shadowdelegatesfocus=""
-              ><button
-                id="button"
-                class="icon-button standard"
-                aria-label="Focus the last run cell"
-              >
-                <span class="icon"><slot></slot></span>
-
-                <span class="touch"></span></button
-            ></template>
-            <md-icon aria-hidden="true"
-              ><template shadowmode="open"><slot></slot></template>more_horiz</md-icon
-            >
-          </md-icon-button>
-
-          <colab-toolbar-button
-            id="connect"
-            class="split-button"
-            tooltipid="colab-connect-tooltip"
-            tooltiptext="Waiting to finish the current execution.
+          
+      <colab-toolbar-button id="connect" class="split-button" tooltipid="colab-connect-tooltip" tooltiptext="Waiting to finish the current execution.
 Python 3 Google Compute Engine backend
 RAM: 1.19 GB/12.67 GB
-Disk: 20.88 GB/107.72 GB"
-            ><template shadowmode="open"
-              ><md-text-button id="button" value="" data-aria-disabled="false"
-                ><template shadowmode="open" shadowdelegatesfocus="">
-                  <div class="background"></div>
-
-                  <button id="button" class="button">
-                    <span class="touch"></span>
-                    <slot name="icon"></slot>
-                    <span class="label"><slot></slot></span>
-                  </button>
-                </template>
-
-                <span class="button-content"><slot></slot></span>
-                <span class="screenreader-only"
-                  >Waiting to finish the current execution. Python 3 Google Compute Engine backend
-                  RAM: 1.19 GB/12.67 GB Disk: 20.88 GB/107.72 GB
-                </span>
-              </md-text-button>
-            </template>
-            <div id="connect-button-resource-display">
-              <colab-usage-sparkline class="ram" label="RAM"
-                ><template shadowmode="open">
-                  <div class="label">RAM</div>
-
-                  <canvas height="14" width="20"></canvas> </template
-              ></colab-usage-sparkline>
-              <colab-usage-sparkline class="disks" label="Disk"
-                ><template shadowmode="open">
-                  <div class="label">Disk</div>
-
-                  <canvas height="14" width="20"></canvas> </template
-              ></colab-usage-sparkline>
-            </div>
-          </colab-toolbar-button>
-          <md-icon-button
-            id="connect-dropdown"
-            class="connect-dropdown"
-            touch-target="none"
-            data-aria-haspopup="menu"
-            data-aria-label="Additional connection options"
-            value=""
-            data-aria-expanded="false"
-            ><template shadowmode="open" shadowdelegatesfocus=""
-              ><button
-                id="button"
-                class="icon-button standard"
-                aria-label="Additional connection options"
-                aria-haspopup="menu"
-                aria-expanded="false"
-              >
-                <span class="icon"><slot></slot></span>
-
-                <span class="touch"></span></button
-            ></template>
-            <md-icon aria-hidden="true"
-              ><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon
-            >
+Disk: 20.88 GB/107.72 GB"><template shadowmode="open"><md-text-button id="button" value="" data-aria-disabled="false"><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+        
+        <span class="button-content"><slot></slot></span>
+        <span class="screenreader-only">Waiting to finish the current execution.
+Python 3 Google Compute Engine backend
+RAM: 1.19 GB/12.67 GB
+Disk: 20.88 GB/107.72 GB </span>
+      </md-text-button>
+       </template>
+         <div id="connect-button-resource-display">
+          <colab-usage-sparkline class="ram" label="RAM"><template shadowmode="open">
+      <div class="label">RAM</div>
+      
+      <canvas height="14" width="20"></canvas>
+    </template></colab-usage-sparkline>
+          <colab-usage-sparkline class="disks" label="Disk"><template shadowmode="open">
+      <div class="label">Disk</div>
+      
+      <canvas height="14" width="20"></canvas>
+    </template></colab-usage-sparkline>
+        </div>
+      </colab-toolbar-button>
+       <md-icon-button id="connect-dropdown" class="connect-dropdown" touch-target="none" data-aria-haspopup="menu" data-aria-label="Additional connection options" value="" data-aria-expanded="false"><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Additional connection options" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>arrow_drop_down</md-icon>
+      </md-icon-button>
+      
+      </template></colab-connect-button>
+    
+    <span class="collapsed-options">
+       <md-icon-button id="share-button-toolbar" command="share" data-aria-label="Share notebook" aria-describedby="share-button-toolbar-tooltip" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Share notebook">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+            <md-icon filled="" aria-hidden="true"><template shadowmode="open"><slot></slot></template>people</md-icon>
           </md-icon-button>
-        </template></colab-connect-button
-      >
+      <md-icon-button id="settings-button-toolbar" command="preferences" data-aria-label="Open settings" aria-describedby="settings-button-toolbar-tooltip" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Open settings">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon filled="" aria-hidden="true"><template shadowmode="open"><slot></slot></template>settings</md-icon>
+      </md-icon-button>
+      
+      <span class="colab-separator"></span>
+    </span>
+    <md-icon-button toggle="" command="toggle-header" id="toggle-header-button" touch-target="none" data-aria-label="Toggle header visibility" aria-describedby="toggle-header-button-tooltip" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button standard" aria-label="Toggle header visibility" aria-pressed="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+    <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>expand_less</md-icon>
+    <md-icon slot="selected" aria-hidden="true"><template shadowmode="open"><slot></slot></template>expand_more</md-icon>
+  </md-icon-button></colab-notebook-toolbar><colab-scroller role="main" id="notebook-main" class="notebook-container" aria-label="Notebook" tabindex="-1">
+        <div class="notebook-scrolling-horizontal-container">
+          <div class="notebook-scrolling-horizontal">
+            <div class="notebook-content-background">
+              
+              <div class="notebook-content ">
+                <div class="add-cell">
+      <hr>
+    </div>
+                <div class="notebook-cell-list"><div class="cell text notebook-cell" id="cell-b7c10a01" role="region" aria-label="Cell 0: Text cell: Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������" tabindex="-1"><div class="cell-tag-editor sticky"></div><div class="agent-focus-label">
+      <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>spark</md-icon>
+      Gemini
+    </div><div class="cell-toolbar sticky"></div><div class="main-content"><div class="cell-contents"><div class="cell-mask"></div><span class="imported-info-area"></span> <div class="toolbar-root"></div>
+      <div class="editor-container horizontal">
+        <div class="editor-root"></div>
+        <div class="text-top-div">
+          <div class="markdown"><span><div class="text-cell-section-header layout horizontal center"><md-icon-button class="header-section-toggle" title="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)" data-aria-label="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template><md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>keyboard_arrow_down</md-icon></md-icon-button><h1>Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������</h1></div>
+<p>������������<strong>������������������������</strong>��������������������� <code>tools/agent/sampler-agent.ts</code>������������ HTTP ���������������
+���������Colab ������ tailscale��������������������� tailscale ������������/��������������� ��� cloudflared ���������������
+<strong>������</strong>��� <code>{id,url,authKey}</code> ��������������������� <code>nn-training/rl-config.json</code>
+���<code>POST <a href="https://colab.research.google.com/drive/1VUDX_hyHVvzc2kQxrAOSgsPvzwcuXD7n#">/admin/nodes/register</a></code>���hub ��� upsert <code>nodes[]</code>������</p>
+<table>
+<thead>
+<tr>
+<th>������</th>
+<th>������</th>
+<th>���������</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>���������������</td>
+<td>��� cell</td>
+<td><code>git clone --depth 1</code>���<strong>������</strong>������������ cell ������������</td>
+</tr>
+<tr>
+<td>��� bun / cloudflared</td>
+<td><code>remote/rollout_node.py</code></td>
+<td>������������������������ <code>platform_net_env()</code> ������������������������������������</td>
+</tr>
+<tr>
+<td>������������</td>
+<td><code>remote/rollout_node.py</code></td>
+<td>tailscale ������ ��� ��������� hub ping ���������422������ ������ cloudflared ������������</td>
+</tr>
+<tr>
+<td>���������</td>
+<td><code>remote/rollout_node.py</code></td>
+<td><code>platform_utils.cpu_worker_slots()</code>���rollout/eval ���<strong>������������</strong>���</td>
+</tr>
+<tr>
+<td>������ / ������</td>
+<td>��� cell</td>
+<td>������������ + ������������������Colab ���������������������</td>
+</tr>
+<tr>
+<td>������������</td>
+<td><code>remote/rollout_node.py</code></td>
+<td><code>HUB_IP</code>/<code>HUB_TOKEN</code> secret ��� ��� ������������ ��� ������ ���URL + ���authKey ���������������</td>
+</tr>
+</tbody></table>
+<p><strong>������������������</strong>���<code>nn-training/remote/rollout_node.py</code> ������ cell ������ CFG / ������ / ������ / clone / ���������
+������������������������������<strong>������������������</strong>���<code>tests/remote/test_tailscale_boot_bun.py</code> ������������</p>
+<p><strong>������</strong>������ <code>CFG.repo</code>���+ ������������ <code>github_token</code>������ ������ secret <code>HUB_IP</code> / <code>HUB_TOKEN</code>
+���tailscale ������������ <code>TS_AUTHKEY</code>������ Run All ��� ��������������� <code>��� ���������������</code>���</p>
+<p><strong>������������</strong>��������� hub ������������������������������������ <code>��� URL</code> ��� <code>��� authKey</code> ������������
+<code>nn-training/rl-config.json</code>���</p>
+<pre><code><span><span class="mtk1">{ "nodes": [ { "id": "rollout-colab", "url": "&lt;URL</span><span class="mtk1">&gt;", "authKey": "&lt;authKey&gt;" } ] }</span></span>
+</code></pre><p>���<code>concurrency</code> ������ = ������������������������������ <code>ping</code> ������ <code>evalSupport</code> ������ ������ ���
+<code>trainer/batch_plan.py:57-61</code> ��� <code>trainer/eval_dispatch.py:114</code>������</p>
+<p><strong>������</strong>������ ��������� cell ��� ������ unregister���<code>enabled=false</code> + <code>unregistered_at</code>���������<strong>������</strong>���������
+��������������������������������������������������������������������������������� <code>max_session_hours</code> ���������������������������</p></span></div>
+        </div>
+      </div>
 
-      <span class="collapsed-options">
-        <md-icon-button
-          id="share-button-toolbar"
-          command="share"
-          data-aria-label="Share notebook"
-          aria-describedby="share-button-toolbar-tooltip"
-          value=""
-          ><template shadowmode="open" shadowdelegatesfocus=""
-            ><button id="button" class="icon-button standard" aria-label="Share notebook">
-              <span class="icon"><slot></slot></span>
-
-              <span class="touch"></span></button
-          ></template>
-          <md-icon filled="" aria-hidden="true"
-            ><template shadowmode="open"><slot></slot></template>people</md-icon
-          >
-        </md-icon-button>
-        <md-icon-button
-          id="settings-button-toolbar"
-          command="preferences"
-          data-aria-label="Open settings"
-          aria-describedby="settings-button-toolbar-tooltip"
-          value=""
-          ><template shadowmode="open" shadowdelegatesfocus=""
-            ><button id="button" class="icon-button standard" aria-label="Open settings">
-              <span class="icon"><slot></slot></span>
-
-              <span class="touch"></span></button
-          ></template>
-          <md-icon filled="" aria-hidden="true"
-            ><template shadowmode="open"><slot></slot></template>settings</md-icon
-          >
-        </md-icon-button>
-
-        <span class="colab-separator"></span>
-      </span>
-      <md-icon-button
-        toggle=""
-        command="toggle-header"
-        id="toggle-header-button"
-        touch-target="none"
-        data-aria-label="Toggle header visibility"
-        aria-describedby="toggle-header-button-tooltip"
-        value=""
-        ><template shadowmode="open" shadowdelegatesfocus=""
-          ><button
-            id="button"
-            class="icon-button standard"
-            aria-label="Toggle header visibility"
-            aria-pressed="false"
-          >
-            <span class="icon"><slot></slot></span>
-
-            <span class="touch"></span></button
-        ></template>
-        <md-icon aria-hidden="true"
-          ><template shadowmode="open"><slot></slot></template>expand_less</md-icon
-        >
-        <md-icon slot="selected" aria-hidden="true"
-          ><template shadowmode="open"><slot></slot></template>expand_more</md-icon
-        >
-      </md-icon-button></colab-notebook-toolbar
-    ><colab-scroller
-      role="main"
-      id="notebook-main"
-      class="notebook-container"
-      aria-label="Notebook"
-      tabindex="-1"
-    >
-      <div class="notebook-scrolling-horizontal-container">
-        <div class="notebook-scrolling-horizontal">
-          <div class="notebook-content-background">
-            <div class="notebook-content">
-              <div class="add-cell">
-                <hr />
-              </div>
-              <div class="notebook-cell-list">
-                <div
-                  class="cell text notebook-cell"
-                  id="cell-b7c10a01"
-                  role="region"
-                  aria-label="Cell 0: Text cell: Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������"
-                  tabindex="-1"
-                >
-                  <div class="cell-tag-editor sticky"></div>
-                  <div class="agent-focus-label">
-                    <md-icon aria-hidden="true"
-                      ><template shadowmode="open"><slot></slot></template>spark</md-icon
-                    >
-                    Gemini
-                  </div>
-                  <div class="cell-toolbar sticky"></div>
-                  <div class="main-content">
-                    <div class="cell-contents">
-                      <div class="cell-mask"></div>
-                      <span class="imported-info-area"></span>
-                      <div class="toolbar-root"></div>
-                      <div class="editor-container horizontal">
-                        <div class="editor-root"></div>
-                        <div class="text-top-div">
-                          <div class="markdown">
-                            <span
-                              ><div class="text-cell-section-header layout horizontal center">
-                                <md-icon-button
-                                  class="header-section-toggle"
-                                  title="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)"
-                                  data-aria-label="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)"
-                                  value=""
-                                  ><template shadowmode="open" shadowdelegatesfocus=""
-                                    ><button
-                                      id="button"
-                                      class="icon-button standard"
-                                      aria-label="Collapse 1 child cell under Battle ���������������rollout / eval������ Kaggle / Colab������ cell ������ (Press <Shift> to also collapse sibling sections)"
-                                    >
-                                      <span class="icon"><slot></slot></span>
-
-                                      <span class="touch"></span></button></template
-                                  ><md-icon aria-hidden="true"
-                                    ><template shadowmode="open"><slot></slot></template
-                                    >keyboard_arrow_down</md-icon
-                                  ></md-icon-button
-                                >
-                                <h1>
-                                  Battle ���������������rollout / eval������ Kaggle / Colab������
-                                  cell ������
-                                </h1>
-                              </div>
-                              <p>
-                                ������������<strong>������������������������</strong>���������������������
-                                <code>tools/agent/sampler-agent.ts</code>������������ HTTP
-                                ��������������� ���������Colab ������ tailscale���������������������
-                                tailscale ������������/��������������� ��� cloudflared
-                                ��������������� <strong>������</strong>���
-                                <code>{id,url,authKey}</code> ���������������������
-                                <code>nn-training/rl-config.json</code> ���<code
-                                  >POST
-                                  <a
-                                    href="https://colab.research.google.com/drive/1VUDX_hyHVvzc2kQxrAOSgsPvzwcuXD7n#"
-                                    >/admin/nodes/register</a
-                                  ></code
-                                >���hub ��� upsert <code>nodes[]</code>������
-                              </p>
-                              <table>
-                                <thead>
-                                  <tr>
-                                    <th>������</th>
-                                    <th>������</th>
-                                    <th>���������</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  <tr>
-                                    <td>���������������</td>
-                                    <td>��� cell</td>
-                                    <td>
-                                      <code>git clone --depth 1</code
-                                      >���<strong>������</strong>������������ cell ������������
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td>��� bun / cloudflared</td>
-                                    <td><code>remote/rollout_node.py</code></td>
-                                    <td>
-                                      ������������������������
-                                      <code>platform_net_env()</code>
-                                      ������������������������������������
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td>������������</td>
-                                    <td><code>remote/rollout_node.py</code></td>
-                                    <td>
-                                      tailscale ������ ��� ��������� hub ping ���������422������
-                                      ������ cloudflared ������������
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td>���������</td>
-                                    <td><code>remote/rollout_node.py</code></td>
-                                    <td>
-                                      <code>platform_utils.cpu_worker_slots()</code>���rollout/eval
-                                      ���<strong>������������</strong>���
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td>������ / ������</td>
-                                    <td>��� cell</td>
-                                    <td>
-                                      ������������ + ������������������Colab ���������������������
-                                    </td>
-                                  </tr>
-                                  <tr>
-                                    <td>������������</td>
-                                    <td><code>remote/rollout_node.py</code></td>
-                                    <td>
-                                      <code>HUB_IP</code>/<code>HUB_TOKEN</code> secret ��� ���
-                                      ������������ ��� ������ ���URL + ���authKey ���������������
-                                    </td>
-                                  </tr>
-                                </tbody>
-                              </table>
-                              <p>
-                                <strong>������������������</strong>���<code
-                                  >nn-training/remote/rollout_node.py</code
-                                >
-                                ������ cell ������ CFG / ������ / ������ / clone / ���������
-                                ������������������������������<strong>������������������</strong>���<code
-                                  >tests/remote/test_tailscale_boot_bun.py</code
-                                >
-                                ������������
-                              </p>
-                              <p>
-                                <strong>������</strong>������ <code>CFG.repo</code>���+ ������������
-                                <code>github_token</code>������ ������ secret <code>HUB_IP</code> /
-                                <code>HUB_TOKEN</code> ���tailscale ������������
-                                <code>TS_AUTHKEY</code>������ Run All ��� ���������������
-                                <code>��� ���������������</code>���
-                              </p>
-                              <p>
-                                <strong>������������</strong>��������� hub
-                                ������������������������������������ <code>��� URL</code> ���
-                                <code>��� authKey</code> ������������
-                                <code>nn-training/rl-config.json</code>���
-                              </p>
-                              <pre><code><span><span class="mtk1">{ "nodes": [ { "id": "rollout-colab", "url": "&lt;URL</span><span class="mtk1">&gt;", "authKey": "&lt;authKey&gt;" } ] }</span></span>
-</code></pre>
-                              <p>
-                                ���<code>concurrency</code> ������ = ������������������������������
-                                <code>ping</code> ������ <code>evalSupport</code> ������ ������ ���
-                                <code>trainer/batch_plan.py:57-61</code> ���
-                                <code>trainer/eval_dispatch.py:114</code>������
-                              </p>
-                              <p>
-                                <strong>������</strong>������ ��������� cell ��� ������
-                                unregister���<code>enabled=false</code> +
-                                <code>unregistered_at</code
-                                >���������<strong>������</strong>���������
-                                ���������������������������������������������������������������������������������
-                                <code>max_session_hours</code> ���������������������������
-                              </p></span
-                            >
-                          </div>
-                        </div>
-                      </div>
-
-                      <div class="section-header">
-                        <colab-run-button
-                          ><template shadowmode="open">
-                            <div class="cell-execution">
-                              <button id="run-button" aria-label="Run cell" aria-disabled="false">
-                                <span aria-hidden="true" class="cell-execution-indicator">
-                                  <svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 24 24">
-                                    <mask id="playSymbolMask">
-                                      <rect width="100%" height="100%" fill="white"></rect>
-                                      <polygon points="10,8 17,12 10,16" fill="black"></polygon>
-                                    </mask>
-                                    <circle
-                                      cx="12"
-                                      cy="12"
-                                      r="7.8"
-                                      mask="url(#playSymbolMask)"
-                                      id="filledCircle"
-                                    ></circle></svg
-                                ></span>
-                              </button></div></template
-                        ></colab-run-button>
-                        <div class="section-header-container" title="click to expand">
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template
-                            >subdirectory_arrow_right</md-icon
-                          >
-                          <span>1 cell hidden</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="add-cell">
-                    <div class="add-cell-buttons">
-                      <md-outlined-button
-                        class="add-code add-button"
-                        data-aria-label="Add code cell
-Ctrl+M B"
-                        title="Add code cell
-Ctrl+M B"
-                        value=""
-                        has-icon=""
-                        ><template shadowmode="open" shadowdelegatesfocus="">
-                          <div class="outline"></div>
-                          <div class="background"></div>
-
-                          <button
-                            id="button"
-                            class="button"
-                            aria-label="Add code cell
-Ctrl+M B"
-                          >
-                            <span class="touch"></span>
-                            <slot name="icon"></slot>
-                            <span class="label"><slot></slot></span>
-                          </button>
-                        </template>
-                        <md-icon slot="icon" aria-hidden="true"
-                          ><template shadowmode="open"><slot></slot></template>add</md-icon
-                        >
-                        Code
-                      </md-outlined-button>
-                      <md-outlined-button
-                        class="add-text add-button"
-                        data-aria-label="Add text cell"
-                        title="Add text cell"
-                        value=""
-                        has-icon=""
-                        ><template shadowmode="open" shadowdelegatesfocus="">
-                          <div class="outline"></div>
-                          <div class="background"></div>
-
-                          <button id="button" class="button" aria-label="Add text cell">
-                            <span class="touch"></span>
-                            <slot name="icon"></slot>
-                            <span class="label"><slot></slot></span>
-                          </button>
-                        </template>
-                        <md-icon slot="icon" aria-hidden="true"
-                          ><template shadowmode="open"><slot></slot></template>add</md-icon
-                        >
-                        Text
-                      </md-outlined-button>
-                    </div>
-                    <hr />
-                  </div>
-                </div>
-                <div
-                  class="cell code notebook-cell focused running code-has-output"
-                  id="cell-c3f2a19b"
-                  role="region"
-                  aria-label="Cell 1: Code cell: Battle ������������ ������ ��� CFG.repo���+ ��������� token������������ Run"
-                  tabindex="-1"
-                >
-                  <div class="cell-tag-editor sticky"></div>
-                  <div class="agent-focus-label">
-                    <md-icon aria-hidden="true"
-                      ><template shadowmode="open"><slot></slot></template>spark</md-icon
-                    >
-                    Gemini
-                  </div>
-                  <div class="cell-toolbar sticky">
-                    <colab-cell-toolbar
-                      ><template shadowmode="open">
-                        <md-icon-button
-                          touch-target="none"
-                          aria-describedby="button-move-cell-up-tooltip"
-                          data-aria-label="Move cell up
-Ctrl+M K"
-                          command="move-cell-up"
-                          id="button-move-cell-up"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Move cell up
-Ctrl+M K"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template
-                            >arrow_upward</md-icon
-                          >
-                        </md-icon-button>
-                        <md-icon-button
-                          touch-target="none"
-                          aria-describedby="button-move-cell-down-tooltip"
-                          data-aria-label="Move cell down
-Ctrl+M J"
-                          command="move-cell-down"
-                          id="button-move-cell-down"
-                          value=""
-                          soft-disabled=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Move cell down
-Ctrl+M J"
-                              aria-disabled="true"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template
-                            >arrow_downward</md-icon
-                          >
-                        </md-icon-button>
-                        <md-menu
-                          positioning="popover"
-                          quick=""
-                          aria-labelledby="ai-menu-anchor-c3f2a19b"
-                          anchor="ai-menu-anchor-c3f2a19b"
-                          aria-hidden="true"
-                          ><template shadowmode="open">
-                            <div class="menu" popover="manual">
-                              <md-elevation part="elevation" aria-hidden="true"
-                                ><template shadowmode="open"><span class="shadow"></span></template
-                              ></md-elevation>
-                              <div class="items">
-                                <div class="item-padding"><slot></slot></div>
-                              </div>
-                            </div>
-                          </template>
-                          <md-menu-item command="generate-code" md-menu-item="" tabindex="0"
-                            ><template shadowmode="open" shadowdelegatesfocus="">
-                              <li id="item" tabindex="0" role="menuitem" class="list-item">
-                                <md-item
-                                  ><template shadowmode="open">
-                                    <slot name="container"></slot>
-                                    <slot class="non-text" name="start"></slot>
-                                    <div class="text">
-                                      <slot name="overline"></slot>
-                                      <slot class="default-slot"></slot>
-                                      <slot name="headline"></slot>
-                                      <slot name="supporting-text"></slot>
-                                    </div>
-                                    <slot class="non-text" name="trailing-supporting-text"></slot>
-                                    <slot class="non-text" name="end"></slot>
-                                  </template>
-                                  <div slot="container"></div>
-                                  <slot name="start" slot="start"></slot>
-                                  <slot name="end" slot="end"></slot>
-
-                                  <slot></slot>
-                                  <slot name="overline" slot="overline"></slot>
-                                  <slot name="headline" slot="headline"></slot>
-                                  <slot name="supporting-text" slot="supporting-text"></slot>
-                                  <slot
-                                    name="trailing-supporting-text"
-                                    slot="trailing-supporting-text"
-                                  ></slot>
-                                </md-item>
-                              </li>
-                            </template>
-                            <span slot="headline">Generate code</span> </md-menu-item
-                          ><md-menu-item command="explain-cell" md-menu-item="" tabindex="-1"
-                            ><template shadowmode="open" shadowdelegatesfocus="">
-                              <li id="item" tabindex="0" role="menuitem" class="list-item">
-                                <md-item
-                                  ><template shadowmode="open">
-                                    <slot name="container"></slot>
-                                    <slot class="non-text" name="start"></slot>
-                                    <div class="text">
-                                      <slot name="overline"></slot>
-                                      <slot class="default-slot"></slot>
-                                      <slot name="headline"></slot>
-                                      <slot name="supporting-text"></slot>
-                                    </div>
-                                    <slot class="non-text" name="trailing-supporting-text"></slot>
-                                    <slot class="non-text" name="end"></slot>
-                                  </template>
-                                  <div slot="container"></div>
-                                  <slot name="start" slot="start"></slot>
-                                  <slot name="end" slot="end"></slot>
-
-                                  <slot></slot>
-                                  <slot name="overline" slot="overline"></slot>
-                                  <slot name="headline" slot="headline"></slot>
-                                  <slot name="supporting-text" slot="supporting-text"></slot>
-                                  <slot
-                                    name="trailing-supporting-text"
-                                    slot="trailing-supporting-text"
-                                  ></slot>
-                                </md-item>
-                              </li>
-                            </template>
-                            <span slot="headline">Explain code</span> </md-menu-item
-                          ><md-menu-item command="transform-code" md-menu-item="" tabindex="-1"
-                            ><template shadowmode="open" shadowdelegatesfocus="">
-                              <li id="item" tabindex="0" role="menuitem" class="list-item">
-                                <md-item
-                                  ><template shadowmode="open">
-                                    <slot name="container"></slot>
-                                    <slot class="non-text" name="start"></slot>
-                                    <div class="text">
-                                      <slot name="overline"></slot>
-                                      <slot class="default-slot"></slot>
-                                      <slot name="headline"></slot>
-                                      <slot name="supporting-text"></slot>
-                                    </div>
-                                    <slot class="non-text" name="trailing-supporting-text"></slot>
-                                    <slot class="non-text" name="end"></slot>
-                                  </template>
-                                  <div slot="container"></div>
-                                  <slot name="start" slot="start"></slot>
-                                  <slot name="end" slot="end"></slot>
-
-                                  <slot></slot>
-                                  <slot name="overline" slot="overline"></slot>
-                                  <slot name="headline" slot="headline"></slot>
-                                  <slot name="supporting-text" slot="supporting-text"></slot>
-                                  <slot
-                                    name="trailing-supporting-text"
-                                    slot="trailing-supporting-text"
-                                  ></slot>
-                                </md-item>
-                              </li>
-                            </template>
-                            <span slot="headline">Transform code</span>
-                          </md-menu-item>
-                        </md-menu>
-                        <md-icon-button
-                          touch-target="none"
-                          data-aria-haspopup="menu"
-                          data-aria-expanded="false"
-                          aria-describedby="ai-menu-anchor-c3f2a19b-tooltip"
-                          data-aria-label="Available AI features"
-                          id="ai-menu-anchor-c3f2a19b"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Available AI features"
-                              aria-haspopup="menu"
-                              aria-expanded="false"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template> pen_spark
-                          </md-icon>
-                        </md-icon-button>
-                        <md-icon-button
-                          touch-target="none"
-                          aria-describedby="button-toggle-edit-markdown-tooltip"
-                          data-aria-label="Edit"
-                          command="toggle-edit-markdown"
-                          id="button-toggle-edit-markdown"
-                          toggle=""
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Edit"
-                              aria-pressed="false"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template>edit</md-icon
-                          >
-                          <md-icon slot="selected" aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template>edit_off</md-icon
-                          >
-                        </md-icon-button>
-                        <md-icon-button
-                          touch-target="none"
-                          aria-describedby="button-set-editable-tooltip"
-                          data-aria-label="Mark cell as editable"
-                          command="set-editable"
-                          id="button-set-editable"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Mark cell as editable"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template>lock_open</md-icon
-                          >
-                        </md-icon-button>
-                        <md-icon-button
-                          touch-target="none"
-                          aria-describedby="button-delete-cell-or-selection-tooltip"
-                          data-aria-label="Delete cell
-Ctrl+M D"
-                          command="delete-cell-or-selection"
-                          id="button-delete-cell-or-selection"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Delete cell
-Ctrl+M D"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button
-                          ></template>
-                          <md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template>delete</md-icon
-                          >
-                        </md-icon-button>
-                        <md-icon-button
-                          touch-target="none"
-                          data-aria-expanded="false"
-                          data-aria-haspopup="menu"
-                          aria-describedby="button-more-actions-tooltip"
-                          data-aria-label="More cell actions"
-                          class="cell-toolbar-more"
-                          id="button-more-actions"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="More cell actions"
-                              aria-haspopup="menu"
-                              aria-expanded="false"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button></template
-                          ><md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template>more_vert</md-icon
-                          >
-                        </md-icon-button>
-                      </template></colab-cell-toolbar
-                    >
-                  </div>
-                  <div class="main-content">
-                    <div class="cell-contents">
-                      <colab-form-title class="formview-title layout horizontal center markdown"
-                        ><md-icon-button
-                          class="header-section-toggle"
-                          title="Hide code"
-                          data-aria-label="Hide code"
-                          value=""
-                          ><template shadowmode="open" shadowdelegatesfocus=""
-                            ><button
-                              id="button"
-                              class="icon-button standard"
-                              aria-label="Hide code"
-                            >
-                              <span class="icon"><slot></slot></span>
-
-                              <span class="touch"></span></button></template
-                          ><md-icon aria-hidden="true"
-                            ><template shadowmode="open"><slot></slot></template
-                            >keyboard_arrow_down</md-icon
-                          ></md-icon-button
-                        >
-                        <div class="layout grow">
-                          <span
-                            ><h3>
-                              Battle ������������ ������ ��� CFG.repo���+ ���������
-                              token������������ Run
-                            </h3></span
-                          >
-                        </div></colab-form-title
-                      >
-                      <div class="cell-mask"></div>
-                      <span class="imported-info-area"></span>
-                      <div class="codecell-input-output">
-                        <div class="inputarea horizontal layout code">
-                          <div class="cell-gutter">
-                            <div class="cell-execution-container">
-                              <colab-run-button
-                                ><template shadowmode="open">
-                                  <div class="cell-execution focused animating running">
-                                    <button
-                                      id="run-button"
-                                      aria-describedby="run-button-tooltip"
-                                      aria-label="Run cell"
-                                      aria-disabled="false"
-                                    >
-                                      <span aria-hidden="true" class="cell-execution-indicator">
-                                        <md-circular-progress
-                                          indeterminate=""
-                                          data-aria-hidden="true"
-                                          ><template shadowmode="open">
-                                            <div
-                                              role="progressbar"
-                                              aria-valuemin="0"
-                                              class="progress indeterminate"
-                                              aria-valuemax="1"
-                                            >
-                                              <div class="spinner">
-                                                <div class="left">
-                                                  <div class="circle"></div>
-                                                </div>
-                                                <div class="right">
-                                                  <div class="circle"></div>
-                                                </div>
-                                              </div>
-                                            </div>
-                                          </template>
-                                        </md-circular-progress>
-
-                                        <svg
-                                          xmlns="http://www.w3.org/2000/svg"
-                                          viewbox="0 0 24 24"
-                                          id="stop-symbol"
-                                        >
-                                          <mask id="stopSymbolMask">
-                                            <rect width="100%" height="100%" fill="white"></rect>
-                                            <polygon
-                                              points="9,9 9,15 15,15 15,9"
-                                              fill="black"
-                                            ></polygon>
-                                          </mask>
-                                          <circle
-                                            cx="12"
-                                            cy="12"
-                                            r="6.4224"
-                                            mask="url(#stopSymbolMask)"
-                                            id="filledCircle"
-                                          ></circle>
-                                        </svg>
-                                      </span>
-                                    </button>
-                                    <div class="status">
-                                      <div class="execution-count">[1]</div>
-                                    </div>
-                                  </div></template
-                                ></colab-run-button
-                              >
-                            </div>
-                          </div>
-                          <div class="editor flex lazy-editor">
-                            <div
-                              class="editor flex monaco"
-                              data-keybinding-context="1"
-                              data-mode-id="notebook-python"
-                            >
-                              <div class="view-lines">
-                                <div class="view-line">
-                                  <span># @title Battle 采样节点 — 填 CFG</span>
-                                </div>
-                                <div class="view-line"><span>import time</span></div>
-                                <div class="view-line"><span>CFG = {</span></div>
-                                <div class="view-line"><span> 'lr': 0.0003,</span></div>
-                                <div class="view-line"><span> 'steps': 10,</span></div>
-                                <div class="view-line"><span>}</span></div>
-                                <div class="view-line">
-                                  <span>for i in range(CFG['steps']):</span>
-                                </div>
-                                <div class="view-line"><span> time.sleep(1)</span></div>
-                              </div>
-                            </div>
-                          </div>
-                          <colab-form class="formview vertical layout flex"
-                            ><div class="widget-area">
-                              <div>
-                                <md-text-button class="toggle-code-button" value=""
-                                  ><template shadowmode="open" shadowdelegatesfocus="">
-                                    <div class="background"></div>
-
-                                    <button id="button" class="button">
-                                      <span class="touch"></span>
-                                      <slot name="icon"></slot>
-                                      <span class="label"><slot></slot></span>
-                                    </button> </template
-                                  >Hide code</md-text-button
-                                >
-                              </div>
-                            </div></colab-form
-                          >
-                        </div>
-                        <div class="output" aria-label="Cell 1 output" role="region">
-                          <div class="output-header"></div>
-                          <div class="output-content">
-                            <div class="output-info">
-                              <colab-output-info
-                                ><template shadowmode="open"
-                                  ><md-icon-button
-                                    toggle=""
-                                    class="toggle-visibility-button"
-                                    touch-target="none"
-                                    data-aria-label="Show/hide output"
-                                    id="toggle-visibility-button"
-                                    value=""
-                                    ><template shadowmode="open" shadowdelegatesfocus=""
-                                      ><button
-                                        id="button"
-                                        class="icon-button standard"
-                                        aria-label="Show/hide output"
-                                        aria-pressed="false"
-                                      >
-                                        <span class="icon"><slot></slot></span>
-
-                                        <span class="touch"></span></button
-                                    ></template>
-                                    <md-icon aria-hidden="true"
-                                      ><template shadowmode="open"><slot></slot></template
-                                      >keyboard_arrow_down</md-icon
-                                    >
-                                    <md-icon slot="selected" aria-hidden="true"
-                                      ><template shadowmode="open"><slot></slot></template
-                                      >keyboard_arrow_right</md-icon
-                                    >
-                                  </md-icon-button>
-                                  <md-icon-button
-                                    touch-target="none"
-                                    data-aria-expanded="false"
-                                    data-aria-haspopup="menu"
-                                    class="menu-button focused"
-                                    data-aria-label="Code cell output actions"
-                                    id="menu-button"
-                                    value=""
-                                    ><template shadowmode="open" shadowdelegatesfocus=""
-                                      ><button
-                                        id="button"
-                                        class="icon-button standard"
-                                        aria-label="Code cell output actions"
-                                        aria-haspopup="menu"
-                                        aria-expanded="false"
-                                      >
-                                        <span class="icon"><slot></slot></span>
-
-                                        <span class="touch"></span></button
-                                    ></template>
-                                    <md-icon aria-hidden="true"
-                                      ><template shadowmode="open"><slot></slot></template
-                                      >more_horiz</md-icon
-                                    >
-                                  </md-icon-button>
-                                </template></colab-output-info
-                              >
-                            </div>
-                            <div class="output-iframe-container">
-                              <div class="output-iframe-sizer">
-                                <div>
-                                  <div>
-                                    <colab-static-output-renderer tabindex="0" role="group"
-                                      ><div>
-                                        <div class="stream output-id-26 output_text">
-                                          <pre>
-[00:05:28] [rollout-node] [keepalive] alive (0 min)
+      <div class="section-header">
+        <colab-run-button><template shadowmode="open"> <div class="cell-execution">
+      <button id="run-button" aria-label="Run cell" aria-disabled="false">
+        <span aria-hidden="true" class="cell-execution-indicator">
+<svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 24 24">
+  
+  <mask id="playSymbolMask">
+    <rect width="100%" height="100%" fill="white"></rect>
+    <polygon points="10,8 17,12 10,16" fill="black"></polygon>
+  </mask>
+  <circle cx="12" cy="12" r="7.8" mask="url(#playSymbolMask)" id="filledCircle"></circle>
+</svg></span>
+      </button>
+       
+    </div></template></colab-run-button>
+        <div class="section-header-container" title="click to expand">
+          <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>subdirectory_arrow_right</md-icon>
+          <span>1 cell hidden</span>
+        </div>
+      </div></div></div><div class="add-cell">
+      <div class="add-cell-buttons">
+        <md-outlined-button class="add-code add-button" data-aria-label="Add code cell
+Ctrl+M B" title="Add code cell
+Ctrl+M B" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      <div class="outline"></div>
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button" aria-label="Add code cell
+Ctrl+M B">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+          <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>add</md-icon>
+          Code
+        </md-outlined-button>
+        <md-outlined-button class="add-text add-button" data-aria-label="Add text cell" title="Add text cell" value="" has-icon=""><template shadowmode="open" shadowdelegatesfocus="">
+      <div class="outline"></div>
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button" aria-label="Add text cell">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>
+          <md-icon slot="icon" aria-hidden="true"><template shadowmode="open"><slot></slot></template>add</md-icon>
+          Text
+        </md-outlined-button>
+        
+        
+      </div><hr>
+    </div></div><div class="cell code notebook-cell focused running code-has-output" id="cell-c3f2a19b" role="region" aria-label="Cell 1: Code cell: Battle ������������ ������ ��� CFG.repo���+ ��������� token������������ Run" tabindex="-1"><div class="cell-tag-editor sticky"></div><div class="agent-focus-label">
+      <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>spark</md-icon>
+      Gemini
+    </div><div class="cell-toolbar sticky"><colab-cell-toolbar><template shadowmode="open"> <md-icon-button touch-target="none" aria-describedby="button-move-cell-up-tooltip" data-aria-label="Move cell up
+Ctrl+M K" command="move-cell-up" id="button-move-cell-up" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Move cell up
+Ctrl+M K">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>arrow_upward</md-icon>
+        
+      </md-icon-button>
+       <md-icon-button touch-target="none" aria-describedby="button-move-cell-down-tooltip" data-aria-label="Move cell down
+Ctrl+M J" command="move-cell-down" id="button-move-cell-down" value="" soft-disabled=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Move cell down
+Ctrl+M J" aria-disabled="true">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>arrow_downward</md-icon>
+        
+      </md-icon-button>
+      <md-menu positioning="popover" quick="" aria-labelledby="ai-menu-anchor-c3f2a19b" anchor="ai-menu-anchor-c3f2a19b" aria-hidden="true"><template shadowmode="open">
+      <div class="menu   " popover="manual">
+        <md-elevation part="elevation" aria-hidden="true"><template shadowmode="open"><span class="shadow"></span></template></md-elevation>
+        <div class="items">
+          <div class="item-padding"> <slot></slot> </div>
+        </div>
+      </div>
+    </template>
+    <md-menu-item command="generate-code" md-menu-item="" tabindex="0"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" tabindex="0" role="menuitem" class="list-item   ">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Generate code</span>
+  </md-menu-item><md-menu-item command="explain-cell" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" tabindex="0" role="menuitem" class="list-item   ">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Explain code</span>
+  </md-menu-item><md-menu-item command="transform-code" md-menu-item="" tabindex="-1"><template shadowmode="open" shadowdelegatesfocus="">
+      <li id="item" tabindex="0" role="menuitem" class="list-item   ">
+      <md-item><template shadowmode="open">
+      <slot name="container"></slot>
+      <slot class="non-text" name="start"></slot>
+      <div class="text">
+        <slot name="overline"></slot>
+        <slot class="default-slot"></slot>
+        <slot name="headline"></slot>
+        <slot name="supporting-text"></slot>
+      </div>
+      <slot class="non-text" name="trailing-supporting-text"></slot>
+      <slot class="non-text" name="end"></slot>
+    </template>
+        <div slot="container">
+             
+        </div>
+        <slot name="start" slot="start"></slot>
+        <slot name="end" slot="end"></slot>
+        
+      <slot></slot>
+      <slot name="overline" slot="overline"></slot>
+      <slot name="headline" slot="headline"></slot>
+      <slot name="supporting-text" slot="supporting-text"></slot>
+      <slot name="trailing-supporting-text" slot="trailing-supporting-text"></slot>
+    
+      </md-item>
+    </li>
+    </template>
+    <span slot="headline">Transform code</span>
+  </md-menu-item>
+  </md-menu>
+          <md-icon-button touch-target="none" data-aria-haspopup="menu" data-aria-expanded="false" aria-describedby="ai-menu-anchor-c3f2a19b-tooltip" data-aria-label="Available AI features" id="ai-menu-anchor-c3f2a19b" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Available AI features" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+            <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template> pen_spark </md-icon>
+          </md-icon-button>
+           <md-icon-button touch-target="none" aria-describedby="button-toggle-edit-markdown-tooltip" data-aria-label="Edit" command="toggle-edit-markdown" id="button-toggle-edit-markdown" toggle="" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Edit" aria-pressed="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>edit</md-icon>
+        <md-icon slot="selected" aria-hidden="true"><template shadowmode="open"><slot></slot></template>edit_off</md-icon>
+      </md-icon-button>
+       <md-icon-button touch-target="none" aria-describedby="button-set-editable-tooltip" data-aria-label="Mark cell as editable" command="set-editable" id="button-set-editable" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Mark cell as editable">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>lock_open</md-icon>
+        
+      </md-icon-button>
+       <md-icon-button touch-target="none" aria-describedby="button-delete-cell-or-selection-tooltip" data-aria-label="Delete cell
+Ctrl+M D" command="delete-cell-or-selection" id="button-delete-cell-or-selection" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Delete cell
+Ctrl+M D">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>delete</md-icon>
+        
+      </md-icon-button>
+      <md-icon-button touch-target="none" data-aria-expanded="false" data-aria-haspopup="menu" aria-describedby="button-more-actions-tooltip" data-aria-label="More cell actions" class="cell-toolbar-more" id="button-more-actions" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="More cell actions" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template><md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>more_vert</md-icon>
+      </md-icon-button>
+      </template></colab-cell-toolbar></div><div class="main-content"><div class="cell-contents"><colab-form-title class="formview-title layout horizontal center markdown"><md-icon-button class="header-section-toggle" title="Hide code" data-aria-label="Hide code" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Hide code">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template><md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>keyboard_arrow_down</md-icon></md-icon-button><div class="layout grow"><span><h3>Battle ������������ ������ ��� CFG.repo���+ ��������� token������������ Run</h3></span></div></colab-form-title><div class="cell-mask"></div><span class="imported-info-area"></span><div class="codecell-input-output">
+      <div class="inputarea horizontal layout code">
+        <div class="cell-gutter">
+          
+          <div class="cell-execution-container">
+            <colab-run-button><template shadowmode="open"> <div class="cell-execution focused animating running">
+      <button id="run-button" aria-describedby="run-button-tooltip" aria-label="Run cell" aria-disabled="false">
+        <span aria-hidden="true" class="cell-execution-indicator">
+  <md-circular-progress indeterminate="" data-aria-hidden="true"><template shadowmode="open">
+      <div role="progressbar" aria-valuemin="0" class="progress  indeterminate " aria-valuemax="1"> <div class="spinner">
+      <div class="left">
+        <div class="circle"></div>
+      </div>
+      <div class="right">
+        <div class="circle"></div>
+      </div>
+    </div></div>
+    </template>
+  </md-circular-progress>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 24 24" id="stop-symbol">
+    <mask id="stopSymbolMask">
+      <rect width="100%" height="100%" fill="white"></rect>
+      <polygon points="9,9 9,15 15,15 15,9" fill="black"></polygon>
+    </mask>
+    <circle cx="12" cy="12" r="6.4224" mask="url(#stopSymbolMask)" id="filledCircle"></circle>
+  </svg>
+    
+</span>
+      </button>
+       <div class="status">
+      <div class="execution-count">[1]</div>
+      
+    </div>
+    </div></template></colab-run-button>
+          </div>
+        </div>
+      <div class="editor flex lazy-editor"><div class="editor flex monaco" data-keybinding-context="1" data-mode-id="notebook-python"><div class="view-lines"><div class="view-line"><span># @title Battle 采样节点 — 填 CFG</span></div><div class="view-line"><span>import time</span></div><div class="view-line"><span>CFG = {</span></div><div class="view-line"><span>    'lr': 0.0003,</span></div><div class="view-line"><span>    'steps': 10,</span></div><div class="view-line"><span>}</span></div><div class="view-line"><span>for i in range(CFG['steps']):</span></div><div class="view-line"><span>    time.sleep(1)</span></div></div></div></div><colab-form class="formview vertical layout flex"><div class="widget-area"><div><md-text-button class="toggle-code-button" value=""><template shadowmode="open" shadowdelegatesfocus="">
+      
+      <div class="background"></div>
+      
+      
+      <button id="button" class="button">
+      
+      <span class="touch"></span>
+      <slot name="icon"></slot>
+      <span class="label"><slot></slot></span>
+      
+    
+    </button>
+    </template>Hide code</md-text-button></div></div></colab-form></div>
+    <div class="output" aria-label="Cell 1 output" role="region"> <div class="output-header"> </div>
+        <div class="output-content">
+          <div class="output-info"><colab-output-info><template shadowmode="open"><md-icon-button toggle="" class="toggle-visibility-button" touch-target="none" data-aria-label="Show/hide output" id="toggle-visibility-button" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Show/hide output" aria-pressed="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>keyboard_arrow_down</md-icon>
+        <md-icon slot="selected" aria-hidden="true"><template shadowmode="open"><slot></slot></template>keyboard_arrow_right</md-icon>
+      </md-icon-button>
+      <md-icon-button touch-target="none" data-aria-expanded="false" data-aria-haspopup="menu" class="menu-button focused" data-aria-label="Code cell output actions" id="menu-button" value=""><template shadowmode="open" shadowdelegatesfocus=""><button id="button" class="icon-button  standard " aria-label="Code cell output actions" aria-haspopup="menu" aria-expanded="false">
+        
+        
+        <span class="icon"><slot></slot></span>
+        
+        <span class="touch"></span>
+  </button></template>
+        <md-icon aria-hidden="true"><template shadowmode="open"><slot></slot></template>more_horiz</md-icon>
+      </md-icon-button>
+      </template></colab-output-info></div>
+          <div class="output-iframe-container">
+            <div class="output-iframe-sizer"> <div><div><colab-static-output-renderer tabindex="0" role="group"><div><div class="stream output-id-26 output_text"><pre>[00:05:28] [rollout-node] [keepalive] alive (0 min)
 [00:05:33] [rollout-node] build ok commit=e8b41cb ref=goal-nn
 step 1/10
 step 2/10
 Traceback (most recent call last):
   File "&lt;stdin&gt;", line 1, in &lt;module&gt;
 RuntimeError: boom
-</pre>
-                                        </div>
-                                      </div>
-                                      <div></div
-                                    ></colab-static-output-renderer>
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                        <colab-cell-next-steps
-                          ><template shadowmode="open"></template
-                        ></colab-cell-next-steps>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="add-cell">
-                    <hr />
-                  </div>
-                </div>
+</pre></div></div><div></div></colab-static-output-renderer></div></div></div>
+          </div>
+        </div></div><colab-cell-next-steps><template shadowmode="open"></template></colab-cell-next-steps></div></div></div><div class="add-cell">
+      <hr>
+    </div></div></div>
               </div>
             </div>
-          </div>
-          <section class="sidebar" aria-label="Comments"></section>
+          <section class="sidebar" aria-label="Comments"></section></div>
+          <div class="footer-links">
+      <colab-footer-links><template shadowmode="open">
+        
+        <a target="_blank" href="https://colab.research.google.com/signup?utm_source=footer&amp;utm_medium=link&amp;utm_campaign=footer_links" aria-label="Colab paid products Link will open in a new tab">Colab paid products</a>
+      
+         - 
+        <a target="_blank" href="https://colab.research.google.com/cancel-subscription" aria-label="Cancel contracts here Link will open in a new tab">Cancel contracts here</a>
+      </template></colab-footer-links>
+    </div>
         </div>
-        <div class="footer-links">
-          <colab-footer-links
-            ><template shadowmode="open">
-              <a
-                target="_blank"
-                href="https://colab.research.google.com/signup?utm_source=footer&amp;utm_medium=link&amp;utm_campaign=footer_links"
-                aria-label="Colab paid products Link will open in a new tab"
-                >Colab paid products</a
-              >
-
-              -
-              <a
-                target="_blank"
-                href="https://colab.research.google.com/cancel-subscription"
-                aria-label="Cancel contracts here Link will open in a new tab"
-                >Cancel contracts here</a
-              >
-            </template></colab-footer-links
-          >
-        </div>
-      </div>
-    </colab-scroller>
-  </body>
-</html>
+      </colab-scroller></body></html>
