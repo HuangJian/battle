@@ -1,0 +1,121 @@
+// 课程 z2-r5g2lr —— `z2-r5g2` 的**加速臂**：只把 lr 1.2e-4 → 2.4e-4（2026-10-30）
+//
+// ── 与 z2-r5g2 的唯一差 ───────────────────────────────────────────────
+//   `lr` 与 `ppo_schedule[0].lr` 同步 1.2e-4 → **2.4e-4**（×2）。其余逐字相同：
+//   同起点（z2-r5guard it500 / wver 0c8795f767f161e1）、同价格表（含 wDef 2.5）、
+//   同关集 `16,22,3,6`、同 20 敌 3 命、同 eval **100 seed/关 = 400 局/点 × every 5**。
+//   ⇒ 两臂唯一变量 = 步长，可直接回答「续训能不能更快」。
+//
+// ── 为什么是 lr ───────────────────────────────────────────────────────
+//   guard 500 轮的 kl 末 20 轮只有 0.0027，而 kl_cap 0.1 ⇒ **37 倍余量**，步长不是被护栏卡住的，
+//   是被 lr 卡住的。加大的成本可控（kl_coef 0.05 仍是软惩罚）。
+//   不改 target_transitions（24576）：加大批次是"每轮更准"，不是"更快"，且会把 6.5h 拉成 13h。
+//
+// ── 判据（与 z2-r5g2 相同，另加一条）──────────────────────────────────
+//   · 主：clear 相对起点 **32.5%（400 局口径）**再升 ≥5pp；副读数「基毁局平均 kills」。
+//   · **互比口径**：两臂互比不看末点，看「每墙钟小时涨了多少 pp」（lv 腿的 kl 更大 ⇒ 单轮更久）。
+//   · 停腿：entropy <0.55（起点 0.70，lr×2 的坍缩风险更高，这条先于 clear 判）；
+//     或 kl 连续 3 轮 >0.02；或 40 轮内 clear −5pp。
+
+// ── ★ 中途结算（2026-10-31 07:5x；**腿仍在跑**）—— **lr×2 被证伪** ────────────
+//   起点同上（`z2-r5guard.it500`，400 局口径 32.5% / 53.2%）。
+//   读数（400 局，逐 (stage,seed) 去重，带节点构成）：
+//   | it  | clear | base  | 执行节点 | self 组单看 |
+//   | 0   | 32.5% | 53.2% | reuse 400 | — |
+//   | 200 | 31.5% | 56.2% | 混合 | — |
+//   | 250 | 30.2% | 57.2% | 混合 | — |
+//   | 310 | 33.2% | 50.2% | self 293 + kaggle 71 + a97 36 | self 102/293 = **35%** |
+//   | 315 | 26.8% | 55.5% | self 293 + kaggle 67 + a97 40 | self 80/293 = **27%** |
+//   ⇒ **全程相对起点 −2 ~ +1pp，没有任何一个点显著**（最好 it310 +0.8pp，p=0.871）。
+//     末点 it315 的 self 组从 35% 掉到 27%（n=293，−8pp ≈2.9σ）——这次 self 在场，
+//     **不是节点构成问题**，是真的回落。
+//   ⚠ **采样 vs greedy 再次背离**：it315 的 rollout（采样）clear **36.2%**，greedy eval 26.8%
+//     （差 9.4pp）。entropy 0.60–0.70（比 g2 的 0.82 低）⇒ 策略更尖，但**众数变差、分布还行**。
+//   ⚠ **kl 是 g2 的 2.2 倍**（末 15 轮 0.0076 vs 0.0034，与步长 ×2 同步），
+//     **entropy 更低**（0.658 vs 0.818）—— 加大步长买到的是更大的 KL 和更尖的分布，**没买到能力**。
+//   判据：主（+5pp）**未达**，且末点触发预注册的"clear −5pp"止损线。
+//   结论：**lr 不是瓶颈。** 起手时"kl 0.0027 距护栏 0.1 有 37 倍余量 ⇒ 被 lr 卡住"的假设**证伪**；
+//     这套 stack 的停滞来自奖励/行为结构，不是优化器的步长。
+//     建议：本臂可以停（唯一变量已排除，继续跑只会在 30% 附近震荡）；算力让给
+//     `z2-r5all` / `z2-r5tempo` 两臂。
+//
+// ── 风险 ───────────────────────────────────────────────────────────────
+//   guard 的熵已坍缩 32%，lr×2 可能把它推得更快 ⇒ 本课真正的读数是
+//   「entropy 曲线 vs clear 曲线」的赛跑，不是单看 clear。
+
+{
+  "version": 5,
+  "name": "z2-r5g2lr",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00024,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00024,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5g2lr/weights.json",
+  "traj": "tmp/z2-r5g2lr",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5g2lr",
+  "backup_prefix": "z2-r5g2lr",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}

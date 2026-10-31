@@ -1,0 +1,150 @@
+// 课程 z2-r5g2 —— r5 续训：从 **z2-r5guard it500** 起步（2026-10-30）
+//
+// ── 为什么起点换成 guard it500 ────────────────────────────────────────────
+//   满池重评（200 seed/关 = 800 局）推翻了 80 局口径的判负（手法见 z2-r5guard 结课节）：
+//     it270               clear 26.1% / 基毁 58.2% / 命尽 15.6%
+//     z2-r5guard it500    clear 32.0% / 基毁 54.1% / 命尽 13.9%   ← **本课起点**
+//     z2-r5lam  it500     clear 29.6% / 基毁 55.6% / 命尽 14.8%
+//   去污染段（720 局）：guard 24.6→32.4（p=0.0003）、lam 24.6→30.7（p=0.0064）。
+//   根因：`eval_games_per_stage: 20` = `EVAL_SEEDS[:20]` = 前 20 个**连续** seed，it270 在该
+//   子集 40.0%、其余 720 局 24.6%（21-100 26.2% / 101-200 23.2%，单调下降）⇒ 前缀不是独立
+//   样本、且与权重强交互，能给出与全池**相反**的方向。⇒ 本课起判据一律**满池**，禁前缀切片。
+//
+// ── 与 z2-r5guard 的差（单变量 = 起点 + eval 规模）──────────────────────────
+//   ① `bc`：it270 → `nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json`
+//      （wver `0c8795f767f161e1` = 该点 evalA 的 wver，逐字对账）；
+//   ② `eval_games_per_stage` 20 → **100**（= 100 seed/关 = **400 局/点**，本机 8 slots ≈75s）；
+//      `eval_every` **保持 5**（101 个点，eval 总耗时 ≈2h）⇒ clear 率 SE 由 5.5pp 降到 ≈2.3pp；
+//      ⚠ 写 50 会被 `worker/eval_track.py:48` 翻译成 100，**写 100 才是字面 100**。
+//   ③ name/out/traj/backup_dir/backup_prefix 换新（fresh，绝不复用别腿目录）。
+//   **价格表逐字不动**（含 wDef 2.5 / pDef 0.15 / capDef 80）；关集 `16,22,3,6` / 20 敌 / 3 命 /
+//   max_ticks 20000 / γ0.998 λ0.95 / lr 1.2e-4 / epochs 4 / mb 1024 / kl 计划 / target_transitions
+//   24576 / paired_rotate_seed / decision_k 10 —— 全部与 guard 相同。
+//
+// ── 判据（预注册）──────────────────────────────────────────────────────
+//   · 主：**clear 率相对起点 32.5%（400 局口径）再升 ≥5pp**，且基毁率不升；
+//     副读数「基毁局平均 kills」（连续量，样本效率比二元 clear 高一个量级）。
+//     起点 400 局口径（前 100 seed/关）：clear **32.5%** / 基毁 **53.2%**；
+//     全 800 局口径另有 clear 32.0% / 基毁 54.1%（两者差 0.5pp，可互换，报告时标明口径）。
+//   · 配对：与 it500 权重逐 (stage,seed) 配对（**400 对**，100 seed/关），McNemar 双侧。
+//   · 分关（下面括号里的分母是 200 seed/关的全池口径，本课实际每关只评 100 seed，
+//     数字会有 1–2 局漂移，**只作方向参考**）：
+//     **2002 是地板（12/200 = 6%，基毁 182/200 = 91%）⇒ 本课核心目标是把 2002 抬到 15%+**；
+//     2000 已 63%（126/200），只防倒退；2001 30%、2003 29% 看有没有溢出收益。
+//   · 停腿：40 轮内 clear 相对起点 −5pp；或 entropy <0.55（起点已 0.70）；或 kl 连续 3 轮 >0.02。
+//   · 调参只动 wDef（2.5/3.0）与 pDef（0.15/0.12），不动别的。
+
+// ── ★ 中途结算（2026-10-31 07:5x；**腿仍在跑**，非终局判负）──────────────────
+//   起点 = `z2-r5guard.it500`（wver 0c8795f767f161e1），400 局口径 **32.5% / 基毁 53.2%**。
+//   读数（100 seed/关 = 400 局，逐 (stage,seed) 去重；**必须连节点构成一起读**）：
+//   | it  | clear | base  | 执行节点 | 备注 |
+//   | 0   | 32.5% | 53.2% | reuse 400 | 起点（缓存）|
+//   | 225 | **37.2%** | 48.2% | self 306 + kaggle 74 + a97 20 | **峰值** |
+//   | 325 | 34.8% | 52.8% | self 281 + kaggle 76 + a97 43 | |
+//   | 345 | 33.2% | 50.7% | self 302 + kaggle 64 + a97 34 | 末个**可比**点 |
+//   | 350 | 26.5% | 57.8% | **kaggle 252 + a97 148（self 全缺席）** | **不可比，作废** |
+//   判据（+5pp）：峰值 +4.8pp 但 McNemar **p=0.140**（不显著）；末个可比点 +0.8pp（p=0.867）
+//     ⇒ **未达预注册线，方向为正但分不出**。
+//   ⚠ **it350 = 真实末点，不是评估伪影**：26.5% / 基毁 57.8%，相对起点 −6.0pp
+//     （400 局配对：新清 48 / 丢清 72，McNemar **p=0.035，显著变差**）。
+//     2026-10-31 08:3x 用 `tools/sim/eval-course-ckpt.ts`（= `runEvalOne` 函数路径，与训练栈
+//     同源）复现该点 **12/12 逐字一致**（outcome + ticks 全同）⇒ 账本没问题、云节点没问题。
+//     同时定位到一个坑：手搓 `export-eval-game.ts` CLI 复现时必须传 **`--player-level`**，
+//     **漏了它整局都不同**（实测漏参 3/3 不一致、补 `--player-level 0` 后 3/3 逐字一致）。
+//     ⇒ 之前写的"greedy 跨节点不可比"**是错诊断，已作废**。
+//     但 **greedy 与采样确实背离**：同期 rollout 稳定 30–35%、entropy 0.82 ⇒
+//     策略的**众数变差、分布还行**（AGENTS §15.3 的老问题），不是评估口径问题。
+//   分关（it0 → it345，clear/100）：2000 63→61 · 2001 27→31 · **2002 8→7（死结，从未到 15%）** ·
+//     2003 32→34 ⇒ 四关都没突破；2002 占全池 25% 却只贡献 7% 的胜局，**全池上限被这一关锁死**。
+//   2002 的画像（vs 2000 关）：kills 6.25 vs 15.92 · walk 79.2 vs 134.3 · **stuck 137/千 vs 97/千** ·
+//     dmg 297 vs 498 · 基毁局 tick 2938 ⇒ **卡墙 + 不交战 + 早塌**。`walkCap 20` 在该关被绑死
+//     （实际要走 79 格），但**单纯提 walkCap 未必对**：见 `z2-r5all` 的 wStop 与 `z2-r5tempo` 的密度税。
+//   训练侧（350 个 iteration）：entropy **0.692 → 0.822（回升，不是坍缩）** · value 347→274 ·
+//     kl 末 15 轮 0.0034 · rollout clear 全程 30–35% 摆动。
+//     ⇒ **训练目标与 greedy 评估同步停滞**；entropy 回升说明它在探索，只是找不到更好的解。
+//   结论：**续训不是杠杆**。500 轮的预算烧在 32–37% 这个平台上，且最好点不显著。
+//     下一步已转向两条多变量腿（`z2-r5all` / `z2-r5tempo`）；本课若继续跑，只在 it350 类
+//     "云节点独占"的点上出现的暴跌一律先查 node 构成，不要写进日志。
+//
+// ── 已知风险 ───────────────────────────────────────────────────────────
+//   ① guard 的 entropy 已由 1.031 掉到 0.70（−32%）⇒ 续训会继续坍缩，本课盯熵；
+//      下一腿若需要，加 ent 正则（本课不加，保持单变量）。
+//   ② basePressure 税是**累积型** Φ（不可观测隐藏状态）⇒「有效」不等于「机制正确」；
+//      见 `z2-r5guard.jsonc` 结课节的机制批评，别把本课的收益归因到税的设计。
+
+{
+  "version": 5,
+  "name": "z2-r5g2",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5g2/weights.json",
+  "traj": "tmp/z2-r5g2",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5g2",
+  "backup_prefix": "z2-r5g2",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}
