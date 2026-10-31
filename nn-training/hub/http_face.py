@@ -117,6 +117,9 @@ from hub.queue import _HubQueue
 from hub.result import ResultRoutes
 from hub.schedule import ScheduleRoutes
 
+# worker 静默哨兵（2026-10-31）：纯观测的进程级打点表，零依赖叶子 ⇒ 本模块（L5）在它上面。
+from hub.worker_pulse import WorkerPulse
+
 # 类属性 `push: PushDispatcher | None` 同理：注解要在模块级可解析。
 # 只 import 这一个名字（`PushWorkers` / `DEFAULT_PUSH_CONFIG` 是引导链的，住 `hub/boot.py`）。
 from remote.push_dispatch import PushDispatcher
@@ -220,7 +223,31 @@ class HubHandler(
     #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
     _worker_source_warned: dict[str, float] = {}
 
+    #: ★ worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：每个带 `X-Worker-Id` 的请求
+    #: `touch()` 一下，后台线程（`hub/boot.py` 的 `hub-worker-pulse`）每 5s 扫一拍，静默
+    #: ≥ 阈值且本 episod 有轮询节奏 ⇒ 一条 err 上报进 `note_worker_error` 的 ring。
+    #: 与 `_seen_worker_sources` 同规：进程级类属性（ThreadingHTTPServer 每请求新建实例）。
+    _worker_pulse: WorkerPulse = WorkerPulse()
+
     # ---- 基础 ----
+    @classmethod
+    def pulse_events(cls) -> list[dict]:
+        """扫一拍 worker 静默哨兵，返回本拍要上发的事件（**只给 `hub/boot.py` 的后台线程调**）。
+
+        为什么留这个 classmethod 而不是让引导链直接摸 `_worker_pulse`：状态是进程级类属性
+        （`ThreadingHTTPServer` 每请求新建实例），但「谁有资格读它」应当是显式的——
+        boot 只负责把事件翻译成 `note_worker_error` 的上报体 + 一行日志。
+        """
+        return cls._worker_pulse.sweep()
+
+    @classmethod
+    def configure_pulse(cls, *, silence_sec: float) -> None:
+        """按启动参数重建哨兵（`--worker-silence-sec`；0 或负数 = 关闭）。
+
+        与 `hub`/`push` 同规：**引导链注入类属性**，`HubHandler` 自己不读 CLI。
+        """
+        cls._worker_pulse = WorkerPulse(silence_sec=silence_sec)
+
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/peek 拉活、result/payload 轮询含 404）
         # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、
@@ -534,6 +561,7 @@ class HubHandler(
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
+        self._worker_pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
@@ -608,6 +636,7 @@ class HubHandler(
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        self._worker_pulse.touch(self._worker_id())
         if path.startswith("/offline/"):
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()

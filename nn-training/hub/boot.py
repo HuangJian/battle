@@ -56,6 +56,7 @@ from hub.offline_push import (
 )
 from hub.queue import _HubQueue
 from hub.store import _JobStore
+from hub.worker_pulse import WORKER_PULSE_SILENCE_SEC, WORKER_PULSE_SWEEP_SEC, error_body
 from remote.code_snapshot import ensure_cluster_snapshot
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
@@ -189,6 +190,17 @@ def main() -> None:
         type=float,
         default=DISCOVER_SCAN_SEC,
         help=f"自动发现的扫描节拍（秒；缺省 {DISCOVER_SCAN_SEC:g}）",
+    )
+    # worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）：hub 是唯一知道「谁还活着」的地方
+    # ——云侧把整机收走时，云机上的日志与浏览器上报腿一起消失，只有 hub 的请求间隔还留着。
+    ap.add_argument(
+        "--worker-silence-sec",
+        type=float,
+        default=WORKER_PULSE_SILENCE_SEC,
+        help=(
+            f"worker 静默告警阈值（秒；缺省 {WORKER_PULSE_SILENCE_SEC:g}，0=关闭）——"
+            "超时且本 episod 有轮询节奏 ⇒ 一条 err 进 /admin/errors（只观测）"
+        ),
     )
     ap.add_argument(
         "--lock-file",
@@ -428,6 +440,36 @@ def main() -> None:
             f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线 push 派发**未挂载**"
             "（启动参数无 --offline-push）——离线 worker 注册进来也不会派单；"
             "控制台节点页「离线 push」面板会显示「hub 未启用」",
+            flush=True,
+        )
+    # ── worker 静默哨兵（2026-10-31，`hub/worker_pulse.py`）─────────────────────────
+    # 只在**进程入口**起线程（不在 `make_server` 里）：e2e/用例起 hub 时会拿到默认阈值但
+    # 不起后台线程 —— 观测面不该给夹具塞一条常驻线程（同 `--discover` 的后台节拍只在 main 起）。
+    if args.worker_silence_sec != WORKER_PULSE_SILENCE_SEC:
+        HubHandler.configure_pulse(silence_sec=args.worker_silence_sec)
+    if args.worker_silence_sec > 0:
+        def _pulse_loop() -> None:
+            while True:
+                time.sleep(max(0.05, WORKER_PULSE_SWEEP_SEC))
+                try:
+                    for ev in HubHandler.pulse_events():
+                        body = error_body(ev, silence_sec=args.worker_silence_sec)
+                        # 进 hub 的错误 ring（控制台 `/admin/errors` 读面自然呈现），并落一行
+                        # 日志——后者是**事后**唯一能 grep 的痕迹（ring 只活
+                        # `WORKER_ERROR_TTL_SEC`＝120s，控制台没在跑就没人接得住）。
+                        hub.note_worker_error(body)
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] [hub-server] ⚠ {body['reason']}"
+                            f"（worker={body['worker']}，只观测，不影响派发）",
+                            flush=True,
+                        )
+                except Exception as e:  # 观测面坏掉不该让进程死（同 discover 扫描失败）
+                    print(f"[hub-server] 静默哨兵扫描失败: {e}", flush=True)
+
+        Thread(target=_pulse_loop, daemon=True, name="hub-worker-pulse").start()
+        print(
+            f"[hub-server] worker 静默哨兵已挂载：阈值={args.worker_silence_sec:g}s "
+            f"扫描={WORKER_PULSE_SWEEP_SEC:g}s ⇒ 静默事件进 /admin/errors（只观测）",
             flush=True,
         )
     srv = make_server(

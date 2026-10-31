@@ -155,6 +155,10 @@ LAYERS: dict[str, int] = {
     # 鉴权原语（S4 第十五刀）：`_is_loopback` + `_AuthGuard`（D9 闭锁）从 `hub_server` 下沉到这里。
     # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
     "hub.auth": 0,
+    # worker 静默哨兵（2026-10-31，`plan` 外的热修；见 `hub/worker_pulse.py` 头部）：只靠
+    # stdlib（time/threading）⇒ **L0**。读者是 `hub.http_face`(L5) 的类属性与 `hub.boot`(L6)
+    # 的后台线程——两条边都严格向上，秩不变。
+    "hub.worker_pulse": 0,
     "hub.blob": 0,
     "hub.schedule": 0,
     # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
@@ -216,6 +220,10 @@ LAYERS: dict[str, int] = {
     # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
     # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
     "remote.error_report": 0,
+    # worker 生命周期上发腿（2026-10-31，`remote/lifecycle.py`）：站在 `remote.error_report`(L0)
+    # 上面（用它发、并且要用 `error_payload`/`post_error` 的同步档）⇒ **L1**。读者只有
+    # `remote.worker`(L5) 一处（`Lifecycle` 四调用点），严格向上。
+    "remote.lifecycle": 1,
     # 2026-09-30（刀 3）：`serve_pool` / `iter_rollout` 出包到 `worker/` ⇒ 键前缀随之改。
     # ⚠ 它们**不是**「搬走就不必入账」：与 `remote.*` 之间**有边**（`remote.worker` →
     # `worker.iter_rollout`、`remote.offline_eval` → `worker.serve_pool`），所以仍在**同一套**

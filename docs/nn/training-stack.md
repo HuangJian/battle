@@ -7,6 +7,39 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §53 云机「静默死」的两条观测腿：hub 静默哨兵 + worker 生命周期上发（2026-10-31）
+
+**一句话**：kaggle 那台 2×T4 **09:51:58 之后再没有一条请求**（整机被云侧收走），而本机当时
+一个字都看不到——`kaggle-*.log` 是**浏览器脚本**抓 cell 输出上报的（`userscript/src/
+notebook-companion/app/ship-loop.ts`），人不在电脑前就一条不传；事故窗口（08:39:37→10:02:05）
+正好和「日志断流」重合，事后只能靠 `tmp/hub-server.out` 的 claim/result cadence 反推死亡时刻。
+⇒ 补两条**独立**的腿：hub 知道「它什么时候不再说话」，worker 自己说「我最后一眼看到什么」。
+
+**事故事实（用于以后对表）**：notebook 日志末行 `00:39:37Z`（=08:39:37 北京）；同一 job
+`0cdf51c23456e74e` 的结果 **08:40:23 还交回了 hub** ⇒ 日志静默 ≠ worker 停工。rollout 节点
+（trainer 侧 `node kaggle`）最后一局 09:22:30、`3 consecutive failures — circuit-broken` 09:22:42、
+此后每轮 `ping failed`；PPO worker 最后 claim 09:51:42、最后一次请求 09:51:58、10:02:18 换出口
+IP（`136.67.55.113`→`34.133.232.57`）重启并 `reclaims=1` 收回旧租约。两个死点差 29 分钟 ⇒
+各自云侧会话被终止，不是 hub/本机/网络的共因。
+
+**落地**：
+
+- `hub/worker_pulse.py`（L0）：`touch(worker)` 由 `hub/http_face.py` 的 `do_GET`/`do_POST` 每个
+  带 `X-Worker-Id` 的请求打一次；`sweep()` 由 `hub/boot.py` 的 `hub-worker-pulse` 线程每 5s 扫一拍。
+  阈值 `--worker-silence-sec`（缺省 120s，0=关）；**武装门槛 ≥3 次请求/episod**（push worker 与
+  一次性冒烟不会被误报）；一段静默**只报一次** err + 恢复时补一条 `recover`（带静默时长）。
+- `remote/lifecycle.py`（L1）：`启动 / 读点（缺省 15min，只在 job 边界）/ SIGTERM·SIGINT / 收线`
+  四类上发，进 hub 的 `/admin/worker-error` ring（控制台 `component=worker-lifecycle`）。
+  启动/收线/信号走**同步**发送（进程马上要没，异步线程活不到发完）；读点走异步（不占关键路径）。
+  SIGINT 上报后交回默认处置（`KeyboardInterrupt`，回传收尾照跑）；SIGTERM 上报后恢复 `SIG_DFL`
+  再自投一发（rc=143 语义不变，但顺序变成「先上报后死」）。
+
+**边界（别指望它）**：① `WORKER_ERROR_TTL_SEC=120s` ⇒ ring 里那条只活两分钟，**控制台没在跑就
+没人接得住**；`tmp/hub-server.out` 的 `⚠ worker … 静默 …s` 那行才是永久痕迹（判读就 grep 它）。
+② SIGKILL 时 `remote/lifecycle.py` 必然沉默，只剩哨兵。③ `readings()` 的显存只在 torch **已加载**
+（`sys.modules`）时才有数——启动行写「未加载」是正常的，别看错。④ 两条腿都**不进任何派发判据**。
+
+---
 ## §52 z2-r5 基毁归因（it270）：114/115 是敌弹；两臂 z2-r5guard / z2-r5lam 预注册（2026-10-30）
 
 **一句话**：`z2-r5base`.it270（80 局 = 清 32 / 基毁 38 / 命尽 10，clear 40.0%）的逐局回放证明

@@ -307,6 +307,7 @@ from remote.job_lifecycle import (
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
 from remote.job_round import run_one_round
+from remote.lifecycle import Lifecycle
 from remote.payload_proc import PayloadProcess, make_prefetcher
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
@@ -1023,6 +1024,13 @@ def worker_loop(
     # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
     # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
     log(f"worker 身份：{worker_id}")
+    # 生命周期上发（2026-10-31，`remote/lifecycle.py`）：启动 / 读点 / SIGTERM / 收线四条。
+    # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
+    # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
+    life = Lifecycle(
+        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+    )
+    life.start()
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
@@ -1131,6 +1139,7 @@ def worker_loop(
                     break  # --once：无 job 或已处理完都退出（冒烟/单发）
                 if max_idle_sec > 0 and time.time() - idle_since > max_idle_sec:
                     log(f"idle > {max_idle_sec}s — exit")
+                    life.why(f"空闲超时 >{max_idle_sec:g}s")
                     break
                 if time.time() - _last_alive_log > ALIVE_LOG_SEC:
                     _alive_log(
@@ -1138,6 +1147,7 @@ def worker_loop(
                     )
                     _last_alive_log = time.time()
                     _polls_since_log = 0
+                life.tick()
                 time.sleep(poll_sec)
                 hi = (hi + 1) % len(hubs)  # 空闲也轮转：多 hub 下一个也得被问到
                 continue
@@ -1214,6 +1224,7 @@ def worker_loop(
                         "——让路只拖长传输；回退档 --bulk-yield always"
                     )
             if round_.stop:
+                life.why("hub 要求停算")
                 return done
             job_ok = round_.ok
             if once:
@@ -1257,6 +1268,8 @@ def worker_loop(
                 "★ 回传收尾有未落定/失败的结果——训练侧会在租约过期后才发现，"
                 "请按上面的 jid 排查（hub 日志 / 网络）"
             )
+        # 收线上报放在**回传收尾之后**：最后一个读点因此包含「结果到底交没交出去」之后的状态。
+        life.close(done)
 
 
 def main() -> None:
