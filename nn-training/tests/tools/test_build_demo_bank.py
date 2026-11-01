@@ -2,7 +2,7 @@
 
 为什么单独一条：这个脚本已经漂过一次（POLICY_EXTRA 9→37 仍硬编码 9）。
 本用例同时钉住三件事：
-  · 当前 shard（46 scalars / 57 extra / obsSchemaMajor=6）能建出正确的 bank；
+  · 当前 shard（46 scalars / 57 extra / obsSchemaMajor=OBS_SCHEMA_MAJOR）能建出正确的 bank；
   · v4 旧 extra（9 维）/ v3 旧 scalars（30 维）不许静默入库；
   · manifest 的 obsSchemaMajor < 当前 schema 不许入库（防拿旧目录建库）。
 """
@@ -21,6 +21,8 @@ import pytest
 NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
+
+from common.schema import BOARD, OBS_CHANNELS, OBS_SCHEMA_MAJOR, POLICY_EXTRA_DIM, SCALAR_DIM
 
 
 def _load_tool() -> Any:
@@ -43,14 +45,14 @@ def _write_shard(
     name: str,
     *,
     n: int = 3,
-    scalars: int = 46,
-    extra: int = 57,
-    obs_schema_major: int = 6,
+    scalars: int = SCALAR_DIM,
+    extra: int = POLICY_EXTRA_DIM,
+    obs_schema_major: int = OBS_SCHEMA_MAJOR,
 ) -> Path:
     d = root / name
     d.mkdir(parents=True)
     rng = np.random.default_rng(abs(hash(name)) % (2**32))
-    np.save(d / "obs.npy", rng.integers(0, 256, (n, 16, 26, 26), dtype=np.uint8))
+    np.save(d / "obs.npy", rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
     np.save(d / "scalars.npy", rng.standard_normal((n, scalars)).astype(np.float32))
     np.save(d / "extra.npy", rng.standard_normal((n, extra)).astype(np.float32))
     np.save(d / "actions.npy", rng.integers(0, 2, (n, 2), dtype=np.uint8))
@@ -85,7 +87,7 @@ def test_builds_current_bank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
     with np.load(out) as z:
         assert sorted(z.files) == ["actions", "extra", "masks", "obs", "scalars"]
-        assert z["obs"].shape == (6, 16, 26, 26)
+        assert z["obs"].shape == (6, OBS_CHANNELS, BOARD, BOARD)
         assert z["scalars"].shape == (6, 46)
         assert z["extra"].shape == (6, 57)
         assert z["actions"].shape == (6, 2)

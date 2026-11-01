@@ -588,6 +588,10 @@ LAYERS: dict[str, int] = {
     # v4（plan/policy-spatial-head.plan.md S0-c）：腿 A/B 起点权重转换（一次性 CLI；
     # 函数内 import worker.models.student（L2）⇒ 拓扑秩 = L3）。
     "worker.scripts.init_spatial_leg": 3,
+    # v7（plan/r5-next.plan.md §3.4）：obs 通道迁移（stem 三段式；一次性 CLI）。顶层只
+    # import `common.*`；函数内 import `worker.data.weights_io`(L1) /
+    # `worker.models.arch_meta`(L1) / `worker.models.student`(L2) ⇒ 拓扑秩 **L3**。
+    "worker.scripts.migrate_obs_channel": 3,
     "worker.train.bc": 3,
     # L4（12 个）
     "worker.iter_job": 4,

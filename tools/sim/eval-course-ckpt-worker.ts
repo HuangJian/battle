@@ -82,6 +82,9 @@ export interface EvalCourseRow {
   /** metrics v10 差距四族（可选：远端/旧 bundle 的行没有这些字段，汇总侧按 0 计）。
    *  与 rollout metrics 行同名同义（同一实现 `src/nn/danger-metrics.ts`）。 */
   stopTicks?: number
+  /** 撞墙压制拍 / 存活拍（wallPress/千 的分子与分母；与 export-eval-game 同源）。 */
+  wallPressTicks?: number
+  aliveTicks?: number
   fireHeldTicks?: number
   nearEnemy4Ticks?: number
   damageBursts?: number
@@ -183,6 +186,8 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         onLaneMoveTicks: res.onLaneMoveTicks,
         onLaneHoldFireTicks: res.onLaneHoldFireTicks,
         stopTicks: res.stopTicks,
+        wallPressTicks: res.wallPressTicks,
+        aliveTicks: res.aliveTicks,
         fireHeldTicks: res.fireHeldTicks,
         nearEnemy4Ticks: res.nearEnemy4Ticks,
         damageBursts: res.damageBursts,

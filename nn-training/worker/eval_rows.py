@@ -264,8 +264,27 @@ def eval_v13_fields(manifest: dict | None) -> dict:
     return out
 
 
+EVAL_MECHANISM_KEYS = ("wallPressTicks", "aliveTicks")
+
+
+def eval_mechanism_fields(manifest: dict | None) -> dict:
+    """机制闸两列（`wallPress/千 = wallPressTicks / aliveTicks × 1000` 的分子/分母）。
+
+    与 v8–v13 的「缺键 = 整键省略」同约：旧 agent/旧报告没有这两列 ⇒ 不进行，
+    读数方按 unknown 处理，不伪造 0（2026-11-01：E2 的机制闸必须能读到分子/分母）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_MECHANISM_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_metric_fields(manifest: dict | None) -> dict:
-    """**metrics 族的唯一聚合入口** = v8 ∪ v9 ∪ v10 ∪ v11 ∪ v12 ∪ v13。
+    """**metrics 族的唯一聚合入口** = v8 ∪ v9 ∪ v10 ∪ v11 ∪ v12 ∪ v13 ∪ mechanism。
 
     为什么要有它（2026-10-19）：v8–v13 六个族在**两处**行构造点逐族展开
     （`eval_rows.eval_row` 与 `trainer/batch_runner.py`），加一族就要改两处、且容易漏一处
@@ -283,6 +302,7 @@ def eval_metric_fields(manifest: dict | None) -> dict:
         eval_v11_fields,
         eval_v12_fields,
         eval_v13_fields,
+        eval_mechanism_fields,
     ):
         out.update(fn(manifest))
     return out
@@ -351,6 +371,8 @@ def eval_row(
         "cellsVisited": manifest.get("cellsVisited"),
         "firstKillTick": manifest.get("firstKillTick"),
         "stuckTicks": manifest.get("stuckTicks"),
+        # 机制闸（plan/r5-next §5.3）：wallPress/千 的分子/分母；缺键 = 整键省略。
+        **eval_mechanism_fields(manifest),
         # metrics v8 危险暴露四列（与 batch_eval.record 同源，见 eval_v8_fields）。
         **eval_v8_fields(manifest),
         # metrics v9 命中方位 + 穿越税观测族（与 batch_eval.record 同源，见 eval_v9_fields）。

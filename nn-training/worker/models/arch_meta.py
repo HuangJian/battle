@@ -36,7 +36,9 @@ SPATIAL_TOWER_FEAT = SPATIAL_TOWER_C * SPATIAL_TOWER_POOL * SPATIAL_TOWER_POOL  
 ModelT = TypeVar("ModelT")
 
 
-def read_arch_kwargs(weights_path: str | None) -> dict[str, Any]:
+def read_arch_kwargs(
+    weights_path: str | None, *, allow_legacy_schema: bool = False
+) -> dict[str, Any]:
     """权重文件的 `arch` 元数据 → `PPOStudent(...)` 的构造关键字（纯读，免框架）。
 
     `None` / 路径不在 ⇒ 全默认档（legacy 128）。**给了存在的路径就必须读得动**：坏文件在这里
@@ -45,11 +47,14 @@ def read_arch_kwargs(weights_path: str | None) -> dict[str, Any]:
 
     只读**清单**（`read_weights_meta`，不解码 base64 张量）：arch 判据用不上那几百 KB 的
     权重本体，而两侧的 `load_state_into` 本来就要整份解码一次（那是它的事）。
+
+    `allow_legacy_schema=True` 只给 **schema 迁移脚本**（`scripts/migrate_obs_channel.py`）：
+    它必须先按旧档的 arch 建出同架构模型；生产路径（`build_ppo`）保持严格门（缺省 False）。
     """
     h = d = head_hidden = None
     policy_extra = spatial_tower = action_v6 = False
     if weights_path and os.path.exists(weights_path):
-        meta = read_weights_meta(weights_path)
+        meta = read_weights_meta(weights_path, allow_legacy_schema=allow_legacy_schema)
         a = meta.get("arch", {})
         h = a.get("h", DEFAULT_H)
         d = a.get("d", DEFAULT_D)

@@ -10575,3 +10575,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `bun run check` 2659 pass / 8 skip / 0 fail · nn `pytest` 两文件 68 passed · ruff 全过。
 - **未验证**：真实饱和集群上的下一轮 busy 计数（`/v1/status.admission.waiting/timedOut` 是观测口，
   要等一次真拥堵）。
+
+## §2026-11-01-goalnn-r5-e2a-dist-enemy-ch16（2026-11-01，E2-A 单通道版：`OBS_CHANNELS 16→17` / `OBS_SCHEMA_MAJOR 7` / `ch16 distEnemy`；ch17 与 s46 本波不做）
+
+- **背景**：plan/r5-next.plan.md §3.4 原稿是「两通道 + 一标量」。E0b′
+  （`reports/r5-p0-measurements-20261101.md` §11，只读探针 `tmp/_probe/e0bp.ts`）把前置判完：
+  `ch16 distEnemy` 过冗余门（BFS 路距 vs s14 欧氏在四邻格的梯度分歧 45.6%/41.8%，
+  ≥2 格分歧 35.1%/40.3%）；`ch17 distPickup` 判冗余（≥2 格 1.8–5%、四邻梯度 1.4–4.2%）。
+- **决定**：本波只加 `ch16`（单变量纪律），`ch17` / `s46 bestPickupValue` 留 E2-B 另案；
+  `SCALAR_DIM` 保持 46。语义护栏：最近敌 ≠ 距基地最近敌 29.0%（2002 36.2%）⇒ ch16 是
+  **导航/交战**通道，不是回防通道，报告读数不得按「保护基地」解读。
+- **编码（冻结）**：`ch = d < 0 ? 255 : min(254, round(255·d/dRef))`，dRef=26；源 = 中心格 +
+  `alive && allegiance==='enemy' && spawnTimer<=0`；单位成本 BFS，钢/水不可通行、砖按 1
+  （E0b′ 主口径；砖=3 备选两档冗余读数相同，被否决）。**无激活敌 ⇒ 全 0**（缺席=0，
+  与「无基地 ⇒ ch5 全 0」同纪律）；有敌但不可达写 255 ⇒ 0/255 语义不混。
+- **权重迁移**：stem 三段式（旧 obs | 新列 0 | coord 后移），新脚本
+  `nn-training/worker/scripts/migrate_obs_channel.py`，落盘前在**旧 schema 输入**上比四头
+  logits（`torch.equal` 逐位相等，本机实测通过）。`init_spatial_leg.py` 的五张表不覆盖
+  stem（只管 fc/头），故另写一套；`arch_meta.read_arch_kwargs` 加 `allow_legacy_schema=`
+  （仅迁移脚本用，生产 `build_ppo` 的严格门不变）。
+- **TS 运行时**：`StudentModel.inCh` 改为从 `stem.weight` 形状反推（与 `scalarDim` 同纪律）
+  —— 旧 fixture/归档权重（16 通道）与新权重（17）同代码可读；硬取常量会让旧档 coord
+  从第 17/18 个输入位读 ⇒ 从 stem 起静默错位。
+- **验收**：`bun run check` 2666 pass / 8 skip / 0 fail · `bun run build` 绿 ·
+  `freeze:check` 签名不变 `0ff1ba66…`（21 组合 / 113,586 行）· torch↔TS 新 schema golden
+  三头 max|Δ| ≤ 4.8e-7。**Paddle 三步对账未跑**（本机无 `tmp/paddle-venv`；两侧 stem 都从
+  `OBS_CHANNELS` 建、`arch_meta` 共用 ⇒ 形状同源，有 venv 的机器须补跑）。
+- **接线闸**：it150（`drop0` 起点下 40 轮翻转率是构造性 0）：`--ablate-ch 16` 翻转率 ≥
+  同批地形通道阳性对照 1/3，并同报 `stem.weight` 新列 L2 范数。

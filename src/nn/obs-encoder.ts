@@ -53,7 +53,10 @@ import {
 import { cornerAnchorDist, nearestPickupCenter, sampleBasePressure } from './danger-metrics'
 
 // ---- Canonical dimensions (mirror nn-training/common/schema.py) ----
-export const OBS_CHANNELS = 16
+// v7（plan/r5-next.plan.md §3.4 的单通道版；E0b′ 见 reports/r5-p0-measurements-20261101.md §11）：
+// 16→17，新增 ch16 `distEnemy`。ch17 `distPickup` / s46 `bestPickupValue` **本波不做**——
+// E0b′ 判 ch17 冗余（≥2 格分歧 1.8–5%、四邻梯度 1.4–4.2%），单变量纪律留给后续 E2-B。
+export const OBS_CHANNELS = 17
 export const BOARD = GRID // 26
 // v5（plan/obs-v5-vector-gap.plan.md，2026-10-12）：30 → 40（s30..s39 追加）。
 // v6（plan/nn-capability-upgrade.plan.md §4-B2）：40 → 46（s40..s45，prevAction /
@@ -64,7 +67,10 @@ export const SCALAR_DIM = 46
 // v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，且
 // critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
 // 指纹防语义错位、MAJOR 防版本混跑。
-export const OBS_SCHEMA_MAJOR = 6
+// v6：SCALAR_DIM 40→46（plan/nn-capability-upgrade.plan.md §4-B2）。
+// v7：OBS_CHANNELS 16→17（ch16 distEnemy；plan/r5-next.plan.md §3.4）⇒ 旧语料/旧权重同废，
+// 全量重导；权重迁移见 nn-training/worker/scripts/migrate_obs_channel.py（stem 三段式）。
+export const OBS_SCHEMA_MAJOR = 7
 
 // ---- Channel index map (plan §1.1 + obs-schema-v3.plan.md v4.0 §3.2) ----
 export const CH = {
@@ -84,7 +90,24 @@ export const CH = {
   waveHeat: 13, // projected spawns in next K ticks per spawn point（N 点通用）
   hitToKill: 14, // min(9, ceil(hp/damage))——随玩家星级重算（live damage，禁缓存）
   spawning: 15, // 生成中敌倒计时 Math.round(255*clamp01(spawnTimer/1000))（uint8 规则）
+  distEnemy: 16, // v7：多源 BFS 到最近激活敌的路距；255=有敌不可达，无激活敌 ⇒ 全 0
 } as const
+
+/**
+ * v7 ch16 `distEnemy` 的归一化分母（格）。
+ *
+ * 编码写死 `ch = d < 0 ? 255 : min(254, round(255·d/dRef))`（plan §3.4）：
+ *   · 不能写 0..1 —— grid 是 `Uint8Array` 且 stem 建网时统一 ×1/255 ⇒ 0..1 被量化成 0/1；
+ *   · 不能除以「本拍最大可达距离」—— 逐帧尺度，玩家不动整张图就跳；
+ *   · 255 只留给 unreachable（可达值截到 254），语义唯一。
+ * dRef = 26 = `BOARD`（半场宽），与 s14 的分母 `26·CELL·1.5` 同量级口径。
+ *
+ * **可通行性 = E0b′ 主口径**（`tmp/_probe/e0bp.ts`）：钢/水不可通行、砖按 1 步计入。
+ * 砖=3 的备选两档冗余读数相同（报告 §11），3 只会让读数更慢饱和，故不采用。
+ * **无激活敌 ⇒ ch16 全 0**（缺席=0，与「无基地 ⇒ ch5 全 0」同纪律）；有敌但被墙隔断的格写 255。
+ * 0/255 因此语义不混：0 = 没有目标，255 = 有目标但没有路。
+ */
+export const DIST_ENEMY_DREF = 26
 
 // ---- PowerUpType declaration order (src/types.ts:20-38) ----
 export const POWERUP_ORDER: PowerUpType[] = [
@@ -246,6 +269,9 @@ export class ObsEncoder {
   readonly obs: Uint8Array = new Uint8Array(OBS_CHANNELS * BOARD * BOARD)
   readonly scalars: Float32Array = new Float32Array(SCALAR_DIM)
   readonly extra: Float32Array = new Float32Array(POLICY_EXTRA_DIM)
+  /** ch16 多源 BFS 复用缓冲（§14.1：676 格，禁每 tick 分配；队列每格至多入队一次）。 */
+  private readonly _bfsDist = new Int32Array(BOARD * BOARD)
+  private readonly _bfsQueue = new Int32Array(BOARD * BOARD)
 
   encode(world: World): void {
     this.obs.fill(0)
@@ -255,6 +281,7 @@ export class ObsEncoder {
     this.encodeBase(world, hasBase)
     this.encodeSelf(world)
     this.encodeEnemies(world)
+    this.encodeDistEnemy(world)
     this.encodeBullets(world)
     this.encodePowerups(world)
     this.encodeWaveHeat(world)
@@ -370,6 +397,77 @@ export class ObsEncoder {
         this.writeBox(CH.hitToKill, t.x, t.y, TANK, TANK, hits)
       }
     }
+  }
+
+  /**
+   * v7 ch16 `distEnemy` —— 多源 BFS（单位成本）到最近**激活敌**的路距（plan §3.4）。
+   *
+   * 源 = 与 ch7-10 同口径的敌（`alive && allegiance==='enemy' && spawnTimer<=0`），
+   * 取**中心格**（与 E0b′ 探针一致）；生成中敌不算（那时它还不是威胁，ch15 另有倒计时）。
+   * 可通行 = 钢/水以外（砖按 1 步，与 E0b′ 主口径一致，见 `DIST_ENEMY_DREF`）。
+   * 无激活敌 ⇒ 直接 return（channel 保持 `encode()` 的清零 = 缺席 0）；有敌时不可达格写 255。
+   *
+   * 镜像无关（距离场在 mirrorX 下不变）；不读 `world.rng`、不改 World（§2.1/§2.3）。
+   */
+  private encodeDistEnemy(world: World): void {
+    const N = BOARD * BOARD
+    const dist = this._bfsDist
+    const queue = this._bfsQueue
+    dist.fill(-1)
+    let head = 0
+    let tail = 0
+    for (const t of world.tanks) {
+      if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+      const c = Math.floor((t.x + t.w / 2) / CELL)
+      const r = Math.floor((t.y + t.h / 2) / CELL)
+      if (c < 0 || c >= BOARD || r < 0 || r >= BOARD) continue
+      const i = r * BOARD + c
+      if (dist[i] === 0) continue // 同格多源只入队一次
+      dist[i] = 0
+      queue[tail++] = i
+    }
+    if (tail === 0) return
+    const grid = world.tileMap.grid
+    while (head < tail) {
+      const cur = queue[head++]
+      const c = cur % BOARD
+      const r = (cur - c) / BOARD
+      const nd = dist[cur] + 1
+      // 四邻（顺序无关：单位成本 BFS，首访即最短）
+      if (c + 1 < BOARD) tail = this._bfsRelax(grid, dist, queue, tail, cur + 1, nd)
+      if (c > 0) tail = this._bfsRelax(grid, dist, queue, tail, cur - 1, nd)
+      if (r + 1 < BOARD) tail = this._bfsRelax(grid, dist, queue, tail, cur + BOARD, nd)
+      if (r > 0) tail = this._bfsRelax(grid, dist, queue, tail, cur - BOARD, nd)
+    }
+    const base = CH.distEnemy * N
+    for (let i = 0; i < N; i++) {
+      const d = dist[i]
+      if (d < 0) {
+        this.obs[base + i] = 255 // 有敌但本格不可达（哨兵；可达值另截到 254）
+        continue
+      }
+      const v = Math.round((255 * d) / DIST_ENEMY_DREF)
+      this.obs[base + i] = v > 254 ? 254 : v
+    }
+  }
+
+  /** ch16 BFS 的单步松弛：未访问且可通行 ⇒ 写距离、入队，返回新的 tail。 */
+  private _bfsRelax(
+    grid: ReadonlyArray<ReadonlyArray<string>>,
+    dist: Int32Array,
+    queue: Int32Array,
+    tail: number,
+    i: number,
+    nd: number,
+  ): number {
+    if (dist[i] !== -1) return tail
+    const c = i % BOARD
+    const r = (i - c) / BOARD
+    const t = grid[r][c]
+    if (t === 'steel' || t === 'water') return tail
+    dist[i] = nd
+    queue[tail] = i
+    return tail + 1
   }
 
   private encodeBullets(world: World): void {
@@ -911,10 +1009,12 @@ export const SCHEMA_FINGERPRINT = fnv1a(
     CH.waveHeat,
     CH.hitToKill,
     CH.spawning,
+    CH.distEnemy, // v7：通道表逐元素 push（与 common/schema.py 的 CH.values() 同序）
     POWERUP_ORDER.join(','),
     BULLET_SPEED_BUCKETS_PX.join(','),
     SPAWN_COUNTDOWN_MS,
     WAVE_HEAT_TICKS,
+    DIST_ENEMY_DREF, // v7：ch16 的 dRef 也是「决定观测字节」的常量
     // POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
     // 与 common/schema.py `_FINGERPRINT_PARTS` 末项逐字同串（双端指纹测试共锚）。
     // v5：末段由三字段扩为四字段（`dim|names|swaps|neg`）——取负域与互换域分家，

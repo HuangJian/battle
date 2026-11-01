@@ -309,10 +309,17 @@ export class NNModel {
 /**
  * CoordConv-ConvMixer-Lite student (plan/RL-Net-Selection.md §4.3), BN-free.
  * Reproduces `nn-training/student_model.py` byte-for-byte from the exported
- * weights. 16 input channels = 14 encoder obs + 2 computed coord channels.
+ * weights. Input = `inCh` encoder obs channels (v7: 17) + 2 computed coord channels.
  */
 export class StudentModel implements ModelLike {
-  readonly inCh = OBS_CHANNELS
+  /**
+   * 输入 obs 通道数 = **从 `stem.weight` 形状反推**（[h, in_ch+2, 3, 3]），不是硬取
+   * `OBS_CHANNELS`。理由同 `scalarDim`（2026-10-19 同类坑）：schema bump（v7 的 16→17）
+   * 改得了 fixture，改不了已归档的生产权重——硬取 17 去读 16 通道旧档，coord 通道会从
+   * stem 的第 17/18 个输入位读，而旧权重把 coord 放在 16/17 位 ⇒ 从 stem 起静默错位。
+   * 反推后：旧权重只读 obs[0..15]、新权重读 obs[0..16]，两侧 coord 偏移各自自洽。
+   */
+  readonly inCh: number
   readonly board = BOARD
   /**
    * 融合宽度 = `fc.weight` 的**真实行宽** − h，不是硬取的 `SCALAR_DIM`。
@@ -443,6 +450,21 @@ export class StudentModel implements ModelLike {
 
     this.stemW = p('stem.weight')
     this.stemB = p('stem.bias')
+    // ★ obs 通道数反推（理由见 `inCh` 字段注释）：stem 输入 = obs 通道 + 2 coord。
+    const stemIn = this.stemW.length / (h * 9)
+    if (!Number.isInteger(stemIn) || stemIn < 2) {
+      throw new Error(
+        `StudentModel: stem.weight 长度 ${this.stemW.length} 与 h=${h} 不匹配` +
+          `（输入通道数 ${stemIn} 必须是整数且 ≥ 2）`,
+      )
+    }
+    this.inCh = stemIn - 2
+    if (this.inCh > OBS_CHANNELS) {
+      throw new Error(
+        `StudentModel: 权重要求 ${this.inCh} 个 obs 通道 > 本编码器 OBS_CHANNELS=${OBS_CHANNELS}` +
+          `（编码器喂不满 ⇒ 尾部恒 0；请升级 schema 或换权重）`,
+      )
+    }
     this.dwW = []
     this.dwB = []
     this.pwW = []
@@ -591,9 +613,9 @@ export class StudentModel implements ModelLike {
       this.spatialFcB = null
     }
 
-    // v3：in_ch = OBS_CHANNELS(16) + 2 coord 通道（原名 in16 保留——缓冲语义是
-    // 「obs 全通道 + 2 coord」，尺寸随 schema 常量走，勿写死）。
-    this.in16 = new Float32Array((OBS_CHANNELS + 2) * sp)
+    // v3：in_ch = 权重反推的 obs 通道 + 2 coord 通道（原名 in16 保留——缓冲语义是
+    // 「obs 全通道 + 2 coord」，尺寸随权重形状走，勿写死）。
+    this.in16 = new Float32Array((this.inCh + 2) * sp)
     // Coord channels: ch14[r*B+c] = round(c/(B-1)*255), ch15[r*B+c] = round(r/(B-1)*255).
     // MUST match nn-training/student_model.py coord_channels() exactly.
     this.coords = new Float32Array(2 * sp)
@@ -782,7 +804,7 @@ export class StudentModel implements ModelLike {
   private features(obs: Uint8Array, scalars: Float32Array): void {
     const sp = this.board * this.board
     const h = this.h
-    // v3: copy all OBS_CHANNELS(16) obs channels then append the precomputed coords.
+    // v3: copy the weight's obs channels (`inCh`，v7 起随权重反推) then append the precomputed coords.
     const oc = this.inCh
     for (let i = 0; i < oc * sp; i++) this.in16[i] = obs[i]
     this.in16.set(this.coords, oc * sp)

@@ -116,13 +116,13 @@ function mkWorld(over: Record<string, unknown> = {}): World {
 }
 
 describe('obs-encoder dimensions', () => {
-  it('exposes the canonical 16×26×26 obs and 46-dim scalar (v6: +POLICY_EXTRA 57)', () => {
-    expect(OBS_CHANNELS).toBe(16)
+  it('exposes the canonical 17×26×26 obs and 46-dim scalar (v7: +ch16 distEnemy; POLICY_EXTRA 57)', () => {
+    expect(OBS_CHANNELS).toBe(17)
     expect(BOARD).toBe(26)
     expect(SCALAR_DIM as number).toBe(46)
-    expect(OBS_SCHEMA_MAJOR as number).toBe(6)
+    expect(OBS_SCHEMA_MAJOR as number).toBe(7)
     const enc = new ObsEncoder()
-    expect(enc.obs.length).toBe(16 * 26 * 26)
+    expect(enc.obs.length).toBe(17 * 26 * 26)
     expect(enc.scalars.length).toBe(46)
     expect(enc.extra.length).toBe(57)
   })
@@ -417,6 +417,100 @@ describe('ObsEncoder.encode — spatial channels', () => {
     expect(s[8]).toBeCloseTo(3 / 20, 4)
     // tier block renumbered to 9..13 (was 14..18); with no enemies all 0
     for (let i = 9; i <= 13; i++) expect(s[i]).toBe(0)
+  })
+})
+
+/** v7 ch16 测试用的场地：默认全 empty，按 (col,row) 覆写地形（可空、砖、钢、水）。 */
+function terrainWorld(
+  tanks: Array<Record<string, unknown>>,
+  cells: Array<[number, number, string]> = [],
+): World {
+  const grid = Array.from({ length: BOARD }, () => Array.from({ length: BOARD }, () => 'empty'))
+  for (const [c, r, t] of cells) grid[r][c] = t
+  return mkWorld({
+    tileMap: {
+      grid,
+      isBaseDestroyed: () => false,
+      get: () => 'empty',
+      hasBase: () => false,
+    },
+    tanks,
+  })
+}
+
+/** 放在 (col,row) 格的敌车（中心格 = floor((x+16)/16)）。 */
+function enemyAt(col: number, row: number, over: Record<string, unknown> = {}) {
+  return mkTank({ x: col * CELL - CELL, y: row * CELL - CELL, ...over })
+}
+
+describe('ObsEncoder.encode — v7 ch16 distEnemy（多源 BFS，plan §3.4）', () => {
+  it('无激活敌 ⇒ 全 0（缺席=0；生成中敌不算源，ch15 另有倒计时）', () => {
+    const none = new ObsEncoder()
+    none.encode(terrainWorld([]))
+    expect(chMax(none.obs, CH.distEnemy)).toBe(0)
+    const spawning = new ObsEncoder()
+    spawning.encode(terrainWorld([enemyAt(6, 6, { spawnTimer: 1000 })]))
+    expect(chMax(spawning.obs, CH.distEnemy)).toBe(0)
+  })
+
+  it('单位成本路距：源格 0 / 邻格 round(255/26)=10 / (0,0)=118', () => {
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(6, 6)]))
+    expect(chCell(enc.obs, CH.distEnemy, 6, 6)).toBe(0)
+    expect(chCell(enc.obs, CH.distEnemy, 7, 6)).toBe(Math.round((255 * 1) / 26))
+    expect(chCell(enc.obs, CH.distEnemy, 6, 7)).toBe(Math.round((255 * 1) / 26))
+    // 曼哈顿 12（6+6）——开场上 BFS 与曼哈顿同值
+    expect(chCell(enc.obs, CH.distEnemy, 0, 0)).toBe(Math.round((255 * 12) / 26))
+    // 远端 25 步仍可达
+    expect(chCell(enc.obs, CH.distEnemy, 25, 0)).toBe(Math.round((255 * 25) / 26))
+  })
+
+  it('可达值截到 254（255 只留给不可达）：对角 50 步 ⇒ 254', () => {
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(25, 25)]))
+    expect(chCell(enc.obs, CH.distEnemy, 0, 0)).toBe(254)
+    expect(chCell(enc.obs, CH.distEnemy, 25, 25)).toBe(0)
+  })
+
+  it('钢/水不可通行 ⇒ 被围住的敌之外全部 255（有敌但不可达）', () => {
+    const walls: Array<[number, number, string]> = [
+      [5, 6, 'steel'],
+      [7, 6, 'steel'],
+      [6, 5, 'water'],
+      [6, 7, 'water'],
+    ]
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(6, 6)], walls))
+    expect(chCell(enc.obs, CH.distEnemy, 6, 6)).toBe(0)
+    expect(chCell(enc.obs, CH.distEnemy, 0, 0)).toBe(255)
+    expect(chCell(enc.obs, CH.distEnemy, 25, 25)).toBe(255)
+    expect(chMax(enc.obs, CH.distEnemy)).toBe(255)
+  })
+
+  it('砖按 1 步计入（E0b′ 主口径）：路径上的砖不改变读数', () => {
+    const bricks: Array<[number, number, string]> = [
+      [7, 6, 'brick'],
+      [8, 6, 'brick'],
+      [9, 6, 'brick'],
+    ]
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(6, 6)], bricks))
+    expect(chCell(enc.obs, CH.distEnemy, 10, 6)).toBe(Math.round((255 * 4) / 26))
+  })
+
+  it('多源取较近者：两敌之间的格读 min(到各源)', () => {
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(2, 2), enemyAt(20, 20)]))
+    expect(chCell(enc.obs, CH.distEnemy, 3, 2)).toBe(Math.round((255 * 1) / 26))
+    expect(chCell(enc.obs, CH.distEnemy, 19, 20)).toBe(Math.round((255 * 1) / 26))
+    // (11,11) 到两源都是 |9|+|9| = 18
+    expect(chCell(enc.obs, CH.distEnemy, 11, 11)).toBe(Math.round((255 * 18) / 26))
+  })
+
+  it('阵亡敌不是源（只认 alive && spawnTimer<=0）', () => {
+    const enc = new ObsEncoder()
+    enc.encode(terrainWorld([enemyAt(6, 6, { alive: false })]))
+    expect(chMax(enc.obs, CH.distEnemy)).toBe(0)
   })
 })
 
