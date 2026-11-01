@@ -329,3 +329,51 @@ def inflight_grace_cap(task_timeout: float) -> float:
     4–76s/轮，2026-09-19 审计 B1）。
     """
     return float(min(task_timeout, EVAL_INFLIGHT_GRACE_SEC))
+
+
+# ---- 轮中自救：本机中途兜底 / 软失败停派后的**回场**（2026-11-01）-------------------
+# 现场：z3-p2002ctl 的 it25 / it50 两轮 eval 只落 14 / 515 局（800 局），`close_reason`
+# 都是 `workers-gone` —— 三条节点的 18 条消费者线程在派发后 16s / 163s 被「连续 9 次
+# 503 busy」的软失败熔断退光，而窗口还剩 1776s / 1631s。旧实现里消费者归零就是**终态**
+# （主循环直接 break → 收工），冻结快照已经建好却没人用，节点也没有任何再入场的路径
+# —— 一次数十秒的集群拥堵被记成了「这一轮没有算力」。
+
+#: 一条节点因**软失败**（瞬断/背压）停派后，允许再入场的次数上限。
+#: 为什么有界：每次回场都会再吃掉一整轮 `nodeSoftFailStreak` 预算，无限回场等于把
+#: 「窗口到期」变成唯一的收尾条件 —— 有界才能让 `workers-gone` 仍然是一个**会到来**的状态。
+SOFT_COMEBACK_MAX = 2
+#: 回场退避首档（秒）：第 n 次回场前等 `first * 2**(n-1)`。留出这段时间让集群里的
+#: 别的课把槽位放掉——立刻回场只会在同一瞬间再撞一次 503。
+SOFT_COMEBACK_FIRST_SEC = 20.0
+
+
+def local_fallback_midround(
+    fallback_only: bool,
+    spawned: bool,
+    snapshot_ready: bool,
+    slots: int,
+    has_work: bool,
+) -> bool:
+    """轮中本机兜底的门（消费者归零那一刻判）：兜底模式 + 未孵过 + 快照在 + 份额>0 + 还有活。
+
+    与**派发前**那条兜底（`nodes_ok` 为空才孵化）是同一条腿的两个入口：节点是「派发后才死」
+    的，所以只看派发那一刻的判定必然漏掉这种整轮缺口。`spawned` 保证整轮只孵一次
+    （重复孵化会把本机核数越滚越多）。
+    """
+    return bool(fallback_only and not spawned and snapshot_ready and int(slots) > 0 and has_work)
+
+
+def soft_comeback_due(done: int, now: float, eligible_at: float, deadline: float) -> bool:
+    """这条节点现在该不该回场：次数没用完 · 已到退避点 · **窗口还有余量**。
+
+    最后一条是硬的：窗口到点后 `worker()` 本来就会因 `time.time() >= deadline` 退出，
+    回场只会孵出立刻结束的线程（把 `window` 收工变成空转）。
+    """
+    if int(done) >= SOFT_COMEBACK_MAX:
+        return False
+    return float(eligible_at) <= float(now) < float(deadline)
+
+
+def soft_comeback_backoff_sec(done: int) -> float:
+    """第 `done+1` 次回场前的退避秒数（指数翻倍，首档 `SOFT_COMEBACK_FIRST_SEC`）。"""
+    return float(SOFT_COMEBACK_FIRST_SEC * 2 ** max(0, int(done)))

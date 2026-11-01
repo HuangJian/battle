@@ -10513,3 +10513,38 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收（local，无节点）**：一局 rollout 产出 `metrics.npy (251,85)` + `metrics_version: 13`；
   Python `RewardFn` 可直接引用新列求值（`r ∈ [−15.5, 16]`）。`bun run check` 2641 pass / `freeze:check` OK /
   `nn-training/tests/{biz,common,hub}` 全绿。
+
+## §2026-11-01-eval-midround-self-rescue（eval 轮中自救：本机中途兜底 + 软失败停派回场）
+
+- **背景**：`z3-p2002ctl` 的 it25 / it50 两轮干净评估只落 **14 / 515 局**（各 800），summary
+  `close_reason=workers-gone`，**16.5s / 163.3s** 就收工，而 `eval_window_sec=1800` 还剩 1776s / 1631s。
+  直接原因：三节点（self 8 / a97 6 / kaggle 4）对 `activeWorkers >= workers` 回 `503 {"error":"busy"}`；
+  `busy` 判瞬断 ⇒ 只回队、不写 `ok=false` meta；一条节点的 N 条消费者线程在**同一瞬间**各吃一次 503
+  ⇒ 一次拥堵就把 `nodeSoftFailStreak`(9) 顶满 ⇒ 该腿线程池整轮退光。三腿全退后主循环
+  `live_workers<=0` 直接 break。in-loop 的 `local_fallback_only=True` 只在**派发那一刻** `nodes_ok`
+  为空才孵本机线程 ⇒ 节点是派发**之后**才死的，冻结快照 `_eval_frozen_weights.json` 建好却没人用；
+  而 `soft_streaks` 清零的唯一途径是「本节点再成功一局」——腿退光后这条路也断了.
+- **决定**（`trainer/eval_dispatch.py` 主循环 + `worker/eval_yield.py` 三个纯函数）：
+  1. **轮中本机兜底**：消费者归零且队列还有活时，兜底模式按 `local_fallback_midround` 再孵一次本机
+     槽位（`local_spawned` 保证整轮只孵一次）。
+  2. **停派后回场**：只对**软失败**停派的节点开放，`SOFT_COMEBACK_MAX=2` 次、退避 20s→40s
+     （`soft_comeback_backoff_sec`）；回场 = 重置该节点的软失败预算。真故障（`nodeFailStreak`）仍整轮
+     停派；窗口到点（`soft_comeback_due` 的 deadline 判据）不回场。
+  3. 两条都以「消费者归零 + 队列有活」为前提；既无回场余量也无本机可孵时才收工（`workers-gone`
+     仍是**会到来**的状态，不把收尾条件换成「窗口到期」）。
+- **否决的备选**：① 无限回场（把「一次拥堵」换成「必然空转到 30min 窗口」）；② 把 `busy` 从瞬断降级成
+  节点故障（忙不是坏，会把健康节点整轮摘掉）；③ 只靠 `_drain_pending_eval` 收尾补（判决要等收官，
+  且这次运行 15:38 重启过、drain 没覆盖 it25/it50）；④ 抬高 `nodeSoftFailStreak`（阈值挪远而已，
+  退光后依旧没有再入场路径）。
+- **落地**：`worker/eval_yield.py`（`local_fallback_midround` / `soft_comeback_due` /
+  `soft_comeback_backoff_sec` / `SOFT_COMEBACK_MAX` / `SOFT_COMEBACK_FIRST_SEC`，仍是零依赖叶子）·
+  **`worker/eval_self_rescue.py`（`EvalConsumers`：孵线程 + 主循环自救段 + 收尾「回场 N 次」行）**——
+  `trainer/eval_dispatch.py` 贴着 LOC 护栏的顶（998 行，`tests/test_python_loc_budget.py` 单文件 < 1000），
+  自救逻辑原样放回去就是 1060 行 ⇒ 按 §5.7「独立所有者 + 独立触发条件」拆成独立模块（派发器只留
+  `consumers.spawn_local/supervise/report` 三个调用点，`threads` 仍归派发器所有：收工行与 join 读它）；
+  家放 `worker/`（训练栈）而非 `trainer/`（只放编排，`tests/test_layering.py` 按集合相等钉住）·
+  用例 `tests/trainer/test_eval_dispatch_resilience.py`（轮中本机接盘 / 回场 / 真故障不回场）+
+  `tests/worker/test_eval_yield_split.py`（公式真值表 + READERS 钉 import 来源）。
+- **验收**：三条新用例在工作区**旧实现**上先红（`workers-gone` 0 局 / 只有 2 次 fetch / 公式不存在；
+  worktree HEAD 实跑），新实现后与两个文件其余用例一起绿（66 passed）。真实缺口点的数据修复另案
+  （用归档权重跑 evalA 补 786 / 285 局，见 `.workbuddy/memory/2026-11-01.md`）。

@@ -15,7 +15,6 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
 
 import common.distribution
 import common.protocol
@@ -40,6 +39,7 @@ from worker.eval_local import (
     run_local_eval_game,
     settle_eval_summary,
 )
+from worker.eval_self_rescue import EvalConsumers
 from worker.eval_track import course_logger, lost_by_node
 
 # 让位/份额（尾巴）策略在 `biz/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
@@ -310,6 +310,8 @@ class EvalDispatcher:
             redispatched: set[tuple[int, int]] = set()
             #: 本机腿本轮停派（**共享**事件：`local_slots` 是 N 条线程，线程局部停不掉全部）。
             local_stopped = threading.Event()
+            #: 消费线程的孵化与轮中自救账本（本机是否已孵 / 回场次数与时刻 / 各腿线程）
+            #: 都住在 `EvalConsumers`（`trainer/eval_self_rescue.py`，2026-11-01 it25/it50）。
 
             def _node_worker_alive() -> bool:
                 """节点消费线程是否还有一条活着（改派只认这个，不认 `nodes_ok`）。
@@ -879,31 +881,21 @@ class EvalDispatcher:
                             f"elapsed={str(el) + 's' if el is not None else '-'}"
                         )
 
-            # —— 份额模式：本机槽位先开工（不等节点门/权重门，审计 B3）——
+            # —— 消费线程：孵化与轮中自救都在 `EvalConsumers`（`trainer/eval_self_rescue.py`）——
             # 本地权重就是本机冻结快照，无需下发；节点门（并行 ping）与权重 POST 都是
-            # 秒级开销，让本机槽位干等纯属白丢吞吐。兜底模式没有确定要跑的本机槽位，
-            # 必须等 `nodes_ok` 出来再孵化（健康集群上本机 0 线程）。
-            def _spawn_tracked(fn, *a: Any, name: str = "") -> threading.Thread:
-                """孵化消费线程并计入 live_workers（线程必须先计数再启动：主线程在
-                spawn 完才看计数，晚计数会让收工判断误以为「消费线程全退」）。"""
-                live_workers[0] += 1
-
-                def _body() -> None:
-                    try:
-                        fn(*a)
-                    finally:
-                        with lock:
-                            live_workers[0] -= 1
-
-                t = threading.Thread(target=_body, daemon=True, name=name)
-                t.start()
-                return t
-
+            # 秒级开销，让本机槽位干等纯属白丢吞吐（审计 B3）。`threads` 仍由本函数持有：
+            # 收工行的「已起线程」与收尾 join 读的就是它。
             threads: list[threading.Thread] = []
+            consumers = EvalConsumers(
+                lock=lock, live_workers=live_workers, threads=threads,
+                local_worker=local_worker, worker=worker,
+                local_slots=local_slots, fallback_only=self.local_fallback_only,
+                fail_streak_max=fail_streak_max, soft_streak_max=soft_streak_max,
+                log=_log, it=it,
+            )
             # 份额模式：本机在节点门前先开工；兜底模式等 nodes_ok 出来再决定。
             if not self.local_fallback_only and snapshot_path is not None and local_slots > 0:
-                for _ in range(local_slots):
-                    threads.append(_spawn_tracked(local_worker, name="eval-local"))
+                consumers.spawn_heads()
 
             local_bun = bun_version(bun)
             # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
@@ -1040,12 +1032,7 @@ class EvalDispatcher:
                         " — skipped this round"
                     )
                     return
-                for _ in range(local_slots):
-                    threads.append(_spawn_tracked(local_worker, name="eval-local"))
-                _log(
-                    f"[eval] it{it}: local fallback ×{local_slots}"
-                    "（no usable remote eval node）"
-                )
+                consumers.spawn_local("no usable remote eval node", snapshot_ready=True)
 
             _log(
                 f"[eval] it{it}: dispatch {total} greedy games "
@@ -1064,17 +1051,20 @@ class EvalDispatcher:
                     f"（local_slots={local_slots} snapshot={'yes' if snapshot_path else 'no'}）"
                 )
             for nd in nodes_ok:
-                for _ in range(nd["c"]):
-                    threads.append(_spawn_tracked(worker, nd, name=f"eval-{nd['id']}"))
+                consumers.spawn_node(nd)
             # —— 等收口（**显式**：旧实现靠 join(window + task_timeout) 顺带完成）——
             # ① settled 满 → 立即收工（req 4：断连 + 拒发新请求，慢节点/竞速副本不再等）；
             # ② 墙钟到期 → **有界**等窗口内的在飞局落账（在飞清空即走，兜底
             #    EVAL_INFLIGHT_GRACE_SEC），那些局有价值，但不再像旧实现那样空等 4–76s。
-            while not all_done.is_set() and time.time() < deadline:
-                all_done.wait(0.2)
-                with lock:
-                    if live_workers[0] <= 0:
-                        break
+            # ③ 消费者归零但**队列还有活** ⇒ 自救（2026-11-01，z3-p2002ctl it25/it50）：
+            #    先中途本机兜底（冻结快照在派发前就建好了），再按退避让**软失败**停派的节点
+            #    回场。旧实现在这里直接 break：一次 503 busy 拥堵就把 800 局里的 786 局判死，
+            #    而窗口还剩 1776s；等一等集群就空出来了，缺的只是「谁去再取一次」。
+            consumers.supervise(
+                all_done=all_done, pending=pending, inflight=inflight,
+                nodes_ok=nodes_ok, streaks=streaks, soft_streaks=soft_streaks,
+                deadline=deadline, snapshot_ready=snapshot_path is not None,
+            )
             grace_end = time.time() + inflight_grace_cap(task_timeout)
             while not all_done.is_set() and time.time() < grace_end:
                 with lock:
@@ -1152,6 +1142,7 @@ class EvalDispatcher:
                     f"（never-dispatched）、派出未落盘 {left_pending - never_n} 局（lost）"
                     f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
                 )
+            consumers.report_comebacks()
             all_done.set()
             quiet_deadline = time.monotonic() + 1.0
             while time.monotonic() < quiet_deadline:

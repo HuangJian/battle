@@ -75,6 +75,16 @@ READERS = {
         "local_release_due",
         "inflight_grace_cap",
     ),
+    # 轮中自救（2026-11-01）：孵线程与归零后的救援路径拆到 `eval_self_rescue.py`
+    # （`eval_dispatch.py` 贴着 LOC 预算的天花板；家搬进 `worker/` 是因为 `trainer/`
+    # 只放编排，`tests/test_layering.py` 按集合相等钉住）——判据公式仍只许从
+    # `worker.eval_yield` 取，拆分不是第二实现点。
+    "worker/eval_self_rescue.py": (
+        "SOFT_COMEBACK_MAX",
+        "local_fallback_midround",
+        "soft_comeback_backoff_sec",
+        "soft_comeback_due",
+    ),
     "trainer/loop_eval.py": (
         "eval_join_soft_sec",
         "eval_tail_overran",
@@ -238,6 +248,26 @@ def test_loop_eval_no_longer_reaches_the_runner_for_policy() -> None:
 
 
 # ─────────────────────── ⑦ 语义（功能用例，逐条钉住） ───────────────────────
+
+
+def test_midround_self_rescue_semantics() -> None:
+    """轮中自救的两个门（2026-11-01 z3-p2002ctl it25/it50 缺口）：公式唯一实现点。"""
+    y = eval_yield_mod
+    assert y.SOFT_COMEBACK_MAX >= 1, "回场至少要允许一次，否则「停派即判死」没变"
+    assert y.soft_comeback_backoff_sec(0) == y.SOFT_COMEBACK_FIRST_SEC
+    assert y.soft_comeback_backoff_sec(1) == 2 * y.SOFT_COMEBACK_FIRST_SEC
+    # 回场三条件：到退避点 · 次数没用完 · **窗口还有余量**（到点收工不回场）
+    assert y.soft_comeback_due(0, 100.0, 100.0, 200.0) is True
+    assert y.soft_comeback_due(0, 99.9, 100.0, 200.0) is False
+    assert y.soft_comeback_due(0, 200.0, 0.0, 200.0) is False
+    assert y.soft_comeback_due(y.SOFT_COMEBACK_MAX, 150.0, 0.0, 200.0) is False
+    # 中途本机兜底：兜底模式 + 未孵过 + 快照在 + 份额>0 + 还有活 —— 缺一不可
+    assert y.local_fallback_midround(True, False, True, 4, True) is True
+    assert y.local_fallback_midround(False, False, True, 4, True) is False
+    assert y.local_fallback_midround(True, True, True, 4, True) is False
+    assert y.local_fallback_midround(True, False, False, 4, True) is False
+    assert y.local_fallback_midround(True, False, True, 0, True) is False
+    assert y.local_fallback_midround(True, False, True, 4, False) is False
 
 
 def test_hold_for_local_semantics() -> None:

@@ -506,12 +506,15 @@ LAYERS: dict[str, int] = {
     #: 层号是拓扑秩，加一条仓内依赖就必须重排）。
     "worker.volume_math": 0,
     "worker.workdir_sweep": 0,
-    # L1（14 个）
+    # L1（15 个）
     "worker.cli": 1,
     "worker.config": 1,
     "worker.data.dataset": 1,
     "worker.data.weights_io": 1,
     "worker.eval_local": 1,
+    # 2026-11-01（轮中自救）：一轮 eval 的消费线程 + 回暖路径；顶层只用
+    # stdlib 与 `worker.eval_yield`(L0) ⇒ 秩 1。
+    "worker.eval_self_rescue": 1,
     "worker.loop_guards_sweep": 1,
     "worker.loop_guards_trip": 1,
     "worker.loop_round": 1,

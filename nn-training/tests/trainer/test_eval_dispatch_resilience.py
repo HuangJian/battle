@@ -241,6 +241,103 @@ def test_hard_failure_still_trips_node(tmp_path, monkeypatch) -> None:
     assert calls["n"] == 3, f"真故障连续 3 次后应停派（实测 {calls['n']} 次）"
 
 
+# ---------------------------------------------------------------------------
+# 轮中自救（2026-11-01，z3-p2002ctl it25/it50 的 786 / 285 局缺口）：
+#   ① 消费者归零但队列还有活 ⇒ **中途本机兜底**（冻结快照在派发前就建好了）；
+#   ② 软失败（503 busy）停派的节点按退避**回场**，而不是一次拥堵就判死整轮。
+# 旧实现在主循环里直接 break ⇒ 16.5s / 163.3s 收工（`workers-gone`），窗口还剩 1776s / 1631s。
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_only_local_takes_over_when_nodes_die_midround(tmp_path, monkeypatch) -> None:
+    """兜底模式 + 节点轮中被 503 busy 熔断 ⇒ 本机**中途**接盘（旧实现整轮 workers-gone）。
+
+    现场：三节点 18 条线程在派发后十几秒全部退光，队列还剩 786/800 局；本机 0 线程，
+    冻结快照 `_eval_frozen_weights.json` 已经建好却没人用。
+    """
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_FIRST_SEC", 0.01)
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_CAP_SEC", 0.02)
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=6,
+        nodes=nodes,
+        local_slots=2,
+        fallback_only=True,
+        window_sec=20.0,
+    )
+    # 软失败熔断压到 2 次：既保证节点腿真的退光，又不让任何一局把瞬断预算（4）用尽
+    # （用尽 = 那局被 drop，本机就补不出 6/6）。
+    h.cfg["policy"]["nodeSoftFailStreak"] = 2
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        raise common.distribution.DistError(503, '{"error":"busy"}')
+
+    rows, _ = h.play(fetch)
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 6, f"本机必须中途接盘（旧实现 0 局 + workers-gone）: {rows}"
+    assert {r["node"] for r in played} == {"local"}, played
+    s = _summary(rows)
+    assert s["dropped"] == 0 and s["games"] == 6 and s["close_reason"] == "settled", s
+    # 不发文本断言：`close_reason == settled`（不是 workers-gone）+ 全是本机局 = 同一件事。
+
+
+def test_soft_stopped_node_rejoins_after_backoff(tmp_path, monkeypatch) -> None:
+    """软失败停派的节点**回场**重取：一次拥堵不是整轮判决。
+
+    旧实现里 `worker()` 因 `soft_streaks` 满而 return 之后没有任何路径再进来 —— 即使
+    集群 20s 后就空出来了（it25 收工时窗口还剩 1776s）。
+    """
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_FIRST_SEC", 0.01)
+    monkeypatch.setattr(eval_yield, "REQUEUE_BACKOFF_CAP_SEC", 0.02)
+    # `raising=False`：旧代码没这个常量 —— 也得让用例跑到**行为断言**上红，而不是在夹具里 AttributeError。
+    monkeypatch.setattr(eval_yield, "SOFT_COMEBACK_FIRST_SEC", 0.05, raising=False)
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=4,
+        nodes=nodes,
+        local_slots=0,
+        fallback_only=True,
+        window_sec=20.0,
+    )
+    h.cfg["policy"]["nodeSoftFailStreak"] = 2
+    calls = {"n": 0}
+
+    def fetch(*_a, **kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise common.distribution.DistError(503, '{"error":"busy"}')
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows, _ = h.play(fetch)
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 4 and {r["node"] for r in played} == {"a97"}, played
+    s = _summary(rows)
+    assert s["close_reason"] == "settled" and s["dropped"] == 0, s
+    # 6 次取活 = 2 次 503 + 回场后 4 局（旧实现没有回场路径，只有那 2 次）。
+    assert calls["n"] == 6, f"2 次失败 + 回场后 4 局（旧实现只有 2 次）: {calls['n']}"
+
+
+def test_hard_failed_node_never_rejoins(tmp_path, monkeypatch) -> None:
+    """真故障（非瞬断）停派 ⇒ **不回场**：回场不得顺手拆掉节点护栏。"""
+    h = _Harness(tmp_path, monkeypatch, games=4)
+    h.cfg["policy"]["nodeFailStreak"] = 1
+    calls = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        calls["n"] += 1
+        raise common.distribution.DistError(400, "boom")
+
+    rows = h.run(fetch)
+    assert calls["n"] == 1, f"真故障一次即停派；回场只对软失败开放（实测 {calls['n']} 次）"
+    assert _summary(rows)["close_reason"] == "workers-gone"
+
+
 @pytest.mark.parametrize("status", [502, 503, 504, 429, 408])
 def test_shared_classifier_covers_tunnel_and_backpressure(status: int) -> None:
     """三层共用判据：隧道/背压状态码一律 transient（不得计节点故障）。"""
@@ -309,7 +406,9 @@ class _LaneHarness:
             max_ticks=10,
             difficulty="hard",
         )
-        self.cfg = {
+        # 注解不是装饰：子类/用例会往 `policy` 里按 key 改值（`nodeSoftFailStreak`），
+        # 不标注时 mypy 把字面量推成 `dict[str, Collection[str]]` ⇒ 索引赋值报红（2026-11-01）。
+        self.cfg: dict[str, Any] = {
             "nodes": nodes,
             "policy": {"evalLocalSlots": local_slots, "nodeFailStreak": 3},
         }
