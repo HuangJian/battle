@@ -323,6 +323,66 @@ def test_soft_stopped_node_rejoins_after_backoff(tmp_path, monkeypatch) -> None:
     assert calls["n"] == 6, f"2 次失败 + 回场后 4 局（旧实现只有 2 次）: {calls['n']}"
 
 
+def test_eval_yields_to_inflight_on_the_same_node(tmp_path, monkeypatch) -> None:
+    """eval 让位（2026-11-01，§39）：节点自报在飞 3 / concurrency 4 ⇒ 只开 1 条线程。
+
+    旧实现 eval 无条件按 `concurrency` 开满线程，而 rollout 与 eval 共用同一个节点池
+    ⇒ 需求翻倍、池满即 503。这里用**峰值并发**判（不是日志文本）：让位生效 ⇒ 峰值 1，
+    不让 ⇒ ≥2（4 条线程同时在跑 6 局）。
+    """
+    import threading
+
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 4}]
+    live = {"n": 0}
+    peak = {"n": 0}
+    lock = threading.Lock()
+
+    def make_fetch(h):
+        def fetch(*_a, **kw):
+            with lock:
+                live["n"] += 1
+                peak["n"] = max(peak["n"], live["n"])
+            try:
+                # sleep-ok: 夹具模拟工作量——让 4 条线程真的叠在同一时刻（否则顺序跑完看不出并发上限）
+                h.time.sleep(0.05)
+                return h.manifest(kw["stage"], kw["seed"]), {}
+            finally:
+                with lock:
+                    live["n"] -= 1
+
+        return fetch
+
+    yielded = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=6,
+        nodes=nodes,
+        local_slots=0,
+        fallback_only=True,
+        window_sec=20.0,
+        ping_extra={"inflight": 3},
+    )
+    rows, _ = yielded.play(make_fetch(yielded))
+    assert len([r for r in rows if r.get("event") == "eval"]) == 6
+    assert peak["n"] == 1, f"在飞 3 / concurrency 4 ⇒ 只许 1 条线程（峰值 {peak['n']}）"
+
+    # 对照组：同一个节点空闲（inflight=0）时 eval 拿满 concurrency（证明上限真的是被算出来的）
+    live["n"] = 0
+    peak["n"] = 0
+    idle = _LaneHarness(
+        tmp_path / "idle",
+        monkeypatch,
+        games=6,
+        nodes=nodes,
+        local_slots=0,
+        fallback_only=True,
+        window_sec=20.0,
+    )
+    rows2, _ = idle.play(make_fetch(idle))
+    assert len([r for r in rows2 if r.get("event") == "eval"]) == 6
+    assert peak["n"] >= 2, f"空节点不该只开 1 条线程（峰值 {peak['n']}）"
+
+
 def test_hard_failed_node_never_rejoins(tmp_path, monkeypatch) -> None:
     """真故障（非瞬断）停派 ⇒ **不回场**：回场不得顺手拆掉节点护栏。"""
     h = _Harness(tmp_path, monkeypatch, games=4)
@@ -368,6 +428,8 @@ class _LaneHarness:
         ping_delay: float = 0.0,
         ping_hook: Any = None,
         ping_fail: tuple[str, ...] = (),
+        #: 额外合并进 ping 载荷（例：`{"inflight": 3}` —— eval 让位的输入）。
+        ping_extra: dict | None = None,
         post_ok: bool = True,
         post_delay: float = 0.0,
         gate_open: bool = True,
@@ -380,7 +442,7 @@ class _LaneHarness:
         self.mp = monkeypatch
         self.time = time
         self.work = tmp_path / "lanes"
-        self.work.mkdir()
+        self.work.mkdir(parents=True)
         self.weights = self.work / "w.json"
         self.weights.write_text('{"arch":{}}', encoding="utf-8")
         self.traj = self.work / "it1"
@@ -437,6 +499,7 @@ class _LaneHarness:
                 "bunVersion": "1.1.0",
                 "codeHash": "deadbeef",
                 "cpus": 1,
+                **(ping_extra or {}),
             }
 
         def post(nodes_: list, *a: Any, **k: Any) -> list:
@@ -452,8 +515,15 @@ class _LaneHarness:
             self.gate_done_at = time.monotonic()
             if not post_ok:
                 return []
+            # 保留调用方**算出来的** `c`（eval 让位后的上限）：写死 `concurrency` 会让
+            # 夹具在节点报 inflight 时仍按满额起线程，让位用例变成自证。
             return [
-                {"id": n["id"], "url": n["url"], "key": "", "c": n.get("concurrency", 1)}
+                {
+                    "id": n["id"],
+                    "url": n["url"],
+                    "key": "",
+                    "c": n.get("c", n.get("concurrency", 1)),
+                }
                 for n in nodes_
             ]
 

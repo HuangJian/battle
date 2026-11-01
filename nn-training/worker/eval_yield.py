@@ -321,6 +321,20 @@ def requeue_backoff_sec(leg: int) -> float:
     return float(min(REQUEUE_BACKOFF_CAP_SEC, REQUEUE_BACKOFF_FIRST_SEC * 2 ** max(0, leg - 1)))
 
 
+def eval_slot_cap(concurrency: int, node_inflight: int, *, floor: int = 1) -> int:
+    """eval 腿对**单节点**的并发上限 = `max(floor, concurrency − 该节点在飞局数)`。
+
+    2026-11-01（`docs/nn/runtime-opt.md` §39）：`concurrency` 是**整台节点池**的份额，而
+    rollout 与 eval 各自按自己的 `concurrency` 开线程 —— 需求翻倍、池满就是 503。节点自报
+    在飞（`/v1/ping` 的 `inflight`，agent 同日起带上）后，eval 让出本课 rollout 正占着的槽。
+
+    `floor=1` 是「让位但不饿死」：节点再忙，eval 也留一条线程推进；否则 800 局会退化成
+    纯等窗口到期（那正是 `workers-gone` 的形状）。
+    """
+    free = int(concurrency) - max(0, int(node_inflight))
+    return max(int(floor), free)
+
+
 def inflight_grace_cap(task_timeout: float) -> float:
     """窗口到期后等「在飞局落账」的宽限上界（秒）：`min(taskTimeoutSec, EVAL_INFLIGHT_GRACE_SEC)`。
 

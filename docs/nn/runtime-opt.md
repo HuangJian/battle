@@ -8,6 +8,76 @@
 
 ---
 
+## §39 节点 503 busy 的归因：多腿 × 多课共用一个准入池（2026-11-01 排查）
+
+### 事实链（代码）
+
+* **节点准入是一个全局计数、且没有队列**：`tools/agent/sampler-agent.ts` 的 `activeWorkers` 是整进程
+  在飞局数；`activeWorkers >= workers` 立刻回 `503 {"error":"busy"}` + `Retry-After: 5`（同步腿与
+  `x-async` 腿各一处同判据）。`workers` 是 agent 自己的池上限（`--workers`，缺省 `physicalCores()`）；
+  **rollout 与 eval 共池**，池满就是池满，与「这条腿是谁」无关。
+* **协调器每条腿各开满 per-node 线程**：`c_n = max(1, 配置 concurrency or ping.cpus)`，rollout 在
+  `trainer/dispatch.py` 里是 `for _ in range(nd["c"])` 起消费线程，eval 在 `trainer/eval_dispatch.py`
+  里同样按 `c_n` 起线程。两条腿的在飞账**互不可见**；跨课程（不同 trainer 进程）更是各算各的。
+  ⇒ 一台节点的需求 = Σ(每条腿 × 每门课) 的 `concurrency`，与节点 `workers` 没有任何对齐。
+* **`busy` 是瞬断**：`common.distribution.is_transient_error` 判它可恢复 ⇒ 只回队、**不消耗 attempt
+  配额**（`trainer/dispatch.py` 的 `transient_err` 分支），于是整个窗口内反复撞同一堵墙。
+
+### 实测（`tmp/trainer-cluster.log`，24h / 451 万行 + 2026-11-01 18:xx 活探针）
+
+| 指标 | 读数 |
+|---|---|
+| busy 行 | **239,512**（占日志 5.31%）· dist 151,131 / eval 88,364 |
+| 回队 vs 丢弃 | requeued 227,590 / dropped 11,922（后者日志里写作 `fanout copy … main in flight, dropped`） |
+| 唯一 (course, stage, seed) | 121,033 ⇒ **1.98 次 503/任务**；最惨 64 次（`y36-explore s2010/seed2000000015`） |
+| 单秒突发 | 最大 **81 条同秒**（07:44:26 `y20-escape`）；同秒 ≥8 条的簇 ≥6,379 个 |
+| 并发课程 | 同一分钟里最多 **16 门课**各自撞过 503（常见 7–8 门） |
+| eval × rollout 叠加 | 1,525 个「同课同分钟两腿都 busy」；只 eval 1,699 / 只 rollout 5,239 |
+
+活探针（`GET /v1/status`，authKey 取自 `rl-config.json`）：
+
+| 节点 | 配置 `concurrency` | agent `workers` | agent `cpus` |
+|---|---|---|---|
+| self | 6 | 8 | 8 |
+| mac | 5 | 6 | **4** |
+| a95 | 6 | 7 | 8 |
+| a97 | 6 | 7 | 8 |
+| kaggle | 4 | 4 | **2** |
+
+两点：① 配置的 `concurrency` 已经≈节点整池 ⇒ **一条腿就能把节点占满**，第二条腿（rollout + in-loop
+ eval）或第二门课必然溢出（实测的形状正是「同秒一批 18 次 503」这种波次起步）。② mac / kaggle 的池
+比物理核还大（6 worker / 4 核、4 worker / 2 vCPU）：单局更慢 ⇒ 池被占得更久 ⇒ busy 更密
+（`--workers` 是节点侧手配值，不走 `physicalCores()` 缺省）。
+
+### 结论（按杠杆排序）
+
+1. **节点侧有界排队**（首选）：把「立刻 503」换成「有界 FIFO + 等一个槽（带超时）」。节点已有常驻池与
+   就绪帧（`__SERVE_READY__`），要加的是等待队列本身；收益是 12.1 万个任务的重复请求里绝大部分变成等待。
+2. **协调器侧共享每节点预算**：一个节点一份 token（hub 中介或文件锁），rollout / eval / 多课共用
+   `workers`，而不是各拿 `concurrency`。跨进程共享账是根；单机内先做「eval 腿上限 =
+   `max(1, concurrency − 本课 rollout 在飞)`」也能消掉一半重复。
+3. **配置护栏**：`Σ(启用课程 × concurrency) > 节点 workers` 时开课即响亮告警；`concurrency` 不超过
+   `ping.cpus`，节点 `--workers <= physicalCores()`（今天的 mac / kaggle 都超了）。
+4. **fanout 别往忙节点发**：11,922 个丢弃多数是竞速副本撞 busy；`pick_race_target` / `fanout copy`
+   前先读一次 `/v1/status`（或在候选里排掉 `busy`）即可省下这部分流量。
+
+### 落地（2026-11-01，同日跟进）
+
+前两条先做「单机可验证」的一半；第 3/4 条留作后续。
+
+* **节点侧有界排队**（杠杆 1）：`tools/agent/admission-queue.ts` 有界 FIFO（缺省等 12s / 队列 32），
+  池满不再立刻 503；队列满 / 超时 / 客户端断开仍回**逐字节相同**的 `503 {"error":"busy"}` +
+  `Retry-After: 5`，`--admission-wait-ms 0` 是回退档。`/v1/status` 新增 `admission.{active,waiting}`
+  与 `admitted/timedOut/rejected` 计数。
+* **eval 让出在飞槽**（杠杆 2 的单机口径）：`/v1/ping` 加法新增 `inflight`（整进程在飞局数），
+  `eval_slot_cap(concurrency, inflight) = max(1, concurrency − inflight)` ⇒ 本课 rollout 占着的槽
+  eval 不再重复要一遍。floor=1 是「让位不饿死」（否则 800 局退化成纯等窗口 = `workers-gone` 形状）。
+* 用例：`tests/agent/admission-queue.test.ts`（FIFO 唤醒 / 超时 / 队满 / abort / 容量 2 五排队者
+  active≤2）· `test_eval_yields_to_inflight_on_the_same_node`（inflight=3 ⇒ 峰值并发 1；空节点对照
+  ≥2，防夹具自证）· `test_eval_slot_cap_semantics`（真值表 + floor）。
+* 仍未做：跨进程共享每节点预算（hub 中介 / 文件锁，杠杆 2 的完整版）· 配置护栏（杠杆 3）·
+  fanout 排掉忙节点（杠杆 4）。真机读数（`admission.waiting` / busy 行数）等下一轮饱和集群。
+
 ## §38 逐局流式采集：采完一局就判差额最大的关（2026-10-27 用户口径）
 
 **用户口径原话**（2026-10-07 起第 N 次重申，所以这次直接钉成集成用例）：

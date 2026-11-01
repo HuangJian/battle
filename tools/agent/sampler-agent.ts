@@ -21,6 +21,7 @@
  * 稳定性问题，允许降级为等价的 node:http 实现（协议不变）。
  *
  * 启动：bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048]
+ *      [--admission-wait-ms N] [--admission-queue-max N]（池满时排队等空槽；0 = 旧行为立即 busy）
  * 首启生成随机 authKey 写同目录 agent.auth 并打印一次；运维复制到 rl-config.json。
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
@@ -30,6 +31,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
 import { physicalCores } from '../lib/cores'
+import { ADMISSION_QUEUE_MAX, ADMISSION_WAIT_MS, createAdmission } from './admission-queue'
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
 // 决策周期 K 的缺省值（单一来源 = src/nn/decision-gate；agent 只用于未传参时的缺省与
 // 「是否为默认值」判定，runtime 语义全在导出器里）。
@@ -153,6 +155,10 @@ let poolIdleMs = PERSIST_IDLE_MS
 let poolFloor = PERSIST_POOL_FLOOR
 let cacheMaxBytes = 2048 * 1024 * 1024
 let cacheMaxItems = 32
+/** 准入排队（2026-11-01，docs/nn/runtime-opt.md §39）：池满时等空槽而不是立刻 503。
+ *  `--admission-wait-ms 0` = 回退档（逐字节旧行为：池满立即 busy）。 */
+let admissionWaitMs = ADMISSION_WAIT_MS
+let admissionQueueMax = ADMISSION_QUEUE_MAX
 /** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
 let forceBun = false
 /** 长驻 worker（§368 提速④）：默认开（2026-09-08 用户指令"全量开关"）；
@@ -175,6 +181,10 @@ let missLogSuppressed = 0
     else if (a === '--workers') workers = Math.max(1, parseInt(argv[++i], 10))
     else if (a === '--cache-mb') cacheMaxBytes = Math.max(1, parseInt(argv[++i], 10)) * 1024 * 1024
     else if (a === '--max-cache-items') cacheMaxItems = Math.max(1, parseInt(argv[++i], 10))
+    else if (a === '--admission-wait-ms')
+      admissionWaitMs = Math.max(0, parseInt(argv[++i], 10) || 0)
+    else if (a === '--admission-queue-max')
+      admissionQueueMax = Math.max(0, parseInt(argv[++i], 10) || 0)
     else if (a === '--no-node') forceBun = true
     else if (a === '--no-persist') persistEnabled = false
     else if (a === '--no-prewarm') prewarmEnabled = false
@@ -457,7 +467,6 @@ const inflight = new Map<string, { stage: number; seed: number; startedAt: numbe
 // v3.6 异步模式：已完成但失败的任务登记表（/v1/result 消费一次即删）。
 // 权重切换清场时与 resultCache 一并清空——跨轮生命周期一致。
 const failedTasks = new Map<string, string>()
-let activeWorkers = 0
 const startedAt = Date.now()
 /** 进程启动随机 8 hex（§3.3）：区分「同 pid 不同代」，并作交接父子核对通道。 */
 const BOOT_ID = randomBytes(4).toString('hex')
@@ -1672,11 +1681,43 @@ async function runGame(
   }
 }
 
+/**
+ * 准入门（唯一实例，2026-11-01）：`acquire()` 拿槽、任务结束 `release()`。
+ *
+ * 旧实现是 `activeWorkers >= workers` 直接 503 —— 节点没有队列，排队只能由协调器用
+ * 「拒收 + 退避重投」表达（24h 实测 23.95 万条 busy，见 docs/nn/runtime-opt.md §39）。
+ * 现在池满时有界等空槽；队列满 / 等到超时 / `--admission-wait-ms 0` 时仍回同一个 503。
+ */
+const admission = createAdmission({
+  capacity: () => workers,
+  queueMax: admissionQueueMax,
+  waitMs: admissionWaitMs,
+})
+
 function jsonResponse(obj: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: { 'Content-Type': 'application/json', ...headers },
   })
+}
+
+/** 准入失败：**body/状态码逐字节不变**（协调器按 503 + Retry-After 判瞬断背压），
+ *  只在真的排过队时留一行——池被压住的原因应该看得见。 */
+function admissionBusy(waitedMs: number): Response {
+  if (waitedMs >= 1000)
+    console.log(
+      `[sampler-agent] admission busy after ${waitedMs}ms ` +
+        `(active=${admission.active()}/${workers}, waiting=${admission.waiting()}, ` +
+        `timedOut=${admission.counters().timedOut})`,
+    )
+  return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
+}
+
+/** 排一个槽；返回 Response = 没排到（调用方直接 return），null = 排到了（任务结束必须 release）。 */
+async function admit(signal?: AbortSignal): Promise<Response | null> {
+  const t0 = Date.now()
+  if ((await admission.acquire(signal)) === 'admitted') return null
+  return admissionBusy(Date.now() - t0)
 }
 
 /** 服务耗时改口径（2026-09-06 用户指令）：elapsedSec 从「子进程内纯游戏耗时」改为
@@ -1785,7 +1826,6 @@ function beginTask(
   // 决策周期 K：`?decisionK=<n>` 时本局按该 K 跑；缺席/10 = 导出器缺省（同上）。
   decisionK: number = DEFAULT_DECISION_K,
 ): void {
-  activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
   // 每局 beginTask/done/finally 不打日志：多 worker RL 采样下会刷爆 tmp/sampler-agent.log。
   // 进度看 /v1/status（gamesDoneTotal/inflight）；失败走 task FAILED。
@@ -1831,7 +1871,7 @@ function beginTask(
       )
     })
     .finally(() => {
-      activeWorkers--
+      admission.release()
       inflight.delete(key)
     })
 }
@@ -2124,9 +2164,6 @@ async function handle(req: Request): Promise<Response> {
     // 地板是冻结的 2048（plan/self-node-disk-alert §4.1）；判据住纯函数（守门用例吃它）。
     if (decideTaskAdmission(free) === 'low-disk')
       return jsonResponse({ error: `low disk: ${free}MB` }, 503)
-    if (activeWorkers >= workers)
-      return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
-
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
     // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
     const sjHash = stageJson
@@ -2159,8 +2196,14 @@ async function handle(req: Request): Promise<Response> {
     // token（不重复 spawn）；旧 trainer 不发此头，走下方同步流式路径，行为不变。
     if (req.headers.get('x-async') === '1') {
       if (inflight.has(key)) return jsonResponse({ status: 'running', token: key }, 202)
-      if (activeWorkers >= workers)
-        return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
+      const noticed = await admit(req.signal)
+      if (noticed) return noticed
+      // 排队期间同键可能已经被别的人开跑（`await` 打开了窗口，旧实现没有）：
+      // 幂等回 running 并**归还槽位**（否则这条重复请求白占一个池槽到收工）。
+      if (inflight.has(key)) {
+        admission.release()
+        return jsonResponse({ status: 'running', token: key }, 202)
+      }
       beginTask(
         key,
         iterId,
@@ -2189,7 +2232,8 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
 
-    activeWorkers++
+    const noticed = await admit(req.signal)
+    if (noticed) return noticed
     inflight.set(key, { stage, seed, startedAt: Date.now() })
     // 保活流式响应：单局可能长达 ~480s，而 Bun.serve idleTimeout 上限仅 255s。若连接全程静默，
     // server 回收连接 → trainer 端报 "Remote end closed"。用合法 chunk 字节(' '空格)每 20s 发一次
@@ -2252,7 +2296,7 @@ async function handle(req: Request): Promise<Response> {
             controller.error(e instanceof Error ? e : new Error(String(e)))
           })
           .finally(() => {
-            activeWorkers--
+            admission.release()
             inflight.delete(key)
           })
       },
@@ -2360,6 +2404,12 @@ async function handle(req: Request): Promise<Response> {
       persistFloor: Math.min(poolFloor, workers),
       persistIdleMs: poolIdleMs,
       workers,
+      // 准入排队（2026-11-01）：active = 已占槽、waiting = 池满时在排队的人数。
+      admission: {
+        active: admission.active(),
+        waiting: admission.waiting(),
+        ...admission.counters(),
+      },
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
       // 最近 30 分钟产出（2026-10-18 用户指令）：结构给程序读（dashboard / 断言），
@@ -2390,6 +2440,9 @@ async function handle(req: Request): Promise<Response> {
   if (req.method === 'GET' && url.pathname === '/v1/ping') {
     return jsonResponse({
       ok: true,
+      // 在飞局数（2026-11-01）：eval 腿按 `concurrency − 在飞` 让出槽位（§39）。
+      // eval 的节点门要求 codeHash 一致 ⇒ 消费方一定跑这份代码，不需要回退分支。
+      inflight: inflight.size,
       // 单实例观测（§3.4，加法）：pid/bootId/instanceGuard（旧消费方忽略未知字段）。
       pid: process.pid,
       bootId: BOOT_ID,

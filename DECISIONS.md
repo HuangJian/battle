@@ -10548,3 +10548,30 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：三条新用例在工作区**旧实现**上先红（`workers-gone` 0 局 / 只有 2 次 fetch / 公式不存在；
   worktree HEAD 实跑），新实现后与两个文件其余用例一起绿（66 passed）。真实缺口点的数据修复另案
   （用归档权重跑 evalA 补 786 / 285 局，见 `.workbuddy/memory/2026-11-01.md`）。
+
+## §2026-11-01-goalnn-admission-queue-and-eval-yield（准入池不再 503 立刻拒：节点有界排队 + eval 让出在飞槽）
+
+- **背景**：`docs/nn/runtime-opt.md` §39 实测 24h **23.95 万条 `503 busy`**（日志 5.31%），12.1 万个唯一任务
+  被放大 1.98 次（最惨 64 次）；`busy` 被判瞬断 ⇒ 只回队、**不消耗** attempt ⇒ 整轮反复撞同一堵墙。
+  根因两条：① 节点准入是**一个全局计数且没有队列**（`activeWorkers >= workers` 立刻 503）；
+  ② 协调器每条腿 × 每门课各按自己的 `concurrency` 开满 per-node 线程，需求 = 腿数 × 课数 × concurrency。
+- **决定**：
+  1. **节点侧有界排队**（`tools/agent/admission-queue.ts`，`sampler-agent` 唯一实例）：池满时进有界 FIFO
+     等空槽（缺省 12s / 队列 32），拿到槽才开跑；队列满、等到超时、客户端断开仍回**逐字节相同**的
+     `503 {"error":"busy"}` + `Retry-After: 5`。`--admission-wait-ms 0` 是回退档（逐字节旧行为）。
+     槽位与任务同生命周期：`beginTask` 的 finally 里 `release()`（成功/失败/断连都不泄漏）。
+  2. **eval 让出在飞槽**：`/v1/ping` 加法新增 `inflight`（整进程在飞局数），eval 腿对单节点的线程数 =
+     `eval_slot_cap(concurrency, inflight) = max(1, concurrency − inflight)`。节点空闲时照旧拿满；本课
+     rollout 占 3/4 时 eval 只开 1 条。`floor=1` 是「让位不饿死」：不允许退化成纯等窗口（那是
+     `workers-gone` 的形状，§2026-11-01-eval-midround-self-rescue 修的就是它）。
+- **被否决的备选**：① 把 `busy` 从瞬断降级成节点故障（忙 ≠ 坏，会把健康节点整轮摘掉，且与回场口冲突）·
+  ② 只抬节点 `--workers`（把超订搬进 CPU；mac 6 worker/4 核、kaggle 4 worker/2 vCPU 已证明更糟）·
+  ③ 协调器侧共享每节点预算（hub 中介 / 文件锁）——跨进程账本，本轮先落单机可验证的两条，它仍是后续杠杆 ·
+  ④ eval 直接 `min(concurrency, pending)`（与本课 rollout 的在飞无关，消不掉共池溢出）。
+- **验收**：`tests/agent/admission-queue.test.ts`（FIFO 唤醒 / 超时 / 队满 / abort / 容量 2 五排队者
+  active≤2 / 缺省 12s·32）· `tests/trainer/test_eval_dispatch_resilience.py`
+  `::test_eval_yields_to_inflight_on_the_same_node`（inflight=3 ⇒ 峰值并发 1；空节点对照组 ≥2，
+  防夹具自证）· `tests/worker/test_eval_yield_split.py::test_eval_slot_cap_semantics`。门禁：
+  `bun run check` 2659 pass / 8 skip / 0 fail · nn `pytest` 两文件 68 passed · ruff 全过。
+- **未验证**：真实饱和集群上的下一轮 busy 计数（`/v1/status.admission.waiting/timedOut` 是观测口，
+  要等一次真拥堵）。

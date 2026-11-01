@@ -47,6 +47,7 @@ from worker.eval_track import course_logger, lost_by_node
 from worker.eval_yield import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     eval_close_reason,
+    eval_slot_cap,
     hold_for_local,
     inflight_grace_cap,
     local_release_due,
@@ -982,7 +983,16 @@ class EvalDispatcher:
                         },
                     )
                     continue
-                c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+                base_c = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+                # 让位（2026-11-01，docs/nn/runtime-opt.md §39）：节点自报在飞 = 本课 rollout
+                # （以及别的腿/课程）正占着的槽。eval 只拿剩下的，不把自己的 concurrency
+                # 再加一遍；`eval_slot_cap` 的 floor=1 让节点再忙也留一条线程推进。
+                c_n = eval_slot_cap(base_c, int(ping.get("inflight") or 0))
+                if c_n < base_c:
+                    _log(
+                        f"[eval] node {nid}: 让出在飞 {base_c - c_n} 槽 ⇒ c={c_n}/{base_c}"
+                        f"（inflight={ping.get('inflight')}）"
+                    )
                 alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
             # 本机槽位可用 ⇔ snapshot_path 已建（见上方快照段）⇒ 门失败不再整轮空转。
             if not alive:

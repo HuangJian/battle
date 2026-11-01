@@ -270,6 +270,23 @@ def test_midround_self_rescue_semantics() -> None:
     assert y.local_fallback_midround(True, False, True, 4, False) is False
 
 
+def test_eval_slot_cap_semantics() -> None:
+    """eval 让位：上限 = concurrency − 节点在飞局数（2026-11-01，503 busy 排查 §39）。
+
+    节点在飞为 0（空节点）⇒ 拿满 `concurrency`；rollout 占了 2 槽 ⇒ 只剩 2；节点已满 ⇒
+    留一条线程推进（不饿死、也不把 800 局拖成纯等窗口）。
+    """
+    y = eval_yield_mod
+    assert y.eval_slot_cap(6, 0) == 6
+    assert y.eval_slot_cap(6, 2) == 4
+    assert y.eval_slot_cap(4, 3) == 1
+    assert y.eval_slot_cap(4, 4) == 1  # 满了也只留一条（floor）
+    assert y.eval_slot_cap(4, 99) == 1
+    assert y.eval_slot_cap(4, -5) == 4  # 负数按 0 夹（账本抖坏不该放大上限）
+    assert y.eval_slot_cap(4, 3, floor=0) == 1
+    assert y.eval_slot_cap(1, 0) == 1
+
+
 def test_hold_for_local_semantics() -> None:
     """节点「关门则让位」：只在预留区内 hold；gate 已放行 / 进宽限 / 无预留 / 队列空 ⇒ 不 hold。"""
     y = eval_yield_mod
