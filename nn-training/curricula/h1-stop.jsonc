@@ -47,20 +47,30 @@
 
   // ── 奖励：x1-a2 v4 包逐字 ──────────────────────────────────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
       "wWin": 2.0,
       "wDmg": 0.03,
       "wShot": 0.05,
-      "wExplore": 0.2
+      "wExplore": 0.2,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -84,7 +94,7 @@
 
   "ppo_schedule": [
     { "until_iter": 40, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
-    { "kl_coef": 0.01, "lr": 0.00025 }
+    { "kl_coef": 0.01, "lr": 0.00025 },
   ],
 
   // ── 采集 ───────────────────────────────────────────────────────────────
@@ -102,7 +112,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

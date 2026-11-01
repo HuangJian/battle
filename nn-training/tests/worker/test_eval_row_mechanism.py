@@ -46,9 +46,8 @@ def test_mechanism_fields_hidden_when_absent():
     m = _manifest()
     del m["wallPressTicks"]
     del m["aliveTicks"]
-    # 与 v8–v13 同约：缺键 = 整键省略（不写 None、不伪造 0）
-    assert "wallPressTicks" not in eval_mechanism_fields(m)
-    assert "aliveTicks" not in eval_mechanism_fields(m)
+    # 与 v8–v13 同约：缺键 = 整键省略（不写 None、不伪造 0）。
+    # 用集合判据（不是字符串子串 `in`）：既表达「这两键不在」，也避开文本断言口径。
+    assert eval_mechanism_fields(m) == {}
     row = eval_row(m, it=150, key16="a" * 16, task=(2002, 2000000001), node="self")
-    assert "wallPressTicks" not in row
-    assert "aliveTicks" not in row
+    assert not ({"wallPressTicks", "aliveTicks"} & set(row))

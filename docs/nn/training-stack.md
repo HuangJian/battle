@@ -8,14 +8,14 @@
 
 ---
 
-## §56 观测 v7：单通道 ch16 `distEnemy`（`OBS_CHANNELS 16→17`，2026-11-01）
+## §57 观测 v7：单通道 ch16 `distEnemy`（`OBS_CHANNELS 16→17`，2026-11-01）
 
 **一句话**：按 plan/r5-next.plan.md §3.4 的**单通道版**落地——只加 `ch16 distEnemy`
 （多源 BFS 单位成本路距）；`ch17 distPickup` / `s46 bestPickupValue` **本波不做**。
 `OBS_CHANNELS 16→17`、`OBS_SCHEMA_MAJOR 6→7`、`SCHEMA_FINGERPRINT dabef716 → 6439fba8`
 ⇒ 旧语料/旧权重全废，全量重导。
 
-### 56.1 为什么只加一条
+### 57.1 为什么只加一条
 
 E0b′（`reports/r5-p0-measurements-20261101.md` §11，只读探针 `tmp/_probe/e0bp.ts`）：
 
@@ -27,7 +27,7 @@ E0b′（`reports/r5-p0-measurements-20261101.md` §11，只读探针 `tmp/_prob
 单变量纪律：本波只动一个输入，it150 的读数才可归因。语义护栏：**最近敌 ≠ 距基地最近敌
 29.0%**（2002 关 36.2%）⇒ ch16 是**导航/交战**通道，不是回防通道；别按「保护基地」解读。
 
-### 56.2 编码与可通行性（冻结，勿改）
+### 57.2 编码与可通行性（冻结，勿改）
 
 ```
 ch = d < 0 ? 255 : min(254, round(255·d/dRef))    dRef = 26
@@ -42,7 +42,7 @@ ch = d < 0 ? 255 : min(254, round(255·d/dRef))    dRef = 26
 - **开销**：`world.tanks` 扫描 + 676 格 BFS，`_bfsDist/_bfsQueue` 复用缓冲（AGENTS §14.1，
   零 per-tick 分配；每格至多入队一次）。镜像无关（距离场在 mirrorX 下不变）。
 
-### 56.3 权重迁移：stem 三段式（**不是**前缀拷贝）
+### 57.3 权重迁移：stem 三段式（**不是**前缀拷贝）
 
 ```
 旧：[obs 0..15 | coord 16..17]      新：[obs 0..15 | 新 obs 16 | coord 17..18]
@@ -65,7 +65,7 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
 - `build_demo_bank.py` 的 obs 形状断言从字面量 16 改为 `OBS_CHANNELS`（v7 起旧 demo 语料
   `obsSchemaMajor=6` 会被拒，符合「旧目录须重导」）。
 
-### 56.4 消融与接线闸
+### 57.4 消融与接线闸
 
 - `--ablate-ch 16` 已存在于 `export-eval-game.ts`（W1 波落地，按 `OBS_CHANNELS` 校验；
   v7 后 16 不再算越界）。只清指定通道的**独立缓冲**，`encoder.obs` 不动 ⇒ 采样轨迹不变。
@@ -75,7 +75,7 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
   `ch16` 组 `flipsMove=1 / dMove=0.210 / dFire=0.109` ⇒ 16 不再被判越界、且该通道真的进图
   （随机权重下就有非零读数；`drop0` 起点应当读 0，那是预期）。
 
-### 56.5 门禁与三端对账（2026-11-01 本机）
+### 57.5 门禁与三端对账（2026-11-01 本机）
 
 - `bun run check` **2666 pass / 8 skip / 0 fail**（2674 用例）；`bun run build` 绿；
   `freeze:check` 签名不变 `0ff1ba66…`（21 组合 / 113,586 行）。
@@ -89,7 +89,7 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
 - **运维**：`src/nn/*` 与 `tools/sim/export-*` 在 codehash 集内 ⇒ 这是一次代码波；
   任何新训练/eval 前确认无在跑课程并重启/换快照节点。
 
-## §55 机制闸两列进 eval 行：`wallPressTicks` / `aliveTicks`（2026-11-01）
+## §56 机制闸两列进 eval 行：`wallPressTicks` / `aliveTicks`（2026-11-01）
 
 **一句话**：eval 逐局行新增 `wallPressTicks` / `aliveTicks` ⇒ `wallPress/千 =
 wallPressTicks / aliveTicks × 1000` 在判决点可直接读。此前 eval 行只有 `onLaneTicks`
@@ -115,6 +115,78 @@ wallPressTicks / aliveTicks × 1000` 在判决点可直接读。此前 eval 行�
   若再开 E-BT 类腿要先补（且 `keep_iters: 1` 会把 shard 清掉）。
 - **运维**：`export-eval-game.ts` 在 codehash 集内 ⇒ 本改动是一次代码波；节点需重启/换快照，
   新评估或训练开跑前确认无在跑课程（本次改动时 `activeCourse` 是陈旧的 c6-chip，无进程）。
+
+## §55 reward.formula 行数组：多行公式落地 + 242 门课重排（2026-11-01）
+
+**一句话**：`reward.formula` 支持「一项一行」的字符串数组，加载层拼成括号表达式；242 门历史课程
+全部重排，逐文件 `ast.dump` 与改前相同。决策索引 → `DECISIONS.md`
+§2026-11-01-goalnn-course-formula-lines。
+
+### §55.1 形状
+
+```jsonc
+"formula": [
+  // 收入
+  "wKill*kills + wHit*aimHits",
+  "+ wWin*where(clearTick>=0, 1, 0)",
+  // 压力税（一项一行，行尾不留运算符）
+  "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+],
+```
+
+- 切分口径：**括号深度 1** 的 `+`/`-`（重排脚本用 `tokenize` ⇒ `1e-4`、`>=`、嵌套 `where(...)` 不误切）；
+  项首保留运算符，项内可再含多项（不强制拆到最小）；
+- 空串项（`""`）丢弃 = 视觉空行；分组注释写数组项之间的 `//`；
+- 校验：`[]` / 全空 / 非字符串项 ⇒ `ValidationError`（`extra="forbid"` 不变）。
+
+### §55.2 归一化与下游不变
+
+`RewardBlock._formula_lines`（`mode="before"`）把列表变成 `"(\n" + "\n".join(项) + "\n)"`：
+
+- `ast.parse(..., mode="eval")` 不接受裸换行，括号内才是隐式续行 ⇒ `parse_formula` / 白名单 /
+  AST 深度逻辑**一行未改**；
+- 括号内 `#` 注释合法（已测），但它算进 `MAX_FORMULA_CHARS`；`//` 在字符串外，不算、也不进公式文本；
+- `RewardSpec.formula` 仍是 `str` ⇒ `RewardSpec.identity()`、`corpus_identity_fp`
+  （收 `reward.model_dump()`）、manifest `reward_formula`、`formula_len` 日志、dashboard（不读 reward）
+  全部零改动；
+- 单行串**原样返回** ⇒ 未重排的课程指纹零漂移。
+
+### §55.3 重排口径与读数
+
+- 242 个课程文件（6 个 `.bc.jsonc` 无 formula，跳过）；每项一行，8–27 项，总 +2991 行；
+- 公式长度 `+4` 左右是括号与换行；最长 `y30-stack` 822 → **826**（上限 1024）；
+- 对账（重排脚本 `--apply` 内置）：**242/242** `ast.dump` 逐字相同、长度未超限、
+  `validate_reward(...).ok`；
+- 落盘时 `tmp/*/training-enabled.txt` 为空（无在训课程）。
+
+### §55.4 身份与热加载
+
+- 公式文本进 `corpus_fp` ⇒ **重排即新实验版本**：闭课的历史 shard 在 D14 下不再同身份
+  （有意，不静默混训）；`course_fp`（整文件 sha，`trainer/loop_lifecycle.py::_course_file_fp`）
+  本来就会因任何字节变化而漂移；
+- 在训课程重排 ⇒ 热加载按 A 类拒收（`biz/hot_reload.py::plan_reload` 返回 `rejected`），
+  沿用启动期配置，需重启；这不是 bug，是「改课程 = 新实验」的既定语义；
+- 同一语义的两种排版**指纹不同**（文本不同）。不引入 `ast.unparse` 规范化：那会让 242 门既有课程
+  （及全部历史 shard）的血缘一起断。
+
+### §55.5 被否决的备选
+
+字符串内 `\n`（不解决阅读）· JSON 字符串裸换行（不再是 JSON，Python/TS 两个解析器的逐字节对账与
+编辑器全红）· 外置公式文件（破 D13 快照 / `course_frozen_bytes` / `course_fp` / `code.zip` 的
+单文件不变量）· 结构化 `terms` 项表（新 DSL + 迁移成本，收益与 `//` 注释重叠）。
+
+### §55.6 分组注释（2026-11-01，同日第二刀）
+
+242 门里 **224 门**（≥6 个加性项）按语义补了 `// 收入 / 价格 / 塑形 / 机制` 分组注释（共 1332 条，只在组切换处插入；
+16 门短公式、2 门单组、6 个 BC 课程跳过）。规则表按全库 **109 种真实项形态**建（`wGeo*`/`wLane*`/`wLong*`/`wDanger*`/
+字面量 `ticks` 都在内，未分类 0），组内**不重排**（保住公式文本与求和顺序）。
+
+- 注释写在 JSONC 字符串外 ⇒ **`formula` 逐字不变、`corpus_fp` 不变**；变的只有整文件 sha `course_fp`（门/trend 过滤
+  与幂等键的文件血缘；`d14_corpus_match` 有 `corpus_fp` 时优先用它 ⇒ 历史 shard 仍可续）。
+- 逐门对账：`spec.formula` 逐字相同 · `corpus_identity_fp` 相同 · `validate_reward(...).ok`。
+- 组名含义：**收入**（击杀/命中/拾取/清场/速度）· **价格**（承伤/死亡/开火/失误/时长罚）· **塑形**（探索/瞄准/移动/
+  包围/威胁/砖）· **机制**（本课特有的税、窗口、基线：`basePressure` / `wDef` / `dmgFirst600` / `wClutch` / `thCost*`）。
+- 一次性脚本已删；以后新课程按同样四项手工分组即可（`MAX_FORMULA_CHARS` 不计字符串外的 `//`）。
 
 ## §54 metrics v13：基地威胁四轴 + 弹道 6 列（2026-11-01）
 

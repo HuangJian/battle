@@ -47,7 +47,18 @@
 
   // ── 奖励：v4 包逐字 ＋ 穿越税（唯一变量 = wLane，本臂 529）──────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited - wLane*onLaneMoveTicks/(ticks+1)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      "- wLane*onLaneMoveTicks/(ticks+1)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -55,13 +66,13 @@
       "wDmg": 0.03,
       "wShot": 0.05,
       "wExplore": 0.2,
-      "wLane": 529.0
+      "wLane": 529.0,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -86,7 +97,7 @@
 
   "ppo_schedule": [
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
-    { "kl_coef": 0.01, "lr": 0.00025 }
+    { "kl_coef": 0.01, "lr": 0.00025 },
   ],
 
   // ── 采集：mb 对齐（48 × mb(512)）；b0/b1/b2 逐字相同 ───────────────────────
@@ -108,5 +119,5 @@
   // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ②）────
   "eval_stages": "2000-2000",
   "eval_games_per_stage": 200,
-  "eval_every": 5
+  "eval_every": 5,
 }

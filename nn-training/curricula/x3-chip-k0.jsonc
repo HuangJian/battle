@@ -20,7 +20,12 @@
 
   // ── 奖励（x3-power 同构；wChip=0.0 对照）───
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wChip*playerDamageTaken",
+    "formula": [
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "- wChip*playerDamageTaken",
+    ],
     "params": {
       "wKill": 4.0,
       "wHit": 0.15,

@@ -40,7 +40,33 @@
   "level": "ladder-c05",
 
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, 1, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 收入
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "- wThreat*threatTicks/(ticks+1)",
+      "- wNearSq*nearSqSum/(ticks+1)",
+      "- wBlock*(idleTicks-stopTicks)/(ticks+1)",
+      // 收入
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -58,12 +84,12 @@
       "wNearSq": 42.0,
       "wFrFreeze": 2.0,
       "wFrBomb": 2.0,
-      "wFrStar": 3.0
+      "wFrStar": 3.0,
     },
     "terminal": {
-      "timeout": -5.0
+      "timeout": -5.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -86,9 +112,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   "target_transitions": 24576,
   // y 系流（新种子，与 20261024/20261101 不同防记忆化；与 y5-early/y5-flank 共享＝三路可比）。
@@ -106,7 +130,7 @@
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 结课报告（2026-10-15，门杀 halt；规格头冻结，本节只读）──

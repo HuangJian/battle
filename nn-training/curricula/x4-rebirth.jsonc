@@ -210,7 +210,17 @@
   // ── 奖励：与 a2 / x2 / x3 逐字一致（见文件头 §3，四条实测理由）──────────────
   "reward": {
     // ⚠ 用**标量 kills**（L7：bomb 缺 11.6%，分列静默丢信用）。
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

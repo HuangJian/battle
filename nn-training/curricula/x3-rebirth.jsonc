@@ -233,7 +233,17 @@
   "reward": {
     // ⚠ 用**标量 kills**，不用分列 killsByKind —— metrics v6 的双口径缺口
     // （bomb 清屏不进事件流，缺 11.6%）会让分列公式静默丢掉炸弹击杀信用（L7）。
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

@@ -50,7 +50,41 @@
   "mode": "per-tick",
   "level": "obstruction",
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow - wBehind*max(0,ticks/350-kills)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      "+ wShot*playerShots",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 收入
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "- wThreat*threatTicks/(ticks+1)",
+      "- wNearSq*nearSqSum/(ticks+1)",
+      "- wBlock*(idleTicks-stopTicks)/(ticks+1)",
+      // 收入
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      "+ wBackHits*backHits",
+      "+ wSideHits*sideHits",
+      "+ wWinHit*hitsInFreezeShieldWindow",
+      // 塑形
+      "- wBehind*max(0,ticks/350-kills)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.45,

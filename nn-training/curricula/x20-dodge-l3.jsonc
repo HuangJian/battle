@@ -63,7 +63,21 @@
 
   // ── 奖励：noexplore 原公式 + ★收入侧并集（起点档）──────────────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected + wStar*starsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      "+ wStar*starsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -72,11 +86,11 @@
       "wExplore": 0.0,
       "wPickup": 3.5,
       "wStar": 2.0,
-      "wApproach": 0.008
+      "wApproach": 0.008,
     },
     // dense-only（与父腿一致）：terminal 空表合法。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -101,9 +115,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：与 L1 逐字相同（并行配对条件）────────────────────────────────────
   "target_transitions": 49152,
@@ -120,7 +132,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

@@ -118,7 +118,21 @@
     "level": 0,
   },
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wPickup*powerUpsCollected + wStar*starsCollected - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots - wTick*ticks - wChip*playerDamageTaken",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wPickup*powerUpsCollected",
+      "+ wStar*starsCollected",
+      // 价格
+      "- wDmg*playerHits",
+      // 塑形
+      "- wStuck*min(max(0, stuckTicks-300), 900)",
+      // 价格
+      "- wShot*playerShots",
+      "- wTick*ticks",
+      "- wChip*playerDamageTaken",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,

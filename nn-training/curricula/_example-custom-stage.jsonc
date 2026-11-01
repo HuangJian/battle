@@ -91,7 +91,18 @@
   "player": { "lives": 2, "level": 2 },
 
   "reward": {
-    "formula": "wKill*(kills+1)**p - wDmg*playerHits - wDmg2*playerDamageTaken + wLoot*powerUpsCollected + wHit*enemyHits - wStuck*max(0, stuckTicks-180)",
+    "formula": [
+      // 收入
+      "wKill*(kills+1)**p",
+      // 价格
+      "- wDmg*playerHits",
+      "- wDmg2*playerDamageTaken",
+      // 收入
+      "+ wLoot*powerUpsCollected",
+      "+ wHit*enemyHits",
+      // 塑形
+      "- wStuck*max(0, stuckTicks-180)",
+    ],
     "params": {
       "wKill": 1.0,
       "p": 1.15,

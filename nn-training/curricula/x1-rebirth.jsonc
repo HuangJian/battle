@@ -117,7 +117,13 @@
   // 历史 `wDmg` 一直挂在 `playerHits` 上 ⇒ 与 terminal.lives_exhausted 重复，
   // 是个**伪装的死项**，从未真正惩罚过「挨打」——这就是「莽」一直没被治的原因。
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots",
+    "formula": [
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,

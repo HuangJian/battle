@@ -148,6 +148,7 @@ class RewardBlock(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: 公式：单行字符串（历史形态，逐字节不变）或**行数组**（多行形态，2026-11-01）。
     formula: str = ""
     #: 降级卡回退目标（formula 超限/含白名单外符号时启用，warning 不静默）
     builtin: str = ""
@@ -162,6 +163,39 @@ class RewardBlock(BaseModel):
     allow_extended_funcs: bool = False
     #: 终局重分配（DECISIONS §382）：True 时终局额按步均摊，默认 False 历史行为
     terminal_spread: bool = False
+
+    @field_validator("formula", mode="before")
+    @classmethod
+    def _formula_lines(cls, v: Any) -> Any:
+        """行数组 → 一个括号表达式（多行 formula，2026-11-01）。
+
+        `"formula": ["wKill*kills", "+ wHit*aimHits", ...]`：一项一个加性项、`+`/`-`
+        留在项首，空行（`""`）丢弃，分组注释写 JSONC 的 `//`（在字符串外 ⇒ 不进
+        `MAX_FORMULA_CHARS` 额度，也不进公式文本）。
+
+        为什么在**加载层**收敛成 `str`：reward 血缘（`RewardSpec.identity`）与语料身份
+        （`corpus_identity_fp` 收 `reward.model_dump()`）都拿这个字符串，manifest 的
+        `reward_formula`、`formula_len` 日志、测试也一律按 str 消费 ⇒ 下游零改动。
+        单行串**原样返回** ⇒ 历史课程逐字节不变；行数组拼出来的文本带换行，与等价单行
+        写法**不是**同一个指纹（排版进了公式文本 = 新语料身份，这是有意的：runtime
+        看到的配置文本确实是新的）。
+
+        括号不是装饰：`ast.parse(..., mode="eval")` 不接受裸换行，括号内才是隐式续行
+        （`parse_formula` 因此一行不用改；括号内的 `#` 行内注释也合法，但它们**算**进
+        1024 字符额度——分组注释优先写 `//`）。
+        """
+        if not isinstance(v, list):
+            return v
+        lines: list[str] = []
+        for i, item in enumerate(v):
+            if not isinstance(item, str):
+                raise ValueError(f"formula[{i}] 必须是字符串（收到 {type(item).__name__}）")
+            line = item.strip()
+            if line:
+                lines.append(line)
+        if not lines:
+            raise ValueError("formula 数组为空（至少要有一项非空表达式）")
+        return "(\n" + "\n".join(lines) + "\n)"
 
     @field_validator("terminal")
     @classmethod

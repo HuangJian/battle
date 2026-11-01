@@ -15,7 +15,18 @@
 
   // dodge-mix：击杀超线性 + 命中敌方 + 拾取 − 被命中 − 掉血 − 停滞（180 tick 免罚）
   "reward": {
-    "formula": "1.0*(kills+1)**1.15 + 0.2*enemyHits - 1.0*playerHits - 0.01*playerDamageTaken + 0.4*powerUpsCollected - 0.002*max(0, stuckTicks-180)",
+    "formula": [
+      // 收入
+      "1.0*(kills+1)**1.15",
+      "+ 0.2*enemyHits",
+      // 价格
+      "- 1.0*playerHits",
+      "- 0.01*playerDamageTaken",
+      // 收入
+      "+ 0.4*powerUpsCollected",
+      // 塑形
+      "- 0.002*max(0, stuckTicks-180)",
+    ],
     "params": {},
     "terminal": { "stage_clear": 2.0, "lives_exhausted": -1.5 },
   },

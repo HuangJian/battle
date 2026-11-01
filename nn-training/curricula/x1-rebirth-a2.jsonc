@@ -217,7 +217,17 @@
 
   // ── 奖励：v2/v3 已在真实语料上证过量级平衡（见文件头 §3/§4）────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

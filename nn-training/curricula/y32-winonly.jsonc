@@ -132,7 +132,39 @@
 
   // ── 奖励：y31-fire 逐字 + 窗口命中项（wWinHit 2.5）；wPickup 保持 0.8 ──
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wShot*playerShots + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, 1, 0) + wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits + wWinHit*hitsInFreezeShieldWindow",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      "+ wShot*playerShots",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 收入
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, (13000-clearTick)/1400, 0)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "- wThreat*threatTicks/(ticks+1)",
+      "- wNearSq*nearSqSum/(ticks+1)",
+      "- wBlock*(idleTicks-stopTicks)/(ticks+1)",
+      // 收入
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      "+ wBackHits*backHits",
+      "+ wSideHits*sideHits",
+      "+ wWinHit*hitsInFreezeShieldWindow",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.32,
@@ -156,13 +188,13 @@
       "wFrBomb": 3.0,
       "wFrStar": 4.0,
       "wBackHits": 1.2,
-      "wSideHits": 0.3
+      "wSideHits": 0.3,
     },
     "terminal": {
       "timeout": -35.0,
-      "lives_exhausted": -35.0
+      "lives_exhausted": -35.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -184,7 +216,7 @@
 
   "ppo_schedule": [
     { "until_iter": 100, "kl_coef": 0.05, "lr": 0.00012, "kl_cap": 0.1 },
-    { "kl_coef": 0.05, "lr": 0.00008, "kl_cap": 0.1 }
+    { "kl_coef": 0.05, "lr": 0.00008, "kl_cap": 0.1 },
   ],
 
   "target_transitions": 24576,
@@ -204,7 +236,7 @@
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 结课结算（2026-10-24）────────────────────────────────────────────────────

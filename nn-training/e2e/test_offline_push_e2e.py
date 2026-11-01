@@ -44,10 +44,15 @@ if str(ROOT) not in sys.path:
 
 from common import net_http
 from common.protocol import COURSE_ENABLE_MARKER
-from tests.hub.test_offline_push_dispatch import COURSE, TOKEN, _Worker
+from tests.hub.test_offline_push_dispatch import TOKEN, _Worker
 from tests.subproc_util import spawn_bound_port
 
 HUB_TOKEN = "e2e-push-token"
+
+#: 本地合成课名（**不在** `curricula/` 里）。真课程会声明 `backup_dir`（仓根相对）⇒ 归档会写到
+#: 真 `nn-training/weights/`，而本 e2e 的隔离根是 `BCITY_WEIGHTS_ARCHIVE_ROOT=<traj>/weights-archive`；
+#: 用假课名走「无声明」的缺省档，归档才落在用例自己的 tmp 里。
+COURSE = "c5-gae-e2e"
 
 
 # ------------------------------------------------------------------ 夹具
@@ -231,7 +236,8 @@ def test_push_mode_whole_workflow(tmp_path: Path) -> None:
     """
     traj = tmp_path / "traj"
     _course(traj)
-    worker = _Worker(tmp_path)  # 假云机：真 face server + 按协议写 outbox
+    # `follow_task_identity=True`：假训练的产物按**收到的那一单**盖章（课名/run_id 以 hub 派单为准）。
+    worker = _Worker(tmp_path, follow_task_identity=True)  # 假云机：真 face server + 按协议写 outbox
     push_cfg = tmp_path / "push-config.json"
     _push_config(push_cfg, _node(worker.url, enabled=True))
 

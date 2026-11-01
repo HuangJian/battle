@@ -135,7 +135,7 @@
 
   // ── 奖励（公式/scheme/terminal 与 x3-start 同构；唯一变量 = params 比值）───
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "formula": ["wKill*kills", "+ wHit*enemyHits", "+ wWin*where(clearTick>=0, 1, 0)"],
     "params": {
       // 3.0→4.0：终结信用 +33%。
       "wKill": 4.0,

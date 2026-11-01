@@ -19,7 +19,15 @@
   //   bomb 清屏击杀不进事件流分列，缺了该桶就等于额外删掉炸弹击杀的信用，
   //   破坏单变量纯度）。完整论证与已知残留见 `x3-credit-p6.jsonc` 同位置注释。
   "reward": {
-    "formula": "wKillBasic*killsBasic + wKillFast*killsFast + wKillPower*killsPower + wKillArmor*killsArmor + wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor) + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "formula": [
+      "wKillBasic*killsBasic",
+      "+ wKillFast*killsFast",
+      "+ wKillPower*killsPower",
+      "+ wKillArmor*killsArmor",
+      "+ wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor)",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+    ],
     "params": {
       "wKillBasic": 3.0,
       "wKillFast": 3.0,

@@ -753,9 +753,14 @@ class OfflineRoundsMixin:
             if not p.is_file():
                 continue
             try:
-                from common.jsonc import strip_comments
+                # 必须用产品同一个加载器（`common.jsonc.loads` = 去注释 + **去尾逗号**）：
+                # 课程文件是 JSONC 子集，`strip_comments` + `json.loads` 会在
+                # `"formula": [...],` 这类数组尾逗号上失败 ⇒ 静默落到「没配置」的缺省归档目录。
+                # 2026-11-01 行数组落地时被
+                # `tests/hub/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 抓住。
+                from common.jsonc import loads as load_jsonc
 
-                cfg = json.loads(strip_comments(p.read_text(encoding="utf-8")))
+                cfg = load_jsonc(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
             if not isinstance(cfg, dict):

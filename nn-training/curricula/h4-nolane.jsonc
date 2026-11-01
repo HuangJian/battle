@@ -61,7 +61,21 @@
 
   // ── 奖励：h4-geo 逐字 ＋ 移动穿越税一项（唯一变量）─────────────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wGeoBack*backHits + wGeoSide*sideHits + wGeoBack*frontHitsExempt - wLane*onLaneMoveTicks/(ticks+1)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 收入
+      "+ wGeoBack*backHits",
+      "+ wGeoSide*sideHits",
+      "+ wGeoBack*frontHitsExempt",
+      // 塑形
+      "- wLane*onLaneMoveTicks/(ticks+1)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -70,13 +84,13 @@
       "wShot": 0.05,
       "wGeoBack": 1.0,
       "wGeoSide": 0.5,
-      "wLane": 200.0
+      "wLane": 200.0,
     },
     "terminal": {
       "lives_exhausted": -5.0,
-      "timeout": -2.0
+      "timeout": -2.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -101,7 +115,7 @@
 
   "ppo_schedule": [
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
-    { "kl_coef": 0.01, "lr": 0.00025 }
+    { "kl_coef": 0.01, "lr": 0.00025 },
   ],
 
   // ── 采集：mb 对齐（48 × mb(512)；单关无 per-stage 配额问题）─────────────────
@@ -121,7 +135,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2000",
   "eval_games_per_stage": 200,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置（agent 不得启动训练，用户手工经控制台开课）────────────────────

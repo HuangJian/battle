@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.course_spec import RewardBlock
 from biz.reward_builtin import V7_DEFAULT_PARAMS, v7_phi
 from biz.reward_library import (
     CORE_FUNCS,
@@ -43,7 +45,12 @@ from biz.reward_library import (
     compile_formula,
     parse_formula,
 )
-from biz.reward_validation import DEFAULT_RANGES, symbolic_envelope, validate_reward
+from biz.reward_validation import (
+    DEFAULT_RANGES,
+    split_additive_terms,
+    symbolic_envelope,
+    validate_reward,
+)
 from common.jsonc import strip_comments
 from worker.config import CURRICULA_DIR, CourseConfig, load_course
 
@@ -377,6 +384,54 @@ def test_jsonc_courses_load() -> None:
         c = load_course(f)
         assert isinstance(c, CourseConfig)
         assert c.name
+        # 多行 formula（行数组）在加载层收敛成 str：下游一律按字符串消费
+        # （血缘/身份/manifest/日志），列表形态不得泄漏。
+        assert isinstance(c.reward.formula, str)
+
+
+# ================================================================== 多行 formula
+
+
+def test_formula_lines_join_and_compile_equal() -> None:
+    """行数组 ≡ 单行：同一 AST、同一 Φ；`#` 行内注释也合法（括号内是隐式续行）。"""
+    lines = [
+        "wKill*kills + wHit*aimHits",
+        "+ wWin*where(clearTick>=0, 1, 0)",
+        "- wDmg*playerDamageTaken  # 承伤",
+    ]
+    joined = RewardBlock.model_validate({"formula": lines}).formula
+    assert joined == "(\n" + "\n".join(line.strip() for line in lines) + "\n)"
+
+    params = {"wKill": 15.0, "wHit": 1.5, "wWin": 60.0, "wDmg": 0.12}
+    single_line = RewardBlock(
+        formula=" ".join(line.split("#")[0] for line in lines)
+    ).formula
+    m = _metrics(5, kills=3.0, aimHits=2.0, clearTick=100.0, playerDamageTaken=40.0)
+    assert np.array_equal(
+        compile_formula(joined, params).phi(m, params),
+        compile_formula(single_line, params).phi(m, params),
+    )
+
+
+def test_formula_lines_rejects_bad_shapes() -> None:
+    from pydantic import ValidationError
+
+    for bad in ([], [""], ["   "], [1], ["kills", None]):
+        with pytest.raises(ValidationError):
+            RewardBlock.model_validate({"formula": bad})
+
+
+def test_formula_lines_legacy_single_line_untouched() -> None:
+    """单行串原样返回 ⇒ 历史课程指纹零漂移。"""
+    src = "wKill*kills + wHit*aimHits"
+    assert RewardBlock(formula=src).formula == src
+
+
+def test_formula_lines_syntax_error_is_loud() -> None:
+    """漏写运算符不能静默：括号内换行是隐式续行，缺 op 仍是语法错误。"""
+    joined = RewardBlock.model_validate({"formula": ["kills", "aimHits"]}).formula
+    with pytest.raises(FormulaError):
+        compile_formula(joined, {})
 
 
 # ================================================================== 课程可用性
@@ -1049,6 +1104,15 @@ def _h5_arm(name: str) -> CourseConfig:
     return load_course(name)
 
 
+def _formula_terms(course: CourseConfig) -> list[str]:
+    """公式的加性项（AST 序）——代替文本前缀断言：多行重排不改语义。"""
+    spec = course.reward_spec()
+    return [
+        ast.unparse(t)
+        for t in split_additive_terms(parse_formula(spec.formula, spec.params).tree.body)
+    ]
+
+
 def _h5_episode(
     fn,
     *,
@@ -1134,8 +1198,19 @@ def test_h5_arms_single_variable() -> None:
     assert dict(a.reward.params) == {**base.reward.params, "wEarlyDmg": 0.06}
     assert a.reward.terminal == base.reward.terminal
     assert b.reward.terminal == base.reward.terminal
-    assert b.reward.formula.startswith(base.reward.formula + " + wClean*")
-    assert a.reward.formula.startswith(base.reward.formula + " - wEarlyDmg*")
+    base_terms = _formula_terms(base)
+    # 只在末尾追加一项（项序列是数据，不按文本前缀断言）
+    assert base_terms == _formula_terms(b)[:-1] == _formula_terms(a)[:-1]
+    base_spec = base.reward_spec()
+    base_params = set(parse_formula(base_spec.formula, base_spec.params).param_names)
+    b_spec = b.reward_spec()
+    assert set(parse_formula(b_spec.formula, b_spec.params).param_names) == base_params | {
+        "wClean"
+    }
+    a_spec = a.reward_spec()
+    assert set(parse_formula(a_spec.formula, a_spec.params).param_names) == base_params | {
+        "wEarlyDmg"
+    }
     assert "wClean" not in base.reward.params and "wClean" not in a.reward.params
     assert "wEarlyDmg" not in base.reward.params and "wEarlyDmg" not in b.reward.params
     # 路径互不相犯（§15.5 禁续跑：out/traj/backup 三处都必须新目录）

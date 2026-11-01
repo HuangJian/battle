@@ -92,7 +92,15 @@
   //   并作敏感性分析；彻底消除需给 bomb 分支补 `pushEvent`（改引擎，本腿按方案 A
   //   处理，不动 `src/game/**`）。
   "reward": {
-    "formula": "wKillBasic*killsBasic + wKillFast*killsFast + wKillPower*killsPower + wKillArmor*killsArmor + wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor) + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "formula": [
+      "wKillBasic*killsBasic",
+      "+ wKillFast*killsFast",
+      "+ wKillPower*killsPower",
+      "+ wKillArmor*killsArmor",
+      "+ wKillBasic*(kills - killsBasic - killsFast - killsPower - killsArmor)",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+    ],
     "params": {
       // 预注册剂量（plan §2）：power 2×，其余与 x3-start 的 wKill=3.0 同价。
       // 注：`wKillBasic` 在本公式里**兼任残差桶（未归因击杀 / bomb 清屏）的单价**，
