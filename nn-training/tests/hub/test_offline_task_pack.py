@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -79,6 +80,26 @@ def _write_pack(tmp_path: Path, course: str, payload: bytes = b"PK\x03\x04fake-t
     p = d / f"task-{course}.zip"
     p.write_bytes(payload)
     return p
+
+
+def _unlink_when_released(path: Path, *, timeout: float = 10.0) -> None:
+    """删文件，等递包线程交还句柄（Windows 上删打开中的文件 = `WinError 32`）。
+
+    为什么要等：`_bytes_file` 是**流式**递包（`with open` 住在生成器里），客户端收满
+    `Content-Length` 的最后一块时，服务端线程可能还没退出那个 `with` —— Linux 允许删
+    打开中的文件，Windows 直接 `PermissionError`（2026-11-01 xdist 满载时门禁红）。
+    谓词 = 文件真的消失；上界 10s ⇒ 真有句柄泄漏时仍然响亮地失败，不把它吞成慢用例。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            path.unlink()
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            # sleep-ok: 轮询步长 20ms（等 hub 的递包线程关闭 zip 句柄；谓词 = 文件消失）
+            time.sleep(0.02)
 
 
 # ------------------------------------------------------------------ 端点：任务包
@@ -521,7 +542,8 @@ def test_missing_pack_ledger_resets_when_the_pack_appears(tmp_path, monkeypatch)
 
     pack = _write_pack(tmp_path, "c5-gae")
     assert _get(base, url)[0] == 200, "包在盘上 ⇒ 照发"
-    pack.unlink()
+    # 200 只说明**客户端**收完了包，服务端可能还在流式读它 ⇒ 删之前等句柄释放（Windows）。
+    _unlink_when_released(pack)
     body = _as_json(_get(base, url)[1])
     assert body["triggered"] is True, body
     assert calls == ["c5-gae"] * (hub_server.TASK_PACK_MISS_TRIGGER_LIMIT + 1)
