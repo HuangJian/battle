@@ -324,6 +324,9 @@ def eval_row(
         "seed": task[1],
         "node": node,
         "outcome": manifest.get("outcome"),
+        # 三档拆分的唯一来源：base_destroyed / lives_exhausted（stage_clear 时为 None）。
+        # 缺它则"基毁率"读不出 —— 2026-11-01 补评实测：报告里有、行里没有 ⇒ 主判据判不了。
+        "lossDetail": manifest.get("lossDetail"),
         "win": win,
         "cleared": cleared,
         "ticks": manifest.get("ticks"),

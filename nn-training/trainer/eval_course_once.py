@@ -208,6 +208,7 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         "stageName": m["stageName"],
         "seed": seed,
         "outcome": row.get("outcome"),
+        "lossDetail": row.get("lossDetail"),
         "win": bool_of("win"),
         "cleared": bool_of("cleared"),
         "ticks": row.get("ticks") or 0,
