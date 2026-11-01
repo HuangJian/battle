@@ -1,11 +1,11 @@
 {
-  "abi": 1,
+  "abi": 2,
   "cc": "clang",
   "ccVersion": "clang version 20.1.0",
   "sources": [
     {
       "path": "src/nn/conv/conv_native.h",
-      "sha256": "ac55fbbb325f60703c46a96a772263adde063d518afe10b3ac75ab4e2aafeda8"
+      "sha256": "fa49510880ab9ca4c6e48ed6a65d221339e2c6076199034e1789c8ba613b59a2"
     },
     {
       "path": "src/nn/conv/conv_wasm.h",
@@ -34,7 +34,7 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "56dc78ee30ae94ffbd973d687936646f7524fe034c448cd6b8b9114e64469c81",
+      "sha256": "d8a3d69314401e8240b43e0f17d2b3d5bd2f3048b65e87a729c11e8304dc952f",
       "bytes": 16384
     },
     {
@@ -52,7 +52,7 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "bff06abeea3c417199e130ffc7f513d94255c6a82e8ab5fad535de9d05843972",
+      "sha256": "6c37960c4a0a112f95cb84d12e4913e5aecf600f31063863d5ce943a39e6b97f",
       "bytes": 9728
     },
     {
@@ -72,8 +72,8 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "35f321071695ccb1a8adfd2c61f9755adedb16409edbde75af049237fd6ed33c",
-      "bytes": 15856
+      "sha256": "6353d5c7491c6479a0dc0fc62e62d62cc8fa6c5d4e28c8521acc794de30858bb",
+      "bytes": 15872
     },
     {
       "id": "linux-arm64",
@@ -90,7 +90,7 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "0909fd03202cdf563dfff2060f93c3568ad42a23d88acea3f5b594902f246906",
+      "sha256": "ca5187b2605dd7c8ecfe4ab2b2f2fa78d48605b9671284ef8eee79fefeec8838",
       "bytes": 9288
     },
     {
@@ -110,7 +110,7 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "eb5ef94443610ab356d5a847855480ccd9653e843f9d803fbe1ca8da840c4afb",
+      "sha256": "ac7ddf8aec270f6732ede4881485ffd8fa26dc7df151141637e6e4abd52d0e99",
       "bytes": 16560
     },
     {
@@ -128,7 +128,7 @@
         "-fvisibility=hidden",
         "-DCF_FREESTANDING=1"
       ],
-      "sha256": "e146e3d84d74db927812591c77666f3a5087404d0a4060130e9075dac6d21c73",
+      "sha256": "e54a19d7039c808f3b9ade05dcd3ca7b287cc710b8dd89d7ac3f6890686793ef",
       "bytes": 16864
     }
   ],
@@ -148,8 +148,8 @@
       "-Wl,--export-memory",
       "-Wl,--strip-all"
     ],
-    "sha256": "5b77cb4df5a14fcccfb789a6e2565be1dfa7962892918f360b6f1c8ce1583cdb",
+    "sha256": "6e506781eba9c216aa1fd2ef27cfcb87bc4bec982d79c047cdca516757ec84f7",
     "bytes": 7350
   },
-  "builtAt": "2026-09-22T23:50:20.990Z"
+  "builtAt": "2026-11-01T15:14:12.350Z"
 }

@@ -39,7 +39,7 @@ const BOARD = 26
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
-const IN_CH = 18
+const IN_CH = 19
 const STEM_W = IN_CH * 576
 const DW_W = D * H * 25
 const PW_W = D * H * H
@@ -248,7 +248,7 @@ function ensureBlob(k: NativeKernel, m: ConvModelView): Float32Array | null {
   return blob
 }
 
-/** 形状守卫：与 wasm 侧同一套契约（h64/d8/board26/18ch），不符直接回落。 */
+/** 形状守卫：与 wasm 侧同一套契约（h64/d8/board26/19ch），不符直接回落。 */
 function shapeOk(m: ConvModelView): boolean {
   return (
     m.dwW.length === D &&
@@ -276,7 +276,7 @@ interface AttestRef {
 function attest(k: NativeKernel, m: ConvModelView, ref: AttestRef): boolean {
   const blob = ensureBlob(k, m)
   if (!blob) {
-    _reason = '权重 blob 尺寸不符（架构不是 h64/d8/18ch）'
+    _reason = '权重 blob 尺寸不符（架构不是 h64/d8/19ch）'
     return false
   }
   const wblobPtr = requireBunFfi()!.ptr(blob)
@@ -335,7 +335,7 @@ function attest(k: NativeKernel, m: ConvModelView, ref: AttestRef): boolean {
 export function runStudentConvNative(model: unknown, ref: AttestRef): boolean {
   const m = model as ConvModelView
   if (!shapeOk(m)) {
-    _reason = _reason || '架构不符（非 h64/d8/26/18ch）'
+    _reason = _reason || '架构不符（非 h64/d8/26/19ch）'
     return false
   }
   const k = loadKernel()

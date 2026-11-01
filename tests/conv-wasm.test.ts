@@ -106,7 +106,7 @@ function tsFeatures(
   const bufA = new Float32Array(H * SP),
     bufB = new Float32Array(H * SP),
     bufC = new Float32Array(H * SP)
-  conv3(in16, stemW, stemB, bufA, 18, H)
+  conv3(in16, stemW, stemB, bufA, 19, H)
   for (let i = 0; i < D; i++) {
     dw5(bufA, dwW[i], dwB[i], bufB)
     pw1(bufB, pwW[i], pwB[i], bufC)
@@ -128,13 +128,13 @@ describe('conv.wasm vs TS naive（数值对拍）', () => {
     )
     const inst = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes))
     const mem = inst.exports.memory as WebAssembly.Memory
-    const STEM_W = 18 * 576,
+    const STEM_W = 19 * 576,
       DW_W = D * H * 25,
       PW_W = D * H * H
     const BLOB = STEM_W + H + DW_W + D * H + PW_W + D * H
     // base 必须在模块自己的静态区之后（内核 scratch/bufB 在 BSS，不在数据段）
     const base = Math.max(1 << 20, mem.buffer.byteLength)
-    const need = base + BLOB * 4 + 18 * SP * 4 + H * 4 + H * SP * 4
+    const need = base + BLOB * 4 + 19 * SP * 4 + H * 4 + H * SP * 4
     const grow = Math.ceil((need - mem.buffer.byteLength) / 65536)
     if (grow > 0) mem.grow(grow)
     const f32At = (o: number) => new Float32Array(mem.buffer, o)
@@ -145,9 +145,9 @@ describe('conv.wasm vs TS naive（数值对拍）', () => {
       oPwW = oDwB + D * H * 4,
       oPwB = oPwW + PW_W * 4
     const oIn = base + BLOB * 4,
-      oPool = oIn + 18 * SP * 4,
+      oPool = oIn + 19 * SP * 4,
       oBufA = oPool + H * 4
-    expect((inst.exports['cf_abi'] as () => number)()).toBe(1)
+    expect((inst.exports['cf_abi'] as () => number)()).toBe(2)
     const feats = inst.exports['cf_student_features'] as (
       wblob: number,
       in16: number,
@@ -157,7 +157,7 @@ describe('conv.wasm vs TS naive（数值对拍）', () => {
 
     for (let frame = 0; frame < 3; frame++) {
       const rnd = mulberry(0xc0ffee + frame * 97)
-      const stemW = randArr(rnd, 10368),
+      const stemW = randArr(rnd, STEM_W),
         stemB = randArr(rnd, 64)
       const dwW: Float32Array[] = [],
         dwB: Float32Array[] = [],
@@ -171,7 +171,7 @@ describe('conv.wasm vs TS naive（数值对拍）', () => {
         pwW.push(randArr(rnd, H * H))
         pwB.push(randArr(rnd, H))
       }
-      const in16 = randArr(rnd, 18 * SP)
+      const in16 = randArr(rnd, 19 * SP)
 
       const ts = tsFeatures(in16, stemW, stemB, dwW, dwB, pwW, pwB)
       // 上传

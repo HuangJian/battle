@@ -10631,3 +10631,44 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 注释在字符串外 ⇒ `corpus_fp` 不变，只动 `course_fp`（历史 shard 仍可续）。
 
 **全文** → `docs/nn/training-stack.md` §55。
+
+## §2026-11-01-goalnn-paddle-parity-v7-noise（Paddle 三端对账在 v7 后补绿：少量 v≈0 坐标的单步离群 + value 头的绝对/相对缝）
+
+- **背景**：观测 v7（`OBS_CHANNELS 16→17`）后 `paddle_parity` 两步红：`check` 的
+  `legacy_plain` 权重 5.80e-4（>1e-4）、after 7.67e-4；`verify` 的 `ckpt_resume`
+  `fwd_rel=2.29e-5`（>1e-5）。**A/B 证据**：同一套 fixture 在 schema-6（detached worktree
+  `62ed797a`）全绿（check worst 4.21e-5 / verify 8.41e-6）⇒ v7 把 stem 输入从 18 加宽到 19
+  改变了 f32 累加长度，但两侧数学未分叉。
+- **定位**：`legacy_plain` 有 **5 个坐标**（stem `[30,0,1,2]` 最大：torch −2.81e-4 /
+  paddle +2.99e-4，≈±lr）一步更新方向相反；其余 72,835 坐标 mean|Δ|=5.1e-8、stats 1.83e-5。
+  = Adam 在 v≈0 坐标上把 f32 正负噪声放大到饱和（同族已知边界：16 通道时 72,264 元素里
+  7 个 >1e-5，见 `paddle_parity.py` 的 `CKPT_STATS_TOL` 注释）。verify 的 2.29e-5 = value 头
+  （|out|≈0.7）的末位噪声；move/fire（|out|≈600）相对误差仅 4.6e-7。
+- **决定**：① `check` 的权重判据加**少量坐标离群**窄缝：超 `atol_weights` 的元素 **≤8**、
+  最大 ≤**2·lr**、均值 ≤atol/10；满足时更新后前向放宽到 `atol_after + 2·d_w`；
+  ② `verify` 改为 `max|Δ| ≤ atol + rtol·max(1,|ref|max)`（`--rtol` 默认 1e-4）。
+  两条都只在「少数坐标 / 小量级头」的形状上生效，大 logits 仍按 1e-4 相对判。
+- **被否决**：把全局 `atol_weights` 抬到 2·lr（任意多坐标都能偏 6e-4，等于拆门）· 换 fixture
+  seed（掩盖而非修复）· 动 Adam eps（改训练语义，且 parity 验的就不是生产优化器）· 全程
+  float64（框架级改造，parity 不要求 bit 级一致）。
+- **验收**：`fixture` → `check` → `verify` 三步 **8+1 用例全 PASS**；check 全量 worst
+  fwd 1.92e-6 / stats 3.80e-5 / weights 5.80e-4（输出 `[5-coord-outlier]` 标记）/ after 7.67e-4；
+  verify worst 2.29e-5；`ruff` 全过。
+
+## §2026-11-01-goalnn-obs-v7-native-kernels-19ch（v7 观测把 TS 卷积内核 18→19 通道：修静默算错 + ABI 2 + 重编六平台 prebuilt）
+
+- **发现**：v7（`OBS_CHANNELS 16→17`）后，迁移权重与 guard it500 应逐位同行为，但端到端 eval
+  的 logits 从 ~1 爆到 1722/5005。定位：`conv_native.h::CF_IN_CH` 与两个 JS 适配器的 `IN_CH`
+  硬编码 18（16 obs + 2 coord）。native 的 `shapeOk` 会拒 19ch（回退 wasm），但
+  `runStudentConvWasm` 只查 d/bufA、**不查 in16 长度** ⇒ 19ch 的 set 把多出的通道写进 pooled 区
+  并让 coord 错位 = **静默算错**（不是慢，是错）。
+- **决定**：`CF_IN_CH 18→19`（17 obs + 2 coord）· `CF_ABI 1→2` · `NATIVE_ABI=2` · wasm 适配器
+  `ABI=2` · `native-build.ts --cross` 重编 6 平台 + wasm32（`--check-prebuilt` 绿）。wasm 入口
+  保留**精确长度守卫**：旧 18ch 权重、未来再变宽一律回退 TS（正确性优先于速度）。
+- **被否决**：只加守卫不重编（v7 eval 19.5× 慢：3000 拍 16.6s vs 0.83s，800 局×7 点会顶穿评估
+  窗口）· 只改 native 不改 wasm（生产路径 wasm 先于 TS，仍错）· 保留 ABI 1（旧库会被新 JS 误用）。
+- **验收**：`bun run check` 2666 pass / 8 skip / 0 fail（含 native-parity / native-prebuilt /
+  conv-wasm 30 例）· `--check-prebuilt` fresh · guard it500 vs 迁移 v7 同 `(stage,seed)` eval
+  逐字段相同（score 0.212 / 1 杀 / hitRate 0.333）· v7 3000 拍 0.82s。
+- **代价**：18ch 旧权重失去加速（回退 TS）；新 schema 一律 19ch 原生路径；prebuilt 二进制更新，
+  节点换码后生效。

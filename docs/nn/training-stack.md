@@ -64,6 +64,13 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
   `OBS_CHANNELS=17` 会让旧档的 coord 从第 17/18 个输入位读 ⇒ 从 stem 起静默错位。
 - `build_demo_bank.py` 的 obs 形状断言从字面量 16 改为 `OBS_CHANNELS`（v7 起旧 demo 语料
   `obsSchemaMajor=6` 会被拒，符合「旧目录须重导」）。
+- **TS 卷积后端同步（v7 必做）**：`conv_native.h::CF_IN_CH 18→19`、`CF_ABI / NATIVE_ABI 1→2`、
+  两个 JS 适配器的 `IN_CH=19`；`bun tools/agent/native-build.ts --cross` 重编 6 平台 + wasm32
+  （`--check-prebuilt` 绿）。**端到端对账发现的静默错**：wasm 适配器只查 d/bufA、不查 in16
+  长度 ⇒ 19ch 的 set 把多出的通道写进 pooled 区、coord 错位 ⇒ logits 从 ~1 爆到 ~5000。
+  修后 guard it500 vs 迁移 v7 在同一 `(stage,seed)` 的 eval 逐字段相同；v7 3000 拍 **0.82s**
+  （只加长度守卫的回退档是 16.6s ⇒ 19.5×，会顶穿 800 局 × 7 点的评估窗口）。
+  旧 18ch 权重现在回退 TS（正确但慢；历史对照读数复用，不重跑）。
 
 ### 57.4 消融与接线闸
 
@@ -83,9 +90,12 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
   `test_schema_fingerprint.py` · `test_init_spatial_leg.py` · `test_student_model.py` ·
   `tests/tools/test_build_demo_bank.py` 全绿。
 - **torch↔TS**：临时 v7 golden（h=16/d=2，17 通道）三头 max|Δ| ≤ **4.8e-7**。
-- **Paddle 三步对账未跑**：本机 `tmp/paddle-venv` 不存在。两侧 stem 都从 `OBS_CHANNELS`
-  建、`arch_meta` 共用 ⇒ 形状同源；有 paddle venv 的机器须补跑
-  `nn-training/tools/paddle_parity.py fixture/check/verify`。
+- **Paddle 三步对账（补跑，绿）**：本机 venv 在 `nn-training/tmp/paddle-venv`（不是仓库根
+  `tmp/paddle-venv`）；`fixture/check/verify` **8+1 用例全 PASS**（check worst fwd 1.92e-6 /
+  stats 3.80e-5 / weights 5.80e-4（`[5-coord-outlier]` 标记）/ after 7.67e-4；verify worst
+  2.29e-5）。v7 加宽 stem 后出现两类 **f32 噪声**越界（不是公式分叉）：`legacy_plain` 5 个
+  v≈0 坐标被 Adam 放大到 ±lr、value 头（|out|≈0.7）末位 2.29e-5；判据窄缝（≤8 坐标离群 /
+  atol+rtol·scale）与 A/B 证据见 `DECISIONS.md` §2026-11-01-goalnn-paddle-parity-v7-noise。
 - **运维**：`src/nn/*` 与 `tools/sim/export-*` 在 codehash 集内 ⇒ 这是一次代码波；
   任何新训练/eval 前确认无在跑课程并重启/换快照节点。
 
