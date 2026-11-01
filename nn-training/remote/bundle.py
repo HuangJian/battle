@@ -99,6 +99,40 @@ from common.hashing import (
 
 # ------------------------------------------------------------------ 导出（hub 侧）
 
+#: 原子替换 `out.tmp → out` 的等待上界（秒）：Windows 上 hub 正在递送旧包时 `os.replace` 会撞
+#: 共享锁（Python 的 `open` 不带 FILE_SHARE_DELETE）。递包线程只在一次响应里握着它（毫秒级）。
+_REPLACE_WAIT_SEC = 10.0
+_REPLACE_POLL_SEC = 0.02
+#: Windows 共享冲突的两个 errno 面：32 = 被占用，5 = 拒绝访问（都可能是「别人开着」）。
+#: POSIX 上 `OSError.winerror` 恒为 `None` ⇒ 这里的重试在 Linux 上是零命中路径。
+_SHARE_WINERRORS = frozenset({5, 32})
+
+
+def _replace_when_released(tmp: Path, out: Path, *, timeout: float = _REPLACE_WAIT_SEC) -> None:
+    """`tmp.replace(out)`，碰到 **Windows 共享冲突**时有界等句柄释放。
+
+    现场（2026-11-01，与 `tests/hub/test_offline_task_pack.py` 的 flake 同一个机制）：
+    `GET /offline/task-pack` 是流式递包（`with open` 住在生成器里），客户端收满
+    `Content-Length` 的最后一块时，服务端线程可能还没退出那个 `with`。Linux 允许 rename
+    覆盖打开中的文件，Windows 直接 `PermissionError` —— 重导本就是「写 `out.tmp` 再原子
+    替换」，撞上就整条导出失败（控制台只能看到一条不明所以的错误）。
+
+    只对共享冲突重试（`winerror ∈ {5, 32}`）：真正的权限错（无 `winerror`）立刻抛，不在这里
+    被拖成 10s。上界保留 ⇒ 真出现句柄泄漏时导出照旧响亮失败。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            tmp.replace(out)
+            return
+        except OSError as e:
+            if getattr(e, "winerror", None) not in _SHARE_WINERRORS:
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            # 20ms 步长：持有者只活一次递包（毫秒级），不需要指数退避。
+            time.sleep(_REPLACE_POLL_SEC)
+
 
 def export_bundle(
     out_zip: str | Path,
@@ -215,7 +249,7 @@ def export_bundle(
         z.writestr(README_NAME, _readme(index))
         for name, raw in parts.items():
             z.writestr(name, raw)
-    tmp.replace(out)
+    _replace_when_released(tmp, out)
     _write_bundle_meta(out, index)
     return index
 

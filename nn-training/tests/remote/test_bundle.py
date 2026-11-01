@@ -36,6 +36,7 @@ from remote.artifacts import ArtifactStore, sha256_bytes
 from remote.bundle import (
     BUNDLE_INDEX,
     BUNDLE_MAGIC,
+    _replace_when_released,
     export_bundle,
     import_bundle,
     read_bundle_index,
@@ -110,6 +111,67 @@ def _manifest(plan: dict, *, it: int, code_sha: str) -> dict:
         "plan_sha256": sha256_bytes(dump_plan(plan)),
     }
     return normalize_manifest(m)
+
+
+class _SharingViolationError(PermissionError):
+    """Windows 共享冲突（`WinError 32`）。POSIX 上造不出真货 ⇒ 子类带 `winerror` 即可喂判据。"""
+
+    winerror = 32
+
+
+def test_export_waits_out_a_sharing_violation_on_the_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hub 正在递送旧包 ⇒ 原子替换撞 Windows 共享锁，**有界重试**后导出照常成功。
+
+    2026-11-01：与 `test_offline_task_pack` 那条 flake 同机制——客户端收完最后一块时，
+    服务端线程可能还没退出 `with open`。Linux 允许 rename 覆盖打开中的文件，Windows 不允许，
+    而重导就是「写 `out.tmp` 再原子替换」⇒ 撞上就整条导出失败（不是慢，是错）。
+    """
+    calls = {"n": 0}
+    real_replace = Path.replace
+
+    def flaky(self: Path, target: Path) -> Path:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _SharingViolationError(13, "sharing violation")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky)
+    out, index, _plan = _export(tmp_path)
+    assert calls["n"] >= 2, "撞锁之后必须再试一次"
+    assert out.is_file() and index["run_id"] == "run-bundle"
+
+
+def test_export_does_not_retry_real_permission_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非共享冲突的 `PermissionError`（无 `winerror` / POSIX 权限）⇒ 立刻抛，不拖 10s。"""
+    calls = {"n": 0}
+
+    def denied(self: Path, target: Path) -> Path:
+        calls["n"] += 1
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "replace", denied)
+    with pytest.raises(PermissionError):
+        _export(tmp_path)
+    assert calls["n"] == 1
+
+
+def test_replace_wait_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """等到上界仍被占 ⇒ 抛（真出现句柄泄漏时导出照旧失败，不被吞成慢导出）。"""
+    tmp = tmp_path / "a.zip.tmp"
+    tmp.write_bytes(b"y")
+    out = tmp_path / "a.zip"
+    out.write_bytes(b"x")
+
+    def never(self: Path, target: Path) -> Path:
+        raise _SharingViolationError(13, "still open")
+
+    monkeypatch.setattr(Path, "replace", never)
+    with pytest.raises(PermissionError):
+        _replace_when_released(tmp, out, timeout=0.0)
 
 
 def _export(tmp_path: Path, *, it: int = 3, n: int = 3) -> tuple[Path, dict, dict]:
