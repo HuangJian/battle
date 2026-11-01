@@ -1,0 +1,133 @@
+// 课程 z3-p2002ctl —— E1-C：原四关分布（z3-p2002 的**同预算对照**）
+//
+// 状态：**已结课（2026-11-01，it160 跑满）**。本臂不单独判正负，只提供 it150 的配对基线。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-11-01；作为 E1-A / E-BT / E2-A 的共同对照）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **一句话**：四关等权续训 160 轮（19,592 局、8.43M transitions），it150 的 2002
+// 基毁 90.0% / clear 6.0%，与起点（guard it500）几乎同值（88.5% / 6.0%）
+// ⇒ **它自己也没在 2002 上学到东西**；这正是 A vs C 配对能干净归因的前提。
+//
+// ── 结 1. 运行事实 ────────────────────────────────────────────────────────
+// · 13:10→17:00（3h47）；15:38 重启后 89 轮 49,152 transitions（前 71 轮 24,576）；
+// · 19,592 局：2000 4,567 / 2001 4,951 / **2002 5,361（27%）** / 2003 4,713；
+// · rollout clear 34.4%（前 71 轮）→ 37.3%（后 89 轮）；KL ≤0.006、entropy 0.70→0.64；
+// · 起点 guard it500；同分布续训先例 z2-r5g2 峰值在 it225 ⇒ 本臂末点不一定是峰。
+//
+// ── 结 2. it150 读数（rollout 集群 5 节点，200 局/关，本地 0 局）──────────
+// | 关卡 | 基毁 | clear | 对起点（guard it500） |
+// | 2000 Crossroads | 31.0% | 62.5% | 28.0% / 63.5% ⇒ 平 |
+// | 2001 Oasis | 53.5% | 38.0% | 61.5% / 30.0% ⇒ 略升（bd p=0.125、clear p=0.121） |
+// | **2002 Steel Fortress** | **90.0%** | **6.0%** | **88.5% / 6.0% ⇒ 平**（bd p=0.749） |
+// | 2003 Brickworks | 34.0% | 31.0% | 38.5% / 29.0% ⇒ 略升（bd p=0.407） |
+// 与 A（z3-p2002）的差：2002 A 好 5 局（p=0.50）、2000 A 好 3 局（p=0.83）、
+// 2001 A 好 13 局（p=0.26）、2003 A 好 17 局（p=0.068）—— 都不显著；E1 判决见 z3-p2002 结课报告。
+//
+// ── 结 3. 用途 / 数据质量 ─────────────────────────────────────────────────
+// · 本臂是 E-BT（z3-bth）与 E2-A 的共用对照：**评估读数可复用，shard 因奖励变更不可复用**。
+// · 数据质量同 A：原账本 it75–150 的 2002 行来自云端（全基毁、kills 4.33、拍数 2760 —— 坏行）；
+//   本报告结论取配套 fresh 集群账本（`tmp/_z3an/fresh-p2002ctl`，200 局/关）。原账本 it150
+//   已补齐 800 行，但其 2002 仍含 21 局云端坏行，**引用时以 fresh 为准**。
+//
+// ── 它为什么存在 ─────────────────────────────────────────────────────────────
+//   E1 要回答的是「把样本全压到 2002，比**继续按原分布训练**更好吗」。没有这条臂，
+//   A 的涨跌就只能跟"起点"比 —— 而那会把"继续训练本身"的效果算成"曝光的功劳"。
+//   ⇒ **一切结论取 A vs C 的差分**，A vs 起点只作描述性读数。
+//
+//   C 不是"平的对照"：同分布续训的先例 `z2-r5g2`（+500 轮）峰值在 it225、末点还显著变差
+//   （p=0.035）⇒ 它在爬升/退化中。所以两个点都要在同一批 (stage,seed) 上配对读。
+//
+// ── 与 z3-p2002 的差（**只有采样分布**）──────────────────────────────────────
+//   A 写 rotation_mode=pinned / rotation_pinned=2002 / rotation_per_it=0；C **三个键都不写**
+//   （= 默认 even，四关轮换）。
+//   其余逐字相同：bc / 价格表 / terminal / 关卡集 / 难度 / lr / epochs / mb / γλ / kl 计划 /
+//   target_transitions / **paired_rotate_seed（必须与 A 同值，否则配对性没了）** /
+//   decision_k / iters / max_hours / eval_*。
+//
+// ── 这条臂同时是 E-BT 与 E2-A 的对照 ───────────────────────────────────────
+//   E-BT 改的是奖励、E2-A 改的是观测，起点/采样/预算/eval 与本臂全同 ⇒ **共用这一条 C**，
+//   不另跑。注意：E-BT 的 shard 因奖励变不能复用（corpus_identity_fp 会拒），
+//   但它的**评估读数**可以复用本臂的。
+//
+// ── 判据 ───────────────────────────────────────────────────────────────────
+//   本臂不单独判正负；它只提供 it150 的配对基线（2002 基毁率 / clear，逐 (stage,seed)）。
+//   自身的止损线照旧：entropy < 0.7×起点连续 5 点 ⇒ 停；任何共同反签名触发 ⇒ 停。
+
+{
+  "version": 5,
+  "name": "z3-p2002ctl",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 160,
+  "max_hours": 4.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z3-p2002ctl/weights.json",
+  "traj": "tmp/z3-p2002ctl",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z3-p2002ctl",
+  "backup_prefix": "z3-p2002ctl",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 200,
+  "eval_every": 25,
+}

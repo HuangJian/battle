@@ -1,0 +1,168 @@
+// 课程 z3-p2002 —— E1-A：把训练样本全压到 2002（曝光重分配）
+//
+// 状态：**已结课（2026-11-01，it160 跑满；判「不过」）**。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-11-01；判据 = it150 单点，A vs z3-p2002ctl 同 seed 配对）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **一句话**：160 轮、20,756 局全压在 Steel Fortress；it150 的 2002 基毁率 87.5% vs C 90.0%
+// （配对 A 好 5 局、p=0.52），clear 9.5% vs 6.0%（净 +7、p=0.23）—— **平，不晋级**。
+// 机制闸（2002 kills/局 ≥9）实测 7.36 **未过**；OOD 11.8% vs guard 17.6%（−5.8pp，点估计过线，
+// 配对 p=0.39）。唯一正向是跨关迁移：Oasis 基毁 61.5%→47.0%（p=0.004）、clear 30%→44.5%（p=0.003）；
+// Brickworks 基毁 38.5%→25.5%（p=0.005）但 clear 不动、命尽 0→41.5%（**死法转移**，不是净变强）。
+//
+// ── 结 1. 运行事实 ────────────────────────────────────────────────────────
+// · it160 跑满（13:09→16:19，3h07）；15:38 重启转 offline push，后 89 轮每轮 49,152
+//   transitions（前 71 轮 24,576）⇒ 后段剂量约 2×，与 C 的「同预算」是名义口径。
+// · 训练 20,756 局（**全是 2002**）；C 19,592 局里 2002 仅 5,361（27%）⇒ 曝光 A:C ≈ **3.9×**。
+// · 健康：KL 0.0028–0.0064、entropy 0.70→0.78、policy loss ~1e-3、value 247–340 ⇒ 无训练崩。
+//
+// ── 结 2. it150 完整评估（rollout 集群 5 节点，200 局/关 × 4 关，本地 0 局）──
+// | 关卡 | A 基毁 | C 基毁 | 净（A 更好） | p | A clear | C clear | 净 | p |
+// | 2000 Crossroads | 29.5% | 31.0% | +3 | 0.834 | 66.0% | 62.5% | +7 | 0.547 |
+// | 2001 Oasis | 47.0% | 53.5% | +13 | 0.259 | 44.5% | 38.0% | +13 | 0.228 |
+// | **2002 Steel Fortress** | **87.5%** | **90.0%** | **+5** | **0.522** | **9.5%** | **6.0%** | **+7** | **0.230** |
+// | 2003 Brickworks | 25.5% | 34.0% | +17 | 0.068 | 33.0% | 31.0% | +4 | 0.731 |
+// 主判据：净降 5 局、p=0.522 ⇒ 灰区（净 4–7 且 p∈0.05–0.25）也不成立 ⇒ **不过**。
+// 次判据：clear 名义 +3.5pp（19/200 vs 12/200），p=0.230 ⇒ 不显著。
+//
+// ── 结 3. 机制 / 反签名 / OOD ────────────────────────────────────────────
+// · kills/局：guard 6.17 → A **7.36** / C 6.96（均 <9 ⇒ 机制闸不过）；
+// · onLaneTicks/千：84.7 → 89.7 / 93.5（**升** ⇒「不升」也不成立）；
+// · aimBricks/局：5.34 → **12.59（A，+136%）** / 8.84（C，+65%）⇒ 反签名「涨 >30%」两臂都触发；
+// · lives 率 3.0%（<20%）· aimHits +24% · cellsVisited +31% ⇒ 其余反签名未触发；
+// · OOD（35 关 × 2 局，seed 880001）：A 8/68=11.8%、C 9/68=13.2%、guard 12/68=17.6%；
+//   A vs guard 点差 −5.8pp（刚好过 >5pp 线），配对 4 vs 8、**p=0.39** ⇒ 证据不足以判记忆化。
+//
+// ── 结 4. 结论 / 遗留 ────────────────────────────────────────────────────
+// **判「不过」**：本剂量（相对 guard 仅 ~1.2×、相对 C 3.9×）下曝光重分配没有换来 2002 收益，
+// 机制线失败；**不判死「曝光」这一类**。Oasis/Brickworks 的跨关迁移是下一腿的线索
+// （尤其 Oasis 的 bd/clear 双显著），但它不是本腿的预注册端点。
+// 数据质量：it75–150 的原账本 2002 行来自云端（全基毁、kills 2.24、拍数 2148 —— 坏行）；
+// 本报告结论取配套 **fresh 集群账本**（`tmp/_z3an/fresh-p2002`，200 局/关）。原账本 it150 已补齐
+// 800 行，但其 2002 仍含 21 局云端坏行，**引用时以 fresh 为准**。
+//
+// ── 这条腿回答什么 ───────────────────────────────────────────────────────────
+//   2002（Steel Fortress）贡献全池 32% 里最小的一块：clear 12/200 = 6%，基毁 177/200 = 88.5%。
+//   四关等权采样时它只拿 25% 样本。本腿把采样**钉死**在这一关 ⇒ 回答「2002 的 6% 是不是
+//   样本密度不够」。
+//
+// ── 与 z2-r5guard 的差（单变量）────────────────────────────────────────────
+//   ① 采样：rotation_mode/pinned/per_it（pinned 2002、per_it 0 ⇒ 一轮只采这一关）
+//   ② 起点：bc 换 guard it500
+//   ③ 预算三件：iters 160 / max_hours 4.0 / eval 满池 + 降频
+//   其余（价格表 / terminal / 关卡集 / 难度 / lr / epochs / mb / γλ / kl 计划 /
+//   target_transitions / paired_rotate_seed / decision_k）与 z2-r5guard **逐字相同**
+//   ⇒ 与 z3-p2002ctl 构成配对（唯一差别就是采样分布）。
+//
+// ── bc 为什么是 guard it500（不是 tstuck it80）──────────────────────────────
+//   · guard it500 是 g2 / lam / g2lr 的**共同父点** ⇒ 历史读数都在它上面量的；换父点旧对照全废。
+//   · tstuck 叠了 wStuck + wOnLane 两个**已被判负**的价，从它起步「唯一改动」就不唯一。
+//   · tstuck 的 wallPress 优势是 wStuck 训出来的（N9：那条价罚的是"没换格"= 跨格速度），
+//     不能当独立证据；同 seed 3 局实测它 kills 12.7 vs guard 7.7，但 6/6 都是基毁，看不出强弱。
+//
+// ── 预算这几键为什么必须显式写 ─────────────────────────────────────────────
+//   · iters：guard 是 500；不覆盖 ⇒ it150 判决完继续白跑 350 轮。
+//   · max_hours：guard 是 40h，而 160 轮实测约 1.5h ⇒ 40h 等于没有停机点。
+//   · eval_games_per_stage：eval_track 是 `EVAL_SEEDS[:n]` **前缀切片**，20 = 前 20 个
+//     **连续** seed（2026-10-30 满池重评已判作废：同一权重在该子集 40.0%、其余 720 局 24.6%，
+//     方向相反）。⚠ **别写 50** —— 它被历史兼容重映射成 100。
+//   · eval_every 25：`it % 25 == 0` ⇒ 命中 it150；5 会跑 30 次满池（≈75 min/臂，判决只用到 1 次）。
+//
+// ── 判据（预注册，只认一个点）──────────────────────────────────────────────
+//   主：**it150 单点**，A vs C（`z3-p2002ctl`）同 seed 配对 —— 2002 **基毁率**降（配对 McNemar）。
+//       （2002 的 clear 只有 12/200，「净+6 且 p<0.05」隐含负翻转 ≤2 ⇒ 6%→9% 会被判平，功效不够。）
+//   副：clear 净转正。
+//   灰区：基毁率净降 4–7 局且 p∈(0.05,0.25) ⇒ 判「未定」，不晋级也不判负。
+//   机制：2002 kills/局 ≥9（it40 止损线）· `wallPressTicks`/千不升（it150）· entropy < 0.7×起点连续 5 点。
+//   防倒退：2000 / 2001 / 2003 **逐关** −3pp 内（不看全池均值 —— 一关的涨能抵掉另一关的跌）。
+//   OOD 探针：it150 顺带跑 34 个未参与训练的关 × 2 局（≈90s），通关率比 guard it500 掉 >5pp
+//      ⇒ 专化/记忆化。
+//
+// ── 已知风险（先写在这儿，别等跑完才说）──────────────────────────────────
+//   pinned 之后 150 轮 ≈ **2.4 万局全在同一张图**（实测 158 局/轮）⇒ "它是不是把这张图记住了"
+//   是合理怀疑，所以 OOD 探针是必跑项、不是可选项。
+//   本腿定位是**便宜的证伪实验**：它平了只说明"**这个剂量下**曝光重分配无效"，
+//   不能判死"曝光"这一类 —— 150 轮 pinned ≈ 150 个 2002-iter 当量，而 guard 已经吃过 125
+//   ⇒ 曝光只翻 1.2 倍。
+
+{
+  "version": 5,
+  "name": "z3-p2002",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 160,
+  "max_hours": 4.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "rotation_mode": "pinned",
+  "rotation_pinned": "2002",
+  "rotation_per_it": 0,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z3-p2002/weights.json",
+  "traj": "tmp/z3-p2002",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z3-p2002",
+  "backup_prefix": "z3-p2002",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 200,
+  "eval_every": 25,
+}

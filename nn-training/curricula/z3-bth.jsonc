@@ -1,0 +1,177 @@
+// 课程 z3-bth —— E-BT：给「基地正被瞄准」这件事按拍定价（四轴 · 累计成本流）
+//
+// 状态：**已结课（2026-11-01，it160 跑满；判「不过 / 判负」）**。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-11-01；判据 = it150 单点，B vs z3-p2002ctl 同 seed 配对）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **一句话**：160 轮、25,307 局、10.85M transitions 把四轴威胁价跑完；it150 的 2002
+// 基毁 92.5% vs C 90.0%（配对 B 差 5 局、p=0.50）、clear 3.5% vs 6.0%（净 −5、p=0.36），
+// **主判据不过**；次级「基毁局平均 kills 不降」实测 4.74 vs 5.82（**−18.5%**）也失败；
+// 反向 kills/局 5.54 vs 6.96（**−1.42，超过 −0.5 停腿线**）⇒ 反向信号触发。
+// 唯一正向是 Brickworks 基毁 25.0% vs 34.0%（p=0.0505），但 clear 不动、命尽 0→40.5%（死法转移）。
+//
+// ── 结 1. 运行事实 ────────────────────────────────────────────────────────
+// · 17:01→18:15（1h13）；全程 offline push，每轮 49,152 steps、~68k samples/iter
+//   ⇒ 10.85M transitions（C 8.43M、A 7.66M ⇒ **本臂比 C 多吃 ~29% 数据**，配对是近似的）。
+// · 25,307 局：2000 5,807 / 2001 6,441 / **2002 7,012（27.7%）** / 2003 6,049；
+// · rollout win 33.1%→40.6%（it150）→37.5%（it160）；整体 clear 36.5% / 命尽 16.3% / 基毁 47.3%；
+// · 健康：KL 0.0024–0.0038、entropy 0.70→0.75、value 247–337 ⇒ 无训练崩。
+//
+// ── 结 2. it150 完整评估（rollout 集群 5 节点，200 局/关 × 4 关，本地 0 局）──
+// | 关卡 | B 基毁 | C 基毁 | 净（B 更好） | p | B clear | C clear | 净 | p |
+// | 2000 Crossroads | 35.5% | 31.0% | −9 | 0.412 | 59.0% | 62.5% | −7 | 0.543 |
+// | 2001 Oasis | 59.0% | 53.5% | −11 | 0.305 | 31.5% | 38.0% | −13 | 0.208 |
+// | **2002 Steel Fortress** | **92.5%** | **90.0%** | **−5** | **0.500** | **3.5%** | **6.0%** | **−5** | **0.359** |
+// | 2003 Brickworks | 25.0% | 34.0% | **+18** | **0.0505** | 34.5% | 31.0% | +7 | 0.515 |
+// 主判据：2002 基毁**升** 5 局（92.5% vs 90.0%，p=0.500）⇒ **不过**（方向都不对）。
+// 副判据：2002 基毁局 kills 4.74 vs C 5.82、vs guard 5.03 ⇒ **降 18.5%，不成立**。
+//
+// ── 结 3. 反向 / 机制 / 退化 ────────────────────────────────────────────
+// · 反向：2002 kills/局 5.54 vs C 6.96 / guard 6.17 ⇒ **−1.42 / −0.63，均超 −0.5 停腿线**；
+//   clear −2.5pp（−5 局，p=0.359）未到 −5pp；`baseDeadline` 中位**未进账本**，不可测；
+// · 机制：`thDirectAimed`/千拍 **在 eval 行与训练 dim_means 里都没有这个键** ⇒ 预注册的
+//   「−30%」**不可测**（这是账本 schema 缺口，不能当达标）。可用近似：threatTicks/局
+//   308 vs C 341（−9.7%）、onLane/千 90.3 vs 93.5（−3.4%）—— 方向对但量级远不到 −30%；
+// · 对 bc：2002 基毁比起点**差** 8 局（p=0.243）、clear 掉 5 局；2000 差 15 局（p=0.115）；
+//   2001 平；2003 基毁 38.5%→25.0%（p=0.0045）但 clear 不显著（p=0.289）。
+//
+// ── 结 4. 结论 / 遗留 ────────────────────────────────────────────────────
+// **判「不过 / 判负」**：四轴威胁价没有把 2002 的基毁率降下来，反而略升；次级 kills 下降并
+// 触发反向停腿线；机制读数缺失，无法证明威胁轴真的被压低。Brickworks 的基毁下降与 A 的
+// 2003 结果同型（命尽 40.5%、clear 不动）⇒ 归为「换死法」。
+// 遗留：① `thCost*` 四轴未进 metrics/eval schema（下一腿前必须补，否则机制闸永远不可测）；
+// ② 本臂与 C 的 transitions 差 1.29×（B 全程 2× steps），严格配对需重跑或按每 transition 归一；
+// ③ 原账本 it25–150 的点是 400 行截断，本报告只补了 it150（800 行），其余点未补。
+//
+// ── 这条腿回答什么 ─────────────────────────────────────────────────────────
+//   P0 取证的三条读数指向同一件事：**不是看不见，是不想去**。
+//     · 基地被打死那一拍，玩家离鹰中位 9.0 格（22 局里 16 局 ≥6 格）；
+//     · 环墙破后 300 拍只从 11.7 格挪到 9.2 格，同期 35 次击杀平均发生在 7.5 格外；
+//     · 道具在 3 格内时，57% 的拍 60 拍内没捡，且漏的分布 ≈ 掉落分布（不是挑食）。
+//   而"到基地多远"观测里早就有（s17/s18），BFS 路距在可通行时与曼哈顿差 ≤2 格
+//   ⇒ 缺的不是距离表示，是"知道了也不回去"的**优先级**。本腿给它一个价。
+//
+// ── 价格形态：累计成本流（这条踩过，别再写回瞬时）──────────────────────────
+//   Φ_th = −( wThDirectAimed·thCostDirectAimed + wThDirect·thCostDirect
+//           + wThBreachAimed·thCostBreachAimed + wThBreach·thCostBreach )
+//   每档的列是**累计成本流**，增量按**决策步** = min(2, 当前计数)。
+//   为什么必须累计：r[i] = Φ[i+1] − Φ[i]。用**瞬时**计数写 Φ 时，威胁持续 120 拍的话
+//   每步 r 都是 0（实测 sum(r)=0.000），只在"进入/离开"各跳一次 —— 那不是"按拍收费"。
+//   改成累计流后，同一场景 120 拍 = −12（实测）。两个数都用真 RewardFn 复现过。
+//
+// ── 剂量（49 局 guard it500 语料实测，逐决策步口径）────────────────────────
+//   每局累计 p50：breach 39 · breachAimed 19 · direct 18 · directAimed 12
+//   ⇒ 按下面的权重，Φ_th 每局 p50 = −15（**1 杀**）、最坏 −36（2.4 杀）。
+//   wDirectAimed 0.54 是这么反解出来的（0.10 会让中位局只有 −2.8 = 0.19 杀，等于没给）。
+//
+// ── 不封顶，止损放实验面 ───────────────────────────────────────────────────
+//   **没有** `min(cap, ·)`：那正是 §2 封闭清单里停用的形态（饱和后继续暴露免费），
+//   而被"免费"掉的恰是"已经很危险、还得救"的那一段。单步增量已被 min(2,·) 封住（≤2·w），
+//   爆量风险在**步**这一级就挡掉了。
+//   止损：单局 Φ_th 中位 < −150（≈10 杀）⇒ **停腿**（人/控制台动作），不钳奖励。
+//
+// ── wDef 置 0 的含义 ───────────────────────────────────────────────────────
+//   本腿把 guard 的累积型 basePressure 税（Φ_def，wDef 2.5）**关掉**，换成四轴。
+//   两者是同一个概念的两套谓词，同时上 = 双算 + 无法归因。term 保留、权重置 0，
+//   这样 diff 最小、一键可回滚。
+//
+// ── 与 z3-p2002ctl 的关系（配对）───────────────────────────────────────────
+//   采样分布 / 起点 / 预算 / eval 与 C 全同 ⇒ **A vs C 就是本腿的判据**，
+//   C 不另跑（它的 shard 因奖励变不能复用，但 **eval 读数可以**）。
+//
+// ── 判据（预注册）──────────────────────────────────────────────────────────
+//   主：it150 单点，vs `z3-p2002ctl` 同 seed 配对 —— 2002 **基毁率**降。
+//   副：2002 基毁局平均 kills 不降（防"回防换不来、反而少杀"）。
+//   机制：`thDirectAimed`/千拍 −30%（比 clear 早 100+ 轮可见）。
+//   反向：clear −5pp · kills −0.5 · `baseDeadline` 中位升 >20%（说明它改成在基地边上转圈）⇒ 停。
+//   健康度：kl / entropy / value_loss / gnorm 四条 + 「value 预测均值 vs Φ 实测均值」对账（偏 3× 停）。
+//     理由：z2-r5lam 的判负机制就是 Φ 尺度变 → critic 崩 → 射术 −25%。
+//
+// ── 开腿前的四条验收（用真 RewardFn，不是单测 threatSplit）──────────────────
+//   ① 计数连续 120 个增量恒 1 ⇒ 累计奖励恰为 −120·w；
+//   ② 0→1→0 不被解释成"一次完整暴露价"；
+//   ③ thShotsAtBaseCum 每次发射只扣一次（本腿 wShot 未上价，先验谓词）；
+//   ④ 四条都跑 build_reward_fn，包络 (0, 4000) = 2×max_ticks/K。
+
+{
+  "version": 5,
+  "name": "z3-bth",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) - wThreat*min(threatTicks, threatCap) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples)) - wThDirectAimed*thCostDirectAimed - wThDirect*thCostDirect - wThBreachAimed*thCostBreachAimed - wThBreach*thCostBreach",
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 0.0,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wThDirectAimed": 0.54,
+      "wThDirect": 0.22,
+      "wThBreachAimed": 0.11,
+      "wThBreach": 0.043,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 160,
+  "max_hours": 4.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z3-bth/weights.json",
+  "traj": "tmp/z3-bth",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z3-bth",
+  "backup_prefix": "z3-bth",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 200,
+  "eval_every": 25,
+}

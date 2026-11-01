@@ -1,0 +1,187 @@
+// 课程 z2-r5tempo —— 与 `z2-r5all` **并行的第二臂**：靶心是「命尽」与「窗口兑现」（2026-10-31）
+//
+// ── 两臂的分工（都是多变量，都追胜率，但打不同的靶）────────────────────────
+//   `z2-r5all`   ：罚**坏行为**（站桩 wStop、命价/血价、输法解耦、道具低价）
+//   本课         ：奖**好状态**（冻盾窗兑现、等级）+ 罚**命尽路径**（火线承压/被围/中了不跑）
+//   两臂共享 10 项（wKill/wHit/wWin/wDmg?/wBrick/walkCap/wPickup/wOther/wDef/terminal），
+//   差异全在"过程项"：r5all 用 `stopTicks` 罚站桩，本课用三条 **超额密度** 罚命尽路径 +
+//   两条 **兑现项** 奖窗口与等级。**互比时只看"每墙钟小时涨多少 pp"，不看末点绝对值。**
+//
+// ── 依据：三种结局的行为签名**完全分离**（z2-r5g2 it345，400 局 = 通 133 / 基毁 203 / 命尽 64）──
+//   | 指标                  | 活局    | 基毁    | 命尽    |
+//   | hurtWeight /千        | 33.0    | 32.5    | **73.8** |
+//   | 冻盾窗占比            | **14.1%** | 7.65% | 7.92%  |
+//   | 窗内命中/局           | **4.49** | 0.98   | 0.59   |
+//   | playerLevel（终局）   | **1.24** | 0.75   | 1.09   |
+//   | enclWeightTicks /千   | 151     | 168     | **215**  |
+//   | postHitLaneTicks /千  | 7.0     | 9.3     | **14.2** |
+//   | kills / ticks         | 20 / 5932 | 6.86 / 3252 | 12.52 / 4196 |
+//   ⇒ **基毁 = 低交战**（少杀、局短、等级 0.75）；**命尽 = 被火力压 + 被围 + 中了不跑**
+//     （hurt 2.2x、encl 1.4x、postHit 2.0x）；**活局 = 窗口兑现 + 长大**（窗内命中 4.5x）。
+//   ⇒ 基毁那一路归 r5all 管；**本课只打命尽（16%）和窗口（活局独有）**。
+//
+// ── 5 个新项（全部用**超额密度**写法，因为 toy 公式逐行求值、不能做除法）──────────
+//   | 项 | 公式片段 | 阈值来源 | 实测剂量（活/基毁/命尽） |
+//   | wWinHit 12 / cap 10 | `+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)` | 活局 4.49 vs 其它 0.6-1.0 | +54 / +12 / +7 |
+//   | wLevel 30 | `+ wLevel*playerLevel` | 1.24 vs 0.75/1.09 | +37 / +22 / +33 |
+//   | wHurt 0.2 / hurtRate 0.040 | `- wHurt*max(0, hurtWeight - hurtRate*ticks)` | 活局 33/千 ⇒ 40/千 为免罚线 | 0 / 0 / −35 |
+//   | wEncl 0.08 / enclRate 0.160 | `- wEncl*max(0, enclWeightTicks - enclRate*ticks)` | 活局 151/千 ⇒ 160 为线 | 0 / −1 / −23 |
+//   | wPostHit 0.6 / postHitRate 0.009 | `- wPostHit*max(0, postHitLaneTicks - postHitRate*ticks)` | 活局 7.0/千 ⇒ 9 为线 | 0 / 0 / −17 |
+//   ⚠ **阈值全部取"活局均值上方一点"**：活局不挨罚，超出部分才收钱 —— 这是让"打死局的人"
+//     付钱，不是让"所有人"付钱（平税 = 又一次 r5base 式空转）。
+//
+// ── 量纲核算（**真 RewardFn**，输入 = it345 三结局实测均值）─────────────────
+//   活局 **+611.5** · 命尽 **+157.6** · 基毁 **+16.6**
+//   （`z2-r5all` 同法：535 / 216 / 21.5 —— 本课活局更高、命尽更低，梯度更陡：595 vs 513）
+//   首版 wHurt 0.5 / wEncl 0.2 / wPostHit 1.5 把命尽打到 **+68**（三项合计 −149），
+//   而"多打 5.6 个"只赚 +100 ⇒ **多打变亏**，会把策略推向"少打少错"。收敛到 0.2/0.08/0.6。
+//   **调这三项之前先算这一步**：Σ(三项罚) 必须 < 多打 5 个的收益（≈90）。
+//
+// ── 与 z2-r5all 的**刻意差异**（不是分叉，是两种假设的对立）────────────────
+//   | | r5all | 本课 |
+//   | wDeath | **8**（命价降到 1.7 杀）| **12**（只降到 1.7→2.4 杀，靠过程税兜） |
+//   | wDmg | **0.05** | **0.08** |
+//   | 站桩 | wStop 0.3（罚超过 0.5% 的停拍）| **不罚**（停可能是在等窗口）|
+//   | 命尽路径 | 不罚（只靠 terminal −20）| **三项超额密度税** |
+//   | 窗口/等级 | 不奖 | **wWinHit + wLevel** |
+//   ⇒ 若 r5all 涨而本课不涨 ⇒ "把命价砸下去让 agent 敢打"是对的；
+//     若本课涨而 r5all 不涨 ⇒ "命价不能动，要罚的是被打的那条路径"。
+//     **这个对照本身就是产出**，不管哪边赢。
+//
+// ── 判据（预注册）──────────────────────────────────────────────────────
+//   · 主：满池 400 局 clear 相对起点 **32.5% 升 ≥8pp**（≥40.5%），基毁率不升。
+//   · 分关：2002 从 7% → ≥12%；2003（命尽最多，death 2.06）从 34% → ≥45%（本课的第二靶）。
+//   · 反（任一即停并回退）：
+//     ① `hurtWeight/千` 没降而 clear 降 ⇒ 火线税在误伤（wHurt 归 0）；
+//     ② `postHitLaneTicks` 没降 ⇒ 该列定义为"挨打后仍在原火线轴"，可能测不到"跑了但被追上"；
+//     ③ 窗内命中涨而拾取总量降 ⇒ 在为窗口而窗口（wWinHit 减半）。
+//   · 回退顺序：wHurt → wPostHit → wEncl → wWinHit/wLevel。
+//
+// ── 已知风险 ───────────────────────────────────────────────────────────
+//   ① 三条"密度税"的阈值取自**当前策略的活局均值**；策略一变，阈值就该重标。
+//      若活局均值上移（比如 hurt 从 33 涨到 42），40/千 的线会开始收活局的钱 ⇒ 观察活局侧变化。
+//   ② `hitsInFreezeShieldWindow` 与 `aimHits` **重叠计价**（窗口内的命中已算进 wHit）。这是故意的：
+//      无风险窗口里的输出应该比普通命中贵。但别再加第三层（比如同时奖窗口时长）。
+//   ③ `playerLevel` 是终局快照、逐行只在升级时跳变 ⇒ 差分后 = "升级那一刻"一次性给钱，
+//      语义正确；但死亡掉级**不会扣回**（差分只看正向跳变），这是已知的近似。
+
+// ── ★ 结课结算（2026-10-31 17:3x，58 个完整点 it0..it285；**判平**）────────────
+//   主读数用**全点均值**（400 局/点，点间波动 ±7pp = 训练震荡，单点不可判）：
+//   | 读数 | 起点 it0 | **58 点均值** | 区间 | 末 5 点 |
+//   | clear | 32.5% | **31.3%** | [24.0, 39.5] | 28.9% |
+//   | 基毁  | 53.2% | 53.9%（持平）| [47.8, 61.0] | 56.2% |
+//   | 命尽  | 14.2% | 14.8%（持平）| [10.5, 19.8] | 14.8% |
+//   ⇒ clear **−1.2pp**、三条读数全平 ⇒ **判平**：五个过程项**既没帮上忙、也没造成伤害**。
+//     峰值 it225 37.5%（+5.0pp，p=0.125）不是稳态，前后都在 31% 附近。
+//
+// ── 机制读数（★ 五个过程项，四个没生效）───────────────────────────────────
+//   起点 it0 → 末 5 点均值：
+//   | 项 | 权重 | 期望方向 | 实测 |
+//   | `hitsInFreezeShieldWindow` | +12 / cap10 | 涨 | 2.73 → **2.41（−11.7%）** ❌ 反向 |
+//   | `playerLevel` | +30 | 涨 | 0.95 → **0.91（−4.5%）** ❌ 反向 |
+//   | `hurtWeight` | −0.2 超额 | 降 | 164.8 → **168.3（+2.1%）** ❌ 反向 |
+//   | `postHitLaneTicks` | −0.6 超额 | 降 | 38.5 → **40.9（+6.2%）** ❌ 反向 |
+//   | `enclWeightTicks` | −0.08 超额 | 降 | 705 → **677（−4.0%）** ✅ 唯一方向对 |
+//   | 旁证：`aimHits` / `powerUpsCollected` / `cellsVisited` | — | 稳 | −3.1% / −2.8% / −1.0% 全平 |
+//   ⇒ **给"过程量"定价，在这套 stack 上几乎不改变行为**（一个 −4%，四个反向）。
+//     唯一"有效"的 `wEncl` 也只有 4% 的降幅，且 clear 没动。
+//
+// ── 与 z2-r5all 合起来的结论（两条腿互相印证）────────────────────────────
+//   r5all 那边：`wStop` **死项**（起点本来就是 0）、`wPickup` 翻倍只 +6.9%、
+//     但 `aimBricks`（+47.9%）与 `walkCap`（+7.6%）生效，`stuckTicks` 无人定价却 −20.4%。
+//   ⇒ 共同机制：**过程项的信号被终局信号淹没**。一局 clear/lose 差 300+ 分，
+//     过程项单局只有 20~80 分 ⇒ PPO 的 advantage 由"赢没赢"主导，过程项基本是噪声。
+//     这解释了 2026-10 以来**六条奖励腿全部无效**（r4threat / r5base / r5guard 的税 / r5lam /
+//     r5g2 / r5all / 本课），比"信噪比不足"更具体。
+//   ⇒ 后继别再往过程项加权。要动就动**能改变终局分布**的东西：关卡组合、算法、观测/动作空间。
+//
+// ── 未解 ───────────────────────────────────────────────────────────────
+//   value 从 517 涨到 843（+63%）而 clear 不动 ⇒ value 头在追新的回报尺度（本课 clear 局 ≈611 分
+//   vs 旧表 369），但没转化成 policy 改善。**value 尺度与策略改善之间的关系仍是黑箱**，
+//   下次动奖励尺度时要单独记这条曲线。
+
+{
+  "version": 5,
+  "name": "z2-r5tempo",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits + wWin*where(clearTick>=0, 1, 0) + wBase*baseWallIntact - wDmg*playerDamageTaken - wDeath*playerDeaths - min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow) + wBrick*min(aimBricks, brickCap) + wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited) + wPickup*min(powerUpsCollected, pickupCap) + wOther*min(puGotOther, otherCap) + wWinHit*min(hitsInFreezeShieldWindow, winHitCap) + wLevel*playerLevel - wHurt*max(0, hurtWeight - hurtRate*ticks) - wEncl*max(0, enclWeightTicks - enclRate*ticks) - wPostHit*max(0, postHitLaneTicks - postHitRate*ticks) - wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    "params": {
+      "wKill": 18.0,
+      "wHit": 2.5,
+      "wWin": 80.0,
+      "wBase": 3.0,
+      "wDmg": 0.08,
+      "wDeath": 12.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.5,
+      "brickCap": 20.0,
+      "wWalk": 1.0,
+      "walkCap": 40.0,
+      "wPickup": 8.0,
+      "pickupCap": 6.0,
+      "wOther": 4.0,
+      "otherCap": 6.0,
+      "wWinHit": 12.0,
+      "winHitCap": 10.0,
+      "wLevel": 30.0,
+      "wHurt": 0.2,
+      "hurtRate": 0.04,
+      "wEncl": 0.08,
+      "enclRate": 0.16,
+      "wPostHit": 0.6,
+      "postHitRate": 0.009,
+      "wDef": 3.0,
+      "pDef": 0.14,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -20.0,
+      "base_destroyed": -55.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r5guard/z2-r5guard.it500.20261030-152207.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 40.0,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z2-r5tempo/weights.json",
+  "traj": "tmp/z2-r5tempo",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z2-r5tempo",
+  "backup_prefix": "z2-r5tempo",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}
