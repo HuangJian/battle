@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import threading
 import time
 
 import pytest
@@ -247,13 +248,22 @@ def test_post_weights_parallel_notes_cache(monkeypatch) -> None:
 
 
 def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
-    """边分发边开采：每个成功节点立刻回调，不必等全部 POST 结束。"""
+    """边分发边开采：每个成功节点立刻回调，不必等全部 POST 结束；两台成功节点**同时在飞**。
+
+    并行判据用**屏障**，不用墙钟（2026-11-01，§90 口径）：旧实现只弯了「总墙钟 < 0.4s」——
+    但只有 slow 节点在 sleep，串行实现也只花 0.15s ⇒ 那条断言几乎恒真（伪绿），而且满载下
+    反而会红。现在两台成功节点必须同时进入 POST 才可能一起通过：串行实现里第一台永远等不到
+    同伴 ⇒ BrokenBarrierError 响亮地红。
+    """
     common.distribution.weights_push_cache_reset()
     spawned: list[str] = []
     order: list[str] = []
+    together = threading.Barrier(2, timeout=10.0)
 
     def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
         order.append(f"post:{url.rsplit('/', 1)[-1]}")
+        if "fail" not in url:
+            together.wait()
         if "slow" in url:
             # sleep-ok: 夹具模拟的工作量：慢节点收权重的那一段耗时
             time.sleep(0.15)
@@ -267,7 +277,6 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
         {"id": "slow", "url": "http://slow", "key": "k", "c": 1},
         {"id": "fail", "url": "http://fail", "key": "k", "c": 1},
     ]
-    t0 = time.monotonic()
     alive = common.distribution.post_weights_parallel(
         nodes,
         "r",
@@ -276,13 +285,11 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
         timeout=5.0,
         on_alive=lambda nd: spawned.append(nd["id"]),
     )
-    dt = time.monotonic() - t0
     assert sorted(spawned) == ["fast", "slow"]
     assert "fail" not in spawned
     assert [n["id"] for n in alive] == ["fast", "slow"]
-    # 并行：总墙钟应接近最慢成功节点（0.15s），远小于串行 0.15+ 其它
-    # timing-ok: 相对判据（阈值随节点超时 0.15s 走，判并行而非绝对速度）
-    assert dt < 0.4
+    # 屏障已在 fake_post 里判过并行：两台都进了 POST 才可能走到这里（没有墙钟阈值）。
+    assert not together.broken
     common.distribution.weights_push_cache_reset()
 
 
