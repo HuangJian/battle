@@ -45,7 +45,25 @@
   "level": "ladder-c20-lives1",
 
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -57,10 +75,10 @@
       "wDist": 0.738,
       "wHurt": 110.0,
       "wEncl": 8.6,
-      "wCorner": 25.0
+      "wCorner": 25.0,
     },
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -83,9 +101,7 @@
   "gamma": 0.999,
   "lam": 0.975,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：按 K 重调（对局数与 K10 持平，见头注推导）────────────────────────
   "target_transitions": 49152,
@@ -106,5 +122,5 @@
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }

@@ -96,7 +96,7 @@
 
   // 奖励与 x3-power 逐字同构（本腿不动奖励，只动日程）。
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "formula": ["wKill*kills", "+ wHit*enemyHits", "+ wWin*where(clearTick>=0, 1, 0)"],
     "params": {
       "wKill": 4.0,
       "wHit": 0.15,

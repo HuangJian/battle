@@ -204,7 +204,19 @@
   "reward": {
     // ⚠ 用**标量 kills**（L7）。拾取项缀尾。wStar 项已删（§3②：star 实得 3.0 ≡ 1 kill，
     //   公式里不留死项；starsCollected 仍被记录，只是不进公式）。
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

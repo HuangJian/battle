@@ -428,14 +428,16 @@ def read_course_keys(course: str) -> dict[str, Any]:
     **不强制任何现有课程改文件**（缺省 = 不留 shards）。
     读法照 `hub/store_offline._course_backup_target`（同一份课程文件、同样的两个名字）。
     """
-    from common.jsonc import strip_comments
+    # 产品同一个加载器（去注释 + **去尾逗号**）：课程是 JSONC 子集，裸
+    # `strip_comments` + `json.loads` 会被数组尾逗号绊倒（2026-11-01 formula 行数组）。
+    from common.jsonc import loads as load_jsonc
 
     for name in (f"{course}.jsonc", f"{course}.bc.jsonc"):
         p = CURRICULA_DIR / name
         if not p.is_file():
             continue
         try:
-            doc = json.loads(strip_comments(p.read_text(encoding="utf-8")))
+            doc = load_jsonc(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         if isinstance(doc, dict):

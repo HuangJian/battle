@@ -72,7 +72,27 @@
 
   // ── 奖励：B 底包逐字 ＋ 新 5 项（比值/速率形；w 按 human-gap f=7.5%/项冻结）───
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -85,11 +105,11 @@
       "wDist": 0.738,
       "wHurt": 25.3,
       "wEncl": 4.85,
-      "wCorner": 9.71
+      "wCorner": 9.71,
     },
     // dense-only（与 B 一致）：terminal 空表合法。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -112,9 +132,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：加大样本（48 × mb(1024) = 49152，ragged=0，TPU mb 对齐；B 是 48000）──
   "target_transitions": 49152,
@@ -133,7 +151,7 @@
   // ── 评估：与 B 同（4 关 × 50 局/点；终判另跑 414000 段，见头注）────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── verdict（2026-10-03 收官；it592 停腿；414000 段 800 局选点；

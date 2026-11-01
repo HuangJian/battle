@@ -182,7 +182,21 @@
   // ── 奖励：x5-approach 终点配置逐字沿用（见 §2 剂量复核；唯一变量 = 环境）───
   "reward": {
     // ⚠ 用**标量 kills**（L7）。
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

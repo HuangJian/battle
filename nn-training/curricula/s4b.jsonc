@@ -24,7 +24,9 @@
     //   · null 维剔除 = 权重乘 0（progress/lives/tempo/accuracy/loot/baseSafety）
     //   · baseIntegrity：基地没了 → v=0 但权重照计（TS 分支语义）
     //   · openingTempo：无首杀（firstKillTick==-1）→ v=0 但权重照计（评审 P0-7）
-    "formula": "S*B*wavg(clip(kills/max(enemyTotal,1),0,1),wP*(enemyTotal>0),clip(lives/max(startLives,1),0,1),wL*(startLives>0),(baseAlive>0)*(0.55+0.45*clip(baseWallIntact/max(baseWallTotal,1),0,1)),wBI*(where(baseAlive>0,baseWallTotal,1)>0),clip(kills/where(ticks>0,ticks/3600,1)/kpmRef,0,1),wT*(kpmRef>0),clip(kills/max(playerShots,1)/accRef,0,1),wA*(accRef>0)*(playerShots>0),clip(powerUpsCollected/max(powerUpsSpawned,1),0,1),wLo*(powerUpsSpawned>0),clip(1-basePressureSum/max(basePressureSamples,1),0,1),wBS*(basePressureSamples>0),where(firstKillTick==-1,0,1-clip(firstKillTick/1800,0,1)),wO)*where(baseAlive>0,1,M)",
+    "formula": [
+      "S*B*wavg(clip(kills/max(enemyTotal,1),0,1),wP*(enemyTotal>0),clip(lives/max(startLives,1),0,1),wL*(startLives>0),(baseAlive>0)*(0.55+0.45*clip(baseWallIntact/max(baseWallTotal,1),0,1)),wBI*(where(baseAlive>0,baseWallTotal,1)>0),clip(kills/where(ticks>0,ticks/3600,1)/kpmRef,0,1),wT*(kpmRef>0),clip(kills/max(playerShots,1)/accRef,0,1),wA*(accRef>0)*(playerShots>0),clip(powerUpsCollected/max(powerUpsSpawned,1),0,1),wLo*(powerUpsSpawned>0),clip(1-basePressureSum/max(basePressureSamples,1),0,1),wBS*(basePressureSamples>0),where(firstKillTick==-1,0,1-clip(firstKillTick/1800,0,1)),wO)*where(baseAlive>0,1,M)",
+    ],
     "params": {
       // REWARD_SCALE / V7 lossBandMax / BASE_LOSS_MULT（tools/sim/rl-reward.ts）
       "S": 10.0,

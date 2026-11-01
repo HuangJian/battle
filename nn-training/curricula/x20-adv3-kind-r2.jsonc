@@ -65,7 +65,27 @@
 
   // ── 奖励：与 kind 逐字同（唯一变量仍是 wPow，相对 hu150 价）─────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) + wPow*killsPower",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      // 收入
+      "+ wPow*killsPower",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -78,11 +98,11 @@
       "wHurt": 110.0,
       "wEncl": 8.6,
       "wCorner": 25.0,
-      "wPow": 1.0
+      "wPow": 1.0,
     },
     // dense-only（与 B 一致）：terminal 空表合法。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -104,9 +124,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：mb 对齐（48 × mb(1024)）──────────────────────────────────────
   "target_transitions": 49152,
@@ -126,5 +144,5 @@
   // ── 评估：日常 200 局/点；爬回线见 yardstick（人工执行）────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }

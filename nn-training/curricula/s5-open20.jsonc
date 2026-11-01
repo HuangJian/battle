@@ -161,7 +161,22 @@
     "level": 0,
   },
   "reward": {
-    "formula": "wKill*(kills+1)**p + wFirst*where(firstKillTick>=0, 1.0, 0.0) + wHit*enemyHits - wDmg*playerHits - wDmg2*playerDamageTaken + wLoot*powerUpsCollected + wStar*starsCollected - wStuck*max(0, stuckTicks-120) - wShot*playerShots",
+    "formula": [
+      // 收入
+      "wKill*(kills+1)**p",
+      "+ wFirst*where(firstKillTick>=0, 1.0, 0.0)",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerHits",
+      "- wDmg2*playerDamageTaken",
+      // 收入
+      "+ wLoot*powerUpsCollected",
+      "+ wStar*starsCollected",
+      // 塑形
+      "- wStuck*max(0, stuckTicks-120)",
+      // 价格
+      "- wShot*playerShots",
+    ],
     "params": {
       "wKill": 1.0,
       "p": 1.15,

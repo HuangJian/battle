@@ -10575,3 +10575,32 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `bun run check` 2659 pass / 8 skip / 0 fail · nn `pytest` 两文件 68 passed · ruff 全过。
 - **未验证**：真实饱和集群上的下一轮 busy 计数（`/v1/status.admission.waiting/timedOut` 是观测口，
   要等一次真拥堵）。
+
+## §2026-11-01-goalnn-course-formula-lines（2026-11-01，reward.formula 支持行数组；242 门课重排为多行）
+
+**决策**：`reward.formula` 接受 `str | list[str]`。列表在**加载层**
+（`biz/course_spec.py::RewardBlock._formula_lines`）收敛成 `"(" + "\n".join(项) + ")"`，
+`RewardSpec.formula` / `reward.model_dump()` / 指纹 / manifest 仍全是 **str** ⇒
+`parse_formula`、`MAX_FORMULA_CHARS`、`corpus_identity_fp`、`hub/smoke_loopback.py`、
+`trainer/loop_remote_job.py` 的 `reward_formula` 零改动。单行串**原样返回** ⇒ 未重排课程的指纹零漂移。
+
+**为什么**：最长公式 822 字符，单行不可读、diff 不可审。行数组 = 一项一行，评审按项进行；
+分组注释用 JSONC 的 `//`（在字符串外 ⇒ 不进公式文本、不占 1024 额度）。
+括号是必需的：`ast.parse(..., mode="eval")` 不接受裸换行，括号内才是隐式续行（`#` 行内注释也合法，
+但它算进 1024）。已把 `curricula/*.jsonc` **242 门**全部重排（8–27 项/门，总 +2991 行，最长 826 < 1024），
+逐文件对账：`ast.dump` 与改前**逐字相同**、`validate_reward` 全绿。
+
+**代价（必须知道）**：拼接文本带换行 ⇒ **重排 = 公式文本变 = reward 血缘与 `corpus_fp` 变**，
+历史 shard 按 D14 不再是同一身份；`course_fp`（整文件 sha）本来就会因任何字节变化而漂移。
+落盘时**无在训课程**（`tmp/*/training-enabled.txt` 为空），故无在飞语料受损；闭课的历史 shard
+不再可续跑（有意：配置文本确实变了）。今后新腿直接写行数组，不要为「整理」重排正在跑的课程。
+
+**被否决**：① 字符串内 `\n`（文件里仍是一行转义，不解决阅读）· ② 允许 JSON 字符串裸换行
+（不再是 JSON/JSONC，编辑器、`jq`、dashboard `core/jsonc.ts` 全红）· ③ 外置公式文件
+（破「一门课一个文件」：D13 快照 / `course_frozen_bytes` / `course_fp` / `code.zip` 都要跟着认识引用文件）·
+④ 结构化 `terms` 项表（新 DSL + 迁移，收益与 `//` 注释重叠）。
+
+**同日补分组注释**（224 门 / 1332 条 `// 收入·价格·塑形·机制`，只在组切换处）：
+注释在字符串外 ⇒ `corpus_fp` 不变，只动 `course_fp`（历史 shard 仍可续）。
+
+**全文** → `docs/nn/training-stack.md` §55。

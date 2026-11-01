@@ -50,7 +50,24 @@
 
   // ── 奖励：B 包逐字 ＋ 单变量三项 ─────────────────────────────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) + wGeoBack*backHits + wGeoSide*sideHits + wGeoBack*frontHitsExempt",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+      // 收入
+      "+ wGeoBack*backHits",
+      "+ wGeoSide*sideHits",
+      "+ wGeoBack*frontHitsExempt",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -60,10 +77,10 @@
       "wPickup": 3.0,
       "wApproach": 0.008,
       "wGeoBack": 1.0,
-      "wGeoSide": 0.5
+      "wGeoSide": 0.5,
     },
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -86,9 +103,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：mb 对齐（x20 现行标准，与 state-init/dodge-l1/clutch 同值）────────
   // 49152 = 48 × mb(1024)；per-stage 配额 12288 = 12 × mb ⇒ 无 ragged tail。
@@ -106,7 +121,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置（agent 不得启动训练，用户手工经控制台开课）────────────────────

@@ -14,7 +14,7 @@
 
   // 奖励 = s1 同款配置公式（夹具用途）
   "reward": {
-    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "formula": ["1.0*(kills+1)", "- 0.15*playerHits"],
     "params": {},
     "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
   },

@@ -144,7 +144,21 @@
   // ── 奖励：x20-rebirth 逐字 + A 项（分段线性承伤）───────────────────────
   "reward": {
     // A 项：`- wDmgLate*max(playerDamageTaken - dmgKnee, 0)` —— Φ 连续，无跳变。
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wDmgLate*max(playerDamageTaken - dmgKnee, 0) - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDmgLate*max(playerDamageTaken - dmgKnee, 0)",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -155,11 +169,11 @@
       "wShot": 0.05,
       "wExplore": 0.2,
       "wPickup": 3.0,
-      "wApproach": 0.008
+      "wApproach": 0.008,
     },
     // dense-only（与 x20-rebirth 一致）：terminal 空表合法（reward_library `.get(outcome,0.0)`）。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -181,9 +195,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：总量 24000/轮 ─────────────────────────────────────────────────
   "target_transitions": 24000,
@@ -200,7 +212,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

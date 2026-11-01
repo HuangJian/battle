@@ -209,7 +209,20 @@
   // ── 奖励：dense-only（见 §2；去 wWin、去双 terminal；其余数值逐字沿用 x6）───
   "reward": {
     // ⚠ 用**标量 kills**（L7）。
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,

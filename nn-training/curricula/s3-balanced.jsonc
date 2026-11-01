@@ -12,7 +12,7 @@
 
   "reward": {
     // wHit（命中敌方）由 param_schedule 线性升温，需先在此声明初值
-    "formula": "1.0*(kills+1) - 0.35*playerHits + 0.001*ticks + wHit*enemyHits",
+    "formula": ["1.0*(kills+1)", "- 0.35*playerHits", "+ 0.001*ticks", "+ wHit*enemyHits"],
     "params": { "wHit": 0.0 },
     // param_schedule 演示：wHit 线性升温（it1=0 → it20=0.2）
     "param_schedule": { "wHit": { "from": 0.0, "to": 0.2, "until_iter": 20, "mode": "linear" } },

@@ -12,7 +12,7 @@
 
   // kill = kill2 + 0.0005*ticks（存活即得分，抑制自杀式速通）
   "reward": {
-    "formula": "1.0*(kills+1) - 0.15*playerHits + 0.0005*ticks",
+    "formula": ["1.0*(kills+1)", "- 0.15*playerHits", "+ 0.0005*ticks"],
     "params": {},
     "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
   },

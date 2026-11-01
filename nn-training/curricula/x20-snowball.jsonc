@@ -138,7 +138,24 @@
 
   // ── 奖励：x20 dense-only 七项逐字沿用 ＋ 里程碑三项（EDGE 一次性，见 §1）───
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) + wMS8*where(kills>=8, 1, 0) + wMS12*where(kills>=12, 1, 0) + wMS16*where(kills>=16, 1, 0)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+      // 收入
+      "+ wMS8*where(kills>=8, 1, 0)",
+      "+ wMS12*where(kills>=12, 1, 0)",
+      "+ wMS16*where(kills>=16, 1, 0)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -149,11 +166,10 @@
       "wApproach": 0.008,
       "wMS8": 6.0,
       "wMS12": 9.0,
-      "wMS16": 12.0
+      "wMS16": 12.0,
     },
-    "terminal": {
-    },
-    "scheme": "toy"
+    "terminal": {},
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -177,7 +193,7 @@
 
   "ppo_schedule": [
     { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
-    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 }
+    { "kl_coef": 0.01, "lr": 0.00025, "kl_cap": 0.2 },
   ],
 
   // ── 采集：总量 24000/轮；4 关均分 ─────────────────────────────────────
@@ -197,7 +213,7 @@
   // 判决走池外段（§3：413000，4 关各 200，seeds 413000-413199）。
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

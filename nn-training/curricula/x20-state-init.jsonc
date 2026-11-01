@@ -70,7 +70,20 @@
   // 对「继承的进度」天然不付钱 —— 不需要、也不许在 TS 侧做 rebase（那会让 metrics.kills
   // 与 manifest 的游戏真值分叉）。分析侧要 rebase 就用 shard manifest 的 `initCounters`。
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -78,11 +91,11 @@
       "wShot": 0.05,
       "wExplore": 0.0,
       "wPickup": 3.0,
-      "wApproach": 0.008
+      "wApproach": 0.008,
     },
     // dense-only（与父腿一致）：terminal 空表合法。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -105,7 +118,7 @@
     "cut_step": 300,
     // 每轮抽样：同 stage 银行局内均匀 + 切点均匀，派生 key=(rotate_seed, it, stage, seed)
     // （resume-safe：同 key 必同值 ⇒ 断点续跑不换起始状态；换 it 必换 ⇒ §15.1 语料轮换）。
-    "rotate_cuts": true
+    "rotate_cuts": true,
   },
 
   // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
@@ -129,9 +142,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：mb 对齐 ────────────────────────────────────────────────────────
   // 49152 = 48 × mb(1024)；est_samples_per_game = P0 实测**首轮兜底**：全银行 972 个切点
@@ -153,7 +164,7 @@
   // 死亡 tick 中位不劣化（§113 口径），不混合标准开局局（会毁单变量纯度）。
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

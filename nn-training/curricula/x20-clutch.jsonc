@@ -144,7 +144,22 @@
 
   // ── 奖励：B 原公式 + 唯一变量惜败奖 ─────────────────────────────────────
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) + wClutch * is_lives_exhausted * where(kills >= 10, kills - 9, 0)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wShot*playerShots",
+      // 塑形
+      "+ wExplore*cellsVisited",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach * where(pickupDist < 0, 0, pickupDist)",
+      // 机制
+      "+ wClutch * is_lives_exhausted * where(kills >= 10, kills - 9, 0)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -153,11 +168,11 @@
       "wExplore": 0.0,
       "wPickup": 3.0,
       "wApproach": 0.008,
-      "wClutch": 1.0
+      "wClutch": 1.0,
     },
     // dense-only（与父腿一致）：terminal 空表合法。
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -194,9 +209,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   // ── 采集：与 noexplore 一致（本腿不动采样）─────────────────────────────────
   // 49152 = 48 × mb(1024)；per-stage quota = 12288 = 12 × mb ⇒ 无 ragged tail。
@@ -214,7 +227,7 @@
   // ── 评估 ───────────────────────────────────────────────────────────────
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 开工前置 ─────────────────────────────────────────────────────────────

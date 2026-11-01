@@ -101,7 +101,7 @@
     // 经 diff(Φ) 后恒为零——终局信号必须走 terminal，禁止写进 formula。
     // 反之 clearTick 是阶跃函数（清场前 -1、后恒 C），where 项经 diff 后在清场步
     // 打出 +wWin 尖峰（含清场后被 max_ticks 截断的 BONUS 局），故留公式内。
-    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0)",
+    "formula": ["wKill*kills", "+ wHit*enemyHits", "+ wWin*where(clearTick>=0, 1, 0)"],
     "params": {
       // 杀一个敌人的主要信用。完成目标的锚点（roadmap：wKill 固定，早期关主信号）。
       "wKill": 3.0,

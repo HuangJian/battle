@@ -7,6 +7,78 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §55 reward.formula 行数组：多行公式落地 + 242 门课重排（2026-11-01）
+
+**一句话**：`reward.formula` 支持「一项一行」的字符串数组，加载层拼成括号表达式；242 门历史课程
+全部重排，逐文件 `ast.dump` 与改前相同。决策索引 → `DECISIONS.md`
+§2026-11-01-goalnn-course-formula-lines。
+
+### §55.1 形状
+
+```jsonc
+"formula": [
+  // 收入
+  "wKill*kills + wHit*aimHits",
+  "+ wWin*where(clearTick>=0, 1, 0)",
+  // 压力税（一项一行，行尾不留运算符）
+  "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+],
+```
+
+- 切分口径：**括号深度 1** 的 `+`/`-`（重排脚本用 `tokenize` ⇒ `1e-4`、`>=`、嵌套 `where(...)` 不误切）；
+  项首保留运算符，项内可再含多项（不强制拆到最小）；
+- 空串项（`""`）丢弃 = 视觉空行；分组注释写数组项之间的 `//`；
+- 校验：`[]` / 全空 / 非字符串项 ⇒ `ValidationError`（`extra="forbid"` 不变）。
+
+### §55.2 归一化与下游不变
+
+`RewardBlock._formula_lines`（`mode="before"`）把列表变成 `"(\n" + "\n".join(项) + "\n)"`：
+
+- `ast.parse(..., mode="eval")` 不接受裸换行，括号内才是隐式续行 ⇒ `parse_formula` / 白名单 /
+  AST 深度逻辑**一行未改**；
+- 括号内 `#` 注释合法（已测），但它算进 `MAX_FORMULA_CHARS`；`//` 在字符串外，不算、也不进公式文本；
+- `RewardSpec.formula` 仍是 `str` ⇒ `RewardSpec.identity()`、`corpus_identity_fp`
+  （收 `reward.model_dump()`）、manifest `reward_formula`、`formula_len` 日志、dashboard（不读 reward）
+  全部零改动；
+- 单行串**原样返回** ⇒ 未重排的课程指纹零漂移。
+
+### §55.3 重排口径与读数
+
+- 242 个课程文件（6 个 `.bc.jsonc` 无 formula，跳过）；每项一行，8–27 项，总 +2991 行；
+- 公式长度 `+4` 左右是括号与换行；最长 `y30-stack` 822 → **826**（上限 1024）；
+- 对账（重排脚本 `--apply` 内置）：**242/242** `ast.dump` 逐字相同、长度未超限、
+  `validate_reward(...).ok`；
+- 落盘时 `tmp/*/training-enabled.txt` 为空（无在训课程）。
+
+### §55.4 身份与热加载
+
+- 公式文本进 `corpus_fp` ⇒ **重排即新实验版本**：闭课的历史 shard 在 D14 下不再同身份
+  （有意，不静默混训）；`course_fp`（整文件 sha，`trainer/loop_lifecycle.py::_course_file_fp`）
+  本来就会因任何字节变化而漂移；
+- 在训课程重排 ⇒ 热加载按 A 类拒收（`biz/hot_reload.py::plan_reload` 返回 `rejected`），
+  沿用启动期配置，需重启；这不是 bug，是「改课程 = 新实验」的既定语义；
+- 同一语义的两种排版**指纹不同**（文本不同）。不引入 `ast.unparse` 规范化：那会让 242 门既有课程
+  （及全部历史 shard）的血缘一起断。
+
+### §55.5 被否决的备选
+
+字符串内 `\n`（不解决阅读）· JSON 字符串裸换行（不再是 JSON，Python/TS 两个解析器的逐字节对账与
+编辑器全红）· 外置公式文件（破 D13 快照 / `course_frozen_bytes` / `course_fp` / `code.zip` 的
+单文件不变量）· 结构化 `terms` 项表（新 DSL + 迁移成本，收益与 `//` 注释重叠）。
+
+### §55.6 分组注释（2026-11-01，同日第二刀）
+
+242 门里 **224 门**（≥6 个加性项）按语义补了 `// 收入 / 价格 / 塑形 / 机制` 分组注释（共 1332 条，只在组切换处插入；
+16 门短公式、2 门单组、6 个 BC 课程跳过）。规则表按全库 **109 种真实项形态**建（`wGeo*`/`wLane*`/`wLong*`/`wDanger*`/
+字面量 `ticks` 都在内，未分类 0），组内**不重排**（保住公式文本与求和顺序）。
+
+- 注释写在 JSONC 字符串外 ⇒ **`formula` 逐字不变、`corpus_fp` 不变**；变的只有整文件 sha `course_fp`（门/trend 过滤
+  与幂等键的文件血缘；`d14_corpus_match` 有 `corpus_fp` 时优先用它 ⇒ 历史 shard 仍可续）。
+- 逐门对账：`spec.formula` 逐字相同 · `corpus_identity_fp` 相同 · `validate_reward(...).ok`。
+- 组名含义：**收入**（击杀/命中/拾取/清场/速度）· **价格**（承伤/死亡/开火/失误/时长罚）· **塑形**（探索/瞄准/移动/
+  包围/威胁/砖）· **机制**（本课特有的税、窗口、基线：`basePressure` / `wDef` / `dmgFirst600` / `wClutch` / `thCost*`）。
+- 一次性脚本已删；以后新课程按同样四项手工分组即可（`MAX_FORMULA_CHARS` 不计字符串外的 `//`）。
+
 ## §54 metrics v13：基地威胁四轴 + 弹道 6 列（2026-11-01）
 
 **一句话**：`METRICS_VERSION 12→13`、行宽 **79→85**（idx79–84），新列**只落盘、不接任何公式**；

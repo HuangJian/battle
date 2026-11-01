@@ -164,7 +164,13 @@
     "level": 0,
   },
   "reward": {
-    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerHits - wStuck*min(max(0, stuckTicks-300), 900) - wShot*playerShots",
+    "formula": [
+      "wKill*kills",
+      "+ wHit*enemyHits",
+      "- wDmg*playerHits",
+      "- wStuck*min(max(0, stuckTicks-300), 900)",
+      "- wShot*playerShots",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.3,

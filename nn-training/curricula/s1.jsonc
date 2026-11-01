@@ -17,7 +17,7 @@
 
   // 奖励 = 配置公式（唯一机制）。Φ = 势；reward[i] = Φ[i+1] − Φ[i]
   "reward": {
-    "formula": "1.0*(kills+1) - 0.15*playerHits",
+    "formula": ["1.0*(kills+1)", "- 0.15*playerHits"],
     "params": {},
     "terminal": { "stage_clear": 2.0, "lives_exhausted": -0.5 },
   },

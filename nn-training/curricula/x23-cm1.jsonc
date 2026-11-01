@@ -15,7 +15,26 @@
   "level": "ladder-c20-lives1",
 
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) + wFireHold*fireHeldTicks/(ticks+1)",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "+ wFireHold*fireHeldTicks/(ticks+1)",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.6,
@@ -28,10 +47,10 @@
       "wHurt": 110.0,
       "wEncl": 8.6,
       "wCorner": 25.0,
-      "wFireHold": 2.0
+      "wFireHold": 2.0,
     },
     "terminal": {},
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -52,9 +71,7 @@
   "gamma": 0.998,
   "lam": 0.95,
 
-  "ppo_schedule": [
-    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
-  ],
+  "ppo_schedule": [{ "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }],
 
   "target_transitions": 24576,
   "est_samples_per_game": 147,
@@ -72,7 +89,7 @@
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
 
 // ── 结算（2026-10-09 回填：it150 终判点；本课停 it151）──

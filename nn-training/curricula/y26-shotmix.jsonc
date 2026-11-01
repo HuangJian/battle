@@ -92,7 +92,36 @@
 
   // ── 奖励：y25-price 逐字，**只改 wAcc 15.3→7.6 与 wHit 0.2→0.35**（净 Φ ≈ +1 分）──
   "reward": {
-    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 收入
+      "+ wWin*where(clearTick>=0, (8000-clearTick)/1400, 0)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "- wThreat*threatTicks/(ticks+1)",
+      "- wNearSq*nearSqSum/(ticks+1)",
+      "- wBlock*(idleTicks-stopTicks)/(ticks+1)",
+      // 收入
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      "+ wBackHits*backHits",
+      "+ wSideHits*sideHits",
+    ],
     "params": {
       "wKill": 3.0,
       "wHit": 0.35,
@@ -113,12 +142,12 @@
       "wFrBomb": 2.0,
       "wFrStar": 3.0,
       "wBackHits": 1.0,
-      "wSideHits": 0.2
+      "wSideHits": 0.2,
     },
     "terminal": {
-      "timeout": -15.0
+      "timeout": -15.0,
     },
-    "scheme": "toy"
+    "scheme": "toy",
   },
   "dodge": "",
 
@@ -140,7 +169,7 @@
 
   "ppo_schedule": [
     { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
-    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 },
   ],
 
   "target_transitions": 24576,
@@ -159,5 +188,5 @@
 
   "eval_stages": "2000-2003",
   "eval_games_per_stage": 50,
-  "eval_every": 5
+  "eval_every": 5,
 }
