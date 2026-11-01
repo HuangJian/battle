@@ -161,6 +161,45 @@ def _production_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> It
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_observation_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单测层**不发观测腿的真实 HTTP**（生命周期 + 错误上报；2026-11-01，与 `_production_isolation` 同族）。
+
+    为什么（实测，不是猜）：`worker_loop` 每个会话打两条**同步**上报（`Lifecycle.start()`
+    的「worker 启动」+ `close()` 的「收线」），而单测里的 hub 地址是 `http://hub` 这种
+    **假主名** ⇒ 每一条都要白等一个真实的连接超时（本机实测 **1.41s/条** ⇒ 一次
+    `worker_loop` **+2.8s**，与用例本身的工作量无关）。`--durations` 只会让人以为「这个
+    用例很慢」，而它其实在等 DNS/connect（正是 conftest 头部说的「不占 CPU 的空等」）。
+    2026-11-01 的 5 条 >5s 警告全部来自这里：`test_async_result_upload` ×2 /
+    `test_backup_round_does_not_touch_computing_at` / `test_worker_loop_forwards_role` /
+    `test_error_report::test_lifecycle_outcomes_are_not_reported`（内部跑 3 轮）。
+
+    掐的只是**出口**（`remote/lifecycle.py` 里那两个模块全局），`Lifecycle` 本体照旧真跑：
+    信号装卸、读数、读点节流、`why()` 都没被打桩。形状本身由
+    `tests/remote/test_lifecycle.py` 直接钉（它自己 patch 这两个出口）。
+    与 `pin_production_env` 把控制台地址钉成死端口同一条理由：观测面没有义务在单测里
+    真的出网。e2e 层（真 hub 子进程）不继承本文件，行为零变化。
+    """
+    from remote import lifecycle
+
+    monkeypatch.setattr(lifecycle, "post_error", lambda *a, **k: True, raising=True)
+    monkeypatch.setattr(lifecycle, "report_error", lambda *a, **k: None, raising=True)
+    # ② 错误上报腿的**按名导入的调用点**（`remote/job_round.py` / `remote/run_loop.py` 都是
+    #    `from remote.error_report import report_error`，所以在源头打桩对它们无效）。源头模块
+    #    本身**不**打桩：它自己的用例（`tests/remote/test_error_report.py`）要用真实现打真回环
+    #    假 hub。两处都属「失败即丢」的观测腿 ⇒ 桩掉的只是网络，不是判据。
+    #    2026-11-01 审计（一次性探针：包住 urllib/socket 计 >200ms 调用，跑完已删）：
+    #    `test_worker_reap_stall` 一族的失败分支会在 **daemon 线程**里真发一笔到假 hub
+    #    （2.0s = `WORKER_ERROR_TIMEOUT_SEC`），耗时被算到后续就绪的用例头上（`--durations`
+    #    里是一串与它无关的用例，看起来毫无规律）。
+    #    只桩**已导入**的模块：这层夹具每个用例都跑，不能为一个断言不到的调用点付一次 import
+    #    （`remote/run_loop.py` 在部分收集下可能还没进来）。
+    for _mod_name in ("remote.job_round", "remote.run_loop"):
+        _mod = sys.modules.get(_mod_name)
+        if _mod is not None:
+            monkeypatch.setattr(_mod, "report_error", lambda *a, **k: None, raising=True)
+
+
 def bp_args(
     sps: int = 3,
     rotate_stages: int = 35,

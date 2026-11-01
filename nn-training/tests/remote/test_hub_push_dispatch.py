@@ -46,6 +46,7 @@ from hub.admin import AdminRoutes
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from remote.worker_server import WorkerServerState, make_worker_server
+from tests.helpers import net_seams
 from tests.helpers.push_worker import PAYLOAD, result_of
 
 # ------------------------------------------------------------------ 夹具与工具
@@ -316,7 +317,11 @@ def test_blocked_nodes_are_visible_with_a_reason(tmp_path: Path) -> None:
 def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> None:
     """rl-config 热重载（mtime）+ 探活写回在线/忙闲；失败未达阈值不算离场但必须「当它在忙」。"""
     cfg = tmp_path / "rl-config.json"
-    _write_cfg(cfg, [{"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True}])
+    # 死桩走 `net_seams`（**当场拒绝**的回环端口），不用 `:1`：本仓容器对未监听的低端口是
+    # DROP ⇒ 每次探活白等满 `ping_timeout`（2026-11-01 实测 2.0s/次）。判据（探活失败 ⇒
+    # 未知 ⇒ 当局忙）与端口号无关。
+    dead = net_seams.dead_loopback_url()
+    _write_cfg(cfg, [{"id": "g1", "url": dead, "gpu_push": True}])
     ws = PushWorkers(cfg, log=_quiet, ping_timeout=_PING_TIMEOUT)
     assert ws.reload(force=True) is True
     assert [w["id"] for w in ws.snapshot()] == ["g1"]
@@ -327,7 +332,7 @@ def test_push_workers_hot_reload_and_probe(tmp_path: Path, worker_factory) -> No
     _write_cfg(
         cfg,
         [
-            {"id": "g1", "url": "http://127.0.0.1:1", "gpu_push": True},
+            {"id": "g1", "url": dead, "gpu_push": True},
             {"id": "g2", "url": live.url, "gpu_push": True, "authKey": "k"},
             {"id": "plain", "url": live.url},  # 非 gpu_push：不得进表
         ],
@@ -543,9 +548,12 @@ def test_backup_claim_of_settled_job_is_refused_by_the_store_gate(
     tick = disp.tick()
     assert tick["started"] == [], tick
     assert not any(str(s).endswith("#b0") for s in disp._inflight), disp._inflight
-    # 给了推送线程足够时间真把 POST 发出去（红的时候就是这么抓到它的）
-    if _wait_until(lambda: w1.received != [], timeout=2.0):
-        raise AssertionError(f"已结算的活被推给了机器（白烧一轮 GPU）：{w1.received}")
+    # 立刻断言「什么也没收到」——**不需要** sleep 等「它会不会真发出去」（2026-11-01）：
+    # `started` 是 `_dispatch` 里**唯一**的推送线程生成点（`t.start()` 之后紧接着 append），
+    # 它为空 ⇒ 本进程此刻没有任何在飞的推送线程 ⇒ 这一读之后也不会有 POST 冒出来。
+    # 原来这里是 `_wait_until(timeout=2.0)`：绿的时候白等满 2s（这条用例 2.02s 全是它），
+    # 而红的时候上面第一条断言就已经当场红（收到与否是同一事实的另一面）。
+    assert w1.received == [], f"已结算的活被推给了机器（白烧一轮 GPU）：{w1.received}"
     assert disp.state()["pushed"] == 0
 
 
@@ -584,8 +592,9 @@ def test_dispatch_reads_its_own_state_once_per_tick(
     tick = disp.tick()
     assert popped["n"] == 1, "夹具没走到「备份值不值得开」那一步"
     assert tick["started"] == [], tick
-    if _wait_until(lambda: w1.received != [], timeout=2.0):
-        raise AssertionError(f"同一份活被推给刚跑完它的机器：{w1.received}")
+    # 与上一条同理（2026-11-01）：`started` 空 = 没有推送线程，立刻断言即可，
+    # 原来的 `_wait_until(timeout=2.0)` 在绿的情形下白等满 2s（这条用例 2.01s 全是它）。
+    assert w1.received == [], f"同一份活被推给刚跑完它的机器：{w1.received}"
     assert disp.state()["pushed"] == 0
 
 
@@ -1008,9 +1017,11 @@ def test_push_ahead_zero_keeps_the_busy_worker_untouched(tmp_path: Path) -> None
         disp.tick()
         assert _wait_until(lambda: len(started) == 1), disp.state()
         for _ in range(3):
-            disp.tick()
-            # sleep-ok: 轮询步长（等的是「忙机没有被选」这个状态，不是墙钟）
-            time.sleep(0.05)
+            # `started` 是**唯一**的推送线程生成点 ⇒ 每拍同步断言「没有起新的推送」，
+            # 不必用 `time.sleep(0.05)` 赌「多收的那一份还没到」（2026-11-01：3 拍白付 0.15s；
+            # 退化在第 1 拍就红，比等窗口到点更强）。
+            tick = disp.tick()
+            assert tick["started"] == [], f"忙机被多推了一份：{tick}"
         remaining_course = "b" if started[0] == "a" * 16 else "a"
         remaining = remaining_course * 16
         assert state.get(remaining) is None  # 忙机没有多收任何一份

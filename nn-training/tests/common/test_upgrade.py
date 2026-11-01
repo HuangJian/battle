@@ -34,6 +34,7 @@ NN_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(NN_DIR))
 
 import common.distribution
+from tests.helpers import net_seams
 from tests.subproc_util import run_utf8
 
 FAILS: list[str] = []
@@ -154,7 +155,8 @@ def test_upgrade_stale_nodes() -> None:
         "nodes": [
             {"id": "stale", "url": stale.url(), "authKey": "K1", "enabled": True},
             {"id": "current", "url": current.url(), "authKey": "K2", "enabled": True},
-            {"id": "down", "url": "http://127.0.0.1:1", "authKey": "K3", "enabled": True},
+            # 死桩走 `net_seams`（当场拒绝）：写 `:1` 在本仓容器是 DROP ⇒ 白等满 `status_timeout`。
+            {"id": "down", "url": net_seams.dead_loopback_url(), "authKey": "K3", "enabled": True},
             {"id": "disabled", "url": stale.url(), "authKey": "K4", "enabled": False},
         ]
     }

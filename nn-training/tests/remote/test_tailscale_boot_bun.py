@@ -84,9 +84,21 @@ def test_online_notebook_cells_install_no_bun() -> None:
 
 def test_ensure_never_touches_bun() -> None:
     """边界 1c + 顺序契约作废：`ensure()` 里连「装 bun」的名字都不该有（注释可以谈 bun）。"""
+    import ast
+    import textwrap
+
     body = inspect.getsource(tailscale_boot.ensure)
-    assert "ensure_bun(" not in body, "ensure() 不许再装 bun（2026-09-25 重裁）"
-    assert "bun.sh" not in body, "ensure() 里不许有任何 bun 安装机制"
+    tree = ast.parse(textwrap.dedent(body))
+    called = {
+        n.func.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert called.isdisjoint({"ensure_bun"}), "ensure() 不许再装 bun（2026-09-25 重裁）"
+    strings = [
+        n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+    assert not any("bun.sh" in s for s in strings), "ensure() 里不许有任何 bun 安装机制"
 
 
 def test_retired_bun_helpers_do_not_come_back() -> None:

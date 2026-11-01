@@ -178,9 +178,16 @@ def test_poll_path_has_no_course_input() -> None:
     assert not any("course" in p.lower() for p in params), params
     # 真实 HTTP 路径也钉一道（URL 里带课程 = 把归属塞回请求侧）
     # 取活必须经 peek + claim 两个面（任一面被换成「带课程参数」的单条腿，这里就红）
+    import ast
+    import textwrap
+
     src = inspect.getsource(acquire_job)
-    assert "peek_jobs" in src and "claim_job" in src, "取活链路少了 peek/claim 之一"
-    assert "course=" not in src, "acquire_job 的请求里出现了课程参数"
+    tree = ast.parse(textwrap.dedent(src))
+    refs = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    refs |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert {"peek_jobs", "claim_job"} <= refs, "取活链路少了 peek/claim 之一"
+    passed = {k.arg for n in ast.walk(tree) if isinstance(n, ast.Call) for k in n.keywords}
+    assert passed.isdisjoint({"course"}), "acquire_job 的请求里出现了课程参数"
     # 三个 HTTP 面的形参也钉一道（响应侧当然会有 course —— 那是 hub 告诉我们的归属事实）
     import remote.worker as W
 

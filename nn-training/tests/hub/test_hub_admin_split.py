@@ -112,7 +112,7 @@ def test_hub_handler_declares_all_mixins_before_the_base_handler() -> None:
     bases = [ast.unparse(b) for b in cls.bases]
     assert bases[-1] == "BaseHTTPRequestHandler", bases
     mixins = bases[:-1]
-    assert "AdminRoutes" in mixins, bases
+    assert {"AdminRoutes"} <= set(mixins), bases
     assert all(b.endswith("Routes") for b in mixins), (
         f"`BaseHTTPRequestHandler` 之前的基类应当全是 `*Routes` 混入：{bases}"
     )
