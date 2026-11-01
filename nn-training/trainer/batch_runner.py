@@ -277,7 +277,8 @@ class BatchEvalRunner:
         #: 收工断连的作用域键（只关本单元自己的在飞请求——rollout 同进程并发，不能误伤）。
         req_scope = f"batcheval:{iter_id}"
         # 新单元开跑：解除上一单元可能的收工态（否则本单元请求落地就被拒）。
-        common.distribution.clear_abort()
+        # 只清自己的作用域：全局清空会把兄弟课程刚落下的收工态重新解封。
+        common.distribution.clear_abort(req_scope)
         # 单 unit 跨多关（一次性评估：用户 2026-09-19 第 2 条「不要 u0/u1/u2 阶段」）：
         # unit["pairs"] = [[stageId, seed], …] 时以它为准；缺省仍由 seeds × stageId 展开
         #（ladder/corpora 的单元逐字不变）。逐关参数走 unit["stageParams"]，见 params_for。

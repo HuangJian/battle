@@ -47,6 +47,7 @@ from worker.eval_track import course_logger, lost_by_node
 from worker.eval_yield import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     eval_close_reason,
+    eval_request_scope,
     eval_slot_cap,
     hold_for_local,
     inflight_grace_cap,
@@ -292,9 +293,10 @@ class EvalDispatcher:
             inflight_nodes: dict[tuple[int, int], set[str]] = {}
             all_done = threading.Event()
             # 收工即断连的作用域（线程 tag）：settled 满即置位 + 关在飞连接——尾部
-            # 竞速副本/慢节点不再等（同 A/B 层）。同进程 rollout 的标签不同，不误伤。
-            req_scope = f"evalscope:{eval_iter_id}"
-            common.distribution.clear_abort()
+            # 竞速副本/慢节点不再等（同 A/B 层）。**必须带课程身份**：同进程兄弟课程
+            # 共享 RUN_ID ⇒ eval iterId 恒同，只用它会把另一门课的在飞请求一起掐死。
+            req_scope = eval_request_scope(eval_iter_id, course_fp)
+            common.distribution.clear_abort(req_scope)
             #: 正在写行的赢家数（record 期间 +1）：收工只等它们落盘。
             writers = [0]
             #: 消费线程数（孵化即 +1，线程退出 -1）。全退 = 再等也不会结算 ⇒ 收工

@@ -600,6 +600,37 @@ def _fast_fetch(h):
     return fetch
 
 
+def test_eval_request_scope_is_per_course(tmp_path, monkeypatch) -> None:
+    """同进程兄弟课程、同 iter_id 的 eval 轮，断连作用域必须不同。
+
+    2026-11-02 z4-nav/z4-polish 现场：两门课共享 `RUN_ID` ⇒ `{RUN_ID}.{it}ev`
+    逐字节相同；z4-nav settled 的 `abort_active_requests(req_scope)` 把 z4-polish
+    的在飞请求成片掐成 `aborted: settled complete`（it0/it10/it15 各一次，每次
+    停派十几分钟）。这里直接钉住「一轮内只用同一 scope、两门课之间 scope 不相交」。
+    """
+    seen_by_course: dict[str, set[str]] = {}
+    current: list[set[str]] = [set()]
+
+    def spy_abort(tag: str = "") -> int:
+        current[0].add(tag)
+        return 0
+
+    monkeypatch.setattr(common.distribution, "abort_active_requests", spy_abort)
+    for name in ("z4-nav", "z4-polish"):
+        work = tmp_path / name
+        work.mkdir()
+        h = _Harness(work, monkeypatch, games=1)
+        h.args.course_obj = types.SimpleNamespace(name=name, stage_json=lambda _s: None)
+        h.args.course_frozen_bytes = f"course:{name}".encode()
+        current[0] = set()
+        h.run(_fast_fetch(h))
+        seen_by_course[name] = current[0]
+    nav, polish = seen_by_course["z4-nav"], seen_by_course["z4-polish"]
+    assert nav and polish, seen_by_course
+    assert nav.isdisjoint(polish), f"两门课共用了断连作用域：{nav & polish}"
+    assert len(nav) == 1 and len(polish) == 1, seen_by_course
+
+
 def test_gate_pings_nodes_in_parallel(tmp_path, monkeypatch) -> None:
     """B2：门必须并行探测——3 台各 0.3s，串行 = 0.9s（实测两台超时即 ~7s）。
 

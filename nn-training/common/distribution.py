@@ -432,10 +432,18 @@ def abort_active_requests(tag: str = "") -> int:
     return len(targets)
 
 
-def clear_abort() -> None:
-    """解除全部收工态（**每个单元开头必须调**；否则上一单元收工后请求立刻被拒）。"""
+def clear_abort(tag: str = "") -> None:
+    """解除收工态（**每个单元开头必须调**；否则上一单元收工后请求立刻被拒）。
+
+    `tag` 非空只清该作用域：多课程同进程各有自己的 `evalscope:*`/`batcheval:*`，
+    全局清空会把兄弟单元刚落下的收工态重新解封（尾巴线程又获准发请求）。
+    空 = 全清（旧调用方逐字不变）。
+    """
     with _ACTIVE_LOCK:
-        _ABORTED_TAGS.clear()
+        if tag:
+            _ABORTED_TAGS.discard(tag)
+        else:
+            _ABORTED_TAGS.clear()
 
 
 def abort_scope(tag: str = "") -> bool:
@@ -1095,7 +1103,10 @@ def post_weights_parallel(
                 kind=kind,
             )
             return nid, nd, mode, None
-        except DistError as e:
+        except (DistError, OSError) as e:
+            # 裸 socket 异常（URLError/10054、读超时）也只剔除该节点：`_request` 不包装
+            # OSError，放它穿过 `fut.result()` 会炸掉整批（2026-11-02 z4-polish it5：
+            # kaggle 一次 10054 → 整轮 800 局 eval 0 局派出、无 summary）。
             return nid, nd, None, e
 
     n = len(nodes)

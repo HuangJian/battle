@@ -69,6 +69,7 @@ READERS = {
     "trainer/eval_dispatch.py": (
         "EVAL_LOCAL_SLOTS_DEFAULT",
         "eval_close_reason",
+        "eval_request_scope",
         "hold_for_local",
         "release_local_gate_if_starved",
         "reserve_local_slots",
@@ -268,6 +269,24 @@ def test_midround_self_rescue_semantics() -> None:
     assert y.local_fallback_midround(True, False, False, 4, True) is False
     assert y.local_fallback_midround(True, False, True, 0, True) is False
     assert y.local_fallback_midround(True, False, True, 4, False) is False
+
+
+def test_eval_request_scope_carries_course_identity() -> None:
+    """断连作用域必须含**课程身份**（2026-11-02 z4-nav/z4-polish 同轮互杀）。
+
+    两门课同进程共享 `RUN_ID` ⇒ eval_iter_id 逐字节相同；只用它做 scope 时，
+    一门课 settled 的 `abort_active_requests` 会把另一门课的在飞请求全掐成
+    `aborted: settled complete`。
+    """
+    y = eval_yield_mod
+    nav = y.eval_request_scope("abc123.5ev", "fp-nav")
+    polish = y.eval_request_scope("abc123.5ev", "fp-polish")
+    assert nav != polish, "兄弟课程同轮共用了断连作用域"
+    assert "abc123.5ev" in nav and "fp-nav" in nav
+    assert y.eval_request_scope("abc123.5ev", "fp-nav") == nav  # 纯函数、可重入
+    # 无课程（手工 evalA 等老路径）也要有稳定、可用的作用域（且不与有课程的撞车）
+    no_course = y.eval_request_scope("abc123.5ev", "")
+    assert "abc123.5ev" in no_course and no_course not in (nav, polish)
 
 
 def test_eval_slot_cap_semantics() -> None:

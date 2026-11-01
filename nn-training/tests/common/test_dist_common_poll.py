@@ -396,6 +396,26 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         assert common.distribution.abort_scope("t-abort") is False  # clear_abort 复位（下一单元可用）
 
 
+def test_clear_abort_is_scope_selective() -> None:
+    """新一轮开工只清**自己的**作用域，别把兄弟课程已收工的 scope 重新解封。
+
+    多课程同进程共享 `RUN_ID`：全局 `clear_abort()` 会把另一门课刚 settled 的
+    `evalscope:*` 一起清掉，那一轮的尾巴线程重新获准发请求（2026-11-02 复核）。
+    无参调用仍是全清：旧调用方逐字不变。
+    """
+    common.distribution.clear_abort()
+    try:
+        common.distribution.abort_active_requests("scope-a")
+        common.distribution.abort_active_requests("scope-b")
+        common.distribution.clear_abort("scope-a")
+        assert common.distribution.abort_scope("scope-a") is False
+        assert common.distribution.abort_scope("scope-b") is True
+        common.distribution.clear_abort()
+        assert common.distribution.abort_scope("scope-b") is False
+    finally:
+        common.distribution.clear_abort()
+
+
 def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
     """节点配置两种键名都要认：归一化形态 `key` 与 rl-config 原始 `authKey`。
 
