@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -42,19 +43,46 @@ def test_settle_happens_before_ready() -> None:
 
 
 def test_timeout_is_bounded_and_reported() -> None:
-    """② 线程卡住 ⇒ settle 有界返回 False（不把 job 卡在 15s 的 HTTP timeout 上）。"""
+    """② 线程卡住 ⇒ settle 有界返回 False（不把 job 卡在 15s 的 HTTP timeout 上）。
+
+    2026-11-01：旧写法是一条墙钟上界 `time.time() - t0 < 2.0`（settle 预算 50ms，2s 当余量），
+    在门禁 8 worker 下假红过一次（实测 2.36s，单跑 / 16 个忙循环加压都只要 0.06s —— 那个
+    2.36s 是**进程被调度器饿住**，不是 settle 慢）。墙钟上界在这里量的是操作系统的调度，
+    而「有没有把预算交给 join」本来能确定性检验 ⇒ 拆成两条不靠墙钟的判据：
+
+    ① 假线程记账：`settle(0.05)` 必须把 **0.05** 传给 `join`（硬编码成缺省 5s 就红）；
+    ② 真线程：返回 False 时工作线程**仍在跑** ⇒ 返回的是「超时」，不是「等完了」。
+    ③ 「会不会永久 hang」由 pytest 的 per-test 上限（60s）兜住 —— 不需要再拿墙钟钉。
+    """
     gate = threading.Event()
 
     def _wait() -> None:
         gate.wait()
 
+    class _Recorder:
+        """只记账的假线程（不碰墙钟、不受调度器影响）。"""
+
+        waited: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.waited = timeout
+
+        def is_alive(self) -> bool:
+            return True
+
+    recorder = _Recorder()
+    stub = round_mod._StartBeacon(_wait)
+    stub._thread = cast(threading.Thread, recorder)
+    assert stub.settle(0.05) is False
+    assert recorder.waited == 0.05, f"预算没传到 join：{recorder.waited}"
+
     beacon = round_mod._StartBeacon(_wait)
     beacon.start()
-    t0 = time.time()
     try:
         assert beacon.settle(0.05) is False
-        # timing-ok: 上界兜底（settle 预算 50ms，2s 只是「真的挂住了」的余量）
-        assert time.time() - t0 < 2.0, "settle 没按时返回"
+        assert beacon._thread is not None and beacon._thread.is_alive(), (
+            "settle 返回时工作线程已结束 —— 它等的是「完成」，不是「预算」"
+        )
     finally:
         gate.set()
         beacon.settle(1.0)

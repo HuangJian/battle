@@ -54,7 +54,9 @@
 from __future__ import annotations
 
 import ast
+import gc
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -85,9 +87,20 @@ CTORS: Final = frozenset({"Lock", "RLock", "Semaphore", "BoundedSemaphore", "Con
 #: 同线程重入**合法**的构造（Condition 缺省的内部锁就是 RLock）。
 REENTRANT: Final = frozenset({"RLock", "Condition"})
 #: 锁名后缀（用来认「构造看不见」的那些：导入的、参数注入的、mixin 建的）。
-LOCK_SUFFIX: Final = re.compile(r"(lock|cv|cond|sem)$", re.I)
+#: 判据与旧的 `re.compile(r"(lock|cv|cond|sem)$", re.I).search(...)` 逐字等价，只是免掉正则调用
+#: （`visit_Assign` 里每个赋值目标都要过它 —— 实测 ~2.4 万次/遍）。
+LOCK_SUFFIXES: Final = ("lock", "cv", "cond", "sem")
 #: 例外标注（临界区那一行或它的上一行）。
 OK_MARK: Final = re.compile(r"lock-reentrant-ok:\s*\S")
+def _lockish(name: str) -> bool:
+    """这个名字看起来是锁吗（`…lock` / `…cv` / `…cond` / `…sem`，大小写无关）？
+
+    与旧的正则 `(lock|cv|cond|sem)$` 逐字等价：`search` 带 `$` 锚 = 后缀匹配；
+    `str.lower().endswith(tuple)` 是逐字节的真后缀判断（无正则回溯、无 Pattern 调用）。
+    """
+    return name.lower().endswith(LOCK_SUFFIXES)
+
+
 #: 廉价预筛的「类」判据（`class` 关键字；超集：注释/字符串里出现也算命中，只会少跳不会误跳）。
 CLASS_TOKEN: Final = re.compile(r"\bclass\b")
 #: 廉价预筛的「锁词」判据：`LOCK_SUFFIX` 的四个词根 + `CTORS` 全名都含它（见 `_needs_index`）。
@@ -187,6 +200,8 @@ class _Indexer(ast.NodeVisitor):
     def __init__(self, mod: _Module, lines: list[str]) -> None:
         self.mod = mod
         self.lines = lines
+        #: 带 `lock-reentrant-ok:` 的行号（含 1）—— 每认出一个锁点都去比对，别每遍重扫正则。
+        self.ok_lines = {i + 1 for i, ln in enumerate(lines) if OK_MARK.search(ln)}
         self.cls: str | None = None
         self.fn: _Fn | None = None
         #: 词法作用域链（最内层在尾）——闭包引用的锁（外层函数的局部 `lock`）靠它解析。
@@ -228,7 +243,7 @@ class _Indexer(ast.NodeVisitor):
         ctor = _ctor_name(node.value)
         for t in node.targets:
             if isinstance(t, ast.Name):
-                known = ctor is not None or LOCK_SUFFIX.search(t.id) is not None
+                known = ctor is not None or _lockish(t.id)
                 if not known:
                     continue
                 if self.fn is not None:
@@ -243,7 +258,7 @@ class _Indexer(ast.NodeVisitor):
                 and isinstance(t.value, ast.Name)
                 and t.value.id == "self"
                 and self.cls
-                and (ctor is not None or LOCK_SUFFIX.search(t.attr) is not None)
+                and (ctor is not None or _lockish(t.attr))
             ):
                 self.mod.class_locks.setdefault(self.cls, {}).setdefault(t.attr, ctor or "?")
         self.generic_visit(node)
@@ -251,7 +266,7 @@ class _Indexer(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         for a in node.names:
             name = a.asname or a.name
-            if a.name != "*" and LOCK_SUFFIX.search(name):
+            if a.name != "*" and _lockish(name):
                 # 跨模块同一把锁：导入处与定义处按**名字**归并（hub/offline.py 的 _TASK_PACK_LOCK）。
                 self.mod.imported_locks.add(name)
         self.generic_visit(node)
@@ -259,19 +274,28 @@ class _Indexer(ast.NodeVisitor):
     # ---- 拿锁 + 收集临界区里的调用 ----
     def visit_With(self, node: ast.With) -> None:
         self._register_sites(node)
-        if self.fn is None:
-            self.generic_visit(node)
-            return
-        for n in ast.walk(node):
-            if isinstance(n, ast.Call):
-                self.fn.calls.append(self._call(n))
-        for item in node.items:
-            for n in ast.walk(item.context_expr):
-                if isinstance(n, ast.Call):
-                    self.fn.calls.append(self._call(n))
+        # with 体（含嵌套 `with`）连同 `items[*].context_expr` 一起交回遍历器：旧写法在这里
+        # `ast.walk` 只收调用、**不** generic_visit ⇒ 嵌套 `with` 的内层锁点永远登记不到
+        # （文档却写着「嵌套的由 generic_visit 登记」，2026-11-01 修正；调用也就只收一次）。
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         if self.fn is not None:
+            # `.acquire()`（手写拿锁）也是锁点：就在这趟遍历里认，别让 `visit_With` 再把整个
+            # 体扫第二遍（那是扫描里最大的重复开销）。
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "acquire":
+                key, ctor = self._lock_of(node.func.value)
+                if key is not None:
+                    self._add_site(
+                        self.fn,
+                        _Site(
+                            key,
+                            node.lineno,
+                            node.end_lineno or node.lineno,
+                            ctor or "?",
+                            self._annotated(node.lineno),
+                        ),
+                    )
             self.fn.calls.append(self._call(node))
         self.generic_visit(node)
 
@@ -284,39 +308,30 @@ class _Indexer(ast.NodeVisitor):
             key, ctor = self._lock_of(item.context_expr)
             if key is None:
                 continue
-            self.fn.sites.append(
+            self._add_site(
+                self.fn,
                 _Site(
                     key,
                     node.lineno,
                     node.end_lineno or node.lineno,
                     ctor or "?",
                     self._annotated(node.lineno),
-                )
+                ),
             )
-        # `.acquire()`（手写拿锁）也在管辖范围
-        for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr == "acquire"
-            ):
-                key, ctor = self._lock_of(inner.func.value)
-                if key is not None:
-                    self.fn.sites.append(
-                        _Site(
-                            key,
-                            inner.lineno,
-                            inner.end_lineno or inner.lineno,
-                            ctor or "?",
-                            self._annotated(inner.lineno),
-                        )
-                    )
+    def _add_site(self, fn: _Fn, site: _Site) -> None:
+        """登记锁点，按（锁身份, 起行, 止行）去重。
+
+        同一个 `.acquire()` 会被「外层 with 的整段扫描」与「它自己那层 visit_With」各收一次
+        （现在 with 体是交给遍历器走的）；重复登记只会让同一个问题在报告里出现两遍，而
+        `_check` 看的就是这三样 ⇒ 这里一并去重。
+        """
+        for s in fn.sites:
+            if s.lock == site.lock and s.line == site.line and s.end == site.end:
+                return
+        fn.sites.append(site)
 
     def _annotated(self, lineno: int) -> bool:
-        for idx in (lineno - 1, lineno - 2):  # 本行 或 上一行
-            if 0 <= idx < len(self.lines) and OK_MARK.search(self.lines[idx]):
-                return True
-        return False
+        return lineno in self.ok_lines or (lineno - 1) in self.ok_lines
 
     def _lock_of(self, expr: ast.AST) -> tuple[LockKey | None, str | None]:
         if (
@@ -324,7 +339,7 @@ class _Indexer(ast.NodeVisitor):
             and isinstance(expr.value, ast.Name)
             and expr.value.id == "self"
         ):
-            if LOCK_SUFFIX.search(expr.attr) is None:
+            if not _lockish(expr.attr):
                 return None, None
             ctor = (self.mod.class_locks.get(self.cls or "") or {}).get(expr.attr, "?")
             return ("attr", expr.attr), ctor
@@ -342,7 +357,13 @@ class _Indexer(ast.NodeVisitor):
 
     def _call(self, call: ast.Call) -> _Call:
         f = call.func
-        callback = self._passes_self(call)
+        # 回调判据**只在临界区里的调用上被读**（`_check` 按 site 的行区间过滤）⇒ 区间外别算：
+        # `_passes_self` 要把 args+keywords 拼成列表再逐个 isinstance，是这条路径上最贵的分支。
+        # 行区间与 `_check` 的过滤条件逐字相同；`with` 头那一行本来就被它排除（`site.line < …`）。
+        in_zone = self.fn is None or any(
+            s.line < call.lineno <= s.end for s in self.fn.sites
+        )
+        callback = self._passes_self(call) if in_zone else False
         if isinstance(f, ast.Attribute):
             if isinstance(f.value, ast.Name) and f.value.id == "self":
                 kind = "self"
@@ -546,7 +567,18 @@ def _repo_report() -> _Report:
                     continue
                 sources[str(p)] = text
         assert len(sources) > 200, f"扫描面缩水了（预筛后只剩 {len(sources)} 个文件）"
-        _REPO_CACHE["report"] = _check(sources)
+        # 索引阶段是「百万级短命 AST 对象」：它们没有环（AST 无父指针，本文件的 dataclass 也不
+        # 回指），引用计数回收即可；GC 开着时每一轮 gen0 收集都要遍历进程里**活着的**大堆
+        # （pytest 自己的对象图），纯做无用功。实测同一份语料（`tmp/probe_lock_scan.py` 探针，
+        # gc on / off）：3.40s / 2.76s。同族先例：`tests/helpers/source_scan.py` 头部那张
+        # 「常驻 AST 被 GC 遍历」的表（2.55s vs 0.82s）。只在扫描期间关，完事原样恢复。
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            _REPO_CACHE["report"] = _check(sources)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
     return _REPO_CACHE["report"]
 
 
@@ -757,6 +789,41 @@ def test_checker_sees_mixin_locks_across_files() -> None:
     both = _check({"mix_core.py": _MIXIN_BUG, "unrelated.py": _MIXIN_UNRELATED})
     assert both.sites == 3, both.sites
     assert len(both.problems) == 1, f"跨组同名锁被当成同一把（错杀）：{both.problems}"
+
+
+#: 嵌套 `with`：内层锁点必须是**独立**锁点（2026-11-01 发现：`visit_With` 只收调用、
+#: 不把 with 体交回遍历器 ⇒ 内层 `with` 从未登记，而文档写的是「嵌套的由 generic_visit 登记」）。
+_NESTED_WITH = """
+import threading
+
+
+class D:
+    def __init__(self):
+        self.a_lock = threading.Lock()
+        self.b_lock = threading.Lock()
+
+    def run(self):
+        with self.a_lock:
+            with self.b_lock:
+                self.bump()
+
+    def bump(self):
+        with self.b_lock:
+            pass
+"""
+
+
+def test_checker_sees_the_inner_lock_of_a_nested_with() -> None:
+    """嵌套 `with` 的内层锁点必须在管辖范围（否则 §74 的形态写在内层就看不见）。
+
+    红检：`run` 持 `b_lock` 调 `bump`（后者也持 `b_lock`）⇒ 必须报出。
+    """
+    rep = _check({"nested_synth.py": _NESTED_WITH})
+    # 3 = `run` 的 `a_lock` + `run` 里**内层**的 `b_lock` + `bump` 自己的 `b_lock`。
+    # 旧代码只有 2（内层那个从未登记）—— 所以这条总数就是那个缺口的哨兵。
+    assert rep.sites == 3, f"嵌套 with 的内层锁点没被登记（认出 {rep.sites} 个，期望 3）"
+    assert rep.problems, "内层锁的重入没被判红 —— 嵌套 with 里的锁点又只有外层可见了"
+    assert "bump" in rep.problems[0], rep.problems
 
 
 # 不设 `time_budget` 标记（2026-10-12 撤销原来的 15s）——本用例是**纯 CPU 静态扫描**，
