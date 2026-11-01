@@ -10,7 +10,8 @@ import {
   resolveLivesFlag,
   type Telemetry,
 } from '../tools/sim/export-rl-rollout'
-import { seedWorld, positionPlayer, makePowerUp } from './helpers'
+import { seedWorld, positionPlayer, makePowerUp, clearArena, placeEnemy } from './helpers'
+import { BASE_POS } from '../src/constants'
 
 /**
  * metrics 行宽护栏（2026-09-12 P0 回归）。
@@ -95,6 +96,14 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     freezeShieldWindowTicks: 0,
     hitsInFreezeShieldWindow: 0,
     deathDerivedShieldTicks: 0,
+    stuckTicksCum: 0,
+    wallPressTicks: 0,
+    cooldownRejectTicks: 0,
+    thShotsAtBaseCum: 0,
+    thCostBreach: 0,
+    thCostBreachAimed: 0,
+    thCostDirect: 0,
+    thCostDirectAimed: 0,
     ...over,
   }
 }
@@ -181,8 +190,35 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[76]).toBe('freezeShieldWindowTicks')
     expect(names[77]).toBe('hitsInFreezeShieldWindow')
     expect(names[78]).toBe('deathDerivedShieldTicks')
+    // metrics v13（2026-11-01，plan/r5-next §11.3）：基地威胁四轴 + 弹道两列。
+    expect(names[79]).toBe('thBreach')
+    expect(names[80]).toBe('thBreachAimed')
+    expect(names[81]).toBe('thDirect')
+    expect(names[82]).toBe('thDirectAimed')
+    expect(names[83]).toBe('thShotsAtBaseCum')
+    expect(names[84]).toBe('thBulletsAtBase')
+    // v13 追加（idx85–88）：四档累计成本流（E-BT 的定价输入）。
+    expect(names[85]).toBe('thCostBreach')
+    expect(names[86]).toBe('thCostBreachAimed')
+    expect(names[87]).toBe('thCostDirect')
+    expect(names[88]).toBe('thCostDirectAimed')
     // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 12')
+    expect(py).toContain('METRICS_VERSION = 13')
+  })
+
+  it('v13 thCost*：连续两行累加（增量 = min(2,计数)），不是瞬时值', () => {
+    const world = seedWorld(7)
+    clearArena(world)
+    if (!world.player) world.spawnPlayer()
+    // 鹰正上方 4 格、朝下 ⇒ 直击已对准 1 个（placeEnemy 收左上角 ⇒ 中心 = col+1,row+1）
+    placeEnemy(world, BASE_POS.col - 1, BASE_POS.row - 5, 'basic', 'down')
+    const tel = makeTelemetry()
+    const r1 = buildMetricsRow(0, world, tel)
+    const r2 = buildMetricsRow(10, world, tel)
+    expect(r2[82]).toBe(1) // 瞬时列（thDirectAimed）不累加
+    expect(r1[87]).toBe(0) // thCostDirect：未对准那档不动
+    expect(r1[88]).toBe(1) // thCostDirectAimed：第一步 +1
+    expect(r2[88]).toBe(2) // 第二步再 +1（累计流）
   })
 
   it('差距四族 15 列写入 idx54–68（metrics v10）', () => {

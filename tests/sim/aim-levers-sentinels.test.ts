@@ -72,8 +72,8 @@ describe('口径源码哨兵：训练导出器（P3）', () => {
     expect(apply).toBeLessThan(score) // 打包/打分前一次应用
   })
 
-  it('METRICS_VERSION = 12（v11 热线族 + v12 freeze/星盾窗 3 列；2026-10-20 补 bump）', () => {
-    expect(roll).toContain('export const METRICS_VERSION = 12')
+  it('METRICS_VERSION = 13（v12 freeze/星盾窗 3 列 + v13 基地威胁四轴/弹道 6 列）', () => {
+    expect(roll).toContain('export const METRICS_VERSION = 13')
   })
 
   it('metrics v11：bulletOwnerId 接线（3 处 push，且写在 bulletId 之后）', () => {
@@ -121,6 +121,17 @@ describe('口径源码哨兵：豁免 A vs 宽口径（§3.6）', () => {
   it('shield-window 头注写明盾侧不是「任意 shieldTimer > 0」', () => {
     expect(sw).toContain('threatLaneExempt')
     expect(sw).toContain('宽')
+  })
+
+  it('v13：threatTicks 冻/盾期豁免（`!exempt` 前置门），且 onLane* 保持 raw 永真', () => {
+    const roll = read('tools/sim/export-rl-rollout.ts')
+    // ① 被六条腿全部定价的 threatTicks 必须在豁免门下累计
+    expect(flat(roll)).toContain('if (!exempt) tel.threatTicks++')
+    // ② onLane* 族**不能**被这扇门带上：它是 raw 永真 + onLaneExemptTicks 加法列的设计，
+    //    公式自己相减（`laneRate` 的分母也依赖 raw）。带上就同时改了分母与净额。
+    expect(flat(roll)).toContain('tel.onLaneTicks++')
+    expect(flat(roll)).not.toContain('if (!exempt) tel.onLaneTicks++')
+    expect(flat(roll)).toContain('if (threatLaneExempt(world)) tel.onLaneExemptTicks++')
   })
 
   it('v10 批次整理：Python 侧不再有 enclExempt 三列（决定 A 取代）', () => {

@@ -19,7 +19,14 @@
 - **定义量 ≠ 行为量**：D1（`playerHits`）在 28046 个死亡局上与 `playerDeaths` **100% 相等**
   ⇒ 那一行的倍数（~140x）是"1 命死了就是死了"的同义反复，**不要当信号读**。
 - 数据源 = tmp/<课>/eval_log.jsonl 的 `event=eval` 行；只读不写。
-- 死 = outcome gameover（命耗尽：lives 0、基地完好）；活 = stage_clear。
+- **结局四档（2026-11-01 修正）**：`gameover` 不是一个结局，是**两个**——
+  `base_destroyed`（基地被打）与 `lives_exhausted`（命耗尽）。细分取顶层 `lossDetail`
+  （`export-eval-game.ts:1475,1691` 落盘；R11 之后才有），缺失时用 `dims.baseIntegrity <= 0` 判基毁。
+  旧头注写「死 = outcome gameover（命耗尽：lives 0、基地完好）」是**错的**，会导致把 79% 的基毁局
+  当成"命耗尽"读，两档的 lane/hurt 签名正好相反，混在一起会把「不躲」稀释掉。
+- **`stuckTicks` 不是率**：报告里的这个字段写的是**单局最长连续卡墙拍**（`stuckMax`，
+  `export-eval-game.ts:1409`），不是累计 —— 所以本表的 `/千` 列是「每千拍的最长一次性卡墙」，
+  不能当卡墙率读（`docs/nn` N8；等报告拆出 `stuckTicksCum` 再换）。
 - gameover 样本 <10 局打 ⚠（比值不稳，只看方向）。
 - 进不了本表的（eval 行没有逐步列）：选中动作置信 −logπ、V(t)、hurt 窗口增量——
   那是 rollout shard 的地盘（`tmp/y5-autopsy*.py` 管）：本表只到局 FIN 行的聚合列。
@@ -245,55 +252,101 @@ def fmt(v) -> str:
     return f"{v:.2f}" if isinstance(v, float) else str(v)
 
 
+def classify(r: dict) -> str:
+    """结局四档：clear / base / lives / timeout。
+
+    优先读 `lossDetail`（R11 后的报告顶层字段），缺则用 `dims.baseIntegrity <= 0` 判基毁
+    —— 老 eval_log（r5guard 及之前）没有 lossDetail，只有 dims。
+    timeout 判定兼容 `max_ticks` 与 `timeout` 两种写法。
+    """
+    o = r.get("outcome")
+    if o == "stage_clear" or r.get("cleared") is True:
+        return "clear"
+    if o in ("max_ticks", "timeout"):
+        return "timeout"
+    detail = r.get("lossDetail")
+    if detail == "base_destroyed":
+        return "base"
+    if detail == "lives_exhausted":
+        return "lives"
+    bi = (r.get("dims") or {}).get("baseIntegrity")
+    if isinstance(bi, (int, float)) and bi <= 0:
+        return "base"
+    return "lives"
+
+
+def dedup(rows: list) -> tuple:
+    """同一 (stage, seed) 只留 `time` 最新的一行（重评过的点会留两份）。"""
+    best = {}
+    for r in rows:
+        k = (r.get("stage"), r.get("seed"))
+        if k not in best or str(r.get("time", "")) >= str(best[k].get("time", "")):
+            best[k] = r
+    return list(best.values()), len(rows) - len(best)
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="NN 战斗行为统计：死局 vs 活局")
+    ap = argparse.ArgumentParser(description="NN 战斗行为统计：通关 / 基毁 / 命尽 三档对照")
     ap.add_argument("--course", required=True, help="课程名（tmp/<课>/eval_log.jsonl）")
     ap.add_argument("--iter", type=int, default=None, help="轮次；缺省最新 eval 轮")
-    ap.add_argument("--stage", action="store_true", help="附分关胜/死/超时表")
+    ap.add_argument("--stage", action="store_true", help="附分关四档计数表")
     args = ap.parse_args()
 
     rows, it = load_eval_rows(args.course, args.iter)
-    go = [r for r in rows if r.get("outcome") == "gameover"]
-    cl = [r for r in rows if r.get("outcome") == "stage_clear"]
-    to = [r for r in rows if r.get("outcome") == "max_ticks"]
-    print(f"{args.course} it{it}: 共 {len(rows)} 局 = 通关 {len(cl)} / 命耗尽 {len(go)} / 超时 {len(to)}")
-    if len(go) < 10:
-        print("⚠ 死局 <10，比值只看方向不看大小")
-    denom_go = sum(r.get("ticks", 0) + 1 for r in go) or 1
-    denom_cl = sum(r.get("ticks", 0) + 1 for r in cl) or 1
+    rows, ndup = dedup(rows)
+    groups: dict = {"clear": [], "base": [], "lives": [], "timeout": []}
+    for r in rows:
+        groups[classify(r)].append(r)
+    cl, ba, li, to = groups["clear"], groups["base"], groups["lives"], groups["timeout"]
+    n = max(1, len(rows))
+    print(
+        f"{args.course} it{it}: {len(rows)} 局"
+        + (f"（去重 {ndup}）" if ndup else "")
+        + f" = 通关 {len(cl)} ({100 * len(cl) / n:.1f}%) / **基毁 {len(ba)} ({100 * len(ba) / n:.1f}%)**"
+        f" / **命尽 {len(li)} ({100 * len(li) / n:.1f}%)** / 超时 {len(to)}"
+    )
+    if len(ba) + len(li) < 10:
+        print("⚠ 输局 <10，比值只看方向不看大小")
 
-    print(f"\n{'编号':<6}{'指标':<16}{'死局':>10}{'活局':>10}{'死/活':>8}  行为解释（一句话）")
+    cols = [("通关", cl), ("基毁", ba), ("命尽", li)]
+    denoms = {name: (sum(r.get("ticks", 0) + 1 for r in rs) or 1) for name, rs in cols}
+
+    head = f"{'编号':<6}{'指标':<16}" + "".join(f"{name:>10}" for name, _ in cols) + f"{'通关/基毁':>10}{'中位·基毁':>10}  行为解释（一句话）"
+    print("\n" + head)
     for code, name, kind, f, plain in METRICS:
-        if kind == "game":
-            gv, cv = [f(r) for r in go], [f(r) for r in cl]
-            a, b = mean(gv), mean(cv)
-            tag = " ※零膨胀" if (zero_inflated(gv) or zero_inflated(cv)) else ""
-        else:
-            a = sum(v for v in (f(r) for r in go) if v is not None) / denom_go * 1000
-            b = sum(v for v in (f(r) for r in cl) if v is not None) / denom_cl * 1000
-            tag = ""
+        vals, cells, med = {}, [], None
+        for label, rs in cols:
+            vs = [f(r) for r in rs]
+            if kind == "game":
+                a = mean(vs)
+                med = median(vs) if label == "基毁" else med
+            else:
+                a = sum(v for v in vs if v is not None) / denoms[label] * 1000
+                med = median(vs) if label == "基毁" else med
+            vals[label] = a
+            cells.append(fmt(a))
+        a, b = vals["通关"], vals["基毁"]
         ratio = f"{a / b:.2f}x" if (a is not None and b not in (None, 0)) else "—"
-        print(f"{code:<6}{name:<16}{fmt(a):>10}{fmt(b):>10}{ratio:>8}  {plain}{tag}")
+        tag = " ※零膨胀" if (zero_inflated([f(r) for r in ba]) and kind == "game") else ""
+        print(f"{code:<6}{name:<16}" + "".join(f"{c:>10}" for c in cells) + f"{ratio:>10}{fmt(med):>10}  {plain}{tag}")
 
     if to:
         k = mean([r.get("kills", 0) for r in to])
         s = mean([r.get("stuckTicks", 0) for r in to])
         td = [r.get("playerDamageTaken", 0) for r in to]
         print(f"\n超时 {len(to)} 局画像：击杀 {fmt(k)}（差一口气）、卡死 {fmt(s)}、"
-              f"中伤中位 {fmt(median(td))}/均值 {fmt(mean(td))}"
-              f"（中位 0＝一半超时局毫发无损找不着北，POMDP 不是菜）。")
+              f"中伤中位 {fmt(median(td))}/均值 {fmt(mean(td))}")
 
     if args.stage:
-        print("\n分关：胜率（死/超）")
+        print("\n分关（四档完整计数，每关 n = 该关注的局数）：")
         by: dict = {}
         for r in rows:
             by.setdefault(r.get("stage"), []).append(r)
         for st in sorted(by):
-            rs = by[st]
-            w = sum(1 for r in rs if r.get("cleared")) / len(rs)
-            g = sum(1 for r in rs if r.get("outcome") == "gameover")
-            t = sum(1 for r in rs if r.get("outcome") == "max_ticks")
-            print(f"  {st}: 胜 {w:.2f}（死{g}/超{t}）")
+            g: dict = {"clear": 0, "base": 0, "lives": 0, "timeout": 0}
+            for r in by[st]:
+                g[classify(r)] += 1
+            print(f"  {st}: n={len(by[st])}  通关 {g['clear']} / 基毁 {g['base']} / 命尽 {g['lives']} / 超时 {g['timeout']}")
 
 
 if __name__ == "__main__":

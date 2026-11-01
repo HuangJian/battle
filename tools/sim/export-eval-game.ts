@@ -46,7 +46,7 @@ import { type Direction, TICK_MS } from '../../src/constants'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
 import type { ReplayType } from '../../src/replay/types'
-import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
+import { ObsEncoder, computeMasks, OBS_CHANNELS, BOARD } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { decodeMove } from '../../src/nn/action-space'
 import { decodeMove4 } from '../../src/nn/action-space-v6'
@@ -76,7 +76,9 @@ import {
   playerHpRatio,
   sampleBasePressure,
   threatLaneExempt,
+  isWallPressTick,
 } from '../../src/nn/danger-metrics'
+import { bulletHitsBaseOrRing, threatSplit, type ThreatSplit } from '../../src/ai/god/ThreatBudget'
 import { createShieldWindow } from '../../src/nn/shield-window'
 import {
   registerEnemyAimShot,
@@ -199,6 +201,34 @@ class ScriptedInput {
     this.fireBefore = false
   }
 }
+
+/**
+ * 消融探针的 extra 分组（**半开区间**，与 `POLICY_EXTRA_NAMES` 序一致）。
+ * 只在 `--ablate-extra <name,...>` 时使用：逐组清零后重跑前向，测「策略到底读不读这族」。
+ */
+// 诊断探针开关（CLI 在 `main` 里写；默认关 ⇒ 行为与报告 schema 逐字节不变）。
+let probeFlag = false
+let ablateSpec = ''
+/** `--ablate-ch 16,17`：逐通道清零（obs 通道消融；`--ablate-extra` 是另一套，别混）。 */
+let ablateChSpec = ''
+
+const ABLATE_GROUPS: ReadonlyArray<readonly [string, number, number]> = [
+  ['threat', 0, 9],
+  ['corr', 9, 13],
+  ['tti', 13, 17],
+  ['laneE', 17, 21],
+  ['blk', 21, 25],
+  ['baseSides', 25, 28],
+  ['baseRing', 28, 31],
+  ['baseTTI', 31, 32],
+  ['baseRel', 32, 34],
+  ['baseDist', 34, 37],
+  ['threatTank', 37, 41],
+  ['prevAction', 41, 45],
+  ['lastHit', 45, 49],
+  ['enemyFacing', 49, 53],
+  ['leadHit', 53, 57],
+]
 
 interface RolloutModel {
   forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
@@ -401,10 +431,113 @@ function isSolid(world: World, col: number, row: number): boolean {
   return t === 'brick' || t === 'steel'
 }
 
+/**
+ * probe 归因（--probe 独有）：「想走但零位移」那一拍，朝向前脸外一格是谁挡的。
+ * 几何：CELL=16、车体 32px ⇒ 朝向前脸外一格 = 1px 推进后的前锋两格（与 World 的
+ * 碰撞盒同面）。`free` 且零位移 = 转向拍 / 其它非地形原因（口径上的残余项）。
+ */
+function probeFrontBlock(
+  world: World,
+  pp: NonNullable<World['player']>,
+  dir: string,
+): 'bound' | 'wall' | 'tank' | 'free' {
+  const cells: Array<[number, number]> = []
+  if (dir === 'up' || dir === 'down') {
+    const row = Math.floor((dir === 'up' ? pp.y - 1 : pp.y + 32) / CELL)
+    cells.push([Math.floor(pp.x / CELL), row], [Math.floor((pp.x + 31) / CELL), row])
+  } else {
+    const col = Math.floor((dir === 'left' ? pp.x - 1 : pp.x + 32) / CELL)
+    cells.push([col, Math.floor(pp.y / CELL)], [col, Math.floor((pp.y + 31) / CELL)])
+  }
+  let wall = false
+  for (const [c, r] of cells) {
+    if (c < 0 || r < 0 || c >= GRID || r >= GRID) return 'bound'
+    const t = world.tileMap.get(c, r)
+    if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') wall = true
+  }
+  if (wall) return 'wall'
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const tk = tanks[i]
+    if (!tk.alive || tk.id === pp.id) continue
+    const tc0 = Math.floor(tk.x / CELL)
+    const tc1 = Math.floor((tk.x + 31) / CELL)
+    const tr0 = Math.floor(tk.y / CELL)
+    const tr1 = Math.floor((tk.y + 31) / CELL)
+    for (const [c, r] of cells) if (c >= tc0 && c <= tc1 && r >= tr0 && r <= tr1) return 'tank'
+  }
+  return 'free'
+}
+
 interface EvalResult {
+  probe?: {
+    ticks: number
+    decisions: number
+    movedTicks: number
+    pressedStillTicks: number
+    holdTicks: number
+    /** 场上有道具的 tick 数（补「捡不捡」的追击面：冲没冲 / 不敢冲）。 */
+    puOnFieldTicks: number
+    /** 最近道具 ≤96px（2 车半格）的 tick 数 —— 分子。 */
+    puNearTicks: number
+    /** 最近道具切比雪夫距离 px 之和（仅在 puOnFieldTicks 上累加）⇒ 平均距离。 */
+    puDistSum: number
+    /** pressedStill 的四路归因（wall 地形 / tank 敌我车 / bound 出界 / free 残余）。 */
+    stillWallTicks: number
+    stillTankTicks: number
+    stillBoundTicks: number
+    stillFreeTicks: number
+    /** 基地环墙首次被打秃的 tick（-1 = 整局未破）。 */
+    baseFirstBreakTick: number
+    /** 挡路时另三向里「1px 推进可行」的条数直方图（下标 = freeDirs 0..3）。
+     *  0 = 真正被围死；≥2 = 有四条路可走却还在撞 → 选路失败，不是地形陷阱。 */
+    freeDirHist: number[]
+    /** 破墙之后的防守面读数：tick 数 / 距基中心 ≤96px 的 tick 数 / 距离和。 */
+    postBreakTicks: number
+    postBreakNearBaseTicks: number
+    postBreakDistSum: number
+    // ---- 2026-11-01（plan/r5-next §5-P0-4 / §11.5）----
+    /** 单局最长连续卡墙拍（与顶层 `stuckTicks` 同值，改名版；顶层旧名保留兼容）。 */
+    stuckMaxTicks: number
+    /** **真累计**卡墙拍（顶层 `stuckTicks` 一直是 max，N8 同名不同义）。 */
+    stuckTicksCum: number
+    /** 非 hold、想走、本 tick 零 px 位移、前脸 1 格被地形挡的拍数。 */
+    wallPressTicks: number
+    /** 请求方向 ≠ 已提交朝向（转向被 turnCooldown 按回）的拍数。 */
+    cooldownRejectTicks: number
+    /** 累计「敌弹朝鹰/环墙发射」次数 + 当前在飞数（§11.5 的谓词自检）。 */
+    shotsAtBaseCum: number
+    bulletsAtBaseTicks: number
+  }
+  ablate?: {
+    decisions: number
+    groups: Record<
+      string,
+      {
+        flipsMove: number
+        flipsFire: number
+        flipsHold: number
+        dMove: number
+        dFire: number
+        dValue: number
+      }
+    >
+  }
   outcome: SimOutcome
   /** 失败细分（仅 gameover：'base_destroyed' | 'lives_exhausted'；其余 undefined）。 */
   lossDetail?: 'base_destroyed' | 'lives_exhausted'
+  // R11（plan/r5-next §14.3 N7）：这些量本就在 scorable.finalState / telemetry 里算出，
+  // 此前只落嵌套层 ⇒ 顶层按列读（eval_rows / 奖励复算）时整族缺席。optional：别的构造点
+  // 不必跟着补。
+  lives?: number
+  baseAlive?: boolean
+  baseWallIntact?: number
+  baseWallTotal?: number
+  basePressureMean?: number
+  basePressureSamples?: number
+  powerUpsSpawned?: number
+  /** 通关发生的 tick（未通关 = null）；「首次通关时刻」类读数要用。 */
+  clearTick?: number | null
   /** 全灭（歼灭率口径，方案 §2.1「全歼率」门）：敌人队列已空且场上无存活非 extra
    *  敌人（SimulationEffects.allEnemiesCleared）。2026-09-12 起 `win` = stage_clear ∪ cleared
    *  （单关训练场景二者等价，见 `win:` 处注释）；`cleared` 字段保留原义供「全歼率」门使用。
@@ -816,6 +949,96 @@ export function runEvalOne(
   // R2 决策门（唯一实现）：逐 tick 喂；`--decision-events` = 均匀 K ∪ threat-ONSET + Δt≥3。
   const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
+  // ---- 探针状态（--probe / --ablate-extra；缺省全关 ⇒ 报告 schema 逐字节不变）----
+  const probeOn = probeFlag
+  const ablateGroups = ablateSpec
+    ? ABLATE_GROUPS.filter((g) =>
+        ablateSpec
+          .split(',')
+          .map((s: string) => s.trim())
+          .includes(g[0]),
+      )
+    : []
+  // v7 预备：obs 通道消融（`--ablate-ch 16,17`）。与 `--ablate-extra` 是两套：前者清 conv 输入通道，
+  // 后者清头输入的 extra 列。E2 的接线闸用它（`--ablate-extra` 看不见 obs 通道）。
+  const ablateChRaw = ablateChSpec ? ablateChSpec.split(',').map((x) => Number(x.trim())) : []
+  const ablateChList = ablateChRaw.filter((n) => Number.isInteger(n) && n >= 0 && n < OBS_CHANNELS)
+  if (ablateChRaw.length !== ablateChList.length) {
+    // 响亮告警：越界通道号（例如 E2 还没落地时传 16,17）会被静默丢掉 —— 那等于在测空气。
+    console.error(
+      `[export-eval-game] --ablate-ch 丢弃了越界通道 ${JSON.stringify(ablateChRaw.filter((n) => !ablateChList.includes(n)))}（OBS_CHANNELS=${OBS_CHANNELS}）⇒ 本次消融只覆盖 ${JSON.stringify(ablateChList)}`,
+    )
+  }
+  const ablateChOn = ablateChList.length > 0
+  const ablateOn = ablateGroups.length > 0 || ablateChOn
+  const probe = {
+    ticks: 0,
+    decisions: 0,
+    movedTicks: 0,
+    pressedStillTicks: 0,
+    holdTicks: 0,
+    puOnFieldTicks: 0,
+    puNearTicks: 0,
+    puDistSum: 0,
+    stillWallTicks: 0,
+    stillTankTicks: 0,
+    stillBoundTicks: 0,
+    stillFreeTicks: 0,
+    baseFirstBreakTick: -1,
+    freeDirHist: [0, 0, 0, 0],
+    postBreakTicks: 0,
+    postBreakNearBaseTicks: 0,
+    postBreakDistSum: 0,
+    stuckMaxTicks: 0,
+    stuckTicksCum: 0,
+    wallPressTicks: 0,
+    cooldownRejectTicks: 0,
+    shotsAtBaseCum: 0,
+    bulletsAtBaseTicks: 0,
+  }
+  /** §11.5：已计入 `shotsAtBaseCum` 的敌弹 id（按弹去重）。 */
+  const seenBaseBulletIds = new Set<number>()
+  const threatOut: ThreatSplit = {
+    breach: 0,
+    breachAimed: 0,
+    direct: 0,
+    directAimed: 0,
+    bulletsAtBase: 0,
+  }
+  const ablate = {
+    decisions: 0,
+    groups: {} as Record<
+      string,
+      {
+        flipsMove: number
+        flipsFire: number
+        flipsHold: number
+        dMove: number
+        dFire: number
+        dValue: number
+      }
+    >,
+  }
+  for (const g of ablateGroups)
+    ablate.groups[g[0]] = {
+      flipsMove: 0,
+      flipsFire: 0,
+      flipsHold: 0,
+      dMove: 0,
+      dFire: 0,
+      dValue: 0,
+    }
+  for (const ch of ablateChList)
+    ablate.groups[`ch${ch}`] = {
+      flipsMove: 0,
+      flipsFire: 0,
+      flipsHold: 0,
+      dMove: 0,
+      dFire: 0,
+      dValue: 0,
+    }
+  let ablateScratch: Float32Array | null = null
+  let ablateObsScratch: Uint8Array | null = null
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
@@ -837,6 +1060,65 @@ export function runEvalOne(
         }
         // v6：掩码 9 宽（move4/fire3/hold2）；legacy 7 宽（move5/fire2）。
         const masks = computeMasks(world, v6)
+        if (ablateOn) {
+          // 消融探针：干净 logits 已在手；逐组清零 extra 重跑前向，记 argmax 翻转与 logit 位移，
+          // 最后把干净 logits 写回 —— 采样动作与无探针跑逐字节相同（轨迹不受探针影响）。
+          ablate.decisions++
+          const ex = encoder.extra
+          if (!ablateScratch || ablateScratch.length !== ex.length)
+            ablateScratch = new Float32Array(ex.length)
+          const cleanMove = Float32Array.from(model!.moveLogits)
+          const cleanFire = Float32Array.from(model!.fireLogits)
+          const cleanHold = model!.holdLogits ? Float32Array.from(model!.holdLogits) : null
+          const cleanValue = Float32Array.from(model!.valueOut)
+          const baseMv = argmaxCat(cleanMove, masks.move)
+          const baseFr = argmaxCat(cleanFire, masks.fire)
+          const baseHd = v6 && cleanHold ? argmaxCat(cleanHold, masks.hold) : 0
+          for (const [name, a, b] of ablateGroups) {
+            ablateScratch.set(ex)
+            for (let i = a; i < b && i < ex.length; i++) ablateScratch[i] = 0
+            model!.forward(encoder.obs, encoder.scalars, ablateScratch)
+            const rec = ablate.groups[name]
+            if (argmaxCat(model!.moveLogits, masks.move) !== baseMv) rec.flipsMove++
+            if (argmaxCat(model!.fireLogits, masks.fire) !== baseFr) rec.flipsFire++
+            if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, masks.hold) !== baseHd)
+              rec.flipsHold++
+            for (let i = 0; i < cleanMove.length; i++)
+              rec.dMove += Math.abs(model!.moveLogits[i] - cleanMove[i])
+            for (let i = 0; i < cleanFire.length; i++)
+              rec.dFire += Math.abs(model!.fireLogits[i] - cleanFire[i])
+            rec.dValue += Math.abs((model!.valueOut[0] ?? 0) - (cleanValue[0] ?? 0))
+          }
+          // ---- 通道消融（--ablate-ch）：逐通道清零后重跑前向 ----
+          // 用独立的 obs 缓冲，`encoder.obs` 本身不动 ⇒ 采样动作与无探针跑逐字节相同。
+          if (ablateChOn) {
+            if (!ablateObsScratch || ablateObsScratch.length !== encoder.obs.length) {
+              ablateObsScratch = new Uint8Array(encoder.obs.length)
+            }
+            const plane = BOARD * BOARD
+            for (const ch of ablateChList) {
+              ablateObsScratch.set(encoder.obs)
+              const base = ch * plane
+              ablateObsScratch.fill(0, base, base + plane)
+              model!.forward(ablateObsScratch, encoder.scalars, ex)
+              const rec = ablate.groups[`ch${ch}`]
+              if (argmaxCat(model!.moveLogits, masks.move) !== baseMv) rec.flipsMove++
+              if (argmaxCat(model!.fireLogits, masks.fire) !== baseFr) rec.flipsFire++
+              if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, masks.hold) !== baseHd)
+                rec.flipsHold++
+              for (let i = 0; i < cleanMove.length; i++)
+                rec.dMove += Math.abs(model!.moveLogits[i] - cleanMove[i])
+              for (let i = 0; i < cleanFire.length; i++)
+                rec.dFire += Math.abs(model!.fireLogits[i] - cleanFire[i])
+              rec.dValue += Math.abs((model!.valueOut[0] ?? 0) - (cleanValue[0] ?? 0))
+            }
+            model!.forward(encoder.obs, encoder.scalars, ex) // 复原（下一段会再写回干净 logits）
+          }
+          model!.moveLogits.set(cleanMove)
+          model!.fireLogits.set(cleanFire)
+          if (cleanHold && model!.holdLogits) model!.holdLogits.set(cleanHold)
+          model!.valueOut.set(cleanValue)
+        }
         let mv = argmaxCat(model!.moveLogits, masks.move)
         if (isGoalMasked && goalSteering) {
           // 每 tick 先跑 God 全链（reflex 层 + 导航目标刷新）；eval 期可接受。
@@ -875,9 +1157,77 @@ export function runEvalOne(
       }
     }
     // B4 哨兵：解冻判定要用 tick 前后的 freezeTimer。
+    // probe（--probe）：本 tick 前的玩家位置 —— 「想走但零位移」的唯一判据。
+    const pxBefore = world.player?.x ?? -1
+    const pyBefore = world.player?.y ?? -1
     const freezeBefore = world.freezeTimer
     sim.tick()
     if (world.player?.alive && !world.player.moving) idleTicks++
+    if (probeOn) {
+      probe.ticks++
+      if (decisions > 0) probe.decisions = decisions
+      if (isStopTick(ai)) probe.holdTicks++
+      const pp = world.player
+      if (pp && pp.alive) {
+        if (pp.x !== pxBefore || pp.y !== pyBefore) probe.movedTicks++
+        else if (!isStopTick(ai)) {
+          probe.pressedStillTicks++
+          // §14.3 N2 的决定性归因：挡在前面的是地形、车，还是什么都没挡。
+          const why = probeFrontBlock(world, pp, pp.dir)
+          if (why === 'wall') {
+            probe.stillWallTicks++
+            // 「撞墙＝被围死还是选错」的唯一分辨法：另三向各测一次 1px 推进。
+            let freeDirs = 0
+            if (probeFrontBlock(world, pp, 'up') === 'free') freeDirs++
+            if (probeFrontBlock(world, pp, 'down') === 'free') freeDirs++
+            if (probeFrontBlock(world, pp, 'left') === 'free') freeDirs++
+            if (probeFrontBlock(world, pp, 'right') === 'free') freeDirs++
+            probe.freeDirHist[freeDirs]++
+          } else if (why === 'tank') probe.stillTankTicks++
+          else if (why === 'bound') probe.stillBoundTicks++
+          else probe.stillFreeTicks++
+        }
+        // ---- 2026-11-01（plan/r5-next §5-P0-4）----
+        // ① 撞墙：**单一判据**在 danger-metrics（与 rollout 侧逐字同源，v13 合一）。
+        if (
+          isWallPressTick(world, pp, {
+            movedPx: pp.x !== pxBefore || pp.y !== pyBefore,
+            hold: isStopTick(ai),
+          })
+        ) {
+          probe.wallPressTicks++
+        }
+        // ② 转向被冷却按回：请求 ≠ 提交朝向（`applyTurnCooldown` 会回退 dir）。
+        if (pp.lastActionDir != null && pp.lastActionDir !== pp.dir) probe.cooldownRejectTicks++
+        // ③ 基地威胁/弹道（§11.5 的 0 成本自检）：在飞数逐拍 + 发射次数按弹 id 去重。
+        threatSplit(world, threatOut)
+        if (threatOut.bulletsAtBase > 0) probe.bulletsAtBaseTicks++
+        for (let bi = 0; bi < world.bullets.length; bi++) {
+          const bb = world.bullets[bi]
+          if (!bb.alive || bb.allegiance !== 'enemy') continue
+          if (seenBaseBulletIds.has(bb.id)) continue
+          if (bulletHitsBaseOrRing(world, bb)) {
+            seenBaseBulletIds.add(bb.id)
+            probe.shotsAtBaseCum++
+          }
+        }
+      }
+      if (probe.baseFirstBreakTick < 0 && countBaseWall(world) < tel.baseWallTotal) {
+        probe.baseFirstBreakTick = probe.ticks
+      }
+      // 「墙被破后不回去守」的直接读数：破墙之后的每一拍，玩家距基中心多远。
+      if (probe.baseFirstBreakTick >= 0 && probe.baseFirstBreakTick < probe.ticks) {
+        const p2 = world.player
+        if (p2 && p2.alive) {
+          const bx = (BASE_POS.col + 1) * CELL
+          const by = (BASE_POS.row + 1) * CELL
+          const d = Math.max(Math.abs(p2.x + 16 - bx), Math.abs(p2.y + 16 - by))
+          probe.postBreakTicks++
+          probe.postBreakDistSum += d
+          if (d <= 96) probe.postBreakNearBaseTicks++
+        }
+      }
+    }
     // metrics v9：「本 tick 开火输出」（fire head，非冷却态、非实弹）—— 读当前驱动 tick 的
     // 输入对象（nn 的 ScriptedInput 与 god 的 GodAIInput 都实现了 `isFiring()`）。
     // 刻意不用 `bullet_fired`：那被冷却/弹量上限门掉，是「实弹」不是「开火输出」。
@@ -1058,6 +1408,22 @@ export function runEvalOne(
       let vanished = 0
       for (const id of prevLivePuIds) if (!live.has(id)) vanished++
       tel.powerUpsSpawned += Math.max(0, collectedThisTick - vanished)
+      // probe：追击面（plan/r5-next §14.3，complaint「不主动捡道具」的唯一判据）。
+      // 「场上有道具」= census 后 live 集非空；距离取切比雪夫（与车体/格子口径一致）。
+      if (probeOn && live.size > 0) {
+        const px = world.player?.x ?? -1
+        const py = world.player?.y ?? -1
+        let best = -1
+        for (const pu of world.powerUps) {
+          const d = Math.max(Math.abs(pu.x - px), Math.abs(pu.y - py))
+          if (best < 0 || d < best) best = d
+        }
+        if (best >= 0) {
+          probe.puOnFieldTicks++
+          probe.puDistSum += best
+          if (best <= 96) probe.puNearTicks++
+        }
+      }
       prevLivePuIds = live
     }
     // 停滞检出（与 export-rl-rollout 同式；上报取整局 max streak）。
@@ -1071,6 +1437,7 @@ export function runEvalOne(
       if (world.player?.alive && pcx === prevCell.col && pcy === prevCell.row && !hitThisTick) {
         stuckStreak++
         if (stuckStreak > stuckMax) stuckMax = stuckStreak
+        if (probeOn) probe.stuckTicksCum++ // v13：真累计（顶层 stuckTicks 仍是 max）
       } else {
         stuckStreak = 0
       }
@@ -1181,7 +1548,11 @@ export function runEvalOne(
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
+  // ⚠ N8（2026-11-01）：**这个字段是 max streak，不是累计**。旧名 `stuckTicks` 保留是为了
+  // 不打断既有消费者（tools/eval-behavior-stats.py、diag/ab-arm-compare）；`--probe` 侧同时
+  // 给 `stuckMaxTicks`（同值、语义明确）与 `stuckTicksCum`（真累计）。
   tel.stuckTicks = stuckMax
+  probe.stuckMaxTicks = stuckMax
   // 过关口径（2026-09-12 用户裁定）：**敌人全灭即算过关**（win ∪ cleared）。
   // 全灭后若场上还有道具会进 BONUS TIME 窗口（`POWERUP_PICKUP_WINDOW_MS = 10000ms ≈ 600 tick`）
   // 才 stage_clear，而 `max_ticks` 可能在窗口结束前截断 ⇒ `outcome='max_ticks'` 却已歼灭。
@@ -1272,6 +1643,15 @@ export function runEvalOne(
     enemyTotal: tel.enemyTotal,
     playerDeaths: tel.playerDeaths,
     playerLevel: world.playerLevel,
+    lives: world.lives,
+    baseAlive: !world.tileMap.isBaseDestroyed(),
+    baseWallIntact: tel.baseWallIntact,
+    baseWallTotal: tel.baseWallTotal,
+    basePressureMean:
+      tel.basePressureSamples > 0 ? tel.basePressureSum / tel.basePressureSamples : 0,
+    basePressureSamples: tel.basePressureSamples,
+    powerUpsSpawned: tel.powerUpsSpawned,
+    clearTick: outcome === 'stage_clear' ? t : null,
     // metrics v8 危险暴露（本路径 = 每局终局快照；逐决策步分布走 rollout metrics shard）：
     // `playerHpRatio` 为终局值（0 = 阵亡），danger/threat 为整局累计 tick，dmgFirst600 为
     // 开局窗承伤（其 == 0 即「前 600 tick 零承伤」，plan §1 T2 的读数）。
@@ -1339,6 +1719,9 @@ export function runEvalOne(
     stopRuns: curStopRun > 0 ? [...stopRuns, curStopRun] : stopRuns,
     // R2.3：决策门读数（Δt 分布）；非 nn 策略 = 全零（读数方按 decisions==0 处理）。
     decisionReadout: gateStats,
+    // 诊断探针（仅在显式开启时出现；缺省报告 schema 不变）。
+    ...(probeOn ? { probe } : {}),
+    ...(ablateOn ? { ablate } : {}),
   }
 }
 
@@ -1392,6 +1775,9 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--replay') replayDir = argv[++i]
     else if (argv[i] === '--decision-events') decisionEvents = true
     else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
+    else if (argv[i] === '--probe') probeFlag = true
+    else if (argv[i] === '--ablate-extra') ablateSpec = argv[++i]
+    else if (argv[i] === '--ablate-ch') ablateChSpec = argv[++i]
   }
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     console.error(`[export-eval-game] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
@@ -1448,6 +1834,22 @@ export function main(argv: string[]): void {
     stage: stageIdx,
     seed,
     policy,
+    ...(res.probe ? { probe: res.probe } : {}),
+    // R11：失败细分 + 基地族顶层直出（此前只存在于 `scorable` 嵌套层）。
+    lossDetail: res.lossDetail ?? null,
+    lives: res.lives,
+    baseAlive: res.baseAlive,
+    baseWallIntact: res.baseWallIntact,
+    baseWallTotal: res.baseWallTotal,
+    basePressureMean: res.basePressureMean,
+    basePressureSamples: res.basePressureSamples,
+    powerUpsSpawned: res.powerUpsSpawned,
+    clearTick: res.clearTick,
+    puCollectedRatio:
+      res.powerUpsSpawned && res.powerUpsSpawned > 0
+        ? +(res.powerUpsCollected / res.powerUpsSpawned).toFixed(4)
+        : null,
+    ...(res.ablate ? { ablate: res.ablate } : {}),
     outcome: res.outcome,
     ticks: res.ticks,
     win: res.win,

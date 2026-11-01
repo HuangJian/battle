@@ -20,6 +20,8 @@
  *   `enemyBulletLaneWeightTick(...)` —— 敌弹火线承伤逐摄权重 Σ(6−x)（本批 `hurtWeight`）
  *   `enclWeightTick(world)`      —— n≥2 时 Σ max(0,K_ENCL−d)（本批 `enclWeightTicks`；与计数共用扫描）
  *   `cornerWeightTick(world)`    —— 四角锚点 Σ max(0,K_CORNER−d)（本批 `cornerWeightTicks`）
+ *   `isWallPressTick(world, tank, {movedPx, hold})` —— 「撞墙」的**唯一**判据（metrics v13 的
+ *                                  `wallPressTicks`；两个导出器共用，防同名不同义）
  *   —— metrics v11（plan/metrics-v11-hotlane.plan.md §2；**签入 2 列 idx74–75**，第三列被
  *   §4bis.4 杀线拦下）：
  *   `nearSqWeightTick(world)`    —— 全敌 Σ(K_NEAR_SQ−d)²（本批 `nearSqSum`）
@@ -880,6 +882,32 @@ export function corridorCells(world: World, tank: Tank, dir: Direction, cap: num
  * 用**同一个**谓词。距离按「格序号 × CELL」（第 1 格 = 相邻格 = CELL px）。坦克一律忽略
  * （子弹穿车不穿墙）。纯函数、零分配。
  */
+
+/**
+ * 「撞墙」的**唯一**判据（metrics v13 `wallPressTicks`；`plan/r5-next.plan.md` §5.3）。
+ *
+ * 六个条件全真才计数：
+ *   ① 存活且不在重生保护（`spawnTimer<=0`，那段时间引擎根本不跑移动）；
+ *   ② 非 hold（有前进意图 —— hold 是"原地转向"，不是撞墙）；
+ *   ③ 本 tick **零 px 位移**（必须 px：玩家 1 px/拍，格级判不出来）；
+ *   ④ 请求方向 = 已提交朝向 —— **排掉被 `turnCooldown` 按回的拍**：
+ *      那拍"没动"是因为转向被拒（`dir` 已被回退），不是撞墙。P0 实测 38/3569 拍属这一类；
+ *   ⑤ 前脸 1 格被地形挡（`corridorCells(cap=1) === 0`）。
+ *
+ * 为什么必须单一实现：v13 初版在两个导出器里各写了一遍、守卫条件不同
+ * （eval 不排重生保护、rollout 排）⇒ 同一个名字在两面不是同一个量，机制闸跨面比就失效。
+ */
+export function isWallPressTick(
+  world: World,
+  tank: Tank,
+  opts: { movedPx: boolean; hold: boolean },
+): boolean {
+  if (!tank.alive || tank.spawnTimer > 0) return false
+  if (opts.hold || opts.movedPx) return false
+  if (tank.lastActionDir == null || tank.lastActionDir !== tank.dir) return false
+  return corridorCells(world, tank, tank.dir, 1) === 0
+}
+
 export function firstBulletBlockerPx(world: World, px: number, py: number, dir: Direction): number {
   const tileMap = world.tileMap
   const v = DIR_VECTORS[dir]

@@ -7,6 +7,58 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §54 metrics v13：基地威胁四轴 + 弹道 6 列（2026-11-01）
+
+**一句话**：`METRICS_VERSION 12→13`、行宽 **79→85**（idx79–84），新列**只落盘、不接任何公式**；
+同一批还顺手补了四个 eval 探针计数器，并因此发现 `stuck` 的口径问题（见 §54.3）。
+
+### 54.1 新增六列（TS `buildMetricsRow` / Python `METRICS` 尾部同序）
+
+| idx | 列 | 语义 |
+|---|---|---|
+| 79 | `thBreach` | 只有破墙射界（`canBreachRingLine`）、炮口未对准 |
+| 80 | `thBreachAimed` | 破墙射界 + 已对准目标格 |
+| 81 | `thDirect` | 直击射界（`canShootBaseLine`）、炮口未对准 |
+| 82 | `thDirectAimed` | 直击射界 + 已对准鹰所在轴 |
+| 83 | `thShotsAtBaseCum` | **累计**「敌弹朝鹰/环墙发射」次数（`bullet_fired` 事件，只增） |
+| 84 | `thBulletsAtBase` | 当前在飞、首个阻弹格 = 鹰/环墙的敌弹数（**只观测，不上价**） |
+
+唯一实现 = `src/ai/god/ThreatBudget.ts::threatSplit`（复用 `canShootBaseLine` / `canBreachRingLine`，
+后者的几何抽成 `ringBreachTargetOf` 以便判"打的是哪一格"）。
+四轴**互斥**（直击优先于破墙）⇒ 计数不会对同一辆车重复计价。
+
+**为什么先只做 metrics 不做 obs**：s1/s39/s6/ch5/ch11 已把信息铺在观测里，缺的是计数与价格；
+动 obs = `OBS_SCHEMA_MAJOR 7` + 全语料重导 + 旧权重全废（§35 记过「代价大一个量级」）。
+
+**为什么 `thBulletsAtBase` 不上价**：给它挂持有值，弹命中/消失那拍 Φ 会**回升**
+⇒ 等于在"基地被打"的瞬间发正奖励，与 terminal 冲突。它的后果已由 `wBase·baseWallIntact` 与 terminal 收过。
+
+### 54.2 落地面（六处 + 三处测试）
+
+`src/ai/god/ThreatBudget.ts`（新函数）· `tools/sim/export-rl-rollout.ts`（`METRICS_DIM 85` / `METRICS_VERSION 13` /
+6 列 + 4 个 telemetry 字段 + 逐拍计数）· `nn-training/biz/reward_library.py`（`METRICS` 尾部 + 版本 + 自检 85）·
+`nn-training/biz/reward_validation.py`（包络：四轴 (0,4)、thShotsAtBaseCum (0,3000)、thBulletsAtBase (0,16)）·
+`nn-training/tests/golden/reward_golden.json`（重生成，只有 `metrics_version` 变）·
+`tools/sim/export-eval-game.ts`（`--probe` 加 6 个字段，默认关）。
+测试：`tests/godai-threat-split.test.ts`（新，8 例）· `tests/export-rl-rollout-metrics.test.ts`（列序 oracle）·
+`nn-training/tests/biz/test_reward_golden.py`（布局清单 + 版本断言）。
+
+⚠ **bump 即语料纪元**：`iter_shard_dirs` 按 `_shard_metrics_version` 过滤 ⇒ 旧 v12 shard 全部作废，
+必须走在任何开课之前。local 实测：一局 rollout 产出 `metrics.npy (251, 85)` + `metrics_version: 13`，
+Python `RewardFn` 可直接引用新列求值。
+
+### 54.3 副产物：`stuck` 量的是「没换格」，不是「卡墙」（N9）
+
+`export-eval-game --probe` 新增 `stuckTicksCum` 后，三局 local 读数
+`stuckCum/ticks = 93.9% / 96.6% / 96.7%`。机制：`stuck-detect.ts::isStuckTick` 的判据是
+**中心格不变**，而玩家 1 px/拍、一格 16 px ⇒ **直线正常前进每 16 拍才换一次格**。
+⇒ `stuckTicks`（metrics idx9 的当前段 / 报告的 max）都只反映"速度/停顿"，
+`wStuck` 两次实验（stuck/千 −24%、胜率不动）由此有了解释；**真正的撞墙量 = `wallPressTicks`**（v13 同时落地）。
+判据与价格一律改用它。
+
+---
+
+---
 ## §53 云机「静默死」的两条观测腿：hub 静默哨兵 + worker 生命周期上发（2026-10-31）
 
 **一句话**：kaggle 那台 2×T4 **09:51:58 之后再没有一条请求**（整机被云侧收走），而本机当时

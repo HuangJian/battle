@@ -27,7 +27,15 @@
  * (tests/godai-threat-budget.test.ts) pins them to the AI's predicates.
  */
 
-import { CELL, GRID, BASE_POS, TICK_MS, TURN_SENTINEL_MS, type Direction } from '../../constants'
+import {
+  CELL,
+  GRID,
+  BASE_POS,
+  TICK_MS,
+  TURN_SENTINEL_MS,
+  DIR_VECTORS,
+  type Direction,
+} from '../../constants'
 import { manhattan } from '../../utils/helpers'
 import { resolveProfile } from '../../config/combat'
 import type { World } from '../../game/World'
@@ -341,36 +349,203 @@ export function canShootBaseLine(world: World, col: number, row: number): boolea
 /**
  * Mirror of canBreachRingFrom — does (col,row) have a clear shot at an
  * intact ring brick (productive breach)? Mirrors SmartThreatModel verbatim.
+ *
+ * 2026-11-01：几何抽到 `ringBreachTargetOf`（**同一实现**，本函数只是判空），
+ * 因为基地威胁分级（`threatSplit`）还要知道"打的是哪一格"才能判炮口朝向。
  */
 export function canBreachRingLine(world: World, col: number, row: number): boolean {
+  return ringBreachTargetOf(world, col, row) !== null
+}
+
+/**
+ * (col,row) 能打的第一个可破环墙格的**坐标**；打不到 ⇒ null。
+ * 逐字保留原 `canBreachRingLine` 的两轴直射线 + 目标格必须是 brick 的语义。
+ */
+export function ringBreachTargetOf(
+  world: World,
+  col: number,
+  row: number,
+  out?: { col: number; row: number },
+): { col: number; row: number } | null {
   const tm = world.tileMap
-  const clearShotAt = (rc: number, rr: number): boolean => {
-    if (col === rc) {
+  for (let i = 0; i < RING_CELLS.length; i++) {
+    const rc = RING_CELLS[i].col
+    const rr = RING_CELLS[i].row
+    const sameCol = col === rc
+    const sameRow = row === rr
+    if (!sameCol && !sameRow) continue
+    let blocked = false
+    if (sameCol) {
       const step = row < rr ? 1 : -1
       for (let r = row + step; r !== rr; r += step) {
-        if (r < 0 || r >= GRID) return false
+        if (r < 0 || r >= GRID) {
+          blocked = true
+          break
+        }
         const t = tm.get(col, r)
-        if (t === 'brick' || t === 'steel') return false
-        if (t === 'base') return false
-      }
-    } else if (row === rr) {
-      const step = col < rc ? 1 : -1
-      for (let c = col + step; c !== rc; c += step) {
-        if (c < 0 || c >= GRID) return false
-        const t = tm.get(c, row)
-        if (t === 'brick' || t === 'steel') return false
-        if (t === 'base') return false
+        if (t === 'brick' || t === 'steel' || t === 'base') {
+          blocked = true
+          break
+        }
       }
     } else {
-      return false
+      const step = col < rc ? 1 : -1
+      for (let c = col + step; c !== rc; c += step) {
+        if (c < 0 || c >= GRID) {
+          blocked = true
+          break
+        }
+        const t = tm.get(c, row)
+        if (t === 'brick' || t === 'steel' || t === 'base') {
+          blocked = true
+          break
+        }
+      }
     }
-    return tm.get(rc, rr) === 'brick'
+    if (blocked) continue
+    if (tm.get(rc, rr) !== 'brick') continue
+    if (out) {
+      out.col = rc
+      out.row = rr
+      return out
+    }
+    return { col: rc, row: rr }
   }
-  // §3.2: iterate the canonical RING_CELLS instead of hand-unrolled loops.
-  for (let i = 0; i < RING_CELLS.length; i++) {
-    if (clearShotAt(RING_CELLS[i].col, RING_CELLS[i].row)) return true
-  }
+  return null
+}
+
+// ---------------------------------------------------------------- 基地威胁分级
+//
+// 2026-11-01（plan/r5-next §11.3）：把「基地威胁」从一维距离代理拆成四轴
+// （位置遮挡 / 朝向 / 弹道 / 计数）。**纯只读、零分配（可用 out 复用）**，
+// 不改任何既有谓词的行为。
+
+/** `threatSplit` 的输出（四个互斥的敌车计数 + 在飞弹数）。 */
+export interface ThreatSplit {
+  /** 只有破墙射界（`canBreachRingLine`），炮口未对准 */
+  breach: number
+  /** 只有破墙射界，炮口已对准目标格 */
+  breachAimed: number
+  /** 直击射界（`canShootBaseLine`），炮口未对准 */
+  direct: number
+  /** 直击射界，炮口已对准鹰所在轴 */
+  directAimed: number
+  /** 在飞的敌弹中「首个阻弹格 = 鹰 或 环墙」的发数 */
+  bulletsAtBase: number
+}
+
+/** 炮口是否指向 (tc,tr)：同列看上下、同行看左右；不同轴一律 false。 */
+function aimedAt(t: Tank, tc: number, tr: number): boolean {
+  const col = Math.floor((t.x + t.w / 2) / CELL)
+  const row = Math.floor((t.y + t.h / 2) / CELL)
+  if (col === tc && row !== tr) return t.dir === (tr > row ? 'down' : 'up')
+  if (row === tr && col !== tc) return t.dir === (tc > col ? 'right' : 'left')
   return false
+}
+
+/**
+ * 敌弹沿 `dir` 推进，第一个**阻弹格**（brick / steel / base，与
+ * `TileMap.blocksBullet` 同谓词；水/草/冰不挡）。出界或扫完仍无 ⇒ null。
+ */
+export function bulletFirstBlockCell(
+  world: World,
+  b: { x: number; y: number; w: number; h: number; dir: Direction },
+  out?: { col: number; row: number },
+): { col: number; row: number } | null {
+  const v = DIR_VECTORS[b.dir]
+  const leadX = b.x + b.w / 2 + v.dx * (b.w / 2)
+  const leadY = b.y + b.h / 2 + v.dy * (b.h / 2)
+  let c = Math.floor(leadX / CELL)
+  let r = Math.floor(leadY / CELL)
+  const tm = world.tileMap
+  for (let i = 0; i < GRID * 2; i++) {
+    if (c < 0 || r < 0 || c >= GRID || r >= GRID) return null
+    const t = tm.get(c, r)
+    if (t === 'brick' || t === 'steel' || t === 'base') {
+      if (out) {
+        out.col = c
+        out.row = r
+        return out
+      }
+      return { col: c, row: r }
+    }
+    c += v.dx
+    r += v.dy
+  }
+  return null
+}
+
+/** 这发弹会不会打到鹰或环墙（含"已经被砖挡下"的否定）。 */
+export function bulletHitsBaseOrRing(
+  world: World,
+  b: { x: number; y: number; w: number; h: number; dir: Direction },
+  out?: { col: number; row: number },
+): boolean {
+  const cell = bulletFirstBlockCell(world, b, out)
+  if (!cell) return false
+  if (world.tileMap.get(cell.col, cell.row) === 'base') {
+    return (
+      cell.col >= BASE_POS.col &&
+      cell.col <= BASE_POS.col + 1 &&
+      cell.row >= BASE_POS.row &&
+      cell.row <= BASE_POS.row + 1
+    )
+  }
+  return isBaseRingCell(cell.col, cell.row)
+}
+
+/**
+ * 基地威胁的四轴计数（**互斥**：直击优先于破墙，避免同一辆车被计两次）。
+ *
+ * 为什么不复用 `enemyDeadline`：那个函数把"最早伤害时间"算成一个**时间**，
+ * 天然丢掉了"几个 / 几个对准了 / 有没有弹在飞"三项；而 2002 的失败是
+ * "封锁线被同时压上"，`min` 型读数看不见。（plan/r5-next §11.2）
+ *
+ * 口径：只算 `allegiance==='enemy'`、`alive`、`spawnTimer<=0`（与 `enemyDeadline` 同）。
+ */
+export function threatSplit(world: World, out?: ThreatSplit): ThreatSplit {
+  const o: ThreatSplit = out ?? {
+    breach: 0,
+    breachAimed: 0,
+    direct: 0,
+    directAimed: 0,
+    bulletsAtBase: 0,
+  }
+  o.breach = 0
+  o.breachAimed = 0
+  o.direct = 0
+  o.directAimed = 0
+  o.bulletsAtBase = 0
+  // 局部复用（两个 2 字段对象/次；本函数按采样频调用，不是每 tick 热路径）
+  const ringCell = { col: 0, row: 0 }
+  const blockCell = { col: 0, row: 0 }
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const tk = tanks[i]
+    if (!tk.alive || tk.allegiance !== 'enemy' || tk.spawnTimer > 0) continue
+    const col = Math.floor((tk.x + tk.w / 2) / CELL)
+    const row = Math.floor((tk.y + tk.h / 2) / CELL)
+    if (canShootBaseLine(world, col, row)) {
+      // 直击射界只可能两轴之一：col === bc 走竖轴，否则（base 两行）走横轴
+      const aimed =
+        col === BASE_POS.col ? aimedAt(tk, col, BASE_POS.row) : aimedAt(tk, BASE_POS.col, row)
+      if (aimed) o.directAimed++
+      else o.direct++
+      continue
+    }
+    const tgt = ringBreachTargetOf(world, col, row, ringCell)
+    if (tgt) {
+      if (aimedAt(tk, tgt.col, tgt.row)) o.breachAimed++
+      else o.breach++
+    }
+  }
+  const bullets = world.bullets
+  for (let i = 0; i < bullets.length; i++) {
+    const b = bullets[i]
+    if (!b.alive || b.allegiance !== 'enemy') continue
+    if (bulletHitsBaseOrRing(world, b, blockCell)) o.bulletsAtBase++
+  }
+  return o
 }
 
 /**

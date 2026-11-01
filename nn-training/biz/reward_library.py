@@ -120,10 +120,14 @@ METRICS: tuple[str, ...] = (
     #                     ⚠ 时长型计数器：Φ 是**逐行差分**（r[i]=Φ[i+1]−Φ[i]）⇒ 直接
     #                     用它作奖励 = 每 tick 罚款且 Φ 无界；要入公式请用封顶或
     #                     改用 playerHpRatio 的深度型势（plan §4.3）。
-    "threatTicks",  # 43  ← v8：累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
-    #                     口径**冻结**在 src/nn/danger-metrics.ts（同轴 ±0.75 格、逼近
-    #                     弹 / 炮口朝玩家的敌车、≤ 6 格；不判墙体遮挡 —— c20 阶梯关是
-    #                     全空场，见 audit §7.3）。上界同 ticks（0–36000）。
+    "threatTicks",  # 43  ← 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
+    #                     几何口径**冻结**在 src/nn/danger-metrics.ts::inThreatLane
+    #                     （v9 定义：19px 带 + 无半径上限 + **判墙体遮挡**）。
+    #                     ⚠ **v13 起冻/盾期豁免**（`exposureExempt`: freezeTimer>0 ∨ 道具盾窗）：
+    #                     冻结期敌人打不出弹、盾期挨打不掉血 ⇒ 继续收税等于罚"窗内上前"，
+    #                     与 `hitsInFreezeShieldWindow`（奖励窗内命中）方向相反。
+    #                     同族的 enclWeightTicks/cornerWeightTicks/hurtWeight 早就是拌入 A。
+    #                     上界同 ticks（0–36000 的保守上界；实际 max_ticks=20000）。
     "dmgFirst600",  # 44  ← v8：tick < 600 的累计承伤（开局窗）。`player_damage` 事件本就
     #                     不含致死一击（src/game/SimulationCombat.ts:604-609）⇒ 与
     #                     paired §5.1 的「不含致死那一击」口径天然一致。
@@ -219,11 +223,32 @@ METRICS: tuple[str, ...] = (
     #                     54–56/58/62–64/72/74–75 都是累计 tick 计数器（同 dangerTicks 警告）；
     #                     59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵；
     #                     66–71 为局内累计计数/权重（差分 ≥ 0）。
+    # ---- metrics v13（2026-11-01，plan/r5-next §11.3；idx79–84）----
+    # 基地威胁四轴（`src/ai/god/ThreatBudget.ts::threatSplit` **唯一实现**）：
+    # 互斥等级计数（直击优先于破墙，同一辆车只进一格），每行取**本拍瞬时值**，
+    # 不是累计 ⇒ 可以直接进 Φ 的持有值，不会产生"隐藏状态"。
+    "thBreach",  # 79  ← 只有破墙射界（canBreachRingLine）、炮口未对准
+    "thBreachAimed",  # 80  ← 破墙射界 + 炮口已对准目标格
+    "thDirect",  # 81  ← 直击射界（canShootBaseLine）、炮口未对准
+    "thDirectAimed",  # 82  ← 直击射界 + 炮口已对准鹰所在轴
+    "thShotsAtBaseCum",  # 83  ← **累计**「敌弹朝鹰/环墙发射」次数（按 bullet_fired 事件，
+    #                     单调不减）⇒ 只在发射那一拍扣一次，命中时不返还。
+    "thBulletsAtBase",  # 84  ← 当前在飞、首个阻弹格 = 鹰/环墙的敌弹数。
+    #                     **只观测，不上价**：给它挂持有值会在弹命中那拍让 Φ 回升
+    #                     （= 在"基地被打"的瞬间发正奖励），与 terminal −35 正面冲突。
+    # ---- metrics v13 追加（idx85–88）：四档**累计成本流**，E-BT 的定价输入 ----
+    # 每**决策步**增量 = min(2, 当前计数)。必须是累计：`r = Φ[i+1]−Φ[i]`，
+    # 瞬时计数写进 Φ 只在进入/离开跳一次，持续暴露的每步 r 恒为 0（实测 120 拍 sum(r)=0）。
+    # 上界 = 2 × max_ticks / K = 4000（**不是** 2×max_ticks×敌数：min(2,·) 已把每步封到 2）。
+    "thCostBreach",  # 85
+    "thCostBreachAimed",  # 86
+    "thCostDirect",  # 87
+    "thCostDirectAimed",  # 88
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,79] f8（idx0–78）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,89] f8（idx0–88）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
 #: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
 #: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
@@ -239,7 +264,10 @@ METRICS_DIM = len(METRICS)
 #: **两条都拌入豁免 A**；公式一个字不动（列先行、价后议）。
 #: v12（plan/nn-capability-upgrade §4-B5）：窗口三列（idx76–78）—— freezeShieldWindowTicks /
 #: hitsInFreezeShieldWindow / deathDerivedShieldTicks；B6 的奖励输入，本批不接公式。
-METRICS_VERSION = 12
+#: v13（2026-11-01，plan/r5-next §11.3）：基地威胁四轴 + 弹道 6 列（idx79–84）——
+#: 前四列是本拍瞬时计数（可进 Φ 持有值），thShotsAtBaseCum 单调累计（只在发射拍扣），
+#: thBulletsAtBase 只观测不上价。**公式一个字不动**（列先行、价后议）。
+METRICS_VERSION = 13
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -971,7 +999,7 @@ def _self_check() -> None:
     #      追加 aim/dodge 8 列（idx66–73），enclMax 顺位 68 → 65 ⇒ 总列数 74。
     # v11：追加 idx74–75 热线族 2 列（plan/metrics-v11-hotlane；第三列被 §4bis 杀线拦下）
     # v12：追加 idx76–78 窗口三列（plan/nn-capability-upgrade §4-B5）
-    assert len(METRICS) == METRICS_DIM == 79, METRICS_DIM
+    assert len(METRICS) == METRICS_DIM == 89, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

@@ -766,6 +766,17 @@ def test_item_metrics_layout_locked() -> None:
         "freezeShieldWindowTicks",  # idx76（v12：freeze ∪ 道具盾拍；剔除死亡派生盾）
         "hitsInFreezeShieldWindow",  # idx77（v12：窗口内命中敌车；B6 奖励输入）
         "deathDerivedShieldTicks",  # idx78（v12：复活盾 + 星盾 grace 拍；只判读）
+        # ---- metrics v13（2026-11-01，plan/r5-next §11.3）：基地威胁四轴 + 弹道 ----
+        "thBreach",  # idx79（v13：只有破墙射界、炮口未对准）
+        "thBreachAimed",  # idx80（v13：破墙射界 + 已对准）
+        "thDirect",  # idx81（v13：直击射界、炮口未对准）
+        "thDirectAimed",  # idx82（v13：直击射界 + 已对准）
+        "thShotsAtBaseCum",  # idx83（v13：累计朝鹰/环墙发射；单调，只在发射拍扣）
+        "thBulletsAtBase",  # idx84（v13：在飞弹数；只观测不上价）
+        "thCostBreach",  # idx85（v13：累计成本流；每决策步增量 min(2,·)）
+        "thCostBreachAimed",  # idx86
+        "thCostDirect",  # idx87
+        "thCostDirectAimed",  # idx88
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -897,8 +908,9 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    # v10（plan/metrics-v10-gap-columns §1）：列宽 69、版本 10。
-    assert METRICS_VERSION == 12
+    # v13（2026-11-01，plan/r5-next §11.3）：列宽 85。**版本断言随每次加列一起改**，
+    # 它是"这条腿的语料必须重采"的硬提醒。
+    assert METRICS_VERSION == 13
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

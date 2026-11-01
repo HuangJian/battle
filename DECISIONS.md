@@ -10490,3 +10490,26 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `disabled`（弹框打开时也是 disabled，实测存档里就如此）；③ 只加 `Reconnect` 子串（会连带 `Reconnecting` 误判）。
 - **落地**：`sites/colab.ts::sessionState` · 用例 `test/colab.test.ts` 新增「`Click to connect Reconnect` ⇒ stopped
   且 stopSession 直接 already-stopped」；旧实现先跑红（unknown）再转绿。
+
+## §2026-11-01-metrics-v13-base-threat（metrics v13：基地威胁四轴 6 列 + eval 探针四计数器 + N9 口径更正）
+
+- **背景**：`plan/r5-next.plan.md` §11 定下「基地威胁按位置遮挡/朝向/弹道/计数四轴拆开」；
+  评审（`plan/r5.review-ds.md` §9）指出三维空间里只有一维（距离）进了价格，其余三轴既无列也无价。
+- **决定**：
+  1. `METRICS_VERSION 12→13`、行宽 **79→85**，尾部追加 `thBreach / thBreachAimed / thDirect / thDirectAimed /
+     thShotsAtBaseCum / thBulletsAtBase`（idx79–84）。**只落盘、不接任何公式**（列先行、价后议）。
+  2. 唯一实现 `src/ai/god/ThreatBudget.ts::threatSplit`：复用既有 `canShootBaseLine` / `canBreachRingLine`，
+     四轴**互斥**（直击优先于破墙）；`canBreachRingLine` 的几何抽成 `ringBreachTargetOf`（行为逐字不变，
+     `bun run freeze:check` 绿）。
+  3. `thBulletsAtBase` **只观测不上价**：给它挂持有值会在弹命中/消失那拍让 Φ 回升，
+     等于在"基地被打"的瞬间发正奖励，与 terminal 冲突；它的后果已由 `wBase` 与 terminal 收过。
+  4. `export-eval-game --probe` 追加 `stuckMaxTicks / stuckTicksCum / wallPressTicks / cooldownRejectTicks /
+     shotsAtBaseCum / bulletsAtBaseTicks`（默认关，不带 `--probe` 报告逐字节不变；顶层旧名 `stuckTicks` 保留兼容）。
+  5. **N9 口径更正**：`stuck-detect` 的判据是"中心格不变"，而玩家 1 px/拍、一格 16 px ⇒ 正常直线前进
+     每 16 拍才换格。local 三局实测 `stuckTicksCum/ticks = 93.9/96.6/96.7%` ⇒ `stuckTicks`（含报告侧 `stuckMax`）
+     只反映"速度/停顿"，**不是撞墙**。判据与价格一律改用 `wallPressTicks`；第三次加 `wStuck` 的提议作废。
+- **代价 / 顺序**：bump 即语料纪元 —— `iter_shard_dirs` 按 `_shard_metrics_version` 过滤，旧 v12 shard 全作废
+  ⇒ **必须走在任何开课之前**。obs 不动（`OBS_SCHEMA_MAJOR` 仍 6）、权重不废、BC 不用重导。
+- **验收（local，无节点）**：一局 rollout 产出 `metrics.npy (251,85)` + `metrics_version: 13`；
+  Python `RewardFn` 可直接引用新列求值（`r ∈ [−15.5, 16]`）。`bun run check` 2641 pass / `freeze:check` OK /
+  `nn-training/tests/{biz,common,hub}` 全绿。

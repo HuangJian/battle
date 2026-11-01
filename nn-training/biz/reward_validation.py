@@ -132,6 +132,22 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "freezeShieldWindowTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
     "hitsInFreezeShieldWindow": (0.0, 3000.0),  # 上界同 playerShots（命中数 ≤ 开火数）
     "deathDerivedShieldTicks": (0.0, 36000.0),
+    # metrics v13（idx79–84，plan/r5-next §11.3）：基地威胁四轴 + 弹道。
+    # 四轴是**互斥计数**，上界 = 同屏活敌上限（`MAX_ENEMIES_ALIVE = 4`）；
+    # thShotsAtBaseCum 单调增，按 playerShots 的量级取上界；
+    # thBulletsAtBase 同屏在飞，取 4 车 × 1 发 + 余量。
+    "thBreach": (0.0, 4.0),
+    "thBreachAimed": (0.0, 4.0),
+    "thDirect": (0.0, 4.0),
+    "thDirectAimed": (0.0, 4.0),
+    "thShotsAtBaseCum": (0.0, 3000.0),
+    "thBulletsAtBase": (0.0, 16.0),
+    # v13 追加（idx85–88）：四档累计成本流。上界 = 2 × max_ticks / K = 4000
+    # （min(2,·) 已把每步增量封到 2；乘敌数或按 36000 算都会松 4–40× ⇒ 角点求值等于没检查）。
+    "thCostBreach": (0.0, 4000.0),
+    "thCostBreachAimed": (0.0, 4000.0),
+    "thCostDirect": (0.0, 4000.0),
+    "thCostDirectAimed": (0.0, 4000.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

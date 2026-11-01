@@ -98,7 +98,9 @@ import {
   nearestPickupDist,
   threatLaneExempt,
   windowKind,
+  isWallPressTick,
 } from '../../src/nn/danger-metrics'
+import { bulletHitsBaseOrRing, threatSplit } from '../../src/ai/god/ThreatBudget'
 import { createShieldWindow } from '../../src/nn/shield-window'
 import {
   HIT_BACK,
@@ -217,7 +219,7 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
 // idx41–44=危险暴露四列（metrics v8，plan/x20-dodge-avoidance.plan.md §2）：
 //   playerHpRatio（hp/maxHp，clamp01，与 obs s19 同源）· dangerTicks（累计 hpRatio<0.4 的
 //   tick）· threatTicks（累计「在敌方弹道/炮口线上」的 tick，口径**冻结**在
-//   `src/nn/danger-metrics.ts`）· dmgFirst600（tick<600 的累计承伤；`player_damage`
+//   `src/nn/danger-metrics.ts`；**v13 起冻/盾期豁免**，见字段注释）· dmgFirst600（tick<600 的累计承伤；`player_damage`
 //   事件本就不含致死一击，见 `SimulationCombat.ts:604-609`）。与 v7 同规：**不进任何
 //   现存公式**（只加观测、不改公式），但 bump METRICS_VERSION ⇒ 旧 v7 语料不兼容
 //   （加载期按行宽/版本响亮报错，不静默错读）。
@@ -277,7 +279,7 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 79
+export const METRICS_DIM = 89
 /**
  * metrics **v12**：v11 的热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被
  * §4bis 杀线拦下）+ v12 的 freeze ∪ 道具盾窗口 3 列（idx76–78，
@@ -291,7 +293,7 @@ export const METRICS_DIM = 79
  * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
  * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 12
+export const METRICS_VERSION = 13
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -385,6 +387,18 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'freezeShieldWindowTicks',
   'hitsInFreezeShieldWindow',
   'deathDerivedShieldTicks',
+  // ---- metrics v13（2026-11-01，plan/r5-next §11.3 + §5-P0-4；纯追加）----
+  // 基地威胁四轴（互斥等级，`ThreatBudget::threatSplit` 唯一实现）+ 弹道两列。
+  'thBreach',
+  'thBreachAimed',
+  'thDirect',
+  'thDirectAimed',
+  'thShotsAtBaseCum',
+  'thBulletsAtBase',
+  'thCostBreach',
+  'thCostBreachAimed',
+  'thCostDirect',
+  'thCostDirectAimed',
 ]
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -577,8 +591,14 @@ export interface Telemetry {
   /** 累计 `hpRatio < DANGER_HP_THRESHOLD` 的 tick（仅玩家存活时计）。 */
   dangerTicks: number
   /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
-   *  ⚠ v9 起**谓词已改定义**（19px 带 + 无半径上限 + 判墙体遮挡）⇒ 与 v8 读数
-   *  不可比（plan §1.2 祖父条款）。 */
+   *  ⚠ v9 起**谓词已改定义**（19px 带 + 无半径上限 + 判墙体遮挡）⇒ 与 v8 读数不可比。
+   *  ⚠ **v13 起冻/盾期豁免**（`exposureExempt`）：冻结/道具盾起效期间**不累计**。
+   *  为什么必须豁免：这条价被 guard/stuck/tempo/all/base/lam **六条腿全部定价**，
+   *  而冻结期敌人打不出弹、盾期挨打不掉血 ⇒ 继续收税等于罚"窗内上前"，
+   *  与 `hitsInFreezeShieldWindow`（专门奖励窗内命中）方向相反，实测表现就是"冻期也龟缩"。
+   *  与同族一致：`enclWeightTicks`/`cornerWeightTicks`/`hurtWeight`/`postHitLaneTicks` 早就是拌入 A。
+   *  `onLaneTicks` **不跟着改**：它是 raw 永真 + `onLaneExemptTicks` 加法列的设计（公式自己减），
+   *  两套口径各有用途，别混。 */
   threatTicks: number
   /** tick < `DMG_FIRST_WINDOW_TICKS` 的累计承伤（致死一击本就不在 player_damage 里）。 */
   dmgFirst600: number
@@ -653,6 +673,22 @@ export interface Telemetry {
   hitsInFreezeShieldWindow: number
   /** 死亡派生盾（复活盾 + star-shield grace）的 tick 累计；只判读，不进奖励。 */
   deathDerivedShieldTicks: number
+  // ---- metrics v13（2026-11-01；plan/r5-next §5-P0-4 / §11.3）----
+  /** **真·累计**卡墙拍（idx9 `stuckTicks` 是"当前连续段"，不是累计；报告侧另有 `stuckMax`）。 */
+  stuckTicksCum: number
+  /** 非 hold、想走、本 tick 零位移、且已提交朝向的前脸被地形挡的拍数。 */
+  wallPressTicks: number
+  /** 请求方向 ≠ 已提交朝向（转向被冷却按回）的拍数。 */
+  cooldownRejectTicks: number
+  /** 累计「敌弹朝鹰/环墙发射」次数（按弹 id 去重，见 `seenBaseBulletIds`）。 */
+  thShotsAtBaseCum: number
+  /** v13：四档**累计成本流**（每决策步增量 = `min(2, 当前计数)`，单调）。
+   *  为什么必须是累计：`r[i] = Φ[i+1]−Φ[i]` ⇒ 瞬时计数写进 Φ 只在进入/离开跳一次，
+   *  持续暴露的每步 r 恒为 0（实测 120 拍 sum(r)=0.000）。 */
+  thCostBreach: number
+  thCostBreachAimed: number
+  thCostDirect: number
+  thCostDirectAimed: number
 }
 
 function countBaseWall(world: World): number {
@@ -736,6 +772,14 @@ export function applySuffixPatches(rows: number[][], patches: ReadonlyArray<Suff
  */
 export function buildMetricsRow(t: number, world: World, tel: Telemetry): number[] {
   tel.baseWallIntact = countBaseWall(world) // 与旧 countersPhi 同侧效应
+  // v13：基地威胁四轴 + 在飞弹（每行算一次；≤4 车 + 少量弹，零热路径压力）。
+  const split = threatSplit(world)
+  // v13：四档**累计成本流**。增量按**决策步**（本函数每次调用 = 一个决策快照）——
+  // 生产列只能落在这里，逐拍累加会差 K 倍（plan §3.3 的 10× 教训）。
+  tel.thCostBreach += Math.min(2, split.breach)
+  tel.thCostBreachAimed += Math.min(2, split.breachAimed)
+  tel.thCostDirect += Math.min(2, split.direct)
+  tel.thCostDirectAimed += Math.min(2, split.directAimed)
   // 伤害成簇（v10）：两类读数都由事件序列一次算出（单调增，零分配；见 danger-metrics）。
   const rowDamage = damageClusterStats(tel.damageTicks, tel.damageAmounts)
   return [
@@ -782,7 +826,7 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     nearestPickupDist(world), // 40 pickupDist（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
     playerHpRatio(world), // 41 playerHpRatio（v8：hp/maxHp，clamp01；玩家不在场 = 0）
     tel.dangerTicks, // 42 dangerTicks（v8：累计 hpRatio<0.4 的 tick）
-    tel.threatTicks, // 43 threatTicks（v9 改定义：19px 带 + 无半径 + 判遮挡）
+    tel.threatTicks, // 43 threatTicks（v9 改定义：19px 带 + 无半径 + 判遮挡；v13 起冻/盾期豁免）
     tel.dmgFirst600, // 44 dmgFirst600（v8：tick<600 的累计承伤，不含致死一击）
     tel.backHits, // 45 backHits（v9：背刺命中）
     tel.sideHits, // 46 sideHits（v9：侧击命中，含同格 + scrum）
@@ -818,6 +862,18 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.freezeShieldWindowTicks, // 76 B5：freeze ∪ 道具盾拍（剔死亡派生盾）
     tel.hitsInFreezeShieldWindow, // 77 B5：窗内命中敌车（分母 = idx76）
     tel.deathDerivedShieldTicks, // 78 B5：复活盾 + 星盾 grace 拍（诊断）
+    // ---- metrics v13（2026-11-01，plan/r5-next §11.3）：基地威胁四轴 + 弹道 ----
+    split.breach, // 79 thBreach：只有破墙射界、炮口未对准
+    split.breachAimed, // 80 thBreachAimed：破墙射界 + 已对准
+    split.direct, // 81 thDirect：直击射界、炮口未对准
+    split.directAimed, // 82 thDirectAimed：直击射界 + 已对准
+    tel.thShotsAtBaseCum, // 83 thShotsAtBaseCum：累计朝鹰/环墙发射（单调）
+    split.bulletsAtBase, // 84 thBulletsAtBase：当前在飞（只观测，不上价）
+    // ---- v13 追加（idx85–88）：四档累计成本流（E-BT 的定价输入）----
+    tel.thCostBreach, // 85
+    tel.thCostBreachAimed, // 86
+    tel.thCostDirect, // 87
+    tel.thCostDirectAimed, // 88
   ]
 }
 
@@ -1306,6 +1362,15 @@ function runOne(
     freezeShieldWindowTicks: 0,
     hitsInFreezeShieldWindow: 0,
     deathDerivedShieldTicks: 0,
+    // metrics v13（idx79–84）。
+    stuckTicksCum: 0,
+    wallPressTicks: 0,
+    cooldownRejectTicks: 0,
+    thShotsAtBaseCum: 0,
+    thCostBreach: 0,
+    thCostBreachAimed: 0,
+    thCostDirect: 0,
+    thCostDirectAimed: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -1499,6 +1564,9 @@ function runOne(
       // v6：move 头**没有 STOP 类**，不前进由 hold 位表达 ⇒ 看 hold。
       stopHeld = v6 ? hd !== null && hd.idx === 1 : aMove === 0
     }
+    // metrics v13：本 tick 前的玩家位置 —— `wallPressTicks` 唯一判据（px，不是格）。
+    const pxBefore = world.player?.x ?? -1
+    const pyBefore = world.player?.y ?? -1
     sim.tick()
     scripted.endFrame()
     t++
@@ -1575,6 +1643,9 @@ function runOne(
         } else if (eb.allegiance === 'enemy') {
           // 本批：承伤族登记（玩家侧盟军弹不入表；权重逐 tick 累计见主循环）。
           registerEnemyAimShot(shotRegistry, eb.id, shard.metrics.length, eb)
+          // metrics v13（§11.3 弹道轴）：**发射那一拍**判一次"这发是不是冲鹰/环墙去的"。
+          // 用事件而不是逐拍扫弹：事件里的弹坐标就是生成位置，且在冷却/弹量门之后（真弹）。
+          if (bulletHitsBaseOrRing(world, eb)) tel.thShotsAtBaseCum++
         }
       } else if (e.type === 'terrain_destroyed') {
         // 本批：brick 桶（只计真破坏；一弹 2×2 多格可推多条事件 ⇒ settle-once 去重）。
@@ -1684,10 +1755,31 @@ function runOne(
     const movedThisTick = cur !== null && (cur.col !== prevCell.col || cur.row !== prevCell.row)
     if (isStuckTick(world.player?.alive ?? false, cur, prevCell, hitThisTick)) {
       tel.stuckTicks++
+      // v13：idx9 是"当前连续段"（非累计）；本列才是**真累计**，与报告侧 `stuckMax` 互补。
+      tel.stuckTicksCum++
     } else {
       tel.stuckTicks = 0
     }
     prevCell = cur ?? { col: -1, row: -1 }
+
+    // ---- metrics v13（2026-11-01，plan/r5-next §5-P0-4）----
+    // 两条都是"玩家的输入 vs 引擎的实际结果"的差，且都只在玩家活着时计。
+    const pp = world.player
+    if (pp && pp.alive && pp.spawnTimer <= 0) {
+      // ① 撞墙：**单一判据**在 danger-metrics（与 eval 侧逐字同源）。
+      //    六个条件见 `isWallPressTick` 的注释（含"排掉被转向冷却按回的拍"）。
+      if (
+        isWallPressTick(world, pp, {
+          movedPx: pp.x !== pxBefore || pp.y !== pyBefore,
+          hold: stopHeld,
+        })
+      ) {
+        tel.wallPressTicks++
+      }
+      // ② 转向被冷却按回：`lastActionDir` 是**请求**，`dir` 是**提交后的朝向**；
+      //    冷却拒绝时 `applyTurnCooldown` 会把 dir 回退 ⇒ 两者不等。
+      if (pp.lastActionDir != null && pp.lastActionDir !== pp.dir) tel.cooldownRejectTicks++
+    }
 
     // 危险暴露累加（metrics v8）：与 stuckTicks 同刻（`sim.tick()` 之后，代表本 tick 的
     // 终态）。两条都是零分配纯判定（AGENTS §14.1–14.2）；玩家阵亡期间不计
@@ -1721,7 +1813,8 @@ function runOne(
       tel.postHitLaneTicks += hotLaneTick(hotLane, world, exempt)
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
       if (inThreatLane(world)) {
-        tel.threatTicks++
+        // v13：冻/盾期**不累计**（见字段注释）。`onLane*` 族保持 raw 永真，不受影响。
+        if (!exempt) tel.threatTicks++
         // ---- metrics v9：穿越税观测族（plan §1.3）----
         // raw 永真：冻/盾拍**照记** onLaneTicks，豁免以**加法列**另记（不是从 raw 里扣）。
         // 两个累计量的差分各自干净 —— 逐行 flag 相乘会在翻转拍打出幻影 ± 尖峰，
@@ -2187,7 +2280,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v12 = [N+1,79]）；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v13 = [N+1,85]）；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,

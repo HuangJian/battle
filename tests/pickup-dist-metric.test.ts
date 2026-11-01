@@ -115,6 +115,14 @@ function mkTel(): Telemetry {
     freezeShieldWindowTicks: 0,
     hitsInFreezeShieldWindow: 0,
     deathDerivedShieldTicks: 0,
+    stuckTicksCum: 0,
+    wallPressTicks: 0,
+    cooldownRejectTicks: 0,
+    thShotsAtBaseCum: 0,
+    thCostBreach: 0,
+    thCostBreachAimed: 0,
+    thCostDirect: 0,
+    thCostDirectAimed: 0,
   }
 }
 
