@@ -29,6 +29,7 @@ from worker.eval_local import (
     merge_eval_rows,
     read_eval_summary_rows,
 )
+from worker.eval_rows import incomplete_summaries
 
 
 def _game(it: int, seed: int, *, wver: str = "a" * 16, win: bool = True) -> dict:
@@ -66,6 +67,47 @@ def _write(path: Path, rows: list[dict]) -> None:
 
 def _read(path: Path) -> list[dict]:
     return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def test_half_panel_is_stamped_incomplete(tmp_path: Path) -> None:
+    """plan/eval-bias A（2026-11-01）：summary 说 800、账本只有 400 行 ⇒ 盖章 + 计入缺口。
+
+    这正是云端那条腿的形状：云机自己写满 800 行 / summary games=800，转移链只带回 400 行。
+    旧实现把 summary 原样并进来，池化 clear 看起来正常、分关读数全错 10pp，且没有任何标记。
+    """
+    src = tmp_path / "src.jsonl"
+    dst = tmp_path / "eval_log.jsonl"
+    _write(src, [_game(5, s) for s in range(400)] + [_summary(5, games=800, wins=274)])
+
+    assert merge_eval_rows(src, dst) == (400, 1)
+    s = read_eval_summary_rows(dst)[-1]
+    assert (s["games"], s["rows_have"], s["rows_incomplete"]) == (800, 400, True)
+    # 工具侧的拒答判据是重算的（不信旧标记）
+    assert incomplete_summaries([s], [r for r in _read(dst) if r["event"] == "eval"]) == [
+        {"iter": 5, "wver": "a" * 16, "games": 800, "rows": 400}
+    ]
+
+
+def test_complete_panel_is_not_flagged(tmp_path: Path) -> None:
+    """行数 = games ⇒ 不盖章（不把正常面板误伤成「不可用」）。"""
+    src = tmp_path / "src.jsonl"
+    dst = tmp_path / "eval_log.jsonl"
+    _write(src, [_game(6, s) for s in range(4)] + [_summary(6, games=4, wins=1)])
+
+    assert merge_eval_rows(src, dst) == (4, 1)
+    s = read_eval_summary_rows(dst)[-1]
+    assert (s["rows_have"], s["rows_incomplete"]) == (4, False)
+    assert incomplete_summaries([s], [r for r in _read(dst) if r["event"] == "eval"]) == []
+
+
+def test_incomplete_check_recomputes_and_ignores_stale_flags() -> None:
+    """判据看**当前行数**：补行之前的旧标记/缺失标记都不影响结论（也不制造幻影缺口）。"""
+    rows = [_game(7, s) for s in range(2)] + [_game(8, s) for s in range(2)]
+    gap = _summary(7, games=4, wins=1)
+    gap["rows_incomplete"] = False  # 陈旧标记：行后来又丢了
+    ok = _summary(8, games=2, wins=0)
+    ok["rows_incomplete"] = True  # 陈旧标记：行已经补齐
+    assert [g["iter"] for g in incomplete_summaries([gap, ok], rows)] == [7]
 
 
 def test_summary_key_rejects_shapes_it_cannot_identify() -> None:

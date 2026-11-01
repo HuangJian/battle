@@ -465,6 +465,62 @@ def _summary_games(r: dict) -> float:
     return float(g) if isinstance(g, (int, float)) and not isinstance(g, bool) else 0.0
 
 
+def rows_by_summary_key(rows: list[dict]) -> dict[tuple[int, str], int]:
+    """逐局行按 `(iter, wver)` 计数 —— 与 summary 行**同一身份**（`eval_summary_key`）。
+
+    "账本里这一轮到底有几行"只能从这里数：summary 的 `games` 是**结算方**的口径，
+    两者在转移链上会分开（2026-11-01：云机自己写满 800 行，课程账本只到 400 行）。
+    """
+    out: dict[tuple[int, str], int] = {}
+    for r in rows:
+        if not isinstance(r, dict) or r.get("event") != "eval":
+            continue
+        it = r.get("iter")
+        wver = str(r.get("wver") or "")
+        if not isinstance(it, int) or not wver:
+            continue
+        out[(int(it), wver)] = out.get((int(it), wver), 0) + 1
+    return out
+
+
+def stamp_rows_completeness(summary: dict, n_rows: int) -> dict:
+    """给 summary 行盖「逐局行是否齐」的章（plan/eval-bias §3.1 Step 3，2026-11-01）。
+
+    `games` 是结算方的口径，`n_rows` 是**当前账本里真数得到**的行数。前者更大 ⇒ 这一点的
+    分关/结局读数不可用（池化 clear 仍可信）。只加字段、不改既有键：旧读方忽略未知键。
+
+    **为什么不放在 `settle_eval_summary`**：那里 `games` 就是同一本账数的行数，恒等；
+    缺口只可能在「云机账本 → 课程账本」的转移/合并之后出现（本函数在本侧被
+    `append_eval_summaries` 调用，正是那一侧的唯一入口）。
+    """
+    games = summary.get("games")
+    want = int(games) if isinstance(games, (int, float)) and not isinstance(games, bool) else 0
+    have = int(n_rows)
+    summary["rows_incomplete"] = have < want
+    summary["rows_have"] = have
+    return summary
+
+
+def incomplete_summaries(summary_rows: list[dict], rows: list[dict]) -> list[dict]:
+    """声明局数 > 账本行数的 summary（分析工具据此**拒答**，不是警告）。
+
+    判据**重算**、不读 `rows_incomplete` 标记：标记只在合并那一刻成立，之后补行/重评会变；
+    读方若信旧标记，就会把已补齐的点当成坏的（或反过来）。返回按 (iter, wver) 排序，
+    元素 `{"iter", "wver", "games", "rows"}`。
+    """
+    counts = rows_by_summary_key(rows)
+    out: list[dict] = []
+    for s in summary_rows:
+        k = eval_summary_key(s)
+        if k is None:
+            continue
+        games = int(_summary_games(s))
+        have = counts.get(k, 0)
+        if have < games:
+            out.append({"iter": k[0], "wver": k[1], "games": games, "rows": have})
+    return sorted(out, key=lambda g: (g["iter"], g["wver"]))
+
+
 def append_eval_summaries(dst_jsonl: Path, rows: list[dict]) -> int:
     """把 summary 行并进 `dst_jsonl`，**单调**：只在该 `(iter, wver)` 尚无 summary、
     或新来的 `games` 更多（断点续跑「先部分、后补齐」的升级）时追加；返回追加行数。
@@ -497,14 +553,18 @@ def append_eval_summaries(dst_jsonl: Path, rows: list[dict]) -> int:
         fresh.append(r)
     if not fresh:
         return 0
+    counts = rows_by_summary_key(read_eval_rows(dst_jsonl))
     dst_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_jsonl, "a", encoding="utf-8") as f:
         for r in fresh:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            k = eval_summary_key(r)
+            # 不改调用方的字典：盖在副本上，写进去的是盖过章的那一份。
+            stamped = stamp_rows_completeness(dict(r), counts.get(k, 0) if k else 0)
+            f.write(json.dumps(stamped, ensure_ascii=False) + "\n")
     return len(fresh)
 
 
-def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path) -> tuple[int, int]:
+def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path, log=None) -> tuple[int, int]:
     """把 `src_jsonl` 的云机 A 层评估（**逐局行 + summary 行**）并进 `dst_jsonl`。
 
     返回 `(新增逐局行数, 新增 summary 行数)`。
@@ -515,9 +575,19 @@ def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path) -> tuple[int, int]:
 
     逐局行按 `eval_row_key` 去重（`(iter,wver,stage,seed)`；`node` 不进键：同一局在云机与
     节点各跑一次是同一份读数）；summary 按 `append_eval_summaries` 的单调规则并。
+
+    `log`（可选，duck-typed 单参函数）打三件事：**收到 / fresh / 落盘后总计**——本模块
+    stdlib-only（分层守卫钉着 import 面），所以日志口由调用方给，不在这里 import 日志层。
+    这三行就是「400 的坎」的判据：收到 800 / fresh 400 ⇒ 写在写盘；收到 400 ⇒ 丢在回传。
     """
-    games = append_eval_rows(dst_jsonl, read_eval_rows(src_jsonl))
+    src_rows = read_eval_rows(src_jsonl)
+    games = append_eval_rows(dst_jsonl, src_rows)
     summaries = append_eval_summaries(dst_jsonl, read_eval_summary_rows(src_jsonl))
+    if log is not None:
+        log(
+            f"[eval-rows] 收到 {len(src_rows)} 行 / fresh {games} 行 / "
+            f"落盘后总计 {len(read_eval_rows(dst_jsonl))} 行"
+        )
     return (games, summaries)
 
 

@@ -54,6 +54,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nn-training"))
+from worker.eval_rows import incomplete_summaries  # noqa: E402
 
 # (编号, 显示名, 取值, 口径, 行为解释)
 # 取值：("game", f) 局均值；("rate", f) /千率；占比类用 "game" + share。
@@ -194,14 +198,19 @@ METRICS = [
 ]
 
 
-def load_eval_rows(course: str, it: int | None) -> tuple[list[dict], int]:
-    """读 tmp/<课>/eval_log.jsonl，取某 it 的 eval 行；it=None 取最新有 summary 的轮。"""
+def load_eval_rows(course: str, it: int | None) -> tuple[list[dict], int, list[dict]]:
+    """读 tmp/<课>/eval_log.jsonl，取某 it 的 eval 行（+ 该轮 summary 行）；it=None 取最新轮。
+
+    第三个返回值是**本轮的 summary 行**：半面板检查（plan/eval-bias A）要拿它的 `games`
+    与真实行数对账——只数行数看不出「这一轮本该有多少局」。
+    """
     path = f"tmp/{course}/eval_log.jsonl"
     try:
         fh = open(path, encoding="utf-8")
     except FileNotFoundError:
         sys.exit(f"no such course log: {path}")
     sums = []
+    summ_rows = []
     rows = []
     with fh:
         for line in fh:
@@ -211,6 +220,7 @@ def load_eval_rows(course: str, it: int | None) -> tuple[list[dict], int]:
             o = json.loads(line)
             if o.get("event") == "eval_summary":
                 sums.append(o.get("iter"))
+                summ_rows.append(o)
             elif o.get("event") == "eval":
                 rows.append(o)
     if it is None:
@@ -220,7 +230,7 @@ def load_eval_rows(course: str, it: int | None) -> tuple[list[dict], int]:
     sel = [r for r in rows if r.get("iter") == it]
     if not sel:
         sys.exit(f"{course} it{it}: no eval rows (summaries: {sorted(sums)[-8:]})")
-    return sel, it
+    return sel, it, [s for s in summ_rows if s.get("iter") == it]
 
 
 def mean(vals: list) -> float | None:
@@ -292,7 +302,17 @@ def main() -> None:
     ap.add_argument("--stage", action="store_true", help="附分关四档计数表")
     args = ap.parse_args()
 
-    rows, it = load_eval_rows(args.course, args.iter)
+    rows, it, sums = load_eval_rows(args.course, args.iter)
+    # 半面板拒答（plan/eval-bias §3.1 Step 3，2026-11-01）：判据在 worker/eval_rows 里
+    # 重算（summary.games vs 真实行数），这里只负责「拒绝出表」。
+    gaps = incomplete_summaries(sums, rows)
+    if gaps:
+        g = gaps[0]
+        print(
+            f"✗ {args.course} it{it}: 逐局行 {g['rows']}/{g['games']}"
+            f"（wver={str(g['wver'])[:12]}…）—— 半面板，分关/结局读数不可用（plan/eval-bias A）"
+        )
+        sys.exit(2)
     rows, ndup = dedup(rows)
     groups: dict = {"clear": [], "base": [], "lives": [], "timeout": []}
     for r in rows:

@@ -744,7 +744,11 @@ def _merge_carried_eval_rows(src_root: Path, dest_root: Path) -> tuple[int, int]
     try:
         from worker.eval_rows import merge_eval_rows
 
-        n_games, n_sums = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
+        n_games, n_sums = merge_eval_rows(
+            src_jsonl,
+            Path(dest_root).parent / "eval_log.jsonl",
+            log=lambda m: print(f"[deliver] {m}", flush=True),
+        )
     except Exception as e:  # rl 包不在（截断快照）/磁盘错——不拖垮导入
         print(f"[deliver] 评估账本并入失败（忽略）: {type(e).__name__}: {e}", flush=True)
         return (0, 0)
