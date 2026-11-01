@@ -29,13 +29,31 @@ def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
     源码级断言（同 test_eval_loot_fields.py 的接线口径）——它抓的正是那 339s 的根因：
     本地-only 的 `for stage, seed in todo: run_local_eval_game(...)`。
     """
+    import ast
+
     src = (ROOT / "trainer" / "eval_a_once.py").read_text(encoding="utf-8")
-    assert "from trainer.eval_dispatch import dispatch_eval_round" in src
-    assert "dispatch_eval_round(" in src
+    tree = ast.parse(src)
+    # 判据是导入/调用关系（AST），不是源码里有没有那行字。
+    imported = {
+        alias.name
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module == "trainer.eval_dispatch"
+        for alias in n.names
+    }
+    assert imported >= {"dispatch_eval_round"}, "evalA 没走 in-loop 同一个派发口"
+    called = {
+        n.func.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert called >= {"dispatch_eval_round"}
     # 不再直接调本地 runner（自己跑局 = 又把节点池甩掉了）
-    assert "run_local_eval_game" not in src
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert (called | names).isdisjoint({"run_local_eval_game"}), "evalA 又自己串行跑局（把节点池甩掉了）"
     # 本机份额来自 policy（与 in-loop 同一旋钮），不是脚本自造的并发数
-    assert "evalLocalSlots" in src
+    assert any(
+        isinstance(n, ast.Constant) and n.value == "evalLocalSlots" for n in ast.walk(tree)
+    ), "evalA 自造了并发数（份额要读 policy 的 evalLocalSlots）"
     # in-loop 的调用点也用同一模块（两边同源，不是各写一套）。
     # 2026-09-24（S4 第十七刀）：in-loop 派发链（`_dispatch_delayed_eval` / `_drain_pending_eval`）
     # 从 `trainer/loop_steps.py` 搬到 `trainer/loop_eval.py`。这里**在业务源码树（`trainer/` + `biz/`）里找**「谁从 eval_dispatch

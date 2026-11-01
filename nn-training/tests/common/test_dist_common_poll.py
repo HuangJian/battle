@@ -277,14 +277,27 @@ def test_transient_judgement_defined_once_and_wired() -> None:
 
     definers = definers_of("is_transient_error")
     # 只有 common.distribution 是真实实现；B 层允许同名但必须是纯转发，且**恰好一份**。
-    assert "distribution.py" in definers, definers
+    assert set(definers) >= {"distribution.py"}, definers
     forwarders = [d for d in definers if d != "distribution.py"]
     assert len(forwarders) == 1, definers
     # 转发件的家由**实存**决定（可能在 `trainer/` 或 `biz/`）——不写死某一棵树。
     fwd_src = source_scan.read_text(str(source_scan.logic_module(str(root), forwarders[0])))
-    assert "return common.distribution.is_transient_error(e)" in fwd_src
-    assert "TRANSIENT_HTTP_STATUS" not in fwd_src  # 判据逻辑不得复制回 B 层
-    assert "_BUSY_HINT" not in fwd_src
+    fwd_tree = ast.parse(fwd_src)
+    # 转发 = 一条 `return common.distribution.is_transient_error(e)`；判据是 AST 里的
+    # return-call 形状，不是文件里有没有这行字（换行/别名都跑不掉，注释提到也不误红）。
+    returned = {
+        ast.unparse(n.value)
+        for n in ast.walk(fwd_tree)
+        if isinstance(n, ast.Return) and n.value is not None
+    }
+    assert returned >= {"common.distribution.is_transient_error(e)"}, (
+        f"B 层转发形状变了：{sorted(returned)}"
+    )
+    fwd_refs = {n.id for n in ast.walk(fwd_tree) if isinstance(n, ast.Name)}
+    fwd_refs |= {n.attr for n in ast.walk(fwd_tree) if isinstance(n, ast.Attribute)}
+    assert {"TRANSIENT_HTTP_STATUS", "_BUSY_HINT"}.isdisjoint(fwd_refs), (
+        "判据逻辑被复制回 B 层（它只许住在 common.distribution）"
+    )
 
     # B 层调用点不变：`import trainer.batch_eval` 拿到的那一名字必须就是上面那份转发。
     import trainer.batch_eval as be
@@ -295,14 +308,25 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     a_layer = source_scan.read_text(str(root / "trainer" / "dispatch.py"))
     c_layer = source_scan.read_text(str(root / "trainer" / "eval_dispatch.py"))
     for src in (a_layer, c_layer):
-        assert "common.distribution.is_transient_error(" in src
-        assert "common.distribution.refresh_weights(" in src
-        assert "409" in src  # 409 是可刷新条件，必须显式分支
-        # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
-        assert "common.distribution.is_task_lost_error(" in src
-        assert "common.distribution.forget_weights_node(" in src
+        tree = ast.parse(src)
+        called = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        # 接线判据 = 真的调到了那几个单源函数（AST 调用名，不是源码文本）
+        for name in (
+            "common.distribution.is_transient_error",
+            "common.distribution.refresh_weights",
+            # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
+            "common.distribution.is_task_lost_error",
+            "common.distribution.forget_weights_node",
+        ):
+            assert name in called, f"{name} 没接线"
+        # 409 是可刷新条件，必须显式分支（AST 常数，不是文本里有没有这三个字符）
+        assert any(
+            isinstance(n, ast.Constant) and n.value == 409 for n in ast.walk(tree)
+        ), "409 分支不见了（那是唯一的可刷新条件）"
         # 带引号的标记字面量只许待在 common.distribution（注释里提到它无所谓）
-        assert '"task lost on node"' not in src
+        assert not any(
+            isinstance(n, ast.Constant) and n.value == "task lost on node" for n in ast.walk(tree)
+        ), "标记字面量被复制进 A/C 层"
     # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
     assert definers_of("is_task_lost_error") == ["distribution.py"]
 

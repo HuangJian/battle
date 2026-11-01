@@ -25,6 +25,54 @@
 
 ---
 
+## §95 文本断言回归本质：把「源码长什么样」的判据全部改成 AST / 对象判据（2026-11-01，用户指令「尽可能去除无意义的文本断言」）
+
+**问题**：护栏（`tests/test_source_text_assert_budget.py`）只保证「只降不升」，从未回答
+「为什么测试里要写文本断言」。实测 1528 条里混着三种东西，只有一种该留下：
+
+| 类 | 被测物 | 是否只能看文本 | 处置 |
+|---|---|---|---|
+| **A** | 操作员读的那一行日志 / CLI 帮助 / `SystemExit` 正文 / notebook cell（pytest 不执行） | 是（交付物**就是**那串字） | 保留 |
+| **B** | 架构接线：谁定义了哪个方法、谁调了谁、谁 import 了谁 | **否** | 本轮全改 |
+| **C** | 字典/集合成员被写成 `"x" in mapping` | 否（计数器误报） | 改集合比较 |
+
+判准写进 `tests/helpers/text_asserts.py` 模块头（口径文件的唯一入口），先读它再抬基线。
+
+**B 类为什么必须改**（不是风格问题，是判据强度问题）：
+`assert "def m(" not in src` 只能证明「某种写法不存在」—— `def m(` 换行、加装饰器、缩进不同都照样是搬漏；
+反过来 `assert "trainer." not in src` 会因注释里提一句就误红。契约是**图关系**，文本只是它的一个投影。
+
+**改法**（全在测试层，生产代码零改动）：
+- **定义表**：`ast.walk(...)` 收 `FunctionDef/AsyncFunctionDef/ClassDef` 名字 → 与期望集合比较
+  （`test_hub_queue_split` 的 91 成员搬漏门）；
+- **调用图**：`_AuthGuard.<m>(self, …)` 的未绑定调用、`st.abandon_job(job_id, worker_id)`、
+  `common.distribution.*` 的单源调用（`test_dist_common_poll` 8 条）；
+- **导入图**：`from trainer.queue_local import …` 的模块尾名、`Import/ImportFrom` 面与
+  `{trainer, worker, biz}` 求交（替代 `"trainer." not in src`）；
+- **形参/关键字**：`ast.arg`（含 posonly/kwonly）+ `Call.keywords` 的 `k.arg`（替代
+  `'hub_course: str = ""'` 计数与 `course=` 子串）；
+- **常量**：`ast.Constant` 值相等（`409` 分支、`"task lost on node"` 反探针）。
+
+**读数**（`python -m tests.helpers.text_asserts --scope form|source`）：
+
+| 口径 | 改前 | 改后 |
+|---|---|---|
+| 形态 A | 1528 | **1473**（−55） |
+| 生产源码面 B | 1105 | **1094**（−11） |
+
+**留下的仍以 A 类为主**：`test_remote_iter.py` 的 123 条口径 B 命中大多是「写桩 `.py` 再断它的日志行」，
+输出文本就是交付物；要把它与「读生产源码」分开，得先给计数口径加「读的是不是生产源码树」一维
+（已记在 `.workbuddy/memory/2026-11-01.md`，**未做**）。
+
+**坑（本轮真踩到的）**：
+1. AST 的 `Name` 集合抓不到 `from common.distribution import check_code_hash`（`alias.name` 要单收）与
+   `from trainer.queue_local import …` 的模块尾名 —— 只收 `Name|Attribute` 会假红。
+2. 形参可能是 positional-only / keyword-only：只数 `n.args.args` 得 0（`hub_course` 就是这样）。
+3. 写 `"x" in {comprehension}` 仍会命中口径 A（C 类噪音）—— 用 `set >= {"x"}` / `isdisjoint({...})`。
+
+**验证**：`bash tools/githook/nn-python-gate.sh` → 5427 passed / 2 skipped / 50s，ruff + mypy 全绿；
+预算测试在 1473/1094 下绿，基线已同步下调。
+
 ## §94 五条 >5s 警告的根因是观测腿在单测里**真出网**：一次 `worker_loop` 白付 2.8s 连接超时（2026-11-01，用户指令「pytest 提速！处理这些 warning」）
 
 **症状**：用户贴的 7 条 >5s 警告。按「它在等谁」分三堆，**只有一堆是空等**：

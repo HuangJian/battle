@@ -443,6 +443,21 @@ def test_no_bare_shutil_rmtree_call():
 
     只查调用（注释/文档里的名字是说明，不是违规）。
     """
+    import ast
+
     src = (NN_ROOT / "biz" / "course_archive.py").read_text(encoding="utf-8")
-    assert not re.search(r"\bshutil\.rmtree\s*\(", src)
-    assert "rmtree_best_effort" in src
+    tree = ast.parse(src)
+    bare = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "rmtree"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "shutil"
+    ]
+    assert bare == [], "模块里出现裸 shutil.rmtree( 调用（沙箱会打死线程）"
+    # 包装函数必须真的在用（定义或被调用都算）——判据是名字，不是文本。
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    names |= {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert names >= {"rmtree_best_effort"}, "删除纪律的包装函数没被使用（有人换回裸 rmtree？）"

@@ -311,6 +311,17 @@ PPO/eval 的规模断言读 `total` 字段而不是文本，所以这一格是 *
 三态探测（可用 / rc≠0 / 不可解析）、`set(cfg) - set(base)` 的键集全部是数据断言 ——
 所以这一格是 **+3** 而不是 +9。
 
+**2026-11-01 降账：形态 1528 → 1473（−55）· 生产源码面 1105 → 1094（−11）**
+（`tests/helpers/text_asserts.py` 模块头新增「A/B/C 三类」判准）。这次不是删用例，是换判据：
+**B 类（架构接线，即「源码长什么样」）全部改成 AST/对象判据** —— 契约是「谁定义了什么、
+谁调了谁、谁 import 了谁」，不是「文件里有没有这串字符」。典型：
+`assert "def m(" not in src`（换行/装饰器就漏）→ 定义表交集；`assert "trainer." not in src`
+（注释提到就误红）→ 导入图；`assert "x" in src` 的调用/形参/常量判据 → AST 调用名 /
+`ast.arg` / `Constant`；`"x" in mapping` → 集合比较（C 类噪音）。
+留下的仍以 **A 类**（操作员读数行 / notebook cell / `SystemExit` 正文）为主：
+那些的交付物**就是**文本，行为断言替不了。逐文件明细：
+`python -m tests.helpers.text_asserts --scope source`（消者是 116 个文件里前几个大户）。
+
 """
 
 from __future__ import annotations
@@ -356,8 +367,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   60s 窗（`test_progress_hooks` 的 `test_iter_progress_logs_at_most_once_a_minute`）与
 #:   「流式采集收官读数并进轮末那一行」（`test_remote_iter` 的
 #:   `test_volume_line_merges_into_the_rollout_line`）——「打了几行、打在哪一行」就是判据本身）。
+#: 2026-11-01 降到 **1473**（−55：B 类架构接线判据改 AST/对象判据，不删用例；理由见模块头末段）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1528
+BASELINE_FORM = 1473
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
@@ -365,7 +377,7 @@ BASELINE_FORM = 1528
 #: 2026-10-29 抬到 **1105**（+5，与上一格同一批改动：`test_remote_iter.py` 是「写桩 .py 再跑」的文件
 #:   （口径 B 的 `.py` 门对它整体成立）⇒ 那 3 条「并进同一行 / 不许单起一行 / 拼接坏了仍打轮末行」
 #:   全计进 B；另 2 条在 `test_progress_hook.py`。判据是「打了几行、打在哪一行」，只能看文本）。
-BASELINE_SRC = 1105
+BASELINE_SRC = 1094
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 

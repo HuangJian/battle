@@ -57,8 +57,13 @@ def test_old_policy_rollout_shard_is_rejected_new_is_accepted() -> None:
 
 def test_demo_identity_excludes_move_label_semantics() -> None:
     """祖父保留：BC 语料身份不引用该键 ⇒ 旧 demo shard 不会被本次变更拒收。"""
+    import ast
+
     src = (ROOT / "worker" / "bc_config.py").read_text(encoding="utf-8")
-    assert "MOVE_LABEL_SEMANTICS" not in src
+    tree = ast.parse(src)
+    refs = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    refs |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert refs.isdisjoint({"MOVE_LABEL_SEMANTICS"}), "语料身份又引用了标签语义版本（会拒收旧 demo shard）"
 
 
 def test_all_funnels_share_one_d14_predicate() -> None:

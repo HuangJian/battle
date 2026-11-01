@@ -29,6 +29,20 @@ def test_eval_tail_race_symbols_still_exist() -> None:
 
 def test_eval_dispatch_still_consumes_the_tail_race() -> None:
     """消费者还在接线（删了符号但断了调用点同样是回归）。"""
+    import ast
+
     src = (ROOT / "trainer" / "eval_dispatch.py").read_text(encoding="utf-8")
-    assert "queue_local" in src
-    assert any(sym in src for sym in ("pick_tail_race", "race_tier_ok", "pick_race_target"))
+    tree = ast.parse(src)
+    refs = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    refs |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    refs |= {alias.name for n in ast.walk(tree) if isinstance(n, ast.Import) for alias in n.names}
+    # `from trainer.queue_local import …` 的模块尾名也算「引用」（本机腿的入口就是它）
+    refs |= {
+        n.module.rsplit(".", 1)[-1]
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module
+    }
+    assert refs >= {"queue_local"}, "eval_dispatch 不再引用 queue_local（本机腿断了）"
+    assert not refs.isdisjoint({"pick_tail_race", "race_tier_ok", "pick_race_target"}), (
+        "长尾竞速的消费者没接线（符号还在，但 eval_dispatch 不再用它们）"
+    )

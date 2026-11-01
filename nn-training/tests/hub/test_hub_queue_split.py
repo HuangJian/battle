@@ -86,6 +86,7 @@ from __future__ import annotations
 import ast
 import inspect
 import sys
+import textwrap
 import threading
 from pathlib import Path
 
@@ -580,9 +581,16 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     assert not any(
         isinstance(n, ast.ClassDef) and n.name == "_HubQueue" for n in _tree(HUB_SERVER).body
     ), "hub_server 又定义了一份 _HubQueue"
-    hs_src = HUB_SERVER.read_text(encoding="utf-8")
-    for m in DOMAIN_METHODS:
-        assert f"def {m}(" not in hs_src, f"hub_server 里还有 _HubQueue::{m} 的实现（搬漏）"
+    # 结构判据（2026-11-01）：数「host 里还有没有同名实现」，不是数源码文本。
+    # 子串只能证明「某种写法不存在」（`def m(` 跨行、带装饰器、缩进不同都照样是搬漏），
+    # 而 AST 直接看定义表——同一条契约，换成抓得住真回归的写法。
+    host_defs = {
+        n.name
+        for n in ast.walk(ast.parse(HUB_SERVER.read_text(encoding="utf-8")))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    leaked = sorted(set(DOMAIN_METHODS) & host_defs)
+    assert leaked == [], f"hub_server 里还有 _HubQueue::{leaked} 的实现（搬漏）"
 
 
 def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
@@ -636,10 +644,13 @@ def test_queue_auth_inherits_the_guard_so_its_unbound_calls_type_check() -> None
     """
     assert auth_mix.QueueAuthMixin.__bases__ == (hs._AuthGuard, peer_mod.QueuePeer)
     for m in ("auth_failure", "auth_success", "is_blocked", "blocked_remaining"):
-        src = inspect.getsource(getattr(auth_mix.QueueAuthMixin, m))
-        assert f"_AuthGuard.{m}(self" in src, f"{m} 不再点名 `_AuthGuard` 的那一份实现"
+        assert _calls_guard_with_self(getattr(auth_mix.QueueAuthMixin, m), m), (
+            f"{m} 不再点名 `_AuthGuard` 的那一份实现（未绑定调用才是契约）"
+        )
     # `_HubQueue.__init__` 仍显式调 `_AuthGuard.__init__`（`_lock` 与 `_now` 的唯一来源）。
-    assert "_AuthGuard.__init__(self, now_fn)" in QUEUE_MOD.read_text(encoding="utf-8")
+    assert _calls_guard_with_self(_HubQueue.__init__, "__init__"), (
+        "_HubQueue.__init__ 没调 `_AuthGuard.__init__(self, now_fn)`（锁/时钟的唯一来源）"
+    )
 
 
 def test_class_constants_are_reachable_through_the_mro() -> None:
@@ -679,6 +690,41 @@ def _callable_names(cls: type) -> set[str]:
     return {n for n in dir(cls) if not n.startswith("__") and callable(getattr(cls, n))}
 
 
+def _calls_guard_with_self(fn: object, name: str) -> bool:
+    """`fn` 里有没有一次 `_AuthGuard.<name>(self, ...)` 调用——AST 判据，不是源码文本。
+
+    为什么不吃文本（2026-11-01）：`f"_AuthGuard.{m}(self" in src` 只证明「某种写法存在」，
+    `self` 改名、参数换行、加注解都照样绿；反过来 `guard = _AuthGuard; guard.m(self)`
+    这种等价写法会误红。AST 直接钉住「未绑定调用」这个契约本身。
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))  # type: ignore[arg-type]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if not (isinstance(callee, ast.Attribute) and callee.attr == name):
+            continue
+        owner = callee.value
+        if not (isinstance(owner, ast.Name) and owner.id == "_AuthGuard"):
+            continue
+        if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == "self":
+            return True
+    return False
+
+
+def _defined_names(path: Path) -> set[str]:
+    """模块里定义/赋值的名字（顶层与 `if`/`try` 分支都算）——判据是 AST，不是源码文本。"""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
 def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     """★ 同名面是**闭集**：换出去一条（或新冒出来一条）立刻红。"""
     common = _callable_names(_JobStore) & _callable_names(_HubQueue)
@@ -693,8 +739,8 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：36 → 37（`store_offline_metrics`）。
     assert len(declared) == 37, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
-    assert "abandon" in FACADE_RENAMED and "abandon" not in common
-    assert "abandon_job" in _callable_names(_JobStore)
+    assert set(FACADE_RENAMED) == {"abandon"} and FACADE_RENAMED.keys() & common == set()
+    assert _callable_names(_JobStore) >= {"abandon_job"}
 
 
 def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> None:
@@ -971,7 +1017,7 @@ def test_queue_peer_is_declarations_only() -> None:
         ]
         assert len(stmts) == 1 and isinstance(stmts[0], ast.Expr), f"QueuePeer.{n.name} 不是纯声明"
         assert isinstance(stmts[0].value, ast.Constant) and stmts[0].value.value is Ellipsis, n.name
-    assert "_store_of" not in {n.name for n in funcs}, (
+    assert {"_store_of"} & {n.name for n in funcs} == set(), (
         "`_store_of` 不该进 QueuePeer：那要 import hub.store ⇒ queue_peer 升 L3 ⇒ "
         "混入 ≥L4 ⇒ hub.queue L5 ⇒ hub_server L6，与 smoke_loopback(L6) 同层"
     )
@@ -999,9 +1045,22 @@ def test_queue_peer_signatures_match_the_real_implementations() -> None:
 def test_the_renamed_forward_is_declared_where_it_lives() -> None:
     """`abandon` 是本刀唯一的**改名**转发（store 侧叫 `abandon_job`）—— 它住 `queue_claims`，
     不是门面簇：它要在转发之外做「release 租约 + 清可见性 + **零** reclaim」的语义保证。"""
-    src = (HUB_DIR / "queue_claims.py").read_text(encoding="utf-8")
-    assert "st.abandon_job(job_id, worker_id)" in src
-    assert "def abandon" not in (HUB_DIR / "queue_store_face.py").read_text(encoding="utf-8")
+    calls = [
+        n
+        for n in ast.walk(ast.parse((HUB_DIR / "queue_claims.py").read_text(encoding="utf-8")))
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "abandon_job"
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "st"
+    ]
+    assert calls, "queue_claims 没调 `st.abandon_job(...)`（改名转发的唯一落点）"
+    face_defs = {
+        n.name
+        for n in ast.walk(ast.parse((HUB_DIR / "queue_store_face.py").read_text(encoding="utf-8")))
+        if isinstance(n, ast.FunctionDef)
+    }
+    assert face_defs & {"abandon"} == set(), "`abandon` 不该住门面簇（它带 release / 零 reclaim 语义）"
 
 
 # ────────────── ⑥ 依赖方向 / 账本 ──────────────
@@ -1016,7 +1075,26 @@ def _logic_layer_import(node: ast.ImportFrom) -> str:
     的那类（表在 `test_hub_job_store_split.ALLOWED_BIZ`）。
     """
     mod = node.module or ""
-    return mod if mod.split(".")[0] in {"trainer", "worker", "biz"} else ""
+    return mod if mod.split(".")[0] in _LOWER_FACES else ""
+
+
+#: 下层业务面（导入它们要经豁免表点名登记；`trainer` 零容忍）。
+_LOWER_FACES = frozenset({"trainer", "worker", "biz"})
+
+
+def _touched_logic_layers(tree: ast.Module) -> set[str]:
+    """文件里**导入**到的下层业务面（`from x import y` 与 `import x.y` 都算；含函数体内）。
+
+    判据是导入关系，不是源码里有没有那串字：注释/字符串里提到 `trainer.` 不该红，
+    `from trainer import x` 这类等价写法一个都不能漏（2026-11-01）。
+    """
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            out.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Import):
+            out.update(alias.name.split(".")[0] for alias in node.names)
+    return out & _LOWER_FACES
 
 
 def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
@@ -1053,13 +1131,12 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
     for other in DOMAINS:
         if other == "queue_resume":
             continue
-        src = (HUB_DIR / f"{other}.py").read_text(encoding="utf-8")
-        # 三个下层业务面都不许碰：`trainer` = 编排（零容忍），`worker` = 训练栈、
+        # 判据是**导入关系**，不是源码里有没有那串字（2026-11-01）：注释/字符串里提到
+        # `trainer.` 不该红，而 `from trainer import x` 这类等价写法一个都不能漏。
+        # 三个下层业务面：`trainer` = 编排（零容忍），`worker` = 训练栈、
         # `biz` = 游戏业务（两者都要经 ALLOWED_BIZ 点名登记）。
-        assert "trainer." not in src, f"{other} 碰了编排 trainer"
-        assert "worker." not in src and "biz." not in src, (
-            f"{other} 碰了训练栈 worker / 游戏业务 biz（需点名登记）"
-        )
+        mixed = _touched_logic_layers(_tree(HUB_DIR / f"{other}.py"))
+        assert mixed == set(), f"{other} 碰了业务层（需点名登记）：{sorted(mixed)}"
 
 
 def test_the_mixins_never_import_each_other_nor_the_host() -> None:
@@ -1098,13 +1175,12 @@ def test_the_sentinel_moved_with_its_only_reader() -> None:
     """`_MISSING_ROOT` 的唯一读者是 `_job_dir` ⇒ 它随簇搬进 `queue_observe`，入口不再留一份。"""
     assert observe_mix._MISSING_ROOT.name == "hub-queue-missing"
     assert not hasattr(hs, "_MISSING_ROOT"), "hub_server 还留着一份 _MISSING_ROOT（搬漏）"
-    assert "_MISSING_ROOT = " not in HUB_SERVER.read_text(encoding="utf-8")
     # `DISCOVER_SCAN_SEC`（后台兜底线程的节拍）只被 `main` 的 argparse 缺省值用 ⇒ 随引导链住
     # `hub/boot.py`（S4 第十六刀；本刀之前住 `hub_server`），与发现簇的 `DISCOVER_SCAN_MIN_SEC`
     # （派发路径上的最小间隔闸）仍是两件事。
     assert hs.DISCOVER_SCAN_SEC == 5.0
-    assert "DISCOVER_SCAN_SEC = " in BOOT.read_text(encoding="utf-8")
-    assert "DISCOVER_SCAN_SEC = " not in HUB_SERVER.read_text(encoding="utf-8")
+    assert _defined_names(BOOT) >= {"DISCOVER_SCAN_SEC"}, "常量没住在引导链里（换名/搬家会静默丢默认值）"
+    assert _defined_names(HUB_SERVER) & {"DISCOVER_SCAN_SEC"} == set(), "hub_server 又留了一份（搬漏）"
 
 
 # ────────────── ⑦ ★ 功能性（跳出结构，真的跑） ──────────────
@@ -1130,7 +1206,7 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     added = hub.discover()
     assert added == ["c1"], added
     assert hub.courses() == ["c1"]
-    assert "c1" in hub._stores and hub.course_open("c1") is True
+    assert set(hub._stores) >= {"c1"} and hub.course_open("c1") is True
 
     # 发布一份 job（走 store 本体 —— 队列不做发布）并让它可领
     st = hub._stores["c1"]
@@ -1181,7 +1257,7 @@ def test_one_lock_governs_even_the_outermost_facade(tmp_path: Path) -> None:
     finally:
         hub._lock.release()
     assert done.wait(5.0), "释放锁之后读者仍没动静"
-    assert "w1" in hub._registry()
+    assert set(hub._registry()) >= {"w1"}
 
 
 def test_adopt_solo_carries_process_state_across_the_domains(tmp_path: Path) -> None:

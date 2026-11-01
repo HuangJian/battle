@@ -126,8 +126,14 @@ def test_queue_claim_done_cycle(tmp_path: Path, monkeypatch) -> None:
 
 def test_hooks_decoupled_from_a_eval() -> None:
     """B/C 批与 A-eval 解耦（2026-09-11）：rollout 不再领批；TrainingLoop idle 窗领取。"""
+    import ast
+
     src = (ROOT / "trainer" / "rollout_phase.py").read_text(encoding="utf-8")
-    assert "maybe_dispatch_batch" not in src
+    # 判据是「有没有引用这个符号」（AST 名字/属性），不是源码里有没有这串字 ——
+    # 注释/文档里提到 `maybe_dispatch_batch` 不该红。
+    refs = {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)}
+    refs |= {n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
+    assert refs.isdisjoint({"maybe_dispatch_batch"}), "rollout 又自己领批了（B/C 批只许由 idle 窗领取）"
     # S4 第十九/二十刀起，EvalBoard 的两个口子分住两处（认领口 `_evalboard_idle` →
     # `trainer/loop_lifecycle.py`；让位口 `_evalboard_yield` → `trainer/loop_dispatch.py`）⇒ 本断言按
     # **持有者**在整个 `trainer/` 源码树里读，不按写死的文件路径读（同 S16 的修法：写死路径的守卫
@@ -136,13 +142,23 @@ def test_hooks_decoupled_from_a_eval() -> None:
     loop_src = "".join(
         p.read_text(encoding="utf-8") for p in sorted(rl_dir.glob("loop_*.py"))
     ) + (rl_dir / "loop_core.py").read_text(encoding="utf-8")
+    loop_tree = ast.parse(loop_src)
+    defined = [n.name for n in ast.walk(loop_tree) if isinstance(n, ast.FunctionDef)]
     for name in ("_evalboard_idle", "_evalboard_yield"):
-        assert loop_src.count(f"def {name}") == 1, f"{name} 搬家后必须恰好一处定义"
-    assert "maybe_dispatch_batch" in loop_src
-    assert "window_event=self._eb_window" in loop_src
+        assert defined.count(name) == 1, f"{name} 搬家后必须恰好一处定义"
+    loop_refs = {n.id for n in ast.walk(loop_tree) if isinstance(n, ast.Name)}
+    assert loop_refs >= {"maybe_dispatch_batch"}
+    loop_kwargs = {k.arg for n in ast.walk(loop_tree) if isinstance(n, ast.Call) for k in n.keywords}
+    assert "window_event" in loop_kwargs, "让位口没把窗口事件传给认领口（EvalBoard 看不见 idle 窗）"
     ed = (ROOT / "trainer" / "eval_dispatch.py").read_text(encoding="utf-8")
     # 节点门判定在 eval_dispatch 里（2026-09-17 起 = check_code_hash，与 rollout 同源）
-    assert "check_code_hash" in ed
+    ed_tree = ast.parse(ed)
+    ed_refs = {n.id for n in ast.walk(ed_tree) if isinstance(n, ast.Name)}
+    ed_refs |= {n.attr for n in ast.walk(ed_tree) if isinstance(n, ast.Attribute)}
+    ed_refs |= {
+        alias.name for n in ast.walk(ed_tree) if isinstance(n, ast.ImportFrom) for alias in n.names
+    }
+    assert ed_refs >= {"check_code_hash"}
     import common.distribution
 
     # engine_epoch 仍是账本记录值（EvalGameRow.engine / 心跳），但不再是节点门判据

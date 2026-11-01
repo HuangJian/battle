@@ -216,11 +216,24 @@ def test_sweep_unreaped_collects_only_dead_ones() -> None:
 def test_kill_reap_sec_is_one_small_positive_number() -> None:
     """那个数字是**唯一**的一份（各条腿都 import 它），而且必须小:大数字只是把「挂住」改名。"""
     assert 0 < plat.KILL_REAP_SEC <= 30.0
-    src = (ROOT / "common/platform_utils.py").read_text(encoding="utf-8")
-    assert "KILL_REAP_SEC = " in src
+    import ast
+
+    def _assigned(text: str) -> set[str]:
+        return {
+            t.id
+            for n in ast.walk(ast.parse(text))
+            if isinstance(n, ast.Assign)
+            for t in n.targets
+            if isinstance(t, ast.Name)
+        }
+
+    def _names(text: str) -> set[str]:
+        return {n.id for n in ast.walk(ast.parse(text)) if isinstance(n, ast.Name)}
+
+    # 判据是「定义/引用这个常量」（AST），不是文件里有没有 `KILL_REAP_SEC = ` 这串字。
+    assert _assigned((ROOT / "common/platform_utils.py").read_text(encoding="utf-8")) >= {"KILL_REAP_SEC"}
     for leg in ("worker/iter_rollout.py", "worker/eval_local.py"):
-        text = (ROOT / leg).read_text(encoding="utf-8")
-        assert "KILL_REAP_SEC" in text, leg
+        assert _names((ROOT / leg).read_text(encoding="utf-8")) >= {"KILL_REAP_SEC"}, leg
 
 
 def test_no_leftover_bookkeeping_from_this_file() -> None:

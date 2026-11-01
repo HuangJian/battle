@@ -100,7 +100,18 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
     assert ep == hashlib.sha256(ch.encode()).hexdigest()[:16]
     assert len(ep) == 16
     # 不掺 git：实现里不得出现 git 调用（旧式为 sha256(git_head + gameplay)）
-    assert "git" not in inspect.getsource(common.distribution.compute_engine_epoch)
+    import ast
+    import textwrap
+
+    epoch_tree = ast.parse(textwrap.dedent(inspect.getsource(common.distribution.compute_engine_epoch)))
+    epoch_strings = [
+        n.value
+        for n in ast.walk(epoch_tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+    assert not any("git" in s for s in epoch_strings), (
+        "engine_epoch 掺了 git（旧式 sha256(git_head + gameplay)）"
+    )
     # 引擎文件已并入 SSOT 清单（改引擎 ⇒ codeHash 变 ⇒ eval 节点门变红）
     rels = [rel for rel, _c in common.distribution._collect_code_hash_files()]
     for need in (

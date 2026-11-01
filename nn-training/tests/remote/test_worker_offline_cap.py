@@ -132,7 +132,13 @@ def test_worker_loop_forwards_role(
     src = (Path(__file__).resolve().parents[2] / "remote" / "job_round.py").read_text(
         encoding="utf-8"
     )
-    assert '"role": role,' in src, "预取线程的 kwargs 没带 role"
+    import ast
+
+    assert any(
+        isinstance(n, ast.Dict)
+        and any(isinstance(k, ast.Constant) and k.value == "role" for k in n.keys)
+        for n in ast.walk(ast.parse(src))
+    ), "预取线程的 kwargs 没带 role"
 
     seen.clear()
     W.worker_loop("http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True)
@@ -233,14 +239,29 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
     # 2026-09-23 拆 `plan_run` / 2026-09-27 第十三刀拆 `plan_handoff` 之后：`run_plan_job`
     # 在驱动引擎（`plan_run`）里，`open_run_context` 在交接面（`plan_handoff`）里，
     # `run_standalone` / `main` 在入口里 ⇒ 三个文件合起来看（三处形参一处都不能少）。
-    offline_src = "".join(
-        (root / "remote" / name).read_text(encoding="utf-8")
-        for name in ("run_loop.py", "plan_run.py", "plan_handoff.py")
-    )
-    assert offline_src.count('hub_course: str = ""') == 3  # run_plan_job/open_run_context/run_standalone
-    assert "hub_course=hub_course" in offline_src
-    assert "course=hub_course" in offline_src  # make_deliverer 那一跳
-    assert "hub_course=args.hub_course" in offline_src  # CLI（全离线包那条腿）
+    import ast
+
+    # 三处形参（run_plan_job/open_run_context/run_standalone）+ 两跳透传，判据都是 AST。
+    params = 0
+    kwargs: set[str] = set()
+    for name in ("run_loop.py", "plan_run.py", "plan_handoff.py"):
+        tree = ast.parse((root / "remote" / name).read_text(encoding="utf-8"))
+        params += sum(
+            1
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef)
+            for a in (*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs)
+            if a.arg == "hub_course"
+        )
+        kwargs |= {
+            k.arg
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            for k in n.keywords
+            if k.arg is not None
+        }
+    assert params == 3  # run_plan_job/open_run_context/run_standalone
+    assert {"hub_course", "course"} <= kwargs  # 透传 + make_deliverer 那一跳
 
 
 def _publish_offline_course(root: Path, course: str, jid: str) -> None:

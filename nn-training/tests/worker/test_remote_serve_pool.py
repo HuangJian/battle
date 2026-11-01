@@ -1115,9 +1115,18 @@ def test_pool_spawns_nothing_on_empty_argv(tmp_path: Path) -> None:
 
 def test_subprocess_imports_are_used_not_shell(tmp_path: Path) -> None:
     """硬化：池只用 subprocess 直起（绝不过 shell），参数逐条传递。"""
+    import ast
     import inspect
 
-    src = inspect.getsource(serve_pool)
-    assert "shell=True" not in src
-    assert "subprocess.Popen" in src
+    tree = ast.parse(inspect.getsource(serve_pool))
+    shells = [
+        kw for node in ast.walk(tree) if isinstance(node, ast.Call) for kw in node.keywords if kw.arg == "shell"
+    ]
+    assert shells == [], "池里出现 shell= 调用（必须直起子进程、参数逐条传）"
+    popens = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen"
+    ]
+    assert popens, "池不再用 subprocess.Popen 直起（下面的 import 成了空壳）"
     assert subprocess.Popen is not None  # 反向断言：上面的 import 不是空壳

@@ -67,6 +67,7 @@ def test_batch_eval_record_uses_shared_helper():
     （它已顶到 1000 LOC 天花板）。判据放宽但**不削弱**——只要还在调聚合入口，
     不管内部是几族都与 `eval_row` 同源（等价性由 `test_eval_metric_fields_equals_union_of_v8_to_v13` 钉住）。
     """
+    import ast
     import pathlib
 
     # 从本文件反推仓根：门禁（`nn-python-gate.sh`）的 cwd 是 `nn-training/`，
@@ -77,4 +78,8 @@ def test_batch_eval_record_uses_shared_helper():
     src = (pathlib.Path(__file__).resolve().parents[3] / "nn-training/trainer/batch_runner.py").read_text(
         encoding="utf-8"
     )
-    assert "eval_metric_fields" in src
+    # 判据是「batch_runner 还引不引用聚合入口」（AST 名字），不是文件里有没有这串字：
+    # 换行/别名/参数里塞注释都不会影响结论。
+    assert {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)} >= {"eval_metric_fields"}, (
+        "batch_runner 不再引用 eval_metric_fields（行构造与 v8 聚合入口断了）"
+    )

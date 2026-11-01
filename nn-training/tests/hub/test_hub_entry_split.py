@@ -393,6 +393,19 @@ def test_the_entry_module_still_looks_like_an_entry() -> None:
     # 按老规矩逐个自别名 re-export，每个名字三行。判据的本意（“入口里没有实现”）由上面
     # `__all__` 与实现模块的存在性断言共同担保，本行只挡“实现被搬回来”。
     assert len(lines) < 160, len(lines)
-    assert not any("serve_forever" in ln for ln in lines), "入口自己起了服务（副作用）"
-    boot_lines = (ROOT / "hub/boot.py").read_text(encoding="utf-8").splitlines()
-    assert sum("serve_forever" in ln for ln in boot_lines) == 1, "起服务应当只有一处（main 的尾巴）"
+    import ast
+
+    def _serves(text: str) -> int:
+        """真正**调用** `serve_forever` 的次数（AST，不是行里有没有这串字）。"""
+        return sum(
+            1
+            for n in ast.walk(ast.parse(text))
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "serve_forever"
+        )
+
+    assert _serves(ENTRY.read_text(encoding="utf-8")) == 0, "入口自己起了服务（副作用）"
+    assert _serves((ROOT / "hub/boot.py").read_text(encoding="utf-8")) == 1, (
+        "起服务应当只有一处（main 的尾巴）"
+    )

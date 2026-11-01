@@ -53,7 +53,10 @@ def test_lock_acquired_before_port_probe_in_source() -> None:
     lock_at = src.index("acquire_instance_lock(")
     probe_at = src.index('ensure_port_free("127.0.0.1", port)')
     assert lock_at < probe_at, "锁必须在端口探测之前拿到"
-    assert "release_instance_lock" in src, "拿到的锁必须在退出时释放（atexit）"
+    import ast
+
+    names = {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)}
+    assert names >= {"release_instance_lock"}, "拿到的锁必须在退出时释放（atexit）"
 
 
 # ────────────────────────── 集成：真进程双启 ──────────────────────────
