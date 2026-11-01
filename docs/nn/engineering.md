@@ -25,6 +25,116 @@
 
 ---
 
+## §94 五条 >5s 警告的根因是观测腿在单测里**真出网**：一次 `worker_loop` 白付 2.8s 连接超时（2026-11-01，用户指令「pytest 提速！处理这些 warning」）
+
+**症状**：用户贴的 7 条 >5s 警告。按「它在等谁」分三堆，**只有一堆是空等**：
+
+| 警告 | 改前 | 它在等谁 | 处置 |
+|---|---|---|---|
+| `test_async_result_upload` ×2 · `hub/test_priority_schedule::test_backup_round…` · `test_worker_offline_cap::test_worker_loop_forwards_role` · `test_error_report::test_lifecycle_outcomes_are_not_reported` | 5.66~9.14s | **DNS/connect 超时**（见下） | ✅ 修根因 |
+| `test_lock_reentrancy::test_no_rerun_…` · `test_source_text_assert_budget::test_text_assert_counts_only_go_down` | 6.80 / 4.49s（安静空载 5.27 / 2.76s） | `ast.parse` + 索引器本体，**无空闲** | 按 §77/§90 口径留痕，**不动** |
+| `e2e/test_hold_e2e::test_full_hold_cycle…` | 4.73~5.39s | 真秒级窗（HOLD 2.0s ×2 + BC 1.5s）+ 真 hub 子进程 | 结构性（§93 的「A 真慢」），**不动** |
+
+**根因（实测，不是推测）**：2026-10-31 落地的生命周期上发腿（`remote/lifecycle.py`）在
+`worker_loop` 的**每条会话打两条同步上报**（`start()` 的「worker 启动」+ `close()` 的「收线」），
+而单测里的 hub 地址是 `http://hub` 这种**假主名** ⇒ 每一条都白等一个真实连接超时。
+
+    单发 post_error('http://hub') → 1.41s（DNS/connect 失败）· 死端口 127.0.0.1:9 → 2.00s
+    ⇒ 一次 worker_loop = 2 条 ≈ **2.8s**，与用例工作量**无关**（0.01s 的用例也 5.6s）
+
+识破手法：`--durations` 只显示「call 5.66s」，而同一批用例的 `setup` 全是 0.01s、内部又把所有
+hub 面都打了桩 ⇒ 差值是**固定的**（2 条上报 × 1.41s），一次 `worker_loop` 一条，与用例做了什么无关。
+
+**修法（只动测试层，生产路径一字未改）**：`nn-training/tests/conftest.py` 新增 autouse 夹具
+`_no_observation_network`，把 `remote/lifecycle.py` 的两个出口（`post_error` / `report_error`）换成
+记录用的壳 —— 与 `tests/remote/test_lifecycle.py` 的 `sent` 夹具**同一手法**、同一条理由
+（观测面没有义务在单测里真的出网，与 `pin_production_env` 把控制台钉成死端口同族）。
+`Lifecycle` 本体（信号装卸 / 读数 / 读点节流 / `why()`）照旧真跑；形状由 test_lifecycle.py 直接钉。
+e2e 层不继承 `tests/conftest.py`，真 hub 的行为零变化。
+
+**读数**（同一命令、同一台机器；`--durations`）：
+
+| 用例 | 改前 | 改后 |
+|---|---|---|
+| `test_worker_loop_starts_the_next_job_before_the_upload_ends` | 6.49s | **0.71s** |
+| `test_once_waits_for_the_result_and_nonzero_exit_on_failure` | 6.63s | **0.01s** |
+| `test_backup_round_does_not_touch_computing_at` | 6.19s | **0.01s** |
+| `test_worker_loop_forwards_role` | 5.66s | **0.01s** |
+| `test_lifecycle_outcomes_are_not_reported`（内部 3 轮 `worker_loop`） | 9.14s | **0.41s** |
+
+同一笔钱在**其他地方也被付过**（没报警告、但每个 `worker_loop` 都 2.8s）：`test_soft_hold_prefetch`（4 次）·
+`test_remote_hotswap`（4 次）· `test_cache_persist` / `test_yield_adaptive` / `test_prefetch_proc` /
+`test_job_round_split` / `test_worker_reap_stall`（2 次）⇒ 全量套件的净收益远大于上表这 5 条。
+
+**为什么不是抬阈值**：§77 已否决「marker 抬到 60」、§90 记录用户 2026-10-29 的口径「先问它在等谁
+/ 它和谁付了同一份钱，而不是先抬阈值」。本条正是那句「先问」的答案：**空等**（不占 CPU）才是
+per-test 预算要抓的形态，而它是测试替一条假 hub 付的网络超时。两条纯 CPU 扫描与一条真秒窗 e2e
+按同一口径**保持留痕**，不配 marker。
+
+### 第二遍（同日）：别处还在付同类的钱 —— 四类落点，同一条「它会真的出网吗」
+
+方法：一次性探针（包 `urllib.request.OpenerDirector.open` / `socket.connect` / `getaddrinfo`，
+记 **>200ms** 并按 nodeid 归因；`tests/ e2e/ -n 8` 全量跑，跑完删除）。按它的读数修了四处：
+
+| 落点 | 改前 | 根因 | 修法 |
+|---|---|---|---|
+| `e2e/test_worker_queue` ×2 | 1.45s ×2 每条 | e2e 不继承 `tests/conftest.py` ⇒ 生命周期两条同步上报真的打到假 hub（`http://h0`） | 两个 `with` 里补 `patch.object(LC, "post_error", …)`（该文件本就逐缝打桩）⇒ **0.32s** |
+| `test_hub_push_dispatch::test_push_workers_hot_reload_and_probe` | 2.01s | 死桩写成 `127.0.0.1:1`：本仓容器对未监听低端口是 **DROP**（黑洞），探活要等满 `ping_timeout` | 新增 `tests/helpers/net_seams.py`（唯一取用口，委托 `TEST_CONSOLE_URL` 的「当场拒绝」探测）⇒ **ms 级** |
+| `test_upgrade::test_upgrade_stale_nodes` | 1.00s | 同上（`"down"` 节点 `:1`），耗时被 `status_timeout=1.0` 卡满 | 同上 |
+| 散落的 daemon `report_error` | 2.0s/笔，**归因串台** | `remote/job_round.py` / `remote/run_loop.py` 都是 `from remote.error_report import report_error`（**按名**绑定）⇒ 在源头打桩无效 | `_no_observation_network` 追加这两个**调用点**的桩（源头模块仍真跑：它自己的用例要拿真实现打真回环假 hub） |
+
+⚠ **归因串台**值得单记：那几笔 2.0s 的 daemon 线程落在**后续**用例身上，所以 `--durations` / 探针会
+把账记给 `test_worker_state_contract` / `test_worker_server_lock` 这类**根本不发网络**的 AST 用例
+（它们确实只花 0.3s）。判据：`connect` 的目标 + 「这个用例源码里有没有出网的可能」。
+
+**剩下的 >200ms 全是「真回环 + 有意慢」**，不动：`/v1/task` 假节点 0.4~1.0s（模拟单局耗时）、
+`_FakeHub(delay=1.0)` 的「hub 卡住时也必须立刻返回」契约用例、`/admin/net-probe` 0.66s。
+
+**验证**：`bash tools/githook/nn-python-gate.sh` 绿（54s → **52s**）；受影响的 13 个文件 177 passed
+（最慢 0.71s）；本轮的 8 个文件 96 passed；全量探针复跑：**假主名 / 黑洞死端口的调用已归零**。
+
+### 第三遍（同日）：负向判据别写成「等它别来」的窗口
+
+`test_hub_push_dispatch` 的两条 ★flake 回归用例（`test_backup_claim_of_settled_job…` 2.02s /
+`test_dispatch_reads_its_own_state_once_per_tick` 2.01s）—— 绿的情况下**全部**花在
+`_wait_until(lambda: w1.received != [], timeout=2.0)` 上：判据是「派发器**不许**推」，却实现成
+「等 2s 看它来不来」。而 `_dispatch` 里 `t.start()` 之后紧接着 `started.append(jid)`，且那是
+**唯一**的推送线程生成点 ⇒ `tick["started"] == []` 当场就等价于「本进程此刻没有在飞的推送
+线程，这一读之后也不会有 POST 冒出来」。改成同步断言：**2.02/2.01s → 0.01/0.01s**。
+
+**守门仍有效（变异验证，不是「跑绿了就算」）**：把 `_snapshot` 的挑人视图改回空（2026-10-11 那个
+bug 的形状）⇒ `test_dispatch_reads_its_own_state_once_per_tick` 当场红在
+`assert tick["started"] == []`（`['jjjjjjjjjjjjjjjj'] == []`），**不需要**任何等待窗口。
+判据强度反而更高：退化不再依赖「推送线程有没有在 2s 内把 POST 发完」。
+（另一条在变异下仍绿 —— 它钉的是 store 闸那一半，docstring 本来就写明「真推送不在本用例范围」。）
+
+同形态的 4 处 `_wait_until(timeout=2.0)` 在 `test_offline_deliver_async`，但是**正向**断言
+（`>= 1` / `== [1]`）：等的是「该来的一定来」，不是「别来」⇒ 不动。
+本刀后 `test_hub_push_dispatch.py` 31 passed，最慢 0.21s。
+
+**全仓扫尾（同日）**：三种写法都搜了一遍——`if _wait*: raise`（负向窗口）· `assert not _wait*/_pump` ·
+`time.sleep(N)` 后紧跟负向断言（多行匹配，窗口 8 行）。可等价转换的 **2 处**已改：
+
+| 用例 | 改前 | 改法 | 读数 |
+|---|---|---|---|
+| `hub/test_role_routing::test_push_leg_never_pushes_an_offline_role_job` | `assert not _pump(…, timeout=0.6)` | 一拍 `disp.tick()` + `started == []`（唯一生成点） | 0.6s 窗口 → 实测 **0.05s** |
+| `remote/test_hub_push_dispatch::test_push_ahead_zero_keeps_the_busy_worker_untouched` | `for _ in range(3): tick(); sleep(0.05)` | 每拍同步断言 `tick["started"] == []` | −0.15s，且退化在第 1 拍就红 |
+
+**2 处不可等价，保留并写明理由**（不硬改）：
+
+* `hub/test_offline_push_dispatch::test_a_missing_round_body_blocks_the_final_until_caught_up` 的
+  `sleep(0.5)`：pump 跑在**真线程**里（`OfflinePushDispatcher.pump_sec` 循环），而「一直不收摊」的
+  唯一证据就是「它又转了十几拍仍然没收」——没有同步信号可读（`ticks` 只能证明转了几拍，不能代替
+  「这些拍里没做那件事」）。
+* `common/test_offline_task_queue::test_install_progress_pinger_does_not_start_a_thread` 的
+  `sleep(0.05)`：判据是「**没有**定时线程」——若它存在，它按自己的拍自己开火；这类否定只能靠一个
+  时间窗观察（且只 50ms，不值得为它加机制）。
+
+反向的也登记一笔：`test_offline_deliver_async` 的 4 处 `_wait_until(timeout=2.0)` 是**正向**断言
+（等「该来的」），**不**属于本族。
+
+---
+
 ## §93 前 30 条最慢用例的耗时清算：满载/空载两套口径 · 两类白付已修 · 一条结构性不动（2026-10-30，用户指令「再跑一轮前 30 条最慢用例的耗时清算」）
 
 **方法**（两套口径，缺一不可）：① **满载** = 门禁同参（`forkdist $NPROC --timeout=60`）连跑 2 次

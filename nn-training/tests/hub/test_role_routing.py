@@ -415,9 +415,14 @@ def test_push_leg_never_pushes_an_offline_role_job(tmp_path: Path, worker_factor
     ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
     disp = _disp(hub, ws)
     try:
-        assert not _pump(disp, lambda: bool(w1.received), timeout=0.6), (
-            "离线盘的活被推给了在线 push worker"
-        )
+        # 同步断言（2026-11-01）：`_dispatch` 里 `started` 是**唯一**的推送线程生成点
+        # （`t.start()` 之后紧接着 append）⇒ 它为空 = 本进程此刻没有在飞推送线程，这一读之后
+        # 也不会有 POST 冒出来。所以**不需要**"转 0.6s 看它来不来"（原来 `_pump(timeout=0.6)`
+        # 绿的时候白转 ≈ 30 拍）。判据没变弱：这个退化（去掉 `role_blocked` 门）在第一拍就推；
+        # 而"拍根本没看到活"的假绿由下面的对照组钉住（同装置换回在线 ⇒ 必须真推出去）。
+        first = disp.tick()
+        assert first["started"] == [], f"离线盘的活被推给了在线 push worker：{first}"
+        assert w1.received == [], "离线盘的活被推给了在线 push worker"
         # 对照组：换回在线归属（同一 job_id / 同一 worker / 同一 kind=ppo 形状）⇒ 推得出去
         store.publish(JID, {**m, ROLE_FIELD: ROLE_ONLINE}, PAYLOAD)
         assert store.job_role(JID) == ROLE_ONLINE
