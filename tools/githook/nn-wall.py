@@ -20,7 +20,6 @@ import argparse
 import os
 import subprocess
 import sys
-import time
 
 DEFAULT_WALL = float(os.environ.get("NN_WALL_S", "480"))
 
@@ -45,16 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     if not a.cmd:
         print("✗ nn-wall: no command after --", file=sys.stderr)
         return 2
-    t0 = time.monotonic()
     p = subprocess.Popen(a.cmd)
-    rc = None
-    while time.monotonic() - t0 < a.wall:
-        rc = p.poll()
-        if rc is not None:
-            break
-        time.sleep(0.25)
-    if rc is None:
+    # 2026-11-02：原来是「`poll()` + `sleep(0.25)`」轮询 —— 子进程跑过 250ms 线的那一次，
+    # 退出后还要白等到下一个 tick 才发现（平均 125ms、最坏 250ms），而 nn-py-safe.sh 的**每一次**
+    # `-m pytest` 都包在本进程里（门禁 master 一发、每个子进程测试各一发）。`wait(timeout=)`
+    # 内部就是 `waitpid` 循环（次次 tick 25ms）⇒ 子进程一退就返，墙钟语义一字未变。
+    try:
+        rc = p.wait(timeout=a.wall)
+    except subprocess.TimeoutExpired:
         kill_tree(p)
+        try:
+            p.wait(timeout=10)  # 收尸：不让被杀的子进程变僵尸（原实现直接 return）
+        except subprocess.TimeoutExpired:
+            pass
         print(
             f"✗ nn-wall: wall {a.wall:g}s exceeded — killed pid {p.pid} tree (exit 124)",
             file=sys.stderr,

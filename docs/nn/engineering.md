@@ -25,6 +25,71 @@
 
 ---
 
+## §102 子 pytest 的 0.3s 启动里没有可删的东西：它不是浪费，是框架自己的 import（2026-11-02，用户指令「Cut pytest's own 0.3-0.6s startup in the scratch-suite children」）
+
+**先拆预算**（本机，`tmp/` 里 2 条假用例，冷/热 `.pyc` 都已就位）：
+
+    .venv/bin/python -c pass                  0.02s   ← 解释器
+    .venv/bin/python -c "import pytest"       0.15–0.17s  ← 框架本体（`-X importtime`：pytest 累计 126ms）
+    .venv/bin/python -m pytest --version      0.16–0.18s
+    真正跑完 2 条用例的整条                     0.24–0.36s
+
+根 `conftest.py` 的 import 共 84ms，其中 **80ms 就是 `import pytest`**（它自己只多 4ms）
+⇒ 也不存在「conftest 拖了启动」这回事。
+
+**候选旋钮全测了**（同机交错，中位）：
+
+| 旋钮 | 中位 |
+|---|---|
+| 基线 | 0.29s |
+| `-p no:xdist` | 0.29s |
+| `-p no:cacheprovider` | 0.28s |
+| `--noconftest` | 0.29s |
+
+全在 run-to-run 噪声（±0.05s）以内。能动的就只有 <30ms，而代价是 **fidelity**：
+这些子进程存在的意义就是「跑一遍门禁那种真实调用」，而 `--noconftest` 恰好会把上一轮
+（§100）刚修的那个 bug（根 conftest 给假用例白做预热）遮起来 —— 那正是「子进程不加载
+conftest 就永远发现不了」的典型。
+
+**结论：不改。** `test_forkdist` 的三个子进程用例的墙钟地板就是
+`0.27s 子 pytest + 0.08s 包装层 + 自己的写入/断言`；§101 已经把唯一真浪费（watchdog 的
+0.25s 尾巴）拿掉了。剩下的要降只能减**进程数**，而那要动 AGENTS §5 与 watchdog 的存在理由。
+
+**被否决**：① `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` —— 把 pytest-timeout 也关了，而
+`test_timeout_reports_its_real_cause` 验的就是它的报告文案；② `-p no:cacheprovider`（3/100s）；
+③ 把五个 scratch 用例合并成一条子进程 —— 那就变成了「一条用例验五件事」，一红看不出哪件坏了。
+
+## §101 watchdog 从「poll + sleep(0.25)」改成 `wait(timeout=)`：每次 `-m pytest` 少付一个 0.25s 的尾巴（2026-11-02，用户指令「Cut the three-process startup cost in test_forkdist's subprocess cases」）
+
+**先量三层**（同机交错取中位）：
+
+    bash tools/githook/nn-py-safe.sh -c pass            0.03s  ← bash + 沙箱变量那一跳几乎免费
+    .venv/bin/python -m pytest <2 条假用例> -q          0.3–0.6s ← pytest 自己的启动（剩下的大头）
+    同一条命令过 nn-py-safe（→ nn-wall → pytest）       0.82s vs 直跑 0.62s（Δ0.20）
+
+**结论**：三层里没有一层是「三个进程的重启」本身（bash 那一跳 30ms、nn-wall 的 python -S 启动 ~30ms），
+真正白付的是 **watchdog 的轮询粒度**：子进程跑过 250ms 线的那一次，退出后还要等下一个 tick
+（平均 125ms、最坏 250ms）；而门禁 master 与**每条起子 pytest 的用例**都走它。
+
+**改法**（`tools/githook/nn-wall.py`）：`poll()` + `sleep(0.25)` 循环 → `p.wait(timeout=a.wall)`
+（内部是 `waitpid` 循环、25ms tick）。墙钟语义一字未改；顺手补了**收尸**（原实现杀完直接
+return，子进程成僵尸）。
+
+**读数**：wrapper vs 直跑的 Δ **0.20 → 0.08s**（剩下的是 nn-wall 启动 + bash + 沙箱 source）；
+`test_forkdist.py` 三条起子进程的用例仍 <1s（`test_timeout_reports_its_real_cause` 1.98s，其中
+**1s 是 `--timeout=1` 本身**）。
+
+**红检（墙钟必须仍然真的杀）**：`NN_PYTEST_WALL_S=2` + 一个 `sleep(30)` 的子用例 ⇒ **rc=124、
+elapsed 2s**、stderr 有 `✗ nn-wall: wall 2s exceeded — killed pid … tree`、无残留进程。
+
+**否决的备选**：① 给这些 scratch 子进程加「关掉 watchdog」的开关 —— 否（AGENTS §5；watchdog
+存在的理由就是 per-test 60s 兜不住 C 层原生阻塞）；② 让 nn-wall 不再是独立进程 —— 否
+（它必须在子进程之外，否则一起被杀）；③ 省掉 bash 那一跳 —— 只值 30ms。
+
+**备注（量测环境）**：同日起重跑的门禁 74–83s vs 本会话早先的 43–49s，>5s 名单也跟着换人
+（`test_ppo_update_smoke` / `test_auto_handoff_e2e` 那条这轮才上榜）—— 这是 §96 记的
+「CPU 扫描撞 5s 口径」，不是回归。
+
 ## §100 `test_timeout_reports_its_real_cause` 的 5s 不是「等」（真被测 1s），是 conftest 给**临时目录里的假用例**白做了 4.6s 预热（2026-11-02，用户指令「Check whether … really needs to wait 5s」）
 
 **先回答问句**：它真的等的是 `--timeout=1` 那一秒（桩子 `time.sleep(5)` 在第 1s 就被 SIGALRM 打断）。
