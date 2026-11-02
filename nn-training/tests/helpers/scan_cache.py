@@ -41,6 +41,10 @@ from typing import Any, Final
 #: 缓存库的落点（系统 temp 下，按仓根分库）。
 _CACHE_ROOT: Final = Path(tempfile.gettempdir()) / "bcity-nn-scan-cache"
 
+#: `os.getuid` 只在 POSIX 存在（Windows 的 typeshed 没有这个属性，裸引用 mypy 红）；
+#: Windows temp 本就按用户隔离，拿不到就不做归属校验。
+_GETUID = getattr(os, "getuid", None)
+
 
 def default_path(scope: str, root: Path) -> Path:
     """该仓库该用途的缓存文件（仓根进哈希 ⇒ 多个 checkout 互不串库）。"""
@@ -63,7 +67,7 @@ class Cache:
 
     def _load(self) -> dict[str, Any]:
         try:
-            if getattr(os, "getuid", None) is not None and self.path.stat().st_uid != os.getuid():
+            if _GETUID is not None and self.path.stat().st_uid != _GETUID():
                 return {}  # 别人写的库：不反序列化（pickle = 执行代码）
             with self.path.open("rb") as fh:
                 blob = pickle.load(fh)
