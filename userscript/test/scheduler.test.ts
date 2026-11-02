@@ -7,8 +7,10 @@ import {
   scheduleStatusText,
   taskBelongsTo,
   TASKS_KEY,
+  tasksKeyFor,
   type Occurrence,
   type SchedulerDeps,
+  type SchedulerEvent,
   type SchedulerStore,
   type SchedulerTask,
 } from '../src/notebook-companion/app/scheduler'
@@ -30,8 +32,11 @@ function parts(ms: number): LocalParts {
 const at = (h: number, m = 0): number => Date.UTC(2026, 9, 30, h, m)
 const OCC_KEY = '2026-10-30@09:00'
 
-function memoryStore(): { store: SchedulerStore; data: Map<string, unknown> } {
-  const data = new Map<string, unknown>()
+function memoryStore(seed?: Map<string, unknown>): {
+  store: SchedulerStore
+  data: Map<string, unknown>
+} {
+  const data = seed ?? new Map<string, unknown>()
   const store: SchedulerStore = {
     getValue: <T>(key: string, fallback: T): T => {
       if (!data.has(key)) return fallback
@@ -49,17 +54,22 @@ interface Harness {
   mem: Map<string, unknown>
   runs: SchedulerTask[]
   changes: number
+  events: SchedulerEvent[]
+  /** 本页任务表键（与调度器同口径）。 */
+  bucket: () => string
   setNow: (ms: number) => void
-  setIdentity: (id: { notebookKey: string; session: string }) => void
+  setIdentity: (id: { notebookKey?: string; session?: string; page?: string }) => void
   setAfterWait: (fn: (() => void) | null) => void
 }
 
-function harness(over: Partial<SchedulerDeps> = {}): Harness {
-  const { store, data } = memoryStore()
+/** `shared` = 同一个 GM 存储（模拟同浏览器里另一个页签）。 */
+function harness(over: Partial<SchedulerDeps> = {}, shared?: Map<string, unknown>): Harness {
+  const { store, data } = memoryStore(shared)
   let now = at(8)
-  let identity = { notebookKey: 'owner/slug', session: 'kaggle-owner-slug-edit-ab12' }
+  let identity = { notebookKey: 'owner/slug', session: 'kaggle-owner-slug-edit-ab12', page: 'p1' }
   let afterWait: (() => void) | null = null
   const runs: SchedulerTask[] = []
+  const events: SchedulerEvent[] = []
   const state = { changes: 0 }
   let seq = 0
   const deps: SchedulerDeps = {
@@ -71,6 +81,7 @@ function harness(over: Partial<SchedulerDeps> = {}): Harness {
     runGraceMs: 10 * 60_000,
     stopGraceMs: 10 * 60_000,
     identity: () => identity,
+    onEvent: (e) => events.push(e),
     confirm: async () => true,
     run: async (t) => {
       runs.push(t)
@@ -90,6 +101,8 @@ function harness(over: Partial<SchedulerDeps> = {}): Harness {
     sched,
     mem: data,
     runs,
+    events,
+    bucket: () => tasksKeyFor(identity.notebookKey, identity.page),
     get changes() {
       return state.changes
     },
@@ -97,7 +110,7 @@ function harness(over: Partial<SchedulerDeps> = {}): Harness {
       now = ms
     },
     setIdentity: (id) => {
-      identity = id
+      identity = { ...identity, ...id }
     },
     setAfterWait: (fn) => {
       afterWait = fn
@@ -139,7 +152,7 @@ describe('定时任务：只设「下一次」（一次性）', () => {
     expect(row.text).toBe('09:05 · 运行全部')
     expect(row.next).toBe('今天 09:05')
     expect(h.sched.rows()[1]!.next).toBe('明天 07:00')
-    expect((h.mem.get(TASKS_KEY) as SchedulerTask[]).length).toBe(2)
+    expect((h.mem.get(h.bucket()) as SchedulerTask[]).length).toBe(2)
   })
 
   it('nextDue：最早的可启用任务；停用/空表 ⇒ null（提示区倒计时用）', () => {
@@ -181,23 +194,23 @@ describe('定时任务：只设「下一次」（一次性）', () => {
     expect(h.sched.add({ at: '09:00', action: 'run-cell' }).ok).toBe(false)
     h.setIdentity({ notebookKey: '', session: '' })
     expect(h.sched.add({ at: '09:00', action: 'run-all' }).ok).toBe(false)
-    expect(h.mem.get(TASKS_KEY)).toBeUndefined()
+    expect(h.mem.get(h.bucket())).toBeUndefined()
   })
 
   it('remove / setEnabled 落盘；remove 清掉该任务的 occurrence（历史不留幽灵）', () => {
     const h = harness()
     expect(h.sched.add({ at: '09:00', action: 'run-all' }).ok).toBe(true)
     h.sched.setEnabled('tid1', false)
-    expect((h.mem.get(TASKS_KEY) as SchedulerTask[])[0]!.enabled).toBe(false)
+    expect((h.mem.get(h.bucket()) as SchedulerTask[])[0]!.enabled).toBe(false)
     h.sched.setEnabled('tid1', true)
-    expect((h.mem.get(TASKS_KEY) as SchedulerTask[])[0]!.enabled).toBe(true)
+    expect((h.mem.get(h.bucket()) as SchedulerTask[])[0]!.enabled).toBe(true)
 
     h.mem.set(OCCURRENCES_KEY, {
       'tid1|2026-10-30@09:00': { state: 'succeeded', by: 'w1', at: at(9) },
       'keep|2026-10-30@09:00': { state: 'succeeded', by: 'w1', at: at(9) },
     })
     h.sched.remove('tid1')
-    expect(h.mem.get(TASKS_KEY)).toEqual([])
+    expect(h.mem.get(h.bucket())).toEqual([])
     expect(Object.keys(occurrences(h))).toEqual(['keep|2026-10-30@09:00'])
   })
 })
@@ -215,7 +228,7 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     await h.sched.tick()
     expect(h.runs.map((t) => t.action)).toEqual(['run-all'])
     expect(occurrences(h)[`tid1|${OCC_KEY}`]?.state).toBe('succeeded')
-    expect(h.mem.get(TASKS_KEY)).toEqual([]) // 一次性：执行后就不再有待办
+    expect(h.mem.get(h.bucket())).toEqual([]) // 一次性：执行后就不再有待办
     expect(h.changes).toBeGreaterThan(before)
 
     h.setNow(at(9, 0) + 40_000)
@@ -238,7 +251,7 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     const occ = occurrences(tooLate)[`tid1|${OCC_KEY}`]!
     expect(occ.state).toBe('skipped')
     expect(occ.reason).toContain('过期')
-    expect(tooLate.mem.get(TASKS_KEY)).toEqual([])
+    expect(tooLate.mem.get(tooLate.bucket())).toEqual([])
   })
 
   it('stop/interrupt 用 stopGraceMs（20 分钟窗口内照停）', async () => {
@@ -271,7 +284,7 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     const occ = occurrences(h)[`tid1|${OCC_KEY}`]!
     expect(occ.state).toBe('skipped')
     expect(occ.reason).toBe('用户取消')
-    expect(h.mem.get(TASKS_KEY)).toEqual([])
+    expect(h.mem.get(h.bucket())).toEqual([])
   })
 
   it('执行失败写 failed + 原因；任务照样移除（不自动重试）', async () => {
@@ -282,23 +295,106 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     const occ = occurrences(h)[`tid1|${OCC_KEY}`]!
     expect(occ.state).toBe('failed')
     expect(occ.reason).toBe('笔记本未连接')
-    expect(h.mem.get(TASKS_KEY)).toEqual([])
+    expect(h.mem.get(h.bucket())).toEqual([])
   })
 
-  it('换 notebook / 换会话 ⇒ fail closed（skipped，不执行）', async () => {
+  it('换会话（同一页重新跑过 run）⇒ stop/interrupt fail closed（skipped，不执行）', async () => {
     const h = harness()
-    h.sched.add({ at: '09:00', action: 'run-all' })
     h.sched.add({ at: '09:00', action: 'stop-session' })
     h.setNow(at(9, 0) + 5_000)
-    h.setIdentity({ notebookKey: 'other/notebook', session: 'kaggle-other-edit-zz99' })
+    h.setIdentity({ session: 'kaggle-owner-slug-edit-newrun' })
     await h.sched.tick()
     expect(h.runs).toHaveLength(0)
     const occ = occurrences(h)
     expect(occ[`tid1|${OCC_KEY}`]?.state).toBe('skipped')
-    expect(occ[`tid1|${OCC_KEY}`]?.reason).toContain('notebook')
-    expect(occ[`tid2|${OCC_KEY}`]?.state).toBe('skipped')
-    expect(occ[`tid2|${OCC_KEY}`]?.reason).toContain('会话已换')
-    expect(h.mem.get(TASKS_KEY)).toEqual([])
+    expect(occ[`tid1|${OCC_KEY}`]?.reason).toContain('会话已换')
+    expect(h.mem.get(h.bucket())).toEqual([])
+  })
+
+  it('页面隔离：同一个 notebook 的另一个页签看不到也不消耗（2026-11-02 事故）', async () => {
+    const a = harness()
+    expect(a.sched.add({ at: '09:00', action: 'run-all' }).ok).toBe(true)
+    expect(a.sched.add({ at: '09:00', action: 'stop-session' }).ok).toBe(true)
+
+    // 同一份 GM 存储，但页标签不同（同 notebook 的另一页签）
+    const b = harness({ writer: 'w2', makeId: () => 'bid-1' }, a.mem)
+    b.setIdentity({ page: 'p2', session: 'kaggle-owner-slug-edit-ab12-p2' })
+    expect(b.sched.tasks()).toEqual([])
+    expect(b.sched.rows()).toEqual([])
+    expect(b.sched.nextDue()).toBeNull()
+
+    b.setNow(at(9, 0) + 5_000)
+    await b.sched.tick()
+    expect(b.runs).toHaveLength(0)
+    expect(occurrences(b)).toEqual({}) // 不写 occurrence
+    expect(a.sched.tasks()).toHaveLength(2) // 任务原封不动
+
+    // 创建页自己到点：照常执行一次（跨页签的 claim 协议仍在）
+    a.setNow(at(9, 0) + 20_000)
+    await a.sched.tick()
+    expect(a.runs.map((t) => t.action).sort()).toEqual(['run-all', 'stop-session'])
+    expect(a.sched.tasks()).toEqual([])
+  })
+
+  it('页面隔离：别的 notebook 的页面更看不到、也吃不掉（旧 bug 的回归钉）', async () => {
+    const a = harness()
+    a.sched.add({ at: '09:00', action: 'run-all' })
+    const other = harness({ writer: 'w9' }, a.mem)
+    other.setIdentity({
+      notebookKey: 'huangjian2026/rollout-358870479',
+      session: 'kaggle-huangjian2026-rollout-358870479-1k1la1',
+      page: 'k1la1',
+    })
+    other.setNow(at(9, 0) + 5_000)
+    await other.sched.tick()
+    expect(other.runs).toHaveLength(0)
+    expect(occurrences(other)).toEqual({})
+    // 旧实现会在这里记一条 skipped 并把任务删掉 ⇒ “一个定时任务都没执行，也没痕迹”
+    expect(a.sched.tasks()).toHaveLength(1)
+    expect(occurrences(a)).toEqual({})
+  })
+
+  it('旧全局键迁移：只搬本页建的（notebook + 创建会话都对得上），其余原封不动', () => {
+    const seed = new Map<string, unknown>()
+    const mine = {
+      id: 'legacy-mine',
+      nextAt: at(9),
+      action: 'run-all' as const,
+      notebookKey: 'owner/slug',
+      sessionAtCreate: 'kaggle-owner-slug-edit-ab12',
+      enabled: true,
+      createdAt: at(8),
+    }
+    const otherTab = {
+      ...mine,
+      id: 'legacy-other-tab',
+      sessionAtCreate: 'kaggle-owner-slug-edit-zz9',
+    }
+    const otherNb = { ...mine, id: 'legacy-other-nb', notebookKey: 'other/notebook' }
+    seed.set(TASKS_KEY, [mine, otherTab, otherNb])
+
+    const h = harness({}, seed)
+    expect(h.sched.tasks().map((t) => t.id)).toEqual(['legacy-mine'])
+    expect(h.sched.tasks()[0]!.ownerPage).toBeUndefined() // 旧数据没有页标签，靠 notebook+会话认领
+    const left = h.mem.get(TASKS_KEY) as Array<{ id: string }>
+    expect(left.map((t) => t.id)).toEqual(['legacy-other-tab', 'legacy-other-nb'])
+  })
+
+  it('调度事件：add / claim / run / skip 都上报（boot 拿它写操作日志）', async () => {
+    const h = harness()
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    expect(h.events.map((e) => e.kind)).toEqual(['add'])
+    h.setNow(at(9, 0) + 5_000)
+    await h.sched.tick()
+    expect(h.events.map((e) => e.kind)).toEqual(['add', 'claim', 'run'])
+    expect(h.events[2]?.ok).toBe(true)
+
+    const cancel = harness({ confirm: async () => false })
+    cancel.sched.add({ at: '09:00', action: 'run-all' })
+    cancel.setNow(at(9, 0) + 5_000)
+    await cancel.sched.tick()
+    expect(cancel.events.map((e) => e.kind)).toEqual(['add', 'claim', 'skip'])
+    expect(cancel.events[2]?.reason).toBe('用户取消')
   })
 
   it('occurrence 记录只留 7 天（写盘时清理）', async () => {

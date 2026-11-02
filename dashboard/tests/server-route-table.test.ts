@@ -35,6 +35,7 @@ describe('路由表：完整性（与旧 if 链的路径/方法逐条对齐）',
         r.path.startsWith('/api/') &&
         r.path !== '/api/deliverUpload' &&
         r.path !== '/api/notebookLog' &&
+        r.path !== '/api/notebookOp' &&
         r.path !== '/api/*'
       ) {
         expect(r.methods).toEqual(['GET'])
@@ -42,9 +43,11 @@ describe('路由表：完整性（与旧 if 链的路径/方法逐条对齐）',
     }
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/*')?.methods).toEqual(['POST'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/deliverUpload')?.methods).toEqual(['POST'])
-    // 第二个 typed POST：notebook 日志搬运（清单端点仍是 GET）
+    // typed POST（自定义头 + 有界 body）：notebook 日志搬运 + 操作日志；两个读取端点仍是 GET
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLog')?.methods).toEqual(['POST'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLogs')?.methods).toEqual(['GET'])
+    expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookOp')?.methods).toEqual(['POST'])
+    expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookOps')?.methods).toEqual(['GET'])
     // 兜底同时接两种方法（GET = 宽松页面/404；POST = 非 API 路径的 404）。
     expect(CONSOLE_ROUTES.find((r) => r.path === '/*')?.methods).toEqual(['GET', 'POST'])
   })

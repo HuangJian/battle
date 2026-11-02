@@ -227,6 +227,14 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
 
 ### 3.3 定时启动/关闭运行时 + 执行指定 cell
 
+> **★ 2026-11-02 修订（事故后收窄，DECISIONS §2026-11-02-bnc-schedule-per-page-and-ops-log）**：
+> 任务表**按页分桶**（`bnc:tasks:<notebookKey>#<page>`），不再是全局/按站点的共享表 ——
+> **每个页面只看得见、也只吃得到本页面设置的任务**；归属对不上的任务一律**只读跳过**
+> （不写 occurrence、不删、不显示）。旧全局键只作一次性懒搬迁来源，残留不消费。
+> 另新增 `POST /api/notebookOp` 操作日志通道（面板按钮 / 命令 / 调度事件 →
+> `tmp/notebook-logs/<site>/<session>.ops.jsonl`，日志页尾巴可见）。下文 §3.3 的「occurrence
+> 跨标签只执行一次」仍保留（同页签多窗口 / 刷新后的互斥），但它已不是跨页隔离的手段。
+
 - **任务模型**（GM 存储，按站点分组；v1 只有本地时区）：
   `{id, at: 'HH:MM', days: 'daily'|'weekdays'|'1,3,5', action: 'run-cell'|'run-all'|'stop-session'|'interrupt',
     notebookKey, sessionAtCreate,
@@ -239,7 +247,7 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
     01:30 只跑一次；春季跳过的 02:30 **不执行**（该墙钟不存在），下一拍照常，不改期。
   - 迟到：`run-*` ≤ 10 min 照常；`stop-session` ≤ `stopGraceMs`（10 min）照常，超过记 `skipped(late)`。
   - 恢复：刷新 / 睡眠唤醒后，`nextFireAt` 只依赖「当前墙钟 + occurrence 键」，不依赖内存里的计时器链。
-- **occurrence 状态机（跨标签只执行一次）**：`pending → claimed → succeeded|failed|skipped`。
+- **occurrence 状态机（同一任务只执行一次）**：`pending → claimed → succeeded|failed|skipped`。
   1. 到点先写 `{state:'claimed', by:<writer>, at}` 到 GM 存储（共享、持久，晚到的标签能看见）；
   2. 抖动等待 `claimSettleMs`（默认 1000ms）后**再读一次**：不是自己 ⇒ 退让；仍是自己 ⇒ 执行（两个标签的
      `setTimeout` 通常在同毫秒级触发，1s 沉淀窗足以让后一次写覆盖前一次）；

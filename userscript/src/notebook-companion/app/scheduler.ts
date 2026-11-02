@@ -4,12 +4,15 @@
  * 口径（2026-10-30 用户收窄）：定时器只设「下一次」，不设重复日期。任务 = `{nextAt, action}`；
  * 到点执行一次即消耗（成功 / 失败 / 取消 / 过期都从任务表移除，occurrence 留 7 天备查）。
  *
- * 三条纪律：
+ * 四条纪律：
  *   ① 计时只靠**墙钟轮询**（不依赖内存计时器链）：睡眠 / 刷新 / 后台节流只会延后一拍，
  *      「到没到」永远由 `now` 与 `nextAt` 现算；
  *   ② 同一个 occurrence 只执行一次：claim 先落 GM 存储，等 `claimSettleMs` 再读回，
  *      不是自己就退让；
- *   ③ claim 一旦写下就不再重试（页面崩在动作里也算「结果未知」，不自动补跑）。
+ *   ③ claim 一旦写下就不再重试（页面崩在动作里也算「结果未知」，不自动补跑）；
+ *   ④ **任务表按页分桶**（`tasksKeyFor`：notebook + 本页标签）：每个页面只看得见、也只吃得到
+ *      自己设的任务。旧版全局键 `bnc:tasks` 是事故源（另一页 tick 到点就把它记成 skipped 并删掉，
+ *      2026-11-02 两个凌晨任务被隔壁 Kaggle 页静默吃掉）⇒ 现已废弃，只作一次性搬迁来源。
  *
  * 本模块不碰 DOM / bridge：倒计时确认与真正执行由 boot 注入（面板与桥都在那边）。
  */
@@ -38,11 +41,22 @@ export interface SchedulerTask {
   action: ScheduleAction
   /** 运行类绑 notebook（`<owner>/<slug>`，跨 run 稳定）。 */
   notebookKey: string
+  /** 创建它的页标签（boot 的 pageTag）：同 notebook 的另一个页签不认领、不显示。 */
+  ownerPage?: string
   /** 停止/中断绑创建时的会话名（含页面标签；换 run 即失效，fail closed）。 */
   sessionAtCreate: string
   target?: ScheduleTarget
   enabled: boolean
   createdAt: number
+}
+
+/** 调度事件（boot 拿它写操作日志 / 面板历史；本模块不认识 dashboard）。 */
+export interface SchedulerEvent {
+  kind: 'add' | 'remove' | 'enable' | 'claim' | 'run' | 'skip' | 'drop'
+  task: SchedulerTask
+  /** `run` 的成功与否；其余见各 kind 的 reason。 */
+  ok?: boolean
+  reason?: string
 }
 
 export type OccurrenceState = 'claimed' | 'succeeded' | 'failed' | 'skipped'
@@ -63,8 +77,19 @@ export interface SchedulerRow {
   enabled: boolean
 }
 
+/** 旧版**全局**任务键（跨页共享 ⇒ 会被别的页面吃掉）。只作一次性搬迁来源，不再写入。 */
 export const TASKS_KEY = 'bnc:tasks'
 export const OCCURRENCES_KEY = 'bnc:occurrences'
+
+/**
+ * 本页任务表的键：`bnc:tasks:<notebookKey>#<page>`。
+ *
+ * 按页分桶而不是全局共享（plan §3.3 原写「按站点分组」）：隔离靠**键**，不靠 tick 里的判断 ——
+ * 看不见的桶，别的页面连「到点没到点」都不知道，更不可能把它记成 skipped 删掉。
+ */
+export function tasksKeyFor(notebookKey: string, page: string): string {
+  return `${TASKS_KEY}:${notebookKey}#${page}`
+}
 
 const OCCURRENCE_KEEP_MS = 7 * 24 * 3_600_000
 const ACTIONS: readonly ScheduleAction[] = ['run-cell', 'run-all', 'stop-session', 'interrupt']
@@ -86,8 +111,13 @@ export interface SchedulerDeps {
   runGraceMs: number
   /** `stop-session` / `interrupt` 的迟到窗口（config.stopGraceMs）。 */
   stopGraceMs: number
-  /** 当前页面身份（创建时写进任务，执行时用来 fail closed）。 */
-  identity: () => { notebookKey: string; session: string }
+  /**
+   * 当前页面身份：`notebookKey` = `<owner>/<slug>`，`session` = 含页标签的会话，
+   * `page` = 本页标签（任务表的分桶键 + 归属判定；sessionStorage 里跨刷新稳定）。
+   */
+  identity: () => { notebookKey: string; session: string; page: string }
+  /** 调度事件（可选）：boot 用它落操作日志。异常被吞，绝不影响调度。 */
+  onEvent?: (e: SchedulerEvent) => void
   /** 到点后的 10s 倒数/取消；返回 false = 用户取消（隐藏页由 boot 直接放行）。 */
   confirm: (task: SchedulerTask, occurrence: string) => Promise<boolean>
   /** 真正执行（bridge / 外层 Stop 按钮都归 boot）。 */
@@ -245,6 +275,35 @@ function defaultWait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** 调度事件 → 操作日志的 op 名（host / single / 测试共用；这是审计时 grep 的稳定口径）。 */
+export function eventOpName(e: SchedulerEvent): string {
+  switch (e.kind) {
+    case 'add':
+      return 'schedule:add'
+    case 'remove':
+      return 'schedule:remove'
+    case 'enable':
+      return 'schedule:enable'
+    case 'claim':
+      return 'schedule:claim'
+    case 'run':
+      return e.ok === false ? 'schedule:run:fail' : 'schedule:run:ok'
+    case 'skip':
+      return 'schedule:skip'
+    case 'drop':
+      return 'schedule:drop'
+  }
+}
+
+/** 调度事件的一行人话 detail（id/动作/到点时刻/原因）。 */
+export function eventDetail(e: SchedulerEvent): string {
+  const d = new Date(e.task.nextAt)
+  const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const parts = [`id=${e.task.id}`, `action=${e.task.action}`, `at=${clock}`]
+  if (e.reason) parts.push(`reason=${e.reason}`)
+  return parts.join(' ')
+}
+
 /** 创建一个调度器。**不自动 start**：boot/测试决定何时轮询。 */
 export function createScheduler(deps: SchedulerDeps): Scheduler {
   const parts = deps.parts ?? defaultParts
@@ -253,8 +312,15 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
   let timer: ReturnType<typeof setInterval> | null = null
   let ticking = false
 
-  const readTasks = (): SchedulerTask[] => {
-    const raw = deps.store.getValue<unknown>(TASKS_KEY, [])
+  /** 本页任务表的键（每次现算：notebook 就是这一页的那一个，页标签跨刷新稳定）。 */
+  const tasksKey = (): string => {
+    const ident = deps.identity()
+    return tasksKeyFor(ident.notebookKey, ident.page)
+  }
+
+  const rawTasks = (): SchedulerTask[] => {
+    ensureMigrated()
+    const raw = deps.store.getValue<unknown>(tasksKey(), [])
     if (!Array.isArray(raw)) return []
     const out: SchedulerTask[] = []
     for (const item of raw) {
@@ -264,9 +330,75 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     return out
   }
 
+  /**
+   * 这一条算不算「本页的」：notebook 相同，且没写 ownerPage（旧数据）或写得就是本页。
+   * 不满足 ⇒ 下面一律**视而不见**（不写 occurrence、不删、不显示）。
+   */
+  const ownTask = (task: SchedulerTask): boolean => {
+    const ident = deps.identity()
+    if (!task.notebookKey || task.notebookKey !== ident.notebookKey) return false
+    if (task.ownerPage !== undefined && task.ownerPage !== '' && task.ownerPage !== ident.page) {
+      return false
+    }
+    return true
+  }
+
+  const readTasks = (): SchedulerTask[] => rawTasks().filter(ownTask)
+
   const writeTasks = (tasks: SchedulerTask[]): void => {
-    deps.store.setValue(TASKS_KEY, tasks)
+    deps.store.setValue(tasksKey(), tasks)
     deps.onChange?.()
+  }
+
+  /** 调度事件 → 注入方（boot 落操作日志）。抛也不影响调度。 */
+  const emit = (
+    kind: SchedulerEvent['kind'],
+    task: SchedulerTask,
+    extra: Omit<SchedulerEvent, 'kind' | 'task'> = {},
+  ): void => {
+    try {
+      deps.onEvent?.({ kind, task, ...extra })
+    } catch {
+      /* 审计不影响执行 */
+    }
+  }
+
+  /**
+   * 旧版**全局**任务表的一次性搬迁（`bnc:tasks` → 本页桶）。
+   *
+   * 只认「确实是本页建的」：notebook 与创建时会话都对得上。搬迁只搬一次，剩下的留在旧键里_不_
+   * 消费 —— 它们属于哪个页面已经无从得知，宁可不动（静默清理又是一种吃掉）。
+   */
+  let migrated = false
+  /** 懒搬迁：host 的 frame 会话要等握手后才知道，所以不能在建调度器那一刻就定生死。 */
+  const ensureMigrated = (): void => {
+    if (migrated) return
+    const ident = deps.identity()
+    if (!ident.notebookKey || !ident.session) return
+    migrated = true
+    migrateLegacy()
+  }
+
+  const migrateLegacy = (): void => {
+    const legacy = deps.store.getValue<unknown>(TASKS_KEY, [])
+    if (!Array.isArray(legacy) || legacy.length === 0) return
+    const ident = deps.identity()
+    const key = tasksKey()
+    const mine: SchedulerTask[] = []
+    const rest: unknown[] = []
+    for (const item of legacy) {
+      const task = sanitizeTask(item)
+      if (
+        task &&
+        task.notebookKey === ident.notebookKey &&
+        task.sessionAtCreate === ident.session
+      ) {
+        mine.push(task)
+      } else rest.push(item)
+    }
+    if (mine.length === 0) return
+    deps.store.setValue(key, [...rawTasks(), ...mine])
+    deps.store.setValue(TASKS_KEY, rest)
   }
 
   const readOccurrences = (): Record<string, Occurrence> => {
@@ -295,7 +427,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     writeTasks(readTasks().filter((t) => t.id !== id))
   }
 
-  /** 运行类只看 notebook；停止/中断看会话（换 run/换页签 ⇒ 不执行）。 */
+  /** 可执行性：运行类只看 notebook；停止/中断看创建时的会话（换 run ⇒ 不执行）。 */
   const bindingError = (task: SchedulerTask): string | null => {
     const ident = deps.identity()
     if (task.action === 'run-cell' || task.action === 'run-all') {
@@ -314,9 +446,13 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     const now = deps.now()
     for (const task of readTasks()) {
       if (!task.enabled || now < task.nextAt) continue
+      // ★ 不是本页的任务 ⇒ 只读跳过。旧实现在这里记 skipped + dropTask，等于「谁先 tick 谁定生死」
+      //   （2026-11-02 事故：隔壁 Kaggle 页把别的 notebook 的两个任务静默吃掉了）。
+      if (!ownTask(task)) continue
       const occId = `${task.id}|${occurrenceKey(parts(task.nextAt))}`
       if (readOccurrences()[occId]) {
         dropTask(task.id) // 防御：已处理过的任务不该再留着
+        emit('drop', task, { reason: 'occurrence 已存在' })
         continue
       }
       const grace =
@@ -326,21 +462,20 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const bad = bindingError(task)
       const expired = now - task.nextAt > grace
       if (bad || expired) {
-        record(occId, {
-          state: 'skipped',
-          by: deps.writer,
-          at: now,
-          reason: bad ?? '已过期（超出迟到窗口，不补跑）',
-        })
+        const reason = bad ?? '已过期（超出迟到窗口，不补跑）'
+        record(occId, { state: 'skipped', by: deps.writer, at: now, reason })
         dropTask(task.id)
+        emit('skip', task, { reason })
         continue
       }
       // ① claim（落盘后别的页签看得见）→ ② 沉淀窗 → ③ 读回转正。
       record(occId, { state: 'claimed', by: deps.writer, at: now })
+      emit('claim', task)
       await wait(Math.max(0, deps.claimSettleMs))
       const settled = readOccurrences()[occId]
       if (!settled || settled.by !== deps.writer || settled.state !== 'claimed') {
         dropTask(task.id)
+        emit('drop', task, { reason: 'claim 被别处覆盖（跨页签互斥）' })
         continue
       }
       let proceed = false
@@ -357,6 +492,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
           reason: '用户取消',
         })
         dropTask(task.id)
+        emit('skip', task, { reason: '用户取消' })
         continue
       }
       let result: { ok: boolean; reason?: string }
@@ -371,6 +507,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         at: deps.now(),
         ...(result.reason ? { reason: result.reason } : {}),
       })
+      emit('run', task, { ok: result.ok, ...(result.reason ? { reason: result.reason } : {}) })
       // 一次性：执行完即消耗（成功/失败都不留待办；occurrence 留 7 天备查）
       dropTask(task.id)
     }
@@ -410,15 +547,18 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         nextAt,
         action: input.action,
         notebookKey: ident.notebookKey,
+        ownerPage: ident.page,
         sessionAtCreate: ident.session,
         ...(input.action === 'run-cell' && input.target ? { target: input.target } : {}),
         enabled: true,
         createdAt: deps.now(),
       }
       writeTasks([...readTasks(), task])
+      emit('add', task)
       return { ok: true, task }
     },
     remove(id) {
+      const gone = readTasks().find((t) => t.id === id)
       writeTasks(readTasks().filter((t) => t.id !== id))
       const all = readOccurrences()
       let removed = false
@@ -428,9 +568,12 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
         removed = true
       }
       if (removed) deps.store.setValue(OCCURRENCES_KEY, all)
+      if (gone) emit('remove', gone)
     },
     setEnabled(id, enabled) {
+      const hit = readTasks().find((t) => t.id === id)
       writeTasks(readTasks().map((t) => (t.id === id ? { ...t, enabled } : t)))
+      if (hit) emit('enable', { ...hit, enabled }, { reason: enabled ? '启用' : '停用' })
     },
     nextDue() {
       let best: SchedulerTask | null = null

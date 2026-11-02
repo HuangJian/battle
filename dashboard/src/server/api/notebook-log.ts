@@ -805,7 +805,8 @@ export function missingLogMessage(key: string): string {
   return `未知组件: ${key}`
 }
 
-function resolveSession(dir: string, key: string): NotebookSessionInfo | null {
+/** 日志键（`notebook` / `notebook:<session>`）→ 会话。操作日志包装器也用它（site 从 meta 来）。 */
+export function resolveNotebookSession(dir: string, key: string): NotebookSessionInfo | null {
   const sessions = listNotebookSessions(dir)
   if (key === 'notebook') return sessions[0] ?? null
   const session = key.slice('notebook:'.length)
@@ -818,7 +819,7 @@ export function notebookNavEntry(
   dir: string,
   key: string,
 ): { key: string; label: string; status: 'running' | 'stopped' } | null {
-  const session = resolveSession(dir, key)
+  const session = resolveNotebookSession(dir, key)
   if (!session) return null
   return {
     key: `notebook:${session.session}`,
@@ -833,7 +834,7 @@ export function notebookLogPayload(
   key: string,
   maxLines: number | 'all',
 ): LogPayload | null {
-  const session = resolveSession(dir, key)
+  const session = resolveNotebookSession(dir, key)
   if (!session) return null
   const t = readLogTail(session.logPath, maxLines)
   return {
@@ -868,6 +869,9 @@ export function pruneNotebookLogs(
     rmIf(s.logPath)
     rmIf(path.join(path.dirname(s.logPath), `${s.session}.1.log`))
     rmIf(path.join(path.dirname(s.logPath), `${s.session}.meta.json`))
+    // 操作日志与 `.log` 同寿命（命名口径见 api/notebook-op.ts::notebookOpsPaths）
+    rmIf(path.join(path.dirname(s.logPath), `${s.session}.ops.jsonl`))
+    rmIf(path.join(path.dirname(s.logPath), `${s.session}.1.ops.jsonl`))
     removed += 1
   }
   return removed

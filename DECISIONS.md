@@ -10672,3 +10672,70 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   逐字段相同（score 0.212 / 1 杀 / hitRate 0.333）· v7 3000 拍 0.82s。
 - **代价**：18ch 旧权重失去加速（回退 TS）；新 schema 一律 19ch 原生路径；prebuilt 二进制更新，
   节点换码后生效。
+
+## §2026-11-01-goalnn-z4-nav-rename-and-polish（z2-r5nav→z4-nav；新增并行打磨臂 z4-polish：只动 reward.params 六个数 / 五轴）
+
+- **改名**：`z2-r5nav` → `z4-nav`（v7 纪元命名；课程配置逐字未动），起点文件同批改名并搬家：
+  `nn-training/weights/z4-nav/z4-nav.it0.20261101-230656.json`（gitignored，本地存在）。
+- **新增 `z4-polish`**：同起点 / 同任务 / 同预算 / 同 eval / 同 paired seed 的并行臂，只改
+  `reward.params`：`wKill 15→18` · `wHit 1.5→1.8` · `wPickup 4→7` · `wWin 60→72` ·
+  `wPace 6→8` + `paceWindow 1000→800`（六个数、五轴：击杀/命中/拾取/胜率/节奏）。
+  防守 / 伤害 / 死亡 / 终局 / 关卡 / 敌数 / 命 / seed 全不动（不让「更莽」被奖励买单）。
+  目的：打磨击杀、命中、拾取、胜率、节奏；wallPress/千 与 ablate-ch16 可顺手报，但只作旁证。
+- **它不是 z4-nav 的对照**：奖励变 ⇒ `corpus_identity_fp` 变（实测 nav `6dce74ac…` /
+  polish `afedf687…`）⇒ shard 不可复用、不可做训练语料配对；eval 行仍按 `(stage,seed)` 配对
+  （读数可复用）。因果判决仍归 `z4-nav` vs `z3-p2002ctl`（原奖励、同起点）。
+- **被否决**：ch16 训练期 ablation 对照臂（要新增 rollout `--ablate-ch` + 课程字段 + corpus fp
+  管线，成本高，另案）· 采样 pinned 2002/2001 的打磨臂（E1 已覆盖，且会混入第二个变量）·
+  「全轴一起加」的 reward（多变量不可解释；本课只加与目标读数直接对应的 5 个轴）。
+- **验收**：两课 `load_course` 通过；`bc` 同一 v7 起点存在；`corpus_identity_fp` 两值不同；
+  reward.formula / 关卡 / 预算 / eval / seed 两边逐字相同，只有上述 6 个 params 不同。
+
+## §2026-11-01-goalnn-z4-budget-eval-cadence（z4 两课预算 160→320、eval_every 25→10；it150 仍是唯一主判）
+
+- **背景**：用户口径「160 太少」「25 看不清走势」。原值沿用 E1/E2 首轮判决预算（160/25），
+  只为 it150 一个点；现在要**走势**与更长的打磨，需要更长预算与更细的评估粒度。
+- **决定**：`z4-nav` 与 `z4-polish` 同步改为 `iters 320` / `max_hours 10.0` / `eval_every 10`
+  （0,10,…,320 共 33 个点）。**it150 仍是唯一预注册主判**（与 `z3-p2002ctl` 的 800 局配对）；
+  it0–140 / it160–320 的其余点只作走势/止损（熵坍缩、反签名、机制闸），禁止「挑最好的点」。
+- **为什么不破坏配对**：`iters / max_hours / eval_*` 不进 `corpus_identity_fp`（预算/测量键），
+  也不改变 `(rotateSeed, it)` 的种子流；it150 之前的训练轨迹与 C 逐字同配置 ⇒ A vs C 的
+  2002 基毁率配对仍成立。
+- **成本**：plan §4.3 的测算是 30 个满池点 ≈75 min/臂 ⇒ 本档 ~80–90 min/臂（200 局/关 ×4）；
+  训练侧 320 轮按 C 的 1.3 min/轮 ≈7 h ⇒ `max_hours 10.0` 留 ~20% 余量。
+- **被否决**：`eval_every 5`（成本翻倍，且判决只用 it150）· 只延长 iters 不改 eval（仍看不清
+  走势）· 把主判挪到 it300（C 没有 300 点，配对性直接丢失）。
+- **验收**：两课 `load_course` 通过；`corpus_identity_fp` 与改预算前**逐字不变**
+  （nav `6dce74ac…` / polish `afedf687…`）。
+
+## §2026-11-02-bnc-schedule-per-page-and-ops-log（定时任务按页分桶：别的 notebook 页面再也吃不掉你的任务；userscript 操作全量落 dashboard 操作日志）
+
+- **事故**：2026-11-02 凌晨在 Kaggle 页设了两个一次性任务（04:00 跑选中 cell、07:00 停会话），
+  8:00 看时**一个都没执行，dashboard 与 worker 日志零痕迹**。日志侧对账：另一个开着的 Kaggle
+  notebook 页（`huangjian2026/rollout-358870479`）全程在写 cell 输出，`2026-11-01T20:00:28.600Z`
+  （= 04:00:28 本地）与 `22:55/23:08Z`（夹住 07:00）都有段头 ⇒ 那一刻它的 JS 在跑；系统日志无
+  Kernel-Power 42/107/506/507 ⇒ 机器没睡。
+- **根因**：任务表用**全局** GM 键 `bnc:tasks`（plan §3.3 原写「按站点分组」，实现没做），而
+  `tickOnce()` 对「到点了但不属于本页」的任务不是视而不见，而是记 `skipped` + `dropTask` ⇒
+  谁先 tick 谁定生死：隔壁 notebook 页把任务静默吃掉了（且跳过路径不写任何日志/面板历史 ⇒
+  「零痕迹」正是它的样子）。
+- **决定**：① 任务表改**按页分桶** `bnc:tasks:<notebookKey>#<page>`（page = boot 的 pageTag，
+  sessionStorage 跨刷新稳定、页签之间必然不同）⇒ 「每个页面只看得见本页面设置的任务」；
+  ② `ownTask()` 阀：notebook 或 ownerPage 对不上的任务一律**只读跳过**（不写 occurrence、不删、
+  不显示），销毁性判断只归本页；③ 旧全局键**一次性懒搬迁**：只搬「notebook + 创建会话都对得上」
+  的（host 的 frame 会话要握手后才知道 ⇒ 搬迁放在首次读取时），其余留在旧键**不消费**；
+  ④ 新增操作日志通道 `POST /api/notebookOp`（typed POST：`X-Notebook-Companion` + 有界 body），
+  面板按钮 / 命令 / 调度事件全量写 `tmp/notebook-logs/<site>/<session>.ops.jsonl`（append-only、
+  写盘前脱敏与截断、2 MiB 轮转一代、7 天 prune），日志页尾巴带横幅展示最近 40 条。
+- **被否决**：只加 `ownTask` 阀不分桶（同 notebook 的另一个页签仍会看到并可侵消；且跨页 RMW
+  仍会丢更新）· 任务表按**站点**分（plan 原文）：Colab 与 Kaggle 各开一页仍会互吃 ·
+  把操作日志写进 `.log`（`recoverNotebookSession` 会把 meta 之外的字节截掉；还会污染搬运游标）·
+  复用 `/api/notebookLog` 的协议搬操作行（epoch/offset/seq 一个都不适用）· 全局 occurrence 也分桶
+  （taskId 本就唯一，而跨页签 claim 互斥还想保留）· 静默清理旧键（又是一种「吃掉」）。
+- **验收**：userscript `bun run typecheck` + 220 测试绿（新用例：页面隔离 ×2 / 迁移 / 事件上报 /
+  op-log ×5 / 接线 ×5；**变异验证**：把分桶键临时改回 `TASKS_KEY`，三条隔离用例立刻变红）；
+  dashboard `typecheck` + `bun run test` 1900 pass / 0 fail（新用例 9 条：解析脱敏 / 轮转 /
+  不碰 meta / 载荷尾巴 / prune）· `oxlint` 0 warning 两份 · 根 `bun run check` 绿。
+- **代价**：同 notebook 的另一个页签**不再**能接手本页的定时任务（用户口径即如此）；旧键里无法
+  判定归属的残留任务永远不再执行（宁可不动，也不静默吞）；操作日志是新增磁盘写入（有界 + 同寿命
+  prune）。
