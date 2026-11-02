@@ -14,7 +14,7 @@ bun/node、不加载 torch、不跑真 rollout/PPO）。窗**全部调秒级**�
      下一个认领者兼现回收，账本 `lease-orphan-reaped`）⇒ 课程接管自动恢复。
 
 先红后绿（本刀 A/B）：把 `_drain_blocked` 与 `_busy_locked` 的 BC 腿分别关掉 ⇒ ② 的对应断言
-当场红（`holding:*` 与 `busy:*` 两条都不是装饰）；恢复后 2 passed（≈6s，窗是真的秒级）。
+当场红（`holding:*` 与 `busy:*` 两条都不是装饰）；恢复后 2 passed（≈3s：两条真窗口 1.0s / 1.5s）。
 """
 
 from __future__ import annotations
@@ -50,10 +50,16 @@ TOKEN = "e2e-holex-sekret"
 C_A = "e2e-hold-a"
 C_B = "e2e-hold-b"
 C_C = "e2e-hold-c"
-#: 秒级窗：hold 2.5s、BC 1.5s（见模块头：不是模拟时钟，是真等）。对着窗做断言的
+#: 秒级窗：hold 1.0s、BC 1.5s（见模块头：不是模拟时钟，是真等）。对着窗做断言的
 #: 两步之间**先补一个进度锚**（真云机轮内也在这么打点）——否则满载的 xdist 下
 #: 测试进程被换出去几百毫秒就可能把窗放过，把「被压」写成假红。
-HOLD_STALE = 2.0
+#:
+#: 2026-11-02 窗从 2.0s 收到 **1.0s**（用户口径：全循环用例要进 <5s 预算）：本用例要等
+#: **两个**真窗口（④ 打点保活后还得再静默一次才能验「新盘 stale 接管」），所以墙钟下限就是
+#: `2 × 窗 + 0.6s`（hub 子进程 spawn 实测 0.57s，每次 HTTP ~1ms）。有进度锚之后，每处
+#: 「仍 live」的断言与锚只隔**一次往返**（~1ms）⇒ 窗缩到 1.0s 既不缩短那个受威胁的间隔，
+#: 也仍然比它大 1000 倍；而被判 stale 的状态是**粘的**（没人打点就一直是 stale），后续断言无争。
+HOLD_STALE = 1.0
 BC_STALE = 1.5
 PACK = b"PK\x03\x04e2e-hold-pack"
 
