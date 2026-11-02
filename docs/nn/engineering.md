@@ -56,6 +56,75 @@
 `torch` 本就在 `sys.modules`，OR 的兼容支路会成立。要验源码面就得用不存在的模块名把兼容支路
 按住（测试里叫 `_NO_MODULE`）。这就是「单跑绿 / 全量红」的典型，也说明这条 OR 是真实存在的。
 
+## §104 「把重导入改懒」能省多少：上层 1.13s/进程，但**这个码库里拿不到**（2026-11-02，用户指令「Measure collection cost with test modules' heavy imports made lazy」）
+
+**怎么量的（Linux）**：在 `PYTHONPATH` 前置一个假 `torch`（`import torch` / `import torch.nn as nn`
+瞬间返回，属性/调用返回代理，`__mro_entries__` 给一个空基类让 `class X(nn.Module)` 能建类），
+与真 torch 交错跑 `--collect-only`。这是「torch 完全惰性」的**上界**。
+
+| 目标：`tests/ e2e/` | import 总 CPU | 其中 torch | 收集墙钟（3 轮） |
+|---|---|---|---|
+| 真 torch | **1.86s** | 1348ms | 5.39 / 7.09 / 7.30s（机器噪声大） |
+| 假 torch（瞬间） | **0.73s** | ~0 | 3.70 / 3.38 / 3.55s |
+
+⇒ 惰性的全部收益 ≈ **1.13s import CPU / 进程**，落到墙钟大约 1.1–1.5s。
+
+**但这个上界在本仓拿不到**（这是本节真正的结论）：
+
+* torch 不是「测试模块顺手导的」：`common/hub/remote/trainer/worker/tools` 里 **26 个生产模块**
+  顶层 `import torch`，且 `worker/models/{core,student,rl_model}.py` 里的 **4 个 `class …(nn.Module)`**
+  在**导入时就要真基类** —— 我的假 torch 是靠 `__mro_entries__` 偷渡才让收集跑通的，真改懒就要
+  动这些类的定义方式（不是「把 import 挪进函数」那一点活）。
+* 两个分发器的账方向相反：forkdist 路径上 `warmup._session_uses("torch")` 的前提正是
+  「收集相已经 import 了 torch」，改懒它就不再预热 ⇒ 每个 worker 各付 import(1.35s) + 首算子(1.3–1.8s)；
+  拿 1.13s 去换 N × ~3.1s，明显亏。xdist 路径上才是净赚（≈1.1s/worker）。
+
+**若要真往这条路走，得配对两道前提**：① 预热判据从 `sys.modules` 改成「收集到的模块源码里提没提
+`import torch`」（`source_scan` 读文本，~50ms）；② 接受生产模块的惰性化改造（比看上去大）。
+
+**Windows 未测**（本机只有 Linux，我不能把这里的数字当那边的结论）。在 Windows 上重跑这两条即可：
+
+    python -X importtime -m pytest tests/ e2e/ --collect-only -q -s   # 看 torch 那一行的 cum
+    PYTHONPATH=<仓>/tmp/lazyprobe python -m pytest tests/ e2e/ --collect-only -q -s  # 同上但假 torch
+
+注意必须带 `-s`：pytest 的全局捕获会把 `importtime` 表吃掉（本节上一次量错就是这个原因，
+已在 §103 里标了那个「量测限制」）。结构上两边一样（xdist 每 worker 各付一份），但 Windows 上
+import 与文件系统都更慢，不能拿 Linux 的 1.13s 当那边的数。
+
+## §103 xdist 路径的「重复启动」审计：`(1+N)` 份解释器 + 收集，是结构性的；唯一可动的只有收集成本本身（2026-11-02，用户指令「Audit the xdist path …」）
+
+**键事实**（探针 `sitecustomize` 在**每个新解释器**里打一行，同一组用例两种分发器各跑一遍）：
+
+| 分发器 | 新解释器 | 收集 | `import pytest` |
+|---|---|---|---|
+| `--forkdist 2` | **1**（worker 是 fork 出来的，不重新 exec） | 1 | 1 |
+| `-n 2`（xdist） | **3**（master + 2 个 exec 出来的 worker；probe 里 worker 的 ppid = master） | 3 | 3 |
+
+即 xdist 下每份 worker（**包抬 master**）各自重付一遍：解释器 0.02s + `import pytest` 0.15s +
+**整棵测试树的收集**。收集实测：全量 `4.3–4.5s`（冷 8.2s）· `tests/` 4.18s · `e2e/` 0.68s（440 个
+测试模块，`tests/common/test_torch_pickle.py:28` 还在模块顶层 `import torch`）。
+
+**这笔重付值多少**（本机 16 核，同一目标集，交错各一次）：
+
+    --forkdist 8   42.78s
+    -n 8           49.11s   ⇒ 8 份冗余收集 ≈ 6.3s（15%）
+
+和 §49 当年 `-n 12` 的「worker 自用 CPU 35% 是重复收集」同源。
+
+**CI 上能省吗（那个路径只有 xdist）**：不能，而且合并两层也不省。CI = 两层两次调用、每次
+`-n 物理核`（2 vCPU）⇒ `2 次 × 3 个进程 = 6 份收集` ≈ 14.6s CPU；合并成一次调用是
+`3 × (4.18+0.68) = 14.6s`，**一模一样**（进程数与目标集合的乘积不变），只省 3 次进程启动
+~0.5s。这也解释了 §50 的实测：2 worker 下 forkdist 与 xdist 墙钟同价（45.03 vs 44.95s）。
+
+**结论：无可动的浪费。** xdist 的 daemon 模式（worker 独立 exec + 各自收集）是为了跨平台
+（Windows 没有 `os.fork`）而选的，守门侧已经选了物理核数；剩下能动的只有**收集成本本身**：
+让测试模块的重导入变懒能让它下降，但那会把 Linux 上「收集相已 import torch ⇒ 预热能 COW 共享」
+的前提打掉（§100：`_session_uses("torch")` 就变假），于是 forkdist 的每个 worker 各付一次
+首算子 —— 是**交换**不是白拿。要动这块得先拿两个平台的两组读数，而不是顺手改。
+
+**量测限制**：`-X importtime` 在本次收集里没有输出 `torch` 那一行（而 meta-path 探针确实看到
+`test_torch_pickle.py:28` 在收集相导入了它）⇒ **不给 torch 占收集多少的数字**，只给总账。
+
 ## §102 子 pytest 的 0.3s 启动里没有可删的东西：它不是浪费，是框架自己的 import（2026-11-02，用户指令「Cut pytest's own 0.3-0.6s startup in the scratch-suite children」）
 
 **先拆预算**（本机，`tmp/` 里 2 条假用例，冷/热 `.pyc` 都已就位）：
