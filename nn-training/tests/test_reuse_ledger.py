@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from tests.helpers import scan_cache
 from tools import reuse_audit
 
 #: R2 豁免表的**期望值**（模块 stem，去掉扩展名；扩展名由 `reuse_audit` 侧补）。
@@ -140,14 +143,74 @@ def _stems(modules: frozenset[str]) -> frozenset[str]:
     return frozenset(m.rsplit(".", 1)[0] for m in modules)
 
 
+#: 逐文件取值的**磁盘**缓存版本（`tests/helpers/scan_cache.py`）：`_funcs` 的四元组口径
+#: （`(name, 内容指纹, 形状指纹, lineno)`）一变就 +1，整库作废。键是「路径 + sha256(内容)」，
+#: 不是 mtime/size——源文件一改键就变，不可能读到旧指纹。
+_FUNCS_CACHE_VERSION = 1
+
+
+def _cached_funcs(cache: scan_cache.Cache) -> Callable[[Path], list[tuple[str, str, str, int]]]:
+    """`reuse_audit._funcs` 的缓存版（同一个函数，只是同一份内容不重算）。
+
+    为什么能缓存：`_funcs(path)` 只依赖文件内容（`_shape` 擦掉标识符与常量、也不带 lineno 这类
+    attributes），返回的四个元组都是可 pickle 的纯数据；账本的分组/计数全建立在它们上面 ⇒
+    命中只意味着「这份内容算过」——
+    它只省时间，不改结论（底线由 `test_cached_funcs_match_a_fresh_parse` 每次对账）。
+    """
+
+    def cached(path: Path) -> list[tuple[str, str, str, int]]:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # 读不了：交给生产实现自己把「解析失败」记成空（不缓存这种一次性情况）。
+            return reuse_audit._funcs(path)
+        hit = cast(list[tuple[str, str, str, int]] | None, cache.get(path, text))
+        if hit is not None:
+            return hit
+        value = reuse_audit._funcs(path)
+        cache.put(path, text, value)
+        return value
+
+    return cached
+
+
 @pytest.fixture(scope="module")
 def report() -> reuse_audit.Report:
-    """整仓扫一次（module 级：一次扫描供下面的断言共用）。"""
-    return reuse_audit.scan()
+    """整仓扫一次（module 级：一次扫描供下面的断言共用）。
+
+    逐文件的 `ast.parse` + 指纹按**内容哈希**缓存（整仓 348 文件：冷 5.0s → 命中 setup 0.17s）；
+    只给 `scan()` 换「怎么读一个文件」，分组与基线口径一字未改。
+    """
+    cache = scan_cache.Cache(
+        "reuse-audit-funcs", version=_FUNCS_CACHE_VERSION, root=reuse_audit.ROOT
+    )
+    try:
+        return reuse_audit.scan(funcs=_cached_funcs(cache))
+    finally:
+        # `scan()` 走完了整个 `prod_files()` 面 ⇒ 只留本轮读到的键（编辑过的旧内容条目会被清掉）。
+        cache.save(full_scan=True)
 
 
 def _counts(report: reuse_audit.Report) -> dict[str, int]:
     return report.to_json()["counts"]  # type: ignore[no-any-return]
+
+
+def test_cached_funcs_match_a_fresh_parse(report: reuse_audit.Report) -> None:
+    """缓存只是加速器：缓存路径与鲜 `ast.parse` 的四元组逐字段相同。
+
+    为什么单独钉：键若退化成 mtime/size、或 `_funcs` 口径变了却忘了 +版本，账本就静默用旧
+    指纹——计数基线看着绿，实际已不反映源码。样本按**固定步长跨包**取（不挑「好文件」：
+    挑好文件会让这条守卫对它真正要防的情况失明）。`report` 参数只为保证缓存已填满。
+    """
+    files = reuse_audit.prod_files(reuse_audit.ROOT)
+    assert report.files == len(files) > 200, (report.files, len(files))  # 扫描面读错时别静默全绿
+    cache = scan_cache.Cache(
+        "reuse-audit-funcs", version=_FUNCS_CACHE_VERSION, root=reuse_audit.ROOT
+    )
+    cached = _cached_funcs(cache)
+    step = max(1, len(files) // 7)
+    for path in files[::step][:7]:
+        assert cached(path) == reuse_audit._funcs(path), f"缓存与鲜解析不一致：{path}"
 
 
 def test_ledger_counts_only_go_down(report: reuse_audit.Report) -> None:

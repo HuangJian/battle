@@ -25,6 +25,46 @@
 
 ---
 
+## §107 `reuse_audit.scan()` 接上 `scan_cache`：整仓 `ast.parse` 3.13s → 0.17s（冷启动不变）（2026-11-02，用户指令「Route reuse_audit.scan's per-file _funcs through scan_cache」）
+
+**为什么它一直没被发现**：`conftest.py::pytest_runtest_makereport` **只对 call 阶段计时**
+（fixture 建拆不算），而这份整仓扫描住在 `tests/test_reuse_ledger.py` 的 module 级夹具里
+⇒ 单跑 setup **3.13s（冷 5.77s）**，门禁 8 worker 抢 CPU 时**一整个 16.67s**，却从不进「>5s 警告」。
+它是「整仓扫描」族（锁重入 / 文本断言 / 标签扫描）里唯一还没吃 `scan_cache` 的一个。
+
+**接法（只加一个显式接缝，不碰口径）**：`tools/reuse_audit.py::scan()` 多一个
+`funcs` 关键字（缺省 `_funcs`，CLI 跑法恒走缺省、不碰缓存）；测试侧用
+`tests/helpers/scan_cache.py` 包一层：
+
+    cache = scan_cache.Cache("reuse-audit-funcs", version=_FUNCS_CACHE_VERSION, root=reuse_audit.ROOT)
+    reuse_audit.scan(funcs=<按「路径 + sha256(内容)」命中的 _funcs>)
+    finally: cache.save(full_scan=True)      # 走完了整个 prod_files() 面 ⇒ 只留本轮读到的键
+
+**为什么能缓存**：`_funcs(path)` 只依赖文件内容——`_shape` 擦掉标识符与常量、且不带
+`lineno` 这类 attributes（它有自己的一段提速史），返回的四个元组都是纯数据。分组 / 计数 /
+基线的输入一字未变 ⇒ 缓存只省时间，不改结论。
+
+**实测**（同一台机）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 单跑 setup（缓存热） | 3.13s | **0.17s** |
+| 单跑 setup（缓存冷） | 4.99–5.77s | 4.99s（不变：冷启动就得扫一遍） |
+| 门禁内 setup（缓存冷，8 worker 抢 CPU） | 14–20s | 16.67s（不变） |
+| 全量 forkdist 墙钟（冷 → 热） | — | 72.3s → **56.4s**（同机、同 5465 用例） |
+
+**坑 / 约束**：
+
+* 版本常量 `_FUNCS_CACHE_VERSION` 必须随 `_funcs` 四元组口径改动 +1（键含内容哈希但不含
+  「算法的口径」）。护栏 `test_cached_funcs_match_a_fresh_parse` 每次拿**固定步长跳包**的
+  样本重算一遍 `_funcs()` 对账：键退化成 mtime/size、或口径变了忘 +版本，它当场红
+  （挑「好文件」会让这条守卫对它真正要防的情况失明）。
+* 库不小：**348 条 / 14MB**（`_shape` 串本来就长）。因为 `full_scan=True` 只留本轮读到的键，
+  大小恒定在每个文件一条；改过的文件会留下旧内容条直到下一次全量扫描。
+* 冷启动那一次仍有 8 份重复计算（每个 `forkdist` worker 各扫一遍再原子替换同一份库）。
+  要再降就得上跨进程锁/单 worker 预热，那是另一件事（`tests/helpers/warmup.py` 里明写「只有
+  一个 worker 会付的扫描」不走预热）。
+
 ## §106 并入 origin/goal-nn 后的一次真红：v7 把 stem 抬到 19ch，而仓里**六个** golden 全是 18ch（2026-11-02，用户指令「git pull，检查并入的代码是否可以应用前面几次 pytest 优化的方式」）
 
 **审计结论先说**：并入的 575 行测试**没有**再出现前面几轮优化针对的任何一类浪费——

@@ -28,6 +28,7 @@ import json
 import re
 import sys
 import tokenize
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -339,8 +340,17 @@ def _funcs(path: Path) -> list[tuple[str, str, str, int]]:
     return out
 
 
-def scan(root: Path = ROOT) -> Report:
-    """扫一遍生产树，产出账本（确定性：同输入同输出）。"""
+def scan(
+    root: Path = ROOT, *, funcs: Callable[[Path], list[tuple[str, str, str, int]]] | None = None
+) -> Report:
+    """扫一遍生产树，产出账本（确定性：同输入同输出）。
+
+    `funcs` = 逐文件取值函数（缺省 `_funcs`）。只给调用方换「怎么读一个文件」，**分组/计数/
+    基线口径不变**：`tests/test_reuse_ledger.py` 用它接 `tests/helpers/scan_cache.py`
+    （路径 + 内容哈希键的磁盘缓存）——整仓 `ast.parse` 每遍 3~5s，源文件不改就不该重算。
+    本工具自己（CLI 跑法）恒走 `_funcs`，不碰任何缓存。
+    """
+    read_funcs = funcs or _funcs
     rep = Report()
     by_content: dict[str, list[tuple[str, str, int]]] = collections.defaultdict(list)
     by_shape: dict[str, list[tuple[str, str, int, str]]] = collections.defaultdict(list)
@@ -351,7 +361,7 @@ def scan(root: Path = ROOT) -> Report:
     rep.files = len(files)
     for f in files:
         rel = f.relative_to(root).as_posix()
-        for name, content, shape, line in _funcs(f):
+        for name, content, shape, line in read_funcs(f):
             rep.functions += 1
             by_name[name].add(rel)
             key = hashlib.sha1(content.encode()).hexdigest()  # 去重键，非安全用途
