@@ -18,7 +18,7 @@ fc / 动作头 / value 头不动：本波 `SCALAR_DIM` / `POLICY_EXTRA_DIM` / �
 用法（必须走 nn-py-safe.sh）：
   bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/migrate_obs_channel.py \
     --from nn-training/weights/z2-r5guard/z2-r5guard.it500.*.json \
-    --to   nn-training/weights/z2-r5nav/z2-r5nav.it0.json
+    --to   nn-training/weights/z4-nav/z4-nav.it0.json
 """
 
 from __future__ import annotations

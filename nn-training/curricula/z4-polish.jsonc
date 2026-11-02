@@ -1,0 +1,181 @@
+// 课程 z4-polish —— z4 并行**打磨臂**：击杀 / 命中 / 拾取 / 胜率 / 节奏四轴加压（2026-11-01）
+//
+// 状态：**未开课**（预注册；与 `z4-nav` 同批可在控制台并行开，同 codehash / 同 schema 7）。
+//
+// ══ 它是什么 / 不是什么 ═════════════════════════════════════════════════
+//   · **是**：从同一个 v7 起点（guard it500 迁移）出发的**训练侧奖励重加权**臂，用来打磨
+//     击杀、命中、拾取、胜率与节奏（these are training-side levers, 不改任务侧：关卡/敌数/命/
+//     终局标准逐字沿用 z4-nav）。
+//   · **不是** `z4-nav` 的对照：奖励变 ⇒ `corpus_identity_fp` 变 ⇒ shard 不可复用、也不能与
+//     nav 做训练语料配对。它的 eval 行只按 (stage,seed) 与 nav 配对（读数可复用，shard 不可）。
+//   · 机制读数（wallPress/千、ablate-ch16）可以顺手报，但**不能**用来判 ch16 的因果效应；
+//     因果判决仍归 `z4-nav` vs `z3-p2002ctl`（同为原奖励、同起点）。
+//
+// ── 改了什么（相对 z4-nav，只有 reward.params 六个数 / 五轴）────────────
+//   wKill    15.0 → 18.0   （击杀 +20%）
+//   wHit      1.5 →  1.8   （命中 +20%）
+//   wPickup   4.0 →  7.0   （拾取 +75%；P0 的「不去捡」缺口）
+//   wWin     60.0 → 72.0   （胜率 +20%）
+//   wPace     6.0 →  8.0   （节奏：每千超额拍 +33%）
+//   paceWindow 1000 → 800  （同一超额拍的斜率再 ×1.25 ⇒ 总节奏压力 ≈ ×1.67）
+//   （节奏一项拆成 wPace 与 paceWindow 两个数 ⇒ 六个数、五个轴。）
+//   **不动**：wDmg / wDeath / wBase / wBrick / wWalk / wThreat / wDef / pDef / capDef /
+//   terminal / 关卡集 / 预算 / eval / paired_rotate_seed —— 不让「更莽」被奖励买单。
+//
+// ── 起点 / 对照 ────────────────────────────────────────────────────────
+//   `bc` = `nn-training/weights/z4-nav/z4-nav.it0.20261101-230656.json`
+//   （与 z4-nav **同一个文件**：guard it500 → v7 迁移，旧 schema 输入逐位一致）。
+//   参照读数：`z4-nav` 的 it0/it50/it100/it150；不另设独立对照臂。
+//
+// ── 预注册读数（it150；与 z4-nav 同批 200 局/关 × 4 配对）────────────
+//   1) 主：**kills/局 ≥ z4-nav it150 + 0.5**，且 `pickups/局 ≥ nav + 0.3`；
+//   2) 胜率/终局：**2002 基毁率 ≤ nav −5pp**；四关 clear 总和不得低于 nav；
+//   3) 节奏：已通关局的 clear 拍数中位 ≤ nav −5%（不拿 timeout 局计入）；
+//   4) 机制旁证：`wallPress/千` 与 `ablate-ch 16` 翻转率照报（不判因果）；
+//   5) 止损：entropy <0.7×起点连续 5 点；共同反签名（lives_exhausted >20% /
+//      aimHits 掉 >15% / cellsVisited 掉 >10% / aimBricks 涨 >30%）任一即停；
+//      it100 若 kills 与 pickups 双双不高于 nav ⇒ 提前停（加价没转成行为）。
+//
+// ── 运行约束 ───────────────────────────────────────────────────────────
+//   · 与 z4-nav 同会话/同 codehash；**同一节点上不要用同一 backup_prefix**（本题已分开）；
+//   · `iters 320 / eval_every 10` ⇒ 主读数仍是 **it150**（与 z4-nav 同批配对）；
+//     it0–140 / it160–320 的其余点只作**走势/止损**，不得挑最好的点当结论；
+//     eval 成本 ≈ 33 点 × 800 局/臂（plan 的测算是 30 点 ≈75 min/臂）；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+
+{
+  "version": 5,
+  "name": "z4-polish",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 1.8,
+      "wWin": 72.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 8.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 800.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 7.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z4-nav/z4-nav.it0.20261101-230656.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z4-polish/weights.json",
+  "traj": "tmp/z4-polish",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z4-polish",
+  "backup_prefix": "z4-polish",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 200,
+  "eval_every": 5,
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结算节（2026-11-02 结课回填；人工停课 at it200，权重到 it203）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **判决：五轴加价没有一条转成行为；主读数（kills/pickups）双双反向；腿间不可分。**
+//
+// ① 主判（预注册 it150，2002 基毁率配对，200 局）：
+//      91.5% vs it0 88.5% —— 转好 15 / 转坏 21，**净 −6**，p=0.405 ⇒ 不过。
+// ② 预注册四读数（it150，对 `z4-nav` 同批同面板）：
+//      kills/局   **11.51 vs nav 12.24**（要求 ≥ nav+0.5，实际 **−0.73**）⇒ 反向
+//      pickups/局 **2.58 vs nav 2.69**（要求 ≥ nav+0.3，实际 **−0.11**）⇒ 反向
+//      2002 基毁率 91.5% vs 91.5%（要求 ≤ nav−5pp）⇒ 0
+//      已通关局 clear 拍中位 5840 vs 5874（要求 −5%，实际 −0.6%）⇒ 不过
+//     ⇒ 提前停条件（it100 kills 与 pickups 双双不高于 nav）**已触发**（pickups +0.08 未过线）。
+// ③ 全池（it0→it200）：clear 32.0%→32.6%（净 +5，p=0.808）· 基毁 54.1%→52.1%（净 −16，p=0.372）
+// ④ 分关（it0→it200，clear）：2000 −3 · 2001 +10 (p=0.34) · 2002 −3 · 2003 +1 ⇒ 全不显著
+// ⑤ 腿间（it200，800 局配对）：clear polish 独赢 142 / nav 独赢 149，净 −7，**p=0.725**
+//      ⚠ **更正一条我自己的误判**：it150 时读到「nav 显著更好（净 −37，p=0.040，主因 2003 −25）」，
+//      到 it200 该差异完全消失（2003 净 +6，p=0.59）⇒ **it150 那个 p=0.04 是相位噪声**。
+//      教训：100 个 eval 点上出现一次 p<0.05，不足为凭；跨点复现才算效应。
+// ⑥ 机制：
+//      wallPress/千 286.9 → 253.0 (it150) → 245.5 (it200) = −14.4%
+//      拾取率（同口径含 star）63.2% → 64.7% (it150) → **63.2% (it200)：零变化**
+//      kills 11.68→12.20 · 余量 0.297→0.290（略降）· idleTicks 234→267（+14%）
+//      **节奏项恒为 0**：`- min(paceCap, wPace*max(0, ticks−kills*paceTicks)/paceWindow)`，
+//        `paceTicks 1200 × 20 敌 = 24000 > max_ticks 20000`，且 `timeout_frac = 0.0`
+//        ⇒ 任何局都不会为正。本课把 `wPace 6→8` / `paceWindow 1000→800` 改在死项上，
+//        **6 个参数里有 2 个是空转的**（占改动量 1/3）。
+// ⑦ 给下一腿的输入：
+//      a) **抬事件价买不到拾取率**：wPickup 4.0→7.0（+75%）后同口径拾取率零变化；
+//         结合 `x5-approach.jsonc` 的「wPickup 3.0 跑 63 轮 pu 0.71→0.69」⇒ 价格不是杠杆。
+//      b) **多轴同改不可归因**：6 个数一起动，事后无法判断谁害了谁。后续腿一律分组 +
+//         独立判决（`z4-pick-wall` 已按此改写判据段）。
+//      c) **写课程时先做量级乘法**：pace 项恒零用一个乘法就能查出来，不必等 200 轮。
+//
+// 数据出处：`tmp/z4-polish/{eval_log,training_log}.jsonl`（39 点 × 800 局）·
+//   `nn-training/weights/z4-polish/`（203 个权重 it1..it203）·
+//   `reports/z4-nav-polish-20261102.md` · `tmp/z4-final.py` / `tmp/z4-final2.py`。
+//   墙钟 11-01 23:59 → 11-02 11:37（11.6h），eval 占 ~3.0h。
+//   停课理由：预注册的两条提前停条件均已触发 + 五轴全部反向 ⇒ 继续无新信息。

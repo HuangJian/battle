@@ -81,6 +81,17 @@ new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
 - 本地 smoke（scratch 17ch 权重，stage0/seed1/600 ticks，`--ablate-ch 16`）：60 decisions，
   `ch16` 组 `flipsMove=1 / dMove=0.210 / dFire=0.109` ⇒ 16 不再被判越界、且该通道真的进图
   （随机权重下就有非零读数；`drop0` 起点应当读 0，那是预期）。
+- **批量读数工具** `nn-training/tools/e2a_readout.py`（必须走 `nn-py-safe.sh`）：按课程真实
+  4 关 × `EVAL_SEEDS` 前缀并发跑局，聚合 `ablate.groups`，输出 `ch0`（阳性对照）/`ch16` 的
+  move 翻转率与闸判定（`ch16 ≥ ch0 的 1/3`）；同报 `stem.weight` 第 16 列 L2。用法：
+  ```
+  bash tools/githook/nn-py-safe.sh nn-training/tools/e2a_readout.py \
+    --weights <it150 weights.json> --course nn-training/curricula/z4-nav.jsonc \
+    --games-per-stage 50 --parallel 4
+  ```
+  本地 4 局 smoke（it0 起点）：1016 decisions，`ch0=2.56%` / `ch16=0`（drop0 起点按构造为 0，
+  只在 it150 用）；stem 第 16 列 L2=0、旧 obs 列均值 7.57。单测 5 例
+  `tests/tools/test_e2a_readout.py`（聚合闸真值表 + stem 列 L2）。
 
 ### 57.5 门禁与三端对账（2026-11-01 本机）
 

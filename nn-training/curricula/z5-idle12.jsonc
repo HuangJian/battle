@@ -1,0 +1,145 @@
+// 课程 z5-idle12 —— `z5-safe-base` 的**并行机制腿**：只改 `wIdle 0.05 → 0.12`（2026-11-02）
+//
+// 状态：**未开课**（预注册；开课由人在控制台走 W4 会话）。
+// 与 `z5-safe-base` **逐字相同**（关卡 / 起点 / 采样计划 / eval / 预算 / 其余 22 个奖励参数），
+// **唯一差异 = `wIdle` 0.05 → 0.12**（×2.4）。
+//
+// ══ 为什么挑 idle（数据依据）════════════════════════════════════════════
+//   `z4-pick-wall.it205` 在全 35 关安全基地图上的实测（**本课起点**）：
+//     墙压 **681/千**（每千拍有 681 拍在顶墙）· idle 中位 **244** · 胜率 39.3% ·
+//     kills 14.11 · cellsVisited 103 · 拾取率 44.6%。
+//   最差三关：**Checkers 976/千 / Iron Curtain 830 / Brick Maze 679**，
+//     Checkers 胜率 **4%**、击杀 **1.68/局** —— 它是**卡在墙里**，不是打不过。
+//   `wallPressTicks` **不在 METRICS 列里**（只在 eval 行）⇒ 入不了 formula；
+//   唯一可用的代理是 `idleTicks`（`player.moving === false`，想动被地形挡也计）。
+//
+//   `z4-pick-wall` 已用 `wIdle 0.05` 验证过**方向**（同批对照：idle 196 vs 无此项的 260–272，
+//   **−25%**），但剂量不够（当时的判据要 ≤130）。本课就是它的**剂量-反应**：
+//   0.05 → 0.12，看 idle 能不能从 244 压到 150 以下、墙压能不能从 681 降到 480 以下。
+//
+// ══ 代价（Φ 拆账）════════════════════════════════════════════════════
+//   idle 项从 −13.90 变 **−33.36**（起点快照），Φ 从 214.5 降到 **195.0（−9%）**。
+//   value 头要重拟合，前 20 轮不判。其余所有项不变。
+//
+// ══ 预注册判据（it100 结；面板 = 全 35 关 × 20 seed = 700 局/点）═══════════
+//   起点（= z5-safe-base 的起点，`z4-pick-wall.it205`，700 局实测）：
+//     idle 244 · 墙压 681/千 · 胜率 39.3% · kills 14.11 · cellsVisited 103 · 拾取率 44.6%
+//   主 1：`idleTicks` 中位 **≤150**（−38%）
+//   主 2：`wallPressTicks`/千 **≤480**（−30%）
+//   守卫（任一破 ⇒ 停）：kills **≥12.0**（−15%）· clear **≥35%**（−4.3pp）·
+//     cellsVisited **≥103**（不许为了少停而变懒）· 拾取率 **≥40%**
+//   反签名：`aimMisses` 涨 >40%（起点 3.96）· hitRate 掉 >15%（起点 0.729）
+//   中间读点 **it50**：idle ≤200 且 kills ≥13 ⇒ 继续；否则杀腿（0.12 已经比 0.05 贵，没动静就是机制到头）
+//
+// ══ 与 z5-safe-base 的归因关系 ═══════════════════════════════════════
+//   两腿只差一个参数 ⇒ 同面板读数**可以直接差分归因给 idle 剂量**（Φ 差 9% 是唯一杂音，
+//   但它对 advantage 的影响是常数级的，不改排序）。这是本课存在的全部理由：
+//   **给 z5-safe-base 的 idle 项做一次干净的剂量-反应**，顺带看胜率 / 耗时 / 拾取 / 击杀
+//   这几个读数会不会跟着动。
+//
+// ══ 运行约束 ═══════════════════════════════════════════════════════════
+//   · 与 z5-safe-base 同会话（v7 / schema 7），可并行开；**不要共用 backup_prefix**；
+//   · `iters 500 / max_hours 48 / eval_every 5 / eval 20 seed×35 关`（与 z5-safe-base 相同）；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+
+{
+  "version": 5,
+  "name": "z5-idle12",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      // 卡墙（**继承起点的唯一优势**：`z4-pick-wall.it205` 是带这个项训出来的，
+      // 去掉它 idle 会反弹回 nav0 的 365 拍。必须保留）
+      "- wIdle*min(idleTicks, idleCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.5,
+      "walkCap": 200.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wIdle": 0.12,
+      "idleCap": 800.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z4-pick-wall/z4-pick-wall.it205.20261102-173625.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 48,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z5-idle12/weights.json",
+  "traj": "tmp/z5-idle12",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z5-idle12",
+  "backup_prefix": "z5-idle12",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

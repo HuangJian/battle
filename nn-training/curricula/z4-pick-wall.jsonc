@@ -1,0 +1,249 @@
+// 课程 z4-pick-wall —— 修两条已确认的行为缺陷：**不捡道具** + **卡墙不动**（2026-11-02）
+//
+// 状态：**未开课**（预注册；开课由人在控制台走 W4 会话）。
+// 起点 = `z4-nav.it0`（v7 / OBS_CHANNELS 17 / stem 19ch），与 z4-nav、z4-polish **同一个文件**
+// ⇒ 三腿逐字可比；本腿不是 A/B 对照（奖励变 ⇒ corpus fp 变 ⇒ shard 不可复用），
+// 只与 z4-nav 按 (stage,seed) 配对读 eval。
+//
+// ══ 为什么是这两个（读数出处 = reports/z4-nav-polish-20261102.md）═══════════
+//   ① 不捡道具：z4-nav 同口径（含 `starsCollected`）拾取率 it0 **63.2%** → it177 **65.0%**，
+//      177 轮只涨 1.8pp；分类型无价值梯度（bomb 71.3 / freeze 70.7 / shield 64.3 /
+//      tank 63.4 / star 76.1）⇒ 纯「顺路撞到」。抬价到 7.0（z4-polish）**零效果**
+//      （65.0 → 64.7），因为 cap 6 与实际 spawn 6.15 撞顶 + 单品只值 1/5 次挨打。
+//   ② 卡墙不动：`wallPressTicks` 全池 287/千 → 252/千（it150），2002 关 **426/千**、
+//      cellsVisited 只有 69（四关最低）、拾取率 53%（最低）；`idleTicks` 全池均值 263 拍/局。
+//      公式里**没有任何一项**直接给「卡住」定价——唯一的间接项 `wWalk` 的 cap=20，
+//      而实测 cellsVisited 中位 99 ⇒ **96–99% 的局在开局 ~7% 时长内就把移动奖励拿满**，
+//      之后走不走都是 0。加上 `pace` 项恒为 0（20 敌 × paceTicks 1200 = 24000 > max_ticks
+//      20000，且 timeout_frac = 0）⇒ **停住不动的边际成本 = 0**。
+//
+// ══ 改了什么（两组，每组一个机制；其余 14 个 reward 参数逐字不动）════════════
+//   组 A · 捡道具（2 个键）
+//     wPickup      4.0 → **20.0**   （一个道具 = 1.33 次击杀 = 0.88 次挨打）
+//     pickupCap    6.0 → **10.0**   （解除与 spawn 6.15 的撞顶）
+//   组 B · 卡墙（3 个键 + 1 个新项）
+//     wWalk        1.0 → **0.15**   ┐ 同一机制：把「移动」的钱从「前 20 格」摊到全 200 格。
+//     walkCap     20.0 → **200.0**  ┘ 总量 20 → 30 分，但整局都在付。
+//     + 新项 `- wIdle*min(idleTicks, idleCap)`，wIdle **0.05** / idleCap **800**
+//       （实测 idleTicks 均值 263 拍 ⇒ 罚 13 分/局；cap 800 防极端局爆掉）
+//   **不动**：wKill 15 / wHit 1.5 / wWin 60 / wBase 3.0 / wDmg 0.12 / wDeath 18 / wPace 6 /
+//   paceTicks 1200 / paceWindow 1000 / paceCap 36 / wBrick 0.25 / brickCap 12 /
+//   wThreat 0.01 / threatCap 500 / wDef 2.5 / pDef 0.15 / capDef 80 / terminal 四项 /
+//   关卡集 / 敌数 / 命数 / max_ticks / eval / paired_rotate_seed / lr / epochs / mb /
+//   gamma / lam / target_transitions。
+//
+// ══ 剂量推导（为什么是 20 / 0.05，不是别的数）══════════════════════════════
+//   上游读数（z4-nav it150 全池 800 局）：kills 12.24 · dmg 269/局 · picks 6.4/局 ·
+//   idle 263 拍 · cellsVisited 103 · ticks 4255。
+//   · 道具 20 分 = 1.33 kill（15）= 0.88 次挨打（22.8）⇒ **不会比打仗更赚**；
+//     但 20 分 ≫「绕 2 格」的机会成本（≈0.4 分）⇒ **过了决策阈值**。
+//     上一次 7.0 没过阈值（7 × GAE 衰减后 < 挨打折现），这次按 5× 上量。
+//   · 死一次的代价 = wDeath 18 + 挨打 22.8 = 40.8 > 20 ⇒ **为捡一个道具死不划算**，
+//     守卫靠 kills/clear 抓（见判据）。
+//   · wWalk 总量 30 分 vs 现在的 20 分，但摊到 200 格 ⇒ 走 2 格 = +0.3 分，
+//     **单靠移动买不到道具**，两组必须同时生效才有效（这是本腿的联合假设）。
+//   · idle 0.05 × 263 = 13 分 vs 道具 20 分 ⇒ 卡住 15 拍 ≈ 半价于一个道具。
+//
+//   ⚠ **Φ 量级实测（it150 均值快照，`tmp/z5-check.py`）：221.9 → 308.2（+39%）**——
+//     不是按 mean_ret 估的 2.5 倍：kill 项本身占 183.6，pickup 只从 24 涨到 128。
+//     value 头要重拟合，`value` loss 前 20 轮可能升到 600+（z4-polish 加价 20% 时
+//     从 406 → 429）。**前 20 轮不判 value loss**（有 `value_anchor 0.001` 兜底）。
+//
+// ══ 预注册判据（it60 结，不拖到 150）—— **两组独立判决，互不连坐** ═════════
+//   ⚠ 2026-11-02 修订（追溯 `y25-price ← … ← x5-rebirth` 之后）：z4 的 formula 缺
+//     `wApproach` 与三个 `wFr*`，而 `x5-approach.jsonc` 的实测是
+//     「**wPickup 3.0 跑 63 轮 pu 0.71→0.69 纹丝不动**，换 wApproach 才 +30.4%」
+//     ⇒ 组 A（抬事件价）在机制上大概率不动，组 B（治卡墙）完全独立。
+//     **不许用一条总判把两组绑死**，否则"卡墙修好了"会被"拾取没动"连坐掉。
+//
+//   组 A（捡道具：`wPickup` 4→20 / `pickupCap` 6→10）
+//     · 成立：it60 同口径拾取率（(powerUpsCollected+starsCollected)/powerUpsSpawned）
+//       **≥85%**（起点 63.2%）且 2002 关 **≥70%**（起点 53.3%）
+//     · 未定：70–85%
+//     · 不成立：**<70%** ⇒ 组 A 判负，**但不连坐组 B**：继续跑到 it200，只读 B
+//   组 B（卡墙：`wWalk`/`walkCap`/`wIdle`）
+//     · 成立：it60 `idleTicks` 中位 **≤130**（起点 263）且 `wallPressTicks`/千 ≤200（起点 287）
+//     · 未定：idle 130–180
+//     · 不成立：**idle >180**
+//   副：cellsVisited 中位 ≥120（起点 99）。
+//   守卫（任一破 ⇒ **整腿停**，与 A/B 归因无关）：
+//     · kills/局 **≥9.0**（起点 12.24，容许 −26%）
+//     · 全池 clear **≥27%**（起点 35.8%，容许 −8.8pp）
+//     · 2002 基毁率 ≤ 94%（起点 88.5%，容许 +5.5pp）
+//     · 反签名：aimMisses 涨 >40%（起点 5.34）/ hitRate 掉 >15%（起点 0.685）
+//   中间读点 **it30**（拆开的双方向门）：
+//     · idle ≤200 ⇒ 组 B 在路上，**无论如何继续**
+//     · 拾取率 ≥72% ⇒ 组 A 在路上
+//     · **两组都不过 ⇒ 杀腿**；只有组 A 不过 ⇒ 不杀，把 A 标死、后续只读 B
+//
+//   四种判决组合都要能写出来（这是本腿的价值所在）：
+//     A 成 + B 成 ⇒ 两个机制都能修，下一腿拆单变量复验
+//     A 成 + B 败 ⇒ 抬价能买绕路（**推翻截胡假说**），卡墙得换 idle 之外的杠杆
+//     A 败 + B 成 ⇒ **截胡假说成立**（价格买不到绕路），卡墙可修 → 与 z6 合看定机制
+//     A 败 + B 败 ⇒ 两条奖励侧的路都堵死，转执行器 overlay
+//
+// ══ 已知局限（写在这，免得读完才失望）══════════════════════════════════
+//   1. **5 个键分属两个机制，用两组独立判决处理**（见上）；若 it60 只动一半，
+//      按组合表读结论，**不要**把它写成"这条腿没用"。
+//   2. `idleTicks` 会把「架枪停顿」也算进去（定义 = `player.moving === false`，
+//      想动被地形挡也计）。它分不出「卡墙」和「停着打靶」⇒ 反签名看 aimMisses/hitRate。
+//      更准的 `wallPressTicks` **不在 METRICS 列里**（只在 eval 行），入公式要加 metrics 列
+//      （TS `buildMetricsRow` + `METRICS_VERSION` + 双端指纹），本腿不做。
+//   3. `pickupDist`/`pickupRelX/Y` 在 fc 层的权重只有标量中位的 84% / 34% / 43%（it0 起
+//      就是这样，177 轮没变）⇒ 网络「看见」道具但不当主变量。本腿只改钱，不改这个权重；
+//      若 it60 拾取率不动，说明「看见≠行动」这条在奖励侧无法修，转执行器 overlay。
+//   4. 起点是「不捡道具」已固化的策略（63.2% 从 it0 起就没动过）。本腿测的是
+//      「固化后大幅加价能否重建行为」，不是「从零能否学会」。
+//   5. **Φ 量级 +39%（221.9 → 308.2）会让 value 头重拟合**，而并行的 `z4-pick-approach`
+//      Φ 几乎不变（221.63）。⇒ 两腿的 rollout 行为**不可直接比**（value 误差不同），
+//      只按 (stage,seed) 配对读 eval 的指标列。这是两个不同机制，本来也不该比"谁更强"。
+//
+// ══ 运行约束 ═══════════════════════════════════════════════════════════
+//   · 与 z4-nav / z4-polish 同会话（v7 / schema 7），可并行开；**不要共用 backup_prefix**；
+//   · `iters 500 / max_hours 48`（it60 出主判，500 轮留走势）⇒ ~14h；
+//   · `eval_every 5` ⇒ **100 个点 × 400 局**（100/关）⇒ eval ≈ 2.4h（800 局/点 176s，
+//     400 局/点 ≈88s）。⚠ 单点 SE 从 1.65pp 升到 2.3pp（全池 400 局），判据看 22pp 级的
+//     差（63%→85%）不受影响，但守卫门（clear ≥27% vs 35.8%，8.8pp）会被噪声咬 ——
+//     守卫一律取**连续 3 点中位**，不读单点；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+
+{
+  "version": 5,
+  "name": "z4-pick-wall",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入（本腿主抬：4.0 → 20.0）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      // 卡墙（本腿新增）
+      "- wIdle*min(idleTicks, idleCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.15,
+      "walkCap": 200.0,
+      "wPickup": 20.0,
+      "pickupCap": 10.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wIdle": 0.05,
+      "idleCap": 800.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z4-nav/z4-nav.it0.20261101-230656.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 48,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z4-pick-wall/weights.json",
+  "traj": "tmp/z4-pick-wall",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z4-pick-wall",
+  "backup_prefix": "z4-pick-wall",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结算节（2026-11-02 20:44 人工停课 at it310 / 500）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **判决：组 A（抬事件价）不成立 · 组 B（治卡墙）不成立但有方向性效果 · 守卫未破。**
+//
+// ① 组 A（拾取率，同口径含 star）：
+//      it0 62.0% → it30 65.7% → it60 64.5% → it150 62.2% → it310 **61.8%**
+//      全程在 60.5–66.7 之间抖动，**无趋势**。判据要 ≥85% ⇒ **不成立**（差 23pp）。
+//      ⚠ 按本课预注册的方向门「it30 拾取率 <72% ⇒ 杀腿」，**it30（65.7%）就该停**，
+//        实际跑到 it310 ⇒ 白跑 280 轮 ≈ 8h。纪律执行失败，记为教训。
+// ② 组 B（卡墙）：
+//      `idleTicks`   234 → it60 234 → it150 213 → it310 **196**（**−16%，单调下降**）
+//      `wallPress/千` 288 → it60 261 → it150 246 → it310 273（最低 226 at it205）
+//      判据要 idle ≤130 且 wall ≤200 ⇒ **不成立**。
+//      但方向性效果确实存在：同批的 `z4-pick-approach`（**没加 idle 项**）末点 idle 260、
+//      `z4-nav`（也没加）it200 是 272 ⇒ **idle 项值 196 vs 260–272，−25%**。
+//      ⇒ 结论：**idle 项是真旋钮，只是 0.05 的剂量买到 −25%，要 −50% 大概得 0.12–0.15。**
+// ③ 主判（2002 基毁率配对，100 局/关）：
+//      it0→it60 净 −7（p=0.167）· it0→it150 净 −3（p=0.648）· it0→it310 净 −5（p=0.383）
+//      ⇒ 不过。2002 clean 62.0% 附近从无变化（54.3% vs 57.3%，噪声内）。
+// ④ 守卫（全部未破）：kills 11.71→11.60（≥9.0 ✓）· clear 32.5%→31.8%（≥27% ✓）·
+//      2002 基毁 86%→91%（≤94% ✓）· aimMisses +8.6%（<40% ✓）· hitRate −3.3%（<15% ✓）
+//      ⇒ **加价没有把战斗打坏**，这是本腿唯一的好消息。
+// ⑤ 全池 clear 配对 it0→it310：净 −3（p=0.864）⇒ 平的。
+//
+// ⑥ 给下一腿的输入（**本次最重要的产出**）：
+//      a) **拾取率对「事件价」完全不敏感**：wPickup 4.0 → **20.0（5×）**、cap 6→10，
+//         310 轮零变化（62.0→61.8）。叠加 `z4-polish`（4→7，零变化）、
+//         `x5-approach.jsonc`（3.0 跑 63 轮 pu 0.71→0.69）⇒ **三次独立实验同向**。
+//         这条线在奖励侧**已经走到头**，不要再抬价。
+//      b) **卡墙要分开治**：`wallPress`（顶墙）与 `idle`（停住）在本课里反向走
+//         （wall 末点 273 回升、idle 196 持续降）⇒ 一个 idle 项只能治一半。
+//         下一腿若要继续，`wIdle 0.05 → 0.12`，且**只改这一个数**（本课已验证方向）。
+//      c) 见并行腿 `z4-pick-approach.jsonc` 结算节 ⑥c：**`pickupDist` 是曼哈顿距离，
+//         不是路径距离** —— 这是两条腿同时失效的共同根因（那边有完整论证）。
+//
+// 数据出处：`tmp/z4-pick-wall/{eval_log,training_log}.jsonl`（63 个 eval 点 × 400 局）·
+//   `nn-training/weights/z4-pick-wall/`（310 个权重）· `tmp/z4p-readout.py` / `tmp/z4p-curves.py`。
+//   起跑 11:42:32 → 停课 20:44（9.0h，34.4 it/h），eval 63 点 × 73s ≈ 1.3h。

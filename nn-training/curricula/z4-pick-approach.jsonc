@@ -1,0 +1,237 @@
+// 课程 z4-pick-approach —— 捡道具的**第二条路**：势能趋近（`wApproach`），不动任何事件价（2026-11-02）
+//
+// 状态：**未开课**（预注册；开课由人在控制台走 W4 会话）。
+// 与 `z4-pick-wall` **并行**、同起点（`z4-nav.it0`）、同关卡/预算/eval/seed ⇒ 两腿唯一的差别是
+// 「用哪种机制让 NN 多走几步去捡道具」：
+//   · z5 = 抬**事件价**（wPickup 4→20，捡到才给）+ 治卡墙
+//   · z6 = 加**势能项**（wApproach，每走近一格就给），wPickup 保持 4.0 **一分不动**
+//
+// ══ 为什么这条路可能对（课程链追溯，2026-11-02）════════════════════════════
+//   链：`y25-price ← y20-stack2 ← y5-dist ← y5-flank ← y5-pace ← y5-near ←
+//        y5-pos ← y5-hit ← y5 ← x5-rebirth`（8 层，`tmp/z5-ancestry.py` 自动追）
+//   **整条链的 pickup 配置逐字未变**：wPickup 3.0 · wApproach **0.008** ·
+//   wFrStar 3.0 / wFrFreeze 2.0 / wFrBomb 2.0。
+//   而 z4-nav / z4-polish 的 formula **只有 wPickup**，`wApproach` 和三个 `wFr*` 都没有
+//   ⇒ z4 是从一个「缺三条拾取激励」的配置起跑的。
+//
+//   `nn-training/curricula/x5-approach.jsonc` 是那条**专门做这件事**的腿，实测：
+//     · x5（wPickup 3.0，63 轮）：pu 0.71→0.69 **纹丝不动**
+//     · 意愿半径 cliff：出生距离 **0–4 格拾取率 74%，5 格+ ≈5%**；失效样本生前最近距离
+//       中位 2.5 格 ⇒ **零绕路，"朝道具走"这个行为不存在**
+//     · 截胡假说：**撞见步 = 战斗最优步** ⇒ 抬 wPickup 只加固战斗，不加固拾取
+//     · 加 `wApproach 0.008` 后：pu/局 **0.728 → 0.949（+30.4%，z≈+3.3）**，
+//       约束线 0.88 ⇒ **机制端点达成**（主端点承伤判负，与本腿无关）
+//     · 机制：势能塑形 **不改最优策略**（Ng et al.）；telescoped 每局净 ≤0
+//       （来回刷分净零、道具过期退回 +w×d）⇒ **无 hack 面**
+//   ⇒ 结论：**"捡道具"这个行为在历史上是被 `wApproach` 挪动的，不是被 `wPickup` 挪动的。**
+//
+//   ⚠ 冲突记录：`reports/x20-nn-vs-human-paired-2026-09-22.md:242` 把 wApproach 判成
+//   「结构性死项（0.008→0.15 回报不变）」。本条以 x5-approach 的 **800 局池外配对**
+//   （+30.4%，z≈3.3）为准；x20 那条是单次扫描、无配对列、且未冻结其它变量。
+//   若本腿 it60 证伪，则以本腿为准并把该结论回写进 `docs/nn/experiments.md`。
+//
+// ══ 改了什么（唯一新项；其余 21 个 reward 参数逐字 = z4-nav）════════════════
+//   新项：`- wApproach * where(pickupDist < 0, 0, min(pickupDist, approachCap))`
+//     wApproach   = **0.05**
+//     approachCap = **6.0**
+//   **不动**：wPickup 4.0 / pickupCap 6 / wWalk 1.0 / walkCap 20 / wKill 15 / wHit 1.5 /
+//   wWin 60 / wBase 3.0 / wDmg 0.12 / wDeath 18 / wPace 6 / paceTicks 1200 / paceWindow 1000 /
+//   paceCap 36 / wBrick 0.25 / brickCap 12 / wThreat 0.01 / threatCap 500 / wDef 2.5 /
+//   pDef 0.15 / capDef 80 / terminal 四项 / 关卡 / 敌数 / 命 / max_ticks / eval / seed / 位移包。
+//
+// ══ 剂量推导（照 x5-approach §3 的门限法，换 z4 的量级）════════════════════
+//   x5 的门限：`wApproach ≤ 0.5 × (kill+win 均值) / Σdist`，x5 实测 12.68 / 753.8 ⇒ 0.0084。
+//   z4 的量级（z4-nav it150 全池）：
+//     · kill+win = 15.0 × 12.24 + 60.0 × 0.358 = 183.6 + 21.5 = **205.1 分**
+//     · 决策步 = ticks 4255 / K 10 = **425 步/局**
+//     · pickupDist 有 **≥40% 的步是哨兵 −1**（无存活道具）⇒ 归零；
+//       有效步 ≈ 250，`min(dist, 6)` 均值估 **4.5 格** ⇒ **Σdist ≈ 1125**
+//     ⇒ 门限 = 0.5 × 205.1 / 1125 = **0.091**，取半（保守，因为 z4 的 pickupDist 分布未实测）
+//     ⇒ **wApproach = 0.05**（Σ 贡献 ≈ 56 分 = kill+win 的 27%）
+//   ⚠ `approachCap = 6` 是本腿相对 x5 的**唯一剂量改动**：x5 单关 13×13、距离天然 ≤6，
+//     用 `where(pickupDist<0,0,pickupDist)` 无 cap；z4 是 26×26，不 cap 会让远处道具
+//     （10+ 格）也持续扣分 ⇒ 诱导长途奔袭。**cap 6 = 「只引导 6 格内的道具」**，
+//     正好对上用户观察到的「就在身边一两格」。
+//   ⚠ pickupDist 是**每决策步采样**（METRICS idx40，哨兵 −1 = 无存活拾取），不是累计量
+//     ⇒ 不存在「累计型 Φ 无界」问题（与 dangerTicks/threatTicks 不同族）。
+//
+// ══ 预注册判据（it60 结；与 z4-pick-wall 同一时点、同一 eval 面板）════════════
+//   主 1：it60 同口径拾取率 **≥85%**（起点 63.2%）；2002 关 **≥70%**（起点 53.3%）。
+//   主 2（机制，x5 同构）：`Σr_approach` 每局 **≤0**（势能法不变式；>0 = 刷分 hack，杀腿）。
+//   副：5 格外的拾取占比上升（「意愿半径」扩大）；`wallPress`/千 不升（不得为捡道具顶墙）。
+//   守卫（任一破 ⇒ 停）：
+//     · kills/局 ≥10.5（起点 12.24，容许 −14%；比 z5 的 −26% 更紧：本腿不动事件价，
+//       不该拿战斗换拾取）
+//     · 全池 clear ≥32%（起点 35.8%，容许 −3.8pp）
+//     · cellsVisited 中位 ≤140（起点 103；>140 = 长途奔袭，hack 前兆）
+//     · 反签名：aimMisses 涨 >30%（起点 5.34）/ hitRate 掉 >10%（起点 0.685）
+//   中间读点 **it30**：拾取率 ≥72% ⇒ 继续；<70% ⇒ 杀腿（比 z5 的 gate 低 2pp，因为
+//   势能项通常比事件价慢热：x5 是 it55 0.77 → it70 0.85 → it155 0.99）。
+//
+// ══ 已知局限 ═══════════════════════════════════════════════════════════
+//   1. **Σdist 未实测**（z4 的 pickupDist 分布不在 eval 行里，只在训练 shard，而 shard 每轮
+//      被清）。剂量 0.05 是按「有效步 250 / 均值 4.5 格」估的；若 it1 的 `Σr_approach`
+//      量级 >100 分/局，说明估小了，**下一腿降到 0.03**（不改本腿，改了就不可归因）。
+//   2. 本腿只测「趋近」，不测「捡起」：如果 NN 走到道具旁边却不吃（例如被敌情打断），
+//      `pickupDist` 会停在 0-1 格，势能项照样给满分 ⇒ **可能出现「贴着道具不打不捡」**。
+//      守卫用 cellsVisited 与 kills 双读数抓。
+//   3. 与 z5 **不是 A/B 对照**（两腿各改不同的项，corpus fp 不同，shard 不可复用）；
+//      两腿只按 (stage,seed) 配对读 eval。真正的机制归因要等两腿都出 it60 之后，
+//      用「哪个机制把拾取率推过 85%」来判。
+//
+// ══ 运行约束 ═══════════════════════════════════════════════════════════
+//   · 与 z4-nav / z4-polish / z4-pick-wall 同会话（v7 / schema 7），可并行；
+//   · `iters 500 / max_hours 48`、`eval_every 5` ⇒ **100 点 × 400 局**（100/关）≈2.4h eval；
+//     单点 SE 2.3pp ⇒ 守卫门取**连续 3 点中位**，不读单点；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+
+{
+  "version": 5,
+  "name": "z4-pick-approach",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      // 拾取趋近（本腿唯一新项；势能法，每决策步给梯度）
+      "- wApproach*where(pickupDist < 0, 0, min(pickupDist, approachCap))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wApproach": 0.05,
+      "approachCap": 6.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z4-nav/z4-nav.it0.20261101-230656.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 48,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z4-pick-approach/weights.json",
+  "traj": "tmp/z4-pick-approach",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z4-pick-approach",
+  "backup_prefix": "z4-pick-approach",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 100,
+  "eval_every": 5,
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结算节（2026-11-02 20:43 人工停课 at it311 / 500）
+// ══════════════════════════════════════════════════════════════════════════
+//
+// **判决：主判 1 不成立（拾取率零变化）· 主判 2 通过（无 hack）· 有副作用（idle 暴走）。**
+//
+// ① 主判 1（拾取率，同口径含 star）：
+//      it0 62.0% → it30 63.8% → it60 63.8% → it150 63.2% → it310 **62.6%**
+//      全程 60.7–66.7，**无趋势**。判据 ≥85% ⇒ **不成立**。
+//      按本课方向门「it30 <70% ⇒ 杀腿」，it30（63.8%）就该停，实际跑到 it311 ⇒ 白跑 280 轮。
+// ② 主判 2（`Σr_approach` ≤ 0，抓刷分 hack）：**通过**。
+//      替代判据 `cellsVisited` 98 → 101（+3%）⇒ 没有长途奔袭；
+//      `spawn` 4.37→4.62（供给稳）⇒ 不是靠道具变多。
+// ③ 副作用（**本腿最重要的读数**）：
+//      `idleTicks` 234 → it250 362 → **it260 594** → it265 458 → it270 423 → it310 260
+//      峰值 594 = it0 的 **2.54 倍**，同时 `wallPress/千` 从 288 降到 **193.6**（最低点）。
+//      ⇒ 不是顶墙，是**停在原地**。而拾取率一分没涨。
+// ④ 守卫：kills 11.71→11.75 ✓ · clear 32.5%→29.5%（**<32% 破线**，但前 6 点在 32–36，
+//      末点是低点，400 局 SE 2.3pp）· cellsVisited 101 ✓ · aimMisses +45%（**>30% 破线**）
+//      · hitRate −7.8%（<10% ✓）。
+//      ⚠ aimMisses 的 +45% 与 `z4-nav` 同期（4.16→5.80，+39%）同量级 ⇒ **是该纪元的共同漂移，
+//      不是本腿特有**（同期 `z4-pick-wall` 只 +8.6%）。
+// ⑤ 主判（2002 基毁率配对）：it0→it60 净 −1（p=1.00）· it0→it310 净 −2（p=0.83）⇒ 不过。
+//
+// ⑥ **根因（2026-11-02 21:30 用 32 局逐 tick 仿真重测，推翻本节的初版判断）**：
+//      a) **初版判断作废**：曾写「`pickupDist` 是曼哈顿距离不是路径距离 ⇒ NN 卡在墙这边」。
+//         用户反驳「四关都很空旷」，随后用 32 局重放（`tmp/z4p-pick-probe.ts`，hash=ok 校验）
+//         实测：**未捡的道具里 9 个的最大接近距离都只有 2 格**（路径距离最多 2–4 格），
+//         **有墙与否解释不了**。**该判断撤回。**
+//      b) 实测分布（32 局 / 95 个道具，`z4-pick-approach.it310` 权重，4 关 × 8 seed）：
+//           生前最近距离 2 格：27 个，捡 18（**66.7%**）→ 9 个没捡
+//           3–5 格：50 个，捡 22（44.0%）
+//           6+ 格：18 个，捡 **0**（0%）
+//         ⇒ **「意愿半径」≈ 5 格**，与 `x5-approach.jsonc` 头注 ⑩① 的
+//           「出生距离 0–4 格拾取率 74%、5 格+ ≈5%」**同构**（独立权重、独立关卡、同一现象）。
+//      c) 关键个案：9 个「到过 2 格却没捡」里 **4 个活满 1199 拍（`POWERUP_TIMEOUT`）后过期**
+//         （decoy/emp/repair/bomb/mine 各一），即 NN 在 2 格外待了整整 20 秒没去拿。
+//         ⇒ **不是"没看见"，是"看见了不动"**。这与观测侧一致：`pickupDist` 在 fc 层的
+//         列范数只有标量中位的 84%，`pickupRelX/Y` 只有 **34% / 43%**（it0 起如此，310 轮没变）。
+//      d) 因此「加钱」与「加势能」都不是缺的那一环 —— 缺的是**状态→动作的通路强度**。
+//         下一步应走观测/执行器，不要再改奖励参数（见 ⑦）。
+//
+// ⑦ 给下一腿的输入：
+//      a) **拾取这条线在奖励侧到此为止**：三次独立实验（wPickup 3.0 / 7.0 / 20.0）零效果，
+//         势能项零效果且有副作用（idle 峰值 594）。下一腿动**观测/执行器**，不改奖励。
+//      b) `idle` 项是唯一被验证有效的旋钮（见 `z4-pick-wall` 结算节 ②），剂量 0.05 → 0.12。
+//
+// 数据出处：`tmp/z4-pick-approach/{eval_log,training_log}.jsonl`（63 点 × 400 局）·
+//   `nn-training/weights/z4-pick-approach/`（311 个权重）· `tmp/z4p-readout.py` / `tmp/z4p-curves.py`。
+//   起跑 11:41:40 → 停课 20:43（9.0h），eval 63 点 × 75s ≈ 1.3h。

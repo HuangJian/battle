@@ -1,0 +1,195 @@
+// 课程 z5-safe-base —— 阶段 A：**基地环改钢（物理不可摧毁）**，先学走迷宫/战斗/拾取（2026-11-02）
+//
+// 状态：**未开课**（预注册；开课由人在控制台走 W4 会话）。
+// 关卡 = `nn-training/levels/classic35-safe-base.jsonc`（由 `tmp/gen-classic35-safe-base.py`
+// 从 classic35 生成；**唯一改动 = 基地 8 格保护圈换钢**，其余逐格相同，脚本自检 35/35 关）。
+//
+// ══ 为什么这么做（数据依据，全部来自 2026-11-02 的逐 tick 实测）════════════
+//   ① z 系列的活动范围只有 **15%**：`cellsVisited` 中位 97–103 / 676 格。
+//      对照 x5（169 格图）是 **40%**。
+//   ② 后果：**47% 的道具生在 6 格外**（95 个道具的分布：0-2 格 5 / 3-5 格 45 /
+//      6-9 格 28 / 10+ 格 17），而 10+ 格的捡取率只有 **5.9%**。
+//      ⇒ 62% 的整体拾取率是「意愿半径 × 生成分布」的确定性乘积（加权算 62.2%，实测 62.0%）。
+//   ③ 不敢走远的原因：2002 关 **88.5% 基毁**、局均只活 3410 拍（max_ticks 的 17%）。
+//      走远 = 丢家 ⇒ 学会"守着一个区域打"。
+//   ④ **把基地变成钢盒之后这个约束消失**：`src/config/combat.ts:359-366` 明写
+//      「Steel is destroyed solely by the player at/above STEEL_PIERCE_PLAYER_LEVEL.
+//       **Enemies — including ELITE power — NEVER pierce steel**」
+//      ⇒ 基地物理不可摧毁，不需要任何引擎改动（游戏里 `applyFencePowerUp()` 用的就是这招）。
+//
+// ══ 采样计划：**全 35 关 + 分批轮换窗口**（2026-11-02 修订，用户令）══════════
+//   `rotation_mode: "even"` / `rotation_per_it: 7` —— 每轮只采 7 关，`ceil(35/7)=5` 轮覆盖一遍，
+//   300 轮 = 60 遍。窗口由 `(rotate_seed, it)` 决定（resume-safe，`worker/stage_rotation.py`）。
+//   为什么不是「全 35 关每轮都采」：`target 24576 / 35 关 = 702 样本/关/轮`，而一局 ≈ 1043 决策步
+//   ⇒ **每关每轮连一局都抽不满**（3 个 0% 关永远拿不到正样本）。
+//   窗口 7 关 ⇒ `32768/7 = 4682 样本/关/轮 ≈ 4.5 局`（对照：旧 4 关方案 6144 样本 ≈ 5.9 局）。
+//   **云机接管时 `sample_mult: 2.0`**（`remote/plan_handoff.py` + `plan_run._scaled_volume`，
+//   运行时参数、不在课程里）⇒ target 65536、每关 **9363 样本 ≈ 9.0 局**。
+//   两者都是 `mb 1024` 的整倍数（32 / 64），不会出现 ragged 末块导致的 XLA 重编译。
+//   ⚠ `target_transitions` **进 `corpus_identity_fp`**（`biz/corpus_fp.py:153`，与
+//     `seed_rotate` 同类：它决定"抽哪些样本"）⇒ 本课语料与 z4 全线不可混，shard 不复用。
+//   ⚠ `rotation_*` 进 `corpus_identity_fp`（换采样计划 = 新实验）⇒ 本课与旧 z4 语料不可混。
+//
+// ══ 评估面板：**全 35 关 × 20 seed = 700 局/点**，`eval_every 10` ⇒ 30 个点 ═══════
+//   日常只看看走势（700 局的全关 SE 已足够分辨 ±3pp 的整体移动）；
+//   **结课判决另跑 35 × 100 = 3500 局**（用户定的口径：结束时才用大样本下结论）。
+//   eval 成本 ≈ 700 × 0.51s ≈ 357s/点 × 30 点 ≈ **3.0h**（训练本体 300 × 100s ≈ 8.3h）。
+//
+// ══ 本课要学的是三件事（不是提胜率）══════════════════════════════════════
+//   走遍全图 · 打完 20 敌 · 顺路捡道具。**"守基地"留到阶段 B**（`z5-defend`，另立）。
+//
+// ══ 改了什么（相对 z4-nav，只有 2 个数 + 换关卡）════════════════════════════
+//     level      classic35 → **classic35-safe-base**（基地环 8 格 = 钢）
+//     wWalk      1.0  → **0.15**   ┐ 同一机制：把「移动」的钱从「前 20 格」摊到全 200 格。
+//     walkCap    20.0 → **200.0**  ┘ 总量 20 → 30 分，但整局都在付。
+//   **不动**：wKill 15 / wHit 1.5 / wWin 60 / wBase 3.0 / wDmg 0.12 / wDeath 18 /
+//   wPace 6 / paceTicks 1200 / paceWindow 1000 / paceCap 36 / wBrick 0.25 / brickCap 12 /
+//   wPickup 4.0 / pickupCap 6 / wThreat 0.01 / threatCap 500 / wDef 2.5 / pDef 0.15 /
+//   capDef 80 / terminal 四项 / 敌数 20 / 命数 3 / max_ticks 20000 / eval / seed / 位移包。
+//   ⚠ **wPickup 保持 4.0 不抬**：抬价已被三次独立实验证伪（`z4-polish` 7.0、`z4-pick-wall`
+//     20.0、`x5-approach` 的 3.0 跑 63 轮），**拾取率对事件价不敏感**。
+//
+// ══ 预注册判据（it100 结；面板 = 全 35 关 × 20 seed，起点基线 = `z4-nav.it0` 实测）══════
+//   **起点基线（`z4-pick-wall.it205` 实测，35 关 × 20 seed = 700 局 + 35 局机制采样）**：
+//      胜率 **39.3%** · kills/局 **14.11** · cellsVisited 中位 **103** · idle 中位 **244** ·
+//      拾取率 **44.6%** · 环墙完好 8.00/8 · 胜局残血 0.651
+//   （同一面板下 `z4-nav.it0` = 胜率 40.9% / kills 14.47 / idle 365 ⇒ **胜率打平**；
+//     `it205` 的真实优势是 idle −24%，与"多走"的目标同向，这才是选它当起点的理由。）
+//   主 1：`cellsVisited` 中位 **≥155**（起点 103 × 1.5，本课**核心端点**）
+//   主 2：拾取率 **≥60%**（起点 44.6 + 15pp）
+//   主 3：kills/局 **≥17.1**（起点 14.11 + 3）
+//   副 1：clear **≥54%**（起点 39.3 + 15pp）
+//   副 2：基毁率 **≤2%**（基地不可摧毁，理论上恒 0）
+//   ⚠ 起点数字来自 n=35 的机制采样（拾取率 SE ≈ ±8pp），只作方向基线；
+//     **结课判决必须用 35 × 100 = 3500 局重测**。
+//   反签名（任一破 ⇒ 停）：
+//     · `aimMisses` 涨 >40%（起点 3.96）· hitRate 掉 >15%（起点 0.729）
+//     · `idleTicks` 中位 >300（起点 234；本课要的是"多走"，idle 不许涨）
+//     · `timeout_frac` >5%（防苟）
+//   中间读点 **it50**：cellsVisited ≥150 且拾取率 ≥72% ⇒ 继续；否则杀腿。
+//
+// ══ 已知局限 / 风险 ═══════════════════════════════════════════════════
+//   1. **`wBase` / `wDef` 在本课是死项**：`baseWallIntact` 恒 8（钢算 solid）、
+//      `basePressureSum` 恒低 ⇒ Φ 从 ~222 降到 ~210。value 头要重拟合，前 20 轮不判。
+//      ⚠ 阶段 B 切回常规 classic35 时这两项会突然复活 ⇒ **B 的前 20 轮同样不判**。
+//   2. **可能学到"无视基地"**：本课没有基毁压力，NN 可以完全不回防。这是刻意的，
+//      但必须在 B 阶段重建。监控反签名：`onLaneTicks` / `basePressureSum` 若长期为 0，
+//      说明它连"敌人朝基地开火"都没见过 ⇒ B 阶段会更难，届时考虑插 A2 半移除。
+//   3. **能力迁移不保证**：`y32-tempo`（空场 c20）迁移到 classic35 实测 **pass 2/400 = 0.5%**、
+//      idle 1419 ⇒ 空场→迷宫的迁移是失败的。本课与 B 的差别只有那 8 格
+//      （迷宫/敌人/出生点/命数全部一致），分布偏移小一个数量级，但**仍是假设**。
+//   4. **起点 = `z4-pick-wall.it205`**（2026-11-02 修订；原写 `z4-nav.it0`）。
+//      改的理由：本课目标是「练出全 35 关的能力」，不是变量归因。`it205` 在安全基地图上
+//      已是四权重最强（胜率 74% / 拾取率 62.3% / idle 300 最低），用它省掉 487 轮重复训练。
+//      代价：与 z4 各腿的差分不再只归因单变量（`bc` 进 `corpus_fp`，本来就不可混）。
+//      ⚠ value 头要在新 Φ 下重拟合（z5 的 Φ 与 `z4-pick-wall` 的 wPickup 20 + wIdle 不同，
+//      与 `z4-nav` 的 walkCap 20 也不同）⇒ 两边一样要重拟合，不构成改起点的额外成本。
+//
+// ══ 运行约束 ═══════════════════════════════════════════════════════════
+//   · 与 z4 各腿同会话（v7 / schema 7）；
+//   · `iters 500 / max_hours 48 / eval_every 5 / eval 20 seed×35 关`；
+//   · ⚠ 新关卡文件 = **codehash 集内？** 不是（`nn-training/**` 不进 codehash），
+//     但云端 worker 吃 hub 启动时锚定的 `code.zip` 快照 ⇒ **必须重启 hub/控制台**才生效；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+
+{
+  "version": 5,
+  "name": "z5-safe-base",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      // 卡墙（**继承起点的唯一优势**：`z4-pick-wall.it205` 是带这个项训出来的，
+      // 去掉它 idle 会反弹回 nav0 的 365 拍。必须保留）
+      "- wIdle*min(idleTicks, idleCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.5,
+      "walkCap": 200.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wIdle": 0.05,
+      "idleCap": 800.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z4-pick-wall/z4-pick-wall.it205.20261102-173625.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 48,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z5-safe-base/weights.json",
+  "traj": "tmp/z5-safe-base",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z5-safe-base",
+  "backup_prefix": "z5-safe-base",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
