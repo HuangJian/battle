@@ -60,6 +60,7 @@ describe('console sparkline (ui/view)', () => {
             killRate: 0.5,
             dmgPerKillPct: 0.05,
             avgResidualHpPct: 0.57,
+            totalPUSpawn: 8,
           },
           evalData: withEval
             ? {
@@ -269,6 +270,58 @@ describe('console sparkline (ui/view)', () => {
       // 所有 iter 均为 rollout 有效点（不再随 eval 缺口稀疏）→ 全量 = 50 点，最近 10 = 10 点
       expect(view.sliceSeries(hp, 'all').vals.length).toBe(50)
       expect(view.sliceSeries(ticks, '10').vals.length).toBe(10)
+    })
+
+    it('击杀/胜局残血/道具 各带绝对值与百分比两条序列（纵坐标档位的数据源）', () => {
+      const iters = mkView(30, true).metrics.iters
+      const series = view.metricSeries(iters)
+      const get = (k: string) => series.find((s) => s.key === k)!
+      // metricSeries 时间正序：vals[0] = 最小 iter 那一行
+      const first = [...iters].sort((a, b) => a.iter - b.iter)[0]!
+      // 击杀：% = 歼灭率；数值 = 每局平均击杀
+      expect(get('killsPct').vals[0]).toBeCloseTo(0.5)
+      expect(get('killsAbs').vals[0]).toBeCloseTo(first.actuals!.totalKills / first.actuals!.games)
+      // 胜局残血：% = 剩余总血量/单命满血；数值 = hp
+      expect(get('winHp').vals[0]).toBeCloseTo(0.57)
+      expect(get('winHpAbs').vals[0]).toBeCloseTo(150)
+      // 道具：数值 = 每局拾取数；% = Σ拾取/Σ掉落
+      expect(get('pu').vals[0]).toBeCloseTo(first.actuals!.totalPU / first.actuals!.games)
+      expect(get('puPct').vals[0]).toBeCloseTo(
+        first.actuals!.totalPU / first.actuals!.totalPUSpawn!,
+      )
+      // eval 同名对（稀疏档也参与「最近 N = 最近 N 个有效点」的截取）
+      expect(get('evalKillsAbs').vals.length).toBe(30)
+      expect(get('evalWinHpAbs').vals[0]).toBeCloseTo(150)
+      expect(view.sliceSeries(get('evalWinHpAbs'), '10').vals.length).toBe(10)
+    })
+
+    it('纵坐标档位：三张图各一个 toggle，默认 % / % / 数值（= 改造前的样子）', () => {
+      const html = render.renderConsolePage(mkView(30, true))
+      // toggle = Switch 组件（role=switch）；三张图各一枚
+      expect((html.match(/aria-label="纵坐标：百分比"/g) ?? []).length).toBe(3)
+      // 默认开/开/关：击杀与残血是百分比，道具是绝对值
+      expect(
+        (html.match(/role="switch" aria-checked="true" aria-label="纵坐标：百分比"/g) ?? []).length,
+      ).toBe(2)
+      expect(
+        (html.match(/role="switch" aria-checked="false" aria-label="纵坐标：百分比"/g) ?? [])
+          .length,
+      ).toBe(1)
+      // 当前单位仍用小字说清楚（theme.css 会整体内联进 html，别按裸类名扫）
+      const units = [...html.matchAll(/class="tc-tcell__unit"[^>]*>(%|数值)<\/span>/g)].map(
+        (m) => m[1],
+      )
+      expect(units).toEqual(['%', '%', '数值'])
+    })
+
+    it('parseTrendScales：坏 JSON / 非法值逐键退默认', () => {
+      expect(view.parseTrendScales(null)).toEqual(view.TREND_SCALES_DEFAULT)
+      expect(view.parseTrendScales('{oops')).toEqual(view.TREND_SCALES_DEFAULT)
+      expect(view.parseTrendScales('{"kills":"abs","winHp":"nope","pu":"pct"}')).toEqual({
+        kills: 'abs',
+        winHp: 'pct',
+        pu: 'pct',
+      })
     })
 
     it('hero 渲染 6 条走势图（rollout+eval 叠加，无耗时/败局耗时）+ 范围档位开关', () => {

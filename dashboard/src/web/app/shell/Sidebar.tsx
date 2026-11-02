@@ -25,6 +25,7 @@ import {
   refreshLabel,
   REFRESH_INTERVALS,
   type PageKey,
+  type RecentCourseView,
   type RefreshSec,
 } from '../../view'
 import { NavSidebar } from './NavSidebar'
@@ -35,9 +36,13 @@ export interface SidebarProps {
   /** 当前查看课程（空串 = 自动/最近活跃）。 */
   course: string
   courses: string[]
+  /** 最近训练的五门（已算好 it / 状态点；与 pill 同源，见 `recentCourseViews`）。 */
+  recentCourses: RecentCourseView[]
   /** 在训课程（= 已开课；课程 select 内标 🔥，与顶栏 pill 行同源）。 */
   trainingCourses: string[]
   onCourseChange: (course: string) => void
+  /** 点侧栏「最近训练」里的一门：切查看目标 + 带回总览（最近五门按训练时间倒序）。 */
+  onPickCourse: (course: string) => void
   /** 开课（弹窗）——课程级选项随它下发。 */
   onOpenCourse: () => void
   /** 该课是否已在课程表（`courseLifecycle.enabled`）；**null = 旧视图无此事实 ⇒ 不渲染该键**
@@ -90,8 +95,10 @@ export function Sidebar({
   activePath,
   course,
   courses,
+  recentCourses,
   trainingCourses,
   onCourseChange,
+  onPickCourse,
   onOpenCourse,
   courseEnabled,
   onNavigate,
@@ -107,6 +114,9 @@ export function Sidebar({
       course={course}
       readOnly={readOnly}
       onNavigate={onNavigate}
+      recentCourses={recentCourses}
+      trainingCourses={trainingCourses}
+      onPickCourse={onPickCourse}
       footer={
         <>
           {/* ── 当前课程（主控对象，全页唯一一处） ── */}

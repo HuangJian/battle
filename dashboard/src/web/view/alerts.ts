@@ -40,8 +40,8 @@ import type { OfflineLeaseView, OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
 import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
-// 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
-// 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
+// 与 pill 的「PPO·无人取」说的是同一件事（有活、没人认领）；「PPO·卡住」是另一类（有持有者但
+// 没开算）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
 import type { ErrorSummaryView } from './error-types'
 import { isNoiseClassification } from './error-hints'
 import type { LoopQueueRow } from './loop-queue'
@@ -449,7 +449,8 @@ function ppoStallAlerts(input: AlertInput): AlertItem[] {
         id: 'ppo-queue-stall',
         severity: 'err',
         icon: '⚠',
-        title: `PPO ${NO_TAKER_LABEL}：已等待 ${waited} 仍无 worker 领取`,
+        // 词不自带前缀（`环节·归属` 里已经有 PPO），这里不再拼 "PPO "——否则读成 "PPO PPO·无人取"。
+        title: `${NO_TAKER_LABEL}：已等待 ${waited} 仍无 worker 领取`,
         detail:
           `job ${stall.it != null ? `it${stall.it}` : stall.jobId.slice(0, 12)}` +
           '——云端 worker 可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。' +

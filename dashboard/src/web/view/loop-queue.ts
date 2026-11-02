@@ -211,6 +211,62 @@ export function coursePills(input: {
   })
 }
 
+/** 侧栏「最近训练」一行的迷你读数（2026-11-02 用户：每门课右侧显示最新 it + 状态色点）。
+ *
+ *  与 pill **同一个派生**（`courseStatus`）：这里只是第 N 个渲染器，不另写判据。
+ *  `it` 读序与课程矩阵一致：被接管 ⇒ 云机回传的最新段内 it（0 回传 = **不可知**，不拿本地
+ *  「下一轮」指针充数）；否则训练侧队列指针 → hub 账本尾行。
+ */
+export interface RecentCourseView {
+  course: string
+  /** 最新 it（`null` = 不可知）。 */
+  it: number | null
+  /** 状态色点（与 pill 同一个 `tone` 词表）。 */
+  tone: CoursePillTone
+  /** 悬停全因（状态词 + 判据，直接给 pill 那份）。 */
+  title: string
+}
+
+/** 最近训练的前 N 门（缺省 5）→ 迷你读数。顺序由调用方给（`courses` 已按训练时间倒序）。 */
+export function recentCourseViews(input: {
+  courses: string[]
+  rows: LoopQueueRow[]
+  overview?: ParallelOverviewView | null
+  trainerRunning: boolean
+  loopCompletes?: Record<string, LoopComplete> | null
+  /** 开课标记清单（`stateView.trainingCourses`）：已停课的课不报 hub 冲突。 */
+  enabledCourses?: string[] | null
+  limit?: number
+}): RecentCourseView[] {
+  const byLq = new Map(input.rows.map((r) => [r.course, r]))
+  const byOv = new Map((input.overview?.rows ?? []).map((r) => [r.course, r]))
+  const hubOnline = input.overview?.hubOnline ?? false
+  const enabledSet = input.enabledCourses ? new Set(input.enabledCourses) : null
+  const out: RecentCourseView[] = []
+  for (const course of input.courses.slice(0, input.limit ?? 5)) {
+    const lq = byLq.get(course) ?? null
+    const ov = byOv.get(course) ?? null
+    const st = courseStatus({
+      course,
+      lq,
+      ov,
+      hubOnline,
+      trainerRunning: input.trainerRunning,
+      overviewStale: input.overview?.stale ?? null,
+      loopComplete: input.loopCompletes?.[course] ?? null,
+      enabled: enabledSet ? enabledSet.has(course) : undefined,
+    })
+    out.push({
+      course,
+      // 被接管：读云机回传的最新 it（本机这一段不跑这门课）。
+      it: ov?.hold ? (ov.offlineLastIter ?? null) : (lq?.it ?? ov?.iter ?? null),
+      tone: st.tone,
+      title: st.title,
+    })
+  }
+  return out
+}
+
 /** 本机重资源池占用（容量为定的票数：本机 PPO / eval 跨课排队 = 1）。 */
 export interface LoopPoolView {
   held: number

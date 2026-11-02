@@ -22,6 +22,11 @@
  *  本机直跑（local）同口径（它也是一个 rollout 执行面）；`rl.local_slots = 0`（直跑未启用）时
  *  并入「停用」折叠桶，不再占行内位置。
  *  点行就地展开并发编辑；启停是行上的 toggle；冒烟与并发编辑仅本机（局域网只读无点击语义）。
+ *
+ *  ★ 2026-11-02（用户报障「push worker 节点还是混在了采样节点区域」）：节点按**能力键**分家
+ *  （`nodeRole`）——`gpu_push` / `offline_push` 条目与采样节点同住 rl-config `nodes[]`，但它们吃的是
+ *  PPO job（单位 = job），一律住下方 PPO 块、用 `PushNodeRow`（身份 + 派发腿徽章 + 并行度 + 启停），
+ *  绝不出「最近完成轮贡献（局）」那一列。
  */
 
 import { useState } from 'preact/hooks'
@@ -29,11 +34,11 @@ import {
   type ContributionBrief,
   nodeHealth,
   type NodeLocalView,
+  nodeRole,
   type NodeView,
   type PpoWorkerLiveView,
 } from '../../view'
 import { Switch } from '../../components/Switch'
-import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
 import { PpoBrief, PpoWorkerRows, SamplingBrief } from './WorkerContribution'
@@ -289,6 +294,81 @@ export function LocalRow({
   )
 }
 
+/** push 节点行（`gpu_push` / `offline_push`）——**只住 PPO 块**，绝不进采样块。
+ *
+ *  ★ 2026-11-02（用户报障：「push worker 节点还是混在了采样节点区域，如 colab-o 和 kaggleO」）：
+ *  这两类条目与采样节点同住 rl-config 的 `nodes[]`，此前一律按采样行渲染 ⇒ 看着像「贡献 0 局的离线
+ *  采样节点」，而它们根本不跑局。身份由能力键判（`nodeRole`），不由名字或 label 猜。
+ *
+ *  行内只给「身份 + 派发腿 + 并行度 + 启停」：
+ *   · 状态点 = **可达性 / 启停**（不是「最近完成轮贡献 vs 并发」——局数对 job 侧没有意义，
+ *     那正是用户看到的混乱来源）；
+ *   · 值列 = `concurrency`（hub 允许这台机器同时在飞的 job 数；缺省 1 = 单 GPU 一次一份）；
+ *   · 徽章 = 走了哪条派发腿（GPU push / 离线 push）——两条腿挑机器的键不同，必须能分开看。
+ *  job 侧的数字在下方 `PpoBrief`（按 worker 归并），这里绝不复述一遍。 */
+export function PushNodeRow({
+  n,
+  readOnly,
+  onToggleEnabled,
+}: {
+  n: NodeView
+  readOnly?: boolean
+  onToggleEnabled: (v: boolean) => void
+}) {
+  const role = nodeRole(n)
+  const label = role === 'offline_push' ? '离线 push' : 'GPU push'
+  const on = n.enabled
+  const tone: StatusTone = !on
+    ? 'off'
+    : n.online === false
+      ? 'err'
+      : n.online === true
+        ? 'ok'
+        : 'off'
+  const dotTitle = !on
+    ? '停用（rl-config enabled = false）：hub 不向它派单，也不探活'
+    : n.online === false
+      ? '探活超时：hub 这一拍找不到它'
+      : n.online === true
+        ? `在线（${label} 节点的探活面应答）`
+        : '未探测'
+  return (
+    <StatusRow
+      tone={tone}
+      dotTitle={dotTitle}
+      name={n.id}
+      nameTitle={`${label} 节点：吃 PPO job（单位 = job），不跑采样局`}
+      value={on ? `${n.concurrency} 并发` : DISABLED_WORD}
+      valueTitle={
+        on
+          ? `并行度 ${n.concurrency}：hub 允许这台机器同时在飞的 job 数（rl-config concurrency）`
+          : '停用（rl-config enabled = false）：不参与 push 派发'
+      }
+      badges={[
+        {
+          text: label,
+          cls: `tc-badge tc-badge--push-${role === 'offline_push' ? 'off' : 'gpu'}`,
+          title:
+            role === 'offline_push'
+              ? '能力键 offline_push：hub 的离线派发腿（自主云机整段任务）'
+              : '能力键 gpu_push：hub 的 GPU 派发腿（逐轮 job）',
+        },
+      ]}
+      ariaLabel={`${n.id}，${label}，${on ? `并行度 ${n.concurrency}` : DISABLED_WORD}；吃 PPO job，不跑采样局`}
+      className={`tc-row--push${on ? '' : ' tc-row--off'}`}
+      roTitle={readOnly ? RO_TITLE : undefined}
+      actions={
+        <Switch
+          label={`${on ? '停用' : '启用'} ${n.id}`}
+          checked={on}
+          disabled={n.busy}
+          onChange={onToggleEnabled}
+        />
+      }
+    />
+  )
+}
+
 export function NodePills({
   nodes,
   local,
@@ -304,11 +384,17 @@ export function NodePills({
   const [draft, setDraft] = useState('')
   const [showDisabled, setShowDisabled] = useState(false)
 
+  // ★ 2026-11-02：先按**能力键**分家（`nodeRole`）——push 节点与采样节点同住 rl-config `nodes[]`，
+  //   但单位（job / 局）与派发腿都不同，采样块的「贡献 vs 并发」判据对它们无意义。
+  const pushNodes: NodeView[] = []
+  const samplers: NodeView[] = []
+  for (const n of nodes) (nodeRole(n) === 'sampler' ? samplers : pushNodes).push(n)
+
   // 三桶按健康度分（缓慢/离线始终展开——它们需要被看见）。
   const healthy: NodeView[] = []
   const slow: NodeView[] = []
   const offline: NodeView[] = []
-  for (const n of nodes) {
+  for (const n of samplers) {
     if (!n.enabled) continue
     // 「探测中」与「缓慢/离线」同样默认展开（它们都需要被看见），只是色/形中性。
     const h = rowState(n, probesPending)
@@ -316,7 +402,9 @@ export function NodePills({
     else if (h === 'slow') slow.push(n)
     else offline.push(n)
   }
-  const disabled = nodes.filter((n) => !n.enabled)
+  // 停用折叠桶**只收采样节点**（push 节点在自己的块里恒出：它们是「这台为什么没干活」的答案，
+  // 折进采样块的桶里只会让人以为配置丢了）。
+  const disabled = samplers.filter((n) => !n.enabled)
   // local：slots > 0 出在行内（同口径健康度）；slots = 0（直跑未启用）并入「停用」桶。
   const localLive = local && local.slots > 0 ? local : null
   const localOff = local != null && local.slots <= 0
@@ -356,49 +444,83 @@ export function NodePills({
     />
   )
 
+  // PPO 块：有 push 节点（登记事实）或有 PPO 读数（贡献 / 在飞）就出——不画空壳标题，
+  // 也不因为「这个窗口没有 job」就把已登记的 push 机器藏掉。
+  const showPpo = pushNodes.length > 0 || brief != null || (live != null && live.length > 0)
+
   return (
     <div className="tc-nodes" aria-label="节点">
-      <SectionHeader
-        title="节点"
-        hint="采样算力供给：本机直跑槽位 + 各登记节点（做 rollout / eval，单位 = 局）。健康度 = 最近完成轮贡献 vs 并发数（0 → 离线 / 不足 → 缓慢 / ≥ 并发 → 健康）；缓慢与离线不折叠，仅停用可折叠。下方「PPO worker（云端）」是另一类身份（单位 = job）"
-      />
-      {/* 分区纪律（2026-10-03）：本节 = 采样块（行 + 末尾份额），PPO 在自己的子块里。
-          两类的身份、单位、口径都不同，绝不落在同一行。 */}
-      {localLive ? <LocalRow local={localLive} probesPending={probesPending} /> : null}
-      {healthy.map((n) => row(n))}
-      {/* 缓慢/离线始终展开（用户指令：不要自动折叠）；仅停用可折叠。 */}
-      {[...slow, ...offline].map((n) => row(n))}
-      {disabledCount > 0 ? (
-        <button
-          type="button"
-          className="tc-row tc-row--act tc-row--off"
-          aria-expanded={showDisabled}
-          aria-label={`${showDisabled ? '收起' : '展开'}停用节点`}
-          title="停用（rl-config enabled=false 的节点 + 本机直跑未启用）：不参与派发也不探活，点开关即启用"
-          onClick={() => setShowDisabled((v) => !v)}
-        >
-          <b>
-            {showDisabled ? '▾' : '▸'} {disabledSummary(disabledCount)}
-          </b>
-        </button>
+      {/* 没有区块标题（2026-11-02 用户：「节点」标题去掉）：两块各有自己的块头，
+          再包一层「节点」只是同一句话写两遍、白吃一行纵向。两块的口径说明移进块头
+          `aria-label` / 悬停（见 `.tc-nodes__grouphd`）。 */}
+      {/* 两块各自成块、样式不同（2026-11-02 用户：rollout 节点与 ppo push 节点要分开）：
+          采样 = 蓝左侧条 + 淡底，PPO = 绿左侧条 + 淡绿底——身份先于读数被看见。 */}
+      <section
+        className="tc-nodes__group tc-nodes__group--rollout"
+        aria-label="采样节点（rollout / eval）"
+      >
+        <div className="tc-nodes__grouphd">
+          <b>采样节点</b>
+          <span className="tc-muted tc-small">rollout / eval · 单位：局</span>
+          {/* 深链（全页唯一入口）：住采样块头右上角（2026-11-02 用户口径）——
+              块里的缩略都是纯读数，不各自带按钮。 */}
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            onClick={onMore}
+            title="节点统计：窗口内成功率 / 局数 / 耗时，以及 push worker 登记"
+          >
+            节点统计 ›
+          </button>
+        </div>
+        {localLive ? <LocalRow local={localLive} probesPending={probesPending} /> : null}
+        {healthy.map((n) => row(n))}
+        {/* 缓慢/离线始终展开（用户指令：不要自动折叠）；仅停用可折叠。 */}
+        {[...slow, ...offline].map((n) => row(n))}
+        {disabledCount > 0 ? (
+          <button
+            type="button"
+            className="tc-row tc-row--act tc-row--off"
+            aria-expanded={showDisabled}
+            aria-label={`${showDisabled ? '收起' : '展开'}停用节点`}
+            title="停用（rl-config enabled=false 的节点 + 本机直跑未启用）：不参与派发也不探活，点开关即启用"
+            onClick={() => setShowDisabled((v) => !v)}
+          >
+            <b>
+              {showDisabled ? '▾' : '▸'} {disabledSummary(disabledCount)}
+            </b>
+          </button>
+        ) : null}
+        {showDisabled ? (
+          <>
+            {localOff && local ? <LocalRow local={local} off /> : null}
+            {disabled.map((n) => row(n))}
+          </>
+        ) : null}
+        {/* 采样块收尾：份额合计 + 各节点签（纯读数，不与 PPO job 同行）。 */}
+        <SamplingBrief brief={brief ?? null} />
+      </section>
+      {showPpo ? (
+        <section className="tc-nodes__group tc-nodes__group--ppo" aria-label="PPO worker（push）">
+          <div className="tc-nodes__grouphd">
+            <b>PPO worker</b>
+            <span className="tc-muted tc-small">云端 push · 单位：job</span>
+          </div>
+          {/* 登记行：谁在 push 池里、走哪条派发腿、启停（2026-11-02 起住这里，不再混进采样块）。 */}
+          {pushNodes.map((n) => (
+            <PushNodeRow
+              key={n.id}
+              n={n}
+              readOnly={readOnly}
+              onToggleEnabled={(v) => onAction('setNodeEnabled', { id: n.id, enabled: v })}
+            />
+          ))}
+          {/* 汇总行 + 每台一行（谁在算哪一轮、下一轮下好了没）；只列在训课程
+              （用户 2026-10-10）；空数组 ⇒ 一点都不渲染。 */}
+          <PpoBrief brief={brief ?? null} />
+          <PpoWorkerRows live={live ?? null} trainingCourses={trainingCourses ?? null} />
+        </section>
       ) : null}
-      {showDisabled ? (
-        <>
-          {localOff && local ? <LocalRow local={local} off /> : null}
-          {disabled.map((n) => row(n))}
-        </>
-      ) : null}
-      {/* 两条**对称的缩略行**：采样在上（虚线收尾，与上方节点行同组）、PPO 在下（实线分隔）。
-          两类身份各自成行、各有标签与单位，永不并排（2026-10-03 + 2026-10-04 两轮口径）。 */}
-      <SamplingBrief brief={brief ?? null} />
-      <PpoBrief brief={brief ?? null} />
-      {/* 汇总行下面：每个工作中 worker 一行（谁在算哪一轮、下一轮下好了没）。
-          只显示**在训课程**的引用（用户 2026-10-10）；空数组 ⇒ 一点都不渲染。 */}
-      <PpoWorkerRows live={live ?? null} trainingCourses={trainingCourses ?? null} />
-      {/* 深链：全页唯一入口（两行缩略都是纯读数，不各自带按钮） */}
-      <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
-        节点统计 ›
-      </button>
     </div>
   )
 }

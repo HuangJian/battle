@@ -1787,6 +1787,24 @@ a.tc-btn {
   font-size: var(--fs-sm);
   white-space: nowrap;
 }
+/* 纵坐标档位（击杀/胜局残血/道具三张图）：Switch（role=switch）+ 当前单位小字。
+ * 与标签同排（值列仍靠右）；只在这三格出现，所以不单独撑高度。 */
+.tc-tcell__hdmid {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.tc-tcell__hdmid .tc-switch {
+  margin-left: 0;
+  padding: 0;
+}
+.tc-tcell__unit {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .tc-tcell .spark {
   width: 100%;
   height: 26px;
@@ -2105,6 +2123,55 @@ a.tc-btn {
    迁移到行原语 `.tc-row*` + 区块头 `.tc-sechd*` 而删除（docs/dashboard-redesign.md §4.2）。
    不要把它们加回来——第四套行样式就是这么长出来的。 */
 
+/* 首页节点区的两块（2026-11-02 用户：rollout 节点与 ppo push 节点要分开、不同样式）。
+   各自成块、左侧色条与底色不同：**身份先于读数被看见**；块内仍是 pill 行。 */
+.tc-nodes__group {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+}
+.tc-nodes__group--rollout {
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+}
+.tc-nodes__group--ppo {
+  border-left: 3px solid var(--green);
+  background: var(--green-bg);
+}
+.tc-nodes__grouphd {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+/* 块头右上角的深链（2026-11-02 用户：「节点统计」按键移到采样节点区域右上角）。
+   只在这一个块头里出现，所以用后代选择器；`margin-left:auto` 把它顶到最右，
+   左侧的标题/单位仍靠左（不额外拆一层 flex 容器）。 */
+.tc-nodes__grouphd .tc-btn {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+.tc-nodes__grouphd b {
+  font-size: var(--fs-sm);
+}
+/* push 节点行（`gpu_push` / `offline_push`，2026-11-02 两块分家）：住在 PPO 块里，身份先于读数。
+   徽章 = 走了哪条派发腿（两条腿挑机器的能力键不同，必须能分开看）；行内不出「局」那一列。 */
+.tc-badge--push-gpu {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid var(--green);
+}
+.tc-badge--push-off {
+  background: var(--surface-2);
+  color: var(--green);
+  border: 1px dashed var(--green);
+}
+
 /* ────────────── 在训课程 pill（2026-09-20：课程开训必须手动开） ──────────────
    一门已开课的课程一个 pill（状态点 + 课名 + it 指针 + 一句状态 + ■ 停课）。与节点 pill
    同一套视觉语言（圆角胶囊 / 状态点色板 / hover 描边）——相邻的 pill 不该长得像两个体系。
@@ -2127,6 +2194,23 @@ a.tc-btn {
   overflow-x: auto;
   scrollbar-width: thin;
   padding-bottom: 2px; /* 给细滚动条留位，避免贴住描述线 */
+}
+/* 词表说明签（2026-11-02 用户：「这些状态提示让人混淆难以理解」）：状态词统一成
+   `环节·归属` 语法，读法只在 `PILL_WORD_GUIDE` 一处——组首一枚中性 `?` 悬停即全表。
+   不可点（纯读数）；宽度固定，不参与横向滚动的伸缩。 */
+.tc-tpills__legend {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  cursor: help;
+  user-select: none;
 }
 /* ✖ `.tc-tpills .lbl`（pill 组前的「在训」文字标签）已于 2026-09-20 删除（用户指令）——
    pill 自己带课名/it/状态；组名留给 `aria-label`（不可见，不吃视觉噪声）。 */
@@ -2898,6 +2982,67 @@ a.tc-btn {
 .tc-nav__label {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 侧栏「最近训练」五门（2026-11-02 用户）：课程 select 是全量名单，这一节只给刚跑过的五门
+   一键入口。展开时才渲染（NavSidebar 的 `!collapsed`）；视觉沿用 `.tc-nav` 的行式：
+   徽标位（左条高亮）+ hover + ellipsis。 */
+.tc-side__recent {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+.tc-side__recent-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: 6px var(--sp-2);
+  border: 0;
+  border-radius: var(--r-1);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tc-side__recent-item:hover {
+  background: var(--surface-2);
+  color: var(--info-fg);
+}
+.tc-side__recent-item[aria-current='true'] {
+  background: var(--info-bg);
+  color: var(--info-fg);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 0 var(--info-fg);
+}
+.tc-side__recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 右侧迷你读数（🔥 + 状态色点 + 最新 it）：整体顶到最右，课名过长时只吃名字的 ellipsis。 */
+.tc-side__recent-readout {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+.tc-side__recent-it {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.tc-side__recent-item[aria-current='true'] .tc-side__recent-it {
+  color: inherit;
+  opacity: 0.75;
+}
+.tc-side__recent-fire {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
 }
 
 .tc-side__spacer {
@@ -3713,11 +3858,12 @@ a.tc-btn {
   padding-top: var(--sp-2);
   border-top: 1px dashed var(--line);
 }
-/* PPO 行（实线：两类身份的界 —— 采样在上、PPO 在下，各自成行、永不并排）。 */
+/* PPO 行：所属块（`.tc-nodes__group--ppo`）已经用绿左侧条与底色划界，这里不再画分隔线
+   （同一条界不画两遍——2026-11-02 两块分家后）。 */
 .tc-contrib-ppobrief {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--line);
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
 }
 .tc-contrib-brieflabel {
   color: var(--muted);

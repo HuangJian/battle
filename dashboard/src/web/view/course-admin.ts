@@ -45,7 +45,7 @@ import {
  *
  *  ⚠ 口径只有一个：**开课标记**（`training-enabled.txt`，训练侧与 hub 的同一个闸）。
  *  它是「这一门被放进课程表了吗」，**不是**「进程在跑吗」——后者的说法彽在**状态列**上
- *  （矩阵词表的「在训 / 未在训 / 接管中（云机） / 接管掉线」），两列回答两个问题。 */
+ *  （矩阵词表的「本机·在训 / 未在训 / 云机·接管 / 云机·掉线」），两列回答两个问题。 */
 export type CourseAdminKind = 'enabled' | 'stopped' | 'declared' | 'archived'
 
 export interface CourseAdminRow {
@@ -198,6 +198,8 @@ export function buildCourseAdmin(input: CourseAdminInput): CourseAdminView {
     overview: input.overview,
     queue: input.queue,
     loopCompletes: input.loopCompletes,
+    // 同样把开课标记交给矩阵：已停课的课不报 `hub·无进程`（即使 hub 还压着残留 job）。
+    enabledCourses: input.training,
     viewing: input.viewing,
     nowSec: input.nowSec,
   })

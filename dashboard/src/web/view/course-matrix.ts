@@ -21,7 +21,7 @@
  *  悬停里，不静默丢）。
  *
  *  为什么（用户的读序）：这门表的用途是「盯着正在跑的那几门」，而未在训的课在盘上可能积到几十门
- *  （历史课都有账本与目录）——它们把在训的那几行挤到屏幕外。**代价**：`hub 已注册 · 无进程`
+ *  （历史课都有账本与目录）——它们把在训的那几行挤到屏幕外。**代价**：`hub·无进程`
  *  这种「两半事实打架」的行（合并的初衷之一，见上）不再直接上屏，只能从表头 chip 的计数看出
  *  「有几门没列」——这是刻意用**读噪**换**信息密度**（DECISIONS §2026-09-20-console-declutter）。
  *
@@ -36,7 +36,7 @@
 
 import type { LoopComplete } from './console-types'
 import type { CourseOverviewRow, ParallelOverviewView, ReadStaleView } from './course-overview'
-import { courseStatus, type CourseStatus } from './course-status'
+import { courseStatus, stepStage, type CourseStatus } from './course-status'
 import { fmtRel } from './format'
 import {
   type LoopQueueRow,
@@ -120,7 +120,7 @@ export const CELL_UNKNOWN = '—'
  *
  *  ⚠ 它只是**上屏筛**，不是状态词的判据：词由 `courseStatus` 单点派生（同样的两半，
  *  按语义优先级给一个答案）——比如「hub 说在训、训练侧没进程」的行上屏但状态词是
- *  `hub 已注册 · 无进程`（warn），不会跟着 `ov.training` 谎报「在训」。 */
+ *  `hub·无进程`（warn），不会跟着 `ov.training` 谎报「在训」。 */
 export function rowTraining(ov: CourseOverviewRow | null, lq: LoopQueueRow | null): boolean {
   return (lq?.training ?? false) || (ov?.training ?? false)
 }
@@ -141,6 +141,10 @@ export function isTrainingRow(r: CourseMatrixRow): boolean {
 /**
  * 一行 → 状态。**判据不再在这里拼**（P1-10）：交给唯一派生 `courseStatus`（`course-status.ts`），
  * 本函数只把它说的语义**说成矩阵的词**（pill 说成自己的细词）——两边同源，不可能互相矛盾。
+ *
+ * ★ 2026-11-02（用户口径：与 pill 同一套 `环节·归属` 语法）：矩阵自己生成的词也带**出处**——
+ *  `本机·…` = 本机进程事实，`hub·…` = hub 派发事实，`云机·…` = 自主接管事实；
+ *  「在等什么」列引的是训练进程原话（表头已标 `训练侧·`），不再另造词。
  *
  * 矩阵词的顺序即「哪条信息最该先说」：
  * 1. 在训但 hub 没注册（warn）——算力在烧，job 永远不派发。
@@ -169,6 +173,9 @@ export function matrixStatus(
     /** ★2026-10-06：账本尾行 `run_complete` 的停车态（`stateView.loopCompletes[课]`）——
      *  终态词与 pill 同源（同屏两侧不得再互相矛盾）。 */
     loopComplete?: LoopComplete | null
+    /** 开课标记（`trainingCourses` 含它）：`false` = 已停课 ⇒ 不报 `hub·无进程`。
+     *  缺省 = 不可知（旧视图/旧调用方，行为不变）。 */
+    enabled?: boolean
   },
 ): MatrixStatus {
   const st = courseStatus({
@@ -183,6 +190,7 @@ export function matrixStatus(
     overviewStale: opts?.overviewStale ?? null,
     queueStale: opts?.queueStale ?? null,
     loopComplete: opts?.loopComplete ?? null,
+    enabled: opts?.enabled,
   })
   return matrixWord(st)
 }
@@ -192,7 +200,7 @@ function matrixWord(st: CourseStatus): MatrixStatus {
   // ① hub 冲突档前置：算力在烧而 job 永不派发 / job 没人消费——矩阵独有的升级信号。
   if (st.conflict === 'hub-unregistered') {
     return {
-      text: '在训 · hub 未注册',
+      text: '本机·在训（hub 未注册）',
       tone: 'warn',
       title:
         'hub 的课程表里没有这门课——它的 PPO job 永远不会被派发（rollout 白跑）。' +
@@ -208,21 +216,21 @@ function matrixWord(st: CourseStatus): MatrixStatus {
   // ③ **接管（hold）**：★M4 词表。live = 归云机管（info，不是故障）；
   //    stale = 接管掉线（warn：它已自愈，但「刚才丢了 15 分钟」这件事要人看见）。
   if (st.kind === 'autonomous-running' || st.kind === 'autonomous-waiting') {
-    return { text: '接管中（云机）', tone: 'info', title: st.title }
+    return { text: '云机·接管', tone: 'info', title: st.title }
   }
-  if (st.kind === 'autonomous-stale') return { text: '接管掉线', tone: 'warn', title: st.title }
-  if (st.kind === 'held-wait') return { text: '接管中（云机）', tone: 'info', title: st.title }
+  if (st.kind === 'autonomous-stale') return { text: '云机·掉线', tone: 'warn', title: st.title }
+  if (st.kind === 'held-wait') return { text: '云机·接管', tone: 'info', title: st.title }
   // ④ hub 注册了它却没进程：job 会堆起来（warn）。
   if (st.conflict === 'hub-no-process' || st.kind === 'hub-no-process') {
     return {
-      text: 'hub 已注册 · 无进程',
+      text: 'hub·无进程',
       tone: 'warn',
       title: st.title,
     }
   }
   // ⑤ 在训：pill 的细词（采集中/等回传/卡住/…）在矩阵合并成粗词，但**语义同源**。
   if (st.kind !== 'not-training' && st.kind !== 'waiting-process' && st.kind !== 'unknown') {
-    return { text: '在训', tone: 'ok', title: st.title }
+    return { text: '本机·在训', tone: 'ok', title: st.title }
   }
   return {
     text: '未在训',
@@ -240,8 +248,10 @@ export function matrixConflict(
   ov: CourseOverviewRow | null,
   lq: LoopQueueRow | null,
   hubOnline: boolean,
-  /** ★2026-10-06：停车态（同 `matrixStatus`）——终态不得被 hub 冲突档升成「在训 · hub 未注册」。 */
+  /** ★2026-10-06：停车态（同 `matrixStatus`）——终态不得被 hub 冲突档升成「本机·在训（hub 未注册）」。 */
   loopComplete: LoopComplete | null = null,
+  /** 开课标记（`false` = 已停课 ⇒ 不报 `hub-no-process`）；缺省 = 不可知。 */
+  enabled?: boolean,
 ): MatrixConflict {
   return courseStatus({
     course: '',
@@ -250,6 +260,7 @@ export function matrixConflict(
     hubOnline,
     trainerRunning: rowProcessTraining(ov, lq),
     loopComplete,
+    enabled,
   }).conflict
 }
 
@@ -273,14 +284,14 @@ export interface MatrixCell {
 export function queueCell(ov: CourseOverviewRow | null, hubOnline: boolean): MatrixCell {
   if (ov?.hold?.state === 'live')
     return {
-      text: '接管中·不派发',
+      text: 'hub·停派',
       title:
         '该课正被自主 worker 接管：PPO 派发被 hold 闸压住（在队任务不撤、也不派给协作盘）——' +
         '队列深度不适用；段内进度见「接管」列（回传轮次/最近产物）。',
     }
   if (!ov || !hubOnline) return { text: CELL_UNKNOWN, title: HUB_DOWN_TITLE }
   return {
-    text: `队列 ${ov.queuePending} · 在飞 ${ov.inflight}`,
+    text: `hub·队列 ${ov.queuePending} / 在飞 ${ov.inflight}`,
     title: `队列深度 ${ov.queuePending}（可领取 job 数）· 在飞 ${ov.inflight}（已发布未回传）`,
   }
 }
@@ -302,7 +313,7 @@ export function holdCell(ov: CourseOverviewRow | null, nowSec: number): MatrixCe
   const who = hold.workerId || '未登记持有者'
   if (hold.state === 'stale') {
     return {
-      text: `接管掉线 · ${who}`,
+      text: `云机·掉线 ${who}`,
       warn: true,
       title:
         `持有人「${who}」的进度已静默超阈值（hub ` +
@@ -312,7 +323,7 @@ export function holdCell(ov: CourseOverviewRow | null, nowSec: number): MatrixCe
     }
   }
   return {
-    text: `${who} · 最近 ${ago}`,
+    text: `云机·${who} 最近 ${ago}`,
     warn: staleArtifact,
     title:
       `${who} 接管中（hold live：压住协作派发 + 本机不跑这门课），最近一次**进度**信号 ${ago} 前。` +
@@ -330,22 +341,53 @@ export function hasHold(ov: CourseOverviewRow | null): boolean {
   return !!ov?.hold
 }
 
+/** 「在等什么」的**短词**（2026-11-02 用户：列里只要环节，整句进悬停）。
+ *
+ *  `采集` / `PPO·已发布` / 下一步的环节（`门禁`、`记账`、`评估`、`导出`、`准备`、`收尾`、
+ *  `采集`）/ `PPO·待发布`（ready 且下一步是 ppo：`PPO` 一个词会被读成已在飞）/ `无待办` /
+ *  `云机·接管` / `配置·阻塞`。
+ *
+ *  映射只此一处：13 步 → 人话复用 `course-status.ts::stepStage`（与 pill 同一个映射）。
+ *  短词**不丢信息**：整句原话逐字进 `title`（见 `waitingCell`）。 */
+export function waitWord(lq: LoopQueueRow): string {
+  switch (lq.waiting.kind) {
+    case 'collect':
+      return '采集'
+    case 'inflight':
+      // 训练侧只知「已发布未回传」——认领/开算在 hub 列，不在这句里断言。
+      return 'PPO·已发布'
+    case 'ready': {
+      const stage = lq.current ? stepStage(lq.current) : null
+      if (!stage) return '本机'
+      return stage === 'PPO' ? 'PPO·待发布' : stage
+    }
+    case 'idle':
+      return '无待办'
+    case 'held':
+      return '云机·接管'
+    case 'blocked':
+      return '配置·阻塞'
+  }
+}
+
 /** 「在等什么」——训练侧事实。调度器视图不可用时是「不知道」，不是「无待办」。 */
 export function waitingCell(lq: LoopQueueRow | null): MatrixCell {
   if (!lq) return { text: CELL_UNKNOWN, title: QUEUE_DOWN_TITLE }
+  const text = lq.waiting.text
   return {
-    text: lq.waiting.text || CELL_UNKNOWN,
-    title: waitTitle(lq.waiting.kind),
+    text: waitWord(lq),
+    // 短词只给环节；判据 + 训练进程**原话**逐字进悬停（不删细节，只降排版层级）。
+    title: text ? `${waitTitle(lq.waiting.kind)}。原话：${text}` : waitTitle(lq.waiting.kind),
   }
 }
 
 /** 「在等什么」——**被接管的课**的（★M4）：不读本地 13 步表的「推进中/采集中」等词——
- *  那段由自主 worker 整段执行，本地只收回传。有回传就说「云机运行中 · 已回传 N 轮」，
- *  一次都还没回传就说「等待接管」。 */
+ *  那段由自主 worker 整段执行，本地只收回传。有回传就说「云机·运行中（已回传 N 轮）」，
+ *  一次都还没回传就说「云机·待接管」。 */
 export function holdWaitCell(ov: CourseOverviewRow): MatrixCell {
   if (ov.hold?.state === 'stale') {
     return {
-      text: '接管掉线 · 已恢复协作',
+      text: '云机·掉线（已恢复协作）',
       title:
         '接管已判掉线（进度静默超阈）：该课已回到协作派发 + 本机采样——这一行接下来会按' +
         '训练侧的「在等什么」推进；要立刻清掉墓碑可点「强制解除接管」。',
@@ -353,14 +395,14 @@ export function holdWaitCell(ov: CourseOverviewRow): MatrixCell {
   }
   if (ov.offlineRounds > 0) {
     return {
-      text: `云机运行中 · 已回传 ${ov.offlineRounds} 轮`,
+      text: `云机·运行中（已回传 ${ov.offlineRounds} 轮）`,
       title:
         `自主 worker 整段在上跑：已回传的段内轮次 ${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}；` +
         '本机不跑这门课（held 等待），PPO 派发也被 hold 闸压住（进度明细见「接管」列）。',
     }
   }
   return {
-    text: '等待接管',
+    text: '云机·待接管',
     title:
       '该课被接管但还没有任何段内产物回传：云机可能刚领走任务包、或还在跑第一轮' +
       '（本机不跑这门课，PPO 派发被 hold 闸压住）。',
@@ -425,7 +467,7 @@ export interface MatrixBadge {
  *  · `pending_export`（导包中）：**不占闸**的软态——不画它，操作员会把「刚认领还没包」
  *    误读成「没人管」。
  *
- *  live 的接管不另画徽标：状态列说「接管中（云机）」、接管列说 holder——同一件事不摆三遍。 */
+ *  live 的接管不另画徽标：状态列说「云机·接管」、接管列说 holder——同一件事不摆三遍。 */
 export function holdBadgeOf(ov: CourseOverviewRow | null): MatrixBadge | null {
   if (!ov) return null
   if (ov.hold?.state === 'stale') {
@@ -482,6 +524,9 @@ export interface CourseMatrixInput {
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——收官终态进状态列，
    *  与 pill 同一派生（缺省 = 旧视图/没有停车态，行为与从前逐字节相同）。 */
   loopCompletes?: Record<string, LoopComplete> | null
+  /** 开课标记清单（`stateView.trainingCourses`）；缺省 = 不可知（不改变旧行为）。
+   *  已停课的课不会因为 hub 还压着 job 而报 `hub·无进程`。 */
+  enabledCourses?: string[] | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
   nowSec: number
@@ -497,6 +542,7 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
   const lqRows = input.queue?.rows ?? []
   const lqByCourse = new Map(lqRows.map((r) => [r.course, r]))
   const hubOnline = input.overview?.hubOnline ?? false
+  const enabledSet = input.enabledCourses ? new Set(input.enabledCourses) : null
 
   const order: string[] = []
   const seen = new Set<string>()
@@ -516,6 +562,8 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
     const ov = ovByCourse.get(course) ?? null
     const lq = lqByCourse.get(course) ?? null
     const loopComplete = input.loopCompletes?.[course] ?? null
+    // `undefined`（调用方没给 enabledCourses）= 不可知；`false` = 已停课。
+    const enabled = enabledSet ? enabledSet.has(course) : undefined
     const fromQueue = lq ? lq.it : null
     const fromLedger = ov ? ov.iter : null
     // ★M4（接管列修正）：被接管的课走「任务包+回传」维度——iter 列**只**读云机回传的最新 it
@@ -535,8 +583,8 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
     return {
       course,
       viewing: course === input.viewing,
-      status: matrixStatus(ov, lq, hubOnline, { loopComplete }),
-      conflict: matrixConflict(ov, lq, hubOnline, loopComplete),
+      status: matrixStatus(ov, lq, hubOnline, { loopComplete, enabled }),
+      conflict: matrixConflict(ov, lq, hubOnline, loopComplete, enabled),
       iter,
       iterSource,
       ov,
@@ -616,7 +664,7 @@ export function matrixMeta(input: {
     const waiting = lq.rows.filter((r) => r.waiting.kind === 'inflight' && r.training).length
     if (waiting > 0)
       out.push({
-        text: `${waiting} 课等回传`,
+        text: `训练侧·等回传 ${waiting} 课`,
         title: '正在等远端 job 回传的在训课程数（结果在 GPU worker / 云机上）',
         tone: 'warn',
       })

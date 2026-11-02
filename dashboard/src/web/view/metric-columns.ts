@@ -119,7 +119,7 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
   residualHp: {
     key: 'residualHp',
     label: '残血',
-    title: '胜局残血 / 该局可支配生命容量',
+    title: '胜局剩余总血量 / 单命满血（三命全在 = 300%）',
     num: true,
   },
   loot: { key: 'loot', label: '道具', title: '每局平均拾取数/掉落数', num: true },

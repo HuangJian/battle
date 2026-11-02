@@ -164,6 +164,8 @@ export function nodeStructure(cfg: RlConfig): NodeView[] {
     id: n.id,
     url: n.url,
     gpuPush: !!n.gpu_push,
+    // 离线 push（`offline_push` 能力键）：与 gpu_push 同属 job 侧，`nodeRole` 据此把它移出采样块。
+    offlinePush: !!n.offline_push,
     enabled: n.enabled,
     concurrency: n.concurrency,
     online: null,

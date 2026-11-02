@@ -34,6 +34,7 @@ const mkNode = (over: Partial<NodeView>): NodeView => ({
   id: 'a1',
   url: 'http://a1',
   gpuPush: false,
+  offlinePush: false,
   enabled: true,
   concurrency: 2,
   online: true,

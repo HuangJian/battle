@@ -24,6 +24,7 @@ import {
   TC_SIDE_COLLAPSED,
   withCourse,
   type PageKey,
+  type RecentCourseView,
 } from '../../view'
 import { readLocal, writeLocal } from '../lib/storage'
 
@@ -39,6 +40,16 @@ export interface NavSidebarProps {
   readOnly?: boolean
   /** 侧栏底部区块（控制台：当前课程 + 全局设置）。独立页不传。 */
   footer?: ComponentChildren
+  /** **最近训练的五门课**（调用方按最近训练时间倒序截断并算好迷你读数；2026-11-02 用户口径）。
+   *
+   *  为什么在这里：课程 select 有几十门（历史课都留着账本），找「刚才跑的那门」要滚很久。
+   *  只给五门一键入口，**展开时**才渲染（折叠成 rail 时连这五门也不占位）。
+   *  缺省/空数组 = 不渲染这一节（`/eval`、`/log` 两个独立页没有课程上下文）。 */
+  recentCourses?: RecentCourseView[]
+  /** 已开课课程（标 🔥；与顶栏 pill / 课程 select 同一名单）。 */
+  trainingCourses?: string[]
+  /** 点一门最近课程 = 切查看目标（控制台还会带回总览页，见 `app.tsx`）。 */
+  onPickCourse?: (course: string) => void
   /** `route` 类导航项的点击（拦截为 pushState）。**不传 = 原生跳转**。
    *
    *  为什么这是可选的：客户端 pushState 只能在**同一个 bundle** 的路由表内切页。独立页
@@ -47,12 +58,23 @@ export interface NavSidebarProps {
   onNavigate?: (page: PageKey, e: JSX.TargetedMouseEvent<HTMLAnchorElement>) => void
 }
 
+/** 状态色调 → 圆点 / 菱形 / 方 / 空心（与 `TrainingPills.tsx::DOT` 同一套色板与形状）。 */
+const DOT: Record<RecentCourseView['tone'], string> = {
+  g: 'tc-dot tc-dot--on',
+  y: 'tc-dot tc-dot--warn',
+  r: 'tc-dot tc-dot--dead',
+  gray: 'tc-dot tc-dot--empty',
+}
+
 export function NavSidebar({
   activePath,
   course = '',
   readOnly = false,
   footer,
   onNavigate,
+  recentCourses = [],
+  trainingCourses = [],
+  onPickCourse,
 }: NavSidebarProps) {
   // 折叠态（手动）：唯一入口 = 品牌行的折叠键——**不**随视口宽度或 hover 自动切换
   // （2026-10-26 用户指令）。SSR 首帧恒展开（与 hydrate 一致），偏好 mount 后恢复。
@@ -123,6 +145,44 @@ export function NavSidebar({
           </div>
         ))}
       </nav>
+
+      {/* 最近训练的五门（展开时才在）：课程 select 是全量名单，这一节是「刚跑过的那几门」。 */}
+      {!collapsed && recentCourses.length > 0 ? (
+        <div className="tc-side__recent" aria-label="最近训练的课程">
+          <span className="tc-side__glabel">最近训练</span>
+          {recentCourses.map((c) => {
+            const active = c.course === course
+            const training = trainingCourses.includes(c.course)
+            return (
+              <button
+                key={c.course}
+                type="button"
+                className="tc-side__recent-item"
+                aria-current={active ? 'true' : undefined}
+                title={`${c.title}\n点击查看 ${c.course} 的训练指标`}
+                onClick={() => onPickCourse?.(c.course)}
+              >
+                <span className="tc-side__recent-name">{c.course}</span>
+                {/* 右侧迷你读数：🔥 = 已开课（与顶栏 pill 同名单）；色点 = 状态；it = 最新指针。 */}
+                <span className="tc-side__recent-readout">
+                  {training ? (
+                    <span className="tc-side__recent-fire" aria-hidden="true">
+                      🔥
+                    </span>
+                  ) : null}
+                  <span className={DOT[c.tone]} title={c.title} aria-hidden="true" />
+                  <span
+                    className="tc-side__recent-it"
+                    title={`最新 it${c.it ?? '—'}（账本指针：下一轮；收官后不再前进）`}
+                  >
+                    it{c.it ?? '—'}
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
 
       <div className="tc-side__spacer" />
 

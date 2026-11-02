@@ -273,7 +273,12 @@ function skillCols(): Col<MetricRow>[] {
       cell: (r) => {
         const pct = r.kind === 'main' ? r.main.actuals?.avgResidualHpPct : r.eval.avgResidualHpPct
         const abs = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
-        if (pct != null) return <span title="胜局残血 / 该局可支配生命容量">{fmtPct(pct)}</span>
+        if (pct != null)
+          return (
+            <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
+              {fmtPct(pct)}
+            </span>
+          )
         if (abs != null)
           return (
             <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">

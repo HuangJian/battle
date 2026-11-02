@@ -83,7 +83,7 @@ function defaultOverview(): ParallelOverviewView {
   return ovView([
     // 在训（hub 也认识它）
     ovRow({ course: 'c4', training: true, iter: 42, hubSeen: true, queuePending: 2, inflight: 1 }),
-    // 接管中（云机）+ 段内已回传 3 轮（账本里没有这些行）
+    // 云机·接管 + 段内已回传 3 轮（账本里没有这些行）
     ovRow({
       course: 'c5',
       training: true,
@@ -96,8 +96,9 @@ function defaultOverview(): ParallelOverviewView {
     }),
     // ★冲突：在训但 hub 没注册 → rollout 白跑
     ovRow({ course: 'ghost', training: true, iter: null, hubSeen: false }),
-    // ★冲突：hub 在线且认识它，但没有进程 → job 堆着没人消费（合并前它长得像「停」）
-    ovRow({ course: 'stalled', training: false, iter: 3, hubSeen: true }),
+    // ★冲突：hub 在线且认识它，但没有进程 → job 堆着没人消费（合并前它长得像「停」）。
+    // 判据含「hub 真有活」（queuePending），否则停课也会被误报（2026-11-02 z4-polish）。
+    ovRow({ course: 'stalled', training: false, iter: 3, hubSeen: true, queuePending: 2 }),
     // 真的没在训（hub 也不认识它）
     ovRow({ course: 'dead', training: false, iter: null, hubSeen: false }),
   ])
@@ -156,11 +157,11 @@ async function render(
 // ────────────────────────── 合并后的状态列（新增信号） ──────────────────────────
 
 describe('课程矩阵：只列在训课程（2026-09-20 用户指令）', () => {
-  it('在训三态同屏可分辨：在训 / 接管中（云机） / 在训·hub 未注册', async () => {
+  it('在训三态同屏可分辨：本机·在训 / 云机·接管 / 本机·在训（hub 未注册）', async () => {
     const html = await render()
-    expect(html).toContain('在训')
-    expect(html).toContain('接管中（云机）')
-    expect(html).toContain('在训 · hub 未注册')
+    expect(html).toContain('本机·在训')
+    expect(html).toContain('云机·接管')
+    expect(html).toContain('本机·在训（hub 未注册）')
     // 徽章档位：在训 g / 接管 a / 冲突 y（fixture 里三行都在训）
     expect(html).toContain('tc-badge--g')
     expect(html).toContain('tc-badge--a')
@@ -177,7 +178,7 @@ describe('课程矩阵：只列在训课程（2026-09-20 用户指令）', () =>
     expect(html).not.toContain('<b>dead</b>')
     expect(html).toContain('未在训 2 门未列')
     // 悬停里逐门点名 + 各自状态（「没上屏」不等于「不存在」——历史课会积几十门）
-    expect(html).toContain('stalled —— hub 已注册 · 无进程')
+    expect(html).toContain('stalled —— hub·无进程')
     expect(html).toContain('dead —— 未在训')
   })
 
@@ -212,7 +213,7 @@ describe('课程矩阵：只列在训课程（2026-09-20 用户指令）', () =>
       }),
     })
     expect(html).toContain('hub 无应答')
-    expect(html).not.toContain('在训 · hub 未注册')
+    expect(html).not.toContain('本机·在训（hub 未注册）')
     expect(html).not.toContain('--course')
     expect(html).not.toContain('data-conflict')
   })
@@ -250,7 +251,7 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
 
   it('队列·在飞列：hub 侧读数；hub 无应答时退化为 `—`（不编 0）', async () => {
     const html = await render()
-    expect(html).toContain('队列 2 · 在飞 1')
+    expect(html).toContain('hub·队列 2 / 在飞 1')
     const down = await render({
       overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true })], {
         hubUrl: null,
@@ -265,9 +266,9 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
 
   it('接管列：只给**有接管**的课；产物超 1 小时变醒目（云机挂了 vs 在跑）', async () => {
     const html = await render()
-    expect(html).toContain('tpu-1 · 最近 —') // 进度信号未上报 ⇒ 相对时间是 `—`（不是 1970）
+    expect(html).toContain('云机·tpu-1 最近 —') // 进度信号未上报 ⇒ 相对时间是 `—`（不是 1970）
     expect((html.match(/tc-mx__seg\b/g) ?? []).length).toBe(3) // 每个上屏的行都有这一格（`—`）
-    expect((html.match(/tpu-1 · 最近/g) ?? []).length).toBe(1) // 只有 c5 有接管读数
+    expect((html.match(/云机·tpu-1 最近/g) ?? []).length).toBe(1) // 只有 c5 有接管读数
     expect(html).not.toContain('tc-mx__seg--stale') // 1 分钟前 = 在跑
 
     const stale = await render({
@@ -293,12 +294,12 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     expect(html).toContain('>it9<')
     // 本轮列 = 云机
     expect(html).toContain('云机 it9')
-    // 在等什么列 = 云机运行中 · 已回传 N 轮（不提本地 13 步表的词）
-    expect(html).toContain('云机运行中 · 已回传 3 轮')
-    // 队列·在飞列 = 接管中·不派发（不摆会误读的「队列 0 · 在飞 0」）
-    expect(html).toContain('接管中·不派发')
+    // 训练侧列 = 云机·运行中（已回传 N 轮）（不提本地 13 步表的词）
+    expect(html).toContain('云机·运行中（已回传 3 轮）')
+    // hub 列 = 停派（不摆会误读的「队列 0 / 在飞 0」）
+    expect(html).toContain('hub·停派')
     // 接管列给持有者（两列口径互补，不删）
-    expect(html).toContain('tpu-1 · 最近 —')
+    expect(html).toContain('云机·tpu-1 最近 —')
   })
 
   it('「在等什么」：四态各自有修饰类；表头汇总等回传的**在训**课数', async () => {
@@ -325,7 +326,7 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     // ready 不上色（它是常态）——但句子里必须有下一步是谁
     expect(html).toContain('无外部等待，下一步 ppo')
     // 表头汇总等回传的**在训**课数（未在训的不算「在等外部」）
-    expect(html).toContain('1 课等回传')
+    expect(html).toContain('训练侧·等回传 1 课')
   })
 
   it('两侧不同步时（hub 说在训、训练侧说没进程）：行仍上屏但淡一档（这行最该看清）', async () => {
@@ -577,11 +578,11 @@ describe('任务包行内操作：「导出」一个键即取回 + 导入改真�
 // 每课行随 `/admin/queue` 一起来。取而代之的是下面两条：接管在屏上怎么说、人能做什么。
 
 describe('★M4 接管：状态列 / 队列格 / 接管列同屏一致，唯一的人工出口是「强制解除接管」', () => {
-  it('接管中的课：三列同屏说同一件事（接管中（云机） · 接管中·不派发 · holder）', async () => {
+  it('接管中的课：三列同屏说同一件事（云机·接管 · hub·停派 · 云机·<holder>）', async () => {
     const html = await render({ onAction: () => {} })
-    expect(html).toContain('接管中（云机）')
-    expect(html).toContain('接管中·不派发')
-    expect(html).toContain('tpu-1 · 最近 —')
+    expect(html).toContain('云机·接管')
+    expect(html).toContain('hub·停派')
+    expect(html).toContain('云机·tpu-1 最近 —')
     // 旧三颗模式钮一个都不在（它们的前提——课程有在线/离线模式——已经没了）
     expect(html).not.toContain('切离线')
     expect(html).not.toContain('切换成在线')
@@ -600,7 +601,7 @@ describe('★M4 接管：状态列 / 队列格 / 接管列同屏一致，唯一�
     expect(await render()).not.toContain('aria-label="hub：强制解除接管')
   })
 
-  it('接管掉线（stale）：状态列说「接管掉线」+ 徽标说「已恢复协作」（本机跑不跑一眼可见）', async () => {
+  it('接管掉线（stale）：状态列说「云机·掉线」+ 徽标说「已恢复协作」（本机跑不跑一眼可见）', async () => {
     const html = await render({
       overview: ovView([
         ovRow({ course: 'c5', training: true, hold: hold('tpu-1', 'stale'), offlineRounds: 2 }),
@@ -608,10 +609,10 @@ describe('★M4 接管：状态列 / 队列格 / 接管列同屏一致，唯一�
       loopQueue: null,
       onAction: () => {},
     })
-    expect(html).toContain('接管掉线')
+    expect(html).toContain('云机·掉线')
     expect(html).toContain('已恢复协作')
-    // 掉线后队列列回到真相（派发已恢复，不能继续拿「接管中」把它藏掉）
-    expect(html).not.toContain('接管中·不派发')
+    // 掉线后队列列回到真相（派发已恢复，不能继续拿「接管」把它藏掉）
+    expect(html).not.toContain('hub·停派')
   })
 })
 

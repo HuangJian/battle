@@ -97,7 +97,11 @@ export function selfDiskBadge(
 export interface NodeView {
   id: string
   url: string
+  /** `gpu_push` 能力键 = PPO push worker（吃 job，不跑采样局）。 */
   gpuPush: boolean
+  /** `offline_push` 能力键 = 离线 push worker（与 `gpu_push` 同属 job 侧，另一条派发腿）。
+   *  可选（additive）：旧视图/夹具不带此键 ⇒ `nodeRole` 视为采样节点。 */
+  offlinePush?: boolean
   enabled: boolean
   concurrency: number
   /** /v1/ping 实时探测；null = 未探测（disabled 时跳过）。 */
@@ -139,6 +143,23 @@ export type NodeHealth = 'healthy' | 'slow' | 'offline'
 export function nodeHealth(contrib: number, concurrency: number): NodeHealth {
   if (!(contrib > 0)) return 'offline'
   return contrib >= (concurrency >= 1 ? concurrency : 1) ? 'healthy' : 'slow'
+}
+
+/** 节点角色 —— 由 rl-config 的**能力键**判定（不是名字、不是 label、不是有没有并发数）。
+ *
+ *  · `sampler`     — 跑 rollout / eval（拉模式，单位 = 局）；没有能力键的条目都是它
+ *  · `gpu_push`    — hub 的 GPU push 派发腿，吃 PPO job（单位 = job）
+ *  · `offline_push`— hub 的离线 push 派发腿（自主云机整段任务），同样吃 job
+ *
+ *  ★ 2026-11-02（用户报障「push worker 节点混在采样节点区，如 colab-o / kaggleO」）：三类条目
+ *  同住 rl-config 的 `nodes[]`，只能靠能力键分开——按「有没有 concurrency / label 长什么样」猜
+ *  必然把 push 机器渲染成「贡献 0 局」的离线采样节点。两个键同时挂（异常配置）时按 `gpu_push`
+ *  收口：两条派发腿各自解析，UI 只作一行归属。 */
+export type NodeRole = 'sampler' | 'gpu_push' | 'offline_push'
+
+export function nodeRole(n: Pick<NodeView, 'gpuPush'> & { offlinePush?: boolean }): NodeRole {
+  if (n.gpuPush) return 'gpu_push'
+  return n.offlinePush ? 'offline_push' : 'sampler'
 }
 
 export interface NodeLocalView {

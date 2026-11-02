@@ -160,8 +160,35 @@ export function parseIterVolume(raw: unknown): IterVolume | null {
  *  hard/chaos/relax 走 DEFAULT_RULES（combatModel=pool）；classic instant 为 100，
  *  训练课程几乎全是 hard → 统一 263（与 c4-dodge「剩 119/263」口径一致）。 */
 const PLAYER_MAX_HP = Math.round(50 * 1.05 * 5) // 263
-/** 训练课程常见 startLives（curricula 普遍 player.lives=1；难度表默认 3 但课程覆盖）。 */
+/** 课程起命兜底（课程文件读不到时）：curricula 普遍 `lives: 1`，但 z4 等关卡是 3。 */
 const ASSUMED_START_LIVES = 1
+
+/** 课程起命缓存：`curricula/<course>.jsonc` 的 `lives`（A 类语料字段，开课后不会热改）。 */
+const courseStartLives = new Map<string, number>()
+
+/** 课程起命。
+ *
+ *  **为什么必须读课程**：eval 行**不落 `startLives`**（只有 rollout 单局 manifest 有）——
+ *  缺它就一律按 1 命算，三命关的残血容量小 3 倍、承伤/杀 的分母也小 3 倍（2026-11-02
+ *  用户报障：z4-pick-approach 的 eval 残血 <5%）。`lives` 是课程数据行，比逐行字段更可靠。
+ *  读不到（课程已删/目录名不是课程名）⇒ `ASSUMED_START_LIVES`（= 旧行为）。 */
+function loadCourseStartLives(course: string): number {
+  const hit = courseStartLives.get(course)
+  if (hit !== undefined) return hit
+  let lives = ASSUMED_START_LIVES
+  try {
+    const p = join(curriculaDir(), `${course}.jsonc`)
+    if (existsSync(p)) {
+      const cur = parseJsonc(readFileSync(p, 'utf8')) as { lives?: unknown }
+      const n = Number(cur.lives)
+      if (Number.isFinite(n) && n > 0) lives = n
+    }
+  } catch {
+    /* unreadable curriculum → 兜底 */
+  }
+  courseStartLives.set(course, lives)
+  return lives
+}
 
 /** 自定义关 2000+i 的敌数：curricula/<course>.jsonc → level → levels/<level>.jsonc stages[i].count。
  *  按课缓存；失败返回 null（不拖垮聚合）。 */
@@ -233,21 +260,20 @@ function courseFromTrajDir(trajDir: string): string {
   }
 }
 
-/** 该局可支配生命容量：(startLives + puGotTank − playerDeaths) × maxHp。 */
-function lifeCapacity(fields: {
-  startLives?: number | null
-  puGotTank?: number | null
-  playerDeaths?: number | null
-}): number {
-  const lives =
+/** 该局剩余命数（含当前命）：startLives + 加命 − 阵亡；胜局至少 1（当前命还活着）。 */
+function livesLeft(
+  fields: { startLives?: number | null; puGotTank?: number | null; playerDeaths?: number | null },
+  fallbackLives: number,
+): number {
+  const start =
     typeof fields.startLives === 'number' &&
     Number.isFinite(fields.startLives) &&
     fields.startLives > 0
       ? fields.startLives
-      : ASSUMED_START_LIVES
+      : fallbackLives
   const tank = typeof fields.puGotTank === 'number' ? fields.puGotTank : 0
   const deaths = typeof fields.playerDeaths === 'number' ? fields.playerDeaths : 0
-  return Math.max(1, lives + tank - deaths) * PLAYER_MAX_HP
+  return Math.max(1, start + tank - deaths)
 }
 
 /** 每杀承伤的分母（用户 2026-09-16：命数 × 满额单命 HP）。 */
@@ -259,41 +285,63 @@ function dmgPerKillCapacity(startLives?: number | null): number {
   return lives * PLAYER_MAX_HP
 }
 
+/** 当前命剩余 hp。
+ *  · 有 `playerHpRatio`（终局 hp/满血；eval 行全有）→ 直接换算，**精确**；
+ *  · 没有（rollout 逐局画像不带血条）→ `满血 − 整局承伤`：整局承伤 ≥ 当前命承伤
+ *    ⇒ 这是**下限**（只少不多；单命且零阵亡局恰为精确值）。 */
+function currentLifeHp(m: { playerHpRatio?: number; playerDamageTaken?: number }): number {
+  if (typeof m.playerHpRatio === 'number' && Number.isFinite(m.playerHpRatio)) {
+    const r = m.playerHpRatio < 0 ? 0 : m.playerHpRatio > 1 ? 1 : m.playerHpRatio
+    return r * PLAYER_MAX_HP
+  }
+  return Math.max(0, PLAYER_MAX_HP - (m.playerDamageTaken ?? 0))
+}
+
 /**
- * 胜局残血（hp）：从已有字段推算，不改 export 写端。
- *   (startLives + puGotTank - playerDeaths) × maxHp − playerDamageTaken
- * - startLives 课程侧未落盘 → 取训练默认 1；puGotTank 仅 eval 行有（RL manifest 缺 → 0）
- * - playerDeaths 仅 eval 行有（RL 缺 → 0）；playerDamageTaken 为非致命扣血累计
- * - 仅胜局（stage_clear）计入；缺 playerDamageTaken 返回 null
+ * 胜局残血（hp）= (剩余命数 − 1) × 满血 + 当前命 hp。
+ *
+ * **口径（2026-11-02 用户报障后订正）**：100% = **一条命**的血量——三命关一局最多剩
+ * 3 条命 ⇒ 200%+。旧实现 `剩余命数×满血 − 整局承伤` 两处错：
+ *   ① `playerDamageTaken` 是**整局累计**（跨命），而容量里已按阵亡扣掉整条命 ⇒ 阵亡前
+ *      那条命的扣血被扣第二遍，胜局残血被压到接近 0；
+ *   ② eval 行缺 `startLives` ⇒ 再按 1 命的容量归一 = 个位数百分比。
+ * 仅胜局（stage_clear）计入；缺 `playerDamageTaken` 返回 null（不编数字）。
  */
-function residualHpFromFields(m: {
-  outcome?: unknown
-  playerDamageTaken?: number
-  playerDeaths?: number
-  puGotTank?: number
-  startLives?: number
-}): number | null {
+function residualHpFromFields(
+  m: {
+    outcome?: unknown
+    playerDamageTaken?: number
+    playerDeaths?: number
+    puGotTank?: number
+    startLives?: number
+    playerHpRatio?: number
+  },
+  fallbackLives: number,
+): number | null {
   const outcome = String(m.outcome ?? '')
   if (outcome && outcome !== 'stage_clear') return null
   if (typeof m.playerDamageTaken !== 'number' || !Number.isFinite(m.playerDamageTaken)) {
     return null
   }
-  const capacity = lifeCapacity(m)
-  return Math.max(0, Math.round(capacity - m.playerDamageTaken))
+  const spare = livesLeft(m, fallbackLives) - 1
+  return Math.max(0, Math.round(spare * PLAYER_MAX_HP + currentLifeHp(m)))
 }
 
-/** 胜局残血占该局可支配容量的比例 0–1；null = 不可计算。 */
-function residualHpPctFromFields(m: {
-  outcome?: unknown
-  playerDamageTaken?: number
-  playerDeaths?: number
-  puGotTank?: number
-  startLives?: number
-}): number | null {
-  const hp = residualHpFromFields(m)
+/** 胜局残血占**单命满血**的比例（1 = 满一条命；三命全在 = 3）；null = 不可计算。 */
+function residualHpPctFromFields(
+  m: {
+    outcome?: unknown
+    playerDamageTaken?: number
+    playerDeaths?: number
+    puGotTank?: number
+    startLives?: number
+    playerHpRatio?: number
+  },
+  fallbackLives: number,
+): number | null {
+  const hp = residualHpFromFields(m, fallbackLives)
   if (hp === null) return null
-  const capacity = lifeCapacity(m)
-  return capacity > 0 ? hp / capacity : null
+  return hp / PLAYER_MAX_HP
 }
 
 /**
@@ -425,8 +473,14 @@ function entryFromManifest(
     pu: Number(m.powerUpsCollected ?? 0) || 0,
     puSpawn: puSpawnFromRow(m),
     ticks: Number(m.ticks ?? 0) || 0,
-    residualHp: residualHpFromFields(m),
-    residualPct: residualHpPctFromFields(m),
+    residualHp: residualHpFromFields(
+      m,
+      course ? loadCourseStartLives(course) : ASSUMED_START_LIVES,
+    ),
+    residualPct: residualHpPctFromFields(
+      m,
+      course ? loadCourseStartLives(course) : ASSUMED_START_LIVES,
+    ),
     outcome: typeof m.outcome === 'string' && m.outcome.length > 0 ? m.outcome : null,
     dmgTaken:
       typeof m.playerDamageTaken === 'number' && Number.isFinite(m.playerDamageTaken)
@@ -588,8 +642,10 @@ export interface CachedActuals extends IterActuals {
 /** 当前 actuals 缓存 schema 版本（门闩：旧缓存一律作废重建）。
  *  v3 = totalPUSpawn（道具掉落数）入聚合；
  *  v4 = 逐局画像改按 `it<N>/per-game.json` 优先（云机/回传跨腿）——旧缓存里那些
- *       「本机 manifest 扫出来的值」不能继续压住新落盘的画像文件。 */
-const ACTUALS_SCHEMA_V = 4
+ *       「本机 manifest 扫出来的值」不能继续压住新落盘的画像文件；
+ *  v5 = 残血口径订正（剩余命按满额计入 + 按单命满血归一，2026-11-02）——旧的
+ *       「可支配容量占比」值不能继续压住新算法。 */
+const ACTUALS_SCHEMA_V = 5
 
 /** 逐局压缩画像的落盘名（回传/导入腿：`<课程>/it<N>/per-game.json`）。 */
 const PER_GAME_NAME = 'per-game.json'
@@ -832,7 +888,7 @@ function collectEvalSummaries(
             agg.startLivesSum += sl
             agg.startLivesN++
           }
-          // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
+          // 残血：仅胜局；(剩余命数 − 1) × 满血 + 当前命 hp（口径见 residualHpFromFields）
           const won = r.win === true || r.win === 1
           if (won) {
             // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
@@ -848,13 +904,14 @@ function collectEvalSummaries(
               playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
               puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
               startLives: Number.isFinite(sl) && sl > 0 ? sl : undefined,
+              playerHpRatio: typeof r.playerHpRatio === 'number' ? r.playerHpRatio : undefined,
             }
-            const rh = residualHpFromFields(fields)
+            const rh = residualHpFromFields(fields, loadCourseStartLives(course))
             if (rh !== null) {
               agg.residualSum += rh
               agg.residualN++
             }
-            const rp = residualHpPctFromFields(fields)
+            const rp = residualHpPctFromFields(fields, loadCourseStartLives(course))
             if (rp !== null) {
               agg.residualPctSum += rp
               agg.residualPctN++
@@ -917,7 +974,7 @@ function collectEvalSummaries(
           ? agg.killRateKills / agg.killRateEnemies
           : null
       const evalStartLives =
-        agg.startLivesN > 0 ? agg.startLivesSum / agg.startLivesN : ASSUMED_START_LIVES
+        agg.startLivesN > 0 ? agg.startLivesSum / agg.startLivesN : loadCourseStartLives(course)
       s.dmgPerKillPct =
         s.dmgPerKill != null ? s.dmgPerKill / dmgPerKillCapacity(evalStartLives) : null
       s.avgResidualHpPct = agg.residualPctN > 0 ? agg.residualPctSum / agg.residualPctN : null
@@ -970,6 +1027,8 @@ function evalGameClass(win: boolean, outcome: string): EvalGameClass {
  *  - 同键重复落账取最后一条（断点重试诚实覆盖）。
  *  - 无任何 summary / 文件不可读 → null（弹窗显示「暂无 eval 评估记录」）。 */
 export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | null {
+  const course = courseFromTrajDir(trajDir)
+  const fallbackLives = course ? loadCourseStartLives(course) : ASSUMED_START_LIVES
   const logPath = join(trajDir, 'eval_log.jsonl')
   if (!existsSync(logPath)) return null
   // 第一趟：summary 按 iter 归并（同 iter 重复 = 补跑后的重复落账，取最后一条）。
@@ -1041,12 +1100,16 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
           // 残血：与 readEvalSummaries 聚合同口径——胜局按 stage_clear 推算
           // （BONUS 截断胜局 outcome=max_ticks，容量公式同样成立），败局恒 null。
           const residualHp = win
-            ? residualHpFromFields({
-                outcome: 'stage_clear',
-                playerDamageTaken: dmgTaken ?? undefined,
-                playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
-                puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-              })
+            ? residualHpFromFields(
+                {
+                  outcome: 'stage_clear',
+                  playerDamageTaken: dmgTaken ?? undefined,
+                  playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+                  puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+                  playerHpRatio: typeof r.playerHpRatio === 'number' ? r.playerHpRatio : undefined,
+                },
+                fallbackLives,
+              )
             : null
           rows.set(`${stage}:${seed}`, {
             stage,

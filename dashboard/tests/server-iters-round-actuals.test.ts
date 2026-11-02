@@ -63,11 +63,44 @@ describe('console/iters 云机腿逐局画像（it<N>/per-game.json）', () => {
       expect(a!.totalKills).toBe(10)
       expect(a!.totalPU).toBe(2) // 道具列（每局 1 个）
       expect(a!.avgTicks).toBe(1500) // 耗时列
-      // 残血列：容量 = 263×2（1 命 + puGotTank 一命）− 300 承伤 = 226；
+      // 残血列：剩余 2 命（1 命 + puGotTank 一命）⇒ 备用命 263 + 当前命
+      // max(0, 263 − 300) = 0 ⇒ 263 hp（无终局血条的**下限**）；
       // 败局（lives_lost）按口径不进残血均值，所以是单局值。
-      expect(a!.avgResidualHp).toBe(226)
+      expect(a!.avgResidualHp).toBe(263)
+      expect(a!.avgResidualHpPct).toBeCloseTo(1)
       expect(a!.avgWinTicks).toBe(2000)
       expect(a!.avgLossTicks).toBe(1000)
+    })
+  })
+
+  it('多命关：剩余命按满额计入，残血 = 剩余总血量 / 单命满血（三命全在 = 300%）', () => {
+    withTmp((dir) => {
+      mkdirSync(path.join(dir, 'it4'), { recursive: true })
+      writeFileSync(
+        path.join(dir, 'it4', 'per-game.json'),
+        JSON.stringify([
+          // 3 命关 + 拾 1 加命 − 阵亡 2 = 剩 2 命；终局满血（playerHpRatio 1）
+          game(2001, 1, {
+            startLives: 3,
+            puGotTank: 1,
+            playerDeaths: 2,
+            playerDamageTaken: 500,
+            playerHpRatio: 1,
+          }),
+          // 3 命关一命未失 + 终局七成血 ⇒ 2 条备用命 + 0.7 条 = 270%
+          game(2001, 2, {
+            startLives: 3,
+            puGotTank: 0,
+            playerDeaths: 0,
+            playerDamageTaken: 200,
+            playerHpRatio: 0.7,
+          }),
+        ]),
+        'utf-8',
+      )
+      const a = readRoundActuals(dir, 4)!
+      expect(a.avgResidualHp).toBe(Math.round((526 + 710) / 2)) // (2×263+263, 2×263+0.7×263)
+      expect(a.avgResidualHpPct).toBeCloseTo(2.35)
     })
   })
 

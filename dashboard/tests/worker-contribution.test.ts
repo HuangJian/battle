@@ -36,6 +36,7 @@ import {
   machineOf,
   WINDOW_OPTIONS,
   type ContributionView,
+  type NodeView,
 } from '../src/web/view'
 import {
   type HistoryAggregate,
@@ -219,7 +220,13 @@ function withPoolRoot(
 ): void {
   const root = mkdtempSync(join(tmpdir(), 'bcity-contrib-'))
   const prev = process.env.BCITY_POOL_DIR
+  const prevMetrics = process.env.BCITY_COURSE_METRICS
   process.env.BCITY_POOL_DIR = root
+  // ★ 2026-11-02：热备份库也要重定向。`scanPoolStreams` 会把 `data/course-metrics/` 里已清的历史课
+  // 补进候选（`addHotMirrorCandidates`，生产语义正确）——本机训练过几十门课 ⇒「临时根里只有我
+  // 写的那本账」这个前提被真实数据打破，三条断言账本数的用例假红（实测 67 本）。指向一个不存在的
+  // 目录 = 零热备份课，与「池根是空的」同一个隔离意图。
+  process.env.BCITY_COURSE_METRICS = join(root, '__no-metrics')
   invalidateNodeHistoryMemo()
   invalidatePpoAttributionMemo()
   try {
@@ -232,6 +239,8 @@ function withPoolRoot(
   } finally {
     if (prev === undefined) delete process.env.BCITY_POOL_DIR
     else process.env.BCITY_POOL_DIR = prev
+    if (prevMetrics === undefined) delete process.env.BCITY_COURSE_METRICS
+    else process.env.BCITY_COURSE_METRICS = prevMetrics
     invalidateNodeHistoryMemo()
     invalidatePpoAttributionMemo()
     rmSync(root, { recursive: true, force: true })
@@ -622,7 +631,7 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     for (const w of five) expect(html).toContain(w)
   })
 
-  it('NodePills 接入：节点区里两处分区在场，深链**只有一个**（旧的按钮内 + 区尾两个入口已收成一个）', () => {
+  it('NodePills 接入：采样 / PPO 两块分开且样式不同，深链**只有一个**（旧的按钮内 + 区尾两个入口已收成一个）', () => {
     const html = renderToString(
       h(NodePills, {
         nodes: [],
@@ -631,10 +640,90 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
         onMore: () => {},
       }),
     )
+    // 2026-11-02 用户：rollout 节点与 ppo push 节点要分开、不同样式 ⇒ 两个 group 各成一节
+    expect(html).toContain('tc-nodes__group--rollout')
+    expect(html).toContain('tc-nodes__group--ppo')
+    expect(html).toContain('aria-label="采样节点（rollout / eval）"')
+    expect(html).toContain('aria-label="PPO worker（push）"')
+    expect(html).toContain('单位：局')
+    expect(html).toContain('单位：job')
     expect(html).toContain('tc-contrib-samplingbrief')
     expect(html).toContain('tc-contrib-ppobrief')
     expect(html).toContain('PPO 合计')
+    // 采样块在上、PPO 块在下（采样收尾行在 PPO 块之前）
+    expect(html.indexOf('tc-nodes__group--rollout')).toBeLessThan(
+      html.indexOf('tc-nodes__group--ppo'),
+    )
     expect(html.split('节点统计 ›').length - 1).toBe(1)
+    // 2026-11-02 用户：「节点」区块标题去掉（两块各有块头，再包一层是同一句话写两遍）；
+    // 「节点统计」深链移到采样块头右上角，不再吊在整区末尾。
+    expect(html).not.toContain('tc-sechd')
+    const rollHd = html.slice(
+      html.indexOf('tc-nodes__group--rollout'),
+      html.indexOf('tc-nodes__group--ppo'),
+    )
+    expect(rollHd).toContain('tc-nodes__grouphd')
+    expect(rollHd).toContain('节点统计 ›')
+  })
+
+  it('没有 PPO 读数 ⇒ 不画 PPO 块（空壳标题会被读成「有东西没加载出来」）', () => {
+    const html = renderToString(
+      h(NodePills, { nodes: [], brief: null, onAction: () => {}, onMore: () => {} }),
+    )
+    expect(html).toContain('tc-nodes__group--rollout')
+    expect(html).not.toContain('tc-nodes__group--ppo')
+  })
+
+  // ★ 2026-11-02（用户报障「push worker 节点还是混在了采样节点区域，如 colab-o 和 kaggleO」）：
+  // 三类条目同住 rl-config `nodes[]`，身份只能由**能力键**判（`nodeRole`）——不是名字、也不是有没有并发数。
+  it('NodePills 接入：push 节点（gpu_push / offline_push）只住 PPO 块，绝不进采样块', () => {
+    const mk = (over: Partial<NodeView>): NodeView => ({
+      id: 'a1',
+      url: 'http://a1',
+      gpuPush: false,
+      enabled: true,
+      concurrency: 2,
+      online: true,
+      slow: false,
+      codeHash: null,
+      cpus: 8,
+      disk: null,
+      busy: false,
+      lastContrib: 3,
+      ...over,
+    })
+    const html = renderToString(
+      h(NodePills, {
+        nodes: [
+          mk({ id: 'a1' }),
+          mk({ id: 'kaggleO', gpuPush: true, enabled: true, concurrency: 4 }),
+          mk({ id: 'colab-o', offlinePush: true, enabled: false, online: null }),
+        ],
+        onAction: () => {},
+        onMore: () => {},
+      }),
+    )
+    const iRollout = html.indexOf('tc-nodes__group--rollout')
+    const iPpo = html.indexOf('tc-nodes__group--ppo')
+    expect(iRollout).toBeGreaterThan(-1)
+    expect(iPpo).toBeGreaterThan(iRollout)
+    const samplingBlock = html.slice(iRollout, iPpo)
+    // 采样节点在采样块里；push 节点一个都不在（用户点名的那两枚）
+    expect(samplingBlock).toContain('>a1</b>')
+    for (const id of ['kaggleO', 'colab-o']) {
+      expect(samplingBlock).not.toContain(`>${id}</b>`)
+      expect(html.indexOf(`>${id}</b>`)).toBeGreaterThan(iPpo)
+    }
+    // 两条派发腿在 PPO 块里各自成徽章；值列是并行度/停用（不是「局」）
+    const ppoBlock = html.slice(iPpo)
+    expect(ppoBlock).toContain('GPU push')
+    expect(ppoBlock).toContain('离线 push')
+    expect(ppoBlock).toContain('4 并发')
+    expect(ppoBlock).toContain('>停用</span>')
+    // 停用的 push 节点**不**折进采样块的「停用 N」折叠桶（那会把它藏起来）；
+    // 采样块里没有任何 push 行（`tc-row--push` 是它们的身份类）。
+    expect(samplingBlock).not.toContain('tc-row--push')
+    expect(samplingBlock).not.toContain('停用 1')
   })
 })
 

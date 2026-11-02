@@ -9,7 +9,7 @@
  *  - hub 在给一门**没有任何进程推进**的课派活 ⇒ job 越堆越多，没人消费；
  *  - 一门课**疯狂训练但 hub 没注册它** ⇒ PPO 永远不被派发，算力白烧（rollout 白跑）。
  *
- *  合并之后这两条落在**状态列**上（`hub 已注册 · 无进程` / `在训 · hub 未注册`），也就是
+ *  合并之后这两条落在**状态列**上（`hub·无进程` / `本机·在训（hub 未注册）`），也就是
  *  操作员第一眼看的那一列。
  *
  *  ## 为什么这里是一张 `<table>` 而不是 `StatusRow` 芯片行
@@ -24,9 +24,15 @@
  *
  *  `mergeCourseRows` 给的是**全集**（outer join 不丢课）；这里用 `isTrainingRow` 再筛一道，
  *  未在训的行不上屏——理由：这张表是「盯着正在跑的那几门」，而未在训的课在盘上会有几十门
- *  （历史课都有账本与目录），它们把在训的行挤出首屏。**代价**：`hub 已注册 · 无进程` 这种
+ *  （历史课都有账本与目录），它们把在训的行挤出首屏。**代价**：`hub·无进程` 这种
  *  「两半事实打架」的行不再直接上屏 ⇒ 表头留一个计数 chip（悬停逐门点名 + 各自状态），
  *  未列的课不静默消失（DECISIONS §2026-09-20-console-declutter · 全文 → docs/nn/console.md §11）。
+ *
+ *  ## 列词法（2026-11-02 用户：与 pill 同一套 `环节·归属` 语法）
+ *
+ *  矩阵自己生成的词都带**出处**：`hub·队列 N / 在飞 M`（派发事实）、`云机·接管 / 云机·掉线 /
+ *  云机·待接管`（自主接管）、`本机·在训 / 本机·待进程`（本机进程）。「在等什么」列引的是
+ *  训练进程原话（表头标 `训练侧·`）——它是别人的报告，不另改写。
  *
  *  ## 只读语义
  *
@@ -137,6 +143,9 @@ export interface CourseMatrixProps {
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`，账本尾行 `run_complete`）——
    *  状态列与 pill 同源说「已收官」（缺省 = 旧视图，行为不变）。 */
   loopCompletes?: Record<string, LoopComplete> | null
+  /** 开课标记清单（`stateView.trainingCourses`）：已停课的课不报 `hub·无进程`。
+   *  缺省/`null` = 不可知（旧视图，行为不变）。 */
+  enabledCourses?: string[] | null
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
@@ -155,6 +164,7 @@ export function CourseMatrix({
   overview,
   loopQueue,
   loopCompletes,
+  enabledCourses,
   course,
   onSelectCourse,
   onAction,
@@ -169,6 +179,7 @@ export function CourseMatrix({
     overview,
     queue: loopQueue,
     loopCompletes,
+    enabledCourses: enabledCourses ?? null,
     viewing: course,
     nowSec,
   })
@@ -308,9 +319,9 @@ export function CourseMatrix({
                   iter
                 </th>
                 <th scope="col">本轮</th>
-                <th scope="col">在等什么</th>
+                <th scope="col">训练侧 · 在等什么</th>
                 <th scope="col" className="tc-mx__num">
-                  队列 · 在飞
+                  hub · 队列 / 在飞
                 </th>
                 <th scope="col">接管</th>
                 {onAction ? <th scope="col">操作</th> : null}

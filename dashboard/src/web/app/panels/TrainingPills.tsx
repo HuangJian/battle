@@ -32,6 +32,7 @@ import {
   type LoopComplete,
   type LoopQueueRow,
   type ParallelOverviewView,
+  PILL_WORD_GUIDE,
 } from '../../view'
 
 export interface TrainingPillsProps {
@@ -98,6 +99,11 @@ export function TrainingPills({
   // 需要一个组名，而它在页面上不可见（不吃视觉噪声）。
   return (
     <div className="tc-tpills" aria-label="在训课程">
+      {/* 词表说明（2026-11-02 用户：「这些状态提示让人混淆难以理解」）：状态词是
+          `环节·归属` 语法，图组左侧一枚中性小签把读法一次说完（纯悬停读数，不可点）。 */}
+      <span className="tc-tpills__legend" title={PILL_WORD_GUIDE} aria-label={PILL_WORD_GUIDE}>
+        ?
+      </span>
       {pills.map((p) => {
         const active = p.course === viewCourse
         return (
@@ -125,7 +131,12 @@ export function TrainingPills({
             <span className={DOT[p.tone]} />
             {p.kind === 'bc' ? <span className="tc-tpill__kind">BC</span> : null}
             <b>{p.course}</b>
-            <span className="v">it{p.it ?? '—'}</span>
+            <span
+              className="v"
+              title={`账本指针 it${p.it ?? '—'}：下一轮（本轮在飞时同号）；收官后不再前进`}
+            >
+              it{p.it ?? '—'}
+            </span>
             <span className="tc-tpill__state">
               {p.status}
               {p.age ? ` ${p.age}` : ''}

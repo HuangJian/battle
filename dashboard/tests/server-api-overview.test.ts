@@ -481,12 +481,12 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
       const c4 = merged.find((r) => r.course === 'c4')!
       expect(c4.holdBadge).toBeNull() // 没有接管 ⇒ 不画徽标
       // c4 在 hub 的队列里有待领 job，而训练侧没进程（本用例没有传 training）⇒ 正是那一档 warn。
-      expect(c4.status.text).toBe('hub 已注册 · 无进程')
+      expect(c4.status.text).toBe('hub·无进程')
       const c5 = merged.find((r) => r.course === 'c5')!
       // live 接管不另画徽标（状态列与接管列已经在说它）；租约徽标仍由 hub 的 leases 面驱动。
       expect(c5.holdBadge).toBeNull()
       expect(c5.leaseBadge?.text).toBe('可接管')
-      expect(c5.status.text).toBe('接管中（云机）')
+      expect(c5.status.text).toBe('云机·接管')
       expect(c5.hold?.text).toContain('tpu-1')
     } finally {
       restore()

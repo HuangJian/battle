@@ -53,6 +53,7 @@ import {
   canonicalPath,
   DEFAULT_PAGE,
   latestRow,
+  recentCourseViews,
   pageForPath,
   REFRESH_INTERVALS,
   TC_ALERT_ACKS,
@@ -421,6 +422,17 @@ export function App({ initial }: AppProps) {
   const lifecycle = stateView?.courseLifecycle ?? null
 
   const courses = stateView?.courses ?? []
+  // 侧栏「最近训练」五门的迷你读数（最新 it + 状态点）：`courses` 已按训练时间倒序。
+  // 与 pill 同一个 `courseStatus` 派生（状态色点 / 悬停全因），不另写判据。
+  const recentCourses = recentCourseViews({
+    courses,
+    rows: stateView?.loopQueue?.rows ?? [],
+    overview: stateView?.overview ?? null,
+    trainerRunning,
+    loopCompletes: stateView?.loopCompletes ?? null,
+    // 已停课的课在侧栏不报 hub 冲突（现场：hub 还压着 1 个 job）。
+    enabledCourses: trainingCourses,
+  })
   // 算力摘要（Topbar chip）：本机直跑槽位计入「在线」（它没有 ping 语义，有槽位即在用）。
   const nodes = stateView?.nodes ?? []
   const localNode = stateView?.localNode ?? null
@@ -445,8 +457,15 @@ export function App({ initial }: AppProps) {
             activePath={canonicalPath(page)}
             course={viewCourse}
             courses={courses}
+            recentCourses={recentCourses}
             trainingCourses={trainingCourses}
             onCourseChange={selectCourse}
+            // 侧栏「最近训练」的一门（2026-11-02 用户）：切查看课程，并回到总览——
+            // 这句话的动作结果是「首页指标区显示这门课的训练情况」，停在 /nodes 上看不到。
+            onPickCourse={(c) => {
+              selectCourse(c)
+              if (page !== 'overview') navigate('overview')
+            }}
             // 开课入口（课程级）：紧挨课程选择器（操作读序：选课 → 训练 → 看哪几门在训）。
             onOpenCourse={() => {
               setOpenCourseTarget(null) // 侧栏入口 = 跟着当前查看课程（老语义）
@@ -597,6 +616,8 @@ export function App({ initial }: AppProps) {
                 overview={stateView?.overview ?? null}
                 loopQueue={stateView?.loopQueue ?? null}
                 loopCompletes={stateView?.loopCompletes ?? null}
+                // 已停课的课不报 `hub·无进程`（开课标记 = 唯一判据；缺省不可知）。
+                enabledCourses={stateView?.trainingCourses ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}

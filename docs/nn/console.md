@@ -13,6 +13,24 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §45 「残血」口径订正：单命满血归一 + 剩余命按满额（2026-11-02）
+
+**触发**：用户报障 `z4-pick-approach`（课程 `lives: 3`）首页残血列 rollout ≈10%、eval <5%，
+「三命关胜局剩三命应该 >200%」。
+
+**根因**：① eval 逐局行不带 `startLives`（只有 rollout 单局 manifest 有）⇒ `iters.ts` 一律按
+1 命算（同一条 bug 把 eval 的「承伤/杀」% 也放大了 3 倍）；② 公式 `剩余命数 × 满血 − 整局承伤`
+把「阵亡前那条命的扣血」扣了第二遍（`playerDamageTaken` 跨命累计），分母又取「剩余容量」
+⇒ 结果永远 ≤100%。
+
+**修法**：`残血 hp = (剩余命数 − 1) × 满血 + 当前命 hp`，`% = hp / 单命满血`；`startLives` 行内缺
+⇒ 读课程 `lives`；当前命 hp 优先 `playerHpRatio`（eval 行全有），rollout 无此字段 ⇒
+`满血 − 整局承伤`（下限）。`ACTUALS_SCHEMA_V` 4→5。实测 eval it275 `1.7% → 140.9%`、
+rollout it278 `14.9% → 81.8%`（下限）。
+
+**边界**：rollout 逐局画像补 `playerHpRatio` 才能精确（exporter 在 codeHash 覆盖集内，开课中途
+不热改）。决策 `DECISIONS.md §2026-11-02-console-residual-hp-per-life`。
+
 ## §44 Notebook 伴生脚本：跨域子帧搬运 + 单写者租约（plan/notebook-userscript，2026-10-30）
 
 **触发**：Kaggle 的 notebook 跑在跨域 iframe（`*.jupyter-proxy.kaggle.net`），外层 `www.kaggle.com` 拿不到
@@ -942,14 +960,32 @@ DECISIONS `§2026-10-03-goalnn-dashboard-alert-dock-global`。
 
 | 状态字 | tone | 判据 |
 |---|---|---|
-| **卡住 Nm** | r | 有在飞 ∧ 最老 `claimedAgo > PILL_STUCK_SEC` |
-| **等回传 Nm** | y | 有在飞 ∧ 龄 ≤ 阈值（`<60s` 不显示龄） |
-| **排队·无人取** | y | `inflight=0 ∧ queuePending>0` ∧ 该课**不在**预取窗口 |
-| **预取中** | g | 同前但在窗口内 |
-| （旧 hub 无 `peeked`）**排队中** | y | 窗口不可知——退化为「排队中」，**不**说「无人取」 |
+| **PPO·卡住 Nm** | r | 有在飞 ∧ 最老 `claimedAgo > PILL_STUCK_SEC` ∧ **没人开算**（开算后的时长是活，不是卡） |
+| **PPO·云机算 Nm** | y | 有在飞 ∧ 至少一份 `computingAgo` 非空（龄 = 最老的**开算**龄） |
+| **PPO·已认领 Nm** | y | 有在飞 ∧ 全部 `computingAgo` 为空（认领后要取包/下 payload；龄 = 认领龄） |
+| **PPO·已发布** | y | 训练侧 `inflight`（已发布未回传）∧ hub 这一拍没有该课读数 ⇒ 认领状态未知（**不**说「等回传」，那会被读成已有人接单） |
+| **PPO·无人取** | y | `inflight=0 ∧ queuePending>0` ∧ 该课**不在**预取窗口 |
+| **PPO·预取** | g | 同前但在窗口内 |
+| （旧 hub 无 `peeked`）**PPO·排队** | y | 窗口不可知——退化为「排队」，**不**说「无人取」 |
+
+★ 2026-11-02 词法重定（用户报障「状态经常不对 / 推进中是什么意思 / 还没 worker 接收就显示等回传」）：
+状态词统一成 **`环节·归属`** 语法（`PPO·云机算` / `门禁·本机` / `采集` 不带归属，因为 rollout
+可能在本机也可能在节点）。三个洞同时补：
+
+1. **认领 ≠ 开算 ≠ 在算**：旧版把「已发布」直接说成「等回传」（训练侧的 `inflight` 只是
+   commit journal 里「已发布未回传」），于是还没人领的 job 也显示「等回传」。现在 hub 的
+   `claimed_ago` / `computing_ago` 分别说成 **已认领** / **云机算**；两者都读不到时只说
+   **PPO·已发布**（悬停明写「谁在算未知」——不编）。
+2. **「推进中」退役**：它来自 `waiting.kind=ready`（盘上没有外部等待），原本什么也没说。
+   现在按 `lq.current` 的下一步说成本机的环节：`PPO·待发布`（下一步是 ppo——`PPO·本机` 会与
+   `PPO·本机算` 读混）/ `门禁·本机` / `记账·本机` / `评估·本机` / `导出·本机` / `收尾·本机`
+   （13 步 → 人话只在 `course-status.ts::stepStage` 一处）。
+3. **「空闲」→「本轮无待办」**：旧词听着像故障解除，实际是「账本已结算 / 还没起第一轮」。
+
+词表说明只一份：`PILL_WORD_GUIDE`（首页 pill 组左侧的 `?` 签悬停即它，与文档同句）。
 
 两条连接：① **jid 连接**：训练侧 `inflight[].jid` ↔ hub `inflight[].job_id`——对上 = 远端；
-对不上 = **本机 PPO**（显示「等回传（本机）」并**压过** 10′/11′：本机在算 + 远端队列有活时
+对不上 = **本机 PPO**（显示「PPO·本机算」并**压过**队列态：本机在算 + 远端队列有活时
 不得误读成「没人取」，评审 P2）；旧训练侧 WAL 无 jid ⇒ 不做连接、不判本机。② **预取窗口**代理
 「有效窗口 = `min(prefetch_depth, 开课数)`」（plan/transfer-residual §1.5）。`pickOldestInflight`
 按认领龄取最老一条；全缺 `claimed_ago` 不升级为「卡住」（不编龄）。
@@ -1104,7 +1140,7 @@ plan §4 S3 只把**读面**进了控制台（`stateView.archived` → 总览底
 
 | 列 | 口径 | 出处 |
 |---|---|---|
-| 状态 | 进程/hub：「在训 / 未在训 / 离线（只收回传）/ 在训 · hub 未注册」 | `matrixStatus`（矩阵复用） |
+| 状态 | 进程/hub：「本机·在训 / 未在训 / 云机·接管 / 本机·在训（hub 未注册）」 | `matrixStatus`（矩阵复用） |
 | 开课标记 | `training-enabled.txt`（训练侧与 hub 的**同一个闸**）——它不是「进程在跑」 | `courseFacts.enabled` |
 | 在等什么 | 训练侧队列 / 离线课的云机回传 | `waitingCell` / `offlineWaitCell`（复用） |
 | 最后写入 | `tmp/<课>/` 的 mtime | `courseFacts.lastWriteMs` |
@@ -2346,8 +2382,19 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 **删除** `CourseOverview.tsx` · `LoopQueue.tsx` 与两套行样式（`.tc-cov__*` / `.tc-loopq__*`，~335 行 CSS）。
 合并的产出不是「少一块卡」，而是**两条从前两边的表各自都看不见的矛盾**上屏：
 
-- `在训 · hub 未注册`（warn）——rollout 在跑、hub 的课程表里没有它 ⇒ **PPO job 永远不会被派发**；
-- `hub 已注册 · 无进程`（warn）——hub 在给它派活、没有任何进程推进它 ⇒ **job 堆着没人消费**。
+- `本机·在训（hub 未注册）`（warn）——rollout 在跑、hub 的课程表里没有它 ⇒ **PPO job 永远不会被派发**；
+- `hub·无进程`（warn）——hub 在给它派活（`queuePending > 0 ∨ inflight > 0`）、没有任何进程推进它
+  ⇒ **job 堆着没人消费**。**开课标记缺失（已停课）⇒ `未在训`**，哪怕 hub 还压着残留 job
+  （2026-11-02 用户两次报障 z4-polish / z4-pick-wall / z4-pick-approach：旧判据只看
+  `hubSeen ∧ 没进程`，把停课报成「在线，却没有任何进程推进它」；`enabledCourses` 现已从
+  `app.tsx` 穿到 `courseStatus` / `matrixStatus` / `mergeCourseRows` / `recentCourseViews`）。
+
+★ 2026-11-02（用户口径，与 pill 同一套 `环节·归属`）：矩阵自己生成的词都带**出处**——
+`hub·队列 N / 在飞 M`、`hub·停派`、`云机·接管 / 云机·掉线 / 云机·待接管 / 云机·运行中（已回传 N 轮）`、
+`本机·在训 / 本机·待进程`；「训练侧 · 在等什么」列是短词（`采集` / `PPO·已发布` /
+`门禁` / `记账` / `评估` / `导出` / `准备` / `收尾` / `PPO·待发布` / `无待办` / `云机·接管` /
+`配置·阻塞`），训练进程的整句原话逐字进悬停（短词不丢信息）。
+旧词 `接管中（云机）/ 接管中·不派发 / 等待接管` 退役——同屏两种说法是 2026-10-04 那类矛盾的来源。
   这条在合并前长得像普通的「停」（前者的两半在各自表里都完全正常）。
 
 **决定**：
@@ -2873,7 +2920,7 @@ select）。因此这不是文本冲突，是**两个版本的 IA 相撞**：11 
   「哪几行上屏」与「状态列说什么」漂开就是 bug，两条用例盯着这个双向关系。
 - **纯函数层不筛**：`mergeCourseRows` 仍产全集（outer join 不丢课）——计数、悬停点名、页脚
   口径（「谁在等外部 / 读面可不可用」）都靠全集。筛选发生在面板一次，不是两张表。
-- **代价（刻意接受，留痕不静默）**：`hub 已注册 · 无进程` 这类「两半事实打架」的行（合并初衷之一）
+- **代价（刻意接受，留痕不静默）**：`hub 已注册 · 无进程` 这类「两半事实打架」的行  （合并初衷之一，2026-11-02 起词为 `hub·无进程`）
   不再直接上屏 ⇒ 表头 chip「未在训 N 门未列」，悬停逐门点名 + 各自状态词。这是用**读噪**换
   **信息密度**：操作员要盯的是正在跑的那几门，而历史课在盘上会积到几十门。
 - **0 门在训不是「没有课程」**：空态显因（`Empty`），三种原因分开说——「当前没有在训课程」

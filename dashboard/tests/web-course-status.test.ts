@@ -133,7 +133,7 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     // 接管 ∧ 零回传 ⇒ 「等云机接管」（云机在跑但还没回传任何一段产物）
     expect(pill.status).toBe('等云机接管')
     expect(pill.status).not.toBe('已收官')
-    expect(matrixStatus(ov, live, true).text).toBe('接管中（云机）')
+    expect(matrixStatus(ov, live, true).text).toBe('云机·接管')
     // 派生层唯一答案：两边同一个 kind（接管族）——矩阵词与 pill 词各自渲染，语义同源。
     const st = courseStatus({ course: 'off', lq: live, ov, hubOnline: true, trainerRunning: false })
     expect(st.kind).toBe('autonomous-waiting')
@@ -147,6 +147,22 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     })
     expect(running.kind).toBe('autonomous-running')
     expect(running.text).toBe('云机执行中')
+  })
+
+  it('★2026-11-02 用户报障：已停课 + hub 残留队列 job ⇒「未在训」，不是「hub·无进程」', () => {
+    // 现场（z4-pick-wall / z4-pick-approach）：trainingCourses 不含它们（已停课），
+    // lq=null，hub 仍认得它且 queuePending=1。停课不清理 hub 已发布的 job——
+    // 「没进程」正是停课的预期，不能报「在线，却没有任何进程推进它」。
+    const ov = ovRow({ course: 'z4-pick-wall', training: false, hubSeen: true, queuePending: 1 })
+    const base = { course: 'z4-pick-wall', lq: null, ov, hubOnline: true, trainerRunning: true }
+    const stopped = courseStatus({ ...base, enabled: false })
+    expect(stopped.text).toBe('未在训')
+    expect(stopped.tone).toBe('gray')
+    expect(stopped.conflict).toBeNull()
+    expect(stopped.title).toContain('已停课')
+    expect(matrixStatus(ov, null, true, { enabled: false }).text).toBe('未在训')
+    // 开课状态不可知 ⇒ 保持旧行为（«hub 有活没人消费» 仍然可见）——宁可漏报，也不编「已停课」。
+    expect(courseStatus(base).text).toBe('hub·无进程')
   })
 
   it('★M4：接管掉线（stale）⇒ 两屏都报「接管掉线」+ 已在悬停里说清自愈（不吓人）', () => {
@@ -165,14 +181,14 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     })[0]!
     expect(pill).toMatchObject({ status: '接管掉线', tone: 'y' })
     expect(pill.title).toContain('已自动恢复')
-    expect(matrixStatus(ov, live, true).text).toBe('接管掉线')
+    expect(matrixStatus(ov, live, true).text).toBe('云机·掉线')
   })
 
   it('★2026-10-06：账本尾行 run_complete ⇒ pill 与矩阵都「已收官」（读面 ready / hub 不认都不动终态）', () => {
     // 事故：收官停车态只进了告警坞（「✅ 训练已完成」），pill/矩阵仍按只读读面说「推进中」——
     // 同一屏两个 widget 互相矛盾。终态事实单点进 `courseStatus`，两个渲染器同时对齐。
     const lq = lqRow({ course: 'p2', state: 'ready' })
-    // hub 不认这门课（hubSeen=false）：停车态不得被冲突档升成「在训 · hub 未注册」。
+    // hub 不认这门课（hubSeen=false）：停车态不得被冲突档升成「本机·在训（hub 未注册）」。
     const ov = ovRow({ course: 'p2', training: true, hubSeen: false })
     const done = {
       at: '2026-10-06 10:39:48',
@@ -329,7 +345,7 @@ describe('courseStatus：读面失败只降级标注（R4-b/g）', () => {
     expect(st.stale).toEqual(stale)
     expect(st.source).toBe('hub')
     const ms = matrixStatus(ov, lq, false, { overviewStale: stale })
-    expect(ms.text).toBe('接管中（云机）')
+    expect(ms.text).toBe('云机·接管')
   })
 
   it('★ 没有旧事实 ⇒ 是「不知道」而不是「未在训」的肯定判断（不编冲突档）', () => {

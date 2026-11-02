@@ -82,13 +82,56 @@ const CAUSE_ADVICE: Record<RunCompleteCause, string> = {
 
 /** 「有活、**没人在飞**」这一类的**唯一词**（pill 与告警坞共用；2026-10-02 口径对齐，plan §6）：
  *  盘上的 `detectPpoQueueStall`（≥5min 无认领的红条）说的就是**同一件事**——两处不得各起
- *  一个名字。分工是「pill 说状态（立即）、告警坞说升级（超时）」，词只能一份。 */
-export const NO_TAKER_LABEL = '排队·无人取'
+ *  一个名字。分工是「pill 说状态（立即）、告警坞说升级（超时）」，词只能一份。
+ *
+ *  ★ 2026-11-02 词法（用户报障「状态难懂」）：改成 **`环节·归属`**——这里的环节是 PPO，
+ *  归属是「没人领」。旧词「排队·无人取」没说环节，且与「等回传」并列时看不出区别。 */
+export const NO_TAKER_LABEL = 'PPO·无人取'
 
 /** 「有在飞、但龄超阈」这一类。pill 专属：告警坞结构上只看得见**无人认领**的 job
  *  （盘上有 `claimed` 标记即跳过，见 `ppo-queue.ts` 头注）——告警坞的区分句引用这个词，
  *  防两类被读成一类（有持有者卡死 ≠ 没人要跑：处置方向相反）。 */
-export const STUCK_LABEL = '卡住'
+export const STUCK_LABEL = 'PPO·卡住'
+
+/** 13 步 → 人话环节（pill 的 `环节·归属` 左半边）。
+ *
+ *  为什么不用内部步骤名（`record_iteration` / `eval_join`）：pill 是给操作员扫读的，
+ *  而内部名是给代码看的（一次「记账」要连读三个英文词）。映射只在这里写一份，
+ *  未列出的步骤原样上屏（宁可露出内部名，也不把新步骤归错类）。 */
+const STEP_STAGE: Record<string, string> = {
+  precollect_join: '采集',
+  rollout: '采集',
+  volume_topup: '采集',
+  eval_dispatch: '评估',
+  eval_join: '评估',
+  ppo: 'PPO',
+  gate: '门禁',
+  record_iteration: '记账',
+  export_weights: '导出',
+  prepare_iter: '准备',
+  hot_reload: '准备',
+  course_iter: '准备',
+  cleanup: '收尾',
+}
+
+export function stepStage(step: string): string {
+  return STEP_STAGE[step] ?? step
+}
+
+/** pill 状态词的**读法**（同一句给：图组悬停、文档、测试断言）。
+ *
+ *  这是本模块唯一的「词表说明」——旧版每个词各自解释，词与词之间的关系（谁优先、龄指什么）
+ *  从来没写在一处，于是「推进中」这种词没人说得清。 */
+export const PILL_WORD_GUIDE =
+  '读法：环节·谁在做。· 采集中 = rollout 局在生产（本机槽位 / 云机节点都算）。' +
+  '· PPO 七态，按「发出去了没有 → 谁领了 → 开算没有」递进：待发布（本机下一步要发、还没发）/ ' +
+  '已发布（训练侧说发了，hub 这一拍没有读数 ⇒ 谁在算未知）/ 排队（有活，预取窗口不可知，旧 hub）/ ' +
+  '预取（刚被 worker 扫到）/ 无人取（有活、没人要）/ 已认领（有人领了、还在取包，未开算）/ ' +
+  '云机算（远端已开算）/ 本机算（hub 没这单，本机在算）/ 卡住（认领超 5 分钟仍没开算）。' +
+  '· 其余环节（评估/门禁/记账/导出/准备/收尾）·本机 = 本机正在跑这一轮、下一步是它。' +
+  '· 本轮无待办 = 账本已结算或还没起第一轮。· 龄只给「已认领 / 云机算 / 卡住」：最老一份的认领 / 开算龄，' +
+  '<60s 不显示。· 已收官 / 已暂停 / 已中止 / 起不来 / 待进程 / 未在训是进程与配置事实，优先于以上所有词；' +
+  '云机执行中 / 等云机接管 / 接管掉线 / 导包中 = 整课被自主 worker 接管。'
 
 /** 龄 → 展示串：`<60s` 不显示（`''`）；`<60m` 用 `Nm`；否则 `Nh`（plan §3.2）。 */
 export function fmtAge(sec: number | null): string {
@@ -168,6 +211,8 @@ export type CourseStatusKind =
   | 'autonomous-stale'
   /** hub 有在飞（未超阈）。 */
   | 'dispatch-inflight'
+  /** hub 有人认领、还没开算（`claimed_ago` 有值、`computing_ago` 空）——「已接收，在取包」。 */
+  | 'dispatch-claimed'
   /** hub 有在飞但龄超阈（有持有者，无进度）。 */
   | 'dispatch-stuck'
   /** hub 有活、没在飞、不在预取窗口（没人要跑）。 */
@@ -227,6 +272,12 @@ export interface CourseStatusInput {
   hubOnline: boolean
   /** **这门课此刻有存活进程**：pill 传共享 trainer 存活；矩阵由行自己推（`lq.training`）。 */
   trainerRunning: boolean
+  /** **开课标记**（`stateView.trainingCourses` 含它）：`false` = 已停课。
+   *
+   *  ★2026-11-02（用户报障 z4-pick-wall / z4-pick-approach：停课了，侧栏仍报「hub·无进程」）：
+   *  停课**不清理 hub 已发布的 job**（现场 queuePending=1）——旧判据把「hub 队列有活 ∧ 没进程」
+   *  当冲突，而没进程正是停课的预期。`undefined`/缺省 = 不可知（旧视图/旧调用方，行为不变）。 */
+  enabled?: boolean | null
   /** 登记在册的 push worker id（holder 不在表里 ⇒ 悬停点名）。 */
   registeredWorkers?: string[] | null
   /** hub 读面新鲜度（`ParallelOverviewView.stale`）；缺省 = 本拍读成功。 */
@@ -369,17 +420,21 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       'gray',
       `训练已完成（${copy.reason}）。${copy.advice}`,
       'loop',
-      // 终态不参与 hub 冲突升级（矩阵会把 `hub-unregistered` 前置成「在训 · hub 未注册」——
+      // 终态不参与 hub 冲突升级（矩阵会把 `hub-unregistered` 前置成「本机·在训（hub 未注册）」——
       // 而课已停车，那个词只是在谎报算力在烧）。
       { conflict: null },
     )
   }
   const training = isTraining(lq, ov)
   const hubKnown = ov !== null && hubOnline
+  // ★2026-11-02（用户报障 z4-polish：已停课却报「在线，却没有任何进程推进它」）：
+  //   `hub-no-process` 的前提是**hub 真在给它派活**（队列有活 / 有在飞）——否则「没进程」
+  //   只是「这门课没在训」（未开课 / 已停课 / 已收官），不是故障，也不会有 job 在堆。
+  const hubWork = !!ov && (ov.queuePending > 0 || ov.inflight > 0)
   const conflict: CourseStatus['conflict'] =
     training && hubKnown && !ov!.hubSeen
       ? 'hub-unregistered'
-      : !training && hubKnown && ov!.hubSeen && !ov!.hold
+      : !training && hubKnown && ov!.hubSeen && !ov!.hold && hubWork
         ? 'hub-no-process'
         : null
   /** 本课冲突档随词一起出（所有分支默认带上它；个别分支显式覆盖）——矩阵用它升级成警告词。 */
@@ -396,6 +451,22 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       ...extra,
       conflict: extra.conflict === undefined ? conflict : extra.conflict,
     })
+
+  // ⓪' **已停课**（开课标记已删）：没有进程是**预期**，不是冲突——先于「hub 记着它 / 队列有活」。
+  //    停课不清理 hub 已发布的 job，旧判据于是把「queuePending=1 ∧ 没进程」报成
+  //    「在线，却没有任何进程推进它」。有 hold 时交给下面的接管档（云机确实在跑）。
+  if (input.enabled === false && !ov?.hold && !isTraining(lq, ov)) {
+    return out(
+      input,
+      'not-training',
+      '未在训',
+      'gray',
+      '已停课（开课标记已删）：本机不跑这门课；hub 那边残留的队列 job 不派给未开课的课，' +
+        '重启 hub 或重新开课会清掉它——这不是故障。',
+      'registry',
+      { conflict: null },
+    )
+  }
 
   // ① 训练侧行缺失：只剩 hub 侧事实。hub 不可达/没读到时是「未在训/在训」的粗档
   //    （不把「读不到课程表」读成「hub 不认这门课」——R4-g 的假诊断回归闸）。
@@ -432,11 +503,11 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
         { conflict: 'hub-unregistered' },
       )
     }
-    if (ov.hubSeen && !ov.hold && !training) {
+    if (ov.hubSeen && !ov.hold && !training && hubWork) {
       return out(
         input,
         'hub-no-process',
-        'hub 已注册 · 无进程',
+        'hub·无进程',
         'y',
         'hub 的课程表里有这门课且在线，但没有任何训练进程推进它——派给它的 job 没有人消费，' +
           '会一直堆在队列里（这份信号在分开的两张表上各自都是「正常」的）',
@@ -469,7 +540,8 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       'not-training',
       '未在训',
       'gray',
-      '没有存活的共享 trainer 进程，且训练侧只读视图不可用——这一行只有 hub 侧事实',
+      '没有这门课的队列行，hub 也没有给它派活——未开课 / 已停课 / 已收官 / 训练侧读面不可用' +
+        '都可能长这样（不是故障）。',
       'registry',
     )
   }
@@ -578,7 +650,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'local-inflight',
-        '等回传（本机）',
+        'PPO·本机算',
         'y',
         '本机在算（训练侧 inflight，但 hub 没有这门课的在飞 job）——非远端。' +
           hubDispatchTitle(hub, wait, input.registeredWorkers) +
@@ -592,9 +664,9 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'local-inflight',
-        '等回传',
+        'PPO·已发布',
         'y',
-        `训练侧在飞但没有 jid（旧训练侧）——无法与 hub 在飞对号。${hubDispatchTitle(
+        `训练侧在飞但没有 jid（旧训练侧）——无法与 hub 在飞对号；**谁在算未知**。${hubDispatchTitle(
           hub,
           wait,
           input.registeredWorkers,
@@ -604,26 +676,35 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       )
     }
     if (hub.inflight > 0) {
-      const age = pickOldestInflight(hub)?.claimedAgo ?? null
-      if (age !== null && age > PILL_STUCK_SEC) {
-        return out(
-          input,
-          'dispatch-stuck',
-          STUCK_LABEL,
-          'r',
-          hubDispatchTitle(hub, wait, input.registeredWorkers),
-          'hub',
-          { age: fmtAge(age) || null },
-        )
+      const claimed = pickOldestInflight(hub)?.claimedAgo ?? null
+      // 有没有人**真的开算**：`computing_ago` 是 `POST /jobs/{id}/start` 的实测龄。
+      // ★ 2026-11-02：认领与开算是两件事（认领后要取包/下 payload）——旧版一律写「等回传」，
+      //    于是「还没被接收」与「正在算」在屏上同一个词（用户报障的根因之一）。
+      const computing = hub.inflightDetail
+        .map((d) => d.computingAgo)
+        .filter((x): x is number => x !== null)
+      const computingAge = computing.length ? Math.max(...computing) : null
+      const title = hubDispatchTitle(hub, wait, input.registeredWorkers)
+      // 「卡住」只定义在**认领了却没开算**上：开算之后的时长是活（PPO 本来就几分钟），
+      // 拿认领龄当门槛会把正常计算报成红色故障。
+      if (claimed !== null && computingAge === null && claimed > PILL_STUCK_SEC) {
+        return out(input, 'dispatch-stuck', STUCK_LABEL, 'r', title, 'hub', {
+          age: fmtAge(claimed) || null,
+        })
+      }
+      if (computingAge !== null) {
+        return out(input, 'dispatch-inflight', 'PPO·云机算', 'y', title, 'hub', {
+          age: fmtAge(computingAge) || null,
+        })
       }
       return out(
         input,
-        'dispatch-inflight',
-        '等回传',
+        'dispatch-claimed',
+        'PPO·已认领',
         'y',
-        hubDispatchTitle(hub, wait, input.registeredWorkers),
+        `已有人认领、还没开算（认领后要取包 / 下 payload；这一步没有心跳）。${title}`,
         'hub',
-        { age: fmtAge(age) || null },
+        { age: fmtAge(claimed) || null },
       )
     }
     // 到这里只可能是 `inflight == 0 ∧ queuePending > 0`（门条件）。
@@ -631,7 +712,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'dispatch-queued',
-        '排队中',
+        'PPO·排队',
         'y',
         `hub 预取窗口不可知（旧版 hub）——无法区分「没人要跑」与「预取中」。${hubDispatchTitle(
           hub,
@@ -645,7 +726,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'dispatch-prefetched',
-        '预取中',
+        'PPO·预取',
         'g',
         `hub 有活且刚被 worker 预取扫到（在预取窗口内）。${hubDispatchTitle(
           hub,
@@ -669,14 +750,14 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
   // `blocked` 不在这里另列一档：上面 `!openable.ok || waiting.kind === 'blocked'` 已拦，
   // 列出即与窄化后的类型冲突（TS2678）——起不来的唯一出口就是上面的红档。
   switch (lq.waiting.kind) {
-    // ★M4（词表定稿）：训练侧的接管等待词是 **`held-wait`**「接管中（云机）」——闲词 `offline`
+    // ★M4（词表定稿）：训练侧的接管等待词是 **`held-wait`**「云机·接管」——闲词 `offline`
     // 已随 rollout_src 写面一起退役（见 `LoopWaitKind` 头注）。
     // 判据是训练侧自己的 held（双通道：直问 hub ∨ 控制文件的缓存，见 `trainer/loop_hold.py`）。
     case 'held':
       return out(
         input,
         'held-wait',
-        '接管中（云机）',
+        '云机·接管',
         'y',
         `本机不跑这门课：该课正被自主 worker 接管（作业照常发布、由协作 worker 取）；` +
           `15 分钟无回传会自动恢复协作派发。${wait}`,
@@ -684,13 +765,49 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
         { conflict },
       )
     case 'inflight':
-      return out(input, 'dispatch-inflight', '等回传', 'y', wait, 'loop', { conflict })
+      // ★ 2026-11-02：hub 这一拍**没有**这门课的在飞/排队（否则上面已经出词）——训练侧说
+      // 「已发布未回传」，但认领状态**不可知**。词必须说到这一层，不能暗示「有人在算」：
+      // 「等回传」会被读成「已经有 worker 接单」，故只用「已发布」（谁在算写在悬停里）。
+      return out(
+        input,
+        'dispatch-inflight',
+        'PPO·已发布',
+        'y',
+        `训练侧说这一单已发布、还没回传；hub 这一拍没有它的在飞/排队读数（不可读或还没到 hub）` +
+          `——**谁在算未知**。${wait}`,
+        'loop',
+        { conflict },
+      )
     case 'collect':
-      return out(input, 'collecting', '采集中', 'g', wait, 'loop', { conflict })
-    case 'ready':
-      return out(input, 'ready', '推进中', 'g', wait, 'loop', { conflict })
+      return out(
+        input,
+        'collecting',
+        '采集中',
+        'g',
+        `rollout 局在生产（本机槽位 / 云机节点都算）· ${wait}`,
+        'loop',
+        {
+          conflict,
+        },
+      )
+    case 'ready': {
+      // old word「推进中」没人说得清（用户 2026-11-02）：这里是**本机的下一步**——
+      // 说成「环节·本机」（`门禁·本机` = 本机在算门禁）。
+      // 唯一例外：下一步是 PPO 时写「待发布」——`PPO·本机` 会与本机在算的 `PPO·本机算` 读混。
+      const stage = lq.current ? stepStage(lq.current) : null
+      const word = stage === null ? '本机·在跑' : stage === 'PPO' ? 'PPO·待发布' : `${stage}·本机`
+      return out(
+        input,
+        'ready',
+        word,
+        'g',
+        `本机正在跑这一轮：下一步是 \`${lq.current || '?'}\`（盘上没有外部等待）。${wait}`,
+        'loop',
+        { conflict },
+      )
+    }
     default:
       // `idle`：本轮无待办（账本已结算 / 刚开课还没起第一轮）——不是故障，也不活跃。
-      return out(input, 'idle', '空闲', 'gray', wait, 'loop', { conflict })
+      return out(input, 'idle', '本轮无待办', 'gray', wait, 'loop', { conflict })
   }
 }

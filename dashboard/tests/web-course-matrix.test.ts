@@ -157,6 +157,33 @@ describe('mergeCourseRows：outer join 不丢行（单侧缺失）', () => {
     expect(cell.text).not.toContain('待办')
   })
 
+  it('训练侧列：短词（采集 / 环节 / PPO·已发布）+ 整句原话进悬停（2026-11-02 用户口径）', () => {
+    // `lqRow` 夹具故意只造「解析后的裸对象」；这里转成行类型只为调纯函数。
+    const cell = (patch: Record<string, unknown>): ReturnType<typeof waitingCell> =>
+      waitingCell(lqRow(patch) as unknown as LoopQueueRow)
+    expect(cell({ waiting: { kind: 'collect', text: '采集中：已落 12 局' } }).text).toBe('采集')
+    expect(
+      cell({ current: 'gate', waiting: { kind: 'ready', text: '无外部等待，下一步 gate' } }).text,
+    ).toBe('门禁')
+    // 下一步是 ppo ⇒「待发布」：一个 `PPO` 会被读成已在飞（与 pill 同一个特例）
+    expect(
+      cell({ current: 'ppo', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } }).text,
+    ).toBe('PPO·待发布')
+    expect(cell({ waiting: { kind: 'inflight', text: '等远端回传：ppo@37' } }).text).toBe(
+      'PPO·已发布',
+    )
+    expect(cell({ waiting: { kind: 'idle', text: '本轮无待办' } }).text).toBe('无待办')
+    expect(cell({ waiting: { kind: 'blocked', text: '课程起不来：缺 stages' } }).text).toBe(
+      '配置·阻塞',
+    )
+    // 原话逐字保留（短词只降排版层级，不删信息）
+    const ready = cell({
+      current: 'gate',
+      waiting: { kind: 'ready', text: '无外部等待，下一步 gate' },
+    })
+    expect(ready.title).toContain('原话：无外部等待，下一步 gate')
+  })
+
   it('两侧同一门课只出一行（join 而不是去重后拼接）', () => {
     const rows = mergeCourseRows({
       overview: ovView([ovRow({ course: 'c4', training: true })], {
@@ -180,29 +207,56 @@ describe('mergeCourseRows：outer join 不丢行（单侧缺失）', () => {
 // ────────────────────────── ② 状态冲突 ──────────────────────────
 
 describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）', () => {
-  it('hub 在线且注册了它、训练侧没进程 ⇒ `hub 已注册 · 无进程`（warn）——job 堆着没人消费', () => {
-    const ov = ovRow({ course: 'c4', hubSeen: true, training: false })
+  it('hub 在线且注册了它、训练侧没进程 ⇒ `hub·无进程`（warn）——job 堆着没人消费', () => {
+    // 判据含「hub 真有活」（queuePending/inflight）：没活就只是「未在训」，见下一条。
+    const ov = ovRow({ course: 'c4', hubSeen: true, training: false, queuePending: 2 })
     const st = matrixStatus(ov, null, true)
-    expect(st.text).toBe('hub 已注册 · 无进程')
+    expect(st.text).toBe('hub·无进程')
     expect(st.tone).toBe('warn')
     expect(matrixConflict(ov, null, true)).toBe('hub-no-process')
   })
 
-  it('在训但 hub 没注册 ⇒ `在训 · hub 未注册`（warn）——rollout 白跑、PPO 永不派发', () => {
+  it('★2026-11-02 用户报障：停课（hub 记着它、残留队列 job）⇒ 「未在训」灰，不报「hub·无进程」', () => {
+    // 开课标记是唯一判据：`enabledCourses` 不含它 ⇒ 停课，hub 队列里的残留 job 不算冲突。
+    const rows = mergeCourseRows({
+      overview: ovView([
+        ovRow({ course: 'z4-pick-wall', training: false, hubSeen: true, queuePending: 1 }),
+      ]),
+      queue: null,
+      enabledCourses: ['other-course'],
+      viewing: '',
+      nowSec: NOW,
+    })
+    expect(rows[0]!.status.text).toBe('未在训')
+    expect(rows[0]!.conflict).toBeNull()
+  })
+
+  it('★2026-11-02：停课且 hub 没活 ⇒ 「未在训」灰（没人报冲突）', () => {
+    // 现场（z4-polish）：已停课 ⇒ 开课标记没了、训练侧没有行；hub 的课程表仍认得它，
+    // 但 queuePending = inflight = 0（没有任何活）。旧判据只看「hubSeen ∧ 没进程」⇒
+    // 报「在线，却没有任何进程推进它」——停课不是故障，也没有 job 在堆。
+    const ov = ovRow({ course: 'z4-polish', hubSeen: true, training: false })
+    const st = matrixStatus(ov, null, true)
+    expect(st.text).toBe('未在训')
+    expect(st.tone).toBe('off')
+    expect(matrixConflict(ov, null, true)).toBeNull()
+  })
+
+  it('在训但 hub 没注册 ⇒ `本机·在训（hub 未注册）`（warn）——rollout 白跑、PPO 永不派发', () => {
     const ov = ovRow({ course: 'c4', hubSeen: false, training: true })
     const st = matrixStatus(ov, null, true)
-    expect(st.text).toBe('在训 · hub 未注册')
+    expect(st.text).toBe('本机·在训（hub 未注册）')
     expect(st.tone).toBe('warn')
     expect(matrixConflict(ov, null, true)).toBe('hub-unregistered')
   })
 
   it('★ 回归闸：hub 无应答时**不得**把「读不到课程表」读成「hub 未注册」', () => {
     // 合并前的总览卡就是这个错：hubOnline=false ⇒ 队列整个读不到 ⇒ hubSeen 恒 false，
-    // 于是每个在训课程都被贴上「在训·hub 未注册」+「以 --course 重启 hub」的假诊断，
+    // 于是每个在训课程都被贴上「本机·在训（hub 未注册）」+「以 --course 重启 hub」的假诊断，
     // 而同一张卡的表头正写着「hub 无应答」。
     const ov = ovRow({ course: 'c4', hubSeen: false, training: true })
     const st = matrixStatus(ov, null, false)
-    expect(st.text).toBe('在训') // 只知道在训，不知道 hub 认不认它
+    expect(st.text).toBe('本机·在训') // 只知道在训，不知道 hub 认不认它
     expect(st.title).not.toContain('--course')
     expect(matrixConflict(ov, null, false)).toBeNull()
     // 同理：hub 无应答时不报「已注册 · 无进程」（那是「hub 认识它」的肯定判断）
@@ -217,7 +271,7 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
       null,
       true,
     )
-    expect(st.text).toBe('接管中（云机）')
+    expect(st.text).toBe('云机·接管')
     expect(st.tone).toBe('info') // 不涂成黄/红：接管是合法状态
     // 掉线（进度静默超阈）= warn：它已自动恢复协作派发，但「刚才丢了 15 分钟」要人看见
     const stale = matrixStatus(
@@ -225,7 +279,7 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
       null,
       true,
     )
-    expect(stale.text).toBe('接管掉线')
+    expect(stale.text).toBe('云机·掉线')
     expect(stale.tone).toBe('warn')
   })
 
@@ -234,15 +288,15 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
       matrixStatus(ovRow({ course: 'a', training: true, hubSeen: true }), null, true),
       matrixStatus(ovRow({ course: 'b', training: true, hubSeen: false }), null, true),
       matrixStatus(ovRow({ course: 'c', hold: hold('tpu-1') }), null, true),
-      matrixStatus(ovRow({ course: 'd', hubSeen: true }), null, true),
+      matrixStatus(ovRow({ course: 'd', hubSeen: true, queuePending: 1 }), null, true),
       matrixStatus(ovRow({ course: 'e', hubSeen: false }), null, true),
     ].map((s) => s.text)
     expect(new Set(states).size).toBe(5)
     expect(states).toEqual([
-      '在训',
-      '在训 · hub 未注册',
-      '接管中（云机）',
-      'hub 已注册 · 无进程',
+      '本机·在训',
+      '本机·在训（hub 未注册）',
+      '云机·接管',
+      'hub·无进程',
       '未在训',
     ])
     // 语义档 → 原语词表（点四档 / 徽章五档），不允许矩阵自己长一套类名
@@ -274,7 +328,7 @@ describe('接管列：谁在跑这门课 + 多久没回传（旧「段内」列�
 
   it('live：holder + 最近一次**进度**信号（不是「上次心跳」——心跳不算活性）', () => {
     const cell = holdCell(heldRow(60), NOW)!
-    expect(cell.text).toBe('tpu-1 · 最近 30s 前')
+    expect(cell.text).toBe('云机·tpu-1 最近 30s 前')
     expect(cell.warn).toBe(false)
     expect(cell.title).toContain('接管中')
     expect(cell.title).toContain('已回传段内 3 轮')
@@ -292,7 +346,7 @@ describe('接管列：谁在跑这门课 + 多久没回传（旧「段内」列�
 
   it('stale（接管掉线）→ 说清**已自动恢复协作**与新盘可直接 claim（不吓人）', () => {
     const cell = holdCell(heldRow(60, 'stale'), NOW)!
-    expect(cell.text).toContain('接管掉线')
+    expect(cell.text).toContain('云机·掉线')
     expect(cell.warn).toBe(true)
     expect(cell.title).toContain('已自动恢复')
     expect(cell.title).toContain('强制解除接管')
@@ -325,12 +379,12 @@ describe('接管列：谁在跑这门课 + 多久没回传（旧「段内」列�
   })
 
   it('★M4：「在等什么」对**被接管**的课换口径（本地 13 步表的词对它没有读面意义）', () => {
-    expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1') })).text).toBe('等待接管')
+    expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1') })).text).toBe('云机·待接管')
     expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1'), offlineRounds: 2 })).text).toBe(
-      '云机运行中 · 已回传 2 轮',
+      '云机·运行中（已回传 2 轮）',
     )
     expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1', 'stale') })).text).toBe(
-      '接管掉线 · 已恢复协作',
+      '云机·掉线（已恢复协作）',
     )
   })
 })
@@ -448,7 +502,7 @@ describe('表头元信息与页脚：两侧各自缺什么都要说出来', () =
     })
     const texts = meta.map((m) => m.text)
     expect(texts).toContain('在训 1/2')
-    expect(texts).toContain('1 课等回传') // 只有「在训」的等回传才算
+    expect(texts).toContain('训练侧·等回传 1 课') // 只有「在训」的等回传才算
     expect(texts).toContain('排队等资源：b')
     expect(texts).toContain('local_ppo 1/1')
     expect(texts).toContain('上一拍读失败（显示缓存）')
@@ -521,13 +575,13 @@ describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
     const all = merged()
     const shown = all.filter(isTrainingRow)
     expect(shown.map((r) => r.course)).toEqual(['live', 'conflict', 'sync'])
-    // 「在训」/「在训 · hub 未注册」这两个判词**只能**出现在在训的行上（反过来说：
-    // 写着在训却没上屏 = 漏筛了一条该看的行）；反之「未在训」/「hub 已注册 · 无进程」
+    // 「本机·在训」/「本机·在训（hub 未注册）」这两个判词**只能**出现在在训的行上（反过来说：
+    // 写着在训却没上屏 = 漏筛了一条该看的行）；反之「未在训」/「hub·无进程」
     // 只能出现在未在训的行上。
-    // 注：`接管中（云机）` / `接管掉线` 不在该对应关系里——接管是 hub 侧事实（与在训与否
+    // 注：`云机·接管` / `云机·掉线` 不在该对应关系里——接管是 hub 侧事实（与在训与否
     // 正交：被接管的课本机不跑，但它在课程表里），矩阵状态列有意把它排在 training 之前。
-    const TRAINING_WORDS = ['在训', '在训 · hub 未注册']
-    const NOT_TRAINING_WORDS = ['未在训', 'hub 已注册 · 无进程']
+    const TRAINING_WORDS = ['本机·在训', '本机·在训（hub 未注册）']
+    const NOT_TRAINING_WORDS = ['未在训', 'hub·无进程']
     for (const r of shown) expect(TRAINING_WORDS, r.course).toContain(r.status.text)
     for (const r of all.filter((x) => !isTrainingRow(x)))
       expect(NOT_TRAINING_WORDS, r.course).toContain(r.status.text)
@@ -548,14 +602,14 @@ describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
  *  在训课的导包键。
  */
 describe('★M4 接管派生：队列格 / 在等什么 / 在训课的导包键', () => {
-  it('队列格：hold live ⇒ 「接管中·不派发」（队列深度对该课已不适用）；stale ⇒ 说真队列', () => {
+  it('队列格：hold live ⇒ 「hub·停派」（队列深度对该课已不适用）；stale ⇒ 说真队列', () => {
     expect(
       queueCell(ovRow({ course: 'c4', hold: hold('tpu-1'), queuePending: 3 }), true).text,
-    ).toBe('接管中·不派发')
-    // stale：派发已恢复，队列列就是真相（不能继续拿「接管中」把它藏掉）
+    ).toBe('hub·停派')
+    // stale：派发已恢复，队列列就是真相（不能继续拿「接管」把它藏掉）
     expect(
       queueCell(ovRow({ course: 'c4', hold: hold('tpu-1', 'stale'), queuePending: 3 }), true).text,
-    ).toBe('队列 3 · 在飞 0')
+    ).toBe('hub·队列 3 / 在飞 0')
     // hub 不可达 ⇒ 仍是「不知道」，不是 0（与接管无关的那条老纪律）
     expect(queueCell(ovRow({ course: 'c4', queuePending: 3 }), false).text).toBe(CELL_UNKNOWN)
   })
@@ -572,9 +626,9 @@ describe('★M4 接管派生：队列格 / 在等什么 / 在训课的导包键'
     })
     // 被接管的课：iter 读**云机回传的最新 it**（本地「下一轮」队列指针这一段没有读面意义）
     expect(row[0]).toMatchObject({ iter: 42, iterSource: 'hold' })
-    expect(row[0]!.waiting.text).toBe('云机运行中 · 已回传 5 轮')
-    // 一次都没回传 ⇒ 「等待接管」；本地 waiting 词（“推进中”）不上屏
-    expect(row[1]!.waiting.text).toBe('等待接管')
+    expect(row[0]!.waiting.text).toBe('云机·运行中（已回传 5 轮）')
+    // 一次都没回传 ⇒ 「云机·待接管」；本地 waiting 词（“推进中”）不上屏
+    expect(row[1]!.waiting.text).toBe('云机·待接管')
     // 没有回传轮 ⇒ 指针**不可知**：iter null 且来源也是 null——绝不拿本地「下一轮」指针（37）充数
     //（这一段本机不跑这门课；悬停由 `iterMissingTitle` 说「接管中但还没有段内回传」）。
     expect(row[1]!.iterSource).toBeNull()

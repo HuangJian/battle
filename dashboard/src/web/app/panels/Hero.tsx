@@ -28,8 +28,11 @@ import {
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_TREND_RANGE,
+  TC_TREND_SCALE,
   TC_TREND_SOURCE,
   isTrendSource,
+  parseTrendScales,
+  TREND_SCALES_DEFAULT,
   TREND_SOURCE_OPTIONS,
   winTone,
   type ConsoleStateView,
@@ -40,11 +43,14 @@ import {
   type PairedReferee,
   type Series,
   type TrendRange,
+  type TrendScale,
+  type TrendScales,
   type TrendSource,
 } from '../../view'
 import { Badge } from '../../components/Pill'
 import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
+import { Switch } from '../../components/Switch'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
@@ -94,6 +100,8 @@ export function TrendCell({
   title,
   hoverIter,
   onHoverIter,
+  scale,
+  onScale,
 }: {
   series: Series | undefined
   seriesEval?: Series | undefined
@@ -111,6 +119,9 @@ export function TrendCell({
   hoverIter?: number | null
   /** 受控悬停回报（鼠标移入/移动/离开）。 */
   onHoverIter?: (it: number | null) => void
+  /** 纵坐标档位（仅击杀/胜局残血/道具三图）：小钮显示**当前**单位，点一下切换。 */
+  scale?: TrendScale
+  onScale?: (s: TrendScale) => void
 }) {
   const evalOnly = source === 'eval'
   const main = evalOnly ? seriesEval : series
@@ -121,8 +132,21 @@ export function TrendCell({
   return (
     <div className="tc-tcell">
       <span className="tc-tcell__hd">
-        <span className="tc-tcell__lbl" title={title}>
-          {main ? main.label : '—'}
+        <span className="tc-tcell__hdmid">
+          <span className="tc-tcell__lbl" title={title}>
+            {main ? main.label : '—'}
+          </span>
+          {onScale ? (
+            <>
+              <Switch
+                label="纵坐标：百分比"
+                checked={scale === 'pct'}
+                onChange={(pct) => onScale(pct ? 'pct' : 'abs')}
+                title={`纵坐标：${scale === 'pct' ? '百分比' : '绝对值'}（开关切换，关 = 数值）`}
+              />
+              <span className="tc-tcell__unit">{scale === 'pct' ? '%' : '数值'}</span>
+            </>
+          ) : null}
         </span>
         <b className={tone ? `tc-mtrend__val--${tone}` : undefined}>
           {fmt(last)}
@@ -187,6 +211,14 @@ function fmtResidual(hp: number | null | undefined): string {
 /** 胜局耗时（ticks）/ 胜局残血 展示：整数（平均值已四舍五入）。 */
 function fmtInt(v: number | null): string {
   return v != null ? String(Math.round(v)) : '—'
+}
+
+/** 趋势图「数值」档：每局平均击杀 1 位 / 道具 2 位。 */
+function fmtDec1(v: number | null): string {
+  return v != null ? v.toFixed(1) : '—'
+}
+function fmtDec2(v: number | null): string {
+  return v != null ? v.toFixed(2) : '—'
 }
 
 /** 胜局耗时列：优先 avgWinTicks，旧缓存无该字段时回退全样本 avgTicks（标题注明）。 */
@@ -337,7 +369,7 @@ function MainTable({
             </td>
             <td className="tc-num">
               {r.actuals?.avgResidualHpPct != null ? (
-                <span title="胜局残血 / 该局可支配生命容量">
+                <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
                   {fmtPct(r.actuals.avgResidualHpPct)}
                 </span>
               ) : r.actuals?.avgResidualHp != null ? (
@@ -510,7 +542,9 @@ function EvalTable({ rows }: { rows: IterRow[] }) {
                 </td>
                 <td className="tc-num">
                   {e.avgResidualHpPct != null ? (
-                    <span title="胜局残血 / 该局可支配生命容量">{fmtPct(e.avgResidualHpPct)}</span>
+                    <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
+                      {fmtPct(e.avgResidualHpPct)}
+                    </span>
                   ) : e.avgResidualHp != null ? (
                     <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
                       {fmtResidual(e.avgResidualHp)}
@@ -685,8 +719,15 @@ export function Hero({
   const series = metricSeries(iters)
   const winSeries = series.find((m) => m.key === 'winRate')
   const evalSeries = series.find((m) => m.key === 'eval')
-  const killsSeries = series.find((m) => m.key === 'kills')
-  const evalKillsSeries = series.find((m) => m.key === 'evalKills')
+  // 三张图各两条序列（绝对值 / 百分比）；选哪条由下面的纵坐标档位决定。
+  const killsPctSeries = series.find((m) => m.key === 'killsPct')
+  const evalKillsPctSeries = series.find((m) => m.key === 'evalKillsPct')
+  const killsAbsSeries = series.find((m) => m.key === 'killsAbs')
+  const evalKillsAbsSeries = series.find((m) => m.key === 'evalKillsAbs')
+  const winHpAbsSeries = series.find((m) => m.key === 'winHpAbs')
+  const evalWinHpAbsSeries = series.find((m) => m.key === 'evalWinHpAbs')
+  const puPctSeries = series.find((m) => m.key === 'puPct')
+  const evalPuPctSeries = series.find((m) => m.key === 'evalPuPct')
   const puSeries = series.find((m) => m.key === 'pu')
   const evalPuSeries = series.find((m) => m.key === 'evalPu')
   const winTicksSeries = series.find((m) => m.key === 'winTicks')
@@ -824,6 +865,26 @@ export function Hero({
     }
   }
 
+  // 纵坐标档位（击杀 / 胜局残血 / 道具）：绝对值 ↔ 百分比。
+  // 持久化与范围/数据源同一个套路：SSR 首帧 = 改造前的样子，hydrate 后恢复偏好。
+  const [scales, setScales] = useState<TrendScales>(TREND_SCALES_DEFAULT)
+  useEffect(() => {
+    try {
+      setScales(parseTrendScales(localStorage.getItem(TC_TREND_SCALE)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onScale = (k: keyof TrendScales, s: TrendScale): void => {
+    const next = { ...scales, [k]: s }
+    setScales(next)
+    try {
+      localStorage.setItem(TC_TREND_SCALE, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+
   // 「比较课程」弹窗开关（弹窗自持数据与轮询；Hero 只负责入口与透传节奏）。
   const [compareOpen, setCompareOpen] = useState(false)
 
@@ -939,39 +1000,57 @@ export function Hero({
             yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
             title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
           />
-          {/* 行2：击杀 / 胜局残血 / 道具 */}
+          {/* 行2：击杀 / 胜局残血 / 道具（纵坐标可切 绝对值 ↔ 百分比） */}
           <TrendCell
-            series={killsSeries}
-            seriesEval={evalKillsSeries}
+            series={scales.kills === 'pct' ? killsPctSeries : killsAbsSeries}
+            seriesEval={scales.kills === 'pct' ? evalKillsPctSeries : evalKillsAbsSeries}
             source={source}
-            fmt={fmtPct}
+            fmt={scales.kills === 'pct' ? fmtPct : fmtDec1}
             range={range}
             hoverIter={hoverIter}
             onHoverIter={setHoverIter}
             yFloor={0}
-            title="歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）"
+            scale={scales.kills}
+            onScale={(s) => onScale('kills', s)}
+            title={
+              scales.kills === 'pct'
+                ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
+                : '每局平均击杀（rollout 实线 · eval 橙点）'
+            }
           />
           <TrendCell
-            series={winHpSeries}
-            seriesEval={evalWinHpSeries}
+            series={scales.winHp === 'pct' ? winHpSeries : winHpAbsSeries}
+            seriesEval={scales.winHp === 'pct' ? evalWinHpSeries : evalWinHpAbsSeries}
             source={source}
-            fmt={fmtPct}
+            fmt={scales.winHp === 'pct' ? fmtPct : fmtInt}
             range={range}
             hoverIter={hoverIter}
             onHoverIter={setHoverIter}
             yFloor={0}
-            title="胜局残血 / 该局可支配生命容量（rollout 实线 · eval 橙点）"
+            scale={scales.winHp}
+            onScale={(s) => onScale('winHp', s)}
+            title={
+              scales.winHp === 'pct'
+                ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
+                : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
+            }
           />
           <TrendCell
-            series={puSeries}
-            seriesEval={evalPuSeries}
+            series={scales.pu === 'pct' ? puPctSeries : puSeries}
+            seriesEval={scales.pu === 'pct' ? evalPuPctSeries : evalPuSeries}
             source={source}
-            fmt={(v) => (v != null ? `${v.toFixed(2)}` : '—')}
+            fmt={scales.pu === 'pct' ? fmtPct : fmtDec2}
             range={range}
             hoverIter={hoverIter}
             onHoverIter={setHoverIter}
             yFloor={0}
-            title="每局平均拾取/掉落（rollout 实线 · eval 橙点）"
+            scale={scales.pu}
+            onScale={(s) => onScale('pu', s)}
+            title={
+              scales.pu === 'pct'
+                ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
+                : '每局平均拾取数（rollout 实线 · eval 橙点）'
+            }
           />
         </div>
         <PairedRefereeLine ref={stateView?.metrics.pairedReferee} />

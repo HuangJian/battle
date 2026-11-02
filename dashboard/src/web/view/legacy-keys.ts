@@ -21,6 +21,8 @@ export const TC_SIDE_COLLAPSED = `${TC_KEY_PREFIX}side.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 /** hero 走势图数据源档位（'all' 全部叠加 / 'rollout' 只看采样 / 'eval' 只看干净评估）。 */
 export const TC_TREND_SOURCE = `${TC_KEY_PREFIX}trend.source`
+/** hero 三张图的纵坐标档位（JSON `{kills, winHp, pu}`：'abs' 绝对值 / 'pct' 百分比）。 */
+export const TC_TREND_SCALE = `${TC_KEY_PREFIX}trend.scale`
 // 「比较课程」弹窗的本地偏好（5 键，plan/dashboard-compare-trends.plan.md §3.11）。
 // 恢复纪律与 Hero 的 TC_TREND_RANGE 同款：**首帧不读**（SSR/hydrate 一致），mount 后的
 // effect 里恢复 + 与当前 courses 求交（选过的课可能已封存/删除）。

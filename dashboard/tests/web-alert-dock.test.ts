@@ -175,7 +175,7 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(items).toEqual([])
   })
 
-  it('PPO 排队·无人取超时 → err；与 pill 同词，且与「卡住」划清界限（2026-10-02 口径对齐）', () => {
+  it('PPO·无人取超时 → err；与 pill 同词，且与「PPO·卡住」划清界限（2026-10-02 口径对齐）', () => {
     const items = buildAlerts({
       ...clean,
       ppoQueueStall: { jobId: 'abcdef1234567890', waitedSec: 305, it: 37 },
@@ -185,7 +185,9 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(items[0]!.detail).toContain('it37')
     // ★ 跨面同词：dock 的说法与 pill 对同一局面给出的状态字**同一个常量**——两处不得
     //   各起一个名字（「同一句话不说两遍」的落点；旧词「排队超时」不得回流）。
-    expect(items[0]!.title).toContain(`PPO ${NO_TAKER_LABEL}`)
+    expect(items[0]!.title).toContain(NO_TAKER_LABEL)
+    // 词本身已带环节前缀（`环节·归属`）——不得再拼一次「PPO 」，否则读成「PPO PPO·无人取」。
+    expect(items[0]!.title).not.toContain('PPO PPO')
     expect(items[0]!.title).not.toContain('排队超时')
     // ★ 反向：dock 结构上不覆盖有持有者的卡死（不是同一个信号）——detail 必须点名 pill 的
     //   「卡住」是另一类，防两类被读成一类。

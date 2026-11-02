@@ -204,7 +204,7 @@ describe('course-admin · 行集与分类', () => {
 })
 
 describe('course-admin · 列口径（复用矩阵词表）', () => {
-  it('状态/在等什么与矩阵同源：被接管 → 「接管中（云机）」+ 云机等待口径', () => {
+  it('状态/在等什么与矩阵同源：被接管 → 「云机·接管」+ 云机等待口径', () => {
     const v = build({
       courses: ['c'],
       facts: [fact('c')],
@@ -217,8 +217,8 @@ describe('course-admin · 列口径（复用矩阵词表）', () => {
       ]),
     })
     const r = v.rows[0]!
-    expect(r.status.text).toBe('接管中（云机）')
-    expect(r.waiting.text).toBe('等待接管') // 零回传：云机刚领走/还在跑第一轮
+    expect(r.status.text).toBe('云机·接管')
+    expect(r.waiting.text).toBe('云机·待接管') // 零回传：云机刚领走/还在跑第一轮
     expect(r.canReleaseHold).toBe(true)
   })
 

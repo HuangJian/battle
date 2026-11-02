@@ -7,7 +7,7 @@ export interface IterActuals {
   totalKills: number
   totalPU: number
   avgTicks: number
-  /** 胜局平均残血（hp 单位：剩余命每命计满额 maxHp + 当前 hp）。
+  /** 胜局平均残血（hp 单位：(剩余命数 − 1) × 满额 maxHp + 当前命 hp）。
    *  null = 数据源无 residualHp（旧 manifest / 无胜局）。 */
   avgResidualHp: number | null
   /** 胜局平均耗时（ticks，仅胜局计入）；null = 无胜局或胜局缺 ticks。
@@ -22,7 +22,7 @@ export interface IterActuals {
   killRate?: number | null
   /** 每杀承伤占「命数×满血」容量的比例 0–1（用户 2026-09-16：由绝对 HP 改百分比）。 */
   dmgPerKillPct?: number | null
-  /** 胜局残血占「该局剩余容量」的平均比例 0–1（capacity=(startLives+tank−deaths)×maxHp）。 */
+  /** 胜局残血 / **单命满血** 的平均比例（1 = 满一条命；三命全在 = 3，可 >1）。 */
   avgResidualHpPct?: number | null
   /** 掉落道具总数（Σspawn）；null/缺 = 数据源无该字段（旧 manifest）。 */
   totalPUSpawn?: number | null
@@ -63,7 +63,7 @@ export interface EvalSummary {
   killRate?: number | null
   /** 每杀承伤 / (startLives×maxHp) 0–1。 */
   dmgPerKillPct?: number | null
-  /** 胜局残血 / 该局剩余容量 的平均 0–1。 */
+  /** 胜局残血 / **单命满血** 的平均比例（三命关可 >1；缺终局血条时为下限）。 */
   avgResidualHpPct?: number | null
   scoreMean: number | null
   scoreStd: number | null

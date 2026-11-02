@@ -19,6 +19,41 @@ export type TrendRange = 'all' | '30' | '10'
  *  想看单边趋势时叠加反而是噪声。 */
 export type TrendSource = 'all' | 'rollout' | 'eval'
 
+/** 纵坐标档位（用户 2026-11-02）：绝对值 / 百分比。只作用于 Hero 的击杀·胜局残血·道具三张图。
+ *  三张图各有自己的「两种读数」语义（见 `metricSeries` 的 `*Pct` / `*Abs` 键），
+ *  档位表只是「选哪一条序列」的开关，不在渲染层做单位换算。 */
+export type TrendScale = 'abs' | 'pct'
+export interface TrendScales {
+  kills: TrendScale
+  winHp: TrendScale
+  pu: TrendScale
+}
+/** 默认档位 = 改造前的样子：击杀/残血本来就是百分比，道具本来就是绝对数。 */
+export const TREND_SCALES_DEFAULT: TrendScales = { kills: 'pct', winHp: 'pct', pu: 'abs' }
+export const TREND_SCALE_OPTIONS: Array<{ value: TrendScale; label: string }> = [
+  { value: 'abs', label: '数值' },
+  { value: 'pct', label: '%' },
+]
+
+export function isTrendScale(v: unknown): v is TrendScale {
+  return v === 'abs' || v === 'pct'
+}
+
+/** localStorage 值 → 三张图的纵坐标档位（坏 JSON / 非法值逐键退默认，不上屏）。 */
+export function parseTrendScales(raw: string | null | undefined): TrendScales {
+  if (!raw) return { ...TREND_SCALES_DEFAULT }
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown> | null
+    return {
+      kills: isTrendScale(o?.kills) ? o.kills : TREND_SCALES_DEFAULT.kills,
+      winHp: isTrendScale(o?.winHp) ? o.winHp : TREND_SCALES_DEFAULT.winHp,
+      pu: isTrendScale(o?.pu) ? o.pu : TREND_SCALES_DEFAULT.pu,
+    }
+  } catch {
+    return { ...TREND_SCALES_DEFAULT }
+  }
+}
+
 /** 数据源档位选项（顺序即上屏顺序；view 层给词，组件只渲染——`TrendRange` 同类）。 */
 export const TREND_SOURCE_OPTIONS: Array<{ value: TrendSource; label: string }> = [
   { value: 'all', label: '全部' },
@@ -37,9 +72,13 @@ const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
   'eval',
   'evalTicks',
   'evalKills',
+  'evalKillsPct',
+  'evalKillsAbs',
   'evalPu',
+  'evalPuPct',
   'evalWinTicks',
   'evalWinHp',
+  'evalWinHpAbs',
   'evalDmgPerKill',
   'evalLossTicks',
 ])
@@ -95,10 +134,40 @@ export function metricSeries(rows: IterRow[]): Series[] {
       iters,
     },
     {
+      key: 'killsPct',
+      label: '击杀',
+      // 歼灭率 0–1 = Σkills/ΣenemyTotal（「百分比」档）。缺敌数 = 无读数，
+      // **不拿每局击杀冒充**（那会让 12 显示成 1200%）；要形状请切「数值」档。
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.killRate != null ? r.actuals.killRate : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'killsAbs',
+      label: '击杀',
+      // 每局平均击杀（「数值」档）。
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.games > 0 ? r.actuals.totalKills / r.actuals.games : Number.NaN,
+      ),
+      iters,
+    },
+    {
       key: 'pu',
       label: '道具',
       vals: chrono.map((r) =>
         r.actuals && r.actuals.games > 0 ? r.actuals.totalPU / r.actuals.games : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'puPct',
+      label: '道具',
+      // 拾取率 0–1 = Σ拾取 / Σ掉落（「百分比」档）；spawn 未知 = 无读数（不编分母）。
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.totalPUSpawn != null && r.actuals.totalPUSpawn > 0
+          ? r.actuals.totalPU / r.actuals.totalPUSpawn
+          : Number.NaN,
       ),
       iters,
     },
@@ -120,7 +189,7 @@ export function metricSeries(rows: IterRow[]): Series[] {
     {
       key: 'winHp',
       label: '胜局残血',
-      // 胜局残血占比 0–1；缺容量时回退绝对 hp（趋势形状仍可读）
+      // 胜局残血 / 单命满血（可 >1）；缺时回退绝对 hp（趋势形状仍可读）
       vals: chrono.map((r) =>
         r.actuals
           ? r.actuals.avgResidualHpPct != null
@@ -129,6 +198,15 @@ export function metricSeries(rows: IterRow[]): Series[] {
               ? r.actuals.avgResidualHp
               : Number.NaN
           : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'winHpAbs',
+      label: '胜局残血',
+      // 胜局平均残血 hp（剩余命每命计满额；「数值」档）。
+      vals: chrono.map((r) =>
+        r.actuals && r.actuals.avgResidualHp != null ? r.actuals.avgResidualHp : Number.NaN,
       ),
       iters,
     },
@@ -179,11 +257,42 @@ export function metricSeries(rows: IterRow[]): Series[] {
       iters,
     },
     {
+      key: 'evalKillsPct',
+      label: 'eval 击杀',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.killRate != null ? r.evalData.killRate : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalKillsAbs',
+      label: 'eval 击杀',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.games > 0 && r.evalData.totalKills != null
+          ? r.evalData.totalKills / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
       key: 'evalPu',
       label: 'eval 道具',
       vals: chrono.map((r) =>
         r.evalData && r.evalData.games > 0 && r.evalData.totalPU != null
           ? r.evalData.totalPU / r.evalData.games
+          : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalPuPct',
+      label: 'eval 道具',
+      vals: chrono.map((r) =>
+        r.evalData &&
+        r.evalData.totalPUSpawn != null &&
+        r.evalData.totalPUSpawn > 0 &&
+        r.evalData.totalPU != null
+          ? r.evalData.totalPU / r.evalData.totalPUSpawn
           : Number.NaN,
       ),
       iters,
@@ -207,6 +316,14 @@ export function metricSeries(rows: IterRow[]): Series[] {
               ? r.evalData.avgResidualHp
               : Number.NaN
           : Number.NaN,
+      ),
+      iters,
+    },
+    {
+      key: 'evalWinHpAbs',
+      label: 'eval 胜局残血',
+      vals: chrono.map((r) =>
+        r.evalData && r.evalData.avgResidualHp != null ? r.evalData.avgResidualHp : Number.NaN,
       ),
       iters,
     },

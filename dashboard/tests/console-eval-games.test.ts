@@ -5,7 +5,7 @@
  *  重复落账覆盖、it0 基线轮、回填读数（reused_wver）、谓词与视图同源、单趟成本钉。 */
 
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { readEvalGames, readEvalRoundOptions } from '../src/server/iters'
@@ -163,6 +163,32 @@ describe('readEvalGames', () => {
     expect(bySeed.get(2)?.dmgPerKill).toBeCloseTo(40)
     expect(bySeed.get(3)?.dmgTaken).toBeNull()
     expect(bySeed.get(3)?.dmgPerKill).toBeNull()
+  })
+
+  it('eval 行不带 startLives 时按课程起命算（三命关 ≠ 单命，2026-11-02 报障）', () => {
+    // 目录名 = 课程名（readEvalGames 的 course 判定），课程 z4-pick-approach 是 lives: 3。
+    const root = mkDir('lives3')
+    const dir = path.join(root, 'z4-pick-approach')
+    mkdirSync(dir)
+    writeFileSync(
+      path.join(dir, 'eval_log.jsonl'),
+      [
+        gameRow({
+          seed: 1,
+          outcome: 'stage_clear',
+          win: 1,
+          playerDamageTaken: 500,
+          playerDeaths: 2,
+          puGotTank: 1,
+          playerHpRatio: 1,
+        }),
+        summaryRow({}),
+      ].join('\n') + '\n',
+    )
+    const v = readEvalGames(dir)!
+    // 剩余命 = 3 + 1 − 2 = 2 ⇒ (2−1)×263 + 1.0×263 = 526 hp（旧算法：
+    // 1 命容量 263 − 500 承伤 → 0，即报障里「eval <5%」的一半根因）
+    expect(v.rows[0]?.residualHp).toBe(526)
   })
 
   it('source 行（EvalBoard B/C 批）与坏行排除；同键重复落账取最后', () => {
