@@ -3069,6 +3069,27 @@ a.tc-btn {
   width: 100%;
   max-width: 100%;
 }
+/* 课程过滤框（2026-11-02）：课程清单 300+ 门，滚动找课不现实。与 select 同宽；
+   `type=search` 自带浏览器原生清除键（不另造一颗按钮，侧栏那栏已经够挤）。 */
+.tc-side__sec .tc-side__filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+.tc-side__sec .tc-side__filter:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.tc-side__sec .tc-side__filter::placeholder {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
 /* 开课键（「训练」）与课程选择器同宽：侧栏那一栏是竖直的，宽度对齐才读成一组
    （读序：选课 → 训练 → 看哪几门在训）。 */
 .tc-side__sec .tc-btn {

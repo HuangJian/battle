@@ -13,6 +13,26 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §46 侧栏课程过滤：系列名即子串、当前课不被滤走（2026-11-02）
+
+**触发**：用户报障「侧栏下拉框从 300 多门课程里找目标课很麻烦」（`discoverCourses` 上限 500，
+curricula + tmp 账本 + 备份库三源合并后 259 门起步），要求至少能按系列名过滤。
+
+**做法**：侧栏「当前课程」上方加一个过滤框（`id=courseFilter`，`type=search` 自带原生清除键），
+纯函数 `view/course-filter.ts::filterCourses` 出候选：
+
+- 过滤词 = 空白分隔、小写；多个词 **AND**（`z4 pick` ≡ `pick z4`）；
+- **系列名不另建表**：系列 = 课名第一段（`z4-pick-approach` → `z4`），本身就是子串 ⇒ 输入 `z4`
+  命中整个系。第二份系列清单会随新课漂移（白名单漂移是本仓踩过的坑）；
+- **过滤 ≠ 切课**：`pinned`（当前查看课）不命中时补在候选首位并标注「（当前 · 不匹配过滤词）」，
+  `hits` 只计真命中。否则 `<select value>` 的 option 被滤掉后浏览器会把显示换成第一项，
+  看起来像课程被切走了；
+- 计数行只在有过滤词时出现：`命中 3 / 259 门` / `无匹配（共 N 门）` / `无匹配 · 仅保留当前课`；
+- 过滤词只存组件本地态（不落 localStorage）：刷新回全量，避免上次的词把新开的课藏起来。
+
+**接线**：`shell/Sidebar.tsx`（DOM 序 过滤框 → 计数行 → `courseSel`）；`view/index.ts` 再导出。
+**回归**：`tests/web-course-filter.test.ts`（纯函数 + SSR 接线，锁「首帧仍是全量」「在训标记不变」）。
+
 ## §45 「残血」口径订正：单命满血归一 + 剩余命按满额（2026-11-02）
 
 **触发**：用户报障 `z4-pick-approach`（课程 `lives: 3`）首页残血列 rollout ≈10%、eval <5%，

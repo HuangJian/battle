@@ -18,8 +18,11 @@
  *  本文件只负责「控制台这一页多出来的东西」——课程、开课、门禁、刷新间隔。
  */
 
+import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import {
+  courseFilterNote,
+  filterCourses,
   GATE_HALT_DURATIONS,
   gateHaltUntilText,
   refreshLabel,
@@ -107,6 +110,11 @@ export function Sidebar({
   refresh,
 }: SidebarProps) {
   const trainingSet = new Set(trainingCourses)
+  // 课程过滤（2026-11-02 用户报障：300+ 门课靠滚动找课）。本地态、不持久化——
+  // 刷新回到全量：上次的过滤词把「刚开的课」藏起来，比多打两个字更难查。
+  const [courseQuery, setCourseQuery] = useState('')
+  const filtered = filterCourses(courses, courseQuery, course)
+  const filterNote = courseFilterNote(filtered)
 
   return (
     <NavSidebar
@@ -122,6 +130,25 @@ export function Sidebar({
           {/* ── 当前课程（主控对象，全页唯一一处） ── */}
           <div className="tc-side__sec">
             <span className="tc-side__slabel">当前课程</span>
+            {/* 过滤框（只筛候选，不切课）：系列名就是课名前缀，`z4` 即整个 z4 系。 */}
+            <input
+              id="courseFilter"
+              className="tc-side__filter"
+              type="search"
+              value={courseQuery}
+              placeholder={
+                courses.length > 0 ? `过滤 ${courses.length} 门课（系列名 / 关键词）` : '过滤课程'
+              }
+              aria-label="过滤课程列表（按课名或系列名；空格分隔多个词，全部命中才显示）"
+              title={
+                '只筛候选，不切课：大小写不敏感；空格分隔的多个词要**同时**命中（`z4 pick` = z4 系里带 pick 的）。\n' +
+                '系列名就是课名第一段（z4 / x20 / h4 / c4），输入它就是整个系列。\n' +
+                '当前查看的课永远留在候选里（不命中时排在首位并标注）——过滤不会把你切到别的课。\n' +
+                '过滤词不持久化：刷新页面回到全量。'
+              }
+              onInput={(e) => setCourseQuery((e.currentTarget as HTMLInputElement).value)}
+            />
+            {filterNote ? <div className="tc-side__note">{filterNote}</div> : null}
             <select
               id="courseSel"
               className="tc-sel"
@@ -131,13 +158,15 @@ export function Sidebar({
               onChange={(e) => onCourseChange((e.currentTarget as HTMLSelectElement).value)}
             >
               <option value="">自动（最近活跃课程）</option>
-              {courses.map((c) => (
+              {filtered.matches.map((c) => (
                 <option key={c} value={c}>
                   {trainingSet.has(c) ? '🔥 ' : ''}
                   {c}
                   {/* 「已开课」而不是「正在训练」：名单的事实源是**开课标记**（课程表），
                       与「进程在不在跑」正交——开了课但 trainer 没起是合法稳态。 */}
                   {trainingSet.has(c) ? '（已开课）' : ''}
+                  {/* 不命中却被保留 = select 的 value 落点，不是「找到了」 */}
+                  {filtered.pinnedKept && c === course ? '（当前 · 不匹配过滤词）' : ''}
                 </option>
               ))}
             </select>
