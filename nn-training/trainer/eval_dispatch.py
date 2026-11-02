@@ -9,7 +9,6 @@ run() 内局部别名 + 闭包保持（行为逐字节不变）；执行面工�
 
 from __future__ import annotations
 
-import json
 import shutil
 import threading
 import time
@@ -18,6 +17,7 @@ from pathlib import Path
 
 import common.distribution
 import common.protocol
+from common.fs import append_jsonl
 from common.log import log
 from remote import weights_standard
 from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
@@ -47,6 +47,7 @@ from worker.eval_track import course_logger, lost_by_node
 from worker.eval_yield import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     eval_close_reason,
+    eval_request_scope,
     eval_slot_cap,
     hold_for_local,
     inflight_grace_cap,
@@ -285,16 +286,16 @@ class EvalDispatcher:
             cleared_total = [0]
             outcomes: dict[str, int] = {}
             node_games: dict[str, int] = {}  # 每节点实际结算的评估局数（summary 用）
-            jsonl_lock = threading.Lock()
             # 2026-09-16：eval 与 rollout 同款 in-flight race——pending 清空后空槽
             # 复制其它节点在跑的尾局，先返回者记账、败者丢弃（不双计）。
             inflight: dict[tuple[int, int], int] = {}
             inflight_nodes: dict[tuple[int, int], set[str]] = {}
             all_done = threading.Event()
             # 收工即断连的作用域（线程 tag）：settled 满即置位 + 关在飞连接——尾部
-            # 竞速副本/慢节点不再等（同 A/B 层）。同进程 rollout 的标签不同，不误伤。
-            req_scope = f"evalscope:{eval_iter_id}"
-            common.distribution.clear_abort()
+            # 竞速副本/慢节点不再等（同 A/B 层）。**必须带课程身份**：同进程兄弟课程
+            # 共享 RUN_ID ⇒ eval iterId 恒同，只用它会把另一门课的在飞请求一起掐死。
+            req_scope = eval_request_scope(eval_iter_id, course_fp)
+            common.distribution.clear_abort(req_scope)
             #: 正在写行的赢家数（record 期间 +1）：收工只等它们落盘。
             writers = [0]
             #: 消费线程数（孵化即 +1，线程退出 -1）。全退 = 再等也不会结算 ⇒ 收工
@@ -386,34 +387,35 @@ class EvalDispatcher:
                 # 累加器要的两个量从行里读回（它们本来就是同一份 manifest 的派生）
                 win = int(row["win"])
                 cleared = int(row["cleared"])
-                with jsonl_lock:
-                    with open(eval_jsonl, "a", encoding="utf-8") as jf:
-                        jf.write(json.dumps(row) + "\n")
-                    # 采样机健康账本同册入账（mode:"eval"）——成功局才记，与 rollout 口径一致。
-                    # meta 是观测面：它**抛错不得让调用方重派**（成功边界 = 上面的 eval 行
-                    # append，评审 P1-3）——否则同 (stage,seed) 会写第二行。
-                    try:
-                        if nd_id != REUSE_NODE:  # 借来的局不是采样机，不进机器健康账
-                            _record_agent_meta(
-                                meta_path,
-                                {
-                                    "node": nd_id,
-                                    "mode": "eval",
-                                    "it": it,
-                                    "stage": task[0],
-                                    "seed": task[1],
-                                    "ok": True,
-                                    "win": win,
-                                    "elapsedSec": manifest.get("elapsedSec"),
-                                    "wallSec": wall_sec,
-                                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                },
-                            )
-                    except Exception as e:
-                        _log(
-                            f"[eval] WARN record meta 写入失败（忽略）"
-                            f": {type(e).__name__}: {str(e)[:160]}"
+                # 每路径单写者（`common.fs.append_jsonl`，返回即落盘）：本轮的锁只管自己
+                # 一轮，而 it55/it60 的尾局会重叠——各轮各自 open 会在 Windows 上互相覆盖
+                # 行首（2026-11-02 z4-polish.it60 缺局）。行 append 成功 = 本局成功边界。
+                append_jsonl(eval_jsonl, row)
+                # 采样机健康账本同册入账（mode:"eval"）——成功局才记，与 rollout 口径一致。
+                # meta 是观测面：它**抛错不得让调用方重派**（成功边界 = 上面的 eval 行
+                # append，评审 P1-3）——否则同 (stage,seed) 会写第二行。
+                try:
+                    if nd_id != REUSE_NODE:  # 借来的局不是采样机，不进机器健康账
+                        _record_agent_meta(
+                            meta_path,
+                            {
+                                "node": nd_id,
+                                "mode": "eval",
+                                "it": it,
+                                "stage": task[0],
+                                "seed": task[1],
+                                "ok": True,
+                                "win": win,
+                                "elapsedSec": manifest.get("elapsedSec"),
+                                "wallSec": wall_sec,
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            },
                         )
+                except Exception as e:
+                    _log(
+                        f"[eval] WARN record meta 写入失败（忽略）"
+                        f": {type(e).__name__}: {str(e)[:160]}"
+                    )
                 with lock:
                     wins[0] += win
                     cleared_total[0] += cleared
@@ -1200,7 +1202,8 @@ class EvalDispatcher:
                 cleared_total=cleared_total,
                 outcomes=outcomes,
                 node_games=node_games,
-                jsonl_lock=jsonl_lock,
+                # summary 与逐局行走同一个单写者（两轮重叠时也不互相覆盖）。
+                append_row=lambda row: append_jsonl(eval_jsonl, row),
                 t_eval_start=t_eval_start,
                 rollout_winrate=rollout_winrate,
                 # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。

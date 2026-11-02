@@ -351,6 +351,10 @@ interface Telemetry {
   stopTicks: number
   /** 累计「本 tick 开火输出为真」（`fireOutThisTick`，与 rollout 的 fireHeld 同 held head）。 */
   fireHeldTicks: number
+  /** 累计「撞墙压制」tick（`isWallPressTick` 单一判据；与 rollout v13 同源）。 */
+  wallPressTicks: number
+  /** 存活且非重生拍（`alive && spawnTimer<=0`）——`wallPress/千` 的分母。 */
+  aliveTicks: number
   /** 累计「最近敌距 ≤ `NEAR_ENEMY_BAND_PX`」的 tick（玩家存活 ∧ 有已激活敌车）。 */
   nearEnemy4Ticks: number
   /** 扣血那一刻 `playerHpRatio < DANGER_HP_THRESHOLD` 的伤害累计。 */
@@ -577,6 +581,9 @@ interface EvalResult {
   onLaneExemptTicks: number
   onLaneMoveTicks: number
   onLaneHoldFireTicks: number
+  /** 机制闸（plan/r5-next §5.3）：撞墙压制拍 / 存活拍（alive && spawnTimer<=0）。 */
+  wallPressTicks: number
+  aliveTicks: number
   /** metrics v10：差距四族（与 rollout metrics 列同名同义）。
    *  `enemyDist` = 终局快照（哨兵 -1）；`damageBursts`/`maxDamage120` 由事件序列算出。 */
   stopTicks: number
@@ -881,6 +888,8 @@ export function runEvalOne(
     onLaneHoldFireTicks: 0,
     stopTicks: 0,
     fireHeldTicks: 0,
+    wallPressTicks: 0,
+    aliveTicks: 0,
     nearEnemy4Ticks: 0,
     damageWhileLow: 0,
     damageTicks: [],
@@ -1445,6 +1454,15 @@ export function runEvalOne(
     }
     // 危险暴露累加（metrics v8/v9）：与 stuck 检出同刻（本 tick 终态）；玩家阵亡期间不计。
     if (world.player?.alive) {
+      // 存活拍（wallPress/千 的分母）：alive && spawnTimer<=0；撞墙判据用 danger-metrics 单一实现。
+      if (world.player.spawnTimer <= 0) {
+        tel.aliveTicks++
+        if (
+          isWallPressTick(world, world.player, { movedPx: movedThisTick, hold: stopOutThisTick })
+        ) {
+          tel.wallPressTicks++
+        }
+      }
       // ---- metrics v10：输入级 2 列（静止列复用上面的 idleTicks）+ 距离 2 列 + 被包围族 7 列 ----
       if (stopOutThisTick) tel.stopTicks++
       if (fireOutThisTick) tel.fireHeldTicks++
@@ -1669,6 +1687,8 @@ export function runEvalOne(
     onLaneMoveTicks: tel.onLaneMoveTicks,
     onLaneHoldFireTicks: tel.onLaneHoldFireTicks,
     stopTicks: tel.stopTicks,
+    wallPressTicks: tel.wallPressTicks,
+    aliveTicks: tel.aliveTicks,
     fireHeldTicks: tel.fireHeldTicks,
     enemyDist: nearestEnemyDistPx(world), // 终局快照（同 metrics 行口径；玩家已死 = 哨兵 -1）
     nearEnemy4Ticks: tel.nearEnemy4Ticks,
@@ -1881,6 +1901,8 @@ export function main(argv: string[]): void {
     onLaneHoldFireTicks: res.onLaneHoldFireTicks,
     // metrics v10：差距四族 15 列（顶层直出，与 rollout metrics 行同源）。
     stopTicks: res.stopTicks,
+    wallPressTicks: res.wallPressTicks,
+    aliveTicks: res.aliveTicks,
     fireHeldTicks: res.fireHeldTicks,
     idleTicks: res.idleTicks,
     enemyDist: res.enemyDist,

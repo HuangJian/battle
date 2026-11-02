@@ -35,7 +35,7 @@ BOARD_ANCHOR = 26
 
 # 必须与 src/nn/obs-encoder.ts::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
 # v5（plan/obs-v5-vector-gap.plan.md）：MAJOR 4→5、40 scalars、37 extra、指纹末段四字段。
-FINGERPRINT = "dabef716"
+FINGERPRINT = "6439fba8"
 
 # 必须与 src/nn/obs-encoder.ts::SCALAR_NAMES 逐字同序（双端共锚）。只钉维度挡不住
 # 「交换两个标量含义」——语义序列进指纹后这类漏同步才现形。
@@ -94,9 +94,9 @@ def test_fingerprint_matches_ts_anchor() -> None:
 
 
 def test_fingerprint_companion_constants() -> None:
-    """配套常量与指纹同版（v5：16ch / 40sc / X=[15,18,29,33] / extra 37）。"""
-    assert OBS_SCHEMA_MAJOR == 6
-    assert OBS_CHANNELS == 16
+    """配套常量与指纹同版（v7：17ch / 46sc / X=[15,18,29,33] / extra 57）。"""
+    assert OBS_SCHEMA_MAJOR == 7
+    assert OBS_CHANNELS == 17
     assert SCALAR_DIM == 46
     assert list(SCALAR_X_INDICES) == [15, 18, 29, 33]
     assert POLICY_EXTRA_DIM == 57

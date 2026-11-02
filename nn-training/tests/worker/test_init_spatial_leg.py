@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.schema import OBS_SCHEMA_MAJOR
+from common.schema import BOARD, OBS_CHANNELS, OBS_SCHEMA_MAJOR
 from worker.data.weights_io import load_state_into, load_weights_json, save_weights_json
 from worker.models.student import PPOStudent
 from worker.ppo.engine import build_ppo
@@ -173,7 +173,7 @@ def test_leg_a_from_v6_source_pads_zero_columns_and_is_bit_identical(tmp_path: P
 
     # 前向对账：extra 全 0 ⇒ 与源模型逐位相同（含 hold / value）。
     g = torch.Generator().manual_seed(91)
-    obs = torch.randint(0, 256, (1, 16, 26, 26), generator=g, dtype=torch.uint8)
+    obs = torch.randint(0, 256, (1, OBS_CHANNELS, BOARD, BOARD), generator=g, dtype=torch.uint8)
     sc = torch.rand((1, 46), generator=g)
     zeros = torch.zeros((1, 57))
     src_m = build_ppo(str(src))

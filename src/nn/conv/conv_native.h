@@ -18,15 +18,16 @@
 #define CF_SP (CF_BOARD * CF_BOARD)
 #define CF_H 64
 #define CF_D 8
-#define CF_IN_CH 18
-#define CF_STEM_W (CF_IN_CH * 576) /* 18×3×3×64 */
+#define CF_IN_CH 19 /* v7: 17 obs + 2 coord（原 18 = 16 obs + 2 coord） */
+#define CF_STEM_W (CF_IN_CH * 576) /* 19×3×3×64 */
 #define CF_DW_W (CF_D * CF_H * 25)
 #define CF_PW_W (CF_D * CF_H * CF_H)
 /** 权重 blob 的 float 总数（顺序见下）；JS 侧按同一顺序拼接。 */
 #define CF_BLOB_FLOATS (CF_STEM_W + CF_H + CF_DW_W + (CF_D * CF_H) + CF_PW_W + (CF_D * CF_H))
 
-/** ABI 版本：内核签名/布局变更时必须 +1（JS 侧不符即拒用 native，回落 wasm）。 */
-#define CF_ABI 1
+/** ABI 版本：内核签名/布局变更时必须 +1（JS 侧不符即拒用 native，回落 wasm）。
+ *  v7（2026-11-01）：stem 输入 18→19 ⇒ 权重 blob / in16 槽位布局变 ⇒ 1→2（旧库必须被拒）。 */
+#define CF_ABI 2
 
 /* pointwise 1×1 的像素平铺宽度（CF_PW_PX；2026-09-22 拍板，见 conv-optimize.plan.md §4.2）。
  *
@@ -65,11 +66,11 @@ extern "C" {
 CF_EXPORT unsigned cf_abi(void);
 
 /**
- * Student features 前向（h=64/d=8/board=26/IN_CH=18）。
+ * Student features 前向（h=64/d=8/board=26/IN_CH=19）。
  *
  * wblob  权重，顺序（f32，连续）：stemW[CF_STEM_W] stemB[CF_H]
  *        dwW[CF_D][CF_H*25] dwB[CF_D][CF_H] pwW[CF_D][CF_H*H] pwB[CF_D][CF_H]
- * in16   输入 18 通道（前 16 = obs，后 2 = coords），长度 CF_IN_CH*CF_SP
+ * in16   输入 19 通道（前 17 = obs，后 2 = coords），长度 CF_IN_CH*CF_SP
  * pooled 输出 [CF_H]；bufA 输出 [CF_H*CF_SP]（GAP 前空间特征，目标热图头唯一消费）
  * 返回 0 成功。
  */

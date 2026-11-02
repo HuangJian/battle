@@ -11,7 +11,10 @@ all npy shards (plan NN-M0 exit rule, nn2 P0-2).
 """
 
 # ---- Observation spatial tensor ----
-OBS_CHANNELS = 16  # plan §1.1 (0..13) + v3: 14 hit_to_kill, 15 spawning
+# v7 (OBS_SCHEMA_MAJOR=7): 16 → 17, ch16 dist_enemy（plan/r5-next.plan.md §3.4 单通道版）。
+# ch17 dist_pickup / s46 best_pickup_value 本波不做（E0b′ 判 ch17 冗余，见
+# reports/r5-p0-measurements-20261101.md §11）。
+OBS_CHANNELS = 17  # plan §1.1 (0..13) + v3: 14 hit_to_kill, 15 spawning + v7: 16 dist_enemy
 BOARD = 26  # GRID — 26x26 sub-block grid
 OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 
@@ -64,7 +67,9 @@ MOVE_LABEL_SEMANTICS = "stop0"
 # v5 (plan/obs-v5-vector-gap.plan.md, 2026-10-12)：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，
 # 且 critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
 # DECISIONS.md §2026-10-12-goalnn-obs-v5-critic-superset（推翻「critic 输入集不动」）。
-OBS_SCHEMA_MAJOR = 6
+# v7 (plan/r5-next.plan.md §3.4, 2026-11-01)：OBS_CHANNELS 16→17（ch16 dist_enemy）⇒
+# 旧语料/旧权重全废，全量重导；旧权重迁移见 worker/scripts/migrate_obs_channel.py。
+OBS_SCHEMA_MAJOR = 7
 
 # ---- Channel index map (plan §1.1 + v3: 14/15) ----
 # 全局规则（hy E1 / dsf A2，实施者必读）：
@@ -89,6 +94,9 @@ CH = {
     "wave_heat": 13,  # projected spawns in next K ticks per spawn point（N 点通用）
     "hit_to_kill": 14,  # min(9, ceil(hp/damage))——随玩家星级重算（live damage，禁缓存）
     "spawning": 15,  # 生成中敌倒计时 0..255
+    # v7：多源 BFS（单位成本）到最近激活敌的路距；钢/水不可通行、砖按 1 步。
+    # 编码 ch = d < 0 ? 255 : min(254, round(255·d/dRef))；无激活敌 ⇒ 全 0（缺席=0）。
+    "dist_enemy": 16,
 }
 
 # ---- PowerUpType declaration order (src/types.ts:20-38, plan §1.1 ch12) ----
@@ -310,6 +318,8 @@ DIRECTION_CHANNELS = {
 #   classic power 重弹 8.0 px/tick 自然落最高档（快弹语义，方向正确）。
 BULLET_SPEED_BUCKETS_PX = [3.7, 3.9, 4.1]
 SPAWN_COUNTDOWN_MS = 1000
+# v7 ch16 dist_enemy 的归一化分母（格；= BOARD）。TS 侧 DIST_ENEMY_DREF 逐字对齐。
+DIST_ENEMY_DREF = 26
 
 
 def _fnv1a(s: str) -> str:
@@ -337,6 +347,7 @@ _FINGERPRINT_PARTS = [
     ",".join(str(b) for b in BULLET_SPEED_BUCKETS_PX),
     str(SPAWN_COUNTDOWN_MS),
     str(600),  # WAVE_HEAT_TICKS（TS const，plan §1.1 ch13）
+    str(DIST_ENEMY_DREF),  # v7 ch16 dRef（TS 侧同名常量；决定观测字节）
     # POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
     # TS 侧同串：`[String(POLICY_EXTRA_DIM), POLICY_EXTRA_NAMES.join(","), SWAPS.map([a,b]=>"a:b").join(",")].join("|")`。
     # v5：末段由三字段扩为四字段（`dim|names|swaps|neg`）——TS 侧同串。

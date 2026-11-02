@@ -162,6 +162,9 @@ from worker.eval_rows import (
     eval_loot_fields as eval_loot_fields,
 )
 from worker.eval_rows import (
+    eval_mechanism_fields as eval_mechanism_fields,
+)
+from worker.eval_rows import (
     eval_metric_fields as eval_metric_fields,
 )
 from worker.eval_rows import (

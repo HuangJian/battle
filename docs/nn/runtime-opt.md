@@ -8,6 +8,115 @@
 
 ---
 
+## §40 兄弟课程 eval 互杀：断连作用域缺课程身份 + 权重 POST 裸 socket 异常炸整轮（2026-11-02）
+
+**现场**（`tmp/trainer-cluster.log`，z4-nav 与 z4-polish 同进程同 codeHash 并跑）：
+
+| 课 | eval 行（it0/5/10/15） | summary |
+|---|---|---|
+| z4-nav | 800 / 800 / 800 / 800 | 00:04:27 · 00:14:22 · 00:24:57 · 00:34:14 全部落盘 |
+| z4-polish | 800 / **0** / 800 / **517** | 只有 it0（00:22:35）、it10（00:38:45） |
+
+两臂每 5 轮一次「同秒互杀」，一次停派十几分钟：
+
+```
+nav it0  settled 00:04:26 → polish 00:04:27 起成片 aborted: settled complete
+nav it5  settled 00:14:22 → polish 00:14:59 整轮 URLError（下面第二条）
+nav it10 settled 00:24:56 → polish 00:24:57 起成片 aborted（00:37:51 本机兜底才接上）
+nav it15 settled 00:34:13 → polish 00:34:14 起成片 aborted（卡在 517/800）
+```
+
+### 根因 A：`req_scope` 只有 iterId，没有课程身份
+
+* `eval_dispatch` 的断连作用域是 `f"evalscope:{eval_iter_id}"`，而 `eval_iter_id =
+  {RUN_ID}.{it}ev`；`RUN_ID` 是**进程级**（`trainer/dispatch_queue.py:17`）。同一 trainer
+  进程承载的兄弟课程同轮 eval ⇒ 作用域字符串逐字节相同。
+* 任一课 settled/收工就 `abort_active_requests(req_scope)`（收工路径与 `_settle_complete`
+  两处）——它按 tag 置全局中止并关同 tag 的在飞响应 ⇒ **另一门课的在飞请求全被掐死**。
+* 后果链：每节点连续 9 次瞬时失败 → 整轮停派；本机兜底要等 `live_workers` 归零，而阻塞在
+  `urlopen` 等响应头的连接不在 `_ACTIVE` 注册表（`common/distribution.py` 自己写了这条
+  局限），abort 关不到，只能等 `taskTimeoutSec≈900s` ⇒ 停派后 13–15 分钟才兜底。
+* 代码在 D14 已承认「多课程同进程共享 RUN_ID ⇒ eval iterId 恒同」（`eval_dispatch.py`
+  的 course_fp 段），当时只给节点 resultCache 加了课程分量，**漏了断连作用域**。
+
+### 根因 B：单节点的裸 socket 异常炸掉整轮权重 POST
+
+* z4-polish it5：00:11:10 派发 W5，00:11:23–28 权重已到 self/a97/gcs；第 4 台 kaggle
+  的 POST 拖到 00:14:59 抛 `URLError: [WinError 10054]`，**一局都没派**。
+* `post_weights_parallel._push` 只捕 `DistError`；`_request` 不包装 `OSError` ⇒ 裸
+  `URLError` 穿过 `fut.result()` 终止整批，「失败节点记日志后排除」的语义被跳过。
+  同型异常 00:41:14 也杀过 z4-nav 的一轮 eval —— 这条路径碰一次中一次。
+
+### 修法（全部带回归用例）
+
+| 改动 | 位置 |
+|---|---|
+| 新的纯函数 `eval_request_scope(eval_iter_id, course_fp)`：作用域 = `evalscope:{course_fp or '-'}:{iter}` | `worker/eval_yield.py` |
+| `clear_abort(tag="")` 支持按作用域清除（空参仍是全清，旧调用方不变）；eval/batch 两个单元开头改传自己的 scope | `common/distribution.py` · `trainer/eval_dispatch.py` · `trainer/batch_runner.py` |
+| `_push` 改捕 `(DistError, OSError)`：单节点剔除，不炸整批 | `common/distribution.py` |
+
+用例：`tests/trainer/test_eval_dispatch_resilience.py::test_eval_request_scope_is_per_course`
+（两门课同 iter_id 跑真实派发器，scope 必须不相交）·
+`tests/worker/test_eval_yield_split.py::test_eval_request_scope_carries_course_identity` ·
+`tests/common/test_dist_common_poll.py::test_clear_abort_is_scope_selective` ·
+`tests/common/test_dist_weights.py::test_post_weights_parallel_excludes_node_on_raw_socket_error`。
+
+**遗留**：z4-polish 的 it5（W5）已是 0 行，修法不回溯；该轮可由收官 drain
+（`_drain_pending_eval` 按归档权重逐轮补，≤600s/轮）或手工 evalA 补评。it15 会在本机
+兜底接上后自行补满。
+
+---
+
+## §41 eval 账本的两个写者：每路径单写者（不靠调用方加锁）（2026-11-02）
+
+**现场**（`tmp/z4-polish/eval_log.jsonl`）：it60 的 summary 报 799 局 / `dropped=1`，
+missing 是 `(2003, 2000000199)`、reason `undispatched`；而派发器同一时刻的收工行是
+「派出=800 认领=800 落盘=800 缺口=0」（01:51:13，内存里的 `landed` 满 800）。
+
+* 账本第 7671 行是一条 **119 字节断头行**（`er"], "killerKinds": … "stopRuns": [7]}\r`）：
+  某行的**行首被覆盖**，只剩尾部；`dist-agent-meta.jsonl:13068` 同病（孤立一个 `}`）。
+* 逐 stage 数 it60：2000/2001/2002 各 200，2003 只有 199（唯一集 799）；meta 的
+  `ok=true` 同样 799（it50/it55/it65 都是 800）。
+* 两轮 eval **本来就会重叠**：`_sweep_eval_tail` 刻意不 join it55 的尾巴
+  （01:44:27–01:56:03），it60 在 01:47:52 就开评（到 01:51:12）——两条腿写同一个账本。
+
+### 根因：锁住在「轮」上，挡不住「轮与轮」
+
+* 每个 `EvalDispatcher.run()` 自建一把 `jsonl_lock`，`record()` / summary 各自
+  `open(..., "a")`。两轮各持自己的锁 ⇒ 对同一文件是**两个写者**。
+* Windows 的追加句柄不是原子 `O_APPEND`（各写各的句柄偏移，CRT 在 write 时才 seek 到
+  EOF）⇒ 后写者覆盖前写者刚写的行首。
+* summary 的读数来自**重扫账本**（`settle_eval_summary`），于是 799 覆盖了内存里的 800，
+  缺口被归成 `carried`（语料全集 − 台账）+ `undispatched` —— 事故当天看不出是写坏了。
+
+### 修法：写入口收敛到「每路径一个写者」
+
+* `common.fs.append_jsonl` 改为队列 + ack：调用方只投递**已编码的整行**，写者线程逐行
+  `open/append/close`；**同一路径任何时刻至多一个追加句柄**，返回即已落盘（成功边界不变）。
+  写失败把 `OSError` 原样回给调用方（`_record_with_retry` 的语义不动）；写者自身不死。
+  空闲 30s 自行退场（不持句柄），下次 append 重建。
+* `trainer/eval_dispatch.py`：`record()` 改 `append_jsonl(eval_jsonl, row)`；summary 通过
+  `settle_eval_summary(append_row=…)` 注入**同一个**写者；本轮的 `jsonl_lock` 删除。
+* `worker/eval_track.py`：`settle_eval_summary` 的 `jsonl_lock` 形参改为注入式
+  `append_row: Callable[[dict], None]`——纯逻辑底座仍不 import `common.fs`（分层守卫）。
+* 同一棵树上的写点一并收口：`remote/offline_eval.py`（云机槽位线程）、
+  `trainer/batch_runner.py`（B/C 行与 A 层共用账本）、`trainer/eval_a_once.py`（手动补
+  summary）。`worker/agent_meta.py` 经 `common.fs.append_jsonl` 自动获得串行化。
+* **范围**：只保证**同进程**（本仓的 eval/rollout 都住在 trainer 进程内）。跨进程同时写
+  同一账本不在本原语保证内——各课程各有自己的 `eval_log.jsonl`。
+
+### 判据
+
+* `tests/common/test_jsonl_writer.py::test_same_path_never_has_two_append_handles`：
+  打桩 `open` 统计同路径追加句柄的并发数（放大持有窗口，不赌 OS 时序）。修前实测
+  **6 个并发句柄**（确定红），修后恒为 1；并校验 30 行全部可解析、每线程行序不乱。
+* `test_write_error_reaches_caller_and_writer_keeps_running`：一次 `PermissionError`
+  之后写者继续服务后续行（`_record_with_retry` 依赖这条）。
+* `tests/trainer/test_eval_dispatch_resilience.py::test_eval_rows_and_summary_go_through_the_single_writer`：
+  真实派发一轮，逐局行 + summary 必须都经过 `common.fs` 的写者（绕过它直接 open 即红）。
+
+---
+
 ## §39 节点 503 busy 的归因：多腿 × 多课共用一个准入池（2026-11-01 排查）
 
 ### 事实链（代码）

@@ -36,14 +36,14 @@ const {
   runStudentConvNative,
   setNativeConvEnabled,
 } = await import('../src/nn/conv/conv_native_adapter.ts')
-const { buildNative, nativeArtifactNames, nativeStaleReason } =
+const { buildNative, nativeArtifactNames, nativeStaleReason, NATIVE_ABI } =
   await import('../tools/agent/native-build.ts')
 
 const BOARD = 26
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
-const IN_CH = 18
+const IN_CH = 19
 const DW_OC = H * 25
 const PW_OC = H * H
 
@@ -279,7 +279,7 @@ describe('attestation 守卫（B2/B4）', () => {
       src,
       '#include <string.h>\n' +
         '#if defined(_WIN32)\n#define EXPORT __declspec(dllexport)\n#else\n#define EXPORT\n#endif\n' +
-        'EXPORT unsigned cf_abi(void) { return 1u; }\n' +
+        'EXPORT unsigned cf_abi(void) { return 2u; }\n' +
         'EXPORT int cf_student_features(const float* w, const float* i, float* pooled, float* bufA) {\n' +
         '  (void)w; (void)i;\n' +
         '  memset(pooled, 0, 64 * sizeof(float));\n' +
@@ -323,7 +323,7 @@ describe('attestation 守卫（B2/B4）', () => {
     fs.writeFileSync(
       path.join(dir, 'native-build.json'),
       JSON.stringify({
-        abi: 1,
+        abi: NATIVE_ABI,
         cc: 'clang',
         ccVersion: 'probe',
         target: `${process.platform}-${process.arch}`,
@@ -355,16 +355,42 @@ describe('attestation 守卫（B2/B4）', () => {
  * 记忆化 / 复用 buffer，这里会红并给出该做什么（换缓存键或显式重建视图），而不是让 rollout
  * 静默继续用旧权重、attestation 也拦不住（它只在首用跑一次）。
  */
+/** 旧 golden 的 stem 是 18ch（16 obs + 2 coord）；v7 内核要 19ch（17 obs + 2 coord）。
+ *  这里只在测试内把 stem 加宽成同一布局（旧 16 列 | 0 | coord 后移），其余参数原样。 */
+function widenStemToV7(entry: { shape: number[]; data: string }): {
+  shape: number[]
+  data: string
+} {
+  const [h, c, k1, k2] = entry.shape
+  const raw = Buffer.from(entry.data, 'base64')
+  const old = new Float32Array(h * c * k1 * k2)
+  for (let i = 0; i < old.length; i++) old[i] = raw.readFloatLE(i * 4)
+  const nc = c + 1
+  const out = new Float32Array(h * nc * k1 * k2)
+  const oldPlane = c * k1 * k2
+  const newPlane = nc * k1 * k2
+  for (let o = 0; o < h; o++) {
+    // 旧 0..15（obs）原位；新第 16 列（v7 的 ch16）置 0；旧 16..17（coord）后移一列。
+    for (let i = 0; i < (c - 2) * k1 * k2; i++) out[o * newPlane + i] = old[o * oldPlane + i]
+    for (let i = (c - 2) * k1 * k2; i < (c - 1) * k1 * k2; i++) out[o * newPlane + i] = 0
+    for (let i = (c - 1) * k1 * k2; i < oldPlane; i++)
+      out[o * newPlane + (i + k1 * k2)] = old[o * oldPlane + i]
+  }
+  const enc = Buffer.alloc(out.length * 4)
+  for (let i = 0; i < out.length; i++) enc.writeFloatLE(out[i], i * 4)
+  return { shape: [h, nc, k1, k2], data: enc.toString('base64') }
+}
+
 describe('权重 blob 缓存键的前提：buildModelFromText 每次返回新实例', () => {
+  const golden = JSON.parse(
+    fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'student-golden-wasm.json'), 'utf8'),
+  ) as { params: Record<string, { shape: number[]; data: string }> }
   const TEXT = JSON.stringify({
     arch: { kind: 'student', h: 64, d: 8 },
-    params: (
-      JSON.parse(
-        fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'student-golden-wasm.json'), 'utf8'),
-      ) as {
-        params: Record<string, unknown>
-      }
-    ).params,
+    params: {
+      ...golden.params,
+      'stem.weight': widenStemToV7(golden.params['stem.weight']),
+    },
   })
 
   it('两次构建：引用不同、内容相同、features 逐字节相同', () => {

@@ -600,6 +600,37 @@ def _fast_fetch(h):
     return fetch
 
 
+def test_eval_request_scope_is_per_course(tmp_path, monkeypatch) -> None:
+    """同进程兄弟课程、同 iter_id 的 eval 轮，断连作用域必须不同。
+
+    2026-11-02 z4-nav/z4-polish 现场：两门课共享 `RUN_ID` ⇒ `{RUN_ID}.{it}ev`
+    逐字节相同；z4-nav settled 的 `abort_active_requests(req_scope)` 把 z4-polish
+    的在飞请求成片掐成 `aborted: settled complete`（it0/it10/it15 各一次，每次
+    停派十几分钟）。这里直接钉住「一轮内只用同一 scope、两门课之间 scope 不相交」。
+    """
+    seen_by_course: dict[str, set[str]] = {}
+    current: list[set[str]] = [set()]
+
+    def spy_abort(tag: str = "") -> int:
+        current[0].add(tag)
+        return 0
+
+    monkeypatch.setattr(common.distribution, "abort_active_requests", spy_abort)
+    for name in ("z4-nav", "z4-polish"):
+        work = tmp_path / name
+        work.mkdir()
+        h = _Harness(work, monkeypatch, games=1)
+        h.args.course_obj = types.SimpleNamespace(name=name, stage_json=lambda _s: None)
+        h.args.course_frozen_bytes = f"course:{name}".encode()
+        current[0] = set()
+        h.run(_fast_fetch(h))
+        seen_by_course[name] = current[0]
+    nav, polish = seen_by_course["z4-nav"], seen_by_course["z4-polish"]
+    assert nav and polish, seen_by_course
+    assert nav.isdisjoint(polish), f"两门课共用了断连作用域：{nav & polish}"
+    assert len(nav) == 1 and len(polish) == 1, seen_by_course
+
+
 def test_gate_pings_nodes_in_parallel(tmp_path, monkeypatch) -> None:
     """B2：门必须并行探测——3 台各 0.3s，串行 = 0.9s（实测两台超时即 ~7s）。
 
@@ -1510,3 +1541,27 @@ def test_sibling_eval_rows_land_without_dispatch(tmp_path, monkeypatch) -> None:
     assert borrowed[0]["dims"] == {"kills": 4}, "读数逐字段来自源行，不重算"
     assert calls["n"] == 1, f"命中局被派给节点重算了（取活 {calls['n']} 次）"
     assert any(r["seed"] == seeds[1] and r["node"] != sr.REUSE_NODE for r in games)
+
+
+def test_eval_rows_and_summary_go_through_the_single_writer(tmp_path, monkeypatch) -> None:
+    """A 层逐局行与 summary 必须走 `common.fs` 的每路径单写者（2026-11-02 it60 缺局）。
+
+    旧实现每轮自己 `open(..., "a")`：两轮重叠时 Windows 上会互相覆盖行首。本用例把
+    `ed.append_jsonl` 换成探针——绕过它直接 open 的代码路径收不到行即红。单写者本身
+    「同路径至多一个句柄」的契约在 `tests/common/test_jsonl_writer.py` 钉住。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=3)
+    seen: list[dict] = []
+    real_append = ed.append_jsonl
+
+    def spy(path, row):
+        seen.append(row)
+        real_append(path, row)
+
+    monkeypatch.setattr(ed, "append_jsonl", spy)
+    h.run(lambda *a, **kw: (h.manifest(kw["stage"], kw["seed"]), {}))
+
+    played = [r for r in seen if r.get("event") == "eval"]
+    assert len(played) == 3, f"逐局行绕过了单写者：{seen}"
+    summaries = [r for r in seen if r.get("event") == "eval_summary"]
+    assert len(summaries) == 1, "summary 必须与逐局行走同一个写者"

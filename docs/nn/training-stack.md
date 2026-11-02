@@ -7,6 +7,125 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+
+## §57 观测 v7：单通道 ch16 `distEnemy`（`OBS_CHANNELS 16→17`，2026-11-01）
+
+**一句话**：按 plan/r5-next.plan.md §3.4 的**单通道版**落地——只加 `ch16 distEnemy`
+（多源 BFS 单位成本路距）；`ch17 distPickup` / `s46 bestPickupValue` **本波不做**。
+`OBS_CHANNELS 16→17`、`OBS_SCHEMA_MAJOR 6→7`、`SCHEMA_FINGERPRINT dabef716 → 6439fba8`
+⇒ 旧语料/旧权重全废，全量重导。
+
+### 57.1 为什么只加一条
+
+E0b′（`reports/r5-p0-measurements-20261101.md` §11，只读探针 `tmp/_probe/e0bp.ts`）：
+
+| 通道 | BFS vs 标量（当前格+四邻） | ≥2 格分歧（砖=1/3） | 四邻梯度分歧 | 判决 |
+|---|---|---|---|---|
+| ch16 distEnemy vs s14/s15/s16 | gap p50=0 p90=2 | 35.1% / 40.3% | 45.6% / 41.8% | **过** |
+| ch17 distPickup vs s32/s33/s34 | 小 | 1.8% / 5.0% | 1.4% / 4.2% | 冗余，不做 |
+
+单变量纪律：本波只动一个输入，it150 的读数才可归因。语义护栏：**最近敌 ≠ 距基地最近敌
+29.0%**（2002 关 36.2%）⇒ ch16 是**导航/交战**通道，不是回防通道；别按「保护基地」解读。
+
+### 57.2 编码与可通行性（冻结，勿改）
+
+```
+ch = d < 0 ? 255 : min(254, round(255·d/dRef))    dRef = 26
+源 = 中心格；alive && allegiance==='enemy' && spawnTimer<=0
+可通行 = 钢/水以外（砖按 1 步）；无激活敌 ⇒ ch16 全 0
+```
+
+- **为什么要 ×255 取整**：grid 是 `Uint8Array`，stem 建网时统一 ×1/255 ⇒ 0..1 会被量化成 0/1。
+- **为什么 255 只给不可达**：可达值截到 254，0/255 语义唯一；**缺席（无敌）单独用全 0**，
+  与「无基地 ⇒ ch5 全 0」同纪律 ⇒ 0 = 没有目标，255 = 有目标但没有路。
+- **砖=3 被否**：两档冗余读数相同（E0b′），3 只让读数更慢饱和；主口径与探针一致。
+- **开销**：`world.tanks` 扫描 + 676 格 BFS，`_bfsDist/_bfsQueue` 复用缓冲（AGENTS §14.1，
+  零 per-tick 分配；每格至多入队一次）。镜像无关（距离场在 mirrorX 下不变）。
+
+### 57.3 权重迁移：stem 三段式（**不是**前缀拷贝）
+
+```
+旧：[obs 0..15 | coord 16..17]      新：[obs 0..15 | 新 obs 16 | coord 17..18]
+new[:, :16]      = old[:, :16]
+new[:, 16:17]    = 0               ← drop0（不是 randn*0.01）
+new[:, 17:19]    = old[:, 16:18]   ← 漏这行 = CoordConv 坏掉
+```
+
+- 新脚本 `nn-training/worker/scripts/migrate_obs_channel.py`（K 个新通道通用）；
+  落盘前构造同架构、旧 `in_ch` 的源模型，在**旧 schema 输入（新通道全 0）**上比四头
+  logits，`torch.equal` 不过就拒绝落盘（实测本机逐位相等）。
+- `init_spatial_leg.py` 的五张表**没有一张涉及 `stem.weight`** ⇒ 通道迁移另写一套；
+  fc/动作头/value 头本波不动（`SCALAR_DIM 46` / `POLICY_EXTRA 57` / 动作空间均未变）；
+  除 stem 外任何张量换形一律响亮拒绝（只支持纯通道迁移）。
+- `arch_meta.read_arch_kwargs` 新增 `allow_legacy_schema=`（只给迁移脚本读旧档 arch；
+  生产 `build_ppo` 的严格 schema 门不变）。
+- **TS 运行时**：`StudentModel.inCh` 改成**从 `stem.weight` 形状反推**（与 `scalarDim`
+  同一纪律）——旧 fixture/归档权重（16 通道）与新权重（17）同代码可读；硬取
+  `OBS_CHANNELS=17` 会让旧档的 coord 从第 17/18 个输入位读 ⇒ 从 stem 起静默错位。
+- `build_demo_bank.py` 的 obs 形状断言从字面量 16 改为 `OBS_CHANNELS`（v7 起旧 demo 语料
+  `obsSchemaMajor=6` 会被拒，符合「旧目录须重导」）。
+- **TS 卷积后端同步（v7 必做）**：`conv_native.h::CF_IN_CH 18→19`、`CF_ABI / NATIVE_ABI 1→2`、
+  两个 JS 适配器的 `IN_CH=19`；`bun tools/agent/native-build.ts --cross` 重编 6 平台 + wasm32
+  （`--check-prebuilt` 绿）。**端到端对账发现的静默错**：wasm 适配器只查 d/bufA、不查 in16
+  长度 ⇒ 19ch 的 set 把多出的通道写进 pooled 区、coord 错位 ⇒ logits 从 ~1 爆到 ~5000。
+  修后 guard it500 vs 迁移 v7 在同一 `(stage,seed)` 的 eval 逐字段相同；v7 3000 拍 **0.82s**
+  （只加长度守卫的回退档是 16.6s ⇒ 19.5×，会顶穿 800 局 × 7 点的评估窗口）。
+  旧 18ch 权重现在回退 TS（正确但慢；历史对照读数复用，不重跑）。
+
+### 57.4 消融与接线闸
+
+- `--ablate-ch 16` 已存在于 `export-eval-game.ts`（W1 波落地，按 `OBS_CHANNELS` 校验；
+  v7 后 16 不再算越界）。只清指定通道的**独立缓冲**，`encoder.obs` 不动 ⇒ 采样轨迹不变。
+- 接线闸改在 **it150**（`drop0` 起点下新通道权重为 0，40 轮的翻转率是构造性 0）：
+  新通道翻转率 ≥ 同批权重对地形通道消融的 1/3；并同报 `stem.weight` 新列的 L2 范数。
+- 本地 smoke（scratch 17ch 权重，stage0/seed1/600 ticks，`--ablate-ch 16`）：60 decisions，
+  `ch16` 组 `flipsMove=1 / dMove=0.210 / dFire=0.109` ⇒ 16 不再被判越界、且该通道真的进图
+  （随机权重下就有非零读数；`drop0` 起点应当读 0，那是预期）。
+
+### 57.5 门禁与三端对账（2026-11-01 本机）
+
+- `bun run check` **2666 pass / 8 skip / 0 fail**（2674 用例）；`bun run build` 绿；
+  `freeze:check` 签名不变 `0ff1ba66…`（21 组合 / 113,586 行）。
+- Python：`tests/worker/test_migrate_obs_channel.py`（5 例，含 `torch.equal` 逐位）·
+  `test_schema_fingerprint.py` · `test_init_spatial_leg.py` · `test_student_model.py` ·
+  `tests/tools/test_build_demo_bank.py` 全绿。
+- **torch↔TS**：临时 v7 golden（h=16/d=2，17 通道）三头 max|Δ| ≤ **4.8e-7**。
+- **Paddle 三步对账（补跑，绿）**：本机 venv 在 `nn-training/tmp/paddle-venv`（不是仓库根
+  `tmp/paddle-venv`）；`fixture/check/verify` **8+1 用例全 PASS**（check worst fwd 1.92e-6 /
+  stats 3.80e-5 / weights 5.80e-4（`[5-coord-outlier]` 标记）/ after 7.67e-4；verify worst
+  2.29e-5）。v7 加宽 stem 后出现两类 **f32 噪声**越界（不是公式分叉）：`legacy_plain` 5 个
+  v≈0 坐标被 Adam 放大到 ±lr、value 头（|out|≈0.7）末位 2.29e-5；判据窄缝（≤8 坐标离群 /
+  atol+rtol·scale）与 A/B 证据见 `DECISIONS.md` §2026-11-01-goalnn-paddle-parity-v7-noise。
+- **运维**：`src/nn/*` 与 `tools/sim/export-*` 在 codehash 集内 ⇒ 这是一次代码波；
+  任何新训练/eval 前确认无在跑课程并重启/换快照节点。
+
+## §56 机制闸两列进 eval 行：`wallPressTicks` / `aliveTicks`（2026-11-01）
+
+**一句话**：eval 逐局行新增 `wallPressTicks` / `aliveTicks` ⇒ `wallPress/千 =
+wallPressTicks / aliveTicks × 1000` 在判决点可直接读。此前 eval 行只有 `onLaneTicks`
+近似 —— 2026-11-01 p2002 / E-BT 结课实测：E1/E2 的机制闸读不出，只能拿近似值顶。
+
+- **口径**：`wallPressTicks` 走 `src/nn/danger-metrics.ts::isWallPressTick`（与 rollout v13
+  同一实现，禁另写判定）；`aliveTicks` = `player.alive && spawnTimer<=0`（plan §5.3 的「存活拍」）。
+- **落点**（三处行构造点 + 一列 TS 类型 + 探针行）：
+  - `tools/sim/export-eval-game.ts`：主循环累计 + `Telemetry`/`EvalResult` + CLI 行；
+  - `tools/sim/eval-course-ckpt-worker.ts`：`EvalCourseRow`（分布式/云机行）；
+  - `worker/eval_rows.py`：`eval_mechanism_fields`（`eval_row` 与 `trainer/batch_runner.record`
+    的 `eval_metric_fields` 共用，避免两处漏改）；
+  - `trainer/eval_course_once.py::_to_tool_row`：探针 JSONL（eval-course-ckpt 产物）。
+- **缺键约定**：与 v8–v13 同 —— 旧 agent / 旧报告没有这两列 ⇒ **整键省略**（读数方按 unknown，
+  不伪造 0）。
+- **不改行为**：纯计数器、不接任何公式；`freeze:check` 签名不变
+  （`0ff1ba66…`，21 组合 / 113,586 行）。
+- **本地 smoke（4 局，guard it500）**：`wallPress/千` = 2000 **103.1** / 2001 **257.2** /
+  2002 **541.5** / 2003 **519.1** —— 与 P0 的 `wall 3,569 / 存活 ≈11,040`（≈323/千）同量级。
+- **门禁**：`bun run check` 2667 用例绿（含根项目全部测试）；Python
+  `tests/worker/test_eval_row_mechanism.py`（3 用例）+ v8/v9/v10/split 回归 27 用例绿。
+- **遗留**：`thCost*` 四轴仍只落 rollout shard（v13 列），未进 eval 行；E2-A 不需要它，
+  若再开 E-BT 类腿要先补（且 `keep_iters: 1` 会把 shard 清掉）。
+- **运维**：`export-eval-game.ts` 在 codehash 集内 ⇒ 本改动是一次代码波；节点需重启/换快照，
+  新评估或训练开跑前确认无在跑课程（本次改动时 `activeCourse` 是陈旧的 c6-chip，无进程）。
+
 ## §55 reward.formula 行数组：多行公式落地 + 242 门课重排（2026-11-01）
 
 **一句话**：`reward.formula` 支持「一项一行」的字符串数组，加载层拼成括号表达式；242 门历史课程

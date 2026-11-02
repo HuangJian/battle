@@ -12,12 +12,12 @@
  * 不再有六区分别上传 + 11 参调用，bufB/bufC 由内核自己的静态区承担。
  * 两侧输出逐位一致由 tests/native-parity.test.ts 钉死（native↔wasm 逐字节）。
  *
- * 契约：仅适用于 h=64 / d=8 / board=26 / IN_CH=18 的 per-tick/intent/goal student 特征
+ * 契约：仅适用于 h=64 / d=8 / board=26 / IN_CH=19 的 per-tick/intent/goal student 特征
  * （共享 StudentModel.features 骨架）。不匹配 / 缺 wasm / ABI 不符 → 返回 false 走 TS 原路径。
  *
  * 内存布局（单例；线性内存自 base 起，base = max(1MB, 模块初始内存) —— 内核的静态
  * scratch/bufB 落在模块自己的 BSS 里，避开它才不会互相踩）：
- *     [wblob CF_BLOB_FLOATS][in16 18×676][pooled 64][bufA 64×676]
+ *     [wblob CF_BLOB_FLOATS][in16 19×676][pooled 64][bufA 64×676]
  * 每 forward 拷 in16（48KB）+ 读回 pooled（256B）+ bufA（169KB）。bufA 回拷实测
  * +2.9 µs/次 ≈ features 的 0.04%——无条件拷贝，以杜绝“某个头悄悄读到陈旧空间特征”
  * 这类静默 bug（2026-09-10 的 goalForward 常量热图即此因）。
@@ -47,8 +47,8 @@ interface WasmRunner {
 }
 
 const BOARD = 26
-// v3（obs-schema-v3.plan.md v4.0）：stem 输入通道 = 16 obs + 2 coord（hy E4 链）
-const IN_CH = 18
+// v7（2026-11-01）：stem 输入通道 = 17 obs + 2 coord（v3 起 16 + 2；v7 观测 ch16 新增）
+const IN_CH = 19
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
@@ -57,7 +57,8 @@ const DW_W = D * H * 25
 const PW_W = D * H * H
 /** 权重 blob 的 float 数（== conv_native.h::CF_BLOB_FLOATS）。 */
 const BLOB_FLOATS = STEM_W + H + DW_W + D * H + PW_W + D * H
-const ABI = 1
+// 与 `native-prebuilt.ts::NATIVE_ABI` / `conv_native.h::CF_ABI` 同值；v7（18→19 通道）1→2。
+const ABI = 2
 
 let _runner: WasmRunner | null | undefined = undefined // undefined=未探测
 
@@ -73,8 +74,7 @@ function loadRunner(): WasmRunner | null {
     }
     const abi = inst.exports['cf_abi'] as (() => number) | undefined
     const feats = inst.exports['cf_student_features'] as
-      | ((wblob: number, in16: number, pooled: number, bufA: number) => number)
-      | undefined
+      ((wblob: number, in16: number, pooled: number, bufA: number) => number) | undefined
     if (!feats) {
       console.error('[conv-wasm] 模块缺 cf_student_features 导出 → 回退 TS')
       return null
@@ -195,6 +195,11 @@ export function runStudentConvWasm(model: unknown): boolean {
   // bufA 尺寸是 h=64/board=26 的充分标识（StudentModel: bufA = Float32Array(h*sp)），
   // 与本文件的固定通道布局一一对应；不符即退 TS 原路径（正确性优先于速度）。
   if (!m.bufA || m.bufA.length !== H * SP) return false
+  // ★ v7（2026-11-01）：本内核的权重 blob / in16 槽位按 `IN_CH`（现 19 = 17 obs + 2 coord）
+  // 写死。**缺这条精确长度守卫时**，19ch 的 set 会把多出的通道写进 pooled 区并让 coord
+  // 错位 ⇒ 静默算错（实测 logits 从 ~1 爆到 ~5000）。守卫保留：旧 18ch 权重、未来再变宽都
+  // 回退 TS 原路径（正确性优先于速度）。
+  if (m.in16.length !== IN_CH * SP) return false
   const r = studentConvWasm()
   if (!r) return false
   try {

@@ -14,6 +14,7 @@ import gzip
 import json
 import threading
 import time
+from urllib.error import URLError
 
 import pytest
 
@@ -178,6 +179,35 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
     assert "weights[rollout] -> a97 (purged," in joined
     # 阶段总计（分发起点）：ready on N/M + 总墙钟 + sha 前 12 位
     assert "ready on 2/3 nodes" in joined and "sha wwwwwwwwwwww" in joined
+
+
+def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) -> None:
+    """单节点的裸 socket 异常（URLError / 10054）只剔除该节点，不得炸掉整批。
+
+    2026-11-02 z4-polish it5 现场：kaggle 的权重 POST 抛 WinError 10054，而
+    `_push` 只捕 `DistError` ⇒ 异常穿过 `fut.result()` 直接终止整轮 800 局 eval
+    （0 局派出、无 summary）。「失败节点记日志后排除」对 OSError 同样成立。
+    """
+    nodes = [
+        {"id": "self", "url": "http://self", "key": "k1"},
+        {"id": "kaggle", "url": "http://kaggle", "key": "k2"},
+        {"id": "a97", "url": "http://a97", "key": "k3"},
+    ]
+    logs: list[str] = []
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        if "kaggle" in url:
+            raise URLError(ConnectionResetError(10054, "forcibly closed by the remote host"))
+        return "purged"
+
+    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    alive = common.distribution.post_weights_parallel(
+        nodes, "run.19", "w" * 64, b"{}", timeout=5.0, kind="eval", log=logs.append
+    )
+    assert [n["id"] for n in alive] == ["self", "a97"]
+    # 「就绪 2/3」由上面的 alive 行为面覆盖；文本只钉操作员归因：为什么剔的是 kaggle。
+    joined = "\n".join(logs)
+    assert "weights POST to kaggle failed" in joined and "excluded" in joined
 
 
 def test_post_weights_parallel_empty(monkeypatch) -> None:

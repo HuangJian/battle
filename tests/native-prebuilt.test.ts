@@ -50,7 +50,7 @@ const BOARD = 26
 const SP = BOARD * BOARD
 const H = 64
 const D = 8
-const IN_CH = 18
+const IN_CH = 19
 
 /* ───────────────────────────── 小工具 ───────────────────────────── */
 
@@ -383,11 +383,11 @@ describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字�
       [
         'import ctypes, hashlib, sys',
         'so, fin, fout = sys.argv[1], sys.argv[2], sys.argv[3]',
-        'N16, NH, NSP, NCH = 18 * 676, 64, 676, 18',
+        'N16, NH, NSP, NCH = 19 * 676, 64, 676, 19',
         'lib = ctypes.CDLL(so)',
         'lib.cf_abi.restype = ctypes.c_uint32',
         'abi = lib.cf_abi()',
-        'assert abi == 1, f"abi={abi}"',
+        'assert abi == 2, f"abi={abi}"',
         'data = open(fin, "rb").read()',
         'n_in = N16 * 4',
         'in16 = (ctypes.c_float * N16).from_buffer_copy(data[:n_in])',

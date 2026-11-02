@@ -4,8 +4,8 @@
 Reads nn-training/data/human-x20-corpus/shard_*/{obs,scalars,extra,actions,masks}.npy,
 concatenates, writes demo_bank.npz (compressed) + prints sha256.
 
-Output keys: obs (N,16,26,26) u1, scalars (N,40) f4, extra (N,37) f4,
-actions (N,2) i8 [move,fire], masks (N,7) u1 [move5, fire2].
+Output keys: obs (N,OBS_CHANNELS,BOARD,BOARD) u1 (v7: 17), scalars (N,SCALAR_DIM) f4,
+extra (N,POLICY_EXTRA_DIM) f4, actions (N,2) i8 [move,fire], masks (N,7) u1 [move5, fire2].
 Same encodings as rollout chunks (ObsEncoder v5：POLICY_EXTRA 随样本走)。
 维度一律从 `common.schema` 读（本脚本已因硬编码 9 漂过一次）。
 """
@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.cli import house_parser, run_main
-from common.schema import OBS_SCHEMA_MAJOR, POLICY_EXTRA_DIM, SCALAR_DIM
+from common.schema import BOARD, OBS_CHANNELS, OBS_SCHEMA_MAJOR, POLICY_EXTRA_DIM, SCALAR_DIM
 
 NN_ROOT = Path(__file__).resolve().parent.parent  # nn-training/ (script lives in tools/)
 
@@ -45,7 +45,11 @@ def main() -> None:
         a = np.load(d / "actions.npy")
         m = np.load(d / "masks.npy")
         assert o.shape[0] == s.shape[0] == a.shape[0] == m.shape[0] == ex.shape[0], d
-        assert tuple(o.shape[1:]) == (16, 26, 26), (d, o.shape)
+        assert tuple(o.shape[1:]) == (OBS_CHANNELS, BOARD, BOARD), (
+            d,
+            o.shape,
+            f"期望 (N,{OBS_CHANNELS},{BOARD},{BOARD})——旧 schema 语料须重导",
+        )
         assert s.ndim == 2 and s.shape[1] == SCALAR_DIM, (
             d,
             s.shape,

@@ -212,6 +212,9 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         "win": bool_of("win"),
         "cleared": bool_of("cleared"),
         "ticks": row.get("ticks") or 0,
+        # 机制闸（plan/r5-next §5.3）：wallPress/千 的分子/分母；旧 B 层行缺键 = None。
+        "wallPressTicks": row.get("wallPressTicks"),
+        "aliveTicks": row.get("aliveTicks"),
         "kills": row.get("kills") or 0,
         "enemyHits": row.get("enemyHits") or 0,
         "playerHits": row.get("playerHits") or 0,

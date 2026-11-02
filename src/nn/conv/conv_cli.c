@@ -7,7 +7,7 @@
  *
  * 二进制协议（小端）:
  *   magic u32 = 0x434F4E56 ('CONV')
- *   in16  f32[IN_CH*SP]  IN_CH=18 SP=676
+ *   in16  f32[IN_CH*SP]  IN_CH=19 SP=676
  *   wblob f32[CF_BLOB_FLOATS]（顺序见 conv_native.h：stemW/stemB/dwW/dwB/pwW/pwB）
  * 输出 stdout:
  *   pooled f32[64]

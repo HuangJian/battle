@@ -74,7 +74,7 @@ export interface NativeTarget {
 }
 
 /** ABI 版本：内核签名/权重布局变更时必须 +1（不符即拒用 native，回落 wasm）。 */
-export const NATIVE_ABI = 1
+export const NATIVE_ABI = 2
 
 /** prebuilt 根目录（相对仓根，posix）。 */
 export const PREBUILT_DIR = 'src/nn/conv/prebuilt'

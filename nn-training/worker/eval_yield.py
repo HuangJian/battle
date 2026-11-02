@@ -71,6 +71,17 @@ def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
     return m if is_eval_round(m) else None
 
 
+def eval_request_scope(eval_iter_id: str, course_fp: str = "") -> str:
+    """单轮 eval 的断连作用域（`abort_active_requests` 的键），**必须带课程身份**。
+
+    多课程同进程共享 `RUN_ID` ⇒ eval iterId 恒同（`{RUN_ID}.{it}ev`）；只用 iterId 时
+    兄弟课程同轮的作用域逐字节相同——一门课 settled 的断连会把另一门课的在飞请求全部
+    判成 `aborted: settled complete`（2026-11-02 z4-nav/z4-polish 每 5 轮互杀一次）。
+    `course_fp` 是 D14 文件血缘（每次启动冻结）；无课程的旧路径用 `-`。
+    """
+    return f"evalscope:{course_fp or '-'}:{eval_iter_id}"
+
+
 def eval_join_soft_sec(policy_cfg: dict | None) -> float:
     """PPO 收官后站等上限（秒）：应急旋钮 policy.evalJoinSoftSec，**缺省 0 = 不站等**。
 

@@ -43,6 +43,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
 from common.cli import house_parser, run_main
+from common.fs import append_jsonl
 from remote import weights_standard
 
 # 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；
@@ -138,8 +139,8 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
         "course_fp": "",
         "reused_wver": True,
     }
-    with open(eval_jsonl, "a", encoding="utf-8") as jf:
-        jf.write(json.dumps(summary) + "\n")
+    # 与 in-loop 评估共用每路径单写者：手动补 summary 可能撞上仍在跑的评估轮。
+    append_jsonl(eval_jsonl, summary)
     return n
 
 

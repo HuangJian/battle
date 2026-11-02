@@ -26,7 +26,7 @@ import {
 } from '../../src/nn/policy-extra'
 
 // 必须与 nn-training/common/schema.py::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-const FINGERPRINT = 'dabef716'
+const FINGERPRINT = '6439fba8'
 
 // 必须与 nn-training/common/schema.py::SCALAR_LAYOUT 的第二元逐字同序（双端共锚）。
 // 只钉维度挡不住「交换两个标量含义」——语义序列进指纹后这种漏同步才现形。
@@ -145,9 +145,9 @@ describe('SCHEMA_FINGERPRINT (obs v5 双端锚)', () => {
     expect(SCHEMA_FINGERPRINT).toBe(FINGERPRINT)
   })
 
-  it('配套常量与指纹同版（v6：16ch / 46sc / X=[15,18,29,33] / extra 57）', () => {
-    expect(OBS_SCHEMA_MAJOR).toBe(6)
-    expect(OBS_CHANNELS).toBe(16)
+  it('配套常量与指纹同版（v7：17ch / 46sc / X=[15,18,29,33] / extra 57）', () => {
+    expect(OBS_SCHEMA_MAJOR).toBe(7)
+    expect(OBS_CHANNELS).toBe(17)
     expect(SCALAR_DIM).toBe(46)
     expect(SCALAR_X_INDICES).toEqual([15, 18, 29, 33])
     expect(POLICY_EXTRA_DIM).toBe(57)

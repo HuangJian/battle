@@ -15,15 +15,16 @@
 
 **为什么单独成家**：这些是**读账本算趋势**的纯逻辑（不跑进程、不开子进程），与「跑一局」的执行面
 分离后，`worker/gate_inputs` / `trainer/eval_a_once` / `remote/offline_eval` 等读者依赖的是「口径
-怎么算」，而不是「评估器怎么起」。只依赖 stdlib（`json` / `threading` / `time` / `pathlib`）+ `common.log`。
+怎么算」，而不是「评估器怎么起」。只依赖 stdlib（`json` / `time` / `pathlib` / `collections.abc`）
++ `common.log`。
 
 `biz/eval_local.py` 保留 `X as X` 门面，历史 import 一行不改（「名字是契约，位置不是」）。
 """
 from __future__ import annotations
 
 import json
-import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -190,7 +191,7 @@ def settle_eval_summary(
     cleared_total: list[int],
     outcomes: dict[str, int],
     node_games: dict[str, int],
-    jsonl_lock: threading.Lock,
+    append_row: Callable[[dict], None],
     t_eval_start: float,
     rollout_winrate: float | None,
     course_fp: str | None = None,
@@ -239,6 +240,10 @@ def settle_eval_summary(
     云机调用点（`remote/offline_eval.py`，位置参数调用）**零改动**：它的
     `never_dispatched=0`、`lost` = 失败局数、`carried` = 全集口径残留 —— 云机侧没有
     「本机待办队列」这个概念，不传是**有意**的，不是遗漏。
+
+    `append_row` 由调用方注入（`common.fs.append_jsonl` 的每路径单写者）：本模块是纯逻辑
+    底座，不能 import `common.fs`（分层守卫）。两轮评估可以重叠，summary 必须与逐局行走
+    **同一个写者**——否则 summary 仍可能与别轮的行互相覆盖（2026-11-02 z4-polish.it60）。
     """
     dropped = total - len(landed)
     #: 账本里已有的 (stage, seed)（与 n 同口径的行）——`missing` 的判据（G6）。
@@ -378,8 +383,7 @@ def settle_eval_summary(
         # D14 课程血缘：门按 course_fp 过滤趋势行（改课程 = 新实验，不与旧课混读）。
         "course_fp": course_fp or "",
     }
-    with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as jf:
-        jf.write(json.dumps(summary) + "\n")
+    append_row(summary)
     if n:
         winrate_part = (
             f"clean winRate={clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"

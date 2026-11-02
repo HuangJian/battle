@@ -16,8 +16,9 @@
 
 1. **best-effort，绝不抛**：账本只服务于人的诊断，写不进去（磁盘满 / 权限 / 目录被
    并发删）**不得**影响采样与结算 ⇒ 吞 `OSError`。调用方在结算路径上，那里容不下异常。
-2. **追加，绝不读改写**：账本可能被别的进程（多课程 supervisor）同时追加。读侧
-   （`trainer/eval_course_once.py` 的重跑清理、巡检聚合）负责跳过坏行。
+2. **追加，绝不读改写**：写入口（`common.fs.append_jsonl`）按路径串行化——重叠的评估轮
+   并发调用也不会互相覆盖行首（2026-11-02 z4-polish.it60）。账本仍可能被**别的进程**读取，
+   读侧（`trainer/eval_course_once.py` 的重跑清理、巡检聚合）负责跳过坏行。
 3. **一次 IO 一局一条**：写点在结算处，单局一次 `open`+`write`，成本可忽略——不要
    为了「省 IO」把它改成批量缓冲，那会让崩溃时丢掉最后几局（正是最想看的那几局）。
 """
@@ -40,7 +41,7 @@ def record_agent_meta(meta_path: str | Path, rec: dict) -> None:
     `rec` 的键由调用方决定，现行字段：
     `{node, mode, it, stage, seed, ok, [win, elapsedSec, wallSec | reason], ts}`。
     `elapsedSec` = 节点侧服务时长；`wallSec` = 训练机派发→结算墙钟（含网络）。
-    放锁内调用可保证顺序（调用方负责），本模块自身不加锁——它是纯追加。
+    本模块自身不加锁——串行化由 `common.fs` 的每路径写者负责，调用方无需再持锁。
     """
     try:
         append_jsonl(meta_path, rec)
