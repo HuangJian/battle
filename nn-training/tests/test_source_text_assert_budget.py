@@ -328,6 +328,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.helpers import scan_cache
 from tests.helpers import text_asserts as TA
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -383,13 +384,19 @@ BASELINE_FORM = 1474
 #: 2026-11-01 回 **1100**（+6，全在 `tests/test_lock_reentrancy.py`：新用例的 3 条 + 仓库扫描
 #:   用例那 3 条。这是口径 B 已经写在模块头的已知限边 ——「B 不区分读的是生产源码还是 `.py`
 #:   路径字符串」，而该文件的合成样本本来就用 `"*.py"` 作字典键 ⇒ 计数增、判据性质未变）。
-BASELINE_SRC = 1100
+#: 2026-11-02 抬到 **1114**（+14，全在新增 `tests/test_scan_cache.py`：那边用 `"a.py"` 作
+#:   缓存键、逐条断行为，于是整个文件的 assert 都被 B 当成「读 .py 面」计进 —— 与上一格同一
+#:   条已知限边。口径 A 仍 0 条（不涉及文本成员比较），是真「行为断言」。
+BASELINE_SRC = 1114
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 
 
 def test_text_assert_counts_only_go_down() -> None:
-    form, src, per_file = TA.totals(ROOT)
+    # 内容哈希缓存（`tests/helpers/scan_cache.py`）：只省「重算一遍同一份源码」的时间，
+    # 判据与口径不变；命中率坏了也只影响快慢，不影响结论。
+    cache = scan_cache.Cache("text-asserts", version=TA.CACHE_VERSION, root=ROOT)
+    form, src, per_file = TA.totals(ROOT, cache=cache)
     assert form > SANITY_FLOOR[0] and src > SANITY_FLOOR[1], (
         f"计数异常偏小（形态 {form} / 源码面 {src}）—— 扫描面或口径坏了，护栏会恒绿"
     )

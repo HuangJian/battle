@@ -66,7 +66,7 @@ import ast
 import re
 from pathlib import Path
 
-from tests.helpers import source_scan
+from tests.helpers import scan_cache, source_scan
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = Path(__file__).resolve().parent
@@ -184,27 +184,46 @@ def _problems(py: Path, src: str | None = None, tree: ast.Module | None = None) 
     return out
 
 
-def _file_problems(py: Path) -> tuple[list[str], list[str], list[str]]:
+#: 逐文件判据的**磁盘**缓存版本（`tests/helpers/scan_cache.py`，2026-11-02）：三条规则的判据、
+#: 理由族、消息形状变了就 +1 —— 旧条目整库作废。
+_CACHE_VERSION = 1
+
+
+def _file_problems(
+    py: Path, cache: scan_cache.Cache | None = None
+) -> tuple[list[str], list[str], list[str]]:
     """一个文件的三类问题：`(sleep 标注, 上界墙钟标注, 时间戳对比标注)`。
 
     **一次 `ast.parse` 供三条规则**（2026-10-29 门禁提速）：三条规则看的是同一批文件、
     同一份 AST，拆成三条用例时实测在门禁里各付一次全仓解析（共 12.6s CPU，其中 2/3 是
     重付的）。预筛仍然是三条各自的超集预筛（并集不命中才跳过解析）。
+
+    给了 `cache` 就按**内容哈希**命中（`tests/helpers/scan_cache.py`）：同一份源码只算一次，
+    跨次门禁直接复用（判据与消息一字未变，只省时间）。
     """
     src = source_scan.read_text(str(py))
+    if cache is not None:
+        hit: tuple[list[str], list[str], list[str]] | None = cache.get(str(py), src)
+        if hit is not None:
+            return hit
     need_sleep = bool(_DOT_SLEEP_RE.search(src))
     need_timing = "assert" in src and bool(
         _TIME_CALL_RE.search(src) or _DURATION_WORD_RE.search(src)
     )
     need_order = "assert" in src and bool(_TIME_CALL_RE.search(src))
+    out: tuple[list[str], list[str], list[str]]
     if not (need_sleep or need_timing or need_order):
-        return [], [], []
-    tree = ast.parse(src)
-    return (
-        _problems(py, src, tree),
-        _timing_problems(py, src, tree),
-        _order_problems(py, src, tree),
-    )
+        out = ([], [], [])
+    else:
+        tree = ast.parse(src)
+        out = (
+            _problems(py, src, tree),
+            _timing_problems(py, src, tree),
+            _order_problems(py, src, tree),
+        )
+    if cache is not None:
+        cache.put(str(py), src, out)
+    return out
 
 
 def test_tests_declare_their_timing_and_sync_reasons() -> None:
@@ -215,17 +234,19 @@ def test_tests_declare_their_timing_and_sync_reasons() -> None:
     ③ 每一处「比较两个事件时间戳」要有落进两族的 `# order-ok: <理由>`。
     三条均为独立断言（消息各自指向对应规则与文档），红了一眼能看出是哪一条。
     """
+    cache = scan_cache.Cache("sleep-guard", version=_CACHE_VERSION, root=ROOT)
     sleep_problems: list[str] = []
     timing_problems: list[str] = []
     order_problems: list[str] = []
-    for root in SCAN_ROOTS:
-        for py in sorted(root.rglob("*.py")):
+    for root_dir in SCAN_ROOTS:
+        for py in sorted(root_dir.rglob("*.py")):
             if "__pycache__" in py.parts:
                 continue
-            got_sleep, got_timing, got_order = _file_problems(py)
+            got_sleep, got_timing, got_order = _file_problems(py, cache)
             sleep_problems += got_sleep
             timing_problems += got_timing
             order_problems += got_order
+    cache.save(full_scan=True)  # 扫的是完整扫描面 ⇒ 顺手清掉旧内容的条目
     assert not sleep_problems, (
         "tests/ 里的 sleep 必须标注理由，且理由要落进「轮询步长」/「夹具模拟」两族"
         "（说明它等的是谓词或模拟的工作量，而不是「等对方先跑」）：\n  "

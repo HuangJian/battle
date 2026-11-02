@@ -84,6 +84,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from common.cli import house_parser, run_main
+from tests.helpers import scan_cache
 
 #: 扫描面（相对 `--root`）：门禁 `pytest tests/ e2e/` 的同一批文件。
 SCAN_DIRS: tuple[str, ...] = ("tests", "e2e")
@@ -574,7 +575,13 @@ def _counts(tree: ast.Module, *, has_py_face: bool) -> tuple[int, int]:
     return form, py_src
 
 
-def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
+#: `totals()` 派生结果的缓存版本：`_counts`（口径）或返回形状改了就 +1（旧条目整库作废）。
+CACHE_VERSION = 1
+
+
+def totals(
+    root: Path, *, cache: scan_cache.Cache | None = None
+) -> tuple[int, int, dict[str, tuple[int, int]]]:
     """`(A 总数, B 总数, {文件: (A, B)})` —— **一次读盘 / 一次解析**出两个口径。
 
     护栏测试用（`tests/test_source_text_assert_budget.py`）：两个口径各扫一遍会把读盘 + 解析
@@ -584,14 +591,23 @@ def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
     for p in scan_paths(root):
         rel = str(p.relative_to(root)).replace("\\", "/")
         text = p.read_text(encoding="utf-8")
-        has_py_face = any(tok in text for tok in _PY_FACE_TOKENS)
-        # 廉价预筛：口径 A 需要 `Assert` 节点（源码里必有 `assert` 关键字），口径 B 需要生产
-        # 源码面字面量 —— 两个都没有的文件解析出来必然是 (0, 0)（2026-10-26，431 → 418 个）。
-        if not has_py_face and "assert" not in text:
-            continue
-        form, py_src = _counts(ast.parse(text, filename=rel), has_py_face=has_py_face)
+        # 内容哈希命中 ⇒ 这份文件上次就是这么算的（口径版本一致才命中，见 `scan_cache`）。
+        hit = cache.get(rel, text) if cache is not None else None
+        if hit is None:
+            has_py_face = any(tok in text for tok in _PY_FACE_TOKENS)
+            # 廉价预筛：口径 A 需要 `Assert` 节点（源码里必有 `assert` 关键字），口径 B 需要生产
+            # 源码面字面量 —— 两个都没有的文件解析出来必然是 (0, 0)（2026-10-26，431 → 418 个）。
+            if not has_py_face and "assert" not in text:
+                hit = (0, 0)
+            else:
+                hit = _counts(ast.parse(text, filename=rel), has_py_face=has_py_face)
+            if cache is not None:
+                cache.put(rel, text, hit)
+        form, py_src = hit
         if form or py_src:
             per_file[rel] = (form, py_src)
+    if cache is not None:
+        cache.save(full_scan=True)  # 扫的是完整扫描面 ⇒ 顺手清掉旧内容的条目
     return (
         sum(f for f, _ in per_file.values()),
         sum(s for _, s in per_file.values()),

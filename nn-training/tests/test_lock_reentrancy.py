@@ -63,7 +63,7 @@ from typing import Final
 
 import pytest
 
-from tests.helpers import source_scan
+from tests.helpers import scan_cache, source_scan
 
 ROOT = Path(__file__).resolve().parent.parent  # nn-training
 REPO = ROOT.parent
@@ -553,6 +553,10 @@ def _reachable_acquirers(
 #: 全仓扫描结果缓存（两个全仓用例共用一次解析；源文件在测试进程里不会变）。
 _REPO_CACHE: dict[str, _Report] = {}
 
+#: 逐文件索引的**磁盘**缓存版本（`tests/helpers/scan_cache.py`）：只要 `_Indexer`/`_Module`
+#: 的语义（登记哪类节点、锁点形状、组合图）变了就 +1 —— 旧条目整库作废。
+_INDEX_VERSION: Final = 1
+
 
 def _repo_report() -> _Report:
     """全仓扫描（源文件白名单见 `SCAN_ROOTS`）——只跑一次，两个用例共用。"""
@@ -575,21 +579,43 @@ def _repo_report() -> _Report:
         gc_was_enabled = gc.isenabled()
         gc.disable()
         try:
-            _REPO_CACHE["report"] = _check(sources)
+            cache = scan_cache.Cache("lock-index", version=_INDEX_VERSION, root=ROOT)
+            _REPO_CACHE["report"] = _check(sources, mods=_index(sources, cache))
         finally:
             if gc_was_enabled:
                 gc.enable()
     return _REPO_CACHE["report"]
 
 
-def _check(sources: dict[str, str]) -> _Report:
-    """对「路径 → 源码」跑一遍判据（真仓库与合成反探针共用同一条路径）。"""
-    rep = _Report()
+def _index(
+    sources: dict[str, str], cache: scan_cache.Cache | None = None
+) -> dict[str, _Module]:
+    """「路径 → 源码」→ 逐文件索引。
+
+    给了 `cache` 就按**内容哈希**命中（`tests/helpers/scan_cache.py`）：命中只意味着
+    「这份内容上次算过、结果一样」，解析与判据一字未变 —— 它只省时间，不改结论。
+    """
     mods: dict[str, _Module] = {}
     for path_str, text in sources.items():
+        hit = cache.get(path_str, text) if cache is not None else None
+        if hit is not None:
+            mods[path_str] = hit
+            continue
         mod = _Module(path_str)
         _Indexer(mod, text.splitlines()).visit(ast.parse(text, filename=path_str))
         mods[path_str] = mod
+        if cache is not None:
+            cache.put(path_str, text, mod)
+    if cache is not None:
+        cache.save(full_scan=True)  # 扫的是完整扫描面 ⇒ 顺手清掉旧内容的条目
+    return mods
+
+
+def _check(sources: dict[str, str], mods: dict[str, _Module] | None = None) -> _Report:
+    """对「路径 → 源码」跑一遍判据（真仓库与合成反探针共用同一条路径）。"""
+    rep = _Report()
+    if mods is None:
+        mods = _index(sources)
     audit = _Audit(mods=mods, groups=_compose_groups(mods), cls_mods={})
     for m in mods.values():
         for c in m.classes:
