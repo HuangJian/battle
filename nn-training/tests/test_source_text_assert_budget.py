@@ -368,8 +368,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   「流式采集收官读数并进轮末那一行」（`test_remote_iter` 的
 #:   `test_volume_line_merges_into_the_rollout_line`）——「打了几行、打在哪一行」就是判据本身）。
 #: 2026-11-01 降到 **1473**（−55：B 类架构接线判据改 AST/对象判据，不删用例；理由见模块头末段）。
+#: 2026-11-02 抬到 **1474**（+1，`tests/common/test_dist_weights.py` 的节点剔除原因行：kaggle 的
+#:   权重 POST 失败 ⇒ 排除该节点——操作员在轮次异常时唯一的归因读数，行为面 `alive` 只断言剔了谁；
+#:   同批另 3 条已改成全等/行为判据，不计）。
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1473
+BASELINE_FORM = 1474
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

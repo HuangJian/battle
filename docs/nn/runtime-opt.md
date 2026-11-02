@@ -67,6 +67,56 @@ nav it15 settled 00:34:13 → polish 00:34:14 起成片 aborted（卡在 517/800
 
 ---
 
+## §41 eval 账本的两个写者：每路径单写者（不靠调用方加锁）（2026-11-02）
+
+**现场**（`tmp/z4-polish/eval_log.jsonl`）：it60 的 summary 报 799 局 / `dropped=1`，
+missing 是 `(2003, 2000000199)`、reason `undispatched`；而派发器同一时刻的收工行是
+「派出=800 认领=800 落盘=800 缺口=0」（01:51:13，内存里的 `landed` 满 800）。
+
+* 账本第 7671 行是一条 **119 字节断头行**（`er"], "killerKinds": … "stopRuns": [7]}\r`）：
+  某行的**行首被覆盖**，只剩尾部；`dist-agent-meta.jsonl:13068` 同病（孤立一个 `}`）。
+* 逐 stage 数 it60：2000/2001/2002 各 200，2003 只有 199（唯一集 799）；meta 的
+  `ok=true` 同样 799（it50/it55/it65 都是 800）。
+* 两轮 eval **本来就会重叠**：`_sweep_eval_tail` 刻意不 join it55 的尾巴
+  （01:44:27–01:56:03），it60 在 01:47:52 就开评（到 01:51:12）——两条腿写同一个账本。
+
+### 根因：锁住在「轮」上，挡不住「轮与轮」
+
+* 每个 `EvalDispatcher.run()` 自建一把 `jsonl_lock`，`record()` / summary 各自
+  `open(..., "a")`。两轮各持自己的锁 ⇒ 对同一文件是**两个写者**。
+* Windows 的追加句柄不是原子 `O_APPEND`（各写各的句柄偏移，CRT 在 write 时才 seek 到
+  EOF）⇒ 后写者覆盖前写者刚写的行首。
+* summary 的读数来自**重扫账本**（`settle_eval_summary`），于是 799 覆盖了内存里的 800，
+  缺口被归成 `carried`（语料全集 − 台账）+ `undispatched` —— 事故当天看不出是写坏了。
+
+### 修法：写入口收敛到「每路径一个写者」
+
+* `common.fs.append_jsonl` 改为队列 + ack：调用方只投递**已编码的整行**，写者线程逐行
+  `open/append/close`；**同一路径任何时刻至多一个追加句柄**，返回即已落盘（成功边界不变）。
+  写失败把 `OSError` 原样回给调用方（`_record_with_retry` 的语义不动）；写者自身不死。
+  空闲 30s 自行退场（不持句柄），下次 append 重建。
+* `trainer/eval_dispatch.py`：`record()` 改 `append_jsonl(eval_jsonl, row)`；summary 通过
+  `settle_eval_summary(append_row=…)` 注入**同一个**写者；本轮的 `jsonl_lock` 删除。
+* `worker/eval_track.py`：`settle_eval_summary` 的 `jsonl_lock` 形参改为注入式
+  `append_row: Callable[[dict], None]`——纯逻辑底座仍不 import `common.fs`（分层守卫）。
+* 同一棵树上的写点一并收口：`remote/offline_eval.py`（云机槽位线程）、
+  `trainer/batch_runner.py`（B/C 行与 A 层共用账本）、`trainer/eval_a_once.py`（手动补
+  summary）。`worker/agent_meta.py` 经 `common.fs.append_jsonl` 自动获得串行化。
+* **范围**：只保证**同进程**（本仓的 eval/rollout 都住在 trainer 进程内）。跨进程同时写
+  同一账本不在本原语保证内——各课程各有自己的 `eval_log.jsonl`。
+
+### 判据
+
+* `tests/common/test_jsonl_writer.py::test_same_path_never_has_two_append_handles`：
+  打桩 `open` 统计同路径追加句柄的并发数（放大持有窗口，不赌 OS 时序）。修前实测
+  **6 个并发句柄**（确定红），修后恒为 1；并校验 30 行全部可解析、每线程行序不乱。
+* `test_write_error_reaches_caller_and_writer_keeps_running`：一次 `PermissionError`
+  之后写者继续服务后续行（`_record_with_retry` 依赖这条）。
+* `tests/trainer/test_eval_dispatch_resilience.py::test_eval_rows_and_summary_go_through_the_single_writer`：
+  真实派发一轮，逐局行 + summary 必须都经过 `common.fs` 的写者（绕过它直接 open 即红）。
+
+---
+
 ## §39 节点 503 busy 的归因：多腿 × 多课共用一个准入池（2026-11-01 排查）
 
 ### 事实链（代码）

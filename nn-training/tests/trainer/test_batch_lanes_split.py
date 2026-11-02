@@ -55,7 +55,7 @@ MACHINE_METHODS = (
 #: 只能被外部（`run()` / `_run_channels`）调的两个：它们不以 `self.<名>` 出现。
 ENTRY_METHODS = ("__init__", "run")
 
-#: 状态块（原 `_run_channels` 开头那段）的 23 个容器（**闭集**）。
+#: 状态块（原 `_run_channels` 开头那段）的 22 个容器（**闭集**）。
 STATE_ATTRS = (
     "all_done",
     "attempts",
@@ -64,7 +64,6 @@ STATE_ATTRS = (
     "in_flight",
     "inflight",
     "inflight_nodes",
-    "jsonl_lock",
     "lanes",
     "lock",
     "node_games",

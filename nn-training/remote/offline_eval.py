@@ -25,7 +25,6 @@ W(it) 行与本地/节点评的同一 W(it) 行在账本里**可以配对**（�
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import threading
@@ -38,6 +37,7 @@ from typing import Any
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
+from common.fs import append_jsonl
 from common.log import log as _rl_log
 from common.log_bundle import LogBundle
 from common.platform_utils import call_bounded, cpu_worker_slots, rmtree_best_effort
@@ -481,7 +481,6 @@ def run_cloud_eval(
                 pool.close()
                 pool = None
         lock = threading.Lock()
-        jsonl_lock = threading.Lock()
         seen: set[tuple[int, int]] = set()
         wins = [0]
         cleared_total = [0]
@@ -601,8 +600,9 @@ def run_cloud_eval(
                     # 与 in-loop 腿同字段（`trainer/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
                     wall_sec=round(wall, 3),
                 )
-                with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                # 每路径单写者（`common.fs.append_jsonl`）：本腿的槽位线程会并发落账，
+                # 写者把它们排成一条队（返回即落盘）。
+                append_jsonl(eval_jsonl, row)
                 with lock:
                     seen.add((int(stage), int(seed)))
                     game_walls.append((round(wall, 3), lab))
@@ -719,7 +719,7 @@ def run_cloud_eval(
             cleared_total,
             outcomes,
             node_games,
-            jsonl_lock,
+            lambda row: append_jsonl(eval_jsonl, row),
             t0,
             rollout_winrate,
             course_fp=course_fp or "",

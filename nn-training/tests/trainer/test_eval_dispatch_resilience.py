@@ -1541,3 +1541,27 @@ def test_sibling_eval_rows_land_without_dispatch(tmp_path, monkeypatch) -> None:
     assert borrowed[0]["dims"] == {"kills": 4}, "读数逐字段来自源行，不重算"
     assert calls["n"] == 1, f"命中局被派给节点重算了（取活 {calls['n']} 次）"
     assert any(r["seed"] == seeds[1] and r["node"] != sr.REUSE_NODE for r in games)
+
+
+def test_eval_rows_and_summary_go_through_the_single_writer(tmp_path, monkeypatch) -> None:
+    """A 层逐局行与 summary 必须走 `common.fs` 的每路径单写者（2026-11-02 it60 缺局）。
+
+    旧实现每轮自己 `open(..., "a")`：两轮重叠时 Windows 上会互相覆盖行首。本用例把
+    `ed.append_jsonl` 换成探针——绕过它直接 open 的代码路径收不到行即红。单写者本身
+    「同路径至多一个句柄」的契约在 `tests/common/test_jsonl_writer.py` 钉住。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=3)
+    seen: list[dict] = []
+    real_append = ed.append_jsonl
+
+    def spy(path, row):
+        seen.append(row)
+        real_append(path, row)
+
+    monkeypatch.setattr(ed, "append_jsonl", spy)
+    h.run(lambda *a, **kw: (h.manifest(kw["stage"], kw["seed"]), {}))
+
+    played = [r for r in seen if r.get("event") == "eval"]
+    assert len(played) == 3, f"逐局行绕过了单写者：{seen}"
+    summaries = [r for r in seen if r.get("event") == "eval_summary"]
+    assert len(summaries) == 1, "summary 必须与逐局行走同一个写者"

@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.fs import append_jsonl
 from worker.eval_local import (
     EVAL_SEEDS,
     a_eval_seed_list,
@@ -131,7 +132,7 @@ def test_settle_summary_drops_dual_track_fields(tmp_path: Path) -> None:
         cleared_total=[2],
         outcomes={},
         node_games={},
-        jsonl_lock=threading.Lock(),
+        append_row=lambda row: append_jsonl(elog, row),
         t_eval_start=0.0,
         rollout_winrate=None,
         course_fp="fpA",
@@ -177,7 +178,7 @@ def test_settle_summary_ignores_bc_evalboard_rows(tmp_path: Path) -> None:
         cleared_total=[2],
         outcomes={},
         node_games={},
-        jsonl_lock=threading.Lock(),
+        append_row=lambda row: append_jsonl(elog, row),
         t_eval_start=0.0,
         rollout_winrate=None,
     )
@@ -250,7 +251,7 @@ def _settle_summary(
         cleared_total=[0],
         outcomes={},
         node_games={},
-        jsonl_lock=threading.Lock(),
+        append_row=lambda row: append_jsonl(elog, row),
         t_eval_start=0.0,
         rollout_winrate=None,
         left_pending=left_pending,

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import common.distribution
+from common.fs import append_jsonl
 from common.log import log
 from remote import weights_standard
 from trainer.batch_plan import (
@@ -618,7 +619,6 @@ class _UnitLanes:
         #: 逐节点瞬断/硬失败计数：单元结束时入账，避免「熔断静默降本地」。
         self.node_soft_fails: dict[str, int] = {}
         self.node_hard_fails: dict[str, int] = {}
-        self.jsonl_lock = threading.Lock()
 
         # ---- 通道机器（req 1/3/5）：就绪即派单；就绪不再 ping/传权重；失联重探 ----
 
@@ -907,23 +907,23 @@ class _UnitLanes:
         # 调用方（eval_m1_once）会看到这一列；A/B/C 层的行不留任何新键。
         if self.owner.include_scorable:
             row["scorable"] = manifest.get("scorable")
-        with self.jsonl_lock:
-            with open(self.owner.eval_log, "a", encoding="utf-8") as jf:
-                jf.write(json.dumps(row) + "\n")
-            _record_agent_meta(
-                self.owner.eval_log.parent / "dist-agent-meta.jsonl",
-                {
-                    "node": nd_id,
-                    "mode": "eval",
-                    "it": self.owner.batch.get("iter", 0),
-                    "stage": task[0],
-                    "seed": task[1],
-                    "ok": True,
-                    "win": win,
-                    "elapsedSec": manifest.get("elapsedSec"),
-                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                },
-            )
+        # 每路径单写者（与 A 层同一条 `eval_log.jsonl` / `dist-agent-meta.jsonl`）：
+        # B/C 行与重叠的 A 层评估轮也不会互相覆盖行首。
+        append_jsonl(self.owner.eval_log, row)
+        _record_agent_meta(
+            self.owner.eval_log.parent / "dist-agent-meta.jsonl",
+            {
+                "node": nd_id,
+                "mode": "eval",
+                "it": self.owner.batch.get("iter", 0),
+                "stage": task[0],
+                "seed": task[1],
+                "ok": True,
+                "win": win,
+                "elapsedSec": manifest.get("elapsedSec"),
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
         with self.lock:
             self.settled[0] += 1
             self.writers[0] = max(0, self.writers[0] - 1)

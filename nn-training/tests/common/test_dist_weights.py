@@ -205,9 +205,9 @@ def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) ->
         nodes, "run.19", "w" * 64, b"{}", timeout=5.0, kind="eval", log=logs.append
     )
     assert [n["id"] for n in alive] == ["self", "a97"]
+    # 「就绪 2/3」由上面的 alive 行为面覆盖；文本只钉操作员归因：为什么剔的是 kaggle。
     joined = "\n".join(logs)
     assert "weights POST to kaggle failed" in joined and "excluded" in joined
-    assert "ready on 2/3 nodes" in joined
 
 
 def test_post_weights_parallel_empty(monkeypatch) -> None:

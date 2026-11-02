@@ -282,11 +282,13 @@ def test_eval_request_scope_carries_course_identity() -> None:
     nav = y.eval_request_scope("abc123.5ev", "fp-nav")
     polish = y.eval_request_scope("abc123.5ev", "fp-polish")
     assert nav != polish, "兄弟课程同轮共用了断连作用域"
-    assert "abc123.5ev" in nav and "fp-nav" in nav
+    assert nav == "evalscope:fp-nav:abc123.5ev"
+    assert polish == "evalscope:fp-polish:abc123.5ev"
     assert y.eval_request_scope("abc123.5ev", "fp-nav") == nav  # 纯函数、可重入
     # 无课程（手工 evalA 等老路径）也要有稳定、可用的作用域（且不与有课程的撞车）
     no_course = y.eval_request_scope("abc123.5ev", "")
-    assert "abc123.5ev" in no_course and no_course not in (nav, polish)
+    assert no_course == "evalscope:-:abc123.5ev"
+    assert no_course not in (nav, polish)
 
 
 def test_eval_slot_cap_semantics() -> None:
