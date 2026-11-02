@@ -58,6 +58,21 @@ AST 解析，在 16 个 worker 上就是同一笔 CPU 被重复付 N 次。
 行为退回「每 worker 自算」。**注意**：本模块自己不许在顶层 import 被预热的包（否则判据恒真，
 `remote_dag` 就是为此改成 thunk 内 import 的）。
 
+## 2026-11-02：判据不再**只靠** `sys.modules`（加源码面）
+
+`sys.modules` 有个隐含前提：「用例会用到 torch」⇒「收集相已经 import 了 torch」。§104 量过，
+这个前提只在现在这种「测试模块顶层 import torch」的写法下成立：一旦有人把重导入改懒（或只是
+把 `import torch` 挑进函数），预热会在**没任何报错**下静默停掉，而后果是每个 worker 各付一次
+`import torch` + 首算子（实测 1.3–1.8s）—— 正是 §100 之前那个格局。
+
+所以现在是**两个信号取或**：
+
+* **源码面**（主）：收集到的测试模块源码里提到 `import torch` / `from torch`（或 `remote_dag`）；
+* `sys.modules`（兜）：有人经助手/间接路径把它导进来了。
+
+源码面用 `source_scan.read_text`（已缓存）逐文件子串判断、命中即停，通常头几个文件就 return；
+读不到就跳过（判据绝不能把预热弄成红）。
+
 ## 安全
 
 * 每一项都必须是**幂等、纯读**的缓存预热（不写盘、不建线程、不碰生产状态）。
@@ -70,7 +85,9 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+
+from tests.helpers import source_scan
 
 
 def _remote_dag_graph() -> object:
@@ -104,12 +121,12 @@ def _torch_first_op() -> object:
         opt.step()
     return True
 
-#: 预热清单：`(名字, 无参 thunk, 判据模块)`，顺序即执行顺序。
+#: 预热清单：`(名字, 无参 thunk, 判据模块, 源码标记)`，顺序即执行顺序。
 #: 加一项之前先在模块头的表里写清「冷启动 / 谁在付 / 换算下来划不划算」，
-#: 并给出「本次会话里谁用得到它」的判据模块（理由见模块头第三列那节）。
-WARMUPS: tuple[tuple[str, Callable[[], object], str], ...] = (
-    ("remote_dag.graph", _remote_dag_graph, "tests.helpers.remote_dag"),
-    ("torch 首次算子", _torch_first_op, "torch"),
+#: 并给出「本次会话里谁用得到它」的两道判据（理由见模块头那两节）。
+WARMUPS: tuple[tuple[str, Callable[[], object], str, tuple[str, ...]], ...] = (
+    ("remote_dag.graph", _remote_dag_graph, "tests.helpers.remote_dag", ("remote_dag",)),
+    ("torch 首次算子", _torch_first_op, "torch", ("import torch", "from torch")),
 )
 
 
@@ -118,13 +135,39 @@ def _session_uses(module: str) -> bool:
     return any(name == module or name.startswith(module + ".") for name in sys.modules)
 
 
-def warm_all() -> None:
-    """跑一遍清单，逐项打一行读数（§16.3：长任务每步可观测）。"""
+def _sources_mention(items: Iterable[object], markers: tuple[str, ...]) -> bool:
+    """收集到的测试模块**源码**里提没提这些字面量（命中即停；读不到就当没提）。
+
+    为什么不靠「已经 import 了」：那只在「测试模块顶层 import」的写法下成立（见模块头）。
+    """
+    for item in items:
+        path = getattr(item, "path", None)
+        if path is None:
+            continue
+        try:
+            text = source_scan.read_text(str(path))
+        except OSError:
+            continue
+        if any(marker in text for marker in markers):
+            return True
+    return False
+
+
+def _needed(needed_by: str, markers: tuple[str, ...], items: Iterable[object]) -> bool:
+    """两项取或的判据：源码面提到（主）或已经 import 进来（兜）。"""
+    return _sources_mention(items, markers) or _session_uses(needed_by)
+
+
+def warm_all(items: Iterable[object] = ()) -> None:
+    """跑一遍清单，逐项打一行读数（§16.3：长任务每步可观测）。
+
+    `items` = `session.items`：判据要看它们的源码（见 `_needed`）；不传就只看 `sys.modules`。
+    """
     total = 0.0
     done = 0
-    for name, fn, needed_by in WARMUPS:
-        if not _session_uses(needed_by):
-            print(f"[warmup] {name} 跳过（本次会话没人 import {needed_by}）", flush=True)
+    for name, fn, needed_by, markers in WARMUPS:
+        if not _needed(needed_by, markers, items):
+            print(f"[warmup] {name} 跳过（本次会话没人用到 {needed_by}）", flush=True)
             continue
         t0 = time.perf_counter()
         try:

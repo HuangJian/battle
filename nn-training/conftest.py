@@ -103,7 +103,9 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
     from tests.helpers import warmup
 
-    warmup.warm_all()
+    # 传 items：判据要看收集到的测试源码（§104：只看 `sys.modules` 等于把前提押在
+    # 「测试模块顶层 import torch」上，改懒就静默失效）。
+    warmup.warm_all(session.items)
 
 
 def pytest_configure(config) -> None:

@@ -25,6 +25,37 @@
 
 ---
 
+## §105 预热判据改成「源码面为主 + `sys.modules` 兜底」：不再依赖「收集相已经 import 了」（2026-11-02，用户指令「Make the warmup criterion source-based」）
+
+**为什么要改**：§104 量出的 1.13s/进程只有把重导入改懒才拿得到，而那时 `warmup` 的判据
+（`"torch" in sys.modules`）会**静默变成 false** —— 预热停掉、每个 worker 各付 import + 首算子
+（1.3–1.8s）。这个失效模式不带任何报错，正是最难发现的那类。
+
+**改法**（`tests/helpers/warmup.py`）：
+
+    判据 = 收集到的测试模块**源码**里提到标记（主）  or  已在 sys.modules（兜）
+
+* 清单变成 4 元组 `(名字, thunk, 判据模块, 源码标记)`；`conftest.pytest_collection_finish`
+  改成 `warm_all(session.items)`（判据要 items 才能看源码）。
+* 源码面走 `source_scan.read_text`（已缓存）逐文件子串、**命中即停**：真语料实测
+  **0–2ms**（头几个文件就命中）；最坏情况（一个都没提）读完 441 个文件 **49ms**。
+* 读不到 / item 没有 `path` ⇒ 当「没提」（预热绝不能把门禁弄红）。
+
+**验证**（两个方向都要）：
+
+| 场景 | 结果 |
+|---|---|
+| scratch 目录两条假用例（不碰 torch） | `[warmup] torch 首次算子 跳过` —— §100 的收益保住 |
+| **只在函数体内** `import torch`（收集相并未 import） | `[warmup] torch 首次算子 2.71s` —— 改懒也不会静默失效 |
+| 真门禁语料 | `remote_dag.graph 1.28s` + `torch 首次算子 0.97s`，5443 passed / 2 skipped |
+
+护栏：`tests/test_warmup_criterion.py`（8 条）——源码面能单独成立、`from` 形式也算、
+读不到/无 path 不算红、清单每项两道判据俱全、`warm_all` 只跑命中项、兼容支路仍在。
+
+**写护栏时踩到的坑（值得记）**：拿 `"torch"` 去断言「不该预热」单跑绿、**门禁红** —— 门禁进程里
+`torch` 本就在 `sys.modules`，OR 的兼容支路会成立。要验源码面就得用不存在的模块名把兼容支路
+按住（测试里叫 `_NO_MODULE`）。这就是「单跑绿 / 全量红」的典型，也说明这条 OR 是真实存在的。
+
 ## §102 子 pytest 的 0.3s 启动里没有可删的东西：它不是浪费，是框架自己的 import（2026-11-02，用户指令「Cut pytest's own 0.3-0.6s startup in the scratch-suite children」）
 
 **先拆预算**（本机，`tmp/` 里 2 条假用例，冷/热 `.pyc` 都已就位）：
@@ -58,6 +89,18 @@ conftest 就永远发现不了」的典型。
 **被否决**：① `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` —— 把 pytest-timeout 也关了，而
 `test_timeout_reports_its_real_cause` 验的就是它的报告文案；② `-p no:cacheprovider`（3/100s）；
 ③ 把五个 scratch 用例合并成一条子进程 —— 那就变成了「一条用例验五件事」，一红看不出哪件坏了。
+
+**那这 0.15s 在门禁里到底付几次？**（用户追问「gate 的 master pytest 会不会重复付」）
+拿 `sitecustomize` 探针在每个新解释器里记一行、再跑 `-p tools.forkdist --forkdist 4`：
+
+    新解释器启动：5 个 = master 1 + nn-wall 1（无 pytest）+ test_forkdist 的子 pytest 3 个
+    fork 出来的 worker：**0 次启动**（它们不重新 exec，也没有 start 行）—— 这是 forkdist 的本意
+    真 import：master 1 次，每个子 pytest 1 次（共 4）
+
+⇒ 门禁在 Linux 上 **只付一次**（0.15s ≈ 整套 43s 的 0.3%）；重复只来自两处：
+① 套件里真起子 pytest 的用例（`test_forkdist` 3 条 + `test_githook_scripts` 的
+`nn-py-safe.sh -m pytest --version` 1 条）；② **xdist 路径**（Windows / CI 的 `-n N`）：每个
+worker 是新进程并各自收集 ⇒ 付 N 次 —— 这正是 §49 引入 forkdist 的收益之一，不是新问题。
 
 ## §101 watchdog 从「poll + sleep(0.25)」改成 `wait(timeout=)`：每次 `-m pytest` 少付一个 0.25s 的尾巴（2026-11-02，用户指令「Cut the three-process startup cost in test_forkdist's subprocess cases」）
 
