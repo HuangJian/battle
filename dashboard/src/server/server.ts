@@ -87,14 +87,21 @@ import {
   ladderTickAll,
   markConsoleActivity,
   appendNotebookChunk,
+  appendNotebookOp,
   decodeLogKey,
   isNotebookLogKey,
   listNotebookSessions,
   missingLogMessage,
+  NOTEBOOK_OP_MAX_BODY_BYTES,
   notebookLogPayload,
   notebookNavEntry,
+  notebookOpsFilePath,
   parseNotebookChunk,
+  parseNotebookOp,
   readBoundedJson,
+  readNotebookOpsTail,
+  resolveNotebookSession,
+  withNotebookOps,
   routeAction,
   sanitizeViewCourse,
   shouldStartLadderTicker,
@@ -481,8 +488,9 @@ async function main(): Promise<void> {
     const key = decodeLogKey(url.pathname, '/log/') as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
     // 虚拟键必须在 `as Component` / `componentLogPayload` **之前**分支（后者的 key 是联合类型）。
+    // notebook 载荷再接一段操作日志尾巴（`.ops.jsonl`；两处调用都要包，见 notebook-wiring 用例）。
     const payload = isNotebookLogKey(key)
-      ? notebookLogPayload(notebookLogsDir(), key, lines)
+      ? withNotebookOps(notebookLogsDir(), key, notebookLogPayload(notebookLogsDir(), key, lines))
       : await componentLogPayload(key, lines, viewCourse || undefined)
     if (!payload) return new Response(missingLogMessage(key), { status: 404 })
     const state = await buildStateView(viewCourse || undefined, { firstPaint: true })
@@ -612,7 +620,7 @@ async function main(): Promise<void> {
     const key = decodeLogKey(url.pathname, '/api/log/') as Component
     const lines = parseLogLines(url.searchParams.get('lines'))
     const payload = isNotebookLogKey(key)
-      ? notebookLogPayload(notebookLogsDir(), key, lines)
+      ? withNotebookOps(notebookLogsDir(), key, notebookLogPayload(notebookLogsDir(), key, lines))
       : await componentLogPayload(key, lines, viewCourse || undefined)
     return payload ? json(payload) : json({ ok: false, message: missingLogMessage(key) }, 404)
   }
@@ -640,6 +648,47 @@ async function main(): Promise<void> {
 
   const notebookLogsRoute: RouteFn = async () =>
     json({ ok: true, sessions: listNotebookSessions(notebookLogsDir()) })
+
+  // 操作日志（面板按钮 / 命令 / 调度事件）：与 `/api/notebookLog` 同一套防线，但**零状态**
+  // ——不占 epoch/offset/租约，只往 `<session>.ops.jsonl` 追加一行。
+  const notebookOpRoute: RouteFn = async (req) => {
+    if (req.headers.get('X-Notebook-Companion') !== '1') {
+      return json(
+        { ok: false, reason: '缺少 X-Notebook-Companion: 1（跨源网页发不了这个头）' },
+        403,
+      )
+    }
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) {
+      return json({ ok: false, reason: 'Content-Type 必须是 application/json' }, 400)
+    }
+    const bounded = await readBoundedJson(req, NOTEBOOK_OP_MAX_BODY_BYTES)
+    if (!bounded.ok) return json({ ok: false, reason: bounded.reason }, bounded.status)
+    const parsed = parseNotebookOp(bounded.value)
+    if (!parsed.ok) return json({ ok: false, reason: parsed.reason }, parsed.status)
+    const { bytes } = appendNotebookOp(notebookLogsDir(), parsed.op, Date.now())
+    return json({ ok: true, bytes })
+  }
+
+  const notebookOpsRoute: RouteFn = async (_req, { url }) => {
+    const session = url.searchParams.get('session') ?? ''
+    const key = `notebook:${session}`
+    const hit = resolveNotebookSession(notebookLogsDir(), key)
+    if (!hit) return json({ ok: false, message: missingLogMessage(key) }, 404)
+    const want = parseLogLines(url.searchParams.get('lines'))
+    const lines = readNotebookOpsTail(
+      notebookLogsDir(),
+      hit.site,
+      hit.session,
+      want === 'all' ? Infinity : want,
+    )
+    return json({
+      ok: true,
+      site: hit.site,
+      session: hit.session,
+      path: notebookOpsFilePath(notebookLogsDir(), hit.site, hit.session),
+      lines,
+    })
+  }
 
   // 组件错误登记表（plan/component-error-registry §4.6）：列表投影（每 4s 轮询）+ `?fp=` 单条 detail。
   // ★ 两条都只读登记表的 **SWR 缓存值**——探测只在 `snapshot-refresher` 的 10s 节拍上，
@@ -774,9 +823,11 @@ async function main(): Promise<void> {
     '/api/errors': { GET: guard(errorsApiRoute) },
     '/api/taskBundleInfo': { GET: guard(taskBundleInfoRoute) },
     '/api/taskBundle': { GET: guard(taskBundleRoute) },
-    // 静态先于通配：两条都必须在 `/api/log/*` 之前（且 `/api/notebookLog` 是第二个 typed POST）。
+    // 静态先于通配：这四条都必须在 `/api/log/*` 之前（typed POST：自定义头 + 有界 body）。
     '/api/notebookLogs': { GET: guard(notebookLogsRoute) },
     '/api/notebookLog': { POST: guard(notebookLogRoute, { activity: false }) },
+    '/api/notebookOps': { GET: guard(notebookOpsRoute) },
+    '/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) },
     '/api/log/*': { GET: guard(apiLogRoute) },
     '/log/*': { GET: guard(logPageRoute) },
     '/api/deliverUpload': { POST: guard(deliverUploadRoute) },

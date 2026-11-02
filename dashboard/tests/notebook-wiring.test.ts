@@ -75,11 +75,23 @@ describe('W1 接线：活动闸 / 路由顺序 / 虚拟键', () => {
     expect(SERVER).toContain('if (opts.activity !== false) markConsoleActivity()')
   })
 
-  it('两条静态路由都在 `/api/log/*` 之前；虚拟键在 componentLogPayload 之前分支', () => {
+  it('操作日志端点：写入是 typed POST、读取是 GET；零状态（不碰搬运 meta）', () => {
+    expect(SERVER).toContain("'/api/notebookOps': { GET: guard(notebookOpsRoute) }")
+    expect(SERVER).toContain(
+      "'/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) }",
+    )
+    expect(SERVER).toContain('appendNotebookOp(notebookLogsDir()')
+    // 两处日志载荷（页面 SSR + /api/log）都要接操作日志尾巴，漏一处就有一半的看不了
+    expect(SERVER.match(/withNotebookOps\(/g)?.length ?? 0).toBe(2)
+  })
+
+  it('四条静态路由都在 `/api/log/*` 之前；虚拟键在 componentLogPayload 之前分支', () => {
     const logWildcard = SERVER.indexOf("'/api/log/*'")
     expect(logWildcard).toBeGreaterThan(-1)
     expect(SERVER.indexOf("'/api/notebookLogs'")).toBeLessThan(logWildcard)
     expect(SERVER.indexOf("'/api/notebookLog'")).toBeLessThan(logWildcard)
+    expect(SERVER.indexOf("'/api/notebookOps'")).toBeLessThan(logWildcard)
+    expect(SERVER.indexOf("'/api/notebookOp'")).toBeLessThan(logWildcard)
     expect(SERVER.indexOf('isNotebookLogKey(key)')).toBeLessThan(
       SERVER.indexOf('componentLogPayload(key'),
     )

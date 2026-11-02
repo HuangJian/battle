@@ -74,6 +74,9 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
   // 会话清单仍是 GET。两条都必须排在 `/api/log/*` 之前（静态先于通配）。
   { path: '/api/notebookLogs', methods: ['GET'] },
   { path: '/api/notebookLog', methods: ['POST'] },
+  // 操作日志（面板/命令/调度事件）：写入是 typed POST、读取仍是 GET。
+  { path: '/api/notebookOps', methods: ['GET'] },
+  { path: '/api/notebookOp', methods: ['POST'] },
   // ── 通配（日志载荷 + 整页；`*` 段由 handler 从 pathname 里切）──
   { path: '/api/log/*', methods: ['GET'] },
   { path: '/log/*', methods: ['GET'] },

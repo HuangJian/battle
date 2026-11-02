@@ -33,14 +33,18 @@ import {
   actionLabel,
   countdownLabel,
   createScheduler,
+  eventDetail,
+  eventOpName,
   historyText,
   scheduleStatusText,
   taskBelongsTo,
   type ScheduleAction,
   type ScheduleTarget,
   type Scheduler,
+  type SchedulerEvent,
   type SchedulerTask,
 } from './scheduler'
+import { createOpLog } from './op-log'
 import { createShipLoop } from './ship-loop'
 
 export interface BootEnv {
@@ -286,6 +290,24 @@ function startHost(
   let ready = false
   let panel: Panel | null = null
 
+  /**
+   * 本页标签：定时任务表的分桶键（`bnc:tasks:<notebook>#<page>`）与归属阀都靠它。
+   * 存 sessionStorage ⇒ 刷新不变、另一个页签必然不同。
+   */
+  const page = pageTag(win)
+  /** 操作日志 → dashboard（失败只掉队列，不影响面板）。 */
+  const ops = createOpLog({
+    runtime,
+    dashboardBase: config.dashboardBase,
+    site: 'kaggle',
+    session: () => (frameSession || session).slice(0, 64),
+    page,
+    writer: writerTag(win, 'host'),
+  })
+  const op = (name: string, detail?: string): void => ops.log(name, detail)
+  const opEvent = (e: SchedulerEvent): void => op(eventOpName(e), eventDetail(e))
+  op('boot', `kaggle host notebook=${notebookKey || '∅'} session=${session || '∅'} page=${page}`)
+
   const adoptSession = (m: BridgeMessage): void => {
     if (!m.session || m.session === frameSession) return
     frameSession = m.session
@@ -300,6 +322,7 @@ function startHost(
       log(
         `bridge ready（nonce=${m.nonce ?? '∅'} notebook=${m.notebook === true} session=${frameSession || '∅'}）`,
       )
+      op('bridge:ready', `notebook=${m.notebook === true} session=${frameSession || '∅'}`)
       panel?.setStatus(m.notebook ? '已连接（笔记本就绪）' : '已连接（等待笔记本）', 'ok')
       syncMarks()
     },
@@ -307,6 +330,7 @@ function startHost(
       adoptSession(m)
       syncMarks()
       log(`bridge status（notebook=${m.notebook === true}）`)
+      op('bridge:status', `notebook=${m.notebook === true} session=${frameSession || '∅'}`)
       if (m.notebook === true) {
         ready = true
         panel?.setStatus('已连接（笔记本就绪）', 'ok')
@@ -317,14 +341,17 @@ function startHost(
     onError: (reason) => {
       ready = false
       log(`bridge: ${reason}`)
+      op('bridge:error', reason)
     },
   })
   // frame 的 iframe URL 是 jupyter-proxy（解析不出 owner/slug）：把外层 notebook 身份送过去，
   // 让日志键用 notebook 名，而不是 kaggle-unknown-edit。
   bridge.setSessionBase(session)
 
+  /** 面板按钮的唯一出口：一条命令 = 一条操作日志（成败与原因都留）。 */
   const run = async (name: string): Promise<void> => {
     const r = await bridge.send(name)
+    op(`cmd:${name}`, r.ok ? 'ok' : (r.reason ?? '失败'))
     if (!r.ok) {
       panel?.setStatus(`${name} ✗ ${r.reason ?? '失败'}`, 'error')
       return
@@ -341,7 +368,10 @@ function startHost(
   const stopNow = async (): Promise<{ ok: boolean; reason?: string; detail?: string }> => {
     if (ready) {
       const f = await bridge.send('flush')
-      if (!f.ok) log(`停会话前未能保存：${f.reason ?? '未排空'}`)
+      if (!f.ok) {
+        log(`停会话前未能保存：${f.reason ?? '未排空'}`)
+        op('stop:flush:fail', f.reason ?? '未排空')
+      }
     }
     return sessionAdapter.stopSession()
   }
@@ -410,6 +440,7 @@ function startHost(
       scrollTop: () => run('scrollTop'),
       scrollBottom: () => run('scrollBottom'),
       openLog: () => {
+        op('log:open', logKey())
         win.open(
           `${config.dashboardBase}/log/${encodeURIComponent(logKey())}`,
           '_blank',
@@ -434,18 +465,31 @@ function startHost(
           enabled: config.autoSaveEnabled,
           intervalSec,
         })
+        op(
+          'autosave',
+          `${value.enabled ? 'on' : 'off'} ${Math.round(value.intervalMin)}min ${r.ok ? 'ok' : (r.reason ?? 'fail')}`,
+        )
         return r.ok ? null : `自动保存已写入配置，但当前帧未连上（${r.reason ?? '无应答'}）`
       },
       onScheduleAdd: async (input) => {
-        if (!sched) return '调度未就绪'
+        op('schedule:add:request', `${input.action} ${input.at}`)
+        if (!sched) {
+          op('schedule:add:reject', '调度未就绪')
+          return '调度未就绪'
+        }
         let target: ScheduleTarget | undefined
         if (input.action === 'run-cell') {
           const cap = await bridge.send('captureTarget')
           if (!cap.ok) {
-            return `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+            const reason = `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+            op('schedule:add:reject', reason)
+            return reason
           }
           const v = cap.value as ScheduleTarget | undefined
-          if (!v || (v.uuid === undefined && v.index === undefined)) return '没拿到目标 cell 的位置'
+          if (!v || (v.uuid === undefined && v.index === undefined)) {
+            op('schedule:add:reject', '没拿到目标 cell 的位置')
+            return '没拿到目标 cell 的位置'
+          }
           target = v
         }
         const r = sched.add({
@@ -453,6 +497,7 @@ function startHost(
           action: input.action as ScheduleAction,
           ...(target ? { target } : {}),
         })
+        if (!r.ok) op('schedule:add:reject', r.reason)
         return r.ok ? null : r.reason
       },
       onScheduleRemove: (id) => sched?.remove(id),
@@ -478,7 +523,9 @@ function startHost(
     stopGraceMs: config.stopGraceMs,
     // 会话必须用 frame 回报的那个（含页面标签）——停止类任务靠它 fail closed；
     // 还没连上时 identity.session 为空 ⇒ add 会响亮拒绝（「等面板显示已连接」）。
-    identity: () => ({ notebookKey, session: frameSession }),
+    // page = 任务表分桶键（本页只看得见自己设的任务）。
+    identity: () => ({ notebookKey, session: frameSession, page }),
+    onEvent: opEvent,
     confirm: async (task, occurrence) => {
       const d = new Date(task.nextAt)
       const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -486,6 +533,7 @@ function startHost(
       // 后台页弹不出确认框：按创建时的预授权执行，但必须留一行证据
       if (doc.hidden) {
         log(`后台按预授权执行：${text}`)
+        op('schedule:confirm:background', text)
         return true
       }
       return panel ? panel.countdown(`即将${text}`, 10) : true
@@ -572,6 +620,8 @@ function startHost(
     doc.removeEventListener('visibilitychange', onVisibility)
     bridge.destroy()
     panel?.destroy()
+    op('dispose')
+    ops.stop()
   }
 }
 
@@ -595,6 +645,8 @@ function startSingle(
     site === 'aistudio' ? new AistudioSessionAdapter(doc, href) : new ColabSessionAdapter(doc, href)
   const notebookKey =
     site === 'aistudio' ? parseAistudioNotebookKey(href) : parseColabNotebookKey(href)
+  /** 本页标签：日志键、任务表分桶、归属阀共用同一个值。 */
+  const page = pageTag(win)
   const loop = createShipLoop({
     doc,
     href,
@@ -603,13 +655,27 @@ function startSingle(
     runtime,
     adapter,
     site,
-    pageTag: pageTag(win),
+    pageTag: page,
     // 写者身份跨刷新稳定（与 host/frame 同口径）：刷新后不被自己的旧租约挡住
     writer: writerTag(win, site),
     onError: (message) => log(`ship: ${message}`),
   })
 
+  /** 操作日志 → dashboard（与 host 同一条通道；`.ops.jsonl` 按会话归档）。 */
+  const ops = createOpLog({
+    runtime,
+    dashboardBase: config.dashboardBase,
+    site,
+    session: () => loop.session.slice(0, 64),
+    page,
+    writer: writerTag(win, site),
+  })
+  const op = (name: string, detail?: string): void => ops.log(name, detail)
+  const opEvent = (e: SchedulerEvent): void => op(eventOpName(e), eventDetail(e))
+  op('boot', `${site} single notebook=${notebookKey || '∅'} session=${loop.session} page=${page}`)
+
   const openLog = (): void => {
+    op('log:open', `notebook:${loop.session}`)
     win.open(
       `${config.dashboardBase}/log/${encodeURIComponent(`notebook:${loop.session}`)}`,
       '_blank',
@@ -617,6 +683,7 @@ function startSingle(
     )
   }
   const openConfig = (): void => {
+    op('config:copy')
     runtime.setClipboard(JSON.stringify(config, null, 2))
     log('配置已复制到剪贴板（改完写回 GM 存储 bnc:config）')
   }
@@ -641,8 +708,10 @@ function startSingle(
     }
   }
 
+  /** 面板按钮的唯一出口：一条命令 = 一条操作日志（成败与原因都留）。 */
   const run = async (name: string, args?: unknown): Promise<void> => {
     const r = await send(name, args)
+    op(`cmd:${name}`, r.ok ? 'ok' : (r.reason ?? '失败'))
     if (!r.ok) {
       panel?.setStatus(`${name} ✗ ${r.reason ?? '失败'}`, 'error')
       return
@@ -733,18 +802,31 @@ function startSingle(
           enabled: config.autoSaveEnabled,
           intervalSec,
         })
+        op(
+          'autosave',
+          `${value.enabled ? 'on' : 'off'} ${Math.round(value.intervalMin)}min ${r.ok ? 'ok' : (r.reason ?? 'fail')}`,
+        )
         return r.ok ? null : `自动保存已写入配置，但当前页未生效（${r.reason ?? '无应答'}）`
       },
       onScheduleAdd: async (input) => {
-        if (!sched) return '调度未就绪'
+        op('schedule:add:request', `${input.action} ${input.at}`)
+        if (!sched) {
+          op('schedule:add:reject', '调度未就绪')
+          return '调度未就绪'
+        }
         let target: ScheduleTarget | undefined
         if (input.action === 'run-cell') {
           const cap = await send('captureTarget')
           if (!cap.ok) {
-            return `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+            const reason = `运行 cell 需要先在笔记本里选中一段代码（${cap.reason ?? '没有目标'}）`
+            op('schedule:add:reject', reason)
+            return reason
           }
           const v = cap.value as ScheduleTarget | undefined
-          if (!v || (v.uuid === undefined && v.index === undefined)) return '没拿到目标 cell 的位置'
+          if (!v || (v.uuid === undefined && v.index === undefined)) {
+            op('schedule:add:reject', '没拿到目标 cell 的位置')
+            return '没拿到目标 cell 的位置'
+          }
           target = v
         }
         const r = sched.add({
@@ -752,6 +834,7 @@ function startSingle(
           action: input.action as ScheduleAction,
           ...(target ? { target } : {}),
         })
+        if (!r.ok) op('schedule:add:reject', r.reason)
         return r.ok ? null : r.reason
       },
       onScheduleRemove: (id) => sched?.remove(id),
@@ -772,7 +855,8 @@ function startSingle(
     claimSettleMs: config.claimSettleMs,
     runGraceMs: 10 * 60_000,
     stopGraceMs: config.stopGraceMs,
-    identity: () => ({ notebookKey, session: loop.session }),
+    identity: () => ({ notebookKey, session: loop.session, page }),
+    onEvent: opEvent,
     confirm: async (task, occurrence) => {
       const d = new Date(task.nextAt)
       const clock = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -780,6 +864,7 @@ function startSingle(
       // 后台页弹不出确认框：按创建时的预授权执行，但必须留一行证据
       if (doc.hidden) {
         log(`后台按预授权执行：${text}`)
+        op('schedule:confirm:background', text)
         return true
       }
       return panel ? panel.countdown(`即将${text}`, 10) : true
@@ -822,6 +907,7 @@ function startSingle(
 
   runtime.registerMenuCommand('Notebook: 保存并清空', () => {
     void loop.saveAndClear().then((r) => {
+      op('menu:saveAndClear', r.ok ? `${r.bytes}B` : (r.reason ?? '保存未完成'))
       log(r.ok ? `已保存并清空（${r.bytes}B）` : `未清空：${r.reason ?? '保存未完成'}`)
     })
   })
@@ -839,5 +925,7 @@ function startSingle(
     sched?.stop()
     loop.stop()
     panel?.destroy()
+    op('dispose')
+    ops.stop()
   }
 }
