@@ -25,6 +25,41 @@
 
 ---
 
+## §106 并入 origin/goal-nn 后的一次真红：v7 把 stem 抬到 19ch，而仓里**六个** golden 全是 18ch（2026-11-02，用户指令「git pull，检查并入的代码是否可以应用前面几次 pytest 优化的方式」）
+
+**审计结论先说**：并入的 575 行测试**没有**再出现前面几轮优化针对的任何一类浪费——
+
+| 早前的优化 | 在并入代码里的对应物 | 结论 |
+|---|---|---|
+| 假主机/死端口的真网络超时 | 新增测试零处，全部打桩（`node_ping`/`post_weights_parallel`/`fetch_task`） | 不适用 |
+| 调度用例里的 2s 空等 | T5/T6 只加了夹具工作量（`sleep-ok` 注解），事件驱动（`Barrier`/`Event`） | 不适用 |
+| 负断言写成轮询窗口 | 新增等待一律 `_wait_until(pred)`，新增 `sleep` 只有 1 处且是夹具 hold | 不适用 |
+| 整仓扫描（`scan_cache`） | 无新增 `rglob`/`os.walk`；只有单文件 `ast.parse` | 不适用 |
+| 子 pytest 启动（warmup / `nn-wall`） | 无新增 `subprocess`/`sys.executable` | 不适用 |
+| 收集期重导入 | 收集墙钟 4.2/4.2/6.7s（§104 基线 5.4–7.3s），新模块只 import 已在的 numpy/torch | 无退化 |
+
+**但并入让一条真用例变红**（`--maxfail=0` 全跑，5466 收下，红 1 条）：
+`tests/worker/test_remote_iter_real_bun.py::test_node_runner_shards_byte_identical_to_direct_run`
+断言 `manifest.feat == "native"`，实测 `ts`。
+
+**根因不是打包也不是 dlopen**（直接探过：`bun:ffi` `dlopen` 成功、`cf_abi()==2`、manifest 的
+sha 与盘上 `.so` 一致）。v7 把 `CF_IN_CH`/`IN_CH` 写死成 **19**（17 obs + 2 coord），而
+`runStudentConvWasm` 新增的守卫 `m.in16.length !== IN_CH*SP ⇒ return false` 对 18ch 权重
+**正确地**拒绝——于是 wasm 与 native（attestation 要 wasm 当参考）一起关掉，回落 TS。
+仓里六个 golden（`student-golden{,-extra,-tower,-wasm,-v6,-v6x}.json`）stem 全是 `[*,18,3,3]`，
+**一个 v7 档都不存在** ⇒ 该断言在并入后的代码里恒不可满足。
+
+**修法沿用并入代码自己的先例**：`tests/native-parity.test.ts` 已带 `widenStemToV7()`（三段式：
+旧 16 列 obs 原位 | 新第 16 列＝0 | coord 两列后移一列）。在 `_write_weights` 里同规则加宽
+golden 的 `stem.weight`：零的新通道 ⇒ 喂什么都不影响输出（A/B 仍逐字节可比），但 in16 长度为
+19×676 ⇒ native 重新可用，这条用例保住了它真正的判据（**搬过家的树里模块相对路径解析**）。
+
+**顺手量到一处仍在付的账（未修，留作下一步）**：`tests/test_reuse_ledger.py` 的 module 级夹具
+调 `reuse_audit.scan()`（344 文件 / 3817 函数的整仓 `ast.parse`）：**setup 3.13s / 冷缓存 5.77s**。
+它躲过了「>5s 警告」因为 `conftest.py::pytest_runtest_makereport` 明写**只算 call 阶段**——
+同族浪费（整仓扫描）里唯一还没吃 `scan_cache` 的一个；`reuse_audit._funcs(path)` 是纯函数、
+返回值可 pickle，接上即可（估 ~0.3s）。
+
 ## §105 预热判据改成「源码面为主 + `sys.modules` 兜底」：不再依赖「收集相已经 import 了」（2026-11-02，用户指令「Make the warmup criterion source-based」）
 
 **为什么要改**：§104 量出的 1.13s/进程只有把重导入改懒才拿得到，而那时 `warmup` 的判据

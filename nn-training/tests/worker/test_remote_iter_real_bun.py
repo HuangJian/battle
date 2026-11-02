@@ -21,6 +21,7 @@ bun / 真节点 / weights fixture」）——本文件需要真 bun，放进 e2e
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -54,9 +55,34 @@ MAX_TICKS = 120
 GOLDEN = REPO_ROOT / "tests/fixtures/student-golden-extra.json"
 
 
+def _widen_stem_to_v7(entry: dict) -> dict:
+    """旧 golden 的 stem 是 18ch（16 obs + 2 coord）；v7 内核要 19ch（17 obs + 2 coord）。
+
+    与 `tests/native-parity.test.ts::widenStemToV7` **同一三段式**（同为 golden 的 v7 加宽）：
+    旧 16 列（obs）原位 | 新第 16 列（v7 `dist_enemy`）置 0 | 旧 coord 两列后移一列。
+    不加宽的话本文件的 `feat == native` 断言永远不可能成立——`conv_wasm_adapter.ts` /
+    `conv_native.h` 都按 `IN_CH=19` 写死了 in16 槽位，18ch 权重会被**正确**拒收回落 TS
+    （2026-11-02 并入 origin/goal-nn 时红在这里）。零列 ⇒ 新通道喂什么都不影响输出，
+    A/B 两条路径仍逐字节可比。
+    """
+    import numpy as np
+
+    h, c, k1, k2 = entry["shape"]
+    old = np.frombuffer(base64.b64decode(entry["data"]), dtype="<f4").reshape(h, c, k1, k2)
+    new = np.zeros((h, c + 1, k1, k2), dtype="<f4")
+    new[:, : c - 2] = old[:, : c - 2]
+    new[:, c - 1 :] = old[:, c - 2 :]  # coord 两列后移；新列留在 0
+    return {
+        "shape": [h, c + 1, k1, k2],
+        "data": base64.b64encode(new.tobytes()).decode("ascii"),
+    }
+
+
 def _write_weights(dst: Path) -> None:
     """把 golden fixture 写成 exporter 吃的 weights JSON（arch 由 fixture 头部派生）。"""
     g = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    params = dict(g["params"])
+    params["stem.weight"] = _widen_stem_to_v7(params["stem.weight"])
     dst.write_text(
         json.dumps(
             {
@@ -66,7 +92,7 @@ def _write_weights(dst: Path) -> None:
                     "d": g["d"],
                     "policyExtra": True,
                 },
-                "params": g["params"],
+                "params": params,
             }
         ),
         encoding="utf-8",
