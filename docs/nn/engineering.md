@@ -25,6 +25,40 @@
 
 ---
 
+## §100 `test_timeout_reports_its_real_cause` 的 5s 不是「等」（真被测 1s），是 conftest 给**临时目录里的假用例**白做了 4.6s 预热（2026-11-02，用户指令「Check whether … really needs to wait 5s」）
+
+**先回答问句**：它真的等的是 `--timeout=1` 那一秒（桩子 `time.sleep(5)` 在第 1s 就被 SIGALRM 打断）。
+剩下 ~4s 与「等」无关。
+
+**分解**（探针：同一条子进程命令，改前/改后）：
+
+    子进程 pytest（`-p tools.forkdist --forkdist 2 --timeout=1`，2 条假用例）
+      改前 8.64s = `[warmup] remote_dag.graph 1.32s` + `[warmup] torch 首次算子 3.26s`
+                + 合计 4.58s 预热 + ~1s 真超时 + ~1s 进程/收集
+      改后 1.55s（预热两项各打一行「跳过」）
+    同机 2×2 交错 A/B（预热会跑 / 会跳）：**12.64s / 9.17s   vs   1.60s / 1.59s**
+
+**根因**：根 conftest 的 `pytest_collection_finish` 只在「注册了 forkdist 插件」时预热，而
+`test_forkdist.py` 的五个 end-to-end 用例正是 `-p tools.forkdist` 起**真 pytest** 跑 scratch
+目录 —— 于是每个子进程都替一组**不碰 torch、不看 remote_dag** 的假用例付掉整张预热表。
+
+**修法**（`tests/helpers/warmup.py`）：清单每项多一个**判据模块**，`sys.modules` 里没有就跳过并
+打一行。语义是「本次会话的测试真把它 import 进了」——收集相已把测试模块全 import 过，所以
+这就是「会不会有人真的用到它」的兼价证据。附带一条结构性要求：**本模块不许在顶层 import
+被预热的包**（否则 `tests.helpers.remote_dag` 恒在 `sys.modules` 里，判据恒真）——
+`remote_dag` 因此改成 thunk 内 import。
+
+**门禁不受影响**（必须验，否则就是拿套件换单用例）：真语料下仍预热
+`remote_dag.graph 3.24s` + `torch 首次算子 1.80s`（日志里能看到三行 `[warmup]`），全套件 5435 passed。
+
+**残余**：这条用例会起**三个** python 进程（`bash nn-py-safe.sh` → `nn-wall.py` → `pytest`）
+外加 1s 真超时；在极慢的机器状态下（那一次全套件 81.9s vs 平时 43s）它会以 6.8s 撞 >5s，
+而那是**进程启动被挤**，不是白等 —— 同样状态下 `test_bootstrap_variant` 也 8.44s。
+
+**否决的备选**：① 去掉 scratch 组的 `-p tools.forkdist` —— 不行（被测物就是那个 runner）；
+② 给预热加个 `--no-warmup` 开关让用例显式关 —— 多一个「忘传就回 4.6s」的旋钮；
+③ 按 `len(session.items)` 阀值跳过 —— 阈值是猜的，与「谁真的会用到」无关。
+
 ## §99 hold 全循环 e2e 4.87s → 2.64s：它等的是**两个真窗口**，能动的只有窗本身（2026-11-02，用户指令「Get test_hold_e2e's full-cycle test under the 5s budget」）
 
 **为什么在它头上**：§96/§98 把扫描类警告清完之后，它是唯一还贴在 5s 线上的（门禁里 5.39s / 6.42s）。

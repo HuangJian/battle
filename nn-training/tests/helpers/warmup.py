@@ -44,6 +44,20 @@ AST 解析，在 16 个 worker 上就是同一笔 CPU 被重复付 N 次。
 `cli_surface._scan()`（0.37s，`test_cli_house` 一个文件）。它们本来就只付一次，预热只会更慢；
 要加速这几份得改用例结构（合并断言 / 缓存派生小结果 / 改扫描实现），不是往这张表里塞。
 
+## 判据的第三列：**本次会话里真的有人用**（2026-11-02，用户指令「Check whether
+## `test_forkdist.py::test_timeout_reports_its_real_cause` really needs to wait 5s」）
+
+上表的「划算」算的是**门禁**那套语料（整套 800 个模块）。但对**临时目录里的两三个假用例**
+（`test_forkdist.py` 的五个 end-to-end 用例各自落一个 scratch 目录跑真 `-m pytest`），清单里的
+每一项都是纯损失 —— 它们一份 torch 算子也不跑、一张 remote_dag 图也不看。实测（`--forkdist 2`
++ 2 条假用例）：预热 **4.58s**（`remote_dag.graph` 1.32 + torch 首次算子 3.26），而
+`test_timeout_reports_its_real_cause` 整条 5.18s 里真被测的只有 `--timeout=1` 那一秒。
+
+所以每项自带一个**判据模块**：收集相已把本次会话的测试模块全部 import 过了 ⇒
+「用例真会用到 torch / remote_dag」等价于「它已经在 `sys.modules` 里」。不在就跳过并打一行，
+行为退回「每 worker 自算」。**注意**：本模块自己不许在顶层 import 被预热的包（否则判据恒真，
+`remote_dag` 就是为此改成 thunk 内 import 的）。
+
 ## 安全
 
 * 每一项都必须是**幂等、纯读**的缓存预热（不写盘、不建线程、不碰生产状态）。
@@ -54,10 +68,16 @@ AST 解析，在 16 个 worker 上就是同一笔 CPU 被重复付 N 次。
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable
 
-from tests.helpers import remote_dag
+
+def _remote_dag_graph() -> object:
+    """`remote_dag.graph()` 的 thunk（**必须**在这里 import：顶层 import 会让下面的判据恒真）。"""
+    from tests.helpers import remote_dag
+
+    return remote_dag.graph()
 
 
 def _torch_first_op() -> object:
@@ -84,19 +104,28 @@ def _torch_first_op() -> object:
         opt.step()
     return True
 
-#: 预热清单：`(名字, 无参 thunk)`，顺序即执行顺序。
-#: 加一项之前先在模块头的表里写清「冷启动 / 谁在付 / 换算下来划不划算」。
-WARMUPS: tuple[tuple[str, Callable[[], object]], ...] = (
-    ("remote_dag.graph", remote_dag.graph),
-    ("torch 首次算子", _torch_first_op),
+#: 预热清单：`(名字, 无参 thunk, 判据模块)`，顺序即执行顺序。
+#: 加一项之前先在模块头的表里写清「冷启动 / 谁在付 / 换算下来划不划算」，
+#: 并给出「本次会话里谁用得到它」的判据模块（理由见模块头第三列那节）。
+WARMUPS: tuple[tuple[str, Callable[[], object], str], ...] = (
+    ("remote_dag.graph", _remote_dag_graph, "tests.helpers.remote_dag"),
+    ("torch 首次算子", _torch_first_op, "torch"),
 )
+
+
+def _session_uses(module: str) -> bool:
+    """本次会话的测试有没有真把它 import 进来（收集相已经跑完 ⇒ `sys.modules` 就是答案）。"""
+    return any(name == module or name.startswith(module + ".") for name in sys.modules)
 
 
 def warm_all() -> None:
     """跑一遍清单，逐项打一行读数（§16.3：长任务每步可观测）。"""
     total = 0.0
     done = 0
-    for name, fn in WARMUPS:
+    for name, fn, needed_by in WARMUPS:
+        if not _session_uses(needed_by):
+            print(f"[warmup] {name} 跳过（本次会话没人 import {needed_by}）", flush=True)
+            continue
         t0 = time.perf_counter()
         try:
             fn()
