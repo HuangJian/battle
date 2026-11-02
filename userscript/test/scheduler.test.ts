@@ -411,6 +411,124 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
   })
 })
 
+describe('可重试失败：窗口内保留任务，再试到成功', () => {
+  it('retry ⇒ waiting + retry 事件，任务保留；下一拍成功 ⇒ 消耗', async () => {
+    let attempt = 0
+    const h = harness({
+      run: async (t) => {
+        attempt += 1
+        h.runs.push(t)
+        return attempt === 1 ? { ok: false, retry: true, reason: '笔记本未就绪' } : { ok: true }
+      },
+    })
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    h.setNow(at(9, 0) + 5_000)
+    await h.sched.tick()
+    expect(h.runs).toHaveLength(1)
+    expect(occurrences(h)[`tid1|${OCC_KEY}`]).toMatchObject({
+      state: 'waiting',
+      reason: '笔记本未就绪',
+    })
+    expect(h.sched.tasks()).toHaveLength(1)
+    expect(h.events.map((e) => e.kind)).toEqual(['add', 'claim', 'retry'])
+
+    // 会话起来了（13:24 那种情况）：下一拍直接重试，不再确认/claim 一遍
+    h.setNow(at(9, 0) + 25_000)
+    await h.sched.tick()
+    expect(h.runs).toHaveLength(2)
+    expect(occurrences(h)[`tid1|${OCC_KEY}`]?.state).toBe('succeeded')
+    expect(h.events.map((e) => e.kind)).toEqual(['add', 'claim', 'retry', 'retry', 'run'])
+    expect(h.sched.tasks()).toEqual([])
+  })
+
+  it('重试不重复弹确认（确认只发生一次）', async () => {
+    let confirms = 0
+    let attempts = 0
+    const h = harness({
+      confirm: async () => {
+        confirms += 1
+        return true
+      },
+      run: async () => {
+        attempts += 1
+        return { ok: false, retry: true, reason: '会话未就绪' }
+      },
+    })
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    h.setNow(at(9, 0) + 5_000)
+    await h.sched.tick()
+    h.setNow(at(9, 0) + 25_000)
+    await h.sched.tick()
+    expect(confirms).toBe(1)
+    expect(attempts).toBe(2)
+  })
+
+  it('重试超出迟到窗口 ⇒ skipped（写原因）并消耗，不无限重试', async () => {
+    let attempts = 0
+    const h = harness({
+      run: async () => {
+        attempts += 1
+        return { ok: false, retry: true, reason: '会话未就绪' }
+      },
+    })
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    h.setNow(at(9, 0) + 5_000)
+    await h.sched.tick()
+    expect(h.sched.tasks()).toHaveLength(1)
+
+    h.setNow(at(9, 11))
+    await h.sched.tick()
+    const occ = occurrences(h)[`tid1|${OCC_KEY}`]!
+    expect(occ.state).toBe('skipped')
+    expect(occ.reason).toContain('重试')
+    expect(attempts).toBe(1)
+    expect(h.sched.tasks()).toEqual([])
+  })
+
+  it('不可重试的失败照旧立刻 failed + 消耗（不把真错误拖成重试）', async () => {
+    const h = harness({ run: async () => ({ ok: false, reason: '指纹不符' }) })
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    h.setNow(at(9, 0) + 5_000)
+    await h.sched.tick()
+    expect(occurrences(h)[`tid1|${OCC_KEY}`]?.state).toBe('failed')
+    expect(h.sched.tasks()).toEqual([])
+  })
+
+  it('等待期间刷新页面（writer 变、页标签不变）⇒ 新页面接管重试，不丢任务', async () => {
+    let attempt = 0
+    const first = harness({
+      run: async (t) => {
+        attempt += 1
+        first.runs.push(t)
+        return { ok: false, retry: true, reason: '笔记本未就绪' }
+      },
+    })
+    first.sched.add({ at: '09:00', action: 'run-all' })
+    first.setNow(at(9, 0) + 5_000)
+    await first.sched.tick()
+    expect(occurrences(first)[`tid1|${OCC_KEY}`]?.state).toBe('waiting')
+
+    const second = harness(
+      {
+        writer: 'w2',
+        run: async (t) => {
+          second.runs.push(t)
+          return { ok: true }
+        },
+      },
+      first.mem,
+    )
+    second.setNow(at(9, 0) + 25_000)
+    await second.sched.tick()
+    expect(second.runs).toHaveLength(1)
+    expect(occurrences(second)[`tid1|${OCC_KEY}`]).toMatchObject({
+      state: 'succeeded',
+      by: 'w2',
+    })
+    expect(second.sched.tasks()).toEqual([])
+  })
+})
+
 describe('执行历史文案', () => {
   it('停会话 · 关运行时：写明运行时文件已删除（事后能从历史里认出来）', () => {
     expect(

@@ -7,6 +7,10 @@ export const SEL = {
   codeCell: '.jp-CodeCell',
   markdownCell: '.jp-MarkdownCell',
   inputArea: '.jp-InputArea',
+  /** 运行/排队时提示符是 `[*]`（或 `[12*]`）；比只看输出更早出现。 */
+  inputPrompt: '.jp-InputPrompt',
+  /** JupyterLab 的内核状态指示器（`data-status=idle|busy|connecting`）。 */
+  kernelStatus: '.jp-Notebook-ExecutionIndicator, .jp-StatusBar-ExecutionIndicator',
   cmContent: '.cm-content',
   outputArea: '.jp-OutputArea',
   outputChild: '.jp-OutputArea-child',

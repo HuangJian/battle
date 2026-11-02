@@ -361,8 +361,14 @@ function startHost(
     panel?.setStatus(`${name} ✓${detail}`, 'ok')
   }
 
-  const fromBridge = (r: { ok: boolean; reason?: string }): { ok: boolean; reason?: string } =>
-    r.ok ? { ok: true } : { ok: false, reason: r.reason ?? 'bridge 无应答' }
+  const fromBridge = (r: {
+    ok: boolean
+    reason?: string
+    retry?: boolean
+  }): { ok: boolean; reason?: string; retry?: boolean } =>
+    r.ok
+      ? { ok: true }
+      : { ok: false, reason: r.reason ?? 'bridge 无应答', ...(r.retry ? { retry: true } : {}) }
 
   /** 停会话：先让 frame 排空日志（失败也停，但说出来），再点外层 Stop。 */
   const stopNow = async (): Promise<{ ok: boolean; reason?: string; detail?: string }> => {
@@ -539,14 +545,15 @@ function startHost(
       return panel ? panel.countdown(`即将${text}`, 10) : true
     },
     run: async (task) => {
-      let result: { ok: boolean; reason?: string; detail?: string }
+      let result: { ok: boolean; reason?: string; detail?: string; retry?: boolean }
       if (task.action === 'stop-session') result = await stopNow()
-      else if (!ready) result = { ok: false, reason: '笔记本未连接（iframe 不可达）' }
+      else if (!ready) result = { ok: false, retry: true, reason: '笔记本未连接（等待 iframe）' }
       else if (task.action === 'interrupt') result = fromBridge(await bridge.send('interrupt'))
       else if (task.action === 'run-all') result = fromBridge(await bridge.send('runAllCells'))
       else result = fromBridge(await bridge.send('runCell', task.target ?? {}))
-      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）
-      recordHistory(task, result)
+      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）；
+      // 可重试的「还没到时候」不进历史（否则每 20s 一行刷屏），最终结果才记。
+      if (!result.retry) recordHistory(task, result)
       return result
     },
     onChange: () => {
@@ -720,10 +727,12 @@ function startSingle(
     panel?.setStatus(`${name} ✓${detail}`, 'ok')
   }
 
-  const toCmd = (r: CommandReply): { ok: boolean; reason?: string; detail?: string } =>
+  const toCmd = (
+    r: CommandReply,
+  ): { ok: boolean; reason?: string; detail?: string; retry?: boolean } =>
     r.ok
       ? { ok: true, ...(typeof r.value === 'string' ? { detail: r.value } : {}) }
-      : { ok: false, reason: r.reason ?? '失败' }
+      : { ok: false, reason: r.reason ?? '失败', ...(r.retry ? { retry: true } : {}) }
 
   /** 本页的执行历史（内存，刷新即清空）。 */
   const history: PanelHistoryRow[] = []
@@ -881,8 +890,9 @@ function startSingle(
       const result = toCmd(
         await send(name, task.action === 'run-cell' ? (task.target ?? {}) : undefined),
       )
-      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）
-      recordHistory(task, result)
+      // 执行历史只留本页内存：刷新页面即清空（不写 GM 存储，跨页签不串）；
+      // 可重试的「还没到时候」不进历史（否则每 20s 一行刷屏），最终结果才记。
+      if (!result.retry) recordHistory(task, result)
       return result
     },
     onChange: () => {

@@ -247,12 +247,16 @@ worker 用）。浏览器是唯一「天然直连本机 dashboard、又不需要
     01:30 只跑一次；春季跳过的 02:30 **不执行**（该墙钟不存在），下一拍照常，不改期。
   - 迟到：`run-*` ≤ 10 min 照常；`stop-session` ≤ `stopGraceMs`（10 min）照常，超过记 `skipped(late)`。
   - 恢复：刷新 / 睡眠唤醒后，`nextFireAt` 只依赖「当前墙钟 + occurrence 键」，不依赖内存里的计时器链。
-- **occurrence 状态机（同一任务只执行一次）**：`pending → claimed → succeeded|failed|skipped`。
+- **occurrence 状态机（同一任务只执行一次）**：`pending → claimed → waiting* → succeeded|failed|skipped`
+  （`waiting` 只由「可重试失败」进入，见下条）。
   1. 到点先写 `{state:'claimed', by:<writer>, at}` 到 GM 存储（共享、持久，晚到的标签能看见）；
   2. 抖动等待 `claimSettleMs`（默认 1000ms）后**再读一次**：不是自己 ⇒ 退让；仍是自己 ⇒ 执行（两个标签的
      `setTimeout` 通常在同毫秒级触发，1s 沉淀窗足以让后一次写覆盖前一次）；
   3. `lastFiredAt` 在 **claim 时**写（不是执行后）——页面崩在动作中也不会重复执行；`claimed` 超过 5 min
      没有结果 ⇒ 面板显示「结果未知」，不自动补跑。
+  4. **唯一的重试例外**：`run()` 回 `{ok:false,retry:true}`（内核还在 connecting / 命令空点）⇒ occurrence 记
+     `waiting`、任务保留；下一拍照常 claim 互斥但**不再弹确认**，迟到窗口一过记 `skipped(重试超时)` 并消耗。
+     动作成功/真失败仍是「一次即消耗」。
   - **不是原子 CAS**（GM 存储没有 compare-and-swap）：这是 best-effort 互斥，靠「持久 claim + 1s 沉淀 +
     重读」把窗口压到可忽略；**不**用 `BroadcastChannel`（沙箱透传未验证）。
 - **页面 / 目标身份**：`run-*` 绑定 `notebookKey`（`<owner>/<slug>`，跨 run 稳定）；`stop`/`interrupt` 绑定
@@ -1077,7 +1081,8 @@ observer 给没有游标的 cell 补标脏，保证首批输出仍会走一次 r
 旧的无标签会话不再续写，7 天 prune 自然清掉。
 
 **2026-10-30 W4 接线（定时启停/执行 cell）**：`app/scheduler.ts` 落任务存储（`bnc:tasks`）与 occurrence
-claim（`bnc:occurrences`，`claimSettleMs` 沉淀窗后转正；claim 后不自动重试）；计时只靠墙钟轮询（20s +
+claim（`bnc:occurrences`，`claimSettleMs` 沉淀窗后转正；落定 claim 不自动重试，`run()` 明确 `retry` 时记
+`waiting` 并在迟到窗口内重试）；计时只靠墙钟轮询（20s +
 `visibilitychange` 立即补一拍），迟到窗口按动作分（`run-*` 10 分钟、`stop/interrupt` = `stopGraceMs`）。
 面板新「定时」组只设**下一次**（**不设重复日期**）：24 小时制 `HH:MM` + 动作（运行选中 cell·运行全部·
 停会话·中断内核），早于现在就是**明天**的那一拍；到点执行**一次即消耗**（成功/失败/取消/过期都从任务表

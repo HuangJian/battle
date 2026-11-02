@@ -132,14 +132,17 @@ describe('AI Studio 适配器：结构来自真实页面存档', () => {
     if (!miss.ok) expect(miss.reason).toContain('找不到 CFG 行')
   })
 
-  it('runCell：先选中再点 notebook:run-cell，点了才算数', async () => {
+  it('runCell：先选中再点 notebook:run-cell，且必须看到执行证据', async () => {
     const w = dom()
     const a = adapter(w)
     const cell = a.cells()[0]!
     cellOf(w, 0).classList.add('jp-mod-selected')
     const li = docOf(w).querySelector('[data-command="notebook:run-cell"]')!
     let clicks = 0
-    li.addEventListener('click', () => (clicks += 1))
+    li.addEventListener('click', () => {
+      clicks += 1
+      cellOf(w, 0).querySelector('.jp-InputPrompt')!.textContent = '[*]:'
+    })
     expect(await a.runCell(cell)).toMatchObject({ ok: true })
     expect(clicks).toBe(1)
   })

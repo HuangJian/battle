@@ -10739,3 +10739,25 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **代价**：同 notebook 的另一个页签**不再**能接手本页的定时任务（用户口径即如此）；旧键里无法
   判定归属的残留任务永远不再执行（宁可不动，也不静默吞）；操作日志是新增磁盘写入（有界 + 同寿命
   prune）。
+
+## §2026-11-02-bnc-run-cell-postcondition-retry（定时 run-cell「点了」不算执行：加执行后置条件 + 迟到窗口内重试）
+
+- **事故**：2026-11-02 13:20 的「运行选中 cell」任务在 Kaggle 页到点后被调度器记为 `succeeded`，
+  但 worker 首行输出是 13:24:23（会话起来后仍需用户手动执行）。GM 存储对账：任务 `t-mutig9`
+  `nextAt=13:20:00`、occurrence 13:20:30 `claimed(host-7xb7sc)`、13:21:31 `succeeded`，任务表随即清空。
+- **根因**：`KaggleFrameAdapter.runCell` 把「命令点到了」当成功（`{ok:true, detail:'queued?'}`）——
+  内核还在 connecting / iframe 正被替换时点击是空点，调度器拿不到任何「没执行」的信号，一次性任务被消耗。
+- **决定**：① `runCell` 点击后必须有执行证据（cell 的 `[*]` 提示符 / `jp-mod-executing` / 提示符变号 /
+  输出变化），且排队证据要**持续 250ms**（iframe 重载会清掉一闪而过的 `[*]`），2.5s 内看不到 ⇒
+  `{ok:false, retry:true}`；内核明确 `connecting` 时不点、直接可重试；
+  已在执行/排队则直接成功（重试幂等，避免训练 cell 双跑）。② `retry` 沿 `CmdResult → commands →
+  bridge → boot` 透传；host 的 `!ready` 与桥超时也标可重试。③ 调度器收到可重试失败时 occurrence 记
+  `waiting`、任务保留，下一拍照常 claim 互斥但**不重复弹确认**，迟到窗口一过记 `skipped(重试超时)`。
+- **被否决**：保留「点了算成功」（事故原样）· 任何失败都重试（指纹不符/目标丢失会白等 10 分钟）·
+  先在调度器里等内核 idle 再点（内核空闲 ≠ 会话就绪；还会把**已在跑**的 cell 再点一次）·
+  失败后立刻重排一个新任务（丢失原 occurrence 审计、且可能双跑）。
+- **验收**：userscript 233 tests / 0 fail（新用例：空点可重试 / 已执行不重复点 / connecting 不点 /
+  排队一闪而过不算执行 / prompt 变号算执行 / waiting 重试与超窗 / 刷新后接管 / retry 三层透传 / 接线钉）·
+  `typecheck` + `oxlint` + `build` 绿 · 根 `bun run check` 2667 pass / 0 fail。
+- **代价**：run-cell 成功路径最多多等 2.5s（仍在 bridge 5s 超时内）；重试每 20s 一拍、最多到迟到窗口
+  （run-* 10 min）；操作日志会多出 `schedule:retry` 行（审计口径，非噪音）。

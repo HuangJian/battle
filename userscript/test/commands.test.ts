@@ -20,6 +20,8 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps {
       detail: `folded:${cell.id}:${collapsed}`,
     }),
     activeCell: () => ({ id: 'c1', index: 1, kind: 'code' as const }),
+    runCell: async () => ({ ok: true, detail: 'running' }),
+    flash: () => {},
     scroll: (to: string) => ({ ok: true, detail: to }),
     scrollOuter: (to: string) => ({ ok: true, detail: to }),
     focusConfig: async (markers: string[]) => ({ ok: true, detail: `cfg:${markers.join('|')}` }),
@@ -132,6 +134,23 @@ describe('frame 命令表', () => {
     expect(
       await runFrameCommand(d, 'setAutoSave', { enabled: false, intervalSec: 999_999 }),
     ).toEqual({ ok: true, value: { enabled: false, intervalSec: 86_400 } })
+  })
+
+  it('runCell 的可重试失败把 retry 原样带回（调度器据此保留任务再试）', async () => {
+    const d = deps()
+    const adapter = d.adapter as unknown as {
+      cells: () => Array<{ id: string; index: number; kind: 'code' }>
+      sourceText: () => string
+      runCell: () => Promise<{ ok: false; retry: boolean; reason: string }>
+    }
+    adapter.cells = () => [{ id: 'c1', index: 1, kind: 'code' }]
+    adapter.sourceText = () => 'print(1)'
+    adapter.runCell = async () => ({ ok: false, retry: true, reason: '内核正在连接' })
+    expect(await runFrameCommand(d, 'runCell', { uuid: 'c1' })).toEqual({
+      ok: false,
+      retry: true,
+      reason: '内核正在连接',
+    })
   })
 
   it('脚本/页面菜单共用的打开动作有副作用；未知命令失败', async () => {

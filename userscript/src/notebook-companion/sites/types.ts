@@ -8,7 +8,10 @@ export interface CellRef {
   kind: 'code' | 'markdown' | 'raw'
 }
 
-export type CmdResult = { ok: true; detail?: string } | { ok: false; reason: string }
+export type CmdResult =
+  | { ok: true; detail?: string }
+  /** `retry` = 此刻不成立但稍后可能成立（内核没连上/命令空点）；调度器据此保留一次性任务。 */
+  | { ok: false; reason: string; retry?: boolean }
 
 export interface FrameAdapter {
   readonly site: SiteId

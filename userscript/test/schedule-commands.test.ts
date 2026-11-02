@@ -85,6 +85,11 @@ describe('frame 命令：定时任务的 cell 目标', () => {
     clearActive(doc)
     const cell = doc.querySelector<HTMLElement>('.jp-CodeCell')!
     cell.classList.add('jp-mod-selected')
+    // 真运行：点 run 后出现执行证据（新后置条件要求；只点命令不算数）
+    doc.querySelector('[data-command="notebook:run-cell"]')!.addEventListener('click', () => {
+      cell.querySelector('.jp-InputPrompt')!.textContent = '[*]:'
+      cell.classList.add('jp-mod-executing')
+    })
     const cap = await runFrameCommand(deps, 'captureTarget')
     const target = cap.value as { uuid: string; index: number; fingerprint: string }
 

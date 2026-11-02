@@ -137,13 +137,119 @@ describe('KaggleFrameAdapter：命令阶梯与后置条件', () => {
     })
     w.document
       .querySelector('[data-command="notebook:run-cell"]')!
-      .addEventListener('click', () => order.push('run'))
+      .addEventListener('click', () => {
+        order.push('run')
+        // 真运行：prompt 变 [*]，执行类落到 cell
+        target.querySelector('.jp-InputPrompt')!.textContent = '[*]:'
+        target.classList.add('jp-mod-executing')
+      })
     const a = new KaggleFrameAdapter(docOf(w), { ...fast, isVisible: () => false })
     // `a.cells()[2]` = index 2 = 第二个 `.jp-CodeCell`（监听器装的就是它）
     const r = await a.runCell(a.cells()[2]!)
-    expect(r.ok).toBe(true)
+    expect(r).toMatchObject({ ok: true, detail: 'running' })
     expect(order.slice(0, 2)).toEqual(['select', 'run'])
     expect(target.classList.contains('jp-mod-selected')).toBe(true)
+  })
+
+  it('runCell：点了之后 cell 没进入执行 ⇒ 失败且标可重试（2026-11-02 13:20 事故）', async () => {
+    const w = dom(FRAME)
+    const target = w.document.querySelectorAll('.jp-CodeCell')[1]!
+    target.classList.add('jp-mod-selected')
+    let clicks = 0
+    w.document
+      .querySelector('[data-command="notebook:run-cell"]')!
+      .addEventListener('click', () => {
+        clicks += 1
+      })
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const r = await a.runCell(a.cells()[2]!)
+    expect(clicks).toBe(1)
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.retry).toBe(true)
+      expect(r.reason).toContain('未进入执行状态')
+    }
+  })
+
+  it('runCell：cell 已在执行/排队 ⇒ 直接成功，不再点运行（避免重试变双跑）', async () => {
+    const w = dom(FRAME)
+    const target = w.document.querySelectorAll('.jp-CodeCell')[1]!
+    target.classList.add('jp-mod-selected')
+    target.querySelector('.jp-InputPrompt')!.textContent = '[*]:'
+    let clicks = 0
+    w.document
+      .querySelector('[data-command="notebook:run-cell"]')!
+      .addEventListener('click', () => {
+        clicks += 1
+      })
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const r = await a.runCell(a.cells()[2]!)
+    expect(r).toMatchObject({ ok: true, detail: 'already-running' })
+    expect(clicks).toBe(0)
+  })
+
+  it('runCell：内核 connecting ⇒ 不点运行，返回可重试失败（等会话真起来）', async () => {
+    const w = dom(FRAME)
+    const target = w.document.querySelectorAll('.jp-CodeCell')[1]!
+    target.classList.add('jp-mod-selected')
+    const indicator = w.document.createElement('div')
+    indicator.className = 'jp-Notebook-ExecutionIndicator'
+    indicator.setAttribute('data-status', 'connecting')
+    w.document.body.append(indicator)
+    let clicks = 0
+    w.document
+      .querySelector('[data-command="notebook:run-cell"]')!
+      .addEventListener('click', () => {
+        clicks += 1
+      })
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const r = await a.runCell(a.cells()[2]!)
+    expect(clicks).toBe(0)
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.retry).toBe(true)
+      expect(r.reason).toContain('连接')
+    }
+  })
+
+  it('runCell：排队一闪而过（iframe 重载清掉）⇒ 不算执行，返回可重试失败', async () => {
+    const w = dom(FRAME)
+    const target = w.document.querySelectorAll('.jp-CodeCell')[1]!
+    target.classList.add('jp-mod-selected')
+    const prompt = target.querySelector('.jp-InputPrompt')!
+    w.document
+      .querySelector('[data-command="notebook:run-cell"]')!
+      .addEventListener('click', () => {
+        prompt.textContent = '[*]:'
+        target.classList.add('jp-mod-executing')
+      })
+    let waits = 0
+    const wait = async (): Promise<void> => {
+      waits += 1
+      if (waits === 1) {
+        // 沉淀窗里 iframe 重载：排队状态被清回点击前的样子
+        prompt.textContent = '[2]:'
+        target.classList.remove('jp-mod-executing')
+      }
+    }
+    const a = new KaggleFrameAdapter(docOf(w), { ...fast, wait })
+    const r = await a.runCell(a.cells()[2]!)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.retry).toBe(true)
+  })
+
+  it('runCell：点完瞬间跑完（prompt 只变号）也算执行，不误报失败', async () => {
+    const w = dom(FRAME)
+    const target = w.document.querySelectorAll('.jp-CodeCell')[1]!
+    target.classList.add('jp-mod-selected')
+    w.document
+      .querySelector('[data-command="notebook:run-cell"]')!
+      .addEventListener('click', () => {
+        target.querySelector('.jp-InputPrompt')!.textContent = '[3]:'
+      })
+    const a = new KaggleFrameAdapter(docOf(w), fast)
+    const r = await a.runCell(a.cells()[2]!)
+    expect(r.ok).toBe(true)
   })
 
   it('scroll：默认容器无效时兜底 scrollIntoView；完全没有 cell ⇒ 失败', () => {

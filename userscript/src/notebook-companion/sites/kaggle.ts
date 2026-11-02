@@ -17,7 +17,12 @@ export interface KaggleHooks {
   maxScanSteps?: number
   /** select 轮询上界（ms）。 */
   selectTimeoutMs?: number
+  /** 点运行后等「cell 真的开始执行」的上界（ms）；超过 ⇒ 可重试失败。 */
+  runStartTimeoutMs?: number
 }
+
+/** 运行 / 排队中的 cell 标记（JupyterLab 在提示符与类上各写一份）。 */
+const RUNNING_CLASSES = ['jp-mod-executing', 'jp-mod-running']
 
 /**
  * 折叠开关：代码与 markdown 段都走这里。
@@ -163,7 +168,10 @@ export class KaggleFrameAdapter implements FrameAdapter {
   readonly site: SiteId = 'kaggle'
   private notebookEl: Element | null = null
   private readonly hooks: Required<
-    Pick<KaggleHooks, 'isVisible' | 'wait' | 'nextFrame' | 'maxScanSteps' | 'selectTimeoutMs'>
+    Pick<
+      KaggleHooks,
+      'isVisible' | 'wait' | 'nextFrame' | 'maxScanSteps' | 'selectTimeoutMs' | 'runStartTimeoutMs'
+    >
   >
   private unfoldObserver: {
     observe(node: Node, init: MutationObserverInit): void
@@ -187,6 +195,7 @@ export class KaggleFrameAdapter implements FrameAdapter {
       nextFrame: hooks.nextFrame ?? defaultNextFrame,
       maxScanSteps: hooks.maxScanSteps ?? 400,
       selectTimeoutMs: hooks.selectTimeoutMs ?? 700,
+      runStartTimeoutMs: hooks.runStartTimeoutMs ?? 2500,
     }
   }
 
@@ -430,16 +439,69 @@ export class KaggleFrameAdapter implements FrameAdapter {
     return { ok: false, reason: `${id} 点击了但后置条件不成立（无效果）` }
   }
 
+  private promptText(cell: CellRef): string {
+    const el = this.cellEl(cell)
+    const prompt = el ? q<HTMLElement>(el, SEL.inputPrompt) : null
+    return (prompt?.textContent ?? '').replace(/\s+/g, '')
+  }
+
+  /** 执行/排队证据：`[*]` 提示符或执行类。注意「点了命令」本身不算证据。 */
+  private isExecuting(cell: CellRef): boolean {
+    const el = this.cellEl(cell)
+    if (!el) return false
+    if (RUNNING_CLASSES.some((c) => el.classList.contains(c))) return true
+    return this.promptText(cell).includes('*')
+  }
+
+  /** 内核状态；指示器缺失 ⇒ unknown（照常点 + 验证，不因认不出就停摆）。 */
+  private kernelStatus(): string {
+    const ind = deepQuery(this.doc, SEL.kernelStatus)
+    return (ind?.getAttribute('data-status') ?? '').toLowerCase() || 'unknown'
+  }
+
   async runCell(cell: CellRef): Promise<CmdResult> {
     const sel = await this.select(cell)
     if (!sel.ok) return sel
-    const before = this.outputText(cell)
-    const r = await this.command('notebook:run-cell')
-    const alt = r.ok ? r : await this.command('runmenu:run') // 工具栏/溢出菜单里的那份
-    if (!alt.ok) return alt
-    await this.hooks.wait(100)
-    if (this.outputText(cell) !== before) return { ok: true, detail: 'running' }
-    return { ok: true, detail: 'queued?' } // 运行有可见效果；无 busy 类也不当失败
+    const beforePrompt = this.promptText(cell)
+    const beforeOutput = this.outputText(cell)
+    const queued = this.isExecuting(cell)
+    // 内核还在连接时点运行多半是空点（2026-11-02 13:20 事故）：留给调度器在迟到窗口内重试。
+    // 已排队时也先不点（上一次点击可能已生效）：等内核连上并确认执行仍在，避免双跑。
+    if (!queued && this.kernelStatus() === 'connecting') {
+      return { ok: false, retry: true, reason: '内核正在连接（等会话就绪后再运行）' }
+    }
+    if (!queued) {
+      const r = await this.command('notebook:run-cell')
+      const alt = r.ok ? r : await this.command('runmenu:run') // 工具栏/溢出菜单里的那份
+      if (!alt.ok) return alt
+    }
+    const step = 100
+    /** 证据要持续一小会儿：iframe 重载会把排队状态清掉，一闪而过不能算数。 */
+    const holdMs = 250
+    for (let waited = 0; waited <= this.hooks.runStartTimeoutMs; waited += step) {
+      // connecting 期间的 `[*]` 可能是「排队但连不上」：等内核真连上再认账
+      if (this.kernelStatus() !== 'connecting') {
+        if (this.isExecuting(cell)) {
+          await this.hooks.wait(holdMs)
+          if (this.isExecuting(cell) && this.kernelStatus() !== 'connecting') {
+            return { ok: true, detail: queued ? 'already-running' : 'running' }
+          }
+          continue // 证据在沉淀窗里消失 ⇒ 当作没执行，继续等
+        }
+        // 秒完的 cell 不一定留下 `[*]`，也不一定有输出：提示符变号同样是执行证据
+        if (this.promptText(cell) !== beforePrompt) return { ok: true, detail: 'ran' }
+        if (this.outputText(cell) !== beforeOutput) return { ok: true, detail: 'running' }
+      }
+      await this.hooks.wait(step)
+    }
+    return {
+      ok: false,
+      retry: true,
+      reason:
+        this.kernelStatus() === 'connecting'
+          ? '点击运行后内核仍在连接（cell 未确认开始执行）'
+          : '点击了运行，但 cell 未进入执行状态（命令可能空点）',
+    }
   }
 
   async clearCellOutput(cell: CellRef): Promise<CmdResult> {

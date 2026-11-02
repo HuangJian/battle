@@ -75,13 +75,36 @@ describe('bridge：host ⇄ frame', () => {
     host.destroy()
   })
 
-  it('host：frame 不回 ⇒ 超时是失败（不假装成功）', async () => {
+  it('host：frame 不回 ⇒ 超时是失败且可重试（不假装成功、不浪费一次性任务）', async () => {
     const f = fakeWindow()
     const host = createHostBridge(f.win, { timeoutMs: 20 })
     host.attach(FRAME, 'frame-window', 'n1')
     const r = await host.send('flush')
     expect(r.ok).toBe(false)
     expect(r.reason).toContain('超时')
+    expect(r.retry).toBe(true)
+    host.destroy()
+  })
+
+  it('host：frame 结果里的 retry 原样带回（runCell 空点/内核没起来）', async () => {
+    const f = fakeWindow()
+    const host = createHostBridge(f.win, { timeoutMs: 500 })
+    host.attach(FRAME, 'frame-window', 'n1')
+    const pending = host.send('runCell', { uuid: 'u1' })
+    const cmd = f.sent[1]!.msg as { id?: string }
+    f.fire({
+      data: {
+        __bnc: 1,
+        kind: 'result',
+        nonce: 'n1',
+        id: cmd.id,
+        ok: false,
+        retry: true,
+        reason: '内核正在连接',
+      },
+      origin: FRAME,
+    })
+    expect(await pending).toEqual({ ok: false, retry: true, reason: '内核正在连接' })
     host.destroy()
   })
 

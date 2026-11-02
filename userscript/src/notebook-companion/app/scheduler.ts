@@ -9,7 +9,9 @@
  *      「到没到」永远由 `now` 与 `nextAt` 现算；
  *   ② 同一个 occurrence 只执行一次：claim 先落 GM 存储，等 `claimSettleMs` 再读回，
  *      不是自己就退让；
- *   ③ claim 一旦写下就不再重试（页面崩在动作里也算「结果未知」，不自动补跑）；
+ *   ③ 落定的 claim 不再重试（页面崩在动作里也算「结果未知」，不自动补跑）；唯一例外是
+ *      `run()` 明确回 `retry`（内核还没连上 / 命令空点）：occurrence 记 `waiting`，任务保留，
+ *      下一拍照常 claim 互斥但**不再弹确认**，迟到窗口一过就 skipped 消耗；
  *   ④ **任务表按页分桶**（`tasksKeyFor`：notebook + 本页标签）：每个页面只看得见、也只吃得到
  *      自己设的任务。旧版全局键 `bnc:tasks` 是事故源（另一页 tick 到点就把它记成 skipped 并删掉，
  *      2026-11-02 两个凌晨任务被隔壁 Kaggle 页静默吃掉）⇒ 现已废弃，只作一次性搬迁来源。
@@ -52,14 +54,14 @@ export interface SchedulerTask {
 
 /** 调度事件（boot 拿它写操作日志 / 面板历史；本模块不认识 dashboard）。 */
 export interface SchedulerEvent {
-  kind: 'add' | 'remove' | 'enable' | 'claim' | 'run' | 'skip' | 'drop'
+  kind: 'add' | 'remove' | 'enable' | 'claim' | 'retry' | 'run' | 'skip' | 'drop'
   task: SchedulerTask
   /** `run` 的成功与否；其余见各 kind 的 reason。 */
   ok?: boolean
   reason?: string
 }
 
-export type OccurrenceState = 'claimed' | 'succeeded' | 'failed' | 'skipped'
+export type OccurrenceState = 'claimed' | 'waiting' | 'succeeded' | 'failed' | 'skipped'
 
 export interface Occurrence {
   state: OccurrenceState
@@ -120,8 +122,11 @@ export interface SchedulerDeps {
   onEvent?: (e: SchedulerEvent) => void
   /** 到点后的 10s 倒数/取消；返回 false = 用户取消（隐藏页由 boot 直接放行）。 */
   confirm: (task: SchedulerTask, occurrence: string) => Promise<boolean>
-  /** 真正执行（bridge / 外层 Stop 按钮都归 boot）。 */
-  run: (task: SchedulerTask) => Promise<{ ok: boolean; reason?: string }>
+  /**
+   * 真正执行（bridge / 外层 Stop 按钮都归 boot）。
+   * `retry:true` = 此刻条件不成立（内核没起来等），保留任务到下一拍；窗口外不再试。
+   */
+  run: (task: SchedulerTask) => Promise<{ ok: boolean; reason?: string; retry?: boolean }>
   onChange?: () => void
   pollMs?: number
   wait?: (ms: number) => Promise<void>
@@ -259,7 +264,13 @@ function sanitizeOccurrence(raw: unknown): Occurrence | null {
   if (typeof raw !== 'object' || raw === null) return null
   const o = raw as Record<string, unknown>
   const state = o.state
-  if (state !== 'claimed' && state !== 'succeeded' && state !== 'failed' && state !== 'skipped') {
+  if (
+    state !== 'claimed' &&
+    state !== 'waiting' &&
+    state !== 'succeeded' &&
+    state !== 'failed' &&
+    state !== 'skipped'
+  ) {
     return null
   }
   if (typeof o.by !== 'string' || typeof o.at !== 'number' || !Number.isFinite(o.at)) return null
@@ -286,6 +297,8 @@ export function eventOpName(e: SchedulerEvent): string {
       return 'schedule:enable'
     case 'claim':
       return 'schedule:claim'
+    case 'retry':
+      return 'schedule:retry'
     case 'run':
       return e.ok === false ? 'schedule:run:fail' : 'schedule:run:ok'
     case 'skip':
@@ -442,6 +455,14 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
     return null
   }
 
+  /** claim → 沉淀窗 → 读回转正；不是自己的就退让（返回 false）。 */
+  const claimSettled = async (occId: string): Promise<boolean> => {
+    record(occId, { state: 'claimed', by: deps.writer, at: deps.now() })
+    await wait(Math.max(0, deps.claimSettleMs))
+    const settled = readOccurrences()[occId]
+    return settled?.by === deps.writer && settled.state === 'claimed'
+  }
+
   const tickOnce = async (): Promise<void> => {
     const now = deps.now()
     for (const task of readTasks()) {
@@ -450,8 +471,10 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       //   （2026-11-02 事故：隔壁 Kaggle 页把别的 notebook 的两个任务静默吃掉了）。
       if (!ownTask(task)) continue
       const occId = `${task.id}|${occurrenceKey(parts(task.nextAt))}`
-      if (readOccurrences()[occId]) {
-        dropTask(task.id) // 防御：已处理过的任务不该再留着
+      const existing = readOccurrences()[occId]
+      // waiting = 上一次「可重试失败」留下的待办；其余状态一律视为已处理完（防御性消耗）。
+      if (existing && existing.state !== 'waiting') {
+        dropTask(task.id)
         emit('drop', task, { reason: 'occurrence 已存在' })
         continue
       }
@@ -462,44 +485,69 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       const bad = bindingError(task)
       const expired = now - task.nextAt > grace
       if (bad || expired) {
-        const reason = bad ?? '已过期（超出迟到窗口，不补跑）'
+        // 重试一直在等（例如内核始终没连上）⇒ 窗口外放弃，但必须写明是重试超时
+        const reason =
+          expired && existing
+            ? '重试超时（超出迟到窗口，不补跑）'
+            : (bad ?? '已过期（超出迟到窗口，不补跑）')
         record(occId, { state: 'skipped', by: deps.writer, at: now, reason })
         dropTask(task.id)
         emit('skip', task, { reason })
         continue
       }
-      // ① claim（落盘后别的页签看得见）→ ② 沉淀窗 → ③ 读回转正。
-      record(occId, { state: 'claimed', by: deps.writer, at: now })
-      emit('claim', task)
-      await wait(Math.max(0, deps.claimSettleMs))
-      const settled = readOccurrences()[occId]
-      if (!settled || settled.by !== deps.writer || settled.state !== 'claimed') {
-        dropTask(task.id)
-        emit('drop', task, { reason: 'claim 被别处覆盖（跨页签互斥）' })
-        continue
+      if (existing) {
+        // 等待重试：确认只在到点那一次发生（不重复弹窗），但仍要 claim 一次做跨页签互斥
+        if (!(await claimSettled(occId))) {
+          dropTask(task.id)
+          emit('drop', task, { reason: '重试 claim 被别处覆盖（跨页签互斥）' })
+          continue
+        }
+        emit('retry', task, existing.reason ? { reason: existing.reason } : {})
+      } else {
+        // ① claim（落盘后别的页签看得见）→ ② 沉淀窗 → ③ 读回转正。
+        record(occId, { state: 'claimed', by: deps.writer, at: now })
+        emit('claim', task)
+        await wait(Math.max(0, deps.claimSettleMs))
+        const settled = readOccurrences()[occId]
+        if (!settled || settled.by !== deps.writer || settled.state !== 'claimed') {
+          dropTask(task.id)
+          emit('drop', task, { reason: 'claim 被别处覆盖（跨页签互斥）' })
+          continue
+        }
+        let proceed = false
+        try {
+          proceed = await deps.confirm(task, occId)
+        } catch {
+          proceed = false
+        }
+        if (!proceed) {
+          record(occId, {
+            state: 'skipped',
+            by: deps.writer,
+            at: deps.now(),
+            reason: '用户取消',
+          })
+          dropTask(task.id)
+          emit('skip', task, { reason: '用户取消' })
+          continue
+        }
       }
-      let proceed = false
-      try {
-        proceed = await deps.confirm(task, occId)
-      } catch {
-        proceed = false
-      }
-      if (!proceed) {
-        record(occId, {
-          state: 'skipped',
-          by: deps.writer,
-          at: deps.now(),
-          reason: '用户取消',
-        })
-        dropTask(task.id)
-        emit('skip', task, { reason: '用户取消' })
-        continue
-      }
-      let result: { ok: boolean; reason?: string }
+      let result: { ok: boolean; reason?: string; retry?: boolean }
       try {
         result = await deps.run(task)
       } catch (e) {
         result = { ok: false, reason: e instanceof Error ? e.message : String(e) }
+      }
+      if (!result.ok && result.retry) {
+        // 可重试失败：任务与 occurrence 都留着，下一拍（会话起来后）再试；窗口外由上面的 expired 兜底
+        record(occId, {
+          state: 'waiting',
+          by: deps.writer,
+          at: deps.now(),
+          ...(result.reason ? { reason: result.reason } : {}),
+        })
+        emit('retry', task, result.reason ? { reason: result.reason } : {})
+        continue
       }
       record(occId, {
         state: result.ok ? 'succeeded' : 'failed',

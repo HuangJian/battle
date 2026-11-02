@@ -17,6 +17,8 @@ export interface BridgeMessage {
   ok?: boolean
   value?: unknown
   reason?: string
+  /** 此刻不成立但稍后可能成立（调度器保留任务再试）。 */
+  retry?: boolean
   href?: string
   notebook?: boolean
   /** frame 实际写入的日志会话键（含页面标签）；host 用它做「打开日志」链接。 */
@@ -70,7 +72,10 @@ export interface HostBridge {
   attach(origin: string, target: unknown, nonce?: string): void
   /** 外层 URL 推出的 notebook 会话基：随 attach 下发，frame 用它替换自己猜出的 unknown。 */
   setSessionBase(base: string): void
-  send(name: string, args?: unknown): Promise<{ ok: boolean; value?: unknown; reason?: string }>
+  send(
+    name: string,
+    args?: unknown,
+  ): Promise<{ ok: boolean; value?: unknown; reason?: string; retry?: boolean }>
   destroy(): void
 }
 
@@ -81,7 +86,10 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
   let sessionBase = ''
   const pending = new Map<
     string,
-    { resolve: (r: { ok: boolean; value?: unknown; reason?: string }) => void; timer: number }
+    {
+      resolve: (r: { ok: boolean; value?: unknown; reason?: string; retry?: boolean }) => void
+      timer: number
+    }
   >()
   const timeoutMs = hooks.timeoutMs ?? 5000
 
@@ -111,6 +119,7 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
       ok: m.ok === true,
       ...(m.value === undefined ? {} : { value: m.value }),
       ...(m.reason ? { reason: m.reason } : {}),
+      ...(m.retry === true ? { retry: true } : {}),
     })
   }
   win.addEventListener('message', listener)
@@ -138,14 +147,18 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
     },
     send(name: string, args?: unknown) {
       if (frameTarget === null) {
-        return Promise.resolve({ ok: false, reason: `cmd ${name} 尚未 attach（没有 frame 目标）` })
+        return Promise.resolve({
+          ok: false,
+          retry: true,
+          reason: `cmd ${name} 尚未 attach（没有 frame 目标）`,
+        })
       }
       const target = frameTarget
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
           pending.delete(id)
-          resolve({ ok: false, reason: `cmd ${name} 超时（${timeoutMs}ms）` })
+          resolve({ ok: false, retry: true, reason: `cmd ${name} 超时（${timeoutMs}ms）` })
         }, timeoutMs) as unknown as number
         pending.set(id, { resolve, timer })
         win.postMessage(
@@ -168,7 +181,7 @@ export interface FrameBridgeHooks {
   handle: (
     name: string,
     args: unknown,
-  ) => Promise<{ ok: boolean; value?: unknown; reason?: string }>
+  ) => Promise<{ ok: boolean; value?: unknown; reason?: string; retry?: boolean }>
   /** ready 里的 `notebook`：宿主据此判断「frame 里真的出现笔记本了」。 */
   isReady?: () => boolean
   /** ready/status 里回报本页的会话键（多开页签时 host 必须拿到**这一页**的，不是自己猜的）。 */

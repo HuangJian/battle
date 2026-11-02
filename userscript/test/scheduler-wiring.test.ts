@@ -44,4 +44,13 @@ describe('调度器接线：页面身份 + 操作日志', () => {
   it('卸下页面时把队列尽量投完（否则「点了但没日志」）', () => {
     expect(BOOT.match(/op\('dispose'\)\n\s+ops\.stop\(\)/g)?.length ?? 0).toBe(2)
   })
+
+  it('retry 接线不可漂：未就绪/桥失败的可重试标记必须交到调度器', () => {
+    // 「笔记本还没连上」不是终局失败：保留一次性任务，等会话起来再跑
+    expect(BOOT).toContain("retry: true, reason: '笔记本未连接（等待 iframe）'")
+    // host 的 fromBridge 与 single 的 toCmd 各透传一次 retry
+    expect(BOOT.match(/\.\.\.\(r\.retry \? \{ retry: true \} : \{\}\)/g)?.length ?? 0).toBe(2)
+    // 可重试的中间态不进执行历史（否则每 20s 一行）
+    expect(BOOT.match(/if \(!result\.retry\) recordHistory\(task, result\)/g)?.length ?? 0).toBe(2)
+  })
 })

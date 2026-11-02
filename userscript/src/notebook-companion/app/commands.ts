@@ -70,12 +70,14 @@ export interface CommandReply {
   ok: boolean
   value?: unknown
   reason?: string
+  /** 此刻不成立但稍后可能成立（调度器据此保留一次性任务）。 */
+  retry?: boolean
 }
 
 const fromCmd = (r: CmdResult): CommandReply =>
   r.ok
     ? { ok: true, ...(r.detail === undefined ? {} : { value: r.detail }) }
-    : { ok: false, reason: r.reason }
+    : { ok: false, reason: r.reason, ...(r.retry ? { retry: true } : {}) }
 
 export async function runFrameCommand(
   deps: CommandDeps,
