@@ -41,6 +41,29 @@ def test_even_window_covers_all_in_ceil_rounds() -> None:
     assert all(w == sorted(w) for w in rounds), "窗口必须排序（顺序进 data_fp）"
 
 
+def test_even_epoch_blocks_tile_across_checkpoints() -> None:
+    """z5 的形态（35 关 / 每轮 7 关）：**对齐 `it=1` 的每 `ceil(n/k)` 轮一个块**，块内无重、
+    并集 == 全集。
+
+    为什么要单钉一条（2026-11-03 评审）：窗口本身是**每 epoch 换一次的随机排列**，隔着看 12 轮
+    （跨块边界）很像「每轮随机抓 7 关」；真正的判据是块。块错位（`pos` 用了 epoch 内的相对值、
+    或断点续跑从块中间起新块）时，单 epoch 的用例仍然绿，但会有关卡长跑都采不到。
+    """
+    stages = [2000 + i for i in range(35)]
+    per_epoch, k = 5, 7
+    windows = {
+        it: window_for(mode="even", it=it, all_stages=stages, rotate_seed=20261103, per_it=k)
+        for it in range(1, 4 * per_epoch + 1)
+    }
+    for start in range(1, 4 * per_epoch + 1, per_epoch):
+        block = [s for it in range(start, start + per_epoch) for s in windows[it]]
+        assert sorted(block) == stages, f"块 it{start}..{start + per_epoch - 1} 没铺满：{block}"
+        assert len(set(block)) == len(block), "块内重复采了同一关"
+        for a in range(start, start + per_epoch):
+            for b in range(a + 1, start + per_epoch):
+                assert not set(windows[a]) & set(windows[b]), f"块内 it{a}/it{b} 窗口重叠"
+
+
 def test_window_is_resume_stable() -> None:
     """判据 4：同 `(rotate_seed, it)` **两次独立构造**逐元素相同；换 seed 才变。"""
     stages = list(range(10))
