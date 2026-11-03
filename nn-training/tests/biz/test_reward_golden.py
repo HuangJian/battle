@@ -965,9 +965,9 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    # v15（2026-11-03，wall-press-two-legs rev2）：列宽 90。**版本断言随每次加列一起改**，
-    # 它是"这条腿的语料必须重采"的硬提醒。
-    assert METRICS_VERSION == 15
+    # v16（2026-11-03）：pickupDist 由曼哈顿改 BFS 路径（列宽仍 90）。**版本断言随每次
+    # 语义/列数变更一起改**，它是"这条腿的语料必须重采"的硬提醒。
+    assert METRICS_VERSION == 16
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

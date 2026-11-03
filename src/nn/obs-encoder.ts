@@ -237,7 +237,8 @@ export const SPAWN_COUNTDOWN_MS = 1000
  *  ⚠ 3 → 2：S7 探针实测（plan §3-S7 ①）两个策略口径的 p99 均 = 1（≤ 2）⇒ 按 §2.4 的
  *  预注册规则取 /2（0/1/2 满量程；/3 会留一个几乎读不到的 1.0 档）。改回去等于让探针白跑。 */
 export const MY_BULLETS_CAP = 2
-/** s32 `pickupDist` 归一化分母（格；与 `reward_validation` 的 0–50 值域同源）。 */
+/** s32 `pickupDist` 归一化分母（格；**观测口径**的曼哈顿直距上界 50）。
+ *  ⚠ 与 metrics idx40 已分家：奖励侧 v16 起是 BFS 路径距离（上界 624），别把两个分母/口径对齐。 */
 export const PICKUP_DIST_NORM = 50
 /** s35 `wallDist` 归一化分母（格；半场宽 26/2 = 13，中心格读数 ≈12/13）。 */
 export const WALL_DIST_NORM = 13

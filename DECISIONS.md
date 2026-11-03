@@ -10905,3 +10905,51 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **被否决**：删 worktree（A/B 对照需要）· 在测试内部 skip（只挡一个目录，换名再犯）·
   让根套件依赖 dashboard 的安装状态。
 - **验收**：`bun run check` 绿；`tests/test-silent-scope.test.ts` 绿。
+
+## §2026-11-03-goalnn-pickup-path-dist（`pickupDist` 原地改 BFS 路径距离；版本 15→16）
+
+- **现场**：`pickupDist`（idx40，v7 起的趋近势能量纲）是**中心格曼哈顿直距**。道具在墙另一侧时
+  直距可以是 2，实际绕行 15–20 格 ⇒ `-wApproach·pickupDist` 在墙这侧的最近点取到最小代价，
+  势能把策略钉在那儿（再迈一步 dist 变大）。
+- **决定**：① **原地改** `nearestPickupDist`（列号/列名/行宽 90 全不变，不加新列）：4 邻接 BFS，
+  「格可走」= **2×2 车身能覆盖它**（`utils/grid-search.ts::isPassable`，与 A\* / 关卡生成器同一份
+  阻车谓词：brick/steel/water/base 阻车 ⇒ 1 格宽走廊不算路）；不可达 / 无存活拾取 / 玩家不在场
+  ⇒ 哨兵 −1（公式侧 `where` 归零），**不拿直距冒充可达性**。② `METRICS_VERSION` 15→16：同名列换了
+  量纲，旧 v15 shard 必须响亮拒收（先例：v14 是纯 mask 语义变更、列宽不变也 bump）。
+  ③ `DEFAULT_RANGES['pickupDist']` `(-1, 50)` → `(-1, 624)`（25×25 可站格 −1）。
+  ④ 砖墙按「此刻阻挡」计（打穿后下一拍自然变短），不做 `breakBrick` 乐观通行。
+- **被否决**：新增 `pickupPathDist` 列（误导性的旧列会留在 ~120 个课程公式里，且双份维护）·
+  只截断/缩放旧值（单位错不是量级问题）· 顺手把观测 s32 也改成 BFS（改 obs = `OBS_SCHEMA_MAJOR`
+  bump + 全权重作废，代价大一个量级，另立纪元）· 用曼哈顿兜底不可达（等于把 bug 留在哨兵语义里）。
+- **边界**：BFS ≥ 曼哈顿 ⇒ `Σwhere0(pickupDist)` 只会变大，按旧口径标定的 `wApproach` 剂量
+  （x5/y\* 系列）复用前必须重算；`z4-pick-approach` 结算 ⑥ 曾**撤回**「曼哈顿导致卡墙」的初判
+  （32 局逐 tick 重测：没捡的道具最近只到过 2 格）⇒ 本腿是量纲保真修复，**不等于已证实的行为提升**，
+  行为 A/B（700 局）未跑。obs s32–s34 仍是曼哈顿 + 像素方向向量，与奖励列**刻意不同源**。
+- **验收**：先红后绿的复现用例 `tests/pickup-dist-metric.test.ts`（墙后 4 格直距 → 28 格路径；
+  封闭盒道具 ⇒ −1 且不参与最近者；独立 BFS 重实现对账；determinism）；
+  `tests/export-rl-rollout-metrics.test.ts`（列序 oracle + 独立 BFS 重算）；
+  `nn-training/tests/biz/test_reward_golden.py` 64 passed（golden 只变 `metrics_version`）。
+
+## §2026-11-03-goalnn-pickup-bfs-dist（`pickupDist`(40) 改 BFS 路径距离：曼哈顿把墙后道具读成「就在隔壁」）
+
+- **口径**：metrics idx40 `pickupDist` 由「最近存活拾取中心格的曼哈顿距」改为**BFS 路径距离**
+  （玩家中心格 → 拾取中心格；格可走 = **2×2 车身能覆盖**，`utils/grid-search.ts::isPassable`：
+  brick/steel/water/base 阻车）。不可达 / 无存活拾取 / 玩家不在场 ⇒ 哨兵 −1。
+  砖按**此刻**阻挡计（打穿后下一拍自然变短），不做 `breakBrick` 乐观通行。
+- **理由**：势能项 `-wApproach*where(pickupDist<0,0,pickupDist)` 的量纲必须随**实际行程**单调下降。
+  墙另一侧的道具直距 2 格、绕行 15–20 格 ⇒ Φ 的最低点在墙这侧，策略停在「最近但走不到」的点。
+- **版本**：`METRICS_VERSION` 15→16（列宽仍 90，同名列换了量 ⇒ 旧 v15 语料不可混训）；
+  `DEFAULT_RANGES.pickupDist` 50→**624**（2×2 可站格 25×25 − 1）；golden 只有 `metrics_version` 变
+  （v7 corpus 不填 idx40，且 `where(0<0,0,0)=0` ⇒ 64 例 reward 逐位不变，已用最近重生成产物对账）。
+- **不改**：obs s32–s34 仍是 `nearestPickupCenter` 的曼哈顿直距 + 像素方向 —— 改 obs = `OBS_SCHEMA_MAJOR`
+  bump + 全权重作废，本腿只动奖励侧量纲；两个量各有 doc 注释、互不替换。
+- **不改课程剂量**：多数 `wApproach` 走 `where` 无 cap，而 BFS ≥ 直距 ⇒ 同剂量下塑形更贵；
+  重跑前先按新分布重标定（`z4-pick-approach` 那类 `min(pickupDist, cap)` 公式天然有界）。
+- **既有证据的边界**：`z4-pick-approach` ⑥ 曾用 32 局逐 tick 复测**撤回**「曼哈顿致卡墙」的判断
+  （未捡道具最大接近 2 格、路径仅 2–4 格）。本改动**不宣称**修复那条曲线 —— 它是量纲正确性修复，
+  行为收益须由新语料 A/B 判定（v15 shard 与新口径不可比）。
+- **被否决**：在公式侧改写 `where`/加 cap（列语义仍错）· 用中心格 BFS（1 格宽走廊会被当成路）·
+  顺带把 obs 也换口径（权重全废，超出本腿）· 不 bump 版本混训旧 shard。
+- **验收**：`tests/pickup-dist-metric.test.ts`（墙后 30 格绕行 / 封闭盒不可达 → 哨兵 / 多拾取 / BONUS 窗 /
+  determinism，独立 BFS 重实现逐行对账）、`tests/export-rl-rollout-metrics.test.ts`（列序 + 独立 BFS）、
+  `nn-training/tests/biz/test_reward_golden.py`（v16 断言）。

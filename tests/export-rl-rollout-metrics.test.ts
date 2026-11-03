@@ -202,9 +202,9 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[86]).toBe('thCostBreachAimed')
     expect(names[87]).toBe('thCostDirect')
     expect(names[88]).toBe('thCostDirectAimed')
-    // v15：wallPressTicks 追加在尾部（idx89），列数变更必须 bump 版本。
+    // v15：wallPressTicks 追加在尾部（idx89）；v16：pickupDist 换口径（列宽不变）。
     expect(names[89]).toBe('wallPressTicks')
-    expect(py).toContain('METRICS_VERSION = 15')
+    expect(py).toContain('METRICS_VERSION = 16')
   })
 
   it('v15 wallPressTicks：累计值原样落在 idx89', () => {
@@ -393,19 +393,61 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(row.slice(31, 39)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
   })
 
-  it('pickupDist 写入 idx40（metrics v7）：独立重算 vs buildMetricsRow 逐位一致', () => {
-    // 独立重实现（不看生产 helper）：中心格曼哈顿，跳过非存活拾取。
-    const indepPickupDist = (w: ReturnType<typeof seedWorld>): number => {
+  it('pickupDist 写入 idx40（metrics v16 起 = BFS 路径距离）：独立重算 vs buildMetricsRow 逐位一致', () => {
+    // 独立重实现（不看生产 helper）：2×2 车身可覆盖格作 BFS，跳过非存活/不可达拾取。
+    const blocks = (t: string): boolean =>
+      t === 'brick' || t === 'steel' || t === 'water' || t === 'base'
+    const coverable = (w: ReturnType<typeof seedWorld>, col: number, row: number): boolean => {
+      for (const [dc, dr] of [
+        [0, 0],
+        [-1, 0],
+        [0, -1],
+        [-1, -1],
+      ] as const) {
+        const ac = col + dc
+        const ar = row + dr
+        if (ac < 0 || ac + 1 >= 26 || ar < 0 || ar + 1 >= 26) continue
+        const ok =
+          !blocks(w.tileMap.grid[ar][ac]) &&
+          !blocks(w.tileMap.grid[ar][ac + 1]) &&
+          !blocks(w.tileMap.grid[ar + 1][ac]) &&
+          !blocks(w.tileMap.grid[ar + 1][ac + 1])
+        if (ok) return true
+      }
+      return false
+    }
+    const indepPickupPathDist = (w: ReturnType<typeof seedWorld>): number => {
       const p = w.player
       if (!p || !p.alive) return PICKUP_DIST_SENTINEL
-      const pc = { col: Math.floor((p.x + p.w / 2) / 16), row: Math.floor((p.y + p.h / 2) / 16) }
+      const pc = Math.floor((p.x + p.w / 2) / 16)
+      const pr = Math.floor((p.y + p.h / 2) / 16)
+      const dist = new Int16Array(26 * 26).fill(-1)
+      dist[pr * 26 + pc] = 0
+      const queue: number[] = [pr * 26 + pc]
+      for (let head = 0; head < queue.length; head++) {
+        const idx = queue[head]
+        const c = idx % 26
+        const r = (idx / 26) | 0
+        for (const [dc, dr] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nc = c + dc
+          const nr = r + dr
+          if (nc < 0 || nc >= 26 || nr < 0 || nr >= 26) continue
+          const n = nr * 26 + nc
+          if (dist[n] !== -1 || !coverable(w, nc, nr)) continue
+          dist[n] = dist[idx] + 1
+          queue.push(n)
+        }
+      }
       let best = PICKUP_DIST_SENTINEL
       for (const pu of w.powerUps) {
         if (!pu.alive) continue
-        const d =
-          Math.abs(Math.floor((pu.x + pu.w / 2) / 16) - pc.col) +
-          Math.abs(Math.floor((pu.y + pu.h / 2) / 16) - pc.row)
-        if (best < 0 || d < best) best = d
+        const d = dist[Math.floor((pu.y + pu.h / 2) / 16) * 26 + Math.floor((pu.x + pu.w / 2) / 16)]
+        if (d >= 0 && (best < 0 || d < best)) best = d
       }
       return best
     }
@@ -425,8 +467,8 @@ describe('export-rl-rollout metrics 行宽', () => {
       makePowerUp(5, 5, 'tank'), // 距 6 格
     )
     const r1 = buildMetricsRow(0, w1, makeTelemetry())
-    expect(r1[40]).toBe(4)
-    expect(r1[40]).toBe(indepPickupDist(w1))
+    expect(r1[40]).toBe(indepPickupPathDist(w1))
+    expect(r1[40]).toBeGreaterThanOrEqual(4) // 路径 ≥ 直距（墙只会变长）
 
     // 同格 = 0；非存活拾取被跳过
     const w2 = withPlayer(2)
@@ -434,7 +476,7 @@ describe('export-rl-rollout metrics 行宽', () => {
     w2.powerUps.push(makePowerUp(5, 5, 'freeze'), makePowerUp(5, 9, 'shield', { alive: false }))
     const r2 = buildMetricsRow(0, w2, makeTelemetry())
     expect(r2[40]).toBe(0)
-    expect(r2[40]).toBe(indepPickupDist(w2))
+    expect(r2[40]).toBe(indepPickupPathDist(w2))
 
     // 无存活拾取 → 哨兵 -1
     const w3 = withPlayer(3)
@@ -442,7 +484,7 @@ describe('export-rl-rollout metrics 行宽', () => {
     w3.powerUps.push(makePowerUp(3, 9, 'star', { alive: false }))
     const r3 = buildMetricsRow(0, w3, makeTelemetry())
     expect(r3[40]).toBe(PICKUP_DIST_SENTINEL)
-    expect(r3[40]).toBe(indepPickupDist(w3))
+    expect(r3[40]).toBe(indepPickupPathDist(w3))
 
     // 玩家不在场（阵亡）→ 哨兵 -1
     const w4 = withPlayer(4)
@@ -451,7 +493,7 @@ describe('export-rl-rollout metrics 行宽', () => {
     w4.powerUps.push(makePowerUp(2, 2, 'star'))
     const r4 = buildMetricsRow(0, w4, makeTelemetry())
     expect(r4[40]).toBe(PICKUP_DIST_SENTINEL)
-    expect(r4[40]).toBe(indepPickupDist(w4))
+    expect(r4[40]).toBe(indepPickupPathDist(w4))
   })
 
   it('puGotOther 写入 idx39（metrics v7）：四桶外拾取的残差记账', () => {

@@ -1,5 +1,5 @@
 {
-  "metrics_version": 15,
+  "metrics_version": 16,
   "generated_by": "worker/scripts/regen_reward_golden.py",
   "cases": [
     {

@@ -76,9 +76,10 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "hitsPower": (0.0, 500.0),
     "hitsArmor": (0.0, 500.0),
     # metrics v7：puGotOther（残差桶，上界同其他拾取桶）+ pickupDist（哨兵 -1；
-    # 真值 = 26×26 场上中心格曼哈顿最大 25+25=50）。
+    # v16 起 = BFS 路径距离，上界 = 2×2 车身可站格数 25×25 − 1 = 624；
+    # v7–v15 的曼哈顿上界 50 已不适用）。
     "puGotOther": (0.0, 30.0),
-    "pickupDist": (-1.0, 50.0),
+    "pickupDist": (-1.0, 624.0),
     # metrics v8：危险暴露四列（plan/x20-dodge-avoidance §2）。加列必须登记域，
     # 否则 symbolic_envelope 角点无法求值（test_all_metrics_have_envelope_range 锁）。
     "playerHpRatio": (0.0, 1.0),  # hp/maxHp，clamp01

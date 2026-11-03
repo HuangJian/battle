@@ -63,6 +63,7 @@ import type { Bullet, Tank } from '../types'
 import type { World } from '../game/World'
 import { TileMap } from '../game/TileMap'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist, snap } from '../utils/helpers'
+import { isPassable } from '../utils/grid-search'
 import {
   SHIELD_CLASS_POWERUP,
   SHIELD_CLASS_SPAWN,
@@ -745,8 +746,8 @@ export function damageClusterStats(
 export const BASE_PRESSURE_RADIUS = 12
 
 /**
- * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
- * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
+ * pickupDist 哨兵：无**可达**存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
+ * 的 -1 哨兵同构。真实距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
  * 势能侧 Φ 不直接消费哨兵：公式统一 `where(pickupDist < 0, 0, pickupDist)` 归零。
  */
 export const PICKUP_DIST_SENTINEL = -1
@@ -776,22 +777,86 @@ export function sampleBasePressure(world: World, enemiesOnly = false): number {
 }
 
 /**
- * 当步玩家到最近**存活**拾取的曼哈顿距离（格；metrics v7）。
- * - 距离口径 = 中心格曼哈顿（`floor((x+w/2)/CELL)`），与 census/telemetry 同构；
- * - 玩家不在场（`?alive` 为假/无 player）⇒ 哨兵 `PICKUP_DIST_SENTINEL`；
- * - 无存活拾取 ⇒ 哨兵（公式侧 `where` 归零）。
- * 热路径（AGENTS §14.1）：零分配 —— 只读迭代 `world.powerUps`，无 filter/map/Set。
- * 防御性 `pu.alive` 检查：dead 拾取可能在 _cleanup 前残留于数组（与 census 同口径）。
+ * 当步玩家到最近**可达**存活拾取的 **BFS 路径距离**（格步；metrics v16）。
+ *
+ * 口径（v16 起，取代 v7 的曼哈顿直距）：
+ * - 图 = 玩家中心格到拾取中心格的 4 邻接 BFS；「格能走」= **2×2 车身能覆盖它**
+ *   （`utils/grid-search.ts::isPassable`，与 A\* 与关卡生成器同一份阻车谓词：
+ *   brick/steel/water/base 阻车）—— 1 格宽走廊不算路；
+ * - 墙另一侧的道具按**绕行**计距：曼哈顿直距会把「就在隔壁」读成 2 格（用户实测：
+ *   绕行 15–20 格），势能项因此把策略引到墙这侧的最近点；
+ * - 不可达（封闭盒 / 无存活拾取 / 玩家不在场）⇒ 哨兵 `PICKUP_DIST_SENTINEL`
+ *   （公式侧 `where` 归零）—— 不拿直距冒充可达性；
+ * - 砖墙按「此刻阻挡」计（打穿后下一拍自然变短），不做 `breakBrick` 乐观通行。
+ *
+ * ⚠ 与 `nearestPickupCenter`（曼哈顿，obs s32–s34 用）**不是同一个量**，别互相替换：
+ * obs 改口径 = `OBS_SCHEMA_MAJOR` bump + 全权重作废，本列只改奖励侧量纲。
+ *
+ * 热路径（AGENTS §14.1）：只跑在**决策步**（每 K tick 一次），写入两组模块级暂存
+ * （`_PATH_DIST`/`_PATH_QUEUE`）—— 它们是「本次调用在飞」的草稿纸，不是跨调用状态；
+ * 单线程仿真 ⇒ 不可重入。不读 rng、不写 World。
  */
 export function nearestPickupDist(world: World): number {
-  return nearestPickupCenter(world, _PU_CENTER)
+  const p = world.player
+  if (!p || !p.alive) return PICKUP_DIST_SENTINEL
+  const pcol = Math.floor((p.x + p.w / 2) / CELL)
+  const prow = Math.floor((p.y + p.h / 2) / CELL)
+  const dist = _PATH_DIST
+  const queue = _PATH_QUEUE
+  dist.fill(-1)
+  const start = prow * GRID + pcol
+  dist[start] = 0
+  queue[0] = start
+  let head = 0
+  let tail = 1
+  while (head < tail) {
+    const idx = queue[head++]
+    const col = idx % GRID
+    const row = (idx / GRID) | 0
+    const nd = dist[idx] + 1
+    for (let s = 0; s < 4; s++) {
+      const nc = col + _STEP_COL[s]
+      const nr = row + _STEP_ROW[s]
+      if (nc < 0 || nc >= GRID || nr < 0 || nr >= GRID) continue
+      const n = nr * GRID + nc
+      if (dist[n] !== -1) continue
+      if (!_tankCanCoverCell(world, nc, nr)) continue
+      dist[n] = nd
+      queue[tail++] = n
+    }
+  }
+  let best = PICKUP_DIST_SENTINEL
+  const pus = world.powerUps
+  for (let i = 0; i < pus.length; i++) {
+    const pu = pus[i]
+    if (!pu.alive) continue
+    const col = Math.floor((pu.x + pu.w / 2) / CELL)
+    const row = Math.floor((pu.y + pu.h / 2) / CELL)
+    const d = dist[row * GRID + col]
+    if (d >= 0 && (best < 0 || d < best)) best = d
+  }
+  return best
 }
 
-/** `nearestPickupCenter` 的复用缓冲（§14.1）。 */
-const _PU_CENTER = new Float64Array(2)
+/** BFS 步向量（up/down/left/right；模块级只读常量）。 */
+const _STEP_COL = [0, 0, -1, 1]
+const _STEP_ROW = [-1, 1, 0, 0]
+/** `nearestPickupDist` 的 BFS 暂存（§14.1：每决策步复用，不分配）。 */
+const _PATH_DIST = new Int16Array(GRID * GRID)
+const _PATH_QUEUE = new Int32Array(GRID * GRID)
+
+/** 2×2 车身能否覆盖格 (col,row)：四个候选锚点里有一个整块可走即可。 */
+function _tankCanCoverCell(world: World, col: number, row: number): boolean {
+  const tm = world.tileMap
+  if (isPassable(tm, col, row, false)) return true
+  if (col > 0 && isPassable(tm, col - 1, row, false)) return true
+  if (row > 0 && isPassable(tm, col, row - 1, false)) return true
+  return col > 0 && row > 0 && isPassable(tm, col - 1, row - 1, false)
+}
 
 /**
  * 最近存活拾取的**中心格曼哈顿距**（格）＋其**像素中心**写进 `out`（长度 2）。
+ * ⚠ **只给观测侧用**（obs s32–s34）：奖励侧的量纲是 `nearestPickupDist` 的 BFS 路径距离。
  *
  * 抽出来的原因（obs-v5 P3）：观测侧要的不只是距离，还要方向（s33/s34 的单位向量），
  * 而「哪个拾取算最近」的规则只能有一份——否则距离列与向量列会在换目标的那一拍分叉。

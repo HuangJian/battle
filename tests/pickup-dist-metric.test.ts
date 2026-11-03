@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { World } from '../src/game/World'
 import { Simulation } from '../src/game/Simulation'
 import type { Direction } from '../src/constants'
-import { CELL } from '../src/constants'
+import { CELL, GRID } from '../src/constants'
 import {
   buildMetricsRow,
   METRICS_DIM,
@@ -20,6 +20,9 @@ import { allEnemiesCleared } from '../src/game/SimulationEffects'
  * （与生产实现不共享代码，抓得住口径漂移），并断言「buildMetricsRow 写进 shard
  * 的第 40 列 == 独立重算」**每步同刻**逐位一致。
  *
+ * 口径（metrics v16）：**BFS 路径距离**（2×2 车身能覆盖的格 = 可走；brick/steel/water/base
+ * 阻车），不是曼哈顿直距 —— 墙另一侧的道具不能被读成「就在隔壁」。
+ *
  * 边界局必须进用例（残差桶教训，x5⑪）：
  *   ① 多拾取局 —— 多拾取铺场，最近者随玩家移动切换（nearest 语义）；
  *   ② 炸弹局 —— bomb 型拾取在场且被玩家拾取（距离 0 → 收集跳变 → 次近/哨兵；
@@ -30,18 +33,68 @@ import { allEnemiesCleared } from '../src/game/SimulationEffects'
  */
 
 // ---- 独立重实现（刻意不 import 生产 helper）----
-function indepPickupDist(w: World): number {
+
+/** 阻车地形（本文件自持一份字面表，不从生产侧 import 谓词）。 */
+function indepBlocksTank(t: string): boolean {
+  return t === 'brick' || t === 'steel' || t === 'water' || t === 'base'
+}
+
+/** 2×2 车身能否覆盖格 (col,row)：四个候选锚点里有一个整块可走即可。 */
+function indepCoverable(w: World, col: number, row: number): boolean {
+  for (let dr = 0; dr >= -1; dr--) {
+    for (let dc = 0; dc >= -1; dc--) {
+      const ac = col + dc
+      const ar = row + dr
+      if (ac < 0 || ac + 1 >= GRID || ar < 0 || ar + 1 >= GRID) continue
+      let ok = true
+      for (let r = ar; r <= ar + 1 && ok; r++) {
+        for (let c = ac; c <= ac + 1; c++) {
+          if (indepBlocksTank(w.tileMap.grid[r][c])) {
+            ok = false
+            break
+          }
+        }
+      }
+      if (ok) return true
+    }
+  }
+  return false
+}
+
+/** BFS 路径距离（格步）；玩家格为起点（即使车身此刻覆盖不全，也从脚下出发）。 */
+function indepPickupPathDist(w: World): number {
   const p = w.player
   if (!p || !p.alive) return PICKUP_DIST_SENTINEL
   const pcol = Math.floor((p.x + p.w / 2) / CELL)
   const prow = Math.floor((p.y + p.h / 2) / CELL)
+  const dist = new Int16Array(GRID * GRID).fill(-1)
+  const start = prow * GRID + pcol
+  dist[start] = 0
+  const queue: number[] = [start]
+  const stepCol = [-1, 1, 0, 0]
+  const stepRow = [0, 0, -1, 1]
+  for (let head = 0; head < queue.length; head++) {
+    const idx = queue[head]
+    const col = idx % GRID
+    const row = (idx / GRID) | 0
+    for (let s = 0; s < 4; s++) {
+      const nc = col + stepCol[s]
+      const nr = row + stepRow[s]
+      if (nc < 0 || nc >= GRID || nr < 0 || nr >= GRID) continue
+      const n = nr * GRID + nc
+      if (dist[n] !== -1) continue
+      if (!indepCoverable(w, nc, nr)) continue
+      dist[n] = dist[idx] + 1
+      queue.push(n)
+    }
+  }
   let best = PICKUP_DIST_SENTINEL
   for (const pu of w.powerUps) {
     if (!pu.alive) continue
     const col = Math.floor((pu.x + pu.w / 2) / CELL)
     const row = Math.floor((pu.y + pu.h / 2) / CELL)
-    const d = Math.abs(col - pcol) + Math.abs(row - prow)
-    if (best < 0 || d < best) best = d
+    const d = dist[row * GRID + col]
+    if (d >= 0 && (best < 0 || d < best)) best = d
   }
   return best
 }
@@ -174,13 +227,13 @@ function sampleLoop(
   while (t < maxTicks && world.state === 'playing') {
     if (t % 10 === 0) {
       rows.push(buildMetricsRow(t, world, mkTel()))
-      indep.push(indepPickupDist(world))
+      indep.push(indepPickupPathDist(world))
     }
     sim.tick()
     t++
   }
   rows.push(buildMetricsRow(t, world, mkTel())) // 终局行
-  indep.push(indepPickupDist(world))
+  indep.push(indepPickupPathDist(world))
   return { rows, indep }
 }
 
@@ -227,6 +280,53 @@ describe('pickupDist：独立重实现 vs shard 列（每步同刻逐位一致�
     expect(rows.length).toBeGreaterThan(3)
     expectColumnMatchesIndep(rows, indep)
     expect(rows[0][40]).toBe(4) // freeze 距 4，tank 距 6
+  })
+
+  it('墙后道具：曼哈顿 4 格、路径 28 格（绕行），列值 == 路径距离', () => {
+    const w = openWorld(4)
+    positionPlayer(w, 8, 8, 'right') // 中心格 (9,9)
+    w.powerUps.push(makePowerUp(8, 12, 'star')) // 中心格 (9,13)：直距 4，隔着一堵墙
+    // 横墙 rows 10–11 / cols 0–20，右侧 cols 21–25 留 2 格宽通道（2×2 车身可过）。
+    for (let r = 10; r <= 11; r++) for (let c = 0; c <= 20; c++) w.tileMap.grid[r][c] = 'brick'
+    const { rows, indep } = sampleLoop(w, 40, null)
+    expect(rows[0][40]).toBeGreaterThan(20)
+    expectColumnMatchesIndep(rows, indep)
+  })
+
+  it('不可达拾取（封闭盒）：不参与最近者；全不可达 ⇒ 哨兵', () => {
+    const w = openWorld(5)
+    positionPlayer(w, 6, 6, 'right') // 中心格 (7,7)
+    // 砖砌封闭盒 rows 16–21 × cols 16–21，盒中心 (18,18) 放一个道具（车身进不去）。
+    for (let c = 16; c <= 21; c++) {
+      w.tileMap.grid[16][c] = 'brick'
+      w.tileMap.grid[21][c] = 'brick'
+    }
+    for (let r = 16; r <= 21; r++) {
+      w.tileMap.grid[r][16] = 'brick'
+      w.tileMap.grid[r][21] = 'brick'
+    }
+    const boxed = makePowerUp(18, 18, 'star')
+    w.powerUps.push(boxed, makePowerUp(8, 6, 'freeze')) // freeze 中心格 (9,7)：可达，距 2
+    const a = sampleLoop(w, 40, null)
+    expect(a.rows[0][40]).toBe(2)
+    expectColumnMatchesIndep(a.rows, a.indep)
+
+    // 只剩盒里的那个 ⇒ 全部行都是哨兵（不是「贴着盒子 2 格」）
+    boxed.alive = true
+    const onlyBoxed = openWorld(6)
+    positionPlayer(onlyBoxed, 6, 6, 'right')
+    for (let c = 16; c <= 21; c++) {
+      onlyBoxed.tileMap.grid[16][c] = 'brick'
+      onlyBoxed.tileMap.grid[21][c] = 'brick'
+    }
+    for (let r = 16; r <= 21; r++) {
+      onlyBoxed.tileMap.grid[r][16] = 'brick'
+      onlyBoxed.tileMap.grid[r][21] = 'brick'
+    }
+    onlyBoxed.powerUps.push(makePowerUp(18, 18, 'star'))
+    const b = sampleLoop(onlyBoxed, 40, null)
+    for (const row of b.rows) expect(row[40]).toBe(PICKUP_DIST_SENTINEL)
+    expectColumnMatchesIndep(b.rows, b.indep)
   })
 
   it('determinism：同 seed 双跑，整行 metrics（含 idx40）逐位相同', () => {

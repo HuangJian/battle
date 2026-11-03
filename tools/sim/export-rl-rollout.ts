@@ -215,8 +215,10 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
 //   `powerUpsCollected ≡ starsCollected + puGot{4} + puGotOther` 恒成立（可测守恒）。
 //   不进任何公式（"不进训练变量"）。
 // idx40=pickupDist（metrics v7 头牌列，plan/pickup-shaping.plan.md §3）：每决策步玩家
-//   到最近**存活**拾取（powerUp.alive）中心格的曼哈顿距离；无存活拾取或玩家不在场时
-//   填哨兵 `PICKUP_DIST_SENTINEL`（-1，公式侧用 where 归零）。势能法趋近塑形项的量纲。
+//   到最近**可达**拾取（powerUp.alive）中心格的 **BFS 路径距离**（v16 起；v7–v15 是
+//   曼哈顿直距）。格可走 = 2×2 车身能覆盖（`isPassable`）；不可达/无存活拾取/玩家
+//   不在场 ⇒ 哨兵 `PICKUP_DIST_SENTINEL`（-1，公式侧 where 归零）。势能法趋近塑形项
+//   的量纲：墙另一侧的道具必须按绕行计，否则势能会把人钉在墙这侧。
 // idx41–44=危险暴露四列（metrics v8，plan/x20-dodge-avoidance.plan.md §2）：
 //   playerHpRatio（hp/maxHp，clamp01，与 obs s19 同源）· dangerTicks（累计 hpRatio<0.4 的
 //   tick）· threatTicks（累计「在敌方弹道/炮口线上」的 tick，口径**冻结**在
@@ -294,7 +296,7 @@ export const METRICS_DIM = 90
  * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
  * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 15
+export const METRICS_VERSION = 16
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -404,8 +406,8 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'wallPressTicks',
 ]
 /**
- * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
- * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
+ * pickupDist 哨兵：无**可达**存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
+ * 的 -1 哨兵同构。真实路径距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
  * 势能侧 Φ 不直接消费哨兵：公式统一 `where(pickupDist < 0, 0, pickupDist)` 归零。
  */
 export { PICKUP_DIST_SENTINEL, nearestPickupDist } from '../../src/nn/danger-metrics'
@@ -826,7 +828,7 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.hitsByKind[2], // 37 hitsPower
     tel.hitsByKind[3], // 38 hitsArmor
     tel.puGotOther, // 39 puGotOther（v7：四桶外拾取残差，x5⑩ 全零 bug 补桶）
-    nearestPickupDist(world), // 40 pickupDist（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
+    nearestPickupDist(world), // 40 pickupDist（v16：最近可达拾取中心格的 BFS 路径距离，哨兵 -1）
     playerHpRatio(world), // 41 playerHpRatio（v8：hp/maxHp，clamp01；玩家不在场 = 0）
     tel.dangerTicks, // 42 dangerTicks（v8：累计 hpRatio<0.4 的 tick）
     tel.threatTicks, // 43 threatTicks（v9 改定义：19px 带 + 无半径 + 判遮挡；v13 起冻/盾期豁免）
@@ -2290,7 +2292,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v15 = [N+1,90]）；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v16 = [N+1,90]）；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,

@@ -108,9 +108,11 @@ METRICS: tuple[str, ...] = (
     #                     四桶全零（x5⑩「puGot* 全零输出 bug」）；本桶让
     #                     powerUpsCollected ≡ stars + 四桶 + 本桶 恒成立（可测守恒）。
     #                     不进任何公式（"不进训练变量"）。
-    "pickupDist",  # 40  ← v7 头牌列：每决策步玩家到最近**存活**拾取中心格的曼哈顿
-    #              距离（powerUp.alive；玩家不在场或无存活拾取 = 哨兵 -1）。势能法
-    #              趋近塑形项（-wApproach*pickupDist）的量纲，公式侧 where 归零。
+    "pickupDist",  # 40  ← v7 头牌列：每决策步玩家到最近**可达**存活拾取中心格的
+    #              **BFS 路径距离**（v16 起；v7–v15 是曼哈顿直距 —— 墙另一侧会读成 2 格
+    #              而实际绕行 15–20 格，势能项把人钉在墙这侧）。格可走 = 2×2 车身能覆盖
+    #              （brick/steel/water/base 阻车）；不可达/无存活拾取/玩家不在场 = 哨兵 -1。
+    #              势能法趋近塑形项（-wApproach*pickupDist）的量纲，公式侧 where 归零。
     # ---- metrics v8：危险暴露四列（plan/x20-dodge-avoidance.plan.md §2；
     #      idx 永久追加在尾部，0–40 列号不动）----
     "playerHpRatio",  # 41  ← v8：hp/maxHp（clamp01；玩家不在场 = 0，与 obs s19 同源）。
@@ -274,7 +276,9 @@ METRICS_DIM = len(METRICS)
 #: v14（2026-11-03，wall-press-two-legs rev2）：v6 mask 语义变更（选定 move 后掩 hold=0）；
 #: 列宽仍 89，旧 v13 shard 因 mask 不可混训而作废。
 #: v15（2026-11-03，同计划腿 B）：追加 wallPressTicks（idx89），行宽 90。
-METRICS_VERSION = 15
+#: v16（2026-11-03）：pickupDist(40) 口径由曼哈顿直距改为 BFS 路径距离（列宽不变，
+#: 旧 v15 语料的同名列是另一个量 ⇒ 不可混训）。
+METRICS_VERSION = 16
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
