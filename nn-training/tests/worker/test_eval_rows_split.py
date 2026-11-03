@@ -198,7 +198,7 @@ def test_eval_row_builds_a_dedupable_ledger_row() -> None:
 
 #: `remote/` 里**只**用纯行/账本原语、因此必须 import `biz.eval_rows` 的调用点。
 REMOTE_PURE_CALLERS = {
-    "hub/queue_resume.py": {"append_eval_rows", "append_eval_summaries"},
+    "hub/queue_resume.py": {"append_eval_aggs", "append_eval_rows", "append_eval_summaries"},
     "remote/deliver_zip.py": {"merge_eval_rows"},
 }
 

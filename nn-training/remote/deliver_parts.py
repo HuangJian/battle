@@ -22,7 +22,7 @@ from pathlib import Path
 import remote.delta_files as delta_files
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_BODY_MAX
 from remote.artifacts import ArtifactStore
-from remote.deliver_wire import wire_row
+from remote.deliver_wire import EVAL_ROWS_HARD, aggregate_eval_rows, wire_row
 
 #: 整份展开器（调用方注入）：`(容器路径) -> 整份路径`。
 Expander = Callable[[Path], Path]
@@ -284,20 +284,78 @@ def build_result_body(
     return body, raw
 
 
+#: 旧上界（2026-10-22）：现在只当 cap 的**地板**用，不再是「每轮最多发多少」。
+EVAL_ROWS_BASE = 400
+
+
+def eval_rows_cap(n_rows: int, *, hard: int = EVAL_ROWS_HARD) -> int:
+    """这一轮逐局行的实际上界：整轮读数放行，只有异常大才收到 `hard`。
+
+    `n_rows` = 本轮账本里的逐局行数（= 关数 × 每关局数）。`max(EVAL_ROWS_BASE, …)` 不是
+    「至少裁到 400」：`n_rows < 400` 时 cap 更大 ⇒ `len(rows) > cap` 不成立，与旧实现
+    同样一条不裁（z5 的 700 行也走这条「不裁」路）。
+    """
+    return max(EVAL_ROWS_BASE, min(int(n_rows), int(hard)))
+
+
+def _stage_seed_key(r: dict) -> tuple:
+    """全序键：整数 stage/seed 数值序，其余按字符串（畸形行不抛）。"""
+    stage, seed = r.get("stage"), r.get("seed")
+    ok_stage = isinstance(stage, int) and not isinstance(stage, bool)
+    ok_seed = isinstance(seed, int) and not isinstance(seed, bool)
+    if ok_stage and ok_seed:
+        return (0, stage, seed)
+    return (1, str(stage), str(seed))
+
+
+def select_eval_rows(rows: list[dict], cap: int) -> list[dict]:
+    """按 stage 分层的**确定性**投影：最多 `cap` 条，每关条数差 ≤1。
+
+    为什么不能 `rows[:cap]`（2026-11-03 z5-safe-base）：`eval_log.jsonl` 的追加顺序是
+    **并发完成顺序**（实测 400 行里 stage 切换 ~300 次），前缀截断保留的是「谁先跑完」
+    —— 尾段关系统性缺席，而且同一策略重跑会得到不同子集。这里先按 `(stage, seed)` 排
+    全序，再按关轮转分配 `divmod(cap, 关数)`：前 `rem` 关各多一条。同一份账本永远得到
+    同一份投影（重复投递的投影必须稳定，否则逐局表会抖）。
+
+    同键 `(iter, wver, stage, seed)` 取**最后一条**（与 `worker.eval_rows.eval_row_key`
+    同一套去重键；`node` 不进键）。`cap < 关数` ⇒ 每关至多一条、只覆盖 stage 最小的
+    前 `cap` 关（覆盖优先于深度）。
+    """
+    if cap <= 0 or len(rows) <= cap:
+        return rows
+    uniq: dict[tuple, dict] = {}
+    for r in rows:
+        uniq[(r.get("iter"), r.get("wver"), r.get("stage"), r.get("seed"))] = r  # 后到覆盖 = 取最后一条
+    ordered = sorted(uniq.values(), key=_stage_seed_key)
+    buckets: dict[object, list[dict]] = {}
+    for r in ordered:  # ordered 已按 stage/seed 排好 ⇒ 桶的插入顺序就是 stage 顺序
+        buckets.setdefault(r.get("stage"), []).append(r)
+    q, rem = divmod(int(cap), len(buckets))
+    picked: list[dict] = []
+    for i, bucket in enumerate(buckets.values()):
+        take = min(q + (1 if i < rem else 0), len(bucket))
+        if take >= len(bucket):
+            picked.extend(bucket)
+        else:
+            picked.extend(bucket[(j * len(bucket)) // take] for j in range(take))
+    return picked
+
+
 def eval_rows_for(
     root: str | Path,
     it: int,
     *,
-    cap: int,
+    hard_cap: int = EVAL_ROWS_HARD,
     log: Callable[[str], None] | None = None,
     throttled_log: Callable[[str, str], None] | None = None,
 ) -> tuple[list[dict], int, int]:
     """产物目录里这一轮的评估读数：`(行, 原始字节, 线上字节)`（没评过 = 空，永不抛）。
 
-    从 `offline_deliver._eval_rows_for` 原样搬来（2026-10-23，LOC 下沉）：判据一字不改——
     逐局行只取 `iter == it` 且**没有 `source`**（B/C evalboard 行的标记）；`summary` 行一起发
     （控制台指标表 / eval 列 / 开课回执 / 门判据唯一认的读数键）且不占上界；逐局行过白名单
-    （`EVAL_ROW_WIRE_KEYS`）瘦身。
+    （`EVAL_ROW_WIRE_KEYS`）瘦身。另附每个 `(iter, wver)` 一行的分析列聚合（`eval_agg`，
+    由 `aggregate_eval_rows` 在**截断前**的全量行上算）——它也不占逐局上界。上界：整轮放行，
+    异常大才按关分层（`eval_rows_cap` / `select_eval_rows`，2026-11-03）。
     """
     from remote.deliver_wire import slim_eval_rows
 
@@ -326,13 +384,17 @@ def eval_rows_for(
             rows.append(r)
     except OSError:
         return [], 0, 0
+    agg_rows = aggregate_eval_rows(rows)  # 截断前的全量行：聚合覆盖整轮
+    cap = eval_rows_cap(len(rows), hard=hard_cap)
     if len(rows) > cap:
+        kept = select_eval_rows(rows, cap)
         if log:
+            stages = len({r.get("stage") for r in kept})
             log(
-                f"补传 it{it}: 评估行 {len(rows)} 条 > 上界 {cap}"
-                f"——只发前 {cap} 条（其余随 artifacts zip 回去）"
+                f"补传 it{it}: 评估行 {len(rows)} 条 > 单轮上界 {cap}"
+                f"——按关分层取 {len(kept)} 条（覆盖 {stages} 关；其余随 artifacts zip 回去）"
             )
-        rows = rows[:cap]
+        rows = kept
     raw_bytes = wire_bytes = 0
     if rows:
         rows, raw_bytes, wire_bytes = slim_eval_rows(rows)
@@ -340,9 +402,9 @@ def eval_rows_for(
             throttled_log(
                 "eval-slim",
                 f"评估行白名单：it{it} {raw_bytes / 1024:.0f}KB → {wire_bytes / 1024:.0f}KB"
-                f"（{len(rows)} 行；分析列随抽屉/离线包到达）",
+                f"（{len(rows)} 行 + 聚合 {len(agg_rows)} 行；逐局明细随抽屉/离线包到达）",
             )
-    return rows + summary, raw_bytes, wire_bytes
+    return rows + summary + agg_rows, raw_bytes, wire_bytes
 
 
 def build_artifact_body(

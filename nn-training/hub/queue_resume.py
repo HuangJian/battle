@@ -138,12 +138,13 @@ class QueueResumeMixin(QueuePeer):
         """
         if not isinstance(rows, list) or not rows:
             return (0, 0)
-        from worker.eval_rows import append_eval_rows, append_eval_summaries
+        from worker.eval_rows import append_eval_aggs, append_eval_rows, append_eval_summaries
 
         ledger = self._stores[course].job_root.parent / "eval_log.jsonl"
         good = [r for r in rows if isinstance(r, dict)]
         games = append_eval_rows(ledger, good)
         summaries = append_eval_summaries(ledger, good)
+        append_eval_aggs(ledger, good)
         return (games, summaries)
 
     def resume_anchor(self, course: str) -> dict | None:

@@ -27,6 +27,9 @@ import json
 import time
 from pathlib import Path
 
+#: 分析列聚合行的 event（一轮一行；与 `remote.deliver_wire.EVAL_AGG_EVENT` 必须一致）。
+EVAL_AGG_EVENT = "eval_agg"
+
 #: eval_log 掉落三列（x5⑧③：eval_dispatch/batch_eval/eval_a_once 此前未接线）。
 #: 取数：manifest 顶层优先 → scorable.telemetry 回落 → None（旧 agent 缺键）。
 #: - puGotOther：export-eval-game 报告顶层已有（metrics v7）。
@@ -543,6 +546,40 @@ def incomplete_summaries(summary_rows: list[dict], rows: list[dict]) -> list[dic
     return sorted(out, key=lambda g: (g["iter"], g["wver"]))
 
 
+def _append_monotone(dst_jsonl: Path, rows: list[dict], *, read_rows, key_fn, stamp=None) -> int:
+    """按 `(iter, wver)` **单调**并一类行：已有且 `games` 不少于新来的 ⇒ 不写。
+
+    summary 与 `eval_agg` 共用这一套（两处各写一遍必然漂）：`read_rows` 是同类目的读法，
+    `key_fn` 给身份，`stamp` 可选（summary 用它盖 `rows_incomplete`）。返回追加行数。
+    """
+    have: dict[tuple[int, str], float] = {}
+    for r in read_rows(dst_jsonl):
+        k = key_fn(r)
+        if k is not None:
+            have[k] = max(have.get(k, 0.0), _summary_games(r))
+    fresh: list[dict] = []
+    for r in rows:
+        k = key_fn(r)
+        if k is None:
+            continue
+        g = _summary_games(r)
+        prev = have.get(k)
+        if prev is not None and g <= prev:
+            continue
+        have[k] = g
+        fresh.append(r)
+    if not fresh:
+        return 0
+    counts = rows_by_summary_key(read_eval_rows(dst_jsonl)) if stamp is not None else {}
+    dst_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_jsonl, "a", encoding="utf-8") as f:
+        for r in fresh:
+            k = key_fn(r)
+            out = stamp(dict(r), counts.get(k, 0) if k else 0) if stamp is not None else r
+            f.write(json.dumps(out, ensure_ascii=False) + "\n")
+    return len(fresh)
+
+
 def append_eval_summaries(dst_jsonl: Path, rows: list[dict]) -> int:
     """把 summary 行并进 `dst_jsonl`，**单调**：只在该 `(iter, wver)` 尚无 summary、
     或新来的 `games` 更多（断点续跑「先部分、后补齐」的升级）时追加；返回追加行数。
@@ -557,33 +594,34 @@ def append_eval_summaries(dst_jsonl: Path, rows: list[dict]) -> int:
     单调规则防的是「后到的旧 summary 覆盖先到的新 summary」：重投/重复导入天然会重发。
     已有 summary 且 `games` 不少于新来的 ⇒ 一行不写（两次调用结果相同 = 幂等）。
     """
-    have: dict[tuple[int, str], float] = {}
-    for r in read_eval_summary_rows(dst_jsonl):
-        k = eval_summary_key(r)
-        if k is not None:
-            have[k] = max(have.get(k, 0.0), _summary_games(r))
-    fresh: list[dict] = []
-    for r in rows:
-        k = eval_summary_key(r)
-        if k is None:
-            continue
-        g = _summary_games(r)
-        prev = have.get(k)
-        if prev is not None and g <= prev:
-            continue
-        have[k] = g
-        fresh.append(r)
-    if not fresh:
-        return 0
-    counts = rows_by_summary_key(read_eval_rows(dst_jsonl))
-    dst_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst_jsonl, "a", encoding="utf-8") as f:
-        for r in fresh:
-            k = eval_summary_key(r)
-            # 不改调用方的字典：盖在副本上，写进去的是盖过章的那一份。
-            stamped = stamp_rows_completeness(dict(r), counts.get(k, 0) if k else 0)
-            f.write(json.dumps(stamped, ensure_ascii=False) + "\n")
-    return len(fresh)
+    return _append_monotone(
+        dst_jsonl,
+        rows,
+        read_rows=read_eval_summary_rows,
+        key_fn=eval_summary_key,
+        stamp=stamp_rows_completeness,
+    )
+
+
+def read_eval_agg_rows(eval_jsonl: Path) -> list[dict]:
+    """读账本里全部 `event:"eval_agg"` 分析列聚合行（缺失/坏行 = 跳过）。"""
+    return _read_ledger_rows(eval_jsonl, EVAL_AGG_EVENT)
+
+
+def eval_agg_key(r: dict) -> tuple[int, str] | None:
+    """聚合行的身份 `(iter, wver)`（一行一轮；形状不合法 ⇒ None）。"""
+    if not isinstance(r, dict) or r.get("event") != EVAL_AGG_EVENT:
+        return None
+    it = r.get("iter")
+    wver = str(r.get("wver") or "")
+    if not isinstance(it, int) or it < 0 or not wver:
+        return None
+    return (int(it), wver)
+
+
+def append_eval_aggs(dst_jsonl: Path, rows: list[dict]) -> int:
+    """把分析列聚合行并进账本（与 summary 同一套 `(iter, wver)` + `games` 单调规则）。"""
+    return _append_monotone(dst_jsonl, rows, read_rows=read_eval_agg_rows, key_fn=eval_agg_key)
 
 
 def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path, log=None) -> tuple[int, int]:
@@ -605,9 +643,10 @@ def merge_eval_rows(src_jsonl: Path, dst_jsonl: Path, log=None) -> tuple[int, in
     src_rows = read_eval_rows(src_jsonl)
     games = append_eval_rows(dst_jsonl, src_rows)
     summaries = append_eval_summaries(dst_jsonl, read_eval_summary_rows(src_jsonl))
+    aggs = append_eval_aggs(dst_jsonl, read_eval_agg_rows(src_jsonl))
     if log is not None:
         log(
-            f"[eval-rows] 收到 {len(src_rows)} 行 / fresh {games} 行 / "
+            f"[eval-rows] 收到 {len(src_rows)} 行 / fresh {games} 行 / 聚合 {aggs} 行 / "
             f"落盘后总计 {len(read_eval_rows(dst_jsonl))} 行"
         )
     return (games, summaries)

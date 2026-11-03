@@ -43,6 +43,7 @@ from common.fs import atomic_write_bytes, atomic_write_json
 from common.logutil import tag_logger
 from common.protocol import OFFLINE_ARTIFACT_BODY_MAX, OFFLINE_PUSH_OUTBOX_WARN_BYTES
 from remote.artifacts import ArtifactStore
+from remote.deliver_wire import EVAL_ROWS_HARD
 
 try:  # pragma: no cover - 平台分支
     import fcntl
@@ -83,8 +84,6 @@ ROUND_FILE_FMT = "it{it:04d}.json"
 SYNC_BATCH_ROUNDS = 8
 #: 进程内线程模式的拍长（秒）。
 OUTBOX_TICK_SEC = 2.0
-#: 单轮评估读数上界（与 `OfflineDeliverer.EVAL_ROWS_CAP` 同值；正常一轮 = 关数×种子数，双轨 100）。
-EVAL_ROWS_CAP = 400
 #: outbox 账本的**跨进程**闸文件（`ack_outbox` 与训练子进程各开一个 fd 抢它）。
 STATE_LOCK_NAME = ".state.lock"
 
@@ -184,7 +183,7 @@ class OutboxParts(Protocol):
         root: str | Path,
         it: int,
         *,
-        cap: int,
+        hard_cap: int = EVAL_ROWS_HARD,
         log: Callable[[str], None] | None = None,
         throttled_log: Callable[[str, str], None] | None = None,
     ) -> tuple[list[dict], int, int]: ...
@@ -391,7 +390,7 @@ class LocalOutboxDeliverer:
         course: str = "",
         hub_lease: str = "",
         worker_name: str = "",
-        eval_cap: int = EVAL_ROWS_CAP,
+        eval_cap: int = EVAL_ROWS_HARD,
         cap_bytes: int = OFFLINE_ARTIFACT_BODY_MAX,
         background: bool = False,
         tick_sec: float = OUTBOX_TICK_SEC,
@@ -651,7 +650,7 @@ class LocalOutboxDeliverer:
         eval_rows, _raw_b, _wire_b = self._parts.eval_rows_for(
             self.root,
             int(it),
-            cap=self._eval_cap,
+            hard_cap=self._eval_cap,
             log=self.log,
             throttled_log=self._throttled_log,
         )

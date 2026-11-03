@@ -40,6 +40,7 @@ from common.platform_utils import cpu_worker_slots
 from common.protocol import UnreapableChildError
 from remote import offline_eval
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.deliver_wire import EVAL_ROWS_HARD
 from remote.offline_deliver import OfflineDeliverer
 from remote.offline_eval import (
     CLOUD_NODE,
@@ -822,17 +823,33 @@ def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> Non
         "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
     )
     got = d._eval_rows_for(2)
-    assert [r["event"] for r in got] == ["eval", "eval_summary"], got
+    assert [r["event"] for r in got] == ["eval", "eval_summary", "eval_agg"], got
     assert got[0]["seed"] == 1, "逐局行只发自家的、本轮的（source 行不随行）"
     assert got[1]["games"] == 4
     assert d._eval_rows_for(9) == []
 
-    # 上界：超出只发前 N 条（宁少不错——体超限会让整趟补传被拒，连权重一起丢）
+    # 上界（2026-11-03）：整轮读数放行；只有异常大才按关分层（宁少不错）。
+    full = [
+        {"event": "eval", "iter": 5, "wver": "a" * 16, "stage": 2000 + s, "seed": i}
+        for s in range(35)
+        for i in range(20)
+    ]
+    (tmp_path / ArtifactStore.EVAL_LOG_NAME).write_text(
+        "\n".join(json.dumps(r) for r in full) + "\n", encoding="utf-8"
+    )
+    full_out = d._eval_rows_for(5)
+    assert len([r for r in full_out if r["event"] == "eval"]) == 700, "z5 的 35×20 必须整轮放行"
+    assert [r["event"] for r in full_out if r["event"] == "eval_agg"] == ["eval_agg"]
+
     many = [
-        {"event": "eval", "iter": 5, "wver": "a" * 16, "stage": 0, "seed": i}
-        for i in range(d.EVAL_ROWS_CAP + 3)
+        {"event": "eval", "iter": 6, "wver": "a" * 16, "stage": 2000 + s, "seed": i}
+        for s in range(40)
+        for i in range(80)
     ]
     (tmp_path / ArtifactStore.EVAL_LOG_NAME).write_text(
         "\n".join(json.dumps(r) for r in many) + "\n", encoding="utf-8"
     )
-    assert len(d._eval_rows_for(5)) == d.EVAL_ROWS_CAP
+    got = d._eval_rows_for(6)
+    game_rows = [r for r in got if r["event"] == "eval"]
+    assert len(game_rows) == EVAL_ROWS_HARD, "异常大按硬上界裁"
+    assert len({r["stage"] for r in game_rows}) == 40, "裁完仍覆盖全部关"

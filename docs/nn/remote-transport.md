@@ -6,6 +6,63 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §134 分析列全量聚合随体回传：一轮一行 `eval_agg`（2026-11-03）
+
+**用户口径**：逐局仍走白名单（`EVAL_ROW_WIRE_KEYS`，体积一字不变），但**每个 it** 把整轮的
+分析列（`cellsVisited` / `idleTicks` / `wallPressTicks` / `powerUpsSpawned` / `aimMisses` /
+`moveHist` / `exposureByKind` / `killOrder` …）聚合成一行传回 hub，不必等离线包。
+
+**行**：`{"event":"eval_agg","iter","wver","time","games","stages","nodes","analysis"}`。
+`analysis` 只含**非白名单**字段（逐局已有的不再重复）：数值 → sum/mean/min/max/n；bool →
+`true/n`；字符串 → 值计数；数字列表 → 逐位求和；字符串列表 → 元素计数；嵌套 dict →
+递归求和；`None` 不计。字段名排序、按 `(iter, wver)` 分组 ⇒ 同一批行任意落盘顺序得到逐字节
+相同的行。体积上界 64KB，超了按字段体积从大到小丢并记 `truncated`。
+
+**落点**：`remote/deliver_wire.py::aggregate_eval_rows`（纯函数，L0）→
+`remote/deliver_parts.py::eval_rows_for` 在**截断前**的全量行上算，返回 `逐局 + summary + agg`
+（聚合不占逐局上界）→ hub `merge_eval_rows` / `append_eval_aggs` 并进课程账本
+（与 summary 同一套 `(iter, wver)` + `games` 单调规则，重投幂等）。
+
+**被否决**：把分析列塞进逐局白名单（z5 一整轮 +1.02MB；3000 行体 6.96MB 顶 8MB 上限）；
+把聚合塞进 `eval_summary`（summary 缺行时就没有载体）。
+
+**验收**：`tests/remote/test_eval_agg.py`（口径 / 顺序无关 / 分组 / 随体发送 / 单调合并）+
+`tests/remote/test_offline_eval_cloud.py`（700 逐局 + 1 聚合）。
+
+---
+
+## §133 云机评估行回传的上界：整轮放行 + 按关分层（2026-11-03）
+
+**现场**：z5-safe-base 35 关 × 20 seed = 700 局/点，实时体只带 400 行（21–22 关），尾段关在
+活体上不可见。复核 `tmp/z5-safe-base/eval_log.jsonl`：400 行里 stage 切换 297–320 次、每关
+2–20 条，缺失集合逐轮不同（it120 缺 14 关、it175 缺 13 关）——`eval_log.jsonl` 是**并发完成
+顺序**追加，`rows[:400]` 保留的是「谁先跑完」，不是「前 20 关」；同一策略重跑会得到不同子集。
+
+**主胜率没有受损**：`eval_summary` 不占上界，z5 每点都是 700 局全量；控制台 `readEvalSummaries`
+读它。受影响的是逐局弹窗（`readEvalGames` 按行重算胜率）与按关闭读。400 行子集胜率
+36.5% / 43.75% / 42.0%（it120/130/175）方向会翻，不是稳定高估。
+
+**决定**（`DECISIONS.md` §2026-11-03-goalnn-eval-rows-stratified）：
+
+* `deliver_wire.EVAL_ROWS_HARD = 3000` 是唯一硬上界（投影后 ~1.7MB/3000 行，加权重/动量
+  ~2.6MB；已高于 2026-10-22 的 1.24MB，坏链路靠降级档兜）；`deliver_outbox` / `offline_deliver`
+  不再各存一份 400。
+* `deliver_parts.eval_rows_cap(n_rows)`：`max(400, min(n_rows, 3000))` ⇒ **完整一轮不裁**
+  （z5 的 700 条原样发出），只有 > 3000 行才裁。
+* `deliver_parts.select_eval_rows`：同键 `(iter, wver, stage, seed)` 取最后一条 → 按 `(stage, seed)` 全序 →
+  `divmod(cap, 关数)` 分层（前 rem 关各多一条）；`cap < 关数` 时只覆盖 stage 最小的前 cap 关。
+  同一份账本永远得到同一份投影（重复投递的投影必须稳定，否则逐局表会抖）。
+* 日志行改成「评估行 N 条 > 单轮上界 cap —— 按关分层取 M 条（覆盖 K 关…）」。
+
+**被否决**：只把 400 改成 800（下个 50 关课再撞）；`cap = n_stages * per_stage`
+（≈len(rows) = 永不裁剪）；随机抽（重复投递的投影会漂）。
+
+**验收**：`tests/remote/test_eval_row_selection.py`（整轮放行 / 恰好 3000 / 打乱同投影 /
+cap < 关数 / 同键最后 / outbox 单源）+ `tests/remote/test_offline_eval_cloud.py`（700 不裁、
+3200→3000 仍覆盖 40 关）。真机需**重导任务包**（云机跑代码快照）。
+
+---
+
 ## §132 单段运输没有告警 + 缓存探针「失败即重传」：链路退化被静默放大（2026-10-30 真机）
 
 **背景**：同一晚 `z2-r5g2` it43–46 的墙钟从 ~80s 涨到 306–408s，而节点自报 `grad_sec` 一直是

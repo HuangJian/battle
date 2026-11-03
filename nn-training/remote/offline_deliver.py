@@ -1341,13 +1341,10 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         )
         return "stop"
 
-    #: 单轮补传携带的评估行上界（防体超限；正常一轮 A 层语料 = 关数×种子数，双轨 100）。
-    EVAL_ROWS_CAP = 400
-
     def _eval_rows_for(self, it: int) -> list[dict]:
-        """本轮评估读数（实现住 `deliver_parts.eval_rows_for`；判据一字不改）。"""
+        """本轮评估读数（实现住 `deliver_parts.eval_rows_for`；上界见 `eval_rows_cap`）。"""
         rows, raw_b, wire_b = deliver_parts.eval_rows_for(
-            self.root, int(it), cap=self.EVAL_ROWS_CAP, log=self.log, throttled_log=self._throttled_log
+            self.root, int(it), log=self.log, throttled_log=self._throttled_log
         )
         self._eval_rows_raw_bytes, self._eval_rows_wire_bytes = raw_b, wire_b
         return rows

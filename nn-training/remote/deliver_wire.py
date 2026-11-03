@@ -67,6 +67,20 @@ PER_GAME_WIRE_KEYS = ("perGame", "perGameSecs")
 #: `eval_log.jsonl` 里算「这一轮有读数」的两种事件（`source` 行是 B/C evalboard 的，不算）。
 EVAL_EVENTS = ("eval", "eval_summary")
 
+#: 单轮逐局评估行的**绝对上界**（2026-11-03，用户定 3000）：真正生效的上界由
+#: `deliver_parts.eval_rows_cap` 算 —— 整轮读数（关数 × 种子数）不裁，只有异常大才收到这里。
+#: 体积：白名单投影后一行 ≈ 583B（z5 的 700 行实测）⇒ 3000 行 ≈ 1.7MB，加权重/动量 ≈ 2.6MB。
+#: 已经高于 2026-10-22 在坏链路上挂掉的 1.24MB —— 更大的体靠降级档兜：传输失败时
+#: `_degraded` 只发权重、评估读数登记 `owed_reposts`，包照旧随 artifacts zip 回去。
+#: 覆盖 z5 的 35×20 与 50×60；更大的课按关分层裁（见 `deliver_parts.select_eval_rows`）。
+EVAL_ROWS_HARD = 3000
+
+#: 分析列聚合行的 event：一轮一行（`(iter, wver)`），不占逐局行上界。
+EVAL_AGG_EVENT = "eval_agg"
+
+#: 聚合行的体积上界：超了按字段体积从大到小丢，并记 `truncated`（确定性）。
+EVAL_AGG_MAX_BYTES = 64 * 1024
+
 
 def slim_eval_row(row: dict) -> dict:
     """一行逐局评估读数 → **实时体投影**（白名单 `EVAL_ROW_WIRE_KEYS`，见那里的为什么）。"""
@@ -85,6 +99,150 @@ def slim_eval_rows(rows: list[dict]) -> tuple[list[dict], int, int]:
     out = [slim_eval_row(r) for r in rows]
     after = len(json.dumps(out, ensure_ascii=False).encode("utf-8"))
     return out, before, after
+
+
+def _agg_number(values: list) -> dict:
+    nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not nums:
+        return {}
+    total = sum(nums)
+    return {
+        "sum": total,
+        "mean": round(total / len(nums), 6),
+        "min": min(nums),
+        "max": max(nums),
+        "n": len(nums),
+    }
+
+
+def _agg_list(values: list[list]) -> dict | None:
+    """数字列表逐位求和；字符串列表按元素计数；空列表/混合类型返回 None。"""
+    if not values:
+        return None
+    numeric = all(
+        all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in xs) for xs in values
+    )
+    if numeric:
+        width = max((len(xs) for xs in values), default=0)
+        if width == 0:
+            return None
+        sums = [0] * width
+        for xs in values:
+            for i, x in enumerate(xs):
+                sums[i] += x
+        return {"sum": sums, "n": len(values)}
+    counts: dict[str, int] = {}
+    for xs in values:
+        for x in xs:
+            if isinstance(x, (str, int, float, bool)):
+                key = str(x)
+                counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return None
+    return {"counts": dict(sorted(counts.items())), "n": len(values)}
+
+
+def _agg_dict(values: list[dict]) -> dict:
+    """嵌套 dict 递归求和（非数值叶子跳过）。"""
+    out: dict = {}
+    for name in sorted({k for d in values for k in d}):
+        agg = _agg_field([d.get(name) for d in values])
+        if agg is not None:
+            out[name] = agg
+    return out
+
+
+def _agg_field(values: list) -> dict | None:
+    """一个字段在这一轮所有局上的聚合；`None` 值不参与（全 `None` ⇒ 整列省略）。"""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return None
+    if all(isinstance(v, bool) for v in vals):
+        return {"true": sum(1 for v in vals if v), "n": len(vals)}
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        return _agg_number(vals)
+    if all(isinstance(v, str) for v in vals):
+        counts: dict[str, int] = {}
+        for v in vals:
+            counts[v] = counts.get(v, 0) + 1
+        return {"counts": dict(sorted(counts.items())), "n": len(vals)}
+    if all(isinstance(v, list) for v in vals):
+        return _agg_list(vals)
+    if all(isinstance(v, dict) for v in vals):
+        return _agg_dict(vals)
+    return None
+
+
+def _fit_agg(fields: dict, limit: int) -> tuple[dict, list[str]]:
+    """把聚合字段收到 `limit` 字节内：按字段体积从大到小丢，返回 `(保留, 丢掉的名字)`。"""
+
+    def size(obj: object) -> int:
+        return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    if size(fields) <= limit:
+        return fields, []
+    kept = dict(fields)
+    dropped: list[str] = []
+    for name in sorted(kept, key=lambda k: (-size(kept[k]), k)):
+        if size(kept) <= limit:
+            break
+        del kept[name]
+        dropped.append(name)
+    return kept, sorted(dropped)
+
+
+def aggregate_eval_rows(rows: list[dict]) -> list[dict]:
+    """把逐局**分析列**聚合成每个 `(iter, wver)` 一行（`eval_agg`）。
+
+    逐局行只发白名单（`EVAL_ROW_WIRE_KEYS`），分析列（`cellsVisited` / `idleTicks` /
+    `wallPressTicks` / `moveHist` / `exposureByKind` / `killOrder` …）过去只能等离线包。
+    这里在**同一份账本**上把它们聚成一两 KB 的一行，每个 it 随体到达 ⇒ 控制台/门判不必
+    等包；逐局体一个字节不变。
+
+    聚合口径（`analysis`）：数值 → sum/mean/min/max/n；bool → true/n；字符串 → 值计数；
+    数字列表 → 逐位求和；字符串列表 → 元素计数；嵌套 dict → 递归求和；`None` 不计。
+    白名单里已逐局发的键不进 `analysis`（那部分逐局已有）。按 `(iter, wver)` 分组、字段
+    名排序 ⇒ 同一批行（任意落盘顺序）得到逐字节相同的结果。体积超 `EVAL_AGG_MAX_BYTES`
+    ⇒ 从最大的字段开始丢，`truncated` 记名字。
+    """
+    groups: dict[tuple[int, str], list[dict]] = {}
+    for r in rows:
+        if not isinstance(r, dict) or r.get("event") != "eval":
+            continue
+        it = r.get("iter")
+        wver = str(r.get("wver") or "")
+        if not isinstance(it, int) or it < 0 or not wver:
+            continue
+        groups.setdefault((int(it), wver), []).append(r)
+    wire_keys = set(EVAL_ROW_WIRE_KEYS)
+    out: list[dict] = []
+    for it, wver in sorted(groups):
+        group = groups[(it, wver)]
+        names = sorted({k for r in group for k in r} - wire_keys - {"event"})
+        fields: dict = {}
+        for name in names:
+            agg = _agg_field([r.get(name) for r in group])
+            if agg is not None:
+                fields[name] = agg
+        analysis, truncated = _fit_agg(fields, EVAL_AGG_MAX_BYTES)
+        nodes: dict[str, int] = {}
+        for r in group:
+            node = str(r.get("node") or "")
+            nodes[node] = nodes.get(node, 0) + 1
+        row = {
+            "event": EVAL_AGG_EVENT,
+            "iter": it,
+            "wver": wver,
+            "time": max((str(r.get("time") or "") for r in group), default=""),
+            "games": len(group),
+            "stages": len({r.get("stage") for r in group}),
+            "nodes": dict(sorted(nodes.items())),
+            "analysis": analysis,
+        }
+        if truncated:
+            row["truncated"] = truncated
+        out.append(row)
+    return out
 
 
 def wire_row(row: dict | None, *, keep_per_game: bool = False) -> tuple[dict | None, int]:

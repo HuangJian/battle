@@ -1851,7 +1851,8 @@ def test_eval_rows_go_through_the_wire_whitelist_and_local_ledger_is_untouched(
     assert d.sync() == 1
     (body,) = op.bodies
     rows = body["eval_rows"]
-    assert len(rows) == 2
+    assert len([r for r in rows if r["event"] == "eval"]) == 2
+    assert [r["event"] for r in rows if r["event"] != "eval"] == ["eval_agg"]
     # 白名单是**契约**，所以用例自己写一份（不 import 实现里的那个常量：那是拿实现验实现）。
     kept = {
         "event",

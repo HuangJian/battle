@@ -10842,3 +10842,39 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `tests/trainer/test_eval_dispatch_resilience.py`（流水线 + 插队端到端）·
   LOC 预算/账本/分层守卫绿。
 - **全文** → `docs/nn/runtime-opt.md` §42。
+
+## §2026-11-03-goalnn-eval-rows-stratified（云机评估行回传 cap：整轮放行 + 按关分层；聚合胜率本就不受影响）
+
+- **现场**：z5-safe-base 35 关 × 20 seed = 700 局/点，实时体只带 400 行（21–22 关），尾段关缺席。
+  `eval_summary` 不占上界，仍是 700 局全量（控制台主胜率读它）⇒ **胜率没有被高估**；400 行子集
+  胜率 36.5% / 43.75% / 42.0%（it120/130/175）方向会翻。根因是 `eval_log.jsonl` 按**并发完成
+  顺序**追加 + `rows[:cap]` 前缀截断（400 行里 stage 切换 ~300 次；缺失集合逐轮不同）。
+- **决定**：`deliver_parts.eval_rows_cap(n_rows, hard=EVAL_ROWS_HARD)` = `max(400, min(n, 3000))`
+  ⇒ 完整一轮不裁；超过 3000 行才 `select_eval_rows`：同键 `(iter, wver, stage, seed)` 取最后一条
+  → 按 `(stage, seed)` 全序 → `divmod(cap, 关数)` 分层（前 rem 关各多一条）；`cap < 关数` 时只覆盖
+  stage 最小的前 cap 关。硬上界单一来源 = `deliver_wire.EVAL_ROWS_HARD`（3000；投影后 ~1.7MB，
+  加权重/动量 ~2.6MB；已高于 2026-10-22 的 1.24MB，坏链路靠降级档兜）。
+  体积实测（it35 的 700 条）：白名单 583B/行（399KB），分析列全量 2112B/行（1.41MB，+1.02MB/轮）；
+  3000 行时体 2.59MB（投影）/ 6.96MB（全量，逼近 8MB 上限）。
+- **被否决**：① 只把 400 改成 800（下个 50 关课再撞）；② `cap = n_stages * (len(rows)//n_stages)`
+  （≈len(rows) = 永不裁剪，与「防体超限」自相矛盾）；③ 随机抽（同一账本重投投影会漂，逐局表抖）。
+- **验收**：`tests/remote/test_eval_row_selection.py`（整轮放行 / 恰好 3000 / 打乱顺序同投影 /
+  cap < 关数 / 同键取最后 / outbox 单源）+  `tests/remote/test_offline_eval_cloud.py`（700 不裁、
+  3200 → 3000 仍覆盖 40 关）。真机需重导任务包（云机跑代码快照）。
+- **全文** → `docs/nn/remote-transport.md` §133。
+
+## §2026-11-03-goalnn-eval-analysis-aggregate（分析列全量聚合成一轮一行 `eval_agg` 随补传体回）
+
+- **口径**（用户 2026-11-03）：逐局仍走白名单；另把**分析列全量**聚合，每个 it 传回 hub 一行。
+- **行**：`{"event":"eval_agg","iter","wver","time","games","stages","nodes","analysis"}`；
+  `analysis` 对每个非白名单键聚合：数值 sum/mean/min/max/n，bool true/n，字符串值计数，
+  数字列表逐位求和，字符串列表元素计数，嵌套 dict 递归求和；`None` 不计；字段名排序。
+  体积上界 64KB（超了按字段体积从大到小丢并记 `truncated`）。
+- **落点**：`deliver_wire.aggregate_eval_rows`（纯函数，在**截断前**的全量行上算）→
+  `deliver_parts.eval_rows_for` 追加到 `rows + summary + agg`（不占逐局上界）→ hub
+  `merge_eval_rows` / `append_eval_aggs`（与 summary 同一套 `(iter,wver)` + `games` 单调规则）。
+- **被否决**：把分析列塞进逐局白名单（z5 一整轮 +1.02MB；3000 行体 6.96MB 顶 8MB）；
+  把聚合塞进 `eval_summary`（summary 缺行时就没有载体）。
+- **验收**：`tests/remote/test_eval_agg.py`（口径 / 顺序无关 / 分组合并 / 随体发送 / 单调合并）+
+  `tests/remote/test_offline_eval_cloud.py`（700 逐局 + 1 聚合）。
+- **全文** → `docs/nn/remote-transport.md` §134。

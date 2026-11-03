@@ -729,7 +729,11 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert d._post_artifact(2)
-    assert sent and [r["event"] for r in sent[0]["eval_rows"]] == ["eval", "eval_summary"]
+    assert sent and [r["event"] for r in sent[0]["eval_rows"]] == [
+        "eval",
+        "eval_summary",
+        "eval_agg",
+    ]
     assert sent[0]["it"] == 2 and sent[0]["weights_json"]
 
 
