@@ -180,6 +180,94 @@ def lost_by_node(meta_path: Path, it: int) -> tuple[dict[str, int], dict[str, in
     return (per_node, per_errno)
 
 
+def eval_round_ledger_state(
+    eval_jsonl: Path, key16: str, it: int, pairs: list[tuple[int, int]]
+) -> tuple[bool, dict[str, Any] | None]:
+    """扫一遍账本：本轮语料是否已全部落在该 (iter, wver) 的逐局行里 + 该键最后一条 summary。
+
+    过滤口径与 `settle_eval_summary` 的账本扫描**逐条一致**（同 event/wver/iter，
+    排除带 `source` 的 B/C 行）——两处漂移会让「已全落」与 summary 的 `dropped`
+    自相矛盾。续跑补账（2026-11-03 z6-porter.it10）靠它判「上一条 summary 的缺口
+    是不是已被迟到行填平」：preempted 收工时在飞的本机局会在 summary 落盘后 1–2s
+    才写行，下次续跑 todo 为空 ⇒ 若不补对账，账本永远停在「缺 N 局」。
+    """
+    keys: set[tuple[int, int]] = set()
+    last: dict[str, Any] | None = None
+    try:
+        with open(eval_jsonl, encoding="utf-8") as f:
+            for ln in f:
+                if '"eval' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except Exception:
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                if r.get("wver") != key16 or r.get("iter") != it:
+                    continue
+                ev = r.get("event")
+                if ev == "eval_summary":
+                    last = r
+                elif ev == "eval" and "source" not in r:
+                    try:
+                        keys.add((int(r["stage"]), int(r["seed"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+    except FileNotFoundError:
+        return False, None
+    return all(p in keys for p in pairs), last
+
+
+def reconcile_late_eval_rows(
+    eval_jsonl: Path,
+    key16: str,
+    it: int,
+    pairs: list[tuple[int, int]],
+    append_row: Callable[[dict], None],
+    rollout_winrate: float | None,
+    course_fp: str | None,
+    log_line: Callable[[str], None],
+) -> int:
+    """`todo` 空时的迟到行补账：补了返回补账前的缺口，没补返回 0。
+
+    现场（2026-11-03 z6-porter.it10）：preempted 收工时在飞的**本机**局会在 summary
+    落盘后 1–2s 才写行；下次续跑 `todo` 已空 ⇒ 调用方直接 skip，账本永远停在「缺 N
+    局」。本轮语料已全部在该 (iter, wver) 的逐局行里、而最后一条 summary 仍记缺口
+    ⇒ 补一条 `settled` 对账（数值全从账本重算，不猜）。幂等：补完后末条 summary 干净
+    （`dropped=0`），再续跑不再补。
+
+    `log_line` 由调用方注入（课程前缀取自派发侧；本模块只有全局 `log`）。
+    """
+    landed_all, prev = eval_round_ledger_state(eval_jsonl, key16, it, pairs)
+    if not landed_all or prev is None:
+        return 0
+    gap = int(prev.get("dropped") or 0)
+    if gap <= 0:
+        return 0
+    log_line(f"[eval] it{it}: 迟到局已全落账（缺 {gap} 局）— 补一条 settled 对账")
+    settle_eval_summary(
+        eval_jsonl=eval_jsonl,
+        key16=key16,
+        it=it,
+        pairs=pairs,
+        total=0,
+        landed=set(),
+        wins=[0],
+        cleared_total=[0],
+        outcomes={},
+        node_games={},
+        append_row=append_row,
+        t_eval_start=time.time(),
+        rollout_winrate=rollout_winrate,
+        course_fp=course_fp,
+        left_pending=0,
+        left_pairs=set(),
+        close_reason="settled",
+    )
+    return gap
+
+
 def settle_eval_summary(
     eval_jsonl: Path,
     key16: str,

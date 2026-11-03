@@ -25,6 +25,45 @@
 
 ---
 
+## §108 it10 eval 报「缺 3 局」而账本里 700 局全在：preempted 收工后的迟到行没有对账入口（2026-11-03，用户指令「z6-porter it10 eval 提示缺3局，请排查」）
+
+**现场**（z6-porter.it10，2026-11-03）：`eval_log.jsonl` 最后一条 summary 写
+`games=709 dropped=3 lost=3 close_reason=preempted`，`missing` 指 s2034/seed…18/19/20；
+而账本里这 3 局的逐局行都在（`node=self`，21:00:59–21:01:00），35 关 × 20 种子 = 700 个
+(stage,seed) **一个不缺**。控制台读最后一条 summary ⇒ 一直显示「缺 3 局」。
+
+**时序（日志 + meta 互证）**：
+
+1. 21:00:26 最后一波 `dispatch 62`；其中 3 局派到本机（self），`elapsedSec≈6.5`；
+2. 21:00:57 PPO it12 收官 ⇒ preempt 置位：eval 断连在飞请求、置 `all_done`；
+3. 21:00:58–59 收工扫描账本（59/62），summary 落账 `dropped=3 lost=3`；
+4. 21:00:59–21:01:00 这 3 局本机局跑完，meta `ok=true` + eval 行落盘（迟到 1–2s）；
+5. 21:01:23 续跑：`todo` 已空 ⇒ `already evaluated — skip` 直接返回，**不再有任何
+   summary 落账**。
+
+⇒ 缺口数值本身没错（收工那一刻确实没落盘）；错的是**缺口被迟到行填平之后没人改账**。
+`_missing_reasons` 把这类「meta 有 `ok=true` 行却没落盘行」归到 `undispatched`（它自己
+注释里的「罕怪态」），正是这个窗口的指纹。
+
+**修法**（`worker/eval_track.py::reconcile_late_eval_rows`，在 `trainer/eval_dispatch.py`
+的 skip 分支调用）：续跑看到 `todo` 空时，用与 `settle_eval_summary` **同一过滤口径**扫一遍
+账本——本轮语料已全部落在该 (iter, wver) 的逐局行、且最后一条 summary 仍记 `dropped>0`
+⇒ 补一条 `close_reason=settled` 的对账 summary（数值全从账本重算，不猜）。幂等：补完后
+最后一条 summary 干净，再续跑不再补。判据钉在
+`tests/worker/test_eval_seed_pool.py::test_resume_after_late_rows_rewrites_the_gap_summary`
+（改前红 `1 == 2`：旧实现只 skip；改后 2 条 summary，末条 `dropped=0/missing=[]`）。
+
+**边界**：只在「逐局行覆盖全部语料」时补账——零梯度轮把局记在别的 iter（`carried`）
+不补，语义不变；迟到局若从未落盘，`todo` 非空，仍走正常重派。迟到局本身**不能等**：
+preempt 是 rollout 绝对优先，本机局跑起来就不可中断，收工只等「正在写行」的线程 1s
+（`writers` 预算），等计算中的局会违反让位纪律。
+
+**补账记录**（2026-11-03 深夜，用户逐条确认）：z6-porter 的 it10（`dropped` 3→0，712
+局）、it25（4→0，705 局）、it30（9→0，708 局）各追加了一条 `settled` 对账行
+（append-only，数值全由 `settle_eval_summary` 从账本重算；补前备份
+`tmp/_eval_log.z6-porter.before-repair.jsonl`）。注意 it30 是补账途中新冒出的同一指纹
+——**旧代码的 trainer 还在跑**，重启前新产生的迟到轮不会自动对账。
+
 ## §107 `reuse_audit.scan()` 接上 `scan_cache`：整仓 `ast.parse` 3.13s → 0.17s（冷启动不变）（2026-11-02，用户指令「Route reuse_audit.scan's per-file _funcs through scan_cache」）
 
 **为什么它一直没被发现**：`conftest.py::pytest_runtest_makereport` **只对 call 阶段计时**

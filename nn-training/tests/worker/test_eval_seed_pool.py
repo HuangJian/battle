@@ -466,6 +466,82 @@ def test_dispatcher_daily_corpus_100_fixed_offpool(tmp_path: Path, monkeypatch) 
     assert {c[1] for c in calls[n_before:]} == {s for _, s in expect}
 
 
+def test_resume_after_late_rows_rewrites_the_gap_summary(tmp_path: Path) -> None:
+    """续跑见 todo 空时，若上一条 summary 仍记缺口 ⇒ 补一条 settled 对账（z6-porter.it10）。
+
+    现场：preempted 收工时 3 局本机局还在飞，summary 记 `dropped=3 lost=3`；它们在
+    summary 落账后 1–2s 才写行；下次续跑 `todo` 已空 ⇒ 旧实现直接 skip，账本永远停在
+    「缺 3 局」。本用例的就是那个后置状态：行已全在账 + 最后一条 summary 仍报缺口。
+    """
+    import types
+
+    import common.distribution
+    import trainer.eval_dispatch as ed
+
+    work = tmp_path / "late"
+    work.mkdir()
+    rl = work / "w.json"
+    rl.write_text('{"arch":{"late":1}}', encoding="utf-8")
+    wver = common.distribution.weights_fingerprint(str(rl))[:16]
+    pairs = [(2000, EVAL_SEEDS[0]), (2000, EVAL_SEEDS[1])]
+    elog = work / "eval_log.jsonl"
+    _write_eval_rows(elog, [{**_eval_row(1, s_, sd, 0), "wver": wver} for s_, sd in pairs])
+    _write_eval_rows(
+        elog,
+        [
+            {
+                "event": "eval_summary",
+                "iter": 1,
+                "wver": wver,
+                "games": 1,
+                "wins": 0,
+                "winRate": 0.0,
+                "clears": 0,
+                "clearRate": 0.0,
+                "outcomes": {"timeout": 1},
+                "dropped": 1,
+                "never_dispatched": 0,
+                "lost": 1,
+                "carried": 0,
+                "left_pending": 0,
+                "close_reason": "preempted",
+                "missing": [
+                    {"stage": 2000, "seed": EVAL_SEEDS[1], "reason": "undispatched"}
+                ],
+            }
+        ],
+    )
+    args = types.SimpleNamespace(
+        eval_games_per_stage=2,
+        total_stages=1,
+        eval_stages="2000",
+        eval_window_sec=60,
+        max_ticks=10,
+        difficulty="hard",
+    )
+    ed.dispatch_eval_round("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1)
+    rows = [
+        json.loads(ln)
+        for ln in elog.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert len(summ) == 2, "迟到局已全落账 ⇒ 续跑必须补一条对账 summary"
+    last = summ[-1]
+    assert last["close_reason"] == "settled"
+    assert last["dropped"] == 0
+    assert last["missing"] == []
+    assert last["games"] == 2
+    # 幂等：对账已 clean，再续跑一次不重复补账
+    ed.dispatch_eval_round("bun", str(rl), work / "trajA", args, {"nodes": []}, "rid.late", 1)
+    rows2 = [
+        json.loads(ln)
+        for ln in elog.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert len([r for r in rows2 if r.get("event") == "eval_summary"]) == 2
+
+
 def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None:
     """n_seeds=2（单测/冒烟）仍走前缀切片，不被翻成日常档 100。"""
     import types

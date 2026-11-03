@@ -42,7 +42,7 @@ from worker.eval_local import (
     settle_eval_summary,
 )
 from worker.eval_self_rescue import EvalConsumers
-from worker.eval_track import course_logger, lost_by_node
+from worker.eval_track import course_logger, lost_by_node, reconcile_late_eval_rows
 
 # 让位/份额（尾巴）策略在 `biz/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
@@ -211,6 +211,11 @@ class EvalDispatcher:
                 _log(
                     f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip"
                     + ("（it0 基线）" if self.baseline else "")
+                )
+                # 迟到行补账（2026-11-03 z6-porter.it10，判据与落账见 eval_track）
+                reconcile_late_eval_rows(
+                    eval_jsonl, key16, it, pairs, lambda row: append_jsonl(eval_jsonl, row),
+                    rollout_winrate, course_fp, _log,
                 )
                 return False
             # ---- 同族课程的现成读数（plan/episode-reuse.plan.md）----
