@@ -23,7 +23,9 @@ from remote import weights_standard
 from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
 from trainer.queue_local import pick_race_target, register_inflight
 from worker import node_identity
+from worker.agent_meta import record_eval_failed
 from worker.archive import find_archive_weights  # noqa: F401 — 兼容旧引用
+from worker.eval_gate import Preempt
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from worker.eval_local import (
@@ -71,38 +73,6 @@ from worker.sibling_reuse import REUSE_NODE, land_reused_eval, reuse_eval_round
 EVAL_WEIGHTS_KIND = "eval"
 
 
-def _record_failed_meta(
-    meta_path: Path,
-    it: int,
-    task: tuple[int, int],
-    node: str,
-    err: str,
-    errno_code: str = "",
-    msg_head: str = "",
-) -> None:
-    """写一条 `ok=false` 的 meta（丢局/缺口原因）。
-
-    plan/eval-gap-honesty D1：`reason` 取**头部**（errno + 首行）——旧的 `[-160:]` 只留栈尾，
-    bun 的 `error: ENOENT … open '<path>'` 正好被切掉。`errno` / `msg_head` 是**纯新增键**，
-    不参与任何公式（历史行读侧按 unknown 处理）。
-    """
-    _record_agent_meta(
-        meta_path,
-        {
-            "node": node,
-            "mode": "eval",
-            "it": it,
-            "stage": task[0],
-            "seed": task[1],
-            "ok": False,
-            "reason": f"{errno_code}: {msg_head}" if msg_head else err,
-            "errno": errno_code,
-            "msg_head": msg_head,
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    )
-
-
 class EvalDispatcher:
     """固定语料干净评估的单轮派发器（阻塞版，调用方放后台线程跑）。
 
@@ -134,6 +104,7 @@ class EvalDispatcher:
         local_gate: threading.Event | None = None,
         baseline: bool = False,
         local_fallback_only: bool = False,
+        preempt: Preempt | None = None,
     ) -> None:
         self.bun = bun
         self.rl_path = rl_path
@@ -149,9 +120,18 @@ class EvalDispatcher:
         self.baseline = baseline
         #: True = 本机只做「集群全部不可用」的兜底（in-loop 四个派发点）。
         self.local_fallback_only = local_fallback_only
+        #: 让位令牌（`worker.eval_gate.Preempt`）：新 rollout 到达即置位 ⇒ 本轮收手、
+        #: 队头保留、下一个间隙续跑。None = 直调（手工 evalA / 单测，不受进程闸约束）。
+        self.preempt = preempt
 
-    def run(self) -> None:
-        """原 dispatch_eval_round 主体：run() 内局部别名；份额模式行为逐字节保留。"""
+    def _preempted(self) -> bool:
+        return self.preempt is not None and bool(self.preempt.is_set())
+
+    def run(self) -> bool:
+        """原 dispatch_eval_round 主体：run() 内局部别名；份额模式行为逐字节保留。
+
+        返回 True = 被 rollout 插队而收手（调用方据 `close_reason=preempted` 留在队头续跑）。
+        """
         bun = self.bun
         rl_path = self.rl_path
         traj_dir = self.traj_dir
@@ -168,13 +148,20 @@ class EvalDispatcher:
 
         # D1b（§2b）：eval 的私有 scratch **不是** it<N>/——轮转删 it<N>/ 时不会带走在飞的评估。
         eval_dir = traj_dir.parent / f"_eval-{traj_dir.name}"
+        if self._preempted():
+            return True  # 令牌已置位（rollout 先到）：门都不用探
         try:
             policy = cfg.get("policy", {})
             status_timeout = float(policy.get("statusTimeoutSec", 3))
             task_timeout = float(policy.get("taskTimeoutSec", 900))
             fail_streak_max = int(policy.get("nodeFailStreak", 3))
             window = float(getattr(args, "eval_window_sec", 1500) or 1500)
-            deadline = time.time() + window
+            # 生效截止时刻：**权重在可用节点上就绪后才定案**（2026-11-03）。旧实现从派发
+            # 起钟 ⇒ POST 挂死就白烧窗口（z5-safe-base it25 kaggle WinError 10054 ×187s）。
+            # POST 期间 `on_alive` 已让先就绪的节点开跑，它们读的是同一格（先给临时上限：
+            # 窗口 + POST 预算），POST 收工后再改写成「此刻起一个完整窗口」。
+            post_budget = min(300.0, max(60.0, task_timeout))
+            deadline = time.time() + window + post_budget
             wver = common.distribution.weights_fingerprint(rl_path)
             key16 = wver[:16]
             # D14 课程血缘（节点 resultCache 键的课程隔离分量，2026-10-08）：
@@ -209,7 +196,7 @@ class EvalDispatcher:
             seed_list = a_eval_seed_list(it, n_seeds, baseline=self.baseline)
             pairs = [(s, sd) for s in eval_stages for sd in seed_list]
             if not pairs:
-                return
+                return False
             # it0 基线：账本按 iter 隔离（baseline 行的 iter 恒 0），否则同指纹的
             # A-eval 行会把基线局算成"已评估"——it0 行永远不落盘、控制台退回旧基准。
             # A-eval 反向同理：min_iter=1 把 it0 基线行挡在 A-eval 去重外（bc 与
@@ -225,7 +212,7 @@ class EvalDispatcher:
                     f"[eval] it{it}: wver={key16[:12]}… already evaluated — skip"
                     + ("（it0 基线）" if self.baseline else "")
                 )
-                return
+                return False
             # ---- 同族课程的现成读数（plan/episode-reuse.plan.md）----
             # 到兄弟课（同 level/关卡/难度/决策粒度）的 `eval_log.jsonl` 里找同 wver 同
             # (stage,seed) 的行：命中局**不进任务表**（连权重 POST / 节点往返都不发生），
@@ -296,6 +283,15 @@ class EvalDispatcher:
             # 共享 RUN_ID ⇒ eval iterId 恒同，只用它会把另一门课的在飞请求一起掐死。
             req_scope = eval_request_scope(eval_iter_id, course_fp)
             common.distribution.clear_abort(req_scope)
+            # 让位钩子（2026-11-03）：rollout 一到 = 所有循环立即收手（all_done 置位）+ 断连
+            # 在飞请求（否则一条 fetch 会拖到 taskTimeoutSec 才交还 CPU/网络）。
+            if self.preempt is not None:
+
+                def _drop_inflight() -> None:
+                    common.distribution.abort_active_requests(req_scope)
+
+                self.preempt.add_hook(all_done.set)
+                self.preempt.add_hook(_drop_inflight)
             #: 正在写行的赢家数（record 期间 +1）：收工只等它们落盘。
             writers = [0]
             #: 消费线程数（孵化即 +1，线程退出 -1）。全退 = 再等也不会结算 ⇒ 收工
@@ -616,6 +612,12 @@ class EvalDispatcher:
                                 nd["id"], kind=EVAL_WEIGHTS_KIND
                             )
                             transient = True
+                    if not ok and self._preempted():
+                        # 被 rollout 插队打断的局：不计 streak / 不写 dropped（不是节点的锅），
+                        # 本轮收手后由队头续跑按 eval_log 缺口重派。
+                        with lock:
+                            _pop_inflight(task, nd["id"])
+                        continue
                     with lock:
                         if ok:
                             if task in seen:
@@ -665,7 +667,7 @@ class EvalDispatcher:
                                     )
                                 )
                             elif task not in seen:
-                                _record_failed_meta(meta_path, it, task, nd["id"], err)
+                                record_eval_failed(meta_path, it, task, nd["id"], err)
                                 _log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err}) "
                                     f"— dropped"
@@ -782,6 +784,10 @@ class EvalDispatcher:
                         err_msg_head = str(getattr(e, "msg_head", "") or "")[:160]
                         # 判据单一实现：A/B/C 三层共用 `common.distribution.is_transient_error`。
                         transient = common.distribution.is_transient_error(e)
+                    if not ok and self._preempted():
+                        with lock:
+                            _pop_inflight(task, "local")
+                        continue
                     with lock:
                         if ok:
                             if task in seen:
@@ -820,7 +826,7 @@ class EvalDispatcher:
                                         " — requeued（瞬断/背压，不计节点故障）"
                                     )
                                 elif task not in seen:
-                                    _record_failed_meta(
+                                    record_eval_failed(
                                         meta_path,
                                         it,
                                         task,
@@ -849,7 +855,7 @@ class EvalDispatcher:
                                 pending.append(task)
                                 _log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
                             elif task not in seen:
-                                _record_failed_meta(
+                                record_eval_failed(
                                     meta_path,
                                     it,
                                     task,
@@ -988,19 +994,28 @@ class EvalDispatcher:
                 base_c = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
                 # 让位（2026-11-01，docs/nn/runtime-opt.md §39）：节点自报在飞 = 本课 rollout
                 # （以及别的腿/课程）正占着的槽。eval 只拿剩下的，不把自己的 concurrency
-                # 再加一遍；`eval_slot_cap` 的 floor=1 让节点再忙也留一条线程推进。
+                # 再加一遍；**不留 floor**（2026-11-03 用户口径「全力保证 rollout」）——
+                # 占满时 c=0，本轮先不孵线程，等 `_grow_slots` 在间隙里补。
                 c_n = eval_slot_cap(base_c, int(ping.get("inflight") or 0))
                 if c_n < base_c:
                     _log(
                         f"[eval] node {nid}: 让出在飞 {base_c - c_n} 槽 ⇒ c={c_n}/{base_c}"
                         f"（inflight={ping.get('inflight')}）"
                     )
-                alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})
+                alive.append(
+                    {
+                        "id": nid,
+                        "url": n["url"],
+                        "key": n.get("authKey", ""),
+                        "c": c_n,
+                        "baseC": base_c,  # 扩容判据（gap 里 ping 空出的槽）
+                    }
+                )
             # 本机槽位可用 ⇔ snapshot_path 已建（见上方快照段）⇒ 门失败不再整轮空转。
             if not alive:
                 if snapshot_path is None:
                     _log("[eval] no eval-capable node — skipped this round")
-                    return
+                    return False
                 _log("[eval] no eval-capable node — local-only eval this round")
 
             # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
@@ -1009,24 +1024,27 @@ class EvalDispatcher:
             weights_standard.ensure_standard_weights(rl_path, log=_log)
             with open(rl_path, "rb") as f:
                 weights_bytes = f.read()
+
+            def _on_weight_ready(nd: dict) -> None:
+                """权重一到就开采（流水线；POST 池线程回调，须线程安全）。"""
+                if not self._preempted():
+                    consumers.spawn_node_once(nd)
+
             nodes_ok = (
                 common.distribution.post_weights_parallel(
-                    alive,
-                    iter_id,
-                    wver,
-                    weights_bytes,
-                    timeout=min(300.0, max(60.0, task_timeout)),
-                    kind=EVAL_WEIGHTS_KIND,
-                    log=_log,
+                    alive, iter_id, wver, weights_bytes, timeout=post_budget,
+                    kind=EVAL_WEIGHTS_KIND, log=_log, on_alive=_on_weight_ready,
                 )
-                if alive
-                else []
+                if alive else []
             )
+            # 窗口从**权重就绪**起算（2026-11-03）：POST 期间 on_alive 已让先就绪的节点
+            # 开跑（它们读临时上限），到这里改写为「此刻起一个完整 `eval_window_sec`」。
+            deadline = time.time() + window
             if alive and not nodes_ok:
                 # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。
                 if snapshot_path is None:
                     _log("[eval] all weight POSTs failed — skipped this round")
-                    return
+                    return False
                 _log("[eval] all weight POSTs failed — local-only eval this round")
 
             # 兜底模式的唯一本机入口：只有 `nodes_ok` 为空才孵化；健康集群本机 0 线程、
@@ -1043,7 +1061,7 @@ class EvalDispatcher:
                         f"（snapshot={'yes' if snapshot_path else 'no'}, slots={local_slots}）"
                         " — skipped this round"
                     )
-                    return
+                    return False
                 consumers.spawn_local("no usable remote eval node", snapshot_ready=True)
 
             _log(
@@ -1063,7 +1081,7 @@ class EvalDispatcher:
                     f"（local_slots={local_slots} snapshot={'yes' if snapshot_path else 'no'}）"
                 )
             for nd in nodes_ok:
-                consumers.spawn_node(nd)
+                consumers.spawn_node_once(nd)
             # —— 等收口（**显式**：旧实现靠 join(window + task_timeout) 顺带完成）——
             # ① settled 满 → 立即收工（req 4：断连 + 拒发新请求，慢节点/竞速副本不再等）；
             # ② 墙钟到期 → **有界**等窗口内的在飞局落账（在飞清空即走，兜底
@@ -1105,9 +1123,10 @@ class EvalDispatcher:
             if local_stopped.is_set():
                 stopped_nodes.add("local")
             close_reason = eval_close_reason(
-                all_done.is_set(),
+                all_done.is_set() and not self._preempted(),
                 no_consumers,
                 time.time() >= deadline,
+                preempted=self._preempted(),
                 lost=lost_n,
                 lost_per_node=lost_per_node,
                 stopped_nodes=stopped_nodes,
@@ -1119,10 +1138,15 @@ class EvalDispatcher:
             )
             # settled 满 = 断连（收工只等「正在写行」的赢家落盘）。
             closing = common.distribution.abort_active_requests(req_scope)
-            if all_done.is_set():
+            if close_reason == "settled":
                 _log(
                     f"[eval] it{it}: settled 满（{len(landed)}/{total}）— 断连 {closing} 条"
                     f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{tail}"
+                )
+            elif close_reason == "preempted":
+                _log(
+                    f"[eval] it{it}: 收工（新 rollout 插队，未全落盘 {len(landed)}/{total}）"
+                    f"— 断连 {closing} 条在飞连接；队头保留，间隙续跑{tail}"
                 )
             elif close_reason == "machine-fault":
                 top_node, top_n = max(lost_per_node.items(), key=lambda kv: kv[1])
@@ -1145,7 +1169,7 @@ class EvalDispatcher:
                     f"未全落盘 {len(landed)}/{total}）— 断连 {closing} 条在飞连接"
                     f"（在途局丢弃，下次续跑）{tail}"
                 )
-            if left_pending > 0:
+            if left_pending > 0 and close_reason != "preempted":
                 # 可读性行（**不是**验收通道：_log() 只在 prefix_scope 内镜像课程日志，
                 # eval 跑在后台线程 ⇒ 落盘的验收面只有 summary 的 close_reason/left_pending，
                 # 2026-10-08 评审 F10）。
@@ -1215,8 +1239,10 @@ class EvalDispatcher:
                 left_pairs=never_pairs,
                 close_reason=close_reason,
             )
+            return self._preempted()
         except Exception as e:
             _log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")
+            return False
 
 
 def dispatch_eval_round(
@@ -1231,24 +1257,17 @@ def dispatch_eval_round(
     local_gate: threading.Event | None = None,
     baseline: bool = False,
     local_fallback_only: bool = False,
-) -> None:
+    preempt: Preempt | None = None,
+) -> bool:
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
     薄包装：OO 实现在 EvalDispatcher（trainer/eval_dispatch.py 同模块——本地直跑
     runner 的 monkeypatch 需落在本模块全局名上，见 e2e/test_run_rl.py）。
+    返回 True = 被 rollout 插队而收手（队头续跑）；False = 本轮收工/无事可做。
     """
-    EvalDispatcher(
-        bun,
-        rl_path,
-        traj_dir,
-        args,
-        cfg,
-        iter_id,
-        it,
-        rollout_winrate,
-        local_gate,
-        baseline,
-        local_fallback_only,
+    return EvalDispatcher(
+        bun, rl_path, traj_dir, args, cfg, iter_id, it,
+        rollout_winrate, local_gate, baseline, local_fallback_only, preempt,
     ).run()
 
 
@@ -1265,9 +1284,16 @@ def dispatch_eval_bg(
     baseline: bool = False,
     local_fallback_only: bool = False,
 ) -> threading.Thread:
-    t_ = threading.Thread(
-        target=dispatch_eval_round,
-        args=(
+    """经**进程级 eval 闸**后台派发（`worker/eval_gate.py`）：rollout 优先、单飞、FIFO。
+
+    返回闸线程（join = 等到这一轮真正收工；被插队时它等下一个间隙续跑）。
+    """
+    from worker.eval_gate import eval_gate
+
+    name = f"eval-it{it}" + ("-baseline" if baseline else "")
+
+    def _job(token) -> bool:
+        return dispatch_eval_round(
             bun,
             rl_path,
             traj_dir,
@@ -1279,9 +1305,7 @@ def dispatch_eval_bg(
             local_gate,
             baseline,
             local_fallback_only,
-        ),
-        daemon=True,
-        name=f"eval-it{it}" + ("-baseline" if baseline else ""),
-    )
-    t_.start()
-    return t_
+            preempt=token,
+        )
+
+    return eval_gate().submit(_job, name=name)

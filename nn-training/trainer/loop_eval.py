@@ -131,6 +131,9 @@ class TrainingEval:
         wver 键控、续跑幂等），所以到这里通常只剩一次零成本观测/清账。**本函数不 join、
         不 sleep**：还在跑的（异常：节点慢/挂了）只打 WARN，由它自己的 `eval_window_sec`
         deadline 结束；`policy.evalJoinSoftSec>0` 时才走旧的「边界处最多补等 N 秒」。
+
+        2026-11-03（进程闸）：`_eval_tail` 的线程现在是闸的票——**排队中 / 被 rollout
+        插队**也表现为 alive，那是有意的等待而不是异常；真正的异常仍是「窗口内跑不完」。
         """
         pending = self._eval_tail
         self._eval_tail = None
@@ -167,6 +170,10 @@ class TrainingEval:
         让判定窗口顺延，判据不变。**per-tick 不站等**（2026-09-17）：未收官的尾巴整根
         传给 `_sweep_eval_tail`，由下一轮 rollout 收官这个自然边界收拢——不站着等任何
         固定秒数。intent/goal 仍全预算 join（止损判门要吃同轮 summary）。
+
+        2026-11-03：join 的对象是**闸的票**（`dispatch_eval_bg` 起的是 gate 线程）——
+        队头续跑意味着它可能先等前一轮 eval 收工、再等下一个 rollout 间隙；预算照旧
+        只兜住「这次 join 等多久」，等待本身不改轮次顺序（FIFO 在 `worker.eval_gate`）。
         """
         args = self.args
         if self._eval_gate is not None:
@@ -220,6 +227,10 @@ class TrainingEval:
         权重轮 M=it-1，读不可变归档（回落活指针 + WARN）。游戏仍藏进随后 PPO(it)
         空窗，wall 不变。未覆盖的对局由派发内幂等续跑；全覆盖即空转返回。
         仅 per-tick（intent/goal 走 m1 路径，it0 基线走独立流，均不动）。
+
+        2026-11-03（进程闸）：这里的「派发」只是把票交给 `worker.eval_gate` 排队——
+        前面还有 eval 或正在 rollout 时它不会立刻开跑，碰上下一次 rollout 还会被插队
+        收手（`close_reason=preempted`，票留队头）；顺序与优先级由闸保证，本函数不管。
         """
         from trainer.dispatch_queue import RUN_ID
         from trainer.eval_dispatch import (
@@ -290,6 +301,10 @@ class TrainingEval:
         全程 best-effort 只记日志；每条早退各打一行（G8）。smoke 轮 / 非 per-tick 跳过。
         `block=False`（serve 收官，G2/N4）：整串逐轮派发放进一个后台 daemon 线程，
         本方法立即返回——run_complete 只保证 drain **已派发**，不保证已结算。
+
+        2026-11-03（进程闸）：逐轮「派发 + join」仍是串行的，但票走闸的 FIFO——训练
+        结束后进程不退出（`--serve` 发现模式）⇒ 排队中的轮次在这里（或下一间隙）继续
+        补；每轮的 join 预算只兜住这次等待，超时那轮**仍在队里**，不被取消。
         """
         from trainer.dispatch_queue import RUN_ID
         from trainer.eval_dispatch import dispatch_eval_bg

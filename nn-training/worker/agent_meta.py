@@ -25,11 +25,12 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from common.fs import append_jsonl
 
-__all__ = ["AGENT_META_NAME", "record_agent_meta"]
+__all__ = ["AGENT_META_NAME", "record_agent_meta", "record_eval_failed"]
 
 #: 账本文件名（与 `trainer/eval_course_once.py` 的重跑清理表、`tools/task.py::clean` 的孤儿表逐字一致）。
 AGENT_META_NAME = "dist-agent-meta.jsonl"
@@ -47,3 +48,35 @@ def record_agent_meta(meta_path: str | Path, rec: dict) -> None:
         append_jsonl(meta_path, rec)
     except OSError:
         pass
+
+
+def record_eval_failed(
+    meta_path: str | Path,
+    it: int,
+    task: tuple[int, int],
+    node: str,
+    err: str,
+    errno_code: str = "",
+    msg_head: str = "",
+) -> None:
+    """写一条 `ok=false` 的 eval meta（丢局/缺口原因）。
+
+    plan/eval-gap-honesty D1：`reason` 取**头部**（errno + 首行）——旧的 `[-160:]` 只留栈尾，
+    bun 的 `error: ENOENT … open '<path>'` 正好被切掉。`errno` / `msg_head` 是**纯新增键**，
+    不参与任何公式（历史行读侧按 unknown 处理）。
+    """
+    record_agent_meta(
+        meta_path,
+        {
+            "node": node,
+            "mode": "eval",
+            "it": it,
+            "stage": task[0],
+            "seed": task[1],
+            "ok": False,
+            "reason": f"{errno_code}: {msg_head}" if msg_head else err,
+            "errno": errno_code,
+            "msg_head": msg_head,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )

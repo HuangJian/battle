@@ -8,6 +8,62 @@
 
 ---
 
+## §42 rollout 绝对优先、eval 排队吃间隙：进程级 eval 闸 + 去掉让位 floor + 窗口从权重就绪起算（2026-11-03 用户口径）
+
+**用户口径（本次改动的唯一依据）**：
+
+> 「前一个 eval 未完成，不启动后面的 eval ！！！不管多少课程，rollout 和 eval 都是排队！
+> 所有 rollout 优先级都高于 eval，一个 it 的 rollout 完全结束后才派发另一个 it 的
+> rollout/eval；rollout 进行过程中，不会被插队，它内部可以满铺可以竞速；eval 进行过程中，
+> 可以被新到的 rollout 插队。」
+> 「rollout 和 ppo 是训练的两大主体，必须保证！eval 只需要利用 rollout 间隙来完成，就算
+> 训练过程中赶不及，可以等训练结束后再继续补！」
+
+**现场**（z5-safe-base it25）：700 局 / 窗口 1800s，收工只落 589 —— 93 局从未派出、
+18 局 lost。三条叠加原因：
+
+1. **让位留 floor**：`eval_slot_cap` 旧口径 `max(1, concurrency − inflight)` ⇒ 节点被
+   rollout 占满时 eval 仍各开 1 条线程（4 节点 = 4 线程拖 700 局，1838s 只跑 589）。
+2. **多轮 eval 并发**：兄弟课程各自到点就派，后来者不排队，**一起分同一批节点的剩余槽位**
+   （同课 it30/it35、z5-idle12 每 ~10 分钟一发）。
+3. **窗口从派发起钟**：kaggle 的一次权重 POST 挂 187s（`WinError 10054`），窗口白烧；
+   其余节点还在等最后一个 POST 才开采（整轮 eval 被一个慢节点钉住）。
+
+**落地（判据与实现分居，派发器只消费）**：
+
+| 改动 | 位置 | 判据 / 契约 |
+|---|---|---|
+| 进程级 eval 闸：FIFO 取号 + 单飞 + rollout 插队 + 队头续跑 | `worker/eval_gate.py`（新，零依赖叶子） | `submit(job)` 的 `job(token)` 返回真值 = 被插队（票留队头，下一间隙续跑）；假值 = 完成 |
+| `eval_slot_cap` **去掉 floor**：`max(0, concurrency − inflight)` | `worker/eval_yield.py` | 占满时 eval 0 线程——「全力保证 rollout」；空出来的槽由 `EvalConsumers._grow_slots` 每 15s 补 |
+| 收工第五态 `preempted`（优先于 machine-fault/workers-gone） | `worker/eval_yield.py::eval_close_reason` | 被插队 = 主动收手，不是异常；票会续跑，所以不报丢局 WARN |
+| rollout 作用域只包采集段：`with eval_gate().rollout():` | `trainer/loop_round_steps.py::step_rollout` | 组合轮体与细粒度 Supervisor 都经本方法 ⇒ 两路共用一张闸；作用域一开，正在跑的 eval 立刻收手 |
+| `dispatch_eval_bg` = 把票交给闸（不再直接起派发线程） | `trainer/eval_dispatch.py` | 返回的线程 join 到「任务真正完成」（被插队时线程继续等间隙续跑） |
+| 窗口从**权重就绪**起算（POST 前先给临时上限 `window + post_budget`，POST 收工后改写） | `trainer/eval_dispatch.py::EvalDispatcher.run` | POST 挂死不再白烧窗口；`post_budget = min(300s, max(60s, taskTimeoutSec))` |
+| 权重下发**流水线**：`on_alive` 一到就孵化该节点的消费线程 | `common/distribution.py` + `EvalConsumers.spawn_node_once` | 先就绪的节点先开采，不再等最后一个 POST；`spawn_node_once` 去重（on_alive 与 POST 收工后补齐两条路会撞车） |
+
+闸为什么是**进程级**而不是按课程：生产是**一个** `run_rl_cluster --serve` 进程装所有课程
+（dashboard 的 trainer spec 不带 `--course`，发现模式永不退出）⇒ 全局一张闸就够，且排队中的
+eval 在训练收尾后还能继续补（用户口径「训练结束后再继续补」）。手工 `evalA` /
+`dispatch_eval_round` 直调不过闸（人点名的一次性评估）。
+
+**范围（有意不接闸的地方）**：`dispatch_eval_bg_m1`（intent/goal 旧派发流）与预采集子进程
+（`--precollect-early`，后台预取）不过闸——前者是另一条评估产品线，后者是采集本体的一部分；
+接上会把 eval 饿死在默认 stream 模式下。显式课程模式（非发现模式）在 `all_settled` 后进程退出，
+排队中的 eval 只保证在发现模式（生产）里补完。
+
+**用例**：`tests/worker/test_eval_gate.py`（单飞 / FIFO / rollout 期间不启动 / 插队后队头续跑且
+拿新令牌 / 钩子幂等与迟到钩子 / 作用域计数 / 任务异常不卡队 / 进程单例）·
+`tests/worker/test_eval_yield_split.py`（`eval_slot_cap` 去 floor 的边界、`close_reason=preempted`
+的五态互斥）· `tests/trainer/test_eval_dispatch_resilience.py`（`on_alive` 流水线：慢节点 POST
+未收工、快节点已取活；插队：`run()` 返回 True + summary `preempted` + 不熔断节点 + 不再取活）。
+
+**被否决**：保留 `floor=1`（rolling 优先级被 eval 反超）· 按课程各建一张闸（同进程里它们仍是
+同一批节点，逐课排队等于没排）· 插队 = 取消本轮（重跑整轮重复计费，已落盘行还得去重）·
+窗口继续从派发起钟（一个挂死的 POST 就吃掉 10% 窗口）· 让 EvalGate 决定节点份额（那是
+`eval_yield` 的判据，闸只回答「现在能不能开跑」）。
+
+---
+
 ## §40 兄弟课程 eval 互杀：断连作用域缺课程身份 + 权重 POST 裸 socket 异常炸整轮（2026-11-02）
 
 **现场**（`tmp/trainer-cluster.log`，z4-nav 与 z4-polish 同进程同 codeHash 并跑）：

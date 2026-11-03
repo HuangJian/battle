@@ -10819,3 +10819,26 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `hub · 队列 / 在飞` 与 `训练侧 · 在等什么`）。「训练侧」列也改**短词**（`采集` /
   `PPO·已发布` / `门禁` / `记账` / `评估` / `导出` / `准备` / `收尾` / `PPO·待发布` /
   `无待办` / `云机·接管` / `配置·阻塞`），训练进程的整句原话逐字进悬停（短词不丢信息）。
+
+## §2026-11-03-goalnn-rollout-first-eval-queue（rollout 绝对优先、eval 全局排队吃间隙：进程级 eval 闸 + 让位去 floor + 窗口从权重就绪起算）
+
+- **口径**（用户 2026-11-03）：「前一个 eval 未完成，不启动后面的 eval ！！！不管多少课程，
+  rollout 和 eval 都是排队！」「所有 rollout 优先级都高于 eval……eval 进行过程中，可以被
+  新到的 rollout 插队」「eval 只需要利用 rollout 间隙来完成，就算训练过程中赶不及，可以等
+  训练结束后再继续补」。
+- **现场**：z5-safe-base it25 700 局只落 589（93 从未派出 + 18 lost）：让位旧口径留 `floor=1`
+  （4 节点 = 4 线程拖 700 局）· 兄弟课程 eval 并发抢同一批节点剩余槽 · kaggle 权重 POST 挂 187s
+  白烧窗口且其余节点陪等。
+- **决定**：① 进程级 `worker/eval_gate.py`（FIFO 单飞 + rollout 插队 + 队头续跑 + 每轮新令牌）；
+  ② `eval_slot_cap` 去 floor（`max(0, concurrency − inflight)`，由 `_grow_slots` 在间隙补线程）；
+  ③ `eval_close_reason` 加第五态 `preempted`（优先于 machine-fault/workers-gone；不报丢局 WARN）；
+  ④ `step_rollout` 采集段持 `with eval_gate().rollout()`（组合轮体与细粒度 Supervisor 共用）；
+  ⑤ `dispatch_eval_bg` 改为向闸提交票；⑥ 评估窗口从权重就绪起算（POST 前临时上限
+  `window + min(300s, max(60s, taskTimeout))`）；⑦ 权重下发流水线 `on_alive` 先就绪先开采。
+- **被否决**：保留 floor=1 · 按课程各建一张闸 · 插队=取消本轮 · 窗口从派发起钟 · 让闸决定节点份额。
+- **范围**：m1 旧派发流（`dispatch_eval_bg_m1`）与预采集子进程不过闸；显式（非发现）`--serve`
+  在 all_settled 后退出，排队 eval 只保证在发现模式（生产）里补完。
+- **验收**：`tests/worker/test_eval_gate.py` · `tests/worker/test_eval_yield_split.py` ·
+  `tests/trainer/test_eval_dispatch_resilience.py`（流水线 + 插队端到端）·
+  LOC 预算/账本/分层守卫绿。
+- **全文** → `docs/nn/runtime-opt.md` §42。

@@ -292,20 +292,22 @@ def test_eval_request_scope_carries_course_identity() -> None:
 
 
 def test_eval_slot_cap_semantics() -> None:
-    """eval 让位：上限 = concurrency − 节点在飞局数（2026-11-01，503 busy 排查 §39）。
+    """eval 让位：上限 = concurrency − 节点在飞局数，**不留 floor**（2026-11-03 用户口径
+    「全力保证 rollout」）。
 
     节点在飞为 0（空节点）⇒ 拿满 `concurrency`；rollout 占了 2 槽 ⇒ 只剩 2；节点已满 ⇒
-    留一条线程推进（不饿死、也不把 800 局拖成纯等窗口）。
+    **0**（本轮先不孵线程，等 `_grow_slots` 在 rollout 退场的间隙里补）。旧实现给的
+    floor=1 正是 z5-safe-base it25「四个节点只开 4 条线程、700 局 1838s 只跑完 589」的形状。
     """
     y = eval_yield_mod
     assert y.eval_slot_cap(6, 0) == 6
     assert y.eval_slot_cap(6, 2) == 4
     assert y.eval_slot_cap(4, 3) == 1
-    assert y.eval_slot_cap(4, 4) == 1  # 满了也只留一条（floor）
-    assert y.eval_slot_cap(4, 99) == 1
+    assert y.eval_slot_cap(4, 4) == 0  # 占满 ⇒ 不抢，留给 rollout
+    assert y.eval_slot_cap(4, 99) == 0
     assert y.eval_slot_cap(4, -5) == 4  # 负数按 0 夹（账本抖坏不该放大上限）
-    assert y.eval_slot_cap(4, 3, floor=0) == 1
     assert y.eval_slot_cap(1, 0) == 1
+    assert y.eval_slot_cap(1, 1) == 0
 
 
 def test_hold_for_local_semantics() -> None:
@@ -332,15 +334,29 @@ def test_release_local_gate_semantics() -> None:
 
 
 def test_eval_close_reason_semantics() -> None:
-    """收工原因三态（plan/eval-baseline-undispatched §2 P0-1）：`workers-gone` 只在
+    """收工原因（plan/eval-baseline-undispatched §2 P0-1）：`workers-gone` 只在
     **窗口还有余量**时成立 —— 窗口到期的正常收工里消费线程本来就会退光，不加这个
-    条件的话 `window` 永远报不出来（三条互斥成空话）。"""
+    条件的话 `window` 永远报不出来（三条互斥成空话）。
+
+    `preempted`（2026-11-03，rollout 插队）：settled 仍最优先（它真跑完了，队头该出队）；
+    其余状态下插队压过 workers-gone / machine-fault（本轮是**主动收手**，不是故障）。
+    """
     y = eval_yield_mod
     assert y.eval_close_reason(True, False, False) == "settled"
     assert y.eval_close_reason(True, True, True) == "settled"  # 落盘满优先，另两条不参与
     assert y.eval_close_reason(False, True, False) == "workers-gone"
     assert y.eval_close_reason(False, True, True) == "window"
     assert y.eval_close_reason(False, False, False) == "window"
+    # 插队：主动收手，不报故障；已完成仍算 settled
+    assert y.eval_close_reason(False, False, False, preempted=True) == "preempted"
+    assert y.eval_close_reason(False, True, False, preempted=True) == "preempted"
+    assert (
+        y.eval_close_reason(
+            False, True, False, preempted=True, lost=83, lost_per_node={"local": 83}
+        )
+        == "preempted"
+    )
+    assert y.eval_close_reason(True, True, False, preempted=True) == "settled"
 
 
 def test_eval_close_reason_machine_fault_semantics() -> None:

@@ -433,7 +433,7 @@ LAYERS: dict[str, int] = {
     # 搬进来同时抬了 12 条既有条目的秩（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 ·
     # `remote.run_loop` 6→7 · `remote.bc_job` 3→4 · `remote.offline_boot` 7→8 等），
     # 因为它们的依赖从「账本外的 biz.*」变成了「账本内的 worker.*」。
-    # L0（45 个）
+    # L0（46 个）
     "worker.agent_meta": 0,
     "worker.archive": 0,
     "worker.backend": 0,
@@ -452,6 +452,10 @@ LAYERS: dict[str, int] = {
     # **单一来源**（`worker.eval_track.EVAL_SEEDS_BASE`，池外固定池）⇒ 本模块不再自带
     # 860001 那份副本 ⇒ 顶层多一条 `worker.eval_track` 边 ⇒ 秩 **L1**（`worker.eval_track` L0）。
     "worker.eval_ingest": 1,
+    # 2026-11-03（用户口径「rollout 绝对优先，eval 排队」）：进程级 eval 排队闸。
+    # 只碰 stdlib（threading/collections）⇒ **L0**；读者是 `trainer/eval_dispatch.py`
+    # 与 `trainer/loop_round_steps.py`（trainer 不在账本内，不计边）。
+    "worker.eval_gate": 0,
     "worker.eval_rows": 0,
     "worker.eval_track": 0,
     "worker.eval_yield": 0,

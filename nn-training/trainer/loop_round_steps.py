@@ -43,6 +43,7 @@ from trainer.loop_steps import (
 from trainer.loop_volume import TrainingVolume
 from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
 from worker.config import course_key_of, resolve_course_quota
+from worker.eval_gate import eval_gate
 from worker.events import log_iter_error
 from worker.loop_round import (
     COLLECT_HELD,
@@ -391,19 +392,24 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 "[run_rl] 被接管的课走到了采集步——步骤顺序被改动过？"
                 f"本机不跑这门课：{HELD_LEG_HINT}"
             )
-        if ctx.collect_mode == COLLECT_NODE:
-            # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
-            #   必须被读——配置冲突就只跳过本轮（`ROUND_SKIP` 走既有 30s/5 连击梯子），
-            #   而不是「带着空 shard 走进 PPO」或「整课 SystemExit 下线」。
-            skipped = self._remote_iter(it, ctx.pairs)
-            if skipped:
-                return finish(skipped, "上云轮配置冲突：本轮跳过")
-        elif self._volume_active():
-            # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
-            # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。
-            self._volume_collect_continuous(it, ctx.dist_cfg)
-        else:
-            self._rollout_phase(it, ctx.pairs, ctx.dist_cfg, ctx.eval_on_round)
+        # ★ 2026-11-03（用户口径「rollout 绝对优先，eval 只吃间隙」）：采集整段持有
+        #   进程级 eval 闸的 rollout 作用域 —— 正在跑的 eval 立刻被插队收手，排队中的
+        #   eval 在这段时间里不启动。两条驱动路径（组合轮体 / 细粒度 Supervisor）都经
+        #   本方法，所以闸只需要在这里开。
+        with eval_gate().rollout():
+            if ctx.collect_mode == COLLECT_NODE:
+                # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
+                #   必须被读——配置冲突就只跳过本轮（`ROUND_SKIP` 走既有 30s/5 连击梯子），
+                #   而不是「带着空 shard 走进 PPO」或「整课 SystemExit 下线」。
+                skipped = self._remote_iter(it, ctx.pairs)
+                if skipped:
+                    return finish(skipped, "上云轮配置冲突：本轮跳过")
+            elif self._volume_active():
+                # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
+                # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。
+                self._volume_collect_continuous(it, ctx.dist_cfg)
+            else:
+                self._rollout_phase(it, ctx.pairs, ctx.dist_cfg, ctx.eval_on_round)
         return None
 
     def step_volume_topup(self, ctx: RoundContext) -> StepResult | None:

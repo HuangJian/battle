@@ -217,18 +217,21 @@ def eval_close_reason(
     no_consumers: bool,
     window_expired: bool,
     *,
+    preempted: bool = False,
     lost: int = 0,
     lost_per_node: dict[str, int] | None = None,
     stopped_nodes: set[str] | tuple[str, ...] = (),
 ) -> str:
-    """收工原因（四值互斥）：`settled` / `machine-fault` / `workers-gone` / `window`。
+    """收工原因（五值互斥）：`settled` / `preempted` / `machine-fault` / `workers-gone` / `window`。
 
     为什么需要它（plan/eval-baseline-undispatched §2 P0-1，2026-10-08）：收工行原先
     只说「未全落盘 N/M」——it0 那 95 局就是在 21s/1500s 时因消费线程归零而收工，
     日志层却报不出「哪条路径收的工」，④（线程为什么退光）无从查。
 
     判据顺序（写死，别重算）：
-      · `settled`：落盘满 ⇒ 正常收工，另两条不参与；
+      · `settled`：落盘满 ⇒ 正常收工，另三条不参与；
+      · `preempted`：被新 rollout 插队（进程闸置位）⇒ 本轮主动收手，队头保留、
+        下一个间隙续跑（2026-11-03：rollout 绝对优先，eval 只吃间隙）；
       · `workers-gone`：**窗口还有余量**而消费线程已归零 —— 这是「远端线程异常退出」
         的指纹；
       · `window`：其余（窗口到期）。
@@ -243,6 +246,8 @@ def eval_close_reason(
     """
     if settled:
         return "settled"
+    if preempted:
+        return "preempted"
     if no_consumers and not window_expired:
         return (
             "machine-fault"
@@ -332,18 +337,18 @@ def requeue_backoff_sec(leg: int) -> float:
     return float(min(REQUEUE_BACKOFF_CAP_SEC, REQUEUE_BACKOFF_FIRST_SEC * 2 ** max(0, leg - 1)))
 
 
-def eval_slot_cap(concurrency: int, node_inflight: int, *, floor: int = 1) -> int:
-    """eval 腿对**单节点**的并发上限 = `max(floor, concurrency − 该节点在飞局数)`。
+def eval_slot_cap(concurrency: int, node_inflight: int) -> int:
+    """eval 腿对**单节点**的并发上限 = `max(0, concurrency − 该节点在飞局数)`。
 
     2026-11-01（`docs/nn/runtime-opt.md` §39）：`concurrency` 是**整台节点池**的份额，而
     rollout 与 eval 各自按自己的 `concurrency` 开线程 —— 需求翻倍、池满就是 503。节点自报
     在飞（`/v1/ping` 的 `inflight`，agent 同日起带上）后，eval 让出本课 rollout 正占着的槽。
 
-    `floor=1` 是「让位但不饿死」：节点再忙，eval 也留一条线程推进；否则 800 局会退化成
-    纯等窗口到期（那正是 `workers-gone` 的形状）。
+    **不设 floor**（2026-11-03 用户口径「全力保证 rollout」）：节点被 rollout/PPO 占满时
+    eval 就是 0 条线程，等下一个间隙再扩容；旧实现的 `max(1, …)` 会在满负荷时仍塞一条
+    eval 线程，与「rollout 绝对优先」相反。
     """
-    free = int(concurrency) - max(0, int(node_inflight))
-    return max(int(floor), free)
+    return max(0, int(concurrency) - max(0, int(node_inflight)))
 
 
 def inflight_grace_cap(task_timeout: float) -> float:

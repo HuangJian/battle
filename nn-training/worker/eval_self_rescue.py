@@ -12,7 +12,10 @@
 
 * **轮中本机兜底**：兜底模式的冻结快照在派发前就建好了，节点腿轮中退光时本机接盘一次；
 * **停派后回场**：软失败（503 busy / 瞬断）停派的节点按退避（20s → 40s，共 2 次）重取，
-  回场即重置该腿的软失败预算；真故障（`nodeFailStreak`）仍整轮停派——回场不拆节点护栏。
+  回场即重置该腿的软失败预算；真故障（`nodeFailStreak`）仍整轮停派——回场不拆节点护栏；
+* **槽位动态扩容**（2026-11-03）：派发时的 `eval_slot_cap(concurrency, inflight)` 只是一张
+  **快照**——rollout 退场后节点 inflight 下降，本轮按最新 ping 把空出来的槽补成线程。
+  旧实现整窗钉在 floor=1：z5-safe-base it25 四个节点只开 4 条线程，700 局 1838s 只跑完 589。
 """
 
 from __future__ import annotations
@@ -23,12 +26,30 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
+import common.distribution
 from worker.eval_yield import (
     SOFT_COMEBACK_MAX,
+    eval_slot_cap,
     local_fallback_midround,
     soft_comeback_backoff_sec,
     soft_comeback_due,
 )
+
+#: 动态扩容的重 ping 间隔（秒）；`0` = 关闭。判据是「rollout 退场后补线程」而不是墙钟：
+#: 测试把它压到毫秒级，走的仍是同一条 `_grow_slots` 路。
+EVAL_SLOT_GROW_SEC = 15.0
+#: 扩容 ping 的每节点预算（与派发时 `statusTimeoutSec` 的缺省同值）。
+EVAL_GROW_PING_TIMEOUT_SEC = 3.0
+
+
+def _capacity_pending(nodes_ok: list[dict[str, Any]]) -> bool:
+    """还有节点「派发时让过位（`c<baseC`）」⇒ 它的份额只是被 rollout/PPO 占着，值得等。
+
+    只看已入场节点：`nodes_ok` 为空（无节点 / 权重全失败）时无路可扩，仍按 workers-gone 收工。
+    """
+    return any(
+        int(nd.get("c") or 0) < int(nd.get("baseC") or nd.get("c") or 1) for nd in nodes_ok
+    )
 
 
 class EvalConsumers:
@@ -68,13 +89,21 @@ class EvalConsumers:
         self.comeback_at: dict[str, float] = {}
         #: 每条节点腿孵化过的线程（判「这条腿是否已退光」；`live_workers` 只是总数）。
         self.node_threads: dict[str, list[threading.Thread]] = {}
+        #: 已按「权重就绪」孵过的节点（`on_alive` 与 POST 收工后的补齐两条路会撞车，
+        #: 整轮每节点只孵一次；扩容/回场走 `spawn_node`，不受此集合限制）。
+        self._spawned_nodes: set[str] = set()
 
     # —— 孵化 ——
 
     def track(self, fn: Callable[..., Any], *a: Any, name: str = "") -> threading.Thread:
         """孵化消费线程并计入 live_workers（线程必须先计数再启动：主线程在
-        spawn 完才看计数，晚计数会让收工判断误以为「消费线程全退」）。"""
-        self.live_workers[0] += 1
+        spawn 完才看计数，晚计数会让收工判断误以为「消费线程全退」）。
+
+        计数走 `self.lock`：2026-11-03 起 `on_alive` 让**权重 POST 线程**也来孵化
+        （边下发边开采），两个节点同时下发成功时 `+= 1` 不能丢。
+        """
+        with self.lock:
+            self.live_workers[0] += 1
 
         def _body() -> None:
             try:
@@ -104,11 +133,76 @@ class EvalConsumers:
             self.threads.append(self.track(self.local_worker, name="eval-local"))
 
     def spawn_node(self, nd: dict) -> None:
-        """孵化一条节点腿的 N 条消费者线程（首次派发与停派后回场共用）。"""
+        """孵化一条节点腿的 N 条消费者线程（首次派发 / 停派后回场 / 扩容共用）。"""
         nid = str(nd["id"])
         for _ in range(int(nd["c"])):
-            self.threads.append(self.track(self.worker, nd, name=f"eval-{nid}"))
-            self.node_threads.setdefault(nid, []).append(self.threads[-1])
+            t = self.track(self.worker, nd, name=f"eval-{nid}")
+            with self.lock:
+                self.threads.append(t)
+                self.node_threads.setdefault(nid, []).append(t)
+
+    def spawn_node_once(self, nd: dict) -> None:
+        """权重就绪即开采（2026-11-03 流水线）：整轮每节点**只孵一次**。
+
+        `on_alive` 在权重 POST 的线程池里回调、POST 收工后主线程还会补一遍剩余节点
+        （失败/超时的那些不在 `nodes_ok` 里）——两条路可能同时到同一节点，故用集合去重。
+        `c<=0` 的节点不孵化（节点被 rollout 占满），等 `_grow_slots` 补。
+        """
+        nid = str(nd["id"])
+        if int(nd.get("c") or 0) <= 0:
+            return
+        with self.lock:
+            if nid in self._spawned_nodes:
+                return
+            self._spawned_nodes.add(nid)
+        self.spawn_node(nd)
+
+    def _grow_slots(
+        self,
+        nodes_ok: list[dict[str, Any]],
+        streaks: dict[str, int],
+        soft_streaks: dict[str, int],
+        queue_len: int,
+    ) -> None:
+        """rollout 退场 ⇒ 重 ping，把空出来的槽补成本轮线程（2026-11-03）。
+
+        只补**派发时让过位**的节点（`c < baseC`）：没让位 = 本来就满额，重 ping
+        纯属多余（也让未发生拥堵的轮次完全不付这笔开销）。`ping.inflight` 含我们
+        自己的在飞局 ⇒ 先减掉本腿活线程，剩下的才是 rollout / 别的轮占的份额，
+        再走与派发时同一个 `eval_slot_cap` 判据。ping 拿不到就这拍不扩，不抛。
+        """
+        yielded = [
+            nd for nd in nodes_ok if int(nd.get("c") or 0) < int(nd.get("baseC") or nd.get("c") or 1)
+        ]
+        if not yielded:
+            return
+        try:
+            pings = common.distribution.ping_nodes_parallel(
+                yielded, timeout=EVAL_GROW_PING_TIMEOUT_SEC
+            )
+        except Exception:
+            return
+        for nd, ping in zip(yielded, pings, strict=True):
+            nid = str(nd["id"])
+            if ping is None or not ping.get("evalSupport"):
+                continue
+            with self.lock:
+                if streaks.get(nid, 0) >= self.fail_streak_max:
+                    continue
+                if soft_streaks.get(nid, 0) >= self.soft_streak_max:
+                    continue
+                alive_n = sum(1 for t in self.node_threads.get(nid, ()) if t.is_alive())
+            base_c = int(nd.get("baseC") or nd.get("c") or 1)
+            others = max(0, int(ping.get("inflight") or 0) - alive_n)
+            want = eval_slot_cap(base_c, others)
+            add = want - alive_n
+            if add <= 0:
+                continue
+            self.spawn_node({**nd, "c": add})
+            self._log(
+                f"[eval] it{self.it}: node {nid} 扩容 +{add} → {want} 线程"
+                f"（inflight={ping.get('inflight')}，队列还剩 {queue_len} 局）"
+            )
 
     # —— 轮中自救 ——
 
@@ -129,19 +223,27 @@ class EvalConsumers:
         旧实现在这里直接 break：一次 503 busy 拥堵就把整轮判死。三种走法：
         ① 兜底模式本机接盘一次（本轮没孵过 + 冻结快照在 + 槽位>0）；
         ② 软失败停派的节点退避到点后回场（回场 = 新一轮软失败预算）；
-        ③ 都无路 ⇒ 返回，`workers-gone` 仍是**会到来**的状态（不把收工换成等窗口到期）。
+        ③ 节点**让过位**（`c<baseC`）但当下被 rollout/PPO 占满 ⇒ 留在窗口里等扩容
+           节拍（2026-11-03：eval 排队吃间隙，节点空出来就补线程；等不到由窗口收工）；
+        ④ 都无路 ⇒ 返回，`workers-gone` 仍是**会到来**的状态（不把收工换成等窗口到期）。
+        另有吞吐路径：每 `EVAL_SLOT_GROW_SEC` 重 ping，把 rollout 退场空出的槽补上。
         """
+        grow_every = float(EVAL_SLOT_GROW_SEC)
+        grow_at = time.time() + grow_every if grow_every > 0 else float("inf")
         while not all_done.is_set() and time.time() < deadline:
             all_done.wait(0.2)
             with self.lock:
                 idle = self.live_workers[0] <= 0
                 has_work = bool(pending) or bool(inflight)
                 queue_len = len(pending)
+            now = time.time()
+            if grow_every > 0 and has_work and now >= grow_at:
+                grow_at = now + grow_every
+                self._grow_slots(nodes_ok, streaks, soft_streaks, queue_len)
             if not idle:
                 continue
             if not has_work:
                 return
-            now = time.time()
             spawned_local = local_fallback_midround(
                 self.fallback_only, self.local_spawned, snapshot_ready, self.local_slots, has_work
             )
@@ -177,6 +279,9 @@ class EvalConsumers:
                     f"（第 {back_n + 1}/{SOFT_COMEBACK_MAX} 次；队列还剩 {queue_len} 局）"
                 )
             if revived or spawned_local or future_revival:
+                continue
+            if _capacity_pending(nodes_ok):
+                # 节点让过位、只是当下被占满：别把「等间隙」记成 workers-gone。
                 continue
             return
 

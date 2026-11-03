@@ -92,7 +92,9 @@ class _Harness:
             common.distribution,
             "post_weights_parallel",
             lambda nodes, *a, **k: [
-                {"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in nodes
+                # `baseC` = 扩容判据（`c<baseC` ⇒ 派发时让过位）；单节点夹具恒满额。
+                {"id": n["id"], "url": n["url"], "key": "", "c": 1, "baseC": 1}
+                for n in nodes
             ],
         )
         monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
@@ -479,6 +481,8 @@ class _LaneHarness:
         self.fallback_only = fallback_only
         #: `play()` 开跑时刻 —— 用例可以用它表达「窗口已过期」这类**事件**，而不是猜时长。
         self.play_t0 = 0.0
+        #: 最近一轮 `run()` 的返回值（True = 被 rollout 插队收手）；`play()` 里写。
+        self.last_preempted: bool | None = None
         if gate_open:
             self.gate.set()
         id_of = {str(n["url"]): str(n["id"]) for n in nodes}
@@ -523,6 +527,7 @@ class _LaneHarness:
                     "url": n["url"],
                     "key": "",
                     "c": n.get("c", n.get("concurrency", 1)),
+                    "baseC": n.get("baseC", n.get("concurrency", 1)),
                 }
                 for n in nodes_
             ]
@@ -561,13 +566,17 @@ class _LaneHarness:
             "elapsedSec": 0.001,
         }
 
-    def play(self, fetch) -> tuple[list[dict], float]:
-        """跑一轮（假节点，不碰网络），返回 (全部日志行, 墙钟秒)。"""
+    def play(self, fetch, *, preempt: Any = None) -> tuple[list[dict], float]:
+        """跑一轮（假节点，不碰网络），返回 (全部日志行, 墙钟秒)。
+
+        `preempt` = 进程闸的让位令牌（`worker.eval_gate.Preempt`；None = 绕过闸直调）。
+        本轮 `run()` 的返回值（True = 被插队收手）记在 `self.last_preempted`。
+        """
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.distribution, "fetch_task", fetch)
         t0 = self.time.monotonic()
         self.play_t0 = t0
-        ed.dispatch_eval_round(
+        self.last_preempted = ed.dispatch_eval_round(
             "bun",
             str(self.weights),
             self.traj,
@@ -577,6 +586,7 @@ class _LaneHarness:
             7,
             local_gate=self.gate,
             local_fallback_only=self.fallback_only,
+            preempt=preempt,
         )
         elapsed = self.time.monotonic() - t0
         ledger = self.work / "eval_log.jsonl"
@@ -1565,3 +1575,118 @@ def test_eval_rows_and_summary_go_through_the_single_writer(tmp_path, monkeypatc
     assert len(played) == 3, f"逐局行绕过了单写者：{seen}"
     summaries = [r for r in seen if r.get("event") == "eval_summary"]
     assert len(summaries) == 1, "summary 必须与逐局行走同一个写者"
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03（用户口径「rollout 绝对优先，eval 排队吃间隙」）：
+#   ① 权重下发是流水线：先就绪的节点先开采，不再等最后一个 POST（it25 kaggle
+#      一次 WinError 10054 挂 187s，其余节点的评估线程陪着干等）；
+#   ② rollout 插队：正在跑的 eval 立刻收手（close_reason=preempted），不算节点
+#      故障、不写丢局告警；票留在闸的队头，下一个间隙续跑。
+# ---------------------------------------------------------------------------
+
+
+def test_weights_post_pipelines_node_start(tmp_path, monkeypatch) -> None:
+    """`on_alive` 一到就开采：慢节点的 POST 还没收工，快节点已经在跑局。"""
+    nodes = [
+        {"id": "fast", "url": "http://fast.local", "concurrency": 1},
+        {"id": "slow", "url": "http://slow.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(tmp_path, monkeypatch, games=4, nodes=nodes, local_slots=0)
+    fast_started = threading.Event()
+    slow_started = threading.Event()
+    saw: dict[str, bool] = {"on_alive_passed": False, "pipelined": False}
+    fetched = {"fast": 0, "slow": 0}
+
+    def fetch(url, *_a, **kw):
+        nid = "fast" if url == "http://fast.local" else "slow"
+        fetched[nid] += 1
+        if nid == "fast":
+            fast_started.set()
+            # 快节点那一局先不结：等慢节点也真的开跑（否则它能在 POST 收工前把 4 局
+            # 全烧完，用例退化成单节点，判据仍在但覆盖面变小）。
+            _wait_until(slow_started.is_set, timeout=20.0)
+        else:
+            slow_started.set()
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    def post(nodes_, *a: Any, **k: Any) -> list:
+        on_alive = k.get("on_alive")
+        saw["on_alive_passed"] = on_alive is not None
+        if on_alive is not None:
+            on_alive(nodes_[0])  # 快节点的权重先就绪
+        # 此刻慢节点的 POST 仍在飞：快节点必须已经取到活（流水线判据）。
+        saw["pipelined"] = _wait_until(fast_started.is_set, timeout=5.0)
+        return [
+            {
+                "id": n["id"],
+                "url": n["url"],
+                "key": n.get("key", ""),
+                "c": n.get("c", 1),
+                "baseC": n.get("baseC", 1),
+            }
+            for n in nodes_
+        ]
+
+    h.mp.setattr(common.distribution, "post_weights_parallel", post)
+    rows, _ = h.play(fetch)
+    assert saw["on_alive_passed"], "派发器没把 on_alive 传给权重下发（流水线断在参数上）"
+    assert saw["pipelined"], "快节点在 POST 收工前没有开跑（旧形态：等最后一个节点就绪）"
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 4, f"流水线不得丢局: {[r.get('seed') for r in played]}"
+    # 不按逐局行的 node 判：快节点那局可能被慢节点的 tail-race 副本先落账（race lane
+    # 记在慢节点名下，原件回包按已落盘去重），节点覆盖面只有 fetch 次数是确定的。
+    assert fetched["fast"] >= 1 and fetched["slow"] >= 1, fetched
+
+
+def test_rollout_preempt_ends_round_with_preempted_reason(tmp_path, monkeypatch) -> None:
+    """rollout 插队 ⇒ 本轮立刻收手：run() 返回 True、summary 报 `preempted`、不熔断节点。"""
+    from worker.eval_gate import Preempt
+
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=6,
+        nodes=nodes,
+        local_slots=0,
+        fallback_only=True,
+        window_sec=60.0,
+    )
+    token = Preempt()
+    started = threading.Event()
+    calls = {"n": 0}
+
+    def fetch(*_a, **kw):
+        calls["n"] += 1
+        started.set()
+        # 插队 = 在飞请求被 `abort_active_requests` 掐断；测试里用令牌收包（同一时刻）。
+        token.wait(20.0)
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    out: dict[str, Any] = {}
+
+    def _play() -> None:
+        out["rows"], out["elapsed"] = h.play(fetch, preempt=token)
+
+    worker = threading.Thread(target=_play, daemon=True)
+    worker.start()
+    try:
+        assert _wait_until(started.is_set, timeout=20.0), (
+            "节点没能在 20s 内取到第一局（用例前提失效）"
+        )
+        token.fire()
+        worker.join(timeout=30.0)
+        assert not worker.is_alive(), "插队后 eval 轮没有收手（旧形态会跑满窗口 60s）"
+    finally:
+        token.fire()  # 幂等：保证 fetch 一定解锁（用例若在上面红了也不留悬挂线程）
+    rows = out["rows"]
+    s = _summary(rows)
+    assert h.last_preempted is True, "run() 必须把「被插队」报给闸（否则票会被误判完成）"
+    assert s["close_reason"] == "preempted", s
+    assert s["games"] <= 1, s  # 插队时最多一局在飞落地，不得继续吃活
+    assert calls["n"] == 1, f"插队后不得继续取活（实测 {calls['n']} 次）"
+    # 插队不是丢局：其余 5 局原样留在队里（票在下一个间隙续跑），也不计入 lost。
+    assert s["lost"] == 0 and s["never_dispatched"] == 5, s
+    # timing-ok: 相对判据（判据 = 收手远早于窗口 60s，不是具体秒数）
+    assert out["elapsed"] < h.window_sec / 2, f"插队没有立刻收手（{out['elapsed']:.2f}s）"
