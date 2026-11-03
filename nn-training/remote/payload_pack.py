@@ -143,7 +143,8 @@ class ShardSegments:
 
     1. **段 == 盘**：同一 shard，内存段与「从落盘目录重打」逐字节相同 ⇒ 零落盘不改变 payload。
        所以 `manifest.json` 的字节必须走 `common.shard.manifest_bytes`（与 `write_shard` 同一处）。
-    2. **每轮一份**：`begin(it)` 换轮即清空。上一轮的段漏进这一轮会是「`data_fp` 对不上但字节
+    2. **每轮一份**：`begin(it)` 换轮即清空；`add` 的锁外压段与换轮竞态由 `_gen` 守卫
+       （压段期间换了轮 ⇒ 写回丢弃）。上一轮的段漏进这一轮会是「`data_fp` 对不上但字节
        合法」的静默错包 —— 本类最危险的失败形态。
     3. **开关同源**：段里有没有 `reward.npy` / f16 是**建账时**的 `wire_diet` 决定的，`take()`
        拿它跟读的时候比 —— 热改开关后旧段一律不用（退回读盘，宁可慢也不发一份与 manifest
@@ -164,6 +165,9 @@ class ShardSegments:
         #: 本轮回传 shard 的 `metrics.npy` 字节（`metrics_stats` 的唯一来源；~22 MB/轮）。
         self._metrics: dict[str, bytes] = {}
         self._slim: Any = None
+        #: 换轮代号（只增不减）：`add` 在锁外压段，期间 `begin` 可能已换轮 —— 写回前比一次，
+        #: 不符就丢弃（2026-11-03：it19 迟到回传的段漏进 it20 的 payload，P1 校验拒收停腿）。
+        self._gen = 0
         #: 这份账属于哪一轮（-1 = 还没有轮）。`take()` 只认同一个 it。
         self.it = -1
         #: 建账时的 `wire_diet`（见不变量 3）。
@@ -185,6 +189,7 @@ class ShardSegments:
         if it == self.it:
             return
         with self._lock:
+            self._gen += 1
             self._parts.clear()
             self._manifests.clear()
             self._metrics.clear()
@@ -203,6 +208,7 @@ class ShardSegments:
         # `write_shard` 落盘时补写 manifest.json ⇒ 段里必须有同一份字节（不变量 1）。
         members["manifest.json"] = manifest_bytes(dict(manifest))
         with self._lock:
+            gen = self._gen
             slim = self._slim
             on_member: Callable[[str, str, bytes], MemberBytes] | None = None
             extra: Mapping[str, bytes] | None = None
@@ -220,6 +226,10 @@ class ShardSegments:
             seg = shard_segment(name, members, on_member=on_member, extra_members=extra)
         comp = compress_segment(seg)  # 锁外（不变量 4）
         with self._lock:
+            if gen != self._gen:
+                # 压段期间 `begin()` 换了轮（it19 迟到回传撞上 it20 开工）：这 bytes 属于
+                # 上一轮（slim 也是旧的），写进新账就是静默错包 —— 丢弃。
+                return
             self._parts[name] = comp
             # 零落盘：磁盘上没有这份 shard 了，发布/裁剪/est/统计要的元数据全留在这里。
             self._manifests[name] = dict(manifest)

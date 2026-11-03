@@ -164,6 +164,52 @@ def test_parts_are_cleared_when_the_round_changes() -> None:
     assert set(got[0]) == {f"rl_s{STAGE}_seed2"}
 
 
+def test_begin_during_compression_drops_the_previous_round_segment(monkeypatch) -> None:
+    """不变量 2（竞态分支）：`add` 在锁外压段期间换轮 ⇒ 旧轮的段不许写进新轮的账。
+
+    z5-safe-base it20 卡死（2026-11-03）的成因：it19 的迟到回传
+    `rl_s2032_seed525491994` 在 `begin(20)` **之前**读到 slim19（段里 `reward_meta.it=19`），
+    压段（锁外）期间主线程已切到 it20，写回却落在新账上 ⇒ it20 的 payload 夹带一份
+    it19 的奖励，worker 的 P1 校验拒绝（ProtocolError）⇒ 确定性失败 ⇒ ABORT 停腿。
+    """
+    from remote import payload_pack
+
+    files, man = _rl_files()
+    name = f"rl_s{STAGE}_seed1"
+    parts = ShardSegments()
+    parts.begin(
+        19,
+        wire_diet=True,
+        slim=build_slim(reward_spec=_spec(), it=19, metrics_version=12, formula_hash="fh"),
+    )
+    real = payload_pack.compress_segment
+
+    def compress_after_switch(seg: bytes) -> bytes:
+        # 压缩跑在锁外（不变量 4）—— 换轮恰好发生在这个窗口里。
+        parts.begin(
+            20,
+            wire_diet=True,
+            slim=build_slim(reward_spec=_spec(), it=20, metrics_version=12, formula_hash="fh"),
+        )
+        return real(seg)
+
+    monkeypatch.setattr(payload_pack, "compress_segment", compress_after_switch)
+    parts.add(name, files, man)
+
+    assert parts.take(20, wire_diet=True) is None, "上一轮的段不许漏进这一轮"
+    assert parts.names() == frozenset()
+    assert parts.manifests() == {}
+    assert parts.metrics_blobs() == []
+
+    # 正控：这一轮自己的段照常入账（守卫只丢「换轮前开始、换轮后写回」的那份）。
+    monkeypatch.setattr(payload_pack, "compress_segment", real)
+    parts.add(name, files, man)
+    took = parts.take(20, wire_diet=True)
+    assert took is not None
+    meta = json.loads(_members_of_segment(took[0][name])[f"{name}/reward_meta.json"])
+    assert meta["it"] == 20
+
+
 def test_take_rejects_a_different_wire_diet() -> None:
     """不变量 3：`wire_diet` 在轮中途被热改 ⇒ 旧段不可用（它们与 manifest 自述不符）。"""
     parts = ShardSegments()

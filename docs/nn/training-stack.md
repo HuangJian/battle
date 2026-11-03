@@ -8,6 +8,34 @@
 
 ---
 
+## §58 跨轮段账竞态：`ShardSegments.add` 的锁外压段撞上 `begin()` ⇒ 旧段丢弃（2026-11-03）
+
+**症状**：`z5-safe-base` 停在 it20（23:55 起连续 5 次 `iter_error`，确定性失败 ⇒ 门禁
+ABORT 停腿，00:26 人工重启才恢复）。hub 侧错误原文：
+
+    reward 的 it=19 != 本轮 it=20（/tmp/remote-worker/fc40f378508cc263/rl_s2032_seed525491994）
+
+**根因**（两把锁之间开着一个窗口）：`add` 在锁内读 `_slim` 并打段，**锁外**做 lzma，
+再在锁内写回 `_parts`。it19 的迟到回传 `rl_s2032_seed525491994`（it19 窗口的关，
+23:54:11 与 it20 开工同秒结算）在 `begin(20)` **之前**读了 slim19 ⇒ 段里
+`reward_meta.it=19`；压段的几毫秒里主线程 `begin(20)` 清了账、换了 slim；写回却照旧
+落进新账 ⇒ it20 的 payload 夹带一份 it19 的奖励。worker 的 P1 校验（`np_core` 的
+`got_it != want_it`）拒收 ⇒ `ProtocolError` 属确定性失败 ⇒ `_leg_abort`（不重试）。
+
+**修法**：`ShardSegments` 加换轮代号 `_gen`（`begin` 换轮时自增）；`add` 第一次持锁
+时记下 gen，锁外压段后、写回前再比一次，不符即**丢弃**（连同 manifest / metrics）。
+被丢的是上一轮的字节，本来就不属于这一轮；新轮自己的 `add` 不受影响。`take()` 的
+it / wire_diet 判据不动。
+
+**回归用例**：`tests/remote/test_payload_parts.py::test_begin_during_compression_drops_the_previous_round_segment`
+—— monkeypatch `compress_segment` 在压段时执行 `begin(20)`：修复前 `take(20)` 拿得到
+it19 的段（红），修复后段账为空（绿）；正控确保第二轮自己的段照常入账。
+
+**教训**：「锁外昂贵段 + 锁内写回」的写法，写回必须带**版本凭据**；仅靠换轮时
+`clear()` 挡不住在飞线程。已知边界：迟到 shard 若整个 `add` 都发生在换轮之后，会以
+新轮的 slim 入账（字节自洽、不报错）—— 本守卫不管这一段（dispatch 的 daemon 线程被
+放弃后仍可能回调），目前无实测事故。
+
 ## §57 观测 v7：单通道 ch16 `distEnemy`（`OBS_CHANNELS 16→17`，2026-11-01）
 
 **一句话**：按 plan/r5-next.plan.md §3.4 的**单通道版**落地——只加 `ch16 distEnemy`
