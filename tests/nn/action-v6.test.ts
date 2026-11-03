@@ -18,7 +18,7 @@ import { World } from '../../src/game/World'
 import { STAGES } from '../../src/config/stages'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES } from '../../src/config/rules'
-import { seedWorld } from '../helpers'
+import { clearArena, positionPlayer, seedWorld } from '../helpers'
 
 /**
  * plan/nn-capability-upgrade.plan.md §4-B1: the v6 action space is three heads
@@ -97,15 +97,15 @@ describe('B1 action space v6: constants and decode', () => {
   })
 })
 
-describe('B1 masks: legacy 5/2 vs v6 4/3', () => {
-  it('legacy masks keep move=5 / fire=2 (old shards unchanged)', () => {
+describe('B1 base masks: legacy 5/2 vs v6 4/3 (before restrictAdvanceMask)', () => {
+  it('legacy base masks keep move=5 / fire=2 (old shards unchanged)', () => {
     const m = computeMasks(makeWorld())
     expect(m.move.length).toBe(5)
     expect(m.fire.length).toBe(2)
     expect(m.hold).toEqual([1, 1])
   })
 
-  it('v6 masks are move=4 / fire=3 with only the cooldown gate carrying information', () => {
+  it('v6 base masks are move=4 / fire=3 with only the cooldown gate carrying information', () => {
     const w = makeWorld()
     const p = w.player!
     p.nextFireInterval = 1
@@ -200,6 +200,27 @@ describe('B1 NNInput commits the v6 semantics', () => {
     expect(input.isHolding()).toBe(false)
     expect(input.isFiring()).toBe(true)
     expect(input.isFireBeforeTurn()).toBe(true)
+  })
+
+  it('a blocked forward cell masks advance, not facing/turn-only', () => {
+    const path = withWeightsFile(
+      v6Weights({
+        moveBias: [10, 0, 0, 0], // up
+        fireBias: [0, 0, 10], // fire after turn
+        holdBias: [10, 0], // prefer advance
+      }),
+    )
+    const world = makeWorld()
+    clearArena(world)
+    world.tileMap.grid[9][10] = 'brick' // directly above the player at (10,10)
+    positionPlayer(world, 10, 10, 'up')
+    world.player!.lastFire = -9999
+    const input = new NNInput(world, { weightsPath: path, decisionK: 10 })
+    input.reset()
+
+    // Facing up is still legal (turn/aim), but advancing into the brick is not.
+    expect(input.getMoveDirection()).toBe('up')
+    expect(input.isHolding()).toBe(true)
   })
 
   it('a cooling player cannot select either shot slot', () => {

@@ -244,11 +244,15 @@ METRICS: tuple[str, ...] = (
     "thCostBreachAimed",  # 86
     "thCostDirect",  # 87
     "thCostDirectAimed",  # 88
+    # ---- metrics v15（2026-11-03，plan/wall-press-two-legs.plan.md rev2；idx89）----
+    # v13 `isWallPressTick` 的唯一判据；**累计 tick**（每 tick ≤1），公式侧用差分/速率，
+    # 不能把累计值当瞬时值直接乘权重。与 eval 账本同源。
+    "wallPressTicks",  # 89
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,89] f8（idx0–88）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,90] f8（idx0–89）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
 #: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
 #: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
@@ -267,7 +271,10 @@ METRICS_DIM = len(METRICS)
 #: v13（2026-11-01，plan/r5-next §11.3）：基地威胁四轴 + 弹道 6 列（idx79–84）——
 #: 前四列是本拍瞬时计数（可进 Φ 持有值），thShotsAtBaseCum 单调累计（只在发射拍扣），
 #: thBulletsAtBase 只观测不上价。**公式一个字不动**（列先行、价后议）。
-METRICS_VERSION = 13
+#: v14（2026-11-03，wall-press-two-legs rev2）：v6 mask 语义变更（选定 move 后掩 hold=0）；
+#: 列宽仍 89，旧 v13 shard 因 mask 不可混训而作废。
+#: v15（2026-11-03，同计划腿 B）：追加 wallPressTicks（idx89），行宽 90。
+METRICS_VERSION = 15
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -999,7 +1006,10 @@ def _self_check() -> None:
     #      追加 aim/dodge 8 列（idx66–73），enclMax 顺位 68 → 65 ⇒ 总列数 74。
     # v11：追加 idx74–75 热线族 2 列（plan/metrics-v11-hotlane；第三列被 §4bis 杀线拦下）
     # v12：追加 idx76–78 窗口三列（plan/nn-capability-upgrade §4-B5）
-    assert len(METRICS) == METRICS_DIM == 89, METRICS_DIM
+    # v13：追加 idx79–88 基地威胁/成本流
+    # v14：mask 语义变更（列宽不变）
+    # v15：追加 idx89 wallPressTicks
+    assert len(METRICS) == METRICS_DIM == 90, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

@@ -46,7 +46,13 @@ import { type Direction, TICK_MS } from '../../src/constants'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
 import type { ReplayType } from '../../src/replay/types'
-import { ObsEncoder, computeMasks, OBS_CHANNELS, BOARD } from '../../src/nn/obs-encoder'
+import {
+  ObsEncoder,
+  computeMasks,
+  restrictAdvanceMask,
+  OBS_CHANNELS,
+  BOARD,
+} from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { decodeMove } from '../../src/nn/action-space'
 import { decodeMove4 } from '../../src/nn/action-space-v6'
@@ -1082,15 +1088,23 @@ export function runEvalOne(
           const cleanValue = Float32Array.from(model!.valueOut)
           const baseMv = argmaxCat(cleanMove, masks.move)
           const baseFr = argmaxCat(cleanFire, masks.fire)
-          const baseHd = v6 && cleanHold ? argmaxCat(cleanHold, masks.hold) : 0
+          // v6：hold 掩码跟**该组自己的 move** 走（base = clean move）。
+          const holdFor = (moveIdx: number): number[] => {
+            masks.hold[0] = 1
+            masks.hold[1] = 1
+            restrictAdvanceMask(world, moveIdx, masks)
+            return masks.hold
+          }
+          const baseHd = v6 && cleanHold ? argmaxCat(cleanHold, holdFor(baseMv)) : 0
           for (const [name, a, b] of ablateGroups) {
             ablateScratch.set(ex)
             for (let i = a; i < b && i < ex.length; i++) ablateScratch[i] = 0
             model!.forward(encoder.obs, encoder.scalars, ablateScratch)
             const rec = ablate.groups[name]
-            if (argmaxCat(model!.moveLogits, masks.move) !== baseMv) rec.flipsMove++
+            const gMv = argmaxCat(model!.moveLogits, masks.move)
+            if (gMv !== baseMv) rec.flipsMove++
             if (argmaxCat(model!.fireLogits, masks.fire) !== baseFr) rec.flipsFire++
-            if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, masks.hold) !== baseHd)
+            if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, holdFor(gMv)) !== baseHd)
               rec.flipsHold++
             for (let i = 0; i < cleanMove.length; i++)
               rec.dMove += Math.abs(model!.moveLogits[i] - cleanMove[i])
@@ -1111,9 +1125,10 @@ export function runEvalOne(
               ablateObsScratch.fill(0, base, base + plane)
               model!.forward(ablateObsScratch, encoder.scalars, ex)
               const rec = ablate.groups[`ch${ch}`]
-              if (argmaxCat(model!.moveLogits, masks.move) !== baseMv) rec.flipsMove++
+              const gMv = argmaxCat(model!.moveLogits, masks.move)
+              if (gMv !== baseMv) rec.flipsMove++
               if (argmaxCat(model!.fireLogits, masks.fire) !== baseFr) rec.flipsFire++
-              if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, masks.hold) !== baseHd)
+              if (v6 && model!.holdLogits && argmaxCat(model!.holdLogits, holdFor(gMv)) !== baseHd)
                 rec.flipsHold++
               for (let i = 0; i < cleanMove.length; i++)
                 rec.dMove += Math.abs(model!.moveLogits[i] - cleanMove[i])
@@ -1151,7 +1166,11 @@ export function runEvalOne(
           }
         }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
-        // v6 第三头（hold：0 advance / 1 turn-only）。legacy 没有这个头 ⇒ 恒 0。
+        // v6 第三头（hold：0 advance / 1 turn-only）。掩码按**最终执行**的 mv 重算；
+        // 保留朝向/转向；legacy 没有这个头 ⇒ 恒 0。
+        masks.hold[0] = 1
+        masks.hold[1] = 1
+        if (v6) restrictAdvanceMask(world, mv, masks)
         const hd = v6 && model!.holdLogits ? argmaxCat(model!.holdLogits!, masks.hold) : 0
         scripted.setAction(mv, fr, hd)
         moveHist[mv]++

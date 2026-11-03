@@ -287,6 +287,9 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
         acc.nFilteredItem++
       } else {
         const label = actionFromFrame({ direction: curDir, firing: cur?.firing ?? false })
+        // BC 保留 **label mask**（全 1）：人类 STOP 是 hold=1 + 当前朝向，撞墙帧是待诊断
+        // 行为。不调用 restrictAdvanceMask —— 否则非法 target 会被 _masked_ce 以 -1e9
+        // 计入 CE（约 1e9 loss），而不是跳过。策略侧的掩码在采样/评估路径单独施加。
         const masks = computeMasks(world, ACTION_V6)
         acc.obs.push(encoder.obs.slice())
         acc.scalars.push(encoder.scalars.slice())

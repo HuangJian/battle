@@ -287,8 +287,8 @@ describe('decisionTick threat-ONSET (edge, condition 4)', () => {
   })
 })
 
-describe('computeMasks', () => {
-  it('masks fire-hold when cooldown not elapsed (v2: no item masks)', () => {
+describe('computeMasks — base masks (before restrictAdvanceMask)', () => {
+  it('base mask: fire-hold masked when cooldown not elapsed (v2: no item masks)', () => {
     const w = mkWorld({
       frame: 0,
       player: mkTank({ nextFireInterval: 300, lastFire: 0 }),
@@ -297,7 +297,7 @@ describe('computeMasks', () => {
     expect(m.move).toEqual([1, 1, 1, 1, 1])
     expect(m.fire).toEqual([1, 0])
   })
-  it('unmasks fire-hold when ready', () => {
+  it('base mask: fire-hold unmasked when ready', () => {
     const w = mkWorld({
       frame: 18,
       player: mkTank({ nextFireInterval: 300, lastFire: 0 }),

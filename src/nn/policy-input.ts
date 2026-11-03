@@ -16,7 +16,7 @@
 import type { Direction } from '../constants'
 import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
-import { ObsEncoder, computeMasks } from './obs-encoder'
+import { ObsEncoder, computeMasks, restrictAdvanceMask } from './obs-encoder'
 import { decodeMove } from './action-space'
 import { HOLD_DIM, decodeMove4 } from './action-space-v6'
 import {
@@ -247,12 +247,15 @@ export class NNInput implements InputLike {
 
     if (v6) {
       // --- B1 v6: hold(2) / move(4) / fire(3) ---
-      const hv = this.model.holdLogits
-      this.holding = hv ? hv[1] > hv[0] : false
       const mv = this.model.moveLogits
       let bestMove = 0
       for (let i = 1; i < 4; i++) if (mv[i] > mv[bestMove]) bestMove = i
       this.moveDir = decodeMove4(bestMove)
+      // 朝向/转向不受地形限制；只限制「向这个方向前进」。先选 move 再定 hold 掩码。
+      restrictAdvanceMask(w, bestMove, masks)
+      const hv = this.model.holdLogits
+      // hold[0] 被掩 ⇒ 必须 turn-only；否则按原 argmax（tie 保持 advance）。
+      this.holding = hv ? masks.hold[0] !== 1 || hv[1] > hv[0] : false
       const fr = this.model.fireLogits
       // Masked argmax over {0 no shot, 1 fire-before-turn, 2 fire-after-turn}.
       // fire[0] is always legal; 1/2 require the cooldown gate (masks.fire[i]).

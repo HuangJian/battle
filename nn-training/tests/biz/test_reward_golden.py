@@ -832,6 +832,7 @@ def test_item_metrics_layout_locked() -> None:
         "thCostBreachAimed",  # idx86
         "thCostDirect",  # idx87
         "thCostDirectAimed",  # idx88
+        "wallPressTicks",  # idx89（v15：v13 撞墙判据的唯一列；累计 tick，公式侧用差分）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -851,6 +852,7 @@ def test_item_metrics_layout_locked() -> None:
     assert METRIC_INDEX["aimHits"] == 66
     assert METRIC_INDEX["aimHitDistSum"] == 67
     assert METRIC_INDEX["cornerWeightTicks"] == 73
+    assert METRIC_INDEX["wallPressTicks"] == 89
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -963,9 +965,9 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    # v13（2026-11-01，plan/r5-next §11.3）：列宽 85。**版本断言随每次加列一起改**，
+    # v15（2026-11-03，wall-press-two-legs rev2）：列宽 90。**版本断言随每次加列一起改**，
     # 它是"这条腿的语料必须重采"的硬提醒。
-    assert METRICS_VERSION == 13
+    assert METRICS_VERSION == 15
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

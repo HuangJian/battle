@@ -50,7 +50,13 @@ import {
   POLICY_EXTRA_NAMES,
   computePolicyExtra,
 } from './policy-extra'
-import { cornerAnchorDist, nearestPickupCenter, sampleBasePressure } from './danger-metrics'
+import {
+  cornerAnchorDist,
+  corridorCells,
+  nearestPickupCenter,
+  sampleBasePressure,
+} from './danger-metrics'
+import { MOVE4_DECODE } from './action-space-v6'
 
 // ---- Canonical dimensions (mirror nn-training/common/schema.py) ----
 // v7（plan/r5-next.plan.md §3.4 的单通道版；E0b′ 见 reports/r5-p0-measurements-20261101.md §11）：
@@ -916,7 +922,8 @@ export function actionFromFrame(f: { direction: Direction | null; firing: boolea
 export interface Masks {
   move: number[] // legacy length 5 (0=STOP); v6 length 4 (up/down/left/right)
   fire: number[] // legacy length 2 ([no-shot, shot-ready]); v6 length 3 (\u0031 before-turn / after-turn)
-  /** B1 v6: hold head mask (always [1,1]); legacy consumers ignore it. */
+  /** B1 v6: hold head mask. Base = [1,1]; `restrictAdvanceMask` 在选定 move 后把
+   *  hold[0]（advance）按前脸地形置 0。hold[1]（turn-only）永远为 1；legacy 忽略。 */
   hold: number[] // length 2
 }
 
@@ -942,17 +949,39 @@ export interface Masks {
  *
  *  改动纪律：本函数返回的**内容**不是指纹输入（指纹只钉上方常量表），但改了
  *  mask 语义 = 改了「一个样本是什么」⇒ 必须走 schema bump 与新语料轮次。
+ *
+ *  v6 的 move 兼管**朝向**（hold=1 + move=d 是 turn-only；STOP = hold=1 + 当前朝向），
+ *  所以这里**不按地形掩 move**。地形只限制 hold[0]（advance），由
+ *  `restrictAdvanceMask` 在选定 move 后执行；move/朝向始终合法。
  */
 export function computeMasks(world: World, v6 = false): Masks {
   const p = world.player
   const ready = p ? isFireReady(world) : false
   // v6: fire head = {0 no shot, 1 before turn, 2 after turn}. Both shot slots
   // share the same physical gate (cooldown), so only readiness carries information
-  // — same as the legacy 2-slot layout. hold/move stay constant by design.
+  // — same as the legacy 2-slot layout. hold[0] is restricted after move selection.
   const fire: number[] = v6 ? [1, ready ? 1 : 0, ready ? 1 : 0] : [1, ready ? 1 : 0]
   const move: number[] = v6 ? [1, 1, 1, 1] : [1, 1, 1, 1, 1]
   const hold: number[] = [1, 1]
   return { move, fire, hold }
+}
+
+/**
+ * v6：选定 move 后，只限制 `hold=0`（advance）。
+ *
+ * - `move` 不掩：朝向/转向在 24 组合里始终合法（2026-10-20 用户裁定）；
+ * - `hold[1]` 始终 1：turn-only 与「原地停住面朝墙」仍可用；
+ * - 判据复用 `corridorCells(cap=1)`，与 `isWallPressTick` 的前脸条件同源。
+ * - 玩家不在场 / 已死亡 ⇒ 保持 [1,1]（不制造新的「全掩码」）。
+ *
+ * 调用方必须在**最终执行**的 move 确定后调用（L0/God 覆盖、goal 偏置之后），
+ * 否则掩码与实际方向错位。纯读 World，不写 World，不读 rng。
+ */
+export function restrictAdvanceMask(world: World, moveIdx: number, masks: Masks): void {
+  const p = world.player
+  if (!p || !p.alive) return
+  const dir = MOVE4_DECODE[moveIdx] ?? MOVE4_DECODE[0]
+  masks.hold[0] = corridorCells(world, p, dir, 1) > 0 ? 1 : 0
 }
 
 function isFireReady(world: World): boolean {

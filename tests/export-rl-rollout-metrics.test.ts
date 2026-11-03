@@ -202,8 +202,16 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[86]).toBe('thCostBreachAimed')
     expect(names[87]).toBe('thCostDirect')
     expect(names[88]).toBe('thCostDirectAimed')
-    // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 13')
+    // v15：wallPressTicks 追加在尾部（idx89），列数变更必须 bump 版本。
+    expect(names[89]).toBe('wallPressTicks')
+    expect(py).toContain('METRICS_VERSION = 15')
+  })
+
+  it('v15 wallPressTicks：累计值原样落在 idx89', () => {
+    const world = seedWorld(1)
+    const row = buildMetricsRow(7, world, makeTelemetry({ wallPressTicks: 7 }))
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row[89]).toBe(7)
   })
 
   it('v13 thCost*：连续两行累加（增量 = min(2,计数)），不是瞬时值', () => {

@@ -148,6 +148,8 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "thCostBreachAimed": (0.0, 4000.0),
     "thCostDirect": (0.0, 4000.0),
     "thCostDirectAimed": (0.0, 4000.0),
+    # v15（idx89）：逐 tick 累计，上层 = maxTicks；公式侧用差分/速率。
+    "wallPressTicks": (0.0, 36000.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

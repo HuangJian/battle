@@ -59,6 +59,7 @@ import { type Direction } from '../../src/constants'
 import {
   ObsEncoder,
   computeMasks,
+  restrictAdvanceMask,
   OBS_SCHEMA_MAJOR,
   OBS_CHANNELS,
   BOARD,
@@ -279,7 +280,7 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 89
+export const METRICS_DIM = 90
 /**
  * metrics **v12**：v11 的热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被
  * §4bis 杀线拦下）+ v12 的 freeze ∪ 道具盾窗口 3 列（idx76–78，
@@ -293,7 +294,7 @@ export const METRICS_DIM = 89
  * ⇒ `[run_rl] remote it1: 无完整 shard（traj ... 空）——无法发布 job` ⇒ 三门课全部
  * `aborted ppo`，而 shard 明明已经落在 `it1/dist/self/` 里。
  */
-export const METRICS_VERSION = 13
+export const METRICS_VERSION = 15
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -399,6 +400,8 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'thCostBreachAimed',
   'thCostDirect',
   'thCostDirectAimed',
+  // v15：wallPressTicks（v13 判据的唯一列；累计 tick，公式侧用差分）
+  'wallPressTicks',
 ]
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -874,6 +877,7 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.thCostBreachAimed, // 86
     tel.thCostDirect, // 87
     tel.thCostDirectAimed, // 88
+    tel.wallPressTicks, // 89（v15：逐 tick 累计，公式侧用差分/速率）
   ]
 }
 
@@ -1498,8 +1502,6 @@ function runOne(
       const masks = computeMasks(world, v6)
       const mv = sampleCat(model.moveLogits, masks.move, rng)
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
-      // v6 第三头：hold（0 advance / 1 turn-only）。legacy 没有这个头 ⇒ null。
-      const hd = v6 ? sampleCat(holdLogitsOf(model), masks.hold, rng) : null
       const value = model.valueOut[0]
       decisionTicks++
 
@@ -1527,6 +1529,14 @@ function runOne(
           dodgeTicks++
         }
         godProbe.endFrame()
+      }
+
+      // v6 第三头：hold（0 advance / 1 turn-only）。必须在 L0/God 覆盖之后采样——
+      // 掩码针对**实际执行**的 move，而不是被覆盖前的抽样方向。legacy 没有这个头 ⇒ null。
+      let hd: ReturnType<typeof sampleCat> | null = null
+      if (v6) {
+        restrictAdvanceMask(world, aMove, masks)
+        hd = sampleCat(holdLogitsOf(model), masks.hold, rng)
       }
 
       // 记录本决策步的指标快照（与 obs 行同刻状态——reward 由 Python 公式引擎
@@ -2280,7 +2290,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v13 = [N+1,85]）；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v15 = [N+1,90]）；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,
