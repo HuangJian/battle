@@ -7,9 +7,11 @@
  * worker 崩 + 兄弟 worker 连环 abort，出一片**假红**。故门禁一律按**物理核数**起 worker
  * （口径唯一实现 = `tools/lib/cores.ts::physicalCores`；决议见 plan `gate-parallelism-physical-cores`）。
  *
- * 组成固定在这里（`--parallel=<物理核数> --timeout=50000` + **排除 `dashboard/**` 与
- * `userscript/**`**）：两者都是独立 bun 项目、由各自的门禁跑（DECISIONS
+ * 组成固定在这里（`--parallel=<物理核数> --timeout=50000` + **排除 `dashboard/**`、
+ * `userscript/**`、`tmp/**`**）：前两者都是独立 bun 项目、由各自的门禁跑（DECISIONS
  * §2026-09-14-goalnn-dashboard-project；userscript 见 plan/notebook-userscript.plan.md §4.1）。
+ * `tmp/**` 是 A/B worktree 与一次性产物的家（AGENTS §5），它们可能含旧代码/旧依赖，
+ * 绝不能进入根套件（否则干净的 `bun run check` 会被旧 worktree 的 dashboard 测试拖红）。
  * 命令行附加参数原样透传给 `bun test`。
  */
 import { spawnSync } from 'node:child_process'
@@ -23,6 +25,7 @@ const args = [
   '--timeout=50000',
   '--path-ignore-patterns=dashboard/**',
   '--path-ignore-patterns=userscript/**',
+  '--path-ignore-patterns=tmp/**',
   ...process.argv.slice(2),
 ]
 console.log(`[gate] bun ${args.join(' ')}`)

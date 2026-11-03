@@ -10878,3 +10878,30 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`tests/remote/test_eval_agg.py`（口径 / 顺序无关 / 分组合并 / 随体发送 / 单调合并）+
   `tests/remote/test_offline_eval_cloud.py`（700 逐局 + 1 聚合）。
 - **全文** → `docs/nn/remote-transport.md` §134。
+
+## §2026-11-03-goalnn-wall-press-two-legs（撞墙两腿：v6 只掩 advance、wallPressTicks 入 METRICS；版本 13→15）
+
+- **口径**（plan `plan/wall-press-two-legs.plan.md` rev2）：v6 的 `move` **兼管朝向**（`hold=1 + move=d`
+  = turn-only；STOP = `hold=1 + 当前朝向`），按地形掩 move 会禁掉转向/瞄准/停住，违反 2026-10-20
+  「三头正交、24 组合全合法」的裁定。⇒ 只掩 `hold[0]`（advance），`hold[1]` 与 move 恒全 1。
+- **决定**：① 新增 `restrictAdvanceMask`（复用 `corridorCells(cap=1)`，与 `isWallPressTick` 的前脸
+  条件同源）；在 RL rollout 的 L0/God 覆盖后、eval 的 goal 偏置后、`NNInput` 的 move argmax 后调用。
+  ② BC exporter **不调用**，label mask 保持全 1（策略 mask 与标签 mask 分开，避免 `_masked_ce` 吃非法 target）。
+  ③ `METRICS_VERSION` 13→14（mask 语义代，列宽不变）再 14→15（追加 idx89 `wallPressTicks`，行宽 90）；
+  `DEFAULT_RANGES` 同步登记 `(0, 36000)`。④ 不改课程公式、不改 `SimulationPlayer` 执行语义、不改 God-AI。
+- **被否决**：掩 `move`（禁 turn-only/瞄准/STOP）· 在 `SimulationPlayer` 执行层夹紧 hold（改回放/录像语义）·
+  BC 复用策略 mask（把撞墙帧的非法 target 送进 `_masked_ce`）· 不 bump 版本混训旧 shard。
+- **验收**：`tests/nn/advance-mask.test.ts`、`tests/nn/action-v6.test.ts`、`tests/export-rl-rollout-metrics.test.ts`、
+  `tests/state-init.test.ts`、`tests/sim/aim-levers-sentinels.test.ts`、`nn-training/tests/biz/test_reward_golden.py`
+  绿；`bun run check` / 全量 pytest / `bun run build` 绿。**行为 A/B（A.4 的 700 局）未跑**：
+  本 checkout 无 it375 权重与报告工件；hub/worker 重启也留给操作窗口。
+
+## §2026-11-03-goalnn-root-gate-tmp（根门禁排除 `tmp/**`：A/B worktree 不拖红干净 checkout）
+
+- **现场**：`bun run check` 在含 `tmp/wt-upstream` 的 checkout 上红；根套件枚举了该 worktree 里的
+  dashboard 测试（两份 `node_modules` 互不重叠），而它本就不在根套件范围。
+- **决定**：`tools/run-root-tests.ts` 增加 `--path-ignore-patterns=tmp/**`；由
+  `tests/test-silent-scope.test.ts` 同时钉住 `dashboard/**`、`userscript/**`、`tmp/**` 三个排除项。
+- **被否决**：删 worktree（A/B 对照需要）· 在测试内部 skip（只挡一个目录，换名再犯）·
+  让根套件依赖 dashboard 的安装状态。
+- **验收**：`bun run check` 绿；`tests/test-silent-scope.test.ts` 绿。

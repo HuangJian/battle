@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import {
   HEAVY_TESTS,
   allTestFiles,
@@ -96,6 +97,15 @@ describe('根套件范围 — userscript 也是独立项目', () => {
  * 变慢），而内联的 ⚠ 提示挂在绿行摘要上没人会读（§1.4 当时只要求「提示」）。
  * 先例：`god-ai-gate` 重命名后残留为死条目（docs/god-ai-tuning.progress.md §234）。
  */
+describe('根门禁 launcher 的排除规则', () => {
+  it('dashboard / userscript / tmp 都被排除（A/B worktree 不拖红根套件）', () => {
+    const src = readFileSync(`${import.meta.dir}/../tools/run-root-tests.ts`, 'utf8')
+    expect(src).toContain("'--path-ignore-patterns=dashboard/**'")
+    expect(src).toContain("'--path-ignore-patterns=userscript/**'")
+    expect(src).toContain("'--path-ignore-patterns=tmp/**'")
+  })
+})
+
 describe('HEAVY_TESTS — 名单有效性与口径', () => {
   it('每个条目都指向一个真实存在的测试文件（重命名/删除残留 = 硬失败）', () => {
     expect(staleHeavyEntries(allTestFiles(joinRoot()))).toEqual([])
