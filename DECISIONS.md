@@ -10822,6 +10822,10 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 
 ## §2026-11-03-goalnn-rollout-first-eval-queue（rollout 绝对优先、eval 全局排队吃间隙：进程级 eval 闸 + 让位去 floor + 窗口从权重就绪起算）
 
+> **本条目已被取代**（2026-11-04）：FIFO / 并发上限 / `Preempt` 收手整体退役，见
+> §2026-11-04-goalnn-task-level-eval-arbitration；「rollout 优先、eval 吃间隙」的目标保留，
+> 落地改为冻结新投递 + 在飞局自然落账。
+
 - **口径**（用户 2026-11-03）：「前一个 eval 未完成，不启动后面的 eval ！！！不管多少课程，
   rollout 和 eval 都是排队！」「所有 rollout 优先级都高于 eval……eval 进行过程中，可以被
   新到的 rollout 插队」「eval 只需要利用 rollout 间隙来完成，就算训练过程中赶不及，可以等
@@ -10953,3 +10957,60 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`tests/pickup-dist-metric.test.ts`（墙后 30 格绕行 / 封闭盒不可达 → 哨兵 / 多拾取 / BONUS 窗 /
   determinism，独立 BFS 重实现逐行对账）、`tests/export-rl-rollout-metrics.test.ts`（列序 + 独立 BFS）、
   `nn-training/tests/biz/test_reward_golden.py`（v16 断言）。
+
+## §2026-11-04-goalnn-eval-gate-two-concurrent（eval 进程闸并发上限 1→2：三腿产能赤字，用户拍板；旧缺口留收官 drain）
+
+> **已被取代**（2026-11-04）：`MAX_CONCURRENT=2` 与 `Preempt` 收手随任务级仲裁退役，
+> 见 §2026-11-04-goalnn-task-level-eval-arbitration。
+
+- **口径**（用户 2026-11-04）：「允许 2 轮并发 eval」；26–34 个重启吞掉的旧轮「留给收官 drain」。
+  本条目**取代** §2026-11-03-goalnn-rollout-first-eval-queue 的「FIFO 单飞」并发上限，
+  其余（rollout 绝对优先 · 插队续跑 · 每轮新令牌 · 闸决定的只是「能不能开跑」）不变。
+- **现场**：三腿（z6-porter / z6-speed / z7-maze）需求 = 每 5 训练轮一轮 eval、训练 ~100s/轮
+  ⇒ 21.6 轮/h；单飞服务上限 ≈ 15 轮/h（700 局 ~235–270s/轮）⇒ 队列每小时涨 6–7 轮，
+  重启后 7.6h 实测 z6-porter 26 个、z6-speed 34 个连续未覆盖轮。详见 `docs/nn/engineering.md` §109。
+- **决定**：`worker/eval_gate.py::MAX_CONCURRENT = 2`（`EvalGate(max_concurrent=…)` 可注入）：
+  开跑条件 = 无 rollout ∧ 在跑数 < 2 ∧ 票在队列前 2 位（FIFO 决定谁先拿空槽，空槽按序补位）；
+  rollout 到达时**所有**在跑轮各自置位 `Preempt` 并收手；被插队的票留在队列**原位**，间隙到了
+  各自拿新令牌续跑。产能 ≈ 30 轮/h > 21.6 轮/h。`status()` 保留 `running` 布尔（`loop_eval`
+  的 idle 补账判据不变），新增 `active` 记在跑轮数。
+- **被否决**：eval 间隔 5→10 轮（改评估频率、旧读数更稀）· 队列「最新优先」（旧轮永无空档且
+  会饿死）· 保持单飞只靠 F1 补账（补账同样吃这 15 轮/h 的产能，越补越落后）。
+- **边界**：并发只改「同时跑几轮」，节点份额仍由 `eval_yield.eval_slot_cap` 按剩余槽发；
+  两轮同时让位/重派仍靠各自 token 收手。旧缺口不手工补账（用户拍板），F1「闸空才补一张」兜意外窗口。
+- **验收**：`tests/worker/test_eval_gate.py`（默认 2 并发 / 第三票等空槽补位 / rollout 收全部在跑轮且
+  原位续跑；单槽语义由 `EvalGate(max_concurrent=1)` 旧用例继续钉住）+
+  `tests/worker/test_eval_timing.py`（idle 补账判据）+ `test_eval_dispatch_resilience.py` 全绿。
+- **全文** → `docs/nn/engineering.md` §109「口径落地」。
+
+## §2026-11-04-goalnn-task-level-eval-arbitration（eval 任务级统一派发：多轮平等发牌 + 跨轮副本平铺 + rollout 只冻结新投递）
+
+- **口径**（用户 2026-11-04）：「一轮 eval A 进行中又来一轮 B ⇒ 两轮平等分派，不排队等 A；
+  所有 eval 局都派出后仍有空闲 worker ⇒ 多伏兵竞速，不区分在飞局是哪个 it，按序平铺；
+  eval 中有新 rollout ⇒ 在飞 eval 局不动，开始派 rollout、停止派新 eval，直至 rollout 全部
+  完成；同一时刻可以多课多 it 的 rollout 与 eval 并行，分派端只决定下一局是谁」。
+- **现场**：轮级闸（FIFO/2 并发 + `Preempt`）串行轮次 ⇒ B 等 A 收尾、A 尾巴只跑自己的副本、
+  rollout 到达时整轮收手并断连在飞局（`dropped` 主源）、两轮并发时同一节点被开出两份线程额度。
+- **决定**：① 进程级 `worker/eval_arbiter.py`：轮只登记上下文（权重 / `eval_iter_id` /
+  `course_fp` / 快照 / 超时 / 队列）+ 冻结感知 `RoundClock`；执行者 `take(node)` 领下一局 =
+  唯一任务按轮轮转（`_rr` 仅在发牌成功时前进，且是**绝对**游标——`% n` 归一化在「只有一轮」
+  时会把下一位钉死在 0，中途登记的轮永远抢不到牌）→ 跨轮副本候选按 `(stage, seed, seq)` 平铺
+  （`_rep` 同款绝对游标；副本不消耗 `attempts`）→ 等待。② `worker/eval_exec.py` 进程级
+  grow-only 按节点线程池，`Grant` 携带**拥有一位任务的轮**的上下文。③ `worker/eval_gate.py`
+  收窄为 freeze/thaw：`submit` 立即开跑（无排队/无并发上限）；rollout 只冻结新 grant，
+  在飞局照常落账，窗口钟暂停。④ 收工：`settled` 满立即断连；窗口到期停发 + 有界宽限
+  `min(task_timeout,120)`（退出要等 `inflight` 与写手**双归零**：`landed` 注册晚于
+  `inflight` 摘除，只等前者会把收口竞态记成 `lost`）；收工后迟到局丢弃。收工四态
+  `settled`/`machine-fault`/`workers-gone`/`window`，`preempted` 退役。⑤ 重试/让位判据全部照旧（`eval_yield` 单源）。
+- **被否决**：保留轮级 `Preempt` · 按 it/课程排优先级 · 每轮/每课程各一张闸 · 副本只在本轮内 ·
+  收工后仍接受迟到局。
+- **边界**：m1 旧派发流与 `tools/eval_backfill.py` 不走 `eval_gate.submit`（无排队/无上限），
+  但登记进同一仲裁器 ⇒ rollout 冻结对补账轮同样生效；rollout 侧长尾竞速一行未动
+  （`queue_local` 三符号仍只服务 rollout）；eval 侧副本道归仲裁器。
+- **验收**：`tests/trainer/test_eval_dispatch_resilience.py`（两轮 A,B,A,B · 冻结期在飞落账且
+  不派新局 · 空闲节点副本道只落一局 · 跨轮副本按 `(stage,seed)` 平铺）+
+  `tests/worker/test_eval_gate.py` + `tests/worker/test_eval_yield_split.py` + 账本/分层守卫。
+- **取代**：本条目取代 §2026-11-03-goalnn-rollout-first-eval-queue 与
+  §2026-11-04-goalnn-eval-gate-two-concurrent 的「FIFO / 并发上限 / Preempt 收手」部分；
+  「rollout 绝对优先、eval 只吃间隙」的目标不变，落地方式改为**冻结新投递**。
+- **全文** → `docs/nn/engineering.md` §111。

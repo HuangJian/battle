@@ -1367,13 +1367,16 @@ def test_eval_local_gate(tmp: Path) -> None:
     # 测试替身：参数用 Any 收口，不必与生产签名逐参对齐。
     ed.run_local_eval_game = fake_runner  # type: ignore[assignment]
     try:
-        # 预留判定纯函数：gate/宽限期放行、余量边界、零预留回退旧路径
-        check(not ed.hold_for_local(6, 2, True, False), "reserve: gate set → no hold")
-        check(ed.hold_for_local(2, 2, False, False), "reserve: within tail → hold for local")
-        check(not ed.hold_for_local(3, 2, False, False), "reserve: above tail → nodes flow")
-        check(not ed.hold_for_local(2, 2, False, True), "reserve: release grace forces flow")
-        check(not ed.hold_for_local(0, 2, False, False), "reserve: empty pending → no hold")
-        check(not ed.hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior")
+        # 预留判定纯函数（判据住 worker/eval_yield；线程级消费在 eval_arbiter）：
+        # gate/宽限期放行、余量边界、零预留回退旧路径
+        from worker.eval_yield import hold_for_local
+
+        check(not hold_for_local(6, 2, True, False), "reserve: gate set → no hold")
+        check(hold_for_local(2, 2, False, False), "reserve: within tail → hold for local")
+        check(not hold_for_local(3, 2, False, False), "reserve: above tail → nodes flow")
+        check(not hold_for_local(2, 2, False, True), "reserve: release grace forces flow")
+        check(not hold_for_local(0, 2, False, False), "reserve: empty pending → no hold")
+        check(not hold_for_local(6, 0, False, False), "reserve: 0 slots → legacy behavior")
         # A：兜底模式 + 无可用节点 → 3 关 ×2 种子全部由 local 结算并聚合进 summary
         traj_a = work / "trajA"
         ed.dispatch_eval_round(

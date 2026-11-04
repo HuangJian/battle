@@ -25,6 +25,77 @@
 
 ---
 
+## §111 eval 任务级统一派发：多轮平等发牌 + 跨轮副本平铺 + rollout 只冻结新投递（2026-11-04，用户口径）
+
+用户口径（原话拆条）：
+
+1. 一轮 eval A 进行中又来一轮 B ⇒ A/B **平等分派**，B 不排在 A 收工之后；A 尾部的算力
+   不再拿去跑自己的竞速副本；
+2. 所有 eval 局都派出后仍有空闲 worker ⇒ **多副本竞速**，不区分在飞局属于哪个 it，按序平铺；
+3. eval 进行中有新 rollout ⇒ **在飞 eval 局不动**，开始派 rollout、停止**新** eval 投递，
+   直到 rollout 全部收工；rollout 末尾的多副本竞速不变；
+4. 同一时刻可以有多门课 / 多个 it 的 rollout 与 eval 在同一批节点上并行，**分派端只决定
+   下一局是谁**。
+
+**旧形态与现场**：轮级进程闸（`worker/eval_gate.py` 的 FIFO/2 并发 + `Preempt`）串行轮次，
+每轮各自按节点起一组线程 ⇒ ① B 的局在 A 收尾前拿不到算力（需求 1 反例）；② A 尾巴只能
+拿去跑 A 自己的副本（需求 2 反例）；③ rollout 到达时**所有**在跑轮置位 `Preempt` 收手并断连，
+在飞局被掐成 lost（需求 3 反例，`dropped` 的主要来源之一）；④ 两轮并发时同一节点被开出
+两份额度（线程按轮生长，不看全局在飞）。
+
+**决定**（任务级仲裁，队列与线程解耦）：
+
+1. `worker/eval_arbiter.py`（进程级 `EvalArbiter`）：轮只**登记**自己的上下文
+   （`EvalRound`：权重 / `eval_iter_id` / `course_fp` / 快照 / 超时 / 语料与待办队列）与
+   `RoundClock`；执行者调 `take(node)` 领**下一局**——唯一任务按轮轮转（`_rr` 只在发牌成功
+   时前进）→ 跨轮竞速副本（候选按 `(stage, seed, seq)` 平铺、`_rep` 游标轮转）→ 等待。
+   副本发牌不动 `attempts`（只加 `inflight`/`leg_tries`）。
+2. `worker/eval_exec.py`：进程级 **grow-only** 按节点线程池（本机 = `local`），线程循环
+   `take → execute(grant)`；`Grant` 永远带着**拥有该任务的轮**的上下文，所以同一个线程能执行
+   任意一轮的局。池子只增不缩 ⇒ 「空闲 worker 进竞速」有物理载体，轮收工不回收线程。
+3. `worker/eval_gate.py` 收窄为 **freeze/thaw 闸**：`submit` 立即起线程（无排队、无并发上限），
+   rollout 作用域只调 `eval_arbiter().freeze()`——冻结期间 `take()` 阻塞、**在飞局照常回包
+   落账**；`RoundClock` 冻结感知（暂停时长不计入窗口），解冻后同一轮继续派完。旧 `Preempt`
+   与第五收工态 `preempted` 一并退役。
+4. 派发器（`trainer/eval_dispatch.py`）：`register` 早于节点门/POST（执行者按 `participates`
+   判据自会等权重就绪）；权重仍按 `kind="eval"` 下发；收工语义 = `settled` 满 → 立即
+   `stop` + 断连作用域；窗口到期 → 停发新牌 + 有界宽限
+   `inflight_grace_cap(task_timeout)=min(task_timeout, 120)` 等在飞落账；收工后返回的局
+   **丢弃**（`收工后返回`），重复副本 `dup settle`。收工原因四态：
+   `settled` / `machine-fault` / `workers-gone` / `window`。
+5. 重试与让位语义**不变**：瞬断回队 `requeue_backoff_sec`（1/2/4/8s 封顶 + `retry_at` 到点才取）、
+   `EVAL_TASK_ATTEMPTS` / `EVAL_TASK_ATTEMPTS_TRANSIENT`、软/硬熔断、本机兜底与在线节点改派、
+   `hold_for_local` / `local_release_due` / `eval_slot_cap` 全部照旧（判据仍只住
+   `worker/eval_yield.py`）。
+
+**被否决**：保留轮级 `Preempt`（rollout 收手整轮，在飞局被掐）· 按 it/课程排优先级
+（用户口径「平等」）· 每课程/每轮各一张闸（回到轮级线程）· 副本只在本轮内竞速（需求 2 的
+反例）· 收工后仍接受迟到局（写入会污染已结算轮次）。
+
+**两个只有并发才暴露的坑**（都已被用例钉住）：
+
+1. **轮转游标必须是绝对值**。发牌成功时写 `_rr = (idx + 1) % n` 在「只有一轮时不变量恒 0」——
+   单独跑的 A 把游标钉死在 0，B 中途登记后仍从 A 起扫，A 一直抢到牌（`A,B,A,B` 用例实测
+   `A,A,B,B`）。改成 `_rr += k + 1`；`_rep` 同理（副本候选集大小随在飞局变化，归一化会把
+   「下一位」重置回 0，同一张候选反复中选）。
+2. **窗口宽限要等两个计数**。`settle_task` 先摘 `inflight`、写手随后才登记 `landed`；只等
+   `inflight_len()<=0` 就收工快照，会把高负载下这段竞态记成 `lost`。宽限退出条件因此是
+   `inflight_len() <= 0 and writers_pending() <= 0`（或池子全死）。
+
+**边界**：m1 旧派发流（`dispatch_eval_bg_m1`）与 `tools/eval_backfill.py` 不走 `eval_gate.submit`
+（无排队/无并发上限，§110 的旁路补账语义不变），但它们登记进**同一**仲裁器 ⇒ 训练进程的
+rollout 冻结对补账轮同样生效（rollout 优先是一刀切）；rollout 侧的长尾竞速
+（`trainer/dispatch.py` / `batch_runner.py` 的 `pick_tail_race` / `pick_race_target`）一行未动；
+eval 侧副本道改由仲裁器拥有，`trainer/queue_local.py` 的三个符号仍只服务 rollout。
+
+**验收**：`tests/trainer/test_eval_dispatch_resilience.py`（两轮轮转 A,B,A,B · rollout
+冻结期间在飞落账且不派新局 · 空闲节点进副本道且只落一局账 · 跨轮副本按 `(stage,seed)` 平铺）·
+`tests/worker/test_eval_gate.py`（立即开跑 / 无并发上限 / 冻结引用计数 / 异常不卡死）·
+`tests/worker/test_eval_yield_split.py`（判据单源 + 读者重指）· `test_remote_dag.py` 分层账本 ·
+`test_dist_common_poll.py` 传输判据单源（扫描面加 `worker/eval_exec.py`）。
+
+**全文** → `DECISIONS.md` §2026-11-04-goalnn-task-level-eval-arbitration。
+
 ## §110 z6 两课 60 轮 eval 缺口：旁路批量补账（`nn-training/tools/eval_backfill.py`）（2026-11-04，用户指令「z6-porter 和 z6-speed 缺了很多轮 eval，请写个脚本把它们补齐，要充分利用 rollout 集群算力！」）
 
 **缺口实测**（口径 = `trainer/loop_eval.py::_eval_covered` 的 `dropped==0` **且**账本去重落盘局

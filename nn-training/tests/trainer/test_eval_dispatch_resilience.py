@@ -14,6 +14,7 @@ test_dist_common_poll.py 有单测。
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import threading
@@ -25,6 +26,7 @@ import pytest
 
 import common.distribution
 import trainer.eval_dispatch as ed
+import worker.eval_exec as ee
 import worker.eval_yield as eval_yield
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
@@ -481,8 +483,6 @@ class _LaneHarness:
         self.fallback_only = fallback_only
         #: `play()` 开跑时刻 —— 用例可以用它表达「窗口已过期」这类**事件**，而不是猜时长。
         self.play_t0 = 0.0
-        #: 最近一轮 `run()` 的返回值（True = 被 rollout 插队收手）；`play()` 里写。
-        self.last_preempted: bool | None = None
         if gate_open:
             self.gate.set()
         id_of = {str(n["url"]): str(n["id"]) for n in nodes}
@@ -566,27 +566,29 @@ class _LaneHarness:
             "elapsedSec": 0.001,
         }
 
-    def play(self, fetch, *, preempt: Any = None) -> tuple[list[dict], float]:
+    def play(
+        self, fetch, *, run_id: str = "rid.lane", it: int = 7
+    ) -> tuple[list[dict], float]:
         """跑一轮（假节点，不碰网络），返回 (全部日志行, 墙钟秒)。
 
-        `preempt` = 进程闸的让位令牌（`worker.eval_gate.Preempt`；None = 绕过闸直调）。
-        本轮 `run()` 的返回值（True = 被插队收手）记在 `self.last_preempted`。
+        `run_id` 决定 `eval_iter_id`（= 节点 resultCache 的迭代键）：两轮并发用例靠它
+        区分「这一局是谁的」——生产里同一门课的多轮共用一个 run_id + 不同 it，
+        本夹具的固定种子池与 it 无关，故用 run_id 做轮身份；`it` 只进日志/summary。
         """
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.distribution, "fetch_task", fetch)
         t0 = self.time.monotonic()
         self.play_t0 = t0
-        self.last_preempted = ed.dispatch_eval_round(
+        ed.dispatch_eval_round(
             "bun",
             str(self.weights),
             self.traj,
             self.args,
             self.cfg,
-            "rid.lane",
-            7,
+            run_id,
+            it,
             local_gate=self.gate,
             local_fallback_only=self.fallback_only,
-            preempt=preempt,
         )
         elapsed = self.time.monotonic() - t0
         ledger = self.work / "eval_log.jsonl"
@@ -897,6 +899,80 @@ def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None
     assert elapsed < h.window_sec + 5.0, f"宽限不该失控（实测 {elapsed:.2f}s）"
 
 
+@pytest.mark.parametrize("lane", ["node", "local"])
+def test_result_returning_after_close_is_dropped(tmp_path, monkeypatch, lane) -> None:
+    """收工后返回的僵尸局必须丢弃（2026-11-04 超额根因）。
+
+    收工路径取**窗口到期 + 有界宽限**：任务级仲裁后 rollout 不再撤销在飞局，本轮也
+    不会被插队收手，于是「summary 已落盘、回包才到」只剩这条腿。宽限
+    （`inflight_grace_cap(task_timeout)`）用尽仍在飞的局，回包时本轮已 `closed`——
+    旧实现照样写行 ⇒ 下一轮按看不到这行的 `done` 快照重派同一 (stage,seed) ⇒
+    同轮两行、局数超出语料（z6-speed it90 实测：同一 `ticks` 的两行相隔 3s，
+    一行 a98、一行 self）。
+    """
+    node_lane = lane == "node"
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}] if node_lane else []
+    h = _LaneHarness(
+        tmp_path,
+        monkeypatch,
+        games=1,
+        nodes=nodes,
+        local_slots=0 if node_lane else 1,
+        fallback_only=not node_lane,
+        window_sec=0.4,
+    )
+    # 宽限上界 = min(taskTimeoutSec, EVAL_INFLIGHT_GRACE_SEC)：缩到 1s 让用例可等
+    # （默认 900s 会让「收工先于回包」这个前提要等 120s）。
+    h.cfg["policy"]["taskTimeoutSec"] = 1.0
+    started = threading.Event()
+    release = threading.Event()
+    #: 僵尸写者的线程对象：放行后 join 它 = 等「收包 → 结算」这条路走完（不靠日志文本同步）。
+    writer: dict = {}
+
+    def _blocking_fetch(*_a, **kw):
+        writer["t"] = threading.current_thread()
+        started.set()
+        assert release.wait(timeout=30.0), "回包未被放行（用例内部死锁）"
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    def _blocking_runner(_bun, _snap, stage, seed, _out, *_a, **_k):
+        writer["t"] = threading.current_thread()
+        started.set()
+        assert release.wait(timeout=30.0), "本机局未被放行（用例内部死锁）"
+        return h.manifest(stage, seed)
+
+    monkeypatch.setattr(ed, "run_local_eval_game", _blocking_runner)
+    box: dict = {}
+
+    def _run() -> None:
+        box["rows"], _elapsed = h.play(_blocking_fetch)
+
+    t = threading.Thread(target=_run, daemon=True, name="zombie-eval-test")
+    t.start()
+    try:
+        assert started.wait(timeout=20.0), "评估没开跑（用例前提失效）"
+        # 窗口到期（0.4s）→ 有界宽限（1s）→ 收工；回包此刻仍被扣住 ⇒ 收工先于回包。
+        t.join(timeout=20.0)
+        assert not t.is_alive(), "在飞局把收工拖过了有界宽限"
+        rows = box["rows"]
+        summ = [r for r in rows if r.get("event") == "eval_summary"]
+        assert summ and summ[-1]["close_reason"] == "window", summ
+        assert summ[-1]["games"] == 0 and summ[-1]["dropped"] == 1, summ
+        assert [r for r in rows if r.get("event") == "eval"] == []
+    finally:
+        release.set()  # 放行僵尸回包（旧实现会在这里补写一行）
+    zombie = writer.get("t")
+    assert zombie is not None, "僵尸写者线程未登记（用例前提失效）"
+    zombie.join(timeout=20.0)
+    assert not zombie.is_alive(), "僵尸写者未在放行后收尾"
+    late = [
+        json.loads(line)
+        for line in (h.work / "eval_log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [r for r in late if r.get("event") == "eval"] == [], "收工后的回包不得补写行"
+
+
 # ---------------------------------------------------------------------------
 # B6（2026-09-19）：干净评估的权重 kind 独立成 'eval'，不再蹭训练 rollout 桶。
 # 节点按 (kind, wver) 分桶缓存权重；同桶时训练每轮刷 churn 与 eval 那份互相驱逐/清场，
@@ -932,10 +1008,27 @@ def test_eval_leg_uses_its_own_weights_kind(tmp_path, monkeypatch) -> None:
 
 
 def test_eval_dispatch_kind_is_single_sourced() -> None:
-    """源码守卫：C 层不得残留 `kind="rollout"` 字面量（防半途改回 rollout 桶）。"""
-    src = Path(ed.__file__).read_text(encoding="utf-8")
-    assert 'kind="rollout"' not in src
-    assert src.count("EVAL_WEIGHTS_KIND") >= 4  # 定义 1 + 三处使用（POST/请求/重发）
+    """源码守卫：eval 腿的权重桶名只有一个来源（防半途改回 rollout 桶）。
+
+    三处使用分住两个文件：权重 POST 在派发器（`trainer/eval_dispatch.py`），局请求、
+    409 重发与任务丢失后的桶清理在执行层（`worker/eval_exec.py`）。执行层经
+    `Grant.round.weights_kind` 取常量而不是 import 派发器——分层守卫不允许 worker
+    依赖 trainer。
+    """
+    disp = Path(ed.__file__).read_text(encoding="utf-8")
+    exec_src = Path(ee.__file__).read_text(encoding="utf-8")
+
+    def _str_consts(src: str) -> set[str]:
+        return {
+            n.value
+            for n in ast.walk(ast.parse(src))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        }
+
+    assert _str_consts(disp).isdisjoint({"rollout"}), "派发器又写回了 rollout 桶名"
+    assert _str_consts(exec_src).isdisjoint({"rollout"}), "执行层又写回了 rollout 桶名"
+    assert disp.count("EVAL_WEIGHTS_KIND") >= 3  # 定义 + weights_kind 入轮 + POST
+    assert exec_src.count("kind=rnd.weights_kind") == 3  # 局请求 / 409 重发 / 丢桶
 
 
 # ---------------------------------------------------------------------------
@@ -1578,11 +1671,11 @@ def test_eval_rows_and_summary_go_through_the_single_writer(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# 2026-11-03（用户口径「rollout 绝对优先，eval 排队吃间隙」）：
+# 2026-11-03（用户口径「rollout 绝对优先」）：
 #   ① 权重下发是流水线：先就绪的节点先开采，不再等最后一个 POST（it25 kaggle
 #      一次 WinError 10054 挂 187s，其余节点的评估线程陪着干等）；
-#   ② rollout 插队：正在跑的 eval 立刻收手（close_reason=preempted），不算节点
-#      故障、不写丢局告警；票留在闸的队头，下一个间隙续跑。
+#   ② 2026-11-04 起优先级落在**任务级**：rollout 活跃只冻结 eval **新**投递，
+#      在飞 eval 局不动也不断连；窗口钟随冻结停走，解冻后同一轮继续派完。
 # ---------------------------------------------------------------------------
 
 
@@ -1639,54 +1732,221 @@ def test_weights_post_pipelines_node_start(tmp_path, monkeypatch) -> None:
     assert fetched["fast"] >= 1 and fetched["slow"] >= 1, fetched
 
 
-def test_rollout_preempt_ends_round_with_preempted_reason(tmp_path, monkeypatch) -> None:
-    """rollout 插队 ⇒ 本轮立刻收手：run() 返回 True、summary 报 `preempted`、不熔断节点。"""
-    from worker.eval_gate import Preempt
+def _ledger_rows(h) -> list[dict]:
+    ledger = h.work / "eval_log.jsonl"
+    if not ledger.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_rollout_freeze_stops_new_grants_and_keeps_inflight(
+    tmp_path, monkeypatch
+) -> None:
+    """rollout 活跃期：只冻结 eval 新投递，在飞局自然落账，窗口钟停走。
+
+    用户口径（2026-11-04）：「在飞 eval 局不动，只是停止分派新的 eval 局，直至所有
+    rollout 完成」。旧实现（`Preempt`）是整轮立刻收手 + 断连掐在飞局；本用例的首局
+    正是在冻结中回包的——它必须落账。窗口 1.0s 而冻结跨过 1.3s：钟若不停走，本轮
+    在冻结期内就被判「窗口到期」，解冻后不会再有局 ⇒ 只有冻结感知正确才会 settled。
+    """
+    from worker.eval_gate import eval_gate
 
     nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
     h = _LaneHarness(
-        tmp_path,
-        monkeypatch,
-        games=6,
-        nodes=nodes,
-        local_slots=0,
-        fallback_only=True,
-        window_sec=60.0,
+        tmp_path, monkeypatch, games=3, nodes=nodes, local_slots=0, window_sec=1.0
     )
-    token = Preempt()
     started = threading.Event()
+    release = threading.Event()
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
         calls["n"] += 1
-        started.set()
-        # 插队 = 在飞请求被 `abort_active_requests` 掐断；测试里用令牌收包（同一时刻）。
-        token.wait(20.0)
+        if calls["n"] == 1:
+            started.set()
+            assert release.wait(timeout=30.0), "首局未被放行（用例内部死锁）"
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     out: dict[str, Any] = {}
 
     def _play() -> None:
-        out["rows"], out["elapsed"] = h.play(fetch, preempt=token)
+        out["rows"], out["elapsed"] = h.play(fetch)
 
-    worker = threading.Thread(target=_play, daemon=True)
+    worker = threading.Thread(target=_play, daemon=True, name="freeze-eval-test")
     worker.start()
+    gate = eval_gate()
+    frozen = False
     try:
-        assert _wait_until(started.is_set, timeout=20.0), (
-            "节点没能在 20s 内取到第一局（用例前提失效）"
+        assert started.wait(timeout=20.0), "节点没能在 20s 内取到第一局（用例前提失效）"
+        gate.begin_rollout()
+        frozen = True
+        # 冻结时长跨过整个窗口：钟若不停走，本轮此刻已被判到期。
+        assert _wait_until(
+            lambda: h.time.monotonic() - h.play_t0 >= h.window_sec + 0.3, timeout=20.0
+        ), "冻结没有持续到窗口之外（用例前提失效）"
+        release.set()
+        # 在飞局在冻结**期间**回包：必须落账（旧 Preempt 会把它掐成 lost）。
+        assert _wait_until(lambda: len(_ledger_rows(h)) >= 1, timeout=10.0), (
+            "冻结期回包的在飞局没有落账（在飞局被撤了？）"
         )
-        token.fire()
+        h.time.sleep(0.3)  # sleep-ok: 轮询步长（有界观察窗，等的是「冻结期没再派新局」这个谓词）
+        assert calls["n"] == 1, f"冻结期仍在派新局（实测 {calls['n']} 次）"
+        assert not out, "冻结期本轮就收工了（窗口钟没有停走）"
+        gate.end_rollout()
+        frozen = False
         worker.join(timeout=30.0)
-        assert not worker.is_alive(), "插队后 eval 轮没有收手（旧形态会跑满窗口 60s）"
+        assert not worker.is_alive(), "解冻后本轮没有收口"
     finally:
-        token.fire()  # 幂等：保证 fetch 一定解锁（用例若在上面红了也不留悬挂线程）
+        release.set()
+        if frozen:
+            gate.end_rollout()
     rows = out["rows"]
     s = _summary(rows)
-    assert h.last_preempted is True, "run() 必须把「被插队」报给闸（否则票会被误判完成）"
-    assert s["close_reason"] == "preempted", s
-    assert s["games"] <= 1, s  # 插队时最多一局在飞落地，不得继续吃活
-    assert calls["n"] == 1, f"插队后不得继续取活（实测 {calls['n']} 次）"
-    # 插队不是丢局：其余 5 局原样留在队里（票在下一个间隙续跑），也不计入 lost。
-    assert s["lost"] == 0 and s["never_dispatched"] == 5, s
-    # timing-ok: 相对判据（判据 = 收手远早于窗口 60s，不是具体秒数）
-    assert out["elapsed"] < h.window_sec / 2, f"插队没有立刻收手（{out['elapsed']:.2f}s）"
+    assert s["close_reason"] == "settled", s
+    assert s["games"] == 3, s
+    assert calls["n"] == 3, f"解冻后应派完全部 3 局（实测 {calls['n']} 次）"
+
+
+def test_two_eval_rounds_share_dispatch_round_robin(tmp_path, monkeypatch) -> None:
+    """两轮 eval 并行：后启动的 B 不等 A 收尾，唯一任务按轮轮转均分。
+
+    用户口径（2026-11-04 需求 1）：A 进行中又起 B ⇒ 两轮**平等**分派，而不是 B 排到
+    A 收工之后；A 的尾部算力也不再拿去跑自己的竞速副本。旧实现是轮级闸 + 每轮各自
+    一组线程，B 只能看着 A 收尾。
+    """
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    ha = _LaneHarness(tmp_path / "a", monkeypatch, games=2, nodes=nodes, local_slots=0)
+    hb = _LaneHarness(tmp_path / "b", monkeypatch, games=2, nodes=nodes, local_slots=0)
+    order: list[str] = []
+    release = threading.Event()
+    # B 的「已进场」判据 = 在仲裁器登记（不是第一批 fetch：单槽节点被 A 占着，
+    # B 的 gr 只能在 A 回包后才发得出来）。
+    from worker.eval_arbiter import EvalArbiter
+
+    registered: list[int] = []
+    orig_register = EvalArbiter.register
+
+    def spy_register(self: EvalArbiter, rnd: Any) -> None:
+        orig_register(self, rnd)
+        registered.append(int(rnd.it))
+
+    monkeypatch.setattr(EvalArbiter, "register", spy_register)
+
+    def fetch(*_a, **kw):
+        order.append("A" if str(kw["iter_id"]).startswith("rid.a") else "B")
+        if len(order) == 1:
+            assert release.wait(timeout=30.0), "首局未被放行（用例内部死锁）"
+        return hb.manifest(kw["stage"], kw["seed"]), {}
+
+    out: dict[str, tuple] = {}
+
+    def _run(key: str, h, rid: str, it: int) -> None:
+        out[key] = h.play(fetch, run_id=rid, it=it)
+
+    ta = threading.Thread(target=_run, args=("a", ha, "rid.a", 7), daemon=True)
+    try:
+        # 先单独起 A：它登记后首局被扣住（唯一线程），队列不会再被 A 吃掉。
+        ta.start()
+        assert _wait_until(lambda: order.count("A") > 0, timeout=20.0), f"A 没有开派: {order}"
+        # A 卡在首局，再起 B：B 登记后两条队列都在，放行首局 ⇒ 发牌按轮轮转。
+        tb = threading.Thread(target=_run, args=("b", hb, "rid.b", 8), daemon=True)
+        tb.start()
+        assert _wait_until(lambda: 8 in registered, timeout=20.0), f"B 没有入场: {registered}"
+        release.set()
+        ta.join(timeout=30.0)
+        tb.join(timeout=30.0)
+        assert not ta.is_alive() and not tb.is_alive(), "两轮没有都收口"
+    finally:
+        release.set()
+    # 唯一任务按轮轮转：A,B,A,B —— B 的第一局严格早于 A 的最后一局 = B 没等 A 收工。
+    assert order[:4] == ["A", "B", "A", "B"], order
+    sa = _summary(out["a"][0])
+    sb = _summary(out["b"][0])
+    assert sa["close_reason"] == "settled" and sa["games"] == 2, sa
+    assert sb["close_reason"] == "settled" and sb["games"] == 2, sb
+    # 4 局 = 4 次执行：唯一局没派完之前不开竞速副本（开了会有第 5 次 fetch）。
+    assert len(order) == 4, order
+
+
+def test_idle_worker_replicates_the_last_inflight_game(tmp_path, monkeypatch) -> None:
+    """需求 2：唯一局都派出后仍空闲的 worker ⇒ 同一局复制到别的节点抢单。
+
+    2 个单线程节点只评 1 局：拿到唯一局的节点被扣住，另一条空闲线程**没有唯一局
+    可领**，只能进副本道（`tail-race ... race lane`）。谁先抢到唯一局是调度决定的，
+    所以只钉结构事实：同一 `(stage, seed)` 被两个节点各跑一次、只落一局账。
+    """
+    nodes = [
+        {"id": "n1", "url": "http://n1.local", "concurrency": 1},
+        {"id": "n2", "url": "http://n2.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0)
+    calls: list[str] = []
+    release = threading.Event()
+
+    def fetch(url, *_a, **kw):
+        calls.append(str(url))
+        if len(calls) <= 2:
+            assert release.wait(timeout=30.0), "副本未能在 30s 内发出（用例前提失效）"
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    out: dict[str, tuple] = {}
+
+    def _play() -> None:
+        out["r"] = h.play(fetch)
+
+    worker = threading.Thread(target=_play, daemon=True, name="replica-lane-test")
+    worker.start()
+    try:
+        assert _wait_until(lambda: len(calls) >= 2, timeout=20.0), (
+            f"空闲节点没有进入副本道（实测 {len(calls)} 口）"
+        )
+        assert len(set(calls[:2])) == 2, f"两局落在同一个节点：{calls}"
+    finally:
+        release.set()
+        worker.join(timeout=30.0)
+    assert not worker.is_alive(), "副本回包后本轮没有收口"
+    rows = out["r"][0]
+    s = _summary(rows)
+    assert s["close_reason"] == "settled" and s["games"] == 1, s
+    assert len([r for r in rows if r.get("event") == "eval"]) == 1, "副本重复落账"
+    # 1 局却执行了 2 次 ⇒ 第二次只能来自副本道（仲裁器的竞速分支）。
+    assert len(calls) == 2, calls
+
+
+def test_replica_lane_flattens_inflight_tasks_across_rounds() -> None:
+    """需求 2 的「不用区分在飞局是哪个 it」：副本候选跨轮平铺，按 `(stage, seed)` 排序。
+
+    纯逻辑用例（两轮用鸭子类型桩）：候选来自**不同轮**、登记序与任务序相反——发牌
+    必须听任务序（`stage` 小的先），而不是听轮序；`_rep` 游标让第二次发牌轮到另一张
+    候选 ⇒ 空闲槽在跨轮候选之间轮转，不会总喂同一轮。
+    """
+    from worker.eval_arbiter import EvalArbiter
+
+    class _Rnd:
+        def __init__(self, seq: int, tasks: list[tuple[int, int]]) -> None:
+            self.seq = seq
+            self.tasks = tasks
+            self.claims: list[tuple[int, int]] = []
+
+        def replica_candidates(self, _nid: str, _now: float) -> list[tuple[int, int]]:
+            return list(self.tasks)
+
+        def claim_replica(self, _nid: str, task: tuple[int, int], _now: float) -> object:
+            self.claims.append(task)
+            return object()
+
+    early_round = _Rnd(1, [(2001, 5)])  # 先登记，但 stage 更大
+    late_round = _Rnd(2, [(2000, 7)])  # 后登记，stage 更小 ⇒ 先发它的副本
+    # 鸭子类型桩：`_replica_grant` 只碰 seq / replica_candidates / claim_replica 三面。
+    rounds: list[Any] = [early_round, late_round]
+    arb = EvalArbiter()
+    assert arb._replica_grant(rounds, "n3", 100.0) is not None
+    assert late_round.claims == [(2000, 7)], late_round.claims
+    assert early_round.claims == [], "副本按轮序而不是任务序发牌（跨轮没平铺）"
+    assert arb._replica_grant(rounds, "n3", 100.0) is not None
+    assert early_round.claims == [(2001, 5)], "游标不转：另一轮的候选永远轮不到"

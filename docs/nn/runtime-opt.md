@@ -10,6 +10,10 @@
 
 ## §42 rollout 绝对优先、eval 排队吃间隙：进程级 eval 闸 + 去掉让位 floor + 窗口从权重就绪起算（2026-11-03 用户口径）
 
+> **已被取代**（2026-11-04）：FIFO / 并发上限 / `Preempt` 收手随任务级统一派发退役——
+> 「rollout 优先」改为冻结 eval 新投递、在飞局自然落账。现行全文见
+> `docs/nn/engineering.md` §111 与 `DECISIONS.md` §2026-11-04-goalnn-task-level-eval-arbitration。
+
 **用户口径（本次改动的唯一依据）**：
 
 > 「前一个 eval 未完成，不启动后面的 eval ！！！不管多少课程，rollout 和 eval 都是排队！
@@ -33,7 +37,7 @@
 
 | 改动 | 位置 | 判据 / 契约 |
 |---|---|---|
-| 进程级 eval 闸：FIFO 取号 + 单飞 + rollout 插队 + 队头续跑 | `worker/eval_gate.py`（新，零依赖叶子） | `submit(job)` 的 `job(token)` 返回真值 = 被插队（票留队头，下一间隙续跑）；假值 = 完成 |
+| 进程级 eval 闸：FIFO 取号 + **最多 2 轮并发**（2026-11-04 由单飞上调，见 `engineering.md` §109）+ rollout 插队 + 原位续跑 | `worker/eval_gate.py`（新，零依赖叶子） | `submit(job)` 的 `job(token)` 返回真值 = 被插队（票留原位，下一间隙续跑）；假值 = 完成；开跑条件 = 无 rollout ∧ 在跑 < `MAX_CONCURRENT` ∧ 票在前 K 位 |
 | `eval_slot_cap` **去掉 floor**：`max(0, concurrency − inflight)` | `worker/eval_yield.py` | 占满时 eval 0 线程——「全力保证 rollout」；空出来的槽由 `EvalConsumers._grow_slots` 每 15s 补 |
 | 收工第五态 `preempted`（优先于 machine-fault/workers-gone） | `worker/eval_yield.py::eval_close_reason` | 被插队 = 主动收手，不是异常；票会续跑，所以不报丢局 WARN |
 | rollout 作用域只包采集段：`with eval_gate().rollout():` | `trainer/loop_round_steps.py::step_rollout` | 组合轮体与细粒度 Supervisor 都经本方法 ⇒ 两路共用一张闸；作用域一开，正在跑的 eval 立刻收手 |
@@ -51,8 +55,9 @@ eval 在训练收尾后还能继续补（用户口径「训练结束后再继续
 接上会把 eval 饿死在默认 stream 模式下。显式课程模式（非发现模式）在 `all_settled` 后进程退出，
 排队中的 eval 只保证在发现模式（生产）里补完。
 
-**用例**：`tests/worker/test_eval_gate.py`（单飞 / FIFO / rollout 期间不启动 / 插队后队头续跑且
-拿新令牌 / 钩子幂等与迟到钩子 / 作用域计数 / 任务异常不卡队 / 进程单例）·
+**用例**：`tests/worker/test_eval_gate.py`（默认 2 并发 / 第三票等空槽补位 / rollout 收全部在跑轮且
+原位续跑 / 单槽 FIFO（`max_concurrent=1`）/ rollout 期间不启动 / 拿新令牌 / 钩子幂等与迟到钩子 /
+作用域计数 / 任务异常不卡队 / 进程单例）·
 `tests/worker/test_eval_yield_split.py`（`eval_slot_cap` 去 floor 的边界、`close_reason=preempted`
 的五态互斥）· `tests/trainer/test_eval_dispatch_resilience.py`（`on_alive` 流水线：慢节点 POST
 未收工、快节点已取活；插队：`run()` 返回 True + summary `preempted` + 不熔断节点 + 不再取活）。

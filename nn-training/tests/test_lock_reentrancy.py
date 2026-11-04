@@ -121,7 +121,7 @@ def _needs_index(text: str) -> bool:
     return bool(CLASS_TOKEN.search(text) or LOCK_WORD.search(text))
 #: 扫描面下锁点的下限（结构性 sanity：解析面缩水/空转时当场红，而不是「0 命中」的假绿）。
 MIN_LOCK_SITES: Final = 60
-#: 目标面棘轮：临界区里「看得到调用、看不到目标」的**去重目标数**（今天 15，见文件头「边界」）。
+#: 目标面棘轮：临界区里「看得到调用、看不到目标」的**去重目标数**（今天 18，见文件头「边界」）。
 #: 涨了就把数字一起改，并当场回答：那个目标会不会回头拿同一把锁？
 #:
 #: 2026-10-09 全仓审计逐个回答完的 15 个（全是**注入的可调用属性**，不是方法，组内也解析不到）：
@@ -134,8 +134,12 @@ MIN_LOCK_SITES: Final = 60
 #:   * `_build` ×1（`CloudEvalRunner`）—— `_eval_job_builder(ctx, ep)` 在 runner **之前**构造，
 #:     拿不到 runner 的 `_lock`（回调闭包只捕 `ctx`/`ep`）⇒ 不可能重入同一把；
 #:   * `InstallGate → 回调 InstallTicket` —— `ticket()` 持锁只造票（票只存 `_gate`）；
-#:     `_valid`/`_cancel`/`_install` 由 **copier 线程**在 `with` 之外调（跨线程，非重入）。
-MAX_OPAQUE_CALLS: Final = 16
+#:     `_valid`/`_cancel`/`_install` 由 **copier 线程**在 `with` 之外调（跨线程，非重入）；
+#:   * `EvalRound._log` / `EvalRound._fail_recorder`（2026-11-04，任务级 eval 仲裁）——
+#:     `trainer/eval_dispatch.py` 构造 `EvalRound` 时注入的两个模块级函数
+#:     （`course_logger(...)` / `record_eval_failed`），只收 round 的**数据**、收不到
+#:     round 实例 ⇒ 回不到 `EvalRound._lock`。
+MAX_OPAQUE_CALLS: Final = 18
 
 LockKey = tuple[object, ...]
 

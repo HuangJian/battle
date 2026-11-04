@@ -391,7 +391,12 @@ BASELINE_FORM = 1475
 #: 2026-11-02 抬到 **1114**（+14，全在新增 `tests/test_scan_cache.py`：那边用 `"a.py"` 作
 #:   缓存键、逐条断行为，于是整个文件的 assert 都被 B 当成「读 .py 面」计进 —— 与上一格同一
 #:   条已知限边。口径 A 仍 0 条（不涉及文本成员比较），是真「行为断言」。
-BASELINE_SRC = 1114
+#: 2026-11-04 抬到 **1115**（+1，`tests/common/test_dist_common_poll.py` 任务级仲裁后补的
+#:   「派发器不得内联传输判据」守卫：`assert c_consts.isdisjoint({409, "task lost on node"})`
+#:   是 **AST 结构**判据（口径 A 0 条），只是输入来自读 `.py` ⇒ 按同一已知限边计进一格。
+#:   同批把 eval 腿执行面从 `eval_dispatch` 挪进 `worker/eval_exec.py`，旧文本判据删/改成
+#:   AST 判据后 B 净 +1、A 净 −1）。
+BASELINE_SRC = 1115
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 

@@ -217,12 +217,11 @@ def eval_close_reason(
     no_consumers: bool,
     window_expired: bool,
     *,
-    preempted: bool = False,
     lost: int = 0,
     lost_per_node: dict[str, int] | None = None,
     stopped_nodes: set[str] | tuple[str, ...] = (),
 ) -> str:
-    """收工原因（五值互斥）：`settled` / `preempted` / `machine-fault` / `workers-gone` / `window`。
+    """收工原因（四值互斥）：`settled` / `machine-fault` / `workers-gone` / `window`。
 
     为什么需要它（plan/eval-baseline-undispatched §2 P0-1，2026-10-08）：收工行原先
     只说「未全落盘 N/M」——it0 那 95 局就是在 21s/1500s 时因消费线程归零而收工，
@@ -230,11 +229,12 @@ def eval_close_reason(
 
     判据顺序（写死，别重算）：
       · `settled`：落盘满 ⇒ 正常收工，另三条不参与；
-      · `preempted`：被新 rollout 插队（进程闸置位）⇒ 本轮主动收手，队头保留、
-        下一个间隙续跑（2026-11-03：rollout 绝对优先，eval 只吃间隙）；
       · `workers-gone`：**窗口还有余量**而消费线程已归零 —— 这是「远端线程异常退出」
         的指纹；
       · `window`：其余（窗口到期）。
+
+    （`preempted` 第五态随轮级 `Preempt` 退役，2026-11-04：rollout 只冻结新投递、
+    在飞局自然落账，不再有「整轮被插队收手」这条收工路径。）
 
     ⚠ `workers-gone` 必须带 `not window_expired`：窗口到期那条路上，消费线程本来就因
     `time.time() >= deadline` 而退出 ⇒ 不加这个条件的话 `window` 永远报不出来
@@ -242,12 +242,10 @@ def eval_close_reason(
 
     `machine-fault`（2026-10-18，plan/eval-gap-honesty §4）：只在 `workers-gone` 的同一个
     前提下细分——缺口**集中在一台机器**（`local` 或本轮已停派的节点）就不是普通缺口
-    （y22-lr it5：83 局全落 `local`）。三个关键字参数全部带缺省 ⇒ 旧调用方/旧用例逐字不变。
+    （y22-lr it5：83 局全落 `local`）。关键字参数全部带缺省 ⇒ 旧调用方/旧用例逐字不变。
     """
     if settled:
         return "settled"
-    if preempted:
-        return "preempted"
     if no_consumers and not window_expired:
         return (
             "machine-fault"
@@ -287,47 +285,10 @@ def local_release_due(now: float, deadline: float) -> bool:
     return float(now) >= float(deadline) - EVAL_LOCAL_RELEASE_GRACE
 
 
-def next_eval_wait(
-    pending: tuple[tuple[int, int], ...],
-    retry_at: dict[tuple[int, int], float],
-    deadline: float,
-    now: float,
-    *,
-    cap: float = 5.0,
-) -> float:
-    """节点 worker「这一拍没取到局」时该睡多久（秒）—— **睡到最近一局回队到期**。
-
-    2026-10-25：旧写法是派发器里一个写死的 `time.sleep(min(5.0, max(0.1, deadline - now)))`，
-    而进程里有 `retry_at`（瞬断回队的指数退避 1/2/4/8s）——那意味着「队列里有活，只是还没到
-    点」。固定 5s 的代价是真实的：一条 404/502 回队的局最坏白等 5s，逐次累加；两个游戏中各
-    退避两轮就是 10s，全落在评估墙钟上（`tests/trainer/test_eval_dispatch_resilience.py` 那三条
-    5~10s 的用例就是它的形状）。睡到到期**不改退避语义**（到点才取，`_take_ready_locked` 的
-    判据不动），也不改 5s 上界。
-
-    两个保守口子（都不让 worker 变热循环）：
-      · 只有「pending 里**全都**在退避」才缩短——还有一局已到期却取不到（尾段预留把它留给本机）
-        时，`available` 是空集，走回老的 5s；
-      · 最近到期已过（<= now）同样走老口径（那时该有人取却没取，是 hold/竞态，不是退避）。
-
-    `pending` 是**快照元组**（派发器由 `deque` 转来：迭代中改容器会 RuntimeError）。
-    **`now` 由调用方给**（本模块是零依赖叶子，不 import `time`）。
-    """
-    try:
-        if pending:
-            dues = [retry_at[t] for t in pending if t in retry_at]
-            if dues and len(dues) == len(pending):
-                delta = min(dues) - float(now)
-                if delta > 0:
-                    return float(min(cap, delta))
-    except RuntimeError:  # 容器被并发改动（deque/dict 迭代）⇒ 本拍按「没活」睡
-        pass
-    return float(min(cap, max(0.1, float(deadline) - float(now))))
-
-
 #: 瞬断/404 回队的指数退避：`min(cap, base * 2**(leg-1))` 秒（原式写死在派发器里：
 #: `min(2**(leg-1), 8)`）。抽成常量只为一件事：**判据（到点才取）不该被墙钟惩罚** ——
-#: 用例把首档压到毫秒级后仍走同一条 `retry_at` → `next_eval_wait` → `_take_ready_locked`
-#: 的路，形状与封顶由 `requeue_backoff_sec` 单测钉住；生产默认就是原式的 1/2/4/8s。
+#: 用例把首档压到毫秒级后仍走同一条 `retry_at` → `_take_ready_locked` 的路，形状与
+#: 封顶由 `requeue_backoff_sec` 单测钉住；生产默认就是原式的 1/2/4/8s。
 REQUEUE_BACKOFF_FIRST_SEC = 1.0
 REQUEUE_BACKOFF_CAP_SEC = 8.0
 

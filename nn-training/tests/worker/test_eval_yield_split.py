@@ -31,7 +31,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import trainer.eval_dispatch as eval_dispatch_mod
 import worker.eval_local as eval_local_mod
 import worker.eval_yield as eval_yield_mod
 from tests.helpers import remote_dag as dag
@@ -70,11 +69,17 @@ READERS = {
         "EVAL_LOCAL_SLOTS_DEFAULT",
         "eval_close_reason",
         "eval_request_scope",
-        "hold_for_local",
+        "eval_slot_cap",
         "release_local_gate_if_starved",
         "reserve_local_slots",
-        "local_release_due",
         "inflight_grace_cap",
+    ),
+    # 任务级仲裁（2026-11-04）：`hold_for_local` 与 `local_release_due` 的**消费点**
+    # 随线程一起搬进仲裁器（`take()` 发牌前判预留）；判据仍只许从 `worker.eval_yield` 取。
+    "worker/eval_arbiter.py": (
+        "hold_for_local",
+        "local_release_due",
+        "requeue_backoff_sec",
     ),
     # 轮中自救（2026-11-01）：孵线程与归零后的救援路径拆到 `eval_self_rescue.py`
     # （`eval_dispatch.py` 贴着 LOC 预算的天花板；家搬进 `worker/` 是因为 `trainer/`
@@ -201,11 +206,6 @@ def test_public_call_sites_can_still_import_from_eval_local() -> None:
     assert release_local_gate_if_starved is eval_yield_mod.release_local_gate_if_starved
 
 
-def test_eval_dispatch_namespace_still_exposes_the_verdicts() -> None:
-    """e2e 里写的是 `ed.hold_for_local(...)`（`ed` = `trainer.eval_dispatch`）——那条路不许断。"""
-    assert eval_dispatch_mod.hold_for_local is eval_yield_mod.hold_for_local
-
-
 # ───────────────── ⑥ 边缘重指 + 判决点迁移（旧表达式必须消失） ─────────────────
 
 
@@ -214,13 +214,13 @@ def test_readers_take_the_verdicts_from_eval_yield() -> None:
     for rel, names in READERS.items():
         src = _import_sources(ROOT / rel)
         bad = sorted(n for n in names if src.get(n) != "worker.eval_yield")
-        assert bad == [], f"{rel} 里这些名字的来源不是 biz.eval_yield：{bad}"
+        assert bad == [], f"{rel} 里这些名字的来源不是 worker.eval_yield：{bad}"
 
 
 def test_eval_dispatch_no_longer_imports_policy_from_the_runner() -> None:
     """派发器只从运行器拿执行面（runner / 账本 / 重试配额），判据一律走新家。"""
     src = _import_sources(DISPATCH_FILE)
-    for name in ("hold_for_local", "release_local_gate_if_starved", "EVAL_LOCAL_SLOTS_DEFAULT"):
+    for name in ("release_local_gate_if_starved", "EVAL_LOCAL_SLOTS_DEFAULT", "eval_slot_cap"):
         assert src.get(name) == "worker.eval_yield", name
     for name in ("run_local_eval_game", "eval_row", "eval_done_keys", "EVAL_TASK_ATTEMPTS"):
         assert src.get(name) == "worker.eval_local", name
@@ -235,12 +235,35 @@ def test_eval_dispatch_inline_formulas_are_gone() -> None:
         "float(min(task_timeout, EVAL_INFLIGHT_GRACE_SEC))",
     ):
         assert old not in src, f"判决点没提干净：{old.strip()[:48]!r}"
-    for new in (
-        "reserved = reserve_local_slots(",  # 份额分支仍调用；兜底模式靠 gate_wired=False 归零
-        "local_release_due(time.time(), deadline),",
-        "grace_end = time.time() + inflight_grace_cap(task_timeout)",
-    ):
-        assert new in src, f"判决点没接上：{new!r}"
+    # 让位判据的消费点搬进仲裁器（发牌前判预留）：必须仍是
+    # `local_release_due(now, clock.deadline(now))` 的形状，公式与实参不得变回内联。
+    arb = (ROOT / "worker" / "eval_arbiter.py").read_text(encoding="utf-8")
+    let_go = [
+        c
+        for c in ast.walk(ast.parse(arb))
+        if isinstance(c, ast.Call)
+        and isinstance(c.func, ast.Name)
+        and c.func.id == "local_release_due"
+    ]
+    unmet = sorted(
+        what
+        for what, ok in {
+            "reserved = reserve_local_slots(": "reserved = reserve_local_slots(" in src,
+            # 份额分支仍调用；兜底模式靠 gate_wired=False 归零
+            "grace_end = time.time() + inflight_grace_cap(task_timeout)": (
+                "grace_end = time.time() + inflight_grace_cap(task_timeout)" in src
+            ),
+            "worker/eval_arbiter.py: local_release_due(now, clock.deadline(now))": any(
+                len(c.args) == 2
+                and isinstance(c.args[1], ast.Call)
+                and isinstance(c.args[1].func, ast.Attribute)
+                and c.args[1].func.attr == "deadline"
+                for c in let_go
+            ),
+        }.items()
+        if not ok
+    )
+    assert unmet == [], f"判决点没接上：{unmet}"
 
 
 def test_loop_eval_no_longer_reaches_the_runner_for_policy() -> None:
@@ -338,8 +361,8 @@ def test_eval_close_reason_semantics() -> None:
     **窗口还有余量**时成立 —— 窗口到期的正常收工里消费线程本来就会退光，不加这个
     条件的话 `window` 永远报不出来（三条互斥成空话）。
 
-    `preempted`（2026-11-03，rollout 插队）：settled 仍最优先（它真跑完了，队头该出队）；
-    其余状态下插队压过 workers-gone / machine-fault（本轮是**主动收手**，不是故障）。
+    `preempted` 第五态已随轮级 `Preempt` 退役（2026-11-04 任务级仲裁：rollout 只冻结
+    新投递，在飞局照常落账，不再有「整轮被插队收手」）。
     """
     y = eval_yield_mod
     assert y.eval_close_reason(True, False, False) == "settled"
@@ -347,16 +370,6 @@ def test_eval_close_reason_semantics() -> None:
     assert y.eval_close_reason(False, True, False) == "workers-gone"
     assert y.eval_close_reason(False, True, True) == "window"
     assert y.eval_close_reason(False, False, False) == "window"
-    # 插队：主动收手，不报故障；已完成仍算 settled
-    assert y.eval_close_reason(False, False, False, preempted=True) == "preempted"
-    assert y.eval_close_reason(False, True, False, preempted=True) == "preempted"
-    assert (
-        y.eval_close_reason(
-            False, True, False, preempted=True, lost=83, lost_per_node={"local": 83}
-        )
-        == "preempted"
-    )
-    assert y.eval_close_reason(True, True, False, preempted=True) == "settled"
 
 
 def test_eval_close_reason_machine_fault_semantics() -> None:
@@ -493,38 +506,12 @@ def test_inflight_grace_cap_semantics() -> None:
     assert y.inflight_grace_cap(120.0) == 120.0
 
 
-def test_next_eval_wait_sleeps_until_the_next_retry_is_due() -> None:
-    """★ 节点 worker「没取到局」的睡眠：退避中睡到**最近到期**，其余情况仍睡满上界。
-
-    这是 `trainer/eval_dispatch.py` 的固定 `sleep(5)` 被换掉的那条判据（2026-10-25）：
-    退避表非空时它把「队列里有活、只是还没到点」的等待从 5s 缩到真实剩余，**不改变
-    退避语义**（到点前 `_take_ready_locked` 仍取不到）。四类现场逐个钉：
-    """
-    y = eval_yield_mod
-    now, deadline = 1000.0, 1600.0
-    # ① 队列空 ⇒ 上界 5s（与旧式子 `min(5.0, max(0.1, deadline - now))` 同值）
-    assert y.next_eval_wait((), {}, deadline, now) == 5.0
-    # ② 全在退避、最近一局 0.75s 后到期 ⇒ 睡 0.75s（旧的固定 5s 就是白等的那几秒）
-    pending = ((1, 1), (1, 2))
-    retry_at = {(1, 1): now + 0.75, (1, 2): now + 7.0}
-    assert y.next_eval_wait(pending, retry_at, deadline, now) == 0.75
-    # ③ 有局已到期却没取走（尾段预留/竞态）⇒ 不缩到毫秒级（否则 worker 变热循环）
-    retry_at = {(1, 1): now - 0.5, (1, 2): now + 7.0}
-    assert y.next_eval_wait(pending, retry_at, deadline, now) == 5.0
-    # ④ 只有一部分在退避（另一局立刻可取的被 hold）⇒ 同样走老口径
-    retry_at = {(1, 1): now + 0.75}
-    assert y.next_eval_wait(pending, retry_at, deadline, now) == 5.0
-    # ⑤ 上界与剩余窗口都照样生效
-    assert y.next_eval_wait(pending, {(1, 1): now + 99.0, (1, 2): now + 99.0}, deadline, now) == 5.0
-    assert y.next_eval_wait((), {}, now + 0.5, now) == 0.5
-
-
 def test_requeue_backoff_shape_and_cap() -> None:
     """回队的退避 = 指数翻倍 + 8s 封顶（原式 `min(2**(leg-1), 8)`，2026-10-25 抽成常量）。
 
     抽常量的理由：`test_eval_dispatch_resilience` 那条「404 回队」用例要真等 1s+2s，
-    而这只是**生产节拍**——用例把它压到毫秒级后仍走 `retry_at` → `next_eval_wait` →
-    `_take_ready_locked` 的同一条路；形状与封顶改由这里钉住（云端一旦改退避，这条先红）。
+    而这只是**生产节拍**——用例把它压到毫秒级后仍走 `retry_at` 的同一条路；形状与封顶
+    改由这里钉住（云端一旦改退避，这条先红）。
     """
     y = eval_yield_mod
     assert y.REQUEUE_BACKOFF_FIRST_SEC == 1.0

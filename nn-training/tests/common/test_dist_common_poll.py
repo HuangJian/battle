@@ -307,7 +307,11 @@ def test_transient_judgement_defined_once_and_wired() -> None:
 
     a_layer = source_scan.read_text(str(root / "trainer" / "dispatch.py"))
     c_layer = source_scan.read_text(str(root / "trainer" / "eval_dispatch.py"))
-    for src in (a_layer, c_layer):
+    # 任务级统一派发（2026-11-04）后 eval 腿的单局执行面搬进 `worker/eval_exec.py`：
+    # 瞬断/404/409 的判据与重取随它走——接线判据连它一起扫，否则扫描面只是看起来还在。
+    exec_layer = source_scan.read_text(str(root / "worker" / "eval_exec.py"))
+    # 两条腿各自执行单局传输：rollout 在 A 层，eval 在 exec 层。
+    for src in (a_layer, exec_layer):
         tree = ast.parse(src)
         called = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
         # 接线判据 = 真的调到了那几个单源函数（AST 调用名，不是源码文本）
@@ -327,6 +331,11 @@ def test_transient_judgement_defined_once_and_wired() -> None:
         assert not any(
             isinstance(n, ast.Constant) and n.value == "task lost on node" for n in ast.walk(tree)
         ), "标记字面量被复制进 A/C 层"
+    # eval 派发器只登记/下发权重：传输判据（含 409 分支）不得被它重新内联一份。
+    c_consts = {n.value for n in ast.walk(ast.parse(c_layer)) if isinstance(n, ast.Constant)}
+    assert c_consts.isdisjoint({409, "task lost on node"}), (
+        "eval_dispatch 又内联了传输判据常数（409 自愈 / 取包丢失标记只许在执行层）"
+    )
     # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
     assert definers_of("is_task_lost_error") == ["distribution.py"]
 

@@ -1,11 +1,19 @@
-"""进程级 eval 排队闸（`worker/eval_gate.py`）的行为用例（2026-11-03 用户口径）。
+"""进程级 eval 闸（`worker/eval_gate.py`）的行为用例（2026-11-04 任务级仲裁）。
 
-口径原文：「前一个 eval 未完成，不启动后面的 eval」「不管多少课程，rollout 和 eval 都是
-排队」「所有 rollout 优先级都高于 eval … eval 进行过程中，可以被新到的 rollout 插队」。
+口径（用户 2026-11-04）：「rollout 一起来，在飞 eval 局不动，只停止派发新的 eval 局，
+直到 rollout 收尾；rollout 之间，多轮 eval 平等共享节点——不再排队」。
 
-为什么用**行为**而不是文本断言：闸的价值全在状态机的时序上（单飞 / FIFO / 插队 /
-续跑留队头），文本断言只能证明「写了这些词」。本文件用 `Event` + 顺序账本钉时序；
-每个等待都有 5s 上界（失败是红，不是挂死），整文件远低于 per-test 60s 护栏。
+闸本体因此只剩两件事：
+  * `rollout()` / `begin_rollout()` / `end_rollout()`：引用计数的冻结/解冻（转给
+    `EvalArbiter.freeze/thaw`——派发暂停 + 窗口钟停走）；
+  * `submit(job)`：起后台线程**立即**跑整轮 `job()`（旧 FIFO 槽位已退役）。
+
+旧用例（单飞/FIFO/插队收手/续跑队头）随 `Preempt` 一起删除——那些时序判据已由
+任务级仲裁接管，行为面在 `tests/trainer/test_eval_dispatch_resilience.py`
+（多轮均分 / 冻结不撤在飞局）。
+
+冻结是**进程级**的：每个用例都必须在 finally 里解冻，否则后面所有用例的仲裁器
+都停在冻结态（挂死而不是红）。
 """
 
 from __future__ import annotations
@@ -13,7 +21,8 @@ from __future__ import annotations
 import threading
 import time
 
-from worker.eval_gate import WAIT_TICK_SEC, EvalGate, Preempt, eval_gate
+from worker.eval_arbiter import eval_arbiter
+from worker.eval_gate import EvalGate, eval_gate
 
 
 def _wait(pred, timeout: float = 5.0) -> bool:
@@ -26,177 +35,107 @@ def _wait(pred, timeout: float = 5.0) -> bool:
     return bool(pred())
 
 
-def test_submit_runs_jobs_single_flight_in_fifo_order() -> None:
-    """单飞 + FIFO：同一时刻只有一票在跑；先到先跑，后到等前一张票真正结束。"""
+def test_submit_starts_job_immediately_without_queue() -> None:
+    """提交即开跑（无 FIFO 槽位）：`submit` 返回的线程 join 到整轮真正收工。"""
     gate = EvalGate()
-    order: list[str] = []
-    active = [0]
-    peak = [0]
-    first_started = threading.Event()
-    release_first = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
 
-    def job1(_token) -> bool:
-        active[0] += 1
-        peak[0] = max(peak[0], active[0])
-        order.append("start1")
-        first_started.set()
-        release_first.wait(5)
-        order.append("end1")
-        active[0] -= 1
-        return False
+    def job() -> None:
+        started.set()
+        release.wait(5)
 
-    def job2(_token) -> bool:
-        active[0] += 1
-        peak[0] = max(peak[0], active[0])
-        order.append("start2")
-        active[0] -= 1
-        return False
+    t = gate.submit(job)
+    assert started.wait(5), "submit 没有立即开跑（旧 FIFO 行为已退役）"
+    st = gate.status()
+    assert st == {
+        "queued": 0,
+        "running": True,
+        "active": 1,
+        "rollouts": 0,
+        "completed": 0,
+    }, st
 
-    t1 = gate.submit(job1)
-    assert first_started.wait(5), "第一票没起跑"
-    t2 = gate.submit(job2)
-    # 给第二票至少一个 WAIT_TICK 的机会去偷跑（它必须吃闭门羹）
-    # sleep-ok: 轮询步长（等的是「后到票没被启动」这个否定谓词，兜底只挡挂起）
-    time.sleep(WAIT_TICK_SEC + 0.1)
-    assert order == ["start1"], f"前一张票未结束就启动了后一张：{order}"
-    assert gate.status()["running"] is True
-
-    release_first.set()
-    t1.join(5)
-    t2.join(5)
-    assert not t1.is_alive() and not t2.is_alive()
-    assert order == ["start1", "end1", "start2"]
-    assert peak[0] == 1, f"出现并发执行（峰值 {peak[0]}）"
-    assert gate.status() == {"queued": 0, "running": False, "rollouts": 0, "completed": 2}
+    release.set()
+    t.join(5)
+    assert not t.is_alive()
+    assert gate.status()["completed"] == 1
+    assert gate.status()["active"] == 0
+    assert gate.status()["running"] is False
 
 
-def test_rollout_defers_queued_eval_until_gap() -> None:
-    """rollout 期间**不启动**排队中的 eval；rollout 结束的这个间隙立刻开跑。"""
+def test_submit_does_not_cap_concurrency() -> None:
+    """闸不再限并发：两个整轮同时开跑（共享节点的仲裁在任务级进行）。"""
     gate = EvalGate()
-    ran = threading.Event()
+    started = [threading.Event(), threading.Event()]
+    release = threading.Event()
 
-    def job(_token) -> bool:
-        ran.set()
-        return False
+    def _job(i: int):
+        def job() -> None:
+            started[i].set()
+            release.wait(5)
 
-    gate.begin_rollout()
+        return job
+
+    t1 = gate.submit(_job(0))
+    t2 = gate.submit(_job(1))
     try:
-        gate.submit(job)
-        # sleep-ok: 轮询步长（等的是「rollout 期间没启动」这个否定谓词，兜底只挡挂起）
-        time.sleep(WAIT_TICK_SEC + 0.1)
-        assert not ran.is_set(), "rollout 进行中启动了 eval"
-        assert gate.status()["queued"] == 1
+        assert started[0].wait(5) and started[1].wait(5), "两轮没有并发开跑"
+        assert gate.status()["active"] == 2
     finally:
-        gate.end_rollout()
-    assert _wait(ran.is_set), "间隙到了 eval 仍未开跑"
-
-
-def test_new_rollout_preempts_running_eval_and_ticket_resumes_at_head() -> None:
-    """插队 + 续跑：rollout 一到，在跑的 eval 收手（返回真值）；票留在**队头**，
-    下一个间隙先续完它，后提交的票才轮到（后一轮不得趁插队超车）。"""
-    gate = EvalGate()
-    order: list[str] = []
-    calls: list[Preempt] = []
-    first_started = threading.Event()
-
-    def job1(token) -> bool:
-        calls.append(token)
-        if len(calls) == 1:
-            order.append("job1#1")
-            first_started.set()
-            assert token.wait(5), "没等到插队令牌"
-            order.append("job1#1-preempted")
-            return True
-        order.append("job1#2")
-        return False
-
-    t1 = gate.submit(job1)
-    assert first_started.wait(5)
-
-    def job2(_token) -> bool:
-        order.append("job2")
-        return False
-
-    t2 = gate.submit(job2)
-    # sleep-ok: 轮询步长（等的是「后到票没超车」这个否定谓词，兜底只挡挂起）
-    time.sleep(WAIT_TICK_SEC + 0.1)
-    assert order == ["job1#1"], f"后到票超车：{order}"
-
-    gate.begin_rollout()
-    assert _wait(lambda: order[-1] == "job1#1-preempted"), "在跑的 eval 没有被插队收手"
-    # 插队期间后到票也不启动
-    # sleep-ok: 轮询步长（等的是「插队期间后到票没启动」这个否定谓词，兜底只挡挂起）
-    time.sleep(WAIT_TICK_SEC + 0.1)
-    assert order == ["job1#1", "job1#1-preempted"]
-    gate.end_rollout()
-
+        release.set()
     t1.join(5)
     t2.join(5)
-    assert not t1.is_alive() and not t2.is_alive()
-    assert order == ["job1#1", "job1#1-preempted", "job1#2", "job2"], order
-    assert len(calls) == 2, "续跑必须拿到新令牌（旧令牌已置位）"
-    assert calls[0] is not calls[1]
-    assert calls[1].is_set() is False
+    assert _wait(lambda: gate.status()["completed"] == 2)
 
 
-def test_preempt_hooks_fire_once_and_late_hook_fires_immediately() -> None:
-    """让位钩子：fire 前注册的随 fire 跑；fire 后注册的**立刻补跑**；重复 fire 不重复叫。"""
-    token = Preempt()
-    hits: list[str] = []
-    token.add_hook(lambda: hits.append("a"))
-    assert hits == []
-    token.fire()
-    assert hits == ["a"]
-    token.add_hook(lambda: hits.append("b"))
-    assert hits == ["a", "b"], "迟到钩子没有立刻补 fire"
-    token.fire()  # 幂等：重叠 rollout 的第二次置位
-    assert hits == ["a", "b"]
+def test_rollout_refcount_freezes_and_thaws_the_arbiter() -> None:
+    """嵌套 rollout：进入即冻结（新 eval 不派、窗口钟停走），计数归零才解冻。"""
+    gate = EvalGate()
+    arb = eval_arbiter()
+    was_frozen = arb.frozen()
+    try:
+        with gate.rollout():
+            assert gate.status()["rollouts"] == 1
+            assert arb.frozen() is True
+            with gate.rollout():
+                assert gate.status()["rollouts"] == 2
+            assert arb.frozen() is True, "内层退出不得提前解冻"
+            assert gate.status()["rollouts"] == 1
+        assert gate.status()["rollouts"] == 0
+        assert arb.frozen() is was_frozen, "外层退出没有恢复冻结态"
+    finally:
+        while gate.status()["rollouts"] > 0:
+            gate.end_rollout()
 
 
-def test_hook_exception_does_not_block_other_hooks() -> None:
-    """一个钩子抛错不得挡住其它钩子/置位（让位是尽力而为，不能反噬收手）。"""
-    token = Preempt()
-    hits: list[str] = []
+def test_rollout_scope_restores_count_on_exception() -> None:
+    """`with gate.rollout():` 内抛错也要解冻（否则整进程 eval 永久停派）。"""
+    gate = EvalGate()
+    try:
+        with gate.rollout():
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert gate.status()["rollouts"] == 0
+    assert eval_arbiter().frozen() is False
+
+
+def test_job_exception_does_not_wedge_the_gate() -> None:
+    """整轮异常不得留下 `running=True`（否则 `loop_eval` 的 gate_idle 判据永久为假）。"""
+    gate = EvalGate()
 
     def boom() -> None:
         raise RuntimeError("boom")
 
-    token.add_hook(boom)
-    token.add_hook(lambda: hits.append("ok"))
-    token.fire()
-    assert token.is_set() is True
-    assert hits == ["ok"]
+    gate.submit(boom).join(5)
+    assert _wait(lambda: gate.status()["active"] == 0)
+    assert gate.status()["running"] is False
+    assert gate.status()["completed"] == 1
 
-
-def test_rollout_scope_context_manager_sets_and_clears_activity() -> None:
-    """`with gate.rollout():` 的进出 = 计数增减（细粒度/组合两条驱动都只经它标记）。"""
-    gate = EvalGate()
-    with gate.rollout():
-        assert gate.status()["rollouts"] == 1
-        with gate.rollout():
-            assert gate.status()["rollouts"] == 2
-        assert gate.status()["rollouts"] == 1
-    assert gate.status()["rollouts"] == 0
-
-
-def test_job_exception_does_not_wedge_the_queue() -> None:
-    """任务抛异常也要出队并叫醒队列（派发器已顶层吞异常；这是闸自己的防御性下限）。"""
-    gate = EvalGate()
-
-    def boom(_token) -> bool:
-        raise RuntimeError("boom")
-
-    t = gate.submit(boom)
-    t.join(5)
-    assert not t.is_alive()
     done = threading.Event()
-
-    def job(_token) -> bool:
-        done.set()
-        return False
-
-    gate.submit(job)
-    assert done.wait(5), "前一票异常后队列卡死"
+    gate.submit(done.set).join(5)
+    assert done.is_set(), "异常之后的新整轮没有开跑"
     assert _wait(lambda: gate.status()["completed"] == 2)
 
 

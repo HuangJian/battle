@@ -453,12 +453,18 @@ LAYERS: dict[str, int] = {
     # 860001 那份副本 ⇒ 顶层多一条 `worker.eval_track` 边 ⇒ 秩 **L1**（`worker.eval_track` L0）。
     "worker.eval_ingest": 1,
     # 2026-11-03（用户口径「rollout 绝对优先，eval 排队」）：进程级 eval 排队闸。
-    # 只碰 stdlib（threading/collections）⇒ **L0**；读者是 `trainer/eval_dispatch.py`
-    # 与 `trainer/loop_round_steps.py`（trainer 不在账本内，不计边）。
-    "worker.eval_gate": 0,
+    # 2026-11-04 起闸只剩 freeze/thaw（转调 `worker.eval_arbiter`(L1)）⇒ 秩 **L2**。
+    # 读者是 `trainer/eval_dispatch.py` 与 `trainer/loop_round_steps.py`（trainer 不在账本内）。
+    "worker.eval_gate": 2,
     "worker.eval_rows": 0,
     "worker.eval_track": 0,
     "worker.eval_yield": 0,
+    # 2026-11-04（任务级统一派发，plan/cloud-pool-cross-round）：eval 的全局仲裁器与执行池。
+    # 仲裁器只 import `worker.eval_yield`(L0) + stdlib ⇒ **L1**；执行池站在仲裁器上
+    # （+ `common.distribution`，不在账本内）⇒ **L2**。两者都是进程面模块，读者是
+    # `trainer/eval_dispatch.py`（trainer 不在账本内，不计边）。
+    "worker.eval_arbiter": 1,
+    "worker.eval_exec": 2,
     "worker.events": 0,
     "worker.forensics": 0,
     # 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式平台化的契约模块
@@ -516,9 +522,10 @@ LAYERS: dict[str, int] = {
     "worker.data.dataset": 1,
     "worker.data.weights_io": 1,
     "worker.eval_local": 1,
-    # 2026-11-01（轮中自救）：一轮 eval 的消费线程 + 回暖路径；顶层只用
-    # stdlib 与 `worker.eval_yield`(L0) ⇒ 秩 1。
-    "worker.eval_self_rescue": 1,
+    # 2026-11-01（轮中自救）：一轮 eval 的消费线程 + 回暖路径；2026-11-04 起还直接
+    # 读仲裁器（`LOCAL_NODE`/`EvalRound`）判回场 ⇒ 顶层多一条 `worker.eval_arbiter`(L1)
+    # 边，秩 **L2**。
+    "worker.eval_self_rescue": 2,
     "worker.loop_guards_sweep": 1,
     "worker.loop_guards_trip": 1,
     "worker.loop_round": 1,
