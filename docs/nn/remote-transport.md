@@ -6,6 +6,46 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §140 采样节点 workers 用满全部核：不套训练侧 `cpu_worker_slots` 的「留 2 核」（2026-11-04）
+
+**现场**：DSW 8 核，启动行 `workers=6（platform_utils cores=8）`。用户口径：
+「8 核机器为什么只起 6 个 workers？要用满所有核心！」
+
+**根因**：`remote/rollout_node.py::_slot_count` 缺省走 `cpu_worker_slots()` —— 那是**训练侧**
+口径（>4 核时 `max(cores−2, 0.8×cores)`，留 2 核给数据回传）。采样节点只跑采样/评估，
+这条预留不该套用。
+
+**落地**：`_slot_count(0)` 直接返回 `effective_cores()`（容器配额/亲和掩码取小后的**全核**）；
+`CFG.workers > 0` 仍完全照填；`platform_utils` 导入失败的内联回退同样全核。训练侧
+`cpu_worker_slots` **不动**（96→94、40→38 等既有口径保留）。
+
+**验收**：`tests/remote/test_rollout_node.py` 新用例 —— 8 核缺省 ⇒ 8；显式 3 ⇒ 3。
+
+---
+
+## §139 下载全链自动重试：候选一轮全挂退避后整轮重来（2026-11-04）
+
+**现场**：DSW 上 cloudflared 三源并行测速全是 `0.0MB/s`（瞬时出网抖动），直连下载
+`connect-timeout 8s` 失败后链路直接放弃 ⇒ 无 URL、注册 400。旧逻辑每个候选只试一次，
+一次抖动就判死刑。
+
+**落地**（零配置，无新开关）：
+
+* `remote/rollout_node.py::_download_retry`：每轮按测速顺序把候选**全试一遍**，全挂则
+  退避（2s / 5s）后整轮重来，缺省 3 轮；每跳 curl 另带
+  `--retry 2 --retry-delay 1 --retry-connrefused`（秒级抖动就地重试）。
+  cloudflared 下载改走它（成功返回所用 URL）。
+* bun 官方 install.sh：同样的 3 轮 × 全部 `GITHUB` 基址（直连 + 内置镜像）；npmmirror
+  二进制回落 2 轮。
+* `ipynb/rollout.ipynb` 源码归档：`_DL_ROUNDS=3` / `_DL_BACKOFF=(2, 5)`，一轮全挂退避后
+  重下；每跳仍带 HTTP/1.1 + 60s 低速放弃（§137），坏 zip / 越界归档照旧换下一源。
+
+**验收**：`tests/remote/test_rollout_node.py`（cloudflared 第一轮三源全挂 → 第二轮命中
+镜像即装好；bun 安装器按 3 轮重跑）、`tests/remote/test_rollout_node_notebook.py`（归档
+首轮失败 → 次轮成功）；ruff / mypy 绿。
+
+---
+
 ## §138 cloudflared 发现不许读登录 shell 的 stdout：DSW 横幅被当路径（ENAMETOOLONG）（2026-11-04）
 
 **现场**：DSW 上 clone / bun 都通了，cloudflared 却报

@@ -341,6 +341,7 @@ def test_bun_installer_gets_github_base(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(rn, "_sh", _fake_sh)
     monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: "")
+    monkeypatch.setattr(rn, "DOWNLOAD_BACKOFF", ())
     bun = rn._ensure_bun(
         Path("/tmp"),
         {"github_base": "https://gh-proxy.com/https://github.com"},
@@ -362,10 +363,11 @@ def test_bun_installer_auto_tries_mirrors_without_config(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(rn, "_sh", _fake_sh)
     monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: "")
+    monkeypatch.setattr(rn, "DOWNLOAD_BACKOFF", ())
     assert rn._ensure_bun(Path("/tmp"), {}, lambda _m: None) == ""
     installers = [c for c in calls if c["cmd"][-1].startswith("curl -fsSL https://bun.sh/install")]
     got = [c["env"]["GITHUB"] if c["env"] else None for c in installers]
-    assert got == [None, *rn.GITHUB_MIRRORS]
+    assert got == [None, *rn.GITHUB_MIRRORS] * rn.DOWNLOAD_ROUNDS
 
 
 def test_cloudflared_install_uses_fastest_probe_then_falls_back(
@@ -403,6 +405,43 @@ def test_cloudflared_install_uses_fastest_probe_then_falls_back(
         "https://gh-proxy.com/" + direct,
         "https://ghproxy.net/" + direct,
     ]
+
+
+def test_cloudflared_download_retries_after_whole_round_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """一轮三源全挂不是终点：退避后整轮重试，镜像恢复即装上（DSW 网络抖动回归）。"""
+    downloads: list[str] = []
+
+    def _fake_sh(cmd, *, cwd=None, timeout=None, env=None):
+        if cmd[:2] == ["bash", "-lc"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        url = next((c for c in cmd if c.startswith("https://")), "")
+        if "--range" in cmd:
+            return SimpleNamespace(returncode=6, stdout="", stderr="")
+        downloads.append(url)
+        if len(downloads) < 5:
+            return SimpleNamespace(returncode=6, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn, "_find_cloudflared", lambda _cfg, _log: "")
+    monkeypatch.setattr(rn.os, "chmod", lambda *a, **k: None)
+    monkeypatch.setattr(rn.subprocess, "Popen", lambda *a, **k: object())
+    monkeypatch.setattr(rn, "DOWNLOAD_BACKOFF", ())
+    out = rn._start_cloudflared({}, 8443, Path("/tmp/x.log"), lambda _m: None)
+    assert out is not None
+    assert len(downloads) == 5
+    assert "gh-proxy.com" in downloads[4]
+
+
+def test_slot_count_uses_all_effective_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """采样节点不预留核：8 核起 8 个 worker（训练侧 `cpu_worker_slots` 的留 2 核不适用）。"""
+    from common import platform_utils
+
+    monkeypatch.setattr(platform_utils, "effective_cores", lambda: 8)
+    assert rn._slot_count(0)[0] == 8
+    assert rn._slot_count(3)[0] == 3
 
 
 def test_cloudflared_discovery_ignores_login_shell_banner(

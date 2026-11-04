@@ -152,20 +152,22 @@ def _dump_tail(path: Path, log: Callable[[str], None], n: int = 40) -> None:
 
 
 def _slot_count(explicit: int) -> tuple[int, str]:
-    """并发槽位：显式值 > `cpu_worker_slots(effective_cores())` > 同规则内联回退。"""
+    """并发槽位：显式值 > `effective_cores()` **全核**（采样节点不预留，用户 2026-11-04）。
+
+    与训练侧 `cpu_worker_slots()`（留 2 核给数据回传）分家：采样节点只跑采样/评估，
+    满核才够用；8 核机器起 8 个 worker。
+    """
     cores = os.cpu_count() or 1
     try:
-        from common.platform_utils import cpu_worker_slots, effective_cores
+        from common.platform_utils import effective_cores
 
         cores = effective_cores()
-        slots = cpu_worker_slots(cores)
-        note = f"platform_utils cores={cores}"
-    except Exception as e:  # 拉不起 platform_utils 时的兜底（与旧 cell 同规则）
-        slots = cores if cores <= 4 else max(1, min(cores, max(cores - 2, int(cores * 0.8))))
+        note = f"platform_utils cores={cores} 全核"
+    except Exception as e:  # 拉不起 platform_utils 时的兜底：同样用满
         note = f"内联回退({type(e).__name__}) cores={cores}"
     if int(explicit or 0) > 0:
         return int(explicit), note + "（CFG.workers 显式）"
-    return int(slots), note
+    return int(cores), note
 
 
 #: 内置 GitHub 镜像（前缀式）：直连不通时**自动**依次尝试，不需要填任何开关。
@@ -253,6 +255,58 @@ def _rank_fastest(
     return [items[i][0] for i in order]
 
 
+#: 下载重试：每轮把候选按序全试一遍，全挂则退避后重来（DSW 出网抖动是常态）。
+DOWNLOAD_ROUNDS = 3
+DOWNLOAD_BACKOFF: tuple[float, ...] = (2.0, 5.0)
+
+
+def _retry_delay(rnd: int) -> float:
+    return DOWNLOAD_BACKOFF[min(rnd, len(DOWNLOAD_BACKOFF) - 1)] if DOWNLOAD_BACKOFF else 0.0
+
+
+def _download_retry(
+    urls: list[str],
+    dest: str | Path,
+    log: Callable[[str], None],
+    *,
+    label: str = "下载",
+    rounds: int | None = None,
+    max_time: int = 180,
+) -> str:
+    """按候选 curl 下载到 `dest`：失败顺延，一轮全挂退避重试；成功返回所用 URL。"""
+    total = DOWNLOAD_ROUNDS if rounds is None else max(1, rounds)
+    for rnd in range(total):
+        for url in urls:
+            r = _sh(
+                [
+                    "curl",
+                    "-fsSL",
+                    "--retry",
+                    "2",
+                    "--retry-delay",
+                    "1",
+                    "--retry-connrefused",
+                    "--connect-timeout",
+                    "8",
+                    "--max-time",
+                    str(max_time),
+                    url,
+                    "-o",
+                    str(dest),
+                ],
+                timeout=max_time + 20,
+            )
+            if r.returncode == 0:
+                return url
+            log(f"{label} 下载失败（第 {rnd + 1}/{total} 轮）: {url}")
+        if rnd + 1 < total:
+            delay = _retry_delay(rnd)
+            log(f"{label} 本轮全部源失败 —— {delay:g}s 后重试（第 {rnd + 2}/{total} 轮）")
+            if delay > 0:
+                time.sleep(delay)
+    return ""
+
+
 def _bun_install_bases(cfg: dict) -> list[str]:
     """官方 install.sh 可用的 `GITHUB` 基址（"" = 直连），**未测速排序**。
 
@@ -313,8 +367,8 @@ def _install_bun_mirror(cfg: dict, log: Callable[[str], None]) -> str:
         log(f"bun 镜像下载: {url}")
         with tempfile.TemporaryDirectory() as td:
             zp = Path(td) / "bun.zip"
-            with urllib.request.urlopen(url, timeout=600) as r, zp.open("wb") as fh:
-                shutil.copyfileobj(r, fh)
+            if not _download_retry([url], zp, log, label="bun 镜像", rounds=2, max_time=600):
+                raise RuntimeError("镜像二进制下载失败")
             with zipfile.ZipFile(zp) as z:
                 z.extractall(td)
             src = Path(td) / target / "bun"
@@ -359,17 +413,29 @@ def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
                 "bun",
                 log,
             )
-        for base in bases:
-            env = None
-            if base:
-                log(f"bun 安装经镜像: {base}")
-                env = os.environ.copy()
-                env["GITHUB"] = base
-            with _public_net():
-                _sh(["bash", "-lc", "curl -fsSL https://bun.sh/install | bash"], timeout=600, env=env)
-            bun = _find()
+        for rnd in range(DOWNLOAD_ROUNDS):
+            for base in bases:
+                env = None
+                if base:
+                    log(f"bun 安装经镜像: {base}")
+                    env = os.environ.copy()
+                    env["GITHUB"] = base
+                with _public_net():
+                    _sh(
+                        ["bash", "-lc", "curl -fsSL https://bun.sh/install | bash"],
+                        timeout=600,
+                        env=env,
+                    )
+                bun = _find()
+                if bun:
+                    break
             if bun:
                 break
+            if rnd + 1 < DOWNLOAD_ROUNDS:
+                delay = _retry_delay(rnd)
+                log(f"bun 官方安装全部源失败 —— {delay:g}s 后重试（第 {rnd + 2}/{DOWNLOAD_ROUNDS} 轮）")
+                if delay > 0:
+                    time.sleep(delay)
     if not bun:
         log("bun 官方安装失败 —— 回落 npmmirror 二进制镜像")
         with _public_net():
@@ -417,23 +483,20 @@ def _start_cloudflared(
     if not cf:
         cf = "/usr/local/bin/cloudflared"
         log("安装 cloudflared…（公网下载，代理已还原）")
-        r = None
         with _public_net():
             direct = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-            # 自动换路（不填开关）：候选并行测速后按实测快慢依次下载；失败顺延下一跳
-            for url in _rank_fastest(
-                [(u, u) for u in _github_candidates(cfg, direct)], "cloudflared", log
-            ):
-                r = _sh(
-                    ["curl", "-fsSL", "--connect-timeout", "8", "--max-time", "180", url, "-o", cf],
-                    timeout=200,
-                )
-                if r.returncode == 0:
-                    if url != direct:
-                        log(f"cloudflared 已从镜像下载: {url}")
-                    break
-                log(f"cloudflared 下载失败（{url}）")
-        if r is not None and r.returncode == 0:
+            # 自动换路（不填开关）：候选并行测速后按实测快慢依次下载；全挂退避重试
+            got = _download_retry(
+                _rank_fastest(
+                    [(u, u) for u in _github_candidates(cfg, direct)], "cloudflared", log
+                ),
+                cf,
+                log,
+                label="cloudflared",
+            )
+        if got:
+            if got != direct:
+                log(f"cloudflared 已从镜像下载: {got}")
             os.chmod(cf, 0o755)
         else:
             log("cloudflared 安装失败（直连与镜像都不通）—— 可预置二进制后用 CFG.cloudflared_path 指路")

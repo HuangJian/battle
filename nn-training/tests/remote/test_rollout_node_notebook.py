@@ -362,6 +362,8 @@ def test_cell_archive_fallback_extracts_stripped_tree(tmp_path: Path) -> None:
             "_log": lambda _m: None,
             "_sh": _fake_sh,
             "_archive_candidates": lambda _ranked: ["https://mirror/archive.zip"],
+            "_DL_ROUNDS": 3,
+            "_DL_BACKOFF": (),
         },
     )
     assert ns["_fetch_archive"]([]) is True
@@ -397,10 +399,48 @@ def test_cell_archive_bad_zip_falls_back_to_next_source(tmp_path: Path) -> None:
             "_log": lambda _m: None,
             "_sh": _fake_sh,
             "_archive_candidates": lambda _ranked: ["https://m/bad.zip", "https://m/good.zip"],
+            "_DL_ROUNDS": 3,
+            "_DL_BACKOFF": (),
         },
     )
     assert ns["_fetch_archive"]([]) is True
     assert fetched == ["https://m/bad.zip", "https://m/good.zip"]
+    assert (code_dir / "tools" / "agent" / "a.ts").is_file()
+
+
+def test_cell_archive_retries_after_whole_round_fails(tmp_path: Path) -> None:
+    """候选一轮全挂不是终点：退避后整轮重试（DSW 出网抖动回归）。"""
+    code_dir = tmp_path / "code"
+    attempts: list[str] = []
+
+    def _fake_sh(cmd, **_kw):
+        url = cmd[cmd.index("-o") - 1]
+        attempts.append(url)
+        dest = Path(cmd[cmd.index("-o") + 1])
+        if len(attempts) == 1:
+            return SimpleNamespace(returncode=6, stdout="", stderr="")
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("r/tools/agent/a.ts", "x")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ns = _cell_funcs(
+        {"_safe_unzip", "_fetch_archive"},
+        {
+            "zipfile": zipfile,
+            "tempfile": tempfile,
+            "os": os,
+            "shutil": shutil,
+            "Path": Path,
+            "code_dir": code_dir,
+            "_log": lambda _m: None,
+            "_sh": _fake_sh,
+            "_archive_candidates": lambda _ranked: ["https://m/archive.zip"],
+            "_DL_ROUNDS": 2,
+            "_DL_BACKOFF": (),
+        },
+    )
+    assert ns["_fetch_archive"]([]) is True
+    assert attempts == ["https://m/archive.zip", "https://m/archive.zip"]
     assert (code_dir / "tools" / "agent" / "a.ts").is_file()
 
 
