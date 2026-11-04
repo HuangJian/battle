@@ -678,6 +678,10 @@ class BcRuntime:
     run_id: str = ""
     #: 远端配置快照（bc_dispatch 派发语料时要传给节点）。
     cfg: dict | None = None
+    #: 每轮是否重读 rl-config 刷新 `hub_url` / `cfg`（见 `_refresh_transport_cfg`）。
+    #: 只有**从配置读来的** hub 地址才置 True；`--remote-hub-url` 显式给的值、以及
+    #: 测试直接构造 runtime 注入的假地址，一律 False = 钉住不动。
+    hub_url_refresh: bool = False
 
 
 def resolve_bc_runtime(
@@ -743,6 +747,8 @@ def resolve_bc_runtime(
         wait_sec=float(getattr(args, "wait_sec", DEFAULT_WAIT_SEC) or 0.0),
         run_id=run_id or RUN_ID,
         cfg=cfg,
+        # 只有「hub 地址来自 rl-config」这条链才每轮重读：显式参数与测试注入都不刷新。
+        hub_url_refresh=not str(args.remote_hub_url or "").strip(),
     )
 
 
@@ -1020,6 +1026,32 @@ class BcLoop:
         """RL 的惰性本机栈钩子（BC 无本机 PPO 栈）——同 `release_torch`，显式空操作。"""
         return None
 
+    def _refresh_transport_cfg(self) -> None:
+        """每轮重读 rl-config 的传输面（hub 地址 + 节点表）。
+
+        为什么：cloudflared **quick tunnel 每次重连换一个域名**，hub 的自动注册会把新地址
+        写回 `rl-config.json`。`BcRuntime` 是启动时快照的 dataclass —— 长跑几小时里
+        `publish` / 轮询 / 派发全打在死地址上，日志只剩「连不上」，而同一时刻手工 ping
+        是通的（2026-11-04 同类现场：`eval_backfill` 用启动快照，gcs 换域名后连 18 轮全超时）。
+
+        读失败**保留旧值**：配置读不到不该把一条正在跑的腿打断。
+        `--remote-hub-url` 显式给的值不覆盖（人拍的不该在第二轮被配置偷换）。
+        """
+        rt = self.runtime
+        if rt.transport != "hub" or not rt.hub_url_refresh:
+            return
+        try:
+            from common.distribution import load_dist_config
+
+            cfg = load_dist_config() or {}
+        except Exception:
+            return
+        rt.cfg = cfg
+        url = str((cfg.get("rl") or {}).get("remote_hub_url") or "").strip()
+        if url and url != rt.hub_url:
+            self.log(f"[run_bc] hub 地址已更新（隧道重连）：{rt.hub_url} -> {url}")
+            rt.hub_url = url
+
     # ---- 读面 ----------------------------------------------------------
 
     def ledger_next_it(self, fallback: int = 1) -> int:
@@ -1037,6 +1069,8 @@ class BcLoop:
         """跑一轮的一段：最多做一件事就返回（`ROUND_WAIT` = 还没完，`ROUND_NEXT` = 真的完了）。"""
         rt = self.runtime
         self._setup()
+        # 传输面每轮热读：隧道重连换域名后，长跑不能一直打旧地址（见 `_refresh_transport_cfg`）。
+        self._refresh_transport_cfg()
         if it in bc_progress(rt.jsonl_path, rt.iters).completed:
             # 账本已结算（重放/重入/别的进程刚跑完）⇒ 不重做，也不重复写账本。
             return RoundOutcome(ROUND_NEXT, it)

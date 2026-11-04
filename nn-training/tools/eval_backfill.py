@@ -178,6 +178,8 @@ class CoursePlanner:
             # 只在内存里覆盖，绝不回写 rl-config.json（同 eval_course_once --dist-local）。
             cfg["policy"] = {**(cfg.get("policy") or {}), "evalLocalSlots": int(local_slots)}
         self.args = ns
+        self.local_slots_override = local_slots
+        self.window_override = window
         self.cfg = cfg
         self.local_slots = int((cfg.get("policy") or {}).get("evalLocalSlots", 4))
         self.traj = self._resolve_traj(ns)
@@ -189,6 +191,28 @@ class CoursePlanner:
     def _resolve_traj(ns) -> Path:
         traj = Path(getattr(ns, "traj", "") or "") or (REPO / "tmp" / str(ns.course_name))
         return traj if traj.is_absolute() else REPO / traj
+
+    def _fresh_cfg(self) -> dict:
+        """**每次派发**重读 rl-config（节点表 + policy），不在进程启动时快照。
+
+        为什么：云节点的隧道域名会变 —— cloudflared quick tunnel 每次重连换一个
+        `*.trycloudflare.com`，hub 的自动注册会把新 URL 写回 `rl-config.json`。进程
+        启动时快照一份 ⇒ 之后每轮都在 ping 一个死域名，日志只剩「ping 失败/超时」。
+        2026-11-04 现场：gcs 10:03 重启 ipynb 换域名，补账进程连打 18 轮全超时，
+        而同一时刻手工 ping 是通的（0.7–1.9s）。
+        """
+        from common import distribution
+
+        cfg = dict(distribution.load_dist_config() or {})
+        rl_cfg = cfg.get("rl") or {}
+        if self.local_slots_override is not None:
+            cfg["policy"] = {
+                **(cfg.get("policy") or {}),
+                "evalLocalSlots": int(self.local_slots_override),
+            }
+        if self.window_override is None:
+            self.args.eval_window_sec = float(rl_cfg.get("eval_window_sec") or 1500)
+        return cfg
 
     @staticmethod
     def _expected_games(ns) -> int:
@@ -232,13 +256,16 @@ class CoursePlanner:
         gate = threading.Event()
         gate.set()  # 补账不在训练的 PPO 窗口里，没有要让位的东西（同 eval_a_once）
         t0 = time.time()
+        # 热读节点表：隧道域名会在会话重启后变（见 `_fresh_cfg` 的注释），
+        # 拿启动时的快照会让整轮永远 ping 一个死域名。
+        cfg = self._fresh_cfg()
         try:
             dispatch_eval_round(
                 bun,
                 plan.ckpt,
                 it_dir,
                 self.args,
-                self.cfg,
+                cfg,
                 f"backfill.{plan.course}.{plan.it}",
                 plan.it,
                 rollout_winrate=None,
