@@ -137,6 +137,16 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=_d("ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
         help="F4 ENT 护栏：winRate >= 此值视为已收敛，不因低熵停车",
     )
+    # 关闭**全部过程熔断**（KL / 熵 / NaN）。只给「换环境迁移」这类特例：起点权重来自
+    # 另一个环境（c20 → 35 关），首轮 KL 天然 0.4–0.8（正常带 0.003–0.013），按正常阈值
+    # 必在 it1–4 熔断，而价格偏差（wDmg 按旧环境承伤密度标的）要跑起来才看得出。
+    # ⚠ 打开 = 崩坏时不停车，必须人工盯 kl / mean_ret / value。
+    ap.add_argument(
+        "--breakers-off",
+        type=lambda s: str(s).strip().lower() in ("1", "true", "yes", "on"),
+        default=_d("breakers_off", False),
+        help="关闭全部过程熔断（KL/熵/NaN）。只给换环境迁移用，默认 False = 护栏在",
+    )
     ap.add_argument(
         "--out-log",
         default=_d("out_log", ""),

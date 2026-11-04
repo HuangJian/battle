@@ -108,3 +108,21 @@ def test_breaker_entropy_consec_configurable() -> None:
         kl_s, ent_s, kl=0.05, entropy=0.20, win_rate=0.2, ent_peak=0.9, ent_consec=2
     )
     assert trip is not None
+
+
+def test_breakers_off_short_circuits() -> None:
+    """`enabled=False` ⇒ 连击归零、永不 tripped（课程键 `breakers_off` 的唯一出口）。
+
+    只给「换环境迁移」这类特例：起点权重来自另一个环境，首轮 KL 天然 0.4–0.8
+    （正常带 0.003–0.013），按正常阈值必在 it1–4 熔断，而价格偏差要跑起来才看得出。
+    """
+    kl_s, ent_s, trip = 0, 0, None
+    for _ in range(5):
+        kl_s, ent_s, trip = breaker_update(
+            kl_s, ent_s, kl=0.9, entropy=0.0, win_rate=0.0, enabled=False
+        )
+    assert (kl_s, ent_s, trip) == (0, 0, None), "关闭期间既不该累计连击也不该熔断"
+
+    # 关掉再打开：连击从 0 重新起算，不继承关闭期间的高 KL（否则一开就秒熔断）
+    kl_s, _, trip = breaker_update(0, 0, kl=0.9, entropy=1.2, win_rate=0.4, enabled=True)
+    assert trip is None and kl_s == 1

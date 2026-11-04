@@ -62,6 +62,8 @@ class LedgerSpec:
     ent_break: float = ENT_BREAK
     ent_consec: int = ENT_BREAK_CONSEC
     ent_max_winrate: float = ENT_BREAK_MAX_WINRATE
+    #: 课程键 `breakers_off`：true ⇒ 账本重算也跳过熔断判定（与生产路径同源）。
+    breakers_off: bool = False
 
     @classmethod
     def from_args(cls, args: Any) -> LedgerSpec:
@@ -77,6 +79,7 @@ class LedgerSpec:
             ent_break=float(getattr(args, "ent_break", ENT_BREAK)),
             ent_consec=int(getattr(args, "ent_break_consec", ENT_BREAK_CONSEC)),
             ent_max_winrate=float(getattr(args, "ent_break_max_winrate", ENT_BREAK_MAX_WINRATE)),
+            breakers_off=bool(getattr(args, "breakers_off", False)),
         )
 
 
@@ -285,6 +288,7 @@ class LedgerView:
             ent_consec=self.spec.ent_consec,
             ent_max_winrate=self.spec.ent_max_winrate,
             ent_peak=self.ent_peak,
+            enabled=not self.spec.breakers_off,
         )
         self.ent_peak = entropy if self.ent_peak is None else max(self.ent_peak, entropy)
 

@@ -33,6 +33,9 @@ HOT_FIELDS: tuple[str, ...] = (
     "ent_break",
     "ent_break_consec",
     "ent_break_max_winrate",
+    # 关掉/打开熔断必须**热生效**：判定在每轮末读 args，不热会更会让人以为「开关没生效」
+    # 而反复重启（ent_break 的前科）。
+    "breakers_off",
 )
 
 #: 结构绑定、热写回 args 也不生效的字段（启动期冻结：池拓扑/路径/账本/ref 快照/

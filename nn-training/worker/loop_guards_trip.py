@@ -66,12 +66,17 @@ class TrainingGuardsTrip:
         args = self.args
         agg = self._agg
         assert agg is not None  # 调用方已门控（agg None 的轮不进此方法）
+        # 课程键 `breakers_off: true` ⇒ 关闭全部**过程**熔断（KL / 熵 / NaN）。
+        # 只给「换环境迁移」这类首轮 KL 天然爆表的场景用；默认 False。
+        # ⚠ 关掉之后策略在崩坏时不会停车，只能人工盯盘（`--serve` 下进程常在）。
+        breakers_off = bool(getattr(args, "breakers_off", False))
         # NaN 检测（plan §8 M0）：NaN 与任何阈值比较恒 False → KL/ENT 熔断与告警
         # **永不触发**（数值崩坏时训练会带着坏权重一路跑到 iters 上限）。必须在
         # 进 breaker_update 之前显式拦，且不走连击——出现即熔断。
-        nan_keys = [k for k in ("policy", "value", "entropy", "kl") if _is_nonfinite(agg.get(k))]
-        if nan_keys:
-            self._tripped = f"non-finite agg[{','.join(nan_keys)}]"
+        if not breakers_off:
+            nan_keys = [k for k in ("policy", "value", "entropy", "kl") if _is_nonfinite(agg.get(k))]
+            if nan_keys:
+                self._tripped = f"non-finite agg[{','.join(nan_keys)}]"
         # intent/goal 用放宽的 KL 熔断阈值（原 intent_rl 专属 --kl-break
         # 0.6 / --kl-break-consec 3，避免误熔断 Bug D；per-tick 用默认 0.15/3）。
         _kl_break = args.kl_break if args.mode in ("intent", "goal") else KL_BREAK
@@ -90,6 +95,7 @@ class TrainingGuardsTrip:
             ent_consec=getattr(args, "ent_break_consec", ENT_BREAK_CONSEC),
             ent_max_winrate=getattr(args, "ent_break_max_winrate", ENT_BREAK_MAX_WINRATE),
             ent_peak=self._ent_peak,
+            enabled=not breakers_off,
         )
         self._kl_streak = kl_streak
         self._ent_streak = ent_streak

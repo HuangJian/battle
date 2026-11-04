@@ -1010,6 +1010,14 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     ent_break_consec: int = 8
     ent_break_max_winrate: float = 0.5
 
+    #: **关闭全部过程熔断**（KL / 熵 / NaN），默认 False = 正常护栏。
+    #: 只给「换环境迁移」这类特例：起点权重来自另一个环境（如 c20 → 35 关），首轮
+    #: KL 天然爆表（实测 0.4–0.8，正常带 0.003–0.013），按正常阈值必在 it1–4 熔断，
+    #: 而 `wDmg`/`wSpeed` 这类「按旧环境承伤密度标的」的价格又必须在跑起来之后才看得出偏差。
+    #: ⚠ 打开它 = 策略崩坏时**不会停车**（`--serve` 下进程常在，会一路跑到 iters 上限），
+    #: 必须人工盯 `kl` / `mean_ret` / `value`；判完立刻改回 False。
+    breakers_off: bool = False
+
     # ---- 课程结束门（可选；缺席 = 关闭，老课程逐字节不变）----
     gates: GatesSpec | None = None
 
@@ -1208,6 +1216,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             "ent_break": "ent_break",
             "ent_break_consec": "ent_break_consec",
             "ent_break_max_winrate": "ent_break_max_winrate",
+            # 关闭全部过程熔断（KL/熵/NaN）。漏映射 = 静默失效（ent_break 前科）——
+            # 课程里写了 true 却照常熔断，会被误读成「开关没用」。
+            "breakers_off": "breakers_off",
         }
         out: dict[str, Any] = {}
         for src_key, dst_key in mapping.items():

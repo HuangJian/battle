@@ -61,12 +61,17 @@ def breaker_update(
     ent_consec: int = ENT_BREAK_CONSEC,
     ent_max_winrate: float = ENT_BREAK_MAX_WINRATE,
     ent_peak: float | None = None,
+    enabled: bool = True,
 ) -> tuple[int, int, str | None]:
     """推进连击计数并判定是否熔断。
 
     返回 (kl_streak, ent_streak, tripped)：tripped 为 None 表示继续训练，
     否则为可读的熔断原因（调用方写 circuit_break 事件并停车）。
     agg 缺失（流式 checkpoint-complete 轮无任何梯度步）由调用方短路，不计连击。
+
+    `enabled=False` ⇒ **整个判定短路**：连击归零、永不 tripped。只给课程键
+    `breakers_off: true` 用（换环境迁移这类「首轮 KL 天然爆表」的场景），
+    默认 True = 正常护栏。关闭期间训练不会因 KL/熵停车，必须人工盯。
 
     kl_break / kl_consec 为可选覆盖（默认 = per-tick 常量 KL_BREAK / KL_BREAK_CONSEC）。
     意图 RL 每代是一次 12–15 局大更新，每代 KL 天然 ≈0.32–0.49（旧 2× 口径；P0-3 后
@@ -77,6 +82,8 @@ def breaker_update(
     的 2026-09-06 修正）。ent_peak = 本轮之前见过的最大熵，None = 无历史基线 → 退回
     绝对电平判定（旧行为）。调用方负责在每轮判定后把 peak 更新为 max(peak, entropy)。
     """
+    if not enabled:
+        return 0, 0, None
     kl_streak = kl_streak + 1 if kl >= kl_break else 0
     ent_streak = (
         ent_streak + 1
