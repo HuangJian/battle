@@ -394,6 +394,9 @@ def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dic
         "val_split": float(course.train.val_split),
         "mirror_p": float(course.train.mirror_p),
         "value_coef": float(course.train.value_coef),
+        # v6 三头（2026-11-04）：worker 侧 `train/bc.py` 按它切 10 元组 / 三头 CE
+        "action_v6": bool(course.train.action_v6),
+        "policy_extra": bool(course.train.policy_extra),
         "ckpt_every": int(course.train.ckpt_every),
         # 训练种子（2026-09-14）：课程 `train.seed` 显式下发到云端 job ——
         # ① 同课程重跑可复现；② R1（v2/v3 obs 对照）两臂能同 seed ⇒ 同 val 划分

@@ -122,6 +122,16 @@ class BcTrainBlock(BaseModel):
     #: 基线 0.927。`auto` = 按训练集 neg/pos 自动定（≈12.6）；显式数 = 直接用；
     #: 0 = 关闭（旧行为，保持历史 checkpoint 语义）。
     fire_pos_weight: float | Literal["auto"] = "auto"
+    #: v6 三头（move4/fire3/hold2）。语料来自 `export-rl-rollout.ts`
+    #: （`a_move/a_fire/a_hold + mask.npy(9)`，不是 legacy 的 `actions/masks(7)`）。
+    #: 2026-11-04：数据链已接通（`npyio._load_dataset_v6` + `dataset.NNDataset` 10 元组 +
+    #: `train/bc.py` 三头 CE）。**开它必须配 `data_dir` 指向 v6 语料**，否则会把 legacy
+    #: 语料按 v6 读（缺 `a_move.npy` 会响亮 FileNotFoundError，不会静默错配）。
+    action_v6: bool = False
+    #: 空间头（`policy_features` 吃 `hidden + POLICY_EXTRA_DIM`）。**z5/z7 的权重全是 True**
+    #: （`arch.policyExtra=true`）⇒ BC 产物要与它们同构就必须开；关着训出来的权重
+    #: `policy_features` 宽度不同，后续 PPO 的 `load_state_into` 会静默跳过那几层。
+    policy_extra: bool = False
     #: warm-start 起点（权重 JSON 路径；绝对路径或仓库根相对；"" = 从随机起）。
     #: 发布时随 payload 以 init_weights.json 落 job 目录，worker 以它作 `--resume`
     #: 起点（优化器/LR 全新；value 头由宽容 loader 忽略）。进行中的续跑归续跑权重所有，
@@ -155,6 +165,12 @@ class BcCourseConfig(BaseModel, CustomStagesMixin):
     #: 关卡引用（`nn-training/levels/<name>.jsonc` 或路径）；设置后 stages/difficulty/player
     #: 只能来自关卡；四类环境覆盖 + `max_ticks` 可在课程侧覆盖（§49，同 RL 课程）
     level: str = ""
+
+    #: **控制台**读的起点（`dashboard/src/stack/courses.ts::resolveCourseBc` 只认这个顶层键，
+    #: 缺它就回退 `tmp/ep60/battle2-p1bc/run/weights.json` 并报「初始权重缺失」）。
+    #: Python 侧不消费它（真正的起点是 `train.init_from`），但必须允许存在——
+    #: `extra="forbid"` 否则会把课程判成非法。**两处必须指同一文件**。
+    bc: str = ""
 
     # ---- 环境（无 level 引用时内联；语义与 RL 课程同表） ----
     stages: str | list = "0-3"

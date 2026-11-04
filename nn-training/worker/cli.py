@@ -141,6 +141,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # 另一个环境（c20 → 35 关），首轮 KL 天然 0.4–0.8（正常带 0.003–0.013），按正常阈值
     # 必在 it1–4 熔断，而价格偏差（wDmg 按旧环境承伤密度标的）要跑起来才看得出。
     # ⚠ 打开 = 崩坏时不停车，必须人工盯 kl / mean_ret / value。
+    # v6 三头（move4/fire3/hold2）。BC 语料来自 `export-rl-rollout.ts`（a_move/a_fire/a_hold
+    # + mask.npy 9 位）；legacy 语料不传（默认 False ⇒ 5/2 两头，逐字节不变）。
+    ap.add_argument(
+        "--action-v6",
+        action="store_true",
+        default=_d("action_v6", False),
+        help="v6 三头动作（move4/fire3/hold2）；BC/PPO 数据链已接通",
+    )
     ap.add_argument(
         "--breakers-off",
         type=lambda s: str(s).strip().lower() in ("1", "true", "yes", "on"),

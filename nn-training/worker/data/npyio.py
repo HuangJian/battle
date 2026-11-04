@@ -117,7 +117,60 @@ def scan_shards(data_dir: str) -> list[str]:
     return sorted(shards)
 
 
-def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
+#: v6 三头语料的文件名表（`export-rl-rollout.ts` 的产物，★与 legacy 的 `SHARD_FILES` **并存**）。
+#: 差别：动作拆成三份（`a_move/a_fire/a_hold`，不是单份 2 列 `actions`）·
+#: 掩码 9 位叫 `mask.npy`（单数，不是 `masks.npy` 的 7 位）· **没有 `conditions`**（恒 0 补）。
+#: 为什么另立一张表而不是改 `SHARD_FILES`：PPO 侧（`np_core`）与 legacy BC 都在读那份，
+#: 动它 = 两套语料集体失配。这里只做「按需分派」。
+V6_FILES = {
+    "obs": "obs.npy",  # uint8 (N, 17, 26, 26)
+    "scalars": "scalars.npy",  # float32 (N, 46)
+    "extra": "extra.npy",  # float32 (N, POLICY_EXTRA_DIM)
+    "a_move": "a_move.npy",  # uint8 (N,) 0..3
+    "a_fire": "a_fire.npy",  # uint8 (N,) 0..2
+    "a_hold": "a_hold.npy",  # uint8 (N,) 0..1
+    "mask": "mask.npy",  # uint8 (N, 9) [move4, fire3, hold2], 1=valid
+}
+
+
+def _load_dataset_v6(data_dir: str) -> dict[str, np.ndarray]:
+    """v6 三头语料装载（`export-rl-rollout.ts` 的 shard）。
+
+    产出的 dict 与 legacy 版**同键**（下游 `NNDataset` / `make_loaders` 不用分叉），
+    额外多一个 `hold` 键（`(N,) int64`）——只有 v6 分支的 `__getitem__` 会读它。
+
+    ⚠ 不走 `verify_shard_schema`：那条按 legacy 的文件名/宽度校验（7 位掩码、`actions` 2 列），
+    v6 语料必然全红。这里用**形状自检**替代（宽度 9 / 动作三类齐全 / 四者等长）。
+    """
+    shards = scan_shards(data_dir)
+    if not shards:
+        raise FileNotFoundError(f"no v6 shards (obs.npy) found under {data_dir}")
+    parts: dict[str, list[np.ndarray]] = {k: [] for k in V6_FILES}
+    for s in shards:
+        for key, fname in V6_FILES.items():
+            p = os.path.join(s, fname)
+            if not os.path.exists(p):
+                raise FileNotFoundError(f"[npyio] v6 shard 缺 {fname}：{s}")
+            parts[key].append(np.load(p))
+    out = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+    n = int(out["obs"].shape[0])
+    for k in ("scalars", "extra", "a_move", "a_fire", "a_hold", "mask"):
+        if int(out[k].shape[0]) != n:
+            raise ValueError(f"[npyio] v6 语料长度不一致：obs={n} {k}={out[k].shape[0]}")
+    if out["mask"].ndim != 2 or int(out["mask"].shape[1]) != 9:
+        raise ValueError(f"[npyio] v6 mask 必须是 (N,9)，收到 {out['mask'].shape}")
+    out["hold"] = out.pop("a_hold").astype(np.int64)
+    # 兼容层：legacy 键名保留（`actions` 2 列 = move+fire，`masks` = 9 位原样）
+    out["actions"] = np.stack([out["a_move"], out["a_fire"]], axis=1).astype(np.int64)
+    out["masks"] = out["mask"].astype(np.float32)
+    out["conditions"] = np.zeros(n, dtype=np.int64)
+    out["shard_ids"] = np.repeat(
+        np.arange(len(shards), dtype=np.int64), [v.shape[0] for v in parts["obs"]]
+    )
+    return out
+
+
+def load_dataset(data_dir: str, action_v6: bool = False) -> dict[str, np.ndarray]:
     """Concatenate every shard under `data_dir` into one big sample dict.
 
     P2-6d（2026-09-02）：额外产出 **"shard_ids"**（(N,) int64，每样本所属 shard
@@ -129,6 +182,8 @@ def load_dataset(data_dir: str) -> dict[str, np.ndarray]:
     一张「半张脸」的观测（major bump 全旧权重失效 ⇒ 同理旧语料全废），必须先
     炸在加载处而不是等训练曲线发疯。
     """
+    if action_v6:
+        return _load_dataset_v6(data_dir)
     shards = scan_shards(data_dir)
     if not shards:
         raise FileNotFoundError(f"no shards (obs.npy) found under {data_dir}")

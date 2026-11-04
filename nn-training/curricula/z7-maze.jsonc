@@ -245,3 +245,20 @@
   "eval_games_per_stage": 20,
   "eval_every": 5,
 }
+
+// ── 结课报告（2026-11-04 22:35 回写；跑到 it184，**坍缩**）──────────────
+// **判决：坍缩到底。win .4354 → .0000（it20 起），entropy 1.228 → 0.111。**
+//
+// ① 曲线（700 局/点，只到 it50 —— eval 被 rollout 抢占后停）：it0 .4354 → it45 **.0000**。
+//    `kills` 13.97 → **0.82**、`pickup` 4.16 → **0.14**、`cells` 49 → **5**（「不动」）。
+// ② 机制（用 it0 的 712 局复算 Φ，**不是 it50** —— 用 it50 是循环论证）：
+//      Φ(过程) −61.8 + terminal −19.8 = **return −81.6**，其中 **`-wBlock` −81.2**
+//      来自 `idleTicks/ticks = 0.738`（起点策略 74% 的步无位移；c20 空场只有 ≈0.2）。
+//    ⇒ 这是「换环境」的第三个量纲问题（前两个：`wDmg` 的承伤密度、`wSpeed` 的时轴拐点）。
+// ③ `breakers_off: true` 全程生效（**0 次熔断**）⇒ 开关本身没问题，是策略崩了。
+//    it1 的 KL **0.442**（正常带 0.003）⇒ 第一次 update 就把策略推死了。
+// ④ 给下一腿：见 `z7-maze-v2`（降负项）与 `z7-maze-kill`（加正项）—— **两条都塌**。
+//    ⇒ 「从 y28 权重直接续训」这条路关闭，转 BC（`bc-v6-train.bc.jsonc`）。
+//
+// 数据：`dashboard/data/course-metrics/z7-maze/{eval_log,training_log}.jsonl` ·
+//       `tmp/z6z7-final.txt` · `reports/z6-z7-verdict-20261104.md`

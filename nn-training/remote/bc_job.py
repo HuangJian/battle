@@ -448,6 +448,9 @@ def _run_bc_job(
             # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
             # （关闭 = 历史语义，重放旧 job 行为不变）。
             fire_pos_weight=manifest.get("fire_pos_weight", 0.0),
+            # v6 三头（2026-11-04）：旧 job 无此键 ⇒ False = legacy 5/2 两头（逐字节不变）
+            action_v6=bool(manifest.get("action_v6", False)),
+            policy_extra=bool(manifest.get("policy_extra", False)),
             on_epoch=_on_epoch,
         )
         if resume_epoch:

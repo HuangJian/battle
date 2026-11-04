@@ -68,14 +68,24 @@ class NNDataset(Dataset):
         augment: bool = False,
         mirror_p: float = 0.5,
         rng: np.random.Generator | None = None,
+        action_v6: bool = False,
     ):
+        #: v6 三头（move4/fire3/hold2）。语料由 `npyio._load_dataset_v6` 产出，多一个
+        #: `hold` 键；legacy 语料没有它 ⇒ 只有 v6 分支读。
+        self.action_v6 = bool(action_v6)
         self.obs = data["obs"].astype(np.uint8)
         self.scalars = data["scalars"].astype(np.float32)
         # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走；
         # 旧 shard（无该键）在 verify_shard_schema/调用方处已拦——这里缺失即 KeyError（响亮）。
         self.extra = data["extra"].astype(np.float32)  # (N,9)
         self.actions = data["actions"].astype(np.int64)  # (N,2) move,fire
-        self.masks = data["masks"].astype(np.float32)  # (N,7)
+        self.masks = data["masks"].astype(np.float32)  # legacy (N,7) / v6 (N,9)
+        #: v6 第三头标签；legacy 语料无该键 ⇒ 全 0 占位（只被 v6 分支读）
+        self.hold = (
+            data["hold"].astype(np.int64)
+            if self.action_v6 and "hold" in data
+            else np.zeros(self.actions.shape[0], dtype=np.int64)
+        )
         self.conditions = data["conditions"].astype(np.int64)
         # v2: returns.npy（M3 value 头 MC 预置）可选——不存在时 n/a
         self.returns = (
@@ -84,7 +94,10 @@ class NNDataset(Dataset):
             else np.full(self.actions.shape[0], np.nan, dtype=np.float32)
         )
         self.augment = augment
-        self.mirror_p = mirror_p
+        # v6 三头暂不做 mirrorX：`mirror_x` 是按 **legacy 5 类 move**（STOP=0）写的左右翻转表，
+        # 对 v6 的 4 类（up/down/left/right，无 STOP）会把 left↔right 映射错位
+        # （实测报 `Target 4 is out of bounds`）。要恢复增强，需另写一张 4 类表。
+        self.mirror_p = 0.0 if action_v6 else mirror_p
         self.rng = rng or np.random.default_rng(0)
         assert self.obs.shape[0] == self.scalars.shape[0] == self.actions.shape[0]
 
@@ -103,6 +116,21 @@ class NNDataset(Dataset):
             # extra 与 obs/scalars 同一抽签、同一次镜像（自洽不可分家）。
             obs, sc, mv, ex = mirror_x(obs, sc, mv, ex)
         # Torch expects (C,H,W); obs is (C,H,W) already.
+        if self.action_v6:
+            # v6 三头：move 4 / fire 3 / hold 2（掩码 9 位，见 `obs-encoder.computeMasks`）。
+            # 元组顺序 = (obs, scalars, extra, move, fire, hold, mask_move, mask_fire, mask_hold, ret)
+            return (
+                obs,
+                sc,
+                ex,
+                mv,
+                fr,
+                int(self.hold[idx]),
+                mask[:4],
+                mask[4:7],
+                mask[7:9],
+                ret,
+            )
         return (
             obs,
             sc,
@@ -122,6 +150,7 @@ def make_loaders(
     mirror_p: float = 0.5,
     seed: int = 1234,
     num_workers: int = 0,
+    action_v6: bool = False,
 ):
     """Build train/val DataLoaders from a directory of npy shards.
 
@@ -142,8 +171,8 @@ def make_loaders(
         random.seed(seed + 2000 + wid)
         torch.manual_seed(seed + 3000 + wid)
 
-    data = load_dataset(data_dir)
-    full = NNDataset(data, augment=False)
+    data = load_dataset(data_dir, action_v6=action_v6)
+    full = NNDataset(data, augment=False, action_v6=action_v6)
     n = len(full)
     n_val = int(n * val_split)
     gen = torch.Generator().manual_seed(seed)
@@ -158,7 +187,7 @@ def make_loaders(
             n_val,
             torch.randperm(int(shard_ids.max()) + 1, generator=gen).tolist(),
         )
-        train_ds = _AugWrapper(data, tr_idx.tolist(), mirror_p, seed)
+        train_ds = _AugWrapper(data, tr_idx.tolist(), mirror_p, seed, action_v6)
         val_ds = torch.utils.data.Subset(full, val_idx.tolist())
         # sizes 用**实际**切分大小（shard 级切分后 val 是整 shard，可能略超 n_val）
         sizes = {"train": len(train_ds), "val": len(val_ds), "total": n}
@@ -171,7 +200,7 @@ def make_loaders(
             raise ValueError(f"语料样本数 {n} < 2——无法切分 train/val（{data_dir}）")
         n_val = max(0, min(n - 1, n_val))
         train_sub, val_ds = random_split(full, [n - n_val, n_val], generator=gen)
-        train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed)
+        train_ds = _AugWrapper(data, list(train_sub.indices), mirror_p, seed, action_v6)
         sizes = {"train": n - n_val, "val": n_val, "total": n}
     return (
         DataLoader(
@@ -196,9 +225,15 @@ def make_loaders(
 class _AugWrapper(Dataset):
     """Thin wrapper exposing NNDataset.__getitem__ with augmentation on a split."""
 
-    def __init__(self, data: dict, indices: list[int], mirror_p: float, seed: int):
+    def __init__(
+        self, data: dict, indices: list[int], mirror_p: float, seed: int, action_v6: bool = False
+    ):
         self.inner = NNDataset(
-            data, augment=True, mirror_p=mirror_p, rng=np.random.default_rng(seed)
+            data,
+            augment=True,
+            mirror_p=mirror_p,
+            rng=np.random.default_rng(seed),
+            action_v6=action_v6,
         )
         self.indices = list(indices)
 

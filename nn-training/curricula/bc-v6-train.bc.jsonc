@@ -1,0 +1,87 @@
+// BC 训练课 bc-v6-train —— 读现成 v6 语料，云端训三头 BC（**不采语料**）。
+//
+// 状态：2026-11-04 21:45 建，**未开课**。
+//
+// ══ 0. 它做什么 ═════════════════════════════════════════════════════════
+//   `data_dir: tmp/bc-corpus`（343 局清场语料，argmax 标签，4.9 GB）→ 云端 GPU worker
+//   跑 `train/bc.py --action-v6` → 出 v6 三头权重。
+//
+//   语料是 `bc-collect-v1`（`kind: ppo`，iters=1）采的 rollout shard，由
+//   `tmp/bc-unpack-filter.py` 过滤掉 214 局败局后剩下的 343 局 `stage_clear`。
+//
+// ══ 1. 为什么 `corpus.games_per_stage = 0` ═══════════════════════════════
+//   这一课**不采语料**——`data_dir` 给了现成目录，`bc_dispatch` 就不再派采集任务。
+//   若误改成 >0，会走 legacy 2 头采集（`export-dagger-labels` 系），把 v6 语料覆盖掉。
+//
+// ══ 2. 关键选择：**从随机起**（`init_from: ""`）═══════════════════════════
+//   BC 的意义是「让**数据**决定策略和熵」——从 y28 权重起微调只会继承它的熵（1.1），
+//   那正是 z7 三腿坍缩的原因。随机起 + 34 万样本，熵由 y28 的轨迹分布决定（预期 0.6–0.75，
+//   与 z5 系能在 500 轮里稳住的区间重合）。
+//
+//   ⚠ `arch` 必须与 z5/z7 同构：`actionV6=true` + `policyExtra=true`（2026-11-04 补上
+//     `BcTrainBlock.policy_extra`，此前课程 schema 里根本没这个键）。关着训出来的权重
+//     `policy_features` 宽度不同，后续 PPO 的 `load_state_into` 会静默跳过那几层。
+//
+// ══ 3. 判据（行为门，不是 val acc —— §47：val .735 健康但 held-out mean 0.00）═════
+//   BC 产物跑 `eval-course-ckpt.ts` 200 局（seed 段与训练不重叠）：
+//     · win **≥ 0.30**（y28 在 20000 拍是 .436，BC 打折后应 ≥.30）
+//     · **拾取率 ≥ 65%**（这是全部意义所在；z5 是 48.7%，y28 是 79.6%）
+//     · cellsVisited 中位 **≥ 70**
+//     · **前 50 步移动率 ≥ 30%**（§47 吸引子的直接判据）
+//     · `moveHist` 连续同向 **< 100 步**
+//   任一条破 ⇒ 上 DAgger（`export-dagger-labels.ts` 的 `--teacher-weights` 还没写）。
+//
+// ══ 4. 资源 ════════════════════════════════════════════════════════════
+//   语料峰值 **11 GB**（obs 5.1 GB + 其余 + DataLoader 副本）⇒ 云机 32 GB，余量 21 GB。
+//   80 epoch × 34 万样本，GPU 上约 **1.5–2 小时**。
+//   `mirror_p` 在 v6 下被强制 0（`mirror_x` 是 legacy 5 类表，会把 move 映出 `Target 4`），
+//   这里写 0.5 只是为了与 legacy 课程同形——**实际不生效**，要恢复增强得另写 4 类镜像表。
+{
+  "version": 1,
+  "name": "bc-v6-train",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  // 环境语义**全部归关卡文件**：BC 课程连 `stage_select` / `lives` 都没有字段
+  // （`BcCourseConfig(extra="forbid")` 会拒；那四类覆盖是 RL 课程的规则）。
+  // 全 35 关 + 3 命 + max_ticks 20000 由 `classic35-safe-base` 自己提供。
+  "max_ticks": 20000,
+
+  "corpus": {
+    // ⚠ 0 = 不采语料（读 data_dir 的现成 shard）。改成 >0 会派 legacy 2 头采集，覆盖 v6 语料。
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 80,
+    "batch": 256,
+    "lr": 0.0003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/z7-maze/z7-maze.it0.json",
+    "action_v6": true,
+    "policy_extra": true,
+  },
+
+  "eval": {
+    // 每 20 epoch 在 35 关上各 10 局（350 局）；只做「有没有死」的哨兵，判决用 §3 的 200 局行为门
+    "every_epochs": 20,
+    "games_per_stage": 10,
+    "levels": ["classic35-safe-base"],
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "data_dir": "tmp/bc-v6-train/bc-data/it1",
+  "out": "nn-training/weights/bc-v6-train/weights.json",
+  "traj": "tmp/bc-v6-train",
+  "backup_dir": "nn-training/weights/bc-v6-train",
+  "backup_prefix": "bc-v6-train",
+}

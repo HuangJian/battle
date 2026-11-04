@@ -206,26 +206,36 @@ def _append_weights_md(
         f.write(row)
 
 
-def _class_counts(dl) -> dict:
-    """训练集各头类别计数（2026-09-14 抽出）：多数类基线与 fire 正例权重的共同数据源。"""
+def _class_counts(dl, action_v6: bool = False) -> dict:
+    """训练集各头类别计数（2026-09-14 抽出）：多数类基线与 fire 正例权重的共同数据源。
+
+    v6 三头（2026-11-04）：语料元组多一个 `hold`（10 元组）、move 是 4 类、fire 是 3 类。
+    """
     c_m: Counter[int] = Counter()
     c_f: Counter[int] = Counter()
+    c_h: Counter[int] = Counter()
     for batch in dl:
-        obs, sc, _ex, mv, fr, mm, mf, ret = [b for b in batch]
-        for t, c in ((mv, c_m), (fr, c_f)):
-            for v in t.tolist():
-                c[v] += 1
-    return {"move": c_m, "fire": c_f}
+        if action_v6:
+            _obs, _sc, _ex, mv, fr, hd, _mm, _mf, _mh, _ret = [b for b in batch]
+            for t, c in ((mv, c_m), (fr, c_f), (hd, c_h)):
+                for v in t.tolist():
+                    c[v] += 1
+        else:
+            _obs, _sc, _ex, mv, fr, _mm, _mf, _ret = [b for b in batch]
+            for t, c in ((mv, c_m), (fr, c_f)):
+                for v in t.tolist():
+                    c[v] += 1
+    return {"move": c_m, "fire": c_f, "hold": c_h} if action_v6 else {"move": c_m, "fire": c_f}
 
 
-def _majority_baseline(dl) -> dict:
+def _majority_baseline(dl, action_v6: bool = False) -> dict:
     """CE if we always predict the most frequent class per head.
 
     Provides a floor to interpret the trained val_loss against (audit gap #2):
     is 1.2431 near the majority-class ceiling, or is there real signal learned?
     """
     out = {}
-    for name, c in _class_counts(dl).items():
+    for name, c in _class_counts(dl, action_v6).items():
         total = sum(c.values())
         if total == 0:
             out[name] = float("nan")
@@ -255,14 +265,24 @@ def train(args) -> dict:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
+    # v6 三头（2026-11-04 落地）：语料由 `export-rl-rollout.ts` 产出，键是
+    # `a_move/a_fire/a_hold + mask.npy(9)`，与 legacy 的 `actions/masks(7)` 并存。
+    action_v6 = bool(getattr(args, "action_v6", False))
     train_dl, val_dl, sizes = make_loaders(
-        args.data_dir, args.batch, args.val_split, args.mirror_p, args.seed, args.num_workers
+        args.data_dir,
+        args.batch,
+        args.val_split,
+        args.mirror_p,
+        args.seed,
+        args.num_workers,
+        action_v6=action_v6,
     )
     print(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
 
     # Majority-class baseline: a floor to interpret val_loss against (audit gap #2).
-    mb = _majority_baseline(train_dl)
-    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}")
+    mb = _majority_baseline(train_dl, action_v6)
+    _mb_tail = f" hold={mb['hold']:.4f}" if action_v6 else ""
+    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}{_mb_tail}")
 
     # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
@@ -270,37 +290,55 @@ def train(args) -> dict:
     dev_str, dev, use_dp = _resolve_bc_device(getattr(args, "device", "cpu"))
     # fire 头正例权重（2026-09-14）：默认 auto = 训练集 neg/pos。放 dev 之后构造，
     # 保证权重张量与 logits 同设备。
-    counts = _class_counts(train_dl)
-    fire_pos_weight = resolve_fire_pos_weight(getattr(args, "fire_pos_weight", 0.0), counts)
-    fire_class_weight = (
-        torch.tensor([1.0, float(fire_pos_weight)], device=dev) if fire_pos_weight > 0 else None
-    )
+    counts = _class_counts(train_dl, action_v6)
+    # v6 的 hold 头 class weight（legacy 路径恒 None）——先声明类型，两个分支都要赋值
+    hold_class_weight: torch.Tensor | None = None
+    fire_class_weight: torch.Tensor | None = None
+    if action_v6:
+        # v6 的 fire 是 **3 类**（no-shot / before-turn / after-turn），二分类的 pos_weight
+        # 不适用 ⇒ 用 inverse-frequency class weight（与 `export-rl-rollout` 的
+        # 3152:110:28 那种极端不平衡对齐，不加权该头必退化成「永不发射」）。
+        _cf = counts["fire"]
+        _tot = sum(_cf.values()) or 1
+        _w = [(_tot / (3 * max(1, _cf.get(k, 0)))) for k in range(3)]
+        fire_class_weight = torch.tensor(_w, device=dev, dtype=torch.float32)
+        fire_pos_weight = -1.0  # 标记「非 legacy 路径」，只用于日志
+        _ch = counts["hold"]
+        _htot = sum(_ch.values()) or 1
+        hold_class_weight = torch.tensor(
+            [(_htot / (2 * max(1, _ch.get(k, 0)))) for k in range(2)], device=dev, dtype=torch.float32
+        )
+    else:
+        fire_pos_weight = resolve_fire_pos_weight(getattr(args, "fire_pos_weight", 0.0), counts)
+        fire_class_weight = (
+            torch.tensor([1.0, float(fire_pos_weight)], device=dev) if fire_pos_weight > 0 else None
+        )
     print(
         f"[train] fire_pos_weight={fire_pos_weight:.2f}"
         f"{'（正例加权开启）' if fire_class_weight is not None else '（关闭）'}"
         f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
     )
-    use_value = getattr(args, "value_coef", 0.0) > 0 and args.arch == "student"
+    # v6 的 `PPOStudent.forward` 恒返回 4 元组（move/fire/hold/value）⇒ 即使 value_coef=0
+    # 也必须用 PPOStudent（StudentNet 没有 value_head），否则解包失败。
+    action_v6_pre = bool(getattr(args, "action_v6", False))
+    use_value = (getattr(args, "value_coef", 0.0) > 0 or action_v6_pre) and args.arch == "student"
     # B1 v6 三头（hold2/move4/fire3）：与 `build_ppo` 同一契约——开关走 CLI，
     # 落盘写进 `arch.actionV6`（`PPOStudent.arch()`），下游据此重建。
     # ⚠ 只有 `student` 家族支持（PPOStudent / StudentNet）；`NNPolicy` 是老
     # Conv 架构、只有 5/2 两头且 forward 返回二元组 ⇒ **显式拒绝**，不静默退化成 legacy。
     action_v6 = bool(getattr(args, "action_v6", False))
-    if action_v6:
-        # B1 v6 的**数据侧**还没接：语料的 hold 标签与掩码（`masks.npy` 7→9）要
-        # rollout 导出、`dataset.py`、`np_core.py`、PPO/BC 训练循环四头同时改。
-        # 只改模型头不改这四处 ⇒ 模型是 4/3 头、数据是 7 维掩码 ⇒ **静默错配**
-        # （argmax 在前 7 位里选，动作语义全错且不报错）。
-        # ⇒ 这里显式拒绝，等整链落地再放开。v6 起点权重走
-        # `worker/scripts/init_spatial_leg.py --action-v6`（不需要 BC 重训）。
-        raise SystemExit(
-            "拒绝：--action-v6 的 BC 训练尚未接通（hold 标签 + masks 7→9 数据链未落地）。"
-            "v6 起点权重请用 init_spatial_leg.py --action-v6 从现有 5/2 权重迁移。"
-        )
+    # v6 数据链已接通（2026-11-04）：`npyio._load_dataset_v6` 读 `a_move/a_fire/a_hold +
+    # mask.npy(9)`，`dataset.NNDataset(action_v6=True)` 返回 10 元组，本函数三头 CE。
+    # 语料由 `export-rl-rollout.ts`（可加 `--teacher-argmax`）产出。
+    policy_extra = bool(getattr(args, "policy_extra", False))
     model = (
-        PPOStudent()
+        PPOStudent(action_v6=action_v6, policy_extra=policy_extra)
         if use_value
-        else (StudentNet() if args.arch == "student" else NNPolicy())
+        else (
+            StudentNet(action_v6=action_v6, policy_extra=policy_extra)
+            if args.arch == "student"
+            else NNPolicy()
+        )
     )  # type: ignore
     if getattr(args, "resume", None):
         print(f"[train] resuming from {args.resume}")
@@ -343,10 +381,29 @@ def train(args) -> dict:
         model.train()
         run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
-            obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+            if action_v6:
+                obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = [b.to(dev) for b in batch]
+            else:
+                hd = mh = None
+                obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
             opt.zero_grad()
-            if use_value:
-                lm, lf, vpred = model(obs, sc, ex)
+            out = model(obs, sc, ex)
+            if action_v6:
+                # v6 三头：move4 + fire3 + hold2（掩码各段见 dataset.NNDataset）
+                lm, lf, lh, vpred = out
+                loss = (
+                    _masked_ce(lm, mv, mm)
+                    + _masked_ce(lf, fr, mf, class_weight=fire_class_weight)
+                    + _masked_ce(lh, hd, mh, class_weight=hold_class_weight)
+                )
+                valid = ~torch.isnan(ret)
+                if args.value_coef > 0 and valid.any():
+                    vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
+                    loss = loss + args.value_coef * vloss
+                    run["vloss"] += float(vloss.item()) * int(valid.sum())
+                    run["vn"] += int(valid.sum())
+            elif use_value:
+                lm, lf, vpred = out
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(
                     lf, fr, mf, class_weight=fire_class_weight
                 )
@@ -357,7 +414,7 @@ def train(args) -> dict:
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
             else:
-                lm, lf = model(obs, sc, ex)
+                lm, lf = out
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(
                     lf, fr, mf, class_weight=fire_class_weight
                 )
@@ -376,12 +433,22 @@ def train(args) -> dict:
         v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "vloss": 0.0, "vn": 0}
         with torch.no_grad():
             for batch in val_dl:
-                obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
-                if use_value:
-                    lm, lf, vpred = model(obs, sc, ex)
+                if action_v6:
+                    obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = [b.to(dev) for b in batch]
                 else:
-                    lm, lf = model(obs, sc, ex)
+                    hd = mh = None
+                    obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+                out_v = model(obs, sc, ex)
+                if action_v6:
+                    lm, lf, lh, vpred = out_v
+                elif use_value:
+                    lm, lf, vpred = out_v
+                else:
+                    lm, lf = out_v
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
+                if action_v6:
+                    # val 同样不施加 class weight（与 `_majority_baseline` 同尺度）
+                    loss = loss + _masked_ce(lh, hd, mh)
                 # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
                 # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。
                 if use_value:
@@ -395,6 +462,8 @@ def train(args) -> dict:
                 v["n"] += obs.shape[0]
                 v["ma"] += _masked_acc(lm, mv, mm) * obs.shape[0]
                 v["fa"] += _masked_acc(lf, fr, mf) * obs.shape[0]
+                if action_v6:
+                    v["ha"] = v.get("ha", 0.0) + _masked_acc(lh, hd, mh) * obs.shape[0]
         val_loss = v["loss"] / max(1, v["n"])
         ma, fa = v["ma"] / max(1, v["n"]), v["fa"] / max(1, v["n"])  # P2-3：--val-split 0 时 v["n"]==0
         vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
@@ -402,11 +471,16 @@ def train(args) -> dict:
         history["val_loss"].append(round(val_loss, 4))
         history["move_acc"].append(round(ma, 4))
         history["fire_acc"].append(round(fa, 4))
+        #: v6 第三头（2026-11-04）：hold 的 val 准确率。legacy 语料没有该头 ⇒ 不写这条键。
+        ha = (v.get("ha", 0.0) / max(1, v["n"])) if action_v6 else None
+        if ha is not None:
+            history.setdefault("hold_acc", []).append(round(ha, 4))
         history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
         print(
             f"[epoch {gepoch:3d}/{epoch_total}] "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"acc move={ma:.3f} fire={fa:.3f} "
+            + (f"hold={ha:.3f} " if ha is not None else "")
             + (f"value={vl:.4f} " if not math.isnan(vl) else "")
             + f"lr={opt.param_groups[0]['lr']:.2e}"
         )
