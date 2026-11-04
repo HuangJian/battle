@@ -84,13 +84,19 @@ def _http(
             return {}
         return loaded if isinstance(loaded, dict) else {}
 
-    try:
-        with net_http.urlopen(req, timeout=10.0) as resp:
-            return resp.status, _as_dict(resp.read())
-    except urllib.error.HTTPError as e:
-        return e.code, _as_dict(e.read())
-    except Exception:
-        return 0, {}
+    # 只读 GET 传输失败**立刻**重试一次：满载时本机 ThreadingHTTPServer 偶发
+    # reset/超时，重读不改任何状态。POST 不重试 —— claim/release 的语义是一次性，
+    # 重发可能把真实失败掩盖成成功（auto-handoff 那边 claim 幂等才允许重试）。
+    last: tuple[int, dict] = (0, {})
+    for _attempt in range(2 if method == "GET" else 1):
+        try:
+            with net_http.urlopen(req, timeout=10.0) as resp:
+                return resp.status, _as_dict(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, _as_dict(e.read())
+        except Exception:
+            last = (0, {})
+    return last
 
 
 def _wait_for(pred, timeout: float, step: float = 0.05) -> bool:

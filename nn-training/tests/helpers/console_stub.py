@@ -66,7 +66,9 @@ class NoHandoffConsole:
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        # `shutdown()` 会等满一个 poll_interval；e2e 每个用例起一份假控制台，
+        # 缺省 0.5s 的关服延迟是白付（请求处理仍是即时的）。
+        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
 
     def close(self) -> None:
         self.srv.shutdown()

@@ -857,10 +857,11 @@ class EvalArbiter:
                 self._rounds.remove(rnd)
             except ValueError:
                 pass
-            if self._rounds:
-                self._rr %= len(self._rounds)
-                self._rep %= len(self._rounds)
-            else:
+            # 游标是**绝对**的：这里不能按当前轮数归一化。第三轮收工时把
+            # `_rr` 压回 `[0, n)`，随后新轮登记（列表又变长）就会让刚发过牌
+            # 的轮从 0 再抢一次 —— 2026-11-04 pygate 复现的 A,A,B,B。
+            # 取模只发生在 `_unique_grant` / `_replica_grant` 的读取处。
+            if not self._rounds:
                 self._rr = self._rep = 0
             self._cond.notify_all()
 
