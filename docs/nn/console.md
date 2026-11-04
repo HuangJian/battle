@@ -13,6 +13,25 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §48 动作结果浮层悬停停表：读的时候不被抽走（2026-11-04）
+
+**触发**（用户）：「当鼠标悬停在 dashboard 页面右上角的提示信息上时，信息窗口不要自动关闭。」
+
+`Flash`（`src/web/components/Flash.tsx`，固定右下角，ok/bad 两色）原来是无条件
+`setTimeout(onHide, 8000)`——浮层里常是失败原因与下一步指引，8s 不看人在不在照样走完，
+鼠标正停着读/选字时会被抽走。
+
+**做法**：组件本地态 `paused`，容器 `onMouseEnter` 置真、`onMouseLeave` 置假；计时 effect 在
+`!flash || paused` 时直接返回（不是建了 timer 再取消）。**移开后重新给满 8s**（不续剩余那一段）：
+浮层是通知不是倒计时进度条，「只剩 0.2s」比「再读 8s」更意外。浮层消失（✕ / 到点）时 `paused`
+归零——指针留在原处不会补发 `mouseleave`，不清会让下一条浮层永远停在暂停里。手动 ✕ 语义不变。
+
+**回归**：`dashboard/tests/web-flash-hover.test.ts`（SSR 形状 + 源码接线）。本仓无 DOM 夹具，
+「悬停 10s 不消失」这类真交互 SSR 断言不到（README「测试分层」同款告诫），靠源码锚点守接线。
+
+**位置**（同日后续要求）：浮层从右上角移到右下角——`.tc-flash` 的 `top:14px` 改 `bottom:14px`，
+`right:14px` 不变；悬停与 8s 口径不受影响（原话里的「右上角」是移动前的描述）。
+
 ## §47 趋势图只画已结算轮：eval 未结束的 it 不画点（2026-11-04）
 
 **触发**（用户）：「一个 it 的 eval 未结束时，其指标不要在趋势图里绘制。避免错判。」

@@ -871,7 +871,8 @@ a.tc-btn {
 /* ── Flash（动作结果/全局） ──────────────────────────────── */
 .tc-flash {
   position: fixed;
-  top: 14px;
+  /* 右下角（2026-11-04 用户：从右上角移来）——topbar 在顶部，浮层落底部不压标题与筛选条。 */
+  bottom: 14px;
   right: 14px;
   max-width: 460px;
   padding: 10px 14px;
