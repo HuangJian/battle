@@ -6,6 +6,74 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §136 镜像候选并行测速：256KB Range 小样排序，快者先用（2026-11-04）
+
+**背景**：§135 的自动换路是「串行、先通先用」—— 墙掉的链路每个还要等 25s（clone）或 8s
+（cloudflared），且先通的镜像不一定快。用户口径：「镜像探测并行，能测速取最快镜像站吗？」
+
+**落地**：
+
+* `_speed_probe`：`curl --range 0-262143 -o /dev/null -w "%{size_download} %{time_total}"`，
+  按字节/耗时算 B/s；不可达/超时 ⇒ 0。HEAD 只测延迟、不代表带宽，所以用 Range 小样。
+* `_rank_fastest`：`ThreadPoolExecutor` 并行跑所有候选的 `_speed_probe`，按吞吐降序；
+  测不出的保持原序殿后；日志一行 `bun/cloudflared 测速: <候选> x.xMB/s · …`。
+* **cloudflared**：先排序再按序下载，失败顺延下一跳（仍带 `--connect-timeout 8`）。
+* **bun**：先排序 `GITHUB` 基址（测速 URL = `releases/latest/download/<target>.zip`），
+  再按序跑官方 install.sh；仍失败 ⇒ npmmirror 二进制。
+* **clone**（cell）：`_probe_clone` 并行 `git ls-remote`（25s 封顶），`_rank_clone_candidates`
+  按耗时升序；clone 失败顺延下一候选（清掉本次新建的半成品目录再试）。`github_token` 仍只
+  注入直连候选。
+
+**代价**：启动多 ~1–2s、每个候选多 ~256KB 探测流量；换来不排队等墙掉的链路、且走实测最快的镜像。
+**被否决**：并行整份对冲（同时下载完整产物取最先完成）—— 流量 ×N，收益只是省一次小样探测。
+
+**验收**：`tests/remote/test_rollout_node.py` 的 `_speed_probe` / `_rank_fastest` /
+cloudflared「最快先下、失败顺延」；`tests/remote/test_rollout_node_notebook.py` 的 clone
+并行探活（Barrier）+ 按耗时排序用例。§135 的自动换路与可选覆盖口子不变。
+
+---
+
+## §135 采样节点在 GitHub 不可达环境（阿里云 DSW）的取件链：默认自动换镜像 + bun npmmirror 回落 + `code_zip`（2026-11-04）
+
+**现场**：阿里云 DSW 上跑 `ipynb/rollout.ipynb` —— `git clone` 报
+`GnuTLS recv error (-110): The TLS connection was non-properly terminated`；`curl bun.sh/install`
+卡 132s 后 `Failed to download bun from github.com/oven-sh/bun/releases/...`。大陆云机到
+`github.com:443` 的直连是常态超时，而 cell 原来只有直连一条路（bun / cloudflared 也都钉死在
+GitHub Releases）。**结论：不是平台坏了，是取件链缺镜像口子。**
+
+**默认行为 = 自动换路，不需要填任何开关**（2026-11-04 用户口径：「不要让我填开关，代码里自动尝试」）：
+
+* **clone**（cell）：`_clone_candidates` 给出「直连 → 内置镜像 `gh-proxy` → `ghproxy.net`」，
+  逐个 `git ls-remote` 探活（25s/个）后 clone 第一个通的；`github_token` 只注入直连候选。
+* **bun**：`_github_direct_ok()` 6s 短探针；直连不通就带 `GITHUB=<镜像>` 重跑官方 install.sh
+  （它认这个环境变量），仍失败 ⇒ npmmirror 二进制（`_bun_target` / `_latest_bun_version` /
+  `_install_bun_mirror`；`-baseline` 判据与官方脚本相同：CPU 无 AVX2 才用）。
+* **cloudflared**：`_github_candidates` 的每个候选带 `--connect-timeout 8` 依次下载 ——
+  直连墙掉 8s 内就换镜像，不再等一次 2 分钟级超时。
+
+**可选的覆盖口子**（留空即可，**不是联网的前提**）：
+
+* `github_base`：显式镜像基址（自建/别家）；给出后它排最前、直连兜底。
+* `bun_mirror`：bun 二进制镜像目录（npmmirror 布局）。
+* `code_zip`：本机已上传的仓库归档（zip/tar.gz，**仓库根打包**）⇒ cell 跳过全部 git 操作
+  （`.git` 都不需要）；私有仓 / 完全离线环境的兜底。
+* `net_proxy`：出站代理；clone / 公网下载 / 隧道安装共用，`NO_PROXY` 合并平台原值 + 回环 + hub 主机。
+
+**顺带修的引导期缺陷**：`tailscale_boot.platform_net_env()` 在「从未注入过代理」（kernel 模式 /
+`ensure` 未跑）时，会按空快照把环境里的代理变量**清空** —— 用户自带的代理在首次公网下载前就被
+抹掉。现在空快照 ⇒ 原样放行（docstring 一直写的是「没有注入时是空操作」）。
+
+**验收**：`tests/remote/test_rollout_node.py`（无配置也试内置镜像 / 显式优先 / 环境变量回退 /
+bun 安装器自动带镜像 / cloudflared 自动换源 / semver 挑版 / target 表）+
+`tests/remote/test_rollout_node_notebook.py`（cell 的 `_clone_candidates` 行为 + clone 前
+`ls-remote` 探活的 AST 守卫）+ `tests/remote/test_bootstrap_proxy.py`（未注入 noop）。
+
+**被否决**：把 clone 逻辑收进 `remote/rollout_node.py`（import 发生在 clone 之后，鸡生蛋）；
+镜像转发私有仓认证（公开加速不接）；从 hub 拉全仓（`GET /code` 只有 Python 侧，TS 运行时只随
+具体 job 下发 —— 取舍见 §78）。
+
+---
+
 ## §134 分析列全量聚合随体回传：一轮一行 `eval_agg`（2026-11-03）
 
 **用户口径**：逐局仍走白名单（`EVAL_ROW_WIRE_KEYS`，体积一字不变），但**每个 it** 把整轮的

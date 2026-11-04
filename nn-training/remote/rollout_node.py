@@ -30,11 +30,16 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 import urllib.request
+import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,6 +75,10 @@ RETRY_FIRST_SEC = 30.0
 #: **只负责把那一行搬进 notebook/rollout-node 日志**，第二个数字源就是第二个真相。
 OUTPUT_STATUS_EVERY_SEC = 600.0
 
+#: bun 二进制镜像（npmmirror）。GitHub Releases 直连不通的环境（阿里云 DSW 等）的兜底：
+#: 目录布局 `.../bun/bun-v<版本>/bun-linux-x64.zip`，与官方 install.sh 下载的产物同名。
+BUN_MIRROR_DEFAULT = "https://registry.npmmirror.com/-/binary/bun"
+
 RegisterFn = Callable[..., Any]
 
 
@@ -97,14 +106,21 @@ def registry_url(hub_ip: str, hub_port: int, cfg_hub_url: str = "") -> str:
 
 # ---------------------------------------------------------------- 进程/网络小工具
 
-def _sh(cmd: list[str], *, cwd: str | None = None, timeout: float | None = None):
+def _sh(
+    cmd: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: float | None = None,
+    env: dict[str, str] | None = None,
+):
     """跑一条命令；启动失败/超时 ⇒ rc=127 的哑结果（与旧 cell 同语义，不抛）。
 
     走 `common.proc.run_capture`：**不写裸 `text=True`**（控制台代码页会解码失败 ⇒ 输出变
     `None`，`tests/common/test_common_layer.py::test_every_production_capture_site_pins_encoding` 钉住）。
+    `env` 只给需要单次改写环境变量的下载用（例：bun 安装器认 `GITHUB` 基址）。
     """
     try:
-        return run_capture(cmd, cwd=cwd, timeout=timeout)
+        return run_capture(cmd, cwd=cwd, timeout=timeout, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         return SimpleNamespace(returncode=127, stdout="", stderr=str(e))
 
@@ -152,22 +168,212 @@ def _slot_count(explicit: int) -> tuple[int, str]:
     return int(slots), note
 
 
+#: 内置 GitHub 镜像（前缀式）：直连不通时**自动**依次尝试，不需要填任何开关。
+GITHUB_MIRRORS = (
+    "https://gh-proxy.com/https://github.com",
+    "https://ghproxy.net/https://github.com",
+)
+
+
+def _explicit_github_base(cfg: dict) -> str:
+    base = str(cfg.get("github_base") or os.environ.get("GITHUB_BASE") or "").strip().rstrip("/")
+    return base
+
+
+def _github_candidates(cfg: dict, url: str) -> list[str]:
+    """`url` 的候选地址：显式镜像 → 直连 → 内置镜像（去重保序）。
+
+    没配 `github_base` 也含内置镜像 —— 「填开关」不该是联网的前提（阿里云 DSW 现场）。
+    镜像只对公开仓/公开产物有效（第三方加速不转发认证）；私有仓走 cell 的 `code_zip`。
+    """
+    if not url.startswith("https://github.com"):
+        return [url]
+    rest = url[len("https://github.com"):]
+    base = _explicit_github_base(cfg)
+    out = [base + rest] if base else [url]
+    if base:
+        out.append(url)
+    out.extend(m + rest for m in GITHUB_MIRRORS)
+    return list(dict.fromkeys(out))
+
+
+def _speed_probe(url: str, cap_bytes: int = 262_144, timeout: int = 6) -> float:
+    """拉一小段估算吞吐（B/s）；不可达/测不出 ⇒ 0。
+
+    HEAD 只能测延迟，不代表带宽 —— 这里用 Range 取前 256KB，按 `size/time` 排。
+    Range 不被支持时会退化成小文件下载，仍以实际字节/耗时计。
+    """
+    r = _sh(
+        [
+            "curl",
+            "-fsSL",
+            "--range",
+            f"0-{cap_bytes - 1}",
+            "--connect-timeout",
+            "4",
+            "--max-time",
+            str(timeout),
+            "-o",
+            os.devnull,
+            "-w",
+            "%{size_download} %{time_total}",
+            url,
+        ],
+        timeout=timeout + 3,
+    )
+    if getattr(r, "returncode", 1) != 0:
+        return 0.0
+    try:
+        size_s, sec_s = str(getattr(r, "stdout", "")).split()[-2:]
+        size, secs = float(size_s), float(sec_s)
+    except (AttributeError, IndexError, ValueError):
+        return 0.0
+    return size / secs if size > 0 and secs > 0 else 0.0
+
+
+def _rank_fastest(
+    items: list[tuple[str, str]], label: str, log: Callable[[str], None]
+) -> list[str]:
+    """并行测速并按吞吐降序返回候选键；测不出的保持原序殿后。
+
+    `items` = `[(键, 测速 URL)]` —— 键用于后续定位候选（cloudflared 是 URL 本身，
+    bun 是 `GITHUB` 基址）。并行是契约：墙掉的链路不该让后面的候选排队白等。
+    """
+    if not items:
+        return []
+    if len(items) == 1:
+        return [items[0][0]]
+    with ThreadPoolExecutor(max_workers=len(items)) as pool:
+        speeds = list(pool.map(lambda it: _speed_probe(it[1]), items))
+    order = sorted(range(len(items)), key=lambda i: (-speeds[i], i))
+    log(
+        f"{label} 测速: "
+        + " · ".join(f"{items[i][0] or '直连'} {speeds[i] / 1e6:.1f}MB/s" for i in order)
+    )
+    return [items[i][0] for i in order]
+
+
+def _bun_install_bases(cfg: dict) -> list[str]:
+    """官方 install.sh 可用的 `GITHUB` 基址（"" = 直连），**未测速排序**。
+
+    显式 `github_base` 最优先；其余 = 直连 + 内置镜像。真正的先后由
+    `_ensure_bun` 里的并行测速决定（快者先装）。
+    """
+    base = _explicit_github_base(cfg)
+    out = ([base] if base else []) + ["", *GITHUB_MIRRORS]
+    return list(dict.fromkeys(out))
+
+
+def _bun_target(machine: str, cpuinfo: str = "") -> str:
+    """bun 的发布包名（`bun-linux-x64[-baseline]` / `bun-linux-aarch64`）；不认识的架构 ⇒ ""。"""
+    m = str(machine or "").lower()
+    if m in ("x86_64", "amd64"):
+        # 与官方 install.sh 同规则：CPU 无 AVX2 ⇒ baseline 包
+        return "bun-linux-x64" + ("-baseline" if cpuinfo and "avx2" not in cpuinfo else "")
+    if m in ("aarch64", "arm64"):
+        return "bun-linux-aarch64"
+    return ""
+
+
+def _bun_asset_url(base: str, target: str) -> str:
+    """bun 测速用的代表产物（latest release 的同名 zip）；`base` 为空 = 直连。"""
+    rest = f"/oven-sh/bun/releases/latest/download/{target or 'bun-linux-x64'}.zip"
+    return (base + rest) if base else "https://github.com" + rest
+
+
+def _latest_bun_version(listing: str) -> str:
+    """npmmirror 目录 JSON 里挑最新稳定版（`bun-v1.4.4/` → `1.4.4`）；没有 ⇒ ""。"""
+    best: tuple[int, ...] = ()
+    for name in re.findall(r"bun-v([0-9]+(?:\.[0-9]+)+)/", listing):
+        key = tuple(int(x) for x in name.split("."))
+        if key > best:
+            best = key
+    return ".".join(str(x) for x in best)
+
+
+def _install_bun_mirror(cfg: dict, log: Callable[[str], None]) -> str:
+    """从 npmmirror 装 bun（`_public_net()` 内调用）；返回 bun 路径，失败 ⇒ ""。"""
+    base = str(
+        cfg.get("bun_mirror") or os.environ.get("BUN_MIRROR") or BUN_MIRROR_DEFAULT
+    ).strip().rstrip("/")
+    try:
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        cpuinfo = ""
+    target = _bun_target(platform.machine(), cpuinfo)
+    if not target:
+        log(f"bun 镜像：不认识的架构 {platform.machine()} —— 跳过")
+        return ""
+    try:
+        with urllib.request.urlopen(f"{base}/", timeout=60) as r:
+            ver = _latest_bun_version(r.read().decode("utf-8", "replace"))
+        if not ver:
+            raise ValueError("目录里没有 bun-v<版本>/")
+        url = f"{base}/bun-v{ver}/{target}.zip"
+        log(f"bun 镜像下载: {url}")
+        with tempfile.TemporaryDirectory() as td:
+            zp = Path(td) / "bun.zip"
+            with urllib.request.urlopen(url, timeout=600) as r, zp.open("wb") as fh:
+                shutil.copyfileobj(r, fh)
+            with zipfile.ZipFile(zp) as z:
+                z.extractall(td)
+            src = Path(td) / target / "bun"
+            if not src.is_file():
+                raise FileNotFoundError(f"zip 里没有 {target}/bun")
+            dest = Path.home() / ".bun" / "bin"
+            dest.mkdir(parents=True, exist_ok=True)
+            final = dest / "bun"
+            shutil.copyfile(src, final)
+            final.chmod(0o755)
+            return str(final)
+    except Exception as e:
+        log(f"bun 镜像安装失败（{type(e).__name__}: {e}）")
+        return ""
+
+
 def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
-    """找/装 bun（★ 公网安装在 ensure 之前发生；这里仍包 `_public_net()` 兜底）。"""
-    cands = ("bun", "/root/.bun/bin/bun", str(Path.home() / ".bun" / "bin" / "bun"))
-    bun = ""
-    for cand in cands:
-        if _sh([cand, "--version"], timeout=120).returncode == 0:
-            bun = cand
-            break
-    if not bun:
-        log("安装 bun…（公网下载）")
-        with _public_net():
-            _sh(["bash", "-lc", "curl -fsSL https://bun.sh/install | bash"], timeout=600)
-        for cand in ("/root/.bun/bin/bun", str(Path.home() / ".bun" / "bin" / "bun"), "bun"):
+    """找/装 bun（★ 公网安装在 ensure 之前发生；这里仍包 `_public_net()` 兜底）。
+
+    GitHub 直连不通时**自动**换路（不需要任何配置）：官方 install.sh 带
+    `GITHUB=<镜像>` 重跑（它认这个环境变量），仍失败 ⇒ 回落 npmmirror 二进制。
+    候选先用 256KB 小样**并行测速**，官方安装按实测快慢依次试。
+    """
+
+    def _find() -> str:
+        for cand in ("bun", "/root/.bun/bin/bun", str(Path.home() / ".bun" / "bin" / "bun")):
             if _sh([cand, "--version"], timeout=120).returncode == 0:
-                bun = cand
+                return cand
+        return ""
+
+    bun = _find()
+    if not bun:
+        log("安装 bun…（公网下载；候选并行测速后按快慢排序）")
+        try:
+            cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            cpuinfo = ""
+        target = _bun_target(platform.machine(), cpuinfo)
+        with _public_net():
+            bases = _rank_fastest(
+                [(b, _bun_asset_url(b, target)) for b in _bun_install_bases(cfg)],
+                "bun",
+                log,
+            )
+        for base in bases:
+            env = None
+            if base:
+                log(f"bun 安装经镜像: {base}")
+                env = os.environ.copy()
+                env["GITHUB"] = base
+            with _public_net():
+                _sh(["bash", "-lc", "curl -fsSL https://bun.sh/install | bash"], timeout=600, env=env)
+            bun = _find()
+            if bun:
                 break
+    if not bun:
+        log("bun 官方安装失败 —— 回落 npmmirror 二进制镜像")
+        with _public_net():
+            bun = _install_bun_mirror(cfg, log)
     if not bun:
         return ""
     bin_dir = str(Path(bun).parent)
@@ -190,21 +396,26 @@ def _start_cloudflared(
     if not cf:
         cf = "/usr/local/bin/cloudflared"
         log("安装 cloudflared…（公网下载，代理已还原）")
+        r = None
         with _public_net():
-            r = _sh(
-                [
-                    "curl",
-                    "-fsSL",
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
-                    "-o",
-                    cf,
-                ],
-                timeout=180,
-            )
-        if r.returncode == 0:
+            direct = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+            # 自动换路（不填开关）：候选并行测速后按实测快慢依次下载；失败顺延下一跳
+            for url in _rank_fastest(
+                [(u, u) for u in _github_candidates(cfg, direct)], "cloudflared", log
+            ):
+                r = _sh(
+                    ["curl", "-fsSL", "--connect-timeout", "8", "--max-time", "180", url, "-o", cf],
+                    timeout=200,
+                )
+                if r.returncode == 0:
+                    if url != direct:
+                        log(f"cloudflared 已从镜像下载: {url}")
+                    break
+                log(f"cloudflared 下载失败（{url}）")
+        if r is not None and r.returncode == 0:
             os.chmod(cf, 0o755)
         else:
-            log("cloudflared 安装失败")
+            log("cloudflared 安装失败（直连与镜像都不通）—— 可预置二进制后用 CFG.cloudflared_path 指路")
             return None
     try:
         return subprocess.Popen(

@@ -11,6 +11,8 @@ import json
 import urllib.error
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -257,3 +259,169 @@ def test_emit_output_summary_prints_exactly_one_line(monkeypatch: pytest.MonkeyP
     seen.clear()
     rn.emit_output_summary(8443, "tok", seen.append)
     assert seen == ["近30min产出 不可知（agent 未应答）"]
+
+
+# ---------------------------------------------------------------- GitHub 不通时的下载路
+
+def test_github_candidates_auto_try_builtin_mirrors() -> None:
+    """不填任何开关：直连之后自动跟内置镜像（阿里云 DSW 现场不需要配置）。"""
+    direct = "https://github.com/HuangJian/battle.git"
+    got = rn._github_candidates({}, direct)
+    assert got[0] == direct
+    assert set(got[1:]) == {m + "/HuangJian/battle.git" for m in rn.GITHUB_MIRRORS}
+    # 非 GitHub 域名不碰
+    assert rn._github_candidates({}, "https://example.com/x.zip") == ["https://example.com/x.zip"]
+
+
+def test_github_candidates_explicit_base_goes_first() -> None:
+    """缓存了 `github_base` 时显式镜像优先、直连兜底、不重复。"""
+    direct = "https://github.com/a/b"
+    cfg = {"github_base": "https://mirror.example/https://github.com/"}
+    assert rn._github_candidates(cfg, direct)[:2] == ["https://mirror.example/https://github.com/a/b", direct]
+    got = rn._github_candidates({"github_base": "https://gh-proxy.com/https://github.com"}, direct)
+    assert got.count("https://gh-proxy.com/https://github.com/a/b") == 1
+
+
+def test_github_candidates_read_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_BASE", "https://mirror.example/https://github.com")
+    assert (
+        rn._github_candidates({}, "https://github.com/a/b")[0]
+        == "https://mirror.example/https://github.com/a/b"
+    )
+
+
+def test_speed_probe_returns_bytes_per_second(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rn,
+        "_sh",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="262144 0.500", stderr=""),
+    )
+    assert rn._speed_probe("https://example.com/a.zip") == pytest.approx(524288.0)
+
+
+def test_speed_probe_failure_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        rn,
+        "_sh",
+        lambda *a, **k: SimpleNamespace(returncode=6, stdout="", stderr=""),
+    )
+    assert rn._speed_probe("https://example.com/a.zip") == 0.0
+
+
+def test_rank_fastest_orders_by_measured_speed(monkeypatch: pytest.MonkeyPatch) -> None:
+    speeds = {
+        "https://slow.example/a": 1_000_000.0,
+        "https://fast.example/a": 9_000_000.0,
+        "https://dead.example/a": 0.0,
+    }
+    monkeypatch.setattr(rn, "_speed_probe", lambda url, **_kw: speeds[url])
+    got = rn._rank_fastest([(u, u) for u in speeds], "测试", lambda _m: None)
+    assert got == ["https://fast.example/a", "https://slow.example/a", "https://dead.example/a"]
+
+
+def test_bun_asset_url_maps_base_to_latest_zip() -> None:
+    assert rn._bun_asset_url("", "bun-linux-x64") == (
+        "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip"
+    )
+    assert rn._bun_asset_url(
+        "https://gh-proxy.com/https://github.com", "bun-linux-aarch64"
+    ) == (
+        "https://gh-proxy.com/https://github.com/oven-sh/bun/releases/latest/download/"
+        "bun-linux-aarch64.zip"
+    )
+
+
+def test_bun_installer_gets_github_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    """官方 install.sh 认 `GITHUB` 环境变量 ⇒ 镜像基址必须传到子进程（阿里云 DSW 回归）。"""
+    calls: list[dict[str, Any]] = []
+
+    def _fake_sh(cmd, *, cwd=None, timeout=None, env=None):
+        calls.append({"cmd": list(cmd), "env": env})
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: "")
+    bun = rn._ensure_bun(
+        Path("/tmp"),
+        {"github_base": "https://gh-proxy.com/https://github.com"},
+        lambda _m: None,
+    )
+    assert bun == ""
+    installer = [c for c in calls if c["cmd"][-1].startswith("curl -fsSL https://bun.sh/install")]
+    assert installer, "没走到官方安装器"
+    assert installer[0]["env"]["GITHUB"] == "https://gh-proxy.com/https://github.com"
+
+
+def test_bun_installer_auto_tries_mirrors_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不填 `github_base`：测不出速度时按「直连 → 内置镜像」稳定顺序逐个重跑官方安装器。"""
+    calls: list[dict[str, Any]] = []
+
+    def _fake_sh(cmd, *, cwd=None, timeout=None, env=None):
+        calls.append({"cmd": list(cmd), "env": env})
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: "")
+    assert rn._ensure_bun(Path("/tmp"), {}, lambda _m: None) == ""
+    installers = [c for c in calls if c["cmd"][-1].startswith("curl -fsSL https://bun.sh/install")]
+    got = [c["env"]["GITHUB"] if c["env"] else None for c in installers]
+    assert got == [None, *rn.GITHUB_MIRRORS]
+
+
+def test_cloudflared_install_uses_fastest_probe_then_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候选并行测速：先下最快的；失败再顺延下一条（不按固定表顺序）。"""
+    downloads: list[str] = []
+
+    def _fake_sh(cmd, *, cwd=None, timeout=None, env=None):
+        if cmd[:2] == ["bash", "-lc"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        url = next((c for c in cmd if c.startswith("https://")), "")
+        if "--range" in cmd:
+            if "gh-proxy.com" in url:
+                return SimpleNamespace(returncode=0, stdout="262144 0.100", stderr="")
+            if "ghproxy.net" in url:
+                return SimpleNamespace(returncode=0, stdout="262144 0.200", stderr="")
+            return SimpleNamespace(returncode=6, stdout="", stderr="")
+        downloads.append(url)
+        return SimpleNamespace(
+            returncode=0 if "ghproxy.net" in url else 6, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn.os, "chmod", lambda *a, **k: None)
+    monkeypatch.setattr(rn.subprocess, "Popen", lambda *a, **k: object())
+    out = rn._start_cloudflared({}, 8443, Path("/tmp/x.log"), lambda _m: None)
+    assert out is not None
+    direct = (
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+        "cloudflared-linux-amd64"
+    )
+    assert downloads == [
+        "https://gh-proxy.com/" + direct,
+        "https://ghproxy.net/" + direct,
+    ]
+
+
+def test_latest_bun_version_picks_semver_max() -> None:
+    listing = (
+        '[{"name":"bun-v1.4.9/"},{"name":"bun-v1.10.0/"},'
+        '{"name":"bun-v1.4.4/"},{"name":"canary/"}]'
+    )
+    assert rn._latest_bun_version(listing) == "1.10.0"
+    assert rn._latest_bun_version("[]") == ""
+
+
+@pytest.mark.parametrize(
+    ("machine", "cpuinfo", "want"),
+    [
+        ("x86_64", "flags: avx2", "bun-linux-x64"),
+        ("x86_64", "flags: sse2", "bun-linux-x64-baseline"),
+        ("amd64", "", "bun-linux-x64"),          # 读不到 cpuinfo 时不猜 baseline
+        ("aarch64", "", "bun-linux-aarch64"),
+        ("mips", "", ""),
+    ],
+)
+def test_bun_target_table(machine: str, cpuinfo: str, want: str) -> None:
+    assert rn._bun_target(machine, cpuinfo) == want

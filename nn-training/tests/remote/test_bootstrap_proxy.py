@@ -91,6 +91,20 @@ def test_platform_net_env_restores_on_exception(monkeypatch: pytest.MonkeyPatch)
     assert os.environ["HTTP_PROXY"] == TAILNET_HTTP
 
 
+def test_platform_net_env_is_noop_when_nothing_was_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """从未注入（kernel 模式 / ensure 未跑）⇒ 原样放行。
+
+    回归：旧实现无条件按 `_ORIG_PROXY_ENV`（空）清空代理变量 —— 用户自己带的
+    `net_proxy`（例阿里云 DSW 的内网代理）会在首次公网下载前被抹掉。
+    """
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy:7890")
+    with ts.platform_net_env():
+        assert os.environ["HTTPS_PROXY"] == "http://corp-proxy:7890"
+    assert os.environ["HTTPS_PROXY"] == "http://corp-proxy:7890"
+
+
 # ─────────────────────────── 引擎顺序阀门 ───────────────────────────
 
 

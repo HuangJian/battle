@@ -18,11 +18,17 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import os
 import re
 import textwrap
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from remote import rollout_node as rn
 
@@ -189,3 +195,69 @@ def test_run_owns_unregister_on_exit() -> None:
     assert names >= {"unregister", "_terminate"}, f"finally 里少了收线步骤：{sorted(names)}"
     terminated = {getattr(c.args[0], "id", "") for c in calls if getattr(c.func, "id", "") == "_terminate" and c.args}
     assert terminated == {"agent", "cfp"}, f"收线要清 agent + cloudflared，实际清了 {sorted(terminated)}"
+
+
+def test_cell_clone_auto_tries_builtin_mirrors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GitHub 直连不通时 clone 自动换路：**不填开关**，候选 = 直连 + 内置镜像，且先探活再 clone。
+
+    只把 cell 里的 `_clone_candidates`（纯函数）摘出来执行；并 AST 检查 clone 分支确实用了
+    候选表 + `git ls-remote` 探活（notebook 不在 pytest 里整段执行）。
+    """
+    monkeypatch.delenv("GITHUB_BASE", raising=False)
+    nb_ast = ast.parse(_cells("code"))
+    clone_fn = next(
+        (n for n in nb_ast.body if isinstance(n, ast.FunctionDef) and n.name == "_clone_candidates"),
+        None,
+    )
+    assert clone_fn is not None, "cell 里应有 _clone_candidates（自动换路）"
+    ns: dict[str, Any] = {"CFG": {}, "os": os}
+    exec(compile(ast.Module(body=[clone_fn], type_ignores=[]), "<rollout.ipynb>", "exec"), ns)
+    direct = "https://github.com/HuangJian/battle.git"
+    got = ns["_clone_candidates"](direct)
+    assert got[0] == direct
+    assert set(got[1:]) == {m + "/HuangJian/battle.git" for m in rn.GITHUB_MIRRORS}
+
+    nb_calls = [n for n in ast.walk(nb_ast) if isinstance(n, ast.Call)]
+    assert any(getattr(c.func, "id", "") == "_clone_candidates" for c in nb_calls), "clone 分支没用候选表"
+    assert any(
+        getattr(c.func, "id", "") == "_rank_clone_candidates" for c in nb_calls
+    ), "clone 分支没用并行测速排序"
+    ls_remote_calls = [
+        c
+        for c in nb_calls
+        if getattr(c.func, "id", "") == "_sh"
+        and c.args
+        and isinstance(c.args[0], ast.List)
+        and any(isinstance(e, ast.Constant) and e.value == "ls-remote" for e in c.args[0].elts)
+    ]
+    assert ls_remote_calls, "clone 前必须逐个探活（git ls-remote）"
+
+
+def test_cell_clone_probes_parallel_and_ranks_fastest() -> None:
+    """clone 候选并行探活、按耗时排序（墙掉的链路不排队白等）。"""
+    nb_tree = ast.parse(_cells("code"))
+    clone_funcs = {n.name: n for n in nb_tree.body if isinstance(n, ast.FunctionDef)}
+    assert {"_probe_clone", "_rank_clone_candidates"} <= set(clone_funcs)
+    clone_ns: dict[str, Any] = {
+        "time": time,
+        "_sh": lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    }
+    exec(
+        compile(
+            ast.Module(
+                body=[clone_funcs["_probe_clone"], clone_funcs["_rank_clone_candidates"]],
+                type_ignores=[],
+            ),
+            "<rollout.ipynb>",
+            "exec",
+        ),
+        clone_ns,
+    )
+    gate = threading.Barrier(2, timeout=5)
+
+    def _probe(item):
+        gate.wait()
+        return (item[0], item[1], 1.0 if item[0] == "fast" else 2.0)
+
+    ranked = clone_ns["_rank_clone_candidates"]([("fast", "f"), ("slow", "s")], _probe)
+    assert ranked == [("fast", "f", 1.0), ("slow", "s", 2.0)]

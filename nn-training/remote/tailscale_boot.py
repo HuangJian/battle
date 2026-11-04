@@ -383,7 +383,13 @@ def platform_net_env() -> Iterator[None]:
     与 notebook_boot 的凭据读取恰恰是公网调用（2026-09-17 Kaggle 事故：HUB_TOKEN
     读失败被吞 → /code 401 → 会话终结）。子进程继承的是**当前**环境，所以出这个
     with 之后 tailnet 代理照旧可用。
+
+    **从未注入过**（kernel 模式、或 ensure 还没跑）⇒ 原样放行：此时环境里的代理是
+    平台/用户自己的（例：`net_proxy` 给受限网络用），抹掉它反而把公网下载打死。
     """
+    if not _ORIG_PROXY_ENV:
+        yield
+        return
     saved = {k: os.environ.get(k) for k in PROXY_ENV_KEYS}
     for k in PROXY_ENV_KEYS:
         orig = _ORIG_PROXY_ENV.get(k)
