@@ -17,6 +17,7 @@
  */
 import { normalizeNewlines } from '../../utils'
 import { deepQuery, deepQueryAll } from '../selectors'
+import { pageMonaco, replaceMonacoSource } from './hub-url'
 import type { CellRef, CmdResult, FrameAdapter, SessionAdapter } from './types'
 
 export const COL_SEL = {
@@ -396,6 +397,13 @@ export class ColabAdapter implements FrameAdapter {
     }
     const md = q<HTMLElement>(el, '.markdown') ?? q<HTMLElement>(el, '.text-top-div')
     return normalizeNewlines(md?.textContent ?? '')
+  }
+
+  /** 写回 cell：Monaco model 整段替换（内容已由调用方按最小差异算好，不丢别的键）。 */
+  async replaceCellSource(cell: CellRef, source: string): Promise<CmdResult> {
+    const before = this.sourceText(cell)
+    if (before === '') return { ok: false, reason: `cell 没有可读的编辑器文本：${cell.id}` }
+    return replaceMonacoSource(pageMonaco(this.doc.defaultView), before, source)
   }
 
   private findConfigLine(

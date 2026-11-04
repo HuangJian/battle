@@ -46,6 +46,7 @@ describe('路由表：完整性（与旧 if 链的路径/方法逐条对齐）',
     // typed POST（自定义头 + 有界 body）：notebook 日志搬运 + 操作日志；两个读取端点仍是 GET
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLog')?.methods).toEqual(['POST'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookLogs')?.methods).toEqual(['GET'])
+    expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookHub')?.methods).toEqual(['GET'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookOp')?.methods).toEqual(['POST'])
     expect(CONSOLE_ROUTES.find((r) => r.path === '/api/notebookOps')?.methods).toEqual(['GET'])
     // 兜底同时接两种方法（GET = 宽松页面/404；POST = 非 API 路径的 404）。

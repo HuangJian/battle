@@ -649,6 +649,20 @@ async function main(): Promise<void> {
   const notebookLogsRoute: RouteFn = async () =>
     json({ ok: true, sessions: listNotebookSessions(notebookLogsDir()) })
 
+  // 当前 cloudflared 隧道 URL（userscript 页首同步 CFG['hub_url']）。只读 + 同一道自定义头：
+  // 跨源网页发不了这个头，而 GM_xmlhttpRequest 可以。没起隧道 ⇒ 空串（不编地址）。
+  const notebookHubRoute: RouteFn = async (req) => {
+    if (req.headers.get('X-Notebook-Companion') !== '1') {
+      return json(
+        { ok: false, reason: '缺少 X-Notebook-Companion: 1（跨源网页发不了这个头）' },
+        403,
+      )
+    }
+    // 隧道登记在共享槽 `''`（一条隧道服务所有课程）。
+    const hubUrl = entryForCourse(loadRegistry(), 'cloudflared', '')?.url ?? ''
+    return json({ ok: true, hubUrl })
+  }
+
   // 操作日志（面板按钮 / 命令 / 调度事件）：与 `/api/notebookLog` 同一套防线，但**零状态**
   // ——不占 epoch/offset/租约，只往 `<session>.ops.jsonl` 追加一行。
   const notebookOpRoute: RouteFn = async (req) => {
@@ -825,6 +839,7 @@ async function main(): Promise<void> {
     '/api/taskBundle': { GET: guard(taskBundleRoute) },
     // 静态先于通配：这四条都必须在 `/api/log/*` 之前（typed POST：自定义头 + 有界 body）。
     '/api/notebookLogs': { GET: guard(notebookLogsRoute) },
+    '/api/notebookHub': { GET: guard(notebookHubRoute) },
     '/api/notebookLog': { POST: guard(notebookLogRoute, { activity: false }) },
     '/api/notebookOps': { GET: guard(notebookOpsRoute) },
     '/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) },

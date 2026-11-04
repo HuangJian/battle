@@ -203,6 +203,42 @@ describe('bridge：host ⇄ frame', () => {
     expect(errors.join()).toContain('顶层')
   })
 
+  it('frame → host：note 在 attach 前排队、attach 后补发（hub_url 同步结果不丢）', () => {
+    const f = fakeWindow('self', 'parent')
+    const notes: Array<{ name?: string; ok?: boolean; value?: unknown; reason?: string }> = []
+    const host = createHostBridge(f.win, { onNote: (m) => notes.push(m) })
+    const frame = createFrameBridge(f.win, {
+      hostOrigins: [KAGGLE],
+      handle: async () => ({ ok: true }),
+    })
+    frame.note('hub:sync', { ok: true, value: 'updated https://hub.test' })
+    expect(f.sent).toHaveLength(0) // 还没 attach：先排队，不能发给未知目标
+
+    host.attach(FRAME, 'frame-window', 'n1')
+    f.fire({ data: { __bnc: 1, kind: 'attach', nonce: 'n1' }, origin: KAGGLE })
+    const note = f.sent.find((s) => (s.msg as { kind?: string }).kind === 'note')?.msg
+    expect(note).toMatchObject({
+      __bnc: 1,
+      kind: 'note',
+      nonce: 'n1',
+      name: 'hub:sync',
+      ok: true,
+      value: 'updated https://hub.test',
+    })
+    f.fire({ data: note, origin: KAGGLE })
+    expect(notes).toHaveLength(1)
+
+    frame.note('hub:sync', { ok: false, reason: 'dashboard 未起' })
+    expect(f.sent.at(-1)!.msg).toMatchObject({
+      kind: 'note',
+      nonce: 'n1',
+      ok: false,
+      reason: 'dashboard 未起',
+    })
+    frame.destroy()
+    host.destroy()
+  })
+
   it('帧内同窗口的伪造消息（source 不是 parent）被拒', () => {
     const f = fakeWindow('self', 'parent')
     const errors: string[] = []

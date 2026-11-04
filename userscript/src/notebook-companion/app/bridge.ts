@@ -5,7 +5,7 @@
  * 抵达该 frame，其他标签拿不到它的 WindowProxy。重复 attach 是常态（iframe 出现 + load），
  * host 只认**当前** nonce，frame 对每次 attach 都回 ready。
  */
-export type BridgeKind = 'attach' | 'ready' | 'status' | 'cmd' | 'result'
+export type BridgeKind = 'attach' | 'ready' | 'status' | 'note' | 'cmd' | 'result'
 
 export interface BridgeMessage {
   __bnc: 1
@@ -63,6 +63,8 @@ export interface HostBridgeHooks {
   timeoutMs?: number
   onReady?: (msg: BridgeMessage) => void
   onStatus?: (msg: BridgeMessage) => void
+  /** frame 主动上报的一次性通知（如 `hub:sync` 的结果）；不是命令回执。 */
+  onNote?: (msg: BridgeMessage) => void
   onError?: (reason: string) => void
 }
 
@@ -96,7 +98,7 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
   const listener = (e: BridgeEvent): void => {
     if (!isBridgeMessage(e.data)) return
     const m = e.data
-    if (m.kind === 'ready' || m.kind === 'status' || m.kind === 'result') {
+    if (m.kind === 'ready' || m.kind === 'status' || m.kind === 'note' || m.kind === 'result') {
       if (!m.nonce || m.nonce !== nonce) {
         hooks.onError?.(`nonce 不符（拿到 ${m.nonce ?? '∅'}）`)
         return
@@ -108,6 +110,10 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
     }
     if (m.kind === 'status') {
       hooks.onStatus?.(m)
+      return
+    }
+    if (m.kind === 'note') {
+      hooks.onNote?.(m)
       return
     }
     if (m.kind !== 'result' || !m.id) return
@@ -192,8 +198,17 @@ export interface FrameBridgeHooks {
   onError?: (reason: string) => void
 }
 
+export interface FrameNotePayload {
+  ok?: boolean
+  /** 文本细节（如 `updated <url>`）；`reason` 只用于失败。 */
+  value?: string
+  reason?: string
+}
+
 export interface FrameBridge {
   readonly nonce: string
+  /** frame → host 的通知；attach 之前调用先排队，attach 后补发（不丢加载期的结果）。 */
+  note(name: string, payload?: FrameNotePayload): void
   destroy(): void
 }
 
@@ -203,6 +218,23 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
   let nonce = ''
   let hostOrigin = ''
   let statusTimer: ReturnType<typeof setInterval> | null = null
+  const pendingNotes: Array<{ name: string; payload: FrameNotePayload }> = []
+
+  const postNote = (n: { name: string; payload: FrameNotePayload }): void => {
+    win.postMessage(
+      win.parent,
+      {
+        __bnc: 1,
+        kind: 'note',
+        nonce,
+        name: n.name,
+        ...(n.payload.ok === undefined ? {} : { ok: n.payload.ok }),
+        ...(n.payload.value ? { value: n.payload.value } : {}),
+        ...(n.payload.reason ? { reason: n.payload.reason } : {}),
+      } satisfies BridgeMessage,
+      hostOrigin,
+    )
+  }
 
   const stopStatus = (): void => {
     if (statusTimer !== null) clearInterval(statusTimer)
@@ -269,6 +301,7 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
         },
         hostOrigin,
       )
+      for (const n of pendingNotes.splice(0)) postNote(n)
       watchReady()
       return
     }
@@ -306,8 +339,16 @@ export function createFrameBridge(win: BridgeWindow, hooks: FrameBridgeHooks): F
     get nonce() {
       return nonce
     },
+    note(name: string, payload: FrameNotePayload = {}) {
+      if (!nonce || !hostOrigin) {
+        pendingNotes.push({ name, payload })
+        return
+      }
+      postNote({ name, payload })
+    },
     destroy() {
       stopStatus()
+      pendingNotes.length = 0
       /* 无 removeEventListener 的最小接口；页面卸载即回收 */
     },
   }

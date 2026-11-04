@@ -23,6 +23,9 @@ export class StubFrameAdapter implements FrameAdapter {
   sourceText(): string {
     return ''
   }
+  async replaceCellSource(_cell: CellRef, _source: string): Promise<CmdResult> {
+    return notYet(this.site)
+  }
   async focusConfig(_markers: string[]): Promise<CmdResult> {
     return notYet(this.site)
   }
