@@ -25,6 +25,29 @@
 
 ---
 
+## §112 控制台停课 ⇒ 不再补该课 eval 空缺（2026-11-04，用户指令「dashboard 点击停课时，如果该课还有 eval 空缺，也不需要再补了」）
+
+**信号**：控制台的「停课」与「暂停」写的是同一份暂停意图，但只有停课会删**开课标记**
+`<traj>/training-enabled.txt`（`dashboard/src/server/actions/course-lifecycle.ts::stopCourse`；
+暂停只写暂停意图）。训练侧判据因此复用同源谓词 `trainer.loop_plan.course_enabled(traj)`
+——不另写「标记存在性检查」（`trainer/once_shot.py` 已点名这是反模式）。
+
+**闸门**（`trainer/loop_eval.py::TrainingEval._course_stopped`，只在 `args.course_obj is not None`
+的课程模式生效；老的无课程路径本来就没有标记，无条件按标记判会把它的 eval 静默关掉）：
+
+- `_dispatch_delayed_eval` 入口：停课 ⇒ 本轮的延迟 eval 与 F1 旧缺口补账都不派；
+- `_drain_pending_eval` 入口：收官 drain 一局不派；
+- `_drain_rounds` 每轮派发前：drain 途中停课 ⇒ 已派出的那轮**不收回**（在飞局不动），
+  剩下的轮不再派。
+
+**行为边界**：在飞 eval 局不取消（仲裁器没有按轮撤单的 API，且 §111 需求 3 就是「在飞不动」）；
+`_eval_backfill` 不清表 ⇒ 重开课后旧缺口仍在账上、下一轮继续补。it0 基线（bc 权重）与
+m1（intent/goal）派发流不经过这两道闸，保持原语义。
+
+**被否决**：按「暂停意图」判（暂停也写它 ⇒ 停课与暂停不可分，短暂暂停恢复后会莫名补账）·
+在仲裁器里加按轮撤单 API（穿透在飞局，违反 §111 需求 3）· 停课时清空 `_eval_backfill`
+（重开课后缺口永久丢失，与 F1 的目标相反）。
+
 ## §111 eval 任务级统一派发：多轮平等发牌 + 跨轮副本平铺 + rollout 只冻结新投递（2026-11-04，用户口径）
 
 用户口径（原话拆条）：

@@ -70,6 +70,8 @@ class TrainingEval:
     #: bun 可执行文件路径（TrainingLoop 持有；延迟 eval 派发传给评估子进程）。
     bun: str
     _traj_dir: Any
+    #: 本课 traj 根（`args.traj`；停课判据读它下面的开课标记）。
+    _traj_root: Any
     _jsonl_path: Any
     _report: dict
     _last_dist_cfg: Any
@@ -110,6 +112,25 @@ class TrainingEval:
     def _eval_policy_cfg(self) -> dict:
         """rl-config 的 policy 块（每轮热读；见 loop_core 的 `_last_dist_cfg`）。"""
         return (getattr(self, "_last_dist_cfg", None) or {}).get("policy") or {}
+
+    def _course_stopped(self) -> bool:
+        """控制台「停课」= 删开课标记（`training-enabled.txt`）⇒ 本课不再补任何 eval 空缺。
+
+        2026-11-04 用户口径：停课就是「不要再为这门课花算力」，旧缺口（F1 补账 / 收官
+        drain）也不补——重开课后缺口仍在账上，届时自然续补。
+
+        信号只有标记能区分停课与暂停（暂停也写暂停意图，但保留标记；见 dashboard
+        `course-lifecycle.ts::stopCourse`）。判据**同源** `trainer.loop_plan.course_enabled`
+        ——`once_shot.py` 已点名禁止另写第二份「标记存在性检查」。
+
+        只在课程模式判（`course_obj is None` = 老的无课程路径，本来就没有标记）：无条件
+        按标记判会把那条路径的 eval 静默关掉。
+        """
+        if getattr(self.args, "course_obj", None) is None:
+            return False
+        from trainer.loop_plan import course_enabled
+
+        return not course_enabled(self._traj_root)
 
     def _eval_join_soft_sec(self) -> float:
         """PPO 收官后的软等上限（policy.evalJoinSoftSec；默认 30s，0 = 完全不站等）。
@@ -246,6 +267,10 @@ class TrainingEval:
             return
         self._eval_thread = None
         self._eval_gate = None
+        if self._course_stopped():
+            # 停课 = 不再为这门课花算力：延迟轮与旧缺口（F1）一起刹车（2026-11-04）。
+            log("[eval] 课程已停课（开课标记不存在）——本轮不派延迟 eval、不补旧缺口")
+            return
         # 补账只在**没有在跑的轮**时放行（2026-11-04 任务级仲裁后 `status()["running"]`
         # = 仲裁器里还有活跃轮）：单轮服务 ~4min，而训练 ~100s/轮。按训练轮速往仲裁器里
         # 灌旧缺口，会把当前读数永久排在旧账后面（08:34 实测的形状）。训练持续不停时
@@ -421,6 +446,10 @@ class TrainingEval:
         # 收官前先把在飞尾巴清账（同理：只观测/清账，不站等）。
         self._sweep_eval_tail()
         try:
+            if self._course_stopped():
+                # 停课 = 用户不要这门课的读数了：收官 drain 也不补（2026-11-04）。
+                log("[eval] drain: 课程已停课（开课标记不存在）——不补任何 eval 空缺")
+                return
             if getattr(args, "mode", "per-tick") != "per-tick":
                 log(
                     f"[eval] drain: 非 per-tick 模式（{getattr(args, 'mode', '?')}）"
@@ -440,7 +469,14 @@ class TrainingEval:
             log(f"[eval] drain: 逐轮收尾 {cand}（升序，各自归档权重；block={block}）")
 
             def _drain_rounds() -> None:
-                for m in cand:
+                for idx, m in enumerate(cand):
+                    if self._course_stopped():
+                        # 在飞的那轮不动（已派出去的不收回）；停课后剩下的轮不再派。
+                        log(
+                            f"[eval] drain: 课程在收尾途中被停课——中止收尾"
+                            f"（剩 {len(cand) - idx} 轮不补）"
+                        )
+                        break
                     try:
                         # 收官 drain 同样走兜底模式：没有本机 gate；节点全不可用时
                         # EvalDispatcher 才启动本机线程。

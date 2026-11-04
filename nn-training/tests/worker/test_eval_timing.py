@@ -383,6 +383,26 @@ def _summary(eval_log: Path, it: int, dropped: int) -> None:
         jf.write(json.dumps({"event": "eval_summary", "iter": it, "dropped": dropped}) + "\n")
 
 
+def _course(ts: TrainingSteps, *, opened: bool = True) -> Path:
+    """夹具切「课程模式」：开课标记住 traj 根（= `_traj_dir` 的父级）。
+
+    控制台「停课」只删这个标记（暂停保留它）⇒ 它是训练侧唯一能区分两者的信号。
+    `course_obj is None` 的老路径本来就没有标记，所以缺省夹具不受停课闸影响；
+    本 helper 只给停课矩阵用。返回标记路径（用例可随时 unlink/重建模拟停/开课）。
+    """
+    from common.protocol import COURSE_ENABLE_MARKER
+
+    ts.args.course_obj = object()
+    root = Path(ts._traj_dir).parent
+    ts._traj_root = root
+    marker = root / COURSE_ENABLE_MARKER
+    if opened:
+        marker.write_text("", encoding="utf-8")
+    else:
+        marker.unlink(missing_ok=True)
+    return marker
+
+
 class _DummyThread:
     def __init__(self, rec: list) -> None:
         self._rec = rec
@@ -577,3 +597,99 @@ def test_backfill_yields_when_eval_gate_is_busy(
     ts._dispatch_delayed_eval(91, {})
     assert calls == [90], f"当前轮照派、旧缺口不动: {calls}"
     assert ts._eval_backfill is None, "闸忙时连扫描都不做（下一轮再看）"
+
+
+# ── 停课闸（2026-11-04 用户指令）：控制台停课 ⇒ 该课不再补任何 eval 空缺 ──────────
+
+
+def test_stopped_course_dispatches_no_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """停课（开课标记被控制台删掉）⇒ 延迟 eval 与旧缺口补账都不再派；重开即恢复。"""
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    _idle_gate(monkeypatch)
+    ts = _steps(tmp_path, _tag="stopped")
+    marker = _course(ts, opened=False)
+    _archive(ts, 5, "{}")
+    ts._eval_backfill = None  # 打开补账：停课时连扫描都不该发生
+    ts._dispatch_delayed_eval(6, {})
+    assert calls == [], "停课还在派 eval"
+    assert ts._eval_backfill is None, "停课还去扫旧缺口"
+    assert ts._eval_thread is None and ts._eval_gate is None
+
+    marker.write_text("", encoding="utf-8")  # 重新开课
+    ts._dispatch_delayed_eval(6, {})
+    assert calls == [5], "重开课后没恢复派发"
+
+
+def test_stopped_course_skips_drain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """停课 ⇒ 收官 drain 一局都不派（未覆盖轮不补）；重开课后照旧逐轮补。"""
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return _DummyThread([])
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    ts = _steps(tmp_path, _tag="stopped-drain")
+    marker = _course(ts, opened=False)
+    _archive(ts, 10, "{}")
+    _archive(ts, 15, "{}")
+    ts._drain_pending_eval()
+    assert calls == [], "停课后 drain 还在补空缺"
+
+    marker.write_text("", encoding="utf-8")
+    ts._drain_pending_eval()
+    assert calls == [10, 15], "重开课后 drain 没恢复"
+
+
+def test_drain_stops_between_rounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """drain 途中停课 ⇒ 已派的不动（在飞局不收回），后面的轮不再派。"""
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        marker.unlink(missing_ok=True)  # 第一轮派出去之后用户点了停课
+        return _DummyThread([])
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    ts = _steps(tmp_path, _tag="mid-drain")
+    marker = _course(ts, opened=True)
+    _archive(ts, 10, "{}")
+    _archive(ts, 15, "{}")
+    ts._drain_pending_eval()
+    assert calls == [10], f"停课后仍派了后面的轮: {calls}"
+    assert ts._eval_thread is not None, "已派的轮不得被收回（在飞局不动）"
+
+
+def test_legacy_non_course_run_keeps_dispatching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """老的无课程路径没有开课标记——停课闸不得把它静默关掉（判据只在课程模式生效）。"""
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    ts = _steps(tmp_path, _tag="legacy")
+    assert getattr(ts.args, "course_obj", None) is None
+    from common.protocol import COURSE_ENABLE_MARKER
+
+    assert not (Path(ts._traj_dir).parent / COURSE_ENABLE_MARKER).exists()
+    _archive(ts, 5, "{}")
+    ts._dispatch_delayed_eval(6, {})
+    assert calls == [5], "无课程路径被停课闸误伤"
