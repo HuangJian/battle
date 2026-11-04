@@ -1,0 +1,247 @@
+// 课程 z7-maze —— 以 **y28-steady.it300** 为起点（不是 z5 系），在 35 关安全基地场学「走迷宫 + 找残敌」。
+//
+// 状态：草稿（2026-11-03 预注册；**未开课**）。
+//
+// ══ 0. 一句话 ════════════════════════════════════════════════════════════
+//   z5 系连跑 850 轮没学会捡道具；而 x/y 系的 `y28-steady.it300` 在**同一张 classic35-safe-base**
+//   上已经有 79.3% 拾取率 / .686 胜率 / 125 格活动半径（70 局实测）。
+//   ⇒ 换方向：**不从 z5 的价目表改起，直接从 y28 的权重与价目表继续**，只补它缺的那一项
+//     （探索/搜索），并把在 35 关上会**倒扣分**的那一项（`wSpeed` 时轴）修掉。
+//
+// ══ 1. 起点怎么来的（**行为等价迁移，不是新训**）══════════════════════════════
+//   `y28-steady.it300` 是 **schema 6 / in_ch 16**，当前栈是 **schema 7 / in_ch 17**（v7 加了 ch16
+//   `distEnemy`）。直接当 bc 会形状不符，用现成工具做三段式迁移：
+//
+//     bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/migrate_obs_channel.py \
+//       --from nn-training/weights/y28-steady/y28-steady.it300.20261021-1612.json \
+//       --to   nn-training/weights/z7-maze/z7-maze.it0.json
+//
+//   已跑，产出：`stem_shape [64,19,3,3]`（17 obs + 2 coord）· **`bit_exact_on_old_schema: true`**
+//   · `new_channel_col_norm: 0.0` ⇒ **新通道权重为 0，旧 schema 输入下 logits 与源模型逐位相同**。
+//   即：本课的 it0 = y28.it300 的**完整能力**，一个新通道的零列，行为零漂移。
+//
+// ══ 2. y28 在 35 关上的体检（70 局，本机，`max_ticks=36000`）══════════════════
+//     win .686 · kills 16.54 · cells 中位 **125** · ticks 中位 17151 · 拾取率 **79.3%** · 承伤 532
+//     outcome: stage_clear 48 / gameover 15 / **max_ticks 7（10%）**
+//
+//   失败结构（每关 2 局，只作方向）：
+//     · **打不完（timeout）**：Diamond 2/2 打满 36000 拍（kills 9.5 / cells 62）· Checkers 1/2
+//       （cells 46 / kills 6）· Twin Towers / Bunker Hill / Gridlock / Spider 各 1/2
+//     · **死得快**：Outpost（cells 78 / 12649 拍）· Waterways（cells 40 / 4864 拍）
+//       · Riverbed（cells 40 / 7696 拍）
+//   ⇒ 主靶是**大图上找不到剩下的敌人**（Diamond 打满 36000 拍只杀 9.5 个），不是「不会打」。
+//     y28 的价目表里**没有任何探索/搜索项**（无 `wWalk`、无 `cellsVisited`）。
+//
+// ══ 3. 改动清单（3 项；其余 19 参逐字 = y28-steady）═══════════════════════════
+//   项                        y28 → 本课            理由 / 剂量
+//   ────────────────────────────────────────────────────────────────────────────
+//   ① `wSpeed` 时轴           `(13000-clearTick)/1400` →       **原式在 35 关会倒扣分**：没有 `max(0,·)`，
+//                              `max(0,20000-clearTick)/1400`     35 关胜局 ticks 中位 17151 ⇒ (13000−17151)/1400
+//                                                                = **−2.96 × wSpeed 3.0 = −8.9 分**（慢赢被罚）。
+//                                                                改成 `max(0,·)` 且把拐点挪到 20000：
+//                                                                17151 拍 ⇒ +6.1 分 · 9000 拍 ⇒ +23.6 分 · ≥20000 ⇒ 0。
+//   ② `wWalk`（新增）          — → **0.05 / walkCap 200**          y28 无探索项。200 格给 10 分
+//                                                                （killEV = 3.0×16.5 = 49.5 ⇒ 20%），
+//                                                                足以把「去没去过的地方」从免费变成有价。
+//   ③ `wApproach`              0.008 → **0.004**                 **v16 把 pickupDist 从曼哈顿改成 BFS 路径距离**
+//                                                                （DECISIONS §2026-11-03-goalnn-pickup-path-dist
+//                                                                明写「按旧口径标定的剂量复用前须重算」）。
+//                                                                BFS ≥ 曼哈顿 ⇒ Σdist 变大，保守减半。
+//                                                                ⚠ it5 回读真实 Σmin(dist,6)，若 >1.5× 预期再降。
+//
+//   **不动**（逐字，22 参里的其余 19 个）：`wKill 3.0` · `wHit 0.32` · `wDmg 0.12` · `wMiss 0.3`
+//   · **`wPickup 0.8`（无 cap）** · `wAcc 2.0` · `wDist 4.0` · **`wWin 48.0`（常数）**
+//   · `wHurt 150` · `wEncl 12.9` · `wCorner 110` · `wThreat 120` · `wNearSq 48` · `wBlock 110`
+//   · `wFrFreeze 3` · `wFrBomb 3` · `wFrStar 4` · `wBackHits 1.2` · `wSideHits 0.3` · `wWinHit 1.6`。
+//
+//   ⚠ **terminal 补全 4 项**（y28 只写了 `timeout/-35` 与 `lives_exhausted/-35`）：
+//     加 `base_destroyed: -35`（钢基地物理不可毁，恒不触发）与 `stage_clear: 0`（默认值，写上更明确）。
+//     `biz/reward_library.py:245` 的 OUTCOMES 四项必须列全，这是硬闸。
+//
+// ══ 3b. 2026-11-03 22:57 首次开课：**3 轮 KL 熔断，已修** ═════════════════════
+//   熔断读数：it1 kl **0.7752** / it2 0.6581 / it3 0.3720（规则：kl ≥ 0.075 连续 3 轮）· entropy 1.14→0.79
+//   · 同栈对照（同期各腿 it1）：z5-safe-base **0.0038** · z5-pick 0.0132 · z6-porter 0.0055 · z6-speed 0.0033
+//     ⇒ **z7 是 200 倍异常，不是「首轮常态」**，也不是熔断阈值太严。
+//   · 直接证据：`policy_new_rms` **0.338**（其余腿 0.0000）· `value_new_rms` 0.05
+//     · value 头输出 **39.9** 而 `mean_ret ≈ 1` ⇒ **value 过估计 40 倍 ⇒ value loss 爆 ⇒ 参数被改了几倍**。
+//   · 根因（用 it0 的 64 局实测指标复算 Φ 的分量）：
+//       wKill*kills +35.3 | wWin +24.8 | wSpeed +10.1 | wHit +8.5 | wWalk +5.4 | wPickup +3.1
+//       **-wDmg*dmg −74.2** | -wCorner −19.4 | -wThreat −9.2 | -wMiss −3.7 | -wHurt −3.7
+//       ⇒ **Φ ≈ −25.3（负的）**，而 value 头还在输出 39.9（它拟合的是 c20 的 Φ）。
+//     `wDmg 0.12` 是按 c20 的承伤水平标的；**35 关实测承伤 618.7**（it0 64 局均值），是 c20 的 2–3 倍
+//     ⇒ 承伤罚比击杀收入大一倍，Φ 变负。
+//   · 修正（2026-11-03 23:14）：**`wDmg 0.12 → 0.042`**（按「承伤罚占正项 30%」重标，
+//     与 z5 的 79/250 = 32% 同比例）⇒ 复算 Φ ≈ **+22.7**，与 value 头的 39.9 同量级；
+//     **`lr 1.2e-4 → 6e-5`**（换环境首轮降步长）。
+//   · **没改**：`wCorner 110`（贡献 −19.4 = 正项的 22%，也偏重，但一次只改一件）·
+//     `normalize_ret`（per-tick 路径 `worker/ppo/engine.py` 写死 False，课程里的值**不生效**，改了是安慰剂）。
+//   · 重开课前：**清掉 `tmp/z7-maze`**（it1–3 的 traj 与 opt 动量都带着爆过的状态），否则 resume 会把坏动量带进来。
+//
+// ══ 3c. `breakers_off: true`（本课是**唯一**开着的课程）═══════════════════════
+//   换环境迁移的首轮 KL 天然爆表（实测 it1 0.775 / 0.800，正常带 0.003–0.013），
+//   按 `KL_BREAK 0.075 × 3 轮` 必在 it1–4 熔断，而「`wDmg` 按旧环境承伤密度标的」
+//   这种偏差**要跑起来才看得出**（本次就是这么发现的：35 关承伤 618.7 ≈ c20 的 2–3 倍）。
+//   ⇒ 本课开 `breakers_off: true`：KL / 熵 / NaN 三类过程熔断全部短路（连击归零、永不 tripped）。
+//   ⚠ 代价：策略崩坏时**不会停车**，`--serve` 下会一路跑到 300 轮。必须人工盯：
+//     · `kl` 应逐轮回落（修正后 it1 0.43 → it5 0.09）；**连续 5 轮 > 0.3 就人工停**
+//     · `mean_ret` 应为正且上升；`value` 与 `mean_ret` 同量级（差 >10 倍 = value 头没拟合上）
+//     · `winRate` 不应跌破 0.25
+//   ⇒ 价格标定完成后（KL 稳定 < 0.05 且 mean_ret 为正），**把本键删掉或写 false**，
+//     重新被正常护栏接管。这个开关只用于「迁移首段」，不是长期配置。
+//
+// ══ 4. 一个反直觉的事实（写下来防误传）════════════════════════════════════
+//   y28 的 `wPickup : wKill` = **0.8 : 3.0 = 0.27**，而 z5 的 = **4.0 : 15.0 = 0.27** —— **完全一样**。
+//   ⇒ 「z5 捡不到是因为道具不值钱」这个说法**不成立**（我 20:15 那版 z6-porter 的立项表写错了，
+//     那是把 `y20-stack2` 的价目表当成了 y28 的）。y28 能捡 79.3% 而 z5 只有 48.7%，
+//     差的是**姿态族**（Hurt/NearSq/Corner/Block/Encl/Threat/Miss/Acc/Dist 九项，z5 一项都没有）
+//     与**无 cap 的 `wPickup`**，不是单枚道具的价钱。
+//   ⇒ 本课不抬 `wPickup`（0.8 保留），只在姿态族的基础上补**探索**。
+//
+// ══ 5. 判据与止损（it60 结；35 关 × 20 seed = 700 局）══════════════════════════
+//   主 1（**本课的守门项**）：拾取率 **≥ 75%**（基线 79.3%，允许 −4.3pp 的漂移，不许更少）
+//   主 2：win **≥ .72**（基线 .686）
+//   主 3：`timeout` **≤ 6%**（基线 10%；Diamond/Checkers 是主战场）
+//   主 4：`cellsVisited` 中位 **≥ 135**（基线 125）
+//   副 1：kills/局 ≥ 16.0（基线 16.54）· 承伤/局 ≤ 560（基线 532）
+//   反签名（任一破 ⇒ **立刻停**，不改判据硬凑）：
+//     · 拾取率 **< 70%** —— 价目表改造把 y28 的能力洗掉了，本课前提不成立
+//     · kills < 15.0 —— 探索把战斗挤掉了
+//     · `timeout > 12%` —— 越探索越打不完
+//   中间读点 **it30**：拾取率 ≥ 75% 且 cells ≥ 128 ⇒ 继续；否则杀腿。
+//   ⚠ 读曲线时同 it 多条 summary **按 games 取最大**，`games < 300` 的点不参与判断
+//     （`reports/z6-it40-readout-20261103.md` §1 的教训）。
+//
+// ══ 6. 已知局限 ══════════════════════════════════════════════════════════
+//   1. **起点是「别人家的权重」**：y28 从 c20 一路训上来，它的价目表与 35 关的适配**未验证**
+//      （本课只重标了 2 处）。若 it60 出现「拾取率保住但 win 掉了」，先怀疑 `wSpeed` 的重标剂量。
+//   2. **`wApproach` 的 BFS 重标是估的**（减半，无 Σdist 实测）。it5 必须回读。
+//   3. **每关 2 局的失败结构只作方向**：Diamond 2/2 timeout 是 n=2 的读数。本课把
+//      Diamond / Checkers / Waterways / Riverbed 四关列为重点观察。
+//   4. **本课不治顶墙**：v14 掩码已把 advance 掩掉（`restrictAdvanceMask`），`wallPress/千` 只作回归读数。
+//   5. **第二阶段（正常场学防守）不在本课**：那要再加 `wBase`/`basePressureSum` 并换 `classic35`
+//      （基地非钢）。本课只做「安全场：走迷宫 + 找残敌 + 保持拾取」。
+//
+// ══ 7. 预算 ══════════════════════════════════════════════════════════════
+//   `iters 300 / max_hours 24 / eval_every 5 / eval 20 seed × 35 关`。
+//   训练本体 ≈ 300 × 100s ≈ 8.3h（云机段 31s/轮 ⇒ ≈2.6h）；eval 60 点 × 700 局 ≈ 7h（吃 rollout 间隙）。
+//
+// ══ 8. 运行约束 ═════════════════════════════════════════════════════════
+//   · **开课前必须重启 hub + 全部 worker**（METRICS_VERSION 16 + v14 mask）；
+//   · `target_transitions 32768` = `mb 1024` × 32；
+//   · 新目录 §15.5：`tmp/z7-maze` / `nn-training/weights/z7-maze`（**it0 已由迁移脚本落盘，不要覆盖**）；
+//   · 新种子流 `paired_rotate_seed: 20261105`（20261028/20261103/20261104 已占用）。
+{
+  "version": 5,
+  "name": "z7-maze",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wMiss*aimMisses",
+      // 收入（**无 cap**，y28 原样：每枚 0.8 分，与 wKill 3.0 的比值 0.27，和 z5 的 4/15 相同）
+      "+ wPickup*powerUpsCollected",
+      // 塑形
+      "- wApproach*where(pickupDist<0, 0, pickupDist)",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wDist*aimHitDistSum/(aimHits+1)",
+      // 收入：赢（常数 48）+ 速度（**本课加 max(0,·) 并把拐点挪到 20000**）
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, winSpan-clearTick)/1400, 0)",
+      // 价格
+      "- wHurt*hurtWeight/(ticks+1)",
+      // 塑形
+      "- wEncl*enclWeightTicks/(ticks+1)",
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+      "- wThreat*threatTicks/(ticks+1)",
+      "- wNearSq*nearSqSum/(ticks+1)",
+      "- wBlock*(idleTicks-stopTicks)/(ticks+1)",
+      // 收入
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      "+ wBackHits*backHits",
+      "+ wSideHits*sideHits",
+      "+ wWinHit*hitsInFreezeShieldWindow",
+      // ★ 本课新增：探索/搜索（y28 完全没有这一项）
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+    ],
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.32,
+      "wDmg": 0.042,
+      "wMiss": 0.3,
+      "wPickup": 0.8,
+      "wApproach": 0.004,
+      "wAcc": 2.0,
+      "wDist": 4.0,
+      "wWin": 48.0,
+      "wSpeed": 3.0,
+      "winSpan": 20000.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wNearSq": 48.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 3.0,
+      "wFrBomb": 3.0,
+      "wFrStar": 4.0,
+      "wBackHits": 1.2,
+      "wSideHits": 0.3,
+      "wWinHit": 1.6,
+      "wWalk": 0.05,
+      "walkCap": 200.0,
+    },
+    "terminal": {
+      "timeout": -35.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z7-maze/z7-maze.it0.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 6e-5,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 6e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261105,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z7-maze/weights.json",
+  "traj": "tmp/z7-maze",
+  "breakers_off": true,
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z7-maze",
+  "backup_prefix": "z7-maze",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

@@ -1,0 +1,200 @@
+// 课程 z6-speed —— z6-porter 的并行腿：**只加「快赢多给」的时轴奖**，打磨局长/节奏。
+//
+// 状态：草稿（2026-11-03 预注册；**未开课**，与 `z6-porter` 并行）。
+//
+// ══ 0. 一句话 ════════════════════════════════════════════════════════════
+//   z5 系的「赢」是**常数价**（`wWin 60`，赢就 60，5 千拍赢和 3 万拍赢一个价），
+//   唯一的节奏项 `wPace` 只罚「杀得少还拖」（700 局里只在 22% 的局生效，中位 −7538 拍不触发）。
+//   ⇒ **没有任何一项为「更快地赢」付钱**。本课只加这一项，其余 28 参逐字 = z5-pick。
+//
+// ══ 1. 立项依据（2026-11-03，700 局实测）══════════════════════════════════
+//   `z5-safe-base.it500` / `z5-pick.it350` 的胜局 ticks 分布（`max_ticks=36000` 面板）：
+//
+//     权重     胜局 P10   中位     P90     最大     负局中位
+//     it500     5832    9695    21201   33032    8560
+//     it350     6012    9662    19391   33881    7795
+//
+//   ⇒ **胜局 P10 与 P90 差 3.3 倍**，而 reward 完全一样。9 千拍和 2 万拍的通关在同一价位上，
+//     「快赢」没有任何梯度；`wPace`（`ticks − kills×1200`）只在 20–22% 的局转正，罚的是「拖着不杀」，
+//     不是「赢得慢」。
+//   y20-stack2 的证据（c20）：把 `wWin` 从常数改成 `5.0×(8000−clearTick)/1400` + `timeout −15`
+//   ⇒ 峰值 **0.723 / 池外 0.701（四条门全过）**，同批 wall/far/escape 三腿全停。
+//   本课照那个结构，但**不改 wWin 的语义**（避免把「赢」本身降价），改成**加一项速度奖**。
+//
+// ══ 2. 唯一改动（1 项）════════════════════════════════════════════════════
+//   `+ wSpeed * where(clearTick >= 0, max(0, winSpan - clearTick) / winSpan, 0)`
+//     `wSpeed = 20.0` · `winSpan = 12000`
+//
+// ── 剂量推导 ────────────────────────────────────────────────────────────
+//   · 中位胜局 9695 拍 ⇒ 速度奖 = 20 × (12000−9695)/12000 = **+3.8 分**
+//   · P10 胜局 5832 拍 ⇒ **+10.3 分**
+//   · 超过 12000 拍的胜局 ⇒ 0 分（不罚，只是不奖）
+//   ⇒ 总量对中位局 +3.8 / 对快局 +10.3，相对 killEV（15×14.6 ≈ 219）是 **1.7%–4.7%**，
+//     不会改变 advantage 的尺度（`normalize_ret: false` 下这点很重要）。
+//   · 为什么不是「把 wWin 拆成 40+20」：那会**降低**赢的净价（中位局 60→45.8），
+//     与「提高胜率」的目标冲突。**加钱而不改语义**是本课的设计原则。
+//   · `winSpan = 12000`：取在胜局中位（9695）与 P90（21201）之间偏短的一侧，
+//     让「中位以上的局」全部落在梯度区里；若取 20000，中位局只有 2.3 分的梯度（太弱）。
+//   · `max(0, ...)` 是必需的：`clearTick > winSpan` 的胜局不得变成负奖（否则「慢赢不如不赢」，
+//     而 `timeout: -50` 意味着慢赢仍远优于输）。
+//
+// ══ 3. 与 z6-porter 的关系（为什么是两条腿而不是一条）══════════════════════
+//   `z6-porter` 改 6 项（拾取价 / 分型 / 空放罚 / 角落税 / wWalk），靶心是「捡 + 走 + 打」；
+//   本课改 1 项，靶心是「耗时」。两条腿**同起点 `z5-pick.it350`、同 `paired_rotate_seed 20261104`、
+//   同面板**，所以任何一条都能和 it0 逐座位配对；
+//   ⚠ 但**两条腿之间不能互相配对归因**（差 7 项）——它们回答的是两个不同问题，不是 A/B。
+//   若两条都赢，第三腿再做「porter + speed」的合并。
+//
+// ══ 4. 起点与缰绳 ════════════════════════════════════════════════════════
+//   起点 = `z5-pick.it350`（理由见 `z6-porter` §4：唯一做到 cells ↑ 且 wall ↓ 的权重，Checkers 破 0）。
+//   ⚠ 它是 v13 权重，在 **v14 掩码**下行为会变（advance 被掩，顶墙物理消失）⇒
+//     **it0 必须用新工具链重测**，本课判据全部写成「相对 it0」。
+//   `kickstart_ref: false`；新目录 `tmp/z6-speed` / `nn-training/weights/z6-speed`（§15.5，禁续跑）。
+//   `paired_rotate_seed: 20261104`（与 z6-porter 同值 ⇒ 两腿逐座位可比；z5 系用的是 20261028/20261103）。
+//
+// ══ 5. 判据与止损（it60 结；35 关 × 20 seed = 700 局）════════════════════════
+//   主 1（本课靶心）：胜局 ticks 中位 **≤ 8200**（it0 约 9695，−15%）
+//   主 2：胜局 ticks P90 **≤ 18000**（it0 约 19400–21200）
+//   主 3：win **不低于 it0**（速度奖不得用胜负换）
+//   副 1：`kills/局 ≥ it0`（快不等于少杀）
+//   副 2：拾取率、`cellsVisited` 中位、`hitRate` 三项**只报不判**（本课不碰它们，掉了说明有耦合）
+//   反签名（任一破 ⇒ 停）：
+//     · `timeout > 1.20× it0`（**2026-11-03 22:30 修正**：原写「> 8%」，但 it0 实测 15.9%
+//       ⇒ 阈值从第一天就破；改成相对起点，当前门 = 19.1%）· `dmg/局 > 1.10× it0`
+//     · `win` 掉 > 3pp（速度奖买不到快，只买到莽）
+//   中间读点 **it30**：胜局 ticks 中位 ≤ 9300 ⇒ 继续；否则杀腿。
+//   ⚠ 判决用「窗口 + 同轮配对」，不用单点门（§122⑦）。
+//
+// ══ 6. 已知局限 ══════════════════════════════════════════════════════════
+//   1. **速度与拾取天然冲突**：多捡一枚约 +12 步（postmortem §5 的算术），而本课为「少步数」付钱。
+//      若 it60 出现「tick 变短但拾取率掉 > 5pp」，说明两者在同一维度上抢预算 ⇒ 合并时要把
+//      `wSpeed` 与 `wPickup` 的比例重排（不是简单相加）。
+//   2. **20 分的绝对量很小**（中位局 +3.8），可能测不出；若 it30 无变化，先看 `wSpeed 20→40`
+//      有没有响应，再决定是否杀腿（别直接判「时轴无效」）。
+//   3. v14 掩码的行为变化未测（同 z6-porter）。
+//   4. `clearTick` 是「敌人首次全灭」的 tick，与 `stage_clear` 之间还隔着 BONUS TIME（≈600 拍）；
+//      本课奖的是「清场快」，不是「结算快」——这是刻意的（清场是玩家能控制的部分）。
+//
+// ══ 7. 预算 ══════════════════════════════════════════════════════════════
+//   `iters 300 / max_hours 24 / eval_every 5 / eval 20 seed × 35 关`（比 porter 短：
+//   单变量、判据只看 ticks，不需要 400 轮）。
+//   ⚠ 与 z6-porter 并行时**两腿共享 worker 池**：并发 2 条腿时每条约 60s/轮（z5 单腿 100s/轮）。
+//
+// ══ 8. 运行约束 ═════════════════════════════════════════════════════════
+//   · **开课前必须重启 hub + 全部 worker**（METRICS_VERSION 16 + v14 mask，同 z6-porter）；
+//   · `target_transitions 32768` = `mb 1024` × 32；`paired_rotate_seed` 与 porter 同值；
+//   · 开课后不要编辑本文件。
+{
+  "version": 5,
+  "name": "z6-speed",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      "- wIdle*min(idleTicks, idleCap)",
+      // 拾取趋近
+      "- wApproach*where(pickupDist < 0, 0, min(pickupDist, approachCap))",
+      // 分型拾取
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      // ★ 本课唯一新项：快赢多给（不罚慢赢，只奖快）
+      "+ wSpeed*where(clearTick>=0, max(0, winSpan-clearTick)/winSpan, 0)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.5,
+      "walkCap": 200.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wIdle": 0.05,
+      "idleCap": 800.0,
+      "wApproach": 0.02,
+      "approachCap": 6.0,
+      "wFrFreeze": 4.0,
+      "wFrBomb": 4.0,
+      "wFrStar": 6.0,
+      "wSpeed": 20.0,
+      "winSpan": 12000.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z5-pick/z5-pick.it350.20261103-185732.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261104,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z6-speed/weights.json",
+  "traj": "tmp/z6-speed",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z6-speed",
+  "backup_prefix": "z6-speed",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

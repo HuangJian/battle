@@ -942,6 +942,36 @@ function logProbAt(logits: Float32Array, mask: number[] | null, idx: number): nu
   return Math.log(_logpBuf[idx] / sum + 1e-8)
 }
 
+/** 掩码 argmax：并列取最小索引；全掩码退末位（与 `export-eval-game` 同语义）。
+ *
+ *  只服务 `--teacher-argmax`：BC 语料要的是「**教师的最优动作**」，不是「教师的采样」。
+ *  `sampleCat` 落的是策略分布的样本（含随机性），直接当 BC 标签会把噪声也学进去。 */
+function argmaxCat(logits: Float32Array, mask: number[] | null): number {
+  let best = -Infinity
+  let bi = logits.length - 1
+  for (let i = 0; i < logits.length; i++) {
+    const v = mask && mask[i] !== 1 ? -1e9 : logits[i]
+    if (v > best) {
+      best = v
+      bi = i
+    }
+  }
+  return bi
+}
+
+/** 采样 / argmax 的统一出口：返回形状与 `sampleCat` 一致（idx + 该动作的 logp）。
+ *  两者 logp 同 softmax 口径（`logProbAt`），所以 PPO 的 ratio 对两种模式都良定义。 */
+function pickCat(
+  logits: Float32Array,
+  mask: number[] | null,
+  rng: () => number,
+  greedy: boolean,
+): { idx: number; logp: number } {
+  if (!greedy) return sampleCat(logits, mask, rng)
+  const idx = argmaxCat(logits, mask)
+  return { idx, logp: logProbAt(logits, mask, idx) }
+}
+
 export interface ShardData {
   obs: Uint8Array[]
   scalars: Float32Array[]
@@ -1218,6 +1248,8 @@ function runOne(
    * 经 `--decision-k` 透传（shard manifest 的 `k` 记有效值）。
    */
   decisionK: number = DEFAULT_DECISION_K,
+  /** `--teacher-argmax`：动作取 argmax 而非采样（BC 语料用；PPO rollout 保持采样）。 */
+  teacherArgmax = false,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -1502,8 +1534,8 @@ function runOne(
       // 掩码宽度随权重走（legacy 7 / v6 9）；`computeMasks` 的 v6 分支返回
       // move4/fire3/hold2（`obs-encoder.ts:848-858`），legacy 返回 move5/fire2。
       const masks = computeMasks(world, v6)
-      const mv = sampleCat(model.moveLogits, masks.move, rng)
-      const fr = sampleCat(model.fireLogits, masks.fire, rng)
+      const mv = pickCat(model.moveLogits, masks.move, rng, teacherArgmax)
+      const fr = pickCat(model.fireLogits, masks.fire, rng, teacherArgmax)
       const value = model.valueOut[0]
       decisionTicks++
 
@@ -1538,7 +1570,7 @@ function runOne(
       let hd: ReturnType<typeof sampleCat> | null = null
       if (v6) {
         restrictAdvanceMask(world, aMove, masks)
-        hd = sampleCat(holdLogitsOf(model), masks.hold, rng)
+        hd = pickCat(holdLogitsOf(model), masks.hold, rng, teacherArgmax)
       }
 
       // 记录本决策步的指标快照（与 obs 行同刻状态——reward 由 Python 公式引擎
@@ -2180,6 +2212,8 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
   // 缺省 = 均匀 K（旧 manifest/_rl_report 逐字节不变）。
   let decisionEvents = false
+  // BC 语料模式（见 runOne 的 teacherArgmax）
+  let teacherArgmax = false
   // 决策周期 K（plan/k5-rhythm.plan.md）：缺省 = 单一来源常量（10，旧行为逐字节不变）；
   // 仅课程 decision_k≠10 时由 --decision-k 显式传入（值非法 = 响亮拒，不静默回退）。
   let decisionK = DEFAULT_DECISION_K
@@ -2194,6 +2228,8 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--lives-override') livesOverride = args[++i]
     else if (args[i] === '--player-level') playerLevelOverride = args[++i]
     else if (args[i] === '--dodge') dodgeArg = args[++i]
+    // BC 语料模式：动作取 argmax（教师的最优动作），不采样本。PPO rollout 不传。
+    else if (args[i] === '--teacher-argmax') teacherArgmax = true
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
@@ -2278,6 +2314,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         initSnapshotPath ? { path: initSnapshotPath } : null,
         decisionEvents,
         decisionK,
+        teacherArgmax,
       )
       decisionReadouts.push(res.decisionReadout)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1

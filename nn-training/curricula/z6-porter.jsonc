@@ -1,0 +1,235 @@
+// 课程 z6-porter —— 把 x/y 系的「价目表族」整组移植到 v6 的 35 关：**抬拾取、罚空放、加角落税**。
+//
+// 状态：草稿（2026-11-03 预注册；**未开课**，开课由人在控制台走 W4 会话）。
+//
+// ══ 0. 一句话 ════════════════════════════════════════════════════════════
+//   z5 系连跑 850 轮（z5-safe-base 500 + z5-pick 350）没能把「捡道具」训出来。
+//   同图同 seed 的对照给出了答案：x/y 系的 `y28-steady.it300` 在**同一张 classic35-safe-base** 上
+//   捡 **94.6%**（前 4 关）/ **84.8%**（前 16 关）、走 **141 格**；z5-pick 只捡 58.3% / 走 102 格。
+//   差别不在环境，在**价目表**：z5 是 15 参极简表，x/y 系是 22 参的「kill 便宜 + 拾取值一个 kill +
+//   整套姿态税」。本课把那三件事按 v6 的尺度接上。
+//
+// ══ 1. 立项依据（2026-11-03 20:00 实测，同图同 seed 池）══════════════════════
+//   面 板 = `classic35-safe-base`，seed `2000000001..`，greedy，`max_ticks=36000`，全本机。
+//
+//     权重                         拾取率(全35关)  win    kills  cells中位  ticks中位  承伤
+//     y28-steady.it300（x/y 系）      **.793**     .686   16.54    125      17151     532   （70 局）
+//     z5-pick.it350                   .487        .457   14.78    102       8798     674   （700 局）
+//     z5-safe-base.it500              .487        .429   14.59     93       9336     658   （700 局）
+//
+//   分段（y28 同一批 70 局）：前 4 关 .946（8 局）· 前 6 关 .918（12 局）· 前 16 关 .848（30 局）· 全 35 关 **.793**。
+//
+//   ⇒ **同一个 26×26 迷宫、全 35 关，x/y 系捡 79.3%、走 125 格、赢 68.6%；z5 系捡 48.7%、走 93–102 格、赢 43–46%。**
+//     差 30.6pp 的拾取率、23pp 的胜率、31 格的活动半径，**而且承伤还低 126**。
+//     ⚠ **更正（2026-11-03 23:00，开课 40 轮后复核）**：本文件初版写「y28 的 `wPickup:wKill` = 3.0:3.0
+//     = 一枚道具值 1 个击杀」——**那串数字是 `y20-stack2` 的，不是 y28-steady 的**。
+//     y28 的真实价目表是 **`wPickup 0.8 : wKill 3.0` = 0.27**，与 z5 的 `4.0:15.0` = 0.27 **完全一样**。
+//     ⇒ 「z5 捡不到是因为道具不值钱」这个论断**不成立**（本课 40 轮抬到 15 倍价、pickup 纹丝不动，
+//       与这条更正一致）。真正差的是：**姿态族**（Hurt 150 / NearSq 48 / Corner 110 / Block 110 /
+//       Encl 12.9 / Threat 120 / Miss 0.3 / Acc 2.0 / Dist 4.0 —— z5 一项都没有）
+//       与 **`wPickup` 无 cap**（y28 不封顶；z5 封顶 6 枚 = 24 分）。
+//     本课保留原参数不动（作为「6 项移植」的实验），但**结论只能由 `wCorner`/`wMiss` 承担**，
+//     不能归给 `wPickup`。后续方向见 `z7-maze`（直接以 y28 权重为起点）。
+//
+// ══ 2. 新工具链带来的三件事（本课必须按新口径设计）══════════════════════════
+//   ① **v14 掩码：顶墙在推理层已被禁**（`45fb46c5`）。v6 的 move 兼管朝向，所以不掩 move；
+//      改为「选定 move 后」用 `corridorCells(cap=1)` 置 `hold[0]`（advance）=0，`hold[1]` 恒 1
+//      ⇒ 面朝墙仍可转向/停住，但**不可能再顶着墙前进**。
+//      ⇒ 本课**不加 `wWallPress`**：不是因为不能（v15 已把 `wallPressTicks` 接进 METRICS idx89），
+//        而是因为 advance 被掩后该列应趋近 0，再定价就是给一个已经被消除的行为付钱。
+//        `wallPress/千` 在本课只作**回归读数**（验证掩码真的生效），不进公式。
+//   ② **v15：`wallPressTicks`（idx89）可定价** —— 本课不用，留给「掩码失效时」的补救腿。
+//   ③ **v16：`pickupDist` 改为 BFS 路径距离**（`9c33a620`）。旧列是曼哈顿直距 ⇒ 墙后 2 格的道具
+//      实际要绕 15–20 格，`-wApproach·dist` 在墙这侧取到最小、**势能把策略钉在原地**。
+//      ⇒ `wApproach` **第一次拿到正确量纲**；本课保留 0.02 **不重标**：
+//        势能的作用是「最后一公里的方向」，BFS 修的是「错误方向」，不是剂量。
+//      ⚠ 但 `Σwhere0(pickupDist)` 会变大（BFS ≥ 曼哈顿）⇒ it5 必须回读真实 Σ，若 > 1.5× 预期再降。
+//   ④ **METRICS_VERSION 16 ⇒ 所有旧 shard 作废**（`iter_shard_dirs` 静默拒收）。
+//      本课必须**从 it1 起跑**、新 out/traj、且开课前重启 hub + 全部 worker（`code.zip` 快照）。
+//
+// ══ 3. 改动清单（6 项；其余 28 参 + terminal 四项逐字 = z5-pick）════════════════
+//   项                      z5-pick → 本课        剂量来源
+//   ─────────────────────────────────────────────────────────────────────────
+//   `wPickup`              4.0  → **15.0**       比值法：对齐 y28 的 `3:3`（一枚道具 = 1 杀）
+//   `wFrFreeze`            4.0  → **10.0**       同比值（y28 的 2.0/3.0）
+//   `wFrBomb`              4.0  → **10.0**       同上
+//   `wFrStar`              6.0  → **15.0**       y28 的 3.0/3.0 = 1.0×，本课取 1.0×（星最值钱）
+//   `wMiss`（新增）          —   → **0.35**       目标「占 killEV 15%」：it350 的 miss 94.3/局
+//                                                ⇒ 0.35×94.3 = 33 分 ≈ 219×15%
+//   `wCorner`（新增）        —   → **550**        目标 22%：`cornerWeightTicks/(ticks+1)` 稳态 0.0876
+//                                                ⇒ 550×0.0876 = 48 分 ≈ 219×22%
+//   `wWalk`                0.5  → **0.15**       让位：姿态族已经有空间偏好，避免重复付费
+//                                                （回到 z4-pick-wall 的值；不摘，因为 z2-r1walk 证过它是移动的开关）
+//
+//   **不动**（逐字）：`wKill 15` · `wHit 1.5` · `wWin 60` · `wBase 3` · `wDmg 0.12` · `wDeath 18`
+//   · `wPace 6/1200/1000/36` · `wBrick 0.25/12` · `walkCap 200` · `pickupCap 6` · `wThreat 0.01/500`
+//   · `wDef 2.5/0.15/80` · `wIdle 0.05/800` · `wApproach 0.02/6` · terminal 四项。
+//
+//   ⚠ **`wMiss` 与 `wHit` 是同一发的两侧**（`aimMisses` ≡ `aimHits` 的镜像，§123 记过「勿同腿定价」）。
+//     y28 同时开着两者（wHit 0.2 + wMiss 0.35），本课照此：`wHit 1.5` 保留、`wMiss 0.35` 新增
+//     ⇒ 一发的净价 = 命中 +1.5 / 脱靶 −0.35，比值 4.3:1。**若 it30 命中率不涨反跌，先摘 `wMiss`。**
+//   ⚠ **`wCorner` 用速率形式** `/(ticks+1)`（y28 原样），与 z5 的累计封顶项混用是合法的
+//     （Φ 逐行差分，见 `biz/reward_library.py` 头注），但**不能把它的量级与累计项直接比**。
+//
+// ══ 4. 起点与缰绳 ════════════════════════════════════════════════════════
+//   起点 = `nn-training/weights/z5-pick/z5-pick.it350.20261103-185732.json`
+//          （**理由**：它是唯一在 35 关上做到「cells ↑ 且 wall ↓」同时发生的权重
+//           —— cells 93→102、wall/千 620→576、Checkers 从 0% 破 0 到 .20；
+//           代价是命中率掉到 .234，本课的 `wMiss` 就是冲着这个来的。）
+//   ⚠ 起点是 v13 时代的权重：在 v14+ 的掩码下它的**行为会变**（advance 被掩，顶墙物理消失）
+//     ⇒ **it0 必须用新工具链重测**，不能拿 z5-pick 报的 .457 当基线。本课头注里的判据都写成
+//     「相对 it0」，具体数值等重测后再回填。
+//   `kickstart_ref: false`（与 z5 系一致，不锁旧策略）。
+//   新目录 §15.5：`tmp/z6-porter` / `nn-training/weights/z6-porter`、opt fresh、**禁续跑**；
+//   新种子流 `paired_rotate_seed: 20261104`（20261028/20261103 已被 z5 与 z5-pick 占用，§15.1）。
+//
+// ══ 5. 判据与止损（it60 结；面板 = 35 关 × 20 seed = 700 局）══════════════════
+//   主 1（拾取，本课靶心）：拾取率 **≥ 70%**（z5 系 48.7%；y28 在同图前 16 关 84.8%）
+//   主 2（走位）：`cellsVisited` 中位 **≥ 120**（z5 系 93–102；y28 前 16 关 132）
+//   主 3（战斗）：`hitRate` **≥ 0.35**（it350 掉到 .234，it500 是 .398）且 `kills/局 ≥ 14.5`
+//   主 4（顶墙回归）：`wallPress/千` 中位 **≤ 200**（z5 系 576–620；v14 掩码的验收判据）
+//   副 1：win 不得低于 it0 基线（同口径）
+//   反签名（任一破 ⇒ 停）：
+//     · `timeout > 1.20× it0`（**2026-11-03 22:30 修正**：原写「> 8%」，但 it0 实测就是 16.0%
+//       —— 那条阈值从第一天就破，不能用来判腿；改成相对起点。当前门 = 19.2%）· `dmg/局 > 1.10× it0`（拾取不能靠挨打换）
+//     · `cellsVisited` 中位 < it0（姿态税压回站桩）
+//   中间读点 **it30**：拾取率 ≥ 55% 且 cells ≥ 110 ⇒ 继续；否则杀腿。
+//   ⚠ 判决只用「窗口 + 同轮配对」，不用单点门（§122⑦）。
+//
+// ══ 6. 已知局限 ══════════════════════════════════════════════════════════
+//   1. **这是移植实验，不是归因实验**：6 项一起改，涨了也分不出是哪一项。
+//      要归因就另开单变量腿（最值得单跑的是「只加 `wPickup 15`」与「只加 `wCorner`」）。
+//   2. **v14 掩码的行为变化未测**：advance 被掩之后，原本靠「顶墙」拿到的 idle 分（wIdle 反向）
+//      和「面朝墙开火」的动作都变了。it0 重测是唯一能看出来的办法。
+//   3. **`wCorner` 在 26×26 上的稳态值只有 0.0876**（it375/700 局实测），比 c20（13×13）稀疏得多；
+//      550 是按这个稳态反算的，换图就失效。
+//   4. **`wMiss` 可能把「少而准」推向「不开枪」**：y27-shot 的教训是「只加命中价会推向少而准」。
+//      本课同时保留 `wHit 1.5`（正项），若 kills 掉 > 10% 先摘 `wMiss`。
+//   5. 三个 0% 关（Brick Maze / Diamond）从来没被任何权重破过，本课不指望；Checkers 已由 it350 破 0。
+//
+// ══ 7. 预算 ══════════════════════════════════════════════════════════════
+//   `iters 400 / max_hours 36 / eval_every 5 / eval 20 seed × 35 关`。
+//   训练本体 ≈ 400 × 100s ≈ 11h（云机段 31s/轮 ⇒ ≈3.4h）；eval 80 点 × 700 局 ≈ 9h（吃 rollout 间隙）。
+//   中间读点 it30；it60 判决；不到 it60 不许加码。
+//
+// ══ 8. 运行约束 ═════════════════════════════════════════════════════════
+//   · **开课前必须重启 hub + 全部 worker**：METRICS_VERSION 16 与 v14 mask 都要求新 `code.zip`；
+//     不重启时 worker 仍发 v13 shard ⇒ `iter_shard_dirs` 静默拒收 ⇒ 那一轮 0 样本空转。
+//   · `target_transitions 32768` 是 `mb 1024` 的 32 倍（无 ragged 末块）；
+//   · 开课后不要编辑本文件（课程字节变 = 新实验版本，热加载 A 类拒收）。
+{
+  "version": 5,
+  "name": "z6-porter",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入（本腿主改：4.0 → 15.0，对齐 y28 的「一枚道具 = 1 杀」）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wDef*min(capDef, max(0, basePressureSum - pDef*basePressureSamples))",
+      "- wIdle*min(idleTicks, idleCap)",
+      // 拾取趋近（沿用 z5-pick；v16 起 pickupDist 是 BFS 路径距离）
+      "- wApproach*where(pickupDist < 0, 0, min(pickupDist, approachCap))",
+      // 分型拾取（4/4/6 → 10/10/15）
+      "+ wFrFreeze*puGotFreeze",
+      "+ wFrBomb*puGotBomb",
+      "+ wFrStar*starsCollected",
+      // 空放罚（本腿新增，x/y 系的 wMiss）
+      "- wMiss*aimMisses",
+      // 角落税（本腿新增，x/y 系的 wCorner；速率形式，与累计项混用合法）
+      "- wCorner*cornerWeightTicks/(ticks+1)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.15,
+      "walkCap": 200.0,
+      "wPickup": 15.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      "wDef": 2.5,
+      "pDef": 0.15,
+      "capDef": 80.0,
+      "wIdle": 0.05,
+      "idleCap": 800.0,
+      "wApproach": 0.02,
+      "approachCap": 6.0,
+      "wFrFreeze": 10.0,
+      "wFrBomb": 10.0,
+      "wFrStar": 15.0,
+      "wMiss": 0.35,
+      "wCorner": 550.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z5-pick/z5-pick.it350.20261103-185732.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 400,
+  "max_hours": 36,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261104,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z6-porter/weights.json",
+  "traj": "tmp/z6-porter",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z6-porter",
+  "backup_prefix": "z6-porter",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
