@@ -10,9 +10,12 @@
 _eval_policy_cfg ← _eval_join_soft_sec ← _sweep_eval_tail ← _dispatch_delayed_eval
                                             ↑                        ↑
 _join_eval ←────────────────────────────────┘                        │
-_eval_covered ← _drain_pending_eval ──────────────────────────────────┘
+_eval_covered ← _uncovered_eval_rounds ◄── {_drain_pending_eval, _backfill_eval_gaps}
 （另有 `_eval_on_round` 的占位：真实现住 `trainer/loop_dispatch.py`，MRO 胜过——S4 第二十刀前住 loop_core）
 ```
+
+2026-11-04（F1 重启补账）在簇内再加 3 个：`_dispatch_eval_round`（单轮派发体）·
+`_uncovered_eval_rounds`（drain 与补账共用的缺口发现）· `_backfill_eval_gaps`（每轮补一个旧缺口）。
 
 切法是**混入**（与第十四/十五刀同源）：同一把锁、同一个 `self`、**零行为变化**——
 `class TrainingSteps(TrainingRemote, TrainingEval)`，组合类与四个「继承真混入」的测试宿主
@@ -21,7 +24,7 @@ _eval_covered ← _drain_pending_eval ──────────────
 
 ## 本文件钉住什么
 
-1. 8 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
+1. 11 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级同一**（`TrainingSteps.X is TrainingEval.X`），不是同名副本；
 3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval, …)`（组合类的直接基类里没有本簇；
    2026-09-25 S4 第十九刀起那支元组的第四件是 `TrainingLifecycle`——见 test_loop_lifecycle_split）；
@@ -47,7 +50,9 @@ EVAL_PY = NN_ROOT / "trainer" / "loop_eval.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 
-#: 这一簇的成员（闭集）：8 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
+#: 这一簇的成员（闭集）：11 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
+#: 2026-11-04（F1 重启补账）：`_dispatch_eval_round`（单轮派发体，从 `_dispatch_delayed_eval`
+#: 提出）+ `_uncovered_eval_rounds`（drain 与补账共用的缺口发现）+ `_backfill_eval_gaps`。
 CLUSTER = (
     "_eval_on_round",
     "_eval_policy_cfg",
@@ -55,7 +60,10 @@ CLUSTER = (
     "_sweep_eval_tail",
     "_join_eval",
     "_dispatch_delayed_eval",
+    "_dispatch_eval_round",
     "_eval_covered",
+    "_uncovered_eval_rounds",
+    "_backfill_eval_gaps",
     "_drain_pending_eval",
 )
 

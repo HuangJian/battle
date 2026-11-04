@@ -188,8 +188,9 @@ def eval_round_ledger_state(
     过滤口径与 `settle_eval_summary` 的账本扫描**逐条一致**（同 event/wver/iter，
     排除带 `source` 的 B/C 行）——两处漂移会让「已全落」与 summary 的 `dropped`
     自相矛盾。续跑补账（2026-11-03 z6-porter.it10）靠它判「上一条 summary 的缺口
-    是不是已被迟到行填平」：preempted 收工时在飞的本机局会在 summary 落盘后 1–2s
-    才写行，下次续跑 todo 为空 ⇒ 若不补对账，账本永远停在「缺 N 局」。
+    是不是已被迟到行填平」：旧轮级闸 `preempted` 收工（2026-11-04 退役）时，在飞的本机
+    局会在 summary 落盘后 1–2s 才写行；今天的同形现场是窗口到期收工后迟到的在飞局。
+    两者都让 next 次续跑的 todo 为空 ⇒ 若不补对账，账本永远停在「缺 N 局」。
     """
     keys: set[tuple[int, int]] = set()
     last: dict[str, Any] | None = None
@@ -231,9 +232,10 @@ def reconcile_late_eval_rows(
 ) -> int:
     """`todo` 空时的迟到行补账：补了返回补账前的缺口，没补返回 0。
 
-    现场（2026-11-03 z6-porter.it10）：preempted 收工时在飞的**本机**局会在 summary
-    落盘后 1–2s 才写行；下次续跑 `todo` 已空 ⇒ 调用方直接 skip，账本永远停在「缺 N
-    局」。本轮语料已全部在该 (iter, wver) 的逐局行里、而最后一条 summary 仍记缺口
+    现场（2026-11-03 z6-porter.it10）：旧轮级闸 `preempted` 收工（2026-11-04 退役）时
+    在飞的**本机**局会在 summary 落盘后 1–2s 才写行；今天的同形现场是窗口到期后迟到的
+    在飞局。下次续跑 `todo` 已空 ⇒ 调用方直接 skip，账本永远停在「缺 N 局」。
+    本轮语料已全部在该 (iter, wver) 的逐局行里、而最后一条 summary 仍记缺口
     ⇒ 补一条 `settled` 对账（数值全从账本重算，不猜）。幂等：补完后末条 summary 干净
     （`dropped=0`），再续跑不再补。
 
@@ -361,6 +363,18 @@ def settle_eval_summary(
                     continue
                 if "source" in r:
                     continue
+                # 同 (stage, seed) 只认第一行（2026-11-04）：上一轮收工后仍在飞的僵尸写者会在
+                # summary 落盘后补写一行，下一轮按 `done` 快照重派时又写一行 ⇒ 同轮行数超出
+                # 语料（历史最多 +N）。去重放在累加之前，胜率/全歼/技能指标与 `n` 同分母。
+                try:
+                    st: int | None = int(r.get("stage") or 0)
+                    sd: int | None = int(r.get("seed"))
+                except (TypeError, ValueError):
+                    st = sd = None
+                if sd is not None and st is not None:
+                    if (st, sd) in led_keys:
+                        continue
+                    led_keys.add((st, sd))
                 led_wins += 1 if r.get("win") else 0
                 # 全歼率（方案 A 口径）：旧行（cleared 缺省）视为未全歼——新 schema
                 # 上线前的行只有本地局有 cleared，此处保守记 0，聚合以新行口径为准。
@@ -381,14 +395,6 @@ def settle_eval_summary(
                 # summary 仍报 0.0）。口径同 `evalboard/stats.ts`：已清场的局不算超时。
                 if oc in ("timeout", "max_ticks") and not r.get("cleared"):
                     led_timeout += 1
-                try:
-                    sd = int(r.get("seed"))
-                except (TypeError, ValueError):
-                    continue
-                try:
-                    led_keys.add((int(r.get("stage") or 0), sd))
-                except (TypeError, ValueError):
-                    pass
     except FileNotFoundError:
         pass
     if led_outcomes:

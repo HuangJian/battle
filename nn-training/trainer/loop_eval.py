@@ -91,6 +91,9 @@ class TrainingEval:
     _eval_join_sec: float = 0.0
     #: `block=False` 收官 drain 的后台线程（serve 用；观测句柄，daemon 随进程退出）。
     _eval_drain_thread: threading.Thread | None = None
+    #: 重启补账（F1）扫出的剩余旧缺口（升序 `(m, archive_path)`）：每轮延迟派发补一个。
+    #: None = 还没扫（每进程一次）；[] = 扫过且无缺口。
+    _eval_backfill: list[tuple[int, str]] | None = None
 
     #: 本轮是否评估轮——真实现在 `trainer/loop_dispatch.py::TrainingDispatch`（S4 第二十刀，
     #: 前住 loop_core 的组合根本体），MRO 胜过此处占位。body 用 raise 而不用 `...`：
@@ -132,8 +135,9 @@ class TrainingEval:
         不 sleep**：还在跑的（异常：节点慢/挂了）只打 WARN，由它自己的 `eval_window_sec`
         deadline 结束；`policy.evalJoinSoftSec>0` 时才走旧的「边界处最多补等 N 秒」。
 
-        2026-11-03（进程闸）：`_eval_tail` 的线程现在是闸的票——**排队中 / 被 rollout
-        插队**也表现为 alive，那是有意的等待而不是异常；真正的异常仍是「窗口内跑不完」。
+        2026-11-04（任务级仲裁）：`_eval_tail` 的线程还在 = 这一轮还在仲裁器里（可能正等
+        rollout 解冻，也可能在等一个空闲槽）——那是有意的等待而不是异常；真正的异常仍是
+        「窗口内跑不完」。
         """
         pending = self._eval_tail
         self._eval_tail = None
@@ -171,9 +175,9 @@ class TrainingEval:
         传给 `_sweep_eval_tail`，由下一轮 rollout 收官这个自然边界收拢——不站着等任何
         固定秒数。intent/goal 仍全预算 join（止损判门要吃同轮 summary）。
 
-        2026-11-03：join 的对象是**闸的票**（`dispatch_eval_bg` 起的是 gate 线程）——
-        队头续跑意味着它可能先等前一轮 eval 收工、再等下一个 rollout 间隙；预算照旧
-        只兜住「这次 join 等多久」，等待本身不改轮次顺序（FIFO 在 `worker.eval_gate`）。
+        2026-11-04（任务级仲裁）：join 的对象是**这一轮的登记**（`dispatch_eval_bg` 起的
+        线程）——它可能先等 rollout 解冻、再等其他轮的同优先级分派；预算照旧只兜住
+        「这次 join 等多久」，等待本身不改分派顺序（顺序在 `worker/eval_arbiter.py`）。
         """
         args = self.args
         if self._eval_gate is not None:
@@ -228,16 +232,11 @@ class TrainingEval:
         空窗，wall 不变。未覆盖的对局由派发内幂等续跑；全覆盖即空转返回。
         仅 per-tick（intent/goal 走 m1 路径，it0 基线走独立流，均不动）。
 
-        2026-11-03（进程闸）：这里的「派发」只是把票交给 `worker.eval_gate` 排队——
-        前面还有 eval 或正在 rollout 时它不会立刻开跑，碰上下一次 rollout 还会被插队
-        收手（`close_reason=preempted`，票留队头）；顺序与优先级由闸保证，本函数不管。
+        2026-11-04（任务级仲裁）：这里的「派发」= 把这一轮登记进进程级仲裁器。多轮不再
+        互相排队（同优先级轮转发牌），rollout 期间只是冻结新 grant；整轮不会被插队收手。
+        顺序与优先级由仲裁器保证，本函数不管。
         """
-        from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import (
-            dispatch_eval_bg,
-            find_archive_weights,
-            select_delayed_eval_it,
-        )
+        from trainer.eval_dispatch import select_delayed_eval_it
 
         args = self.args
         # 本轮采集刚落幕（rollout 收官）= 上一轮 eval 尾巴的自然收拢点：先收拢，再派新轮。
@@ -247,9 +246,26 @@ class TrainingEval:
             return
         self._eval_thread = None
         self._eval_gate = None
+        # 补账只在**没有在跑的轮**时放行（2026-11-04 任务级仲裁后 `status()["running"]`
+        # = 仲裁器里还有活跃轮）：单轮服务 ~4min，而训练 ~100s/轮。按训练轮速往仲裁器里
+        # 灌旧缺口，会把当前读数永久排在旧账后面（08:34 实测的形状）。训练持续不停时
+        # 仲裁器几乎不空 ⇒ 旧缺口留给收官 drain（它逐轮 block 到落盘）。
+        from worker.eval_gate import eval_gate as _eval_gate
+
+        st = _eval_gate().status()
+        gate_idle = not st.get("running") and int(st.get("queued") or 0) == 0
         m = select_delayed_eval_it(it, self._eval_on_round)
-        if m is None:
-            return
+        if m is not None:
+            self._dispatch_eval_round(m, it, dist_cfg)
+        # 新轮票先入队；补账票只在闸空时再加一张（绝不与当前读数抢产能）。
+        self._backfill_eval_gaps(it, gate_idle=gate_idle)
+
+    def _dispatch_eval_round(self, m: int, it: int, dist_cfg: dict | None) -> None:
+        """为一轮已完成权重 W(m) 派发（读归档；归档缺席回落活指针 + WARN）。"""
+        from trainer.dispatch_queue import RUN_ID
+        from trainer.eval_dispatch import dispatch_eval_bg, find_archive_weights
+
+        args = self.args
         src = find_archive_weights(
             str(getattr(args, "backup_dir", "") or ""),
             str(getattr(args, "backup_prefix", "") or ""),
@@ -292,6 +308,98 @@ class TrainingEval:
             return False
         return any(r.get("dropped") == 0 for r in rows)
 
+    def _uncovered_eval_rounds(self) -> tuple[dict[int, str], list[int]]:
+        """归档权重表 + 未覆盖评估轮（升序）。drain 与重启补账共用这一份发现逻辑。"""
+        eval_log = Path(self._traj_dir).parent / "eval_log.jsonl"
+        summaries: dict[int, list[dict]] = {}
+        try:
+            with open(eval_log, encoding="utf-8") as jf:
+                for line in jf:
+                    try:
+                        r = json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("event") == "eval_summary" and isinstance(r.get("iter"), int):
+                        summaries.setdefault(int(r["iter"]), []).append(r)
+        except OSError:
+            pass
+        args = self.args
+        arch_m: dict[int, str] = {}
+        bdir = str(getattr(args, "backup_dir", "") or "")
+        bpre = str(getattr(args, "backup_prefix", "") or "")
+        if bdir and bpre:
+            try:
+                from worker.archive import REPO_ROOT
+
+                root = REPO_ROOT
+            except Exception:
+                root = None
+            import os as _os
+            import re as _re
+
+            base = str(root / bdir) if root is not None and not _os.path.isabs(bdir) else bdir
+            try:
+                pat = _re.compile(rf"^{_re.escape(bpre)}\.it(\d+)\..*\.json$")
+                for p in Path(base).glob(f"{bpre}.it*.*.json"):
+                    mt = pat.match(p.name)
+                    if mt:
+                        kk, vv = int(mt.group(1)), str(p)
+                        if kk not in arch_m:
+                            arch_m[kk] = vv
+            except OSError:
+                pass
+        cand = sorted(
+            m
+            for m in arch_m
+            if m >= 1 and self._eval_on_round(m) and not self._eval_covered(m, summaries)
+        )
+        return arch_m, cand
+
+    def _backfill_eval_gaps(self, it: int, *, gate_idle: bool) -> None:
+        """重启补账（F1）：闸的队列在内存里 —— 进程重启会把「已派发、未开跑」的评估轮整批
+        丢掉，而 `select_delayed_eval_it` 只看 `it-1`，那些轮次就成永久缺号（2026-11-04
+        z6/z7：00:56 重启吞掉 13 轮，之后日志里再没人提它们）。每进程首次延迟派发时扫一遍
+        归档 + 账本，把**早于 it-1** 的未覆盖评估轮排进闸；此后每轮至多补一轮（升序）。
+
+        `gate_idle` 由调用方在**派发当前轮之前**采样：闸里已有活（排队或正在跑）就整轮
+        不补账——闸是进程级（并发 2），往饱和队列里再灌旧账等于饿死当前读数（2026-11-04
+        实测补账票 36 张/小时 vs 单飞服务 ~15 张/小时）。训练不停时旧缺口交给收官 drain。
+
+        只补归档权重（历史轮没有活指针可回落：拿今天的权重标旧轮号 = 假读数）。
+        票不写 `_eval_thread`：补账与任何一轮都没有 join 关系，也不参与尾巴交棒。
+        """
+        if getattr(self.args, "smoke", False) or not gate_idle:
+            return
+        if self._eval_backfill is None:
+            arch_m, cand = self._uncovered_eval_rounds()
+            self._eval_backfill = [(m, arch_m[m]) for m in cand if m < it - 1]
+            if self._eval_backfill:
+                log(
+                    f"[eval] 补账: {len(self._eval_backfill)} 个未覆盖的旧评估轮 "
+                    f"{[m for m, _ in self._eval_backfill]}——每轮补一个（升序）"
+                )
+            else:
+                log("[eval] 补账: 无旧缺口")
+        if not self._eval_backfill:
+            return
+        from trainer.dispatch_queue import RUN_ID
+        from trainer.eval_dispatch import dispatch_eval_bg
+
+        m, path = self._eval_backfill.pop(0)
+        dispatch_eval_bg(
+            self.bun,
+            path,
+            self._traj_dir,
+            self.args,
+            getattr(self, "_last_dist_cfg", None) or {},
+            f"{RUN_ID}.{m}",
+            m,
+            None,
+            local_gate=None,
+            local_fallback_only=True,
+        )
+        log(f"[eval] 补账: it{m} 已排队（剩 {len(self._eval_backfill)} 轮旧缺口）")
+
     def _drain_pending_eval(self, *, block: bool = True) -> None:
         """收官 drain（用户指令：最终轮立即 eval）：为**所有**未覆盖评估轮按归档权重
         **逐轮**派发并等收官（P0-4：wver 每轮变，「同 wver 续跑」补不出旧轮——旧实现只
@@ -322,51 +430,10 @@ class TrainingEval:
             if getattr(args, "smoke", False):
                 log("[eval] drain: smoke 轮——跳过收官 eval")
                 return
-            eval_log = Path(self._traj_dir).parent / "eval_log.jsonl"
-            summaries: dict[int, list[dict]] = {}
-            try:
-                with open(eval_log, encoding="utf-8") as jf:
-                    for line in jf:
-                        try:
-                            r = json.loads(line)
-                        except Exception:
-                            continue
-                        if r.get("event") == "eval_summary" and isinstance(r.get("iter"), int):
-                            summaries.setdefault(int(r["iter"]), []).append(r)
-            except OSError:
-                pass
-            arch_m: dict[int, str] = {}
-            bdir = str(getattr(args, "backup_dir", "") or "")
-            bpre = str(getattr(args, "backup_prefix", "") or "")
-            if bdir and bpre:
-                try:
-                    from worker.archive import REPO_ROOT
-
-                    root = REPO_ROOT
-                except Exception:
-                    root = None
-                import os as _os
-                import re as _re
-
-                base = str(root / bdir) if root is not None and not _os.path.isabs(bdir) else bdir
-                try:
-                    pat = _re.compile(rf"^{_re.escape(bpre)}\.it(\d+)\..*\.json$")
-                    for p in Path(base).glob(f"{bpre}.it*.*.json"):
-                        mt = pat.match(p.name)
-                        if mt:
-                            kk, vv = int(mt.group(1)), str(p)
-                            if kk not in arch_m:
-                                arch_m[kk] = vv
-                except OSError:
-                    pass
+            arch_m, cand = self._uncovered_eval_rounds()
             if not arch_m:
                 log("[eval] drain: 无归档权重可评估——跳过")
                 return
-            cand = sorted(
-                m
-                for m in arch_m
-                if m >= 1 and self._eval_on_round(m) and not self._eval_covered(m, summaries)
-            )
             if not cand:
                 log("[eval] drain: 评估轮权重均已完整 summary——无需收尾 eval")
                 return

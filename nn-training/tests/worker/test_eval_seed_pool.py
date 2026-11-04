@@ -586,3 +586,27 @@ def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None
         "bun", str(rl), work / "traj", args, cfg, "rid.pre", 3, local_gate=gate
     )
     assert set(calls) == {(2000, EVAL_SEEDS[0]), (2000, EVAL_SEEDS[1])}
+
+
+def test_settle_summary_dedupes_duplicate_pairs(tmp_path: Path) -> None:
+    """同 (stage, seed) 的重复行只认第一行（2026-11-04 超额根因）。
+
+    现场（z6-speed it90 起）：让位收工后仍在飞的僵尸写者会在 summary 落盘之后补写一行，
+    下一轮按旧 `done` 快照重派同一局又写一行 ⇒ 账本行数超出语料，summary 的分母/胜率
+    被重复行污染。口径：同一局同权重，值本应一致 ⇒ 先落的那行定性，其余整行忽略。
+    """
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2000, 860001), (2000, 860002)]
+    _write_eval_rows(
+        elog,
+        [
+            _eval_row(4, 2000, 860001, 1),
+            _eval_row(4, 2000, 860002, 0),
+            # 重复行（僵尸/重派）：如果被计入，胜率会从 0.5 掉到 0.333
+            _eval_row(4, 2000, 860001, 0),
+        ],
+    )
+    summ = _settle_summary(elog, it=4, pairs=pairs, total=2, landed=set(pairs))
+    assert summ["games"] == 2, "重复行不得进分母"
+    assert summ["wins"] == 1 and summ["winRate"] == 0.5, "第一行定性"
+    assert summ["dropped"] == 0 and summ["missing"] == []

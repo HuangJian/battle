@@ -87,6 +87,9 @@ def _steps(tmp_path: Path, **over) -> TrainingSteps:
     ts._report = {"winRate": 0.5}
     ts._last_dist_cfg = {}
     ts._eval_on_round = _every5  # type: ignore[assignment]
+    # 补账（F1）默认关：本文件的既有用例只钉单轮派发 / 收尾；补账矩阵自带专属用例
+    # （`test_dispatch_backfills_old_gaps_one_per_round` 显式把 `_eval_backfill` 复位成 None）。
+    ts._eval_backfill = []
     return ts
 
 
@@ -455,3 +458,122 @@ def test_drain_early_exits_are_logged(tmp_path: Path, monkeypatch: pytest.Monkey
     _summary(elog, 5, 0)
     ts._drain_pending_eval()
     assert any("均已完整 summary" in s for s in logs), logs
+
+
+# ── 重启补账（F1，2026-11-04 z6/z7 的 13 轮缺号）────────────────────────────────
+
+
+class _StubGate:
+    """替身闸：只回答 `status()`（补账只看「闸空不空」）。"""
+
+    def __init__(self, *, queued: int = 0, running: bool = False) -> None:
+        self._st = {"queued": queued, "running": running, "rollouts": 0, "completed": 0}
+
+    def status(self) -> dict:
+        return dict(self._st)
+
+
+def _idle_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    import worker.eval_gate as eval_gate_mod
+
+    monkeypatch.setattr(eval_gate_mod, "eval_gate", lambda: _StubGate())
+
+
+def test_dispatch_backfills_old_gaps_one_per_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧缺口每轮补一个、升序、只扫一次；已覆盖与当前轮（`m >= it-1`）不进补账。
+
+    病根：闸（`worker.eval_gate`）的队列在内存里 —— 进程重启把「已派发、未开跑」的轮次
+    整批丢掉，而 `select_delayed_eval_it` 只看 `it-1`，它们从此无人再提（z6-porter
+    it50/55/65/70/80/85、z6-speed 同号段 + it90 等共 13 轮）。一次全排会让新轮的票排在
+    整串旧缺口之后（当前读数被饿死）⇒ 每轮只补一个，且**新轮先入队**。
+    """
+    import trainer.eval_dispatch as ed
+
+    calls: list[tuple[int, str]] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append((it, rl_path))
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    _idle_gate(monkeypatch)
+    ts = _steps(tmp_path)
+    ts._eval_backfill = None  # 打开补账（夹具默认关）
+    a50 = _archive(ts, 50, "{}")
+    _archive(ts, 55, "{}")
+    _archive(ts, 60, "{}")
+    a90 = _archive(ts, 90, "{}")
+    elog = Path(str(ts._traj_dir).replace("it6", "")) / "eval_log.jsonl"
+    _summary(elog, 60, 0)  # 60 已完整覆盖 ⇒ 不补
+
+    ts._dispatch_delayed_eval(91, {})  # 正常派发 90（it-1），随后补 50
+    assert calls == [(90, str(a90)), (50, str(a50))], calls
+    assert ts._eval_backfill is not None
+    assert [mm for mm, _p in ts._eval_backfill] == [55], "每轮只放行一个缺口"
+
+    ts._dispatch_delayed_eval(92, {})  # 91 非评估轮 ⇒ 只有补账 55
+    assert [it for it, _ in calls][-1] == 55 and len(calls) == 3, calls
+    assert ts._eval_backfill == [], "缺口补完即止"
+
+    ts._dispatch_delayed_eval(93, {})  # 队列空：不再派
+    assert len(calls) == 3, calls
+
+
+def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """smoke 轮不补账；全新课程（无旧缺口）扫一次即空转——不得凭空重派已覆盖的轮。"""
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    _idle_gate(monkeypatch)
+    ts = _steps(tmp_path, _tag="smoke", smoke=True)
+    ts._eval_backfill = None
+    _archive(ts, 50, "{}")
+    ts._dispatch_delayed_eval(91, {})
+    assert ts._eval_backfill is None, "smoke 不做补账扫描"
+    assert 50 not in calls, calls
+
+    fresh = _steps(tmp_path, _tag="fresh")
+    fresh._eval_backfill = None
+    _archive(fresh, 5, "{}")
+    fresh._dispatch_delayed_eval(6, {})  # 唯一的归档轮就是 it-1（正常派发负责）
+    assert calls.count(5) == 1, "5 只由正常派发一次"
+    assert fresh._eval_backfill == [], "扫过且无缺口 ⇒ 空表"
+
+
+def test_backfill_yields_when_eval_gate_is_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """闸里已有活 ⇒ 本轮**不补账也不扫描**（当前轮照派）。
+
+    闸是进程级（并发 2）、单轮服务 ~4min，而训练 ~100s/轮：按训练轮速灌旧缺口 = 需求翻倍，
+    当前读数会被旧账永久压在队尾（2026-11-04 08:34 实测 36 张/小时 vs 单飞服务
+    ~15 张/小时）。补账只吃真空隙，训练不停时旧缺口留给收官 drain。
+    """
+    import trainer.eval_dispatch as ed
+    import worker.eval_gate as eval_gate_mod
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    monkeypatch.setattr(eval_gate_mod, "eval_gate", lambda: _StubGate(queued=1))
+    ts = _steps(tmp_path, _tag="busy")
+    ts._eval_backfill = None
+    _archive(ts, 50, "{}")
+    _archive(ts, 90, "{}")
+    ts._dispatch_delayed_eval(91, {})
+    assert calls == [90], f"当前轮照派、旧缺口不动: {calls}"
+    assert ts._eval_backfill is None, "闸忙时连扫描都不做（下一轮再看）"
