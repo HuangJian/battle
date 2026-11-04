@@ -385,14 +385,35 @@ def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
     return bun
 
 
+def _find_cloudflared(cfg: dict, log: Callable[[str], None]) -> str:
+    """已安装的 cloudflared（显式 → PATH → 常见目录）。
+
+    不走 `bash -lc 'command -v ...'`：DSW 的登录 shell 会先打一屏横幅，stdout 非空 ≠ 找到了
+    二进制 —— 旧实现把横幅末行当路径，Popen 报 `OSError: File name too long`（2026-11-04）。
+    """
+    explicit = str(cfg.get("cloudflared_path") or "").strip()
+    cands = [os.path.expanduser(explicit)] if explicit else []
+    found = shutil.which("cloudflared")
+    if found:
+        cands.append(found)
+    cands += [
+        "/usr/local/bin/cloudflared",
+        str(Path.home() / ".local" / "bin" / "cloudflared"),
+        str(Path.home() / "bin" / "cloudflared"),
+    ]
+    for cand in dict.fromkeys(cands):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    if explicit:
+        log(f"cloudflared_path 不是可执行文件: {explicit}")
+    return ""
+
+
 def _start_cloudflared(
     cfg: dict, port: int, cf_log: Path, log: Callable[[str], None]
 ) -> Any:
     """起 cloudflared quick tunnel；二进制缺失时**在 `_public_net()` 里**下载（F5）。"""
-    cf = str(cfg.get("cloudflared_path") or "").strip()
-    if not cf:
-        w = _sh(["bash", "-lc", "command -v cloudflared || true"], timeout=60).stdout.strip()
-        cf = w.splitlines()[-1].strip() if w else ""
+    cf = _find_cloudflared(cfg, log)
     if not cf:
         cf = "/usr/local/bin/cloudflared"
         log("安装 cloudflared…（公网下载，代理已还原）")

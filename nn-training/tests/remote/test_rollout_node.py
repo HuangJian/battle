@@ -390,6 +390,7 @@ def test_cloudflared_install_uses_fastest_probe_then_falls_back(
         )
 
     monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn, "_find_cloudflared", lambda _cfg, _log: "")
     monkeypatch.setattr(rn.os, "chmod", lambda *a, **k: None)
     monkeypatch.setattr(rn.subprocess, "Popen", lambda *a, **k: object())
     out = rn._start_cloudflared({}, 8443, Path("/tmp/x.log"), lambda _m: None)
@@ -402,6 +403,35 @@ def test_cloudflared_install_uses_fastest_probe_then_falls_back(
         "https://gh-proxy.com/" + direct,
         "https://ghproxy.net/" + direct,
     ]
+
+
+def test_cloudflared_discovery_ignores_login_shell_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DSW 的 `bash -lc` 会先打横幅：stdout 非空不等于找到了二进制（旧实现撞 ENAMETOOLONG）。"""
+    calls: list[list[str]] = []
+
+    def _fake_sh(cmd, **_kw):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="╰────────┴────────╯\n", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn.shutil, "which", lambda _name: "")
+    monkeypatch.setattr(rn.os.path, "isfile", lambda _p: False)
+    assert rn._find_cloudflared({}, lambda _m: None) == ""
+    assert calls == []
+
+
+def test_cloudflared_discovery_prefers_explicit_executable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`CFG.cloudflared_path` 指到可执行文件时优先用它；不可执行则不采用。"""
+    cf = tmp_path / "cloudflared"
+    cf.write_bytes(b"")
+    monkeypatch.setattr(rn.os.path, "isfile", lambda p: str(p) == str(cf))
+    monkeypatch.setattr(rn.os, "access", lambda p, _mode: str(p) == str(cf))
+    monkeypatch.setattr(rn.shutil, "which", lambda _name: "C:/other/cloudflared")
+    assert rn._find_cloudflared({"cloudflared_path": str(cf)}, lambda _m: None) == str(cf)
 
 
 def test_latest_bun_version_picks_semver_max() -> None:

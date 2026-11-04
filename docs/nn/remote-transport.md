@@ -6,6 +6,52 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §138 cloudflared 发现不许读登录 shell 的 stdout：DSW 横幅被当路径（ENAMETOOLONG）（2026-11-04）
+
+**现场**：DSW 上 clone / bun 都通了，cloudflared 却报
+`cloudflared 启动失败: [Errno 36] File name too long: '╰────…╯'`。根因不是二进制坏了：
+发现逻辑用 `bash -lc 'command -v cloudflared || true'`，而 DSW 的**登录 shell 先打一屏横幅**；
+`command -v` 没找到时 stdout 仍是横幅（非空）⇒ 旧代码把末行（边框线）当路径传给 `Popen`。
+
+**落地**（`remote/rollout_node.py::_find_cloudflared`）：
+
+* 发现链：显式 `CFG.cloudflared_path` → `shutil.which("cloudflared")` →
+  `/usr/local/bin` · `~/.local/bin` · `~/bin`；只认 `isfile + X_OK`。**不 spawn 登录 shell**。
+* 显式路径不可执行时打一行（`cloudflared_path 不是可执行文件`）并回落到自动发现；
+  都没有才走公网下载安装（§135/§136 的换镜像 + 测速逻辑不变）。
+
+**验收**：`tests/remote/test_rollout_node.py` 两条新用例 —— 横幅 stdout 不产生路径
+（且发现阶段不调 `_sh`）；显式可执行路径优先。ruff / mypy 绿。
+
+---
+
+## §137 镜像 clone 仍会挂：git 降 HTTP/1.1 + 低速 60s 放弃 + 源码归档 zip 自动兜底（2026-11-04）
+
+**现场**：§135/§136 的自动换路在 DSW 上仍失败：gh-proxy 的 `git clone` 探活通、但大包传输
+挂满 900s；ghproxy.net 直接报 `RPC 失败。curl 92 HTTP/2 stream 0 was not closed cleanly:
+INTERNAL_ERROR (err 2)` / `unexpected disconnect while reading sideband packet` /
+`fatal: 过早的文件结束符`。两个镜像的 `/archive/refs/heads/<ref>.zip` 实测都是 HTTP 200
+`application/zip`（约 1.7MB）—— 坏的是 **git smart HTTP 的 HTTP/2 长连接**，不是镜像本身。
+
+**落地**（`ipynb/rollout.ipynb`，仍然零配置）：
+
+* **git 一律 HTTP/1.1**：clone / `ls-remote` 探活 / 已有仓库的 fetch 都带
+  `-c http.version=HTTP/1.1`（镜像代理的 HTTP/2 多路复用不可靠）。
+* **低速即弃**：`-c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60`，单源 clone 墙钟上限
+  从 900s 收到 240s —— 墙掉的链路约 60s 就换下一跳，不再白占 15 分钟。
+* **源码归档兜底**：所有 git 候选都失败（或探活全灭）⇒ 按**同一批源**依次下
+  `https://github.com/<owner>/<repo>/archive/refs/heads/<ref>.zip`（再退
+  `/archive/<ref>.zip`）：`curl --http1.1 --connect-timeout 8 --max-time 600
+  --speed-limit 1024 --speed-time 60`；校验 zip → 拒收越界成员/坏 zip（换下一源）→ 剥掉顶层
+  `<repo>-<ref>/` → 铺进 `code_dir`。**没有 `.git` 也能跑**（采样节点不依赖 git 历史，
+  `_head` 记空；`gitShortHash` 回落 `unknown`，只有手动 pull 端点不可用）。
+* 归档不带 token（镜像不转发认证）⇒ 私有仓仍只有 `code_zip` 或直连 + `github_token` 两条路。
+
+**验收**：`tests/remote/test_rollout_node_notebook.py` 的 HTTP/1.1 + 低速参数、归档候选
+（直连/镜像 × 两种路径形态）、真 zip 解压剥顶层、越界路径拒收；ruff / mypy 绿。
+
+---
+
 ## §136 镜像候选并行测速：256KB Range 小样排序，快者先用（2026-11-04）
 
 **背景**：§135 的自动换路是「串行、先通先用」—— 墙掉的链路每个还要等 25s（clone）或 8s

@@ -20,13 +20,16 @@ import inspect
 import json
 import os
 import re
+import shutil
+import tempfile
 import textwrap
 import threading
 import time
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -39,6 +42,18 @@ NOTEBOOK = NN / "ipynb" / "rollout.ipynb"
 def _cells(kind: str) -> str:
     nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     return "".join("".join(c.get("source", [])) for c in nb["cells"] if c["cell_type"] == kind)
+
+
+def _cell_funcs(wanted: set[str], ns: dict[str, Any]) -> dict[str, Any]:
+    """从 cell 里摘出指定函数执行（notebook 不在 pytest 里整段跑）。"""
+    nb_tree = ast.parse(_cells("code"))
+    selected = [n for n in nb_tree.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    assert {n.name for n in selected} == wanted, (
+        f"cell 缺少函数：{sorted(wanted - {n.name for n in selected})}"
+    )
+    payload = ast.Module(body=cast(list[ast.stmt], selected), type_ignores=[])
+    exec(compile(payload, "<rollout.ipynb>", "exec"), ns)
+    return ns
 
 
 def test_code_cell_compiles() -> None:
@@ -238,14 +253,21 @@ def test_cell_clone_probes_parallel_and_ranks_fastest() -> None:
     nb_tree = ast.parse(_cells("code"))
     clone_funcs = {n.name: n for n in nb_tree.body if isinstance(n, ast.FunctionDef)}
     assert {"_probe_clone", "_rank_clone_candidates"} <= set(clone_funcs)
+    net_args = next(
+        n
+        for n in nb_tree.body
+        if isinstance(n, ast.Assign)
+        and any(t.id == "_GIT_NET_ARGS" for t in n.targets if isinstance(t, ast.Name))
+    )
     clone_ns: dict[str, Any] = {
+        "_GIT_NET_ARGS": ast.literal_eval(net_args.value),
         "time": time,
         "_sh": lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
     }
     exec(
         compile(
             ast.Module(
-                body=[clone_funcs["_probe_clone"], clone_funcs["_rank_clone_candidates"]],
+                body=[clone_funcs[name] for name in ("_probe_clone", "_rank_clone_candidates")],
                 type_ignores=[],
             ),
             "<rollout.ipynb>",
@@ -261,3 +283,133 @@ def test_cell_clone_probes_parallel_and_ranks_fastest() -> None:
 
     ranked = clone_ns["_rank_clone_candidates"]([("fast", "f"), ("slow", "s")], _probe)
     assert ranked == [("fast", "f", 1.0), ("slow", "s", 2.0)]
+
+
+def test_cell_git_uses_http1_and_aborts_stalled_transfers() -> None:
+    """HTTP/2 走镜像会 `RPC 失败 / INTERNAL_ERROR`；低速 60s 就换源（不白等 15 分钟）。"""
+    nb_tree = ast.parse(_cells("code"))
+    net_args = next(
+        n
+        for n in nb_tree.body
+        if isinstance(n, ast.Assign)
+        and any(t.id == "_GIT_NET_ARGS" for t in n.targets if isinstance(t, ast.Name))
+    )
+    args = ast.literal_eval(net_args.value)
+    assert set(args) >= {"http.version=HTTP/1.1", "http.lowSpeedLimit=1024", "http.lowSpeedTime=60"}
+    clone_calls = [
+        c
+        for c in ast.walk(nb_tree)
+        if isinstance(c, ast.Call)
+        and getattr(c.func, "id", "") == "_sh"
+        and c.args
+        and isinstance(c.args[0], ast.List)
+        and any(isinstance(e, ast.Constant) and e.value == "clone" for e in c.args[0].elts)
+    ]
+    assert clone_calls, "clone 分支没找到 git clone 调用"
+    for call in clone_calls:
+        argv = call.args[0]
+        assert isinstance(argv, ast.List), "git 调用的第一个参数应是 argv 列表"
+        assert any(
+            isinstance(e, ast.Starred) and getattr(e.value, "id", "") == "_GIT_NET_ARGS"
+            for e in argv.elts
+        ), "git clone 没带 _GIT_NET_ARGS"
+
+
+def test_cell_archive_fallback_maps_every_mirror() -> None:
+    """git 克隆全挂 ⇒ 同一批源改下源码归档；顶层 `refs/heads` 与扁平两种形态都试。"""
+    ns = _cell_funcs(
+        {"_clone_candidates", "_archive_candidates"},
+        {
+            "CFG": {},
+            "os": os,
+            "repo": "https://github.com/o/r.git",
+            "ref": "goal-nn",
+        },
+    )
+    ranked = [
+        ("direct", "https://github.com/o/r.git", 1.0),
+        ("mirror", "https://gh-proxy.com/https://github.com/o/r.git", 2.0),
+    ]
+    got = ns["_archive_candidates"](ranked)
+    head = "https://github.com/o/r/archive/refs/heads/goal-nn.zip"
+    assert got[0] == head
+    assert set(got) >= {
+        "https://github.com/o/r/archive/goal-nn.zip",
+        "https://gh-proxy.com/" + head,
+        "https://gh-proxy.com/https://github.com/o/r/archive/goal-nn.zip",
+    }
+
+
+def test_cell_archive_fallback_extracts_stripped_tree(tmp_path: Path) -> None:
+    """下载的归档把顶层 `<repo>-<ref>/` 剥掉再铺到 code_dir（无 .git 也能跑）。"""
+    code_dir = tmp_path / "code"
+
+    def _fake_sh(cmd, **_kw):
+        dest = Path(cmd[cmd.index("-o") + 1])
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("battle-goal-nn/tools/agent/sampler-agent.ts", "x")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ns = _cell_funcs(
+        {"_safe_unzip", "_fetch_archive"},
+        {
+            "zipfile": zipfile,
+            "tempfile": tempfile,
+            "os": os,
+            "shutil": shutil,
+            "Path": Path,
+            "code_dir": code_dir,
+            "_log": lambda _m: None,
+            "_sh": _fake_sh,
+            "_archive_candidates": lambda _ranked: ["https://mirror/archive.zip"],
+        },
+    )
+    assert ns["_fetch_archive"]([]) is True
+    assert (code_dir / "tools" / "agent" / "sampler-agent.ts").read_text(encoding="utf-8") == "x"
+    assert not (code_dir / "battle-goal-nn").exists()
+
+
+def test_cell_archive_bad_zip_falls_back_to_next_source(tmp_path: Path) -> None:
+    """坏归档（不是 zip）不致命：换下一源继续下。"""
+    code_dir = tmp_path / "code"
+    fetched: list[str] = []
+
+    def _fake_sh(cmd, **_kw):
+        url = cmd[cmd.index("-o") - 1]
+        fetched.append(url)
+        dest = Path(cmd[cmd.index("-o") + 1])
+        if url.endswith("bad.zip"):
+            dest.write_bytes(b"not a zip")
+        else:
+            with zipfile.ZipFile(dest, "w") as zf:
+                zf.writestr("r/tools/agent/a.ts", "x")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    ns = _cell_funcs(
+        {"_safe_unzip", "_fetch_archive"},
+        {
+            "zipfile": zipfile,
+            "tempfile": tempfile,
+            "os": os,
+            "shutil": shutil,
+            "Path": Path,
+            "code_dir": code_dir,
+            "_log": lambda _m: None,
+            "_sh": _fake_sh,
+            "_archive_candidates": lambda _ranked: ["https://m/bad.zip", "https://m/good.zip"],
+        },
+    )
+    assert ns["_fetch_archive"]([]) is True
+    assert fetched == ["https://m/bad.zip", "https://m/good.zip"]
+    assert (code_dir / "tools" / "agent" / "a.ts").is_file()
+
+
+def test_cell_archive_extraction_rejects_path_traversal(tmp_path: Path) -> None:
+    """归档来自公网 ⇒ 成员路径越界必须拒收，不许写到 code_dir 外面。"""
+    archive = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../evil.txt", "x")
+    ns = _cell_funcs({"_safe_unzip"}, {"zipfile": zipfile, "Path": Path})
+    with pytest.raises(ValueError):
+        ns["_safe_unzip"](archive, tmp_path / "out")
+    assert not (tmp_path / "evil.txt").exists()
