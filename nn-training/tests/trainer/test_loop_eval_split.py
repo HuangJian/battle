@@ -24,7 +24,7 @@ _eval_covered ← _uncovered_eval_rounds ◄── {_drain_pending_eval, _backfi
 
 ## 本文件钉住什么
 
-1. 12 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
+1. 14 个成员**定义**在新家，`TrainingSteps` 里**零同名定义**（门面只能是门面）；
 2. 接线是**对象级同一**（`TrainingSteps.X is TrainingEval.X`），不是同名副本；
 3. 组装是**追加**：`__bases__ == (TrainingRemote, TrainingEval, …)`（组合类的直接基类里没有本簇；
    2026-09-25 S4 第十九刀起那支元组的第四件是 `TrainingLifecycle`——见 test_loop_lifecycle_split）；
@@ -50,14 +50,18 @@ EVAL_PY = NN_ROOT / "trainer" / "loop_eval.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 
-#: 这一簇的成员（闭集）：12 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
+#: 这一簇的成员（闭集）：14 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
 #: 2026-11-04（F1 重启补账）：`_dispatch_eval_round`（单轮派发体，从 `_dispatch_delayed_eval`
 #: 提出）+ `_uncovered_eval_rounds`（drain 与补账共用的缺口发现）+ `_backfill_eval_gaps`。
 #: 2026-11-04（停课闸）：`_course_stopped`（控制台停课 ⇒ 不再补任何 eval 空缺）。
+#: 2026-11-04（§113 单开轮上限）：`_eval_open_threads`（本课在跑轮线程清活）+
+#: `_eval_course_fp`（课指纹，查仲裁器里本课是否已有登记轮）。
 CLUSTER = (
     "_eval_on_round",
     "_eval_policy_cfg",
     "_course_stopped",
+    "_eval_open_threads",
+    "_eval_course_fp",
     "_eval_join_soft_sec",
     "_sweep_eval_tail",
     "_join_eval",
@@ -167,7 +171,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_eval_only() -> None:
-    """本簇（12 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
+    """本簇（14 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingEval` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。

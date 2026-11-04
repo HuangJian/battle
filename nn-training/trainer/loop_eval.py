@@ -96,6 +96,11 @@ class TrainingEval:
     #: 重启补账（F1）扫出的剩余旧缺口（升序 `(m, archive_path)`）：每轮延迟派发补一个。
     #: None = 还没扫（每进程一次）；[] = 扫过且无缺口。
     _eval_backfill: list[tuple[int, str]] | None = None
+    #: 本课已派发、尚未收工的 eval 轮线程。§113 起每课同时只开一轮：旧实现无上限，
+    #: 2026-11-04 z7 两课 134 分钟派出 19 轮/课却只收 5 轮，15 轮平分涓流 ⇒ 每轮缺 300+。
+    _eval_open: tuple[Any, ...] = ()
+    #: 因本课已有轮在跑而顺延的权重轮（latest-wins；更旧的轮由补账/收官 drain 兜底）。
+    _eval_pending_m: int | None = None
 
     #: 本轮是否评估轮——真实现在 `trainer/loop_dispatch.py::TrainingDispatch`（S4 第二十刀，
     #: 前住 loop_core 的组合根本体），MRO 胜过此处占位。body 用 raise 而不用 `...`：
@@ -131,6 +136,18 @@ class TrainingEval:
         from trainer.loop_plan import course_enabled
 
         return not course_enabled(self._traj_root)
+
+    def _eval_open_threads(self) -> tuple[Any, ...]:
+        """本课仍在跑（已提交、未收工）的 eval 轮线程；顺手剪掉已收工的。"""
+        alive = tuple(t for t in self._eval_open if t.is_alive())
+        self._eval_open = alive
+        return alive
+
+    def _eval_course_fp(self) -> str:
+        """本课文件血缘（`""` = 无课程身份的旧路径）：冻结与在飞轮数都按它分账。"""
+        from worker.cmd import course_fp_for_args
+
+        return course_fp_for_args(self.args)
 
     def _eval_join_soft_sec(self) -> float:
         """PPO 收官后的软等上限（policy.evalJoinSoftSec；默认 30s，0 = 完全不站等）。
@@ -253,9 +270,14 @@ class TrainingEval:
         空窗，wall 不变。未覆盖的对局由派发内幂等续跑；全覆盖即空转返回。
         仅 per-tick（intent/goal 走 m1 路径，it0 基线走独立流，均不动）。
 
-        2026-11-04（任务级仲裁）：这里的「派发」= 把这一轮登记进进程级仲裁器。多轮不再
-        互相排队（同优先级轮转发牌），rollout 期间只是冻结新 grant；整轮不会被插队收手。
-        顺序与优先级由仲裁器保证，本函数不管。
+        2026-11-04（任务级仲裁）：这里的「派发」= 把这一轮登记进进程级仲裁器。rollout
+        期间只是冻结本课的新 grant；整轮不会被插队收手。顺序与优先级由仲裁器保证。
+
+        2026-11-04（§113）：**每课同时只开一轮**。旧实现每 5 轮无条件再开一轮，轮次
+        无上限堆积（z7 两课 134 分钟派 19 轮/课、只收 5 轮；15 轮平分涓流 ⇒ 每轮 700 局
+        只落 300–500，`never_dispatched` 涨到 300+）。现在到期的更新轮记在顺延位
+        （latest-wins）：本课轮一收工就派最新那个；被顶掉的旧轮由补账/收官 drain 从
+        归档补，不占训练期的产能。
         """
         from trainer.eval_dispatch import select_delayed_eval_it
 
@@ -271,19 +293,29 @@ class TrainingEval:
             # 停课 = 不再为这门课花算力：延迟轮与旧缺口（F1）一起刹车（2026-11-04）。
             log("[eval] 课程已停课（开课标记不存在）——本轮不派延迟 eval、不补旧缺口")
             return
-        # 补账只在**没有在跑的轮**时放行（2026-11-04 任务级仲裁后 `status()["running"]`
-        # = 仲裁器里还有活跃轮）：单轮服务 ~4min，而训练 ~100s/轮。按训练轮速往仲裁器里
-        # 灌旧缺口，会把当前读数永久排在旧账后面（08:34 实测的形状）。训练持续不停时
-        # 仲裁器几乎不空 ⇒ 旧缺口留给收官 drain（它逐轮 block 到落盘）。
-        from worker.eval_gate import eval_gate as _eval_gate
+        from worker.eval_arbiter import eval_arbiter
 
-        st = _eval_gate().status()
-        gate_idle = not st.get("running") and int(st.get("queued") or 0) == 0
+        busy = bool(self._eval_open_threads()) or eval_arbiter().active_for(
+            self._eval_course_fp()
+        ) > 0
         m = select_delayed_eval_it(it, self._eval_on_round)
+        if self._eval_pending_m is not None:
+            m = self._eval_pending_m if m is None else max(m, self._eval_pending_m)
+            self._eval_pending_m = None
         if m is not None:
-            self._dispatch_eval_round(m, it, dist_cfg)
-        # 新轮票先入队；补账票只在闸空时再加一张（绝不与当前读数抢产能）。
-        self._backfill_eval_gaps(it, gate_idle=gate_idle)
+            if busy:
+                self._eval_pending_m = m
+                log(
+                    f"[eval] it{m}: 本课已有 eval 轮在跑 —— 顺延"
+                    "（latest-wins；旧轮由补账/收官 drain 兜底）"
+                )
+            else:
+                self._dispatch_eval_round(m, it, dist_cfg)
+                busy = True
+        # 补账只在**本课真的空下来**时放行（本课在飞轮 = `_eval_open` ∪ 仲裁器登记）。
+        # 单轮服务数分钟而训练 ~90s/轮：按训练轮速灌旧缺口会把当前读数永久排在旧账
+        # 后面（2026-11-04 08:34 实测 36 张/小时）。旧缺口留给空闲轮与收官 drain。
+        self._backfill_eval_gaps(it, gate_idle=not busy)
 
     def _dispatch_eval_round(self, m: int, it: int, dist_cfg: dict | None) -> None:
         """为一轮已完成权重 W(m) 派发（读归档；归档缺席回落活指针 + WARN）。"""
@@ -320,6 +352,7 @@ class TrainingEval:
             local_gate=None,
             local_fallback_only=True,
         )
+        self._eval_open = (*self._eval_open, self._eval_thread)
         log(
             f"[eval] it{m} dispatched from "
             f"{'archive' if from_archive else 'LIVE pointer'} {src_path} "
@@ -386,12 +419,13 @@ class TrainingEval:
         z6/z7：00:56 重启吞掉 13 轮，之后日志里再没人提它们）。每进程首次延迟派发时扫一遍
         归档 + 账本，把**早于 it-1** 的未覆盖评估轮排进闸；此后每轮至多补一轮（升序）。
 
-        `gate_idle` 由调用方在**派发当前轮之前**采样：闸里已有活（排队或正在跑）就整轮
-        不补账——闸是进程级（并发 2），往饱和队列里再灌旧账等于饿死当前读数（2026-11-04
+        `gate_idle` 由调用方给：本课已有在飞轮（`_eval_open` ∪ 仲裁器登记，含刚派出的这一
+        轮，§113）就整轮不补账——往饱和的同一课上再灌旧账等于饿死当前读数（2026-11-04
         实测补账票 36 张/小时 vs 单飞服务 ~15 张/小时）。训练不停时旧缺口交给收官 drain。
 
         只补归档权重（历史轮没有活指针可回落：拿今天的权重标旧轮号 = 假读数）。
-        票不写 `_eval_thread`：补账与任何一轮都没有 join 关系，也不参与尾巴交棒。
+        票不写 `_eval_thread`（与任何一轮都没有 join 关系，也不参与尾巴交棒），但要记进
+        `_eval_open`：本课下一次派发须把它算作在飞，否则会同时开出第二轮（§113）。
         """
         if getattr(self.args, "smoke", False) or not gate_idle:
             return
@@ -411,7 +445,7 @@ class TrainingEval:
         from trainer.eval_dispatch import dispatch_eval_bg
 
         m, path = self._eval_backfill.pop(0)
-        dispatch_eval_bg(
+        thread = dispatch_eval_bg(
             self.bun,
             path,
             self._traj_dir,
@@ -423,6 +457,7 @@ class TrainingEval:
             local_gate=None,
             local_fallback_only=True,
         )
+        self._eval_open = (*self._eval_open, thread)
         log(f"[eval] 补账: it{m} 已排队（剩 {len(self._eval_backfill)} 轮旧缺口）")
 
     def _drain_pending_eval(self, *, block: bool = True) -> None:
@@ -493,6 +528,7 @@ class TrainingEval:
                             local_gate=None,
                             local_fallback_only=True,
                         )
+                        self._eval_open = (*self._eval_open, self._eval_thread)
                         budget = min(
                             float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0,
                             600.0,

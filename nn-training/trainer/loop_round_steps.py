@@ -393,11 +393,13 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 f"本机不跑这门课：{HELD_LEG_HINT}"
             )
         # ★ 2026-11-03（用户口径「rollout 绝对优先，eval 只吃间隙」）：采集整段持有
-        #   进程级 eval 闸的 rollout 作用域。2026-11-04（任务级仲裁）语义：在飞 eval 局
-        #   **不动**（自然落账），只冻结**新 grant**；冻结期间各轮窗口钟一起停走，解冻后
-        #   同一轮继续派完。两条驱动路径（组合轮体 / 细粒度 Supervisor）都经本方法，
-        #   所以闸只需要在这里开。
-        with eval_gate().rollout():
+        #   eval 闸的 rollout 作用域。2026-11-04（任务级仲裁）语义：在飞 eval 局
+        #   **不动**（自然落账），只冻结**新 grant**；冻结期间本轮窗口钟停走，解冻后
+        #   同一轮继续派完。两条驱动路径（组合轮体 / 细粒度 Supervisor）都经本方法。
+        #   §113：作用域按课程——A 课采集只冻 A 课，不再连坐同进程的 B 课。
+        from worker.cmd import course_fp_for_args
+
+        with eval_gate().rollout(course_fp_for_args(self.args)):
             if ctx.collect_mode == COLLECT_NODE:
                 # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
                 #   必须被读——配置冲突就只跳过本轮（`ROUND_SKIP` 走既有 30s/5 连击梯子），

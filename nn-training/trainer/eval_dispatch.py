@@ -491,8 +491,8 @@ class EvalDispatcher:
             )
             # 窗口从**权重就绪**起算（2026-11-03）：POST 期间 `_on_weight_ready` 已让先
             # 就绪的节点开跑（它们读临时上限），到这里改写为「此刻起一个完整窗口」。
-            # 冻结中（rollout 活跃）则窗口钟一开始就停走（任务级仲裁的 rollout 优先）。
-            rnd.arm_window(time.time(), paused=arb.frozen())
+            # 本课冻结中（rollout 活跃）则窗口钟一开始就停走；别的课采集不停本课的钟（§113）。
+            rnd.arm_window(time.time(), paused=arb.frozen_for(course_fp))
             rnd.set_remote_ready(nodes_ok)
             if alive and not nodes_ok:
                 # 旧实现此处无条件 return：本机槽位明明可用却整轮 0 局（审计 B5）。

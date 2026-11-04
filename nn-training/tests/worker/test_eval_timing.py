@@ -483,20 +483,31 @@ def test_drain_early_exits_are_logged(tmp_path: Path, monkeypatch: pytest.Monkey
 # ── 重启补账（F1，2026-11-04 z6/z7 的 13 轮缺号）────────────────────────────────
 
 
-class _StubGate:
-    """替身闸：只回答 `status()`（补账只看「闸空不空」）。"""
+class _RoundStub:
+    """仲裁器里的「本课已有一轮在跑」替身。
 
-    def __init__(self, *, queued: int = 0, running: bool = False) -> None:
-        self._st = {"queued": queued, "running": running, "rollouts": 0, "completed": 0}
+    池线程可能在本替身登记期间醒来调 `take()` ⇒ 发牌用到的面也要给全（一律「不要牌」）。
+    """
 
-    def status(self) -> dict:
-        return dict(self._st)
+    course_fp = ""
 
+    def register_clock(self, now: float) -> None:
+        pass
 
-def _idle_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    import worker.eval_gate as eval_gate_mod
+    def pause_clock(self, now: float) -> None:
+        pass
 
-    monkeypatch.setattr(eval_gate_mod, "eval_gate", lambda: _StubGate())
+    def resume_clock(self, now: float) -> None:
+        pass
+
+    def wants(self, nid: str, now: float) -> bool:
+        return False
+
+    def claim_unique(self, nid: str, now: float) -> None:
+        return None
+
+    def replica_candidates(self, nid: str, now: float) -> list:
+        return []
 
 
 def test_dispatch_backfills_old_gaps_one_per_round(
@@ -504,10 +515,13 @@ def test_dispatch_backfills_old_gaps_one_per_round(
 ) -> None:
     """旧缺口每轮补一个、升序、只扫一次；已覆盖与当前轮（`m >= it-1`）不进补账。
 
-    病根：闸（`worker.eval_gate`）的队列在内存里 —— 进程重启把「已派发、未开跑」的轮次
-    整批丢掉，而 `select_delayed_eval_it` 只看 `it-1`，它们从此无人再提（z6-porter
-    it50/55/65/70/80/85、z6-speed 同号段 + it90 等共 13 轮）。一次全排会让新轮的票排在
-    整串旧缺口之后（当前读数被饿死）⇒ 每轮只补一个，且**新轮先入队**。
+    病根：进程重启把「已派发、未开跑」的轮次整批丢掉，而 `select_delayed_eval_it` 只看
+    `it-1`，它们从此无人再提（z6-porter it50/55/65/70/80/85、z6-speed 同号段 + it90
+    等共 13 轮）。一次全排会让新轮的票排在整串旧缺口之后（当前读数被饿死）⇒ 每轮只补
+    一个，且**新轮先入队**。
+
+    §113 起每课同时只开一轮：当前轮在场时不补账（同一迭代最多一轮），补账吃下一个
+    真正空闲的迭代。
     """
     import trainer.eval_dispatch as ed
 
@@ -515,10 +529,10 @@ def test_dispatch_backfills_old_gaps_one_per_round(
 
     def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
         calls.append((it, rl_path))
+        _summary(Path(traj_dir).parent / "eval_log.jsonl", it, 0)  # 整轮完整收工
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
-    _idle_gate(monkeypatch)
     ts = _steps(tmp_path)
     ts._eval_backfill = None  # 打开补账（夹具默认关）
     a50 = _archive(ts, 50, "{}")
@@ -528,16 +542,20 @@ def test_dispatch_backfills_old_gaps_one_per_round(
     elog = Path(str(ts._traj_dir).replace("it6", "")) / "eval_log.jsonl"
     _summary(elog, 60, 0)  # 60 已完整覆盖 ⇒ 不补
 
-    ts._dispatch_delayed_eval(91, {})  # 正常派发 90（it-1），随后补 50
-    assert calls == [(90, str(a90)), (50, str(a50))], calls
+    ts._dispatch_delayed_eval(91, {})  # 正常派发 90（it-1）；本轮不再塞补账
+    assert calls == [(90, str(a90))], calls
+    assert ts._eval_backfill is None, "当前轮在场时不扫描旧缺口"
+
+    ts._dispatch_delayed_eval(92, {})  # 91 非评估轮、上一轮已不在跑 ⇒ 补 50
+    assert calls[-1] == (50, str(a50)) and len(calls) == 2, calls
     assert ts._eval_backfill is not None
     assert [mm for mm, _p in ts._eval_backfill] == [55], "每轮只放行一个缺口"
 
-    ts._dispatch_delayed_eval(92, {})  # 91 非评估轮 ⇒ 只有补账 55
+    ts._dispatch_delayed_eval(93, {})  # 队列空：补 55
     assert [it for it, _ in calls][-1] == 55 and len(calls) == 3, calls
     assert ts._eval_backfill == [], "缺口补完即止"
 
-    ts._dispatch_delayed_eval(93, {})  # 队列空：不再派
+    ts._dispatch_delayed_eval(94, {})  # 队列空：不再派
     assert len(calls) == 3, calls
 
 
@@ -551,10 +569,10 @@ def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
 
     def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
         calls.append(it)
+        _summary(Path(traj_dir).parent / "eval_log.jsonl", it, 0)  # 整轮完整收工
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
-    _idle_gate(monkeypatch)
     ts = _steps(tmp_path, _tag="smoke", smoke=True)
     ts._eval_backfill = None
     _archive(ts, 50, "{}")
@@ -567,20 +585,21 @@ def test_backfill_skips_smoke_and_is_a_noop_without_gaps(
     _archive(fresh, 5, "{}")
     fresh._dispatch_delayed_eval(6, {})  # 唯一的归档轮就是 it-1（正常派发负责）
     assert calls.count(5) == 1, "5 只由正常派发一次"
+    fresh._dispatch_delayed_eval(7, {})  # 上一轮已不在跑 ⇒ 这一刻才扫补账
     assert fresh._eval_backfill == [], "扫过且无缺口 ⇒ 空表"
 
 
-def test_backfill_yields_when_eval_gate_is_busy(
+def test_backfill_yields_when_arbiter_has_same_course_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """闸里已有活 ⇒ 本轮**不补账也不扫描**（当前轮照派）。
+    """本课已有轮在仲裁器里跑 ⇒ 本轮**不补账也不扫描**（当前轮照派/顺延）。
 
-    闸是进程级（并发 2）、单轮服务 ~4min，而训练 ~100s/轮：按训练轮速灌旧缺口 = 需求翻倍，
-    当前读数会被旧账永久压在队尾（2026-11-04 08:34 实测 36 张/小时 vs 单飞服务
-    ~15 张/小时）。补账只吃真空隙，训练不停时旧缺口留给收官 drain。
+    单轮服务数分钟，而训练 ~90s/轮：按训练轮速灌旧缺口 = 需求翻倍，当前读数会被旧账
+    永久压在队尾（2026-11-04 08:34 实测 36 张/小时 vs 单飞服务 ~15 张/小时）。补账只吃
+    真空隙，训练不停时旧缺口留给收官 drain。
     """
     import trainer.eval_dispatch as ed
-    import worker.eval_gate as eval_gate_mod
+    from worker.eval_arbiter import eval_arbiter
 
     calls: list[int] = []
 
@@ -589,14 +608,104 @@ def test_backfill_yields_when_eval_gate_is_busy(
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
-    monkeypatch.setattr(eval_gate_mod, "eval_gate", lambda: _StubGate(queued=1))
-    ts = _steps(tmp_path, _tag="busy")
-    ts._eval_backfill = None
-    _archive(ts, 50, "{}")
-    _archive(ts, 90, "{}")
-    ts._dispatch_delayed_eval(91, {})
-    assert calls == [90], f"当前轮照派、旧缺口不动: {calls}"
-    assert ts._eval_backfill is None, "闸忙时连扫描都不做（下一轮再看）"
+    arb = eval_arbiter()
+    busy = _RoundStub()
+    arb.register(busy)  # type: ignore[arg-type]
+    try:
+        ts = _steps(tmp_path, _tag="busy")
+        ts._eval_backfill = None
+        _archive(ts, 50, "{}")
+        _archive(ts, 90, "{}")
+        ts._dispatch_delayed_eval(91, {})
+        assert calls == [], f"本课已有轮在跑，却又派了新轮: {calls}"
+        assert ts._eval_pending_m == 90, "最新权重轮没有顺延"
+        assert ts._eval_backfill is None, "闸忙时连扫描都不做（下一轮再看）"
+    finally:
+        arb.unregister(busy)  # type: ignore[arg-type]
+
+
+# ── 每课单轮上限 + latest-wins 顺延（§113，2026-11-04 z7 两课 15 轮堆积）─────────
+
+
+def test_dispatch_caps_open_rounds_and_keeps_latest_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本课同时只开一轮；到期的更新轮覆盖顺延位（latest-wins），轮收工后派最新。
+
+    旧实现每 5 轮无条件再开一轮：134 分钟派出 19 轮/课、只收 5 轮 ⇒ 15 轮平分一条
+    涓流，每轮 700 局只落 300–500，`never_dispatched` 涨到 300+。单轮上限让每一轮
+    拿到全部本课份额；被顺延掉的旧轮由补账/收官 drain 从归档补。
+    """
+    import trainer.eval_dispatch as ed
+
+    calls: list[int] = []
+    hold = threading.Event()
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+
+        def _job() -> None:
+            hold.wait(30.0)
+
+        th = threading.Thread(target=_job, daemon=True)
+        th.start()
+        return th
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    ts = _steps(tmp_path, _tag="cap")
+    ts._eval_on_round = lambda m: True  # type: ignore[assignment]
+    for m in (5, 6, 7, 8):
+        _archive(ts, m, "{}")
+
+    ts._dispatch_delayed_eval(6, {})  # m=5：开一轮
+    assert calls == [5], calls
+    ts._dispatch_delayed_eval(7, {})  # m=6：顺延
+    ts._dispatch_delayed_eval(8, {})  # m=7：覆盖顺延位（6 被更新值顶掉）
+    assert calls == [5], f"单轮上限失效: {calls}"
+    assert ts._eval_pending_m == 7, "顺延位不是最新的权重轮"
+
+    hold.set()
+    for th in ts._eval_open:
+        th.join(5)
+    assert ts._eval_open_threads() == ()
+
+    ts._dispatch_delayed_eval(9, {})  # 轮已收工：顺延位(7) 与当前(8) 取最新 = 8
+    assert calls == [5, 8], f"收工后没有派最新的顺延轮: {calls}"
+    assert ts._eval_pending_m is None
+    for th in ts._eval_open:
+        th.join(5)
+
+
+def test_dispatch_defers_when_same_course_round_is_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本课轮已登记在仲裁器（收尾/补账起的轮）也算在飞：延迟派发只记顺延位。"""
+    import trainer.eval_dispatch as ed
+    from worker.eval_arbiter import eval_arbiter
+
+    calls: list[int] = []
+
+    def _fake_bg(bun, rl_path, traj_dir, args, cfg, iter_id, it, *a, **k):
+        calls.append(it)
+        return threading.Thread()
+
+    monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
+    arb = eval_arbiter()
+    busy = _RoundStub()
+    arb.register(busy)  # type: ignore[arg-type]
+    try:
+        ts = _steps(tmp_path, _tag="registered")
+        ts._eval_on_round = lambda m: True  # type: ignore[assignment]
+        _archive(ts, 5, "{}")
+        _archive(ts, 6, "{}")
+        ts._dispatch_delayed_eval(6, {})
+        assert calls == [] and ts._eval_pending_m == 5
+    finally:
+        arb.unregister(busy)  # type: ignore[arg-type]
+
+    ts._dispatch_delayed_eval(7, {})  # 当前(6) 比顺延位(5) 新 ⇒ 派 6
+    assert calls == [6], calls
+    assert ts._eval_pending_m is None
 
 
 # ── 停课闸（2026-11-04 用户指令）：控制台停课 ⇒ 该课不再补任何 eval 空缺 ──────────
@@ -613,7 +722,6 @@ def test_stopped_course_dispatches_no_eval(tmp_path: Path, monkeypatch: pytest.M
         return threading.Thread()
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", _fake_bg)
-    _idle_gate(monkeypatch)
     ts = _steps(tmp_path, _tag="stopped")
     marker = _course(ts, opened=False)
     _archive(ts, 5, "{}")

@@ -7,6 +7,11 @@
 3. rollout 启动 ⇒ **在飞 eval 局不动**，只冻结新 eval 投递，直到 rollout 收尾；
 4. 同一时刻多课程/多轮的 rollout 与 eval 在同一批节点上并行，分派端决定下一局是谁。
 
+2026-11-04（§113）：冻结按**课程**作用域（`freeze(course_fp)`）。旧实现冻结整个进程
+⇒ Supervisor 里两门课交替采集时（z7-maze-v2/kill 各有 91 轮采集），任一课采集都把
+另一门课的 eval 一起停掉，实测冻结覆盖 75% 墙钟。`freeze(None)` 仍是进程级冻结
+（手工 `evalA` / 无课程身份的旧路径）。
+
 旧实现是「每轮一条轮级闸 + 每条腿一组线程」：闸串行轮次（并发 2），轮 A 的线程又
 只看得见 A 的队列 ⇒ B 的局在 A 收尾前拿不到算力，A 尾部的算力只能拿去跑自己的竞速
 副本。本模块把**队列与线程解耦**：轮只登记 `(stage, seed)` 与自己的上下文，线程从
@@ -830,14 +835,18 @@ class EvalArbiter:
         self._rep = 0
         self._grant_ids = count(1)
         self._frozen = 0
+        self._frozen_courses: dict[str, int] = {}
         self._shutdown = False
 
     # —— 登记 / 冻结 ——
 
+    def _frozen_for_locked(self, course_fp: str) -> bool:
+        return self._frozen > 0 or self._frozen_courses.get(course_fp, 0) > 0
+
     def register(self, rnd: EvalRound) -> None:
         with self._cond:
             rnd.register_clock(time.time())
-            if self._frozen:
+            if self._frozen_for_locked(rnd.course_fp):
                 rnd.pause_clock(time.time())
             self._rounds.append(rnd)
             self._cond.notify_all()
@@ -859,35 +868,69 @@ class EvalArbiter:
         # `count` 的 `next()` 在 GIL 下原子：发牌序号只是路径标签，不必进条件锁。
         return next(self._grant_ids)
 
-    def freeze(self) -> None:
+    def freeze(self, course_fp: str | None = None) -> None:
+        """冻结新 grant：`course_fp=None` = 进程级；给了值 = 只冻该课（§113）。"""
         with self._cond:
-            self._frozen += 1
-            if self._frozen == 1:
-                now = time.time()
-                for rnd in self._rounds:
-                    rnd.pause_clock(now)
-                self._cond.notify_all()
+            now = time.time()
+            if course_fp is None:
+                self._frozen += 1
+                if self._frozen == 1:
+                    for rnd in self._rounds:
+                        rnd.pause_clock(now)
+            else:
+                n = self._frozen_courses.get(course_fp, 0) + 1
+                self._frozen_courses[course_fp] = n
+                if n == 1:
+                    for rnd in self._rounds:
+                        if rnd.course_fp == course_fp:
+                            rnd.pause_clock(now)
+            self._cond.notify_all()
 
-    def thaw(self) -> None:
+    def thaw(self, course_fp: str | None = None) -> None:
         with self._cond:
-            if self._frozen <= 0:
-                return
-            self._frozen -= 1
-            if self._frozen == 0:
-                now = time.time()
-                for rnd in self._rounds:
-                    rnd.resume_clock(now)
-                self._cond.notify_all()
+            now = time.time()
+            if course_fp is None:
+                if self._frozen <= 0:
+                    return
+                self._frozen -= 1
+                if self._frozen == 0:
+                    for rnd in self._rounds:
+                        if not self._frozen_for_locked(rnd.course_fp):
+                            rnd.resume_clock(now)
+            else:
+                n = self._frozen_courses.get(course_fp, 0)
+                if n <= 0:
+                    return
+                if n == 1:
+                    self._frozen_courses.pop(course_fp, None)
+                else:
+                    self._frozen_courses[course_fp] = n - 1
+                if not self._frozen_for_locked(course_fp):
+                    for rnd in self._rounds:
+                        if rnd.course_fp == course_fp:
+                            rnd.resume_clock(now)
+            self._cond.notify_all()
 
     def frozen(self) -> bool:
+        """进程级冻结（`freeze()` 无参）。按课冻结走 `frozen_for(course_fp)`。"""
         with self._cond:
             return self._frozen > 0
+
+    def frozen_for(self, course_fp: str) -> bool:
+        with self._cond:
+            return self._frozen_for_locked(course_fp)
+
+    def active_for(self, course_fp: str) -> int:
+        """该课仍登记在仲裁器里的轮数（在跑或尚未收工）。"""
+        with self._cond:
+            return sum(1 for rnd in self._rounds if rnd.course_fp == course_fp)
 
     def reset_for_tests(self) -> None:
         with self._cond:
             self._shutdown = True
             self._rounds.clear()
             self._frozen = 0
+            self._frozen_courses.clear()
             self._cond.notify_all()
 
     # —— 发牌 ——
@@ -896,7 +939,8 @@ class EvalArbiter:
         """给 `nid` 发下一局：唯一任务按轮轮转 → 跨轮竞速副本 → 等待。
 
         返回 None = 本进程再没有轮需要这个节点的线程（调用方退出）。冻结期间**阻塞**
-        而不是返回 None：rollout 结束后同一个线程继续服务，不重新孵化。
+        而不是返回 None：rollout 结束后同一个线程继续服务，不重新孵化。冻结按课程
+        过滤（§113）：A 课采集中只挡住 A 课的轮，B 课照常领牌。
         """
         idle_since: float | None = None
         while True:
@@ -904,13 +948,11 @@ class EvalArbiter:
                 if self._shutdown:
                     return None
                 now = time.time()
-                if self._frozen:
+                if any(r.wants(nid, now) for r in self._rounds):
                     idle_since = None
-                    self._cond.wait(TAKE_TICK_SEC)
-                    continue
-                rounds = list(self._rounds)
-                if any(r.wants(nid, now) for r in rounds):
-                    idle_since = None
+                    rounds = [
+                        r for r in self._rounds if not self._frozen_for_locked(r.course_fp)
+                    ]
                     grant = self._unique_grant(rounds, nid, now)
                     if grant is None:
                         grant = self._replica_grant(rounds, nid, now)

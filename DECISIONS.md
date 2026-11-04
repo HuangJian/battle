@@ -11014,3 +11014,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   §2026-11-04-goalnn-eval-gate-two-concurrent 的「FIFO / 并发上限 / Preempt 收手」部分；
   「rollout 绝对优先、eval 只吃间隙」的目标不变，落地方式改为**冻结新投递**。
 - **全文** → `docs/nn/engineering.md` §111。
+
+## §2026-11-04-goalnn-eval-freeze-per-course-and-round-cap（eval 冻结按课程 + 本课单开轮上限）
+
+- **现场**（2026-11-04 13:27–15:45，z7-maze-v2 / z7-maze-kill 同进程 134 分钟）：两课各自采集
+  只占墙钟 35–37%，但 §111 的冻结仍是进程级 ⇒ 并集 75% 的墙钟两课 eval 全停（冻结期落账
+  0.30–0.34 局/s vs 解冻 0.70–0.72 局/s）；两课各派发 19 轮、收工 5 轮，15+ 轮平分一股涓流
+  ⇒ 逐轮 landed 从 it5 的 529/519 掉到 it25 的 316/325（每轮 700 局）。
+- **决定**：① 冻结按课程作用域（`freeze/thaw/frozen_for(course_fp)`，`None` = 进程级），
+  `take()` 过滤冻结课程的轮再发牌；采集侧 `step_rollout` 传 `course_fp_for_args(args)`。
+  ② 每课同时只开一轮 eval（`_eval_open` ∪ `active_for(course_fp)`）；到期的更新轮 latest-wins
+  记 `_eval_pending_m`，下一轮只派 `max(新, pending)`；被顶掉的旧轮由 F1 补账 / 收官 drain
+  按归档权重补。③ 补账门槛从「闸空」改为「本课空」。
+- **被否决**：继续进程级冻结（兄弟课连坐）· 按节点/全局并发限流（rollout 优先已由
+  `eval_slot_cap` 保证）· 无限开轮 + 只改轮转权重（涓流仍被摊薄）· 被顶掉的旧轮直接丢弃
+  （读数永久缺失）。
+- **边界**：在飞局不撤不断连（§111 需求 3）；评估规模（700 局/轮）与 `ROUND_SKIP` 口径不动；
+  混跑期集群 1.21 局/s vs 两课需求 ≈2.89 局/s 是**结构性缺口**，rollout 优先 ⇒ 训练期落后由
+  drain / 补账兜底，不靠分派修。
+- **验收**：`test_course_rollout_does_not_freeze_sibling_course_eval` ·
+  `test_dispatch_caps_open_rounds_and_keeps_latest_pending` ·
+  `test_backfill_yields_when_arbiter_has_same_course_round` + trainer/worker 全量 2149 绿 +
+  完整门禁 `nn-python-gate.sh` 绿（5530 passed / 10 skipped，2026-11-04）。
+- **补充**：§2026-11-04-goalnn-task-level-eval-arbitration 的冻结作用域（原进程级）由本条目
+  收窄为按课程；其余决定不变。
+- **全文** → `docs/nn/engineering.md` §113。

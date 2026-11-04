@@ -1810,6 +1810,92 @@ def test_rollout_freeze_stops_new_grants_and_keeps_inflight(
     assert calls["n"] == 3, f"解冻后应派完全部 3 局（实测 {calls['n']} 次）"
 
 
+def test_course_rollout_does_not_freeze_sibling_course_eval(
+    tmp_path, monkeypatch
+) -> None:
+    """A 课 rollout 只冻结 A 课：B 课同进程的轮照常派完，A 课解冻后补齐（§113）。
+
+    现场（2026-11-04 13:27–15:41 z7-maze-v2 / z7-maze-kill）：两课各 91 轮采集交替
+    占满墙钟，进程级冻结覆盖 75%——任一课采集都把另一门课的 eval 一起停掉。按课程
+    冻结后，B 课的线程在 A 课采集期间照常从仲裁器领局。
+    """
+    from worker.cmd import course_fp_for_args
+    from worker.eval_arbiter import EvalArbiter, EvalRound
+    from worker.eval_gate import eval_gate
+
+    nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
+    ha = _LaneHarness(tmp_path / "a", monkeypatch, games=2, nodes=nodes, local_slots=0)
+    hb = _LaneHarness(tmp_path / "b", monkeypatch, games=2, nodes=nodes, local_slots=0)
+    ha.args.course_obj = types.SimpleNamespace(name="A", stage_json=lambda _s: None)
+    ha.args.course_frozen_bytes = b'{"name":"A"}'
+    hb.args.course_obj = types.SimpleNamespace(name="B", stage_json=lambda _s: None)
+    hb.args.course_frozen_bytes = b'{"name":"B"}'
+    fp_a, fp_b = course_fp_for_args(ha.args), course_fp_for_args(hb.args)
+    assert fp_a and fp_b and fp_a != fp_b
+
+    calls = {"a": 0, "b": 0}
+
+    def fetch(*_a, **kw):
+        which = "a" if str(kw["iter_id"]).startswith("rid.a") else "b"
+        calls[which] += 1
+        h = ha if which == "a" else hb
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    registered = threading.Event()
+    armed = threading.Event()
+    orig_register = EvalArbiter.register
+    orig_arm = EvalRound.arm_window
+
+    def spy_register(self: EvalArbiter, rnd: Any) -> None:
+        orig_register(self, rnd)
+        if rnd.course_fp == fp_a:
+            registered.set()
+
+    def spy_arm(self: EvalRound, now: float, *, paused: bool) -> None:
+        orig_arm(self, now, paused=paused)
+        if self.course_fp == fp_a:
+            armed.set()  # 权重 POST 收工、窗口已 arm ⇒ 池线程此刻真有活可领
+
+    monkeypatch.setattr(EvalArbiter, "register", spy_register)
+    monkeypatch.setattr(EvalRound, "arm_window", spy_arm)
+
+    gate = eval_gate()
+    out: dict[str, tuple] = {}
+    frozen = False
+    try:
+        gate.begin_rollout(fp_a)
+        frozen = True
+        a_thread = threading.Thread(
+            target=lambda: out.setdefault("a", ha.play(fetch, run_id="rid.a", it=7)),
+            daemon=True,
+            name="course-a-eval",
+        )
+        a_thread.start()
+        assert registered.wait(timeout=20.0), "A 课的轮没有登记"
+        # A 的权重 POST 已收工（窗口 arm）：池线程此刻真能领局，0 次才是「被冻结」而非「还没开跑」。
+        assert armed.wait(timeout=20.0), "A 课的权重没有就绪（窗口未 arm）"
+        assert calls["a"] == 0, "A 课冻结期间仍在派新局"
+
+        rows_b, _ = hb.play(fetch, run_id="rid.b", it=8)
+        played_b = [r for r in rows_b if r.get("event") == "eval"]
+        assert len(played_b) == 2, (
+            f"兄弟课的 eval 被 A 的 rollout 冻住了: {rows_b}\n" + "\n".join(hb.logs)
+        )
+        assert calls["b"] == 2, calls
+
+        gate.end_rollout(fp_a)
+        frozen = False
+        a_thread.join(timeout=30.0)
+        assert not a_thread.is_alive(), "解冻后 A 课没有收口"
+    finally:
+        if frozen:
+            gate.end_rollout(fp_a)
+
+    assert calls["a"] == 2, calls
+    rows_a = out["a"][0]
+    assert len([r for r in rows_a if r.get("event") == "eval"]) == 2, rows_a
+
+
 def test_two_eval_rounds_share_dispatch_round_robin(tmp_path, monkeypatch) -> None:
     """两轮 eval 并行：后启动的 B 不等 A 收尾，唯一任务按轮轮转均分。
 

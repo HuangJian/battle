@@ -25,6 +25,55 @@
 
 ---
 
+## §113 eval 冻结按课程 + 本课单开轮上限（2026-11-04，现场：z7-maze-v2 / z7-maze-kill「eval 又慢又缺局」）
+
+**现场**（2026-11-04 13:27–15:45，两课同进程 134 分钟）：
+
+- 每门课自己的采集只占墙钟 **35–37%**（91 段：v2 2809s / kill 3002s），但旧闸**进程级**
+  冻结 ⇒ 任一课采集都冻住两课 eval：并集 **5993s = 75%** 墙钟；
+- 冻结期落账 0.30–0.34 局/s，解冻 0.70–0.72 局/s —— 每课约 3/4 墙钟被兄弟课连坐；
+- 轮次无上限：两课各 **派发 19 轮、收工 5 轮**；同一股算力被 15+ 轮轮转平分 ⇒ 逐轮
+  landed 从 it5 的 529/519 掉到 it25 的 316/325（每轮 700 局），`never_dispatched` 逐轮涨。
+
+**根因**：① `eval_gate().rollout()` 是进程级（§111 做到任务级，但冻结仍全局）；
+② 每轮采集收官都派一个新 eval 轮，从不看本课上一轮是否还在跑 ⇒ 开轮数随训练线性增长，
+而集群吞吐固定。
+
+**决定**：
+
+1. **冻结按课程**（`worker/eval_gate.py` + `worker/eval_arbiter.py`）：`rollout(course_fp)` /
+   `freeze(course_fp)` / `thaw(course_fp)` / `frozen_for(course_fp)`；`take()` 先过滤冻结课程的
+   轮再发牌（其余课照常）。`course_fp=None` 仍为进程级（老的无课程路径 / 单测）。采集侧
+   `trainer/loop_round_steps.py::step_rollout` 传 `course_fp_for_args(self.args)`。
+2. **本课单开轮上限 + latest-wins**（`trainer/loop_eval.py`）：`_eval_open` 记本课在跑轮线程、
+   `eval_arbiter().active_for(course_fp)` 记已登记轮；二者皆空才派新轮。忙时把 `m` 记进
+   `_eval_pending_m`，下一轮只派 `max(新 m, pending)`；被顶掉的旧轮不丢——F1 补账与收官
+   drain 按归档权重补（归档不可变 ⇒ 读数仍可信）。
+3. 补账门槛从「闸空」改为「本课空」（`gate_idle=not busy`）：兄弟课在跑不再饿死本课历史缺口。
+
+**行为边界**（不变式）：在飞 eval 局仍不撤、不断连（§111 需求 3）；
+`eval_slot_cap(concurrency, inflight)=max(0, concurrency−inflight)` 不动 ⇒ rollout 绝对优先；
+评估规模（700 局/轮）与 30s/5 连击 `ROUND_SKIP` 不动——本次只改「谁在什么时候排队」。
+
+**验证**（`tests/worker/test_eval_gate.py` / `tests/trainer/test_eval_dispatch_resilience.py` /
+`tests/worker/test_eval_timing.py`）：A 课冻结时 B 课 eval 照常落账、A 解冻后补齐
+（`test_course_rollout_does_not_freeze_sibling_course_eval`）；本课已有轮在跑时新轮顺延、
+latest-wins 只派最新（`test_dispatch_caps_open_rounds_and_keeps_latest_pending`）；仲裁器里有
+本课登记轮时补账让路（`test_backfill_yields_when_arbiter_has_same_course_round`）。
+
+**e2e 混跑**（`e2e/test_run_rl.py`，2026-11-04 补）：走真链路（真 `dispatch_eval_bg` +
+真 `run_rollout_queue` + 假集群节点 HTTP），钉住上面这三条在**同节点并发**下仍成立——
+`test_it_mixed_cluster_rollout_only_freezes_own_course_eval`（A 课 rollout 期间 B 课 eval
+三局完整收工、A 课零派出零落账，解冻后同一轮补齐）与
+`test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight`（2 局在飞 + 2 局
+pending 时起冻结：在飞局照常落账、pending 一局不领，解冻后补满且逐局不重）。
+
+**遗留（结构性缺口，需用户裁决）**：混跑期集群实测 **1.21 局/s**（15:00–15:41 合计
+72.7 局/分），纯 eval 期 **3.26 局/s**，而两课需求 **≈2.89 局/s**（700 局/轮，5 it ≈ 97s/it）。
+rollout 优先是用户明确口径 ⇒ 混跑期 eval 必然落后，由收官 drain / 补账兜底。若要「训练中
+也不落后」只有三条路：降 eval 频度/局数、恢复 a96（当日离线）、或接受训练期部分覆盖由
+drain 补齐。
+
 ## §112 控制台停课 ⇒ 不再补该课 eval 空缺（2026-11-04，用户指令「dashboard 点击停课时，如果该课还有 eval 空缺，也不需要再补了」）
 
 **信号**：控制台的「停课」与「暂停」写的是同一份暂停意图，但只有停课会删**开课标记**

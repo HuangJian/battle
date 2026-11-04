@@ -332,6 +332,10 @@ class FakeServer(ThreadingHTTPServer):
         #: ——「采集回来时 eval 还在飞」由它**结构性**成立，不再与采集墙钟竞速。
         self.eval_gate: threading.Event | None = None
         self.eval_dispatched: threading.Event = threading.Event()
+        #: eval 腿的派发流水 `(iterId, stage, seed)`：rollout 与 eval 共用 `/v1/task`，
+        #: `events` 里的 dispatch 行分不出是谁；混跑用例要按**课程**归因（iterId 是课程侧
+        #: 传入的轮身份 + `ev` 后缀，见 `_eval_fetches`）。
+        self.eval_fetches: list[tuple[str, int, int]] = []
         # v3.17 收尾兜底回归：重复派发的副本（竞速输家）在此挂住 dup_hang 秒——
         # 模拟「输家副本落在慢节点且走同步 200 分支」：abandon_event 覆盖不到，
         # 只能靠 dispatcher 的 tailGraceJoinSec 收尾兜底，否则整轮被拖到满超时。
@@ -407,6 +411,10 @@ class FakeAgent(BaseHTTPRequestHandler):
             key = (int(q["stage"]), int(q["seed"]))
             with self._srv._fetch_lock:
                 self._srv.fetch_n[key] = self._srv.fetch_n.get(key, 0) + 1
+                if q.get("mode") == "eval":
+                    self._srv.eval_fetches.append(
+                        (str(q.get("iterId") or ""), key[0], key[1])
+                    )
             self._srv.events.append(("dispatch", time.time(), key))
             # 重复派发 = 竞速副本：挂住 dup_hang 秒（慢节点 + 同步 agent 的不可中断路径）
             if self._srv.dup_hang > 0 and key in self._srv.dispatched:
@@ -1055,6 +1063,294 @@ def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             "I10 rows ran archive W5 bytes (not live pointer)",
         )
     finally:
+        srv.shutdown()
+
+
+# ─────────────────── 混跑：集群 rollout × eval（§113，2026-11-04） ───────────────────
+
+
+def _eval_course_args(base: types.SimpleNamespace, course: str, **over) -> types.SimpleNamespace:
+    """一堂课的 in-loop eval args：课程身份 + 固定语料范围。
+
+    `course_frozen_bytes` 是 `course_fp_for_args` 的字节源（生产由 `course_from_args` 落）。
+    A/B 两课只差它 —— 若冻结按**进程**而不是按课（§113 前的实现），两课会同生共死。
+    """
+    ns = types.SimpleNamespace(
+        **{
+            **vars(base),
+            "course": course,
+            "course_obj": types.SimpleNamespace(name=course, stage_json=lambda _s: None),
+            "course_frozen_bytes": json.dumps({"course": course}).encode("utf-8"),
+            "eval_games_per_stage": 1,
+            "eval_stages": "0-2",
+            "eval_window_sec": 120,
+            "total_stages": 3,
+        }
+    )
+    for k, v in over.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _wait_until(pred, *, timeout: float = 30.0) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        # sleep-ok: 轮询步长（等的是谓词/状态，超时只当挂起兜底）
+        time.sleep(0.02)
+    return bool(pred())
+
+
+def _eval_fetches(srv: FakeServer, tag: str) -> list[tuple[str, int, int]]:
+    """该课程 eval 轮的 `/v1/task` 派发流水。
+
+    派发器把 iterId 记为 `{tag}ev`（`worker/eval_local.EVAL_ITER_SUFFIX`：eval 与采集
+    在 agent 结果缓存里键空间隔离），所以比的是带后缀的全名，不是裸 tag。
+    """
+    from worker.eval_local import EVAL_ITER_SUFFIX
+
+    want = f"{tag}{EVAL_ITER_SUFFIX}"
+    return [f for f in srv.eval_fetches if f[0] == want]
+
+
+def _eval_ledger(path: Path) -> tuple[list[dict], list[dict]]:
+    """(逐局行, summary 行)——判据只读结构化账本，不碰日志文本。"""
+    if not path.exists():  # 第一局落账前账本还不存在（= 一行都没有）
+        return [], []
+    rows = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return (
+        [r for r in rows if r.get("event") == "eval"],
+        [r for r in rows if r.get("event") == "eval_summary"],
+    )
+
+
+def test_it_mixed_cluster_rollout_only_freezes_own_course_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """集群混跑：A 课 rollout 与 B 课 eval 在同一节点并行；A 的新 eval 局冻结、B 照常。
+
+    用户口径（plan/cloud-pool-cross-round.plan.md）：rollout 绝对优先，但冻结只停**它自己
+    那门课**的新 eval 投递——旧实现冻结整个进程，两门课交替采集时任一课采集都把另一门课
+    的 eval 一起停掉（z7-maze-v2/kill 实测冻结覆盖 75% 墙钟，§113）。
+
+    本用例在 e2e 层走**真链路**：真 `dispatch_eval_bg`（in-loop 同一入口，`local_fallback_only`）
+    + 真 `run_rollout_queue` + 真 HTTP 假集群节点；冻结作用域 = 生产 `step_rollout` 的
+    `eval_gate().rollout(course_fp_for_args(args))`。判据全在结构化面上：
+    `/v1/task` 的 eval 派发流水（按 iterId 归因）、`eval_log.jsonl` 的逐局行与 summary。
+
+    钉住三件事：
+      ① B 课 eval 在 A 课冻结期间**完整收工**（3 局落账、summary settled/dropped=0）；
+      ② A 课 rollout 与 B 课**在飞** eval 局同节点并行（B 的 handler 被按在飞，rollout 照常跑完）；
+      ③ A 课冻结期 0 局派出、0 行落账；解冻后同一轮收工（3 局、summary 完整）。
+    """
+    import trainer.eval_dispatch as ed
+    from worker.cmd import course_fp_for_args
+    from worker.eval_arbiter import eval_arbiter
+    from worker.eval_gate import eval_gate
+
+    srv, _WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    # 节点 id 每用例唯一：eval 执行池按节点 id 生长且**只增不缩**（worker/eval_exec.py 的
+    # grow-only 池），与套件其它 e2e 共用 "fake" 会让并发线程数被前序用例左右（判据就会
+    # 变成「执行顺序」的断言）。
+    nid = f"mix-{tmp_path.name}"
+    cfg["nodes"][0]["id"] = nid
+    cfg["policy"]["evalLocalSlots"] = 0  # 纯远端：本机兜底腿另有专门用例
+
+    w_a = tmp_path / "wa" / "weights.json"
+    w_b = tmp_path / "wb" / "weights.json"
+    w_a.parent.mkdir()
+    w_b.parent.mkdir()
+    w_a.write_text('{"course": "a"}', encoding="utf-8")
+    w_b.write_text('{"course": "b"}', encoding="utf-8")
+    # eval 账本落 `<traj>/../eval_log.jsonl` ⇒ 两课各用一层自己的父目录（否则同册）。
+    traj_a = tmp_path / "ta" / "it7"
+    traj_b = tmp_path / "tb" / "it8"
+    traj_a.mkdir(parents=True)
+    traj_b.mkdir(parents=True)
+    log_a = traj_a.parent / "eval_log.jsonl"
+    log_b = traj_b.parent / "eval_log.jsonl"
+    args_a = _eval_course_args(args, "course-a")
+    args_b = _eval_course_args(args, "course-b")
+    fp_a, fp_b = course_fp_for_args(args_a), course_fp_for_args(args_b)
+    assert fp_a and fp_b and fp_a != fp_b, "夹具前提：两门课的课程身份必须不同"
+
+    gate = eval_gate()
+    gate.begin_rollout(fp_a)
+    th_a: threading.Thread | None = None
+    th_b: threading.Thread | None = None
+    try:
+        # A 课 eval 先登记（冻结中）：轮会活着等，但一局都不该派出去。
+        th_a = ed.dispatch_eval_bg(
+            bun, str(w_a), traj_a, args_a, cfg, "mix.a", 7, local_fallback_only=True
+        )
+        assert _wait_until(
+            lambda: eval_arbiter().active_for(fp_a) > 0
+        ), "A 课的 eval 轮没有登记（等不到 active_for > 0）"
+
+        # B 课 eval：同集群同节点，3 局全部**按在飞**（handler 压在 `srv.eval_gate` 上）。
+        srv.eval_gate = threading.Event()
+        th_b = ed.dispatch_eval_bg(
+            bun, str(w_b), traj_b, args_b, cfg, "mix.b", 8, local_fallback_only=True
+        )
+        assert _wait_until(lambda: len(_eval_fetches(srv, "mix.b")) == 3), (
+            f"B 课 3 局没有全部派出：{srv.eval_fetches}"
+        )
+
+        # —— 真混跑：A 的 rollout 在 B 的 3 局 eval 仍在飞时跑完整轮 ——
+        rep = run_rl.run_rollout_queue(
+            bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix.7",
+            local_slots_max=0,
+        )
+        check(rep["games"] == 2 and rep["missing"] == [], "混跑：A 课 rollout 2 局全结算")
+        check(th_b.is_alive(), "混跑：B 课 eval 在 rollout 收尾时仍在飞（同节点并行）")
+        check(_eval_fetches(srv, "mix.a") == [], f"冻结期 A 课 0 局派出：{srv.eval_fetches}")
+        check(_eval_ledger(log_a)[0] == [], "冻结期 A 课 0 行落账")
+
+        # 放行在飞局：它们照常落账（rollout 只冻结**新投递**，不撤销在飞局）。
+        srv.eval_gate.set()
+        th_b.join(timeout=60)
+        check(not th_b.is_alive(), "B 课 eval 轮收工")
+        rows_b, summ_b = _eval_ledger(log_b)
+        check(len(rows_b) == 3, f"B 课 3 局落账（got {len(rows_b)}）")
+        check(
+            bool(summ_b)
+            and summ_b[-1]["games"] == 3
+            and summ_b[-1]["dropped"] == 0
+            and summ_b[-1]["close_reason"] == "settled"
+            and summ_b[-1]["course_fp"] == fp_b
+            and summ_b[-1]["nodes"] == {nid: 3},
+            f"B 课 summary 完整收工：{summ_b[-1] if summ_b else None}",
+        )
+        # 冻结仍是**按课**的：B 收工时 A 仍 0 局（进程级冻结的实现里这不可能发生）。
+        check(_eval_ledger(log_a)[0] == [], "B 收工时 A 课仍被冻结")
+        check(
+            [r["node"] for r in rows_b] == [nid] * 3, "B 课 3 局都由集群节点结算"
+        )
+
+        # —— 解冻：A 课同一轮继续领牌，收工读数完整 ——
+        gate.end_rollout(fp_a)
+        th_a.join(timeout=60)
+        check(not th_a.is_alive(), "解冻后 A 课 eval 收工")
+        a_fetches = _eval_fetches(srv, "mix.a")
+        check(len(a_fetches) == 3, f"解冻后 A 课 3 局派出（got {len(a_fetches)}）")
+        rows_a, summ_a = _eval_ledger(log_a)
+        check(len(rows_a) == 3, f"A 课 3 局落账（got {len(rows_a)}）")
+        check(
+            bool(summ_a)
+            and summ_a[-1]["games"] == 3
+            and summ_a[-1]["dropped"] == 0
+            and summ_a[-1]["close_reason"] == "settled"
+            and summ_a[-1]["course_fp"] == fp_a
+            and summ_a[-1]["nodes"] == {nid: 3},
+            f"A 课 summary 完整收工：{summ_a[-1] if summ_a else None}",
+        )
+    finally:
+        if srv.eval_gate is not None:
+            srv.eval_gate.set()  # 断言失败也别把 handler 按满 120s
+        gate.end_rollout(fp_a)
+        for th in (th_a, th_b):
+            if th is not None:
+                th.join(timeout=60)
+        srv.shutdown()
+
+
+def test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """集群混跑：rollout 只冻结 eval 的**新投递** —— 在飞局不撤销、待办局等解冻。
+
+    4 局 eval、节点 2 槽 ⇒ 恰好 2 局在飞 + 2 局待办。A 课 rollout 与它们抢同一节点：
+      · 冻结期 pending 的 2 局**一局都不派**（`/v1/task` 的 eval 流水停在 2）；
+      · 已在飞的 2 局不被 rollout 撤销：放行 handler 后照常落账；
+      · rollout 收尾、解冻后同一批池线程继续领牌 ⇒ 4 局全落、summary settled/dropped=0。
+
+    与上一条的分工：那条钉「冻结按课 + 兄弟课不受影响」；这条钉「冻结的粒度只到新投递」，
+    即 §113 的用户口径原文「在飞 eval 局不动，只停止派发新的 eval 局」。
+    """
+    import trainer.eval_dispatch as ed
+    from worker.cmd import course_fp_for_args
+    from worker.eval_gate import eval_gate
+
+    srv, _WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
+    nid = f"mix2-{tmp_path.name}"
+    cfg["nodes"][0]["id"] = nid
+    cfg["nodes"][0]["concurrency"] = 2  # 2 槽 ⇒ 2 局在飞、2 局留在 pending
+    cfg["policy"]["evalLocalSlots"] = 0
+
+    w_a = tmp_path / "w" / "weights.json"
+    w_a.parent.mkdir()
+    w_a.write_text('{"course": "a"}', encoding="utf-8")
+    traj_a = tmp_path / "ta" / "it7"
+    traj_a.mkdir(parents=True)
+    log_a = traj_a.parent / "eval_log.jsonl"
+    args_a = _eval_course_args(args, "course-a", eval_stages="0-3")  # 4 局
+    fp_a = course_fp_for_args(args_a)
+    assert fp_a
+
+    gate = eval_gate()
+    froze = False
+    th: threading.Thread | None = None
+    try:
+        # 先让 2 局**真在飞**（handler 压在 `srv.eval_gate` 上），再起冻结 —— 本用例测的是
+        # 冻结**中途**落下的语义，冻结若发生在派发前，轮会直接 arm 成 paused（上一条已覆盖）。
+        srv.eval_gate = threading.Event()
+        th = ed.dispatch_eval_bg(
+            bun, str(w_a), traj_a, args_a, cfg, "mix2.a", 7, local_fallback_only=True
+        )
+        assert _wait_until(lambda: len(_eval_fetches(srv, "mix2.a")) == 2), (
+            f"2 槽应有 2 局在飞：{srv.eval_fetches}"
+        )
+        gate.begin_rollout(fp_a)
+        froze = True
+
+        # —— 混跑：在飞局仍被按着，rollout 跑完整轮 ——
+        rep = run_rl.run_rollout_queue(
+            bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix2.7",
+            local_slots_max=0,
+        )
+        check(rep["games"] == 2 and rep["missing"] == [], "混跑：rollout 2 局全结算")
+        check(th.is_alive(), "eval 轮活着等解冻（pending 2 局）")
+        check(len(_eval_fetches(srv, "mix2.a")) == 2, f"冻结期不许领新牌：{srv.eval_fetches}")
+        check(_eval_ledger(log_a)[0] == [], "在飞局未落账前 ledger 为空（handler 仍被按着）")
+
+        # 放行在飞局：它们照常结算；冻结仍在 ⇒ 池线程结算完只能等，不会领走 pending。
+        srv.eval_gate.set()
+        assert _wait_until(lambda: len(_eval_ledger(log_a)[0]) == 2), "在飞 2 局没有落账"
+        check(
+            len(_eval_fetches(srv, "mix2.a")) == 2,
+            f"在飞局落账后仍不许领新牌：{srv.eval_fetches}",
+        )
+        check(th.is_alive(), "pending 2 局仍被冻结挡着（轮未收工）")
+
+        gate.end_rollout(fp_a)
+        froze = False
+        th.join(timeout=60)
+        check(not th.is_alive(), "解冻后 eval 轮收工")
+        rows, summ = _eval_ledger(log_a)
+        check(len(rows) == 4, f"解冻后补满 4 局（got {len(rows)}）")
+        check(
+            sorted((r["stage"], r["seed"]) for r in rows)
+            == sorted({(r["stage"], r["seed"]) for r in rows}),
+            "4 局逐局不重复",
+        )
+        check(
+            bool(summ)
+            and summ[-1]["games"] == 4
+            and summ[-1]["dropped"] == 0
+            and summ[-1]["close_reason"] == "settled"
+            and summ[-1]["course_fp"] == fp_a
+            and summ[-1]["nodes"] == {nid: 4},
+            f"summary 完整收工：{summ[-1] if summ else None}",
+        )
+        check(all(r["node"] == nid for r in rows), "4 局都由集群节点结算")
+    finally:
+        if srv.eval_gate is not None:
+            srv.eval_gate.set()
+        if froze:  # 断言中途失败时解冻，别把后续用例的 eval 一起冻着
+            gate.end_rollout(fp_a)
+        if th is not None:
+            th.join(timeout=60)
         srv.shutdown()
 
 
