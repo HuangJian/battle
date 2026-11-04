@@ -25,6 +25,123 @@
 
 ---
 
+## §110 z6 两课 60 轮 eval 缺口：旁路批量补账（`nn-training/tools/eval_backfill.py`）（2026-11-04，用户指令「z6-porter 和 z6-speed 缺了很多轮 eval，请写个脚本把它们补齐，要充分利用 rollout 集群算力！」）
+
+**缺口实测**（口径 = `trainer/loop_eval.py::_eval_covered` 的 `dropped==0` **且**账本去重落盘局
+≥ 700；`eval_every=5`、`eval_stages=2000-2034`、`eval_games_per_stage=20` ⇒ 700 局/轮）：
+
+| 课程 | 缺口轮 | 明细 |
+|---|---|---|
+| z6-porter | 29 | it70 / it80 / it85（早期漏）+ it145–270 每 5 轮（26） |
+| z6-speed | 32 | it55 / it60 / it65 / it70 / it80 / it85（早期漏）+ it145–270（26） |
+
+合计 **61 轮 / 42700 局**。训练停点 it274 / it273 ⇒ 账本最后一条完整 summary 停在 it140，
+与 §109 的「落后 130+ 轮」是同一件事的账本形态。§109 的 F1（重启补账）只在闸全空时放行
+一张、训练不停时不补；收官 drain 要等训练真正结束 —— 于是缺口只能靠旁路补。
+
+**工具**：`nn-training/tools/eval_backfill.py`（`--courses a b [--from/--to/--max-rounds/
+--dry-run/--local-slots/--window]`）。它不是第二套评估器：逐轮直调
+`trainer/eval_dispatch.py::dispatch_eval_round`，与 in-loop / 手动 evalA **同语料**
+（`a_eval_seed_list` 固定池）、同节点门（codeHash / bun 版本 / `evalSupport` / bootId 钉）、
+同 schema、同 `settle_eval_summary` 落账。缺口判定用同一把尺 + 行数双保险（防 §109 那种
+`games=84 / dropped=616` 的陈旧 summary 自报干净）。
+
+**「充分利用集群算力」的三条落地**：
+
+1. **不走进程闸**：闸是给训练主循环排优先级的（rollout 插队 + 同时 2 轮），补账跟当前读数
+   抢 FIFO 只会互相拖；直调派发器，节点池由它按 `eval_slot_cap` 自己分配。
+2. **零空档流水线**：一轮收工立刻派下一轮（`Semaphore(inflight)` + 后台线程），派发之间的
+   ping / 权重 POST 固定开销与上一轮的尾巴重叠。
+3. **吃满空闲槽 / 有 rollout 自动让位**：`eval_slot_cap(concurrency, inflight)` 不留 floor
+   —— 集群空闲时 eval 拿满 `concurrency`，rollout 到场就退到 0。让位是派发器既有语义，
+   本脚本不另加判断（也**不该**加：那会造第二个事实源）。
+
+⚠ `--inflight>1` 不会真提速：第二轮 ping 时看到第一轮已占满节点（`inflight ≈ Σconcurrency`）
+⇒ `c=0`，只会在启动瞬间抢一次槽。默认 1 是诚实的默认值。
+
+**实测**（2026-11-04 09:5x，训练停在 `job_pending it274`、集群 `inflight=0`）：
+单轮 700 局 = **192.4s / 204.9s**（it55 / it60），`派出=700 认领=700 落盘=700 缺口=0`，
+节点分布 `self≈350 / mac≈80–103 / kaggle≈84–98 / a97≈47–55 / a95≈45–51 / a98≈42–45 /
+a96≈21`。7 个在线节点里 **gcs 被 bun 门拒（1.4.2 vs 1.4.4）**，实际 6–7 节点 ~41 槽。
+60 轮 ≈ 3.4h。
+
+**操作提示**：`--local-slots 0` 只关**Python 本机腿**；`self`（127.0.0.1:8443 的 agent）仍是
+集群节点、照常吃 8 槽 —— 这是本机跑满一半局的原因，不是泄漏。要连本机 agent 一起排除，
+得在 rl-config 里禁用它（那是改配置，不归本脚本）。
+
+## §109 z6/z7 三腿 eval 严重滞后 + 同轮超额：进程闸的产能赤字、重启吞队列、收工后僵尸写者（2026-11-04，用户指令「z6/z7 三腿的 eval 严重滞后，请排查原因！！！另外还有些 it 的 eval 局数有少量超额，一起处理掉」）
+
+**现场**（2026-11-04 08:3x，训练 it：z6-porter 274 / z6-speed 273 / z7-maze 185）：
+账本里最近一次**完整**评估轮是 z6-porter/z6-speed 的 it140（08:31 收官），z7-maze 的
+it55；而训练早已到 270+ ⇒ 当前读数落后 **130+ 轮**。同期账本尾部的 08:35–08:43 还在
+跑 **it50**（重启补账票）。另一面：z6-porter 有 15 个、z6-speed 10 个、z7-maze 4 个
+(iter,wver) 的 summary 记 `games=702–718`（语料 700）——「局数少量超额」。
+
+**根因 A：进程闸单飞的产能赤字（滞后的主因）**。闸（`worker/eval_gate.py`，2026-11-03
+用户口径「rollout 绝对优先、同时只有一轮 eval」）的**服务上限**由单轮工作量决定：700 局
+扎实跑 ~235–270s（summary 的 `sec`；08:35:15 dispatch → 08:39:26 settled 实测 251s）
+⇒ **~15 轮/h**。需求 = 每 5 轮训练一轮 eval，训练实测 ~100s/轮 ⇒ 每门课 **7.2 轮/h**。
+两腿 ≈ 14.4 轮/h（贴着上限），三腿 = **21.6 轮/h** ⇒ 队列按 ~6–7 轮/h 增长。00:56 重启
+后 7.6h 实测未覆盖轮：z6-porter 26 个连续轮（it145–270）、z6-speed 34 个——与模型吻合。
+`preempted` 摘要只是滚动记账（不丢已落盘局），它拉长每轮 wall time，产能上限不变。
+
+**根因 B：重启吞队列 ⇒ 永久缺号**。闸的队列在内存里（进程级单例）；重启把「已派发、
+未开跑」的轮次整批丢掉，而 `select_delayed_eval_it` 只看 `it-1` ⇒ 再没人提它们。
+00:56 重启吞掉 13 轮（z6-porter it50/55/65/70/80/85、z6-speed 同号段 + it90 等）；
+08:33 重启实测 z6-porter 32 轮、z6-speed 34 轮未覆盖。
+
+**根因 C：收工后的僵尸写者 ⇒ 同轮双行**。卡在 `urlopen`（响应头未回）的请求
+`abort_active_requests` 关不掉，收工后仍会回包；旧实现照样写 eval 行——行落在 summary
+扫描之后 ⇒ 下一轮 `done` 快照看不到它 ⇒ 重派同一 `(stage,seed)` ⇒ 双行；旧
+`settle_eval_summary` 又逐行累加 ⇒ `games` 超出语料。实证：z6-speed it90
+s2000/seed2000000009 有两条 `ticks=14239` 完全相同的行，相隔 3s（a98 + self）。
+
+**修法**（三条，互不依赖）：
+
+1. **F2 收工边界**（`trainer/eval_dispatch.py`，节点腿 + 本机腿）：`all_done` 置位后
+   返回的局一律丢弃（`[eval] 收工后返回 … — dropped`），不再写行。让位时钩子立即置位
+   `all_done`，所以 preempt 关不掉的慢回包走这一条。
+2. **F3 去重重算**（`worker/eval_track.py::settle_eval_summary`）：账本扫描按
+   `(stage,seed)` 只认第一行，胜率/全歼/技能指标与 `n` 同分母——历史重复行不再灌进
+   新 summary。
+3. **F1 重启补账**（`trainer/loop_eval.py::_backfill_eval_gaps`）：每进程首扫一遍归档 +
+   账本，把**早于 it-1** 的未覆盖轮入闸；但**只在进程闸全空时**放行一张。初版按训练轮速
+   `每轮一张`（≈36 张/h vs 服务 ~15 张/h）反而把当前读数按在旧账后面——08:34 上线后
+   实测发现，随即改成「真空隙才补」。训练不停时闸几乎不空 ⇒ 旧缺口交给收官 drain
+   （`_drain_pending_eval` 逐轮 block 到落盘）；补账只认归档权重（旧轮没有活指针）。
+
+判据：`tests/worker/test_eval_timing.py`（每轮一张/升序/只扫一次 · 闸忙时不补 ·
+smoke 不补）· `tests/trainer/test_eval_dispatch_resilience.py`
+（`test_result_returning_after_close_is_dropped` 节点/本机两腿）·
+`tests/worker/test_eval_seed_pool.py`（同轮重复行去重后 `games=2`）。
+
+**补账记录**（2026-11-04，append-only）：对「最后一条 summary 记 `dropped>0` 或
+`games≠唯一局数`、而账本已覆盖全部 700 个 (stage,seed)」的 30 个 (iter,wver)（z6-porter
+15 · z6-speed 10 含 it75 的 `games=84/dropped=616` 陈旧摘要 · z7-maze 4）各追加一条
+`close_reason=settled` 的对账 summary，数值由去重后的 `settle_eval_summary` 从账本重算；
+补前备份 `tmp/_eval_log.<course>.before-repair2.jsonl`。重复的逐局行本身保留（append-only，
+不再参与读数）。
+
+**口径落地（2026-11-04 用户拍板：允许 2 轮并发 eval）**：单飞产能 ~15 轮/h < 三腿需求
+21.6 轮/h，缺口只靠「少派」治不好。`worker/eval_gate.py` 由单飞改为 **FIFO + 最多 2 轮
+并发**（`MAX_CONCURRENT=2`，新口径覆盖 2026-11-03 的单飞口径）：
+
+- 开跑条件 = 无 rollout 且 `len(running) < 2` 且票在队列前 2 位（前两张并发，第 3 张等
+  空槽；空槽按 FIFO 补位）。
+- rollout 到达时**所有**在跑轮都被插队（各自 `Preempt` 置位 / 钩子收手）；被插队的票留在
+  队列**原位**，间隙到了各自拿新令牌续跑——不许后轮越过。
+- 产能 ≈ 2×15 = 30 轮/h > 21.6 轮/h（三腿），留出 ~8 轮/h 余量给 preempt 拉长的 wall time。
+- `status()` 的 `running` 仍是布尔（`loop_eval` 的 idle 补账判据不变），新增 `active` 给
+  诊断看「在跑几轮」。
+
+判据：`tests/worker/test_eval_gate.py`
+（`test_default_gate_runs_two_rounds_and_third_takes_the_freed_slot` ·
+`test_rollout_preempts_every_running_round_and_all_resume_in_place`；单槽语义由
+`EvalGate(max_concurrent=1)` 的两条旧用例继续钉住）。
+
+**旧缺口处置（用户拍板）**：26–34 个重启吞掉的旧轮**不手工补账**，留给收官 drain
+（`_drain_pending_eval` 逐轮 block 到落盘）；F1 的「闸空才补一张」继续兜意外窗口。
+
 ## §108 it10 eval 报「缺 3 局」而账本里 700 局全在：preempted 收工后的迟到行没有对账入口（2026-11-03，用户指令「z6-porter it10 eval 提示缺3局，请排查」）
 
 **现场**（z6-porter.it10，2026-11-03）：`eval_log.jsonl` 最后一条 summary 写
