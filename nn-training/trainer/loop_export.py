@@ -44,6 +44,7 @@ import 后，陈旧的 `trainer.loop_steps.<名字>` 会**响亮** `AttributeErr
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -195,6 +196,17 @@ class TrainingExport:
                 f"[run_rl] 动态采集无法写进离线计划（{e}）——修好课程/参数再导出："
                 "盘里没有的采集量规则，云机无法自行补上"
             ) from e
+        if block is not None:
+            # 计划/实验身份：缺省 alpha；显式 quota 也必须写进块（否则节点会把「没有键」
+            # 读成新的 alpha 缺省）。`NN_VOLUME_SCHED` 只作导出进程的缺省值，节点不读 env。
+            sched = str(
+                getattr(args, "volume_sched", "")
+                or os.environ.get("NN_VOLUME_SCHED", "")
+                or "alpha"
+            ).strip().lower()
+            if sched not in ("quota", "alpha"):
+                raise SystemExit(f"[run_rl] --volume-sched 只认 quota/alpha，收到 {sched!r}")
+            block["sched"] = sched
         if block is not None and rotation_on:
             # 全关 est 表（additive；只有开了轮换才写）：计划覆盖的**每一轮**都靠它反解
             # 自己那几关的局数（`worker/volume_waves.volume_block_for_window`）。

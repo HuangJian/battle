@@ -75,6 +75,8 @@ def volume_block(
         "games_per_stage_by_stage": games,
         "est_s_by_stage": {s: int(est_map.get(s, 0)) for s in stage_list},
         "est_hi_factor": 1.15,
+        # 测试工厂的缺省仍是旧的 quota 行为；alpha 用例显式覆盖。生产缺省是 alpha。
+        "sched": "quota",
         "topup": {
             "enabled": True,
             "max_batches": 3,

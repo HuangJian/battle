@@ -374,6 +374,33 @@ class ServePool:
             self.unready += len(booting)
         return len(good)
 
+    def begin_round(self) -> None:
+        """跨轮复用时重置**本轮**读数与熔断；暖 worker 一个不动，dead 的 kill/reap。
+
+        `unready` 不能直接置 0：`ready` 是 `Event`，不是 bool；只数仍在 booting 且未 dead 的。
+        轮边界上的 dead worker 必须 `kill()`（子进程可能还在进程组里）；只从列表剔掉会留尸。
+        """
+        with self._lock:
+            self.served = 0
+            self.spawned = 0
+            self.killed = 0
+            dead = [w for w in self._workers if w.dead]
+            self._workers = [w for w in self._workers if not w.dead]
+            self.killed = len(dead)
+            self.unready = sum(
+                1 for w in self._workers if not w.ready.is_set() and not w.dead
+            )
+            self.fallback = 0
+            self.fallback_reasons.clear()
+            self.bypassed = 0
+            self.disabled = False
+            self._fallback_logged = 0
+        for w in dead:
+            try:
+                w.kill()
+            except Exception:
+                pass
+
     def close(self) -> None:
         self.closed = True
         with self._lock:

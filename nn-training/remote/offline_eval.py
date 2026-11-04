@@ -42,6 +42,7 @@ from common.log import log as _rl_log
 from common.log_bundle import LogBundle
 from common.platform_utils import call_bounded, cpu_worker_slots, rmtree_best_effort
 from common.protocol import UnreapableChildError
+from remote.cloud_pool import CLOUD_EVAL_POOL, set_eval_busy
 from worker import serve_pool
 from worker.eval_local import (
     a_eval_seed_list,
@@ -374,6 +375,9 @@ def run_cloud_eval(
     work_dir: str | Path,
     course: Any = None,
     course_fp: str = "",
+    #: TS 代码 sha256（跨轮 eval 池的 key）。**不要**从 `ts_root` 路径反推：scratch 下
+    #: basename 是 `nn-rollout-ts-<48hex>`，不是 sha。长度不对 ⇒ 本次不保池，不 assert。
+    ts_code_sha256: str = "",
     bun: str = "",
     slots: int = 0,
     game_timeout_sec: float = 0.0,
@@ -408,13 +412,17 @@ def run_cloud_eval(
         "skipped": 0,
         "wver": "",
         "sec": 0.0,
+        #: 池的诊断计数（没建池 = None；内层 finally 会在存回/关闭前写它）。
+        "servePool": None,
         #: 机器级停滞导致的轮内重投次数（0 = 没卡过；`out` 只进日志/诊断，不进 wire）。
         "roundRetries": 0,
     }
     t0 = time.time()
-    # 池的所有权在本函数（创建 → 轮末关）；先声明成 None，好让 finally 对**任何**出口都成立
-    # （函数里有多处 `return out`，finally 一样会跑）。
+    # 池的所有权在本函数（创建/取回 → 轮末存回或关）；先声明成 None，好让 finally 对**任何**
+    # 出口都成立（函数里有多处 `return out`，finally 一样会跑）。
     pool = None
+    pool_key = str(ts_code_sha256 or "").strip().lower()
+    set_eval_busy(True)
     try:
         if not plan.enabled:
             log(f"[eval-cloud] it{it}: 课程没配 eval 语料（eval_games_per_stage=0）——跳过")
@@ -462,15 +470,29 @@ def run_cloud_eval(
         # 不把常驻进程留到段末（空闲占内存），而冷启动一轮只付一次。
         # 池上限取 `min(slots, 本轮局数)`：slots 远大于局数时（例：96 vCPU 会话给 92 slots、
         # 本轮只有 8 局），按 slots 起池等于为 8 局预热 92 个进程 —— 纯浪费（冷启动排队）。
-        pool = serve_pool.make_pool(
-            bun_bin, ts, min(n_slots, len(todo)), log, for_script=serve_pool.EVAL_SCRIPT
-        )
-        if pool is not None:
-            ready_n = pool.start()
+        requested = min(n_slots, len(todo))
+        reused = False
+        # 跨轮暖池：key 必须是 manifest 的 ts_code_sha256；薄池不取（take 会关旧）。
+        if len(pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
+            pool = CLOUD_EVAL_POOL.take(pool_key, min_workers=requested)
+            reused = pool is not None
+            if pool is not None:
+                eb.add(
+                    "worker池",
+                    f"复用跨轮暖池：{pool.max_workers} 宽（请求 {requested}，mode=eval）"
+                    "——本轮 spawned 应为 0",
+                )
+        if pool is None:
+            pool = serve_pool.make_pool(
+                bun_bin, ts, requested, log, for_script=serve_pool.EVAL_SCRIPT
+            )
+        if pool is not None and not getattr(pool, "closed", False):
+            # `take` 返回的暖池已经 `begin_round`；只有新池才 `start()`。
+            ready_n = int(getattr(pool, "max_workers", 0) or 0) if reused else pool.start()
             if ready_n:
                 eb.add(
                     "worker池",
-                    f"长驻 worker 池：{ready_n}/{min(n_slots, len(todo))} 就绪（同质入口 "
+                    f"长驻 worker 池：{ready_n}/{requested} 就绪（同质入口 "
                     f"{serve_pool.SERVE_ANY_SCRIPT}，mode=eval）——逐局进程启动/权重解析只付一次，"
                     "单局失败自动回退一次性 spawn",
                 )
@@ -680,8 +702,20 @@ def run_cloud_eval(
                     )
         finally:
             if pool is not None:
-                eb.add("servePool", pool.summary())
-                pool.close()
+                finished, pool = pool, None      # 防止外层 finally 再关
+                eb.add("servePool", finished.summary())
+                # ★ 评审 C2 的最终处置：读取/写 out 都在这里；原 :692-705 那段已删。
+                out["servePool"] = {
+                    "served": finished.served,
+                    "spawned": finished.spawned,
+                    "killed": finished.killed,
+                    "fallback": finished.fallback,
+                    "reasons": dict(finished.fallback_reasons),
+                }
+                if len(pool_key) == 64 and CLOUD_EVAL_POOL.enabled:
+                    CLOUD_EVAL_POOL.put(pool_key, finished)
+                else:
+                    finished.close()
 
         # 单局耗时分布（每轮都打）：<5s 这条线（以及重试次数）靠真数据校准，不靠猜。
         eb.add(
@@ -689,17 +723,7 @@ def run_cloud_eval(
             game_watch.game_time_summary("eval", game_walls, retried=len(retried_games)),
             final_only=True,
         )
-        out["servePool"] = (
-            None
-            if pool is None
-            else {
-                "served": pool.served,
-                "spawned": pool.spawned,
-                "killed": pool.killed,
-                "fallback": pool.fallback,
-                "reasons": dict(pool.fallback_reasons),
-            }
-        )
+        # `out["servePool"]` 已在内层 finally 写入（评审 C2）；这里不再读 pool.*。
         out["settled"] = len(seen)
         out["failed"] = len(failed)
         out["roundRetries"] = round_retries
@@ -732,6 +756,7 @@ def run_cloud_eval(
     finally:
         if pool is not None:
             pool.close()  # 幂等：内层 finally 已关过就是空操作（防「创建后、执行前」抛出的漏）
+        set_eval_busy(False)
         out["sec"] = round(time.time() - t0, 2)
     if out["ran"]:
         eb.add(

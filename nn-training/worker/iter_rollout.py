@@ -948,7 +948,7 @@ def run_iter_rollout(
     ctx: RoundContext | None = None,
     it: int = 0,
     next_game: Callable[[], list[str] | None] | None = None,
-    on_game_settled: Callable[[list[str], int], None] | None = None,
+    on_game_settled: Callable[..., None] | None = None,
     #: 轮末想并进**同一行**的读数（流式采集的 `summary_line`）。在 `emit` 前一刻调用 ⇒
     #: 拿到的是收官后的数；异常只记一行（读数不许把一轮 rollout 弄挂）。
     #: 2026-10-29 日志瘦身：`流式采集：动态加采 …` 原来是独立一行，现在并进轮末那行。
@@ -1366,7 +1366,12 @@ def run_iter_rollout(
                             if on_game_settled is not None:
                                 # 观测腿：账本报错了不许掀翻训练（调度器自己会兜）。
                                 try:
-                                    on_game_settled(list(argvs[i]), _samples_of(argvs[i]))
+                                    on_game_settled(
+                                        list(argvs[i]),
+                                        _samples_of(argvs[i]),
+                                        wall_sec=float(game_secs[i] or 0.0),
+                                        now=now,
+                                    )
                                 except Exception as e:
                                     log(f"WARN 流式采集记账异常（忽略）：{type(e).__name__}: {e}")
                         # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的

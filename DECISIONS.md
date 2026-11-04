@@ -11039,3 +11039,33 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **补充**：§2026-11-04-goalnn-task-level-eval-arbitration 的冻结作用域（原进程级）由本条目
   收窄为按课程；其余决定不变。
 - **全文** → `docs/nn/engineering.md` §113。
+
+## §2026-11-04-goalnn-cloud-pool-cross-round（云机 serve pool 跨轮保留 + 采集 α 单腿）
+
+- **决定**：rollout/eval 的 `ServePool` 从「每轮建、轮末关」改为**同进程跨轮保留**；key 用
+  `ts_code_sha256`（不目录路径），`take/put` 显式转移所有权，`begin_round()` 每轮清零读数/熔断
+  并 kill/reap dead worker；段末在 `run_standalone`/`worker_loop`/`run_plan_job` 统一 `close_all`，
+  进程 `atexit` 兜底。eval 后台线程在飞时跳过 `close_all`（不硬杀写盘子进程）。
+- **P1**：`volume.sched` 作为**计划/实验身份**（不是运行时覆盖），只认 `quota`/`alpha`；α 以
+  实测 `samples/wall` 的 `rem_games×wall/(inflight+0.3)` 派发，冷启动轮转、近分交错、cap 冻结；
+  `T_fill` 改善 ≥10% **且 `T_round`/`T_drain` 不回归 >2%** 才可继续，capped/no_data 轮单列。
+- **理由**：TPU 330GB 内存只用 ~16GB，轮间 94 个 bun 冷启动（进程/模块/wasm/attestation）是纯浪费；
+  eval 池每点重付更不划算。α 的旧 `T_fill` 单指标会把「前 90% 快、尾部慢」判成胜利。
+- **边界**：不共享 rollout/eval 池；不取消在飞局、不做 hedge；不改任务侧关卡/敌数/命数/奖励；
+  `sched` 不进 `data_fp`，alpha 轮必须新 `--out`，不得与 quota 混训。
+- **验收**：`test_cloud_pool.py` / `test_stream_alpha.py` / `test_offline_eval_pool.py` /
+  `test_remote_serve_pool.py` 绿；同机两轮 `spawned=0`，段末无 `serve-any` 残留。
+- **全文** → `docs/nn/runtime-opt.md` §43。
+
+## §2026-11-04-goalnn-alpha-default-sched（采集默认档改 alpha，quota 降为显式回退）
+
+- **决定**：`volume.sched` 缺省/无键按 `alpha`；`worker/cli.py` 默认 `alpha`；计划导出缺省写
+  `"alpha"`，显式 `quota` 也必须落键。alpha 不再只做实验轮，但 quota/alpha 切换仍必须新
+  `--out`，不得混训。
+- **理由**：用户 2026-11-04 明确指令「默认仍是 quota —— 改成默认 α」；α 的 est-free 判据与
+  `T_fill`/`T_drain` 读数已落地，quota 保留为可回退的稳定档。
+- **边界**：任务侧关卡/敌数/命数/奖励不动；quota 仍用 est/缺口/`_cap`，alpha 判据仍不含 est；
+  旧计划无 `sched` 现在按 alpha 跑（行为变化），显式 `sched="quota"` 才回退。
+- **验收**：`test_stream_alpha`（缺省 alpha / CLI 缺省 / 显式 quota）、`test_stage_rotation_export`
+  （导出缺省 alpha / 显式 quota 落键）与相关 stream/plan 用例绿。
+- **全文** → `docs/nn/runtime-opt.md` §43。
