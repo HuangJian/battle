@@ -189,6 +189,10 @@ export interface IterRow {
    *  lr / ppo_sec / dist_phase_sec / wire）是 NaN 缺口 —— **不是 0**，别拿来判「没动」。
    *  旧账本行不写该键 ⇒ `undefined` 与 `false` 同义（消费方一律 `?? false`）。 */
   pendingPpo?: boolean
+  /** ★ true = 这一轮**干净评估还没结算**（`eval_log` 里已有该 it 的逐局行、但 `eval_summary`
+   *  还没落账；迟到评估 / 评估窗口仍在跑）。走势图不画这一轮（见 `series.ts::metricSeries`）；
+   *  指标表照旧显示（那是实时观察口）。旧账本/无评估的轮无该键 ⇒ `undefined` 与 `false` 同义。 */
+  evalInFlight?: boolean
   /** M0 传输账；**additive**：旧账本行无 `wire` 键，测试直构的 fixture 通常也不带
    *  （与控制台视图的 `activeCourse?` / `isBc?` 同口径）→ 消费方一律用 `?? null` 归一。 */
   wire?: IterWire | null

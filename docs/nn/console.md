@@ -13,6 +13,27 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §47 趋势图只画已结算轮：eval 未结束的 it 不画点（2026-11-04）
+
+**触发**（用户）：「一个 it 的 eval 未结束时，其指标不要在趋势图里绘制。避免错判。」
+半轮的点（rollout 刚收官、等 PPO/eval）与 eval 口径不可比，画上去会被当成趋势拐点。
+
+**判据**（`iters.buildIterRows` → `IterRow`，`view/series.ts` 消费）：
+
+- `pendingPpo`（既有）= 只有 `rollout_end` 行 ⇒ 采集刚收官，PPO 与 eval 都还没回；
+- `evalInFlight`（新增）= `eval_log.jsonl` 已有该 it 的逐局行、但没有结算过的 `eval_summary`
+  （迟到评估 / 评估窗口仍在跑）。`evalWins` / `evalSummaries` 两个 map 本来就在手边，不额外扫盘。
+
+`metricSeries` 先过滤 `pendingPpo || evalInFlight` 再排序出序列 ⇒ Hero 六张图与「比较课程」图
+（服务端同一函数）口径一致。**指标表不过滤**：那是实时观察口，`PPO 中` 徽标已标明半轮；
+两处口径不同是刻意的。eval 结算后同一轮自动重新入图（过滤的是状态，不是永久丢点）。
+
+**被否决**：只过滤 `pendingPpo`（迟到 eval 仍会画出未结算点）· 在渲染层逐图过滤
+（六张图 + 比较图各写一遍，迟早漏一张）· 指标表一起过滤（丢掉实时观察面）。
+
+**回归**：`dashboard/tests/trend-settled-rows.test.ts`（4 例：服务端标记 / pending 窗口 /
+过滤与对齐 / 结算后回图）。
+
 ## §46 侧栏课程过滤：系列名即子串、当前课不被滤走（2026-11-02）
 
 **触发**：用户报障「侧栏下拉框从 300 多门课程里找目标课很麻烦」（`discoverCourses` 上限 500，

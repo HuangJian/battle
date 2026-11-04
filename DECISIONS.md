@@ -11039,3 +11039,19 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **补充**：§2026-11-04-goalnn-task-level-eval-arbitration 的冻结作用域（原进程级）由本条目
   收窄为按课程；其余决定不变。
 - **全文** → `docs/nn/engineering.md` §113。
+
+## §2026-11-04-goalnn-trend-hides-unsettled-eval（趋势图不画 eval 未结束的轮；指标表照旧）
+
+- **背景**（用户）：「一个 it 的 eval 未结束时，其指标不要在趋势图里绘制。避免错判。」
+  半轮（`rollout_end` 刚收官、等 PPO/eval）或迟到评估未结算时，rollout 读数虽齐、与 eval 口径
+  不可比，画上去会被当成趋势拐点。与 §2026-10-19-goalnn-rollout-end-event 不冲突：那条是
+  **指标表**的「采集收官即上屏」，本次只改走势图的入图条件。
+- **决定**：`IterRow.evalInFlight` = `eval_log` 已有该 it 的逐局行 ∧ 无 `eval_summary`
+  （`iters.buildIterRows`，两个 map 本来就在手边）；`view/series.ts::metricSeries` 先过滤
+  `pendingPpo || evalInFlight` 再出序列 ⇒ Hero 六张图与「比较课程」图（服务端同函数）一致。
+  指标表/徽标不动；eval 结算后该轮自动重新入图（过滤的是状态）。
+- **被否决**：只过滤 `pendingPpo`（迟到 eval 仍会画出未结算点）· 在渲染层逐图过滤
+  （六张图 + 比较图各写一遍，迟早漏一张）· 指标表一起过滤（丢掉实时观察面）。
+- **验收**：`dashboard/tests/trend-settled-rows.test.ts` 4 例 + dashboard
+  typecheck / 全量 test / 三份 bundle 绿。
+- **全文** → `docs/nn/console.md` §47。
