@@ -119,6 +119,72 @@ def test_rollout_end_does_not_advance_resume_pointer(tmp_path: Path) -> None:
     assert inc.iterations_n == 1 and inc.next_it == 4
 
 
+#: 一局单局 manifest（`compact_per_game` 要的那些字段，与盘上 `manifest.json` 同形）。
+GAME = {
+    "stage": 3,
+    "seed": 11,
+    "nSamples": 100,
+    "kills": 6,
+    "ticks": 2000,
+    "outcome": "stage_clear",
+    "powerUpsCollected": 1,
+    "playerDamageTaken": 300,
+    "playerDeaths": 0,
+    "puGotTank": 1,
+    "startLives": 1,
+    "enemyTotal": 20,
+    "puSpawnBomb": 1,
+    "dims": {"loot": 0.5},
+}
+
+
+def _rollout_host(tmp_path: Path, parts: object) -> TrainingLoop:
+    """`_record_rollout` 的最小宿主（与文件里其它用例同一套脚手架）。"""
+    loop = TrainingLoop(
+        _args(traj=str(tmp_path), out=str(tmp_path / "weights.json")), None, "bun", {}
+    )
+    loop._jsonl_path = tmp_path / "training_log.jsonl"
+    loop._traj_dir = tmp_path / "it6"
+    loop._traj_dir.mkdir()
+    loop._report = dict(REPORT)
+    loop._rollout_sec = 31.5
+    loop._ledger = LedgerView(path=loop._jsonl_path)
+    loop._payload_parts = parts
+    return loop
+
+
+def test_record_rollout_writes_per_game_before_the_ledger_line(tmp_path: Path) -> None:
+    """★ 2026-11-04：逐局画像与 `rollout_end` 行**同一时刻**就位（不等 PPO）。
+
+    控制台的「耗时/击杀/残血/道具」四列只读 `it<N>/per-game.json`；它原先只在轮末
+    （`step_record_iteration` 最后、PPO 与权重回传之后）才写 ⇒ 远端轮在等 PPO 的
+    几十分钟里只有胜率、四列全空（用户 2026-11-04 报障）。画像不依赖梯度步 ⇒
+    `_record_rollout` 先把本轮内存账写成画像，再落账本行。
+    """
+    parts = types.SimpleNamespace(it=6, manifests=lambda: {"rl_s3_seed11": GAME})
+    loop = _rollout_host(tmp_path, parts)
+
+    loop._record_rollout(6)
+
+    pg = json.loads((loop._traj_dir / "per-game.json").read_text(encoding="utf-8"))
+    assert [(r["stage"], r["seed"]) for r in pg] == [(3, 11)]
+    assert pg[0]["kills"] == 6 and pg[0]["ticks"] == 2000
+    assert pg[0]["playerDamageTaken"] == 300 and pg[0]["enemyTotal"] == 20
+    # 账本行照旧只一行（画像不是第二份账）。
+    lines = [x for x in loop._jsonl_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert [json.loads(x)["event"] for x in lines] == ["rollout_end"]
+
+
+def test_record_rollout_ignores_previous_round_memory_shards(tmp_path: Path) -> None:
+    """上一轮的迟到段账不能冒充本轮画像；盘上也没有 shard ⇒ 不写空数组（不覆盖回传腿）。"""
+    parts = types.SimpleNamespace(it=5, manifests=lambda: {"rl_s3_seed11": GAME})
+    loop = _rollout_host(tmp_path, parts)
+
+    loop._record_rollout(6)
+
+    assert not (loop._traj_dir / "per-game.json").exists()
+
+
 def test_record_rollout_is_idempotent(tmp_path: Path) -> None:
     """同一 it 重复进入采集收官步 ⇒ 只落一行（让步后重入 / 重放不重复记账）。"""
     loop = TrainingLoop(_args(traj=str(tmp_path), out=str(tmp_path / "weights.json")), None, "bun", {})

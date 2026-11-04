@@ -583,11 +583,34 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         行落账后它即被覆盖（同 iter 取文件里最后一条）。
 
         幂等：账本里已有本 it 的 `rollout_end` 行 ⇒ 直接返回（让步后重入 / 重放不重复记账）。
+
+        ★ 2026-11-04（用户报障「rollout 结束等 PPO 时只有胜率，击杀/耗时空着」）：
+        **先写逐局画像、再落这一行**。控制台的耗时/击杀/残血/道具四列只读
+        `it<N>/per-game.json`（零落盘/云机腿的单局 manifest 只活在内存账里），而它原先只在
+        轮末（`step_record_iteration` 最后、PPO 之后）写 ⇒ 远端轮在等 PPO 的几十分钟里四列
+        恒空。画像不依赖梯度步 ⇒ 在这一行上屏前落盘，数据源与轮末那份逐字相同。
+        轮末的 `_finalize_returned_shards` 照旧写（同内容幂等覆盖；`stage_est.json` 的顺序契约
+        不变，那里才有分关账）。
         """
         view = getattr(self, "_ledger", None)
         seen = getattr(view, "rollout_ends", None)
         if seen is not None and it in seen:
             return
+        # 本轮内存账（轮号对不上 = 上一轮的迟到段账，不能冒充本轮）；盘上 shard 由
+        # `write_iter_actuals` 自己扫，两路都空 ⇒ 它不写（绝不拿空数组覆盖回传腿的文件）。
+        # `_traj_dir` / `_payload_parts` 都走 `getattr` 兜底（与 `_ledger` 同一条）：单测脚手架是
+        # 最小宿主，生产实例两格都由 `_setup_common` 赋值。
+        parts = getattr(self, "_payload_parts", None)
+        mem = (
+            parts.manifests()
+            if parts is not None and int(getattr(parts, "it", -1)) == int(it)
+            else {}
+        )
+        traj_dir = getattr(self, "_traj_dir", None)
+        if traj_dir is not None:
+            from trainer.zero_disk import write_iter_actuals
+
+            write_iter_actuals(traj_dir, mem)
         self._ledger_apply(
             write_rollout_end(
                 self._jsonl_path,
