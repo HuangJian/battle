@@ -1455,9 +1455,10 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
         // 两种行都能出指标行：
         //   · `iteration`    = 本轮**结算完**（含 PPO 与传输账）；
         //   · `rollout_end`  = 本轮**采集收官即刻**（PPO 还没跑 / 权重还没回传）。
-        // 后者是用户 2026-10-19 的口径修复：走势图要「采集一结束就多一点」，不是
+        // 后者是用户 2026-10-19 的口径修复：**指标表**要「采集一结束就多一点」，不是
         // 「等 W(it+1) 回来才多一点」。同 iter 取文件里最后一条（见下方去重）
         // ⇒ PPO 落账后 `rollout_end` 行自动被覆盖，不留残影。
+        // （走势图自 2026-11-04 起只画**已结算**轮：未结算的点不进序列，见 `view/series.ts`。）
         if (r.event !== 'iteration' && r.event !== 'rollout_end') return
         const early = r.event === 'rollout_end'
         /** PPO 侧字段（`rollout_end` 时还没跑 ⇒ NaN 缺口，绝不写 0 冒充）；
@@ -1523,6 +1524,9 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
           expectedGames: Number(r.expectedGames ?? 0),
           // 「采集已收官、PPO 未回传」的行：UI 在 iter 列标一盏灯，读数不冒充。
           pendingPpo: early,
+          // 该轮干净评估还在跑：eval_log 已有逐局行、但没有结算过的 summary。
+          // 两表都在手边（同一内容源）⇒ 不用再扫一遍盘；走势图据此跳过这一轮。
+          evalInFlight: evalWins.has(iter) && !evalSummaries.has(iter),
           halted: Boolean(r.halted),
           topDims,
           avgTicks:

@@ -102,10 +102,23 @@ export function sliceSeries(series: Series, range: TrendRange): Series {
   return { key, label, vals: vals.slice(-Number(range)), iters: iters.slice(-Number(range)) }
 }
 
+/** 趋势图只画**已结算**的轮（用户 2026-11-04）：一轮的 eval 未结束时，它的点不进序列 ——
+ *  该轮还没结算（等 PPO）或迟到评估仍在跑时，rollout 读数虽然齐，与 eval 口径却不可比，
+ *  画上去会被当成趋势拐点 / 与琥珀线错位对照。
+ *
+ *  两种「未结束」都排除：
+ *   · `pendingPpo` —— 只有 `rollout_end` 行（第 ⑥ 步刚收官，eval 还没派/没回）；
+ *   · `evalInFlight` —— `iteration` 行已落，但该轮 eval 的逐局行有了、summary 未结算。
+ *  指标表**不过滤**（那是实时观察口，`PPO 中` 徽标已经标明半轮）——两处口径不同是刻意的。 */
+function settledRows(rows: IterRow[]): IterRow[] {
+  return rows.filter((r) => !r.pendingPpo && !r.evalInFlight)
+}
+
 /** 指标表列集（时间正序；actuals/eval 缺轮断点 = NaN 会被 sparkPoints 过滤）。
- *  返回全量时序（不做 20 轮截断），由 sliceSeries / TrendChart 按范围档位截取。 */
+ *  返回全量时序（不做 20 轮截断），由 sliceSeries / TrendChart 按范围档位截取。
+ *  **先丢掉未结算轮**（见 `settledRows`）：趋势图不画半轮。 */
 export function metricSeries(rows: IterRow[]): Series[] {
-  const chrono = [...rows].sort((a, b) => a.iter - b.iter)
+  const chrono = [...settledRows(rows)].sort((a, b) => a.iter - b.iter)
   const iters = chrono.map((r) => r.iter)
   return [
     { key: 'winRate', label: '胜率', vals: chrono.map((r) => r.winRate), iters },

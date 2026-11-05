@@ -8,6 +8,47 @@
 
 ---
 
+## §60 轮末派生文件审计：只有 `per-game.json` 有「等 PPO 才可见」缺口（2026-11-04）
+
+**问题**（接 §59）：还有哪些**采集侧派生文件**只在轮末（`step_record_iteration`，PPO 之后）
+才落盘，从而在「采集已收官、等 PPO」的窗口里对读者不可见？逐个查写入点 + 读者 + 窗口内是否有人读：
+
+| 产物 | 写点 | 读者 | 窗口内会有人读吗 | 结论 |
+|---|---|---|---|---|
+| `it<N>/per-game.json` | 轮末 `_finalize_returned_shards`（原先） | **控制台四列**（`readRoundActuals`） | 会——`rollout_end` 行先上屏 | **真缺口，已修（§59）**：`_record_rollout` 内先写 |
+| `it<N>/stage_est.json` | 轮末 `finalize_round_shards` | `trailing_stage_samples_per_game(agg=latest/pooled)` ← `_volume_stage_ests_map`（下一轮采集规划）· `loop_export._volume_plan_block`（导出，rollout 前） | **不会**（两处都传 `exclude_it=正在跑的这一轮`；控制台零引用） | 保持轮末：消费者是「下一轮/导出」，轮末写已足够；提前写只会把本轮塞进 `agg=latest` 的候选（靠 `exclude_it` 才不出错） |
+| `it<N>/metrics_stats.jsonl` | 轮末 `_write_iter_stats` | 无控制台引用（仅文档/notebook/人工分析）；云节点轮本就跳过 | 不会 | 无缺口（不是 UI 数据源） |
+| 自动巡检 HTML | 轮末 `_run_inspect`（`rl-hourly-inspect.ts`） | 控制台零引用（盘上诊断产物） | 不会 | 无缺口 |
+| 账本行的采集侧事实（`winRate` / `samples` / `ticks` / `rollout_sec` / `pure_collect_sec` / `dim_means` / `rotation` / `volume_stage_stats`） | **采集收官即刻**（`write_rollout_end`） | 控制台主行/走势图/窗口列 | 会，且已在 | 已满足 |
+| 本机腿 `manifest.json` / `dist/<node>/rl_s*` | 采集期间 | 控制台回落扫描 | 会，且已在 | 已满足 |
+
+**边界（明确不动）**：权重 / opt / `wire` / `kl` / `entropy` / `ppo_sec` 等确实是 PPO 侧的产物，
+窗口内本就不存在——继续缺键（NaN 缺口），不冒充 0。
+
+**结论**：控制台可见的采集侧派生文件只有 `per-game.json` 一例，其余要么无控制台读者，
+要么消费者本来就在轮末之后。`stage_est.json` 的「轮末」是**契约**（`_finalize_returned_shards`
+必须在 `_record_iteration` / `_write_iter_stats` / 巡检之后），不是因为疏忽——不要顺手提前。
+
+## §59 采集收官即写逐局画像：控制台「耗时/击杀/残血/道具」不再等 PPO（2026-11-04）
+
+**症状**（用户报障）：一个 it 在 rollout 结束、等 PPO 结果的几十分钟里，控制台只显示胜率，
+击杀 / 耗时 / 承伤·杀 / 残血 / 道具全空——看起来像「这轮没数据」。
+
+**根因**：那四列的唯一数据源是 `it<N>/per-game.json`（零落盘/云机腿的单局 manifest 只活在
+`ShardSegments._manifests` 内存里，随进程回收），而它只在轮末
+（`step_record_iteration` 最后一步 `_finalize_returned_shards`，PPO 与权重回传之后）才写。
+账本侧的 `rollout_end` 行自 2026-10-19 起就在采集收官即刻上屏 ⇒ 那一行先到、画像后到。
+
+**修法**：`TrainingSteps._record_rollout` 在写 `rollout_end` 之前先调
+`zero_disk.write_iter_actuals(self._traj_dir, mem)`——同一份**全采集**画像（`parts.it` 是本轮
+才取内存账：上一轮的迟到段账不许冒充本轮；两路都没数据时它自己不写，绝不拿空数组覆盖回传腿
+的文件）。轮末 `_finalize_returned_shards` 照旧写（同内容幂等覆盖；`stage_est.json` 的顺序契约
+不变：分关账仍在轮末、那三步读内存账之后）。
+
+**回归**：`tests/worker/test_rollout_end_event.py::test_record_rollout_writes_per_game_before_the_ledger_line`
+（修前红：`it6/per-game.json` 不存在）· `test_record_rollout_ignores_previous_round_memory_shards`
+（轮号闸 + 不写空数组）。控制台读面**零改动**：`readRoundActuals` 本来就优先读这个文件。
+
 ## §58 跨轮段账竞态：`ShardSegments.add` 的锁外压段撞上 `begin()` ⇒ 旧段丢弃（2026-11-03）
 
 **症状**：`z5-safe-base` 停在 it20（23:55 起连续 5 次 `iter_error`，确定性失败 ⇒ 门禁

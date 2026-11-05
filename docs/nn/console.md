@@ -13,6 +13,43 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §48 右上角浮层悬停停表：读的时候不被抽走（2026-11-04）
+
+**触发**（用户）：「当鼠标悬停在 dashboard 页面右上角的提示信息上时，信息窗口不要自动关闭。」
+
+`Flash`（`src/web/components/Flash.tsx`，固定右上角，ok/bad 两色）原来是无条件
+`setTimeout(onHide, 8000)`——浮层里常是失败原因与下一步指引，8s 不看人在不在照样走完，
+鼠标正停着读/选字时会被抽走。
+
+**做法**：组件本地态 `paused`，容器 `onMouseEnter` 置真、`onMouseLeave` 置假；计时 effect 在
+`!flash || paused` 时直接返回（不是建了 timer 再取消）。**移开后重新给满 8s**（不续剩余那一段）：
+浮层是通知不是倒计时进度条，「只剩 0.2s」比「再读 8s」更意外。浮层消失（✕ / 到点）时 `paused`
+归零——指针留在原处不会补发 `mouseleave`，不清会让下一条浮层永远停在暂停里。手动 ✕ 语义不变。
+
+**回归**：`dashboard/tests/web-flash-hover.test.ts`（SSR 形状 + 源码接线）。本仓无 DOM 夹具，
+「悬停 10s 不消失」这类真交互 SSR 断言不到（README「测试分层」同款告诫），靠源码锚点守接线。
+
+## §47 趋势图只画已结算轮：eval 未结束的 it 不画点（2026-11-04）
+
+**触发**（用户）：「一个 it 的 eval 未结束时，其指标不要在趋势图里绘制。避免错判。」
+半轮的点（rollout 刚收官、等 PPO/eval）与 eval 口径不可比，画上去会被当成趋势拐点。
+
+**判据**（`iters.buildIterRows` → `IterRow`，`view/series.ts` 消费）：
+
+- `pendingPpo`（既有）= 只有 `rollout_end` 行 ⇒ 采集刚收官，PPO 与 eval 都还没回；
+- `evalInFlight`（新增）= `eval_log.jsonl` 已有该 it 的逐局行、但没有结算过的 `eval_summary`
+  （迟到评估 / 评估窗口仍在跑）。`evalWins` / `evalSummaries` 两个 map 本来就在手边，不额外扫盘。
+
+`metricSeries` 先过滤 `pendingPpo || evalInFlight` 再排序出序列 ⇒ Hero 六张图与「比较课程」图
+（服务端同一函数）口径一致。**指标表不过滤**：那是实时观察口，`PPO 中` 徽标已标明半轮；
+两处口径不同是刻意的。eval 结算后同一轮自动重新入图（过滤的是状态，不是永久丢点）。
+
+**被否决**：只过滤 `pendingPpo`（迟到 eval 仍会画出未结算点）· 在渲染层逐图过滤
+（六张图 + 比较图各写一遍，迟早漏一张）· 指标表一起过滤（丢掉实时观察面）。
+
+**回归**：`dashboard/tests/trend-settled-rows.test.ts`（4 例：服务端标记 / pending 窗口 /
+过滤与对齐 / 结算后回图）。
+
 ## §46 侧栏课程过滤：系列名即子串、当前课不被滤走（2026-11-02）
 
 **触发**：用户报障「侧栏下拉框从 300 多门课程里找目标课很麻烦」（`discoverCourses` 上限 500，
