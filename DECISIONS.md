@@ -11055,3 +11055,24 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`dashboard/tests/trend-settled-rows.test.ts` 4 例 + dashboard
   typecheck / 全量 test / 三份 bundle 绿。
 - **全文** → `docs/nn/console.md` §47。
+
+## §2026-11-04-goalnn-bc-epoch-backfill（BC epoch 回传：隧道 530 丢包后重放 + hub 按 epoch 幂等 + 迟到行不派 eval）
+
+- **现场**（2026-11-04，bc-v6-train）：控制台 BC Epoch 区 ep2/ep4 各出现两行、ep5 整行缺失。
+  账本与 hub 的 `bc-metrics.jsonl` 都是 6 行 4 个 epoch（ep2 两次 POST 差 5.4s、ep4 差 7.3s，
+  指标逐位相同）；云机日志 `WARN: epoch 3/5/7 回传失败(HTTP 530)`，而 ep3 在 hub 里**存在**。
+  ⇒ cloudflared 530：请求已落盘但响应丢（重试写第二行）或请求没到 origin（永久缺一行）。
+- **决定**：① `remote/bc_job.py` 的 `_bc_post_epoch` 返回 bool，失败 body 进进程内 backlog
+  （上限 8，超限丢最老并告警），下一次回传成功后与训练收尾时重放（仍失败即停，不阻塞训练）；
+  ② hub `store_bc_epoch` 指标行按 epoch **幂等**（同 epoch 只留一行），且**迟到的旧 epoch 不倒回
+  resume**（`epoch < 现存 resume epoch` 只补行）；③ trainer 的 `BcWait.last_epoch` 判「回头行」
+  ⇒ 账本照收、**不派 eval**（`run_epoch_eval` 取 hub `/resume`，已前进到最新，冒充旧 epoch 就是假指标）。
+- **被否决**：新开 `POST /jobs/{id}/bc-metrics`（metrics-only；语义纯但要动 hub 路由面 +
+  `_HubQueue` 门面 + 四份 AST 守卫，且丢掉「重放同一份 body」的幂等语义）· 只加长重试（隧道抖动
+  可持续几分钟，且把训练阻塞在隧道上）· 控制台按 `(it, epoch)` 去重（掩盖缺行、让「补发没到」更难发现）。
+- **边界**：backlog 不落盘（worker 重启会丢，但重启本来就从 resume 重训、会重算重发）；收尾补发
+  仍失败只留 WARN，不伪造缺行。
+- **验收**：`tests/hub/test_bc_resume_store.py` · `tests/remote/test_bc_epoch_backfill.py` ·
+  `tests/trainer/test_bc_ingest_backfill.py` · `e2e/test_bc_epoch_e2e.py` · `tests/hub` + `tests/remote`
+  全量 2337 绿。
+- **全文** → `docs/nn/remote-transport.md` §141。

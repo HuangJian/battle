@@ -5,7 +5,8 @@
 
 * **轮询会话**：`BcWait`（跨「让位 → 过一会儿回来问」保留 epoch 游标 / 无进展告警 / 错误连击退避）
   + `READY`/`PENDING`/`TRANSIENT` 三态分类 + `wait_bc_round`（单课程阻塞包装）；
-* **回传入账**：`ingest_bc_metrics`（`bc-metrics` 增量 → `bc_epoch` 账本事件 + eval 边界）
+* **回传入账**：`ingest_bc_metrics`（`bc-metrics` 增量 → `bc_epoch` 账本事件 + eval 边界；
+  迟到补发的旧 epoch 只入账、不派 eval）
   + `run_epoch_eval`（hub resume 权重 → 多地图干净评估 → `bc_eval` 事件）+ `ledger_bc_epoch`；
 * **节奏常量**：`IDLE_WARN_SEC` / `POLL_SEC` / `POLL_MAX_SEC`。
 
@@ -121,6 +122,8 @@ class BcWait:
     jid: str
     #: 已入账的 epoch 行数（增量游标）。
     seen_metrics: int = 0
+    #: 已入账的**最新** epoch（读面判「迟到补发行」的基准：`ep < last_epoch` ⇒ 重放的旧 epoch）。
+    last_epoch: int = 0
     #: 上一次有进展（有新 epoch 入账）的时刻。
     last_progress: float = field(default_factory=time.time)
     #: 无进展告警是否已打（只打一次，避免刷屏）。
@@ -224,14 +227,33 @@ def ingest_bc_metrics(
                 wait.seen_metrics = len(rows)
                 wait.last_progress = time.time()
                 wait.idle_warned = False
+                # 迟到补发行（2026-11-04）：隧道 530 丢掉的那个 epoch 由 worker 的 backlog 在
+                # 最新 epoch **之后**重放 ⇒ 这里会拿到一行「回头行」（…ep6, ep5）。账本要照收，
+                # 但它**不能派 eval**：`run_epoch_eval` 取 hub `/resume`（此刻已是 ep6+ 的权重），
+                # 拿新权重冒充旧 epoch 的结果比缺一行更糟。
+                late: set[int] = set()
                 for r in new_rows:
+                    ep = int(r.get("epoch", 0) or 0)
+                    if ep and ep < wait.last_epoch:
+                        late.add(ep)
                     ledger_bc_epoch(jsonl_path, it, r)
-                latest = int(rows[-1].get("epoch", 0) or 0)
-                logger(f"[run_bc] it{it}: epoch 指标 +{len(new_rows)} 行（最新 ep{latest}）入账")
+                    if ep > wait.last_epoch:
+                        wait.last_epoch = ep
+                logger(
+                    f"[run_bc] it{it}: epoch 指标 +{len(new_rows)} 行"
+                    f"（最新 ep{wait.last_epoch}）入账"
+                )
+                if late:
+                    logger(
+                        f"[run_bc] it{it}: 其中 {len(late)} 行是迟到补发"
+                        f"（ep{','.join(str(e) for e in sorted(late))}）——只入账，不派 eval"
+                    )
                 if eval_cfg.enabled:
                     for r in new_rows:
                         ep = int(r.get("epoch", 0) or 0)
-                        if ep and ep % int(eval_cfg.every_epochs) == 0:
+                        if not ep or ep in late:
+                            continue
+                        if ep % int(eval_cfg.every_epochs) == 0:
                             run_epoch_eval(
                                 hub_url, token, wait.jid, jsonl_path, it, ep, course, cfg, logger
                             )

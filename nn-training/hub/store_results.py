@@ -7,7 +7,8 @@
 * `store_job_failure` —— 节点**确定性**失败（bun 装不上 / TS 运行时取不到 / argv 非法）
   的终局标记：训练侧立刻停腿，不再等 25min 超时；
 * `store_bc_epoch` / `get_bc_resume` / `get_bc_metrics` —— BC 云腿的每 epoch 权重 +
-  指标（单文件覆盖存最新 resume，磁盘有界：每 job 恒 1 份权重）。
+  指标（单文件覆盖存最新 resume，磁盘有界：每 job 恒 1 份权重；指标行按 epoch 幂等，
+  迟到的旧 epoch 只补行、不倒回 resume）。
 
 ## 依赖方向
 
@@ -18,10 +19,50 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
 from common.protocol import FAIL_NAME
+
+
+def _bc_metric_rows(jd: Path) -> list[dict]:
+    """读该 job 已有的 `bc-metrics.jsonl` 行（坏行跳过；文件不在 ⇒ []）。"""
+    p = jd / ResultsMixin.BC_METRICS_NAME
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict):
+                    out.append(e)
+    except OSError:
+        return []
+    return out
+
+
+def _append_bc_metric_row(jd: Path, epoch: int, metrics: dict, ts: float) -> bool:
+    """追加一行 epoch 指标；**同一 epoch 已有行 ⇒ 跳过**（幂等）。返回是否写入。
+
+    幂等是隧道 530 的必需项：请求已落盘、响应丢在 Cloudflare 上时 worker 会重发同一份
+    body（`remote/bc_job.py::_bc_post_epoch` 的重试），无条件 append 就是控制台里
+    bc-v6-train 的重复 ep2/ep4（吃掉了「最新 6 个 epoch」的名额）。补发链路（迟到的旧
+    epoch 重放）也靠它防重。
+    """
+    if any(int(r.get("epoch", 0) or 0) == int(epoch) for r in _bc_metric_rows(jd)):
+        return False
+    row = {"epoch": int(epoch), **metrics, "ts": ts}
+    with open(jd / ResultsMixin.BC_METRICS_NAME, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return True
 
 
 class ResultsMixin:
@@ -89,7 +130,12 @@ class ResultsMixin:
 
     def store_bc_epoch(self, job_id: str, body: dict) -> bool:
         """BC epoch 回传落盘：bc-resume.json（单文件原子覆盖 = 最新 epoch 权重）+
-        bc-metrics.jsonl（追加一行指标）。返回 False = 体非法。调用方已验租约。"""
+        bc-metrics.jsonl（按 epoch 追加一行指标，同 epoch 重发幂等）。
+
+        **迟到的旧 epoch 不得倒回 resume**（2026-11-04 补发链路）：隧道 530 丢掉的 ep5
+        会在 ep6 成功后由 worker 重放，若照旧覆盖，resume 退回 ep5 ⇒ 重启/换机会重训
+        已完成的 ep6。eps 相等（同一 epoch 的重试）照旧覆盖——权重没有更新可言。
+        返回 False = 体非法。调用方已验租约。"""
         # ★M5（Q5）：epoch 是 BC 作业**唯一**的进度信号（心跳只续租、不当活性）⇒ 落盘成功
         # 即打一个进度锚：`_lease_state` 的 bc 判活、`bc_drain_of`、900s 让出回收都读它。
         # 打点住 store（写入点唯一），handler 不另写一行。
@@ -102,15 +148,16 @@ class ResultsMixin:
                 return False
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)
-            # 原子覆盖：tmp + replace——中断的 POST 不留半截 resume
-            tmp = jd / (self.BC_RESUME_NAME + ".tmp")
-            tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, jd / self.BC_RESUME_NAME)
+            prev = self.get_bc_resume(job_id)
+            prev_epoch = int(prev.get("epoch", 0) or 0) if isinstance(prev, dict) else 0
+            if epoch >= prev_epoch:
+                # 原子覆盖：tmp + replace——中断的 POST 不留半截 resume
+                tmp = jd / (self.BC_RESUME_NAME + ".tmp")
+                tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, jd / self.BC_RESUME_NAME)
             metrics = body.get("metrics")
             if isinstance(metrics, dict):
-                row = {"epoch": epoch, **metrics, "ts": self._now()}
-                with open(jd / self.BC_METRICS_NAME, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                _append_bc_metric_row(jd, epoch, metrics, self._now())
             return True
 
     def get_bc_resume(self, job_id: str) -> dict | None:
@@ -125,22 +172,4 @@ class ResultsMixin:
             return None
 
     def get_bc_metrics(self, job_id: str) -> list[dict]:
-        p = self._job_dir(job_id) / self.BC_METRICS_NAME
-        if not p.exists():
-            return []
-        out: list[dict] = []
-        try:
-            with open(p, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(e, dict):
-                        out.append(e)
-        except OSError:
-            return []
-        return out
+        return _bc_metric_rows(self._job_dir(job_id))

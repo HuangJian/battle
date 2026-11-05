@@ -47,7 +47,10 @@ from remote.http import _request
 from remote.job_fs import _persist_result
 
 __all__ = [
+    "BC_EPOCH_BACKLOG_MAX",
     "PPO_BACKENDS",
+    "_bc_backlog_add",
+    "_bc_backlog_replay",
     "_bc_device",
     "_bc_fetch_resume",
     "_bc_load_local_resume",
@@ -133,6 +136,12 @@ def _bc_load_local_resume(work_dir: Path, jid: str) -> tuple[int, bytes] | None:
         return None
 
 
+#: 隧道 530 丢包后最多攒多少个 epoch body 等重放（2026-11-04）。
+#: 每份带 ~0.7MB b64 权重（重放必须是**当初那一份**，hub 的 resume/幂等判据都读 epoch），
+#: 8 份 ≈ 5MB：覆盖 ~15 分钟断网；超出的丢最老的并留日志（那几行账本会缺失）。
+BC_EPOCH_BACKLOG_MAX = 8
+
+
 def _bc_post_epoch(
     base_url: str,
     token: str,
@@ -141,11 +150,14 @@ def _bc_post_epoch(
     lease_token: str,
     *,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
-) -> None:
+) -> bool:
     """POST /jobs/{id}/epoch（每 epoch 权重+指标回传；租约校验在 hub 侧）。
 
+    **返回 bool**（2026-11-04 补发链路）：False = 这一 epoch 没送到 hub，调用方要把它留在
+    backlog 里等隧道恢复后重放。`HTTP 530` 是 cloudflared 抖动的常态——可重试不等于已送达。
+
     best-effort：2 次退避重试后仍失败只 WARN——resume 停在最后成功 epoch，
-    下个 epoch 自带重试；绝不因回传失败打断训练。"""
+    绝不因回传失败打断训练。"""
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     last = ""
     for attempt in range(1, 3):
@@ -165,7 +177,7 @@ def _bc_post_epoch(
         except Exception as e:
             status, resp = None, repr(e).encode()
         if status in (200, 201):
-            return
+            return True
         last = (
             f"HTTP {status}"
             if status is not None
@@ -174,6 +186,46 @@ def _bc_post_epoch(
         if attempt < 2:
             time.sleep(2)
     log(f"WARN: epoch {body.get('epoch')} 回传失败({last})——resume 停留在上一成功 epoch")
+    return False
+
+
+def _bc_backlog_add(
+    pending: list[dict],
+    body: dict,
+    *,
+    cap: int = BC_EPOCH_BACKLOG_MAX,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> None:
+    """把一次失败的回传 body 记进 backlog（有界：超限丢最老的并留一行日志）。
+
+    为什么存整份 body 而不是只存指标：重放走的是同一个 `POST /epoch`，hub 用 body 里的
+    `epoch` 做幂等与「不倒回 resume」判据——换一份拼出来的 body 会把这两条判据变成猜。
+    """
+    pending.append(body)
+    while len(pending) > cap:
+        old = pending.pop(0)
+        log(f"WARN: epoch 回传 backlog 已满（{cap}）——丢弃 ep{old.get('epoch')}（账本会缺这一行）")
+
+
+def _bc_backlog_replay(
+    base_url: str,
+    token: str,
+    jid: str,
+    pending: list[dict],
+    lease_token: str,
+    *,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> int:
+    """按顺序重放 backlog；**遇到仍失败即停**（隧道还断着，接着捶只会拖慢训练）。
+
+    返回仍待补发的行数（0 = 全部送达）。hub 侧按 epoch 幂等，所以重放到一个「其实已经落盘、
+    只是当初响应丢了」的 epoch 上也不会写出第二行。
+    """
+    while pending:
+        if not _bc_post_epoch(base_url, token, jid, pending[0], lease_token, log=log):
+            return len(pending)
+        pending.pop(0)
+    return 0
 
 
 def _bc_device(dev_str: str) -> str:
@@ -396,8 +448,13 @@ def _run_bc_job(
     if resume_epoch:
         log(f"job {jid}: resume 接续——从 epoch {resume_epoch} 继续（共 {total_epochs}）")
 
+    # 隧道 530 丢包（2026-11-04）：一次回传失败 = 这一 epoch 的指标行永久缺失（hub 只留最新
+    # resume，训练侧轮询也永远看不到它）。失败的那一份 body 留在 backlog，下一次回传成功后
+    # 重放 `POST /jobs/{id}/epoch`——hub 按 epoch 幂等，迟到的旧 epoch 只补行、不倒回 resume。
+    pending_epochs: list[dict] = []
+
     # 每 epoch 回传回调：本地原子覆盖 + hub POST（均 best-effort——失败只 WARN，
-    # resume 停在最后一次成功回传的 epoch，下个 epoch 重试）。
+    # resume 停在最后一次成功回传的 epoch，下个 epoch 重试 + 补发 backlog）。
     def _on_epoch(gepoch: int, raw_model: Any, m: dict) -> None:
         tmp = job_dir / "bc-epoch-tmp.json"
         save_weights_json(raw_model, str(tmp), extra_meta={"epoch": gepoch, "ckpt": True})
@@ -411,8 +468,19 @@ def _run_bc_job(
         except OSError:
             pass
         _bc_store_local_resume(job_dir.parent, jid, body)
-        if base_url:
-            _bc_post_epoch(base_url, token, jid, body, lease_token, log=log)
+        if not base_url:
+            return
+        if not _bc_post_epoch(base_url, token, jid, body, lease_token, log=log):
+            _bc_backlog_add(pending_epochs, body, log=log)
+            return
+        if not pending_epochs:
+            return
+        n = len(pending_epochs)
+        left = _bc_backlog_replay(base_url, token, jid, pending_epochs, lease_token, log=log)
+        if left:
+            log(f"WARN: job {jid}: 仍 {left} 行 epoch 指标补发失败——留到下个 epoch")
+        else:
+            log(f"job {jid}: {n} 行漏传的 epoch 指标已补发入账")
 
     if resume_epoch >= total_epochs > 0:
         # 上轮已完成全部 epoch、只差最终回传（epoch POST 成功但 result 丢失）：
@@ -469,6 +537,15 @@ def _run_bc_job(
             + (f" resume@{resume_epoch}" if resume_epoch else "")
         )
         metrics = bc_train(ns)
+        # 收尾补发：最后一个 epoch 的回传也可能吃 530——训练一结束就没有「下一个 epoch」
+        # 来带它了，必须在这里再试一次（失败则留日志：那几行账本就是缺的）。
+        if base_url and pending_epochs:
+            n = len(pending_epochs)
+            left = _bc_backlog_replay(base_url, token, jid, pending_epochs, lease_token, log=log)
+            log(
+                f"job {jid}: 收尾补发 epoch 指标 {n} 行"
+                + ("" if not left else f"——仍缺 {left} 行（隧道仍不可达）")
+            )
         hist = metrics.get("history", {})
         sizes = metrics.get("sizes", {})
         result_metrics = {

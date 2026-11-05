@@ -6,6 +6,53 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §141 BC 每-epoch 回传的隧道丢包：失败进 backlog 重放 + hub 按 epoch 幂等 + 迟到行不派 eval（2026-11-04）
+
+**现场**：用户问「控制台 BC Epoch 区为什么 ep2/ep4 各显示两行」。查 `bc-v6-train`
+（2026-11-04 22:2x，Kaggle 节点 → 本机 hub 走 cloudflared）：
+
+* 账本 `tmp/bc-v6-train/training_log.jsonl` 里 ep2 有两条（ts 差 0.5ms，同一轮 poll 写入）、
+  ep4 有两条（差 15s），指标逐位相同；源头 `remote-jobs/<jid>/bc-metrics.jsonl` 同样 6 行 4 个
+  epoch（hub 侧 ts 差 5.4s / 7.3s ⇒ **两次独立 POST**）；
+* 同一份账本里 **ep5 整行缺失**，`bc-resume.json` 从 4 直接跳到 6；
+* 云机日志（`tmp/notebook-logs/kaggle/…`）：`WARN: epoch 3/5/7 回传失败(HTTP 530)`——而 ep3
+  在 hub 文件里**存在**。
+
+**根因**：`HTTP 530` = cloudflared 隧道错误，两种形态都出现了：**请求已到 origin 并落盘、
+响应丢在隧道上**（worker 重试 ⇒ 同一 epoch 写两行），以及**请求根本没到 origin**（两次尝试都
+失败 ⇒ 那一行永久缺失，`hub/store_results.py` 只 append，`remote/bc_job.py::_bc_post_epoch`
+只重试 2 次后就放弃）。控制台是 1:1 忠实渲染（`ledger.ts::bcRowsFromLedgerTail`），所以
+重复/缺失都是数据面的事实，不是 UI bug。
+
+**落地**（不新增端点，重放走同一个 `POST /jobs/{id}/epoch`）：
+
+* `remote/bc_job.py`：`_bc_post_epoch` 返回 `bool`；失败的那一份 body 进 `pending_epochs`
+  （`BC_EPOCH_BACKLOG_MAX = 8`，超限丢最老并告警），**下一次回传成功后**与**训练收尾时**各
+  重放一次（`_bc_backlog_replay`，遇仍失败即停，不捶隧道、不阻塞训练）。
+* `hub/store_results.py`：指标行**按 epoch 幂等**（`_append_bc_metric_row`，同 epoch 已有行即
+  跳过）——这是重放的安全前提，也顺手治了 ep2/ep4 那种重复行；**迟到的旧 epoch 不倒回
+  resume**（`epoch < 现存 resume epoch` 只补指标行）——否则 ep6 之后补 ep5 会让重启从 ep5
+  重训。
+* `trainer/bc_ingest.py`：`BcWait.last_epoch` 判「回头行」（`ep < last_epoch`）⇒ 账本照收、
+  **不派 eval**。`run_epoch_eval` 取的是 hub `/resume`（已前进到最新），拿它冒充旧 epoch 的
+  结果比缺一行更糟。
+
+**被否决**：① 新开 `POST /jobs/{id}/bc-metrics`（metric-only 补发）——语义更纯，但要动
+hub 路由面 + `_HubQueue` 门面 + 四份 AST 守卫，且 backlog 里只存指标就够，却拿不到
+「同一份 body」带来的幂等语义；② 只把重试次数加长（30s 级）——隧道抖动可持续几分钟，
+而且把训练阻塞在隧道上；③ 控制台按 `(it, epoch)` 去重——掩盖缺行，且会让「补发没到」
+更难被发现。
+
+**边界**：backlog 只活在进程内（worker 重启会丢，但那时本来就从 resume 重训，会把丢的
+epoch 重算重发）；收尾补发也失败 ⇒ 留一行 WARN，那几行账本仍是缺的（不伪造）。
+
+**验收**：`tests/hub/test_bc_resume_store.py`（同 epoch 重放只一行 / 迟到 ep5 不倒回 resume）·
+`tests/remote/test_bc_epoch_backfill.py`（530 ⇒ `False` · 重放逐条 · 仍断则整批保留 · 有界）·
+`tests/trainer/test_bc_ingest_backfill.py`（迟到行入账但不派 eval · 正常整批增量不被误判）·
+`e2e/test_bc_epoch_e2e.py` · `tests/hub` + `tests/remote` 全量 2337 绿。
+
+---
+
 ## §140 采样节点 workers 用满全部核：不套训练侧 `cpu_worker_slots` 的「留 2 核」（2026-11-04）
 
 **现场**：DSW 8 核，启动行 `workers=6（platform_utils cores=8）`。用户口径：
