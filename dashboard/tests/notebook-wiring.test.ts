@@ -85,6 +85,17 @@ describe('W1 接线：活动闸 / 路由顺序 / 虚拟键', () => {
     expect(SERVER.match(/withNotebookOps\(/g)?.length ?? 0).toBe(2)
   })
 
+  it('hub 隧道 URL 端点：只读 GET + 自定义头；读共享 cloudflared 槽（没隧道就空串）', () => {
+    expect(SERVER).toContain("'/api/notebookHub': { GET: guard(notebookHubRoute) }")
+    expect(SERVER).toContain("entryForCourse(loadRegistry(), 'cloudflared', '')?.url")
+    expect(SERVER.indexOf("'/api/notebookHub'")).toBeLessThan(SERVER.indexOf("'/api/log/*'"))
+    const handler = SERVER.slice(
+      SERVER.indexOf('const notebookHubRoute'),
+      SERVER.indexOf('const notebookOpsRoute'),
+    )
+    expect(handler).toContain("req.headers.get('X-Notebook-Companion') !== '1'")
+  })
+
   it('四条静态路由都在 `/api/log/*` 之前；虚拟键在 componentLogPayload 之前分支', () => {
     const logWildcard = SERVER.indexOf("'/api/log/*'")
     expect(logWildcard).toBeGreaterThan(-1)

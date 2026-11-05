@@ -8,6 +8,41 @@
 
 ---
 
+## §43 云机 serve pool 跨轮保留 + 采集 α 单腿（2026-11-04，P0a/P0b/P1）
+
+**现场**：TPU 云机 330GB 内存只用了 ~16GB，但每个 kind=iter 轮、每个 eval 点都要重付 94 个 bun
+的冷启动（exec + 模块/TS 树遍历 + wasm 实例化 + 首用 attestation×3）。池在轮内已经有效，浪费只在
+轮与轮之间。
+
+**P0 落地**：
+
+- 新 `remote/cloud_pool.py`（L0）：`CloudPoolKeeper` 按 `ts_code_sha256` 保存**一个**池；
+  `take()` 摘走并调 `begin_round()`，`put()` 存回，`close_all()` 幂等收池。
+- `worker/serve_pool.py::begin_round()`：清零 served/spawned/killed/fallback/disabled，`unready`
+  按仍在 booting 的实数重算；轮边界上的 dead worker **kill/reap**，不是只从列表剔掉。
+- rollout：`remote/worker.py` 的 `run_job` 在 `try` 内 `take`，finally 先 `rctx.pool = None` 再
+  `put`；`worker_loop`、`run_standalone`、`run_plan_job` 段末 `close_all`，`atexit` 兜底。
+- eval：`run_cloud_eval` 从 `manifest.ts_code_sha256` 显式收 key（**不从 scratch 路径反推**；
+  `nn-rollout-ts-<48hex>` 不是 sha），轮末在 finally 里读 `finished` 并写 `out["servePool"]`；
+  在飞时 `close_all` 跳过，避免硬杀正在写盘的子进程。
+- notebook：`keep_serve_pool` 缺省 `None/auto`，按 `MemAvailable` 落 `0/1`（≥48GB 开、<32GB 关）；
+  显式 `True/False` 优先。
+
+**P1 已切默认 alpha**（2026-11-04 用户指令；`quota` 是显式回退档）：`volume.sched` 是计划/实验身份（`quota`/`alpha`），不是运行时覆盖；缺省/无键 = alpha，导出侧缺省写 alpha，显式 quota 也必须落键；
+`StreamCollector` 用 `samples_s`/`wall_s` 的 EWMA、`rem_games×wall/(inflight+0.3)` 派发，冷启动
+轮转、近分交错、进入 α 时冻结 cap；`observe` 收 `wall_sec/now`，轮报带 `t_fill_sec`/`t_drain_sec`、
+`no_data_stages`、`capped_stages`。`T_fill` 只在全关首次达配额时有定义；P1 门禁是 `T_fill` 改善
+≥10% **且** `T_round`/`T_drain` 不回归 >2%。
+
+**边界**：rollout/eval 不共享池；不取消在飞局、不做 hedge；不改任务侧关卡/敌数/命数/奖励；
+`sched` 不进 `data_fp`，切换 quota/alpha 必须新 `--out`，不得混训。
+
+**验收**：`tests/remote/test_cloud_pool.py`、`tests/worker/test_stream_alpha.py`、
+`tests/remote/test_offline_eval_pool.py`、`tests/worker/test_remote_serve_pool.py` 绿；真机连续两轮
+`spawned=0`、段末无 `serve-any` 残留。
+
+---
+
 ## §42 rollout 绝对优先、eval 排队吃间隙：进程级 eval 闸 + 去掉让位 floor + 窗口从权重就绪起算（2026-11-03 用户口径）
 
 > **已被取代**（2026-11-04）：FIFO / 并发上限 / `Preempt` 收手随任务级统一派发退役——

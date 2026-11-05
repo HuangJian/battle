@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -424,6 +425,39 @@ def test_pool_enabled_defaults_on_and_env_kills_it(monkeypatch: pytest.MonkeyPat
         assert serve_pool.pool_enabled() is False
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "1")
     assert serve_pool.pool_enabled() is True
+
+
+def test_begin_round_resets_counters_and_reaps_dead_workers(tmp_path: Path) -> None:
+    """跨轮复用只重置**本轮**读数；暖 worker 不丢，dead 必须 kill（不是只过滤）。"""
+    import threading
+
+    begin_pool = ServePool("bun", tmp_path, 3, log=lambda _m: None)
+
+    class W:
+        def __init__(self, *, dead: bool = False, ready: bool = True) -> None:
+            self.dead = dead
+            self.ready = threading.Event()
+            if ready:
+                self.ready.set()
+            self.kills = 0
+
+        def kill(self) -> None:
+            self.kills += 1
+            self.dead = True
+
+    warm, booting, dead = W(), W(ready=False), W(dead=True)
+    begin_pool._workers = cast("list[serve_pool._Worker]", [warm, booting, dead])
+    begin_pool.served, begin_pool.spawned, begin_pool.killed = 9, 4, 7
+    begin_pool.unready, begin_pool.fallback, begin_pool.bypassed, begin_pool.disabled = 2, 3, 4, True
+    begin_pool.fallback_reasons = {"err": 3}
+    begin_pool.begin_round()
+    assert (begin_pool.served, begin_pool.spawned) == (0, 0)
+    assert begin_pool.killed == 1 and dead.kills == 1, "dead 必须被 kill/reap"
+    assert begin_pool._workers == [warm, booting], "暖/正在 booting 的 worker 一个不动"
+    assert begin_pool.unready == 1, "unready 只数仍在 booting 的，不是无条件 0"
+    assert (begin_pool.fallback, begin_pool.bypassed, begin_pool.disabled) == (0, 0, False)
+    assert begin_pool.fallback_reasons == {}
+    assert begin_pool.max_workers == 3
 
 
 def test_try_pool_refuses_a_task_for_another_script(tmp_path: Path) -> None:

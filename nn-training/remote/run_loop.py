@@ -36,6 +36,7 @@ from common.cli import house_parser, run_main
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
 from remote.error_report import report_error
 from remote.plan_handoff import ROTATION_POLICIES as ROTATION_POLICIES
 from remote.plan_run import (
@@ -261,7 +262,26 @@ def run_standalone(
     st = ctx.store.read_state() or {}
     start_from = int(st.get("last_it", plan["start_it"]))
     log(f"续跑起点 it{start_from}（计划 it{plan['start_it']} → it{plan['end_it']}）")
-    return _drive(ctx, session=[], start_from=start_from)
+    try:
+        return _drive(ctx, session=[], start_from=start_from)
+    finally:
+        _close_cloud_pools(ctx, log)
+
+
+def _close_cloud_pools(ctx: RunContext, log: Callable[[str], None]) -> None:
+    """段末收池：rollout 总是收；eval 在飞时跳过（后台线程可能正在写盘）。"""
+    runner = getattr(ctx, "eval_runner", None)
+    busy = False
+    if runner is not None:
+        try:
+            busy = runner.inflight_it() is not None or runner.pending_it() is not None
+        except AttributeError:
+            busy = False
+    if busy:
+        log("WARN eval 后台线程仍在飞——跳过 eval 池显式 close（交给收线/进程退出）")
+    else:
+        CLOUD_EVAL_POOL.close_all()
+    CLOUD_ROLLOUT_POOL.close_all()
 
 
 def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:

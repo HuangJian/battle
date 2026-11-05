@@ -66,6 +66,19 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
+  it('setHubSync：hub_url 同步结果上屏（成功/未改/失败原因）', () => {
+    const panel = mountPanel(docOf(dom()), {})
+    const el = panel.host.shadowRoot!.querySelector('[data-hub]') as HTMLElement
+    expect(el.textContent).toBe('')
+    panel.setHubSync('hub_url 已更新 → https://hub.test', 'ok')
+    expect(el.textContent).toContain('已更新')
+    expect(el.getAttribute('data-tone')).toBe('ok')
+    panel.setHubSync('hub_url 未同步：dashboard 未起', 'error')
+    expect(el.textContent).toContain('未同步')
+    expect(el.getAttribute('data-tone')).toBe('error')
+    panel.destroy()
+  })
+
   it('setSchedule：行上屏；勾选/删除回调带 id', () => {
     const w = dom()
     const removed: string[] = []

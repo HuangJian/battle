@@ -13,6 +13,7 @@
  * 没实测过的动作一律 fail closed（不猜选择器、不假装成功）。
  */
 import { normalizeNewlines } from '../../utils'
+import { pageMonaco, replaceMonacoSource } from './hub-url'
 import { KaggleFrameAdapter } from './kaggle'
 import type { CellRef, CmdResult, SessionAdapter, SiteId } from './types'
 
@@ -97,6 +98,13 @@ export class AistudioAdapter extends KaggleFrameAdapter {
     const lines = [...box.querySelectorAll<HTMLElement>('.view-line')]
     if (lines.length === 0) return normalizeNewlines(lineText(box))
     return lines.map(lineText).join('\n')
+  }
+
+  /** 写回 cell：AI Studio 也是 Monaco（`.view-line`），走同一个 model 写入。 */
+  override async replaceCellSource(cell: CellRef, source: string): Promise<CmdResult> {
+    const before = this.sourceText(cell)
+    if (before === '') return { ok: false, reason: `cell 没有可读的编辑器文本：${cell.id}` }
+    return replaceMonacoSource(pageMonaco(this.doc.defaultView), before, source)
   }
 
   /**

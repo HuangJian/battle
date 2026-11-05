@@ -6,6 +6,7 @@
  */
 import { normalizeNewlines } from '../../utils'
 import { deepQuery, deepQueryAll, MIME, SEL } from '../selectors'
+import { minimalEdit } from './hub-url'
 import type { CellRef, CmdResult, FrameAdapter, SessionAdapter, SiteId } from './types'
 
 export interface KaggleHooks {
@@ -19,6 +20,8 @@ export interface KaggleHooks {
   selectTimeoutMs?: number
   /** 点运行后等「cell 真的开始执行」的上界（ms）；超过 ⇒ 可重试失败。 */
   runStartTimeoutMs?: number
+  /** 写回源码：选中 Range 后插入文本（默认 `document.execCommand('insertText')`；测试注入）。 */
+  insertText?: (target: HTMLElement, text: string) => boolean
 }
 
 /** 运行 / 排队中的 cell 标记（JupyterLab 在提示符与类上各写一份）。 */
@@ -170,7 +173,13 @@ export class KaggleFrameAdapter implements FrameAdapter {
   private readonly hooks: Required<
     Pick<
       KaggleHooks,
-      'isVisible' | 'wait' | 'nextFrame' | 'maxScanSteps' | 'selectTimeoutMs' | 'runStartTimeoutMs'
+      | 'isVisible'
+      | 'wait'
+      | 'nextFrame'
+      | 'maxScanSteps'
+      | 'selectTimeoutMs'
+      | 'runStartTimeoutMs'
+      | 'insertText'
     >
   >
   private unfoldObserver: {
@@ -196,6 +205,16 @@ export class KaggleFrameAdapter implements FrameAdapter {
       maxScanSteps: hooks.maxScanSteps ?? 400,
       selectTimeoutMs: hooks.selectTimeoutMs ?? 700,
       runStartTimeoutMs: hooks.runStartTimeoutMs ?? 2500,
+      insertText:
+        hooks.insertText ??
+        ((target, text) => {
+          target.focus()
+          try {
+            return this.doc.execCommand('insertText', false, text)
+          } catch {
+            return false
+          }
+        }),
     }
   }
 
@@ -266,6 +285,62 @@ export class KaggleFrameAdapter implements FrameAdapter {
   sourceText(cell: CellRef): string {
     const el = this.cellEl(cell)
     return el ? (q<HTMLElement>(el, SEL.cmContent)?.textContent ?? '') : ''
+  }
+
+  /**
+   * 写回 cell 源码：只替换「旧文本 → 新文本」的最小差异区间（CFG 里的 hub_url 值），
+   * 不整段重写（注释/缩进/其它键都保留）。写完回读校验——编辑器没接受就还原并带原因失败。
+   */
+  async replaceCellSource(cell: CellRef, source: string): Promise<CmdResult> {
+    const el = this.cellEl(cell)
+    const content = el ? q<HTMLElement>(el, SEL.cmContent) : null
+    if (!content) return { ok: false, reason: `cell 没有可编辑的编辑器：${cell.id}` }
+    const before = this.sourceText(cell)
+    const edit = minimalEdit(before, source)
+    if (!edit) return { ok: true, detail: 'unchanged' }
+    if (!this.applyDomEdit(content, edit.start, edit.end, edit.text)) {
+      return { ok: false, retry: true, reason: '编辑器没接受写入（DOM 选区/execCommand 失败）' }
+    }
+    await this.hooks.nextFrame()
+    if (this.sourceText(cell) === source) return { ok: true, detail: 'cm' }
+    // 没落地：按「当前 → 原文」再改一次，别把半截内容留在用户 cell 里。
+    const back = minimalEdit(this.sourceText(cell), before)
+    if (back) this.applyDomEdit(content, back.start, back.end, back.text)
+    return {
+      ok: false,
+      retry: true,
+      reason:
+        this.sourceText(cell) === before
+          ? '编辑器未接受写入（内容已还原）'
+          : '编辑器未接受写入，且回滚校验失败（请手动检查 CFG cell）',
+    }
+  }
+
+  /** 把字符区间映射到 content 的文本节点，选中后用 `insertText` 钩子写入。 */
+  private applyDomEdit(content: HTMLElement, start: number, end: number, text: string): boolean {
+    const locate = (offset: number): { node: Text; offset: number } | null => {
+      let seen = 0
+      const walker = this.doc.createTreeWalker(content, 4) // 4 = NodeFilter.SHOW_TEXT
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const len = node.textContent?.length ?? 0
+        if (offset <= seen + len) return { node: node as Text, offset: offset - seen }
+        seen += len
+      }
+      return null
+    }
+    const from = locate(start)
+    if (!from) return false
+    const to = end === start ? from : locate(end)
+    if (!to) return false
+    const range = this.doc.createRange()
+    range.setStart(from.node, from.offset)
+    range.setEnd(to.node, to.offset)
+    const selection = this.doc.defaultView?.getSelection?.() ?? null
+    if (!selection) return false
+    content.focus()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    return this.hooks.insertText(content, text)
   }
 
   /** 在已渲染的 code cell 里按行找配置标记（启发式优先：CFG 开头且含 `{`）。 */

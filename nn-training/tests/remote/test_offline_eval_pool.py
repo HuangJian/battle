@@ -18,6 +18,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -29,6 +30,7 @@ import remote.offline_eval as offline_eval
 import worker.eval_local as eval_local
 import worker.serve_pool as serve_pool
 from remote.artifacts import sha256_file
+from remote.cloud_pool import CLOUD_EVAL_POOL
 from remote.offline_eval import CLOUD_NODE, eval_plan_of, run_cloud_eval
 
 
@@ -77,8 +79,20 @@ class FakePool:
         self.killed = 0
         self.fallback = 0
         self.fallback_reasons: dict[str, int] = {}
+        # 跨轮 keeper 需要的最小形状（真池由 ServePool 提供）。
+        self.max_workers = 4
+        self.ts_dir = None
+        self.begin_n = 0
         for k, v in over.items():
             setattr(self, k, v)
+
+    def begin_round(self) -> None:
+        self.begin_n += 1
+        self.served = 0
+        self.spawned = 0
+        self.killed = 0
+        self.fallback = 0
+        self.fallback_reasons = {}
 
     def start(self) -> int:
         self.started += 1
@@ -174,7 +188,8 @@ def test_cloud_eval_closes_the_pool_even_when_a_game_explodes(
         slots=2,
         log=lambda _m: None,
     )
-    assert out["failed"] == 1 and pool.closed >= 2, "两条 finally 路径都该关（close 幂等）"
+    # 池现在由内层 finally 关一次（不存 keeper：本用例没给 ts_code_sha256）；外层 pool 已置 None。
+    assert out["failed"] == 1 and pool.closed == 1, "异常路径也必须关池（且只关一次）"
 
 
 def test_cloud_eval_skips_pooling_when_the_pool_cannot_start(
@@ -211,6 +226,68 @@ def test_cloud_eval_skips_pooling_when_the_pool_cannot_start(
     assert seen == [None], "没就绪就不该把池交出去"
     assert out["servePool"] is None
     assert any("起不来" in m for m in msgs), msgs
+
+
+def test_cloud_eval_reuses_the_keeper_pool_for_the_same_ts_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0b：同 ts sha 的第二个 eval 取回暖池（spawned=0），不再 make/start。"""
+    pool = FakePool(spawned=2, max_workers=4)
+    built: list[int] = []
+
+    def fake_make(*_a, **_k):
+        built.append(1)
+        return pool
+
+    monkeypatch.setattr(offline_eval.serve_pool, "make_pool", fake_make)
+    monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
+
+    def fake_runner(_bun, _w, stage, seed, out_dir, *_a, **_kw):
+        p = _kw.get("pool")
+        if p is not None:
+            p.try_capture([], 1.0)  # 模拟执行面真的用了池（served 才不是 0）
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return {"win": True, "cleared": True, "outcome": "win", "elapsedSec": 0.0}
+
+    monkeypatch.setattr(offline_eval, "run_local_eval_game", fake_runner)
+    sha = "a" * 64
+    course = _course(n_seeds=1)
+    kw: dict[str, Any] = dict(
+        plan=eval_plan_of(course),
+        it=1,
+        weights_path=_weights(tmp_path),
+        eval_jsonl=tmp_path / "eval_log.jsonl",
+        ts_root=_ts_root(tmp_path),
+        work_dir=tmp_path / "work",
+        course=course,
+        bun="bun",
+        slots=2,
+        ts_code_sha256=sha,
+        log=lambda _m: None,
+    )
+    CLOUD_EVAL_POOL.close_all()
+    try:
+        first = run_cloud_eval(**kw)
+        assert built == [1] and first["servePool"]["spawned"] == 2
+        # 同一份权重会让第二点被 `eval_done_keys` 全跳过（连池都不建）；换一份权重
+        # 只为让第二点有 todo，TS sha 仍然是同一个（keeper key 不变）。
+        w2 = tmp_path / "weights2.json"
+        w2.write_bytes(b'{"w":2}')
+        second = run_cloud_eval(
+            **{
+                **kw,
+                "it": 2,
+                "weights_path": w2,
+                # 独立账本：否则同 (stage,seed) 的已评行会让第二点提前返回（连池都不建）。
+                "eval_jsonl": tmp_path / "eval_log2.jsonl",
+            }
+        )
+        assert built == [1], "第二个同 sha eval 不该再 make_pool"
+        assert second["servePool"]["spawned"] == 0
+        assert second["servePool"]["served"] == 1
+        assert pool.begin_n == 1 and pool.started == 1, "跨轮只 begin 一次，且不重复 start"
+    finally:
+        CLOUD_EVAL_POOL.close_all()
 
 
 def test_cloud_eval_env_switch_disables_pooling(

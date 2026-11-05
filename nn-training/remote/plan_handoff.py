@@ -1152,6 +1152,8 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
             "work_dir": work_dir,
             "course": ctx.course,
             "course_fp": str(ctx.manifest.get("course_fp", "") or ""),
+            # eval 跨轮池的 key：来自 manifest，不从 ts_root 路径反推（scratch 下不是 sha）。
+            "ts_code_sha256": str(ctx.manifest.get("ts_code_sha256", "") or ""),
             "slots": ctx.eval_slots,
             # **原样传 0（= 没指定）**：由 `run_cloud_eval` 按 `common/game_watch.py` 解析成
             # 「首次尝试 = 5s（用户口径：单局 >5s 肯定不正常）、重试 ×4」；显式给了正数就完全

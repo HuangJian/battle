@@ -29,6 +29,7 @@ import {
 } from './bridge'
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
+import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
   actionLabel,
   countdownLabel,
@@ -237,6 +238,27 @@ function startFrame(
     onError: (reason) => log(`bridge: ${reason}`),
   })
 
+  // 页首同步 CFG['hub_url']：hub 的 cloudflared 隧道换了 URL，notebook 里的配置跟着换。
+  // 结果经 bridge 送到外层面板（成功 / 未改 / 失败原因都要看得见，不能只进 console）。
+  const hubSync = config.enabled
+    ? startHubUrlSync({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        adapter,
+        markers: config.configMarkers,
+        log: (msg) => log(`hub: ${msg}`),
+      })
+    : null
+  if (hubSync) {
+    void hubSync.done.then((r) => {
+      log(`hub 同步：${r.ok ? (r.detail ?? 'ok') : r.reason}`)
+      bridge.note(
+        'hub:sync',
+        r.ok ? { ok: true, value: r.detail ?? 'ok' } : { ok: false, reason: r.reason },
+      )
+    })
+  }
+
   // 自动清空的「近 10s 有交互」闸：捕获阶段，不改页面行为。
   const touch = (): void => loop.lastInteractionAt(Date.now())
   for (const ev of ['keydown', 'pointerdown', 'wheel', 'scroll'] as const) {
@@ -256,6 +278,7 @@ function startFrame(
 
   return () => {
     clearTimeout(startFallback)
+    hubSync?.cancel()
     loop.stop()
     bridge.destroy()
   }
@@ -337,6 +360,16 @@ function startHost(
       } else {
         panel?.setStatus('已连接（等待笔记本）', 'warn')
       }
+    },
+    onNote: (m) => {
+      if (m.name !== 'hub:sync') return
+      const view = describeHubSync({
+        ok: m.ok === true,
+        ...(typeof m.value === 'string' ? { detail: m.value } : {}),
+        ...(m.reason ? { reason: m.reason } : {}),
+      })
+      op('hub:sync', view.text)
+      panel?.setHubSync(view.text, view.tone)
     },
     onError: (reason) => {
       ready = false
@@ -681,6 +714,24 @@ function startSingle(
   const opEvent = (e: SchedulerEvent): void => op(eventOpName(e), eventDetail(e))
   op('boot', `${site} single notebook=${notebookKey || '∅'} session=${loop.session} page=${page}`)
 
+  // 页首同步 CFG['hub_url']（与 Kaggle 帧同一条路径；single 页没有桥，结果进操作日志）。
+  const hubSync = config.enabled
+    ? startHubUrlSync({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        adapter,
+        markers: config.configMarkers,
+        log: (msg) => log(`hub: ${msg}`),
+      })
+    : null
+  if (hubSync) {
+    void hubSync.done.then((r) => {
+      op('hub:sync', r.ok ? (r.detail ?? 'ok') : r.reason)
+      const view = describeHubSync(r)
+      panel?.setHubSync(view.text, view.tone)
+    })
+  }
+
   const openLog = (): void => {
     op('log:open', `notebook:${loop.session}`)
     win.open(
@@ -930,6 +981,7 @@ function startSingle(
 
   return () => {
     clearInterval(markTimer)
+    hubSync?.cancel()
     doc.removeEventListener('visibilitychange', onVisibility)
     for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })
     sched?.stop()

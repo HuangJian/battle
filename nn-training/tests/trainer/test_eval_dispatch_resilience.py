@@ -19,6 +19,7 @@ import json
 import re
 import threading
 import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,27 @@ import worker.eval_yield as eval_yield
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
+
+
+@pytest.fixture(autouse=True)
+def _fresh_eval_pools() -> Iterator[None]:
+    """每例都从空仲裁器/空线程池开始。
+
+    这两份状态是**进程级单例**（生产正确：线程跨轮复用）。但用例之间不隔离时，
+    上一例的 a97 线程可以领走下一例的任务，窗口/轮转断言就会被并发与游标残留
+    打穿（2026-11-04 pygate 实测：window 用例多落一局、round-robin 变成 A,A,B,B）。
+    """
+    from worker.eval_arbiter import reset_eval_arbiter
+    from worker.eval_exec import reset_eval_executors
+
+    # 顺序不能反：新执行器在构造时绑定当前仲裁器，先换仲裁器再换执行器。
+    reset_eval_arbiter()
+    reset_eval_executors()
+    try:
+        yield
+    finally:
+        reset_eval_arbiter()
+        reset_eval_executors()
 
 
 def _wait_until(pred: Any, *, timeout: float = 20.0, step: float = 0.02) -> bool:
@@ -1280,10 +1302,23 @@ def test_close_reason_window_when_deadline_hits(tmp_path, monkeypatch) -> None:
     判定必须用「窗口还有没有余量」把两者分开 —— 否则这一档永远报不出来）。"""
     import time
 
+    from worker.eval_arbiter import EvalRound
+
     h = _Harness(tmp_path, monkeypatch, games=2)
     h.args.eval_window_sec = 0.5
+    armed = threading.Event()
+    orig_arm = EvalRound.arm_window
+
+    def spy_arm(self: EvalRound, now: float, *, paused: bool) -> None:
+        orig_arm(self, now, paused=paused)
+        armed.set()
+
+    monkeypatch.setattr(EvalRound, "arm_window", spy_arm)
 
     def fetch(*_a, **kw):
+        # 窗口从权重就绪起算；等它 arm 再睡，避免 arm 被调度推迟时这局在
+        # 窗口开始前就跑完、把「窗口内跑不完」的夹具变成「跑得完」。
+        assert armed.wait(timeout=10.0), "窗口没有 arm（用例内部死锁）"
         # sleep-ok: 夹具模拟「窗口内跑不完的一局」（0.6s > 窗口 0.5s）
         time.sleep(0.6)
         return h.manifest(kw["stage"], kw["seed"]), {}
@@ -2036,3 +2071,42 @@ def test_replica_lane_flattens_inflight_tasks_across_rounds() -> None:
     assert early_round.claims == [], "副本按轮序而不是任务序发牌（跨轮没平铺）"
     assert arb._replica_grant(rounds, "n3", 100.0) is not None
     assert early_round.claims == [(2001, 5)], "游标不转：另一轮的候选永远轮不到"
+
+
+def test_unregister_does_not_rewind_round_robin_cursor() -> None:
+    """一轮收工不得重置发牌游标：随后登记的新轮必须接在当前轮之后。
+
+    旧实现 `unregister` 把 `_rr` 按**当时**轮数取模；A 发出首牌后第三轮收工
+    （列表缩到 1）把游标压回 0，B 再登记时又从 A 起扫 ⇒ A 连拿两局。pygate
+    2026-11-04 的 A,A,B,B 就是这条路径。
+    """
+    from worker.eval_arbiter import EvalArbiter
+
+    class _Rnd:
+        course_fp = ""
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.claims = 0
+
+        def register_clock(self, _now: float) -> None:
+            pass
+
+        def pause_clock(self, _now: float) -> None:
+            pass
+
+        def claim_unique(self, _nid: str, _now: float) -> _Rnd:
+            self.claims += 1
+            return self
+
+    arb = EvalArbiter()
+    a, stale, b = _Rnd("A"), _Rnd("stale"), _Rnd("B")
+    arb.register(a)  # type: ignore[arg-type]
+    arb.register(stale)  # type: ignore[arg-type]
+    assert arb._unique_grant(arb._rounds, "n1", 1.0) is a
+    arb.unregister(stale)  # type: ignore[arg-type]
+    arb.register(b)  # type: ignore[arg-type]
+    assert arb._unique_grant(arb._rounds, "n1", 2.0) is b, (
+        "游标被 unregister 归一化，A 又拿了一局"
+    )
+    assert a.claims == 1 and b.claims == 1

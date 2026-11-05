@@ -70,6 +70,7 @@ from remote.artifacts import (
     sha256_bytes,
     sha256_file,
 )
+from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
 from remote.offline_deliver import DRAIN_FLUSH_SEC
 
 # ---- 计划交接面（校验 / 取包播种 / 上下文 / 评估装配）已下沉 `remote/plan_handoff.py`（S5 第十三刀，2026-09-27）-----
@@ -789,7 +790,12 @@ def run_plan_job(
         ctx.last_opt_sha = _stored_opt_sha(ctx, anchor_it)
     else:
         session.append(_checkpoint(ctx, anchor_it, first_result, wall_sec=0.0, phase="anchor"))
-    return _drive(ctx, session=session, start_from=start_from)
+    try:
+        return _drive(ctx, session=session, start_from=start_from)
+    finally:
+        # 测试腿的收池兜底；eval 在飞时 close_all 自己会跳过。
+        CLOUD_ROLLOUT_POOL.close_all()
+        CLOUD_EVAL_POOL.close_all()
 
 
 def _end_it_reached(plan: dict, *, state: str, it_end: int) -> bool:

@@ -124,6 +124,7 @@ from remote.bulk_sched import (
 from remote.bulk_sched import (
     yield_worth_it as yield_worth_it,
 )
+from remote.cloud_pool import CLOUD_ROLLOUT_POOL, acquire_rollout, release_rollout
 
 # 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
 # 注入点分档（第十二刀后重划）：
@@ -751,8 +752,13 @@ def run_job(
             # ★ 逐局流式采集（2026-10-27，用户口径）：`volume` 块在 ⇒ 本轮采哪几局由调度器
             # **每结算一局重算一次**（差额最大的关先派，槽位空出即补，满额即停）——不再有
             # 「一批跑完再算下一批」。`volume` 缺席（在线 kind=iter / 老计划）= 老行为逐字不变。
-            collector = StreamCollector.from_spec(manifest["rollout"], log=log)
+            collector = StreamCollector.from_spec(
+                manifest["rollout"], log=log, started_at=time.time()
+            )
+            pool_key = str(manifest.get("ts_code_sha256", "") or "").strip().lower()
             try:
+                # ★ 先建 collector 再取池：from_spec 抛错时池还没被取走。
+                rctx.pool = acquire_rollout(pool_key, log)
                 iter_info = run_iter_rollout(
                     job_dir,
                     manifest["rollout"],
@@ -767,7 +773,9 @@ def run_job(
                 )
                 shard_dirs = list(iter_info["shard_dirs"])
             finally:
-                rctx.close()  # 池：rollout 跑完就收（PPO 之前）；失败路径也收
+                pool, rctx.pool = rctx.pool, None
+                release_rollout(pool_key, pool)
+                rctx.close()  # 池已摘走；这里只收落点/临时资源
             if collector is not None:
                 # 轮报的 `volumeTopup`（读数面；`rule`/逐关账/缺口/浪费/触顶 与旧形态同键）。
                 iter_info["volumeTopup"] = collector.volume()
@@ -1269,6 +1277,7 @@ def worker_loop(
                 "请按上面的 jid 排查（hub 日志 / 网络）"
             )
         # 收线上报放在**回传收尾之后**：最后一个读点因此包含「结果到底交没交出去」之后的状态。
+        CLOUD_ROLLOUT_POOL.close_all()
         life.close(done)
 
 

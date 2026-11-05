@@ -124,7 +124,7 @@ TOP_IMPORTS = frozenset(
         "remote",
     }
 )
-STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
+STDLIB_IMPORTS = frozenset({"os", "pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(

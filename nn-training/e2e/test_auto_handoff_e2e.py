@@ -68,6 +68,9 @@ from tests.subproc_util import spawn_bound_port
 TOKEN = "e2e-autohandoff-sekret"
 C_AUTO = "e2e-auto-a"
 C_OTHER = "e2e-auto-b"
+#: hold 静默窗：stale 是**粘的**（claim 之后没人打点就一直 stale），轮询步长 50ms
+#: ⇒ 1.0s 已有 20× 余量；与 `test_hold_e2e.HOLD_STALE` 同口径。再大只是让用例白等。
+HOLD_STALE = 1.0
 
 #: 自动交接控制台的端点（与生产同路径；`hub/task_pack.py::AUTO_HANDOFF_CONSOLE_PATH`）。
 CONSOLE_HANDOFF_PATH = "/api/autoOfflineHandoff"
@@ -219,7 +222,9 @@ class _FakeConsole:
         self.calls = calls
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        # `shutdown()` 会等满一个 poll_interval；每个 e2e 用例都起一份假控制台，
+        # 缺省 0.5s 的关服延迟就是白付（真 HTTP 请求仍然即时处理，不受影响）。
+        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
 
     def handoff_courses(self) -> list[str]:
         """被请求过的 `autoOfflineHandoff` 课程名（顺序即请求顺序）。"""
@@ -856,7 +861,7 @@ def test_dead_offline_holder_is_reclaimed_after_silence(tmp_path: Path) -> None:
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _write_pack(traj, C_AUTO, b"PK\x03\x04t3-pack")
-    hub = _Hub(traj, hold_stale_sec=2.0)
+    hub = _Hub(traj, hold_stale_sec=HOLD_STALE)
     try:
         hub.ready(expect=[C_AUTO])
         st, body = _offline_claim(hub, C_AUTO, "w-a")
@@ -902,7 +907,7 @@ def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> No
     for c in (C_AUTO, C_OTHER):
         _course_dirs(traj, c)
         _write_pack(traj, c, f"PK\x03\x04{c}".encode())
-    hub = _Hub(traj, hold_stale_sec=2.0)
+    hub = _Hub(traj, hold_stale_sec=HOLD_STALE)
     try:
         hub.ready(expect=[C_AUTO, C_OTHER])
         assert _offline_claim(hub, C_AUTO, "w-a")[0] == 200
@@ -1040,7 +1045,7 @@ def test_full_cycle_hold_takeover_revoked_and_reclaim(tmp_path: Path) -> None:
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _write_pack(traj, C_AUTO, b"PK\x03\x04t7-pack")
-    hub = _Hub(traj, hold_stale_sec=2.0)
+    hub = _Hub(traj, hold_stale_sec=HOLD_STALE)
     try:
         hub.ready(expect=[C_AUTO])
         # ① 在训无主：可领

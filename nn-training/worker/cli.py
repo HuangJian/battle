@@ -241,6 +241,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "pooled=近 3 轮池化（旧口径，A/B 用）",
     )
     ap.add_argument(
+        "--volume-sched",
+        choices=("quota", "alpha"),
+        default=_d("volume_sched", "alpha") or "alpha",
+        help="采集调度档（缺省 alpha）：alpha=按实测 samples/wall 的逐局调度；"
+        "quota=回退档（按 est/缺口）。写进离线计划的 volume.sched；切档必须新 --out，不得混训",
+    )
+    ap.add_argument(
         "--rotate-stages",
         type=int,
         default=_d("rotate_stages", 0),

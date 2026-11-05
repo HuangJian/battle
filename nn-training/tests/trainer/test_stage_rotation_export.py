@@ -5,7 +5,7 @@ plan/it-stage-ratation.plan.md §9.5（2026-10-28）。导出侧要保证两件�
   ① 开了轮换 ⇒ `volume` 块里带**全关** est 表（`est_s_all`）—— 云机跑到第 2 轮换到别的
      窗口时，要能按同一套反解算出那几关的局数；窗口外的关没有 est 就会静默回退全局单值
      （「每关同一个 G」的老病）。
-  ② 不开轮换 ⇒ 块形状逐字节不变（不许因为这次改动让既有计划多出一个键）。
+  ② 不开轮换 ⇒ 块里不出现 `est_s_all`（轮换字段不泄漏；`sched` 默认档另行钉）。
 
 （多轮包本身不再被拒 —— 旧用例 `test_multi_round_bundle_with_rotation_is_refused` 随
 §3.7 的拒收一起退役，改为在 `tests/worker/test_plan_rotation_multiround.py` 里钉
@@ -76,8 +76,16 @@ def test_rotation_export_pins_the_all_stage_est_table(tmp_path: Path) -> None:
         assert block["est_s_by_stage"][s] == block["est_s_all"][s]
 
 
-def test_without_rotation_the_block_is_byte_identical(tmp_path: Path) -> None:
-    """未开轮换 ⇒ 块里没有 `est_s_all`（老计划逐字节不变）。"""
+def test_export_sched_defaults_to_alpha_and_quota_is_explicit(tmp_path: Path) -> None:
+    """计划导出缺省写 alpha；显式 quota 必须落成 `"quota"`，不能靠「没有键」。"""
+    alpha_block = _Export(tmp_path)._volume_plan_block(5)
+    assert alpha_block is not None and alpha_block["sched"] == "alpha"
+    quota_block = _Export(tmp_path, volume_sched="quota")._volume_plan_block(5)
+    assert quota_block is not None and quota_block["sched"] == "quota"
+
+
+def test_without_rotation_the_block_has_no_est_s_all(tmp_path: Path) -> None:
+    """未开轮换 ⇒ 块里没有 `est_s_all`（轮换字段不泄漏）。"""
     stub = _Export(tmp_path, rotation_mode="", rotation_per_it=0)
     block = stub._volume_plan_block(5)
     assert block is not None

@@ -618,6 +618,11 @@ def validate_volume_block_ext(block: object, *, require_runtime: bool = False) -
     lo = raw_topup["last_lo_factor"]
     if isinstance(lo, bool) or not isinstance(lo, (int, float)) or not (0 < float(lo) <= 1):
         raise ValueError(f"volume.topup.last_lo_factor 必须在 (0, 1]，收到 {lo!r}")
+    # `sched` 是计划/实验身份旋钮（缺省 alpha；旧计划没有该键也按 alpha 跑）。拼错必须
+    # 响亮；只校验，不把缺省键写回 `out`（计划导出侧负责显式落键）。
+    raw_sched = block.get("sched", "alpha")
+    if not isinstance(raw_sched, str) or raw_sched.strip().lower() not in ("quota", "alpha"):
+        raise ValueError(f"volume.sched 只认 'quota'/'alpha'，收到 {raw_sched!r}")
     out = dict(block)
     out["stages"] = stages
     out["est_s_by_stage"] = ests

@@ -56,6 +56,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 from common.protocol import ProtocolError
@@ -70,7 +71,18 @@ from worker.volume_alloc import (
 )
 from worker.volume_quota import default_game_cap, stage_seeds, target_per_stage
 
-__all__ = ["STREAM_RULE", "StreamCollector"]
+__all__ = ["SCHEDS", "STREAM_RULE", "StreamCollector"]
+
+#: P1 的采集调度档（计划/实验身份，不是运行时覆盖）。
+SCHEDS = ("quota", "alpha")
+
+
+def _ewma(prev: float, x: float, *, half_life: int = 20) -> float:
+    """指数滑动平均（半衰期 20 局；首条实测直接落值，不做 0→x 的慢热）。"""
+    if prev <= 0:
+        return float(x)
+    a = 1.0 - 0.5 ** (1.0 / float(max(1, half_life)))
+    return float(prev + a * (float(x) - float(prev)))
 
 #: 采集调度规则版本（进轮报 `volumeTopup.rule`；与 `VOLUME_ALLOC_RULE` 同值 —— 配额口径
 #: 没变，变的是「谁来决定下一局」，那一层由 `mode` 字段说清）。
@@ -124,9 +136,18 @@ class StreamCollector:
         vol: dict,
         *,
         log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        started_at: float | None = None,
     ) -> None:
         self.spec = spec
         self.log = log
+        raw_sched = vol.get("sched", "alpha")
+        if not isinstance(raw_sched, str) or raw_sched.strip().lower() not in SCHEDS:
+            raise ProtocolError(
+                f"rollout.volume.sched 非法：{raw_sched!r}（只认 {SCHEDS}）"
+            )
+        self.sched = raw_sched.strip().lower()
+        #: 轮起点（由 `remote/worker.py` 传 `time.time()`；纯逻辑不自己读钟）。
+        self.started_at = started_at
         self.stages: list[int] = [int(s) for s in vol["stages"]]
         self.target = int(vol["target_transitions"])
         self.quota = target_per_stage(self.target, len(self.stages))
@@ -168,6 +189,16 @@ class StreamCollector:
         #: 冻结的硬顶（见 `_cap`：有实测之后第一条顶就定下来，之后 est 怎么跳都不改）。
         self._caps: dict[int, int] = {}
         self._dispatched = 0
+        # ---- α（P1）的实测数据面：wall/samples 只从 observe 进来 ----
+        self.samples_s: dict[int, float] = {s: 0.0 for s in self.stages}
+        self.wall_s: dict[int, float] = {s: 0.0 for s in self.stages}
+        self.first_quota_at: dict[int, float] = {}
+        self.last_settle_at: float | None = None
+        self.no_data: set[int] = set()
+        self._alpha_started = False
+        self._cold_dispatched = 0
+        self._seq = 0
+        self._alpha_caps: dict[int, int] = {}
 
     # ────────────────────────── 构造 ──────────────────────────
 
@@ -177,6 +208,7 @@ class StreamCollector:
         spec: dict,
         *,
         log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        started_at: float | None = None,
     ) -> StreamCollector | None:
         """spec 带**启用的** `volume` 块 ⇒ 调度器；缺席/关闭 ⇒ `None`（老行为逐字不变）。
 
@@ -193,7 +225,7 @@ class StreamCollector:
         topup = vol["topup"]
         if not bool(topup.get("enabled")) or int(topup.get("max_batches", 0)) <= 0:
             return None
-        return cls(spec, vol, log=log)
+        return cls(spec, vol, log=log, started_at=started_at)
 
     # ────────────────────────── 账本读数 ──────────────────────────
 
@@ -249,6 +281,105 @@ class StreamCollector:
             self._caps[stage] = cap
         return cap
 
+    # ────────────────────────── α（P1）──────────────────────────
+
+    def _alpha_cap(self, stage: int, *, freeze: bool = True) -> int:
+        """α 模式的独立硬顶：按**实测** samples/局反解，进入 α 时冻结。
+
+        `planned_games` 只作地板；`games + 1` 是冻结时的下限，之后**不随后续派发抬高**。
+        与 quota 模式的 `_cap` 完全分开：quota 的 est 反解不参与 α 判据。
+        """
+        frozen = self._alpha_caps.get(stage)
+        if frozen is not None:
+            return int(frozen)
+        samples = max(float(self.samples_s.get(stage, 0.0)), 1.0)
+        cap = max(
+            int(self.planned_games.get(stage, 0) or 1),
+            math.ceil(self.quota / samples) * 4,
+            int(self.games.get(stage, 0)) + 1,
+        )
+        if freeze and int(self.settled.get(stage, 0)) > 0:
+            self._alpha_caps[stage] = cap
+        return cap
+
+    def _alpha_score(self, stage: int) -> float:
+        """剩余局数 × 单局墙钟 / (在飞 + 0.3)。量纲 = 秒/槽位；不读 est。"""
+        got = int(self.collected.get(stage, 0))
+        rem = max(0, self.quota - got)
+        samples = max(float(self.samples_s.get(stage, 0.0)), 1.0)
+        wall = float(self.wall_s.get(stage, 0.0)) or 1.0
+        inflight = max(0, int(self.games.get(stage, 0)) - int(self.settled.get(stage, 0)))
+        return wall * (rem / samples) / (inflight + 0.3)
+
+    def _enter_alpha(self) -> None:
+        """冷启动结束：标 no_data、按当时实测 samples 冻结每关 cap。"""
+        self._alpha_started = True
+        for s in self.stages:
+            if int(self.settled.get(s, 0)) <= 0 or int(self.collected.get(s, 0)) <= 0:
+                self.no_data.add(s)
+            self._alpha_cap(s)  # freeze（有数据的关用实测；no_data 关反正被跳过）
+
+    def _cold_in_flight(self) -> bool:
+        """还有「一局都没结算」的关在飞吗？有 ⇒ 冷启动只能软停，不能标 no_data。"""
+        return any(
+            int(self.settled.get(s, 0)) <= 0
+            and int(self.games.get(s, 0)) > int(self.settled.get(s, 0))
+            for s in self.stages
+        )
+
+    def _cold_stage(self) -> int | None:
+        """开局轮转：每关至少 1 局结算；最多 `2n` 次，之后才标 no_data 进 α。
+
+        `_fill` 会在一局都没结算时连续问很多次（池宽 94）：到 2n 时那些局**还在飞**，
+        此时返回 None 会被 `_fill` 当成终局（`supply_open=False`）⇒ 只采 2n 局就收工。
+        所以到顶/无候选时先看 `_cold_in_flight()`：有在飞就返回 None 让 `_next_alpha` 交 `[]`
+        （软停，结算后还会再问）；没有在飞才真正标 no_data 进 α。
+        """
+        if self._cold_dispatched >= max(2 * len(self.stages), 1):
+            if self._cold_in_flight():
+                return None
+            self._enter_alpha()
+            return None
+        for k in range(len(self.stages)):
+            s = self.stages[(self._cold_dispatched + k) % len(self.stages)]
+            if s in self.no_data or int(self.settled.get(s, 0)) > 0:
+                continue
+            if int(self.games.get(s, 0)) >= self._alpha_cap(s, freeze=False):
+                continue
+            self._cold_dispatched += 1
+            return s
+        if self._cold_in_flight():
+            return None
+        self._enter_alpha()
+        return None
+
+    def _next_alpha(self) -> list[str] | None:
+        """α 的单拍：冷启动轮转 → 分数最高 → 近分按派发序号交错。终局只有 `None`。"""
+        if not self._alpha_started:
+            stage = self._cold_stage()
+            if stage is not None:
+                return self._mint(stage)
+            if not self._alpha_started:
+                if self._cold_in_flight():
+                    return []  # 冷启动在飞：本拍软停，结算后再问（不是终局）
+                self._enter_alpha()
+        cands: list[tuple[float, int]] = []
+        for s in self.stages:
+            if s in self.no_data:
+                continue
+            if int(self.collected.get(s, 0)) >= self.quota:
+                continue
+            if int(self.games.get(s, 0)) >= self._alpha_cap(s):
+                continue
+            cands.append((self._alpha_score(s), int(s)))
+        if not cands:
+            return None
+        best = max(score for score, _ in cands)
+        near = sorted(s for score, s in cands if score >= best * 0.95)
+        stage = near[self._seq % len(near)]
+        self._seq += 1
+        return self._mint(stage)
+
     # ────────────────────────── 调度 ──────────────────────────
 
     def next_game(self) -> list[str] | None:
@@ -259,6 +390,8 @@ class StreamCollector:
           结算后再问。冷启动（还没有局均估计、每关已有一局在飞）就是这个状态；
         * `None` —— **终局**：所有关都满额（或撞硬顶）⇒ 本轮不再派新局。
         """
+        if self.sched == "alpha":
+            return self._next_alpha()
         best_key: tuple[int, int] | None = None
         best_stage: int | None = None
         #: 还有没有「未满额且未触顶」的关 —— 有 ⇒ 本拍的空结果只是软停，不是终局。
@@ -304,8 +437,19 @@ class StreamCollector:
         self._dispatched += 1
         return argv
 
-    def observe(self, argv: list[str], samples: int) -> None:
-        """一局结算：记样本、推进 est 分母、冻硬顶。**绝不抛**（观测腿，不能让训练死在记账上）。"""
+    def observe(
+        self,
+        argv: list[str],
+        samples: int,
+        *,
+        wall_sec: float = 0.0,
+        now: float | None = None,
+    ) -> None:
+        """一局结算：记样本、推进 est 分母、冻硬顶；α 另记 samples/wall/首达时间。
+
+        旧调用方不传 kwargs 仍兼容（`wall_sec=0`、`now=None`）。**绝不抛**（观测腿，
+        不能让训练死在记账上）。
+        """
         try:
             stage = _stage_of(list(argv))
         except ProtocolError:
@@ -316,6 +460,20 @@ class StreamCollector:
         n = int(samples or 0)
         if n > 0:
             self.collected[stage] = int(self.collected.get(stage, 0)) + n
+        wall = float(wall_sec or 0.0)
+        if wall > 0:
+            self.wall_s[stage] = _ewma(float(self.wall_s.get(stage, 0.0)), wall)
+        if n > 0:
+            self.samples_s[stage] = _ewma(float(self.samples_s.get(stage, 0.0)), float(n))
+        # 旧调用方不传 now：保留上一个真实时间戳，不要用 0 把它冲掉（t_drain 会变成负数）。
+        if now is not None:
+            self.last_settle_at = float(now)
+        if (
+            int(self.collected.get(stage, 0)) >= self.quota
+            and stage not in self.first_quota_at
+            and self.last_settle_at is not None
+        ):
+            self.first_quota_at[stage] = self.last_settle_at
 
     # ────────────────────────── 读数（轮报）──────────────────────────
 
@@ -324,12 +482,20 @@ class StreamCollector:
         short = shortfall_by_stage(
             stages=self.stages, collected=self.collected, target_transitions=self.target
         )
+        cap_for = self._alpha_cap if self.sched == "alpha" else self._cap
         capped = sorted(
-            s for s in short if int(self.games.get(s, 0)) >= self._cap(s) > 0
+            s for s in short if int(self.games.get(s, 0)) >= cap_for(s) > 0
         )
+        t_fill_sec = None
+        if self.started_at is not None and all(s in self.first_quota_at for s in self.stages):
+            t_fill_sec = round(max(self.first_quota_at.values()) - self.started_at, 3)
+        t_drain_sec = None
+        if self.started_at is not None and self.last_settle_at is not None:
+            t_drain_sec = round(self.last_settle_at - self.started_at, 3)
         return {
             "rule": STREAM_RULE,
             "mode": STREAM_MODE,
+            "sched": self.sched,
             "dispatched_games": int(self._dispatched),
             "planned_games": sum(int(v) for v in self.planned_games.values()),
             "est_hi_factor": float(self.est_hi_factor),
@@ -345,6 +511,14 @@ class StreamCollector:
                 )
             ),
             "capped_stages": [int(s) for s in capped],
+            "no_data_stages": sorted(int(s) for s in self.no_data),
+            "samples_per_game": {int(s): round(float(v), 3) for s, v in self.samples_s.items()},
+            "wall_sec_per_game": {int(s): round(float(v), 3) for s, v in self.wall_s.items()},
+            "first_quota_at": {int(s): float(v) for s, v in self.first_quota_at.items()},
+            "last_settle_at": self.last_settle_at,
+            #: 只在**所有关**首次达配额时有定义；capped/no_data 轮为 None（不混进中位数）。
+            "t_fill_sec": t_fill_sec,
+            "t_drain_sec": t_drain_sec,
         }
 
     def stage_stats(self) -> dict:
@@ -374,7 +548,9 @@ class StreamCollector:
                     "games": int(self.games.get(s, 0)),
                     # `est_s` = 计划钉的本关估计（与训练侧分母同源）；`cap_games` = 同一份硬顶。
                     "est_s": int(self.ests.get(s, 0)),
-                    "cap_games": int(self._plan_caps.get(s, 0)),
+                    "cap_games": int(
+                        self._alpha_cap(s) if self.sched == "alpha" else self._plan_caps.get(s, 0)
+                    ),
                 }
                 for s in self.stages
             },

@@ -19,6 +19,11 @@ export interface FrameAdapter {
   cells(): CellRef[]
   outputText(cell: CellRef): string
   sourceText(cell: CellRef): string
+  /**
+   * 把整段源码写回编辑器（hub URL 同步用）。实现只改「旧 → 新」的最小差异区间，
+   * 写完必须回读校验；编辑器没接受 ⇒ 带原因失败（绝不假装成功）。
+   */
+  replaceCellSource(cell: CellRef, source: string): Promise<CmdResult>
   /** 跳到并聚焦代码里的配置行（CFG）；标记按顺序匹配，找不到必须带原因。 */
   focusConfig(markers: string[]): Promise<CmdResult>
   /** 当前选中/激活的 cell（没有 ⇒ null）；命令只作用于 active cell。 */

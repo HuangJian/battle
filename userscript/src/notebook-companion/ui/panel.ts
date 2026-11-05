@@ -48,6 +48,8 @@ export interface Panel {
   setStatus(text: string, tone?: 'ok' | 'warn' | 'error'): void
   /** 本页写的是哪一份日志（`notebook:<session>`；多开页签时只有它能把页面和日志对上）。 */
   setSession(text: string): void
+  /** 页首 `CFG['hub_url']` 同步结果（成功 / 未改 / 失败原因）；空串 = 不显示。 */
+  setHubSync(text: string, tone?: 'ok' | 'warn' | 'error'): void
   /** 定时任务列表（存储与调度在 app/scheduler，面板只负责上屏）。 */
   setSchedule(rows: PanelScheduleRow[]): void
   /** 本次页面内的执行历史（内存；刷新即清空）。 */
@@ -194,6 +196,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 button[data-act="saveAndClear"] { background: #1e5a3a; border-color: #2f8a58; flex-basis: 100px; }
 .sess { margin: 0 0 6px; color: #7f93ad; font-size: 10px; line-height: 1.3; word-break: break-all; }
 .sess:empty { display: none; }
+.hub { margin: 0 0 6px; color: #9fb3cc; font-size: 10px; line-height: 1.35; word-break: break-all; }
+.hub:empty { display: none; }
+.hub[data-tone="ok"] { color: #7fd6a2; }
+.hub[data-tone="warn"] { color: #e6c36a; }
+.hub[data-tone="error"] { color: #ff8d8d; }
 .status { margin-top: 6px; min-height: 16px; color: #9fb3cc; word-break: break-all; }
 .status[data-tone="ok"] { color: #7fd6a2; }
 .status[data-tone="warn"] { color: #e6c36a; }
@@ -255,6 +262,7 @@ export function mountPanel(
     `<div class="hd" data-drag title="拖动移动面板"><span class="grip">⠿</span>` +
     `<span class="title">Notebook Companion</span><span class="hint">拖动</span></div>` +
     `<div class="sess" data-sess></div>` +
+    `<div class="hub" data-hub></div>` +
     GROUPS.map(
       (g) =>
         `<div class="group">${g.label ? `<div class="glabel">${g.label}</div>` : ''}<div class="row">${g.buttons
@@ -289,6 +297,7 @@ export function mountPanel(
   const handle = shadow.querySelector('[data-drag]') as HTMLElement
   const status = shadow.querySelector('.status') as HTMLElement
   const sess = shadow.querySelector('[data-sess]') as HTMLElement
+  const hub = shadow.querySelector('[data-hub]') as HTMLElement
   const tzEl = shadow.querySelector('[data-tz]') as HTMLElement
   const schedAt = shadow.querySelector('[data-sched="at"]') as HTMLInputElement
   const schedAction = shadow.querySelector('[data-sched="action"]') as HTMLSelectElement
@@ -430,6 +439,11 @@ export function mountPanel(
   function setSession(text: string): void {
     sess.textContent = text ? `日志 ${text}` : ''
     sess.title = text
+  }
+
+  function setHubSync(text: string, tone: 'ok' | 'warn' | 'error' = 'ok'): void {
+    hub.textContent = text
+    hub.setAttribute('data-tone', tone)
   }
 
   function setSchedule(rows: PanelScheduleRow[]): void {
@@ -577,6 +591,7 @@ export function mountPanel(
     host,
     setStatus,
     setSession,
+    setHubSync,
     setSchedule,
     setHistory,
     countdown,
