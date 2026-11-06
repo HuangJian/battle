@@ -1,0 +1,195 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-06 09:00 回写；**跑 58 / 300 轮**，11-05 15:28 人工停课）──────────
+//   **判决：与主腿同崩，且早 3 轮 ⇒ idle 封顶不是必需的（但也不是充分的）。**
+//
+//   in-loop eval（全 35 关 × 20 seed = 700 局/点）：
+//     it | win | kills | pu/局 | ticks 中位 | idle/ticks
+//      0 | .547 | 14.27 | 4.02 | 13992 | .690
+//      5 | **.377** | 14.79 | 3.94 | 14766 | .501   ← 已经低于主腿同期 .446
+//     10 | .289 | 13.31 | 3.66 | 15726 | .516
+//     20 | .139 |  9.97 | 2.53 | 14679 | .598
+//     30 | .043 |  7.65 | 1.82 | 15952 | .642
+//     40 | .051 |  7.54 | 1.57 | 19234 | .628
+//     50 | .001 |  5.31 | 1.08 | 14181 | .606
+//     55 | .009 |  5.03 | 1.23 | 13486 | .641
+//   `gameover` 率 33.4%（it0）→ 91.1%（it55）；训练内求死率 it5 **44.9%** → it8 55.1% → it58 93.1%。
+//   训练侧：kl it1 **1.453** → 末 .205；entropy **1.017** → .160；value 84.8 → 66.5；
+//   mean_ret +6.2 → **−1.5**。
+//
+//   **T_\***：T_kl(连续 2 轮 >0.1) **it2(.664)** · T_death(>40%) **it5(.449)** ·
+//   T_ent(<0.40) **it5(.340)** · T_win(<.40) **it8(.388)**。
+//
+//   **与主腿 `z8-steady` 并排（本课存在的唯一目的）**：
+//     | 指标 | 主腿（idle cap .002/20000） | 本腿（v1 激励 .006 无 cap） |
+//     |---|---|---|
+//     | T_death | it8 | **it5** |
+//     | T_ent | it7 | it5 |
+//     | 末点 win | .000 | .009 |
+//     | 末点 kills | **1.17** | 5.03 |
+//     | 末点 idle/ticks | **.933** | .641 |
+//     | 末点 ticks 中位 | 8276 | 13486 |
+//   ⇒ **判决表第 3 行：激励只延寿不治病。** 但方向"反了一半"：本腿在 kills 与 idle 上
+//     **都优于主腿**，只是崩得更早 ⇒ **wIdle .002 这个"温柔剂量"反而放大了"站着挨打"**
+//     （罚得太轻 ⇒ 站着不动的机会成本下降）。
+//   ⚠ 不能写成"idle 封顶有害"：两腿都崩到 0，末点差异混着崩盘路径；能确定的只有
+//     **它不是救命的那一项**，且**"降剂量"不是正确的修法方向**。
+//
+//   第四根因同主腿（起点 `bc-v6-train` 不合格，熵 0.9123 / 1/4 局冻死），不重复。
+//   四课汇总见 `reports/z8-close-20261106.md`。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z8-steady-ctrl —— z8-steady 的**单变量对照腿**（2026-11-05 12:20 立项 →
+// **2026-11-06 结课**）
+//
+// 它存在的唯一目的：回答「**idle 封顶到底是不是必需的**」。
+// 与主腿 `z8-steady` 的差异**只有一处**：激励函数回 v1 原样（`- wIdle*idleTicks`
+// **不封顶**、`wIdle .006`）；训练侧（kl_coef .2 / lr 5e-5 / kickstart .92）**完全相同**。
+//
+// ══ 1. 为什么是这个方向（而不是「只改激励」）══════════════════════════════════
+//   两个方向的检验都有用，但决策价值不同：
+//     · 「只改激励」（训练侧回 v1）测的是「训练侧值不值得修」——答案其实已经知道了：
+//       v1 it1 的 kl=2.174 与激励无关，不修必崩（`reports/z8-noidle-hurry-analysis-20261105.md`）。
+//     · 本腿（训练侧修好、激励回 v1）测的是「**激励改动是否值得**」——这才是真问题。
+//       若本腿也不崩 ⇒ 只靠 kl/lr/kickstart 就够，idle 封顶可以不做（省一处任务侧手感改动）；
+//       若本腿崩而主腿不崩 ⇒ idle 封顶是主因，保留。
+//   ⇒ 单变量落在**激励**上，因为训练侧那三项只是旋钮，idle 罚才是会改变玩法手感的那个。
+//
+// ══ 2. 与主腿的逐字差异（必须只有这一处）══════════════════════════════════════
+//     formula:  `- wIdle*min(idleTicks, idleCap)`   →  `- wIdle*idleTicks`
+//     params:   `wIdle .002` + `idleCap 20000`       →  `wIdle .006`（无 idleCap 键）
+//     out/traj/backup: 全部独立目录（AGENTS §15.5，不可与主腿混算）
+//   其余（bc / 关集 / rotation / paired_rotate_seed / lr / kl_coef / kickstart 三键 /
+//   terminal / target_transitions / eval 面板 / mb / gamma / lam）**逐字相同**。
+//   `tmp/z8-check-parallel.py` 会把这条断言写成硬检查。
+//
+// ══ 3. 判据：不看「谁最后赢」，看「谁先坏」════════════════════════════════════
+//   两腿都会在早期给出信号，等 it300 再比 win 是浪费。四个先验指标，按出现先后排：
+//
+//   ① **求死率** `lives_exhausted / 总局数`（训练内，每轮 rollout 直接给）
+//        v1 实测：it1 = 5%，it5 = 45%，it10 = **96%**。这是最灵敏的指纹。
+//        判据：**首次 > 40% 的轮次**记 `T_death(腿)`。
+//   ② **kl 首次 > 0.1**（连续两轮）记 `T_kl`
+//   ③ **entropy 首次 < 0.40** 记 `T_ent`
+//   ④ **训练内 win 首次 < .40**（起点 11 关 .769）记 `T_win`
+//
+//   ★ 判决表（`T` 越小 = 坏得越早）：
+//
+//   | 主腿 A          | 对照腿 B        | 结论 |
+//   |-----------------|-----------------|------|
+//   | 不坏（60 轮 win ≥ .50） | 坏           | **idle 封顶是必需的** ⇒ 保留，进 P2 |
+//   | 不坏            | 不坏            | **idle 封顶不必要** ⇒ 只用训练侧修正即可，撤回激励改动 |
+//   | 坏（晚于 B）     | 坏（早）        | 激励只延寿不治病 ⇒ 停，重查第四根因 |
+//   | 坏             | 坏（同时）      | 三根因之外还有第四个 ⇒ 停，先查 BC 起点是否可用 |
+//   | 坏（早于 B）     | 坏（晚）        | **假设被推翻**：说明 idle 封顶反而有害 ⇒ 立即停，重读 |
+//
+//   ⚠ 配对 McNemar 只在**两腿都还没坏**的轮次里有效（kl 漂移后策略分布不同，
+//     win 不可配对）。所以本腿的价值在 `T_*` 这四个时间点，不在最终 win 差。
+//
+// ══ 4. 允许被熔断停掉——停腿时间本身就是数据 ══════════════════════════════════
+//   `breakers_off: false`。若本腿 kl 冲过 0.075 被 F4 ABORT，**不要重启**
+//   （v1 就是重启 + 关熔断把 14 轮烧掉的）。记录 `T_abort` 即可，那是本腿最强的读数。
+//
+// ══ 5. 资源与共用 ══════════════════════════════════════════════════════════════
+//   两腿并行 = 2×32768 transitions/轮。v1 两腿并行时每轮 3–5 分钟（含 eval），
+//   60 轮判据点约 3–5 小时。`paired_rotate_seed: 20261105` 相同 ⇒ (stage, seed) 逐轮一致，
+//   eval 面板 `2000-2034 × 20` 也相同 ⇒ 前 10 轮可直接配对。
+//
+//   起点 `bc` = ep18（与主腿同）。**训练启动由用户手工执行，agent 不起腿。**
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z8-steady-ctrl",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "pinned",
+  "rotation_per_it": 0,
+  "rotation_pinned": "2002,2014-2015,2021-2022,2025-2029,2032",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 36000,
+
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWalk*min(cellsVisited, walkCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // ── 本腿唯一差异：**不封顶**（v1 原样）────────────────────────────
+      // 起点 timeout 局 idle 28944 × .006 = −174 ⇒ 天平 Δret = **−22.0**（学送死）
+      "- wIdle*idleTicks",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wPickup": 6.0,
+      "pickupCap": 9.0,
+      "wWalk": 0.8,
+      "walkCap": 260.0,
+      "wBrick": 0.5,
+      "brickCap": 12.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 800.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      // v1 原值，且**没有 idleCap 键**（对照腿不能有）
+      "wIdle": 0.006,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  // 训练侧与主腿**逐字相同**（本腿的差异只在激励）
+  "kickstart_ref": true,
+  "kickstart_init": 1.0,
+  "kickstart_decay": 0.92,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00005,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.2,
+      "lr": 0.00005,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261105,
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/z8-steady-ctrl/weights.json",
+  "traj": "tmp/z8-steady-ctrl",
+  "breakers_off": true,
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z8-steady-ctrl",
+  "backup_prefix": "z8-steady-ctrl",
+
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

@@ -1,0 +1,202 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ⛔ **整条腿砍掉（2026-11-05 12:20，用户拍板）——不要再开。**
+//
+// ── 结课报告（2026-11-06 09:00 回写；**跑 20 / 300 轮**，11-05 12:04 人工停课）──────
+//   **判决：失败，且崩得比对照腿 `z8-noidle` 更快。**
+//
+//   in-loop eval（全 35 关 × 20 seed = 700 局/点）：
+//     it | win | kills | pu/局 | ticks 中位
+//      0 | .547 | 14.27 | 4.02 | 13992
+//      5 | **.166** | 10.80 | 2.90 | 14738   ← noidle 同期 .346
+//     10 | .026 | 7.31 | 1.85 | 12488
+//     20 | **.000** | 2.75 | 0.60 | 10504
+//   `gameover` 率 33.4% → **93.4%**（it20）；训练内求死率 it1 6.5% → it4 **50.0%** → it10 91.7%。
+//   训练侧：kl it1 **2.150** → it20 .286；entropy .884 → .278；mean_ret +6.2 → +1.1。
+//
+//   **T_\***：T_kl(连续 2 轮 >0.1) **it2** · T_death(>40%) **it4** · T_ent(<0.40) **it4** ·
+//   T_win(<.40) **it6**。⇒ 四项全部**早于** `z8-noidle`（it2/it5/it3/it7）。
+//
+//   根因（两条，11-05 分析已定）：
+//     ① `wSlow` 按**绝对拍数**加税、对未赢局也生效 ⇒ 放大"快速送死"的梯度
+//        （Δret(timeout−gameover) 从 −22 拉到 **−78**，坍缩后 **−137**）；
+//     ② `wFast` 在起点只有 **2.1%** 局能触发（13/610）⇒ 全腿贡献恒 0，是"写了等于没写"。
+//   ⇒ **绝对拍数奖/税这类项，在"早死比拖长更短"的环境里天然反向**；要写必须先乘
+//     `where(clearTick>=0, …)`（z9-r4-fast 做了，但也没买到速度，见该课结课）。
+//
+//   后继 = **`z8-steady.jsonc`**（无耗时项；此前误写为 `z9-steady`）。四课汇总见
+//     `reports/z8-close-20261106.md`。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z8-hurry —— z8 系列 · 阶梯 P1 的**并行对照腿**（2026-11-05，**未开课**）
+//
+// 与 `z8-noidle.jsonc` 唯一差异 = 在它的激励函数上**再加两条耗时奖/税**。
+// 其余（起点 bc、关集、rotation、paired_rotate_seed、优化超参、eval 面板、
+// target_transitions、任务侧参数）逐字相同 ⇒ `(rotateSeed, it)` 种子流逐轮一致，
+// 两条腿同 (stage,seed) 可 **McNemar 配对比较**（用户 10:50 指定「并行课程」）。
+//
+// 用户口径：**<7000 ticks 过关有奖 · 7000~12000 不奖不罚 · >12000 加税**。
+//
+// ══ 1. 耗时项设计（Φ 持有值、r = Φ[i+1]−Φ[i] 逐行差分）════════════════════════
+//   `+ wFast*where(clearTick>=0, max(0, fastTicks - clearTick)/fastWindow, 0)`
+//   `− wSlow*max(0, ticks - slowTicks)/slowWindow`
+//
+//   · **奖用 `clearTick`**（METRICS idx30 = 敌人首次全灭的拍数，哨兵 −1 = 未清场）：
+//     `where(clearTick>=0, …)` 保证只有**过关局**才可能拿奖；该列在清场那一拍
+//     从 −1 跳成常数 ⇒ Φ 一次性跳变、r 只在那一拍给奖，不是每 tick 发钱。
+//     clearTick=5000 ⇒ +8×(7000−5000)/1000 = **+16**；clearTick≥7000 ⇒ 0。
+//   · **税用 `ticks`**（累计拍数）：`max(0, ticks−12000)` 从 12000 拍起线性增长
+//     ⇒ r 每 tick −wSlow/slowWindow = **−0.003**，拖越久扣越多，**所有局**适用
+//     （含未过关）。ticks=16000 ⇒ Φ 上 −12；ticks=36000 ⇒ −72。
+//   · **中间带 7000–12000 两项皆零**：`max(0,7000−clearTick)=0` 且
+//     `max(0,ticks−12000)=0` ⇒ 不奖不罚。
+//     ⚠ 口径：**「不奖不罚」只指新增的这两条耗时项**，noidle 的基础价目表
+//       （wKill/wPickup/wWalk/wIdle/pace/…）照常生效，不是说整局奖励为 0。
+//   · 与 noidle 已有的 `pace` 项不重复：pace 是**相对杀敌节奏**（超 kills×800 拍罚），
+//     本腿这两项是**绝对拍数分档**。两条腿都保留 pace ⇒ 差异可归因。
+//
+//   起点（ep18）在这 11 关 610 局的耗时分布：
+//     <7000   :  13 局 ( 2.1%)，其中 7 胜 ⇒ **快奖是稀有目标，正是要练出来的能力**
+//     7000–12000: 162 局 (26.6%)，胜率 0.932 ⇒ 高效区，不动它
+//     >12000  : 435 局 (71.3%)，胜率 0.715 ⇒ 税覆盖七成局
+//     全场 ticks 中位 15474 / 胜局 14235。
+//
+// ══ 2. 标定与量纲 ═════════════════════════════════════════════════════════════
+//   沿用 noidle 的全部税率（见它 §2 的逐项表，Φ(过程) 净 +364.3）。
+//   新增两项在起点 610 局上：快奖 ≈ 0（<7000 且清场仅 7 局）、慢税 ≈ −22。
+//   自检逐局代回（`tmp/z8-check-reward.txt`）：
+//     Φ 全关 +350.0 / 赢局 +444.9 / 输局 +34.5（noidle 是 +372.5 / +458.7 / +86.0）；
+//     含 terminal 的 return 赢局 +444.8 / **输局 −10.0**（noidle 输局 +41.5）。
+//   ⇒ 输局 return 被压到略负，但赢局仍 +445 主导，不是 z7 那种 Φ≈−81.6 的全局反向。
+//     这是本腿相对 noidle 的主要风险，开课首轮必读 value loss / KL。
+//   参数：`wFast 8.0 / fastTicks 7000 / fastWindow 1000`、
+//         `wSlow 3.0 / slowTicks 12000 / slowWindow 1000`。
+//   自检 `tmp/z8-check-reward.py`（两门课一起验）：片段符号 / 中间带零 /
+//   Φ 量纲 / terminal 4 项 / target_transitions 整除 / 全 35 个 stage_json 非空。
+//
+// ══ 3. 关集与 eval（与 noidle 逐字相同）════════════════════════════════════════
+//   **不用 `stage_select`**：它会把课程 stages 裁成 11 个并重编号，导致
+//   `stage_json(2011..2034)` 返回空串 ⇒ in-loop 全 35 关 eval 崩
+//   （`course_spec.py:1058-1067` / `worker/config.py:475`）。
+//   ⇒ `rotation_mode "pinned"` + 11 个**原关号** + `per_it 0`，课程关集保持 35 关。
+//   `eval_stages "2000-2034"` × 20 seed = 700 局（趋势哨兵，前缀子集不判腿）。
+//   **判决**仍走外部全 35 关满池（seed 不重叠）：
+//       bun tools/sim/eval-course-ckpt.ts \
+//         --course nn-training/levels/classic35-safe-base.jsonc \
+//         --weights z8h=nn-training/weights/z8-hurry/weights.json \
+//         --games 1750 --seed0 2000000007 --out tmp/z8-hurry-full35.jsonl
+//   除 win 外，本腿额外看**耗时分档迁移**（<7000 局数、ticks 中位）；
+//   与 noidle 的配对差用同 (stage,seed) 的 McNemar，不相减混合面板。
+//
+// ══ 4. 开课 ══════════════════════════════════════════════════════════════════
+//   任务侧一个字不动（3 命 / 20 敌 / 36000 拍 / level 0），关卡 `classic35-safe-base`。
+//   起点 `bc` = 交付权重 ep18；`out/traj/backup` 独立 ⇒ 新实验（AGENTS §15.5）。
+//   **训练启动由用户手工执行，agent 不起腿。**
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z8-hurry",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "pinned",
+  "rotation_per_it": 0,
+  "rotation_pinned": "2002,2014-2015,2021-2022,2025-2029,2032",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 36000,
+
+  "reward": {
+    "formula": [
+      // 战斗与拾取：保持 ep18 已有的能力
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 跑起来 + 处理障碍物
+      "+ wWalk*min(cellsVisited, walkCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 价格：不许为快而送死
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      // 相对杀敌节奏税（两腿共有）
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 罚长停：线性不封顶（两腿共有）
+      "- wIdle*idleTicks",
+      "- wThreat*min(threatTicks, threatCap)",
+      // ── 本腿独有：绝对耗时奖/税 ─────────────────────────────────────────
+      // <7000 拍清场有奖（clearTick 只在清场那拍跳变 ⇒ 一次性结算）
+      "+ wFast*where(clearTick>=0, max(0, fastTicks - clearTick)/fastWindow, 0)",
+      // >12000 拍起每 tick 加税（ticks 累计 ⇒ 持续压力）
+      "- wSlow*max(0, ticks - slowTicks)/slowWindow",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wPickup": 6.0,
+      "pickupCap": 9.0,
+      "wWalk": 0.8,
+      "walkCap": 260.0,
+      "wBrick": 0.5,
+      "brickCap": 12.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 800.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wIdle": 0.006,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+      // 耗时分档：<7000 奖 / 7000–12000 零 / >12000 税
+      "wFast": 8.0,
+      "fastTicks": 7000.0,
+      "fastWindow": 1000.0,
+      "wSlow": 3.0,
+      "slowTicks": 12000.0,
+      "slowWindow": 1000.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261105,
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/z8-hurry/weights.json",
+  "traj": "tmp/z8-hurry",
+  "breakers_off": true,
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z8-hurry",
+  "backup_prefix": "z8-hurry",
+
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

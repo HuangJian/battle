@@ -1,0 +1,230 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-06 09:20 回写；**跑 134 / 400 轮**，11-05 19:14 停）──────────────
+//   **判决：失败。独有判据（赢局 ticks ≤3100）零位移，主判据退化 6.5pp。整条腿砍掉。**
+//
+//   停课状态：最后一条日志是 `job_pending`（it135，无 `job_completed`），
+//   `training-enabled.txt` 已移除 ⇒ **人工停课**（`error` 行 0）。
+//
+//   **独有判据（赢局 ticks 中位 ≤ 3100）—— 零位移**：
+//     it0 3453 · 前半（it≤35）3322–3550 · 末点 it130 **3445** · 目标 **≤3100**。
+//     10 个评估点全部落在 **3254–3786**，一次都没接近 3100。`wFast 20`（占 Φ 8%）一分钱没买到。
+//
+//   **主判据（win）—— 退化**：
+//     | 窗口 | 局数 | win | 2000 | 2001 | 2002 | 2003 |
+//     | it≤35 | 640 | **.620** | .82 | .59 | .31 | .76 |
+//     | it≥100 | 560 | **.555** | .84 | .52 | .21 | **.66** |
+//     | Δ | — | **−6.5pp** | +2 | −7 | −10 | **−10 pp** |
+//     斜率 **−0.066 pp/点**（27 点）—— 是主腿的 5 倍速退化。
+//   末点 it130（80 局）：win **.512** · 拾取率 .525 · 赢局 ticks **3445** · cells 66 ·
+//     dmg/局 288 · kills 5.62。
+//
+//   **训练侧**：kl p50 2.16e-3 · entropy .905 → **.931（还在升）** · value 180 → 238 ·
+//     mean_ret 48.1 → **69.5（+45%）** · 基毁率 .352 → .351。
+//     `mean_ret` 涨 45% 而 ticks 不动 ⇒ 钱涨在**清场之外**的项（拾取/承伤/威胁），与"更快"无关。
+//
+//   根因（三条）：
+//     ① **速度不是这套策略的可优化维度**：`wFast` 触发率 50%（<3500 拍），但 135 轮里
+//        最好的点是 3254（it35），随后回到 3450 带。20 分奖励（占 Φ 8%）+ lr 6e-5 推不动。
+//     ② **与主腿判据互斥**：捡一个 12 格外的道具 ≈ 384 拍，按 `wFast 20/1000` 折 **−7.68 分**
+//        （道具本身 8 分）。主腿要求拾取率 .70（必须捡远的），本腿罚"捡远的"
+//        ⇒ **两腿不可能同时达标**。
+//     ③ **长局关被系统性惩罚**：2003（赢局 p50 3565、idle 2092）**.76 → .66**、
+//        2002 .31 → .21 —— 这两个恰好是"赢了也要慢慢磨"的关。
+//
+//   归档对账：`nn-training/weights/z9-r4-fast/z9-r4-fast.it130.20261105-190835.json`
+//     sha256[:16] **`07f74822f9f111d9`** = eval it130 的 `wver` ✓。
+//
+//   ⛔ **整条腿砍掉，与 `z8-hurry` 同处理。** 耗时奖/税在 8 敌关这套策略上**没有任何可测效应**，
+//     且把 win 拖低 6.5pp。文件保留作对照档案。
+//   全文：`reports/z9-r4-close-20261106.md`。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z9-r4-fast —— z9-r4 的**并行耗时腿**（2026-11-05 16:00 立项 →
+// **2026-11-06 结课，失败·砍腿**）
+//
+// 目标：在 z9-r4（捡道具 + 保胜率）之上，把「清场耗时长」压下来。
+// 与主腿 `z9-r4` 的差异**只有奖励末尾两行 + 5 个参数**，其余逐字相同。
+//
+// ══ 1. 为什么这次不能照搬 z8-hurry（先说结论：慢税绝对不能按 `ticks` 计）══════
+//   z8-hurry 的死法：`- wSlow*max(0, ticks - 12000)/1000` 对**所有局**生效 ⇒
+//   在「未赢」分支上也能省税 ⇒ 放大「快速送死」的梯度（差价 22 → 78 → 137 分），
+//   16 轮 win .547 → 0。详见 `reports/z8-noidle-hurry-analysis-20261105.md`。
+//
+//   本课环境的实测（200 局探针，`tmp/z9-r4-probe/r4t155-200.jsonl.run/eval_log.jsonl`）：
+//
+//   | outcome | n | ticks p10 | 中位 | p90 | max |
+//   |---|---|---|---|---|---|
+//   | stage_clear | 105 | 2456 | **3492** | 4416 | 9265 |
+//   | gameover | 94 | 1610 | **2330** | 3629 | 6002 |
+//   | max_ticks | 1 | — | 12000 | — | 12000 |
+//
+//   ⇒ **gameover 比赢局短 1162 拍**。任何「按绝对拍数线性加税」的项，
+//     都是在给「早点死」发钱。这个环境里尤其致命：gameover 占 47%。
+//   ⇒ 而且本课 terminal 是 `timeout −50 / lives_exhausted −35`（差 15，沿 z2-r4 老定价），
+//     任何让 timeout 更贵的项都在加强「求死」梯度。
+//
+//   ★ 唯一安全的写法：**两项都乘 `where(clearTick >= 0, …, 0)`** ——
+//     未清场（含 gameover / timeout）一律 0 ⇒ 对「赢 vs 输」的相对梯度零影响。
+//
+// ══ 2. 分档（按赢局 ticks 分位定，不是拍脑袋）══════════════════════════════════
+//   赢局分位：p10 2456 / p25 2842 / **p50 3492** / p75 3792 / **p90 4572** / p95 5350
+//
+//     < 3500 拍清场  ⇒ 有奖（起点 50% 的赢局落在这边）
+//     3500–4500    ⇒ 不奖不罚（中间带，放过正常节奏）
+//     > 4500       ⇒ 加税（起点约 10% 的赢局）
+//
+//   `fastTicks 3500`（= 中位）⇒ 触发率 50%，梯度最强；
+//   `slowTicks 4500`（≈ p90）⇒ 只罚尾部，不碰主体。
+//
+// ══ 3. 剂量与量纲（硬闸：满量程必须 < 主奖励项）════════════════════════════════
+//   `+ wFast*where(clearTick>=0, max(0, fastTicks - clearTick)/fastWindow, 0)`
+//     wFast 20 / fastWindow 1000 ⇒ 2500 拍清场 **+20**，3492 拍 0，3500+ 0。
+//   `- min(slowCap, wSlow*where(clearTick>=0, max(0, clearTick - slowTicks)/slowWindow, 0))`
+//     wSlow 10 / slowWindow 1000 / slowCap **30** ⇒ 5500 拍 −10、6000 拍 −15、
+//     7500+ 封顶 **−30**（= 0.5 × wWin 60，不压倒胜负）。
+//
+//   对照赢局 Φ 的量级（8 杀 120 + 命中 ~45 + wWin 60 + 拾取 2.15×8=17 ≈ **+240**）：
+//     快奖最多 +20（8%）、慢税最多 −30（12.5%）⇒ 都是塑形，不是主导。
+//   ⚠ 若实跑出现「为快而送命」（win 掉 >3pp），先砍 wFast 20→10，再砍 wSlow 10→5；
+//     **不要**去动 terminal（那是主腿的定价，两腿必须一致）。
+//
+// ══ 4. 与主腿 z9-r4 的差异（必须只有这一处）═══════════════════════════════════
+//   formula：+2 行（快奖 / 慢税），其余逐字相同
+//   params： + wFast / fastTicks / fastWindow / wSlow / slowTicks / slowWindow / slowCap
+//   name / out / traj / backup：独立（AGENTS §15.5）
+//   其余（bc / kickstart 三键 / kl_coef / lr / target_transitions / 关集 / eval 面板 /
+//   terminal / wPickup / wNear / wApproach）**逐字相同** ⇒ 两腿可配对。
+//
+// ══ 5. 判据（主腿的判据照旧，本腿加一条耗时）══════════════════════════════════
+//   共用（与 z9-r4 相同）：win ≥ .58（起点 .5300，掉到 .50 停）· 拾取率 ≥ .70 ·
+//     2002 关 ≥ .30（起点 .160）。
+//   本腿独有：**赢局 ticks 中位 ≤ 3100**（起点 3492，目标 −11%）·
+//     `<3500 的赢局占比` 从 .509 升到 **≥ .65** ·
+//     同时 win 不得比主腿低 >3pp（快不能拿胜率换）。
+//   ⚠ 前缀子集禁令：in-loop eval（2000-2003 × 20 = 80 局）只作趋势哨兵；
+//     判腿用外部满池 400 局（seed 860001+，与探针同面板）。
+//
+// ══ 6. 开课 ══════════════════════════════════════════════════════════════════
+//   控制台开课；**训练启动由用户手工执行，agent 不起腿。**
+//   与 z9-r4 同时开 ⇒ 400 局面板逐局配对（同 seed），可直接 McNemar。
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z9-r4-fast",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 8,
+  "lives": 3,
+  "max_ticks": 12000,
+
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入：拾取终点价抬到半杀（4.0 → 8.0）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 拾取塑形：远区线性（选近路）+ 近区陡增（最后三格与风险同价）
+      // 哨兵 −1 = 无存活道具 ⇒ 必须归零
+      // ⚠ 符号：远区 `min(d,cap)` 越远越大 ⇒ 减号；近区 `max(0,R−d)` 越近越大 ⇒ **加号**
+      "- wApproach*where(pickupDist < 0, 0, min(pickupDist, approachCap))",
+      "+ wNear*where(pickupDist < 0, 0, max(0, nearRadius - pickupDist))",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+      // ── 本腿独有：耗时项（**必须** where(clearTick>=0) 归零）──────────────
+      // 理由见 §1：gameover 比赢局短 1162 拍，任何对未赢局生效的拍数项都在奖励早死。
+      // <3500 拍清场有奖：2500 拍 ⇒ +20，3492 ⇒ 0
+      "+ wFast*where(clearTick>=0, max(0, fastTicks - clearTick)/fastWindow, 0)",
+      // >4500 拍清场加税，封顶 −30（< 0.5×wWin）：5500 ⇒ −10，6000 ⇒ −15
+      "- min(slowCap, wSlow*where(clearTick>=0, max(0, clearTick - slowTicks)/slowWindow, 0))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 1.0,
+      "walkCap": 20.0,
+      "wPickup": 8.0,
+      "pickupCap": 6.0,
+      "wApproach": 0.05,
+      "approachCap": 12.0,
+      "wNear": 0.7,
+      "nearRadius": 3.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+      // 耗时分档：<3500 奖 / 3500–4500 零 / >4500 税（cap 30）
+      "wFast": 20.0,
+      "fastTicks": 3500.0,
+      "fastWindow": 1000.0,
+      "wSlow": 10.0,
+      "slowTicks": 4500.0,
+      "slowWindow": 1000.0,
+      "slowCap": 30.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r4threat/z2-r4threat.it155.s7.json",
+  "kickstart_ref": true,
+  "kickstart_init": 1.0,
+  "kickstart_decay": 0.92,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 400,
+  "max_hours": 24,
+  "lr": 0.00006,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00006,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261028,
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/z9-r4-fast/weights.json",
+  "traj": "tmp/z9-r4-fast",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z9-r4-fast",
+  "backup_prefix": "z9-r4-fast",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
