@@ -1,0 +1,159 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-07 08:27 回写；**跑 200 / 500 轮**，08:17:30 人工暂停）────────
+//   **判决：证伪。「承伤成本是捡道具的主导成本」不成立。**
+//   全文 → `reports/z11-close-20261107.md`；读数 → `tmp/z11-check.txt`
+//
+//   停课状态：`run_complete` 0 / `error` 0 / 08:17:30 写入 paused ⇒ 人工暂停，不是崩溃。
+//   面板：A 层满池 400 局/点（同上；立项块写的 80 局作废）。
+//   配对 vs `z11-null`（16400 键）：win **−2.84pp**（McNemar 2267:2733，χ²=43.4，**p=4.4e−11**）；
+//     拾取率 **−0.42pp**（.568 vs .573）。
+//   ⚠ 前后半 +6.34pp 是**分段假象**：前半 .173 是改价后的适应期低谷，后半 .236 只是回到
+//     null 水平（.230），不是爬升；斜率 +0.0423 是把「低谷回升」当趋势。
+//   成本侧证据：`dmg` 未降（413→424 vs null 420→431）⇒ 降 `wDmg` 并没让策略更敢挨打，
+//     因为它本来就不是靠承伤换位置。
+//   训练侧：kl 中位 3.46e-3（null 3.51e-3）⇒ 改价不影响优化器。
+//   判决意义：`reports/z5-pick-pickup-postmortem-20261103.md:57-79` 的净收益算术
+//     （+8~10 −8.6 −1.7 ≈ −0.3~−2.3）**在 z10 面板上不成立**。价格侧两个方向
+//     （抬收益 / 拆成本）都已试完，**不要再开纯配置价格腿**。
+// 课程 z11-cost —— 只降「绕路成本」：把捡道具的净收益从负翻正（2026-11-06 立项）
+//
+// 0. 一句话：相对共同底座**单变量 `wDmg 0.12 → 0.025`**，其余逐字不变。八次「抬终点价」
+//    全部证伪，但从来没有人动过算术里的**成本侧**；本腿直接改那个主导项。
+//    同时修掉 z10 自身违反硬闸 #6 的量纲超标。
+//
+// 1. 立项依据（两条独立、都有读数）
+//    · `reports/z5-pick-pickup-postmortem-20261103.md:57-79`（34 局 31935 决策步）：
+//      一枚道具收益 +8~10 分；12 步路程承伤 **−8.6**（wDmg .12）+ 机会成本 −1.7
+//      ⇒ 净 **−0.3~−2.3**。「不捡」是当前价格下的最优解；`wApproach 0.02×6=0.12` 而
+//      挨一发 12 分 = 靠近 100 格的价，差两个数量级。
+//    · 本轮实测 z10 it180（80 局）`playerDamageTaken` 中位 408 / p99=max **1092**
+//      ⇒ `wDmg 0.12` 满量程 **131 分**，是 `0.5×wWin=30` 的 **4.4 倍**（违反硬闸 #6）。
+//      改 0.025 ⇒ 满量程 **27.3 < 30 ✓**，且 12 步承伤 −8.6→−1.8
+//      ⇒ 净 **+4.5~+6.5 转正**。这是唯一一个「既修硬闸又翻转行为算术」的零代码旋钮。
+//
+// 2. it0 基线（⚠ 今晚未跑新探针，引用盘上现有读数）
+//    · 起点 `z10-maze.it233`（sha16 46489ad5c065c375），schema 与 z2 起点逐字段一致。
+//    · 最近 eval it230：win .188 · pick .588 · dmg 418.4 · base .662（80 局 in-loop）。
+//    · z10 后半 1280 局：win .235 · pick .581 · base .618。
+//    ⇒ 对照腿 `z11-null` 同起点同 seed 流，本腿**只与它配对**，不与 z10 原账本相减。
+//
+// 3. 变量账：`reward.params.wDmg = 0.025`（唯一）。formula / 其余 17 项 params / terminal /
+//    训练侧 / 起点 / 预算 / 面板逐字 = z11-null。任务侧（lives 3 / 20 敌 / classic35 4 关 /
+//    max_ticks 20000）一个字未动（AGENTS §0.2）。
+//
+// 4. 判据与止损
+//    · 主：拾取率（collected/spawned，in-loop 同面板）vs `z11-null` **配对**，
+//      目标 Δ ≥ +5pp 且方向持续（≥20 个评估点）；副：主动拾取率读数、win、cellsVisited。
+//    · 护栏（放松承伤的代价）：`playerDamageTaken` 升幅 **≤25%**、`playerDeaths` 不升、
+//      `win` 不低于 null 腿 −3pp、`entropy ≥.30`、`kl ∈ [2e-3,1e-2]`。
+//    · 止损：护栏任一条破，或拾取率反向 ≥3pp，或 error 行出现 ⇒ 停腿。
+//    · **定腿另跑外部满池 400 局（860001+）**；in-loop 20 seed 前缀子集不得单独定腿。
+//
+// 5. 已知局限（必须随读数引用）
+//    · 拾取率分母含约 21%「同拍生成即捡」白送道具，仪表未修 ⇒ 只能看**相对 Δ**，不能看绝对值。
+//    · wDmg 降 4.8 倍可能把躲避行为一起抹掉 ⇒ 上面四条护栏是硬止损，不是装饰。
+//    · 基毁（后半 .618）仍是主失败模式，本腿不碰 ⇒ win 大幅改善不是本腿目标。
+//    · 净收益算术来自 z5 的 35 关钢基场，搬到 z10 的 4 关常规图是**外推**，未在本面板重算。
+//
+// 6. 预算：500 it / 36h。eval_every 5、80 局/点、paired_rotate_seed 20261106（与 null 同）。
+//
+// ── 开工前置 ── bc 在盘 / `load_course` 过 / dashboard JSONC 过；
+//    开训 30 秒 `grep -h "hub=" tmp/z11-cost/training-loop.log | tail -1` 核对隧道名。
+// ── 诊断工具 ── `tmp/z10-close.py` · `tmp/z10-pick180/analyze.py` · `tmp/z5-final.txt` 算术表
+// ── 结算节（结课时回填到本文件头 + `reports/z11-close-<YYYYMMDD>.md`）──────────
+//    §停课状态 §与 null 的配对表 §四条护栏逐条 §训练侧四指标 §归档 sha16 §根因与后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z11-cost",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.025,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 36,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z11-cost/weights.json",
+  "traj": "tmp/z11-cost",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z11-cost",
+  "backup_prefix": "z11-cost",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-cost → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`：常驻 trainer 只准
+//     `trainer/run_rl_cluster.py --serve`（闸在 `worker/trainer_gate.py`），
+//     per-course run_rl 会被响亮拒绝（AGENTS §5 训练纪律）。
+//   ⚠ 不要复用 z10 的 out/traj/backup 目录；本课已全部换新（§15.5 禁跨改动续跑）。

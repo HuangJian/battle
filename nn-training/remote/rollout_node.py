@@ -90,6 +90,20 @@ OUTPUT_STATUS_EVERY_SEC = 600.0
 #: 目录布局 `.../bun/bun-v<版本>/bun-linux-x64.zip`，与官方 install.sh 下载的产物同名。
 BUN_MIRROR_DEFAULT = "https://registry.npmmirror.com/-/binary/bun"
 
+#: 各云平台**跨会话持久化**的根目录（按优先级探测，第一个存在者胜）。系统盘上的
+#: `~/.bun/bin`、`/usr/local/bin`、PATH 在 DSW 停机/换对话后会被重置 ⇒ 下载成功的二进制
+#: 落在这里才免得了下次重下（用户 2026-11-07：DSW 下 bun/cloudflared 反复下载甚至超时）。
+#:   DSW=/mnt/workspace（NAS，停机/释放仍在）· AI Studio=/home/aistudio ·
+#:   Kaggle=/kaggle/working · Colab=/content（运行时重连内保留）。
+PERSISTENT_ROOTS: tuple[str, ...] = (
+    "/mnt/workspace",
+    "/home/aistudio",
+    "/kaggle/working",
+    "/content",
+)
+#: 持久根下的缓存子目录名（bun / cloudflared 两个二进制平铺在里面）。
+BIN_CACHE_SUBDIR = ".battle-bin"
+
 RegisterFn = Callable[..., Any]
 
 
@@ -471,6 +485,63 @@ def _install_bun_mirror(cfg: dict, log: Callable[[str], None]) -> str:
         return ""
 
 
+def _bin_cache_dir(cfg: dict, *, isdir: Callable[[str], bool] | None = None) -> Path | None:
+    """持久二进制缓存目录：显式 `CFG.bin_cache_dir` / `BATTLE_BIN_CACHE` 优先；否则按
+    `PERSISTENT_ROOTS` 自动探测（第一个存在者）。都没有 ⇒ None（= 无缓存，行为同今天）。
+
+    零配置（用户 2026-11-07）：DSW/Kaggle/Colab/AI Studio 各自探测自己的持久根，不需要填开关；
+    显式口子留给持久盘挂在别处（如 /mnt/data）或想共用一份缓存的人。`isdir` 是单测注入点。
+    """
+    explicit = str(cfg.get("bin_cache_dir") or os.environ.get("BATTLE_BIN_CACHE") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    check = os.path.isdir if isdir is None else isdir
+    for root in PERSISTENT_ROOTS:
+        if check(root):
+            return Path(root) / BIN_CACHE_SUBDIR
+    return None
+
+
+def _cached_bin(cache: Path | None, name: str, log: Callable[[str], None]) -> str:
+    """缓存里**可执行且 `--version` 通过**的二进制路径；无缓存/坏档/架构不符 ⇒ ""。
+
+    校验靠真跑 `--version`：缓存可能是上个架构的机器留下的、或半截下载 ⇒ 不能只看存在就用。
+    """
+    if cache is None:
+        return ""
+    cand = cache / name
+    if not (cand.is_file() and os.access(cand, os.X_OK)):
+        return ""
+    if _sh([str(cand), "--version"], timeout=60).returncode != 0:
+        log(f"缓存 {name} 校验失败（坏档或架构不符）—— 忽略，重新下载")
+        return ""
+    log(f"复用持久缓存 {name}: {cand}（跳过下载）")
+    return str(cand)
+
+
+def _store_bin(cache: Path | None, name: str, src: str | Path, log: Callable[[str], None]) -> None:
+    """把下载/安装成功的二进制复制进持久缓存（best-effort，**绝不致命**）。
+
+    `src` 可能只是 PATH 上的名字（"bun"）⇒ 先 `shutil.which` 解析成真实文件。源就是缓存自身
+    （命中复用）时跳过，避免 SameFileError。写不进（只读盘/配额）只记一行，不影响本次运行。
+    """
+    if cache is None:
+        return
+    try:
+        real = Path(shutil.which(str(src)) or str(src))
+        if not real.is_file():
+            return
+        dest = cache / name
+        if real.resolve() == dest.resolve():
+            return
+        cache.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(real, dest)
+        dest.chmod(0o755)
+        log(f"已缓存 {name} → {dest}（下次对话直接复用）")
+    except OSError as e:
+        log(f"缓存 {name} 写入失败（{type(e).__name__}）—— 不影响本次运行")
+
+
 def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
     """找/装 bun（★ 公网安装在 ensure 之前发生；这里仍包 `_public_net()` 兜底）。
 
@@ -479,7 +550,12 @@ def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
     候选先用 256KB 小样**并行测速**，官方安装按实测快慢依次试。
     """
 
+    cache = _bin_cache_dir(cfg)
+
     def _find() -> str:
+        cached = _cached_bin(cache, "bun", log)
+        if cached:
+            return cached
         for cand in ("bun", "/root/.bun/bin/bun", str(Path.home() / ".bun" / "bin" / "bun")):
             if _sh([cand, "--version"], timeout=120).returncode == 0:
                 return cand
@@ -528,6 +604,7 @@ def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
             bun = _install_bun_mirror(cfg, log)
     if not bun:
         return ""
+    _store_bin(cache, "bun", bun, log)
     bin_dir = str(Path(bun).parent)
     if bin_dir and bin_dir != "." and bin_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
@@ -545,6 +622,9 @@ def _find_cloudflared(cfg: dict, log: Callable[[str], None]) -> str:
     """
     explicit = str(cfg.get("cloudflared_path") or "").strip()
     cands = [os.path.expanduser(explicit)] if explicit else []
+    cached = _cached_bin(_bin_cache_dir(cfg), "cloudflared", log)
+    if cached:
+        cands.append(cached)
     found = shutil.which("cloudflared")
     if found:
         cands.append(found)
@@ -637,6 +717,7 @@ def _start_cloudflared(
             if got != direct:
                 log(f"cloudflared 已从镜像下载: {got}")
             os.chmod(cf, 0o755)
+            _store_bin(_bin_cache_dir(cfg), "cloudflared", cf, log)
         else:
             log("cloudflared 安装失败（直连与镜像都不通）—— 可预置二进制后用 CFG.cloudflared_path 指路")
             return None

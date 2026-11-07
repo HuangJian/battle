@@ -1,0 +1,176 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-07 08:27 回写；**跑 5 / 500 轮**，08:25 后用户停课）──────────
+//   **判决：it0 迁移成功、it5 崩死。⚠ 修正立项表述：不是「迁移失败」。**
+//   全文 → `reports/z11-close-20261107.md`；读数 → `tmp/z11-check.txt`
+//
+//   停课状态：`run_complete` 0 / `error` 0 / 用户手动停（paused 已含）⇒ 不是崩溃。
+//   面板：A 层满池 400 局/点（同上）。
+//   **it0（BC 原始权重）**：win **.000** · pick **.876** · base_destroyed **1.000** ·
+//     kills 1.53 · cells p50 37 · dmg 79（对照 null it0：.182/.545/.652/9.47/84）。
+//     ⇒ **拾取能力跨环境完整保留**（.876 甚至高于它在 safe-base 上的 .773），
+//       但**完全不会打/守**。这正是 `y34-hitfix-it195` 迁移塌方（73.5%→1.9%）的同型现象：
+//       能力分布错配，不是能力丢失。
+//   **it5（PPO 5 轮后）**：win .000 · pick **.095** · base 1.000 · kills 0.51 · cells **2** ·
+//     dmg 38 ⇒ **BC 的捡行为被 PPO 5 轮洗掉，策略坍缩成「原地不动」**，基毁仍 100%。
+//   it0 vs null 配对 **−18.25pp**（0:73，精确二项 p≈1.1e−22）⇒ 止损在开课那一秒就触发。
+//   崩因同 z8 族但更极端：该 BC 权重 move 熵 .9123、约 1/4 局开局冻死、
+//     原话「不判全过，别接 PPO」（`bc-v6-train-analysis-20261105.md:4,52,257-259`）；
+//     `value_anchor .001` 没挡住冷 value 头把它拖进静止。
+//   判决意义：**「会捡」与「会打/会守」分别活在两个权重里，纯配置搬不到一起**
+//     （bc 会捡 pick .876 / z10 会打 kills 9.47）。
+//   后继：要合体只能在 z10 环境用 `--teacher-argmax` 重采语料重训 BC（或 bc-v6 的捡 +
+//     z10 打的混合语料），并同时修 `value_coef`/冷 value 头 —— **改工程，不是改配置**。
+// 课程 z11-bc —— 换起点：把「会捡」的 BC 权重裸接到 z10 环境（2026-11-06 立项，500 it）
+//
+// 0. 一句话：相对 z11-null **单变量 `bc`** = `bc-v6-train/weights.json`，其余逐字不变。
+//    三条路线复盘后，这是唯一能零代码验证「方向2 的会捡能力能否在 z10 活下来」的腿。
+//
+// 1. 立项依据（真机读数）
+//    · `reports/bc-v6-train-analysis-20261105.md:336`：BC 交付权重 ep18 在
+//      `classic35-safe-base` 合并 1950 局 win **.5385** / 拾取率 **.7730**；
+//      `:342`「0 冻死」11 关 610 局 win **.769** / 拾取 **.811**。
+//      ⇒ NN 不是「练不出捡道具」，这个能力存在过；z10 三腿从 z2 收敛起点出发
+//      拾取率锁 .50–.59、八次抬价证伪 ⇒ 换起点比继续调价格更接近病灶。
+//    · **不是重复 z8**：z8 四课同用这份 bc 却全崩（`reports/z8-close-20261106.md:99-112`），
+//      但崩因是 `-wIdle*idleTicks` 不封顶 **−174 = 3×wWin**、`value_coef=0` 冷 value 头、
+//      `breakers_off:true` 让 kl 裸奔 —— **这三样在 z11-null 配置里一个都没有**
+//      （无 wIdle 项、`value_anchor .001`、`breakers_off false`、termination 四项正常）。
+//      ⇒ 本课判的是「去掉三个放大器之后，这份 BC 起点能不能站住」。
+//    · schema 已核：bc-v6 与 z10.it233 的 `format=nn-weights-json` /
+//      `schema_major=7` / `num_params=73668` / `arch` 全字段 / `params` 44 键集
+//      **逐项一致**（`tmp/verify-z11.py`），归档 ckpt 当 bc 合法。
+//
+// 2. it0 基线（⚠ 今晚未跑新探针，不许拿 .773 当本腿基线）
+//    · BC 权重读数来自 `classic35-safe-base`（钢基 / 35 关 / 36000 拍）；
+//      本腿是 `classic35`（常规图）4 关子集 / 20 敌 / 20000 拍 ⇒ **跨环境**。
+//    · 前例 `reports/y34-hitfix-it195-classic35-20261025.md:8-9`：迁移塌方
+//      73.5%→1.9%，面板差 **−69.9pp**（同 1 星口径），报告自承「是面板读数，
+//      不是能力读数」。⇒ **it0 必须实测**，本腿 it0 以首点 in-loop 80 局为准。
+//    · 对照 z11-null 同起点底座 it0 引用 z10 it230：win .188 / pick .588 / base .662。
+//
+// 3. 变量账：**只有 `bc`**。reward（11 行 / 18 项 / terminal 四项）、训练侧、
+//    面板、预算逐字 = z11-null；任务侧一个字未动（AGENTS §0.2）。
+//    ⚠ `kickstart_ref` 保持 **false**：按 skill 规则「BC 产物 = 学到手的策略」应为 true，
+//    这里刻意保持单变量、是**已知偏离**；测的正是「裸接 PPO 能否保住会捡的行为」。
+//    若 it1 kl 异常，后续单独加一条 kickstart 腿，不要在本腿里改。
+//
+// 4. 判据与止损（in-loop 80 局/点只作同面板配对趋势）
+//    · 主：it0 / it20 / it50 的拾取率与 win，**vs z11-null 逐局配对**；
+//      保住「拾取率 ≥ null +5pp」才算迁移成功；掉到 .50 以下即判迁移失败。
+//    · 副：move 熵、`cellsVisited < 30` 的局占比（冻死代理）、kl、entropy、base_destroyed。
+//    · 硬止损：it1–20 win 相对 it0 掉 >10pp / `entropy < .30` / `kl > .05` /
+//      冻死局占比 >40% / error 行出现 ⇒ 停腿（z8 四课 T_kl 全是 it2）。
+//    · **定腿另跑外部满池 400 局（860001+）**；20 seed 前缀子集不得单独定腿。
+//
+// 5. 已知局限（必须随读数引用）
+//    · 这份 BC 五项门 2 项不可判、move 熵 .9123（目标 .6–.75）、约 1/4 局开局冻死，
+//      原话「**不判全过，别接 PPO**」仍成立 ⇒ 本课是**已知风险的受控验证**，不是推荐起点。
+//    · 若崩，正确结论是「这份 BC 必须用 argmax 标签重训」，**不是**「BC 路线不行」。
+//    · 拾取率分母仍含约 21% 生成即捡白送道具（仪表未修）⇒ 只能看相对 Δ。
+//
+// 6. 预算：500 it / 36h。`paired_rotate_seed 20261106`（同 null，可逐局配对）、
+//    `out/traj/backup_*` 全新目录（§15.5 禁续跑）。
+//
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-bc → 开课。
+//   训练唯一入口 = 控制台 / 同源 API；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`（`worker/trainer_gate.py` 会拒）。
+//   开训 30 秒核对日志 `hub=` 与当时活着的隧道 URL（换名会报 530）。
+// ── 诊断工具 ── `tmp/z10-close.py` · `tmp/z10-pick180/analyze.py` · `tmp/bc-v6-gate-verdict.txt`
+// ── 结算节（结课时回填到本文件头 + `reports/z11-close-<YYYYMMDD>.md`）──────────
+//   §停课状态 §it0/20/50 迁移表 §与 null 配对 §冻死代理 §训练侧四指标 §归档 sha16 §根因与后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z11-bc",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 36,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z11-bc/weights.json",
+  "traj": "tmp/z11-bc",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z11-bc",
+  "backup_prefix": "z11-bc",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-bc → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`：常驻 trainer 只准
+//     `trainer/run_rl_cluster.py --serve`（闸在 `worker/trainer_gate.py`），
+//     per-course run_rl 会被响亮拒绝（AGENTS §5）。
+//   ⚠ 不要复用 z10 的 out/traj/backup 目录；本课已全部换新（§15.5 禁跨改动续跑）。

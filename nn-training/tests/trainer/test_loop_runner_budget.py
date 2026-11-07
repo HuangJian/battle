@@ -49,7 +49,7 @@ def test_budget_live_reads_args_after_hot_edit() -> None:
 
     assert runner.planner("c", 1, None) == []  # type: ignore[arg-type]
     assert runner.finished is True
-    assert "500" in runner.finish_reason
+    assert runner.finish_reason == "iters=500 跑满"
 
     # 生产同款：停→开 先清收工态（loop_serve._revive_hygiene）
     runner.finished = False
@@ -68,7 +68,7 @@ def test_explicit_iters_still_frozen() -> None:
 
     assert runner.planner("c", 501, None) == []  # type: ignore[arg-type]
     assert runner.finished is True
-    assert "500" in runner.finish_reason
+    assert runner.finish_reason == "iters=500 跑满"
 
 
 def test_budget_live_zero_means_unlimited() -> None:

@@ -40,6 +40,8 @@ def train_tuning_argv(train: Any) -> list[str]:
     return [
         "--weight-exponent",
         str(train.weight_exponent),
+        "--policy-coef",
+        str(train.policy_coef),
         "--patience",
         str(train.patience),
     ]

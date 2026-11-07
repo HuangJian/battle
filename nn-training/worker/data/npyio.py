@@ -159,6 +159,24 @@ def _load_dataset_v6(data_dir: str) -> dict[str, np.ndarray]:
             raise ValueError(f"[npyio] v6 语料长度不一致：obs={n} {k}={out[k].shape[0]}")
     if out["mask"].ndim != 2 or int(out["mask"].shape[1]) != 9:
         raise ValueError(f"[npyio] v6 mask 必须是 (N,9)，收到 {out['mask'].shape}")
+    # C9 value-only：v6 语料也可能带 `returns.npy`（value 头 MC 回归目标）。
+    # 允许部分 shard 缺失：缺失局填 NaN，与 legacy `OPTIONAL_FILES` 的 n/a 语义一致。
+    ret_parts: list[np.ndarray] = []
+    has_returns = False
+    for s, obs_part in zip(shards, parts["obs"], strict=True):
+        rp = os.path.join(s, "returns.npy")
+        if os.path.exists(rp):
+            arr = np.load(rp).astype(np.float32)
+            if arr.shape[0] != obs_part.shape[0]:
+                raise ValueError(
+                    f"[npyio] v6 returns 长度 {arr.shape[0]} != obs {obs_part.shape[0]}（{s}）"
+                )
+            has_returns = True
+            ret_parts.append(arr)
+        else:
+            ret_parts.append(np.full(obs_part.shape[0], np.nan, dtype=np.float32))
+    if has_returns:
+        out["returns"] = np.concatenate(ret_parts)
     out["hold"] = out.pop("a_hold").astype(np.int64)
     # 兼容层：legacy 键名保留（`actions` 2 列 = move+fire，`masks` = 9 位原样）
     out["actions"] = np.stack([out["a_move"], out["a_fire"]], axis=1).astype(np.int64)

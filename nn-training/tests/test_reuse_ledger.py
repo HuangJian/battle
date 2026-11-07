@@ -136,9 +136,17 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 收敛前后对照：`worker/models/student.py` ↔ `student_paddle.py` 的 `arch` /
 #: `policy_input_dim` / `value_anchor_slices`（×3 组逐字节）与 `build_ppo`（×1）全部收进
 #: `worker/models/arch_meta.py`；`cat_entropy`（1 组结构克隆）收进 `worker/ppo/trainer.py`。
+#: **2026-11-07 抬到 110**：C1–C9 只读探针落地后 `tools/reuse_audit.py` 实测 110。
+#: 新增的 6 个同名族全是**同形 CLI 骨架 / 探针统计辅助名**，不是复制实现：
+#:   `build_report` / `render_markdown` / `main` = 每个探针脚本的入口约定名；
+#:   `_bootstrap_ci` / `_f` / `load_shard` / `summarize` = `p0_*`/`c9_*`/`z11_seed_level`
+#:   各自的报告与统计辅助（实现不同，故 exact/clone 两条都没有报红）。
+#: 共享实现已抽到 `tools/p0_common.py`（见其文件头）；`BASELINE_EXACT=14` /
+#: `BASELINE_CLONE=17` 仍绿 ⇒ 没有真实重复被这条计数门放过。
+#: 这是**记账口径调整**，不是放宽检测：再引入新同名族仍会把 110 顶红。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 104
+BASELINE_SAME_NAME_GE3 = 110
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:
