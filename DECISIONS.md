@@ -11307,3 +11307,14 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `course-lifecycle.test.ts` 39 passed（含 5 例新锁用例）；dashboard 全量 1959 pass / 0 fail +
   typecheck 462 files 干净；根 `bun run check` 2672 pass / 0 fail。
 - **全文** → `docs/nn/training-stack.md` §70（控制台侧指针 `docs/nn/console.md` §49）。
+
+## §2026-11-07-goalnn-w1-thcost-negative（P3-A 判负：事件当拍价动得了机制量，守家反而变差）
+
+- **背景**：plan `classic35-path` §8 的 P3-A 假设「把基地威胁搬到决策当拍（`−wThCost*ΣthCost*`）⇒ 绕开 19.3 步信用窗 ⇒ 守家改善」；C4 判 `redundant_signal`、C2 给出剂量。落 `w1-null`（零变量对照）/ `w1-thcost`（唯一变量，`wThCost 0.1059`）两门课，同批开、`paired_rotate_seed 20261107`、A 层 400 局/点。
+- **被否决**：① 停腿补 eval 遥测重开（18:35 用户选 C：不停腿、另起只读探针）；② 中途改工程补 `thCost` 列（会破坏在跑腿语料版本）；③ 靠 it20 的 `+7pp p=.0087` 提前宣布成功（单点 MDE 8.0pp，且未复现）；④ 靠 40 局探针的「1/4 关下降」判机制无效（小样本功效不足，扩到 200 局翻成 4/4）。
+- **决定**：用户 19:46 拍板跑到 it100 补齐三窗，**判词以三窗为准，不提前定**。机制量用 it50 归档权重的 200 局/腿只读 rollout 探针（`--seeds 0-49`），同 `(stage,seed)` 配对，总量与**每决策步速率**两个口径都报。
+- **结果（判负）**：三窗 Δwin it20 **+7.0pp**(p=.0087) → it50 **0.0**(p=1) → it100 **−9.5pp**(McNemar 50:88, χ²=10.46, **p=.0012**)；it100 Δbase **+9.25pp**、Δkills −1.65、Δcells −9.4。run-average（21 点/400 seed）Δ **+0.19pp**、CI [−1.04,+1.38] 跨零 ⇒ 全程无效应，早期优势是收敛速度红利（两腿 win 都从 .1825 爬到 .2500，null 在 it50 追平、it100 反超）。判据 ②（base −8pp）未过且反向、③ 地板击穿。**机制量**：ΣthCost 总量 4/4 关降（Δ −10.19，CI [−18.73,−1.89] 不跨零）按原口径通过，但速率口径仅 2/4 关、CI 跨零 ⇒ 下降主要来自**局更短**（samples −5.5%），不是每拍威胁率下降。
+- **判读**：稠密信号学到的是「缩短暴露」而非「在威胁下守住基地」，与 plan §8-A 的警告「机制量动了 ≠ 守家变好」一致。这是价格侧第 9 次「加/拆一个项买不到胜率」的同型负结果（z11-cost 拆项、w1-thcost 加项）。**别再调 `wThCost` 剂量**：方向可反转。
+- **边界**：4 关 / 20000 拍机制脚手架，不是原题 35 关 / 36000 拍；探针是 it50 权重、各自 on-policy 分布，it100 未重采；`training-enabled.txt` 仍在、腿还在跑（null it104 / thcost it102）⇒ **停课由用户手工**。
+- **验收**：`tmp/w1-probe/w1-verdict.py --probe rollouts-it50` → `verdict-it100.txt` / `verdict-rollouts-it50-21pts.md`；归档 `w1-null.it100.20261107-212321.json` / `w1-thcost.it100.20261107-212633.json`；两课头已回填结课块。
+- **全文** → `reports/w1-close-20261107.md`；`docs/nn/experiments.md` §135；`plan/classic35-path.plan.md` §17。
