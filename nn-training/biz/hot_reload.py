@@ -53,6 +53,8 @@ RESTART_ONLY_FIELDS: tuple[str, ...] = (
     # 缰绳初值（§5.1）：kk 调度的初值在启动自检/args 合并时读一次，热改它不会让已经
     # 排好的衰减曲线回头——与 kickstart_ref 同类，记 restart-only（响亮提示），不静默吞。
     "kickstart_init",
+    # 缰绳衰减率（2026-11-05）：与初值同一条调度曲线，热改不会让已排好的衰减回头 ⇒ 同类。
+    "kickstart_decay",
     # 结果面止损一族（2026-10-02 从 rl-config 迁入课程文件）：判据规则 mid-run 改 = 判读窗口
     # 中途换口径（与 kickstart_init 同类）⇒ restart-only。读面消费 args 上的启动物化快照
     # （`flat_overrides` 以 dict 物化），热加载**不写回**这两键 ⇒「停止→启动后生效」名副其实。

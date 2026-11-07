@@ -973,6 +973,12 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 它**不进** `corpus_identity_fp`（ref/优化器语义 ≠ 「一个样本是什么」，进去会让
     #: 全体课程指纹漂移）——见 `tests/worker/test_kickstart_plan.py` 的断言。
     kickstart_init: float | None = None
+    #: 缰绳的**衰减率**（2026-11-05，z8 事故后补）：`kk(it) = init × decay^(it-1)`。
+    #: 缺席 = 沿用 argparse 缺省 0.5（每轮减半 ⇒ it10 只剩 1/512，对「冷 value 头
+    #: 需要十几轮才能收敛」的场景太陡）。0.92 = it10 还剩 0.47、it20 剩 0.20。
+    #: ⚠ 与 `kickstart_init` 同待遇：同名映射到 argparse dest / restart-only /
+    #: **不进** `corpus_identity_fp`（优化器语义，不是「一个样本是什么」）。
+    kickstart_decay: float | None = None
     # ---- 结果面止损块（2026-10-02 从 rl-config 迁入课程文件；DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）----
     #: 干烧熔断（参照物/阈值）。缺席 = worker 模块常量（第二刀后 rl-config 回落已删）；**不进** corpus_identity_fp。
     #: restart-only（判据规则 mid-run 改 = 判读窗口中途换口径；读面消费 args 上的启动物化快照）。
@@ -1195,6 +1201,8 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             "value_anchor": "value_anchor",
             # 缰绳初值 kk(1)：课程键 → argparse dest（异名；漏映射 = 静默失效，ent_break 前科）
             "kickstart_init": "kickstart_kl",
+            # 缰绳衰减率（同名 dest）：漏映射 = 静默回落到 CLI 缺省 0.5，课程写 0.92 白发
+            "kickstart_decay": "kickstart_decay",
             "warmup_iters": "warmup_iters",
             "gamma": "gamma",
             "lam": "lam",

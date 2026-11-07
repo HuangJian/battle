@@ -1,0 +1,244 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-06 09:00 回写；**跑 60 / 300 轮**，11-05 15:29 人工停课）──────────
+//   **判决：失败。四项修正全部无效——win .547 → 0，idle 没降反升，崩盘只比 v1 晚 3 轮。**
+//
+//   in-loop eval（全 35 关 × 20 seed = 700 局/点）：
+//     it | win | kills | pu/局 | ticks 中位 | idle/ticks
+//      0 | .547 | 14.27 | 4.02 | 13992 | .690
+//      5 | .446 | 14.77 | 4.07 | 14414 | .554   ← 峰值（仍低于起点）
+//     10 | .296 | 12.74 | 3.29 | 15394 | .598
+//     15 | .121 | 10.21 | 2.37 | 16936 | .654
+//     20 | .176 | 11.52 | 2.78 | 16164 | .629
+//     30 | .220 | 11.86 | 3.02 | 15540 | .598
+//     40 | .097 |  7.62 | 1.73 | 12110 | .729
+//     50 | .001 |  3.14 | 0.58 | 10581 | .857
+//     55 | .000 |  1.72 | 0.30 |  8840 | .926
+//     60 | **.000** | **1.17** | **0.19** | **8276** | **.933**
+//   `gameover` 率 33.4%（it0）→ **89.3%**（it60）；训练内求死率 it5 26.1% → it8 54.8% → it60 93.9%。
+//   训练侧：kl it1 **1.422** → 末 .125；entropy **1.021** → .123；value 82.6 → 41.9；
+//   mean_ret +6.5 → **−9.7（转负）**。
+//
+//   **T_\***：T_kl(连续 2 轮 >0.1) **it2(.804)** · T_ent(<0.40) **it7(.341)** ·
+//   T_death(>40%) **it8(.548)** · T_win(<.40) **it8(.333)**。
+//
+//   **对照判决（vs `z8-steady-ctrl`，本文件 §3 判决表第 3 行）**：
+//     主腿坏在 **it8**、对照腿坏在 **it5** ⇒ **「坏（晚于 B）」= 激励只延寿不治病 ⇒ 停，重查第四根因。**
+//     · idle 封顶把崩盘推迟了 3 轮，但**结局一样（末点 win 0）**；
+//     · 且 `idle/ticks` 从 .690 涨到 **.933**，绝对 idle 拍数只从 9654 降到 7721
+//       ⇒ **封顶没有降低"少动"，只是把局缩短了**（ticks 中位 13992 → 8276）。
+//     · 反观对照腿（v1 激励）末点 kills **5.03** / idle **.641** 都比主腿好，只是崩得更早
+//       ⇒ **idle 罚的剂量（.002）反而放大了"站着挨打"**。
+//   ⇒ 能确定的只有：**idle 封顶不是救命的那一项**。不能写成"有害"（两腿都崩到 0）。
+//
+//   **第四根因 = 起点不合格**（四课共用）：`bc = bc-v6-train/weights.json`，move 熵 0.9123、
+//   1/4 局开局冻死、同 seed 分裂两种行为；`reports/bc-v6-train-analysis-20261105.md §8`
+//   原话「**不判全过，别接 PPO**」。
+//   `kl_coef .2 + lr 5e-5 + kickstart_ref(.92)` 三件套**没能压住 it1 的 kl 1.42**
+//   （kickstart 实测 it1 = 0.589，policy 已被拉向 ref，但 approx_kl 仍 1.4
+//   ⇒ 起点策略在随机采样下本就偏离 BC 分布）。
+//
+//   ⇒ **不要再在这套 bc 上开 PPO 腿。** 先按 `bc-v6-train-analysis-20261105.md` 的收口：
+//     换 `--teacher-argmax` 语料重训 BC（move 熵 0.9123 → 目标 0.6–0.75）再谈 RL。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z8-steady —— 阶梯 P1 主线 · `z8-noidle` 的**改名 + 修正版**（2026-11-05 12:20 立项 →
+// **2026-11-06 结课，失败**）
+//
+// ⚠ 前身 `z8-noidle` 于 11:06–12:05 实跑并崩盘（32 轮，产物留在 `tmp/z8-noidle/`）。
+//   本课是**改名后的修正版**：课程名 / out / traj / backup 全部换新
+//   —— AGENTS §15.5：改奖励语义 = 新实验，读数不可与 v1 混算、不可相减。
+//   `z8-noidle.jsonc` 保留原样作事故档案（奖励公式与分析口径的对照物）。
+//
+//   ⚠ 别把两件事搞混：**不是**把修正写回 z8-noidle，而是 z8-noidle 的修正版**改名叫** z8-steady。
+//
+// ══ v1 事故记录（保留作对照基线，别删）══════════════════════════════════════════
+//   16 轮内全 35 关 eval：win **.5471 → 0**，kills 14.27 → 3.22，powerUps 4.02 → 0.71，
+//   cells 中位 120 → 49；训练内 it17 有 **56/61 局 = lives_exhausted**（三命主动送光，
+//   kills 均值 3.25、伤害 762/800、拾取 0）。kl it1 = **2.174**（健康值 .011–.020），
+//   entropy .888 → .150。
+//
+//   三根因（互相独立，任一单独就够学坏）：
+//     ① `- wIdle*idleTicks` **不封顶** ⇒ 起点 timeout 局 idle 28944 拍 × .006 = **−174**，
+//        单项超过 wWin 60 的三倍 ⇒ 「拖到超时」比「三命打光」还低 22 分 ⇒ 学送死；
+//     ② 冷 value 头：起点 `bc-v6-train` 是纯 BC 权重，`train/train_bc_v6.py:23`
+//        **`value_coef=0`** ⇒ value 随机，第一轮 GAE 的 V 全是噪音；
+//     ③ KL 三缺一：`kl_coef .05` 太松（z5 冷启动用 .2）/ `kl_cap` **本路径不接线** /
+//        F4 在 it3 正确 ABORT 但重启带 `breakers_off=true` ⇒ 之后 14 轮裸奔。
+//
+//   全文 → `reports/z8-noidle-hurry-analysis-20261105.md`
+//
+// ══ 四项修正（用户 2026-11-05 12:10 拍板）══════════════════════════════════════
+//   ① `wIdle .006 → .002` + **封顶** `min(idleTicks, idleCap=20000)`
+//   ② `timeout` **不动**（保持 −50）—— idle 一改天平就翻，动它是第二变量
+//   ③ `kl_coef .2` + `lr 5e-5` + `kickstart_ref true` / `kickstart_decay .92`
+//   ④ `z8-hurry` 整条腿砍掉（耗时奖/税一整套不做）
+//
+//   ⚠ **并行对照腿 = `z8-steady-ctrl.jsonc`**：激励与本课逐字相同，训练侧回 v1 原值。
+//     两腿的唯一差异 = ③ 那三项，共享 `paired_rotate_seed` ⇒ 可分离「激励修正」与
+//     「训练侧修正」各自的作用。判据见本文件 §5。
+//
+// ══ 1. 任务侧一个字不动 ══════════════════════════════════════════════════════
+//   `level: classic35-safe-base`：35 关原表 / 3 命 / 20 敌 / **36000 拍** / hard / level 0。
+//   禁止为训练方便改命数、敌数、关卡形态或拍数。
+//
+// ══ 2. idle 修正的标定（为什么是 .002 + cap 20000）════════════════════════════
+//   起点 610 局（P1 11 关）按 outcome 拆，Φ 逐局代回 + terminal，Δret = timeout − gameover：
+//     v1 现状 .006/无cap      Δ = **−22.0**  ← 学送死（实测证明）
+//     .003/无cap              Δ = +29.7
+//     .002/无cap              Δ = +46.9
+//     **.002/cap20000（本课）  Δ = +64.2**
+//     .006/cap5000            Δ = +80.7（但 P1 均值 12440 已触顶 ⇒ 常数，回到 z5 的病）
+//   量纲：.002 × 20000 = 最坏 −40（< wWin 60），P1 均值局 −24.9 ≈ 1.6 个 kill。
+//   梯度保留到 2 万拍才触顶 ⇒ 「站着打持续失血」成立，但不会压倒「打赢」。
+//
+//   ★ 为什么不会学「苟着不打」：kills 0 + idle 36000 ⇒ pace 封顶 −36 + idle −40
+//     + timeout −50 ≈ **−124.5**，远低于 gameover +105.6（自检 ④ 断言）。
+//
+// ══ 3. 训练侧三项（冷 value 头的处置）══════════════════════════════════════════
+//   · `kickstart_ref true` + `kickstart_init 1.0` + `kickstart_decay .92`：
+//     把 policy 钉在 BC 上（ref = 课程 `bc` 冻结快照），让 value 拿稳定 target 收敛。
+//     ⚠ **decay 必须写**：CLI 缺省 0.5 每轮减半 ⇒ it10 只剩 1/512（缰绳等于没开）；
+//       .92 则 it10 剩 .472、it20 剩 .205、it30 剩 .089。
+//       该键 2026-11-05 才进 `flat_overrides`（`biz/course_spec.py` + `biz/hot_reload.py`）。
+//     ⚠ `kickstart_ref` 要求 `warmup_iters=0`（`worker/config.py:339` 会响亮拒启）。
+//     ⚠ kickstart 只锚 **policy 三头**（move/fire/hold），**不含 value**
+//       （`ppo/engine.py` 的 kl_m/kl_f/kl_parts）——value 仍靠 kl_coef 高 + lr 低压着慢慢学。
+//   · `kl_coef .2`：z5 冷启动同值（`docs/nn/experiments.md:3902`：`kl_coef 0.2 → 0.05`）。
+//     ⚠ `kl_cap .1` 写在 schedule 里只为与 z5/v1 同形，**它不是护栏**——
+//       remote/serial 无人消费（`DECISIONS §2026-09-15-goalnn-kl-cap-unwired`；
+//       只有 `stream` 模式读，本课 stream=0）。
+//   · `lr 5e-5`：v1 的 1.2e-4 的 0.42 倍。**20 轮后是否放开由人看读数热改 schedule**，
+//     本课不预置自动放开（自动放开 = 没人看着就换档）。
+//
+// ══ 4. 关集与 eval（与 v1 逐字相同，便于对照）══════════════════════════════════
+//   训练只采 11 关（P1：0 冻死那批），但课程关集保持全 35 关 ⇒ in-loop 全关 eval 才拿得到
+//   stageJson（`course_spec.py:1058-1067` / `worker/config.py:475`；`stage_select` 会重编号，
+//   已否决）。`eval_stages "2000-2034"` × 20 seed = 700 局，**前缀子集，只作趋势哨兵**。
+//   判决 = 外部全 35 关满池（seed 不重叠）：
+//       bun tools/sim/eval-course-ckpt.ts \
+//         --course nn-training/levels/classic35-safe-base.jsonc \
+//         --weights z8s=nn-training/weights/z8-steady/weights.json \
+//         --games 1750 --seed0 2000000007 --out tmp/z8-steady-full35.jsonl
+//   对照基线：v1 it0（= ep18）全 35 关 **win .5471 / idle .690 / cells 120 / kills 14.27**。
+//   护栏（plan §6 第 1 条）：全 35 关满池 win 若不升、或 idle 不降 ⇒ 停手，别进 P2。
+//
+// ══ 5. 人工盯盘判据（用户口径：不关熔断，人看）════════════════════════════════
+//   v1 的教训是「看到 kl .56 就该停，而不是关熔断继续」。**本课 `breakers_off` 缺省 false。**
+//     · **kl > 0.1 连续两轮 ⇒ 停**（不用等 F4 的 3 轮）；
+//     · entropy 连续 5 轮下降且 < .35 ⇒ 策略在锁死，停；
+//     · value loss 单调上升超过 5 轮 ⇒ value 在追一个动得过快的 target，停；
+//     · 训练内 win 连续 3 轮 < .40（起点 .769 在 11 关）⇒ 停；
+//     · **求死率**（lives_exhausted / 总局数）> 40% ⇒ 停（v1 在 it10 就到 96%）。
+//   开课首轮必读 kl / entropy / value / gnorm（AGENTS §15.4）。
+//
+// ══ 6. 开课 ══════════════════════════════════════════════════════════════════
+//   起点 `bc` = ep18（`nn-training/weights/bc-v6-train/weights.json`，wver ec9dc680）。
+//   **训练启动由用户手工执行，agent 不起腿。**
+//   ⚠ `biz/course_spec.py` / `biz/hot_reload.py` 本轮为 `kickstart_decay` 加了字段
+//     ⇒ 云端 worker 用 hub 启动时锚定的 `code.zip` 快照，**必须重启 hub / 控制台**才生效。
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z8-steady",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "pinned",
+  "rotation_per_it": 0,
+  "rotation_pinned": "2002,2014-2015,2021-2022,2025-2029,2032",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 36000,
+
+  "reward": {
+    "formula": [
+      // 战斗与拾取：保持 ep18 已有的能力
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 跑起来 + 处理障碍物
+      "+ wWalk*min(cellsVisited, walkCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 价格：不许为快而送死
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      // 相对杀敌节奏税：超过 kills*paceTicks 拍才罚，封顶
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 罚长停：**封顶**（本课核心修正；v1 不封顶 ⇒ timeout 局 −174 压死一切）
+      "- wIdle*min(idleTicks, idleCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wPickup": 6.0,
+      "pickupCap": 9.0,
+      "wWalk": 0.8,
+      "walkCap": 260.0,
+      "wBrick": 0.5,
+      "brickCap": 12.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 800.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      // .002 × 20000 = 最坏 −40（< wWin 60）；P1 均值局 −24.9 ≈ 1.6 个 kill
+      "wIdle": 0.002,
+      "idleCap": 20000.0,
+      "wThreat": 0.01,
+      "threatCap": 500.0,
+    },
+    "terminal": {
+      // 与 v1 同值（用户 12:10 拍板：不动）。idle 修正后天平已从 −22 翻到 +64。
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  // 冷 value 头 + 高熵 BC 起点 ⇒ 用 BC 缰绳钉住 policy，value 拿稳定 target 收敛
+  "kickstart_ref": true,
+  "kickstart_init": 1.0,
+  // ⚠ .92 而非 CLI 缺省 .5：缺省在 it10 只剩 1/512，等于没开
+  "kickstart_decay": 0.92,
+  // kickstart_ref 要求 warmup_iters=0（worker/config.py:339 响亮拒启）
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00005,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.2,
+      "lr": 0.00005,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 32768,
+  "paired_rotate_seed": 20261105,
+  "decision_events": false,
+  "decision_k": 10,
+
+  // 新实验：与 v1 的 tmp/z8-noidle 分开（AGENTS §15.5）
+  "out": "tmp/z8-steady/weights.json",
+  "traj": "tmp/z8-steady",
+  "breakers_off": true,
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z8-steady",
+  "backup_prefix": "z8-steady",
+
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

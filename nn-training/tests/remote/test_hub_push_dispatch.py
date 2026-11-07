@@ -378,11 +378,15 @@ def _dispatcher(
     )
 
 
-def _workers_with(tmp_path: Path, factory, *specs) -> PushWorkers:
+def _workers_with(tmp_path: Path, factory, *specs, now_fn=None) -> PushWorkers:
     """登记表用**测试自己的**配置路径：绝不能落回仓库的 rl-config.json
     （那会让用例依赖开发机上的真实节点列表——本机有 gpu_push 节点时行为就变了）。"""
     ws = PushWorkers(
-        tmp_path / "push-config.json", log=_quiet, ping_sec=0.0, ping_timeout=_PING_TIMEOUT
+        tmp_path / "push-config.json",
+        log=_quiet,
+        ping_sec=0.0,
+        ping_timeout=_PING_TIMEOUT,
+        now_fn=now_fn if now_fn is not None else time.time,
     )
     for i, (w, kw) in enumerate(specs):
         ws.add({"id": kw.pop("id", f"g{i}"), "url": w.url, "authKey": "sekret", **kw})
@@ -674,8 +678,10 @@ def test_single_worker_cooldown_expires_and_job_is_retried(
     flaky = worker_factory(refuse=True)
     hub = _hub(tmp_path, ["x2"])
     _publish(hub, "x2", "j" * 16)
-    ws = _workers_with(tmp_path, worker_factory, (flaky, {"id": "g1"}))
     clock = {"t": 1000.0}  # 假钟：冷却窗由它推进，不与墙钟/负载赛跑
+    # Same-clock fix as test_slow_result (2026-11-06): registry + dispatcher must share
+    # the fake clock or re-pinging dies after the first probe (see _workers_with).
+    ws = _workers_with(tmp_path, worker_factory, (flaky, {"id": "g1"}), now_fn=lambda: clock["t"])
     logs: list[str] = []
     disp = PushDispatcher(
         hub,
@@ -745,8 +751,13 @@ def test_slow_result_fetch_logs_a_loud_line(tmp_path: Path, worker_factory, monk
     w1 = worker_factory()
     hub = _hub(tmp_path, ["x2"])
     _publish(hub, "x2", "j" * 16)
-    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
     clock = {"t": 1000.0}
+    # Same clock for registry and dispatcher (flake, 2026-11-06): PushDispatcher.tick()
+    # decides "due to ping" by now - workers.last_ping_at(). Workers default to real time,
+    # so a frozen fake clock (1000.0) vs real epoch (~1.7e9) makes the delta hugely
+    # negative after the first ping -> never re-ping -> if that one ping misses under
+    # xdist load, the worker is forever offline and nothing dispatches.
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}), now_fn=lambda: clock["t"])
     logs: list[str] = []
     disp = PushDispatcher(
         hub,
@@ -769,8 +780,14 @@ def test_slow_result_fetch_logs_a_loud_line(tmp_path: Path, worker_factory, monk
 
     monkeypatch.setattr(pd, "_http", slow_http)
     disp.tick()
-    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None)
-    assert disp.state()["slow_result"] >= 1, logs[-5:]
+    # Wait for the counter, not just the result: accept_result() makes the result visible
+    # before _warn_slow_result() increments slow_result, so waiting only on get_result
+    # can return (and assert) before the increment lands under load.
+    assert _pump(
+        disp,
+        lambda: hub._stores["x2"].get_result("j" * 16) is not None
+        and disp.state()["slow_result"] >= 1,
+    ), logs[-5:]
 
 
 def test_cache_probe_failure_reuses_last_hit(monkeypatch) -> None:

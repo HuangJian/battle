@@ -80,6 +80,36 @@ def test_kickstart_init_maps_to_argparse_dest_kickstart_kl() -> None:
     assert args.kickstart_kl == 0.25
 
 
+def test_kickstart_decay_maps_to_argparse_dest() -> None:
+    """管道 ①：`kickstart_decay` 同名映射到 args；漏映射 = 静默回落 CLI 缺省 0.5。
+
+    2026-11-05 z8 事故：冷 value 头需要十几轮才收敛，CLI 缺省 0.5 每轮减半 ⇒ it10
+    只剩 1/512（缰绳等于没开）。课程必须能把衰减改缓（0.92 ⇒ it10 还剩 0.47）。
+    """
+    c = _course(kickstart_ref=True, kickstart_init=1.0, kickstart_decay=0.92)
+    assert c.flat_overrides()["kickstart_decay"] == 0.92, "漏映射 = 静默失效"
+
+    args = _args()
+    apply_course(args, c)
+    assert args.kickstart_decay == 0.92
+
+    # 曲线形状：it10 仍有一半缰绳，it20 剩两成；CLI 缺省 0.5 在 it10 已是 0.002
+    assert kickstart_coef(args, 1) == pytest.approx(1.0)
+    assert kickstart_coef(args, 10) == pytest.approx(0.92**9, abs=1e-9)
+    assert kickstart_coef(args, 10) == pytest.approx(0.47, abs=0.01)
+    assert kickstart_coef(args, 20) == pytest.approx(0.20, abs=0.01)
+
+
+def test_kickstart_decay_absent_keeps_cli_default_bytes_identical() -> None:
+    """缺席 = 老行为逐字节不变：不写 `flat_overrides` 键，args 保持 CLI 缺省。"""
+    c = _course(kickstart_ref=True, kickstart_init=0.8)
+    assert c.flat_overrides().get("kickstart_decay") is None, "缺席不得凭空出现"
+
+    args = _args()
+    apply_course(args, c)
+    assert args.kickstart_decay == 0.5, "缺席不得改写成别的缺省"
+
+
 def test_kickstart_init_formula_is_run_origin_and_keeps_zeroing_chain() -> None:
     """管道 ④：`kk(it)=init×decay^(it-1)`；衰减到阈值以下仍精确归零（coef_active 链不动）。"""
     args = _args()
