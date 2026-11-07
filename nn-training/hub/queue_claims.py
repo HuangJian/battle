@@ -49,6 +49,11 @@ from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.store_leases import ClaimOutcome
 
+#: 死租约周期清扫的最小间隔（秒，plan/dead-lease-sweep）。与 `DISCOVER_SCAN_MIN_SEC`
+#: 同款：挂在既有读面（`peek_jobs`）上，1s 已足够让死租约在下一个观测拍回池，又不会被多台
+#: worker 的 peek 放大。**模块级而非类常量**：拆分守卫把混入的类常量钉成发现簇那两个。
+SWEEP_MIN_SEC = 1.0
+
 
 class QueueClaimsMixin(QueuePeer):
     """域混入：见模块头部。"""
@@ -62,6 +67,8 @@ class QueueClaimsMixin(QueuePeer):
     _order: list[str]
     #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒；观测面读，见 `queue_observe`）。
     _peeked: dict[str, float]
+    #: 上次死租约清扫的时刻（秒，plan/dead-lease-sweep；组合类 `__init__` 建，-inf = 首次必扫）。
+    _sweep_at: float
     _stores: dict[str, _JobStore]
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
@@ -268,6 +275,44 @@ class QueueClaimsMixin(QueuePeer):
             role=role,
         )
 
+    def sweep_dead_leases(self) -> int:
+        """把死租约送进既有回收入口（plan/dead-lease-sweep），返回本轮回收数。
+
+        为什么需要周期触发：改动前回收只在 `_claim_locked` 的 `recovering` 分支与 `lease_worker`
+        里发生，而 `lease_worker` 只被 `inflight()` 的**活**租约逐个调到 ⇒ 过期租约既不在
+        在飞集，也要等「有人 claim 它」才回收。优先级表读 `_claimed`/`_computing`/`_ready`
+        的残留 ⇒ 那份 job 永远排在最低档，形成「优先级骗人 ⇒ 没人 claim ⇒ 不回收」的互锁
+        （z11-bc 9h19m 现场）。
+
+        挂点只有 `peek_jobs`：云 worker 每轮必调，且生产上 `claim_next` 已零调用点。**不挂**
+        `queue_state`——那一簇的契约是「只读、不参与任何调度决策」，在观测面回收会让
+        「打开控制台」变成写事件。
+
+        判据/回收动作/账本事件/毒包计数全部沿用既有实现：本函数只负责**枚举课程**与
+        **调用** `reap_dead_leases()`（后者持锁一次，见 store 侧注释）。回收数只服务日志与
+        测试，不回灌调度。`SWEEP_MIN_SEC` 内重复调用直接返回 0。
+        """
+        now = self._now()
+        if now - self._sweep_at < SWEEP_MIN_SEC:
+            return 0
+        self._sweep_at = now
+        reaped = 0
+        for course in list(self._stores):
+            st = self._stores[course]
+            for jid in st.reap_dead_leases():
+                reaped += 1
+                # ★ 熔断告警在**回收那一刻**喊：清扫可能把第 3 次零回传直接收满，
+                # 而告警原本只挂在「下一次 claim 失败」上——没人再来 claim 就永远不喊
+                # （test_poison_freeze 的日志用例当场抓到）。
+                self._announce_freeze(course, jid)
+        if reaped:
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 死租约清扫：回收 {reaped} 份"
+                "（过期/孤儿 ⇒ 回池 + 毒包计数；见 plan/dead-lease-sweep）",
+                flush=True,
+            )
+        return reaped
+
     # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / claim / priority ----
     def peek_jobs(
         self,
@@ -276,7 +321,10 @@ class QueueClaimsMixin(QueuePeer):
         role: str = ROLE_ONLINE,
         n: int = PEEK_MAX,
     ) -> list[dict]:
-        """候选 job（**不认领**：无租约、无副作用、不动游标）——§2.6 的软持有候选来源。
+        """候选 job（**不认领**：无租约、不动游标）——§2.6 的软持有候选来源。
+
+        会顺手触发死租约清扫（`sweep_dead_leases`，plan/dead-lease-sweep）与 `discover()`：
+        前者是本轮唯一挂点（回收动作仍走 store 的既有入口），不改变「不认领」这条主语义。
 
         与 `claim_next` 同三道闸：`_serves_course`（开课标记）、**归属/停摆**
         （`role` = 请求方自报的归属，判据与闸同源：`_JobStore.role_blocked`）、
@@ -300,6 +348,7 @@ class QueueClaimsMixin(QueuePeer):
         优先级表的事（客户端 peek → `/jobs/priority` → claim 按表排序）。
         """
         self.discover()
+        self.sweep_dead_leases()
         # R2-2：登记表（避让链的唯一输入）改由 peek/priority 喂——缺它
         # `active_worker_count()` 恒 0 ⇒ 避让链静默失效（纯函数用例测不出「调用点为 0」）。
         self.note_worker(worker_id)

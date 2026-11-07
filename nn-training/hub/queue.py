@@ -136,6 +136,8 @@ class _HubQueue(
         self._discover_root: Path | None = Path(discover_root) if discover_root else None
         self._discover_fresh = float(discover_fresh_sec)
         self._discover_last = 0.0
+        #: 死租约清扫的节流基准（plan/dead-lease-sweep）：-inf ⇒ 首次调用必扫。
+        self._sweep_at = float("-inf")
         #: 「跳过未开课课程」的告警去重集（每门课只喊一次，不刷屏）。
         self._no_marker_warned: set[str] = set()
         #: 启动参数里带过模式段的课程（`--course a=offline`；★M4b/P1-3：WARN + 忽略，

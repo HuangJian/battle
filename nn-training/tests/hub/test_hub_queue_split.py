@@ -162,6 +162,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "claimable_job_ids",
             "claim",
             "peek_jobs",
+            # 2026-11-07（plan/dead-lease-sweep）：`peek_jobs` 每轮顺手清扫死租约。
+            "sweep_dead_leases",
             "_manifest_summary",
             "claim_job",
             "priority_view",
@@ -391,6 +393,7 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_cursor": frozenset({"__init__", "claim_job", "claim_next", "drop_course"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
+    "_sweep_at": frozenset({"__init__", "sweep_dead_leases"}),
     "_discover_root": frozenset({"__init__"}),
     "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
     "_halts": frozenset({"__init__", "set_halt", "drop_course"}),
@@ -565,7 +568,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # ——`/jobs/{id}/status` 认账本净态，status 与派发池从此同源）⇒ 127。
     # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 130, len(DOMAIN_METHODS)
+    # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 131, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -575,7 +579,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 130, len(seen)
+    assert len(seen) == 131, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -1007,7 +1011,8 @@ def test_queue_peer_is_declarations_only() -> None:
     # +1 增（`course_open`：开课标记的唯一公开读面）；2026-10-11 W7 +1（`cancel_job`）⇒ 80；
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）+1（`store_offline_metrics`）⇒ 81。
     # 2026-11-05（#12）+1（`get_bc_epoch_weights`：按 epoch 取快照的读面）⇒ 82。
-    assert len(funcs) == 82, len(funcs)
+    # 2026-11-07（plan/dead-lease-sweep）+1（`sweep_dead_leases`）⇒ 83。
+    assert len(funcs) == 83, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。
