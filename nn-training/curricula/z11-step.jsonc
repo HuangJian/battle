@@ -1,0 +1,161 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-07 08:27 回写；**跑 201 / 500 轮**，08:17:30 人工暂停）────────
+//   **判决：证伪。「零位移 = 步长不足」正式死了。**
+//   全文 → `reports/z11-close-20261107.md`；读数 → `tmp/z11-check.txt`
+//
+//   停课状态：`run_complete` 0 / `error` 0 / 08:17:30 写入 paused ⇒ 人工暂停，不是崩溃。
+//   面板：A 层满池 400 局/点（同上）。
+//   **主机制量确实动了**：`lr` 全部轮次确认为 **2.4e-4**；`kl` p25/p50/p75 =
+//     4.20 / **4.94** / 5.87 e−3，**中位比 null（3.51e-3）+41%**，p75 已进目标区间 5e−3–1e−2。
+//   **行为不动**：配对 win **−0.92pp**（2424:2575，χ²=4.56，**p=.033**，边缘显著为负）；
+//     拾取率 −0.13pp；后半 base .612 vs null .622（无实质差）。
+//   `entropy` .977→.698：更大步长让策略更快收窄，但没有收窄到有用行为上。
+//   判决意义：`reports/z9-r4-close-20261106.md:153-159` 把 z9 零位移归因为
+//     「步长不足 + 目标落在能力半径外」；步长这一半被单独拆掉后仍不动
+//     ⇒ **只剩「目标不在策略参数方向上」**（观测/奖励结构，见报告 §6）。
+//   后继：不要再开纯配置步长腿；要动就走 BC 语料或稠密塑形列（改工程）。
+// 课程 z11-step —— 只放大训练步长：验证「零位移 = 步长不足」（2026-11-06 立项）
+//
+// 0. 一句话：相对共同底座**单变量组 = 位移包**（`lr` 与 `ppo_schedule[0]` 的 lr/kl_coef 三项），
+//    reward 一个字不动。这是唯一完全不碰奖励、不碰任务、零代码的判决性腿。
+//
+// 1. 立项依据（真机读数）
+//    · `reports/z10-close-20261106.md`：三腿 kl 全程 **2.5–4.3e-3**（护栏 2e-3–1e-2 的下沿）、
+//      lr 1.2e-4、190–300 轮 win/拾取率斜率 ≈0、mean_ret 涨 +9.8%/+17.2% 而行为全平。
+//    · `reports/z9-r4-close-20261106.md:153-159` 结课判词：「不是奖励排错序，是**步长不足 +
+//      目标落在能力半径外**」；其 §3.1 第 5/6 条即 `lr 6e-5→1.2e-4`、`kl_coef .05→.02`。
+//      本腿在同一方向上再走一格：`lr 1.2e-4→2.4e-4`、`kl_coef .02→.01`。
+//    · 若放大步长后 kl 抬到 5e-3–1e-2 而行为**仍**零位移 ⇒ 「步长不足」被证伪，
+//      目标确实在能力半径外；若出现斜率 ⇒ 之前三腿只是没推动策略。两种结果都有判决价值。
+//
+// 2. it0 基线（⚠ 今晚未跑新探针，引用盘上现有读数）
+//    · 起点 `z10-maze.it233`（sha16 46489ad5c065c375），arch/schema_major/params 键集已核一致。
+//    · 最近 eval it230：win .188 · pick .588 · base .662（80 局 in-loop）；z10 后半 win .235 / pick .581。
+//    ⇒ 只与 `z11-null` 配对，不与 z10 原账本相减（换了起点）。
+//
+// 3. 变量账（三项，同属「位移包」一个概念变量）
+//    · `lr`: 0.00012 → **0.00024**
+//    · `ppo_schedule[0].lr`: 0.00012 → **0.00024**
+//    · `ppo_schedule[0].kl_coef`: 0.02 → **0.01**
+//    其余逐字 = z11-null：`lam .95` / `gamma .998` / `epochs 4` / `mb 1024` /
+//    `normalize_ret false` / `value_anchor .001` / `kl_cap .1` / `target_transitions 24576` /
+//    `kickstart_ref false` / `warmup_iters 0`。
+//    ⚠ 刻意**不改** lam / normalize_ret：z7 的 value 头被拉爆、z8 的冷 value 都是动过这些的，
+//      混进来就无法归因。任务侧一个字未动。
+//
+// 4. 判据与止损
+//    · 主：it1–20 `kl` 是否抬到 **5e-3–1e-2**；前后半 win / 拾取率斜率 vs null 腿配对。
+//    · 副：entropy、mean_ret、base_destroyed、kills、dmg/局。
+//    · **硬止损（z8 教训）**：`breakers_off: false` 与 `ent_break 0.25` 保持不放；
+//      it1–3 只要 `kl > 0.05` 或 `entropy < 0.30` 立即停腿（z8 四课 T_kl 全是 it2、
+//      it1 kl 曾到 2.174）；`error` 行出现即停。
+//    · **定腿另跑外部满池 400 局（860001+）**；in-loop 20 seed 前缀子集不得单独定腿。
+//
+// 5. 已知局限
+//    · 起点是零位移权重；放大步长可能只是更快收敛到同一个平台，而不是跨出去。
+//    · 抬 lr 会让 `mean_ret` 与行为进一步脱钩（z10 同族指纹），别把 return 上涨当成功。
+//    · wDmg 0.12 的量纲超标（满量程 131 > 30）在本腿**故意保留**，与 z11-cost 形成对照：
+//      若只有 cost 腿动、step 腿不动 ⇒ 归因指向价格量纲而不是优化器。
+//
+// 6. 预算：500 it / 36h。eval_every 5、80 局/点、paired_rotate_seed 20261106（与 null 同）。
+//
+// ── 开工前置 ── bc 在盘 / `load_course` 过 / dashboard JSONC 过；
+//    开训 30 秒 `grep -h "hub=" tmp/z11-step/training-loop.log | tail -1` 核对隧道名。
+// ── 诊断工具 ── `tmp/z10-close.py`（kl/entropy/mean_ret 四指标）· `tmp/z8-check-parallel.txt`（崩盘指纹对照）
+// ── 结算节（结课时回填到本文件头 + `reports/z11-close-<YYYYMMDD>.md`）──────────
+//    §停课状态 §it1–20 kl 曲线 §与 null 的配对表 §训练侧四指标 §归档 sha16 §根因与后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z11-step",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 36,
+  "lr": 0.00024,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.01,
+      "lr": 0.00024,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z11-step/weights.json",
+  "traj": "tmp/z11-step",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z11-step",
+  "backup_prefix": "z11-step",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-step → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`：常驻 trainer 只准
+//     `trainer/run_rl_cluster.py --serve`（闸在 `worker/trainer_gate.py`），
+//     per-course run_rl 会被响亮拒绝（AGENTS §5 训练纪律）。
+//   ⚠ 不要复用 z10 的 out/traj/backup 目录；本课已全部换新（§15.5 禁跨改动续跑）。

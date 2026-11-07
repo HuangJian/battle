@@ -1,0 +1,223 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-06 21:46 回写；**跑 233 / 300 轮**，21:17 人工停课）──────────
+//   **判决：失败·零位移。判据一条未达。全文 → `reports/z10-close-20261106.md`**
+//
+//   停课状态：最后一条日志是 `job_pending`（it234，无 `job_completed` / `run_complete`），
+//   `loop-control.json` 的 `paused` 含本课 ⇒ **人工停课**，不是崩溃（`error` 行 0）。
+//   面板：in-loop 2000–2003 × 20 seed = 80 局/点（`EVAL_SEEDS` 前缀子集，只作同面板配对）；
+//   **外部满池 400 局（860001+）未跑**，判据§5 要求的定腿口径未满足，但 3760 局已足够判负。
+//
+//   主判据 win：前半 it≤76 **.202**（1280 局）→ 后半 it≥153 **.235**（1280 局），
+//     斜率 **+0.0130 pp/点**（47 点）⇒ 47 点只走 +0.6pp，噪声内；末 10 点 .19–.26 无趋势。
+//   拾取率 **.574 → .581**（斜率 +0.0021 pp/点）⇒ **零位移**（第六/七/八次证伪「调终点价」）。
+//   末点 it230（80 局）：win **.188** · pick **.588** · kills 10.21 · ticks p50 4364 ·
+//     base_destroyed **.662** · dmg 418.4 · wver `373a3c8a81e7fd43`。
+//   判据核对：`base_destroyed ≤ .25` ⇒ 后半 **.618 未达**；护栏 `2002 ≥ .15` ⇒ **.04 未达**；
+//     主 1「win 掉到 .20 以下停」⇒ 末点 .188 **破线**；`entropy ≥ .30` ⇒ .813 达标。
+//   分关 win 前→后：2000 .44→.44 / 2001 .15→.19 / **2002 .02→.04** / 2003 .20→.27；
+//     2002 的 base_destroyed .96→.92 ⇒ 迷宫关几乎全是被拆家。
+//   训练侧：kl .0035→.0034 · entropy .847→.799 · **mean_ret 49.14→53.93（+9.8%）** ·
+//     lr 1.2e-4 ⇒ **奖励在涨、行为不动**，不是熔断也不是步长不足。
+//
+//   根因：① 主失败模式仍是基毁（静态墙价 z9-r4b / 瞬态流价 t / 破墙价 brick 三条杠杆全没买到基防）；
+//     ② 拾取率锁在 .50–.59，抬 `wPickup` 与势能塑形已累计八次证伪；
+//     ③ 本轮独立调查（`tmp/z10-pick180/analysis.txt`）：obs 无缺失（ch12 与 idx40 一一对应、
+//        `corr(s32,pickupDist)=.998`），`pickupDist` 列已存在但**本课公式没消费它**；
+//        奖励只有稀疏 `+ wPickup*min(collected,6)`（=4），而 `-wPace` cap 36 / `-wThreat` cap 24
+//        罚绕路 ⇒ 走过去的 5–120 步**零梯度**；
+//     ④ 85% 拾取率的分母混了 21%「同拍生成即捡」白送道具 ⇒ **判据本身是浑的**。
+//     ⚠ 两次自我修正写在这里：`pickupDist=-1` 是「场上没有道具」不是「不可达」；
+//        静态几何「4 关全连通」不等于动态落点可达 ⇒ 别补 `powerUpsUnreachable` 列、别改 `buildDrop`。
+//   后继（均未验证）：先修测量口径（拆出生成即捡，主判据改主动拾取率 50.6%→≥81%）→ null 腿
+//     → BC 注入 `dist≥8` 示范（唯一未判死的杠杆，重训 BC 前先过五项门）；reward 结构另开一腿。
+//     **别再**：抬 wPickup / 接回 wNear·wApproach（判死）/ 改 obs（全权重作废）/ 动任务侧（红线）。
+//     定腿一律满池 + 配对 + 附面板名，禁 20-seed 前缀子集。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z10-maze —— z9-r4-safe 的替代腿：**会走迷宫 · 会战斗 · 会拾取 · 能赢**（2026-11-06，草稿，未开课）
+// ↑ 以下为立项时原文，保留作设计沿革；**状态与判词以上方结课块为准**。
+//
+// 为什么在（基于实际 eval/training 原账本重算，不抄头注判词）：
+//   · `z9-r4-safe` 实跑是 1 命版（in-loop it0 win .225、58 输局全是 lives_exhausted、
+//     base_destroyed 恒 0），它在测命数不在测钢基；其探针报告引用的 .875（probe，lives 3，
+//     80 局）原始 shards 已不在盘上、不可复核。**本腿替代它**。
+//   · z9-r4 主腿的“退化”经配对复算后基本是原地踏步（it0–35 .578 → it100–136 .570，
+//     配对 2160 键 fast 反而 +2pp，不显著）：它失败不是学错，是价格表+几何没给新行为
+//     留梯度。五次「抬终点价/势能塑形」已对拾取证伪（x5 / z4-polish / z4-pick-wall /
+//     z4-pick-approach / z5-pick），本腿**不再在奖励侧追拾取**。
+//   · x/y 迁移塌方发生在 classic 上（y34 toy pickup .91 + win .72 → y35 classic
+//     pickup .72 + win .02、kills 17.8→3.48、cells 中位 21）：塌的是走位/击杀，不是
+//     「道具眼睛」。本腿主杠杆只改「走多远才给钱」和「慢到什么程度算慢」两处。
+//
+// ══ 0. 任务侧（2026-11-06 用户裁定：20 敌 — 回到真实经典）═════════════════
+//   `level: classic35`（**不是** safe-base）· `stage_select: "16,22,3,6"`（Crossroads /
+//   Oasis / Steel Fortress / Brickworks）· **20 敌 / 3 命 / 20000 拍 / hard / level 0**。
+//   8 敌版在安全场上轻轻松松且 win=`kills=8` 同义，道具不在因果链上；20 敌全关里
+//   星（3 星钢穿 + 能力维度 50→80）才咬合通关。12000→20000：20 敌局中位 ~9000 拍、
+//   p90 必被截，保留 12000 会把正常赢局记成 timeout；与 z5-pick（20 敌 / 20000）同口径。
+//   `lives: 1` 与 `level: classic35-safe-base` 两处改动不得重犯；这两个键是本课开课
+//   前必须复核的。
+//
+// ══ 1. 父腿与变量账（一次只改一件事）══════════════════════════════════════════
+//   bc 与 z9-r4 / z9-r4b 同一起点 `z2-r4threat.it155.s7`（schema7 / in_ch 17）。
+//   相对 z9-r4b，本腿差异**只有两组参数**（其余逐字 = z9-r4b，含 wBase 7 / wPickup 4 /
+//   无 wNear / 无 wApproach / lr 1.2e-4 / kl .02 / kickstart false）：
+//     改 ① 探索梯度：`wWalk 1.0→0.25 / walkCap 20→90`
+//       旧：每格 1.0 分，但 20 格满 ⇒ 现状 cells 中位 70（盘上实测）之后**零边际**，
+//         迷宫深处走一步一分钱不给。旧价的 maze 可动区实际只到 20 格。
+//       新：每格 0.25 分、90 格满 ⇒ 总预算 +22.5（与旧 +20 同量级，硬闸 ✓），
+//         但梯度一直给到 90 格，覆盖 2002 迷宫道具刷出来的 13–16 格深处。
+//       `walkCap` 保留封顶（z0「无封顶探索款」判死仍有效）；总价不变防刷分。
+//     改 ② 效率价生效：`paceTicks 1200→500`（wPace/paceWindow/paceCap 不动）
+//       旧：paceTicks 1200 ⇒ 赢局（3500 拍 / 8 杀）`3500 − 9600 < 0`，pace 项全程 0 贡献，
+//         杀慢＝没人罚，base 被慢慢拆的主因在于没人给「清场太慢」定价。
+//       新：paceTicks 500 ⇒ 赢局（3500/8）仍 0（不罚正常节奏），
+//         3500 拍/4 杀 → `(3500−2000)/1000×6 = −9`；磨到 6000 拍/4 杀 → −24。
+//         只罚尾部，不罚主体（与 z9-r4-fast 的 `wFast/wSlow` 教训：**必须只罚赢/近赢
+//         的慢局**，故本式仍乘原项的 max(0, …) 门，不对 gameover 局发钱——
+//         慢输局的 kills 小，pace 自然放大罚，方向同「用行动别苟」）。
+//
+// ══ 2. 为什么不加拾取项（先写，免得下轮又把它们加回来）══════════════════════
+//   · 拾取在 8 敌版是 kill 的结果（第 5 杀才掉第一枚；`spawned=0` 局 100% 输因 kills
+//     均值 1.71，条件在 kills 之后拾取对 win 没有残余效应 —— 8 敌版 win 的同义定义是
+//     kills=8，拿它当理由属同义反复，不用）。
+//   · 在奖励语言（Φ 逐行差分，`biz/reward_library.py`）里任何 `pickupDist` 潜在势
+//     在拾取事件必然付/收一笔 `w×d_init` 的路程账，终点净价依赖距离 —— 方向是
+//     「越远越赚」，与设计意图反号，且已五次证伪。进展奖 `w×(d_t−d_{t+1})` 在本引擎
+//     里只能写成 Φ 的距离项，同病。
+//   ⇒ 本腿拾取**只保留终点价** `wPickup*min(collected,6)=4`（z9-r4b 中性价，逐字继承），
+//     不加 wFr*/wNear/wApproach。拾取率若动，归因顺序：先到 cells→kills 的联动。
+//   ⇒ 若单道具期捡到率长期都不动（见 §5），下一步是观测（s46 bestPickupValue）或
+//     GodAI「专程拾取」BC 片段——那是 schema/数据腿，不在本课.
+//
+// ══ 3. 剂量与硬闸（盘上分布实算）══════════════════════════════════════════════
+//   · 每格探索 0.25 分 vs 每格承伤成本 0.19 分（实测 0.0972 HP/拍 × 0.12 × 16 拍）
+//     ⇒ 走格净 ~+0.06/格，**不赚钱但够格**；机会成本 0.45/格仍是杀敌的心智，
+//     走位价不会抢击杀价（对齐 z5 的「cells ↑ 且 dmg ↓」观察）。
+//   · wBase 7.0、8 块满墙 = 56 < wWin 60 ✓（丢一块 −7 = 0.47 个击杀，逐字继承 z9-r4b）。
+//   · terminal 不动（−50 / −35 / −35 / 0）。
+//
+// ══ 4. 训练侧（逐字 = z9-r4b）══════════════════════════════════════════════════
+//   `lr 1.2e-4` / `kl_coef 0.02` / `kickstart_ref false` / `epochs 4` / `mb 1024` /
+//   `gamma 0.998` / `lam 0.95` / `normalize_ret false` / `target_transitions 24576`。
+//   起点是收敛态，不开缰绳（z9-r4 的 6e-5 + kickstart true + kl .05 已证 135 轮零位移）。
+//
+// ══ 5. 判据（主轨在胜率与效率，拾取只作分档诊断）══════════════════════════════
+//   面板：in-loop 80 局（2000–2003×20）只作哨兵；**定腿一律用外部满池
+//   4 关×100 seed（seed 860001+）400 局**，与 probe 同口径。
+//   ★ 20 敌起跑基线（2026-11-06 探针，`tmp/z10-20/it155-100.jsonl`，4 关×25 seed=100）：
+//   起点权重 `z2-r4threat.it155.s7` greedy win **.26**（Crossroads .48 / Oasis .24 /
+//   Steel Fortress **.08** / Brickworks .24），kills 均值 10.32、中位 8，ticks 中位
+//   3950，kills/千 2.42。**8 敌版的 .53 / .58 门限作废**，20 敌目标待外部 400 局回填：
+//     主 1：win —— 以 .26 为下沿记录增量，**掉到 .20 以下停**（本腿两项改动都只动
+//         走位/效率，不动击杀价）；400 局后定绝对门。
+//     主 2：`kills/千` —— 起点已 2.42，目标改为按 400 局**不降**、2002 专项回升。
+//     主 3：`base_destroyed ≤ 25%` —— eval_log 的 `lossDetail` 三列（本探针 lossDetail 全
+//         空，按 outcome 的 gameover 74 / clear 26 读；eval 面板自动回填）。
+//     诊断（不判过/不过）：单道具期拾取率（段内恰 1 个道具）、`d_start` 分档、
+//         `每局 d_min` 中位、`cellsVisited` 中位；**总拾取率不许跨版本/跨局数比较**。
+//     护栏：2002（Steel Fortress）≥ .15（起点 .08，25 局/关）；entropy ≥ .30。
+//
+//
+// ══ 6. 与现网两条腿的关系（开课前必读）══════════════════════════════════════
+//   · `z9-r4-safe`（1 命版，已跑 it34，win 全程 .17–.22）：**应当停课**，这条线作废。
+//   · `z9-r4b`（已跑 it51，配对 win 与 z9-r4 打平 .584）：为它留 100 轮读数；本腿用
+//     独立 out/traj/backup、独立 paired_rotate_seed（§15.5 禁跨改动续跑），不想等的话
+//     先停 z9-r4b 再开 z10-maze（同 seed 流、与旧腿可逐局配对）。
+//   · 开课：控制台（`bun run dashboard` :8900），用户手工执行，agent 不起腿。
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z10-maze",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制：基地完整性（8 块满 = 56 分，满量程 < wWin 60；逐字继承 z9-r4b）
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形：探索（本腿改 ①：wWalk 1.0→0.25 / walkCap 20→90，总预算 +22.5 同量级）
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入：拾取只用终点价（逐字继承 z9-r4b；零和势能已删，不加回）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r4threat/z2-r4threat.it155.s7.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/z10-maze/weights.json",
+  "traj": "tmp/z10-maze",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z10-maze",
+  "backup_prefix": "z10-maze",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

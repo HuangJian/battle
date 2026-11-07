@@ -1,0 +1,202 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-06 21:46 回写；**跑满 300 / 300 轮**，21:18 正常收官）────────
+//   **判决：失败·配对无差异。主判据 +3pp 未达、主机制量未采集。**
+//   全文 → `reports/z10-close-20261106.md` · 读数 → `tmp/z10-close.txt`
+//
+//   停课状态：唯一有 `run_complete` 的腿（it300, `cause=iters`，
+//   reason「正常收官（it300/300）：跑满声明的轮数，本地停采、云机已停机」）；
+//   `error` 行 0、`job_completed` 300/300 ⇒ **正常收官，不是崩溃、不是人工掐断**。
+//   面板：in-loop 80 局/点（前缀子集，只作同面板配对）；**外部满池 400 局未跑**。
+//
+//   单变量（相对 z10-maze，只有这一处概念改动）：`wBase 7.0→3.0` +
+//     `- wThCost*min(thCostCap, thCostBreach+thCostBreachAimed+thCostDirect+thCostDirectAimed)`
+//     （`wThCost 0.06` / `thCostCap 220`）；terminal 逐字相同。
+//   主判据（配对 win vs z10-maze，同 iter 同 seed）：3760 配对键，主 .2205 / 本腿 .2239
+//     ⇒ **+0.35pp**（目标 +3pp），McNemar discordant **580 : 567**（χ²≈0.15, p≈.70）⇒ **完全不显著**。
+//   主机制（本应先动）：判据要求同题 ΣthCost / 局 **降 ≥15%**；`eval_log.jsonl` **不含 thCost 列**，
+//     本课从未采集该读数 ⇒ **不是没达标，是仪表没接线**。替代读数 `base_destroyed`
+//     配对段 .6426→.6223（相对降幅仅 **3.15%**），远不到 15%。
+//   前后半：win **.231 → .236**（+0.48pp，斜率 +0.0022 pp/点）；拾取率 **.575 → .560（−1.55pp）**；
+//     kills 10.60→10.95；base_destroyed .632→.593；ticks p50 4223→4206。
+//   末点 it300（80 局）：win **.200**（恰在 .20 下沿） · pick **.505**（三腿最低） ·
+//     kills 10.68 · base_destroyed .625 · dmg 447.5 · wver `9952de18c6869a7e`。
+//   判据核对：副 1 `base_destroyed ≤ .25` ⇒ **.593 未达**；副 2 `win ≥ .20` 勉强达、
+//     `2002 ≥ .10` ⇒ **.05 未达**；`entropy ≥ .30` ⇒ .790 达标。
+//   分关 win 前→后：2000 .44→.45 / 2001 .23→.25 / 2002 .02→.05 / **2003 .23→.19（−4.0pp）**。
+//   训练侧：kl .0026→.0035 · entropy .851→.809 · **mean_ret 48.89→57.29（+17.2%）** ·
+//     lr 1.2e-4 ⇒ 又是「奖励在涨、行为全平」的 z9 同族指纹。
+//
+//   根因：① **瞬态流价也没买到基防**（配对 +0.35pp 不显著、基毁只降 2.0pp），
+//     与 `z9-r4b` 静态墙价证伪同族 ⇒ 基防不是「价征在哪一拍」的问题；
+//     ② 判据§4 明写「机制量没动就不要烧满 300 轮」，但 thCost 遥测从未接线 ⇒ 下轮先把机制量落盘；
+//     ③ 拾取率 −1.55pp，同样零位移（详见主腿结课块的拾取专题）。
+//   后继：先把 thCost 落到可读遥测；修 `powerUpsSpawned` 分母口径；再谈 BC 注入 / reward 结构。
+//     **别再**：抬 wPickup / 接回 wNear·wApproach / 改 obs / 动任务侧。满池配对定腿。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 z10-maze-t —— z10-maze 的**平行威胁流腿**：**基地定价从静态墙价换成瞬时威胁流价**（2026-11-06，未开课）
+// ↑ 以下为立项时原文，保留作设计沿革；**状态与判词以上方结课块为准**。
+//
+// 为什么在（基于实际 eval/training 原账本重算）：
+//   · `z9-r4b`（wBase 3→7，8 敌）已证伪：eval it0 .637 → it110 .412，配对 it70–111
+//     与主腿 −9.7pp（r4 .571 vs r4b .474），输法仍是 base_destroyed（it70–111 中
+//     360/374 输局为基毁）。**静态墙价买不到基防** —— 基毁局的 cells 更少、威胁反而更低
+//     （被动低交战慢慢拆），墙价罚的是结果，不是正在发生的暴露。
+//   · 本腿**不复刻 r4b**；改用 `thCost*` 四轴的累计成本流（`biz/reward_library.py`
+//     idx85–88，每决策步 `min(2, count)`），按 `r = Φ[i+1]−Φ[i]` 恰好是
+//     “基地被对准那几拍的租金”，对正在基毁窗口中的玩家征税，逼回防/截击。
+//   · 与 `z10-maze`（已开跑，20 敌 / 3 命 / 20000 拍）同题、同起点、同种子流，
+//     两腿可逐局配对 —— **本腿 vs z10 之差只能归因于这一处换杠杆**。
+//
+// ══ 0. 任务侧：与 z10-maze 逐字相同 ═════════════════════════════════════════════
+//   `level: classic35` · `stage_select: "16,22,3,6"`（Crossroads / Oasis /
+//   Steel Fortress / Brickworks）· **20 敌 / 3 命 / 20000 拍 / hard / level 0**。
+//   `bc = z2-r4threat.it155.s7`（schema7 / in_ch 17；z10 同源）。
+//
+// ══ 1. 变量账（相对 z10-maze 只有一处概念改动：基地价换杠杆）══════════════════
+//   子项 A（降静态价）：`wBase 7.0 → 3.0`（满墙 24 分，回 v2 水平）
+//   子项 B（新增瞬时流价）：
+//     `- wThCost*min(thCostCap, thCostBreach+thCostBreachAimed+thCostDirect+thCostDirectAimed)`
+//   其余逐字 = z10-maze（含 wPickup 4 / 无 wNear / 无 wApproach /
+//   wWalk 0.25 / cap 90 / pace 500 / lr 1.2e-4 / kl .02 / kickstart false）。
+//   归因句：本腿检验的不是“基地价更高”，而是“基地价征在**瞬态窗口**上
+//   是否比征在**墙格存量**上更有效”。r4b 已杀死了后者，z10 正在跑前者不上的
+//   新基线（in-loop it0–40 win 稳 .20 左右，kills/千已 2.42）。
+//
+// ══ 2. 剂量（盘上 114 个 shard 实测，8 敌短局 → 20 敌按 ticks 3930:3235=1.22× 外推）
+//   局尾 ΣthCost 中位 ≈ 87（8 敌）→ 20 敌 ≈ **106**；p90 ≈ 164 → 20 敌 ≈ **200**。
+//   取 `wThCost 0.06 / thCostCap 220` ⇒
+//     · 中位局价 ≈ 6.4 分（0.43 个击杀）；p90 封顶 ≈ 12 分（0.8 个击杀）。
+//     · 硬闸：满量程 12 < wWin 60 ✓；且**只罚正在被打**的步，与 wThreat（玩家在敌
+//       火线）不重叠 —— 同步惩罚 vs 被动惩罚是两笔账。
+//   为什么不标高：r4b 的教训是“静态优先在墙价上加码”不买行为；瞬态价的杠杆在
+//   威胁窗口内（暴露拍的密度）而不是在终点总量。首档剂量宁可保守（与 verdict
+//   §ThreatBudget 建议同形“累计成本流”）。
+//
+// ══ 3. 训练侧（逐字 = z10-maze）════════════════════════════════════════════════
+//   `lr 1.2e-4` / `kl .02` /
+//   `kickstart false` / `epochs 4` / `mb 1024` / `gamma .998` / `lam .95` /
+//   `target_transitions 24576` / `iters 300` / `max_hours 24`。
+//   起点是收敛态，不开缰绳（同 z9-r4b 的选择，见 `z10-maze` §4）。
+//
+// ══ 4. 判据（按本腿换杠杆重定，外部 400 局逐题配对再下结论）══════════════════
+//   面板：in-loop 80 局（2000–2003×20）只作哨兵；定腿用外部满池
+//   4 关×100 seed（seed 860001+）400 局，与 probe 同口径。
+//     主比较（主判据）：配对胜率 vs z10-maze（同 iter 同 seed McNemar）。目标:
+//         +3pp 或更高；**掉到 −3pp 以下止损**。
+//     主机制（机制量必须先动）：同题 thCost 总和（shard ̇̄̄̄ mid）/局
+//         目标降 ≥ **15%**（z10 it40 均值起算）。
+//     副 1：`base_destroyed`（eval_log 的 `lossDetail`）占比 ≤ .25（z10 探针 74% gameover）
+//         且不升于 z10 配对段。
+//     副 2：胜率护栏：整体 win ≥ .20（20 敌基线 .26 的容差带），且 **2002 ≥ .10** 护栏。
+//     诊断：单道具期拾取率、d_start 分档、d_min 中位 —— 与 z10 逐段对照（诊断不判过/不过）。
+//   训练读数护栏（§15.4）：kl 2e-3–1e-2、entropy ≥ .30。
+//   先行读点：**it40** 同题配对一次；机制量没动（thCost 不降）就不要烧满 300 轮。
+//
+// ══ 5. 与现网两条腿的关系（开课前必读）══════════════════════════════════════
+//   · `z10-maze`（已开跑，20 敌 / 3 命 / 20000 拍，it45 win 稳 .20）：配对对照臂。
+//   · `z9-r4b`（8 敌，已自废 It110 win .412）：本腿**替代其“守家”方向**，不复刻它。
+//   · `z9-r4-safe`（1 命版，已停，作废）：见结课报告，不得重启。
+//   · 开课：控制台（`bun run dashboard` :8900），任意一边腾出 worker 后手工起课。
+//     agent 不起腿。`tmp/z10-maze-t/weights.json`、备份、日志独立目录。
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z10-maze-t",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+
+  "reward": {
+    "formula": [
+      // 收入
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 机制（本腿降静态价 7→3，留小存量信号）
+      "+ wBase*baseWallIntact",
+      // 价格
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // 塑形：探索（逐字 = z10-maze）
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      // 收入：拾取只用终点价（逐字 = z9-r4b / z10-maze）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 机制：玩家威胁税（逐字 = z10-maze）
+      "- wThreat*min(threatTicks, threatCap)",
+      // 本腿唯一新增：基地瞬时威胁流价（每决策步 `min(2,count)` 的累计，
+      // 差分即「正在被射界内的那几步的租金」；满量程 12 分 < wWin 60）
+      "- wThCost*min(thCostCap, thCostBreach+thCostBreachAimed+thCostDirect+thCostDirectAimed)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 3.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+      "wThCost": 0.06,
+      "thCostCap": 220.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+
+  "dodge": "",
+  "bc": "nn-training/weights/z2-r4threat/z2-r4threat.it155.s7.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/z10-maze-t/weights.json",
+  "traj": "tmp/z10-maze-t",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z10-maze-t",
+  "backup_prefix": "z10-maze-t",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}

@@ -1,0 +1,202 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-07 09:39 回写；**it3 / 500 熔断**，08:58:15 开课、09:02:40 停）──────
+//   **判决：失败·熔断。强缰绳不是保护，是加速崩。**
+//   全文 → `reports/z11-close-20261107.md` §8；读数 → `tmp/z11-anchor/training_log.jsonl`
+//
+//   停课状态：`circuit_break` it3 → `gate_verdict=ABORT` → `run_complete cause=breaker`
+//     （reason「F4 熔断：kl>=0.075 for 3 consecutive iters (now 0.231)」）。
+//     **不是崩溃、不是人工停**；`error` 行 0。
+//
+//   it0（BC 起点，A 层 400 局）：win **.000** · pick **.876** · base_destroyed **1.000** ·
+//     kills 1.53 · cells p50 37 · dmg 79 · ticks 1854；wver `ec9dc6804fd2aef6`
+//     —— 与 `z11-bc` it0 完全同源（同一份 bc、同一面板）。
+//   逐轮训练侧（**没有第二个 eval 点**，eval_every 5 而 it3 就熔断）：
+//     | it | winRate(rollout) | kl | entropy | mean_ret | outcomes |
+//     | 1 | .0048（1/207） | **0.64882** | 1.6111 | **−3.91** | base_destroyed 206 |
+//     | 2 | .0000 | **0.33122** | 1.5959 | **−10.94** | base_destroyed 145 |
+//     | 3 | .0000 | **0.23105** | 1.5227 | **−17.61** | base_destroyed 167 |
+//   ⇒ `kl` 从 it1 就是阈值 0.075 的 **8.7 倍**，连续三轮全超；`mean_ret` **−3.91→−17.61
+//     持续恶化**（不是「锁住不动」，是「越锁越差」）；it1 唯一一次清场（1/207），之后两轮全基毁。
+//
+//   根因：**BC 起点与 z10 奖励的目标方向相反**（BC：win 0 / cells 37 / 基毁 100%；
+//     PPO 要：打人守家）。第一轮更新就产生巨大策略位移，`kickstart_kl 3.0` 只放大 loss
+//     梯度、**不能把策略拉回 ref，也阻止不了 F4 观测到 KL**。
+//   适用边界（本课最重要的产出）：**`kickstart_ref` 只能锁「与目标方向接近的收敛策略」**
+//     （x2-start / x3-start 先例），**不能锁「与目标方向相反的坍缩策略」**。
+//     z8 的 `kl_coef .2 + kickstart .92` 压不住 it1 kl 1.42 是同族事故。
+//
+//   与 `z11-bc` 的对照（两条腿都失败，但失败方式不同）：
+//     · `z11-bc`（无缰绳）：it0 pick .876 → **it5 .095、cells 37→2** —— 行为被**慢慢洗掉**；
+//     · `z11-anchor`（强缰绳）：**it1 kl 0.649、it3 熔断** —— KL **当场爆炸**。
+//     ⇒ 合起来的结论：**这份 BC 权重根本不能接 PPO，无论锁不锁。**
+//
+//   后继：不要再给这份 bc 加缰绳调剂量（已两次证伪）；要救只能在 z10 环境用
+//     `--teacher-argmax` 重采语料重训 BC（并把 `value_coef`/冷 value 头一起修），
+//     或做 bc-v6 的捡 + z10 打的混合语料 —— **改工程，不是改配置**。
+//
+//   归档：`z11-anchor.it1/.it2/.it3` 三份在盘（397,757 B 各）。
+// 课程 z11-anchor —— 给「会捡的 BC 权重」加缰绳：PPO 能不能在保住捡的同时学会打（2026-11-07 立项）
+//
+// 0. 一句话：相对 z11-null **概念变量 = 「BC 起点 + 强缰绳」三项**（`bc` / `kickstart_ref` /
+//    `kickstart_init`），reward、任务侧、lr/kl 全部逐字不变。它是 `z11-bc` 崩盘的**最小修复实验**。
+//
+// 1. 立项依据（z11 结课的真机读数，400 局/点 A 层满池）
+//    · `z11-bc` **it0**（BC 原始权重）：win .000 · pick **.876** · base_destroyed **1.000** ·
+//      kills 1.53 · cells p50 37 · dmg 79（对照 null it0：.182/.545/.652/9.47/84）。
+//      ⇒「会捡」跨环境完整保留，但不会打/不会守。
+//    · `z11-bc` **it5**（PPO 5 轮后）：win .000 · pick **.095** · base 1.000 · kills 0.51 ·
+//      cells **2** ⇒ **PPO 五轮就把 BC 的捡行为洗掉，策略坍缩成原地不动**。
+//    · 崩因同 z8 族：该 BC 权重 move 熵 .9123、约 1/4 局开局冻死、原话「不判全过，别接 PPO」
+//      （`reports/bc-v6-train-analysis-20261105.md:4,52,257-259`）；`value_anchor .001`
+//      挡不住冷 value 头把它拖进静止。`z11-bc` 当时**刻意 `kickstart_ref: false`**（单变量），
+//      本课就是把那个被省掉的缰绳补上。
+//
+// 2. it0 基线（**同权重同面板，可直接引用，不需重跑**）
+//    · z11-bc it0 = 本课 it0（同一份 `bc-v6-train/weights.json`、同一 400 局面板）：
+//      win .000 / pick .876 / base 1.000 / kills 1.53 / cells 37 / dmg 79。
+//    · 本课开跑后 it0 若与上述偏离 >3pp，先查 bc 加载与面板，别拿曲线下结论。
+//
+// 3. 变量账（相对 z11-null，三项同属「起点 + 缰绳」一个概念变量）
+//    · `bc`: `z10-maze.it233` → **`bc-v6-train/weights.json`**
+//    · `kickstart_ref`: false → **true**（把 bc 当 ref，前几轮用 KL 锁住策略）
+//    · `kickstart_init`: 缺省 → **3.0**（→ `kickstart_kl`；系数 = 3.0 × 0.5^(it−1)，
+//      it5 仍 0.19、it7 0.047 ⇒ 实质强锁 it1–5、it7 后基本放开）
+//    · `kickstart_decay`: 显式写 **0.5**（不写会回落到 CLI 缺省，课程写 0.92 白发的前科）
+//    其余逐字 = z11-null：reward 11 行 / 18 项 / terminal 四项、`lr 1.2e-4`、`kl_coef .02`、
+//    `breakers_off false`、`ent_break .25`、`iters 500`、`target_transitions 24576`、任务侧未动。
+//
+// 4. 为什么**不**用 z11 最新权重起跑（两条硬理由）
+//    · **配对失效**：训练 rollout 的 seed 由 `(rotate_seed, it, stage, wave)` 键控。从
+//      `z11-ent` it200 起跑的新课，其 it1 与 ent 的 it201 是**不同 seed**，无法逐局配对；
+//      而本课与 ent 同 it 同 seed，**可逐局 McNemar**（这才是并行的价值）。
+//    · **起点是坏的**：ent it200 的 entropy 1.407、mean_ret 23.9、pick 比 null 低 0.52pp；
+//      从高熵低 return 态起跑，收熵/打磨都会混入「继承了什么」的歧义。
+//    · 另外 ent 还在跑（it204+），它那个「最新」权重每分钟都在变，不可复现。
+//
+// 5. 判据与止损（it1–20 是判决窗口，400 局/点 A 层满池；与 z11-ent 逐局配对）
+//    · 主 1（保住捡）：it1–10 的 pick **≥ .70**；对照 z11-bc it5 的 .095。
+//    · 主 2（学会打）：it10–20 的 `base_destroyed` **从 1.000 下降 ≥10pp**，且 kills 从 1.53
+//      抬到 ≥3.0；it20 win ≥ .05。
+//    · 副：`cellsVisited` p50 ≥ 60（it0 是 37，bc it5 崩到 2）、dmg、kl、entropy。
+//    · 硬止损（任一触发即停）：it1–10 pick **< .50**（缰绳没保住捡）；或 cells p50 **< 20**
+//      （又被洗成静止）；或 it20 `base_destroyed` 仍 **= 1.000**（缰绳锁死了学习，判负）；
+//      或 `kl > .05` / `entropy < .30` / error 行出现。
+//    · 判决口径：**两种失败要分开写** —— 「捡被洗掉」= 缰绳剂量不够；「捡保住但基毁不动」
+//      = 缰绳锁太死/BC 权重本身不会打。不要混成一句「BC 不行」。
+//
+// 6. 已知局限
+//    · 这份 BC 权重本身 win 0、base 1.000，**缰绳只能保行为，不能凭空创造战斗能力**；
+//      若 it20 基毁仍 1.000，正确结论是「需要重训 BC（argmax 语料 + 战斗局）」，不是「缰绳没用」。
+//    · `kickstart_init 3.0` 是**未标定的经验剂量**（z8 用 0.92 失败；默认 1.0 只锁 it1–7 的弱形式）。
+//      若前 5 轮 pick 保住了但 win 完全不动，下一腿再降 init / 改 decay，不要在本腿里调。
+//    · 拾取率分母仍含约 21% 生成即捡白送道具（仪表未修）⇒ 只作相对比较。
+//    · 与 `z11-ent` 并行：两条腿共用 `paired_rotate_seed 20261106` 与同一 A 层面板，
+//      可逐局配对；但**跨批次不得相减**（A 层 2_000_000_001 / B·C 层 860001）。
+//
+// 7. 预算：500 it / 36h（it20 前必须看判决窗口，别盲跑满）。eval_every 5、A 层 400 局/点。
+//
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-anchor → 开课。
+//   训练唯一入口 = 控制台 / 同源 API；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`（`worker/trainer_gate.py` 会拒）。
+//   开训 30 秒核对日志 `hub=` 与当时活着的隧道 URL（换名会报 530）。
+// ── 诊断工具 ── `tmp/z11-check.py`（改 NAMES 复用）· `tmp/bc-v6-gate-verdict.txt`
+// ── 结算节（结课时回填到本文件头 + `reports/z11-close-<YYYYMMDD>.md`）──────────
+//   §停课状态 §it0/5/10/20 四点的 pick/cells/base/kills §与 ent 配对 §kl/entropy
+//   §「捡被洗掉 vs 缰绳锁死」分开判 §归档 sha16 §根因与后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z11-anchor",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 36,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z11-anchor/weights.json",
+  "traj": "tmp/z11-anchor",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z11-anchor",
+  "backup_prefix": "z11-anchor",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  "kickstart_init": 3.0,
+  "kickstart_decay": 0.5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-anchor → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`：常驻 trainer 只准
+//     `trainer/run_rl_cluster.py --serve`（闸在 `worker/trainer_gate.py`）。
+//   ⚠ 不要复用 z10/z11 的 out/traj/backup 目录；本课已全部换新（§15.5 禁跨改动续跑）。
