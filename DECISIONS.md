@@ -11238,3 +11238,50 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `tests/remote/test_ppo_backend_switch.py`；`tools/paddle_parity.py bc-fixture/bc-check/bc-verify`
   PASS（forward 9.20e-07 / after 1.45e-06 / torch 读 Paddle 权重 4.04e-07）。
 - **全文** → `docs/nn/training-stack.md` §68；规格 → `plan/bc-single-course.plan.md` §16.8 #17。
+
+## §2026-11-07-goalnn-c8-seed-level（C8：统计单位 = `(stage, seed)`；z11 旧 p 降为上界，run-average 与 endpoint 分开报）
+
+- **背景**：`worker/eval_track.py:78-95` 的 A 层池与 `it` 无关；`tmp/z11-check.py:128-146`
+  以 `(it, stage, seed)` 配对，把 41 点 × 400 seed 当独立样本 ⇒ 同一 seed 被计 41 次，
+  z11 全部 p 只是上界。`plan/classic35-path.plan.md` §5 把 C8 定为硬前置。
+- **被否决**：① 继续用全量 McNemar（同一 seed 重复计权，p 虚高）；② 只报 endpoint
+  （丢掉旧 p 实际测的 run-average，且单点 400 局对 <8pp 无功效）；③ 用 ICC 有效观测数
+  63 当检验 n（那只是旧 p 的解释量；C8 的 400 个 seed 均值仍是 400 个独立单元）。
+- **决定**：统计单位 = `(stage, seed)`；窗口 = 所有比较腿都完整的 iter 交集；主读数 =
+  每 seed 窗口均值 + 配对 sign/bootstrap，副读数 = 末个完整 iter 的逐局 win + McNemar；
+  旧全量 McNemar 只作上界。两个 estimand 分别报 MDE：run-average ±1.31pp@400、
+  单点 ±8.0pp@400（p_d≈.33，替换计划的 7.7pp）。工具 `nn-training/tools/z11_seed_level.py`，
+  测试 `tests/tools/test_z11_seed_level.py`。
+- **结果（z11 四腿，0–200）**：cost run-average −2.84pp [−3.72, −1.98] p=4.85e−8 /
+  endpoint +0.50pp p=.930；step −0.92pp [−1.80, −0.03] p=.0708 / +1.25pp p=.731；
+  ent +3.16pp [+2.20, +4.17] p=5.72e−6 / +3.25pp p=.298（it200，非 ent 末点）。
+  旧 p 复现 4.68e−11 / .03387 / 1.60e−12 ⇒ loader 正确。
+- **边界**：只覆盖四腿 0–200 公共窗口；ent 201+ 与 cont 的 it20/50/100 三窗未算；
+  run-average 含训练轨迹适应期，不能读成末点能力；C1–C7/C9 未做。
+- **验收**：ruff + mypy 绿；14 passed；`bash tools/githook/nn-py-safe.sh
+  nn-training/tools/z11_seed_level.py` 可复算。
+- **全文** → `reports/c8-z11-seed-level-20261107.md`；`docs/nn/experiments.md` §129。
+
+## §2026-11-07-goalnn-c9-critic-calibration（C9：it233 critic 压缩/偏置；value-only = 冻结策略只训 value_head）
+
+- **背景**：z10.it233 的失败无法区分「策略没学好」与「critic 尺度/偏置把优势估计带歪」；
+  plan §5 C9 要求 4 关 × 50 局标定，并评估 `--policy-coef 0` 的 value-only 预热。
+- **被否决**：① 只把 policy loss 乘 0、不冻结参数（AdamW weight_decay 仍改策略；共享 trunk
+  还会被 value 更新）；② 只报 game-level R²/斜率（掩盖局内排序）；③ 把 `policy_coef`
+  当纯配置（`worker/` 原无此键，且 v6 loader 不读 `returns.npy`）。
+- **决定**：`--policy-coef` 默认 1.0（历史行为）；0 时在建 optimizer **之前**冻结除
+  `value_head.*` 外全部参数，optimizer 只收 value 头，且要求 `--arch student` /
+  `value_coef>0`；配置 → 本地 argv → 云端 manifest 全链透传。v6 `_load_dataset_v6`
+  读可选 `returns.npy`（缺失填 NaN）。校准工具 `tools/c9_critic_calibration.py`，
+  MC return 用课程公式现算，CI 按局 cluster bootstrap。工具支持 `--value-weights`：
+  用同一批 obs 前向重算预热后的 V，并记录 sha16；it233 自身 identity 复算差 ≤3e−6。
+- **结果（it233，16/22/3/6 × 50 seed = 200 局 / 159,471 步）**：step 级 R² **.0800**、
+  slope **.5784** [.4181,.7272]、meanV **11.61** vs meanMC **53.64**（−42.0）；
+  game-level R² .2344、slope 1.0126、截距 **+28.60**；stage 22 slope CI 跨 0，
+  stage 3 meanV 为负而 meanMC 为正 ⇒ critic 仍压缩+偏置。
+- **边界**：单 checkpoint / on-policy；20 轮 PPO 未起（训练由人手工），所以**不判决**
+  P2-A 可跳过、也不把标定当 it5 崩因的证明；换奖励 schedule 需重算。
+- **验收**：C9 相关 15 passed；`test_bc_value_only.py` 1 epoch 真跑并断言非 value 参数
+  导出 base64 逐字节不变、value 头有更新；`test_bc_course` + `test_bc_loop` 67 passed；
+  ruff + mypy 绿；200 个 rollout 已写 `returns.npy`。
+- **全文** → `reports/c9-critic-calibration-20261107.md`；`docs/nn/experiments.md` §130。

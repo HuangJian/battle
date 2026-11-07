@@ -258,6 +258,22 @@ def _majority_baseline(dl, action_v6: bool = False) -> dict:
     return out
 
 
+def _freeze_non_value(model: torch.nn.Module) -> None:
+    """C9 value-only：只让 `value_head.*` 保留梯度，其余参数冻结。
+
+    `PPOStudent` 的 value_head 与策略头共享 `pf`；冻结 trunk 才能保证策略输出
+    逐字节不变。冻结必须发生在建 optimizer 之前——否则 AdamW 的 weight_decay
+    仍会改策略权重（零梯度不等于零更新）。
+    """
+    n_value = 0
+    for name, param in model.named_parameters():
+        keep = name.startswith("value_head.")
+        param.requires_grad = keep
+        n_value += int(keep)
+    if n_value == 0:
+        raise ValueError("--policy-coef 0 但模型没有 value_head.* 参数")
+
+
 def train(args) -> dict:
     # P2-3（2026-09-02）：可复现性补全——此前只有 torch.manual_seed，numpy/random
     # 全局 RNG 未播种（_majority_baseline 的 Counter 顺序、DataLoader worker 内
@@ -348,6 +364,18 @@ def train(args) -> dict:
     # mask.npy(9)`，`dataset.NNDataset(action_v6=True)` 返回 10 元组，本函数三头 CE。
     # 语料由 `export-rl-rollout.ts`（可加 `--teacher-argmax`）产出。
     policy_extra = bool(getattr(args, "policy_extra", False))
+    # C9（value-only 预热）：policy_coef=0 时只训 value 头；策略/主干必须冻结。
+    # 先拒绝无目标配置，别让零梯度 + weight_decay 静默改策略。
+    policy_coef = float(getattr(args, "policy_coef", 1.0))
+    if policy_coef < 0:
+        raise ValueError(f"policy_coef 必须 ≥ 0（得到 {policy_coef}）")
+    if policy_coef == 0.0:
+        _value_coef = float(getattr(args, "value_coef", 0.0) or 0.0)
+        if not use_value or _value_coef <= 0:
+            raise ValueError(
+                "--policy-coef 0 是 value-only：需要 --arch student 且 --value-coef > 0"
+                "（否则没有任何可训练目标）"
+            )
     model = (
         PPOStudent(action_v6=action_v6, policy_extra=policy_extra)
         if use_value
@@ -362,6 +390,8 @@ def train(args) -> dict:
         load_state_into(model, args.resume)
     model = model.to(dev)
     raw_model = model
+    if policy_coef == 0.0:
+        _freeze_non_value(raw_model)
     if use_dp:
         # DP 包装：前向/反向跨卡分发（batch 均分），参数共享原地更新——raw_model
         # 的 state_dict 始终是训练终态；落盘/恢复/参数计数一律走 raw（防 "module." 前缀）。
@@ -376,7 +406,10 @@ def train(args) -> dict:
     if n_params > 200_000:
         print(f"[train] WARNING: {n_params} > 200K budget; consider shrinking conv_ch/head_hidden")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    if not trainable:
+        raise ValueError("没有可训练参数（policy_coef=0 时检查 value_head）")
+    opt = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs))
 
     #: 交付 epoch 的**原始** val_loss（文件名/账本口径；B1，2026-11-05）。
@@ -418,37 +451,54 @@ def train(args) -> dict:
             if action_v6:
                 # v6 三头：move4 + fire3 + hold2（掩码各段见 dataset.NNDataset）
                 lm, lf, lh, vpred = out
-                loss = (
-                    _masked_ce(lm, mv, mm)
-                    + _masked_ce(lf, fr, mf, class_weight=fire_class_weight)
-                    + _masked_ce(lh, hd, mh, class_weight=hold_class_weight)
-                )
+                if policy_coef == 0.0:
+                    loss = torch.zeros((), device=dev)
+                else:
+                    policy_loss = (
+                        _masked_ce(lm, mv, mm)
+                        + _masked_ce(lf, fr, mf, class_weight=fire_class_weight)
+                        + _masked_ce(lh, hd, mh, class_weight=hold_class_weight)
+                    )
+                    loss = policy_loss if policy_coef == 1.0 else policy_coef * policy_loss
                 valid = ~torch.isnan(ret)
                 if args.value_coef > 0 and valid.any():
                     vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
                     loss = loss + args.value_coef * vloss
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
+                elif policy_coef == 0.0:
+                    raise ValueError(
+                        "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
+                    )
             elif use_value:
                 lm, lf, vpred = out
-                loss = _masked_ce(lm, mv, mm) + _masked_ce(
-                    lf, fr, mf, class_weight=fire_class_weight
-                )
+                if policy_coef == 0.0:
+                    loss = torch.zeros((), device=dev)
+                else:
+                    policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                        lf, fr, mf, class_weight=fire_class_weight
+                    )
+                    loss = policy_loss if policy_coef == 1.0 else policy_coef * policy_loss
                 valid = ~torch.isnan(ret)
                 if valid.any():
                     vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
                     loss = loss + args.value_coef * vloss
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
+                elif policy_coef == 0.0:
+                    raise ValueError(
+                        "value-only: batch 内没有有效 return（returns.npy 缺失/全 NaN）"
+                    )
             else:
                 lm, lf = out
-                loss = _masked_ce(lm, mv, mm) + _masked_ce(
+                policy_loss = _masked_ce(lm, mv, mm) + _masked_ce(
                     lf, fr, mf, class_weight=fire_class_weight
                 )
+                loss = policy_loss if policy_coef == 1.0 else policy_coef * policy_loss
             loss.backward()
             # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
             # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
             run["loss"] += loss.item() * obs.shape[0]
             run["n"] += obs.shape[0]
@@ -774,6 +824,12 @@ def main():
         default=0.0,
         help=">0: 语料带 returns.npy 时按该系数对 value 头做 MC return 回归 "
         "（M2 ⑥ / M3 value 预置；仅 --arch student 生效）",
+    )
+    ap.add_argument(
+        "--policy-coef",
+        type=float,
+        default=1.0,
+        help="策略 CE 权重；0 = value-only（冻结 trunk/策略头，只训 value_head；需 value-coef>0）",
     )
     args = ap.parse_args()
     train(args)

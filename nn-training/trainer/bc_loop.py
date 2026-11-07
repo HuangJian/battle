@@ -390,6 +390,8 @@ def bc_job_extra(
         "val_split": float(course.train.val_split),
         "mirror_p": float(course.train.mirror_p),
         "value_coef": float(course.train.value_coef),
+        # C9：0 = value-only（本地 train_tuning_argv / 云端 manifest 都要透传）
+        "policy_coef": float(course.train.policy_coef),
         # v6 三头（2026-11-04）：worker 侧 `train/bc.py` 按它切 10 元组 / 三头 CE
         "action_v6": bool(course.resolved_action_v6),
         "policy_extra": bool(course.train.policy_extra),

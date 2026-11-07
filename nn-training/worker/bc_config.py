@@ -183,6 +183,9 @@ class BcTrainBlock(BaseModel):
     #: >0 且语料带 returns.npy 时对 value 头做 MC 回归（历史教训：默认 0——
     #: value MC 回归在 coef 0.05 下都爆，docs/nn/legacy.md §20 M3）
     value_coef: float = 0.0
+    #: C9 value-only 预热：策略 CE 权重。0 = 冻结 trunk/策略头，只训 value_head；
+    #: 1 = 历史 BC。0 必须配 value_coef > 0（train 侧响亮拒绝无目标配置）。
+    policy_coef: float = 1.0
     seed: int = 1234
     #: 每 N epoch 中途 checkpoint（{out}.ckpt.{epoch}）；0 = 关
     ckpt_every: int = 0
@@ -232,6 +235,13 @@ class BcTrainBlock(BaseModel):
     def _weight_exponent_ge0(cls, v: float) -> float:
         if v < 0:
             raise ValueError("train.weight_exponent 必须 ≥ 0")
+        return v
+
+    @field_validator("policy_coef")
+    @classmethod
+    def _policy_coef_ge0(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("train.policy_coef 必须 ≥ 0")
         return v
 
     @field_validator("lr")

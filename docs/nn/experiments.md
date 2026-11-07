@@ -7,6 +7,265 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §134 C4 离线 AUC 探针：pf 高可解码，但 12 维基地威胁不是唯一载体（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C4）：critic 冷、标定差，不能直接拿 `V(s)` 的 AUC
+判断“输入里有没有守家信号”（那是循环论证）。本探针冻结 z10.it233 的 `pf`，只训练
+logistic probe：`outcome=base_destroyed ∧ end_tick−t≤W`，W = 50/100/200 拍；
+并对 `POLICY_EXTRA[25:37]` 做置零消融。
+
+**口径**
+- 数据：`tmp/p0-c9/rollouts` **200/200** shard · **159,471** 决策步 · metrics v16 ·
+  4 关（3/6/16/22）· z10.it233 sha16 `46489ad5c065c375`。
+- `pf` = `policy_features`（**不读 value_head**），当前 **185 维**（128 hidden + 57 extra）；
+  消融列是 `pf[153:165]`，即 `POLICY_EXTRA[25:37]`（基地威胁/环墙/TTI/相对向量/各侧敌距）。
+- 标签只用 t 时刻特征与 terminal tick；非 `base_destroyed` 局全负。
+- 5 折按 `(stage, seed)` 分组；训练抽样 = **全部正步 + 3% 负步**，每局按实际入样概率
+  回补并归一（每局总权重相同），池化入样率 **3.3%–4.3%**；评估用**留出局全部步**。
+- 95% CI = 按局 cluster bootstrap 500 次；`PR-AUC` = average precision，与 prevalence 同报。
+- critic 基线读 shard 的 `value.npy`，并按 **`−V(s)`**（低 V = 高风险）计风险 AUC；
+  原始 V 的 AUC 一并留档（`raw_value_auc`）。
+
+**读数**
+
+| W（拍） | 正步 / 步数 | prevalence | full AUC [95% CI] | 去 12 维 AUC [95% CI] | Δ AUC | full AP | 去 12 维 AP | critic −V AUC [95% CI] |
+|---:|---:|---:|---|---|---:|---:|---:|---|
+| 50 | 545 / 159,471 | 0.34% | **0.974** [0.963, 0.985] | **0.945** [0.921, 0.968] | 0.029 | 0.217 | 0.199 | 0.899 [0.871, 0.926] |
+| 100 | 1,090 / 159,471 | 0.68% | **0.968** [0.957, 0.979] | **0.942** [0.917, 0.962] | 0.027 | 0.339 | 0.243 | 0.887 [0.852, 0.917] |
+| 200 | 2,180 / 159,471 | 1.37% | **0.952** [0.932, 0.966] | **0.928** [0.901, 0.951] | 0.024 | 0.441 | 0.342 | 0.872 [0.836, 0.903] |
+
+critic 原始 V 的 AUC 为 **0.101 / 0.113 / 0.128**（反向；低 V = 高风险是预期方向，
+不是“无信号”）。
+
+**判读**
+- 三窗 full AUC 都高（0.952–0.974），说明同一份 `pf` 里**线性可解码**出“基地将在
+  W 拍内被毁”；这不是 critic 已经在用它的证据。
+- 去 12 维后仍 **0.928–0.945**，只掉 **0.024–0.029**，低于预注册的材料性阈值 0.05
+  ⇒ 机械读法 **`redundant_signal`**：基地威胁信息在 obs/其它 `pf` 列里有多处载体，
+  12 维不是唯一来源；但并非零贡献。
+- critic `−V` 风险 AUC **0.872–0.899**，比 probe 低 **6–8 个点**：critic 不是完全看不见，
+  但排序确实弱一档；W 越短差距越大（W50 0.899 vs 0.974）。
+- full AP 0.217/0.339/0.441 远高于同窗 prevalence，但三窗 prevalence 不同，**不跨 W
+  直接比 AP**。
+- 决策：**辅助预测头的边际低，先做 P3-A（把基地事件搬到当拍）**；value 预热仍是
+  C9 的账，不作为本探针的直接处方；`full` 高而消融仍高，不支持“表示层缺失 ⇒ ch17”。
+  critic 与 probe 的 6–8 点差距保留为“critic 弱一档”的归因线索，不单独立腿。
+
+**边界**：单 checkpoint / 4 关 on-policy shard / 20k 拍训练期 rollout，不是 w1-null 的
+36k 面板；标签是“基地毁前 W 拍”，不是“守家动作正确性”；logistic 只测线性可解码性，
+AUC 低不等于非线性模型也低；训练抽样保留全部正步改变了训练类先验（评估仍自然 prevalence）。
+
+**验收**：`test_p0_auc_probe.py` **8 passed**；ruff + mypy 绿；
+`bash tools/githook/nn-py-safe.sh nn-training/tools/p0_auc_probe.py --shards tmp/p0-c9/rollouts`
+可复算；产物 `tmp/p0-c4/auc.{json,md}`（smoke `tmp/p0-c4/smoke.*`）。
+
+---
+
+## §133 C3 双教师 argmax 一致率：33.4%，否决全局混合（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C3）：bc-v6（pick）与 z10.it233（fight）各有自己的
+argmax。若按概率全局混合，主头不一致的状态会被平均成两边都不想要的策略；先量一致率，
+<60% 就按窗口切分（§7 P2-B）。
+
+**口径**
+- 数据：`tmp/p0-c9/rollouts` 的 **80/200** shard（按 stage 轮转，4 关覆盖），**63,193**
+  决策步；metrics v16。
+- A = `bc-v6-train/weights.json`（sha16 `ec9dc6804fd2aef6`）；B = z10.it233
+  （sha16 `46489ad5c065c375`）。
+- 主读数 = 掩码 argmax 的 `(move, fire)` 同时一致。`hold` 的合法掩码是方向相关的
+  （shard 只存执行方向那一版），只在“两人同一个 move 且 = 执行 move”时精确比较；
+  不拿未知掩码猜。95% CI = 按局 cluster bootstrap 2000 次。
+- 状态层非互斥：`pickup_near` = `0≤pickupDist≤6`；`enemy_fire_lane` = `leadHit*` 任一；
+  `base_threatened` = `thBreach/thBreachAimed/thDirect/thDirectAimed/thBulletsAtBase` 任一；
+  `tactical_any` = 三者并集；`none` = 补集。
+
+**读数**
+
+| 层 | 决策步 | move | fire | **move+fire [95% CI]** | full (可判 n) | hold (可比 n) |
+|---|---:|---:|---:|---|---|---|
+| all | 63,193 | 41.8% | 78.9% | **33.4% [32.5, 34.3]** | 25.6% (58,263) | 92.3% (16,175) |
+| pickup_near | 4,258 | 30.5% | 82.5% | **25.2% [21.1, 29.8]** | 19.8% (3,996) | 97.8% (811) |
+| enemy_fire_lane | 13,182 | 45.3% | 88.0% | **40.2% [38.9, 41.7]** | 33.2% (12,105) | 95.0% (4,228) |
+| base_threatened | 6,799 | 42.8% | 76.6% | **34.4% [31.6, 37.5]** | 26.9% (6,363) | 89.9% (1,904) |
+| tactical_any | 20,861 | 42.4% | 83.1% | **36.0% [34.5, 37.4]** | 29.0% (19,334) | 93.9% (5,977) |
+| none | 42,332 | 41.5% | 76.8% | **32.1% [30.8, 33.4]** | 23.9% (38,929) | 91.3% (10,198) |
+
+**判读**
+- **全部层都 <60%**，因此不做全局混合，改按窗口切分（§7 P2-B）。
+- 分歧主要在 **move（41.8%）**，不是 fire（78.9%）；`hold` 在可比子集上 92.3%，
+  不是主要矛盾。`full` 的分母是 58,263 可判步（不含 4,930 个 hold 掩码不可比步），
+  不与 33.4% 的 63,193 全步同分母；同一可判集上 move+fire 为 27.8%。
+- **pickup_near 最差（25.2%）**：拾取附近恰是两种教师分歧最大的状态，全局混合会
+  直接抹掉 pick 行为；`enemy_fire_lane` 最高（40.2%）也仍远低于 60%。
+- 低一致率只否决全局混合，**不等于**按窗口切分已被验证；后者仍需单独实验。
+
+**边界**：B 就是生成这批 shard 的 z10.it233；只做同一状态上的 argmax 比较，不重跑仿真、
+不改课程；80/200 是 stage 轮转抽样；4 关 hard，跨关/跨难度不可直接外推。
+
+**验收**：`test_p0_teacher_agreement.py` **7 passed**；ruff + mypy 绿；
+`bash tools/githook/nn-py-safe.sh nn-training/tools/p0_teacher_agreement.py --max-games 80 --threads 8`
+可复算；产物 `tmp/p0-c3/agreement.{json,md}`。
+
+---
+
+## §132 C1 价格腿效应量上限：6/10 项低于 30 分（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C1）：价格腿已经跑过多次，但缺一张「就算该项满量程
+移动，最多能改多少 return」的表。没有这张表，低于可测阈值的项会被反复抬价。
+
+**口径**：只审**价格侧** `w*`；`最大差额 = |Δw| × 项内最大量`。cap 优先取公式自带
+上限（`pickupCap`/`brickCap`/`thCostCap`/`approachCap`/`nearRadius`），`wBase` 取基环 8 格；
+`wDmg` 无公式 cap，用 `tmp/p0-c9/rollouts` 200 局末行 `playerDamageTaken` 经验最大
+**1172**。阈值 = **30 分**（P0.1 的「<30 = 不可测」）；8pp 是 win-rate MDE，表里只列
+比值，**不与 30 分同单位比较**。
+
+**读数**：
+
+| 腿 | 参数 | 旧 → 新 | 项内最大量 | 最大差额 | 判决 |
+|---|---|---:|---:|---:|---|
+| z5-pick | `wPickup` | 4→7 | 6 | 18.00 | 不可测 |
+| z5-pick (max) | `wPickup` | 4→20 | 6 | 96.00 | ≥30 |
+| z9-r4 | `wPickup` | 4→8 | 6 | 24.00 | 不可测 |
+| z9-r4 | `wNear` | 0→.7 | 3 | 2.10 | 不可测 |
+| z9-r4 | `wApproach` | .02→.05 | 12 | 0.36 | 不可测 |
+| z9-r4b | `wBase` | 3→7 | 8 | 32.00 | ≥30 |
+| z10-maze-t | `wBase` | 7→3 | 8 | 32.00 | ≥30 |
+| z10-maze-t | `wThCost` | 0→.06 | 220 | 13.20 | 不可测 |
+| z10-maze-brick | `wBrick` | .25→1 | 12 | 9.00 | 不可测 |
+| z11-cost | `wDmg` | .12→.025 | 1172 | 111.34 | ≥30 |
+
+**判读**：
+- **6/10 低于 30 分**：wPickup 4→7 / 4→8、wNear、wApproach、wThCost、wBrick。
+  这些项单独满量程也不够解释一个胜率台阶；继续抬它们没有信息量。
+- **wBase 3↔7 = 32 分**，刚过线；但 z9-r4b 的实际读数仍为负 ⇒ 上限大不等于行为
+  会被买到。
+- **wDmg 下调上限 111.34 分**（经验 max 1172），但 z11-cost 的 `dmg/局` 没降、C8
+  配对 win **−2.84pp** ⇒ 上限只是「可能性」，不是实现效应。
+- 4→20 的 96 分是历史最高档；实际测过的 4→8 只有 24 分，不能拿 96 分替 4→8 辩护。
+- `wNear`/`wApproach` 同距离族，单行上界不可相加；净额要逐状态对账。
+
+**边界**：固定轨迹/metrics 的代数上限，不是行为响应预测；训练侧 (`lr`/`kl`/`ent`)、
+换起点、BC 不在表内。`wDmg` cap 是 200 局经验最大值，换关集/策略会变。
+
+**验收**：`test_p0_effect_ceiling.py` 4 passed；ruff + mypy 绿；
+`bash tools/githook/nn-py-safe.sh nn-training/tools/p0_effect_ceiling.py` 可复算；
+产物 `tmp/p0-return/effect-ceiling.{json,md}`。
+
+---
+
+## §131 C2 ΣthCost 分布：池化 p95=170，隐含 wThCost≈0.106（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C2）：z10-t 的判据「ΣthCost/局 降 ≥15%」因
+`eval_log` 未接 thCost 列而从未可测；P3-A 又必须用**实测 p95** 定剂量，不能用
+`thShotsAtBaseCum=3000` / `thCost*=4000` 的校验上界。本探针只读现成 RL shard。
+
+**口径**：`tmp/p0-c9/rollouts`（z10.it233 的 4 关 × 50 seed）· **200 局 / 159,471 决策** ·
+metrics v16 · 每局 `ΣthCost = metrics[N,85..88]` 末行之和（四列为逐决策累计成本流，
+不再逐行求和）· p50/p95/p99 按**局**统计 · p95 CI = 按局 bootstrap 2000 次
+（seed 20261108）· `w@18 = 18 / p95`。
+
+**读数**：
+
+| 关 | 局 | 决策/局 | mean | p50 | p95 | p99 | max | p95 95% CI | w@18 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---:|
+| 3 | 50 | 437.5 | 81.20 | 78.50 | 132.65 | 168.04 | 170.00 | [120.00,168.20] | .1357 |
+| 6 | 50 | 596.9 | 80.54 | 84.00 | 152.10 | 159.57 | 163.00 | [112.84,159.85] | .1183 |
+| 16 | 50 | 748.9 | 112.54 | 101.00 | 197.20 | 251.71 | 262.00 | [154.55,252.55] | .0913 |
+| 22 | 50 | 1406.1 | 103.70 | 93.50 | 184.30 | 216.01 | 241.00 | [148.30,218.05] | .0977 |
+| **pooled** | 200 | 797.4 | 94.50 | 88.50 | **170.00** | 241.00 | 262.00 | [154.05,187.00] | **.1059** |
+
+四轴 pooled p95：`thCostBreach` 116.05 · `thCostBreachAimed` 40.10 ·
+`thCostDirect` 46.05 · `thCostDirectAimed` 28.00；零成本局 1/200（stage 6）。
+
+**判读**：P3-A 若以「p95 局总成本 = 0.3×wWin = 18」定单价，池化基线要求
+`wThCost≈0.1059`；分关 p95 132.7–197.2 ⇒ 0.0913–0.1357。stage 16 最高，符合
+「Crossroads 的破墙/直击暴露最长」的直觉。**这是剂量换算，不是开课判决**；
+A 臂仍要过机制量移动 + win 地板。p95 CI 的宽度（154–187）就是本批的噪声上界，
+跨批比较必须同关集同面板。
+
+**边界**：z10.it233 的 20k 拍训练期 rollout（含探索），不是 w1-null 的 36k 拍面板，
+也不是 z10-t 训练后的策略；不能拿它当 eval 能力读数，也不能据此直接选 P3-A 单价。
+
+**验收**：`test_p0_thcost.py` 5 passed；ruff + mypy 绿；
+`bash tools/githook/nn-py-safe.sh nn-training/tools/p0_thcost.py` 可复算；
+产物 `tmp/p0-thcost/thcost.{json,md}`。
+
+---
+
+## §130 C9 critic 标定：it233 仍压缩+偏置；value-only 只训 value_head（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C9）：z10 的失败无法区分「策略没学好」与「critic 尺度/偏置
+把优势估计带歪」。取 z10.it233，4 关 × 50 seed 的 on-policy rollout，`V(s)` 对
+`metrics.npy` 现算的 MC return 做标定；并落地只训 value 头的预热路径。
+
+**口径**：关卡 16/22/3/6（z10 的 4 关）· 200 局 / 159,471 决策步 · γ=0.998 ·
+奖励在 it=233 下算（identity `9dd0c89908d2c209`，metrics v16）· MC return
+`G_t=r_t+γ(1-done_t)G_{t+1}` · OLS `G ~ 1 + V` · CI = 按局 cluster bootstrap 1000 次。
+`value.npy` 已用 Python 前向对账（854 状态 max abs 2.0e−4）。
+
+**读数**：
+
+| 口径 | R² | 斜率 [95% CI] | 截距 | mean V | mean MC |
+|---|---:|---|---:|---:|---:|
+| 决策步 pooled | **0.0800** | **0.5784** [0.4181, 0.7272] | 46.92 | 11.61 | 53.64 |
+| game-level pooled | 0.2344 | 1.0126 | 28.60 | 5.06 | 33.73 |
+| stage 3（步） | 0.0223 | 0.2871 [0.0287, 0.5252] | 29.11 | −30.79 | 20.27 |
+| stage 6（步） | 0.0527 | 0.6092 [0.3946, 0.8156] | 16.57 | 12.46 | 24.16 |
+| stage 16（步） | 0.0419 | 0.6551 [0.2389, 1.0596] | 59.45 | 34.90 | 82.32 |
+| stage 22（步） | 0.0028 | 0.1222 [−0.1463, 0.3765] | 59.78 | 12.05 | 61.26 |
+
+**判读**：step 级斜率 <1 且 CI 排除 1、mean V 比 mean MC 低 42.0、R² 仅 .080 ⇒ it233
+的 critic 仍系统性低估且局内排序弱；stage 22 斜率跨 0、stage 3 mean V 为负而 mean MC
+为正。game-level 斜率≈1 只是跨局尺度，截距 +28.6 仍是偏置。
+⇒ critic 是可信的失败因子候选，但**不能**单凭标定证明 it5 崩因，也不能据此跳过 P2-A。
+
+**value-only**：`worker/train/bc.py --policy-coef 0`（默认 1）在建 optimizer 前冻结除
+`value_head.*` 外全部参数，optimizer 只收 value 头；要求 `value_coef>0`。配置/argv/
+云端 manifest 已透传；v6 loader 读可选 `returns.npy`。`test_bc_value_only.py` 1 epoch
+真跑并断言非 value 参数导出 base64 逐字节不变、value 头有更新。
+**预热后校准**：工具 `--value-weights <ckpt>` 用同一批 `obs/scalars/extra` 前向重算 V，
+报告记录 `value_source`/sha16；用 it233 自身 identity 复算，R²/slope/meanV 差 ≤3e−6。
+
+**边界**：单 checkpoint / on-policy；20 轮 PPO 未起（训练由人手工）；换奖励 schedule
+需重算。C9 相关 15 passed；`test_bc_v6_data` / `test_bc_course` / `test_bc_loop` 绿。
+全文 → `reports/c9-critic-calibration-20261107.md`；产物 → `tmp/p0-c9/`。
+---
+
+## §129 C8 seed 级重算：z11 四腿的 p 是上界；run-average ≠ endpoint（2026-11-07）
+
+**背景**（plan `classic35-path` §5 C8，ds H1）：`worker/eval_track.py:78-95` 的 A 层池
+`EVAL_SEEDS[:100]` 与 `it` 无关；`tmp/z11-check.py` 的配对键是 `(it, stage, seed)`，
+把 41 点 × 400 seed = 16,400 局当独立样本 ⇒ 同一 seed 被计 41 次，旧 p 只是上界。
+
+**口径（跑数前写死）**：统计单位 = `(stage, seed)`；窗口 = 四腿都完整的 iter 交集
+（0–200，41 点 × 400 唯一 seed）；主读数 = 每 seed 窗口均值 + 配对 sign/bootstrap；
+副读数 = it200 逐局 win + McNemar；旧全量 McNemar 只作上界。工具
+`nn-training/tools/z11_seed_level.py`（只读，bootstrap 固定种子）。
+
+**读数**：
+
+| 腿 | run-average Δ（95% CI） | sign p | endpoint it200 Δ（95% CI） | p |
+|---|---:|---:|---:|---:|
+| cost | **−2.84pp** [−3.72, −1.98] | 4.85e−8 | +0.50pp [−5.25, +6.00] | .930 |
+| step | **−0.92pp** [−1.80, −0.03] | .0708 | +1.25pp [−4.50, +7.00] | .731 |
+| ent | **+3.16pp** [+2.20, +4.17] | 5.72e−6 | +3.25pp [−2.50, +9.00] | .298 |
+
+- 复用审计：ICC（控制腿）= **.1347**（设计效应 **6.39×**）⇒ 41 点只值约 **6.4 个
+  独立点**（不是 41 个）；旧 p 复现 cost 4.68e−11 / step .03387 / ent 1.60e−12 ⇒ loader 与配对键没读错。
+- **真实 MDE**：run-average ±**1.31pp**@400 seeds（800→.93 / 1600→.66）；
+  单点 ±**8.0pp**@400（实测 discordance 32.5–33.8%）⇒ 替换计划 §4 的 7.7pp。
+- **判决**：cost 的负与 ent 的正都在 run-average 层可分辨；**step 降为不可分辨**；
+  三门的 it200 endpoint 都不可分辨。计划「+3.16pp 低于 7.7pp ⇒ 不可分辨」是把
+  单点 MDE 套到 run-average 上，应拆成两个 estimand。
+
+**边界**：C8 只覆盖 z11 四腿的 0–200 公共窗口；ent 201+ 与 cont 的 it20/50/100
+三窗未算；run-average 含训练轨迹适应期，不等于末点能力。C1–C7/C9 未做。
+
+**验收**：`test_z11_seed_level.py` 14 passed；ruff + mypy 绿；
+`bash tools/githook/nn-py-safe.sh nn-training/tools/z11_seed_level.py` 可复算。
+全文 → `reports/c8-z11-seed-level-20261107.md`；产物 → `tmp/p0-c8/`。
+---
+
 ## §128 z5-pick 停腿：走位/顶墙首次双改善 + Checkers 破 0；但拾取率零位移（`wApproach` 第 5 次证伪）、命中率腰斩（2026-11-03）
 
 > 课程 `nn-training/curricula/z5-pick.jsonc`（尾「结课报告」）· 起点 `z5-safe-base.it500` ·
