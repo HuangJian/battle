@@ -33,9 +33,11 @@ import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -68,6 +70,15 @@ _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 #: 退避上限（net/server 类失败）。
 RETRY_MAX_SEC = 300.0
 RETRY_FIRST_SEC = 30.0
+
+#: cloudflared 自救（plan/rollout-tunnel-url-retry）：每次 attempt 是新进程，最多 3 次；
+#: 第 3 次回到首选姿势并开 debug，把「死因」打出来。
+CLOUDFLARED_ATTEMPTS = 3
+CLOUDFLARED_RETRY_SEC = 5.0
+CLOUDFLARED_PROBE_TIMEOUT = 3.0
+#: 首拍失败后的「补拿」节拍与监护循环里的等待上限（不能每拍阻塞 90s）。
+TUNNEL_RETRY_SEC = 60.0
+TUNNEL_RETRY_WAIT_SEC = 30.0
 
 #: 「近 30 分钟产出」摘要的打印节拍（用户 2026-10-18：「rollout.ipynb 及 sampler-agent 的 log
 #: 无法观察最近贡献情况，请持续统计半小时滑动窗口产出，每十分钟打印一行」）。
@@ -128,6 +139,81 @@ def _sh(
 def _public_net() -> Any:
     """公网下载上下文：还原 ensure 之前的代理环境（没有注入时是空操作）。"""
     return tailscale_boot.platform_net_env()
+
+
+def _direct_env() -> dict[str, str]:
+    """给 cloudflared 子进程的「直连」环境：摘掉代理键，但保留 NO_PROXY 的本地回环。
+
+    为什么不能用 `platform_net_env()`：它只在 tailscale `set_proxy_env()` 跑过之后才有
+    还原对象；cf-only 路径（没有 TS_AUTHKEY）里它是空操作，平台代理仍在。
+    为什么不能连 `NO_PROXY` 一起清：cloudflared 还要访问 `http://localhost:<port>`，
+    没有 bypass 条目时它可能被塞进代理。
+    """
+    env = dict(os.environ)
+    for key in tailscale_boot.PROXY_ENV_KEYS:
+        if key.lower() != "no_proxy":
+            env.pop(key, None)
+    bypass = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    parts = [p for p in ("localhost", "127.0.0.1", "::1", bypass) if p]
+    env["NO_PROXY"] = ",".join(dict.fromkeys(parts))
+    env["no_proxy"] = env["NO_PROXY"]
+    return env
+
+
+def _probe_https(
+    posture: str,
+    host: str = "api.trycloudflare.com",
+    timeout: float = CLOUDFLARED_PROBE_TIMEOUT,
+) -> bool:
+    """代理感知的 HTTPS 可达性：`direct` 显式不挂代理，`inherit` 用进程当前代理。
+
+    为什么不用 `socket.create_connection`：原始 socket 不读 `HTTP(S)_PROXY`，
+    `inherit` 与 `direct` 的结果必然相同（plan/rollout-tunnel-url-retry B3）。
+    """
+    handlers = [urllib.request.ProxyHandler({})] if posture == "direct" else []
+    opener = urllib.request.build_opener(*handlers)
+    req = urllib.request.Request(f"https://{host}/", method="HEAD")
+    try:
+        with opener.open(req, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True  # 404/405 也说明 DNS/TLS/代理链通了
+    except Exception:
+        return False
+
+
+def _probe_tcp(
+    host: str, port: int, timeout: float = CLOUDFLARED_PROBE_TIMEOUT
+) -> bool:
+    """原始 TCP 可达性（不看代理；只作边缘 7844 的诊断，不参与姿势选择）。"""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _net_probe(log: Callable[[str], None]) -> tuple[str, str]:
+    """一次预检：用代理感知的 HTTPS 选首选姿势，原始 TCP 只诊断边缘 7844。"""
+    inherit = _probe_https("inherit")
+    direct = _probe_https("direct")
+    edge = _probe_tcp("region1.v2.argotunnel.com", 7844)
+    log(
+        "预检: api.trycloudflare.com:443 "
+        f"inherit={'ok' if inherit else 'fail'} direct={'ok' if direct else 'fail'} "
+        f"｜ 边缘7844 tcp={'ok' if edge else 'fail'}"
+    )
+    if inherit:
+        log("⇒ 采用 inherit 姿势")
+        return "inherit", "direct"
+    if direct:
+        log("⇒ inherit 不通、direct 可达 ⇒ 先试 direct 姿势")
+        return "direct", "inherit"
+    log(
+        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；"
+        "仍按 inherit 尝试"
+    )
+    return "inherit", "direct"
 
 
 def _terminate(p: Any) -> None:
@@ -475,10 +561,63 @@ def _find_cloudflared(cfg: dict, log: Callable[[str], None]) -> str:
     return ""
 
 
+def _reset_cf_log(cf_log: Path, attempt: int) -> None:
+    """每次 attempt 前轮转并清空日志：否则 `_tunnel_url` 会读到上一次的死域名。"""
+    try:
+        old = cf_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        old = ""
+    if old:
+        try:
+            cf_log.with_name(f"{cf_log.name}.{attempt}").write_text(old, encoding="utf-8")
+        except OSError:
+            pass
+    try:
+        cf_log.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
+
+_DEAD_HINTS = (
+    "failed to",
+    "no such host",
+    "connection refused",
+    "context deadline",
+    "i/o timeout",
+    "tls handshake",
+    "error",
+)
+
+
+def _dead_reason(cf_log: Path) -> str:
+    """从 cloudflared 日志尾部提一行死因；提不到就如实说提不到，不编。"""
+    try:
+        lines = cf_log.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+    except OSError:
+        return "未能从日志提取（读不到日志）"
+    for line in lines:
+        low = line.lower()
+        if any(h in low for h in _DEAD_HINTS):
+            return line.strip()[:300]
+    return "未能从日志提取"
+
+
 def _start_cloudflared(
-    cfg: dict, port: int, cf_log: Path, log: Callable[[str], None]
+    cfg: dict,
+    port: int,
+    cf_log: Path,
+    log: Callable[[str], None],
+    *,
+    protocol: str | None = "http2",
+    edge_ip: str | None = "4",
+    debug: bool = False,
+    env_posture: str = "inherit",
 ) -> Any:
-    """起 cloudflared quick tunnel；二进制缺失时**在 `_public_net()` 里**下载（F5）。"""
+    """起 cloudflared quick tunnel；二进制缺失时**在 `_public_net()` 里**下载（F5）。
+
+    `protocol` / `edge_ip` 为 None = 不传，交给 cloudflared 自选（第 3 次 attempt 用）；
+    参数顺序与 `hub/tunnel_ab_probe.py::_start_tunnel` 同形，避免两套写法漂移。
+    """
     cf = _find_cloudflared(cfg, log)
     if not cf:
         cf = "/usr/local/bin/cloudflared"
@@ -501,11 +640,21 @@ def _start_cloudflared(
         else:
             log("cloudflared 安装失败（直连与镜像都不通）—— 可预置二进制后用 CFG.cloudflared_path 指路")
             return None
+    cmd = [cf, "tunnel", "--url", f"http://localhost:{port}", "--no-autoupdate"]
+    if protocol:
+        cmd += ["--protocol", protocol]
+    if edge_ip:
+        cmd += ["--edge-ip-version", edge_ip]
+    if debug:
+        cmd += ["--loglevel", "debug"]
+    cmd += ["--logfile", str(cf_log)]
+    env = _direct_env() if env_posture == "direct" else None
     try:
         return subprocess.Popen(
-            [cf, "tunnel", "--url", f"http://localhost:{port}", "--logfile", str(cf_log)],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
+            env=env,
         )
     except OSError as e:
         log(f"cloudflared 启动失败: {e}")
@@ -522,7 +671,18 @@ def _tunnel_url(cf_log: Path) -> str:
     return m[-1] if m else ""
 
 
-def _wait_tunnel_url(cf_log: Path, cfp: Any, log: Callable[[str], None], timeout: float = 90.0) -> str:
+def _wait_tunnel_url(
+    cf_log: Path,
+    cfp: Any,
+    log: Callable[[str], None],
+    timeout: float = 90.0,
+    attempt: tuple[int, int] | None = None,
+) -> str:
+    """等 quick tunnel URL；进程退出或超时都返回 `""`。
+
+    `attempt` 只改日志形状：首拍之外的 attempt 由 `_ensure_cloudflared_url` 统一打
+    `rc` / 死因 / 尾部，这里不再重复 dump。
+    """
     t0 = time.time()
     while time.time() - t0 < timeout:
         url = _tunnel_url(cf_log)
@@ -531,9 +691,137 @@ def _wait_tunnel_url(cf_log: Path, cfp: Any, log: Callable[[str], None], timeout
         if cfp is not None and cfp.poll() is not None:
             break
         time.sleep(2)
+    if attempt is not None:
+        return ""  # 重试阶梯由 _ensure 统一打 rc / 存活秒数 / 尾部，这里不重复
     log(f"⚠ 没拿到隧道 URL —— 下面是 {cf_log} 尾部：")
     _dump_tail(cf_log, log, 25)
     return ""
+
+
+def _ensure_cloudflared_url(
+    cfg: dict,
+    port: int,
+    cf_log: Path,
+    log: Callable[[str], None],
+    *,
+    attempts: int = CLOUDFLARED_ATTEMPTS,
+    postures: tuple[str, ...] | None = None,
+    wait_timeout: float = 90.0,
+) -> tuple[str, Any]:
+    """起 cloudflared 并拿 URL；每次 attempt 都是**新进程**，失败带 rc/死因。
+
+    阶梯（plan/rollout-tunnel-url-retry §2.6-B）：
+    1. 预检首选姿势 + http2 + v4；
+    2. 另一姿势 + http2 + v4；
+    3. **回到首选姿势** + 不指定 protocol/edge（交给 cloudflared 自选）+ debug。
+
+    第 3 次回到首选而不是重复第 2 次，是为了让 debug 落在「最可能成功」的姿势上。
+    URL 出现但进程已退出 ⇒ 不采用（死域名会被注册成 530/422，见 §2.2）。
+    """
+    prefs = tuple(postures or ("inherit", "direct"))
+    preferred = prefs[0] or "inherit"
+    other = prefs[1] if len(prefs) > 1 else ("direct" if preferred == "inherit" else "inherit")
+    ladder: tuple[tuple[str, str | None, str | None, bool], ...] = (
+        (preferred, "http2", "4", False),
+        (other, "http2", "4", False),
+        (preferred, None, None, True),
+    )
+    total = max(1, int(attempts))
+    for i in range(1, total + 1):
+        posture, protocol, edge_ip, debug = ladder[min(i - 1, len(ladder) - 1)]
+        _reset_cf_log(cf_log, i)
+        t0 = time.time()
+        cfp = _start_cloudflared(
+            cfg,
+            port,
+            cf_log,
+            log,
+            protocol=protocol,
+            edge_ip=edge_ip,
+            debug=debug,
+            env_posture=posture,
+        )
+        if cfp is None:
+            log("cloudflared 不可用（二进制缺失/启动失败）—— 不再重试")
+            return "", None
+        url = _wait_tunnel_url(
+            cf_log, cfp, log, timeout=wait_timeout, attempt=(i, total)
+        )
+        alive = cfp.poll() is None
+        if url and alive:
+            flag = protocol or "auto"
+            log(f"cloudflared 第 {i}/{total} 次就绪（{posture} + {flag}）")
+            return url, cfp
+        elapsed = time.time() - t0
+        rc = cfp.poll()
+        if rc is None:
+            log(f"cloudflared 第 {i}/{total} 次未就绪（进程仍在连接，{elapsed:.0f}s）")
+        else:
+            log(
+                f"cloudflared 第 {i}/{total} 次未就绪"
+                f"（进程已退出 rc={rc}，存活 {elapsed:.0f}s）"
+            )
+        if url:
+            log(f"  日志里有 URL 但进程已退出：{url}（不采用）")
+        log(f"  死因: {_dead_reason(cf_log)}")
+        _dump_tail(cf_log, log, 6)
+        _terminate(cfp)
+        if i < total:
+            time.sleep(CLOUDFLARED_RETRY_SEC * i)
+    return "", None
+
+
+def _open_cloudflared_once(
+    *,
+    current_url: str,
+    cfp: Any,
+    ensure: Callable[[], tuple[str, Any]],
+) -> tuple[str, Any, bool]:
+    """已有 cf 进程则复用；否则跑一轮。返回 `(url, cfp, started)`。
+
+    ★ 判据是 `cfp` 而不是 `url`：422 回落时 `current_url` 是**非空的 tailscale URL**，
+    但此刻必须起 cloudflared（plan/rollout-tunnel-url-retry B1）。
+    """
+    if cfp is not None:
+        return current_url, cfp, False
+    url, new_cfp = ensure()
+    if url:
+        return url, new_cfp, True
+    return current_url, None, False
+
+
+def _open_tailscale(
+    cfg: dict, ts_authkey: str, port: int, log: Callable[[str], None]
+) -> tuple[str, bool]:
+    """tailscale 引导；成功返回 `(url, True)`，失败返回 `("", False)`（不抛）。"""
+    ts_cfg = {
+        "ts_authkey": ts_authkey,
+        "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
+        "proxy_env": bool(cfg.get("ts_proxy_env", True)),
+        "engine": str(cfg.get("ts_engine") or ""),
+        "no_proxy_extra": str(cfg.get("ts_no_proxy_extra") or ""),
+        "ts_tarball": str(cfg.get("ts_tarball") or ""),
+        "ts_prefix": str(cfg.get("ts_prefix") or ""),
+    }
+    try:
+        info = tailscale_boot.ensure(ts_cfg, log)
+        url = f"http://{info['ip']}:{port}"
+        mode = str(info.get("mode") or "")
+        log(f"tailscale 就绪: url={url} mode={mode}")
+        if mode.startswith("userspace"):
+            log(
+                "⚠ userspace 模式：入站到本地端口不通（注册会被 hub ping 门拒 422）——"
+                "注册失败会自动回落 cloudflared"
+            )
+        return url, True
+    except Exception as e:
+        log(f"tailscale 引导失败（{type(e).__name__}: {e}）")
+        return "", False
+
+
+def _tunnel_retry_due(url: str, now: float, next_tunnel_try: float) -> bool:
+    """空 URL 才补拿；到点才试（墙钟，不用 tick 计数）。"""
+    return not url and now >= next_tunnel_try
 
 
 def _agent_entry(code_dir: Path) -> Path | None:
@@ -636,6 +924,70 @@ def output_line(status: dict | None) -> str:
     return "近30min产出 不可知（旧 agent 无 outputLine）"
 
 
+def _try_register_once(
+    *,
+    url: str,
+    auth: str,
+    node_id: str,
+    workers: int,
+    label: str,
+    hub_url: str,
+    hub_token: str,
+    log: Callable[[str], None],
+    urlopen: RegisterFn | None = None,
+) -> dict:
+    """注册一次；空 URL 是第一行硬闸（零 HTTP，也不写 `reg_state`）。
+
+    `kind="nourl"` 是**本地**失败，调用方据此走「等隧道」而不是注册退避。
+    """
+    if not url:
+        return {
+            "ok": False,
+            "status": 0,
+            "action": None,
+            "body": {},
+            "capabilities": [],
+            "error": "no tunnel url",
+            "kind": "nourl",
+        }
+    payload = build_register_payload(node_id, url, auth, workers, label)
+    return register(urlopen or urllib.request.urlopen, hub_url, hub_token, payload, log)
+
+
+def _banner_lines(
+    *,
+    node_id: str,
+    url: str,
+    auth: str,
+    workers: int,
+    bun_version: str,
+    code_hash: str,
+    hub_configured: bool,
+    reg_state: dict[str, str],
+) -> list[str]:
+    """启动横幅的纯函数：空 URL 时**不**打印粘进去必 400 的 `nodes[]` 片段。"""
+    lines = ["=" * 68]
+    if hub_configured and reg_state.get("url"):
+        lines.append(f"★ 已自动注册 : id={node_id}（rl-config.nodes[] 每轮热读，已生效）")
+    elif url:
+        lines.append("★ 未注册 —— 如需手工：写入本机 nn-training/rl-config.json：")
+        lines.append(
+            f'  {{"nodes":[{{"id":"{node_id}","url":"{url}","authKey":"{auth}"}}]}}'
+        )
+    else:
+        lines.append(
+            "★ 未注册：隧道 URL 未取到 —— 不要手工登记（空 url 会被 hub 400 拒）。"
+        )
+        lines.append("   节点每 60s 重试建隧道；真因看上面的 cloudflared 日志尾部。")
+    lines.append(f"★ URL     : {url or '(未取到)'}")
+    lines.append(f"★ authKey : {auth or '(未生成)'}")
+    lines.append(
+        f"  workers : {workers}  bun {bun_version}  codeHash={code_hash[:12]}"
+    )
+    lines.append("=" * 68)
+    return lines
+
+
 # ---------------------------------------------------------------- 主流程（cell 调用）
 
 def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
@@ -681,39 +1033,51 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     cfp = None
     cf_log = Path("/tmp/rollout-cloudflared.log")
     url = ""
+    forced_cf = str(cfg.get("link") or "").strip().lower() == LINK_CLOUDFLARED
+    probe_postures: tuple[str, str] | None = None
 
-    def _open_cloudflared(reason: str) -> None:
+    def _get_postures() -> tuple[str, str]:
+        nonlocal probe_postures
+        if probe_postures is None:
+            probe_postures = _net_probe(log)
+        return probe_postures
+
+    def _open_cloudflared(reason: str) -> bool:
         nonlocal link, url, cfp
         log(f"cloudflared 通道（{reason}）")
-        if cfp is None:
-            cfp = _start_cloudflared(cfg, port, cf_log, log)
-        if cfp is not None:
-            url = _wait_tunnel_url(cf_log, cfp, log)
-        link = LINK_CLOUDFLARED
+        url, cfp, started = _open_cloudflared_once(
+            current_url=url,
+            cfp=cfp,
+            ensure=lambda: _ensure_cloudflared_url(
+                cfg,
+                port,
+                cf_log,
+                log,
+                attempts=CLOUDFLARED_ATTEMPTS,
+                postures=_get_postures(),
+            ),
+        )
+        if started:
+            link = LINK_CLOUDFLARED
+        return started
 
     if link == LINK_TAILSCALE:
-        ts_cfg = {
-            "ts_authkey": ts_authkey,
-            "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
-            "proxy_env": bool(cfg.get("ts_proxy_env", True)),
-            "engine": str(cfg.get("ts_engine") or ""),
-            "no_proxy_extra": str(cfg.get("ts_no_proxy_extra") or ""),
-            "ts_tarball": str(cfg.get("ts_tarball") or ""),
-            "ts_prefix": str(cfg.get("ts_prefix") or ""),
-        }
-        try:
-            info = tailscale_boot.ensure(ts_cfg, log)
-            url = f"http://{info['ip']}:{port}"
-            mode = str(info.get("mode") or "")
-            log(f"tailscale 就绪: url={url} mode={mode}")
-            if mode.startswith("userspace"):
-                log("⚠ userspace 模式：入站到本地端口不通（注册会被 hub ping 门拒 422）——"
-                    "注册失败会自动回落 cloudflared")
-        except Exception as e:
-            log(f"tailscale 引导失败（{type(e).__name__}: {e}）—— 回落 cloudflared")
+        url, ok = _open_tailscale(cfg, ts_authkey, port, log)
+        if not ok:
+            log("—— 回落 cloudflared")
             link = LINK_CLOUDFLARED
     if link != LINK_TAILSCALE:
         _open_cloudflared("通道决策=cloudflared")
+    if not url and not forced_cf and has_ts:
+        log("cloudflared 未就绪 —— 回落 tailscale")
+        url, ok = _open_tailscale(cfg, ts_authkey, port, log)
+        if ok:
+            link = LINK_TAILSCALE
+    elif not url and forced_cf:
+        log("强制通道=cloudflared，跳过 tailscale 回落")
+    elif not url and not has_ts:
+        log("无 ts_authkey ⇒ 本会话无法回落 tailscale")
+    next_tunnel_try = time.time() + TUNNEL_RETRY_SEC if not url else 0.0
 
     # ── 4. sampler-agent ─────────────────────────────────────────────────
     entry = _agent_entry(code_dir)
@@ -735,10 +1099,17 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     next_retry = 0.0
 
     def _try_register() -> dict:
-        payload = build_register_payload(
-            node_id, url, auth, workers, worker_name(env, "t" if link == LINK_TAILSCALE else "c")
+        out = _try_register_once(
+            url=url,
+            auth=auth,
+            node_id=node_id,
+            workers=workers,
+            label=worker_name(env, "t" if link == LINK_TAILSCALE else "c"),
+            hub_url=hub_url,
+            hub_token=hub_token,
+            log=log,
+            urlopen=urllib.request.urlopen,
         )
-        out = register(urllib.request.urlopen, hub_url, hub_token, payload, log)
         if out["ok"]:
             reg_state.update({"url": url, "authKey": auth})
             log(f"已注册节点 id={node_id} url={url} action={out['action']}")
@@ -748,32 +1119,46 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         out = _try_register()
         if not out["ok"] and int(out.get("status") or 0) == 422 and link == LINK_TAILSCALE:
             log("hub ping 门 422：tailscale 入站不可达 —— 回落 cloudflared 并重注册")
-            _open_cloudflared("ping 门 422")
-            out = _try_register()
-        if not out["ok"]:
+            if not _open_cloudflared("ping 门 422"):
+                # B1：cf 全败时**不能**拿旧 tailscale URL 再发一次必然 422 的注册。
+                hub_configured = False
+                url = ""
+                log(
+                    "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
+                    "—— 本会话不再自动注册"
+                )
+            else:
+                out = _try_register()
+                if not out["ok"] and int(out.get("status") or 0) == 422:
+                    hub_configured = False
+                    log(
+                        "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
+                        "—— 本会话不再自动注册"
+                    )
+        if not out["ok"] and hub_configured:
             if out["kind"] == "auth":
                 hub_configured = False
                 log("HUB_TOKEN 被拒（auth）——注册放弃：token 不对，重试无意义（检查 secret 后重跑）")
+            elif out["kind"] == "nourl":
+                next_tunnel_try = time.time() + TUNNEL_RETRY_SEC
+                log("首拍未注册：隧道 URL 未取到 —— 等待补拿（不进入注册退避）")
             else:
                 backoff = RETRY_FIRST_SEC
                 next_retry = time.time() + backoff
                 log(f"首拍注册失败（{out['kind']}）——{int(backoff)}s 后重试")
 
     # ── 6. 横幅（注册成功 = 自动；否则保留手工路径）───────────────────────
-    log("=" * 68)
-    if hub_configured and reg_state["url"]:
-        log(f"★ 已自动注册 : id={node_id}（rl-config.nodes[] 每轮热读，已生效）")
-    else:
-        log("★ 未注册 —— 如需手工：写入本机 nn-training/rl-config.json：")
-        _u, _a = url or "", auth or ""
-        log(f'  {{"nodes":[{{"id":"{node_id}","url":"{_u}","authKey":"{_a}"}}]}}')
-    log(f"★ URL     : {url or '(未取到)'}")
-    log(f"★ authKey : {auth or '(未生成)'}")
-    log(
-        f"  workers : {workers}  bun {_sh([bun, '--version']).stdout.strip()}  "
-        f"codeHash={str((ping or {}).get('codeHash', ''))[:12]}"
-    )
-    log("=" * 68)
+    for line in _banner_lines(
+        node_id=node_id,
+        url=url,
+        auth=auth,
+        workers=workers,
+        bun_version=_sh([bun, "--version"]).stdout.strip(),
+        code_hash=str((ping or {}).get("codeHash", "")),
+        hub_configured=hub_configured,
+        reg_state=reg_state,
+    ):
+        log(line)
 
     # ── 7. 监护：agent 死重启 / 隧道换名重注册 / 会话到点收线 ─────────────
     deadline = time.time() + max(0.0, float(cfg.get("max_session_hours") or 0)) * 3600
@@ -810,13 +1195,36 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                 auth2 = _wait_auth(agent, auth_path, 30)
                 if auth2 and auth2 != auth:
                     auth = auth2
+                    next_retry = 0.0
                     log("★ authKey 变了 —— 将重注册")
-            if cfp is not None:
+            now = time.time()
+            if _tunnel_retry_due(url, now, next_tunnel_try):
+                log("隧道补拿：尝试重新建 cloudflared…")
+                url, cfp, started = _open_cloudflared_once(
+                    current_url=url,
+                    cfp=cfp,
+                    ensure=lambda: _ensure_cloudflared_url(
+                        cfg,
+                        port,
+                        cf_log,
+                        log,
+                        attempts=1,
+                        postures=_get_postures(),
+                        wait_timeout=TUNNEL_RETRY_WAIT_SEC,
+                    ),
+                )
+                if started:
+                    link = LINK_CLOUDFLARED
+                    log(f"★ 隧道就绪（补拿）：{url} —— 将重注册")
+                    next_retry = 0.0
+                next_tunnel_try = now + TUNNEL_RETRY_SEC
+            if url and cfp is not None:
                 cur = _tunnel_url(cf_log)
                 if cur and cur != url:
                     url = cur
+                    next_retry = 0.0
                     log(f"★ 隧道换名（quick tunnel 重连）：{url} —— 将重注册")
-            if hub_configured and should_register(reg_state, url, auth) and time.time() >= next_retry:
+            if hub_configured and url and should_register(reg_state, url, auth) and now >= next_retry:
                 out = _try_register()
                 if out["ok"]:
                     backoff, next_retry = 0.0, 0.0
@@ -825,7 +1233,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                     log("HUB_TOKEN 被拒（auth）——注册放弃")
                 else:
                     backoff = RETRY_FIRST_SEC if backoff <= 0 else min(RETRY_MAX_SEC, backoff * 2)
-                    next_retry = time.time() + backoff
+                    next_retry = now + backoff
                     log(f"重注册失败（{out['kind']}）——{int(backoff)}s 后重试")
             # 产出摘要（每 10 分钟一行）：先于 sleep 判定，保证第一行不会因重启/重注册被推迟。
             # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。

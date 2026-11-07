@@ -144,12 +144,40 @@ def test_cell_logs_to_a_file_too() -> None:
     assert appends, "cell 的 _log 应同时写文件（追加模式）——否则会话被回收时输出连着丢"
 
 
-def test_credentials_are_read_before_tailscale_ensure() -> None:
+def test_credentials_are_read_before_tailscale_ensure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """★ 顺序契约：`ensure()` 会注入代理 ⇒ 平台 Secrets（公网 HTTPS）必须先读完。"""
     src = inspect.getsource(rn.run)
     cred = src.index('secret("TS_AUTHKEY"')
-    ensure = src.index("tailscale_boot.ensure(")
-    assert cred < ensure, "凭据读取被挪到 ensure() 之后 —— 复现 2026-09-17 事故（代理注入后取不到 secret）"
+    open_ts = src.index("_open_tailscale(")
+    assert cred < open_ts, (
+        "凭据读取被挪到 tailscale 引导之后 —— 复现 2026-09-17 事故（代理注入后取不到 secret）"
+    )
+    # ensure() 本身搬进 `_open_tailscale`（plan/rollout-tunnel-url-retry B2），
+    # 顺序契约因此拆成两段：run 先读凭据，helper 里才 ensure。
+    seen: list[dict] = []
+
+    def _fake_ensure(cfg: dict, _log: Callable[[str], None]) -> dict:
+        seen.append(cfg)
+        return {"ip": "100.64.0.1", "mode": "kernel"}
+
+    monkeypatch.setattr(rn.tailscale_boot, "ensure", _fake_ensure)
+    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == (
+        "http://100.64.0.1:8443",
+        True,
+    )
+    assert seen == [
+        {
+            "ts_authkey": "ak",
+            "ts_ephemeral": True,
+            "proxy_env": True,
+            "engine": "",
+            "no_proxy_extra": "",
+            "ts_tarball": "",
+            "ts_prefix": "",
+        }
+    ]
 
 
 def _download_statements_inside_public_net(
