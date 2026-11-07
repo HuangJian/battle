@@ -6,6 +6,7 @@
 
 import threading
 import time
+import urllib.parse
 
 import pytest
 
@@ -66,6 +67,30 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
             poll_s=0.02,
         )
     assert "deadline exceeded" in str(ei.value)
+
+
+def test_poll_result_forwards_v6_label_mode(monkeypatch) -> None:
+    """v6 BC 的 labelMode 必须进轮询键：提交端 taskKey 含它，漏传 = async 永远 404。"""
+    seen: list[str] = []
+
+    def fake_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
+        seen.append(url)
+        return 202, b'{"status": "running"}'
+
+    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution, "POLL_MIN_BUDGET_SEC", 0.01)
+    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+    with pytest.raises(common.distribution.DistError, match="deadline exceeded"):
+        common.distribution._poll_result(
+            "http://node",
+            "tok",
+            {"iterId": "r.1", "stage": 0, "seed": 1, "labelMode": "argmax"},
+            budget=0.01,
+            poll_s=0.01,
+        )
+    assert seen
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(seen[0]).query)
+    assert query["labelMode"] == ["argmax"]
 
 
 def _fetch(url: str = "http://node") -> dict:

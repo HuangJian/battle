@@ -11,12 +11,14 @@ import {
   type ActionResult,
   autoOfflineHandoff,
   busy,
+  clearBcResume,
   jobIdError,
   markCloudHaltRecovered,
   openCourse,
   redoPpo,
   registerPushWorker,
   releaseCourseHold,
+  rebuildCodeSnapshot,
   reloadPushWorkers,
   removePushWorker,
   setCoursePaused,
@@ -436,6 +438,12 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       // ★M4：取代已退役的三颗模式钮（切离线/切换成在线/交还自动）。
       case 'releaseCourseHold':
         return okResp(await releaseCourseHold(bodyStr(body, 'course')))
+      // ---- #8：清空 BC 课程级续训索引（只删别名；要求先暂停，见 actions/bc-progress）----
+      case 'clearBcResume':
+        return okResp(await clearBcResume(ctx.course))
+      // ---- B7：重打集群代码快照（只写 tmp/.code-snapshot；不重启进程）----
+      case 'rebuildCodeSnapshot':
+        return okResp(await rebuildCodeSnapshot())
       // ---- 自动离线交接（hub 反向调用：自主 worker 领走一门缺包/包旧的在训课之后）----
       // 这不是控制台客户端的动作：hub（python）POST `/api/autoOfflineHandoff`。
       // ★M4/F1：它现在**只导包**（不写意图、不写 rl-config、不推 hub）。

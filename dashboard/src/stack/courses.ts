@@ -32,7 +32,10 @@ import {
  *  「只剥整行 `//`」的弱实现**，那正是本次事故根因。 */
 export function resolveCourseBc(course: string): string {
   const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
-  const file = path.join(curriculaDir(), `${course}.jsonc`)
+  // 与 `isBcCourse` 同一条事实：`.bc.jsonc` 优先。BC 课也允许写顶层 `bc`
+  // （控制台播种用）；只读 `.jsonc` 会让它静默回退 legacy。
+  const bcFile = path.join(curriculaDir(), `${course}.bc.jsonc`)
+  const file = existsSync(bcFile) ? bcFile : path.join(curriculaDir(), `${course}.jsonc`)
   let parsed: { bc?: unknown }
   try {
     parsed = readJsoncFile(file) as { bc?: unknown }

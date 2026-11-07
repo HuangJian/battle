@@ -53,6 +53,79 @@ def eval_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
     return out
 
 
+def build_eval_panel(
+    *,
+    level_name: str,
+    max_ticks: int,
+    difficulty: str,
+    lives: int | None,
+    games_per_stage: int,
+    stages: int,
+    course_max_ticks: int | None = None,
+) -> dict[str, Any]:
+    """eval 行/面板的**面板口径**（B4，2026-11-05）：max_ticks / lives / games / seed0。
+
+    课程顶层 `max_ticks` 不进这条链（每图用自己关卡文件的值），所以读数**禁止跨面板相减**；
+    两个值都写进去，漂移在面板上可见，而不是靠人记。`seed0` 固定 1（每 stage 的 seed 从 1 起）。
+    """
+    return {
+        "level": level_name,
+        "max_ticks": int(max_ticks),
+        "course_max_ticks": None if course_max_ticks is None else int(course_max_ticks),
+        "difficulty": str(difficulty),
+        "lives": None if lives is None else int(lives),
+        "games_per_stage": int(games_per_stage),
+        "seed0": 1,
+        "stages": int(stages),
+    }
+
+
+def _ratio(num: float, den: float) -> float | None:
+    """有分母才有率；0 分母 = 无读数（None），不编 0。"""
+    return round(num / den, 4) if den > 0 else None
+
+
+def _behaviour_fields(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """行为门需要的三个率/量（B5，2026-11-05）：周期 eval 以前只有 `pickup_mean`（拾取
+    **个数**），而课程门判据是 `powerUpsCollected/powerUpsSpawned` 的率 ≥65%；
+    `cellsVisited` / `moveHist` 根本没进产物 ⇒ 五项判据一项也测不到。
+
+    - `pickup_rate` = Σ收集 / Σ生成（分母 0 ⇒ None）；
+    - `pickup_spawn_mean` = 每局生成数（解释 pickup_rate 的分母口径）；
+    - `cells_mean` = 每局访问格数的均值（探索塌陷哨兵）；
+    - `move_frac` = 方向移动占全部决策的比例（`moveHist[0]` 是停/无输入）。
+    """
+    if not rows:
+        return {
+            "pickup_rate": None,
+            "pickup_spawn_mean": None,
+            "cells_mean": None,
+            "move_frac": None,
+        }
+    spawned = sum(float(r.get("powerUpsSpawned") or 0) for r in rows)
+    collected = sum(float(r.get("powerUpsCollected") or 0) for r in rows)
+    cells = [
+        float(r["cellsVisited"])
+        for r in rows
+        if r.get("cellsVisited") is not None
+    ]
+    move_num = 0.0
+    move_den = 0.0
+    for h in (r.get("moveHist") for r in rows):
+        if not isinstance(h, (list, tuple)) or len(h) < 2:
+            continue
+        vals = [float(x or 0) for x in h]
+        move_den += sum(vals)
+        move_num += sum(vals[1:])  # 槽 0 = 停/无输入
+    n = len(rows)
+    return {
+        "pickup_rate": _ratio(collected, spawned),
+        "pickup_spawn_mean": round(spawned / n, 3),
+        "cells_mean": round(sum(cells) / len(cells), 1) if cells else None,
+        "move_frac": _ratio(move_num, move_den),
+    }
+
+
 def aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """单地图局结果 → RL 门指标口径聚合（纯函数，单测覆盖）。
 
@@ -71,6 +144,9 @@ def aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "timeout_frac": 0.0,
             "score_mean": 0.0,
             "mean_ticks": 0.0,
+            # B5：行为门口径（拾取率 / 探索 / 移动占比）——零局时全是 None，
+            # 不编 0（0 会被误读成「测到了，真没捡」）。
+            **_behaviour_fields([]),
         }
     wins = sum(1 for r in rows if r.get("win"))
     timeouts = sum(
@@ -88,6 +164,7 @@ def aggregate_eval_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "timeout_frac": round(timeouts / n, 4),
         "score_mean": round(sum(float(r.get("score") or 0) for r in rows) / n, 3),
         "mean_ticks": round(sum(float(r.get("ticks") or 0) for r in rows) / n, 1),
+        **_behaviour_fields(rows),
     }
 
 
@@ -104,6 +181,7 @@ def dispatch_bc_eval(
     games_per_stage: int,
     it: int,
     epoch: int,
+    course_max_ticks: int | None = None,
     cfg: dict | None = None,
     nodes: list[dict] | None = None,
     log=lambda msg: print(msg, flush=True),
@@ -111,7 +189,13 @@ def dispatch_bc_eval(
     """把一份 BC 权重在 eval.levels 各图上跑干净评估并聚合。
 
     返回 {"epoch", "wver", "levels": [{level, n, wins, win_rate, kills_mean,
-    phits_mean, pickup_mean, timeout_frac, score_mean, mean_ticks, failed}], "ts"}。
+    phits_mean, pickup_mean, timeout_frac, score_mean, mean_ticks, failed,
+    pickup_rate, pickup_spawn_mean, cells_mean, move_frac, panel}],
+    "sentinel_only": True, "ts"}。
+
+    B4/B5（2026-11-05）：每行带 `panel`（max_ticks / difficulty / lives / games / seed0）——
+    课程顶层的 `max_ticks` 不进这条链（各图用自己关卡文件的值），所以面板读数**禁止跨
+    面板相减**；`sentinel_only=True` 写死「周期 eval 只作哨兵，判决只认 200 局行为门」。
     无可用节点 / 权重推送全败 → BcEvalError（调用方决定降级或中止）。
     """
     from worker.config import load_course, resolve_level
@@ -238,8 +322,27 @@ def dispatch_bc_eval(
 
         ok_rows = [r for r in rows if not r.get("failed")]
         failed = len(rows) - len(ok_rows)
+        if course_max_ticks is not None and int(lvl.max_ticks) != int(course_max_ticks):
+            log(
+                f"[bc-eval] {level_name}: 面板 max_ticks={int(lvl.max_ticks)} ≠ 课程声明 "
+                f"{int(course_max_ticks)}——行内 panel 已记两个值，禁止与别的面板相减"
+            )
         agg = aggregate_eval_rows(ok_rows)
-        agg.update({"level": level_name, "failed": failed})
+        agg.update(
+            {
+                "level": level_name,
+                "failed": failed,
+                "panel": build_eval_panel(
+                    level_name=level_name,
+                    max_ticks=int(lvl.max_ticks),
+                    difficulty=str(lvl.difficulty),
+                    lives=getattr(lvl.player, "lives", None),
+                    games_per_stage=int(games_per_stage),
+                    stages=len(lvl.stage_ids),
+                    course_max_ticks=course_max_ticks,
+                ),
+            }
+        )
         level_rows.append(agg)
         log(
             f"[bc-eval] {level_name}: n={agg['n']} win_rate={agg['win_rate']} "
@@ -252,5 +355,7 @@ def dispatch_bc_eval(
         "epoch": int(epoch),
         "wver": wver,
         "levels": level_rows,
+        # B5：周期 eval 不是判决（判决 = 200 局行为门）；面板据此标注。
+        "sentinel_only": True,
         "ts": time.time(),
     }

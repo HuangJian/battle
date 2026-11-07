@@ -34,7 +34,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -708,6 +708,14 @@ def _enqueue(
     rt = runtimes[course]
     facts, _view = course_facts(Path(rt.args.traj), course=course)
     it = int(facts.it)
+    if rt.kind == "bc" and rt.bc is not None:
+        # 与 `BcLoop.ledger_next_it` 同源：预算扩大时入队指针也要回到最后一个已完成轮，
+        # 否则 `add_course` 会拿着 `iters+1` 的显式任务直接开一轮不存在的训练。
+        from worker.bc_resume import bc_next_it
+
+        it = bc_next_it(rt.bc, it)
+        if it != int(facts.it):
+            facts = replace(facts, it=it)
     tasks = pending_tasks(round_tasks_for(course, it), facts)
     if not step_mode and tasks:
         tasks = [Task(course, it, ROUND_KIND)]

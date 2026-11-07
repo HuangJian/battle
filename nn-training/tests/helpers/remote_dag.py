@@ -439,8 +439,10 @@ LAYERS: dict[str, int] = {
     "worker.agent_meta": 0,
     "worker.archive": 0,
     "worker.backend": 0,
-    "worker.bc_dispatch": 0,
+    "worker.bc_dispatch": 1,
     "worker.bc_ledger": 0,
+    # G3 课程级 resume 只读判据：只依赖 `bc_ledger`(L0) ⇒ 拓扑秩 **L1**。
+    "worker.bc_resume": 1,
     "worker.breaker": 0,
     "worker.commit_journal": 0,
     "worker.config_file": 0,
@@ -544,7 +546,13 @@ LAYERS: dict[str, int] = {
     # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：靠 `worker.volume_quota`(L1)
     # 的 `target_per_stage` 与 `worker.volume_math`(L0) ⇒ 2026-10-11 S3 起秩 2。
     "worker.volume_alloc": 2,
+    # 结局分类（bc_dispatch 与 bc_corpus 共用；无 worker 依赖）⇒ **L0**。
+    "worker.bc_outcome": 0,
     "worker.bc_config": 2,
+    # 2026-11-06（BC #6）：ratio/fixed 语料读取与选择；靠 bc_config(L2) ⇒ **L3**。
+    "worker.bc_corpus": 3,
+    # 采集编排（bc_config L2 / bc_corpus L3 / bc_dispatch L1）⇒ **L4**。
+    "worker.bc_collect": 4,
     # ★ 2026-10-05（plan/course-startup-recover）：课程解析/校验链从 loop_serve 抽出——顶层只
     # 用 `worker.modes`(L0) 与 `common.*`，函数内延迟用 `worker.cli`/`worker.config`(L1) ⇒ 秩 2。
     "worker.course_args": 2,
@@ -606,6 +614,9 @@ LAYERS: dict[str, int] = {
     # `worker.models.arch_meta`(L1) / `worker.models.student`(L2) ⇒ 拓扑秩 **L3**。
     "worker.scripts.migrate_obs_channel": 3,
     "worker.train.bc": 3,
+    # 2026-11-06（BC #10 Paddle 双生）：顶层靠 `worker.models.student_paddle`(L2) /
+    # `worker.data.npyio`(L1) / `worker.train.bc_core`(L0) ⇒ **L3**；不 import remote.*。
+    "worker.train.bc_paddle": 3,
     # L4（12 个）
     "worker.iter_job": 4,
     "worker.loop_guards_gate": 4,

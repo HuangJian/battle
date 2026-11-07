@@ -85,7 +85,9 @@ function webComponents(dir = 'src/web', out: string[] = []): string[] {
 
 describe('console SSR renderConsolePage', () => {
   it('渲染外壳 + 总览区块、动作按钮、开关键与转义', async () => {
-    const s = await api.buildStateView()
+    // 显式钉非 BC 课：自动选课会随「最近活跃课程」漂到 BC 课（BC 区按设计不渲染
+    // RL Hero），本用例要验证的是总览外壳与 Hero，不是选课结果。
+    const s = await api.buildStateView('c6-pickup')
     const html = render.renderConsolePage(s)
     const dom = body(html)
     expect(html).toContain('炼丹炉')
@@ -153,7 +155,8 @@ describe('console SSR renderConsolePage', () => {
   })
 
   it('服务端按 page 渲染对应页面：全览出 hero、指标页出完整指标表、节点页不重复 hero', async () => {
-    const s = await api.buildStateView()
+    // 同上：总览的 Hero 只属 RL 课；别让自动选课把这条路由断言变成 BC 课断言。
+    const s = await api.buildStateView('c6-pickup')
     const overview = body(render.renderConsolePage(s, { page: 'overview' }))
     expect(overview).toContain('tc-hero')
     expect(overview).toContain('总览') // 顶栏页面标题

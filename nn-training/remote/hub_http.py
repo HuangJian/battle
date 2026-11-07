@@ -361,6 +361,40 @@ def poll_job(
 JOB_ALIVE = "alive"  # hub 认识这个 jid（任意 state：pending/leased/done/failed/frozen/cancelled）
 JOB_UNKNOWN = "unknown"  # hub 侧不存在这个 jid（404——目录被删 / 课程不认识它）
 JOB_UNREACHABLE = "unreachable"  # 没答上来（网络/5xx/其它）：**不许**据此判丢失
+#: 训练侧**对账**专用（`job_liveness` 不区分这一档）：hub 已终局且不会再产出结果。
+#: `done` **不**在这里——结果已经在 hub 上，认领它才能落位；重发同一个 jid 反而会
+#: 撞上旧 result 永远等不到新结果。
+JOB_CLOSED = "closed"  # failed / frozen / cancelled：允许重发布（新 job 走课程级 resume）
+
+
+def job_reconcile_state(
+    base_url: str, token: str, jid: str, *, timeout: float = PROBE_TIMEOUT_SEC
+) -> str:
+    """BC 盘上 job 的**认领对账**：返回 `alive` / `closed` / `unknown` / `unreachable`。
+
+    为什么不能复用 `job_liveness`：看门狗只问「hub 还认不认识它」，而训练侧还要问
+    「等下去还会不会有结果」。`failed` / `frozen` / `cancelled` 都还是 200（hub 认识），
+    但它们不会再回传；不区分就会永远等一条死 job（G4 要治的死锁）。
+
+    `done` 归 `alive`：结果可取，落位是下一步，重发只会撞旧 result。
+    `unreachable` 一律保守（不重发）——网络抖动不是丢失，误判的代价是整轮 GPU。
+    """
+    try:
+        status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+    except Exception:
+        return JOB_UNREACHABLE
+    if status == 404:
+        return JOB_UNKNOWN
+    if status != 200:
+        return JOB_UNREACHABLE
+    try:
+        loaded = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JOB_ALIVE
+    state = loaded.get("state") if isinstance(loaded, dict) else None
+    if state in ("failed", "frozen", "cancelled"):
+        return JOB_CLOSED
+    return JOB_ALIVE
 
 
 def job_liveness(

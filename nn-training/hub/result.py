@@ -364,6 +364,24 @@ class ResultRoutes:
         self._json(r)
 
 
+    # ---- GET /jobs/{id}/epoch-weights/{epoch}（按 epoch 取不可变快照，#12）----
+    def _get_bc_epoch_weights(self) -> None:
+        """按 epoch 取归档权重；不存在 = 404（调用方据此跳过该边界 eval）。"""
+        jid = self._job_or_404()
+        if jid is None:
+            return
+        try:
+            epoch = int(self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1])
+        except ValueError:
+            self._json({"error": "bad epoch"}, 400)
+            return
+        r = self.hub.get_bc_epoch_weights(jid, epoch)
+        if r is None:
+            self._json({"error": "no epoch snapshot"}, 404)
+            return
+        self._json(r)
+
+
     # ---- GET /jobs/{id}/bc-metrics（训练机/run_bc 轮询每 epoch 指标行）----
     def _get_bc_metrics(self) -> None:
         jid = self._job_or_404()

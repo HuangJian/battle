@@ -56,7 +56,6 @@ from common.protocol import (
     TS_CODE_NAME,
     blob_path,
     collision_rows,
-    d14_corpus_match,
     data_fp,
     decode_opt_tar,
     decode_weights_json,
@@ -64,6 +63,8 @@ from common.protocol import (
     job_seed,
     normalize_manifest,
     role_of,
+    shard_corpus_skipped,
+    shard_lineage_ok,
     validate_rollout_spec,
 )
 from common.protocol import (
@@ -233,7 +234,7 @@ def iter_shard_dirs(
     for d in walk_shard_dirs(it_dir, with_manifest=True):
         if not ((d / "obs.npy").exists() or (d / "metrics.npy").exists()):
             continue
-        if (course_fp or corpus_fp) and not _shard_lineage_ok(d, course_fp, corpus_fp, log):
+        if (course_fp or corpus_fp) and not shard_lineage_ok(d, course_fp, corpus_fp, log):
             skipped += 1
             continue
         if state_init and not _shard_state_init_ok(d, log):
@@ -356,25 +357,6 @@ def _shard_state_init_ok(d: Path, log=lambda msg: None) -> bool:
     return shard_state_init_ok(mm, True)
 
 
-def _shard_lineage_ok(
-    d: Path, course_fp: str, corpus_fp: str, log=lambda msg: None
-) -> bool:
-    """shard 的 manifest 是否与本次 job 同血缘（读不到 = 不收，宁可少一份也不整份被云拒）。"""
-    try:
-        mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        log(f"[publish] D14: 剔除 {d.name}（shard manifest 不可读: {e}）")
-        return False
-    if d14_corpus_match(course_fp, corpus_fp, mm):
-        return True
-    log(
-        f"[publish] D14: 剔除 {d.name}（shard 血缘 "
-        f"{str(mm.get('course_fp'))[:12]}…/{str(mm.get('corpus_fp') or '-')[:12]}… != "
-        f"job {course_fp[:12]}…/{corpus_fp[:12] or '-'}…）"
-    )
-    return False
-
-
 def _shard_mtime(d: Path) -> float:
     """shard manifest 的 mtime；目录已被并发删除（输家退场）时返回 +inf（排到最后）。"""
     try:
@@ -391,22 +373,29 @@ def iter_bc_shard_dirs(
     *,
     course_fp: str = "",
     corpus_fp: str = "",
+    data_root: str | Path | None = None,
 ) -> list[Path]:
     """本轮 BC 语料 shard 集（plan/bc-cloud-integration.plan.md §4）：
     `<traj>/bc-data/<round>/bc_s*_seed*/`（含 manifest.json）；round 缺省 = `it{it}`，
     smoke 轮传 "smoke"（冒烟语料与真轮隔离，2026-09-13）。
 
+    `data_root` 非 None 时直接扫这个根（fixed 源；递归找 shard）。
+
     同名 shard 去重与 PPO（iter_shard_dirs）同策略：按 manifest mtime 保留最早一份
     （先写盘者 = 结算赢家），退役者响亮日志。D14 血缘过滤同 PPO（同一判据、同一原因）。"""
-    data_root = Path(traj_dir) / "bc-data" / (round_name or f"it{it}")
-    if not data_root.exists():
+    round_dir = round_name or f"it{it}"
+    root = Path(data_root) if data_root is not None else Path(traj_dir) / "bc-data" / round_dir
+    if not root.exists():
         return []
     groups: dict[str, list[Path]] = {}
     skipped = 0
-    for p in data_root.glob("bc_s*_seed*"):
+    for p in root.rglob("bc_s*_seed*"):
         if not (p.is_dir() and (p / "manifest.json").is_file()):
             continue
-        if (course_fp or corpus_fp) and not _shard_lineage_ok(p, course_fp, corpus_fp, log):
+        if shard_corpus_skipped(p) or (
+            (course_fp or corpus_fp)
+            and not shard_lineage_ok(p, course_fp, corpus_fp, log)
+        ):
             skipped += 1
             continue
         groups.setdefault(p.name, []).append(p)

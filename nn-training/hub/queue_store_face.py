@@ -129,6 +129,10 @@ class QueueStoreFaceMixin(QueuePeer):
         st = self._store_of(job_id)
         return st.get_bc_metrics(job_id) if st else []
 
+    def get_bc_epoch_weights(self, job_id: str, epoch: int) -> dict | None:
+        st = self._store_of(job_id)
+        return st.get_bc_epoch_weights(job_id, epoch) if st else None
+
     def append_ledger(self, job_id: str, event: dict) -> None:
         """往**归属课程**的账本追加一行（`/jobs/{id}/fail` 的 job_cancelled 用）。"""
         st = self._store_of(job_id)

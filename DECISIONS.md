@@ -11105,3 +11105,136 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `tests/trainer/test_bc_ingest_backfill.py` · `e2e/test_bc_epoch_e2e.py` · `tests/hub` + `tests/remote`
   全量 2337 绿。
 - **全文** → `docs/nn/remote-transport.md` §141。
+
+## §2026-11-05-goalnn-bc-action-v6-single-source（BC 动作空间单源 + 语料指纹条件键）
+
+- **决定**：`BcCourseConfig.action_v6` 顶层（`None` = 回退已废弃的 `train.action_v6`）；顶层与
+  显式 train 值冲突 ⇒ 加载报错。`bc_corpus_identity_fp` **仅 `resolved_action_v6=True`** 时加入
+  `action_v6` + `label_mode`；`bc_job_extra` 读 `resolved_action_v6`。
+- **理由**：`train.action_v6` 与顶层双写会形成第二事实源；无条件把 `action_v6:false` 加进 payload
+  会让所有 legacy BC 课程指纹漂移（与 `paired_rotate_seed` 的「仅激活时进」先例一致）。v6 下换
+  argmax/sampled 若不进指纹，`bc_dispatch` 的 `iterId=bc-it{it}-{corpus_fp[:12]}` 会回放旧 shard。
+- **被否决**：无条件加键（legacy 全漂）· 只加 `action_v6` 不加 `label_mode`（标签模式混训）·
+  只改 `train.action_v6` 不加顶层（双源）。
+- **边界**：`label_policy`（标签权重内容身份）留 P1，与权重上传一起进指纹；#6 留用旋钮未定语义前
+  不实现。legacy 课程 fp 逐字节不变。
+- **验收**：`tests/worker/test_bc_course.py` 新增 5 条（单源/冲突/兼容/条件指纹/B1 血缘）+
+  `tests/trainer/test_bc_loop.py` 隐藏目录；`bash tools/githook/nn-python-gate.sh` 绿
+  （5580 passed / 2 skipped）。
+- **全文** → `docs/nn/training-stack.md` §61；规格 → `plan/bc-single-course.plan.md` §16。
+
+## §2026-11-05-goalnn-bc-v6-collect（v6 BC 采集：label_policy 权重、bc-v6 mode、能力位）
+
+- **决定**：`corpus.label_policy` 是 v6 采集的标签权重路径；`label_policy_fp=sha256(file)` 只进
+  v6 语料指纹，`resolved_action_v6 && games_per_stage>0` 必填。`bc_dispatch` 先校验权重是三头 v6，
+  经既有 `/v1/weights` 下发（`wver=sha, kind=rollout`），再派 `mode=bc-v6`；节点新增
+  `bcV6Support`（旧 `bcSupport` 只服务 legacy）。agent 新增 `labelMode`（argmax/sampled），
+  进提交/轮询 taskKey 后缀 `:lm<mode>`；argmax 走 `export-rl-rollout --teacher-argmax`。
+  v6 shard 用 RL 文件表（`a_hold/lp_hold` 可选），manifest 记 `label_mode`/`label_policy_fp`/
+  `corpus_fp`；wins-only 在落盘前按 `outcome=stage_clear` 过滤。
+- **理由**：标签来源是语料身份的一部分；权重只进池不走 payload，复用已验证的内容寻址与
+  `/v1/weights`；任务键不进 labelMode 会让同 iter 的 argmax/sampled 互相回放旧 shard。
+- **被否决**：新建 BC 专用 collector（重复 RL shard 契约）· 权重塞 payload（大、且绕过节点缓存）·
+  只加 mode 不加能力位（旧 agent 会静默跑成默认 rollout）· `label_policy` 只记路径不进指纹
+  （同路径换文件仍会回放）。
+- **边界**：`bc-v6-train`（`games_per_stage: 0`）不要求 `label_policy`；未跑真实 1 关 1 局 1 epoch；
+  只接受权重文件路径，不接受裸 wver；G3/G4/#10 未做。
+- **验收**：`tests/worker/test_bc_course.py`（必填/指纹/能力位/三头权重校验/派发/wins 过滤）·
+  `tests/common/test_dist_common_poll.py`（labelMode 轮询键）·
+  `tests/agent/decision-events-taskkey.test.ts`（`:lm<mode>`）；`bash tools/githook/nn-python-gate.sh`
+  绿（ruff + mypy + 5586 passed / 2 skipped / 38s）。
+- **全文** → `docs/nn/training-stack.md` §62；规格 → `plan/bc-single-course.plan.md` §16。
+
+## §2026-11-05-goalnn-bc-resume-reopen（BC 课程级 resume 索引 + 预算扩大重开最后完成轮）
+
+- **决定**：已完成轮在课程目标 epoch 变大时写一次 `bc_round_reopened{it, old_epochs,
+  new_epochs}` 并发布新 jid。新 jid 的 resume 在自身文件缺失时回读课程级索引
+  `<job_root>/bc-resume/by-course/<course_key>/<it>.json`；`store_bc_epoch` 原子写、只增不回倒。
+  `bc_round_completed` 仍是完成判据并新增 `epochs`；`completed_epochs` 的判据链 =
+  `bc_epoch` → 完成事件 → 已完成 job 的 `manifest.epochs`（无证据 = `None`，不重开）。
+  指针唯一读法 = `worker/bc_resume.bc_next_it`：全轮完成且预算仍大时返回**最后一个已完成轮**；
+  引擎、`LoopRunner`、`_enqueue`、`run_blocking` 共用；桥不得再用 `max` 夹回队列指针。
+- **理由**：只读 `bc_round_completed` 会把 40→80 读成已收官；按 jid 的 resume 又让新 jid 从
+  epoch 1 重训。课程级索引是 per-jid 语义的别名，不需要新 TTL/租约，也不改 `bc-resume` 权威。
+  选择最后完成轮（而非 it1 或 `iters+1`）与「停课后改 epochs 再开课」的操作路径一致。
+- **被否决**：新增 `resume_mode` 开关 · 复用旧 jid 原地改 epochs（worker 已按旧目标收口）·
+  用 `bc_epoch` 单条做判据（隧道丢包后缺行会误判）· 索引无条件覆盖（迟到 ep5 会把 ep40 回倒）·
+  入队只读 `iters+1`（显式任务绕过 planner，直接开不存在的轮）。
+- **边界**：真实节点 40→80 的 `resume_epoch=40` / 无 epoch 1/80 尚未验收；G4 hub 对账、
+  #10 paddle 未做；索引只在 `store_bc_epoch` 的写入路径生成，旧 job 需等下一行 epoch 回传。
+- **验收**：`tests/worker/test_bc_ledger.py` · `tests/trainer/test_bc_loop.py` ·
+  `tests/hub/test_bc_resume_store.py` · `tests/trainer/test_serve_bc.py` ·
+  `tests/worker/test_loop_runner.py`；`bash tools/githook/nn-python-gate.sh` 绿
+  （ruff + mypy + 5596 passed / 2 skipped / 39.54s）。
+- **全文** → `docs/nn/training-stack.md` §63；规格 → `plan/bc-single-course.plan.md` §16。
+
+## §2026-11-05-goalnn-bc-round-job-reconcile（BC 盘上 job：隐藏目录 + hub 对账 + 缺失记账）
+
+- **决定**：`find_round_job` 与 `prune_remote_jobs` 跳过 `.` 开头目录（不计数、不删除）。hub
+  传输认领前用 `job_reconcile_state` 对账：404=`unknown`、200+failed/frozen/cancelled=`closed`
+  ⇒ 不认领、允许重发，并由引擎记一次
+  `bc_round_job_missing{it,job_id,hub_state,resume_lost:true,ts}`；200 的其它 state（含 `done`）
+  与异常/5xx=`alive`/`unreachable` ⇒ 认领并继续等。不新增租约字段，仍复用 `_lease_state`
+  （BC 900s 进度静默）。扫描/收敛住 `trainer/bc_round_job.py`，`bc_loop` 留薄门面。
+- **理由**：`glob("*")` 会匹配点开头目录，`.deleted-*` 被读成未收口会卡整轮；旧逻辑对 hub 侧
+  已终局的 job 只会永等。`done` 有结果可落，重发会撞旧 result；`unreachable` 是没答上来，误判
+  的代价是整轮 GPU。`resume_lost` 只指该 jid 的 per-jid resume，课程级索引仍可接续。
+- **被否决**：复用 `job_liveness`（它不区分 failed/frozen/cancelled，正是要治的死 job）·
+  `done` 当 closed（结果可取却重发）· `unreachable` 当丢失（网络抖动重算整轮）· 新增租约
+  TTL/字段（与 `_lease_state` 双源）· 把隐藏目录算进 keep 或按 mtime 删掉。
+- **边界**：真实节点 A 停 15min、B 领同一 jid、`lease-orphan-reaped` 未验收；push/local 传输
+  不向 hub 对账（没有同一份 job store，拿它否掉盘上活会误重发）。
+- **验收**：`tests/trainer/test_bc_loop.py` · `tests/trainer/test_serve_bc.py` ·
+  `tests/remote/test_hub_liveness_cancel.py` · `tests/hub/test_bc_resume_store.py` ·
+  `tests/test_layering.py`（`bc_round_job` 登记）；`bash tools/githook/nn-python-gate.sh` 绿
+  （ruff + mypy + 5601 passed / 2 skipped / 42.41s）。
+- **全文** → `docs/nn/training-stack.md` §64；规格 → `plan/bc-single-course.plan.md` §16。
+
+## §2026-11-06-goalnn-bc-loss-retention（BC 败局留用：课程配置目标占比 + 固定语料原样）
+
+- **背景**：`wins_only` 在落盘前丢弃全部非胜局；y28 557→343（38.4% 败局从未进训练分布）。
+- **备选与否决**：保留率（用户选目标占比）· 全留/均匀随机（无混合比控制）· 胜局过采样
+  （复制不是新数据）· fixed 默认套策略（名不副实）· 严格目标裁胜局（浪费正样本）。
+- **决定**：`corpus.source=collect|fixed`。collect 的 `ratio` 为 `target{win,loss,timeout}`
+  目标占比（和=1、win>0、只裁不补、胜局不裁，`win` 是下限；按关卡默认；不可行记
+  `infeasible`，实际值入账）；`timeout` 独立类别。`fixed` 原样读现成语料、不采集/不筛选，
+  仅 schema 校验，记录 `data_fp`。新键激活时进语料指纹；未选中的局写 skip marker。
+- **边界**：未实现；实现需覆盖整数配额、缺类别、per-stage 取整、skip marker、fixed 审计；
+  G2/G3/G4 真机验收仍待跑。
+- **全文** → `plan/bc-single-course.plan.md` §16.9。
+
+## §2026-11-06-goalnn-bc-code-snapshot-freshness（BC 发布：快照过期只告警 + 控制台重打）
+
+- **背景**：`code.zip` 会话冻结；B7 现场（权重 `history` 缺 `hold_acc`）证明工作区改动可能没进云端，
+  manifest 只有 `code_sha256`，操作员无法判断「这次 job 跑的是哪版代码」。
+- **备选与否决**：发布前 sha 不一致即拒绝（脏树/无关未提交文件会挡住整轮；plan §16.2 B6 已裁决
+  只告警）· 每轮重打快照（破坏会话内代码一致性，PPO/BC 可能领到不同代码）· 只记 sha 无告警
+  （操作员仍不知道在跑旧代码）。
+- **决定**：BC 发布在快照来源为会话快照时，按 `pack_code_zip` 同规则算工作区 sha；不一致写 WARN
+  但不拒发，job 目录写 `code-freshness.json`（snapshot/workspace/stale/commit/ts）。面板显示最近
+  job 的 sha12 与 stale；`rebuildCodeSnapshot` 调 `python -m remote.code_snapshot --rebuild
+  --anchor-pid <dashboard pid>` 强制重打，锚指回长驻控制台（短命 CLI 退出不会留下死锚）。
+- **边界**：只覆盖 BC 发布；PPO publish 未接入；旧 job 无旁挂显示 `stale=null`；重打只影响下一次发布。
+- **验收**：`tests/remote/test_code_snapshot.py` · `tests/trainer/test_bc_loop.py` ·
+  `dashboard/tests/ledger-bc-code-snapshot.test.ts`；NN 全量 5654 passed / 2 skipped，dashboard 1953 pass。
+- **全文** → `docs/nn/training-stack.md` §66；规格 → `plan/bc-single-course.plan.md` §16.8。
+
+## §2026-11-06-goalnn-bc-paddle-backend（BC 的 Paddle 双生：纯 Paddle 机也能跑 BC 课）
+
+- **背景**：AI Studio 训练任务镜像只带 Paddle；`worker/train/bc.py` 顶层 `import torch` 会让
+  `kind=bc` 在纯 Paddle 机入口即炸。PPO 已有双生，BC 还没有。
+- **被否决**：Paddle 后端拒收 BC（纯 Paddle 机永远无法跑 BC 课）· 让 `bc_paddle` 静默退回
+  老 `NNPolicy`（arch 变了却无告警）· 为复用常量 import torch（入口就炸）· 在 Paddle 训练器里
+  重抄早停/NaN 清洗（双生漂移）· 写 torch `.pt` checkpoint（纯 Paddle 机没有 torch 序列化面）。
+- **决定**：新增 `worker/train/bc_paddle.py`（只支持 `--arch student`；v6 三头 / `policy_extra` /
+  `hold_acc` / 续训 / 早停 / class weight 与 `bc.py` 同语义）；纯判据上移 `bc_core.py` 两边共用。
+  `remote/bc_job.py` 按 `backend` 延迟分派，Paddle 分支先线程环境后 import，并用
+  `paddle_env.check_device` 拒 `tpu/xla/cuda-dp/dp/mps`；`remote/worker.py` 允许 Paddle 跑
+  `kind=ppo/bc`，仍拒 `iter`。`--checkpoint` 在 Paddle 上显式拒绝；`--backend` 仍是节点本地开关，
+  不进 manifest、不上报 hub。
+- **边界**：老 `NNPolicy`（`arch=bc`）无 Paddle 双生；本机同机双框架冒烟通过，AI Studio 纯 Paddle
+  机（无 torch）真实 1 epoch 未跑。
+- **验收**：`tests/worker/test_bc_paddle.py`（临时 Paddle 3.3.1，3 passed）· `tests/remote/test_bc_job_split.py` ·
+  `tests/remote/test_ppo_backend_switch.py`；`tools/paddle_parity.py bc-fixture/bc-check/bc-verify`
+  PASS（forward 9.20e-07 / after 1.45e-06 / torch 读 Paddle 权重 4.04e-07）。
+- **全文** → `docs/nn/training-stack.md` §68；规格 → `plan/bc-single-course.plan.md` §16.8 #17。

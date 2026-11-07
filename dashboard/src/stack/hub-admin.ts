@@ -295,6 +295,47 @@ export async function hubUnfreeze(
   }
 }
 
+/** **清空课程级 BC 续训索引**（#8）：`POST /admin/bc-resume/clear?course=<课>`。
+ *
+ *  只删 hub 的 `bc-resume/by-course/<course>/*.json` 别名——下一次开课从 ep1 起。
+ *  `reachable` 与 `ok` 分开：hub 连不上（换候选继续试）≠ hub 拒绝（把原话带回去）。
+ *  没有索引 = 200 + cleared 0（幂等，不编「失败」）。 */
+export async function hubClearBcResume(
+  url: string,
+  token: string,
+  course: string,
+): Promise<{ reachable: boolean; ok: boolean; cleared: number; message: string }> {
+  const base = url.replace(/\/+$/, '')
+  try {
+    const resp = await fetch(`${base}/admin/bc-resume/clear?course=${encodeURIComponent(course)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    })
+    const body = (await resp.json().catch(() => null)) as {
+      cleared?: unknown
+      error?: unknown
+    } | null
+    if (resp.status === 200) {
+      return {
+        reachable: true,
+        ok: true,
+        cleared: typeof body?.cleared === 'number' ? body.cleared : 0,
+        message: '已清空',
+      }
+    }
+    const err = typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+    return { reachable: true, ok: false, cleared: 0, message: err }
+  } catch (e) {
+    return {
+      reachable: false,
+      ok: false,
+      cleared: 0,
+      message: `hub 不可达：${e instanceof Error ? e.message : String(e)}`,
+    }
+  }
+}
+
 /** 直探一台 worker_server 的 `/ping`（登记/列表用）：`{online, busy}`。
  *  `online=false` 与「未探」是**两种**状态：前者是探过不通（隧道没起来/机器没开），
  *  后者是根本没法探（无鉴权键 / 已停用）——面板要给不同的提示。 */

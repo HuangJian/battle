@@ -79,13 +79,24 @@ class FakeHub:
     def __init__(self, *, ready_after: int = 2) -> None:
         self.polls = 0
         self.ready_after = ready_after
+        # 假结果默认报课程目标 epoch：G3 起「完成事件里的 epochs < 课程目标」就是预算扩大，
+        # 报 1 会让默认 150-epoch 的夹具被正确地判成一直没跑完。预算重开用例显式改它。
+        self.result: dict[str, Any] = {"metrics": {"epochs": 150}}
+        #: jid → (HTTP code, state)；缺省 = 200 pending（盘上 job 仍可等）。
+        self.states: dict[str, tuple[int, str]] = {}
 
     def request(self, base: str, token: str, path: str, timeout: float = 0.0) -> Any:
+        if path.endswith("/status"):
+            jid = path.split("/")[-2]
+            code, state = self.states.get(jid, (200, "pending"))
+            if code == 200:
+                return 200, json.dumps({"job_id": jid, "state": state}).encode("utf-8")
+            return code, b"{}"
         if path.endswith("/result"):
             self.polls += 1
             if self.polls < self.ready_after:
                 return 404, b"{}"
-            return 200, json.dumps({"metrics": {"epochs": 1}}).encode("utf-8")
+            return 200, json.dumps(self.result).encode("utf-8")
         if path.endswith("/bc-metrics"):
             return 200, b'{"rows": []}'
         return 404, b"{}"
@@ -315,6 +326,41 @@ def test_bc_course_runs_alongside_rl_and_yields_while_waiting(world: SimpleNames
     # 两门课共用一个进程、一个 supervisor：两门课的引擎都建过，退出时全部释放
     assert rep.engines["builds"] >= 2 and rep.engines["loaded"] == []
     assert set(rep.courses) == {world.bc, "rl-a"}
+
+
+def test_bc_enqueue_keeps_the_reopened_round(world: SimpleNamespace) -> None:
+    """★ 入队指针与引擎同源：两轮都已结算、预算却从 1 涨到 150 ⇒ 重开 it2，不是跳过整课。
+
+    旧接线的症状：`_enqueue` 拿 `bc_next_it` 的 `iters+1` 建显式任务，队列直接开一轮
+    不存在的训练（不经过 planner），`bc_round_reopened` 永远不出现。
+    """
+    log = Path(world.tmp) / "traj" / "training_log.jsonl"
+    for it in (1, 2):
+        bc_loop.append_ledger(
+            log, {"event": ROUND_DONE_EVENT, "it": it, "epochs": 1}
+        )
+    world.hub.result = {"metrics": {"epochs": 150}}
+    clock = FakeClock()
+    rep = serve(
+        [world.bc],
+        prepare=False,
+        bun="bun",
+        iters=2,
+        step_mode=False,
+        traj_root=str(world.tmp),
+        now=clock.now,
+        sleep=clock.sleep,
+        poll_sec=1.0,
+        max_steps=50,
+    )
+
+    assert rep.stop_reason == "all_settled"
+    assert world.published == [2]  # 只重开最后一个已完成轮，没有 it3
+    reopened = [
+        e for e in read_events(log) if e.get("event") == "bc_round_reopened"
+    ]
+    assert [(e["it"], e["old_epochs"], e["new_epochs"]) for e in reopened] == [(2, 1, 150)]
+    assert rep.courses[world.bc]["next_it"] == 3
 
 
 def test_bc_course_uses_round_granularity_even_in_step_mode(world: SimpleNamespace) -> None:

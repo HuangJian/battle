@@ -166,6 +166,11 @@ TRAINER_ORCHESTRATION = frozenset(
         "batch_store",
         "bc_ingest",
         "bc_loop",
+        #: 2026-11-05（G4，plan/bc-single-course.plan.md）：`bc_loop` 拆出 `bc_round_job`
+        #: （盘上未收口 job 的扫描 + hub 对账）—— 它直接拿 `remote.hub_http.job_reconcile_state`
+        #: ⇒ **直接**编排成员；`bc_loop` 经它仍可达 ⇒ 名字不动。拆的理由是 `bc_loop.py`
+        #: 已顶到 LOC 预算（<1000），扫描不是编排本身。
+        "bc_round_job",
         "collect_only",
         "dispatch",
         #: 2026-10-11（S1，plan/nn-training-reuse-and-deps.plan.md）：`queue.py` → `dispatch_queue.py`

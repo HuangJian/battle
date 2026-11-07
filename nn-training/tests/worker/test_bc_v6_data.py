@@ -4,10 +4,9 @@
   1. `npyio._load_dataset_v6` 从 `a_move/a_fire/a_hold + mask.npy(9)` 拼出与 legacy 同键的 dict；
   2. `NNDataset(action_v6=True)` 返回 **10 元组**，且 mask 按 4/3/2 切成三段；
   3. 三个头各自 CE 能算，且 **move 的 target 不会越过 4 类**（`mirror_x` 那条 legacy 5 类表
-     曾经把 v6 的 4 类映射出 `Target 4`，这里钉住 `mirror_p=0` 的绕行）。
-
-为什么不调 `train()`：它要完整 args + 落盘，且 44.7 万样本的语料会吃 11 GB 内存——
-真正的端到端验证放在云机（`bc` 课程，32 G 内存）。
+     曾经把 v6 的 4 类映射出 `Target 4`）；B2 起 v6 **恢复 mirrorX 增强**（4 类表），
+     本文件同时钉住「增强后标签仍在 0..3」。
+  4. B2 的 class-weight 强度旋钮与 `val_loss_weighted` / `hold_acc` 回传（小语料真跑 1 epoch）。
 """
 
 from __future__ import annotations
@@ -104,6 +103,97 @@ def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
         + torch.nn.functional.cross_entropy(lh, hd.long())
     )
     assert torch.isfinite(ce)
+
+
+def test_v6_mirror_augmentation_is_selfconsistent(corpus: Path) -> None:
+    """B2：v6 增强不再被强制关闭；镜像后标签仍是 4 类，且与 `mirror_x` 同源。"""
+    from worker.data.mirror import mirror_x
+
+    data = load_dataset(str(corpus), action_v6=True)
+    ds = NNDataset(data, augment=True, mirror_p=1.0, action_v6=True)
+    item = ds[0]
+    mv = int(data["actions"][0, 0])
+    e_obs, _e_sc, e_mv, _e_ex = mirror_x(
+        data["obs"][0], data["scalars"][0], mv, data["extra"][0], action_v6=True
+    )
+    assert int(item[3]) == e_mv
+    assert np.array_equal(item[0], e_obs)
+    # 4 类表：left(2)↔right(3)，up/down 不变；legacy 表会给出 4（越界）。
+    assert mirror_x(data["obs"][0], data["scalars"][0], 2, None, action_v6=True)[2] == 3
+    assert mirror_x(data["obs"][0], data["scalars"][0], 1, None, action_v6=True)[2] == 1
+
+
+def _train_args(tmp_path: Path, **over: object):
+    import types
+
+    ns = types.SimpleNamespace(
+        data_dir=str(tmp_path),
+        arch="student",
+        out=str(tmp_path / "w.json"),
+        notes="test",
+        resume=None,
+        epoch_offset=0,
+        ckpt_every=0,
+        checkpoint=None,
+        epochs=1,
+        batch=64,
+        lr=1e-3,
+        val_split=0.25,
+        mirror_p=0.5,
+        seed=1234,
+        num_workers=0,
+        device="cpu",
+        value_coef=0.0,
+        on_epoch=None,
+        action_v6=True,
+        policy_extra=False,
+        weight_exponent=1.0,
+        fire_pos_weight="auto",
+    )
+    for k, v in over.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def test_bc_train_v6_reports_hold_and_weighted_val(corpus: Path, tmp_path: Path) -> None:
+    """B2/B1：on_epoch 必须带 hold_acc；加权 val 单列且不污染 val_loss 本体。"""
+    from worker.train.bc import train
+
+    # 单 shard 微语料：1 个 train batch，只验回传字段（训练时长 <5s）。
+    small = tmp_path / "one"
+    _write_shard(small, "s0", 3)
+    calls: list[dict] = []
+    out = train(
+        _train_args(
+            small, out=str(tmp_path / "w.json"), on_epoch=lambda _g, _m, m: calls.append(dict(m))
+        )
+    )
+    assert len(calls) == 1
+    assert 0.0 <= calls[0]["hold_acc"] <= 1.0
+    assert calls[0].get("val_loss_weighted") is not None
+    assert calls[0]["val_loss_weighted"] != calls[0]["val_loss"]
+    assert len(out["history"]["hold_acc"]) == 1
+    assert len(out["history"]["val_loss_weighted"]) == 1
+
+
+def test_bc_train_weight_exponent_zero_disables_weighting(corpus: Path, tmp_path: Path) -> None:
+    """exp=0 ⇒ 不加权：加权 val 消失（两个口径重合就没必要存第二条）；hold_acc 照旧。"""
+    from worker.train.bc import train
+
+    small = tmp_path / "one0"
+    _write_shard(small, "s0", 4)
+    calls: list[dict] = []
+    out = train(
+        _train_args(
+            small,
+            out=str(tmp_path / "w0.json"),
+            weight_exponent=0.0,
+            on_epoch=lambda _g, _m, m: calls.append(dict(m)),
+        )
+    )
+    assert calls[0].get("val_loss_weighted") is None
+    assert out["history"].get("val_loss_weighted") is None
+    assert calls[0].get("hold_acc") is not None
 
 
 def test_legacy_path_untouched(corpus: Path) -> None:

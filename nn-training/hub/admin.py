@@ -525,6 +525,32 @@ class AdminRoutes:
             {"job_id": jid, "unfrozen": True, "reclaims": info.get("reclaims", 0)}, 200
         )
 
+    def _admin_clear_bc_resume(self) -> None:
+        """`POST /admin/bc-resume/clear?course=<课>`：清空课程级 BC 续训索引（#8）。
+
+        语义 = 「下一次开课从 ep1 起」：只删 `bc-resume/by-course/<course>/*.json` 别名，
+        不动 per-jid 权重、`epoch-weights/` 历史、账本与归档。在跑的 job 仍会在下一次
+        epoch 回传时重建索引 ⇒ 控制台要求先暂停；这里不猜「是否在跑」（那是租约事实）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        course = (qs.get("course") or [""])[0].strip()
+        if not course:
+            self._json({"error": "需要 course=<课>"}, 400)
+            return
+        try:
+            cleared = self.hub.clear_bc_course_index(course)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 清空 BC 续训索引：course={course} "
+            f"（{cleared} 轮）",
+            flush=True,
+        )
+        self._json({"course": course, "cleared": cleared}, 200)
+
     def _admin_cancel_job(self) -> None:
         """`POST /admin/cancel-job?job_id=<jid>`：人工作废**一个**未被认领的 job（W7）。
 

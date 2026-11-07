@@ -11,8 +11,8 @@
 
 本文件钉住的是「壳」这一半：
   * 后端解析（含显式值**不兜底**：要 paddle 却没装 ⇒ 在那台机器上响亮失败）；
-  * Paddle worker **只收 kind=ppo** —— bc / 节点侧 rollout 仍是 torch/bun 语义（迁移范围
-    = 只 PPO），且拒单必须发生在**任何下载之前**；
+  * Paddle worker 收 kind=ppo + kind=bc（2026-11-06 BC #10）；节点侧 rollout（kind=iter）
+    仍是 torch/bun 语义，且拒单必须发生在**任何下载之前**；
   * `--device auto` 在 Paddle 后端要问 **Paddle** 有没有 GPU。`normalize_ppo_device` 问的是
     torch（纯 Paddle 机上恒 False）⇒ 不问这一下，GPU 任务会被静默降成 cpu（慢两个数量级，
     日志一切正常 —— 与 2026-09-15 的 auto 事故同一形状）。
@@ -168,16 +168,21 @@ def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return seen
 
 
-@pytest.mark.parametrize("kind", ["bc", "iter"])
-def test_paddle_backend_rejects_non_ppo_kinds_before_any_download(
+def test_paddle_backend_rejects_iter_before_any_download(
     tmp_path: Path,
     downloads: list[str],
-    kind: str,
 ) -> None:
-    """迁移范围 = 只 PPO ⇒ bc / 节点侧 rollout 在 Paddle 后端上**零字节**拒收。"""
-    with pytest.raises(ProtocolError, match="只跑 kind=ppo"):
-        worker.run_job("http://hub", "tok", _job(kind), work_dir=tmp_path, backend="paddle")
+    """节点侧 rollout 仍是 torch/bun 语义 ⇒ 在 Paddle 后端上**零字节**拒收。"""
+    with pytest.raises(ProtocolError, match="只跑 kind=ppo/bc"):
+        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path, backend="paddle")
     assert downloads == []
+
+
+def test_paddle_backend_lets_bc_through(tmp_path: Path, downloads: list[str]) -> None:
+    """BC #10：Paddle 后端不再拒收 BC（真正跑到取 payload 那一步）。"""
+    with pytest.raises(_DownloadedError):
+        worker.run_job("http://hub", "tok", _job("bc"), work_dir=tmp_path, backend="paddle")
+    assert downloads == [JID]
 
 
 def test_paddle_backend_lets_ppo_through(tmp_path: Path, downloads: list[str]) -> None:

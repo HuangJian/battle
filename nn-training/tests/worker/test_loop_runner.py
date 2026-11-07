@@ -91,3 +91,21 @@ def test_ready_runs_the_step_normally() -> None:
     res, asked = _run(ready=True)
     assert res.status == "done"
     assert asked == [1]
+
+
+class _LedgerLoop:
+    """假引擎：账本指针可**往回**（预算扩大时重开最后一个已完成轮）。"""
+
+    def __init__(self, next_it: int) -> None:
+        self.next_it = next_it
+
+    def ledger_next_it(self, fallback: int = 1) -> int:
+        return self.next_it
+
+
+def test_engine_pointer_can_move_back_to_a_reopened_round() -> None:
+    """指针语义归引擎：账本说 it1 要重开时，队列的 it2 不得用 `max` 把它夹掉。"""
+    runner = LoopRunner(loop=_LedgerLoop(1), course="a", iters=2)
+    queue = CourseQueue(course="a", next_it=2)
+    tasks = runner.planner("a", 2, queue)
+    assert [t.it for t in tasks] == [1]

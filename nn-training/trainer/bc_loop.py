@@ -46,7 +46,11 @@ from pathlib import Path
 from common.cli import house_parser
 from common.log import log
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from remote.code_snapshot import current_code_zip_path, published_code_zip
+from remote.code_snapshot import (
+    current_code_zip_path,
+    published_code_zip,
+    workspace_code_sha,
+)
 from remote.hub_client import (
     git_head,
     iter_bc_shard_dirs,
@@ -54,19 +58,30 @@ from remote.hub_client import (
     publish_job,
     verify_and_land_bc,
 )
+from trainer.bc_round_job import find_round_job as _find_round_job
+from trainer.bc_round_job import prune_remote_jobs, train_tuning_argv, train_tuning_meta
 from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
+from worker.bc_collect import collect_corpus as _collect_corpus
+from worker.bc_collect import smoke_overrides as smoke_overrides
 from worker.bc_config import (
     BC_SUFFIX,
     BcCourseConfig,
     bc_corpus_identity_fp,
     load_bc_course,
     resolve_bc_course,
-    round_seeds,
 )
-from worker.bc_dispatch import BcDispatchError, dispatch_bc_corpus, landed_pairs
 from worker.bc_eval import BcEvalError, dispatch_bc_eval
-from worker.bc_ledger import ROUND_DONE_EVENT, append_ledger, bc_progress, completed_jobs
+from worker.bc_ledger import (
+    ROUND_DONE_EVENT,
+    ROUND_JOB_MISSING_EVENT,
+    ROUND_REOPENED_EVENT,
+    append_ledger,
+    bc_progress,
+    completed_jobs,
+    last_round_reopened,
+)
+from worker.bc_resume import bc_next_it, completed_epochs
 from worker.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT, RoundOutcome
 
 #: nn-training 目录（入口路径/子进程 cwd 都相对它——与 `trainer/run_bc.py` 的 `NN_ROOT` 同一个）。
@@ -188,22 +203,6 @@ def prune_bc_data(traj: Path, it: int, keep: int = BC_DATA_KEEP) -> None:
                 log(f"[run_bc] WARN prune {d} skipped: {e}")
 
 
-def prune_remote_jobs(job_root: Path, keep: int = 3) -> None:
-    """remote-jobs 旧 job 目录收敛（按 mtime 保留最近 keep 个；与 worker 侧同策略）。"""
-    if not job_root.exists():
-        return
-    dirs = sorted(
-        (d for d in job_root.iterdir() if d.is_dir() and d.name not in (".extra_tmp",)),
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-    for d in dirs[keep:]:
-        try:
-            shutil.rmtree(d)
-        except OSError:
-            pass
-
-
 # ---- 语料采集 --------------------------------------------------------------
 
 
@@ -227,21 +226,6 @@ def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
     return p
 
 
-def smoke_overrides(course: BcCourseConfig) -> dict:
-    """--smoke 尺寸压缩：1 局 / max_ticks≤300 / epochs=1（真一轮，分钟级内）。
-
-    wins_only 同步关闭：300 tick 内不可能 stage_clear，wins-only 会把唯一一局也
-    过滤掉（实测教训 2026-09-13）——冒烟要的是全链打通，不是语料质量。"""
-    return {
-        "games_per_stage": 1,
-        "max_ticks": min(int(course.max_ticks), 300),
-        "epochs": 1,
-        "batch": min(int(course.train.batch), 256),
-        "wins_only": False,
-        "near_miss_times": 1,
-    }
-
-
 def collect_corpus(
     course: BcCourseConfig,
     course_fp: str,
@@ -251,67 +235,25 @@ def collect_corpus(
     *,
     smoke: bool,
     cfg: dict | None,
+    jsonl_path: Path | None = None,
     log=log,
-) -> None:
-    """补齐本轮语料：断点续跑过滤 → bc_dispatch 并发派发 → 无 shard 则响亮失败。
+) -> Path:
+    """保留 `bc_loop` 编排面：实现已下沉 `worker/bc_collect.py`，此处只转发。
 
-    smoke 轮**不做断点续跑**（todo = 全量重采）——smoke 覆盖（wins_only/max_ticks）
-    与真跑口径不同，复用盘上 shard 会拿冒烟语料冒充真语料（2026-09-13 实测：
-    smoke 的 timeout shard 落进 it1 被真跑复用，语料污染）。"""
-    seeds = round_seeds(course, it)
-    stages = course.stage_ids
-    want = {(s, seed) for s in stages for seed in seeds}
-    have = landed_pairs(data_round_dir)
-    max_ticks = int(course.max_ticks)
-    wins_only = bool(course.corpus.wins_only)
-    near_miss = int(course.corpus.near_miss_times)
-    if smoke:
-        ov = smoke_overrides(course)
-        max_ticks = ov["max_ticks"]
-        wins_only = ov["wins_only"]
-        near_miss = ov["near_miss_times"]
-        seeds = seeds[:1]
-        want = {(s, seeds[0]) for s in stages}
-        todo = sorted(want)  # smoke 全量重采（不复用盘上 shard，见 docstring）
-    else:
-        todo = sorted(want - have)
-        if not todo:
-            log(f"[run_bc] it{it}: 语料已齐（{len(have)} shards on disk）— 跳过采集")
-            return
-    log(
-        f"[run_bc] it{it}: 需采 {len(todo)} 局（已有 {len(have)}）stages={stages} "
-        f"seeds={seeds[0]}..{seeds[-1]} wins_only={wins_only}"
-    )
-    sj_for = {s: course.custom_stage_payload(s) for s in stages}
-    stats = dispatch_bc_corpus(
-        tasks=todo,
-        out_dir=data_round_dir,
-        it=it,
-        corpus_fp=corpus_fp,
-        course_fp=course_fp,
-        difficulty=course.difficulty,
-        max_ticks=max_ticks,
-        stage_json_for=lambda s: sj_for.get(s),
-        lives_override=course.player.lives,
-        player_level=course.player.level,
-        wins_only=wins_only,
-        near_miss_times=near_miss,
+    `test_bc_ingest_split` 把 collect_corpus 钉在 bc_loop 的编排面上；实现拆分后
+    用薄门面保留该契约，同时 `monkeypatch bc_loop.collect_corpus` 仍可替换整段。
+    """
+    return _collect_corpus(
+        course,
+        course_fp,
+        corpus_fp,
+        it,
+        data_round_dir,
+        smoke=smoke,
         cfg=cfg,
-        task_timeout_sec=max(120.0, float(max_ticks) * 0.5 + 120.0),
-        iter_suffix="-smoke" if smoke else "",
+        jsonl_path=jsonl_path,
         log=log,
     )
-    if stats["failed"] > 0:
-        tripped = stats.get("failed_nodes") or []
-        raise BcDispatchError(
-            f"it{it}: {stats['failed']} 个语料任务彻底失败（重跑 run_bc 断点续跑补齐）"
-            + (
-                f"；已熔断节点：{'、'.join(tripped)}——先 /v1/ping 看该节点 codeHash"
-                " 与节点侧日志，再决定 /v1/update 或停用"
-                if tripped
-                else ""
-            )
-        )
 
 
 # ---- 任务发布 --------------------------------------------------------------
@@ -327,17 +269,29 @@ def publish_bc_job(
     traj: Path,
     job_root: Path,
     jsonl_path: Path,
+    course_key: str = "",
     round_name: str = "",
+    data_round_dir: Path | None = None,
     log=log,
 ) -> dict:
     """打包 + 发布 BC job（hub/push 共用；返回归一化 manifest）。
 
     round_name：语料轮目录名（真轮缺省 it{it}；smoke 轮 "smoke"——采集/发布/落位
-    三处必须同目录，否则发布找不到 shard）。"""
+    三处必须同目录，否则发布找不到 shard）。
+    data_round_dir：fixed 源的实际语料根；None = 历史 `<traj>/bc-data/<round>`。"""
     # D14 血缘过滤：与云端逐 shard 拒收同判据（protocol.d14_corpus_match）——
     # 异血缘 shard 不进 payload（2026-09-20 事故：混入即整份被云退回）。
+    # fixed 源是显式「原样使用」：shard 的 lineage 来自别的课程版本，不能按本课
+    # 指纹剔掉；job extra 的 corpus_source=fixed 会让云端同样跳过 D14（见 bc_job）。
+    fixed_source = course.corpus.source == "fixed"
     shard_dirs = iter_bc_shard_dirs(
-        traj, it, round_name, log=log, course_fp=course_fp, corpus_fp=corpus_fp
+        traj,
+        it,
+        round_name,
+        log=log,
+        course_fp="" if fixed_source else course_fp,
+        corpus_fp="" if fixed_source else corpus_fp,
+        data_root=data_round_dir,
     )
     if not shard_dirs:
         raise SystemExit(
@@ -374,13 +328,55 @@ def publish_bc_job(
         lr=float(course.train.lr),
         kind="bc",
         init_weights_path=str(init_src) if init_src is not None else "",
-        extra=bc_job_extra(course, it, smoke=is_smoke),
+        extra=bc_job_extra(course, it, smoke=is_smoke, course_key=course_key),
         log=log,
     )
+    # B7（2026-11-06）：快照是会话冻结的，但工作区可能已经变了。只告警、不拒发
+    # （plan §16.2 B6）；结果落 job 旁挂文件，控制台据此显示「本次 job 快照 sha」
+    # 与「过期」标记。按 pack_code_zip 的同一规则重打一份临时 zip 取 hash；
+    # 这是每轮一次、冷路径，换的是「云端到底跑哪版代码」可观测。
+    jid = str(manifest.get("job_id") or "")
+    workspace_sha = code_sha
+    stale: bool | None = False
+    if _from_snapshot:
+        try:
+            workspace_sha = workspace_code_sha(NN_ROOT, repo_root=REPO_ROOT)
+        except Exception as e:  # 打包失败不能把发布拖死，只是无法判定
+            stale = None
+            log(f"[run_bc] WARN: 当前工作区代码指纹计算失败（{e}）——无法判断快照是否过期")
+        else:
+            stale = workspace_sha != code_sha
+            if stale:
+                log(
+                    f"[run_bc] WARN: 代码快照与当前工作区不一致（snapshot={code_sha[:12]} "
+                    f"workspace={workspace_sha[:12]}）——本 job 仍按会话快照发布；"
+                    "要让新代码生效，请在控制台重打快照（或重启 hub/trainer）"
+                )
+    if jid:
+        try:
+            job_dir = Path(job_root) / jid
+            (job_dir / "code-freshness.json").write_text(
+                json.dumps(
+                    {
+                        "job_id": jid,
+                        "snapshot_sha": code_sha,
+                        "workspace_sha": workspace_sha,
+                        "stale": stale,
+                        "commit": commit,
+                        "ts": time.time(),
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            log(f"[run_bc] WARN: 代码快照旁挂文件写失败（{e}）——不影响发布")
     return manifest
 
 
-def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dict:
+def bc_job_extra(
+    course: BcCourseConfig, it: int, *, smoke: bool = False, course_key: str = ""
+) -> dict:
     """BC job manifest 的 `extra`（worker 侧消费：arch/val_split/mirror_p/value_coef/
     ckpt_every/train_seed/fire_pos_weight/notes）。
 
@@ -389,13 +385,13 @@ def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dic
     `"auto"` ⇒ `float("auto")` 直接 ValueError、BC 启动即崩。同理 `train_seed` 必须
     int()（worker 用 int() 消费），其余数值键照旧收窄。
     """
-    return {
+    extra = {
         "arch": str(course.train.arch),
         "val_split": float(course.train.val_split),
         "mirror_p": float(course.train.mirror_p),
         "value_coef": float(course.train.value_coef),
         # v6 三头（2026-11-04）：worker 侧 `train/bc.py` 按它切 10 元组 / 三头 CE
-        "action_v6": bool(course.train.action_v6),
+        "action_v6": bool(course.resolved_action_v6),
         "policy_extra": bool(course.train.policy_extra),
         "ckpt_every": int(course.train.ckpt_every),
         # 训练种子（2026-09-14）：课程 `train.seed` 显式下发到云端 job ——
@@ -407,8 +403,19 @@ def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dic
         # 低于"永不发射"常数基线（实测 0.770 < 0.927）。**原值直传**：数字或 "auto"
         # （由 worker → train/bc.py::resolve_fire_pos_weight 解析）。
         "fire_pos_weight": course.train.fire_pos_weight,
+        # B2/B3：两个训练旋钮（bc_round_job 单点；bc_loop 的 LOC 预算）。
+        **train_tuning_meta(course.train),
         "notes": f"bc course={course.name} it={it} smoke={smoke}",
     }
+    if course.corpus.source == "fixed":
+        # 显式标记：云端 `_run_bc_job` 据此跳过 D14（fixed 语料血缘不属于本课）。
+        extra["corpus_source"] = "fixed"
+    if course_key:
+        # G3：课程级 resume 索引的键。幂等键不含它（publish_job 里 extra 在 job_id 之后并入），
+        # 但 hub 写 `bc-resume/by-course/<course_key>/<it>.json` 必须靠它——course 字段是
+        # 课程全文，course_name 是展示名，二者都不等于锁/账本用的 stem。
+        extra["course_key"] = str(course_key)
+    return extra
 
 
 def bc_run_start_event(course: BcCourseConfig, course_key: str, run_id: str = "") -> dict:
@@ -480,6 +487,7 @@ def train_local_bc(
         str(course.train.seed),
         "--fire-pos-weight",
         str(course.train.fire_pos_weight),
+        *train_tuning_argv(course.train),
         "--ckpt-every",
         str(ckpt_every),
         "--device",
@@ -487,6 +495,12 @@ def train_local_bc(
         "--notes",
         f"run_bc local course={course.name}",
     ]
+    # 本地 CLI 也必须能与云端口径同构（2026-11-05）：v6 三头 / 空间头开关以前只在
+    # 云端 manifest 里，本地 `train/bc.py` 会把 v6 语料按 legacy 5 类读。
+    if course.resolved_action_v6:
+        cmd.append("--action-v6")
+    if course.train.policy_extra:
+        cmd.append("--policy-extra")
     # 路径一律**绝对**：run_bc 本体 chdir 仓库根，而子进程 cwd=NN_ROOT——相对路径
     # 会在 nn-training/ 下找语料（2026-09-13 实测 FileNotFoundError）。
     cmd[cmd.index("--data-dir") + 1] = str(Path(cmd[cmd.index("--data-dir") + 1]).resolve())
@@ -808,50 +822,30 @@ def bc_course_args(course: str, argv: list[str] | None = None) -> argparse.Names
 
 
 def find_round_job(
-    job_root: Path, it: int, *, completed_jids: set[str] | None = None, log=log
+    job_root: Path,
+    it: int,
+    *,
+    completed_jids: set[str] | None = None,
+    hub_url: str = "",
+    token: str = "",
+    on_missing=None,
+    log=log,
 ) -> tuple[str, dict] | None:
     """盘上找**这一轮已发布、还没收口**的 job → `(jid, manifest)`；没有则 None。
 
-    为什么必须找：BC 的续训按 jid 存（hub `/jobs/{jid}/resume` 与 worker 本地
-    `bc-resume/<jid>`）⇒ **重发 = 新 jid = 取不到旧进度 = 从头训**。所以「让位后再来问」
-    与「进程重启后续跑」都必须先认领已有的那份 job。
-
-    多个候选（历史失败尝试的残留）⇒ 取 manifest mtime 最新的一份，其余**响亮**记一行
-    （不做静默回收：那些 job 可能仍在某台云机上跑着）。
+    实现住 `trainer/bc_round_job.py`（本文件已顶到 LOC 预算）；这里只留门面，保证
+    `bc_ingest_split` 认的「编排面」名字仍在。传入 hub 地址时先对账：unknown/closed
+    不认领，允许重发（G4）；unreachable 保守等待。
     """
-    done = completed_jids or set()
-    cands: list[tuple[float, str, dict]] = []
-    try:
-        entries = sorted(Path(job_root).glob("*/manifest.json"))
-    except OSError:
-        return None
-    for mp in entries:
-        try:
-            m = json.loads(mp.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(m, dict) or int(m.get("it", -1)) != int(it):
-            continue
-        if str(m.get("kind", "")) != "bc":
-            continue
-        jid = str(m.get("job_id") or mp.parent.name)
-        if jid in done:
-            continue
-        try:
-            mt = mp.stat().st_mtime
-        except OSError:
-            mt = 0.0
-        cands.append((mt, jid, m))
-    if not cands:
-        return None
-    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    if len(cands) > 1:
-        others = ", ".join(j for _t, j, _m in cands[1:])
-        log(
-            f"[run_bc] it{it}: 盘上有 {len(cands)} 个未收口 bc job，按 manifest 时间取最新 "
-            f"{cands[0][1]}（其余不回收，可能仍在云机上跑：{others}）"
-        )
-    return cands[0][1], cands[0][2]
+    return _find_round_job(
+        job_root,
+        it,
+        completed_jids=completed_jids,
+        hub_url=hub_url,
+        token=token,
+        on_missing=on_missing,
+        log=log,
+    )
 
 
 # ---- 收官 / 归档 -----------------------------------------------------------
@@ -985,6 +979,8 @@ class BcLoop:
         self._waits: dict[int, BcWait] = {}
         #: push 直推已提交的轮（提交是内存态：重启后需要重提交，与 RL 的「换节点重提交」同规）。
         self._submitted: set[int] = set()
+        #: 已记录「旧 job 不可认领」的 jid（进程内幂等：同一份账不刷屏）。
+        self._missing_noted: set[str] = set()
         self._setup_done = False
         #: 共用的 args 视图（`LoopRunner` 依赖 `loop.args.traj`；`iters` 由调用方另传）。
         self.args = argparse.Namespace(
@@ -1058,8 +1054,12 @@ class BcLoop:
     # ---- 读面 ----------------------------------------------------------
 
     def ledger_next_it(self, fallback: int = 1) -> int:
-        """下一轮 = 账本里第一个**未完成**的轮（`bc_round_completed` 是唯一依据）。"""
-        return bc_progress(self.runtime.jsonl_path, self.runtime.iters).next_it
+        """下一轮 = 第一个未完成轮；预算扩大时把**最后一个已完成轮**交回重开。
+
+        只读 `bc_round_completed` 会把 40→80 的重开读成「全轮已完 ⇒ 指针=iters+1」，
+        调度器于是永远不再问这一轮。判据与重开事件共用 `completed_epochs` 一份实现。
+        """
+        return bc_next_it(self.runtime, fallback)
 
     def inflight_job_id(self, it: int) -> str | None:
         """这门课此刻在等的 job（控制台「在等什么」的那一列靠它点名）。"""
@@ -1074,8 +1074,10 @@ class BcLoop:
         self._setup()
         # 传输面每轮热读：隧道重连换域名后，长跑不能一直打旧地址（见 `_refresh_transport_cfg`）。
         self._refresh_transport_cfg()
-        if it in bc_progress(rt.jsonl_path, rt.iters).completed:
-            # 账本已结算（重放/重入/别的进程刚跑完）⇒ 不重做，也不重复写账本。
+        if it in bc_progress(rt.jsonl_path, rt.iters).completed and not self._reopen_if_budget_grew(
+            it
+        ):
+            # 账本已结算（重放/重入/别的进程刚跑完）⇒ 不重做；但预算扩大时同一轮要重开。
             return RoundOutcome(ROUND_NEXT, it)
         got = self._inflight_or_start(it)
         if got is None:  # 本机训练：整轮已在本机做完
@@ -1114,6 +1116,47 @@ class BcLoop:
             return RoundOutcome(ROUND_SMOKE_STOP, it)
         return RoundOutcome(ROUND_NEXT, it)
 
+    def _reopen_if_budget_grew(self, it: int) -> bool:
+        """预算扩大（40→80 epoch）⇒ 写一次 `bc_round_reopened` 并允许本轮重新发布。
+
+        `bc_round_completed` 仍是完成判据；这里只把「已经完成、但课程目标 epoch 更大」这一种
+        情况从「跳过」改成「重开」。续训权重由 hub 的课程级索引提供，新 job 的 jid 会变，
+        但 `/jobs/{new}/resume` 会回退到 `(course,it)` 索引，因此 worker 从 epoch 41 起训而不是 1。
+        """
+        rt = self.runtime
+        if rt.smoke:
+            return False
+        target = int(rt.course.train.epochs)
+        done = completed_epochs(rt.jsonl_path, it, rt.job_root)
+        if done is None or target <= done:
+            return False
+        prev = last_round_reopened(rt.jsonl_path, it)
+        prev_new = 0
+        if isinstance(prev, dict):
+            raw = prev.get("new_epochs")
+            if isinstance(raw, int) and not isinstance(raw, bool):
+                prev_new = raw
+        if prev_new == target:
+            self.log(
+                f"[run_bc] it{it}: 预算扩大重开已在途（{done}→{target} epochs）——继续认领/等待"
+            )
+            return True
+        append_ledger(
+            rt.jsonl_path,
+            {
+                "event": ROUND_REOPENED_EVENT,
+                "it": int(it),
+                "old_epochs": int(done),
+                "new_epochs": target,
+                "ts": time.time(),
+            },
+        )
+        self.log(
+            f"[run_bc] it{it}: 预算扩大 {done}→{target} epochs——重开本轮"
+            "（新 job，续用课程级 resume 索引）"
+        )
+        return True
+
     def _inflight_or_start(self, it: int) -> tuple[str, dict] | None:
         """认领本轮已有的 job（内存 → 盘上），没有就开一轮（采集/发布 或 本机训练）。
 
@@ -1128,8 +1171,17 @@ class BcLoop:
             return jid, manifest
         # 冒烟轮**不认领盘上 job**：它的语料口径/尺寸都被压缩过，复用等于拿冒烟语料冒充真语料。
         if not rt.smoke:
+            # hub 路径先对账（G4）：unknown/closed 的旧 job 不再“不重发布”地空等；
+            # push/local 没有同一份 hub job store，不能拿 hub 状态去否掉盘上活。
+            use_hub = rt.transport == "hub"
             found = find_round_job(
-                rt.job_root, it, completed_jids=completed_jobs(rt.jsonl_path), log=self.log
+                rt.job_root,
+                it,
+                completed_jids=completed_jobs(rt.jsonl_path),
+                hub_url=rt.hub_url if use_hub else "",
+                token=rt.token if use_hub else "",
+                on_missing=self._note_job_missing,
+                log=self.log,
             )
             if found is not None:
                 jid, manifest = found
@@ -1143,11 +1195,34 @@ class BcLoop:
                 return jid, manifest
         return self._start_round(it)
 
+    def _note_job_missing(self, jid: str, manifest: dict, state: str) -> None:
+        """旧 job 在 hub 侧已不可认领：记一次账，随后允许重发（G4）。
+
+        `resume_lost` 只描述**该 jid 的** per-jid resume；新 job 仍可能从课程级
+        `(course, it)` 索引接续，所以它不是“整轮从头训”的断言。
+        """
+        if jid in self._missing_noted:
+            return
+        self._missing_noted.add(jid)
+        raw_it = manifest.get("it")
+        it = raw_it if isinstance(raw_it, int) and not isinstance(raw_it, bool) else 0
+        append_ledger(
+            self.runtime.jsonl_path,
+            {
+                "event": ROUND_JOB_MISSING_EVENT,
+                "it": int(it),
+                "job_id": jid,
+                "hub_state": state,
+                "resume_lost": True,
+                "ts": time.time(),
+            },
+        )
+
     def _start_round(self, it: int) -> tuple[str, dict] | None:
         """开一轮：采集语料（幂等）→ 本机训练 **或** 发布远端 job。"""
         rt = self.runtime
         data_round_dir = rt.data_root / ("smoke" if rt.smoke else f"it{it}")
-        collect_corpus(
+        collected = collect_corpus(
             rt.course,
             rt.course_fp,
             rt.corpus_fp,
@@ -1155,8 +1230,11 @@ class BcLoop:
             data_round_dir,
             smoke=rt.smoke,
             cfg=rt.cfg,
+            jsonl_path=rt.jsonl_path,
             log=self.log,
         )
+        if collected is not None:
+            data_round_dir = Path(collected)
         if rt.transport == "local":
             metrics = train_local_bc(
                 rt.course,
@@ -1179,7 +1257,9 @@ class BcLoop:
             traj=rt.traj,
             job_root=rt.job_root,
             jsonl_path=rt.jsonl_path,
+            course_key=rt.course_key,
             round_name=("smoke" if rt.smoke else ""),
+            data_round_dir=data_round_dir,
             log=self.log,
         )
         jid = str(manifest["job_id"])
@@ -1237,8 +1317,17 @@ class BcLoop:
         rt = self.runtime
         archive_round(rt.course, rt.course_key, it, rt.out_weights, metrics, smoke=smoke)
         if not smoke:
+            recorded = metrics.get("epochs")
+            if not isinstance(recorded, int) or isinstance(recorded, bool) or recorded < 1:
+                recorded = int(rt.course.train.epochs)
             append_ledger(
-                rt.jsonl_path, {"event": ROUND_DONE_EVENT, "it": int(it), "ts": time.time()}
+                rt.jsonl_path,
+                {
+                    "event": ROUND_DONE_EVENT,
+                    "it": int(it),
+                    "epochs": int(recorded),
+                    "ts": time.time(),
+                },
             )
         prune_bc_data(rt.traj, it)
         prune_remote_jobs(rt.job_root)
@@ -1266,7 +1355,9 @@ class BcLoop:
     def run_blocking(self) -> None:
         """单课程阻塞驱动：等外部时**原地重问**（无让位对象），语义与改造前的 for 循环一致。"""
         rt = self.runtime
-        it = 1
+        # 从账本指针起（不是 1）：全部轮已完成但预算扩大时，指针 = 最后一个已完成轮，
+        # 否则会重开最早一轮，或从头重跑已经结算的轮。
+        it = self.ledger_next_it()
         while rt.iters <= 0 or it <= rt.iters:
             outcome = self.run_one_round(it)
             if outcome.status == ROUND_WAIT:

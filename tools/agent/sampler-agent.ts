@@ -1478,13 +1478,19 @@ async function runGame(
   // 决策周期 K（plan/k5-rhythm.plan.md）：`?decisionK=<n>` 时本局按该 K 跑
   // （评估/rollout 同传）；缺席/10 = 导出器缺省（旧训练侧逐字节不变）。
   decisionK: number = DEFAULT_DECISION_K,
+  // v6 BC 标签来源：argmax=教师最优动作，sampled=策略采样（BC 的行为克隆标签）。
+  // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
+  labelMode: string = 'argmax',
 ): Promise<Buffer> {
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
   // 跳过权重桶查找（调用方 /v1/task 已保证只有 bcSupport 节点会收到该模式）。
-  const isBc = mode === 'bc'
-  const ws = isBc ? null : weightsOf(kind, wver, course)
-  if (!ws && !isBc) throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
+  // mode=bc-v6（2026-11-05）：走 export-rl-rollout，需要 label_policy 权重（wver=sha）。
+  const isBcLegacy = mode === 'bc'
+  const isBcV6 = mode === 'bc-v6'
+  const ws = isBcLegacy ? null : weightsOf(kind, wver, course)
+  if (!ws && !isBcLegacy)
+    throw new Error(`no weights cached for kind=${kind} wver=${wver.slice(0, 12)}…`)
   const wfile = ws?.file ?? ''
   // 干净评估走独立贪心 runner（不在 codeHash 集内，见 export-eval-game.ts 头注释）；
   // 只产 _eval_report.json，无 npy shards。v3.7：mode=eval 支持 policy=intent-exec
@@ -1504,7 +1510,7 @@ async function runGame(
     // §353：exporter 入口先取出，交给 runner 决定用 bun 直跑 TS 还是 node 跑打包产物。
     const entryTs = isEval
       ? 'tools/sim/export-eval-game.ts'
-      : isBc
+      : isBcLegacy
         ? 'tools/sim/export-godai-bc.ts'
         : isGoalRollout
           ? 'tools/sim/export-goal-rollout.ts'
@@ -1514,7 +1520,7 @@ async function runGame(
     const packFile = path.join(gameDir, '_result.pack')
     const scriptName = isEval
       ? 'export-eval-game'
-      : isBc
+      : isBcLegacy
         ? 'export-godai-bc'
         : isGoalRollout
           ? 'export-goal-rollout'
@@ -1524,7 +1530,7 @@ async function runGame(
     const runner = rolloutRunner()
     const nodeLabel = `${runner.engine}-${process.pid}`
     let args: string[]
-    if (isBc) {
+    if (isBcLegacy) {
       // BC 任务参数（export-godai-bc.ts）：单局 stage/seed + 教师口径，无权重。
       args = [entryTs, '--stage', String(stage), '--seed', String(seed)]
       if (stageJson) args.push('--stage-json', stageJson)
@@ -1569,24 +1575,31 @@ async function runGame(
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
-        if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
-        if (isGoalRollout) {
-          args.push('--heartbeat', String(heartbeat))
-          if (goalCoarse) args.push('--coarse')
-        }
-        // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
-        if (dodge) args.push('--dodge', dodge)
-        // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
-        if (stageJson) args.push('--stage-json', stageJson)
-        if (livesOverride) args.push('--lives-override', livesOverride)
-        if (playerLevel) args.push('--player-level', playerLevel)
         // R2 事件 rung：本局走事件门（缺席/false = 老行为）。
         if (decisionEvents) args.push('--decision-events')
         // 决策周期 K：仅非默认值透传（缺席 = 导出器缺省 10，旧训练侧逐字节不变）。
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
-        // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
-        // goal/intent exporter 不认识该参数）
-        if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
+        // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
+        if (stageJson) args.push('--stage-json', stageJson)
+        if (livesOverride) args.push('--lives-override', livesOverride)
+        if (playerLevel) args.push('--player-level', playerLevel)
+        if (isBcV6) {
+          // v6 BC：权重已由 /v1/task 按 label_policy sha 缓存；argmax=教师标签，
+          // sampled=策略采样标签。course_fp 进 export-rl-rollout 的 shard manifest。
+          if (labelMode === 'argmax') args.push('--teacher-argmax')
+          if (courseFp) args.push('--course-fp', courseFp)
+        } else {
+          if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
+          if (isGoalRollout) {
+            args.push('--heartbeat', String(heartbeat))
+            if (goalCoarse) args.push('--coarse')
+          }
+          // goal-nn 卡 A3：dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
+          if (dodge) args.push('--dodge', dodge)
+          // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
+          // goal/intent exporter 不认识该参数）
+          if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
+        }
       }
       args.push(
         '--max-ticks',
@@ -1787,6 +1800,9 @@ export function taskKey(
   // 决策周期 K（plan/k5-rhythm.plan.md）：同一种子在不同 K 下是不同的局
   // （决策边界不同）⇒ 非默认值时并入 `:k<N>` 后缀。仅激活时进键（同上）。
   dk = '',
+  // v6 BC 标签来源（argmax/sampled）：同一 iterId 下两种标签是不同语料，
+  // 仅非空时进 `:lm<mode>` 后缀（legacy 键逐字节不变）。
+  lm = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -1794,7 +1810,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}`
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}`
 }
 
 function beginTask(
@@ -1825,6 +1841,8 @@ function beginTask(
   decisionEvents = false,
   // 决策周期 K：`?decisionK=<n>` 时本局按该 K 跑；缺席/10 = 导出器缺省（同上）。
   decisionK: number = DEFAULT_DECISION_K,
+  // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
+  labelMode: string = 'argmax',
 ): void {
   inflight.set(key, { stage, seed, startedAt: Date.now() })
   // 每局 beginTask/done/finally 不打日志：多 worker RL 采样下会刷爆 tmp/sampler-agent.log。
@@ -1851,6 +1869,7 @@ function beginTask(
     course,
     decisionEvents,
     decisionK,
+    labelMode,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -2113,6 +2132,12 @@ async function handle(req: Request): Promise<Response> {
     const difficulty = url.searchParams.get('difficulty') ?? 'hard'
     // mode=eval → 干净评估局（贪心、无 shards）；缺省 rollout。旧 trainer 不发此参数。
     const mode = url.searchParams.get('mode') ?? 'rollout'
+    const isBcV6 = mode === 'bc-v6'
+    // v6 标签来源：argmax=教师最优动作，sampled=策略采样。只在 v6 校验；legacy
+    // bc/rollout 不传 labelMode（空串不漂移历史 taskKey）。
+    const labelMode = url.searchParams.get('labelMode') ?? (isBcV6 ? 'argmax' : '')
+    if (isBcV6 && labelMode !== 'argmax' && labelMode !== 'sampled')
+      return jsonResponse({ error: `labelMode invalid: ${labelMode}` }, 400)
     if (
       !iterId ||
       !wver ||
@@ -2126,16 +2151,17 @@ async function handle(req: Request): Promise<Response> {
     const policy = url.searchParams.get('policy') ?? 'nn'
     // M8：意图 rollout 的 replan cadence（export-intent-rollout --replan；缺省 0=不传）。
     const replan = parseInt(url.searchParams.get('replan') ?? '0', 10)
-    // BC 语料任务（2026-09-13）：mode=bc 无权重语义——跳过权重桶检查；
-    // wins/nearMissTimes = God-AI 教师口径参数（export-godai-bc 透传）。
-    const isBc = mode === 'bc'
+    // BC 语料任务（2026-09-13 legacy / 2026-11-05 v6）：
+    // - mode=bc：God-AI 教师自对弈，无权重语义；
+    // - mode=bc-v6：策略权重（wver=label_policy sha）+ labelMode 决定 argmax/sampled。
+    const isBcLegacy = mode === 'bc'
     const wins = url.searchParams.get('wins') ?? '1'
     const nearMissTimes = url.searchParams.get('nearMissTimes') ?? '3'
     // v5 多课程：课程名从任务 URL 来（训练侧按课程下发），权重按 (course, kind) 取桶。
     // 缺省空串 = 旧单课程桶（旧训练侧不传 → 行为与改造前一致）。
     const course = url.searchParams.get('course') ?? ''
-    const ws = isBc ? null : weightsOf(kind, wver, course)
-    if (!ws && !isBc) return jsonResponse({ error: 'wver not cached here' }, 409)
+    const ws = isBcLegacy ? null : weightsOf(kind, wver, course)
+    if (!ws && !isBcLegacy) return jsonResponse({ error: 'wver not cached here' }, 409)
     // M1d：课程自定义关参数（仅 per-tick rollout 消费；eval/其它 kind 忽略）。
     const stageJson = url.searchParams.get('stageJson') ?? ''
     const livesOverride = url.searchParams.get('livesOverride') ?? ''
@@ -2179,6 +2205,7 @@ async function handle(req: Request): Promise<Response> {
       courseFp,
       decisionEvents ? 'de1' : '',
       decisionK !== DEFAULT_DECISION_K ? String(decisionK) : '',
+      labelMode,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2228,6 +2255,7 @@ async function handle(req: Request): Promise<Response> {
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
         decisionEvents,
         decisionK,
+        labelMode,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -2272,6 +2300,7 @@ async function handle(req: Request): Promise<Response> {
           course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
           decisionEvents,
           decisionK,
+          labelMode,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -2327,6 +2356,8 @@ async function handle(req: Request): Promise<Response> {
     // 决策周期 K 同规（plan/k5-rhythm.plan.md）：`decisionK` 解码为与提交端相同的
     // 规范串（`String(parseInt)`），后缀与提交端逐字节一致。
     const dkPoll = Number.parseInt(url.searchParams.get('decisionK') ?? '', 10)
+    // v6 BC 标签来源：与提交端同配方（空串 = legacy 键不变）。
+    const lmPoll = url.searchParams.get('labelMode') ?? ''
     const key = taskKey(
       iterId,
       mode,
@@ -2337,6 +2368,7 @@ async function handle(req: Request): Promise<Response> {
       courseFp,
       url.searchParams.get('decisionEvents') === '1' ? 'de1' : '',
       Number.isInteger(dkPoll) && dkPoll !== DEFAULT_DECISION_K ? String(dkPoll) : '',
+      lmPoll,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2470,6 +2502,9 @@ async function handle(req: Request): Promise<Response> {
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,
+      // v6 BC 采集支持位（2026-11-05）：/v1/task ?mode=bc-v6（export-rl-rollout +
+      // 标签权重 + 可选 --teacher-argmax）。旧 agent 无此字段 → bc_dispatch v6 不派。
+      bcV6Support: true,
       // 磁盘水位（plan/self-node-disk-alert）：纯加法字段，旧消费方忽略未知键。
       ...diskReport(),
     })

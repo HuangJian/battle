@@ -1,7 +1,7 @@
 /** ledger.ts — 训练账本尾派生：课程编辑态、BC 轮次与多地图 eval 行。 */
-import { readFileSync } from 'fs'
+import { readFileSync, readdirSync, statSync } from 'fs'
 import path from 'path'
-import { curriculaDir } from '../../core/paths'
+import { curriculaDir, tmpLogsDir } from '../../core/paths'
 import type { CourseEdit } from '../../web/view'
 import { readCourseTail } from './course-source'
 
@@ -49,6 +49,8 @@ export interface BcEpochRow {
   valLoss: number | null
   moveAcc: number | null
   fireAcc: number | null
+  /** v6 第三头（#11）；旧账本行没有该键 ⇒ null。 */
+  holdAcc: number | null
   lr: number | null
   ts: number
 }
@@ -65,6 +67,22 @@ export interface BcEvalLevelRow {
   scoreMean: number
   meanTicks: number
   failed: number
+  /** 行为门口径（B5）：拾取率 / 每局生成 / 探索格 / 移动占比。 */
+  pickupRate?: number | null
+  pickupSpawnMean?: number | null
+  cellsMean?: number | null
+  moveFrac?: number | null
+  /** 面板口径（B4）：禁止跨面板相减。 */
+  panel?: {
+    level?: string
+    maxTicks?: number | null
+    courseMaxTicks?: number | null
+    difficulty?: string
+    lives?: number | null
+    gamesPerStage?: number | null
+    seed0?: number | null
+    stages?: number | null
+  }
 }
 
 export interface BcEvalRow {
@@ -72,6 +90,8 @@ export interface BcEvalRow {
   epoch: number
   wver: string
   levels: BcEvalLevelRow[]
+  /** B5：周期 eval 只作哨兵，判决只认 200 局行为门。 */
+  sentinelOnly?: boolean
   ts: number
 }
 
@@ -101,6 +121,21 @@ export function bcRowsFromLedgerTail(lines: string[]): {
   }
   const num = (v: unknown): number | null =>
     typeof v === 'number' && Number.isFinite(v) ? v : null
+  /** eval 行的 panel（B4）：旧账本没有它 ⇒ undefined；坏值逐键退 null，不整体丢行。 */
+  const parsePanel = (v: unknown): BcEvalLevelRow['panel'] => {
+    if (!v || typeof v !== 'object') return undefined
+    const p = v as Record<string, unknown>
+    return {
+      level: typeof p.level === 'string' ? p.level : undefined,
+      maxTicks: num(p.max_ticks),
+      courseMaxTicks: num(p.course_max_ticks),
+      difficulty: typeof p.difficulty === 'string' ? p.difficulty : undefined,
+      lives: num(p.lives),
+      gamesPerStage: num(p.games_per_stage),
+      seed0: num(p.seed0),
+      stages: num(p.stages),
+    }
+  }
   for (const line of lines.slice(from)) {
     const t = line.trim()
     if (!t) continue
@@ -119,6 +154,7 @@ export function bcRowsFromLedgerTail(lines: string[]): {
         valLoss: num(r.val_loss),
         moveAcc: num(r.move_acc),
         fireAcc: num(r.fire_acc),
+        holdAcc: num(r.hold_acc),
         lr: num(r.lr),
         ts: num(r.ts) ?? 0,
       })
@@ -135,12 +171,18 @@ export function bcRowsFromLedgerTail(lines: string[]): {
         scoreMean: num(l.score_mean) ?? 0,
         meanTicks: num(l.mean_ticks) ?? 0,
         failed: num(l.failed) ?? 0,
+        pickupRate: num(l.pickup_rate),
+        pickupSpawnMean: num(l.pickup_spawn_mean),
+        cellsMean: num(l.cells_mean),
+        moveFrac: num(l.move_frac),
+        panel: parsePanel(l.panel),
       }))
       evals.push({
         it: num(r.it) ?? 0,
         epoch: num(r.epoch) ?? 0,
         wver: typeof r.wver === 'string' ? r.wver : '',
         levels,
+        sentinelOnly: r.sentinel_only === true,
         ts: num(r.ts) ?? 0,
       })
     }
@@ -148,13 +190,76 @@ export function bcRowsFromLedgerTail(lines: string[]): {
   return { epochs, evals }
 }
 
+/** 最近一轮 BC job 的代码快照旁挂（B7；旧 job 没有旁挂 ⇒ stale=null）。 */
+export interface BcCodeSnapshotRow {
+  jobId: string
+  snapshotSha: string
+  workspaceSha: string
+  stale: boolean | null
+  commit: string
+  ts: number
+}
+
+function latestBcCodeSnapshot(course: string): BcCodeSnapshotRow | null {
+  const root = path.join(tmpLogsDir(), course, 'remote-jobs')
+  let best: {
+    mt: number
+    manifest: Record<string, unknown>
+    sidecar: Record<string, unknown>
+  } | null = null
+  try {
+    for (const name of readdirSync(root)) {
+      if (name.startsWith('.')) continue
+      const dir = path.join(root, name)
+      const manifestPath = path.join(dir, 'manifest.json')
+      let manifest: Record<string, unknown>
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (manifest.kind !== 'bc') continue
+      let mt = 0
+      try {
+        mt = statSync(manifestPath).mtimeMs
+      } catch {
+        /* 读不到 mtime 仍可作候选 */
+      }
+      if (best && mt <= best.mt) continue
+      let sidecar: Record<string, unknown> = {}
+      try {
+        sidecar = JSON.parse(
+          readFileSync(path.join(dir, 'code-freshness.json'), 'utf-8'),
+        ) as Record<string, unknown>
+      } catch {
+        /* 旧 job / 旁挂还没写：只显示 manifest 的 sha，不猜新旧 */
+      }
+      best = { mt, manifest, sidecar }
+    }
+  } catch {
+    return null
+  }
+  if (!best) return null
+  const m = best.manifest
+  const s = best.sidecar
+  return {
+    jobId: String(m.job_id ?? ''),
+    snapshotSha: String(m.code_sha256 ?? ''),
+    workspaceSha: typeof s.workspace_sha === 'string' ? s.workspace_sha : '',
+    stale: typeof s.stale === 'boolean' ? s.stale : null,
+    commit: String(m.commit ?? ''),
+    ts: typeof s.ts === 'number' && Number.isFinite(s.ts) ? s.ts : best.mt / 1000,
+  }
+}
+
 /** BC epoch 面板视图：账本尾窗解析 + 课程 eval.every_epochs（面板头提示用）。 */
 export async function buildBcEpochsView(course: string | undefined): Promise<{
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
+  codeSnapshot: BcCodeSnapshotRow | null
 }> {
-  if (!course) return { epochs: [], evals: [], evalEveryEpochs: null }
+  if (!course) return { epochs: [], evals: [], evalEveryEpochs: null, codeSnapshot: null }
   let epochs: BcEpochRow[] = []
   let evals: BcEvalRow[] = []
   try {
@@ -174,5 +279,5 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   } catch {
     /* 非 BC 课程 / 读不到 → null */
   }
-  return { epochs, evals, evalEveryEpochs }
+  return { epochs, evals, evalEveryEpochs, codeSnapshot: latestBcCodeSnapshot(course) }
 }

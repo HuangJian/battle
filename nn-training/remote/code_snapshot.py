@@ -96,7 +96,9 @@ __all__ = [
     "published_code_zip",
     "published_ts_code_zip",
     "read_cluster_snapshot",
+    "rebuild_cluster_snapshot",
     "snapshot_dir",
+    "workspace_code_sha",
 ]
 
 #: 快照目录名（相对 `<repo>/tmp`）——点目录，且**不在**被打包的根（`nn-training/`）之下。
@@ -445,7 +447,12 @@ def _pack_ts(
 
 
 def _pack_and_publish(
-    d: Path, repo_root: str | Path | None, *, anchor_kind: str, log: Callable[[str], None]
+    d: Path,
+    repo_root: str | Path | None,
+    *,
+    anchor_kind: str,
+    anchor_pid: int | None = None,
+    log: Callable[[str], None],
 ) -> CodeSnapshot:
     """打一份新快照并原子发布（内容寻址的文件名 + 最后写元数据）。
 
@@ -464,7 +471,9 @@ def _pack_and_publish(
     now = time.time()
     # 先算成局部量再进元数据：同一次调用的返回值与写盘内容**同源**（不从字面量字典里回读，
     # 免得两个值哪天分叉，也免得 mypy 对 `dict[str, object]` 的索引抱怨）。
-    self_pid = os.getpid()
+    # 控制台「重打快照」跑在短命 python 子进程里，锚必须指回长驻的 dashboard；
+    # 否则下一次 read 立刻看到 anchor_alive=False。缺省仍是当前进程。
+    self_pid = int(anchor_pid or os.getpid())
     self_fp = _cmdline_sha12(self_pid)
     meta = {
         "magic": SNAPSHOT_MAGIC,
@@ -504,6 +513,50 @@ def _pack_and_publish(
         ts_sha256=ts[1] if ts else "",
         ts_bytes=ts[2] if ts else 0,
     )
+
+
+def rebuild_cluster_snapshot(
+    *,
+    anchor_kind: str = "console",
+    anchor_pid: int | None = None,
+    repo_root: str | Path | None = None,
+    log: Callable[[str], None] = lambda _m: None,
+) -> CodeSnapshot:
+    """**控制台重打入口**：不管旧锚是否活着，强制打一份新快照并原子发布。
+
+    与 `ensure_cluster_snapshot` 的区别只有「复用」这一步：重打是人的显式动作，
+    目的是让「发布 job 的代码快照」追上当前工作区；不是启动路径的自动判定。
+    `anchor_pid` 指回长驻的控制台进程，避免短命 CLI 退出后所有消费者看到死锚。
+    并发重打只可能多打一份内容寻址的 zip；元数据最后原子替换，读面不会读到半份。
+    """
+    d = snapshot_dir(repo_root)
+    d.mkdir(parents=True, exist_ok=True)
+    snap = _pack_and_publish(
+        d, repo_root, anchor_kind=anchor_kind, anchor_pid=anchor_pid, log=log
+    )
+    log(_line(snap, reused=False) + "（控制台重打）")
+    return snap
+
+
+def workspace_code_sha(
+    pack_root: str | Path, *, repo_root: str | Path | None = None
+) -> str:
+    """当前工作区按 `pack_code_zip` 同一规则打包后的 sha256。
+
+    只用于**告警**（B7）：快照是会话冻结的，发布时若工作区已变，云端跑的仍是旧代码。
+    临时 zip 放在快照目录（在被打包的 `nn-training/` 之外），打包完立即删除；
+    不读/不删旧快照，也不写 `snapshot.json`。
+    """
+    d = snapshot_dir(repo_root)
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".workspace.{os.getpid()}.{time.time_ns()}.zip"
+    try:
+        return pack_code_zip(pack_root, tmp)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _git_head(repo_root: str | Path | None) -> str:
@@ -669,3 +722,40 @@ def ensure_cluster_snapshot(
     finally:
         # 只放自己的锁（易主时不动别人的）——`release_instance_lock` 就是那条判据。
         release_instance_lock(str(lock_path))
+
+
+def _main() -> int:
+    import sys
+
+    from common.cli import house_parser
+
+    parser = house_parser("集群代码快照（控制台重打入口）")
+    parser.add_argument("--rebuild", action="store_true", help="强制重打一份快照")
+    parser.add_argument("--anchor-kind", default="console")
+    parser.add_argument("--anchor-pid", type=int, default=0)
+    args = parser.parse_args()
+    if not args.rebuild:
+        parser.error("只有 --rebuild 是公开动作；启动路径请用 ensure_cluster_snapshot")
+    snap = rebuild_cluster_snapshot(
+        anchor_kind=str(args.anchor_kind),
+        anchor_pid=(int(args.anchor_pid) or None),
+        log=lambda m: print(m, file=sys.stderr),
+    )
+    print(
+        json.dumps(
+            {
+                "sha256": snap.sha256,
+                "zip": str(snap.zip_path),
+                "bytes": snap.bytes,
+                "packed_at": snap.packed_at,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    from common.cli import run_main
+
+    run_main(_main)

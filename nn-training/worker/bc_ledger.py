@@ -28,6 +28,11 @@ from common.fs import append_jsonl
 
 #: BC 轮完成事件名（唯一判据；外加 `job_completed` 标记 job 已收口）。
 ROUND_DONE_EVENT = "bc_round_completed"
+#: 轮**重开**事件名（预算扩大：40→80 epoch 时允许同一 `it` 再发布一份新 job）。
+ROUND_REOPENED_EVENT = "bc_round_reopened"
+#: 盘上 job 已不可认领（hub 404 / failed / frozen / cancelled）——只记一次，随后允许重发。
+#: `resume_lost` 指**该 jid 的** per-jid resume 不再可用；新 job 仍可能从课程级索引接续。
+ROUND_JOB_MISSING_EVENT = "bc_round_job_missing"
 #: job 收口事件名（`remote.hub_client.mark_job_completed` 写；用于分辨「这轮的 job 还没回来」）。
 JOB_DONE_EVENT = "job_completed"
 #: job 发布事件名（`remote.hub_client.publish_job` 写；「已发布未回传」的起点）。
@@ -75,6 +80,46 @@ def completed_rounds(jsonl_path: str | Path) -> set[int]:
         except (KeyError, TypeError, ValueError):
             continue
     return out
+
+
+def recorded_epochs(jsonl_path: str | Path, it: int) -> int:
+    """该轮账本里记录到的最大 epoch（`bc_epoch.epoch` 或完成事件的 `epochs`）。
+
+    为什么同时读两处：旧账本没有 `bc_round_completed.epochs`（G3 起才写），但滚动回传的
+    `bc_epoch` 行通常齐；反过来若指标行缺失，完成事件里的 `epochs` 仍能证明该轮跑到了哪。
+    两处都没有 ⇒ 0（调用方必须把 0 当「不可判定」，不能当「0 epoch」去重开）。
+    """
+    want = int(it)
+    best = 0
+    for e in read_events(jsonl_path):
+        ev = e.get("event")
+        if ev not in ("bc_epoch", ROUND_DONE_EVENT):
+            continue
+        try:
+            got_it = int(e.get("it", -1))
+        except (TypeError, ValueError):
+            continue
+        if got_it != want:
+            continue
+        raw = e.get("epochs") if ev == ROUND_DONE_EVENT else e.get("epoch")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > best:
+            best = raw
+    return best
+
+
+def last_round_reopened(jsonl_path: str | Path, it: int) -> dict | None:
+    """该轮最后一条 `bc_round_reopened`（文件序；没有 ⇒ None）。"""
+    want = int(it)
+    last: dict | None = None
+    for e in read_events(jsonl_path):
+        if e.get("event") != ROUND_REOPENED_EVENT:
+            continue
+        try:
+            if int(e.get("it", -1)) == want:
+                last = e
+        except (TypeError, ValueError):
+            continue
+    return last
 
 
 def scan_jobs(jsonl_path: str | Path) -> tuple[dict[str, dict], set[str], set[str]]:

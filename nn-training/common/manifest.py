@@ -398,6 +398,35 @@ def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dic
     return str(shard_manifest.get("course_fp", "")) == job_course_fp
 
 
+def shard_lineage_ok(
+    shard_dir: str | Path, course_fp: str, corpus_fp: str, log=lambda msg: None
+) -> bool:
+    """shard 的 manifest 是否与本次 job 同血缘（读不到 = 不收，宁可少一份也不整份被云拒）。"""
+    d = Path(shard_dir)
+    try:
+        mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log(f"[publish] D14: 剔除 {d.name}（shard manifest 不可读: {e}）")
+        return False
+    if d14_corpus_match(course_fp, corpus_fp, mm):
+        return True
+    log(
+        f"[publish] D14: 剔除 {d.name}（shard 血缘 "
+        f"{str(mm.get('course_fp'))[:12]}…/{str(mm.get('corpus_fp') or '-')[:12]}… != "
+        f"job {course_fp[:12]}…/{corpus_fp[:12] or '-'}…）"
+    )
+    return False
+
+
+def shard_corpus_skipped(shard_dir: str | Path) -> bool:
+    """ratio 未选中的 shard 只有 manifest（`corpus_skipped=true`）——不得进 payload。"""
+    try:
+        mm = json.loads((Path(shard_dir) / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return mm.get("corpus_skipped") is True
+
+
 def data_fp(shard_dirs: Sequence[str | Path], *, mem: Mapping[str, dict] | None = None) -> str:
     """D1 data_fp：sha256(按字典序排列的 shard 相对路径 + 各 manifest {wver,stage,seed})。
 

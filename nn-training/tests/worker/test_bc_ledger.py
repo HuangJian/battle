@@ -19,13 +19,16 @@ from worker.bc_ledger import (
     JOB_DONE_EVENT,
     JOB_PENDING_EVENT,
     ROUND_DONE_EVENT,
+    ROUND_REOPENED_EVENT,
     append_ledger,
     bc_progress,
     completed_jobs,
     completed_rounds,
     inflight_jobs,
     job_net_event,
+    last_round_reopened,
     read_events,
+    recorded_epochs,
 )
 
 
@@ -159,6 +162,40 @@ def test_progress_finished_only_when_all_rounds_done(tmp_path: Path) -> None:
 def test_progress_of_empty_ledger_starts_at_one(tmp_path: Path) -> None:
     prog = bc_progress(tmp_path / "missing.jsonl", 4)
     assert (prog.next_it, prog.done, prog.finished) == (1, 0, False)
+
+
+def test_recorded_epochs_reads_metric_rows_and_completion_field(tmp_path: Path) -> None:
+    """预算扩大判据：`bc_epoch` 与 G3 起完成事件的 `epochs` 都算证据；别的轮不算。"""
+    p = _write(
+        tmp_path / "l.jsonl",
+        [
+            {"event": "bc_epoch", "it": 1, "epoch": 2},
+            {"event": "bc_epoch", "it": 1, "epoch": 7},
+            {"event": "bc_epoch", "it": 2, "epoch": 99},  # 别的轮不污染
+            {"event": ROUND_DONE_EVENT, "it": 1, "epochs": 40},
+            {"event": ROUND_DONE_EVENT, "it": 1},  # 旧账本缺字段：不炸
+            {"event": "bc_epoch", "it": 1, "epoch": "bad"},
+        ],
+    )
+    assert recorded_epochs(p, 1) == 40
+    assert recorded_epochs(p, 2) == 99
+    assert recorded_epochs(p, 3) == 0
+    assert recorded_epochs(tmp_path / "missing.jsonl", 1) == 0
+
+
+def test_last_round_reopened_is_the_latest_for_that_round(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "l.jsonl",
+        [
+            {"event": ROUND_REOPENED_EVENT, "it": 1, "old_epochs": 20, "new_epochs": 40},
+            {"event": ROUND_REOPENED_EVENT, "it": 2, "old_epochs": 40, "new_epochs": 80},
+            {"event": ROUND_REOPENED_EVENT, "it": 1, "old_epochs": 40, "new_epochs": 80},
+        ],
+    )
+    ev = last_round_reopened(p, 1)
+    assert ev is not None and (ev["old_epochs"], ev["new_epochs"]) == (40, 80)
+    assert last_round_reopened(p, 3) is None
+    assert last_round_reopened(tmp_path / "missing.jsonl", 1) is None
 
 
 # ---------------------------------------------------------------- 净态（唯一折叠口径）

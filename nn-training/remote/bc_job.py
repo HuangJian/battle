@@ -368,33 +368,40 @@ def _run_bc_job(
     base_url: str = "",
     token: str = "",
     lease_token: str = "",
+    backend: str = "torch",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> dict:
     """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
     D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，
     本地 bc-resume/ 兜底——中断重领同 job 从最后完成的 epoch 接着训，绝不从头重训）
-    → 复用 `train/bc.py::train` 训练（on_epoch 回调每 epoch 回传权重+指标：hub
-    POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新 resume + 本地原子覆盖）→
-    BC 权重 + metrics 回传。
+    → 按 `backend` 复用 `train/bc.py::train` 或 `train/bc_paddle.py::train`（on_epoch
+    回调每 epoch 回传权重+指标：hub POST /jobs/{id}/epoch 租约校验防旧 worker 覆盖新
+    resume + 本地原子覆盖）→ BC 权重 + metrics 回传。
 
     语料 = payload 解包出的 npy shard 目录（obs/scalars/actions/masks/conditions/
     returns + manifest），bc.py 的 scan_shards 对 job_dir 递归扫描即全部装载。
     """
     # ---- D14 语料血缘：与 PPO 同规（BC shard manifest 同样携带 course_fp/corpus_fp）----
-    _cfp = str(manifest["course_fp"])
-    _corpus = str(manifest.get("corpus_fp", "") or "")
-    for _sd in shard_dirs:
-        try:
-            with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
-                _sm = json.load(_f)
-        except (OSError, ValueError) as _e:
-            raise ProtocolError(f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}") from _e
-        if not d14_corpus_match(_cfp, _corpus, _sm):
-            raise ProtocolError(
-                f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
-                f"shard={str(_sm.get('corpus_fp') or _sm.get('course_fp'))[:12]}… "
-                f"（{_sd}）——跨课程语料混入，拒收"
-            )
+    # fixed 源是课程显式声明的「原样使用现成语料」：其 shard 可能来自别的课程版本，
+    # 按本课指纹拒收会把整个功能变成死路；发布端因此写入 corpus_source=fixed，
+    # 云端只对这一种显式来源跳过血缘门（其余仍逐 shard 拒收）。
+    if manifest.get("corpus_source") != "fixed":
+        _cfp = str(manifest["course_fp"])
+        _corpus = str(manifest.get("corpus_fp", "") or "")
+        for _sd in shard_dirs:
+            try:
+                with open(os.path.join(_sd, "manifest.json"), encoding="utf-8") as _f:
+                    _sm = json.load(_f)
+            except (OSError, ValueError) as _e:
+                raise ProtocolError(
+                    f"D14 course_fp: 读 shard manifest 失败 {_sd}: {_e}"
+                ) from _e
+            if not d14_corpus_match(_cfp, _corpus, _sm):
+                raise ProtocolError(
+                    f"D14 corpus_fp 不匹配：job={_corpus[:12] or _cfp[:12]}… "
+                    f"shard={str(_sm.get('corpus_fp') or _sm.get('course_fp'))[:12]}… "
+                    f"（{_sd}）——跨课程语料混入，拒收"
+                )
 
     t0 = time.time()
 
@@ -422,19 +429,37 @@ def _run_bc_job(
         log(f"job {jid}: ECHO (bc smoke) — 占位权重回传（未跑 BC）")
         return result
 
-    # ---- 延迟 import torch + BC 训练器（B7 同款；本模块顶层零 torch）----
-    import torch
-
-    if torch_threads > 0:
-        torch.set_num_threads(torch_threads)
+    # ---- 延迟 import 训练器（B7 同款；本模块顶层零 torch/paddle）----
     from types import SimpleNamespace
 
-    from worker.data.weights_io import save_weights_json
-    from worker.train.bc import train as bc_train
+    save_weights_json: Any
+    if backend == "paddle":
+        # `paddle.io` / numpy 在 import 期建线程池——线程旋钮必须早于它们。
+        from remote import paddle_env
+
+        paddle_env.apply_thread_env(torch_threads)
+        from worker.models.student_paddle import save_weights_json as _paddle_save_weights
+        from worker.train.bc_paddle import train as bc_train
+
+        save_weights_json = _paddle_save_weights
+    else:
+        import torch
+
+        if torch_threads > 0:
+            torch.set_num_threads(torch_threads)
+        from worker.data.weights_io import save_weights_json as _torch_save_weights
+        from worker.train.bc import train as bc_train
+
+        save_weights_json = _torch_save_weights
 
     # 训练种子（2026-09-14 修正）：课程/调用方指定优先 —— 见 resolve_bc_seed。
     seed_int, seed_src = resolve_bc_seed(manifest)
     dev = _bc_device(device)
+    if backend == "paddle":
+        # Paddle 没有 XLA/DataParallel/MPS 路径：在开跑前响亮拒绝 torch 专属实验臂。
+        from remote.paddle_env import check_device
+
+        dev = check_device(jid, dev)
     out_path = job_dir / "bc-weights.json"
     total_epochs = int(manifest["epochs"])
 
@@ -492,6 +517,7 @@ def _run_bc_job(
             "train_samples": 0,
             "val_samples": 0,
             "best_val_loss": 0.0,
+            "delivered_epoch": int(resume_epoch),
             "resumed_complete": True,
         }
     else:
@@ -516,6 +542,10 @@ def _run_bc_job(
             # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
             # （关闭 = 历史语义，重放旧 job 行为不变）。
             fire_pos_weight=manifest.get("fire_pos_weight", 0.0),
+            # B2：v6 class weight 强度；旧 job 无此键 ⇒ 1.0（历史行为，逐字节不变）
+            weight_exponent=float(manifest.get("weight_exponent", 1.0)),
+            # B3：早停；旧 job 无此键 ⇒ 0 = 关（跑满 epochs，逐字节不变）
+            patience=int(manifest.get("patience", 0) or 0),
             # v6 三头（2026-11-04）：旧 job 无此键 ⇒ False = legacy 5/2 两头（逐字节不变）
             action_v6=bool(manifest.get("action_v6", False)),
             policy_extra=bool(manifest.get("policy_extra", False)),
@@ -532,8 +562,9 @@ def _run_bc_job(
                 ns.resume = init_resume
                 log(f"job {jid}: warm start——init_weights.json 作起点，优化器/LR 全新")
         log(
-            f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
-            f"lr={ns.lr} device={dev} seed={seed_int}({seed_src}) shards={len(shard_dirs)}"
+            f"job {jid}: BC start backend={backend} arch={ns.arch} epochs={ns.epochs} "
+            f"batch={ns.batch} lr={ns.lr} device={dev} seed={seed_int}({seed_src}) "
+            f"shards={len(shard_dirs)}"
             + (f" resume@{resume_epoch}" if resume_epoch else "")
         )
         metrics = bc_train(ns)
@@ -553,6 +584,11 @@ def _run_bc_job(
             "train_samples": int(sizes.get("train", 0) or 0),
             "val_samples": int(sizes.get("val", 0) or 0),
             "best_val_loss": float(metrics.get("best_val_loss", 0.0) or 0.0),
+            # B1：交付权重来自 best val 的那一 epoch，不是 history[-1]（ep80）。
+            "delivered_epoch": int(metrics.get("delivered_epoch", 0) or 0),
+            # B3：早停后实际跑完的 epoch 数（`epochs` 仍是课程声明的上限）。
+            "epochs_completed": int(metrics.get("epochs_completed", total_epochs) or total_epochs),
+            "early_stopped": bool(metrics.get("early_stopped", False)),
             "move_acc": float(hist.get("move_acc", [0.0])[-1]) if hist.get("move_acc") else 0.0,
             "fire_acc": float(hist.get("fire_acc", [0.0])[-1]) if hist.get("fire_acc") else 0.0,
             "params": int(metrics.get("params", 0) or 0),

@@ -287,6 +287,32 @@ def test_prune_keeps_only_recent_zips(tmp_path: Path, monkeypatch: pytest.Monkey
 # ---------------------------------------------------------------- 消费路径（publish）
 
 
+def test_workspace_code_sha_tracks_tree_without_leaving_scratch(tmp_path: Path) -> None:
+    """B7：当前工作区指纹与快照同规则；改文件必变，临时 zip 不残留。"""
+    root = _fake_repo(tmp_path)
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=root)
+    pack_root = root / "nn-training"
+
+    assert cs.workspace_code_sha(pack_root, repo_root=root) == snap.sha256
+    assert not list(cs.snapshot_dir(root).glob(".workspace.*.zip"))
+
+    (pack_root / "trainer.py").write_text("x = 2\n", encoding="utf-8")
+    assert cs.workspace_code_sha(pack_root, repo_root=root) != snap.sha256
+
+
+def test_rebuild_uses_live_anchor_and_picks_up_new_code(tmp_path: Path) -> None:
+    """控制台重打：不因旧锚活着而复用；锚可指回长驻进程，改代码后 sha 必变。"""
+    root = _fake_repo(tmp_path)
+    first = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=root)
+    (root / "nn-training" / "trainer.py").write_text("x = 3\n", encoding="utf-8")
+    second = cs.rebuild_cluster_snapshot(anchor_kind="console", anchor_pid=first.anchor_pid, repo_root=root)
+
+    assert second.sha256 != first.sha256
+    assert second.anchor_pid == first.anchor_pid
+    got = cs.read_cluster_snapshot(root)
+    assert got is not None and got.sha256 == second.sha256
+
+
 def test_published_code_zip_prefers_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """有快照 ⇒ publish 用快照（会话冻结），**不**动 per-course 的 code.zip。"""
     snap_source = _fake_repo(tmp_path / "src")

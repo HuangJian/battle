@@ -62,7 +62,20 @@ from worker.models.student import PPOStudent, StudentNet
 
 # 免 torch 的判据半边（2026-09-26，item 6f + 续扫）：BC 旋钮归一在 train/bc_core.py、
 # 设备串在 train/device.py。本模块 import 后自用 + 沿用旧名对外可见（既有调用点一行不改）。
-from worker.train.bc_core import resolve_fire_pos_weight
+from worker.train.bc_core import (
+    SMOOTH_WINDOW,
+    early_stop_epoch,
+    resolve_fire_pos_weight,
+)
+from worker.train.bc_core import (
+    sanitize_json as _sanitize_json,
+)
+from worker.train.bc_core import (
+    select_best_epoch as select_best_epoch,
+)
+from worker.train.bc_core import (
+    smoothed_val_loss as smoothed_val_loss,
+)
 from worker.train.device import resolve_bc_device
 
 
@@ -245,18 +258,6 @@ def _majority_baseline(dl, action_v6: bool = False) -> dict:
     return out
 
 
-def _sanitize_json(o):
-    """递归把 float NaN → None（json.dump 默认写出非标准 `NaN` 字面量，
-    TS JSON.parse 会直接抛错——weights 文件里不能带 NaN）。"""
-    if isinstance(o, float) and math.isnan(o):
-        return None
-    if isinstance(o, dict):
-        return {k: _sanitize_json(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_sanitize_json(v) for v in o]
-    return o
-
-
 def train(args) -> dict:
     # P2-3（2026-09-02）：可复现性补全——此前只有 torch.manual_seed，numpy/random
     # 全局 RNG 未播种（_majority_baseline 的 Counter 顺序、DataLoader worker 内
@@ -291,6 +292,12 @@ def train(args) -> dict:
     # fire 头正例权重（2026-09-14）：默认 auto = 训练集 neg/pos。放 dev 之后构造，
     # 保证权重张量与 logits 同设备。
     counts = _class_counts(train_dl, action_v6)
+    # B2（2026-11-05）：class weight **强度旋钮**。1 = 完全 inverse-frequency（旧行为），
+    # 0 = 不加权，中间值 = `w ** exp`。标定判据是「预测边缘 ≈ 标签边缘」，不是 val 新低：
+    # v6 fire 的三类分布 ~90:10:9 时，满额加权会把正例预测率从 9.7% 推到 23.6%。
+    weight_exp = float(getattr(args, "weight_exponent", 1.0) or 0.0)
+    if weight_exp < 0:
+        raise ValueError(f"weight_exponent 必须 ≥ 0（得到 {weight_exp}）")
     # v6 的 hold 头 class weight（legacy 路径恒 None）——先声明类型，两个分支都要赋值
     hold_class_weight: torch.Tensor | None = None
     fire_class_weight: torch.Tensor | None = None
@@ -300,13 +307,21 @@ def train(args) -> dict:
         # 3152:110:28 那种极端不平衡对齐，不加权该头必退化成「永不发射」）。
         _cf = counts["fire"]
         _tot = sum(_cf.values()) or 1
-        _w = [(_tot / (3 * max(1, _cf.get(k, 0)))) for k in range(3)]
-        fire_class_weight = torch.tensor(_w, device=dev, dtype=torch.float32)
+        _w = [((_tot / (3 * max(1, _cf.get(k, 0)))) ** weight_exp) for k in range(3)]
+        fire_class_weight = (
+            torch.tensor(_w, device=dev, dtype=torch.float32) if weight_exp > 0 else None
+        )
         fire_pos_weight = -1.0  # 标记「非 legacy 路径」，只用于日志
         _ch = counts["hold"]
         _htot = sum(_ch.values()) or 1
-        hold_class_weight = torch.tensor(
-            [(_htot / (2 * max(1, _ch.get(k, 0)))) for k in range(2)], device=dev, dtype=torch.float32
+        hold_class_weight = (
+            torch.tensor(
+                [((_htot / (2 * max(1, _ch.get(k, 0)))) ** weight_exp) for k in range(2)],
+                device=dev,
+                dtype=torch.float32,
+            )
+            if weight_exp > 0
+            else None
         )
     else:
         fire_pos_weight = resolve_fire_pos_weight(getattr(args, "fire_pos_weight", 0.0), counts)
@@ -318,6 +333,8 @@ def train(args) -> dict:
         f"{'（正例加权开启）' if fire_class_weight is not None else '（关闭）'}"
         f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
     )
+    if action_v6:
+        print(f"[train] weight_exponent={weight_exp:.2f}（0=不加权 / 1=完全 inverse-freq）")
     # v6 的 `PPOStudent.forward` 恒返回 4 元组（move/fire/hold/value）⇒ 即使 value_coef=0
     # 也必须用 PPOStudent（StudentNet 没有 value_head），否则解包失败。
     action_v6_pre = bool(getattr(args, "action_v6", False))
@@ -362,7 +379,14 @@ def train(args) -> dict:
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, args.epochs))
 
+    #: 交付 epoch 的**原始** val_loss（文件名/账本口径；B1，2026-11-05）。
     best_val = float("inf")
+    #: 选权重用的滑动平均 val_loss（B1，2026-11-07）：单点新低不再当选。
+    best_smoothed = float("inf")
+    #: 交付权重实际来自哪一（全局）epoch（B1，2026-11-05）：result.json 必须能回答它，
+    #: 否则 `history[-1]`（ep80）会被误读成交付精度（2026-11-05 复盘）。
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
     history: dict[str, list[float]] = {
         "train_loss": [],
         "val_loss": [],
@@ -376,6 +400,9 @@ def train(args) -> dict:
     # 否则第二段 run 的 ckpt.1..N 会撞名第一段（2026-09-09 p3bc 61-90 事故）。
     epoch_base = int(getattr(args, "epoch_offset", 0) or 0)
     epoch_total = epoch_base + args.epochs
+    #: `epochs` 是**上限**（B3）：早停后这个数是实际跑完的 epoch 数。
+    epochs_done = epoch_base
+    patience = int(getattr(args, "patience", 0) or 0)
     for epoch in range(1, args.epochs + 1):
         gepoch = epoch_base + epoch
         model.train()
@@ -430,7 +457,17 @@ def train(args) -> dict:
 
         # Validation (no augmentation).
         model.eval()
-        v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "vloss": 0.0, "vn": 0}
+        v = {
+            "loss": 0.0,
+            "n": 0,
+            "ma": 0.0,
+            "fa": 0.0,
+            "vloss": 0.0,
+            "vn": 0,
+            # B2：加权 val 的累加器（v6 才有；与训练目标同口径，仅作诊断）。
+            "wloss": 0.0,
+            "wn": 0,
+        }
         with torch.no_grad():
             for batch in val_dl:
                 if action_v6:
@@ -447,8 +484,19 @@ def train(args) -> dict:
                     lm, lf = out_v
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
                 if action_v6:
-                    # val 同样不施加 class weight（与 `_majority_baseline` 同尺度）
+                    # val_loss 本体**不**施加 class weight（与 `_majority_baseline` 同尺度）；
+                    # 加权口径另存 `val_loss_weighted`（B2），避免两条曲线被混读成一个数。
                     loss = loss + _masked_ce(lh, hd, mh)
+                    if weight_exp > 0 and (
+                        fire_class_weight is not None or hold_class_weight is not None
+                    ):
+                        wloss = (
+                            _masked_ce(lm, mv, mm)
+                            + _masked_ce(lf, fr, mf, class_weight=fire_class_weight)
+                            + _masked_ce(lh, hd, mh, class_weight=hold_class_weight)
+                        )
+                        v["wloss"] += wloss.item() * obs.shape[0]
+                        v["wn"] += obs.shape[0]
                 # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
                 # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。
                 if use_value:
@@ -469,6 +517,10 @@ def train(args) -> dict:
         vl = v["vloss"] / max(1, v["vn"]) if v["vn"] > 0 else float("nan")
         history["train_loss"].append(round(train_loss, 4))
         history["val_loss"].append(round(val_loss, 4))
+        if v["wn"] > 0:
+            history.setdefault("val_loss_weighted", []).append(
+                round(v["wloss"] / v["wn"], 4)
+            )
         history["move_acc"].append(round(ma, 4))
         history["fire_acc"].append(round(fa, 4))
         #: v6 第三头（2026-11-04）：hold 的 val 准确率。legacy 语料没有该头 ⇒ 不写这条键。
@@ -484,9 +536,25 @@ def train(args) -> dict:
             + (f"value={vl:.4f} " if not math.isnan(vl) else "")
             + f"lr={opt.param_groups[0]['lr']:.2e}"
         )
-        if val_loss < best_val:
-            best_val = val_loss
-            best_state = {k: v.detach().clone() for k, v in raw_model.state_dict().items()}
+        epochs_done = gepoch
+        # B1：选权重看**完整窗口**的滑动平均 val_loss，单点新低不再当选（2026-11-07）。
+        # 在早停 break 之前判：停的那一轮也可能是平滑曲线的新低（严格 <，无 min_delta）。
+        if len(history["val_loss"]) >= SMOOTH_WINDOW:
+            smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
+            if smoothed < best_smoothed:
+                best_smoothed = smoothed
+                best_val = val_loss
+                best_epoch = gepoch
+                best_state = {
+                    k: v.detach().clone() for k, v in raw_model.state_dict().items()
+                }
+        stop_at = early_stop_epoch(history["val_loss"], patience)
+        if stop_at is not None and epoch >= stop_at:
+            print(
+                f"[train] early stop at epoch {gepoch}/{epoch_total}："
+                f"滑动平均 val_loss（window={SMOOTH_WINDOW}）连续 {patience} epoch 无改善"
+            )
+            break
         # Mid-run checkpoint (--ckpt-every N): save current weights (not best, for resume).
         ckpt_every = int(getattr(args, "ckpt_every", 0) or 0)
         if ckpt_every > 0 and epoch % ckpt_every == 0:
@@ -494,7 +562,12 @@ def train(args) -> dict:
             save_weights_json(
                 raw_model,
                 ckpt_path,
-                extra_meta={"epoch": gepoch, "best_val_loss": round(best_val, 4), "ckpt": True},
+                extra_meta={
+                    "epoch": gepoch,
+                    # 窗口未满时还没有候选权重：写 None，别让 Infinity 进 JSON。
+                    "best_val_loss": round(best_val, 4) if best_epoch else None,
+                    "ckpt": True,
+                },
             )
             print(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
         # Per-epoch hook（BC 云端回传 2026-09-13）：worker/run_bc 以回调持久化/回传
@@ -509,9 +582,26 @@ def train(args) -> dict:
                     "val_loss": round(val_loss, 4),
                     "move_acc": round(ma, 4),
                     "fire_acc": round(fa, 4),
+                    # v6 第三头（#11）：以前漏发 ⇒ 账本/面板的 hold 列永远是空。
+                    **({"hold_acc": round(ha, 4)} if ha is not None else {}),
+                    # B2：加权 val 与 val_loss 并排入账（诊断用，不替代门指标）。
+                    **(
+                        {"val_loss_weighted": round(v["wloss"] / v["wn"], 4)}
+                        if v["wn"] > 0
+                        else {}
+                    ),
                     "lr": float(opt.param_groups[0]["lr"]),
                 },
             )
+
+    if best_state is None:
+        if not history["val_loss"]:
+            raise RuntimeError("BC 训练没有完成任何 epoch（--epochs 必须 >= 1）")
+        # 窗口未满（epochs < SMOOTH_WINDOW）：交最后一轮，而不是退回单点 min。
+        best_epoch = epochs_done
+        best_val = history["val_loss"][-1]
+        best_smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
+        best_state = {k: v.detach().clone() for k, v in raw_model.state_dict().items()}
 
     # Restore best on CPU (weights export/registry must be bitwise-stable
     # regardless of training device).
@@ -526,6 +616,10 @@ def train(args) -> dict:
         "args": {k: v for k, v in vars(args).items() if k != "on_epoch"},
         "sizes": sizes,
         "best_val_loss": round(float(best_val), 4),
+        "best_smoothed_val_loss": round(float(best_smoothed), 4),
+        "delivered_epoch": int(best_epoch),
+        "epochs_completed": int(epochs_done),
+        "early_stopped": bool(epochs_done < epoch_total),
         "history": history,
         # 2026-09-14：把"地板"和补偿系数写进 checkpoint —— 只看 fire_acc 会误判
         # （它可能低于"永不发射"的常数基线），必须能随权重回看这两个参照量。
@@ -536,7 +630,7 @@ def train(args) -> dict:
     out_dir = os.path.dirname(os.path.abspath(args.out))
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     versioned = os.path.join(
-        out_dir, f"weights.{stamp}_ep{epoch_total}_val{float(best_val):.4f}.json"
+        out_dir, f"weights.{stamp}_ep{epochs_done}_val{float(best_val):.4f}.json"
     )
     save_weights_json(raw_model, versioned, extra_meta=meta)
     _safe_copy(versioned, args.out)  # active pointer for the TS runtime (read-only tolerant)
@@ -552,6 +646,10 @@ def train(args) -> dict:
         "out": versioned,
         "active": args.out,
         "best_val_loss": best_val,
+        "best_smoothed_val_loss": best_smoothed,
+        "delivered_epoch": int(best_epoch),
+        "epochs_completed": int(epochs_done),
+        "early_stopped": bool(epochs_done < epoch_total),
         "params": n_params,
         "history": history,
         # 远程 BC job（plan/bc-cloud-integration.plan.md §3）回传 metrics 用；
@@ -631,6 +729,12 @@ def main():
     )
     ap.add_argument("--checkpoint", default=None, help="optional .pt checkpoint path")
     ap.add_argument("--epochs", type=int, default=100)
+    ap.add_argument(
+        "--patience",
+        type=int,
+        default=0,
+        help="早停：滑动平均 val_loss（window=5）连续 N epoch 无改善就停；0=关（epochs 仍是上限）",
+    )
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--val-split", type=float, default=0.1)
@@ -640,6 +744,22 @@ def main():
         "--fire-pos-weight",
         default="auto",
         help="fire 头 BCE 正例权重：'auto'（按训练集 neg/pos，≈12.6）/ 数字 / 0=关（默认 auto）",
+    )
+    ap.add_argument(
+        "--weight-exponent",
+        type=float,
+        default=1.0,
+        help="v6 class weight 强度：1=完全 inverse-frequency（旧行为）/ 0=不加权 / 中间值 w**exp",
+    )
+    ap.add_argument(
+        "--action-v6",
+        action="store_true",
+        help="v6 三头语料（a_move/a_fire/a_hold + mask.npy 9 位）；本地 CLI 与云端 manifest 同一开关",
+    )
+    ap.add_argument(
+        "--policy-extra",
+        action="store_true",
+        help="空间头：POLICY_EXTRA(37) 进 hidden（arch.policyExtra=true）",
     )
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument(

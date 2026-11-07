@@ -622,6 +622,8 @@ class HubHandler(
                 self._get_status()
             elif path.startswith("/jobs/") and path.endswith("/result"):
                 self._get_result()
+            elif path.startswith("/jobs/") and "/epoch-weights/" in path:
+                self._get_bc_epoch_weights()
             elif path.startswith("/jobs/") and path.endswith("/resume"):
                 self._get_bc_resume()
             elif path.startswith("/jobs/") and path.endswith("/bc-metrics"):
@@ -666,6 +668,9 @@ class HubHandler(
                 self._post_bc_epoch()
             elif path == "/admin/unfreeze":
                 self._admin_unfreeze()
+            elif path == "/admin/bc-resume/clear":
+                # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
+                self._admin_clear_bc_resume()
             elif path == ADMIN_CANCEL_JOB_PATH:
                 # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
                 self._admin_cancel_job()

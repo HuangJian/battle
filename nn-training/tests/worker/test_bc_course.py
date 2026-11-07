@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -483,6 +484,8 @@ def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
     assert ex["train_seed"] == int(c.train.seed)
     assert ex["arch"] == str(c.train.arch)
     assert ex["notes"].endswith("it=2 smoke=False")
+    assert ex.get("course_key") is None  # 空串不添键（旧调用字节不变）
+    assert bc_loop.bc_job_extra(c, 2, course_key="bc-c4-v3")["course_key"] == "bc-c4-v3"
     # 数字型配置同样原样透传
     c2 = c.model_copy(update={"train": c.train.model_copy(update={"fire_pos_weight": 3.5})})
     assert bc_loop.bc_job_extra(c2, 1)["fire_pos_weight"] == 3.5
@@ -601,6 +604,33 @@ def test_bc_train_init_from_parses(tmp_path: Path) -> None:
     assert c.auto_stop is True
 
 
+def test_bc_course_bc_and_init_from_must_agree(tmp_path: Path) -> None:
+    """顶层 bc 与控制台要读的起点必须同源；两侧都写时不一致就拒课。"""
+    import json as _json
+
+    from worker.bc_config import load_bc_course
+
+    w = tmp_path / "w.json"
+    w.write_text("{}", encoding="utf-8")
+
+    ok = tmp_path / "ok.bc.jsonc"
+    ok.write_text(
+        _json.dumps({"name": "ok", "bc": str(w), "train": {"init_from": str(w)}}),
+        encoding="utf-8",
+    )
+    assert load_bc_course(str(ok)).bc == str(w)
+
+    bad = tmp_path / "bad.bc.jsonc"
+    other = tmp_path / "other.json"
+    other.write_text("{}", encoding="utf-8")
+    bad.write_text(
+        _json.dumps({"name": "bad", "bc": str(w), "train": {"init_from": str(other)}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"bc 与 train.init_from 不一致"):
+        load_bc_course(str(bad))
+
+
 # ── 环境覆盖（2026-10-28，docs/nn/training-stack.md §49）──────────────────────────
 # BC 课程与 RL 课程共用 `biz.course_resolve.apply_level_file`：挑关/敌数/命/星/max_ticks
 # 四个覆盖键 + max_ticks 在两条加载链上逐字同规。分叉的两份实现会在下一次改动时漂移
@@ -653,3 +683,309 @@ def test_bc_course_overrides_without_level_raise(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="没有 `level`"):
         load_bc_course(str(p))
+
+
+# ── action_v6 单源 / label_mode 进指纹（2026-11-05 评审 B4）────────────────────
+
+
+def test_bc_action_v6_top_level_is_single_source(tmp_path: Path) -> None:
+    """顶层 `action_v6` 是唯一事实源；`bc_job_extra` 也必须读解析值。"""
+    p = tmp_path / "v6.bc.jsonc"
+    p.write_text(
+        json.dumps(
+            {
+                "kind": "bc",
+                "name": "v6",
+                "action_v6": True,
+                "corpus": {"games_per_stage": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    c = load_bc_course(str(p))
+    assert c.action_v6 is True
+    assert c.resolved_action_v6 is True
+
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from trainer import bc_loop
+
+    assert bc_loop.bc_job_extra(c, 1)["action_v6"] is True
+
+
+def test_bc_action_v6_conflict_raises(tmp_path: Path) -> None:
+    """顶层与显式 `train.action_v6` 不同 ⇒ 响亮报错（不静默覆盖）。"""
+    for top, train in ((True, False), (False, True)):
+        p = tmp_path / f"conflict-{top}.bc.jsonc"
+        p.write_text(
+            json.dumps(
+                {"kind": "bc", "name": "c", "action_v6": top, "train": {"action_v6": train}}
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="action_v6 冲突"):
+            load_bc_course(str(p))
+
+
+def test_bc_v6_one_smoke_course_is_valid() -> None:
+    """P3 示例课：1 关 × 20 局 / 1 epoch，v6 三件套齐（action_v6 / policy_extra / 标签权重）。"""
+    c = load_bc_course("bc-v6-one")
+    assert c.action_v6 is True
+    assert c.stage_ids == [0]
+    assert c.corpus.games_per_stage == 20
+    assert c.corpus.label_mode == "argmax"
+    assert c.corpus.label_policy.endswith("z7-maze.it0.json")
+    assert c.train.epochs == 1 and c.train.policy_extra is True
+    assert c.eval.every_epochs == 0
+    assert c.auto_stop is True
+
+
+def test_bc_action_v6_backward_compat_from_train_key() -> None:
+    """存量 `bc-v6-train` 只写 `train.action_v6`：仍解析为 v6，不要求改课程文件。"""
+    c = load_bc_course("bc-v6-train")
+    assert c.action_v6 is None
+    assert c.resolved_action_v6 is True
+
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from trainer import bc_loop
+
+    assert bc_loop.bc_job_extra(c, 1)["action_v6"] is True
+
+
+def test_bc_corpus_identity_fp_v6_label_mode_conditional() -> None:
+    """`label_mode` 只在 v6 进指纹：legacy 不变，v6 的 argmax/sampled 必须不同。"""
+    legacy = load_bc_course("bc-c4")
+    fp = bc_corpus_identity_fp(legacy)
+    legacy_sampled = legacy.model_copy(
+        update={"corpus": legacy.corpus.model_copy(update={"label_mode": "sampled"})}
+    )
+    assert bc_corpus_identity_fp(legacy_sampled) == fp
+
+    v6 = load_bc_course("bc-v6-train")
+    fp_v6 = bc_corpus_identity_fp(v6)
+    v6_sampled = v6.model_copy(
+        update={"corpus": v6.corpus.model_copy(update={"label_mode": "sampled"})}
+    )
+    assert bc_corpus_identity_fp(v6_sampled) != fp_v6
+    v6_off = v6.model_copy(update={"action_v6": False})
+    assert bc_corpus_identity_fp(v6_off) != fp_v6
+
+
+def test_bc_shard_lineage_prefers_corpus_fp_over_file_sha(tmp_path: Path) -> None:
+    """改课程 train 块/注释（course_fp 变）不应让已采 shard 失配——D14 首分支比 corpus_fp。
+
+    这条锁的是 2026-11-05 评审 B1：`bc_dispatch` 已同时写 `course_fp`/`corpus_fp`，
+    P5 不需要再补；只有 RL 血缘/手工改过 manifest 的存量 shard 才走 course_fp 回退。
+    """
+    from remote.hub_client import iter_bc_shard_dirs
+
+    round_dir = tmp_path / "bc-data" / "it1"
+    keep = round_dir / "bc_s2000_seed1"
+    keep.mkdir(parents=True)
+    (keep / "manifest.json").write_text(
+        json.dumps(
+            {
+                "stage": 2000,
+                "seed": 1,
+                "course_fp": "old-file-sha",
+                "corpus_fp": "stable-corpus-fp",
+            }
+        ),
+        encoding="utf-8",
+    )
+    foreign = round_dir / "bc_s2000_seed2"
+    foreign.mkdir()
+    (foreign / "manifest.json").write_text(
+        json.dumps(
+            {
+                "stage": 2000,
+                "seed": 2,
+                "course_fp": "old-file-sha",
+                "corpus_fp": "other-corpus-fp",
+            }
+        ),
+        encoding="utf-8",
+    )
+    got = iter_bc_shard_dirs(
+        tmp_path, 1, course_fp="new-file-sha", corpus_fp="stable-corpus-fp"
+    )
+    assert [p.name for p in got] == ["bc_s2000_seed1"]  # 改文件字节仍放行；异血缘剔除
+
+
+# ------------------------------------------------ v6 采集（G2，2026-11-05）
+
+
+def _v6_course_file(tmp_path: Path, *, label_policy: str = "", games: int = 1) -> Path:
+    p = tmp_path / "v6.bc.jsonc"
+    corpus: dict[str, object] = {"games_per_stage": games, "label_mode": "argmax"}
+    if label_policy:
+        corpus["label_policy"] = label_policy
+    d = {
+        "kind": "bc",
+        "name": "v6-test",
+        "action_v6": True,
+        "corpus": corpus,
+    }
+    p.write_text(json.dumps(d), encoding="utf-8")
+    return p
+
+
+def test_bc_v6_collection_requires_label_policy(tmp_path: Path) -> None:
+    """v6 采集必须有标签权重；纯训练课（games_per_stage=0）不强制。"""
+    p = _v6_course_file(tmp_path)
+    with pytest.raises(ValueError, match="label_policy"):
+        load_bc_course(str(p))
+
+    w = tmp_path / "label.json"
+    w.write_text("{}", encoding="utf-8")
+    p = _v6_course_file(tmp_path, label_policy=str(w))
+    c = load_bc_course(str(p))
+    assert c.label_policy_file == w
+    assert len(c.label_policy_fp) == 64
+
+    # 训练-only v6 课（bc-v6-train）不受新校验影响。
+    assert load_bc_course("bc-v6-train").corpus.games_per_stage == 0
+
+
+def test_bc_v6_label_policy_fp_joins_corpus_identity(tmp_path: Path) -> None:
+    """同一路径换权重文件 = 新语料；label_mode 变化也必须换 fp。"""
+    w = tmp_path / "label.json"
+    w.write_text("one", encoding="utf-8")
+    c = load_bc_course(str(_v6_course_file(tmp_path, label_policy=str(w))))
+    fp = bc_corpus_identity_fp(c)
+    old_weight_fp = c.label_policy_fp
+    assert old_weight_fp == hashlib.sha256(b"one").hexdigest()
+
+    sampled = c.model_copy(
+        update={"corpus": c.corpus.model_copy(update={"label_mode": "sampled"})}
+    )
+    assert bc_corpus_identity_fp(sampled) != fp
+
+    w.write_text("two", encoding="utf-8")
+    assert c.label_policy_fp != old_weight_fp
+    assert bc_corpus_identity_fp(c) != fp
+
+
+def test_bc_capable_nodes_v6_requires_bc_v6_support(monkeypatch) -> None:
+    from worker import bc_dispatch as D
+
+    cfg = {"nodes": [{"id": "legacy", "url": "http://legacy", "enabled": True}]}
+    monkeypatch.setattr(D, "node_ping", lambda *_a, **_kw: {"bcSupport": True})
+    assert D.bc_capable_nodes(cfg, action_v6=True) == []
+    monkeypatch.setattr(
+        D, "node_ping", lambda *_a, **_kw: {"bcSupport": True, "bcV6Support": True}
+    )
+    assert [n["id"] for n in D.bc_capable_nodes(cfg, action_v6=True)] == ["legacy"]
+
+
+def test_bc_dispatch_v6_uploads_label_weights_and_filters_wins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """v6 派发：权重按 label_policy sha 下发，manifest 可审计，wins-only 前缀过滤。"""
+    from common import shard as shard_mod
+    from common.hashing import sha256_file
+    from worker import bc_dispatch as D
+
+    w = tmp_path / "label.json"
+    w.write_text(
+        json.dumps(
+            {
+                "format": "nn-weights-json",
+                "arch": {"actionV6": True},
+                "params": {"hold_head.weight": {"shape": [2, 1], "data": ""}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    label_fp = sha256_file(w)
+    posts: list[dict] = []
+    calls: list[dict] = []
+
+    def fake_post(nodes, **kw):
+        posts.append(kw)
+        return nodes
+
+    def fake_fetch(_url: str, _auth: str, **kw):
+        calls.append(kw)
+        stage, seed = int(kw["stage"]), int(kw["seed"])
+        outcome = "stage_clear" if seed == 1 else "loss"
+        manifest = {
+            "wver": label_fp,
+            "collector": "RL",
+            "stage": stage,
+            "seed": seed,
+            "outcome": outcome,
+            "nSamples": 3,
+        }
+        files = {name: b"x" for name in (*shard_mod.SHARD_FILES, *shard_mod.OPTIONAL_SHARD_FILES)}
+        return manifest, files
+
+    monkeypatch.setattr(D, "post_weights_parallel", fake_post)
+    monkeypatch.setattr(D, "fetch_task", fake_fetch)
+    stats = D.dispatch_bc_corpus(
+        tasks=[(2000, 1), (2000, 2)],
+        out_dir=tmp_path / "data",
+        it=1,
+        corpus_fp="cfp-v6",
+        course_fp="xfp-v6",
+        difficulty="hard",
+        max_ticks=100,
+        wins_only=True,
+        nodes=[{"id": "n1", "url": "http://n1", "concurrency": 1, "enabled": True}],
+        action_v6=True,
+        label_policy_path=str(w),
+        label_mode="sampled",
+        log=lambda _m: None,
+    )
+    assert stats["kept"] == 1
+    assert stats["loss_skipped"] == 1
+    assert stats["failed"] == 0
+    assert (tmp_path / "data" / "bc_s2000_seed1" / "a_hold.npy").is_file()
+    assert not (tmp_path / "data" / "bc_s2000_seed2").exists()
+
+    assert posts and posts[0]["wver"] == label_fp
+    assert posts[0]["kind"] == "rollout"
+    assert calls[0]["mode"] == "bc-v6"
+    assert calls[0]["wver"] == label_fp
+    assert calls[0]["label_mode"] == "sampled"
+    assert calls[0]["wins"] is None
+
+    manifest = json.loads(
+        (tmp_path / "data" / "bc_s2000_seed1" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["label_mode"] == "sampled"
+    assert manifest["label_policy_fp"] == label_fp
+    assert manifest["corpus_fp"] == "cfp-v6"
+
+
+def test_bc_dispatch_v6_rejects_legacy_label_weights(tmp_path: Path) -> None:
+    """legacy 5/2 权重不能当 v6 标签策略：否则采出 7 宽 shard，训练端才炸。"""
+    from worker import bc_dispatch as D
+
+    w = tmp_path / "legacy.json"
+    w.write_text(
+        json.dumps(
+            {
+                "format": "nn-weights-json",
+                "params": {"move_head.weight": {"shape": [5, 1], "data": ""}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(D.BcDispatchError, match="legacy 5/2"):
+        D.dispatch_bc_corpus(
+            tasks=[(2000, 1)],
+            out_dir=tmp_path,
+            it=1,
+            corpus_fp="cfp",
+            course_fp="xfp",
+            difficulty="hard",
+            max_ticks=100,
+            nodes=[{"id": "n1", "url": "http://n1", "enabled": True}],
+            action_v6=True,
+            label_policy_path=str(w),
+            log=lambda _m: None,
+        )

@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 from hub.server import _JobStore
@@ -72,6 +74,38 @@ def test_store_bc_epoch_invalid_body_rejected(tmp_path: Path) -> None:
     assert store.store_bc_epoch(jid, {"epoch": 3}) is False  # 缺 weights
     assert store.store_bc_epoch(jid, {"epoch": True, "weights": "x"}) is False  # bool 冒充 int
     assert store.get_bc_resume(jid) is None and store.get_bc_metrics(jid) == []
+    assert not (tmp_path / "jobs" / jid / "epoch-weights").exists()
+
+
+def test_every_epoch_gets_an_immutable_snapshot(tmp_path: Path) -> None:
+    """#12：resume 只留最新，但每个 epoch（含迟到补发）都留一份不可变快照。"""
+    store = _mini_store(tmp_path)
+    jid = "j" * 16
+    (tmp_path / "jobs" / jid).mkdir(parents=True)
+    assert store.store_bc_epoch(jid, _epoch_body(1)) is True
+    assert store.store_bc_epoch(jid, _epoch_body(7)) is True
+    assert store.store_bc_epoch(jid, _epoch_body(5)) is True  # 迟到的补发
+
+    snaps = sorted(p.name for p in (tmp_path / "jobs" / jid / "epoch-weights").glob("*.json"))
+    assert snaps == ["ep1.json", "ep5.json", "ep7.json"]
+    assert store.get_bc_epoch_weights(jid, 5)["epoch"] == 5  # type: ignore[index]
+    assert store.get_bc_resume(jid)["epoch"] == 7  # type: ignore[index]
+
+
+def test_epoch_snapshot_same_epoch_replay_is_one_file(tmp_path: Path) -> None:
+    """同一 epoch 的重发（隧道 530）原子覆盖同名快照，不产生第二份。"""
+    store = _mini_store(tmp_path)
+    jid = "j" * 16
+    (tmp_path / "jobs" / jid).mkdir(parents=True)
+    assert store.store_bc_epoch(jid, _epoch_body(3)) is True
+    body = _epoch_body(3)
+    body["metrics"]["val_loss"] = 1.2
+    assert store.store_bc_epoch(jid, body) is True
+    files = list((tmp_path / "jobs" / jid / "epoch-weights").glob("ep3*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text(encoding="utf-8"))["metrics"]["val_loss"] == 1.2
+    assert store.get_bc_epoch_weights(jid, 0) is None
+    assert store.get_bc_epoch_weights(jid, 99) is None
 
 def test_store_bc_epoch_same_epoch_replay_appends_once(tmp_path: Path) -> None:
     """隧道 530 的「已落盘但响应丢了」重发：resume 照写，指标行不得重复。
@@ -125,3 +159,91 @@ def test_bc_resume_missing_is_404_semantic(tmp_path: Path) -> None:
     jid = "j" * 16
     (tmp_path / "jobs" / jid).mkdir(parents=True)
     assert store.get_bc_resume(jid) is None  # worker GET 404 → 全新训练
+
+
+def _job_with_manifest(
+    tmp_path: Path,
+    jid: str,
+    *,
+    key: str = "bc-x",
+    it: int = 1,
+    epochs: int = 80,
+) -> Path:
+    jd = tmp_path / "jobs" / jid
+    jd.mkdir(parents=True)
+    (jd / "manifest.json").write_text(
+        json.dumps(
+            {
+                "job_id": jid,
+                "kind": "bc",
+                "course_key": key,
+                "it": it,
+                "epochs": epochs,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return jd
+
+
+def test_store_bc_epoch_writes_course_index_and_late_replay_does_not_rewind(
+    tmp_path: Path,
+) -> None:
+    """课程级索引与 per-jid 同写；迟到的 ep5 不得把索引从 ep6 拉回去。"""
+    store = _mini_store(tmp_path)
+    jid = "j" * 16
+    _job_with_manifest(tmp_path, jid)
+    assert store.store_bc_epoch(jid, _epoch_body(4)) is True
+    index = tmp_path / "jobs" / "bc-resume" / "by-course" / "bc-x" / "1.json"
+    assert json.loads(index.read_text(encoding="utf-8"))["epoch"] == 4
+    assert store.store_bc_epoch(jid, _epoch_body(6)) is True
+    assert json.loads(index.read_text(encoding="utf-8"))["epoch"] == 6
+    assert store.store_bc_epoch(jid, _epoch_body(5)) is True  # 迟到补发
+    assert json.loads(index.read_text(encoding="utf-8"))["epoch"] == 6
+    assert store.get_bc_resume(jid)["epoch"] == 6  # type: ignore[index]
+
+
+def test_new_jid_reads_course_index_when_per_job_resume_missing(tmp_path: Path) -> None:
+    """重开的新 jid 没有自己的 resume ⇒ 回退到同一 `(course,it)` 的索引。
+
+    G4：旧 job 在 hub 侧 unknown/closed 后重发是常态，**旧 job 目录可能已被清掉**
+    （`prune_remote_jobs` / 人工清理）。课程索引住 `jobs/bc-resume/by-course`，
+    不在单个 job 目录里 ⇒ 源目录消失也不影响接续。
+    """
+    store = _mini_store(tmp_path)
+    old = "o" * 16
+    new = "n" * 16
+    _job_with_manifest(tmp_path, old)
+    assert store.store_bc_epoch(old, _epoch_body(40)) is True
+    shutil.rmtree(tmp_path / "jobs" / old)  # 源 job 已不可认领（G4）
+    _job_with_manifest(tmp_path, new)
+    got = store.get_bc_resume(new)
+    assert got is not None and got["epoch"] == 40
+    assert not (tmp_path / "jobs" / new / store.BC_RESUME_NAME).exists()
+
+
+def test_clear_course_index_removes_only_that_course_alias(tmp_path: Path) -> None:
+    """#8：清空只删课程级别名；per-jid resume / 别的课 / 幂等语义都不受影响。"""
+    store = _mini_store(tmp_path)
+    jid = "c" * 16
+    _job_with_manifest(tmp_path, jid)
+    assert store.store_bc_epoch(jid, _epoch_body(3)) is True
+    idx = tmp_path / "jobs" / "bc-resume" / "by-course" / "bc-x" / "1.json"
+    other = tmp_path / "jobs" / "bc-resume" / "by-course" / "bc-y" / "2.json"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("{}", encoding="utf-8")
+    per_job = tmp_path / "jobs" / jid / store.BC_RESUME_NAME
+    assert idx.exists() and per_job.exists()
+    assert store.clear_bc_course_index("bc-x") == 1
+    assert not idx.exists()
+    assert other.exists() and per_job.exists()
+    assert store.get_bc_resume(jid)["epoch"] == 3  # type: ignore[index]
+    assert store.clear_bc_course_index("bc-x") == 0  # 幂等
+
+
+def test_course_index_rejects_unsafe_course_key(tmp_path: Path) -> None:
+    store = _mini_store(tmp_path)
+    jid = "j" * 16
+    _job_with_manifest(tmp_path, jid, key="../escape")
+    assert store.store_bc_epoch(jid, _epoch_body(1)) is True
+    assert not (tmp_path / "jobs" / "bc-resume").exists()

@@ -29,6 +29,32 @@ describe('console/actions.resolveCourseBc（§384：种子路径读课程 bc 字
     expect(actions.resolveCourseBc('no-such-course-xyz')).not.toContain('ckpt')
   })
 
+  it('BC 课程的 bc 从 .bc.jsonc 读，且优先于同名 .jsonc', () => {
+    const dir = path.join(os.tmpdir(), `bcity-bc-jsonc-${process.pid}`)
+    mkdirSync(dir, { recursive: true })
+    const prev = process.env.BCITY_CURRICULA_DIR
+    try {
+      writeFileSync(
+        path.join(dir, 'bc-course.bc.jsonc'),
+        '{ "bc": "nn-training/weights/bc/w.json" }\n',
+        'utf-8',
+      )
+      writeFileSync(
+        path.join(dir, 'bc-course.jsonc'),
+        '{ "bc": "nn-training/weights/rl/w.json" }\n',
+        'utf-8',
+      )
+      process.env.BCITY_CURRICULA_DIR = dir
+      expect(actions.resolveCourseBc('bc-course')).toBe(
+        path.join(NN_TRAINING, 'weights', 'bc', 'w.json'),
+      )
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_CURRICULA_DIR
+      else process.env.BCITY_CURRICULA_DIR = prev
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('行内 `//` 注释的课程照常读到 bc（2026-09-17 x1-rebirth 事故回归）', () => {
     // 该文件的 "lr" / "epochs" / "seed_rotate" 等行都带行内注释。
     // 课程名 = 课程文件名（`nn-training/curricula/<course>.jsonc`）：事故当时的

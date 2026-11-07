@@ -297,6 +297,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "wire_stats",
             "store_bc_epoch",
             "get_bc_resume",
+            # 2026-11-05（#12）：按 epoch 取不可变权重快照的门面转发。
+            "get_bc_epoch_weights",
             "get_bc_metrics",
             "append_ledger",
         ),
@@ -326,6 +328,8 @@ FACADE_SAME_SIG = (
     "frozen_info",
     "get_bc_metrics",
     "get_bc_resume",
+    # 2026-11-05（#12）：`GET /jobs/{id}/epoch-weights/{epoch}` 的门面（与 store 逐参数一致）。
+    "get_bc_epoch_weights",
     "get_result",
     "heartbeat",
     "is_blocked",
@@ -561,7 +565,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # ——`/jobs/{id}/status` 认账本净态，status 与派发池从此同源）⇒ 127。
     # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 129, len(DOMAIN_METHODS)
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 130, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -571,7 +575,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 129, len(seen)
+    assert len(seen) == 130, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -737,7 +741,7 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     # 2026-10-17（plan/export-must-not-cancel-live-job §5）：35 → 36（`ledger_net_state`
     # ——账本净态的读面；`/jobs/{id}/status` 与派发池同源）。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：36 → 37（`store_offline_metrics`）。
-    assert len(declared) == 37, len(declared)
+    assert len(declared) == 38, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert set(FACADE_RENAMED) == {"abandon"} and FACADE_RENAMED.keys() & common == set()
     assert _callable_names(_JobStore) >= {"abandon_job"}
@@ -751,7 +755,7 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
     """
     # ★M5：30 → 31（`job_kind` 的逐字转发）；2026-10-11 W7：31 → 32（`cancel_job`）；
     # 2026-10-17：32 → 33（`ledger_net_state`）。
-    assert len(FACADE_SAME_SIG) == 33
+    assert len(FACADE_SAME_SIG) == 34
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))
@@ -1002,7 +1006,8 @@ def test_queue_peer_is_declarations_only() -> None:
     # `set_mode` / `dispatch_effective_mode` / `set_mode_pinned` / `pinned_of` / `authority_of`）、
     # +1 增（`course_open`：开课标记的唯一公开读面）；2026-10-11 W7 +1（`cancel_job`）⇒ 80；
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）+1（`store_offline_metrics`）⇒ 81。
-    assert len(funcs) == 81, len(funcs)
+    # 2026-11-05（#12）+1（`get_bc_epoch_weights`：按 epoch 取快照的读面）⇒ 82。
+    assert len(funcs) == 82, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

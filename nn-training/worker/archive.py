@@ -55,6 +55,7 @@ def backup_weights(
     prefix: str = "rl-weights",
     backup_dir: str | None = None,
     suffix: str = ".json",
+    label: str | None = None,
 ) -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
 
@@ -70,6 +71,10 @@ def backup_weights(
     扫的存储副本，名字必须自述形态（否则 `eval-board` 的 iter 选择器会把一份解不开的容器当可
     装载权重列出来）。只改名字：**归档字节一个不改**（它是那一轮的不可变快照）。
 
+    `label`：BC 每 epoch 归档用（`ep{gepoch}`，2026-11-05 #12）。**缺省 None ⇒ 仍是
+    `it{it}`，RL 命名逐字节不变**；传了 label 就是幂等的——同一 label 已有归档时直接返回
+    旧路径，不因时间戳多出一份。
+
     Returns the archive destination path, or None on any (non-fatal) IO error.
     """
     try:
@@ -77,7 +82,13 @@ def backup_weights(
         if not bdir.is_absolute():
             bdir = REPO_ROOT / bdir
         bdir.mkdir(parents=True, exist_ok=True)
-        dst = bdir / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}{suffix}"
+        stem = f"{prefix}.{label}" if label else f"{prefix}.it{it}"
+        if label:
+            # 同一 epoch 的重发/补发不得产生第二份（#12 幂等）：已有同名族就返回旧的。
+            prior = sorted(bdir.glob(f"{stem}.*{suffix}"))
+            if prior:
+                return str(prior[-1])
+        dst = bdir / f"{stem}.{time.strftime('%Y%m%d-%H%M%S')}{suffix}"
         shutil.copyfile(weights_path, dst)
         return str(dst)
     except OSError as e:

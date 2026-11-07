@@ -10,8 +10,9 @@
 2. **依赖方向**——`bc_job` 只许依赖 `remote.http` / `remote.job_fs`（都向下），不得 import
    `remote.worker`（`worker` 用自别名转发回来）；
 3. **转发的名字是同一对象**（e2e / tests 都直接 `worker_mod.X` / `from remote.worker import X`）；
-4. **顶层零 torch**（本仓硬规：hub 侧与协议单测不得拉 torch）——torch 与 `train/bc.py` 必须仍是
-   `_run_bc_job` **函数内**的延迟 import；这条守卫是这个不变量第一次被机械钉住；
+4. **顶层零 torch/paddle**（本仓硬规：hub 侧与协议单测不得拉训练框架）——torch / paddle
+   与 `train/bc*.py` 必须仍是 `_run_bc_job` **函数内**的延迟 import；BC #10 之后两条分支
+   都要守住这条；
 5. **顶层无新增可变容器**；
 6. **`d14_corpus_match` 两边是同一个函数对象**（worker 侧那份转发是给 `run_job` 用的，不随簇走）。
 """
@@ -108,11 +109,13 @@ def test_worker_forwards_every_moved_name_as_the_same_object() -> None:
         )
 
 
-def test_torch_stays_a_deferred_import_inside_run_bc_job() -> None:
-    """**顶层零 torch**：`import torch` 与 `train.bc` 必须仍在函数内（延迟 import）。"""
+def test_frameworks_stay_deferred_imports_inside_run_bc_job() -> None:
+    """**顶层零 torch/paddle**：两条后端分支的 import 都必须在函数内。"""
     top = _top_level_imports(BC_FILE)
-    assert "torch" not in top, "bc_job 顶层 import torch（本仓硬规：顶层零 torch）"
-    assert "worker.train.bc" not in top, "train.bc 必须在 _run_bc_job 内延迟 import"
+    assert {"torch", "paddle"}.isdisjoint(top), "训练框架必须在 _run_bc_job 内延迟 import"
+    assert {"worker.train.bc", "worker.train.bc_paddle"}.isdisjoint(
+        top
+    ), "train.bc / train.bc_paddle 必须在 _run_bc_job 内延迟 import"
 
     # 而它们确实在 `_run_bc_job` 体内（否则就是漏搬）
     fn = next(
@@ -126,7 +129,7 @@ def test_torch_stays_a_deferred_import_inside_run_bc_job() -> None:
             inner.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             inner.add(node.module)
-    assert {"torch", "worker.train.bc"} <= inner, sorted(inner)
+    assert {"torch", "worker.train.bc", "worker.train.bc_paddle"} <= inner, sorted(inner)
 
 
 def test_bc_job_has_no_top_level_mutable_container() -> None:

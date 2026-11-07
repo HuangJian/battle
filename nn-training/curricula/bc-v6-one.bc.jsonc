@@ -1,0 +1,63 @@
+// BC 样本课 bc-v6-one —— 一门课跑通全流程的**最小冒烟**（P3，2026-11-05）。
+//
+// 目的：证明「开课 → v6 采集（1 关 × 20 局）→ 云端 1 epoch 训练 → 权重归档」没有人工断点。
+// 成立后才放大到 343 局 / 80 epoch（`bc-v6-train`）。
+//
+// ⚠ 不要拿它当训练课：20 局 / 1 epoch 只够走通链路，行为门（200 局）必然不过。
+// ⚠ 新 `out`/`traj`/`backup`：与任何存量课都不共享目录（§15.5）。
+//
+// v6 采集的三件套：顶层 `action_v6: true` + `train.policy_extra: true` +
+// `corpus.label_policy`（教师权重；内容 sha256 进语料指纹）。换标签权重 = 新语料。
+{
+  "version": 1,
+  "name": "bc-v6-one",
+  "kind": "bc",
+  "action_v6": true,
+
+  // 一关、硬难度、12000 拍；不引 level 文件（内联环境，改动只影响本课）。
+  "stages": "0",
+  "difficulty": "hard",
+  "max_ticks": 12000,
+  "player": { "lives": 3, "level": 3 },
+
+  "corpus": {
+    // 1 关 × 20 局 = 20 局；argmax 压熵（§12 决策 #1）。
+    "games_per_stage": 20,
+    "wins_only": true,
+    "near_miss_times": 0,
+    "seed_rotate": 20,
+    "label_mode": "argmax",
+    // 教师权重 = y28→z7 迁移后的 v6 权重（必须与 action_v6 同构）。
+    "label_policy": "nn-training/weights/z7-maze/z7-maze.it0.json",
+  },
+
+  "train": {
+    "arch": "student",
+    // 冒烟：1 epoch；早停关（patience 0 = 不启用）。
+    "epochs": 1,
+    "patience": 0,
+    "batch": 256,
+    "lr": 0.0003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+    "fire_pos_weight": "auto",
+    // 从随机起（不继承教师熵）；起点权重留空 ⇒ 不依赖任何存量文件。
+    "init_from": "",
+    "policy_extra": true,
+  },
+
+  // 冒烟不跑周期 eval（判决另走 200 局行为门）。
+  "eval": { "every_epochs": 0, "games_per_stage": 0, "levels": [] },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 4,
+  "data_dir": "tmp/bc-v6-one/bc-data",
+  "out": "tmp/bc-v6-one/weights.json",
+  "traj": "tmp/bc-v6-one",
+  "backup_dir": "nn-training/weights/bc-v6-one",
+  "backup_prefix": "bc-v6-one",
+}

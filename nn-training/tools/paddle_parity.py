@@ -24,6 +24,11 @@ Cases (one arch × one feature each, kept orthogonal on purpose):
   tower         — spatial_tower arch + value-anchor pull
   ckpt_resume   — torch 写 ckpt → Paddle 读/续跑一个 epoch → 写回 torch 格式
                   （`checkpoint_paddle` 的端到端验收；`verify` 再用 torch 读 Paddle 写的那份）
+
+BC (#10, 2026-11-06) 走同一文件的三步对账：
+  bc-fixture — torch 造一份恒定 v6 语料 + 初始权重 + 1 epoch 基准
+  bc-check   — paddle 用同一初始权重跑 1 epoch，对 metrics / 前向；导出权重
+  bc-verify  — torch 读 Paddle 导出的权重 JSON，前向必须对上 Paddle 自己的输出
 """
 
 from __future__ import annotations
@@ -727,8 +732,200 @@ def _verify_ckpt(cdir: Path, arch: str, atol: float) -> bool:
     return ok
 
 
+def _bc_args(root: Path, tag: str) -> Any:
+    """BC 对账的固定参数面（torch/paddle 必须逐项相同）。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        data_dir=str(root / "bc-data"),
+        arch="student",
+        out=str(root / tag / "weights.json"),
+        notes="bc-parity",
+        resume=str(root / "bc-init.json"),
+        epoch_offset=0,
+        ckpt_every=0,
+        checkpoint=None,
+        epochs=1,
+        batch=16,
+        lr=3e-3,
+        val_split=0.25,
+        mirror_p=0.0,
+        seed=SEED,
+        num_workers=0,
+        device="cpu",
+        value_coef=0.0,
+        fire_pos_weight=0.0,
+        weight_exponent=1.0,
+        patience=0,
+        action_v6=True,
+        policy_extra=True,
+    )
+
+
+def _bc_write_data(root: Path) -> Path:
+    """恒定 v6 shard：所有样本同分布 ⇒ split/乱序不会改变两边的指标。"""
+    d = root / "bc-data" / "bc_s0_seed1"
+    d.mkdir(parents=True, exist_ok=True)
+    n = 16
+    np.save(d / "obs.npy", np.zeros((n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
+    np.save(d / "scalars.npy", np.zeros((n, SCALAR_DIM), dtype=np.float32))
+    np.save(d / "extra.npy", np.zeros((n, POLICY_EXTRA_DIM), dtype=np.float32))
+    for key in ("a_move", "a_fire", "a_hold"):
+        np.save(d / f"{key}.npy", np.zeros(n, dtype=np.int64))
+    np.save(d / "mask.npy", np.ones((n, 9), dtype=np.float32))
+    (d / "manifest.json").write_text("{}", encoding="utf-8")
+    return d
+
+
+def _bc_load_batch(root: Path) -> dict[str, np.ndarray]:
+    return {k: np.load(root / f"bc-batch-{k}.npy") for k in ("obs", "scalars", "extra")}
+
+
+def _bc_forward_torch(model, root: Path, out_name: str) -> dict[str, np.ndarray]:
+    import torch
+
+    data = _bc_load_batch(root)
+    with torch.no_grad():
+        obs = torch.from_numpy(data["obs"])
+        sc = torch.from_numpy(data["scalars"])
+        ex = torch.from_numpy(data["extra"])
+        out = model(obs, sc, ex)
+    arr = {"move": out[0].numpy(), "fire": out[1].numpy(), "hold": out[2].numpy(), "value": out[3].numpy()}
+    np.savez(root / out_name, **arr)
+    return arr
+
+
+def bc_fixture(root: Path) -> None:
+    """torch 侧：造 v6 语料、初始权重、1 epoch 基准与更新后前向。"""
+    import torch
+
+    from worker.data.weights_io import load_state_into, save_weights_json
+    from worker.models.student import PPOStudent
+    from worker.train.bc import train as torch_bc_train
+
+    root.mkdir(parents=True, exist_ok=True)
+    _bc_write_data(root)
+    torch.manual_seed(SEED)
+    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    save_weights_json(model, str(root / "bc-init.json"))
+    load_state_into(model, str(root / "bc-init.json"))
+    model.eval()
+    for key, arr in (
+        ("obs", np.zeros((16, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8)),
+        ("scalars", np.zeros((16, SCALAR_DIM), dtype=np.float32)),
+        ("extra", np.zeros((16, POLICY_EXTRA_DIM), dtype=np.float32)),
+    ):
+        np.save(root / f"bc-batch-{key}.npy", arr)
+    _bc_forward_torch(model, root, "bc-torch-before.npz")
+    metrics = torch_bc_train(_bc_args(root, "bc-torch"))
+    (root / "bc-torch-metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    # train() 内部自建模型；基准前向必须从导出的 active 权重重建，不能复用闭包外的初始模型。
+    trained = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    load_state_into(trained, str(root / "bc-torch" / "weights.json"))
+    trained.eval()
+    _bc_forward_torch(trained, root, "bc-torch-after.npz")
+    shown = {k: metrics["history"][k] for k in ("train_loss", "val_loss", "move_acc", "fire_acc", "hold_acc")}
+    print(f"bc-fixture: metrics={shown}")
+
+
+def bc_check(root: Path, atol_metrics: float, atol_forward: float) -> int:
+    """paddle 侧：同一初始权重跑 1 epoch，对 metrics / 前向；写出权重与 Paddle 前向。"""
+    import numpy as np
+    import paddle
+
+    from worker.models.student_paddle import PPOStudent, load_state_into, save_weights_json
+    from worker.train import bc_paddle
+
+    paddle.set_device("cpu")
+    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    load_state_into(model, str(root / "bc-init.json"))
+    model.eval()
+    batch = _bc_load_batch(root)
+    with paddle.no_grad():
+        out = model(
+            paddle.to_tensor(batch["obs"]),
+            paddle.to_tensor(batch["scalars"]),
+            paddle.to_tensor(batch["extra"]),
+        )
+    ref_before = np.load(root / "bc-torch-before.npz")
+    d_before = max(
+        _rel(out[0].numpy(), ref_before["move"]),
+        _rel(out[1].numpy(), ref_before["fire"]),
+        _rel(out[2].numpy(), ref_before["hold"]),
+        _rel(out[3].numpy(), ref_before["value"]),
+    )
+    metrics = bc_paddle.train(_bc_args(root, "bc-paddle"))
+    ref = json.loads((root / "bc-torch-metrics.json").read_text(encoding="utf-8"))
+    keys = ("train_loss", "val_loss", "move_acc", "fire_acc", "hold_acc")
+    d_metrics = max(
+        abs(float(metrics["history"][k][-1]) - float(ref["history"][k][-1]))
+        / (1.0 + abs(float(ref["history"][k][-1])))
+        for k in keys
+    )
+    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    load_state_into(model, str(root / "bc-paddle" / "weights.json"))
+    model.eval()
+    with paddle.no_grad():
+        out = model(
+            paddle.to_tensor(batch["obs"]),
+            paddle.to_tensor(batch["scalars"]),
+            paddle.to_tensor(batch["extra"]),
+        )
+    ref_after = np.load(root / "bc-torch-after.npz")
+    d_after = max(
+        _rel(out[0].numpy(), ref_after["move"]),
+        _rel(out[1].numpy(), ref_after["fire"]),
+        _rel(out[2].numpy(), ref_after["hold"]),
+        _rel(out[3].numpy(), ref_after["value"]),
+    )
+    np.savez(
+        root / "bc-paddle-forward.npz",
+        move=out[0].numpy(),
+        fire=out[1].numpy(),
+        hold=out[2].numpy(),
+        value=out[3].numpy(),
+    )
+    save_weights_json(model, str(root / "bc-paddle-weights.json"))
+    ok = d_before <= atol_forward and d_metrics <= atol_metrics and d_after <= atol_forward
+    print(
+        f"{'PASS' if ok else 'FAIL'} bc_forward={d_before:.2e} "
+        f"bc_metrics={d_metrics:.2e} bc_after={d_after:.2e} "
+        f"| tol forward={atol_forward:g} metrics={atol_metrics:g}"
+    )
+    return 0 if ok else 1
+
+
+def bc_verify(root: Path, atol: float) -> int:
+    """torch 侧：读 Paddle 导出的权重 JSON，前向必须对上 Paddle 自己的输出。"""
+    import numpy as np
+    import torch
+
+    from worker.data.weights_io import load_state_into
+    from worker.models.student import PPOStudent
+
+    model = PPOStudent(h=64, d=8, head_hidden=128, action_v6=True, policy_extra=True)
+    load_state_into(model, str(root / "bc-paddle-weights.json"))
+    batch = _bc_load_batch(root)
+    with torch.no_grad():
+        out = model(
+            torch.from_numpy(batch["obs"]),
+            torch.from_numpy(batch["scalars"]),
+            torch.from_numpy(batch["extra"]),
+        )
+    ref = np.load(root / "bc-paddle-forward.npz")
+    d = max(
+        _rel(out[0].numpy(), ref["move"]),
+        _rel(out[1].numpy(), ref["fire"]),
+        _rel(out[2].numpy(), ref["hold"]),
+        _rel(out[3].numpy(), ref["value"]),
+    )
+    ok = d <= atol
+    print(f"{'PASS' if ok else 'FAIL'} bc_paddle→torch fwd_rel={d:.2e} | tol {atol:g}")
+    return 0 if ok else 1
+
+
 def main() -> int:
-    ap = house_parser(description="Paddle ↔ torch PPO parity harness")
+    ap = house_parser(description="Paddle ↔ torch PPO/BC parity harness")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p1 = sub.add_parser("fixture", help="torch: 生成基准（权重/输入/前向/一步更新结果）")
     p1.add_argument("--out", default="tmp/paddle-parity")
@@ -746,12 +943,28 @@ def main() -> int:
     p3.add_argument("--atol", type=float, default=1e-5)
     # 小量级头（value ≈0.7）的 f32 末位噪声：绝对项 + 相对项（理由见 run_verify 文档）。
     p3.add_argument("--rtol", type=float, default=1e-4)
+    p4 = sub.add_parser("bc-fixture", help="torch: 生成 BC v6 一步基准")
+    p4.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p5 = sub.add_parser("bc-check", help="paddle: 复跑 BC 一步并对账")
+    p5.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p5.add_argument("--atol-metrics", type=float, default=1e-3)
+    p5.add_argument("--atol-forward", type=float, default=1e-4)
+    p6 = sub.add_parser("bc-verify", help="torch: 读 Paddle BC 权重并前向对账")
+    p6.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p6.add_argument("--atol", type=float, default=1e-4)
     args = ap.parse_args()
     if args.cmd == "fixture":
         run_fixture(Path(args.out))
         return 0
     if args.cmd == "verify":
         return 1 if run_verify(Path(args.dir), args.atol, args.rtol) else 0
+    if args.cmd == "bc-fixture":
+        bc_fixture(Path(args.dir))
+        return 0
+    if args.cmd == "bc-check":
+        return bc_check(Path(args.dir), args.atol_metrics, args.atol_forward)
+    if args.cmd == "bc-verify":
+        return bc_verify(Path(args.dir), args.atol)
     return (
         1
         if run_check(

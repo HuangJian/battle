@@ -187,6 +187,12 @@ from common.manifest import (
     serve_mode_for as serve_mode_for,
 )
 from common.manifest import (
+    shard_corpus_skipped as shard_corpus_skipped,
+)
+from common.manifest import (
+    shard_lineage_ok as shard_lineage_ok,
+)
+from common.manifest import (
     shard_name as shard_name,
 )
 from common.manifest import (

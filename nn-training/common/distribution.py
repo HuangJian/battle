@@ -134,8 +134,10 @@ def rl_config_path() -> str:
 
 CONFIG_PATH = rl_config_path()
 
-#: BC 语料任务的模式标识：agent /v1/task ?mode=bc。
+#: BC 语料任务的模式标识：agent /v1/task ?mode=bc（God-AI 教师，无权重）。
 BC_MODE = "bc"
+#: v6 BC 采集：agent 跑 `export-rl-rollout.ts`（策略权重 + 可选 --teacher-argmax）。
+BC_V6_MODE = "bc-v6"
 #: BC 任务 wver 常量（无权重语义——God-AI 教师自对弈不需要策略权重）。
 BC_WVER = "bc"
 
@@ -1332,6 +1334,9 @@ def fetch_task(
     timeout: float,
     mode: str | None = None,
     kind: str = "rollout",
+    # BC v6 标签来源（`argmax` / `sampled`）：仅 mode=bc-v6 透传，且进 agent
+    # taskKey 后缀（同一 iterId 下 argmax/sampled 不能回放彼此缓存）。
+    label_mode: str = "",
     replan: int = 0,
     reward: str = "",
     course: str | None = None,
@@ -1398,6 +1403,8 @@ def fetch_task(
         params["policy"] = policy
     if kind != "rollout":
         params["kind"] = kind
+    if label_mode:
+        params["labelMode"] = label_mode
     if replan > 0:
         params["replan"] = replan
     if reward:
@@ -1515,6 +1522,9 @@ def _poll_result(
         qparams["decisionEvents"] = params["decisionEvents"]
     if params.get("decisionK"):
         qparams["decisionK"] = params["decisionK"]
+    # v6 BC：labelMode 进提交端 taskKey 后缀，轮询端必须同配方（否则 async 必 404）。
+    if params.get("labelMode"):
+        qparams["labelMode"] = params["labelMode"]
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(POLL_MIN_BUDGET_SEC, budget)
     while True:

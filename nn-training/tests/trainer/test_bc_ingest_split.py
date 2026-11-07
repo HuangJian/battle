@@ -53,9 +53,14 @@ MOVED_NAMES = {
 ALLOWED_IMPORTS = {
     "__future__",
     "json",
+    "os",
+    "tempfile",
     "time",
     "dataclasses",
     "pathlib",
+    "worker.archive",
+    # #12（2026-11-05）：每 epoch 原子归档需要临时文件 + `backup_weights`（轮末同一写入器）；
+    # 归档是回传入账的观测面，仍住本模块，不引入编排依赖。
     "common.protocol",
     # S5 第五刀（2026-09-27）：HTTP 面下沉 `remote/hub_http.py`；`_request` 的所有者搬了家，
     # 本模块（函数内 import 那个注入点）随之改指。

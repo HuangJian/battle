@@ -14,6 +14,79 @@ torch——`tests/worker/test_bc_course.py::test_resolve_fire_pos_weight` 因此
 
 from __future__ import annotations
 
+import math
+
+#: 平滑窗口（B3/B1，2026-11-05/07）：单点 val_loss 的抖动由 fire 头噪声主导（与
+#: fire_acc 相关 −0.965），拿单点做「新低」等于在噪声里抽签。早停与选权重共用。
+SMOOTH_WINDOW = 5
+#: 平滑值改善小于该幅度不算「改善」（否则平盘会被当成缓慢进步而永不早停）。
+EARLY_STOP_MIN_DELTA = 1e-4
+
+
+def smoothed_val_loss(val_losses: list[float], window: int = SMOOTH_WINDOW) -> float:
+    """最近 `window` 个 val_loss 的算术平均（不足 window 时用已有的全部）。"""
+    recent = val_losses[-max(1, window) :]
+    return sum(recent) / len(recent)
+
+
+def early_stop_epoch(
+    val_losses: list[float],
+    patience: int,
+    window: int = SMOOTH_WINDOW,
+    min_delta: float = EARLY_STOP_MIN_DELTA,
+) -> int | None:
+    """该在第几个 epoch 停（1-based）？`None` = 不早停。
+
+    判据：**滑动平均 val_loss** 连续 `patience` 个 epoch 没有改善（改善 = 比历史最佳
+    平滑值低过 `min_delta`）。纯函数 ⇒ 早停语义可单测，不用真训练收敛曲线。
+    """
+    if patience <= 0:
+        return None
+    best = float("inf")
+    best_at = 0
+    for i in range(1, len(val_losses) + 1):
+        sm = smoothed_val_loss(val_losses[:i], window)
+        if sm < best - min_delta:
+            best = sm
+            best_at = i
+            continue
+        if best_at and i - best_at >= patience:
+            return i
+    return None
+
+
+def select_best_epoch(val_losses: list[float], window: int = SMOOTH_WINDOW) -> int | None:
+    """按**滑动平均** val_loss 选交付权重来自哪一 epoch（1-based；None = 窗口未满）。
+
+    B1（2026-11-07）：单点 `min(val_loss)` 由 fire 头噪声主导，等于在噪声里抽签；
+    只看**完整窗口**的平滑值 ⇒ 一次尖峰不可能把交付权重拉过来。返回窗口**末端**
+    epoch（平滑曲线天然滞后：状态取窗口最后一天的权重）。训练不足 `window` 轮时返回
+    None，调用方按「交最后一轮」处理，而不是退回单点最小。
+    """
+    w = max(1, window)
+    if len(val_losses) < w:
+        return None
+    best_at = 0
+    best = float("inf")
+    for i in range(w, len(val_losses) + 1):
+        sm = sum(val_losses[i - w : i]) / w
+        if sm < best:
+            best = sm
+            best_at = i
+    return best_at
+
+
+def sanitize_json(o):
+    """递归把 float NaN → None（json.dump 默认写出非标准 `NaN` 字面量，
+    TS JSON.parse 会直接抛错——weights 文件里不能带 NaN）。"""
+    if isinstance(o, float) and math.isnan(o):
+        return None
+    if isinstance(o, dict):
+        return {k: sanitize_json(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [sanitize_json(v) for v in o]
+    return o
+
 
 def resolve_fire_pos_weight(raw: object, counts: dict) -> float:
     """fire 头正例权重（2026-09-14）：`"auto"` = 训练集 neg/pos（≈12.6）；数 = 直接用；

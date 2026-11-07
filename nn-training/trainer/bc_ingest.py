@@ -24,12 +24,14 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from common.log import log
 from common.protocol import decode_weights_json
+from worker.archive import backup_weights
 from worker.bc_config import BcCourseConfig
 from worker.bc_eval import BcEvalError, dispatch_bc_eval
 from worker.bc_ledger import append_ledger
@@ -56,10 +58,95 @@ def ledger_bc_epoch(jsonl_path: Path, it: int, row: dict) -> None:
             "val_loss": row.get("val_loss"),
             "move_acc": row.get("move_acc"),
             "fire_acc": row.get("fire_acc"),
+            #: v6 第三头（#11）：legacy 行没有该键 ⇒ None（旧账本仍可读）。
+            "hold_acc": row.get("hold_acc"),
+            #: B2：与训练同口径的加权 val（诊断列）；`val_loss` 仍保持未加权。
+            "val_loss_weighted": row.get("val_loss_weighted"),
             "lr": row.get("lr"),
             "ts": time.time(),
         },
     )
+
+
+def audit_bc_ledger(epochs: list[int], expected: int) -> dict:
+    """账本完整性审计（B8，2026-11-05）：缺号 / 重复 / 末轮必达。
+
+    事故（报告 §6）：107 条 `bc_epoch` 只覆盖 77 个 epoch，缺 5/25/80、30 条重复 ——
+    面板照样把点连成曲线，看不出中间是空的。纯函数 ⇒ 可在轮末入账一条
+    `bc_ledger_audit`，面板/报告读它而不是自己猜。
+
+    `expected` = 课程声明的 epoch 总数（0 = 未知，只报 observed）。
+    """
+    seen = sorted(set(int(e) for e in epochs if int(e) > 0))
+    have = set(seen)
+    missing = [e for e in range(1, int(expected) + 1) if e not in have] if expected > 0 else []
+    duplicates = len([e for e in epochs if int(e) > 0]) - len(seen)
+    return {
+        "event": "bc_ledger_audit",
+        "expected": int(expected),
+        "observed": len(seen),
+        "missing": missing,
+        "duplicates": duplicates,
+        "complete": bool(not missing and duplicates == 0 and (expected <= 0 or len(seen) >= expected)),
+    }
+
+
+def _archive_epoch_weights(
+    hub_url: str,
+    token: str,
+    jid: str,
+    it: int,
+    epoch: int,
+    course: BcCourseConfig,
+    logger=log,
+) -> str | None:
+    """把 hub 上的 ep{N} 快照归档到课程 `backup_dir`（#12）。
+
+    - **只在该课程配了 `backup_dir` 时做**：没配时默认会落到 RL 的
+      `nn-training/weights/`，80 个 epoch 会污染 RL 归档面；轮末那份 `it` 归档仍保留。
+    - 幂等：`backup_weights(label=epN)` 已有同名归档 ⇒ 直接复用，不产生第二份。
+    - 失败只 WARN：归档是观测面，不得打断训练等待。
+    """
+    if not course.backup_dir:
+        return None
+    import tempfile
+
+    from remote.hub_http import _request
+
+    prefix = course.resolve_backup_prefix(course.name)
+    try:
+        st, body = _request(
+            hub_url, token, f"/jobs/{jid}/epoch-weights/{int(epoch)}", timeout=30.0
+        )
+        if st == 404:
+            logger(f"[run_bc] it{it} ep{epoch}: hub 无该 epoch 快照——跳过归档")
+            return None
+        if st != 200:
+            raise RuntimeError(f"HTTP {st}")
+        d = json.loads(body.decode("utf-8"))
+        raw = decode_weights_json(str(d["weights"]))
+        fd, tmp = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            dst = backup_weights(
+                tmp,
+                it,
+                prefix=prefix,
+                backup_dir=str(course.backup_dir),
+                label=f"ep{int(epoch)}",
+            )
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        if dst:
+            logger(f"[run_bc] it{it} ep{epoch}: 权重归档 {dst}")
+        return dst
+    except Exception as e:
+        logger(f"[run_bc] it{it} ep{epoch}: 权重归档失败（不致命）: {type(e).__name__}: {e}")
+        return None
 
 
 def run_epoch_eval(
@@ -73,15 +160,23 @@ def run_epoch_eval(
     cfg: dict | None,
     log=log,
 ) -> None:
-    """从 hub resume 取该 epoch 权重快照 → 多地图干净评估 → bc_eval 账本事件。"""
+    """从 hub 取**该 epoch** 的不可变快照 → 多地图干净评估 → bc_eval 事件。
+
+    B6：不能用 `/resume`（它可能已经是更晚的权重）——迟到补发行按行序贴标签会得到假指标。
+    """
     import json as _json
 
     from remote.hub_http import _request
 
     try:
-        st, body = _request(hub_url, token, f"/jobs/{jid}/resume", timeout=30.0)
+        st, body = _request(
+            hub_url, token, f"/jobs/{jid}/epoch-weights/{int(epoch)}", timeout=30.0
+        )
+        if st == 404:
+            log(f"[run_bc] it{it} ep{epoch}: 无该 epoch 快照——本边界跳过 eval")
+            return
         if st != 200:
-            log(f"[run_bc] it{it} ep{epoch}: resume 未就绪（HTTP {st}）——本边界跳过 eval")
+            log(f"[run_bc] it{it} ep{epoch}: 快照读取失败（HTTP {st}）——本边界跳过 eval")
             return
         d = _json.loads(body.decode("utf-8"))
         weights = decode_weights_json(str(d["weights"]))
@@ -91,6 +186,8 @@ def run_epoch_eval(
             games_per_stage=int(course.eval.games_per_stage),
             it=it,
             epoch=epoch,
+            # B4：课程声明的面板与实际关卡值并存入行，跨面板不可相减。
+            course_max_ticks=int(course.max_ticks),
             cfg=cfg,
             log=log,
         )
@@ -130,6 +227,8 @@ class BcWait:
     idle_warned: bool = False
     #: 连续网络错/5xx 次数（退避用；404 = 正常排队，清零）。
     err_streak: int = 0
+    #: 已入账的 epoch（B8：同 epoch 重发只记一次；轮末用它做缺号审计）。
+    ledger_epochs: list[int] = field(default_factory=list)
 
     def backoff_sec(self) -> float:
         """瞬时错误后的退避（2 的幂，封顶 `POLL_MAX_SEC`）。"""
@@ -172,6 +271,23 @@ class BcWait:
         if status == 200:
             loaded = json.loads(body.decode("utf-8"))
             if isinstance(loaded, dict):
+                # B8：轮末审计（缺号/重复/末轮必达）入账，面板读它而不是猜曲线完整性。
+                # 冒烟回显（`{"smoke": True}`）不是真实训练结果：本轮作废、零 epoch，
+                # 审计只会把空账本写成「缺全部」——空轮不落任何账本事件。
+                if not loaded.get("smoke"):
+                    try:
+                        audit = audit_bc_ledger(self.ledger_epochs, int(course.train.epochs))
+                        append_ledger(
+                            jsonl_path,
+                            {**audit, "it": int(it), "jid": self.jid, "ts": time.time()},
+                        )
+                        if not audit["complete"]:
+                            logger(
+                                f"[run_bc] it{it}: 账本不完整——缺 ep{audit['missing']}"
+                                f"、重复 {audit['duplicates']} 条（expected={audit['expected']}）"
+                            )
+                    except Exception as e:  # 审计失败绝不打断收尾
+                        logger(f"[run_bc] WARN 账本审计失败: {type(e).__name__}: {e}")
                 return READY, loaded
             raise RuntimeError(f"wait_bc_round: job {self.jid} 结果非对象")
         if status == 404:
@@ -232,16 +348,26 @@ def ingest_bc_metrics(
                 # 但它**不能派 eval**：`run_epoch_eval` 取 hub `/resume`（此刻已是 ep6+ 的权重），
                 # 拿新权重冒充旧 epoch 的结果比缺一行更糟。
                 late: set[int] = set()
+                dup = 0
                 for r in new_rows:
                     ep = int(r.get("epoch", 0) or 0)
+                    # B8：同 epoch 重发（旧链路的 30 条重复行）只入账一次。
+                    if ep and ep in wait.ledger_epochs:
+                        dup += 1
+                        continue
+                    if ep:
+                        wait.ledger_epochs.append(ep)
                     if ep and ep < wait.last_epoch:
                         late.add(ep)
                     ledger_bc_epoch(jsonl_path, it, r)
+                    if ep:
+                        _archive_epoch_weights(hub_url, token, wait.jid, it, ep, course, logger)
                     if ep > wait.last_epoch:
                         wait.last_epoch = ep
                 logger(
-                    f"[run_bc] it{it}: epoch 指标 +{len(new_rows)} 行"
+                    f"[run_bc] it{it}: epoch 指标 +{len(new_rows) - dup} 行"
                     f"（最新 ep{wait.last_epoch}）入账"
+                    + (f"；跳过重复 {dup} 行" if dup else "")
                 )
                 if late:
                     logger(

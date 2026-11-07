@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,9 +27,14 @@ if str(ROOT) not in sys.path:
 
 import trainer.bc_loop as bc_loop
 from remote import hub_client, hub_http
-from trainer.bc_loop import BcLoop, BcRuntime, find_round_job
+from trainer.bc_loop import BcLoop, BcRuntime, find_round_job, prune_remote_jobs
 from worker.bc_config import load_bc_course
-from worker.bc_ledger import ROUND_DONE_EVENT, read_events
+from worker.bc_ledger import (
+    ROUND_DONE_EVENT,
+    ROUND_JOB_MISSING_EVENT,
+    ROUND_REOPENED_EVENT,
+    read_events,
+)
 from worker.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT
 
 
@@ -42,9 +49,17 @@ class FakeHub:
         self.metric_calls = 0
         self.boom_metrics = False
         self.paths: list[str] = []
+        #: jid → (HTTP code, state)；缺省 = 200 pending（盘上 job 仍可等）。
+        self.states: dict[str, tuple[int, str]] = {}
 
     def request(self, base: str, token: str, path: str, timeout: float = 0.0) -> Any:
         self.paths.append(path)
+        if path.endswith("/status"):
+            jid = path.split("/")[-2]
+            code, state = self.states.get(jid, (200, "pending"))
+            if code == 200:
+                return 200, json.dumps({"job_id": jid, "state": state}).encode("utf-8")
+            return code, b"{}"
         if path.endswith("/result"):
             self.polls += 1
             if self.polls < self.ready_after:
@@ -99,7 +114,17 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
         r.published.append(it)
         job_root = Path(kw["job_root"])
         (job_root / jid).mkdir(parents=True, exist_ok=True)
-        manifest = {"job_id": jid, "it": it, "kind": "bc", "course_name": "x", "mode": "bc"}
+        course_obj = kw.get("course")
+        epochs = int(getattr(getattr(course_obj, "train", None), "epochs", 0) or 0)
+        manifest = {
+            "job_id": jid,
+            "it": it,
+            "kind": "bc",
+            "course_name": "x",
+            "course_key": str(kw.get("course_key") or ""),
+            "epochs": epochs,
+            "mode": "bc",
+        }
         (job_root / jid / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         # push 直推要提交 payload/code（真 publish 会写这两个文件；假件补上）
         (job_root / jid / "payload.tar.xz").write_bytes(b"payload")
@@ -152,6 +177,7 @@ def _runtime(
     tmp_path: Path,
     *,
     iters: int = 2,
+    epochs: int = 150,
     smoke: bool = False,
     transport: str = "hub",
     sub: str = "traj",
@@ -161,6 +187,10 @@ def _runtime(
     `sub`：同一用例里两门课必须**各用一份 traj**（共用一份账本会让断言互相污染）。
     """
     course = load_bc_course("bc-c4-v3")
+    if int(course.train.epochs) != int(epochs):
+        course = course.model_copy(
+            update={"train": course.train.model_copy(update={"epochs": int(epochs)})}
+        )
     traj = tmp_path / sub
     traj.mkdir(parents=True, exist_ok=True)
     return BcRuntime(
@@ -188,6 +218,53 @@ def _runtime(
 
 def _loop(tmp_path: Path, **kw: Any) -> BcLoop:
     return BcLoop(_runtime(tmp_path, **kw), log=lambda _m: None, sleep=lambda _s: None)
+
+
+def test_publish_records_code_snapshot_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B7：快照与工作区不一致时只告警 + 写旁挂；发布不被拒绝。"""
+    course = load_bc_course("bc-c4")
+    traj = tmp_path / "traj"
+    traj.mkdir()
+    job_root = traj / "remote-jobs"
+    shard = traj / "bc_s1_seed1"
+    shard.mkdir()
+    logs: list[str] = []
+
+    def fake_publish(**kw: Any) -> dict:
+        job_dir = Path(kw["job_root"]) / "jid-stale"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        return {"job_id": "jid-stale", "code_sha256": "a" * 64}
+
+    monkeypatch.setattr(bc_loop, "iter_bc_shard_dirs", lambda *a, **k: [shard])
+    monkeypatch.setattr(bc_loop, "git_head", lambda: "deadbeef")
+    monkeypatch.setattr(
+        bc_loop, "published_code_zip", lambda *a, **k: (tmp_path / "code.zip", "a" * 64, True)
+    )
+    monkeypatch.setattr(bc_loop, "workspace_code_sha", lambda *a, **k: "b" * 64)
+    monkeypatch.setattr(bc_loop, "resolve_bc_init_weights", lambda _c: None)
+    monkeypatch.setattr(bc_loop, "publish_job", fake_publish)
+
+    manifest = bc_loop.publish_bc_job(
+        course=course,
+        course_fp="f" * 64,
+        corpus_fp="c" * 64,
+        course_text="{}",
+        it=1,
+        traj=traj,
+        job_root=job_root,
+        jsonl_path=traj / "training_log.jsonl",
+        log=logs.append,
+    )
+
+    assert manifest["job_id"] == "jid-stale"
+    doc = json.loads(
+        (job_root / "jid-stale" / "code-freshness.json").read_text(encoding="utf-8")
+    )
+    assert doc["stale"] is True
+    assert doc["snapshot_sha"] == "a" * 64 and doc["workspace_sha"] == "b" * 64
 
 
 # ------------------------------------------------------------ 指针 / 生命周期
@@ -279,6 +356,90 @@ def test_completed_round_is_skipped_without_any_publish(
     assert rec.published == [] and rec.collected == []
 
 
+def test_expanded_epoch_budget_reopens_completed_round(
+    tmp_path: Path, hub: FakeHub, rec: Recorder
+) -> None:
+    """G3：40→80 时同一轮写 `bc_round_reopened` 并发布新 job；80 到账后不再重开。"""
+    loop = _loop(tmp_path, iters=1, epochs=80)
+    bc_loop.append_ledger(
+        loop.runtime.jsonl_path, {"event": ROUND_DONE_EVENT, "it": 1, "epochs": 40}
+    )
+    bc_loop.append_ledger(
+        loop.runtime.jsonl_path, {"event": "bc_epoch", "it": 1, "epoch": 40}
+    )
+    assert loop.ledger_next_it() == 1  # 不是 2：预算扩大后这一轮还要跑
+
+    hub.result = {"metrics": {"epochs": 80}}
+    hub.ready_after = 1
+    assert loop.run_one_round(1).status == ROUND_NEXT
+
+    reopened = [
+        e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_REOPENED_EVENT
+    ]
+    assert [(e["old_epochs"], e["new_epochs"]) for e in reopened] == [(40, 80)]
+    assert rec.published == [1]
+    assert loop.ledger_next_it() == 2  # 新目标已到账 ⇒ 真正收官
+    assert loop.run_one_round(1).status == ROUND_NEXT
+    assert len(
+        [e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_REOPENED_EVENT]
+    ) == 1
+
+
+def test_run_blocking_starts_at_the_reopened_round(
+    tmp_path: Path, hub: FakeHub, rec: Recorder
+) -> None:
+    """阻塞入口也从账本指针起：两轮都完成、预算扩大 ⇒ 只重开 it2，不从 it1 重跑。"""
+    loop = _loop(tmp_path, iters=2, epochs=80)
+    for it in (1, 2):
+        bc_loop.append_ledger(
+            loop.runtime.jsonl_path, {"event": ROUND_DONE_EVENT, "it": it, "epochs": 40}
+        )
+    hub.result = {"metrics": {"epochs": 80}}
+    hub.ready_after = 1
+
+    loop.run_blocking()
+
+    assert rec.published == [2]
+    assert rec.collected == [2]
+    reopened = [
+        e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_REOPENED_EVENT
+    ]
+    assert [(e["it"], e["old_epochs"], e["new_epochs"]) for e in reopened] == [(2, 40, 80)]
+
+
+def test_reopen_uses_completed_job_manifest_epochs_when_ledger_has_none(
+    tmp_path: Path, hub: FakeHub, rec: Recorder
+) -> None:
+    """旧账本只有 `bc_round_completed` 没有 epoch 列 ⇒ 用已完成 job 的 manifest.epochs。"""
+    loop = _loop(tmp_path, iters=1, epochs=80)
+    old = loop.runtime.job_root / "old"
+    old.mkdir(parents=True)
+    (old / "manifest.json").write_text(
+        json.dumps(
+            {
+                "job_id": "old",
+                "it": 1,
+                "kind": "bc",
+                "course_key": "bc-c4-v3",
+                "epochs": 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    bc_loop.append_ledger(loop.runtime.jsonl_path, {"event": "job_completed", "job_id": "old"})
+    bc_loop.append_ledger(loop.runtime.jsonl_path, {"event": ROUND_DONE_EVENT, "it": 1})
+    assert loop.ledger_next_it() == 1
+
+    hub.result = {"metrics": {"epochs": 80}}
+    hub.ready_after = 1
+    assert loop.run_one_round(1).status == ROUND_NEXT
+    reopened = [
+        e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_REOPENED_EVENT
+    ]
+    assert [(e["old_epochs"], e["new_epochs"]) for e in reopened] == [(40, 80)]
+    assert rec.published == [1]
+
+
 def test_round_two_runs_after_round_one_lands(tmp_path: Path, hub: FakeHub, rec: Recorder) -> None:
     """两轮的发布/落位各自一次，完成事件按序入账。"""
     loop = _loop(tmp_path, iters=2)
@@ -341,6 +502,104 @@ def test_disk_job_of_a_completed_round_is_ignored(
     )
     bc_loop.append_ledger(rt.jsonl_path, {"event": "job_completed", "job_id": "oldjid"})
     assert find_round_job(rt.job_root, 1, completed_jids={"oldjid"}) is None
+
+
+def test_find_round_job_ignores_hidden_deleted_dirs(tmp_path: Path) -> None:
+    """`.deleted-*` 不参与「未收口 job」判定（2026-11-05 评审 B3）。"""
+    job_root = tmp_path / "remote-jobs"
+    hidden = job_root / ".deleted-old"
+    hidden.mkdir(parents=True)
+    (hidden / "manifest.json").write_text(
+        json.dumps({"job_id": "hidden", "it": 1, "kind": "bc"}), encoding="utf-8"
+    )
+    assert find_round_job(job_root, 1) is None
+
+    real = job_root / "real"
+    real.mkdir()
+    (real / "manifest.json").write_text(
+        json.dumps({"job_id": "real", "it": 1, "kind": "bc"}), encoding="utf-8"
+    )
+    found = find_round_job(job_root, 1)
+    assert found is not None and found[0] == "real"
+
+
+def test_hub_unusable_job_is_republished_and_resume_loss_is_recorded(
+    tmp_path: Path, hub: FakeHub, rec: Recorder
+) -> None:
+    """G4：盘上 job 在 hub 侧不存在/已终局 ⇒ 不认领，允许重发并记一次 `bc_round_job_missing`。"""
+    cases = [
+        (404, "", "unknown"),
+        (200, "failed", "closed"),
+        (200, "frozen", "closed"),
+        (200, "cancelled", "closed"),
+    ]
+    for code, state, want in cases:
+        sub = f"c{code}-{state or 'none'}"
+        rt = _runtime(tmp_path, iters=1, sub=sub)
+        old = rt.job_root / "oldjid"
+        old.mkdir(parents=True)
+        (old / "manifest.json").write_text(
+            json.dumps({"job_id": "oldjid", "it": 1, "kind": "bc"}), encoding="utf-8"
+        )
+        hub.states["oldjid"] = (code, state)
+        hub.ready_after = 1
+        loop = BcLoop(rt, log=lambda _m: None, sleep=lambda _s: None)
+
+        assert loop.run_one_round(1).status == ROUND_NEXT
+        assert rec.published[-1] == 1  # 重发，不是空等旧 jid
+        # 假发布器在整个用例里连续编号（jid1/jid2/…），最后一轮落位的必是刚发的那份。
+        assert rec.landed[-1] == (1, f"jid{len(rec.published)}")
+        missing = [
+            e
+            for e in read_events(rt.jsonl_path)
+            if e.get("event") == ROUND_JOB_MISSING_EVENT
+        ]
+        assert [(e["it"], e["job_id"], e["hub_state"], e["resume_lost"]) for e in missing] == [
+            (1, "oldjid", want, True)
+        ]
+
+
+@pytest.mark.parametrize("code,state", [(200, "done"), (503, "")])
+def test_hub_done_or_unreachable_job_is_still_adopted(
+    tmp_path: Path, hub: FakeHub, rec: Recorder, code: int, state: str
+) -> None:
+    """`done` 有结果可落；`unreachable` 只是没答上来——两者都不许重发（G4 保守方向）。"""
+    rt = _runtime(tmp_path, iters=1, sub=f"{code}-{state or 'none'}")
+    old = rt.job_root / "oldjid"
+    old.mkdir(parents=True)
+    (old / "manifest.json").write_text(
+        json.dumps({"job_id": "oldjid", "it": 1, "kind": "bc"}), encoding="utf-8"
+    )
+    hub.states["oldjid"] = (code, state)
+    hub.ready_after = 1
+    loop = BcLoop(rt, log=lambda _m: None, sleep=lambda _s: None)
+
+    assert loop.run_one_round(1).status == ROUND_NEXT
+    assert rec.published == []  # 不重发
+    assert rec.landed == [(1, "oldjid")]
+
+
+def test_prune_remote_jobs_ignores_hidden_dirs(tmp_path: Path) -> None:
+    """隐藏目录不计数、不被 prune 删除：否则 `.deleted-*` 会挤掉真正的在飞 job。"""
+    root = tmp_path / "remote-jobs"
+    hidden = root / ".deleted-old"
+    hidden.mkdir(parents=True)
+    base = time.time() - 100.0
+    for i in range(4):
+        d = root / f"j{i}"
+        d.mkdir()
+        os.utime(d, (base + i, base + i))
+    os.utime(hidden, (base + 1000.0, base + 1000.0))
+
+    prune_remote_jobs(root, keep=3)
+
+    assert hidden.exists()
+    assert sorted(d.name for d in root.iterdir() if d.is_dir()) == [
+        ".deleted-old",
+        "j1",
+        "j2",
+        "j3",
+    ]
 
 
 def test_smoke_round_does_not_adopt_disk_job(tmp_path: Path, hub: FakeHub, rec: Recorder) -> None:

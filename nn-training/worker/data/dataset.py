@@ -94,10 +94,11 @@ class NNDataset(Dataset):
             else np.full(self.actions.shape[0], np.nan, dtype=np.float32)
         )
         self.augment = augment
-        # v6 三头暂不做 mirrorX：`mirror_x` 是按 **legacy 5 类 move**（STOP=0）写的左右翻转表，
-        # 对 v6 的 4 类（up/down/left/right，无 STOP）会把 left↔right 映射错位
-        # （实测报 `Target 4 is out of bounds`）。要恢复增强，需另写一张 4 类表。
-        self.mirror_p = 0.0 if action_v6 else mirror_p
+        # v6 三头同样做 mirrorX（2026-11-05，B2）：`mirror_x` 早有 4 类表
+        # （`_MOVE_FLIP_V6`，up/down/left/right 只换 left↔right）；此前这里强制
+        # `mirror_p=0` 是因为没把 `action_v6` 传进镜像函数，legacy 5 类表会把 v6 的
+        # move 映到 4（`Target 4 is out of bounds`）。现在开关与表同源，增强恢复。
+        self.mirror_p = mirror_p
         self.rng = rng or np.random.default_rng(0)
         assert self.obs.shape[0] == self.scalars.shape[0] == self.actions.shape[0]
 
@@ -114,7 +115,7 @@ class NNDataset(Dataset):
         ret = self.returns[idx]
         if self.augment and self.rng.random() < self.mirror_p:
             # extra 与 obs/scalars 同一抽签、同一次镜像（自洽不可分家）。
-            obs, sc, mv, ex = mirror_x(obs, sc, mv, ex)
+            obs, sc, mv, ex = mirror_x(obs, sc, mv, ex, action_v6=self.action_v6)
         # Torch expects (C,H,W); obs is (C,H,W) already.
         if self.action_v6:
             # v6 三头：move 4 / fire 3 / hold 2（掩码 9 位，见 `obs-encoder.computeMasks`）。

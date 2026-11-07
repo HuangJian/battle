@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import urllib.parse
 from pathlib import Path
@@ -96,6 +97,37 @@ def test_unfreeze_is_best_effort_and_never_raises(monkeypatch) -> None:
     assert http_mod.unfreeze_job("", "t", JID) is False
     assert http_mod.unfreeze_job("http://hub.invalid", "t", "") is False
     assert sent == []
+
+
+def test_job_reconcile_state_closes_terminal_jobs_but_keeps_done_alive(monkeypatch) -> None:
+    """G4 对账四态：done 有结果可落 ⇒ alive；failed/frozen/cancelled ⇒ closed。
+
+    `done` 若被当 closed，重发同一个 jid 会撞旧 result，永远等不到新结果；
+    failed/frozen/cancelled 若被当 alive，训练侧就会永远等一条不会回传的 job。
+    """
+    for state in ("pending", "leased", "done"):
+        _routes(
+            monkeypatch,
+            {f"/jobs/{JID}/status": (200, json.dumps({"state": state}).encode("utf-8"))},
+        )
+        assert http_mod.job_reconcile_state("http://hub.invalid", "t", JID) == http_mod.JOB_ALIVE
+    for state in ("failed", "frozen", "cancelled"):
+        _routes(
+            monkeypatch,
+            {f"/jobs/{JID}/status": (200, json.dumps({"state": state}).encode("utf-8"))},
+        )
+        assert http_mod.job_reconcile_state("http://hub.invalid", "t", JID) == http_mod.JOB_CLOSED
+
+    _routes(monkeypatch, {f"/jobs/{JID}/status": (404, b'{"error":"unknown job"}')})
+    assert http_mod.job_reconcile_state("http://hub.invalid", "t", JID) == http_mod.JOB_UNKNOWN
+    for status in (401, 503):
+        _routes(monkeypatch, {f"/jobs/{JID}/status": (status, b"nope")})
+        assert (
+            http_mod.job_reconcile_state("http://hub.invalid", "t", JID)
+            == http_mod.JOB_UNREACHABLE
+        )
+    _routes(monkeypatch, {f"/jobs/{JID}/status": OSError("down")})
+    assert http_mod.job_reconcile_state("http://hub.invalid", "t", JID) == http_mod.JOB_UNREACHABLE
 
 
 def test_admin_cancel_job_four_states(monkeypatch) -> None:

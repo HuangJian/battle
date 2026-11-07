@@ -35,6 +35,25 @@ describe('taskKey 决策事件后缀（仅激活时进键）', () => {
   })
 })
 
+describe('taskKey v6 BC 标签来源后缀（仅非空进键）', () => {
+  it('空串 = 历史键不变；argmax/sampled 各自成键', () => {
+    const base = taskKey('it1', 'bc-v6', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'bc-v6', 'rollout', 2000, 7, '', '', '', '', '')).toBe(base)
+    expect(taskKey('it1', 'bc-v6', 'rollout', 2000, 7, '', '', '', '', 'argmax')).toBe(
+      `${base}:lmargmax`,
+    )
+    expect(taskKey('it1', 'bc-v6', 'rollout', 2000, 7, '', '', '', '', 'sampled')).toBe(
+      `${base}:lmsampled`,
+    )
+  })
+
+  it('与决策后缀并存时顺序为 de→k→lm', () => {
+    expect(taskKey('it1', 'bc-v6', 'rollout', 2000, 7, '', '', 'de1', '5', 'argmax')).toBe(
+      'it1:bc-v6:rollout:2000:7:de1:k5:lmargmax',
+    )
+  })
+})
+
 describe('taskKey 决策周期 K 后缀（仅非默认值进键）', () => {
   it('激活 = 尾缀 :k<N>；与 de1 并存顺序 de→k', () => {
     expect(taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '5')).toBe(

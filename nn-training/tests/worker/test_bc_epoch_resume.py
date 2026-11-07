@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hub.server import _JobStore
+from worker.train.bc import SMOOTH_WINDOW, select_best_epoch, smoothed_val_loss
 from worker.train.bc import train as bc_train
 
 # ------------------------------------------------------------------ hub 存储
@@ -95,6 +96,32 @@ def test_bc_train_on_epoch_called_per_epoch(tmp_path: Path) -> None:
     bc_train(ns)
     assert [g for g, _ in calls] == [1, 2]  # 全局 epoch 编号
     assert set(calls[0][1]) == {"train_loss", "val_loss", "move_acc", "fire_acc", "lr"}
+
+
+def test_bc_train_reports_the_epoch_it_actually_delivers(tmp_path: Path) -> None:
+    """B1：窗口未满（2 < 5）时交最后一轮，`best_val` 是该轮的原始 val_loss。"""
+    out = bc_train(_bc_args(tmp_path))
+    assert out["delivered_epoch"] == 2
+    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1])
+    assert out["best_smoothed_val_loss"] == pytest.approx(
+        smoothed_val_loss(out["history"]["val_loss"], window=SMOOTH_WINDOW)
+    )
+
+
+def test_bc_train_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path: Path) -> None:
+    """B1：epochs >= 窗口时，交付 epoch = 完整窗口滑动平均的最小值（不看单点）。"""
+    out = bc_train(_bc_args(tmp_path, epochs=6))
+    delivered = select_best_epoch(out["history"]["val_loss"], window=SMOOTH_WINDOW)
+    assert delivered is not None and delivered >= SMOOTH_WINDOW
+    assert out["delivered_epoch"] == delivered
+    assert out["best_val_loss"] == pytest.approx(
+        out["history"]["val_loss"][delivered - 1]
+    )
+    meta = json.loads((tmp_path / "bc-weights.json").read_text(encoding="utf-8"))
+    assert meta["delivered_epoch"] == delivered
+    assert meta["best_smoothed_val_loss"] == pytest.approx(
+        out["best_smoothed_val_loss"]
+    )
 
 
 def test_bc_train_resume_continues_epoch_numbering(tmp_path: Path) -> None:

@@ -129,13 +129,16 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: ⚠ 另一次在飞的改动（payload 分块并行，2026-10-27 评审时**移出工作树**，停在
 #: `nn-training/tmp/wip-keep/`）恢复后会在 `remote/payload_pack.py` 多出 1 格（`one`）——
 #: 那笔账由那次改动自己在本文件记。本基线只覆盖「Paddle 双生 + 评审收敛」这一份 ⇒
-#: **现状读数 = 103**（`tools/reuse_audit.py` 实测，停放后已对过账）。
+#: **现状读数 = 104**（`tools/reuse_audit.py` 实测）。2026-11-05 #12 的账：
+#: `get_bc_epoch_weights` 在 `hub/store_results.py`（实现）+ `hub/queue_store_face.py`（门面转发）+
+#: `hub/queue_peer.py`（Protocol 声明）三处同名 —— 与 `get_bc_resume` / `store_bc_epoch` 同款的
+#: **合法同名面**（三处形状一致是契约），不是复制了一份实现。
 #: 收敛前后对照：`worker/models/student.py` ↔ `student_paddle.py` 的 `arch` /
 #: `policy_input_dim` / `value_anchor_slices`（×3 组逐字节）与 `build_ppo`（×1）全部收进
 #: `worker/models/arch_meta.py`；`cat_entropy`（1 组结构克隆）收进 `worker/ppo/trainer.py`。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 103
+BASELINE_SAME_NAME_GE3 = 104
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

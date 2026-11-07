@@ -25,6 +25,67 @@ from typing import Any
 
 from common.protocol import FAIL_NAME
 
+#: 课程级 resume 索引目录（相对 job 根）：`bc-resume/by-course/<course_key>/<it>.json`。
+#: 它是 per-jid `bc-resume.json` 的**别名**，不是第二份权威：写入点只有 `store_bc_epoch`，
+#: 读取点只有 `get_bc_resume` 的 fallback。
+BC_COURSE_INDEX_DIR = "bc-resume/by-course"
+
+
+def _safe_course_key(raw: object) -> str:
+    """manifest 里的课程键 → 可安全拼进路径的段；非法/缺失 ⇒ 空串（不写索引）。"""
+    key = raw.strip() if isinstance(raw, str) else ""
+    if (
+        not key
+        or key in (".", "..")
+        or "/" in key
+        or "\\" in key
+        or ":" in key
+        or "\x00" in key
+    ):
+        return ""
+    return key
+
+
+def _read_json_dict(path: Path) -> dict | None:
+    """读一个 JSON 对象；缺失/坏文件/非对象 ⇒ None（索引是别名，坏文件等同缺失）。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def _bc_index_target(jd: Path) -> tuple[str, int] | None:
+    """从 job manifest 取 `(course_key, it)`；不是 BC job / 旧 manifest 缺键 ⇒ None。"""
+    m = _read_json_dict(jd / "manifest.json")
+    if not isinstance(m, dict) or str(m.get("kind", "")) != "bc":
+        return None
+    key = _safe_course_key(m.get("course_key"))
+    it = m.get("it")
+    if not key or not isinstance(it, int) or isinstance(it, bool) or it < 1:
+        return None
+    return key, it
+
+
+def _bc_index_path(jd: Path, course_key: str, it: int) -> Path:
+    return Path(jd).parent / BC_COURSE_INDEX_DIR / course_key / f"{int(it)}.json"
+
+
+def _write_bc_course_index(
+    jd: Path, target: tuple[str, int], body: dict, epoch: int
+) -> None:
+    """原子覆盖课程级索引；旧 epoch（迟到的补发）**不得倒回**。调用方已持 `_lock`。"""
+    path = _bc_index_path(jd, target[0], target[1])
+    prev = _read_json_dict(path)
+    prev_epoch = int(prev.get("epoch", 0) or 0) if isinstance(prev, dict) else 0
+    if int(epoch) < prev_epoch:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (path.name + ".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
 
 def _bc_metric_rows(jd: Path) -> list[dict]:
     """读该 job 已有的 `bc-metrics.jsonl` 行（坏行跳过；文件不在 ⇒ []）。"""
@@ -125,6 +186,10 @@ class ResultsMixin:
 
     BC_METRICS_NAME = "bc-metrics.jsonl"
 
+    #: 每 epoch 的**不可变权重快照**（#12）：`epoch-weights/ep{N}.json`。
+    #: `bc-resume.json` 仍只留最新一份（续训权威）；这里是给人/评估/对照用的历史。
+    BC_EPOCH_WEIGHTS_DIR = "epoch-weights"
+
     #: epoch POST 体上限（weights ~0.5MB b64 后 ~0.7MB；4MB 已极宽裕）
     BC_EPOCH_BODY_MAX = 4 * 1024 * 1024
 
@@ -148,28 +213,81 @@ class ResultsMixin:
                 return False
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)
-            prev = self.get_bc_resume(job_id)
+            target = _bc_index_target(jd)
+            # 每 epoch 快照与 resume 覆盖**解耦**：迟到的旧 epoch 虽然不回倒 resume，
+            # 仍要按自己的名字留下快照（历史不该被吞）；同 epoch 重发原子覆盖同名文件。
+            snap = jd / self.BC_EPOCH_WEIGHTS_DIR / f"ep{int(epoch)}.json"
+            snap.parent.mkdir(parents=True, exist_ok=True)
+            snap_tmp = snap.parent / (snap.name + ".tmp")
+            snap_tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
+            os.replace(snap_tmp, snap)
+            # 只拿**本 job** 的旧 resume 做「不倒回」判据；不能走 get_bc_resume（它会在 per-job
+            # 缺失时回退课程索引，导致新 job 的 ep1 被旧课程的 ep40 挡住、永远不落盘）。
+            prev = _read_json_dict(jd / self.BC_RESUME_NAME)
             prev_epoch = int(prev.get("epoch", 0) or 0) if isinstance(prev, dict) else 0
             if epoch >= prev_epoch:
                 # 原子覆盖：tmp + replace——中断的 POST 不留半截 resume
                 tmp = jd / (self.BC_RESUME_NAME + ".tmp")
                 tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
                 os.replace(tmp, jd / self.BC_RESUME_NAME)
+                if target is not None:
+                    _write_bc_course_index(jd, target, body, epoch)
             metrics = body.get("metrics")
             if isinstance(metrics, dict):
                 _append_bc_metric_row(jd, epoch, metrics, self._now())
             return True
 
     def get_bc_resume(self, job_id: str) -> dict | None:
-        p = self._job_dir(job_id) / self.BC_RESUME_NAME
-        if not p.exists():
+        """本 job 的 resume；缺失时回退到课程级 `(course_key, it)` 索引。
+
+        重开（预算 40→80）会发布新 jid，而新 job 自己没有历史 resume；索引让 worker 仍能从
+        ep40 接续。per-jid 文件存在时**永远优先**（索引只是别名，不改变同 jid 语义）。
+        """
+        jd = self._job_dir(job_id)
+        loaded = _read_json_dict(jd / self.BC_RESUME_NAME)
+        if loaded is not None:
+            return loaded
+        target = _bc_index_target(jd)
+        if target is None:
             return None
-        try:
-            with open(p, encoding="utf-8") as f:
-                loaded = json.load(f)
-                return loaded if isinstance(loaded, dict) else None
-        except (OSError, ValueError):
-            return None
+        return _read_json_dict(_bc_index_path(jd, target[0], target[1]))
+
+    def clear_bc_course_index(self, course: str) -> int:
+        """删除课程级 `(course,it)` 续训索引（#8 控制台「清空进度」）。
+
+        只删索引**别名**，不碰 per-jid `bc-resume.json`、`epoch-weights/`、账本或归档权重。
+        在跑 job 的下一次 epoch 回传仍会重建索引（所以调用方应先暂停课程）。
+        返回删掉的轮次文件数（课程没有索引 ⇒ 0，幂等）；课程键非法 ⇒ ValueError。
+        """
+        key = _safe_course_key(course)
+        if not key:
+            raise ValueError(f"非法课程键 {course!r}")
+        # `_job_dir(<任一 jid>)` 的父目录 = job 根（`<job_root>/<jid>`）。
+        root = Path(self._job_dir("_probe_")).parent / BC_COURSE_INDEX_DIR / key
+        with self._lock:
+            if not root.is_dir():
+                return 0
+            removed = 0
+            for p in list(root.glob("*.json")) + list(root.glob("*.json.tmp")):
+                try:
+                    p.unlink()
+                except OSError:
+                    continue
+                if p.name.endswith(".json"):
+                    removed += 1
+            try:
+                root.rmdir()
+            except OSError:
+                pass  # 还有别的文件（异常残留）就留着，别为清理把目录强删
+            return removed
 
     def get_bc_metrics(self, job_id: str) -> list[dict]:
         return _bc_metric_rows(self._job_dir(job_id))
+
+    def get_bc_epoch_weights(self, job_id: str, epoch: int) -> dict | None:
+        """按 epoch 取不可变快照（#12）；旧 job / 尚未回传 / 非法 epoch ⇒ None。"""
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+            return None
+        return _read_json_dict(
+            self._job_dir(job_id) / self.BC_EPOCH_WEIGHTS_DIR / f"ep{int(epoch)}.json"
+        )

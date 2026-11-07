@@ -546,15 +546,16 @@ def run_job(
             "本 worker 拒收这份活。"
         )
 
-    # ---- PPO 后端（2026-10-27，Paddle 双生）：**节点本地能力开关**，hub 不可见（用户口径②）----
-    # paddle 后端只跑 kind=ppo（迁移范围 = 只 PPO）：BC / 节点侧 rollout 仍是 torch/bun 语义。
-    # 在**任何下载之前**拒单 —— 别让 AI Studio 机器传完 payload 才炸 "No module named torch"。
-    # 载荷是**入参**（`--backend` 一路传下来）；空串 = auto（看本机，torch 优先，逐字节旧行为）。
+    # ---- 训练后端（2026-10-27，Paddle 双生）：**节点本地能力开关**，hub 不可见（用户口径②）----
+    # 2026-11-06（BC #10）：Paddle 后端现在跑 kind=ppo + kind=bc；节点侧 rollout 仍是
+    # torch/bun 语义。在**任何下载之前**拒单 —— 别让 AI Studio 机器传完 payload 才炸
+    # "No module named torch"。载荷是**入参**（`--backend` 一路传下来）；空串 = auto
+    # （看本机，torch 优先，逐字节旧行为）。
     backend = resolve_ppo_backend(backend)
-    if backend == "paddle" and str(manifest["kind"]) != "ppo":
+    if backend == "paddle" and str(manifest["kind"]) not in ("ppo", "bc"):
         raise ProtocolError(
-            f"job {jid}: 本 worker 是 Paddle 后端，只跑 kind=ppo；这份活是 "
-            f"kind={manifest['kind']}——拒收（BC/rollout 仍是 torch/bun 语义）"
+            f"job {jid}: 本 worker 是 Paddle 后端，只跑 kind=ppo/bc；这份活是 "
+            f"kind={manifest['kind']}——拒收（节点侧 rollout 仍是 torch/bun 语义）"
         )
 
     # ---- 结果复用（2026-09-05）：上次已算完但回传失败 → 本地缓存直接重传，不重算 PPO ----
@@ -670,7 +671,7 @@ def run_job(
             echo=echo,
             base_url=base_url,
             token=token,
-            lease_token=lease_token,
+            lease_token=lease_token, backend=backend,
             log=log,
         )
 

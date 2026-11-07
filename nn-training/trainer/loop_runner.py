@@ -160,7 +160,10 @@ class LoopRunner:
         hook = getattr(self.loop, "ledger_next_it", None)
         if callable(hook):
             try:
-                return max(int(hook(fallback)), int(fallback))
+                # **不能**再与队列指针取 max：预算扩大（40→80）时账本会故意回到最后一个
+                # 已完成轮（如 it1），而队列指针可能已经是 it2——取 max 正好把重开轮夹掉。
+                # 类内 docstring 已把指针语义归引擎，这里信任钩子（RL 无此钩子，走下面）。
+                return max(1, int(hook(fallback)))
             except Exception:  # 同上：读盘失败不得卡住调度
                 return int(fallback)
         try:

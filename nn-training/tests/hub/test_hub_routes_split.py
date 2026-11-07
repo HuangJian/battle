@@ -9,7 +9,7 @@
 ```
 HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes, BaseHTTPRequestHandler)
     schedule   取活/租约/打点：peek · priority · claim · start · ready · abandon · heartbeat · release
-    result     回传与终局：result(POST) · fail · status · result(GET) · epoch · resume · bc-metrics
+    result     回传与终局：result(POST) · fail · status · result(GET) · epoch · resume · bc-metrics · epoch-weights
     blob       字节服务：payload · code · ts_code · blob · shared_code
     offline    离线段：task-pack · resume · resume_blob · artifact · result
 ```
@@ -96,6 +96,7 @@ MIXINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "_post_bc_epoch",
             "_get_bc_resume",
             "_get_bc_metrics",
+            "_get_bc_epoch_weights",
         ),
     ),
     "blob": (
@@ -181,7 +182,7 @@ def test_every_route_method_lives_in_its_mixin() -> None:
         assert missing == [], f"{mod}.py::{cls.__name__} 少了 {missing}"
         crept_back = sorted(set(methods) & defined_here)
         assert crept_back == [], f"这些方法又回到 HubHandler 了：{crept_back}"
-    assert len(ROUTE_METHODS) == 25, len(ROUTE_METHODS)
+    assert len(ROUTE_METHODS) == 26, len(ROUTE_METHODS)
 
 
 def test_the_mixins_are_actually_wired_into_the_handler() -> None:

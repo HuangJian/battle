@@ -1,14 +1,16 @@
 """biz/bc_dispatch.py — BC 语料 LAN 集群派发（plan/bc-cloud-integration.plan.md §5）。
 
-把 (stage, seed) 语料任务分派给启用的 LAN 采样节点（`/v1/task ?mode=bc`），节点侧
-跑 God-AI 教师单局（tools/sim/export-godai-bc.ts）并回传 BCV2 容器；训练机校验后
-落盘 `<data_dir>/it{it}/bc_s{stage}_seed{seed}/`（npy + manifest，含 course_fp/
-corpus_fp 血缘）。
+把 (stage, seed) 语料任务分派给启用的 LAN 采样节点：legacy `mode=bc` 跑 God-AI 教师
+（tools/sim/export-godai-bc.ts），v6 `mode=bc-v6` 跑策略导出器
+（tools/sim/export-rl-rollout.ts + 可选 --teacher-argmax）；训练机校验后落盘
+`<data_dir>/it{it}/bc_s{stage}_seed{seed}/`（npy + manifest，含 course_fp/corpus_fp 血缘）。
 
 与 RL dispatch.py 的差异（刻意精简）：
   - 无竞速：每个 (stage, seed) 任务归一个节点槽位独占（语料不需要最快者胜）；
-  - 无 wver 权重切换（教师自对弈不依赖策略权重，wver 恒 BC_WVER）；
-  - wins-only 败局（manifest.kept=false 空容器）是**合法结果**，计 loss_skipped；
+  - legacy 无 wver 权重语义（wver 恒 BC_WVER）；v6 先经 `/v1/weights` 下发
+    visibility `corpus.label_policy`（wver=文件 sha256），再用同一 sha 派局；
+  - wins-only：legacy 败局是 kept=false 空容器；v6 在落盘前按
+    `manifest.outcome == stage_clear` 过滤（败局不落盘）；
   - 局失败（DistError）重试一次（可能换节点），再败计 failed 由调用方决断。
 
 torch-free / stdlib-only。
@@ -26,13 +28,17 @@ from typing import Any
 import common.distribution
 from common.distribution import (
     BC_MODE,
+    BC_V6_MODE,
     BC_WVER,
     fetch_task,
     load_dist_config,
     node_ping,
+    post_weights_parallel,
     validate_result,
     write_shard,
 )
+from common.hashing import sha256_file
+from worker.bc_outcome import classify_outcome
 
 #: 熔断后队列暂空时的让位轮询步长（秒）——与 `tripped_idle_polls` 相乘 = 等待总预算。
 TRIPPED_IDLE_STEP_SEC = 0.05
@@ -42,11 +48,14 @@ class BcDispatchError(RuntimeError):
     """BC 语料派发失败（无可用节点 / 任务彻底失败）。"""
 
 
-def bc_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
-    """启用且 ping 报告 bcSupport 的节点（旧 agent 缺能力位 → 不派——fail-closed，
+def bc_capable_nodes(
+    cfg: dict | None, log=lambda msg: None, *, action_v6: bool = False
+) -> list[dict]:
+    """启用且 ping 报告对应 BC 能力位的节点（旧 agent 缺能力位 → 不派——fail-closed，
     与 stageJsonSupport 同规：旧 agent 会把不认识的 mode 静默跑成默认 rollout，
-    数据污染绝不容忍）。"""
+    数据污染绝不容忍）。v6 额外要求 `bcV6Support`（它要策略权重，旧 BC 节点没有）。"""
     out: list[dict] = []
+    cap = "bcV6Support" if action_v6 else "bcSupport"
     for n in (cfg or {}).get("nodes", []):
         if not n.get("enabled", True):
             continue
@@ -54,14 +63,37 @@ def bc_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
         if ping is None:
             log(f"[bc-dispatch] node {n.get('id') or n.get('url')} unreachable — skip")
             continue
-        if not ping.get("bcSupport"):
+        if not ping.get(cap):
             log(
-                f"[bc-dispatch] node {n.get('id') or n.get('url')} 无 bcSupport 能力位"
+                f"[bc-dispatch] node {n.get('id') or n.get('url')} 无 {cap} 能力位"
                 "（旧 agent）—— skip（/v1/update 升级后自动纳入）"
             )
             continue
         out.append(n)
     return out
+
+
+def _require_v6_label_weights(path: Path) -> None:
+    """标签策略必须是 v6 三头权重：legacy 5/2 权重会采出 7 宽 shard，训练端必炸。
+
+    判据与 TS 运行时同源（`hold_head.weight` 存在 = v6）；`arch.actionV6` 也认，
+    兼容 arch 元数据与文件参数不同步的旧 v6 权重。只读 JSON 清单，不解码张量。
+    """
+    from worker.data.weights_meta import read_weights_meta
+
+    try:
+        meta = read_weights_meta(str(path))
+    except (OSError, ValueError) as e:
+        raise BcDispatchError(f"label_policy 不是可读的 nn-weights-json：{path}：{e}") from e
+    arch_raw = meta.get("arch")
+    params_raw = meta.get("params")
+    arch: dict = arch_raw if isinstance(arch_raw, dict) else {}
+    params: dict = params_raw if isinstance(params_raw, dict) else {}
+    if not (bool(arch.get("actionV6")) or "hold_head.weight" in params):
+        raise BcDispatchError(
+            "label_policy 是 legacy 5/2 权重（无 hold_head.weight / actionV6）——"
+            "v6 采集必须用三头 v6 权重"
+        )
 
 
 def dispatch_bc_corpus(
@@ -83,6 +115,12 @@ def dispatch_bc_corpus(
     max_slots: int = 64,
     task_timeout_sec: float = 600.0,
     iter_suffix: str = "",
+    #: v6 三头采集：节点跑 `export-rl-rollout`（策略权重 + 可选 --teacher-argmax）。
+    action_v6: bool = False,
+    #: v6 标签策略权重路径（仓库根相对或绝对）；v6 采集必填，sha 进 manifest/缓存键。
+    label_policy_path: str = "",
+    #: v6 标签来源（argmax/sampled）；只影响节点参数与 taskKey，已进 corpus_fp。
+    label_mode: str = "argmax",
     #: 节点熔断阈值（同一节点连续 N 次「真失败」后本轮摘掉它，任务改派其它节点）。
     #: 0 = 关闭。2026-09-14 事故：mac 节点胜局一律崩（17 局全废），训练直接
     #: BcDispatchError 挂掉——有熔断则 3 次就摘掉它，剩余任务重排给健康节点。
@@ -107,22 +145,60 @@ def dispatch_bc_corpus(
     （2026-09-13 实测：smoke 两次跑同 iterId，第二次直接回放上一次的 loss-skipped）。
     """
     if not tasks:
-        return {"games": 0, "kept": 0, "loss_skipped": 0, "failed": 0, "nodes": 0}
+        return {
+            "games": 0,
+            "kept": 0,
+            "loss_skipped": 0,
+            "invalid_skipped": 0,
+            "failed": 0,
+            "nodes": 0,
+        }
+    if action_v6 and label_mode not in ("argmax", "sampled"):
+        raise BcDispatchError(f"label_mode 非法：{label_mode!r}（只认 argmax/sampled）")
+    label_bytes = b""
+    label_fp = ""
+    if action_v6:
+        if not label_policy_path:
+            raise BcDispatchError("v6 采集必须提供 label_policy 权重路径")
+        policy_file = Path(label_policy_path)
+        if not policy_file.is_file():
+            raise BcDispatchError(f"label_policy 权重不存在：{label_policy_path}")
+        _require_v6_label_weights(policy_file)
+        label_bytes = policy_file.read_bytes()
+        label_fp = sha256_file(policy_file)
     if nodes is None:
-        nodes = bc_capable_nodes(cfg if cfg is not None else load_dist_config(), log=log)
-    if not nodes:
-        raise BcDispatchError(
-            "无可用 bc 语料节点（enabled + bcSupport）——检查 rl-config nodes 与节点"
-            " agent 版本（/v1/ping 需报 bcSupport:true）"
+        nodes = bc_capable_nodes(
+            cfg if cfg is not None else load_dist_config(), log=log, action_v6=action_v6
         )
+    if not nodes:
+        cap = "bcV6Support" if action_v6 else "bcSupport"
+        raise BcDispatchError(
+            f"无可用 bc 语料节点（enabled + {cap}）——检查 rl-config nodes 与节点"
+            f" agent 版本（/v1/ping 需报 {cap}:true）"
+        )
+    iter_id = f"bc-it{it}-{str(corpus_fp)[:12]}{iter_suffix}"
+    if action_v6:
+        # 标签权重走既有 /v1/weights 协议（kind=rollout，按 sha 内容寻址）；先下发再派局，
+        # 节点 `/v1/task ?mode=bc-v6` 只接受已缓存的 wver（409 由 dispatch 重试兜底）。
+        alive = post_weights_parallel(
+            nodes,
+            iter_id=iter_id,
+            wver=label_fp,
+            weights_bytes=label_bytes,
+            timeout=120.0,
+            kind="rollout",
+            log=log,
+        )
+        if not alive:
+            raise BcDispatchError("label_policy 权重下发失败：无可用节点")
+        nodes = alive
+
     slots: list[tuple[dict, int]] = []
     for n in nodes:
         for i in range(max(1, int(n.get("concurrency", 1) or 1))):
             slots.append((n, i))
     if len(slots) > max_slots:
         slots = slots[:max_slots]
-
-    iter_id = f"bc-it{it}-{str(corpus_fp)[:12]}{iter_suffix}"
     work: queue.Queue = queue.Queue()
     for task in tasks:
         work.put(task)
@@ -132,6 +208,7 @@ def dispatch_bc_corpus(
         "games": 0,
         "kept": 0,
         "loss_skipped": 0,
+        "invalid_skipped": 0,
         "failed": 0,
         "nodes": len(nodes),
     }
@@ -189,33 +266,49 @@ def dispatch_bc_corpus(
                         url,
                         auth,
                         iter_id=iter_id,
-                        wver=BC_WVER,
+                        wver=label_fp if action_v6 else BC_WVER,
                         stage=stage,
                         seed=seed,
                         max_ticks=max_ticks,
                         difficulty=difficulty,
                         timeout=task_timeout_sec,
-                        mode=BC_MODE,
+                        mode=BC_V6_MODE if action_v6 else BC_MODE,
                         stage_json=stage_json_for(stage) or "",
                         lives_override=lives_override,
                         player_level=player_level,
                         course_fp=course_fp,
-                        wins=(1 if wins_only else 0),
-                        near_miss_times=near_miss_times,
+                        wins=None if action_v6 else (1 if wins_only else 0),
+                        near_miss_times=None if action_v6 else near_miss_times,
+                        label_mode=label_mode if action_v6 else "",
                     )
                     reason = validate_result(
-                        manifest, files, BC_WVER, {(stage, seed)}, seen_keys
+                        manifest, files, label_fp if action_v6 else BC_WVER, {(stage, seed)}, seen_keys
                     )
                     if reason:
                         raise common.distribution.DistError(0, f"validate: {reason}")
                     with lock:
                         stats["games"] += 1
-                    if manifest.get("kept") is False:
+                    skip_reason = ""
+                    if action_v6:
+                        # v6 没有 God 教师的 kept 标记：按 manifest.outcome 判定。
+                        # error/aborted = 无效样本，无论 all/ratio/wins-only 都不落盘。
+                        outcome_class = classify_outcome(manifest)
+                        if outcome_class is None:
+                            skip_reason = "invalid"
+                        elif wins_only and outcome_class != "win":
+                            skip_reason = "wins-only"
+                    elif manifest.get("kept") is False:
+                        skip_reason = "wins-only"
+                    if skip_reason:
                         with lock:
-                            stats["loss_skipped"] += 1
+                            if skip_reason == "invalid":
+                                stats["invalid_skipped"] += 1
+                            else:
+                                stats["loss_skipped"] += 1
+                            seen_keys.add((stage, seed))
                         log(
-                            f"[bc-dispatch] {nid} s{stage} seed{seed}: loss-skipped"
-                            "（wins-only）"
+                            f"[bc-dispatch] {nid} s{stage} seed{seed}: skip"
+                            f"（{skip_reason} outcome={manifest.get('outcome')!r}）"
                         )
                     else:
                         shard_dir = Path(out_dir) / f"bc_s{stage}_seed{seed}"
@@ -223,6 +316,10 @@ def dispatch_bc_corpus(
                         manifest["course_fp"] = course_fp
                         manifest["corpus_fp"] = corpus_fp
                         manifest["it"] = int(it)
+                        if action_v6:
+                            # 审计/加载端可查；同时让“换标签模式/权重”在 shard 层可见。
+                            manifest["label_mode"] = label_mode
+                            manifest["label_policy_fp"] = label_fp
                         write_shard(files, manifest, str(shard_dir))
                         with lock:
                             stats["kept"] += 1
@@ -309,7 +406,8 @@ def dispatch_bc_corpus(
         )
     log(
         f"[bc-dispatch] round it{it} done in {stats['elapsed_sec']}s: games={stats['games']} "
-        f"kept={stats['kept']} loss_skipped={stats['loss_skipped']} failed={stats['failed']} "
+        f"kept={stats['kept']} loss_skipped={stats['loss_skipped']} "
+        f"invalid_skipped={stats['invalid_skipped']} failed={stats['failed']} "
         f"nodes={stats['nodes']}"
         + (f" tripped={'、'.join(stats['failed_nodes'])}" if tripped else "")
     )
