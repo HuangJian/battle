@@ -401,6 +401,28 @@ def build_factory(
     return factory
 
 
+def _ensure_course_lock(rt: CourseRuntime) -> bool:
+    """跑课前重取本课锁（2026-11-07 用户口径：控制台停课会删本课锁）。
+
+    停课删锁后，恢复/重开走内存表（`sup.resume` / `_revive_aborted`）**不重取锁**——没有
+    这道闸，该课就无锁裸跑（冒烟腿 / BC 一次性腿可与它双开写同一批 traj）。这里在每一步
+    执行前补取：本进程已持有 ⇒ 零写盘；缺失/陈旧 ⇒ 接管重取；别的**活**进程持有 ⇒ False
+    （调用方按 `SKIP_KIND_LOCK` 下线，持有者死后判据变 ⇒ 自动复活）。`acquire_lock` 的
+    fail-closed/fail-open 语义原样复用（`common.instance_lock`），不另写一套窗口规则。
+    """
+    from common.instance_lock import read_lock
+
+    if not rt.lock_path:
+        return True
+    holder, _exe, _ts = read_lock(rt.lock_path)
+    if holder == os.getpid():
+        return True
+    if not acquire_lock(rt.lock_path, tag=f"serve:{rt.course}"):
+        return False
+    log(f"[serve] 课程 {rt.course}：本课锁缺失/陈旧——已重新取锁 {rt.lock_path}")
+    return True
+
+
 def build_executor(
     pool: EnginePool,
     runtimes: dict[str, CourseRuntime],
@@ -426,6 +448,15 @@ def build_executor(
         engine = pool.get(task.course)
         ensure_ready(rt, engine)
         with prefix_scope(task.course):
+            if not _ensure_course_lock(rt):
+                detail = (
+                    f"本课锁被别的实例持有（{rt.lock_path}）——该课下线，锁释放后自动复活"
+                )
+                log(f"[serve] 课程 {task.course}：{detail}")
+                if report is not None:
+                    _record_skip(report, task.course, SKIP_KIND_LOCK, detail, traj_root)
+                    report.failures[task.course] = detail
+                return abort(detail)
             try:
                 assert rt.runner is not None  # factory 保证
                 return rt.runner.executor(task, queue)

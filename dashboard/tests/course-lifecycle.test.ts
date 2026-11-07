@@ -23,7 +23,15 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -421,6 +429,72 @@ describe('stopCourse：非破坏停课（暂停意图 + 删开课标记；★M4 
 
   it('空课程 ⇒ 拒绝（停课是按课程记的）', async () => {
     await expect(stopCourse('')).rejects.toThrow(/需要课程/)
+  })
+})
+
+// ────────────────────────── ③″ 停课清锁（2026-11-07 用户口径） ──────────────────────────
+//
+// nn-training 下积了上百个 `.run_rl.<课>.lock`：共享 trainer 只在进程退出时放锁（被强杀就
+// 永久残留），而停课原先只删开课标记 + 写暂停意图，不碰锁。用户口径：停课顺手清本课锁。
+// 活锁按身份分流：共享 trainer 自己握的（正常持有 ⇒ 删，serve 跑课前有重取闸兜底）vs
+// 别的活进程握的（不动，fail-closed）。进程级锁（run_cluster）不属于本课，一律不动。
+
+describe('stopCourse：停课顺手清本课锁', () => {
+  it('陈旧锁（持有者已死）⇒ 删锁 + 回执点名', async () => {
+    writeLock('run_rl', COURSE, 999_999_999)
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    expect(existsSync(path.join(LOCKS, `.run_rl.${COURSE}.lock`))).toBe(false)
+    expect(r.detail!.join('\n')).toContain('陈旧锁')
+  })
+
+  it('共享 trainer 正常持有（holder == cluster）⇒ 删锁；进程级锁不动', async () => {
+    writeLock('run_rl', COURSE, process.pid)
+    writeLock('run_cluster', '', process.pid)
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    expect(existsSync(path.join(LOCKS, `.run_rl.${COURSE}.lock`))).toBe(false)
+    expect(existsSync(path.join(LOCKS, '.run_cluster.lock'))).toBe(true)
+    expect(r.detail!.join('\n')).toContain('重新取锁')
+  })
+
+  it('别的活进程持有（holder ≠ cluster）⇒ 不动 + 点名（fail-closed）', async () => {
+    writeLock('run_rl', COURSE, process.pid) // 无 cluster 锁 ⇒ 外来 runner
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    expect(existsSync(path.join(LOCKS, `.run_rl.${COURSE}.lock`))).toBe(true)
+    expect(r.detail!.join('\n')).toContain('未动')
+  })
+
+  it('BC 课清 run_bc 锁；别课与进程级陈旧锁不受影响', async () => {
+    writeLock('run_bc', BC_COURSE, 999_999_999)
+    writeLock('run_rl', COURSE, 999_999_999)
+    writeLock('run_cluster', '', 999_999_999)
+    const r = await stopCourse(BC_COURSE)
+    expect(r.ok).toBe(true)
+    expect(existsSync(path.join(LOCKS, `.run_bc.${BC_COURSE}.lock`))).toBe(false)
+    expect(existsSync(path.join(LOCKS, `.run_rl.${COURSE}.lock`))).toBe(true)
+    expect(existsSync(path.join(LOCKS, '.run_cluster.lock'))).toBe(true)
+  })
+
+  it('残缺且刚创建（别人的写入窗口）⇒ 不动（fail-closed）；够旧的残缺锁 ⇒ 删', async () => {
+    const lockPath = path.join(LOCKS, `.run_rl.${COURSE}.lock`)
+    writeFileSync(lockPath, '', 'utf-8') // 空文件 = `O_CREAT|O_EXCL` 与写 PID 之间的窗口
+    const fresh = await stopCourse(COURSE)
+    expect(existsSync(lockPath)).toBe(true)
+    expect(fresh.detail!.join('\n')).toContain('写入窗口')
+
+    const past = new Date(Date.now() - 3_600_000)
+    utimesSync(lockPath, past, past) // 够旧的残缺残留 = 崩溃残留，按陈旧锁清理
+    const old = await stopCourse(COURSE)
+    expect(existsSync(lockPath)).toBe(false)
+    expect(old.detail!.join('\n')).toContain('陈旧锁')
+  })
+
+  it('无锁 ⇒ 回执无锁噪音', async () => {
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    expect(r.detail!.join('\n')).not.toContain('.lock')
   })
 })
 

@@ -8,6 +8,37 @@
 
 ---
 
+## §70 控制台停课顺手清本课锁 + serve 跑课前重取闸（2026-11-07）
+
+**背景**：`nn-training/` 积了 ~101 个 `.lock`（其中 90 个持有者已死的陈旧锁）。成因：共享
+trainer 只在**进程退出**（atexit）释放按课锁——停课/换课都不释放，硬杀则留下死锁；而
+`stopCourse` 从不碰锁。用户口径：首页点停课时清掉对应课程的锁。**单向删锁不安全**：停课删锁后，
+恢复/重开走内存表（`sup.resume` / `_revive_aborted`）**不重取锁** ⇒ 该课无锁裸跑（冒烟腿 /
+BC 一次性腿可与它双开写同一批 traj）。故「删 + 跑课前重取闸」成对落地。
+
+**实现**
+- `dashboard/src/server/actions/course-lifecycle.ts::pruneStoppedCourseLocks`：停课写暂停意图后，
+  对本文课的 `run_rl` / `run_bc` 锁逐一裁决——持有者已死/不可解析 ⇒ 删（陈旧）；持有者 ==
+  `run_cluster` 持有人（共享 trainer 的正常持有）⇒ 删（跑课前由下面的闸重取）；**别的活进程**
+  持有 ⇒ 一个字不动 + 回执点名（fail-closed，停掉它或确认已死后人工删）。best-effort，不影响
+  暂停意图的结果。
+- `nn-training/trainer/loop_serve.py::_ensure_course_lock`（接在 `build_executor.execute` 的
+  `prefix_scope` 内、每步执行前）：本进程已持有 ⇒ 零写盘；缺失/陈旧 ⇒ `acquire_lock` 接管重取；
+  别的**活**进程持有 ⇒ 该课 ABORT + 按 `SKIP_KIND_LOCK` 记账（锁签名判据，持有者死 ⇒ 自动复活）。
+  复用 `common.instance_lock` 的 fail-closed/fail-open 语义（残缺且新鲜的写入窗口仍拒启），不另写窗口规则。
+- 一次性存量清理：按「持有者死才删」删 90 个；保留 9 个活持有者锁（hub 18196 / trainer 10084 ×5 /
+  runner 15220 ×3）与 `uv.lock`（依赖锁，不是 PID 锁）。
+
+**验证**
+- 新增 `test_serve_course_lock.py`（4 例）：缺失⇒重取（写回本进程 pid）/ 自有⇒零写盘（mtime 不变）/
+  陈旧⇒接管 / 别的活进程⇒ABORT+LOCK 记账+锁不动，持有者死⇒`reopenable_skipped` 复活。
+- dashboard `course-lifecycle.test.ts` 新增 5 例（陈旧/共享 trainer/外活进程/BC/无锁），全文件
+  39 pass；dashboard 全量 1959 pass / 0 fail，typecheck 462 files 干净。
+- nn `tests/trainer/` 全量 **765 pass**（含 55 例既有 serve 回归）；根 `bun run check`
+  2672 pass / 11 skip / 0 fail。
+
+---
+
 ## §69 BC 交付权重改按滑动平均 val_loss 选（2026-11-07）
 
 **背景**（plan `bc-single-course` §16.8 #2 / B1 残余）：`delivered_epoch` 已入账，但 `best_state`

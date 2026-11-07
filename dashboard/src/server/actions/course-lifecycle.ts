@@ -20,6 +20,8 @@
  *      ★ 2026-10-02（用户口径）：顺手清理本课已无信息量的 rl-config 残留
  *      （`rollout_src='local'` 缺省档 + 空节点整条删；`pruneStoppedCourseConfig`），
  *      显式 `node`/`auto`/`run` 一个字不动。
+ *      ★ 2026-11-07（用户口径）：顺手清本课锁（`pruneStoppedCourseLocks`）——死锁/共享
+ *      trainer 正常持有 ⇒ 删，别的活进程持有 ⇒ 不动；serve 跑课前重取闸兜底裸跑窗口。
  *
  *  ★M4（2026-10-07，plan/worker-type-dispatch-model §3-M4）：**课程不再区分在线/离线**——
  *  开课不接受 `trainMode`（弹窗那格已删）、停课也不再推 hub（那边没有模式可推）。
@@ -27,11 +29,20 @@
  *  掉线 900s 自动解除），开课弹窗只剩 rollout 位置这一把活旋钮。
  */
 
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs'
 import path from 'path'
 import { loadConfig, saveConfig } from '../../core/config'
 import { curriculaDir, REPO_ROOT, tmpLogsDir } from '../../core/paths'
-import { validateCourseName } from '../../core/slots'
+import { type LockKind, lockName, lockPathFor, validateCourseName } from '../../core/slots'
 import type { CourseConf, RolloutSrcMode } from '../../core/types'
 import {
   COURSE_ENABLE_MARKER,
@@ -421,6 +432,68 @@ export async function releaseCourseHold(course: string): Promise<ActionResult> {
   return done(false, `${c} 未能解除接管：${last}`)
 }
 
+/** 残缺锁的写入窗口宽限（毫秒）：与 `common/instance_lock.PARTIAL_LOCK_GRACE_SEC` 同值。
+ *  `O_CREAT|O_EXCL` 与写 PID 是两次系统调用，中间文件是空的；删掉它就是把先行者的锁抢走
+ *  （2026-10-11 事故）⇒ 解析不出持有者且比这还新时 fail-closed。 */
+const PARTIAL_LOCK_GRACE_MS = 30_000
+
+/** 锁文件里**已写下**的 PID（解析不出 ⇒ null）。`runRlLockHolder` 把「已死」与「还没写」
+ *  都读成 null，删锁前必须区分：后者可能是另一个进程刚创建还没写盘的锁。 */
+function parseLockPid(lockPath: string): number | null {
+  try {
+    const pid = Number.parseInt((readFileSync(lockPath, 'utf-8').split('|')[0] ?? '').trim(), 10)
+    return Number.isInteger(pid) && pid > 0 ? pid : null
+  } catch {
+    return null
+  }
+}
+
+/** 停课顺手清本课锁（2026-11-07 用户口径）：`.run_rl.<课>.lock` / `.run_bc.<课>.lock`。
+ *
+ *  背景：共享 trainer 只在进程退出时放按课锁（被强杀就永久残留），nn-training 下积了上百个
+ *  死锁；停课原先只删开课标记 + 写暂停意图，不碰锁。这里按身份分流：
+ *    · 持有者已死/不可解析（且不是别人的写入窗口）⇒ 陈旧锁，删；
+ *    · 持有者 == 共享 trainer（进程级锁持有人）⇒ 正常持有，删——serve 跑课前有重取闸
+ *      （`loop_serve._ensure_course_lock`）兜底，重开/恢复时它会重新取锁，不会无锁裸跑；
+ *    · 持有者是别的活进程 ⇒ 不动（fail-closed：可能是按课 runner / PID 复用，交人工确认）。
+ *  进程级锁（run_cluster/hub）不属于本课，一律不碰。返回人读说明（无锁 ⇒ 空）。
+ */
+function pruneStoppedCourseLocks(course: string): string[] {
+  const notes: string[] = []
+  const cluster = runClusterLockHolder()
+  for (const kind of ['run_rl', 'run_bc'] as LockKind[]) {
+    const lockPath = lockPathFor(course, kind)
+    if (!existsSync(lockPath)) continue
+    const name = lockName(course, kind)
+    const holder = kind === 'run_bc' ? runBcLockHolder(course) : runRlLockHolder(course)
+    if (holder !== null && holder !== cluster) {
+      notes.push(`本课锁 ${name} 由另一进程 PID ${holder} 持有，未动（停掉它或确认已死后人工删除）`)
+      continue
+    }
+    if (holder !== null) {
+      rmSync(lockPath, { force: true })
+      notes.push(
+        `已释放本课锁 ${name}（共享 trainer PID ${holder} 的正常持有；重开/恢复时它跑课前会重新取锁）`,
+      )
+      continue
+    }
+    // 无活持有者：已写下 PID（必然已死）⇒ 陈旧锁；解析不出且刚创建 ⇒ 可能是别人的写入窗口。
+    let ageMs = 0
+    try {
+      ageMs = Date.now() - statSync(lockPath).mtimeMs
+    } catch {
+      continue // 裁决期间被持有人自己释放了：没有可清的东西
+    }
+    if (parseLockPid(lockPath) === null && ageMs < PARTIAL_LOCK_GRACE_MS) {
+      notes.push(`本课锁 ${name} 无持有者且刚创建，疑似写入窗口，未动（稍后再停一次即可清理）`)
+      continue
+    }
+    rmSync(lockPath, { force: true })
+    notes.push(`已清理陈旧锁 ${name}（持有者已死/不可解析）`)
+  }
+  return notes
+}
+
 export async function stopCourse(course: string): Promise<ActionResult> {
   guard(`course-stop:${course}`)
   try {
@@ -438,6 +511,8 @@ export async function stopCourse(course: string): Promise<ActionResult> {
     rmSync(marker, { force: true })
     // ② 暂停意图（表内暂停，双保险：万一标记被手工建回来/还在旧进程的内存表里）
     const pause = setCoursePaused(c, true)
+    // ③ 清本课锁（2026-11-07 用户口径）：死锁/共享 trainer 正常持有 ⇒ 删；别的活进程 ⇒ 不动。
+    const lockNotes = pruneStoppedCourseLocks(c)
     // ★M4：原来的第 ③ 步「hub 该课置 offline」已删（hub 无模式）。开课标记是 hub 认课的
     //   唯一 opt-out（`role_blocked` 的停课腿），删它就够了。
     const notes = [
@@ -446,6 +521,7 @@ export async function stopCourse(course: string): Promise<ActionResult> {
         ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训，hub 也不可领）'
         : '本课本就没有开课标记',
       `暂停意图：${pause.message}`,
+      ...lockNotes,
       '队列与账本一个字不动：已入队的 job 仍在队列里，恢复（开课）后从原处接着跑。',
       '账本/iter/指标仍可看（课程下拉不筛历史课）——这是**非破坏**停课，不是下架。',
       '★ 在云的接管（hold）不杀：云机上正在跑的那份只能由操作员在云机侧停；' +

@@ -13,6 +13,14 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §49 停课顺手清本课锁（2026-11-07）
+
+**指针**：用户口径「首页点停课时，把对应课程的 lock 清理掉」——`stopCourse` 现在调
+`actions/course-lifecycle.ts::pruneStoppedCourseLocks`：陈旧锁/共享 trainer 正常持有 ⇒ 删，
+别的活进程持有 ⇒ 不动 + 回执点名（fail-closed）。删活锁的安全网在训练侧：serve 每步执行前
+`loop_serve.py::_ensure_course_lock` 重取（本进程已持有 ⇒ 零写盘；被外活进程占 ⇒ 该课
+ABORT + `SKIP_KIND_LOCK`，持有者死自动复活）。全文与验证见 `docs/nn/training-stack.md §70`。
+
 ## §48 动作结果浮层悬停停表：读的时候不被抽走（2026-11-04）
 
 **触发**（用户）：「当鼠标悬停在 dashboard 页面右上角的提示信息上时，信息窗口不要自动关闭。」

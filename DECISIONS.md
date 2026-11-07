@@ -11285,3 +11285,25 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   导出 base64 逐字节不变、value 头有更新；`test_bc_course` + `test_bc_loop` 67 passed；
   ruff + mypy 绿；200 个 rollout 已写 `returns.npy`。
 - **全文** → `reports/c9-critic-calibration-20261107.md`；`docs/nn/experiments.md` §130。
+
+## §2026-11-07-goalnn-stop-course-lock-prune（停课清本课锁 + serve 跑课前重取闸）
+
+- **背景**：`nn-training/` 积了 ~101 个 `.lock`（90 个持有者已死）。共享 trainer 只在进程退出
+  释放按课锁（停课/换课都不释放，硬杀留死锁），而 `stopCourse` 从不碰锁。用户口径：首页点停课时
+  把对应课程的 lock 清理掉。
+- **被否决**：① 只删死锁（共享 trainer 正常持有的活锁原样留下）——停→开后 trainer 仍服务多课，
+  盘上会留下一批「课已停、锁还在」的活锁，正是本次要治的垃圾形态；② 停课时让 trainer 主动释放
+  锁（本机侧没有 RPC 通道，且会与它内存里的 runtime 状态脱钩）；③ 只删锁不加重取闸——停课删锁后
+  恢复/重开走 `sup.resume` / `_revive_aborted` 复用内存 runtime，**不重取锁** ⇒ 无锁裸跑
+  （冒烟腿 / BC 一次性腿可与它双开写同一批 traj）。
+- **决定**：`stopCourse` 调 `pruneStoppedCourseLocks`——持有者已死/不可解析 ⇒ 删；持有者 ==
+  共享 trainer（`run_cluster` 持有人）⇒ 删；**别的活进程**持有 ⇒ 一个字不动（fail-closed，
+  回执点名）。训练侧成对落 `_ensure_course_lock`（`build_executor.execute` 每步执行前重取）：
+  本进程已持有 ⇒ 零写盘；缺失/陈旧 ⇒ 接管；别的活进程持有 ⇒ 该课 ABORT + `SKIP_KIND_LOCK`
+  记账，持有者死 ⇒ 锁签名变 ⇒ 自动复活。锁的写入窗口/fail-open 语义复用 `common.instance_lock`。
+- **边界**：一次性存量清理按「持有者死才删」删 90 个；保留 9 个活持有者锁（hub 18196 /
+  trainer 10084 ×5 / runner 15220 ×3）与 `uv.lock`（依赖锁，不是 PID 锁）。
+- **验收**：`test_serve_course_lock.py` 4 passed；`tests/trainer/` 765 passed；dashboard
+  `course-lifecycle.test.ts` 39 passed（含 5 例新锁用例）；dashboard 全量 1959 pass / 0 fail +
+  typecheck 462 files 干净；根 `bun run check` 2672 pass / 0 fail。
+- **全文** → `docs/nn/training-stack.md` §70（控制台侧指针 `docs/nn/console.md` §49）。
