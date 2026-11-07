@@ -1,0 +1,199 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 结课报告（2026-11-07 16:28 回写；**跑 270 / 270 轮**，15:40:45 正常收官）────────
+//   **判决：机制验证成功（收熵可行），但「稳定爬升」不成立（配对剧烈震荡）。**
+//   全文 → `reports/z11-close-20261107.md` §10；读数 → `tmp/z11-final.txt`
+//
+//   状态：it270/270 正常收官（`cause=iters`），`error` 0、无熔断、无人工停。
+//   面板：**55 个 A 层点 × 400 局 = 22000 局**（种 2000000001–100）。
+//
+//   前后半（it≤90 vs it≥180，各 7600 局）：
+//     win **.251 → .267（+1.54pp）** · pick **.558 → .567（+0.90pp）** · base .584 → .588。
+//   末点 it270：win **.260** · pick **.573** · base .580 · kills 10.53 · cells 86 · dmg 446；
+//     wver **`27c23330053b79f1`** = 归档 `z11-cont.it270.20261107-154044.json`，完全一致。
+//   **训练侧（判据核心）**：`entropy` 1.368 → **1.110**（后段进目标 1.00–1.15）、
+//     `mean_ret` 30.07 → **41.68（+38.6%）**、kl 中位 3.61e-3。
+//
+//   与 ent 的**跨 iter 配对**（offset 230：cont it_k ↔ ent it_(230+k)，每点 400 键）：
+//     it10 **−7.25**（51:80）· it20 −0.75（65:68）· it30 −1.50（65:71）· it50 +1.75（69:62）·
+//     it75 **−8.75**（50:85）· it100 +0.50（73:71）· it150 **+5.25**（83:62）·
+//     it200 **+7.75**（79:48）· it250 **−7.25**（53:82）· it270 **−0.75（65:68）**；
+//     pick 末点 **+3.95pp**（.573 vs ent .533）。
+//   判据：主 1（配对 win ≥ ent −2pp）**部分不达标**（中段 it10/it75/it250 破线 7–9pp，
+//     终点在容差内）；主 2（it50 entropy 1.00–1.15）**后段达标**（中点 1.218、后 10 轮 1.110）；
+//     主 3（mean_ret 回升 ≥10%）**达标 +38.6%**；额外 pick **+3.95pp**。
+//
+//   判决：收熵把 ent 的胜率**冻结在同一水平**（末点 −0.75pp 在噪声内），同时把 return
+//     （+38.6%）和拾取率（+3.95pp）修回来；但配对从 **−8.75 到 +7.75** 剧烈震荡
+//     （远超 400 局 SE≈2.5pp）⇒ 策略在 270 轮里**震荡而非单调改善**。
+//   ⚠ **不要把 it270 当「最优权重」直接部署**；先用满池 400 局多 seed 复测一次再定。
+//   后继：从本课 it270 再收熵到引擎缺省 0.01，或加 `value_anchor` 稳 value；
+//     **别碰价格侧与步长**（z11-cost / z11-step 已双双证伪）。
+// 课程 z11-cont —— 从 z11-ent 的尾端最优 it230 接力，把熵从 0.03 退火到 0.015（2026-11-07 立项）
+//
+// 0. 一句话：起点 = `z11-ent.it230`，**唯一变量 `ppo_schedule[0].ent_coef 0.03 → 0.015`**，
+//    其余逐字 = z11-ent。判的是：**ent 那 +3.16pp 胜率是能力，还是高熵带来的噪声红利。**
+//
+// 1. 为什么是 it230（尾端最优的判定，不是拍脑袋）
+//    用 z11-ent 的 41 个 A 层 eval 点（400 局/点），取**居中 5 点滑动平均**（抗单点尖峰）：
+//      | iter | win | base | kills | 5点均值 win | 5点均值 base |
+//      | 205 | .325 | .542 | 12.28 | .2860 | .5790 |
+//      | 215 | .273 | .580 | 11.48 | .2935 | .5660 |
+//      | 220 | .325 | .537 | 11.88 | .2925 | .5600 |  ← 不是最优
+//      | 225 | .302 | .545 | 11.79 | .2970 | .5560 |
+//      | **230** | **.320** | **.512** | **12.31** | **.3000** | **.5540** |  ← 尾端最优
+//      | 235 | .265 | .605 | 11.62 | .2938 | .5581 |
+//    it230 同时拿下尾端**最高 5 点均值 win（.3000）、最低基毁（.5540）、最高 kills（12.31）**，
+//    且 pick .577 不低。it220 单点 win 更高（.325），但基毁 .537 比 .512 差、kills 低 0.43、
+//    5 点均值低 0.75pp ⇒ **不选 220**。
+//    ⚠ it230 的训练侧：kl 0.00425、**entropy 1.464**、mean_ret **20.63**（全腿最低区间）——
+//    这正是本课要收熵的直接动机：胜率在涨、return 在掉、熵接近散架。
+//
+// 2. ★ 配对方法（用户 09:08 的指法，确认成立）
+//    新腿 it_k ↔ **z11-ent it_(230+k)**：两者是「同一状态 + 同样 k 轮更新」，且 eval 面板是
+//    **固定的 A 层池 4 关×100 seed = 400 局/点（种 2000000001–100）**，与训练 iter 无关
+//    ⇒ 同一批 400 个 (stage, seed)，**可逐局 McNemar**。
+//    ⚠ 注意区分：训练 rollout 的 seed 由 `(rotate_seed, it, stage, wave)` 键控，两边语料不同；
+//    但**配对的有效性来自评估面板，不来自训练语料**。所以这条对照成立。
+//    it270 ↔ ent it500 是终点对照；it20/50/100 各有归档点可比。
+//
+// 3. it0 基线（= z11-ent it230 的 A 层 400 局读数，同权重同面板，不需重跑）
+//    win **.320** · pick **.577** · base **.512** · kills **12.31** · cells 97 · dmg 435 ·
+//    ticks 4352；训练侧 entropy 1.464 / mean_ret 20.63 / kl 4.25e-3。
+//    本课 it0 若偏离 >3pp，先查 bc 加载（sha16 应对上 `z11-ent.it230` 归档）。
+//
+// 4. 变量账（相对 z11-ent 只有一处）
+//    · `ppo_schedule[0].ent_coef`: 0.03 → **0.015**（0.01 是引擎缺省、0.03 是 ent）
+//    · `bc`：null 起点 → **`z11-ent.it230.20261107-085514.json`**（这是「接力」这个操作本身，
+//      与 ent_coef 同属「在 ent 轨迹上退火」一个概念；不是两个独立变量）
+//    其余逐字 = z11-ent：reward 11 行/18 项/terminal 四项、`lr 1.2e-4`、`kl_coef .02`、
+//    `kl_cap .1`、`lam .95`、`gamma .998`、`breakers_off false`、`ent_break .25`、
+//    `target_transitions 24576`、`paired_rotate_seed 20261106`、任务侧未动。
+//    ⚠ **不要用 kickstart 强锁**：`z11-anchor` 已证明锁一个坏策略会制造 KL 爆炸
+//      （it3 kl **0.231** ≥ 0.075 连续 3 轮，F4 熔断，`run_complete cause=breaker`）。
+//      本课 `kickstart_ref: false` / `warmup_iters 0`。
+//
+// 5. 判据与止损（与 ent 逐点配对，400 局/点）
+//    · 主 1（胜率不退）：it20 / it50 / it100 的配对 win **不低于 ent 同轮数 −2pp**。
+//    · 主 2（熵降下来）：it50 时 `entropy` 落到 **1.00–1.15**（it230 起点 1.464）。
+//    · 主 3（胜率不是靠乱跑）：`mean_ret` 从 20.63 **回升** ≥10%，且 pick 不降 >1pp。
+//    · 副：base_destroyed（起点 .512）、kills（12.31）、cells（97）、dmg。
+//    · 硬止损：配对 win 连续 2 点掉 >5pp / `kl > .075` 连续 3 轮（F4 会自动熔断）/
+//      `entropy < .30` / pick 掉 >3pp / error 行出现。
+//    · 判决口径：**「胜率保住 + 熵降」= 能力；「熵降 + 胜率掉」= 原来的 +3.16pp 是噪声红利。**
+//
+// 6. 已知局限
+//    · **如果你要的是纯接力（不改超参）**：那不需要这门课 —— 直接让 `z11-ent` 跑满 500
+//      就是同一条轨迹；新课必须改一个变量才有信息量，本课选的是收熵。
+//    · ent 还在跑（09:08 时 it241），it230 之后它可能继续爬；若它后续点显著高于 230，
+//      本课的起点就不是最终最优 —— 但 230 的判定基于 5 点均值，抗单点尖峰。
+//    · 0.015 是「0.01 与 0.03 的中点」，**未标定**；若熵降太慢（it50 仍 >1.3），下一腿再降到 0.01。
+//    · 拾取率分母仍含约 21% 生成即捡白送道具（仪表未修）⇒ pick 只作相对比较。
+//    · 跨批次不得相减（A 层 2_000_000_001 / B·C 层 860001）。
+//
+// 7. 预算：**270 it / 18h**（230 + 270 = 500 = ent 终点，逐点对齐）。
+//    eval_every 5、A 层 400 局/点。
+//
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-cont → 开课。
+//   训练唯一入口 = 控制台 / 同源 API；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`（`worker/trainer_gate.py` 会拒）。
+//   开训 30 秒核对日志 `hub=` 与当时活着的隧道 URL（换名会报 530）。
+// ── 诊断工具 ── `tmp/z11-check.py`（改 NAMES/ITER 复用）· `tmp/ent-curve.txt`（ent 全曲线）
+// ── 结算节（结课时回填到本文件头 + `reports/z11-close-<YYYYMMDD>.md`）──────────
+//   §停课状态 §it20/50/100/270 与 ent 230/280/330/500 的配对表 §entropy/mean_ret
+//   §「能力 vs 噪声红利」判决 §归档 sha16 §后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "z11-cont",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z11-ent/z11-ent.it230.20261107-085514.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 270,
+  "max_hours": 18,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.015,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261106,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/z11-cont/weights.json",
+  "traj": "tmp/z11-cont",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/z11-cont",
+  "backup_prefix": "z11-cont",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 z11-cont → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要写 `cli.ts --script run_rl.py --course ...`：常驻 trainer 只准
+//     `trainer/run_rl_cluster.py --serve`（闸在 `worker/trainer_gate.py`）。
+//   ⚠ 不要复用 z10/z11 的 out/traj/backup 目录；本课已全部换新（§15.5 禁跨改动续跑）。
