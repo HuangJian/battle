@@ -6,6 +6,91 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §143 空隧道 URL 不注册 + cloudflared 三段自救（2026-11-07）
+
+**现场**：DSW 上 cloudflared 起后 **16s** 退出，日志停在
+`Requesting new quick Tunnel on trycloudflare.com...`；采样节点在 30/60/120s 反复向 hub 发
+**空 URL**（每次 400），而 `reg_state["authKey"]` 始终为空 ⇒ `should_register` 恒真 ⇒
+每一拍都重发。现场只能从 `_wait_tunnel_url` 的空串与 hub 的 400 反推，cloudflared 为什么死
+（rc / 死因 / 日志尾部）一个字都没有。
+
+**根因**：
+
+1. **空 URL 没有硬闸**：`_open_cloudflared` 把 `""` 直接交给注册，hub 只能 400；而失败路径
+   不写 `reg_state`，下一拍仍满足 `should_register`。
+2. **一次 attempt 一个进程，死了不重开**：`_wait_tunnel_url` 对「进程退出」与「超时」同一出口，
+   没有 rc、存活秒数、死因；cloudflared 短暂退出就等于本会话没有隧道。
+3. **422 回落的判据错在 URL**：tailscale 的 URL 非空、但 cloudflared 进程根本没起时，
+   旧逻辑不会去起 cloudflared；反过来 cf 失败时也没有反向回落 tailscale。
+
+**落地**：
+
+- `_try_register_once()` 是注册唯一入口：`url` 为空直接返回
+  `kind="nourl"` / `status=0` / `capabilities: []`，**零 HTTP、不写 `reg_state`**；`run()` 据此走
+  「等隧道补拿」而不是注册退避。
+- `_banner_lines()` 在空 URL 时不打印 `{"nodes":[...]}` 手工片段（粘进配置必 400），改打
+  「不要手工登记 + 每 60s 重试 + 看 cloudflared 日志尾部」。
+- `_ensure_cloudflared_url()` 每次 attempt 都起**新进程**，3 段阶梯：
+  ① 预检首选姿势 + `http2` + `v4`；② 另一姿势 + `http2` + `v4`；③ **回到首选姿势** +
+  不指定 protocol/edge（交给 cloudflared 自选）+ debug。每段先轮转/清空 `cf.log`（否则读到
+  上一次的死域名），失败打 `rc`、存活秒数与 `_dead_reason()`，统一 dump 尾部 6 行；URL 只有
+  `cfp.poll() is None` 才采用。
+- `_net_probe()`：`inherit` / `direct` 都用**代理感知的 HTTPS**（`direct` 显式 `ProxyHandler({})`），
+  原始 TCP 只诊断 `region1.v2.argotunnel.com:7844`，不参与姿势选择；`direct` 子进程走
+  `_direct_env()`（摘代理键、保留/补 localhost 的 `NO_PROXY`，不改全局 `os.environ`）。
+- `_open_cloudflared_once()` 的判据是 **`cfp` 而不是 `url`**：422 时 `current_url` 可能是非空
+  tailscale URL，但仍必须起 cf；cf 全败则清空 URL 并立即停止自动注册（不再用旧 tailscale
+  URL 发第二次必然 422 的注册）；cf 成功但重注册仍 422 同样停止。反向：cf 空且 tailscale
+  可用时回落 tailscale；`link=cloudflared` 强制时跳过。
+- 监护循环按**墙钟**每 60s 补拿（`TUNNEL_RETRY_SEC`），补拿 `wait_timeout=30s`（不阻塞 10s 拍）；
+  空 URL 在 `should_register` **之前**短路。新 URL / authKey 变化清 `next_retry`。
+
+**被否决**：空 URL 也注册（hub 400 是确定的，且把本地失败伪装成远端错误）· 只把
+`_wait_tunnel_url` 的 90s 调大（本事故 16s 就退出，等更久不赚）· 第 3 次重复第 2 姿势
+（debug 应落在最可能成功的姿势）· 用原始 socket 选姿势（不读代理，inherit/direct 必然同结果）。
+
+**验收**：`tests/remote/test_rollout_node.py` 新增 21 条（空 URL 硬闸 / 空 URL 多 tick 不注册 /
+横幅 / direct env / 三段阶梯 / 活进程校验 / 死 URL 不采用 / 422 全败不再二次注册 /
+日志轮转 / 死因 / 代理感知预检 / 422 与反向回落）；
+`tests/remote/test_rollout_node_notebook.py` 的顺序契约改为「run 先读凭据、`_open_tailscale`
+内才 ensure」；聚焦 89 passed（含文本断言预算护栏）；NN 完整 gate（ruff + mypy + pytest +
+e2e）73s 全绿，根 `bun run check` / `bun run build` 绿。**真机验收未做**：
+需要现场 kill cloudflared / 出网受限机器各跑一次。
+
+**全文** → `plan/rollout-tunnel-url-retry.plan.md`；评审 → `plan/rollout-tunnel-url-retry.review-bf.md`；
+决策 → `DECISIONS.md` §2026-11-07-goalnn-rollout-tunnel-url-retry。
+
+## §142 死租约周期清扫：回收从「有人 claim」改成 `peek_jobs` 每拍顺手收（2026-11-07）
+
+**现场**：z11-bc it1（job `692baf378fb3c60f`）22:59:34 回传被掐后 **9h19m** 零认领；同期四门
+并行腿每小时各 22–24 次 claim。`_reclaims` 全程 0，08:18 重新 claim 时才变 1 ⇒ 回收发生在
+「有人 claim」那一刻。
+
+**根因**：`_collect_expired_locked` 只有两个调用点——`_claim_locked` 的 `recovering` 分支与
+`lease_worker`；而 `lease_worker` 只被 `inflight()`（**活**租约）逐个调到。回传失败的 worker
+留下 `_claimed` / `_computing` / `_ready` 三份残留，`job_priority` 先判 `ready` ⇒ 这份 job
+永远是 `low`；四门课每 2 分钟各产一个 HIGHEST ⇒ 没人 claim 它 ⇒ 永不回收 ⇒ 残留永在。
+
+**落地**：`LeaseMixin.reap_dead_leases()` 持 `_lock` 一次枚举死租约并逐个走
+`_collect_expired_locked`（stale 记录 / 毒包计数 / 账本事件的唯一实现）；
+`QueueClaimsMixin.sweep_dead_leases()` 遍历课程、按模块级 `SWEEP_MIN_SEC=1.0` 节流，
+唯一挂点是 `peek_jobs`（云 worker 每轮必调）。`queue_state` 保持只读（观测簇的契约），
+`claim_next` 不挂（生产已零调用点）。
+
+**熔断告警**：清扫可能把「认领后零回传」第 3 次直接收满，因此 `_announce_freeze` 必须在
+回收那一刻喊；等下一次 claim 才喊，可能永远没人来（`test_poison_freeze` 的日志用例抓到）。
+
+**边界**：BC 的 900s 进度让出从「有人 claim 时」变成「每拍都可能」——死 worker 仍先撞
+300s 过期；健康但 epoch >15min 的 BC 会被自动让出（既有语义节拍化，另条再调窗）。push
+过期回收不豁免；单课程模式照常工作。
+
+**测试**：`tests/hub/test_dead_lease_sweep.py` 7 条（主用例 / peek 挂点 / 活租约 / 三次冻结 /
+已结算 / 节流 / BC 进度让出）；守卫 `test_hub_queue_split`（130→131、QueuePeer 82→83、
+`STATE_WRITERS` 的 `_sweep_at`）与 `test_hub_job_store_split`（64→65）同改。
+
+**全文** → `plan/dead-lease-sweep.plan.md`；决策 → `DECISIONS.md`
+§2026-11-07-goalnn-dead-lease-sweep。
+
 ## §141 BC 每-epoch 回传的隧道丢包：失败进 backlog 重放 + hub 按 epoch 幂等 + 迟到行不派 eval（2026-11-04）
 
 **现场**：用户问「控制台 BC Epoch 区为什么 ep2/ep4 各显示两行」。查 `bc-v6-train`

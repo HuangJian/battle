@@ -611,8 +611,9 @@ class LeaseMixin:
         **完全同路**（同一个 stale 记录 + 同一份毒包计数），只多写一条账本事件
         `lease-orphan-reaped`——它是「队列诚实」这句话的凭据（控制台读账本尾窗口即见）。
 
-        为什么计数住这里而不是 `claim()` 里贴一段：**回收入口只有两处**（`_claim_locked`
-        的 `recovering` 分支 / 观测面的 `lease_worker`），谁先看到谁就回收；而判据
+        为什么计数住这里而不是 `claim()` 里贴一段：**回收实现只此一处**（`_claim_locked`
+        的 `recovering` 分支 / 观测面的 `lease_worker` / 周期清扫 `reap_dead_leases` 都调它），
+        谁先看到谁就回收；而判据
         （`_lease_state`）是纯读、四个读面共用。早先只在 `claim` 里贴的写法会被
         `/admin/queue` 的轮询（`lease_worker`，控制台每秒都在调）抢在前面——计数恒为 0，
         熔断永远不触发（这就是「判据要有唯一入口」在本仓的第三次同一教训）。
@@ -725,6 +726,27 @@ class LeaseMixin:
         now = self._now()
         with self._lock:
             return [jid for jid in self._leases if self._lease_held(jid, now)]
+
+    def reap_dead_leases(self) -> list[str]:
+        """回收本 store 的**全部**死租约（过期 ∨ 孤儿，§52），返回被回收的 jid。
+
+        为什么需要它：改动前回收只在 `_claim_locked` 的 `recovering` 分支与 `lease_worker` 里发生，
+        而 `lease_worker` 只被 `inflight()` 的**活**租约逐个调到 ⇒ 死租约既不在在飞集、
+        也要等「有人 claim 它」才回收；优先级表又读 `_claimed`/`_computing`/`_ready` 的残留，
+        于是「优先级非最高 ⇒ 没人 claim ⇒ 不回收」互锁（z11-bc 9h19m）。本函数给周期清扫
+        一个持锁一次的入口。
+
+        为什么不像调用方那样先 `dead_lease_ids()` 再逐个 `lease_worker()`：两步之间另一拍
+        可能已回收/已重领，回收计数会多算；持 `_lock` 一次枚举 + 回收，计数才是真值。
+        回收动作仍只走 `_collect_expired_locked`（stale 记录 / 毒包计数 / 账本事件的唯一实现）。
+        """
+        now = self._now()
+        with self._lock:
+            dead = [(jid, self._lease_state(jid, now)) for jid in self._leases]
+            doomed = [(jid, state) for jid, state in dead if state in LEASE_DEAD]
+            for jid, state in doomed:
+                self._collect_expired_locked(jid, orphan=state == LEASE_ORPHAN)
+            return [jid for jid, _ in doomed]
 
     def heartbeat(self, job_id: str, lease_token: str) -> bool:
         """心跳续租（60s 节奏；H2：非原租者拒续）。

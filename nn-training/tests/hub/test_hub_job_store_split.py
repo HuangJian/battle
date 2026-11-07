@@ -147,6 +147,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "stale_holder",
             "lease_worker",
             "inflight",
+            # 2026-11-07（plan/dead-lease-sweep）：周期清扫的持锁回收入口。
+            "reap_dead_leases",
             "heartbeat",
             "release",
             "result_token_ok",
@@ -343,8 +345,8 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 64, len(MIXIN_METHODS)
-    assert len(seen) == 64, len(seen)
+    assert len(MIXIN_METHODS) == 65, len(MIXIN_METHODS)
+    assert len(seen) == 65, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
@@ -354,8 +356,8 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-08 M5 加 4 条（`note_job_progress` / `job_progress_at` / `_bc_progress_stale_sec` /
     # `bc_drain_of`——BC 进度租约与 drain 判据）；
     # 2026-10-11 W7（plan/aborted-course-revival）加 2 条（`cancel_job` / `_cancel_job_locked`）
-    # ⇒ 现在 64 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 64 + 2, "_JobStore 的方法总数变了"
+    # ⇒ 64 + 2；2026-11-07（plan/dead-lease-sweep）加 1 条（`reap_dead_leases`）⇒ 65 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 65 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

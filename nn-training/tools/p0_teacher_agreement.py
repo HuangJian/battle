@@ -99,7 +99,7 @@ def masked_argmax(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if z.ndim != 2:
         raise ValueError(f"masked_argmax 只接二维，收到 {z.shape}")
     scored = np.where(m, z, -1e9)
-    best = np.argmax(scored, axis=1).astype(np.int64)
+    best = np.asarray(np.argmax(scored, axis=1), dtype=np.int64)
     all_masked = ~m.any(axis=1)
     if bool(all_masked.any()):
         best[all_masked] = z.shape[1] - 1
@@ -149,8 +149,8 @@ def classify_states(
     pd = metrics[:, METRIC_INDEX["pickupDist"]]
     pickup = (pd >= 0.0) & (pd <= float(pickup_near))
     lead = extra[:, list(LEAD_HIT_COLS)]
-    enemy_lane = (lead > 0.5).any(axis=1)
-    base = (metrics[:, list(BASE_THREAT_COLS)] > 0.0).any(axis=1)
+    enemy_lane = np.asarray((lead > 0.5).any(axis=1), dtype=bool)
+    base = np.asarray((metrics[:, list(BASE_THREAT_COLS)] > 0.0).any(axis=1), dtype=bool)
     tactical = pickup | enemy_lane | base
     return {
         ALL: np.ones(metrics.shape[0], dtype=bool),

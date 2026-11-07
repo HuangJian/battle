@@ -11239,6 +11239,68 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   PASS（forward 9.20e-07 / after 1.45e-06 / torch 读 Paddle 权重 4.04e-07）。
 - **全文** → `docs/nn/training-stack.md` §68；规格 → `plan/bc-single-course.plan.md` §16.8 #17。
 
+## §2026-11-07-goalnn-iters-hot-reload-live（课程 `iters` 热更：判据活读 runner，收官后仍需停→开）
+
+- **背景**：z11-ent 把课程 `iters 500→800`、`course_edit verdict=applied`，it501 就收官；同一拍
+  `run_complete iters=800` 与 `收工判据 iters=500` 并存。两份预算：文案读热更后的 `args.iters`，
+  `LoopRunner.planner` 读构造期快照；入队通道 `_enqueue` 又没有预算闸（停→开 放行一轮）。
+- **被否决**：把 `iters` 挪进 `RESTART_ONLY_FIELDS`（单进程多课程，重启 = 所有腿停）· 停开时
+  重建 `LoopRunner`（重开不保证重建 runtime，第二个不确定源）· 热更尾部回写 `runner.iters`
+  （同一事实两个写点）· 课程加 `iters_live` 开关（默认正确不该要人打开）· 顺手改
+  `finish_course.total`（观测面，改 `run_complete` 既有读面，另开）· 本腿给 `_enqueue` 补预算闸
+  （空任务队列立即 DONE，停→开路径会再触发一次 `finish_course`/`run_complete`）。
+- **决定**：`LoopRunner._budget_iters()` 每拍取值：`self.iters > 0`（serve 级 `--iters` 显式覆盖）
+  冻结；否则活读 `loop.args.iters`（0 = 不限）。`planner` 判满与 `finish_reason` 同走它。
+  `build_factory` 只灌 CLI 值（`int(iters or 0)`）；BC 分歧刻意不统一。课程收官后改大 `iters`
+  仍需控制台 停→开（队列 DONE 没有 planner，复活只认开课标记 mtime）；运行中改则下一拍生效。
+- **验收**：`tests/trainer/test_loop_runner_budget.py`（5 条）· 聚焦回归 74 passed
+  （`tests/trainer` + `tests/biz` + `tests/worker`）；NN 全量 gate **5666 passed / 3 skipped**
+  （ruff + mypy 绿，64s）。
+- **全文** → `docs/nn/training-stack.md` §70；规格 → `plan/iters-hot-reload-live.plan.md`。
+
+## §2026-11-07-goalnn-dead-lease-sweep（死租约周期清扫：`peek_jobs` 每拍收，回收只走既有入口）
+
+- **背景**：z11-bc it1 回传被掐后 **9h19m** 零认领；回传失败的 worker 留下 `_claimed` /
+  `_computing` / `_ready` 三份残留，`job_priority` 先判 `ready` ⇒ 这份 job 恒为 `low`；
+  而回收只在「有人 claim 它」时发生 ⇒「优先级非最高 ⇒ 没人 claim ⇒ 不回收」互锁。
+- **被否决**：只改 `_facts_locked` 绑租约（第二判据，且毒包熔断仍永不计数）· 后台线程/新 tick
+  （新生命周期，既有读面已在跑）· 在 `queue_state` 里顺手回收（观测簇契约是只读，控制台不开时零清扫）·
+  trainer 侧换 job_id 重发（`it` 与账本错位，治的是发现延迟）· `inflight()` 返回死租约
+  （毁掉「在飞 = 活租约」口径）· 缩短 TTL（到期后仍没人回收）。
+- **决定**：`LeaseMixin.reap_dead_leases()` 持 `_lock` 一次枚举死租约并逐个走
+  `_collect_expired_locked`（判据/计数/账本/冻结全复用）；`QueueClaimsMixin.sweep_dead_leases()`
+  遍历课程、按模块级 `SWEEP_MIN_SEC=1.0` 节流，**唯一挂点 = `peek_jobs`**（`queue_state` 保持只读，
+  `claim_next` 生产零调用点不挂）。回收后对每个 jid 调 `_announce_freeze`：清扫可能一次收满
+  三次阈值，等下一次 claim 才喊可能永远没人来。
+- **边界**：BC 的 900s 进度让出变成每拍可能（死 worker 仍先 300s 过期；超窗健康作业会被
+  自动让出，另条再调窗）· push 过期回收不豁免 · 单课程模式照常 · 不改 trainer 等结果无上限。
+- **验收**：`tests/hub/test_dead_lease_sweep.py` 7 条 · `test_poison_freeze` / `test_hub_leases` /
+  `test_hub_queue_split` / `test_hub_job_store_split` 全绿；NN 全量 gate 见下方实测。
+- **全文** → `docs/nn/remote-transport.md` §142；规格 → `plan/dead-lease-sweep.plan.md`。
+
+## §2026-11-07-goalnn-rollout-tunnel-url-retry（空隧道 URL 不注册 + cloudflared 三段自救）
+
+- **背景**：DSW 上 cloudflared 16s 退出，采样节点在 30/60/120s 向 hub 重发**空 URL**（400）；
+  `reg_state["authKey"]` 恒空 ⇒ `should_register` 恒真；日志没有 rc / 死因 / 尾部。
+- **被否决**：空 URL 也注册（把本地失败伪装成远端 400）· 只调大 `_wait_tunnel_url` 超时
+  （16s 就死，等更久不赚）· 第 3 次重复第 2 姿势（debug 应落在最可能成功的姿势）·
+  原始 socket 选预检姿势（不读代理，inherit/direct 必然同结果）。
+- **决定**：`_try_register_once()` 对空 URL 返回 `kind="nourl"` / `capabilities: []`，零 HTTP、
+  不写 `reg_state`；`_banner_lines()` 空 URL 时不再打印必 400 的 `nodes[]` 片段。
+  `_ensure_cloudflared_url()` 每次 attempt 新进程，3 段阶梯（首选+http2+v4 → 另一姿势+http2+v4 →
+  首选+自选 protocol/edge+debug），每段重置日志，URL 仅活进程采用，失败带 rc/死因/尾部。
+  `_net_probe()` 用代理感知 HTTPS 选姿势（`direct` 显式无代理），TCP 7844 只诊断。
+  422 回落判据从 `url` 改为 `cfp`（非空 tailscale URL 但无 cf 进程仍须起 cf）；
+  cf 全败则清空 URL 并立即停止自动注册（不再用旧 tailscale URL 发第二次必然 422 的注册）；
+  cf 成功但重注册仍 422 同样停止。反向回落 tailscale；强制 `link=cloudflared` 跳过反向回落。
+  监护按墙钟每 60s 补拿、等待上限 30s，空 URL 在 `should_register` 之前短路，
+  新 URL/auth 清 `next_retry`。
+- **边界**：本腿不动 hub 400、不改 tailscale 通道本体、不新增 CFG 旋钮；真机 kill cloudflared /
+  出网受限机器未验收；补拿失败只留一行 WARN，仍需人工看现场。
+- **验收**：`tests/remote/test_rollout_node.py` 21 条 · `test_rollout_node_notebook.py` 顺序契约 ·
+  `test_bootstrap_proxy.py`；聚焦 89 passed；NN 完整 gate（ruff + mypy + pytest + e2e）73s 全绿；
+  根 `bun run check` / `bun run build` 绿。
+- **全文** → `docs/nn/remote-transport.md` §143；规格 → `plan/rollout-tunnel-url-retry.plan.md`。
 ## §2026-11-07-goalnn-c8-seed-level（C8：统计单位 = `(stage, seed)`；z11 旧 p 降为上界，run-average 与 endpoint 分开报）
 
 - **背景**：`worker/eval_track.py:78-95` 的 A 层池与 `it` 无关；`tmp/z11-check.py:128-146`

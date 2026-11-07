@@ -324,7 +324,7 @@ def waiting_state(
     显示成「已收官」（R1-e）。
     """
     if finished:
-        return WAIT_IDLE, f"已跑满 it{it - 1}/{iters}（改大 iters 后 停→开 可续跑）"
+        return WAIT_IDLE, f"已跑满 it{it - 1}/{iters}（改大 iters 后需 停→开 重新入队）"
     if held:
         # ★P1-3：被接管的课本机不跑（云机在跑这一段）——这一档写在 `inflight` 之前：它不派
         # 本机队列项，报「在等什么」时必须先说清原因，否则会显示成「本轮无待办」而让人以为

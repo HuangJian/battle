@@ -347,6 +347,9 @@ def build_factory(
     构建时同时挂好该课的 `LoopRunner`（任务体↔引擎的唯一桥）：它是 `planner`/`executor` 的
     来源，也是「这一课跑到哪一步」的内存加速器（权威永远是账本）。
 
+    `iters` 只收 **serve 级 `--iters`** 的显式值（0 = 不冻结）：0 时预算由每课 `LoopRunner`
+    每拍活读课程 args，课程热更改大后下一拍即生效（plan/iters-hot-reload-live）。
+
     **BC 课（R3-4）**：引擎是 `trainer.bc_loop.BcLoop`（同一套 `_setup`/`run_one_round`/
     `finish_course`/`release_torch` 子集），且**恒为轮粒度**（13 步表是 RL 的一轮，硬套会
     给 BC 发它不认识的待办）；指针走引擎自己的 `ledger_next_it`（`bc_round_completed`）。
@@ -359,6 +362,9 @@ def build_factory(
             from trainer.bc_loop import BcLoop
 
             engine: Any = BcLoop(rt.bc)
+            # BC 刻意不统一（plan/iters-hot-reload-live §2 边界③）：`BcLoop.args` 是构造期
+            # Namespace，BC 课程没有热更写回 args 的路径 ⇒ 快照与活读等价；改成 0 反而会让
+            # 它走进活读（无收益的风险）。
             rt.runner = LoopRunner(
                 loop=engine,
                 course=course,
@@ -373,10 +379,12 @@ def build_factory(
 
         # ★ §3：单一 PPO 路径 ⇒ 引擎不建本机 PPO 栈，后端传 None（hub 免 torch，D2）。
         engine = TrainingLoop(rt.args, None, bun, update_kwargs)
+        # 只灌**显式 CLI 值**（serve 级 `--iters`）；0 = 不冻结，预算由 LoopRunner 每拍活读
+        # `engine.args.iters`（课程热更写回的就是它）——见 `LoopRunner._budget_iters`。
         rt.runner = LoopRunner(
             loop=engine,
             course=course,
-            iters=int(iters or getattr(rt.args, "iters", 0) or 0),
+            iters=int(iters or 0),
             step_mode=step_mode,
             poll_interval=poll_interval,
             now=now,

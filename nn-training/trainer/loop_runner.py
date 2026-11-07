@@ -106,7 +106,7 @@ class LoopRunner:
 
     loop: Any
     course: str
-    iters: int = 0  # 0 = 不限（与 CLI 同语义）
+    iters: int = 0  # 0 = 不冻结，每拍读 loop.args.iters（课程也 0 才是不限）
     poll_interval: float = POLL_INTERVAL_SEC
     now: Callable[[], float] = time.time
     finished: bool = False
@@ -121,13 +121,31 @@ class LoopRunner:
 
     # ---------------------------------------------------------------- planner
 
+    def _budget_iters(self) -> int:
+        """本拍生效的预算（0 = 不限）。
+
+        `self.iters > 0` = serve 级 `--iters` 显式覆盖：**构造时冻结**，课程热更改了也不动
+        （用户显式压过课程）。否则活读 `loop.args.iters`——课程热更
+        （`biz/hot_reload.apply_hot_fields`）写回的就是这个对象，因此改大 iters 下一拍即生效。
+
+        **字段的 0 不是「不限」，是「去问课程」**；课程的 0 才是不限。本模块的判满只有一处
+        调用（`planner`），`finish_reason` 必须与它同源——文案里的数就是判据用的数。
+
+        收官后改大 iters 不会自己复活：队列 `DONE` 后没有 planner，重开走
+        `loop_serve._revive_hygiene`（清 `finished`）+ 停→开 重新入队。
+        """
+        if self.iters > 0:
+            return int(self.iters)
+        return int(getattr(getattr(self.loop, "args", None), "iters", 0) or 0)
+
     def planner(self, course: str, it: int, queue: CourseQueue) -> list[Task]:
         if self.finished:
             return []
         want = self._ledger_next_it(it)
-        if budget_exhausted(want, self.iters):
+        budget = self._budget_iters()
+        if budget_exhausted(want, budget):
             self.finished = True
-            self.finish_reason = f"iters={self.iters} 跑满"
+            self.finish_reason = f"iters={budget} 跑满"
             return []
         if self.step_mode:
             tasks = self._pending_steps(course, want)

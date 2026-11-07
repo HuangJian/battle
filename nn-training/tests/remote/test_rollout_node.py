@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 from email.message import Message
 from io import BytesIO
@@ -496,6 +497,513 @@ def test_bun_target_table(machine: str, cpuinfo: str, want: str) -> None:
     assert rn._bun_target(machine, cpuinfo) == want
 
 
+# ------------------------------------------------ 空 URL 硬闸 / banner / 通道姿势
+
+def test_empty_url_never_posts_to_hub() -> None:
+    """★ 空 URL 是本地失败：零 HTTP、kind=nourl、不写 reg_state。"""
+    calls: list = []
+    out = rn._try_register_once(
+        url="",
+        auth="ak",
+        node_id="n",
+        workers=1,
+        label="l",
+        hub_url="http://hub:8787",
+        hub_token="tok",
+        log=lambda _m: None,
+        urlopen=_opener(_Resp({}), calls=calls),
+    )
+    assert out == {
+        "ok": False,
+        "status": 0,
+        "action": None,
+        "body": {},
+        "capabilities": [],
+        "error": "no tunnel url",
+        "kind": "nourl",
+    }
+    assert calls == []
+
+
+def test_try_register_once_posts_with_the_injected_opener() -> None:
+    calls: list = []
+    out = rn._try_register_once(
+        url="https://a.trycloudflare.com",
+        auth="ak",
+        node_id="n",
+        workers=1,
+        label="l",
+        hub_url="http://hub:8787",
+        hub_token="tok",
+        log=lambda _m: None,
+        urlopen=_opener(_Resp({"action": "created"}), calls=calls),
+    )
+    assert out["ok"] is True and len(calls) == 1
+
+
+def test_banner_skips_manual_snippet_when_url_empty() -> None:
+    lines = rn._banner_lines(
+        node_id="n",
+        url="",
+        auth="ak",
+        workers=2,
+        bun_version="1.4.4",
+        code_hash="0123456789abcdef",
+        hub_configured=True,
+        reg_state={"url": "", "authKey": ""},
+    )
+    assert lines == [
+        "=" * 68,
+        "★ 未注册：隧道 URL 未取到 —— 不要手工登记（空 url 会被 hub 400 拒）。",
+        "   节点每 60s 重试建隧道；真因看上面的 cloudflared 日志尾部。",
+        "★ URL     : (未取到)",
+        "★ authKey : ak",
+        "  workers : 2  bun 1.4.4  codeHash=0123456789ab",
+        "=" * 68,
+    ]
+
+
+def test_banner_prints_manual_snippet_when_url_present() -> None:
+    lines = rn._banner_lines(
+        node_id="n",
+        url="https://a.trycloudflare.com",
+        auth="ak",
+        workers=2,
+        bun_version="1.4.4",
+        code_hash="0123456789abcdef",
+        hub_configured=True,
+        reg_state={"url": "", "authKey": ""},
+    )
+    assert lines[2] == (
+        '  {"nodes":[{"id":"n","url":"https://a.trycloudflare.com","authKey":"ak"}]}'
+    )
+
+
+def test_direct_env_strips_proxies_keeps_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://platform:3128")
+    monkeypatch.setenv("https_proxy", "http://platform:3128")
+    monkeypatch.setenv("NO_PROXY", ".corp.example")
+    env = rn._direct_env()
+    assert env.get("HTTP_PROXY") is None and env.get("https_proxy") is None
+    bypass = env["NO_PROXY"].split(",")
+    assert bypass[:3] == ["localhost", "127.0.0.1", "::1"]
+    assert bypass[-1] == ".corp.example"
+    assert env["PATH"] == os.environ["PATH"]
+    # 只给子进程用，不能污染本进程（注册请求还要走平台代理）。
+    assert os.environ["HTTP_PROXY"] == "http://platform:3128"
+
+
+def test_open_cloudflared_once_starts_even_with_nonempty_current_url() -> None:
+    """★ B1：422 时 current_url 是 tailscale URL，但 cfp 为 None ⇒ 必须起 cf。"""
+    calls: list[int] = []
+
+    def _ensure() -> tuple[str, object]:
+        calls.append(1)
+        return "https://cf.trycloudflare.com", object()
+
+    url, cfp, started = rn._open_cloudflared_once(
+        current_url="http://100.64.0.5:8443", cfp=None, ensure=_ensure
+    )
+    assert url == "https://cf.trycloudflare.com"
+    assert cfp is not None and started is True and calls == [1]
+
+
+def test_open_cloudflared_once_reuses_live_process() -> None:
+    proc = object()
+    url, cfp, started = rn._open_cloudflared_once(
+        current_url="", cfp=proc, ensure=lambda: ("", None)
+    )
+    assert url == "" and cfp is proc and started is False
+
+
+def test_tunnel_retry_due_only_when_empty_and_due() -> None:
+    assert rn._tunnel_retry_due("https://a.trycloudflare.com", 100.0, 0.0) is False
+    assert rn._tunnel_retry_due("", 100.0, 101.0) is False
+    assert rn._tunnel_retry_due("", 101.0, 101.0) is True
+
+
+# ------------------------------------------------ cloudflared 自救 / 预检
+
+class _Proc:
+    def __init__(self, rc: int | None) -> None:
+        self.rc = rc
+        self.terminated = False
+
+    def poll(self) -> int | None:
+        return self.rc
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def test_422_and_cf_failure_stops_without_second_tailscale_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B1：cf 全败时清空 URL，不能拿旧 tailscale URL 再发一次必然 422 的注册。"""
+    code_dir = tmp_path / "code"
+    entry = code_dir / "tools" / "agent" / "sampler-agent.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("// fake\n", encoding="utf-8")
+    posts: list[str] = []
+
+    class _Agent:
+        returncode = None
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _interrupt(*_a: object) -> None:
+        raise KeyboardInterrupt
+
+    def _fake_register(**kw: object) -> dict:
+        posts.append(str(kw["url"]))
+        return {
+            "ok": False,
+            "status": 422,
+            "action": None,
+            "body": {},
+            "capabilities": [],
+            "error": "unreachable",
+            "kind": "server",
+        }
+
+    monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
+    monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_TAILSCALE)
+    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
+    monkeypatch.setattr(rn, "_ensure_bun", lambda *_a: "/bin/bun")
+    monkeypatch.setattr(rn, "_open_tailscale", lambda *_a: ("http://100.64.0.5:8443", True))
+    monkeypatch.setattr(rn, "_ensure_cloudflared_url", lambda *_a, **_k: ("", None))
+    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Agent())
+    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
+    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
+    monkeypatch.setattr(rn, "_sh", lambda *_a, **_k: SimpleNamespace(stdout="1.4.4"))
+    monkeypatch.setattr(rn, "_try_register_once", _fake_register)
+    monkeypatch.setattr(rn.time, "sleep", _interrupt)
+
+    rn.run(
+        {
+            "code_dir": str(code_dir),
+            "link": "tailscale",
+            "node_id": "n",
+            "hub_url": "http://hub:8787",
+            "hub_token": "tok",
+            "agent_port": 8443,
+            "workers": 1,
+        },
+        lambda _m: None,
+        lambda key, default: {"TS_AUTHKEY": "ak", "HUB_TOKEN": "tok"}.get(key, default),
+    )
+    assert posts == ["http://100.64.0.5:8443"]
+
+
+def test_empty_url_multiple_ticks_never_posts_or_backs_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B4：空 URL 在监护循环里多拍都不进注册，也不翻退避。"""
+    code_dir = tmp_path / "code"
+    entry = code_dir / "tools" / "agent" / "sampler-agent.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("// fake\n", encoding="utf-8")
+    clock = {"now": 1000.0, "sleeps": 0}
+    logs: list[str] = []
+    posts: list[str] = []
+    gates: list[str] = []
+    real_once = rn._try_register_once
+
+    def _register(*_a: object) -> dict:
+        posts.append("called")
+        raise AssertionError("空 URL 不得进入 register()")
+
+    def _gate(**kw: Any) -> dict:
+        gates.append(str(kw["url"]))
+        return real_once(**kw)
+
+    def _time() -> float:
+        return clock["now"]
+
+    def _sleep(sec: float) -> None:
+        clock["sleeps"] += 1
+        clock["now"] += sec
+        if clock["sleeps"] >= 4:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
+    monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_CLOUDFLARED)
+    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
+    monkeypatch.setattr(rn, "_ensure_bun", lambda *_a: "/bin/bun")
+    monkeypatch.setattr(rn, "_ensure_cloudflared_url", lambda *_a, **_k: ("", None))
+    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
+    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
+    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
+    monkeypatch.setattr(rn, "_sh", lambda *_a, **_k: SimpleNamespace(stdout="1.4.4"))
+    monkeypatch.setattr(rn, "register", _register)
+    monkeypatch.setattr(rn, "_try_register_once", _gate)
+    monkeypatch.setattr(rn.time, "time", _time)
+    monkeypatch.setattr(rn.time, "sleep", _sleep)
+
+    rn.run(
+        {
+            "code_dir": str(code_dir),
+            "link": "cloudflared",
+            "node_id": "n",
+            "hub_url": "http://hub:8787",
+            "hub_token": "tok",
+            "agent_port": 8443,
+            "workers": 1,
+            "max_session_hours": 1,
+        },
+        logs.append,
+        lambda key, default: {"TS_AUTHKEY": "ak", "HUB_TOKEN": "tok"}.get(key, default),
+    )
+    assert posts == []
+    assert gates == [""]  # 只有首拍一次的本地硬闸；监护多拍不再调用
+    assert clock["sleeps"] == 4
+    assert any(line.startswith("首拍未注册") for line in logs)
+    assert not [line for line in logs if line.startswith("注册失败")]
+
+
+def test_cloudflared_dead_process_triggers_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    procs = [_Proc(1), _Proc(None)]
+    starts: list[object] = []
+
+    def _start(*_a: object, **_k: object) -> _Proc:
+        p = procs[len(starts)]
+        starts.append(p)
+        return p
+
+    monkeypatch.setattr(rn, "_start_cloudflared", _start)
+    monkeypatch.setattr(
+        rn,
+        "_wait_tunnel_url",
+        lambda *_a, **_k: "" if len(starts) == 1 else "https://b.trycloudflare.com",
+    )
+    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
+    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
+    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn.time, "sleep", lambda *_a: None)
+
+    url, cfp = rn._ensure_cloudflared_url(
+        {}, 8443, tmp_path / "cf.log", lambda _m: None, attempts=3
+    )
+    assert url == "https://b.trycloudflare.com"
+    assert cfp is procs[1] and len(starts) == 2
+
+
+def test_dead_url_is_not_accepted_even_when_log_has_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B5：日志先写出 URL、进程随即退出 ⇒ 该 URL 不得采用，继续下一 attempt。"""
+    procs = [_Proc(1), _Proc(None)]
+    starts: list[object] = []
+    urls = iter(["https://dead.trycloudflare.com", "https://live.trycloudflare.com"])
+
+    def _start(*_a: object, **_k: object) -> _Proc:
+        p = procs[len(starts)]
+        starts.append(p)
+        return p
+
+    monkeypatch.setattr(rn, "_start_cloudflared", _start)
+    monkeypatch.setattr(rn, "_wait_tunnel_url", lambda *_a, **_k: next(urls))
+    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
+    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
+    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn.time, "sleep", lambda *_a: None)
+
+    url, cfp = rn._ensure_cloudflared_url(
+        {}, 8443, tmp_path / "cf.log", lambda _m: None, attempts=2
+    )
+    assert url == "https://live.trycloudflare.com"
+    assert cfp is procs[1] and len(starts) == 2
+
+
+def test_cloudflared_retry_is_bounded_and_ladder_returns_to_preferred(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    starts: list[dict] = []
+    sleeps: list[float] = []
+
+    def _start(*_a: object, **kw: object) -> _Proc:
+        starts.append(dict(kw))
+        return _Proc(1)
+
+    monkeypatch.setattr(rn, "_start_cloudflared", _start)
+    monkeypatch.setattr(rn, "_wait_tunnel_url", lambda *_a, **_k: "")
+    monkeypatch.setattr(rn, "_reset_cf_log", lambda *_a: None)
+    monkeypatch.setattr(rn, "_dead_reason", lambda *_a: "x")
+    monkeypatch.setattr(rn, "_dump_tail", lambda *_a, **_k: None)
+    monkeypatch.setattr(rn.time, "sleep", lambda s: sleeps.append(s))
+
+    url, cfp = rn._ensure_cloudflared_url(
+        {},
+        8443,
+        tmp_path / "cf.log",
+        lambda _m: None,
+        attempts=3,
+        postures=("inherit", "direct"),
+    )
+    assert url == "" and cfp is None and len(starts) == 3
+    assert [s["env_posture"] for s in starts] == ["inherit", "direct", "inherit"]
+    assert [s["protocol"] for s in starts] == ["http2", "http2", None]
+    assert [s["debug"] for s in starts] == [False, False, True]
+    assert sleeps == [5.0, 10.0]
+
+
+def test_cf_log_is_reset_between_attempts(tmp_path: Path) -> None:
+    cf = tmp_path / "cf.log"
+    cf.write_text("https://a.trycloudflare.com", encoding="utf-8")
+    rn._reset_cf_log(cf, 1)
+    assert cf.read_text(encoding="utf-8") == ""
+    assert (tmp_path / "cf.log.1").read_text(encoding="utf-8").startswith(
+        "https://a.trycloudflare.com"
+    )
+
+    missing = tmp_path / "missing.log"
+    rn._reset_cf_log(missing, 2)
+    assert missing.read_text(encoding="utf-8") == ""
+
+
+def test_dead_reason_extracted_from_log(tmp_path: Path) -> None:
+    cf = tmp_path / "cf.log"
+    cf.write_text(
+        '{"level":"info","message":"Requesting new quick Tunnel..."}\n'
+        '{"level":"error","message":"failed to dial: no such host"}\n',
+        encoding="utf-8",
+    )
+    assert rn._dead_reason(cf) == (
+        '{"level":"error","message":"failed to dial: no such host"}'
+    )
+
+    cf.write_text('{"level":"info","message":"still connecting"}\n', encoding="utf-8")
+    assert rn._dead_reason(cf) == "未能从日志提取"
+
+
+def test_net_probe_uses_proxy_aware_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rn, "_probe_https", lambda posture, **_k: posture == "inherit")
+    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: True)
+    logs: list[str] = []
+    postures = rn._net_probe(logs.append)
+    assert postures == ("inherit", "direct")
+    assert logs == [
+        "预检: api.trycloudflare.com:443 inherit=ok direct=fail ｜ 边缘7844 tcp=ok",
+        "⇒ 采用 inherit 姿势",
+    ]
+
+
+def test_net_probe_falls_back_to_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rn, "_probe_https", lambda posture, **_k: posture == "direct")
+    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: True)
+    logs: list[str] = []
+    postures = rn._net_probe(logs.append)
+    assert postures == ("direct", "inherit")
+    assert logs == [
+        "预检: api.trycloudflare.com:443 inherit=fail direct=ok ｜ 边缘7844 tcp=ok",
+        "⇒ inherit 不通、direct 可达 ⇒ 先试 direct 姿势",
+    ]
+
+
+def test_net_probe_reports_unreachable_but_still_returns_postures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(rn, "_probe_https", lambda *_a, **_k: False)
+    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: False)
+    logs: list[str] = []
+    postures = rn._net_probe(logs.append)
+    assert postures == ("inherit", "direct")
+    assert logs == [
+        "预检: api.trycloudflare.com:443 inherit=fail direct=fail ｜ 边缘7844 tcp=fail",
+        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；"
+        "仍按 inherit 尝试",
+    ]
+
+
+def test_cf_cmd_carries_compat_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+
+    def _popen(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        return object()
+
+    monkeypatch.setattr(rn, "_find_cloudflared", lambda *_a, **_k: "/bin/cloudflared")
+    monkeypatch.setattr(rn.subprocess, "Popen", _popen)
+    assert rn._start_cloudflared({}, 8443, tmp_path / "cf.log", lambda _m: None) is not None
+    assert captured["cmd"] == [
+        "/bin/cloudflared",
+        "tunnel",
+        "--url",
+        "http://localhost:8443",
+        "--no-autoupdate",
+        "--protocol",
+        "http2",
+        "--edge-ip-version",
+        "4",
+        "--logfile",
+        str(tmp_path / "cf.log"),
+    ]
+    assert captured["env"] is None
+
+
+def test_cf_cmd_direct_posture_uses_child_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+
+    def _popen(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return object()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://platform:3128")
+    monkeypatch.setattr(rn, "_find_cloudflared", lambda *_a, **_k: "/bin/cloudflared")
+    monkeypatch.setattr(rn.subprocess, "Popen", _popen)
+    rn._start_cloudflared(
+        {}, 8443, tmp_path / "cf.log", lambda _m: None, env_posture="direct"
+    )
+    env = captured["env"]
+    assert env is not None
+    assert env.get("HTTP_PROXY") is None
+    assert env["NO_PROXY"].split(",")[0] == "localhost"
+    assert os.environ["HTTP_PROXY"] == "http://platform:3128"
+
+
+def test_open_tailscale_returns_url_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rn.tailscale_boot,
+        "ensure",
+        lambda _cfg, _log: {"ip": "100.64.0.5", "mode": "userspace"},
+    )
+    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == (
+        "http://100.64.0.5:8443",
+        True,
+    )
+
+    def _boom(_cfg, _log):
+        raise RuntimeError("no tailnet")
+
+    monkeypatch.setattr(rn.tailscale_boot, "ensure", _boom)
+    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == ("", False)
 # ---------------------------------------------------------------- 持久二进制缓存
 
 def _fake_exe(path: Path) -> Path:

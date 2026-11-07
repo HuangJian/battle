@@ -535,7 +535,8 @@ class TrainingLifecycle:
             log(f"[run_rl] 停车：run_complete 落账失败（{e}）— 仅横幅派生缺失，继续停车")
         log(
             f"[run_rl] 正常完成（it{it}/{total}）——本地停止采集，进程停车不断开；"
-            "EvalBoard B 批照常认领；改大 iters 后经控制台 停止→启动 以继续训练"
+            "EvalBoard B 批照常认领；改大 iters 后仍须经控制台 停止→启动 重新入队"
+            "（课程运行中直接改则下一拍生效）"
         )
 
     def _park_after_completion(self, it: int) -> None:
