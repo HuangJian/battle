@@ -2,8 +2,10 @@
 
 分类学沿用 §2026-09-13-level-extraction：
 - **非语料改动**（corpus_identity_fp 不变；B/C 类）：白名单字段直接写回 args——消费点
-  每轮活读（iters/gamma/lam/epochs/mb/eval_*/ent_break*，loop_core:207 / loop_steps
-  _course_iter），**下一 iter 即生效**；结构绑定字段（bc/out/traj 等）记
+  每轮活读（iters → `trainer.loop_runner.LoopRunner._budget_iters`，planner 每拍；
+  gamma/lam/epochs/mb → `loop_steps._course_iter`；eval_*/ent_break* 同轮内读取），
+  **下一 iter 即生效**；
+  结构绑定字段（bc/out/traj 等）记
   restart-only，响亮日志「停止→启动后生效」，不静默吞。
 - **语料身份改动**（corpus_fp 变了 = A 类破坏性）：拒绝热应用，写 `course_edit` 事件
   （控制台横幅）+ 响亮日志，**沿用启动期配置继续训练**。云端不可见：D13 课程快照 /
@@ -16,10 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
-#: 消费点每轮活读 args 的字段（loop_core:207 iters / loop_steps._course_iter
-#: gamma,lam / 每评估轮 eval_* / breaker ent_break* / schedule 基值 lr,epochs,mb）——
+#: 消费点每轮活读 args 的字段（iters → LoopRunner._budget_iters，planner 每拍；
+#: gamma,lam/epochs,mb → loop_steps._course_iter；eval_*/ent_break* 同轮内读取）——
 #: 热写回 args 即下一 iter 生效。
 HOT_FIELDS: tuple[str, ...] = (
+    # 判据在 runner：`LoopRunner._budget_iters` 每拍活读 args（不是启动期快照）⇒ 热更生效。
     "iters",
     "max_hours",
     "eval_stages",
