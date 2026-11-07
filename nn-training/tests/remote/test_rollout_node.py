@@ -494,3 +494,193 @@ def test_latest_bun_version_picks_semver_max() -> None:
 )
 def test_bun_target_table(machine: str, cpuinfo: str, want: str) -> None:
     assert rn._bun_target(machine, cpuinfo) == want
+
+
+# ---------------------------------------------------------------- 持久二进制缓存
+
+def _fake_exe(path: Path) -> Path:
+    path.write_bytes(b"fake-binary")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("root", "want"),
+    [
+        ("/mnt/workspace", "/mnt/workspace/.battle-bin"),
+        ("/home/aistudio", "/home/aistudio/.battle-bin"),
+        ("/kaggle/working", "/kaggle/working/.battle-bin"),
+        ("/content", "/content/.battle-bin"),
+    ],
+)
+def test_bin_cache_dir_autodetects_platform_root(root: str, want: str) -> None:
+    """零配置：各平台探测自己的持久根（DSW/AI Studio/Kaggle/Colab），落 `.battle-bin/`。"""
+    assert rn._bin_cache_dir({}, isdir=lambda p: p == root) == Path(want)
+
+
+def test_bin_cache_dir_priority_dsw_first() -> None:
+    """多个持久根并存时按 PERSISTENT_ROOTS 优先级（DSW 的 NAS 最持久，排第一）。"""
+    got = rn._bin_cache_dir({}, isdir=lambda p: p in ("/content", "/mnt/workspace"))
+    assert got == Path("/mnt/workspace/.battle-bin")
+
+
+def test_bin_cache_dir_none_when_no_persistent_root() -> None:
+    """没有持久根（本机/普通容器）⇒ None ⇒ 行为与无缓存时完全一致。"""
+    assert rn._bin_cache_dir({}, isdir=lambda _p: False) is None
+
+
+def test_bin_cache_dir_explicit_cfg_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BATTLE_BIN_CACHE", "/env/cache")
+    got = rn._bin_cache_dir({"bin_cache_dir": "/cfg/cache"}, isdir=lambda _p: True)
+    assert got == Path("/cfg/cache")
+
+
+def test_bin_cache_dir_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BATTLE_BIN_CACHE", "/env/cache")
+    assert rn._bin_cache_dir({}, isdir=lambda _p: False) == Path("/env/cache")
+
+
+def test_cached_bin_reuses_valid_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    bun = _fake_exe(cache / "bun")
+    monkeypatch.setattr(
+        rn, "_sh", lambda *a, **k: SimpleNamespace(returncode=0, stdout="1.4.4", stderr="")
+    )
+    assert rn._cached_bin(cache, "bun", lambda _m: None) == str(bun)
+
+
+def test_cached_bin_rejects_bad_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """坏档/架构不符（--version 非 0）⇒ 忽略缓存，让调用方重下。"""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _fake_exe(cache / "bun")
+    monkeypatch.setattr(
+        rn, "_sh", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="")
+    )
+    logs: list[str] = []
+    assert rn._cached_bin(cache, "bun", logs.append) == ""
+    assert any("校验失败" in m for m in logs)
+
+
+def test_cached_bin_skips_non_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "bun").write_bytes(b"x")
+    monkeypatch.setattr(rn.os, "access", lambda *a: False)
+    calls: list[Any] = []
+
+    def _rec(cmd, **_kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _rec)
+    assert rn._cached_bin(cache, "bun", lambda _m: None) == ""
+    assert calls == [], "不可执行就不该跑 --version"
+
+
+def test_cached_bin_none_cache_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*_a, **_k):
+        pytest.fail("无缓存时不该跑子进程")
+
+    monkeypatch.setattr(rn, "_sh", _boom)
+    assert rn._cached_bin(None, "bun", lambda _m: None) == ""
+
+
+def test_store_bin_copies_into_cache(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    src = _fake_exe(tmp_path / "bun-src")
+    rn._store_bin(cache, "bun", src, lambda _m: None)
+    dest = cache / "bun"
+    assert dest.is_file()
+    assert dest.read_bytes() == src.read_bytes()
+
+
+def test_store_bin_none_cache_noop(tmp_path: Path) -> None:
+    src = _fake_exe(tmp_path / "bun-src")
+    rn._store_bin(None, "bun", src, lambda _m: None)  # 不抛
+    assert not (tmp_path / "bun").exists()
+
+
+def test_store_bin_missing_source_noop(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    rn._store_bin(cache, "bun", tmp_path / "nope", lambda _m: None)
+    assert not (cache / "bun").exists()
+
+
+def test_store_bin_same_file_skips(tmp_path: Path) -> None:
+    """命中复用后源就是缓存自身 ⇒ 跳过，SameFileError 绝不冒泡。"""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    dest = _fake_exe(cache / "bun")
+    rn._store_bin(cache, "bun", dest, lambda _m: None)
+    assert dest.read_bytes() == b"fake-binary"
+
+
+def test_ensure_bun_reuses_cache_and_skips_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    bun = _fake_exe(cache / "bun")
+    calls: list[list[str]] = []
+
+    def _fake_sh(cmd, **_kw):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="1.4.4", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    got = rn._ensure_bun(tmp_path, {"bin_cache_dir": str(cache)}, lambda _m: None)
+    assert got == str(bun)
+    assert not any("bun.sh/install" in " ".join(c) for c in calls), "命中缓存就不该再下载"
+
+
+def test_ensure_bun_stores_into_cache_after_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """官方安装全挂 ⇒ 镜像装成功 ⇒ 二进制落进持久缓存（下次对话免重下）。"""
+    cache = tmp_path / "cache"
+    fake = _fake_exe(tmp_path / "fake-bun")
+    monkeypatch.setattr(
+        rn, "_sh", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="")
+    )
+    monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: str(fake))
+    monkeypatch.setattr(rn, "DOWNLOAD_BACKOFF", ())
+    got = rn._ensure_bun(tmp_path, {"bin_cache_dir": str(cache)}, lambda _m: None)
+    assert got == str(fake)
+    assert (cache / "bun").is_file()
+    assert (cache / "bun").read_bytes() == fake.read_bytes()
+
+
+def test_find_cloudflared_reuses_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cf = _fake_exe(cache / "cloudflared")
+    monkeypatch.setattr(
+        rn, "_sh", lambda *a, **k: SimpleNamespace(returncode=0, stdout="2025.1.0", stderr="")
+    )
+    monkeypatch.setattr(rn.shutil, "which", lambda _n: "")
+    assert rn._find_cloudflared({"bin_cache_dir": str(cache)}, lambda _m: None) == str(cf)
+
+
+def test_start_cloudflared_caches_after_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = tmp_path / "cache"
+    stored: list[tuple[Any, str, Any]] = []
+    monkeypatch.setattr(rn, "_find_cloudflared", lambda _cfg, _log: "")
+    monkeypatch.setattr(rn, "_store_bin", lambda c, name, src, log: stored.append((c, name, src)))
+
+    def _fake_sh(cmd, **_kw):
+        if "--range" in cmd:
+            return SimpleNamespace(returncode=6, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rn, "_sh", _fake_sh)
+    monkeypatch.setattr(rn.os, "chmod", lambda *a, **k: None)
+    monkeypatch.setattr(rn.subprocess, "Popen", lambda *a, **k: object())
+    out = rn._start_cloudflared(
+        {"bin_cache_dir": str(cache)}, 8443, Path("/tmp/x.log"), lambda _m: None
+    )
+    assert out is not None
+    assert stored and stored[0][0] == cache and stored[0][1] == "cloudflared"
