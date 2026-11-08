@@ -11451,6 +11451,50 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `bun run check` 2672 pass / 11 skip、build 过。
 - **全文** → `docs/nn/training-stack.md` §71；规格 → `plan/bc-ledger-gap.plan.md` §10。
 
+## §2026-11-08-goalnn-w3-nofreeze-negative（z8 崩因判清：idle 罚无罪，bc-v6 起点有罪）
+
+- **背景**：`z8-noidle` 在 0 冻死 11 关（`classic35-safe-base`）判负，四条根因候选：① `-wIdle` 不封顶
+  ② 冷 value 头 ③ KL 三缺一 ④ 起点熵 .9123。本课把 ① 单独拿掉（reward = z11-null 逐字、无 idle 罚、
+  无快奖），同 11 关 / 同起点 `bc-v6-train` / 同面板 ⇒ 单变量检验 ①。
+- **结果**：it0 eval（220 局）win **.773** / kills **18.42** / idle 12,442（与历史 1950 局 .769 吻合）；
+  it1 **kl 1.688**、entropy .969→.418；**F4 熔断（kl ≥ .075 连续 3 轮）⇒ it3 收官**；it10 eval（118 局）
+  win **.051** / kills **8.18**；`lives_exhausted` 从 3/33 涨到 32/37（送死）。
+- **判读**：① **idle 罚无罪** —— 去掉后崩得同样快（kl 1.688 vs z8 2.174）。② **起点有罪** —— 冷 value
+  让第一轮 advantage 尺度爆炸，`kl_coef .02` / `ent_coef .01` 都拉不住。③ 与 C9 合起来：
+  「先修 critic 再接 PPO」也不成立（尺度可修、排序不可修，修完 base 反 +10.5pp）。
+  ⇒ **`bc-v6-train` 不能作 PPO 起点；BC 产物 → PPO 这条路在现有工具链上无解**。
+- **口径修正（同日）**：课程 `level` 曾误写原题 `classic35`（应为 `classic35-safe-base`）；探针证明
+  原题面板 bc-v6 0/55 胜 / 1.8 杀 / 55 全基毁（无钢环），safe-base 0.75 胜 / 18.89 杀 / 0 基毁。
+  已修并写入课程头注。
+- **边界**：11 关子集 / safe-base；单变量只有 reward；语料 seed 与 z8 不同（20261108 vs 20261105）。
+- **验收**：`tmp/w3-nofreeze-11/{training_log,eval_log}.jsonl`；`run_complete cause=circuit_break`。
+- **补测（11-08 10:56）：z10 起点也不可用。** `z10.it233` 在 safe-base 11 关 it0
+  （55 局 / seed 860001–860005）：win **.527** / kills 15.64 / idle 中位 5,717 /
+  gameover **42%（23/55，基毁 0）**；对照 bc-v6 同面板：win **.745** / kills 18.89 /
+  idle 8,850 / timeout 18%。⇒ z10 **win −22pp、会送死**，不是更好的起点。
+  **11 关线没有可用起点（bc-v6 冷 value、z10 弱且送死）⇒ 关闭**，不再重启。
+- **全文** → `reports/w3-nofreeze-11-20261108.md`；`plan/classic35-path.plan.md` §17。
+
+## §2026-11-08-goalnn-w3-ramparts-negative（单关 100% 曝光 50 轮零改善：曝光假设否证）
+
+- **背景**：2022 Ramparts 是全 35 关里唯一 `max_ticks` 的关（350 局），z10 杀 **19/20** 卡死：
+  `idleTicks 29,362/36,000`（81.6%）、最长卡段 1,407 拍、88 发中 2；同 seed God **20/20 / 8,169 拍**
+  全清。假设「样本密度 1/35 太低」⇒ `w3-ramparts`：`pinned "2022"` + `per_it 0` 把密度拉到 100%，
+  `bc z10.it233`、reward 逐字 = z11-null、`iters 200`。
+- **决定**：判在 **it50**（预算 1/4），预注册三门：20 杀率 ≥ .50 / 平均拍数 ≤ 12,000 / idle ≤ 6,000。
+- **结果（三门全未达成）**：20 杀率 it0 **.35** → it50 **.34**；拍数 16,487 → **15,741**（只 −4.5%）；
+  idle 11,981 → **11,353**（只 −5.2%，且 it20 曾到 10,585 又反弹）；win .350 → .340；base .52 → .47。
+  训练侧稳定：it54 kl **.0027** / entropy **.802** / mean_ret 57.0 / value 90.6，rollout stage_clear 12/20。
+- **判读**：① **「曝光不足」否证** —— 100% 密度 50 轮，三个目标量一个没动。② 训练稳定但 eval 冻结 ⇒
+  reward 能拿的分（杀 13 + 捡 + walk）已拿满，剩下 7 个敌人要多花 10,000+ 拍绕路，在 `wPace/wBrick`
+  下不划算；**但加价已被 P3-A / C1 / z8 三次否证** ⇒ 不能再走加价。③ 2022 只剩 **obs/动作结构**
+  （清墙子目标）或 **人类/规则演示语料**，均需新立项。
+- **全局收敛**：价格 / 步长 / 冷启动 / 守家机制 / BC 语料 / BC 起点 / critic 预热 / 单关曝光
+  —— **八项训练侧杠杆全部否证**。不再开「同一套 obs/动作 + 换 reward/起点/曝光」的任何变体。
+- **边界**：单关 / 原题 / z10 起点 / 50 轮；eval 100 局/点（MDE ≈9pp）；不能外推到其他关。
+- **验收**：`tmp/w3-ramparts/{training_log,eval_log}.jsonl`；本报告判在 it50，课未跑满。
+- **全文** → `reports/w3-ramparts-20261108.md`；`plan/classic35-path.plan.md` §17。
+
 ## §2026-11-08-goalnn-rollout-tunnel-silent-death（隧道静默死：判死归一 + 探针姿势，不加 force 重注册）
 
 - **背景**：2026-11-08 DSW 的 cloudflared 进程消失，节点 `url` 非空、`cf_log` 尾部仍是旧域名、

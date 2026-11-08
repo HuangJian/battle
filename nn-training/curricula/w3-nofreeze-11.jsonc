@@ -1,0 +1,174 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-08 10:51；优先级高于下方立项块）
+//   **崩了，且与 z8 完全同型 ⇒ 判因结论：idle 罚无罪，起点有罪。**
+//   · it0 eval（220 局）：win **.773** / kills **18.42** / cells 152.8 / idle 12,442
+//     —— 与历史 1950 局的 .769 吻合，面板修正（safe-base）与起点都对。
+//   · it1-3：win .879/.744/.756，但 **kl 1.688 → .808 → .573**（`kl_coef .02` 压不住），
+//     **entropy .969 → .418**；**F4 熔断：kl ≥ .075 连续 3 轮（now .573）⇒ it3 收官**。
+//   · it7-11：win **.140 → .051**，`lives_exhausted` 从 3/33 涨到 **32/37**，ent .246。
+//   · eval it10（118 局）：win **.051**（from .773）/ kills **8.18**（from 18.42）。
+//   ⇒ **去掉 idle 罚后照样崩，速度一样快** ⇒ z8 的第一根因（`-wIdle` 不封顶）**被排除**；
+//     主因是 **② 冷 value 头 + ④ 起点熵 .9123** —— 冷 V 让第一轮 advantage 尺度爆炸
+//     （kl 1.688），这是 reward 改不动的。**`bc-v6-train` 作为 PPO 起点不可用。**
+//   后继：11 关路线要换起点（z10 系在 safe-base 上待测），或关掉这条线转 P4。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w3-nofreeze-11 —— 0 冻死 11 关专项：**z8-noidle 的「去 idle 罚」对照**（2026-11-08，已判负）
+//
+// 0. 一句话：与 `z8-noidle` **同 11 关、同起点 `bc-v6-train`、同任务侧**，**唯一变量 = reward**：
+//    z8 有 `-wIdle*idleTicks`（不封顶），本课用 **z11-null 逐字（无 idle 罚、无快奖）**。
+//    它回答的是「z8 崩盘是 idle 罚的锅，还是起点 bc 的锅（第四根因）」。
+//
+// 1. 立项依据
+//    · `plan/bc-curriculum-ladder.plan.md §3`：1950 局合并面板里 **0 冻死 11 关**
+//      = `2002 2014 2015 2021 2022 2025 2026 2027 2028 2029 2032`，
+//      bc-v6-train 在这 11 关 **win 0.769 / 冻死 0/610 / 拾取率 0.811** ⇒ 唯一「起点不会冻死」的子集。
+//    · `z8-noidle` 在同一子集判负：it20 win **.000**、gameover 93%、训练内求死率 it12 **100%**、
+//      entropy .888→.146；根因 `-wIdle*idleTicks` 不封顶 ⇒ timeout 局 −174 = 3×wWin
+//      ⇒ 「拖到超时」严格劣于「三命打光」（`MEMORY.md` 硬闸 #6）。第四条根因另指
+//      「起点 bc 熵 0.9123 + 送死吸引子」。
+//    · **本课把 reward 换回 z11-null（无 idle 罚）⇒ 单变量隔离第四根因**：
+//      不崩 ⇒ z8 的锅在 idle 罚；仍崩 ⇒ bc 起点本身不合格，ladder P1 这条路要换起点。
+//
+// 2. 面板（★ 2026-11-08 10:25 修正：原先误写成原题 `classic35`）
+//    · **本课必须是 `classic35-safe-base`** —— 与 `z8-noidle` / ladder P1 同面板
+//      （加长 36000 拍 / 3 命 / 20 敌 / hard），「0 冻死 11 关」的 76.9% 就是在这个面板上测的。
+//    · 误用原题 `classic35` 的代价（本日探针实测，55 局 / 11 关 ×5 seed / 36000 拍）：
+//      `bc-v6-train` **win 0.00（0/55）**、kills **1.8**、cells 中位 **29**、cells<50 **78%**、
+//      **55/55 全是 base_destroyed**（原题基地没有 8 砖钢环）⇒ 起点直接 0 胜，课程无意义。
+//    · 换回 safe-base 后，bc-v6 的 0/610 冻死 / win .769 前提才成立，与 z8 的对照才是单变量。
+//
+// 3. bc 选择：`bc-v6-train/weights.json`（ep18，sha16 `ec9dc680…`）
+//    · 理由：它是 ladder P1 的原配起点，也是「0 冻死 11 关」唯一有 0/610 冻死证据的权重。
+//    · **风险写明**：z8 的第四根因说它 move 熵 0.9123（目标 0.6–0.75）、1/4 局开局冻死、
+//      同 seed 分裂两种行为；且它 kills 只有 **1.8**（safe-base 面板也会捡不会打）。
+//      本课就是拿它做单变量判决，不是「已认可」它。
+//    · 若它崩（entropy < .40 或求死率升），结论是「bc 不合格」，不是「reward 不够」。
+//
+// 4. reward：**逐字 = z11-null**（11 行 / 18 项 params / terminal 四项）
+//    · 无 `wIdle`、无 `wFast/wSlow`、无任何新增价格项（P3-A / C1 已否证加价）。
+//    · `wPace` 自有封顶 36 分（< wWin 60），能压长局但不制造「送死套利」。
+//
+// 5. 关集机制：`rotation_mode "pinned"` + `rotation_pinned "2002,2014-2015,2021-2022,2025-2029,2032"`
+//    + `rotation_per_it 0`（11 个**原关号**，不是 1-based 位置）
+//    · **不写 `stage_select`**：裁关会重编号 stages ⇒ `stage_json(2034)` 返回 None，
+//      in-loop eval 拿空关卡（`bc-curriculum-ladder.plan.md:157-167`）。
+//    · 每轮 11 关全采：`target_transitions 24576` ⇒ 每关 ~2235 samples ≈ 6 局 × 36,000 拍。
+//
+// 6. 判据（预注册；本课**不设 win 提升门**，z8 已证明先崩后谈收益）
+//    · 主 1（不崩）：it120 时 `lives_exhausted / gameover` 的占比 ≤ it0 + 10pp
+//      （z8 在 it5 就 41.4% 求死、it12 100%）。
+//    · 主 2（熵不塌）：`entropy` 不低于 .40（z8 在 it3 跌破）。
+//    · 主 3（不冻死）：11 关 `win ≥ it0 基线`（it0 由首点实测，**不用历史 1950 局数字**），
+//      且 `idleTicks/局` 不升。
+//    · 副：kl / value / gnorm、`cells` 中位不崩。
+//    · 停机：`entropy <.30` 或 `>1.6` / `kl >.05` / error 或熔断 / 送死率 >50% / cells 崩塌。
+//
+// 7. 已知局限
+//    · 11 关是**子集**，win 只与同面板 it0 比，不作全 35 关读数、不与 z8 的历史 1950 局相减。
+//    · 起点熵高是已知风险；本课不负责「修起点」，只负责「判 z8 的崩因」。
+//    · 每轮固定 11 关 + 换 seed（§15.1 成立）；关集固定 ⇒ 不能回答「冻死关」的表现。
+//
+// 8. 预算：`iters 120` / `max_hours 12`，`eval_every 10`（12 点 × 220 局）。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `bc` 在盘、`load_course` 过、dashboard JSONC 过。
+//    · 与 `w3-ramparts` **同批开**（两条腿占满 worker 预算，别再开第三条）。
+//    · 控制台 `bun run dashboard`（:8900）→ 选课 w3-nofreeze-11 → 开课。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（结课时回填 + `reports/w3-nofreeze-11-<YYYYMMDD>.md`）──────────
+//    §停课状态 §it0/40/80/120 的送死率与 entropy §11 关 win/idle §判决（惩罚 vs 起点）
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "w3-nofreeze-11",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 36000,
+  "rotation_mode": "pinned",
+  "rotation_pinned": "2002,2014-2015,2021-2022,2025-2029,2032",
+  "rotation_per_it": 0,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/bc-v6-train/weights.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 120,
+  "max_hours": 12,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.01,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/w3-nofreeze-11/weights.json",
+  "traj": "tmp/w3-nofreeze-11",
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/w3-nofreeze-11",
+  "backup_prefix": "w3-nofreeze-11",
+  "eval_stages": "2002,2014-2015,2021-2022,2025-2029,2032",
+  "eval_games_per_stage": 20,
+  "eval_every": 10,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w3-nofreeze-11 → 开课（与 w3-ramparts 同批）。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 本课只判「z8 的崩因是 idle 罚还是起点 bc」，不作 35 关能力读数。

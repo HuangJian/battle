@@ -1,0 +1,162 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-08 11:54；it50 提前判负，优先级高于下方立项块）
+//   **100% 曝光 50 轮，2022 的「19/20 卡死」零改善 ⇒ 「曝光不足」假设否证。**
+//   · eval 100 局/点：20 杀率 it0 **.35** → it50 **.34**（门 .50）；
+//     平均拍数 16,487 → **15,741**（门 ≤12,000，God 8,169）；idle 11,981 → **11,353**
+//     （门 ≤6,000，只降 5.2%，且 it20 曾到 10,585 又反弹）；win .350 → .340。
+//   · 训练侧完全稳定：it54 kl **.0027** / entropy **.802** / mean_ret 57.0 / value 90.6，
+//     rollout stage_clear 12/20 ⇒ **不是训练崩，是策略在 2022 上拿不到新东西**。
+//   · 判读：reward 能拿的分它已经拿了（杀 13 个 + 捡 + walk）；剩下的 7 个敌人要多花
+//     10,000+ 拍绕路，在 `wPace/wBrick` 下**不划算** ⇒ 不是学习问题，是激励结构；
+//     但「加价」已被 P3-A / C1 / z8 三次否证 ⇒ **不能再走加价**。
+//   · ⇒ 2022 只剩 obs/动作结构改造（清墙子目标）或人类演示语料，均需新立项。
+//   后继：停课（预算还剩 150 轮不烧）。全文 `reports/w3-ramparts-20261108.md`。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w3-ramparts —— 2022 Ramparts 单关专项（2026-11-08 立项，it50 判负）
+//
+// 0. 一句话：把 35 关里**唯一 timeout 的关**单独拉出来、样本密度从 1/35 拉到 100%，
+//    判「19/20 杀卡死」是**曝光不足**还是**能力上限（不绕射界/不清墙）**。
+//
+// 1. 立项依据（`reports/p4-baseline-z10-20261108.md §3.5`）
+//    · z10.it233 在原题 35 关 350 局里 **22/35 关 win=0**，2022 是唯一 `max_ticks`：
+//      seed 860005 杀 **19/20**、36,000 拍超时、dmg 514；`idleTicks 29,362`（81.6%）、
+//      最长连续卡段 **1,407 拍**、88 发中 2、`moveHist` 单方向 2,466/3,600
+//      ⇒ **站在墙后原地对射、弹道被挡；不绕射界、不清墙**。
+//    · 同 seed God-AI 对照：**20/20 / 8,169 拍 / dmg 216** ⇒ 该关可解，NN 是能力问题。
+//    · 这一关是「清墙/绕射界」缺陷最干净的样本：已能杀 19 个，只差最后 1 个装甲。
+//
+// 2. bc 选择：`z10.it233`（不是 bc-v6-train）
+//    · z10 在 2022 的 350 局面板 win **20%**、kills **12.6**（10 局里 2 胜、1 局 19 杀超时）；
+//      bc-v6-train 在该关历史 win 0.769 但 **kills 1.5（不会打）**，且 z8 判负的第四根因是
+//      「起点熵 0.9123 + 送死吸引子」⇒ **不从 BC 产物起**。
+//    · 起点要的是「会打、差最后一步」⇒ z10 是唯一有 19/20 证据的权重。
+//
+// 3. reward：**逐字 = z11-null**（11 行 formula / 18 项 params / terminal 四项）
+//    · 不加任何价格项：P3-A（`wThCost`）三窗判负、C1 判 6/10 价格项上限 <30 分；
+//    · 不加 idle 罚：z8 的 `-wIdle*idleTicks` 不封顶 ⇒ timeout 局 −174 = 3×wWin ⇒
+//      96% 局主动送死（`MEMORY.md` 硬闸 #6）。本课若卡死，**先停课看读数，不补罚项**。
+//    · `wPace` 项自带封顶 36 分（< wWin 60），已能压长局，够用。
+//
+// 4. 关集机制：`rotation_mode "pinned"` + `rotation_pinned "2022"` + `per_it 0`
+//    · **不写 `stage_select`**：裁关会把 stages 重编号成 2000–2xxx，`stage_json(2034)`
+//      返回 None，in-loop eval 拿空关卡（`bc-curriculum-ladder.plan.md:157-167`）。
+//    · `pinned` 用**原关号**（2000+i），不是 1-based 位置。
+//    · 每轮只采这一关：`target_transitions 24576` ⇒ 每轮 ~7 局 × 36,000 拍 ≈ 20s。
+//
+// 5. 判据（预注册）
+//    · 主 1：it200 时 **20/20 杀**的局占比 ≥ 50%（it0 基线由首点实测，不用 350 局数字）。
+//    · 主 2：**平均拍数向 God 的 8,169 靠近**（it0 若 ~16,630，目标 ≤ 12,000）。
+//    · 主 3：`idleTicks/局` 从 it0 的 12,296 降到 ≤ 6,000（卡死减半）。
+//    · win 只作地板；单关 win 不作跨阶段/跨课相减（面板不同）。
+//    · 停机条件：entropy >1.6 或 <.30 / kl >.05 / error 或熔断 / cells 崩塌 / 送死率升。
+//
+// 6. 已知局限
+//    · 单关专项 = 极端样本密度，**可能过拟合这一关**；本课只回答「能不能学会清墙/绕射界」，
+//      不作 35 关能力读数。学会了要另开扩关课（P4），不能直接把本课权重当全线交付。
+//    · 起点 z10 是 4 关 20000 拍的 OOD 权重，在 2022 的 it0 只有 20%。
+//    · `rotation_pinned` 固定关集 + 每轮换 seed（§15.1 仍成立）。
+//
+// 7. 预算：`iters 200` / `max_hours 6`，`eval_every 10`（20 点 × 50 局 = 1,000 局）。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `bc` 在盘、`load_course` 过、dashboard JSONC 过。
+//    · 控制台 `bun run dashboard`（:8900）→ 选课 w3-ramparts → 开课。
+//    · 开训 30 秒 `grep -h "hub=" tmp/w3-ramparts/training-loop.log | tail -1`。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（结课时回填 + `reports/w3-ramparts-<YYYYMMDD>.md`）────────────
+//    §停课状态 §it0/it50/it100/it200 的 20 杀率与拍数 §idle §训练侧四指标 §判决
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "w3-ramparts",
+  "mode": "per-tick",
+  "level": "classic35",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 36000,
+  "rotation_mode": "pinned",
+  "rotation_pinned": "2022",
+  "rotation_per_it": 0,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 200,
+  "max_hours": 24,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.01,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/w3-ramparts/weights.json",
+  "traj": "tmp/w3-ramparts",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/w3-ramparts",
+  "backup_prefix": "w3-ramparts",
+  "eval_stages": "2022",
+  "eval_games_per_stage": 50,
+  "eval_every": 10,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w3-ramparts → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 单关课只回答「能不能学会清墙/绕射界」，不作 35 关能力读数。
