@@ -310,6 +310,66 @@ interface LabelAgg {
   dmg600Known: number
   /** `dmgFirst600 === 0` 的局数（「前 600 tick 零承伤」，plan §1 T2）。 */
   clean600: number
+  /** 可选均值列的 known 分母（P1-3：与 `v11KnownDelta` 同规——缺键整局不入分母）；
+   *  `0` ⇒ 显示 `N/A`，绝不把「旧 bundle 没有这一列」读成 0.00。 */
+  known: Record<string, number>
+}
+
+/**
+ * 逐局可选均值列（v8–v10 + aim-dodge）：求和 + **known 计数**分母。
+ *
+ * 为什么不能除 `games`：mixed-version 窗口期旧 bundle 的行整键缺席，除局数会把
+ * 「没有读数」稀释成 0.00（2026-11-08 评审 P1-3；同 `v11KnownDelta` 的 R15 口径）。
+ * `v11` 两列**不在**本表：它们的见证键契约是 `v11KnownDelta` 的 `nearSqSum`。
+ */
+const KNOWN_MEAN_KEYS = [
+  'dangerTicks',
+  'threatTicks',
+  'dmgFirst600',
+  'backHits',
+  'sideHits',
+  'frontHitsExempt',
+  'farHits',
+  'geoFallback',
+  'onLaneTicks',
+  'onLaneExemptTicks',
+  'onLaneMoveTicks',
+  'onLaneHoldFireTicks',
+  'stopTicks',
+  'fireHeldTicks',
+  'idleTicks',
+  'nearEnemy4Ticks',
+  'damageBursts',
+  'maxDamage120',
+  'damageWhileLow',
+  'encl1Ticks',
+  'encl2Ticks',
+  'encl3pTicks',
+  'enclMax',
+  'aimHits',
+  'aimHitDistSum',
+  'aimBricks',
+  'aimIgnited',
+  'aimMisses',
+  'hurtWeight',
+  'enclWeightTicks',
+  'cornerWeightTicks',
+] as const
+
+type MeanKey = (typeof KNOWN_MEAN_KEYS)[number]
+
+/** 可选均值列的可判定均值：`0` 局有键 ⇒ `null`（显示 `N/A`），不把缺席读成 0。 */
+export function meanKnown(sum: number, known: number): number | null {
+  return known > 0 ? sum / known : null
+}
+
+function addKnownMeans(a: LabelAgg, r: EvalCourseRow): void {
+  for (const k of KNOWN_MEAN_KEYS) {
+    const v = r[k]
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    a[k] += v
+    a.known[k] = (a.known[k] ?? 0) + 1
+  }
 }
 
 /**
@@ -391,6 +451,7 @@ function summarize(
         v11Known: 0,
         dmg600Known: 0,
         clean600: 0,
+        known: {},
       }
       agg.set(r.label, a)
     }
@@ -405,39 +466,8 @@ function summarize(
     a.playerDamageTaken += r.playerDamageTaken
     a.playerShots += r.playerShots
     a.ticks += r.ticks
-    a.dangerTicks += r.dangerTicks ?? 0
-    a.threatTicks += r.threatTicks ?? 0
-    a.dmgFirst600 += r.dmgFirst600 ?? 0
-    a.backHits += r.backHits ?? 0
-    a.sideHits += r.sideHits ?? 0
-    a.frontHitsExempt += r.frontHitsExempt ?? 0
-    a.farHits += r.farHits ?? 0
-    a.geoFallback += r.geoFallback ?? 0
-    a.onLaneTicks += r.onLaneTicks ?? 0
-    a.onLaneExemptTicks += r.onLaneExemptTicks ?? 0
-    a.onLaneMoveTicks += r.onLaneMoveTicks ?? 0
-    a.onLaneHoldFireTicks += r.onLaneHoldFireTicks ?? 0
-    // metrics v10（可选字段，与 v9 同约：旧行缺席按 0 计）。
-    a.stopTicks += r.stopTicks ?? 0
-    a.fireHeldTicks += r.fireHeldTicks ?? 0
-    a.idleTicks += r.idleTicks ?? 0
-    a.nearEnemy4Ticks += r.nearEnemy4Ticks ?? 0
-    a.damageBursts += r.damageBursts ?? 0
-    a.maxDamage120 += r.maxDamage120 ?? 0
-    a.damageWhileLow += r.damageWhileLow ?? 0
-    a.encl1Ticks += r.encl1Ticks ?? 0
-    a.encl2Ticks += r.encl2Ticks ?? 0
-    a.encl3pTicks += r.encl3pTicks ?? 0
-    a.enclMax += r.enclMax ?? 0
-    // aim-dodge-levers（可选字段，与 v10 同约：旧行缺席按 0 计）。
-    a.aimHits += r.aimHits ?? 0
-    a.aimHitDistSum += r.aimHitDistSum ?? 0
-    a.aimBricks += r.aimBricks ?? 0
-    a.aimIgnited += r.aimIgnited ?? 0
-    a.aimMisses += r.aimMisses ?? 0
-    a.hurtWeight += r.hurtWeight ?? 0
-    a.enclWeightTicks += r.enclWeightTicks ?? 0
-    a.cornerWeightTicks += r.cornerWeightTicks ?? 0
+    // metrics v8–v10 + aim-dodge（可选字段）：求和 + known 分母（见 KNOWN_MEAN_KEYS）。
+    addKnownMeans(a, r)
     // metrics v11（idx74–75）：**known 计数**（契约见 `v11KnownDelta`）。
     const v11 = v11KnownDelta(r)
     a.v11Known += v11.known
@@ -457,7 +487,11 @@ function summarize(
       ` dmg600  thrTk  dngTk  clean600\n`,
   )
   for (const a of agg.values()) {
-    const per = Math.max(1, a.games)
+    // 可选均值列统一走 known 分母（缺键 ⇒ `N/A`）；主表里的 kills/hits 等是**求和**，不受影响。
+    const f = (k: MeanKey, digits = 2): string => {
+      const v = meanKnown(a[k], a.known[k] ?? 0)
+      return v === null ? 'N/A' : v.toFixed(digits)
+    }
     process.stderr.write(
       `${a.label.padEnd(28)} ${`${a.passed}/${a.games}`.padEnd(6)} ${String(a.kills).padEnd(6)} ` +
         `${String(a.enemyHits).padEnd(7)} ${String(a.playerHits).padEnd(10)} ` +
@@ -467,46 +501,44 @@ function summarize(
           .padEnd(9)} ` +
         `${String(a.outcomes['max_ticks'] ?? 0).padEnd(9)} ${a.outcomes['gameover'] ?? 0} ` +
         // metrics v8 危险暴露（plan/x20-dodge-avoidance §3 探针表）：均值 + 开局干净局占比。
-        `${Math.round(a.dmgFirst600 / per)
-          .toString()
-          .padEnd(7)} ${Math.round(a.threatTicks / per)
-          .toString()
-          .padEnd(7)} ${Math.round(a.dangerTicks / per)
-          .toString()
-          .padEnd(7)} ${`${a.clean600}/${a.dmg600Known}`}\n`,
+        `${f('dmgFirst600', 0).padEnd(7)} ${f('threatTicks', 0).padEnd(7)} ${f(
+          'dangerTicks',
+          0,
+        ).padEnd(7)} ${`${a.clean600}/${a.dmg600Known}`}\n`,
     )
     // metrics v9（plan/geo-threat-instrumentation.plan.md §3）：命中方位 + 穿越税观测族。
     // 逐局均值（per = 局数）；far/geoFallback 是**监视列**（不定价），hold 是架枪直读。
     process.stderr.write(
-      `${''.padEnd(28)}   ↳ v9 back ${(a.backHits / per).toFixed(2)} side ${(a.sideHits / per).toFixed(2)}` +
-        ` fExempt ${(a.frontHitsExempt / per).toFixed(2)} far ${(a.farHits / per).toFixed(2)}` +
-        ` geofb ${(a.geoFallback / per).toFixed(2)} | onLane ${(a.onLaneTicks / per).toFixed(1)}` +
-        ` exempt ${(a.onLaneExemptTicks / per).toFixed(1)} move ${(a.onLaneMoveTicks / per).toFixed(1)}` +
-        ` holdFire ${(a.onLaneHoldFireTicks / per).toFixed(2)}\n`,
+      `${''.padEnd(28)}   ↳ v9 back ${f('backHits')} side ${f('sideHits')}` +
+        ` fExempt ${f('frontHitsExempt')} far ${f('farHits')}` +
+        ` geofb ${f('geoFallback')} | onLane ${f('onLaneTicks', 1)}` +
+        ` exempt ${f('onLaneExemptTicks', 1)} move ${f('onLaneMoveTicks', 1)}` +
+        ` holdFire ${f('onLaneHoldFireTicks')}\n`,
     )
     // metrics v10（plan/metrics-v10-gap-columns.plan.md §1）：差距四族逐局均值。
     // 输入级 3 列 + 距离 + 伤害成簇 3 列 + 被包围族 7 列；包围族带豁免对照组（净价先看差）。
     process.stderr.write(
-      `${''.padEnd(28)}   ↳ v10 stop ${(a.stopTicks / per).toFixed(1)} idle ${(a.idleTicks / per).toFixed(1)}` +
-        ` fireHeld ${(a.fireHeldTicks / per).toFixed(1)} near4 ${(a.nearEnemy4Ticks / per).toFixed(1)}` +
-        ` bursts ${(a.damageBursts / per).toFixed(2)} max120 ${(a.maxDamage120 / per).toFixed(1)}` +
-        ` dmgLow ${(a.damageWhileLow / per).toFixed(1)} |` +
-        ` encl ${(a.encl1Ticks / per).toFixed(1)}/${(a.encl2Ticks / per).toFixed(1)}/${(a.encl3pTicks / per).toFixed(1)}` +
-        ` max ${(a.enclMax / per).toFixed(2)}\n`,
+      `${''.padEnd(28)}   ↳ v10 stop ${f('stopTicks', 1)} idle ${f('idleTicks', 1)}` +
+        ` fireHeld ${f('fireHeldTicks', 1)} near4 ${f('nearEnemy4Ticks', 1)}` +
+        ` bursts ${f('damageBursts')} max120 ${f('maxDamage120', 1)}` +
+        ` dmgLow ${f('damageWhileLow', 1)} |` +
+        ` encl ${f('encl1Ticks', 1)}/${f('encl2Ticks', 1)}/${f('encl3pTicks', 1)}` +
+        ` max ${f('enclMax')}\n`,
     )
     // aim-dodge-levers（plan/aim-dodge-levers.plan.md §4）：开火结果族 + 承伤/暴露杠杆逐局均值。
     process.stderr.write(
-      `${''.padEnd(28)}   ↳ ad  hits ${(a.aimHits / per).toFixed(2)} dist ${(a.aimHitDistSum / per).toFixed(2)}` +
-        ` brick ${(a.aimBricks / per).toFixed(2)} ign ${(a.aimIgnited / per).toFixed(2)} miss ${(a.aimMisses / per).toFixed(2)}` +
-        ` | hurt ${(a.hurtWeight / per).toFixed(2)} enclW ${(a.enclWeightTicks / per).toFixed(1)}` +
-        ` cornerW ${(a.cornerWeightTicks / per).toFixed(1)}\n`,
+      `${''.padEnd(28)}   ↳ ad  hits ${f('aimHits')} dist ${f('aimHitDistSum')}` +
+        ` brick ${f('aimBricks')} ign ${f('aimIgnited')} miss ${f('aimMisses')}` +
+        ` | hurt ${f('hurtWeight')} enclW ${f('enclWeightTicks', 1)}` +
+        ` cornerW ${f('cornerWeightTicks', 1)}\n`,
     )
     // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：热线族两列逐局均值。
     // 分母 = `v11Known`（有 v11 键的局），mixed-version 窗口期不会静默稀释（R15）。
-    const perV11 = Math.max(1, a.v11Known)
+    const nearSq = meanKnown(a.nearSqSum, a.v11Known)
+    const hotLane = meanKnown(a.postHitLaneTicks, a.v11Known)
     process.stderr.write(
-      `${''.padEnd(28)}   ↳ v11 nearSq ${(a.nearSqSum / perV11).toFixed(2)}` +
-        ` hotLane ${(a.postHitLaneTicks / perV11).toFixed(1)}` +
+      `${''.padEnd(28)}   ↳ v11 nearSq ${nearSq === null ? 'N/A' : nearSq.toFixed(2)}` +
+        ` hotLane ${hotLane === null ? 'N/A' : hotLane.toFixed(1)}` +
         ` (known ${a.v11Known}/${a.games})\n`,
     )
   }

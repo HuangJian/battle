@@ -39,6 +39,7 @@ from types import SimpleNamespace
 # 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "nn-training"))
+from biz.reward_library import METRICS
 from common.cli import house_parser, run_main
 
 # 本入口的 stdout 是**调用方的产物通道**（`--out` 缺省时 eval-course-ckpt 的行就走
@@ -202,6 +203,10 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         return v if isinstance(v, list) else []
 
     return {
+        # metrics v14（plan/o1-eval-metrics-remediation §6 S1）：B 层行里所有与 rollout
+        # `METRICS` 同名的列**原样过桥**——不再逐列白名单（2026-11-08 评审 P0-2：L3 白名单
+        # 曾缺 81 列，补一列要改一处；显式项在后覆盖同名键的既有默认值语义）。
+        **{k: row[k] for k in METRICS if k in row},
         "label": m["label"],
         "id": _row_id(seed0, n_stages, games, m["weightIdx"], stage_local, seed),
         "stageId": int(row["stage"]),

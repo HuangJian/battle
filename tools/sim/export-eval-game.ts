@@ -79,6 +79,7 @@ import {
   inThreatLane,
   windowKind,
   nearestEnemyDistPx,
+  nearestPickupDist,
   playerHpRatio,
   sampleBasePressure,
   threatLaneExempt,
@@ -400,6 +401,15 @@ interface Telemetry {
   freezeShieldWindowTicks: number
   hitsInFreezeShieldWindow: number
   deathDerivedShieldTicks: number
+  // ---- metrics v13（切片 5，2026-11-08）----
+  /** 四档累计成本流：每**决策步** +min(2, 轴计数)，与 rollout `buildMetricsRow` 同刻
+   *  （逐拍累加会差 K 倍，见 DECISIONS §2026-11-01-goalnn-threat-split）。 */
+  thCostBreach: number
+  thCostBreachAimed: number
+  thCostDirect: number
+  thCostDirectAimed: number
+  /** 累计「敌弹朝鹰/环墙发射」次数（`bullet_fired` 事件，只增）。 */
+  thShotsAtBaseCum: number
   /**
    * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
    * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
@@ -548,6 +558,19 @@ interface EvalResult {
   powerUpsSpawned?: number
   /** 通关发生的 tick（未通关 = null）；「首次通关时刻」类读数要用。 */
   clearTick?: number | null
+  /** metrics v13（切片 5）：基地威胁四轴终局快照 + 在飞弹 + 成本流 + 朝基地发射累计。
+   *  `pickupDist` 为终局快照（与 `enemyDist` 同规），无存活拾取/玩家不在场 = 哨兵 -1。 */
+  pickupDist: number
+  thBreach: number
+  thBreachAimed: number
+  thDirect: number
+  thDirectAimed: number
+  thShotsAtBaseCum: number
+  thBulletsAtBase: number
+  thCostBreach: number
+  thCostBreachAimed: number
+  thCostDirect: number
+  thCostDirectAimed: number
   /** 全灭（歼灭率口径，方案 §2.1「全歼率」门）：敌人队列已空且场上无存活非 extra
    *  敌人（SimulationEffects.allEnemiesCleared）。2026-09-12 起 `win` = stage_clear ∪ cleared
    *  （单关训练场景二者等价，见 `win:` 处注释）；`cleared` 字段保留原义供「全歼率」门使用。
@@ -918,6 +941,11 @@ export function runEvalOne(
     freezeShieldWindowTicks: 0,
     hitsInFreezeShieldWindow: 0,
     deathDerivedShieldTicks: 0,
+    thCostBreach: 0,
+    thCostBreachAimed: 0,
+    thCostDirect: 0,
+    thCostDirectAimed: 0,
+    thShotsAtBaseCum: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
     exposureByKind: [0, 0, 0, 0],
@@ -1056,6 +1084,15 @@ export function runEvalOne(
   let ablateObsScratch: Uint8Array | null = null
 
   while (t < maxTicks) {
+    // metrics v13（切片 5）：成本流按**决策步**采样（与 rollout `buildMetricsRow` 同刻；
+    // 逐拍累加会差 K 倍）。四轴只依赖世界状态，不读策略 ⇒ 各 policy 同口径。
+    if (t % decisionK === 0) {
+      threatSplit(world, threatOut)
+      tel.thCostBreach += Math.min(2, threatOut.breach)
+      tel.thCostBreachAimed += Math.min(2, threatOut.breachAimed)
+      tel.thCostDirect += Math.min(2, threatOut.direct)
+      tel.thCostDirectAimed += Math.min(2, threatOut.directAimed)
+    }
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
     if (policy === 'nn' || policy === 'nn-goal') {
       if (decisionDue(t, world, gate, gateCfg)) {
@@ -1345,6 +1382,8 @@ export function runEvalOne(
           registerPlayerAimShot(shotRegistry, eb.id, keyCol(fk), keyRow(fk), 0, eb)
         } else if (eb.allegiance === 'enemy') {
           registerEnemyAimShot(shotRegistry, eb.id, 0, eb)
+          // metrics v13（切片 5）：与 rollout 同一事件/同一谓词（export-rl-rollout:1692）。
+          if (bulletHitsBaseOrRing(world, eb)) tel.thShotsAtBaseCum++
         }
       } else if (e.type === 'terrain_destroyed') {
         // 本批：brick 桶（真破坏；一弹多格多条事件 ⇒ settle-once 去重）。
@@ -1545,6 +1584,9 @@ export function runEvalOne(
   }
   shotRegistry.clear()
 
+  // metrics v13（切片 5）：终局四轴 + 在飞弹快照（与 rollout 行末值同口径的瞬时读数）。
+  threatSplit(world, threatOut)
+
   // 终局墙体完整性：此前只在 tel 初始化时赋一次 ⇒ 恒等于 baseWallTotal，下游
   // godai-score 的 baseIntegrity = 0.55 + 0.45·clamp01(intact/total) 被钉死在 1.0，
   // "墙被打秃但基地还活着"这一领先指标完全丢失。语义对齐 export-rl-rollout（每决策步
@@ -1710,6 +1752,17 @@ export function runEvalOne(
     aliveTicks: tel.aliveTicks,
     fireHeldTicks: tel.fireHeldTicks,
     enemyDist: nearestEnemyDistPx(world), // 终局快照（同 metrics 行口径；玩家已死 = 哨兵 -1）
+    pickupDist: nearestPickupDist(world), // 终局快照（无存活拾取/玩家不在场 = 哨兵 -1）
+    thBreach: threatOut.breach,
+    thBreachAimed: threatOut.breachAimed,
+    thDirect: threatOut.direct,
+    thDirectAimed: threatOut.directAimed,
+    thShotsAtBaseCum: tel.thShotsAtBaseCum,
+    thBulletsAtBase: threatOut.bulletsAtBase,
+    thCostBreach: tel.thCostBreach,
+    thCostBreachAimed: tel.thCostBreachAimed,
+    thCostDirect: tel.thCostDirect,
+    thCostDirectAimed: tel.thCostDirectAimed,
     nearEnemy4Ticks: tel.nearEnemy4Ticks,
     damageBursts: damageClusterStats(tel.damageTicks, tel.damageAmounts).bursts,
     maxDamage120: damageClusterStats(tel.damageTicks, tel.damageAmounts).max120,
@@ -1925,6 +1978,18 @@ export function main(argv: string[]): void {
     fireHeldTicks: res.fireHeldTicks,
     idleTicks: res.idleTicks,
     enemyDist: res.enemyDist,
+    // metrics v13（切片 5）：`pickupDist` + `th*` 10 列（顶层直出，eval_rows 侧补齐面）。
+    pickupDist: res.pickupDist,
+    thBreach: res.thBreach,
+    thBreachAimed: res.thBreachAimed,
+    thDirect: res.thDirect,
+    thDirectAimed: res.thDirectAimed,
+    thShotsAtBaseCum: res.thShotsAtBaseCum,
+    thBulletsAtBase: res.thBulletsAtBase,
+    thCostBreach: res.thCostBreach,
+    thCostBreachAimed: res.thCostBreachAimed,
+    thCostDirect: res.thCostDirect,
+    thCostDirectAimed: res.thCostDirectAimed,
     nearEnemy4Ticks: res.nearEnemy4Ticks,
     damageBursts: res.damageBursts,
     maxDamage120: res.maxDamage120,

@@ -250,13 +250,20 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
 
     monkeypatch.setattr(hub_client, "clear_halt_on_startup", fake_clear_halt)
 
-    # 单实例锁：真实现会在 nn-training/ 下落锁文件（测试不得写仓内文件）
+    # 单实例锁：真实现会在 nn-training/ 下落锁文件（测试不得写仓内文件）。
+    # ⚠ 两处都要打桩：`_open_bc_course` 走 `run_rl._acquire_run_rl_lock`；`serve` 的
+    # `_setup` 还会用 `worker.train.loop_util.acquire_lock` 再拿同一把课锁
+    # （`loop_serve.py:428`）——只打前者会让后者在仓根落真锁，同文件后续用例被拒启
+    # （2026-11-08 门禁实测：PID 复用同一 pytest worker ⇒「未给身份指纹」拒启）。
     def fake_acquire(path: str, **kw: Any) -> bool:
-        locks.append(str(path))
+        if str(path) not in locks:
+            locks.append(str(path))
         return True
 
     monkeypatch.setattr("trainer.run_rl._acquire_run_rl_lock", fake_acquire)
     monkeypatch.setattr("trainer.run_rl._cleanup_run_rl_lock", lambda path: None)
+    monkeypatch.setattr(loop_serve, "acquire_lock", fake_acquire)
+    monkeypatch.setattr(loop_serve, "cleanup_lock", lambda path: None)
 
     # ---- open_course：BC 课走**真**分支，RL 课给假 args ----
     real_open = loop_serve.open_course

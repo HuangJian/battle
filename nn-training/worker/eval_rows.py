@@ -286,8 +286,136 @@ def eval_mechanism_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: 与 rollout `metrics.npy` 同名、但 eval 报告**顶层已有**的 27 列
+#: （plan/o1-eval-metrics-remediation §6 S1）。切片 1 先补 16 列；切片 5 让
+#: `export-eval-game.ts` 直出剩余 `pickupDist` + `th*` 10 列后，本表覆盖全部
+#: 27 列缺口。本表是**补齐点**，不是 METRICS 的副本。
+EVAL_EXTRA_KEYS = (
+    "lives",
+    "baseAlive",
+    "baseWallTotal",
+    "baseWallIntact",
+    "basePressureSum",
+    "basePressureSamples",
+    "clearTick",
+    "enemyDist",
+    "killsBasic",
+    "killsFast",
+    "killsPower",
+    "killsArmor",
+    "hitsBasic",
+    "hitsFast",
+    "hitsPower",
+    "hitsArmor",
+    # 切片 5（2026-11-08）：`pickupDist` + 基地威胁四轴/成本流/发射累计。
+    "pickupDist",
+    "thBreach",
+    "thBreachAimed",
+    "thDirect",
+    "thDirectAimed",
+    "thShotsAtBaseCum",
+    "thBulletsAtBase",
+    "thCostBreach",
+    "thCostBreachAimed",
+    "thCostDirect",
+    "thCostDirectAimed",
+)
+
+#: 切片 5（2026-11-08）后上游已补 `pickupDist` + `th*` 10 列 ⇒ 本表清空。
+#: 保留登记处（不是删机制）：将来 METRICS 新增列而上游尚未构造时，先登记在这里，
+#: 列集合守卫按 `METRICS = 行键 ∪ 本表` 判定；**空表 = 90 列全在行里**。
+EVAL_METRIC_EXEMPT_KEYS: tuple[str, ...] = ()
+
+
+def _telemetry(manifest: dict | None) -> dict:
+    """`scorable.telemetry`（缺/形状不对 = 空 dict）——与 `eval_loot_fields` 同一取法。"""
+    if not isinstance(manifest, dict):
+        return {}
+    scorable = manifest.get("scorable")
+    if not isinstance(scorable, dict):
+        return {}
+    t = scorable.get("telemetry")
+    return t if isinstance(t, dict) else {}
+
+
+def eval_extra_fields(manifest: dict | None) -> dict:
+    """补齐 L2 相对 METRICS 缺的 27 列（缺键 = 整键省略，0 是合法读数）。
+
+    与 v8–v13 同一条纪律：**只此一处**，`eval_row` 与 `trainer/batch_runner.record`
+    都经 `eval_metric_fields` 取数（2026-11-08 评审 P0-2：只改 `_to_tool_row` 不改
+    行构造点 ⇒ 汇总拿 None 再 `?? 0`，键存在性测试绿而假零照旧）。
+
+    `clearTick` 是**值转换**不是复制：eval 报告用 `null` 表示「未清场」，账本统一成
+    rollout 的 `-1` 哨兵。⚠ 但值仍是 `stage_clear` 的**终局** tick（含 BONUS TIME），
+    不是 rollout 的 first-clear tick；只能判 presence（`clearTick >= 0`），不得当
+    first-clear 用（plan §8 口径速查）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in (
+        "lives",
+        "baseWallTotal",
+        "baseWallIntact",
+        "basePressureSamples",
+        "enemyDist",
+    ):
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    # `baseAlive` 在报告里是 bool，metrics 列是 1/0（与 rollout `buildMetricsRow` 同型）。
+    # `null` = 无读数（整键省略）；只有明确 `False` 才写 0（不得把未知读成「基地已失」）。
+    alive = manifest.get("baseAlive")
+    if alive is not None:
+        out["baseAlive"] = 1 if alive else 0
+    # 报告顶层只有 mean/samples（R11）；sum 优先取 telemetry 的原值，再退回乘积。
+    total = _telemetry(manifest).get("basePressureSum")
+    samples = manifest.get("basePressureSamples")
+    if total is not None:
+        out["basePressureSum"] = total
+    else:
+        mean = manifest.get("basePressureMean")
+        if (
+            isinstance(mean, (int, float))
+            and not isinstance(mean, bool)
+            and isinstance(samples, (int, float))
+            and not isinstance(samples, bool)
+        ):
+            out["basePressureSum"] = mean * samples
+    if "clearTick" in manifest:
+        tick = manifest["clearTick"]
+        out["clearTick"] = -1 if tick is None else tick
+    # 分敌种四列：索引序 = ENEMY_KIND_ORDER = [basic, fast, power, armor]（与 METRICS 同序）。
+    for prefix, key in (("kills", "killsByKind"), ("hits", "hitsByKind")):
+        kinds = manifest.get(key)
+        if not isinstance(kinds, list):
+            continue
+        for idx, name in enumerate(("Basic", "Fast", "Power", "Armor")):
+            if idx < len(kinds) and kinds[idx] is not None:
+                out[f"{prefix}{name}"] = kinds[idx]
+    # 切片 5：`export-eval-game.ts` 顶层已直出（终局快照 / 决策步累计）。
+    # `pickupDist` 的 -1 是合法哨兵（无存活拾取/玩家不在场），不是「缺键」。
+    for k in (
+        "pickupDist",
+        "thBreach",
+        "thBreachAimed",
+        "thDirect",
+        "thDirectAimed",
+        "thShotsAtBaseCum",
+        "thBulletsAtBase",
+        "thCostBreach",
+        "thCostBreachAimed",
+        "thCostDirect",
+        "thCostDirectAimed",
+    ):
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_metric_fields(manifest: dict | None) -> dict:
-    """**metrics 族的唯一聚合入口** = v8 ∪ v9 ∪ v10 ∪ v11 ∪ v12 ∪ v13 ∪ mechanism。
+    """**metrics 族的唯一聚合入口** = extra ∪ v8 ∪ v9 ∪ v10 ∪ v11 ∪ v12 ∪ v13 ∪ mechanism。
 
     为什么要有它（2026-10-19）：v8–v13 六个族在**两处**行构造点逐族展开
     （`eval_rows.eval_row` 与 `trainer/batch_runner.py`），加一族就要改两处、且容易漏一处
@@ -299,6 +427,7 @@ def eval_metric_fields(manifest: dict | None) -> dict:
     """
     out: dict = {}
     for fn in (
+        eval_extra_fields,
         eval_v8_fields,
         eval_v9_fields,
         eval_v10_fields,
@@ -376,6 +505,9 @@ def eval_row(
         "stuckTicks": manifest.get("stuckTicks"),
         # 机制闸（plan/r5-next §5.3）：wallPress/千 的分子/分母；缺键 = 整键省略。
         **eval_mechanism_fields(manifest),
+        # metrics v14（plan/o1-eval-metrics-remediation §6 S1）：27 列缺口全量补齐
+        # （切片 1 的 16 列 + 切片 5 让 exporter 直出的 11 列；EXEMPT 已清空）。
+        **eval_extra_fields(manifest),
         # metrics v8 危险暴露四列（与 batch_eval.record 同源，见 eval_v8_fields）。
         **eval_v8_fields(manifest),
         # metrics v9 命中方位 + 穿越税观测族（与 batch_eval.record 同源，见 eval_v9_fields）。

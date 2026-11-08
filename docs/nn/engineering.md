@@ -25,6 +25,46 @@
 
 ---
 
+## §115 eval 账本补全 27 列：切片 1 补 16 + 切片 5 补 11，`METRICS` 过桥 + known 分母（2026-11-08）
+
+**现场**：`o1` 分析脚本用 `<out>.run/eval_log.jsonl` 复算 Φ 时把
+`where(clearTick>=0,1,0)` 算成恒真——行里根本没有 `clearTick`；`eval-course-ckpt.ts::summarize`
+对缺列 `?? 0`，把「没读数」印成 `0.00`。27 列缺口的实测切分（评审 bf P0-1）：
+16 列可补（7 列报告顶层直取 + 9 列可派生：`basePressureSum` / 分敌种 kills·hits）+ **11 列
+上游无值**（`pickupDist` + `th*` 10 列，原先只在 `export-rl-rollout.ts`）。切片 5 已把
+这 11 列补进 eval 导出器。
+
+**决定**（plan/o1-eval-metrics-remediation v3 §11）：
+
+1. `worker/eval_rows.py` 新增 `EVAL_EXTRA_KEYS`(27) / `EVAL_METRIC_EXEMPT_KEYS`(0) /
+   `eval_extra_fields()`，挂进 `eval_metric_fields` ⇒ `eval_row` 与 `batch_runner.record`
+   两个行构造点同时生效（只改 `_to_tool_row` 会「测试绿、假零照旧」）；
+2. `clearTick` 只统一**哨兵**（`null`→`-1`），值仍是 `stage_clear` 的**终局** tick
+   （含 BONUS TIME），只能判 presence，不得当 rollout 的 first-clear；
+3. `_to_tool_row` 按 `biz.reward_library.METRICS` **原样过桥**，不再逐列白名单；
+   TS 本机 worker 同步写 27 列 + `EvalCourseRow` optional 字段；
+4. `summarize` 的可选均值列改 **known 分母**（`meanKnown` / `KNOWN_MEAN_KEYS`，
+   0 局有键 ⇒ `N/A`），与 `v11KnownDelta` 同规；
+5. 切片 5：`export-eval-game.ts` 用 `nearestPickupDist` 落 `pickupDist` 终局快照；`threatSplit`
+   落四轴/在飞弹终局快照，成本流按**决策步** +min(2, 轴) 累计（与 rollout `buildMetricsRow`
+   同刻，逐拍会差 K 倍），`thShotsAtBaseCum` 按 `bullet_fired` 事件累计；`EXEMPT` 清空。
+6. 守卫住 `nn-training/tests/`：`set(METRICS) - set(row) == EXEMPT`（现为空集），删一列即红。
+
+**分期（已兑现）**：`pickupDist` + `th*` 要改 codehash 集内的 `export-eval-game.ts` 并新增
+`threatSplit` 采样 ⇒ 先登记为切片 5、在维护窗口落地（2026-11-08 完成）；**被否决**：只在
+汇总显示层标注「缺列」（治不了分析脚本把哨兵算成恒真）；把补齐逻辑放 `batch_runner.py`
+（LOC 990/1000，逐列展开必撞 LOC 闸）。
+
+**顺手修（测试隔离）**：`test_serve_bc` 的 `world` fixture 只打桩
+`run_rl._acquire_run_rl_lock`，漏了 `loop_serve._setup` 的 `acquire_lock`（`loop_serve.py:428`）
+⇒ 测试在仓根落 `.run_bc.bc-int.lock`，同一 pytest worker 的后续用例被「未给身份指纹」拒启。
+两处都打桩、路径只记一次（`locks` 断言不变）。
+
+**验收**：`bun run check` 2687 tests / 2670 pass / 0 fail；`bun run build` 绿；NN gate
+**5808 passed / 3 skipped**（65s）；`test_eval_metric_columns.py` 9 例（含删 `clearTick`
+负测试）、`export-eval-game-metrics.test.ts` 2 例、`eval-course-ckpt-known.test.ts` 2 例；
+仓根不再残留 `.run_bc.*.lock`。
+
 ## §114 pygate 慢用例：两条单测在真连公网 HTTPS（2026-11-08）
 
 **现场**：`bun run pygate` 74.6s；一次全量 `--durations=0` 里最慢单条只有 4.58s，Top30 合计

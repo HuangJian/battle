@@ -123,6 +123,38 @@ export interface EvalCourseRow {
   stopRuns?: number[]
   /** EV 标定用（B3）：本局访问格数；旧行缺席即无。 */
   cellsVisited?: number
+  /** metrics v14（plan/o1-eval-metrics-remediation §6 S1）：与 rollout `METRICS` 同名的
+   *  16 列。此前只在 eval 报告顶层 / Python 账本里，本行契约缺席。旧 bundle 的行缺席 =
+   *  无信号（与 v8–v13 同约：不伪造 0）。`clearTick` 统一为 `-1` 哨兵。 */
+  lives?: number
+  baseAlive?: number
+  baseWallTotal?: number
+  baseWallIntact?: number
+  basePressureSum?: number
+  basePressureSamples?: number
+  clearTick?: number
+  enemyDist?: number
+  killsBasic?: number
+  killsFast?: number
+  killsPower?: number
+  killsArmor?: number
+  hitsBasic?: number
+  hitsFast?: number
+  hitsPower?: number
+  hitsArmor?: number
+  /** metrics v13（切片 5）：`pickupDist` + 基地威胁四轴/成本流/发射累计。
+   *  与 Python `eval_rows.eval_extra_fields` 同源同义；`pickupDist` 无读数 = -1 哨兵。 */
+  pickupDist?: number
+  thBreach?: number
+  thBreachAimed?: number
+  thDirect?: number
+  thDirectAimed?: number
+  thShotsAtBaseCum?: number
+  thBulletsAtBase?: number
+  thCostBreach?: number
+  thCostBreachAimed?: number
+  thCostDirect?: number
+  thCostDirectAimed?: number
 }
 
 self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
@@ -219,6 +251,39 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         idleTicks: res.idleTicks,
         stopRuns: res.stopRuns,
         cellsVisited: res.cellsVisited,
+        // metrics v14（plan/o1-eval-metrics-remediation §6 S1）：与 Python
+        // `eval_rows.eval_extra_fields` 同源同义；`clearTick` 的 null 统一成 -1 哨兵
+        // （值仍是**终局** tick，只能判 presence，不得当 first-clear 用）。
+        lives: res.lives,
+        baseAlive: res.baseAlive === undefined ? undefined : res.baseAlive ? 1 : 0,
+        baseWallTotal: res.baseWallTotal,
+        baseWallIntact: res.baseWallIntact,
+        basePressureSum:
+          res.basePressureMean === undefined || res.basePressureSamples === undefined
+            ? undefined
+            : res.basePressureMean * res.basePressureSamples,
+        basePressureSamples: res.basePressureSamples,
+        clearTick: res.clearTick === undefined ? undefined : (res.clearTick ?? -1),
+        enemyDist: res.enemyDist,
+        killsBasic: res.killsByKind[0],
+        killsFast: res.killsByKind[1],
+        killsPower: res.killsByKind[2],
+        killsArmor: res.killsByKind[3],
+        hitsBasic: res.hitsByKind[0],
+        hitsFast: res.hitsByKind[1],
+        hitsPower: res.hitsByKind[2],
+        hitsArmor: res.hitsByKind[3],
+        pickupDist: res.pickupDist,
+        thBreach: res.thBreach,
+        thBreachAimed: res.thBreachAimed,
+        thDirect: res.thDirect,
+        thDirectAimed: res.thDirectAimed,
+        thShotsAtBaseCum: res.thShotsAtBaseCum,
+        thBulletsAtBase: res.thBulletsAtBase,
+        thCostBreach: res.thCostBreach,
+        thCostBreachAimed: res.thCostBreachAimed,
+        thCostDirect: res.thCostDirect,
+        thCostDirectAimed: res.thCostDirectAimed,
       })
     }
     ;(self as any).postMessage({ results: rows })

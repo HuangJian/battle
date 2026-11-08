@@ -11513,3 +11513,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （2683 tests）。真机 kill 验收未做。
 - **全文** → `docs/nn/remote-transport.md` §144；规格 →
   `plan/rollout-node-tunnel-death-blindspot.plan.md`。
+
+## §2026-11-08-goalnn-eval-metric-columns（eval 账本补全 27 列；切片 5 收掉豁免，`METRICS` 过桥）
+
+- **背景**：`o1` 分析脚本拿 `<out>.run/eval_log.jsonl` 复算 Φ 时 `where(clearTick>=0,1,0)`
+  恒真（行里没有 `clearTick`）；`eval-course-ckpt.ts::summarize` 对缺列 `?? 0`，把「没读数」
+  印成 `0.00`。27 列缺口实测 = 16 列可补（7 直取 + 9 派生）+ **11 列上游无值**
+  （`pickupDist` + `th*` 10 列，原先只在 `export-rl-rollout.ts`）；切片 5 已把这些
+  列补进 eval 导出器。
+- **决定**：补齐逻辑住 `worker/eval_rows.py::eval_extra_fields`，挂进 `eval_metric_fields`
+  ⇒ `eval_row` 与 `batch_runner.record` 两个行构造点同时生效；`clearTick` 只统一**哨兵**
+  （`null`→`-1`），值仍是 `stage_clear` 的**终局** tick（含 BONUS TIME），只能判 presence；
+  `_to_tool_row` 按 `METRICS` 原样过桥；`summarize` 可选均值列改 known 分母（0 局有键 ⇒ `N/A`）；
+  切片 5 在 `export-eval-game.ts` 补 `pickupDist` + `th*`（成本流按决策步累计），
+  `EVAL_METRIC_EXEMPT_KEYS` 清空；守卫 `METRICS = 行键`（空集豁免仍保留为未来登记处）。
+- **分期**：`pickupDist` + `th*` 要改 codehash 集内的 `export-eval-game.ts` 并新增 `threatSplit`
+  采样 ⇒ 先登记切片 5、维护窗口落地（2026-11-08 完成）。**被否决**：只标注「缺列」不改行
+  （治不了恒真）；补齐逻辑放 `batch_runner.py`（LOC 990/1000，逐列展开必撞闸）。
+- **顺手修**：`test_serve_bc` 的 `world` fixture 漏打桩 `loop_serve._setup` 的
+  `acquire_lock`，测试在仓根落 `.run_bc.bc-int.lock`，同 worker 后续用例被拒启。
+- **验收**：`bun run check` 2687 tests / 0 fail；`bun run build` 绿；NN gate **5808 passed /
+  3 skipped**（65s）；`test_eval_metric_columns.py` 9 例（含删 `clearTick` 负测试）、
+  `export-eval-game-metrics.test.ts` 2 例。
+- **全文** → `docs/nn/engineering.md` §115；规格 → `plan/o1-eval-metrics-remediation.plan.md` §11；
+  评审 → 同目录 `.review-bf.md`。
