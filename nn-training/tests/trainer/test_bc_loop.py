@@ -26,12 +26,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.bc_loop as bc_loop
+import trainer.bc_round_job as bc_round_job
 from remote import hub_client, hub_http
 from trainer.bc_loop import BcLoop, BcRuntime, find_round_job, prune_remote_jobs
 from worker.bc_config import load_bc_course
 from worker.bc_ledger import (
     ROUND_DONE_EVENT,
     ROUND_JOB_MISSING_EVENT,
+    ROUND_LAND_REJECTED_EVENT,
     ROUND_REOPENED_EVENT,
     read_events,
 )
@@ -158,7 +160,7 @@ def rec(monkeypatch: pytest.MonkeyPatch) -> Recorder:
 
     monkeypatch.setattr(bc_loop, "collect_corpus", collect_corpus)
     monkeypatch.setattr(bc_loop, "publish_bc_job", publish_bc_job)
-    monkeypatch.setattr(bc_loop, "verify_and_land_bc", verify_and_land_bc)
+    monkeypatch.setattr(bc_round_job, "verify_and_land_bc", verify_and_land_bc)
     monkeypatch.setattr(bc_loop, "archive_round", archive_round)
     monkeypatch.setattr(bc_loop, "train_local_bc", train_local_bc)
     monkeypatch.setattr(bc_loop, "mark_job_completed", lambda p, jid: r.marked.append(str(jid)))
@@ -394,6 +396,28 @@ def test_reentrant_wait_does_not_republish(tmp_path: Path, hub: FakeHub, rec: Re
     assert rec.landed == [(1, "jid1")] and rec.archived == [1]
     done = [e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_DONE_EVENT]
     assert [e["it"] for e in done] == [1]
+
+
+def test_land_rejection_is_loud_and_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """落位拒收不得被吞成 retry：账本记一条，抛 SystemExit（serve 层映射 ABORT）。"""
+    loop = _loop(tmp_path, iters=1)
+
+    def reject(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("BC 校验失败: data_fp 不匹配（云=10275b6e… 本地=e3b0c442…）")
+
+    monkeypatch.setattr(bc_round_job, "verify_and_land_bc", reject)
+    with pytest.raises(SystemExit):
+        loop._land(1, "jid-reject", {"job_id": "jid-reject"}, {"metrics": {}})
+
+    events = [
+        e
+        for e in read_events(loop.runtime.jsonl_path)
+        if e.get("event") == ROUND_LAND_REJECTED_EVENT
+    ]
+    assert len(events) == 1
+    assert events[0]["it"] == 1 and events[0]["jid"] == "jid-reject"
 
 
 def test_completed_round_is_skipped_without_any_publish(

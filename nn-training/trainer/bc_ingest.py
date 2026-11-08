@@ -275,6 +275,19 @@ class BcWait:
                 # 冒烟回显（`{"smoke": True}`）不是真实训练结果：本轮作废、零 epoch，
                 # 审计只会把空账本写成「缺全部」——空轮不落任何账本事件。
                 if not loaded.get("smoke"):
+                    # 末轮 flush（2026-11-08）：READY 之后不会再走下面的 PENDING 分支，
+                    # 短 job（短于一个轮询间隔）会一次 drain 都没有。审计前必须把最后
+                    # 一批 /bc-metrics 入账，否则末轮（常是唯一一轮）的 bc_epoch 永久丢失。
+                    ingest_bc_metrics(
+                        self,
+                        hub_url=hub_url,
+                        token=token,
+                        jsonl_path=jsonl_path,
+                        it=it,
+                        course=course,
+                        cfg=cfg,
+                        logger=logger,
+                    )
                     try:
                         audit = audit_bc_ledger(self.ledger_epochs, int(course.train.epochs))
                         append_ledger(

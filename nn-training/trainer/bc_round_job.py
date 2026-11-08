@@ -1,4 +1,4 @@
-"""bc_round_job —— BC `remote-jobs/` 目录的读与收敛（G4：隐藏目录 + hub 对账）。
+"""bc_round_job —— BC `remote-jobs/` 目录的读/收敛 + 一轮结果落位（G4：隐藏目录 + hub 对账）。
 
 **为什么单独成家**：`trainer/bc_loop.py` 的有效 LOC 已顶到预算（<1000），而这两段
 都不是编排本身：`find_round_job` 只回答「这一轮盘上还有没有能认领的 job」，
@@ -14,20 +14,87 @@
    resume 已不可用，新 job 从课程级索引续训）；`unreachable` ⇒ **保守认领**，不重发。
    `done` 归 alive：结果已经在 hub 上，认领后落位；重发只会撞旧 result 永远等不到新结果。
 
-**不写账本、不发布**：这里只做只读判定，回调 `on_missing` 由引擎决定记什么。
+**读面不写账本、不发布**：`find_round_job` / `prune_remote_jobs` 只做只读判定，回调
+`on_missing` 由引擎决定记什么。`land_bc_result` 是落位面：只在校验失败时写
+`bc_land_rejected`（确定性终局），成功路径仍由引擎写 `job_completed` / 轮完成事件。
 """
 
 from __future__ import annotations
 
 import json
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from common.log import log
+from remote.hub_client import verify_and_land_bc
 from remote.hub_http import JOB_CLOSED, JOB_UNKNOWN, JOB_UNREACHABLE, job_reconcile_state
+from worker.bc_config import BcCourseConfig
+from worker.bc_ledger import ROUND_LAND_REJECTED_EVENT, append_ledger
 
 MissingHook = Callable[[str, dict, str], None]
+
+
+class LandRuntime(Protocol):
+    """落位需要的最小运行时面（避免 `bc_round_job` 反向 import `bc_loop`）。"""
+
+    course: BcCourseConfig
+    traj: Path
+    data_root: Path
+    out_weights: str
+    jsonl_path: Path
+    smoke: bool
+
+
+def land_bc_result(
+    rt: LandRuntime,
+    it: int,
+    jid: str,
+    manifest: dict,
+    result: dict,
+    *,
+    log=log,
+) -> None:
+    """校验 + 落盘一轮 BC 权重；确定性拒收写账本后终止本课。
+
+    fixed 源的发布根是 `course.corpus.fixed_dir`，不是 `traj/bc-data/<round>`；落位必须
+    用同一根 + 同一 shard 命名模式 + D14 豁免，否则永远扫到空集（2026-11-08 事故）。
+    校验失败是确定性终局：写 `bc_land_rejected` 后抛 `SystemExit`（serve 层映射 ABORT），
+    不再让 `loop_runner` 把它吞成每 30s 一次的 retry。
+    """
+    round_name = "smoke" if rt.smoke else ""
+    fixed_source = rt.course.corpus.source == "fixed"
+    if fixed_source:
+        fixed_dir = str(rt.course.corpus.fixed_dir or "").strip()
+        data_root = Path(fixed_dir) if fixed_dir else rt.data_root
+    else:
+        data_root = rt.data_root / (round_name or f"it{it}")
+    try:
+        verify_and_land_bc(
+            result,
+            manifest,
+            traj_dir=str(rt.traj),
+            it=it,
+            out_weights=rt.out_weights,
+            round_name=round_name,
+            data_root=data_root,
+            fixed_source=fixed_source,
+            log=log,
+        )
+    except Exception as e:
+        append_ledger(
+            rt.jsonl_path,
+            {
+                "event": ROUND_LAND_REJECTED_EVENT,
+                "it": int(it),
+                "jid": jid,
+                "reason": f"{type(e).__name__}: {e}"[:500],
+                "ts": time.time(),
+            },
+        )
+        raise SystemExit(f"[run_bc] it{it}: 落位拒收（{jid[:12]}）——{e}") from e
 
 
 def train_tuning_meta(train: Any) -> dict[str, float | int | str]:

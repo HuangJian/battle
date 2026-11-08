@@ -17,8 +17,8 @@ import pytest
 
 import remote.hub_http as hub_http
 import trainer.bc_ingest as bc_ingest
-from trainer.bc_ingest import BcWait, ingest_bc_metrics
-from worker.bc_config import BcCourseConfig, BcEvalBlock
+from trainer.bc_ingest import READY, BcWait, ingest_bc_metrics
+from worker.bc_config import BcCourseConfig, BcEvalBlock, BcTrainBlock
 
 
 def _course() -> BcCourseConfig:
@@ -92,6 +92,45 @@ def test_late_backfill_row_is_ledgered_without_eval(
     assert evaluated == [4, 6]
     assert _ledger_epochs(ledger) == [4, 6, 5]
     assert wait.last_epoch == 6
+    assert wait.seen_metrics == 3
+
+
+def test_ready_on_first_poll_flushes_metrics_before_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第一次轮询就 READY：必须在审计前把最后一批指标入账（短 job 零次 PENDING）。"""
+    ledger = tmp_path / "training_log.jsonl"
+
+    def request(base: str, token: str, path: str, timeout: float = 0.0):
+        if path.endswith("/result"):
+            return 200, json.dumps({"metrics": {"epochs": 3}}).encode("utf-8")
+        if path.endswith("/bc-metrics"):
+            return 200, json.dumps({"rows": _rows(1, 2, 3)}).encode("utf-8")
+        return 404, b"{}"
+
+    monkeypatch.setattr(hub_http, "_request", request)
+    course = BcCourseConfig(
+        name="bc-flush",
+        train=BcTrainBlock(epochs=3),
+        eval=BcEvalBlock(every_epochs=0),
+    )
+    wait = BcWait(jid="j" * 16)
+
+    status, loaded = wait.poll_once(
+        hub_url="http://hub",
+        token="t",
+        jsonl_path=ledger,
+        it=1,
+        course=course,
+        cfg=None,
+        logger=lambda _m: None,
+    )
+
+    assert status == READY and loaded is not None
+    events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    assert [e["epoch"] for e in events if e["event"] == "bc_epoch"] == [1, 2, 3]
+    audit = [e for e in events if e["event"] == "bc_ledger_audit"]
+    assert audit and audit[-1]["complete"] is True
     assert wait.seen_metrics == 3
 
 

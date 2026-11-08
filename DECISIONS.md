@@ -11432,6 +11432,25 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   配对脚本口径同 C8（`(stage,seed)` 单元、单窗 400 局）。
 - **全文** → `reports/w1-valueonly-ppo-20261107.md`；`plan/classic35-path.plan.md` §17。
 
+## §2026-11-08-goalnn-bc-ledger-fixed-land（BC 账本末轮 flush + fixed 源落位口径 + 拒收响亮化）
+
+- **背景**：三门 fixed 源 BC 课无 `bc_round_completed` / 无轮级权重，账本只有重复审计。真实原因不是
+  「审计不 complete ⇒ 不收尾」，而是 ① `poll_once` READY 前不再 drain `/bc-metrics`（末轮丢行）；
+  ② `verify_and_land_bc` 用采集课口径（`traj/bc-data` + `bc_s*`）重算 fixed 源的 `data_fp`，
+  扫 0 个 shard ⇒ 空指纹 ≠ manifest，每次 READY 都拒收；异常又被 `loop_runner` 吞成无限 retry。
+- **决定**：① READY/非冒烟分支审计前 flush 一次指标（幂等游标）；② 落位校验新增
+  `data_root` / `fixed_source`，与发布端共用 fixed 根 + `*_s*_seed*` + D14 豁免；③ 落位失败写
+  `bc_land_rejected` 后抛 `SystemExit`（`bc_round_job.land_bc_result`；serve 映射 ABORT），
+  确定性拒收不自动重试。审计保持观测面。
+- **被否决**：把审计改成「缺行也 complete」（藏缺号）；只补 flush（fixed 课仍永不落位）；
+  继续无限 retry（账本无声、GPU 时间空转）；让 `_land` 从 result 补账本（result 无逐 epoch history）。
+- **后果**：fixed 课终于能写完成事件与轮级权重；`bc_land_rejected` 是新的可 grep 终局信号；
+  采集课路径逐字节不变（显式传同一根 + 默认 pattern）。
+- **验收**：`test_bc_ingest_backfill` READY-on-first-poll、`test_bc_land_verify`（新 3 例）、
+  `test_bc_loop` 拒收终局；聚焦 71 passed；完整 NN gate 5791 passed / 11 skipped；根
+  `bun run check` 2672 pass / 11 skip、build 过。
+- **全文** → `docs/nn/training-stack.md` §71；规格 → `plan/bc-ledger-gap.plan.md` §10。
+
 ## §2026-11-08-goalnn-rollout-tunnel-silent-death（隧道静默死：判死归一 + 探针姿势，不加 force 重注册）
 
 - **背景**：2026-11-08 DSW 的 cloudflared 进程消失，节点 `url` 非空、`cf_log` 尾部仍是旧域名、

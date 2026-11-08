@@ -33,6 +33,9 @@ ROUND_REOPENED_EVENT = "bc_round_reopened"
 #: 盘上 job 已不可认领（hub 404 / failed / frozen / cancelled）——只记一次，随后允许重发。
 #: `resume_lost` 指**该 jid 的** per-jid resume 不再可用；新 job 仍可能从课程级索引接续。
 ROUND_JOB_MISSING_EVENT = "bc_round_job_missing"
+#: 落位**拒收**事件名（2026-11-08）：确定性校验失败（data_fp/commit/init 不匹配）不进
+#: retry 环——写一条人读原因后终止本课（`BcLoop._land` → SystemExit → serve ABORT）。
+ROUND_LAND_REJECTED_EVENT = "bc_land_rejected"
 #: job 收口事件名（`remote.hub_client.mark_job_completed` 写；用于分辨「这轮的 job 还没回来」）。
 JOB_DONE_EVENT = "job_completed"
 #: job 发布事件名（`remote.hub_client.publish_job` 写；「已发布未回传」的起点）。

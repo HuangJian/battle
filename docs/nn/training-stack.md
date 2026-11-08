@@ -8,6 +8,43 @@
 
 ---
 
+## §71 BC 账本末轮 flush + fixed 源落位口径 + 拒收响亮化（2026-11-08）
+
+**背景**：三门 fixed 源课（`w1-valueonly` / `w2-pickup-ft` / `w2-pickup-heads`）没有
+`bc_round_completed`、没有轮级 `weights.json`，账本里只有重复的 `bc_ledger_audit`。原以为
+「审计不 complete ⇒ 不收尾」，实际是两条独立故障：① `poll_once` 在 `READY` 分支先审计再返回，
+READY 之后不会再走 `PENDING` 的 drain ⇒ 短 job 末轮/全轮丢行；② `verify_and_land_bc` 重算
+`data_fp` 时用采集课口径（`traj/bc-data/<round>` + `bc_s*`），fixed 源的 shard 在 `fixed_dir`、
+命名常为 `rl_s*` ⇒ 扫 0 个、空指纹 `e3b0c442…` ≠ manifest，每次 READY 都拒收。审计本身只是
+观测面：`_close_round` 在落位成功后无条件写完成事件，`w2-pick-collect` 0 条 `bc_epoch` 仍完成。
+
+**实现**
+- `trainer/bc_ingest.py::BcWait.poll_once`：200/非冒烟分支先调 `ingest_bc_metrics` 再审计
+  （幂等游标 `seen_metrics` + `ledger_epochs` 去重），补上末轮 flush。
+- `remote/hub_client.py::verify_and_land_bc`：新增 `data_root` / `fixed_source`；fixed 时
+  `course_fp=""` / `corpus_fp=""`（D14 豁免）、`name_pattern="*_s*_seed*"`、扫 `fixed_dir`；
+  采集课仍走 `traj/bc-data/<round>` + `bc_s*`。
+- `trainer/bc_round_job.py::land_bc_result`（`bc_loop._land` 只转调）：按 `course.corpus.source`
+  解析同一根（fixed 空串回退 `rt.data_root`），把 root/口径传给校验；校验失败写
+  `bc_land_rejected`（it/jid/reason）后抛 `SystemExit`，由 `loop_serve.execute` 映射为 ABORT，
+  不再被 `loop_runner` 吞成每 30s 的 retry。
+- `worker/bc_ledger.py`：新增 `ROUND_LAND_REJECTED_EVENT = "bc_land_rejected"`。
+
+**验证**
+- `tests/trainer/test_bc_ingest_backfill.py`：READY-on-first-poll（零次 PENDING）⇒ 3 条
+  `bc_epoch` + audit complete；旧实现红（`[] != [1,2,3]`）。
+- `tests/remote/test_bc_land_verify.py`（新，3 例）：fixed 在外置根落位成功 / 采集课默认根回归 /
+  不传 root 的旧口径仍响亮拒收；旧实现因 `data_root` 未定义而红。
+- `tests/trainer/test_bc_loop.py`：落位拒收 ⇒ `bc_land_rejected` + `SystemExit`（旧实现只抛
+  `RuntimeError`、无事件）。
+- 聚焦 **71 passed**（BC 相关 + layering/文本预算/LOC 守卫）；完整 NN gate **5791 passed /
+  11 skipped**；根 `bun run check` **2672 pass / 11 skip / 0 fail**（2683 tests）；`bun run build` 过。
+
+**边界**：只修训练侧（不改云端/任务侧）；`bc_land_rejected` 是终局判决，确定性拒收不自动重试；
+要重试就新课程名 + 新目录（§15.5）。
+
+---
+
 ## §70 控制台停课顺手清本课锁 + serve 跑课前重取闸（2026-11-07）
 
 **背景**：`nn-training/` 积了 ~101 个 `.lock`（其中 90 个持有者已死的陈旧锁）。成因：共享

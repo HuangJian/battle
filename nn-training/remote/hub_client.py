@@ -1507,6 +1507,8 @@ def verify_and_land_bc(
     it: int,
     out_weights: str,
     round_name: str = "",
+    data_root: str | Path | None = None,
+    fixed_source: bool = False,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> str:
     """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
@@ -1514,6 +1516,8 @@ def verify_and_land_bc(
     校验（无 init-weights fencing——BC 无 warm-start，改对账 manifest 自带指纹）：
       1. init_weights_fp == manifest 值（防 result 错配 job）；
       2. data_fp == 本地对当前轮 bc shard 集重算（防云训练了别的语料，D12 同语义）；
+         `fixed_source=True` 时扫 `data_root`、按 `*_s*_seed*` 认 shard 并跳过 D14
+         （与发布端同口径；2026-11-08 前这里按采集课默认根扫，fixed 课永远空指纹）；
       3. commit_echo == manifest.commit（代码版本一致）。
     落盘：weights_json 原子写 out_weights（无 opt tar——BC v1 不跨轮续训）。
     返回落盘 weights 的指纹（wver）。
@@ -1523,14 +1527,19 @@ def verify_and_land_bc(
         raise HubClientError(
             "BC 校验失败: init_weights_fp 不匹配（result 与 manifest 错配）——拒收"
         )
+    # 与发布端同口径（2026-11-08）：fixed 源的 shard 在 fixed_dir、命名常为 rl_s*，
+    # 且显式跳过 D14；按采集课的 traj/bc-data + bc_s* 重算会扫到 0 个 shard，
+    # 得到空指纹 e3b0c442…，于是每次 READY 都拒收（w1/w2 fixed 课的实际死因）。
     local_fp = data_fp(
         iter_bc_shard_dirs(
             traj_dir,
             it,
             round_name,
             log=log,
-            course_fp=str(m.get("course_fp") or ""),
-            corpus_fp=str(m.get("corpus_fp") or ""),
+            course_fp="" if fixed_source else str(m.get("course_fp") or ""),
+            corpus_fp="" if fixed_source else str(m.get("corpus_fp") or ""),
+            data_root=data_root,
+            name_pattern="*_s*_seed*" if fixed_source else "bc_s*_seed*",
         )
     )
     if result["data_fp"] != local_fp:

@@ -56,10 +56,16 @@ from remote.hub_client import (
     iter_bc_shard_dirs,
     mark_job_completed,
     publish_job,
-    verify_and_land_bc,
 )
-from trainer.bc_round_job import find_round_job as _find_round_job
-from trainer.bc_round_job import prune_remote_jobs, train_tuning_argv, train_tuning_meta
+from trainer.bc_round_job import (
+    find_round_job as _find_round_job,
+)
+from trainer.bc_round_job import (
+    land_bc_result,
+    prune_remote_jobs,
+    train_tuning_argv,
+    train_tuning_meta,
+)
 from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
 from worker.bc_collect import collect_corpus as _collect_corpus
@@ -1311,15 +1317,7 @@ class BcLoop:
     def _land(self, it: int, jid: str, manifest: dict, result: dict) -> None:
         """落位 + 归档 + 账本（顺序与改造前 `main()` 逐条同义）。"""
         rt = self.runtime
-        verify_and_land_bc(
-            result,
-            manifest,
-            traj_dir=str(rt.traj),
-            it=it,
-            out_weights=rt.out_weights,
-            round_name=("smoke" if rt.smoke else ""),
-            log=self.log,
-        )
+        land_bc_result(rt, it, jid, manifest, result, log=self.log)
         mark_job_completed(rt.jsonl_path, jid)
         self._close_round(it, dict(result.get("metrics") or {}), smoke=rt.smoke)
 

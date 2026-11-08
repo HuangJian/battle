@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.bc_loop as bc_loop
+import trainer.bc_round_job as bc_round_job
 import trainer.loop_core as loop_core
 import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
@@ -236,7 +237,7 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
 
     monkeypatch.setattr(bc_loop, "collect_corpus", collect_corpus)
     monkeypatch.setattr(bc_loop, "publish_bc_job", publish_bc_job)
-    monkeypatch.setattr(bc_loop, "verify_and_land_bc", verify_and_land_bc)
+    monkeypatch.setattr(bc_round_job, "verify_and_land_bc", verify_and_land_bc)
     monkeypatch.setattr(bc_loop, "archive_round", archive_round)
     monkeypatch.setattr(bc_loop, "find_round_job", find_round_job)
     # 注入点 = HTTP 面的所有者；`set_cloud_halt` 仍走 `hub_client` 的转发名（调用方延迟 import 它）。
