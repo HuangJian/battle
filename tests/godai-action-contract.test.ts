@@ -296,6 +296,8 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
         ...DEFAULT_GOD_AI_PARAMS,
         // A23 纪元：本用例测 action contract 自身，与转身开火无关。
         turnToFireMode: 0,
+        // A9 mode2 纪元：同上，预封线会改写 S34 seed11 的轨迹 ⇒ 固定回 mode-1 口径。
+        baseLaneSealMode: 1,
         actionContractMode: 0,
       },
       maxTicks: 8000,
@@ -305,7 +307,7 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
       stage: STAGES[33],
       difficulty: 'hard',
       stageIndex: 0,
-      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, turnToFireMode: 0 },
+      godAIParams: { ...DEFAULT_GOD_AI_PARAMS, turnToFireMode: 0, baseLaneSealMode: 1 },
       maxTicks: 8000,
     })
     expect(a.outcome).toBe(b.outcome)
@@ -336,6 +338,8 @@ describe('mode gating (byte-identical default, active only when > 0)', () => {
         ...DEFAULT_GOD_AI_PARAMS,
         // A23 纪元：本用例测 action contract 自身，与转身开火无关。
         turnToFireMode: 0,
+        // A9 mode2 纪元：同上，预封线会改写 S34 seed11 的轨迹 ⇒ 固定回 mode-1 口径。
+        baseLaneSealMode: 1,
         actionContractMode: 1,
       },
       maxTicks: 8000,
