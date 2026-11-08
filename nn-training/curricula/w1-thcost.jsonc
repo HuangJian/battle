@@ -1,0 +1,207 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-07 21:30；优先级高于下方立项块）
+//   **判负**：三窗 Δwin it20 +7.0pp(p=.0087) → it50 0.0(p=1) → it100 **−9.5pp**
+//   (McNemar 50:88 χ²=10.46 p=.0012)；Δbase it100 **+9.25pp**、Δkills −1.65、
+//   Δcells −9.4。run-average 21 点 Δ +0.19pp、CI 跨零 ⇒ 早期优势是收敛速度红利，
+//   null 在 it50 追平、it100 反超。判据 ②（base −8pp）未过且反向；③ 地板击穿。
+//   机制量：ΣthCost 总量 4/4 关降（Δ −10.19、CI 不跨零），但速率口径 2/4 关且
+//   CI 跨零 ⇒ 下降主要来自局更短（−5.5% samples），不是每拍威胁率下降。
+//   根因：稠密信号学到的是「缩短暴露」，不是「在威胁下守住基地」。
+//   `entropy` 1.401 / kl 3.5e−3，无 error/熔断；腿仍在跑（it102）⇒ **用户手工停课**。
+//   全文 `reports/w1-close-20261107.md`；不要再加 `wThCost` 剂量（方向可反转）。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w1-thcost —— P3-A：把基地威胁事件搬到**当拍**（2026-11-07 立项，已判负）
+//
+// 0. 一句话：相对 `w1-null` **唯一变量 = reward 新增一行基地威胁流价 + 一个参数
+//    `wThCost`**。判「事件当拍的局部价能不能移动守家行为」，不是判「调价格能不能涨 win」。
+//
+// 1. 立项依据（`plan/classic35-path.plan.md` v5 §8 / §16；v6 起跑线修正）
+//    · C4 离线 AUC：full .952–.974、去 12 维只掉 .024–.029 ⇒ `redundant_signal`，
+//      辅助头边际低，先做 P3-A；critic `−V` AUC .872–.899 比 probe 低 6–8 点。
+//    · C1：10 个价格项里 6 个上限 <30 分 ⇒ 再抬系数是白烧轮数；本项目改的是
+//      **信号的存在性**（把事件放到当拍），不是系数。
+//    · C8：统计单位 = `(stage,seed)`，旧 41 点 p 只是上界；MDE 按两个 estimand 报。
+//    · 起跑线探针（17:54，`tmp/w1-probe/`）：原题 35 关 / 36000 拍 / 350 局，
+//      z10.it233 = **9.43%**、z11-ent.it500 = 14.29%，逐关 22/35 关恒 0
+//      ⇒ 原题 it0 太低且 C2 剂量不可移植。**本腿落在与 C1–C9 同源的
+//      4 关 / 20000 拍机制脚手架**；原题留 P4 验收（7,000 局同段配对）。
+//
+// 2. 剂量（C2 实测，`tmp/p0-thcost/thcost.json` / `docs/nn/experiments.md §131`）
+//    · 200 局 / 4 关 ×50 seed，z10.it233 on-policy：ΣthCost pooled
+//      p50 88.5 / **p95 170** / p99 241 / **max 262**。
+//    · 以「p95 局总成本 = 0.3 × wWin = 18 分」定单价 ⇒ `wThCost = 18/170 = 0.1059`
+//      （分关 0.0913–0.1357，stage 16 最高）。
+//    · **满量程 = 0.1059 × 262 = 27.75 < 0.5×wWin = 30** ⇒ 过 `MEMORY.md:50`
+//      硬闸 #6，**不需要 cap**。这也避开 `r5-next.plan.md:131-133` 的「全局 cap
+//      饱和后继续暴露免费」；被停的是 cap，不是累计量。
+//    · ⚠ 该剂量只对 **4 关 / 20000 拍 / z10.it233 分布**成立。换到原题 36000 拍
+//      或换起点权重，必须用 `p0_thcost.py` 在**本腿真正起点分布**上重算，禁止照抄。
+//
+// 3. 变量账（相对 `w1-null`，逐字 diff 只有 3 处）
+//    · `reward.formula` 末尾新增
+//      `"- wThCost*(thCostBreach+thCostBreachAimed+thCostDirect+thCostDirectAimed)"`
+//    · `reward.params` 新增 `"wThCost": 0.1059`
+//    · name / out / traj / backup_dir / backup_prefix
+//    其余（terminal 四项 / 17 项原 params / lr / kl / gamma / lam / decision_k /
+//    target_transitions / breakers / ent_break / paired_rotate_seed 20261107）逐字同。
+//
+// 4. 为什么这一行能绕开 19.3 步信用窗
+//    · 四轴是**逐决策累计**成本流（`export-rl-rollout.ts:784-787,878-881`，
+//      每步增量 = `min(2, count)`）；`thShotsAtBaseCum` 只在发射拍扣。
+//    · `Φ` 持有值 + `r = Φ[i+1] − Φ[i]`（`reward_library.py:966`）⇒ 差分自动给出
+//      **发射当拍**的增量罚，不需要穿过 GAE 的 `(γλ)^k` 衰减把终局 −35 传回来。
+//    · 前置是**减号**（硬闸 #4 同型自检）：成本上升 ⇒ Φ 下降 ⇒ r 为负。
+//
+// 5. 硬闸自检（开课前逐条核，未过不许开课）
+//    · #1 terminal 四项齐（timeout/lives_exhausted/base_destroyed/stage_clear）✓
+//    · #2 `target_transitions 24576 = 24 × mb 1024` ✓
+//    · #6 满量程 27.75 < 30 ✓（见 §2）
+//    · #7 **✅ 已执行（17:54，`tmp/w1-probe/check-outcome.py` → `.txt`）**：
+//      用 `CourseConfig.reward_spec()` + `build_reward_fn` 对**本腿起点分布**
+//      （`tmp/p0-c9/rollouts`，200 局 / 4 关 / 20000 拍 / metrics v16）逐局
+//      Φ 代回，按 outcome 拆开：
+//        w1-null    Δret(timeout − gameover) = **+185.91**
+//        w1-thcost  Δret(timeout − gameover) = **+183.93**（>0 过闸）
+//      排序 clear(315) > timeout(205) > gameover(14/61) 未翻；新增项对 200 局
+//      单调负向（mean −10.01、max 降幅 −27.75 = 满量程），没有造出送死套利。
+//      边界：timeout 组仅 6 局，功效低；这是**奖励函数方向性硬闸**，不是策略
+//      行为读数。换奖励 schedule / 换起点分布必须重算。
+//    · `gamma .998 / lam .95 / decision_k 10` 显式写（防呆断言，plan §4）。
+//
+// 6. 判据（plan §8-A 三行，各有失败面；预注册，不再开课后改）
+//    · 分层：**整线验收主读数 = win**（11-05 裁决 #3）；机制量/基毁率是
+//      **P3 内部阶段门**，只判「机制有没有动」，不宣布策略变好。
+//    · ① 机制：`ΣthCost` 的 p50/p95 在 **≥3/4 关下降**，幅度 ≥ C2 的批内噪声
+//      （p95 95% CI [154.05,187.00] 即本批噪声上界）。
+//    · ② 目标：`base_destroyed` **下降 ≥8pp**（≈ C8 单点 MDE 8.0pp@400）；
+//      主读数改用 C8 的 run-average 时 MDE 为 ±1.31pp@400，两个 estimand 分开报。
+//    · ③ 地板：`win ≥ w1-null − 2pp`，**不作非劣性判定**（400 seed 上「不低于」
+//      是零功效判据）；`timeout_rate` 不升、`cells p50` 不降、逐关 win 不塌。
+//    · 统计：同 iter/stage/seed 逐局配对；it20/50/100 三窗**分别报** McNemar，
+//      不合并；旧 z11 的 41 点 p 一律只作上界。
+//
+// 7. 止损（任一触发即停）
+//    · 机制量变化 < 本面板 MDE 持续 40 轮（按 C8 的 seed 级 CI 判，不数轮数）。
+//    · `kl > .05` / `entropy < .30` / **`entropy > 1.6`** / `mean_ret` 持续下滑 /
+//      error 行 / `cells` 中位跌破 it0 的 60%
+//      （防「缩家不出门」：贴家会降低 thCost，36000 拍下缩家 → timeout 可能仍
+//      赢过 gameover，ds M9）。**两课同护栏，任一臂先停同时停。**
+//    · `timeout_rate` 相对 null 明显上升 ⇒ 立即停，回 §5 #7 重做 Φ 拆算。
+//
+// 8. 已知局限
+//    · it0 **本腿首轮 in-loop eval 实测**；z11-null it0（win .182 / base .652 /
+//      kills 9.47）只作「起点加载是否正确」的哨兵，不作基线。
+//    · 外部 `eval-course-ckpt.ts` 行无 `lossDetail` ⇒ 基毁/命尽细分读 in-loop
+//      `eval_log.jsonl`，两种行不得混用。
+//    · 4 关 20000 拍是机制脚手架；P4 必须回原题 35 关 36000 拍验收。
+//    · `ent_coef` = **0.03**（18:19 用户按推荐裁定选 A，两课显式逐字同；B 降级为
+//      并行只读复核 / P4）。高熵可能稀释 thCost 机制量 ⇒ 若前 40 轮机制量被噪声
+//      淹没，另开 `.01` 底座的复现腿（**新实验**，不原地改本腿）。
+//
+// 9. 预算：300 it / 18h，eval_every 5；机制量 40 轮不动即停，不必烧满。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · §5 #7 的 outcome 拆算落盘且为绿；`load_course` 过；dashboard JSONC 过。
+//    · 与 `w1-null` 同批开、同 `paired_rotate_seed 20261107`，否则配对失效。
+//    · 开训 30 秒 `grep -h "hub=" tmp/w1-thcost/training-loop.log | tail -1`
+//      核对当时活着的 hub URL（换名会报 530）。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 诊断工具 ── `nn-training/tools/p0_thcost.py`（剂量）· `tmp/w1-probe/`（探针）
+// ── 结算节（结课时回填文件头 + `reports/w1-close-<YYYYMMDD>.md`）────────────
+//    §停课状态 §前后半配对表 §ΣthCost 按关 §训练侧四指标 §判据逐条 §归档 sha16
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "w1-thcost",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wThCost*(thCostBreach+thCostBreachAimed+thCostDirect+thCostDirectAimed)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+      "wThCost": 0.1059,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261107,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/w1-thcost/weights.json",
+  "traj": "tmp/w1-thcost",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/w1-thcost",
+  "backup_prefix": "w1-thcost",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w1-thcost → 开课（与 w1-null 同批）。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ✅ §5 #7 已过闸（见上）；仍须 **用户手工开课**，agent 不起腿。
+//   ⚠ 课程尚未开训、无真机训练读数 ⇒ 不 commit（只在真机证明有效后才提交）。

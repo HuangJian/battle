@@ -1,0 +1,168 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-07 23:06；优先级高于下方立项块）
+//   20 轮跑满（run_complete cause=iters）。**没崩，但显著更差**：
+//   it20 绝对读数 pick .416 / cells 中位 80 / base .682 ⇒ 三条主判据全过（未复现 it5 坍缩）；
+//   对照 z11-null 同点配对：Δwin −3.75pp（p=.155，不显著）、Δpick −5.14pp、
+//   Δcells −10.2、**Δbase +10.50pp（McNemar 52:94，χ²=12.08，p=.00051 显著更差）**。
+//   ⇒ **冷 critic 不是 z11-bc it5 崩因**；而「尺度对(1.07)、排序错(R² .088)」的 critic
+//   比冷 critic 更危险 —— 它给可信的错误 advantage，把策略带偏（base 显著上升）。
+//   **P2-A 的 gate 关闭**：value-only 预热不作独立起点；行为先验只走 P2-B 窗口微调。
+//   全文 `reports/w1-valueonly-ppo-20261107.md`、`DECISIONS §2026-11-07-goalnn-w1-valueonly-ppo`。
+//   ⚠ 训练语料 seed 与 z11-null 不同（20261107 vs 20261106）⇒ 差异非 100% 归因 critic。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w1-valueonly-ppo —— C9 闸第二步：critic 尺度修好后，PPO 还崩不崩（2026-11-07，已结课）
+//
+// 0. 一句话：相对 `z11-null` **唯一变量 = 起点权重**（`z10.it233` → `w1-valueonly.ep5`），
+//    跑 **20 轮**看是否复现 `z11-bc` 的 it5 型坍缩。不是「继续爬 win」的腿。
+//
+// 1. 立项依据
+//    · `w1-valueonly`（2026-11-07 22:19）：冻结策略只训 value 头 5 epoch，
+//      step slope .5784→**1.0686 [.7919,1.3155]**、meanV 11.61→**54.82**（vs MC 53.64）
+//      ⇒ **critic 尺度/偏置修好**；但 R² 只 .0800→.0879 ⇒ 排序没修。
+//      42/44 参数 base64 逐字节不变，只有 `value_head.{weight,bias}` 变。
+//    · `z11-bc` it5 的坍缩（pick .876→.095、cells 37→2、base→1.0）夹着两个因：
+//      冷 critic + BC 策略本身 OOD。本腿把「冷 critic」换掉、其余逐字不动 ⇒ 单变量。
+//    · 判据不判 win（11-05 #3 的整线验收才用 win）；本腿只判「行为有没有被洗掉」。
+//
+// 2. 变量账（相对 `z11-null`，逐字核对）
+//    · `bc`: `z10-maze.it233` → **`w1-valueonly.ep5`**（唯一变量）
+//    · `iters`: 500 → **20**（只跑到判决点；不是预算削减）
+//    · `name` / `out` / `traj` / `backup_*` / `paired_rotate_seed`（20261107）
+//    · **其余逐字 = z11-null**：reward 11 行 / 18 项 params / terminal 四项 /
+//      `lr 1.2e-4` / `kl_coef .02` / `kl_cap .1` / `lam .95` / `gamma .998` /
+//      `target_transitions 24576` / `decision_k 10` / `breakers_off false` /
+//      `ent_break .25` / `normalize_ret false` / `kickstart_ref false` / `warmup_iters 0`。
+//    · **`ent_coef` 显式写 0.01**（= 引擎缺省，也是 z11-null 的实际值）。
+//      ⚠ 不要套 w1-null / w1-thcost 裁定的 `.03` —— 那两门课互相对照才用 .03；
+//      本腿的对照是 z11-null（.01），改它就是第二个变量，对照失效。
+//
+// 3. 面板与对照
+//    · 4 关 `stage_select "16,22,3,6"` / 20000 拍 / 3 命 / hard / 20 敌（与 z11-null 同）。
+//    · 对照臂 = `z11-null` 的前 20 轮（同 iter / stage / seed 逐局配对；A 层固定池
+//      `2000000001–100`，400 局/点）。
+//    · 统计单位 = `(stage,seed)`；it 是重复测量（C8 口径），不合并窗口。
+//
+// 4. 判据（预注册，开课后不改）
+//    · **主 1（不洗掉捡）**：it20 `pick ≥ .40`（起点 .545 的 −15% 内），且与 z11-null
+//      同点配对的 Δpick 不低于 −5pp。`z11-bc` it5 是 .876→.095 ⇒ 本腿若腰斩即崩。
+//    · **主 2（不冻死）**：it20 `cells 中位 ≥ 60`（起点 87；z11-bc it5 掉到 2）。
+//    · **主 3（守家不塌）**：it20 `base_destroyed ≤ .70`（起点 .652），且 Δbase ≤ +3pp。
+//    · 副：训练侧 `value` loss / advantage 方差（game-level 过度自信的后果）、`kl`、`entropy`。
+//    · **win 只作地板**：`win ≥ z11-null − 2pp`，不作非劣性判定（400 seed 上零功效）。
+//
+// 5. 止损（任一触发即停）
+//    · `pick < .35` / `cells 中位 < 50` / `base > .75`（坍缩形状）。
+//    · `kl > .05` / `entropy < .30` / `entropy > 1.6` / error 或熔断行。
+//    · `value loss` 相对 z11-null 同期 > 2×（game-level 偏斜顶爆 critic）。
+//
+// 6. 已知局限
+//    · critic 标定是 **in-sample**（w1-valueonly 训练/评估同一批 200 局）⇒ .0879 是乐观值，
+//      真实泛化更低；本腿正是检验「乐观标定够不够让 PPO 不崩」。
+//    · game-level slope 2.03 / 截距 −70.7：局间过度自信未修；若 value loss 爆，
+//      下一腿再上 `normalize_ret: true`（链路已核 `np_core.py:666`），**不在本腿里改**。
+//    · 4 关 / 20000 拍脚手架，不是原题 35 关 / 36000 拍。
+//    · 20 轮只够判「崩不崩」，不够判任何胜率提升；不要把 it20 的 win 当能力读数。
+//
+// 7. 预算：20 it / ~35 分钟（z11-null 233 轮 ≈10.7h ⇒ 1.6 min/轮），`max_hours 3`；eval_every 5。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `bc` 在盘且 arch 与 z10 同构（`actionV6:true` / `policyExtra:true` / h64 d8，已核）。
+//    · `load_course` 过；dashboard JSONC 过。
+//    · 控制台 `bun run dashboard`（:8900）→ 选课 w1-valueonly-ppo → 开课；
+//      开训 30 秒 `grep -h "hub=" tmp/w1-valueonly-ppo/training-loop.log | tail -1`。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（结课时回填文件头 + `reports/w1-valueonly-ppo-<YYYYMMDD>.md`）────────
+//    §停课状态 §it20 配对表（pick/cells/base/win）§训练侧 value/kl/entropy §判决
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "w1-valueonly-ppo",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/w1-valueonly/w1-valueonly.ep5.20261107-221826.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 20,
+  "max_hours": 3,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.01,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261107,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/w1-valueonly-ppo/weights.json",
+  "traj": "tmp/w1-valueonly-ppo",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/w1-valueonly-ppo",
+  "backup_prefix": "w1-valueonly-ppo",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w1-valueonly-ppo → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 20 轮只判「崩不崩」；it20 的 win 不作能力读数。

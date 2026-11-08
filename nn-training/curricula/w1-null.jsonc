@@ -1,0 +1,178 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-07 21:30；优先级高于下方立项块）
+//   P3-A **判负**：三窗 Δwin it20 +7.0pp(p=.0087) → it50 0.0(p=1) → it100 **−9.5pp**
+//   (p=.0012)；run-average 21 点 Δ +0.19pp、CI [−1.04,+1.38] 跨零 ⇒ 全程无效应。
+//   本腿是对照臂，末窗反而反超主腿 9.5pp；`mean_ret` 38.3→14.2 持续下滑（命中止损），
+//   `entropy` 峰值 1.437 未破 1.6，kl 3–6e−3，无 error/熔断。
+//   机制量（it50 权重 200 局只读探针）：ΣthCost 总量 4/4 关降、但速率口径 2/4 且 CI
+//   跨零 ⇒ 「梯度吃了饵」不等于守家变好。全文 `reports/w1-close-20261107.md`。
+//   ⚠ `training-enabled.txt` 仍在、腿还在跑（it104）⇒ **需用户手工停课**。
+//   判词以结课块为准；下方立项块保留作设计留痕。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w1-null —— P3-A 守家机制腿的**零变量对照**（2026-11-07 立项，已判负）
+//
+// 0. 一句话：逐字 = z11-null 的 reward / 训练侧 / 任务脚手架，只换课名、产物目录、
+//    iters 预算与 paired_rotate_seed。它是 `w1-thcost` 唯一合法的单变量对照。
+//
+// 1. 立项依据（`plan/classic35-path.plan.md` v5 §8，v6 起跑线探针修正）
+//    · C8 把统计单位钉成 `(stage,seed)`；C2 给出 ΣthCost 的按局分位；C4 判
+//      `redundant_signal` ⇒ 辅助头边际低，先做「把基地事件搬到当拍」的 P3-A。
+//    · **起跑线探针（本日 17:54，`tmp/w1-probe/`）**：同一版权重 z10.it233 在
+//      **原题 classic35 / 35 关 / 36000 拍 / 350 局**上只有 **33/350 = 9.43%**，
+//      逐关 22/35 关 win=0、2002 Steel Fortress = 0；`z11-ent.it500` 同段 14.29%
+//      （配对 +4.86pp，低于 C8 的单点 MDE 8.0pp ⇒ 只写方向，不写显著）。
+//      ⇒ **z10.it233 的「稳定」只在它自己的 4 关 / 20000 拍面板成立**；原题 it0
+//      太低，机制量会被 OOD 噪声淹没，C2 的剂量也不可移植。
+//    ⇒ P3-A 机制腿落在 **与 C1–C9 全部探针同源的 4 关 / 20000 拍脚手架**；
+//      原题 35 关 / 36000 拍留给 P4 验收（7,000 局同段配对）。这不是任务降级，
+//      是机制诊断面板；最终验收必须回原题（plan §0）。
+//
+// 2. it0 基线（**本腿 it0 以开课后首个 in-loop eval 点为准**，不引用别腿数字当基线）
+//    · 起点 = `z10-maze.it233.20261106-211711.json`（与 z11-null / C1–C9 同权重）。
+//    · 同权重同面板的**历史哨兵**：z11-null it0 A 层 400 局 win .182 / base .652 /
+//      kills 9.47。本腿 it0 偏离 >3pp ⇒ 先查 bc 加载与面板，别拿曲线下结论。
+//    · 原题 35 关探针读数见 §1；两个面板不得相减（A 层 2_000_000_001 /
+//      B·C 层 860001，且关集/时限都不同）。
+//
+// 3. 变量账（相对 z11-null）
+//    · name / out / traj / backup_dir / backup_prefix / iters 500→300 /
+//      max_hours 36→18 / paired_rotate_seed 20261106→**20261107**。
+//    · reward 11 行 / 18 项 params / terminal 四项 / lr / kl / gamma / lam /
+//      decision_k / target_transitions / breakers / ent_break **逐字不变**。
+//    · 与 `w1-thcost` 相比只差「reward 新增一行 + 一个 wThCost 参数」，其余逐字同。
+//
+// 4. 奖励与训练侧：scheme toy；`gamma .998 / lam .95 / decision_k 10` 显式写
+//    （代码默认 GAMMA=0.995，漏写会静默改视界，plan §4 防呆断言）。
+//    `target_transitions 24576 = 24 × mb 1024`（硬闸 #2）；terminal 四项齐（硬闸 #1）。
+//    `ppo_schedule` 每段显式 `kl_cap`（skill §4：段内缺席会回落到 rl-config）。
+//    **★ 18:19 用户按推荐裁定（选 A）**：两课 `ppo_schedule[0].ent_coef` 显式写
+//    **0.03**（唯一方向为正的档位；C8 run-average +3.16pp [+2.20,+4.17]
+//    `p=5.72e−6`、MDE 1.31pp ⇒ 可分辨）。引擎缺省是 0.01（`engine.py:122`），
+//    旧草案漏写 ⇒ 现在显式，不再让缺省值替人决定。
+//    选项 B（扩面板 ≥1600 seed）**降级为并行只读复核 / 并入 P4 验收**，不作开课
+//    前置：A 层固定池只有 200 seed（`eval_track.py:44-45`），1600 seed 的单点
+//    MDE 3.9pp 仍 > +3.16pp，且 C8 已用更便宜的 run-average 回答同一问题
+//    （plan §6 / ds M7 修正）。两门课逐字同值；日后要改必须同改，否则单变量失效。
+//
+// 5. 判据与止损（对照臂不设自己的成功判据，只提供配对）
+//    · 主：`w1-thcost` 与 w1-null 同 iter / stage / seed 逐局配对；整线验收主读数
+//      = **win**（11-05 用户裁决 #3，不改成行为门）。
+//    · 统计单位 = `(stage, seed)`；it 是重复测量。MDE 用 C8 实测两个 estimand：
+//      **run-average ±1.31pp@400 / 单点 ±8.0pp@400**，不复用 z11 的 41 点 p。
+//    · 止损：`kl > .05` / `entropy < .30` / **`entropy > 1.6`**（.03 档 z11-ent
+//      中位 1.407，逼近上沿）/ `mean_ret` 持续下滑 / error 行 / cells 崩塌。
+//      **对照臂与主腿同护栏**：任一臂先停都同时停，否则逐局配对失效。
+//
+// 6. 已知局限
+//    · 4 关 20000 拍是**机制脚手架**，不是最终任务；P4 必须回原题 35 关 36000 拍。
+//    · 拾取率分母含约 21% 生成即捡白送道具，只作相对比较。
+//    · 外部 `eval-course-ckpt.ts` 的行没有 `lossDetail` 字段 ⇒ 基毁/命尽细分只能
+//      读 in-loop `eval_log.jsonl`，两者不得混用。
+//    · ⚠ 逐字继承 z11-null 的 `wDmg 0.12`（满量程 131 分 > 0.5×wWin=30，违反
+//      硬闸 #6）。**对照臂必须逐字同**，不能为修硬闸改它；`z11-cost` 已证伪
+//      「修量纲不改行为」。两课同瑕疵 ⇒ 单变量仍成立，`check-w1.py` 标 WARN。
+//
+// 7. 预算：300 it / 18h（z11-null 233 轮 ≈10.7h ⇒ 300 轮 ≈14h）。eval_every 5。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `bc` 在盘；`load_course` 过；dashboard JSONC 校验过；两门课同批开、同
+//      `paired_rotate_seed`，否则逐局配对失效。
+//    · 开训 30 秒 `grep -h "hub=" tmp/w1-null/training-loop.log | tail -1`
+//      核对当时活着的 hub URL（换名会报 530）。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 诊断工具 ── `tmp/w1-probe/`（原题起跑线探针）· `nn-training/tools/p0_thcost.py`
+// ── 结算节（结课时回填文件头 + `reports/w1-close-<YYYYMMDD>.md`）────────────
+//    §停课状态 §前后半配对表 §机制量 §训练侧四指标 §判据逐条 §归档 sha16 §后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 5,
+  "name": "w1-null",
+  "mode": "per-tick",
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wBase*baseWallIntact",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wWalk*where(cellsVisited>walkCap, walkCap, cellsVisited)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "- wThreat*min(threatTicks, threatCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wWin": 60.0,
+      "wBase": 7.0,
+      "wDmg": 0.12,
+      "wDeath": 18.0,
+      "wPace": 6.0,
+      "paceTicks": 500.0,
+      "paceWindow": 1000.0,
+      "paceCap": 36.0,
+      "wBrick": 0.25,
+      "brickCap": 12.0,
+      "wWalk": 0.25,
+      "walkCap": 90.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wThreat": 0.02,
+      "threatCap": 1200.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -35.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.00012,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261107,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/w1-null/weights.json",
+  "traj": "tmp/w1-null",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/w1-null",
+  "backup_prefix": "w1-null",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w1-null → 开课（与 w1-thcost 同批）。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 不要复用 z11-null 的 out/traj/backup 目录（§15.5 禁跨改动续跑）。

@@ -1,0 +1,135 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-07 22:19；优先级高于下方立项块）
+//   5 epoch 完成（job 32b71d70101958fa / worker kaggle-c / 159,471 步）。
+//   **判据 2/3 过**：step slope **1.0686 [.7919,1.3155]**（覆盖 1 ✓）、
+//   meanV **54.82** vs meanMC 53.64（差 +1.18 ✓）；但 step R² 只从 .0800 → **.0879**
+//   （门 .12，✗）⇒ **尺度/偏置修好、排序解释力没动**。
+//   game-level 反而翻成过度自信（slope 2.03 / 截距 −70.7），20 轮 PPO 要盯 value loss。
+//   权重 diff：42/44 参数 base64 逐字节不变，只有 value_head.{weight,bias} 变化
+//   （Δmax .2586 / .1040）⇒ 冻结策略、单变量成立。
+//   ⚠ 复算是 in-sample（同一批 200 局），R² .0879 是乐观值。
+//   下一步：ep5 当 bc 起点、kickstart_ref:false、reward 逐字 = z11-null、20 轮 PPO，
+//   判 it20 是否复现 z11-bc 的 it5 坍缩。全文 `reports/w1-valueonly-20261107.md`。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w1-valueonly —— C9 的下一条腿：冻结策略、只训 value 头（2026-11-07 立项，已结课）
+//
+// 0. 一句话：从 `z10.it233` 起，**策略参数逐字节冻结**，只在 `tmp/p0-c9/rollouts`
+//    （200 局 / 4 关 / 20000 拍 / 带 returns.npy）上训 value 头 5 epoch。
+//    它回答的是「冷 critic 是不是 P2-A 的 gate」，不是「BC 行为先验行不行」。
+//
+// 1. 立项依据
+//    · C9（`reports/c9-critic-calibration-20261107.md`）：it233 的 critic **压缩+偏置**
+//      —— step R² .0800 / slope .5784 [.4181,.7272] / meanV **11.61** vs meanMC **53.64**；
+//      game-level slope 1.01 但截距 +28.60。⇒ critic 排序弱一档、尺度压了 4.6 倍。
+//    · 报告 `:93-95` 明写「下一条腿（agent 未执行）：用 z10.it233 起点、
+//      `--policy-coef 0 --value-coef 1 --epochs 5` 在同批语料上只训 value 头」。
+//    · `--policy-coef 0` 已在 `worker/train/bc.py` 落地：在建 optimizer **之前**冻结除
+//      `value_head.*` 外全部参数，optimizer 只收 value 头（`test_bc_value_only.py` 用
+//      1 epoch 真跑断言非 value 参数 base64 逐字节不变、value 头有更新）。
+//
+// 2. 变量账（相对 `z10.it233` 原权重）
+//    · 只动 **value 头**；策略（trunk / move / fire / hold / policy_features）逐字节不变。
+//    · 训练数据 = C9/C4/C3 共用的那批 v6 rollout（200 局，含 65 clear / 109 base /
+//      20 lives / 6 timeout），`returns.npy` 200/200 已落盘（C9 补写）。
+//    · `value_coef 1.0`（纯回归，不混 policy loss）；`policy_coef 0.0`。
+//
+// 3. 数据身份（`source=fixed` 的纪律）
+//    · `fixed_dir` 的**字节不进课程指纹**（`bc_config.py:502-504`），所以本课必须自己
+//      记录 `data_fp`：开课前 `find tmp/p0-c9/rollouts -name returns.npy | wc -l` 应为
+//      **200**；shard 是 metrics v16 / 20000 拍 / 4 关（3/6/16/22）。
+//    · 换语料 = 新实验：新 `out/traj/backup`，不得复用本目录（AGENTS §15.5）。
+//
+// 4. 判据（开课前预注册，不改）
+//    · 主 1：用 `c9_critic_calibration.py --value-weights <交付权重>` 复算同一批 200 局，
+//      **step R² 显著高于 .0800**（点估计至少 ×1.5，且按局 bootstrap CI 下界 > .08）。
+//    · 主 2：**calibration slope 的 95% CI 覆盖 1**（当前 [.418,.727] 不覆盖）。
+//    · 主 3：**meanV 与 meanMC(53.64) 的差缩小到 ±10 内**（当前 −42.0）。
+//    · 副：value loss 曲线、early-stop 是否在 5 epoch 内稳定。
+//    · **不判 win/kills**：策略逐字节不变，eval 行为必然与 z10.it233 同分布；跑 eval
+//      只作「策略确实没被改」的哨兵（同 seed 逐局 win 应完全一致）。
+//
+// 5. 接 PPO 的闸（下一门课，不在本课）
+//    · 本课交付权重当 `bc` 起点、`kickstart_ref:false`、跑 **20 轮** PPO（z10 起点、
+//      同 4 关 20000 拍、同 reward 逐字 = z11-null），与 z11-null 同期配对。
+//    · 判：it20 是否复现 z11-bc 的 it5 型坍缩（pick/cells 崩塌、base 1.0）。
+//      不崩 ⇒ 冷 critic 是崩因，P2-A 可跳过、直接 P2-B；仍崩 ⇒ 崩溃主因在 BC 策略
+//      本身（OOD/去随机化），必须走完整 BC 重训。
+//
+// 6. 已知局限
+//    · 语料只有 4 关、200 局、20000 拍、z10.it233 的 on-policy 分布；**不是原题 35 关
+//      36000 拍**，价值头在 35 关的泛化未验。
+//    · 5 epoch 是 C9 报告的建议值，未标定；若 value loss 未收敛，下一腿再扩 epoch
+//      （新实验），不在本课里调。
+//    · `source=fixed` 不筛选结局；200 局里 timeout 仅 6 局，`timeout` 端的 value 标定
+//      仍弱。
+//
+// 7. 预算：1 轮 × 5 epoch（200 局 / ~16 万决策步）≈ 分钟级；不做周期 eval。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `tmp/p0-c9/rollouts` 200 个 returns.npy 在盘；`load_bc_course` 过；
+//      dashboard JSONC 校验过。
+//    · 开课走控制台（`bun run dashboard` :8900）→ 选课 w1-valueonly；agent 不起腿。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（结课时回填文件头 + `reports/w1-valueonly-<YYYYMMDD>.md`）──────────
+//    §停课状态 §交付 epoch §R²/slope/meanV 复算 §与 z10.it233 的逐字节 diff §后继
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "w1-valueonly",
+  "kind": "bc",
+  "action_v6": true,
+
+  // fixed 语料不采集；环境字段只为 eval/一致性（本课 eval 关闭）。
+  "stages": "0-3",
+  "difficulty": "hard",
+  "max_ticks": 20000,
+  "player": { "lives": 3, "level": 0 },
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "tmp/p0-c9/rollouts",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "outcome_policy": "all",
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 5,
+    "patience": 0,
+    "batch": 256,
+    "lr": 0.0003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    // 纯 value 回归：policy loss 权重 0（冻结策略），value 系数 1.0（C9 报告建议）。
+    "value_coef": 1.0,
+    "policy_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+    "fire_pos_weight": "auto",
+    // 与顶层 `bc` 必须同一文件（§67 一致性校验）。
+    "init_from": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+    "policy_extra": true,
+  },
+
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+
+  "eval": { "every_epochs": 0, "games_per_stage": 0, "levels": [] },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 4,
+  "data_dir": "tmp/w1-valueonly/bc-data",
+  "out": "tmp/w1-valueonly/weights.json",
+  "traj": "tmp/w1-valueonly",
+  "backup_dir": "nn-training/weights/w1-valueonly",
+  "backup_prefix": "w1-valueonly",
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w1-valueonly → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 开课前记 `data_fp`（200 个 shard 的 returns.npy 计数 + 目录 mtime）；
+//     换语料必须新 out/traj/backup（§15.5）。
+// ═══════════════════════════════════════════════════════════════════════════════

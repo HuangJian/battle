@@ -1,0 +1,134 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ★ 结课块（2026-11-08；优先级高于下方立项块）
+//   **第一轮判负（全参微调）**：3 epoch / 1 万步、move acc .392→.372（学不会）、
+//   行为门 40 局/臂同 stage-seed 配对：pick（collected/局）**1.25 vs z10 2.18（−42%）**、
+//   kills **−2.83**、base **+25pp**、win −12.5pp；判据 1/4 过（只有 cells 中位 82.5）。
+//   ⇒ 全参微调把 trunk 拉偏。**后继 = `w2-pickup-heads`**（同语料/起点/lr/epoch，
+//   唯一变量 `train_heads: policy`，trunk 与 value_head 逐字节冻结）。
+//   ⚠ 本课 `bc_round_completed` 已写、`iters:1` ⇒ 用同目录重开不会重跑；
+//     要重试请走 `w2-pickup-heads`，不要改本文件。
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w2-pickup-ft —— P2-B：从 z10 起，只在 pickup 窗口的步上做 BC 微调（2026-11-07，已判负）
+//
+// 0. 一句话：`source=fixed` 指向**裁好的 pickup 窗口语料**，从 `z10.it233`（会打/守）
+//    起、`lr 1e-4` 训 3 epoch，只补「会捡」，不碰其余 93.7% 的步。
+//
+// 1. 立项依据（`plan/w2-window-split.plan.md` §2，方案 B1）
+//    · 窗口统计：pickup 6.3% / lane 19.4% / base_strict 2.5% / none 71.8%
+//      ⇒ 硬切分丢 none 浪费七成；只在 pickup 窗口加 loss 是「加法」。
+//    · 从 `z10.it233` 起的理由：它已经会打/守（4 关 20000 拍 kills 9.47 / base .652），
+//      pickup 窗口只占 6.3%，1 万步足够「补捡」；从随机起要同时学两件事，样本量不够。
+//    · 不裁其余窗口的理由：动那 93.7% 的步只会把「会打」洗掉（`z11-bc` it5 先例）。
+//
+// 2. 语料（**上游 = z10 轨迹 + pick 教师重标注 + 裁 pickup 窗口**）
+//    · 路线修正（2026-11-08）：原计划「用 pick 教师采集」**失败** —— `w2-pick-collect`
+//      200 局**全 loss**，`pickupDist≤6` 只有 **623 步 / 55 局（1.4%）**：pick 教师在
+//      classic35 面板上基本不跑动，采不到「pickup 状态下的捡动作」。
+//    · 改为跨教师重标注（`tools/bc_relabel.py`）：
+//        `--shards tmp/p0-c9/rollouts --weights bc-v6-train --out tmp/w2-split/relabel-pick`
+//      把 **z10 的状态分布**保留、`a_*`（训练标签，`npyio.py:129,182`）换成 pick 教师
+//      的掩码 argmax；`lp_*` 同步。200 局 / 159,471 步全部重写。
+//    · 再裁窗口：`bc_window_cut --shards tmp/w2-split/relabel-pick \
+//      --out tmp/w2-split/pickup-only-relabel --max-dist 6` →
+//      **154 shard / 10,069 步（6.3%）**。
+//    · 信息量验证：pickup 窗口内 pick 教师 vs z10 的标签差异 **move 68.8% / fire 21.1% /
+//      hold 2.8%**；move 分布 pick `[.434,.166,.194,.206]` vs z10 `[.255,.177,.231,.337]`
+//      ⇒ 确实换掉了动作，不是「几乎一样」。
+//    · ⚠ `tmp/w2-split/pickup-only`（z10 语料，未重标注）与 `pickup-only-pick`（pick 教师
+//      采集的 623 步）都**不要**用来训本课。
+//    · `source=fixed` 的 `fixed_dir` 字节不进课程指纹 ⇒ 开课前记 shard 数 / 步数 / 源目录。
+//
+// 3. 训练侧
+//    · `init_from` = `z10.it233`；`lr 1e-4`（BC 默认 3e-4 的 1/3，限制共享 trunk 漂移）；
+//      `epochs 3`、`batch 256`、`mirror_p 0.5`、`val_split 0.1`。
+//    · `value_coef 0`（只补行为；value 线由 C9 单独走，且 C9 已判负不作起点）；
+//      `policy_coef 1`。`eval` 关闭。`iters: 1`。
+//
+// 4. 判据（预注册，行为门；**win 只作地板**，11-05 #3）
+//    · 主 1（补上捡）：4 关 ×50 seed = 200 局行为门（seed 段 `860001`，本机 `--no-dist`）：
+//      **pick ≥ .585**（z10 基线 .545 + 8pp），且 `powerUpsSpawned` 白送（≈21%）未变。
+//    · 主 2（不洗掉打）：**kills ≥ 8.97**（基线 9.47 − 0.5）、**base ≤ .662**（基线 .652 + 1pp）。
+//    · 主 3（不冻死）：**cells 中位 ≥ 80**（基线 87）、最长停段不高于 z10。
+//    · 副：action entropy 不低于 z10 的 0.6–0.75 带（`bc_entropy_probe.py`）。
+//    · 地板：`win ≥ z10 − 2pp`，不作非劣性判定。
+//
+// 5. 下一步（不在本课）
+//    · 过闸 ⇒ 交付权重当 `bc`、`kickstart_ref:false`、20 轮 PPO、reward 逐字 = z11-null，
+//      与 z11-null 同 `(stage,seed)` 配对；判 it20 是否保住 pick 且不塌 base。
+//    · 不过闸 ⇒ 优先扩采集到 500 局（2.5 万步）再裁，**不调 lr/epoch**（样本量是主约束）。
+//
+// 6. 已知局限
+//    · 语料只有 4 关 / 20000 拍；pickup 窗口 1 万步，若 pick 提升有限是样本量问题，不是 lr 问题。
+//    · 只裁 pickup 窗口仍会改共享 trunk；`lr 1e-4` + 3 epoch 是限制，不是保证。
+//    · `pickupDist` 是 v16 BFS 可达距离；哨兵 `-1` 已被 `bc_window_cut` 排除。
+//    · 4 关脚手架，不是原题 35 关 / 36000 拍。
+//
+// 7. 预算：3 epoch / 1 万步 ≈ 分钟级；行为门 200 局 ≈ 12 s（本机 `--no-dist`）。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `tmp/w2-split/pickup-only-pick` 已裁好、shard 数/步数已记；
+//      `load_bc_course` 过；dashboard JSONC 过。
+//    · 控制台 `bun run dashboard`（:8900）→ 选课 w2-pickup-ft → 开课。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（结课时回填 + `reports/w2-pickup-ft-<YYYYMMDD>.md`）────────────
+//    §语料 data_fp/shard 数 §训练 loss/acc §行为门三项 §判决 §后继 PPO 20 轮
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "w2-pickup-ft",
+  "kind": "bc",
+  "action_v6": true,
+
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "tmp/w2-split/pickup-only-relabel",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "outcome_policy": "all",
+    "seed_rotate": 0,
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 3,
+    "patience": 0,
+    "batch": 256,
+    "lr": 0.0001,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    // P2-B 第二轮（2026-11-08）：第一轮全参微调把 trunk 拉偏（kills −2.8、base +25pp），
+    // 改为只训 move/fire/hold 三个头，trunk（stem/blocks/fc）与 value_head 逐字节冻结。
+    "train_heads": "policy",
+    "seed": 1234,
+    "ckpt_every": 0,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+    "policy_extra": true,
+  },
+
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+
+  "eval": { "every_epochs": 0, "games_per_stage": 0, "levels": [] },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 4,
+  "data_dir": "tmp/w2-pickup-ft/bc-data",
+  "out": "tmp/w2-pickup-ft/weights.json",
+  "traj": "tmp/w2-pickup-ft",
+  "backup_dir": "nn-training/weights/w2-pickup-ft",
+  "backup_prefix": "w2-pickup-ft",
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w2-pickup-ft → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ `fixed_dir` 必须是 `pickup-only-pick`（pick 教师语料裁出来的），不是预演目录。

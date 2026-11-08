@@ -1,0 +1,114 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// 课程 w2-pick-collect —— P2-B 的 **pick 教师语料采集课**（2026-11-07 立项，未开课）
+//
+// 0. 一句话：用 pick 教师（`bc-v6-train`）的 argmax 在 4 关 20000 拍上采 **200 局**，
+//    采完只训 1 epoch（产物丢弃），语料给 `bc_window_cut.py` 裁 `pickup_near` 窗口。
+//    它**不是**训练腿，是「补齐会捡」的原料生产。
+//
+// 1. 立项依据（`plan/w2-window-split.plan.md` §2）
+//    · C3 一致率 33.4%（pickup_near 25.2% 最差）⇒ 全局混合否决，只能按窗口切分。
+//    · 窗口统计（200 局 / 159,471 步）：pickup 6.3% / lane 19.4% / base_strict 2.5% /
+//      none 71.8%；原口径 `base_threatened` 69.5% 太宽，不能当窗口。
+//    · 推荐方案 B1：从 `z10.it233`（会打/守）起，只用本课语料里 `pickupDist∈[0,6]`
+//      的步做 BC 微调（`w2-pickup-ft`）—— 加法补「会捡」，不动「会打」。
+//
+// 2. 采集口径
+//    · `label_policy = bc-v6-train/weights.json`（sha16 `ec9dc6804fd2aef6`，C3 的 A 教师）、
+//      `label_mode: argmax`（执行动作 = 标签，BC 语料要教师的最优动作）。
+//    · `games_per_stage: 50` × 4 关 = **200 局**；`outcome_policy: all`、`wins_only: false`
+//      （语料要覆盖全部结局；后续裁剪只按窗口，不按结局）。
+//    · `near_miss_times: 0`（不要 near-miss 追加局）、`seed_rotate: 0`（单轮课，§15.1 轮转不适用）。
+//    · 面板：`stage_select "16,22,3,6"` / 20000 拍 / 3 命 / hard / 20 敌 —— 与
+//      `z10.it233` 的原生面板一致，裁出的窗口才和 z10 的行为门可比。
+//
+// 3. 训练侧（只为让流程走完，产物**丢弃**）
+//    · `arch: student`、`policy_extra: true`、`epochs: 1`、`batch 256`、`lr 3e-4`、
+//      `value_coef 0`、`policy_coef 1`、`init_from = z10.it233`（保底，避免随机起 NaN）。
+//    · `eval` 关闭；`iters: 1`。产物在 `tmp/w2-pick-collect/`，**不进权重归档当交付**。
+//
+// 4. 语料身份（采完必记）
+//    · `data_fp` 由引擎写进 `bc_corpus_mix`；裁剪后再记一次裁剪目录的 shard 数 + 步数
+//      （`tmp/w2-split/pickup-only`：154 shard / 10,069 步，已用 z10 的 200 局预演）。
+//    · 换 `label_policy` 字节 / `label_mode` / `action_v6` = 新语料（§62 指纹）。
+//
+// 5. 判据（本课不设成功判据）
+//    · 只验「200 局齐、`lp_*` 与执行动作在 argmax 模式下一致、`manifest` 有 stage/seed/outcome」。
+//    · 语料质量由下游 `w2-pickup-ft` 的行为门判：pick ↑、kills/base/cells 不塌。
+//
+// 6. 已知局限
+//    · 4 关 / 20000 拍脚手架；pick 教师在原题 35 关的 OOD 未验（`z11-bc` it0 量化过跨 level 迁移）。
+//    · pickup 窗口只占 6.3% ⇒ 200 局只出 1 万步；若下游 pick 不达标，**优先扩到 500 局**，不调 lr。
+//    · 采集 1 epoch 的训练产物不保证任何能力，**不要**拿它当交付权重。
+//    · **本路线已被证明不可用（2026-11-08 实测）**：200 局**全 loss**、`pickupDist≤6`
+//      只有 **623 步 / 55 局（1.4%）**（z10 轨迹是 10,069 步 / 6.3%）—— pick 教师在
+//      classic35 面板上基本不跑动，采不到「pickup 状态下的捡动作」。
+//      ⇒ 微调课改用 `tools/bc_relabel.py`（z10 轨迹 + pick 教师重标注）。
+//      本课留作负结果 + 教训：**换教师采语料前，先量目标窗口密度**。
+//
+// 7. 预算：采集 200 局 ≈ 10–15 分钟 + 1 epoch ≈ 2 分钟（云端 worker，与 w1 系同量级）。
+//
+// ── 开工前置（训练由用户手工启动，agent 不起腿）──────────────────────────────
+//    · `bc` 与 `label_policy` 都在盘、arch 一致（`actionV6:true`/`policyExtra:true`）。
+//    · `load_bc_course` 过；dashboard JSONC 过。
+//    · 控制台 `bun run dashboard`（:8900）→ 选课 w2-pick-collect → 开课。
+//    · 只 add/commit 明确路径，**永不 push**；未跟踪 md 不入 tracking。
+// ── 结算节（采完回填）── §局数/结局分布 §data_fp §裁剪后 shard 数/步数 §下游课链接
+// ═══════════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "w2-pick-collect",
+  "kind": "bc",
+  "action_v6": true,
+
+  "level": "classic35",
+  "stage_select": "16,22,3,6",
+  "enemies": 20,
+  "lives": 3,
+  "max_ticks": 20000,
+
+  "corpus": {
+    "source": "collect",
+    "games_per_stage": 50,
+    "wins_only": false,
+    "outcome_policy": "all",
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "label_mode": "argmax",
+    "label_policy": "nn-training/weights/bc-v6-train/weights.json",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 1,
+    "patience": 0,
+    "batch": 256,
+    "lr": 0.0003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "seed": 1234,
+    "ckpt_every": 0,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+    "policy_extra": true,
+  },
+
+  "bc": "nn-training/weights/z10-maze/z10-maze.it233.20261106-211711.json",
+
+  "eval": { "every_epochs": 0, "games_per_stage": 0, "levels": [] },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 4,
+  "data_dir": "tmp/w2-pick-collect/bc-data",
+  "out": "tmp/w2-pick-collect/weights.json",
+  "traj": "tmp/w2-pick-collect",
+  "backup_dir": "nn-training/weights/w2-pick-collect",
+  "backup_prefix": "w2-pick-collect",
+}
+
+// ── 启动（用户手工；agent 不启动训练）──────────────────────────────────────
+//   `bun run dashboard`（:8900）→ 控制台选课 w2-pick-collect → 开课。
+//   **训练操作唯一入口 = 控制台 / 同源 API**；零 worker 就等，永不就地降级。
+//   ⚠ 本课产物**不是交付权重**；采完立刻跑 `bc_window_cut.py` 裁窗口。
