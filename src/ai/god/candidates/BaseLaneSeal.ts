@@ -142,16 +142,20 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
   // the normal chain fight.
   if (self.world.frame < self._sealSuppressUntil) return false
 
-  // Seal cell: the standable cell closest to the base on that column, strictly
-  // below the shooter (between it and the eagle) AND inside the base band
-  // (rows `row-5 .. row-2`). The band matters: scanning all the way up to the
-  // shooter sends the player to a cell 10+ rows above the eagle to "seal" a
-  // lane at its far end — blocking works from anywhere on the line, but
-  // leaving the base area for a cell deep in the maze measured −10pp on
-  // Brickworks / −8pp on Twin Towers. Sealing must be a base-side job.
+  // Seal cell: the standable cell closest to the base on that column,
+  // strictly below the shooter (between it and the eagle), scanned over
+  // the whole segment from 2 cells below the shooter down to 2 cells
+  // above the eagle (the shipped god-retune form; see the note inside
+  // sealRowFor — an earlier base-band-only scan diverged from it).
   const sealRowFor = (col: number, row: number): number => {
-    const low = Math.max(BASE_POS.row - 5, row + 1)
-    for (let r = BASE_POS.row - 2; r >= low && r >= 0; r--) {
+    // god-merge 移植修正（2026-11-08，与 god-retune 尖端对账后补）：
+    // 选格扫描范围以 god-retune b00c1bb8 后的发货形态为准 —— 从射手下方
+    // 2 格一路扫到基地上方 2 格，取最靠基地的可站格；早期版本只扫基地带
+    // （base-5..base-2），带内无可站格时不封线，行为不一致（Checkers /
+    // Battlement 同种子对局实测分叉）。CellMode 1/2/3 的选格变体仍未移植。
+    const low = Math.max(row + 2, 0) // never stand in the muzzle cell
+    const hi = BASE_POS.row - 2
+    for (let r = hi; r >= low; r--) {
       if (standable(self, col, r)) return r
     }
     return -1
