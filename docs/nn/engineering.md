@@ -25,6 +25,37 @@
 
 ---
 
+## §114 pygate 慢用例：两条单测在真连公网 HTTPS（2026-11-08）
+
+**现场**：`bun run pygate` 74.6s；一次全量 `--durations=0` 里最慢单条只有 4.58s，Top30 合计
+91.0s（全部可见 call 合计 464.2s）。把 Top30 放进**同一进程串行**复测后分成两类：
+`test_bc_epoch_resume` / `test_ppo_kickstart_cache` / `test_ckpt_convert` / `test_p0_auc_probe`
+并行里 2–4s、串行 0.01–0.5s ⇒ 每 worker 一次的 torch 首次算子成本（§43/§72 已判不可动）；
+真正仍然慢的是 e2e 的秒级窗（`HOLD_STALE=1.0` 等，判据所需）与真子进程启动。
+
+**白付**：`tests/remote/test_rollout_node.py` 的 `test_422_...` 与 `test_empty_url_...` 走
+`rn.run` 的 cloudflared 打开路径，`_get_postures()` 在打桩的 `_ensure_cloudflared_url`
+**之前**先跑 `_net_probe` —— 单测里真连 `api.trycloudflare.com:443` 两次 + 边缘 7844
+（cProfile：1.42s `urllib` + 0.22s TCP）。两条合计 5.1s CPU（单进程 2.65 / 2.48s），
+且依赖公网/代理，网络抖动即假红。
+
+**修法**：两条用例各补
+`monkeypatch.setattr(rn, "_net_probe", lambda _log: ("inherit", "direct"))`
+（同文件第三条 `rn.run` 用例本来就打了这个桩）。生产逻辑零改动；两条降到 <0.01s。
+
+**被否决**：① 单次 `--durations` 下结论（负载会让排名换人，先串行复测才分得清 torch 冷启动）；
+② `--dist=loadscope`（同机实测 79.1s vs 默认 73.9s，慢 5.2s）；③ 缩 e2e 的 1.0s hold 窗
+（20× 余量是满载防假红的地板，省 0.4s/例不值）。
+
+**读数**：两条 2.65 / 2.48s → <0.01s；全量仍 5791 passed / 11 skipped。
+
+**第二批（同日，真子进程）**：`offline_deliver_proc` 每条 `_State` 的 `close` 要等子进程从
+`time.sleep(DRAIN_TICK_SEC=0.5)` 醒来（实测 start 0.32s / close 0.64s）⇒ 测试把 `tick_sec`
+设到下限 0.05（生产缺省不动）。两条重点 2.31 → 0.95 / 0.94s，整文件 ~12s → ~7s。
+`instance_lock` / `worker_server_lock` 拆开是 spawn 0.82–1.27s + 第二次真进程拒启
+0.98–1.00s（其中 ≈0.55s = 解释器 + `hub.boot` 导入，其余是拒启时 `pwsh` CIM 读命令行），
+`_wait_ready` 只占 3–29ms ⇒ 无测试侧固定等待可省，未动。
+
 ## §113 eval 冻结按课程 + 本课单开轮上限（2026-11-04，现场：z7-maze-v2 / z7-maze-kill「eval 又慢又缺局」）
 
 **现场**（2026-11-04 13:27–15:45，两课同进程 134 分钟）：

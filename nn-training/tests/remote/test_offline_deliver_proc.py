@@ -162,6 +162,9 @@ class _State:
         self.root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
         self.work = tmp_path / "work"
         self.logs: list[str] = []
+        # 收线要等子进程从 `time.sleep(tick_sec)` 醒来；生产缺省 0.5s 在这里只是壁钟。
+        # 测试显式调到下限（`deliver_worker` 会钳到 >= 0.05），投递判据与生产缺省无关。
+        kw.setdefault("tick_sec", 0.05)
         self.d = DelivererProcess(
             base_url=hub.url,
             token=TOKEN,
@@ -553,6 +556,7 @@ def test_outbox_mode_child_writes_the_files_and_needs_no_hub(tmp_path: Path) -> 
         artifacts_dir=root,
         outbox_dir=out,
         work_dir=tmp_path / "work",
+        tick_sec=0.05,  # 同 `_State`：只收窄测试壁钟，生产缺省不动
         log=logs.append,
     )
     try:
