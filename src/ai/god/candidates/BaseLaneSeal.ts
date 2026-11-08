@@ -127,7 +127,7 @@ export function evalBaseLaneSeal(self: GodAIInput, ctx: DecisionContext): boolea
     recordBranch(self, 'baseLaneSeal')
     return true
   }
-  const move = self.navigateTowards({ col: bestCol, row: sealRow })
+  const move = self.navigateTowards({ col: bestCol, row: sealRow }, 'lane')
   if (move === null) return false
   self._moveDir = move
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, move)
@@ -284,7 +284,7 @@ function evalPreSeal(self: GodAIInput, ctx: DecisionContext): boolean {
     recordBranch(self, 'baseLaneSeal')
     return true
   }
-  const move = self.navigateTowards({ col: bestCol, row: bestSealRow })
+  const move = self.navigateTowards({ col: bestCol, row: bestSealRow }, 'lane')
   if (move === null) return false
   if (prm.baseLaneSealAntiStuckTicks > 0) {
     if (pc.col === self._sealLastCol && pc.row === self._sealLastRow) {

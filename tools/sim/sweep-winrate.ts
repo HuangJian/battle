@@ -93,6 +93,14 @@ async function sweepDifficulty(diff: string): Promise<DiffAgg> {
         difficulty: diff,
         params,
         maxTicks: MAX_TICKS,
+        // 2026-11-02: pass the REAL stage index. The task already records it in
+        // `meta` for reporting, but it was never forwarded to the simulation —
+        // so every run behaved like stage 0. That changes `stageClearScore` and
+        // therefore `rules.dropOnScoreMilestone` power-up drops: measured on
+        // hard × 100 remote seeds (900001-900100), the missing index cost
+        // **1.1pp** (83.5% → 84.6%). Same defect class the eval-suite pool path
+        // had (see the memory note on "symbols can flip").
+        stageIndex: si,
         coop,
         spectateDual,
         recordReplay: saveFailures,
@@ -285,7 +293,7 @@ function buildMarkdown(aggs: DiffAgg[], unionWorst: number[], history: WinrateSn
   lines.push(`# God AI 胜率扫描报告 (classic / hard / chaos)${modeSuffix}`)
   lines.push('')
   lines.push(
-    `> 范围：35 关 × 60 种子 × ${aggs.length} 难度 = ${aggs.reduce((n, a) => n + a.total, 0)} 局。`,
+    `> 范围：35 关 × ${seeds.length} 种子 × ${aggs.length} 难度 = ${aggs.reduce((n, a) => n + a.total, 0)} 局。`,
   )
   lines.push(`> 当前代码默认 God AI 参数（DEFAULT_GOD_AI_PARAMS），无人工操作。`)
   lines.push('')

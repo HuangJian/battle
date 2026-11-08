@@ -116,6 +116,72 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
       // travel → fewer dodged shots). 0 at default ⇒ byte-identical.
       let effectiveRange =
         scan.enemyKind === 'armor' ? self.params.t2aHighHpMaxRange : self.params.t2aMaxRange
+      // 2026-11-02：基地受威胁时放宽交战距离 —— 此时追上去=离开防守位，而
+      // 「站在原地把这一发打出去」比「压上去」更安全（拉近的收益是命中率，
+      // 但离开基地的代价更大）。0 = OFF（byte-identical）。
+      if (
+        self.params.t2aMaxRangeThreat > 0 &&
+        scan.enemyKind !== 'armor' &&
+        self.hasBase &&
+        self.isBaseUnderThreat()
+      ) {
+        effectiveRange = Math.max(effectiveRange, self.params.t2aMaxRangeThreat)
+      }
+      // 2026-11-02 局面自适应（`t2aAdaptiveMode`）：把交战距离从「编译期常量」
+      // 改成「局面函数」—— 命中率-距离曲线的收益只在该局面划算时才取。
+      //
+      // 依据（`tmp/hit-by-range.ts`，Battlement 60 seeds / 3,269 发）：3-4 格命中
+      // **66.1%** vs 10+ 格 **16.9%**（后者吃掉 29.5% 的发数）。把 t2aMaxRange
+      // 15→10 让 7 关 +7，但全局 −0.38pp —— 因为「压上去」在某些局面是自杀：
+      // 场上敌人多（会被围）或自己血薄（换不起）时，远距压制才是对的。
+      //
+      // 判据：**场上敌人 ≤ N 且 HP 占比 ≥ F**（少而自己还硬 ⇒ 压上去把这一发打死）。
+      // 两个条件都读 World/params，零分配、不抽 RNG。0 = OFF（byte-identical）。
+      if (self.params.t2aAdaptiveMode > 0 && scan.enemyKind !== 'armor') {
+        // mode 1：按「敌人少 + 自己还硬」压上去（实测只覆盖 17.7% 的 tick）。
+        // mode 2：按**敌人是否朝我走来** —— 迎头的敌人压上去会相撞（我 2 发打死它、
+        //   它 3 发才打死我），追着跑的敌人压上去只是陪跑。这条有明确的机制依据：
+        //   命中率的收益只在「敌人也在缩短距离」时才不需要额外的移动预算。
+        if (self.params.t2aAdaptiveMode === 1) {
+          const liveEnemies = self._enemies.length > 0 ? self._enemies.length : w.tanks.length
+          const hpFrac = p.maxHp > 0 ? p.hp / p.maxHp : 1
+          if (
+            liveEnemies <= self.params.t2aAdaptiveMaxEnemies &&
+            hpFrac >= self.params.t2aAdaptiveMinHpFrac
+          ) {
+            effectiveRange = Math.min(effectiveRange, self.params.t2aAdaptiveRange)
+          }
+        } else {
+          // 找 aixDir 线上最近的敌人，看它是否朝我
+          const pc2 = self.playerCell()
+          const list = self._enemies.length > 0 ? self._enemies : w.tanks
+          let bestD = 99
+          let closing = false
+          for (let i = 0; i < list.length; i++) {
+            const e = list[i]
+            if (!e.alive || e.spawnTimer > 0 || e.allegiance !== 'enemy') continue
+            const c = self.tankCell(e)
+            const dc = c.col - pc2.col
+            const dr = c.row - pc2.row
+            const onLine =
+              (aimDir === 'left' && Math.abs(dr) <= 1 && dc < 0) ||
+              (aimDir === 'right' && Math.abs(dr) <= 1 && dc > 0) ||
+              (aimDir === 'up' && Math.abs(dc) <= 1 && dr < 0) ||
+              (aimDir === 'down' && Math.abs(dc) <= 1 && dr > 0)
+            if (!onLine) continue
+            const d = Math.abs(dc) + Math.abs(dr)
+            if (d >= bestD) continue
+            bestD = d
+            // closing = its facing points back at me (or it is stationary)
+            closing =
+              (e.dir === 'left' && aimDir === 'right') ||
+              (e.dir === 'right' && aimDir === 'left') ||
+              (e.dir === 'up' && aimDir === 'down') ||
+              (e.dir === 'down' && aimDir === 'up')
+          }
+          if (closing) effectiveRange = Math.min(effectiveRange, self.params.t2aAdaptiveRange)
+        }
+      }
       if (self.params.dodgeRateShrinksT2a > 0 && scan.enemyKind !== 'armor') {
         const m = self._enemyModel
         if (m && m.active) {

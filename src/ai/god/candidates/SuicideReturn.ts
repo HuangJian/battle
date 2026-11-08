@@ -77,7 +77,7 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
       // §74/§70 base-wall guards inside shouldFireInDir keep it from
       // blowing up its own base). No dodging while the trade is active.
       const tc = self.tankCell(target)
-      self._moveDir = self.navigateTowards(tc)
+      self._moveDir = self.navigateTowards(tc, 'return')
       self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
     }
     recordBranch(self, 'suicideReturn')
@@ -147,7 +147,7 @@ export function evalSuicideReturn(self: GodAIInput, ctx: DecisionContext): boole
   self._suicideStandTicks = 0
   if (mode === 3) {
     const tc = self.tankCell(target)
-    self._moveDir = self.navigateTowards(tc)
+    self._moveDir = self.navigateTowards(tc, 'return')
     self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
   } else {
     self._moveDir = null

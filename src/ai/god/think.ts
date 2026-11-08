@@ -9,15 +9,17 @@
 // candidate body is a VERBATIM transcription of the original branch — parity
 // by construction (M1 theorem, doc §3.3). Weights strictly mirror the chain
 // order, so behavior under default params is byte-identical to pre-M1.
-import { type GodAIInput, recordBranch } from '../GodAIInput'
+import { type GodAIInput, recordBranch, markBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, TANK, RESPAWN_SHIELD_MS } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
 import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
 import { turnWillCommit } from './turn-gate'
-import { runChain, type Candidate } from './DecisionCore'
+import { runChain, type Candidate, type DecisionContext } from './DecisionCore'
 import { updateEnemyModel } from './EnemyModel'
+import { updateEnemyMotion } from './EnemyMotion'
 import { superItemPressesImpl } from './SuperItems'
+import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 
 import { MID_LANE_HOLD } from './candidates/MidLaneHold'
 import { CARVE_PATH } from './candidates/CarvePath'
@@ -220,6 +222,8 @@ export function thinkImpl(self: GodAIInput): void {
     const t = tanks[i]
     if (t.alive && t.spawnTimer <= 0) self._enemies.push(t)
   }
+  // 2026-10-31 运动感知（pursuitLeadMode 2）：每 tick 更新一次实测速度。
+  if (self.params.pursuitLeadMode >= 2) updateEnemyMotion(self)
   const all = w.allTanks
   self._otherTanks.length = 0
   for (let i = 0; i < all.length; i++) {
@@ -722,4 +726,97 @@ export function thinkImpl(self: GodAIInput): void {
       }
     }
   }
+
+  // 2026-10-30 navigate 停滞打断（navEngageBreakMode）：导航中若有 ≤N 格的
+  // 对齐敌人而本拍没开火，就停下来打这一发，别一路走过去。见 §函数注释。
+  navEngageBreakImpl(self, ctx)
+
+  // 2026-11-01 基地防守转身开火（baseTurnFireMode）：威胁期轴对齐就转身打。
+  // 必须排在 navEngageBreak 之后 —— 后者在基地受威胁时主动让位，前者只在那时生效。
+  baseTurnFireImpl(self, ctx)
+}
+
+/**
+ * 基地防守「转身开火」（`baseTurnFireMode`，0 = OFF byte-identical）。
+ *
+ * 为什么需要（hard 35×60 逐拍诊断，`tmp/threat-facing.ts` / `tmp/turnfire-yield.ts`）：
+ * 基地受威胁且玩家 ≤12 格的 tick 占 13–17%，其中只有 14.4% 朝向威胁敌人，
+ * 47.7% 与它轴对齐却朝向别处；朝向时的开火已贴射速上限（27.5 拍/发），
+ * 所以缺的是**朝向**而不是扳机。7,094 拍「对齐 + 朝向错 + 没开火」中，
+ * 6,148 拍（86.7%）转身即可获得合法射击（4,393 拍在 ≤6 格内）。
+ *
+ * 只做一件事：把 `_moveDir` 换成敌人的方向（转身）并在同拍开火。不改目标、
+ * 不改导航、不写任何状态 —— 下一拍候选链照常接管。三个硬门保证不作废：
+ *   1. `turnWillCommit` —— 这一发必须真的沿新朝向飞出去（A2 不变量）；
+ *   2. `scanAheadImpl(dir).enemy` —— 那条射界上现在确实有敌人；
+ *   3. 目标必须是**威胁敌人**（能打基地 / 能拆基地环），不是随便一个敌人。
+ */
+export function baseTurnFireImpl(self: GodAIInput, ctx: DecisionContext): boolean {
+  const prm = self.params
+  if (prm.baseTurnFireMode <= 0) return false
+  if (self._fire) return false
+  if (!self.hasBase || !self.isBaseUnderThreat()) return false
+  const p = ctx.p
+  const pc = self.playerCell()
+  const dBase = manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row)
+  if (dBase > prm.baseTurnFireBaseRangeCells) return false
+
+  const list = self._enemies
+  let bestDir: Direction | null = null
+  let bestD = Infinity
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0) continue
+    // Cheap distance pre-filter before the geometry predicates.
+    const ex = t.x + t.w / 2
+    const ey = t.y + t.h / 2
+    const cd = Math.abs(Math.floor(ex / CELL) - pc.col) + Math.abs(Math.floor(ey / CELL) - pc.row)
+    if (cd > prm.baseTurnFireRangeCells || cd >= bestD) continue
+    if (!enemyCanShootBase(self, t) && !enemyCanBreachRing(self, t)) continue
+    // Pixel-accurate "which way would point at it": aligned within half a tank.
+    let dir: Direction | null = null
+    if (Math.abs(ey - ctx.pcy) <= TANK / 2) dir = ex < ctx.pcx ? 'left' : 'right'
+    else if (Math.abs(ex - ctx.pcx) <= TANK / 2) dir = ey < ctx.pcy ? 'up' : 'down'
+    if (!dir) continue
+    // Already facing it and still not firing ⇒ the candidate chain had its
+    // reasons (cooldown / cancel-shot gate). Never second-guess that.
+    if (dir === p.dir) continue
+    if (!turnWillCommit(self.world, p, dir)) continue
+    if (!scanAheadImpl(self, ctx.pcx, ctx.pcy, dir).enemy) continue
+    bestDir = dir
+    bestD = cd
+  }
+  if (!bestDir) return false
+  self._moveDir = bestDir
+  self._fire = !ctx.onCooldown
+  markBranch(self, 'baseTurnFire')
+  return true
+}
+
+/**
+ * 导航停滞打断（`navEngageBreakMode`，0 = OFF byte-identical）。
+ *
+ * 背景（tools/diag/nav-stall-audit.ts，hard 35×60）：`navigate` 长段吃掉 13.7%
+ * 的 tick、段内击杀率只有段外的 0.33×；其中 452 个「贴身空转」段（≥50% 拍敌在
+ * 5 格内）中位 355 拍只开火 7 拍、5 发弹。典型形状（S29 Spider s31）：敌在 4–5 格、
+ * aimDir 存在，但 AI 一路沿导航方向走，只沿移动方向开火，等于把整段路让给敌人。
+ *
+ * 规则：**仅当**当前拍的最后分支是 `navigate`、本拍没开火、存在 aimDir、基地
+ * 不受威胁、且该方向 ≤navEngageBreakRangeCells 格内确有敌人与干净射界时 ——
+ * 停步（_moveDir=null）并开火。不改导航目标、不改任何状态，下一拍一切照旧。
+ */
+export function navEngageBreakImpl(self: GodAIInput, ctx: DecisionContext): boolean {
+  const prm = self.params
+  if (prm.navEngageBreakMode <= 0) return false
+  if (self._lastBranch !== 'navigate' || self._fire) return false
+  const aimDir = ctx.aimDir
+  if (!aimDir) return false
+  if (self.hasBase && self.isBaseUnderThreat()) return false
+  const scan = scanAheadImpl(self, ctx.pcx, ctx.pcy, aimDir)
+  if (!scan.enemy || scan.enemyDist > prm.navEngageBreakRangeCells) return false
+  if (!shouldFireInDirImpl(self, ctx.pcx, ctx.pcy, aimDir)) return false
+  self._moveDir = null
+  self._fire = !ctx.onCooldown
+  if (self._fire) markBranch(self, 'navEngage')
+  return self._fire
 }

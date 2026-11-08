@@ -19,7 +19,7 @@ export function evalInterceptBase(self: GodAIInput, ctx: DecisionContext): boole
     if (baseThreat) {
       const interceptCell = baseBulletInterceptCellImpl(self, baseThreat)
       if (interceptCell) {
-        self._moveDir = self.navigateTowards(interceptCell)
+        self._moveDir = self.navigateTowards(interceptCell, 'intercept')
         // Fire to intercept the bullet (T5 extended to base defense).
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
         recordBranch(self, 't8')

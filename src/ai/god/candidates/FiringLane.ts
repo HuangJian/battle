@@ -67,7 +67,7 @@ export function evalFiringLane(self: GodAIInput, ctx: DecisionContext): boolean 
   const target = self._firingLaneCell
   if (!target) return false
   if (target.col === pc.col && target.row === pc.row) return false // arrived; next replan re-picks
-  self._moveDir = self.navigateTowards(target)
+  self._moveDir = self.navigateTowards(target, 'lane')
   if (!self._moveDir) {
     // A* failed — unstick toward any passable direction (P2.2-style).
     for (let di = 0; di < ALL_DIRS.length; di++) {

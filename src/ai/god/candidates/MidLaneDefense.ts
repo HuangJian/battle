@@ -171,7 +171,7 @@ export function evalMidLaneDefense(self: GodAIInput, ctx: DecisionContext): bool
     return true
   }
   // No carve path (rare — point unreachable) — plain navigation.
-  self._moveDir = self.navigateTowards(point)
+  self._moveDir = self.navigateTowards(point, 'hold')
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
   recordBranch(self, 'midLaneDefense')
   return true

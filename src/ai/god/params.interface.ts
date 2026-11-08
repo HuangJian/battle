@@ -633,6 +633,34 @@ export interface GodAIParams {
    */
   t2aMaxRange: number
   /**
+   * 2026-11-02：基地受威胁时的 t2a 交战距离覆盖（0 = OFF，用 t2aMaxRange）。
+   *
+   * 背景：命中率-距离曲线（`tmp/hit-by-range.ts`，Battlement 60 seeds / 3,269 发）：
+   * 3-4 格 **66.1%** · 5-6 格 55.2% · 7-9 格 44.6% · **10+ 格 16.9%（占 29.5% 的发数）**。
+   * 把 `t2aMaxRange` 15→10 让 7 关 +7（Maze +4 / Checkers +5 / Star Fort +4），
+   * 但全局 −0.38pp（其他 28 关的远距压制被砍掉）。
+   * 本参数给「基地受威胁」这个局面单独的放宽值：守家时不追上去、原地把弹打出去。
+   */
+  t2aMaxRangeThreat: number
+  /**
+   * 2026-11-02 局面自适应交战距离（`t2aAdaptiveMode`，0 = OFF byte-identical）。
+   *
+   * 把 `t2aMaxRange` 从编译期常量改成局面函数：命中率-距离曲线（3-4 格 66.1% vs
+   * 10+ 格 16.9%，后者占 29.5% 发数）的收益并不在所有局面成立 —— 场上敌人多会被
+   * 围，自己血薄换不起。
+   *
+   * ON 时：**场上敌人 ≤ t2aAdaptiveMaxEnemies 且 hp/maxHp ≥ t2aAdaptiveMinHpFrac**
+   * ⇒ 交战距离压到 `t2aAdaptiveRange`；否则保持 `t2aMaxRange`。
+   * 零分配、不抽 RNG（只读 World + params）。
+   */
+  t2aAdaptiveMode: number
+  /** 压上去的交战距离（格）。默认 8。 */
+  t2aAdaptiveRange: number
+  /** 「敌人少」阈值（场上存活数）。默认 2。 */
+  t2aAdaptiveMaxEnemies: number
+  /** 「自己还硬」的血量占比阈值。默认 0.5。 */
+  t2aAdaptiveMinHpFrac: number
+  /**
    * §56: Close-combat T2a range for HIGH-HP enemies (maxHp > 1, i.e. armor).
    * Default 2 — the player only stops to aim at multi-HP enemies when at
    * point-blank range. At longer ranges, the player keeps NAVIGATING to
@@ -697,6 +725,58 @@ export interface GodAIParams {
    * weight is 30-120). Gated independently for A/B testing.
    */
   defenseClearShotBonus: number
+
+  /**
+   * 2026-11-01 基地防守「转身开火」（`baseTurnFireMode`，0 = OFF byte-identical）。
+   *
+   * 诊断（hard，35×60；逐关 `base-death-scan` + 逐拍 `threat-facing`）：
+   * 基地受威胁（isBaseUnderThreat）且玩家 ≤12 格时 ——
+   *   · 基地挨打时玩家距基地中位 **7 格**、最近敌人中位 **7 格**，
+   *     即"人就在旁边"，失败 100% 仍是丢基地；
+   *   · 威胁期只有 **14.4%** 的拍朝向那个威胁敌人，**47.7%** 的拍与它
+   *     轴对齐（±1 格）却朝向别处；
+   *   · 朝向时的开火量已经贴着射速上限（27.5 拍/发），所以瓶颈不是扳机，
+   *     而是**朝向**：候选链沿导航方向走，走的方向不是敌人的方向，
+   *     于是"走过去"的整段路零产出（`_fireGateAudit.noFire` 占绝对多数，
+   *     转身门 `effectiveDirMismatch` 只有 ~0.1%）。
+   * 量化收益：7,094 拍「对齐 + 朝向错 + 没开火」，其中 **6,148 拍（86.7%）
+   * 转身后 scanAhead 立刻看到敌人**，4,393 拍在 ≤6 格内（近距必中区）。
+   *
+   * 规则：基地受威胁、本拍没开火、玩家距基地 ≤baseTurnFireBaseRangeCells、
+   * 存在一个威胁敌人（enemyCanShootBase || enemyCanBreachRing）在
+   * ≤baseTurnFireRangeCells 且与玩家轴对齐、`turnWillCommit(dir)` 成立
+   * （保证这一发真的沿新朝向飞出去，A2 的不变量）、该方向 scanAhead 看到
+   * 敌人 —— 就 `_moveDir = dir` 并开火（`_fire = !onCooldown`，冷却时只转身）。
+   *
+   * 0 = OFF。默认值见 baseTurnFireRangeCells / baseTurnFireBaseRangeCells。
+   */
+  baseTurnFireMode: number
+  /** baseTurnFireMode 的敌人距离上限（格）：只打这么近的威胁者。默认 8。 */
+  baseTurnFireRangeCells: number
+  /** baseTurnFireMode 只在玩家距基地 ≤ 该格时生效（远处回防由既有门负责）。默认 12。 */
+  baseTurnFireBaseRangeCells: number
+
+  /**
+   * 2026-11-01 「用命换输出」（`dodgeHpArmorMode`，0 = OFF byte-identical）。
+   *
+   * 依据：模拟层对**非致命命中**的契约是「只扣 HP，不改 identity / profile /
+   * 任何派生属性，无 stun、无击退」（SimulationCombat 命中分支注释，issue #2）。
+   * 所以吃一发非致命弹的全部代价就是 HP。而 hard 有 3 条命：
+   *   · 败局平均只死 **0.4–0.6** 次/局（胜局 0.5–1.1 次 —— **胜局反而死得多**）；
+   *   · `livesOverride` 探针（7 关 × 60 seeds）：1 命 **36.7%** · 3 命 **72.1%** ·
+   *     5 命 **72.1%（与 3 命逐局完全相同）** ⇒ 第 3 条命之后完全没人用。
+   *
+   * 也就是说：AI 现在为每一发子弹让路，而其中绝大多数根本打不死它。本旋钮让
+   * AI 在「hp > damage × dodgeHpArmorHits」时**无视这一发**，把 dodge 的 tick
+   * 让给进攻候选（dodge 占 4.5% 的 tick，且期间基本不产出）。
+   *
+   * 1 = ON。0 = OFF（保持「躲一切弹」的旧行为）。
+   */
+  dodgeHpArmorMode: number
+  /** `dodgeHpArmorMode` 的出血额度（发）：剩余 HP 高于 damage×该值时无视威胁弹。默认 2。 */
+  dodgeHpArmorHits: number
+  /** `dodgeHpArmorMode = 3` 的贴脸半径（格）：最近敌人在该距离内才放弃躲弹。默认 3。 */
+  dodgeHpArmorMeleeCells: number
 
   /**
    * D2 / 拆环威胁 (ring-breach threat score, plan/Battlement-Hard-Exploration
@@ -2084,6 +2164,31 @@ export interface GodAIParams {
    * an urgent short-range errand.
    */
   pickupPrioritySpawnRowMax: number
+  /**
+   * 2026-10-31（用户规则）：freeze / bomb 豁免出生带门（`pickupPrioritySpawnRowMax`）。
+   * 0 = OFF（byte-identical）。实测 A* 4–8 格的冻/炸 175 个 0 拾取，其中 94 个在顶部 3 行。
+   */
+  highPickupSpawnRowExempt: number
+  /**
+   * 2026-10-31（用户规则）：freeze / bomb 豁免路线危险门（`pickupPriorityMaxDanger`）。
+   * 0 = OFF。§87 紧急拾取没有敌近门，实际卡住 4–8 格的是「有敌人比玩家更靠近道具」。
+   */
+  highPickupDangerExempt: number
+  /**
+   * 2026-11-01 诊断开关（0 = OFF，零开销）：统计撤退门
+   * （`fieldRetreatPickupGate` / M13）挡住了多少次「紧急高价值拾取」。
+   * 计数写入 branchCounts.pickupRetreatGate / pickupRetreatBlocked（纯观察）。
+   */
+  pickupRetreatProbeMode: number
+  /**
+   * 2026-11-01 拾取承诺跨 tick（0 = OFF，byte-identical）。1 = ON：
+   * commitPowerupTail 的目标在 `pickupCommitTicks` 内跨 tick 存活；被 dodge/防守
+   * 抢占后下一拍恢复；基地受威胁、道具消失或超时则释放。
+   * 动机：A* 4–8 格的冻/炸 76–86% 被选为目标却 0% 拾取（执行中断，非门限）。
+   */
+  pickupCommitMode: number
+  /** 承诺时长（拍，默认 60）。 */
+  pickupStickyTicks: number
 
   // ---- §88: 据守咽喉要地 (chokepoint holding, user request 2026-08-02) ----
   /**
@@ -2513,6 +2618,92 @@ export interface GodAIParams {
    */
   closePickupRange: number
 
+  // ---- 2026-10-29: HIGH-value must-pick (freeze / bomb, user rule) ----
+  /**
+   * 用户规则（2026-10-29）：**除非基地正在被威胁，8 格以内的 freeze / bomb
+   * 必须全部捡取；8 格以外在保证安全的前提下也要尽量捡。**
+   *
+   * 0 = OFF（byte-identical）。1 = ON：PICKUP_HIGH 候选在链首（dual 门控之后、
+   * `!self.aggressive` 门之前）先查 `findMustPickupHighImpl`：
+   *   · `mustPickupHighRange` 内（默认 8 格）：只保留「可达 + 敌人不压在道具上」
+   *     两道门，忽略 §87 的 nearbyEnemy / routeDanger / spawn-band 门；
+   *   · `highSafePickupRange` 内（> mustPickupHighRange 时生效）：保留全部 §87
+   *     安全门，仅把 HIGH 的距离上限放宽。
+   * 两种半径共用同一个硬门：`isBaseUnderThreat()` 为真 ⇒ 直接放弃（回防优先）。
+   *
+   * 动机（hard 35×60 itemAudit, 2026-10-29）：freeze 掉落 1634 个，86.5% 被拾取；
+   * 未拾取的 221 个里 124 个玩家曾进入 8 格内却从未拾取（4 格以上 0 个被拾取）。
+   * 现行 PICKUP_HIGH 被 `!self.aggressive` 与 §87 安全门双重阻塞，导致「看见了
+   * 但不捡」。本条规则只对 freeze/bomb（真正能解围的即时道具）放宽。
+   */
+  mustPickupHighMode: number
+  /** must-pick 半径（格，Manhattan）。用户口径：8。 */
+  mustPickupHighRange: number
+  /**
+   * MUST 带的可选安全带（0 = 关）：最近的活敌 ≤ 该格数时放弃必捡。
+   * 用户规则的唯一例外是「基地受威胁」，本参数用于 A/B 验证「敌人贴脸也去捡」
+   * 是否在赔胜率（hard 35×60 实测 must8 = −5 胜，需判断是否由贴脸硬捡造成）。
+   */
+  mustPickupMinEnemyDist: number
+  /**
+   * MUST 带的承诺窗口（0 = 无承诺，byte-identical）。>0：一旦 must-pick 选中
+   * 道具，就持续追同一个目标最多 N tick（道具消失 / 基地受威胁时立刻放弃）。
+   * 动机（2026-10-29 胜转负法医）：Battlement S34 s2 在 (22,11) 附近
+   * powerup↑/navigate↓ 每 50–100 tick 翻转一次、持续 ~500 tick，基地从 120 掉到 0。
+   * 与 §152-W3 的 pickupCommitTicks 同思路，但只作用于 freeze/bomb 的 MUST 带，
+   * 且基地威胁优先级最高。
+   */
+  mustPickupCommitTicks: number
+  /**
+   * MUST 带的开局禁令（0 = 关）：世界击杀数 < N 时不启用 must-pick。
+   * 动机（2026-10-29 胜转负法医）：22 个 W→L 里 16 个在赛程前半段分歧，
+   * 分歧时击杀 17/22 ≤6；而 17 个 L→W 无一在 25% 前分歧、15/17 分歧时击杀 ≥7。
+   * 开局是滚雪球期（每杀都换掉落与星级），不该为道具让路。
+   */
+  mustPickupMinKills: number
+  // ---- 2026-10-29: freeze-window lateral align ----
+  /**
+   * 冻结期横移对齐（0 = OFF，byte-identical）。1 = ON：冻结期间 aimDir 存在
+   * 但弹道走廊为空（`scanAhead` 看不到敌人）时，若敌人在瞄准轴前方
+   * 1–2 格横向偏移内，就横移一格把它放回 6px 走廊，下一拍 stop-and-aim 接管。
+   *
+   * 动机（hard 35×60 低杀窗口逐拍解剖）：满长低杀窗口 52% 的拍是
+   * 「有 aimDir + 路径无遮挡 + fire=false」；敌人横向偏 ~1 格时走廊打不到，
+   * 导航回退又指向敌人本体格（不可达）⇒ 20s 原地掉头（S19 s6：144 拍已朝上仍 0 开火）。
+   */
+  freezeAlignMode: number
+  /** 冻结期横移对齐的搜索半径（格，Manhattan；沿瞄准轴方向）。默认 8。 */
+  freezeAlignRangeCells: number
+  /**
+   * 冻结期「可射目标优先」（0 = OFF，byte-identical）。1 = ON：findEnemyDirection
+   * 在冻结期给「6px 弹道无 brick/steel/base」的目标 +1e9 分，压过威胁/距离。
+   * 动机：默认评分会在冻结期选中「更近但隔砖/钢」的敌人，随后 stop-and-aim
+   * 每拍都因走廊为空拒绝开火（S19 s6：正上方 8.4 格隔砖+钢，144 拍 0 开火）。
+   */
+  freezeTargetLosMode: number
+  /**
+   * 冻结期破砖开路（0 = OFF，byte-identical）。1 = ON：冻结期瞄准方向走廊为空、
+   * 且第一块挡弹地形是 **brick**（不是 steel/base）时，沿瞄准方向边推进边开火，
+   * 把车道挖出来。钢/基地不可挖 ⇒ 交给目标选择换人。
+   */
+  freezeCarveMode: number
+  /** 冻结期破砖的搜索格数上限（默认 8）。 */
+  freezeCarveRangeCells: number
+  // ---- 2026-10-30: navigate 停滞打断 ----
+  /**
+   * 导航停滞打断（0 = OFF，byte-identical）。1 = ON：`navigate` 分支中若
+   * aimDir 存在、该方向 ≤navEngageBreakRangeCells 格内有敌人且射界干净、
+   * 本拍没开火、基地不受威胁 ⇒ 停步并开火（分支标记 navEngage）。
+   *
+   * 数据（tools/diag/nav-stall-audit.ts，hard 35×60）：navigate 长段占 13.7% tick，
+   * 段内击杀率 0.33× 段外；452 个贴身段（敌 ≤5 格占 68% 拍）中位 355 拍只开 7 拍火。
+   */
+  navEngageBreakMode: number
+  /** 打断的敌人距离上限（格，默认 5）。 */
+  navEngageBreakRangeCells: number
+  /** 8 格之外的「安全带」半径（格）；0 = 不启用。仅 freeze/bomb，且全部 §87 安全门生效。 */
+  highSafePickupRange: number
+
   // ---- §166 / B1: star rush — 星经济冲刺 (star-economy sprint) ----
   /**
    * §166 / B1: 0 = OFF (byte-identical). 1 = ON: while the controlled tank's
@@ -2632,6 +2823,27 @@ export interface GodAIParams {
    * aggressive branches are untouched; no commit is written under threat.
    */
   huntCommitTicks: number
+  /**
+   * 2026-10-30 有条件追击承诺（0 = OFF）。>0：追击目标锁定 N 拍，但**只在
+   * 基地不受威胁时**；基地一受威胁立刻释放。动机：无条件 `huntCommitTicks=120`
+   * 实测 hard 1804→1737（−67）——换目标是防御响应的必要行为；本旋钮保留
+   * 「追击中途不换目标」的收益，同时不锁死防线。
+   */
+  huntCommitSafeTicks: number
+  // ---- 2026-10-30: 预判拦截 ----
+  /**
+   * 预判拦截（0 = OFF，byte-identical）。1 = ON：追击目标从「敌人当前格」改为
+   * 「沿敌人朝向前方 `pursuitLeadCells` 格」的拦截点（越界/钢/水/基地则逐格退让）。
+   * 动机：同速尾随追当前格永远缩不近距离（nav-stall：段首 7 格、段尾 7 格）。
+   */
+  pursuitLeadMode: number
+  /** 提前格数（默认 2）。 */
+  pursuitLeadCells: number
+  /**
+   * mode 2 的最小稳定拍数（默认 2）：敌人必须连续 N 拍朝同一方向移动才预判；
+   * 刚转向/静止时提前量归零（避免把玩家导向空地）。
+   */
+  pursuitLeadStableTicks: number
 
   // ---- §171: path-aware target selection (路径长度感知目标选择) ----
   /**

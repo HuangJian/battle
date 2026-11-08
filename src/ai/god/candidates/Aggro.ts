@@ -2,7 +2,8 @@
 // Extracted verbatim from think.ts (plan/refactor.trae.md §3.4):
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
-import { CELL } from '../../../constants'
+import { CELL, FIELD } from '../../../constants'
+import { aabb } from '../../../utils/helpers'
 import { ALL_DIRS } from '../../../utils/direction'
 import { type GodAIInput, markBranch, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
@@ -20,6 +21,8 @@ import {
 import { updateStuckTrack } from '../stuck-track'
 import { STEEL_PIERCE_PLAYER_LEVEL } from '../../../config/combat'
 import { findFreezePickupTargetImpl } from '../StrategyPlanner'
+import { findFreezeAlignDirImpl } from '../StrategyPlanner'
+import { firstBlockerKindImpl } from '../FireControl'
 
 export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, aimDir } = ctx
@@ -40,7 +43,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
     ) {
       const freezeTarget = findFreezePickupTargetImpl(self, pcx, pcy)
       if (freezeTarget) {
-        self._moveDir = self.navigateTowards(freezeTarget)
+        self._moveDir = self.navigateTowards(freezeTarget, 'item')
         // §185: When navigateTowards returns null (no path to the pickup),
         // fall through to aggressive branch instead of returning true with
         // move=null — the player would be stuck indefinitely in the powerup
@@ -67,6 +70,82 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
           } else {
             self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir)
             recordBranch(self, 'powerup')
+            return true
+          }
+        }
+      }
+    }
+    // 2026-10-29 freeze-window carve (freezeCarveMode): the aim line is
+    // empty, and the first blocker is BRICK (diggable). Enemies are frozen —
+    // digging a 6px lane is free tempo, and the lane also serves the base
+    // defence afterwards. Steel/base are not diggable ⇒ leave it to target
+    // selection (freezeTargetLosMode) instead of hammering a steel wall.
+    if (self.params.freezeCarveMode > 0 && w.freezeTimer > 0 && aimDir) {
+      const carveScan = scanAheadImpl(self, pcx, pcy, aimDir)
+      if (!carveScan.enemy) {
+        const blocker = firstBlockerKindImpl(
+          self,
+          pcx,
+          pcy,
+          aimDir,
+          self.params.freezeCarveRangeCells,
+        )
+        if (blocker === 'brick' && !selfFireBaseGuardBlocks(self, pcx, pcy, aimDir)) {
+          self._moveDir = aimDir
+          self._fire = !onCooldown
+          recordBranch(self, 'aggressive', 'freezeCarve')
+          return true
+        }
+      }
+    }
+    // 2026-10-29 freeze-window lateral align (freezeAlignMode): the frozen
+    // enemy sits 1–2 cells off the bullet corridor. `scanAhead` sees nothing
+    // (so stop-and-aim declines), and the navigate fallback targets the enemy
+    // body — an occupied, unreachable cell — so the first path step flips
+    // up/down at a cell boundary for the whole 20s window (hard S19 Frozen
+    // Field seed 6: 144 ticks facing the enemy with a clear path, fire=0).
+    // Sidestep one cell to put it back on the 6px corridor; enemies are
+    // frozen, so the only threat is in-flight bullets (DODGE handles those).
+    // 0 = OFF (byte-identical).
+    if (self.params.freezeAlignMode > 0 && w.freezeTimer > 0 && aimDir) {
+      const corridorEmpty = !scanAheadImpl(self, pcx, pcy, aimDir).enemy
+      if (corridorEmpty) {
+        const side = findFreezeAlignDirImpl(
+          self,
+          pcx,
+          pcy,
+          aimDir,
+          self.params.freezeAlignRangeCells,
+        )
+        if (side) {
+          // Validate the lateral step physically (bounds + terrain + tanks):
+          // the navigator may insist on a different first step, so do NOT
+          // require it to agree — but never hijack into a blocked cell.
+          const stepX = side === 'left' ? -CELL : side === 'right' ? CELL : 0
+          const stepY = side === 'up' ? -CELL : side === 'down' ? CELL : 0
+          const nx = p.x + stepX
+          const ny = p.y + stepY
+          let clear =
+            nx >= 0 &&
+            ny >= 0 &&
+            nx + p.w <= FIELD &&
+            ny + p.h <= FIELD &&
+            !w.rectHitsTerrain(nx, ny, p.w, p.h)
+          if (clear) {
+            const tanks = w.allTanks
+            for (let ti = 0; ti < tanks.length; ti++) {
+              const o = tanks[ti]
+              if (!o.alive || o === p) continue
+              if (aabb(nx, ny, p.w, p.h, o.x, o.y, o.w, o.h)) {
+                clear = false
+                break
+              }
+            }
+          }
+          if (clear) {
+            self._moveDir = side
+            self._fire = false
+            recordBranch(self, 'aggressive', 'freezeAlign')
             return true
           }
         }
@@ -186,7 +265,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       const puStuck =
         self.params.powerupStuckTicks > 0 && self._digBlockTicks >= self.params.powerupStuckTicks
       if (!puStuck) {
-        self._moveDir = self.navigateTowards(puTarget)
+        self._moveDir = self.navigateTowards(puTarget, 'item')
         self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
         markBranch(self, 'aggressive')
         return true
@@ -216,7 +295,7 @@ export function evalAggro(self: GodAIInput, ctx: DecisionContext): boolean {
       }
       if (escape152) {
         if (self._aggNavTrack.suppress > 0) self._aggNavTrack.suppress--
-        self._moveDir = self.navigateTowards(MAP_CENTER)
+        self._moveDir = self.navigateTowards(MAP_CENTER, 'escape')
         if (!self._moveDir) {
           for (let di = 0; di < ALL_DIRS.length; di++) {
             const d = ALL_DIRS[di]

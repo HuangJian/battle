@@ -48,7 +48,7 @@ export function evalMidLaneHold(self: GodAIInput, ctx: DecisionContext): boolean
   }
   if (!busy) return false
   // 前往对消格（findParryHoldCellImpl 已保证走廊可达 — 顶部广场不打砖）。
-  self._moveDir = self.navigateTowards(hold)
+  self._moveDir = self.navigateTowards(hold, 'hold')
   self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, self._moveDir ?? p.dir)
   recordBranch(self, 'midLaneHold')
   return true

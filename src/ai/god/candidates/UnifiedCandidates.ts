@@ -48,7 +48,7 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
   if (!v.kind) return false
   const roll = (): boolean => self.rng.next() >= prm.aimError
   if (v.kind === 'returnDefense') {
-    self._moveDir = self.navigateTowards({ col: anchorCol, row: anchorRow })
+    self._moveDir = self.navigateTowards({ col: anchorCol, row: anchorRow }, 'hold')
     self._fire = false
     recordBranch(self, 'unifiedCandidates', 'candidateReturn')
     return true
@@ -94,7 +94,7 @@ export function evalUnifiedCandidates(self: GodAIInput, ctx: DecisionContext): b
     self._moveDir = null
     self._fire = v.fireClear && !onCooldown && roll()
   } else {
-    self._moveDir = self.navigateTowards(tc)
+    self._moveDir = self.navigateTowards(tc, 'engage')
     self._fire = aligned && facing && !fireRayBlocked(w, p, target) && !onCooldown && roll()
   }
   recordBranch(

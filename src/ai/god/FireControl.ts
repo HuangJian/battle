@@ -98,7 +98,17 @@ export function findEnemyDirectionImpl(
       const lvl = estimatedEnemyLevel(self)
       if (lvl > 0) threatWeight *= 1 + self.params.tierWeightScale * lvl
     }
-    const score = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100
+    const baseScore = (threatWeight + bonusWeight) * 10000 - dist + hpFactor * 100
+    // 2026-10-29 (freezeTargetLosMode): during freeze, prefer a target the
+    // 6px bullet lane can actually reach. The default score picks by threat
+    // then distance — which happily selects a nearer enemy standing behind
+    // brick/steel, and the stop-and-aim scan then declines every tick (S19
+    // Frozen Field seed 6: dead-aligned armor 8.4 cells up behind brick+steel,
+    // 144 ticks facing it with zero shots). A clear lane outranks distance.
+    let score = baseScore
+    if (self.params.freezeTargetLosMode > 0 && w.freezeTimer > 0) {
+      if (bulletLaneClearImpl(self, pcx, pcy, dir, dist)) score += 1e9
+    }
 
     if (score > bestScore) {
       bestScore = score
@@ -107,6 +117,58 @@ export function findEnemyDirectionImpl(
   }
 
   return bestDir
+}
+
+/**
+ * 2026-10-29：6px 弹道走廊是否干净（无 brick/steel/base 挡路）。
+ * 用玩家中心所在的格沿 `dir` 逐格走到 `distPx` 之前，供冻结期目标选择使用。
+ * 只读 World；冻结期专用，非热路径。
+ */
+export function bulletLaneClearImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  distPx: number,
+): boolean {
+  const tm = self.world.tileMap
+  const col = Math.floor(pcx / CELL)
+  const row = Math.floor(pcy / CELL)
+  const steps = Math.floor(distPx / CELL)
+  for (let s = 1; s <= steps; s++) {
+    const c = dir === 'left' ? col - s : dir === 'right' ? col + s : col
+    const r = dir === 'up' ? row - s : dir === 'down' ? row + s : row
+    if (c < 0 || r < 0 || c >= GRID || r >= GRID) return false
+    const t = tm.get(c, r)
+    if (t === 'brick' || t === 'steel' || t === 'base') return false
+  }
+  return true
+}
+
+/**
+ * 2026-10-29：`dir` 方向 `maxCells` 格内第一块挡弹的地形（brick/steel/base），
+ * 'none' = 通道干净。冻结期破砖决策用：brick 可挖、steel/base 不可挖。
+ */
+export function firstBlockerKindImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  dir: Direction,
+  maxCells: number,
+): 'brick' | 'steel' | 'base' | 'none' {
+  const tm = self.world.tileMap
+  const col = Math.floor(pcx / CELL)
+  const row = Math.floor(pcy / CELL)
+  for (let s = 1; s <= maxCells; s++) {
+    const c = dir === 'left' ? col - s : dir === 'right' ? col + s : col
+    const r = dir === 'up' ? row - s : dir === 'down' ? row + s : row
+    if (c < 0 || r < 0 || c >= GRID || r >= GRID) return 'none'
+    const t = tm.get(c, r)
+    if (t === 'brick') return 'brick'
+    if (t === 'steel') return 'steel'
+    if (t === 'base') return 'base'
+  }
+  return 'none'
 }
 
 // Hoisted constants — flat arrays (perf §63): tuple destructuring

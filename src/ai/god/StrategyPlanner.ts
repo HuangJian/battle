@@ -2,11 +2,13 @@ import { type GodAIInput, countBranch } from '../GodAIInput'
 import type { Tank, PowerUpType } from '../../types'
 import type { World } from '../../game/World'
 import { findPath, type Cell } from './pathfind'
-import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID, TICK_MS } from '../../constants'
+import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID, TICK_MS, DIR_VECTORS } from '../../constants'
+import type { Direction } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
 import { POWERUP_PRIORITY, kindThreatWeight, shotsToKill } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
+import { enemyStableVelocity } from './EnemyMotion'
 import { targetValue, enemyDeadline, killAssessment, countRingBrickCells } from './ThreatBudget'
 import { coveragePlanImpl } from './CoveragePlanner'
 import type { ActionId } from './DecisionCore'
@@ -426,12 +428,17 @@ export function findUrgentPowerUpTargetImpl(
     // §88 tier gate: only consider items of the requested tier (default 'all'
     // = pre-§88 behavior, byte-identical).
     if (tier !== 'all' && urgentTier(pu.type) !== tier) continue
+    const probe = p.pickupRetreatProbeMode > 0
+    if (probe) countBranch(self, 'uuSeen')
     const dist = Math.round(manhattan(cx, cy, pcx, pcy) / CELL)
     let range = urgentPickupRange(pu.type, p)
     // §166 / B1: extended urgent range for rush stars (4 -> starRushRangeCells).
     if (rushStar && p.starRushRangeCells > range) range = p.starRushRangeCells
     // Distance gate by category — the core of the tuning sweep.
-    if (range <= 0 || dist > range) continue
+    if (range <= 0 || dist > range) {
+      if (probe) countBranch(self, 'uuRange')
+      continue
+    }
 
     // 双玩家协作: 伙伴明显更近的道具跳过, 让伙伴拾取 (避免争抢)
     if (self.hasLivingPartner()) {
@@ -447,7 +454,14 @@ export function findUrgentPowerUpTargetImpl(
     // the player dives in and meets fresh spawns. Never treat the band as
     // an urgent errand; S5 navigation can still fetch far items there.
     if (p.pickupPrioritySpawnRowMax > 0 && Math.floor(pu.y / CELL) <= p.pickupPrioritySpawnRowMax) {
-      continue
+      // 2026-10-31 用户规则：freeze / bomb 豁免出生带门（highPickupSpawnRowExempt）。
+      // 实测：A* 4–8 格的冻/炸 175 个 0 拾取，其中 94 个就在顶部 3 行；豁免后
+      // 这两种「一捡就翻盘」的道具才可能在敌方出生带被捡起。
+      const exempt = p.highPickupSpawnRowExempt > 0 && (pu.type === 'freeze' || pu.type === 'bomb')
+      if (!exempt) {
+        if (probe) countBranch(self, 'uuSpawnRow')
+        continue
+      }
     }
 
     // Path safety gate: no enemy between the player and the item (D5: the
@@ -457,16 +471,29 @@ export function findUrgentPowerUpTargetImpl(
       self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger &&
       !starInBox &&
       !(rushStar && liftGates)
-    )
-      continue
+    ) {
+      // 2026-10-31 用户规则：freeze / bomb 豁免「路线危险」门（highPickupDangerExempt）。
+      // 这才是 4–8 格死区的真正闸门：§87 紧急拾取没有敌近门，`pickupPriorityMaxDanger=0`
+      // 却会因为「有敌人比玩家更靠近道具」直接否掉（4 敌同场几乎常真）。
+      const dangerExempt =
+        p.highPickupDangerExempt > 0 && (pu.type === 'freeze' || pu.type === 'bomb')
+      if (!dangerExempt) {
+        if (probe) countBranch(self, 'uuDanger')
+        continue
+      }
+    }
 
     // Reachability gate: the tank must be able to drive to a cell that
     // overlaps the item (same A* as the bonus window). Without this the
     // player would chase a steel/water-enclosed pocket every tick.
     const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), Math.floor(pu.y / CELL))
-    if (!collect) continue
+    if (!collect) {
+      if (probe) countBranch(self, 'uuUnreachable')
+      continue
+    }
 
     const priority = POWERUP_PRIORITY[pu.type] ?? 5
+    if (probe) countBranch(self, 'uuAccept')
     if (dist < bestDist || (dist === bestDist && priority < bestPriority)) {
       bestDist = dist
       bestPriority = priority
@@ -683,8 +710,204 @@ export function findClosePickupTargetImpl(self: GodAIInput, pcx: number, pcy: nu
   return findNearestReachablePowerUp(self, pcx, pcy, range)
 }
 
-/** §87: distance gate (cells) for a power-up type. 0 = never urgent. */
-function urgentPickupRange(type: PowerUpType, p: GodAIParams): number {
+/** 最近的、已生成的存活敌人距离（格，Manhattan）；-1 = 场上无敌人。 */
+function nearestEnemyDistCells(self: GodAIInput, pcx: number, pcy: number): number {
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  const pCol = Math.floor(pcx / CELL)
+  const pRow = Math.floor(pcy / CELL)
+  let best = -1
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+    const d = manhattan(Math.floor(t.x / CELL), Math.floor(t.y / CELL), pCol, pRow)
+    if (best < 0 || d < best) best = d
+  }
+  return best
+}
+
+/**
+ * 2026-10-29 用户规则：**除非基地正在被威胁，8 格以内的 freeze / bomb 必捡**；
+ * 8 格以外（≤ highSafePickupRange）在保证安全的前提下尽量捡。
+ *
+ * 与 findUrgentPowerUpTargetImpl 的差别是有意为之：
+ *   · MUST 带（≤ mustPickupHighRange）只保留「可达 + 敌人不压在道具上」两道门，
+ *     忽略 §87 的 nearbyEnemy / routeDanger / spawn-band —— 用户明确要求
+ *     「8 格以内全部捡」，只留基地威胁一个例外；
+ *   · SAFE 带（mustPickupHighRange < dist ≤ highSafePickupRange）保留全部
+ *     §87 安全门（敌人贴脸 / 路线危险 / 敌方出生带），只放宽距离。
+ *   · 只针对 freeze + bomb：这两个是即时解围道具（冻全场 / 清全场），
+ *     和 star 那种「慢慢滚雪球」的收益结构不同。
+ *
+ * 硬门：`isBaseUnderThreat()` 为真 ⇒ 返回 null（回防优先）。该判定在 think
+ * 内是按拍缓存的（`_baseUnderThreatCache`），不增加热路径成本。
+ *
+ * Gated by mustPickupHighMode (0 = OFF, byte-identical).
+ */
+export function findMustPickupHighImpl(self: GodAIInput, pcx: number, pcy: number): Cell | null {
+  const p = self.params
+  if (p.mustPickupHighMode <= 0) return null
+  if (self.hasBase && self.isBaseUnderThreat()) {
+    // Base threat also cancels an active commit — defense outranks the item.
+    self._mustCommitActive = false
+    self._mustCommitTicks = 0
+    return null
+  }
+  if (p.mustPickupMinKills > 0 && self.world.killCount < p.mustPickupMinKills) {
+    self._mustCommitActive = false
+    self._mustCommitTicks = 0
+    return null
+  }
+  const commitTicks = p.mustPickupCommitTicks
+  if (commitTicks > 0 && self._mustCommitActive) {
+    self._mustCommitTicks++
+    const alive = powerUpAliveAt(self, self._mustCommitItemCol, self._mustCommitItemRow)
+    if (!alive || self._mustCommitTicks > commitTicks) {
+      self._mustCommitActive = false
+      self._mustCommitTicks = 0
+    } else {
+      return { col: self._mustCommitCol, row: self._mustCommitRow }
+    }
+  }
+  const powerUps = self.world.powerUps
+  if (powerUps.length === 0) return null
+
+  const mustRange = p.mustPickupHighRange
+  const safeRange = p.highSafePickupRange > mustRange ? p.highSafePickupRange : 0
+
+  // SAFE 带的安全门只需算一次「最近敌人距离」；MUST 带的可选贴脸门也用它。
+  let nearbyChecked = false
+  let nearEnemyDist = -1
+  const ensureNearby = (): void => {
+    if (nearbyChecked) return
+    nearbyChecked = true
+    nearEnemyDist = nearestEnemyDistCells(self, pcx, pcy)
+  }
+
+  let bestCol = 0
+  let bestRow = 0
+  let bestItemCol = 0
+  let bestItemRow = 0
+  let bestDist = Infinity
+  let hasBest = false
+
+  for (let pi = 0; pi < powerUps.length; pi++) {
+    const pu = powerUps[pi]
+    if (!pu.alive) continue
+    if (pu.type !== 'freeze' && pu.type !== 'bomb') continue
+    const cx = pu.x + pu.w / 2
+    const cy = pu.y + pu.h / 2
+    const dist = Math.round(manhattan(cx, cy, pcx, pcy) / CELL)
+    const inMust = dist <= mustRange
+    const inSafe = safeRange > 0 && dist <= safeRange
+    if (!inMust && !inSafe) continue
+
+    // MUST 带：用户规则豁免 §87 安全门，但可选「贴脸不捡」安全带（A/B 用）。
+    if (inMust && p.mustPickupMinEnemyDist > 0) {
+      ensureNearby()
+      if (nearEnemyDist >= 0 && nearEnemyDist <= p.mustPickupMinEnemyDist) continue
+    }
+
+    // SAFE 带：保留 §87 的全部安全门（MUST 带按用户规则豁免）。
+    if (!inMust) {
+      if (p.pickupPriorityMinEnemyDist > 0) {
+        ensureNearby()
+        if (nearEnemyDist >= 0 && nearEnemyDist <= p.pickupPriorityMinEnemyDist) continue
+      }
+      if (self.calculateRouteDanger(pcx, pcy, cx, cy) > p.pickupPriorityMaxDanger) continue
+      if (p.pickupPrioritySpawnRowMax > 0 && Math.floor(pu.y / CELL) <= p.pickupPrioritySpawnRowMax)
+        continue
+    }
+
+    // 双玩家协作：伙伴明显更近 ⇒ 让给伙伴（与 urgent pickup 同规则）。
+    if (self.hasLivingPartner()) {
+      const partner = self.coopPartner()!
+      const partnerDist = Math.round(
+        manhattan(cx, cy, partner.x + partner.w / 2, partner.y + partner.h / 2) / CELL,
+      )
+      if (partnerDist < dist - 3) continue
+    }
+
+    // 可达性（与导航同一套 A*）+ 敌人压在道具上时不追（捡不到还挨打）。
+    const collect = powerUpCollectCell(self, Math.floor(pu.x / CELL), Math.floor(pu.y / CELL))
+    if (!collect) continue
+    if (powerupHasEnemyOverlap(self, collect.col, collect.row)) continue
+
+    if (dist < bestDist) {
+      bestDist = dist
+      bestCol = collect.col
+      bestRow = collect.row
+      bestItemCol = Math.floor(pu.x / CELL)
+      bestItemRow = Math.floor(pu.y / CELL)
+      hasBest = true
+    }
+  }
+
+  if (!hasBest) return null
+  if (commitTicks > 0) {
+    self._mustCommitActive = true
+    self._mustCommitTicks = 0
+    self._mustCommitCol = bestCol
+    self._mustCommitRow = bestRow
+    self._mustCommitItemCol = bestItemCol
+    self._mustCommitItemRow = bestItemRow
+  }
+  return { col: bestCol, row: bestRow }
+}
+
+/**
+ * 冻结期横移对齐（2026-10-29 `freezeAlignMode`）：挑一个「横向偏 1–2 格、
+ * 在瞄准轴前方、在 rangeCells 内」的敌人，返回横移一步的方向。
+ *
+ * 动机（hard 35×60 low-kill 逐拍解剖）：满长低杀窗口里 52% 的拍是
+ * 「aimDir 存在 + 路径无遮挡 + fire=false」。敌人横向偏 ~1 格时
+ * `scanAhead` 的 6px 走廊看不到它（不开火），而导航目标又是敌人本体格
+ * （被冻结车体占住、A* 不可达）⇒ 首步在两格边界上下翻，整个 20s 窗口原地掉头
+ * （S19 Frozen Field seed 6：144 拍已朝上仍 0 开火）。横移一格把敌人放回
+ * 弹道走廊，下一拍 stop-and-aim 自然接管。
+ *
+ * 纯 World 读（`_enemies` 快照），无 RNG、无副作用；调用方负责选路与安全校验。
+ */
+export function findFreezeAlignDirImpl(
+  self: GodAIInput,
+  pcx: number,
+  pcy: number,
+  aimDir: Direction,
+  rangeCells: number,
+): Direction | null {
+  const w = self.world
+  const vertical = aimDir === 'up' || aimDir === 'down'
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  let bestDir: Direction | null = null
+  let bestOffset = Infinity
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+    const dx = t.x + t.w / 2 - pcx
+    const dy = t.y + t.h / 2 - pcy
+    let along: number
+    let offset: number
+    if (vertical) {
+      along = aimDir === 'up' ? -dy : dy
+      offset = Math.abs(dx)
+    } else {
+      along = aimDir === 'left' ? -dx : dx
+      offset = Math.abs(dy)
+    }
+    // 必须在瞄准轴前方、射程内，且横向偏移在「横移一格能救」的区间。
+    if (along < CELL || along > rangeCells * CELL) continue
+    if (offset < CELL / 2 || offset > 2 * CELL) continue
+    if (offset < bestOffset) {
+      bestOffset = offset
+      bestDir = vertical ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+    }
+  }
+  return bestDir
+}
+
+/** §87: distance gate (cells) for a power-up type. 0 = never urgent. */ function urgentPickupRange(
+  type: PowerUpType,
+  p: GodAIParams,
+): number {
   switch (type) {
     case 'bomb':
     case 'freeze':
@@ -2094,6 +2317,22 @@ function normalSelectionTarget(
       if (enemies[ti].id === self._huntCommitId) return self.tankCell(enemies[ti])
     }
   }
+  // 2026-10-30 有条件追击承诺（huntCommitSafeTicks）：只在基地无威胁时生效；
+  // 基地一受威胁立刻释放并回落到下面的自由选择（防御优先）。
+  if (
+    self.params.huntCommitSafeTicks > 0 &&
+    self._huntSafeCommitId >= 0 &&
+    w.frame < self._huntSafeCommitUntil
+  ) {
+    if (self.hasBase && self.isBaseUnderThreat()) {
+      self._huntSafeCommitId = -1
+      self._huntSafeCommitUntil = 0
+    } else {
+      for (let ti = 0; ti < enemies.length; ti++) {
+        if (enemies[ti].id === self._huntSafeCommitId) return self.tankCell(enemies[ti])
+      }
+    }
+  }
   let best = enemies[0]
   let bestDist = Infinity
   if (self.params.targetValueMode > 0) {
@@ -2234,6 +2473,74 @@ function nearestBaseBandEnemy(self: GodAIInput, playerCell: Cell, enemies: Tank[
   return best ? self.tankCell(best) : null
 }
 
+/**
+ * 2026-10-30 有条件追击承诺：把这次选出的目标登记为 "safe commit"（仅当基地无威胁）。
+ * 只记录，不改变返回值；释放逻辑在 selectTargetUncached 读端与基地受威胁时。
+ */
+
+/**
+ * 2026-10-30 预判拦截（`pursuitLeadMode`）：把「追敌人当前格」换成「追它将到的格」。
+ *
+ * 背景（nav-stall 探针）：86% 的 navigate 长段是追敌，目标距离中位 7 → 7 格——
+ * 敌人与玩家同速，追当前格永远缩不近距离（同速尾随只能保持差距）。把目标点沿
+ * 敌人朝向提前 `pursuitLeadCells` 格，玩家走内切路线才可能真正咬住。
+ *
+ * 纯读：只读 tileMap / 坦克朝向；提前点越界或落在不可通行地形（steel/water/base）
+ * 时逐格退让，最后回落到敌人当前格。不改变目标选择本身，只改导航终点。
+ */
+export function interceptLeadCellImpl(self: GodAIInput, target: Cell | null): Cell | null {
+  const prm = self.params
+  if (prm.pursuitLeadMode <= 0 || !target) return target
+  const w = self.world
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+    const c = self.tankCell(t)
+    if (c.col !== target.col || c.row !== target.row) continue
+    // mode 1 = 瞬时朝向；mode 2 = 实测稳定位移（刚转向/静止则不预判）。
+    let v: { dx: number; dy: number } | null
+    if (prm.pursuitLeadMode >= 2) {
+      const vel = enemyStableVelocity(self, t.id, prm.pursuitLeadStableTicks)
+      v = vel ? { dx: vel.col, dy: vel.row } : null
+    } else {
+      const d = DIR_VECTORS[t.dir]
+      v = d ? { dx: d.dx, dy: d.dy } : null
+    }
+    if (!v || (v.dx === 0 && v.dy === 0)) return target
+    for (let k = prm.pursuitLeadCells; k >= 1; k--) {
+      const nc = target.col + v.dx * k
+      const nr = target.row + v.dy * k
+      if (nc < 0 || nr < 0 || nc >= GRID || nr >= GRID) continue
+      const tile = w.tileMap.get(nc, nr)
+      if (tile === 'steel' || tile === 'water' || tile === 'base') continue
+      return { col: nc, row: nr }
+    }
+    return target
+  }
+  return target
+}
+
+function writeSafeHuntCommit(self: GodAIInput, w: World, target: Cell | null): void {
+  if (self.params.huntCommitSafeTicks <= 0 || !target) return
+  if (self.hasBase && self.isBaseUnderThreat()) return
+  // ALIASING: `target` is often the shared _tankCellBuf — snapshot it before
+  // the loop (tankCell() in the loop would clobber the very cell we compare).
+  const tCol = target.col
+  const tRow = target.row
+  const list = self._enemies.length > 0 ? self._enemies : w.tanks
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+    const c = self.tankCell(t)
+    if (c.col === tCol && c.row === tRow) {
+      self._huntSafeCommitId = t.id
+      self._huntSafeCommitUntil = w.frame + self.params.huntCommitSafeTicks
+      return
+    }
+  }
+}
+
 function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   const w = self.world
   // §79: controlled tank, not `w.player`. In co-op the God AI drives P2, so
@@ -2276,6 +2583,11 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // the static ±3-col box AND the P4 race-to-base check (flanking runners
   // that would beat the player back to the base).
   const baseUnderThreat = self.isBaseUnderThreat()
+  // 2026-10-30 有条件追击承诺：基地受威胁 ⇒ 立刻释放（防御优先）。
+  if (baseUnderThreat && self._huntSafeCommitId >= 0) {
+    self._huntSafeCommitId = -1
+    self._huntSafeCommitUntil = 0
+  }
   // D1 (plan §D1): the §137 guard-anchor knob also drives the D1 objective
   // (approach-band LOS term in computeBaseGuardAnchorImpl) and the D1 hooks
   // below — flag once, reuse in both the base-threat hold and the normal
@@ -2413,7 +2725,10 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // §88: 据守咽喉要地 gate — see chokepointHoldGate().
   if (self.params.chokepointMode > 0 && self.hasBase && !baseUnderThreat) {
     const cp = chokepointHoldGate(self, playerCell, enemies.length)
-    if (cp) return cp
+    if (cp) {
+      writeSafeHuntCommit(self, w, cp)
+      return interceptLeadCellImpl(self, cp)
+    }
   }
 
   // D1 (plan §D1): approach-band anchor hold gate — see anchorApproachHoldGate().
@@ -2426,7 +2741,11 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // When few enemies remain, go directly for the nearest enemy.
   // This replaces the old endgame check (which was too restrictive:
   // enemiesRemaining <= 1 && enemies.length <= 1).
-  if (canHunt) return huntModeTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
+  if (canHunt) {
+    const tgt = huntModeTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
+    writeSafeHuntCommit(self, w, tgt)
+    return interceptLeadCellImpl(self, tgt)
+  }
 
   // M0.5 退役（2026-08-03）: D1/D2 guardBand + damagedArmor 空块已移除
   // （否决并退役）。
@@ -2441,7 +2760,9 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // Normal target selection (base NOT under threat): dual-breach anchors /
   // P2 patrol / coverage / intent / §170 commit / nearest-family loops.
   if (!baseUnderThreat) {
-    return normalSelectionTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
+    const tgt = normalSelectionTarget(self, w, p, playerCell, enemies, coopActive, partnerCell)
+    writeSafeHuntCommit(self, w, tgt)
+    return interceptLeadCellImpl(self, tgt)
   }
 
   // Base under threat: score the most dangerous enemy (§59 clear-shot,

@@ -14,6 +14,7 @@ import {
   makeScanResult,
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
+import { type EnemyMotionSlot, makeEnemyMotionSlots } from './god/EnemyMotion'
 import { newStuckTrack, type StuckTrack } from './god/stuck-track'
 import { turnWillCommit } from './god/turn-gate'
 import type { ActionIntent } from './god/StrategyPlanner'
@@ -283,6 +284,31 @@ export class GodAIInput implements InputLike {
   _pickupCommitItemRow = 0
 
   /**
+   * 2026-10-29: must-pick (freeze/bomb ≤8 cells) commit state. The must-pick
+   * branch re-decides every tick with no hysteresis, so a target at the range
+   * boundary / behind a wall ping-pongs with the navigate branch (hard
+   * Battlement S34 seed 2: ~500 ticks alternating powerup↑/navigate↓ while
+   * the base bled out 120→0). Commit for mustPickupCommitTicks while the item
+   * stays alive AND the base is not threatened. AI-internal, not serialized.
+   */
+  _mustCommitActive = false
+  _mustCommitTicks = 0
+  _mustCommitCol = 0
+  _mustCommitRow = 0
+  _mustCommitItemCol = 0
+  _mustCommitItemRow = 0
+
+  /**
+   * 2026-10-30: last navigateTowards() intent — target cell + coarse reason.
+   * Pure observation for the nav-stall probe (tools/diag/nav-stall-audit.ts):
+   * answers "这 13.7% 的 navigate 在往哪走、为什么". Not serialized, never
+   * read back into decisions. (Named _navIntent* to avoid the §68 nav cache.)
+   */
+  _navIntentCol = -1
+  _navIntentRow = -1
+  _navIntentReason = ''
+
+  /**
    * §86: Dodge direction persistence — the last dodge direction used for a
    * given threat bullet id. When the same threat persists across ticks and
    * the last dodge direction is still safe, `dodgeDirectionImpl` returns it
@@ -344,6 +370,29 @@ export class GodAIInput implements InputLike {
    * param 0 ⇒ never written ⇒ byte-identical.
    */
   _huntCommitId = -1
+  /**
+   * 2026-10-30: 有条件追击承诺（`huntCommitSafeTicks`）——只在基地无威胁时
+   * 锁定追击目标；基地一受威胁立刻释放。无条件 §170 承诺（120 拍）实测 −67，
+   * 因为换目标本身是防御响应的必要行为。
+   */
+  _huntSafeCommitId = -1
+  _huntSafeCommitUntil = 0
+
+  /**
+   * 2026-11-01 拾取粘性（pickupCommitMode）：commitPowerupTail 记下的目标格与到期拍。
+   * 纯 AI 内部状态（不序列化）；用于「4–8 格选了却走不到」的执行修复。
+   * （与 §152-W3 的 `_pickupCommit*` 是两套：那套只处理 dist>range 翻转。）
+   */
+  _pickupStickyCol = -1
+  _pickupStickyRow = -1
+  _pickupStickyUntil = 0
+
+  /**
+   * 2026-10-31: per-enemy measured motion (pursuitLeadMode 2). 8 fixed slots,
+   * updated once per tick in think() from the `_enemies` snapshot; pure
+   * observation for lead interception (see god/EnemyMotion.ts).
+   */
+  _enemyMotion: EnemyMotionSlot[] = makeEnemyMotionSlots()
   _huntCommitUntil = 0
 
   /**
@@ -1135,6 +1184,15 @@ export class GodAIInput implements InputLike {
     this._pickupCommitRow = 0
     this._pickupCommitItemCol = 0
     this._pickupCommitItemRow = 0
+    this._mustCommitActive = false
+    this._mustCommitTicks = 0
+    this._mustCommitCol = 0
+    this._mustCommitRow = 0
+    this._mustCommitItemCol = 0
+    this._mustCommitItemRow = 0
+    this._navIntentCol = -1
+    this._navIntentRow = -1
+    this._navIntentReason = ''
     // §86: reset dodge direction persistence.
     this._lastDodgeDir = null
     this._lastDodgeThreatId = -1
@@ -1143,6 +1201,22 @@ export class GodAIInput implements InputLike {
     this._threatStickyHold = 0 // §169
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
+    this._huntSafeCommitId = -1
+    this._huntSafeCommitUntil = 0
+    this._pickupStickyCol = -1
+    this._pickupStickyRow = -1
+    this._pickupStickyUntil = 0
+    for (let i = 0; i < this._enemyMotion.length; i++) {
+      const sl = this._enemyMotion[i]
+      sl.valid = false
+      sl.id = -1
+      sl.col = -1
+      sl.row = -1
+      sl.dc = 0
+      sl.dr = 0
+      sl.stable = 0
+      sl.still = 0
+    }
     this._huntCommitUntil = 0 // §170
     this._defenseReturnLatch = false // A4
     this._dmEscDir = null // A7
@@ -1829,8 +1903,8 @@ export class GodAIInput implements InputLike {
   tankCell(t: Tank): Cell {
     return tankCellImpl(this, t)
   }
-  navigateTowards(target: Cell): Direction | null {
-    return navigateTowardsImpl(this, target)
+  navigateTowards(target: Cell, reason = 'point'): Direction | null {
+    return navigateTowardsImpl(this, target, reason)
   }
   followPath(): Direction | null {
     return followPathImpl(this)

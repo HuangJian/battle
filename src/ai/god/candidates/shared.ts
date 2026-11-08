@@ -140,13 +140,21 @@ export function commitPowerupTail(
   ctx: DecisionContext,
   target: { col: number; row: number },
 ): boolean {
-  self._moveDir = self.navigateTowards(target)
+  self._moveDir = self.navigateTowards(target, 'item')
   // 机制修复（2026-10-20，复刻外部研究并独立验证）：道具候选原来只调
   // shouldFireInDir —— 路被砖挡住时既不挖也不走，原地打转（外部取证 s34
   // (22,21) 想去拿道具、2×2 车身被 (23,20) 的砖挡死）。
   // 改走 carveFire：能走就正常射击，走不动且眼前是砖就开火破砖。
   // carveFire 内部已挡 baseWall / baseSteel，不会打基地保护环。
   carveFire(self, ctx, self._moveDir)
+  // 2026-11-01 承诺跨 tick（pickupCommitMode）：记住这次拾取目标，下一拍
+  // 即使紧急查找换了目标/掉了射程，也继续去同一个道具（被 dodge/防守抢占后
+  // 下一拍恢复；超时/道具消失/基地受威胁则释放）。
+  if (self.params.pickupCommitMode > 0) {
+    self._pickupStickyCol = target.col
+    self._pickupStickyRow = target.row
+    self._pickupStickyUntil = self.world.frame + self.params.pickupStickyTicks
+  }
   recordBranch(self, 'powerup')
   return true
 }

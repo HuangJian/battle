@@ -222,6 +222,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // 1-HP enemies). For multi-HP enemies (armor), t2aHighHpMaxRange=2
   // triggers point-blank engagement (§56 — generalizes S32 close-combat).
   t2aMaxRange: 15,
+  t2aMaxRangeThreat: 0,
+  t2aAdaptiveMode: 0,
+  t2aAdaptiveRange: 8,
+  t2aAdaptiveMaxEnemies: 2,
+  t2aAdaptiveMinHpFrac: 0.5,
   t2aHighHpMaxRange: 2,
 
   // §58: Stage-level adaptive params (Strategy G). These generalize the old
@@ -242,6 +247,20 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // Default 500 — prioritizes enemies with a clear line of fire to the base.
   // 0 = OFF (byte-identical to pre-§59).
   defenseClearShotBonus: 500,
+
+  // 2026-11-01 基地防守转身开火：威胁期「轴对齐但朝向错」的拍占 85.6%，
+  // 其中 86.7% 转身即可开火（详见 params.interface.ts 的诊断段）。
+  // 本轮先以 A/B 候选落地；verified 后再决定默认值。
+  baseTurnFireMode: 0,
+  baseTurnFireRangeCells: 8,
+  baseTurnFireBaseRangeCells: 12,
+
+  // 2026-11-01 「用命换输出」：非致命命中只扣 HP（无 stun/无降级），血量富余时
+  // 躲弹 = 白送窗口。lives 探针：1 命 36.7% / 3 命 72.1% / 5 命 72.1%（3→5 逐局相同
+  // ⇒ 第 3 条命之后没人用）。A/B 候选；验证后再定默认值。
+  dodgeHpArmorMode: 0,
+  dodgeHpArmorHits: 2,
+  dodgeHpArmorMeleeCells: 3,
 
   // D2 / 拆环威胁: ring-breach score bonus in defense-mode target selection
   // (canBreachRingFrom — enemy aligned with an intact ring brick). Default
@@ -753,6 +772,11 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   pickupPriorityMaxDanger: 0,
   pickupPriorityMinEnemyDist: 5,
   pickupPrioritySpawnRowMax: 3,
+  highPickupSpawnRowExempt: 0,
+  highPickupDangerExempt: 0,
+  pickupRetreatProbeMode: 0,
+  pickupCommitMode: 0,
+  pickupStickyTicks: 60,
   // D5 (plan §D5): star/tank base-box gate relaxation (0 = OFF, byte-identical
   // to §87). A/B candidate: 20 (rows 20+).
   pickupStarBoxRow: 0,
@@ -903,6 +927,22 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // enemies nearby.
   closePickupRange: 2,
 
+  // 2026-10-29 用户规则：8 格内 freeze/bomb 必捡（基地受威胁除外），8 格外
+  // 在安全前提下尽量捡。默认 0 = byte-identical，A/B 通过后置 1。
+  mustPickupHighMode: 0,
+  mustPickupHighRange: 8,
+  mustPickupMinEnemyDist: 0,
+  mustPickupCommitTicks: 0,
+  mustPickupMinKills: 0,
+  freezeAlignMode: 0,
+  freezeAlignRangeCells: 8,
+  freezeTargetLosMode: 0,
+  freezeCarveMode: 0,
+  freezeCarveRangeCells: 8,
+  navEngageBreakMode: 0,
+  navEngageBreakRangeCells: 5,
+  highSafePickupRange: 0,
+
   // §166 / B1: star rush (星经济冲刺). Default 0 = OFF (byte-identical).
   // A/B arms: mode=1 × range 8/12 × liftGates 0/1 on the hard 35×20 screen.
   starRushMode: 0,
@@ -936,6 +976,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §170: hunt commit — default 0 (OFF, byte-identical). Candidate value
   // 120 (2s); needs A/B before shipping.
   huntCommitTicks: 0,
+  huntCommitSafeTicks: 0,
+  pursuitLeadMode: 0,
+  pursuitLeadCells: 2,
+  pursuitLeadStableTicks: 2,
 
   // §171: path-aware target selection — default 0 (OFF, byte-identical).
   // Candidate value 1; needs A/B before shipping.
@@ -1228,7 +1272,17 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   aimError: 0,
   suboptimalPathProb: 0,
   pickupPriorityMode: 0,
+  highPickupSpawnRowExempt: 0,
+  highPickupDangerExempt: 0,
   closePickupRange: 0,
+  // 2026-10-29 must-pick：守卫没有道具库存（SimulationPowerUps 只结算
+  // player/player2），追道具纯属空转 —— 显式 0，不随 DEFAULT 传播。
+  mustPickupHighMode: 0,
+  highSafePickupRange: 0,
+  freezeAlignMode: 0,
+  freezeTargetLosMode: 0,
+  freezeCarveMode: 0,
+  navEngageBreakMode: 0,
   freezePickupRange: 0,
   direItemMode: 0,
   powerupMaxDivertDistance: 0,

@@ -6,6 +6,7 @@ import { CELL } from '../../../constants'
 import { type GodAIInput, markBranch, recordBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
+import { scanAheadImpl } from '../FireControl'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
 import { dodgeDirectionImpl } from '../ThreatAssessor'
 import { crossfireEscapeDirImpl } from '../crossfire'
@@ -13,6 +14,83 @@ import { muzzleEscapeDirImpl } from '../muzzle-threat'
 
 export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, threat } = ctx
+  // 2026-11-01 「用命换输出」：非致命命中**只扣 HP**（SimulationCombat 的
+  // 命中分支明确保证不改 identity/profile/任何派生属性，无 stun、无击退），
+  // 所以吃一发非致命弹的唯一代价就是 HP —— 而 hard 有 3 条命，败局平均只用
+  // 0.5 条（lives=1→3 是 +35pp，3→5 是 0.0pp：第 3 条命以后完全没人用）。
+  // 血量富余时躲弹 = 白送输出窗口。`dodgeHpArmorMode > 0` 让 AI 在
+  // 「hp > damage × dodgeHpArmorHits」时无视这一发，把 dodge 的 tick 让给
+  // 进攻候选。0 = OFF（byte-identical）。
+  //
+  // mode 2（2026-11-01 追加）：再要求**还剩 ≥2 条命**。全局无门版实测 −2.38pp
+  // （Steel Web −14 / Bastion −10 / Riverbed −9 —— 那几关的败局本来就是
+  // lives_exhausted，3.0 死/局），而受益的正是「败局几乎不死」的关
+  // （Ice Palace +6 / Checkers +5 / Star Fort +5）。命数门把「换」限制在
+  // 「还有本钱」的阶段：用掉第 1 条换输出，但绝不把最后一条也赌进去。
+  // mode 5（2026-11-02 用户裁定）：「激进不是浪更不是送死」—— 只在**打得着**的
+  // 时候换血，三个条件缺一不可：
+  //   ① **>1 命**（`w.lives > 1`）—— 还输得起；
+  //   ② **非致命**（`p.hp > threat.damage`）—— 这一发打不死我；
+  //   ③ **能对消 或 能换伤**：
+  //      a) 对消：来袭弹与我对齐且车道干净（`dodgeCounterFireDirImpl`）⇒ 迎面
+  //         一炮把它打掉，**不掉血、只花冷却**；
+  //      b) 换伤：枪是热的且当前朝向上确实有敌人（`scanAheadImpl(p.dir).enemy`）
+  //         ⇒ 站住打这一发，挨的那一下当交换。
+  // 与 mode 1–4 的区别：那四档只看「血量够」就放弃躲，等于无条件挨打（实测
+  // 全负）；本档只在**这一拍有产出**时才换，没有产出照旧躲。
+  if (self.params.dodgeHpArmorMode >= 5 && threat) {
+    const dmg = threat.damage > 0 ? threat.damage : 1
+    if (w.lives > 1 && p.hp > dmg) {
+      if (!onCooldown) {
+        const faceDir = dodgeCounterFireDirImpl(self, threat, pcx, pcy)
+        if (faceDir) {
+          self._moveDir = faceDir
+          self._fire = true
+          markBranch(self, 'dodgeTrade')
+          return true
+        }
+        // mode 6 = 只对消（不做换伤）；5/7 才走换伤分支。
+        if (self.params.dodgeHpArmorMode !== 6 && scanAheadImpl(self, pcx, pcy, p.dir).enemy) {
+          // mode 5：站住打这一发；mode 7：**保持朝向继续走**并开火（不转身 ⇒
+          // 子弹仍沿已提交的 p.dir 飞，A2 不变量不被破坏；同时不放弃机动）。
+          self._moveDir = self.params.dodgeHpArmorMode >= 7 ? p.dir : null
+          self._fire = true
+          markBranch(self, 'dodgeTrade')
+          return true
+        }
+      }
+    }
+  }
+  // mode 1–4 是「血量门」家族（只看血量就放弃躲，已全部否证）；5 以上走上面的
+  // 「换血」家族，两个家族互斥 —— 否则 mode 6 会在对消失败后落进血量门，名不副实。
+  if (self.params.dodgeHpArmorMode > 0 && self.params.dodgeHpArmorMode < 5 && threat) {
+    const hits = self.params.dodgeHpArmorHits
+    const dmg = threat.damage > 0 ? threat.damage : 1
+    const livesOk =
+      self.params.dodgeHpArmorMode < 2 ||
+      (self.params.dodgeHpArmorMode === 4 ? w.lives >= 3 : w.lives >= 2)
+    // mode 3：只在「贴脸」（最近敌人在 ≤dodgeHpArmorMeleeCells 格）时换 ——
+    // 那个距离上躲弹的成功率本来就低，而一换一能立刻把场上的敌人打少一个。
+    let meleeOk = true
+    if (self.params.dodgeHpArmorMode >= 3) {
+      meleeOk = false
+      const lim = self.params.dodgeHpArmorMeleeCells
+      const list = self._enemies.length > 0 ? self._enemies : w.tanks
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i]
+        if (!e.alive || e.spawnTimer > 0 || e.allegiance !== 'enemy') continue
+        const ec = self.tankCell(e)
+        if (
+          Math.abs(ec.col - Math.floor(pcx / CELL)) + Math.abs(ec.row - Math.floor(pcy / CELL)) <=
+          lim
+        ) {
+          meleeOk = true
+          break
+        }
+      }
+    }
+    if (livesOk && meleeOk && p.hp > dmg * hits) return false
+  }
   if (threat) {
     if (threat.id !== self.lastThreatId) {
       self.lastThreatId = threat.id

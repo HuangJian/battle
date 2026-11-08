@@ -3,7 +3,7 @@
 // the M1 evaluate() closure became this named function; behavior
 // is byte-identical (per-tick determinism gate).
 import { CELL } from '../../../constants'
-import { type GodAIInput } from '../../GodAIInput'
+import { type GodAIInput, countBranch } from '../../GodAIInput'
 import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../DecisionCore'
 import {
   commitPowerupTail,
@@ -13,6 +13,7 @@ import {
 import { manhattan } from '../../../utils/helpers'
 import { findDireItemTargetImpl } from '../StrategyPlanner'
 import { findDualFencePickupImpl } from '../StrategyPlanner'
+import { findMustPickupHighImpl, findUrgentPowerUpTargetImpl } from '../StrategyPlanner'
 
 export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean {
   const { pcx, pcy } = ctx
@@ -56,6 +57,17 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
   // NOTE: fence is already handled above (§180) — the sticky hold now only
   // blocks non-fence powerups (star/tank/shield/bomb/freeze).
   if (isDualCentralBreachHoldP1(self)) return false
+  // 2026-10-29 用户规则：除非基地正在被威胁，8 格以内的 freeze / bomb 必捡
+  // （8 格外 ≤ highSafePickupRange 在安全前提下也捡）。放在 AGGRO 之前、且
+  // 不受 `!self.aggressive` 门控 —— 旧链路里这两类道具在 aggressive 期被
+  // 整段跳过，itemAudit 里 124 个「玩家进过 8 格却没捡」的 freeze 由此而来。
+  // 基地威胁是唯一例外，判定在 findMustPickupHighImpl 内部（按拍缓存）。
+  if (self.params.mustPickupHighMode > 0) {
+    const mustTarget = findMustPickupHighImpl(self, pcx, pcy)
+    if (mustTarget) {
+      return commitPowerupTail(self, ctx, mustTarget)
+    }
+  }
   // NORMAL mode only: during freeze the aggressive branch already grabs
   // power-ups when no enemy is aligned, and an aligned frozen enemy is a
   // free kill we must not interrupt. Gated by pickupPriorityMode.
@@ -64,9 +76,43 @@ export function evalPickupHigh(self: GodAIInput, ctx: DecisionContext): boolean 
   // after the aggressive section (see PICKUP_MID). When chokepointMode==0,
   // the original all-tiers-together order is kept (byte-identical to pre-§88).
   if (!self.aggressive) {
+    // 2026-11-01 拾取粘性（pickupCommitMode）：上一拍已承诺的道具继续去，
+    // 即使紧急查找本拍会换目标/掉出射程。基地受威胁或道具消失则释放。
+    if (
+      self.params.pickupCommitMode > 0 &&
+      self._pickupStickyCol >= 0 &&
+      ctx.w.frame < self._pickupStickyUntil
+    ) {
+      const col = self._pickupStickyCol
+      const row = self._pickupStickyRow
+      let alive = false
+      for (let pi = 0; pi < ctx.w.powerUps.length; pi++) {
+        const pu = ctx.w.powerUps[pi]
+        if (!pu.alive) continue
+        if (Math.floor(pu.x / CELL) === col && Math.floor(pu.y / CELL) === row) {
+          alive = true
+          break
+        }
+      }
+      if (alive && !(self.hasBase && self.isBaseUnderThreat())) {
+        return commitPowerupTail(self, ctx, { col, row })
+      }
+      self._pickupStickyCol = -1
+      self._pickupStickyRow = -1
+      self._pickupStickyUntil = 0
+    }
     // §146 C (extended): M13-condition gate — no pickup tier may hijack
     // the retreat. 0 = OFF (byte-identical).
     if (retreatGateBlocksPickup(self)) {
+      // 2026-11-01 诊断（pickupRetreatProbeMode，默认 0 = 零开销）：
+      // 统计「撤退门挡掉了一个本可紧急拾取的 freeze/bomb」的次数。
+      // 只读：findUrgentPowerUpTargetImpl 不写 World、不抽 RNG。
+      if (self.params.pickupRetreatProbeMode > 0) {
+        countBranch(self, 'pickupRetreatGate')
+        if (findUrgentPowerUpTargetImpl(self, pcx, pcy, 'high')) {
+          countBranch(self, 'pickupRetreatBlocked')
+        }
+      }
       return false
     }
     // E1 / 道具经济 (plan 反证判据): dire-state item pickup — when the base

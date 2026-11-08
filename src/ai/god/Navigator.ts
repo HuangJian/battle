@@ -1,7 +1,7 @@
 import type { GodAIInput } from '../GodAIInput'
 import type { Tank } from '../../types'
 import type { Cell } from './pathfind'
-import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, type Direction } from '../../constants'
+import { CELL, TANK, GRID, TICK_MS, DIR_VECTORS, BASE_POS, type Direction } from '../../constants'
 import { findPath } from './pathfind'
 import { blocksBullet } from './Chokepoint'
 import { opposite, ALL_DIRS } from '../../utils/direction'
@@ -150,7 +150,16 @@ export function tankCellImpl(self: GodAIInput, t: Tank): Cell {
  * bound staleness. Byte-identical: when inputs are unchanged the result is
  * identical because terrain changes coincide with cell changes.
  */
-export function navigateTowardsImpl(self: GodAIInput, target: Cell): Direction | null {
+export function navigateTowardsImpl(
+  self: GodAIInput,
+  target: Cell,
+  reason = 'point',
+): Direction | null {
+  // Nav-intent probe (2026-10-30): remember the LAST navigateTowards target of
+  // the tick — that is the committed branch's destination. Pure observation.
+  self._navIntentCol = target.col
+  self._navIntentRow = target.row
+  self._navIntentReason = reason
   const w = self.world
   // §79: MUST be the controlled tank, not `w.player`. In co-op the God AI
   // drives `w.player2`; reading `w.player` here made every passability test
@@ -389,6 +398,29 @@ export function followPathImpl(self: GodAIInput): Direction | null {
  * This ensures the player always has a path to the target, even on maze
  * stages where the only route goes through brick walls.
  */
+
+/** Classify a selectTarget() destination for the nav-intent probe (read-only). */
+function classifyNavTarget(self: GodAIInput, target: Cell, playerCell: Cell): string {
+  const list = self._enemies.length > 0 ? self._enemies : self.world.tanks
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i]
+    if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+    const c = self.tankCell(t)
+    if (c.col === target.col && c.row === target.row) return 'nav:enemy'
+  }
+  const pus = self.world.powerUps
+  for (let i = 0; i < pus.length; i++) {
+    const pu = pus[i]
+    if (!pu.alive) continue
+    if (Math.floor(pu.x / CELL) === target.col && Math.floor(pu.y / CELL) === target.row)
+      return 'nav:item'
+  }
+  const dBase = Math.abs(target.col - BASE_POS.col) + Math.abs(target.row - BASE_POS.row)
+  if (dBase <= 4) return 'nav:base'
+  const dSelf = Math.abs(target.col - playerCell.col) + Math.abs(target.row - playerCell.row)
+  return dSelf <= 1 ? 'nav:self' : 'nav:point'
+}
+
 export function replanImpl(self: GodAIInput, playerCell: Cell): void {
   const w = self.world
   const target = self.selectTarget(playerCell)
@@ -396,6 +428,12 @@ export function replanImpl(self: GodAIInput, playerCell: Cell): void {
     self.path = []
     return
   }
+  // 2026-10-30 nav-intent probe: followPath-driven navigation never calls
+  // navigateTowards, so record selectTarget()'s destination here, classified
+  // against the live entity set (pure observation, no decision impact).
+  self._navIntentCol = target.col
+  self._navIntentRow = target.row
+  self._navIntentReason = classifyNavTarget(self, target, playerCell)
 
   if (target.col === playerCell.col && target.row === playerCell.row) {
     self.path = []

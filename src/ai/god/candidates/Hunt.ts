@@ -360,7 +360,7 @@ function pickHuntMoveDir(
     // P2.2: Stuck too long — break the loop. Try A* to center first, then
     // fall back to any passable direction (not directMove, which would
     // re-select the enemy target and re-enter the stuck loop).
-    self._moveDir = self.navigateTowards(navTarget!)
+    self._moveDir = self.navigateTowards(navTarget!, 'hunt')
     if (!self._moveDir) {
       // A* failed (walled off) — try directions toward center first,
       // then any passable direction.

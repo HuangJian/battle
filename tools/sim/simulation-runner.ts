@@ -10,7 +10,14 @@ import { IntentExecutor } from '../../src/nn/intent-executor'
 import { IntentOracleProbe } from '../../src/nn/intent-oracle-probe'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
-import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
+import {
+  CELL,
+  GRID,
+  BASE_POS,
+  ENEMIES_PER_STAGE,
+  START_LIVES,
+  DIR_VECTORS,
+} from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
 import { sampleBasePressure } from '../../src/nn/danger-metrics'
 import { readFileSync } from 'fs'
@@ -18,8 +25,17 @@ import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { paramsHash } from '../lib/stage-spec'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { enemyCanShootBase, enemyCanBreachRing } from '../../src/ai/god/SmartThreatModel'
+import { scanAheadImpl, aimSurvivesTurnImpl } from '../../src/ai/god/FireControl'
+import { findPath } from '../../src/ai/god/pathfind'
 import type { Direction } from '../../src/constants'
-import type { StageData, GameEvent, TankKind, IntelligenceLevel, Tank } from '../../src/types'
+import type {
+  StageData,
+  GameEvent,
+  TankKind,
+  IntelligenceLevel,
+  Tank,
+  PowerUpType,
+} from '../../src/types'
 
 // ============================================================
 // Types
@@ -209,6 +225,14 @@ export interface SimResult {
       despawnTick: number
     }>
   }
+  /** Item/freeze audit (only when `itemAudit: true`). */
+  itemAudit?: ItemAudit
+  /** Per-tick decision trace (only when `tickTrace: true`). */
+  tickTrace?: TickTraceRow[]
+  /** Long navigate segments (only when `navStallAudit: true`). */
+  navStalls?: NavStallSegment[]
+  /** Lead-prediction accuracy (only when `leadAudit: true`). */
+  leadAudit?: LeadAuditStats
   /** Replay data (only when record=true). */
   replay?: {
     initialSnapshot: import('../../src/snapshot/types').WorldSnapshot
@@ -423,11 +447,213 @@ export interface RunForensics {
 /** Maximum ticks before forcing a stop (10 minutes at 60fps = 36000). */
 export const MAX_TICKS = 36000
 
+/**
+ * 冰冻/道具审计（item economy diagnosis）—— 只读观测，逐道具生命周期 + 冻结窗口。
+ * 与 star census 同构，但覆盖**全部**道具类型，并按冻结窗口统计击杀，
+ * 用来回答两件事：①冰冻道具是不是都拣到了 ②冻结生效期间实际杀了多少敌人。
+ */
+/**
+ * 逐拍决策轨迹（opt-in，法医用）：记录每拍的决策分支、输入、位置与基地/玩家状态。
+ * 用于 A/B 胜转负归因：找出两臂第一处分歧拍，看当时 must8 在做什么。
+ * 每拍一个对象 —— 只给单局法医脚本用，禁止在批量评估里打开。
+ */
+export interface TickTraceRow {
+  tick: number
+  branch: string
+  moveDir: Direction | null
+  fire: boolean
+  /** Player center (px, rounded). */
+  px: number
+  py: number
+  hp: number
+  lives: number
+  baseHp: number
+  /** World kill count at this tick. */
+  kills: number
+  /** Player star level. */
+  level: number
+  /** Live, fully-spawned enemies. */
+  enemies: number
+  /** Nearest enemy distance (cells); -1 = none. */
+  nearestEnemy: number
+  /** world.freezeTimer at the end of the tick (ms). */
+  freezeMs: number
+  /** input.isBaseUnderThreat() for this tick. */
+  baseThreat: boolean
+  /** Some live enemy is axis-aligned (±1 cell) — a firing line exists geometrically. */
+  aligned: boolean
+  /** Axis-aligned enemy with a bullet-clear path (no brick/steel/base between). */
+  los: boolean
+  /** The think() aim direction this tick (null = no aimable enemy). */
+  aimDir: string | null
+  /** Player facing at the end of the tick. */
+  dir: string
+  /** Last navigateTowards() intent this tick (probe). */
+  navTargetCol: number
+  navTargetRow: number
+  navTargetReason: string
+  /** AI stall counters (0 = not suppressed). */
+  digBlockTicks: number
+  campSuppress: number
+  navSuppress: number
+  /** scanAhead(aimDir).enemy — the stop-and-aim corridor gate. */
+  scanEnemy: boolean
+  /** aimSurvivesTurnImpl(aimDir) — the turn-snap gate. */
+  aimOk: boolean
+}
+
+export interface ItemAuditRecord {
+  id: number
+  type: PowerUpType
+  /** Tick the item first appeared on the field (post-tick observation). */
+  spawnTick: number
+  /** 道具左上角的格坐标（16px 网格）。 */
+  col: number
+  row: number
+  /** Tick it was picked up; -1 = never picked. */
+  pickedTick: number
+  /** Tick it left the field (-1 = still alive when the run ended). */
+  despawnTick: number
+  /** Min Manhattan distance (px) from the player center while it was alive; -1 = n/a. */
+  minDistPx: number
+  /** Min Manhattan distance in cells (rounded); -1 = n/a. */
+  minDistCells: number
+  /**
+   * 2026-10-31: 玩家到道具的最小 **A\* 路径长度**（格）；-1 = 从未算过。
+   * 只在玩家换了格、且曼哈顿 ≤8（路径长度的必要条件）时算，避免每 tick 全量寻路。
+   */
+  minPathCells: number
+  /**
+   * 2026-11-01: 是否曾被 AI 选为拾取目标（branch=powerup 且导航意图指向该格）。
+   * 用于回答「4–8 格死区是没选，还是选了没走到」。
+   */
+  everTargeted: boolean
+  /** Player's distance to base (cells) at spawn; -1 = no player. */
+  playerDistToBaseAtSpawn: number
+  /** True when it was picked while a freeze window was already running
+   *  (freeze item ⇒ wasted stacking; other items ⇒ freeze-time economy). */
+  pickedWhileFreezeActive: boolean
+}
+
+/** One continuous freeze effect window (freezeTimer > 0). */
+export interface FreezeWindowRecord {
+  startTick: number
+  /** Tick the window expired; -1 = still active at run end. */
+  endTick: number
+  /** Enemy kills credited to the player while the window was active. */
+  kills: number
+  /** Live, fully-spawned enemies at window start / end (end = -1 if ongoing). */
+  enemiesAtStart: number
+  enemiesAtEnd: number
+  /** Player distance to base (cells) at window start; -1 = no player. */
+  playerDistToBaseAtStart: number
+  /** True when a freeze item pickup started this window (false = emp/snapshot). */
+  startedByFreezeItem: boolean
+  // ---- Per-window forensics (<2-kill window diagnosis, 2026-10-29) ----
+  /** Ticks from startTick to the first kill inside the window; -1 = no kill. */
+  firstKillOffset: number
+  /** Power-ups picked up while the window was running. */
+  itemsPicked: number
+  /** Approx player travel inside the window (Manhattan, cells). */
+  playerTravelCells: number
+  /** Nearest live enemy distance (cells) at window start; -1 = field empty. */
+  nearestEnemyDistAtStart: number
+  /** Min nearest-enemy distance over the window; -1 = field empty throughout. */
+  minEnemyDist: number
+  /** Ticks the player was dead/respawning during the window. */
+  playerDeadTicks: number
+  /** Player shells fired inside the window. */
+  playerShots: number
+  /** Enemy-hit events landed inside the window (any enemy kind). */
+  enemyHits: number
+  /** Enemy-hit events by victim kind (armor vs basic …). */
+  hitKinds: Record<string, number>
+  /** Ticks with at least one live enemy axis-aligned (±1 cell) — a firing line
+   *  exists geometrically, walls aside. */
+  alignedTicks: number
+  /** Ticks with an axis-aligned enemy and a bullet-clear path (no brick/steel/base). */
+  losTicks: number
+  /** Decision-branch tick histogram inside the window (branch → ticks). */
+  branchTicks: Record<string, number>
+}
+
+export interface ItemAudit {
+  items: ItemAuditRecord[]
+  freezeWindows: FreezeWindowRecord[]
+  /** Enemy kills while freeze was active (any source). */
+  killsDuringFreeze: number
+  /** All enemy kills in the run. */
+  killsTotal: number
+  /** Ticks with freeze active (freezeTimer > 0 at the start or end of tick). */
+  freezeActiveTicks: number
+  outcome: SimOutcome
+}
+
+/**
+ * 导航停滞段（`navigate` 连续 ≥ navStallMinTicks 拍）——用于量化「长时间导航
+ * 不接战」：段内最近敌距离、贴脸拍数、开火/射击/命中/击杀、移动、基地血量变化。
+ * 只读观测；opt-in（`navStallAudit`），每段一个对象。
+ */
+export interface NavStallSegment {
+  startTick: number
+  /** End tick; -1 = still running when the run ended. */
+  endTick: number
+  ticks: number
+  /** Min nearest-enemy distance (cells) inside the segment; -1 = no enemy. */
+  minEnemyDist: number
+  /** Ticks with a live enemy within 5 / 8 cells. */
+  near5Ticks: number
+  near8Ticks: number
+  fireTicks: number
+  /** Ticks inside the segment with a freeze active (world.freezeTimer > 0). */
+  freezeTicks: number
+  playerShots: number
+  enemyHits: number
+  kills: number
+  travelCells: number
+  /** Nav intent at segment start (probe, 2026-10-30). */
+  reason: string
+  targetCol: number
+  targetRow: number
+  targetDistStart: number
+  targetDistEnd: number
+  /** How many times the nav target changed during the segment. */
+  targetChanges: number
+  /** True when the segment ended within 1 cell of the target. */
+  reachedTarget: boolean
+  distBaseStart: number
+  distBaseEnd: number
+  baseHpStart: number
+  baseHpEnd: number
+  /** True when the run ended during this segment. */
+  endedRun: boolean
+}
+
+/** 提前量预测精度（leadAudit）：k 拍后敌人实际所在格与预测格的对照。 */
+export interface LeadAuditK {
+  k: number
+  samples: number
+  /** Facing-dir prediction hit rate (exact cell). */
+  facingHit: number
+  /** Measured-velocity prediction hit rate (exact cell; abstain → current cell). */
+  motionHit: number
+  /** No-lead baseline (predict current cell). */
+  baseHit: number
+  /** Motion predictor abstained (enemy not stably moving). */
+  motionAbstain: number
+  /** Enemy actually moved during the horizon. */
+  enemyMoved: number
+}
+
+export interface LeadAuditStats {
+  ticks: number
+  byK: LeadAuditK[]
+}
+
 export interface RunOptions {
   seed: number
   stage: StageData
-  difficulty: string
-  /**
+  difficulty: string /**
    * 0-based index of the stage being simulated. Recorded into the World via
    * loadStageData so the resulting snapshot (and any replay) carries the real
    * stage number. Without this the World defaulted to stage 0, which makes
@@ -544,6 +770,29 @@ export interface RunOptions {
    * allocates, so never enable inside the optimizer.
    */
   powerupCensus?: boolean
+  /**
+   * Collect a full item/freeze audit (`ItemAudit`): every power-up's spawn /
+   * pickup / despawn tick + spawn cell + min player distance, plus one record
+   * per freeze window with the kills scored inside it. Read-only observation —
+   * the run outcome is byte-identical whether on or off (per-tick distance
+   * scan allocates, so never enable inside the optimizer).
+   */
+  itemAudit?: boolean
+  /**
+   * 逐拍决策轨迹（法医 A/B 归因）：每拍记录 branch / move / fire / 位置 / HP /
+   * 基地 HP / 敌人数 / 最近敌距 / freeze 计时 / baseThreat。只读，不改结果；
+   * 每拍分配一个对象，**禁止**在批量评估里打开（只给单局归因脚本）。
+   */
+  tickTrace?: boolean
+  /**
+   * 导航停滞审计：记录连续 `navigate` ≥ navStallMinTicks 拍的段（段内最近敌距离、
+   * 开火/射击/命中/击杀、移动、基地血量变化）。只读，opt-in。
+   */
+  navStallAudit?: boolean
+  /** 段长阈值（拍），默认 300。 */
+  navStallMinTicks?: number
+  /** 提前量预测精度审计（朝向 vs 实测速度 vs 不预判）。只读，opt-in。 */
+  leadAudit?: boolean
 }
 
 // ============================================================
@@ -797,11 +1046,421 @@ export function runSimulation(opts: RunOptions): SimResult {
   >()
   let censusStarSpawned = 0
   let censusStarPicked = 0
+  // ---- Item/freeze audit (only touched when opts.itemAudit) ----
+  const wantItemAudit = opts.itemAudit === true
+  const auditItems: ItemAuditRecord[] = []
+  const auditById = new Map<number, ItemAuditRecord>()
+  const freezeWindows: FreezeWindowRecord[] = []
+  let openFreezeWindow: FreezeWindowRecord | null = null
+  let prevFreezeTimer = 0
+  let killsDuringFreeze = 0
+  let killsTotal = 0
+  let freezeActiveTicks = 0
+  /** Live, fully-spawned enemies (same predicate as the forensics census). */
+  const liveEnemyCount = (): number => {
+    let n = 0
+    const list = world.tanks
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]
+      if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+      n++
+    }
+    return n
+  }
+  const playerDistToBaseCells = (): number => {
+    const p = world.player
+    if (!p || !p.alive) return -1
+    const bcx = BASE_POS.col * CELL + CELL
+    const bcy = BASE_POS.row * CELL + CELL
+    return Math.round((Math.abs(p.x + p.w / 2 - bcx) + Math.abs(p.y + p.h / 2 - bcy)) / CELL)
+  }
+  /** Nearest live, fully-spawned enemy (cells); -1 = field empty. */
+  const nearestEnemyDistCells = (): number => {
+    const p = world.player
+    if (!p || !p.alive) return -1
+    let best = -1
+    const list = world.tanks
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]
+      if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+      const d = Math.round(
+        (Math.abs(t.x + t.w / 2 - (p.x + p.w / 2)) + Math.abs(t.y + t.h / 2 - (p.y + p.h / 2))) /
+          CELL,
+      )
+      if (best < 0 || d < best) best = d
+    }
+    return best
+  }
+  let freezeLastPX = -1
+  let freezeLastPY = -1
+  /** Distance (cells) to the last nav intent; -1 = none. */
+  const navIntentDistCells = (): number => {
+    const p = world.player
+    if (!p || !p.alive || input._navIntentCol < 0) return -1
+    const pc = Math.floor((p.x + p.w / 2) / CELL)
+    const pr = Math.floor((p.y + p.h / 2) / CELL)
+    return Math.abs(pc - input._navIntentCol) + Math.abs(pr - input._navIntentRow)
+  }
+  // ---- Per-tick decision trace (only touched when opts.tickTrace) ----
+  const wantTickTrace = opts.tickTrace === true
+  const tickTrace: TickTraceRow[] = []
+  // ---- Nav-stall audit state (only touched when opts.navStallAudit) ----
+  const wantNavStall = opts.navStallAudit === true
+  const navStallMin = opts.navStallMinTicks ?? 300
+  const navStalls: NavStallSegment[] = []
+  let navSeg: NavStallSegment | null = null
+  let navSegPrevX = -1
+  let navSegPrevY = -1
+  let navSegLastTargetCol = -2
+  let navSegLastTargetRow = -2
+  // Item-audit A* path cache key (player cell).
+  let auditPathCol = -1
+  let auditPathRow = -1
+  // ---- Lead-prediction accuracy audit (opt-in) ----
+  const wantLead = opts.leadAudit === true
+  // Lead 是「格」不是「拍」：敌人约 23 拍走一格（实测 ~0.7px/tick, 16px/格），
+  // 所以 1/2/3 格的评估视界分别是 23/46/69 拍。
+  const LEAD_SPECS = [
+    { k: 1, h: 23 },
+    { k: 2, h: 46 },
+    { k: 3, h: 69 },
+  ]
+  const leadStats = LEAD_SPECS.map((sp) => ({
+    k: sp.k,
+    samples: 0,
+    emitted: 0,
+    facingHit: 0,
+    motionHit: 0,
+    baseHit: 0,
+    motionAbstain: 0,
+    enemyMoved: 0,
+  }))
+  const leadPrev = new Map<
+    number,
+    { col: number; row: number; dc: number; dr: number; stable: number }
+  >()
+  const leadPending: Array<{
+    due: number
+    id: number
+    k: number
+    fc: number
+    fr: number
+    mc: number
+    mr: number
+    bc: number
+    br: number
+    moving: boolean
+  }> = []
+  /** Alignment/LOS probe for the freeze-window forensics (opt-in, per tick). */
+  const freezeAlignment = (): { aligned: boolean; los: boolean } => {
+    const p = world.player
+    if (!p || !p.alive) return { aligned: false, los: false }
+    const pCol = Math.round((p.x + p.w / 2) / CELL)
+    const pRow = Math.round((p.y + p.h / 2) / CELL)
+    let aligned = false
+    const list = world.tanks
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i]
+      if (!t.alive || t.spawnTimer > 0 || t.allegiance !== 'enemy') continue
+      const eCol = Math.round((t.x + t.w / 2) / CELL)
+      const eRow = Math.round((t.y + t.h / 2) / CELL)
+      const sameCol = Math.abs(eCol - pCol) <= 1
+      const sameRow = Math.abs(eRow - pRow) <= 1
+      if (!sameCol && !sameRow) continue
+      aligned = true
+      // Bullet-clear: walk the cells strictly between the two tanks.
+      let clear = true
+      if (sameCol) {
+        const lo = Math.min(eRow, pRow)
+        const hi = Math.max(eRow, pRow)
+        for (let r = lo + 1; r < hi; r++) {
+          const tile = world.tileMap.get(pCol, r)
+          if (tile === 'brick' || tile === 'steel' || tile === 'base') {
+            clear = false
+            break
+          }
+        }
+      } else {
+        const lo = Math.min(eCol, pCol)
+        const hi = Math.max(eCol, pCol)
+        for (let c = lo + 1; c < hi; c++) {
+          const tile = world.tileMap.get(c, pRow)
+          if (tile === 'brick' || tile === 'steel' || tile === 'base') {
+            clear = false
+            break
+          }
+        }
+      }
+      if (clear) return { aligned: true, los: true }
+    }
+    return { aligned, los: false }
+  }
 
   const t0 = performance.now()
 
   while (tick < maxTicks) {
     sim.tick()
+    // Item audit: freeze-window bookkeeping. `Simulation` decrements the timer
+    // at tick start, so `prev > 0 || cur > 0` is the honest "this tick was
+    // covered" predicate (the tick whose timer lands on 0 was still covered).
+    // Windows are opened here — before the event loop — so kills produced by
+    // the very tick that started the freeze are attributed to that window.
+    let freezeCoveredThisTick = false
+    // Freeze state BEFORE this tick's timer update. A freeze item picked this
+    // tick sets `freezeTimer` to 20000 inside sim.tick(), so reading the
+    // post-tick value would mislabel every freeze pickup as "stacked".
+    let freezeWasActiveBefore = false
+    if (wantItemAudit) {
+      freezeWasActiveBefore = prevFreezeTimer > 0
+      const cur = world.freezeTimer
+      freezeCoveredThisTick = prevFreezeTimer > 0 || cur > 0
+      if (freezeCoveredThisTick) {
+        freezeActiveTicks++
+        if (!openFreezeWindow) {
+          const p = world.player
+          const ndStart = nearestEnemyDistCells()
+          openFreezeWindow = {
+            startTick: tick + 1,
+            endTick: -1,
+            kills: 0,
+            enemiesAtStart: liveEnemyCount(),
+            enemiesAtEnd: -1,
+            playerDistToBaseAtStart: playerDistToBaseCells(),
+            startedByFreezeItem: false,
+            firstKillOffset: -1,
+            itemsPicked: 0,
+            playerTravelCells: 0,
+            nearestEnemyDistAtStart: ndStart,
+            minEnemyDist: ndStart,
+            playerDeadTicks: 0,
+            playerShots: 0,
+            enemyHits: 0,
+            hitKinds: {},
+            alignedTicks: 0,
+            losTicks: 0,
+            branchTicks: {},
+          }
+          freezeLastPX = p && p.alive ? p.x : -1
+          freezeLastPY = p && p.alive ? p.y : -1
+        } else {
+          // Per-window forensics: what is the AI doing while frozen enemies
+          // stand still? Branch histogram + travel + min enemy distance.
+          const br = input._lastBranch
+          openFreezeWindow.branchTicks[br] = (openFreezeWindow.branchTicks[br] ?? 0) + 1
+          const p = world.player
+          if (p && p.alive) {
+            if (freezeLastPX >= 0) {
+              openFreezeWindow.playerTravelCells +=
+                (Math.abs(p.x - freezeLastPX) + Math.abs(p.y - freezeLastPY)) / CELL
+            }
+            freezeLastPX = p.x
+            freezeLastPY = p.y
+          } else {
+            openFreezeWindow.playerDeadTicks++
+            freezeLastPX = -1
+            freezeLastPY = -1
+          }
+          const nd = nearestEnemyDistCells()
+          if (
+            nd >= 0 &&
+            (openFreezeWindow.minEnemyDist < 0 || nd < openFreezeWindow.minEnemyDist)
+          ) {
+            openFreezeWindow.minEnemyDist = nd
+          }
+          const al = freezeAlignment()
+          if (al.aligned) openFreezeWindow.alignedTicks++
+          if (al.los) openFreezeWindow.losTicks++
+        }
+      } else if (openFreezeWindow) {
+        openFreezeWindow.endTick = tick + 1
+        openFreezeWindow.enemiesAtEnd = liveEnemyCount()
+        freezeWindows.push(openFreezeWindow)
+        openFreezeWindow = null
+      }
+      prevFreezeTimer = cur
+    }
+
+    if (wantTickTrace) {
+      const p = world.player
+      const al = freezeAlignment()
+      tickTrace.push({
+        tick: tick + 1,
+        branch: input._lastBranch,
+        moveDir: input._moveDir,
+        fire: input._fire,
+        px: p ? Math.round(p.x + p.w / 2) : -1,
+        py: p ? Math.round(p.y + p.h / 2) : -1,
+        hp: p?.hp ?? -1,
+        lives: world.lives,
+        baseHp: world.baseHp,
+        kills: world.killCount,
+        level: p?.level ?? 0,
+        enemies: liveEnemyCount(),
+        nearestEnemy: nearestEnemyDistCells(),
+        freezeMs: world.freezeTimer,
+        baseThreat: input.isBaseUnderThreat(),
+        aligned: al.aligned,
+        los: al.los,
+        aimDir: input._decisionCtx?.aimDir ?? null,
+        dir: p?.dir ?? '',
+        navTargetCol: input._navIntentCol,
+        navTargetRow: input._navIntentRow,
+        navTargetReason: input._navIntentReason,
+        digBlockTicks: input._digBlockTicks,
+        campSuppress: input._aggCampTrack.suppress,
+        navSuppress: input._aggNavTrack.suppress,
+        scanEnemy: input._decisionCtx?.aimDir
+          ? scanAheadImpl(
+              input,
+              p ? p.x + p.w / 2 : 0,
+              p ? p.y + p.h / 2 : 0,
+              input._decisionCtx.aimDir,
+            ).enemy
+          : false,
+        aimOk:
+          p && input._decisionCtx?.aimDir
+            ? aimSurvivesTurnImpl(input, p, input._decisionCtx.aimDir)
+            : false,
+      })
+    }
+
+    if (wantNavStall) {
+      const br = input._lastBranch
+      if (br === 'navigate') {
+        const p = world.player
+        if (!navSeg) {
+          const tDist = navIntentDistCells()
+          navSeg = {
+            startTick: tick + 1,
+            endTick: -1,
+            ticks: 0,
+            minEnemyDist: -1,
+            near5Ticks: 0,
+            near8Ticks: 0,
+            fireTicks: 0,
+            freezeTicks: 0,
+            playerShots: 0,
+            enemyHits: 0,
+            kills: 0,
+            travelCells: 0,
+            reason: input._navIntentReason,
+            targetCol: input._navIntentCol,
+            targetRow: input._navIntentRow,
+            targetDistStart: tDist,
+            targetDistEnd: tDist,
+            targetChanges: 0,
+            reachedTarget: false,
+            distBaseStart: playerDistToBaseCells(),
+            distBaseEnd: -1,
+            baseHpStart: world.baseHp,
+            baseHpEnd: -1,
+            endedRun: false,
+          }
+          navSegPrevX = p ? p.x : -1
+          navSegPrevY = p ? p.y : -1
+          navSegLastTargetCol = input._navIntentCol
+          navSegLastTargetRow = input._navIntentRow
+        }
+        const seg = navSeg
+        if (input._navIntentReason) seg.reason = input._navIntentReason
+        seg.ticks++
+        if (world.freezeTimer > 0) seg.freezeTicks++
+        if (input._fire) seg.fireTicks++
+        const nd = nearestEnemyDistCells()
+        if (nd >= 0) {
+          if (seg.minEnemyDist < 0 || nd < seg.minEnemyDist) seg.minEnemyDist = nd
+          if (nd <= 5) seg.near5Ticks++
+          if (nd <= 8) seg.near8Ticks++
+        }
+        if (p && p.alive && navSegPrevX >= 0) {
+          seg.travelCells += (Math.abs(p.x - navSegPrevX) + Math.abs(p.y - navSegPrevY)) / CELL
+        }
+        if (p) {
+          navSegPrevX = p.x
+          navSegPrevY = p.y
+        }
+        if (
+          input._navIntentCol !== navSegLastTargetCol ||
+          input._navIntentRow !== navSegLastTargetRow
+        ) {
+          seg.targetChanges++
+          navSegLastTargetCol = input._navIntentCol
+          navSegLastTargetRow = input._navIntentRow
+        }
+        const td = navIntentDistCells()
+        if (td >= 0) seg.targetDistEnd = td
+        seg.distBaseEnd = playerDistToBaseCells()
+        seg.baseHpEnd = world.baseHp
+      } else if (navSeg) {
+        navSeg.endTick = tick + 1
+        if (!navSeg.reason) navSeg.reason = 'unknown'
+        navSeg.reachedTarget = navSeg.targetDistEnd >= 0 && navSeg.targetDistEnd <= 1
+        if (navSeg.ticks >= navStallMin) navStalls.push(navSeg)
+        navSeg = null
+      }
+    }
+    if (wantLead) {
+      const tickNow = tick + 1
+      // Resolve predictions that were due at/before this tick.
+      for (let i = leadPending.length - 1; i >= 0; i--) {
+        const pd = leadPending[i]
+        if (pd.due > tickNow) continue
+        leadPending.splice(i, 1)
+        let target: any = null
+        for (let ti = 0; ti < world.tanks.length; ti++) {
+          const t = world.tanks[ti]
+          if (t.id === pd.id && t.alive) {
+            target = t
+            break
+          }
+        }
+        if (!target) continue // enemy died/despawned — no sample
+        const ac = Math.round(target.x / CELL)
+        const ar = Math.round(target.y / CELL)
+        const st = leadStats[pd.k - 1]
+        st.samples++
+        if (pd.fc === ac && pd.fr === ar) st.facingHit++
+        if (pd.mc === ac && pd.mr === ar) st.motionHit++
+        if (pd.bc === ac && pd.br === ar) st.baseHit++
+        if (ac !== pd.bc || ar !== pd.br) st.enemyMoved++
+      }
+      // Emit predictions for this tick.
+      for (let ti = 0; ti < world.tanks.length; ti++) {
+        const t = world.tanks[ti]
+        if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+        const col = Math.round(t.x / CELL)
+        const row = Math.round(t.y / CELL)
+        const prev = leadPrev.get(t.id)
+        let dc = 0
+        let dr = 0
+        let stable = 0
+        if (prev) {
+          dc = col - prev.col
+          dr = row - prev.row
+          stable = dc === prev.dc && dr === prev.dr && (dc !== 0 || dr !== 0) ? prev.stable + 1 : 0
+        }
+        leadPrev.set(t.id, { col, row, dc, dr, stable })
+        const fv = DIR_VECTORS[t.dir] ?? { dx: 0, dy: 0 }
+        const mv = stable >= 2 && (dc !== 0 || dr !== 0) ? { dx: dc, dy: dr } : null
+        for (let ki = 0; ki < LEAD_SPECS.length; ki++) {
+          const k = LEAD_SPECS[ki].k
+          leadStats[ki].emitted++
+          if (mv === null) leadStats[ki].motionAbstain++
+          leadPending.push({
+            due: tickNow + LEAD_SPECS[ki].h,
+            id: t.id,
+            k,
+            fc: col + fv.dx * k,
+            fr: row + fv.dy * k,
+            mc: col + (mv ? mv.dx * k : 0),
+            mr: row + (mv ? mv.dy * k : 0),
+            bc: col,
+            br: row,
+            moving: false,
+          })
+        }
+      }
+    }
     // §120: snapshot THIS tick's AI decision state BEFORE endFrame clears it.
     // Event consumption happens after endFrame, and bullet_fired / death
     // events must be tagged with the state of the tick that PRODUCED them —
@@ -910,12 +1569,170 @@ export function runSimulation(opts: RunOptions): SimResult {
         }
       }
     }
+    // Item audit: observe every power-up on the field, track its lifecycle,
+    // and mark departures. Pickups are resolved in the event loop below
+    // (`powerup_collected` carries the type, not the id). Read-only.
+    if (wantItemAudit) {
+      const seen = new Set<number>()
+      const pus = world.powerUps
+      // A* path length is only recomputed when the player enters a new cell.
+      const pl = world.player
+      const pcCol = pl && pl.alive ? Math.round(pl.x / CELL) : -1
+      const pcRow = pl && pl.alive ? Math.round(pl.y / CELL) : -1
+      const cellChanged = pcCol !== auditPathCol || pcRow !== auditPathRow
+      if (cellChanged) {
+        auditPathCol = pcCol
+        auditPathRow = pcRow
+      }
+      for (let pi = 0; pi < pus.length; pi++) {
+        const pu = pus[pi]
+        if (!pu.alive) continue
+        seen.add(pu.id)
+        let rec = auditById.get(pu.id)
+        if (!rec) {
+          rec = {
+            id: pu.id,
+            type: pu.type,
+            spawnTick: tick,
+            col: Math.floor(pu.x / CELL),
+            row: Math.floor(pu.y / CELL),
+            pickedTick: -1,
+            despawnTick: -1,
+            minDistPx: -1,
+            minDistCells: -1,
+            minPathCells: -1,
+            everTargeted: false,
+            playerDistToBaseAtSpawn: playerDistToBaseCells(),
+            pickedWhileFreezeActive: false,
+          }
+          auditById.set(pu.id, rec)
+          auditItems.push(rec)
+        }
+        const p = world.player
+        if (p && p.alive) {
+          const d =
+            Math.abs(p.x + p.w / 2 - (pu.x + pu.w / 2)) +
+            Math.abs(p.y + p.h / 2 - (pu.y + pu.h / 2))
+          if (rec.minDistPx < 0 || d < rec.minDistPx) {
+            rec.minDistPx = d
+            rec.minDistCells = Math.round(d / CELL)
+          }
+          const ic = Math.floor(pu.x / CELL)
+          const ir = Math.floor(pu.y / CELL)
+          if (
+            !rec.everTargeted &&
+            input._lastBranch === 'powerup' &&
+            input._navIntentReason === 'item' &&
+            Math.abs(input._navIntentCol - ic) + Math.abs(input._navIntentRow - ir) <= 1
+          ) {
+            rec.everTargeted = true
+          }
+          // A* 路径长度（≤8 格判定用）：曼哈顿 ≤8 是必要条件；玩家换格时重算。
+          if (cellChanged && pcCol >= 0) {
+            if (Math.abs(ic - pcCol) + Math.abs(ir - pcRow) <= 8) {
+              let path = findPath(world.tileMap, { col: pcCol, row: pcRow }, { col: ic, row: ir })
+              if (!path)
+                path = findPath(
+                  world.tileMap,
+                  { col: pcCol, row: pcRow },
+                  { col: ic, row: ir },
+                  { breakBrick: true },
+                )
+              if (path) {
+                const len = path.length
+                if (rec.minPathCells < 0 || len < rec.minPathCells) rec.minPathCells = len
+              }
+            }
+          }
+        }
+      }
+      for (const [id, rec] of auditById) {
+        if (rec.despawnTick === -1 && !seen.has(id)) rec.despawnTick = tick
+      }
+    }
     for (const e of events) {
       if (collectEvents) allEvents.push(e)
       if (e.type === 'base_destroyed') lastBaseDestroyedBy = e.by
       // Track first kill for failure taxonomy.
       if (firstKillTick === undefined && e.type === 'tank_destroyed' && e.by === 'player') {
         firstKillTick = tick
+      }
+      if (wantNavStall && navSeg) {
+        if (e.type === 'bullet_fired' && e.bullet.isPlayer) navSeg.playerShots++
+        else if (e.type === 'enemy_hit') navSeg.enemyHits++
+        else if (e.type === 'tank_destroyed' && e.by === 'player' && e.tank.allegiance === 'enemy')
+          navSeg.kills++
+      }
+      if (wantItemAudit) {
+        // Shot/hit accounting inside a freeze window — tells "not firing"
+        // apart from "firing but missing" apart from "hitting an armor tank".
+        if (freezeCoveredThisTick && openFreezeWindow) {
+          if (e.type === 'bullet_fired' && e.bullet.isPlayer) {
+            openFreezeWindow.playerShots++
+          } else if (e.type === 'enemy_hit') {
+            openFreezeWindow.enemyHits++
+            const k = e.targetKind
+            openFreezeWindow.hitKinds[k] = (openFreezeWindow.hitKinds[k] ?? 0) + 1
+          }
+        }
+        // Kills scored while a freeze covered this tick — the "freeze window
+        // conversion" number. `by === 'player'` + not the player itself: a
+        // decoy/guard carries isPlayer=false but allegiance != 'enemy', so
+        // gate on allegiance to keep this an ENEMY-kill count.
+        if (e.type === 'tank_destroyed' && e.by === 'player' && e.tank.allegiance === 'enemy') {
+          killsTotal++
+          if (freezeCoveredThisTick) {
+            killsDuringFreeze++
+            if (openFreezeWindow) {
+              openFreezeWindow.kills++
+              if (openFreezeWindow.firstKillOffset < 0) {
+                openFreezeWindow.firstKillOffset = tick - openFreezeWindow.startTick
+              }
+            }
+          }
+        }
+        // Attribute pickups to the departing record of the same type (nearest
+        // to the player when several of one type vanished on the same tick).
+        if (e.type === 'powerup_collected') {
+          let best: ItemAuditRecord | null = null
+          for (let ai = 0; ai < auditItems.length; ai++) {
+            const rec = auditItems[ai]
+            if (rec.type !== e.powerUp || rec.pickedTick !== -1 || rec.despawnTick !== tick)
+              continue
+            if (!best || rec.minDistPx < best.minDistPx) best = rec
+          }
+          if (!best) {
+            // Spawned + consumed inside one tick (drop landed on the player):
+            // synthesise a record so spawn/pickup totals stay balanced.
+            const p = world.player
+            best = {
+              id: -1 - auditItems.length,
+              type: e.powerUp,
+              spawnTick: tick,
+              col: p ? Math.floor(p.x / CELL) : -1,
+              row: p ? Math.floor(p.y / CELL) : -1,
+              pickedTick: tick,
+              despawnTick: tick,
+              minDistPx: 0,
+              minDistCells: 0,
+              minPathCells: 0,
+              everTargeted: true,
+              playerDistToBaseAtSpawn: playerDistToBaseCells(),
+              pickedWhileFreezeActive: false,
+            }
+            auditItems.push(best)
+          }
+          best.pickedTick = tick
+          best.pickedWhileFreezeActive = freezeWasActiveBefore
+          // Count only pickups that happen INSIDE an already-running window —
+          // the freeze item that STARTED the window is not "shopping".
+          if (freezeCoveredThisTick && freezeWasActiveBefore && openFreezeWindow) {
+            openFreezeWindow.itemsPicked++
+          }
+          if (best.type === 'freeze' && openFreezeWindow && openFreezeWindow.startTick === tick) {
+            openFreezeWindow.startedByFreezeItem = true
+          }
+        }
       }
       if (wantTelemetry) {
         // isPlayer (not kind === 'player'): the decoy ally tank also carries
@@ -1232,6 +2049,46 @@ export function runSimulation(opts: RunOptions): SimResult {
       tick,
       baseMaxHp: world.baseMaxHp,
       samples: ledgerSamples,
+    }
+  }
+
+  if (wantNavStall && navSeg) {
+    navSeg.endedRun = true
+    if (!navSeg.reason) navSeg.reason = 'unknown'
+    navSeg.reachedTarget = navSeg.targetDistEnd >= 0 && navSeg.targetDistEnd <= 1
+    if (navSeg.ticks >= navStallMin) navStalls.push(navSeg)
+    navSeg = null
+  }
+  if (wantNavStall) result.navStalls = navStalls
+  if (wantLead) {
+    result.leadAudit = {
+      ticks: tick,
+      byK: leadStats.map((st) => ({
+        k: st.k,
+        samples: st.samples,
+        facingHit: st.samples ? st.facingHit / st.samples : 0,
+        motionHit: st.samples ? st.motionHit / st.samples : 0,
+        baseHit: st.samples ? st.baseHit / st.samples : 0,
+        motionAbstain: st.emitted ? st.motionAbstain / st.emitted : 0,
+        enemyMoved: st.samples ? st.enemyMoved / st.samples : 0,
+      })),
+    }
+  }
+  if (wantTickTrace) result.tickTrace = tickTrace
+
+  if (wantItemAudit) {
+    if (openFreezeWindow) {
+      openFreezeWindow.enemiesAtEnd = liveEnemyCount()
+      freezeWindows.push(openFreezeWindow)
+      openFreezeWindow = null
+    }
+    result.itemAudit = {
+      items: auditItems,
+      freezeWindows,
+      killsDuringFreeze,
+      killsTotal,
+      freezeActiveTicks,
+      outcome,
     }
   }
 
