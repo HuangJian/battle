@@ -299,9 +299,17 @@ export function thinkImpl(self: GodAIInput): void {
         if (d === p.dir) continue
         if (!turnWillCommit(w, p, d)) continue
         const sc = scanAheadImpl(self, pcx, pcy, d)
-        if (!sc.enemy || sc.enemyDist >= bestDist) continue
+        if (!sc.enemy) continue
+        // god-merge 移植修正（2026-11-08）：距离必须在 shouldFireInDir 调用
+        // **之前**捕获到局部变量 —— scan 结果是全 tick 共享的 memo 对象，
+        // shouldFireInDir 内部求值会改写它（enemyDist 变 Infinity）。
+        // god-retune 在 A27 提交里把这里改成了先捕获 score 再比较/赋值，
+        // 因而免疫；#47 的旧形态是调用后读对象字段，吃到被改写的值，
+        // 表现为同距双敌时选错方向（Checkers seed 1 实测分叉）。
+        const score = sc.enemyDist
+        if (score >= bestDist) continue
         if (!shouldFireInDirImpl(self, pcx, pcy, d)) continue
-        bestDist = sc.enemyDist
+        bestDist = score
         bestDir = d
       }
       if (bestDir !== null) {
