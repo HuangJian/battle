@@ -4,6 +4,18 @@ import { manhattan } from '../../utils/helpers'
 import type { Direction } from '../../constants'
 
 /**
+ * Default EMA window (ticks) armed by `enemyModelMode > 0` when the caller did
+ * not set `enemyModelWindowTicks`.
+ *
+ * Why this constant exists (2026-10-27 audit): the update site and every
+ * consumer gate on `enemyModelWindowTicks > 0`, but the table ships it at 0 —
+ * so `enemyModelMode: 1` on its own was a **dead switch** (measured 0/350
+ * games different). A mode knob must arm its own mechanism; 120 ticks (2 s) is
+ * the window every archived M3 experiment used.
+ */
+export const ENEMY_MODEL_DEFAULT_WINDOW_TICKS = 120
+
+/**
  * Pillar B core (plan/God-AI-Redesign-v2 §4.2b): EnemyModel — 敌情感知模型。
  *
  * God AI does NOT read the difficulty label or `tank.aiState.level` to decide

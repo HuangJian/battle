@@ -95,6 +95,31 @@ export interface GodAIParams {
   baseLaneSentryMode: number
   /** §X: 哨兵站位搜索半径与开火距离上限（曼哈顿格数）。 */
   baseLaneSentryRange: number
+  /**
+   * A9 mode 2 (2026-10-27): leash for the PRE-SEAL, measured on the distance to
+   * the seal CELL (not to the shooter). Time-to-impact is set by the shooter's
+   * distance; the player's job is only to reach the lane. 6 cells ≈ 66 ticks —
+   * the same order as a shell's flight from a 15-cell sniper.
+   */
+  baseLaneSealCellRange: number
+  /**
+   * A9 mode 2 (2026-10-27): how the seal cell is chosen on the shooter's column.
+   * 0 = nearest the eagle (shipped; ties to safety, walls behind us).
+   * 1 = fastest to reach from the player (any cell on the line blocks the shell).
+   */
+  baseLaneSealCellMode: number
+  /**
+   * A9 mode 2 (2026-10-27): only pre-seal against shooters at least this many
+   * cells from the base. Near-band enemies (the ones that actually kill it, from
+   * rows 23-25) are a MELEE job — sealing in front of them spends ticks that
+   * cost 0.33 kills/game while blocking 0.00 shells/game. 0 = no gate.
+   */
+  baseLaneSealPreMinDist: number
+  /**
+   * A9 mode 2 (2026-10-27): anti-wedge. If the player's cell does not change for
+   * this many ticks while walking to the seal cell, yield for 120 ticks. 0 = OFF.
+   */
+  baseLaneSealAntiStuckTicks: number
   /** §193-B: 卫位导航（station-approach）— 非对齐/被挡时走向 ±1 列清晰站位。0 = OFF（v5 字节不变）。 */
   baseLaneSentryStation: number
   /** §225-A: 带内应急进 lane — ring 已破 + 敌人已在基地带内（row ≥ 23）+ 玩家
@@ -541,10 +566,13 @@ export interface GodAIParams {
   /** §164: enemy within this many cells of the lane keeps the hold active when no shell is in the column. */
   midLaneHoldEnemyDist: number
   /**
-   * §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12,
-   * 24-offset) 在全部 35 关都是环砖格，A* 到砖格目标返回空路径 → 回防路由失效
-   * （S8 实测 corridor=0 breakBrick=0）。开启时：默认点不可站则在小盒内扫最近
-   * 可站格。0 默认 OFF → byte-identical。
+   * ⚠ RETIRED (2026-10-27 audit) — **zero read sites**. A8 (`defenseCellResolve`,
+   * shipped 1) replaced this path unconditionally: the defense cell is resolved
+   * to a standable cell for every caller. Measured `defensePosStandable: 1` =
+   * 0/140 games different, because the field is never read.
+   *
+   * Kept only so old A/B scripts / archived profiles still typecheck; setting
+   * it has no effect. Do NOT re-wire it — use `defenseCellResolve`.
    */
   defensePosStandable: number
   /** 远位触发阈值：仅当玩家距基地超过该格数时启用集合点回退（近基 byte-identical）。 */
@@ -1263,6 +1291,218 @@ export interface GodAIParams {
    * 1 = ON (default — the fix).
    */
   aimTurnSnapGuard: number
+
+  /**
+   * A2 (plan/godai-post-a1-retune.plan.md §3.1): committed-facing fire gate.
+   *
+   * A1 made "a bullet always leaves along the tank's *committed* facing" a
+   * hard engine rule (`SimulationCombat.tryFire` adjudicates the pending turn
+   * before deriving the bullet direction). The God AI's fire decisions were
+   * written against the opposite invariant — "the bullet flies along
+   * `_moveDir`" — which A1 only guarantees on ticks where the turn is
+   * actually accepted. Inside the turn-cooldown window (200 ms ≈ 12 ticks) a
+   * "turn + fire" request now emits a bullet along the OLD facing: one wasted
+   * shot in the wrong lane (measured: hard 77.7% → 58.7% win).
+   *
+   * When ON, `GodAIInput.isFiring()` — the single choke point every candidate
+   * funnels through — additionally requires `turnWillCommit(...)`
+   * (`src/ai/god/turn-gate.ts`): the emitted shot must fly along this tick's
+   * requested direction. Otherwise the tick is spent turning only; the shot
+   * goes out 1..k ticks later once the turn commits (k ≤ turnCooldownMs/TICK_MS).
+   * Pure predicate: no RNG, no World mutation — replay/snapshot-safe.
+   *
+   * 0 = OFF (pre-A2 / A1-era behavior, byte-identical — A/B baseline).
+   * 1 = ON (the fix — shipped 2026-10-19, DECISIONS §A2).
+   */
+  turnCommitFireGate: number
+
+  /**
+   * 坦克墙（机制修复 2026-10-20）：敌车格在 A* 里的额外代价（cells）。
+   * 缺陷实测：A* 只算地形 ⇒ 路径穿过敌车格后顶牛 **0.43% 的 tick（24 拍/局）**，
+   * 81% 发生在 navigate 分支。给敌车 footprint 计价后，规划器会在「绕远」与
+   * 「打穿」之间按 tick 比价。0 = OFF（byte-identical）。
+   */
+  navEnemyCellCost: number
+
+  /**
+   * A3 (turn economy): don't request a turn the cooldown will refuse.
+   *
+   * `applyTurnCooldown` reverts a refused turn AND sets `moving = false` — the
+   * tank freezes for the rest of the 200 ms window. Measured (2026-10-19,
+   * 8 stages × 3 seeds, hard): God-AI spends **17.7% of all ticks** requesting
+   * a turn it cannot get, i.e. standing still for no gain. It also turns ~240
+   * times per game and **95% of those turns produce no shot within 12 ticks** —
+   * the turns are bought for movement, but the price (aiming lockout) is paid
+   * in the coin of firing windows.
+   *
+   * When ON, `GodAIInput.getMoveDirection()` substitutes the refused request
+   * with the tank's COMMITTED facing: the tank keeps moving instead of
+   * halting, and the turn is re-requested as soon as the cooldown allows
+   * (the branch intent in `_moveDir` is untouched). The shot set is unchanged:
+   * `isFiring()` suppresses the shot when the effective direction differs from
+   * the branch's aim, so this knob isolates "less standing still" from "more
+   * shooting".
+   *
+   * 0 = OFF (A2 behaviour, byte-identical **for the instance that received the
+   *     override** — verified tick-by-tick against the A2 commit).
+   *     NOTE: 天降神兵 guards (`SimulationEnemies.guardAIFor`) build their own
+   *     God-AI brain from `DEFAULT_GOD_AI_PARAMS`, so they follow the SHIPPED
+   *     default, not a per-run `--params` override. A paired A/B that sets 0
+   *     therefore isolates the player-side effect only (guards keep mode 2), so
+   *     the shipped effect is ≥ the measured one.
+   * 1 = substitute unconditionally (A/B arm — loses on Steel Web: momentum into
+   *     a bullet defeats the dodge).
+   * 2 = substitute ONLY when the committed facing is not crossed by an enemy
+   *     bullet (`isSafeDir`); a refused DODGE turn stays a stop, because the
+   *     §95 halt is the dodge. **Shipped (2026-10-19).**
+   */
+  turnEconomyMode: number
+
+  /**
+   * A4 (2026-10-20): hysteresis (in cells) on the "return to defend" distance
+   * thresholds — `maxPlayerDistFromBase` and `outnumberedFieldDistCells`.
+   *
+   * WHY: those thresholds are compared against `playerDistToBase`, a DISCRETE
+   * cell distance derived from `playerCell()` (`round(x / CELL)`), so it flips
+   * between `d` and `d+1` every time the tank crosses a cell boundary — about
+   * every 11 ticks at player speed. When the tank sits exactly on the boundary
+   * the objective flips between "hunt the enemy" and "return to base", which
+   * reverses the desired direction — and the 200 ms turn cooldown (12 ticks)
+   * is longer than one cell of travel, so the reversal can never complete.
+   * Measured (turn-waste-probe, hard, 5 stages × 4 seeds): **48.6 standing
+   * oscillations per game burning 12.4% of all ticks with zero net
+   * displacement**, 36.2 of them a hunt↔defend objective flip. Concrete case
+   * (s35 seed 1000): the tank paced y=152↔165 at x=384 for 90+ ticks —
+   * `distToBase` 26 (cell row 10) → hunt up; 27 (row 9) → return down.
+   *
+   * Semantics: entering the defend objective stays immediate (a real emergency
+   * is never delayed). Leaving it requires the distance to fall to
+   * `threshold - defenseReturnHysteresis`, so the objective cannot re-flip on
+   * the boundary the tank is standing on. The latch is cleared as soon as no
+   * defend condition holds, so a vanishing threat releases it at once.
+   *
+   * 0 = OFF (byte-identical to pre-A4).
+   */
+  defenseReturnHysteresis: number
+
+  /**
+   * A9 (2026-10-21): seal a REMOTE base-shot lane before the shell is fired.
+   *
+   * The 700-game audit found the base dies to shots from far up the base COLUMN
+   * while the player stands a median 9 cells away (only 0.23 enemies within 6
+   * cells at the fatal moment; fatal bullet `down` 40% / `left` 32% / `right`
+   * 28%). `baseLaneSentry` (§198) reacts to `canShootBase` / `canBreachRing`
+   * shooters but only within `baseLaneSentryRange + 1` of the player, so a
+   * column shooter 9-20 cells up is never contested.
+   *
+   * 1 = `baseLaneSeal` is in the chain: pick the most dangerous remote shooter
+   *     (live line to the base, ≥ `baseLaneSealMinDist` away, within
+   *     `baseLaneSealRange` of the player), walk to the closest-to-base
+   *     standable cell on that shooter's column, hold it facing up and fire.
+   *     Standing there both blocks the shell with the tank and gives a clear
+   *     firing line at the shooter. Vertical lanes only (see the candidate).
+   * 0 = OFF (byte-identical to pre-A9).
+   */
+  baseLaneSealMode: number
+  /** A9: only seal against shooters at least this many cells from the base
+   * (closer shooters belong to baseLaneSentry / defenseIntercept). */
+  baseLaneSealMinDist: number
+  /** A9: max manhattan distance from the player to the shooter we will chase. */
+  baseLaneSealRange: number
+  /** A9: also pre-empt RING-BREACH shooters (`enemyCanBreachRing`), not just
+   * shooters with a clear line to the base (`enemyCanShootBase`). 1 = both,
+   * 0 = direct base shots only. */
+  baseLaneSealCbr: number
+
+  /**
+   * A8 (2026-10-21): resolve the defense cell to a cell the tank can STAND on.
+   *
+   * `getDefaultDefensePosition()` returns `(BASE_POS.col, BASE_POS.row −
+   * defenseRowOffset)` = **(12, 23)**. Measured over all 35 stages: that cell
+   * is the base ring's top brick on **35/35**, and `findPath` returns an empty
+   * route in BOTH modes (corridor and dig-through-brick) from the spawn cell
+   * and from mid-map. So every "return to defend" order — `selectTarget`'s
+   * baseUnderThreat branch, the M13 field retreat, §113/§88 base returns —
+   * handed the navigator a target that can never be reached: `followPath`
+   * returns null, `directMove` blind-digs at the ring, and the player paces in
+   * front of a wall (§146B / §149 / A6 all saw the symptom; none removed the
+   * cause).
+   *
+   * 1 = resolve (SHIPPED): keep the cell if it is standable AND has at least
+   *     one standable 4-neighbour (a standable single-cell bubble inside the
+   *     ring is still unreachable); otherwise walk UP the base column (the
+   *     approach band the position is meant to cover) up to
+   *     `DEFENSE_SCAN_UP` rows, then widen to a 7×10 box and take the nearest
+   *     usable cell. On all 35 stages this lands on **(12,22)** — directly in
+   *     front of the base, standable, with a 6–10 cell dig route from spawn.
+   * 0 = legacy raw cell (A/B baseline only; byte-identical to pre-A8).
+   *
+   * Cached per `tileMap.revision` + requested cell (terrain changes only bump
+   * it), cleared in `reset()`. Pure terrain function — no RNG, no player state.
+   */
+  defenseCellResolve: number
+
+  /**
+   * A12 (2026-10-23): multi-sector crossfire escape (see god/crossfire.ts).
+   * 0 = OFF (byte-identical), 1 = on.
+   */
+  crossfireSectorMode: number
+  /** A18 (2026-10-25): deterministic fire-discipline throttle in percent
+   * (hash of the frame; no RNG draw). 0 = never skip. */
+  fireSkipPct: number
+  /** A19 (2026-10-25): P2.4 predictive-crossing fire (shoot where a strafing
+   * enemy WILL cross). 0 = off. */
+  predictiveCrossingFire: number
+  /** A20 (2026-10-25): slack (ticks) added to the half-body crossing time when
+   * deciding that a strafing enemy will cross our line in time. */
+  crossingSlackTicks: number
+  /** A23 (2026-10-26): when the gun is ready and nothing is aligned on the
+   * current facing, turn to the nearest hittable enemy and fire. 0 = OFF. */
+  turnToFireMode: number
+  /** A27 (2026-10-26): extra cells of "penalty" for targets that need more than
+   * one hit when choosing which direction to turn-and-fire (kill the finishers
+   * first; armour soaks the whole shot budget). 0 = OFF. */
+  finisherBias: number
+  /** A28 (2026-10-26): cells of chase-score penalty for targets that need more
+   * than one hit (kill the finishers first). 0 = OFF. */
+  armorChasePenalty: number
+  /** A29 (2026-10-26): on-field HP pool at or above which fire-quality mode kicks
+   * in (no P2.4 crossing shots; corridor-verified targets only). 0 = OFF. */
+  qualityFireHp: number
+  /** A24 (2026-10-26): late-game hunt — walk straight at the nearest remaining
+   * enemy when nothing is hittable and the base is safe. 0 = OFF. */
+  lateHuntMode: number
+  /** A24: kills threshold that marks the late game. */
+  lateHuntKills: number
+  /** A24b: trigger when at most this many enemies are alive on the field. */
+  lateHuntMaxAlive: number
+  /** A24: only hunt when the nearest enemy is farther than this many cells. */
+  lateHuntMinDist: number
+  /** A12: engage only when the earliest shell reaches the CURRENT cell within
+   * this many ticks (urgency gate; avoids hijacking routine dodges). */
+  crossfireMinTti: number
+
+  /**
+   * A5 (2026-10-20): probe `canMoveDir` / `canMoveOrBreak` along the movement
+   * axis from the tank's REAL pixel coordinate instead of `snap()`-ing it to
+   * the cell grid first.
+   *
+   * `snap` is `round(v / CELL) * CELL`, so it jumps a whole cell at every
+   * half-cell — which the tank crosses every ~8px. For a sideways probe that
+   * shifts the probed rectangle by one cell, so "can I go left?" flips between
+   * FALSE and TRUE for the SAME wall depending on which half of the cell the
+   * tank is on. `directMove` then alternates between `left` and its
+   * any-passable fallback (`right`, straight away from the target), and the
+   * 200 ms turn cooldown means neither reversal ever completes: the tank paces
+   * one cell forever. Measured: 43.5 standing oscillations per game after A4,
+   * of which 67% have a stable objective (the A-star / directMove layer is what
+   * flips). Concrete case: hard s35 seed 1000, x=354↔368 at y=160, 300+ ticks.
+   *
+   * The perpendicular axis keeps `snap` — the engine snaps it every tick.
+   *
+   * 0 = OFF (byte-identical to pre-A5). 1 = ON.
+   */
+  navExactMoveProbe: number
 
   /**
    * §84: Aggressive branch stall detection. When > 0, the aggressive
@@ -2477,7 +2717,10 @@ export const ARCHIVED_KNOB_GROUPS: readonly ArchivedKnobGroup[] = [
   },
   { gate: 'defenseInterceptPredictCells', note: '方向 D 预测版 (§135, byte-identical)' },
   { gate: 'defenseInterceptDigBricks', note: '方向 D 破砖版 (§136, byte-identical)' },
-  { gate: 'defensePosStandable', note: '+ minDist 子参数 (§146B 收窄版外全关, §149 边际≈0)' },
+  {
+    gate: 'defensePosStandable',
+    note: 'RETIRED：0 个读取点（A8 defenseCellResolve 已无条件取代）。实测 0/140 局变化，勿再接线',
+  },
   { gate: 'iceGlideControl', note: '+ minSpeed 子参数 (§145, S24 难度地板关)' },
   { gate: 'defenseBreachBonus', note: 'D2 拆环威胁评分 (§141)' },
   { gate: 'baseLaneSentryInBandNav', note: '带内应急进 lane (§225A/§226 双否决)' },

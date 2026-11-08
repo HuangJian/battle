@@ -15,6 +15,7 @@ import {
 } from './god/FireControl'
 import type { ScanResult } from './god/FireControl'
 import { newStuckTrack, type StuckTrack } from './god/stuck-track'
+import { turnWillCommit } from './god/turn-gate'
 import type { ActionIntent } from './god/StrategyPlanner'
 import { makeCandidateVerdict } from './god/ActionCandidates'
 import { thinkImpl, CANDIDATES } from './god/think'
@@ -26,6 +27,7 @@ import {
   detectCentralBreachRisk,
 } from './god/params'
 import type { GodAIParams } from './god/params'
+import { ENEMY_MODEL_DEFAULT_WINDOW_TICKS } from './god/EnemyModel'
 export {
   DEFAULT_GOD_AI_PARAMS,
   SKILLED_HUMAN_PARAMS,
@@ -197,6 +199,11 @@ export class GodAIInput implements InputLike {
   /** Whether think() ran this tick (avoids double-computation). */
   _thought = false
 
+  /** A3 per-tick cache for {@link effectiveMoveDir} (see its doc for the
+   * determinism reason). Invalidated in endFrame() / reset(). */
+  private _effectiveDirCache: Direction | null = null
+  private _effectiveDirCacheValid = false
+
   /** Current A* path being followed. */
   path: Direction[] = []
   /** Re-plan counter. */
@@ -337,6 +344,47 @@ export class GodAIInput implements InputLike {
    */
   _huntCommitId = -1
   _huntCommitUntil = 0
+
+  /**
+   * A4 (2026-10-20): "already returning to defend" latch for the hunt↔defend
+   * hysteresis (see `params.defenseReturnHysteresis`). AI-internal decision
+   * state — never serialized, cleared in reset(). Default param 0 ⇒ the latch
+   * is never read ⇒ byte-identical to pre-A4.
+   */
+  _defenseReturnLatch = false
+
+  /**
+   * A8 (2026-10-21): resolved standable defense cell — `(12,23)` is the base
+   * ring's top brick on all 35 stages, so the raw cell must never reach the
+   * navigator (see `resolveStandableDefenseCellImpl`). Cached per
+   * `tileMap.revision` + requested cell; cleared by reset().
+   */
+  _defCellCol = -99
+  _defCellRow = -99
+  _defCellKeyCol = -99
+  _defCellKeyRow = -99
+  _defCellRev = -1
+  _defCellValid = false
+
+  /**
+   * Diagnostic only (no gameplay effect, no RNG): why `isFiring()` said no.
+   * Populated on every call so a probe can attribute the "gun ready + target
+   * aligned but nothing fired" ticks to a specific gate.
+   */
+  _fireGateAudit: Record<string, number> = {}
+  /** A21 (2026-10-25) diagnostic: why a fire was ALLOWED (enemy/steel/intercept/crossing/wall). */
+  _fireReason: Record<string, number> = {}
+  /** A29 (2026-10-26): true while the on-field HP pool is above `qualityFireHp`
+   * (fire-quality mode: no P2.4 crossing shots, corridor-verified targets only). */
+  _hpPressureActive = false
+  /** frame of the last shot that came from the A15 `fireAlongFacing` branch. */
+  _lastFireWasFacing = -1
+  /** A15: per-tick memo so `isFiring()` is IDEMPOTENT inside one tick. The
+   * recorder calls it AFTER the tick (world already advanced) while the sim
+   * called it DURING the tick; without the memo the two answers differ and the
+   * recorded frame no longer reproduces the run (replay round-trip off by a tick). */
+  _facingFireTick = -1
+  _facingFireOk = false
 
   /**
    * Phase 2 §6.3: short-term action intent (plan §6.3) — the hunt target
@@ -884,6 +932,11 @@ export class GodAIInput implements InputLike {
   _enemyModel: EnemyModelState = initEnemyModel(false)
   /** M3: previous-tick player HP — hit detection for the accuracy feature. */
   _enemyModelLastHp = 0
+  /** A9 seal anti-wedge: last cell while walking to the seal + no-progress count. */
+  _sealLastCol = -1
+  _sealLastRow = -1
+  _sealStillTicks = 0
+  _sealSuppressUntil = 0
 
   constructor(
     world: World,
@@ -903,6 +956,17 @@ export class GodAIInput implements InputLike {
     // gate's S25 result from 1/20 to 0/20 — a silent global corruption of
     // every later simulation in the process). DECISIONS §98.
     this._baseParams = { ...params }
+    // M3 (2026-10-27): arm the model window on the BASE params, before any
+    // reset reads it. `reset()` resolves `_enemyModel.active` from
+    // `this.params` at its top (line ~1167) — i.e. BEFORE the stage-adapted
+    // params are computed at the bottom. A caller that only sets
+    // `enemyModelMode` (window ships at 0) therefore left `active=false` for
+    // the whole run: measured `enemyModelMode: 1` alone = 0/350 games.
+    // Defaulting here fixes BOTH the missing companion and the stale-capture
+    // ordering; the reset-time guard below covers stage adaptations.
+    if (this._baseParams.enemyModelMode > 0 && this._baseParams.enemyModelWindowTicks <= 0) {
+      this._baseParams.enemyModelWindowTicks = ENEMY_MODEL_DEFAULT_WINDOW_TICKS
+    }
     this.params = this._baseParams
     this._orderedCandidates = orderedCandidates(CANDIDATES, this._baseParams.actionWeights)
     // M3: initialize the EnemyModel (active flag resolved in reset() from the
@@ -941,6 +1005,10 @@ export class GodAIInput implements InputLike {
   /** Per-tick lazy memos — pure functions of the current World state.
    * Called by endFrame() every tick and by reset() on stage transitions. */
   private invalidatePerTickCaches(): void {
+    // A3: the effective move direction is a per-tick decision (it reads the
+    // frame clock) — it must not leak into the next tick.
+    this._effectiveDirCacheValid = false
+    this._effectiveDirCache = null
     this._baseUnderThreatCache = null
     this._playerCellValid = false
     this._canMoveComputed = 0
@@ -1009,7 +1077,16 @@ export class GodAIInput implements InputLike {
   reset(): void {
     this._moveDir = null
     this._fire = false
+    // A9 seal anti-wedge is keyed on `world.frame`, which restarts at 0 per
+    // stage — a stale `_sealSuppressUntil` from the previous stage would mute
+    // the seal for the whole next stage.
+    this._sealLastCol = -1
+    this._sealLastRow = -1
+    this._sealStillTicks = 0
+    this._sealSuppressUntil = 0
     this._thought = false
+    this._effectiveDirCache = null
+    this._effectiveDirCacheValid = false
     this._pressGuard = false // §167
     this._pressFrenzy = false // §167
     resetIntentTagger(this)
@@ -1043,6 +1120,9 @@ export class GodAIInput implements InputLike {
     this._midLaneStickyHold = 0 // §164
     this._huntCommitId = -1 // §170
     this._huntCommitUntil = 0 // §170
+    this._defenseReturnLatch = false // A4
+    this._defCellValid = false // A8
+    this._defCellRev = -1
     this._intent = null // Phase 2 §6.3
     this._coverageCell = null // Phase 3
     this._coverageUntil = 0
@@ -1122,18 +1202,87 @@ export class GodAIInput implements InputLike {
       }
     }
     this.params = computeStageAdaptedParams(baseForAdapt, this.world)
+    // M3 (2026-10-27): `enemyModelMode` was a **dead gate** — both its update
+    // site (think.ts) and every consumer require a non-zero window
+    // (`enemyModelMode > 0 && enemyModelWindowTicks > 0`), and the window
+    // ships at 0. Measured: `enemyModelMode: 1` alone changed **0/350 games**.
+    // One knob must mean one mechanism, so a non-zero mode now arms the
+    // default window; an explicit caller value still wins. Default mode 0 ⇒
+    // nothing changes (byte-identical).
+    if (this.params.enemyModelMode > 0 && this.params.enemyModelWindowTicks <= 0) {
+      this.params.enemyModelWindowTicks = ENEMY_MODEL_DEFAULT_WINDOW_TICKS
+    }
     // M2: rebuild the candidate chain in effective-weight order from the
     // (possibly stage-adapted) params. Default = M1 chain order.
     this._orderedCandidates = orderedCandidates(CANDIDATES, this.params.actionWeights)
   }
 
+  /**
+   * A3 (turn economy): the direction actually requested from the engine.
+   *
+   * A turn the cooldown will refuse is not free: `applyTurnCooldown` reverts it
+   * AND halts the tank (`moving = false`) for the rest of the window, so the
+   * request buys a 12-tick freeze and nothing else. Measured: the God AI asks
+   * for such a turn on **17.7% of all ticks**. When `turnEconomyMode > 0` we
+   * keep the branch intent in `_moveDir` (so aiming/branch logic is untouched)
+   * but request the COMMITTED facing instead — the tank keeps moving, and the
+   * turn goes through the moment the cooldown expires.
+   *
+   * PER-TICK CACHED (determinism, AGENTS §2.3): unlike the pre-A3 getter this
+   * reads `world.frame`, and the input is queried more than once per tick —
+   * `Simulation` drives the tank, then `InputRecorder.recordFrame()` reads it
+   * AFTER the tick advanced `frame`. Recomputing there could substitute a
+   * different direction than the one the tank actually received, which made
+   * `tests/replay-roundtrip.test.ts` diverge (score 6600 vs 4000). The value is
+   * frozen for the tick and invalidated in `endFrame()` / `reset()`.
+   */
+  effectiveMoveDir(): Direction | null {
+    if (this._effectiveDirCacheValid) return this._effectiveDirCache
+    const d = this._moveDir
+    let out = d
+    if (this.params.turnEconomyMode > 0 && d) {
+      const p = this.controlledTank(this.world)
+      if (p && !turnWillCommit(this.world, p, d)) {
+        // Mode 2: keeping momentum is only worth it when the committed facing
+        // is not walking into a bullet — a refused dodge turn must stay a STOP
+        // (the §95 halt IS the dodge). Mode 1 substitutes unconditionally.
+        out =
+          this.params.turnEconomyMode >= 2 &&
+          !this.isSafeDir(p.x + p.w / 2, p.y + p.h / 2, p.dir, -1)
+            ? null
+            : p.dir
+      }
+    }
+    this._effectiveDirCache = out
+    this._effectiveDirCacheValid = true
+    return out
+  }
+
   getMoveDirection(): Direction | null {
     this.think()
-    return this._moveDir
+    return this.effectiveMoveDir()
   }
 
   isFiring(): boolean {
     if (!this._thought) this.think()
+    if (!this._fire) return false
+    // A2 (plan/godai-post-a1-retune.plan.md §3.1): the single choke point for
+    // every candidate's fire decision. After A1 a shot always leaves along the
+    // COMMITTED facing, so firing on a tick whose turn gets rejected by the
+    // turn cooldown spends a bullet in the OLD lane. Suppress that shot here
+    // (decisions stay untouched, so branch counters / telemetry still reflect
+    // the AI's intent); the turn commits 1..k ticks later and the shot goes
+    // out then. See `god/turn-gate.ts` for why the predicate is exact.
+    if (this.params.turnCommitFireGate > 0) {
+      const p = this.controlledTank(this.world)
+      const d = this.effectiveMoveDir()
+      // A3: the branch aimed at `_moveDir`; if turn economy substituted a
+      // different direction, firing now would shoot a lane nobody aimed at.
+      // Keeping the shot set identical is what makes this knob a clean test of
+      // "less standing still", not "more shooting".
+      if (d !== this._moveDir) return false
+      if (!turnWillCommit(this.world, p, d)) return false
+    }
     return this._fire
   }
 

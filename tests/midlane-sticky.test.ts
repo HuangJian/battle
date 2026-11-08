@@ -27,11 +27,13 @@ import { START_LIVES } from '../src/constants'
 // to the lane point and holds through the whole drill.
 // ================================================================
 
-function runSeed10(params: Partial<typeof DEFAULT_GOD_AI_PARAMS>): {
+function runRiverbed(
+  seed: number,
+  params: Partial<typeof DEFAULT_GOD_AI_PARAMS>,
+): {
   outcome: string
   terminalTick: number
 } {
-  const seed = 10
   const difficulty = 'hard'
   const world = new World()
   world.rng.reseed(seed)
@@ -41,7 +43,24 @@ function runSeed10(params: Partial<typeof DEFAULT_GOD_AI_PARAMS>): {
   world.playerLevel = world.difficulty?.playerStartLevel ?? 0
   world.lives = world.difficulty?.startLives ?? START_LIVES
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, ...params }, godRng)
+  const input = new GodAIInput(
+    world,
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
+      // 本用例钉的是自己的机制 ⇒ 固定回 26。
+      maxPlayerDistFromBase: 26,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
+      // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+      turnToFireMode: 0,
+      // A9 mode2 纪元（2026-10-27）：预封线在 Riverbed（无钢列）会改变本 seed 的走向；
+      // 本用例钉的是 midLaneSticky 自己的机制 ⇒ 固定回 mode-1 口径（同上面三条的隔离惯例）。
+      baseLaneSealMode: 1,
+      ...params,
+    },
+    godRng,
+  )
   const sim = new Simulation(world, input)
   world.loadStageData(STAGES[7], 7)
   input.reset()
@@ -62,22 +81,22 @@ function runSeed10(params: Partial<typeof DEFAULT_GOD_AI_PARAMS>): {
   return { outcome, terminalTick }
 }
 
-describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
-  it('baseline (sticky=0): seed 10 loses — reproduces the drill base death', () => {
-    // Pin sticky OFF explicitly: the shipped default is now 90 (hard/chaos),
-    // which is exactly the fix under test. At 0 the drill chews the ring, the
-    // fatal bullet wins the race — this documents the bug the sticky fixes.
-    const r = runSeed10({ midLaneStickyTicks: 0 })
-    expect(r.outcome).toBe('gameover')
-    expect(r.terminalTick).toBeLessThan(10000)
+describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks) — 开火准入纪元（2026-10-20）', () => {
+  // ⚠ 本用例在「开火策略准入」纪元（DECISIONS §2026-10-20-godai-mechfix-fire-admission）
+  // 被改写：t2a 在冷却期不再提交 ⇒ 玩家不再蹲车道，seed 10 的钻砖死亡**不再复现**；
+  // 而 sticky=90 会把玩家钉在原地，反而把它从 clear 变 gameover。
+  // 新纪元 60-seed 配对 sweep（A = 旧默认 90）：0 → SUITE 0.5781（+0.0127）· 30 → 0.5747 ·
+  // 60 → 0.5686 · 90 → 0.5654 ⇒ 单调下降 ⇒ 默认改为 0。
+  const SEED = 10
+
+  it('shipped default (sticky=0): seed 10 clears — the drill death is gone in this epoch', () => {
+    const r = runRiverbed(SEED, {})
+    expect(r.outcome).toBe('stageclear')
   })
 
-  // DISABLED (2026-10-19): A1 (global fire-direction fix) changed God-AI
-  // behaviour on hard; this seed no longer clears, so the §164 sticky benefit no
-  // longer holds here. The old expectation was a God-AI performance guard
-  // measured on the pre-A1 (side-shot) mechanic — retired per user directive.
-  it.skip('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
-    const r = runSeed10({ midLaneStickyTicks: 90 })
-    expect(r.outcome).toBe('stageclear')
+  it('sticky=90 loses this seed — documents why the default moved back to 0', () => {
+    const r = runRiverbed(SEED, { midLaneStickyTicks: 90 })
+    expect(r.outcome).toBe('gameover')
+    expect(r.terminalTick).toBeLessThan(10000)
   })
 })

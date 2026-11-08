@@ -156,7 +156,16 @@ export function evalEngage(self: GodAIInput, ctx: DecisionContext): boolean {
           1,
         )
 
-        if (!campedTooLong && !outgunned) {
+        // 开火策略准入（2026-10-20 用户定规）：**开火冷却没到，开火策略不许生效**。
+        // 原来 onCooldown 时 t2a 仍会把 `_moveDir` 设成 aimDir（为"对准"转走方向盘），
+        // 但这一拍根本打不出子弹 ⇒ 白转一次（12 拍锁定 + 站桩）。审计：这类
+        // 「navigate→t2a→navigate」切换 1568 次/700 局，是"无用转身"的头号来源。
+        // 关掉后 t2a 在冷却期直接不提交，方向盘留给 navigate。
+        // 用户定规（2026-10-20）：**开火冷却没到，开火策略不许生效**（无开关，固定生效）。
+        // 只约束**玩家坦克**（P1/P2）。护卫/盟友是独立的辅助 AI，其「挡道避让 + 恢复自主」
+        // 契约不归本规则管（tests/godai-guard.test.ts 锁定该行为）。
+        const fireReadyGate = onCooldown && p.kind === 'player'
+        if (!campedTooLong && !outgunned && !fireReadyGate) {
           // ---- §49: 炮口相向分场景策略 ----
           // When an enemy faces the player, adapt per enemy type: ice skips,
           // 1HP enemies fight normally (counter-fire still applies — it is a

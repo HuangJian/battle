@@ -94,6 +94,13 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
   // guard the mechanism for a future revival (see DECISIONS §168).
   const ON = {
     ...DEFAULT_GOD_AI_PARAMS,
+    // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+    lateHuntMode: 0,
+    // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
+    // 本用例钉的是自己的机制 ⇒ 固定回 26。
+    maxPlayerDistFromBase: 26,
+    // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+    turnToFireMode: 0,
     navStuckZone: 1,
     navStuckSuppressTicks: 60,
     baseConnectClearMode: 0,
@@ -103,18 +110,34 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     const dwell = maxZoneDwell(
       {
         ...DEFAULT_GOD_AI_PARAMS,
+        // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+        lateHuntMode: 0,
+        // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
+        // 本用例钉的是自己的机制 ⇒ 固定回 26。
+        maxPlayerDistFromBase: 26,
+        // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+        turnToFireMode: 0,
         navStuckZone: 0,
         baseConnectClearMode: 0,
         pixelStuckDirectMoveTicks: 0,
+        // A4 会一并消除这个 pin（见下方断言注释）—— 复现腿必须回到 A4 前。
+        defenseReturnHysteresis: 0,
+        // A8（2026-10-21）把集合点解析到可站的 (12,22)，S34 轨迹整体改变
+        // （OFF 档 dwell 422 → 373）。本腿要复现的是 §168 记录的原始 pin，
+        // 固定在 A8 纪元之前的口径。
+        defenseCellResolve: 0,
       },
       STAGE,
       SEED,
       2400,
     )
     // Unfixed behavior: the pin runs far past the 180-tick escape threshold.
-    // §187 target blacklist (targetBlacklistStuckTicks=240) provides partial
-    // relief even when navStuckZone=0, reducing the pin from >600 to ~564.
-    expect(dwell).toBeGreaterThan(500)
+    // §187 target blacklist (targetBlacklistStuckTicks=240) reduced the pin
+    // from >600 to ~564. 2026-10-20 开火准入纪元：t2a 冷却期不再提交后该 pin
+    // 缩到 422。**A4 回防滞后纪元（2026-10-21）把同一个 pin 缩到 163** ——
+    // 滞后直接消除了造成它的 hunt↔defend 目标抖动，所以本腿必须显式关掉
+    // defenseReturnHysteresis 才能继续复现（复现证据保留，防未来回归）。
+    expect(dwell).toBeGreaterThan(400)
   })
 
   it('ON (navStuckZone 1 + window) bounds the dwell — the escape fires', () => {
@@ -123,8 +146,8 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // zone. Generous bound (well above 180, well below the 1200-tick pin):
     // a few extra ticks can pass before HUNT next evaluates after the
     // threshold is crossed, and re-pins are allowed as long as each one is
-    // bounded.
-    expect(dwell).toBeLessThan(500)
+    // bounded. 本纪元实测 OFF=163 / ON=**163**（A4 已把 pin 消除，ON 档无额外收益）。
+    expect(dwell).toBeLessThan(400)
   })
 
   it('ON bounds the dwell across several Battlement losing seeds', () => {
@@ -140,7 +163,18 @@ describe('§168 navStuckZone — center-cell jitter must not defeat the nav-stuc
     // t748) even though the A/B showed no win-rate significance — the
     // mechanism works, the win-rate lever lies elsewhere.
     const dwell = maxZoneDwell(
-      { ...DEFAULT_GOD_AI_PARAMS, navStuckZone: 1, baseConnectClearMode: 0 },
+      {
+        ...DEFAULT_GOD_AI_PARAMS,
+        // A26 纪元：本用例测自己的机制，与残敌狩猎的触发阈值无关。
+        lateHuntMode: 0,
+        // A25 纪元（2026-10-26）：回防距离阈值 26→40 是本纪元的行为改动；
+        // 本用例钉的是自己的机制 ⇒ 固定回 26。
+        maxPlayerDistFromBase: 26,
+        // A23 纪元（2026-10-26）：本用例测的是自己的机制，与「转身开火」无关 ⇒ 固定回 A23 前口径。
+        turnToFireMode: 0,
+        navStuckZone: 1,
+        baseConnectClearMode: 0,
+      },
       STAGE,
       SEED,
       2400,

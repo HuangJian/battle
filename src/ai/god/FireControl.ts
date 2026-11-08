@@ -508,7 +508,11 @@ function predictEnemyCrossingImpl(
 
     // Tolerance: the time it takes for half the tank body to cross the
     // line, plus a few ticks of slack for sub-pixel jitter.
-    const tolerance = TANK / (2 * enemySpeed) + 6
+    // A20 (2026-10-25): slack is a knob. `+6` ticks of slop on top of the
+    // half-body crossing time means we fire up to ~17 ticks off the crossing —
+    // these shots are only 36.6% accurate (vs 90.5% for aimed shots). Tighter
+    // slack = fewer but better prediction shots.
+    const tolerance = TANK / (2 * enemySpeed) + self.params.crossingSlackTicks
     if (Math.abs(enemyTimeToCross - bulletTimeToReach) <= tolerance) {
       return true // pure check — caller handles RNG
     }
@@ -679,6 +683,29 @@ export function aimSurvivesTurnImpl(self: GodAIInput, p: Tank, aimDir: Direction
  * T6: base protection bricks are never fired at.
  * T11: steel is only fired at if player level ≥ 3 (can pierce steel).
  */
+
+/**
+ * A18 (2026-10-25): single fire-permission roll for the whole fire gate.
+ *
+ * `aimError` used to be sampled here (5 sites). It never bent a trajectory — it
+ * simply declined that many fire decisions. User rule (2026-10-25): the God AI
+ * must not carry deliberate handicaps. So:
+ *   · aimError <= 0  ⇒ return true WITHOUT drawing RNG (no imperfection, and the
+ *     AI's RNG stream stays untouched by the fire gate);
+ *   · fireSkipPct > 0 ⇒ a DETERMINISTIC fire-discipline throttle (hash of the
+ *     frame), used to reproduce the economy effect without randomness.
+ */
+function aimOk(self: GodAIInput): boolean {
+  const err = self.params.aimError
+  const skip = self.params.fireSkipPct
+  if (skip > 0) {
+    const h = (Math.imul(self.world.frame + 1, 2654435761) >>> 0) % 100
+    if (h < skip) return false
+  }
+  if (err <= 0) return true
+  return self.rng.next() >= err
+}
+
 export function shouldFireInDirImpl(
   self: GodAIInput,
   pcx: number,
@@ -779,12 +806,12 @@ export function shouldFireInDirImpl(
         return false
       }
     }
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   // Steel with level ≥ 3 (no enemy found): fire to pierce.
   if (result.steel) {
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   // Check for enemy bullet to intercept (T5).
@@ -799,7 +826,7 @@ export function shouldFireInDirImpl(
     const d = bulletInFrontDist(dir, bcx, bcy, pcx, pcy, BULLET_ALIGN_NEXT_CELL)
     if (d < 0) continue
     if (d < TANK * 4) {
-      return self.rng.next() >= self.params.aimError
+      return aimOk(self)
     }
   }
 
@@ -807,9 +834,9 @@ export function shouldFireInDirImpl(
   // line of fire, check if an enemy moving perpendicular will cross
   // the bullet's path at the right time. This lets the player hit
   // fast enemies that dodge bullets by moving sideways.
-  if (!result.wall) {
+  if (!result.wall && self.params.predictiveCrossingFire > 0 && !self._hpPressureActive) {
     if (predictEnemyCrossingImpl(self, pcx, pcy, dir)) {
-      return self.rng.next() >= self.params.aimError
+      return aimOk(self)
     }
   }
 
@@ -821,7 +848,7 @@ export function shouldFireInDirImpl(
   // classic bulletCap mode), skip wall-firing to reserve the bullet cap
   // for enemies and enemy bullets.
   if (allowWallFire && result.wall && !result.baseWall && !result.steel) {
-    return self.rng.next() >= self.params.aimError
+    return aimOk(self)
   }
 
   return false

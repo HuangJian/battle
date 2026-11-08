@@ -4,7 +4,7 @@ import type { World } from '../../game/World'
 import { findPath, type Cell } from './pathfind'
 import { CELL, BASE_POS, POWERUP_TIMEOUT_MS, GRID, TICK_MS } from '../../constants'
 import { BALANCED_ENEMY_CPS, BASE_SPEED_CPS } from '../../config/speed'
-import { POWERUP_PRIORITY, kindThreatWeight } from './constants'
+import { POWERUP_PRIORITY, kindThreatWeight, shotsToKill } from './constants'
 import type { GodAIParams } from './params'
 import { enemyCanShootBase, enemyCanBreachRing } from './SmartThreatModel'
 import { targetValue, enemyDeadline, killAssessment, countRingBrickCells } from './ThreatBudget'
@@ -29,6 +29,29 @@ function coopAdjustDist(
   if (!coopActive || !partnerCell) return adjustedDist
   const pd = manhattan(tc.col, tc.row, partnerCell.col, partnerCell.row)
   return pd < d - 3 ? adjustedDist + 5 : adjustedDist
+}
+
+/**
+ * A28 (2026-10-26, fixed 2026-10-27): chase-cost surcharge for a body that
+ * eats more than one shell.
+ *
+ * Autopsy: the `armor` share of a wave is the strongest predictor of a weak
+ * stage (corr −0.461; every terrain feature ≈0), and an armor body costs
+ * 4 shots ≈ 300 ticks of cooldown while the rest of the wave advances.
+ *
+ * The penalty is scaled by **shots still needed** (`shotsToKill − 1`), not by
+ * a boolean `hp > 1`: `Tank.hp` is in damage points (100..500), so `hp > 1`
+ * is true for every enemy and the penalty cancelled out of the ordering —
+ * measured 700/700 byte-identical games before the fix.
+ *
+ * Placement note: the original sat only in `huntModeTarget` (the `canHunt`
+ * endgame path, rarely reached), which is why even the unit fix measured
+ * 350/350 identical. It is now applied on every nearest-enemy cascade.
+ */
+function armorChasePen(self: GodAIInput, t: Tank): number {
+  if (self.params.armorChasePenalty <= 0) return 0
+  const shots = shotsToKill(t.hp ?? 1, self.world.rules.referenceDamage)
+  return (shots - 1) * self.params.armorChasePenalty
 }
 
 // ---- Phase 2 §6.3 / open-test protocol §5.3: short-term action intent ----
@@ -1318,42 +1341,10 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
       }
     }
   }
-  // §146 B: defensePosStandable — 集合点可达性修复。默认防守位 (12, 24-offset)
-  // 在全部 35 关上都是环砖格（§137 注释承认），A*（corridor 与 breakBrick）到
-  // 砖格目标均返回空路径 → 紧急回防/§113/§88 的回防路由全部失效，玩家只能靠
-  // directMove 盲目破砖（S8 实测：pocket→(12,23) corridor=0 breakBrick=0）。
-  // 旋钮开启时：若默认点不可站，在基地周边小盒（rows br-6..br+1, cols
-  // bc-3..bc+4）内扫最近可站格作为集合点——保证回防目标永远可达。
-  // 0 默认 OFF → byte-identical。
-  if (self.params.defensePosStandable > 0) {
-    // 仅远位（> defensePosStandableMinDist）触发：近基 idle 时保持旧行为
-    // （directMove 盲走到环砖前），爆炸半径最小化；S8 口袋回防（dist 25-32）
-    // 正是远位场景。playerCell 是 per-tick 缓存，无 RNG —— 安全。
-    const pc = self.playerCell()
-    const far =
-      manhattan(pc.col, pc.row, BASE_POS.col, BASE_POS.row) > self.params.defensePosStandableMinDist
-    if (!far) return def
-    const t = self.world.tileMap.get(def.col, def.row)
-    if (t === 'brick' || t === 'steel' || t === 'water' || t === 'base') {
-      const bc = BASE_POS.col
-      const br = BASE_POS.row
-      let best: Cell | null = null
-      let bestDist = Infinity
-      for (let r = br - 6; r <= br + 1; r++) {
-        for (let c = bc - 3; c <= bc + 4; c++) {
-          if (c < 0 || c >= GRID || r < 0 || r >= GRID) continue
-          const t2 = self.world.tileMap.get(c, r)
-          if (t2 === 'brick' || t2 === 'steel' || t2 === 'water' || t2 === 'base') continue
-          const d = manhattan(c, r, bc, br)
-          if (d < bestDist) {
-            bestDist = d
-            best = { col: c, row: r }
-          }
-        }
-      }
-      if (best) return best
-    }
-  }
+  // §146 B / A8: defensePosStandable 已被 A8 的无条件解析取代（见下方
+  // resolveStandableDefenseCellImpl）—— 旧旋钮的 `far > minDist` 收紧只是把
+  // 「不可站的集合点」限制在远位场景，机制本身仍然是错的。旋钮保留但不再读取，
+  // 留档在 ARCHIVED_KNOB_GROUPS。
   // §137: the default sits on the base ring (brick on all 35 stages) — when
   // the guard-anchor mechanism is ON, hold the computed guard cell instead.
   if (self.params.baseGuardAnchorMode > 0) {
@@ -1364,7 +1355,91 @@ export function getDefaultDefensePositionImpl(self: GodAIInput): Cell {
       if (anchor) return anchor
     }
   }
-  return def
+  // A8 (2026-10-21): the defense cell MUST be a cell the tank can stand on.
+  // Mechanism repair, shipped ON; `defenseCellResolve: 0` restores the raw
+  // (unreachable) cell for A/B reproducibility only.
+  if (self.params.defenseCellResolve <= 0) return def
+  return resolveStandableDefenseCellImpl(self, def)
+}
+
+/** A8: how far up the base column the standable search walks before widening. */
+const DEFENSE_SCAN_UP = 6
+
+/**
+ * A8 (2026-10-21) — 机制修复：集合点必须是「能站上去的格」。
+ *
+ * `getDefaultDefensePosition` 返回 `(BASE_POS.col, BASE_POS.row − defenseRowOffset)`
+ * = **(12, 23)**。实测（35 关全量，`tmp/defpos-probe.ts`）：
+ * **35/35 关该格都是基地环砖**，且 A* 从出生点与中场出发、corridor 与 breakBrick
+ * **两种模式全部返回空路径**（path length 0）。后果：所有「回防」指令
+ * （`selectTarget` 的 baseUnderThreat / M13 field-retreat / §113 / §88 回防）都把
+ * 一个永远到不了的目标交给导航层 —— `followPath` 返回 null，`directMove` 只能朝
+ * 环砖盲走破砖，玩家在环砖前打转（这正是 §146B / §149 / A6 反复看到的
+ * 「回防路由失效」）。
+ *
+ * 解析顺序（全部是纯地形读，无 RNG、与玩家位置无关）：
+ *   1. 原格可站且**四邻至少一个可站**（环内单格气泡「可站但 A* 进不去」也算坏格）；
+ *   2. 沿基地列**向上**走（防守位要覆盖的就是基地方向的接近带，列不变语义最强）；
+ *   3. 基地周边 7×10 盒内按曼哈顿距离就近取可站格。
+ * 都找不到时原样返回（极端封闭地形，至少不比现在更差）。
+ *
+ * 结果按 `tileMap.revision` + 原格缓存（地形变化 / 伙伴偏移变化才重算），
+ * `reset()` 清空。返回值是新对象（调用方会改写 col/row）。
+ */
+export function resolveStandableDefenseCellImpl(self: GodAIInput, def: Cell): Cell {
+  const tm = self.world.tileMap
+  if (
+    self._defCellValid &&
+    self._defCellRev === tm.revision &&
+    self._defCellKeyCol === def.col &&
+    self._defCellKeyRow === def.row
+  ) {
+    return { col: self._defCellCol, row: self._defCellRow }
+  }
+  const standable = (c: number, r: number): boolean => {
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return false
+    const t = tm.get(c, r)
+    return t !== 'brick' && t !== 'steel' && t !== 'water' && t !== 'base'
+  }
+  const usable = (c: number, r: number): boolean =>
+    standable(c, r) &&
+    (standable(c - 1, r) || standable(c + 1, r) || standable(c, r - 1) || standable(c, r + 1))
+
+  let outCol = def.col
+  let outRow = def.row
+  let found = usable(def.col, def.row)
+  if (!found) {
+    for (let k = 1; k <= DEFENSE_SCAN_UP; k++) {
+      const r = def.row - k
+      if (usable(def.col, r)) {
+        outRow = r
+        found = true
+        break
+      }
+    }
+  }
+  if (!found) {
+    let bestD = Infinity
+    for (let r = def.row - DEFENSE_SCAN_UP; r <= def.row + 3; r++) {
+      for (let c = def.col - 3; c <= def.col + 3; c++) {
+        if (!usable(c, r)) continue
+        const d = Math.abs(c - def.col) + Math.abs(r - def.row)
+        if (d < bestD) {
+          bestD = d
+          outCol = c
+          outRow = r
+          found = true
+        }
+      }
+    }
+  }
+  self._defCellCol = outCol
+  self._defCellRow = outRow
+  self._defCellKeyCol = def.col
+  self._defCellKeyRow = def.row
+  self._defCellRev = tm.revision
+  self._defCellValid = true
+  return { col: outCol, row: outRow }
 }
 
 /**
@@ -1835,7 +1910,25 @@ function huntModeTarget(
     const tc = self.tankCell(t)
     const d = manhattan(tc.col, tc.row, playerCell.col, playerCell.row)
     // Prefer bonus enemies (they drop power-ups) when distances are close.
-    let adjustedDist = coopAdjustDist(d - (t.bonus ? 2 : 0), d, tc, coopActive, partnerCell)
+    // A28 (2026-10-26): armour chase penalty. Autopsy: `armor` ratio is the only
+    // strong predictor of a weak stage (corr −0.461; every terrain feature ≈0)
+    // and an armour body eats 4 shots ≈ 300 ticks of cooldown, i.e. the whole
+    // fire budget while the rest of the wave advances. Penalise it in the
+    // CHASE score (not in the fire-direction choice — A27 showed that site never
+    // has two candidates to compare). 0 = OFF (byte-identical).
+    //
+    // ⚠ 2026-10-27 修正：原判据 `(t.hp ?? 1) > 1` 把**伤害点**当发数用 ⇒ hard 下
+    // 每个敌人都 > 1 ⇒ 全员同加一份惩罚 ⇒ 排序不变（实测 700/700 逐局一致，A28
+    // 因此被判「机制空转」）。惩罚必须按「还需几发」缩放，才真的把 4 发装甲排到
+    // 1 发残兵之后。
+    const armorPen = armorChasePen(self, t)
+    let adjustedDist = coopAdjustDist(
+      d - (t.bonus ? 2 : 0) + armorPen,
+      d,
+      tc,
+      coopActive,
+      partnerCell,
+    )
     if (adjustedDist < bestDist) {
       bestDist = adjustedDist
       best = t
@@ -1940,7 +2033,7 @@ function normalSelectionTarget(
         adjustedDist = coopAdjustDist(adjustedDist, d, tc, coopActive, partnerCell)
       } else {
         adjustedDist = coopAdjustDist(
-          d - (t.bonus ? self.params.bonusHuntBias : 0),
+          d - (t.bonus ? self.params.bonusHuntBias : 0) + armorChasePen(self, t),
           d,
           tc,
           coopActive,
@@ -1976,7 +2069,8 @@ function normalSelectionTarget(
       const tc = self.tankCell(t)
       let adjustedDist =
         huntPathCost(self, playerCell, t.id, tc.col, tc.row) -
-        (t.bonus ? self.params.bonusHuntBias : 0)
+        (t.bonus ? self.params.bonusHuntBias : 0) +
+        armorChasePen(self, t)
       adjustedDist = coopAdjustDist(
         adjustedDist,
         manhattan(tc.col, tc.row, playerCell.col, playerCell.row),
@@ -1997,7 +2091,7 @@ function normalSelectionTarget(
       // §172: bonus preference is the bonusHuntBias knob (default 2 =
       // the historical constant, byte-identical).
       let adjustedDist = coopAdjustDist(
-        d - (t.bonus ? self.params.bonusHuntBias : 0),
+        d - (t.bonus ? self.params.bonusHuntBias : 0) + armorChasePen(self, t),
         d,
         tc,
         coopActive,
@@ -2085,7 +2179,14 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // endgame, base defense takes priority over hunting when the player is
   // too far away to intercept in time.
   const playerDistToBase = manhattan(playerCell.col, playerCell.row, baseCol, baseRow)
-  if (baseUnderThreat && playerDistToBase > self.params.maxPlayerDistFromBase) {
+  // A4 hysteresis: see `params.defenseReturnHysteresis`. `distMargin` is added
+  // to the measured distance ONLY once the defend objective is already latched,
+  // which lowers the release threshold to `threshold - hysteresis` while
+  // leaving the (immediate) entry threshold untouched. With hysteresis 0 the
+  // margin is always 0 ⇒ byte-identical to pre-A4.
+  const distMargin = self._defenseReturnLatch ? self.params.defenseReturnHysteresis : 0
+  if (baseUnderThreat && playerDistToBase + distMargin > self.params.maxPlayerDistFromBase) {
+    self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
 
@@ -2132,9 +2233,23 @@ function selectTargetUncached(self: GodAIInput, playerCell: Cell): Cell | null {
   // retreats instead of hunting. The 60-seed A/B empirically validated this
   // as net positive (hard +2.3pp / chaos +0.6pp) — do not "fix" it into a
   // regression by reordering the blocks.
-  if (isFieldRetreatConditionImpl(self, baseUnderThreat, playerDistToBase, enemies.length)) {
+  // A4 hysteresis: same margin as the base-threat gate above — the two gates
+  // share one latch because their consequence is identical (return to the same
+  // defense position), so neither can re-flip the objective alone.
+  if (
+    isFieldRetreatConditionImpl(
+      self,
+      baseUnderThreat,
+      playerDistToBase + distMargin,
+      enemies.length,
+    )
+  ) {
+    self._defenseReturnLatch = true
     return self.getDefaultDefensePosition()
   }
+  // No defend condition holds any more (threat gone / far enough inside the
+  // release threshold) — drop the latch so the next entry is immediate again.
+  self._defenseReturnLatch = false
 
   // Aggressive mode (freeze): chase nearest — see freezeChaseTarget().
   if (self.aggressive) return freezeChaseTarget(self, w, playerCell, enemies, baseCol, baseRow)

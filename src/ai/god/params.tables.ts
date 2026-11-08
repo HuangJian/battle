@@ -33,7 +33,14 @@ import type { GodAIParams } from './params.interface'
  */
 export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   reactionDelay: 0,
-  aimError: 0.03030591179971963,
+  // A18 (2026-10-25): **Zero deliberate imperfection.** `aimError` used to skip
+  // 3% of fire decisions at random; user rule: the God AI must not carry
+  // handicaps. Removing it (measured hard 35×20) costs −1.14pp, so the
+  // economy effect is kept as a DETERMINISTIC discipline instead (`fireSkipPct`,
+  // hash of the frame — reproducible, no RNG draw).
+  // 35×60 vs the old random 3%: hard −0.33pp (t=−0.44) · chaos −1.33pp (t=−1.68)
+  // · classic +0.48pp ⇒ net −0.4pp, accepted as a mechanism fix.
+  aimError: 0,
   suboptimalPathProb: 0,
   // §233: decision-chain throttle. A/B on hard 35×60: thinkInterval=2 costs
   // −2.8pp win rate (−0.022 mean score, 691/2100 outcome diffs) vs 1 — the
@@ -50,7 +57,7 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // for the instant/classic restore table (91% gate byte-identical).
   defenseColSpread: 3,
   threatRangeCells: 23,
-  maxPlayerDistFromBase: 26,
+  maxPlayerDistFromBase: 40,
   // P4: race-to-base emergency defense (see interface docs). Range 18 /
   // margin 2 — M4 search widened the race window (earlier, more committed
   // defense before the enemy reaches the base).
@@ -87,6 +94,10 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   baseLaneSentryMode: 1,
   // §146 C: 哨兵站位搜索半径（曼哈顿格数）与开火距离上限。
   baseLaneSentryRange: 6,
+  baseLaneSealCellRange: 14,
+  baseLaneSealCellMode: 0,
+  baseLaneSealPreMinDist: 0,
+  baseLaneSealAntiStuckTicks: 20,
   // §193-B/§198: 卫位导航 — SHIPPED（2026-08-15）。默认 1 = ON。
   // 当前基线（含 §195 sticky=90）决定性 60-seed paired A/B：
   // hard 净 +3（1591→1594，8 L→W / 5 W→L）、classic 净 0（byte-identical —
@@ -183,7 +194,14 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // powerup navigation. Conservative: maze nav rarely exceeds 3s stuck.
   powerupStuckTicks: 300,
   // §146 B: 集合点可达性 — default 0 (OFF, byte-identical)。
-  // defensePosStandableMinDist=8：仅远位（S8 口袋 dist 25-32）启用，近基不动。
+  // A6 (2026-10-20) 实测后维持 OFF：默认防守位 (12,23) 确实是基地环砖格，
+  // A* 到砖格目标返回空路径（回防只能靠 directMove 盲走破砖）—— 但把它换成
+  // 可站格后，35×60 串行 A/B（真实 stageIndex）胜率 79.7% vs base 80.0%
+  // （Δ-0.0036, t=-0.33），且**单关总 tick +5.5%**（s35 seeds1-20:
+  // 160135→168987）：玩家真的跑回基地了，清关却更慢。即「回防目标不可达」
+  // 无意中把玩家留在了战场上（打转），修好可达性只是把打转换成了回防奔袭，
+  // 两者都不产生净胜率 —— 与「站位/防守侧 A/B 全负」的历史结论一致。
+  // defensePosStandableMinDist=8：仅远位启用，近基 idle 保持旧行为。
   defensePosStandable: 0,
   defensePosStandableMinDist: 8,
   // §145: 冰上滑行控制 — default 0 (OFF, byte-identical)。iceGlideMinSpeed
@@ -351,13 +369,13 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   midLaneHoldRange: 1,
   midLaneMaxDist: 8,
   midLaneMaxDigCells: 3,
-  // §164: mid-lane drill sticky — SHIPPED hard/chaos = 90 (2026-08-14,
-  // DECISIONS §195; classic restore 0 via CLASSIC_MODEL_PARAMS). 60-seed
-  // paired A/B: hard SUITE 0.5333→0.5380, S8 Riverbed 37%→45% (5 L→W, 0
-  // W→L on seeds 1-30); classic/chaos no regression. Sweep 60/90/120/150/
-  // 180/240 peaked at 90 — must bridge the 70-130 tick drill gaps without
-  // over-anchoring the player (≥120 starts trading away map control).
-  midLaneStickyTicks: 90,
+  // §164: mid-lane drill sticky — 曾 SHIPPED 90（2026-08-14，DECISIONS §195）。
+  // ⚠ 2026-10-20 开火准入纪元重调：**90 已从"修复"变成"负担"**。同一 60-seed 配对
+  // （A=90 新纪元基线 0.5654）下 sweep：0 → SUITE **0.5781（+0.0127）**、30 → 0.5747、
+  // 60 → 0.5686、90 → 基线 ⇒ 单调下降。原因：新纪元里 t2a 冷却期不再提交，玩家本来就
+  // 不会蹲车道，sticky 反而把他钉在原地（Riverbed seed 4/8/10/12… 从 clear 变 gameover）。
+  // ⇒ 默认改 0；§164 的钻砖复现用例已按新epoch改写（见 tests/midlane-sticky.test.ts）。
+  midLaneStickyTicks: 0,
   // §164: proactive mid-lane flank hold. 0 = OFF (byte-identical).
   // §165 round 2: A/B tested — CATASTROPHIC (-4.1pp). The enemy-near-lane
   // trigger fires 14-35% of ticks on most maps → player statue at the base
@@ -450,6 +468,111 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // §80: Turn-snap aim guard — 1 = ON (default, the fix). 0 = OFF (pre-§80
   // behavior, A/B baseline). See interface docs.
   aimTurnSnapGuard: 1,
+  // A2 (plan/godai-post-a1-retune.plan.md §3.1): committed-facing fire gate —
+  // 0 = OFF (pre-A2 / A1-era behavior, byte-identical A/B baseline).
+  // 1 = ON (SHIPPED 2026-10-19). hard 35×20 CRN 配对: Δscore +0.0964 ±0.0162
+  // (t=5.94, 441 好/256 坏/3 平), 算术 score 0.6104 → 0.7069, 胜率 58.7% → 71.0%
+  // ⇒ 回收 A1 缺口的 66.6%；中位偏弹率 27.4% → 0%. 见 DECISIONS §A2.
+  turnCommitFireGate: 1,
+  // 坦克墙（机制修复，SHIPPED 2026-10-20）：敌车格在 A* 里按「可击破的墙」计价。
+  // hard 60-seed vs 0：SUITE 0.5791→0.5825（1625/2100 局相同，胜率不变）⇒ 机制正确且不伤人。
+  navEnemyCellCost: 2,
+  // A3 转身经济：拿不到的转身不请求（沿已提交朝向继续走，别让引擎站桩）。
+  // 0 = OFF（A2 行为，字节等同）· 1 = 无条件替换 · **2 = 仅当已提交朝向不被子弹穿过时替换**
+  // （被拒的躲弹转身必须保持「停」，§95 的 halt 就是 dodge）。SHIPPED 2（2026-10-19）。
+  // hard 35×60 CRN 配对 vs A2：Δscore +0.0384 ±0.0084（t=4.56），SUITE 0.5246→0.5725，
+  // 胜率 74%→79%（1150 好/947 坏/3 平，4 关涨 0 关跌）。mode 1 只有 +0.0183 且 Steel Web 倒退。
+  turnEconomyMode: 2,
+  // A4 (2026-10-20): hysteresis on the hunt↔defend distance thresholds.
+  // 0 = OFF (byte-identical to pre-A4). 35×60 串行配对（真实 stageIndex）：
+  // 全量 35×60 串行配对（真实 stageIndex）：1 → Δ-0.0016 (t=-0.15) ·
+  // 2 → Δ-0.0102 (t=-0.97) · 3 → Δ-0.0029 (t=-0.27) —— h1 与 h3 的胜率差
+  // 3 局，纯噪声。按**机制强度**取 3：40 局探针上翻转次数 46.7→41.1（h1，
+  // 只 −12%，等于没修好）vs 46.7→18.9（h3，−60%）。h2 是唯一的真退步。
+  defenseReturnHysteresis: 3,
+  // A9 (2026-10-21): 远程来袭弹提前判线 + 封线 —— SHIPPED（hard/chaos）。
+  // 35×60 串行配对（真实 stageIndex、CRN）：hard 79.5%→**80.0%**（Δ+0.48pp, t=1.20）
+  // · chaos 77.8%→**78.1%**（Δ+0.29pp, t=0.66）· classic 84.2%→84.1%（Δ−0.14pp,
+  // t=−1.73，但整张表只有 3 局翻盘且全向下）⇒ classic 经 CLASSIC_OVERRIDES restore 0
+  // （与 baseLaneSentry §198 / defenseIntercept §134 同规）。机制侧证据：把「本该被
+  // 反应式拦截（t8）的子弹」提前消掉 —— t8 触发 45 → 2 次 / 140 局。
+  //
+  // mode 2 (2026-10-27, SHIPPED): 预封线 —— leash 从「到射手」改成「到封线格」，
+  // 并把「破环者 / 停滞在通透列上的敌人」纳入目标；**只在基地两列都没有钢的关卡**
+  // 生效（钢对敌人永久，其余关卡本就不存在狙击列）。35 关里只有 s8 Riverbed /
+  // s14 Steel Web / s21 Checkers / s34 Battlement 过门。
+  // 35×60：hard +0.14pp(t=0.43, kills +60) · classic −0.05pp(t=−0.45, 36 局变化) ·
+  // chaos **+0.71pp(t=2.35, kills +214)**；**Riverbed hard 58%→65%**，其余 31 关逐关不变。
+  baseLaneSealMode: 2,
+  baseLaneSealMinDist: 8,
+  baseLaneSealRange: 14,
+  // csb-only（只封「直射基地」的射手，不提前封拆环者）：35×20 上 +0.71pp(t=0.66)
+  // vs 含 cbr 的 ±0 —— 拆环威胁太常见，提前封线会把玩家从进攻位拖走。
+  baseLaneSealCbr: 0,
+  // A8 (2026-10-21): 集合点必须是能站的格 —— (12,23) 在 35/35 关都是环砖，
+  // A* 两种模式都返回空路径 ⇒ 所有回防指令都交给导航层一个到不了的目标。
+  // 1 = 解析到 (12,22)（SHIPPED）· 0 = 原始格（仅 A/B 基线，字节等同）。
+  // A12 (2026-10-24): 多扇区交叉火逃逸 —— **SHIPPED**（判据 = 步后最早到弹 TTI 最大，
+  // 且只在「最早一发 ≤ crossfireMinTti 拍到达」时接管 dodge）。
+  // 35×60 串行配对（真实 stageIndex、CRN）：hard 80.0%→**80.5%**（Δ+0.52pp, t=1.61,
+  // kills +60）· classic 84.2%→84.3%（t=0.38）· chaos 78.0%→**78.7%**（Δ+0.67pp,
+  // t=1.78, kills +125）⇒ **三难度同号为正**。s14 单关 60 seed：43→45（71.7%→75.0%）。
+  // 历史：v1「按轴计数」s14 −15pp（走进最急那发）；v2 TTI 无紧迫门全量 ±0（54/54）。
+  crossfireSectorMode: 1,
+  // A18 (2026-10-25): 确定性开火纪律（%）。取代 aimError 的「随机跳发」：
+  // 用 frame 的确定性哈希决定这一拍是否放弃开火，行为可复现、不抽 RNG。
+  // 0 = 不跳发。
+  fireSkipPct: 3,
+  // A19 (2026-10-25): P2.4 预测穿越开火开关。尸检：每局 **29.5 发（57.6% 的发次）**
+  // 是在「车道上没有敌人」的情况下打出的，命中率只有 36.6%（有目标时 90.5%）。
+  // 这批里几乎全是「提前打敌人将要穿过的地方」与破砖。0 = 关闭 P2.4。
+  predictiveCrossingFire: 1,
+  // A20 (2026-10-25): 预测穿越的时间容差（拍）。越小 = 只打「时间刚好」的穿越，
+  // 发数少但命中率高。默认 6（历史值）。
+  crossingSlackTicks: 6,
+  // A23 (2026-10-26): 就绪且当前朝向无射门时，**转过去打**最近的可见敌人。
+  // 尸检：就绪 2371 拍/局，朝向对齐仅 506（21%），另有 **1014 拍（43%）别的方向有射门**。
+  // 35×60 串行配对（CRN）：hard 80.2%→**81.7%**（+1.43pp, t=1.28, kills +440）·
+  // chaos 77.4%→**81.1%**（**+3.67pp, t=3.32**, kills +1077）· classic 86.9%→87.3%（+0.43pp）
+  // ⇒ **三难度同号为正**（SHIPPED）。
+  turnToFireMode: 1,
+  // A27 (2026-10-26): 「先杀一枪能打死的」——A23 选方向时给「非一枪死」的目标加这个格数惩罚。
+  // 起因：装甲占比与胜率的相关性 −0.461（地形全部 ≈0），最差 6 关全是 armor ≥20%。
+  // 0 = OFF（纯最近优先，A23 原行为）。
+  finisherBias: 0,
+  // A28 (2026-10-26, 修正并 SHIPPED 2026-10-27): 追「要打好几发」的目标时，在**追击评分**
+  // 里按「还需几发 − 1」× 本值加格数惩罚 —— 优先清掉快死的，别让 4 发装甲把射速预算吃光
+  // （装甲占比与胜率相关性 −0.461，最差 6 关全 armor ≥20%）。
+  //
+  // 两次实现错误的复盘（`docs/godai-failed-ideas-audit.md`）：
+  //   ① `hp` 是**伤害点**（100..500）不是发数 ⇒ 原判据 `hp > 1` 对每个敌人都成立，
+  //      惩罚被加给所有人 ⇒ 排序不变（实测 700/700 逐局相同）；
+  //   ② 惩罚只挂在 `huntModeTarget`（canHunt 残局分支），而 90% 的选目标走
+  //      `normalSelectionTarget` 的最近敌级联 ⇒ 即使修好单位也照样空转（350/350）。
+  // 修好后 35×60 配对：hard **83.5%→85.8%（+2.24pp, t=2.70）**、kills +380、
+  // suite 0.6567→0.6909；classic −0.62pp(t=−0.88) ⇒ 由 CLASSIC_OVERRIDES 还原 0；
+  // chaos −0.10pp(t=−0.11) ⇒ 噪声，保留 1。
+  armorChasePenalty: 1,
+  // A29 (2026-10-26): 场上存活总 HP ≥ 此值时进入「质量模式」（不放开火预算：关 P2.4
+  // 预测穿越 + 只打覆盖走廊的目标）。0 = OFF。逐关相关性：win vs 总 HP = −0.472。
+  qualityFireHp: 0,
+  // A24 (2026-10-26): 晚期残敌狩猎 —— 击杀数 ≥ lateHuntKills 且四方向无射门、基地不告急时，
+  // 直接朝最近残敌走（贪心一步）。0 = OFF。
+  // A24b (2026-10-26, 按用户裁定细化：残敌 ≤3 + 只在开火冷却中推进)：
+  // 35×60 hard **+1.57pp**(t=1.48, kills +293) · classic **+0.19pp** · chaos −0.67pp(t=−0.61)
+  lateHuntMode: 1,
+  lateHuntKills: 14,
+  // A24b：触发口径改为「场上残敌 ≤ N」（用户裁定），且只在开火冷却中推进。
+  lateHuntMaxAlive: 8,
+  lateHuntMinDist: 6,
+  // A12: 只在「最早一发在 N 拍内到达」时才接管 dodge（0 拍阈值 = 不接管）。
+  crossfireMinTti: 12,
+  defenseCellResolve: 1,
+  // A5 (2026-10-20): probe the movement axis un-snapped in canMoveDir /
+  // canMoveOrBreak. 保留实现，默认 OFF —— 实测它让碰撞判定整体更保守，
+  // 触发 directMove 的 any-passable fallback 更频繁（打转 43.5→52.6 次/局、
+  // 短抖动 33→63 次/局），证明病根在 fallback 选向而不在探测精度。
+  navExactMoveProbe: 0,
   // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
   aggCampTimeoutTicks: 120,
   // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.
@@ -794,6 +917,18 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // uses radius 3 where the false positive cannot occur — restore 0
   // (byte-identical classic gate).
   baseWallExactRing: 0,
+  // A14 (2026-10-25): 开火对消（子弹打子弹）**只在 classic 开启** ——
+  // classic 是 instant 1-HP + bulletCap 1 + 慢弹速，对消的收益极大：
+  // 35×60 配对 **84.3% → 86.4%（Δ+2.14pp, t=3.67, kills +350）**，是全场最强单点。
+  // hard（−0.43pp, t=−0.67）与 chaos（+0.05pp）在 2100 局上都是噪声 ⇒ DEFAULT 保持 0。
+  // god-merge 移植注记：原提交 1e115eb4 同捆的「躲炮口」（muzzleEscapeMode）
+  // 三档实测全负/中性、方向已关闭，未移植。
+  dodgeCounterFire: 1,
+  // A28: the focus-fire chase surcharge is a POOL-model win (+2.24pp on hard)
+  // and a small loss under `instant` (classic −0.62pp, t=−0.88) — the 1-bullet
+  // cap already forces every shot to be a commitment, so spending travel time
+  // to pick a weaker target does not pay. Same pattern as §115's M4 restore.
+  armorChasePenalty: 0,
   replanInterval: 50,
   // §233: decision-chain throttle is a pool-model (hard/chaos) perf fix —
   // classic instant 1-HP 未 A/B，restore 1（byte-identical classic gate）。
@@ -816,6 +951,11 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // §X: 车道哨兵是 hard/chaos 基地防御池修复 — classic instant 未 A/B，
   // restore 0（byte-identical classic gate）。
   baseLaneSentryMode: 0,
+  // A9 (2026-10-21): 远程封线在 classic 上实测**只坏不好** —— 35×60 配对里
+  // 2100 局只有 3 局翻盘、全部向下（Δ−0.14pp, t=−1.73, +0/−3）。classic 是
+  // bulletCap 1 的单发对枪，站上车道等于把每发都变成对射 ⇒ restore 0
+  // （byte-identical classic gate）。hard/chaos 正向，保持 1。
+  baseLaneSealMode: 0,
   // Phase 2 §6.1: 行动有效性契约未在任何难度 A/B — restore 0（byte-identical
   // classic gate；且 classic 防御分支本就 restore 0，无站桩提交可管）。
   actionContractMode: 0,
@@ -972,6 +1112,9 @@ export const GUARD_GOD_AI_PARAMS: GodAIParams = {
   navStuckSuppressTicks: 0,
   // §186: guards don't use powerup stuck detection.
   powerupStuckTicks: 0,
+  // A28: the guard profile stays byte-identical to the pre-A28 era — guard
+  // behaviour is replay-locked by the SP regression line (§159/§160 yield).
+  armorChasePenalty: 0,
   // §169: guards keep the raw (non-sticky) threat signal — their defense
   // behavior is replay-locked (same reason navBreakStuck is zeroed above).
   threatStickyTicks: 0,

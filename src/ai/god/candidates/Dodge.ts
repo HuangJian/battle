@@ -8,6 +8,7 @@ import { type Candidate, type DecisionContext, ACTION_WEIGHTS } from '../Decisio
 import { dodgeCounterFireDirImpl } from '../ThreatAssessor'
 import { COUNTER_FIRE_RANGE_CELLS } from '../constants'
 import { dodgeDirectionImpl } from '../ThreatAssessor'
+import { crossfireEscapeDirImpl } from '../crossfire'
 
 export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
   const { w, p, pcx, pcy, onCooldown, threat } = ctx
@@ -98,6 +99,28 @@ export function evalDodge(self: GodAIInput, ctx: DecisionContext): boolean {
             return true
           }
         }
+      }
+    }
+
+    // A12 (2026-10-23): MULTI-SECTOR CROSSFIRE ESCAPE. s14 autopsy: 75% of the
+    // fatal ticks had ≥2 shells in flight and the single-threat dodge steps
+    // out of one lane straight into the other. Take the step that leaves the
+    // FEWEST lanes covering us, when that strictly beats the normal dodge.
+    if (self.params.crossfireSectorMode > 0) {
+      const esc = crossfireEscapeDirImpl(self, pcx, pcy)
+      if (esc !== null) {
+        self._moveDir = esc
+        if (threat.id === self._lastDodgeThreatId && self._lastDodgeDir !== null) {
+          if (self._moveDir !== self._lastDodgeDir) self._dodgeFlipCount++
+          else self._dodgeFlipCount = 0
+        } else {
+          self._dodgeFlipCount = 0
+        }
+        self._lastDodgeThreatId = threat.id
+        self._lastDodgeDir = self._moveDir
+        self._fire = !onCooldown && self.shouldFireInDir(pcx, pcy, esc)
+        recordBranch(self, 'dodge')
+        return true
       }
     }
 

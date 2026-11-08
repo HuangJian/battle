@@ -13,7 +13,8 @@ import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
 import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
-import { scanAheadImpl } from './FireControl'
+import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
+import { turnWillCommit } from './turn-gate'
 import { runChain, type Candidate } from './DecisionCore'
 import { updateEnemyModel } from './EnemyModel'
 import { superItemPressesImpl } from './SuperItems'
@@ -33,6 +34,7 @@ import { CLOSE_PICKUP } from './candidates/ClosePickup'
 import { AGGRO } from './candidates/Aggro'
 import { PICKUP_HIGH } from './candidates/PickupHigh'
 import { BASE_LANE_SENTRY } from './candidates/BaseLaneSentry'
+import { BASE_LANE_SEAL } from './candidates/BaseLaneSeal'
 import { UNIFIED_CANDIDATES } from './candidates/UnifiedCandidates'
 import { INTERCEPT_BASE } from './candidates/InterceptBase'
 import { DODGE } from './candidates/Dodge'
@@ -152,6 +154,8 @@ export const CANDIDATES: Candidate[] = [
   DEFENSE_INTERCEPT,
   // §163: 中路防守 — defenseIntercept(550) 之下、closePickup(540) 之上。
   MID_LANE_DEFENSE,
+  // A9: 远程来袭弹封线 — midLaneDefense(545) 之下、closePickup(540) 之上。
+  BASE_LANE_SEAL,
   // §158: 非冰冻期近距离道具拾取 — defenseIntercept(550) 之下、engage(500) 之上。
   CLOSE_PICKUP,
   ENGAGE,
@@ -275,8 +279,120 @@ export function thinkImpl(self: GodAIInput): void {
   // undefended (the #1 cause of 330-tick base losses in classic).
   const shielded = (p.shieldTimer ?? 0) > 0
 
+
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   self.aggressive = frozen
+
+  // ============ A23 (2026-10-26): FACE THE SHOT ============
+  // Autopsy: the gun is ready 2371 ticks/game but only 506 of those (21%) have a
+  // hittable enemy on the CURRENT facing; a further **1014 ticks (43%) have a
+  // hittable enemy in another direction** — the AI simply never turns to it.
+  // That is the single largest block of wasted fire opportunities. When the gun
+  // is ready and nothing is aligned where we look, turn to the nearest hittable
+  // enemy and shoot (the turn is committed, so A2's fire gate stays satisfied).
+  if (self.params.turnToFireMode > 0 && !onCooldown && !frozen && !shielded) {
+    if (!shouldFireInDirImpl(self, pcx, pcy, p.dir)) {
+      let bestDir: Direction | null = null
+      let bestDist = Infinity
+      for (let di = 0; di < ALL_DIRS.length; di++) {
+        const d = ALL_DIRS[di]
+        if (d === p.dir) continue
+        if (!turnWillCommit(w, p, d)) continue
+        const sc = scanAheadImpl(self, pcx, pcy, d)
+        if (!sc.enemy) continue
+        // god-merge 移植修正（2026-11-08）：距离必须在 shouldFireInDir 调用
+        // **之前**捕获到局部变量 —— scan 结果是全 tick 共享的 memo 对象，
+        // shouldFireInDir 内部求值会改写它（enemyDist 变 Infinity）。
+        // god-retune 在 A27 提交里把这里改成了先捕获 score 再比较/赋值，
+        // 因而免疫；#47 的旧形态是调用后读对象字段，吃到被改写的值，
+        // 表现为同距双敌时选错方向（Checkers seed 1 实测分叉）。
+        const score = sc.enemyDist
+        if (score >= bestDist) continue
+        if (!shouldFireInDirImpl(self, pcx, pcy, d)) continue
+        bestDist = score
+        bestDir = d
+      }
+      if (bestDir !== null) {
+        self._moveDir = bestDir
+        self._fire = true
+        // 词表契约：细分支标签必须存在于 `intent/vocab.ts` 的 STATIC_FORWARD
+        // （'engage' 不在表里会让 NN intent 管线直接抛错）。't2a' 就是交战分支。
+        recordBranch(self, 't2a')
+        return
+      }
+    }
+  }
+
+  // ============ A24 (2026-10-26): LATE-GAME HUNT ============
+  // 晚期尸检（hard 280 局，A23 纪元）：「就绪但四方向都没人」344 拍/局，其中
+  //   navigate 61.7%（交通时间）· **powerup 25.9%（去捡道具）** · aggressive 9.7%。
+  // 残敌少而远时，AI 会把晚期时间花在跑路/捡道具上。A24：晚期且无射门 + 基地不告急时，
+  // 直接朝最近的残敌走（贪心一步），把「跑路」换成「接战」；接上后被 A23 接管转身开火。
+  if (
+    self.params.lateHuntMode > 0 &&
+    // A24b (2026-10-26, 用户裁定)：触发改为「场上残敌 ≤ N」，而不是击杀数阈值。
+    self._enemies.length > 0 &&
+    self._enemies.length <= self.params.lateHuntMaxAlive &&
+    // 只在**开火冷却中**推进：枪就绪时的每一拍都值得留在原地等射门（A23 会转身打）。
+    // 冷却期本来就打不出子弹，用它来走位是纯赚。
+    onCooldown &&
+    !frozen &&
+    !self.isBaseUnderThreat()
+  ) {
+    let hittable = false
+    for (let di = 0; di < ALL_DIRS.length; di++) {
+      const sc = scanAheadImpl(self, pcx, pcy, ALL_DIRS[di])
+      if (sc.enemy) {
+        hittable = true
+        break
+      }
+    }
+    if (!hittable) {
+      let target: (typeof w.tanks)[number] | null = null
+      let bestD = Infinity
+      for (let i = 0; i < self._enemies.length; i++) {
+        const e = self._enemies[i]
+        const d = Math.abs(e.x + e.w / 2 - pcx) + Math.abs(e.y + e.h / 2 - pcy)
+        if (d < bestD) {
+          bestD = d
+          target = e
+        }
+      }
+      if (target && bestD > self.params.lateHuntMinDist * CELL) {
+        const dx = target.x + target.w / 2 - pcx
+        const dy = target.y + target.h / 2 - pcy
+        const horiz: Direction = dx > 0 ? 'right' : 'left'
+        const vert: Direction = dy > 0 ? 'down' : 'up'
+        const order: Direction[] = Math.abs(dx) >= Math.abs(dy) ? [horiz, vert] : [vert, horiz]
+        for (let i = 0; i < order.length; i++) {
+          if (self.canMoveDir(p, order[i])) {
+            self._moveDir = order[i]
+            self._fire = false
+            recordBranch(self, 'navigate')
+            return
+          }
+        }
+      }
+    }
+  }
+
+  // ============ A29 (2026-10-26): HP-PRESSURE FIRE DISCIPLINE ============
+  // 逐关尸检：胜率与「本关敌人总血量」的相关性 **−0.472**（比 armor 占比 −0.461 更强；
+  // 地形全部 ≈0）。机制：每局射速上限固定（~64 发），血量池越大，每一发低质量弹的机会成本
+  // 越高。而三成命中率的「预测穿越」弹在低血关是赚的，在高血关就是在烧预算。
+  // ⇒ 当**场上存活总 HP ≥ 阈值（按「发数」计）** 时进入「质量模式」：关掉 P2.4 预测穿越 +
+  //    只打真正覆盖 19px 走廊的目标（corridorEnemyGate 语义），把发次留给能命中的射击。
+  // ⚠ 2026-10-27 修正：`hp` 是伤害点，原实现 `pool += hp` 后与 10/16/30 比 ⇒ 恒真，
+  //   三档实测 **350/350 逐局一致** = 悄悄变成「质量模式永远开」。改成
+  //   `hp / referenceDamage`（发数）后阈值才有梯度；hard 存活池实测 p50=7、p90=10。
+  if (self.params.qualityFireHp > 0) {
+    const ref = w.rules.referenceDamage
+    let pool = 0
+    for (let i = 0; i < self._enemies.length; i++) pool += (self._enemies[i].hp ?? 1) / ref
+    self._hpPressureActive = pool >= self.params.qualityFireHp
+  } else {
+    self._hpPressureActive = false
+  }
 
   // ---- Scan for enemy targets (global vision, T9 priority) ----
   let aimDir = findEnemyDirectionImpl(self, pcx, pcy)

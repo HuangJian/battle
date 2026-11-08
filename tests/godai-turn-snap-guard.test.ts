@@ -65,7 +65,16 @@ function coopGod(
   const p1Col = world.playerSpawnPoint?.col ?? 8
   world.player2SpawnPoint = { col: 24 - p1Col, row: 24 }
   world.spawnPlayer2()
-  const params: GodAIParams = { ...DEFAULT_GOD_AI_PARAMS, aimTurnSnapGuard: guard, ...extra }
+  // A3 (turn economy) pinned OFF: keeping momentum instead of halting changes
+  // this pathological trajectory, so the §80 "guard OFF pins the tank" premise
+  // would no longer reproduce. This file isolates §80 — A3 is covered by
+  // tests/godai-turn-economy.test.ts.
+  const params: GodAIParams = {
+    ...DEFAULT_GOD_AI_PARAMS,
+    aimTurnSnapGuard: guard,
+    turnEconomyMode: 0,
+    ...extra,
+  }
   const god = new GodAIInput(world, params, new RNG(seed ^ 0xdeadbeef), (w) => w.player2)
   god.reset()
   return god

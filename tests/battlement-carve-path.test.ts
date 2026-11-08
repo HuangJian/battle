@@ -68,7 +68,13 @@ function makeWorld(carveMode: number): { world: World; ai: GodAIInput } {
   p.shieldTimer = 0
   const ai = new GodAIInput(
     world,
-    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode, baseConnectClearMode: 0 },
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
+      carvePathMode: carveMode,
+      baseConnectClearMode: 0,
+    },
     new RNG(0x1234),
   )
   ai.reset()
@@ -109,7 +115,13 @@ function makeBattlement(carveMode: number): { world: World; ai: GodAIInput } {
   p.shieldTimer = 0
   const ai = new GodAIInput(
     world,
-    { ...DEFAULT_GOD_AI_PARAMS, carvePathMode: carveMode, baseConnectClearMode: 0 },
+    {
+      ...DEFAULT_GOD_AI_PARAMS,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
+      carvePathMode: carveMode,
+      baseConnectClearMode: 0,
+    },
     new RNG(0x1234),
   )
   ai.reset()
@@ -359,6 +371,8 @@ describe('§161 — Battlement hard integration (Mode A digs out and reaches the
     // test isolates §161 Mode A's own carve behavior.
     const input = new GodAIInput(world, {
       ...DEFAULT_GOD_AI_PARAMS,
+      // A24b 纪元：本用例测自己的机制，与「残敌狩猎」无关。
+      lateHuntMode: 0,
       carvePathMode: 1,
       baseConnectClearMode: 0,
       navBreakStuck: 0,

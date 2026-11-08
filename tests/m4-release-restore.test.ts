@@ -23,7 +23,9 @@ describe('m4-release-restore', () => {
     expect(DEFAULT_GOD_AI_PARAMS.threatRangeCells).toBe(23) // 10 → 23
     expect(DEFAULT_GOD_AI_PARAMS.campTimeoutTicks).toBe(20) // 90 → 20
     expect(DEFAULT_GOD_AI_PARAMS.outnumberedFieldDistCells).toBe(26) // 15 → 26
-    expect(DEFAULT_GOD_AI_PARAMS.aimError).toBeCloseTo(0.0303, 4) // game-feel: NOT tuned
+    // A18 (2026-10-25): 用户裁定「God 不携带任何人为不完美」⇒ aimError 归零，
+    // 经济效应改由确定性的 fireSkipPct 承担（无 RNG）。这里钉住「零不完美」。
+    expect(DEFAULT_GOD_AI_PARAMS.aimError).toBe(0)
     expect(DEFAULT_GOD_AI_PARAMS.suboptimalPathProb).toBe(0) // game-feel: NOT tuned
   })
 
