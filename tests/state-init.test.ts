@@ -8,6 +8,7 @@ import { cloneWorld } from '../src/snapshot/WorldSerializer'
 import { worldTickHash } from '../src/replay/tickHash'
 import { DIFFICULTIES } from '../src/config/difficulty'
 import { RULES } from '../src/config/rules'
+import { OBS_CHANNELS, SCALAR_DIM } from '../src/nn/obs-encoder'
 import { STAGES } from '../src/config/stages'
 import type { Direction } from '../src/constants'
 import type { InputLike } from '../src/game/Input'
@@ -93,14 +94,21 @@ function tmp(): string {
  * 一份零填充的最小 student 权重（只为把 `runOne` 跑起来）。
  *
  * 为什么不读真权重：RL 权重 JSON 落在 `nn-training/weights/**`（gitignore，不入库）——用例
- * 依赖它就会在干净的 clone 上红。arch/形状与真权重同源（in_ch=16, board=26, h=64）；
- * 形状错了 `StudentModel` 会当场报维度错，所以这份表也是「schema 变了就红」的钉子。
+ * 依赖它就会在干净的 clone 上红。形状 = **当前生产架构**（h=64 / d=8 / 8 block / 三头 + value 头），
+ * 输入宽度跟住 `src/nn/obs-encoder.ts`（17 obs + 2 coord = 19 通道、标量 46）：形状错了
+ * `StudentModel` 当场报维度错（这就是「schema 变了就红」的钉子），同时命中加速卷积内核的准入
+ * ——native/wasm 只收 19 通道，旧 18 通道（16 obs / 30 标量）会静默回退 TS 特征路径
+ * （实测 1200 拍 4.7s → 0.26s）。零权重下两条路径的 logits 都是 0，轨迹逐位相同。
  */
 function zeroStudentWeights(): string {
+  const h = 64
+  const d = 8
+  const inCh = OBS_CHANNELS
+  const scalarDim = SCALAR_DIM
   const shapes: Record<string, number[]> = {
-    'stem.weight': [64, 18, 3, 3],
-    'stem.bias': [64],
-    'fc.weight': [128, 94],
+    'stem.weight': [h, inCh + 2, 3, 3],
+    'stem.bias': [h],
+    'fc.weight': [128, h + scalarDim],
     'fc.bias': [128],
     'move_head.weight': [5, 128],
     'move_head.bias': [5],
@@ -109,11 +117,11 @@ function zeroStudentWeights(): string {
     'value_head.weight': [1, 128],
     'value_head.bias': [1],
   }
-  for (let i = 0; i < 8; i++) {
-    shapes[`blocks.${i}.dw.weight`] = [64, 1, 5, 5]
-    shapes[`blocks.${i}.dw.bias`] = [64]
-    shapes[`blocks.${i}.pw.weight`] = [64, 64, 1, 1]
-    shapes[`blocks.${i}.pw.bias`] = [64]
+  for (let i = 0; i < d; i++) {
+    shapes[`blocks.${i}.dw.weight`] = [h, 1, 5, 5]
+    shapes[`blocks.${i}.dw.bias`] = [h]
+    shapes[`blocks.${i}.pw.weight`] = [h, h, 1, 1]
+    shapes[`blocks.${i}.pw.bias`] = [h]
   }
   const params: Record<string, { shape: number[]; data: string }> = {}
   for (const [name, shape] of Object.entries(shapes)) {
@@ -125,7 +133,15 @@ function zeroStudentWeights(): string {
     format: 'nn-weights-json',
     version: 1,
     schema_major: 3,
-    arch: { kind: 'student', in_ch: 16, board: 26, scalar_dim: 30, h: 64, d: 8, head_hidden: 128 },
+    arch: {
+      kind: 'student',
+      in_ch: inCh,
+      board: 26,
+      scalar_dim: scalarDim,
+      h,
+      d,
+      head_hidden: 128,
+    },
     params,
   })
 }

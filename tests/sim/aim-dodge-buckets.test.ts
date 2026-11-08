@@ -12,19 +12,33 @@
  */
 import { describe, expect, it } from 'bun:test'
 import { STAGES } from '../../src/config/stages'
+import { OBS_CHANNELS, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { runSimulation } from '../../tools/sim/simulation-runner'
 import { runEvalOne } from '../../tools/sim/export-eval-game'
 import { AIM_COL, runOneBench } from '../../tools/sim/export-rl-rollout'
 
 /**
- * 零填充 student 权重（只为把 runOne 跑起来；与 tests/state-init.test.ts 同源）。
- * 不读真权重：`nn-training/weights/**` 是 gitignore，干净 clone 上不存在。
+ * 零填充 student 权重（不读真权重：`nn-training/weights/**` 是 gitignore，干净 clone 上不存在）。
+ *
+ * 形状 = **当前生产架构**（h=64 / d=8 / 8 个 block / 三头 + value 头）⇒ `buildModelFromText`
+ * 与 `assertRolloutWeightsSchema` 仍按生产 schema 校验、跑的是生产特征路径
+ * （**保留 schema 护栏**：不要缩小成 h=16/d=2 的瘦身规格）。
+ *
+ * 输入/标量宽度必须**跟住** `src/nn/obs-encoder.ts`（17 obs + 2 coord = 19 通道，标量 46）：
+ * 加速卷积内核（native / wasm）的准入就是这组宽度，写成旧的 18 通道（16 obs / 30 标量）
+ * 会静默回退 TS 特征路径 —— 实测同一局 1200 拍 **4.7s → 0.26s（约 17×）**。
+ * 零权重下两条路径的 logits 都是 0（= 零 bias），轨迹逐位相同（2026-11-08 A/B：三个
+ * (stage, seed) 的末行 metrics 完全相同）⇒ 这是纯成本收窄，不改任何断言。
  */
 function zeroStudentWeights(): string {
+  const h = 64
+  const d = 8
+  const inCh = OBS_CHANNELS
+  const scalarDim = SCALAR_DIM
   const shapes: Record<string, number[]> = {
-    'stem.weight': [64, 18, 3, 3],
-    'stem.bias': [64],
-    'fc.weight': [128, 94],
+    'stem.weight': [h, inCh + 2, 3, 3],
+    'stem.bias': [h],
+    'fc.weight': [128, h + scalarDim],
     'fc.bias': [128],
     'move_head.weight': [5, 128],
     'move_head.bias': [5],
@@ -33,11 +47,11 @@ function zeroStudentWeights(): string {
     'value_head.weight': [1, 128],
     'value_head.bias': [1],
   }
-  for (let i = 0; i < 8; i++) {
-    shapes[`blocks.${i}.dw.weight`] = [64, 1, 5, 5]
-    shapes[`blocks.${i}.dw.bias`] = [64]
-    shapes[`blocks.${i}.pw.weight`] = [64, 64, 1, 1]
-    shapes[`blocks.${i}.pw.bias`] = [64]
+  for (let i = 0; i < d; i++) {
+    shapes[`blocks.${i}.dw.weight`] = [h, 1, 5, 5]
+    shapes[`blocks.${i}.dw.bias`] = [h]
+    shapes[`blocks.${i}.pw.weight`] = [h, h, 1, 1]
+    shapes[`blocks.${i}.pw.bias`] = [h]
   }
   const params: Record<string, { shape: number[]; data: string }> = {}
   for (const [name, shape] of Object.entries(shapes)) {
@@ -49,7 +63,15 @@ function zeroStudentWeights(): string {
     format: 'nn-weights-json',
     version: 1,
     schema_major: 3,
-    arch: { kind: 'student', in_ch: 16, board: 26, scalar_dim: 30, h: 64, d: 8, head_hidden: 128 },
+    arch: {
+      kind: 'student',
+      in_ch: inCh,
+      board: 26,
+      scalar_dim: scalarDim,
+      h,
+      d,
+      head_hidden: 128,
+    },
     params,
   })
 }
