@@ -95,7 +95,7 @@ describe('A9 mode 2 — pre-seal leashes on the lane cell, not the shooter', () 
     expect(evalBaseLaneSeal(input, ctx)).toBe(false) // suppressed window
   })
 
-  it('seal cell rule: nearest-eagle walks down, fastest/region hold where we stand', () => {
+  it('seal cell rule: nearest-eagle walks down', () => {
     // Player already ON the sniper's column, half-way up the corridor.
     const at = (params: Partial<typeof DEFAULT_GOD_AI_PARAMS>) => {
       const sc = scenario({ baseLaneSealMode: 2, ...params })
@@ -112,18 +112,14 @@ describe('A9 mode 2 — pre-seal leashes on the lane cell, not the shooter', () 
       }
       return { claimed: evalBaseLaneSeal(sc.input, ctx), move: sc.input._moveDir }
     }
-    // 0 = nearest the eagle: still walks DOWN to the base-side cell.
+    // 0 = nearest the eagle (SHIPPED rule): still walks DOWN to the
+    // base-side cell.
     const c0 = at({ baseLaneSealCellMode: 0 })
     expect(c0.claimed).toBe(true)
     expect(c0.move).not.toBeNull()
-    // 1 = fastest cell: the cell we are standing on ⇒ hold in place.
-    const c1 = at({ baseLaneSealCellMode: 1 })
-    expect(c1.claimed).toBe(true)
-    expect(c1.move).toBeNull()
-    // 2 = nearest-eagle cell + region hold: already in the corridor ⇒ hold.
-    const c2 = at({ baseLaneSealCellMode: 2 })
-    expect(c2.claimed).toBe(true)
-    expect(c2.move).toBeNull()
+    // god-merge 移植注记：原用例还测了 CellMode 1（fastest）与 2（region
+    // hold）两种选格规则 —— 两者均实测更差、默认 0、未发货
+    // （god-retune b00c1bb8 / 560b13a4），未移植，故此处只保留已发货的 0。
   })
 
   it('mode 2 is inert on stages whose base columns contain steel (user gate)', () => {

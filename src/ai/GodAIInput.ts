@@ -1286,27 +1286,6 @@ export class GodAIInput implements InputLike {
     return this._fire
   }
 
-  /**
-   * A15d-fix (2026-10-27): is there a **lead-verified** shot along the tank's
-   * committed facing right now? Pure (`leadHitForDir` reads World only), so it
-   * is safe to call from `isFiring()` — unlike `shouldFireInDir`, which draws
-   * one `rng.next()` for the aimError roll and would fork the AI's random
-   * stream between callers (the §A15 replay-roundtrip bug).
-   *
-   * Memoized per tick on `_facingFireTick/_facingFireOk` because `isFiring()`
-   * is queried several times per tick (sim + recorder) and must be idempotent.
-   */
-  private facingLeadShot(): boolean {
-    if (this._facingFireTick === this.world.frame) return this._facingFireOk
-    this._facingFireTick = this.world.frame
-    this._facingFireOk = false
-    const p = this.controlledTank(this.world)
-    if (p && p.alive) {
-      this._facingFireOk = leadHitForDir(this.world, p.dir, p.x + p.w / 2, p.y + p.h / 2) > 0
-    }
-    return this._facingFireOk
-  }
-
   wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
     // §167 / B4: super-item strategic activation. OFF (default) keeps the
     // pre-§167 behavior (never pressed — byte-identical). Rewind is never

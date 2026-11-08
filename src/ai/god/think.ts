@@ -11,7 +11,7 @@
 // order, so behavior under default params is byte-identical to pre-M1.
 import { type GodAIInput, recordBranch } from '../GodAIInput'
 import type { Direction } from '../../constants'
-import { BASE_POS, CELL, DIR_VECTORS, TANK, RESPAWN_SHIELD_MS } from '../../constants'
+import { BASE_POS, CELL, DIR_VECTORS, TANK } from '../../constants'
 import { ALL_DIRS } from '../../utils/direction'
 import { scanAheadImpl, shouldFireInDirImpl } from './FireControl'
 import { turnWillCommit } from './turn-gate'
@@ -42,7 +42,6 @@ import { SUICIDE_RETURN } from './candidates/SuicideReturn'
 
 import { manhattan } from '../../utils/helpers'
 import { findEnemyDirectionImpl } from './FireControl'
-import { shotsToKill } from './constants'
 import type { GodAIParams } from './params.interface'
 
 /**
@@ -280,16 +279,6 @@ export function thinkImpl(self: GodAIInput): void {
   // undefended (the #1 cause of 330-tick base losses in classic).
   const shielded = (p.shieldTimer ?? 0) > 0
 
-  // A31b (2026-10-27): `shieldTimer` is shared by THREE sources with very
-  // different meanings — respawn shield (3s, `RESPAWN_SHIELD_MS`), star-grace
-  // (1.5s) and the SHIELD POWER-UP (20s, `POWERUP_DURATION_MS`, additive).
-  // A31/A35b were written against "the 20-second invincible window" but gated
-  // on `shieldTimer > 0`, so ~45% of their triggers fired in the 3-second
-  // window right after a DEATH — the worst possible moment to abandon the
-  // defence (measured hard: 374 respawn/star ticks vs 456 power-up ticks per
-  // game). `shieldTimer > RESPAWN_SHIELD_MS` is exact: only the power-up can
-  // push the timer above the respawn cap.
-  const powerupShielded = (p.shieldTimer ?? 0) > RESPAWN_SHIELD_MS
 
   // ---- S8: Set aggressive mode (freeze only, NOT shield) ----
   self.aggressive = frozen
