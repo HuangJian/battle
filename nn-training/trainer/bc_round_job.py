@@ -30,9 +30,14 @@ from remote.hub_http import JOB_CLOSED, JOB_UNKNOWN, JOB_UNREACHABLE, job_reconc
 MissingHook = Callable[[str, dict, str], None]
 
 
-def train_tuning_meta(train: Any) -> dict[str, float | int]:
+def train_tuning_meta(train: Any) -> dict[str, float | int | str]:
     """B2/B3 两个训练旋钮的 manifest 片段（bc_loop 的 LOC 预算：单点在此）。"""
-    return {"weight_exponent": float(train.weight_exponent), "patience": int(train.patience)}
+    return {
+        "weight_exponent": float(train.weight_exponent),
+        "patience": int(train.patience),
+        # P2-B（2026-11-08）：可训参数范围；旧课程缺键 ⇒ all
+        "train_heads": str(getattr(train, "train_heads", "all")),
+    }
 
 
 def train_tuning_argv(train: Any) -> list[str]:
@@ -42,6 +47,8 @@ def train_tuning_argv(train: Any) -> list[str]:
         str(train.weight_exponent),
         "--policy-coef",
         str(train.policy_coef),
+        "--train-heads",
+        str(getattr(train, "train_heads", "all")),
         "--patience",
         str(train.patience),
     ]

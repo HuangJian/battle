@@ -374,12 +374,16 @@ def iter_bc_shard_dirs(
     course_fp: str = "",
     corpus_fp: str = "",
     data_root: str | Path | None = None,
+    name_pattern: str = "bc_s*_seed*",
 ) -> list[Path]:
     """本轮 BC 语料 shard 集（plan/bc-cloud-integration.plan.md §4）：
     `<traj>/bc-data/<round>/bc_s*_seed*/`（含 manifest.json）；round 缺省 = `it{it}`，
     smoke 轮传 "smoke"（冒烟语料与真轮隔离，2026-09-13）。
 
     `data_root` 非 None 时直接扫这个根（fixed 源；递归找 shard）。
+    `name_pattern` 缺省 `bc_s*_seed*`（BC 采集课）；fixed 源常来自 RL 导出器
+    （`rl_s*_seed*`），调用方传 `*_s*_seed*` —— 否则发布端一个 shard 都扫不到，
+    会在 `publish_bc_job` 里抛「无完整 BC shard」（2026-11-07 w1-valueonly 事故）。
 
     同名 shard 去重与 PPO（iter_shard_dirs）同策略：按 manifest mtime 保留最早一份
     （先写盘者 = 结算赢家），退役者响亮日志。D14 血缘过滤同 PPO（同一判据、同一原因）。"""
@@ -389,7 +393,7 @@ def iter_bc_shard_dirs(
         return []
     groups: dict[str, list[Path]] = {}
     skipped = 0
-    for p in root.rglob("bc_s*_seed*"):
+    for p in root.rglob(name_pattern):
         if not (p.is_dir() and (p / "manifest.json").is_file()):
             continue
         if shard_corpus_skipped(p) or (

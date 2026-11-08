@@ -186,6 +186,11 @@ class BcTrainBlock(BaseModel):
     #: C9 value-only 预热：策略 CE 权重。0 = 冻结 trunk/策略头，只训 value_head；
     #: 1 = 历史 BC。0 必须配 value_coef > 0（train 侧响亮拒绝无目标配置）。
     policy_coef: float = 1.0
+
+    #: 可训参数范围（P2-B，2026-11-08）：`all` = 历史 BC；`policy` = 只训
+    #: move/fire/hold 三个头（trunk 与 value_head 冻结）；`value` = 只训 value 头
+    #: （等价 `policy_coef=0`）。**旧课程缺键 ⇒ `all`（逐字节不变）**。
+    train_heads: Literal["all", "policy", "value"] = "all"
     seed: int = 1234
     #: 每 N epoch 中途 checkpoint（{out}.ckpt.{epoch}）；0 = 关
     ckpt_every: int = 0

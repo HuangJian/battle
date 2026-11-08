@@ -258,20 +258,34 @@ def _majority_baseline(dl, action_v6: bool = False) -> dict:
     return out
 
 
-def _freeze_non_value(model: torch.nn.Module) -> None:
-    """C9 value-only：只让 `value_head.*` 保留梯度，其余参数冻结。
+#: 可训练参数白名单（`--train-heads`）。trunk = `stem.* / blocks.* / fc.*`。
+TRAIN_HEAD_PREFIXES: dict[str, tuple[str, ...]] = {
+    "policy": ("move_head.", "fire_head.", "hold_head."),
+    "value": ("value_head.",),
+}
 
-    `PPOStudent` 的 value_head 与策略头共享 `pf`；冻结 trunk 才能保证策略输出
-    逐字节不变。冻结必须发生在建 optimizer 之前——否则 AdamW 的 weight_decay
-    仍会改策略权重（零梯度不等于零更新）。
+
+def _freeze_except(model: torch.nn.Module, keep: tuple[str, ...] | None) -> int:
+    """只让 `keep` 前缀的参数保留梯度；`None` = 全训（不动）。
+
+    冻结必须发生在建 optimizer 之前——否则 AdamW 的 weight_decay 仍会改被冻参数
+    （零梯度不等于零更新）。返回保活的参数张量数。
     """
-    n_value = 0
+    if keep is None:
+        return sum(1 for _ in model.parameters())
+    n = 0
     for name, param in model.named_parameters():
-        keep = name.startswith("value_head.")
-        param.requires_grad = keep
-        n_value += int(keep)
-    if n_value == 0:
-        raise ValueError("--policy-coef 0 但模型没有 value_head.* 参数")
+        ok = name.startswith(keep)
+        param.requires_grad = ok
+        n += int(ok)
+    if n == 0:
+        raise ValueError(f"--train-heads 白名单 {keep} 没匹配到任何参数")
+    return n
+
+
+def _freeze_non_value(model: torch.nn.Module) -> None:
+    """C9 value-only 的旧入口：等价 `_freeze_except(model, ("value_head.",))`。"""
+    _freeze_except(model, TRAIN_HEAD_PREFIXES["value"])
 
 
 def train(args) -> dict:
@@ -369,7 +383,10 @@ def train(args) -> dict:
     policy_coef = float(getattr(args, "policy_coef", 1.0))
     if policy_coef < 0:
         raise ValueError(f"policy_coef 必须 ≥ 0（得到 {policy_coef}）")
-    if policy_coef == 0.0:
+    # `policy_coef=0` 的历史语义是 value-only；但 P2-B 的 `train_heads=policy`
+    # 配 `policy_coef=0` 是另一种非法组合，留给下面的 train_heads 校验报错。
+    _heads_early = str(getattr(args, "train_heads", "all") or "all")
+    if policy_coef == 0.0 and _heads_early != "policy":
         _value_coef = float(getattr(args, "value_coef", 0.0) or 0.0)
         if not use_value or _value_coef <= 0:
             raise ValueError(
@@ -390,8 +407,20 @@ def train(args) -> dict:
         load_state_into(model, args.resume)
     model = model.to(dev)
     raw_model = model
-    if policy_coef == 0.0:
-        _freeze_non_value(raw_model)
+    # P2-B（2026-11-08）：`--train-heads` 控制可训参数范围。trunk = stem/blocks/fc。
+    # 背景：pickup 窗口微调（1 万步 / 3 epoch）把 trunk 拉偏，kills −2.8、base +25pp；
+    # 冻结 trunk 才能只改「捡」不动「打」。
+    train_heads = str(getattr(args, "train_heads", "all") or "all")
+    if train_heads not in ("all", "policy", "value"):
+        raise ValueError(f"train_heads 只能是 all/policy/value（得到 {train_heads}）")
+    if train_heads == "all" and policy_coef == 0.0:
+        train_heads = "value"  # 兼容旧课程：policy_coef=0 即 value-only
+    if train_heads == "value" and policy_coef != 0.0:
+        raise ValueError("train_heads=value 需要 policy_coef=0（策略不该有梯度）")
+    if train_heads == "policy" and policy_coef == 0.0:
+        raise ValueError("train_heads=policy 需要 policy_coef>0（否则策略头零梯度）")
+    if train_heads != "all":
+        _freeze_except(raw_model, TRAIN_HEAD_PREFIXES[train_heads])
     if use_dp:
         # DP 包装：前向/反向跨卡分发（batch 均分），参数共享原地更新——raw_model
         # 的 state_dict 始终是训练终态；落盘/恢复/参数计数一律走 raw（防 "module." 前缀）。
@@ -790,6 +819,13 @@ def main():
     ap.add_argument("--val-split", type=float, default=0.1)
     ap.add_argument("--mirror-p", type=float, default=0.5, help="mirrorX augmentation prob")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument(
+        "--train-heads",
+        choices=("all", "policy", "value"),
+        default="all",
+        help="可训参数范围：all=历史 BC；policy=只训 move/fire/hold 头（trunk 冻结）；"
+        "value=只训 value 头（等价 policy_coef=0）",
+    )
     ap.add_argument(
         "--fire-pos-weight",
         default="auto",

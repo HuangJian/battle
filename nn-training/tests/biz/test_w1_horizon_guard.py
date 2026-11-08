@@ -15,6 +15,7 @@ from typing import Any
 
 from biz.course_resolve import load_course
 from biz.reward_library import METRIC_INDEX
+from common.jsonc import load as load_jsonc
 from worker.ppo.np_core import compute_gae
 
 NN_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +47,11 @@ def test_w1_courses_explicitly_set_horizon_keys() -> None:
     files = sorted(CURRICULA.glob("w1-*.jsonc"))
     for path in files:
         text = path.read_text(encoding="utf-8")
+        # BC 课（kind=bc）没有 PPO 视界键：`BcTrainBlock` 不接受 gamma/lam/decision_k，
+        # 写上去会被 extra="forbid" 拒绝。本守卫只管 RL 课（2026-11-08 w1-valueonly 撞上）。
+        # 用 JSONC 解析判 kind（结构化），不新增文本断言（复用账本会记一条）。
+        if str(load_jsonc(str(path)).get("kind") or "") == "bc":
+            continue
         for key in ("gamma", "lam", "decision_k"):
             assert re.search(rf'^\s*"{key}"\s*:', text, re.MULTILINE), (
                 f"{path.name} 缺显式 {key}；漏写会静默用 GAMMA=0.995"

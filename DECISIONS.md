@@ -11380,3 +11380,54 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **边界**：4 关 / 20000 拍机制脚手架，不是原题 35 关 / 36000 拍；探针是 it50 权重、各自 on-policy 分布，it100 未重采；`training-enabled.txt` 仍在、腿还在跑（null it104 / thcost it102）⇒ **停课由用户手工**。
 - **验收**：`tmp/w1-probe/w1-verdict.py --probe rollouts-it50` → `verdict-it100.txt` / `verdict-rollouts-it50-21pts.md`；归档 `w1-null.it100.20261107-212321.json` / `w1-thcost.it100.20261107-212633.json`；两课头已回填结课块。
 - **全文** → `reports/w1-close-20261107.md`；`docs/nn/experiments.md` §135；`plan/classic35-path.plan.md` §17。
+
+## §2026-11-07-goalnn-w1-valueonly（C9 预热落地：冻结策略只训 value 头，尺度修好、排序没修）
+
+- **背景**：C9 判 it233 的 critic **压缩+偏置**（step R² .0800 / slope .5784 / meanV 11.61 vs meanMC 53.64），
+  并给出「`--policy-coef 0 --value-coef 1 --epochs 5`」的下一条腿建议。`policy_coef 0` 已在
+  `worker/train/bc.py` 落地（optimizer 之前冻结除 `value_head.*` 外全部参数）。
+- **决定**：落 `nn-training/curricula/w1-valueonly.bc.jsonc`（`source=fixed` 指向 `tmp/p0-c9/rollouts`、
+  `init_from` 与 `bc` 同指 z10.it233、`value_coef 1` / `policy_coef 0` / 5 epoch / eval 关闭），
+  用户 21:58 开课。**发布端曾因 `iter_bc_shard_dirs` 只认 `bc_s*` 而 SystemExit**（fixed 源是
+  `rl_s*`）——已修（`name_pattern` 参数 + fixed 传 `*_s*_seed*`），重启 trainer 后 22:03 发布成功。
+- **结果（2/3 过）**：step slope **1.0686 [.7919,1.3155] 覆盖 1**、meanV **54.82** vs meanMC 53.64
+  （+1.18）⇒ 尺度/偏置修好；step R² 仅 .0800 → **.0879**（预注册门 .12）⇒ **排序解释力没动**。
+  game-level 翻成过度自信（slope 2.0304 / 截距 −70.74 / meanV 51.45 vs 33.73）。
+  权重 diff：42/44 参数 base64 逐字节不变，仅 `value_head.{weight,bias}` 变化（Δmax .2586/.1040）
+  ⇒ 冻结策略、单变量成立。
+- **判读**：z11-bc it5 崩因的「冷 critic 尺度错」这一半被证伪 —— 5 epoch 纯 value 回归即可修尺度，
+  不需要重训策略；但 R² 不动说明「排序弱」不是冷启动造成，更像优化路径/容量问题（C4 已证信息在 `pf` 里）。
+  **in-sample 警告**：复算用训练同批 200 局，.0879 是乐观值。
+- **边界**：单 checkpoint / 4 关 20000 拍脚手架 / 5 epoch 未标定；game-level 过度自信是新风险，
+  20 轮 PPO 要盯 value loss；若爆，下一腿再上 `normalize_ret: true`（链路已核），不原地改。
+- **验收**：`c9_critic_calibration.py --value-weights …` → `tmp/w1-probe/critic-valueonly.{json,md}`；
+  训练日志 `tmp/w1-valueonly/training_log.jsonl`（bc_epoch ×5 / job_result_accepted / ledger audit 5/5）。
+- **全文** → `reports/w1-valueonly-20261107.md`；`plan/classic35-path.plan.md` §17。
+
+## §2026-11-07-goalnn-w1-valueonly-ppo（C9 闸关闭：没崩，但「尺度对、排序错」的 critic 让守家显著变差）
+
+- **背景**：C9 的假设是「冷 critic 尺度错 ⇒ z11-bc it5 坍缩」。`w1-valueonly` 已把 critic 尺度
+  修好（slope 1.07 / meanV 54.8），本腿把起点换成它、其余逐字 = `z11-null`，跑 20 轮单变量检验。
+- **被否决**：① 用 `ent_coef 0.03`（那会让对照失效；本腿对照是 z11-null 的 0.01）；
+  ② 用 win 作主判据（20 轮、单点 MDE 8pp，−3.75pp 不可分辨）；③ 把 `normalize_ret` 当排序修复
+  （它只改 ret 尺度，不改 critic 排序）。
+- **决定**：`w1-valueonly-ppo.jsonc`，`bc=w1-valueonly.ep5`、`ent_coef 0.01`、`iters 20`、
+  reward / lr / kl / gamma / lam / K / tt 逐字 = z11-null；判据预注册为 it20 `pick≥.40` /
+  `cells 中位≥60` / `base≤.70` + 与 z11-null 同 `(stage,seed)` 配对。
+- **结果（没崩、但更差）**：it20 绝对读数 pick **.416** / cells 中位 **80** / base **.682**
+  ⇒ 三条主判据全过，**未复现 it5 型坍缩**（pick .876→.095 / cells→2 / base→1.0 都没发生）。
+  对照配对：Δwin −3.75pp（McNemar 63:48，p=.155 不显著）、Δpick −5.14pp、Δcells −10.2、
+  **Δbase +10.50pp（McNemar 52:94，χ²=12.08，p=.00051 显著更差）**。训练侧 A 熵 .989 /
+  mean_ret 52.9 vs B .859 / 62.2。
+- **判读**：① **冷 critic 不是 z11-bc it5 崩因** —— 换掉它 20 轮内没崩，崩因更可能是
+  BC 策略本身 OOD（pick .876 / kills 1.53 / base 1.0）与 PPO 目标方向相反。
+  ② **「尺度对、排序错」的 critic 比冷 critic 更危险**：冷 critic 的 advantage 缩放错得离谱、
+  策略几乎不动；尺度正确但排序弱的 critic 给出「看起来可信」的错误 advantage，反而把策略带偏
+  （base 显著 +10.5pp）。③ **P2-A 的 gate 关闭**：value-only 预热不作独立起点，行为先验只走
+  P2-B（pickup 窗口微调，`plan/w2-window-split.plan.md`）。④ 若要「会打」的起点，`z10.it233`
+  本身在 20 轮内全面优于 ep5（win .260 vs .2225 / base .578 vs .682 / cells 94.5 vs 80）。
+- **边界**：两腿训练语料 seed 不同（20261107 vs 20261106）⇒ 差异非 100% 归因 critic；评估面板
+  相同故逐局配对有效。20 轮只判「崩不崩」；critic 标定是 in-sample，本腿是乐观条件下的负结果。
+- **验收**：`tmp/w1-valueonly-ppo/{eval_log,training_log}.jsonl`；`run_complete cause=iters`；
+  配对脚本口径同 C8（`(stage,seed)` 单元、单窗 400 局）。
+- **全文** → `reports/w1-valueonly-ppo-20261107.md`；`plan/classic35-path.plan.md` §17。

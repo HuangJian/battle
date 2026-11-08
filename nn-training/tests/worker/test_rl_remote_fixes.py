@@ -262,6 +262,24 @@ def test_iter_bc_shard_dirs_drops_foreign_lineage(tmp_path: Path) -> None:
     assert len(iter_bc_shard_dirs(str(tmp_path), 7, log=lambda _m: None)) == 2
 
 
+def test_iter_bc_shard_dirs_accepts_rl_pattern(tmp_path: Path) -> None:
+    """fixed 源来自 RL 导出器（`rl_s*_seed*`）：默认 pattern 不认，显式放宽才收。
+
+    2026-11-07 w1-valueonly 事故：fixed 课程指向 `tmp/p0-c9/rollouts`（`rl_s*`），
+    `publish_bc_job` 只 `rglob("bc_s*_seed*")` ⇒ 一个 shard 都扫不到 ⇒ SystemExit
+    「无完整 BC shard」，job 从未进 hub ⇒ kaggle worker 永远 no job。
+    """
+    from remote.hub_client import iter_bc_shard_dirs
+
+    root = tmp_path / "rollouts"
+    _mk_shard(root / "rl_s16_seed0", {})
+    _mk_shard(root / "rl_s16_seed1", {})
+
+    assert iter_bc_shard_dirs(str(tmp_path), 1, data_root=root) == []
+    got = iter_bc_shard_dirs(str(tmp_path), 1, data_root=root, name_pattern="*_s*_seed*")
+    assert [d.name for d in got] == ["rl_s16_seed0", "rl_s16_seed1"]
+
+
 def test_d14_predicate_is_single_implementation() -> None:
     """判据只有一份：发布端用的就是云端拒收用的那一个函数（漂开 = 发布出去的必被拒）。"""
     from common.protocol import d14_corpus_match as canonical

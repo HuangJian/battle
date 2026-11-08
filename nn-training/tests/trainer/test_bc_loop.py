@@ -267,6 +267,56 @@ def test_publish_records_code_snapshot_freshness(
     assert doc["snapshot_sha"] == "a" * 64 and doc["workspace_sha"] == "b" * 64
 
 
+def test_publish_bc_job_fixed_uses_rl_shard_pattern(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """fixed 课程 ⇒ 发布端按 `*_s*_seed*` 扫（rl_s* 也认），data_root 指 fixed_dir。
+
+    2026-11-07 w1-valueonly：fixed_dir 是 `tmp/p0-c9/rollouts`（rl_s*），默认
+    `bc_s*_seed*` 扫不到 ⇒ SystemExit，hub 里没有 job，kaggle worker 空转。
+    """
+    base = load_bc_course("bc-c4")
+    fixed_dir = tmp_path / "rollouts"
+    fixed_dir.mkdir()
+    course = base.model_copy(
+        update={
+            "corpus": base.corpus.model_copy(
+                update={
+                    "source": "fixed",
+                    "fixed_dir": str(fixed_dir),
+                    "games_per_stage": 0,
+                    "wins_only": False,
+                    "outcome_policy": "all",
+                }
+            )
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_iter(traj: Any, it: int, round_name: str = "", **kw: Any) -> list:
+        captured.update(kw)
+        return []
+
+    monkeypatch.setattr(bc_loop, "iter_bc_shard_dirs", fake_iter)
+    with pytest.raises(SystemExit, match="无完整 BC shard"):
+        bc_loop.publish_bc_job(
+            course=course,
+            course_fp="f" * 64,
+            corpus_fp="c" * 64,
+            course_text="{}",
+            it=1,
+            traj=tmp_path / "traj",
+            job_root=tmp_path / "jobs",
+            jsonl_path=tmp_path / "training_log.jsonl",
+            data_round_dir=fixed_dir,
+            log=lambda _m: None,
+        )
+
+    assert captured["name_pattern"] == "*_s*_seed*"
+    assert Path(captured["data_root"]) == fixed_dir
+    assert captured["course_fp"] == "" and captured["corpus_fp"] == ""
+
+
 # ------------------------------------------------------------ 指针 / 生命周期
 
 

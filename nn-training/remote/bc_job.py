@@ -541,6 +541,8 @@ def _run_bc_job(
             value_coef=float(manifest.get("value_coef", 0.0) or 0.0),
             # C9 value-only：旧 job 无此键 ⇒ 1.0（历史 BC 行为逐字节不变）
             policy_coef=float(manifest.get("policy_coef", 1.0)),
+            # P2-B（2026-11-08）：可训参数范围；旧 job 无此键 ⇒ all（逐字节不变）
+            train_heads=str(manifest.get("train_heads", "all")),
             # fire 头正例权重（2026-09-14）：'auto' 或数字；旧 job 无此键 → 0.0
             # （关闭 = 历史语义，重放旧 job 行为不变）。
             fire_pos_weight=manifest.get("fire_pos_weight", 0.0),

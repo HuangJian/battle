@@ -292,10 +292,17 @@ def publish_bc_job(
         course_fp="" if fixed_source else course_fp,
         corpus_fp="" if fixed_source else corpus_fp,
         data_root=data_round_dir,
+        # fixed 语料常来自 RL 导出器（rl_s*_seed*），BC 采集课则是 bc_s*_seed*。
+        name_pattern="*_s*_seed*" if fixed_source else "bc_s*_seed*",
     )
     if not shard_dirs:
+        root_hint = (
+            Path(data_round_dir)
+            if data_round_dir is not None
+            else traj / "bc-data" / (round_name or f"it{it}")
+        )
         raise SystemExit(
-            f"[run_bc] it{it}: 无完整 BC shard（{traj / 'bc-data' / f'it{it}'} 空）——无法发布"
+            f"[run_bc] it{it}: 无完整 BC shard（{root_hint} 空）——无法发布"
         )
     commit = git_head()
     # 集群代码快照优先（2026-10-10 用户指令，plan/cluster-code-snapshot）：会话内全体消费者
@@ -392,6 +399,8 @@ def bc_job_extra(
         "value_coef": float(course.train.value_coef),
         # C9：0 = value-only（本地 train_tuning_argv / 云端 manifest 都要透传）
         "policy_coef": float(course.train.policy_coef),
+        # P2-B（2026-11-08）：all / policy（只训三个策略头）/ value；旧课程缺键 ⇒ all
+        "train_heads": str(getattr(course.train, "train_heads", "all")),
         # v6 三头（2026-11-04）：worker 侧 `train/bc.py` 按它切 10 元组 / 三头 CE
         "action_v6": bool(course.resolved_action_v6),
         "policy_extra": bool(course.train.policy_extra),
