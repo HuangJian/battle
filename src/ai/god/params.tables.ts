@@ -853,6 +853,13 @@ const CLASSIC_OVERRIDES: Partial<GodAIParams> = {
   // uses radius 3 where the false positive cannot occur — restore 0
   // (byte-identical classic gate).
   baseWallExactRing: 0,
+  // A14 (2026-10-25): 开火对消（子弹打子弹）**只在 classic 开启** ——
+  // classic 是 instant 1-HP + bulletCap 1 + 慢弹速，对消的收益极大：
+  // 35×60 配对 **84.3% → 86.4%（Δ+2.14pp, t=3.67, kills +350）**，是全场最强单点。
+  // hard（−0.43pp, t=−0.67）与 chaos（+0.05pp）在 2100 局上都是噪声 ⇒ DEFAULT 保持 0。
+  // god-merge 移植注记：原提交 1e115eb4 同捆的「躲炮口」（muzzleEscapeMode）
+  // 三档实测全负/中性、方向已关闭，未移植。
+  dodgeCounterFire: 1,
   replanInterval: 50,
   // §233: decision-chain throttle is a pool-model (hard/chaos) perf fix —
   // classic instant 1-HP 未 A/B，restore 1（byte-identical classic gate）。
