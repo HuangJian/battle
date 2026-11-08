@@ -11431,3 +11431,22 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验收**：`tmp/w1-valueonly-ppo/{eval_log,training_log}.jsonl`；`run_complete cause=iters`；
   配对脚本口径同 C8（`(stage,seed)` 单元、单窗 400 局）。
 - **全文** → `reports/w1-valueonly-ppo-20261107.md`；`plan/classic35-path.plan.md` §17。
+
+## §2026-11-08-goalnn-rollout-tunnel-silent-death（隧道静默死：判死归一 + 探针姿势，不加 force 重注册）
+
+- **背景**：2026-11-08 DSW 的 cloudflared 进程消失，节点 `url` 非空、`cf_log` 尾部仍是旧域名、
+  本地 `_ping` 全绿 ⇒ 补拿闸（只在空 URL 时）与换名闸（只认字符串变化）都不触发，
+  dashboard 长期「无 ping · 无历史」。见 `docs/nn/remote-transport.md` §144。
+- **决定**：cloudflared 通道新增判死纯函数 `_tunnel_dead`——进程退出是确定性证据（每拍）；
+  进程活着时要求「本地 agent 健康 + 公网 `/v1/ping` 连续 3 次失败（60s 节拍）」。判死后
+  `cfp=None / url="" / reg_state["url"]="" / next_tunnel_try=now`，复用既有补拿与注册退避。
+  `_open_cloudflared_once` 判据改 `cfp.poll() is None`；公网探针必须包在 `_public_net()`。
+- **被否决**：`should_register(force=True)`（quick tunnel 每次随机域名；同名时 hub ping 门
+  已决定写不写盘，force 无收益）· 只靠 URL 探针（530/超时是常态 + tailnet 代理假阳性）·
+  用本地 `_ping` 当隧道证据（本 bug 的成因）· 外层重复 `_reset_cf_log`。
+- **边界**：只修 cloudflared；tailscale 通道静默死未覆盖（另案）。
+- **验收**：`tests/remote/test_rollout_node.py` 新增 4 条；聚焦 87 passed、remote 1835 passed；
+  NN 完整门禁 5786 passed / 11 skipped（90s）、根 `bun run check` 2672 pass / 0 fail
+  （2683 tests）。真机 kill 验收未做。
+- **全文** → `docs/nn/remote-transport.md` §144；规格 →
+  `plan/rollout-node-tunnel-death-blindspot.plan.md`。

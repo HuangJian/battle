@@ -233,10 +233,15 @@ LAYERS: dict[str, int] = {
     # 那些边就会静默消失 —— `test_layer_numbers_are_dense_and_meaningful` 会当场报空洞。
     "worker.serve_pool": 0,
     "remote.tailscale_boot": 0,
+    # 采样节点 quick tunnel 的日志/健康工具（2026-11-08，LOC 预算拆分）：依赖
+    # `remote.tailscale_boot`(L0) 与 `remote.push_tunnel`(L0) ⇒ 拓扑秩 **L1**。
+    # 读者只有 `rollout_node`。
+    "remote.rollout_tunnel": 1,
     # 采样节点运行时（2026-10-10，plan/rollout-node-auto-register v2）：cell 拆薄后逻辑住
-    # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)
-    # ⇒ 拓扑秩 **L1**；`common.*` 不在账本内，不计边。
-    "remote.rollout_node": 1,
+    # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)、
+    # `remote.push_register`(L0)、`push_tunnel`(L0) 与 `rollout_tunnel`(L1)
+    # ⇒ 拓扑秩 **L2**；`common.*` 不在账本内，不计边。
+    "remote.rollout_node": 2,
     # 节点自动注册的**唯一实现**（2026-10-23，plan/push-mode-notebooks §4.3）：从
     # `rollout_node` 下沉出的纯函数 + HTTP + `Registry`，只靠 stdlib ⇒ **L0**；采样 / GPU / 离线
     # 三条腿都站在它上面（`rollout_node` 的 L1 秩不变，因为 push_register 更低）。

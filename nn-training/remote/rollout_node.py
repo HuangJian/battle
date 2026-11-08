@@ -59,13 +59,19 @@ from remote.push_register import classify_error as classify_error
 from remote.push_register import register as register
 from remote.push_register import should_register as should_register
 from remote.push_register import unregister as unregister
+from remote.push_tunnel import tunnel_url_of as _tunnel_url
+from remote.rollout_tunnel import PROBE_SEC as TUNNEL_PROBE_SEC
+from remote.rollout_tunnel import dead_reason as _dead_reason
+from remote.rollout_tunnel import dump_tail as _dump_tail
+from remote.rollout_tunnel import public_ping as _public_ping
+from remote.rollout_tunnel import reset_log as _reset_cf_log
+from remote.rollout_tunnel import retry_due as _tunnel_retry_due
+from remote.rollout_tunnel import tunnel_dead as _tunnel_dead
+from remote.rollout_tunnel import wait_url as _wait_tunnel_url
 
 #: 通道名（与 hub/nodes 注册载荷里的 url 形态对应）。
 LINK_TAILSCALE = "tailscale"
 LINK_CLOUDFLARED = "cloudflared"
-
-#: 换名检测（quick tunnel 重连会换域名）。
-_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 #: 退避上限（net/server 类失败）。
 RETRY_MAX_SEC = 300.0
@@ -241,14 +247,6 @@ def _terminate(p: Any) -> None:
             p.kill()
         except Exception:
             pass
-
-
-def _dump_tail(path: Path, log: Callable[[str], None], n: int = 40) -> None:
-    try:
-        for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]:
-            log("  | " + ln)
-    except OSError:
-        pass
 
 
 def _slot_count(explicit: int) -> tuple[int, str]:
@@ -641,47 +639,6 @@ def _find_cloudflared(cfg: dict, log: Callable[[str], None]) -> str:
     return ""
 
 
-def _reset_cf_log(cf_log: Path, attempt: int) -> None:
-    """每次 attempt 前轮转并清空日志：否则 `_tunnel_url` 会读到上一次的死域名。"""
-    try:
-        old = cf_log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        old = ""
-    if old:
-        try:
-            cf_log.with_name(f"{cf_log.name}.{attempt}").write_text(old, encoding="utf-8")
-        except OSError:
-            pass
-    try:
-        cf_log.write_text("", encoding="utf-8")
-    except OSError:
-        pass
-
-
-_DEAD_HINTS = (
-    "failed to",
-    "no such host",
-    "connection refused",
-    "context deadline",
-    "i/o timeout",
-    "tls handshake",
-    "error",
-)
-
-
-def _dead_reason(cf_log: Path) -> str:
-    """从 cloudflared 日志尾部提一行死因；提不到就如实说提不到，不编。"""
-    try:
-        lines = cf_log.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
-    except OSError:
-        return "未能从日志提取（读不到日志）"
-    for line in lines:
-        low = line.lower()
-        if any(h in low for h in _DEAD_HINTS):
-            return line.strip()[:300]
-    return "未能从日志提取"
-
-
 def _start_cloudflared(
     cfg: dict,
     port: int,
@@ -740,43 +697,6 @@ def _start_cloudflared(
     except OSError as e:
         log(f"cloudflared 启动失败: {e}")
         return None
-
-
-def _tunnel_url(cf_log: Path) -> str:
-    """隧道 URL：取日志里**最后一个**（quick tunnel 重连会换域名；旧 URL 会撞 HTTP 530）。"""
-    try:
-        txt = cf_log.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    m = _URL_RE.findall(txt)
-    return m[-1] if m else ""
-
-
-def _wait_tunnel_url(
-    cf_log: Path,
-    cfp: Any,
-    log: Callable[[str], None],
-    timeout: float = 90.0,
-    attempt: tuple[int, int] | None = None,
-) -> str:
-    """等 quick tunnel URL；进程退出或超时都返回 `""`。
-
-    `attempt` 只改日志形状：首拍之外的 attempt 由 `_ensure_cloudflared_url` 统一打
-    `rc` / 死因 / 尾部，这里不再重复 dump。
-    """
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        url = _tunnel_url(cf_log)
-        if url:
-            return url
-        if cfp is not None and cfp.poll() is not None:
-            break
-        time.sleep(2)
-    if attempt is not None:
-        return ""  # 重试阶梯由 _ensure 统一打 rc / 存活秒数 / 尾部，这里不重复
-    log(f"⚠ 没拿到隧道 URL —— 下面是 {cf_log} 尾部：")
-    _dump_tail(cf_log, log, 25)
-    return ""
 
 
 def _ensure_cloudflared_url(
@@ -858,12 +778,14 @@ def _open_cloudflared_once(
     cfp: Any,
     ensure: Callable[[], tuple[str, Any]],
 ) -> tuple[str, Any, bool]:
-    """已有 cf 进程则复用；否则跑一轮。返回 `(url, cfp, started)`。
+    """已有**存活** cf 进程则复用；否则跑一轮。返回 `(url, cfp, started)`。
 
     ★ 判据是 `cfp` 而不是 `url`：422 回落时 `current_url` 是**非空的 tailscale URL**，
     但此刻必须起 cloudflared（plan/rollout-tunnel-url-retry B1）。
+    ★ 死进程对象（`poll()` 非 None）必须当作「没有」：否则静默死后再也建不起新隧道
+    （plan/rollout-node-tunnel-death-blindspot §3.4）。
     """
-    if cfp is not None:
+    if cfp is not None and cfp.poll() is None:
         return current_url, cfp, False
     url, new_cfp = ensure()
     if url:
@@ -898,11 +820,6 @@ def _open_tailscale(
     except Exception as e:
         log(f"tailscale 引导失败（{type(e).__name__}: {e}）")
         return "", False
-
-
-def _tunnel_retry_due(url: str, now: float, next_tunnel_try: float) -> bool:
-    """空 URL 才补拿；到点才试（墙钟，不用 tick 计数）。"""
-    return not url and now >= next_tunnel_try
 
 
 def _agent_entry(code_dir: Path) -> Path | None:
@@ -1247,6 +1164,9 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     restarts, tick, miss = 0, 0, 0
     # 「近 30 分钟产出」摘要：按**墙钟**而不是 tick 计数（sleep 漂移不会把 10 分钟变成 11 分钟）
     next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
+    # 隧道健康：进程退出每拍判；公网 URL 探针按墙钟节拍跑（给新隧道一个完整的传播窗口）。
+    next_tunnel_probe = time.time() + TUNNEL_PROBE_SEC
+    tunnel_probe_fails = 0
     try:
         while True:
             if time.time() > deadline:
@@ -1279,6 +1199,44 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                     next_retry = 0.0
                     log("★ authKey 变了 —— 将重注册")
             now = time.time()
+            # 隧道死亡检测（plan/rollout-node-tunnel-death-blindspot）：静默死的隧道 URL 不变、
+            # 日志尾部仍是旧域名，既有「补拿/换名」两道闸都看不见。判死后归一成「无隧道」
+            # （cfp=None + url=""），复用补拿闸重建、复用 should_register 语义强制重注册。
+            agent_ok = agent.poll() is None
+            if not agent_ok:
+                tunnel_probe_fails = 0  # 本机不健康时连败数不作数（问题不在隧道）
+            if (
+                link == LINK_CLOUDFLARED
+                and agent_ok
+                and url
+                and cfp is not None
+                and cfp.poll() is None
+                and now >= next_tunnel_probe
+            ):
+                probe_ok = _public_ping(url, auth) is not None
+                tunnel_probe_fails = 0 if probe_ok else tunnel_probe_fails + 1
+                next_tunnel_probe = now + TUNNEL_PROBE_SEC
+            if _tunnel_dead(
+                is_cloudflared=link == LINK_CLOUDFLARED,
+                url=url,
+                cfp=cfp,
+                agent_ok=agent_ok,
+                probe_fails=tunnel_probe_fails,
+            ):
+                why = (
+                    "cloudflared 进程已退出"
+                    if cfp is None or cfp.poll() is not None
+                    else f"公网探针连续 {tunnel_probe_fails} 次失败"
+                )
+                log(f"★ 隧道判定死亡（{why}）—— 重建 cloudflared 并重注册")
+                _terminate(cfp)
+                cfp = None
+                url = ""
+                # 绕过 should_register 的去重（重建后即便拿到同名 URL 也要重注册）。
+                # 副作用：重新注册成功前，收线时不会发 unregister（hub 侧由 ping 门兜底）。
+                reg_state["url"] = ""
+                tunnel_probe_fails = 0
+                next_tunnel_try = now
             if _tunnel_retry_due(url, now, next_tunnel_try):
                 log("隧道补拿：尝试重新建 cloudflared…")
                 url, cfp, started = _open_cloudflared_once(
@@ -1298,12 +1256,16 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                     link = LINK_CLOUDFLARED
                     log(f"★ 隧道就绪（补拿）：{url} —— 将重注册")
                     next_retry = 0.0
+                    tunnel_probe_fails = 0
+                    next_tunnel_probe = now + TUNNEL_PROBE_SEC
                 next_tunnel_try = now + TUNNEL_RETRY_SEC
             if url and cfp is not None:
                 cur = _tunnel_url(cf_log)
                 if cur and cur != url:
                     url = cur
                     next_retry = 0.0
+                    tunnel_probe_fails = 0
+                    next_tunnel_probe = now + TUNNEL_PROBE_SEC
                     log(f"★ 隧道换名（quick tunnel 重连）：{url} —— 将重注册")
             if hub_configured and url and should_register(reg_state, url, auth) and now >= next_retry:
                 out = _try_register()

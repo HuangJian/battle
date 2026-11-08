@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from remote import rollout_node as rn
+from remote import rollout_tunnel as rt
 from remote import tailscale_boot
 
 # ---------------------------------------------------------------- resolve_link
@@ -611,7 +612,7 @@ def test_open_cloudflared_once_starts_even_with_nonempty_current_url() -> None:
 
 
 def test_open_cloudflared_once_reuses_live_process() -> None:
-    proc = object()
+    proc = _Proc(None)
     url, cfp, started = rn._open_cloudflared_once(
         current_url="", cfp=proc, ensure=lambda: ("", None)
     )
@@ -639,6 +640,79 @@ class _Proc:
 
     def wait(self, timeout: float | None = None) -> int:
         return 0
+
+
+def test_open_cloudflared_once_restarts_when_process_exited() -> None:
+    """死进程对象（poll 非 None）必须当作没有：否则静默死后再也建不起隧道。"""
+    calls: list[int] = []
+
+    def _ensure() -> tuple[str, object]:
+        calls.append(1)
+        return "https://new.trycloudflare.com", _Proc(None)
+
+    url, cfp, started = rn._open_cloudflared_once(
+        current_url="https://dead.trycloudflare.com", cfp=_Proc(7), ensure=_ensure
+    )
+    assert url == "https://new.trycloudflare.com"
+    assert cfp is not None and cfp.poll() is None
+    assert started is True and calls == [1]
+
+
+def test_tunnel_dead_requires_cloudflared_and_evidence() -> None:
+    live, dead = _Proc(None), _Proc(7)
+    kw: dict[str, Any] = {
+        "is_cloudflared": True,
+        "url": "https://a.trycloudflare.com",
+    }
+    assert rn._tunnel_dead(**kw, cfp=dead, agent_ok=True, probe_fails=0) is True
+    assert rn._tunnel_dead(**kw, cfp=None, agent_ok=True, probe_fails=0) is True
+    # 公网探针：连续 2 次不算、3 次算；本地 agent 不健康时不判。
+    assert rn._tunnel_dead(**kw, cfp=live, agent_ok=True, probe_fails=2) is False
+    assert rn._tunnel_dead(**kw, cfp=live, agent_ok=True, probe_fails=3) is True
+    assert rn._tunnel_dead(**kw, cfp=live, agent_ok=False, probe_fails=9) is False
+    # tailscale 通道 cfp=None 是正常态；空 URL 走补拿闸。
+    assert (
+        rn._tunnel_dead(
+            is_cloudflared=False, url="http://100.64.0.5:8443", cfp=None,
+            agent_ok=True, probe_fails=9,
+        )
+        is False
+    )
+    assert (
+        rn._tunnel_dead(
+            is_cloudflared=True,
+            url="",
+            cfp=None,
+            agent_ok=True,
+            probe_fails=9,
+        )
+        is False
+    )
+
+
+def test_public_ping_runs_in_platform_net_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公网探针必须在 `_public_net()` 里跑（否则 tailnet 代理会把它恒打死）。"""
+    seen: list[str] = []
+
+    class _Ctx:
+        def __enter__(self) -> None:
+            seen.append("in")
+
+        def __exit__(self, *_a: object) -> None:
+            seen.append("out")
+
+    monkeypatch.setattr(rt.tailscale_boot, "platform_net_env", lambda: _Ctx())
+    assert rn._public_ping("https://x.trycloudflare.com", "ak", lambda *_a: {"ok": 1}) == {
+        "ok": 1
+    }
+    assert seen == ["in", "out"]
+
+    def _boom(*_a: object) -> dict | None:
+        raise RuntimeError("down")
+
+    assert rn._public_ping("https://x.trycloudflare.com", "ak", _boom) is None
 
 
 def test_422_and_cf_failure_stops_without_second_tailscale_post(
@@ -773,6 +847,95 @@ def test_empty_url_multiple_ticks_never_posts_or_backs_off(
     assert clock["sleeps"] == 4
     assert any(line.startswith("首拍未注册") for line in logs)
     assert not [line for line in logs if line.startswith("注册失败")]
+
+
+def test_dead_tunnel_process_rebuilds_and_reregisters(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """2026-11-08 现场：cloudflared 静默死、URL 字串不变 ⇒ 必须重建 + 重注册。"""
+    code_dir = tmp_path / "code"
+    entry = code_dir / "tools" / "agent" / "sampler-agent.ts"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("// fake\n", encoding="utf-8")
+    clock = {"now": 1000.0, "sleeps": 0}
+    logs: list[str] = []
+    posts: list[str] = []
+    built: list[str] = []
+    tunnel = _Proc(None)  # 首拍拿到时还活着，注册成功后静默死掉（现场形态）
+    ensured = iter(
+        [
+            ("https://dead.trycloudflare.com", tunnel),
+            ("https://live.trycloudflare.com", _Proc(None)),
+        ]
+    )
+
+    def _ensure(*_a: object, **_k: object) -> tuple[str, object]:
+        url, proc = next(ensured)
+        built.append(url)
+        return url, proc
+
+    def _register(**kw: object) -> dict:
+        posts.append(str(kw["url"]))
+        tunnel.rc = 7  # 注册成功后隧道进程死掉
+        return {
+            "ok": True,
+            "status": 200,
+            "action": "updated",
+            "body": {},
+            "capabilities": [],
+            "error": None,
+            "kind": "ok",
+        }
+
+    def _time() -> float:
+        return clock["now"]
+
+    def _sleep(sec: float) -> None:
+        clock["sleeps"] += 1
+        clock["now"] += sec
+        if clock["sleeps"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(rn, "probe_cloud_env", lambda: "test")
+    monkeypatch.setattr(rn, "resolve_link", lambda *_a: rn.LINK_CLOUDFLARED)
+    monkeypatch.setattr(rn, "_slot_count", lambda _n: (1, "test"))
+    monkeypatch.setattr(rn, "registry_url", lambda *_a: "http://hub:8787")
+    monkeypatch.setattr(rn, "_ensure_bun", lambda *_a: "/bin/bun")
+    monkeypatch.setattr(rn, "_net_probe", lambda _log: ("inherit", "direct"))
+    monkeypatch.setattr(rn, "_ensure_cloudflared_url", _ensure)
+    monkeypatch.setattr(rn, "_start_agent", lambda *_a: _Proc(None))
+    monkeypatch.setattr(rn, "_wait_auth", lambda *_a, **_k: "ak")
+    monkeypatch.setattr(rn, "_ping", lambda *_a, **_k: {"codeHash": "0123456789abcdef"})
+    monkeypatch.setattr(rn, "_tunnel_url", lambda _p: "")
+    monkeypatch.setattr(rn, "_sh", lambda *_a, **_k: SimpleNamespace(stdout="1.4.4"))
+    monkeypatch.setattr(rn, "_try_register_once", _register)
+    monkeypatch.setattr(rn, "unregister", lambda *_a, **_k: {"ok": True, "error": None})
+    monkeypatch.setattr(rn.time, "time", _time)
+    monkeypatch.setattr(rn.time, "sleep", _sleep)
+
+    rn.run(
+        {
+            "code_dir": str(code_dir),
+            "link": "cloudflared",
+            "node_id": "n",
+            "hub_url": "http://hub:8787",
+            "hub_token": "tok",
+            "agent_port": 8443,
+            "workers": 1,
+            "max_session_hours": 1,
+        },
+        logs.append,
+        lambda key, default: {"HUB_TOKEN": "tok"}.get(key, default),
+    )
+
+    assert built == [
+        "https://dead.trycloudflare.com",
+        "https://live.trycloudflare.com",
+    ]
+    assert posts == [
+        "https://dead.trycloudflare.com",
+        "https://live.trycloudflare.com",
+    ]
 
 
 def test_cloudflared_dead_process_triggers_restart(

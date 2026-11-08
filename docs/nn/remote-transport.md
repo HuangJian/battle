@@ -6,6 +6,48 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §144 采样节点隧道静默死自愈：进程退出/公网连败判死 → 归一「无隧道」（2026-11-08）
+
+**现场**：DSW 上 `ps aux | grep cloudflared` 无进程；训练机侧 DNS=NXDOMAIN、直连=530、
+经代理=TLS 失败，而同网 kaggle quick tunnel 正常。节点日志仍每拍 `alive` / `action=updated`，
+dashboard 池显示「无 ping · 无历史」。根因：监护循环只判「URL 为空」补拿、「URL 字串变化」换名；
+静默死的隧道 URL 不变、`cf_log` 尾部仍是旧域名；keepalive 只 ping `127.0.0.1`，与隧道无关。
+
+**落地**：
+
+- `_tunnel_dead(link,url,cfp,agent_ok,probe_fails)` 纯函数：cloudflared 通道且 url 非空时，
+  `cfp is None / poll() 非 None` 即死；进程活着则要求**本地 agent 健康 + 公网探针连续 3 次失败**。
+  tailscale 通道（`cfp=None` 是正常态）与空 URL 一律不判。
+- 判死后归一：`_terminate(cfp); cfp=None; url=""; reg_state["url"]=""; next_tunnel_try=now`，
+  复用既有补拿闸（`attempts=1`、`wait_timeout=30s`）重建；`should_register` 自然为真 ⇒ 重注册。
+  不新增 `force` 参数（quick tunnel 每次随机域名；同名时 hub ping 门也早已决定写不写盘）。
+- `_open_cloudflared_once` 判据从 `cfp is not None` 改为 `cfp.poll() is None`：死进程对象
+  否则会永久短路重建（把「判死」修好也建不起新隧道）。
+- `_public_ping`：复用 `common.distribution.node_ping`（hub ping 门同口径），**包在
+  `_public_net()` 里**——userspace tailscale 会把 `HTTP_PROXY` 指到只转发 tailnet 的代理，
+  不还原就会把健康隧道连续判死。节拍 `TUNNEL_PROBE_SEC=60s`、`TUNNEL_DEAD_STREAK=3`。
+- 重建顺序：先 `_terminate` 再 `_ensure`（避免新旧 cloudflared 写同一 `--logfile`，
+  让 URL 提取读到交错内容）。
+- LOC 预算把日志/健康工具拆到 `remote/rollout_tunnel.py`（`rollout_node` 998 → 979，新模块 89）；
+  URL 提取复用 `remote.push_tunnel.tunnel_url_of`，不再有第二份 `trycloudflare` 正则。
+  `remote_dag` 账本：`rollout_tunnel` **L1**、`rollout_node` **L1 → L2**。
+
+**被否决**：`should_register(force=True)`（多余 API 面）· 只靠公网探针（一次 530/超时是常态，
+且代理姿势会制造假阳性）· 把本地 `_ping` 当隧道证据（就是本 bug）· 外层再 `_reset_cf_log`
+（`_ensure` 每 attempt 已轮转）· 额外退避机制（沿用 60s 节拍 + 单 attempt 上界）。
+
+**边界**：只覆盖 cloudflared 通道；**tailscale 静默死仍是盲区**（唯一证据是 hub ping 门）。
+检测时间：进程死 ≤1 拍（10s）；进程活但 URL 不通 3×60s。补拿最多阻塞监护循环 30s（既有行为）。
+
+**验收**：`nn-training/tests/remote/test_rollout_node.py` 新增 **4 条**（死进程必重建 /
+`_tunnel_dead` 全组合 / `_public_ping` 上下文与异常 / `run()` 假时钟：死进程 → 重建 + 重注册
+URL 序列）；聚焦 87 passed、`tests/remote/` 1835 passed；NN 完整门禁 **5786 passed / 11 skipped**
+（90s）、根 `bun run check` **2672 pass / 0 fail**（2683 tests）。
+**真机验收未做**：需在 dsw kill cloudflared 后观察一个监护周期内恢复。
+
+**全文** → `plan/rollout-node-tunnel-death-blindspot.plan.md`；决策 →
+`DECISIONS.md` §2026-11-08-goalnn-rollout-tunnel-silent-death。
+
 ## §143 空隧道 URL 不注册 + cloudflared 三段自救（2026-11-07）
 
 **现场**：DSW 上 cloudflared 起后 **16s** 退出，日志停在
