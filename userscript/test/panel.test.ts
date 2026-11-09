@@ -422,3 +422,108 @@ describe('面板位置持久化（GM 存储）', () => {
     panel.destroy()
   })
 })
+
+describe('面板最小化：收起成小方块（可拖拽 · 点一下还原）', () => {
+  const miniOf = (panel: ReturnType<typeof mountPanel>): HTMLElement =>
+    panel.host.shadowRoot!.querySelector('[data-mini]') as HTMLElement
+  const boxOf = (panel: ReturnType<typeof mountPanel>): HTMLElement =>
+    panel.host.shadowRoot!.querySelector('.bnc') as HTMLElement
+  const minBtnOf = (panel: ReturnType<typeof mountPanel>): HTMLElement =>
+    panel.host.shadowRoot!.querySelector('[data-min]') as HTMLElement
+
+  it('最小化 ⇒ 面板收起 + 小方块出现在面板原位；标题栏按钮不触发拖拽', () => {
+    const w = dom()
+    const panel = mountPanel(docOf(w), {}, { position: { left: 200, top: 150 } })
+    const bnc = boxOf(panel)
+    const mini = miniOf(panel)
+    const minBtn = minBtnOf(panel)
+
+    expect(mini.hidden).toBe(true)
+    minBtn.dispatchEvent(
+      pointer(w, 'pointerdown', {
+        bubbles: true,
+        button: 0,
+        clientX: 300,
+        clientY: 250,
+        pointerId: 1,
+      }),
+    )
+    expect(bnc.hasAttribute('data-dragging')).toBe(false) // 按按钮 = 按按钮，不是拖面板
+    minBtn.click()
+
+    expect(bnc.hidden).toBe(true)
+    expect(mini.hidden).toBe(false)
+    expect(mini.style.left).toBe('200px')
+    expect(mini.style.top).toBe('150px')
+    expect(mini.getAttribute('role')).toBe('button')
+    expect(mini.getAttribute('tabindex')).toBe('0')
+    panel.destroy()
+  })
+
+  it('小方块可拖拽：拖完只记位置不还原；点一下才还原到小方块那儿', () => {
+    const w = dom()
+    const saved: PanelPosition[] = []
+    const panel = mountPanel(
+      docOf(w),
+      {},
+      { position: { left: 200, top: 150 }, onMove: (p) => saved.push(p) },
+    )
+    const bnc = boxOf(panel)
+    const mini = miniOf(panel)
+    const doc = docOf(w) as unknown as EventTarget
+    minBtnOf(panel).click()
+
+    mini.dispatchEvent(
+      pointer(w, 'pointerdown', {
+        bubbles: true,
+        button: 0,
+        clientX: 210,
+        clientY: 160,
+        pointerId: 3,
+      }),
+    )
+    expect(mini.getAttribute('data-dragging')).toBe('1')
+    doc.dispatchEvent(pointer(w, 'pointermove', { clientX: 260, clientY: 210, pointerId: 3 }))
+    expect(mini.style.left).toBe('250px')
+    expect(mini.style.top).toBe('200px')
+    doc.dispatchEvent(pointer(w, 'pointerup', { pointerId: 3 }))
+    expect(mini.hasAttribute('data-dragging')).toBe(false)
+    expect(bnc.hidden).toBe(true) // 拖拽不等于点一下
+    expect(saved).toEqual([]) // 拖小方块不写面板位置（还原那拍才写）
+
+    mini.click() // 拖拽后浏览器补的 click 当「不是点一下」吃掉
+    expect(bnc.hidden).toBe(true)
+    mini.click() // 真·点一下 ⇒ 还原
+    expect(mini.hidden).toBe(true)
+    expect(bnc.hidden).toBe(false)
+    expect(bnc.style.left).toBe('250px')
+    expect(bnc.style.top).toBe('200px')
+    expect(saved).toEqual([{ left: 250, top: 200 }])
+    panel.destroy()
+  })
+
+  it('键盘 Enter/空格 也能还原；倒计时开始会先把面板放出来（取消键看得见）', async () => {
+    const w = dom()
+    const panel = mountPanel(docOf(w), {})
+    const bnc = boxOf(panel)
+    const mini = miniOf(panel)
+
+    /** happy-dom 的事件类型与 lib.dom 不同名（测试边界一次强转，与文件头同一个理由）。 */
+    const key = (k: string): Event =>
+      new w.KeyboardEvent('keydown', { key: k, bubbles: true }) as unknown as Event
+
+    minBtnOf(panel).click()
+    mini.dispatchEvent(key('Enter'))
+    expect(bnc.hidden).toBe(false)
+
+    minBtnOf(panel).click()
+    mini.dispatchEvent(key(' '))
+    expect(bnc.hidden).toBe(false)
+
+    minBtnOf(panel).click()
+    const p = panel.countdown('准备保存', 0)
+    expect(bnc.hidden).toBe(false)
+    await expect(p).resolves.toBe(true)
+    panel.destroy()
+  })
+})

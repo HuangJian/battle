@@ -187,6 +187,28 @@ const STYLE = `
 .hd .grip { opacity: .55; }
 .hd .title { flex: 1 1 auto; }
 .hd .hint { opacity: .45; }
+.hd .min {
+  flex: 0 0 auto; min-width: 0; width: 20px; height: 18px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 12px/1 system-ui, sans-serif; color: #9fb3cc;
+  background: #1b2738; border: 1px solid #2d4a70; border-radius: 4px; cursor: pointer;
+}
+.hd .min:hover { background: #24354b; color: #dbe7ff; }
+.bnc[hidden] { display: none; }
+/* 最小化后的小方块：自己是拖拽手柄，点一下还原。 */
+.mini {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2147483646;
+  width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
+  color: #dbe7ff; background: rgba(16, 22, 32, .94);
+  border: 1px solid rgba(120, 170, 255, .45); border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  font: 700 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: .06em;
+  cursor: move; touch-action: none; user-select: none;
+}
+.mini:hover { border-color: rgba(120, 170, 255, .8); }
+.mini[hidden] { display: none; }
+.mini[data-dragging="1"] { cursor: grabbing; box-shadow: 0 10px 26px rgba(0, 0, 0, .6); }
+.mini:focus-visible { outline: 2px solid #4c8dff; outline-offset: 2px; }
 .group { margin-top: 8px; }
 .group:first-of-type { margin-top: 0; }
 .glabel { color: #7f93ad; font-size: 10px; letter-spacing: .08em; margin-bottom: 3px; }
@@ -265,7 +287,9 @@ export function mountPanel(
   shadow.innerHTML =
     `<style>${STYLE}</style><div class="bnc" role="group" aria-label="Notebook Companion">` +
     `<div class="hd" data-drag title="拖动移动面板"><span class="grip">⠿</span>` +
-    `<span class="title">Notebook Companion</span><span class="hint">拖动</span></div>` +
+    `<span class="title">Notebook Companion</span><span class="hint">拖动</span>` +
+    `<button type="button" class="min" data-min title="最小化成小方块（可拖动 · 点一下还原）"` +
+    ` aria-label="最小化">–</button></div>` +
     `<div class="sess" data-sess></div>` +
     `<div class="hub" data-hub></div>` +
     GROUPS.map(
@@ -299,10 +323,14 @@ export function mountPanel(
     `<div class="snote">训练 cell 开始执行时上报 stopOthers；dashboard 目前只记录，不发停止命令。</div></div>` +
     `<div class="status" data-tone="warn">连接中…</div>` +
     `<div class="ask" data-ask hidden><span data-ask-text></span>` +
-    `<button type="button" data-ask-cancel>取消</button></div></div>`
+    `<button type="button" data-ask-cancel>取消</button></div></div>` +
+    `<div class="mini" data-mini hidden role="button" tabindex="0" aria-label="还原控制面板"` +
+    ` title="Notebook Companion：点一下还原；拖动移动">NC</div>`
 
   const bnc = shadow.querySelector('.bnc') as HTMLElement
   const handle = shadow.querySelector('[data-drag]') as HTMLElement
+  const minBtn = shadow.querySelector('[data-min]') as HTMLElement
+  const mini = shadow.querySelector('[data-mini]') as HTMLElement
   const status = shadow.querySelector('.status') as HTMLElement
   const sess = shadow.querySelector('[data-sess]') as HTMLElement
   const hub = shadow.querySelector('[data-hub]') as HTMLElement
@@ -359,6 +387,9 @@ export function mountPanel(
   function onPointerDown(e: Event): void {
     const ev = e as PointerEvent
     if (ev.button !== 0) return
+    // 标题栏里的按钮（最小化）不参与拖拽：按一下就是按一下
+    const target = ev.target as unknown as Element | null
+    if (target && typeof target.closest === 'function' && target.closest('button')) return
     const rect = bnc.getBoundingClientRect()
     // 已经有坐标（恢复的位置或上一次拖拽）就直接用：happy-dom 无布局、真实页面也可能有小数
     const origin = current ?? { left: rect.left, top: rect.top }
@@ -390,9 +421,107 @@ export function mountPanel(
   }
 
   function onResize(): void {
+    if (minimized) {
+      if (miniPos) placeMini(miniPos.left, miniPos.top)
+      return
+    }
     if (!pinned) return
     const rect = bnc.getBoundingClientRect()
     placeAt(rect.left, rect.top)
+  }
+
+  // ── 最小化：面板收起成一个小方块（可拖动、点一下还原，位置跟手） ──
+  let minimized = false
+  let miniPos: PanelPosition | null = null
+  let miniDrag: { pointerId: number | undefined; dx: number; dy: number; moved: boolean } | null =
+    null
+  let suppressMiniClick = false
+
+  function panelOrigin(): PanelPosition {
+    if (current) return current
+    const rect = bnc.getBoundingClientRect()
+    return { left: rect.left, top: rect.top }
+  }
+
+  function placeMini(left: number, top: number): void {
+    const box = clampToViewport(mini, view, left, top)
+    mini.style.left = `${box.left}px`
+    mini.style.top = `${box.top}px`
+    mini.style.right = 'auto'
+    mini.style.bottom = 'auto'
+    miniPos = box
+  }
+
+  /** 收起 / 还原。还原后面板落在小方块的位置（并落存储：下次刷新就在那儿）。 */
+  function setMinimized(next: boolean): void {
+    if (next === minimized) return
+    const at = miniPos ?? panelOrigin()
+    minimized = next
+    if (next) {
+      bnc.hidden = true
+      mini.hidden = false
+      placeMini(at.left, at.top)
+      return
+    }
+    mini.hidden = true
+    bnc.hidden = false
+    placeAt(at.left, at.top)
+    options.onMove?.(current ?? at)
+  }
+
+  function onMiniDown(e: Event): void {
+    const ev = e as PointerEvent
+    if (ev.button !== 0) return
+    suppressMiniClick = false // 新的一次按下：上一次拖拽留下的抑制到此作废
+    const rect = mini.getBoundingClientRect()
+    const origin = miniPos ?? { left: rect.left, top: rect.top }
+    miniDrag = {
+      pointerId: ev.pointerId,
+      dx: ev.clientX - origin.left,
+      dy: ev.clientY - origin.top,
+      moved: false,
+    }
+    placeMini(origin.left, origin.top)
+    mini.setAttribute('data-dragging', '1')
+    if (typeof ev.pointerId === 'number') mini.setPointerCapture?.(ev.pointerId)
+  }
+
+  function onMiniMove(e: Event): void {
+    if (!miniDrag) return
+    const ev = e as PointerEvent
+    if (miniDrag.pointerId !== undefined && ev.pointerId !== undefined) {
+      if (ev.pointerId !== miniDrag.pointerId) return
+    }
+    miniDrag.moved = true
+    placeMini(ev.clientX - miniDrag.dx, ev.clientY - miniDrag.dy)
+  }
+
+  function endMiniDrag(): void {
+    if (!miniDrag) return
+    const { moved, pointerId } = miniDrag
+    if (typeof pointerId === 'number') mini.releasePointerCapture?.(pointerId)
+    miniDrag = null
+    mini.removeAttribute('data-dragging')
+    // 拖过就只落位置（点一下不算「还原」）；没拖 ⇒ 点一下还原
+    if (moved) suppressMiniClick = true
+    else setMinimized(false)
+  }
+
+  function onMiniKey(e: Event): void {
+    const key = (e as KeyboardEvent).key
+    if (key !== 'Enter' && key !== ' ') return
+    e.preventDefault?.()
+    suppressMiniClick = false
+    setMinimized(false)
+  }
+
+  function onMiniClick(): void {
+    // 拖拽结束时浏览器也会补一个 click：那个不算「点一下」
+    if (suppressMiniClick) {
+      suppressMiniClick = false
+      return
+    }
+    setMinimized(false)
   }
 
   // 恢复上次拖到的位置：先夹进当前视口，再进正常拖拽状态（resize 也会继续盯住）
@@ -402,6 +531,13 @@ export function mountPanel(
   moveTarget.addEventListener('pointermove', onPointerMove)
   moveTarget.addEventListener('pointerup', endDrag)
   moveTarget.addEventListener('pointercancel', endDrag)
+  minBtn.addEventListener('click', () => setMinimized(true))
+  mini.addEventListener('pointerdown', onMiniDown)
+  mini.addEventListener('click', onMiniClick)
+  mini.addEventListener('keydown', onMiniKey)
+  moveTarget.addEventListener('pointermove', onMiniMove)
+  moveTarget.addEventListener('pointerup', endMiniDrag)
+  moveTarget.addEventListener('pointercancel', endMiniDrag)
   view?.addEventListener('resize', onResize)
 
   shadow.addEventListener('click', (e) => {
@@ -520,6 +656,7 @@ export function mountPanel(
 
   /** 到点倒数 + 取消：`seconds<=0` 立即放行（测试与「隐藏页预授权」都走这条）。 */
   function countdown(text: string, seconds: number): Promise<boolean> {
+    setMinimized(false) // 倒计时带「取消」：收着面板就没法点它
     askFinish?.(false) // 同拍只留一个倒计时（新的覆盖旧的）
     ask.hidden = false
     let left = Math.max(0, Math.floor(seconds))
@@ -639,6 +776,12 @@ export function mountPanel(
       moveTarget.removeEventListener('pointermove', onPointerMove)
       moveTarget.removeEventListener('pointerup', endDrag)
       moveTarget.removeEventListener('pointercancel', endDrag)
+      mini.removeEventListener('pointerdown', onMiniDown)
+      mini.removeEventListener('click', onMiniClick)
+      mini.removeEventListener('keydown', onMiniKey)
+      moveTarget.removeEventListener('pointermove', onMiniMove)
+      moveTarget.removeEventListener('pointerup', endMiniDrag)
+      moveTarget.removeEventListener('pointercancel', endMiniDrag)
       view?.removeEventListener('resize', onResize)
       host.remove()
     },
