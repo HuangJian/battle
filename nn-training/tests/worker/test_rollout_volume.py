@@ -22,6 +22,7 @@ from tests.conftest import bp_args
 from trainer.loop_core import TrainingLoop
 from worker.commit_journal import CommitJournal
 from worker.config import CourseConfig, corpus_identity_fp
+from worker.greedy_quota import GREEDY_QUOTA_RULE_V1
 from worker.volume_waves import (
     DEFAULT_MAX_WAVES,
     STOP_GAME_CAP,
@@ -616,6 +617,9 @@ class _StubLoop:
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
+    def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
+        TrainingLoop._volume_collect_greedy(cast(Any, self), it, dist_cfg)
+
     #: 零落盘（2026-10-28）：桩上没有段账 ⇒ `settled_stage_totals` 只读盘上 shard
     #: （本文件测的正是「重启后从盘上回填」那条老路径）。
     _payload_parts = None
@@ -693,6 +697,11 @@ class _StubLoop:
         self._volume_g0 = 0
         self._volume_est = 0
         self._volume_capped = False
+        # greedy 采集（本文件只测跨波读盘；生产在方法内先清空再写）。
+        self._greedy_plan: Any = None
+        self._greedy_stats: dict | None = None
+        self._greedy_report: dict | None = None
+        self._greedy_waves = 0
         # 生产在 `_volume_collect_continuous` 末尾写入（分关账 + est 口径）；
         # 桩先声明，测试才能断言首波读数（mypy 也才看得见这个属性）。
         self._volume_stage_stats: dict = {}
@@ -1172,3 +1181,144 @@ def _settle_first_wave(stub: _StubLoop) -> None:
         "scoreList": [],
         "dimLists": {},
     }
+
+
+def test_greedy_collect_reads_current_round_dir(tmp_path: Path) -> None:
+    """greedy 补波必须从 `<traj_root>/itN` 读已结算账，不能拼成 `itN/itN`。
+
+    回归：旧写法把已经带轮号的 `_traj_dir` 又拼了一次 `it{it}`，于是每波都看不到
+    上一波的 shard，`start_idx` 永远从 0 开始 ⇒ 重派同一批 (stage, seed)，
+    在真实采集里表现为「波次涨、局数不涨」的白烧。
+
+    同时钉住本地串行路径的**过采**：本地池一次把整批候选跑完（`on_result`/`halt`
+    要等整批结束才回），所以 greedy 的候选池不能再乘 `DEFAULT_POOL_MULT`——
+    否则候选全跑完 = 2× collect_target（2026-11-09 S3 实测 18407/8602）。
+    """
+    # est=0 = 真·冷启动：首波按宽度铺，随后才从本轮 shard 学到 est。这正是
+    # S3 生产形状（it0 只有 eval、没有可复用 shard）⇒ 第二波是候选池，不是首波。
+    stub = _StubLoop(tmp_path, target=4000, est=0, samples=50)
+    stub.args.greedy_quota = {"win": 0.7, "timeout": 0.3, "oversample_cap": 2.0}
+    stub.args.volume_max_batches = 3
+
+    def fake_dispatch(
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
+    ) -> dict:
+        taken: list[tuple[int, int]] = []
+        for stage, seed in pairs:
+            if halt_event is not None and halt_event.is_set():
+                break
+            taken.append((stage, seed))
+            # 生产布局：本地 shard 在 itN/w<wave>/rl_s*_seed*（export-rl-rollout 的
+            # --out 是波目录），不是 itN 的直接子目录。`w0` 是初波。
+            d = stub._traj_dir / f"w{len(stub.dispatched)}" / f"rl_s{stage:02d}_seed{seed}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "manifest.json").write_text(
+                json.dumps({
+                    "stage": stage,
+                    "seed": seed,
+                    "wver": _WVER,
+                    "nSamples": stub.samples,
+                    "outcome": "stage_clear",
+                    "labelMode": "greedy",
+                }),
+                encoding="utf-8",
+            )
+            if on_result is not None:
+                on_result({"stage": stage, "seed": seed, "nSamples": stub.samples})
+        stub.dispatched.append(taken)
+        samples = len(taken) * stub.samples
+        return {
+            "games": len(taken),
+            "winRate": 0.0,
+            "outcomes": {"stage_clear": len(taken)},
+            "totalSamples": samples,
+            "totalTicks": samples * 10,
+            "scoreList": [],
+            "dimLists": {},
+        }
+
+    stub._dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
+    stub._volume_collect_greedy(1, None)
+
+    flat = [pair for wave in stub.dispatched for pair in wave]
+    assert flat, "greedy 阶段应至少派出一波"
+    assert len(flat) == len(set(flat)), "greedy 波次不得重派同一 (stage, seed)"
+    assert stub._greedy_waves >= 2
+    assert stub._greedy_stats is not None
+    assert stub._greedy_stats["total"] > 0
+    # collect_target=8000；允许一个波次的离散步长（本测试 4 关 × 50 samples）
+    assert stub._greedy_stats["total"] <= 8000 + 4 * stub.samples, (
+        f"本地 greedy 过采：total={stub._greedy_stats['total']} collect_target=8000"
+    )
+    assert stub._greedy_stats["rule"] == GREEDY_QUOTA_RULE_V1, (
+        "iteration 事件里的 rule 必须与选择器/语料身份同源，不能硬编码旧版本"
+    )
+
+
+def test_greedy_halt_accepts_queue_total_samples(tmp_path: Path) -> None:
+    """逐局熔断必须认远端/队列 path 的 `totalSamples`（评审 P0）。
+
+    回归：初版 `_watch` 只认 `nSamples`，而 `trainer/dispatch.py::_ensure_games`
+    把单局 manifest 转成 `totalSamples` ⇒ 队列路径 halt 永不 set，整批候选跑完
+    = 过采。生产同款回调 `collect_only._on_result` 用的是 totalSamples/samples。
+    """
+    # target=100 × 比例 0.2 × cap 2 ⇒ collect_target=40；每局 50 samples ⇒
+    # 第一局结算即应 set halt，第二局不该再派。
+    stub = _StubLoop(tmp_path, target=100, est=0, samples=50)
+    stub.args.greedy_quota = {"win": 0.2, "timeout": 0.0, "oversample_cap": 2.0}
+    stub.args.volume_max_batches = 3
+
+    def fake_dispatch(
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
+    ) -> dict:
+        taken: list[tuple[int, int]] = []
+        for stage, seed in pairs:
+            if halt_event is not None and halt_event.is_set():
+                break
+            taken.append((stage, seed))
+            d = stub._traj_dir / f"w{len(stub.dispatched)}" / f"rl_s{stage:02d}_seed{seed}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "manifest.json").write_text(
+                json.dumps({
+                    "stage": stage,
+                    "seed": seed,
+                    "wver": _WVER,
+                    "nSamples": stub.samples,
+                    "outcome": "stage_clear",
+                    "labelMode": "greedy",
+                }),
+                encoding="utf-8",
+            )
+            if on_result is not None:
+                on_result({"stage": stage, "seed": seed, "totalSamples": stub.samples})
+        stub.dispatched.append(taken)
+        samples = len(taken) * stub.samples
+        return {
+            "games": len(taken),
+            "winRate": 0.0,
+            "outcomes": {"stage_clear": len(taken)},
+            "totalSamples": samples,
+            "totalTicks": samples * 10,
+            "scoreList": [],
+            "dimLists": {},
+        }
+
+    stub._dispatch_volume_wave = fake_dispatch  # type: ignore[method-assign]
+    stub._volume_collect_greedy(1, None)
+
+    assert len(stub.dispatched) == 1, "halt 置位后不该再开新波"
+    assert len(stub.dispatched[0]) == 1, (
+        "首局结算即应触发逐局熔断；只认 nSamples 会让整批候选跑完"
+    )

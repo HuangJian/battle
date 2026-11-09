@@ -159,6 +159,12 @@ def rollout_sources(
                 continue
             if mm.get("wver") != wver:
                 continue
+            # greedy 与采样语料不互借（plan/greedy-outcome-quota rev4）：普通轮借到
+            # greedy shard = 把失败轨迹当 on-policy 样本；greedy 轮借到普通局 = 没挖到
+            # 新失败。labelMode 是 provenance 的唯一判据（旧 shard 无键 = 采样）。
+            greedy_shard = str(mm.get("labelMode") or "") == "greedy"
+            if greedy_shard != bool(getattr(args, "rollout_argmax", False)):
+                continue
             report = shard.parent / "_rl_report.json"
             if not report.is_file():
                 continue

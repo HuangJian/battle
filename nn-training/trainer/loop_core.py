@@ -215,6 +215,14 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         #: 只在 `_volume_collect_continuous` 里赋值会让「未开该模式 / stream / collect-only」
         #: 的轮在落账时 AttributeError（e2e 当场抓到，2026-10-07）。
         self._volume_stage_stats: dict | None = None
+        #: greedy 结果配额（plan/greedy-outcome-quota rev4）：采集阶段写 plan/stats，
+        #: 发布阶段读 plan 做分层预筛。必须在 __init__ 初值（同 _volume_stage_stats 的教训）。
+        self._greedy_plan: Any = None
+        self._greedy_stats: dict | None = None
+        self._greedy_report: dict | None = None
+        self._greedy_waves = 0
+        #: 普通连续配额已派出的 (stage, seed)；greedy 阶段过滤掉它们，保证两批种子不相交。
+        self._volume_ordinary_seeds: set[tuple[int, int]] = set()
         self._rollout_sec = 0.0
         # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
         # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。

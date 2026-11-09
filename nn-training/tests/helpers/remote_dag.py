@@ -480,6 +480,9 @@ LAYERS: dict[str, int] = {
     # （意图 + 回执；只 stdlib + common.log ⇒ **L0**，与 `worker.rl_config_schema` 同型）。
     "worker.gate_halt": 0,
     "worker.gate_inputs": 0,
+    # greedy 结果配额的分层预筛（plan/greedy-outcome-quota rev4）：纯选择器，
+    # 依赖面 = stdlib + `biz.course_spec`（不在本账本）⇒ **L0**。
+    "worker.greedy_quota": 0,
     "worker.kickstart_burn": 1,
     #: 本机评估失败的保真类型（plan/eval-gap-honesty D1）：只用 stdlib（re）⇒ L0。
     "worker.local_eval_error": 0,

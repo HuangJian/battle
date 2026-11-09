@@ -59,3 +59,10 @@ def test_no_overrides_no_flags() -> None:
     assert "--player-level" not in cmd
     assert "--lives_override" not in cmd
     assert "--player_level" not in cmd
+
+
+def test_teacher_argmax_only_when_requested() -> None:
+    """greedy 第二遍才追加 `--teacher-argmax`；普通采集逐字节不变。"""
+    assert _cmd().count("--teacher-argmax") == 0
+    assert _cmd(rollout_argmax=False).count("--teacher-argmax") == 0
+    assert _cmd(rollout_argmax=True).count("--teacher-argmax") == 1

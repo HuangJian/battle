@@ -64,6 +64,27 @@ def test_quota_zero_is_caller_gated_but_never_crashes(tmp_path: Path) -> None:
     assert kept == [] and trimmed == 3 and samples == 0
 
 
+def test_protected_greedy_is_kept_even_after_quota(tmp_path: Path) -> None:
+    """greedy 预筛保住的局优先保留：seed 序前缀不能把它裁掉（plan rev4 §7.7）。"""
+    root = tmp_path / "dist"
+    dirs = [_shard(root, 2000, i, 100) for i in range(3)]
+    protected = {dirs[2].name}
+    kept, trimmed, samples = _trim_shards_to_quota(dirs, 100, protected=protected)
+    assert [p.name for p in kept] == [protected.copy().pop()]
+    assert trimmed == 2 and samples == 100
+
+
+def test_protected_can_exceed_quota(tmp_path: Path) -> None:
+    """protected 是硬保留：两份各 100 > quota 100 也全留（预筛已保证 ≤ per-stage target）。"""
+    root = tmp_path / "dist"
+    dirs = [_shard(root, 2000, i, 100) for i in range(3)]
+    kept, trimmed, samples = _trim_shards_to_quota(
+        dirs, 100, protected={dirs[1].name, dirs[2].name}
+    )
+    assert {p.name for p in kept} == {dirs[1].name, dirs[2].name}
+    assert trimmed == 1 and samples == 200
+
+
 def test_bad_manifest_is_skipped_not_fatal(tmp_path: Path) -> None:
     """坏 manifest / 缺 nSamples 的 shard 跳过（少一局不该让整轮发布失败）。"""
     root = tmp_path / "dist"

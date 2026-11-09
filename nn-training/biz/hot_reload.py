@@ -63,6 +63,10 @@ RESTART_ONLY_FIELDS: tuple[str, ...] = (
     # （`flat_overrides` 以 dict 物化），热加载**不写回**这两键 ⇒「停止→启动后生效」名副其实。
     "kickstart_burn",
     "paired_kill",
+    # greedy 结果配额（plan/greedy-outcome-quota rev4）：采集计划每轮开头只算一次；
+    # 三档比例变了 corpus_identity_fp 会拒绝整单，cap/soft 这类预算/降级开关则
+    # 只记 restart-only（热改不会让本轮已派出的 greedy 批次回头）。
+    "greedy_quota",
     "normalize_ret",
     "out",
     "traj",

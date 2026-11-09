@@ -131,6 +131,9 @@ SLOT_WRITERS: dict[str, frozenset[str]] = {
     "_code_zip_path": frozenset({"loop_remote_job.py"}),
     "_collect_child": frozenset({"loop_remote_job.py"}),
     "_demo_raw": frozenset({"loop_remote_job.py"}),
+    # greedy 结果配额（plan/greedy-outcome-quota rev4）：发布阶段预筛完后写；
+    # 采集阶段在 `loop_volume` 自己那份槽位写，本族只登记这一处。
+    "_greedy_stats": frozenset({"loop_remote_job.py"}),
     "_kl_cum": frozenset({"loop_remote_job.py"}),
     "_ppo_cloud_sec": frozenset({"loop_remote_job.py"}),
     "_ppo_sec": frozenset({"loop_remote_job.py"}),
@@ -203,6 +206,9 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             "worker.config",
             "trainer.dispatch_queue",
             "worker.resume",
+            # greedy 结果配额（plan/greedy-outcome-quota rev4）：预筛模块延迟 import，
+            # 与发布相位方法的既有 import 形状一致。
+            "worker.greedy_quota",
             "biz.reward_library",
         }
     ),

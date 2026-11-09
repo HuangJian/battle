@@ -71,6 +71,8 @@ CLUSTER = (
     "_volume_journal_replay",
     "_volume_topup",
     "_volume_collect_continuous",
+    # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立采集阶段。
+    "_volume_collect_greedy",
     # 2026-10-28（零落盘）：补波的「本波已采多少」要读本轮内存账（回传 shard 不在盘上）。
     "_round_mem_shards",
 )

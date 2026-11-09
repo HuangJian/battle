@@ -59,6 +59,7 @@ MOVED_NAMES = {
     "GatesSpec",
     "PlayerBlock",
     "StateInitBlock",
+    "GreedyQuotaBlock",
     "CourseConfig",
     "KickstartBurnBlock",
     "PairedKillBlock",

@@ -92,6 +92,10 @@ def build_rollout_cmd(
             "--node-label",
             node_label,
         ]
+        # greedy 采集（plan/greedy-outcome-quota rev4）：只有 greedy 阶段临时置位；
+        # 普通 rollout 不置位 ⇒ 命令逐字节不变。TS 侧据此写 manifest labelMode。
+        if bool(getattr(args, "rollout_argmax", False)):
+            cmd.append("--teacher-argmax")
         # goal-nn 卡 A2/A3：玩具奖励臂 / dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
         # A2 已废（plan/rl-training-config.md §4：奖励由课程配置公式驱动，TS 不再算
         # reward）——不再追加 --reward；--dodge 保留透传。

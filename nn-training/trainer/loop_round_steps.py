@@ -387,6 +387,21 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
           「本机自己采样」（那会与云机取包链双跑）。
         """
         it = ctx.it
+        # 每轮清零：上一轮的 greedy plan/stats/report 不得影响本轮发布
+        #（node/held 分支不跑采集，但发布相位仍会读这三个槽位）。
+        self._greedy_plan = None
+        self._greedy_stats = None
+        self._greedy_report = None
+        # greedy 结果配额 v1 只支持本机连续配额（plan/greedy-outcome-quota rev4）：
+        # node 腿的 argv 由 sampler-agent 派发，没有第二遍 greedy 钩子；静默退化 = 漏采。
+        # 判据是「三档比例和 > 0」：声明了块但全 0 = 合法关闭，不能连 node 腿都拒掉。
+        if ctx.collect_mode == COLLECT_NODE:
+            from worker.greedy_quota import quota_active
+
+            if quota_active(getattr(self.args, "greedy_quota", None)):
+                raise RuntimeError(
+                    "greedy_quota 只支持本机采集（collect_mode=local）；node 路径未实现"
+                )
         if ctx.collect_mode == COLLECT_HELD:
             raise RuntimeError(
                 "[run_rl] 被接管的课走到了采集步——步骤顺序被改动过？"
@@ -410,7 +425,11 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
             elif self._volume_active():
                 # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
                 # 派发。必须在 `_log_report` 之前（本轮报告要含全部批）。
+                self._volume_ordinary_seeds = set()
                 self._volume_collect_continuous(it, ctx.dist_cfg)
+                # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立种子流 + 自己的
+                # target/cap；课程 volume 块保持原样。
+                self._volume_collect_greedy(it, ctx.dist_cfg)
             else:
                 self._rollout_phase(it, ctx.pairs, ctx.dist_cfg, ctx.eval_on_round)
         return None

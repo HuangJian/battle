@@ -944,7 +944,8 @@ function logProbAt(logits: Float32Array, mask: number[] | null, idx: number): nu
 
 /** 掩码 argmax：并列取最小索引；全掩码退末位（与 `export-eval-game` 同语义）。
  *
- *  只服务 `--teacher-argmax`：BC 语料要的是「**教师的最优动作**」，不是「教师的采样」。
+ *  服务 `--teacher-argmax`：BC 语料要的是「**教师的最优动作**」，不是「教师的采样」；
+ *  greedy 分层采集同样靠它产出「失败/超时」轨迹（plan/greedy-outcome-quota rev4）。
  *  `sampleCat` 落的是策略分布的样本（含随机性），直接当 BC 标签会把噪声也学进去。 */
 function argmaxCat(logits: Float32Array, mask: number[] | null): number {
   let best = -Infinity
@@ -1248,7 +1249,11 @@ function runOne(
    * 经 `--decision-k` 透传（shard manifest 的 `k` 记有效值）。
    */
   decisionK: number = DEFAULT_DECISION_K,
-  /** `--teacher-argmax`：动作取 argmax 而非采样（BC 语料用；PPO rollout 保持采样）。 */
+  /** `--teacher-argmax`：动作取 argmax 而非采样。
+   *  BC 语料与 greedy 分层采集（plan/greedy-outcome-quota rev4）共用此开关。
+   *  ⚠ greedy 子批混入 PPO 时是**确定性策略梯度近似**，不是 on-policy PPO 目标：
+   *  行为策略是 δ(a)，正确权重应为 π_new(a)，而 `engine.py` 用的是 π_new/π_old
+   *  （相差 1/π_old(a)）。首 epoch ratio=1 只说明数值自洽，不说明权重正确。 */
   teacherArgmax = false,
 ): RunResult {
   const world = new World()
@@ -2334,6 +2339,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         collector: 'RL',
         policy: 'nn-student-rl',
         metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v16 = [N+1,90]）；shape[0] 下游据此分版本
+        // greedy 采集 provenance（plan/greedy-outcome-quota rev4）：只在 --teacher-argmax
+        // 时写；旧 shard 无此键 = 采样语料（逐字节不变）。trim/兄弟复用据此判模式。
+        ...(teacherArgmax ? { labelMode: 'greedy' } : {}),
         difficulty,
         stage: si,
         seed,

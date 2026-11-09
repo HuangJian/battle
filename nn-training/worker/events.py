@@ -250,6 +250,13 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             # 「哪一轮起换了分配口径」只在这里可读（§15.5：不静默漂移）。
             "volume_alloc_rule": m.get("volume_alloc_rule"),
             "volume_stage_stats": m.get("volume_stage_stats"),
+            # greedy 结果配额（plan/greedy-outcome-quota rev4）：仅激活时写键，
+            # 普通轮事件逐字节不变。
+            **(
+                {"greedy_quota_stats": m["greedy_quota_stats"]}
+                if m.get("greedy_quota_stats")
+                else {}
+            ),
             # 采样子集（plan/it-stage-ratation §9.1）：`rotation_mode` 缺席 ⇒ 不写键。
             **({"rotation": m["rotation"]} if m.get("rotation") else {}),
             # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：
@@ -307,6 +314,7 @@ def write_rollout_end(
     *,
     rotation: dict | None = None,
     volume_stage_stats: dict | None = None,
+    greedy_quota_stats: dict | None = None,
 ) -> dict:
     """`rollout_end` 事件：本轮**采集收官即刻**落账（不等 PPO / 权重回传）。
 
@@ -350,6 +358,7 @@ def write_rollout_end(
             # 采样子集 + 分关账（采集侧事实；None ⇒ 不写键）。
             **({"rotation": rotation} if rotation else {}),
             **({"volume_stage_stats": volume_stage_stats} if volume_stage_stats else {}),
+            **({"greedy_quota_stats": greedy_quota_stats} if greedy_quota_stats else {}),
             # 权重下发墙钟属**采集侧**（report 里本来就有）⇒ 这一行也带。
             "dist_phase_sec": report.get("dist_phase_sec"),
             # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）

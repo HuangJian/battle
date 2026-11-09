@@ -655,6 +655,53 @@ class StateInitBlock(BaseModel):
         return self
 
 
+class GreedyQuotaBlock(BaseModel):
+    """课程 `greedy_quota` 块：greedy 采集语料的**结果构成**（plan/greedy-outcome-quota rev4）。
+
+    三个比例的分母 = **本轮总 transition**（Q1/Q2）；和 ≤ 1，其余为普通采样语料。
+    `oversample_cap` 是 greedy 采集阶段的过采倍率硬顶（2.0 = 多采 100%）。
+    `soft=True` 触顶走降级；`soft=False` 响亮失败。
+
+    只用于**语料筛选**，不参与奖励结算（reward 仍按 `terminal[outcome]` 走）。
+    缺席 = 老行为逐字节不变；`loss` 在钢环下大概率置 0（保留词表位置）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    win: float = 0.0
+    loss: float = 0.0
+    timeout: float = 0.0
+    oversample_cap: float = 2.0
+    soft: bool = True
+
+    @field_validator("win", "loss", "timeout", mode="before")
+    @classmethod
+    def _ratio_before(cls, v: Any) -> Any:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"greedy_quota 比例必须是 number，收到 {v!r}")
+        f = float(v)
+        if not math.isfinite(f) or f < 0 or f > 1:
+            raise ValueError(f"greedy_quota 比例必须在 [0,1]，收到 {v!r}")
+        return f
+
+    @field_validator("oversample_cap", mode="before")
+    @classmethod
+    def _cap_before(cls, v: Any) -> Any:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"greedy_quota.oversample_cap 必须是 number，收到 {v!r}")
+        f = float(v)
+        if not math.isfinite(f) or f < 1.0:
+            raise ValueError(f"greedy_quota.oversample_cap 必须 ≥1，收到 {v!r}")
+        return f
+
+    @model_validator(mode="after")
+    def _sum_le_one(self) -> GreedyQuotaBlock:
+        total = self.win + self.loss + self.timeout
+        if total > 1.0 + 1e-9:
+            raise ValueError(f"greedy_quota 三档和必须 ≤1，收到 {total!r}")
+        return self
+
+
 #: `kickstart_burn.mode` 的合法值域（与 `worker/kickstart_burn.py::MODES` 同源）。
 #: biz 不能 import worker（向上边）⇒ 字面量在这边冻结，由 `tests/worker/test_kickstart_plan.py` 对账。
 KICKSTART_BURN_MODES: tuple[str, ...] = ("auto", "baseline", "paired")
@@ -945,6 +992,11 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 缺席 = 标准开局（老课程逐字节不变）。开训前置（银行 manifest 在盘上）由
     #: `apply_course` 在启动期校验——`load_course` 不多读盘（它只读课程文件本身）。
     state_init: StateInitBlock | None = None
+
+    #: greedy 采集语料的结果构成（plan/greedy-outcome-quota rev4）。缺席 = 老行为。
+    #: 只决定「训练集放哪些样本」；`oversample_cap`/`soft` 是预算/降级开关，
+    #: 按 `max_games_per_stage`/`est` 的分类学**不进** `corpus_identity_fp`。
+    greedy_quota: GreedyQuotaBlock | None = None
 
     # ---- 奖励 ----
     reward: RewardBlock = RewardBlock()
@@ -1252,6 +1304,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # （P3 的 `biz/cmd.build_rollout_cmd`）只要 JSON 可序列化的数据——`echo_config`
             # 也会 json.dumps 它，pydantic 模型对象在那里直接炸。
             out["state_init"] = self.state_init.model_dump()
+        if "greedy_quota" in explicit and self.greedy_quota is not None:
+            # 同 state_init：嵌套块必须走这里，不进标量 mapping（漏映射 = 静默失效）。
+            out["greedy_quota"] = self.greedy_quota.model_dump()
         if "kickstart_burn" in explicit and self.kickstart_burn is not None:
             # 止损块 → args（dict）：这是 **restart-only 的冻结面**——读面消费 args 的启动快照，
             # 热加载不写回它（`biz/hot_reload.RESTART_ONLY_FIELDS`），mid-run 编辑只记「停止→启动后生效」。

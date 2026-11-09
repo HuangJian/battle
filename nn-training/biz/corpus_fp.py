@@ -23,6 +23,11 @@ from biz.course_spec import CourseConfig
 #: 于是规则变更自动让旧 shard 成为异血缘（D14 拒收），而不是静默混训（§15.5）。
 VOLUME_RULE_V1 = 1
 
+#: greedy 结果配额规则版本（plan/greedy-outcome-quota rev4）。只收三档比例 + 本常量；
+#: `oversample_cap`/`soft` 是预算/降级开关，按 `max_games_per_stage` 的分类学不进身份。
+#: v2：timeout 目标按实际供给分配（win/loss 仍逐关）；选择语义变 ⇒ 语料身份必须变。
+GREEDY_QUOTA_RULE_V1 = 2
+
 
 def _bc_action_space(bc_path: str) -> str:
     """读起点权重的动作空间：`'v6'`（hold2/move4/fire3）或 `'legacy'`（5/2）。
@@ -193,6 +198,17 @@ def _identity_payload(course: CourseConfig, *, drop_reward: bool = False) -> dic
             "cut_step": si.cut_step,
             "rotate_cuts": bool(si.rotate_cuts),
         }
+    # greedy 结果配额（plan/greedy-outcome-quota rev4）：只收**决定训练集放哪些样本**的
+    # 三档比例 + 规则版本；oversample_cap/soft 不进（预算/降级开关，同 max_games_per_stage）。
+    # ⚠ 仅激活时进 payload：缺席 = 老指纹逐字节不变。
+    if course.greedy_quota is not None:
+        gq = course.greedy_quota
+        payload["greedy_quota"] = {
+            "win": float(gq.win),
+            "loss": float(gq.loss),
+            "timeout": float(gq.timeout),
+        }
+        payload["greedy_quota_rule"] = GREEDY_QUOTA_RULE_V1
     # 决策事件补充（§6 R2）：transition 粒度（Δt 分布）变了 ⇒ 样本身份变；
     # 同样**仅在激活时**（无条件加入会让一切既有课程指纹漂移，在跑的腿 shard 被判异身份）。
     if bool(getattr(course, "decision_events", False)):

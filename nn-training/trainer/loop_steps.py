@@ -624,6 +624,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                     self.args, it, getattr(self, "_rotate_seed", 0)
                 ),
                 volume_stage_stats=getattr(self, "_volume_stage_stats", None),
+                greedy_quota_stats=getattr(self, "_greedy_stats", None),
             )
         )
 
@@ -668,6 +669,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                         self._volume_stage_stats.get("rule") if self._volume_stage_stats else None
                     ),
                     "volume_stage_stats": self._volume_stage_stats,
+                    "greedy_quota_stats": getattr(self, "_greedy_stats", None),
                     # 采样子集读数（plan §9.1；`rotation_mode` 缺席 ⇒ None ⇒ 不写键）。
                     "rotation": _rotation_event(
                         self.args, it, getattr(self, "_rotate_seed", 0)

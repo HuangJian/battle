@@ -42,7 +42,11 @@ from worker.loop_round import RemotePpoJob
 
 
 def _trim_shards_to_quota(
-    shard_dirs: list[Path], quota: int, *, mem: dict[str, dict] | None = None
+    shard_dirs: list[Path],
+    quota: int,
+    *,
+    mem: dict[str, dict] | None = None,
+    protected: set[str] | None = None,
 ) -> tuple[list[Path], int, int]:
     """按 `per_stage_quota` **裁掉超采的 shard**（整局取舍）→ `(保留集, 丢了几局, 保留 samples)`。
 
@@ -61,7 +65,8 @@ def _trim_shards_to_quota(
     ≤ 331（9%），比 46% 的白传好一个量级。
 
     顺序：每个 stage 内按目录名（`rl_s{stage}_seed{seed}` ⇒ seed 序）取，无偏；
-    跨 stage 无关（配额本来就是逐关的）。
+    跨 stage 无关（配额本来就是逐关的）。`protected`（greedy 预筛保住的局）在每个
+    stage 内**优先保留**，即使配额已满也不裁——否则 seed 序前缀会把 greedy 子集反杀。
     """
     import json as _json
 
@@ -84,8 +89,12 @@ def _trim_shards_to_quota(
     kept_samples = 0
     for st in sorted(by_stage):
         acc = 0
-        for p, n in sorted(by_stage[st], key=lambda t: t[0].name):
-            if acc >= quota:
+        for p, n in sorted(
+            by_stage[st],
+            key=lambda t: (0 if protected and t[0].name in protected else 1, t[0].name),
+        ):
+            is_protected = bool(protected and p.name in protected)
+            if acc >= quota and not is_protected:
                 trimmed += 1
                 continue
             kept.append(p)
@@ -101,6 +110,8 @@ class TrainingRemoteJob(TrainingRemotePush):
     # 「有意并存」的理由同 `trainer/loop_remote_push.py`；`args` / `_code_zip_path` 由基类声明。
     _traj_dir: Any
     _jsonl_path: Any
+    #: greedy 结果配额（plan/greedy-outcome-quota rev4）：预筛阶段写；plan 只经 getattr 读。
+    _greedy_stats: Any
     _ppo_sec: float
     #: 云端 worker **自报**的真训练秒（load+chunk+update，不含上传/排队/下载）。
     #: 与 `_ppo_sec`（往返墙钟）分开记——后者打包传输与排队，用于诊断/配额，
@@ -322,8 +333,35 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   PPO 侧 `per_stage_quota` 的截断保留作第二道保险（裁后几乎不会再有触发）。
         #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
         quota = self._per_stage_quota(it)
+        protected: set[str] = set()
+        plan = getattr(self, "_greedy_plan", None)
+        if plan is not None and export_path is None and shard_dirs:
+            # greedy 分层预筛（plan/greedy-outcome-quota rev4）：必须在配额裁剪**之前**，
+            # 把多余 greedy 局按 outcome/逐关丢掉，保住子集交给 trim 的 protected。
+            from worker.greedy_quota import (
+                load_manifests,
+                merge_greedy_stats,
+                select_greedy_shards,
+            )
+
+            manifests = load_manifests(shard_dirs, mem)
+            sel = select_greedy_shards([p.name for p in shard_dirs], manifests, plan, it=it)
+            if sel.drop:
+                shard_dirs = [p for p in shard_dirs if p.name not in sel.drop]
+                log(f"it{it}: greedy 预筛丢 {len(sel.drop)} 局（逐关/三档配额）")
+            protected = set(sel.keep)
+            # 采集阶段的留痕（degraded / cap_hit / waves / targets / total）**不得**被预筛
+            # 读数覆盖：本方法在 `step_rollout` 之后、`record_iteration` 之前跑，两处事件
+            # 读的是同一个槽位。预筛读数挂子键 ⇒ iteration 事件同时可归因采集与预筛
+            # （plan rev4 §5.1/§5.2 的「是否触发降级要写 iteration 事件」）。
+            self._greedy_stats = merge_greedy_stats(
+                getattr(self, "_greedy_stats", None), sel.stats
+            )
+            log(f"it{it}: greedy 预筛 stats={sel.stats}")
         if quota > 0 and export_path is None:
-            kept, n_trimmed, n_kept = _trim_shards_to_quota(shard_dirs, quota, mem=mem)
+            kept, n_trimmed, n_kept = _trim_shards_to_quota(
+                shard_dirs, quota, mem=mem, protected=protected or None
+            )
             if n_trimmed:
                 log(
                     f"it{it}: 打包前按配额裁剪 shard —— 丢 {n_trimmed} 局未传"

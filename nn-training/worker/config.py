@@ -101,6 +101,9 @@ from biz.course_spec import (
     GateTeacher as GateTeacher,
 )
 from biz.course_spec import (
+    GreedyQuotaBlock as GreedyQuotaBlock,
+)
+from biz.course_spec import (
     KickstartBurnBlock as KickstartBurnBlock,
 )
 from biz.course_spec import (
