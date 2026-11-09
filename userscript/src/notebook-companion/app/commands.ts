@@ -181,6 +181,10 @@ export async function runFrameCommand(
           ? Math.min(24 * 3600, Math.max(0, Math.round(a.intervalSec)))
           : 0
       deps.loop.setAutoSave(enabled, intervalSec)
+      // 输出读不到（魔搭）时「自动保存并清空」不可能工作：写进配置，但必须让面板显示失败
+      if (deps.adapter.outputUnavailable) {
+        return { ok: false, reason: deps.adapter.outputUnavailable }
+      }
       return { ok: true, value: { enabled, intervalSec } }
     }
     case 'openLog':

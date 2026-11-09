@@ -1,6 +1,6 @@
 /** sites/types.ts — 站点适配器契约（W0 只落类型；Kaggle 实现在 W2）。 */
 
-export type SiteId = 'kaggle' | 'colab' | 'aistudio'
+export type SiteId = 'kaggle' | 'colab' | 'aistudio' | 'modelscope'
 
 export interface CellRef {
   id: string
@@ -16,6 +16,11 @@ export type CmdResult =
 export interface FrameAdapter {
   readonly site: SiteId
   readonly ready: boolean
+  /**
+   * 输出文本读不到时的原因（站点把输出放在跨域 webview 里，例如魔搭 Web IDE）。
+   * 非空 ⇒ 搬运/保存一律 fail closed：`ship-loop` 不会「0 字节成功然后清空」。
+   */
+  readonly outputUnavailable?: string
   cells(): CellRef[]
   outputText(cell: CellRef): string
   sourceText(cell: CellRef): string

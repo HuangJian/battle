@@ -1,4 +1,5 @@
 import { createRuntime, type Runtime } from '../../runtime'
+import type { FrameAdapter, SessionAdapter } from '../sites/types'
 import {
   applyPageAutoSave,
   autoSaveKeyFor,
@@ -22,6 +23,12 @@ import {
   AistudioSessionAdapter,
   parseAistudioNotebookKey,
 } from '../sites/aistudio'
+import {
+  ModelscopeAdapter,
+  ModelscopeSessionAdapter,
+  parseModelscopeNotebookKey,
+  parseModelscopeSession,
+} from '../sites/modelscope'
 import {
   mountPanel,
   PANEL_POS_KEY,
@@ -143,7 +150,10 @@ function pageTag(win: Window): string {
  * 持有搬运权」）。存进 sessionStorage ⇒ 刷新沿用同一个 writer，第一笔就顺手续租；真另有
  * 页签时它有自己的标签与日志键，互不干扰。
  */
-function writerTag(win: Window, role: 'host' | 'frame' | 'colab' | 'aistudio'): string {
+function writerTag(
+  win: Window,
+  role: 'host' | 'frame' | 'colab' | 'aistudio' | 'modelscope',
+): string {
   const key = `${WRITER_KEY}:${role}`
   const gen = (): string => `${role}-${randomTag(win)}`
   try {
@@ -759,14 +769,28 @@ function startSingle(
   runtime: Runtime,
   log: (msg: string) => void,
 ): () => void {
-  // 同文档站点：Colab 与 AI Studio（BML Codelab）。cell 都在本帧里 —— 不建桥，差别只在
-  // 适配器、日志键与会话实现。
+  // 同文档站点：Colab、AI Studio（BML Codelab）、魔搭 Web IDE 的 notebook 帧。cell 都在本帧里 ——
+  // 不建桥，差别只在适配器、日志键与会话实现。
   const site = singleSite(href) ?? 'colab'
-  const adapter = site === 'aistudio' ? new AistudioAdapter(doc) : new ColabAdapter(doc)
-  const sessionAdapter =
-    site === 'aistudio' ? new AistudioSessionAdapter(doc, href) : new ColabSessionAdapter(doc, href)
-  const notebookKey =
-    site === 'aistudio' ? parseAistudioNotebookKey(href) : parseColabNotebookKey(href)
+  const adapter: FrameAdapter =
+    site === 'aistudio'
+      ? new AistudioAdapter(doc)
+      : site === 'modelscope'
+        ? new ModelscopeAdapter(doc)
+        : new ColabAdapter(doc)
+  const sessionAdapter: SessionAdapter =
+    site === 'aistudio'
+      ? new AistudioSessionAdapter(doc, href)
+      : site === 'modelscope'
+        ? new ModelscopeSessionAdapter(doc)
+        : new ColabSessionAdapter(doc, href)
+  /** 魔搭的 notebook 名不在 URL 里，只能从工作台标签读；warm 起来之前是空串（见下面的补读）。 */
+  let notebookKey =
+    site === 'aistudio'
+      ? parseAistudioNotebookKey(href)
+      : site === 'modelscope'
+        ? parseModelscopeNotebookKey(doc)
+        : parseColabNotebookKey(href)
   /** 本页标签：日志键、任务表分桶、归属阀共用同一个值。 */
   const page = pageTag(win)
   applyPageAutoSave(runtime, page, config)
@@ -1000,7 +1024,33 @@ function startSingle(
     adapter.ready ? '已连接（笔记本就绪）' : '已连接（等待笔记本）',
     adapter.ready ? 'ok' : 'warn',
   )
+  if (site === 'modelscope') {
+    // 输出在跨域 webview 里：面板一上来就说清楚，不能让人以为「保存日志」在正常工作。
+    panel.setStatus('已连接（魔搭 Web IDE：cell 输出在跨域 webview，保存日志不可用）', 'warn')
+  }
   panel.setStopPpoVisible(offlineDetected)
+
+  // 魔搭的 notebook 身份在 URL 里没有（帧地址只有 `?t=&lang=`），只能等工作台把标签渲染出来；
+  // 读到就换日志键/任务桶，最多等 30s（换键 = 换一份日志，与 host 的 attach 同口径）。
+  let identityTimer: ReturnType<typeof setInterval> | null = null
+  if (site === 'modelscope' && !notebookKey) {
+    const deadline = Date.now() + 30_000
+    identityTimer = setInterval(() => {
+      const key = parseModelscopeNotebookKey(doc)
+      if (!key) {
+        if (Date.now() < deadline) return
+        if (identityTimer !== null) clearInterval(identityTimer)
+        identityTimer = null
+        return
+      }
+      notebookKey = key
+      loop.setSessionBase(parseModelscopeSession(doc))
+      panel?.setSession(`notebook:${loop.session}`)
+      op('identity', `notebook=${key} session=${loop.session}`)
+      if (identityTimer !== null) clearInterval(identityTimer)
+      identityTimer = null
+    }, 1000)
+  }
 
   // 离线训练页（battle.offline.ipynb）：训练 cell 从排队转真正执行时上报一次。
   // 与 host 同一通道（`/api/notebookOp`）；Colab/AI Studio 没有桥，直接落本页日志。
@@ -1116,6 +1166,7 @@ function startSingle(
   return () => {
     clearInterval(markTimer)
     if (offlineTimer !== null) clearInterval(offlineTimer)
+    if (identityTimer !== null) clearInterval(identityTimer)
     hubSync?.cancel()
     doc.removeEventListener('visibilitychange', onVisibility)
     for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })

@@ -38,6 +38,15 @@ describe('detectRole', () => {
     expect(detectRole('https://aistudio.baidu.com/studio/x')).toBeNull()
   })
 
+  it('魔搭的 notebook-ide 帧 = single；外层 /code/workspace 与其它路径不是', () => {
+    expect(detectRole('https://modelscope.cn/notebook/main.html?t=1&lang=zh-CN')).toBe('single')
+    expect(detectRole('https://www.modelscope.cn/notebook/main.html?t=1')).toBe('single')
+    // 外层 React 外壳里没有 notebook DOM（cell 在 iframe 里）⇒ 不接
+    expect(detectRole('https://modelscope.cn/code/workspace')).toBeNull()
+    expect(detectRole('https://modelscope.cn/notebook/other.html')).toBeNull()
+    expect(detectRole('https://evil-modelscope.cn/notebook/main.html')).toBeNull()
+  })
+
   it('其他页面 / 非 https / 伪域名一律 null', () => {
     expect(detectRole('https://www.kaggle.com/datasets/x')).toBeNull()
     expect(detectRole('http://www.kaggle.com/code/x')).toBeNull()

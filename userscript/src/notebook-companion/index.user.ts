@@ -2,11 +2,13 @@
 // @name         Battle City Notebook Companion
 // @namespace    battle-city-web
 // @version      0.1.0
-// @description  把 Kaggle / Colab notebook 的 cell 输出定期保存到本机 dashboard
+// @description  把 Kaggle / Colab / AI Studio notebook 的 cell 输出定期保存到本机 dashboard（魔搭：面板可用，输出在跨域 webview 里读不到）
 // @match        https://www.kaggle.com/code/*
 // @match        https://*.jupyter-proxy.kaggle.net/*
 // @match        https://colab.research.google.com/*
 // @match        https://aistudio.baidu.com/*
+// @match        https://modelscope.cn/notebook/*
+// @match        https://www.modelscope.cn/notebook/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue

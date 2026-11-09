@@ -36,7 +36,7 @@ export const OP_MAX_BYTES = 2 * 1024 * 1024
 export const OP_MAX_DETAIL = 400
 export const OP_MAX_OP_NAME = 64
 
-const SITES = ['kaggle', 'colab', 'aistudio'] as const
+const SITES = ['kaggle', 'colab', 'aistudio', 'modelscope'] as const
 const OP_NAME_RE = /^[A-Za-z0-9:_.-]{1,64}$/
 const TAG_RE = /^[a-z0-9-]{0,32}$/i
 

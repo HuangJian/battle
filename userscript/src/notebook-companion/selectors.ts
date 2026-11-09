@@ -57,11 +57,14 @@ export function deepQueryAll(root: ParentNode, selector: string): Element[] {
 
 export type Role = 'host' | 'frame' | 'single'
 /** 同文档站点（cell 与面板同页，不建 iframe 桥）。 */
-export type SingleSite = 'colab' | 'aistudio'
+export type SingleSite = 'colab' | 'aistudio' | 'modelscope'
 
 /**
- * 同文档站点判定：Colab 与 AI Studio（BML Codelab 的 notebook 帧）。
+ * 同文档站点判定：Colab、AI Studio（BML Codelab 的 notebook 帧）、魔搭（ModelScope）Web IDE 的
+ * notebook 帧。
  * AI Studio 只认 `/user/<uid>/<pid>/lab/…` 这层——外层 `/vscode/` 工作台不接（面板无处安放）。
+ * 魔搭只认 `/notebook/main.html`：那是 hermes-ide（VS Code 工作台）帧，cell 与输出都在里面；
+ * 外层 `/code/workspace` 只是 React 外壳（没有 notebook DOM），不接。
  */
 export function singleSite(rawUrl: string): SingleSite | null {
   let url: URL
@@ -76,13 +79,19 @@ export function singleSite(rawUrl: string): SingleSite | null {
   if (host === 'aistudio.baidu.com' && /\/user\/[^/]+\/\d+\/lab(\/|$)/.test(url.pathname)) {
     return 'aistudio'
   }
+  if (
+    (host === 'modelscope.cn' || host === 'www.modelscope.cn') &&
+    url.pathname === '/notebook/main.html'
+  ) {
+    return 'modelscope'
+  }
   return null
 }
 
 /**
  * Kaggle 编辑页 = 外层 `www.kaggle.com/code/*`；notebook = `*.jupyter-proxy.kaggle.net`；
- * Colab = 单文档（cell 与面板同页、无跨域 iframe ⇒ `single`）。
- * 其余（数据集页、http、伪域名、非 URL）一律 null —— 角色判定只认这三个入口。
+ * Colab / AI Studio / 魔搭 = 单文档（cell 与面板同页 ⇒ `single`）。
+ * 其余（数据集页、http、伪域名、非 URL）一律 null —— 角色判定只认这些入口。
  */
 export function detectRole(rawUrl: string): Role | null {
   let url: URL

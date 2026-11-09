@@ -46,7 +46,7 @@ const PRUNE_THROTTLE_MS = 60 * 60 * 1000
 /** 导航状态点：最近 30s 有写入 = running。 */
 const RUNNING_WINDOW_MS = 30_000
 
-const SITES = ['kaggle', 'colab', 'aistudio'] as const
+const SITES = ['kaggle', 'colab', 'aistudio', 'modelscope'] as const
 export type NotebookSite = (typeof SITES)[number]
 export type NotebookMode = 'append' | 'reset' | 'clear' | 'probe'
 const MODES: readonly NotebookMode[] = ['append', 'reset', 'clear', 'probe']

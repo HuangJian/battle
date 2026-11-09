@@ -1,6 +1,6 @@
 /** protocol.ts — 页面 → dashboard 日志协议 v2（与 dashboard 侧各自实现，不跨项目 import）。 */
 
-export type NotebookSite = 'kaggle' | 'colab' | 'aistudio'
+export type NotebookSite = 'kaggle' | 'colab' | 'aistudio' | 'modelscope'
 export type NotebookMode = 'append' | 'reset' | 'clear' | 'probe'
 
 export interface NotebookChunk {

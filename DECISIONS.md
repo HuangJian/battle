@@ -11474,3 +11474,27 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   由离线页直接停其它 PPO 页（浏览器跨页无法互停，且误停代价高）。
 - **验收**：`cd userscript && bun run check` 271 pass；typecheck / oxlint / build 全绿；
   新增 `offline-watch` 7 用例、`offline-wiring` 4 用例、面板/配置回归。
+## §2026-11-09-goalnn-notebook-modelscope（魔搭 Web IDE：面板接入，日志搬运 fail closed）
+
+- **背景**：用户要求 userscript 支持 `modelscope.cn` 上跑的 notebook（存档 `D:\github\modelscope.mhtml`，
+  2026-11-09 抓 `/code/workspace`）。实测是「外层 React 外壳 + **同源** iframe
+  `modelscope.cn/notebook/main.html`（魔搭 hermes-ide = VS Code 工作台）」，不是 JupyterLab：
+  cell 是 `.monaco-list-row.code-cell-row/.markdown-cell-row[data-index]`（虚拟化）、源码是 Monaco
+  `.view-line`、执行态是行 `aria-label="code cell, executing"` + `codicon-notebook-state-executing`。
+- **决定**：把 `/notebook/main.html` 认成 `single` 站点 `modelscope`（面板挂在帧内，与 Colab/AI Studio
+  同一条路），不接外层 `/code/workspace`（那里没有 notebook DOM）。适配器只做实测过的动作：
+  读 cell / 源码 / 执行态、点 cell 左侧主运行按钮（执行中只认账，绝不点「停止」）、工具栏
+  `中断` / `Restart Kernel` / `清除所有输出`（后者要后置条件）、CFG 定位、脚本自己的折叠层、滚动、定时徽标。
+- **输出读不到 ⇒ fail closed**：cell 输出（含 stdout）只渲染在跨域 webview
+  （`g.alicdn.com/modelscope-fe/…/webviews/index.html?purpose=notebookRenderer` → `*.vscode-cdn.net`），
+  主文档 `.rendered-output` 为空（存档里训练日志只在那个 iframe）。因此 `FrameAdapter.outputUnavailable`
+  非空，`ship-loop` 的 `flushAll/saveAndClear` 直接带原因失败、`start()` 不挂观察者/定时器 ⇒
+  **绝不出现「0 字节保存成功然后清空」**。日志在魔搭走 notebook 内的 hub 回传。
+- **未实测入口一律 fail closed**：停实例（入口在外层「实例运行中」下拉）、只清空单个 cell、运行全部、
+  折叠输入/输出、`replaceCellSource`（工作台不一定把 monaco 挂到 window ⇒ hub 同步会报原因）。
+- **否决**：外层页挂面板 + 跨帧桥（同源也拿不到 cell，收益为零）；把 userscript 注入 webview
+  （`g.alicdn.com` 与 `vscode-cdn.net` 双跨域，Chrome 也不加载 `vscode-remote+` 方案）；用
+  `GM_xmlhttpRequest` 去 DSW 网关私接口拉 kernel 输出（要 tkn、随平台版本漂移）。
+- **验收**：`cd userscript && bun run check` 292 pass（新增 `test/modelscope.test.ts` 20 用例 +
+  `test/fixtures/modelscope.html`）；`cd dashboard && bun run typecheck` 绿、`bun run test` 1983 pass
+  （两个 `SITES` 白名单加 `modelscope`）。

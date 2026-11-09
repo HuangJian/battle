@@ -12,6 +12,7 @@ import type { NotebookChunk, NotebookResponse, NotebookSite } from '../protocol'
 import { parseKaggleSession, withPageTag } from '../sites/kaggle'
 import { parseColabSession } from '../sites/colab'
 import { parseAistudioSession } from '../sites/aistudio'
+import { parseModelscopeSession } from '../sites/modelscope'
 import {
   COLAB_OBSERVER,
   KAGGLE_OBSERVER,
@@ -75,12 +76,15 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const writer = opts.writer ?? randomWriter()
   // 会话键按站点解析：Colab 的 URL 是 /drive/<fileId>，AI Studio 是 /user/<uid>/<pid>/lab/
   // tree/<nb>，拿 Kaggle 那套只会得到 unknown
+  // 魔搭的 notebook 身份也不在 URL 里（帧地址只有 `?t=&lang=`）：从工作台标签读，所以接的是 doc。
   const parseSession =
-    site === 'aistudio'
-      ? parseAistudioSession
-      : site === 'colab'
-        ? parseColabSession
-        : parseKaggleSession
+    site === 'modelscope'
+      ? () => parseModelscopeSession(opts.doc)
+      : site === 'aistudio'
+        ? parseAistudioSession
+        : site === 'colab'
+          ? parseColabSession
+          : parseKaggleSession
   let baseSession = parseSession(opts.referrer || opts.href)
   let session = opts.pageTag ? withPageTag(baseSession, opts.pageTag) : baseSession
   const now = opts.now ?? (() => Date.now())
@@ -91,6 +95,12 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   let observer: OutputObserver | null = null
   let timer: ReturnType<typeof setInterval> | null = null
   let lastInteraction = 0
+
+  /** 读不到输出（站点把输出放在跨域 webview）⇒ 搬运/保存一律 fail closed，绝不清空。 */
+  const outputBlocker = (): { ok: false; bytes: 0; reason: string } | null =>
+    opts.adapter.outputUnavailable
+      ? { ok: false, bytes: 0, reason: opts.adapter.outputUnavailable }
+      : null
 
   const cells = () => opts.adapter.cells().filter((c) => c.kind === 'code')
   const textOf = (id: string) => {
@@ -152,6 +162,9 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
   const flushAll = async (
     deadlineMs = 60_000,
   ): Promise<{ ok: boolean; bytes: number; reason?: string }> => {
+    // 输出不可读时**连空转都不做**：返回 0 字节成功会被 saveAndClear 当成「已保存」然后清空。
+    const blocked = outputBlocker()
+    if (blocked) return blocked
     const started = now()
     let bytes = 0
     /** 连续「没发出字节且游标没动」的轮数；输出还在长则归零（那是流式，不是冲突）。 */
@@ -340,6 +353,12 @@ export function createShipLoop(opts: ShipLoopOptions): ShipLoop {
     },
     start() {
       if (timer !== null) return
+      const blocked = outputBlocker()
+      if (blocked) {
+        // 不挂观察者、不起定时器：5s 一拍的 0 字节 POST 只是噪音
+        opts.onError?.(blocked.reason)
+        return
+      }
       observer = createOutputObserver(
         opts.doc,
         (id) => dirty.add(id),

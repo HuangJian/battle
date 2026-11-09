@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><title>rollout.ipynb - 无标题 (工作区) - ModelScope Code IDE</title></head>
+<body>
+<!--
+  夹具来源：`D:\github\modelscope.mhtml`（2026-11-09 抓取 https://modelscope.cn/code/workspace 的
+  notebook-ide 帧 → https://modelscope.cn/notebook/main.html）。标签/class/data-* 原样保留，
+  源码与日志换成合成文本（存档里是训练日志与隧道 URL，不入库）。
+  与存档的差异：存档里只有「执行中」的 code cell（data-index=1）；这里另加一个空闲 code cell
+  （data-index=2，运行动画按 VS Code 的 `codicon-play` +「运行单元格」拼出），用来测「点运行 ⇒ 执行」。
+-->
+<div class="monaco-workbench">
+  <div class="tabs-container">
+    <div class="tab tab-actions-right sizing-fit has-icon active selected" role="tab"
+         aria-label="rollout.ipynb" data-resource-name="rollout.ipynb" aria-selected="true">
+      <div class="monaco-icon-label ipynb-ext-file-icon tab-label"
+           aria-label="\mnt\workspace\rollout.ipynb"><a class="label-name">rollout.ipynb</a></div>
+    </div>
+  </div>
+  <div class="notebookOverlay notebook-editor notebook-editor-editable">
+    <div class="notebook-toolbar-container">
+      <div class="notebook-toolbar-left">
+        <div class="monaco-toolbar"><div class="monaco-action-bar">
+          <ul class="actions-container" role="toolbar">
+            <li class="action-item menu-entry notebook-action-view-item"><a class="action-label codicon codicon-add" role="button" aria-label="添加 Markdown 单元格"></a></li>
+            <li class="action-item menu-entry notebook-action-view-item"><a class="action-label codicon codicon-notebook-stop" role="button" aria-label="中断"></a></li>
+            <li class="action-item menu-entry notebook-action-view-item"><a class="action-label icon" role="button" aria-label="Restart Kernel"></a></li>
+            <li class="action-item menu-entry notebook-action-view-item"><a class="action-label codicon codicon-notebook-clear" role="button" aria-label="清除所有输出"></a></li>
+          </ul>
+        </div></div>
+      </div>
+      <div class="notebook-toolbar-right">
+        <div class="monaco-toolbar"><div class="monaco-action-bar">
+          <ul class="actions-container" role="toolbar">
+            <li class="action-item kernel-action-view-item">
+              <a class="action-label codicon codicon-notebook-kernel-select" role="button" aria-label="/usr/local/bin/python"></a>
+              <a class="kernel-label">Python 3.11.11</a>
+            </li>
+          </ul>
+        </div></div>
+      </div>
+    </div>
+    <div class="cell-list-container">
+      <div class="monaco-list list_id_5 mouse-support selection-single" tabindex="0" role="list" aria-label="笔记本">
+        <div class="monaco-scrollable-element" role="presentation">
+          <div class="monaco-list-rows">
+            <div class="monaco-list-row markdown-cell-row" role="listitem" data-index="0"
+                 aria-selected="false" aria-label="markdown cell" id="list_id_5_0">
+              <div class="cell-inner-container">
+                <div class="cell markdown"><div class="markdown-cell-container"># rollout</div></div>
+              </div>
+            </div>
+            <div class="monaco-list-row code-cell-row selected focused" role="listitem" data-index="1"
+                 aria-selected="true" aria-label="code cell, executing" id="list_id_5_1">
+              <div class="cell-inner-container cell-has-toolbar-actions">
+                <div class="cell code">
+                  <div class="run-button-container">
+                    <div class="monaco-toolbar"><div class="monaco-action-bar">
+                      <ul class="actions-container" role="toolbar">
+                        <li class="action-item monaco-dropdown-with-primary" role="presentation">
+                          <div class="action-container menu-entry" role="button" tabindex="0">
+                            <a class="action-label codicon codicon-notebook-stop" role="button" aria-label="停止单元格执行"></a>
+                          </div>
+                          <div class="dropdown-action-container">
+                            <div class="monaco-dropdown"><div class="dropdown-label">
+                              <a class="action-label codicon codicon-chevron-down notebook-cell-run-toolbar" aria-label="更多..."></a>
+                            </div></div>
+                          </div>
+                        </li>
+                      </ul>
+                    </div></div>
+                  </div>
+                  <div class="cell-editor-part">
+                    <div class="cell-editor-container" data-mode-id="python">
+                      <div class="monaco-editor no-user-select showUnused showDeprecated vs" role="code">
+                        <div class="view-lines monaco-mouse-cursor-text" role="presentation" aria-hidden="true">
+                          <div class="view-line"><span><span>CFG = {</span></span></div>
+                          <div class="view-line"><span><span>&nbsp;&nbsp;&nbsp;&nbsp;'hub_url': '',</span></span></div>
+                          <div class="view-line"><span><span>&nbsp;&nbsp;&nbsp;&nbsp;'nodes': [],</span></span></div>
+                          <div class="view-line"><span><span>}</span></span></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="cell-statusbar-container is-active-cell" tabindex="-1">
+                    <div class="cell-status-left"><div class="cell-contributed-items cell-contributed-items-left">
+                      <div class="cell-status-item" aria-label="" role="" custom-hover="true">
+                        <span class="codicon codicon-notebook-state-executing codicon-modifier-spin"></span>
+                      </div>
+                      <div class="cell-status-item" aria-label="30m 54.9s" role="">30m 54.9s</div>
+                    </div></div>
+                    <div class="cell-status-right"><div class="cell-contributed-items cell-contributed-items-right">
+                      <div class="cell-status-item cell-status-item-has-command" aria-label="Python" role="">Python</div>
+                    </div></div>
+                  </div>
+                </div>
+                <div class="output">
+                  <div class="output-inner-container background" output-mime-type="application/vnd.code.notebook.stdout">
+                    <div class="rendered-output"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="monaco-list-row code-cell-row" role="listitem" data-index="2"
+                 aria-selected="false" aria-label="code cell" id="list_id_5_2">
+              <div class="cell-inner-container">
+                <div class="cell code">
+                  <div class="run-button-container">
+                    <div class="monaco-toolbar"><div class="monaco-action-bar">
+                      <ul class="actions-container" role="toolbar">
+                        <li class="action-item monaco-dropdown-with-primary" role="presentation">
+                          <div class="action-container menu-entry" role="button" tabindex="0">
+                            <a class="action-label codicon codicon-play" role="button" aria-label="运行单元格"></a>
+                          </div>
+                          <div class="dropdown-action-container">
+                            <div class="monaco-dropdown"><div class="dropdown-label">
+                              <a class="action-label codicon codicon-chevron-down notebook-cell-run-toolbar" aria-label="更多..."></a>
+                            </div></div>
+                          </div>
+                        </li>
+                      </ul>
+                    </div></div>
+                  </div>
+                  <div class="cell-editor-part">
+                    <div class="cell-editor-container" data-mode-id="python">
+                      <div class="monaco-editor no-user-select showUnused showDeprecated vs" role="code">
+                        <div class="view-lines monaco-mouse-cursor-text" role="presentation" aria-hidden="true">
+                          <div class="view-line"><span><span>print('rollout-node')</span></span></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="cell-statusbar-container" tabindex="-1">
+                    <div class="cell-status-left"><div class="cell-contributed-items cell-contributed-items-left">
+                      <div class="cell-status-item" aria-label="" role="" custom-hover="true"></div>
+                    </div></div>
+                  </div>
+                </div>
+                <div class="output">
+                  <div class="output-inner-container background" output-mime-type="application/vnd.code.notebook.stdout">
+                    <div class="rendered-output"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
