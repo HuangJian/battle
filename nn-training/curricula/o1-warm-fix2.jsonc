@@ -1,0 +1,279 @@
+// 课程 o1-warm-fix2 —— 替换 o1-warm-fix：**加重 wallPress 罚**（2026-11-09）
+//
+// 状态：**已结课（2026-11-09 用户确认停课，it83）· 未做 B/C 满池判决 / 归档待判**。
+//   ⚠ 本课**没有自己的** 860001 起 800 局评估产物 ⇒ 结课报告只归档跑量与
+//   A 层趋势，**不下晋级判词**；详见下方「★ 结课报告」第 2、4 节。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// ★ 结课报告（2026-11-09 22:4x；优先级高于下方立项块）
+// ══════════════════════════════════════════════════════════════════════════
+// ── 1. 停课状态与冻结归档 ─────────────────────────────────────────────
+//   2026-11-09 09:58:50 开课 → 末次落账 13:43:03（用户 2026-11-09 确认停课）。
+//   83 轮 / 约 3h44m，未跑满 `iters 300`；3 次 `run_start`（重启 2 次）、
+//   2 次 job_cancelled，**零 error / 零熔断**。
+//   末次有评估支撑的归档 = **it80** `o1-warm-fix2.it80.20261109-133603.json`
+//   （sha16 `5fa31318ad72863b` == it80 in-loop eval wver）；
+//   末点归档 it83（sha16 `4dbe0b8366007ab0`）**无评估，不用**。
+//
+// ── 2. 判决读数：**缺**（口径纪律）──────────────────────────────────────
+//   ⚠ 本机没有该腿自己的 **B/C 层 860001 起 / 4 关 × 200 seed = 800 局**产物。
+//   `tmp/o1-probe/warmfix60-bc800.jsonl` 是**起点语料**（父课 `o1-warm-fix` it60），
+//   不是本课权重，绝不能拿来当本课判决。§3 判据**无法判定**，只作归档待判。
+//
+// ── 3. A 层趋势（401 局每点 / 17 点 / 前缀子集，**仅趋势，不作判决**）──────
+//   it0  clear .910 / wall 18.1 / idle中 47.1% / stuck中 250 / hit .475 / dmg 21.2
+//   it60 clear **.965**（峰值）/ wall 17.6 / idle中 28.0% / hit .265
+//   it80 clear **.873** / wall **22.2** / idle中 37.1% / stuck中 155 /
+//        hit **.339** / dmg **41.4** / dmg千拍聚合 **27.69** / shots 13.4 /
+//        timeout .082 / gameover .042 / **卡死失败局占比 74.5%（38/51）**。
+//   逐关 clear（it80）：2000 1.000 / 2001 1.000 / 2002 .890 / **2003 .610**。
+//   wver 逐点全不同，无坍缩指纹。
+//
+// ── 4. 目标对照（A 层趋势，仅提示；§3 正式判据无法判定）──────────────────
+//   买到：idle 47.1%→37.1%、stuck 中位 250→155、卡死失败局占比
+//   88.9%（父课 it60 同面板）→**74.5%**（降幅比 fast-fix2 小）。
+//   买砸：**wallPress 18.1→22.2**（§3「唯一要买的指标 ≤8」反向走远）、
+//   dmg 21.2→41.4（+95%，反签名）、hitRate .475→.339（−29%，反签名
+//   「掉 >15%」）、clear .910→.873、2003 .610。
+//   ⇒ 与姊妹课 `o1-fast-fix2` 同构：加重 wall 罚 + idle 对冲压住了站桩，
+//   但没压住顶墙，还把承伤与命中推坏。
+//
+// ── 5. 判词（限定在 A 层）──────────────────────────────────────────────
+//   **归档待判，不晋级也不宣告失败**。两门 fix2 合起来说明：
+//   「罚卡死 → 加重 wall 罚 + idle 对冲」两轮都没买到 `wallPress`，
+//   反而把承伤/命中推坏；o1 系列失败关从父课的 2002 漂到 2003。
+//   下一腿不在奖励侧继续加权，转动作/观测侧脱困检查（S3 greedy 配额同族）。
+//
+// ── 6. 复现 ────────────────────────────────────────────────────────────
+//   A 层 `tmp/o1-warm-fix2/eval_log.jsonl`；账本 `.../training_log.jsonl`；
+//   取数 `tmp/o1-close-four.py`。补判决：`eval-course-ckpt.ts --games 800
+//   --seed0 860001 --weights warmfix2=<it80>`（**尚未跑**）。
+//
+// ── 7. 血缘警告 ────────────────────────────────────────────────────────
+//   只改注释 ⇒ `course_fp` 变、语义指纹不变（已 `load_course` 复验）。
+//   已停课；若重开须重新对齐旧 shard 的 `course_fp`。
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为立项时的设计说明（保留作历史；「已立项 / 仍在跑」是当时语气，
+//   判词一律以本结课报告为准）
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 为什么要再来一门
+// ══════════════════════════════════════════════════════════════════════════
+// o1-warm-fix it60（B/C 800 局）：clear **.919**、hitRate **.484**（父课 .297）、
+// dmg/局 **18.5**（父课 51.1）—— 命中/躲弹大胜；但 **wallPress 18.3 仍高**（门 ≤10），
+// 失败仍是卡死（timeout 7.4%、卡死失败局 95.4%、**59/65 集中在 2002**）。
+// 同 seed 教师 100% 赢 ⇒ 任务可赢。本课只改：**wallPress 单价 0.6 → 1.0**（×1.67）
+// + **idle 罚对冲**（只罚墙会推回 hold 站桩）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 与 o1-fast-fix2 的差异（同 14 行公式，只差参数）
+// ══════════════════════════════════════════════════════════════════════════
+// | 参数 | fast-fix2 | **warm-fix2** | 理由 |
+// | wHit | 3 | **4** | 保持父课 warm 的命中价 |
+// | wShot | 0.02 | **0.20** | 保持「罚盲射」 |
+// | wStuck | 0.01 | **0.02** | 父课 warm 的卡死罚加倍 |
+// | wMove | 0.03 | **0.02** | 父课 warm 的移动价 |
+// | paceCap | 36 | **30** | 父课 warm 的反苟 |
+// | wFast | 24 | **36** | 父课 warm 的快清关价 |
+// | wDeath / wDmg | 12 / .08 | **6 / .07** | 父课 warm 的天平 |
+// | wThreat / wLaneMove | .02 / .05 | **.04 / .08** | 父课 warm 的射界项 |
+// | **wWall / wallCap** | **1.0 / 40** | **1.0 / 40** | 本课重点（父课 0.6 / 80） |
+// | **wWall2 / wallCap2** | **.2 / 80** | **.2 / 80** | 分段：40–120 拍仍 0.2/拍（满量程合计 56） |
+// | **wIdle / idleCap / idleFree** | **.01 / 1000 / .35** | 同 | 35% 免费（人类 ~30% 不动）+ 超出才罚 |
+// | **wIdle2 / idleCap2** | **.005 / 5000** | 同 | 第二段超出罚（合计满量程 35） |
+// 其余（wKill/wWin/runCap/fastCap/moveCap/shotCap/stuckCap/dmgCap/threatCap/
+//   laneCap/wPace/paceTicks/paceWindow、terminal、位移包）逐字相同。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 剂量（`o1-fix2-tune.py`，真 RewardFn，起点 warmfix60 800 局）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点语料：clear .919 / wall 均 **18.3** / idle 中位 42.9% / stuck 中位 194。
+// 十条（本腿语料全过）：
+//   脱困ΔΦ **+49.8** · 卡死EV −142.7 vs gameover（差 >8）· 移动EV +117.0（差 >20）·
+//   **移动EV − 站桩EV = +242.0**（门 ≥30）· 跑Δ **+22.9** · 快Δ **+6.3** ·
+//   **墙Δ +17.4**（门 ≥10；父课只有 +9.5）· gameover−lazy >0 · clear−非clear 大正 ·
+//   满量程 **56 < 60**（wall 两段 40+16；起点 wall p99=52 / max=62 < 120 ⇒ 无截断）。
+// ⚠ 交叉语料（fastfix50）也全过；但剂量仍按本腿语料定。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据与止损（全池 greedy，连续 2 独立点）
+// ══════════════════════════════════════════════════════════════════════════
+//   主 0 clear **≥ .90**（父课 .919）
+//   主 1 **wallPress ≤ 8**（父课 18.3；本课唯一要买的指标）
+//   主 2 **卡死失败局占比 ≤ 2%**（父课 95.4%）
+//   主 3 timeout **≤ 3%**（父课 7.4%）
+//   主 4 cells 中位 **≥ 30**（父课 26）且 idle ≤ 45%（父课 47.5%）
+//   主 5 hitRate **≥ .35**（父课 .484，不允许掉 >15% 相对峰值）
+//   反签名：**idle 涨 >10pp**（用不动规避 wall 罚）· dmg/局涨 >30% ·
+//     clear 掉 >2pp · 卡死占比回升 >5% · gameover >15% 且 clear 不涨 · entropy/kl 熔断。
+//   止损：it40 wallPress 未降到 ≤10 或 idle 涨 >10pp ⇒ 停腿。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 已知局限
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 替换而非续跑；旧 `o1-warm-fix` 建议人停。
+// 2. wall 是**分段**：0–40 拍 1.0/拍、40–120 拍 0.2/拍（合计满量程 56 < 60，硬闸 #6）。
+//    起点 wall max 62 < 120 ⇒ 无截断；>120 拍才无梯度（分布里没有）。
+//    不封顶会重演 z8（idle 罚到 −174 ⇒ 96% 局主动送死），所以「尾部有代价」用分段实现。
+// 3. 仍偏离硬闸 #7（父课同款理由：timeout 局全是卡死），用三条替代断言。
+// 4. 失败仍集中在 2002；若 wall 罚到位但 2002 卡死不减，转动作/观测侧兜底。
+// 5. 交叉语料全过是巧合，不改变「剂量起点专属」纪律。
+//  · `reports/o1-warm-fix2-close-20261109.md` 未另出（结课报告按纪律回填在本文件头）。
+
+// ── 结算节（2026-11-09 已回填；完整报告在文件头「★ 结课报告」）──────────────
+//  · 停课：2026-11-09 09:58 开 → 13:43 末次落账，83 轮 / 零 error / 未跑满 300。
+//  · 末次有评估支撑归档：it80 `5fa31318ad72863b`；it83 无评估、不用。
+//  · ⚠ **无 B/C 满池（860001 起 800 局）产物 ⇒ 不下判决**；`warmfix60-bc800`
+//    是父课起点语料，不是本课权重。
+//  · A 层趋势（仅趋势）：idle 47.1%→37.1%、卡死占比 88.9%→74.5% 略降；
+//    但 wall 18.1→22.2、dmg 21.2→41.4、hit .475→.339 反向 ⇒ **归档待判**。
+//
+
+{
+  "version": 5,
+  "name": "o1-warm-fix2",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": [
+      // ① 击杀：每只 15 分；1 敌关等价于「清关」的主收入
+      "wKill*kills",
+      // ② 命中：每发 3（fast）/ 4（warm）分；空射不单独定价（aimMisses 是 hit 镜像，会重复计价）
+      "+ wHit*aimHits",
+      // ③ 清关奖：无条件 60 分，但按走过格子打折（runCap 30 打满）—— 父课已验证的条件价
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // ④ 快清关：清场越早一次性越多（fastCap 2000 拍内线性，>2000 拍为 0）
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      // ⑤ 移动拍：稠密走位奖；顶墙拍计入 idleTicks，所以 ticks-idleTicks 自动排除蹭墙拍
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // ⑥ 开火成本：每发 0.02（fast，几乎免费以鼓励开枪）/ 0.2（warm，罚盲射）
+      "- wShot*min(playerShots, shotCap)",
+      // ⑦ 撞墙（0–40 拍）：有前进意图 + 零位移，1.0/拍（父课 0.4/0.6 的 2.5×/1.67×）
+      "- wWall*min(wallPressTicks, wallCap)",
+      // ⑧ 撞墙（40–120 拍）：第二段 0.2/拍 —— 超 cap 仍持续有代价（硬闸 #6 下的分段做法）
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      // ⑨ 卡死（≤2000 拍）：最长连续「没换格且没打中」，0.01（fast）/ 0.02（warm）每拍
+      "- wStuck*min(stuckTicks, stuckCap)",
+      // ⑩ 卡死（2000–6000 拍）：第二段 0.002/拍 —— 失败局 stuck 常 4000+，后半段不再免费
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      // ⑪ 不动（超出免费额度的前 1000 拍）：免费额度 = 35% × min(ticks, 1000)，
+      //    拖时间不会抬高额度（否则「拖到 6000 拍」会白拿 2100 拍免费额度）
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      // ⑫ 不动（继续超出）：第二段 0.005/拍；卡死局 idle 90% 仍被罚，站桩排序不变
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      // ⑬ 承伤：每点 0.08（fast）/ 0.07（warm）；dmgCap 200 = 1 命上限，不会截断
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      // ⑭ 掉命：每人头 12（fast）/ 6（warm）；terminal 另有 −30
+      "- wDeath*playerDeaths",
+      // ⑮ 待在敌方射界（0–120 拍）：每拍 0.02（fast）/ 0.04（warm）—— 满血时允许激进
+      "- wThreat*min(threatTicks, threatCap)",
+      // ⑯ 待在敌方射界（120–500 拍）：第二段 0.005（fast）/ 0.01（warm）每拍，长暴露不再免费
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      // ⑰ 射界里仍在移动：每拍 0.05（fast）/ 0.08（warm）—— 躲弹动作的正奖，与 ⑮⑯ 配对
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // ⑱ 残血别浪（0–100 拍）：低血量拍 0.3/拍 —— 前期满血可激进，后期血少要收
+      "- wDanger*min(dangerTicks, dangerCap)",
+      // ⑲ 残血别浪（100–600 拍）：第二段 0.05/拍
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      // ⑳ 基地威胁税（0–200 压力点）：钢环下不改变结局，但保住「回防/优先清基边敌人」的行为，
+      //    为 o7 换回砖环铺路（否则到时策略不会回防）
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      // ㉑ 基地威胁税（200–500）：第二段 0.03/点，长压制不再免费
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      // ㉒ 反苟：按拍计费（每杀赠 1200 拍），封顶 44；与 ④ 快清关方向一致
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 4.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 36.0,
+      "fastCap": 2000.0,
+      "wMove": 0.02,
+      "moveCap": 1600.0,
+      "wShot": 0.2,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.02,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.07,
+      "dmgCap": 200.0,
+      "wDeath": 6.0,
+      "wThreat": 0.04,
+      "threatCap": 120.0,
+      "wThreat2": 0.01,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.08,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 44.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o1-warm-fix/o1-warm-fix.it60.20261109-005441.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o1-warm-fix2/weights.json",
+  "traj": "tmp/o1-warm-fix2",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o1-warm-fix2",
+  "backup_prefix": "o1-warm-fix2",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}

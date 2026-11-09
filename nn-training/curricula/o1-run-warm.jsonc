@@ -1,0 +1,351 @@
+// ══════════════════════════════════════════════════════════════════════════
+// ★ 结课报告（2026-11-08 23:0x；优先级最高，先读这段）
+// ══════════════════════════════════════════════════════════════════════════
+// 状态：**已结课（22:43:45 停课，it161）· 有条件结课 / 不晋级**。
+//   后继 = `o1-warm-fix.jsonc`（bc 用本课 **it155**）。
+//
+// ── 1. 停课状态 ─────────────────────────────────────────────────────────
+//   16:51 开课 → 22:43:45 停（`training-enabled.txt` 已撤），161 轮 / 约 5h52m，
+//   未跑满 `iters 300`；161 个归档，`training_log.jsonl` **零 error / 零熔断**。
+//   末点 `o1-run-warm.it161.20261108-224345.json`（sha16 `2958937eaa9f6a49`）无评估，不用；
+//   判决权重 = **it160**（`o1-run-warm.it160.20261108-224201.json`，
+//   sha16 `c2cea74c888f3bea` == it160 eval wver）。
+//
+// ── 2. 主读数（B/C 860001 起 / 4 关 × 200 seed = 800 局 greedy，it160）──────────
+//   clear **.970**（776/800）· timeout .020 · gameover .010 · cells 中位 **26** ·
+//   idle 均值 **38.2%**（中位 33.1%）· hitRate .297 · aimMiss 2.7 · shots 12.7 ·
+//   wallPress **22.2 拍** · stuck 均值 270（中位 93）· ticks **1009** ·
+//   dmg 51.1/局 · dmg/千拍 聚合 **50.69**（it0 11.63）· playerHits .010。
+//   **卡死失败局占比 66.7%（16/24）**，失败局 `stuck` 中位 **4288**。
+//   ⇒ 清关与瞄准已很强（.970 / hitRate .297 / aimMiss 2.7），
+//     但**顶墙（22.2）与每拍承伤（50.69）明显恶化**；失败少而集中，2/3 是卡死。
+//
+// ── 3. A 层轨迹（400 局/点，仅趋势）──────────────────────────────────────
+//   it0 .752 / cells 18 / idle 87.4% / wall 10.1 / ticks 2778
+//   → it80 .910 / cells 20 / idle 63.2% / ticks 1475
+//   → it120 .853 / wall 14.7 → it140 .875 / cells 23 / idle 61.6%
+//   → **it160 .978 / cells 26 / idle 33.1% / wall 21.6 / ticks 958**
+//   同段重复检查 it155 vs it160：**0/400** 局逐字段相同 ⇒ 独立点，无坍缩。
+//
+// ── 4. 判据逐条（§6；hit = 不过/触发）────────────────────────────────────
+// | 主 0 clear ≥.90 | **.970** | ✅ |
+// | 主 1 cells 中位 ≥30 | 26 | ❌ |
+// | 主 2 hitRate ≥.25 | .297 | ✅ |
+// | 主 2 aimMiss ≤20 | 2.7 | ✅ |
+// | 主 3 wallPress ≤10 | **22.2** | ❌ |
+// | 主 4 dmg/千拍 ≤ it0(聚合) | **50.69 vs 11.63** | ❌ |
+// | 主 4 playerHits ≤.10 | .010 | ✅ |
+// | 反签名 卡死占比 >5% | **66.7%** | ❌ 触发 |
+// ⇒ **不晋级**；但 clear/瞄准三条达标，够格当后继课起点。
+//
+// ── 5. 失败模式（录像 + 账本一致）────────────────────────────────────────
+//   it150 的失败局画像：shots **19.8**（成功 11.7）、hitRate **.119**（成功 .351）、
+//   stuckMax 1921、gameover 20/30 ⇒ **贴墙/贴障碍盲射打不中，最后被打死**；
+//   it160 失败局缩到 24 局但 `stuck` 中位 4288 ⇒ **卡死仍是唯一失败主因**。
+//   `wallPressTicks` 只算「有前进意图 + 零位移」，选 hold 不计 ⇒ 后继课用 `stuckTicks`。
+//
+// ── 6. 后继 ─────────────────────────────────────────────────────────────
+//   `o1-warm-fix.jsonc`：bc = **本课 it155**（sha16 `7a7bcd6cbbeb688e`），
+//   新增 `-wStuck*min(stuckTicks,stuckCap)`、`wShot .20`、`wHit 4`、`wWall .6`。
+//   **注意**：bc 用的是 it155 而非判决点 it160 —— 剂量在 it155 语料上标定；
+//   若想以 it160（clear .970 / wall 22.2）为起点，必须重标剂量，不能直接换一行。
+//
+// ── 7. 复现 ─────────────────────────────────────────────────────────────
+//   `bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o1-env.json --no-dist
+//    --weights warm160=<it160> --games 800 --seed0 860001 --out tmp/o1-probe/warm160-bc800.jsonl`
+//   数据脚本 `tmp/o1-probe/o1-old-close.py`。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为立项说明（原「★ 课程 o1-run-warm」块；「待开训」语气是当时的，勿误读）
+// ══════════════════════════════════════════════════════════════════════════
+// ★ 课程 o1-run-warm —— o1-run 的**热启动配对臂**（2026-11-08 16:40）
+//   优先级高于下方所有段落：下方 §0–§7 写的是主腿 o1-run（scratch 起点）的设计，
+//   本臂与它**逐字同奖励、同任务、同位移包、同面板、同 rotateSeed**，
+//   只差 `name / bc / kickstart_ref / out / traj / backup_*`（`check-o1-run-warm.py` 硬断言）。
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 为什么主腿从随机权重开始，以及本臂为什么可以接着训
+//    · 主腿用 scratch **不是技术限制，是归因要求**：换奖励语义 = 新实验（§15.5），
+//      若同时换起点，行为变化无法归到奖励包；z2-r1 判负 → r1walk 上位也是
+//      「同任务只多一项 wWalk、起点仍用 scratch 重跑」（it165/170 clear 98.8%）。
+//      skill §4：bc 是随机初始化 ⇒ `kickstart_ref: false`；是学到手的策略 ⇒ `true`。
+//    · **可以接着训，而且本臂数据上更划算**：`tmp/o1-probe/warm-vs-scratch.py` 在
+//      新价目表下算三批同面板语料的 EV：scratch **−44.65** / it70 **+0.43** /
+//      it80 **+33.82**（clear 局 +48.96），距「走动清关」上限 +72.49 还有 ~39 分空间
+//      ⇒ 起点已有明确上升梯度，不必从零重学开火。
+//    · ⚠ **纠正**：上一轮答复说「热启动只改 bc 一行」是错的。必须同时
+//      `kickstart_ref: true` + `warmup_iters: 0`（x2-start / x3-start / x2-rebirth 先例），
+//      否则跨 Φ 的起点会在 it1 被推飞；缰绳系数 `1.0×0.5^(it−1)` 实质只锁 it1–7。
+//      另需新 out/traj/backup（§15.5 禁续跑）与**冻结归档**（活指针禁令）。
+//
+// 1. 起点 = 末次有评估支撑的冻结归档
+//    `nn-training/weights/o1-open/o1-open.it80.20261108-162207.json`
+//    sha256 前 16 = **05ad6fef206d40cd**，与 in-loop `eval_log.jsonl` 的 it80 wver 逐字一致
+//    ⇒ 评估所评的就是这份权重。⛔ 不用 `tmp/o1-open/weights.json` 活指针（z2 §50.3 禁令）。
+//    it80 之后还有归档但**没有评估支撑**（eval 每 5 轮，最后一点 = it80）⇒ 不用。
+//
+// 2. it0 基线（B/C 层满池 800 局 / seed0 860001，同面板同环境，`tmp/o1-probe/it80-bc800.jsonl`）
+//    clear **.746** · cells 均值 19.2 / 中位 **19** · idle **90.4%** · hitRate **.055** ·
+//    aimMiss 36.7/局 · wallPress **10.5** 拍 · dmg 33.4/局 · dmg/千拍 **11.6** ·
+//    EV(o1-run 新 Φ) **+33.82** · Δret(timeout−gameover) +15.37。
+//    ⚠ **订正「站桩固化」的旧判断**：A 层 cells 中位 it70 3 → it75 10 → **it80 18**，
+//    B/C 满池 it80 是 19 ⇒ o1-open 自己正在从站桩往回走；代价是顶墙 2.1→10.5 拍、
+//    承伤 24.2→33.4、hitRate 0.056 没改善 ⇒ 正好是本臂要压的三件事。
+//
+// 3. 判据：四条主门与主腿同值，但**基线换成本臂 it0**（不许照抄主腿的 19.8）
+//    连续 2 独立评估点、全池：clear ≥50% · cells 中位 ≥30 且 idle ≤70% ·
+//    hitRate ≥0.25 且 aimMiss ≤20 · wallPress ≤10 拍 · dmg/千拍 ≤**11.6** 且 playerHits ≤0.10
+//    （后两条必须在 cells ≥30 前提下判）。**前 20 轮不判**：新 Φ 下 value 头要重拟合，
+//    kickstart 缰绳 it1–7 也在锁；盯 kl / entropy / mean_ret 而非 clear。
+//
+// 4. 已知局限（诚实登记，别等翻车再查）
+//    ① 反事实微调（`warm-vs-scratch.py` ③，it80 clear 局中位画像）：
+//       cells 14→30 **+32.00 分** · 移动拍 +1000 **+6.47** · 多命中 1 发 +3.00 ·
+//       threat 归零+射界移动 +3.26 · **顶墙归零仅 +1.20 · 空射减半仅 +0.70**。
+//       ⇒ 新奖励对「不顶墙 / 瞄得准」的推动力远小于「跑」；若 it40 这两项不降，
+//       **停腿重标 wWall / wShot**（且必须与主腿同改，否则配对臂失效）。
+//    ② it80 分布里 cells≥30 只有 10 局、clear 0.2、EV +13.88 < 10–30 档 +34.07
+//       ⇒ 「走够 30 格」与「清关」在当前动态下有冲突，晋级门可能偏严，
+//       开训后按全池实测复核（不改在跑的文件，写进结课报告）。
+//    ③ 热启动继承 o1-open 的策略先验，若 it1–20 出现 mean_ret 持续下滑 / kl >0.05 /
+//       Δret 翻负 ⇒ 停腿，改回主腿的 scratch 臂。
+//    ④ 两臂与 o1-open 的 `corpus_identity_fp` 各不同 ⇒ shard 禁混；
+//       三腿并行前先确认 hub / worker 容量。
+//
+// 5. 开工前置 / 启动（agent 不起腿）
+//    · `tmp/o1-probe/check-o1-run-warm.py` 全绿；dashboard 仓内 JSONC 解析过；
+//    · ⛔ **o1-open 仍在跑，别编辑 o1-open.jsonc**（字节变 = 热加载拒收 + course_fp 抖全集群）；
+//    · 控制台 `bun run dashboard` :8900 → 选 o1-run-warm → 开课；
+//      开训 30 秒 `grep -h "hub=" tmp/o1-run-warm/training-loop.log | tail -1` 核对 URL。
+// ── 结算节（2026-11-08 已回填；完整报告在文件头「★ 结课报告」）──────────────
+//  · 停课：16:51 开课 → 22:43:45 停，161 轮 / 零 error / 未跑满 300。
+//  · 判决权重：it160 冻结归档 sha16 `c2cea74c888f3bea`（= it160 eval wver）；
+//    末点 it161 `2958937eaa9f6a49` 无评估、不用。
+//  · 全池（B/C 800 局）：clear .970 / cells 中位 26 / idle 38.2% / hitRate .297 /
+//    wallPress 22.2 / stuck 均 270 / ticks 1009 / dmg 51.1 / dmg千拍聚合 50.69。
+//  · 判据：clear/hitRate/aimMiss/playerHits 过；cells 26<30、wall 22.2>10、
+//    dmg/千拍 50.69>11.63 不过；反签名卡死占比 66.7% 触发 ⇒ **有条件结课 / 不晋级**。
+//  · 后继：`o1-warm-fix`（bc = 本课 it155；换 it160 需重标剂量）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为主腿 o1-run 的原始设计说明（保留作历史；「唯一变量」指主腿 vs o1-open）
+// ══════════════════════════════════════════════════════════════════════════
+// 课程 o1-run —— o1-open 的**重设计腿**：让 NN 跑起来 / 瞄准起来 / 不顶墙 / 躲开炮弹（2026-11-08）
+//
+// 状态：**已立项 / 未开课**（agent 不启动训练；开课由人在控制台走）。
+// 全文判词与 it70 体检数据 = `reports/o1-run-20261108.md`；剂量网格 = `tmp/o1-probe/o1run-tune.py`。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+// o1-open.it70 把 1 敌关打成了**站桩炮台**：clear 74.8%（A 层）/ 69.6%（B/C 满池），
+// 但 cellsVisited 中位 3、idle 97.4%、hitRate 0.116、wallPress 2.1 拍、dmg/千拍与起点
+// **无显著差异**（19.77 vs 18.93，p=0.85）⇒ 赢了，但没跑、没真躲、只在盲射。
+// 本腿**任务侧逐字不变**，只换奖励包：把「走」变成清关的必要条件，给空射/顶墙/承伤上价。
+// 起点仍是**同一个随机权重**（与 o1-open 单变量对照，z2-r1 → r1walk 的先例）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据：it70 的四问四答（A 层 400 局 + B/C 层满池 800 局，双面板方向一致）
+// ══════════════════════════════════════════════════════════════════════════
+// | 问 | A 层 it70 | B/C 满池 it70 | 判定 |
+// |---|---|---|---|
+// | 跑得欢吗 | cells 均值 3.58 / 中位 3、idle 97.3%、moveEnt 0.261 | 3.57 / 中位 3、idle 97.4% | **不跑**；it60 中位还是 52，it65 掉到 9、it70 掉到 3 |
+// | 瞄得准吗 | hitRate 0.123、aimMiss 33.5/局、shots 40.0 | 0.116、38.0/局、44.5 | 从「完全打不中」到「12% 命中」，但 84% 子弹打空；timeout 局 103 发 / hitRate 0.011 |
+// | 顶墙吗 | wallPress 2.1 拍、stuckMax 1601 | 2.1 拍、1820 | **顶墙少，但那是因为根本不动**；不是学会绕墙 |
+// | 躲弹吗 | dmg 19.5、threatTicks 15.8、dangerTicks 4.5 | dmg 24.3、threatTicks 19.7 | **dmg/千拍 13.4→13.4（A 层 p=0.56）/ 18.9→19.8（B/C p=0.85）完全没变** ⇒ 是「不接触 + 局短」，不是躲弹 |
+// 训练侧 it50–76：kl 0.006–0.012 稳定、entropy 2.1–2.2 几乎不动、mean_ret 11→32 稳步上升
+// ⇒ **不是优化崩了，是价目表下站桩就是最优解**（与 z2-r1 判词同源）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 变量账（相对 o1-open，**唯一变量 = reward 包**）
+// ══════════════════════════════════════════════════════════════════════════
+// 同：level / stage_select / enemies / lives / max_ticks / difficulty / bc / kickstart_ref /
+//     warmup_iters / lr / epochs / mb / gamma / lam / kl_coef / ent_coef / value_anchor /
+//     target_transitions / iters / max_hours / eval_* / paired_rotate_seed（同 seed 便于逐局配对）。
+// 异：name / out / traj / backup_* / reward（11 行公式 + 22 参数 + terminal）。
+// ⚠ 两腿语料身份不同（reward 进 corpus_identity_fp）⇒ shard 不复用、不得混训。
+// ⚠ **不要编辑正在跑的 o1-open.jsonc**：课程字节变 = 新实验版本、热加载 A 类拒收、
+//    course_fp 抖全集群。o1-run 是独立文件，不动前者一个字节。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 四个目标 → 四个显式机制（全部是 Φ 持有值，逐行差分给 r）
+// ══════════════════════════════════════════════════════════════════════════
+// ① **跑起来**：`+ wMove*min(ticks - idleTicks, moveCap)` —— 稠密「实际移动拍数」，
+//    比 cellsVisited（每 6 拍采一格）密 6 倍；**外加 `wWin*min(cellsVisited/runCap,1)`**
+//    把清关奖按走过格数**打折** ⇒ 站着清关只拿 1/10。这是与 z5（单纯抬 wWalk 到
+//    100 分、cells 零位移）不同的机制：走从「可选」变成「通关必要条件」。
+//    ⚠ 顶墙拍 ticks+1 且 idle+1 ⇒ 本项净 0，再由 ③ 罚一次，不会奖励撞墙。
+// ② **瞄得准**：`wHit` 1.5→3.0 + `- wShot*min(playerShots, shotCap)` 给每次开火计价。
+//    ⚠ **不给 aimMisses 定价**：`biz/reward_library.py:204` 明写它是 hit 镜像
+//    （`playerShots = aimHits+aimBricks+aimIgnited+aimMisses`），同腿定价 = 重复计价。
+//    同时**删掉 wBrick**（打中砖墙给钱会诱导盲射打墙）。
+// ③ **不顶墙**：`- wWall*min(wallPressTicks, wallCap)` —— v15 唯一「撞墙」判据
+//    （`isWallPressTick`：有前进意图 + 零 px 位移 + 前脸被挡，排除转向冷却/重生保护）。
+//    ⚠ `stuckTicks` 是整局**最长连续卡墙拍**（N8），不是累计，不进公式。
+// ④ **躲开炮弹**：`wDmg` cap 100→200（p90 满量程）+ `- wThreat*min(threatTicks,cap)`
+//    （罚待在敌方射界）+ `+ wLaneMove*min(onLaneMoveTicks,cap)`（奖「射界里仍在移动」）。
+//    两项配对 = 射界里站着只罚、射界里动有补偿。**判据必须绑定 cells ≥30**，
+//    否则「不接触」会把 dmg 做成伪改善（o1 it70 的教训）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 剂量：真 RewardFn 批量标定（`tmp/o1-probe/o1run-tune.py`）
+// ══════════════════════════════════════════════════════════════════════════
+// 语料 = o1-open in-loop **A 层同面板** eval_log 6800 局（it0–it80 的混合行为池：
+// it10–it60 是跑动策略、it0/it65–80 是站桩策略）⇒ 正好做反事实排序标定。
+// ⚠ 是跨策略混合池，只用于「奖励指向」，**不是单一 on-policy 语料、不作判腿**。
+// 1728 组合 / 1050 合格；采用「四目标剂量都不取最低档」的偏好组：
+//   | 组 | sit_clear | run_clear | sit | run | clear | timeout | gameover | lazy |
+//   | EV | +29.97 | **+72.49** | +0.16 | +19.71 | **+43.88** | −4.90 | −25.59 | −48.00 |
+// 六条硬约束（真 RewardFn 复算）：
+//   跑动清关 − 站桩清关 −10 = **+32.52** ✓ · 跑−坐 +5 = **+24.55** ✓ ·
+//   Δret(timeout−gameover) = **+20.69 >0** ✓（硬闸 #7，按 outcome 拆）·
+//   gameover−lazy = **+22.41 >0** ✓（z8 自检 ④）·
+//   clear 高于所有非 clear 组 **+24.18** ✓ · 罚/塑形满量程 **24 < wWin 60** ✓（硬闸 #6）。
+// terminal 四项齐全（硬闸 #1）；`base_destroyed −35` 钢环下不可达但必须列（o7 换砖环才活）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 判据与止损（**全池判决，不用教师表现**，§0.2 四禁令）
+// ══════════════════════════════════════════════════════════════════════════
+// ⚠ 面板：in-loop `eval_games_per_stage 50` 是前 50 连续 seed，**只作走势**。
+//   晋级/结课一律另跑 `eval-course-ckpt.ts --games 800 --seed0 860001`（B/C 层 4 关 × 200 seed
+//   满池），或 A 层 200 seed 满池；**结论必须带面板名，跨面板不相减**。
+// 晋级 o2 需**连续 2 个独立评估点**（wver 不同、逐局账本不同）同时满足：
+//   主 0：clear ≥ 50%（满池）
+//   主 1「跑」：cellsVisited 中位 **≥30**（= runCap）且 idle% ≤70%（o1 it70 = 97.4%）
+//   主 2「瞄」：hitRate **≥0.25** 且 aimMisses/局 **≤20**（o1 it70 = 0.116 / 38）
+//   主 3「不顶墙」：wallPressTicks/局 **≤10**，且必须在主 1 成立的前提下判
+//   主 4「躲弹」：dmg/千拍 **≤19.8**（o1 it70 B/C 满池基线）且 playerHits ≤0.10，
+//                且必须在主 1 成立的前提下判（否则是「不接触」伪改善）
+// 反签名（任一破 ⇒ 停）：`hitRate` 相对本腿峰值掉 >15%（**不是 aimMisses 绝对数**）·
+//   timeout_frac >40% · cells 中位 ≤3 连续 10 点 · dmg/千拍涨 >30% ·
+//   entropy <0.30 / >1.6 · kl >0.05 · mean_ret 持续下滑 · error 行 · Δret 翻负。
+//   ⚠ 修订说明：o1-open §6 的「aimMisses 涨 >40%」在从零腿上是**伪阳性**
+//   （it0 命中率 ≈0，学会开火必然带出空射：13.3→33.5，但 hitRate 0→0.123 是真进步）。
+//   本腿改用命中率相对峰值，反签名才不会把进步判成退步。
+// 止损：it40 全池 clear ≤5% ⇒ 先查任务侧 commander floor（`enemies:1` 必是 commander），
+//   改 `enemies:3` 重跑；仍 0 ⇒ 停整条线。**若 it100 仍站桩（cells 中位 <10）**：
+//   判「奖励侧买不动」，停腿转任务侧脚手架（多出生点敌数 3–4），那是新实验、不是调价。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 6. 已知局限
+// ══════════════════════════════════════════════════════════════════════════
+// 1. **结构性风险最高**：z5 已证「走位价买到 100 分（kill+win 的 43%）cells 仍零位移」。
+//    本腿靠「清关奖打折」而非抬价改变必要性，是未验证假设；若 it100 仍站桩 ⇒ 见 §5 止损。
+// 2. `ticks - idleTicks` 是移动拍数的近似（idleTicks = `!player.moving`，含顶墙拍），
+//    已由 ③ 的 wWall 抵消；但**不是**真实位移 px，别拿它当距离用。
+// 3. `wLaneMove` 在 1 敌关 threatTicks 中位 0（均值 19.7）⇒ 信号稀疏，是方向占位，
+//    多敌段（o3+）才可能成为主杠杆。
+// 4. `dmgCap 200` 让 1 命 gameover 局（dmg 恒 200）触顶无额外梯度，靠 terminal 承载。
+// 5. 剂量语料是跨策略混合池（§4），不是单一 on-policy 分布；o2 起必须在自己 it0 重标。
+// 6. 4 关定集 = 记忆化风险（§15.1）；跨级读数只用于晋级。
+// 7. 与 o1-open 同 `paired_rotate_seed` 只为逐 (stage,seed) 配对；两腿 shard 身份不同，禁混。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 7. 预算与开工前置
+// ══════════════════════════════════════════════════════════════════════════
+// 300 it / 18h；`target_transitions 24576 = 24 × mb 1024`（硬闸 #2）；eval_every 5。
+// ① bc 在盘（`nn-training/weights/o1-open/scratch-init.json`，schema 7 / 17ch / actionV6）；
+// ② `tmp/o1-probe/check-o1-run.py` 全绿；③ dashboard 仓内 JSONC 解析测试过；
+// ④ 新 out/traj/backup 目录（§15.5 禁跨改动续跑）；
+// ⑤ 开训 30 秒 `grep -h "hub=" tmp/o1-run/training-loop.log | tail -1` 核对 hub URL；
+// ⑥ 控制台开课：`bun run dashboard` :8900 → 选 o1-run → 开课（agent 不起腿）。
+//    与 o1-open 并行前先确认 hub / worker 容量，别把两条腿挤到同一批节点上互相抢采样。
+// ── 诊断工具 ── `tmp/o1-probe/`（it70-check / it70-bc / o1run-tune / check-o1-run）
+// ── 结算节（结课时回填文件头 + `reports/o1-run-close-<YYYYMMDD>.md`）──────────
+
+{
+  "version": 5,
+  "name": "o1-run-warm",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": [
+      // 收入：命中抬价；清关按走位打折（跑起来的结构性必要条件）
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // 稠密移动：实际移动拍数（ticks - idleTicks），顶墙拍净 0
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // 价格：总开火 / 顶墙 / 承伤 / 掉命 / 停在敌方射界
+      "- wShot*min(playerShots, shotCap)",
+      "- wWall*min(wallPressTicks, wallCap)",
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      "- wDeath*playerDeaths",
+      "- wThreat*min(threatTicks, threatCap)",
+      // 躲弹：射界里仍在移动才补偿（站着只吃 wThreat 罚）
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // 反苟：按拍计费，封顶 18（比 o1 的 24 小，少惩罚长局走动）
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 3.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wMove": 0.01,
+      "moveCap": 2000.0,
+      "wShot": 0.1,
+      "shotCap": 120.0,
+      "wWall": 0.08,
+      "wallCap": 150.0,
+      "wDmg": 0.12,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 600.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 18.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -25.0,
+      "base_destroyed": -35.0,
+      "timeout": -30.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  // 热启动：o1-open 末次有评估支撑的冻结归档（sha16 05ad6fef206d40cd = it80 wver）
+  // ⛔ 不用活指针；skill §4：学到手的策略必须 kickstart_ref=true + warmup_iters=0
+  "bc": "nn-training/weights/o1-open/o1-open.it80.20261108-162207.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o1-run-warm/weights.json",
+  "traj": "tmp/o1-run-warm",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o1-run-warm",
+  "backup_prefix": "o1-run-warm",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}

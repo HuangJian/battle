@@ -1,0 +1,230 @@
+// 课程 o1-warm-fix —— 替换 o1-run-warm：专治「贴墙盲射打不中 → 被打死」（2026-11-08）
+//
+// 状态：**已结课（2026-11-09 用户确认停课，it60）· 不晋级 / 有条件结课**。
+//   判词与 B/C 满池读数见下方「★ 结课报告」；后继 = `o1-warm-fix2.jsonc`
+//   （bc 用本课 **it60**，末点即判决权重）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// ★ 结课报告（2026-11-09 22:4x；优先级高于下方立项块）
+// ══════════════════════════════════════════════════════════════════════════
+// ── 1. 停课状态与判决权重 ─────────────────────────────────────────────
+//   2026-11-08 22:46:51 开课 → 末次落账 2026-11-09 00:54:41（用户 2026-11-09
+//   确认停课）。60 轮 / 约 2h08m，未跑满 `iters 300`；`training_log.jsonl`
+//   **零 error / 零熔断**，1 次 lease-orphan-reaped + 1 次 job_rejected。
+//   判决权重 = **it60** `o1-warm-fix.it60.20261109-005441.json`
+//   （sha16 `de4cb95aa23bcaf6` == it60 in-loop eval wver，也是 `o1-warm-fix2` 的 bc）；
+//   **末点归档即判决权重**（与 fast-fix 不同，it60 有评估）。
+//
+// ── 2. 主读数（B/C 层 860001 起 / 4 关 × 200 seed = 800 局 greedy / it60，
+//        判决口径；`tmp/o1-probe/warmfix60-bc800.jsonl.run/eval_log.jsonl`）────
+//   clear **.919** · timeout .074 · gameover .007 · cells 中位 26 ·
+//   idle 均 47.5%（中位 42.9%）· hitRate **.484** · wallPress **18.3 拍** ·
+//   stuck 中位 194 · ticks 1529 · dmg 18.5/局 · dmg/千拍聚合 **12.10** ·
+//   shots 6.3。**卡死失败局占比 95.4%（62/65）**。
+//   逐关 clear：2000 .995 / 2001 .990 / **2002 .705** / 2003 .985。
+//
+// ── 3. A 层趋势（401 局每点 / 前缀子集，**仅趋势**）──────────────────────
+//   it0 .975 / wall 21.6 / hit .298 → it35 .960 / wall 16.8 / hit .307
+//   → **it60 .910 / wall 18.1 / hit .475 / idle 中 47.1% / stuck 中 250 /
+//   timeout .075**。13 个点 wver 全不同，无坍缩指纹。
+//
+// ── 4. 判据逐条（§3，全池 greedy；✅过 / ❌不过）──────────────────────────
+// | 主 0 clear ≥.88      | **.919**  | ✅ |
+// | 主 1 卡死失败局 ≤2%  | **95.4%** | ❌ |
+// | 主 2 hitRate ≥.35    | **.484**  | ✅ |
+// | 主 3 gameover ≤5%    | .007      | ✅ |
+// | 主 4 wallPress ≤10   | **18.3**  | ❌ |
+// | 反签名 clear 掉 >2pp | .970→.919（−5.1pp） | ❌ 触发 |
+// | 反签名 dmg 涨 >30%   | 51.1→18.5（−64%）   | 未触发 |
+// | 止损 it40 卡死占比 ≤4% | 未达到   | ❌ 应停腿 |
+// ⇒ **不晋级**；命中/承伤大胜，但 clear 掉 5.1pp 已触发反签名。
+//
+// ── 5. 判词 ────────────────────────────────────────────────────────────
+//   相对父课 `o1-run-warm` it160（同面板 B/C 800 局：clear .970 / hitRate .297 /
+//   dmg 51.1 / dmg千拍 50.69 / wall 22.2 / 卡死 66.7% / timeout 2.0%）：
+//   **命中与躲弹是大胜**（hit .297→.484、dmg 51.1→18.5、dmg千拍 50.69→12.10）。
+//   代价是 clear .970→.919（−5.1pp，反签名触发）、卡死 66.7%→**95.4%**、
+//   timeout 2.0%→7.4%、wall 18.3 仍 >10，失败集中在 2002（.705）。
+//   ⇒ 与 fast-fix 同构：`wStuck` 罚买到了命中/承伤，没买到「不卡死」。
+//
+// ── 6. 后继 / 遗产 ─────────────────────────────────────────────────────
+//   `o1-warm-fix2.jsonc` 的 bc = 本课 **it60**（剂量在 800 局语料上标定）。
+//
+// ── 7. 复现 ────────────────────────────────────────────────────────────
+//   `tmp/o1-close-four.py`；账本 `tmp/o1-warm-fix/training_log.jsonl`。
+//
+// ── 8. 血缘警告 ────────────────────────────────────────────────────────
+//   只改注释 ⇒ `course_fp` 变、语义指纹不变（已 `load_course` 复验）。
+//   已停课不再开；若重开须重新对齐旧 shard 的 `course_fp`。
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为立项时的设计说明（保留作历史；「已立项 / 仍在跑」是当时语气，
+//   判词一律以本结课报告为准）
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 取证（o1-run-warm 最近 eval 点 it150，A 层 400 局）
+// ══════════════════════════════════════════════════════════════════════════
+// | 组 | n | shots | hitRate | stuckMax | wallPress | idle% | ticks | 输法 |
+// | 失败 | 30 | **19.8** | **.119** | **1921** | 22.8 | 81.3 | 2634 | gameover 20 / max_ticks 10 |
+// | 成功 | 370 | 11.7 | **.351** | 381 | 16.2 | 53.4 | 1074 | — |
+// 长局（≥3000 拍）37 局：shots 34.2 但 miss 20.6、hitRate **.109**、stuck 3530、idle 85.9%
+// ⇒ **不是不开枪，是卡住后朝墙/障碍盲射**（打不中还不换位），最后被打死。
+// `wallPressTicks` 只有 22.8（选 hold 不计），`stuckTicks` 才是判别量。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 与 o1-fast-fix 的差异（同一公式，只差参数）
+// ══════════════════════════════════════════════════════════════════════════
+// | 参数 | fast-fix | **warm-fix** | 理由 |
+// | wHit | 3 | **4** | 把「命中」的价抬高，拉开与空射的差 |
+// | wShot | 0.02 | **0.20** | 本课失败局空射多（19.8 发 / hitRate .119）⇒ 空射要贵 |
+// | wWall | 0.4 | **0.6** | 贴墙是本课主症状，单价 ×1.5（cap 80 ⇒ 满量程 48） |
+// | wStuck | 0.01 | **0.02** | 卡死是本课共同症状，罚加倍（cap 2000 ⇒ 40） |
+// | wMove | 0.03 | **0.02** | 本课已有移动能力，不必再加价 |
+// | paceCap | 36 | **30** | 反苟 + 给 gameover−lazy 留裕度 |
+// | wFast | 20 | **30** | 父课 clearTick 短，快Δ 需更高单价才过门 |
+// | wDeath | 12 | **6** | gameover 局 dmg 200 已由 wDmg 罚；death 低是给天平留裕度 |
+// | wDmg | 0.08 | **0.07** | 同上（warm 的 gameover 更频繁） |
+// | wThreat / wLaneMove | .02 / .05 | **.04 / .08** | 罚待射界、奖射界里移动 |
+// 其余（wKill/wWin/runCap/fastCap/moveCap/shotCap/wallCap/stuckCap/dmgCap/threatCap/
+//   laneCap/wPace/paceTicks/paceWindow、terminal、位移包）逐字相同。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 剂量（`tmp/o1-probe/o1-fix-tune.py`，真 RewardFn，最新语料 warm155 800 局）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点语料（it155，B/C 860001 起 800 局 greedy）：clear **.905** / 卡死失败局 52（6.5%）/
+//   stuck 中位 217 / idle 中位 43.7% / wall 均 16.6 / shots 均 8.2。
+// 本课九条（warm155 语料）全过：
+//   脱困ΔΦ **+49.6**（门 ≥15）· 卡死EV **−114.7** vs gameover −65.6（差 49.1，门 ≥8）·
+//   移动EV +109.4 · 跑Δ **+17.0**（门 ≥8）· 快Δ **+3.2**（门 ≥3）· 墙Δ **+9.5**（门 ≥3）·
+//   gameover−lazy >0 · clear−非clear 大正 · 满量程 **48 < 60**。
+// ⚠ 交叉语料（fast35）上 `gameover−lazy` −20.1（不过门）⇒ **剂量起点专属**，换 bc 重标。
+// ⚠ 天平与 fast-fix 相同：本课**有意**让「卡死超时」比「战死」差（§3 三条替代断言），
+//   因为本课的 timeout 局同样是卡死；防送死靠 `gameover−lazy>0` + clear 最高 + gameover 占比监控。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据与止损（全池 greedy，连续 2 独立点）
+// ══════════════════════════════════════════════════════════════════════════
+//   主 0 clear **≥ .88**（it155 .905，不允许掉 >2pp）
+//   主 1 **卡死失败局占比 ≤ 2%**（it155 6.5%）
+//   主 2 **hitRate ≥ .35**（失败局 .119 ⇒ 要把它拉回成功局水平；it155 全体请用本腿 it0 复核）
+//   主 3 gameover **≤ 5%**（it150 失败局 20/30 是 gameover；全池 gameover 见 B/C）
+//   主 4 wallPress **≤ 10**（it155 16.6）
+//   反签名：dmg/局涨 >30% · hitRate 相对峰值掉 >15% · clear 掉 >2pp ·
+//     卡死占比回升 >5% · gameover >15% 且 clear 不涨 · entropy/kl 熔断。
+//   止损：it40 卡死占比未降到 ≤4% 或 hitRate 未升 ⇒ 停腿（奖励侧买不动）。
+// ⚠ 面板/口径同 fast-fix；`dmg/千拍` 与 `dmg/局` 分开看。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 已知局限
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 替换而非续跑；旧 `o1-run-warm` 建议人停，别并行。
+// 2. `wDeath 6` 是给天平留裕度，不是鼓励送死；监控 gameover 占比。
+// 3. 本课偏离硬闸 #7（理由同 fast-fix §3）；结课必须复核三条替代断言。
+// 4. 交叉语料不过门 ⇒ 剂量起点专属。
+// 5. 1 敌关 aimHits ≤4，wHit 4 满量程 16 <60；20 敌段需加 cap。
+// 6. 4 关定集 = 记忆化风险；跨级读数只用于晋级。
+//  · `reports/o1-warm-fix-close-20261109.md` 未另出（结课报告按纪律回填在本文件头）。
+
+// ── 结算节（2026-11-09 已回填；完整报告在文件头「★ 结课报告」）──────────────
+//  · 停课：2026-11-08 22:46 开 → 11-09 00:54 末次落账，60 轮 / 零 error / 未跑满 300。
+//  · 判决权重：it60 `de4cb95aa23bcaf6`（末点即有评估，= `o1-warm-fix2` 的 bc）。
+//  · B/C 满池 800 局：clear .919 / timeout .074 / hitRate .484 / wall 18.3 /
+//    dmg 18.5（dmg千拍聚合 12.10）/ 卡死失败局 95.4% / 2002 最弱 .705。
+//  · 判据：主 0/2/3 过；主 1、主 4、clear 反签名、止损不过 ⇒ **不晋级**。
+//
+
+{
+  "version": 5,
+  "name": "o1-warm-fix",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      "- wShot*min(playerShots, shotCap)",
+      "- wWall*min(wallPressTicks, wallCap)",
+      "- wStuck*min(stuckTicks, stuckCap)",
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      "- wDeath*playerDeaths",
+      "- wThreat*min(threatTicks, threatCap)",
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 4.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      // 36（而非 30）：快Δ 裕度只有 +0.20 太薄；36 把它抬到 ~0.8，满量程仍 <60
+      "wFast": 36.0,
+      "fastCap": 2000.0,
+      "wMove": 0.02,
+      "moveCap": 1600.0,
+      "wShot": 0.2,
+      "shotCap": 120.0,
+      "wWall": 0.6,
+      "wallCap": 80.0,
+      "wStuck": 0.02,
+      "stuckCap": 2000.0,
+      "wDmg": 0.07,
+      "dmgCap": 200.0,
+      "wDeath": 6.0,
+      "wThreat": 0.04,
+      "threatCap": 600.0,
+      "wLaneMove": 0.08,
+      "laneCap": 200.0,
+      "wPace": 6.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 30.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o1-run-warm/o1-run-warm.it160.20261108-224201.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o1-warm-fix/weights.json",
+  "traj": "tmp/o1-warm-fix",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o1-warm-fix",
+  "backup_prefix": "o1-warm-fix",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
