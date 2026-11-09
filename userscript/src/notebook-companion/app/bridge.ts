@@ -25,6 +25,8 @@ export interface BridgeMessage {
   session?: string
   /** host 侧已知的日志会话基（attach 下发）：frame 的 iframe URL 解析不出 notebook。 */
   sessionBase?: string
+  /** host 的本页自动保存设置（attach 下发）：frame 在启动循环前应用。 */
+  autoSave?: { enabled: boolean; intervalSec: number }
 }
 
 export interface BridgeEvent {
@@ -74,6 +76,8 @@ export interface HostBridge {
   attach(origin: string, target: unknown, nonce?: string): void
   /** 外层 URL 推出的 notebook 会话基：随 attach 下发，frame 用它替换自己猜出的 unknown。 */
   setSessionBase(base: string): void
+  /** 本页自动保存设置：随 attach 下发（下一次 attach 也带上最新值）。 */
+  setAutoSave(settings: { enabled: boolean; intervalSec: number }): void
   send(
     name: string,
     args?: unknown,
@@ -86,6 +90,7 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
   let nonce = ''
   let frameTarget: unknown = null
   let sessionBase = ''
+  let autoSave: { enabled: boolean; intervalSec: number } | null = null
   const pending = new Map<
     string,
     {
@@ -144,12 +149,16 @@ export function createHostBridge(win: BridgeWindow, hooks: HostBridgeHooks = {})
           kind: 'attach',
           nonce,
           ...(sessionBase ? { sessionBase } : {}),
+          ...(autoSave ? { autoSave } : {}),
         } satisfies BridgeMessage,
         origin,
       )
     },
     setSessionBase(base: string) {
       sessionBase = base
+    },
+    setAutoSave(settings) {
+      autoSave = { enabled: settings.enabled, intervalSec: settings.intervalSec }
     },
     send(name: string, args?: unknown) {
       if (frameTarget === null) {

@@ -26,6 +26,19 @@ export interface BncConfig {
 
 export const CONFIG_KEY = 'bnc:config'
 
+/** 面板「自动保存并清空」的本页设置（开关 + 间隔）。 */
+export interface AutoSaveSettings {
+  enabled: boolean
+  intervalSec: number
+}
+
+/** 本页自动保存设置的键前缀：页标签跨刷新稳定、不同页签分开。 */
+export const AUTO_SAVE_KEY_PREFIX = 'bnc:autoSave:'
+
+export function autoSaveKeyFor(page: string): string {
+  return `${AUTO_SAVE_KEY_PREFIX}${page}`
+}
+
 export const DEFAULT_CONFIG: BncConfig = {
   dashboardBase: 'http://127.0.0.1:8900',
   enabled: true,
@@ -114,4 +127,46 @@ export function loadConfig(runtime: Runtime): BncConfig {
 
 export function saveConfig(runtime: Runtime, config: BncConfig): void {
   runtime.setValue(CONFIG_KEY, sanitizeConfig(config))
+}
+
+function sanitizeAutoSave(raw: unknown, fallback: AutoSaveSettings): AutoSaveSettings {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ...fallback }
+  const o = raw as Record<string, unknown>
+  return {
+    enabled: typeof o.enabled === 'boolean' ? o.enabled : fallback.enabled,
+    intervalSec:
+      typeof o.intervalSec === 'number' && Number.isFinite(o.intervalSec)
+        ? Math.min(24 * 3600, Math.max(0, Math.round(o.intervalSec)))
+        : fallback.intervalSec,
+  }
+}
+
+/** 读本页的自动保存设置；没有本页键（旧版）时沿用全局 config 的值。 */
+export function loadAutoSave(
+  runtime: Runtime,
+  page: string,
+  fallback: AutoSaveSettings,
+): AutoSaveSettings {
+  return sanitizeAutoSave(runtime.getValue(autoSaveKeyFor(page), null), fallback)
+}
+
+/** 只写本页键；绝不回写 `bnc:config`（否则又会串到同站的其他页面）。 */
+export function saveAutoSave(runtime: Runtime, page: string, settings: AutoSaveSettings): void {
+  runtime.setValue(
+    autoSaveKeyFor(page),
+    sanitizeAutoSave(settings, {
+      enabled: DEFAULT_CONFIG.autoSaveEnabled,
+      intervalSec: DEFAULT_CONFIG.autoSaveIntervalSec,
+    }),
+  )
+}
+
+/** 把本页覆盖应用到该页唯一的 config 对象（host / single / frame 各一份）。 */
+export function applyPageAutoSave(runtime: Runtime, page: string, config: BncConfig): void {
+  const saved = loadAutoSave(runtime, page, {
+    enabled: config.autoSaveEnabled,
+    intervalSec: config.autoSaveIntervalSec,
+  })
+  config.autoSaveEnabled = saved.enabled
+  config.autoSaveIntervalSec = saved.intervalSec
 }

@@ -336,6 +336,16 @@ describe('定时任务：到点执行一次即消耗（claim + 迟到窗口）',
     expect(a.sched.tasks()).toEqual([])
   })
 
+  it('ownerPage 随任务落盘保留；同桶混入别的页任务也不认领', () => {
+    const h = harness()
+    h.sched.add({ at: '09:00', action: 'run-all' })
+    const stored = h.mem.get(h.bucket()) as SchedulerTask[]
+    expect(stored[0]!.ownerPage).toBe('p1')
+
+    h.mem.set(h.bucket(), [...stored, { ...stored[0]!, id: 'other-page', ownerPage: 'p2' }])
+    expect(h.sched.tasks().map((t) => t.id)).toEqual(['tid1'])
+  })
+
   it('页面隔离：别的 notebook 的页面更看不到、也吃不掉（旧 bug 的回归钉）', async () => {
     const a = harness()
     a.sched.add({ at: '09:00', action: 'run-all' })

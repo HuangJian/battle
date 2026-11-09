@@ -253,6 +253,8 @@ function sanitizeTask(raw: unknown): SchedulerTask | null {
     nextAt,
     action,
     notebookKey: typeof o.notebookKey === 'string' ? o.notebookKey : '',
+    // ownerPage 必须随任务一起回读：同一桶里混入别的页任务时，ownTask 才能拒绝。
+    ...(typeof o.ownerPage === 'string' && o.ownerPage ? { ownerPage: o.ownerPage } : {}),
     sessionAtCreate: typeof o.sessionAtCreate === 'string' ? o.sessionAtCreate : '',
     ...(rawTarget ? { target: sanitizeTarget(rawTarget) } : {}),
     enabled: o.enabled !== false,

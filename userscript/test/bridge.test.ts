@@ -75,6 +75,19 @@ describe('bridge：host ⇄ frame', () => {
     host.destroy()
   })
 
+  it('host：setAutoSave 后 attach 带上本页设置（frame 先应用再启动）', () => {
+    const f = fakeWindow()
+    const host = createHostBridge(f.win)
+    host.setAutoSave({ enabled: false, intervalSec: 120 })
+    host.attach(FRAME, 'frame-window', 'n1')
+    expect(f.sent[0]!.msg).toMatchObject({
+      kind: 'attach',
+      nonce: 'n1',
+      autoSave: { enabled: false, intervalSec: 120 },
+    })
+    host.destroy()
+  })
+
   it('host：frame 不回 ⇒ 超时是失败且可重试（不假装成功、不浪费一次性任务）', async () => {
     const f = fakeWindow()
     const host = createHostBridge(f.win, { timeoutMs: 20 })
@@ -169,6 +182,28 @@ describe('bridge：host ⇄ frame', () => {
       origin: KAGGLE,
     })
     expect(seen).toEqual(['kaggle-Huang-rollout-edit'])
+  })
+
+  it('frame：attach 里的 autoSave 交给 onAttach（boot 在建循环前应用）', () => {
+    const f = fakeWindow('self', 'parent')
+    const seen: Array<{ enabled: boolean; intervalSec: number }> = []
+    createFrameBridge(f.win, {
+      hostOrigins: [KAGGLE],
+      handle: async () => ({ ok: true }),
+      onAttach: (m) => {
+        if (m.autoSave) seen.push(m.autoSave)
+      },
+    })
+    f.fire({
+      data: {
+        __bnc: 1,
+        kind: 'attach',
+        nonce: 'n1',
+        autoSave: { enabled: false, intervalSec: 120 },
+      },
+      origin: KAGGLE,
+    })
+    expect(seen).toEqual([{ enabled: false, intervalSec: 120 }])
   })
 
   it('frame：attach 时 notebook 未就绪 ⇒ 出现后补 status（notebook=true）', async () => {

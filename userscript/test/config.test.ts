@@ -1,9 +1,26 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  applyPageAutoSave,
+  autoSaveKeyFor,
   DEFAULT_CONFIG,
   isLoopbackHttpBase,
+  loadAutoSave,
   sanitizeConfig,
+  saveAutoSave,
 } from '../src/notebook-companion/config'
+import type { Runtime } from '../src/runtime'
+
+function memoryRuntime(): { runtime: Runtime; data: Map<string, unknown> } {
+  const data = new Map<string, unknown>()
+  return {
+    runtime: {
+      getValue: <T>(key: string, fallback: T): T =>
+        data.has(key) ? (data.get(key) as T) : fallback,
+      setValue: (key: string, value: unknown) => void data.set(key, value),
+    } as unknown as Runtime,
+    data,
+  }
+}
 
 describe('config：非法存储值逐字段回默认（不抛）', () => {
   it('非对象 / null / 数组 ⇒ 全默认', () => {
@@ -66,5 +83,34 @@ describe('config：非法存储值逐字段回默认（不抛）', () => {
     expect(c.autoClearDeferWarnSec).toBe(600)
     expect(c.keepBytes).toBe(1024)
     expect(c.confirmStopOnCreate).toBe(DEFAULT_CONFIG.confirmStopOnCreate)
+  })
+})
+
+describe('自动保存设置：按页隔离', () => {
+  const base = { enabled: true, intervalSec: 1800 }
+
+  it('两个页面用不同的键；一页的改动读不到另一页', () => {
+    const { runtime } = memoryRuntime()
+    saveAutoSave(runtime, 'p1', { enabled: false, intervalSec: 120 })
+    expect(autoSaveKeyFor('p1')).toBe('bnc:autoSave:p1')
+    expect(autoSaveKeyFor('p1')).not.toBe(autoSaveKeyFor('p2'))
+    expect(loadAutoSave(runtime, 'p1', base)).toEqual({ enabled: false, intervalSec: 120 })
+    expect(loadAutoSave(runtime, 'p2', base)).toEqual(base)
+  })
+
+  it('apply 只改本页 config；坏字段回退，间隔夹到 0–24h', () => {
+    const { runtime, data } = memoryRuntime()
+    saveAutoSave(runtime, 'p1', { enabled: true, intervalSec: 10 * 86_400 })
+    data.set(autoSaveKeyFor('p2'), { enabled: 'no', intervalSec: -5 })
+
+    const a = { ...DEFAULT_CONFIG }
+    const b = { ...DEFAULT_CONFIG }
+    applyPageAutoSave(runtime, 'p1', a)
+    applyPageAutoSave(runtime, 'p2', b)
+
+    expect(a.autoSaveEnabled).toBe(true)
+    expect(a.autoSaveIntervalSec).toBe(86_400)
+    expect(b.autoSaveEnabled).toBe(DEFAULT_CONFIG.autoSaveEnabled)
+    expect(b.autoSaveIntervalSec).toBe(0)
   })
 })

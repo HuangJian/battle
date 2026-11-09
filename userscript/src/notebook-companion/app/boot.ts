@@ -1,5 +1,11 @@
 import { createRuntime, type Runtime } from '../../runtime'
-import { loadConfig, saveConfig, type BncConfig } from '../config'
+import {
+  applyPageAutoSave,
+  autoSaveKeyFor,
+  loadConfig,
+  saveAutoSave,
+  type BncConfig,
+} from '../config'
 import { detectRole, singleSite, type Role } from '../selectors'
 import {
   createTabTitleSync,
@@ -187,6 +193,8 @@ function startFrame(
 ): () => void {
   const adapter = new KaggleFrameAdapter(doc)
   const session = new KaggleSessionAdapter(doc, href)
+  const page = pageTag(win)
+  applyPageAutoSave(runtime, page, config)
   const loop = createShipLoop({
     doc,
     href,
@@ -194,7 +202,7 @@ function startFrame(
     config,
     runtime,
     adapter,
-    pageTag: pageTag(win),
+    pageTag: page,
     writer: writerTag(win, 'frame'),
     onError: (message) => log(`ship: ${message}`),
   })
@@ -218,7 +226,7 @@ function startFrame(
   }
   const openConfig = (): void => {
     runtime.setClipboard(JSON.stringify(config, null, 2))
-    log('配置已复制到剪贴板（改完写回 GM 存储 bnc:config）')
+    log(`配置已复制到剪贴板（自动保存按页存 ${autoSaveKeyFor(page)}；其余在 bnc:config）`)
   }
 
   const bridge = createFrameBridge(frameBridgeWindow(win), {
@@ -232,6 +240,7 @@ function startFrame(
     session: () => loop.session,
     onAttach: (m) => {
       if (m.sessionBase) loop.setSessionBase(m.sessionBase)
+      if (m.autoSave) loop.setAutoSave(m.autoSave.enabled, m.autoSave.intervalSec)
       startLoop()
       log(`bridge attach（nonce=${m.nonce ?? '∅'}）`)
     },
@@ -318,6 +327,7 @@ function startHost(
    * 存 sessionStorage ⇒ 刷新不变、另一个页签必然不同。
    */
   const page = pageTag(win)
+  applyPageAutoSave(runtime, page, config)
   /** 操作日志 → dashboard（失败只掉队列，不影响面板）。 */
   const ops = createOpLog({
     runtime,
@@ -380,6 +390,10 @@ function startHost(
   // frame 的 iframe URL 是 jupyter-proxy（解析不出 owner/slug）：把外层 notebook 身份送过去，
   // 让日志键用 notebook 名，而不是 kaggle-unknown-edit。
   bridge.setSessionBase(session)
+  bridge.setAutoSave({
+    enabled: config.autoSaveEnabled,
+    intervalSec: config.autoSaveIntervalSec,
+  })
 
   /** 面板按钮的唯一出口：一条命令 = 一条操作日志（成败与原因都留）。 */
   const run = async (name: string): Promise<void> => {
@@ -499,7 +513,11 @@ function startHost(
         const intervalSec = Math.min(24 * 3600, Math.max(60, Math.round(value.intervalMin * 60)))
         config.autoSaveEnabled = value.enabled
         config.autoSaveIntervalSec = intervalSec
-        saveConfig(runtime, config)
+        saveAutoSave(runtime, page, {
+          enabled: config.autoSaveEnabled,
+          intervalSec: config.autoSaveIntervalSec,
+        })
+        bridge.setAutoSave({ enabled: config.autoSaveEnabled, intervalSec })
         const r = await bridge.send('setAutoSave', {
           enabled: config.autoSaveEnabled,
           intervalSec,
@@ -687,6 +705,7 @@ function startSingle(
     site === 'aistudio' ? parseAistudioNotebookKey(href) : parseColabNotebookKey(href)
   /** 本页标签：日志键、任务表分桶、归属阀共用同一个值。 */
   const page = pageTag(win)
+  applyPageAutoSave(runtime, page, config)
   const loop = createShipLoop({
     doc,
     href,
@@ -743,7 +762,7 @@ function startSingle(
   const openConfig = (): void => {
     op('config:copy')
     runtime.setClipboard(JSON.stringify(config, null, 2))
-    log('配置已复制到剪贴板（改完写回 GM 存储 bnc:config）')
+    log(`配置已复制到剪贴板（自动保存按页存 ${autoSaveKeyFor(page)}；其余在 bnc:config）`)
   }
   const deps: CommandDeps = {
     loop,
@@ -857,7 +876,10 @@ function startSingle(
         const intervalSec = Math.min(24 * 3600, Math.max(60, Math.round(value.intervalMin * 60)))
         config.autoSaveEnabled = value.enabled
         config.autoSaveIntervalSec = intervalSec
-        saveConfig(runtime, config)
+        saveAutoSave(runtime, page, {
+          enabled: config.autoSaveEnabled,
+          intervalSec: config.autoSaveIntervalSec,
+        })
         const r = await send('setAutoSave', {
           enabled: config.autoSaveEnabled,
           intervalSec,

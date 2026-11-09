@@ -17,11 +17,11 @@ const OP_LOG = readFileSync(
 )
 
 describe('调度器接线：页面身份 + 操作日志', () => {
-  it('两个角色都交 page（host 的 frameSession 与 single 的 loop.session 各一份）', () => {
+  it('三个角色都交 page（host 的 frameSession、single 的 loop.session、frame 的日志/自动保存）', () => {
     expect(BOOT).toContain('identity: () => ({ notebookKey, session: frameSession, page })')
     expect(BOOT).toContain('identity: () => ({ notebookKey, session: loop.session, page })')
-    // page 必须来自 sessionStorage 的页标签（跨刷新稳定、页签之间必然不同）
-    expect(BOOT.match(/const page = pageTag\(win\)/g)?.length ?? 0).toBe(2)
+    // page 必须来自 sessionStorage 的页标签（跨刷新稳定、页签之间分开）
+    expect(BOOT.match(/const page = pageTag\(win\)/g)?.length ?? 0).toBe(3)
   })
 
   it('调度事件 → op 日志：两个角色都挂 onEvent', () => {
