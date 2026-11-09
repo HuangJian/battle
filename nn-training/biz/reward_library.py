@@ -25,7 +25,7 @@ scheme** —— 旧课程（kill/kill2/balanced/dodge-mix）与 v7 都是配置�
 既杜绝「跨决策步混算」的口径错误，也防内存/数值爆炸。唯一例外 `wavg` 是
 **特征轴**归约（同一行内定长 `(v,w)` 对），不跨样本。
 
-公式限长 ≤1024 字符、AST 深度 ≤64（解析层 DoS 防线）；求值后 `isfinite` 检查
+公式限长 ≤8192 字符、AST 深度 ≤64（解析层 DoS 防线）；求值后 `isfinite` 检查
 （除零/溢出 NaN 不得静默污染 GAE）。
 """
 
@@ -308,7 +308,9 @@ def outcome_virtuals(outcome: str) -> dict[str, float]:
 
 # ---------------------------------------------------------------- 白名单
 
-MAX_FORMULA_CHARS = 1024
+#: 2026-11-09 从 1024 放宽到 8192：o1 系列公式已到 20+ 项（分段 wall/stuck/idle/danger/
+#: 基地税），1024 逼着删有效项；8192 仍能拦住失控公式，降级卡语义不变。
+MAX_FORMULA_CHARS = 8192
 MAX_AST_DEPTH = 64
 
 #: 函数名 → 白名单层。核心层默认开放；扩展层需 `allow_extended_funcs: true`。
@@ -506,7 +508,7 @@ class FormulaError(ValueError):
 class FormulaDegradeError(FormulaError):
     """公式**量化触发面**超限（评审 F1，2026-09-02）。
 
-    降级卡只允许在**机制性量化限制**上触发：formula > 1024 字符 / AST 深度 > 64
+    降级卡只允许在**机制性量化限制**上触发：formula > MAX_FORMULA_CHARS（8192）字符 / AST 深度 > 64
     ——这两类与公式语义无关，配置方「换 builtin」是合法备胎。语法错误、白名单
     外符号、未知名 params 等都是**配置错误**（手误即脚枪），必须原样传播、
     由调用方响亮报错——绝不静默回退 builtin 掩盖真因。
