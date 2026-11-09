@@ -2233,7 +2233,8 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--lives-override') livesOverride = args[++i]
     else if (args[i] === '--player-level') playerLevelOverride = args[++i]
     else if (args[i] === '--dodge') dodgeArg = args[++i]
-    // BC 语料模式：动作取 argmax（教师的最优动作），不采样本。PPO rollout 不传。
+    // greedy 采集开关：BC 语料与 greedy 分层配额共用（plan/greedy-outcome-quota rev4）；
+    // 动作取 argmax 而非采样。普通采样 rollout 不传 ⇒ 旧 manifest 逐字节不变。
     else if (args[i] === '--teacher-argmax') teacherArgmax = true
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。

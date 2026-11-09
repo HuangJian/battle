@@ -1322,3 +1322,164 @@ def test_greedy_halt_accepts_queue_total_samples(tmp_path: Path) -> None:
     assert len(stub.dispatched[0]) == 1, (
         "首局结算即应触发逐局熔断；只认 nSamples 会让整批候选跑完"
     )
+
+
+# ---------------------------------------------------------------------------
+# greedy 采集阶段：停止 / 降级 / 跳过（plan rev4 §5.1–5.2）
+#
+# 这些用例只驱动 `_volume_collect_greedy` 这一个采集方法：假派发只落 manifest、
+# 不跑仿真、不碰 PPO。默认**不回调 on_result**，让停止条件完全由循环顶部的
+# `bins >= targets` / `total >= collect_target` 决定；逐局熔断另有专门用例。
+# ---------------------------------------------------------------------------
+
+
+def _install_greedy_dispatch(
+    stub: _StubLoop,
+    outcome_for: Any,
+    *,
+    fire_on_result: bool = False,
+) -> None:
+    """装可控的 greedy 派发桩：`outcome_for(wave, i) -> (outcome, nSamples)`。"""
+
+    def fake(
+        it: int,
+        pairs: list[tuple[int, int]],
+        dist_cfg: dict | None,
+        *,
+        halt_event: Any = None,
+        on_result: Any = None,
+        pool_halt: bool = False,
+    ) -> dict:
+        assert bool(getattr(stub.args, "rollout_argmax", False)) is True, (
+            "greedy 波派发前必须临时置位 --teacher-argmax"
+        )
+        wave = len(stub.dispatched)
+        taken: list[tuple[int, int]] = []
+        settled = 0
+        for stage, seed in pairs:
+            if halt_event is not None and halt_event.is_set():
+                break
+            outcome, n = outcome_for(wave, len(taken))
+            taken.append((stage, seed))
+            d = stub._traj_dir / f"w{wave}" / f"rl_s{stage:02d}_seed{seed}"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "manifest.json").write_text(
+                json.dumps({
+                    "stage": stage,
+                    "seed": seed,
+                    "wver": _WVER,
+                    "nSamples": n,
+                    "outcome": outcome,
+                    "labelMode": "greedy",
+                }),
+                encoding="utf-8",
+            )
+            settled += n
+            if fire_on_result and on_result is not None:
+                on_result({"stage": stage, "seed": seed, "nSamples": n})
+        stub.dispatched.append(taken)
+        return {
+            "games": len(taken),
+            "winRate": 0.0,
+            "outcomes": {"stage_clear": len(taken)},
+            "totalSamples": settled,
+            "totalTicks": settled * 10,
+            "scoreList": [],
+            "dimLists": {},
+        }
+
+    stub._dispatch_volume_wave = fake  # type: ignore[method-assign]
+
+
+def _greedy_stub(tmp_path: Path, quota: dict, *, target: int = 1000) -> _StubLoop:
+    stub = _StubLoop(tmp_path, target=target, est=0, samples=100)
+    stub.args.greedy_quota = quota
+    stub.args.volume_max_batches = 8
+    return stub
+
+
+def test_greedy_all_bins_met_is_not_degraded(tmp_path: Path) -> None:
+    """三档都达标 ⇒ 不降级、不触 cap 降级、没跑满波次上限（§5.2 第一分支）。
+
+    ⚠ 钉住当前行为：`total` 会到 `collect_target`，**不是** `T_g`。派发计划按逐关
+    `collect_target/n` 铺，逐局熔断阈值也是 `collect_target` ⇒ 本机串行路径下
+    「达标即停」这一分支基本不可达，一波就冲到硬顶（S3 it1 的 10521/8602 同源）。
+    改生产代码会动在跑的 S3 剂量，这里先如实钉住，语义偏差记进 plan §14。
+    """
+    stub = _greedy_stub(
+        tmp_path, {"win": 0.5, "loss": 0.0, "timeout": 0.5, "oversample_cap": 2.0}
+    )
+    _install_greedy_dispatch(
+        stub,
+        lambda wave, i: ("stage_clear", 100) if i % 2 == 0 else ("timeout", 100),
+    )
+    stub._volume_collect_greedy(1, None)
+
+    st = stub._greedy_stats
+    assert st is not None
+    assert st["degraded"] is False and st["cap_hit"] is False
+    assert st["bins"]["win"] >= 500 and st["bins"]["timeout"] >= 500
+    assert st["waves"] < 8, "达标后必须停采，不能一路烧到 max_batches"
+    assert st["total"] >= st["collect_target"], "当前实现按逐关 quota 铺满到硬顶"
+    assert st["rule"] == GREEDY_QUOTA_RULE_V1
+    assert stub.args.rollout_argmax is False, "收官后必须还原 argmax，普通波不许被污染"
+
+
+def test_greedy_cap_degrades_softly(tmp_path: Path) -> None:
+    """只有 win 供给 ⇒ 触 cap 降级：留缺口、不重分配、soft=true 不抛。"""
+    stub = _greedy_stub(
+        tmp_path,
+        {"win": 0.5, "timeout": 0.5, "oversample_cap": 2.0, "soft": True},
+        target=400,
+    )
+    _install_greedy_dispatch(stub, lambda wave, i: ("stage_clear", 100))
+    stub._volume_collect_greedy(1, None)
+
+    st = stub._greedy_stats
+    assert st is not None
+    assert st["degraded"] is True and st["cap_hit"] is True
+    assert st["bins"]["timeout"] == 0, "缺额不得从 win 档重分配过去"
+    assert st["soft"] is True
+    assert st["total"] >= st["collect_target"]
+    assert st["stopped_no_games"] is False
+
+
+def test_greedy_hard_target_raises(tmp_path: Path) -> None:
+    """soft=false 且未达标 ⇒ 响亮 RuntimeError，不静默拿半吊子语料去训。"""
+    stub = _greedy_stub(
+        tmp_path,
+        {"win": 0.5, "timeout": 0.5, "oversample_cap": 2.0, "soft": False},
+        target=400,
+    )
+    _install_greedy_dispatch(stub, lambda wave, i: ("stage_clear", 100))
+    with pytest.raises(RuntimeError, match="soft=false"):
+        stub._volume_collect_greedy(1, None)
+
+
+def test_greedy_all_zero_quota_is_noop(tmp_path: Path) -> None:
+    """三档全 0 = 合法关闭：不建 plan、不派局、不写 stats（与缺席等价）。"""
+    stub = _greedy_stub(tmp_path, {"win": 0, "loss": 0, "timeout": 0})
+    stub._volume_collect_greedy(1, None)
+    assert stub._greedy_plan is None and stub._greedy_stats is None
+    assert stub.dispatched == [] and stub._greedy_waves == 0
+
+
+@pytest.mark.parametrize("skip", ["collect_only", "export_bundle"])
+def test_greedy_skips_export_only_paths(tmp_path: Path, skip: str) -> None:
+    """`--collect-only` / `--export-bundle` 不跑第二遍、不预筛（包是给人看的全量）。"""
+    stub = _greedy_stub(tmp_path, {"win": 0.1, "timeout": 0.1})
+    if skip == "collect_only":
+        stub.args.collect_only = 1
+    else:
+        stub.args.export_bundle = "tmp/bundle"
+    stub._volume_collect_greedy(1, None)
+    assert stub._greedy_plan is None and stub._greedy_stats is None
+    assert stub.dispatched == []
+
+
+def test_greedy_stream_path_is_loudly_rejected(tmp_path: Path) -> None:
+    """stream 路径没有第二遍 greedy 钩子 ⇒ 响亮拒绝，不静默退化。"""
+    stub = _greedy_stub(tmp_path, {"win": 0.1})
+    stub._stream_meta = {"handle": object()}
+    with pytest.raises(RuntimeError, match="stream"):
+        stub._volume_collect_greedy(1, None)

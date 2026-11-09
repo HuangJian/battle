@@ -152,6 +152,36 @@ def test_rollout_source_requires_same_wver(
     assert (2000, 9) in found and found[(2000, 9)][2] == LEG_B
 
 
+def test_greedy_shards_are_never_borrowed_across_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """greedy 与采样语料不互借（plan/greedy-outcome-quota rev4 §7.5）。
+
+    `labelMode` 是 provenance 的唯一判据：普通轮借到 greedy shard = 把失败轨迹当
+    on-policy 样本；greedy 轮借到普通局 = 没挖到新失败。旧 shard 无该键 ⇒ 采样。
+    """
+    a, b = _course(LEG_A), _course(LEG_B)
+    root = tmp_path / "b"
+    _wire_trajs(monkeypatch, {a.traj: tmp_path / "a", b.traj: root})
+
+    shard = _shard(root)  # 普通 shard，无 labelMode
+    args_greedy = SimpleNamespace(course_obj=a, reuse_siblings=1, rollout_argmax=True)
+    assert sr.rollout_sources([(2000, 7)], WVER, args_greedy) == {}, (
+        "greedy 轮不得借普通局"
+    )
+
+    mm = json.loads((shard / "manifest.json").read_text(encoding="utf-8"))
+    mm["labelMode"] = "greedy"
+    (shard / "manifest.json").write_text(json.dumps(mm), encoding="utf-8")
+    args_sample = SimpleNamespace(course_obj=a, reuse_siblings=1)
+    assert sr.rollout_sources([(2000, 7)], WVER, args_sample) == {}, (
+        "普通轮不得借 greedy 局"
+    )
+    assert (2000, 7) in sr.rollout_sources([(2000, 7)], WVER, args_greedy), (
+        "同模式的 greedy 轮仍应命中"
+    )
+
+
 def test_rollout_source_refuses_precomputed_reward(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
