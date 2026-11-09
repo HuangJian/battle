@@ -1,5 +1,5 @@
 /**
- * web-view-trend-range.test.ts — §382 走势范围（全量 / 最近30 / 最近10）：metricSeries 全量正序对齐、eval「最近 N」= 最近 N 个有效点、hero 6 条走势图与档位开关
+ * web-view-trend-range.test.ts — 走势范围（全量 / 最近60% / 最近30%）：metricSeries 全量正序对齐、eval「最近 N」= 最近 N 个有效点、hero 6 条走势图与档位开关
  *
  * 分层：src/web/view/series.ts（metricSeries / sliceSeries）
  *
@@ -12,7 +12,7 @@ import { render, view } from './helpers/console-fixture'
 import type { ConsoleStateView } from '../src/web/view'
 
 describe('console sparkline (ui/view)', () => {
-  describe('console trend chart / 走势范围 (§382: 全量/最近30/最近10)', () => {
+  describe('console trend chart / 走势范围（全量/最近60%/最近30%）', () => {
     const mkView = (n: number, withEval: boolean): ConsoleStateView => ({
       time: 't',
       course: 'c',
@@ -102,12 +102,12 @@ describe('console sparkline (ui/view)', () => {
       expect(win.iters[29]).toBe(100)
     })
 
-    it('sliceSeries：all 全量 / 30 / 10 截取点数正确', () => {
-      const series = view.metricSeries(mkView(50, true).metrics.iters)
+    it('sliceSeries：all 全量 / 最近60% / 最近30% 截取点数正确', () => {
+      const series = view.metricSeries(mkView(100, true).metrics.iters)
       const win = series.find((s) => s.key === 'winRate')!
-      expect(view.sliceSeries(win, 'all').vals.length).toBe(50)
-      expect(view.sliceSeries(win, '30').vals.length).toBe(30)
-      expect(view.sliceSeries(win, '10').vals.length).toBe(10)
+      expect(view.sliceSeries(win, 'all').vals.length).toBe(100)
+      expect(view.sliceSeries(win, '60pct').vals.length).toBe(60)
+      expect(view.sliceSeries(win, '30pct').vals.length).toBe(30)
     })
 
     it('sliceSeries eval 特殊语义：「最近 N」= 最近 N 个有效点（跳过 NaN 缺口）', () => {
@@ -169,12 +169,13 @@ describe('console sparkline (ui/view)', () => {
       const all = view.sliceSeries(evalS, 'all')
       expect(all.vals.length).toBe(25)
       expect(all.iters.length).toBe(25)
-      // 最近 10 个有效 eval 点
-      const last10 = view.sliceSeries(evalS, '10')
-      expect(last10.vals.length).toBe(10)
-      // 应为最后 10 个偶数 iter：32,34,...,50
-      expect(last10.iters[0]).toBe(32)
-      expect(last10.iters[9]).toBe(50)
+      // 最近 60% 个有效 eval 点：25 × 0.6 = 15（向上取整）
+      const last60 = view.sliceSeries(evalS, '60pct')
+      expect(last60.vals.length).toBe(15)
+      expect(last60.iters[14]).toBe(50)
+      // 「最近30%」仍按有效点计：25 × 0.3 = 7.5 ⇒ 向上取整 8
+      expect(view.sliceSeries(evalS, '30pct').vals.length).toBe(8)
+      expect(view.sliceSeries(evalS, '30pct').iters.at(-1)).toBe(50)
     })
 
     it('metricSeries：胜局耗时/胜局残血/承伤·杀/败局耗时 = rollout「所有 iter」平均，非 eval 口径', () => {
@@ -267,9 +268,9 @@ describe('console sparkline (ui/view)', () => {
       expect(loss.vals[0]).toBeCloseTo(900)
       expect(loss.vals[0]).toBeCloseTo(900)
       expect(Number.isFinite(ticks.vals[1])).toBe(true)
-      // 所有 iter 均为 rollout 有效点（不再随 eval 缺口稀疏）→ 全量 = 50 点，最近 10 = 10 点
+      // 所有 iter 均为 rollout 有效点（不再随 eval 缺口稀疏）→ 全量 = 50 点，最近 60% = 30 点
       expect(view.sliceSeries(hp, 'all').vals.length).toBe(50)
-      expect(view.sliceSeries(ticks, '10').vals.length).toBe(10)
+      expect(view.sliceSeries(ticks, '60pct').vals.length).toBe(30)
     })
 
     it('击杀/胜局残血/道具 各带绝对值与百分比两条序列（纵坐标档位的数据源）', () => {
@@ -292,7 +293,7 @@ describe('console sparkline (ui/view)', () => {
       // eval 同名对（稀疏档也参与「最近 N = 最近 N 个有效点」的截取）
       expect(get('evalKillsAbs').vals.length).toBe(30)
       expect(get('evalWinHpAbs').vals[0]).toBeCloseTo(150)
-      expect(view.sliceSeries(get('evalWinHpAbs'), '10').vals.length).toBe(10)
+      expect(view.sliceSeries(get('evalWinHpAbs'), '60pct').vals.length).toBe(18)
     })
 
     it('纵坐标档位：三张图各一个 toggle，默认 % / % / 数值（= 改造前的样子）', () => {
@@ -336,8 +337,8 @@ describe('console sparkline (ui/view)', () => {
       // 范围档位渲染且默认最近 30
       expect(html).toContain('tc-trend-range__btn')
       expect(html).toContain('全量')
-      expect(html).toContain('最近30')
-      expect(html).toContain('最近10')
+      expect(html).toContain('最近60%')
+      expect(html).not.toContain('最近10')
     })
 
     it('面积渐变的引用自洽 + 不依赖包围盒（恒定序列不得变黑）', () => {
@@ -366,8 +367,8 @@ describe('console sparkline (ui/view)', () => {
       expect(html).toMatch(/tc-segmented__btn--on[^>]*aria-pressed="true"[^>]*>全部</)
       // 默认档位仍是双序列叠加（eval 橙线在）——档位是**新增开关**，不改默认语义
       expect(html).toContain('stroke="var(--eval-line, #ea580c)"')
-      // 范围档位的默认（最近30）不受影响
-      expect(html).toMatch(/tc-trend-range__btn--on[^>]*aria-pressed="true"[^>]*>最近30</)
+      // 范围档位的默认（最近30%）不受影响
+      expect(html).toMatch(/tc-trend-range__btn--on[^>]*aria-pressed="true"[^>]*>最近30%</)
     })
   })
 })

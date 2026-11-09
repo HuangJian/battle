@@ -2325,6 +2325,10 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         if (v.value !== null) (dimAcc[k] ??= []).push(v.value)
       }
       const shardName = `rl_s${si}_seed${seed}`
+      // 逐局指标快照：完整 metrics 行的终局值。控制台要按 rollout 口径看全部指标，
+      // 而单局 manifest 原先只带摘要列；随 shard 一起落盘后，本机扫描与云机
+      // per-game 回传用的是同一份 `metricValues`（不需要再读 metrics.npy）。
+      const finalMetricRow = res.shard.metrics[res.shard.metrics.length - 1]
       const manifest = {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
@@ -2375,6 +2379,13 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         playerDeaths: res.playerDeaths,
         puGotTank: res.puGotTank,
         puGotOther: res.puGotOther,
+        ...(finalMetricRow
+          ? {
+              metricValues: Object.fromEntries(
+                METRICS_COLUMN_NAMES.map((k, i) => [k, Number(finalMetricRow[i] ?? 0)]),
+              ),
+            }
+          : {}),
         // feat：本 shard 由哪条 features 后端产出（native / wasm / ts）。
         // 加它是为了「以为开了 native 其实回落了」能被事后看见（评审 B5③）；
         // **与 wver 解耦**：本机直跑（无 --wver）也必须记，否则「本机看到的读数走哪条后端」

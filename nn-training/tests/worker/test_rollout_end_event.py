@@ -135,6 +135,7 @@ GAME = {
     "enemyTotal": 20,
     "puSpawnBomb": 1,
     "dims": {"loot": 0.5},
+    "metricValues": {"dangerTicks": 3, "wallPressTicks": 7},
 }
 
 
@@ -170,6 +171,7 @@ def test_record_rollout_writes_per_game_before_the_ledger_line(tmp_path: Path) -
     assert [(r["stage"], r["seed"]) for r in pg] == [(3, 11)]
     assert pg[0]["kills"] == 6 and pg[0]["ticks"] == 2000
     assert pg[0]["playerDamageTaken"] == 300 and pg[0]["enemyTotal"] == 20
+    assert pg[0]["metricValues"] == {"dangerTicks": 3, "wallPressTicks": 7}
     # 账本行照旧只一行（画像不是第二份账）。
     lines = [x for x in loop._jsonl_path.read_text(encoding="utf-8").splitlines() if x.strip()]
     assert [json.loads(x)["event"] for x in lines] == ["rollout_end"]

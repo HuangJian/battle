@@ -30,6 +30,8 @@ export interface TrendChartProps {
   fmt: (v: number | null) => string
   tone?: 'g' | 'y' | 'r'
   height?: number
+  /** 画布宽（px）。缺省 260（Hero 小卡宽度）；放大浮窗传实测宽，避免 viewBox 被横向拉伸。 */
+  width?: number
   /** y 轴下界上限：实际下界 = min(dataMin, yFloor)。缺省贴 dataMin。
    *  击杀/道具传 0（基底锁 0）；胜率传 0.3（基底不得高于 30%）。 */
   yFloor?: number
@@ -114,6 +116,7 @@ export function TrendChart({
   fmt,
   tone,
   height = 56,
+  width = VB_W,
   yFloor,
   yMin,
   color: colorProp,
@@ -142,7 +145,8 @@ export function TrendChart({
   const sharedIndex = controlled && hoverIter != null ? iters.indexOf(hoverIter) : -1
   const hover = controlled ? (sharedIndex >= 0 ? sharedIndex : null) : localHover
 
-  const plotW = VB_W - PAD_L - PAD_R
+  const vbW = Math.max(VB_W, Math.round(width))
+  const plotW = vbW - PAD_L - PAD_R
   const px = (i: number): number => PAD_L + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
   const hx = hover != null ? px(hover) : null
 
@@ -158,8 +162,8 @@ export function TrendChart({
     }
     const chartW = chartRef.current?.offsetWidth ?? 0
     const tipW = tipRef.current?.offsetWidth ?? 0
-    setTipCx(trendTipCenter((hx / VB_W) * chartW, chartW, tipW))
-  }, [hx])
+    setTipCx(trendTipCenter((hx / vbW) * chartW, chartW, tipW))
+  }, [hx, vbW])
 
   const valid = vals.filter(Number.isFinite)
   const valid2 = vals2 ? vals2.filter(Number.isFinite) : []
@@ -239,7 +243,7 @@ export function TrendChart({
         className="tc-trend__svg"
         width="100%"
         height={height}
-        viewBox={`0 0 ${VB_W} ${height}`}
+        viewBox={`0 0 ${vbW} ${height}`}
         preserveAspectRatio="none"
         aria-label={`${series.label}${series2 ? ` / ${series2.label}` : ''} 走势`}
       >
@@ -269,7 +273,7 @@ export function TrendChart({
               <line
                 x1={PAD_L}
                 y1={y.toFixed(1)}
-                x2={VB_W - PAD_R}
+                x2={vbW - PAD_R}
                 y2={y.toFixed(1)}
                 stroke="var(--border)"
                 stroke-width="1"
@@ -410,7 +414,7 @@ export function TrendChart({
           className="tc-trend__tip"
           ref={tipRef}
           style={{
-            left: tipCx != null ? `${tipCx.toFixed(1)}px` : `${(hx / VB_W) * 100}%`,
+            left: tipCx != null ? `${tipCx.toFixed(1)}px` : `${(hx / vbW) * 100}%`,
           }}
         >
           <span className="tc-trend__tip-it">it{hover != null ? iters[hover] : ''}</span>

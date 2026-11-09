@@ -18,6 +18,12 @@ import type {
   PairedCompare,
   PairedReferee,
 } from '../web/view'
+import {
+  BEHAVIOR_METRIC_KEYS,
+  BEHAVIOR_METRICS,
+  computeMetricStats,
+  type MetricStats,
+} from '../web/view'
 import { mcnemarP, pairedVerdict } from '../../../tools/eval/mcnemar'
 import { STAGES } from '../../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
@@ -451,6 +457,25 @@ export interface RawEntry {
   /** 关卡敌数（manifest.enemyTotal 或 stage 反查；null=未知）。 */
   enemyTotal: number | null
   startLives: number | null
+  /** metrics v16 的逐局终局快照（manifest/per-game 的 `metricValues`；旧画像 = null）。 */
+  metricValues: Record<string, number> | null
+}
+
+/** 单局画像里的逐局指标快照。新画像写 `metricValues`；旧 manifest 仍从顶层同名列兜底。 */
+function metricValuesFromRow(r: Record<string, unknown>): Record<string, number> | null {
+  const out: Record<string, number> = {}
+  const raw = r.metricValues ?? r.metric_values
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+    }
+  }
+  for (const k of BEHAVIOR_METRIC_KEYS) {
+    if (k in out) continue
+    const v = r[k]
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+  }
+  return Object.keys(out).length > 0 ? out : null
 }
 
 /**
@@ -493,6 +518,7 @@ function entryFromManifest(
     ),
     startLives:
       typeof m.startLives === 'number' && Number.isFinite(m.startLives) ? m.startLives : null,
+    metricValues: metricValuesFromRow(m),
   }
 }
 
@@ -533,6 +559,7 @@ function aggregateActuals(entries: RawEntry[]): IterActuals | null {
   let killRateN = 0
   let startLivesSum = 0
   let startLivesN = 0
+  const metricValues = new Map<string, number[]>()
   for (const v of entries) {
     totalKills += v.kills
     totalPU += v.pu
@@ -573,6 +600,21 @@ function aggregateActuals(entries: RawEntry[]): IterActuals | null {
       startLivesSum += v.startLives
       startLivesN++
     }
+    if (v.metricValues) {
+      for (const [k, x] of Object.entries(v.metricValues)) {
+        let xs = metricValues.get(k)
+        if (!xs) {
+          xs = []
+          metricValues.set(k, xs)
+        }
+        xs.push(x)
+      }
+    }
+  }
+  const behaviorMetrics: Record<string, MetricStats> = {}
+  for (const key of BEHAVIOR_METRIC_KEYS) {
+    const st = computeMetricStats(metricValues.get(key) ?? [])
+    if (st) behaviorMetrics[key] = st
   }
   const dmgPerKillAbs = dmgN > 0 && dmgKills > 0 ? +(dmgSum / dmgKills).toFixed(1) : null
   const meanStartLives = startLivesN > 0 ? startLivesSum / startLivesN : ASSUMED_START_LIVES
@@ -590,6 +632,7 @@ function aggregateActuals(entries: RawEntry[]): IterActuals | null {
     dmgPerKillPct:
       dmgPerKillAbs != null ? dmgPerKillAbs / dmgPerKillCapacity(meanStartLives) : null,
     avgResidualHpPct: residualPctN > 0 ? residualPctSum / residualPctN : null,
+    behaviorMetrics: Object.keys(behaviorMetrics).length > 0 ? behaviorMetrics : null,
   }
 }
 
@@ -644,8 +687,9 @@ export interface CachedActuals extends IterActuals {
  *  v4 = 逐局画像改按 `it<N>/per-game.json` 优先（云机/回传跨腿）——旧缓存里那些
  *       「本机 manifest 扫出来的值」不能继续压住新落盘的画像文件；
  *  v5 = 残血口径订正（剩余命按满额计入 + 按单命满血归一，2026-11-02）——旧的
- *       「可支配容量占比」值不能继续压住新算法。 */
-const ACTUALS_SCHEMA_V = 5
+ *       「可支配容量占比」值不能继续压住新算法；
+ *  v6 = 逐局指标快照（metricValues）进入 actuals。 */
+const ACTUALS_SCHEMA_V = 6
 
 /** 逐局压缩画像的落盘名（回传/导入腿：`<课程>/it<N>/per-game.json`）。 */
 const PER_GAME_NAME = 'per-game.json'
@@ -677,7 +721,8 @@ export function parseActualsCacheText(text: string): Map<number, CachedActuals> 
         'killRate' in v &&
         'dmgPerKillPct' in v &&
         'avgResidualHpPct' in v &&
-        'totalPUSpawn' in v
+        'totalPUSpawn' in v &&
+        'behaviorMetrics' in v
       ) {
         out.set(it, v)
       }
@@ -803,6 +848,8 @@ function collectEvalSummaries(
     residualPctN: number
     startLivesSum: number
     startLivesN: number
+    /** 完整逐局指标的原始值（按 key 分组；统计量在 summary 合并时算）。 */
+    metricValues: Map<string, number[]>
   }
   const games = new Map<number, Map<string, GameAgg>>()
   try {
@@ -847,8 +894,21 @@ function collectEvalSummaries(
               residualPctN: 0,
               startLivesSum: 0,
               startLivesN: 0,
+              metricValues: new Map(),
             }
             byWver.set(wver, agg)
+          }
+          // 逐局指标：只收有限数值（缺键/None/字符串 = 无读数，不补 0）。
+          for (const def of BEHAVIOR_METRICS) {
+            const v = r[def.key]
+            if (typeof v === 'number' && Number.isFinite(v)) {
+              let xs = agg.metricValues.get(def.key)
+              if (!xs) {
+                xs = []
+                agg.metricValues.set(def.key, xs)
+              }
+              xs.push(v)
+            }
           }
           const score = Number(r.score ?? 0)
           agg.n++
@@ -949,6 +1009,7 @@ function collectEvalSummaries(
           dmgPerKill: null,
           scoreMean: null,
           scoreStd: null,
+          behaviorMetrics: null,
         })
       } catch {
         /* skip bad line */
@@ -980,6 +1041,12 @@ function collectEvalSummaries(
       s.avgResidualHpPct = agg.residualPctN > 0 ? agg.residualPctSum / agg.residualPctN : null
       s.scoreMean = +mean.toFixed(4)
       s.scoreStd = +Math.sqrt(Math.max(0, agg.scoreSqSum / agg.n - mean * mean)).toFixed(4)
+      const behavior: Record<string, MetricStats> = {}
+      for (const def of BEHAVIOR_METRICS) {
+        const st = computeMetricStats(agg.metricValues.get(def.key) ?? [])
+        if (st) behavior[def.key] = st
+      }
+      s.behaviorMetrics = Object.keys(behavior).length > 0 ? behavior : null
     }
   } catch {
     /* unreadable */
@@ -1493,6 +1560,7 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
             killRate: cached.killRate ?? null,
             dmgPerKillPct: cached.dmgPerKillPct ?? null,
             avgResidualHpPct: cached.avgResidualHpPct ?? null,
+            behaviorMetrics: cached.behaviorMetrics ?? null,
           }
         } else {
           actuals = roundActuals(iter)

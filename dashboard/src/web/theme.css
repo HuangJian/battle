@@ -938,7 +938,7 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
 }
 
-/* 走势控制条：左 = 数据源档位（全部/rollout/eval），右 = 范围档位（全量/最近30/最近10）。
+/* 走势控制条：左 = 数据源档位（全部/rollout/eval），右 = 范围档位（全量/最近60%/最近30%）。
  * 两个档位是同一排的两个问题（看哪条口径 × 看多少轮），各自一个胶囊分段控件。 */
 .tc-trendctl {
   display: flex;
@@ -948,7 +948,7 @@ a.tc-btn {
   margin-bottom: 4px;
   align-self: flex-start;
 }
-/* 走势范围档位（全量 / 最近30 / 最近10）：胶囊分段控件，非独立按键 */
+/* 走势范围档位（全量 / 最近60% / 最近30%）：胶囊分段控件，非独立按键 */
 .tc-trend-range {
   display: flex;
   gap: 0;
@@ -1806,10 +1806,127 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.tc-tcell .spark {
-  width: 100%;
-  height: 26px;
-  display: block;
+.tc-tcell__chart {
+  cursor: zoom-in;
+  min-height: 56px;
+}
+.tc-tcell__chart:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 走势图显示/统计值配置面板：从控制条下方展开，不占常驻纵向空间。 */
+.tc-trendconfig {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--card);
+}
+.tc-trendconfig__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+.tc-trendconfig__items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  /* 完整 metrics 列有 90+ 个：配置面板限高滚动，避免把趋势区整体推走。 */
+  max-height: 180px;
+  overflow: auto;
+  align-content: flex-start;
+}
+.tc-trendconfig__group--metrics {
+  flex: 1 1 460px;
+  min-width: 0;
+}
+.tc-trendconfig__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  white-space: nowrap;
+}
+.tc-trendconfig__metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.tc-trendconfig__stat {
+  max-width: 74px;
+  padding: 1px 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--text);
+  font-size: var(--fs-xs);
+}
+.tc-trendconfig__hint {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+/* 全屏趋势浮窗：占窗口 94vw × 88vh，图表槽吃剩余高度。 */
+.tc-modal.tc-trendzoom {
+  width: 94vw;
+  height: 88vh;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tc-trendzoom__hd {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.tc-trendzoom__hd h3 {
+  margin: 0;
+}
+.tc-trendzoom__hd .tc-muted {
+  flex: 1;
+}
+.tc-trendzoom__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.tc-trendzoom__lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.tc-trendzoom__lg:hover {
+  border-color: var(--accent);
+}
+.tc-trendzoom__lg--off {
+  color: var(--muted);
+  border-style: dashed;
+  opacity: 0.65;
+}
+.tc-trendzoom__chart {
+  flex: 1 1 0;
+  min-height: 280px;
+  overflow: hidden;
+}
+.tc-trendzoom__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.tc-trendzoom__foot .sp {
+  flex: 1;
 }
 .tc-mtrend__val--g {
   color: var(--green);

@@ -3,25 +3,38 @@
  *  数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
 
 import {
+  behaviorMetricSeries,
   colsOf,
+  BEHAVIOR_METRICS,
+  behaviorTrendKey,
+  DEFAULT_BEHAVIOR_METRIC_STATS,
+  DEFAULT_TREND_VISIBILITY,
   evalBannerDone,
   EVAL_ROW_KEYS,
   filterGroups,
   fmtLootPickDrop,
+  fmtMetricStat,
   fmtNum,
   fmtPaired,
   fmtPct,
   fmtPhaseSecs,
   heroMainRows,
   iterGroups,
+  isTrendRange,
+  isTrendSource,
   klTone,
   latestRow,
   MAIN_ROW_KEYS,
+  METRIC_STAT_LABEL,
+  METRIC_STAT_OPTIONS,
   metricSeries,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
   pairedVerdictText,
+  parseBehaviorMetricStats,
+  parseMetricStat,
+  parseTrendVisibility,
   phaseSecs,
   phaseSecsTitle,
   retTone,
@@ -30,18 +43,25 @@ import {
   TC_TREND_RANGE,
   TC_TREND_SCALE,
   TC_TREND_SOURCE,
-  isTrendSource,
+  TC_TREND_STAT,
+  TC_TREND_VISIBILITY,
   parseTrendScales,
+  TREND_BASE_CHARTS,
+  TREND_RANGE_OPTIONS,
   TREND_SCALES_DEFAULT,
   TREND_SOURCE_OPTIONS,
   winTone,
+  type BehaviorMetricKey,
+  type BehaviorMetricStatMap,
   type ConsoleStateView,
   type EvalABanner,
   type EvalCkptFile,
   type IterRow,
   type MetricCol,
+  type MetricStatKey,
   type PairedReferee,
   type Series,
+  type TrendChartKey,
   type TrendRange,
   type TrendScale,
   type TrendScales,
@@ -52,6 +72,7 @@ import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Switch } from '../../components/Switch'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
+import { TrendZoomModal, type ZoomTarget } from '../../components/TrendZoomModal'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
@@ -102,6 +123,7 @@ export function TrendCell({
   onHoverIter,
   scale,
   onScale,
+  onExpand,
 }: {
   series: Series | undefined
   seriesEval?: Series | undefined
@@ -122,6 +144,8 @@ export function TrendCell({
   /** 纵坐标档位（仅击杀/胜局残血/道具三图）：小钮显示**当前**单位，点一下切换。 */
   scale?: TrendScale
   onScale?: (s: TrendScale) => void
+  /** 点击图表主体放大（放大浮窗由调用方渲染）。 */
+  onExpand?: (main: Series, overlay: Series | undefined) => void
 }) {
   const evalOnly = source === 'eval'
   const main = evalOnly ? seriesEval : series
@@ -159,23 +183,38 @@ export function TrendCell({
         </b>
       </span>
       {main ? (
-        <TrendChart
-          series={main}
-          series2={overlay}
-          range={range}
-          fmt={fmt}
-          // eval 档一条线：色 = 口径（橙），不叠语义 tone（值列已经把判断说完了）。
-          tone={evalOnly ? undefined : tone}
-          color={evalOnly ? COLOR_EVAL : undefined}
-          height={56}
-          yFloor={yFloor}
-          yMin={yMin}
-          hoverIter={hoverIter}
-          onHoverIter={onHoverIter}
-        />
-      ) : evalOnly && series ? (
-        <span className="tc-muted tc-small">该课程暂无干净评估</span>
-      ) : null}
+        <div
+          className="tc-tcell__chart"
+          role={onExpand ? 'button' : undefined}
+          tabIndex={onExpand ? 0 : undefined}
+          aria-label={onExpand ? `${main.label}走势图，点击放大` : undefined}
+          title={onExpand ? '点击放大（浮窗内可切换统计值曲线）' : undefined}
+          onClick={() => onExpand?.(main, overlay)}
+          onKeyDown={(e) => {
+            if (onExpand && (e.key === 'Enter' || e.key === ' ')) {
+              e.preventDefault()
+              onExpand(main, overlay)
+            }
+          }}
+        >
+          <TrendChart
+            series={main}
+            series2={overlay}
+            range={range}
+            fmt={fmt}
+            // eval 档一条线：色 = 口径（橙），不叠语义 tone（值列已经把判断说完了）。
+            tone={evalOnly ? undefined : tone}
+            color={evalOnly ? COLOR_EVAL : undefined}
+            height={56}
+            yFloor={yFloor}
+            yMin={yMin}
+            hoverIter={hoverIter}
+            onHoverIter={onHoverIter}
+          />
+        </div>
+      ) : (
+        <span className="tc-muted tc-small">{evalOnly ? '该课程暂无干净评估' : '暂无数据'}</span>
+      )}
     </div>
   )
 }
@@ -826,12 +865,12 @@ export function Hero({
 
   // 同组共享的悬停迭代号：六张趋势图读同一个 it（鼠标在哪张图上移动，全组一起亮）。
   const [hoverIter, setHoverIter] = useState<number | null>(null)
-  // 走势范围档位（全量 / 最近30 / 最近10）；持久化到 localStorage，hydrate 后恢复。
-  const [range, setRange] = useState<TrendRange>('30')
+  // 走势范围档位（全量 / 最近60% / 最近30%）；持久化到 localStorage，hydrate 后恢复。
+  const [range, setRange] = useState<TrendRange>('30pct')
   useEffect(() => {
     try {
       const v = localStorage.getItem(TC_TREND_RANGE)
-      if (v === 'all' || v === '30' || v === '10') setRange(v)
+      if (isTrendRange(v)) setRange(v)
     } catch {
       /* 隐私模式等不可写场景忽略 */
     }
@@ -884,6 +923,49 @@ export function Hero({
       /* ignore */
     }
   }
+
+  // 走势图显示表 + 逐指标统计量。SSR 首帧 = 默认六项 + 全均值，hydrate 后恢复偏好。
+  const [visibility, setVisibility] = useState<Record<TrendChartKey, boolean>>(() => ({
+    ...DEFAULT_TREND_VISIBILITY,
+  }))
+  useEffect(() => {
+    try {
+      setVisibility(parseTrendVisibility(localStorage.getItem(TC_TREND_VISIBILITY)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onToggleChart = (k: TrendChartKey, on: boolean): void => {
+    const next = { ...visibility, [k]: on }
+    setVisibility(next)
+    try {
+      localStorage.setItem(TC_TREND_VISIBILITY, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+  const [metricStats, setMetricStats] = useState<BehaviorMetricStatMap>(() => ({
+    ...DEFAULT_BEHAVIOR_METRIC_STATS,
+  }))
+  useEffect(() => {
+    try {
+      setMetricStats(parseBehaviorMetricStats(localStorage.getItem(TC_TREND_STAT)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onMetricStat = (key: BehaviorMetricKey, s: MetricStatKey): void => {
+    const next = { ...metricStats, [key]: s }
+    setMetricStats(next)
+    try {
+      localStorage.setItem(TC_TREND_STAT, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+  const [configOpen, setConfigOpen] = useState(false)
+  /** 放大浮窗的目标（null = 关着）。统计值曲线只在行为指标上出现。 */
+  const [zoom, setZoom] = useState<ZoomTarget | null>(null)
 
   // 「比较课程」弹窗开关（弹窗自持数据与轮询；Hero 只负责入口与透传节奏）。
   const [compareOpen, setCompareOpen] = useState(false)
@@ -938,19 +1020,28 @@ export function Hero({
             onChange={onSource}
           />
           <div className="tc-trend-range" role="group" aria-label="走势范围">
-            {(['all', '30', '10'] as TrendRange[]).map((r) => (
+            {TREND_RANGE_OPTIONS.map((r) => (
               <button
-                key={r}
+                key={r.value}
                 type="button"
-                className={`tc-trend-range__btn${range === r ? ' tc-trend-range__btn--on' : ''}`}
-                aria-pressed={range === r}
-                onClick={() => onRange(r)}
+                className={`tc-trend-range__btn${range === r.value ? ' tc-trend-range__btn--on' : ''}`}
+                aria-pressed={range === r.value}
+                onClick={() => onRange(r.value)}
               >
-                {r === 'all' ? '全量' : `最近${r}`}
+                {r.label}
               </button>
             ))}
           </div>
           <span className="tc-trendctl__end">
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              aria-expanded={configOpen}
+              title="选择显示哪些走势图，以及行为指标的统计值"
+              onClick={() => setConfigOpen((v) => !v)}
+            >
+              走势配置
+            </button>
             <button
               type="button"
               className="tc-btn tc-btn--sm"
@@ -961,97 +1052,254 @@ export function Hero({
             </button>
           </span>
         </div>
+        {configOpen ? (
+          <div className="tc-trendconfig">
+            <div className="tc-trendconfig__group tc-trendconfig__group--metrics">
+              <b className="tc-small">显示走势图 · 逐局指标统计量</b>
+              <div className="tc-trendconfig__items">
+                {TREND_BASE_CHARTS.map((c) => (
+                  <label className="tc-trendconfig__item" key={c.key}>
+                    <input
+                      type="checkbox"
+                      checked={visibility[c.key]}
+                      onChange={(e) => onToggleChart(c.key, e.currentTarget.checked)}
+                    />
+                    {c.label}
+                  </label>
+                ))}
+                {BEHAVIOR_METRICS.map((m) => {
+                  const key = behaviorTrendKey(m.key)
+                  return (
+                    <div className="tc-trendconfig__metric" key={key}>
+                      <label className="tc-trendconfig__item">
+                        <input
+                          type="checkbox"
+                          checked={visibility[key]}
+                          onChange={(e) => onToggleChart(key, e.currentTarget.checked)}
+                        />
+                        {m.label}
+                      </label>
+                      <select
+                        className="tc-trendconfig__stat"
+                        aria-label={`${m.label}统计量`}
+                        title={`${m.label} 趋势图统计量（默认均值）`}
+                        value={metricStats[m.key]}
+                        onChange={(e) =>
+                          onMetricStat(m.key, parseMetricStat(e.currentTarget.value))
+                        }
+                      >
+                        {METRIC_STAT_OPTIONS.map((o) => (
+                          <option value={o.value} key={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+            <div className="tc-trendconfig__group">
+              <b className="tc-small">统计量口径</b>
+              <span className="tc-trendconfig__hint">
+                每项默认均值；放大后初始只显示该统计量曲线，图例可点击增删其它统计量。
+              </span>
+            </div>
+          </div>
+        ) : null}
         {evalBanner ? (
           <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} />
         ) : null}
         <div className="tc-trends">
           {/* 行1：胜率 / 承伤·杀 / 胜局耗时（与击杀对调，2026-09-18） */}
-          <TrendCell
-            series={winSeries}
-            seriesEval={evalSeries}
-            source={source}
-            fmt={fmtPct}
-            toneOf={winTone}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yFloor={0.3}
-            title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
-          />
-          <TrendCell
-            series={dmgPerKillSeries}
-            seriesEval={evalDmgPerKillSeries}
-            source={source}
-            fmt={fmtPct}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yFloor={0}
-            title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
-          />
-          <TrendCell
-            series={winTicksSeries}
-            seriesEval={evalWinTicksSeries}
-            source={source}
-            fmt={fmtInt}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
-            title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
-          />
+          {visibility.winRate ? (
+            <TrendCell
+              series={winSeries}
+              seriesEval={evalSeries}
+              source={source}
+              fmt={fmtPct}
+              toneOf={winTone}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yFloor={0.3}
+              title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: '胜率',
+                  series: main,
+                  series2: overlay,
+                  fmt: fmtPct,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yFloor: 0.3,
+                })
+              }
+            />
+          ) : null}
+          {visibility.dmgPerKill ? (
+            <TrendCell
+              series={dmgPerKillSeries}
+              seriesEval={evalDmgPerKillSeries}
+              source={source}
+              fmt={fmtPct}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yFloor={0}
+              title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: '承伤/杀',
+                  series: main,
+                  series2: overlay,
+                  fmt: fmtPct,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yFloor: 0,
+                })
+              }
+            />
+          ) : null}
+          {visibility.winTicks ? (
+            <TrendCell
+              series={winTicksSeries}
+              seriesEval={evalWinTicksSeries}
+              source={source}
+              fmt={fmtInt}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
+              title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: '胜局耗时',
+                  series: main,
+                  series2: overlay,
+                  fmt: fmtInt,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yMin: winTicksYMin(winTicksSeries, evalWinTicksSeries),
+                })
+              }
+            />
+          ) : null}
           {/* 行2：击杀 / 胜局残血 / 道具（纵坐标可切 绝对值 ↔ 百分比） */}
-          <TrendCell
-            series={scales.kills === 'pct' ? killsPctSeries : killsAbsSeries}
-            seriesEval={scales.kills === 'pct' ? evalKillsPctSeries : evalKillsAbsSeries}
-            source={source}
-            fmt={scales.kills === 'pct' ? fmtPct : fmtDec1}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yFloor={0}
-            scale={scales.kills}
-            onScale={(s) => onScale('kills', s)}
-            title={
-              scales.kills === 'pct'
-                ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
-                : '每局平均击杀（rollout 实线 · eval 橙点）'
-            }
-          />
-          <TrendCell
-            series={scales.winHp === 'pct' ? winHpSeries : winHpAbsSeries}
-            seriesEval={scales.winHp === 'pct' ? evalWinHpSeries : evalWinHpAbsSeries}
-            source={source}
-            fmt={scales.winHp === 'pct' ? fmtPct : fmtInt}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yFloor={0}
-            scale={scales.winHp}
-            onScale={(s) => onScale('winHp', s)}
-            title={
-              scales.winHp === 'pct'
-                ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
-                : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
-            }
-          />
-          <TrendCell
-            series={scales.pu === 'pct' ? puPctSeries : puSeries}
-            seriesEval={scales.pu === 'pct' ? evalPuPctSeries : evalPuSeries}
-            source={source}
-            fmt={scales.pu === 'pct' ? fmtPct : fmtDec2}
-            range={range}
-            hoverIter={hoverIter}
-            onHoverIter={setHoverIter}
-            yFloor={0}
-            scale={scales.pu}
-            onScale={(s) => onScale('pu', s)}
-            title={
-              scales.pu === 'pct'
-                ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
-                : '每局平均拾取数（rollout 实线 · eval 橙点）'
-            }
-          />
+          {visibility.kills ? (
+            <TrendCell
+              series={scales.kills === 'pct' ? killsPctSeries : killsAbsSeries}
+              seriesEval={scales.kills === 'pct' ? evalKillsPctSeries : evalKillsAbsSeries}
+              source={source}
+              fmt={scales.kills === 'pct' ? fmtPct : fmtDec1}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yFloor={0}
+              scale={scales.kills}
+              onScale={(s) => onScale('kills', s)}
+              title={
+                scales.kills === 'pct'
+                  ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
+                  : '每局平均击杀（rollout 实线 · eval 橙点）'
+              }
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: scales.kills === 'pct' ? '击杀（歼灭率）' : '击杀（每局平均）',
+                  series: main,
+                  series2: overlay,
+                  fmt: scales.kills === 'pct' ? fmtPct : fmtDec1,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yFloor: 0,
+                })
+              }
+            />
+          ) : null}
+          {visibility.winHp ? (
+            <TrendCell
+              series={scales.winHp === 'pct' ? winHpSeries : winHpAbsSeries}
+              seriesEval={scales.winHp === 'pct' ? evalWinHpSeries : evalWinHpAbsSeries}
+              source={source}
+              fmt={scales.winHp === 'pct' ? fmtPct : fmtInt}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yFloor={0}
+              scale={scales.winHp}
+              onScale={(s) => onScale('winHp', s)}
+              title={
+                scales.winHp === 'pct'
+                  ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
+                  : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
+              }
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: scales.winHp === 'pct' ? '胜局残血（百分比）' : '胜局残血（HP）',
+                  series: main,
+                  series2: overlay,
+                  fmt: scales.winHp === 'pct' ? fmtPct : fmtInt,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yFloor: 0,
+                })
+              }
+            />
+          ) : null}
+          {visibility.pu ? (
+            <TrendCell
+              series={scales.pu === 'pct' ? puPctSeries : puSeries}
+              seriesEval={scales.pu === 'pct' ? evalPuPctSeries : evalPuSeries}
+              source={source}
+              fmt={scales.pu === 'pct' ? fmtPct : fmtDec2}
+              range={range}
+              hoverIter={hoverIter}
+              onHoverIter={setHoverIter}
+              yFloor={0}
+              scale={scales.pu}
+              onScale={(s) => onScale('pu', s)}
+              title={
+                scales.pu === 'pct'
+                  ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
+                  : '每局平均拾取数（rollout 实线 · eval 橙点）'
+              }
+              onExpand={(main, overlay) =>
+                setZoom({
+                  title: scales.pu === 'pct' ? '道具（拾取率）' : '道具（每局平均）',
+                  series: main,
+                  series2: overlay,
+                  fmt: scales.pu === 'pct' ? fmtPct : fmtDec2,
+                  color: source === 'eval' ? COLOR_EVAL : undefined,
+                  yFloor: 0,
+                })
+              }
+            />
+          ) : null}
+          {BEHAVIOR_METRICS.filter((m) => visibility[behaviorTrendKey(m.key)]).map((m) => {
+            const statKey = metricStats[m.key]
+            const rollout = behaviorMetricSeries(iters, m.key, statKey, 'rollout')
+            const evalSeries = behaviorMetricSeries(iters, m.key, statKey, 'eval')
+            const fmt = (v: number | null): string => (v == null ? '—' : fmtMetricStat(v, m))
+            return (
+              <TrendCell
+                key={m.key}
+                series={rollout}
+                seriesEval={evalSeries}
+                source={source}
+                fmt={fmt}
+                range={range}
+                hoverIter={hoverIter}
+                onHoverIter={setHoverIter}
+                yFloor={0}
+                title={`逐局统计（${METRIC_STAT_LABEL[statKey]}；rollout 实线 · eval 橙点）· ${m.title}`}
+                onExpand={() =>
+                  setZoom({
+                    title: `${m.label}·${METRIC_STAT_LABEL[statKey]}`,
+                    fmt,
+                    behavior: { key: m.key, iters, stat: statKey, source },
+                  })
+                }
+              />
+            )
+          })}
+          {!Object.values(visibility).some(Boolean) ? (
+            <p className="tc-muted tc-small">走势图已全部隐藏；点「走势配置」重新显示。</p>
+          ) : null}
         </div>
         <PairedRefereeLine ref={stateView?.metrics.pairedReferee} />
       </div>
@@ -1070,6 +1318,8 @@ export function Hero({
         refreshSec={refreshSec}
         onClose={() => setCompareOpen(false)}
       />
+      {/* 只在打开时挂载：首帧的可见统计量直接由 target 决定，不会先闪一下默认均值。 */}
+      {zoom ? <TrendZoomModal target={zoom} range={range} onClose={() => setZoom(null)} /> : null}
     </section>
   )
 }

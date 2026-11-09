@@ -46,6 +46,29 @@ export interface DataTableProps<T> {
   selection?: DataTableSelection<T>
 }
 
+/** 列显隐的默认值：`hiddenByDefault` 列在**首次**出现时隐藏；用户手点后以存储为准。
+ *  存储里额外记一个默认集合签名，新增默认隐藏列时只合并一次（不会把用户已打开的列再次藏起来）。 */
+function loadHidden(
+  storagePrefix: string | undefined,
+  columns: Array<{ key: string; hiddenByDefault?: boolean }>,
+): Set<string> {
+  const defaults = columns.filter((c) => c.hiddenByDefault).map((c) => c.key)
+  if (!storagePrefix || typeof localStorage === 'undefined') return new Set(defaults)
+  try {
+    const raw = localStorage.getItem(`${storagePrefix}.hidden`)
+    if (raw === null) return new Set(defaults)
+    const stored = JSON.parse(raw) as unknown
+    if (!Array.isArray(stored) || !stored.every((x) => typeof x === 'string')) {
+      return new Set(defaults)
+    }
+    const sig = defaults.join(',')
+    const seen = localStorage.getItem(`${storagePrefix}.hidden.defaults`)
+    return new Set(seen === sig ? stored : [...stored, ...defaults])
+  } catch {
+    return new Set(defaults)
+  }
+}
+
 function loadPref<T>(
   storagePrefix: string | undefined,
   key: string,
@@ -84,17 +107,11 @@ export function DataTable<T>(props: DataTableProps<T>) {
   const [keyword, setKeyword] = useState('')
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [colMenuOpen, setColMenuOpen] = useState(false)
-  const [hidden, setHidden] = useState<Set<string>>(
-    () =>
-      new Set(
-        loadPref<string[]>(
-          storagePrefix,
-          'hidden',
-          columns.filter((c) => c.hiddenByDefault).map((c) => c.key),
-          (v) => Array.isArray(v) && v.every((x) => typeof x === 'string'),
-        ),
-      ),
-  )
+  const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(storagePrefix, columns))
+  const hiddenDefaultsSig = columns
+    .filter((c) => c.hiddenByDefault)
+    .map((c) => c.key)
+    .join(',')
   const menuRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const headerCheckRef = useRef<HTMLInputElement>(null)
@@ -110,10 +127,11 @@ export function DataTable<T>(props: DataTableProps<T>) {
       localStorage.setItem(`${storagePrefix}.sort`, JSON.stringify({ k: sortKey, d: sortDir }))
       localStorage.setItem(`${storagePrefix}.dense`, JSON.stringify(dense))
       localStorage.setItem(`${storagePrefix}.hidden`, JSON.stringify([...hidden]))
+      localStorage.setItem(`${storagePrefix}.hidden.defaults`, hiddenDefaultsSig)
     } catch {
       /* 不可写不致命 */
     }
-  }, [storagePrefix, sortKey, sortDir, dense, hidden])
+  }, [storagePrefix, sortKey, sortDir, dense, hidden, hiddenDefaultsSig])
 
   useEffect(() => {
     const onDoc = (e: MouseEvent): void => {

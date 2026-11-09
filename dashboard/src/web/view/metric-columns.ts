@@ -20,6 +20,7 @@
  *  本模块纯数据 + 纯函数（无 JSX / 无 IO），与其它 `view/` 模块同规：服务端与客户端共用。
  */
 
+import { BEHAVIOR_METRICS, type BehaviorMetricKey } from './behavior-metrics'
 import { PAIRED_COL_TITLES } from './format'
 
 // ────────────────────────── 键 ──────────────────────────
@@ -69,8 +70,12 @@ export type EvalRowColKey =
  *  常驻两格空位不划算）。 */
 export type IterExtraColKey = 'window' | 'stageProgress'
 
+/** 逐局指标列键：用 `bm:` 前缀避开与既有列（如 `kills`/`ticks`）的键冲突。
+ *  行为指标列只进 `/metrics` 完整表，不进首页「最新 6 轮」速览表。 */
+export type BehaviorMetricColKey = `bm:${BehaviorMetricKey}`
+
 /** 全部列键（两个表与 `MetricsTable` 的并集）。 */
-export type MetricColKey = MainRowColKey | EvalRowColKey | IterExtraColKey
+export type MetricColKey = MainRowColKey | EvalRowColKey | IterExtraColKey | BehaviorMetricColKey
 
 // ────────────────────────── 模型 ──────────────────────────
 
@@ -78,11 +83,33 @@ export interface MetricCol<K extends MetricColKey = MetricColKey> {
   key: K
   /** 表头文字（唯一一份）。 */
   label: string
+  /** 逐局指标列对应的账本键（表头键带 `bm:` 前缀，账本键不带）。 */
+  behaviorKey?: BehaviorMetricKey
   /** 表头 hover 口径（大白话；缺省 = 这一列不必解释）。 */
   title?: string
   /** 数字列：右对齐 + `tabular-nums`（竖着比大小用）。 */
   num?: boolean
+  /** 完整表首次渲染时默认隐藏（DataTable 的列菜单仍可打开）。 */
+  hiddenByDefault?: boolean
 }
+
+/** 行为指标列（表内显示均值；完整六种统计量在 hover 与放大浮窗里）。 */
+const BEHAVIOR_METRIC_COLS = Object.fromEntries(
+  BEHAVIOR_METRICS.map((m) => {
+    const key: BehaviorMetricColKey = `bm:${m.key}`
+    return [
+      key,
+      {
+        key,
+        behaviorKey: m.key,
+        label: m.label,
+        title: `逐局指标统计（表内为均值）· ${m.title}`,
+        num: true,
+        hiddenByDefault: true,
+      },
+    ]
+  }),
+) as Record<BehaviorMetricColKey, MetricCol<BehaviorMetricColKey>>
 
 /** 列模型总表（键 → 定义）。**改列只改这里。** */
 export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
@@ -164,6 +191,9 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
     num: true,
   },
   wver: { key: 'wver', label: 'wver', title: '评估所用权重版本（显示前 7 位）' },
+
+  // ── 逐局指标（完整 metrics 列；只进完整指标表，默认隐藏） ──
+  ...BEHAVIOR_METRIC_COLS,
 }
 
 /** 首页主行表的列顺序。**顺序只在这里**（渲染器不再自己决定先后）。 */

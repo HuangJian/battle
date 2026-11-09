@@ -21,6 +21,10 @@ export const TC_SIDE_COLLAPSED = `${TC_KEY_PREFIX}side.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 /** hero 走势图数据源档位（'all' 全部叠加 / 'rollout' 只看采样 / 'eval' 只看干净评估）。 */
 export const TC_TREND_SOURCE = `${TC_KEY_PREFIX}trend.source`
+/** hero 走势图显示表（JSON `{chartKey: boolean}`；六项默认 true，行为指标默认 false）。 */
+export const TC_TREND_VISIBILITY = `${TC_KEY_PREFIX}trend.visibility`
+/** 逐指标趋势图统计量（JSON `{metricKey: stat}`；旧版单值仍会铺到全部指标）。 */
+export const TC_TREND_STAT = `${TC_KEY_PREFIX}trend.stat`
 /** hero 三张图的纵坐标档位（JSON `{kills, winHp, pu}`：'abs' 绝对值 / 'pct' 百分比）。 */
 export const TC_TREND_SCALE = `${TC_KEY_PREFIX}trend.scale`
 // 「比较课程」弹窗的本地偏好（5 键，plan/dashboard-compare-trends.plan.md §3.11）。

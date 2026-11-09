@@ -11398,3 +11398,44 @@ Battlement 51=51 ⇒ **−0.09pp（t=−0.18）**；全局 35×60 仅 9/2100 局
 
 **按用户政策发货**（机制修复即使不赚也做）：这是行为正确性修复，不再"假装在封线"。
 det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样本，这是语料盲区，记一笔。
+## §2026-11-09-goalnn-dashboard-behavior-metrics（首页/指标表接入 eval 逐局行为指标）
+
+- **背景**：v8–v14 逐局行为指标（`dangerTicks` / `onLane*` / `thBreach` / `basePressureSum` 等）
+  只在 `<out>.run/eval_log.jsonl` 的 `event:"eval"` 行；dashboard 读面此前丢弃，趋势图与指标表都看不到。
+- **决定**：服务端 `collectEvalSummaries` 按 `(iter,wver)` 聚合原始值，用 `computeMetricStats`
+  算 mean / median / min / max / p90 / p99，挂 `EvalSummary.behaviorMetrics`；客户端注册表
+  `EVAL_BEHAVIOR_METRICS` 是单一出处，趋势图、列模型、显示配置都从它长出来。行为指标卡只走 eval
+  口径（不跟 rollout 数据源档位），默认隐藏；配置面板逐项显隐，统计值全局切换（默认均值）。
+- **否决**：读 `metrics.npy`（dashboard 不读 npy，要新增解码与 IO）；给每个指标手写趋势图（15×重复）。
+- **交互**：范围档位 `10` → `60pct`（最近 60% 有效点，向上取整），保留 `30pct`（最近 30% 有效点）；点击趋势图放大到全屏，
+  行为指标浮窗用 `MultiTrendChart` 画六条统计曲线，图例按钮逐条显隐；指标表新增列默认隐藏、列菜单
+  可开，表内显示均值、hover 六统计量。
+- **验收**：`cd dashboard && bun run typecheck && bun run test`（1972 pass / 0 fail）；
+  `bun src/server/build.ts` 四份 bundle 绿；根 `bun run check` 绿（2717 pass / 16 skip / 0 fail）。
+## §2026-11-09-goalnn-dashboard-behavior-metrics-all-sources（逐局指标全量 + rollout/eval 双源）
+
+- **背景**：上一节只接 eval 的 15 项行为指标。用户要求「所有指标列都应该支持」且「同时接 rollout/eval，
+  支持全部 / rollout / eval 数据源开关」；据此扩面，上一节「只走 eval」「15 项」作废，其余交互仍有效。
+- **决定**：`BEHAVIOR_METRICS` = `METRICS_COLUMN_NAMES` 的 90 列 + eval 专属 `aliveTicks` /
+  `postThawDamageRate` = 92 项；rollout 与 eval 各自聚合六统计量，趋势卡 / 放大浮窗 / 指标表共用一份注册表。
+  数据源档位决定读 `actuals.behaviorMetrics` 还是 `evalData.behaviorMetrics`；`all` 时 rollout 实线 + eval 虚线。
+  配置键与列键统一 `bm:` 前缀（避开 `kills` 等与基础图/基础列撞键），默认隐藏，配置面板与列菜单可逐项打开。
+- **数据链**：`tools/sim/export-rl-rollout.ts` 每局 manifest 写 `metricValues`（完整 metrics 终局行）；
+  `nn-training/worker/reports.py::_PER_GAME_FIELDS` 让 `per-game.json` 透传；`iters.ts` 读两种来源并把缓存
+  升到 `ACTUALS_SCHEMA_V=6`。缺 `metricValues` 的旧画像只按顶层同名列回退，不补 0。
+- **否决**：dashboard 读 `metrics.npy`（新增 npy 解码与 IO）；只给 15 项 eval 指标做趋势图；固定 eval 口径。
+- **范围修订（2026-11-09）**：最后一档由 `30`（最近 30 轮）改为 `30pct` /「最近30%」（最近 30% 有效点，
+  向上取整、至少 1 个）；旧 localStorage 的 `30` 不再合法，读取时退默认 `30pct`。
+- **验收**：dashboard typecheck 绿、1975 pass / 0 fail；`bun run build:ui` 四份 bundle 绿、dashboard oxlint 0；
+  根 `bun run check` 2717 pass / 16 skip / 0 fail；Python `test_rollout_end_event` 覆盖 `metricValues` 透传。
+## §2026-11-09-goalnn-dashboard-behavior-metric-stats（逐指标统计量 + 浮窗单统计量初态）
+
+- **背景**：上一节把六种统计量做成全局切换；用户要求「设置显示/隐藏指标趋势图时，要支持显示哪一种统计量，
+  默认取均值；浮窗放大时，初始只显示该统计量曲线，可以鼠标点击显示/隐藏其它统计量曲线」。
+- **决定**：`TC_TREND_STAT` 由单值改为 JSON map `{metricKey: stat}`（默认全部 `mean`）；配置面板每个逐局
+  指标行一个统计量下拉，趋势卡按各自统计量取序列；旧版单值（如 `'p90'`）读取时铺到全部指标，坏 JSON /
+  未知键 / 非法值逐项退均值。放大浮窗初始 `visibleStats` 只含当前指标配置的统计量，六个图例按钮保留，
+  点击可增删其它统计量；浮窗只在 `zoom != null` 时挂载，避免打开瞬间先渲染默认均值。
+- **否决**：继续全局统计量（用户明确要每项可选）；浮窗初始六条全开（信息过载，也无法一眼看出卡片口径）。
+- **验收**：dashboard typecheck 绿；`bun run test` 1976 pass / 0 fail；`bun run lint` 0；`bun run build:ui`
+  四份 bundle 绿。

@@ -11,7 +11,7 @@
 import os from 'os'
 import path from 'path'
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { readIterMetrics } from '../src/server/iters'
 import { phaseSecs } from '../src/web/view'
 
@@ -30,6 +30,111 @@ describe('console/iters §361②：完整指标表不截断（MAX 500 上限）'
       expect(rows.length).toBe(500)
       expect(rows[0]!.iter).toBe(599)
       expect(rows[499]!.iter).toBe(100)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('console/iters 行为指标聚合（eval 逐局行）', () => {
+  it('同一 (iter,wver) 的逐局值 → 六种统计量挂在 evalData 上', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-behavior-'))
+    try {
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        JSON.stringify({ event: 'iteration', iter: 3, time: '', winRate: 0.5, score_mean: 0 }),
+        'utf-8',
+      )
+      const evalRows = [
+        { event: 'eval', iter: 3, wver: 'w3', stage: 1, seed: 11, win: true, dangerTicks: 4 },
+        { event: 'eval', iter: 3, wver: 'w3', stage: 1, seed: 12, win: false, dangerTicks: 8 },
+        // 别的 wver 不混入本 summary（按 (iter,wver) 配对）
+        { event: 'eval', iter: 3, wver: 'other', stage: 1, seed: 13, win: true, dangerTicks: 99 },
+        {
+          event: 'eval_summary',
+          iter: 3,
+          wver: 'w3',
+          time: '',
+          games: 2,
+          wins: 1,
+          winRate: 0.5,
+        },
+      ]
+      writeFileSync(
+        path.join(dir, 'eval_log.jsonl'),
+        evalRows.map((r) => JSON.stringify(r)).join('\n'),
+        'utf-8',
+      )
+      const { rows } = readIterMetrics(dir)
+      const bm = rows[0]!.evalData!.behaviorMetrics!
+      expect(bm.dangerTicks).toEqual({
+        mean: 6,
+        median: 6,
+        min: 4,
+        max: 8,
+        p90: 7.6,
+        p99: 7.96,
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('旧账本无这些字段 ⇒ behaviorMetrics 为 null（不编 0）', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-behavior-old-'))
+    try {
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        JSON.stringify({ event: 'iteration', iter: 3, time: '', winRate: 0.5, score_mean: 0 }),
+        'utf-8',
+      )
+      writeFileSync(
+        path.join(dir, 'eval_log.jsonl'),
+        [
+          { event: 'eval', iter: 3, wver: 'w3', stage: 1, seed: 11, win: true },
+          { event: 'eval_summary', iter: 3, wver: 'w3', time: '', games: 1, wins: 1 },
+        ]
+          .map((r) => JSON.stringify(r))
+          .join('\n'),
+        'utf-8',
+      )
+      const { rows } = readIterMetrics(dir)
+      expect(rows[0]!.evalData!.behaviorMetrics).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('console/iters 逐局指标聚合（rollout 画像）', () => {
+  it('per-game.json 的 metricValues → 六种统计量挂到 actuals/IterRow 上', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-rollout-behavior-'))
+    try {
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        JSON.stringify({ event: 'iteration', iter: 3, time: '', winRate: 0.5, score_mean: 0 }),
+        'utf-8',
+      )
+      const itDir = path.join(dir, 'it3')
+      mkdirSync(itDir, { recursive: true })
+      writeFileSync(
+        path.join(itDir, 'per-game.json'),
+        JSON.stringify([
+          { stage: 1, seed: 11, nSamples: 1, metricValues: { dangerTicks: 4, wallPressTicks: 10 } },
+          { stage: 1, seed: 12, nSamples: 1, metricValues: { dangerTicks: 8, wallPressTicks: 20 } },
+        ]),
+        'utf-8',
+      )
+      const { rows } = readIterMetrics(dir)
+      expect(rows[0]!.actuals!.behaviorMetrics!.dangerTicks).toEqual({
+        mean: 6,
+        median: 6,
+        min: 4,
+        max: 8,
+        p90: 7.6,
+        p99: 7.96,
+      })
+      expect(rows[0]!.actuals!.behaviorMetrics!.wallPressTicks.mean).toBe(15)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

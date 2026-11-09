@@ -1,4 +1,5 @@
 /** series.ts — 指标序列切分与逐指标序列抽取（趋势图数据源）。 */
+import { behaviorMetricDef, type BehaviorMetricKey, type MetricStatKey } from './behavior-metrics'
 import { IterRow } from './metric-types'
 
 // ────────────────────────── 纯函数：指标系列 ──────────────────────────
@@ -9,10 +10,22 @@ export interface Series {
   vals: number[]
   /** 与 vals 逐位对齐的迭代序号（时间正序）。 */
   iters: number[]
+  /** 稀疏口径（eval / 行为统计）：范围档位按有效点截取，而不是按迭代轮数。 */
+  sparse?: boolean
 }
 
-/** 走势图范围档位：全量 / 最近 30 轮 / 最近 10 轮。 */
-export type TrendRange = 'all' | '30' | '10'
+/** 走势图范围档位：全量 / 最近 60% 点 / 最近 30% 点。 */
+export type TrendRange = 'all' | '60pct' | '30pct'
+
+export const TREND_RANGE_OPTIONS: Array<{ value: TrendRange; label: string }> = [
+  { value: 'all', label: '全量' },
+  { value: '60pct', label: '最近60%' },
+  { value: '30pct', label: '最近30%' },
+]
+
+export function isTrendRange(v: string | null | undefined): v is TrendRange {
+  return v === 'all' || v === '60pct' || v === '30pct'
+}
 
 /** 走势图数据源档位（用户 2026-09-20）：全部 = rollout 实线 + eval 橙线叠加（原行为）；
  *  rollout / eval = 只画一条——两种口径的量级/采样密度差很远（同图里 eval 常被压成孤点），
@@ -84,22 +97,63 @@ const SPARSE_SERIES_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * 按范围档位截取序列。eval 源序列（eval 胜率）在有限轮里常带 NaN 缺口，
+ * 按范围档位截取序列。eval 源序列（eval 胜率 / 行为统计）在有限轮里常带 NaN 缺口，
  * 其「最近 N」语义 = 最近 N 个**有效**评估点（而非最近 N 轮迭代），
  * 避免窗口内全是 NaN 画空图；「全量」档同样只保留有效点。
  * 其它指标（含 rollout 口径的胜局耗时/胜局残血/承伤·杀/败局耗时）= 最近 N 轮迭代（按 iter 截取）。
+ * `60pct` / `30pct` = 最近 60% / 30% 的可见点（向上取整，至少 1 个）。
  */
 export function sliceSeries(series: Series, range: TrendRange): Series {
-  const { key, label, vals, iters } = series
-  if (vals.length === 0) return { key, label, vals, iters }
-  // eval 源：先过滤到有效评估点，再按档位截取。
-  if (SPARSE_SERIES_KEYS.has(key)) {
+  const { key, label, vals, iters, sparse } = series
+  if (vals.length === 0) return { key, label, vals, iters, sparse }
+  const tail = (n: number): number =>
+    range === 'all' ? n : Math.max(1, Math.ceil(n * (range === '60pct' ? 0.6 : 0.3)))
+  // eval / 行为统计：先过滤到有效评估点，再按档位截取。
+  if (sparse || SPARSE_SERIES_KEYS.has(key)) {
     const pairs = vals.map((v, i) => ({ v, it: iters[i] })).filter((p) => Number.isFinite(p.v))
-    const sliced = range === 'all' ? pairs : pairs.slice(-Number(range))
-    return { key, label, vals: sliced.map((p) => p.v), iters: sliced.map((p) => p.it) }
+    const sliced = pairs.slice(-tail(pairs.length))
+    return {
+      key,
+      label,
+      vals: sliced.map((p) => p.v),
+      iters: sliced.map((p) => p.it),
+      sparse: true,
+    }
   }
-  if (range === 'all') return { key, label, vals, iters }
-  return { key, label, vals: vals.slice(-Number(range)), iters: iters.slice(-Number(range)) }
+  const n = tail(vals.length)
+  return {
+    key,
+    label,
+    vals: range === 'all' ? vals : vals.slice(-n),
+    iters: range === 'all' ? iters : iters.slice(-n),
+  }
+}
+
+/** 逐局指标的数据口径：rollout 读 `actuals.behaviorMetrics`，eval 读 `evalData.behaviorMetrics`。 */
+export type BehaviorMetricSource = 'rollout' | 'eval'
+
+/** 单个逐局指标 × 一个统计值 × 一个数据源 → 趋势序列（缺轮 = NaN，不补 0）。 */
+export function behaviorMetricSeries(
+  rows: IterRow[],
+  key: BehaviorMetricKey,
+  stat: MetricStatKey,
+  source: BehaviorMetricSource = 'eval',
+): Series {
+  const chrono = [...settledRows(rows)].sort((a, b) => a.iter - b.iter)
+  const def = behaviorMetricDef(key)
+  return {
+    key: `behavior-${key}-${stat}-${source}`,
+    label: `${def?.label ?? key}${source === 'eval' ? ' · eval' : ''}`,
+    vals: chrono.map((r) => {
+      const st =
+        source === 'rollout'
+          ? r.actuals?.behaviorMetrics?.[key]
+          : r.evalData?.behaviorMetrics?.[key]
+      return st ? st[stat] : Number.NaN
+    }),
+    iters: chrono.map((r) => r.iter),
+    sparse: true,
+  }
 }
 
 /** 趋势图只画**已结算**的轮（用户 2026-11-04）：一轮的 eval 未结束时，它的点不进序列 ——

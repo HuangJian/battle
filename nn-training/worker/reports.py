@@ -129,6 +129,8 @@ _PER_GAME_FIELDS: tuple[str, ...] = (
     "puSpawnShield",
     "puSpawnStar",
     "score",
+    # 完整逐局指标快照（metrics v16）；旧导出器没有该键 ⇒ 控制台按缺读数处理。
+    "metricValues",
 )
 
 

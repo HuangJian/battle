@@ -1,4 +1,5 @@
 /** metric-types.ts — 训练指标类型（iters 数据层契约）：轮次 / eval 汇总 / 逐局 / 配对裁判。 */
+import type { MetricStats } from './behavior-metrics'
 
 // ────────────────────────── 训练指标类型（iters.ts 数据层的契约） ──────────────────────────
 
@@ -26,6 +27,9 @@ export interface IterActuals {
   avgResidualHpPct?: number | null
   /** 掉落道具总数（Σspawn）；null/缺 = 数据源无该字段（旧 manifest）。 */
   totalPUSpawn?: number | null
+  /** 逐局指标在本轮 rollout 采样上的六种统计量（per-game.json / manifest.metricValues）。
+   *  缺键 = 该指标没有有效读数（旧画像 / 该轮未采到）；整块 null = 无逐局指标。 */
+  behaviorMetrics?: Record<string, MetricStats> | null
 }
 
 export interface EvalSummary {
@@ -67,6 +71,9 @@ export interface EvalSummary {
   avgResidualHpPct?: number | null
   scoreMean: number | null
   scoreStd: number | null
+  /** 完整逐局指标的统计量（按本 summary 的 (iter,wver) 逐局行聚合）。
+   *  缺键 = 该指标在这轮没有有效读数（旧账本/旧 exporter）；整块 null = 没有逐局行。 */
+  behaviorMetrics?: Record<string, MetricStats> | null
   /** 本轮 vs 开腿首轮的配对比较（同语料逐 seed；基线轮/无数据为 null）。 */
   pairedVsFirst?: PairedCompare | null
 }

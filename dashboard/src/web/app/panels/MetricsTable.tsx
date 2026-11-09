@@ -8,6 +8,11 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import {
+  BEHAVIOR_METRICS,
+  fmtMetricStat,
+  METRIC_STAT_LABEL,
+  METRIC_STAT_KEYS,
+  type BehaviorMetricDef,
   evalBannerDone,
   filterGroups,
   fmtLootPickDrop,
@@ -49,9 +54,17 @@ import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
  *
  *  为什么用展开而不是逐个赋值：`Col` 的这四个字段本来就该由模型独占，展开能保证「模型加一个字段、
  *  这里自动跟上」，不必两处同步；`key` 也从模型取，顺手保证列 id 与模型键一致。 */
-function colDef(key: MetricColKey): Pick<Col<MetricRow>, 'key' | 'label' | 'align' | 'thTitle'> {
+function colDef(
+  key: MetricColKey,
+): Pick<Col<MetricRow>, 'key' | 'label' | 'align' | 'thTitle' | 'hiddenByDefault'> {
   const m = METRIC_COLS[key]
-  return { key: m.key, label: m.label, align: m.num ? 'num' : undefined, thTitle: m.title }
+  return {
+    key: m.key,
+    label: m.label,
+    align: m.num ? 'num' : undefined,
+    thTitle: m.title,
+    hiddenByDefault: m.hiddenByDefault,
+  }
 }
 
 /** 显示行 = 主行 | eval 子行 的联合（eval only 时只保留子行，与旧 /pool 语义一致）。 */
@@ -316,6 +329,32 @@ function skillCols(): Col<MetricRow>[] {
   ]
 }
 
+/** 逐局指标列：主行显示本轮 rollout 采样的均值，eval 子行显示干净评估的均值。
+ *  默认隐藏；列菜单里逐个打开。完整六种统计量在 hover 与放大浮窗里。 */
+function behaviorCols(): Col<MetricRow>[] {
+  return BEHAVIOR_METRICS.map((def: BehaviorMetricDef) => ({
+    ...colDef(`bm:${def.key}` as MetricColKey),
+    sortValue: (r) => {
+      const st =
+        r.kind === 'eval'
+          ? r.eval.behaviorMetrics?.[def.key]
+          : r.main.actuals?.behaviorMetrics?.[def.key]
+      return st?.mean ?? null
+    },
+    cell: (r) => {
+      const st =
+        r.kind === 'eval'
+          ? r.eval.behaviorMetrics?.[def.key]
+          : r.main.actuals?.behaviorMetrics?.[def.key]
+      if (!st) return <span className="tc-muted">-</span>
+      const all = METRIC_STAT_KEYS.map(
+        (k) => `${METRIC_STAT_LABEL[k]} ${fmtMetricStat(st[k], def)}`,
+      ).join(' · ')
+      return <span title={`${def.title}\n${all}`}>{fmtMetricStat(st.mean, def)}</span>
+    },
+  }))
+}
+
 /**
  * 列工厂。
  * - eval-only：列结构与顺序与首页 Hero EvalTable 逐列一致
@@ -376,6 +415,7 @@ function buildMetricCols(
       winRateCol('evalRate'),
       ...pairedCols(baselineIter),
       ...skillCols(),
+      ...behaviorCols(),
       scoreCol,
       {
         ...colDef('evalSec'),
@@ -416,6 +456,8 @@ function buildMetricCols(
     ...klEntropyCols(),
     // 采样范围压尾：不搅动既有读序（窗口/进度是新事实，要时往右扫一眼；列显隐可持久化）。
     ...samplingCols(),
+    // 行为指标压最后：默认隐藏，列菜单里按需打开。
+    ...behaviorCols(),
   ]
 }
 
@@ -672,7 +714,8 @@ export function MetricsTable({
         去重后留底缓存）；击杀=歼灭率（Σkills/Σ敌数），承伤·杀 =
         每杀承伤/(命数×满血)，残血=胜局残血/可支配生命容量（均百分比）；带 ≈ 为估算。 eval 行 ={' '}
         <b>干净评估</b>（greedy 固定语料），iter=N 评估的是第 N 轮 PPO 更新前的权重；缺N =
-        窗口内未收官被清场。
+        窗口内未收官被清场。逐局指标列 = 完整 metrics 列（主行 rollout、eval
+        子行干净评估），默认隐藏（列菜单可开），表内为逐局均值，完整六种统计量见 hover。
       </p>
     </div>
   )

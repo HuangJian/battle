@@ -35,7 +35,8 @@ export interface MultiTrendSeries {
 
 export interface MultiTrendChartProps {
   seriesList: MultiTrendSeries[]
-  metric: CompareMetric
+  /** 指标档位（决定 y 轴下界规则）；缺省 = 按数据自动缩放（统计曲线浮窗用）。 */
+  metric?: CompareMetric
   fmt: (v: number | null) => string
   /** 画布宽（px）= 容器实测宽；缺省 720。
    *
@@ -45,6 +46,8 @@ export interface MultiTrendChartProps {
    *  折中（用户 2026-10-10：弹窗改成 80vw 后必须铺满）。 */
   width?: number
   height?: number
+  /** 是否渲染内置图例（浮窗自己画可点击图例时关掉，避免两套图例）。 */
+  showLegend?: boolean
   /** 把稀疏 **eval** 序列的相邻有效点直连（跨缺口连线）。
    *
    *  「只看 eval」档专用（用户 2026-10-10 裁定：那一档就是把散点连成线读趋势）。
@@ -76,6 +79,7 @@ export function MultiTrendChart({
   fmt,
   width = VB_W_DEFAULT,
   height = 240,
+  showLegend = true,
   bridgeGaps = false,
 }: MultiTrendChartProps) {
   const [hover, setHover] = useState<number | null>(null)
@@ -99,7 +103,8 @@ export function MultiTrendChart({
   }
 
   // y 轴下界规则住在 view 层（`compareYBounds` 单一出处）：本组件只负责把它翻译成像素。
-  const bounds = compareYBounds(metric, seriesList)
+  // 无 metric（统计曲线浮窗）= 自动缩放，不套胜率/击杀那些档位的基底规则。
+  const bounds = metric ? compareYBounds(metric, seriesList) : {}
   const dataMin = Math.min(...nums)
   const dataMax = Math.max(...nums)
   let lo = bounds.yMin ?? (bounds.yFloor != null ? Math.min(dataMin, bounds.yFloor) : dataMin)
@@ -170,7 +175,7 @@ export function MultiTrendChart({
         width="100%"
         height={height}
         role="img"
-        aria-label={`多课程${metric}对比图`}
+        aria-label={metric ? `多课程${metric}对比图` : '多序列统计对比图'}
         onMouseMove={onMove}
         onMouseLeave={() => setHover(null)}
       >
@@ -293,31 +298,33 @@ export function MultiTrendChart({
         ) : null}
       </svg>
       {/* 图例：课色 + 口径（eval 虚线）。SVG 小条取色，避免内联样式（样式纪律）。 */}
-      <div className="tc-mchart__legend">
-        {seriesList.map((s) => (
-          <span className="tc-mchart__lg" key={`lg:${s.course}:${s.key}`}>
-            <svg
-              className="tc-mchart__sw"
-              viewBox="0 0 12 4"
-              width="12"
-              height="4"
-              aria-hidden="true"
-            >
-              <line
-                x1="0"
-                y1="2"
-                x2="12"
-                y2="2"
-                stroke={s.color}
-                stroke-width="2"
-                stroke-dasharray={isEvalKey(s.key) ? '3 2' : undefined}
-              />
-            </svg>
-            {s.course}
-            {isEvalKey(s.key) ? ' · eval' : ''}
-          </span>
-        ))}
-      </div>
+      {showLegend ? (
+        <div className="tc-mchart__legend">
+          {seriesList.map((s) => (
+            <span className="tc-mchart__lg" key={`lg:${s.course}:${s.key}`}>
+              <svg
+                className="tc-mchart__sw"
+                viewBox="0 0 12 4"
+                width="12"
+                height="4"
+                aria-hidden="true"
+              >
+                <line
+                  x1="0"
+                  y1="2"
+                  x2="12"
+                  y2="2"
+                  stroke={s.color}
+                  stroke-width="2"
+                  stroke-dasharray={isEvalKey(s.key) ? '3 2' : undefined}
+                />
+              </svg>
+              {s.course}
+              {isEvalKey(s.key) ? ' · eval' : ''}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
