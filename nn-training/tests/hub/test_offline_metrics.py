@@ -93,6 +93,27 @@ def test_metrics_is_idempotent_by_it_and_fingerprint(tmp_path: Path) -> None:
     assert third["rows"] == 1
 
 
+def test_metrics_only_row_lands_per_game_snapshot(tmp_path: Path) -> None:
+    """统计批也带逐局画像：迭代结束即可给 rollout 趋势图供数，不必等 weights 到岸。"""
+    store = _store(tmp_path)
+    per_game = [
+        {
+            "stage": 1,
+            "seed": 7,
+            "nSamples": 5,
+            "metricValues": {"dangerTicks": 4, "wallPressTicks": 10},
+        }
+    ]
+    row = _row(4)
+    row["row"]["perGame"] = per_game
+
+    res = store.store_offline_metrics({"run_id": RUN, "rows": [row]})
+    assert res["status"] == "accepted" and res["rows"] == 1
+    pg = tmp_path / COURSE / "it4" / "per-game.json"
+    assert pg.is_file(), "统计批没落逐局画像 ⇒ dashboard 要等整包才画得出 rollout 曲线"
+    assert json.loads(pg.read_text(encoding="utf-8")) == per_game
+
+
 def test_metrics_only_rows_do_not_freeze_the_active_pointer(tmp_path: Path) -> None:
     """★ 评审 P0：统计行进课程账本时必须是 `weights_landed=false` 的临时行。
 

@@ -805,6 +805,20 @@ export function forEachTextLine(text: string, onLine: (line: string) => void): v
   }
 }
 
+/**
+ * eval 逐局指标取数：优先读实时体的 `metricValues` 快照，再回退顶层同名列。
+ * 云机旧包没有快照，但白名单内的核心列仍在顶层；两条路都不编 0。
+ */
+function evalMetricValue(r: Record<string, unknown>, key: string): number | null {
+  const raw = r.metricValues
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const v = (raw as Record<string, unknown>)[key]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  const v = r[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
 /** eval 汇总的解析内核（
  *  · 路径版：`readChunkLines` 分块喂（增量、内存恒定）；
  *  · 冷存/内容版：`parseEvalSummariesText` 直接喂字符串。两路同一份语义。 */
@@ -900,8 +914,8 @@ function collectEvalSummaries(
           }
           // 逐局指标：只收有限数值（缺键/None/字符串 = 无读数，不补 0）。
           for (const def of BEHAVIOR_METRICS) {
-            const v = r[def.key]
-            if (typeof v === 'number' && Number.isFinite(v)) {
+            const v = evalMetricValue(r, def.key)
+            if (v != null) {
               let xs = agg.metricValues.get(def.key)
               if (!xs) {
                 xs = []

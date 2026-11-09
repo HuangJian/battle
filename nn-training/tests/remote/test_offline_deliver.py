@@ -1809,6 +1809,7 @@ def _heavy_eval_log(root: Path, *, it: int, games: int = 1) -> Path:
                 "kills": 4,
                 "ticks": 900,
                 "dims": {"loot": {"value": 3}},
+                "dangerTicks": 12,
                 "hitsByKind": [1, 2, 3],
                 "killsByKind": [3, 0, 0],
                 "exposureByKind": [9, 8, 7],
@@ -1839,8 +1840,9 @@ def test_eval_rows_go_through_the_wire_whitelist_and_local_ledger_is_untouched(
 ) -> None:
     """W3（评审 P0-5）：实时体的逐局行**过白名单**，去重键一个不少，本地账本一字未动。
 
-    白名单之外的列不是丢了：它们逐字留在 `eval_log.jsonl` 里，而那份文件由抽屉与离线包
-    整份带走。这条用例同时钉住两件事——「瘦」与「瘦的东西还能在 hub 去重」。
+    数组/对象类分析列不是丢了：它们逐字留在 `eval_log.jsonl` 里，而那份文件由抽屉与
+    离线包整份带走；普通数值指标则随 `metricValues` 快照即时到达。这条用例同时钉住
+    两件事——「瘦」与「瘦的东西还能在 hub 去重」。
     """
     root = _make_artifacts(tmp_path / "art", iters=(2,))
     p = _heavy_eval_log(root, it=2, games=2)
@@ -1874,8 +1876,11 @@ def test_eval_rows_go_through_the_wire_whitelist_and_local_ledger_is_untouched(
         "puGotTank",
         "powerUpsCollected",
         "dims",
+        "metricValues",
     }
     assert set(rows[0]) <= kept, f"白名单之外的东西上了实时体：{sorted(set(rows[0]) - kept)}"
+    assert rows[0]["metricValues"]["dangerTicks"] == 12, "行为指标要随逐局快照即时到达"
+    assert set(rows[0]["metricValues"]).isdisjoint({"hitsByKind"}), "数组类分析列仍只随包走"
     for k in ("event", "iter", "wver", "stage", "seed"):
         assert k in rows[0], f"去重键被瘦掉了：{k}"
     for k in ("hitsByKind", "killsByKind", "exposureByKind", "moveHist", "decisions", "stopRuns"):

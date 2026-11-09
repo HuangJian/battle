@@ -80,6 +80,59 @@ describe('console/iters 行为指标聚合（eval 逐局行）', () => {
     }
   })
 
+  it('实时 eval 行带 metricValues 快照 ⇒ 白名单外行为指标也参与聚合', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-eval-metric-values-'))
+    try {
+      writeFileSync(
+        path.join(dir, 'training_log.jsonl'),
+        JSON.stringify({ event: 'iteration', iter: 3, time: '', winRate: 0.5, score_mean: 0 }),
+        'utf-8',
+      )
+      const evalRows = [
+        {
+          event: 'eval',
+          iter: 3,
+          wver: 'w3',
+          stage: 1,
+          seed: 11,
+          win: true,
+          metricValues: { dangerTicks: 4, aliveTicks: 100, postThawDamageRate: 0.2 },
+        },
+        {
+          event: 'eval',
+          iter: 3,
+          wver: 'w3',
+          stage: 1,
+          seed: 12,
+          win: false,
+          metricValues: { dangerTicks: 8, aliveTicks: 200, postThawDamageRate: 0.1 },
+        },
+        {
+          event: 'eval_summary',
+          iter: 3,
+          wver: 'w3',
+          time: '',
+          games: 2,
+          wins: 1,
+          winRate: 0.5,
+        },
+      ]
+      writeFileSync(
+        path.join(dir, 'eval_log.jsonl'),
+        evalRows.map((r) => JSON.stringify(r)).join('\n'),
+        'utf-8',
+      )
+      const { rows } = readIterMetrics(dir)
+      const bm = rows[0]!.evalData!.behaviorMetrics!
+      expect(bm.dangerTicks.mean).toBe(6)
+      expect(bm.aliveTicks.mean).toBe(150)
+      expect(bm.postThawDamageRate.mean).toBeCloseTo(0.15)
+      expect(bm.dangerTicks.p90).toBe(7.6)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('旧账本无这些字段 ⇒ behaviorMetrics 为 null（不编 0）', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-iters-behavior-old-'))
     try {

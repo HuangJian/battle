@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 #: 实时体里**逐局评估行**保留的键（白名单；评审 P0-5 / Q2）。
@@ -28,11 +29,12 @@ from pathlib import Path
 #: 为什么是白名单而不是「去掉几个大键」：实时体的读者只有两类——① hub 的合并去重
 #: （`worker.eval_rows.eval_row_key`，逐字要 `event/iter/wver/stage/seed`）；② 控制台的
 #: 逐局表与趋势列（`dashboard/src/server/iters.ts` 的 `EvalGameRow` 与 `readEvalSummaries`
-#: 聚合）。剩下的（metrics v8–v13 各族、分敌种画像、`moveHist/decisions/stopRuns/idleTicks`）
-#: 是**分析面**，不是实时面：它们逐字留在 `eval_log.jsonl` 里，而那份文件由抽屉与离线包
-#: 整份带走（`remote/backup_drawer` / `remote/deliver_zip`）——少走一次 1.24MB 的实时体，
-#: 不等于那份读数消失。
-#: ⚠ 加分析列时**不要**往这里塞：先问「控制台这一屏要不要在包到达之前看见它」。
+#: 聚合）。
+#:
+#: ★ 2026-11-09：新增 `metricValues` —— 逐局数值快照。控制台的行为指标（90 个 rollout
+#: 列 + 2 个 eval 专属列）需要逐局值才能算 median/p90/p99；只发 `eval_agg` 的
+#: sum/mean/min/max 不够。数组/对象类分析列（`moveHist` / 分敌种画像等）仍只随包走。
+#: 快照由 `slim_eval_row` 从行内数值字段生成，所以**新增普通数值指标不需要再改白名单**。
 EVAL_ROW_WIRE_KEYS = (
     # 去重键 + 归属（hub `merge_eval_rows` 的判据，少一个就会被并成一行/落哨兵键）
     "event",
@@ -56,6 +58,8 @@ EVAL_ROW_WIRE_KEYS = (
     "powerUpsCollected",
     # `iters.ts:237` 的 spawn 反推来源（`dims.loot`）
     "dims",
+    # 逐局数值快照：控制台行为指标（含白名单之外的非数组/对象列）
+    "metricValues",
 )
 
 #: 账本行里**不走实时体**的逐局明细（Q2）：它们只随离线包/抽屉到达。
@@ -69,9 +73,9 @@ EVAL_EVENTS = ("eval", "eval_summary")
 
 #: 单轮逐局评估行的**绝对上界**（2026-11-03，用户定 3000）：真正生效的上界由
 #: `deliver_parts.eval_rows_cap` 算 —— 整轮读数（关数 × 种子数）不裁，只有异常大才收到这里。
-#: 体积：白名单投影后一行 ≈ 583B（z5 的 700 行实测）⇒ 3000 行 ≈ 1.7MB，加权重/动量 ≈ 2.6MB。
-#: 已经高于 2026-10-22 在坏链路上挂掉的 1.24MB —— 更大的体靠降级档兜：传输失败时
-#: `_degraded` 只发权重、评估读数登记 `owed_reposts`，包照旧随 artifacts zip 回去。
+#: 体积：全指标行投影后 ≈ 1.8KB（2026-11-09 实测；`metricValues` 占大头），3000 行 ≈ 5.3MB。
+#: 加上权重/动量仍低于 8MB 体上限；更大的体靠降级档兜：传输失败时 `_degraded` 只发权重、
+#: 评估读数登记 `owed_reposts`，包照旧随 artifacts zip 回去。
 #: 覆盖 z5 的 35×20 与 50×60；更大的课按关分层裁（见 `deliver_parts.select_eval_rows`）。
 EVAL_ROWS_HARD = 3000
 
@@ -82,9 +86,40 @@ EVAL_AGG_EVENT = "eval_agg"
 EVAL_AGG_MAX_BYTES = 64 * 1024
 
 
+def _metric_values(row: dict) -> dict[str, float]:
+    """行内**数值型**字段的紧凑快照（白名单键除外——它们逐局已在顶层）。
+
+    只收有限数值：数组/对象/字符串/None 一律跳过。这样控制台能对任意新增数值列
+    直接算六种统计量，而不必每加一列就同步一份 Python 键表。
+    """
+    out: dict[str, float] = {}
+    for k, v in row.items():
+        if k in EVAL_ROW_WIRE_KEYS or isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and math.isfinite(float(v)):
+            out[k] = v
+    return out
+
+
 def slim_eval_row(row: dict) -> dict:
-    """一行逐局评估读数 → **实时体投影**（白名单 `EVAL_ROW_WIRE_KEYS`，见那里的为什么）。"""
-    return {k: row[k] for k in EVAL_ROW_WIRE_KEYS if k in row}
+    """一行逐局评估读数 → **实时体投影**（白名单 + 数值快照；见 `EVAL_ROW_WIRE_KEYS`）。"""
+    out = {k: row[k] for k in EVAL_ROW_WIRE_KEYS if k in row}
+    raw = row.get("metricValues")
+    if isinstance(raw, dict):
+        metrics = {
+            str(k): v
+            for k, v in raw.items()
+            if not isinstance(v, bool)
+            and isinstance(v, (int, float))
+            and math.isfinite(float(v))
+        }
+    else:
+        metrics = _metric_values(row)
+    if metrics:
+        out["metricValues"] = metrics
+    else:
+        out.pop("metricValues", None)
+    return out
 
 
 def slim_eval_rows(rows: list[dict]) -> tuple[list[dict], int, int]:
@@ -194,10 +229,9 @@ def _fit_agg(fields: dict, limit: int) -> tuple[dict, list[str]]:
 def aggregate_eval_rows(rows: list[dict]) -> list[dict]:
     """把逐局**分析列**聚合成每个 `(iter, wver)` 一行（`eval_agg`）。
 
-    逐局行只发白名单（`EVAL_ROW_WIRE_KEYS`），分析列（`cellsVisited` / `idleTicks` /
-    `wallPressTicks` / `moveHist` / `exposureByKind` / `killOrder` …）过去只能等离线包。
-    这里在**同一份账本**上把它们聚成一两 KB 的一行，每个 it 随体到达 ⇒ 控制台/门判不必
-    等包；逐局体一个字节不变。
+    逐局行发白名单 + 数值快照（`EVAL_ROW_WIRE_KEYS`）；数组/对象类分析列
+    （`moveHist` / `exposureByKind` / `killOrder` …）仍只能等离线包。这里在**同一份账本**上
+    把它们聚成一两 KB 的一行，每个 it 随体到达 ⇒ 控制台/门判不必等包。
 
     聚合口径（`analysis`）：数值 → sum/mean/min/max/n；bool → true/n；字符串 → 值计数；
     数字列表 → 逐位求和；字符串列表 → 元素计数；嵌套 dict → 递归求和；`None` 不计。

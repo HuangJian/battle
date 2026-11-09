@@ -18,7 +18,12 @@ import json
 from pathlib import Path
 
 from remote.deliver_parts import eval_rows_for
-from remote.deliver_wire import EVAL_AGG_EVENT, EVAL_ROW_WIRE_KEYS, aggregate_eval_rows
+from remote.deliver_wire import (
+    EVAL_AGG_EVENT,
+    EVAL_ROW_WIRE_KEYS,
+    aggregate_eval_rows,
+    slim_eval_row,
+)
 from worker.eval_rows import merge_eval_rows, read_eval_agg_rows
 
 
@@ -101,7 +106,7 @@ def test_aggregate_groups_by_iter_and_wver() -> None:
 
 def test_eval_rows_for_carries_one_agg_without_touching_per_game_rows(tmp_path: Path) -> None:
     rows = [
-        _row(stage=2000 + s, seed=i, cellsVisited=100)
+        _row(stage=2000 + s, seed=i, cellsVisited=100, dangerTicks=7)
         for s in range(35)
         for i in range(20)
     ]
@@ -112,8 +117,28 @@ def test_eval_rows_for_carries_one_agg_without_touching_per_game_rows(tmp_path: 
     aggs = [r for r in got if r["event"] == EVAL_AGG_EVENT]
     assert len(games) == 700, "逐局仍是 700 条"
     assert all(set(r) <= set(EVAL_ROW_WIRE_KEYS) for r in games), "逐局仍然只有白名单"
+    assert all(r["metricValues"]["dangerTicks"] == 7 for r in games), "数值快照要上实时体"
     assert len(aggs) == 1 and aggs[0]["games"] == 700
     assert aggs[0]["analysis"]["cellsVisited"]["sum"] == 700 * 100
+
+
+def test_slim_eval_row_ships_a_numeric_snapshot_for_behavior_metrics() -> None:
+    row = _row(
+        seed=7,
+        dangerTicks=11,
+        aliveTicks=321,
+        postThawDamageRate=0.25,
+        hitsByKind=[1, 2, 3],
+    )
+    slim = slim_eval_row(row)
+    mv = slim["metricValues"]
+    assert (mv["dangerTicks"], mv["aliveTicks"], mv["postThawDamageRate"]) == (
+        11,
+        321,
+        0.25,
+    )
+    assert set(mv).isdisjoint({"hitsByKind"}), "数组类分析列仍只随包走"
+    assert set(mv).isdisjoint({"event", "stage"}), "白名单键不重复进快照"
 
 
 def test_agg_merge_is_idempotent_and_monotone(tmp_path: Path) -> None:
