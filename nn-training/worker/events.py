@@ -257,6 +257,17 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
                 if m.get("greedy_quota_stats")
                 else {}
             ),
+            # 2026-11-10：主 report 已含 greedy 局，`samples`/`outcomes` 是全量口径；
+            # 这两个 additive 键保留**采样口径**给 est（trailing_samples_per_game）。
+            # 只有开了 greedy_quota 的轮才写 ⇒ 老账本逐字节不变。
+            **(
+                {
+                    "sampling_samples": m["sampling_samples"],
+                    "sampling_games": m["sampling_games"],
+                }
+                if m.get("sampling_samples") and m.get("sampling_games")
+                else {}
+            ),
             # 采样子集（plan/it-stage-ratation §9.1）：`rotation_mode` 缺席 ⇒ 不写键。
             **({"rotation": m["rotation"]} if m.get("rotation") else {}),
             # 降级轮的可归因（plan/offline-hold-stale-fallback §3-S1e）：

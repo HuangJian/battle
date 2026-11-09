@@ -131,6 +131,10 @@ _PER_GAME_FIELDS: tuple[str, ...] = (
     "score",
     # 完整逐局指标快照（metrics v16）；旧导出器没有该键 ⇒ 控制台按缺读数处理。
     "metricValues",
+    # 2026-11-10：greedy 分层采集的 provenance。逐局画像（per-game.json /
+    # 耗时·击杀·残血·道具四列）必须能区分 greedy 局与采样局；旧 manifest 无该键
+    # ⇒ compact_per_game 只带非空字段，老账本逐字节不变。
+    "labelMode",
 )
 
 

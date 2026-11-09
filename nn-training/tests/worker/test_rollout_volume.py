@@ -1338,8 +1338,12 @@ def _install_greedy_dispatch(
     outcome_for: Any,
     *,
     fire_on_result: bool = False,
+    extra_outcomes: dict | None = None,
 ) -> None:
-    """装可控的 greedy 派发桩：`outcome_for(wave, i) -> (outcome, nSamples)`。"""
+    """装可控的 greedy 派发桩：`outcome_for(wave, i) -> (outcome, nSamples)`。
+
+    `extra_outcomes` 让报告里带败局/超时局（测全量 report 合并用）。
+    """
 
     def fake(
         it: int,
@@ -1378,10 +1382,16 @@ def _install_greedy_dispatch(
             if fire_on_result and on_result is not None:
                 on_result({"stage": stage, "seed": seed, "nSamples": n})
         stub.dispatched.append(taken)
+        # 真实 `_rl_report.json` 聚合里 games == Σoutcomes；把 extra 的败局从
+        # stage_clear 里扣出来，避免桩把 winRate 分母写歪（combine_reports 用 games）。
+        n_extra = sum(extra_outcomes.values()) if extra_outcomes else 0
+        outs = {"stage_clear": max(0, len(taken) - n_extra)}
+        if extra_outcomes:
+            outs.update(extra_outcomes)
         return {
             "games": len(taken),
             "winRate": 0.0,
-            "outcomes": {"stage_clear": len(taken)},
+            "outcomes": outs,
             "totalSamples": settled,
             "totalTicks": settled * 10,
             "scoreList": [],
@@ -1475,6 +1485,58 @@ def test_greedy_skips_export_only_paths(tmp_path: Path, skip: str) -> None:
     stub._volume_collect_greedy(1, None)
     assert stub._greedy_plan is None and stub._greedy_stats is None
     assert stub.dispatched == []
+
+
+def test_greedy_waves_merge_into_main_report(tmp_path: Path) -> None:
+    """2026-11-10 用户裁决：主 rollout 胜率改全量，greedy 败局/超时局必须可见。
+
+    回归：此前 greedy 波只进 `_greedy_report`（死数据），`write_rollout_end` /
+    `write_iteration` 读 `self._report` ⇒ 控制台恒显示纯采样的 >98%。
+    同时钉住「合并前后各存一份 brief」，供控制台下钻采样 vs greedy。
+    """
+    stub = _greedy_stub(tmp_path, {"win": 0.5, "timeout": 0.5, "oversample_cap": 2.0})
+    stub._report = {
+        "games": 10,
+        "winRate": 1.0,
+        "outcomes": {"stage_clear": 10},
+        "totalSamples": 1000,
+        "totalTicks": 10000,
+        "scoreList": [],
+        "dimLists": {},
+    }
+    stub._volume_collected = 1000
+    stub._volume_stage_stats = {"rule": 1, "stages": {}}
+    _install_greedy_dispatch(
+        stub,
+        lambda wave, i: ("stage_clear", 50),
+        extra_outcomes={"lives_exhausted": 2, "timeout": 1},
+    )
+    stub._volume_collect_greedy(1, None)
+
+    rep = stub._report
+    assert rep["outcomes"]["stage_clear"] > 10, "greedy 局数必须并进主 report"
+    assert rep["outcomes"]["lives_exhausted"] >= 2
+    assert rep["outcomes"]["timeout"] >= 1
+    assert rep["winRate"] < 1.0, "败局/超时局必须把主胜率拉下来"
+    assert rep["totalSamples"] > 1000, "greedy transitions 必须并进 samples"
+
+    st = stub._greedy_stats
+    assert st is not None
+    assert st["sampling_report"]["winRate"] == 1.0
+    assert st["sampling_report"]["samples"] == 1000
+    assert st["greedy_report"]["outcomes"]["lives_exhausted"] >= 2
+    assert st["greedy_report"]["samples"] > 0
+    # 其余 rollout 指标也统计 greedy（用户追加口径）。
+    assert stub._volume_collected == 1000 + st["total"], (
+        "transitions_collected 必须含 greedy，且与 report.totalSamples 同口径"
+    )
+    g = stub._volume_stage_stats.get("greedy") or {}
+    assert g.get("samples") == st["total"]
+    assert g.get("games", 0) > 0
+    assert g.get("stages"), "分关 greedy 账不能空"
+    assert stub._volume_stage_stats["stages"] == {}, (
+        "普通配额诊断口径不许被 greedy 覆盖"
+    )
 
 
 def test_greedy_stream_path_is_loudly_rejected(tmp_path: Path) -> None:

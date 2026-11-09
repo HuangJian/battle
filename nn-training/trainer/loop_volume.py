@@ -1071,6 +1071,27 @@ class TrainingVolume:
         bins, total = greedy_progress(names, manifests)
         degraded = any(int(bins[b]) < int(targets[b]) for b in targets)
         cap_hit = bool(degraded and total >= plan.collect_target)
+        # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
+        # `_greedy_report`（死数据），`write_rollout_end` / `write_iteration` 读的是
+        # `self._report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
+        # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数。
+        def _brief(rep: dict | None) -> dict:
+            rep = rep or {}
+            return {
+                "games": int(rep.get("games") or 0),
+                "winRate": float(rep.get("winRate") or 0.0),
+                "outcomes": dict(rep.get("outcomes") or {}),
+                "samples": int(rep.get("totalSamples") or 0),
+            }
+
+        sampling_report = _brief(self._report)
+        greedy_report = _brief(self._greedy_report)
+        if self._greedy_report:
+            self._report = combine_reports([self._report, self._greedy_report])
+        # 全量指标：`transitions_collected` 由 `_volume_collected` 落账（不读 report）。
+        # 两边同加才守得住 e2e 的 `report.totalSamples == _volume_collected` 等式。
+        if self._volume_collected is not None:
+            self._volume_collected = int(self._volume_collected) + int(total)
         self._greedy_stats = {
             "rule": GREEDY_QUOTA_RULE_V1,
             "target": int(plan.total_target),
@@ -1085,7 +1106,31 @@ class TrainingVolume:
             "cap_hit": cap_hit,
             "waves": int(self._greedy_waves),
             "stopped_no_games": bool(stopped_no_games),
+            # 拆分读数（合并前的采样 / 本轮 greedy）；`merge_greedy_stats` 只挂
+            # `prefilter` 子键，这两个键会一路带进 iteration 事件。
+            "sampling_report": sampling_report,
+            "greedy_report": greedy_report,
         }
+        # 分关 greedy 账挂到 `volume_stage_stats` 的**增量**子键：控制台的分关表能看见
+        # greedy 样本落在哪几关，同时普通配额诊断的 stages/shortfall/est_src 口径不动。
+        if isinstance(self._volume_stage_stats, dict):
+            by_stage: dict[str, dict] = {}
+            greedy_games = 0
+            for name in names:
+                mm = manifests.get(name) or {}
+                if not is_greedy_manifest(mm):
+                    continue
+                greedy_games += 1
+                row = by_stage.setdefault(
+                    str(mm.get("stage")), {"samples": 0, "games": 0}
+                )
+                row["samples"] += manifest_samples(mm)
+                row["games"] += 1
+            self._volume_stage_stats["greedy"] = {
+                "samples": int(total),
+                "games": greedy_games,
+                "stages": by_stage,
+            }
         log(
             f"[greedy] it{it}: 收官 bins={bins} targets={targets} total={total} "
             f"degraded={degraded} cap_hit={cap_hit} waves={self._greedy_waves}"

@@ -670,6 +670,17 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                     ),
                     "volume_stage_stats": self._volume_stage_stats,
                     "greedy_quota_stats": getattr(self, "_greedy_stats", None),
+                    # est 隔离：主 report 是全量，这两个键只带采样口径（见 events.py）。
+                    "sampling_samples": (
+                        (getattr(self, "_greedy_stats", None) or {})
+                        .get("sampling_report", {})
+                        .get("samples")
+                    ),
+                    "sampling_games": (
+                        (getattr(self, "_greedy_stats", None) or {})
+                        .get("sampling_report", {})
+                        .get("games")
+                    ),
                     # 采样子集读数（plan §9.1；`rotation_mode` 缺席 ⇒ None ⇒ 不写键）。
                     "rotation": _rotation_event(
                         self.args, it, getattr(self, "_rotate_seed", 0)

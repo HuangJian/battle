@@ -358,6 +358,15 @@ def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int =
                     continue
                 if e.get("event") != "iteration":
                     continue
+                # 2026-11-10：全量 report 含 greedy 局（timeout 局可达 600 trans），
+                # 直接拿它算 est 会抬高局均 ⇒ 下轮首波少派局（欠采）。gq 课在
+                # iteration 行额外写 sampling_samples/games（采样口径），优先用它们；
+                # 老账本无这两个键 ⇒ 原路径逐字节不变。
+                ss = e.get("sampling_samples")
+                sg = e.get("sampling_games")
+                if isinstance(ss, int) and isinstance(sg, int) and sg > 0 and ss > 0:
+                    rows.append((sg, ss))
+                    continue
                 # 量纲红线：samples（不是 ticks）。旧行无 samples 键则跳过（不用 ticks 顶）。
                 samples = e.get("samples")
                 outs = e.get("outcomes")
