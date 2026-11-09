@@ -19,6 +19,10 @@ export interface FrameAdapter {
   cells(): CellRef[]
   outputText(cell: CellRef): string
   sourceText(cell: CellRef): string
+  /** 只读执行态：cell 正在执行或排队（站点各自判据；监控用，不改 DOM）。 */
+  cellExecuting(cell: CellRef): boolean
+  /** 内核状态（`idle | busy | connecting | unknown`；认不出 ⇒ unknown）。 */
+  kernelStatus(): string
   /**
    * 把整段源码写回编辑器（hub URL 同步用）。实现只改「旧 → 新」的最小差异区间，
    * 写完必须回读校验；编辑器没接受 ⇒ 带原因失败（绝不假装成功）。

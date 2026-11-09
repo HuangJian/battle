@@ -528,8 +528,13 @@ export class KaggleFrameAdapter implements FrameAdapter {
     return this.promptText(cell).includes('*')
   }
 
+  /** 只读执行态（离线训练监控用）：不点命令、不改 DOM。 */
+  cellExecuting(cell: CellRef): boolean {
+    return this.isExecuting(cell)
+  }
+
   /** 内核状态；指示器缺失 ⇒ unknown（照常点 + 验证，不因认不出就停摆）。 */
-  private kernelStatus(): string {
+  kernelStatus(): string {
     const ind = deepQuery(this.doc, SEL.kernelStatus)
     return (ind?.getAttribute('data-status') ?? '').toLowerCase() || 'unknown'
   }

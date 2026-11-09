@@ -399,6 +399,17 @@ export class ColabAdapter implements FrameAdapter {
     return normalizeNewlines(md?.textContent ?? '')
   }
 
+  /** Colab 的 `.running` 只标真正在跑的 cell（排队不亮）；只读，不改按钮。 */
+  cellExecuting(cell: CellRef): boolean {
+    const el = this.cellEl(cell)
+    return el !== null && el.classList.contains('running')
+  }
+
+  /** Colab 没有可读的内核状态指示器（连接条只分已连接/未连接）⇒ unknown。 */
+  kernelStatus(): string {
+    return 'unknown'
+  }
+
   /** 写回 cell：Monaco model 整段替换（内容已由调用方按最小差异算好，不丢别的键）。 */
   async replaceCellSource(cell: CellRef, source: string): Promise<CmdResult> {
     const before = this.sourceText(cell)

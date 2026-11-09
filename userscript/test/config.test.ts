@@ -5,8 +5,11 @@ import {
   DEFAULT_CONFIG,
   isLoopbackHttpBase,
   loadAutoSave,
+  loadStopPpo,
   sanitizeConfig,
   saveAutoSave,
+  saveStopPpo,
+  stopPpoKeyFor,
 } from '../src/notebook-companion/config'
 import type { Runtime } from '../src/runtime'
 
@@ -112,5 +115,19 @@ describe('自动保存设置：按页隔离', () => {
     expect(a.autoSaveIntervalSec).toBe(86_400)
     expect(b.autoSaveEnabled).toBe(DEFAULT_CONFIG.autoSaveEnabled)
     expect(b.autoSaveIntervalSec).toBe(0)
+  })
+})
+
+describe('停止其它 PPO：按页隔离', () => {
+  it('默认关；只写本页键；坏值回退 fallback', () => {
+    const { runtime, data } = memoryRuntime()
+    expect(loadStopPpo(runtime, 'p1')).toBe(false)
+    saveStopPpo(runtime, 'p1', true)
+    expect(loadStopPpo(runtime, 'p1')).toBe(true)
+    expect(loadStopPpo(runtime, 'p2')).toBe(false)
+    expect(stopPpoKeyFor('p1')).toBe('bnc:stopPpo:p1')
+    data.set(stopPpoKeyFor('p2'), 'yes')
+    expect(loadStopPpo(runtime, 'p2', true)).toBe(true)
+    expect(loadStopPpo(runtime, 'p2', false)).toBe(false)
   })
 })

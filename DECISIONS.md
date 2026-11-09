@@ -11456,3 +11456,21 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   在 notebook 启动链继续自交接（与现有 supervisor 抢锁）。
 - **验收**：Python `tests/remote/test_rollout_node.py` + notebook 契约 105 passed；TS
   `tests/dist-agent.test.ts` / `tests/agent/restart-guard.test.ts` 30 passed；typecheck 绿。
+## §2026-11-09-goalnn-offline-start-report（离线训练开始：先只上报，不自动停 PPO）
+
+- **背景**：离线训练页（`nn-training/ipynb/battle.offline.ipynb`）开始执行训练 cell 时，
+  希望 dashboard 知道；后续阶段才由 dashboard 通知其它 PPO 页停 session。
+- **决定**：本阶段只做上报，复用现有 `POST /api/notebookOp`（不新增 dashboard 端点/状态）；
+  op 名 `offline:detected` / `offline:cell-start`，detail 带 cell / 等待时长 / 证据与
+  `stopOthers=0|1`。检测在 frame 内做（跨域 DOM 只有 frame 能读），经 bridge note 交给
+  host；Colab/AI Studio 的 single 角色直接落本页 op。
+- **判定**：队列与执行在 JupyterLab 外观上可能同态（`jp-mod-running` / `[*]`）⇒ 不靠单点
+  状态变化；要求目标 cell 输出变化，或内核 `busy` 且没有别的 cell 在跑，证据持续 1s 才
+  上报一次；cell 回 idle 后才允许下一轮。目标 cell 按源码标记 `# @title Battle 离线训练`
+  识别；虚拟化滚出 DOM 时不判、不重置阶段。
+- **开关**：面板「启动后停止其它 ppo worker」按页存 `bnc:stopPpo:<page>`，默认 false；
+  只在识别到离线页后显示。本阶段只把值写进 detail，dashboard 不发停止命令。
+- **否决**：新增 `/api/notebookSignal` + 命令轮询（本阶段不需要下行，先不引入状态端点）；
+  由离线页直接停其它 PPO 页（浏览器跨页无法互停，且误停代价高）。
+- **验收**：`cd userscript && bun run check` 271 pass；typecheck / oxlint / build 全绿；
+  新增 `offline-watch` 7 用例、`offline-wiring` 4 用例、面板/配置回归。

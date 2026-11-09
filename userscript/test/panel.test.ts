@@ -203,6 +203,35 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     panel.destroy()
   })
 
+  it('离线接管：默认隐藏/关闭；显示后勾选回传本页开关', async () => {
+    const w = dom()
+    const calls: boolean[] = []
+    const panel = mountPanel(
+      docOf(w),
+      {},
+      {
+        stopPpo: false,
+        onStopPpoChange: (enabled) => {
+          calls.push(enabled)
+          return null
+        },
+      },
+    )
+    const shadow = panel.host.shadowRoot!
+    const group = shadow.querySelector('[data-ppo-group]') as HTMLElement
+    const box = shadow.querySelector('[data-ppo="enabled"]') as HTMLInputElement
+    expect(group.hidden).toBe(true)
+    expect(box.checked).toBe(false)
+    panel.setStopPpoVisible(true)
+    expect(group.hidden).toBe(false)
+    box.checked = true
+    box.dispatchEvent(new w.Event('change') as unknown as Event)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(calls).toEqual([true])
+    expect(shadow.querySelector('.status')!.textContent).toContain('已开启')
+    panel.destroy()
+  })
+
   it('忙态禁用全部按钮，handler 完成后恢复；异常写红字', async () => {
     const w = dom()
     let release: () => void = () => {}
@@ -284,7 +313,7 @@ describe('面板：按钮 → handler，状态/忙态可见', () => {
     expect(labels.slice(0, 3)).toEqual(['折叠', '跳转', '自动'])
     expect(labels[3]).toContain('定时（一次性')
     const groups = [...shadow.querySelectorAll('.group')]
-    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 3, 0, 1])
+    expect(groups.map((g) => g.querySelectorAll('button').length)).toEqual([3, 4, 3, 0, 1, 0])
     expect(groups[0]!.querySelector('.glabel')).toBeNull()
     const jump = [...groups[2]!.querySelectorAll('[data-act]')].map((el) =>
       el.getAttribute('data-act'),

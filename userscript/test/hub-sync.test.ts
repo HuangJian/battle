@@ -46,6 +46,8 @@ function adapterWith(sources: string[]): { adapter: FrameAdapter; writes: string
     ready: true,
     cells: () => list.map((_, i) => ({ id: `c${i}`, index: i, kind: 'code' as const })),
     sourceText: (cell) => list[cell.index] ?? '',
+    cellExecuting: () => false,
+    kernelStatus: () => 'unknown',
     replaceCellSource: async (cell, source) => {
       writes.push(source)
       list[cell.index] = source

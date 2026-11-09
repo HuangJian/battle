@@ -54,6 +54,8 @@ export interface Panel {
   setSchedule(rows: PanelScheduleRow[]): void
   /** 本次页面内的执行历史（内存；刷新即清空）。 */
   setHistory(rows: PanelHistoryRow[]): void
+  /** 离线训练页才显示「启动后停止其它 ppo worker」；其它页面保持隐藏。 */
+  setStopPpoVisible(visible: boolean): void
   /** 到点倒数 + 「取消」；返回 false = 用户取消（面板销毁也算取消）。 */
   countdown(text: string, seconds: number): Promise<boolean>
   setBusy(busy: boolean): void
@@ -101,6 +103,9 @@ export interface PanelOptions {
   /** 当前「自动保存并清空」设置（只上屏；改动走 onAutoSaveChange）。 */
   autoSave?: PanelAutoSave
   onAutoSaveChange?: (value: PanelAutoSave) => string | null | void | Promise<string | null | void>
+  /** 「启动后停止其它 ppo worker」本页设置（默认关；只在离线训练页显示）。 */
+  stopPpo?: boolean
+  onStopPpoChange?: (enabled: boolean) => string | null | void | Promise<string | null | void>
 }
 
 interface ButtonSpec {
@@ -289,6 +294,9 @@ export function mountPanel(
     `<div class="hist" data-hist hidden></div>` +
     `<div class="snote">只跑一次（执行后自动移除）；24 小时制，早于现在 = 明天；` +
     `运行 cell = 添加时选中的那一段（内容变了不跑）。</div></div>` +
+    `<div class="group" data-ppo-group hidden><div class="glabel">离线训练</div>` +
+    `<label class="arow"><input type="checkbox" data-ppo="enabled"> 启动后停止其它 ppo worker</label>` +
+    `<div class="snote">训练 cell 开始执行时上报 stopOthers；dashboard 目前只记录，不发停止命令。</div></div>` +
     `<div class="status" data-tone="warn">连接中…</div>` +
     `<div class="ask" data-ask hidden><span data-ask-text></span>` +
     `<button type="button" data-ask-cancel>取消</button></div></div>`
@@ -308,6 +316,8 @@ export function mountPanel(
   const hist = shadow.querySelector('[data-hist]') as HTMLElement
   const autoEnabled = shadow.querySelector('[data-auto="enabled"]') as HTMLInputElement
   const autoMinutes = shadow.querySelector('[data-auto="minutes"]') as HTMLInputElement
+  const ppoGroup = shadow.querySelector('[data-ppo-group]') as HTMLElement
+  const ppoEnabled = shadow.querySelector('[data-ppo="enabled"]') as HTMLInputElement
   const ask = shadow.querySelector('[data-ask]') as HTMLElement
   const askText = shadow.querySelector('[data-ask-text]') as HTMLElement
   const askCancel = shadow.querySelector('[data-ask-cancel]') as HTMLElement
@@ -318,6 +328,7 @@ export function mountPanel(
   autoEnabled.checked = autoSave.enabled
   autoMinutes.value = String(autoSave.intervalMin)
   autoMinutes.disabled = !autoSave.enabled
+  ppoEnabled.checked = options.stopPpo === true
 
   // 本地时区（任务用墙钟，不存 UTC）：显示出来，操作员不用猜
   const offsetMin = -new Date().getTimezoneOffset()
@@ -562,6 +573,26 @@ export function mountPanel(
   autoEnabled.addEventListener('change', applyAutoSave)
   autoMinutes.addEventListener('change', applyAutoSave)
 
+  function applyStopPpo(): void {
+    const enabled = ppoEnabled.checked
+    const ret = options.onStopPpoChange?.(enabled)
+    if (ret === undefined) {
+      setStatus('离线接管未接线', 'warn')
+      return
+    }
+    void Promise.resolve(ret)
+      .then((err) => {
+        if (typeof err === 'string' && err) setStatus(err, 'error')
+        else
+          setStatus(
+            enabled ? '已开启：训练开始后上报停止其它 ppo worker' : '已关闭：训练开始只上报',
+            'ok',
+          )
+      })
+      .catch((e: unknown) => setStatus(e instanceof Error ? e.message : String(e), 'error'))
+  }
+  ppoEnabled.addEventListener('change', applyStopPpo)
+
   schedAction.addEventListener('change', () => {
     schedAckWrap.hidden = schedAction.value !== 'stop-session'
   })
@@ -594,6 +625,9 @@ export function mountPanel(
     setHubSync,
     setSchedule,
     setHistory,
+    setStopPpoVisible(next: boolean) {
+      ppoGroup.hidden = !next
+    },
     countdown,
     setBusy(next: boolean) {
       busy = next

@@ -170,3 +170,21 @@ export function applyPageAutoSave(runtime: Runtime, page: string, config: BncCon
   config.autoSaveEnabled = saved.enabled
   config.autoSaveIntervalSec = saved.intervalSec
 }
+
+/** 面板「启动后停止其它 ppo worker」的本页设置（只在离线训练页显示）。 */
+export const STOP_PPO_KEY_PREFIX = 'bnc:stopPpo:'
+
+export function stopPpoKeyFor(page: string): string {
+  return `${STOP_PPO_KEY_PREFIX}${page}`
+}
+
+/** 读本页开关；缺省 / 坏值 ⇒ fallback（默认关）。 */
+export function loadStopPpo(runtime: Runtime, page: string, fallback = false): boolean {
+  const raw = runtime.getValue(stopPpoKeyFor(page), null)
+  return typeof raw === 'boolean' ? raw : fallback
+}
+
+/** 只写本页键：同站多页互不影响，绝不回写 `bnc:config`。 */
+export function saveStopPpo(runtime: Runtime, page: string, enabled: boolean): void {
+  runtime.setValue(stopPpoKeyFor(page), enabled === true)
+}

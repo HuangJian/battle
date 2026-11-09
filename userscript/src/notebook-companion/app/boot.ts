@@ -3,7 +3,9 @@ import {
   applyPageAutoSave,
   autoSaveKeyFor,
   loadConfig,
+  loadStopPpo,
   saveAutoSave,
+  saveStopPpo,
   type BncConfig,
 } from '../config'
 import { detectRole, singleSite, type Role } from '../selectors'
@@ -35,6 +37,7 @@ import {
 } from './bridge'
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
+import { createOfflineWatch } from './offline-watch'
 import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
   actionLabel,
@@ -247,6 +250,37 @@ function startFrame(
     onError: (reason) => log(`bridge: ${reason}`),
   })
 
+  // 离线训练页（battle.offline.ipynb）：训练 cell 从排队转真正执行时，经桥上报一次。
+  // 只读监控：不点运行、不停会话；host 负责落 `/api/notebookOp`。
+  const offline = config.enabled
+    ? createOfflineWatch({
+        snapshot: () => ({
+          cells: adapter.cells(),
+          sourceText: (cell) => adapter.sourceText(cell),
+          executing: (cell) => adapter.cellExecuting(cell),
+          outputText: (cell) => adapter.outputText(cell),
+          kernelStatus: adapter.kernelStatus(),
+        }),
+      })
+    : null
+  let offlineNoted = false
+  const offlineTimer =
+    offline === null
+      ? null
+      : setInterval(() => {
+          const start = offline.poll()
+          const hit = offline.detected()
+          if (hit && !offlineNoted) {
+            offlineNoted = true
+            bridge.note('offline:detected', { value: `cell=${hit.index} id=${hit.id}` })
+          }
+          if (start) {
+            bridge.note('offline:cell-start', {
+              value: `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms evidence=${start.evidence}`,
+            })
+          }
+        }, 1000)
+
   // 页首同步 CFG['hub_url']：hub 的 cloudflared 隧道换了 URL，notebook 里的配置跟着换。
   // 结果经 bridge 送到外层面板（成功 / 未改 / 失败原因都要看得见，不能只进 console）。
   const hubSync = config.enabled
@@ -287,6 +321,7 @@ function startFrame(
 
   return () => {
     clearTimeout(startFallback)
+    if (offlineTimer !== null) clearInterval(offlineTimer)
     hubSync?.cancel()
     loop.stop()
     bridge.destroy()
@@ -321,6 +356,7 @@ function startHost(
   const logKey = (): string => `notebook:${frameSession || session}`
   let ready = false
   let panel: Panel | null = null
+  let offlineDetected = false
 
   /**
    * 本页标签：定时任务表的分桶键（`bnc:tasks:<notebook>#<page>`）与归属阀都靠它。
@@ -372,6 +408,27 @@ function startHost(
       }
     },
     onNote: (m) => {
+      if (m.name === 'offline:detected') {
+        offlineDetected = true
+        panel?.setStopPpoVisible(true)
+        const detail =
+          `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''}`.trim()
+        op('offline:detected', detail)
+        return
+      }
+      if (m.name === 'offline:cell-start') {
+        const stopOthers = loadStopPpo(runtime, page, false)
+        const detail =
+          `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''} ` +
+          `stopOthers=${stopOthers ? 1 : 0}`
+        op('offline:cell-start', detail.trim())
+        void ops.flush()
+        panel?.setStatus(
+          stopOthers ? '离线训练已开始（已上报：停其它 PPO）' : '离线训练已开始（已上报）',
+          'ok',
+        )
+        return
+      }
       if (m.name !== 'hub:sync') return
       const view = describeHubSync({
         ok: m.ok === true,
@@ -528,6 +585,12 @@ function startHost(
         )
         return r.ok ? null : `自动保存已写入配置，但当前帧未连上（${r.reason ?? '无应答'}）`
       },
+      stopPpo: loadStopPpo(runtime, page, false),
+      onStopPpoChange: (enabled) => {
+        saveStopPpo(runtime, page, enabled)
+        op('stopPpo', enabled ? 'on' : 'off')
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -564,6 +627,7 @@ function startHost(
 
   // 先显示外层 URL 推出的键；frame 一连上就用它回报的（含页面标签）覆盖。
   panel.setSession(logKey())
+  panel.setStopPpoVisible(offlineDetected)
 
   // Kaggle 的「是否仍需编辑 / 配额超限」弹窗会卡住训练页：自动点白名单里的继续键
   const autoContinue = installAutoContinue(doc, {
@@ -775,6 +839,7 @@ function startSingle(
 
   let panel: Panel | null = null
   let sched: Scheduler | null = null
+  let offlineDetected = false
 
   /** 命令分发：Kaggle 那边跨帧 postMessage，这里同一文档直接调（失败带原因，不静默）。 */
   const send = async (name: string, args?: unknown): Promise<CommandReply> => {
@@ -890,6 +955,12 @@ function startSingle(
         )
         return r.ok ? null : `自动保存已写入配置，但当前页未生效（${r.reason ?? '无应答'}）`
       },
+      stopPpo: loadStopPpo(runtime, page, false),
+      onStopPpoChange: (enabled) => {
+        saveStopPpo(runtime, page, enabled)
+        op('stopPpo', enabled ? 'on' : 'off')
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -929,6 +1000,47 @@ function startSingle(
     adapter.ready ? '已连接（笔记本就绪）' : '已连接（等待笔记本）',
     adapter.ready ? 'ok' : 'warn',
   )
+  panel.setStopPpoVisible(offlineDetected)
+
+  // 离线训练页（battle.offline.ipynb）：训练 cell 从排队转真正执行时上报一次。
+  // 与 host 同一通道（`/api/notebookOp`）；Colab/AI Studio 没有桥，直接落本页日志。
+  const offline = config.enabled
+    ? createOfflineWatch({
+        snapshot: () => ({
+          cells: adapter.cells(),
+          sourceText: (cell) => adapter.sourceText(cell),
+          executing: (cell) => adapter.cellExecuting(cell),
+          outputText: (cell) => adapter.outputText(cell),
+          kernelStatus: adapter.kernelStatus(),
+        }),
+      })
+    : null
+  let offlineNoted = false
+  const offlineTimer =
+    offline === null
+      ? null
+      : setInterval(() => {
+          const start = offline.poll()
+          const hit = offline.detected()
+          if (hit && !offlineNoted) {
+            offlineNoted = true
+            offlineDetected = true
+            panel?.setStopPpoVisible(true)
+            op('offline:detected', `cell=${hit.index} id=${hit.id}`)
+          }
+          if (start) {
+            const stopOthers = loadStopPpo(runtime, page, false)
+            const detail =
+              `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms ` +
+              `evidence=${start.evidence} stopOthers=${stopOthers ? 1 : 0}`
+            op('offline:cell-start', detail)
+            void ops.flush()
+            panel?.setStatus(
+              stopOthers ? '离线训练已开始（已上报：停其它 PPO）' : '离线训练已开始（已上报）',
+              'ok',
+            )
+          }
+        }, 1000)
 
   sched = createScheduler({
     store: runtime,
@@ -1003,6 +1115,7 @@ function startSingle(
 
   return () => {
     clearInterval(markTimer)
+    if (offlineTimer !== null) clearInterval(offlineTimer)
     hubSync?.cancel()
     doc.removeEventListener('visibilitychange', onVisibility)
     for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })

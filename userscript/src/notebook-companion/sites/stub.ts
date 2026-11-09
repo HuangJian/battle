@@ -23,6 +23,12 @@ export class StubFrameAdapter implements FrameAdapter {
   sourceText(): string {
     return ''
   }
+  cellExecuting(): boolean {
+    return false
+  }
+  kernelStatus(): string {
+    return 'unknown'
+  }
   async replaceCellSource(_cell: CellRef, _source: string): Promise<CmdResult> {
     return notYet(this.site)
   }
