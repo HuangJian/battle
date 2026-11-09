@@ -1,10 +1,10 @@
 /** WorkerContribution.tsx — 并行 worker 贡献度（plan/worker-contribution-view）。
  *
  *  · `variant="full"`：节点页（NodeStats 抽屉）主体——份额条列表 ⇄ 机器×课程矩阵 + 口径脚注；
- *  · `SamplingBrief` + `PpoBrief`：首页节点区的**两条对称缩略行**（2026-10-03 用户报障
- *    「rollout 节点与 ppo 节点混在一起，数据混乱」→ 2026-10-04「像采样合计一样缩略显示即可」）
- *    ——采样行在上、PPO 行在下（实线分隔），各带自己的标签与单位。两者挤在同一个按钮里、
- *    或把 PPO 铺成逐行带进度条的列表，都被用户否过。
+ *  · `SamplingBrief` + `PpoBrief`：首页节点区两块**标题行里的合计读数**（2026-10-03 用户报障
+ *    「rollout 节点与 ppo 节点混在一起，数据混乱」→ 2026-10-04「像采样合计一样缩略显示即可」
+ *    → 2026-11-09「合计并入块头，减少纵向占用」）——各带自己的标签与单位，
+ *    但只住在各自块头，绝不合并成同一行。把 PPO 铺成逐行带进度条的列表，被用户否过。
  *
  *  硬口径（用户 2026-10-02 裁决 / plan §4）：
  *    · 两组**永不合并**（采样=局 / PPO=job）；样本名不合并——归属由来源决定，不由名字决定；
@@ -28,7 +28,7 @@ import {
 } from '../../view'
 
 export interface WorkerContributionProps {
-  /** 节点页主体（两组并排的表 + 脚注）。首页的两条缩略行见 `SamplingBrief` / `PpoBrief`。 */
+  /** 节点页主体（两组并排的表 + 脚注）。首页两段标题行合计读数见 `SamplingBrief` / `PpoBrief`。 */
   variant: 'full'
   /** full 变体数据源（`/api/pool` 的 `contribution`）。 */
   contribution?: ContributionView | null
@@ -236,7 +236,7 @@ function MatrixTable({ view }: { view: ContributionView }) {
   )
 }
 
-/** 缩略行的份额签（采样与 PPO 共用同一形状）：等宽身份 + 加粗份额，描边胶囊。
+/** 合计读数的份额签（采样与 PPO 共用同一形状）：等宽身份 + 加粗份额，描边胶囊。
  *
  *  两行是**两种人群、两种单位**（局 / job），但版式一致——2026-10-19 用户要求
  *  「同样样式也应用到 PPO 合计」，故形状只在这里实现一次，不两边各拼一遍。 */
@@ -249,15 +249,15 @@ function BriefChip({ id, share, title }: { id: string; share: number | null; tit
   )
 }
 
-/** 采样块的**收尾行**（首页）：采样份额合计 + 每个份额 >10% 的节点。
+/** 采样块**标题行里的合计读数**（首页）：采样份额合计 + 每个份额 >10% 的节点。
  *
- *  为什么独立成行、且**只带采样一侧**（2026-10-03 用户报障：「rollout 节点 和 ppo 节点混在一起，
+ *  为什么只带采样一侧（2026-10-03 用户报障：「rollout 节点 和 ppo 节点混在一起，
  *  数据混乱，难以区分」）：此前 PPO 与采样两组挤在**同一个按钮**里，两种单位、两种分母并排 ⇒
- *  身份与口径都分不开。现在份额归**采样块的末尾**（全部采样节点行都在它上面，它只是收尾合计），
- *  PPO 在自己那一行（`PpoBrief`）。两组仍**永不合并**（WC-plan §4.1b）——这里只是把「不合并」
- *  落到版式上：采样份额绝不与 PPO job 数出现在同一行。
+ *  身份与口径都分不开。现在采样读数住**采样块头**（2026-11-09 用户：并入「采样节点」标题行，
+ *  不再在块尾单开一行），PPO 住自己的块头（`PpoBrief`）。两组仍**永不合并**（WC-plan §4.1b）——
+ *  这里只是把「不合并」落到版式上：采样份额绝不与 PPO job 数出现在同一处。
  *
- *  这是**纯读数**（不可点）：唯一的深链入口在 PPO 子块的行尾，避免同一区出现两个「节点统计 ›」。
+ *  这是**纯读数**（不可点）：唯一的深链入口在采样块头，避免同一区出现两个「节点统计 ›」。
  *
  *  ★ 2026-10-19（用户口径）：份额不再是固定 top-3，而是**所有份额 >10% 的节点**逐个成签
  *  ——尾部长尾节点在节点行里本来就有身份，这一行只留撑起采样供给的主力。 */
@@ -266,12 +266,12 @@ export function SamplingBrief({ brief }: { brief: ContributionBrief | null }) {
   const total = brief.sampling.total
   const rows = filterBriefSampling(brief.sampling.top)
   return (
-    <p
-      className="tc-contrib-samplingbrief"
-      title="采样份额 = 窗口内成功局（rollout + eval）占采样组内的比例；只列份额 >10% 的节点（更小的节点见上方节点行）；与 PPO job 数不同单位、分母各自独立（两组永不合并）"
+    <span
+      className="tc-contrib-brief tc-contrib-brief--sampling"
+      title="采样份额 = 窗口内成功局（rollout + eval）占采样组内的比例；只列份额 >10% 的节点（更小的节点见下方节点行）；与 PPO job 数不同单位、分母各自独立（两组永不合并）"
     >
       <span className="tc-contrib-brieflabel">采样合计</span>
-      <b>{total > 0 ? `${fmtCount(total)} 局` : '—'}</b>
+      <b className="tc-contrib-brieftotal">{total > 0 ? `${fmtCount(total)} 局` : '—'}</b>
       {rows.length > 0 ? (
         <span className="tc-contrib-briefchips">
           {rows.map((s) => (
@@ -286,18 +286,18 @@ export function SamplingBrief({ brief }: { brief: ContributionBrief | null }) {
       ) : total > 0 ? (
         <span className="tc-muted">无节点 &gt;10%</span>
       ) : null}
-    </p>
+    </span>
   )
 }
 
-/** PPO 缩略行（首页）：与 `SamplingBrief` **完全对称的一行**读数——`PPO 合计 858 job · 名字 份额 · …`。
+/** PPO 块**标题行里的合计读数**（首页）：与 `SamplingBrief` **完全对称**——`PPO 合计 858 job · 名字 份额 · …`。
  *
  *  用户 2026-10-04：「不需要百分比 progress bar，像「采样合计」一样缩略显示即可」⇒
  *  去掉**份额条**与**逐行列表**（那是节点页 `variant="full"` 的形态），首页只留合计 + 各台份额。
  *
- *  两类身份仍不混行：采样行在本行**上方**，各有自己的标签与单位（局 / job）；
- *  角色隔离（两组永不合并，WC-plan §4.1b）在这条版式上照旧成立——这里只是把 PPO 也压成一行，
- *  不是把它并进采样那一行。
+ *  两类身份仍不混行：采样读数在采样块头、PPO 读数在 PPO 块头，各有自己的标签与单位（局 / job）；
+ *  角色隔离（两组永不合并，WC-plan §4.1b）在这条版式上照旧成立——这里只是把 PPO 也压成一段合计读数，
+ *  不是把它并进采样块。
  *
  *  份额仍**全列**（用户 2026-10-03「全部活跃 worker 都列」）；身份已按机器归并（`machineOf`）
  *  ⇒ 行数 = 机器数（单位数级），太长时由 `flex-wrap` 折行，不会撑破也不会挤掉数值。
@@ -309,12 +309,14 @@ export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
   if (!brief) return null
   const { ppo } = brief
   return (
-    <p
-      className="tc-contrib-ppobrief"
+    <span
+      className="tc-contrib-brief tc-contrib-brief--ppo"
       title="云端 worker 完成的 PPO job（单位：job；与采样局数不同单位、永不合并）；份额分母 = 本组内全体；身份按机器归并（剥 `:pid`）；全部活跃 worker 都列"
     >
       <span className="tc-contrib-brieflabel">PPO 合计</span>
-      <b>{ppo.totalDone > 0 ? `${fmtCount(ppo.totalDone)} job` : '—'}</b>
+      <b className="tc-contrib-brieftotal">
+        {ppo.totalDone > 0 ? `${fmtCount(ppo.totalDone)} job` : '—'}
+      </b>
       {ppo.top.length > 0 ? (
         <span className="tc-contrib-briefchips">
           {ppo.top.map((w) => (
@@ -327,7 +329,7 @@ export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
           ))}
         </span>
       ) : null}
-    </p>
+    </span>
   )
 }
 
@@ -363,7 +365,7 @@ function JobSeg({ label, refs, title }: { label: string; refs: PpoJobRef[]; titl
 /** 首页 PPO 区的**每台一行**（plan/dashboard-ppo-live-rows，2026-10-09）：
  *  「这几台机器现在正在算哪一轮、下一轮下好了没」。
  *
- *  与 `PpoBrief`（汇总行）**并存**：那一行回答「谁贡献过多少」（逐字不动：合计 + 各台份额），
+ *  与 `PpoBrief`（块头合计读数）**并存**：那一段回答「谁贡献过多少」（逐字不动：合计 + 各台份额），
  *  这一块回答「此刻在干什么」。两类的身份/单位口径仍各自成规（WC-plan §4.1b）。
  *
  *  三段的口径（全部据实，缺数据一律标不可知）：

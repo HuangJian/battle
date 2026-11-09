@@ -2422,7 +2422,8 @@ a.tc-btn {
   flex: 0 0 100%;
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
 }
 /* 块头右上角的深链（2026-11-02 用户：「节点统计」按键移到采样节点区域右上角）。
    只在这一个块头里出现，所以用后代选择器；`margin-left:auto` 把它顶到最右，
@@ -2431,7 +2432,7 @@ a.tc-btn {
   margin-left: auto;
   flex: 0 0 auto;
 }
-.tc-nodes__grouphd b {
+.tc-nodes__grouphd > b {
   font-size: var(--fs-sm);
 }
 /* push 节点行（`gpu_push` / `offline_push`，2026-11-02 两块分家）：住在 PPO 块里，身份先于读数。
@@ -4131,35 +4132,30 @@ a.tc-btn {
   color: var(--muted);
   font-size: var(--fs-xs);
 }
-/* ── 首页两类身份的分区（2026-10-03 用户报障：rollout 节点与 ppo 节点混在一起）──
-   采样块 = 上方全部节点行 + **末尾一行份额**；PPO 在自己的子块里（子标题 + 上分隔线）。
+/* ── 首页两类身份的合计读数：住在各自块头（2026-11-09 用户：「采样合计」并入
+   「采样节点」标题行、「PPO 合计」并入「PPO worker」标题行，减少纵向占用）。
+   两块仍是不同身份 / 单位，绝不合并；这里只是不再为合计单开一条带分隔线的整行。
 
-   ★ 这两个块**必须 flex-basis:100%**：`.tc-nodes` 是 `display:flex; flex-wrap:wrap` 的
-   **pill 行**（`.tc-row` 是 inline-flex 圆角小胶囊），不加这条它们会被当成 pill 挤到行尾、
-   在右侧堆成一列（2026-10-03 实景：PPO 三行挤在右上角一小块，左边还留着大片空白）。
-   它们语义上是**块**（占满整行），不是 pill。 */
-.tc-contrib-samplingbrief,
-.tc-contrib-ppobrief {
-  flex: 0 0 100%;
-  width: 100%;
-  display: flex;
+   `.tc-contrib-brief` 是标题行里的一个 inline-flex 项：chips 在内部换行；
+   `flex-basis:280px` 让它在窄屏优先整体换行，而不是把标题和按钮挤没。 */
+.tc-contrib-brief {
+  display: inline-flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  flex: 1 1 280px;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
   font-size: var(--fs-sm);
 }
-/* 采样行的收尾（虚线：与上方节点行同属一组）。 */
-.tc-contrib-samplingbrief {
-  margin: var(--sp-2) 0 0;
-  padding-top: var(--sp-2);
-  border-top: 1px dashed var(--line);
+.tc-contrib-brief--sampling,
+.tc-contrib-brief--ppo {
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--line);
 }
-/* PPO 行：所属块（`.tc-nodes__group--ppo`）已经用绿左侧条与底色划界，这里不再画分隔线
-   （同一条界不画两遍——2026-11-02 两块分家后）。 */
-.tc-contrib-ppobrief {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: none;
+.tc-contrib-brieftotal {
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 .tc-contrib-brieflabel {
   color: var(--muted);
@@ -4193,7 +4189,7 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
 }
 /* ── 每台工作盘**此刻**在干什么（2026-10-09，plan/dashboard-ppo-live-rows）──
-   汇总行（`.tc-contrib-ppobrief`）下面逐台一行：● 名字 份额 [计算中][课:itN] [已下载][课:itN] …
+   块头合计读数下面逐台一行：● 名字 份额 [计算中][课:itN] [已下载][课:itN] …
    同样 `flex-basis:100%`：`.tc-nodes` 是 pill 行，不加这条每行会被当成胶囊挤到行尾。 */
 .tc-contrib-ppolive {
   flex: 0 0 100%;

@@ -500,14 +500,14 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
   })
 
   // ★ 2026-10-03（用户报障「rollout 节点与 ppo 节点混在一起，数据混乱」）：旧的
-  // `variant="compact"`（两组挤一个按钮）已拆成两个独立形态——采样份额归采样块末尾，
+  // `variant="compact"`（两组挤一个按钮）已拆成两个独立形态——采样读数归采样块头、
   // PPO worker 另起子块。下面三条钉住「分区」这件事本身，不只是钉住渲染。
   it('首页分区：采样份额行只带采样一侧；PPO 子块只带 PPO 一侧（两类不混行）', () => {
     const view = sampleView()
     const brief = compactSummary(view, 3, BRIEF_ALL)
 
     const smpHtml = renderToString(h(SamplingBrief, { brief }))
-    expect(smpHtml).toContain('tc-contrib-samplingbrief')
+    expect(smpHtml).toContain('tc-contrib-brief--sampling')
     expect(smpHtml).toContain('采样合计')
     expect(smpHtml).toContain('tc-contrib-briefchip')
     expect(smpHtml).toContain('self')
@@ -516,7 +516,7 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(smpHtml).not.toContain('合计 6 job')
 
     const ppoHtml = renderToString(h(PpoBrief, { brief }))
-    expect(ppoHtml).toContain('tc-contrib-ppobrief')
+    expect(ppoHtml).toContain('tc-contrib-brief--ppo')
     expect(ppoHtml).toContain('PPO 合计')
     expect(ppoHtml).toContain('6 job')
     // 与采样行同一签样式（2026-10-19「同样样式应用到 PPO 合计」）
@@ -534,9 +534,9 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(ppoHtml).not.toContain('采样合计')
   })
 
-  // ★ 2026-10-19（用户口径）：采样收尾行从「固定 top-3」改成「所有份额 >10% 的节点」——
+  // ★ 2026-10-19（用户口径）：采样合计从「固定 top-3」改成「所有份额 >10% 的节点」——
   // 阈值必须在**全量**行上过筛，所以服务端改成 BRIEF_ALL；这里同时钉住严格大于与全量前提。
-  it('采样收尾行：份额严格 >10% 的节点全打印；=10% / 缺数据 / 长尾都不打印', () => {
+  it('采样合计：份额严格 >10% 的节点全打印；=10% / 缺数据 / 长尾都不打印', () => {
     const sampling = buildSamplingContribution([
       { id: 'alpha', split: { rollout: 5, eval: 0, fail: 0 } }, // 50%
       { id: 'beta', split: { rollout: 3, eval: 0, fail: 0 } }, // 30%
@@ -602,12 +602,12 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(html).not.toContain('tc-contrib-briefchip')
   })
 
-  it('缺数据 ⇒ 两条缩略行都不渲染（空行会被读成「有东西没加载出来」）', () => {
+  it('缺数据 ⇒ 两段合计读数都不渲染（空壳会被读成「有东西没加载出来」）', () => {
     expect(renderToString(h(SamplingBrief, { brief: null }))).toBe('')
     expect(renderToString(h(PpoBrief, { brief: null }))).toBe('')
   })
 
-  it('PPO 缩略行：同一签样式，但不过 >10% 阈值（1% 的 worker 也列）', () => {
+  it('PPO 合计：同一签样式，但不过 >10% 阈值（1% 的 worker 也列）', () => {
     const view = sampleView()
     view.ppo = buildPpoContribution(
       [50, 30, 12, 7, 1].map((done, i) => ({ worker: `w${i}`, done, rejected: 0 })),
@@ -647,10 +647,28 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(html).toContain('aria-label="PPO worker（push）"')
     expect(html).toContain('单位：局')
     expect(html).toContain('单位：job')
-    expect(html).toContain('tc-contrib-samplingbrief')
-    expect(html).toContain('tc-contrib-ppobrief')
+    expect(html).toContain('tc-contrib-brief--sampling')
+    expect(html).toContain('tc-contrib-brief--ppo')
+    expect(html).toContain('采样合计')
     expect(html).toContain('PPO 合计')
-    // 采样块在上、PPO 块在下（采样收尾行在 PPO 块之前）
+    // ★ 2026-11-09 用户：两块合计分别并入各自标题行（不再在块尾单开一条）。
+    // 断言「在块头 div 内」而不是「页面上存在」——重复一份在块尾也会被这条抓住。
+    const rollHeadStart = html.indexOf(
+      'tc-nodes__grouphd',
+      html.indexOf('tc-nodes__group--rollout'),
+    )
+    const rollHead = html.slice(rollHeadStart, html.indexOf('</div>', rollHeadStart))
+    expect(rollHead).toContain('采样合计')
+    expect(rollHead).toContain('tc-contrib-brief--sampling')
+    expect(rollHead).toContain('self')
+    const ppoHeadStart = html.indexOf('tc-nodes__grouphd', html.indexOf('tc-nodes__group--ppo'))
+    const ppoHead = html.slice(ppoHeadStart, html.indexOf('</div>', ppoHeadStart))
+    expect(ppoHead).toContain('PPO 合计')
+    expect(ppoHead).toContain('tc-contrib-brief--ppo')
+    expect(ppoHead).toContain('cloudA')
+    expect(html.split('采样合计').length - 1).toBe(1)
+    expect(html.split('PPO 合计').length - 1).toBe(1)
+    // 采样块在上、PPO 块在下（采样块头在 PPO 块之前）
     expect(html.indexOf('tc-nodes__group--rollout')).toBeLessThan(
       html.indexOf('tc-nodes__group--ppo'),
     )

@@ -50,8 +50,9 @@ export interface NodePillsProps {
   /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；缺省不画）。
    *
    *  ★ 2026-10-03（用户报障「rollout 节点与 ppo 节点混在一起，数据混乱」）：它现在供**两处**
-   *  使用——**两条对称的缩略行**：采样行（`SamplingBrief`）+ PPO 行（`PpoBrief`），各占整行、
-   *  各带标签与单位，永不并排（2026-10-04 起 PPO 也压成一行，不再铺逐行列表）。
+   *  使用——两块**标题行里的合计读数**：采样块头（`SamplingBrief`）+ PPO 块头（`PpoBrief`），
+   *  各带标签与单位，永不并排（2026-10-04 起 PPO 也压成一段，不再铺逐行列表；
+   *  2026-11-09 用户：两块合计分别并入各自标题行，减少纵向占用）。
    *  此前一个按钮里同时塞两组（两种单位、两种分母并排）就是「混在一起」的来源。 */
   brief?: ContributionBrief | null
   /** 每台工作盘**此刻**在干什么（plan/dashboard-ppo-live-rows；缺省不画）。
@@ -305,7 +306,7 @@ export function LocalRow({
  *     那正是用户看到的混乱来源）；
  *   · 值列 = `concurrency`（hub 允许这台机器同时在飞的 job 数；缺省 1 = 单 GPU 一次一份）；
  *   · 徽章 = 走了哪条派发腿（GPU push / 离线 push）——两条腿挑机器的键不同，必须能分开看。
- *  job 侧的数字在下方 `PpoBrief`（按 worker 归并），这里绝不复述一遍。 */
+ *  job 侧的数字在块头 `PpoBrief`（按 worker 归并），这里绝不复述一遍。 */
 export function PushNodeRow({
   n,
   readOnly,
@@ -462,8 +463,10 @@ export function NodePills({
         <div className="tc-nodes__grouphd">
           <b>采样节点</b>
           <span className="tc-muted tc-small">rollout / eval · 单位：局</span>
+          {/* 采样合计并入块头（2026-11-09 用户）：与标题、单位同一行，不再在块尾单开一条。 */}
+          <SamplingBrief brief={brief ?? null} />
           {/* 深链（全页唯一入口）：住采样块头右上角（2026-11-02 用户口径）——
-              块里的缩略都是纯读数，不各自带按钮。 */}
+              块里的读数都是纯展示，不各自带按钮。 */}
           <button
             type="button"
             className="tc-btn tc-btn--sm"
@@ -497,14 +500,14 @@ export function NodePills({
             {disabled.map((n) => row(n))}
           </>
         ) : null}
-        {/* 采样块收尾：份额合计 + 各节点签（纯读数，不与 PPO job 同行）。 */}
-        <SamplingBrief brief={brief ?? null} />
       </section>
       {showPpo ? (
         <section className="tc-nodes__group tc-nodes__group--ppo" aria-label="PPO worker（push）">
           <div className="tc-nodes__grouphd">
             <b>PPO worker</b>
             <span className="tc-muted tc-small">云端 push · 单位：job</span>
+            {/* PPO 合计并入块头（2026-11-09 用户）：与「PPO worker」同一行，不再在登记行下面单开一条。 */}
+            <PpoBrief brief={brief ?? null} />
           </div>
           {/* 登记行：谁在 push 池里、走哪条派发腿、启停（2026-11-02 起住这里，不再混进采样块）。 */}
           {pushNodes.map((n) => (
@@ -515,9 +518,8 @@ export function NodePills({
               onToggleEnabled={(v) => onAction('setNodeEnabled', { id: n.id, enabled: v })}
             />
           ))}
-          {/* 汇总行 + 每台一行（谁在算哪一轮、下一轮下好了没）；只列在训课程
+          {/* 合计已在块头；这里只留每台一行（谁在算哪一轮、下一轮下好了没）；只列在训课程
               （用户 2026-10-10）；空数组 ⇒ 一点都不渲染。 */}
-          <PpoBrief brief={brief ?? null} />
           <PpoWorkerRows live={live ?? null} trainingCourses={trainingCourses ?? null} />
         </section>
       ) : null}
