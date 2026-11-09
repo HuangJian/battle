@@ -32,6 +32,7 @@ from biz.reward_builtin import V7_DEFAULT_PARAMS, v7_phi
 from biz.reward_library import (
     CORE_FUNCS,
     EXT_FUNCS,
+    MAX_FORMULA_CHARS,
     METRIC_INDEX,
     METRICS,
     METRICS_DIM,
@@ -127,9 +128,9 @@ def test_extended_funcs_opt_in() -> None:
 
 
 def test_limits_trigger_degrade_card() -> None:
-    """降级卡：formula >1024 字符 → 有 builtin 时回退（warning），无 builtin 时硬失败。"""
-    long_f = " + ".join(["kills"] * 400)
-    assert len(long_f) > 1024
+    """降级卡：formula > MAX_FORMULA_CHARS → 有 builtin 时回退（warning），无 builtin 时硬失败。"""
+    long_f = " + ".join(["kills"] * (MAX_FORMULA_CHARS // 5 + 10))
+    assert len(long_f) > MAX_FORMULA_CHARS
     with pytest.raises(FormulaError, match="降级卡"):
         parse_formula(long_f, {})
     # 声明了 builtin → 回退到内置（不静默：走 log warning 分支）
@@ -141,7 +142,7 @@ def test_limits_trigger_degrade_card() -> None:
 
 
 def test_degrade_only_on_quantitative_triggers() -> None:
-    """评审 F1：降级卡**只**在量化触发面（>1024 字符 / AST>64）回退 builtin——
+    """评审 F1：降级卡**只**在量化触发面（>MAX_FORMULA_CHARS / AST>64）回退 builtin——
 
     语法错误 / 未知名 params / 白名单外符号是配置错误，声明了 builtin 也必须
     响亮 raise（否则调参手误 → 实验静默换内置，golden 在 v7 域上还不暴露）。
@@ -149,7 +150,7 @@ def test_degrade_only_on_quantitative_triggers() -> None:
     import re as _re
 
     # 量化触发面 → 回退（warning 带真实原因）
-    long_f = " + ".join(["kills"] * 400)
+    long_f = " + ".join(["kills"] * (MAX_FORMULA_CHARS // 5 + 10))
     spec = RewardSpec(formula=long_f, builtin="v7", params=dict(V7_DEFAULT_PARAMS))
     fn = build_reward_fn(spec)
     assert fn._compiled is None and fn._builtin is not None
@@ -285,7 +286,7 @@ def test_v7_formula_matches_builtin_bitwise() -> None:
     course = load_course("s4b")
     spec = course.reward_spec()
     fn = build_reward_fn(spec)
-    assert fn._compiled is not None, "v7 公式应能编译（607 字符 < 1024 限长）"
+    assert fn._compiled is not None, "v7 公式应能编译（607 字符 < MAX_FORMULA_CHARS 限长）"
     m = _v7_corpus(n=2000, seed=3)
     a = fn.phi(m, 1)
     b = v7_phi(m, spec.params)
