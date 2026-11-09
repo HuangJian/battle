@@ -54,6 +54,19 @@ describe('taskKey v6 BC 标签来源后缀（仅非空进键）', () => {
   })
 })
 
+describe('taskKey greedy 分层采集后缀（2026-11-10，全节点）', () => {
+  it('greedy 局与采样局不同键；缺席 = 老键逐字节不变', () => {
+    const base = taskKey('it1', 'rollout', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '', 'greedy')).toBe(
+      `${base}:lmgreedy`,
+    )
+    expect(taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '', '')).toBe(base)
+    expect(taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '', 'greedy')).not.toBe(
+      taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '', 'argmax'),
+    )
+  })
+})
+
 describe('taskKey 决策周期 K 后缀（仅非默认值进键）', () => {
   it('激活 = 尾缀 :k<N>；与 de1 并存顺序 de→k', () => {
     expect(taskKey('it1', 'rollout', 'rollout', 2000, 7, '', '', '', '5')).toBe(

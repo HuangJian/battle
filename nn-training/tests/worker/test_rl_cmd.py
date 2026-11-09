@@ -66,3 +66,19 @@ def test_teacher_argmax_only_when_requested() -> None:
     assert _cmd().count("--teacher-argmax") == 0
     assert _cmd(rollout_argmax=False).count("--teacher-argmax") == 0
     assert _cmd(rollout_argmax=True).count("--teacher-argmax") == 1
+
+
+def test_teacher_argmax_reaches_node_side_argv() -> None:
+    """2026-11-10：kind=iter / 半离线的 argv 由节点执行，也必须带 greedy flag。"""
+    cmd = build_rollout_cmd(
+        "bun", _args(rollout_argmax=True),
+        weights="w.json", out_dir="w0", stage=2000, seed=7,
+        wver="abc", node_label="iter", node_side=True,
+    )
+    assert cmd.count("--teacher-argmax") == 1
+    plain = build_rollout_cmd(
+        "bun", _args(),
+        weights="w.json", out_dir="w0", stage=2000, seed=7,
+        wver="abc", node_label="iter", node_side=True,
+    )
+    assert plain.count("--teacher-argmax") == 0

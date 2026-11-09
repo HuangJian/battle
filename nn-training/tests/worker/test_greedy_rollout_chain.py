@@ -212,13 +212,20 @@ def _patch_node_round(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wcmd, "course_fp_for_args", lambda args: "fp")
 
 
-def test_node_gate_rejects_only_active_quota() -> None:
-    """非零三档 + node ⇒ 响亮拒绝（不静默退化成「本机偷偷采」）。"""
-    with pytest.raises(RuntimeError, match="node 路径未实现"):
-        RoundSteps.step_rollout(
-            cast(Any, _node_loop({"win": 0.1, "timeout": 0.075})),
-            cast(Any, _node_ctx()),
-        )
+def test_node_path_accepts_active_greedy_quota(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-11-10：greedy 采集已全节点化 ⇒ node 分支不再按 quota 拒绝。
+
+    回归：初版 `step_rollout` 用 `COLLECT_NODE + quota_active` 抛
+    「只支持本机采集」，导致节点腿永远采不到 greedy 语料。
+    """
+    _patch_node_round(monkeypatch)
+    loop = _node_loop({"win": 0.1, "timeout": 0.075})
+    assert RoundSteps.step_rollout(cast(Any, loop), cast(Any, _node_ctx())) is None
+    assert loop._greedy_plan is None
+    assert loop._greedy_stats is None
+    assert loop._greedy_report is None
 
 
 def test_node_gate_allows_zero_quota_and_clears_slots(

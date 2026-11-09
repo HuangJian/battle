@@ -1321,6 +1321,55 @@ def _unpack_bcv2(frame: bytes) -> tuple[dict, dict]:
     return manifest, files
 
 
+def check_node_capabilities(
+    args: object,
+    node_id: str,
+    nd: dict,
+    *,
+    stage_json: str | None = "",
+) -> None:
+    """节点能力握手（fail-closed）：缺能力位的旧 agent 一律拒派，绝不静默降级。
+
+    四条契约（plan §5.2 / LC §4.6 / k5-rhythm / greedy-outcome-quota rev5）：
+      · stageJsonSupport      —— 自定义关（旧 agent 会静默跑默认关）
+      · decisionEventsSupport —— 事件门（旧 agent 会静默跑均匀 K）
+      · decisionKSupport      —— K≠10（旧 agent 会静默按 K=10 跑）
+      · greedyRolloutSupport  —— `?labelMode=greedy`（旧 agent 会静默跑成采样局，
+        正是 o1-gq-* 前 9 轮 `bins` 全 0 的根因）
+    只在对应能力被激活时检查；缺席 = 老课程逐字节不变。
+    """
+    ping = nd.get("ping") or {}
+    if stage_json and not ping.get("stageJsonSupport"):
+        raise DistError(
+            0,
+            f"node {node_id} 缺 stageJsonSupport 能力位（旧 agent）——"
+            "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
+        )
+    if bool(getattr(args, "decision_events", False)) and not ping.get(
+        "decisionEventsSupport"
+    ):
+        raise DistError(
+            0,
+            f"node {node_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
+            "事件任务被拒；不降级（升级 agent 后自动加入）",
+        )
+    dk = int(getattr(args, "decision_k", 10))
+    if dk != 10 and not ping.get("decisionKSupport"):
+        raise DistError(
+            0,
+            f"node {node_id} 缺 decisionKSupport 能力位（旧 agent）——"
+            f"K={dk} 任务被拒；不降级（升级 agent 后自动加入）",
+        )
+    if bool(getattr(args, "rollout_argmax", False)) and not ping.get(
+        "greedyRolloutSupport"
+    ):
+        raise DistError(
+            0,
+            f"node {node_id} 缺 greedyRolloutSupport 能力位（旧 agent）——"
+            "greedy 局被拒；升级 sampler-agent 后自动加入",
+        )
+
+
 def fetch_task(
     url: str,
     auth_key: str,
@@ -1334,8 +1383,9 @@ def fetch_task(
     timeout: float,
     mode: str | None = None,
     kind: str = "rollout",
-    # BC v6 标签来源（`argmax` / `sampled`）：仅 mode=bc-v6 透传，且进 agent
-    # taskKey 后缀（同一 iterId 下 argmax/sampled 不能回放彼此缓存）。
+    # 标签/动作来源：`argmax`/`sampled` = BC v6 标签（`mode=bc-v6`）；
+    # `greedy` = RL greedy 分层采集（2026-11-10，所有节点通用）。非空即进 agent
+    # taskKey 后缀（`:lm<mode>`）⇒ 同一 iterId 下不同动作选择方式的局互不回放缓存。
     label_mode: str = "",
     replan: int = 0,
     reward: str = "",

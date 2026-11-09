@@ -388,20 +388,14 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         """
         it = ctx.it
         # 每轮清零：上一轮的 greedy plan/stats/report 不得影响本轮发布
-        #（node/held 分支不跑采集，但发布相位仍会读这三个槽位）。
+        #（held 分支不跑采集，但发布相位仍会读这三个槽位）。
         self._greedy_plan = None
         self._greedy_stats = None
         self._greedy_report = None
-        # greedy 结果配额 v1 只支持本机连续配额（plan/greedy-outcome-quota rev4）：
-        # node 腿的 argv 由 sampler-agent 派发，没有第二遍 greedy 钩子；静默退化 = 漏采。
-        # 判据是「三档比例和 > 0」：声明了块但全 0 = 合法关闭，不能连 node 腿都拒掉。
-        if ctx.collect_mode == COLLECT_NODE:
-            from worker.greedy_quota import quota_active
-
-            if quota_active(getattr(self.args, "greedy_quota", None)):
-                raise RuntimeError(
-                    "greedy_quota 只支持本机采集（collect_mode=local）；node 路径未实现"
-                )
+        # 2026-11-10：greedy 采集已做成全节点能力（队列 / kind=iter / 半离线都带
+        # --teacher-argmax），不再按 collect_mode 拒绝。node 分支的整轮编排由
+        # `_remote_iter` 自己发 greedy 批次；本机侧无第二遍钩子时也不会静默降级
+        # （缺能力位的节点在 dispatch 侧 fail-closed）。
         if ctx.collect_mode == COLLECT_HELD:
             raise RuntimeError(
                 "[run_rl] 被接管的课走到了采集步——步骤顺序被改动过？"

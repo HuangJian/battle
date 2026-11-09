@@ -851,8 +851,12 @@ class TrainingVolume:
     def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         """greedy 结果配额采集阶段（plan/greedy-outcome-quota rev4）。
 
-        v1 只支持本机连续配额路径；node 在 `step_rollout` 已响亮拒绝。课程 volume 块
-        保持原样：本阶段用自己的 `collect_target`/`per_stage_collect`，不碰
+        **所有采集通道都支持**（2026-11-10）：本机串行池 / dist 队列节点 /
+        `kind=iter` 云节点 / 半离线模板。`args.rollout_argmax=True` 期间，本机与
+        argv 型节点由 `build_rollout_cmd` 拼 `--teacher-argmax`，队列节点由
+        `?labelMode=greedy` 透传（已进 agent taskKey 与轮询配方，缓存隔离），
+        shard manifest 一律带 `labelMode="greedy"`。课程 volume 块保持原样：
+        本阶段用自己的 `collect_target`/`per_stage_collect`，不碰
         `validate_runtime_volume` 的同源门。
 
         为什么是**独立阶段**而不是放大普通配额：`widen_by_width` 是「铺到至少 width 个
@@ -867,7 +871,10 @@ class TrainingVolume:
         if getattr(args, "greedy_quota", None) is None:
             return
         if self._stream_meta is not None:
-            raise RuntimeError("greedy_quota 不支持 stream 路径（v1 只支持串行连续配额）")
+            raise RuntimeError(
+                "greedy_quota 不支持 stream 编排路径（该路径没有第二遍采集钩子，"
+                "不是节点能力限制；请走串行/队列节点通道）"
+            )
         if int(getattr(args, "collect_only", 0) or 0):
             return
         if str(getattr(args, "export_bundle", "") or ""):

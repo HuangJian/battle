@@ -756,35 +756,11 @@ class RolloutDispatcher:
                         _sj = stage_json_for_args(args, task[0])
                         _ov = args_rollout_overrides(args)
                         _cfp = course_fp_for_args(args)  # D14 语料血缘
-                        # 能力握手（plan §5.2 / LC §4.6）：stageJson 任务只派给
-                        # ping.stageJsonSupport 节点；不支持 → 响亮失败，绝不降级。
-                        if _sj and not (nd.get("ping") or {}).get("stageJsonSupport"):
-                            raise common.distribution.DistError(
-                                0,
-                                f"node {nd_id} 缺 stageJsonSupport 能力位（旧 agent）——"
-                                "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
-                            )
-                        # R2 事件 rung：事件课程的 rollout 只派给能力位节点（旧 agent
-                        # 静默跑均匀局混入 ⇒ 训练数据污染；fail-closed 同上）。
-                        # 缺席 = 老课程不查（getattr 缺省 False）。
-                        if bool(getattr(args, "decision_events", False)) and not (
-                            nd.get("ping") or {}
-                        ).get("decisionEventsSupport"):
-                            raise common.distribution.DistError(
-                                0,
-                                f"node {nd_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
-                                "事件任务被拒；不降级（升级 agent 后自动加入）",
-                            )
-                        # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 任务的局只派给能力位节点
-                        # （旧 agent 不认识 decisionK，静默跑 K=10 混入 ⇒ 数据污染；fail-closed 同上）。
-                        # 缺席/10 = 老课程不查（getattr 缺省 10）。
-                        _dk = int(getattr(args, "decision_k", 10))
-                        if _dk != 10 and not (nd.get("ping") or {}).get("decisionKSupport"):
-                            raise common.distribution.DistError(
-                                0,
-                                f"node {nd_id} 缺 decisionKSupport 能力位（旧 agent）——"
-                                f"K={_dk} 任务被拒；不降级（升级 agent 后自动加入）",
-                            )
+                        # 节点能力握手（4 个能力位，fail-closed）拆到传输层，
+                        # 见 common.distribution.check_node_capabilities。
+                        common.distribution.check_node_capabilities(
+                            args, nd_id, nd, stage_json=_sj
+                        )
                         manifest, files = common.distribution.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -802,7 +778,12 @@ class RolloutDispatcher:
                             # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
                             # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
-                            decision_k=_dk,
+                            decision_k=int(getattr(args, "decision_k", 10)),
+                            # greedy 分层采集：labelMode=greedy 进 URL → agent 拼
+                            # --teacher-argmax；该键已进 taskKey 与轮询配方，缓存隔离。
+                            label_mode="greedy"
+                            if getattr(args, "rollout_argmax", False)
+                            else "",
                             stage_json=_sj or "",
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov

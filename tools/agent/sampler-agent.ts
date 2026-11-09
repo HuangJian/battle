@@ -1580,6 +1580,11 @@ async function runGame(
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
+        // greedy 分层采集（plan/greedy-outcome-quota rev5）：**所有节点**都要能按 argmax
+        // 采 rollout，不再只有 BC v6。`labelMode=greedy` 已进 taskKey（:lmg）⇒
+        // 同 (iterId,stage,seed) 的 greedy 局不会命中采样局的 resultCache。
+        if (labelMode === 'greedy' || (isBcV6 && labelMode === 'argmax'))
+          args.push('--teacher-argmax')
         // R2 事件 rung：本局走事件门（缺席/false = 老行为）。
         if (decisionEvents) args.push('--decision-events')
         // 决策周期 K：仅非默认值透传（缺席 = 导出器缺省 10，旧训练侧逐字节不变）。
@@ -1591,7 +1596,8 @@ async function runGame(
         if (isBcV6) {
           // v6 BC：权重已由 /v1/task 按 label_policy sha 缓存；argmax=教师标签，
           // sampled=策略采样标签。course_fp 进 export-rl-rollout 的 shard manifest。
-          if (labelMode === 'argmax') args.push('--teacher-argmax')
+          // sampled=策略采样标签。course_fp 进 export-rl-rollout 的 shard manifest。
+          // `--teacher-argmax` 已在上方按 labelMode 统一拼，这里不再重复。
           if (courseFp) args.push('--course-fp', courseFp)
         } else {
           if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
@@ -2154,8 +2160,12 @@ async function handle(req: Request): Promise<Response> {
     // v6 标签来源：argmax=教师最优动作，sampled=策略采样。只在 v6 校验；legacy
     // bc/rollout 不传 labelMode（空串不漂移历史 taskKey）。
     const labelMode = url.searchParams.get('labelMode') ?? (isBcV6 ? 'argmax' : '')
-    if (isBcV6 && labelMode !== 'argmax' && labelMode !== 'sampled')
+    // greedy = RL rollout 按 argmax 采（所有节点通用）；argmax/sampled 仅 BC v6 标签。
+    // 旧 agent 不认识 greedy ⇒ 训练侧凭 greedyRolloutSupport 能力位 fail-closed。
+    if (labelMode && !['argmax', 'sampled', 'greedy'].includes(labelMode))
       return jsonResponse({ error: `labelMode invalid: ${labelMode}` }, 400)
+    if (isBcV6 && labelMode !== 'argmax' && labelMode !== 'sampled')
+      return jsonResponse({ error: `labelMode invalid for bc-v6: ${labelMode}` }, 400)
     if (
       !iterId ||
       !wver ||
@@ -2523,6 +2533,10 @@ async function handle(req: Request): Promise<Response> {
       // v6 BC 采集支持位（2026-11-05）：/v1/task ?mode=bc-v6（export-rl-rollout +
       // 标签权重 + 可选 --teacher-argmax）。旧 agent 无此字段 → bc_dispatch v6 不派。
       bcV6Support: true,
+      // greedy 分层采集支持位（2026-11-10）：`?labelMode=greedy` 时**任意 rollout 节点**
+      // 都给 export-rl-rollout 拼 --teacher-argmax。旧 agent 会静默跑成采样局（数据污染）
+      // ⇒ 训练侧只在有此能力位的节点上派 greedy 任务（fail-closed，同 decisionKSupport）。
+      greedyRolloutSupport: true,
       // 磁盘水位（plan/self-node-disk-alert）：纯加法字段，旧消费方忽略未知键。
       ...diskReport(),
     })
