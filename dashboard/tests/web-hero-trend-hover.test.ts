@@ -66,3 +66,35 @@ describe('Hero 趋势图 · 共享 hover', () => {
     expect(html).not.toContain('stroke-dasharray="2 2"')
   })
 })
+
+/** 渲染一格并在需要一个放大入口时传入 `onExpand`。 */
+function cellWithExpand(onExpand: boolean): string {
+  return renderToString(
+    h(TrendCell, {
+      series: win,
+      seriesEval: undefined,
+      source: 'rollout',
+      fmt: (v) => (v == null ? '—' : String(v)),
+      range: 'all',
+      ...(onExpand ? { onExpand: () => {} } : {}),
+    }),
+  )
+}
+
+describe('Hero 趋势图 · hover 读数与放大互不抢手势', () => {
+  it('图表主体只负责读数：不是按钮、不挂原生 title（否则会和读数框抢悬停）', () => {
+    const html = cellWithExpand(false)
+    expect(html).toContain('tc-tcell__chart')
+    expect(html).not.toContain('role="button"')
+    expect(html).not.toContain('title="点击放大')
+    expect(html).not.toContain('tc-tcell__zoom')
+  })
+
+  it('可放大时给独立按钮：图表主体仍不是按钮，也没有原生 title', () => {
+    const html = cellWithExpand(true)
+    expect(html).toContain('tc-tcell__zoom')
+    expect(html).toContain('aria-label="放大走势图：胜率"')
+    expect(html).not.toContain('role="button"')
+    expect(html).not.toContain('title="点击放大')
+  })
+})

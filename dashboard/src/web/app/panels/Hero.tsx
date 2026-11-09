@@ -26,14 +26,12 @@ import {
   latestRow,
   MAIN_ROW_KEYS,
   METRIC_STAT_LABEL,
-  METRIC_STAT_OPTIONS,
   metricSeries,
   PAIRED_COL_TITLES,
   pairedBaselineOf,
   pairedTone,
   pairedVerdictText,
   parseBehaviorMetricStats,
-  parseMetricStat,
   parseTrendVisibility,
   phaseSecs,
   phaseSecsTitle,
@@ -46,7 +44,6 @@ import {
   TC_TREND_STAT,
   TC_TREND_VISIBILITY,
   parseTrendScales,
-  TREND_BASE_CHARTS,
   TREND_RANGE_OPTIONS,
   TREND_SCALES_DEFAULT,
   TREND_SOURCE_OPTIONS,
@@ -76,6 +73,7 @@ import { TrendZoomModal, type ZoomTarget } from '../../components/TrendZoomModal
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
+import { TrendConfigModal } from './TrendConfigModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 
@@ -183,20 +181,7 @@ export function TrendCell({
         </b>
       </span>
       {main ? (
-        <div
-          className="tc-tcell__chart"
-          role={onExpand ? 'button' : undefined}
-          tabIndex={onExpand ? 0 : undefined}
-          aria-label={onExpand ? `${main.label}走势图，点击放大` : undefined}
-          title={onExpand ? '点击放大（浮窗内可切换统计值曲线）' : undefined}
-          onClick={() => onExpand?.(main, overlay)}
-          onKeyDown={(e) => {
-            if (onExpand && (e.key === 'Enter' || e.key === ' ')) {
-              e.preventDefault()
-              onExpand(main, overlay)
-            }
-          }}
-        >
+        <div className="tc-tcell__chart">
           <TrendChart
             series={main}
             series2={overlay}
@@ -211,6 +196,28 @@ export function TrendCell({
             hoverIter={hoverIter}
             onHoverIter={onHoverIter}
           />
+          {/* 放大是**独立按钮**：图表主体只负责 hover 读数（十字光标），两者不再抢同一个点击面。
+              也不能给图表主体挂原生 `title`——浏览器浮层会和读数框抢悬停。 */}
+          {onExpand ? (
+            <button
+              type="button"
+              className="tc-tcell__zoom"
+              aria-label={`放大走势图：${main.label}`}
+              title="放大走势图（浮窗内可切换统计量）"
+              onClick={() => onExpand(main, overlay)}
+            >
+              <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+                <path
+                  d="M7.5 1H11v3.5M4.5 11H1V7.5M11 1 7.5 4.5M1 11l3.5-3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          ) : null}
         </div>
       ) : (
         <span className="tc-muted tc-small">{evalOnly ? '该课程暂无干净评估' : '暂无数据'}</span>
@@ -966,6 +973,11 @@ export function Hero({
   const [configOpen, setConfigOpen] = useState(false)
   /** 放大浮窗的目标（null = 关着）。统计值曲线只在行为指标上出现。 */
   const [zoom, setZoom] = useState<ZoomTarget | null>(null)
+  /** 打开放大浮窗：顺手清掉共享 hover（浮窗盖住图后，准星/读数不再留在底下）。 */
+  const openZoom = (t: ZoomTarget): void => {
+    setHoverIter(null)
+    setZoom(t)
+  }
 
   // 「比较课程」弹窗开关（弹窗自持数据与轮询；Hero 只负责入口与透传节奏）。
   const [compareOpen, setCompareOpen] = useState(false)
@@ -1036,9 +1048,10 @@ export function Hero({
             <button
               type="button"
               className="tc-btn tc-btn--sm"
+              aria-haspopup="dialog"
               aria-expanded={configOpen}
               title="选择显示哪些走势图，以及行为指标的统计值"
-              onClick={() => setConfigOpen((v) => !v)}
+              onClick={() => setConfigOpen(true)}
             >
               走势配置
             </button>
@@ -1052,61 +1065,6 @@ export function Hero({
             </button>
           </span>
         </div>
-        {configOpen ? (
-          <div className="tc-trendconfig">
-            <div className="tc-trendconfig__group tc-trendconfig__group--metrics">
-              <b className="tc-small">显示走势图 · 逐局指标统计量</b>
-              <div className="tc-trendconfig__items">
-                {TREND_BASE_CHARTS.map((c) => (
-                  <label className="tc-trendconfig__item" key={c.key}>
-                    <input
-                      type="checkbox"
-                      checked={visibility[c.key]}
-                      onChange={(e) => onToggleChart(c.key, e.currentTarget.checked)}
-                    />
-                    {c.label}
-                  </label>
-                ))}
-                {BEHAVIOR_METRICS.map((m) => {
-                  const key = behaviorTrendKey(m.key)
-                  return (
-                    <div className="tc-trendconfig__metric" key={key}>
-                      <label className="tc-trendconfig__item">
-                        <input
-                          type="checkbox"
-                          checked={visibility[key]}
-                          onChange={(e) => onToggleChart(key, e.currentTarget.checked)}
-                        />
-                        {m.label}
-                      </label>
-                      <select
-                        className="tc-trendconfig__stat"
-                        aria-label={`${m.label}统计量`}
-                        title={`${m.label} 趋势图统计量（默认均值）`}
-                        value={metricStats[m.key]}
-                        onChange={(e) =>
-                          onMetricStat(m.key, parseMetricStat(e.currentTarget.value))
-                        }
-                      >
-                        {METRIC_STAT_OPTIONS.map((o) => (
-                          <option value={o.value} key={o.value}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-            <div className="tc-trendconfig__group">
-              <b className="tc-small">统计量口径</b>
-              <span className="tc-trendconfig__hint">
-                每项默认均值；放大后初始只显示该统计量曲线，图例可点击增删其它统计量。
-              </span>
-            </div>
-          </div>
-        ) : null}
         {evalBanner ? (
           <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} />
         ) : null}
@@ -1125,7 +1083,7 @@ export function Hero({
               yFloor={0.3}
               title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: '胜率',
                   series: main,
                   series2: overlay,
@@ -1148,7 +1106,7 @@ export function Hero({
               yFloor={0}
               title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: '承伤/杀',
                   series: main,
                   series2: overlay,
@@ -1171,7 +1129,7 @@ export function Hero({
               yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
               title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: '胜局耗时',
                   series: main,
                   series2: overlay,
@@ -1201,7 +1159,7 @@ export function Hero({
                   : '每局平均击杀（rollout 实线 · eval 橙点）'
               }
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: scales.kills === 'pct' ? '击杀（歼灭率）' : '击杀（每局平均）',
                   series: main,
                   series2: overlay,
@@ -1230,7 +1188,7 @@ export function Hero({
                   : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
               }
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: scales.winHp === 'pct' ? '胜局残血（百分比）' : '胜局残血（HP）',
                   series: main,
                   series2: overlay,
@@ -1259,7 +1217,7 @@ export function Hero({
                   : '每局平均拾取数（rollout 实线 · eval 橙点）'
               }
               onExpand={(main, overlay) =>
-                setZoom({
+                openZoom({
                   title: scales.pu === 'pct' ? '道具（拾取率）' : '道具（每局平均）',
                   series: main,
                   series2: overlay,
@@ -1288,7 +1246,7 @@ export function Hero({
                 yFloor={0}
                 title={`逐局统计（${METRIC_STAT_LABEL[statKey]}；rollout 实线 · eval 橙点）· ${m.title}`}
                 onExpand={() =>
-                  setZoom({
+                  openZoom({
                     title: `${m.label}·${METRIC_STAT_LABEL[statKey]}`,
                     fmt,
                     behavior: { key: m.key, iters, stat: statKey, source },
@@ -1317,6 +1275,14 @@ export function Hero({
         stateView={stateView}
         refreshSec={refreshSec}
         onClose={() => setCompareOpen(false)}
+      />
+      <TrendConfigModal
+        open={configOpen}
+        visibility={visibility}
+        metricStats={metricStats}
+        onToggleChart={onToggleChart}
+        onMetricStat={onMetricStat}
+        onClose={() => setConfigOpen(false)}
       />
       {/* 只在打开时挂载：首帧的可见统计量直接由 target 决定，不会先闪一下默认均值。 */}
       {zoom ? <TrendZoomModal target={zoom} range={range} onClose={() => setZoom(null)} /> : null}

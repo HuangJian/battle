@@ -1806,68 +1806,225 @@ a.tc-btn {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* 图表主体 = 「读」的区域：hover 出十字准星 + 读数，绝不是放大镜。
+ * 放大走右上角独立按钮（旧版整块图 role=button + zoom-in，点击会跟读数抢手势，
+ * 且原生 title 会和读数框抢悬停）。 */
 .tc-tcell__chart {
-  cursor: zoom-in;
+  position: relative;
+  cursor: crosshair;
   min-height: 56px;
 }
-.tc-tcell__chart:focus-visible {
+.tc-tcell__zoom {
+  position: absolute;
+  top: 0;
+  right: 0;
+  /* 压在读数框（z-index 5）之上，读数框永远不会挡住这个入口。 */
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: pointer;
+  transition:
+    opacity 0.12s,
+    background 0.12s,
+    color 0.12s,
+    border-color 0.12s;
+}
+
+.tc-tcell:hover .tc-tcell__zoom,
+.tc-tcell__zoom:focus-visible {
+  opacity: 1;
+  border-color: var(--border);
+  background: var(--card);
+  color: var(--accent);
+}
+.tc-tcell__zoom:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-/* 走势图显示/统计值配置面板：从控制条下方展开，不占常驻纵向空间。 */
-.tc-trendconfig {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 18px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-2);
-  background: var(--card);
-}
-.tc-trendconfig__group {
+/* 走势配置弹窗（用户 2026-11-09）：按指标类型分节 + 两列 + 底部固定释义栏。
+ * 90+ 项不再挤在控制条下方——弹窗自己滚，滚的只是指标区，标题/释义/完成键常驻。 */
+.tc-modal.tc-trendcfg {
+  width: min(1000px, 94vw);
+  height: min(86vh, 860px);
+  max-height: 86vh;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  min-width: 180px;
+  overflow: hidden;
 }
-.tc-trendconfig__items {
+.tc-trendcfg__hd {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  /* 完整 metrics 列有 90+ 个：配置面板限高滚动，避免把趋势区整体推走。 */
-  max-height: 180px;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+.tc-trendcfg__hd h3 {
+  margin: 0;
+  flex: 0 0 auto;
+}
+.tc-trendcfg__hd p {
+  flex: 1;
+  margin: 1px 0 0;
+  line-height: 1.5;
+}
+.tc-trendcfg__hd .tc-link {
+  flex: 0 0 auto;
+}
+.tc-trendcfg__body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
-  align-content: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding-right: 6px;
 }
-.tc-trendconfig__group--metrics {
-  flex: 1 1 460px;
-  min-width: 0;
+.tc-trendcfg__sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.tc-trendconfig__item {
+/* 分节标题吸顶：滚到哪一段都还知道自己在看哪一类。 */
+.tc-trendcfg__sec-hd {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 6px 0 5px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+}
+.tc-trendcfg__sec-hd h4 {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 700;
+}
+.tc-trendcfg__sec-hd .tc-muted {
+  flex: 1;
+  min-width: 220px;
+}
+.tc-trendcfg__count {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tc-trendcfg__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+}
+.tc-trendcfg__grid--base {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.tc-trendcfg__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+}
+.tc-trendcfg__row:hover {
+  background: var(--row-hover);
+}
+.tc-trendcfg__row:focus-within {
+  background: var(--row-hover);
+  border-color: var(--border);
+}
+.tc-trendcfg__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
   font-size: var(--fs-sm);
   color: var(--text);
+  cursor: pointer;
+}
+.tc-trendcfg__names {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  min-width: 0;
+}
+.tc-trendcfg__cn {
   white-space: nowrap;
 }
-.tc-trendconfig__metric {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
+.tc-trendcfg__key {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  white-space: nowrap;
 }
-.tc-trendconfig__stat {
-  max-width: 74px;
-  padding: 1px 2px;
+.tc-trendcfg__stat {
+  flex: 0 0 auto;
+  max-width: 78px;
+  padding: 1px 3px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--card);
   color: var(--text);
   font-size: var(--fs-xs);
 }
-.tc-trendconfig__hint {
-  color: var(--muted);
-  font-size: var(--fs-xs);
+/* 底部释义栏常驻：hover 任何一项都在同一个地方展开，不会被滚动容器裁掉。 */
+.tc-trendcfg__explain {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.tc-trendcfg__explain b {
+  flex: 0 0 auto;
+}
+.tc-trendcfg__explain span {
+  min-width: 0;
+}
+.tc-trendcfg__foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+@media (max-width: 760px) {
+  .tc-trendcfg__grid,
+  .tc-trendcfg__grid--base {
+    grid-template-columns: 1fr;
+  }
+  .tc-modal.tc-trendcfg {
+    width: 96vw;
+    height: 92vh;
+    max-height: 92vh;
+  }
 }
 /* 全屏趋势浮窗：占窗口 94vw × 88vh，图表槽吃剩余高度。 */
 .tc-modal.tc-trendzoom {
