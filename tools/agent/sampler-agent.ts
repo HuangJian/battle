@@ -32,7 +32,12 @@ import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
 import { physicalCores } from '../lib/cores'
 import { ADMISSION_QUEUE_MAX, ADMISSION_WAIT_MS, createAdmission } from './admission-queue'
-import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
+import {
+  RESTART_GRACE_MS,
+  SUPERVISED_ENV,
+  SUPERVISED_RESTART_EXIT_CODE,
+  shouldAcceptRestart,
+} from './restart-guard'
 // 决策周期 K 的缺省值（单一来源 = src/nn/decision-gate；agent 只用于未传参时的缺省与
 // 「是否为默认值」判定，runtime 语义全在导出器里）。
 import { DEFAULT_DECISION_K } from '../../src/nn/decision-gate'
@@ -2059,8 +2064,9 @@ async function handle(req: Request): Promise<Response> {
       }
       const self = process.argv[1]
       const args = process.argv.slice(2)
-      // 先应答 202，再【停监听 → spawn 新实例 → 退出】：端口先释放，child 立即
-      // 绑定成功，消除"child 先起、parent 未退"的 EADDRINUSE 竞速窗口。
+      const supervised = process.env[SUPERVISED_ENV] === '1'
+      // 先应答 202，再【停监听 → spawn 新实例 / 交给 supervisor → 退出】：端口先释放，
+      // child 立即绑定成功，消除"child 先起、parent 未退"的 EADDRINUSE 竞速窗口。
       setImmediate(() => {
         try {
           activeServer?.stop(true)
@@ -2070,6 +2076,18 @@ async function handle(req: Request): Promise<Response> {
         // 单实例锁交还（§3.2）：端口已释放、父进程即将退出——锁必须先删，child 才能 'wx' 抢到；
         // child 用 SAMPLER_HANDOFF（+父的 bootId）向判定表证明「我是合法接班人」。
         removeInstanceLock()
+        if (supervised) {
+          // notebook 的 rollout_node 是外部 supervisor：它会在本进程退出后重新拉起。
+          // 这里绝不能再 spawn detached child，否则 child 与 supervisor 的新进程会抢端口/锁。
+          killPersistPool()
+          setTimeout(() => {
+            console.log(
+              `[sampler-agent] restarting under supervisor (exit ${SUPERVISED_RESTART_EXIT_CODE})`,
+            )
+            process.exit(SUPERVISED_RESTART_EXIT_CODE)
+          }, delayMs)
+          return
+        }
         try {
           const child = spawn(process.execPath, [self, ...args], {
             cwd: REPO_ROOT,

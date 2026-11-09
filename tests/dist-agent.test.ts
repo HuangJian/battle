@@ -19,6 +19,7 @@ import {
 import { WEIGHT_RE } from '../tools/agent/workdir-cleanup'
 // 单实例互斥（plan/sampler-single-instance.plan.md）：源码守卫用的常量
 import { HANDOFF_ENV, REFUSE_EXIT_CODE } from '../tools/agent/single-instance'
+import { SUPERVISED_ENV } from '../tools/agent/restart-guard'
 // F3/F4 纯实现（与 sampler-agent 同源，诊断工具/单测共用）
 import {
   codeHashReport,
@@ -468,5 +469,15 @@ describe('单实例互斥：起听前的互斥判定 + 锁 + 交接标记（源�
     expect(bind).toBeGreaterThan(0)
     expect(SRC.slice(bind)).toContain('writeInstanceLock()')
     expect(SRC).toContain("{ flag: 'wx' }")
+  })
+
+  it(`受监护模式（${SUPERVISED_ENV}）不 spawn detached child，只按专用码退出交给 supervisor`, () => {
+    const start = SRC.indexOf("url.pathname === '/v1/restart'")
+    expect(start).toBeGreaterThan(0)
+    const branch = SRC.slice(start, SRC.indexOf("url.pathname === '/v1/task'", start))
+    expect(branch).toContain('SUPERVISED_ENV')
+    expect(branch).toContain('process.exit(SUPERVISED_RESTART_EXIT_CODE)')
+    // 受监护分支必须在 spawn 之前 return（不能落进 detached 交接）
+    expect(branch.indexOf('if (supervised)')).toBeLessThan(branch.indexOf('const child = spawn'))
   })
 })

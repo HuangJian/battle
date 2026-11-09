@@ -14,6 +14,18 @@
 export const RESTART_GRACE_MS = 30_000
 
 /**
+ * 外部 supervisor 标记（`rollout.ipynb` 的 `rollout_node` 注入）。
+ *
+ * 有它时 `/v1/restart` **不 spawn detached child**：agent 自己退出，由 supervisor 重新拉起。
+ * 否则 agent 的交接 child 会和 supervisor 的新进程抢同一个端口/单实例锁，远控重启会把
+ * 节点监护循环打崩（notebook 启动的 sampler 与 console 启动的 sampler 的区别就在这里）。
+ */
+export const SUPERVISED_ENV = 'SAMPLER_SUPERVISED'
+
+/** 受监护重启的退出码（EX_TEMPFAIL）：supervisor 据此识别「计划内重启」，不计崩溃次数。 */
+export const SUPERVISED_RESTART_EXIT_CODE = 75
+
+/**
  * nowMs − bootMs ≥ graceMs 才接受重启；graceMs ≤ 0 视为禁用护栏（恒接受，测试用）。
  */
 export function shouldAcceptRestart(

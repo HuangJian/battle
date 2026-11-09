@@ -11439,3 +11439,20 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
 - **否决**：继续全局统计量（用户明确要每项可选）；浮窗初始六条全开（信息过载，也无法一眼看出卡片口径）。
 - **验收**：dashboard typecheck 绿；`bun run test` 1976 pass / 0 fail；`bun run lint` 0；`bun run build:ui`
   四份 bundle 绿。
+## §2026-11-09-goalnn-sampler-supervised-restart（采样节点远控重启交给 notebook supervisor）
+
+- **背景**：`rollout.ipynb` 的 `rollout_node` 是 sampler-agent 的外部监护者；而 agent 的
+  `/v1/restart` 原本会 spawn detached child 自交接。两者同时存在时，child 与 supervisor 新拉起的
+  agent 抢同一个端口/单实例锁，远控重启会把节点打崩或留下孤儿。
+- **决定**：`rollout_node._start_agent` 注入 `SAMPLER_SUPERVISED=1`。agent 收到 `/v1/restart` 后
+  先完成可选 `pullBranch` 的 fetch/reset，再停监听、删锁、收 worker 池并以退出码 **75** 退出；
+  supervisor 识别 75 为计划内重启，重新拉起新进程且**不计入** `restart_limit` 的崩溃预算。
+  控制台/自交接链仍走原 detached child 路径；env 未设时行为逐字不变。
+- **手动兜底**：停 cell（unregister + 杀当前 agent）后重跑同一 cell。cell 在 clone 分支检查
+  git fetch/checkout/reset 的返回码，失败即 `SystemExit`，不再静默沿用旧代码；同 kernel 重跑会先清空
+  `remote.*` 模块缓存，避免 Python 模块缓存继续跑旧运行时。`code_zip` 仍沿用已解压目录，更新离线包
+  请换 `code_dir`/清目录后重跑。
+- **否决**：让 supervisor 收养 agent 的 detached child（跨进程 pid/端口，复杂且仍有竞态）；让 agent
+  在 notebook 启动链继续自交接（与现有 supervisor 抢锁）。
+- **验收**：Python `tests/remote/test_rollout_node.py` + notebook 契约 105 passed；TS
+  `tests/dist-agent.test.ts` / `tests/agent/restart-guard.test.ts` 30 passed；typecheck 绿。

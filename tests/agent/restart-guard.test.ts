@@ -7,7 +7,12 @@
  * 拒绝重启（agent 回 409，协调器 request_upgrade 记失败、下轮 rescan 重试）。
  */
 import { describe, it, expect } from 'bun:test'
-import { RESTART_GRACE_MS, shouldAcceptRestart } from '../../tools/agent/restart-guard'
+import {
+  RESTART_GRACE_MS,
+  SUPERVISED_ENV,
+  SUPERVISED_RESTART_EXIT_CODE,
+  shouldAcceptRestart,
+} from '../../tools/agent/restart-guard'
 
 describe('shouldAcceptRestart — /v1/restart 防循环 grace 窗口', () => {
   const BOOT = 1_000_000
@@ -32,5 +37,10 @@ describe('shouldAcceptRestart — /v1/restart 防循环 grace 窗口', () => {
 
   it('grace 默认 30s：覆盖协调器 rescan 周期（~15s）两个周期', () => {
     expect(RESTART_GRACE_MS).toBe(30_000)
+  })
+
+  it('受监护重启契约：env 标记与退出码跨进程对齐', () => {
+    expect(SUPERVISED_ENV).toBe('SAMPLER_SUPERVISED')
+    expect(SUPERVISED_RESTART_EXIT_CODE).toBe(75)
   })
 })

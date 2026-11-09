@@ -1336,6 +1336,37 @@ def test_find_cloudflared_reuses_cache(tmp_path: Path, monkeypatch: pytest.Monke
     assert rn._find_cloudflared({"bin_cache_dir": str(cache)}, lambda _m: None) == str(cf)
 
 
+def test_start_agent_marks_the_process_as_supervised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """notebook 启动链必须让 agent 交给外层监护循环重启，而不是自己 spawn detached child。"""
+    monkeypatch.delenv(rn.AGENT_SUPERVISED_ENV, raising=False)
+    seen: dict[str, Any] = {}
+
+    def _popen(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["kw"] = kw
+        return object()
+
+    monkeypatch.setattr(rn.subprocess, "Popen", _popen)
+    out = rn._start_agent(
+        "/bin/bun",
+        tmp_path / "sampler-agent.ts",
+        tmp_path,
+        8443,
+        2,
+        {},
+        tmp_path / "agent.log",
+    )
+    assert out is not None
+    assert seen["kw"]["env"][rn.AGENT_SUPERVISED_ENV] == "1"
+    assert os.environ.get(rn.AGENT_SUPERVISED_ENV) is None, "不得把标记泄漏进训练机/本进程环境"
+
+
+def test_planned_restart_exit_code_is_not_a_crash() -> None:
+    """75 = 受监护模式下的 /v1/restart；监护循环只按这个码识别计划内重启。"""
+    assert rn.AGENT_RESTART_EXIT_CODE == 75
+    assert rn.AGENT_RESTART_EXIT_CODE != 0
+
+
 def test_start_cloudflared_caches_after_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

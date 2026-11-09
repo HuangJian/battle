@@ -92,6 +92,13 @@ TUNNEL_RETRY_WAIT_SEC = 30.0
 #: **只负责把那一行搬进 notebook/rollout-node 日志**，第二个数字源就是第二个真相。
 OUTPUT_STATUS_EVERY_SEC = 600.0
 
+#: 受监护启动标记：与 `tools/agent/restart-guard.ts` 的 `SUPERVISED_ENV` 逐字对齐。
+#: 有它时 agent 的 `/v1/restart` 只退出、不 spawn detached child —— 由本模块的监护循环
+#: 从盘上重新拉起（notebook 启动链没有控制台那套自交接 owner，抢端口就会把节点打崩）。
+AGENT_SUPERVISED_ENV = "SAMPLER_SUPERVISED"
+#: 受监护重启的退出码（EX_TEMPFAIL）：计划内重启，不计入 `restart_limit` 的崩溃预算。
+AGENT_RESTART_EXIT_CODE = 75
+
 #: bun 二进制镜像（npmmirror）。GitHub Releases 直连不通的环境（阿里云 DSW 等）的兜底：
 #: 目录布局 `.../bun/bun-v<版本>/bun-linux-x64.zip`，与官方 install.sh 下载的产物同名。
 BUN_MIRROR_DEFAULT = "https://registry.npmmirror.com/-/binary/bun"
@@ -844,8 +851,10 @@ def _start_agent(
         str(int(cfg.get("cache_mb") or 2048)),
     ] + [str(a) for a in (cfg.get("agent_extra") or [])]
     fh = open(agent_log, "a", encoding="utf-8", errors="replace")  # 交给 Popen 持有（本进程不关）
+    env = dict(os.environ)
+    env[AGENT_SUPERVISED_ENV] = "1"
     return subprocess.Popen(
-        cmd, cwd=str(code_dir), stdout=fh, stderr=subprocess.STDOUT
+        cmd, cwd=str(code_dir), stdout=fh, stderr=subprocess.STDOUT, env=env
     )
 
 
@@ -1185,11 +1194,17 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                     else:
                         miss = 0
             if dead:
-                if restarts >= restart_limit:
-                    log(f"agent 已重启 {restarts} 次仍不健康 —— 停止（看 {agent_log}）")
-                    break
-                restarts += 1
-                log(f"agent 判定死亡（{why}）—— 第 {restarts} 次重启")
+                planned = agent.returncode == AGENT_RESTART_EXIT_CODE
+                if planned:
+                    # 远控 /v1/restart：agent 已 pull 完并按受监护模式退出。重新拉起即加载新代码；
+                    # 这是计划内重启，不能吃崩溃预算（否则几次正常升级就把节点停了）。
+                    log("agent 按远控重启请求退出（受监护）—— 重新拉起加载新代码")
+                else:
+                    if restarts >= restart_limit:
+                        log(f"agent 已重启 {restarts} 次仍不健康 —— 停止（看 {agent_log}）")
+                        break
+                    restarts += 1
+                    log(f"agent 判定死亡（{why}）—— 第 {restarts} 次重启")
                 _terminate(agent)
                 agent = _start_agent(bun, entry, code_dir, port, workers, cfg, agent_log)
                 miss = 0
