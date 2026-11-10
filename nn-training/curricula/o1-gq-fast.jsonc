@@ -1,0 +1,441 @@
+// 课程 o1-gq-fast —— o1 系列第 3 轮 / 并行臂 A：让 greedy 轨迹进语料，
+// 把「顶墙 / 卡死」从零梯度变成有梯度（2026-11-09）
+//
+// 状态：**已结课（2026-11-10 用户裁决停课，it256）· B/C 满池判决：通过**
+//   （8/8 主门全过 + 反签名零触发；归因限制见 §5：无 null 腿）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// ★ 结课报告（2026-11-10 08:0x；优先级高于下方立项块）
+// ══════════════════════════════════════════════════════════════════════════
+// ── 1. 停课状态与冻结归档 ─────────────────────────────────────────────
+//   2026-11-10 00:36:34 开课 → 末次落账 07:33:46（it256），约 6h57m，
+//   256/300 轮未跑满（用户裁决「不跑了，结课」；07:34 起已无落账，
+//   07:41 经控制台 `stopCourse` 删开课标记确认停课，非破坏、账本不动）。
+//   3 次 run_start、2 次 job_cancelled、**零 error / 零熔断**；
+//   it257 job 已发布未认领即停。kl 均值 0.0067 / max 0.014，entropy 1.35→1.60。
+//   末点归档 = **it256** `o1-gq-fast.it256.20261110-073346.json`
+//   （sha16 `a56281eb6efa6d26`；本报告 §2 的 B/C 判决即其评估支撑）；
+//   末次 in-loop eval = it255（wver `9ca6052ca4dcd633`）。
+//
+// ── 2. B/C 满池判决（800 局/权重，seed0 860001，greedy，同 seed 配对）────
+//   产物 `tmp/o1-probe/gq-fast-bc.jsonl`（1600 行），2026-11-10 07:46–07:53
+//   本机 8 槽 × 389s；it0 = 起点 bc `o1-fast-fix2.it80`（sha16 `a1a5250f07f15da3`）。
+//
+//   | 门 | it0 → it256 | 判定 |
+//   | 主0 wallPress 中位 −30% | 18.0 → 7.0（**−61.1%**） | PASS |
+//   | 主1 stuck≥800 局数 −50% | 69 → 21（−69.6%） | PASS |
+//   | 主2 timeout ≤ it0/3 | 38 → 4 | PASS |
+//   | 主3 clear ≥ it0 | .8313 → **.9750**（+14.37pp） | PASS |
+//   | 主4 clear 局 ticks 中位 ≤ it0 | 921 → 761 | PASS |
+//   | 主5 hitRate ≥ it0 | .2154 → .2920（+35.6%） | PASS |
+//   | 主6 dmg/千拍（聚合）≤ it0 | 47.80 → **19.53（−59.1%）** | PASS |
+//   | 主7 cellsVisited 中位 ≥ it0 | 30.0 → 34.0 | PASS |
+//   | 反签名 | clear +14.37pp / dmg −59.1% / hit +35.6% / idle −6.68pp | 零触发 |
+//
+//   配对 clear：both 653 / gained 127 / lost 12，McNemar 精确 p<0.0001。
+//   逐关 clear（it0→it256）：2000 1.000→1.000 / 2001 .990→.970 /
+//   2002 .880→.995 / **2003 .455→.935**；2003 wall 均 43.6→13.1。
+//   gameover 97→16、timeout 38→4：失败供给本身几乎消失。
+//
+// ── 3. A 层趋势（400 局/点 × 52 点，仅趋势，不与 §2 相减）────────────────
+//   clear .840(it0) → .980(it250) / .953(it255)；中段 it200 .882、
+//   it245 .910 两次真实回落后恢复。wallMed 17→11(it250)/5(it255)、
+//   stuck≥800 32→13(it250)、dmg/千拍 46.6→27.8、cellsMed 30→33。
+//
+// ── 4. 过程门与配额供给（本轮最大的执行偏差）────────────────────────────
+//   `greedy_quota_stats.degraded` 252/257 轮真（最长连续 113）、cap_hit 249。
+//   **it1 起 timeout 档供给即 0**（it80 eval 估计 .1664 未兑现，§7④ 供给
+//   不确定性应验）；loss 档 it1 有 1026，随策略改善枯到末轮 103
+//   （末轮 bins win 8614/loss 103/timeout 0，目标 2458/492/1106）。
+//   课规「连续 5 轮 degraded ⇒ 停腿查供给」自 it5 起被击穿，训练未停，
+//   直至用户裁决结课。枯竭机制 = 策略变好后 greedy 几乎不输不超时，
+//   不是采集故障；但 soft=true 下 `degraded = any(bin<target)` 无法区分
+//   ⇒ **该门语义会把成功的跑一律停下来**，后续课程需修语义
+//   （区分「供给枯竭型」与「采集故障型」），本轮按事实归档、不追停。
+//
+// ── 5. 判词 ───────────────────────────────────────────────────────────
+//   **通过**（§6 八门全过 + 零反签名），o1 系列 greedy-deploy 口径的新高
+//   （clear .9750；100% 是愿景未达，2003 .935 仍是最低关）。
+//   归因受限：**null 腿未立**（开工前置③未闭环），以上只能说「从 fix2.it80
+//   起点继续训练 256 轮（含 greedy 配额语料）后八门全过」，不能分解
+//   greedy_quota 的独立贡献；且硬负样本供给 mid-run 已枯竭，后段语料
+//   实质以 win 为主。若要把「greedy 语料修顶墙」写成可复用结论，
+//   需补 null 腿对照；本轮先按权重结课归档。
+//
+// ── 6. 复现 ───────────────────────────────────────────────────────────
+//   判决：`bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o1-env.json
+//     --no-dist --dist-local 8 --weights it0=<fix2.it80 bc> --weights it256=<末点>
+//     --games 800 --seed0 860001 --out tmp/o1-probe/gq-fast-bc.jsonl`；
+//   取数 `tmp/o1-gq-verdict.mjs`；A 层 `tmp/o1-gq-fast/eval_log.jsonl`；
+//   账本 `tmp/o1-gq-fast/training_log.jsonl`；跑量 `tmp/o1-gq-progress.mjs`。
+//   it0 sample 口径未补（主门全 greedy 口径，不影响判决）。
+//
+// ── 7. 血缘警告 ───────────────────────────────────────────────────────
+//   只改注释 ⇒ `course_fp` 变、语义指纹不变。已停课；若重开须重新对齐
+//   旧 shard 的 `course_fp`。
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为立项时的设计说明（保留作历史；「已立项 / 未开课」是当时语气，
+//   判词一律以本结课报告为准）
+// ══════════════════════════════════════════════════════════════════════════
+//   任务侧（4 关 / 1 敌 / 1 命 / 6000 拍 / 钢环）
+//   与父课逐字相同；唯一改动在训练侧 = 加 `greedy_quota` 语料配方。
+//   姊妹臂 = `o1-gq-warm.jsonc`。两臂**不是单变量对照**（参数臂 + 剂量各自标定），
+//   分别回答「fast / warm 两种失败模式能不能被 greedy 语料修好」。
+//   ⚠ 归因需要 null 腿（同配置、去掉 greedy_quota）另立，见文末「开工前置」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   NN 用采样动作 rollout 时几乎不顶墙（`wallPress` ~0.1 / `stuck` ~0），
+//   所以 `wWall` / `wStuck` 的梯度恒 0；换成 greedy 推理就露馅：
+//   同 seed 同权重，clear .9903→.7389（S0 的 2×2×800 局对照）。
+//   ⇒ **不改奖励**，只让父课已有的罚项见得到这些轨迹：课程声明 greedy 语料的
+//   胜/败/超时构成，采集侧跑独立 greedy 阶段，打包前逐关预筛 + protected trim。
+//   目标 = 冲击 100% 胜率：跑得欢（cells）/ 杀得快（ticks）/ 瞄得准（hitRate）/
+//   躲得妙（dmg）；100% 是**愿景**，判据见 §6（§0.2：不用教师表现定 DoD）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据：最后 eval 轮 it80 的语料取证（A 层 401 局 / greedy 推理）
+// ══════════════════════════════════════════════════════════════════════════
+//   取数 `tmp/o1-gq-new-probe.py`（口径复用 `o1-old-close.py`），
+//   数据 `tmp/o1-gq-new-probe.txt`；父课结课报告见 `curricula/o1-fast-fix2.jsonc` 头注。
+//
+//   ① **顶墙是失败的唯一强判别量**（按 wallPressTicks 三等分，不是按结果分层）：
+//       低 wall ≤11  n=136  clear **.941**  dmg 20.6  ticks 824
+//       高 wall >24  n=132  clear **.629**  dmg 99.2  ticks 1805  timeout 10
+//       ⇒ 顶墙不是伴随现象，是失败链前端；失败局 wall 均 41.4（gameover）/ 38.9（timeout），
+//       成功局只有 17.0。
+//   ② **卡死 = 站桩盲射到 6000 拍超时**：stuck≥800 判据命中 32 局，
+//       clear **.531**、wall 均 43.1、idle 中 82.7%%、ticks 4396；
+//       timeout 局 stuck 均 3593 / idle 87.3%% / shots 98.7。
+//   ③ **失败集中在 2003 Brickworks**：逐关 clear 2000 1.000 / 2001 .990 / 2002 .830 / **2003 .540**；
+//       2003 的 wall 均 **40.7**，timeout 11 / gameover 36；
+//       2000 全清且 wall 均 ~5 ⇒ timeout 供给**只在 2002/2003**，
+//       配额必须走 stage-aware（规则 v2），不能逐关等额派。
+//   ④ **父课 fix2 把「站桩」换成了「顶墙」**：it0→it80 wall 12.76→20.81（+8.05）、
+//       stuck 915→288、idle −22.7pp、hit −.27、dmg +51.4、clear −.04。
+//       ⇒ 奖励侧继续加重罚项已被证伪（两门 fix2 都没买到 wallPress，还把承伤/命中推坏）；
+//         本轮**一个参数都不加**，改从语料侧补梯度。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 起跑线、配额剂量标定（单位 = transition，Q1 分母 = 本轮总语料）
+// ══════════════════════════════════════════════════════════════════════════
+//   起点 bc = `o1-fast-fix2.it80.20261109-133453.json`（sha16 `a1a5250f07f15da3` == it80 eval wver；
+//   末次有评估支撑的冻结归档，不是末点 itNN）。A 层显示中段有更高读数，
+//   但 401 局是**前缀子集仅趋势**（2026-10-30 满池实测：方向可反），
+//   不能据此选起点；且本轮配额正是在 it80 供给上标定的（剂量/起点自洽）。
+//
+//   it80 三档供给（按 transition；eval ticks/10 ≈ nSamples，timeout 局 6000 拍 = 600 trans
+//   ⇒ **按局数和按 transition 的占比差 4–6 倍**，配额只能用后者）：
+//       win **.7347** / loss **.0989** / timeout **.1664**
+//       逐关 timeout：2000 0 / 2001 0 / 2002 .1654 / 2003 .3591
+//   S0（fix2 起点，2×2×800 局 `--teacher-argmax`）给的对照是 p_timeout .2482；
+//   S3 run3 it1 的 greedy bins 也落在 .228。三个口径不一致 ⇒ 供给有不确定性，
+//   配额取**保守值** + `soft=true`，首轮看 `greedy_quota_stats.degraded` 复核。
+//
+//   **本课配额**：`win=.10 / loss=.02 / timeout=.045 / cap=2.0 / soft=true`
+//     T_total=24576 ⇒ T_g=4055、collect_target=8110、
+//     bin_targets win 2458 / loss 492 / timeout 1106。
+//     loss 档**启用**（S3 是 0）：gameover 局 wall 均 41.4 甚至高于 timeout 局，
+//     是最有信息量的顶墙样本；丢掉它等于把最硬的反例筛掉。
+//     timeout .045 按 fast it80 (.1664) 供给反解（不是照抄 S3 的 .075）；
+//     2026-11-09 复核：初稿 .04 → **.045**。用户曾提「三档等比翻倍」，核算后否决
+//     （翻倍会让 collect 占到 T_total 的 64%、loss 达成掉到 65%、并触发 §6 的
+//     degraded 止损）；改为只提 timeout 档、win 不动 ⇒ 成本 +3%、硬负样本 +12%。
+//
+//   **可达性验算**（把 it80 的 401 局转成 manifest，喂生产 `select_greedy_shards`）：
+//     kept 33 shards / 5088 samples；实保 win 2826（115%）/
+//     loss 462（94%）/ timeout 1800（163%）
+//     ⇒ 三档可达；timeout 超目标是 shard 粒度（单局约 600 trans）所致，
+//       loss 档的缺口走 §5.2 降级（soft=true，留痕不报错）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. cells 边际与 EV 排序（决定「奖励不改」是不是对的）
+// ══════════════════════════════════════════════════════════════════════════
+//   把 it80 按 cellsVisited 的 p25/p75 分成「坐 / 走」两档（不是按结果分）：
+//     dmg 坐 94.4 → 走 16.0（Δ−78.4，边际 −3.06/格）
+//     wall 坐 25.5 → 走 17.1（Δ−8.4，边际 −0.33/格）
+//     stuck 坐 338 → 走 175（Δ−163，边际 −6.35/格）
+//     clear 坐 .78 → 走 .99（Δ+.21）
+//   ⇒ **EV(走) > EV(坐)**：多走伴随顶墙/卡死下降、clear 上升。
+//   ⚠ 通关率已经很高时 EV(rush) 不可能是负的（kill+win 恒正），
+//     所以「0 伤」靠排序承载，**绝不为压承伤再加剂量** —— a2 的教训：
+//     硬压会把策略推向「不挨打也不杀敌」的保守陷阱。这正是本课不改奖励的第二条理由。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 奖励：逐字继承父课，一个参数都不动
+// ══════════════════════════════════════════════════════════════════════════
+//   formula / params / terminal / scheme / 位移包 / eval / rotateSeed 全部同
+//   `o1-fast-fix2.jsonc`（生成脚本按字节复制 JSON 段）。
+//   已有的 `wWall 1.0 / wallCap 40` + 第二段 `.2/80`（满量程 56 < wWin 60，
+//   硬闸 #6 不破）与 `wStuck .01/2000` + 第二段 `.002/4000`、`wIdle` 对冲，
+//   Φ 是持有值、`r` 是逐行差分（硬闸 #4），`wallPressTicks` 在 metrics 行里随拍累计
+//   ⇒ 每多顶墙 1 拍就多 −1.0 的差分，梯度落在**整条轨迹**而不是终局一行。
+//   采样语料里该累计值恒 ~0 ⇒ 差分恒 0 ⇒ 梯度恒 0，这才是根因。
+//   在 **it80 greedy 轨迹**上都能咬住：wall 均 20.81 / p90 ~44 / max 73，
+//   timeout 局 stuck 均 3593。
+//   父课不是「罚得不够」，是「罚项在采样语料里没有样本」；
+//   本轮把样本送进来即可，再加罚会重蹈 fix2 的 dmg/hit 恶化。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 起点与缰绳 / 语料身份
+// ══════════════════════════════════════════════════════════════════════════
+//   bc = 归档 ckpt（`o1-fast-fix2.it80`），`kickstart_ref: true`、
+//   `warmup_iters: 0`（系数 1.0×0.5^(it−1)，实质只锁 it1–7）。
+//   `greedy_quota` 三档比例 + 规则版本 v2 **进 `corpus_identity_fp`**
+//   ⇒ 与 null 腿自动异血缘、旧 shard 不会被 D14 误收；`cap/soft` 不进身份
+//   （预算/降级开关），`labelMode="greedy"` 随 shard 落盘做 provenance。
+//   ⚠ rev5（2026-11-10）：greedy 采集已**全节点化**——队列节点走
+//   `?labelMode=greedy`、argv 型节点走 `--teacher-argmax`，缺
+//   `greedyRolloutSupport` 能力位的旧 agent 在 dispatch 侧 fail-closed。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 6. 判据与止损（**判决一律 B/C 满池 860001 起 / 4 关 × 200 seed = 800 局 greedy**；
+//    A 层 in-loop 401 局/点只作趋势，跨面板不相减、不拿来做「A 比 B 强」）
+// ══════════════════════════════════════════════════════════════════════════
+//   先补 it0 双口径基线（开课前跑 `--games 800 --seed0 860001`，父课两腿都没留此读数）：
+//     ① 本课 it0 权重在 B/C 满池的 greedy 读数；② 同权重 sample 读数。
+//     下面所有「较 it0」都以 ① 为准，数值在开课前回填到本节。
+//
+// | 主 0 greedy wallPress 中位 较 it0 降 ≥30% | 首要门 |
+// | 主 1 stuck≥800 局数 较 it0 降 ≥50%      | 卡死门 |
+// | 主 2 timeout 局数 ≤ it0 的 1/3           | 超时门 |
+// | 主 3 B/C clear ≥ it0（不掉）             | 不许拿胜率换指标 |
+// | 主 4 clear 局 ticks ≤ it0                | 杀得快 |
+// | 主 5 hitRate ≥ it0                       | 瞄得准 |
+// | 主 6 dmg/千拍（聚合口径）≤ it0           | 躲得妙；逐局均值口径不可混用 |
+// | 主 7 cellsVisited 中位 ≥ it0             | 跑得欢 |
+// | 反签名 clear 掉 >2pp / dmg 涨 >30% / hitRate 掉 >15% / idle 涨 >10pp | 任一触发即不过 |
+// | 过程门 `greedy_quota_stats.degraded` 连续 5 轮 True | 配额不可达 ⇒ 停腿查供给 |
+//
+//   止损：it40 时 greedy wallPress 未降（或主 3 破）⇒ **停腿**。
+//   按 `plan/greedy-outcome-quota.plan.md` §8 的成功信号：达成率长期为 0
+//   且 greedy wall 已降 ⇒ 转动作/观测侧脱困检查，**不继续加配额**。
+//   100% 胜率是愿景，不是预设 DoD；不许用教师表现判「还有没有可学的」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 7. 已知局限（写清，免得下一个人当 bug 修）
+// ══════════════════════════════════════════════════════════════════════════
+//   ① greedy 子批混入 PPO 是**确定性策略梯度近似**，不是 on-policy 目标：
+//     行为策略 δ(a) 的正确权重是 π_new(a)，代码用 π_new/π_old 差 1/π_old；
+//     v1 与采样子批同权（无 `greedy_coef`）。⇒ 必须靠 null 腿 + greedy eval +
+//     ratio 分布判定是否可接受；若梯度被稀释/扭歪，改走辅助损失（demo_bc 同族）。
+//   ② shard 粒度剂量偏差：预筛按整局取舍，实保 timeout 可超目标 163%；
+//     S3 run3 it1 实测训练包 timeout 9.6%（声明 7.5%）。结论必须带此读数。
+//   ③ 逐关 protected 可超 `per_stage_target`（timeout 只分给有供给的 2002/2003），
+//     打包总量可略超 T_total；2003 恰是最需要学的关，hard negative 不算错配。
+//   ④ 供给估计三个口径不一致（S0 .248 / S3 .228 / it80 eval .1664）；
+//     `soft=true` + `degraded` 留痕是唯一保险，首轮必须复核。
+//   ⑤ cells 边际按行为分档仍有混杂（低 cells 局可能就是 2003 难关）；
+//     排除「难度混杂」靠 S0 的**同 seed 换策略**对照（greedy vs sample），
+//     不是靠按结果分层。单局结论不推广，全部用 ≥400 局样本。
+//   ⑥ 4 关定集有记忆化风险（§15.1）；跨级读数只用于晋级，不用于调剂量。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 8. 预算 / 开工前置
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576`（mb 1024 的整倍数，XLA 不重编译）、`iters 300`、
+//   `max_hours 18`、`eval_every 5` / `eval_games_per_stage 50`。
+//   greedy 阶段额外采到 collect_target=8110 trans ⇒ rollout 墙钟约 +35–45%，
+//   本机串行池 + `soft=true`，不要和 node 腿并行抢资源。
+//   **null 腿**：另立一门与本课逐字相同、仅去掉 `greedy_quota` 的课程
+//   （新 out/traj，禁续跑）；否则 attribution 不成立。S3 run3 的 null 腿可作 fast 臂参考。
+//   启动命令写在文末；**agent 不启动训练**，开课由人在控制台拍板。
+//   开训后 30 秒自检：`grep -h "hub=" tmp/<课>/training-loop.log | tail -1`
+//   必须等于当时活着的 hub URL（quick tunnel 换名 ⇒ HTTP 530 且不自愈，只能重启）。
+//
+//
+// ── 8b. 3000 拍只读诊断面板（2026-11-09 用户裁决；**任务侧一个字不动**）──────
+//   用户观察「不顶墙不卡死的局一般 1500 拍结束」；it80 实测 clear 局 ticks 中位
+//   921/792、p90 1827/1553，但各有 **10 局（3.0% / 2.9%）>3000 拍**（最长 4611/5692）。
+//   ⇒ 课程 `max_ticks` 保持 **6000**（AGENTS §0.2：任务侧/终局标准不可动；
+//     改成 3000 会把这些本来能赢的局判成 timeout，且让已标定的三档供给、
+//     `fastCap/ticksShouldWin/paceTicks` 剂量、父课结课报告与 S0/S3 全部失效）。
+//   **诊断做法（只读，不改课程配置、不进 corpus_identity_fp）**：
+//     cp tmp/o1-probe/o1-env.json tmp/o1-probe/o1-env-3000.json  # 只把 max_ticks 改 3000
+//     bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o1-env-3000.json \
+//       --no-dist --weights <name>=<it80 bc> --games 800 --seed0 860001 \
+//       --out tmp/<leg>-probe/it0-3000.jsonl
+//   `eval-course-ckpt` 没有 `--max-ticks` flag（`maxTicks` 从 `--course` 文件读），
+//   所以必须走这份 tmp 副本；副本只用于诊断，**不参与任何训练/eval 判决**。
+//   ⚠ 面板纪律：这是「3000 拍诊断面板」，与 §6 的「6000 拍 B/C 满池判决面板」
+//     **不同面板，不可相减、不可拿来做「A 比 B 强」**；它只回答「不顶墙的局多快结束」，
+//     且已知 3000 拍口径会冤杀约 3% 的慢 clear 局 —— 那正是要观察的对象。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为逐字继承的配置段（formula/params 与父课同源；改动点只有 6 个身份键 +
+//   `greedy_quota` 块）。判词以本立项说明为准。
+// ══════════════════════════════════════════════════════════════════════════
+//
+{
+  "version": 5,
+  "name": "o1-gq-fast",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 1,
+  "lives": 1,
+  "max_ticks": 6000,
+  "reward": {
+    "formula": [
+      // ① 击杀：每只 15 分；1 敌关等价于「清关」的主收入
+      "wKill*kills",
+      // ② 命中：每发 3（fast）/ 4（warm）分；空射不单独定价（aimMisses 是 hit 镜像，会重复计价）
+      "+ wHit*aimHits",
+      // ③ 清关奖：无条件 60 分，但按走过格子打折（runCap 30 打满）—— 父课已验证的条件价
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // ④ 快清关：清场越早一次性越多（fastCap 2000 拍内线性，>2000 拍为 0）
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      // ⑤ 移动拍：稠密走位奖；顶墙拍计入 idleTicks，所以 ticks-idleTicks 自动排除蹭墙拍
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // ⑥ 开火成本：每发 0.02（fast，几乎免费以鼓励开枪）/ 0.2（warm，罚盲射）
+      "- wShot*min(playerShots, shotCap)",
+      // ⑦ 撞墙（0–40 拍）：有前进意图 + 零位移，1.0/拍（父课 0.4/0.6 的 2.5×/1.67×）
+      "- wWall*min(wallPressTicks, wallCap)",
+      // ⑧ 撞墙（40–120 拍）：第二段 0.2/拍 —— 超 cap 仍持续有代价（硬闸 #6 下的分段做法）
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      // ⑨ 卡死（≤2000 拍）：最长连续「没换格且没打中」，0.01（fast）/ 0.02（warm）每拍
+      "- wStuck*min(stuckTicks, stuckCap)",
+      // ⑩ 卡死（2000–6000 拍）：第二段 0.002/拍 —— 失败局 stuck 常 4000+，后半段不再免费
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      // ⑪ 不动（超出免费额度的前 1000 拍）：免费额度 = 35% × min(ticks, 1000)，
+      //    拖时间不会抬高额度（否则「拖到 6000 拍」会白拿 2100 拍免费额度）
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      // ⑫ 不动（继续超出）：第二段 0.005/拍；卡死局 idle 90% 仍被罚，站桩排序不变
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      // ⑬ 承伤：每点 0.08（fast）/ 0.07（warm）；dmgCap 200 = 1 命上限，不会截断
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      // ⑭ 掉命：每人头 12（fast）/ 6（warm）；terminal 另有 −30
+      "- wDeath*playerDeaths",
+      // ⑮ 待在敌方射界（0–120 拍）：每拍 0.02（fast）/ 0.04（warm）—— 满血时允许激进
+      "- wThreat*min(threatTicks, threatCap)",
+      // ⑯ 待在敌方射界（120–500 拍）：第二段 0.005（fast）/ 0.01（warm）每拍，长暴露不再免费
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      // ⑰ 射界里仍在移动：每拍 0.05（fast）/ 0.08（warm）—— 躲弹动作的正奖，与 ⑮⑯ 配对
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // ⑱ 残血别浪（0–100 拍）：低血量拍 0.3/拍 —— 前期满血可激进，后期血少要收
+      "- wDanger*min(dangerTicks, dangerCap)",
+      // ⑲ 残血别浪（100–600 拍）：第二段 0.05/拍
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      // ⑳ 基地威胁税（0–200 压力点）：钢环下不改变结局，但保住「回防/优先清基边敌人」的行为，
+      //    为 o7 换回砖环铺路（否则到时策略不会回防）
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      // ㉑ 基地威胁税（200–500）：第二段 0.03/点，长压制不再免费
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      // ㉒ 反苟：按拍计费（每杀赠 1200 拍），封顶 46；与 ④ 快清关方向一致
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 3.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 24.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1200.0,
+      "paceWindow": 1000.0,
+      "paceCap": 46.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o1-fast-fix2/o1-fast-fix2.it80.20261109-133453.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261108,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o1-gq-fast/weights.json",
+  "traj": "tmp/o1-gq-fast",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o1-gq-fast",
+  "backup_prefix": "o1-gq-fast",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  "greedy_quota": {
+    "win": 0.1,
+    "loss": 0.02,
+    "timeout": 0.045,
+    "oversample_cap": 2.0,
+    "soft": true,
+  },
+}
+
+// ── 开工前置（2026-11-09；agent 不启动训练）──────────────────────────────
+//  ① 冻结 bc 已存在：`nn-training/weights/o1-fast-fix2/o1-fast-fix2.it80.20261109-133453.json`
+//  ② 补 it0 双口径 B/C 满池基线（greedy + sample，各 800 局 / seed0 860001），
+//     把 §6 的「较 it0」数值回填；父课两腿都**没有**自己的满池读数。
+//  ③ null 腿另立（同配置去掉 greedy_quota、新 out/traj），否则无法归因。
+//  ④ 控制台 `bun run dashboard` :8900 → 选本课 → 开课；零 worker 就等，
+//     不要就地降级；节点必须带 `greedyRolloutSupport` 能力位（升级后重启）。
+//  ⑤ 开训 30s 自检 hub URL（见 §8）。首轮看 `greedy_quota_stats` 的
+//     `degraded` / `cap_hit` / `prefilter`；连续 5 轮 degraded ⇒ 停腿查供给。
+// ── 诊断工具 ────────────────────────────────────────────────────────────
+//  `tmp/o1-gq-new-probe.py`（it80 取证）/ `tmp/o1-gq-new-write.py`（本文件生成）
+//  / `tmp/o1-close-four.py`（父课结课读数）/ `plan/greedy-outcome-quota.plan.md`
+// ── 结算节（已回填：见文件头「★ 结课报告」；`reports/` 在 .gitignore 里，不另出报告）─
+//  · 状态：已结课（2026-11-10，it256）。B/C 判决：通过（8/8 + 零反签名）。
+//  · 3000 拍诊断面板：见 §8b，只读副本、不改课程；与 6000 拍判决面板不可相减。
