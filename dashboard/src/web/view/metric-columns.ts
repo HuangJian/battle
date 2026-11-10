@@ -209,6 +209,13 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
   ...BEHAVIOR_METRIC_COLS,
 }
 
+/** **列顺序的键全集**：两张表、全部视图（all / rollout / eval / 首页主行 / 首页 eval）的并集。
+ *
+ *  拖拽排序与 `tc.*.order` 都按它算——同一个存储键服务列集合不同的多个视图，只存当前视图的
+ *  列会让对方独有的列被当成「新列」（2026-11-10：拖「胜率」后 eval 胜率跑到最后；藏着的列
+ *  取消隐藏也丢位置）。顺序 = `METRIC_COLS` 的定义序，也是 `applyColOrder` 缺键归位的模型参照。 */
+export const METRIC_ORDER_KEYS: readonly MetricColKey[] = Object.keys(METRIC_COLS) as MetricColKey[]
+
 /** 主行（rollout 口径）的列顺序。**顺序只在这里**（渲染器不再自己决定先后）。
  *  完整指标表的 all / rollout 档与首页速览表的主行视图共用这一份（逐局指标块压在其后）。 */
 export const ROLLOUT_ROW_KEYS: readonly RolloutRowColKey[] = [
@@ -247,6 +254,17 @@ export const EVAL_ROW_KEYS: readonly EvalRowColKey[] = [
   'scoreMean',
   'evalSec',
   'wver',
+]
+
+/** 缺键归位用的参照序（按视图各一份）：主行视图 → eval 视图 → 扁平全集（逐局指标等）。
+ *
+ *  为什么不能只用一份扁平序：两个视图的模型序并不相同（`evalRate` 在 eval 视图里紧跟
+ *  `time`，而扁平定义序里它紧跟 `winRate`）——用扁平序归位会让「动 rollout 胜率」把
+ *  eval 胜率一起带走（2026-11-10 报障：两边互相拉扯）。 */
+export const METRIC_ORDER_REFS: readonly (readonly string[])[] = [
+  ROLLOUT_ROW_KEYS,
+  EVAL_ROW_KEYS,
+  METRIC_ORDER_KEYS,
 ]
 
 /** 按顺序取列定义（渲染器用它同时生成表头与列数，避免两处各数一遍）。 */

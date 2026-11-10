@@ -10,7 +10,14 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
-import { applyColOrder, keywordMatch, moveColKey, parseColOrder, type SortDir } from '../view'
+import {
+  applyColOrder,
+  keywordMatch,
+  moveColKey,
+  parseColOrder,
+  resolveColOrder,
+  type SortDir,
+} from '../view'
 import { colDragProps } from './col-drag'
 
 export interface Col<T> {
@@ -47,6 +54,14 @@ export interface DataTableProps<T> {
   /** 表头拖拽重排（缺省关：只给真需要自定义列序的表开，不改变其它表格的手感）。
    *  开则顺序持久化到 `${storagePrefix}.order`（需要 storagePrefix 才会存）。 */
   reorderable?: boolean
+  /** 拖拽 / 持久化用的**键全集**（缺省 = `columns` 的键）。
+   *  调用方自己接管列显隐（`columnsMenu={false}`）或多视图共用一个存储键时传这里：只存
+   *  当前 `columns` 会让被藏 / 另一视图独有的列在下次出现时丢位置（用户 2026-11-10）。
+   *  渲染仍只用 `columns`。 */
+  orderKeys?: readonly string[]
+  /** 缺键归位用的**参照序**（与 `orderKeys` 配套；每个视图一份模型序）。已有存储是权威，
+   *  这里只决定「存储里还没有的键」落在哪——两个视图各用各的模型序，才会互不牵扯。 */
+  orderRefs?: readonly (readonly string[])[]
   /** 行尾 ▸ 展开详情；缺省 = 无展开列。 */
   expandRender?: (row: T) => ComponentChildren
   emptyText?: string
@@ -148,8 +163,12 @@ export function DataTable<T>(props: DataTableProps<T>) {
   /** 全部列（含被藏起来的）的显示顺序：拖动只改它，藏起来的列因此保住位置。 */
   const ordered = reorderable ? applyColOrder(columns, colOrder) : columns
   const onMoveCol = (from: string, to: string): void => {
+    // 在**键全集**上换位（不是当前可见列）：切视图 / 取消隐藏后列才回得到原位。
+    // 基准：已存顺序是权威（另一视图的列原样保留，拖谁只动谁）；还没存储时用当前渲染顺序
+    // （首帧不会因为并集顺序而跳列），缺的键按各自视图的模型序归位。
+    const universe = props.orderKeys ?? columns.map((c) => c.key)
     const next = moveColKey(
-      ordered.map((c) => c.key),
+      resolveColOrder(universe, colOrder ?? ordered.map((c) => c.key), props.orderRefs),
       from,
       to,
     )

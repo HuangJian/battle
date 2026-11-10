@@ -24,6 +24,8 @@ import {
   type ConsoleStateView,
   type EvalABanner,
   type EvalCkptFile,
+  METRIC_ORDER_KEYS,
+  METRIC_ORDER_REFS,
   type IterFilter,
   type MetricStatKey,
 } from '../../view'
@@ -242,6 +244,12 @@ export function MetricsTable({
         columnsMenu={false}
         // 表头可拖拽重排（用户 2026-11-10）：顺序存 `tc.metrics.order`，与显隐/统计量各存一份。
         reorderable
+        // 顺序按**键全集**存（含被藏起来的列 / eval 档独有的列）：否则切行过滤或取消隐藏时，
+        // 那些列会被当成「新列」归到表尾（用户 2026-11-10）。
+        orderKeys={METRIC_ORDER_KEYS}
+        // 缺键（另一视图 / 刚取消隐藏的列）按各自视图的模型序归位：动 rollout 的列不会
+        // 把 eval 视图的列带走（用户 2026-11-10）。
+        orderRefs={METRIC_ORDER_REFS}
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
         toolbarLeft={

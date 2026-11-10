@@ -20,6 +20,8 @@ import {
   isTrendRange,
   isTrendSource,
   latestRow,
+  METRIC_ORDER_KEYS,
+  METRIC_ORDER_REFS,
   METRIC_STAT_LABEL,
   metricSeries,
   moveColKey,
@@ -28,6 +30,7 @@ import {
   parseColOrder,
   parseHiddenCols,
   parseTrendVisibility,
+  resolveColOrder,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_HERO_ITERS_COLS,
@@ -483,9 +486,15 @@ function LastIters({
     // 最新一轮不挂状态徽标（用户 2026-11-10）：它恒是刚采集收官、PPO 未回传的那轮。
     { quietStatusIter: rows[0]?.iter ?? null },
   )
-  // 顺序只作用于显示：全部列（含藏起来的）排好后再过滤，藏一列再拖不会让它的位置失效。
+  // 显示顺序 = 存储序作用在当前视图的全部列上（藏起来的列也参与）；无存储 ⇒ 模型序。
   const orderedAll = applyColOrder(allCols, colOrder)
-  const fullOrder = orderedAll.map((c) => c.key)
+  // 拖拽的基准是**键全集**（含藏起来的列 + 另一个视图独有的列）：缺的键按模型位补齐。
+  // 只存当前视图的列会让它们在切换 / 取消隐藏时丢位置（用户 2026-11-10）。
+  const fullOrder = resolveColOrder(
+    METRIC_ORDER_KEYS,
+    colOrder ?? orderedAll.map((c) => c.key),
+    METRIC_ORDER_REFS,
+  )
   const cols = orderedAll.filter((c) => !hiddenCols.has(c.key))
   const onMoveCol = (from: string, to: string): void => {
     const next = moveColKey(fullOrder, from, to)

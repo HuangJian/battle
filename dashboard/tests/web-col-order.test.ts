@@ -6,7 +6,8 @@
  *
  * 四个钉子：
  *  ① 解析：坏 JSON / 非字符串元素 ⇒ 「没有顺序」；重复键只留第一次；
- *  ② 应用：认识的键按存储序，模型新加的列按模型序接在后面（升级后新列不会掉队/消失）；
+ *  ② 应用：认识的键按存储序，存储里没有的键回到**模型位**（新列不消失，也不会因为另一个
+ *     视图没存过它就被甩到表尾；2026-11-10 报障）；
  *  ③ 移动：from 插到 to 之前；任一键缺失 ⇒ 原样返回（陈旧存储不许制造乱序）；
  *  ④ 接线：两张表（`/metrics` 与首页速览表）共用同一份 colDragProps，顺序各存各的键。
  */
@@ -16,7 +17,19 @@ import { readFileSync } from 'node:fs'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { DataTable } from '../src/web/components/DataTable'
-import { applyColOrder, moveColKey, parseColOrder } from '../src/web/view'
+import {
+  applyColOrder,
+  BEHAVIOR_METRICS,
+  behaviorColKey,
+  EVAL_ROW_KEYS,
+  METRIC_COLS,
+  METRIC_ORDER_KEYS,
+  METRIC_ORDER_REFS,
+  moveColKey,
+  parseColOrder,
+  resolveColOrder,
+  ROLLOUT_ROW_KEYS,
+} from '../src/web/view'
 
 const KEYS = ['iter', 'time', 'winRate', 'kl'] as const
 const COLS = KEYS.map((key) => ({ key }))
@@ -43,21 +56,25 @@ describe('applyColOrder：键序 → 列序', () => {
     expect(keyOf(applyColOrder([{ key: 'iter' }], ['kl']))).toEqual(['iter'])
   })
 
-  it('认识的键按存储序，新列按模型序接在后面', () => {
+  it('认识的键按存储序；缺键回到模型位（不是一律接尾）', () => {
+    // kl 的模型前驱是 winRate ⇒ 跟着它（不是一律甩到表尾）
     expect(keyOf(applyColOrder(COLS, ['winRate', 'iter']))).toEqual([
       'winRate',
+      'kl',
       'iter',
       'time',
-      'kl',
     ])
+    // 用户把 kl 拖到最前、winRate 第二 ⇒ 缺的 iter/time 回到模型位
+    expect(keyOf(applyColOrder(COLS, ['kl', 'winRate']))).toEqual(['iter', 'time', 'kl', 'winRate'])
   })
 
   it('存储里的陌生键被忽略（别表的键不会变出幽灵列，也不会挤掉本表的列）', () => {
+    // 只有 kl 是认识的（它在模型里排最后）⇒ 缺的 iter/time/winRate 回模型位，排它前面
     expect(keyOf(applyColOrder(COLS, ['bm:ticks', 'kl']))).toEqual([
-      'kl',
       'iter',
       'time',
       'winRate',
+      'kl',
     ])
   })
 
@@ -71,6 +88,104 @@ describe('applyColOrder：键序 → 列序', () => {
     applyColOrder(COLS, order)
     expect(keyOf(COLS)).toEqual([...KEYS])
     expect(order).toEqual(['kl'])
+  })
+})
+
+describe('跨视图：一个存储键服务列集合不同的多个视图（2026-11-10 报障）', () => {
+  // eval 视图的真实形状（简化成同一段）：eval 胜率排在 time 之后。
+  const EVAL_COLS = ['iter', 'time', 'evalRate', 'b01', 'avgWinTicks', 'scoreMean'].map((key) => ({
+    key,
+  }))
+  // 「全部」视图拖动后写下的顺序（不含 eval 专属列——列集合里根本没有它们）。
+  const ALL_DRAG = ['winRate', 'iter', 'time', 'avgWinTicks', 'kills', 'scoreMean']
+
+  it('旧存储缺 eval 专属列 ⇒ eval 胜率回到 time 之后（不再被甩到尾）', () => {
+    expect(keyOf(applyColOrder(EVAL_COLS, ALL_DRAG))).toEqual([
+      'iter',
+      'time',
+      'evalRate',
+      'b01',
+      'avgWinTicks',
+      'scoreMean',
+    ])
+  })
+
+  it('拖拽基准用键全集：顺序表含两个视图的键，切视图不再丢位置', () => {
+    const base = resolveColOrder(METRIC_ORDER_KEYS, null)
+    const dragged = moveColKey(base, 'winRate', 'iter')
+    expect(dragged).toContain('evalRate')
+    expect(dragged.indexOf('winRate')).toBeLessThan(dragged.indexOf('iter'))
+    // 同一份顺序套到 eval 视图：eval 胜率仍在 time 后面（前三个位置不变）。
+    expect(keyOf(applyColOrder(EVAL_COLS, dragged)).slice(0, 3)).toEqual([
+      'iter',
+      'time',
+      'evalRate',
+    ])
+  })
+
+  it('藏起来的列保住拖拽后的位置（取消隐藏不回表尾）', () => {
+    const visible = COLS.filter((c) => c.key !== 'kl') // kl 被藏起来，没参与拖动
+    const afterDrag = moveColKey(resolveColOrder(KEYS, null), 'winRate', 'iter')
+    expect(keyOf(applyColOrder(visible, afterDrag))).toEqual(['winRate', 'iter', 'time'])
+    // 取消隐藏：kl 仍在拖拽后该在的地方（这里是表尾，但它被 pos 记住而不是被当新列）
+    expect(keyOf(applyColOrder(COLS, afterDrag))).toEqual(['winRate', 'iter', 'time', 'kl'])
+  })
+})
+
+describe('两个视图互不牵扯（2026-11-10 报障：改 rollout 胜率会动 eval 胜率）', () => {
+  const rollout = ['iter', 'time', 'winRate', 'avgWinTicks', 'kills', 'scoreMean']
+  const evalCols = ['iter', 'time', 'evalRate', 'b01', 'avgWinTicks', 'scoreMean']
+  const asCols = (ks: readonly string[]): { key: string }[] => ks.map((key) => ({ key }))
+
+  it('rollout 视图拖 winRate：eval 视图的 evalRate 仍锚在 time 后面', () => {
+    const stored = resolveColOrder(METRIC_ORDER_KEYS, rollout, METRIC_ORDER_REFS)
+    const after = resolveColOrder(
+      METRIC_ORDER_KEYS,
+      moveColKey(stored, 'winRate', 'iter'),
+      METRIC_ORDER_REFS,
+    )
+    expect(after[0]).toBe('winRate')
+    expect(keyOf(applyColOrder(asCols(evalCols), after)).slice(0, 3)).toEqual([
+      'iter',
+      'time',
+      'evalRate',
+    ])
+  })
+
+  it('eval 视图拖 evalRate：rollout 视图的 winRate 仍锚在 time 后面', () => {
+    const stored = resolveColOrder(METRIC_ORDER_KEYS, evalCols, METRIC_ORDER_REFS)
+    const after = resolveColOrder(
+      METRIC_ORDER_KEYS,
+      moveColKey(stored, 'evalRate', 'iter'),
+      METRIC_ORDER_REFS,
+    )
+    expect(after[0]).toBe('evalRate')
+    expect(keyOf(applyColOrder(asCols(rollout), after)).slice(0, 3)).toEqual([
+      'iter',
+      'time',
+      'winRate',
+    ])
+  })
+
+  it('已存顺序是权威：拖当前视图的列不重算另一视图的键', () => {
+    const stored = resolveColOrder(METRIC_ORDER_KEYS, evalCols, METRIC_ORDER_REFS)
+    const moved = moveColKey(stored, 'evalRate', 'time') // 用户把 eval 胜率放到 time 前
+    const after = resolveColOrder(
+      METRIC_ORDER_KEYS,
+      moveColKey(moved, 'winRate', 'iter'), // 之后在 rollout 视图拖 winRate
+      METRIC_ORDER_REFS,
+    )
+    expect(after.indexOf('evalRate')).toBeLessThan(after.indexOf('time'))
+  })
+})
+
+describe('METRIC_ORDER_KEYS：列顺序的键全集', () => {
+  it('覆盖两个视图与逐局指标的全部列，无重复', () => {
+    const keys = [...METRIC_ORDER_KEYS]
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const k of [...ROLLOUT_ROW_KEYS, ...EVAL_ROW_KEYS]) expect(keys).toContain(k)
+    for (const m of BEHAVIOR_METRICS) expect(keys).toContain(behaviorColKey(m.key))
+    expect(keys.length).toBe(Object.keys(METRIC_COLS).length)
   })
 })
 
@@ -143,6 +258,16 @@ describe('接线：两张表共用一份拖拽实现，顺序各存各的', () =
     expect(read('src/web/app/panels/MetricsTable.tsx')).toContain('reorderable')
     expect(read('src/web/components/DataTable.tsx')).toContain('.order')
     expect(read('src/web/view/legacy-keys.ts')).toContain('hero.iters.order')
+  })
+
+  it('拖拽按键全集算：指标页传 METRIC_ORDER_KEYS、首页用 resolveColOrder', () => {
+    expect(read('src/web/app/panels/MetricsTable.tsx')).toContain('orderKeys={METRIC_ORDER_KEYS}')
+    expect(read('src/web/app/panels/MetricsTable.tsx')).toContain('orderRefs={METRIC_ORDER_REFS}')
+    expect(read('src/web/components/DataTable.tsx')).toContain('resolveColOrder(')
+    const hero = read('src/web/app/panels/Hero.tsx')
+    expect(hero).toContain('resolveColOrder(')
+    expect(hero).toContain('METRIC_ORDER_KEYS')
+    expect(hero).toContain('METRIC_ORDER_REFS')
   })
 
   it('首帧不读 localStorage（hydrate 一致），偏好只在 effect 里恢复', () => {
