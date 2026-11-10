@@ -17,7 +17,7 @@ describe('userscript metadata', () => {
     expect(BLOCK.trimEnd().endsWith('// ==/UserScript==')).toBe(true)
   })
 
-  it('匹配 Kaggle 外层/帧 + Colab + AI Studio + 魔搭 notebook 帧（都有实测夹具）', () => {
+  it('匹配 Kaggle 外层/帧 + Colab + AI Studio + 魔搭 notebook 帧/工作区页（都有实测夹具）', () => {
     expect(META.matches).toEqual([
       'https://www.kaggle.com/code/*',
       'https://*.jupyter-proxy.kaggle.net/*',
@@ -25,6 +25,8 @@ describe('userscript metadata', () => {
       'https://aistudio.baidu.com/*',
       'https://modelscope.cn/notebook/*',
       'https://www.modelscope.cn/notebook/*',
+      'https://modelscope.cn/code/*',
+      'https://www.modelscope.cn/code/*',
     ])
     // 只有拿到真实结构才加 @match；没采样的站点加了就是「看起来支持」的灰面板
     expect(META.matches.some((m) => /aistudio\.baidu\.com/i.test(m))).toBe(true)
