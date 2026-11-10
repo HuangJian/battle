@@ -240,6 +240,8 @@ export function MetricsTable({
         storagePrefix="tc.metrics"
         // 显隐已由本页接管（弹窗 + `tc.metrics.cols`）⇒ 收起表格自带的「列▾」。
         columnsMenu={false}
+        // 表头可拖拽重排（用户 2026-11-10）：顺序存 `tc.metrics.order`，与显隐/统计量各存一份。
+        reorderable
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
         toolbarLeft={

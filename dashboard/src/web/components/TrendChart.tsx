@@ -19,7 +19,14 @@
 
 import { useLayoutEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import { sliceSeries, trendHoverIndex, trendTipCenter, type Series, type TrendRange } from '../view'
+import {
+  formulaLabel,
+  sliceSeries,
+  trendHoverIndex,
+  trendTipCenter,
+  type Series,
+  type TrendRange,
+} from '../view'
 
 export interface TrendChartProps {
   /** 主序列（rollout）：全量时序（组件内部按 range 截取）。 */
@@ -236,6 +243,11 @@ export function TrendChart({
   if (vals2 && hv2 != null && Number.isFinite(hv2)) {
     tipParts.push(`${series2!.label} ${fmt(hv2)}`)
   }
+  // formula 名（用户 2026-11-10）：与课程文件的 reward.formula 对照用。两条口径可能对应
+  // 同一个指标（rollout / eval 都是 mean(kills)）⇒ 去重后只写一次。
+  const formulaNames = [
+    ...new Set([series.formula, series2?.formula].filter((x): x is string => !!x)),
+  ]
 
   return (
     <div className="tc-trend" style={{ height }} ref={chartRef}>
@@ -419,6 +431,11 @@ export function TrendChart({
         >
           <span className="tc-trend__tip-it">it{hover != null ? iters[hover] : ''}</span>
           <span className="tc-trend__tip-val">{tipParts.join(' · ')}</span>
+          {formulaNames.length > 0 ? (
+            <span className="tc-trend__tip-formula">
+              {formulaNames.map(formulaLabel).join(' / ')}
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>

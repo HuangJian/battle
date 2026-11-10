@@ -3,6 +3,7 @@
  *  数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
 
 import {
+  applyColOrder,
   behaviorMetricSeries,
   BEHAVIOR_METRICS,
   behaviorTrendKey,
@@ -21,13 +22,16 @@ import {
   latestRow,
   METRIC_STAT_LABEL,
   metricSeries,
+  moveColKey,
   pairedBaselineOf,
   parseBehaviorMetricStats,
+  parseColOrder,
   parseHiddenCols,
   parseTrendVisibility,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_HERO_ITERS_COLS,
+  TC_HERO_ITERS_ORDER,
   TC_HERO_ITERS_STAT,
   TC_TREND_RANGE,
   TC_TREND_SCALE,
@@ -60,6 +64,7 @@ import { Switch } from '../../components/Switch'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
 import { TrendZoomModal, type ZoomTarget } from '../../components/TrendZoomModal'
 import type { Col } from '../../components/DataTable'
+import { colDragProps } from '../../components/col-drag'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { buildMetricCols, type MetricRow } from './metric-table-cols'
 import { ReplayExportModal } from './ReplayExportModal'
@@ -281,13 +286,36 @@ function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
  *  都要能配到首页」）：速览表以前手挑十几列、自己重写每格渲染，逐局指标（90+）与窗口/逐关账
  *  根本上不了首页，同一个读数还可能两处分叉。现在这里只剩排版——表头从列模型取、单元格按
  *  同一个列数组铺；速览与完整表的差别只有「哪 6 行 / 无排序 / 无表格自带列菜单」。 */
-function SummaryTable({ rows, cols }: { rows: MetricRow[]; cols: Col<MetricRow>[] }) {
+function SummaryTable({
+  rows,
+  cols,
+  onMove,
+}: {
+  rows: MetricRow[]
+  cols: Col<MetricRow>[]
+  onMove: (from: string, to: string) => void
+}) {
+  // 正在拖的列（只为了给表头上色；顺序本身由父组件的偏好决定）。
+  const [dragKey, setDragKey] = useState<string | null>(null)
   return (
-    <table className="tc-table tc-table--dense">
+    <table className="tc-table tc-table--dense tc-table--reorder">
       <thead>
         <tr>
           {cols.map((c) => (
-            <th key={c.key} className={c.align === 'num' ? 'tc-num' : undefined} title={c.thTitle}>
+            <th
+              key={c.key}
+              className={`${c.align === 'num' ? 'tc-num' : ''}${
+                dragKey === c.key ? ' tc-th--dragging' : ''
+              }`}
+              title={c.thTitle}
+              {...colDragProps({
+                key: c.key,
+                dragging: dragKey,
+                onDragStart: setDragKey,
+                onDragEnd: () => setDragKey(null),
+                onMove,
+              })}
+            >
               {c.label}
             </th>
           ))}
@@ -418,6 +446,17 @@ function LastIters({
   }
   const [colsOpen, setColsOpen] = useState(false)
 
+  // 列顺序（用户 2026-11-10：拖拽表头自定义位置）。首帧 = 模型顺序，mount 后恢复；
+  // 写入只在松手时发生（首帧的 null 不许把已存顺序抹掉）。
+  const [colOrder, setColOrder] = useState<string[] | null>(null)
+  useEffect(() => {
+    try {
+      setColOrder(parseColOrder(localStorage.getItem(TC_HERO_ITERS_ORDER)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+
   const mains = heroMainRows(iters)
   if (mains.length === 0) return null
   const ev = view === 'eval'
@@ -444,7 +483,19 @@ function LastIters({
     // 最新一轮不挂状态徽标（用户 2026-11-10）：它恒是刚采集收官、PPO 未回传的那轮。
     { quietStatusIter: rows[0]?.iter ?? null },
   )
-  const cols = allCols.filter((c) => !hiddenCols.has(c.key))
+  // 顺序只作用于显示：全部列（含藏起来的）排好后再过滤，藏一列再拖不会让它的位置失效。
+  const orderedAll = applyColOrder(allCols, colOrder)
+  const fullOrder = orderedAll.map((c) => c.key)
+  const cols = orderedAll.filter((c) => !hiddenCols.has(c.key))
+  const onMoveCol = (from: string, to: string): void => {
+    const next = moveColKey(fullOrder, from, to)
+    setColOrder(next)
+    try {
+      localStorage.setItem(TC_HERO_ITERS_ORDER, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
   const n = ev ? filterGroups(iterGroups(iters), 'eval').length : mains.length
   return (
     <div className="tc-hero__iters">
@@ -477,7 +528,7 @@ function LastIters({
           <button
             type="button"
             className="tc-btn tc-btn--sm"
-            title="选这张速览表显示哪些列（主行 / eval 各一套；藏起来的列在完整指标表里照旧可看）"
+            title="选这张速览表显示哪些列（主行 / eval 各一套；藏起来的列在完整指标表里照旧可看）；也可直接拖动表头调整列位置"
             onClick={() => setColsOpen(true)}
           >
             列配置
@@ -514,7 +565,7 @@ function LastIters({
       />
       {/* 横向滚动只给表体（列可配到 100+ 列）：标题与按钮留在视野内。 */}
       <div className="tc-hero__iters-wrap">
-        {collapsed ? null : <SummaryTable rows={rows} cols={cols} />}
+        {collapsed ? null : <SummaryTable rows={rows} cols={cols} onMove={onMoveCol} />}
       </div>
     </div>
   )

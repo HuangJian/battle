@@ -204,16 +204,61 @@ describe('渲染级闸：两处表头 = 同一份模型', () => {
   it('首页速览表与完整指标表（all 模式）：表头逐列完全相同（用户 2026-11-10）', async () => {
     const { Hero } = await import('../src/web/app/panels/Hero')
     const { MetricsTable } = await import('../src/web/app/panels/MetricsTable')
-    const hero = heads(
-      slice(renderToString(h(Hero, { stateView: mkView(ROWS), onMore: () => {} }))),
-    )
-    const full = heads(slice(renderToString(h(MetricsTable, { stateView: mkView(ROWS) }))))
+    const heroHtml = slice(renderToString(h(Hero, { stateView: mkView(ROWS), onMore: () => {} })))
+    const fullHtml = slice(renderToString(h(MetricsTable, { stateView: mkView(ROWS) })))
+    const hero = heads(heroHtml)
+    const full = heads(fullHtml)
     expect(hero.length).toBeGreaterThan(0)
     expect(hero.map((x) => x.label)).toEqual(full.map((x) => x.label))
     for (const [i, x] of hero.entries()) {
       expect(x.title).toBe(full[i].title)
       expect(x.num).toBe(full[i].num)
     }
+    // 拖拽重排（用户 2026-11-10）：两张表的每个表头都可拖（同一个 colDragProps）。
+    expect(heroHtml.match(/draggable=/g)?.length).toBe(hero.length)
+    expect(fullHtml.match(/draggable=/g)?.length).toBe(full.length)
+  })
+
+  it('已跑过 evalA 的轮：入口退役，原位显示那次 eval 胜率（用户 2026-11-10）', async () => {
+    const { MetricsTable } = await import('../src/web/app/panels/MetricsTable')
+    const evalData = {
+      time: '2026-09-20 09:05:00',
+      games: 8,
+      wins: 6,
+      winRate: 0.75,
+      clears: 6,
+      clearRate: 0.75,
+      dropped: 0,
+      sec: 90,
+      wver: 'abc1234',
+      outcomes: {},
+      avgTicks: 900,
+      avgWinTicks: 800,
+      totalKills: 32,
+      totalPU: 8,
+      avgResidualHp: null,
+      avgLossTicks: null,
+      dmgPerKill: null,
+      scoreMean: 0.5,
+      scoreStd: 0.1,
+    } as NonNullable<IterRow['evalData']>
+    const html = slice(
+      renderToString(h(MetricsTable, { stateView: mkView([fakeRow(3), fakeRow(2, evalData)]) })),
+    )
+    /** 取 `<b>iter</b>` 所在的那一行（主行；eval 子行是灰字，不带 <b>）。 */
+    const rowOf = (iter: number): string => {
+      const at = html.indexOf(`<b>${iter}</b>`)
+      expect(at, `找不到 it${iter} 那一行`).toBeGreaterThan(-1)
+      return html.slice(at, html.indexOf('</tr>', at))
+    }
+    // 没评过的轮：入口照旧在场
+    expect(rowOf(3)).toContain('evalA')
+    // 评过的轮：按钮消失，同一格换成干净评估胜率（75.0%，hover 说清这是这次的结果）
+    const rated = rowOf(2)
+    // 按钮本体没了（`>evalA<`）；hover 文案例外——它正是在说「这是该轮 evalA 的结果」。
+    expect(rated).not.toContain('>evalA<')
+    expect(rated).toContain('75.0%')
+    expect(rated).toContain('该轮 evalA 结果')
   })
 
   it('指标页表（all 模式）：每个表头都能在模型里找到，且口径一字不差', async () => {

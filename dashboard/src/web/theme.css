@@ -580,6 +580,21 @@ a.tc-btn {
 .tc-table td.tdhl {
   box-shadow: inset 3px 0 0 var(--accent);
 }
+/* ── 表头拖拽重排（用户 2026-11-10：指标表各列可自定义位置） ── */
+.tc-table--reorder thead th {
+  cursor: grab;
+}
+.tc-table--reorder thead th:active {
+  cursor: grabbing;
+}
+/* 正在拖的那列“提起来”：变淡 + 丢掉 hover 强调，剩下的位置一眼看得出 */
+.tc-table thead th.tc-th--dragging {
+  opacity: 0.45;
+}
+.tc-table thead th.tc-th--dragging:hover {
+  background: #fafbfd;
+  color: var(--muted);
+}
 .tc-table--dense tbody td {
   padding: 5px 10px;
   font-size: var(--fs-base);
@@ -908,6 +923,14 @@ a.tc-btn {
   width: 100%;
   height: 100%;
   overflow: visible;
+}
+/* hover 里的 formula 名（用户 2026-11-10）：与数值同一块提示，等宽字体便于对照课程公式 */
+.tc-trend__tip-formula {
+  display: block;
+  margin-top: 1px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-sm);
+  color: var(--muted);
 }
 .tc-trend__tip {
   position: absolute;

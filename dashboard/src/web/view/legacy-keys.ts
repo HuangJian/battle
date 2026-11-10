@@ -27,6 +27,8 @@ export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
 export const TC_HERO_ITERS_COLS = `${TC_KEY_PREFIX}hero.iters.cols`
 /** 首页速览表的逐局指标统计量（与指标页各自一份：两张表各看各的口径）。 */
 export const TC_HERO_ITERS_STAT = `${TC_KEY_PREFIX}hero.iters.stat`
+/** 首页速览表的列顺序（JSON 字符串数组 = 全部列键，含藏起来的列；拖拽表头产生）。 */
+export const TC_HERO_ITERS_ORDER = `${TC_KEY_PREFIX}hero.iters.order`
 /** 侧栏折叠态（'1' = 图标条；**只由品牌行的折叠键写**，不随视口/hover 自动切换）。 */
 export const TC_SIDE_COLLAPSED = `${TC_KEY_PREFIX}side.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`

@@ -24,6 +24,8 @@ import {
   fmtPct,
   fmtPhaseSecs,
   fmtStampToday,
+  formulaLabel,
+  formulaMetricName,
   iterGroups,
   klTone,
   METRIC_COLS,
@@ -199,7 +201,22 @@ function iterCol(ea: EvalACols, opts: MetricColsOptions): Col<MetricRow> {
               PPO 中
             </span>
           ) : null}
-          {!ea.readOnly && ea.course && !r.main.evalData ? (
+          {r.main.evalData ? (
+            // 已跑过 evalA（用户 2026-11-10）：按钮退役，**原位换成那次干净评估的胜率**——
+            // 同一格要么是「可以点一下」的入口，要么是点完之后的结果，不让两者并存。
+            r.main.evalData.winRate !== null ? (
+              <Badge
+                tone={winTone(r.main.evalData.winRate)}
+                title={`该轮 evalA 结果：干净评估（greedy 固定语料）· 评估权重 = 第 ${r.main.iter} 轮 PPO 更新前 · ${r.main.evalData.games} 局 ${r.main.evalData.wins} 胜`}
+              >
+                {fmtPct(r.main.evalData.winRate)}
+              </Badge>
+            ) : (
+              <span className="tc-muted" title="该轮有评估记录，但没有胜率读数">
+                —
+              </span>
+            )
+          ) : !ea.readOnly && ea.course ? (
             <button
               type="button"
               className="tc-btn tc-btn--sm tc-ml-2"
@@ -355,11 +372,17 @@ function behaviorCols(stats: BehaviorMetricStatMap): Col<MetricRow>[] {
   return BEHAVIOR_METRICS.map((def: BehaviorMetricDef) => {
     const stat = stats[def.key] ?? 'mean'
     const model = METRIC_COLS[behaviorColKey(def.key)]
+    // formula 名（用户 2026-11-10）：这一列在课程 reward.formula 里叫什么。
+    // eval 专属两列在 metrics 向量里没有位置 ⇒ formula = null（不冒充）。
+    const formula = formulaMetricName(def.key)
+    const formulaText = formula ? `\n${formulaLabel(formula)}` : ''
     return {
       ...colDef(model.key),
       // 统计量非均值时表头带后缀（中位数/p90 不能只靠 hover 才知道）。
       label: metricColLabelWithStat(model.label, stat),
-      thTitle: `${def.title}；表内显示${METRIC_STAT_LABEL[stat]}（单元格 hover 列全六种）`,
+      thTitle: `${def.title}；表内显示${METRIC_STAT_LABEL[stat]}（单元格 hover 列全六种）${
+        formula ? `；${formulaLabel(formula)}` : ''
+      }`,
       sortValue: (r) => metricStatValue(rowMetricStats(r, def.key), stat),
       cell: (r) => {
         const st = rowMetricStats(r, def.key)
@@ -368,7 +391,7 @@ function behaviorCols(stats: BehaviorMetricStatMap): Col<MetricRow>[] {
           (k) => `${METRIC_STAT_LABEL[k]} ${fmtMetricStat(st[k], def)}`,
         ).join(' · ')
         return (
-          <span title={`${def.title}\n${all}\n表内显示：${METRIC_STAT_LABEL[stat]}`}>
+          <span title={`${def.title}${formulaText}\n${all}\n表内显示：${METRIC_STAT_LABEL[stat]}`}>
             {fmtMetricStat(metricStatValue(st, stat), def)}
           </span>
         )
