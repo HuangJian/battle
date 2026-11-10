@@ -49,6 +49,7 @@ import {
   courseEnableMarkerPath,
   isBcCourse,
   resolveArchivedSeedPath,
+  resolveCourseBc,
   seedWeightsFromBc,
 } from '../../stack/courses'
 import { pruneLegacyCourseKnobs, pruneStoppedCourseConfig } from '../../stack/course-knobs'
@@ -58,6 +59,12 @@ import { remoteExecutionFace } from '../../stack/push-config'
 import { hubCandidates, hubReleaseCourseHold } from '../../stack/hub-admin'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { ensureFreshTaskBundle } from './auto-offline-handoff'
+import {
+  baseWeightsPath,
+  type OpenableProbe,
+  type OpenCheckResult,
+  runCourseOpenCheck,
+} from '../../stack/course-open-check'
 import { loopControlPath } from '../../core/paths'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
@@ -265,8 +272,23 @@ export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFact
 // ⇒ it0 读数两条产路都不通，得在开课那一刻补一次」（2026-09-24）。课程去模式化后开课
 // **恒为本机跑**，主循环的基线派发（`trainer/loop_baseline.py`）就在场上，不需要替代产路。
 
-/** **开课**：把一门课放进训练（进程没跑也能放——训练进程是发现式的，下一拍就入队）。 */
-export async function openCourse(course: string, opts: OpenCourseOpts = {}): Promise<ActionResult> {
+/** 开课前体检的**默认**实现（真起 python 跑训练栈同一条校验链）。
+ *  `setOpenableProbe` 只是单测注入点（避免单测拉起训练栈）；生产路径永远是它。 */
+let defaultProbe: OpenableProbe = runCourseOpenCheck
+/** 单测注入点：换掉默认体检实现（`openCourse` 的 `deps.probe` 优先级更高）。 */
+export function setOpenableProbe(fn: OpenableProbe): void {
+  defaultProbe = fn
+}
+
+/** **开课**：把一门课放进训练（进程没跑也能放——训练进程是发现式的，下一拍就入队）。
+ *
+ *  `deps.probe` = 开课前体检的注入点（缺省 = 真起 python 跑训练栈同一条校验链；
+ *  单测不拉起训练栈）。 */
+export async function openCourse(
+  course: string,
+  opts: OpenCourseOpts = {},
+  deps: { probe?: OpenableProbe } = {},
+): Promise<ActionResult> {
   guard(`course-open:${course}`)
   try {
     const c = String(course ?? '').trim()
@@ -296,6 +318,34 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     //    · 暂停意图文件必须**可读可解析**：`setCoursePaused` 对坏文件是保守拒绝（不覆盖，
     //      可能有人在手改/另一份工具在写）——而它是写面里唯一会拒绝的一步。坏文件是
     //      「已知事实」，体检放这里才叫「拒绝 = 零副作用」。
+    //    · **课程配置 + 基础权重体检**（2026-11-10 用户：「不要等 ppo 时才错误退出」）：
+    //      跑训练栈**同一条**校验链——课程文件 pydantic schema（`biz/course_resolve.load_course`）、
+    //      RL 运行时链（`worker.course_args.course_openable` = rl-config → apply_course →
+    //      validate_args）、基础权重清单（`worker.data.weights_meta.read_weights_meta`）。
+    //      判据只有 python 一份（TS 侧重写课程 schema 必与 pydantic 分叉）；这里只负责在
+    //      写面之前拒绝、并把原文原因上屏。
+    const probe = deps.probe ?? defaultProbe
+    let check: OpenCheckResult
+    try {
+      check = probe(c, bc ? null : baseWeightsPath(c, seedPath, resolveCourseBc(c)))
+    } catch (e) {
+      return done(false, `${c} 未开课：开课前体检跑不起来`, [
+        e instanceof Error ? e.message : String(e),
+        '本次开课**未写任何东西**——体检在训练栈的 python 里跑（venv/pydantic 未就绪时先装环境）。',
+      ])
+    }
+    if (!check.ok || (check.weights && !check.weights.ok)) {
+      const lines: string[] = []
+      if (!check.ok) lines.push(`课程配置：${check.reason}`)
+      if (check.weights && !check.weights.ok) {
+        lines.push(`基础权重 schema 不符（${check.weights.path}）：${check.weights.reason}`)
+      }
+      lines.push(
+        '本次开课**未写任何东西**——先把上面这条改好（判据 = 训练栈同一条校验链，' +
+          '不是控制台另写的一套），改完再点开课。',
+      )
+      return done(false, `${c} 未开课：开课前配置体检不通过`, lines)
+    }
     const control = readLoopControl()
     if (control.error) {
       return done(false, `${c} 未开课：控制文件有问题，未改动`, [
