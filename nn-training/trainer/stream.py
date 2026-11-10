@@ -107,6 +107,9 @@ def run_rollout_stream(
     course_fp: str | None = None,
     corpus_fp: str | None = None,
     on_shard=None,
+    # 采集真正收官（collector 线程退出）时回调一次；调用方用它解冻 eval 闸。
+    # 必须在尾部 drain **之前**调用：尾部 PPO 是本地算力，节点已经空闲，eval 该进场。
+    on_collect_end=None,
 ) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
@@ -400,6 +403,13 @@ def run_rollout_stream(
     # 主线程测量，最后一个 in-flight wave 的更新时长会被误计入采集窗口。
     collect_done = box.get("t_end") or time.time()
     th.join(timeout=5.0)
+    # collector 已退出 ⇒ 节点不再有本轮的采集任务在派发（尾部只可能有竞速输家）。
+    # 解冻 eval 只能在这里做：此前 `_rollout_phase` 的 `with` 作用域会把 PPO 也包进去。
+    if on_collect_end is not None and not th.is_alive():
+        try:
+            on_collect_end()
+        except Exception as cb_err:
+            log(f"[stream] on_collect_end error: {str(cb_err)[:120]}")
     with lock:
         n_left = len(pend)
     log(

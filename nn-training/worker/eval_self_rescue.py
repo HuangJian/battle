@@ -46,9 +46,9 @@ def round_live(rnd: EvalRound, execs: Any, now: float | None = None) -> bool:
     """这一轮还有没有「取得到任务」的活线程（节点须可路由，本机须参与且已孵）。"""
     now = time.time() if now is None else float(now)
     for nid in rnd.node_ids():
-        if rnd.node_routable(nid, now) and execs.live(nid) > 0:
+        if rnd.node_routable(nid, now) and execs.active(nid) > 0:
             return True
-    return rnd.local_ok(now) and execs.live(LOCAL_NODE) > 0
+    return rnd.local_ok(now) and execs.active(LOCAL_NODE) > 0
 
 
 def grow_pools(rnd: EvalRound, execs: Any) -> int:
@@ -76,18 +76,24 @@ def grow_pools(rnd: EvalRound, execs: Any) -> int:
             continue
         if not rnd.node_routable(nid, time.time()):
             continue
-        alive_n = execs.live(nid)
+        alive_n = execs.active(nid)
         base_c = int(nd.get("baseC") or nd.get("c") or 1)
         others = max(0, int(ping.get("inflight") or 0) - alive_n)
         want = eval_slot_cap(base_c, others)
         add = want - alive_n
-        if add <= 0:
-            continue
-        added += execs.ensure_node({**nd, "c": want}, want)
-        rnd.log(
-            f"[eval] it{rnd.it}: node {nid} 扩容 +{add} → {want} 线程"
-            f"（inflight={ping.get('inflight')}，队列还剩 {queue_len} 局）"
-        )
+        # 即使 add<=0 也要 ensure：want 变小时池子要真正缩，owner 目标也要刷新。
+        rnd.set_node_cap(nid, want)
+        added += execs.ensure_node({**nd, "c": want}, want, owner=rnd)
+        if add > 0:
+            rnd.log(
+                f"[eval] it{rnd.it}: node {nid} 扩容 +{add} → {want} 线程"
+                f"（inflight={ping.get('inflight')}，队列还剩 {queue_len} 局）"
+            )
+        elif add < 0:
+            rnd.log(
+                f"[eval] it{rnd.it}: node {nid} 缩容 {add} → {want} 线程"
+                f"（inflight={ping.get('inflight')}，队列还剩 {queue_len} 局）"
+            )
     return added
 
 
@@ -111,7 +117,7 @@ def rescue_round(rnd: EvalRound, execs: Any) -> str:
         True,
     ):
         rnd.mark_local_spawned()
-        execs.ensure_local(rnd.local_slots)
+        execs.ensure_local(rnd.local_slots, owner=rnd)
         rnd.log(
             f"[eval] it{rnd.it}: local fallback ×{rnd.local_slots}"
             f"（节点消费线程轮中归零，队列还剩 {queue_len} 局）"
@@ -133,7 +139,9 @@ def rescue_round(rnd: EvalRound, execs: Any) -> str:
         if nd is None:
             continue
         rnd.revive_node(nid, now + soft_comeback_backoff_sec(back_n + 1))
-        execs.ensure_node(nd, int(nd.get("c") or 0))
+        cap = int(nd.get("c") or 0)
+        rnd.set_node_cap(nid, cap)
+        execs.ensure_node(nd, cap, owner=rnd)
         acted = True
         rnd.log(
             f"[eval] it{rnd.it}: node {nid} 停派后回场"

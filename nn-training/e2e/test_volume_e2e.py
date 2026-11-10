@@ -497,6 +497,10 @@ def _env(
             "queueWindowSec": 120,
             "statusTimeoutSec": 3,
             "agentRescanSec": 1,
+            # 假节点偶尔在 all_settled 后回 "aborted: settled complete"（瞬时错误）；
+            # 默认 5s 退避会在满载下把跨重启用例推过 30s 预算（2026-11-10 flake）。
+            # 只调节奏，不碰配额/重试断言。
+            "transientBackoffSec": 0.02,
             "tailFanoutN": 4 if fanout else 0,
             "tailFanoutDup": 2 if fanout else 0,
         },

@@ -55,6 +55,8 @@ class _Harness:
         ping_fn=None,
         policy: dict[str, Any] | None = None,
         respawn: bool = True,
+        local_slots: int = 0,
+        workers: int = 1,
     ) -> None:
         self.mp = monkeypatch
         self.work = tmp_path / "a-layer"
@@ -66,7 +68,7 @@ class _Harness:
         self.logs: list[str] = []
         self.refreshed: list[dict] = []
         self.args = types.SimpleNamespace(
-            workers=1,
+            workers=workers,
             max_ticks=10,
             difficulty="hard",
             lives_override=None,
@@ -94,6 +96,9 @@ class _Harness:
             },
         }
         self.games = games
+        self.local_slots = local_slots
+        # 本机腿的测试统一打桩：不启真 bun、不建长驻池。
+        monkeypatch.setattr(disp, "make_local_pool", lambda *a, **k: None)
         monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(disp, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(
@@ -147,7 +152,7 @@ class _Harness:
             self.args,
             self.cfg,
             "rid.7",
-            local_slots_max=0,
+            local_slots_max=self.local_slots,
             halt_event=halt_event,
             on_shard=on_shard,
         ).run()
@@ -564,3 +569,157 @@ def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
     assert report.get("halt_aborted") is True, report
     # timing-ok: 上界兜底（halt 后不得白等窗口，3s 只挡挂起）
     assert elapsed < 3.0, f"halt 后不得白等窗口（实测 {elapsed:.1f}s）"
+
+
+def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> None:
+    """分配超时重排必须**取消原请求**，不能只在队列里再放一份。
+
+    场景：单节点 2 槽、一局。A 槽的主副本卡在 fetch（模拟闪断/隧道挂住），
+    B 槽空闲 → 30s reaper（用例里 0.05s）把它回队。旧实现随后会再取一次活、
+    同一局在节点上跑第二遍；新实现先对原 attempt 的 tag 调
+    `abort_active_requests`，再回队。
+
+    判据：① 取活恰好 2 次（原请求 + 重排后的一次），不是无限重排；
+    ② abort 被调用且 tag 是 rollout 作用域；③ 缺局为空。
+    """
+    node = {
+        **_node("a97", 2),
+        "c": 2,
+        # fake_post 从配置节点拷 ping；不打能力位 ⇒ 训练侧不会登记取消目标。
+        "ping": {**GOOD_PING, "cpus": 2, "cancelSupport": True},
+    }
+    h = _Harness(
+        tmp_path,
+        monkeypatch,
+        games=1,
+        nodes=[node],
+        ping_fn=lambda *_a, **_k: {**GOOD_PING, "cpus": 2, "cancelSupport": True},
+        policy={"taskFetchTimeoutSec": 0.05, "queueWindowSec": 3.0},
+    )
+    calls: list[str] = []
+    aborted: list[str] = []
+    cancelled: list[tuple[str, str, str]] = []
+    cancel_seen = threading.Event()
+    real_abort = common.distribution.abort_active_requests
+
+    def spy_abort(tag: str = "") -> int:
+        aborted.append(tag)
+        return real_abort(tag)
+
+    def spy_cancel(url: str, auth: str, key: str) -> bool:
+        cancelled.append((url, auth, key))
+        cancel_seen.set()
+        return True
+
+    monkeypatch.setattr(common.distribution, "abort_active_requests", spy_abort)
+    monkeypatch.setattr(common.distribution, "cancel_task", spy_cancel)
+    release = threading.Event()
+
+    def fetch(url: str, *_a, **kw):
+        calls.append(url)
+        on_key = kw.get("on_key")
+        if on_key is not None:
+            on_key("it-cancel:rollout:rollout:0:1")
+        if len(calls) == 1:
+            release.wait(2)  # 第一份卡住；重排的第二份立刻返回
+        return h.manifest(), {}
+
+    try:
+        report = h.run(fetch)
+    finally:
+        release.set()
+
+    assert report["missing"] == [], report.get("missing")
+    assert len(calls) == 2, (
+        f"同一局应只执行两次（原请求 + 重排），实测 {len(calls)}；logs={h.logs}"
+    )
+    assert any(t.startswith("rollout:") for t in aborted), (
+        f"reaper 没有取消原请求的断连作用域：{aborted}"
+    )
+    assert cancel_seen.wait(2), f"reaper 没有给远端发 /v1/cancel；logs={h.logs}"
+    assert any(key == "it-cancel:rollout:rollout:0:1" for _, _, key in cancelled), (
+        f"取消请求没有带上 taskKey：{cancelled}"
+    )
+    assert any(url == node["url"] for url, _, _ in cancelled), (
+        f"取消请求没有发到持有任务的节点：{cancelled}"
+    )
+
+
+def test_local_slots_zero_spawns_no_local_threads(tmp_path, monkeypatch) -> None:
+    """B3：local_slots=0 不再预孵化 cap_full 条空转本机线程。"""
+    h = _Harness(tmp_path, monkeypatch, games=4, nodes=[_node("a97")], workers=4)
+    local_calls: list[tuple[int, int]] = []
+    spawned: list[int] = []
+    real_spawn = ql.LocalLane.spawn
+
+    def spy_spawn(self, n):
+        spawned.append(n)
+        real_spawn(self, n)
+
+    def local_run(_bun, _rl, _traj, _idx, task, *_a, **_k):
+        local_calls.append(task)
+        return h.manifest()
+
+    monkeypatch.setattr(ql.LocalLane, "spawn", spy_spawn)
+    monkeypatch.setattr(disp, "run_local_rollout", local_run)
+
+    report = h.run(lambda *_a, **_k: (h.manifest(), {}))
+
+    assert report["missing"] == [], report.get("missing")
+    assert local_calls == [], f"local_slots=0 仍跑了本机局: {local_calls}"
+    assert spawned == [0], f"local_slots=0 仍孵化了本机线程: {spawned}"
+
+
+def test_local_slots_caps_initial_local_threads(tmp_path, monkeypatch) -> None:
+    """B3：初始本机线程数 = local_slots，不再取 max(local_slots, cap_full)。"""
+    h = _Harness(tmp_path, monkeypatch, games=4, nodes=[_node("a97")], workers=4, local_slots=2)
+    spawned: list[int] = []
+    real_spawn = ql.LocalLane.spawn
+
+    def spy_spawn(self, n):
+        spawned.append(n)
+        real_spawn(self, n)
+
+    monkeypatch.setattr(ql.LocalLane, "spawn", spy_spawn)
+    monkeypatch.setattr(disp, "run_local_rollout", lambda *_a, **_k: h.manifest())
+
+    report = h.run(lambda *_a, **_k: (h.manifest(), {}))
+
+    assert report["missing"] == [], report.get("missing")
+    assert spawned == [2], f"初始本机线程数不等于 local_slots: {spawned}"
+
+
+def test_local_slots_zero_falls_back_when_remote_dead(tmp_path, monkeypatch) -> None:
+    """B3：本机 0 线程时，远端失联仍要按 cap_full 补孵并接盘。"""
+    h = _Harness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=[_node("a97")],
+        workers=2,
+        policy={"remoteDeadSecs": 0.05, "queueWindowSec": 2.0},
+    )
+    local_calls: list[tuple[int, int]] = []
+    spawned: list[int] = []
+    real_spawn = ql.LocalLane.spawn
+
+    def spy_spawn(self, n):
+        spawned.append(n)
+        real_spawn(self, n)
+
+    def local_run(_bun, _rl, _traj, _idx, task, *_a, **_k):
+        local_calls.append(task)
+        return h.manifest()
+
+    monkeypatch.setattr(ql.LocalLane, "spawn", spy_spawn)
+    monkeypatch.setattr(disp, "run_local_rollout", local_run)
+
+    def fetch(*_a, **_k):
+        raise common.distribution.DistError(503, '{"error":"busy"}')
+
+    report = h.run(fetch)
+
+    assert report["missing"] == [], report.get("missing")
+    assert spawned == [0, 2], f"失联补孵不是 0 -> 2: {spawned}"
+    assert sorted(local_calls) == [(2000, 1), (2000, 2)], local_calls
+    assert report["dist"]["nodes"] == {"local": 2}, report["dist"]

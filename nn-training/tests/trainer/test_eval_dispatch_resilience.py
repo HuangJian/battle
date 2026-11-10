@@ -1907,8 +1907,9 @@ def test_course_rollout_does_not_freeze_sibling_course_eval(
         )
         a_thread.start()
         assert registered.wait(timeout=20.0), "A 课的轮没有登记"
-        # A 的权重 POST 已收工（窗口 arm）：池线程此刻真能领局，0 次才是「被冻结」而非「还没开跑」。
-        assert armed.wait(timeout=20.0), "A 课的权重没有就绪（窗口未 arm）"
+        # B2：A 冻结期间连权重都不 POST（窗口不会 arm），但仍登记在仲裁器里；
+        # B 课不因 A 的冻结而停。
+        assert not armed.wait(0.2), "A 课冻结期间不应 POST/arm 权重"
         assert calls["a"] == 0, "A 课冻结期间仍在派新局"
 
         rows_b, _ = hb.play(fetch, run_id="rid.b", it=8)
@@ -1920,6 +1921,7 @@ def test_course_rollout_does_not_freeze_sibling_course_eval(
 
         gate.end_rollout(fp_a)
         frozen = False
+        assert armed.wait(timeout=20.0), "解冻后 A 课的权重才应就绪"
         a_thread.join(timeout=30.0)
         assert not a_thread.is_alive(), "解冻后 A 课没有收口"
     finally:
@@ -2110,3 +2112,45 @@ def test_unregister_does_not_rewind_round_robin_cursor() -> None:
         "游标被 unregister 归一化，A 又拿了一局"
     )
     assert a.claims == 1 and b.claims == 1
+
+
+def test_post_weights_is_deferred_until_thaw(tmp_path, monkeypatch) -> None:
+    """B2：冻结期不得 POST 权重；解冻后补发并正常收工。
+
+    旧顺序 register → ping → POST → arm_window：冻结只暂停窗口钟，权重仍会推给
+    节点，白白占 rollout 的带宽/桶。新行为把 POST 门放在读权重之前。
+    """
+    from worker.eval_arbiter import eval_arbiter
+
+    h = _Harness(tmp_path, monkeypatch, games=1)
+    post_called = threading.Event()
+
+    def post(nodes, *_a, **_k):
+        post_called.set()
+        return [
+            {"id": n["id"], "url": n["url"], "key": "", "c": 1, "baseC": 1}
+            for n in nodes
+        ]
+
+    monkeypatch.setattr(common.distribution, "post_weights_parallel", post)
+
+    def fetch(*_a, **kw):
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    monkeypatch.setattr(common.distribution, "fetch_task", fetch)
+    common.distribution.weights_push_cache_reset()
+    arb = eval_arbiter()
+    arb.freeze(None)
+    t = threading.Thread(
+        target=ed.dispatch_eval_round,
+        args=("bun", str(h.weights), h.traj, h.args, h.cfg, "rid.c", 5),
+        daemon=True,
+    )
+    t.start()
+    try:
+        assert not post_called.wait(0.2), "冻结期不得 POST 权重"
+    finally:
+        arb.thaw(None)
+    t.join(timeout=10)
+    assert not t.is_alive(), "解冻后 eval 轮应收工"
+    assert post_called.is_set(), "解冻后必须补 POST 权重"

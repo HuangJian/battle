@@ -15,6 +15,8 @@ import json
 import subprocess
 import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,117 @@ REPO_ROOT = (
 #: 最终能被收掉」的兜底；池没服务成照样回退一次性 spawn，而那条路仍然不限。取 30min：
 #: 8 并发实测单局 p99 16.8s（`docs/nn/runtime-opt.md` §8），超订下再慢两个数量级也到不了。
 LOCAL_GAME_TIMEOUT_SEC = 1800.0
+
+
+def split_local_head(
+    tasks: list[tuple[int, int]], local_slots: int
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """B3 轮转取单：把本机保留段与本机任务交替发牌。
+
+    旧形态把洗牌后的**前 k 个**任务整段留给本机（k = local_slots）⇒ 本机零延迟
+    恒占队首。现在从远端先发一张，再本机/远端轮流；本机份额仍恰好 k，且远端
+    任务保持原相对顺序。k = 0 / k >= n 退化为「全远端」/「全本机」。
+    """
+    k = min(max(0, int(local_slots)), len(tasks))
+    if k == 0:
+        return [], list(tasks)
+    if k == len(tasks):
+        return list(tasks), []
+    remote_quota = len(tasks) - k
+    head: list[tuple[int, int]] = []
+    rest: list[tuple[int, int]] = []
+    local_turn = False  # 远端先拿队首；本机槽不因零网络延迟固定抢第一张
+    for task in tasks:
+        take_local = (local_turn and len(head) < k) or len(rest) >= remote_quota
+        if take_local:
+            head.append(task)
+            local_turn = False
+        else:
+            rest.append(task)
+            local_turn = True
+    return head, rest
+
+
+class LocalLane:
+    """本机 worker 的孵化与远端失联补孵（B3）。
+
+    初始只孵 `local_slots` 条；远端连续 `remote_dead_sec` 无结算时补到
+    `cap_full`，恢复后让多孵的槽位自行退场。线程体仍由 dispatcher 的
+    `worker` 闭包提供，本类只持有槽位账。
+    """
+
+    def __init__(
+        self,
+        worker: Callable[[dict | None, int | None], None],
+        *,
+        local_slots: int,
+        cap_full: int,
+        local_cap: list[int],
+        last_remote_ok: list[float],
+        remote_dead_sec: float,
+        all_settled: threading.Event,
+        halt_event: threading.Event | None,
+        deadline: float,
+        lock: Any,
+        threads: list[threading.Thread],
+    ) -> None:
+        self.worker = worker
+        self.local_slots = local_slots
+        self.cap_full = cap_full
+        self.local_cap = local_cap
+        self.last_remote_ok = last_remote_ok
+        self.remote_dead_sec = remote_dead_sec
+        self.all_settled = all_settled
+        self.halt_event = halt_event
+        self.deadline = deadline
+        self.lock = lock
+        self.threads = threads
+        self._slots: list[tuple[int, threading.Thread]] = []
+
+    def spawn(self, n: int) -> None:
+        for _ in range(max(0, n)):
+            slot = len(self._slots)
+            t = threading.Thread(
+                target=self.worker, args=(None, slot), daemon=True, name="rollout-local"
+            )
+            t.start()
+            self.threads.append(t)
+            self._slots.append((slot, t))
+
+    def slot_allowed(self, slot: int) -> bool:
+        """失联补孵的槽位在远端恢复后返回 False（调用方持锁）。"""
+        return (
+            slot < self.local_cap[0]
+            or time.time() - self.last_remote_ok[0] > self.remote_dead_sec
+        )
+
+    def watch(self) -> None:
+        while (
+            not self.all_settled.is_set()
+            and not (self.halt_event is not None and self.halt_event.is_set())
+            and time.time() < self.deadline
+        ):
+            with self.lock:
+                remote_alive = time.time() - self.last_remote_ok[0] <= self.remote_dead_sec
+                want = self.local_slots if remote_alive else self.cap_full
+                if self.local_cap[0] != want:
+                    prev = self.local_cap[0]
+                    self.local_cap[0] = want
+                    log(f"[dist] local slots {prev} -> {want}")
+                self._slots[:] = [(s, t) for s, t in self._slots if t.is_alive()]
+                add = max(0, want - len(self._slots))
+            if add:
+                self.spawn(add)
+            self.all_settled.wait(0.1)
+
+    def start(self) -> None:
+        self.spawn(self.local_slots)
+        if self.local_slots < self.cap_full:
+            t = threading.Thread(
+                target=self.watch, daemon=True, name="rollout-local-watch"
+            )
+            t.start()
+            self.threads.append(t)
 
 
 def make_local_pool(
@@ -557,6 +670,182 @@ def register_inflight(inflight: dict[tuple[int, int], int], task: tuple[int, int
     节点数（pick_race_target 同节点排除），无 tailFanoutDup。重试 requeue 不出表、
     再派发再登记（计数累加），结算/终局失败路径负责扣减。"""
     inflight[task] = inflight.get(task, 0) + 1
+
+
+def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> float:
+    """收尾 join 的 grace 秒数（纯函数；2026-09-19 收紧）。
+
+    all_settled / halt 后默认 **0**：计划对局已齐（或已熔断），在飞副本只剩竞速
+    输家——结果注定被 dedup 丢弃，等待无数据价值（x20-rebirth it19：30s×3 波纯开销）。
+    policy.tailGraceJoinSec 可覆写（e2e 用 2s 验有界）。
+    窗口到期未齐 → tailGraceJoinSecDeadline（默认 5s）给在飞 worker 极短补结算窗；
+    缺口由 volume 补波 / resume 兜底。绝不再用 queueWindow+taskTimeout（旧 2700s 洞）。
+    """
+    if all_settled or halted:
+        return float(policy.get("tailGraceJoinSec", 0))
+    return float(policy.get("tailGraceJoinSecDeadline", 5))
+
+
+def ensure_games(m: dict) -> dict:
+    """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
+
+    分布式 agent 返回的 manifest 没有 games/totalSamples/totalTicks 等聚合字段，
+    而 _rl_report.json（本地 rollout）已含这些键。本函数为缺失格式补上，使
+    results 与 resumed_manifests 输出同构，消除 KeyError('games')。
+    """
+    if "games" in m:
+        return m
+    score = m.get("score")
+    return {
+        "games": 1,
+        "outcomes": {str(m.get("outcome", "unknown")): 1},
+        "totalSamples": int(m.get("nSamples") or 0),
+        "totalTicks": int(m.get("ticks") or 0),
+        "scoreList": [score] if isinstance(score, (int, float)) else [],
+        "dimLists": {},
+    }
+
+
+def next_attempt_tag(iter_id: str, seq: list[int]) -> str:
+    """发一个本轮唯一的 attempt tag（`rollout:<iter>:aN`）。"""
+    seq[0] += 1
+    return f"rollout:{iter_id}:a{seq[0]}"
+
+
+def remember_task_key(target: dict | None, key: str) -> None:
+    """`fetch_task` 发请求前的回调：把 agent 认可的 taskKey 记到本次 attempt。"""
+    if target is not None:
+        target["task_key"] = key
+
+
+def note_cancel_target(
+    inflight_targets: dict[tuple[int, int], dict[str, dict]],
+    task: tuple[int, int],
+    tag: str,
+    nd: dict,
+) -> dict | None:
+    """登记远端取消目标；旧 agent（无 cancelSupport）不登记。"""
+    if not bool((nd.get("ping") or {}).get("cancelSupport")):
+        return None
+    target = {"url": nd["url"], "auth": nd["key"], "task_key": ""}
+    inflight_targets.setdefault(task, {})[tag] = target
+    return target
+
+
+def drop_attempt(
+    inflight_tags: dict[tuple[int, int], set[str]],
+    inflight_targets: dict[tuple[int, int], dict[str, dict]],
+    task: tuple[int, int],
+    tag: str | None,
+) -> None:
+    """摘掉这一份 attempt 的断连 tag 与取消目标（其它副本继续保留）。"""
+    if not tag:
+        return
+    tags = inflight_tags.get(task)
+    if tags is not None:
+        tags.discard(tag)
+        if not tags:
+            inflight_tags.pop(task, None)
+    targets = inflight_targets.get(task)
+    if targets is not None:
+        targets.pop(tag, None)
+        if not targets:
+            inflight_targets.pop(task, None)
+
+
+def prune_timeout_blocks(
+    task_timeout_blocks: dict[tuple[int, int], set[str]],
+    inflight: dict[tuple[int, int], int],
+    pending: deque[tuple[int, int]],
+) -> None:
+    """清理已不在活跃集里的任务冷却黑名单。"""
+    for task in list(task_timeout_blocks):
+        if task not in inflight and task not in pending:
+            task_timeout_blocks.pop(task, None)
+
+
+def _cancel_remote_targets(targets: list[dict], log: Any) -> None:
+    """daemon 线程：把超时 attempt 的取消请求送到各节点（失败只记数，不抛）。"""
+    ok = 0
+    tried = 0
+    for t in targets:
+        key = str(t.get("task_key") or "")
+        if not key:
+            continue
+        tried += 1
+        if common.distribution.cancel_task(
+            str(t.get("url") or ""), str(t.get("auth") or ""), key
+        ):
+            ok += 1
+    if tried:
+        log(f"[dist] alloc-timeout: cancelled {ok}/{tried} remote task(s)")
+
+
+def reap_alloc_timeouts(
+    *,
+    inflight: dict[tuple[int, int], int],
+    inflight_ts: dict[tuple[int, int], float],
+    inflight_nodes: dict[tuple[int, int], set[str]],
+    inflight_tags: dict[tuple[int, int], set[str]],
+    inflight_targets: dict[tuple[int, int], dict[str, dict]],
+    task_timeout_blocks: dict[tuple[int, int], set[str]],
+    pending: deque[tuple[int, int]],
+    timeout_sec: float,
+    log: Any,
+) -> int:
+    """把超时任务放回 `pending` 并取消原请求；返回本次重排的任务数。
+
+    `inflight_ts` 是**首次派发**的墙钟锚点，竞速副本不刷新它；超时任务回队前
+    对该任务的每个 attempt tag 调 `abort_active_requests`——只关这一份请求，
+    避免「超时回队 + 原请求继续跑」把同一局执行两遍。
+
+    已知局限：卡在 `urlopen`（响应头还没回来）的连接不在注册表里，关不到；
+    那部分只能等原请求自己的 timeout（见 `common.distribution.abort_active_requests`）。
+    """
+    now = time.time()
+    reaped = [task for task, ts in list(inflight_ts.items()) if now - ts > timeout_sec]
+    if not reaped:
+        return 0
+
+    tags: list[str] = []
+    cancel_targets: list[dict] = []
+    for task in reaped:
+        blocked = inflight_nodes.pop(task, set())
+        inflight.pop(task, None)
+        inflight_ts.pop(task, None)
+        tags.extend(inflight_tags.pop(task, set()))
+        cancel_targets.extend(inflight_targets.pop(task, {}).values())
+        pending.append(task)
+        if blocked:
+            task_timeout_blocks.setdefault(task, set()).update(blocked)
+            log(
+                f"[dist] alloc-timeout s{task[0]}/seed{task[1]} "
+                f"({timeout_sec:.0f}s) — re-queued, cooling nodes: {blocked}"
+            )
+        else:
+            log(
+                f"[dist] alloc-timeout s{task[0]}/seed{task[1]} "
+                f"({timeout_sec:.0f}s) — re-queued"
+            )
+
+    # 关掉超时那一份的 HTTP 响应（异步轮询会立刻抛；同步请求若已拿到响应头也能被
+    # reset）。关不到的部分由原请求自己的 timeout 兜底——至少不再让 reaper 被
+    # 竞速副本反复「续命」。
+    aborted = sum(common.distribution.abort_active_requests(tag) for tag in tags)
+    log(
+        f"[dist] alloc-timeout: aborted {aborted}/{len(tags)} "
+        "in-flight request(s) — the re-queued copy is the only live one"
+    )
+    # 断本端连接只省本端的等待；有 cancelSupport 的节点还要真正停掉远端算力。
+    # daemon 线程：reaper 在 dispatch 锁内跑，HTTP 不得持锁。
+    if cancel_targets:
+        threading.Thread(
+            target=_cancel_remote_targets,
+            args=(cancel_targets, log),
+            daemon=True,
+            name="alloc-cancel",
+        ).start()
+    return len(reaped)
 
 
 def pick_tail_race(inflight: dict[tuple[int, int], int], dup: int) -> tuple[int, int] | None:

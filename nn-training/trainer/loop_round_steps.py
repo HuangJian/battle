@@ -408,7 +408,14 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         #   §113：作用域按课程——A 课采集只冻 A 课，不再连坐同进程的 B 课。
         from worker.cmd import course_fp_for_args
 
-        with eval_gate().rollout(course_fp_for_args(self.args)):
+        # 2026-11-10：闸的作用域必须是「采集」，不是「采集 + 本轮 PPO」。stream 的
+        # collector 与 PPO 在同一个调用里 ⇒ 旧 `with` 会把 PPO 也冻进去（解冻时权重已旧）。
+        # 这里显式 begin/end：stream 在 collector 退出时经 `on_collect_end` 提前解冻，
+        # 串行/上云/配额路径在 finally 解冻。`end_rollout` 对已归零的计数是 no-op。
+        _gate = eval_gate()
+        _course_fp = course_fp_for_args(self.args)
+        _gate.begin_rollout(_course_fp)
+        try:
             if ctx.collect_mode == COLLECT_NODE:
                 # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
                 #   必须被读——配置冲突就只跳过本轮（`ROUND_SKIP` 走既有 30s/5 连击梯子），
@@ -425,7 +432,15 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 # target/cap；课程 volume 块保持原样。
                 self._volume_collect_greedy(it, ctx.dist_cfg)
             else:
-                self._rollout_phase(it, ctx.pairs, ctx.dist_cfg, ctx.eval_on_round)
+                self._rollout_phase(
+                    it,
+                    ctx.pairs,
+                    ctx.dist_cfg,
+                    ctx.eval_on_round,
+                    on_collect_end=lambda: _gate.end_rollout(_course_fp),
+                )
+        finally:
+            _gate.end_rollout(_course_fp)
         return None
 
     def step_volume_topup(self, ctx: RoundContext) -> StepResult | None:

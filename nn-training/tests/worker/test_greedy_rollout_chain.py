@@ -188,6 +188,14 @@ class _Gate:
     def rollout(self, _fp: object) -> nullcontext[None]:
         return nullcontext()
 
+    # `step_rollout` 2026-11-10 起用显式 begin/end（采集收官即解冻 eval），
+    # 桩必须与真实 EvalGate 同形，否则只测到“假对象没有这个方法”。
+    def begin_rollout(self, _fp: object = None) -> None:
+        pass
+
+    def end_rollout(self, _fp: object = None) -> None:
+        pass
+
 
 def _node_loop(gq: dict) -> SimpleNamespace:
     return SimpleNamespace(

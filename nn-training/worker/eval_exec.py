@@ -5,77 +5,147 @@
 `"local"`）生长，线程循环 `take(node) → execute(grant)`；`Grant.round` 决定用哪份
 权重 / iterId / course_fp / 快照 / 超时。
 
-池子只增不缩（除线程自然死亡）：轮结束不回收线程，下一轮登记后同一批线程直接
-复用——这也是「所有 eval 局都派出后空闲 worker 进入竞速」的物理载体。
+池子按节点许可可增可缩：轮收工/节点让位后多余线程收到退出信号，空闲线程下一轮
+登记后仍可复用——这也是「所有 eval 局都派出后空闲 worker 进入竞速」的物理载体。
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
 from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
 
 
+@dataclass
+class _Slot:
+    """一条池线程 + 它的退出信号（缩容只置信号，不强杀在飞局）。"""
+
+    thread: threading.Thread
+    stop: threading.Event
+
+
 class EvalExecutors:
-    """按节点 id 的 grow-only 线程池（进程级单例；rollout 冻结由仲裁器负责）。"""
+    """按节点 id 的可缩容线程池（进程级单例；rollout 冻结由仲裁器负责）。"""
 
     def __init__(self, arbiter: Any | None = None) -> None:
         self._arb = arbiter if arbiter is not None else eval_arbiter()
         self._lock = threading.Lock()
-        self._pools: dict[str, list[threading.Thread]] = {}
+        self._pools: dict[str, list[_Slot]] = {}
+        # 每个 owner（一轮 eval）对节点的期望线程数；同节点取 max，轮收工时释放。
+        self._wants: dict[str, dict[int | None, int]] = {}
         self._closed = False
 
     # —— 池子维护 ——
 
-    def _ensure(self, key: str, want: int, target: Any, name: str) -> int:
+    def _set_want_locked(self, key: str, want: int, owner: Any | None) -> None:
+        owners = self._wants.setdefault(key, {})
+        owners[None if owner is None else id(owner)] = max(0, int(want))
+
+    def _target_locked(self, key: str) -> int:
+        return max(self._wants.get(key, {}).values(), default=0)
+
+    def _resize_locked(self, key: str) -> int:
+        """把池子对齐到当前期望数：多的置退出信号，少的下一拍补。"""
+        pool = self._pools.setdefault(key, [])
+        pool[:] = [s for s in pool if s.thread.is_alive()]
+        target = self._target_locked(key)
+        for i, slot in enumerate(pool):
+            if i < target:
+                slot.stop.clear()
+            else:
+                slot.stop.set()
+        return target
+
+    def _ensure(
+        self,
+        key: str,
+        want: int,
+        target: Any,
+        name: str,
+        owner: Any | None = None,
+    ) -> int:
         self._lock.acquire()
         try:
             if self._closed:
                 return 0
-            pool = self._pools.setdefault(key, [])
-            pool[:] = [t for t in pool if t.is_alive()]
-            add = max(0, int(want) - len(pool))
+            self._set_want_locked(key, want, owner)
+            target_n = self._resize_locked(key)
+            pool = self._pools[key]
+            add = max(0, target_n - len(pool))
             for _ in range(add):
-                t = threading.Thread(target=target, args=(key,), daemon=True, name=name)
-                pool.append(t)
+                stop = threading.Event()
+                t = threading.Thread(
+                    target=target, args=(key, stop), daemon=True, name=name
+                )
+                pool.append(_Slot(t, stop))
                 t.start()
             return add
         finally:
             self._lock.release()
 
-    def ensure_node(self, nd: dict[str, Any], want: int) -> int:
+    def ensure_node(
+        self, nd: dict[str, Any], want: int, owner: Any | None = None
+    ) -> int:
         nid = str(nd["id"])
-        return self._ensure(nid, want, self._node_loop, f"eval-{nid}")
+        return self._ensure(nid, want, self._node_loop, f"eval-{nid}", owner)
 
-    def ensure_local(self, want: int) -> int:
-        return self._ensure(LOCAL_NODE, want, self._local_loop, "eval-local")
+    def ensure_local(self, want: int, owner: Any | None = None) -> int:
+        return self._ensure(LOCAL_NODE, want, self._local_loop, "eval-local", owner)
+
+    def release_owner(self, owner: Any) -> None:
+        """一轮收工：撤掉它的期望数，池子按其余 owner 缩容。"""
+        oid = id(owner)
+        with self._lock:
+            for key, owners in list(self._wants.items()):
+                if oid not in owners:
+                    continue
+                owners.pop(oid)
+                if not owners:
+                    self._wants.pop(key, None)
+                self._resize_locked(key)
 
     def live(self, nid: str) -> int:
+        """池里还活着的线程数（含已置退出信号、正在跑最后一局的线程）。"""
         with self._lock:
             pool = self._pools.get(nid, [])
-            pool[:] = [t for t in pool if t.is_alive()]
+            pool[:] = [s for s in pool if s.thread.is_alive()]
             return len(pool)
 
+    def active(self, nid: str) -> int:
+        """还在领牌的线程数（缩容中/已置退出信号的不算）。"""
+        with self._lock:
+            pool = self._pools.get(nid, [])
+            pool[:] = [s for s in pool if s.thread.is_alive()]
+            return sum(1 for s in pool if not s.stop.is_set())
+
     def node_alive_for(self, rnd: EvalRound) -> bool:
-        """本机改派判据：该轮还有**可路由**节点且它的池子还有活线程。"""
+        """本机改派判据：该轮还有**可路由**节点且它的池子还有能领牌的线程。"""
         now = time.time()
-        return any(rnd.node_routable(nid, now) and self.live(nid) > 0 for nid in rnd.node_ids())
+        return any(
+            rnd.node_routable(nid, now) and self.active(nid) > 0
+            for nid in rnd.node_ids()
+        )
 
     def close_pools(self) -> None:
         with self._lock:
             self._closed = True
+            for pool in self._pools.values():
+                for slot in pool:
+                    slot.stop.set()
             self._pools.clear()
+            self._wants.clear()
 
     # —— 线程循环 ——
 
-    def _node_loop(self, nid: str) -> None:
+    def _node_loop(self, nid: str, stop: threading.Event) -> None:
         while True:
-            if self._closed:
+            if self._closed or stop.is_set():
                 return
-            grant = self._arb.take(nid)
+            grant = self._arb.take(nid, stop=stop)
             if grant is None:
                 return
             try:
@@ -90,11 +160,11 @@ class EvalExecutors:
                     node_alive=False,
                 )
 
-    def _local_loop(self, _nid: str) -> None:
+    def _local_loop(self, _nid: str, stop: threading.Event) -> None:
         while True:
-            if self._closed:
+            if self._closed or stop.is_set():
                 return
-            grant = self._arb.take(LOCAL_NODE)
+            grant = self._arb.take(LOCAL_NODE, stop=stop)
             if grant is None:
                 return
             try:

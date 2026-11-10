@@ -13,6 +13,7 @@
  *                       trainer 轮询 GET /v1/result 取包（同 key 幂等）。
  *                     结果缓存 LRU：同键重入直接回放。
  *   GET  /v1/result   异步取包：200 容器 | 202 在跑 | 500 局失败（一次性消费）| 404 过期。
+ *   POST /v1/cancel   按 taskKey 取消在飞任务（分配超时后停掉远端算力；404 = 已结束/过期）。
  *   GET  /v1/status   健康快照（巡检用）。
  *   GET  /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus。
  *
@@ -468,7 +469,50 @@ export function noteTaskOutput(mode: string, iterId: string, ok: boolean): void 
 function currentOutputWindow(): ReturnType<typeof outputWindow> {
   return outputWindow(outputState, Date.now(), startedAt)
 }
-const inflight = new Map<string, { stage: number; seed: number; startedAt: number }>()
+interface InflightTask {
+  stage: number
+  seed: number
+  startedAt: number
+  cancelled: boolean
+  signal: AbortSignal
+  cancel: () => void
+}
+const inflight = new Map<string, InflightTask>()
+let cancelledTotal = 0
+
+/** /v1/cancel 的纯判定（导出供单测）：只负责“标取消 + 调一次 cancel”。 */
+export type CancelVerdict = 'cancelled' | 'already' | 'not-found'
+export function cancelTaskState(
+  task: { cancelled: boolean; cancel: () => void } | undefined,
+): CancelVerdict {
+  if (!task) return 'not-found'
+  if (task.cancelled) return 'already'
+  task.cancelled = true
+  task.cancel()
+  return 'cancelled'
+}
+
+function newInflightTask(stage: number, seed: number): InflightTask {
+  const ac = new AbortController()
+  return {
+    stage,
+    seed,
+    startedAt: Date.now(),
+    cancelled: false,
+    signal: ac.signal,
+    cancel: () => ac.abort(),
+  }
+}
+
+/** 取消一个在飞任务（幂等）；返回 not-found 时 handler 回 404。 */
+function cancelTask(key: string): CancelVerdict {
+  const verdict = cancelTaskState(inflight.get(key))
+  if (verdict === 'cancelled') {
+    cancelledTotal++
+    console.log(`[sampler-agent] task CANCELLED key=${key}`)
+  }
+  return verdict
+}
 // v3.6 异步模式：已完成但失败的任务登记表（/v1/result 消费一次即删）。
 // 权重切换清场时与 resultCache 一并清空——跨轮生命周期一致。
 const failedTasks = new Map<string, string>()
@@ -1394,7 +1438,9 @@ async function runViaPersistWorker(
   mode: string,
   args: string[],
   gameDir: string,
+  signal?: AbortSignal,
 ): Promise<{ outcome: PersistAttempt; worker: PoolWorker | null }> {
+  if (signal?.aborted) return { outcome: 'failed', worker: null }
   // 同质池：任意空闲 worker 都能服务任意 mode（不再按 key 找“对腿的那个”）。
   let w: PoolWorker | undefined = persistPool.find((x) => !x.busy)
   if (!w) {
@@ -1426,11 +1472,31 @@ async function runViaPersistWorker(
       pend('dead', 'timeout')
     }
   })
+  let detachAbort = (): void => {}
+  if (signal) {
+    const onAbort = (): void => {
+      const pend = w!.pending
+      if (!pend) return
+      w!.pending = null
+      // 取消不是 worker 的错，但这一局卡在它进程里 ⇒ 只能回收；池按需再补。
+      recyclePersistWorker(w!)
+      pend('dead', 'cancelled')
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    detachAbort = () => signal.removeEventListener('abort', onAbort)
+    if (signal.aborted) onAbort()
+  }
+  if (signal?.aborted) {
+    taskTimer.cancel()
+    detachAbort()
+    return { outcome: 'failed', worker: null }
+  }
   if (!w.child.stdin) {
     w.busy = false
     w.idleSinceMs = Date.now()
     w.pending = null
     taskTimer.cancel()
+    detachAbort()
     return { outcome: 'failed', worker: null }
   }
   try {
@@ -1441,10 +1507,12 @@ async function runViaPersistWorker(
     w.idleSinceMs = Date.now()
     w.pending = null
     taskTimer.cancel()
+    detachAbort()
     return { outcome: 'failed', worker: null }
   }
   const settled = await result
   // 结算（ok/taskErr/dead 三态）后立刻撤销：定时器只属于**这一个**任务（回归见上）。
+  detachAbort()
   taskTimer.cancel()
   if (settled === 'ok') {
     if (fs.existsSync(path.join(gameDir, '_result.pack'))) return { outcome: 'ok', worker: null }
@@ -1454,7 +1522,33 @@ async function runViaPersistWorker(
   }
   // taskErr：worker 健康（serve-loop 已在等下一行）⇒ 留着，由调用方按兜底结果定夺
   if (settled === 'taskErr') return { outcome: 'taskErr', worker: w }
+  if (signal?.aborted) return { outcome: 'failed', worker: null }
   return { outcome: 'failed', worker: null } // dead：close / 超时已回收
+}
+
+function killChildTree(child: ChildProcess): void {
+  if (child.exitCode !== null || child.killed) return
+  if (process.platform === 'win32' && child.pid) {
+    const tk = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+    tk.on('error', () => {})
+    return
+  }
+  try {
+    child.kill('SIGTERM')
+  } catch {
+    /* gone */
+  }
+  const t = setTimeout(() => {
+    try {
+      child.kill('SIGKILL')
+    } catch {
+      /* gone */
+    }
+  }, 2_000)
+  t.unref?.()
 }
 
 async function runGame(
@@ -1486,7 +1580,10 @@ async function runGame(
   // v6 BC 标签来源：argmax=教师最优动作，sampled=策略采样（BC 的行为克隆标签）。
   // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
   labelMode: string = 'argmax',
+  // 取消信号（/v1/cancel）：abort ⇒ 杀子进程 / 回收长驻 worker，结果不再回包。
+  signal?: AbortSignal,
 ): Promise<Buffer> {
+  if (signal?.aborted) throw new Error('task cancelled')
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
   // 跳过权重桶查找（调用方 /v1/task 已保证只有 bcSupport 节点会收到该模式）。
@@ -1638,9 +1735,10 @@ async function runGame(
     // 进池的准入 = 这个导出器在同质入口的 mode 表里（BC / 未知条目 ⇒ 一次性 spawn）。
     const persistMode = persistEnabled ? persistModeFor(entryTs) : null
     if (persistMode) {
-      const run = await runViaPersistWorker(persistMode, args, gameDir)
+      const run = await runViaPersistWorker(persistMode, args, gameDir, signal)
       attempt = run.outcome
       errWorker = run.worker
+      if (signal?.aborted) throw new Error('task cancelled')
     }
     if (attempt === 'ok') {
       persistBreaker = notePersistAttempt(persistBreaker, 'ok', Date.now())
@@ -1658,6 +1756,9 @@ async function runGame(
         // Windows：隐藏子进程控制台窗口（否则 self 节点每个对局都会弹黑窗抢焦点）。
         windowsHide: true,
       })
+      const onAbort = (): void => killChildTree(child)
+      if (signal?.aborted) onAbort()
+      else signal?.addEventListener('abort', onAbort, { once: true })
       let tail = ''
       const cap = (chunk: Buffer): void => {
         tail = (tail + chunk.toString('utf8')).slice(-4000)
@@ -1668,6 +1769,8 @@ async function runGame(
         child.on('error', reject)
         child.on('close', (code) => resolve(code ?? -1))
       })
+      signal?.removeEventListener('abort', onAbort)
+      if (signal?.aborted) throw new Error('task cancelled')
 
       if (rc !== 0) {
         // 引擎级降级判定：node 连续 NODE_FAIL_LIMIT 次失败 → 该进程余生回退 bun。
@@ -1855,7 +1958,8 @@ function beginTask(
   // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
   labelMode: string = 'argmax',
 ): void {
-  inflight.set(key, { stage, seed, startedAt: Date.now() })
+  const task = newInflightTask(stage, seed)
+  inflight.set(key, task)
   // 每局 beginTask/done/finally 不打日志：多 worker RL 采样下会刷爆 tmp/sampler-agent.log。
   // 进度看 /v1/status（gamesDoneTotal/inflight）；失败走 task FAILED。
   runGame(
@@ -1881,6 +1985,7 @@ function beginTask(
     decisionEvents,
     decisionK,
     labelMode,
+    task.signal,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -1889,6 +1994,7 @@ function beginTask(
       noteTaskOutput(mode, iterId, true)
     })
     .catch((e: unknown) => {
+      if (task.signal.aborted) return
       const msg = e instanceof Error ? e.message : String(e)
       noteTaskOutput(mode, iterId, false)
       // 600：摘要已把错误类型行排在最前（summarizeChildFailure），留足余量让
@@ -1920,6 +2026,29 @@ async function handle(req: Request): Promise<Response> {
   const auth = req.headers.get('authorization') ?? ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token || !safeEqual(token, authKey())) return jsonResponse({ error: 'unauthorized' }, 401)
+
+  // 取消在飞任务（2026-11-10）：分配超时后 trainer 先断本端连接，再按 taskKey 要求
+  // 节点停算。key 走 JSON body（含 ':' 等字符，不依赖 query 转义）；也接受 ?key=。
+  if (req.method === 'POST' && url.pathname === '/v1/cancel') {
+    let key = url.searchParams.get('key') ?? ''
+    if (!key) {
+      try {
+        const body: unknown = await req.json()
+        if (
+          body !== null &&
+          typeof body === 'object' &&
+          typeof (body as { key?: unknown }).key === 'string'
+        )
+          key = (body as { key: string }).key
+      } catch {
+        /* malformed JSON -> 400 below */
+      }
+    }
+    if (!key) return jsonResponse({ error: 'missing key' }, 400)
+    const verdict = cancelTask(key)
+    if (verdict === 'not-found') return jsonResponse({ error: 'unknown task', key }, 404)
+    return jsonResponse({ status: verdict, key })
+  }
 
   // kept 短路径探针（2026-09-19）：只查内存桶，不读 body。trainer 命中后跳过 POST。
   if (req.method === 'GET' && url.pathname === '/v1/weights/cached') {
@@ -2290,7 +2419,8 @@ async function handle(req: Request): Promise<Response> {
 
     const noticed = await admit(req.signal)
     if (noticed) return noticed
-    inflight.set(key, { stage, seed, startedAt: Date.now() })
+    const task = newInflightTask(stage, seed)
+    inflight.set(key, task)
     // 保活流式响应：单局可能长达 ~480s，而 Bun.serve idleTimeout 上限仅 255s。若连接全程静默，
     // server 回收连接 → trainer 端报 "Remote end closed"。用合法 chunk 字节(' '空格)每 20s 发一次
     // 保活，防 server 空闲回收；单局完成后追加 gzip payload 并结束。trainer 在 gunzip 前 strip 空格
@@ -2329,6 +2459,7 @@ async function handle(req: Request): Promise<Response> {
           decisionEvents,
           decisionK,
           labelMode,
+          task.signal,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -2347,6 +2478,10 @@ async function handle(req: Request): Promise<Response> {
           })
           .catch((e: unknown) => {
             if (hb) clearInterval(hb)
+            if (task.signal.aborted) {
+              controller.error(new Error('task cancelled'))
+              return
+            }
             noteTaskOutput(mode, iterId, false)
             lastError = `${new Date().toISOString()} s${stage}/seed${seed}: ${e instanceof Error ? e.message : String(e)}`
             console.error(`[sampler-agent] task failed: ${lastError}`)
@@ -2359,6 +2494,8 @@ async function handle(req: Request): Promise<Response> {
       },
       cancel() {
         if (hb) clearInterval(hb)
+        // 客户端断连（含 trainer 收工断连）也停掉这一局的远端算力。
+        cancelTask(key)
       },
     })
     return new Response(stream, { headers: { 'Content-Type': 'application/octet-stream' } })
@@ -2415,7 +2552,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: failed }, 500)
     }
     const running = inflight.get(key)
-    if (running)
+    if (running && !running.cancelled)
       return jsonResponse(
         { status: 'running', elapsedSec: +((Date.now() - running.startedAt) / 1000).toFixed(1) },
         202,
@@ -2537,6 +2674,9 @@ async function handle(req: Request): Promise<Response> {
       // 都给 export-rl-rollout 拼 --teacher-argmax。旧 agent 会静默跑成采样局（数据污染）
       // ⇒ 训练侧只在有此能力位的节点上派 greedy 任务（fail-closed，同 decisionKSupport）。
       greedyRolloutSupport: true,
+      // /v1/cancel 支持位（2026-11-10）：分配超时后按 taskKey 取消在飞局。
+      // 旧 agent 无此字段 ⇒ 训练侧只断本端连接，行为不变。
+      cancelSupport: true,
       // 磁盘水位（plan/self-node-disk-alert）：纯加法字段，旧消费方忽略未知键。
       ...diskReport(),
     })

@@ -45,6 +45,11 @@ TAKE_TICK_SEC = 0.2
 #: 无任何轮登记时，线程再等这么久才退出——只为躲开「上一轮刚收工、下一轮刚登记」
 #: 的窗口，避免线程一退就要重新孵化（也避免单测里跨用例的池抖动）。
 IDLE_EXIT_SEC = 0.5
+#: 同一任务最多几份在飞副本（主副本 + 至多 1 份竞速）。
+#: 竞速是尾延迟手段：副本数应随**剩余工作量**增长，而不是随空槽数增长。
+#: 旧实现让 `pending` 空后的每个空闲线程都复制任意在飞局，48 个空槽对 1 局
+#: 残局可以产生 47 份完整重跑；这里把上界钉死在 2。
+MAX_COPIES_PER_TASK = 2
 
 
 class RoundClock:
@@ -225,6 +230,10 @@ class EvalRound:
 
         self._lock = threading.Lock()
         self.nodes: dict[str, dict[str, Any]] = {}
+        # 每节点许可（c）与本轮在该节点的在飞数：claim 时扣、settle 时还。
+        # 池线程数只是物理载体；没有许可账时，历史大池会在下轮解冻后按旧槽数抢任务。
+        self.node_caps: dict[str, int] = {LOCAL_NODE: max(0, int(local_slots))}
+        self.node_inflight: dict[str, int] = {}
         self.remote_ready = False
         self.attempts: dict[tuple[int, int], int] = {}
         self.leg_tries: dict[tuple[tuple[int, int], str], int] = {}
@@ -287,8 +296,10 @@ class EvalRound:
             self.clock.resume(now)
 
     def activate(self, nd: dict[str, Any]) -> None:
+        nid = str(nd["id"])
         with self._lock:
-            self.nodes[str(nd["id"])] = dict(nd)
+            self.nodes[nid] = dict(nd)
+            self.node_caps[nid] = max(0, int(nd.get("c") or 0))
 
     def set_remote_ready(self, nodes_ok: list[dict[str, Any]]) -> None:
         """POST 收工：只保留权重真正就绪的节点，本机兜底从此可用。"""
@@ -307,6 +318,22 @@ class EvalRound:
     def node_ids(self) -> list[str]:
         with self._lock:
             return list(self.nodes)
+
+    def set_node_cap(self, nid: str, cap: int) -> None:
+        """更新节点许可（扩容/让位后与池目标同源）。"""
+        with self._lock:
+            self.node_caps[nid] = max(0, int(cap))
+
+    def _node_cap_locked(self, nid: str) -> int:
+        if nid == LOCAL_NODE:
+            return max(0, int(self.local_slots))
+        if nid in self.node_caps:
+            return self.node_caps[nid]
+        # 旧测试/手工构造的 nodes 没有 c：按 1 槽处理（生产节点必带 c）。
+        return max(0, int((self.nodes.get(nid) or {}).get("c") or 1))
+
+    def _has_node_capacity_locked(self, nid: str) -> bool:
+        return self.node_inflight.get(nid, 0) < self._node_cap_locked(nid)
 
     # —— 参与判据（仲裁器调用；读锁） ——
 
@@ -421,6 +448,7 @@ class EvalRound:
         self.leg_tries[key] = leg
         self.inflight[task] = self.inflight.get(task, 0) + 1
         self.inflight_nodes.setdefault(task, set()).add(nid)
+        self.node_inflight[nid] = self.node_inflight.get(nid, 0) + 1
         self._grant_seq += 1
         return Grant(
             round=self,
@@ -435,6 +463,8 @@ class EvalRound:
     def claim_unique(self, nid: str, now: float) -> Grant | None:
         with self._lock:
             if not self._participates_locked(nid, now):
+                return None
+            if not self._has_node_capacity_locked(nid):
                 return None
             if nid != LOCAL_NODE:
                 gate_ok = self.local_gate is not None and self.local_gate.is_set()
@@ -454,17 +484,25 @@ class EvalRound:
         with self._lock:
             if not self._participates_locked(nid, now):
                 return []
+            if not self._has_node_capacity_locked(nid):
+                return []
             return [
                 task
                 for task in self.inflight
                 if nid not in self.inflight_nodes.get(task, set())
+                and self.inflight.get(task, 0) < MAX_COPIES_PER_TASK
             ]
 
     def claim_replica(self, nid: str, task: tuple[int, int], now: float) -> Grant | None:
         with self._lock:
             if not self._participates_locked(nid, now):
                 return None
-            if task not in self.inflight or nid in self.inflight_nodes.get(task, set()):
+            if (
+                not self._has_node_capacity_locked(nid)
+                or task not in self.inflight
+                or nid in self.inflight_nodes.get(task, set())
+                or self.inflight.get(task, 0) >= MAX_COPIES_PER_TASK
+            ):
                 return None
             grant = self._claim_locked(task, nid, replica=True)
         self._log(f"[eval] tail-race s{task[0]}/seed{task[1]} node={nid} — race lane")
@@ -472,10 +510,20 @@ class EvalRound:
 
     # —— 结算 ——
 
+    def _release_node_locked(self, nid: str) -> None:
+        n = self.node_inflight.get(nid, 0)
+        if n <= 0:
+            return
+        if n <= 1:
+            self.node_inflight.pop(nid, None)
+        else:
+            self.node_inflight[nid] = n - 1
+
     def _pop_inflight_locked(self, task: tuple[int, int], nid: str) -> None:
         n = self.inflight.get(task, 0)
         if n <= 0:
             return
+        self._release_node_locked(nid)
         if n <= 1:
             self.inflight.pop(task, None)
             self.inflight_nodes.pop(task, None)
@@ -484,6 +532,8 @@ class EvalRound:
             self.inflight_nodes.get(task, set()).discard(nid)
 
     def _clear_inflight_locked(self, task: tuple[int, int]) -> None:
+        for nid in self.inflight_nodes.get(task, ()):
+            self._release_node_locked(nid)
         self.inflight.pop(task, None)
         self.inflight_nodes.pop(task, None)
 
@@ -912,6 +962,17 @@ class EvalArbiter:
                             rnd.resume_clock(now)
             self._cond.notify_all()
 
+    def wait_for_thaw(self, course_fp: str) -> bool:
+        """冻结期阻塞调用方（eval 派发线程），解冻/仲裁器 shutdown 后返回。
+
+        B2（2026-11-10）：eval 冻结期间不再 POST 权重。窗口钟在 `register()` 时已暂停，
+        这里只等本课解冻；进程 shutdown 返回 False，调用方放弃本轮。
+        """
+        with self._cond:
+            while self._frozen_for_locked(course_fp) and not self._shutdown:
+                self._cond.wait(TAKE_TICK_SEC)
+            return not self._shutdown
+
     def frozen(self) -> bool:
         """进程级冻结（`freeze()` 无参）。按课冻结走 `frozen_for(course_fp)`。"""
         with self._cond:
@@ -936,7 +997,7 @@ class EvalArbiter:
 
     # —— 发牌 ——
 
-    def take(self, nid: str) -> Grant | None:
+    def take(self, nid: str, stop: threading.Event | None = None) -> Grant | None:
         """给 `nid` 发下一局：唯一任务按轮轮转 → 跨轮竞速副本 → 等待。
 
         返回 None = 本进程再没有轮需要这个节点的线程（调用方退出）。冻结期间**阻塞**
@@ -945,8 +1006,10 @@ class EvalArbiter:
         """
         idle_since: float | None = None
         while True:
+            if stop is not None and stop.is_set():
+                return None
             with self._cond:
-                if self._shutdown:
+                if self._shutdown or (stop is not None and stop.is_set()):
                     return None
                 now = time.time()
                 if any(r.wants(nid, now) for r in self._rounds):

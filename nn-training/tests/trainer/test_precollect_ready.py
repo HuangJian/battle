@@ -127,3 +127,22 @@ def test_join_timeout_still_terminates(tmp_path: Path, monkeypatch) -> None:
     child = _Child(None)
     assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
     assert child.poll() == -15  # 超时 terminate
+
+
+def test_join_terminates_after_no_progress_window(tmp_path: Path, monkeypatch) -> None:
+    """活着但零产出的预采子进程不能把整轮开训拖满 1 小时。
+
+    旧实现只有总超时 3600s；一个卡死的子进程（进程在、shard 不落）会让主进程
+    每 2s 读一次盘、白等一小时，然后才回退自己采。新判据：连续
+    `PRECOLLECT_STALL_SEC` 没有**新增** shard 就 terminate + 回退。
+    """
+    monkeypatch.setattr(rp, "PRECOLLECT_STALL_SEC", 60.0)
+    monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: set())
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rp.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(rp.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    child = _Child(None)
+    assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
+    assert child.poll() == -15
+    # 60s 停滞窗就退，不是旧的总超时 3600s
+    assert 60.0 <= clock["t"] < 3600.0, f"停滞判据没有生效（时钟 {clock['t']}s）"

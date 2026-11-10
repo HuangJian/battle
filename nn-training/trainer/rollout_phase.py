@@ -27,6 +27,11 @@ from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.stream import run_rollout_stream
 from worker.resume import completed_pairs, state_init_enabled
 
+#: 预采子进程「无新增 shard」的容忍上限（秒）。到点即 terminate + 回退自己采。
+#: 不是总超时（总超时仍是 3600s）：一个活着但零产出的子进程不该让整轮开训等一小时。
+#: 300 = 5 分钟；正常预采在首波通常 <60s 就有 shard 落盘（半波阈值见 precollect_min_wave）。
+PRECOLLECT_STALL_SEC = 300.0
+
 
 def precollect_min_wave() -> int:
     """预采「半波即可开训」的 shard 数（`policy.streamWaveGames` 的一半，下限 4）。
@@ -75,6 +80,8 @@ def precollect_ready(
     args,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    *,
+    progress: int | None = None,
 ) -> bool:
     """预采是否**已经可以开训**（非阻塞判据；R2c-3 的让位入口）。
 
@@ -86,12 +93,14 @@ def precollect_ready(
         return True
     if child.poll() is not None:
         return True
-    return (
+    done = (
         precollect_progress(
             traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
         )
-        >= precollect_min_wave()
+        if progress is None
+        else int(progress)
     )
+    return done >= precollect_min_wave()
 
 
 def join_precollect_child(
@@ -116,15 +125,24 @@ def join_precollect_child(
         return None
     _pre_min_wave = precollect_min_wave()
     _pre_deadline = time.time() + 3600
+    _last_done = -1
+    _last_progress_at = time.time()
     _pre_ready = False
+    _stalled = False
     while time.time() < _pre_deadline:
+        _pre_done = precollect_progress(
+            traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
+        )
         if precollect_ready(
-            child, traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
+            child,
+            traj_root,
+            it,
+            args,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            progress=_pre_done,
         ):
             if child.poll() is None:
-                _pre_done = precollect_progress(
-                    traj_root, it, args, course_fp=course_fp, corpus_fp=corpus_fp
-                )
                 log(
                     f"[double-buffer] precollect it{it}: {_pre_done} shards ready "
                     f"(≥{_pre_min_wave}), proceeding before subprocess exit"
@@ -133,9 +151,21 @@ def join_precollect_child(
                 log(f"[double-buffer] precollect it{it} done rc={child.returncode}")
             _pre_ready = True
             break
+        if _pre_done > _last_done:
+            _last_done = _pre_done
+            _last_progress_at = time.time()
+        elif time.time() - _last_progress_at >= PRECOLLECT_STALL_SEC:
+            _stalled = True
+            log(
+                f"[double-buffer] precollect it{it}: no new shard for "
+                f"{PRECOLLECT_STALL_SEC:.0f}s (still {_pre_done}/{_pre_min_wave}) "
+                "— terminate, fall back to own collect"
+            )
+            break
         time.sleep(2)
     if not _pre_ready:
-        log(f"[double-buffer] precollect it{it} timeout — fall back to own collect")
+        if not _stalled:
+            log(f"[double-buffer] precollect it{it} timeout — fall back to own collect")
         child.terminate()
     return None
 
@@ -196,6 +226,9 @@ def dispatch_rollout_phase(
     # 零落盘（plan/payload-zero-disk §3）：dispatch 腿收到 shard 时的回调（`ShardSegments.add`）。
     # 两条路（stream / 串行）都经 `run_rollout_queue` ⇒ 同一个注入点，这里只透传。
     on_shard=None,
+    # 采集真正收官（collector 线程退出）时回调一次；stream 用它解冻 eval 闸。
+    # 串行路径的采集收官 = 本函数返回，调用方的 finally 负责解冻，不需要它。
+    on_collect_end=None,
 ) -> tuple[
     dict,
     dict | None,
@@ -322,6 +355,7 @@ def dispatch_rollout_phase(
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
                 on_shard=on_shard,
+                on_collect_end=on_collect_end,
                 **_stream_kwargs,
             )
             stream_meta = report

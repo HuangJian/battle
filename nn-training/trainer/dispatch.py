@@ -20,12 +20,24 @@ from common.proc import bun_version as _bun_version
 from common.proc import version_mm as _mm
 from remote import weights_standard
 from trainer.queue_local import (
+    LocalLane,
+    drop_attempt,
     make_local_pool,
+    next_attempt_tag,
+    note_cancel_target,
     pick_race_target,
+    prune_timeout_blocks,
+    reap_alloc_timeouts,
     register_inflight,
+    remember_task_key,
     rescan_nodes,
+    resolve_tail_join_sec,
     run_local_rollout,
     run_rollout,
+    split_local_head,
+)
+from trainer.queue_local import (
+    ensure_games as _ensure_games,
 )
 from worker import node_identity, serve_pool
 from worker.agent_meta import record_agent_meta as _record_agent_meta_impl
@@ -48,38 +60,6 @@ ROLLOUT_LOG_EVERY = 10  # 本地 rollout 每 N 局结算打一条进度行
 RACE_LOG_SAMPLE = 2  # 竞速输家/dup settle 每类最多打前 N 条，其余进 round-done 汇总
 
 
-def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> float:
-    """收尾 join 的 grace 秒数（纯函数；2026-09-19 收紧）。
-
-    all_settled / halt 后默认 **0**：计划对局已齐（或已熔断），在飞副本只剩竞速
-    输家——结果注定被 dedup 丢弃，等待无数据价值（x20-rebirth it19：30s×3 波纯开销）。
-    policy.tailGraceJoinSec 可覆写（e2e 用 2s 验有界）。
-    窗口到期未齐 → tailGraceJoinSecDeadline（默认 5s）给在飞 worker 极短补结算窗；
-    缺口由 volume 补波 / resume 兜底。绝不再用 queueWindow+taskTimeout（旧 2700s 洞）。
-    """
-    if all_settled or halted:
-        return float(policy.get("tailGraceJoinSec", 0))
-    return float(policy.get("tailGraceJoinSecDeadline", 5))
-
-
-def _ensure_games(m: dict) -> dict:
-    """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
-
-    分布式 agent 返回的 manifest 没有 games/totalSamples/totalTicks 等聚合字段，
-    而 _rl_report.json（本地 rollout）已含这些键。本函数为缺失格式补上，使
-    results 与 resumed_manifests 输出同构，消除 KeyError('games')。
-    """
-    if "games" in m:
-        return m
-    score = m.get("score")
-    return {
-        "games": 1,
-        "outcomes": {str(m.get("outcome", "unknown")): 1},
-        "totalSamples": int(m.get("nSamples") or 0),
-        "totalTicks": int(m.get("ticks") or 0),
-        "scoreList": [score] if isinstance(score, (int, float)) else [],
-        "dimLists": {},
-    }
 
 
 # 版本探测 / major.minor 比对 / 节点采样账本 —— 唯一实现见 `common.proc` 与
@@ -487,11 +467,9 @@ class RolloutDispatcher:
         # R6：--local-slots 头部分配——洗牌后的前 local_slots 个任务划入本机专用队列，
         # 节点线程不可触及（确定性「dist 阶段最先被分派」）；本机让位（local_suspend）
         # 时一次性并回主队列交远端消化，防挂死。
-        head_tasks: deque[tuple[int, int]] = deque()
-        if local_slots > 0 and tasks:
-            k = min(local_slots, len(tasks))
-            head_tasks = deque(tasks[:k])
-            tasks = tasks[k:]
+        # B3：本机保留段按本机/远端轮转发牌，不再整段占队首（份额仍 = local_slots）。
+        head, tasks = split_local_head(tasks, local_slots)
+        head_tasks: deque[tuple[int, int]] = deque(head)
         # 本机槽的长驻池（`--serve`，与节点侧 `worker/serve_pool.py` 同一份协议）：
         # 逐局 spawn 时每局重付进程启动 / wasm 编译 / 权重解析，池化后只付一次（节点侧实测
         # 1.59×，docs/nn/runtime-opt.md §20）。宽度 = 本机槽位数；池起不来或某局跑挂就地回退
@@ -529,9 +507,9 @@ class RolloutDispatcher:
         all_settled = threading.Event()  # 成功+永久缺失 == 总局数 时置位，worker 立即收工
         deadline = time.time() + window
         next_idx = [0]
-        # 远端集体失联保护：本机线程按满额孵化、并发闸门初始为 local_slots
-        # （流式模式下被压低以给 torch 让核）；若连续 remoteDeadSecs 无任何远端
-        # 结算，则闸门放开到满额，保证 PPO 语料供应不被死掉的远端拖垮。
+        # 远端集体失联保护：本机先只孵化 local_slots 条线程（0 = 不孵化）；
+        # 连续 remoteDeadSecs 无任何远端结算时，由本机守护线程补孵到 cap_full，
+        # 保证 PPO 语料供应不被死掉的远端拖垮。
         cap_full = max(1, min(args.workers, n_total_tasks))
         local_cap = [local_slots]
         local_active = [0]
@@ -543,13 +521,12 @@ class RolloutDispatcher:
         sum_game_sec = [0.0]
         sum_game_sec_by_node: dict[str, float] = {}
         last_remote_ok = [time.time()]
-        # 2026-09-09 诊断：local_slots 闸门实测失效（配置 1、实测并发≈8）时的一手证据。
-        # 线程孵化数 = max(local_slots, cap_full) ⇒ 闸门若失效，并发就等于这里的
-        # thread_slots；与实测并发对比即可判定闸门是否真的在起作用。
+        # 2026-11-10（B3）：初始线程数就是 local_slots，不再预孵化 cap_full 条空转
+        # 线程；远端失联后由 watchdog 补孵。thread_slots 是初始值，fallback 是上限。
         log(
             f"[dist] slots: local_slots={local_slots} (max={local_slots_max}) "
             f"cap_full={cap_full} workers={args.workers} "
-            f"thread_slots={max(local_slots, cap_full)} "
+            f"thread_slots={local_slots} fallback={cap_full} "
             f"nodes={[(n['id'], n['c']) for n in nodes]}"
         )
         remote_dead_sec = float(policy.get("remoteDeadSecs", 150))
@@ -583,9 +560,19 @@ class RolloutDispatcher:
         inflight_ts: dict[tuple[int, int], float] = {}
         inflight_nodes: dict[tuple[int, int], set[str]] = {}
         task_timeout_blocks: dict[tuple[int, int], set[str]] = {}
+        # 任务 → 本次 attempt 的断连作用域键（一任务可有多份在飞副本）。reaper 用它
+        # 只关**这一份**请求，避免同一局在超时重排后仍有两份在跑。
+        # 已知局限：卡在 `urlopen`（响应头还没回来）的连接不在注册表里，关不到；
+        # 见 `common.distribution.abort_active_requests` 的 docstring。
+        inflight_tags: dict[tuple[int, int], set[str]] = {}
+        # 任务 → attempt tag → 远端取消目标（url/auth/task_key）。只有 ping.cancelSupport
+        # 的节点才登记；旧 agent 保持「只断本端连接」的既有行为。
+        inflight_targets: dict[tuple[int, int], dict[str, dict]] = {}
+        _tag_seq = [0]
 
-        def worker(nd: dict | None) -> None:
+        def worker(nd: dict | None, local_slot: int | None = None) -> None:
             suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
+            cancel_target: dict | None = None
             while (
                 not all_settled.is_set()
                 and not (halt_event is not None and halt_event.is_set())
@@ -599,59 +586,34 @@ class RolloutDispatcher:
                 drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
                 # 本 worker 本次 attempt 的派发墙钟起点（勿用 inflight_ts[task]——竞速副本会覆盖）。
                 t_task_start: float | None = None
+                task_tag: str | None = None
                 with lock:
                     if nd is not None and (
                         streaks.get(nd_id, 0) >= fail_streak_max
                         or soft_streaks.get(nd_id, 0) >= soft_streak_max
                     ):
                         return
+                    # B3：远端恢复后，失联期补孵的本机线程自行退场；远端再次失联时
+                    # watchdog 会按 cap_full 重新补孵。local_slots 以内的线程恒保留。
+                    if (
+                        nd is None
+                        and local_slot is not None
+                        and not local_lane.slot_allowed(local_slot)
+                    ):
+                        return
                     # v3.15 分配超时重入：扫描 in-flight 找到超时任务，重新进入 pending 队列。
                     # 闪断节点（如 a96）抢走任务后实际挂起，其他节点为空闲但看不到这些任务。
                     # 超时任务的持有节点加入冷却黑名单（task_timeout_blocks），冷却期内
                     # 该节点不得再次抢到同一任务，防 a96 超时→回队→又被 a96 抢走的死循环。
-                    _now = time.time()
-                    _reaped = []
-                    for _t, _ts in list(inflight_ts.items()):
-                        if _now - _ts > task_fetch_timeout:
-                            _reaped.append(_t)
-                    if _reaped:
-                        for _t in _reaped:
-                            _blocked_nodes = inflight_nodes.pop(_t, set())
-                            inflight.pop(_t, None)
-                            inflight_ts.pop(_t, None)
-                            pending.append(_t)
-                            if _blocked_nodes:
-                                task_timeout_blocks.setdefault(_t, set()).update(_blocked_nodes)
-                                log(
-                                    f"[dist] alloc-timeout s{_t[0]}/seed{_t[1]} "
-                                    f"({task_fetch_timeout:.0f}s) — re-queued, "
-                                    f"cooling nodes: {_blocked_nodes}"
-                                )
-                            else:
-                                log(
-                                    f"[dist] alloc-timeout s{_t[0]}/seed{_t[1]} "
-                                    f"({task_fetch_timeout:.0f}s) — re-queued"
-                                )
-                    # 清理过期的冷却黑名单条目
-                    _now2 = time.time()
-                    _expired = []
-                    for _t, _nodes in list(task_timeout_blocks.items()):
-                        if _t in inflight or _t in pending:
-                            continue  # 任务仍在活跃，保留冷却
-                        _expired.append(_t)
-                    for _t in _expired:
-                        task_timeout_blocks.pop(_t, None)
+                    reap_alloc_timeouts(
+                        inflight=inflight, inflight_ts=inflight_ts,
+                        inflight_nodes=inflight_nodes, inflight_tags=inflight_tags,
+                        inflight_targets=inflight_targets,
+                        task_timeout_blocks=task_timeout_blocks, pending=pending,
+                        timeout_sec=task_fetch_timeout, log=log,
+                    )
+                    prune_timeout_blocks(task_timeout_blocks, inflight, pending)
                     if nd is None:
-                        # 远端失联 → 本机并发恢复满额（防流式 PPO 被饿死）
-                        if (
-                            time.time() - last_remote_ok[0] > remote_dead_sec
-                            and local_cap[0] != cap_full
-                        ):
-                            local_cap[0] = cap_full
-                            log(
-                                f"[dist] no remote settle for {remote_dead_sec:.0f}s — "
-                                f"local slots {local_slots} -> {cap_full}"
-                            )
                         # R6：PPO 波次启动后本机让位训练（local_suspend 置位）；
                         # 集群停摆豁免——远端失联超阈值时让位自动失效，采集不饿死。
                         suspended = (
@@ -690,6 +652,12 @@ class RolloutDispatcher:
                         register_inflight(inflight, task)
                         inflight_ts[task] = time.time()
                         t_task_start = inflight_ts[task]
+                        if nd is not None:
+                            task_tag = next_attempt_tag(iter_id, _tag_seq)
+                            inflight_tags.setdefault(task, set()).add(task_tag)
+                            cancel_target = note_cancel_target(
+                                inflight_targets, task, task_tag, nd
+                            )
                         inflight_nodes.setdefault(task, set()).add(nd_id)
                         if nd is None:
                             local_active[0] += 1
@@ -712,8 +680,15 @@ class RolloutDispatcher:
                             if tail_cand is not None:
                                 task = tail_cand
                                 inflight[task] += 1
-                                inflight_ts[task] = time.time()
-                                t_task_start = inflight_ts[task]
+                                # 不刷新 inflight_ts：它是**首次派发**的墙钟锚点，
+                                # 竞速副本一刷新，挂住的主副本就能永远逃过 reaper。
+                                t_task_start = time.time()
+                                if nd is not None:
+                                    task_tag = next_attempt_tag(iter_id, _tag_seq)
+                                    inflight_tags.setdefault(task, set()).add(task_tag)
+                                    cancel_target = note_cancel_target(
+                                        inflight_targets, task, task_tag, nd
+                                    )
                                 inflight_nodes.setdefault(task, set()).add(nd_id)
                                 fanout_copy = True
                                 if nd is None:
@@ -741,6 +716,8 @@ class RolloutDispatcher:
                 transient_err = False  # 背压/瞬断（单一判据：common.distribution.is_transient_error）
                 task_lost = False  # 取包丢失（节点重启/清场；判据：common.distribution.is_task_lost_error）
                 try:
+                    if nd is not None and task_tag:
+                        common.distribution.set_request_tag(task_tag)
                     if nd is None:
                         _idx = next_idx[0]
                         next_idx[0] += 1
@@ -779,6 +756,7 @@ class RolloutDispatcher:
                             decision_events=bool(getattr(args, "decision_events", False)),
                             # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
                             decision_k=int(getattr(args, "decision_k", 10)),
+                            on_key=lambda key: remember_task_key(cancel_target, key),
                             # greedy 分层采集：labelMode=greedy 进 URL → agent 拼
                             # --teacher-argmax；该键已进 taskKey 与轮询配方，缓存隔离。
                             label_mode="greedy"
@@ -850,6 +828,10 @@ class RolloutDispatcher:
                         if nd is not None:
                             common.distribution.forget_weights_node(nd_id, kind=wkind)
                         transient_err = True
+                if task_tag:
+                    # 这份 attempt 的请求已结束（成败都算）：解除收工态，tag 不再复用。
+                    common.distribution.clear_abort(task_tag)
+                    common.distribution.set_request_tag("")
                 with lock:
                     if nd is None and task is not None:
                         # max(0, …)：任何未配对路径都不许把计数打成负数（负 = 闸门失效）。
@@ -866,6 +848,10 @@ class RolloutDispatcher:
                                     inflight.pop(task, None)
                                     inflight_ts.pop(task, None)
                                     inflight_nodes.pop(task, None)
+                            # 已结算的任务不再需要任何在飞副本的算力：关掉它们的请求。
+                            for _lt in inflight_tags.pop(task, set()):
+                                common.distribution.abort_active_requests(_lt)
+                            inflight_targets.pop(task, None)
                             # 输家副本退场：竞速双方都在锁外写盘、锁内结算——后到者
                             # 的 shard 目录若不删，发布端 iter_shard_dirs 会把同一
                             # seed 的两份数据一起打进 payload.zip（重复 arcname，
@@ -891,6 +877,10 @@ class RolloutDispatcher:
                             inflight.pop(task, None)
                             inflight_ts.pop(task, None)
                             inflight_nodes.pop(task, None)
+                        # 胜者已定：其余竞速副本的结果注定被丢弃，立即断连止损。
+                        for _lt in inflight_tags.pop(task, set()):
+                            common.distribution.abort_active_requests(_lt)
+                        inflight_targets.pop(task, None)
                         last_settle_at[0] = time.time()
                         streaks[nd_id] = 0
                         soft_streaks[nd_id] = 0
@@ -962,6 +952,7 @@ class RolloutDispatcher:
                                 inflight.pop(task, None)
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
+                        drop_attempt(inflight_tags, inflight_targets, task, task_tag)
                         if task in seen or task in missing_keys:
                             race_drops["fanout_settled"] += 1
                             if race_drops["fanout_settled"] <= RACE_LOG_SAMPLE:
@@ -994,6 +985,9 @@ class RolloutDispatcher:
                                 inflight.pop(task, None)
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
+                        for _lt in inflight_tags.pop(task, set()):
+                            common.distribution.abort_active_requests(_lt)
+                        inflight_targets.pop(task, None)
                         race_drops["main_by_fanout"] += 1
                         if race_drops["main_by_fanout"] <= RACE_LOG_SAMPLE:
                             log(
@@ -1028,6 +1022,8 @@ class RolloutDispatcher:
                                 inflight.pop(task, None)
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
+                        # 只摘自己的 tag：同任务的竞速副本可能还在飞，不能一起取消。
+                        drop_attempt(inflight_tags, inflight_targets, task, task_tag)
                         pending.append(task)
                         stats["retried"] += 1
                         log(
@@ -1046,6 +1042,11 @@ class RolloutDispatcher:
                         )
                     else:
                         missing_keys.add(task)
+                        inflight.pop(task, None)
+                        inflight_ts.pop(task, None)
+                        inflight_nodes.pop(task, None)
+                        inflight_tags.pop(task, None)
+                        inflight_targets.pop(task, None)
                         _record_agent_meta(
                             meta_path,
                             {
@@ -1080,6 +1081,7 @@ class RolloutDispatcher:
 
         threads: list[threading.Thread] = []
         extra_threads: list[threading.Thread] = []
+
         # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
         alive: list = []
         spawned_ids: set[str] = set()
@@ -1104,13 +1106,23 @@ class RolloutDispatcher:
                 extra_threads.append(t)
 
         # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
+        # B3：初始只开 local_slots 条（0 = 不开）；失联补孵由 LocalLane 守护。
+        local_lane = LocalLane(
+            worker,
+            local_slots=local_slots,
+            cap_full=cap_full,
+            local_cap=local_cap,
+            last_remote_ok=last_remote_ok,
+            remote_dead_sec=remote_dead_sec,
+            all_settled=all_settled,
+            halt_event=halt_event,
+            deadline=deadline,
+            lock=lock,
+            threads=threads,
+        )
         t_dist_start_box[0] = time.time()
-        for _ in range(max(local_slots, cap_full)):
-            t = threading.Thread(
-                target=worker, args=(None,), daemon=True, name="rollout-local"
-            )
-            t.start()
-            threads.append(t)
+        local_lane.start()
+
         # reuse 节点：同 wver 已下发，立刻开采。
         for nd in reuse:
             _spawn_node_workers(nd)

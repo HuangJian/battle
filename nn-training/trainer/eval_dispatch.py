@@ -351,7 +351,7 @@ class EvalDispatcher:
             rnd.land_reused(reused)
             # 份额模式：本机在节点门前先开工（旧派发器同序）；兜底模式等 nodes_ok 出来再定。
             if not self.local_fallback_only and snapshot_path is not None and local_slots > 0:
-                execs.ensure_local(local_slots)
+                execs.ensure_local(local_slots, owner=rnd)
 
             local_bun = bun_version(bun)
             # 2026-09-03 修正（mac 实测 stage.tiles null）：eval_stages 含自定义关
@@ -465,6 +465,11 @@ class EvalDispatcher:
                     return False
                 _log("[eval] no eval-capable node — local-only eval this round")
 
+            # B2（2026-11-10）：冻结期不推权重。窗口钟已暂停，等本课解冻后再 POST；
+            # 进程 shutdown 时放弃本轮。冻结可能发生在 ping 之后，故门放在读权重之前。
+            if not arb.wait_for_thaw(course_fp):
+                return False
+
             # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
             # ★ 2026-10-15：与 rollout 腿同一口径——推之前先把 delta 容器落地成整份
             #   （评估节点自己也 `JSON.parse` 这个文件）。
@@ -480,7 +485,11 @@ class EvalDispatcher:
                 线程先跑会拿到「node gone」。
                 """
                 rnd.activate(nd)
-                execs.ensure_node(nd, int(nd.get("c") or 0))
+                execs.ensure_node(nd, int(nd.get("c") or 0), owner=rnd)
+
+            # 读权重期间可能又进入冻结：POST 前再确认一次（窗口钟仍停）。
+            if not arb.wait_for_thaw(course_fp):
+                return False
 
             nodes_ok = (
                 common.distribution.post_weights_parallel(
@@ -517,7 +526,7 @@ class EvalDispatcher:
                     )
                     return False
                 rnd.mark_local_spawned()
-                execs.ensure_local(local_slots)
+                execs.ensure_local(local_slots, owner=rnd)
                 _log(
                     f"[eval] it{it}: local fallback ×{local_slots}"
                     "（no usable remote eval node，本机接盘）"
@@ -544,7 +553,7 @@ class EvalDispatcher:
                 # 这里补幂等一遍——`post_weights_parallel` 的 on_alive 只是流水线优化，
                 # 不能把「节点可派」建立在它一定被回调上（替身/降级实现没有回调）。
                 rnd.activate(nd)
-                execs.ensure_node(nd, int(nd.get("c") or 0))
+                execs.ensure_node(nd, int(nd.get("c") or 0), owner=rnd)
 
             # —— 等收口（任务级仲裁：线程一直活着，收工只看这一轮的账）——
             # ① settled 满 → 立即收工（断连 + 拒发新请求，慢节点/竞速副本不再等）；
@@ -694,6 +703,7 @@ class EvalDispatcher:
         finally:
             if rnd is not None:
                 arb.unregister(rnd)
+                execs.release_owner(rnd)
 
 
 def _pools_alive(rnd: EvalRound, execs) -> bool:

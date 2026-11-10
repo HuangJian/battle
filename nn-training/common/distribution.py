@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from common.hashing import sha256_file
@@ -84,6 +84,7 @@ from common.shard import (
 from common.shard import (
     write_shard as write_shard,
 )
+from common.task_key import task_key as task_key
 from common.weights_ledger import (
     _WEIGHTS_PUSHED as _WEIGHTS_PUSHED,
 )
@@ -1370,6 +1371,30 @@ def check_node_capabilities(
         )
 
 
+def cancel_task(base_url: str, auth_key: str, key: str, timeout: float = 3.0) -> bool:
+    """POST /v1/cancel {key}；旧 agent / 404 / 网络错误一律 False（不抛）。
+
+    调用方在**独立 daemon 线程**里跑：不继承 worker 的 `rollout:*` 断连 tag，
+    否则 reaper 刚 `abort_active_requests` 过的作用域会把这条取消请求也拦掉。
+    """
+    old_tag = request_tag()
+    set_request_tag("")
+    try:
+        status, _ = _request(
+            base_url.rstrip("/") + "/v1/cancel",
+            auth_key,
+            timeout,
+            data=json.dumps({"key": key}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return bool(status == 200)
+    except Exception:
+        return False
+    finally:
+        set_request_tag(old_tag)
+
+
 def fetch_task(
     url: str,
     auth_key: str,
@@ -1415,6 +1440,9 @@ def fetch_task(
     # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
     # （fail-closed；本函数只透传，不查 ping）。
     decision_k: int = 10,
+    # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
+    # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
+    on_key: Callable[[str], None] | None = None,
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -1488,6 +1516,21 @@ def fetch_task(
         params["wins"] = wins
     if near_miss_times is not None:
         params["nearMissTimes"] = near_miss_times
+    if on_key is not None:
+        on_key(
+            task_key(
+                iter_id,
+                str(params.get("mode", "rollout")),
+                str(params.get("kind", "rollout")),
+                stage,
+                seed,
+                str(params.get("stageJsonHash", "")),
+                str(params.get("courseFp", "")),
+                str(params.get("decisionEvents", "")),
+                str(params.get("decisionK", "")),
+                str(params.get("labelMode", "")),
+            )
+        )
     qs = urllib.parse.urlencode(params)
     base = url.rstrip("/")
     started = time.monotonic()

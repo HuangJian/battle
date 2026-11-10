@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from trainer.dispatch_queue import local_slots_max_of
+from trainer.queue_local import split_local_head
 
 
 class _Args:
@@ -42,3 +43,25 @@ def test_unset_means_auto() -> None:
 def test_string_input_tolerant() -> None:
     assert local_slots_max_of(_Args("2")) == 2
     assert local_slots_max_of(_Args("x")) is None  # 脏值退 auto 而非崩溃
+
+
+def test_local_head_rotates_with_remote_and_keeps_quota() -> None:
+    tasks = [(2000, i) for i in range(1, 7)]
+    head, rest = split_local_head(tasks, 2)
+    assert head == [(2000, 2), (2000, 4)], head
+    assert rest == [(2000, 1), (2000, 3), (2000, 5), (2000, 6)], rest
+    assert sorted(head + rest) == tasks
+
+
+def test_local_head_zero_and_full_are_degenerate() -> None:
+    tasks = [(2000, 1), (2000, 2)]
+    assert split_local_head(tasks, 0) == ([], tasks)
+    assert split_local_head(tasks, 2) == (tasks, [])
+    assert split_local_head(tasks, 9) == (tasks, [])
+
+
+def test_local_head_keeps_exact_share_when_remote_quota_is_small() -> None:
+    tasks = [(2000, i) for i in range(1, 5)]
+    head, rest = split_local_head(tasks, 3)
+    assert len(head) == 3 and len(rest) == 1, (head, rest)
+    assert sorted(head + rest) == tasks
