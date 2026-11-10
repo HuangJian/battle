@@ -1,6 +1,9 @@
 /** DataTable.tsx — 通用数据表：表头排序（data-v 语义保留）+ 列显隐菜单 + 密度切换 +
  *  关键词过滤 + 粘性表头 + 行展开 + 空/加载态。组件内 state 自有，绝不上升（硬边界）。
- *  可选 storagePrefix 持久化到 tc.* 命名空间。 */
+ *  可选 storagePrefix 持久化到 tc.* 命名空间。
+ *
+ *  `columnsMenu={false}` = 显隐由调用方接管（指标页把它放进「指标表配置」弹窗）：
+ *  本组件既不藏列也不写显隐存储——两处同时写一个键，弹窗里勾了列也会被旧存储重新藏起来。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
@@ -34,6 +37,9 @@ export interface DataTableProps<T> {
   initialSortDir?: SortDir
   /** 提供则把排序/密度/列显隐持久化到 localStorage（tc.node.<view>.* 语义）。 */
   storagePrefix?: string
+  /** 内置「列▾」菜单（缺省开）。调用方自己接管列显隐时传 false：本组件不再藏列、也不再写
+   *  显隐存储——否则同一个键上有两个写者，弹窗里勾了列也可能被旧存储重新藏起来。 */
+  columnsMenu?: boolean
   /** 行尾 ▸ 展开详情；缺省 = 无展开列。 */
   expandRender?: (row: T) => ComponentChildren
   emptyText?: string
@@ -86,6 +92,9 @@ function loadPref<T>(
   }
 }
 
+/** 共享的空集合（`columnsMenu={false}` 时用；常量避免每次 render 新建）。 */
+const EMPTY_HIDDEN: ReadonlySet<string> = new Set<string>()
+
 export function DataTable<T>(props: DataTableProps<T>) {
   const {
     columns,
@@ -107,7 +116,12 @@ export function DataTable<T>(props: DataTableProps<T>) {
   const [keyword, setKeyword] = useState('')
   const [expandedRow, setExpandedRow] = useState<string | null>(null)
   const [colMenuOpen, setColMenuOpen] = useState(false)
-  const [hidden, setHidden] = useState<Set<string>>(() => loadHidden(storagePrefix, columns))
+  const showColumnsMenu = props.columnsMenu !== false
+  const [hiddenOwn, setHidden] = useState<Set<string>>(() =>
+    showColumnsMenu ? loadHidden(storagePrefix, columns) : new Set<string>(),
+  )
+  /** 显隐被调用方接管（`columnsMenu={false}`）⇒ 本组件不藏任何列。 */
+  const hidden = showColumnsMenu ? hiddenOwn : EMPTY_HIDDEN
   const hiddenDefaultsSig = columns
     .filter((c) => c.hiddenByDefault)
     .map((c) => c.key)
@@ -126,12 +140,13 @@ export function DataTable<T>(props: DataTableProps<T>) {
     try {
       localStorage.setItem(`${storagePrefix}.sort`, JSON.stringify({ k: sortKey, d: sortDir }))
       localStorage.setItem(`${storagePrefix}.dense`, JSON.stringify(dense))
+      if (!showColumnsMenu) return
       localStorage.setItem(`${storagePrefix}.hidden`, JSON.stringify([...hidden]))
       localStorage.setItem(`${storagePrefix}.hidden.defaults`, hiddenDefaultsSig)
     } catch {
       /* 不可写不致命 */
     }
-  }, [storagePrefix, sortKey, sortDir, dense, hidden, hiddenDefaultsSig])
+  }, [storagePrefix, sortKey, sortDir, dense, hidden, hiddenDefaultsSig, showColumnsMenu])
 
   useEffect(() => {
     const onDoc = (e: MouseEvent): void => {
@@ -209,30 +224,32 @@ export function DataTable<T>(props: DataTableProps<T>) {
           value={keyword}
           onInput={(e) => setKeyword((e.target as HTMLInputElement).value)}
         />
-        <div className="tc-colmenu" ref={menuRef}>
-          <button
-            type="button"
-            className="tc-btn tc-btn--sm"
-            aria-label="列显隐"
-            onClick={() => setColMenuOpen((v) => !v)}
-          >
-            列▾
-          </button>
-          {colMenuOpen ? (
-            <div className="tc-colmenu__panel" role="menu" aria-label="列显隐">
-              {columns.map((c) => (
-                <label key={c.key}>
-                  <input
-                    type="checkbox"
-                    checked={!hidden.has(c.key)}
-                    onChange={() => toggleCol(c.key)}
-                  />
-                  <span>{c.label}</span>
-                </label>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        {showColumnsMenu ? (
+          <div className="tc-colmenu" ref={menuRef}>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              aria-label="列显隐"
+              onClick={() => setColMenuOpen((v) => !v)}
+            >
+              列▾
+            </button>
+            {colMenuOpen ? (
+              <div className="tc-colmenu__panel" role="menu" aria-label="列显隐">
+                {columns.map((c) => (
+                  <label key={c.key}>
+                    <input
+                      type="checkbox"
+                      checked={!hidden.has(c.key)}
+                      onChange={() => toggleCol(c.key)}
+                    />
+                    <span>{c.label}</span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="tc-segmented" role="group" aria-label="表格密度">
           <button
             type="button"

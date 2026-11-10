@@ -11,6 +11,20 @@ export function fmtFullTs(ms: number): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
 }
 
+/** 本机戳 `'YYYY-MM-DD HH:MM:SS'`（账本里的行时间原样）：**今天**只显 `HH:MM:SS`，
+ *  其余照原样。用在首页「最新 6 轮」表——最近几轮几乎都在今天，日期每天重复十几次是噪声。
+ *
+ *  非该格式（空串 / 带时区 / 别的写法）原样返回：宁可显示原值，也不猜。
+ *  按字符串前缀与「本机今天」比日期，不走 `new Date(stamp)`（无时区戳会被当本地解析，
+ *  云机写的 UTC 戳则会被误判——这里只做“今天/不是今天”这一件事）。 */
+export function fmtStampToday(stamp: string, now = Date.now()): string {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(stamp)
+  if (!m) return stamp
+  const d = new Date(now)
+  const today = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+  return m[1] === today ? m[2]! : stamp
+}
+
 export function fmtTs(ms: number, now = Date.now()): string {
   const d = new Date(ms)
   const sameDay =

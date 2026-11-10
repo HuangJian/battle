@@ -1,5 +1,5 @@
 /**
- * web-view-format.test.ts — 时间 / 文本格式化纯函数：fmtTs 同日跨日、fmtFullTs、fmtPct、stripIsoPrefix、formatBytes
+ * web-view-format.test.ts — 时间 / 文本格式化纯函数：fmtTs 同日跨日、fmtFullTs、fmtStampToday、fmtPct、stripIsoPrefix、formatBytes
  *
  * 分层：src/web/view/format.ts
  *
@@ -14,6 +14,7 @@ import {
   fmtNum,
   fmtPct,
   fmtPhaseSecs,
+  fmtStampToday,
   fmtTs,
   phaseSecs,
   phaseSecsTitle,
@@ -31,6 +32,15 @@ describe('view 纯函数：时间与文本', () => {
 
   it('fmtFullTs：完整「YYYY-MM-DD HH:MM:SS」（历史锚点比较用）', () => {
     expect(fmtFullTs(new Date(2026, 8, 7, 9, 8, 5).getTime())).toBe('2026-09-07 09:08:05')
+  })
+
+  it('fmtStampToday：本机戳是今天 ⇒ 只留 HH:MM:SS；其它日子/非该格式原样', () => {
+    const now = new Date(2026, 8, 7, 12, 0, 0).getTime()
+    expect(fmtStampToday('2026-09-07 09:08:05', now)).toBe('09:08:05')
+    expect(fmtStampToday('2026-09-06 23:59:59', now)).toBe('2026-09-06 23:59:59')
+    // 非 `YYYY-MM-DD HH:MM:SS`：宁可显示原值，也不猜
+    expect(fmtStampToday('', now)).toBe('')
+    expect(fmtStampToday('2026-09-07T09:08:05Z', now)).toBe('2026-09-07T09:08:05Z')
   })
 
   it('fmtPct / stripIsoPrefix', () => {

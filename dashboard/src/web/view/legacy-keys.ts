@@ -6,6 +6,13 @@ export const TC_CARD_KEY = (id: string): string => `${TC_KEY_PREFIX}card.${id}`
 export const TC_INTERVAL_KEY = (id: string): string => `${TC_KEY_PREFIX}interval.${id}`
 export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
+/** 指标表的列显隐（JSON 字符串数组 = 隐藏的列键；缺键 ⇒ 默认隐藏逐局指标列）。
+ *  条目「列▾」已退役：指标页的显隐统一走「指标表配置」弹窗，旧值只作迁移来源。 */
+export const TC_METRICS_COLS = `${TC_KEY_PREFIX}metrics.cols`
+/** @deprecated 条目「列▾」时代的显隐键（DataTable 自持）；仅供 `parseHiddenCols` 迁移。 */
+export const TC_METRICS_HIDDEN_LEGACY = `${TC_KEY_PREFIX}metrics.hidden`
+/** 指标表逐局指标列的统计量（JSON `{metricKey: stat}`，与走势图同一份解析）。 */
+export const TC_METRICS_STAT = `${TC_KEY_PREFIX}metrics.stat`
 /** 局域网只读横幅关闭键（用户关闭后不再显示；tc. 前缀保证不被 cleanupNonTcKeys 误删）。 */
 export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
 /** 告警坞已读集合（JSON 数组；键 = `alertAckKey(kind, subject, eventId)` 事件身份，2026-10-03）。
@@ -16,6 +23,10 @@ export const TC_ALERT_ACKS = `${TC_KEY_PREFIX}cloudHalt.ack`
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 /** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
 export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
+/** hero 最新 6 轮速览表的列显隐（JSON 字符串数组 = 隐藏的列键；缺键 ⇒ 全显示）。 */
+export const TC_HERO_ITERS_COLS = `${TC_KEY_PREFIX}hero.iters.cols`
+/** 首页速览表的逐局指标统计量（与指标页各自一份：两张表各看各的口径）。 */
+export const TC_HERO_ITERS_STAT = `${TC_KEY_PREFIX}hero.iters.stat`
 /** 侧栏折叠态（'1' = 图标条；**只由品牌行的折叠键写**，不随视口/hover 自动切换）。 */
 export const TC_SIDE_COLLAPSED = `${TC_KEY_PREFIX}side.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
