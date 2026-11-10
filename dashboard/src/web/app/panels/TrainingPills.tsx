@@ -100,7 +100,8 @@ export function TrainingPills({
   return (
     <div className="tc-tpills" aria-label="在训课程">
       {/* 词表说明（2026-11-02 用户：「这些状态提示让人混淆难以理解」）：状态词是
-          `环节·归属` 语法，图组左侧一枚中性小签把读法一次说完（纯悬停读数，不可点）。 */}
+          `环节·状态` 语法（2026-11-10 用户：归属本机/云机不上 pill），图组左侧一枚中性小签
+          把读法一次说完（纯悬停读数，不可点）。 */}
       <span className="tc-tpills__legend" title={PILL_WORD_GUIDE} aria-label={PILL_WORD_GUIDE}>
         ?
       </span>

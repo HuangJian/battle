@@ -131,7 +131,8 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
       overview: ovView([ov]),
     })[0]!
     // 接管 ∧ 零回传 ⇒ 「等云机接管」（云机在跑但还没回传任何一段产物）
-    expect(pill.status).toBe('等云机接管')
+    // 2026-11-10：pill 只报状态——归属（云机）不上屏
+    expect(pill.status).toBe('等接管')
     expect(pill.status).not.toBe('已收官')
     expect(matrixStatus(ov, live, true).text).toBe('云机·接管')
     // 派生层唯一答案：两边同一个 kind（接管族）——矩阵词与 pill 词各自渲染，语义同源。
@@ -421,6 +422,6 @@ describe('courseStatus：来源可用性变化不改词（R4-b/c/d 的滞回）'
       overview: { ...ov, hubOnline: false, stale: { since: 1, reason: 'boom' } },
     })[0]!
     expect(after.status).toBe(before.status)
-    expect(before.status).toBe('云机执行中')
+    expect(before.status).toBe('执行中')
   })
 })

@@ -125,7 +125,7 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(p).toMatchObject({ course: 'c6-chip', it: 37, status: '采集中', tone: 'g' })
   })
 
-  it('「在等什么」四态：环节·归属词法（已发布 / 采集中 / 门禁·本机 / 本轮无待办）——不在 TS 里重算语义', () => {
+  it('「在等什么」四态：环节词法（已发布 / 采集中 / 门禁 / 本轮无待办）——不在 TS 里重算语义', () => {
     const status = (patch: Partial<LoopQueueRow>): string =>
       view.coursePills({
         courses: ['c'],
@@ -140,8 +140,8 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     // 旧词「推进中」退役（2026-11-02）：`ready` 说的是**本机的下一步**（current 环节）
     expect(
       status({ current: 'gate', waiting: { kind: 'ready', text: '无外部等待，下一步 gate' } }),
-    ).toBe('门禁·本机')
-    // 下一步是 PPO（还没发布）⇒「待发布」：不得与本机在算的「PPO·本机算」读混。
+    ).toBe('门禁')
+    // 下一步是 PPO（还没发布）⇒「待发布」：不得与已开算的「PPO·在算」读混。
     expect(
       status({ current: 'ppo', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } }),
     ).toBe('PPO·待发布')
@@ -200,10 +200,10 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     })[0]!
     expect(noRow).toMatchObject({ it: null, status: '已收官' })
     // resume（停→开，新事件追加在后）⇒ 服务端条目消失 ⇒ 回到训练侧词。
-    expect(view.coursePills({ ...base, loopCompletes: {} })[0]!.status).toBe('采集·本机')
+    expect(view.coursePills({ ...base, loopCompletes: {} })[0]!.status).toBe('采集')
   })
 
-  it('★M4：被接管的课 pill 不提本地「推进中/采集中」，走「云机执行中」（整段由云机跑）', () => {
+  it('★M4：被接管的课 pill 不提本地「推进中/采集中」，走「执行中」（整段由云机跑，但归属不上 pill）', () => {
     const p = view.coursePills({
       courses: ['x20-off'],
       rows: [
@@ -218,7 +218,7 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
         }),
       ),
     })[0]!
-    expect(p).toMatchObject({ course: 'x20-off', status: '云机执行中', tone: 'g' })
+    expect(p).toMatchObject({ course: 'x20-off', status: '执行中', tone: 'g' })
     expect(p.title).toContain('接管')
     expect(p.title).toContain('已回传段内 7 轮')
     // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：被接管的课也仍报「已暂停」
@@ -231,7 +231,7 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(paused.status).toBe('已暂停')
   })
 
-  it('★M4：接管 ∧ **0 回传** ⇒ 「等云机接管」（不说「云机执行中」——那是进度断言）', () => {
+  it('★M4：接管 ∧ **0 回传** ⇒ 「等接管」（不说「执行中」——那是进度断言）', () => {
     // 用户报障原文（2026-09-23）：三个离线课「两个显示「回传中」，一个显示「等回传」，实际上
     // 三个都没有被云机接收」。旧形状只能回答「hub 说不说它离线」，于是把「还没取走包」写成
     // 「回传中」——读着像在跑（而 hub 侧离线段进度是空的）。0 回传只能说「等云机」。
@@ -245,8 +245,8 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
       ),
     })
     expect(p.map((x) => [x.status, x.tone])).toEqual([
-      ['等云机接管', 'y'],
-      ['等云机接管', 'y'],
+      ['等接管', 'y'],
+      ['等接管', 'y'],
     ])
     expect(p[0]!.title).toContain('还没有任何段内产物回传')
   })
@@ -259,7 +259,7 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
       trainerRunning: true,
       overview: ov(ovRow('x20-live', { hold: hold('tpu-1'), offlineRounds: 1 })),
     })[0]!
-    expect(live.status).toBe('云机执行中')
+    expect(live.status).toBe('执行中')
     expect(live.title).toContain('本机不跑')
     // stale = 进度静默超阈 ⇒ 已自动恢复协作派发（黄，不是红：它已经自愈）
     const stale = view.coursePills({
@@ -371,7 +371,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
   })
 
   // ★ 2026-11-02（用户报障「还没 ppo worker 接收就显示等回传」）：认领与开算是两件事。
-  it('②b 认领后已开算 ⇒ 「PPO·云机算」，龄取**开算**龄（不是认领龄）', () => {
+  it('②b 认领后已开算 ⇒ 「PPO·在算」，龄取**开算**龄（不是认领龄）', () => {
     const [p] = view.coursePills({
       courses: ['c'],
       rows: [row({ course: 'c' })],
@@ -384,7 +384,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
         }),
       ),
     })!
-    expect(p).toMatchObject({ status: 'PPO·云机算', age: '2m', tone: 'y' })
+    expect(p).toMatchObject({ status: 'PPO·在算', age: '2m', tone: 'y' })
   })
 
   it('②c 认领 6 分钟但已开算 ⇒ **不算卡住**（开算后的时长是活，PPO 本来就几分钟）', () => {
@@ -400,7 +400,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
         }),
       ),
     })!
-    expect(p.status).toBe('PPO·云机算')
+    expect(p.status).toBe('PPO·在算')
     expect(p.tone).toBe('y') // 红点是「认领了却不开算」，不是「算得久」`
   })
 
@@ -440,7 +440,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
     expect(p.title).toContain('心跳 4s 前')
   })
 
-  it('⑥ 训练侧 inflight 但 hub 无对应 jid ⇒ 「PPO·本机算」（jid 连接一分为二）', () => {
+  it('⑥ 训练侧 inflight 但 hub 无对应 jid ⇒ 「PPO·在算」（jid 连接一分为二）', () => {
     const [p] = view.coursePills({
       courses: ['c'],
       rows: [
@@ -461,7 +461,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
       trainerRunning: true,
       overview: ov(hubRow('c', { queuePending: 1, inflight: 0, peeked: false, nextJob: 'j1' })),
     })!
-    expect(p).toMatchObject({ status: 'PPO·本机算', tone: 'y' })
+    expect(p).toMatchObject({ status: 'PPO·在算', tone: 'y' })
     expect(p.title).toContain('非远端')
     expect(p.title).toContain('等远端回传：ppo_remote@37')
   })
@@ -511,7 +511,7 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
       trainerRunning: true,
       overview: ov(hubRow('c', { queuePending: 2, inflight: 0, peeked: true })),
     })!
-    expect(p.status).toBe('PPO·本机算')
+    expect(p.status).toBe('PPO·在算')
   })
 
   it('⑩ jid 对上 ⇒ 走远端的「PPO·已认领」；未登记持有者被点名', () => {
@@ -891,12 +891,76 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     const pillStart = html.indexOf('aria-label="在训课程"')
     const pillSeg = html.slice(pillStart, html.indexOf('tc-top__right', pillStart))
     expect(pillStart).toBeGreaterThan(-1)
-    // 词表说明签：状态词是 `环节·归属` 语法，读法只在 `PILL_WORD_GUIDE` 一处（悬停）。
+    // 词表说明签：状态词是 `环节·状态` 语法（归属不上 pill），读法只在 `PILL_WORD_GUIDE` 一处（悬停）。
     expect(pillSeg).toContain('tc-tpills__legend')
-    expect(pillSeg).toContain('环节·谁在做')
+    expect(pillSeg).toContain('环节·状态')
     expect(pillSeg).toContain('卡住')
     expect(pillSeg).toContain('27m')
     expect(pillSeg).toContain('持有者 gpu-7')
     expect(pillSeg).toContain('不在 worker 登记表里')
+  })
+})
+
+describe('顶部 pill 只报状态（用户 2026-11-10：不显示本机 / 云机）', () => {
+  it('归属词上屏前被摘掉，其余状态词原样（只改说法，不改判据）', () => {
+    const w = view.pillStatusWord
+    expect(w('门禁·本机')).toBe('门禁')
+    expect(w('评估·本机')).toBe('评估')
+    expect(w('本机·在跑')).toBe('在跑')
+    expect(w('PPO·本机算')).toBe('PPO·在算')
+    expect(w('PPO·云机算')).toBe('PPO·在算')
+    expect(w('云机·接管')).toBe('接管中')
+    expect(w('云机执行中')).toBe('执行中')
+    expect(w('等云机接管')).toBe('等接管')
+    for (const same of [
+      '采集中',
+      'PPO·待发布',
+      'PPO·已发布',
+      'PPO·排队',
+      'PPO·预取',
+      'PPO·无人取',
+      'PPO·已认领',
+      'PPO·卡住',
+      '已暂停',
+      '已收官',
+      '已中止',
+      '起不来',
+      '待进程',
+      '未在训',
+      '接管掉线',
+      '导包中',
+      '视图不可用',
+    ]) {
+      expect(w(same)).toBe(same)
+    }
+  })
+
+  it('coursePills 实际产出的状态不含「本机 / 云机」（接管 / held / 本机在算 / 环节各一条）', () => {
+    const got = view.coursePills({
+      courses: ['a', 'b', 'c', 'd', 'e'],
+      rows: [
+        row({ course: 'a', waiting: { kind: 'ready', text: '无外部等待' } }),
+        row({ course: 'b' }),
+        row({ course: 'c', waiting: { kind: 'held', text: '云机接管中' } }),
+        row({
+          course: 'd',
+          waiting: { kind: 'inflight', text: '等远端回传：ppo_remote@37' },
+          inflight: [
+            { phase: 'ppo_remote', round: '37', jid: 'local12345678', dispatch: null, dir: null },
+          ],
+        }),
+        row({ course: 'e', current: 'gate', waiting: { kind: 'ready', text: '无外部等待' } }),
+      ],
+      trainerRunning: true,
+      overview: ov(
+        ovRow('a', { hold: hold('tpu-1'), offlineRounds: 2 }),
+        ovRow('b', { hold: hold('tpu-2') }),
+        ovRow('d', { queuePending: 1, inflight: 0, peeked: false, nextJob: 'j1' }),
+      ),
+    })
+    expect(got.map((p) => p.status)).toEqual(['执行中', '等接管', '接管中', 'PPO·在算', '门禁'])
+    for (const p of got) expect(p.status).not.toMatch(/本机|云机/)
+    // 悬停仍说出归属（上屏面去掉的只是「谁在做」，不是事实）。
+    expect(got[0]!.title).toContain('接管')
   })
 })
