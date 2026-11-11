@@ -686,7 +686,11 @@ def test_local_slots_zero_spawns_no_local_threads(tmp_path, monkeypatch) -> None
 
 
 def test_local_slots_caps_initial_local_threads(tmp_path, monkeypatch) -> None:
-    """B3：初始本机线程数 = local_slots，不再取 max(local_slots, cap_full)。"""
+    """B3：初始本机线程数 = local_slots，不再取 max(local_slots, cap_full)。
+
+    只钉**首次** spawn：收尾竞态里 watcher 可能为空槽补孵 1 条（全集并行实测
+    `[2, 1]`），那是保活/收尾，不是「初始预孵化 cap_full」。
+    """
     h = _Harness(tmp_path, monkeypatch, games=4, nodes=[_node("a97")], workers=4, local_slots=2)
     spawned: list[int] = []
     real_spawn = ql.LocalLane.spawn
@@ -701,7 +705,7 @@ def test_local_slots_caps_initial_local_threads(tmp_path, monkeypatch) -> None:
     report = h.run(lambda *_a, **_k: (h.manifest(), {}))
 
     assert report["missing"] == [], report.get("missing")
-    assert spawned == [2], f"初始本机线程数不等于 local_slots: {spawned}"
+    assert spawned and spawned[0] == 2, f"首次本机 spawn 数不等于 local_slots: {spawned}"
 
 
 def test_local_slots_zero_falls_back_when_remote_dead(tmp_path, monkeypatch) -> None:
