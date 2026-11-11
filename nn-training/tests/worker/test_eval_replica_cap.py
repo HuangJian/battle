@@ -38,6 +38,7 @@ def _round(copies: int) -> EvalRound:
     rnd.attempts = {}
     rnd.leg_tries = {}
     rnd._grant_seq = 0
+    rnd.tail_race_grants = 0
     rnd._lock = threading.Lock()
     rnd._log = lambda _m: None
     return rnd

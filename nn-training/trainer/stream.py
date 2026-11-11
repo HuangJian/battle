@@ -110,6 +110,10 @@ def run_rollout_stream(
     # 采集真正收官（collector 线程退出）时回调一次；调用方用它解冻 eval 闸。
     # 必须在尾部 drain **之前**调用：尾部 PPO 是本地算力，节点已经空闲，eval 该进场。
     on_collect_end=None,
+    # 队列清空/回队（stream 的 eval 动态闸）：全部任务已派出 ⇒ 解冻本课 eval；
+    # 超时任务回队 ⇒ 重新冻结，保证 rollout 仍优先。
+    on_dispatch_drained=None,
+    on_dispatch_active=None,
 ) -> dict:
     """流式迭代（--stream 1）：采集与 PPO 重叠。
 
@@ -243,6 +247,22 @@ def run_rollout_stream(
         except Exception as cb_err:
             log(f"[stream] on_collect_done error: {str(cb_err)[:120]}")
 
+    def _on_queue_drained() -> None:
+        if on_dispatch_drained is not None:
+            try:
+                on_dispatch_drained()
+            except Exception as cb_err:
+                log(f"[stream] on_dispatch_drained error: {str(cb_err)[:120]}")
+        _fire_eval_once("dispatch queue drained")
+
+    def _on_queue_active() -> None:
+        if on_dispatch_active is None:
+            return
+        try:
+            on_dispatch_active()
+        except Exception as cb_err:
+            log(f"[stream] on_dispatch_active error: {str(cb_err)[:120]}")
+
     def _collector():
         try:
             box["report"] = run_rollout_queue(
@@ -258,7 +278,8 @@ def run_rollout_stream(
                 tail_dispatch=False,
                 halt_event=halt_ev,
                 local_suspend=ppo_started_ev,
-                on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"),
+                on_queue_drained=_on_queue_drained,
+                on_queue_active=_on_queue_active,
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,

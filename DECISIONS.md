@@ -11498,3 +11498,18 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
 - **验收**：`cd userscript && bun run check` 292 pass（新增 `test/modelscope.test.ts` 20 用例 +
   `test/fixtures/modelscope.html`）；`cd dashboard && bun run typecheck` 绿、`bun run test` 1983 pass
   （两个 `SITES` 白名单加 `modelscope`）。
+
+## §2026-11-10-stream-eval-drain-gate（stream eval 动态闸：队列清空解冻 / 回队重冻）
+
+- **背景**：stream 的 eval 闸原本覆盖整段采集，队列清空时 eval 派发线程仍在 `wait_for_thaw`；
+  P0-2 要求 eval 只吃 rollout 间隙。完整「按槽位配额」需要 rollout/eval 共享节点许可账，
+  本轮风险过大。
+- **决定**：`RolloutDispatcher` 暴露 `on_queue_active`，与既有 `on_queue_drained` 一起交给
+  `QueueEdgeGate`；stream 在全部任务已派出时 `end_rollout` 解冻本课 eval，超时任务回队且仍有
+  剩活时 `begin_rollout` 重冻。在飞 eval 局不撤销，只停新 grant。
+- **边界**：不在采集全程解冻（会与可派 rollout 抢槽），也不预留固定 eval 槽；eval 进入的前提
+  是「没有可派 rollout」。
+- **否决**：直接重写槽位模型（收益不确定、要动 dispatch/eval 两套许可账）；采集开始即解冻
+  （违背 rollout 优先，实测会拉长采集）。
+- **验收**：`test_stream_collect_end` 覆盖 drain→refill→drain 顺序与 step 闸计数；
+  完整 nn 门禁 ruff / mypy 889 / pytest 5882 passed + 3 skipped（52s）。

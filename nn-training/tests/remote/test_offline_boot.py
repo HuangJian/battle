@@ -26,6 +26,16 @@ import pytest
 from remote import bundle as bundle_mod
 from remote import offline_boot
 
+
+def test_blocked_poll_shortens_to_the_nearest_lease_expiry() -> None:
+    """P2-1：被别人持有的活按最近 `expires_in` 再问，空队列仍用配置节拍。"""
+    rows = [{"course": "a", "expires_in": 2.0}, {"course": "b", "expires_in": 9.0}]
+    assert offline_boot.blocked_poll_sec(rows, 15.0) == 2.0
+    assert offline_boot.blocked_poll_sec(rows, 0.5) == 0.5  # 测试节拍不被放大
+    assert offline_boot.blocked_poll_sec([], 15.0) == 15.0
+    assert offline_boot.blocked_poll_sec([{"expires_in": 0.2}], 15.0) == 1.0
+
+
 PACK_INDEX = {
     "magic": bundle_mod.BUNDLE_MAGIC,
     "proto": bundle_mod.BUNDLE_PROTO,

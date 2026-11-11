@@ -294,6 +294,10 @@ def settle_eval_summary(
     # 标注用 `Any`（**全仓既有口径**：train_core / train_common / np_core 的 bundle 形参都这么写）
     # ——既不 import 那个类，也不给它再起一个名字（那会把「同名散落」账本顶过门槛）。
     eval_bundle: Any = None,
+    # P2-2 观测：竞速发牌 / 重复落盘 / 冻结累计秒。缺省值让云机调用点零改动。
+    tail_race_grants: int = 0,
+    dup_games: int = 0,
+    frozen_sec: float = 0.0,
 ) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
@@ -461,6 +465,9 @@ def settle_eval_summary(
         # 收工时的待办余量（含重投回队的局）与收工原因（新行才有；旧行缺字段 = unknown）。
         "left_pending": int(left_pending),
         "close_reason": close_reason,
+        "eval_tail_race_grants": int(tail_race_grants),
+        "eval_dup_games": int(dup_games),
+        "frozenSec": round(float(frozen_sec), 1),
         # 缺口局 + 原因（G6；上限 MISSING_MAX）。旧行缺本字段 = unknown（不是 0）。
         "missing": missing,
         "rolloutWinRate": report_winrate_safe(rollout_winrate),

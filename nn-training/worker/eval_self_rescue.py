@@ -36,6 +36,9 @@ from worker.eval_yield import (
 #: 动态扩容的重 ping 间隔（秒）；`0` = 关闭。判据是「rollout 退场后补线程」而不是墙钟：
 #: 测试把它压到毫秒级，走的仍是同一条 `grow_pools` 路。
 EVAL_SLOT_GROW_SEC = 15.0
+#: 连续「重 ping 没扩出线程」时的退避上限（秒）：空闲节点槽位没变化时，
+#: 15s 一拍纯属空转；翻倍到 60s，一旦真扩出线程立刻回到基准节拍。
+GROW_BACKOFF_MAX_SEC = 60.0
 #: 扩容 ping 的每节点预算（与派发时 `statusTimeoutSec` 的缺省同值）。
 EVAL_GROW_PING_TIMEOUT_SEC = 3.0
 #: 收口轮询步长（秒）：只是定时醒来重判，正常路径靠事件/计数。
@@ -49,6 +52,13 @@ def round_live(rnd: EvalRound, execs: Any, now: float | None = None) -> bool:
         if rnd.node_routable(nid, now) and execs.active(nid) > 0:
             return True
     return rnd.local_ok(now) and execs.active(LOCAL_NODE) > 0
+
+
+def next_grow_sec(current: float, added: int, *, floor: float = EVAL_SLOT_GROW_SEC) -> float:
+    """扩容重 ping 的下一个间隔：扩出线程 ⇒ 回基准；连续空手 ⇒ 翻倍到 60s。"""
+    if added > 0:
+        return max(0.0, floor)
+    return min(max(GROW_BACKOFF_MAX_SEC, floor), max(floor, current * 2))
 
 
 def grow_pools(rnd: EvalRound, execs: Any) -> int:
@@ -162,6 +172,7 @@ def supervise_round(
     冻结（rollout 活跃）期间窗口钟停走 ⇒ `rnd.expired()` 恒假，这里只是继续等；
     新的 eval 局由仲裁器冻结，**在飞局不撤销**（用户 2026-11-04 口径）。
     """
+    grow_every = grow_sec
     grow_at = time.time() + grow_sec if grow_sec > 0 else float("inf")
     while True:
         if rnd.settled.is_set():
@@ -173,8 +184,9 @@ def supervise_round(
         if not has_work and rnd.writers_pending() <= 0:
             return "workers-gone"
         if grow_sec > 0 and has_work and now >= grow_at:
-            grow_at = now + grow_sec
-            grow_pools(rnd, execs)
+            added = grow_pools(rnd, execs)
+            grow_every = next_grow_sec(grow_every, added, floor=grow_sec)
+            grow_at = now + grow_every
         if has_work and not round_live(rnd, execs, now):
             why = rescue_round(rnd, execs)
             if why:

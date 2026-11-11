@@ -18,9 +18,14 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from worker.eval_arbiter import EvalRound, RoundClock
+from worker.eval_arbiter import (
+    TAKE_TICK_SEC,
+    WAIT_MAX_SEC,
+    EvalRound,
+    RoundClock,
+)
 from worker.eval_exec import EvalExecutors
-from worker.eval_self_rescue import grow_pools
+from worker.eval_self_rescue import grow_pools, next_grow_sec
 
 
 def _wait_until(pred: Any, timeout: float = 5.0) -> bool:
@@ -78,6 +83,10 @@ def _round(cap: int) -> EvalRound:
     rnd.it = 1
     rnd.seen = set()
     rnd.writers = 0
+    rnd.tail_race_grants = 0
+    rnd.dup_games = 0
+    rnd.frozen_sec = 0.0
+    rnd._frozen_at = 0.0
     return rnd
 
 
@@ -139,6 +148,37 @@ def test_claim_replica_also_respects_node_cap() -> None:
     assert replica is not None and replica.replica is True
 
 
+def test_wait_hint_relaxes_only_when_nothing_ready() -> None:
+    """P2-1：有就绪待办保持 0.2s；队列空/只剩在飞局才放宽到 1s。"""
+    now = time.time()
+    rnd = _round(2)
+    rnd.pending.clear()
+    assert rnd.wait_hint("n1", now) == WAIT_MAX_SEC
+
+    rnd.pending.append((0, 99))
+    rnd.retry_at[(0, 99)] = now + 0.4
+    assert 0.3 <= rnd.wait_hint("n1", now) <= 0.41
+
+    rnd.retry_at.clear()
+    assert rnd.wait_hint("n1", now) == TAKE_TICK_SEC
+
+
+def test_eval_waste_counters_record_race_and_dup() -> None:
+    now = time.time()
+    rnd = _round(2)
+    rnd.nodes["n2"] = {"id": "n2", "c": 1}
+    rnd.node_caps["n2"] = 1
+    first = rnd.claim_unique("n1", now)
+    assert first is not None
+    replica = rnd.claim_replica("n2", first.task, now)
+    assert replica is not None
+    assert rnd.tail_race_grants == 1
+
+    assert rnd.settle_task(first, ok=True) is True
+    assert rnd.settle_task(replica, ok=True) is False
+    assert rnd.dup_games == 1
+
+
 class _GrowRnd:
     def __init__(self) -> None:
         self.it = 1
@@ -170,6 +210,15 @@ class _GrowExecs:
     def ensure_node(self, nd: dict, want: int, owner: Any = None) -> int:
         self.calls.append((int(nd["c"]), want, owner))
         return 0
+
+
+def test_grow_backoff_doubles_without_growth_and_resets_on_add() -> None:
+    """P2-1：空闲节点槽位没变化时 15s 重 ping 会翻倍退避，扩出线程立刻回基准。"""
+    assert next_grow_sec(15.0, 0) == 30.0
+    assert next_grow_sec(30.0, 0) == 60.0
+    assert next_grow_sec(60.0, 0) == 60.0  # 封顶
+    assert next_grow_sec(60.0, 1) == 15.0
+    assert next_grow_sec(0.02, 0, floor=0.02) == 0.04
 
 
 def test_grow_pools_trims_when_live_slots_drop(monkeypatch) -> None:

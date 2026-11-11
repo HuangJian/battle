@@ -21,6 +21,7 @@ from common.proc import version_mm as _mm
 from remote import weights_standard
 from trainer.queue_local import (
     LocalLane,
+    QueueEdgeGate,
     drop_attempt,
     make_local_pool,
     next_attempt_tag,
@@ -35,6 +36,7 @@ from trainer.queue_local import (
     run_local_rollout,
     run_rollout,
     split_local_head,
+    waste_block,
 )
 from trainer.queue_local import (
     ensure_games as _ensure_games,
@@ -92,6 +94,8 @@ class RolloutDispatcher:
         tail_dispatch: bool = True,
         halt_event: threading.Event | None = None,
         on_queue_drained=None,
+        # 队列从「已全部派出」重新出现可派任务时回调（stream 用它重新冻结 eval）。
+        on_queue_active=None,
         local_suspend: threading.Event | None = None,
         extra_wver: str | None = None,
         course_fp: str | None = None,
@@ -115,6 +119,7 @@ class RolloutDispatcher:
         self.tail_dispatch = tail_dispatch
         self.halt_event = halt_event
         self.on_queue_drained = on_queue_drained
+        self.on_queue_active = on_queue_active
         self.local_suspend = local_suspend
         self.extra_wver = extra_wver
         self.course_fp = course_fp
@@ -154,7 +159,6 @@ class RolloutDispatcher:
         on_result = self.on_result
         local_slots_max = self.local_slots_max
         halt_event = self.halt_event
-        on_queue_drained = self.on_queue_drained
         local_suspend = self.local_suspend
         extra_wver = self.extra_wver
         course_fp = self.course_fp
@@ -490,7 +494,7 @@ class RolloutDispatcher:
         soft_streak_max = int(policy.get("nodeSoftFailStreak", fail_streak_max * 3))
         soft_streaks: dict[str, int] = {}
         results: list[dict] = []
-        stats = {"retried": 0}
+        stats = {"retried": 0, "alloc_timeout_requeued": 0, "late_original_settled": 0}
         # 竞速输家/dup settle 是 fan-out 的正常结局，逐条打会刷爆 training-loop.log
         # （实测单轮数百行）。每类只留前 RACE_LOG_SAMPLE 条作证据，其余进 round-done 汇总。
         race_drops = {
@@ -507,6 +511,7 @@ class RolloutDispatcher:
         all_settled = threading.Event()  # 成功+永久缺失 == 总局数 时置位，worker 立即收工
         deadline = time.time() + window
         next_idx = [0]
+        edges = QueueEdgeGate(self.on_queue_drained, self.on_queue_active, log)
         # 远端集体失联保护：本机先只孵化 local_slots 条线程（0 = 不孵化）；
         # 连续 remoteDeadSecs 无任何远端结算时，由本机守护线程补孵到 cap_full，
         # 保证 PPO 语料供应不被死掉的远端拖垮。
@@ -581,9 +586,7 @@ class RolloutDispatcher:
                 nd_id = nd["id"] if nd else "local"
                 task = None
                 attempt = 0
-                took_local = False
-                fanout_copy = False
-                drained = False  # 本次取任务后派发队列是否清空（回调在锁外做，避免持锁派 eval）
+                took_local = fanout_copy = False
                 # 本 worker 本次 attempt 的派发墙钟起点（勿用 inflight_ts[task]——竞速副本会覆盖）。
                 t_task_start: float | None = None
                 task_tag: str | None = None
@@ -605,7 +608,7 @@ class RolloutDispatcher:
                     # 闪断节点（如 a96）抢走任务后实际挂起，其他节点为空闲但看不到这些任务。
                     # 超时任务的持有节点加入冷却黑名单（task_timeout_blocks），冷却期内
                     # 该节点不得再次抢到同一任务，防 a96 超时→回队→又被 a96 抢走的死循环。
-                    reap_alloc_timeouts(
+                    stats["alloc_timeout_requeued"] += reap_alloc_timeouts(
                         inflight=inflight, inflight_ts=inflight_ts,
                         inflight_nodes=inflight_nodes, inflight_tags=inflight_tags,
                         inflight_targets=inflight_targets,
@@ -661,8 +664,6 @@ class RolloutDispatcher:
                         inflight_nodes.setdefault(task, set()).add(nd_id)
                         if nd is None:
                             local_active[0] += 1
-                        if not head_tasks and not pending:
-                            drained = True
                     else:
                         # pending 已空：空槽 in-flight race（2026-09-16）。
                         # 同节点不派回；无 dup 上限；先返回者结算。
@@ -698,17 +699,14 @@ class RolloutDispatcher:
                                     f"[dist] tail-race s{task[0]}/seed{task[1]} "
                                     f"node={nd_id} (inflight x{inflight[task]}) — race lane"
                                 )
-                if drained and on_queue_drained is not None:
-                    # 派发队列清空：全部采集任务已交到节点/本地线程手上、结果仍在途。
-                    # 干净评估此刻进场填收尾空槽（2026-08-25 用户修订，取代「权重分发完
-                    # 即派」——那会与采集全程抢节点）。失败回队会让队列再次非空乃至二次
-                    # 清空；重复触发由调用方的护栏去重。
-                    try:
-                        on_queue_drained()
-                    except Exception as cb_err:
-                        log(f"[dist] on_queue_drained error: {str(cb_err)[:120]}")
+                    queue_open = bool(pending or head_tasks)
+                drained = task is not None and not fanout_copy and not queue_open
+                edges.seen(drained=drained, queue_open=queue_open)
                 if task is None:
+                    _idle_t0 = time.time()
                     all_settled.wait(0.5)
+                    # 只计「本机槽有空位却没活」；挂起让位/满额就不算白等。
+                    local_lane.note_idle(nd is None, took_local, suspended, _idle_t0)
                     continue
                 summary = None
                 err = ""
@@ -866,6 +864,7 @@ class RolloutDispatcher:
                                     vdir = vdir / shard_name
                                 rmtree_best_effort(vdir, ignore_errors=True)
                             race_drops["dup_settle"] += 1
+                            stats["late_original_settled"] += int(not fanout_copy)
                             if race_drops["dup_settle"] <= RACE_LOG_SAMPLE:
                                 log(
                                     f"[dist] dup settle s{task[0]}/seed{task[1]} node={nd_id} — dropped"
@@ -1289,6 +1288,7 @@ class RolloutDispatcher:
             sum_game_sec=sum_game_sec[0],
             sum_game_sec_by_node=sum_game_sec_by_node,
         )
+        combined["dist"]["waste"] = waste_block(stats, local_lane.idle_sec)
         combined["dist_phase_sec"] = round((t_dist_done_box[0] or time.time()) - t_queue_enter, 1)
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True

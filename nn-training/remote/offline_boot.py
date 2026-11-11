@@ -332,6 +332,21 @@ DEFAULT_WAIT_SEC = 1800.0
 IDLE_WAIT_TERMINAL_SEC = 300.0
 #: 等包循环的轮询间隔（秒）——两条源都在这条间隔上轮。
 DEFAULT_POLL_SEC = 15.0
+
+
+def blocked_poll_sec(rows: list[dict], poll: float) -> float:
+    """有活但被别人持有时，按最近租约到期缩短再问间隔（P2-1）。
+
+    空队列仍用 15s（没有可观测的到活信号）；但「2s 后过期」的课不该也等满 15s。
+    下限 1s（测试可把 `poll` 压到毫秒级），上限就是配置的 `queue_poll_sec`。
+    """
+    if not rows or poll <= 0:
+        return max(0.0, poll)
+    try:
+        soonest = min(float(r.get("expires_in") or poll) for r in rows)
+    except (TypeError, ValueError):
+        return poll
+    return min(poll, max(min(1.0, poll), soonest))
 #: hub 取包的重试上限（轮数；`CFG["hub_tries"]`，0 = 不限）。到顶就转「等上传」模式。
 DEFAULT_HUB_TRIES = 10
 #: 探活与取包的超时（秒）。取包给得宽：任务包几 MB～几十 MB，云机的下行不一定快。
@@ -504,7 +519,7 @@ def prompt_upload(log: Callable[[str], None]) -> Path | None:
     ——`files.upload()` 会**阻塞**在交互上，抢在重试前面弹就等于关掉了自动取包这条路。
     """
     try:
-        from google.colab import files  # type: ignore[import-not-found]
+        from google.colab import files  # type: ignore[import-not-found, import-untyped]
 
         log("弹出上传框：请选择控制台导出的 task-<课>.zip（在控制台「导出任务包」下载）")
         got = files.upload()
@@ -3074,13 +3089,14 @@ def _run_auto(
         # ⚠ 与上面 `leases["blockers"]`（tasks 非空时的交接中间态）同名不同物。
         if blocked_rows:
             _idle_take_bc()  # ★M5：都被别人持着 ⇒ 用空档领一份 BC（Q5：两型均可领）
+            wait = blocked_poll_sec(blocked_rows, poll)
             log(
                 "清单里有活但都被别人持有："
                 + "、".join(
                     f"{b['course']}@{b['holder'] or '?'}（{float(b['expires_in']):.0f}s 后过期）"
                     for b in blocked_rows
                 )
-                + f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+                + f"—— {wait:g}s 后再问（不占 idle 预算）"
             )
             if keepalive_stop is not None and keepalive_stop.is_set():
                 log("收到停机信号 ⇒ 收工")
@@ -3090,7 +3106,7 @@ def _run_auto(
                 return rc
             idle_since = time.monotonic()
             terminal_since = None  # 有活（被别人持有）⇒ 同上，别让终态窗口提前收工
-            time.sleep(poll)
+            time.sleep(wait)
             continue
         if mode != "drain":
             log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")

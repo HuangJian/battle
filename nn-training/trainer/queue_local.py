@@ -76,6 +76,50 @@ def split_local_head(
     return head, rest
 
 
+class QueueEdgeGate:
+    """派发队列「清空 / 重新可派」边沿 → 回调（在 dispatch 锁外执行）。
+
+    stream 用它把 eval 闸做成队列状态驱动：全部任务已派出 ⇒ 解冻本课 eval；
+    超时回队且仍有剩活 ⇒ 重新冻结。状态与一次性回调都在这里，dispatch 只喂两个布尔。
+    """
+
+    def __init__(
+        self,
+        on_drained: Callable[[], object] | None,
+        on_active: Callable[[], object] | None,
+        log_fn: Callable[[str], None],
+    ) -> None:
+        self._on_drained = on_drained
+        self._on_active = on_active
+        self._log = log_fn
+        self._drained = False
+
+    def seen(self, *, drained: bool, queue_open: bool) -> None:
+        if drained:
+            self._drained = True
+            self._fire(self._on_drained, "on_queue_drained")
+        elif self._drained and queue_open:
+            self._drained = False
+            self._fire(self._on_active, "on_queue_active")
+
+    def _fire(self, cb: Callable[[], object] | None, name: str) -> None:
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception as cb_err:
+            self._log(f"[dist] {name} error: {str(cb_err)[:120]}")
+
+
+def waste_block(stats: dict[str, int], local_idle_sec: float) -> dict[str, float | int]:
+    """`dist.waste` 的单一组装点（只观测，不并入 dupRate）。"""
+    return {
+        "alloc_timeout_requeued": stats["alloc_timeout_requeued"],
+        "late_original_settled": stats["late_original_settled"],
+        "local_idle_thread_sec": round(float(local_idle_sec), 2),
+    }
+
+
 class LocalLane:
     """本机 worker 的孵化与远端失联补孵（B3）。
 
@@ -111,6 +155,12 @@ class LocalLane:
         self.lock = lock
         self.threads = threads
         self._slots: list[tuple[int, threading.Thread]] = []
+        #: 本机槽「有容量却无活」的累计线程秒（P2-2 观测；不进 dupRate）。
+        self.idle_sec = 0.0
+
+    def note_idle(self, local: bool, active: bool, suspended: bool, t0: float) -> None:
+        if local and active and not suspended:
+            self.idle_sec += time.time() - t0
 
     def spawn(self, n: int) -> None:
         for _ in range(max(0, n)):

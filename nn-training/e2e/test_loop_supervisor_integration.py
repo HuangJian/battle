@@ -144,7 +144,7 @@ def _make_loop(
     _stub(loop, "_log_report", lambda it, t0: None)
     _stub(loop, "_join_eval", lambda it: None)
 
-    def fake_rollout(it: int, pairs, dist_cfg, eval_on_round, on_collect_end=None) -> None:
+    def fake_rollout(it: int, pairs, dist_cfg, eval_on_round, on_collect_end=None, **_kw) -> None:
         loop._report = dict(REPORT)  # 让真 _record_iteration 有一份可写的报告
         # 同步假 rollout：返回即采集收官 —— 真路径在 stream collector 退出时调它。
         if on_collect_end is not None:

@@ -83,7 +83,7 @@ def test_not_ready_yields_with_a_readable_reason() -> None:
     assert res.status == WAIT
     assert asked == [1]
     assert "预采" in res.reason
-    assert res.resume_at == 1015.0  # now + poll_interval
+    assert res.resume_at == 1001.0  # now + 预采专用 1s（本机子进程，不用 15s）
     assert res.hold is False  # 预采是子进程，不占本机资源票
 
 

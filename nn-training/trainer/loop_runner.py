@@ -73,6 +73,9 @@ from worker.loop_tasks import (
 
 #: `WAIT` 后的再问间隔（秒）——远小于本机轮询密度需求，且不烧 CPU（调度器是事件驱动）。
 POLL_INTERVAL_SEC = 15.0
+#: 个别让位点的再问间隔覆盖：预采是**本机子进程**，半波 shard 通常秒级落盘，
+#: 用 15s 会把 PPO 后的下一轮开训白等一个量级。远端 PPO 回传仍是 15s（网络腿）。
+WAIT_POLL_SEC: dict[str, float] = {"precollect_join": 1.0}
 
 #: 轮粒度任务名（细粒度模式用 `ROUND_TASKS` 里的 13 个 kind）。
 ROUND_KIND = "round"
@@ -292,7 +295,7 @@ class LoopRunner:
         jid = getattr(self.loop, "inflight_job_id", lambda _it: None)(ctx.it)
         reason = WAIT_REASONS.get(kind, f"等外部事实（{kind}）")
         return waiting(
-            self.now() + self.poll_interval,
+            self.now() + WAIT_POLL_SEC.get(kind, self.poll_interval),
             f"{reason}（it{ctx.it}）",
             hold=False,
             jid=jid,

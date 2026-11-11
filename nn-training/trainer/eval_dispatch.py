@@ -582,6 +582,9 @@ class EvalDispatcher:
             # 放回去（重投回队）——把它算成「从未派出」会在有失败的轮里撒谎
             # （2026-10-08 评审 F1）。`left_pending` 照报全量（人读最顺），归因只认 `never_pairs`。
             stats = rnd.close()
+            tail_race_grants = int(stats.get("tail_race_grants", 0) or 0)
+            dup_games = int(stats.get("dup_games", 0) or 0)
+            frozen_sec = float(stats.get("frozen_sec", 0.0) or 0.0)
             left_pending = int(stats["left_pending"])
             inflight_n = int(stats["inflight_n"])
             never_pairs = stats["never_pairs"]
@@ -643,6 +646,11 @@ class EvalDispatcher:
                     f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
                 )
             rnd.report_comebacks()
+            if tail_race_grants or dup_games or frozen_sec:
+                _log(
+                    f"[eval] it{it}: waste tail_race={tail_race_grants} "
+                    f"dup={dup_games} frozen={frozen_sec:.0f}s"
+                )
             quiet_deadline = time.monotonic() + 1.0
             while time.monotonic() < quiet_deadline:
                 if rnd.writers_pending() <= 0:
@@ -693,6 +701,9 @@ class EvalDispatcher:
                 left_pending=left_pending,
                 left_pairs=never_pairs,
                 close_reason=close_reason,
+                tail_race_grants=tail_race_grants,
+                dup_games=dup_games,
+                frozen_sec=frozen_sec,
             )
             return False
         except Exception as e:

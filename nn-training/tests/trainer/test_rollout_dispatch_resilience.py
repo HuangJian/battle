@@ -140,7 +140,10 @@ class _Harness:
 
         monkeypatch.setattr(common.distribution, "post_weights_parallel", fake_post)
 
-    def run(self, fetch, halt_event=None, on_shard=None) -> dict:
+    def run(
+        self, fetch, halt_event=None, on_shard=None,
+        on_queue_drained=None, on_queue_active=None,
+    ) -> dict:
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.distribution, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
@@ -154,6 +157,8 @@ class _Harness:
             "rid.7",
             local_slots_max=self.local_slots,
             halt_event=halt_event,
+            on_queue_drained=on_queue_drained,
+            on_queue_active=on_queue_active,
             on_shard=on_shard,
         ).run()
 
@@ -624,12 +629,22 @@ def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> No
             release.wait(2)  # 第一份卡住；重排的第二份立刻返回
         return h.manifest(), {}
 
+    edges: list[str] = []
     try:
-        report = h.run(fetch)
+        report = h.run(
+            fetch,
+            on_queue_drained=lambda: edges.append("drain"),
+            on_queue_active=lambda: edges.append("active"),
+        )
     finally:
         release.set()
 
     assert report["missing"] == [], report.get("missing")
+    # 单局回队后立刻又被取走 ⇒ 队列仍是「已全部派出」，只需 drain 边沿；
+    # active（回队后仍有剩活）由 stream 的假 `_rollout_phase` 用例直接钉住。
+    assert edges.count("drain") >= 1, f"派发清空没有触发 eval 闸的 drain 边沿：{edges}"
+    assert report["dist"]["waste"]["alloc_timeout_requeued"] >= 1, report["dist"]
+    assert report["dist"]["waste"]["local_idle_thread_sec"] >= 0.0, report["dist"]
     assert len(calls) == 2, (
         f"同一局应只执行两次（原请求 + 重排），实测 {len(calls)}；logs={h.logs}"
     )

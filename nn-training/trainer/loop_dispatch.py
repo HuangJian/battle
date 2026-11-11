@@ -106,6 +106,8 @@ class TrainingDispatch:
         dist_cfg: dict | None,
         eval_on_round: bool,
         on_collect_end=None,
+        on_dispatch_drained=None,
+        on_dispatch_active=None,
     ) -> None:
         """单轮采集派发（三路：dist 流式 / dist 串行 / 纯本地），结果落 self._report。"""
         args = self.args
@@ -137,6 +139,8 @@ class TrainingDispatch:
                 # 采集收官（stream 的 collector 退出）→ 解冻本课 eval；串行路径由
                 # step_rollout 的 finally 解冻，这里传 None 也无害。
                 on_collect_end=on_collect_end,
+                on_dispatch_drained=on_dispatch_drained,
+                on_dispatch_active=on_dispatch_active,
             )
         )
         self._report = report

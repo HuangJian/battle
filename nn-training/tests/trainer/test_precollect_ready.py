@@ -44,12 +44,18 @@ class _Child:
     def returncode(self) -> int | None:
         return self._code
 
-    def terminate(self) -> None:  # join 的超时分支会调它
+    def terminate(self) -> None:  # join 的就绪/超时分支会调它
         self._code = -15
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return self._code
+
+    def kill(self) -> None:
+        self._code = -9
 
 
 def _as_popen(child: _Child) -> subprocess.Popen[bytes]:
-    """替身 → 声明的签名（生产代码只调 `poll`/`returncode`/`terminate`）。"""
+    """替身 → 声明的签名（生产代码只调 `poll`/`returncode`/`terminate`/`wait`/`kill`）。"""
     return cast("subprocess.Popen[bytes]", child)
 
 
@@ -105,17 +111,36 @@ def test_predicate_is_non_blocking(tmp_path: Path, monkeypatch) -> None:
     assert time.monotonic() - t0 < 0.5
 
 
-def test_join_uses_the_same_predicate_and_returns_at_once_when_ready(
+def test_join_terminates_ready_child_before_parent_takeover(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """同源证据：就绪的子进程交给 `join_precollect_child`，它必须当场返回（不再轮询）。"""
+    """同源证据：就绪后当场收掉子进程再返回，避免父子同轮共用 traj/w{idx}。"""
     monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: _shards(5))
     child = _Child(None)
     t0 = time.monotonic()
     assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
     # timing-ok: 契约上界（就绪必须当场返回，上界即契约）
     assert time.monotonic() - t0 < 0.5
-    assert child.poll() is None  # 就绪开训 ≠ terminate 子进程：它继续产剩下的 shard
+    assert child.poll() == -15  # 就绪开训前先 terminate，防止父子同写
+
+
+class _StubbornChild(_Child):
+    """terminate 不退的子进程：钉住 kill 兜底。"""
+
+    def terminate(self) -> None:
+        pass
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        if self._code is None:
+            raise subprocess.TimeoutExpired("precollect", timeout or 0.0)
+        return self._code
+
+
+def test_join_kills_child_that_ignores_terminate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: _shards(5))
+    child = _StubbornChild(None)
+    assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
+    assert child.poll() == -9
 
 
 def test_join_timeout_still_terminates(tmp_path: Path, monkeypatch) -> None:

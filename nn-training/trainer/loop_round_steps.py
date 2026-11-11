@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -415,6 +416,25 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         _gate = eval_gate()
         _course_fp = course_fp_for_args(self.args)
         _gate.begin_rollout(_course_fp)
+        # stream 的 eval 动态闸：队列清空即解冻，任务回队即重冻。`_gate_lock` 把
+        # 本地状态与闸的引用计数放在同一临界区，避免 drain/refill 交错时把计数记反。
+        _gate_lock = threading.Lock()
+        _gate_released = [False]
+
+        def _release_gate() -> None:
+            with _gate_lock:
+                if _gate_released[0]:
+                    return
+                _gate_released[0] = True
+                _gate.end_rollout(_course_fp)
+
+        def _refreeze_gate() -> None:
+            with _gate_lock:
+                if not _gate_released[0]:
+                    return
+                _gate_released[0] = False
+                _gate.begin_rollout(_course_fp)
+
         try:
             if ctx.collect_mode == COLLECT_NODE:
                 # ★ 2026-10-23（plan/offline-hold-stale-fallback §3-S3）：`_remote_iter` 的**返回值**
@@ -437,10 +457,12 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                     ctx.pairs,
                     ctx.dist_cfg,
                     ctx.eval_on_round,
-                    on_collect_end=lambda: _gate.end_rollout(_course_fp),
+                    on_collect_end=_release_gate,
+                    on_dispatch_drained=_release_gate,
+                    on_dispatch_active=_refreeze_gate,
                 )
         finally:
-            _gate.end_rollout(_course_fp)
+            _release_gate()
         return None
 
     def step_volume_topup(self, ctx: RoundContext) -> StepResult | None:

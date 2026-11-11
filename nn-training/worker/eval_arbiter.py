@@ -40,8 +40,12 @@ from worker.eval_yield import (
 
 #: 本机槽位的伪节点 id（与旧派发器的线程名 / 账本口径一致）。
 LOCAL_NODE = "local"
-#: 没有可领任务时的轮询步长（秒）。竞速/退避都用它做上限，不忙等。
+#: 有就绪待办时的轮询步长（秒）。竞速/退避都用它做上限，不忙等。
 TAKE_TICK_SEC = 0.2
+#: 没有就绪待办（队列空/只剩在飞局）时的等待上限（秒）。
+#: 这类等待只能靠结算/登记事件打破；1s 足够快，又把 288 条线程的唤醒从
+#: 1440 次/秒压到 288 次/秒。有就绪待办仍用 TAKE_TICK_SEC。
+WAIT_MAX_SEC = 1.0
 #: 无任何轮登记时，线程再等这么久才退出——只为躲开「上一轮刚收工、下一轮刚登记」
 #: 的窗口，避免线程一退就要重新孵化（也避免单测里跨用例的池抖动）。
 IDLE_EXIT_SEC = 0.5
@@ -261,6 +265,11 @@ class EvalRound:
         #: 不得再计一次 streak / 再回队一次（重复结算即重复扣预算）。
         self._done_grants: set[int] = set()
         self._grant_seq = 0
+        #: 观测账（P2-2）：竞速发牌数、重复落盘数、冻结累计秒。
+        self.tail_race_grants = 0
+        self.dup_games = 0
+        self.frozen_sec = 0.0
+        self._frozen_at = 0.0
 
     # —— 上下文 / 时钟 ——
 
@@ -289,11 +298,19 @@ class EvalRound:
 
     def pause_clock(self, now: float) -> None:
         with self._lock:
-            self.clock.pause(now)
+            if not self.clock.paused:
+                self.clock.pause(now)
+                self._frozen_at = now
 
     def resume_clock(self, now: float) -> None:
         with self._lock:
+            if not self.clock.paused:
+                return
+            started = self._frozen_at or self.clock.paused_at
             self.clock.resume(now)
+            if started:
+                self.frozen_sec += max(0.0, now - started)
+            self._frozen_at = 0.0
 
     def activate(self, nd: dict[str, Any]) -> None:
         nid = str(nd["id"])
@@ -418,6 +435,27 @@ class EvalRound:
         with self._lock:
             return len(self.inflight)
 
+    def wait_hint(self, nid: str, now: float) -> float:
+        """本轮当前无牌可发时，下一次值得醒来检查的时间上限（秒）。
+
+        `TAKE_TICK_SEC` = 还有就绪待办（可能被许可/让位/重投闸挡住），保持原节拍；
+        `WAIT_MAX_SEC` = 队列空或只剩在飞局，等结算/登记事件即可。退避中的任务
+        按最近 `retry_at` 精确醒来；窗口到期也按 `remaining` 醒来。
+        """
+        with self._lock:
+            if not self._participates_locked(nid, now):
+                return TAKE_TICK_SEC
+            if self.pending:
+                if any(
+                    self.retry_at.get(task, 0.0) <= now for task in self.pending
+                ):
+                    return TAKE_TICK_SEC
+                due = min(self.retry_at[task] for task in self.pending)
+                return max(0.01, min(WAIT_MAX_SEC, due - now))
+            if self.clock.paused:
+                return WAIT_MAX_SEC
+            return max(0.01, min(WAIT_MAX_SEC, self.clock.remaining(now)))
+
     # —— 发牌 ——
 
     def _node_route_alive_locked(self) -> bool:
@@ -505,6 +543,7 @@ class EvalRound:
             ):
                 return None
             grant = self._claim_locked(task, nid, replica=True)
+            self.tail_race_grants += 1
         self._log(f"[eval] tail-race s{task[0]}/seed{task[1]} node={nid} — race lane")
         return grant
 
@@ -572,6 +611,8 @@ class EvalRound:
             self._done_grants.add(grant.gid)
             if ok:
                 if self.closed or self.settled.is_set() or task in self.seen:
+                    if task in self.seen:
+                        self.dup_games += 1
                     self._pop_inflight_locked(task, nid)
                     why = "收工后返回" if (self.closed or self.settled.is_set()) else "dup settle"
                     self._log(
@@ -804,6 +845,9 @@ class EvalRound:
                 "soft_streaks": dict(self.soft_streaks),
                 "local_stopped": self.local_stopped.is_set(),
                 "settled": self.settled.is_set(),
+                "tail_race_grants": self.tail_race_grants,
+                "dup_games": self.dup_games,
+                "frozen_sec": self.frozen_sec,
             }
         self.settled.set()
         return stats
@@ -970,7 +1014,8 @@ class EvalArbiter:
         """
         with self._cond:
             while self._frozen_for_locked(course_fp) and not self._shutdown:
-                self._cond.wait(TAKE_TICK_SEC)
+                # 解冻/重置都会 notify；长冻结期不需要每 0.2s 醒来一次。
+                self._cond.wait()
             return not self._shutdown
 
     def frozen(self) -> bool:
@@ -1022,13 +1067,18 @@ class EvalArbiter:
                         grant = self._replica_grant(rounds, nid, now)
                     if grant is not None:
                         return grant
-                    self._cond.wait(TAKE_TICK_SEC)
+                    wait_s = min(
+                        (r.wait_hint(nid, now) for r in rounds),
+                        default=WAIT_MAX_SEC,
+                    )
+                    self._cond.wait(wait_s)
                     continue
                 if idle_since is None:
                     idle_since = now
                 elif now - idle_since >= IDLE_EXIT_SEC:
                     return None
-                self._cond.wait(TAKE_TICK_SEC)
+                # register/unregister 都会 notify；这里等满剩余退出窗即可。
+                self._cond.wait(max(0.01, IDLE_EXIT_SEC - (now - idle_since)))
 
     def _unique_grant(
         self, rounds: list[EvalRound], nid: str, now: float

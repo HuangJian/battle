@@ -32,6 +32,29 @@ from worker.resume import completed_pairs, state_init_enabled
 #: 300 = 5 分钟；正常预采在首波通常 <60s 就有 shard 落盘（半波阈值见 precollect_min_wave）。
 PRECOLLECT_STALL_SEC = 300.0
 
+#: 父进程接管前收预采子进程的等待上限（秒）；terminate 不退则 kill。
+PRECOLLECT_TERM_WAIT_SEC = 10.0
+
+
+def _stop_precollect(child: subprocess.Popen) -> None:
+    """父进程接管前收掉预采子进程，避免父子共用 traj / `w{idx}` 同轮双写。"""
+    if child.poll() is not None:
+        return
+    t0 = time.time()
+    child.terminate()
+    try:
+        child.wait(timeout=PRECOLLECT_TERM_WAIT_SEC)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        try:
+            child.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pass
+    # P2-2 替代读数：overlap 已被 terminate 消掉，真正要看的成本是收子进程的墙钟。
+    stop_sec = time.time() - t0
+    if stop_sec >= 0.5:
+        log(f"[double-buffer] precollect stop cost {stop_sec:.1f}s (terminate→reap)")
+
 
 def precollect_min_wave() -> int:
     """预采「半波即可开训」的 shard 数（`policy.streamWaveGames` 的一半，下限 4）。
@@ -114,9 +137,11 @@ def join_precollect_child(
     """吞吐 T4：本轮开头检查预采子进程产出。
 
     轮询 completed_pairs 直到足够开首波（而非 wait 子进程退出），避免预采尾段
-    拖慢、主进程空等。子进程在后台继续产出剩余 shard，run_rollout_queue 的
-    completed_pairs 会跳过已落盘局。返回始终为 None——句柄本轮已消费
-    （超时 terminate / 正常退出），下一轮的新句柄由 spawn_next_collect 建立。
+    拖慢、主进程空等。半波就绪后**先收掉子进程**：父子共用同一个 traj 目录与
+    `w{idx}` 本地工作目录，继续并行会让同一 `(stage,seed)` 两边同时写。已落盘
+    shard 由 completed_pairs 跳过，剩余局由父进程自己采（保留半波收益，放弃尾段
+    重叠）。返回始终为 None——句柄本轮已消费（超时 terminate / 正常退出），下一轮
+    的新句柄由 spawn_next_collect 建立。
 
     就绪判据在 `precollect_ready`（单进程调度器问的是同一个函数 ⇒ 它不会让位到一半
     又被本循环卡住）。
@@ -145,8 +170,9 @@ def join_precollect_child(
             if child.poll() is None:
                 log(
                     f"[double-buffer] precollect it{it}: {_pre_done} shards ready "
-                    f"(≥{_pre_min_wave}), proceeding before subprocess exit"
+                    f"(≥{_pre_min_wave}), stopping child before parent takeover"
                 )
+                _stop_precollect(child)
             else:
                 log(f"[double-buffer] precollect it{it} done rc={child.returncode}")
             _pre_ready = True
@@ -166,7 +192,7 @@ def join_precollect_child(
     if not _pre_ready:
         if not _stalled:
             log(f"[double-buffer] precollect it{it} timeout — fall back to own collect")
-        child.terminate()
+        _stop_precollect(child)
     return None
 
 
@@ -229,6 +255,9 @@ def dispatch_rollout_phase(
     # 采集真正收官（collector 线程退出）时回调一次；stream 用它解冻 eval 闸。
     # 串行路径的采集收官 = 本函数返回，调用方的 finally 负责解冻，不需要它。
     on_collect_end=None,
+    # stream 的 eval 动态闸：队列清空 = 解冻，回队 = 重冻（见 `run_rollout_stream`）。
+    on_dispatch_drained=None,
+    on_dispatch_active=None,
 ) -> tuple[
     dict,
     dict | None,
@@ -356,6 +385,8 @@ def dispatch_rollout_phase(
                 corpus_fp=corpus_fp,
                 on_shard=on_shard,
                 on_collect_end=on_collect_end,
+                on_dispatch_drained=on_dispatch_drained,
+                on_dispatch_active=on_dispatch_active,
                 **_stream_kwargs,
             )
             stream_meta = report
