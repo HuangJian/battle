@@ -13,6 +13,49 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §52 `stopOthers` 接成真命令：dashboard 中转，其它页 15s 内停会话（2026-11-11）
+
+**背景**：`§2026-11-09-goalnn-offline-start-report` 只上报、不发命令（面板上写着「dashboard 目前只记录」）。
+用户要求接成真命令——但浏览器跨页没法互停，dashboard 是唯一共用的会合点，所以由它中转。
+
+**通道（不新增 op 语义，ack 就是一行 op）**：
+
+| 环节 | 接口 | 触发 |
+|---|---|---|
+| 上报 | `POST /api/notebookOp`（既有） | 离线页训练 cell 开始执行，`offline:cell-start … stopOthers=1` |
+| 派发 | 同上请求内 | dashboard 给**其它**最近 10 分钟有 op 写入的会话各记一条 `stop-session`，并往发起会话写一行证据 `stop:others targets=N/M site:session,…` |
+| 取件 | `GET /api/notebookCmds?site=&session=` | 各页每 15s 一次（自定义头同 `/api/notebookHub`） |
+| 执行 | 页面自己点「停止会话」 | Kaggle host 走 `stopNow()`（先 flush 再点外层 Stop）；Colab/AI Studio/魔搭走本页 `stopSession` |
+| ack | `POST /api/notebookOp` 落 `cmd:stop-session id=<id> ok|fail …` | 同一行既是证据又是 ack：服务端把命令置 ok/fail，之后不再下发 |
+
+**存储**：`<notebookLogsDir>/<site>/<session>.cmds.json`（与 `.ops.jsonl` 同目录、同寿命——`pruneNotebookLogs`
+一并删）。同 id 后写胜出，单文件保留最近 50 条；写盘走 tmp + rename（读改写不会看到半截 JSON）。
+
+**判据与上限**（`api/notebook-cmd.ts` 的常量，都是参数化入口）：
+- 只停「其它 **PPO worker 页**」：发起会话自己排除在外；目标 = 会话**同时**满足 ① `.ops.jsonl` mtime 在
+  **10 分钟**内（活着）∧ ② `.log` 尾巴（最近 **64KB**）里有 worker 标记 `[worker]` / `[worker-supervisor]`
+  （`worker.py`/`bc_job.py`/`download.py`/`http.py` 的每一行都带这个前缀）。只搬日志的普通页、离线训练页、
+  rollout 节点都不会被打（2026-11-11 用户口径：「只停 PPO worker 页，不误停正在搬运日志的普通页」）；
+  单次最多 **5** 个目标（mtime 新的优先）；被跳过的非 worker 页计入证据行 `skipped_non_worker=N`；
+- **幂等**：目标在命令 **TTL 15 分钟**内已有 pending ⇒ 跳过（同一轮 cell-start 被重放不会连点）；
+- **fail closed**：站/会话非法、路径越界一律抛；过期 pending 不下发（页面几小时后醒来也不会被停）。
+
+**分类判据的实测**：真实 `tmp/notebook-logs` 上——AI Studio worker 会话（8MB 日志）尾巴命中；`.1.log`
+备份段与 `…-battle-offline-…` 会话不命中。日志缺席/读不到 ⇒ **fail closed 不停**（宁可不问，也不停一个
+说不准的页）。排障口 `requirePpoWorker: false` 能放开成「全部活会话」（只给测试/人工排查用）。
+
+**用户脚本侧**（`app/stop-cmd.ts`）：`session()` 为空（Kaggle host 还没跟 frame 握手）就不发请求——绝不拿
+别人的命令停自己；同一 id 只停一次（内存集合 + 服务端 ack 双保险）；停不掉就 ack `fail` + 原因（绝不静默）；
+网络错/坏 JSON 当这一拍没取到，下一拍再来。伴生脚本关掉（`config.enabled=false`）就不取命令。
+
+**旧版本兼容**：没装新脚本的页不会取件 ⇒ 命令 15 分钟后自然失效（不补投、不重试到天亮）。
+
+**验收**：dashboard `bun run typecheck` / `bun run lint` / `bun run test`（**2069 pass**，新增
+`tests/notebook-cmd.test.ts` 15 条（含只停 worker 页、尾巴窗口、证据计数） + `prune` 应用到 `.cmds.json`）；userscript `bun run check`
+（typecheck 65 文件 / oxlint 0 / **319 pass** / `dist` 重建，新增 `test/stop-cmd.test.ts` 10 条 +
+接线守卫 1 条）。**未实测**：真实 Kaggle 页上「点 Stop 后 ack 是否在 15s 内出现」——需要浏览器里装新
+`dist/notebook-companion.user.js` 后跑一次离线训练。
+
 ## §50 云机 eval 行只在 `metricValues` 里带游戏读数：读侧一律快照优先（2026-11-11）
 
 **触发**（用户）：自主云机训练时 eval 指标与本地集群跑的不一致——`o2-reflex` it300 本地评

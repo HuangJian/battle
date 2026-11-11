@@ -320,7 +320,7 @@ export function mountPanel(
     `运行 cell = 添加时选中的那一段（内容变了不跑）。</div></div>` +
     `<div class="group" data-ppo-group hidden><div class="glabel">离线训练</div>` +
     `<label class="arow"><input type="checkbox" data-ppo="enabled"> 启动后停止其它 ppo worker</label>` +
-    `<div class="snote">训练 cell 开始执行时上报 stopOthers；dashboard 目前只记录，不发停止命令。</div></div>` +
+    `<div class="snote">训练 cell 开始执行时上报 stopOthers；dashboard 只让其它正在跑 PPO worker 的页停会话（日志里有 [worker] 才算，对方 15s 内取到命令）。</div></div>` +
     `<div class="status" data-tone="warn">连接中…</div>` +
     `<div class="ask" data-ask hidden><span data-ask-text></span>` +
     `<button type="button" data-ask-cancel>取消</button></div></div>` +

@@ -5,7 +5,7 @@
  * 与 `.log`（cell 搬运）完全解耦（不改 meta、不占 epoch），并且能在日志页尾巴上看得到。
  */
 import { afterAll, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -15,6 +15,7 @@ import {
   REDACTED,
   type NotebookChunk,
 } from '../src/server/api/notebook-log'
+import { notebookCmdsPath } from '../src/server/api/notebook-cmd'
 import {
   appendNotebookOp,
   notebookOpsFilePath,
@@ -186,11 +187,13 @@ describe('操作日志：落盘 / 轮转 / 尾巴', () => {
     expect(withNotebookOps(dir, 'notebook:missing', base)).toBe(base)
   })
 
-  it('prune：过期会话连 .ops.jsonl 一起删（与 .log 同寿命）', () => {
+  it('prune：过期会话连 .ops.jsonl / .cmds.json 一起删（与 .log 同寿命）', () => {
     const dir = tempDir()
     appendNotebookOp(dir, op(), T0)
     const file = notebookOpsFilePath(dir, 'kaggle', 'kaggle-owner-slug-edit-ab12')
     expect(statSync(file).isFile()).toBe(true)
+    const cmdsFile = notebookCmdsPath(dir, 'kaggle', 'kaggle-owner-slug-edit-ab12')
+    writeFileSync(cmdsFile, '[]\n', 'utf8')
     const chunk: NotebookChunk = {
       v: 2,
       site: 'kaggle',
@@ -212,5 +215,6 @@ describe('操作日志：落盘 / 轮转 / 尾巴', () => {
     const eightDays = 8 * 24 * 3600_000
     expect(pruneNotebookLogs(dir, Date.now() + eightDays, 7 * 24 * 3600_000, 0)).toBe(1)
     expect(() => statSync(file)).toThrow()
+    expect(() => statSync(cmdsFile)).toThrow()
   })
 })

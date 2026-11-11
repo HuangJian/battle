@@ -11555,3 +11555,37 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   `nn-training/tests/remote/test_cache_persist.py`（读命中 touch ×2）+ `nn-training/tests/common/
   test_offline_task_queue.py::test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course`
   （改动前红：`multi=[True, False]`）。
+
+## §2026-11-11-goalnn-offline-stop-others-downlink（`stopOthers` 接成真命令：dashboard 中转 `stop-session`）
+
+- **背景**：`§2026-11-09-goalnn-offline-start-report` 只把开关写进 op（面板写明「dashboard 目前只记录，不发
+  停止命令」）。用户要求把它接成真命令：「自主云机启动后停止其它 ppo worker」。浏览器跨页无法互停，dashboard
+  是唯一共用会合点。
+- **决定**：三件事都不新增语义层——① dashboard 在 `POST /api/notebookOp` 里，见到
+  `offline:cell-start … stopOthers=1` 就给**其它**最近 10 分钟有 op 写入的会话各记一条 `stop-session`
+  （`<notebookLogsDir>/<site>/<session>.cmds.json`），并往发起会话写证据行 `stop:others targets=N/M …`；
+  ② 各页每 15s `GET /api/notebookCmds?site=&session=` 取自己的待办，命中就点「停止会话」（Kaggle host
+  先 flush 再点外层 Stop，Colab/AI Studio/魔搭走本页 `stopSession`）；③ 页面停完落一行
+  `cmd:stop-session id=<id> ok|fail …`，**这一行既是证据也是 ack**（服务端据此置 ok/fail，不再下发）。
+- **边界**：发起会话自己永远不是目标；命令 TTL 15 分钟（过期不下发）；同目标 TTL 内已有 pending 不重复派；
+  单次最多 5 个目标（mtime 新的优先）；`.cmds.json` 与 `.ops.jsonl` 同寿命（`pruneNotebookLogs` 一并删）。
+  旧版脚本不取件 ⇒ 命令自然过期，不补投。
+- **否决**：hub 停机达令（按课程停云端 worker，语义是「停一整门课的云机」，与「这一页」不对应）；
+  停用 `gpu_push` 节点（持久改配置、需要人再手动开）；让离线页直接停别的页（跨页做不到，误停代价高）。
+- **未实测**：真实 Kaggle 页上「点 Stop → ack 15s 内出现」——需浏览器装新 `dist` 后跑一次离线训练。
+- **影响**：`dashboard/src/server/api/notebook-cmd.ts`（新）+ `server.ts` / `route-table.ts` / `api/index.ts`；
+  `userscript/src/notebook-companion/app/stop-cmd.ts`（新）+ `boot.ts` 两条腿；面板提示同步改口。
+  全文 → `docs/nn/console.md §52`。验收：dashboard typecheck/lint/test 2066 pass；userscript `bun run check`
+  319 pass + dist 重建。
+
+### 补记（`§2026-11-11-goalnn-offline-stop-others-downlink`，同日用户指令：只停 PPO worker 页）
+
+- **口径**：停会话命令不能误停「正在搬运日志的普通页」——只打真正在跑 PPO worker 的页。
+- **判据（数据面，不新增上行）**：目标会话必须**同时**满足 ① `.ops.jsonl` mtime 在 10 分钟内（活着）
+  ∧ ② `.log` 尾巴（最近 64KB）含 `[worker]` 或 `[worker-supervisor]`。后者是 worker 侧所有进程
+  （`worker.py`/`bc_job.py`/`download.py`/`http.py`）的固定行前缀，普通页/离线页/rollout 节点不会打。
+- **实测**：真实 `tmp/notebook-logs`——AI Studio worker 会话（8MB）尾巴命中；`…-battle-offline-…` 与
+  `.1.log` 备份段不命中。
+- **fail closed**：日志缺席/读不到 ⇒ 不停（宁可不问，也不停一个说不准的页）。`requirePpoWorker:false`
+  只作排障口。证据行补 `skipped_non_worker=N`，能直接看出「为什么没停我这一页」。
+- **验收**：dashboard `bun run test` **2069 pass**（新增 3 条：只停 worker 页 / 尾巴窗口 / 证据计数）。

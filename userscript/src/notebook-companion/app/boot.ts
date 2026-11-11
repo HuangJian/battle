@@ -45,6 +45,7 @@ import {
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
 import { createOfflineWatch } from './offline-watch'
+import { createStopCmdPoller } from './stop-cmd'
 import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
   actionLabel,
@@ -691,6 +692,19 @@ function startHost(
   })
   panel.setSchedule(sched.rows())
   sched.start()
+  // 下行命令（`stopOthers`）：别的页开始离线训练时，dashboard 会让我们停会话。
+  // 与 op 日志同一条通道（GET /api/notebookCmds → stopNow → ack 落 op）；伴生脚本关掉就不取。
+  const stopCmd = config.enabled
+    ? createStopCmdPoller({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        site: 'kaggle',
+        session: () => (frameSession || session).slice(0, 64),
+        stop: stopNow,
+        onEvent: op,
+      })
+    : null
+  stopCmd?.start()
   // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）；
   // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案）。
   const markTimer = setInterval(() => {
@@ -748,6 +762,7 @@ function startHost(
     clearInterval(timer)
     clearInterval(markTimer)
     autoContinue.dispose()
+    stopCmd?.stop()
     sched?.stop()
     doc.removeEventListener('visibilitychange', onVisibility)
     bridge.destroy()
@@ -1030,6 +1045,19 @@ function startSingle(
   }
   panel.setStopPpoVisible(offlineDetected)
 
+  // 下行命令（`stopOthers`，与 host 同口径）：停会话走本页适配器，ack 落 op 日志。
+  const stopCmd = config.enabled
+    ? createStopCmdPoller({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        site,
+        session: () => loop.session.slice(0, 64),
+        stop: async () => toCmd(await send('stopSession')),
+        onEvent: op,
+      })
+    : null
+  stopCmd?.start()
+
   // 魔搭的 notebook 身份在 URL 里没有（帧地址只有 `?t=&lang=`），只能等工作台把标签渲染出来；
   // 读到就换日志键/任务桶，最多等 30s（换键 = 换一份日志，与 host 的 attach 同口径）。
   let identityTimer: ReturnType<typeof setInterval> | null = null
@@ -1167,6 +1195,7 @@ function startSingle(
     clearInterval(markTimer)
     if (offlineTimer !== null) clearInterval(offlineTimer)
     if (identityTimer !== null) clearInterval(identityTimer)
+    stopCmd?.stop()
     hubSync?.cancel()
     doc.removeEventListener('visibilitychange', onVisibility)
     for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })
