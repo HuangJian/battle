@@ -11556,6 +11556,28 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   test_offline_task_queue.py::test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course`
   （改动前红：`multi=[True, False]`）。
 
+## §2026-11-11-goalnn-offline-start-probe（离线训练「开始执行」探测两天 0 条：判据补强 + 读数出口）
+
+- **背景**：`§2026-11-09-goalnn-offline-start-report` 的上报腿上线后，用户要求查日志确认是否生效。
+  57 个 ops 文件里 `offline:detected` 14 条、`stopPpo` 3 条、**`offline:cell-start` 0 条**（三者同一提交
+  引入 ⇒ 不是「装的是旧版」）；今天 `…-offline-edit-1andil` 会话训练 00:09 起跑、07:33 失败、08:41
+  手动重跑，期间面板自己发的 `log:open`(07:50) 证明脚本在线，仍无一条 ⇒ dashboard 至今没收到过任何
+  `stopOthers` 值。
+- **根因**：`app/offline-watch.ts` 三处静默 fail closed（每处直接 `return null`、零读数）：① 基线采在
+  「已经开始执行之后」，只认「从这一拍往后继续变」；② `busy` 依赖 Jupyter 状态栏（Kaggle UI 通常没有
+  ⇒ `kernelStatus` 恒 unknown）；③ `target` 缓存永不失效（重渲染换 id 即永久哑）。
+- **决定**：① 证据改成**相邻两拍**的输出变化；② 新增看门狗——`others===0` 且连续 3 拍执行、等满 3s
+  ⇒ `evidence=held` 上报（只写 op、不下发命令，排队仍不报，原有不变量不变）；③ `target` 连续 3 拍不在
+  `cells()` 里就清缓存重认；④ 新增 `diag()`，`detected`/`cell-start` 的 detail 带 `kernel=/outLen=`，
+  连续 5 拍执行未上报时落 `offline:watch-diag`（一次执行周期一行）。
+- **否决**：先只加诊断、下一轮再改判据（用户口径「一次做完」，且诊断行与补强互不依赖）；把看门狗做成
+  「不管别的 cell 在不在跑都报」（会把排队算成开始，破坏既有不变量）；新增 dashboard 端点（仍走
+  `POST /api/notebookOp` 的 op 日志）。
+- **未验证**：真实 Kaggle DOM 上 `cellExecuting` / `outputText` 哪一格不成立——本地无 DOM 快照，靠下次
+  带诊断的真实运行回答。
+- **影响**：全文 → `docs/nn/console.md §51`；验收 `cd userscript && bun run check`（typecheck 63 文件 /
+  oxlint 0 / 308 pass / dist 两份重建），用例 `test/offline-watch.test.ts` + `test/offline-wiring.test.ts`。
+
 ## §2026-11-11-goalnn-offline-stop-others-downlink（`stopOthers` 接成真命令：dashboard 中转 `stop-session`）
 
 - **背景**：`§2026-11-09-goalnn-offline-start-report` 只把开关写进 op（面板写明「dashboard 目前只记录，不发

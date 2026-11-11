@@ -56,6 +56,52 @@
 接线守卫 1 条）。**未实测**：真实 Kaggle 页上「点 Stop 后 ack 是否在 15s 内出现」——需要浏览器里装新
 `dist/notebook-companion.user.js` 后跑一次离线训练。
 
+## §51 离线训练「开始执行」探测：判据三处静默 fail closed，补看门狗 + 读数（2026-11-11）
+
+**触发**（用户）：userscript 加了「自主云机启动后停其它 PPO worker」，面板写着「训练 cell 开始
+执行时上报 stopOthers；dashboard 目前只记录，不发停止命令」——要求查日志确认探测是否生效。
+
+**结论：没有生效。** `tmp/notebook-logs/**/*.ops.jsonl`（57 个会话文件）里：
+
+| op | 条数 | 读数 |
+|---|---|---|
+| `offline:detected` | **14** | 识别离线页正常；最近一条 11-10 23:10（北京） |
+| `stopPpo` | **3** | 面板开关被点过（`on`） |
+| `offline:cell-start` | **0** | 从未发生 ⇒ dashboard 也从未收到过任何 `stopOthers` 值 |
+
+三个 op 是**同一提交**（`1413c6a0`，11-09 21:21）一起加的 ⇒ 不存在「装的是旧版」。今天的会话
+`kaggle-…-offline-edit-1andil` 更是把窗口钉死：训练 00:09 起跑、07:33 失败、08:41 手动重跑，期间
+host 侧还有 op（00:19 `saveAndClear`、00:21 autosave、07:50 `log:open`——最后这条是面板自己发的，
+脚本在线），却一条 `cell-start` 都没有。
+
+**三处静默 fail closed**（`app/offline-watch.ts`，每处都直接 `return null` 且不留读数）：
+
+1. **基线采在「开始之后」**：`baseline` 在第一拍（已 exec）才采，只认「从这一拍往后输出继续变」
+   ⇒ 前几秒没输出就永远错过；
+2. **`busy` 依赖 Jupyter 状态栏**：`.jp-Notebook-ExecutionIndicator/.jp-StatusBar-ExecutionIndicator`
+   在 Kaggle UI 上通常不存在 ⇒ `kernelStatus` 恒 `unknown` ⇒ `busyAlone` 永远 false；
+3. **`target` 缓存永不失效**：页面重渲染换了 cell id ⇒ `cells.find(same)` 永远找不到 ⇒ 永久哑。
+
+**落地**（同时上是「诊断 + 判据」两半，不拆开）：
+
+- 证据改成**相邻两拍**的输出变化（不再比「起点」）；
+- 新增**看门狗**：`others === 0` 且连续 `heldPolls=3` 拍执行、等满 `heldMs=3000` ⇒ 以
+  `evidence=held` 上报。它只写 op、不下发命令，所以宁可晚 1s 也不永远不说；排队（别的 cell 在跑）
+  仍**不**上报，原有不变量不变；
+- `target` 连续 `missingLimit=3` 拍不在 `cells()` 里 ⇒ 清缓存重认（虚拟化滚出一两拍不会误重置）；
+- 新增 `diag()` 读数（`execPolls / kernel / outLen / others / waitedMs / phase`）：
+  `offline:detected` / `offline:cell-start` 的 detail 带上 `kernel=… outLen=…`；连续 5 拍执行却没
+  上报时落一条 **`offline:watch-diag`**（一次执行周期一行，帧内与 single 两条腿都发，host/single
+  都落 op）。下一次真实运行若还不报，日志会直接指出卡在哪一格。
+
+**验收**：`cd userscript && bun run check`——typecheck 63 文件 0 错 · oxlint 0 · **308 pass** ·
+`dist/notebook-companion.user.js`（+ `.debug`）重建。用例：`test/offline-watch.test.ts` 新增 Kaggle 形态（kernel
+unknown + 输出恒空 ⇒ `held`）、相邻拍变化、排队不报、`diag()` 读数、重渲染换 id 后重认；
+`test/offline-wiring.test.ts` 新增读数出口守卫（`offline:watch-diag` ×1 帧内 note + ×2 op）。
+
+**未验证的部分**：真实 Kaggle DOM 上 `cellExecuting` / `outputText` 到底哪一格不成立——本地没有
+DOM 快照，只能等下一次带诊断的运行（这也是先上读数的理由）。
+
 ## §50 云机 eval 行只在 `metricValues` 里带游戏读数：读侧一律快照优先（2026-11-11）
 
 **触发**（用户）：自主云机训练时 eval 指标与本地集群跑的不一致——`o2-reflex` it300 本地评

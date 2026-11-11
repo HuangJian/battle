@@ -32,6 +32,16 @@ describe('离线训练上报：接线', () => {
     expect(BOOT.match(/void ops\.flush\(\)/g)?.length ?? 0).toBe(2)
   })
 
+  it('探测有读数出口：detected / cell-start 带 kernel+outLen，卡住时落 offline:watch-diag', () => {
+    // 2026-11-11 现场：两天 0 条 cell-start，但日志里也看不出卡在哪一格（exec / kernel / 输出）。
+    // 这条钉住「读数必须出得来」：帧内与 single 两条腿都要发诊断，host 与 single 都要落 op。
+    expect(BOOT.match(/bridge\.note\('offline:watch-diag'/g)?.length ?? 0).toBe(1)
+    expect(BOOT.match(/op\('offline:watch-diag'/g)?.length ?? 0).toBe(2)
+    expect(BOOT.match(/diag\.execPolls >= 5/g)?.length ?? 0).toBe(2)
+    // detected ×2 + cell-start ×2：每一条上报都自带内核状态与输出长度
+    expect(BOOT.match(/kernel=\$\{diag\.kernel\} outLen=\$\{diag\.outLen\}/g)?.length ?? 0).toBe(4)
+  })
+
   it('两条腿都挂下行命令轮询（stopOthers 真能停别的页）', () => {
     // 一帧一 single：host（Kaggle）与 single（Colab/AI Studio/魔搭）各挂一个轮询器
     expect(BOOT.match(/createStopCmdPoller\(\{/g)?.length ?? 0).toBe(2)

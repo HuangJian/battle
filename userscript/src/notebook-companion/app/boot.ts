@@ -275,19 +275,36 @@ function startFrame(
       })
     : null
   let offlineNoted = false
+  // 诊断只发一次：目标在跑但判据没成立时，把「卡在哪一格」（exec / kernel / output 长度）
+  // 写进 op 日志。2026-11-11 的现场就是缺这一行——两天里只有「没上报」，看不出为什么。
+  let offlineDiagSent = false
   const offlineTimer =
     offline === null
       ? null
       : setInterval(() => {
           const start = offline.poll()
           const hit = offline.detected()
+          const diag = offline.diag()
+          if (diag.execPolls === 0) offlineDiagSent = false
           if (hit && !offlineNoted) {
             offlineNoted = true
-            bridge.note('offline:detected', { value: `cell=${hit.index} id=${hit.id}` })
+            bridge.note('offline:detected', {
+              value: `cell=${hit.index} id=${hit.id} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            })
           }
           if (start) {
             bridge.note('offline:cell-start', {
-              value: `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms evidence=${start.evidence}`,
+              value: `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms evidence=${start.evidence} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            })
+            return
+          }
+          // 连续 5 拍执行中却没上报 ⇒ 打一行读数（一次执行周期只一行）。
+          if (!offlineDiagSent && diag.execPolls >= 5) {
+            offlineDiagSent = true
+            bridge.note('offline:watch-diag', {
+              value:
+                `cell=${hit ? hit.index : '-'} execPolls=${diag.execPolls} kernel=${diag.kernel} ` +
+                `outLen=${diag.outLen} others=${diag.others} waited=${diag.waitedMs}ms phase=${diag.phase}`,
             })
           }
         }, 1000)
@@ -425,6 +442,12 @@ function startHost(
         const detail =
           `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''}`.trim()
         op('offline:detected', detail)
+        return
+      }
+      if (m.name === 'offline:watch-diag') {
+        const detail =
+          `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''}`.trim()
+        op('offline:watch-diag', detail)
         return
       }
       if (m.name === 'offline:cell-start') {
@@ -1094,29 +1117,45 @@ function startSingle(
       })
     : null
   let offlineNoted = false
+  // 诊断一行（与帧内那条同口径）：判据卡住时把读数留在 op 日志里。
+  let offlineDiagSent = false
   const offlineTimer =
     offline === null
       ? null
       : setInterval(() => {
           const start = offline.poll()
           const hit = offline.detected()
+          const diag = offline.diag()
+          if (diag.execPolls === 0) offlineDiagSent = false
           if (hit && !offlineNoted) {
             offlineNoted = true
             offlineDetected = true
             panel?.setStopPpoVisible(true)
-            op('offline:detected', `cell=${hit.index} id=${hit.id}`)
+            op(
+              'offline:detected',
+              `cell=${hit.index} id=${hit.id} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            )
           }
           if (start) {
             const stopOthers = loadStopPpo(runtime, page, false)
             const detail =
               `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms ` +
-              `evidence=${start.evidence} stopOthers=${stopOthers ? 1 : 0}`
+              `evidence=${start.evidence} stopOthers=${stopOthers ? 1 : 0} ` +
+              `kernel=${diag.kernel} outLen=${diag.outLen}`
             op('offline:cell-start', detail)
             void ops.flush()
             panel?.setStatus(
               stopOthers ? '离线训练已开始（已上报：停其它 PPO）' : '离线训练已开始（已上报）',
               'ok',
             )
+            return
+          }
+          if (!offlineDiagSent && diag.execPolls >= 5) {
+            offlineDiagSent = true
+            const diagLine =
+              `cell=${hit ? hit.index : '-'} execPolls=${diag.execPolls} kernel=${diag.kernel} ` +
+              `outLen=${diag.outLen} others=${diag.others} waited=${diag.waitedMs}ms phase=${diag.phase}`
+            op('offline:watch-diag', diagLine)
           }
         }, 1000)
 
