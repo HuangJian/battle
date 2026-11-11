@@ -2,12 +2,13 @@
 
 Two interpreters, one file:
 
+  Run these from the repo root (the defaults are anchored there):
   1. torch side (repo venv, has torch):
-       bash tools/githook/nn-py-safe.sh tools/paddle_parity.py fixture --out tmp/paddle-parity
+       bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py fixture --out tmp/paddle-parity
   2. Paddle side (isolated venv, has paddle only):
-       tmp/paddle-venv/Scripts/python.exe tools/paddle_parity.py check --dir tmp/paddle-parity
+       tmp/paddle-venv/Scripts/python.exe nn-training/tools/paddle_parity.py check --dir tmp/paddle-parity
   3. back to torch — the Paddle-written weights JSON must serve unchanged:
-       bash tools/githook/nn-py-safe.sh tools/paddle_parity.py verify --dir tmp/paddle-parity
+       bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py verify --dir tmp/paddle-parity
 
 The fixture stores, per case: initial weights JSON, the minibatch (+ demo bank),
 reference forward logits, one-epoch update stats and post-update weights. `check`
@@ -44,6 +45,10 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# 2026-11-11（DECISIONS §376 双 tmp 统一）：默认产物锚定仓库根 tmp/。
+# 此前是相对 "tmp/..."：从 nn-training/ 手工跑会把产物写回 nn-training/tmp。
+_TMP = _ROOT.parent / "tmp"
 
 from common.cli import house_parser, run_main
 from common.schema import (
@@ -928,9 +933,9 @@ def main() -> int:
     ap = house_parser(description="Paddle ↔ torch PPO/BC parity harness")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p1 = sub.add_parser("fixture", help="torch: 生成基准（权重/输入/前向/一步更新结果）")
-    p1.add_argument("--out", default="tmp/paddle-parity")
+    p1.add_argument("--out", default=str(_TMP / "paddle-parity"))
     p2 = sub.add_parser("check", help="paddle: 复跑并对比")
-    p2.add_argument("--dir", default="tmp/paddle-parity")
+    p2.add_argument("--dir", default=str(_TMP / "paddle-parity"))
     p2.add_argument("--atol-forward", type=float, default=1e-5)
     p2.add_argument("--atol-stats", type=float, default=1e-5)
     p2.add_argument("--rtol-stats", type=float, default=1e-4)
@@ -939,18 +944,18 @@ def main() -> int:
     p2.add_argument("--atol-weights", type=float, default=1e-4)
     p2.add_argument("--atol-after", type=float, default=1e-4)
     p3 = sub.add_parser("verify", help="torch: 读 Paddle 写出的权重 JSON 并前向对账")
-    p3.add_argument("--dir", default="tmp/paddle-parity")
+    p3.add_argument("--dir", default=str(_TMP / "paddle-parity"))
     p3.add_argument("--atol", type=float, default=1e-5)
     # 小量级头（value ≈0.7）的 f32 末位噪声：绝对项 + 相对项（理由见 run_verify 文档）。
     p3.add_argument("--rtol", type=float, default=1e-4)
     p4 = sub.add_parser("bc-fixture", help="torch: 生成 BC v6 一步基准")
-    p4.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p4.add_argument("--dir", default=str(_TMP / "bc-paddle-parity"))
     p5 = sub.add_parser("bc-check", help="paddle: 复跑 BC 一步并对账")
-    p5.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p5.add_argument("--dir", default=str(_TMP / "bc-paddle-parity"))
     p5.add_argument("--atol-metrics", type=float, default=1e-3)
     p5.add_argument("--atol-forward", type=float, default=1e-4)
     p6 = sub.add_parser("bc-verify", help="torch: 读 Paddle BC 权重并前向对账")
-    p6.add_argument("--dir", default="tmp/bc-paddle-parity")
+    p6.add_argument("--dir", default=str(_TMP / "bc-paddle-parity"))
     p6.add_argument("--atol", type=float, default=1e-4)
     args = ap.parse_args()
     if args.cmd == "fixture":

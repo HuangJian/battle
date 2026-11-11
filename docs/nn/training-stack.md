@@ -1543,9 +1543,9 @@ demo-BC · value-anchor；`SEED=20261027`、B=8、demo 32 条。`lp_old` 必须�
 生成（早期合成值把 ratio 推到 e^30、梯度全被 clip，读数是假绿）。三模式命令（Paddle venv 在 `tmp/paddle-venv`）：
 
 ```
-bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py fixture --out nn-training/tmp/paddle-parity
-cd nn-training && ../tmp/paddle-venv/Scripts/python.exe tools/paddle_parity.py check --dir tmp/paddle-parity
-bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py verify --dir nn-training/tmp/paddle-parity
+bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py fixture --out tmp/paddle-parity
+tmp/paddle-venv/Scripts/python.exe nn-training/tools/paddle_parity.py check --dir tmp/paddle-parity
+bash tools/githook/nn-py-safe.sh nn-training/tools/paddle_parity.py verify --dir tmp/paddle-parity
 ```
 
 **读数（全 PASS）**：forward 相对误差 ≤2.80e-6 · 一步 stats ≤4.46e-5 · 权重绝对差 ≤4.21e-5 ·
