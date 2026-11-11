@@ -6,6 +6,42 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §148 云机 rollout 节点「经常断连 / 贡献度极低」：探活预算 3s、权重握手 50s、2 核被派 4 槽（2026-11-11）
+
+**现场（kaggle 滚动机节点）**：面板读数“断连”，实际节点空载答 `/v1/ping` 就要 **0.9~2.7s**
+（quick tunnel RTT），而派发/评估的探活预算是 **3s**。07/08/09 三个小时各
+`[dist] node kaggle: ping failed — excluded this round` **84 / 97 / 88 次**；eval 侧同时
+`连续 9 次瞬时失败（背压/瞬断）— 停派`、`让出在飞 4 槽 ⇒ c=0/4`。那份笔记本日志里 40 分钟
+`gamesDoneTotal` 冻在 721、`inflight=[]`，就是「每轮都被判出局」的样子——节点健康。
+
+**三条並存的结构成本**（实测数字）：
+
+1. **探活预算太紧**：3s < 云端空载 p99。一次超时就进 `excluded`，而节点越忙越答不上 ⇒ 负反馈。
+2. **权重握手每轮重来**：`weights[rollout] -> kaggle (kept, 54.6s)` —— `kept` 却是 54s，因为
+   缓存探针的 5s 先超时、退回整份上传，节点收完才说「我本来就有」。权重只 **0.38MB**
+   （50s ⇔ 6KB/s，不是带宽）⇒ 整轮在 `ready on 5/5 nodes in 54.69s` 上等它。P90「权重就绪」
+   27.9s、max 356s，而 >20s 的慢握手 3 小时里只有 kaggle 257 次 / dsw 253 次、局域网节点各 2 次。
+3. **2 个物理核被派 4 个槽**：`/v1/ping.cpus=2`（`physicalCores()` = min(物理核, cgroup 配额, 掩码)），
+   而 rl-config 钉 `concurrency=4`、笔记本按 `effective_cores()`=4 起 worker ⇒ 4 个重型 native
+   worker 抢 2 个核，父进程的事件循环被饿住 ⇒ 上面两条被放大。
+
+**修法（本次落地）**
+
+- `common.distribution.STATUS_TIMEOUT_SEC = 8.0` + `status_timeout_of(policy)`：**单一缺省**，
+  派发 / 评估 / 批跑 / 评估自救扩容四处同读；policy 显式值仍优先。
+- **ping 超时不再摘权重账本**：超时是「这轮够不着」，不是「重启丢了桶」——旧写法让下一轮
+  重新握手（上面那条 54s 就是它）。真重启的证据是 codeHash/bun 不符；同 sha 手动重启仍有 409 自愈。
+- 缓存探针预算 5s → 15s（超时的代价不是 5s，而是后面那次全额 POST）。
+- `common.distribution.node_slots(configured, cpus)` = `min(config, ping.cpus)`；`_slot_count` 改用
+  **物理核**（与 agent 的 `CPUS` 同口径），「满核」不再被读成「逻辑核」。
+
+**未闭的环**：quick tunnel 本身就是结构成本（每次会话换 URL、RTT 1s 起步）；`id=kaggle` 被每个
+会话复用、hub 注册 last-writer-wins ⇒ 两个会话同时活着时必有一个孤儿（keepalive 照打、0 局）。
+固定入口（named tunnel / tailscale）与同 id 冲突单独评。
+
+**验收**：`tests/trainer/test_node_probe_budgets.py` 6 条（对 HEAD 验红 5 条）+ `_slot_count` 物理核
+用例；`nn-python-gate` 5881 passed。
+
 ## §147 自主云机离线包从不跑 greedy 语料：轮内补采集阶段（B 口径「挤进普通采样」）（2026-11-11）
 
 **现场**：`o2-notax` 自主段 300 轮，课程写着 `greedy_quota: 12%`，云机日志全文 `greedy` / `argmax` /

@@ -437,13 +437,23 @@ def test_cloudflared_download_retries_after_whole_round_fails(
     assert "gh-proxy.com" in downloads[4]
 
 
-def test_slot_count_uses_all_effective_cores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """采样节点不预留核：8 核起 8 个 worker（训练侧 `cpu_worker_slots` 的留 2 核不适用）。"""
+def test_slot_count_uses_all_physical_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """采样节点不预留核：8 **物理**核起 8 个 worker（训练侧 `cpu_worker_slots` 的留 2 核不适用）。
+
+    口径必须是物理核（= agent 自己的 `CPUS = physicalCores()`）：两套口径并存就会出现
+    「笔记本按 4 开池、agent 自报 2 核」的超额认购（2026-11-11 kaggle：父进程 HTTP 被饿到
+    30~60s，连带 ping/权重握手成批超时）。HT sibling 只共享执行单元与 L1/L2，每个 worker
+    是 ~75–100MB 的重型进程 ⇒ 按物理核铺才是「满核」。
+    """
     from common import platform_utils
 
     monkeypatch.setattr(platform_utils, "effective_cores", lambda: 8)
-    assert rn._slot_count(0)[0] == 8
+    monkeypatch.setattr(platform_utils, "physical_cores", lambda: 4)
+    assert rn._slot_count(0)[0] == 4
     assert rn._slot_count(3)[0] == 3
+    # 容器配额比物理核更小（cgroup 限流）⇒ 取小，别按机器型号报数
+    monkeypatch.setattr(platform_utils, "effective_cores", lambda: 2)
+    assert rn._slot_count(0)[0] == 2
 
 
 def test_cloudflared_discovery_ignores_login_shell_banner(

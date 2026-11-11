@@ -224,7 +224,7 @@ class BatchEvalRunner:
         args = self.args
         unit = self.unit
         policy_cfg = self.cfg.get("policy", {})
-        status_timeout = float(policy_cfg.get("statusTimeoutSec", 3))
+        status_timeout = common.distribution.status_timeout_of(policy_cfg)
         task_timeout = float(policy_cfg.get("taskTimeoutSec", 900))
         fail_streak_max = int(policy_cfg.get("nodeFailStreak", 3))
         # 背压参数（与 biz/bc_dispatch 的 busy 重排同源，默认值取同一量级）：

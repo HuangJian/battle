@@ -257,17 +257,23 @@ def _terminate(p: Any) -> None:
 
 
 def _slot_count(explicit: int) -> tuple[int, str]:
-    """并发槽位：显式值 > `effective_cores()` **全核**（采样节点不预留，用户 2026-11-04）。
+    """并发槽位：显式值 > `physical_cores()` **全核**（采样节点不预留，用户 2026-11-04）。
 
     与训练侧 `cpu_worker_slots()`（留 2 核给数据回传）分家：采样节点只跑采样/评估，
-    满核才够用；8 核机器起 8 个 worker。
+    满核才够用；8 物理核机器起 8 个 worker。
+
+    ★ 2026-11-11 用**物理核**（不是 `effective_cores()`）：口径必须与 agent 自己的
+      `CPUS = physicalCores()`（`tools/lib/cores.ts`）一致——同一个节点两套口径就会
+      出现「笔记本按 4 开池、agent 自报 2 核」的超额认购（kaggle 实测，父进程 HTTP
+      被饿到 30~60s）。HT sibling 只共享执行单元与 L1/L2，每个 worker 是 ~75–100MB
+      的重型进程，按物理核铺才是「满核」。
     """
     cores = os.cpu_count() or 1
     try:
-        from common.platform_utils import effective_cores
+        from common.platform_utils import effective_cores, physical_cores
 
-        cores = effective_cores()
-        note = f"platform_utils cores={cores} 全核"
+        cores = min(effective_cores(), physical_cores())
+        note = f"platform_utils 物理核={cores} 全核"
     except Exception as e:  # 拉不起 platform_utils 时的兜底：同样用满
         note = f"内联回退({type(e).__name__}) cores={cores}"
     if int(explicit or 0) > 0:

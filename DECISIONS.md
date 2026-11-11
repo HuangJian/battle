@@ -11716,3 +11716,36 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   `tests/test_reuse_ledger.py` 的只降不升判据，没抬基线。
 - **验收**：`tests/worker/test_greedy_round.py` + `tests/remote/test_greedy_offline_wiring.py`（19 条）；
   `nn-training/tests/remote` 全量 1859 pass；全文 → `docs/nn/remote-transport.md §147`。
+
+## §2026-11-11-goalnn-rollout-node-liveness-budgets（云机 rollout 节点「经常断连 / 贡献度极低」：探活预算、权重握手、并发取小）
+
+- **现场（kaggle 滚动机节点，2026-11-11）**：节点空载答 `/v1/ping` 要 **0.9~2.7s**（quick tunnel RTT），
+  而派发/评估的探活预算是 **3s** ⇒ 07/08/09 三个小时各 `ping failed — excluded this round`
+  **84 / 97 / 88 次**，eval 侧同时 `连续 9 次瞬时失败（背压/瞬断）— 停派`、`让出在飞 4 槽 ⇒ c=0/4`；
+  节点自己那 40 分钟 `gamesDoneTotal` 冻在 721、`inflight=[]` —— 它健康，只是每轮都被判出局。
+  另一条：`weights[rollout] -> kaggle (kept, 54.6s)`，**节点本来就有这份权重**（0.38MB，50s ≈ 6KB/s，
+  不可能是带宽）——探针 5s 超时后退化成整份重传，客户端收完才被回一句 `kept`。
+  第三条：`/v1/ping.cpus=2`（`physicalCores()`）而 rl-config 钉 `concurrency=4`、笔记本按
+  `effective_cores()`=4 起 worker ⇒ 4 个重型 native worker 抢 2 个物理核，父进程 HTTP 被饿到几十秒，
+  把前两条放大成自我维持的负反馈。
+- **决定 A（探活预算）**：新增 `common.distribution.STATUS_TIMEOUT_SEC = 8.0` 与 `status_timeout_of(policy)`，
+  派发（`trainer/dispatch`）、评估（`trainer/eval_dispatch`）、批跑（`trainer/batch_runner`）、
+  评估自救扩容（`worker/eval_self_rescue`）四处**共读这一份**缺省；policy 显式值仍优先（本机
+  rl-config 里那份 3 已改 8，该文件是 gitignore 的本地数据）。
+- **决定 B（权重握手）**：① ping **超时不再摘权重账本**（`forget_weights_node`）——超时是「这轮够不着」，
+  不是「节点重启丢了桶」；真重启的证据是 codeHash/bun 不符，同 sha 手动重启仍有 409 自愈兜底。
+  ② `post_weights` 的缓存探针预算 5s → 15s：探针超时的代价不是 5s，而是后面那次全额 POST。
+- **决定 C（并发取小）**：新增 `common.distribution.node_slots(configured, cpus)` = `min(config, ping.cpus)`
+  （任一缺用另一个，都没给 ⇒ 1），派发侧改走它；笔记本 `_slot_count` 从 `effective_cores()` 改为
+  `min(effective_cores, physical_cores)` —— 口径必须与 agent 自己的 `CPUS = physicalCores()` 一致，
+  「两套口径」正是超额认购的来源。**这是对 2026-11-04「采样节点满核」口径的细化**：满核 = 物理核
+  （HT sibling 只共享执行单元与 L1/L2，每个 worker 是 ~75–100MB 的重型进程），不是「逻辑核数」。
+- **否决**：① 「连续 2 次 ping 失败才排除」——排除本身无害（这轮够不着就用不了它），真正该保护的
+  是权重账本，B① 用「证据才失效」比「等两轮」严格更好，且不让整轮多等一次 8s；
+  ② 把 `statusTimeoutSec` 一刀切抬到 20s+ —— 死节点每轮白等 20s，8s 已覆盖云端 p99 空载 RTT 的 3 倍；
+  ③ 给云机写死 `concurrency: 2` —— 节点换机器/换配额就不对了，取小让它自报。
+- **验收**：`tests/trainer/test_node_probe_budgets.py`（6 条；对 HEAD 用 `git worktree add --detach`
+  验红 5 条、1 条守卫本就绿）+ `tests/remote/test_rollout_node.py` 的 `_slot_count` 用例按物理核重写；
+  `nn-python-gate` 全量 **5881 passed / 0 failed**。全文 → `docs/nn/remote-transport.md §148`。
+- **未闭的环**：tunnel 本身仍是结构性成本（换 URL、RTT 1s 起步）；固定入口（named tunnel / tailscale）
+  与「同 id 多会话 last-writer-wins」单独评。

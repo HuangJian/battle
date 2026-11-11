@@ -483,11 +483,48 @@ def _request(
                 _ACTIVE.discard(key)
 
 
-def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
+#: 节点探活（`/v1/ping`）的**唯一**缺省预算（秒）。2026-11-11：3s 对云机隧道太紧——
+#: kaggle 节点**空载**答一次就要 0.9~2.7s（实测），忙起来直接超时 ⇒ 整轮被判
+#: `ping failed`（当天 07/08/09 各 84/97/88 次，而节点其实好好活着）。
+STATUS_TIMEOUT_SEC: float = 8.0
+
+
+def status_timeout_of(policy: Mapping[str, Any] | None) -> float:
+    """`policy.statusTimeoutSec` → 探活预算（缺席/坏值/非正 ⇒ `STATUS_TIMEOUT_SEC`）。
+
+    单一入口：派发（rollout）、评估、批跑三处都读它——两处各写一个缺省字面量，
+    改一处漏一处就是本仓库的老事故型（先例见 `codehash-files.txt` 的双语同步）。
+    """
+    raw = (policy or {}).get("statusTimeoutSec")
+    if raw is None:
+        return STATUS_TIMEOUT_SEC
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return STATUS_TIMEOUT_SEC
+    return v if v > 0 else STATUS_TIMEOUT_SEC
+
+
+def node_slots(configured: Any, cpus: Any) -> int:
+    """节点并发槽位 = `min(config concurrency, 节点自报 cpus)`（任一缺 ⇒ 用另一个）。
+
+    为什么取小：`/v1/ping.cpus` 是 `physicalCores()`（min(物理核, cgroup 配额, 掩码)），
+    而 config 里的 `concurrency` 是人手填的旧值——kaggle 会话只给 2 个物理核，
+    config 却钉着 4 ⇒ 4 个重型 native worker 抢 2 个核，父进程的事件循环被饿住，
+    于是 1s 的 HTTP 变成 30~60s（2026-11-11：权重握手 54.6s、ping 成批超时）。
+    """
+    cfg = int(configured or 0)
+    rep = int(cpus or 0)
+    if cfg > 0 and rep > 0:
+        return max(1, min(cfg, rep))
+    return max(1, cfg or rep or 1)
+
+
+def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> list[dict | None]:
     """**并行** ping 一批节点（保序返回，失败 = None）。
 
     为什么必须并行：串行 ping 的墙钟 = Σ 每台延迟，而超时预算是**按节点**的
-    （`statusTimeoutSec` 默认 3s）⇒ 两台负载高的节点就让整个阶段花 ~7s（2026-09-19
+    （`STATUS_TIMEOUT_SEC`）⇒ 两台负载高的节点就让整个阶段花两倍预算（2026-09-19
     实测：`u0 阶段 gate 6.83s alive=4/6`，其中两台正是超时被丢）。节点门在每单元
     重跑一次，这笔开销按单元累加。并行后 == 最慢一台。
     """
@@ -509,7 +546,7 @@ def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
         return list(ex.map(_one, nodes))
 
 
-def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
+def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
     """GET /v1/ping → dict；任何失败返回 None（调用侧决定排除该节点）。"""
     try:
         status, body = _request(url.rstrip("/") + "/v1/ping", auth_key, timeout)
@@ -987,7 +1024,10 @@ def post_weights(
     GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
     多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
     """
-    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
+    # 探针预算 5s → 15s（2026-11-11）：云机隧道空载单请求就要 0.9~2.7s，5s 在节点忙时
+    # 必超时 ⇒ 退化成整份重传（0.38MB 传了 54.6s，节点收完才说「我本来就有」）。探针
+    # 超时的代价不是 5s，而是后面那次全额 POST。
+    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(15.0, timeout))
     if cached is True:
         return "kept"
     course_name = course_name_of() if course is None else course

@@ -36,8 +36,9 @@ from worker.eval_yield import (
 #: 动态扩容的重 ping 间隔（秒）；`0` = 关闭。判据是「rollout 退场后补线程」而不是墙钟：
 #: 测试把它压到毫秒级，走的仍是同一条 `grow_pools` 路。
 EVAL_SLOT_GROW_SEC = 15.0
-#: 扩容 ping 的每节点预算（与派发时 `statusTimeoutSec` 的缺省同值）。
-EVAL_GROW_PING_TIMEOUT_SEC = 3.0
+#: 扩容 ping 的每节点预算 = 派发侧同一个缺省（`common.distribution.STATUS_TIMEOUT_SEC`，
+#: 2026-11-11 由 3s 抬到 8s：云机隧道空载就要 0.9~2.7s，3s 在忙时必超时）。
+EVAL_GROW_PING_TIMEOUT_SEC = common.distribution.STATUS_TIMEOUT_SEC
 #: 收口轮询步长（秒）：只是定时醒来重判，正常路径靠事件/计数。
 SUPERVISE_TICK_SEC = 0.2
 
