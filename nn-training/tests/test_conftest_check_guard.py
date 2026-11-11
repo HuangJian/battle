@@ -78,3 +78,25 @@ def test_guard_ignores_non_list_fails() -> None:
     gen = _enter(SimpleNamespace(FAILS="not a list"))
     with pytest.raises(StopIteration):
         next(gen)
+
+
+def test_tmp_hooks_are_registered_once(request) -> None:
+    """tmp 清理/失败标记 hook 每进程只能有一份实现（2026-11-11）。
+
+    e2e/conftest.py 曾把 `pytest_runtest_makereport` / `pytest_sessionfinish`
+    import 进自己的命名空间 —— pytest 把 conftest 模块的每个 `pytest_*` 属性都注册成
+    hook 实现，于是全量门禁（tests/ + e2e/）里每个 hook 跑两遍：两个 detached 清理
+    进程抢删同一份清单、各自 skip 掉对方已删的目录，删除预算一用完就欠账（实测残留
+    6116 个 tmp 目录）。按 plugin 名钉死「只许根 conftest 一份」。
+    """
+    for hook_name in ("pytest_sessionfinish", "pytest_runtest_makereport"):
+        impls = getattr(request.config.pluginmanager.hook, hook_name).get_hookimpls()
+        names = [i.plugin_name for i in impls if "conftest" in i.plugin_name]
+        assert len(names) == 1, f"{hook_name} 注册了多份：{names}"
+
+
+def test_tmp_dir_for_does_not_create_the_directory() -> None:
+    """路径计算不许建目录：autouse 隔离每用例都调它，建了就等于恢复空目录垃圾。"""
+    node = SimpleNamespace(nodeid="tests/fake::test_lazy")
+    d = conftest.tmp_dir_for(SimpleNamespace(node=node))
+    assert not d.exists(), f"tmp_dir_for 建了目录：{d}"

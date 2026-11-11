@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import secrets
 from pathlib import Path
 
 from common.cli import run_main
+from common.platform_utils import rmtree_best_effort
 from worker.terminal_stats import terminal_stats
 
-REPO = Path(__file__).resolve().parents[3]  # 仓库根（2026-09-08 双 tmp 统一：tmp/ 在仓库根）
 FAILS: list[str] = []
 
 
@@ -53,9 +52,9 @@ def _write_manifest(
     return m
 
 
-def test_terminal_stats_basic() -> None:
+def test_terminal_stats_basic(tmp_path: Path) -> None:
     """基础聚合：多嵌套层级、(stage,seed) 去重、local-eval 跳过。"""
-    tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_{secrets.token_hex(4)}"
+    tmp = tmp_path / "basic"
     it_dir = tmp / "it1"
     # w0/ 层级
     _write_manifest(it_dir, "w0", 2000, 1, kills=3, powerups=1, ticks=4500, nsamples=450)
@@ -87,9 +86,9 @@ def test_terminal_stats_basic() -> None:
     check(rec["by_stage"]["2001"]["kills_total"] == 5.0, "stage 2001 kills = 5")
 
 
-def test_terminal_stats_no_manifests() -> None:
+def test_terminal_stats_no_manifests(tmp_path: Path) -> None:
     """空目录返回 games=0 不崩溃。"""
-    tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_empty_{secrets.token_hex(4)}"
+    tmp = tmp_path / "empty"
     it_dir = tmp / "it_empty"
     it_dir.mkdir(parents=True, exist_ok=True)
     rec = terminal_stats(str(it_dir), it=5)
@@ -103,9 +102,9 @@ def test_terminal_stats_missing_dir() -> None:
     check(rec["games"] == 0, "missing dir: games=0")
 
 
-def test_terminal_stats_win_rate() -> None:
+def test_terminal_stats_win_rate(tmp_path: Path) -> None:
     """混合 outcome 验证 win_rate。"""
-    tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_win_{secrets.token_hex(4)}"
+    tmp = tmp_path / "win"
     it_dir = tmp / "it2"
     _write_manifest(
         it_dir, "w0", 2000, 1, kills=5, powerups=2, ticks=8000, nsamples=800, outcome="stage_clear"
@@ -125,9 +124,9 @@ def test_terminal_stats_win_rate() -> None:
     check(rec["kills"]["max"] == 5.0, "kills max = 5")
 
 
-def test_terminal_stats_dedup_nsamples() -> None:
+def test_terminal_stats_dedup_nsamples(tmp_path: Path) -> None:
     """同一 (stage,seed) 取 nSamples 最大者。"""
-    tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_dedup_{secrets.token_hex(4)}"
+    tmp = tmp_path / "dedup"
     it_dir = tmp / "it3"
     # 先写小 nSamples
     _write_manifest(it_dir, "dist/a", 2000, 1, kills=1, powerups=0, ticks=1000, nsamples=100)
@@ -140,9 +139,9 @@ def test_terminal_stats_dedup_nsamples() -> None:
     check(rec["ticks"]["mean"] == 8000.0, "took max nSamples version: ticks=8000")
 
 
-def test_terminal_stats_ignores_metrics_npy() -> None:
+def test_terminal_stats_ignores_metrics_npy(tmp_path: Path) -> None:
     """函数不读 metrics.npy，放一个伪造的不报错。"""
-    tmp = REPO / "tmp" / "pytest-tmp" / f"test_terminal_npy_{secrets.token_hex(4)}"
+    tmp = tmp_path / "npy"
     it_dir = tmp / "it4"
     _write_manifest(it_dir, "w0", 2000, 1, kills=2, powerups=0, ticks=3000, nsamples=300)
     # 伪造 metrics.npy
@@ -156,13 +155,18 @@ def test_terminal_stats_ignores_metrics_npy() -> None:
 
 def main() -> None:
     import sys
+    import tempfile
 
-    test_terminal_stats_basic()
-    test_terminal_stats_no_manifests()
-    test_terminal_stats_missing_dir()
-    test_terminal_stats_win_rate()
-    test_terminal_stats_dedup_nsamples()
-    test_terminal_stats_ignores_metrics_npy()
+    root = Path(tempfile.mkdtemp(prefix="terminal-stats-"))
+    try:
+        test_terminal_stats_basic(root)
+        test_terminal_stats_no_manifests(root)
+        test_terminal_stats_missing_dir()
+        test_terminal_stats_win_rate(root)
+        test_terminal_stats_dedup_nsamples(root)
+        test_terminal_stats_ignores_metrics_npy(root)
+    finally:
+        rmtree_best_effort(root, ignore_errors=True)
 
     print()
     if FAILS:

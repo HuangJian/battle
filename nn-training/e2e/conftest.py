@@ -40,15 +40,13 @@ def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("NN_SERVE_POOL", "0")
 
-# 复用单测目录的 fixtures / session hooks（tmp_path 覆盖与清理语义一致）。
-from tests.conftest import (
-    bp_args,
-    pin_production_env,
-    pytest_runtest_makereport,
-    pytest_sessionfinish,
-    tmp,
-    tmp_path,
-)
+
+# 夹具复用（`tmp_path` / 清理 hooks 已统一住在根 conftest，两层共享）。
+# ⚠️ **不要**再把 `pytest_*` hook 函数 import 进本模块：pytest 会把 conftest 模块的
+# 每个 `pytest_*` 属性注册成 hook 实现，import 一次 = 全量门禁里多跑一遍（2026-11-11
+# 实测：两个清理进程抢删同一份清单，通过用例的 tmp 目录长期清不干净）。
+from conftest import tmp_dir_for
+from tests.conftest import bp_args, pin_production_env
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +62,7 @@ def _production_isolation(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtu
     钉名单与实现在**一处**（`tests/conftest.py::pin_production_env` / `PRODUCTION_STATE_PINS`）；
     本层只负责挂上。守卫 `tests/test_production_isolation.py`（两层都挂没挂由它钉）。
 
-    `tmp_path` 走 `request.getfixturevalue` 而不是形参：本模块顶部 import 了同名夹具函数
-    （extend 语义），形参会撞 ruff F811（2026-10-06 门禁实测）。
+    用 `tmp_dir_for(request)` 而不是 `tmp_path` 形参：隔离只需要**路径**（真写点自己会
+    mkdir），请求 tmp_path 会为每个用例（哪怕从不写盘）建一个空目录。
     """
-    pin_production_env(monkeypatch, request.getfixturevalue("tmp_path"))
+    pin_production_env(monkeypatch, tmp_dir_for(request))

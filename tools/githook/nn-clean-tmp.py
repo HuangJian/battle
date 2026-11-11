@@ -28,6 +28,9 @@ import time
 from pathlib import Path
 
 KEEP_DAYS = float(os.environ.get("NN_TMP_KEEP_DAYS", "1"))
+#: 空目录的宽限（秒）：空目录没有 debug 价值，但可能是**正在跑**的用例刚建好 tmp_path、
+#: 还没落盘 ⇒ 只删「空置超过这个时间」的（缺省 1h；KEEP_DAYS 窗口不必为它们白等一天）。
+EMPTY_GRACE_S = float(os.environ.get("NN_TMP_EMPTY_GRACE_S", "3600"))
 # 脚本位于 tools/githook/ → parents[2] = 仓库根
 TARGET = Path(__file__).resolve().parents[2] / "tmp" / "pytest-tmp"
 
@@ -91,6 +94,14 @@ def remove_listed(list_path: Path) -> int:
     return 0
 
 
+def _is_empty_dir(p: Path) -> bool:
+    """目录里没有任何条目（无权限/竞态一律当「不空」，宁可不删）。"""
+    try:
+        return next(p.iterdir(), None) is None
+    except OSError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="清理 tmp/pytest-tmp（过期 / 按清单）")
     ap.add_argument(
@@ -123,6 +134,14 @@ def main(argv: list[str] | None = None) -> int:
         if mtime < cutoff:
             try:
                 shutil.rmtree(child)  # -S 下为原版 rmtree（沙箱保护未注入）
+                removed += 1
+            except OSError:
+                pass
+        elif time.time() - mtime > EMPTY_GRACE_S and _is_empty_dir(child):
+            # 崩掉/被 kill 的 session 不会走 conftest 的收尾清理，留下的空目录没有
+            # 任何 debug 价值；超过宽限期就即时收掉，不等 KEEP_DAYS。
+            try:
+                child.rmdir()
                 removed += 1
             except OSError:
                 pass

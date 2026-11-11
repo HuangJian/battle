@@ -34,6 +34,11 @@ standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败�
 from __future__ import annotations
 
 import os
+import re
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
 
 # ---- CPU 内线程封顶（2026-10-09，docs/nn/engineering.md §68）----
 # ⚠ 位置是语义的一部分：必须落在 numpy / torch **被 import 之前**（BLAS 在载入时就按
@@ -129,6 +134,10 @@ def _budget_of(item) -> tuple[float, float]:
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+    # tmp 目录保留策略：setup/call/teardown 任一阶段报错 ⇒ 该用例的目录不删（供 debug）。
+    # （与耗时预算共用一个 hook，避免同名实现被 ruff F811 判重。）
+    if call.excinfo is not None:
+        _TEST_BAD.add(item.nodeid)
     # 只算 call 阶段（fixture 建拆与收集不算）；已失败的用例不叠加噪音。
     if report.when != "call" or report.outcome != "passed":
         return
@@ -255,3 +264,162 @@ def _scratch_off(monkeypatch):
 
     monkeypatch.delenv(scratch.SCRATCH_ENV, raising=False)
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", ())
+
+
+# ── 测试临时目录：项目内、惰性创建、通过即清、失败保留（2026-09-14 用户定案）────────────
+# 这一段原住 `tests/conftest.py`；e2e/conftest.py 为复用把两个 hook **import 进了自己的
+# 命名空间**，而 pytest 会把 conftest 模块里每个 `pytest_*` 属性都注册成 hook 实现 ⇒
+# 全量门禁（tests/ + e2e/）里每个 hook 跑两遍：同一份清理清单被两个 detached 进程抢删
+# （`.cleanup.log` 里同 `(N dirs)` 的 spawn 成对出现、`removed N, skipped N` 互补），
+# 「通过即清」因此长期欠账 —— 2026-11-11 实测残留 6116 个目录（6065 个不到 1 天）。
+# 根 conftest 每进程只加载一次、两层共享，故把机制收在这里：没有第二份注册。
+#
+# 语义（用户口径）：
+#   * 目录落在仓库根 `tmp/pytest-tmp/<nodeid>-<pid>-<ms>-<id>`（已 gitignore）；
+#   * **惰性创建**：只有真请求 `tmp_path` 的用例才 mkdir。autouse 的
+#     `_production_isolation` 只需要路径（真写点自己会 mkdir）—— 它此前依赖 tmp_path，
+#     让每个用例（哪怕从不写盘）都留下一个空目录（实测占残留的一半以上：3586/6116）；
+#   * 通过（含 skip）的目录在 session 收尾交给 `nn-clean-tmp.py` 子进程删除；
+#     失败/报错的原样保留，供事后 debug（兜底由 KEEP_DAYS 窗口负责）。
+#   * 删除必须走 `python -S` 子进程：进程内 rmtree 会被沙箱 sitecustomize 拦成
+#     SystemExit（见 common/platform_utils 的平台说明），且不能阻塞 session 收尾。
+_TMP_ROOT = Path(__file__).resolve().parents[1] / "tmp" / "pytest-tmp"
+_TEST_TMP_DIRS: dict[str, list[str]] = {}
+_TEST_BAD: set[str] = set()
+
+
+def tmp_dir_for(request) -> Path:
+    """本用例的 tmp 目录路径（**只算不建**）；同一用例多次调用返回同一路径。
+
+    缓存挂在 item 上：保证 autouse 的 `_production_isolation`（先跑）与真请求
+    `tmp_path` 的用例看到**同一个**目录 —— 前者只把路径钉进 env，后者才 mkdir。
+    """
+    node = request.node
+    cached: Path | None = getattr(node, "_nn_tmp_dir", None)
+    if cached is not None:
+        return cached
+    safe = node.nodeid.replace("/", "__").replace("::", "__")
+    # Windows 文件名净化（2026-10-02）：参数化 id 可以合法含 `:`（如 `[c5:]`、`[a:b]`）——
+    # 直接用 nodeid 当目录名会 NotADirectoryError（WinError 267）。非法字符换成 `_`。
+    safe = re.sub(r'[<>:"|?*\\]', "_", safe)
+    # pid：分片并行 / forkdist 多进程时各进程的 id 序列相同，无 pid 会撞目录；
+    # 毫秒：Windows PID 会复用，避免复用旧目录残留；item id：同进程内唯一。
+    d = _TMP_ROOT / f"{safe}-{os.getpid()}-{int(time.time() * 1000)}-{id(node) & 0xFFFF}"
+    node._nn_tmp_dir = d
+    # 只登记**路径**（不建目录）：用例可能从不请求 tmp_path，但被钉进这个目录的 env
+    # 会让生产代码自己 mkdir 写盘 —— 收尾时按「真实存在的目录」过滤，才能一并清掉。
+    _TEST_TMP_DIRS.setdefault(node.nodeid, []).append(str(d))
+    return d
+
+
+@pytest.fixture
+def tmp_path(request) -> Path:
+    """覆盖内置 tmp_path：项目内唯一目录、零 basetemp（沙箱批量删除保护适配）。
+
+    内置 tmp_path 依赖 pytest 的 basetemp——pytest 每次启动会**清空** basetemp
+    （一次性删除全部累积文件，>50 触发沙箱 SAFE_DELETE_BULK_CONFIRM_REQUIRED：
+    交互式弹确认、pre-commit hook 等无交互场景直接 SystemExit 失败）。
+
+    本实现按需建目录、登记给 session 收尾清理（通过即删、失败保留），不创建 basetemp。
+    """
+    d = tmp_dir_for(request)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@pytest.fixture
+def tmp(tmp_path: Path) -> Iterator[Path]:
+    """Legacy test_run_rl.py compat：直接复用（被覆盖的）tmp_path。"""
+    yield tmp_path
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """session 收尾：把**通过**用例的临时目录清单交给清理器（失败/报错的不动）。
+
+    ⚠️ **必须异步**（2026-09-14 实测踩坑）：一次全量约 800 个目录，Windows 上同步
+    rmtree 每个都要几十~几百 ms —— 同步等它删完，session 收尾就变成几分钟（实测把
+    门禁从 ~30s 拖到 215s+，提交被 hook 拦下）。清理是 best-effort 的收尾工作，**没有
+    任何理由阻塞 session 结束**，故用 detached Popen 起进程、不等待：清单文件由清理器
+    自己删（`nn-clean-tmp.py --paths` 用完即删）。
+
+    2026-11-11：删除**不再带 10s 预算**（`NN_TMP_CLEAN_S=0`）。那个预算按「清理会阻塞」
+    设计，但这里本来就是后台进程 —— 预算一到就停 = 每轮都留一部分，几次门禁就堆回几千个。
+    POSIX 再加 `start_new_session`（握手/终端退出后不被 SIGHUP 带走），与 Windows 的
+    DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP 对齐。
+    """
+    try:
+        # 只收**真实存在**的目录：惰性创建的用例可能从未写盘（路径被登记但没 mkdir）。
+        victims = [
+            d
+            for nodeid, dirs in _TEST_TMP_DIRS.items()
+            if nodeid not in _TEST_BAD
+            for d in dirs
+            if os.path.isdir(d)
+        ]
+        if not victims:
+            return
+        print(
+            f"[conftest] tmp 清理：{len(victims)} 个通过用例的目录入队"
+            f"（登记 {len(_TEST_TMP_DIRS)} 个用例，其中 {len(_TEST_BAD)} 个需保留）",
+            flush=True,
+        )
+        import subprocess
+        import tempfile
+
+        cleaner = Path(__file__).resolve().parents[1] / "tools" / "githook" / "nn-clean-tmp.py"
+        if not cleaner.is_file():
+            return
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".txt",
+            prefix="pytest-clean-",
+            delete=False,
+            encoding="utf-8",
+        ) as fh:
+            fh.write("\n".join(victims))
+            list_path = fh.name
+        try:
+            from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+
+            # 比 CREATE_NO_WINDOW 更强：DETACHED_PROCESS 脱离父控制台，清理器
+            # 既吃不到 git hook 控制台的幽灵 CTRL_C_EVENT，也不会向该控制台
+            # 广播（2026-09-15 commit 卡死 / 幽灵 Ctrl-C）。CREATE_NO_WINDOW 在
+            # DETACHED 下会被忽略，故再用 STARTUPINFO SW_HIDE 防黑窗闪烁。
+            _flags = dict(_POPEN_NO_WINDOW)
+            _si = None
+            if sys.platform == "win32":
+                _flags["creationflags"] = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                )
+                _si = subprocess.STARTUPINFO()
+                _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                _si.wShowWindow = subprocess.SW_HIDE
+            else:
+                _flags["start_new_session"] = True
+
+            log_path = cleaner.parent.parent.parent / "tmp" / "pytest-tmp" / ".cleanup.log"
+            with log_path.open("a", encoding="utf-8") as log_fh:
+                log_fh.write(f"--- spawn {list_path} ({len(victims)} dirs)\n")
+                log_fh.flush()
+                subprocess.Popen(
+                    [sys.executable, "-S", str(cleaner), "--paths", list_path],
+                    **_flags,
+                    startupinfo=_si,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    close_fds=True,
+                    env={**os.environ, "NN_TMP_CLEAN_S": "0"},
+                )
+        except Exception as e:
+            print(
+                f"[conftest] tmp 清理启动失败（留给门禁兜底）: {type(e).__name__}: {e}", flush=True
+            )
+            try:
+                os.unlink(list_path)
+            except OSError:
+                pass
+    except Exception:
+        pass
