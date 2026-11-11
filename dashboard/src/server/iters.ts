@@ -354,16 +354,20 @@ function residualHpPctFromFields(
  * 从 eval 行 / rollout manifest 推导「掉落数」（power-ups spawned）。
  * 优先级：显式 `powerUpsSpawned` → `puSpawn*` 分项之和（可能漏同 tick 拾取）→
  * `dims.loot` 比值反推（collected/value）→ 不可推导返回 null。
+ *
+ * 取数一律走 `evalMetricValue`（快照优先）：云机实时体只平铺白名单键，`powerUpsSpawned`
+ * 与 `puSpawn*` 都只活在 `metricValues` 里（2026-11-11 o2-reflex 报障：顶层缺键 ⇒ 退回
+ * `dims.loot` 比值 ⇒ 掉落数被写成拾取数）。
  */
 function puSpawnFromRow(r: Record<string, unknown>): number | null {
-  const explicit = Number(r.powerUpsSpawned)
-  if (Number.isFinite(explicit)) return explicit
+  const explicit = evalMetricValue(r, 'powerUpsSpawned')
+  if (explicit != null) return explicit
   const sum =
-    (Number(r.puSpawnBomb ?? 0) || 0) +
-    (Number(r.puSpawnTank ?? 0) || 0) +
-    (Number(r.puSpawnFreeze ?? 0) || 0) +
-    (Number(r.puSpawnShield ?? 0) || 0) +
-    (Number(r.puSpawnStar ?? 0) || 0)
+    (evalMetricValue(r, 'puSpawnBomb') ?? 0) +
+    (evalMetricValue(r, 'puSpawnTank') ?? 0) +
+    (evalMetricValue(r, 'puSpawnFreeze') ?? 0) +
+    (evalMetricValue(r, 'puSpawnShield') ?? 0) +
+    (evalMetricValue(r, 'puSpawnStar') ?? 0)
   const collected = Number(r.powerUpsCollected ?? 0) || 0
   // 分项能解释拾取（或本局无拾取）时信任分项；collected>0 且分项=0 说明遥测不全，走比值。
   if (sum > 0 || collected === 0) return sum
@@ -946,10 +950,12 @@ function collectEvalSummaries(
             agg.dmgN++
           }
           // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
+          // ⚠ 云机实时体的 enemyTotal 只在 `metricValues` 里（白名单外）——顶层缺席时
+          //   反查会拿关卡几何（classic 20 敌）冒充课程实跑敌数（o2 系列 2 敌）⇒ 歼灭率 ÷10。
           const stageId = Number(r.stage)
           const enemyTotal = resolveEnemyTotal(
             Number.isFinite(stageId) ? stageId : NaN,
-            typeof r.enemyTotal === 'number' ? r.enemyTotal : null,
+            evalMetricValue(r, 'enemyTotal'),
             course,
           )
           if (enemyTotal != null && enemyTotal > 0) {
@@ -957,8 +963,8 @@ function collectEvalSummaries(
             agg.killRateEnemies += enemyTotal
             agg.killRateN++
           }
-          const sl = Number(r.startLives)
-          if (Number.isFinite(sl) && sl > 0) {
+          const sl = evalMetricValue(r, 'startLives')
+          if (sl != null && sl > 0) {
             agg.startLivesSum += sl
             agg.startLivesN++
           }
@@ -977,8 +983,9 @@ function collectEvalSummaries(
                 typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
               playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
               puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-              startLives: Number.isFinite(sl) && sl > 0 ? sl : undefined,
-              playerHpRatio: typeof r.playerHpRatio === 'number' ? r.playerHpRatio : undefined,
+              startLives: sl != null && sl > 0 ? sl : undefined,
+              // 云机行同样只在快照里；缺它残血会退成「满血 − 整局承伤」的下限值。
+              playerHpRatio: evalMetricValue(r, 'playerHpRatio') ?? undefined,
             }
             const rh = residualHpFromFields(fields, loadCourseStartLives(course))
             if (rh !== null) {
@@ -1187,7 +1194,9 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
                   playerDamageTaken: dmgTaken ?? undefined,
                   playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
                   puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-                  playerHpRatio: typeof r.playerHpRatio === 'number' ? r.playerHpRatio : undefined,
+                  // 云机能带行的 playerHpRatio 只在 `metricValues` 里（快照优先，同 `readEvalSummaries`）；
+                  // 直读顶层会退成「满血 − 整局承伤」的下限值。
+                  playerHpRatio: evalMetricValue(r, 'playerHpRatio') ?? undefined,
                 },
                 fallbackLives,
               )

@@ -60,6 +60,75 @@ describe('ingestEvalRow', () => {
  * 旧行/未同步节点的报告没有这些键 —— 必须填零/空而**不伪造**（覆盖率里另行豁免，
  * 见 store.PHASE0_FIELDS），且不得把畸形值（长度≠4 / 混类型）当有效数据收下。
  */
+/**
+ * 云机补传的逐局 eval 行经 `remote/deliver_wire.py::slim_eval_row` 投影：白名单键平铺，
+ * 其余数值列只活在 `metricValues` 快照里（2026-11-11，与 `server/iters.ts` 同一条口径）。
+ * 直读顶层会静默落成默认值（`enemyTotal` 默认 20 ⇒ 歼灭率 ÷10、命中/开火/卡死列全 0）。
+ */
+describe('云机实时体形态（白名单 + metricValues 快照）', () => {
+  const WIRE = {
+    event: 'eval',
+    iter: 5,
+    wver: 'w5',
+    stage: 0,
+    seed: 860001,
+    node: 'cloud',
+    outcome: 'stage_clear',
+    win: 1,
+    cleared: 1,
+    ticks: 400,
+    score: 0.9,
+    quality: 0.9,
+    kills: 2,
+    powerUpsCollected: 1,
+    playerDamageTaken: 50,
+    playerDeaths: 0,
+    puGotTank: 0,
+    dims: { loot: 1 },
+    metricValues: {
+      enemyTotal: 2,
+      playerHits: 1,
+      playerShots: 9,
+      enemyHits: 3,
+      stuckTicks: 40,
+      firstKillTick: 120,
+      cellsVisited: 44,
+      playerLevel: 1,
+      puSpawnBomb: 1,
+      puSpawnTank: 0,
+      puSpawnFreeze: 0,
+      puSpawnShield: 0,
+      puSpawnStar: 0,
+      puGotBomb: 1,
+      puGotFreeze: 0,
+      puGotShield: 0,
+    },
+  }
+
+  it('白名单外的计数列从快照读，不落默认值 20 / 0', () => {
+    const r = ingestEvalRow(WIRE, ctx)
+    expect(r.enemyTotal).toBe(2)
+    expect(r.playerHits).toBe(1)
+    expect(r.playerShots).toBe(9)
+    expect(r.enemyHits).toBe(3)
+    expect(r.stuckTicks).toBe(40)
+    expect(r.firstKillTick).toBe(120)
+    expect(r.cellsVisited).toBe(44)
+    expect(r.playerLevel).toBe(1)
+    expect(r.puSpawnBomb).toBe(1)
+    expect(r.puGotBomb).toBe(1)
+  })
+
+  it('白名单内的列仍走顶层（快照缺席也可用）', () => {
+    const r = ingestEvalRow({ ...WIRE, metricValues: undefined }, ctx)
+    expect(r.kills).toBe(2)
+    expect(r.powerUpsCollected).toBe(1)
+    expect(r.playerDamageTaken).toBe(50)
+    // 真缺席时才落默认（老行口径不变）
+    expect(r.enemyTotal).toBe(20)
+  })
+})
+
 describe('Phase 0 census 七列映射', () => {
   const base = { iter: 1, wver: 'w1', stage: 0, seed: 860001, win: 1, outcome: 'stage_clear' }
 

@@ -11498,3 +11498,32 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
 - **验收**：`cd userscript && bun run check` 292 pass（新增 `test/modelscope.test.ts` 20 用例 +
   `test/fixtures/modelscope.html`）；`cd dashboard && bun run typecheck` 绿、`bun run test` 1983 pass
   （两个 `SITES` 白名单加 `modelscope`）。
+## §2026-11-11-goalnn-eval-wire-snapshot（控制台 eval 读数必须快照优先：云机实时体把白名单外的游戏列收进 `metricValues`）
+
+- **背景**：用户报障「自主云机训练时 eval 指标与本地集群跑的不一致」——`o2-reflex` it300 本地评
+  歼灭率 87.4% · 道具 0.39/0.91，it290/295 云机评 8.4% · 0.35/0.35。真因不在训练侧：云机补传
+  的逐局 eval 行走 `remote/deliver_wire.py::slim_eval_row` 投影（白名单顶层键 + 其余数值列进
+  `metricValues`），本机 in-loop eval 平铺全字段；`dashboard/src/server/iters.ts` 的
+  `collectEvalSummaries` 只有 `BEHAVIOR_METRICS` 走 `evalMetricValue`（快照优先），核心列直读
+  顶层 ⇒ `enemyTotal` 缺席退回关卡反查（20 敌 vs 课程实跑 2 敌）⇒ 歼灭率 ÷10（669/8000=8.4%）、
+  `powerUpsSpawned` 缺席退回 `dims.loot` 比值（o2 的 loot 维 = 拾取数）⇒ 掉落写成拾取。
+  同期云机 eval winRate 78.5%，读数本身正常。
+- **决定**：`collectEvalSummaries` 的四个白名单外输入（`enemyTotal` / `powerUpsSpawned`（含
+  `puSpawn*` 分项）/ `startLives` / `playerHpRatio`）统一走 `evalMetricValue`（快照 → 顶层）。
+  历史行不重传：修读侧一次，云机段 60 轮旧行读数同时恢复。
+- **否决**：给 Python 白名单加这 4 键（列已随 `metricValues` 到达，再平铺一份 = 双份线上体积，
+  且 `metricValues` 的立身理由就是「新增数值列不必改白名单」）；在 hub `merge_eval_rows` 时把快照
+  摊回顶层（账本 = 写端原样，补传与人工导入两条腿共用同一份账本，改写会让两条腿的落盘对不上）；
+  只按「云机行」特判（本机将来若也走瘦身投影，同一个洞会再开一次）。
+- **影响**：全文与验证 → `docs/nn/console.md §50`；回归用例
+  `dashboard/tests/server-iters-eval-wire-shape.test.ts`（平铺行 vs 独立重实现的投影行必须聚出
+  同一份 summary 与逐局行）+ `dashboard/tests/evalboard-ingest.test.ts`。真账本回放 it295
+  83.6% · 0.35/0.89 / it290 84.5% · 0.36/0.92（与 it300 本地 87.4% · 0.39/0.91 同带）。
+  **同一形状还解掉 11-11 审计里「cloud 半面板不可判」的判词**：那些列一直在 `metricValues`
+  里，只是读侧没看。
+- **范围（三处读者一次收完）**：`collectEvalSummaries`（指标表）· `readEvalGames`（逐局弹窗/回放
+  选择器，`playerHpRatio` ⇒ 残血不再退成「满血 − 承伤」下限）· `evalboard/ingest.ts::ingestEvalRow`
+  （`enemyTotal` / `playerShots` / `enemyHits` / `playerHits` / `stuckTicks` / `firstKillTick` /
+  `cellsVisited` / `playerLevel` / `puSpawn*` / `puGot*`；`enemyTotal` 曾对云机行恒落默认 20 ⇒
+  A 层 `killCompletion` 同样是 ÷10 假值）。注意边界：进快照的是**数值**列，数组/对象类分析列
+  （`moveHist` / `killOrder` / `exposureByKind`）仍只随离线包到达。

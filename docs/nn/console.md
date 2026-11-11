@@ -13,6 +13,39 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §50 云机 eval 行只在 `metricValues` 里带游戏读数：读侧一律快照优先（2026-11-11）
+
+**触发**（用户）：自主云机训练时 eval 指标与本地集群跑的不一致——`o2-reflex` it300 本地评
+（歼灭率 87.4% · 道具 0.39/0.91）正常，it290/295 云机评（歼灭率 8.4% · 道具 0.35/0.35）明显不对。
+
+**根因**：云机补传的逐局 eval 行走 `remote/deliver_wire.py::slim_eval_row` 的投影 = 「白名单
+顶层键 + 其余数值列进 `metricValues`」；本机 in-loop eval 写的是全字段平铺。`iters.ts` 的
+`collectEvalSummaries` 只对 `BEHAVIOR_METRICS` 用了 `evalMetricValue`（快照优先），核心列仍
+直读顶层 ⇒ 两条降级路径：① `enemyTotal` 缺席 → `resolveEnemyTotal` 关卡反查（classic 20 敌，
+课程实跑 2 敌）⇒ 歼灭率 ÷10（669 杀 ÷ 8000 敌 = 8.4%）；② `powerUpsSpawned`（及 `puSpawn*`
+分项）缺席 → 退回 `dims.loot` 比值，而 o2 系列的 `loot` 维恒等于拾取数 ⇒ 掉落被写成拾取
+（0.35/0.35）。**读数本身没问题**：同期云机 eval winRate 78.5%、Σkills/ΣenemyTotal 83.6%。
+
+**修法**：白名单外的列全部改走快照优先的取数口（`evalMetricValue` / `evalboard/ingest.ts`
+的 `snapshotNum`），三处读者一次改完：
+`collectEvalSummaries`（`enemyTotal` / `powerUpsSpawned`（含 `puSpawn*` 分项）/ `startLives` /
+`playerHpRatio`）· `readEvalGames`（逐局弹窗的 `playerHpRatio` ⇒ 残血不再退成下限）·
+`evalboard/ingest.ts::ingestEvalRow`（`enemyTotal` / `playerShots` / `enemyHits` / `playerHits` /
+`stuckTicks` / `firstKillTick` / `cellsVisited` / `playerLevel` / `puSpawn*` / `puGot*`；
+`enemyTotal` 之前对云机行恒落默认 20 ⇒ A 层 `killCompletion` 也是 ÷10 的假值）。
+历史行不必重传：修读侧一次就够，云机段那 60 轮的旧行读数同时恢复。**不改** Python 白名单
+（这些列已随 `metricValues` 到达，再平铺一份 = 双份体积），也不在 hub 合并时改写行（补传
+与导入两条腿共用同一份账本，改写会把「账本 = 写端原样」这条口径打掉）。
+
+**验证**：`dashboard/tests/server-iters-eval-wire-shape.test.ts`（平铺行 vs 独立重实现的投影行
+必须聚出**同一份** summary 与逐局行；未修前 killRate 0.05 对 0.5、残血 213 对 132）+ 
+`dashboard/tests/evalboard-ingest.test.ts`（快照列不落默认 20/0；白名单列仍走顶层）。
+真账本回放 `tmp/o2-reflex`：it295 83.6% · 0.35/0.89、it290 84.5% · 0.36/0.92（与 it300 本地
+87.4% · 0.39/0.91 同带）；真云机行的 `ingestEvalRow` 现在给出 `enemyTotal 2 / playerShots 8`。
+
+**教训**：白名单投影与读侧聚合是一对契约，**先看白名单，再看读侧**——任何新进聚合的逐局列
+要么进白名单，要么必须走 `evalMetricValue`；漏一列得到的是静默的 10× 偏差，不是报错。
+
 ## §49 停课顺手清本课锁（2026-11-07）
 
 **指针**：用户口径「首页点停课时，把对应课程的 lock 清理掉」——`stopCourse` 现在调
