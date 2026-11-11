@@ -23,8 +23,8 @@ import { renderToString } from 'preact-render-to-string'
 import {
   colsOf,
   EVAL_ROW_KEYS,
-  MAIN_ROW_KEYS,
   METRIC_COLS,
+  ROLLOUT_ROW_KEYS,
   TC_METRICS_FILTER,
   type ConsoleStateView,
   type IterRow,
@@ -119,14 +119,14 @@ describe('列模型：完整性（键 ↔ 定义）', () => {
   })
 
   it('两个顺序数组都指向已定义的键、且各自无重复', () => {
-    for (const k of MAIN_ROW_KEYS) expect(METRIC_COLS[k]).toBeDefined()
+    for (const k of ROLLOUT_ROW_KEYS) expect(METRIC_COLS[k]).toBeDefined()
     for (const k of EVAL_ROW_KEYS) expect(METRIC_COLS[k]).toBeDefined()
-    expect(new Set(MAIN_ROW_KEYS).size).toBe(MAIN_ROW_KEYS.length)
+    expect(new Set(ROLLOUT_ROW_KEYS).size).toBe(ROLLOUT_ROW_KEYS.length)
     expect(new Set(EVAL_ROW_KEYS).size).toBe(EVAL_ROW_KEYS.length)
   })
 
   it('colsOf 保序（表头顺序不由渲染器决定）', () => {
-    expect(colsOf(MAIN_ROW_KEYS).map((c) => c.key)).toEqual([...MAIN_ROW_KEYS])
+    expect(colsOf(ROLLOUT_ROW_KEYS).map((c) => c.key)).toEqual([...ROLLOUT_ROW_KEYS])
     expect(colsOf(EVAL_ROW_KEYS).map((c) => c.key)).toEqual([...EVAL_ROW_KEYS])
     expect(colsOf([]).length).toBe(0)
   })
@@ -157,21 +157,30 @@ describe('列模型：完整性（键 ↔ 定义）', () => {
 describe('源文件级闸：渲染器不再手写列定义', () => {
   const read = (p: string): string => readFileSync(p, 'utf8')
 
-  it('Hero：表头只有 colHead 一处模板（没有第二个 `<th>` 字面量）', () => {
+  it('Hero：表格壳只有一个 `<th>` 模板，列与格子全从共享工厂取', () => {
     const src = read('src/web/app/panels/Hero.tsx')
     // 注释里提到 `<th>` 不算（说明文字本来就该提）；只看代码本体。
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
-    // 唯一允许的 `<th>` 是 colHead 里的模板；表头**列表**必须来自模型。
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/[^\n]*/g, '')
     expect(code.match(/<th\b/g)?.length).toBe(1)
-    expect(code).toContain('function colHead')
-    expect(src).toContain('colsOf(MAIN_ROW_KEYS).map(colHead)')
-    expect(src).toContain('colsOf(EVAL_ROW_KEYS).map(colHead)')
-    // 空态 colSpan 也由模型算（此前手写 15，而 eval 表实为 16 列）。
-    expect(src).toContain('colSpan={EVAL_ROW_KEYS.length}')
+    // 备选列 = 完整指标表的列（用户 2026-11-10）：两页都走同一个列工厂。
+    expect(src).toContain("from './metric-table-cols'")
+    expect(code).toContain('buildMetricCols(')
+    expect(code).toContain('c.cell(r)')
+    // 空态 colSpan 跟着**实际可见**列数走（藏列时也不会少跨一格）。
+    expect(src).toContain('colSpan={cols.length}')
   })
 
-  it('MetricsTable：列壳全部由 colDef 取模型（零内联 label/align/thTitle）', () => {
-    const src = read('src/web/app/panels/MetricsTable.tsx')
+  it('列工厂：两页共用，且列序只由模型的键数组决定', () => {
+    const src = read('src/web/app/panels/metric-table-cols.tsx')
+    expect(src).toContain('ROLLOUT_ROW_KEYS')
+    expect(src).toContain('EVAL_ROW_KEYS')
+    expect(src).toContain('export function buildMetricCols')
+    // 列按模型键序铺（不在这里手排先后）
+    expect(src).toContain('order.map((k) => byKey.get(k))')
+  })
+
+  it('列工厂：列壳全部由 colDef 取模型（零内联 label/align/thTitle）', () => {
+    const src = read('src/web/app/panels/metric-table-cols.tsx')
     const lines = src.split('\n').filter((l) => !l.includes('{ value:'))
     const bad = lines.filter((l) => /^\s*(label|align|thTitle): '.*',$/.test(l))
     expect(bad).toEqual([])
@@ -180,16 +189,76 @@ describe('源文件级闸：渲染器不再手写列定义', () => {
 })
 
 describe('渲染级闸：两处表头 = 同一份模型', () => {
-  it('首页主行表：表头逐列等于 MAIN_ROW_KEYS（文字 + hover 口径 + 数字对齐）', async () => {
+  it('首页主行表：表头逐列等于 ROLLOUT_ROW_KEYS（文字 + hover 口径 + 数字对齐）', async () => {
     const { Hero } = await import('../src/web/app/panels/Hero')
     const html = renderToString(h(Hero, { stateView: mkView(ROWS), onMore: () => {} }))
     const got = heads(slice(html))
-    const want = colsOf(MAIN_ROW_KEYS)
+    const want = colsOf(ROLLOUT_ROW_KEYS)
     expect(got.map((x) => x.label)).toEqual(want.map((c) => c.label))
     for (const [i, col] of want.entries()) {
       expect(got[i].title).toBe(col.title ?? null)
       expect(got[i].num).toBe(Boolean(col.num))
     }
+  })
+
+  it('首页速览表与完整指标表（all 模式）：表头逐列完全相同（用户 2026-11-10）', async () => {
+    const { Hero } = await import('../src/web/app/panels/Hero')
+    const { MetricsTable } = await import('../src/web/app/panels/MetricsTable')
+    const heroHtml = slice(renderToString(h(Hero, { stateView: mkView(ROWS), onMore: () => {} })))
+    const fullHtml = slice(renderToString(h(MetricsTable, { stateView: mkView(ROWS) })))
+    const hero = heads(heroHtml)
+    const full = heads(fullHtml)
+    expect(hero.length).toBeGreaterThan(0)
+    expect(hero.map((x) => x.label)).toEqual(full.map((x) => x.label))
+    for (const [i, x] of hero.entries()) {
+      expect(x.title).toBe(full[i].title)
+      expect(x.num).toBe(full[i].num)
+    }
+    // 拖拽重排（用户 2026-11-10）：两张表的每个表头都可拖（同一个 colDragProps）。
+    expect(heroHtml.match(/draggable=/g)?.length).toBe(hero.length)
+    expect(fullHtml.match(/draggable=/g)?.length).toBe(full.length)
+  })
+
+  it('已跑过 evalA 的轮：入口退役，原位显示那次 eval 胜率（用户 2026-11-10）', async () => {
+    const { MetricsTable } = await import('../src/web/app/panels/MetricsTable')
+    const evalData = {
+      time: '2026-09-20 09:05:00',
+      games: 8,
+      wins: 6,
+      winRate: 0.75,
+      clears: 6,
+      clearRate: 0.75,
+      dropped: 0,
+      sec: 90,
+      wver: 'abc1234',
+      outcomes: {},
+      avgTicks: 900,
+      avgWinTicks: 800,
+      totalKills: 32,
+      totalPU: 8,
+      avgResidualHp: null,
+      avgLossTicks: null,
+      dmgPerKill: null,
+      scoreMean: 0.5,
+      scoreStd: 0.1,
+    } as NonNullable<IterRow['evalData']>
+    const html = slice(
+      renderToString(h(MetricsTable, { stateView: mkView([fakeRow(3), fakeRow(2, evalData)]) })),
+    )
+    /** 取 `<b>iter</b>` 所在的那一行（主行；eval 子行是灰字，不带 <b>）。 */
+    const rowOf = (iter: number): string => {
+      const at = html.indexOf(`<b>${iter}</b>`)
+      expect(at, `找不到 it${iter} 那一行`).toBeGreaterThan(-1)
+      return html.slice(at, html.indexOf('</tr>', at))
+    }
+    // 没评过的轮：入口照旧在场
+    expect(rowOf(3)).toContain('evalA')
+    // 评过的轮：按钮消失，同一格换成干净评估胜率（75.0%，hover 说清这是这次的结果）
+    const rated = rowOf(2)
+    // 按钮本体没了（`>evalA<`）；hover 文案例外——它正是在说「这是该轮 evalA 的结果」。
+    expect(rated).not.toContain('>evalA<')
+    expect(rated).toContain('75.0%')
+    expect(rated).toContain('该轮 evalA 结果')
   })
 
   it('指标页表（all 模式）：每个表头都能在模型里找到，且口径一字不差', async () => {

@@ -86,9 +86,12 @@ import {
   invalidateAfterAction,
   ladderTickAll,
   markConsoleActivity,
+  ackNotebookCmd,
   appendNotebookChunk,
   appendNotebookOp,
   decodeLogKey,
+  enqueueStopOthers,
+  isNotebookSite,
   isNotebookLogKey,
   listNotebookSessions,
   missingLogMessage,
@@ -96,8 +99,11 @@ import {
   notebookLogPayload,
   notebookNavEntry,
   notebookOpsFilePath,
+  parseAckDetail,
   parseNotebookChunk,
   parseNotebookOp,
+  parseStopOthers,
+  pendingNotebookCmds,
   readBoundedJson,
   readNotebookOpsTail,
   resolveNotebookSession,
@@ -106,6 +112,8 @@ import {
   sanitizeViewCourse,
   shouldStartLadderTicker,
   startSnapshotRefresher,
+  stopOthersEvidence,
+  validateNotebookSession,
 } from './api'
 import { courseMetricsStatusPayload, startCourseMetricsMirror } from './course-metrics-mirror'
 import { restartSpecFor } from './actions'
@@ -679,8 +687,53 @@ async function main(): Promise<void> {
     if (!bounded.ok) return json({ ok: false, reason: bounded.reason }, bounded.status)
     const parsed = parseNotebookOp(bounded.value)
     if (!parsed.ok) return json({ ok: false, reason: parsed.reason }, parsed.status)
-    const { bytes } = appendNotebookOp(notebookLogsDir(), parsed.op, Date.now())
+    const dir = notebookLogsDir()
+    const now = Date.now()
+    const { bytes } = appendNotebookOp(dir, parsed.op, now)
+    // ① 命令 ack：页面停完会话后落的 `cmd:stop-session id=<id> ok|fail` 一行（不另开端点）。
+    const ack = parsed.op.op === 'cmd:stop-session' ? parseAckDetail(parsed.op.detail ?? '') : null
+    if (ack) ackNotebookCmd(dir, parsed.op.site, parsed.op.session, ack.id, ack.status)
+    // ② `offline:cell-start … stopOthers=1` ⇒ 给其它活会话派 `stop-session`，并回写一行证据
+    //    （与 cell-start 同一条时间线：谁、在什么时候、让哪几页停）。
+    if (parseStopOthers(parsed.op)) {
+      const made = enqueueStopOthers(dir, { site: parsed.op.site, session: parsed.op.session }, now)
+      appendNotebookOp(
+        dir,
+        {
+          v: 1,
+          site: parsed.op.site,
+          session: parsed.op.session,
+          page: parsed.op.page,
+          writer: 'dashboard',
+          at: now,
+          op: 'stop:others',
+          detail: stopOthersEvidence(made),
+        },
+        now,
+      )
+    }
     return json({ ok: true, bytes })
+  }
+
+  // 下行命令的取件口（页面每 15s 一次）：**只回本会话的 pending 命令**，TTL 内不过期。
+  // 与 `/api/notebookHub` 同一道自定义头；站/会话非法一律 400（不猜）。
+  const notebookCmdsRoute: RouteFn = async (req, { url }) => {
+    if (req.headers.get('X-Notebook-Companion') !== '1') {
+      return json(
+        { ok: false, reason: '缺少 X-Notebook-Companion: 1（跨源网页发不了这个头）' },
+        403,
+      )
+    }
+    const site = url.searchParams.get('site') ?? ''
+    const session = url.searchParams.get('session') ?? ''
+    if (!isNotebookSite(site)) return json({ ok: false, reason: `site 非法：${site}` }, 400)
+    const invalid = validateNotebookSession(session)
+    if (invalid) return json({ ok: false, reason: `session：${invalid}` }, 400)
+    const cmds = pendingNotebookCmds(notebookLogsDir(), site, session, Date.now())
+    return json({
+      ok: true,
+      cmds: cmds.map((c) => ({ id: c.id, action: c.action, at: c.at, by: c.by })),
+    })
   }
 
   const notebookOpsRoute: RouteFn = async (_req, { url }) => {
@@ -843,6 +896,7 @@ async function main(): Promise<void> {
     '/api/notebookLog': { POST: guard(notebookLogRoute, { activity: false }) },
     '/api/notebookOps': { GET: guard(notebookOpsRoute) },
     '/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) },
+    '/api/notebookCmds': { GET: guard(notebookCmdsRoute, { activity: false }) },
     '/api/log/*': { GET: guard(apiLogRoute) },
     '/log/*': { GET: guard(logPageRoute) },
     '/api/deliverUpload': { POST: guard(deliverUploadRoute) },

@@ -13,24 +13,31 @@
  *
  *  三个不变量（改列时按它判断）：
  *    1. **label / title 只在这里写一次**——两个面板都不许再出现表头字面量。
- *    2. **列顺序也只在这里**（`MAIN_ROW_KEYS` / `EVAL_ROW_KEYS`）；渲染器只按顺序摆 `<td>`，
+ *    2. **列顺序也只在这里**（`ROLLOUT_ROW_KEYS` / `EVAL_ROW_KEYS`）；渲染器只按顺序摆 `<td>`，
  *       不许自己决定「哪一列在前」。
+ *    另：首页速览表的**备选列** = 完整指标表的列（用户 2026-11-10「完全一样」）——两处都从
+ *    `app/panels/metric-table-cols.tsx` 的同一个列工厂取，本文件不再保留首页专用列。
  *    3. `num` 同时决定右对齐与 `tabular-nums`（数字列的两位一体，避免一处对齐一处不齐）。
  *
  *  本模块纯数据 + 纯函数（无 JSX / 无 IO），与其它 `view/` 模块同规：服务端与客户端共用。
  */
 
-import { BEHAVIOR_METRICS, type BehaviorMetricKey } from './behavior-metrics'
+import {
+  BEHAVIOR_METRICS,
+  METRIC_STAT_LABEL,
+  type BehaviorMetricKey,
+  type MetricStatKey,
+  type MetricStats,
+} from './behavior-metrics'
 import { PAIRED_COL_TITLES } from './format'
 
 // ────────────────────────── 键 ──────────────────────────
 
-/** 首页「最新 6 轮 → 主行」表的列键（顺序见 `MAIN_ROW_KEYS`）。 */
-export type MainRowColKey =
+/** 主行（rollout 口径）表的列键：完整指标表的 all / rollout 档按它排（顺序见 `ROLLOUT_ROW_KEYS`）。 */
+export type RolloutRowColKey =
   | 'iter'
   | 'time'
   | 'winRate'
-  | 'evalCell'
   | 'avgWinTicks'
   | 'kills'
   | 'dmgPerKill'
@@ -42,12 +49,14 @@ export type MainRowColKey =
   | 'entropy'
   | 'meanRet'
   | 'lr'
+  | 'window'
+  | 'stageProgress'
 
-/** 首页「最新 6 轮 → eval」表的列键（顺序见 `EVAL_ROW_KEYS`）。
+/** eval（干净评估）表的列键（顺序见 `EVAL_ROW_KEYS`）。
  *
  *  与主行表的差异是**真的语义差异**，不是排版差异：eval 表看的是「这一轮干净评估有多可信」，
- *  所以多了配对四列（b01/b10/p/delta）与过拟合，少了 PPO 诊断列（KL/熵/mean_ret/lr——它们与
- *  eval 无关）；`evalCell`（主行那个「有没有 eval / 可点入队」的格子）换成 `evalRate`。 */
+ *  所以多了配对四列（b01/b10/p/delta），少了 PPO 诊断列（KL/熵/mean_ret/lr——它们与
+ *  eval 无关），胜率列换成 `evalRate`。 */
 export type EvalRowColKey =
   | 'iter'
   | 'time'
@@ -65,17 +74,11 @@ export type EvalRowColKey =
   | 'evalSec'
   | 'wver'
 
-/** `/metrics` 完整表**独有**的列键（首页「最新 6 轮」速览表不放：窗口/逐关账要横向空间，
- *  而且只有开了动态采集（`target_transitions>0`）/轮换的课才有读数——速览表为这几列
- *  常驻两格空位不划算）。 */
-export type IterExtraColKey = 'window' | 'stageProgress'
-
-/** 逐局指标列键：用 `bm:` 前缀避开与既有列（如 `kills`/`ticks`）的键冲突。
- *  行为指标列只进 `/metrics` 完整表，不进首页「最新 6 轮」速览表。 */
+/** 逐局指标列键：用 `bm:` 前缀避开与既有列（如 `kills`/`ticks`）的键冲突。 */
 export type BehaviorMetricColKey = `bm:${BehaviorMetricKey}`
 
-/** 全部列键（两个表与 `MetricsTable` 的并集）。 */
-export type MetricColKey = MainRowColKey | EvalRowColKey | IterExtraColKey | BehaviorMetricColKey
+/** 全部列键（两张表共用这一份并集）。 */
+export type MetricColKey = RolloutRowColKey | EvalRowColKey | BehaviorMetricColKey
 
 // ────────────────────────── 模型 ──────────────────────────
 
@@ -89,21 +92,36 @@ export interface MetricCol<K extends MetricColKey = MetricColKey> {
   title?: string
   /** 数字列：右对齐 + `tabular-nums`（竖着比大小用）。 */
   num?: boolean
-  /** 完整表首次渲染时默认隐藏（DataTable 的列菜单仍可打开）。 */
+  /** 默认隐藏（首次上屏 / 坏存储）：逐局指标列；两张表的「列配置」都可打开。 */
   hiddenByDefault?: boolean
 }
 
-/** 行为指标列（表内显示均值；完整六种统计量在 hover 与放大浮窗里）。 */
+/** 逐局指标列的键前缀（指标表配置弹窗与 `Col.key` 共用这一份；账本键不带前缀）。 */
+export const BEHAVIOR_COL_PREFIX = 'bm:'
+
+/** 账本键 → 指标表列键。 */
+export function behaviorColKey(k: BehaviorMetricKey): BehaviorMetricColKey {
+  return `${BEHAVIOR_COL_PREFIX}${k}`
+}
+
+/** 指标表列键 → 账本键；不是逐局指标列 ⇒ null。 */
+export function behaviorColKeyOf(key: string): BehaviorMetricKey | null {
+  return key.startsWith(BEHAVIOR_COL_PREFIX)
+    ? (key.slice(BEHAVIOR_COL_PREFIX.length) as BehaviorMetricKey)
+    : null
+}
+
+/** 行为指标列（表内统计量可在「指标配置」里切换，缺省均值；六种全都见单元格 hover）。 */
 const BEHAVIOR_METRIC_COLS = Object.fromEntries(
   BEHAVIOR_METRICS.map((m) => {
-    const key: BehaviorMetricColKey = `bm:${m.key}`
+    const key: BehaviorMetricColKey = behaviorColKey(m.key)
     return [
       key,
       {
         key,
         behaviorKey: m.key,
         label: m.label,
-        title: `逐局指标统计（表内为均值）· ${m.title}`,
+        title: `逐局指标统计（表内统计量可在「指标配置」里切换）· ${m.title}`,
         num: true,
         hiddenByDefault: true,
       },
@@ -122,11 +140,6 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
     key: 'winRate',
     label: '胜率',
     title: '本轮 rollout 采样胜率（训练时边采边算，含探索；与下面的干净评估不是一回事）',
-  },
-  evalCell: {
-    key: 'evalCell',
-    label: 'eval',
-    title: '该轮的干净评估；还没有评估时可点「eval A」用该轮权重跑一次（写 eval_log）',
   },
   evalRate: {
     key: 'evalRate',
@@ -192,16 +205,23 @@ export const METRIC_COLS: Readonly<Record<MetricColKey, MetricCol>> = {
   },
   wver: { key: 'wver', label: 'wver', title: '评估所用权重版本（显示前 7 位）' },
 
-  // ── 逐局指标（完整 metrics 列；只进完整指标表，默认隐藏） ──
+  // ── 逐局指标（完整 metrics 列；默认隐藏，首页与完整表都可在「列配置」里打开） ──
   ...BEHAVIOR_METRIC_COLS,
 }
 
-/** 首页主行表的列顺序。**顺序只在这里**（渲染器不再自己决定先后）。 */
-export const MAIN_ROW_KEYS: readonly MainRowColKey[] = [
+/** **列顺序的键全集**：两张表、全部视图（all / rollout / eval / 首页主行 / 首页 eval）的并集。
+ *
+ *  拖拽排序与 `tc.*.order` 都按它算——同一个存储键服务列集合不同的多个视图，只存当前视图的
+ *  列会让对方独有的列被当成「新列」（2026-11-10：拖「胜率」后 eval 胜率跑到最后；藏着的列
+ *  取消隐藏也丢位置）。顺序 = `METRIC_COLS` 的定义序，也是 `applyColOrder` 缺键归位的模型参照。 */
+export const METRIC_ORDER_KEYS: readonly MetricColKey[] = Object.keys(METRIC_COLS) as MetricColKey[]
+
+/** 主行（rollout 口径）的列顺序。**顺序只在这里**（渲染器不再自己决定先后）。
+ *  完整指标表的 all / rollout 档与首页速览表的主行视图共用这一份（逐局指标块压在其后）。 */
+export const ROLLOUT_ROW_KEYS: readonly RolloutRowColKey[] = [
   'iter',
   'time',
   'winRate',
-  'evalCell',
   'avgWinTicks',
   'kills',
   'dmgPerKill',
@@ -213,9 +233,11 @@ export const MAIN_ROW_KEYS: readonly MainRowColKey[] = [
   'entropy',
   'meanRet',
   'lr',
+  'window',
+  'stageProgress',
 ]
 
-/** 首页 eval 视图的列顺序（与 `MetricsTable` 的 `eval` 过滤模式逐列一致）。 */
+/** eval 视图的列顺序（完整指标表的 eval 档与首页速览表的 eval 视图共用这一份）。 */
 export const EVAL_ROW_KEYS: readonly EvalRowColKey[] = [
   'iter',
   'time',
@@ -234,7 +256,72 @@ export const EVAL_ROW_KEYS: readonly EvalRowColKey[] = [
   'wver',
 ]
 
+/** 缺键归位用的参照序（按视图各一份）：主行视图 → eval 视图 → 扁平全集（逐局指标等）。
+ *
+ *  为什么不能只用一份扁平序：两个视图的模型序并不相同（`evalRate` 在 eval 视图里紧跟
+ *  `time`，而扁平定义序里它紧跟 `winRate`）——用扁平序归位会让「动 rollout 胜率」把
+ *  eval 胜率一起带走（2026-11-10 报障：两边互相拉扯）。 */
+export const METRIC_ORDER_REFS: readonly (readonly string[])[] = [
+  ROLLOUT_ROW_KEYS,
+  EVAL_ROW_KEYS,
+  METRIC_ORDER_KEYS,
+]
+
 /** 按顺序取列定义（渲染器用它同时生成表头与列数，避免两处各数一遍）。 */
 export function colsOf<K extends MetricColKey>(keys: readonly K[]): MetricCol<K>[] {
   return keys.map((k) => METRIC_COLS[k] as MetricCol<K>)
+}
+
+// ────────────────────────── 指标表的列显隐（用户 2026-11-10） ──────────────────────────
+
+/** 默认隐藏的列（= 模型里 `hiddenByDefault` 的那些）：首次上屏与坏存储都退到这里。 */
+export const DEFAULT_HIDDEN_COL_KEYS: readonly string[] = (
+  Object.keys(METRIC_COLS) as MetricColKey[]
+).filter((k) => METRIC_COLS[k].hiddenByDefault)
+
+/** 列显隐偏好的持久化值（JSON 字符串数组）→ 隐藏集合。
+ *
+ *  · 新键有值 ⇒ 只认它（用户手点的结果就是全部真相）；
+ *  · 新键缺/坏、有**旧键**（DataTable 时代 `tc.metrics.hidden`）⇒ 迁移：旧集合 ∪ 默认集合
+ *    ——旧键存的时候还没有逐局指标列，不补默认会让 90+ 列一起上屏；
+ *  · 都没有 / 都是坏值 ⇒ 默认集合。
+ *
+ *  `defaults` 可被调用方改：首页速览表默认一列都不藏（传 `[]`），指标页默认藏逐局指标列。
+ *
+ *  为什么放 `view/`：与 Hero 的走势偏好同一套路——首帧走默认，hydrate 后由纯函数解析存储。 */
+export function parseHiddenCols(
+  raw: string | null | undefined,
+  legacy?: string | null,
+  defaults: readonly string[] = DEFAULT_HIDDEN_COL_KEYS,
+): Set<string> {
+  const parse = (s: string | null | undefined): string[] | null => {
+    if (!s) return null
+    try {
+      const v = JSON.parse(s) as unknown
+      if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) return null
+      return v as string[]
+    } catch {
+      return null
+    }
+  }
+  const fresh = parse(raw)
+  if (fresh) return new Set(fresh)
+  const old = parse(legacy)
+  if (old) return new Set([...old, ...defaults])
+  return new Set(defaults)
+}
+
+/** 逐局指标列的表头文字：统计量非均值时带后缀（表里放的是中位数/分位数，不能只靠 hover 才知道）。 */
+export function metricColLabelWithStat(label: string, stat: MetricStatKey): string {
+  return stat === 'mean' ? label : `${label}·${METRIC_STAT_LABEL[stat]}`
+}
+
+/** 逐局指标列的**表内读数** = 配置的那一种统计量（缺读数 ⇒ null，渲染显 `—`，不冒充 0）。
+ *  单元格与排序共用它：改了统计量，显示的数和排出来的序一起变。 */
+export function metricStatValue(
+  st: MetricStats | null | undefined,
+  stat: MetricStatKey,
+): number | null {
+  const v = st?.[stat]
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
 }

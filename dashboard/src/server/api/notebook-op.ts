@@ -36,7 +36,8 @@ export const OP_MAX_BYTES = 2 * 1024 * 1024
 export const OP_MAX_DETAIL = 400
 export const OP_MAX_OP_NAME = 64
 
-const SITES = ['kaggle', 'colab', 'aistudio', 'modelscope'] as const
+/** 站点白名单（`/api/notebookCmd*` 也用它校验 query，别各写一份）。 */
+export const NOTEBOOK_SITES = ['kaggle', 'colab', 'aistudio', 'modelscope'] as const
 const OP_NAME_RE = /^[A-Za-z0-9:_.-]{1,64}$/
 const TAG_RE = /^[a-z0-9-]{0,32}$/i
 
@@ -74,7 +75,7 @@ export function parseNotebookOp(raw: unknown): NotebookOpParse {
   if (!o) return { ok: false, status: 400, reason: 'body 必须是 JSON 对象' }
   if (o.v !== 1) return { ok: false, status: 400, reason: 'v 必须是 1' }
   const site = o.site
-  if (typeof site !== 'string' || !(SITES as readonly string[]).includes(site)) {
+  if (typeof site !== 'string' || !(NOTEBOOK_SITES as readonly string[]).includes(site)) {
     return { ok: false, status: 400, reason: `site 非法：${String(site)}（kaggle/colab/aistudio）` }
   }
   const session = typeof o.session === 'string' ? o.session : ''

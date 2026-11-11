@@ -16,7 +16,7 @@
 
 import type { LoopComplete } from './console-types'
 import type { ParallelOverviewView, ReadStaleView } from './course-overview'
-import { courseStatus } from './course-status'
+import { courseStatus, pillStatusWord } from './course-status'
 
 /** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。
  *
@@ -203,7 +203,9 @@ export function coursePills(input: {
       course,
       kind: r?.kind ?? 'rl',
       it: r?.it ?? null,
-      status: st.text,
+      // 顶部 pill 只报状态（用户 2026-11-10）：`courseStatus` 的词是 `环节·归属`，上屏前摘掉
+      // 归属（谁在做看悬停 / 课程矩阵）——映射只在 `pillStatusWord` 一处，pill 不自己拼词。
+      status: pillStatusWord(st.text),
       age: st.age,
       tone: st.tone,
       title: st.title,

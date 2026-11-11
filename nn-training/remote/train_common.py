@@ -78,6 +78,19 @@ def blob_wanted(
     return wanted
 
 
+def copy_iter_metrics(result: dict, iter_info: dict | None) -> None:
+    """节点自己跑的 rollout 的采集口径 → 结果行（M3；两条后端腿共用一份）。
+
+    `report` / `volume_stage_stats` / `greedy_quota_stats` 三个键不搬这一手就随
+    `iter_info` 一起丢掉（老产物行没有这些键 = 留空，不编 0）。
+    """
+    if iter_info is None:
+        return
+    for key in ("report", "volume_stage_stats", "greedy_quota_stats"):
+        if key in iter_info:
+            result[key] = iter_info[key]
+
+
 def ppo_shards_root(job_dir: str | Path, iter_info: dict | None) -> str:
     """PPO 的**装载根**（`plan/rollout-topup-fastpath` §3.5 / 评审 P0-1）。
 

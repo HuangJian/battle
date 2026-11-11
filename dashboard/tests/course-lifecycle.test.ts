@@ -77,6 +77,16 @@ import { syncAll } from '../src/server/course-metrics/mirror'
 import { pruneNoiseCourses } from '../src/stack/course-knobs'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
 import * as actions from '../src/server/actions'
+import { setOpenableProbe } from '../src/server/actions/course-lifecycle'
+import type { OpenableProbe } from '../src/stack/course-open-check'
+
+/** 开课前体检的桩：真实现会起 python 跑训练栈同一条校验链——本套件盯生命周期，
+ *  不拉起训练栈（探测脚本本身由 `course-open-check.test.ts` 钉）。 */
+const PROBE_OK: OpenableProbe = () => ({ ok: true, reason: '', weights: null })
+const open = (course: string, opts?: actions.OpenCourseOpts) =>
+  openCourse(course, opts, { probe: PROBE_OK })
+// 全局默认也换成桩：`routeAction('openCourse', …)` 那条路径（备份课重开用例）不经过 `open`。
+setOpenableProbe(PROBE_OK)
 
 /** 真实存在的非 BC 课程（开课要过课程文件存在性检查）。 */
 const COURSE = 'c5-gae'
@@ -175,7 +185,7 @@ function seedCourseKnobs(keys: Record<string, unknown>, course = COURSE): void {
 
 describe('openCourse：把「这门课存在且可被调度」写到盘上', () => {
   it('建账本 + `remote-jobs/`（hub 认课的锚点；不建它置模式必被拒）', async () => {
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(true)
     expect(existsSync(path.join(TRAJ, COURSE, 'training_log.jsonl'))).toBe(true)
     expect(existsSync(path.join(TRAJ, COURSE, 'remote-jobs'))).toBe(true)
@@ -187,7 +197,7 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
     // 「跑满」闸挡死，而重导是需求侧触发的 ⇒ 死锁）。无包时**不预造**，只如实回一行。
     // 本套件的两门课盘上都没有任务包（`tmp/<课>/task-<课>.zip`）⇒ 走的就是「不预造」这一支。
     expect(existsSync(path.join(tmpCourseDir(COURSE), `task-${COURSE}.zip`))).toBe(false)
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     const detail = r.detail!.join('\n')
     expect(detail).toContain('任务包：')
     expect(detail).toContain('不预造')
@@ -198,31 +208,75 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
     // 根因就是「有账本 = 在训」；开课标记（训练侧 `enabled_courses` / hub `_course_dir_live`
     // 的同一个闸）是控制台按下的那一下。
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(false)
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(true)
     expect(r.detail!.join('\n')).toContain('开课标记')
   })
 
   it('幂等：账本/目录已存在时不重复建（重按开课 = 零副作用）', async () => {
-    await openCourse(COURSE)
-    const again = await openCourse(COURSE)
+    await open(COURSE)
+    const again = await open(COURSE)
     expect(again.ok).toBe(true)
     expect(again.detail!.join('\n')).not.toContain('已建课程账本')
   })
 
   it('BC 课程不播种权重（无 warm-start；它自带 BC 语料那一路）', async () => {
     mkdirSync(path.join(TRAJ, BC_COURSE), { recursive: true })
-    const r = await openCourse(BC_COURSE)
+    const r = await open(BC_COURSE)
     expect(r.ok).toBe(true)
     expect(existsSync(path.join(TRAJ, BC_COURSE, 'weights.json'))).toBe(false)
   })
 
   it('课程名不存在 ⇒ 可捕获的 ActionError（**不是** process.exit：控制台不能被一次误点杀掉）', async () => {
-    await expect(openCourse('no-such-course-xyz')).rejects.toThrow(/不存在/)
+    await expect(open('no-such-course-xyz')).rejects.toThrow(/不存在/)
   })
 
   it('空课程 ⇒ 拒绝（开课是按课程记的）', async () => {
-    await expect(openCourse('')).rejects.toThrow(/需要课程/)
+    await expect(open('')).rejects.toThrow(/需要课程/)
+  })
+
+  it('★ 2026-11-10：体检不通过 ⇒ 开课拒绝、零副作用（不等 PPO 起来才退出）', async () => {
+    const marker = path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER)
+    const ledger = path.join(TRAJ, COURSE, 'training_log.jsonl')
+    const before = { marker: existsSync(marker), ledger: existsSync(ledger) }
+    const r = await openCourse(
+      COURSE,
+      {},
+      {
+        probe: () => ({
+          ok: false,
+          reason: 'ValidationError: kickstart_init 未开缰绳',
+          weights: {
+            path: 'tmp/x/weights.json',
+            ok: false,
+            reason: 'ValueError: schema_major=6 ≠ 当前 7',
+          },
+        }),
+      },
+    )
+    expect(r.ok).toBe(false)
+    const detail = r.detail!.join('\n')
+    // 两条原因都原文上屏（课程配置 + 权重 schema）
+    expect(detail).toContain('kickstart_init')
+    expect(detail).toContain('schema_major=6')
+    expect(detail).toContain('未写任何东西')
+    // 零副作用：开课标记与账本都没动
+    expect(existsSync(marker)).toBe(before.marker)
+    expect(existsSync(ledger)).toBe(before.ledger)
+  })
+
+  it('体检进程起不来（venv 缺）⇒ 响亮拒绝并点名原因', async () => {
+    const r = await openCourse(
+      COURSE,
+      {},
+      {
+        probe: () => {
+          throw new Error('找不到 python 解释器（nn-training/.venv 未就绪）')
+        },
+      },
+    )
+    expect(r.ok).toBe(false)
+    expect(r.detail!.join('\n')).toContain('找不到 python 解释器')
   })
 })
 
@@ -241,7 +295,7 @@ describe('封存起点（G4-①）', () => {
 
   it('seedFrom 解析不到 ⇒ 开课前响亮拒绝、零副作用', async () => {
     await expect(
-      openCourse(COURSE, { seedFrom: { sourceCourse: 'no-such-arch', it: 3 } }),
+      open(COURSE, { seedFrom: { sourceCourse: 'no-such-arch', it: 3 } }),
     ).rejects.toThrow(/起点不可用/)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(false)
   })
@@ -253,7 +307,7 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
   it('★M4：开课不写课程级旋钮（未选 rollout 位置 ⇒ 一个字不落）+ 不补 it0 基线', async () => {
     // ★M2 之前「离线开课」会落 `{rollout_src:'run', run_iters:-1}`；今天那个模式不存在了，
     //   未显式选 rollout 位置就什么都不写（缺省档不留痕由停课/prune 收）。
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(courseKeys()).toEqual({})
     // ★ 全局键（所有课共用的默认面）一个字不动——rollout 位置是**这门课**的决定
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
@@ -268,7 +322,7 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
   })
 
   it('rollout 位置：写课程级覆盖（不碰全局 rl.rollout_src）', async () => {
-    await openCourse(COURSE, { rolloutSrc: 'node' })
+    await open(COURSE, { rolloutSrc: 'node' })
     expect(courseKeys().rollout_src).toBe('node')
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
       rl: Record<string, unknown>
@@ -281,7 +335,7 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
     // 旧开课弹窗写过的 `remote_degrade_after` 已无读者，开课时随 legacy 清理一并删掉。
     seedCourseKnobs({ remote_degrade_after: 3 })
     expect(courseKeys().remote_degrade_after).toBe(3)
-    await openCourse(COURSE)
+    await open(COURSE)
     expect(courseKeys().remote_degrade_after).toBeUndefined()
   })
 
@@ -299,7 +353,7 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
         2,
       ),
     )
-    await openCourse(COURSE)
+    await open(COURSE)
     // 两条退役键都清掉，而课程节点本身（只剩它）也整条删掉（空节点不留痕）
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
       courses: Record<string, unknown>
@@ -317,7 +371,7 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
 
 describe('openCourse：一个字都不打 hub（自动交接只由 hub → 控制台反向触发）', () => {
   it('开课全程零 hub 调用、零意图写入（旧形状会 POST /admin/courses 并落 courseModes）', async () => {
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(true)
     expect(calls).toEqual([])
     expect(r.message).toContain('已开课')
@@ -328,16 +382,16 @@ describe('openCourse：一个字都不打 hub（自动交接只由 hub → 控�
 
   it('hub 不可达 / 回 400 都不影响开课（本机侧事实与 hub 的认课是异步收敛的）', async () => {
     hub = 'throw'
-    const down = await openCourse(COURSE)
+    const down = await open(COURSE)
     expect(down.ok).toBe(true)
     hub = 'unknown'
-    const unknown = await openCourse(COURSE)
+    const unknown = await open(COURSE)
     expect(unknown.ok).toBe(true)
     expect(calls).toEqual([]) // 两种情形下都没碰 hub：失败无从谈起
   })
 
   it('回执说清「开课标记 = 在训闸」与新模型的分工（接管由云机 claim 建立）', async () => {
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     const text = r.detail!.join('\n')
     expect(text).toContain('开课标记')
     // 回执不再出现任何「hub 模式」字样（那是旧模型的词）
@@ -408,11 +462,11 @@ describe('stopCourse：非破坏停课（暂停意图 + 删开课标记；★M4 
   })
 
   it('可逆：停课 → 开课把暂停意图清掉（否则「开了课但不推进」）', async () => {
-    await openCourse(COURSE)
+    await open(COURSE)
     await stopCourse(COURSE)
     expect(readLoopControl().paused).toContain(COURSE)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(false)
-    await openCourse(COURSE)
+    await open(COURSE)
     expect(readLoopControl().paused).not.toContain(COURSE)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(true)
   })
@@ -548,7 +602,7 @@ describe('开课前置检查：锁的身份（不是「活着就拒」）', () =
   it('共享 trainer 握着本课的按课锁 ⇒ **开课成功**（它服务多课，这是正常持有）', async () => {
     writeLock('run_rl', COURSE, process.pid) // 本课锁持有人 ==
     writeLock('run_cluster', '', process.pid) // 共享 trainer 进程级锁持有人
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(true)
     expect(r.detail!.join('\n')).toContain('正常持有')
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(true)
@@ -558,7 +612,7 @@ describe('开课前置检查：锁的身份（不是「活着就拒」）', () =
   it('另一份按课 runner（持有人 ≠ 共享 trainer）⇒ 拒开，且**零副作用**', async () => {
     writeLock('run_rl', COURSE, process.pid) // 按课的另一份 runner（活着的别的进程）
     // 没有共享 trainer 锁 ⇒ 两者不是同一个进程 ⇒ 真冲突
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(false)
     expect(r.message).toContain('另一份按课 runner')
     expect(r.detail!.join('\n')).toContain('未写任何东西')
@@ -572,7 +626,7 @@ describe('开课前置检查：锁的身份（不是「活着就拒」）', () =
 
   it('陈旧锁（持有人已死）不拦：照常开课', async () => {
     writeLock('run_rl', COURSE, 999_999_999)
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(true)
     expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(true)
   })
@@ -619,7 +673,7 @@ describe('开课的写序：被拒 = 零副作用', () => {
   it('暂停意图文件坏了 ⇒ 拒开课，且盘上一个字都没写（意图文件也不覆盖）', async () => {
     const controlFile = process.env.BCITY_LOOP_CONTROL!
     writeFileSync(controlFile, '{ 这不是 JSON')
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(false)
     expect(r.message).toContain('控制文件有问题')
     expect(r.detail!.join('\n')).toContain('未写任何东西')
@@ -637,7 +691,7 @@ describe('开课的写序：被拒 = 零副作用', () => {
     const real = process.env.BCITY_RL_CONFIG!
     process.env.BCITY_RL_CONFIG = DIR
     try {
-      await expect(openCourse(COURSE)).rejects.toThrow()
+      await expect(open(COURSE)).rejects.toThrow()
     } finally {
       process.env.BCITY_RL_CONFIG = real
     }
@@ -649,7 +703,7 @@ describe('开课的写序：被拒 = 零副作用', () => {
 
   it('开课成功：回执里「暂停意图」写在开课标记之前（写序与盘上一致）', async () => {
     setCoursePaused(COURSE, true)
-    const r = await openCourse(COURSE)
+    const r = await open(COURSE)
     expect(r.ok).toBe(true)
     const lines = r.detail!
     expect(lines.findIndex((l) => l.startsWith('暂停意图'))).toBeLessThan(
@@ -703,7 +757,7 @@ describe('开课的写序：被拒 = 零副作用', () => {
           JSON.stringify({ event: 'eval_summary', iter: 57, winRate: 0.352, games: 400 }),
         ].join('\n')}\n`,
       )
-      const r = await openCourse(KK)
+      const r = await open(KK)
       expect(r.ok).toBe(true)
       const text = r.detail!.join('\n')
       expect(text).toContain('kk 初值 1（来源：缺省 1.0 ——')

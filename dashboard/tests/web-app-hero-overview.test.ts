@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'bun:test'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
-import { type ConsoleStateView, type IterRow } from '../src/web/view'
+import { fmtFullTs, type ConsoleStateView, type IterRow } from '../src/web/view'
 
 // ────────────────────────── 纯函数：指标行 / 排序 / 过滤 ──────────────────────────
 function fakeRow(iter: number, evalData: IterRow['evalData'] = null): IterRow {
@@ -116,9 +116,42 @@ describe('Hero 训练状态区（§367：最新 6 轮完整指标）', () => {
     ) as IterRow
     expect(pending.ppoSec).toBeNull() // 前提：线上字节确实长这样
     const html = renderToString(h(H, { stateView: mkView([pending]), onMore: () => {} }))
-    expect(html).toContain('PPO 中')
+    // 最新一轮不挂状态徽标（2026-11-10 用户）——它只有这一行，自然就是最新轮
+    expect(html).not.toContain('PPO 中')
     // 阶段耗时：rollout 有读数、PPO 未回传 ⇒ `—`（不是 0、不是 NaN、不是崩）
     expect(html).toContain('42/—/—s')
     expect(html).toContain('>—<') // kl / entropy / meanRet / lr 四列
+  })
+
+  it('最新一轮：不挂状态徽标，时间今天只显时分秒（2026-11-10 用户）', async () => {
+    const { Hero: H } = await import('../src/web/app/panels/Hero')
+    const mkView = (iters: IterRow[]): ConsoleStateView => ({
+      time: 't',
+      course: 'kb1',
+      courses: [],
+      components: [],
+      nodes: [],
+      modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },
+      metrics: { available: true, iters },
+      phase: { phase: 'idle', sinceMs: null, iter: null },
+    })
+    const today = fmtFullTs(Date.now()) // 'YYYY-MM-DD HH:MM:SS'（本机今天）
+    const hhmmss = today.slice(11)
+    const html = renderToString(
+      h(H, {
+        stateView: mkView([
+          { ...fakeRow(9), time: today, pendingPpo: true, halted: true },
+          { ...fakeRow(8), time: '2020-01-02 03:04:05', pendingPpo: true, halted: true },
+        ]),
+        onMore: () => {},
+      }),
+    )
+    // 最新轮（表头第一行）：pendingPpo + halted 都不标
+    expect(html.split('PPO 中').length - 1).toBe(1) // 只有 it8 那一行
+    expect(html.split('halted').length - 1).toBe(1)
+    // 今天的时间只显 HH:MM:SS；日期不再是今天的原样保留
+    expect(html).toContain(`>${hhmmss}<`)
+    expect(html).not.toContain(`>${today}<`)
+    expect(html).toContain('2020-01-02 03:04:05')
   })
 })

@@ -1,0 +1,352 @@
+// 课程 o2-def —— o2 系列第 2 轮（与 `o2-fast` 并行）：防守定价臂（2026-11-10）
+//
+// 状态：**已结课 · 已停课**（2026-11-10 12:03，it95）· 结课报告（2026-11-10）
+//   A 层最终：320/400 = 80.0%（93/93/61/73；best it80 = 81.8）；**未跑 B/C 官方面板**
+//   （课程自查按 A 层 ×2 = 654/800）。it80 自查门：主 0 74/800 ✓、主 1 654 ✓、主 2 72 ✗（≤60）、
+//   主 3 1687 ✓、主 4 45.3 ✓、主 5 gameover 桶 hurt 密度 89.3 vs 85.0 ✗；反签名 idle .432 > .4071 ✗。
+//   判词：**两行税定价成立**（hurt SNR 3.1 / threat 2.7，全式最强判别项），**但没换成胜率**：
+//   命尽桶挨打密度没降（89.3 vs 85.0），策略被推向「少挨打/多停」（idle 反签名）。
+//   少挨打与赢不同向：it70 dmg 最低 32.9 但胜率 66%，it80 胜率 81.8 而 dmg 45.3。
+//   结课档案：`docs/nn/experiments.md §139`；立项依据见本文件 §1–§3 与 §138。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   `o2-fast` 是「无配额干净基线」；本课在同一任务侧、同一 bc 起点上换一个训练
+//   方向：**给「挨打的路径」定价**（不是给死亡定价、也不是给 DPS 定价）。
+//   唯一改动 = 奖励公式加两行**超额密度税**：㉓ 火线承伤 `hurtWeight`（命中弹的
+//   贴脸积分）+ ㉔ 敌方火线驻留 `threatTicks`。靶心 = it0 面板的 **158 个命尽局**
+//   （122/158 零击杀、中位 928 拍就死）。两臂并行、同起点、同面板；互比只看
+//   「每墙钟小时涨多少 pp」，不是单变量对照。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据（it0 面板失败结构 + 防守签名，全部来自本仓实测）
+// ══════════════════════════════════════════════════════════════════════════
+//   it0 = o2-fast 起点权重（o1-gq-fast.it256，sha16 `a56281eb6efa6d26`）在
+//   2 敌 / 3000 拍 / seed0 860001 / 800 局 greedy 面板
+//   （`tmp/o1-probe/o2-it0-bc-dist.jsonl`；与 o2-fast §4.1 同一批读数，面板不依赖奖励）：
+//     clear .7475（598/800）/ gameover **158** / timeout 50 / clearTicksMed 1804 /
+//     dmg/千拍 56.00 / idle .3571 / kills 均值 1.59。
+//
+// ── 1.1 命尽局长什么样（不是「打输了」，是「没开打就死了」）────────────────
+//   击杀直方图 `{0:122, 1:32, 2:4}` ⇒ **77% 零击杀**、均值 0.25 杀（清关局 = 2.0）；
+//   死亡拍中位 **928**（q10 595 / q90 1642）；2003 75 局 / 2001 51 / 2002 20 / 2000 12。
+//   分关签名（gameover 桶）：2001 最「早」（中位 795 拍、dmgFirst600 均 170.6）、
+//   2003 最「多」（75 局、hurtW 76.7）、2000 最「轻」（12 局、hurtW 51.1）。
+//
+// ── 1.2 三种结局的防守遥测完全分离（同面板，均值；密度 = 每千拍）──────────
+//   | 指标 | clear | gameover | timeout |
+//   | `threatTicks`/千 | 25.0 | **128.2** | 13.5 |
+//   | `hurtWeight`/千 | 9.6 | **85.0** | 5.1 |
+//   | `dangerTicks`/千 | 108.9 | 250.8 | 148.4 |
+//   | `dmgFirst600` | 28.8 | **112.0** | 20.0 |
+//   | `maxDamage120` 中位 | 0 | **200** | 100 |
+//   | `playerDamageTaken` | 70.5 | 200（封顶）| 82.0 |
+//   ⇒ 命尽局 = **开局就被压在火线上**（前 600 拍吃掉 112 点伤），不是残血拉锯；
+//     超时桶恰好相反（火线驻留最低 13.5/千、42% 零伤）⇒ 防守定价不补贴拖局。
+//
+// ── 1.3 现价与失败价排序（全 22 项 + terminal 逐局回放，`tmp/o2-def-replay.mjs`）──
+//   现价（分桶均值）：threat −0.77/−2.07/−0.79；danger −11.46/−30.63/−13.20；
+//   dmg −5.61/−16.00/−6.56 ⇒ 命尽路径三项合计只比清关贵 **30.9** 分。
+//   全式总奖励：clear **+103.7** / gameover **−90.1** / timeout **−80.4**
+//   ⇒ ⚠ **失败价排序是反的**：早死（−90.1）比拖到 3000 拍（−80.4）**便宜 9.7 分**。
+//   本课两行税把命尽路径再压 −35.7 ⇒ gameover −125.8 vs timeout −82.6（贵 43.2），
+//   clear−gameover 差 193.7 → 224.0（+15.7%）。
+//
+// ── 1.4 为什么选 hurt/threat，不选 wDmg / wDanger / burst / 近敌 / 角 ─────
+//   · **wDmg 是平税**：clear 已付 5.61、gameover 只多付 10.4（damage 在 200 处随死亡
+//     封顶）。抬 wDmg 每给 clear 加 1 分，最多换到 0.6 分 spread；本课两行税每给
+//     clear 加 1 分换到 **3.7 分**（(35.7−2.2)/(5.4−2.2)，见 §4）⇒ 同成本下靶向性 6×。
+//   · **wDanger 已经在咬**（gameover −30.63 vs clear −11.46）：gameover 桶 dangerTicks
+//     均 264.8（中位 177，全非零），抬它是在已生效的项上再加码；且 danger 在超时桶
+//     也不低（148.4/千，长局低血）⇒ 分不开「命尽」与「拖局」。
+//   · **burst 系（`maxDamage120`/`damageBursts`/`damageWhileLow`）与 damage 共线**
+//     （r = 0.902 / — / 0.909）⇒ 再加价 = 重复计死亡那一击，而死亡已有 terminal −30
+//     + wDeath 12 占着。aim-dodge E2 门的同一把尺：r > 0.8 的列**替换**而不是叠加。
+//   · **近敌/角/被围会补贴拖局**：`nearEnemy4Ticks` 超时桶最高（627 vs clear 521）、
+//     `cornerWeightTicks` 超时 221 vs gameover 17 ⇒ 定价 = 罚「远离敌人」，正好反了。
+//   · `hurtWeight` ~ `playerDamageTaken` r = **0.778 < 0.8**（E2 门）⇒ 可与 wDmg 同腿
+//     共存；且它**只在命中时结算**（没挨打 = 0）⇒ 干净走位一分不付。
+//   · `threatTicks` 在超时桶最低 ⇒ 不补贴拖局；且与 hurt 相关仅 0.641（两个不同形状：
+//     「挨打且贴脸」vs「驻留火线」）。
+//
+// ── 1.5 先例是负的，本臂就是一次高剂量复测（预注册读法）──────────────────
+//   z2-r5tempo 的同形三项密度税判平（clear −1.2pp，五个过程项四项反向），其结课
+//   结论是「过程项的信号被终局信号淹没（clear/lose 差 300+，过程项只有 20–80）」。
+//   本臂的相对剂量 = 命尽桶 +35.7 / 终局差 193.7 = **18.4%**（z2 是 28/300 ≈ 9.3%，
+//   约 2×）。若本臂仍判平 ⇒ 结论是「这套 stack 上过程项定价失效」，**不是「剂量不够」**；
+//   下一代按 1.4 的 E2 门做「替换 wDmg」而不是继续加税。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 任务侧与 o2-fast 逐字同；训练侧唯一差 = 两行防守定价
+// ══════════════════════════════════════════════════════════════════════════
+//   | 维度 | o2-fast（null 对照） | **o2-def（本课）** |
+//   | 任务侧（关集/敌数/命/3000 拍/bc） | — | **逐字同**（同 4 关 × count 2 / 1 命 / 3000 拍）|
+//   | bc 起点 | it256 `a56281eb6efa6d26` | 同 |
+//   | 奖励 22 行 / 参数 | §4.3 调参后 | **逐字同** |
+//   | ㉓ 火线承伤超额税 | 无 | `- wHurtEx*min(hurtExCap, max(0, hurtWeight - hurtRate*ticks))` |
+//   | ㉔ 火线驻留超额税 | 无 | `- wThreatEx*min(threatExCap, max(0, threatTicks - threatRate*ticks))` |
+//   | PPO 缰绳 / eval / iters / 预算 | — | 同（lr 5e-4 / T 24576 / 300 it / 18h / 50 局×4 关 / every 5）|
+//   | paired_rotate_seed | 20261110 | **20261111**（并行腿新语料，§15.5）|
+//   | out / traj / backup | tmp/o2-fast | `tmp/o2-def` / `nn-training/weights/o2-def` |
+//   · **两臂互比不是单变量对照**：o2-fast 同期也在训练（含它自己的 §4.3 调参），互比
+//     读数只有「同墙钟小时的 pp 差」这一种解释力；「奖励的因果效应」只在两臂**同起点 +
+//     同面板**的配对读数里做（B/C 满池 seed0 860001）。
+//   · 为什么不动 terminal（`lives_exhausted −30`）：那是「命价」腿（z2-r5all 的方向），
+//     不是本臂要测的「路径定价」；混进来就无法分解「行为改了」还是「死得更贵了」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据与止损（预注册；B/C 满池 860001 起 / 4 关 × 200 seed = 800 局 greedy /
+//    3000 拍口径；A 层 in-loop 200 局/点只作趋势，不作停腿判据——200 局噪声 σ≈5.6 局）
+// ══════════════════════════════════════════════════════════════════════════
+//   it0 锚点（同 o2-fast §4.1，面板与奖励无关 ⇒ 逐字有效）：
+//     clear .7475（598）/ gameover 158 / timeout 50 / wallMed 17.0 / stuck≥800 35 /
+//     clearTicksMed 1804 / dmg/千拍 56.00 / idle .3571 / kills 均值 1.59。
+//   | 主 0 gameover ≤ **110**（−30%，≈3.5σ）| 靶心 |
+//   | 主 0b 111–134 = 方向对但欠剂量；≥135（<15%） = 无效 ⇒ 停腿 | 预注册三分法 |
+//   | 主 1 clear ≥ **598**（cleared 口径）| 不拿胜率换（三桶恒等：主 0+主 2 同时满足
+//   |   ⇒ stage_clear 自动 ≥630）|
+//   | 主 2 timeout ≤ **60**（+10 局）| 不许把命尽改造成拖死 |
+//   | 主 3 clear 局 ticks 中位 ≤ **1804** | 防守不许把清关拖慢 |
+//   | 主 4 dmg/千拍（聚合）≤ **56.00** | 真防守了，不是只改了站位 |
+//   | 主 5 gameover 桶 `hurtWeight`/千 或 `threatTicks`/千 降 ≥15% | 行为改了，不是白交税 |
+//   | 反签名 clear < 598 / idle > .4071（+5pp）/ kills 均值 < 1.29（−0.3）/
+//   |   dmg > 72.8（+30%）/ entropy·kl 熔断 |
+//   回退顺序（先归因，再动剂量；一次只拆一块）：
+//     ① 苟签名（timeout > 60 ∨ idle ↑ ∨ kills ↓）⇒ 先拆 **wThreatEx** 0.15→0.08
+//        （暴露税最易逼出「躲火线不交战」；hurt 税是命中耦合的，站着不动反而更贵）；
+//     ② 白交税（gameover ≥ 135 而 hurt/threat 密度降 ≥15%）⇒ 判「过程项空转」（z2 先例），
+//        **不抢救**，直接停腿；
+//     ③ clear 掉 >2pp 而 gameover 也降 ⇒ 交易失败，先降 **wHurtEx** 0.4→0.25 再判。
+//   100% 胜率是愿景不是 DoD；不许用教师表现判「还有没有可学的」（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 剂量标定（it0 面板 800 局**逐局真式回放**，脚本 `tmp/o2-def-replay.mjs`）
+// ══════════════════════════════════════════════════════════════════════════
+//   | 桶 | n | hurt 税 | threat 税 | 合计 | 付税局 | 单局最大 |
+//   | clear | 592 | −3.3 | −2.1 | **−5.4**（中位 0）| 34% | −57.8 |
+//   | gameover | 158 | −23.5 | −12.2 | **−35.7**（中位 −35.8）| **99%** | −72.0 |
+//   | max_ticks | 50 | −1.7 | −0.5 | −2.2（中位 0）| 24% | −24.4 |
+//   · 免罚线 = 「clear 密度均值上方一点」（z2 同法）：hurt **12/千**（clear 9.6/千，+25%）、
+//     threat **30/千**（clear 25.0/千，+20%）⇒ 正常清关几乎零税、命尽局 8.9×/5.1× 超额。
+//   · 帽 = **hurt 120 / threat 160 raw**（帽后乘权 = 48 / 24 分）：只咬尾部
+//     （gameover p95 = 113.3 / 157.5）；**不设帽会出事**——2000 关一局 0 伤慢清关
+//     threat 超额 982（2631 拍里 1061 拍在火线上）单局 −147，把清关打成负分。
+//     帽后该局 −24，clear 桶最大税 −57.8。
+//   · 分关合计税（clear / gameover）：2000 −1.5 / −22.9 · 2001 −10.8 / −33.9 ·
+//     2002 −3.3 / −35.0 · **2003 −7.5 / −39.1**（主目标 2003 最重；2000 的 12 局
+//     靠 17 杀撑赢面，税最轻——符合预期）。
+//   · 剂量护栏（z2 规则「Σ罚 < 多打收益」）：一杀 ≈ 18 + 3×2.82 发命中 ≈ **26.5**；
+//     命尽桶 0.25 杀，税不是从击杀收入里扣，是从「被打中的那条路径」里扣；clear 桶
+//     中位 0、p90 ≈ 20.5 ⇒ 正常清关最多付 0.8 杀。z2 的过剂量事故（三项合计 −149，
+//     把命尽打到 +68）在本课剂量下不可复现（命尽桶税 −35.7 = 1.3 杀）。
+//   · **eval 面板不受奖励参数影响**（greedy 动作用网络）⇒ it0 锚点与 o2-fast 共用。
+//     但 `corpus_identity_fp` 含 reward ⇒ 本课指纹与 o2-fast **不同**（新语料，§15.5）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 已知局限 / 风险（写清，免得下一个人当 bug 修）
+// ══════════════════════════════════════════════════════════════════════════
+//   ① 过程项定价先例是负的（z2-r5tempo 五项判平；2026-10 起六条奖励腿全部无效）——
+//      本臂是一次「2× 相对剂量」的复测，§1.5 已预注册空转的判法。
+//   ② `hurtWeight` 与 `playerDamageTaken` r=0.778（<0.8 门）：若本臂判平，下一代应做
+//      「替换 wDmg」（单变量）而不是「叠加」；本课保留 wDmg 是为了两臂只差新税。
+//   ③ 两臂并行互比 ≠ 单变量：只读「每墙钟小时 pp」；因果解释只在同起点 + 同面板内做。
+//   ④ 4 关定集有记忆化风险（§15.1）：B/C 面板用于判决，跨课读数只用于晋级。
+//   ⑤ value 尺度会抬（loser −90→−126）：z2 观察到 value 涨 +63% 而 clear 不动 ⇒
+//      若本课 value 异常而 clear/gameover 正常，先怀疑 value 头在追尺度，不要当策略问题。
+//   ⑥ 与 o1 系列 6000 拍面板不可相减（同 o2-fast §5⑤）。
+//   ⑦ 帽是**包络保险不是旋钮**（z2-r5guard 同款）：帽 120/160 只咬 gameover 桶 p95
+//      以上的尾巴（go 桶 2–5%），调帽 = 改语义，不要用帽来「调剂量」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 6. 预算 / 开工前置（agent 不启动训练）
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576` / `iters 300` / `max_hours 18` / `eval_every 5` /
+//   `eval_games_per_stage 50`（与 o2-fast 同预算 ⇒ 互比用每墙钟小时 pp）。
+//   ① bc 冻结归档已存在（it256，见 §2）。
+//   ② it0 基线复用 o2-fast §4.1（面板与奖励无关，无需重跑）。
+//   ③ 控制台 `bun run dashboard` :8900 → 选本课 → 开课；零 worker 就等，不就地降级。
+//   ④ 开训 30 秒自检 hub URL：`grep -h "hub=" tmp/o2-def/training-loop.log | tail -1`
+//      必须等于当时活着的 hub URL（quick tunnel 换名 ⇒ HTTP 530 不自愈，只能重启）。
+//   ⑤ 两臂并行时 worker 份额会互相挤压：互比读数必须同时记
+//      `tmp/o2-{fast,def}/training-loop.log` 的 rollout 墙钟；一臂饿死则读数作废
+//      （是调度差异，不是策略差异）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为配置段：任务侧 / PPO 缰绳 / eval / 预算逐字继承 o2-fast；
+//   改动点 = 5 个身份键（name / paired_rotate_seed / out / traj / backup_*）
+//   + 奖励公式追加 ㉓㉔ 两行 + 6 个新参数。判词以本立项说明为准。
+// ══════════════════════════════════════════════════════════════════════════
+//
+{
+  "version": 5,
+  "name": "o2-def",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "max_ticks": 3000,
+  "reward": {
+    "formula": [
+      // ① 击杀：每只 18 分（o2-fast §4.3 调参后）
+      "wKill*kills",
+      // ② 命中：每发 3；空射不单独定价（aimMisses 是 hit 镜像，会重复计价）
+      "+ wHit*aimHits",
+      // ③ 清关奖：无条件 60 分，但按走过格子打折（runCap 30 打满）
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // ④ 快清关：清场越早一次性越多（fastCap 2000 拍内线性，>2000 拍为 0）
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      // ⑤ 移动拍：稠密走位奖；顶墙拍计入 idleTicks，所以 ticks-idleTicks 自动排除蹭墙拍
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // ⑥ 开火成本：每发 0.02（几乎免费以鼓励开枪）
+      "- wShot*min(playerShots, shotCap)",
+      // ⑦ 撞墙（0–40 拍）：有前进意图 + 零位移，1.0/拍
+      "- wWall*min(wallPressTicks, wallCap)",
+      // ⑧ 撞墙（40–120 拍）：第二段 0.2/拍
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      // ⑨ 卡死（≤2000 拍）：0.01 每拍
+      "- wStuck*min(stuckTicks, stuckCap)",
+      // ⑩ 卡死（2000 拍以后）：第二段 0.002/拍
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      // ⑪ 不动（超出免费额度的前 1000 拍）：免费额度 = 35% × min(ticks, 1000)
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      // ⑫ 不动（继续超出）：第二段 0.005/拍
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      // ⑬ 承伤：每点 0.08；dmgCap 200 = 1 命上限，不会截断
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      // ⑭ 掉命：每人头 12；terminal 另有 −30
+      "- wDeath*playerDeaths",
+      // ⑮ 待在敌方射界（0–120 拍）：每拍 0.02 —— 满血时允许激进
+      "- wThreat*min(threatTicks, threatCap)",
+      // ⑯ 待在敌方射界（120–500 拍）：第二段 0.005 每拍
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      // ⑰ 射界里仍在移动：每拍 0.05 —— 躲弹动作的正奖，与 ⑮⑯ 配对
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // ⑱ 残血别浪（0–100 拍）：低血量拍 0.3/拍
+      "- wDanger*min(dangerTicks, dangerCap)",
+      // ⑲ 残血别浪（100–600 拍）：第二段 0.05/拍
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      // ⑳ 基地威胁税（0–200 压力点）
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      // ㉑ 基地威胁税（200–500）：第二段 0.03/点
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      // ㉒ 反苟：按拍计费（每杀赠 1000 拍，窗口 800）
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // ㉓ 防守定价 A（本课新增）：火线承伤超额密度税。hurtWeight = 命中弹在飞行途中的
+      //    Σ(6−x)（19px 带、只在真命中时结算）⇒ 只罚「被打中且弹贴脸」，干净走位为 0。
+      //    免罚线 12/千（clear 密度 9.6/千 上方）；帽 120 raw = 48 分（只包络尾部，§4）。
+      "- wHurtEx*min(hurtExCap, max(0, hurtWeight - hurtRate*ticks))",
+      // ㉔ 防守定价 B（本课新增）：敌方火线驻留超额密度税。只罚超出 clear 密度（25/千）
+      //    的驻留；免罚线 30/千；帽 160 raw = 24 分（未帽时 0 伤慢清关单局 −147，§4）。
+      //    ⚠ 与 ⑮⑯ 同列不同形：⑮⑯ 是平税（gameover 只 −2.07），本行是超额梯度（−12.2）。
+      "- wThreatEx*min(threatExCap, max(0, threatTicks - threatRate*ticks))",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 3.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 24.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1000.0,
+      "paceWindow": 800.0,
+      "paceCap": 46.0,
+      "wHurtEx": 0.4,
+      "hurtRate": 0.012,
+      "hurtExCap": 120.0,
+      "wThreatEx": 0.15,
+      "threatRate": 0.03,
+      "threatExCap": 160.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o1-gq-fast/o1-gq-fast.it256.20261110-073346.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261111,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o2-def/weights.json",
+  "traj": "tmp/o2-def",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o2-def",
+  "backup_prefix": "o2-def",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+}
+
+// ── 诊断工具 / 复现 ────────────────────────────────────────────────────────
+//  剂量标定（本课 §4 全部读数）：
+//    `node tmp/o2-def-design.mjs`（候选取量 / 分桶密度 / 现价 / 共线）
+//    `node tmp/o2-def-replay.mjs`（全 22 项 + 两行新税逐局回放；fast vs def 总奖励）
+//  B/C 判决面板（3000 拍，**默认 dist**；与 o2-fast 同面板同 seed ⇒ 可配对）：
+//    `bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o2-env-course.json
+//     --weights it0=<it256 bc> --games 800 --seed0 860001 --out <jsonl>`
+//    （env 由 o2-fast 解析结果生成 `tmp/o2-mk-env.py`；本课任务侧逐字一致，复用同一份）
+//  取数：`tmp/o2-verdict.mjs --file <jsonl> --labels it0[,itNN] --weights <w0>[,<w1>]`
+//  对账：`tmp/o2-recon.mjs <a.jsonl> <b.jsonl>`（本机 vs dist 逐局逐字段）。

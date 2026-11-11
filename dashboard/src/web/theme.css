@@ -580,6 +580,21 @@ a.tc-btn {
 .tc-table td.tdhl {
   box-shadow: inset 3px 0 0 var(--accent);
 }
+/* ── 表头拖拽重排（用户 2026-11-10：指标表各列可自定义位置） ── */
+.tc-table--reorder thead th {
+  cursor: grab;
+}
+.tc-table--reorder thead th:active {
+  cursor: grabbing;
+}
+/* 正在拖的那列“提起来”：变淡 + 丢掉 hover 强调，剩下的位置一眼看得出 */
+.tc-table thead th.tc-th--dragging {
+  opacity: 0.45;
+}
+.tc-table thead th.tc-th--dragging:hover {
+  background: #fafbfd;
+  color: var(--muted);
+}
 .tc-table--dense tbody td {
   padding: 5px 10px;
   font-size: var(--fs-base);
@@ -908,6 +923,14 @@ a.tc-btn {
   width: 100%;
   height: 100%;
   overflow: visible;
+}
+/* hover 里的 formula 名（用户 2026-11-10）：与数值同一块提示，等宽字体便于对照课程公式 */
+.tc-trend__tip-formula {
+  display: block;
+  margin-top: 1px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--fs-sm);
+  color: var(--muted);
 }
 .tc-trend__tip {
   position: absolute;
@@ -1807,8 +1830,8 @@ a.tc-btn {
   white-space: nowrap;
 }
 /* 图表主体 = 「读」的区域：hover 出十字准星 + 读数，绝不是放大镜。
- * 放大走右上角独立按钮（旧版整块图 role=button + zoom-in，点击会跟读数抢手势，
- * 且原生 title 会和读数框抢悬停）。 */
+ * 放大走图区左下角独立按钮（旧版整块图 role=button + zoom-in，点击会跟读数抢手势，
+ * 且原生 title 会和读数框抢悬停）。左下角（2026-11-10 用户）：顶部留给读数框。 */
 .tc-tcell__chart {
   position: relative;
   cursor: crosshair;
@@ -1816,8 +1839,8 @@ a.tc-btn {
 }
 .tc-tcell__zoom {
   position: absolute;
-  top: 0;
-  right: 0;
+  bottom: 0;
+  left: 0;
   /* 压在读数框（z-index 5）之上，读数框永远不会挡住这个入口。 */
   z-index: 6;
   display: inline-flex;
@@ -1850,8 +1873,9 @@ a.tc-btn {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-/* 走势配置弹窗（用户 2026-11-09）：按指标类型分节 + 两列 + 底部固定释义栏。
- * 90+ 项不再挤在控制条下方——弹窗自己滚，滚的只是指标区，标题/释义/完成键常驻。 */
+/* 配置弹窗结构类（首页「走势配置」2026-11-09 + 指标页「指标表配置」2026-11-10）：
+ * 按指标类型分节 + 两列 + 底部固定释义栏。90+ 项不再挤在控制条/表头里——弹窗自己滚，
+ * 滚的只是指标区，标题/释义/完成键常驻。两个弹窗**共用这一套类名**（同一形状，不复制一份）。 */
 .tc-modal.tc-trendcfg {
   width: min(1000px, 94vw);
   height: min(86vh, 860px);
@@ -2134,6 +2158,10 @@ a.tc-btn {
   margin-top: 0;
   border-top: 1px dashed var(--border);
   padding-top: 6px;
+}
+/* 横向滚动只给表体：列可配（逐局指标全开时 100+ 列）——标题行与「列配置」按钮不能跟着
+   滚出视野，否则藏回那一列得先横向滚回来。 */
+.tc-hero__iters-wrap {
   overflow-x: auto;
 }
 .tc-hero__iters-hd {
@@ -2472,7 +2500,7 @@ a.tc-btn {
   padding-bottom: 2px; /* 给细滚动条留位，避免贴住描述线 */
 }
 /* 词表说明签（2026-11-02 用户：「这些状态提示让人混淆难以理解」）：状态词统一成
-   `环节·归属` 语法，读法只在 `PILL_WORD_GUIDE` 一处——组首一枚中性 `?` 悬停即全表。
+   `环节·状态` 语法，读法只在 `PILL_WORD_GUIDE` 一处——组首一枚中性 `?` 悬停即全表。
    不可点（纯读数）；宽度固定，不参与横向滚动的伸缩。 */
 .tc-tpills__legend {
   flex: 0 0 auto;

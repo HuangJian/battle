@@ -79,6 +79,8 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
   // 操作日志（面板/命令/调度事件）：写入是 typed POST、读取仍是 GET。
   { path: '/api/notebookOps', methods: ['GET'] },
   { path: '/api/notebookOp', methods: ['POST'] },
+  // 下行命令取件口（`stopOthers` 让其它页停会话）：页面每 15s 一次 GET，ack 走上面的 op POST。
+  { path: '/api/notebookCmds', methods: ['GET'] },
   // ── 通配（日志载荷 + 整页；`*` 段由 handler 从 pathname 里切）──
   { path: '/api/log/*', methods: ['GET'] },
   { path: '/log/*', methods: ['GET'] },

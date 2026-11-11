@@ -3,41 +3,39 @@
  *  数据口径 = /api/state.metrics；「完整指标表 ›」进抽屉。 */
 
 import {
+  applyColOrder,
   behaviorMetricSeries,
-  colsOf,
   BEHAVIOR_METRICS,
   behaviorTrendKey,
   DEFAULT_BEHAVIOR_METRIC_STATS,
+  DEFAULT_HIDDEN_COL_KEYS,
   DEFAULT_TREND_VISIBILITY,
   evalBannerDone,
-  EVAL_ROW_KEYS,
   filterGroups,
-  fmtLootPickDrop,
   fmtMetricStat,
-  fmtNum,
   fmtPaired,
   fmtPct,
-  fmtPhaseSecs,
   heroMainRows,
   iterGroups,
   isTrendRange,
   isTrendSource,
-  klTone,
   latestRow,
-  MAIN_ROW_KEYS,
+  METRIC_ORDER_KEYS,
+  METRIC_ORDER_REFS,
   METRIC_STAT_LABEL,
   metricSeries,
-  PAIRED_COL_TITLES,
+  moveColKey,
   pairedBaselineOf,
-  pairedTone,
-  pairedVerdictText,
   parseBehaviorMetricStats,
+  parseColOrder,
+  parseHiddenCols,
   parseTrendVisibility,
-  phaseSecs,
-  phaseSecsTitle,
-  retTone,
+  resolveColOrder,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
+  TC_HERO_ITERS_COLS,
+  TC_HERO_ITERS_ORDER,
+  TC_HERO_ITERS_STAT,
   TC_TREND_RANGE,
   TC_TREND_SCALE,
   TC_TREND_SOURCE,
@@ -54,7 +52,6 @@ import {
   type EvalABanner,
   type EvalCkptFile,
   type IterRow,
-  type MetricCol,
   type MetricStatKey,
   type PairedReferee,
   type Series,
@@ -64,18 +61,20 @@ import {
   type TrendScales,
   type TrendSource,
 } from '../../view'
-import { Badge } from '../../components/Pill'
 import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Switch } from '../../components/Switch'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
 import { TrendZoomModal, type ZoomTarget } from '../../components/TrendZoomModal'
+import type { Col } from '../../components/DataTable'
+import { colDragProps } from '../../components/col-drag'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
+import { buildMetricCols, type MetricRow } from './metric-table-cols'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
 import { TrendConfigModal } from './TrendConfigModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
-import type { JSX } from 'preact'
+import { MetricsConfigModal } from './MetricsConfigModal'
 
 export interface HeroProps {
   stateView: ConsoleStateView | null
@@ -241,19 +240,6 @@ function winTicksYMin(...seriesList: Array<{ vals: number[] } | undefined>): num
   return Math.max(0, mn * 0.8, mx * 0.5)
 }
 
-/** 击杀/道具 展示辅助：每局平均；击杀 1 位、道具 2 位小数。 */
-/** 击杀/道具 展示辅助：每局平均；击杀 1 位、道具 2 位小数。
- *  total 为「无读数」时显 `—`（2026-10-19：`rollout_end` 行 / it0 基线行过 JSON 后是 null）。 */
-function fmtPerGame(total: number | null | undefined, games: number, digits = 1): string {
-  if (total == null || !Number.isFinite(total)) return '—'
-  if (games <= 0) return String(total)
-  return (total / games).toFixed(digits)
-}
-
-function fmtResidual(hp: number | null | undefined): string {
-  return hp == null ? '-' : String(hp)
-}
-
 /** 胜局耗时（ticks）/ 胜局残血 展示：整数（平均值已四舍五入）。 */
 function fmtInt(v: number | null): string {
   return v != null ? String(Math.round(v)) : '—'
@@ -265,13 +251,6 @@ function fmtDec1(v: number | null): string {
 }
 function fmtDec2(v: number | null): string {
   return v != null ? v.toFixed(2) : '—'
-}
-
-/** 胜局耗时列：优先 avgWinTicks，旧缓存无该字段时回退全样本 avgTicks（标题注明）。 */
-function winTicksCell(r: IterRow): string {
-  if (r.actuals?.avgWinTicks != null) return String(r.actuals.avgWinTicks)
-  if (r.actuals) return `${fmtNum(r.actuals.avgTicks, 0)}≈`
-  return `${fmtNum(r.avgTicks, 0)}≈`
 }
 
 /** 配对裁判行（只读哨子，不进门判）：最新 eval vs 开腿 / vs 上一轮，同语料逐 seed 配对。
@@ -304,322 +283,65 @@ function PairedRefereeLine({ ref }: { ref: PairedReferee | null | undefined }) {
 
 /** 按 iter 解析权重路径 → 见 lib/eval-a.ts */
 
-/** 表头单元格：列模型 → `<th>`。`num` 一个字段同时管右对齐与 tabular-nums（两位一体）。
+/** 速览表壳：列与格子**全部**来自 `metric-table-cols.tsx`（与「完整指标表」同一份工厂）。
  *
- *  两张表共用它，表头文字/口径文案/列数全部来自 `view/metric-columns.ts`——本文件不再出现
- *  任何表头字面量（此前 15 个 `<th>` 是手写的，与 `/metrics` 那套各写一遍）。 */
-function colHead(c: MetricCol): JSX.Element {
-  return (
-    <th key={c.key} className={c.num ? 'tc-num' : undefined} title={c.title}>
-      {c.label}
-    </th>
-  )
-}
-
-/** 主行视图：最新 6 轮完整指标。非 eval 轮可手动启动 evalA（课程 A 层，完成后回填）。 */
-function MainTable({
+ *  为什么不再自己写格子（用户 2026-11-10：「备选列必须和完整指标表完全一样，所有可见指标
+ *  都要能配到首页」）：速览表以前手挑十几列、自己重写每格渲染，逐局指标（90+）与窗口/逐关账
+ *  根本上不了首页，同一个读数还可能两处分叉。现在这里只剩排版——表头从列模型取、单元格按
+ *  同一个列数组铺；速览与完整表的差别只有「哪 6 行 / 无排序 / 无表格自带列菜单」。 */
+function SummaryTable({
   rows,
-  course,
-  ckpts,
-  readOnly,
-  onEvalQueued,
-  busyIters,
+  cols,
+  onMove,
 }: {
-  rows: IterRow[]
-  course: string
-  ckpts: EvalCkptFile[]
-  readOnly: boolean
-  onEvalQueued: (iter: number, ckpt: string) => void
-  busyIters: Set<number>
+  rows: MetricRow[]
+  cols: Col<MetricRow>[]
+  onMove: (from: string, to: string) => void
 }) {
+  // 正在拖的列（只为了给表头上色；顺序本身由父组件的偏好决定）。
+  const [dragKey, setDragKey] = useState<string | null>(null)
   return (
-    <table className="tc-table tc-table--dense">
-      {/* 表头从列模型取（view/metric-columns.ts）——两处表格不许再各写一份表头字面量。 */}
+    <table className="tc-table tc-table--dense tc-table--reorder">
       <thead>
-        <tr>{colsOf(MAIN_ROW_KEYS).map(colHead)}</tr>
+        <tr>
+          {cols.map((c) => (
+            <th
+              key={c.key}
+              className={`${c.align === 'num' ? 'tc-num' : ''}${
+                dragKey === c.key ? ' tc-th--dragging' : ''
+              }`}
+              title={c.thTitle}
+              {...colDragProps({
+                key: c.key,
+                dragging: dragKey,
+                onDragStart: setDragKey,
+                onDragEnd: () => setDragKey(null),
+                onMove,
+              })}
+            >
+              {c.label}
+            </th>
+          ))}
+        </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={r.iter}>
-            <td>
-              <b>{r.iter}</b>
-              {r.halted ? (
-                <span className="tc-pill tc-pill--note" title="该轮被 KL halt 中止">
-                  halted
-                </span>
-              ) : null}
-              {/* 采集已收官、PPO/权重未回传：这一行有 rollout 读数，PPO 侧列是空缺口。 */}
-              {r.pendingPpo ? (
-                <span
-                  className="tc-pill tc-pill--note"
-                  title="本轮采集已收官，PPO 梯度步尚未回传（下列 PPO 读数为空是预期，不是 0）"
-                >
-                  PPO 中
-                </span>
-              ) : null}
-            </td>
-            <td className="tc-muted tc-nowrap">{r.time}</td>
-            <td>
-              <Badge tone={winTone(r.winRate)}>{fmtPct(r.winRate)}</Badge>
-            </td>
-            <td>
-              {r.evalData && r.evalData.winRate !== null ? (
-                <Badge tone={winTone(r.evalData.winRate)}>{fmtPct(r.evalData.winRate)}</Badge>
-              ) : !readOnly && course ? (
-                <button
-                  type="button"
-                  className="tc-btn tc-btn--sm"
-                  disabled={busyIters.has(r.iter)}
-                  title={
-                    ckptForIter(ckpts, r.iter)
-                      ? `为 it${r.iter} 启动课程设计评估（evalA：该轮权重 × 固定语料，写 eval_log）`
-                      : `未发现 it${r.iter} 权重归档，无法启动 evalA`
-                  }
-                  onClick={() => {
-                    const ckpt = ckptForIter(ckpts, r.iter)
-                    if (ckpt) onEvalQueued(r.iter, ckpt)
-                  }}
-                >
-                  {busyIters.has(r.iter) ? '…' : 'eval A'}
-                </button>
-              ) : (
-                <span className="tc-muted">-</span>
-              )}
-            </td>
-            <td className="tc-num">
-              <span title="胜局平均耗时（ticks）">{winTicksCell(r)}</span>
-            </td>
-            <td className="tc-num">
-              {r.actuals?.killRate != null ? (
-                <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.actuals.killRate)}</span>
-              ) : r.actuals ? (
-                <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀（非百分比）">
-                  {fmtPerGame(r.actuals.totalKills, r.actuals.games)}
-                </span>
-              ) : (
-                <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                  {fmtNum(r.kills, 1)}≈
-                </span>
-              )}
-            </td>
-            <td className="tc-num">
-              {r.actuals?.dmgPerKillPct != null ? (
-                <span title="每杀承伤 / (命数×满血)">{fmtPct(r.actuals.dmgPerKillPct)}</span>
-              ) : r.actuals?.dmgPerKill != null ? (
-                <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
-                  {r.actuals.dmgPerKill.toFixed(1)}
-                </span>
-              ) : (
-                <span className="tc-muted">-</span>
-              )}
-            </td>
-            <td className="tc-num">
-              {r.actuals?.avgResidualHpPct != null ? (
-                <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
-                  {fmtPct(r.actuals.avgResidualHpPct)}
-                </span>
-              ) : r.actuals?.avgResidualHp != null ? (
-                <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
-                  {fmtResidual(r.actuals.avgResidualHp)}
-                </span>
-              ) : (
-                <span className="tc-muted">-</span>
-              )}
-            </td>
-            <td className="tc-num">
-              {r.actuals ? (
-                <span title="每局平均拾取数/掉落数">
-                  {fmtLootPickDrop(r.actuals.totalPU, r.actuals.totalPUSpawn, r.actuals.games)}
-                </span>
-              ) : (
-                <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-                  {fmtNum(r.loot == null ? null : r.loot * 100, 0)}%≈
-                </span>
-              )}
-            </td>
-            <td className="tc-num" title={phaseSecsTitle(phaseSecs(r))}>
-              {fmtPhaseSecs(phaseSecs(r))}
-            </td>
-            <td className="tc-num">{fmtNum(r.scoreMean, 4)}</td>
-            <td>
-              <Badge tone={klTone(r.kl)}>{fmtNum(r.kl, 4)}</Badge>
-            </td>
-            <td className="tc-num">{fmtNum(r.entropy, 3)}</td>
-            <td>
-              <Badge tone={retTone(r.meanRet)}>{fmtNum(r.meanRet, 3)}</Badge>
-            </td>
-            <td className="tc-num">{fmtNum(r.lr, 6)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  )
-}
-
-/** eval 视图：最新 6 轮干净评估（有 evalData 的轮，iter 倒序；与抽屉 eval 过滤同口径）。
- *  列 = 评估专属字段：eval 胜率（含局数）、过拟合（锚−轮 gap）、耗时/击杀/残血/道具/得分
- *  （评估实际值；击杀/道具为每局平均，残血为胜局平均，得分无 ±std）、窗口用时、评估权重版本。 */
-function EvalTable({ rows }: { rows: IterRow[] }) {
-  const groups = filterGroups(iterGroups(rows), 'eval').slice(0, 6)
-  // 配对基线轮：全量行里任一非空 pairedVsFirst 的 baseIter（只看前 6 行会误判）。
-  const baseIter = pairedBaselineOf(rows.map((r) => r.evalData?.pairedVsFirst))
-  return (
-    <table className="tc-table tc-table--dense">
-      {/* 表头从列模型取（与 /metrics 的 eval 模式同一份顺序与口径）。 */}
-      <thead>
-        <tr>{colsOf(EVAL_ROW_KEYS).map(colHead)}</tr>
-      </thead>
-      <tbody>
-        {groups.length === 0 ? (
+        {rows.length === 0 ? (
           <tr>
-            {/* colSpan 由列模型算（此前手写 15，而 eval 表实为 16 列——空态那一行少跨一格，
-                没人会发现）。 */}
-            <td colSpan={EVAL_ROW_KEYS.length} className="tc-muted tc-center">
+            {/* colSpan 跟着实际可见列数走（藏列时也不会少跨一格）。 */}
+            <td colSpan={cols.length} className="tc-muted tc-center">
               该课程暂无 eval 评估记录
             </td>
           </tr>
         ) : (
-          groups.map((g) => {
-            const e = g.eval!
-            const p = e.pairedVsFirst ?? null
-            const isBase = !p && baseIter !== null && g.iter === baseIter
-            return (
-              <tr key={`e${g.iter}`}>
-                <td>
-                  <span className="tc-muted tc-nowrap">eval it{g.iter}</span>
-                  {e.dropped > 0 ? (
-                    <span
-                      className="tc-pill tc-pill--note"
-                      title="评估窗口内未收官、被下轮权重分发清场的评估局数"
-                    >
-                      缺{e.dropped}
-                    </span>
-                  ) : null}
+          rows.map((r) => (
+            <tr key={r.kind === 'main' ? `m${r.iter}` : `e${r.iter}`}>
+              {cols.map((c) => (
+                <td key={c.key} className={c.align === 'num' ? 'tc-num' : undefined}>
+                  {c.cell(r)}
                 </td>
-                <td className="tc-muted tc-nowrap">{e.time}</td>
-                <td>
-                  {e.winRate !== null ? (
-                    <>
-                      <Badge
-                        tone={winTone(e.winRate)}
-                        title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${g.iter} 轮 PPO 更新前 · ${e.games} 局 ${e.wins} 胜 · 全歼 ${e.clears} · 用时 ${e.sec}s`}
-                      >
-                        {fmtPct(e.winRate)}
-                      </Badge>{' '}
-                      <span className="tc-muted">
-                        {e.wins}/{e.games}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {!p ? (
-                    isBase ? (
-                      <span className="tc-muted" title="配对基线本轮：vs自己不判">
-                        基线
-                      </span>
-                    ) : (
-                      <span className="tc-muted">-</span>
-                    )
-                  ) : (
-                    <span title={PAIRED_COL_TITLES.b01}>{p.b01}</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {!p ? (
-                    <span className="tc-muted">-</span>
-                  ) : (
-                    <span title={PAIRED_COL_TITLES.b10}>{p.b10}</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {!p ? (
-                    <span className="tc-muted">-</span>
-                  ) : (
-                    <Badge
-                      tone={pairedTone(p.verdict)}
-                      title={`${PAIRED_COL_TITLES.p}；${pairedVerdictText(p.verdict)}`}
-                    >
-                      {p.p.toFixed(2)}
-                    </Badge>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {!p ? (
-                    <span className="tc-muted">-</span>
-                  ) : (
-                    <span title={`${PAIRED_COL_TITLES.delta}；${pairedVerdictText(p.verdict)}`}>
-                      {(p.deltaPp > 0 ? '+' : '') + p.deltaPp.toFixed(1)}pp
-                    </span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.avgWinTicks != null ? (
-                    e.avgWinTicks
-                  ) : e.avgTicks !== null ? (
-                    <span title="无胜局耗时字段，回退全样本均值">{e.avgTicks}≈</span>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.killRate != null ? (
-                    <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(e.killRate)}</span>
-                  ) : e.totalKills != null && e.games > 0 ? (
-                    <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀">
-                      {fmtPerGame(e.totalKills, e.games)}
-                    </span>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.dmgPerKillPct != null ? (
-                    <span title="每杀承伤 / (命数×满血)">{fmtPct(e.dmgPerKillPct)}</span>
-                  ) : e.dmgPerKill != null ? (
-                    <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
-                      {e.dmgPerKill.toFixed(1)}
-                    </span>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.avgResidualHpPct != null ? (
-                    <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
-                      {fmtPct(e.avgResidualHpPct)}
-                    </span>
-                  ) : e.avgResidualHp != null ? (
-                    <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
-                      {fmtResidual(e.avgResidualHp)}
-                    </span>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.totalPU !== null ? (
-                    <span title="每局平均拾取数/掉落数">
-                      {fmtLootPickDrop(e.totalPU, e.totalPUSpawn, e.games)}
-                    </span>
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">
-                  {e.scoreMean !== null ? (
-                    e.scoreMean.toFixed(4)
-                  ) : (
-                    <span className="tc-muted">-</span>
-                  )}
-                </td>
-                <td className="tc-num">{e.sec.toFixed(0)}s</td>
-                <td className="tc-mono tc-muted tc-small">{e.wver.slice(0, 7)}</td>
-              </tr>
-            )
-          })
+              ))}
+            </tr>
+          ))
         )}
       </tbody>
     </table>
@@ -684,10 +406,105 @@ function LastIters({
       return next
     })
   }
+  // 列显隐 + 逐局指标统计量（用户 2026-11-10）：速览表的**备选列 = 完整指标表的列**
+  // （同一个列工厂 buildMetricCols），配置各存一份（主行视图 / eval 视图各一套键）。
+  // 默认集合 = 模型里 `hiddenByDefault` 的那些（逐局指标块），与指标页一致。
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(() => new Set(DEFAULT_HIDDEN_COL_KEYS))
+  useEffect(() => {
+    try {
+      setHiddenCols(parseHiddenCols(localStorage.getItem(TC_HERO_ITERS_COLS)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onToggleCol = (key: string, on: boolean): void => {
+    const next = new Set(hiddenCols)
+    if (on) next.delete(key)
+    else next.add(key)
+    setHiddenCols(next)
+    try {
+      localStorage.setItem(TC_HERO_ITERS_COLS, JSON.stringify([...next]))
+    } catch {
+      /* ignore */
+    }
+  }
+  const [metricStats, setMetricStats] = useState<BehaviorMetricStatMap>(() => ({
+    ...DEFAULT_BEHAVIOR_METRIC_STATS,
+  }))
+  useEffect(() => {
+    try {
+      setMetricStats(parseBehaviorMetricStats(localStorage.getItem(TC_HERO_ITERS_STAT)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const onMetricStat = (key: BehaviorMetricKey, stat: MetricStatKey): void => {
+    const next = { ...metricStats, [key]: stat }
+    setMetricStats(next)
+    try {
+      localStorage.setItem(TC_HERO_ITERS_STAT, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+  const [colsOpen, setColsOpen] = useState(false)
+
+  // 列顺序（用户 2026-11-10：拖拽表头自定义位置）。首帧 = 模型顺序，mount 后恢复；
+  // 写入只在松手时发生（首帧的 null 不许把已存顺序抹掉）。
+  const [colOrder, setColOrder] = useState<string[] | null>(null)
+  useEffect(() => {
+    try {
+      setColOrder(parseColOrder(localStorage.getItem(TC_HERO_ITERS_ORDER)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
 
   const mains = heroMainRows(iters)
   if (mains.length === 0) return null
   const ev = view === 'eval'
+  // 行：主行视图 = 最新 6 个主行；eval 视图 = 最新 6 个 eval 子行（与完整表 eval 档同源）。
+  const rows: MetricRow[] = ev
+    ? filterGroups(iterGroups(iters), 'eval')
+        .slice(0, 6)
+        .map((g) => ({ kind: 'eval', iter: g.iter, time: g.eval!.time, eval: g.eval! }))
+    : mains.map((r) => ({ kind: 'main', iter: r.iter, time: r.time, main: r }))
+  const allCols = buildMetricCols(
+    {
+      course,
+      ckpts,
+      readOnly,
+      busyIters,
+      onEvalA: (iter) => {
+        const ckpt = ckptForIter(ckpts, iter)
+        if (ckpt) onEvalQueued(iter, ckpt)
+      },
+    },
+    ev ? 'eval' : 'all',
+    pairedBaselineOf(iters.map((r) => r.evalData?.pairedVsFirst)),
+    metricStats,
+    // 最新一轮不挂状态徽标（用户 2026-11-10）：它恒是刚采集收官、PPO 未回传的那轮。
+    { quietStatusIter: rows[0]?.iter ?? null },
+  )
+  // 显示顺序 = 存储序作用在当前视图的全部列上（藏起来的列也参与）；无存储 ⇒ 模型序。
+  const orderedAll = applyColOrder(allCols, colOrder)
+  // 拖拽的基准是**键全集**（含藏起来的列 + 另一个视图独有的列）：缺的键按模型位补齐。
+  // 只存当前视图的列会让它们在切换 / 取消隐藏时丢位置（用户 2026-11-10）。
+  const fullOrder = resolveColOrder(
+    METRIC_ORDER_KEYS,
+    colOrder ?? orderedAll.map((c) => c.key),
+    METRIC_ORDER_REFS,
+  )
+  const cols = orderedAll.filter((c) => !hiddenCols.has(c.key))
+  const onMoveCol = (from: string, to: string): void => {
+    const next = moveColKey(fullOrder, from, to)
+    setColOrder(next)
+    try {
+      localStorage.setItem(TC_HERO_ITERS_ORDER, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
   const n = ev ? filterGroups(iterGroups(iters), 'eval').length : mains.length
   return (
     <div className="tc-hero__iters">
@@ -720,6 +537,14 @@ function LastIters({
           <button
             type="button"
             className="tc-btn tc-btn--sm"
+            title="选这张速览表显示哪些列（主行 / eval 各一套；藏起来的列在完整指标表里照旧可看）；也可直接拖动表头调整列位置"
+            onClick={() => setColsOpen(true)}
+          >
+            列配置
+          </button>
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
             title="从训练的任意 in-loop eval 轮导出仿真 replay（弹窗里按评估轮选，默认最新轮；勾选局 → 确定性重放 → .replay 下载）"
             onClick={() => setReplayOpen(true)}
           >
@@ -736,18 +561,21 @@ function LastIters({
         readOnly={readOnly}
         onClose={() => setReplayOpen(false)}
       />
-      {collapsed ? null : ev ? (
-        <EvalTable rows={iters} />
-      ) : (
-        <MainTable
-          rows={mains}
-          course={course}
-          ckpts={ckpts}
-          readOnly={readOnly}
-          onEvalQueued={onEvalQueued}
-          busyIters={busyIters}
-        />
-      )}
+      {/* 列配置：主行与 eval 的列集合不同，弹窗跟着当前视图走（两套键互不相干）。 */}
+      <MetricsConfigModal
+        open={colsOpen}
+        title="速览表列配置"
+        cols={allCols.map((c) => ({ key: c.key, label: c.label, hint: c.thTitle }))}
+        hidden={hiddenCols}
+        stats={metricStats}
+        onToggle={onToggleCol}
+        onStat={onMetricStat}
+        onClose={() => setColsOpen(false)}
+      />
+      {/* 横向滚动只给表体（列可配到 100+ 列）：标题与按钮留在视野内。 */}
+      <div className="tc-hero__iters-wrap">
+        {collapsed ? null : <SummaryTable rows={rows} cols={cols} onMove={onMoveCol} />}
+      </div>
     </div>
   )
 }

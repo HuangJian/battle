@@ -110,6 +110,9 @@ from remote.plan_handoff import (
     _read_opt_file as _read_opt_file,
 )
 from remote.plan_handoff import (
+    _reseed_anchors as _reseed_anchors,
+)
+from remote.plan_handoff import (
     _seed_demo_blob_cache as _seed_demo_blob_cache,
 )
 from remote.plan_handoff import (
@@ -240,6 +243,65 @@ def _scaled_volume(volume: Mapping[str, Any], mult: float) -> dict:
     }
 
 
+def _greedy_budget(course: Any, volume: Mapping[str, Any]) -> tuple[Any, int, dict] | None:
+    """课程 `greedy_quota` → `(GreedyQuotaPlan, 整轮 target, 原始块)`；未激活 ⇒ `None`。
+
+    `target_transitions` 必须是**本轮放大后**的值（`_scaled_volume` 之后）：用减量后的分母会
+    把 12% 算成别的比例，而课程块本身只是三个比例，不带分母。
+    课程快照缺失（`ctx.course is None`）⇒ 与「未声明」同路（fail closed，不放宽配额）。
+    """
+    from worker.greedy_quota import parse_greedy_quota, quota_active
+
+    raw: Any = getattr(course, "greedy_quota", None)
+    if raw is None or not quota_active(raw):
+        return None
+    target = int(volume.get("target_transitions", 0) or 0)
+    stages = [int(s) for s in (volume.get("stages") or ())]
+    if target <= 0 or not stages:
+        return None
+    plan = parse_greedy_quota(raw, target_transitions=target, stages=stages)
+    if plan is None or int(plan.total_target) <= 0:
+        return None
+    block: dict[str, Any] = dict(raw.model_dump()) if hasattr(raw, "model_dump") else dict(raw)
+    return plan, target, block
+
+
+def _volume_with_target(volume: Mapping[str, Any], target: int) -> dict:
+    """同源重解 volume 块到**指定 target**（B 口径的减量，与 `_scaled_volume` 同一族纯函数）。
+
+    与 `_scaled_volume(vol, r)` 的差别：这里把 `target_transitions` / `per_stage_quota` 写成
+    精确值，不靠 `ceil` 的浮点除法（减量 = 整轮总 target − greedy 那份，两个整数相减，
+    多一个字节的漂移都会让 `validate_runtime_volume` 的同源复算对不上）。
+    """
+    from worker.volume_alloc import alloc_games_by_stage, est_hi, widen_by_width
+    from worker.volume_quota import target_per_stage
+
+    target = max(1, int(target))
+    stages = [int(s) for s in volume["stages"]]
+    out = {
+        **dict(volume),
+        "target_transitions": target,
+        "per_stage_quota": target_per_stage(target, len(stages)),
+    }
+    per_stage = volume.get("games_per_stage_by_stage")
+    if not isinstance(per_stage, dict) or not per_stage:
+        # 老五字段块：只缩小标量目标与初波局数，形状逐字不变。
+        old = int(volume.get("target_transitions", 0) or 0)
+        base = int(volume.get("games_per_stage", 1) or 1)
+        out["games_per_stage"] = max(1, math.ceil(base * target / max(1, old)))
+        return out
+    ests = {int(k): int(v) for k, v in (volume.get("est_s_by_stage") or {}).items()}
+    factor = float(volume.get("est_hi_factor", 1.0) or 1.0)
+    games = alloc_games_by_stage(
+        stages, target, ests_hi={s: est_hi(ests.get(s, 0), factor=factor) for s in stages}
+    )
+    widen = int(volume.get("widen_width", 0) or 0)
+    if widen > 0:
+        games = widen_by_width(games, widen)
+    out["games_per_stage_by_stage"] = games
+    return out
+
+
 def _run_iteration(
     ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
 ) -> dict:
@@ -329,6 +391,34 @@ def _run_iteration(
                 vol_probe = dict(
                     vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
                 )
+    # ---- greedy 语料预算（2026-11-11，plan/greedy-offline-autonomous）----
+    # 用户口径 B「挤进去」：普通采样少采 greedy 的那一份，**整轮总量不变**。
+    # `per_stage_quota` 必须是**减量前**的整轮值 —— PPO 的逐关上限就是「整轮总量/关数」，
+    # 换成减量后的值会把 greedy 那份一并截掉（训到的 greedy 样本 = 0，账本却好看）。
+    _greedy: tuple[Any, int, dict] | None = None
+    _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
+    if (
+        isinstance(vol_probe, dict)
+        and ctx.course is None
+        and "greedy_quota" in str(ctx.manifest.get("course") or "")
+        and not ctx.greedy_course_warned
+    ):
+        # 课程声明了 greedy 但快照没加载（只可能发生在非 notebook 入口）——说出来，不静默。
+        ctx.greedy_course_warned = True
+        ctx.log(
+            "WARN: ctx.course 缺失 ⇒ 本段 greedy_quota **不生效**（按老路径跑）；"
+            "需要 greedy 的腿请用 `--artifacts <目录>`（目录里有 course.jsonc）"
+        )
+    if isinstance(vol_probe, dict):
+        _greedy = _greedy_budget(ctx.course, vol_probe)
+        if _greedy is not None:
+            _gplan, _total_t, _block = _greedy
+            _ordinary_t = max(1, _total_t - int(_gplan.total_target))
+            vol_probe = _volume_with_target(vol_probe, _ordinary_t)
+            ctx.log(
+                f"it{it} greedy 预算：普通 {_ordinary_t} + greedy {int(_gplan.total_target)}"
+                f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {_full_per_stage}）"
+            )
     _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
     if window_override is not None:
         # 降级轮：块已经按全关解好，**不要再**让 `pairs_for` 按配方派生一次（那会解回窗口）。
@@ -339,6 +429,15 @@ def _run_iteration(
         pairs = _scaled_pairs(pairs, ctx.sample_mult)
     spec = iter_spec(_plan, it, pairs, wver=init_fp, course=ctx.course)
     spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))
+    if _greedy is not None:
+        # 两个键跟 spec 上云：云机在 rollout 之后、PPO 之前自己算配额并发 greedy 波
+        # （分母必须是**减量前**的整轮 target，否则 12% 会按减量后的分母算成别的比例）。
+        from common.protocol import validate_rollout_spec
+
+        _gplan, _total_t, _block = _greedy
+        spec = validate_rollout_spec(
+            {**spec, "greedy_quota": _block, "greedy_round_target": int(_total_t)}
+        )
     # 日志面用**重铺后的** plan（否则打出来的还是打包时的旧 G_s，与实采对不上）
     vol = vol_probe
     epochs_eff = int(ctx.manifest.get("epochs") or 0)
@@ -391,7 +490,12 @@ def _run_iteration(
     drift = 0
     want = 0
     if isinstance(vol, dict):
-        want = int(vol["per_stage_quota"])
+        # greedy 激活时用**减量前**的整轮值（见上面 B 口径那段：减量后的值会连 greedy 一起截掉）。
+        want = (
+            int(_full_per_stage or vol["per_stage_quota"])
+            if _greedy
+            else int(vol["per_stage_quota"])
+        )
         have = int(m.get("per_stage_quota", 0) or 0)
         drift = have if (have and have != want) else 0
         m["per_stage_quota"] = want
@@ -422,6 +526,18 @@ def _run_iteration(
             "（worker 侧传 run_job 自己；CLI 侧传 remote.run_loop._real_run_job）——"
             "见 remote/plan_run.py 头部"
         )
+    # ★ 2026-11-11（o2-notax it163 现场）：每轮开跑前把工件锚点（ref/demo）**缺了就补**。
+    #   `blob_cache` 是有预算的（三树合计 256MB，按 mtime 丢最旧），而自主腿的锚点只有一份、
+    #   丢了下一轮就是向空 base_url 发 GET 的确定性失败。另两道（读命中 touch / prune 不删锚点）
+    #   各自在场，但都管不住「已经没了」（被外部清、被盘满清）；这一道管的就是它。
+    #   命中时只一个 stat（不哈希、不写盘），所以每轮调不构成开销。
+    _reseed_anchors(
+        manifest=m,
+        job_dir=Path(ctx.store.root),
+        work_dir=Path(ctx.work_dir),
+        artifacts_root=Path(ctx.store.root),
+        log=ctx.log,
+    )
     # 代码快照与 TS 运行时：**有随包字节就用字节**（全离线：节点无仓、不联网），没有就
     # 交给 `run_job` 走它本来的路（命中 code_cache / 向 hub 下载——半离线轮就是这条路：
     # worker 自己那一轮已把 code.zip 落进内容寻址缓存）。两个来源都存在时优先字节。
@@ -541,6 +657,18 @@ def _row_extra(result: dict, phase: str) -> dict | None:
     vstats = result.get("volume_stage_stats")
     if isinstance(vstats, dict) and vstats:
         extra["volume_stage_stats"] = vstats
+    # greedy 语料账（2026-11-11）：与 trainer 腿同键（`trainer/loop_steps` 写的那三个）。
+    # `sampling_*` 只带**采样口径**（`worker/resume` 算 est 时优先读它，混入 greedy 的
+    # timeout 局会把下轮首波派少）。
+    gq = result.get("greedy_quota_stats")
+    if isinstance(gq, dict) and gq:
+        extra["greedy_quota_stats"] = gq
+        sr = gq.get("sampling_report")
+        if isinstance(sr, dict):
+            if int(sr.get("samples") or 0) > 0:
+                extra["sampling_samples"] = int(sr["samples"])
+            if int(sr.get("games") or 0) > 0:
+                extra["sampling_games"] = int(sr["games"])
     # ★ 2026-10-29（云机轮墙钟）：产物段（save/pack/identity）的秒数。它是 `wall=` 里除了
     #   `rollout_sec`/`ppo_sec` 之外最大的一块，此前**一行打点都没有**（只有临时开关
     #   `PPO_CUDA_DIAG=1` 才打）——真机 43.4s/轮，占一轮的一半，日志里完全看不见。

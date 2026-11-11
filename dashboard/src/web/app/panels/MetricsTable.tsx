@@ -1,526 +1,40 @@
 /** MetricsTable.tsx — 「指标」页：完整表格 + eval 子行 + 行过滤。
  *  iter 列：无 eval 的主行可点 evalA（课程设计评估 → eval_log，与 Hero 最新 6 轮同路径）。
  *
- *  列模型（表头文字 / hover 口径 / 数字对齐）来自 `view/metric-columns.ts` 的**唯一一份**——
- *  本文件只提供每列的**格子渲染 + 排序键**（`cell`/`sortValue`），不再自己写 label/align/thTitle。
+ *  列模型（表头文字 / hover 口径 / 数字对齐）来自 `view/metric-columns.ts` 的**唯一一份**；
+ *  列工厂（格子渲染）在 `metric-table-cols.tsx`——首页「最新 6 轮」速览表也用它，
+ *  否则两处格子迟早分叉（红心——用户 2026-11-10：首页备选列必须与完整表完全一样）。
+ *  本文件只管：行筛选 / 表格壳 / 列显隐与统计量持久化 / evalA 入队。
  *  背景与验收：`DECISIONS.md §2026-09-20-metric-table-single-home`。 */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
-import type { ComponentChildren } from 'preact'
 import {
-  BEHAVIOR_METRICS,
-  fmtMetricStat,
-  METRIC_STAT_LABEL,
-  METRIC_STAT_KEYS,
-  type BehaviorMetricDef,
+  DEFAULT_BEHAVIOR_METRIC_STATS,
+  DEFAULT_HIDDEN_COL_KEYS,
+  parseBehaviorMetricStats,
+  parseHiddenCols,
+  TC_METRICS_COLS,
+  TC_METRICS_HIDDEN_LEGACY,
+  TC_METRICS_STAT,
+  type BehaviorMetricKey,
+  type BehaviorMetricStatMap,
   evalBannerDone,
-  filterGroups,
-  fmtLootPickDrop,
-  fmtNum,
-  fmtPct,
-  fmtPhaseSecs,
-  iterGroups,
-  klTone,
-  METRIC_COLS,
-  PAIRED_COL_TITLES,
   pairedBaselineOf,
-  pairedTone,
-  pairedVerdictText,
-  phaseSecs,
-  phaseSecsTitle,
-  retTone,
   TC_METRICS_FILTER,
-  volumeText,
-  volumeTitle,
-  winTone,
-  windowText,
-  windowTitle,
+  type ConsoleStateView,
   type EvalABanner,
   type EvalCkptFile,
-  type EvalSummary,
+  METRIC_ORDER_KEYS,
+  METRIC_ORDER_REFS,
   type IterFilter,
-  type IterRow,
-  type MetricColKey,
-  type PairedCompare,
+  type MetricStatKey,
 } from '../../view'
-import type { ConsoleStateView } from '../../view'
-import { Badge } from '../../components/Pill'
-import { DataTable, type Col } from '../../components/DataTable'
+import { DataTable } from '../../components/DataTable'
 import { EvalBanner } from '../../components/EvalBanner'
+import { MetricsConfigModal } from './MetricsConfigModal'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
-
-/** 列模型 → `DataTable` 的列壳（键/表头/对齐/hover 口径）。
- *
- *  为什么用展开而不是逐个赋值：`Col` 的这四个字段本来就该由模型独占，展开能保证「模型加一个字段、
- *  这里自动跟上」，不必两处同步；`key` 也从模型取，顺手保证列 id 与模型键一致。 */
-function colDef(
-  key: MetricColKey,
-): Pick<Col<MetricRow>, 'key' | 'label' | 'align' | 'thTitle' | 'hiddenByDefault'> {
-  const m = METRIC_COLS[key]
-  return {
-    key: m.key,
-    label: m.label,
-    align: m.num ? 'num' : undefined,
-    thTitle: m.title,
-    hiddenByDefault: m.hiddenByDefault,
-  }
-}
-
-/** 显示行 = 主行 | eval 子行 的联合（eval only 时只保留子行，与旧 /pool 语义一致）。 */
-type MetricRow =
-  | { kind: 'main'; iter: number; time: string; main: IterRow }
-  | { kind: 'eval'; iter: number; time: string; eval: EvalSummary }
-
-function buildRows(rows: IterRow[], mode: IterFilter): MetricRow[] {
-  const out: MetricRow[] = []
-  for (const g of filterGroups(iterGroups(rows), mode)) {
-    // it0 = bc 权重基线（训练前）：只有干净评估、没有 rollout 采样，不渲染主行
-    // （合成行在 console/iters.ts；rollout 派生字段是 NaN 缺口，不是 0）。
-    if (mode !== 'eval' && g.iter > 0)
-      out.push({ kind: 'main', iter: g.iter, time: g.main.time, main: g.main })
-    if (mode !== 'rollout' && g.eval)
-      out.push({ kind: 'eval', iter: g.iter, time: g.eval.time, eval: g.eval })
-  }
-  return out
-}
-
-/** 击杀/道具每局平均展示。 */
-/** 击杀/道具每局平均展示；「无读数」显 `—`（2026-10-19：过 JSON 的 null）。 */
-function fmtPerGame(total: number | null | undefined, games: number, digits = 1): string {
-  if (total == null || !Number.isFinite(total)) return '—'
-  if (games <= 0) return String(total)
-  return (total / games).toFixed(digits)
-}
-
-type EvalACols = {
-  course: string
-  ckpts: EvalCkptFile[]
-  readOnly: boolean
-  busyIters: Set<number>
-  onEvalA: (iter: number) => void
-}
-
-/** eval 行配对单元格：null → 基线轮标“基线”，否则“—”（与基线无交集等）。 */
-function pairedCell(
-  p: PairedCompare | null | undefined,
-  isBaseline: boolean,
-  pick: (c: PairedCompare) => ComponentChildren,
-): ComponentChildren {
-  if (!p) {
-    return isBaseline ? (
-      <span className="tc-muted" title="配对基线本轮：vs自己不判">
-        基线
-      </span>
-    ) : (
-      <span className="tc-muted">-</span>
-    )
-  }
-  return pick(p)
-}
-
-/** eval-only 模式的替换列：b01/b10/p/delta（PPO 诊断列在 eval 行恒为—，换成裁判）。 */
-function pairedCols(baselineIter: number | null): Col<MetricRow>[] {
-  const isBase = (r: MetricRow): boolean =>
-    r.kind === 'eval' && baselineIter !== null && r.iter === baselineIter
-  const get = (r: MetricRow): PairedCompare | null | undefined =>
-    r.kind === 'eval' ? r.eval.pairedVsFirst : undefined
-  return [
-    {
-      ...colDef('b01'),
-      sortValue: (r) => get(r)?.b01 ?? null,
-      cell: (r) =>
-        pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b01}>{c.b01}</span>),
-    },
-    {
-      ...colDef('b10'),
-      sortValue: (r) => get(r)?.b10 ?? null,
-      cell: (r) =>
-        pairedCell(get(r), isBase(r), (c) => <span title={PAIRED_COL_TITLES.b10}>{c.b10}</span>),
-    },
-    {
-      ...colDef('pairedP'),
-      sortValue: (r) => get(r)?.p ?? null,
-      cell: (r) =>
-        pairedCell(get(r), isBase(r), (c) => (
-          <Badge
-            tone={pairedTone(c.verdict)}
-            title={`${PAIRED_COL_TITLES.p}；${pairedVerdictText(c.verdict)}`}
-          >
-            {c.p.toFixed(2)}
-          </Badge>
-        )),
-    },
-    {
-      ...colDef('delta'),
-      sortValue: (r) => get(r)?.deltaPp ?? null,
-      cell: (r) =>
-        pairedCell(get(r), isBase(r), (c) => (
-          <span title={`${PAIRED_COL_TITLES.delta}；${pairedVerdictText(c.verdict)}`}>
-            {(c.deltaPp > 0 ? '+' : '') + c.deltaPp.toFixed(1)}pp
-          </span>
-        )),
-    },
-  ]
-}
-
-/** 共享列：iter（eval 行旁无 evalA——eval-only 只有 eval 子行）。 */
-function iterCol(ea: EvalACols): Col<MetricRow> {
-  return {
-    ...colDef('iter'),
-    cell: (r) =>
-      r.kind === 'main' ? (
-        <span className="tc-nowrap">
-          <b>
-            {r.main.iter}
-            {r.main.halted ? <span className="tc-pill tc-pill--note">halted</span> : null}
-          </b>
-          {/* 采集已收官、PPO/权重未回传：这一行有 rollout 读数，PPO 侧列是空缺口。 */}
-          {r.main.pendingPpo ? (
-            <span
-              className="tc-pill tc-pill--note"
-              title="本轮采集已收官，PPO 梯度步尚未回传（下列 PPO 读数为空是预期，不是 0）"
-            >
-              PPO 中
-            </span>
-          ) : null}
-          {!ea.readOnly && ea.course && !r.main.evalData ? (
-            <button
-              type="button"
-              className="tc-btn tc-btn--sm tc-ml-2"
-              disabled={ea.busyIters.has(r.main.iter) || !ckptForIter(ea.ckpts, r.main.iter)}
-              title={
-                ckptForIter(ea.ckpts, r.main.iter)
-                  ? `为 it${r.main.iter} 启动课程设计评估（evalA）`
-                  : `未发现 it${r.main.iter} 权重归档`
-              }
-              onClick={() => ea.onEvalA(r.main.iter)}
-            >
-              {ea.busyIters.has(r.main.iter) ? '…' : 'evalA'}
-            </button>
-          ) : null}
-        </span>
-      ) : (
-        <span className="tc-muted tc-nowrap">
-          eval it{r.iter}
-          {r.eval.dropped > 0 ? (
-            <span
-              className="tc-pill tc-pill--note"
-              title="评估窗口内未收官、被下轮权重分发清场的评估局数"
-            >
-              缺{r.eval.dropped}
-            </span>
-          ) : null}
-        </span>
-      ),
-  }
-}
-
-/** 共享列：技能读数（主行走 rollout 实际值；eval 行走干净评估实际值）。 */
-function skillCols(): Col<MetricRow>[] {
-  return [
-    {
-      ...colDef('avgWinTicks'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          r.main.actuals?.avgWinTicks != null ? (
-            r.main.actuals.avgWinTicks
-          ) : r.main.actuals ? (
-            <span title="无胜局耗时字段，回退全样本均值">{r.main.actuals.avgTicks}≈</span>
-          ) : (
-            <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-              {r.main.avgTicks}≈
-            </span>
-          )
-        ) : r.eval.avgWinTicks != null ? (
-          r.eval.avgWinTicks
-        ) : r.eval.avgTicks !== null ? (
-          <span title="无胜局耗时字段，回退全样本均值">{r.eval.avgTicks}≈</span>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      ...colDef('kills'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          r.main.actuals?.killRate != null ? (
-            <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.main.actuals.killRate)}</span>
-          ) : r.main.actuals ? (
-            <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀（非百分比）">
-              {fmtPerGame(r.main.actuals.totalKills, r.main.actuals.games)}
-            </span>
-          ) : (
-            <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-              {fmtNum(r.main.kills, 1)}≈
-            </span>
-          )
-        ) : r.eval.killRate != null ? (
-          <span title="歼灭率 = Σ击杀 / Σ关卡敌数">{fmtPct(r.eval.killRate)}</span>
-        ) : r.eval.totalKills != null && r.eval.games > 0 ? (
-          <span className="tc-muted" title="缺关卡敌数，显示每局平均击杀">
-            {fmtPerGame(r.eval.totalKills, r.eval.games)}
-          </span>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      ...colDef('dmgPerKill'),
-      cell: (r) => {
-        const pct = r.kind === 'main' ? r.main.actuals?.dmgPerKillPct : r.eval.dmgPerKillPct
-        const abs = r.kind === 'main' ? r.main.actuals?.dmgPerKill : r.eval.dmgPerKill
-        if (pct != null)
-          return <span title="每杀承伤 / (命数×满血)；越小越会周旋">{fmtPct(pct)}</span>
-        if (abs != null)
-          return (
-            <span className="tc-muted" title="缺容量分母，显示每杀承伤绝对 HP">
-              {fmtNum(abs, 1)}
-            </span>
-          )
-        return <span className="tc-muted">-</span>
-      },
-    },
-    {
-      ...colDef('residualHp'),
-      cell: (r) => {
-        const pct = r.kind === 'main' ? r.main.actuals?.avgResidualHpPct : r.eval.avgResidualHpPct
-        const abs = r.kind === 'main' ? r.main.actuals?.avgResidualHp : r.eval.avgResidualHp
-        if (pct != null)
-          return (
-            <span title="胜局剩余总血量 / 单命满血（三命全在 = 300%，按满额计）">
-              {fmtPct(pct)}
-            </span>
-          )
-        if (abs != null)
-          return (
-            <span className="tc-muted" title="缺容量分母，显示胜局平均残血 HP">
-              {abs}
-            </span>
-          )
-        return <span className="tc-muted">-</span>
-      },
-    },
-    {
-      ...colDef('loot'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          r.main.actuals ? (
-            <span title="每局平均拾取数/掉落数">
-              {fmtLootPickDrop(
-                r.main.actuals.totalPU,
-                r.main.actuals.totalPUSpawn,
-                r.main.actuals.games,
-              )}
-            </span>
-          ) : (
-            <span className="tc-muted" title="该轮磁盘数据已清理，估算值">
-              {fmtNum(r.main.loot == null ? null : r.main.loot * 100, 0)}%≈
-            </span>
-          )
-        ) : r.eval.totalPU !== null ? (
-          <span title="每局平均拾取数/掉落数">
-            {fmtLootPickDrop(r.eval.totalPU, r.eval.totalPUSpawn, r.eval.games)}
-          </span>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-  ]
-}
-
-/** 逐局指标列：主行显示本轮 rollout 采样的均值，eval 子行显示干净评估的均值。
- *  默认隐藏；列菜单里逐个打开。完整六种统计量在 hover 与放大浮窗里。 */
-function behaviorCols(): Col<MetricRow>[] {
-  return BEHAVIOR_METRICS.map((def: BehaviorMetricDef) => ({
-    ...colDef(`bm:${def.key}` as MetricColKey),
-    sortValue: (r) => {
-      const st =
-        r.kind === 'eval'
-          ? r.eval.behaviorMetrics?.[def.key]
-          : r.main.actuals?.behaviorMetrics?.[def.key]
-      return st?.mean ?? null
-    },
-    cell: (r) => {
-      const st =
-        r.kind === 'eval'
-          ? r.eval.behaviorMetrics?.[def.key]
-          : r.main.actuals?.behaviorMetrics?.[def.key]
-      if (!st) return <span className="tc-muted">-</span>
-      const all = METRIC_STAT_KEYS.map(
-        (k) => `${METRIC_STAT_LABEL[k]} ${fmtMetricStat(st[k], def)}`,
-      ).join(' · ')
-      return <span title={`${def.title}\n${all}`}>{fmtMetricStat(st.mean, def)}</span>
-    },
-  }))
-}
-
-/**
- * 列工厂。
- * - eval-only：列结构与顺序与首页 Hero EvalTable 逐列一致
- *   （iter / 时间 / eval 胜率 / b01 / b10 / p / delta / 过拟合 / 技能列 / 得分 / 用时 / wver）。
- * - all / rollout：主行诊断列（rollout / PPO / KL…）；eval 子行同技能读数。
- */
-function buildMetricCols(
-  ea: EvalACols,
-  mode: IterFilter,
-  baselineIter: number | null,
-): Col<MetricRow>[] {
-  const timeCol: Col<MetricRow> = {
-    ...colDef('time'),
-    cell: (r) => <span className="tc-muted">{r.kind === 'main' ? r.main.time : r.eval.time}</span>,
-  }
-  /** 胜率列：两处调用分别是主行「胜率」与 eval 视图「eval 胜率」——两个列键共用一份格子渲染。 */
-  const winRateCol = (key: 'winRate' | 'evalRate'): Col<MetricRow> => ({
-    ...colDef(key),
-    cell: (r) =>
-      r.kind === 'main' ? (
-        <Badge tone={winTone(r.main.winRate)}>{fmtPct(r.main.winRate)}</Badge>
-      ) : r.eval.winRate !== null ? (
-        <>
-          <Badge
-            tone={winTone(r.eval.winRate)}
-            title={`干净评估（greedy 固定语料）· 评估权重 = 第 ${r.iter} 轮 PPO 更新前 · ${r.eval.games} 局 ${r.eval.wins} 胜 · 全歼 ${r.eval.clears} · outcomes: ${
-              Object.entries(r.eval.outcomes)
-                .map(([k, v]) => `${k}×${v}`)
-                .join(' ') || '-'
-            } · 用时 ${r.eval.sec}s · wver ${r.eval.wver.slice(0, 12)}…`}
-          >
-            {fmtPct(r.eval.winRate)}
-          </Badge>{' '}
-          <span className="tc-muted">
-            {r.eval.wins}/{r.eval.games}
-          </span>
-        </>
-      ) : (
-        <span className="tc-muted">-</span>
-      ),
-  })
-  const scoreCol: Col<MetricRow> = {
-    ...colDef('scoreMean'),
-    cell: (r) =>
-      r.kind === 'main' ? (
-        fmtNum(r.main.scoreMean, 4)
-      ) : r.eval.scoreMean !== null ? (
-        r.eval.scoreMean.toFixed(4)
-      ) : (
-        <span className="tc-muted">-</span>
-      ),
-  }
-
-  if (mode === 'eval') {
-    return [
-      iterCol(ea),
-      timeCol,
-      winRateCol('evalRate'),
-      ...pairedCols(baselineIter),
-      ...skillCols(),
-      ...behaviorCols(),
-      scoreCol,
-      {
-        ...colDef('evalSec'),
-        cell: (r) =>
-          r.kind === 'eval' ? `${r.eval.sec.toFixed(0)}s` : <span className="tc-muted">-</span>,
-      },
-      {
-        ...colDef('wver'),
-        cell: (r) =>
-          r.kind === 'eval' ? (
-            <span className="tc-mono tc-muted tc-small" title={r.eval.wver}>
-              {r.eval.wver.slice(0, 7)}
-            </span>
-          ) : (
-            <span className="tc-muted">-</span>
-          ),
-      },
-    ]
-  }
-
-  return [
-    iterCol(ea),
-    timeCol,
-    winRateCol('winRate'),
-    ...skillCols(),
-    {
-      ...colDef('phaseSecs'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <span title={phaseSecsTitle(phaseSecs(r.main))}>{fmtPhaseSecs(phaseSecs(r.main))}</span>
-        ) : (
-          <span title="eval 窗口用时" className="tc-num">
-            {r.eval.sec.toFixed(0)}s
-          </span>
-        ),
-    },
-    scoreCol,
-    ...klEntropyCols(),
-    // 采样范围压尾：不搅动既有读序（窗口/进度是新事实，要时往右扫一眼；列显隐可持久化）。
-    ...samplingCols(),
-    // 行为指标压最后：默认隐藏，列菜单里按需打开。
-    ...behaviorCols(),
-  ]
-}
-
-/** 采样范围两列（动态采集/轮换专属；eval 行/非动态采集轮显—，不编读数）。
- *
- *  为什么单独两列而不是并进胜率列：窗口（采了哪些关）与各关进度（采够了没）是**采样**
- *  事实，与「练得好不好」正交；混在一格会让两个问题互相淹没（「某关连着几轮没被采到」
- *  这种账正是要一眼看得见）。 */
-function samplingCols(): Col<MetricRow>[] {
-  return [
-    {
-      ...colDef('window'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <span title={windowTitle(r.main.rotation)}>{windowText(r.main.rotation)}</span>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      ...colDef('stageProgress'),
-      cell: (r) =>
-        r.kind === 'main' && r.main.volume ? (
-          <span title={volumeTitle(r.main.volume)}>{volumeText(r.main.volume)}</span>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-  ]
-}
-
-/** PPO 诊断列（rollout 行专属；eval-only 模式下整列是—，由配对列替换）。 */
-function klEntropyCols(): Col<MetricRow>[] {
-  return [
-    {
-      ...colDef('kl'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <Badge tone={klTone(r.main.kl)}>{fmtNum(r.main.kl, 4)}</Badge>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      ...colDef('entropy'),
-      cell: (r) =>
-        r.kind === 'main' ? fmtNum(r.main.entropy, 3) : <span className="tc-muted">-</span>,
-    },
-    {
-      ...colDef('meanRet'),
-      cell: (r) =>
-        r.kind === 'main' ? (
-          <Badge tone={retTone(r.main.meanRet)}>{fmtNum(r.main.meanRet, 3)}</Badge>
-        ) : (
-          <span className="tc-muted">-</span>
-        ),
-    },
-    {
-      ...colDef('lr'),
-      cell: (r) => (r.kind === 'main' ? fmtNum(r.main.lr, 6) : <span className="tc-muted">-</span>),
-    },
-  ]
-}
+import { buildMetricCols, buildRows, type MetricRow } from './metric-table-cols'
 
 export function MetricsTable({
   stateView,
@@ -544,6 +58,54 @@ export function MetricsTable({
     }
     return 'all'
   })
+  // ── 指标表配置（用户 2026-11-10）：哪几列上屏 + 逐局指标用哪种统计量 ──
+  // 持久化与 Hero 的走势配置同一套路：SSR 首帧 = 默认（逐局指标列隐藏、全均值），
+  // hydrate 后由 effect 从 localStorage 恢复偏好。
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(() => new Set(DEFAULT_HIDDEN_COL_KEYS))
+  useEffect(() => {
+    try {
+      setHiddenCols(
+        parseHiddenCols(
+          localStorage.getItem(TC_METRICS_COLS),
+          localStorage.getItem(TC_METRICS_HIDDEN_LEGACY),
+        ),
+      )
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const [metricStats, setMetricStats] = useState<BehaviorMetricStatMap>(() => ({
+    ...DEFAULT_BEHAVIOR_METRIC_STATS,
+  }))
+  useEffect(() => {
+    try {
+      setMetricStats(parseBehaviorMetricStats(localStorage.getItem(TC_METRICS_STAT)))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const [colsOpen, setColsOpen] = useState(false)
+  const onToggleCol = (key: string, on: boolean): void => {
+    const next = new Set(hiddenCols)
+    if (on) next.delete(key)
+    else next.add(key)
+    setHiddenCols(next)
+    try {
+      localStorage.setItem(TC_METRICS_COLS, JSON.stringify([...next]))
+    } catch {
+      /* ignore */
+    }
+  }
+  const onMetricStat = (key: BehaviorMetricKey, stat: MetricStatKey): void => {
+    const next = { ...metricStats, [key]: stat }
+    setMetricStats(next)
+    try {
+      localStorage.setItem(TC_METRICS_STAT, JSON.stringify(next))
+    } catch {
+      /* ignore */
+    }
+  }
+
   const [ckpts, setCkpts] = useState<EvalCkptFile[]>([])
   const [busyIters, setBusyIters] = useState<Set<number>>(() => new Set())
   // evalA 横幅（用户 2026-10-18：与首页同一形状 + 读数回填后自动隐藏；原来是 InlineNotice 一行
@@ -633,7 +195,7 @@ export function MetricsTable({
     })()
   }
 
-  const metricCols = buildMetricCols(
+  const allCols = buildMetricCols(
     {
       course,
       ckpts,
@@ -644,7 +206,10 @@ export function MetricsTable({
     filter,
     // 配对基线轮：任一非空 pairedVsFirst 的 baseIter（全空 → null，配对列标—）。
     pairedBaselineOf((stateView?.metrics.iters ?? []).map((r) => r.evalData?.pairedVsFirst)),
+    metricStats,
   )
+  // 显隐由本页持有（「指标表配置」弹窗是唯一入口）⇒ 只把要显示的列交给表格。
+  const metricCols = allCols.filter((c) => !hiddenCols.has(c.key))
 
   if (!stateView?.metrics.available) {
     return (
@@ -675,6 +240,16 @@ export function MetricsTable({
         initialSortKey="iter"
         initialSortDir="desc"
         storagePrefix="tc.metrics"
+        // 显隐已由本页接管（弹窗 + `tc.metrics.cols`）⇒ 收起表格自带的「列▾」。
+        columnsMenu={false}
+        // 表头可拖拽重排（用户 2026-11-10）：顺序存 `tc.metrics.order`，与显隐/统计量各存一份。
+        reorderable
+        // 顺序按**键全集**存（含被藏起来的列 / eval 档独有的列）：否则切行过滤或取消隐藏时，
+        // 那些列会被当成「新列」归到表尾（用户 2026-11-10）。
+        orderKeys={METRIC_ORDER_KEYS}
+        // 缺键（另一视图 / 刚取消隐藏的列）按各自视图的模型序归位：动 rollout 的列不会
+        // 把 eval 视图的列带走（用户 2026-11-10）。
+        orderRefs={METRIC_ORDER_REFS}
         emptyText="尚无完整迭代记录"
         ariaLabel="训练指标"
         toolbarLeft={
@@ -690,6 +265,14 @@ export function MetricsTable({
               onChange={setFilterPersist}
             />
             <span className="tc-muted tc-small">{rows.length} 轮</span>
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              title="选哪些列上屏，以及逐局指标用哪个统计量（均值/中位数/p90…）"
+              onClick={() => setColsOpen(true)}
+            >
+              指标配置
+            </button>
             {stateView.metrics.source === 'mirror' ? (
               <span
                 className="tc-badge tc-badge--y"
@@ -708,6 +291,15 @@ export function MetricsTable({
           </>
         }
       />
+      <MetricsConfigModal
+        open={colsOpen}
+        cols={allCols.map((c) => ({ key: c.key, label: c.label, hint: c.thTitle }))}
+        hidden={hiddenCols}
+        stats={metricStats}
+        onToggle={onToggleCol}
+        onStat={onMetricStat}
+        onClose={() => setColsOpen(false)}
+      />
       <p className="tc-caption tc-caption--flush">
         胜局耗时/击杀/承伤·杀/道具 = <b>实际值</b>（it&#123;N&#125;/**/manifest.json 逐局聚合，
         道具列 = 每局平均拾取/掉落； stage+seed
@@ -715,7 +307,8 @@ export function MetricsTable({
         每杀承伤/(命数×满血)，残血=胜局残血/可支配生命容量（均百分比）；带 ≈ 为估算。 eval 行 ={' '}
         <b>干净评估</b>（greedy 固定语料），iter=N 评估的是第 N 轮 PPO 更新前的权重；缺N =
         窗口内未收官被清场。逐局指标列 = 完整 metrics 列（主行 rollout、eval
-        子行干净评估），默认隐藏（列菜单可开），表内为逐局均值，完整六种统计量见 hover。
+        子行干净评估），默认隐藏；点「指标配置」选上屏的列、并逐指标选统计量
+        （均值/中位数/最小/最大/p90/p99，缺省均值），单元格 hover 仍列全六种。
       </p>
     </div>
   )

@@ -13,6 +13,128 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §52 `stopOthers` 接成真命令：dashboard 中转，其它页 15s 内停会话（2026-11-11）
+
+**背景**：`§2026-11-09-goalnn-offline-start-report` 只上报、不发命令（面板上写着「dashboard 目前只记录」）。
+用户要求接成真命令——但浏览器跨页没法互停，dashboard 是唯一共用的会合点，所以由它中转。
+
+**通道（不新增 op 语义，ack 就是一行 op）**：
+
+| 环节 | 接口 | 触发 |
+|---|---|---|
+| 上报 | `POST /api/notebookOp`（既有） | 离线页训练 cell 开始执行，`offline:cell-start … stopOthers=1` |
+| 派发 | 同上请求内 | dashboard 给**其它**最近 10 分钟有 op 写入的会话各记一条 `stop-session`，并往发起会话写一行证据 `stop:others targets=N/M site:session,…` |
+| 取件 | `GET /api/notebookCmds?site=&session=` | 各页每 15s 一次（自定义头同 `/api/notebookHub`） |
+| 执行 | 页面自己点「停止会话」 | Kaggle host 走 `stopNow()`（先 flush 再点外层 Stop）；Colab/AI Studio/魔搭走本页 `stopSession` |
+| ack | `POST /api/notebookOp` 落 `cmd:stop-session id=<id> ok|fail …` | 同一行既是证据又是 ack：服务端把命令置 ok/fail，之后不再下发 |
+
+**存储**：`<notebookLogsDir>/<site>/<session>.cmds.json`（与 `.ops.jsonl` 同目录、同寿命——`pruneNotebookLogs`
+一并删）。同 id 后写胜出，单文件保留最近 50 条；写盘走 tmp + rename（读改写不会看到半截 JSON）。
+
+**判据与上限**（`api/notebook-cmd.ts` 的常量，都是参数化入口）：
+- 只停「其它 **PPO worker 页**」：发起会话自己排除在外；目标 = 会话**同时**满足 ① `.ops.jsonl` mtime 在
+  **10 分钟**内（活着）∧ ② `.log` 尾巴（最近 **64KB**）里有 worker 标记 `[worker]` / `[worker-supervisor]`
+  （`worker.py`/`bc_job.py`/`download.py`/`http.py` 的每一行都带这个前缀）。只搬日志的普通页、离线训练页、
+  rollout 节点都不会被打（2026-11-11 用户口径：「只停 PPO worker 页，不误停正在搬运日志的普通页」）；
+  单次最多 **5** 个目标（mtime 新的优先）；被跳过的非 worker 页计入证据行 `skipped_non_worker=N`；
+- **幂等**：目标在命令 **TTL 15 分钟**内已有 pending ⇒ 跳过（同一轮 cell-start 被重放不会连点）；
+- **fail closed**：站/会话非法、路径越界一律抛；过期 pending 不下发（页面几小时后醒来也不会被停）。
+
+**分类判据的实测**：真实 `tmp/notebook-logs` 上——AI Studio worker 会话（8MB 日志）尾巴命中；`.1.log`
+备份段与 `…-battle-offline-…` 会话不命中。日志缺席/读不到 ⇒ **fail closed 不停**（宁可不问，也不停一个
+说不准的页）。排障口 `requirePpoWorker: false` 能放开成「全部活会话」（只给测试/人工排查用）。
+
+**用户脚本侧**（`app/stop-cmd.ts`）：`session()` 为空（Kaggle host 还没跟 frame 握手）就不发请求——绝不拿
+别人的命令停自己；同一 id 只停一次（内存集合 + 服务端 ack 双保险）；停不掉就 ack `fail` + 原因（绝不静默）；
+网络错/坏 JSON 当这一拍没取到，下一拍再来。伴生脚本关掉（`config.enabled=false`）就不取命令。
+
+**旧版本兼容**：没装新脚本的页不会取件 ⇒ 命令 15 分钟后自然失效（不补投、不重试到天亮）。
+
+**验收**：dashboard `bun run typecheck` / `bun run lint` / `bun run test`（**2069 pass**，新增
+`tests/notebook-cmd.test.ts` 15 条（含只停 worker 页、尾巴窗口、证据计数） + `prune` 应用到 `.cmds.json`）；userscript `bun run check`
+（typecheck 65 文件 / oxlint 0 / **319 pass** / `dist` 重建，新增 `test/stop-cmd.test.ts` 10 条 +
+接线守卫 1 条）。**未实测**：真实 Kaggle 页上「点 Stop 后 ack 是否在 15s 内出现」——需要浏览器里装新
+`dist/notebook-companion.user.js` 后跑一次离线训练。
+
+## §51 离线训练「开始执行」探测：判据三处静默 fail closed，补看门狗 + 读数（2026-11-11）
+
+**触发**（用户）：userscript 加了「自主云机启动后停其它 PPO worker」，面板写着「训练 cell 开始
+执行时上报 stopOthers；dashboard 目前只记录，不发停止命令」——要求查日志确认探测是否生效。
+
+**结论：没有生效。** `tmp/notebook-logs/**/*.ops.jsonl`（57 个会话文件）里：
+
+| op | 条数 | 读数 |
+|---|---|---|
+| `offline:detected` | **14** | 识别离线页正常；最近一条 11-10 23:10（北京） |
+| `stopPpo` | **3** | 面板开关被点过（`on`） |
+| `offline:cell-start` | **0** | 从未发生 ⇒ dashboard 也从未收到过任何 `stopOthers` 值 |
+
+三个 op 是**同一提交**（`1413c6a0`，11-09 21:21）一起加的 ⇒ 不存在「装的是旧版」。今天的会话
+`kaggle-…-offline-edit-1andil` 更是把窗口钉死：训练 00:09 起跑、07:33 失败、08:41 手动重跑，期间
+host 侧还有 op（00:19 `saveAndClear`、00:21 autosave、07:50 `log:open`——最后这条是面板自己发的，
+脚本在线），却一条 `cell-start` 都没有。
+
+**三处静默 fail closed**（`app/offline-watch.ts`，每处都直接 `return null` 且不留读数）：
+
+1. **基线采在「开始之后」**：`baseline` 在第一拍（已 exec）才采，只认「从这一拍往后输出继续变」
+   ⇒ 前几秒没输出就永远错过；
+2. **`busy` 依赖 Jupyter 状态栏**：`.jp-Notebook-ExecutionIndicator/.jp-StatusBar-ExecutionIndicator`
+   在 Kaggle UI 上通常不存在 ⇒ `kernelStatus` 恒 `unknown` ⇒ `busyAlone` 永远 false；
+3. **`target` 缓存永不失效**：页面重渲染换了 cell id ⇒ `cells.find(same)` 永远找不到 ⇒ 永久哑。
+
+**落地**（同时上是「诊断 + 判据」两半，不拆开）：
+
+- 证据改成**相邻两拍**的输出变化（不再比「起点」）；
+- 新增**看门狗**：`others === 0` 且连续 `heldPolls=3` 拍执行、等满 `heldMs=3000` ⇒ 以
+  `evidence=held` 上报。它只写 op、不下发命令，所以宁可晚 1s 也不永远不说；排队（别的 cell 在跑）
+  仍**不**上报，原有不变量不变；
+- `target` 连续 `missingLimit=3` 拍不在 `cells()` 里 ⇒ 清缓存重认（虚拟化滚出一两拍不会误重置）；
+- 新增 `diag()` 读数（`execPolls / kernel / outLen / others / waitedMs / phase`）：
+  `offline:detected` / `offline:cell-start` 的 detail 带上 `kernel=… outLen=…`；连续 5 拍执行却没
+  上报时落一条 **`offline:watch-diag`**（一次执行周期一行，帧内与 single 两条腿都发，host/single
+  都落 op）。下一次真实运行若还不报，日志会直接指出卡在哪一格。
+
+**验收**：`cd userscript && bun run check`——typecheck 63 文件 0 错 · oxlint 0 · **308 pass** ·
+`dist/notebook-companion.user.js`（+ `.debug`）重建。用例：`test/offline-watch.test.ts` 新增 Kaggle 形态（kernel
+unknown + 输出恒空 ⇒ `held`）、相邻拍变化、排队不报、`diag()` 读数、重渲染换 id 后重认；
+`test/offline-wiring.test.ts` 新增读数出口守卫（`offline:watch-diag` ×1 帧内 note + ×2 op）。
+
+**未验证的部分**：真实 Kaggle DOM 上 `cellExecuting` / `outputText` 到底哪一格不成立——本地没有
+DOM 快照，只能等下一次带诊断的运行（这也是先上读数的理由）。
+
+## §50 云机 eval 行只在 `metricValues` 里带游戏读数：读侧一律快照优先（2026-11-11）
+
+**触发**（用户）：自主云机训练时 eval 指标与本地集群跑的不一致——`o2-reflex` it300 本地评
+（歼灭率 87.4% · 道具 0.39/0.91）正常，it290/295 云机评（歼灭率 8.4% · 道具 0.35/0.35）明显不对。
+
+**根因**：云机补传的逐局 eval 行走 `remote/deliver_wire.py::slim_eval_row` 的投影 = 「白名单
+顶层键 + 其余数值列进 `metricValues`」；本机 in-loop eval 写的是全字段平铺。`iters.ts` 的
+`collectEvalSummaries` 只对 `BEHAVIOR_METRICS` 用了 `evalMetricValue`（快照优先），核心列仍
+直读顶层 ⇒ 两条降级路径：① `enemyTotal` 缺席 → `resolveEnemyTotal` 关卡反查（classic 20 敌，
+课程实跑 2 敌）⇒ 歼灭率 ÷10（669 杀 ÷ 8000 敌 = 8.4%）；② `powerUpsSpawned`（及 `puSpawn*`
+分项）缺席 → 退回 `dims.loot` 比值，而 o2 系列的 `loot` 维恒等于拾取数 ⇒ 掉落被写成拾取
+（0.35/0.35）。**读数本身没问题**：同期云机 eval winRate 78.5%、Σkills/ΣenemyTotal 83.6%。
+
+**修法**：白名单外的列全部改走快照优先的取数口（`evalMetricValue` / `evalboard/ingest.ts`
+的 `snapshotNum`），三处读者一次改完：
+`collectEvalSummaries`（`enemyTotal` / `powerUpsSpawned`（含 `puSpawn*` 分项）/ `startLives` /
+`playerHpRatio`）· `readEvalGames`（逐局弹窗的 `playerHpRatio` ⇒ 残血不再退成下限）·
+`evalboard/ingest.ts::ingestEvalRow`（`enemyTotal` / `playerShots` / `enemyHits` / `playerHits` /
+`stuckTicks` / `firstKillTick` / `cellsVisited` / `playerLevel` / `puSpawn*` / `puGot*`；
+`enemyTotal` 之前对云机行恒落默认 20 ⇒ A 层 `killCompletion` 也是 ÷10 的假值）。
+历史行不必重传：修读侧一次就够，云机段那 60 轮的旧行读数同时恢复。**不改** Python 白名单
+（这些列已随 `metricValues` 到达，再平铺一份 = 双份体积），也不在 hub 合并时改写行（补传
+与导入两条腿共用同一份账本，改写会把「账本 = 写端原样」这条口径打掉）。
+
+**验证**：`dashboard/tests/server-iters-eval-wire-shape.test.ts`（平铺行 vs 独立重实现的投影行
+必须聚出**同一份** summary 与逐局行；未修前 killRate 0.05 对 0.5、残血 213 对 132）+
+`dashboard/tests/evalboard-ingest.test.ts`（快照列不落默认 20/0；白名单列仍走顶层）。
+真账本回放 `tmp/o2-reflex`：it295 83.6% · 0.35/0.89、it290 84.5% · 0.36/0.92（与 it300 本地
+87.4% · 0.39/0.91 同带）；真云机行的 `ingestEvalRow` 现在给出 `enemyTotal 2 / playerShots 8`。
+
+**教训**：白名单投影与读侧聚合是一对契约，**先看白名单，再看读侧**——任何新进聚合的逐局列
+要么进白名单，要么必须走 `evalMetricValue`；漏一列得到的是静默的 10× 偏差，不是报错。
+
 ## §49 停课顺手清本课锁（2026-11-07）
 
 **指针**：用户口径「首页点停课时，把对应课程的 lock 清理掉」——`stopCourse` 现在调

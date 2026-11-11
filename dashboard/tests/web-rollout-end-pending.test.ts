@@ -6,6 +6,8 @@
  * 背景（用户 2026-10-19 口径）：指标行现在可以来自 `rollout_end`（采集收官即刻），
  *  此时 PPO 侧那几列是 NaN 缺口。若 UI 不标注，操作员会把「空」读成「没动」。
  *  ⇒ iter 列给一盏灯；它**只说明来源**，不动任何读数。
+ *  例外（用户 2026-11-10）：**最新一轮不挂状态徽标**——它几乎总是 pending，常亮就是噪声。
+ *  Hero 主表按「不是表头那一行」判；`/metrics` 完整表不加这个过滤（它是全量分析面）。
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -60,13 +62,21 @@ function mkView(iters: IterRow[]): ConsoleStateView {
 describe('rollout_end 行的「PPO 中」标记', () => {
   it('Hero 主表：pendingPpo 行出标记，普通行不出', async () => {
     const { Hero } = await import('../src/web/app/panels/Hero')
-    const pending = { ...baseRow(6), pendingPpo: true }
+    // pending 行不在表头（it6 正常、it5 pending）：旧行照旧标灯。
+    const pending = { ...baseRow(5), pendingPpo: true }
     const html = renderToString(
-      h(Hero, { stateView: mkView([pending, baseRow(5)]), onMore: () => {} }),
+      h(Hero, { stateView: mkView([baseRow(6), pending]), onMore: () => {} }),
     )
     expect(html).toContain('PPO 中')
     // 只给 pending 那一行：整页只有一处标记
     expect(html.split('PPO 中').length - 1).toBe(1)
+
+    // 最新一轮（表头第一行）不挂状态徽标（2026-11-10 用户）：它恒是 pending，标灯是噪声。
+    const newest = { ...baseRow(6), pendingPpo: true }
+    const top = renderToString(
+      h(Hero, { stateView: mkView([newest, baseRow(5)]), onMore: () => {} }),
+    )
+    expect(top).not.toContain('PPO 中')
 
     const plain = renderToString(
       h(Hero, { stateView: mkView([baseRow(6), baseRow(5)]), onMore: () => {} }),

@@ -872,6 +872,8 @@ export function pruneNotebookLogs(
     // 操作日志与 `.log` 同寿命（命名口径见 api/notebook-op.ts::notebookOpsPaths）
     rmIf(path.join(path.dirname(s.logPath), `${s.session}.ops.jsonl`))
     rmIf(path.join(path.dirname(s.logPath), `${s.session}.1.ops.jsonl`))
+    // 下行命令（`stopOthers`）与 ops 同寿命（命名口径见 api/notebook-cmd.ts::notebookCmdsPath）
+    rmIf(path.join(path.dirname(s.logPath), `${s.session}.cmds.json`))
     removed += 1
   }
   return removed

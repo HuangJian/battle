@@ -80,7 +80,9 @@ describe('W1 接线：活动闸 / 路由顺序 / 虚拟键', () => {
     expect(SERVER).toContain(
       "'/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) }",
     )
-    expect(SERVER).toContain('appendNotebookOp(notebookLogsDir()')
+    // 写盘仍走同一个目录来源（2026-11-11 起先取 `dir` 再复用：同一条请求里还要派下行命令）
+    expect(SERVER).toContain('const dir = notebookLogsDir()')
+    expect(SERVER).toContain('appendNotebookOp(dir, parsed.op, now)')
     // 两处日志载荷（页面 SSR + /api/log）都要接操作日志尾巴，漏一处就有一半的看不了
     expect(SERVER.match(/withNotebookOps\(/g)?.length ?? 0).toBe(2)
   })

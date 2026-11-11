@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 #: 逐轮重定向的 flag → 占位符名。值一律按当轮/当局实值写入（模板里是目标轮的值）。
 RETARGET_FLAGS: dict[str, str] = {
     "--stages": "stage",
@@ -27,6 +29,20 @@ RETARGET_FLAGS: dict[str, str] = {
     "--out": "out",
     "--wver": "wver",
 }
+
+
+def flag_value(argv: Sequence[str], flag: str) -> str | None:
+    """argv 里 `flag` 的第一个取值（无该 flag / 结尾无值 ⇒ `None`）。
+
+    住这里而不是各用各的：`worker.plan`（拼命令）与 `worker.greedy_round`（拆模板）用的是
+    同一口径，抄第三份会被 `tests/test_reuse_ledger.py` 的同名散落判据抓住——只留这一份，
+    上层用 `from worker.rollout_argv import flag_value` 引回自己的老名字。
+    """
+    try:
+        i = argv.index(flag)
+    except ValueError:
+        return None
+    return str(argv[i + 1]) if i + 1 < len(argv) else None
 
 
 def retarget_argv(

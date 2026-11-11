@@ -26,8 +26,9 @@ function harness(withMarker = true) {
     holdMs: 1000,
     snapshot: (): OfflineSnapshot => ({
       cells,
+      // 按**段号**认标记（不是 id）：重渲染换 id 的用例靠这个还能重新识别。
       sourceText: (cell) =>
-        withMarker && cell.id === TRAIN.id
+        withMarker && cell.index === TRAIN.index
           ? `${OFFLINE_CELL_MARKER} —— 改参数后点 Run`
           : '# warmup',
       executing: (cell) => running.has(cell.id),
@@ -123,6 +124,80 @@ describe('离线训练 cell：只认真正开始执行', () => {
     expect(h.watch.poll()).toBeNull() // 新一轮 pending
     h.advance(1500)
     expect(h.watch.poll()?.cell.id).toBe(TRAIN.id)
+  })
+
+  it('★ Kaggle 形态：认得执行、但内核状态与输出都读不到 ⇒ 看门狗仍上报（2026-11-11 现场）', () => {
+    // 现场：`offline:detected` 在、`offline:cell-start` 两天 0 条。Kaggle 没有 Jupyter 状态栏
+    // （kernel 恒 unknown），输出选择器也不一定命中（outLen 恒 0）——只靠前两条证据永远不响。
+    const h = harness()
+    h.output(TRAIN.id, '')
+    h.run(TRAIN.id)
+    h.kernel('unknown')
+    expect(h.watch.poll()).toBeNull() // 进 pending
+    h.advance(1000)
+    expect(h.watch.poll()).toBeNull() // 第 2 拍：拍数还不够
+    h.advance(1000)
+    expect(h.watch.poll()).toBeNull() // 第 3 拍：拍数够，但还没等满 heldMs(3000)
+    h.advance(1000)
+    expect(h.watch.poll()?.evidence).toBe('held')
+  })
+
+  it('输出「相对上一拍」变化即算（不要求从起点累计变）', () => {
+    // 旧版基线在**已经开始执行之后**才采：前几秒没输出就永远错过。新版只比相邻两拍。
+    const h = harness()
+    h.output(TRAIN.id, '')
+    h.run(TRAIN.id)
+    h.kernel('unknown')
+    expect(h.watch.poll()).toBeNull() // pending，基线 = ''
+    h.output(TRAIN.id, '[offline] course=o2-notax\n')
+    h.advance(1200)
+    expect(h.watch.poll()?.evidence).toBe('output')
+  })
+
+  it('排队（别的 cell 一直在跑、无输出、无内核读数）⇒ 看门狗也不报', () => {
+    const h = harness()
+    h.output(TRAIN.id, '')
+    h.run(WARM.id, TRAIN.id)
+    h.kernel('unknown')
+    expect(h.watch.poll()).toBeNull()
+    for (let i = 0; i < 6; i += 1) {
+      h.advance(1000)
+      expect(h.watch.poll()).toBeNull()
+    }
+  })
+
+  it('diag() 把「卡在哪一格」变成读数', () => {
+    const h = harness()
+    h.output(TRAIN.id, '')
+    h.run(WARM.id, TRAIN.id)
+    h.kernel('unknown')
+    expect(h.watch.poll()).toBeNull()
+    h.advance(500)
+    expect(h.watch.poll()).toBeNull()
+    const d = h.watch.diag()
+    expect(d).toMatchObject({
+      targetId: TRAIN.id,
+      phase: 'pending',
+      kernel: 'unknown',
+      outLen: 0,
+      others: 1,
+    })
+    expect(d.execPolls).toBeGreaterThanOrEqual(1)
+  })
+
+  it('目标 cell 连续 3 拍不在 cells() 里 ⇒ 丢掉缓存重新识别（页面重渲染换了 id 也不会永久哑）', () => {
+    const h = harness()
+    h.run(TRAIN.id)
+    h.kernel('busy')
+    expect(h.watch.poll()).toBeNull()
+    const renamed: CellRef = { id: 'train-v2', index: 1, kind: 'code' }
+    h.setCells([WARM, renamed])
+    for (let i = 0; i < 3; i += 1) expect(h.watch.poll()).toBeNull()
+    expect(h.watch.diag().targetId).toBeNull()
+    h.run(renamed.id)
+    expect(h.watch.poll()).toBeNull() // 重认后的第一拍：重新建基线
+    h.advance(1500)
+    expect(h.watch.poll()?.cell.id).toBe(renamed.id)
   })
 
   it('目标 cell 被虚拟化滚出 DOM ⇒ 不判、不重置阶段', () => {

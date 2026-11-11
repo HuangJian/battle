@@ -402,6 +402,10 @@ LAYERS: dict[str, int] = {
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，
     # 而是 1 + max(deps)）；`boot` 与 `hub_server` 因此分别在 L6 / L7。
     "hub.http_face": 5,
+    #: 云机轮内的 greedy 接线（2026-11-11，plan/greedy-offline-autonomous）：替 `remote/worker`
+    #: 背掉「rollout + greedy 波 + 并账」，依赖 `worker.greedy_round`(L3) / `worker.iter_rollout`(L1)
+    #: / `worker.reports`(L0) ⇒ **L4**（作业壳 L5 直接调它）。
+    "remote.offline_greedy": 4,
     "remote.worker": 5,
     # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。
@@ -483,6 +487,11 @@ LAYERS: dict[str, int] = {
     # greedy 结果配额的分层预筛（plan/greedy-outcome-quota rev4）：纯选择器，
     # 依赖面 = stdlib + `biz.course_spec`（不在本账本）⇒ **L0**。
     "worker.greedy_quota": 0,
+    #: 云机轮内的 greedy 采集阶段（2026-11-11，plan/greedy-offline-autonomous）：编排器，
+    #: 依赖面 = `worker.greedy_quota`(L0) + `worker.reports`(L0) + `worker.rollout_argv`(L0)
+    #: + `worker.volume_quota`(L1) + `worker.volume_alloc`(L2) ⇒ 拓扑秩 **L3**（与
+    #: `worker.stream_collect` 同层：两者都是「节点侧的采集调度」）。消费者 = `remote/worker`(L5)。
+    "worker.greedy_round": 3,
     "worker.kickstart_burn": 1,
     #: 本机评估失败的保真类型（plan/eval-gap-honesty D1）：只用 stdlib（re）⇒ L0。
     "worker.local_eval_error": 0,

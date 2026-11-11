@@ -304,6 +304,8 @@ class RunContext:
         self.t0 = time.time()
         #: 上一轮结果的 opt 原始字节的 sha（→ 下一轮 manifest.opt_sha，命中 blob_cache）
         self.last_opt_sha: str = ""
+        #: greedy 语料（2026-11-11）：「课程声明了 greedy_quota 但 ctx.course 缺失」只 WARN 一次。
+        self.greedy_course_warned: bool = False
         #: 已报过的「配额漂移」原值（manifest 与计划不一致）——同值不重复报。
         #: 2026-10-30（用户口径「prep 行只留必要读数」）：漂移不再进 prep 那行，
         #: 改成「值变了才报一行」——静默会让人以为两边一致。
@@ -688,6 +690,46 @@ def _seed_ref_blob_cache(
         "ref_weights.json、job 目录缺 blob.ref、blob_cache 未命中——修法：用带 ref 的任务包"
         "重导（export_bundle 见 job 目录 blob.ref 即自动打包），或把 ref_weights.json 放进产物目录"
     )
+
+
+def _reseed_anchors(
+    *,
+    manifest: dict,
+    job_dir: str | Path,
+    work_dir: str | Path,
+    artifacts_root: str | Path | None,
+    log: Callable[[str], None] = _log_default,
+) -> int:
+    """每轮开跑前把锚点（ref / demo）**缺了就补回** `blob_cache`。返回补了几件。
+
+    第三道兜底（2026-11-11 o2-notax it163）：`blob_cache` 是**有预算的**（三树合计 256MB，按
+    mtime 丢最旧）。段启动时种进来的 ref/demo 只此一份，自主腿没有下载通道 —— 它们被清掉的
+    下一轮，`_fetch_ref` 向空 base_url 发 GET = 确定性 `ProtocolError` = 整段死。另外两道是
+    「读命中 touch」（不让它们变最旧）与「prune 不删锚点」（`download.anchor_shas`）；这一道
+    管的是**已经没了**的情形：从产物目录 `ref_weights.json` / `demo.npz`、包根 `blob.ref` 重种。
+
+    只看「在不在」，**不重算 sha**：命中路径由一个 stat 走完（每轮哈希 0.4MB 是无谓开销）；
+    损坏的件由 `_resolve_blob` 的 sha 校验兜（它会报“cache 命中但 sha 不符”并重取）。
+    在 = 完全不动（不写盘、不改 mtime，否则 prune 的读数会失真）。
+    """
+    cache = Path(work_dir) / "blob_cache"
+    filled = 0
+    for sha_key, seed in (
+        ("ref_sha", _seed_ref_blob_cache),
+        ("demo_sha", _seed_demo_blob_cache),
+    ):
+        sha = str(manifest.get(sha_key, "") or "")
+        if not sha or (cache / sha).is_file():
+            continue
+        seed(
+            manifest=manifest,
+            job_dir=job_dir,
+            work_dir=work_dir,
+            artifacts_root=artifacts_root,
+            log=log,
+        )
+        filled += 1
+    return filled
 
 
 def _read_opt_file(root: Path, name: str) -> bytes:

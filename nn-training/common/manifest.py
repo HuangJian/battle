@@ -559,7 +559,15 @@ def validate_rollout_spec(spec: object) -> dict:
     # wire 兼容面上。这里只要求「是对象」：完整形状 + 同源校验在
     # `worker.volume_alloc.validate_runtime_volume`（节点在用它之前跑，失败即响亮报错），
     # 免得在本层抄第三份字段表。
-    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {"argv", "volume"}
+    # `greedy_quota` / `greedy_round_target`（2026-11-11，plan/greedy-offline-autonomous）：
+    # 自主云机轮内的 greedy 采集预算。**只在课程声明了 `greedy_quota` 时出现**——
+    # 缺席的旧包输出逐字节不变（两个键都不在默认表里）。
+    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {
+        "argv",
+        "volume",
+        "greedy_quota",
+        "greedy_round_target",
+    }
     out = dict(ROLLOUT_SPEC_DEFAULTS)
     for k, v in spec.items():
         if k not in allowed:
@@ -570,6 +578,21 @@ def validate_rollout_spec(spec: object) -> dict:
     if "volume" in out and not isinstance(out["volume"], dict):
         raise ProtocolError(
             f"manifest.rollout.volume 必须是对象，收到 {type(out['volume']).__name__}"
+        )
+    if "greedy_quota" in out and out["greedy_quota"] is not None:
+        if not isinstance(out["greedy_quota"], dict):
+            raise ProtocolError(
+                f"manifest.rollout.greedy_quota 必须是对象，收到 {type(out['greedy_quota']).__name__}"
+            )
+        raw_target = out.get("greedy_round_target")
+        if isinstance(raw_target, bool) or not isinstance(raw_target, int) or raw_target <= 0:
+            raise ProtocolError(
+                "manifest.rollout.greedy_quota 需要同批的 greedy_round_target（本轮**放大后**的"
+                f"总 target，正整数），实得 {raw_target!r}——分母缺失就无从算 12%"
+            )
+    elif "greedy_round_target" in out:
+        raise ProtocolError(
+            "manifest.rollout.greedy_round_target 只与 greedy_quota 一起出现（孤键 = 半份契约，拒收）"
         )
     raw_argv = spec.get("argv")
     if not isinstance(raw_argv, list) or not raw_argv:

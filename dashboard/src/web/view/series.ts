@@ -1,5 +1,6 @@
 /** series.ts — 指标序列切分与逐指标序列抽取（趋势图数据源）。 */
 import { behaviorMetricDef, type BehaviorMetricKey, type MetricStatKey } from './behavior-metrics'
+import { formulaMetricName } from './formula-metrics'
 import { IterRow } from './metric-types'
 
 // ────────────────────────── 纯函数：指标系列 ──────────────────────────
@@ -12,6 +13,9 @@ export interface Series {
   iters: number[]
   /** 稀疏口径（eval / 行为统计）：范围档位按有效点截取，而不是按迭代轮数。 */
   sparse?: boolean
+  /** 这一序列对应 shaping formula 里的指标名（没有对应 = 缺省；hover 用，
+   *  见 `view/formula-metrics.ts`）。 */
+  formula?: string
 }
 
 /** 走势图范围档位：全量 / 最近 60% 点 / 最近 30% 点。 */
@@ -144,6 +148,8 @@ export function behaviorMetricSeries(
   return {
     key: `behavior-${key}-${stat}-${source}`,
     label: `${def?.label ?? key}${source === 'eval' ? ' · eval' : ''}`,
+    // 逐局指标就是 formula 里的指标变量本身（eval 专属两列没有公式名 ⇒ 缺省）。
+    formula: formulaMetricName(key) ?? undefined,
     vals: chrono.map((r) => {
       const st =
         source === 'rollout'
@@ -218,6 +224,8 @@ export function metricSeries(rows: IterRow[]): Series[] {
         r.actuals && r.actuals.games > 0 ? r.actuals.totalKills / r.actuals.games : Number.NaN,
       ),
       iters,
+      // 每局平均击杀 = mean(kills)：与公式里的同名指标一一对应（hover 里标出来）。
+      formula: formulaMetricName('killsAbs') ?? undefined,
     },
     {
       key: 'pu',
@@ -226,6 +234,8 @@ export function metricSeries(rows: IterRow[]): Series[] {
         r.actuals && r.actuals.games > 0 ? r.actuals.totalPU / r.actuals.games : Number.NaN,
       ),
       iters,
+      // 每局平均拾取 = mean(powerUpsCollected)（同上，与公式同名）。
+      formula: formulaMetricName('pu') ?? undefined,
     },
     {
       key: 'puPct',

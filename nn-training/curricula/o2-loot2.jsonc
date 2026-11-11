@@ -1,0 +1,407 @@
+// 课程 o2-loot2 —— o2-loot 的后继课（2026-11-11）
+//
+// 状态：**已立项 · 待开课**（开课由人在控制台 :8900 拍板；agent 不启动训练）
+// 依据：用户 2026-11-11「看了 o2-loot.it300 的录像，最大问题是一直顶着钢铁开火，
+//   其次还是不躲炮弹/炮口」+ 本仓 B/C 800 局判决 + 4 局逐帧取证报告。
+//   主攻这两个缺陷；freeze 窗口奖降剂量修泄漏、不设硬门（见 §5④）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   从 **o2-loot.it300** 热启动；任务侧 / PPO / eval / 12% greedy 配额逐字继承 o2-loot。
+//   训练侧 5 处改动：㉗ **比率型**浪费弹税（修顶钢）、㉘ 挨打后留火线税（修不换道）、
+//   ㉖ 火线免罚线 30→12/千拍 + 税率 .05→.08、㉕ `wWinHit` 6→3（修 y27 泄漏）。
+//   ⚠ 不用「浪费弹总量税」——它在本课目标分布上已被逐局回放判死（§1.3、§4）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据（全部本仓实测）
+// ══════════════════════════════════════════════════════════════════════════
+//   ── 1.1 起点权重值得继续：o2-loot.it300 是本轮显著腿 ──────────────────────
+//   B/C 满池（800 局 / seed0 860001 / greedy / 3000 拍，`tmp/o2-analysis/bc-o2-three.jsonl`）：
+//     bcgq100（o2-gq100.it52）662/800 · **loot300 702/800 = 87.75%**
+//     ⇒ 同 seed 配对 **+5.00pp，McNemar p=.00593（显著）**；notax189 720/800 更强但
+//     notax−loot 仅 +2.25pp、p=.162（不显著）。loot 的 dmg/千 49.4→32.2、
+//     clearTicks 1842→1671、zeroKill 8.5%→4.12% ⇒ 赢法成立，值得在其上修缺陷。
+//   ⚠ 代价已经写进反签名：hitRate .323→.220（−32%）、shots 16.3→24.4（+50%）。
+//
+//   ── 1.2 「顶钢开火」= 78% 的子弹没打到敌人 ────────────────────────────────
+//   | B/C 800 局 | shots | 命中敌 | 拆砖 | 打钢未破/空射 | 命中率 | 浪费率 |
+//   | bcgq100 | 16.3 | 5.25 | 5.67 | 5.22 | .323 | .677 |
+//   | **loot300** | **24.4** | **5.35** | 8.24 | **10.63** | **.220** | **.780** |
+//   多开 8.1 发只换来 +0.10 次命中。分关：2003 关 28.9 发里 14.46（50%）打砖/钢、
+//   `wallPress` 46.0；timeout 局 43.6 发、miss 29.0、命中率 .092。
+//   **逐帧取证**（`reports/o2-loot-frame-forensic-20261111.md`，4 局 replay、
+//   tickHashes 逐点全对）：Steel Fortress **t=641–2441 共 33 发全部 `steel_block`**，
+//   落点恒为格 (20,3)、发射间隔中位 60 拍、玩家 x[280,288] y[32,42] 几乎不动；
+//   t=2561–2971 再 8 发同格。抽查 t=641 发射 → t=642 只剩 `explosion(328,56)`、
+//   该格 tile=steel、无 `terrain_destroyed` ⇒ 打钢未破确认。
+//
+//   ── 1.3 为什么不修不行 + 为什么不能按总量收税 ────────────────────────────
+//   · `wShot` 只有 0.02/发（帽 120 ⇒ 满量程 2.4 分）；`aimBricks`/`aimMisses`/
+//     `aimIgnited` 在 loot 26 行里**零定价** ⇒ 弹打去哪几乎免费。
+//   · `wStuck`（罚「没换格且没打中」）+ `wIdle`（罚静止）下，**持续开火是规避
+//     卡死/静止罚的最便宜手段** ⇒ 安全区机械刷枪。逐帧证据：**81 发浪费弹里
+//     火线内 0 发（0.0%）**，命中敌车 16 发里火线内 3 发（18.8%）
+//     ⇒ 顶钢开火与「不躲炮口」**时空分离**，不是一件事，不该用同一个罚项治。
+//   · ⚠ **总量税已证伪**（`tmp/o2-analysis/fire-dose.txt`）：
+//     `-2·min(12, aimBricks+aimMisses−0.65·playerShots)` 在 loot300 目标分布
+//     上 Δret(timeout−gameover) = **−7.23 FAIL**、排序也翻（timeout 罚 −20.21
+//     vs gameover −4.84 ⇒ 拖到超时比送死便宜，z8 主动送死同型）；
+//     而在 bcgq100 起点分布上却 PASS（+24.10）⇒ **边际随分布翻号**。
+//     浪费弹与拖局共线，按终局总量收税必然重罚长局，调系数救不了。
+//   ⇒ ㉗ 改用**比率型**：`(aimBricks+aimMisses)/playerShots` 超过 0.60 的部分，
+//     不随局长累积；实测两张面板 Δret 都 >0（§4）。
+//
+//   ── 1.4 「不躲炮口」= 火线税在正常分布里根本不咬 ──────────────────────────
+//   整体 `threat/千` loot 20.3 低于 bc 30.3 是「打得快、死得少」的分母效应；
+//   gameover 桶 threat/千 **106.0**（bc 86.9，+22%）、`onLaneHoldFire` 15.4/千
+//   （clear 1.9）、`postHitLane` 16.9/千（clear 2.4）。而 ㉖ 免罚线设 30/千拍
+//   ⇒ 整体密度才 20.3/千，**绝大多数局不触发**，只有已经要死的局才咬。
+//   逐帧火线窗口：Oasis t=671–725 静止 55 拍直到死；Brickworks t=826–881
+//   三段 12/12/8 拍静止且其间挨打；Crossroads t=353–409 动了 54/57 拍却
+//   始终没脱离火线（动而不换道）；挨打后 60 拍仍留火线 Steel Fortress t=455
+//   **51/61 拍**。⇒ ㉖ 降免罚线 + ㉘ 挨打后留线税。
+//
+//   ── 1.5 否决清单（都有数据）──────────────────────────────────────────────
+//   · 浪费弹**总量**税 / 抬 `wShot` 平税：§1.3 已判死。
+//   · `wApproach` 线性/分段势能：z5 五次证伪 + 道具跳变幻影尖峰。
+//   · o2-def 高剂量两行税：it95 判「定价成立但没换胜率，idle .432 苟签名」。
+//   · 抬 `wLaneMove`：gameover 桶 `onLaneMoveTicks` 反而更高 ⇒ 奖励死局。
+//   · `wKill2` / `wNoKill` / `wTrunc`（o2-gq100 三行）：it52 结课判方向恶化。
+//   · y27-window 的窗口奖励泄漏（hitRate .807→.752、shots +9%）⇒ `wWinHit` 降档。
+//   · 放松 `wStuck` / `wIdle` 去反向激励：会重演苟签名（loot idle 已靠开火压到
+//     379/千，放松即回升）；本轮选择给浪费弹定价、保留两项底座罚。
+//   · **转观测/架构**：错判词已更正——o2 全系 `arch.policyExtra=true`、
+//     `move_head.weight [4,185]` = hidden 128 + POLICY_EXTRA 57，
+//     `enemyFacing*` / 敌弹 TTI / `leadHit*` 全进三个策略头与 value 头
+//     （`DECISIONS.md §11592`、`src/nn/infer.ts:694-698`）。观测层不是天花板。
+//   · 动任务侧（lives / 敌数 / 关卡 / max_ticks）：AGENTS §0.2 禁止，一字未动。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 配方（逐字继承 o2-loot；改动点 = 6 个身份键 + bc + 2 行 + 5 参数 + 3 处重定价）
+// ══════════════════════════════════════════════════════════════════════════
+//   | 维度 | o2-loot（父腿） | **o2-loot2（本课）** |
+//   | 任务侧 / PPO / eval / greedy 12% / 预算 | — | 逐字同 |
+//   | 基线 22 行 + 41 参数 | — | 逐字同（一个不动）|
+//   | ㉓ 拾取 12/帽2 · ㉔ freeze 加成 8/帽1 | — | 逐字同 |
+//   | ㉕ 窗口命中 | wWinHit 6 / 帽4 | **wWinHit 3**（修泄漏）|
+//   | ㉖ 火线超额税 | .05、免罚线 30/千、帽160 | **.08、免罚线 12/千**、帽160 |
+//   | ㉗ 浪费弹比率税 | 无 | **新增**（w 20 / floor .60 / cap 1.0）|
+//   | ㉘ 挨打后留线税 | 无 | **新增**（w .3 / 帽 60）|
+//   | bc | o2-gq100.it52 | **o2-loot.it300.20261111-055347.json** |
+//   | paired_rotate_seed | 20261117 | **20261119**（独立，理由 §5⑨）|
+//   | out / traj / backup | tmp/o2-loot · weights/o2-loot | `tmp/o2-loot2` · `weights/o2-loot2` |
+//   · ㉗ 用 `max(1, playerShots)` 防除零；`aimBricks+aimMisses` 与 `playerShots`
+//     均为累计量，Φ 逐行差分下每发子弹结算时给局部信用（不是只在终局结算），
+//     但 Σr ≡ Φ_end−Φ_start 恒等 ⇒ 改善的是信用分配时间形状，不是凭空加回报（§5②）。
+//   · `kickstart_ref true` / `warmup_iters 0`（bc 是学到手的策略，锁 it1–7）。
+//   · **组合臂**（5 处改动捆一起），不做单变量归因；回退顺序见 §3。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据与止损（预注册；B/C = 4 关 × 200 seed = 800 局 / seed0 860001 / greedy /
+//    3000 拍，与 bc 同面板同 seed 配对；A 层只作趋势）
+// ══════════════════════════════════════════════════════════════════════════
+//   ✅ **it0 锚点已存在，无需补跑**：`tmp/o2-analysis/bc-o2-three.jsonl` 的
+//     `loot300` label 就是本课的 bc（800 局同面板），可直接配对；
+//     itN 用同一命令加 `loot2=<权重>` 即可。这是选 loot.it300 作 bc 的额外好处。
+//   it0 锚点：cleared 702/800 · go 65 · timeout 36 · shots 24.4 · aimHits 5.35 ·
+//     aimBricks 8.24 · aimMisses 10.63 · 浪费率 .780 · hitRate .220 ·
+//     gameover 桶 threat/千 106.0 · clearTicks 1671 · dmg/千 32.2 · idle 379/千。
+//   | 主 0（顶钢）| 浪费率 `(aimBricks+aimMisses)/playerShots` ≤ **.700**（-8pp）；
+//   |            | `aimMisses`/局 ≤ **8.0**（-2.6 发）；`playerShots`/局 ≤ **20.0** |
+//   | 主 1（开火质量）| `aimHits/playerShots` ≥ **.280**（+.060）；`aimHits`/局不降（≥5.35）|
+//   | 主 2（躲炮口）| gameover 桶 `threatTicks`/千拍 ≤ **90**（-15%）；
+//   |              | `postHitLaneTicks`/千拍（gameover 桶）较 it0 降 ≥20% |
+//   | 主 3（不换命）| B/C cleared ≥ **694**（bc −1pp）；timeout ≤ 10%；
+//   |              | dmg/千拍 ≤ 41.9（bc×1.30）；idle 涨 ≤5pp（相对 bc 37.9%）|
+//   | 反签名 | clear < bc −3pp / idle 涨 >5pp / shots 涨 >30% / hitRate 掉 >15% /
+//   |         | dmg/千 涨 >30% / timeout >10% / entropy <1.4 / kl·熔断 ⇒ 任一触发即停腿复盘 |
+//   · 止损：**it20 先查一次**（浪费率 / 命中率 / gameover 火线），it40 复查；
+//     三项全不动且 B/C 掉 >2pp ⇒ 停腿。三腿前作曾在 it20–35 之间失守，不等 it40。
+//   · 回退顺序（一次只拆一块）：① idle/timeout 涨 ⇒ 先降 `wWaste` 20→10
+//     （比率税最易逼出「干脆不开火」）；② hitRate 掉 ⇒ 降 `wWinHit` 3→1.5；
+//     ③ gameover 火线不降而 clear 掉 ⇒ 降 `wThreatEx` .08→.05（o2-def 苟签名）；
+//     ④ 三项全不动 ⇒ 判「Φ 差分对逐帧行为无梯度」，转决策事件级 shaping /
+//     信用分配（AGENTS 训练侧可动），**不再加价**。
+//   · 100% 胜率是愿景不是 DoD；不许用教师表现判可学性 / 定阈值（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 剂量标定（`tmp/o2-loot2-dose.py` → `tmp/o2-analysis/loot2-dose.txt`；
+//    两张面板各 800 局逐局真式回放，硬闸在**目标分布**上判）
+// ══════════════════════════════════════════════════════════════════════════
+//   loot300 目标分布（含 terminal：clear 0 / gameover −30 / timeout −40）：
+//   | 配方 | clear | gameover | timeout | Δret(to−go) | 排序 |
+//   | S0 loot 26 行 | 113.86 | −81.33 | −73.19 | +8.14 | PASS |
+//   | S1 +㉗ 比率税 | 111.02 | −84.74 | −79.13 | **+5.61** | PASS |
+//   | S2 +㉖ 重定价 | 113.01 | −85.46 | −74.45 | **+11.01** | PASS |
+//   | S3 +㉘ 留线税 | 112.90 | −85.78 | −74.29 | **+11.48** | PASS |
+//   | **S4 定稿** | **108.68** | **−93.31** | **−81.66** | **+11.65** | PASS |
+//   S4 相对 S0：clear −5.18 / gameover −11.98 / timeout −8.46
+//     ⇒ clear−gameover 差 **扩大 +6.80**，且 timeout 仍比 gameover 贵 11.65 分
+//     ⇒ 定价成立且**不会诱发主动送死**（对比总量税的 −7.23 FAIL）。
+//   bcgq100 起点分布交叉复核：S4 Δret **+34.23 PASS**（S0 +31.60），
+//     S1 也 PASS（+30.01）⇒ **比率型不翻号**（总量税在两面板一 PASS 一 FAIL）。
+//   ⚠ 硬闸 #7：Δret(timeout − gameover) = **+11.65 > 0**（按 outcome 分桶硬断言，
+//     不把 timeout 与 gameover 混成「输局」）；排序 clear > timeout > gameover ✓。
+//   ⚠ 硬闸 #6：新增/改动项满量程 = ㉗ **8.00**（名义 cap 20）、㉘ **18.00**、
+//     ㉖ 12.8、㉕ 12 ⇒ 全部 < 0.5×wWin(30)，每项自带 cap，无未封顶线性项。
+//     `terminal` 4 项齐全（缺 base_destroyed = 弃基地零罚）。
+//   ⇒ 分项均值（clear / go / to）：㉗ −2.84 / −3.41 / −5.94，㉘ −0.95 / −4.44 / −1.10
+//     ⇒ ㉘ 主要咬 gameover（正是「死在火线上」），㉗ 对 timeout 稍重但仍守住 Δret。
+//   · `corpus_identity_fp` 含 reward ⇒ 与 loot / notax / reflex 均异血缘，
+//     **不得跨课续跑**（§15.5）。`target_transitions 24576` = 24×mb 1024。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 已知局限 / 风险
+// ══════════════════════════════════════════════════════════════════════════
+//   ① **不许回退到浪费弹总量税**（Δret −7.23 FAIL、分布翻号，§1.3）。
+//   ② Σr ≡ Φ_end−Φ_start 恒等：㉗ 改善的是每发子弹结算时的信用分配形状，
+//      不是总回报；若策略仍刷枪，说明 GAE/λ 或决策 cadence 才是瓶颈，别再加价。
+//   ③ o2-def 高剂量负税推苟：本课三项负税实测 clear 桶合计只 −5.18 分，
+//      且配 ㉓㉔㉕ 三行正奖对冲；**仍须盯 idle / timeout**（反签名已列）。
+//   ④ freeze 窗口追杀本轮**不设硬门**：三腿 `winHit` 全不过（2.58/2.92/2.97），
+//      且 y27-window 证明抬高窗口奖会泄漏成「处处多打」；本课把 wWinHit 降到 3
+//      修泄漏，保留 `wFreezePick 8` 拾取加成。用户明确排序前两位是顶钢/不躲炮口。
+//   ⑤ 观测层不是天花板（§1.5），别拿「看不见」当借口转架构；
+//      数值列在 `metricValues`（90/90），读侧要适配，数组/对象类
+//      （moveHist / killOrder / exposureByKind）仍只随离线包。
+//   ⑥ `paired_rotate_seed` 独立（20261119）：与在跑的 notax 共享 V 会动态改变其
+//      `kickstart_burn` 参照物（auto→paired）⇒ 不打扰在跑的腿。控制台会提示
+//      「配对无对端」，不是 bug；判决配对走 B/C eval 面板（seed0 860001）。
+//   ⑦ 热启动换价目表 ⇒ value 头会追新尺度；前 10 轮盯 entropy/kl，
+//      value 异常而 clear/gameover 正常时先怀疑 value 尺度。
+//   ⑧ 单跑 checkpoint 级差异可达 ~18pp（gqfix 教训）⇒ 只看跨 3 点同向 + B/C。
+//   ⑨ 4 关定集记忆化（§15.1）：A 层只作趋势；与 o1 6000 拍面板不可相减。
+//   ⑩ 逐帧证据 n=4 只定位机制，频率以 B/C 800 局为准；录像文件不带 wver，
+//      按用户指认 loot.it300。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 6. 预算 / 开工前置（agent 不直接跑 run_rl；开课走控制台 :8900 同源 API）
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576` / `iters 300` / `max_hours 18` /
+//   `eval_every 5` / `eval_games_per_stage 50`（与父腿同预算 ⇒ 互比用每墙钟小时）。
+//   ① bc 冻结归档存在；`kickstart_ref true` / `warmup_iters 0`。
+//   ② it0 B/C 锚点已在 `tmp/o2-analysis/bc-o2-three.jsonl`（`loot300` label），无需补跑。
+//   ③ 开训 30 秒自检 hub URL：`grep -h "hub=" tmp/o2-loot2/training-loop.log | tail -1`
+//      必须等于当时活着的 hub URL；`rl-config.json` 无 `remote_hubs` 覆盖 ⇒
+//      继承 tailnet 稳定地址，无 quick tunnel 换名 530 风险。
+//   ④ B/C 复跑用**默认 dist 全节点**（self/mac/dsw/kaggle/a95/a97），
+//      `--weights` 是 **repeatable**（每个 label 要单独一个 `--weights`），
+//      不加 `--dist-local`、不加 `--no-dist`（用户 2026-11-11 明令）。
+//   ⑤ 首轮看 `greedy_quota_stats` achieved/target 与 cap_hit；不用 degraded 当停腿判据。
+//   ⑥ 零 worker 就等，不就地降级。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为配置段：任务侧 / 基线 22 行 / PPO / eval / 配额逐字继承 o2-loot；
+//   改动点 = 6 个身份键 + bc + 2 行公式 + 5 个新参数 + 3 处重定价。判词以本立项说明为准。
+// ══════════════════════════════════════════════════════════════════════════
+//
+{
+  "version": 5,
+  "name": "o2-loot2",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "max_ticks": 3000,
+  "reward": {
+    "formula": [
+      // ① 击杀：每只 18 分
+      "wKill*kills",
+      // ② 命中：每发 3
+      "+ wHit*aimHits",
+      // ③ 清关奖：无条件 60 分，按走过格子打折
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // ④ 快清关：清场越早一次性越多
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      // ⑤ 移动拍：稠密走位奖
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // ⑥ 开火成本：每发 0.02
+      "- wShot*min(playerShots, shotCap)",
+      // ⑦ 撞墙（0–40 拍）：1.0/拍
+      "- wWall*min(wallPressTicks, wallCap)",
+      // ⑧ 撞墙（40–120 拍）：0.2/拍
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      // ⑨ 卡死（≤2000 拍）：0.01 每拍
+      "- wStuck*min(stuckTicks, stuckCap)",
+      // ⑩ 卡死（2000 拍以后）：0.002/拍
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      // ⑪ 不动（超出免费额度的前 1000 拍）
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      // ⑫ 不动（继续超出）：0.005/拍
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      // ⑬ 承伤：每点 0.08
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      // ⑭ 掉命：每人头 12；terminal 另有 −30
+      "- wDeath*playerDeaths",
+      // ⑮ 待在敌方射界（0–120 拍）：每拍 0.02
+      "- wThreat*min(threatTicks, threatCap)",
+      // ⑯ 待在敌方射界（120–500 拍）：0.005 每拍
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      // ⑰ 射界里仍在移动：每拍 0.05
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // ⑱ 残血别浪（0–100 拍）：0.3/拍
+      "- wDanger*min(dangerTicks, dangerCap)",
+      // ⑲ 残血别浪（100–600 拍）：0.05/拍
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      // ⑳ 基地威胁税（0–200 压力点）
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      // ㉑ 基地威胁税（200–500）：0.03/点
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      // ㉒ 反苟：按拍计费（每杀赠 1000 拍，窗口 800）
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      // ㉓ 拾取终点奖（与 o2-loot 逐字同）
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // ㉔ freeze 拾取定向加成（与 o2-loot 逐字同）
+      "+ wFreezePick*min(puGotFreeze, freezePickCap)",
+      // ㉕ 冻结/盾窗口内命中奖：wWinHit 6→3（y27 泄漏 / loot 反签名）
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // ㉖ 火线驻留超额税：免罚线 30/千 → 12/千、税率 .05 → .08
+      //    （原免罚线高于实测密度 20.3/千，绝大多数局不触发）
+      "- wThreatEx*min(threatExCap, max(0, threatTicks - threatRate*ticks))",
+      // ㉗ 【新·缺陷①】浪费弹**比率**税：只罚「非敌命中占比」超过 0.60 的部分，
+      //    不随局长累积 ⇒ 不会像总量税那样把 timeout 压到比 gameover 便宜（§1.3）。
+      //    max(1, playerShots) 防除零；aimBricks/aimMisses/playerShots 均为累计量，
+      //    Φ 差分下每发子弹结算时给局部信用。
+      "- wWaste*min(wasteCap, max(0, (aimBricks + aimMisses)/max(1, playerShots) - wasteFrac))",
+      // ㉘ 【新·缺陷②】挨打后仍留该源火线轴：逐帧证据 t=455 后 51/61 拍仍在火线。
+      //    只咬 gameover 桶（回放 clear −0.95 / go −4.44 / to −1.10）。
+      "- wPostHit*min(postHitLaneTicks, postHitCap)",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 3.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 24.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1000.0,
+      "paceWindow": 800.0,
+      "paceCap": 46.0,
+      // ㉓ 拾取奖
+      "wPickup": 12.0,
+      "pickupCap": 2.0,
+      // ㉔ freeze 拾取定向加成
+      "wFreezePick": 8.0,
+      "freezePickCap": 1.0,
+      // ㉕ 窗口命中奖（重定价 6→3）
+      "wWinHit": 3.0,
+      "winHitCap": 4.0,
+      // ㉖ 火线驻留超额税（重定价：免罚线 30→12/千、税率 .05→.08）
+      "wThreatEx": 0.08,
+      "threatRate": 0.012,
+      "threatExCap": 160.0,
+      // ㉗ 浪费弹比率税
+      "wWaste": 20.0,
+      "wasteFrac": 0.6,
+      "wasteCap": 1.0,
+      // ㉘ 挨打后留线税
+      "wPostHit": 0.3,
+      "postHitCap": 60.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o2-loot/o2-loot.it300.20261111-055347.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261119,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o2-loot2/weights.json",
+  "traj": "tmp/o2-loot2",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o2-loot2",
+  "backup_prefix": "o2-loot2",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  "greedy_quota": {
+    "win": 0.09,
+    "loss": 0.02,
+    "timeout": 0.01,
+    "oversample_cap": 2.0,
+    "soft": true,
+  },
+}
+
+// ── 诊断工具 / 复现 ────────────────────────────────────────────────────────
+//  起点 B/C 锚点（已有，无需补跑）：`tmp/o2-analysis/bc-o2-three.jsonl` 的 `loot300` label
+//  判决复跑（3000 拍，默认 dist 全节点；**--weights 是 repeatable，每 label 单独一个**；
+//    不加 --dist-local / --no-dist）：
+//    `bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o2-env-course.json
+//     --weights bc=nn-training/weights/o2-loot/o2-loot.it300.20261111-055347.json
+//     --weights loot2=<nn-training/weights/o2-loot2/o2-loot2.itN...json>
+//     --games 800 --seed0 860001 --out tmp/o2-analysis/loot2-bc.jsonl`
+//  聚合审计：`bash tools/githook/nn-py-safe.sh tmp/o2-loot-fire-audit.py`
+//    → `tmp/o2-analysis/fire-audit.txt`；总量税证伪 → `fire-dose.txt`
+//  剂量标定：`bash tools/githook/nn-py-safe.sh tmp/o2-loot2-dose.py`
+//    → `tmp/o2-analysis/loot2-dose.txt`（两张面板 + 两条硬闸）
+//  逐帧取证：`reports/o2-loot-frame-forensic-20261111.{md,html}`
+//    （`tmp/o2-frame-dump.ts` + `tmp/o2-frame-analyze.py`，tickHashes 逐点全对）
+//  机制读数：读 `tmp/o2-loot2/eval_log.jsonl` 逐局行；数值列走 `metricValues`
+//    适配器（90/90 都在），先验覆盖数；数组/对象类不进定价。
+//  开课（由人在控制台拍板）：`POST /api/openCourse` body `{"course":"o2-loot2"}`。

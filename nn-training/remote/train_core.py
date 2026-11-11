@@ -68,6 +68,7 @@ from remote.job_lifecycle import job_body_error
 from remote.train_common import (
     blob_wanted,
     check_demo_bank,
+    copy_iter_metrics,
     course_prep,
     decode_demo_bank,
     kick_kl_value,
@@ -946,12 +947,8 @@ def run_training_core(
         "commit_echo": manifest["commit"],
         "ppo_sec": ppo_sec,
     }
-    if iter_info is not None:
-        # M3：节点自己跑的 rollout 的采集口径（协议层必校——hub 侧无本地 shard 可算）。
-        # ★ 2026-10-28（云机轮换）：分关采集账一并回传（控制台「各关进度」读的就是它）——
-        #   不在这里搬一手，`iter_info` 里那份就随函数返回被丢了（老产物行没这个键 = 留空）。
-        #   两条后端腿（本函数 / `_run_training_core_paddle`）各一行：同一份 `iter_info`。
-        result.update({k: iter_info[k] for k in ("report", "volume_stage_stats") if k in iter_info})
+    # M3：节点自己跑的 rollout 的采集口径（两条后端腿共用一份；见 `train_common.copy_iter_metrics`）。
+    copy_iter_metrics(result, iter_info)
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,
@@ -1342,9 +1339,8 @@ def _run_training_core_paddle(
         "commit_echo": manifest["commit"],
         "ppo_sec": ppo_sec,
     }
-    if iter_info is not None:
-        # 与 torch 腿同一行（M3 的 report 必带；★ 分关采集账可选，缺则不给键）。
-        result.update({k: iter_info[k] for k in ("report", "volume_stage_stats") if k in iter_info})
+    # 与 torch 腿同一行（M3）；见 `train_common.copy_iter_metrics`。
+    copy_iter_metrics(result, iter_info)
     result["wire"] = _wire_block(
         payload_bytes=payload_bytes,
         payload_dl_sec=payload_dl_sec,

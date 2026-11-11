@@ -11513,3 +11513,254 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   （违背 rollout 优先，实测会拉长采集）。
 - **验收**：`test_stream_collect_end` 覆盖 drain→refill→drain 顺序与 step 闸计数；
   完整 nn 门禁 ruff / mypy 889 / pytest 5882 passed + 3 skipped（52s）。
+## §2026-11-10-goalnn-o2-3000-ticks（o2 系列终局拍数 = 3000：按人类体验口径前移，6000 只在 o1 有剂量依赖）
+
+- **背景**：o2-fast（两敌关，从 o1-gq-fast.it256 起）立项时用户裁决
+  「6000 拍太长了，改成 3000 拍！人类打的话 1200 拍足够」。o1 系列全部挂在 6000 拍上
+  （`o1-gq-*` §8b 曾以「任务侧不可动」保留 6000，另做 3000 只读诊断面板）；AGENTS §0.2
+  的难度唯一口径 = **人类熟练玩家体验**，6000 拍（≈5× 人类）不是体验口径。
+- **决定**：o2 系列课程 `max_ticks = 3000`（≈2.5× 熟练人类），写在各课程文件里（不关卡文件，
+  关卡是所有腿共享的环境语义）；训练 rollout / A 层 in-loop eval / B/C 判决面板统一 3000，
+  与 o1 的 6000 拍读数**不可相减**。3000 的截断代价有实测上界：it0 权重在 2 敌 / 6000 拍
+  面板的 623 个 clear 局里只有 27 局（4.3%）>3000 拍。
+- **否决**：保留 6000（o1 §8b 的理由是「已标定的三档供给 / 剂量 / 父课报告全挂 6000」，
+  o2 是新实验、无历史剂量依赖）；折中 4000（旧 o2 探针口径，仍 ≈3.3× 人类）；把 3000
+  写进关卡文件（会改动所有引用该关的腿，且 lossy）。
+- **影响**：reward 的时间项（`fastCap 2000` / `ticksShouldWin 1000` / pace 免费 1200×kills）
+  在 3000 内的比例变大但语义不变；§15.5「改课程语义 = 新实验」——o2-fast 本就是新 out/traj。
+  后续 o2 腿（如 o2-gq）继承 3000；o1 历史读数保持 6000 原样，不回填、不重算。
+  课程头注 `curricula/o2-fast.jsonc` §2/§4.2；实验记录 → `docs/nn/experiments.md`。
+## §2026-11-10-goalnn-o2-it0-params（o2-fast 开课前按 it0 失败结构重标 3 个奖励参数：wKill 15→18 / paceTicks 1200→1000 / paceWindow 1000→800）
+
+- **背景**：o2-fast（两敌 / 3000 拍 / 无配额）开课前，用户令「根据 it0 eval 的数据，
+  合理调整 params」。it0 判决面板（800 局 greedy）拆桶：clear 592 / gameover 158 /
+  max_ticks 50。超时桶 **45/50 恰好 1 杀**（idle 58.8%、stuck 中位 904、命中 4/48 发、
+  42% 零承伤）⇒「杀完第一只就不打了」；根因是反苟项按 6000 拍标定，1 杀局在 3000 拍
+  的罚分天花板 (3000−1200)/1000×8 = 14.4，恰好约等于一次击杀的 15 —— 拖满最后 1800 拍
+  的成本 ≈ 放弃的那一杀。158 个 gameover 全部死在 200 承伤（1 命 200 HP、标准弹 100/发），
+  2003 75 / 2001 51。
+- **决定**：只动 3 个参数，其余 19 项与 terminal 保持 o1 剂量：`wKill 15→18`（+20%，
+  2 敌下第二杀承载整条胜利路径，15 是 1 敌口径）；`paceTicks 1200→1000`、
+  `paceWindow 1000→800`（1 杀拖满罚 20、0 杀 30；clear 均值只多罚 1.3）。旧面板逐局
+  回放：clear 110.8→115.7、timeout −63.9→−66.5、gameover −56.6→−57.6 ⇒
+  clear−timeout 差 174.7→182.2。eval 面板不受奖励影响（greedy 不用奖励）⇒ it0 读数、
+  判据锚点逐字不变；`corpus_identity_fp` 含 reward ⇒ `71afd4f8…` → `ecbd26f1…`，
+  历史语料不得混续（AGENTS §15.5）。
+- **否决**：抬 danger 两档（hpRatio<0.4 才触发，1 命 200 HP / 标准弹 100 ⇒ 200→100→0
+  不经过 0.4，超时桶无作用面）；抬 wDmg/wThreat（gameover 是 2 敌同场的能力缺口，
+  抬「少挨打」的价格会连「去杀第二只」一起压）；抬 timeout terminal −40→−50
+  （o1 已定「超时最差」序，本课的问题是节奏税的 horizon 失配，不是终局价）；
+  动 wWin/wFast（快清奖只对 35% 的局有效，节奏税已由 pace 承担）。
+- **影响**：课程头注 §2/§4.3；实验记录 §137 追加段；开课仍由控制台拍板，agent 不启动。
+## §2026-11-10-goalnn-o2-def（o2 并行第 2 腿「防守定价臂」：两行超额密度税打 158 个开局命尽局，未开课）
+
+- **背景**：o2-fast 立项后用户令「再设计一门 o2 并行课，尝试其它训练方向」，四选一后
+  选定**防守定价臂**（否决 λ 0.99 / greedy_quota / 探索项三臂，见下）。it0 面板
+  （800 局 greedy，与 o2-fast 同批、面板与奖励无关）失败结构：gameover 158 里 **122 局
+  零击杀（77%）**、死亡拍中位 928、前 600 拍吃 112 伤 ⇒ 不是「打输了」是「没开打就死」；
+  三结局防守遥测完全分离（hurtWeight/千 9.6/85.0/5.1，threatTicks/千 25.0/128.2/13.5；
+  超时桶最低 ⇒ 防守定价不补贴拖局）。全式逐局回放（`tmp/o2-def-replay.mjs`）还显示
+  **失败价排序是反的**：早死 −90.1 比拖到 3000 拍 −80.4 便宜 9.7 分。
+- **决定**：新课 `nn-training/curricula/o2-def.jsonc`（与 o2-fast 并行）。任务侧 / bc
+  （o1-gq-fast.it256）/ 22 行奖励与参数 / PPO 缰绳 / eval 面板**逐字同** o2-fast；唯一
+  改动 = 奖励追加两行超额密度税：㉓ `- wHurtEx*min(hurtExCap, max(0, hurtWeight -
+  hurtRate*ticks))`（w .4 / 免罚线 12/千 / 帽 120 raw）+ ㉔ `- wThreatEx*min(
+  threatExCap, max(0, threatTicks - threatRate*ticks))`（w .15 / 30/千 / 帽 160 raw）。
+  800 局逐局回放剂量：clear −5.4（中位 0，34% 付）/ gameover **−35.7**（99% 付）/
+  timeout −2.2 ⇒ gameover −125.8 vs timeout −82.6（贵 43.2），clear−gameover 差
+  193.7 → 224.0（+15.7%）；相对剂量 18.4%（z2-r5tempo 同形税 9.3% 的 ~2×）。判据预注册
+  在课程头注 §3（主 0 gameover ≤ 110；111–134 = 欠剂量；≥135 = 停腿）。新语料：
+  paired_rotate_seed 20261111 / out·traj `tmp/o2-def` / backup `weights/o2-def`
+  ⇒ `corpus_identity_fp` ecbd26f1… → 655183e2…（§15.5，不得跨课续跑）。
+- **否决**：抬 wDmg（平税：clear 已付 5.61、gameover 只多 10.4，靶向性比本包差 6×）；
+  抬 wDanger（已在咬：gameover −30.63，且超时桶 148.4/千，分不开命尽与拖局）；
+  burst/damageWhileLow（与 damage 共线 r=0.902/0.909 > E2 门 0.8 ⇒ 该替换不该叠加）；
+  nearEnemy4Ticks/cornerWeightTicks（超时桶最高 ⇒ 定价=罚远离敌人，会补贴拖局）；
+  无帽税（2000 关一局 0 伤慢清关 threat 超额 982 ⇒ −147，把清关打成负分）；
+  动 terminal 命价（那是 z2-r5all 的腿，混进来无法分解「路径定价」本身）；λ 0.99 /
+  greedy_quota / 探索项（本轮另两臂的方向，留待后续单独立项）。
+- **影响**：两臂并行互比只读「同墙钟小时 pp」；因果解释只在同起点 + 同面板（B/C 满池
+  seed0 860001）内做；worker 份额互相挤压，一臂饿死则读数作废（课程 §6⑤）。若判平 ⇒
+  「过程项定价在该 stack 失效」而非剂量不够（z2 先例），下一代按 E2 门做「替换 wDmg」。
+  课程头注 §1–§6；实验记录 → `docs/nn/experiments.md §138`；开课仍由控制台 :8900
+  拍板，agent 不启动训练。
+## §2026-11-11-goalnn-eval-wire-snapshot（控制台 eval 读数必须快照优先：云机实时体把白名单外的游戏列收进 `metricValues`）
+
+- **背景**：用户报障「自主云机训练时 eval 指标与本地集群跑的不一致」——`o2-reflex` it300 本地评
+  歼灭率 87.4% · 道具 0.39/0.91，it290/295 云机评 8.4% · 0.35/0.35。真因不在训练侧：云机补传
+  的逐局 eval 行走 `remote/deliver_wire.py::slim_eval_row` 投影（白名单顶层键 + 其余数值列进
+  `metricValues`），本机 in-loop eval 平铺全字段；`dashboard/src/server/iters.ts` 的
+  `collectEvalSummaries` 只有 `BEHAVIOR_METRICS` 走 `evalMetricValue`（快照优先），核心列直读
+  顶层 ⇒ `enemyTotal` 缺席退回关卡反查（20 敌 vs 课程实跑 2 敌）⇒ 歼灭率 ÷10（669/8000=8.4%）、
+  `powerUpsSpawned` 缺席退回 `dims.loot` 比值（o2 的 loot 维 = 拾取数）⇒ 掉落写成拾取。
+  同期云机 eval winRate 78.5%，读数本身正常。
+- **决定**：`collectEvalSummaries` 的四个白名单外输入（`enemyTotal` / `powerUpsSpawned`（含
+  `puSpawn*` 分项）/ `startLives` / `playerHpRatio`）统一走 `evalMetricValue`（快照 → 顶层）。
+  历史行不重传：修读侧一次，云机段 60 轮旧行读数同时恢复。
+- **否决**：给 Python 白名单加这 4 键（列已随 `metricValues` 到达，再平铺一份 = 双份线上体积，
+  且 `metricValues` 的立身理由就是「新增数值列不必改白名单」）；在 hub `merge_eval_rows` 时把快照
+  摊回顶层（账本 = 写端原样，补传与人工导入两条腿共用同一份账本，改写会让两条腿的落盘对不上）；
+  只按「云机行」特判（本机将来若也走瘦身投影，同一个洞会再开一次）。
+- **影响**：全文与验证 → `docs/nn/console.md §50`；回归用例
+  `dashboard/tests/server-iters-eval-wire-shape.test.ts`（平铺行 vs 独立重实现的投影行必须聚出
+  同一份 summary 与逐局行）+ `dashboard/tests/evalboard-ingest.test.ts`。真账本回放 it295
+  83.6% · 0.35/0.89 / it290 84.5% · 0.36/0.92（与 it300 本地 87.4% · 0.39/0.91 同带）。
+  **同一形状还解掉 11-11 审计里「cloud 半面板不可判」的判词**：那些列一直在 `metricValues`
+  里，只是读侧没看。
+- **范围（三处读者一次收完）**：`collectEvalSummaries`（指标表）· `readEvalGames`（逐局弹窗/回放
+  选择器，`playerHpRatio` ⇒ 残血不再退成「满血 − 承伤」下限）· `evalboard/ingest.ts::ingestEvalRow`
+  （`enemyTotal` / `playerShots` / `enemyHits` / `playerHits` / `stuckTicks` / `firstKillTick` /
+  `cellsVisited` / `playerLevel` / `puSpawn*` / `puGot*`；`enemyTotal` 曾对云机行恒落默认 20 ⇒
+  A 层 `killCompletion` 同样是 ÷10 假值）。注意边界：进快照的是**数值**列，数组/对象类分析列
+  （`moveHist` / `killOrder` / `exposureByKind`）仍只随离线包到达。
+
+## §2026-11-11-goalnn-blob-cache-touch-and-root-layout（自主段的两处自毁：blob 缓存读命中必须 touch；布局判据取「本会话见过几门课」）
+
+- **背景**：用户报「自主云机 07:33 出错后一直没自行恢复，08:41 手动重跑 cell 才好」。日志里是两条
+  故障咬在一起：① `it163` 的 PPO 在 `_fetch_ref` 处 `ProtocolError: 没有 hub 地址（base_url 为空）
+  却要下载 …/blob?name=ref`，同秒上面一行正是 `cache prune: 丢 2 个最旧的缓存条目`（同日 20:42
+  o2-loot it184 同模式）；② 失败后重进的那一拍产物根从 `/dev/shm/battle2-offline/o2-notax` 变成
+  共享的 `/dev/shm/battle2-offline`，在那里读到别的腿的 `it-300` ⇒ `本机段落已完成` ⇒ `noop`
+  rc=0 ⇒ 这份包记进 `served` ⇒ 队列全终态 ⇒ 空转 300s 自行收工，真段停在 it162/163。
+- **决定（锚点三层兜底 + 布局稳定，用户口径「要彻底兜住」）**：① **不该丢** ——
+  `download.py::_resolve_blob` / `resolve_blobs_batch` 的 cache **读命中**补 `_touch()`（A3 的规矩在
+  `_cache_blob`/`_ensure_code`/`_ensure_ts_code` 早就有，写路径修了、读路径漏了）；② **不许删** ——
+  `prune_caches(keep=anchor_shas(manifest))`：manifest 点名的 ref/demo/opt/init（只认 64-hex）永不
+  参与淘汰，光锚点超预算时**不删 + 一行响亮说明**；③ **丢了能补** ——
+  `plan_handoff._reseed_anchors`，`plan_run._run_iteration` 每轮开跑前调一次，缓存缺件才从产物目录
+  `ref_weights.json`/`demo.npz`、包根 `blob.ref` 重种（命中只一个 `stat`）；④ **布局稳定** ——
+  `offline_boot.session_multi(tasks, served)`：`multi` = 本会话**见过**几门课（`tasks ∪ served`），
+  重进拍落回 `<root>/<course>`、从 it162 续跑。三层各管一段：概率（touch）/ 保证不丢（keep）/
+  自愈（重种），任一条在场都能让 it163 那一拍活下来。
+- **否决**：只加 touch（概率非零且无自愈）；把锚点搬进独立 `anchor_store/`（为 0.4MB 掀整条取字节
+  查找链、磁盘按段无上限）；放大 256MB 预算 / 按子树各给一份（上限会悄悄 ×3，A3 已否决）；
+  失败后不记 `served` 强制重试整段（白烧 33s/轮 rollout，且治不了根降维）；只加告警。
+- **残留**：缓存与本地字节源**同时**都没了（包没带 ref、产物目录也被清）时仍会响亮失败——这是
+  输入缺失，不是缓存策略问题；此时报错原文即修法（重导带 ref 的任务包）。
+- **影响**：全文 → `docs/nn/remote-transport.md §146`；回归用例
+  `nn-training/tests/remote/test_cache_persist.py`（读命中 touch ×2）+ `nn-training/tests/common/
+  test_offline_task_queue.py::test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course`
+  （改动前红：`multi=[True, False]`）。
+
+## §2026-11-11-goalnn-offline-start-probe（离线训练「开始执行」探测两天 0 条：判据补强 + 读数出口）
+
+- **背景**：`§2026-11-09-goalnn-offline-start-report` 的上报腿上线后，用户要求查日志确认是否生效。
+  57 个 ops 文件里 `offline:detected` 14 条、`stopPpo` 3 条、**`offline:cell-start` 0 条**（三者同一提交
+  引入 ⇒ 不是「装的是旧版」）；今天 `…-offline-edit-1andil` 会话训练 00:09 起跑、07:33 失败、08:41
+  手动重跑，期间面板自己发的 `log:open`(07:50) 证明脚本在线，仍无一条 ⇒ dashboard 至今没收到过任何
+  `stopOthers` 值。
+- **根因**：`app/offline-watch.ts` 三处静默 fail closed（每处直接 `return null`、零读数）：① 基线采在
+  「已经开始执行之后」，只认「从这一拍往后继续变」；② `busy` 依赖 Jupyter 状态栏（Kaggle UI 通常没有
+  ⇒ `kernelStatus` 恒 unknown）；③ `target` 缓存永不失效（重渲染换 id 即永久哑）。
+- **决定**：① 证据改成**相邻两拍**的输出变化；② 新增看门狗——`others===0` 且连续 3 拍执行、等满 3s
+  ⇒ `evidence=held` 上报（只写 op、不下发命令，排队仍不报，原有不变量不变）；③ `target` 连续 3 拍不在
+  `cells()` 里就清缓存重认；④ 新增 `diag()`，`detected`/`cell-start` 的 detail 带 `kernel=/outLen=`，
+  连续 5 拍执行未上报时落 `offline:watch-diag`（一次执行周期一行）。
+- **否决**：先只加诊断、下一轮再改判据（用户口径「一次做完」，且诊断行与补强互不依赖）；把看门狗做成
+  「不管别的 cell 在不在跑都报」（会把排队算成开始，破坏既有不变量）；新增 dashboard 端点（仍走
+  `POST /api/notebookOp` 的 op 日志）。
+- **未验证**：真实 Kaggle DOM 上 `cellExecuting` / `outputText` 哪一格不成立——本地无 DOM 快照，靠下次
+  带诊断的真实运行回答。
+- **影响**：全文 → `docs/nn/console.md §51`；验收 `cd userscript && bun run check`（typecheck 63 文件 /
+  oxlint 0 / 308 pass / dist 两份重建），用例 `test/offline-watch.test.ts` + `test/offline-wiring.test.ts`。
+
+## §2026-11-11-goalnn-offline-stop-others-downlink（`stopOthers` 接成真命令：dashboard 中转 `stop-session`）
+
+- **背景**：`§2026-11-09-goalnn-offline-start-report` 只把开关写进 op（面板写明「dashboard 目前只记录，不发
+  停止命令」）。用户要求把它接成真命令：「自主云机启动后停止其它 ppo worker」。浏览器跨页无法互停，dashboard
+  是唯一共用会合点。
+- **决定**：三件事都不新增语义层——① dashboard 在 `POST /api/notebookOp` 里，见到
+  `offline:cell-start … stopOthers=1` 就给**其它**最近 10 分钟有 op 写入的会话各记一条 `stop-session`
+  （`<notebookLogsDir>/<site>/<session>.cmds.json`），并往发起会话写证据行 `stop:others targets=N/M …`；
+  ② 各页每 15s `GET /api/notebookCmds?site=&session=` 取自己的待办，命中就点「停止会话」（Kaggle host
+  先 flush 再点外层 Stop，Colab/AI Studio/魔搭走本页 `stopSession`）；③ 页面停完落一行
+  `cmd:stop-session id=<id> ok|fail …`，**这一行既是证据也是 ack**（服务端据此置 ok/fail，不再下发）。
+- **边界**：发起会话自己永远不是目标；命令 TTL 15 分钟（过期不下发）；同目标 TTL 内已有 pending 不重复派；
+  单次最多 5 个目标（mtime 新的优先）；`.cmds.json` 与 `.ops.jsonl` 同寿命（`pruneNotebookLogs` 一并删）。
+  旧版脚本不取件 ⇒ 命令自然过期，不补投。
+- **否决**：hub 停机达令（按课程停云端 worker，语义是「停一整门课的云机」，与「这一页」不对应）；
+  停用 `gpu_push` 节点（持久改配置、需要人再手动开）；让离线页直接停别的页（跨页做不到，误停代价高）。
+- **未实测**：真实 Kaggle 页上「点 Stop → ack 15s 内出现」——需浏览器装新 `dist` 后跑一次离线训练。
+- **影响**：`dashboard/src/server/api/notebook-cmd.ts`（新）+ `server.ts` / `route-table.ts` / `api/index.ts`；
+  `userscript/src/notebook-companion/app/stop-cmd.ts`（新）+ `boot.ts` 两条腿；面板提示同步改口。
+  全文 → `docs/nn/console.md §52`。验收：dashboard typecheck/lint/test 2066 pass；userscript `bun run check`
+  319 pass + dist 重建。
+
+### 补记（`§2026-11-11-goalnn-offline-stop-others-downlink`，同日用户指令：只停 PPO worker 页）
+
+- **口径**：停会话命令不能误停「正在搬运日志的普通页」——只打真正在跑 PPO worker 的页。
+- **判据（数据面，不新增上行）**：目标会话必须**同时**满足 ① `.ops.jsonl` mtime 在 10 分钟内（活着）
+  ∧ ② `.log` 尾巴（最近 64KB）含 `[worker]` 或 `[worker-supervisor]`。后者是 worker 侧所有进程
+  （`worker.py`/`bc_job.py`/`download.py`/`http.py`）的固定行前缀，普通页/离线页/rollout 节点不会打。
+- **实测**：真实 `tmp/notebook-logs`——AI Studio worker 会话（8MB）尾巴命中；`…-battle-offline-…` 与
+  `.1.log` 备份段不命中。
+- **fail closed**：日志缺席/读不到 ⇒ 不停（宁可不问，也不停一个说不准的页）。`requirePpoWorker:false`
+  只作排障口。证据行补 `skipped_non_worker=N`，能直接看出「为什么没停我这一页」。
+- **验收**：dashboard `bun run test` **2069 pass**（新增 3 条：只停 worker 页 / 尾巴窗口 / 证据计数）。
+
+## §2026-11-11-goalnn-greedy-offline-round（自主云机轮内补 greedy 采集：B 口径「挤进普通采样」，账本三键与 trainer 同形）
+
+- **背景**：`o2-notax` 自主段 300 轮写着 `greedy_quota: 12%`，却从未执行（云机日志 `greedy`/`argmax` 0 次；
+  账本只有 it1 的 `volume_stage_stats.greedy`）。根因**不是** `export_bundle` 守卫：自主腿的一轮由
+  `remote/worker.run_job` 在云机内闭环（`run_iter_rollout` → PPO），trainer 的 `_volume_collect_greedy`
+  根本不在场（`loop_volume.py:851` 的 docstring 说「kind=iter 云节点都支持」——那说的是 trainer 仍当编排者的拓扑）。
+- **决定（落点）**：`remote/worker.run_job` 在 rollout 之后、`run_training_core` 之前插入 greedy 阶段
+  （新模块 `worker/greedy_round.py`）。产出根 = `<job>/greedy/wave{k}/`，经 `rctx` 的 `scratch.batch_rel`
+  镜像进轮 scratch ⇒ 仍在 PPO 的**单一装载根**里；`discover_shards` 按路径序把 `greedy/` 排在 `w0/` 之前。
+- **决定（B 口径，用户 2026-11-11 裁决「挤进去」）**：普通采样少采 greedy 那份，`per_stage_quota` 保持
+  **减量前**的整轮值 ⇒ 每轮训练样本数不变、其中 12% 是 greedy。云机侧本轮 greedy 上限 = `plan.total_target`
+  （不吃 `oversample_cap`；cap 仍进账本），分母 = **放大后**的整轮 target。
+- **契约**：spec 新增 `greedy_quota` / `greedy_round_target`（`common/manifest.validate_rollout_spec`
+  白名单；缺席的旧包归一化输出逐字节不变）；账本三键 `greedy_quota_stats` / `sampling_samples` /
+  `sampling_games` 过 `remote/train_core` 的 `iter_info` 透传与 `remote/artifacts.LEDGER_FIELDS`。
+- **否决**：① 往本轮 spec 的 argv 追加 greedy 行——云机带 `volume` 块时走 `StreamCollector`，argv 只当
+  每关模板 ⇒ 追加行被静默忽略，还会顶开 `--out` 编号；② plan_run 预采 greedy 再喂 payload——
+  `verify_shards` 只认「实产 == 声明」，要改包契约；③ 放开 `export_bundle` 守卫让 trainer 再派单——
+  自主段没有下载通道。
+- **与在线腿的差异（记录在案）**：在线腿采 100% + 12% 再让 PPO 逐关截断（不同序丢片）；离线腿按 B 减量
+  ⇒ 同一课程两腿的「每轮样本构成」不是逐字节可比。行为改善属训练侧观察，不作硬 DoD（AGENTS §0.2）。
+- **部署**：`nn-training/**` 不进 codehash 集，但云机代码来自身 `code.zip` 快照 ⇒ 必须重打代码快照 + 重启；
+  已收官的 notax 不会自动变好，验证要新开课（新 `out`/`traj` + 本条，AGENTS §15.5）。
+- **结构（实施后补记）**：接线住新模块 `remote/offline_greedy.py`（L4，已登记 DAG）——`remote/worker.py`
+  已顶着 LOC 999 预算；`collect_round()` = rollout + greedy 波 + 并账，作业壳只留一行。回落成「原地」档时
+  `_under_ppo_root()` 把落单 shard 搬进 `<shards_root>/greedy/`（搬不动抛 `ProtocolError`：采到但训不到比
+  不采更糟）；`collector` 在场时 `volume_stage_stats` 改**合并**（否则盖掉刚并进去的 `greedy` 子键）。
+  `ctx.course is None` ⇒ greedy 静默不生效，但 `plan_run` WARN 一次（否则重演「课程写着 12%、日志 0 次」）。
+- **顺手拆重复（门禁逼出来的）**：`greedy_quota.report_brief()`（原先 trainer 与 greedy_round 各一份 brief）
+  + `rollout_argv.flag_value()`（L0 下沉，`worker.plan._flag_value` 改 import 别名）——两处都过了
+  `tests/test_reuse_ledger.py` 的只降不升判据，没抬基线。
+- **验收**：`tests/worker/test_greedy_round.py` + `tests/remote/test_greedy_offline_wiring.py`（19 条）；
+  `nn-training/tests/remote` 全量 1859 pass；全文 → `docs/nn/remote-transport.md §147`。
+
+## §2026-11-11-goalnn-rollout-node-liveness-budgets（云机 rollout 节点「经常断连 / 贡献度极低」：探活预算、权重握手、并发取小）
+
+- **现场（kaggle 滚动机节点，2026-11-11）**：节点空载答 `/v1/ping` 要 **0.9~2.7s**（quick tunnel RTT），
+  而派发/评估的探活预算是 **3s** ⇒ 07/08/09 三个小时各 `ping failed — excluded this round`
+  **84 / 97 / 88 次**，eval 侧同时 `连续 9 次瞬时失败（背压/瞬断）— 停派`、`让出在飞 4 槽 ⇒ c=0/4`；
+  节点自己那 40 分钟 `gamesDoneTotal` 冻在 721、`inflight=[]` —— 它健康，只是每轮都被判出局。
+  另一条：`weights[rollout] -> kaggle (kept, 54.6s)`，**节点本来就有这份权重**（0.38MB，50s ≈ 6KB/s，
+  不可能是带宽）——探针 5s 超时后退化成整份重传，客户端收完才被回一句 `kept`。
+  第三条：`/v1/ping.cpus=2`（`physicalCores()`）而 rl-config 钉 `concurrency=4`、笔记本按
+  `effective_cores()`=4 起 worker ⇒ 4 个重型 native worker 抢 2 个物理核，父进程 HTTP 被饿到几十秒，
+  把前两条放大成自我维持的负反馈。
+- **决定 A（探活预算）**：新增 `common.distribution.STATUS_TIMEOUT_SEC = 8.0` 与 `status_timeout_of(policy)`，
+  派发（`trainer/dispatch`）、评估（`trainer/eval_dispatch`）、批跑（`trainer/batch_runner`）、
+  评估自救扩容（`worker/eval_self_rescue`）四处**共读这一份**缺省；policy 显式值仍优先（本机
+  rl-config 里那份 3 已改 8，该文件是 gitignore 的本地数据）。
+- **决定 B（权重握手）**：① ping **超时不再摘权重账本**（`forget_weights_node`）——超时是「这轮够不着」，
+  不是「节点重启丢了桶」；真重启的证据是 codeHash/bun 不符，同 sha 手动重启仍有 409 自愈兜底。
+  ② `post_weights` 的缓存探针预算 5s → 15s：探针超时的代价不是 5s，而是后面那次全额 POST。
+- **决定 C（并发取小）**：新增 `common.distribution.node_slots(configured, cpus)` = `min(config, ping.cpus)`
+  （任一缺用另一个，都没给 ⇒ 1），派发侧改走它；笔记本 `_slot_count` 从 `effective_cores()` 改为
+  `min(effective_cores, physical_cores)` —— 口径必须与 agent 自己的 `CPUS = physicalCores()` 一致，
+  「两套口径」正是超额认购的来源。**这是对 2026-11-04「采样节点满核」口径的细化**：满核 = 物理核
+  （HT sibling 只共享执行单元与 L1/L2，每个 worker 是 ~75–100MB 的重型进程），不是「逻辑核数」。
+- **否决**：① 「连续 2 次 ping 失败才排除」——排除本身无害（这轮够不着就用不了它），真正该保护的
+  是权重账本，B① 用「证据才失效」比「等两轮」严格更好，且不让整轮多等一次 8s；
+  ② 把 `statusTimeoutSec` 一刀切抬到 20s+ —— 死节点每轮白等 20s，8s 已覆盖云端 p99 空载 RTT 的 3 倍；
+  ③ 给云机写死 `concurrency: 2` —— 节点换机器/换配额就不对了，取小让它自报。
+- **验收**：`tests/trainer/test_node_probe_budgets.py`（6 条；对 HEAD 用 `git worktree add --detach`
+  验红 5 条、1 条守卫本就绿）+ `tests/remote/test_rollout_node.py` 的 `_slot_count` 用例按物理核重写；
+  `nn-python-gate` 全量 **5881 passed / 0 failed**。全文 → `docs/nn/remote-transport.md §148`。
+- **未闭的环**：tunnel 本身仍是结构性成本（换 URL、RTT 1s 起步）；固定入口（named tunnel / tailscale）
+  与「同 id 多会话 last-writer-wins」单独评。

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -30,6 +31,7 @@ if str(ROOT) not in sys.path:
 
 import remote.download as dl
 import remote.job_round as round_mod
+import remote.plan_handoff as ph
 import remote.worker as W
 
 MB = 1024 * 1024
@@ -113,6 +115,154 @@ def test_a_blob_cache_hit_touches_mtime(tmp_path: Path) -> None:
     dl._cache_blob(root, sha, raw, lambda _m: None)
     assert p.stat().st_mtime > before, "命中没 touch mtime ⇒ prune 会把高频命中的件当最旧删掉"
     assert p.read_bytes() == raw, "touch 不该动字节"
+
+
+def test_a_blob_cache_read_hit_touches_mtime(tmp_path: Path) -> None:
+    """★ 读路径的命中也要 touch（`_resolve_blob` / `resolve_blobs_batch`）。
+
+    现场（2026-11-11 07:33，o2-notax it163）：段启动时 `_seed_ref_blob_cache` 把 kickstart ref
+    写进 `blob_cache/<sha>`，此后**每轮都命中、但一次也没 touch** —— 于是它在合计预算的
+    prune 里永远是「最旧」的那一件。跑了约 100 分钟后 prune 终于把它挑中删掉，下一轮
+    `_resolve_blob` 只能向空 base_url 要字节 ⇒ `ProtocolError` 打死整段（自主腿没有下载通道，
+    确定性、重试不会变好）。
+
+    `_cache_blob` 早就有这条规则（见上一个用例），写路径修了、读路径漏了。
+    """
+    root = tmp_path / "blob_cache"
+    root.mkdir()
+    raw = b"ref" * 64
+    sha = hashlib.sha256(raw).hexdigest()
+    p = root / sha
+    p.write_bytes(raw)
+    os.utime(p, (time.time() - 10_000, time.time() - 10_000))
+    before = p.stat().st_mtime
+    got, hit, src = dl._resolve_blob(
+        blob_root=root,
+        name=dl.BLOB_REF,
+        sha=sha,
+        inline_b64="",
+        jid="j1",
+        base_url="",
+        token="",
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert got == raw and hit and src == "cache"
+    assert p.stat().st_mtime > before, "读命中没 touch ⇒ prune 会把锚点当最旧删掉"
+    assert p.read_bytes() == raw, "touch 不该动字节"
+
+
+def test_a_batch_blob_cache_read_hit_touches_mtime(tmp_path: Path) -> None:
+    """批量那条读路径同规（判据同源：改一条必须改两条）。"""
+    root = tmp_path / "blob_cache"
+    root.mkdir()
+    raw = b"opt" * 64
+    sha = hashlib.sha256(raw).hexdigest()
+    p = root / sha
+    p.write_bytes(raw)
+    os.utime(p, (time.time() - 10_000, time.time() - 10_000))
+    before = p.stat().st_mtime
+    out = dl.resolve_blobs_batch(
+        wanted={dl.BLOB_OPT: sha},
+        blob_root=root,
+        jid="j1",
+        base_url="",
+        token="",
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert out[dl.BLOB_OPT][0] == raw and out[dl.BLOB_OPT][2] == "cache"
+    assert p.stat().st_mtime > before, "批量读命中没 touch ⇒ 同一件会先于真正冷件被删"
+
+
+def test_prune_never_drops_a_pinned_anchor(tmp_path: Path) -> None:
+    """★ B：manifest 点名的锚点（ref/demo/opt）**不许被 prune 挑中**——哪怕它是最旧的那一件。
+
+    为什么不能只靠「命中 touch」（A）：touch 依赖 mtime 排序这个概率，而配额是共享池。
+    某一拍如果一次性落进来一批大件，锚点仍可能被挑中；它一旦被删，自主腿就没有第二份字节。
+    """
+    root = tmp_path / "cache"
+    sha = "e" * 64
+    anchor = _mk(root, f"blob_cache/{sha}", 1 * MB, age_sec=300)  # 最旧的那一件
+    code = _mk(root, "code_cache/cccc", 1 * MB, age_sec=200)
+    fresh = _mk(root, "blob_cache/dddd", 1 * MB, age_sec=1)
+    dropped = dl.prune_caches(root, budget_bytes=1 * MB, keep={sha}, log=lambda _m: None)
+    assert anchor.exists(), "锚点被 prune 删了（keep 没生效）"
+    assert not code.exists() and not fresh.exists(), "非锚点的旧件应该被丢光"
+    assert dropped == 2
+
+
+def test_prune_says_so_when_the_pinned_floor_exceeds_the_budget(tmp_path: Path) -> None:
+    """全剩下无法回收的锚点件 ⇒ **不删**，但要响亮说明配额没兑现在哪。"""
+    root = tmp_path / "cache"
+    sha = "f" * 64
+    anchor = _mk(root, f"blob_cache/{sha}", 2 * MB, age_sec=300)
+    logs: list[str] = []
+    dropped = dl.prune_caches(root, budget_bytes=1 * MB, keep={sha}, log=logs.append)
+    assert dropped == 0 and anchor.exists()
+    # 只判「有没有响」而不判措辞（文本断言预算：改标题字不该炸）——「为什么」是给操作员的，
+    # 而同族两条已钉住行为面（dropped=0 / 锚点在）。
+    assert logs, "配额没兑现（锚点超预算）却没有打任何一行——静默超限 = 没人知道为什么盘一直涨"
+
+
+def test_anchor_shas_takes_only_content_addressed_values() -> None:
+    """`anchor_shas` 只认 64 位十六进制（`"bc"` / 空串是哨兵，不是地址）。"""
+    real = "a" * 64
+    got = dl.anchor_shas(
+        {"ref_sha": real, "opt_sha": "", "init_weights_fp": "bc", "demo_sha": "G" * 64}
+    )
+    assert got == frozenset({real}), got
+
+
+def test_reseed_anchors_refills_a_missing_ref_without_any_network(tmp_path: Path) -> None:
+    """★ C：每轮开跑前的自愈 —— 缓存里没了就从产物目录/包根补回，**不发任何网络请求**。
+
+    这是 07:33 现场的直译：贮子（blob_cache）被 prune 清掉后，旧行为是 `_resolve_blob` 向
+    空 base_url 发 GET ⇒ ProtocolError 打死整段；新行为是这一轮先自己把字节种回去。
+    """
+    raw = b"ref" * 1024
+    sha = hashlib.sha256(raw).hexdigest()
+    work = tmp_path / "work"
+    (work / "blob_cache").mkdir(parents=True)
+    arts = tmp_path / "artifacts"
+    arts.mkdir()
+    (arts / "ref_weights.json").write_bytes(raw)
+    manifest = {"ref_sha": sha}
+    filled = ph._reseed_anchors(
+        manifest=manifest, job_dir=arts, work_dir=work, artifacts_root=arts, log=lambda _m: None
+    )
+    assert filled == 1
+    assert (work / "blob_cache" / sha).read_bytes() == raw
+    # 链下游真的能拿到：空 base_url 也命中缓存（= 这一轮不会去打网）
+    got, hit, src = dl._resolve_blob(
+        blob_root=work / "blob_cache",
+        name=dl.BLOB_REF,
+        sha=sha,
+        inline_b64="",
+        jid="j1",
+        base_url="",
+        token="",
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert got == raw and hit and src == "cache"
+
+
+def test_reseed_anchors_does_nothing_when_the_anchor_is_there(tmp_path: Path) -> None:
+    """在就不动（每轮真去哈希 0.4MB 是无谓开销；touch 由读路径负责）。"""
+    raw = b"ref" * 1024
+    sha = hashlib.sha256(raw).hexdigest()
+    work = tmp_path / "work"
+    cache = work / "blob_cache"
+    cache.mkdir(parents=True)
+    p = cache / sha
+    p.write_bytes(raw)
+    before = p.stat().st_mtime
+    filled = ph._reseed_anchors(
+        manifest={"ref_sha": sha}, job_dir=work, work_dir=work, artifacts_root=None, log=lambda _m: None
+    )
+    assert filled == 0
+    assert p.stat().st_mtime == before, "在缓存里就不该重写（mtime 被改会让 prune 读数失真）"
 
 
 def test_a_corrupt_cache_entry_is_repaired_not_kept(tmp_path: Path) -> None:

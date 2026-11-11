@@ -51,6 +51,9 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
+from common.distribution_limits import node_slots as node_slots
+from common.distribution_limits import status_timeout_of as status_timeout_of
 from common.hashing import sha256_file
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from common.proc import run_capture
@@ -484,11 +487,11 @@ def _request(
                 _ACTIVE.discard(key)
 
 
-def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
+def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> list[dict | None]:
     """**并行** ping 一批节点（保序返回，失败 = None）。
 
     为什么必须并行：串行 ping 的墙钟 = Σ 每台延迟，而超时预算是**按节点**的
-    （`statusTimeoutSec` 默认 3s）⇒ 两台负载高的节点就让整个阶段花 ~7s（2026-09-19
+    （`STATUS_TIMEOUT_SEC`）⇒ 两台负载高的节点就让整个阶段花两倍预算（2026-09-19
     实测：`u0 阶段 gate 6.83s alive=4/6`，其中两台正是超时被丢）。节点门在每单元
     重跑一次，这笔开销按单元累加。并行后 == 最慢一台。
     """
@@ -510,7 +513,7 @@ def ping_nodes_parallel(nodes: list, timeout: float = 3.0) -> list[dict | None]:
         return list(ex.map(_one, nodes))
 
 
-def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
+def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
     """GET /v1/ping → dict；任何失败返回 None（调用侧决定排除该节点）。"""
     try:
         status, body = _request(url.rstrip("/") + "/v1/ping", auth_key, timeout)
@@ -988,7 +991,10 @@ def post_weights(
     GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
     多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
     """
-    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
+    # 探针预算 5s → 15s（2026-11-11）：云机隧道空载单请求就要 0.9~2.7s，5s 在节点忙时
+    # 必超时 ⇒ 退化成整份重传（0.38MB 传了 54.6s，节点收完才说「我本来就有」）。探针
+    # 超时的代价不是 5s，而是后面那次全额 POST。
+    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(15.0, timeout))
     if cached is True:
         return "kept"
     course_name = course_name_of() if course is None else course

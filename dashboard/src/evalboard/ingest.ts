@@ -79,6 +79,23 @@ export interface RawEvalRow {
 
 const toNum = (v: unknown, dft = 0): number =>
   typeof v === 'number' && Number.isFinite(v) ? v : dft
+
+/**
+ * 逐局标量取数：**快照优先**，再回退顶层同名列；两路都没有 ⇒ null。
+ *
+ * 云机补传的行过 `remote/deliver_wire.py::slim_eval_row` 投影：白名单键平铺，其余数值列
+ * 只活在 `metricValues` 里（2026-11-11，`enemyTotal` 直读顶层曾落成默认 20 ⇒ 歼灭率 ÷10）。
+ * 与 `server/iters.ts::evalMetricValue` 同一条口径：新增数值列不必再动白名单，但**必须走这里**。
+ */
+function snapshotNum(raw: RawEvalRow, key: string): number | null {
+  const mv = raw.metricValues
+  if (mv && typeof mv === 'object' && !Array.isArray(mv)) {
+    const v = (mv as Record<string, unknown>)[key]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  const v = raw[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
 const toBool = (v: unknown): boolean => v === true || v === 1
 
 /** Phase-0 计数列（长度 4，basic/fast/power/armor；非数组/旧行 → 全 0）。 */
@@ -136,29 +153,26 @@ export function ingestEvalRow(raw: RawEvalRow, ctx: IngestCtx, ts?: string): Eva
     cleared: toBool(raw.cleared),
     ticks: toNum(raw.ticks, 0),
     kills: toNum(raw.kills, 0),
-    enemyTotal: toNum(raw.enemyTotal, 20),
-    playerHits: toNum(raw.playerHits, 0),
+    enemyTotal: toNum(snapshotNum(raw, 'enemyTotal'), 20),
+    playerHits: toNum(snapshotNum(raw, 'playerHits'), 0),
     playerDamageTaken: toNum(raw.playerDamageTaken, 0),
-    playerShots: toNum(raw.playerShots, 0),
-    enemyHits: toNum(raw.enemyHits, 0),
+    playerShots: toNum(snapshotNum(raw, 'playerShots'), 0),
+    enemyHits: toNum(snapshotNum(raw, 'enemyHits'), 0),
     powerUpsCollected: toNum(raw.powerUpsCollected, 0),
-    stuckTicks: toNum(raw.stuckTicks, 0),
-    firstKillTick:
-      typeof raw.firstKillTick === 'number' && Number.isFinite(raw.firstKillTick)
-        ? raw.firstKillTick
-        : null,
+    stuckTicks: toNum(snapshotNum(raw, 'stuckTicks'), 0),
+    firstKillTick: snapshotNum(raw, 'firstKillTick'),
     playerDeaths: toNum(raw.playerDeaths, 0),
-    cellsVisited: toNum(raw.cellsVisited, 0),
-    playerLevel: toNum(raw.playerLevel, 0),
-    puSpawnBomb: 0,
-    puSpawnTank: 0,
-    puSpawnFreeze: 0,
-    puSpawnShield: 0,
-    puSpawnStar: 0,
-    puGotBomb: 0,
-    puGotTank: 0,
-    puGotFreeze: 0,
-    puGotShield: 0,
+    cellsVisited: toNum(snapshotNum(raw, 'cellsVisited'), 0),
+    playerLevel: toNum(snapshotNum(raw, 'playerLevel'), 0),
+    puSpawnBomb: toNum(snapshotNum(raw, 'puSpawnBomb'), 0),
+    puSpawnTank: toNum(snapshotNum(raw, 'puSpawnTank'), 0),
+    puSpawnFreeze: toNum(snapshotNum(raw, 'puSpawnFreeze'), 0),
+    puSpawnShield: toNum(snapshotNum(raw, 'puSpawnShield'), 0),
+    puSpawnStar: toNum(snapshotNum(raw, 'puSpawnStar'), 0),
+    puGotBomb: toNum(snapshotNum(raw, 'puGotBomb'), 0),
+    puGotTank: toNum(snapshotNum(raw, 'puGotTank'), 0),
+    puGotFreeze: toNum(snapshotNum(raw, 'puGotFreeze'), 0),
+    puGotShield: toNum(snapshotNum(raw, 'puGotShield'), 0),
     score: toNum(raw.score, 0),
     // Phase 0 逐敌种画像：确定性 gameplay 遥测，旧行缺键填零/空（不伪造，见 store.PHASE0_FIELDS）
     hitsByKind: toKindCounts(raw.hitsByKind),

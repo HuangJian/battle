@@ -6,6 +6,183 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §148 云机 rollout 节点「经常断连 / 贡献度极低」：探活预算 3s、权重握手 50s、2 核被派 4 槽（2026-11-11）
+
+**现场（kaggle 滚动机节点）**：面板读数“断连”，实际节点空载答 `/v1/ping` 就要 **0.9~2.7s**
+（quick tunnel RTT），而派发/评估的探活预算是 **3s**。07/08/09 三个小时各
+`[dist] node kaggle: ping failed — excluded this round` **84 / 97 / 88 次**；eval 侧同时
+`连续 9 次瞬时失败（背压/瞬断）— 停派`、`让出在飞 4 槽 ⇒ c=0/4`。那份笔记本日志里 40 分钟
+`gamesDoneTotal` 冻在 721、`inflight=[]`，就是「每轮都被判出局」的样子——节点健康。
+
+**三条並存的结构成本**（实测数字）：
+
+1. **探活预算太紧**：3s < 云端空载 p99。一次超时就进 `excluded`，而节点越忙越答不上 ⇒ 负反馈。
+2. **权重握手每轮重来**：`weights[rollout] -> kaggle (kept, 54.6s)` —— `kept` 却是 54s，因为
+   缓存探针的 5s 先超时、退回整份上传，节点收完才说「我本来就有」。权重只 **0.38MB**
+   （50s ⇔ 6KB/s，不是带宽）⇒ 整轮在 `ready on 5/5 nodes in 54.69s` 上等它。P90「权重就绪」
+   27.9s、max 356s，而 >20s 的慢握手 3 小时里只有 kaggle 257 次 / dsw 253 次、局域网节点各 2 次。
+3. **2 个物理核被派 4 个槽**：`/v1/ping.cpus=2`（`physicalCores()` = min(物理核, cgroup 配额, 掩码)），
+   而 rl-config 钉 `concurrency=4`、笔记本按 `effective_cores()`=4 起 worker ⇒ 4 个重型 native
+   worker 抢 2 个核，父进程的事件循环被饿住 ⇒ 上面两条被放大。
+
+**修法（本次落地）**
+
+- `common.distribution.STATUS_TIMEOUT_SEC = 8.0` + `status_timeout_of(policy)`：**单一缺省**，
+  派发 / 评估 / 批跑 / 评估自救扩容四处同读；policy 显式值仍优先。
+- **ping 超时不再摘权重账本**：超时是「这轮够不着」，不是「重启丢了桶」——旧写法让下一轮
+  重新握手（上面那条 54s 就是它）。真重启的证据是 codeHash/bun 不符；同 sha 手动重启仍有 409 自愈。
+- 缓存探针预算 5s → 15s（超时的代价不是 5s，而是后面那次全额 POST）。
+- `common.distribution.node_slots(configured, cpus)` = `min(config, ping.cpus)`；`_slot_count` 改用
+  **物理核**（与 agent 的 `CPUS` 同口径），「满核」不再被读成「逻辑核」。
+
+**未闭的环**：quick tunnel 本身就是结构成本（每次会话换 URL、RTT 1s 起步）；`id=kaggle` 被每个
+会话复用、hub 注册 last-writer-wins ⇒ 两个会话同时活着时必有一个孤儿（keepalive 照打、0 局）。
+固定入口（named tunnel / tailscale）与同 id 冲突单独评。
+
+**验收**：`tests/trainer/test_node_probe_budgets.py` 6 条（对 HEAD 验红 5 条）+ `_slot_count` 物理核
+用例；`nn-python-gate` 5881 passed。
+
+## §147 自主云机离线包从不跑 greedy 语料：轮内补采集阶段（B 口径「挤进普通采样」）（2026-11-11）
+
+**现场**：`o2-notax` 自主段 300 轮，课程写着 `greedy_quota: 12%`，云机日志全文 `greedy` / `argmax` /
+`labelMode` / `teacher` **0 次**，账本只有 it1 的 `volume_stage_stats.greedy`（36 局）；it2–it300 一条都没有
+（对照 `o2-loot` 45 次 / `o2-reflex` 39 次）。后果：熵 1.5484→1.5579 不降、rollout/eval gap 恒定 −7.84pp、
+41 点平台期零突破 —— 部署口径（greedy）的失败从未进梯度。
+
+**根因（不是那个 `export_bundle` 守卫）**：自主腿的一轮由 `remote/worker.run_job` 在云机内闭环
+（`run_iter_rollout` → `run_training_core` 的 PPO），**trainer 不在场** ⇒ `trainer/loop_volume.py:851` 的
+`_volume_collect_greedy` 与它那三处守卫（`greedy_quota is None` / stream raise / `collect_only` /
+`export_bundle` 早退）一条都不会被执行到。那条 docstring「所有采集通道都支持 … `kind=iter` 云节点」说的是
+**trainer 仍当编排者**的拓扑（trainer 本机跑 volume 采集，节点只跑派下来的 argv），与自主包是两件事 ——
+这是本主题最容易浪费一天的坑。
+
+**三条结构事实（决定了落点只能在轮内）**
+
+1. 离线一轮是**原子**的：rollout 与 PPO 一次做完，`_run_iteration` 返回后再跑的局只能进下一轮；
+2. 云机 rollout **走流式采集**：`worker/stream_collect.py` 把 spec 的 `argv` 当**每关模板**（局由调度器
+   现场长、`_out_next = max(len(argv), top_out+1)`）⇒ 往 argv 里追加 greedy 行会被**静默忽略**，还会顶开
+   `--out` 编号（这是「先试最小改法」会走到的死路）；
+3. rollout 轮末是「**实产 == 声明**」逐位对账（`verify_shards` + `iter_expected_data_fp`）⇒ greedy 必须
+   自己的 spec + 自己的产出根，不能和普通波共用一个目录。
+
+**落地**
+
+- 新模块 `worker/greedy_round.py`：`greedy_argv_rows()`（该关模板 → `retarget_argv` +
+  `--teacher-argmax`）、`greedy_spec()`（显式 argv，不带 `volume`）、`run_greedy_round()`（波次循环 +
+  结算 + 与 trainer 同键的 stats）。配额/分档/种子全部复用 `worker.greedy_quota` / `worker.volume_alloc` /
+  `worker.volume_quota` 的纯函数，不另立第二份。
+- 接线住新模块 `remote/offline_greedy.py`（**L4**，已登记 `tests/helpers/remote_dag.py`）：
+  `collect_round()` = `run_iter_rollout` + greedy 波 + 并账，`remote/worker.run_job` 只留一行调用
+  （作业壳 LOC 999 已顶预算，且这段与网络/校验/分叉无关）。顺序仍是 `run_iter_rollout` 之后、
+  `run_training_core` 之前（长驻池仍在）；产出根 `<job>/greedy/wave{k}/`，`rctx` 已解析时经
+  `scratch.batch_rel` 按相对位置镜像进轮 scratch ⇒ 仍在 PPO 的单一装载根里，`discover_shards`
+  按路径序把 `greedy/` 排在 `w0/` 前。
+- 回落成「原地」档（`scratch` 没解析）时 shard 会落在 PPO 装载根外：`_under_ppo_root()` 用 `shutil.move`
+  搬进 `<shards_root>/greedy/`，搬不动**抛** `ProtocolError`（采到但训不到比不采更糟，而账本会好看）。
+  `run_job` 里 `collector` 在场时 `volume_stage_stats` 由「覆盖」改「合并」—— 否则本行会把刚并进去的
+  `greedy` 子键盖掉。
+- `ctx.course is None`（课程对象缺席）⇒ greedy 静默不生效，只在 `plan_run` 里 WARN 一次
+  （`ctx.greedy_course_warned`）——不 WARN 就重演「课程写着 12%、日志一个字都没有」。
+- 进度**只认 `shard_dirs`、不扫盘**：换根档下 job 目录里没有 shard（扫盘会看到 0 局 ⇒ 一路空转到波次上限）。
+- spec 两个新键 `greedy_quota` / `greedy_round_target`（`common/manifest.validate_rollout_spec` 白名单；
+  缺席的旧包归一化输出**逐字节不变**）。
+
+**B 口径（用户 2026-11-11 裁决「挤进去」）**：普通采样少采 greedy 那份，`per_stage_quota` 保持
+**减量前**的整轮值 ⇒ 每轮训练样本数不变、其中 12% 是 greedy。云机侧上限 = `plan.total_target`
+（不吃 `oversample_cap`，cap 仍进账本），分母 = **放大后**的整轮 target（用减量后的分母会把 12% 算成 13.6%）。
+与在线腿的差异记录在案：在线腿采 100% + 12% 再让 PPO 逐关截断（顺序决定丢哪几片）；离线腿按 B 减量，
+同一课程两腿的「每轮样本构成」**不是逐字节可比**。
+
+**账本**：`greedy_quota_stats`（含 `sampling_report` / `greedy_report`）、`volume_stage_stats["greedy"]`、
+顶层 `sampling_samples` / `sampling_games` —— 与 trainer 腿同键同名；`remote/train_core` 的 `iter_info`
+透传与 `remote/artifacts.LEDGER_FIELDS` 三行是必须的（离线腿的 iteration 行由 `plan_run._checkpoint` 写，
+不走 `biz/events.write_iteration`）。
+
+**验收**：`tests/worker/test_greedy_round.py`（9 条：模板/行生成、B 上限、普通 seed 排除、停波三态、
+stats 形状、硬配额响亮失败）+ `tests/remote/test_greedy_offline_wiring.py`（10 条：白名单与半份契约、
+B 减量、`collect_round` 接线与并账、`_under_ppo_root` 搬迁、`copy_iter_metrics`、账本搬运、旧包不变）；
+`nn-training/tests/remote` 全量 1859 pass。
+
+**顺手拆掉两处会被门禁记账的重复**（改完 LOC/复用账本才绿）：`greedy_quota.report_brief()`
+（`trainer/loop_volume` 与 `worker/greedy_round` 原本各抄一份 brief）、`rollout_argv.flag_value()`
+（L0 下沉；`worker.plan._flag_value` 改成 import 别名，第三份副本会被「同名散落 ≥3 模块」抓住）。
+
+**部署（不做就等于没修）**：`nn-training/**` 不进 codehash 集，但云机代码来自身 **`code.zip` 快照**
+⇒ 控制台**重打代码快照** + 重启；云机按包 sha12 认领 ⇒ 已收官的 notax 不会自动变好，验证要新开课
+（新 `out`/`traj` + DECISIONS 条目，AGENTS §15.5）。
+
+**未验证**：真机一轮的墙钟增量（预计 ≈ 30 局 × 亚秒级，但 `放大×2` 之上再挤 12% 的实际 `wall_sec` 要等
+P4 新腿读数）；以及课程 `soft=false` 时「greedy 三档填不满」是否会让整段失败——语义上应当失败
+（与 trainer 一致），但离线腿一轮失败会烧掉 3 次重试预算，需在 P4 观察。
+
+## §146 自主段自己打死自己：blob 缓存读命中不 touch ⇒ prune 砍掉 kickstart ref 锚点；重进拍把产物根降维（2026-11-11）
+
+**现场**：用户报「自主云机 07:33 出错后一直没自行恢复，08:41 手动重跑 cell 才好」。日志
+（`tmp/notebook-logs/kaggle/…-1andil.log`，时间戳 UTC，`23:33` = 北京 `07:33`）里是两条互不相干的
+故障咬在一起：
+
+1. `[23:32:55] it163 首批按本机宽度重铺` 与 `cache prune: 丢 2 个最旧的缓存条目` 同一秒，
+   然后 it163 的 PPO 在 `_fetch_ref` 处 `ProtocolError: 没有 hub 地址（base_url 为空）却要下载
+   /jobs/f33b4d93dd61696d/blob?name=ref` ⇒ `自主段在 it163 处失败` ⇒ `run_loop 退出 rc=1`。
+   同一模式早在 `20:42:22`（o2-loot it184）就发生过一次，两次都是「prune 的那一拍 → 下一轮 ref miss」。
+2. 失败后 `_run_auto` 立刻重进同一门课：`产物根: /dev/shm/battle2-offline`（**没有** `/o2-notax`），
+   在那里读出 `本地产物齐全（it300）` ⇒ `本机段落已完成（it300 ≥ end_it300）` ⇒ `noop` rc=0 ⇒
+   `段末摘要已补传：it300 noop` ⇒ 这份包被记进 `served`（`本会话已跑过这份包`）⇒ 队列全终态 ⇒
+   每 15s 一拍空转到 300s 上限 ⇒ 会话自行收工。真段停在 it162/163。
+
+**根因一（读命中不 touch）**：`blob_cache/<sha>` 的写路径（`_cache_blob`）与 code/ts_code 的命中
+路径都按 A3 的规矩 `_touch` 了 mtime，唯独 `_resolve_blob` 与 `resolve_blobs_batch` 的**读命中**
+分支漏了。段启动时 `_seed_ref_blob_cache` 种进 `blob_cache` 的 kickstart ref（0.4MB）此后每轮都
+命中、却一次也没刷新 mtime ⇒ 在「三棵树合计 256MB、按 mtime 丢最旧」的 `prune_caches` 眼里，
+它永远是最旧的那一件。opt 不会这样：`_seed_opt_blob_cache` 每轮重写（mtime 每轮变新）。
+测量对得上：两次事故的会话分别跑了 ~97 / ~98 分钟才轮到它（prune 先吃真正冷掉的 code/ts 残留），
+失守的时刻就是 prune 的「最旧」轮到锚点的那一拍。
+
+**根因二（布局按本拍猜）**：`_run_auto` 传 `multi=len(tasks) > 1`。一门课跑挂后重进的那一拍，
+清单里只剩它自己可领 ⇒ `multi=False` ⇒ `local_root_path` 把显式 `CFG.local_root` 原样当产物根
+（单课语义），而那个**共享根**里躺着别的腿的 `it-300` 账本 ⇒ 「已完成」。会话开始时 3 门可领 ⇒
+`multi=True` ⇒ 每门课一个子目录，所以**只有失败后的重进拍**会掉进共享根，看起来就像「错了就再也
+不回来了」。8:41 手动重跑 cell 是新会话（3 门可领）⇒ 自动恢复。
+
+**落地（锚点三层兜底 + 布局稳定，四刀一起上）**：
+
+1. **不该丢** —— `download.py::_resolve_blob` / `resolve_blobs_batch` 的 cache 命中分支补
+   `_touch(cp)`（与 `_cache_blob` / `_ensure_code` / `_ensure_ts_code` 同规，判据同源改一处必须
+   改两处）。热件不再因为「只看不写」而被当成最旧。
+2. **不许删** —— `prune_caches(..., keep=…)` + 纯函数 `download.anchor_shas(manifest)`
+   （只认 64-hex 的 `ref_sha`/`demo_sha`/`opt_sha`/`init_weights_fp`；`bc`/空串是哨兵）：manifest
+   点名的那几件**永不参与淘汰**，哪怕它是最旧的。光锚点就超预算时不删、打一行
+   「锚点件 X MB 不可回收」（静默超限和静默删锚都是事故）。两个 prune 调用点
+   （`_ensure_code` / `_ensure_ts_code`）按各自那一轮的 manifest 传。
+3. **丢了能补** —— `plan_handoff._reseed_anchors`：`plan_run._run_iteration` 每轮开跑前调一次，
+   `blob_cache/<sha>` 不在时才从产物目录 `ref_weights.json` / `demo.npz`、包根 `blob.ref` 重种。
+   只看「在不在」（命中路径一个 `stat`，不哈希不写盘），所以每轮调不构成开销；它管的是前两道
+   都兜不住的情形（被外部清、盘满被系统清）。
+4. **布局稳定** —— `offline_boot.session_multi(courses, served)` 纯函数：`multi` = 「本会话见过
+   几门课」（`tasks ∪ served`），不再是「本拍有几门」。重进拍落回 `<root>/<course>`，续跑点回到
+   it162，不再撞共享根里别的腿的 it300。
+
+**为什么是三层而不是挑一层**：① 靠 touch = 概率；② 靠 keep = 保证「不丢」，但补不出已经丢的；
+③ 靠重种 = 自愈，但前提是本地还有字节源。2026-11-11 这次的现场三条都缺，所以三条一起补：
+任一条独立到场都能让 it163 那一拍活下来，叠起来才是「出事了下一轮自己站起来」。
+
+**被否决**：只加 touch（概率降到很低但非零，且完全无自愈）；把锚点搬进独立 `anchor_store/`
+（`plan/` 级结构改动、查找链多一源、磁盘按段无上限，为 0.4MB 掀整条链不划算）；放大 256MB 预算
+或按子树各给一份（上限会悄悄 ×3，A3 已否决，且锚点仍在同一个池里被挤）；失败后不记 `served`
+强制重试整段（重跑 rollout 白烧 33s/轮，且治不了根降维）；只加告警（它本来就不是偶发抖动）。
+
+**验收**：
+
+- `tests/remote/test_cache_persist.py`：读命中 touch ×2（改动前红：`mtime` 不动）·
+  `prune` 不删锚点 · 锚点占满预算时「不删 + 响亮说明」· `anchor_shas` 只收 64-hex ·
+  `_reseed_anchors` 清空缓存后**零网络**补回（并当场跑通 `_resolve_blob` 的 `cache` 命中）·
+  在就不重写（`mtime` 不变）。
+- `tests/remote/test_plan_run_split.py`：`_run_iteration` 必须每轮调 `_reseed_anchors`（AST 守卫，
+  删掉这条兜底即红）；交接面门面 19 → 20 名。
+- `tests/common/test_offline_task_queue.py`：重进拍布局不降维（改动前红：`multi=[True, False]`）。
+- 门禁：`tests/remote + tests/worker` **3380 passed / 1 skipped**（skipped = 无 paddle）·
+  `tests/common{,_layer,_progress_hook}` 全绿 · ruff / mypy 干净 · 根 `bun run check` 2737 pass。
+
 ## §145 采样节点远控重启：受监护模式退出，由 rollout_node 重新拉起（2026-11-09）
 
 **问题**：`rollout.ipynb` 的 `rollout_node` 是 sampler-agent 的外部监护者。agent 的

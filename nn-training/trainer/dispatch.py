@@ -168,7 +168,7 @@ class RolloutDispatcher:
         policy = cfg.get("policy", {})
         task_timeout = float(policy.get("taskTimeoutSec", 900))
         window = float(policy.get("queueWindowSec", 1800))
-        status_timeout = float(policy.get("statusTimeoutSec", 3))
+        status_timeout = common.distribution.status_timeout_of(policy)
         fail_streak_max = int(policy.get("nodeFailStreak", 3))
         # 主动升级机制（M8）：ping 发现 codeHash **stale** 的节点 → POST /v1/restart
         # 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）；拿不到升级分支时
@@ -227,8 +227,11 @@ class RolloutDispatcher:
         nodes = []
         for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
             if ping is None:
-                log(f"[dist] node {nid}: ping failed — excluded this round")
-                common.distribution.forget_weights_node(nid)
+                # ★ 2026-11-11：**不摘权重账本**。超时是「这轮够不着」，不是「节点重启丢了桶」——
+                # 旧写法一次超时就 forget ⇒ 下一轮重新握手（云机 = 整份重传 0.38MB / 50s，
+                # 日志里那句 `weights[rollout] -> kaggle (kept, 54.6s)` 就是它）。真重启的证据是
+                # 下面的 codeHash/bun 不符；剩下的漏网（同 sha 手动重启）有 409 自愈兜底。
+                log(f"[dist] node {nid}: ping failed — excluded this round（权重账本保留）")
                 continue
             if ping.get("codeHash") != code_hash:
                 # codeHash 不符 ⇒ 节点可能 pull/restart 丢权重——缓存必须失效
@@ -336,7 +339,9 @@ class RolloutDispatcher:
                     },
                 )
                 continue
-            c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+            # 并发按「配置 vs 节点自报核数」取小（2026-11-11）：kaggle 只报 2 核而 config 钉 4
+            # 时，4 个重型 worker 抢 2 个核会把父进程的 HTTP 拖成几十秒（评审见 node_slots）。
+            c_n = common.distribution.node_slots(n.get("concurrency"), ping.get("cpus"))
             log(f"[dist] node {nid}: online, concurrency={c_n}")
             nodes.append(
                 {

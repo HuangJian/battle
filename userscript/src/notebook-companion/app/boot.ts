@@ -45,6 +45,7 @@ import {
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
 import { createOfflineWatch } from './offline-watch'
+import { createStopCmdPoller } from './stop-cmd'
 import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
   actionLabel,
@@ -274,19 +275,36 @@ function startFrame(
       })
     : null
   let offlineNoted = false
+  // 诊断只发一次：目标在跑但判据没成立时，把「卡在哪一格」（exec / kernel / output 长度）
+  // 写进 op 日志。2026-11-11 的现场就是缺这一行——两天里只有「没上报」，看不出为什么。
+  let offlineDiagSent = false
   const offlineTimer =
     offline === null
       ? null
       : setInterval(() => {
           const start = offline.poll()
           const hit = offline.detected()
+          const diag = offline.diag()
+          if (diag.execPolls === 0) offlineDiagSent = false
           if (hit && !offlineNoted) {
             offlineNoted = true
-            bridge.note('offline:detected', { value: `cell=${hit.index} id=${hit.id}` })
+            bridge.note('offline:detected', {
+              value: `cell=${hit.index} id=${hit.id} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            })
           }
           if (start) {
             bridge.note('offline:cell-start', {
-              value: `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms evidence=${start.evidence}`,
+              value: `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms evidence=${start.evidence} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            })
+            return
+          }
+          // 连续 5 拍执行中却没上报 ⇒ 打一行读数（一次执行周期只一行）。
+          if (!offlineDiagSent && diag.execPolls >= 5) {
+            offlineDiagSent = true
+            bridge.note('offline:watch-diag', {
+              value:
+                `cell=${hit ? hit.index : '-'} execPolls=${diag.execPolls} kernel=${diag.kernel} ` +
+                `outLen=${diag.outLen} others=${diag.others} waited=${diag.waitedMs}ms phase=${diag.phase}`,
             })
           }
         }, 1000)
@@ -424,6 +442,12 @@ function startHost(
         const detail =
           `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''}`.trim()
         op('offline:detected', detail)
+        return
+      }
+      if (m.name === 'offline:watch-diag') {
+        const detail =
+          `notebook=${notebookKey || '∅'} ${typeof m.value === 'string' ? m.value : ''}`.trim()
+        op('offline:watch-diag', detail)
         return
       }
       if (m.name === 'offline:cell-start') {
@@ -691,6 +715,19 @@ function startHost(
   })
   panel.setSchedule(sched.rows())
   sched.start()
+  // 下行命令（`stopOthers`）：别的页开始离线训练时，dashboard 会让我们停会话。
+  // 与 op 日志同一条通道（GET /api/notebookCmds → stopNow → ack 落 op）；伴生脚本关掉就不取。
+  const stopCmd = config.enabled
+    ? createStopCmdPoller({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        site: 'kaggle',
+        session: () => (frameSession || session).slice(0, 64),
+        stop: stopNow,
+        onEvent: op,
+      })
+    : null
+  stopCmd?.start()
   // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）；
   // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案）。
   const markTimer = setInterval(() => {
@@ -748,6 +785,7 @@ function startHost(
     clearInterval(timer)
     clearInterval(markTimer)
     autoContinue.dispose()
+    stopCmd?.stop()
     sched?.stop()
     doc.removeEventListener('visibilitychange', onVisibility)
     bridge.destroy()
@@ -1030,6 +1068,19 @@ function startSingle(
   }
   panel.setStopPpoVisible(offlineDetected)
 
+  // 下行命令（`stopOthers`，与 host 同口径）：停会话走本页适配器，ack 落 op 日志。
+  const stopCmd = config.enabled
+    ? createStopCmdPoller({
+        runtime,
+        dashboardBase: config.dashboardBase,
+        site,
+        session: () => loop.session.slice(0, 64),
+        stop: async () => toCmd(await send('stopSession')),
+        onEvent: op,
+      })
+    : null
+  stopCmd?.start()
+
   // 魔搭的 notebook 身份在 URL 里没有（帧地址只有 `?t=&lang=`），只能等工作台把标签渲染出来；
   // 读到就换日志键/任务桶，最多等 30s（换键 = 换一份日志，与 host 的 attach 同口径）。
   let identityTimer: ReturnType<typeof setInterval> | null = null
@@ -1066,29 +1117,45 @@ function startSingle(
       })
     : null
   let offlineNoted = false
+  // 诊断一行（与帧内那条同口径）：判据卡住时把读数留在 op 日志里。
+  let offlineDiagSent = false
   const offlineTimer =
     offline === null
       ? null
       : setInterval(() => {
           const start = offline.poll()
           const hit = offline.detected()
+          const diag = offline.diag()
+          if (diag.execPolls === 0) offlineDiagSent = false
           if (hit && !offlineNoted) {
             offlineNoted = true
             offlineDetected = true
             panel?.setStopPpoVisible(true)
-            op('offline:detected', `cell=${hit.index} id=${hit.id}`)
+            op(
+              'offline:detected',
+              `cell=${hit.index} id=${hit.id} kernel=${diag.kernel} outLen=${diag.outLen}`,
+            )
           }
           if (start) {
             const stopOthers = loadStopPpo(runtime, page, false)
             const detail =
               `cell=${start.cell.index} id=${start.cell.id} waited=${start.waitedMs}ms ` +
-              `evidence=${start.evidence} stopOthers=${stopOthers ? 1 : 0}`
+              `evidence=${start.evidence} stopOthers=${stopOthers ? 1 : 0} ` +
+              `kernel=${diag.kernel} outLen=${diag.outLen}`
             op('offline:cell-start', detail)
             void ops.flush()
             panel?.setStatus(
               stopOthers ? '离线训练已开始（已上报：停其它 PPO）' : '离线训练已开始（已上报）',
               'ok',
             )
+            return
+          }
+          if (!offlineDiagSent && diag.execPolls >= 5) {
+            offlineDiagSent = true
+            const diagLine =
+              `cell=${hit ? hit.index : '-'} execPolls=${diag.execPolls} kernel=${diag.kernel} ` +
+              `outLen=${diag.outLen} others=${diag.others} waited=${diag.waitedMs}ms phase=${diag.phase}`
+            op('offline:watch-diag', diagLine)
           }
         }, 1000)
 
@@ -1167,6 +1234,7 @@ function startSingle(
     clearInterval(markTimer)
     if (offlineTimer !== null) clearInterval(offlineTimer)
     if (identityTimer !== null) clearInterval(identityTimer)
+    stopCmd?.stop()
     hubSync?.cancel()
     doc.removeEventListener('visibilitychange', onVisibility)
     for (const ev of EVENTS) win.removeEventListener(ev, touch, { capture: true })

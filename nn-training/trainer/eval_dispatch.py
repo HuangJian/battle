@@ -152,7 +152,7 @@ class EvalDispatcher:
         rnd: EvalRound | None = None
         try:
             policy = cfg.get("policy", {})
-            status_timeout = float(policy.get("statusTimeoutSec", 3))
+            status_timeout = common.distribution.status_timeout_of(policy)
             task_timeout = float(policy.get("taskTimeoutSec", 900))
             fail_streak_max = int(policy.get("nodeFailStreak", 3))
             window = float(getattr(args, "eval_window_sec", 1500) or 1500)
