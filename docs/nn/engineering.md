@@ -25,6 +25,41 @@
 
 ---
 
+## §116 `common/distribution.py` 再腾余量：竞速账 / 采集口径下沉 `common/race_metrics.py`（2026-11-11）
+
+**现场**：合并 `origin/goal-nn` 的 connect 竞速后，`common/distribution.py` **正好 1000 LOC**
+（`tests/test_python_loc_budget.py` ≥1000 即红；合并前已 999——S5 拆分后的余量早被吃光）。
+先做了一次无语义的两行改写（`auth = {...}` + 单行 `Request(...)`：5 → 2 行）把门禁救回来，
+但只留 3 行余量：下一个改这个文件的人必然再撞一次。
+
+**决定**：按「独立所有者 + 独立触发条件」把**竞速账与采集口径**整块搬到
+**`common/race_metrics.py`**（75 LOC，stdlib-only）：`rollout_collect_sec` / `dup_rate` /
+`effective_slots` / `race_stats` / `by_node_of` / `dist_block` / `race_log_line` 七名**逐字不动**。
+`common/distribution.py` 1000 → **931 LOC**（余量 69），只留 `X as X` 门面 ⇒ 调用点
+（`trainer/dispatch` 的 `[dist] round eff` / `dist` 块 / race drops 行）与打桩面一行不改。
+
+**为什么是这一簇**：它们只吃数字与结算行（不碰网络、权重、模块全局），触发条件只有
+「一轮收齐后算账 / 打一行日志」；`race_stats` 本来就是「重复执行率唯一的算术出处」
+（日志与 `dist` 块各算一遍必漂，历史上出现过「日志说 38%、事件说 48%」）。
+
+**切分规避的三处风险**：
+- **无环**：块零 import 仓内模块 ⇒ 新模块不反向 import 门面（`request_upgrade` / `unpack_container`
+  那两块都要 `_request` / `DistError`，搬它们就得造环或延迟 import，本次不动）。
+- **打桩面无迁移**：七名全仓零 `monkeypatch.setattr`，外部读点全按 `common.distribution.X`
+  属性解析 ⇒ 门面对象恒等（`d.race_stats is r.race_stats`）。
+- **删无用 import**：`Mapping` / `Sequence` 随实现走（`Callable` 留守），ruff `unfixable=["F401"]`
+  ⇒ 手动删，不然门禁照旧红。
+
+**验证**：`ruff check` + mypy 绿；`compile` 级对账：门面对象 `is` 同一函数、`race_log_line`
+输出与搬前逐字相同；`nn-python-gate` 全量 **5923 passed / 3 skipped**（mypy 896 → **897** 文件）；
+LOC 守卫 7 例绿（`distribution.py` 931、`race_metrics.py` 75）。
+
+**留待**：`distribution.py` 里还有两块「独立触发」的大块（远控升级护栏 `request_upgrade_guarded`
+/ 结果容器解包 `unpack_container`），都因 `_request` / `DistError` 而**不能**直接搬——下次撞线
+时该按「先下沉 `_request` 的宿主」再搬，而不是继续压行数。
+
+---
+
 ## §115 eval 账本补全 27 列：切片 1 补 16 + 切片 5 补 11，`METRICS` 过桥 + known 分母（2026-11-08）
 
 **现场**：`o1` 分析脚本用 `<out>.run/eval_log.jsonl` 复算 Φ 时把

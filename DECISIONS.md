@@ -11816,3 +11816,24 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   再往下压要复用连接，或让节点门一轮只跑一次而不是每波一次。② gcs 磁盘临界（清盘 / 停用；
   `DISK_FLOOR_MB` 是冻结值，改它另案）——**本次未动**，用户未选该修法。③ 代码改动要重启 trainer
   （走控制台）才生效；预算收回虽热读但不够（见上面 75s 分解）。
+
+## §2026-11-11-goalnn-race-metrics-split（`common/distribution.py` 再腾余量：竞速账 / 采集口径下沉 `common/race_metrics.py`）
+
+- **现场**：合并 connect 竞速后 `common/distribution.py` 正好 **1000 LOC**（`tests/test_python_loc_budget.py`
+  ≥1000 即红；合并前 999，S5 拆分留下的余量早被后续改动吃光）。先用无语义的两行改写
+  （`auth = {…}` + 单行 `Request(…)`，5 → 2 行）把门禁救回，但只剩 3 行余量。
+- **决定**：把「竞速账 + 采集口径」整块搬到 **`common/race_metrics.py`**（75 LOC，stdlib-only）：
+  `rollout_collect_sec` / `dup_rate` / `effective_slots` / `race_stats` / `by_node_of` / `dist_block` /
+  `race_log_line` 七名**逐字不动**；`distribution.py` 1000 → **931 LOC**，留 `X as X` 门面 ⇒
+  调用点（`trainer/dispatch` 的 `[dist] round eff` / `dist` 块 / race drops 行）与打桩面一行不改。
+- **为什么是这一簇**：触发条件单一（「一轮收齐后算账 / 打一行日志」），只吃数字与结算行，
+  不碰网络 / 权重 / 模块全局；`race_stats` 本就是「重复执行率唯一的算术出处」——日志行与
+  `dist` 块各算一遍必漂（历史事故：日志说 38%、事件说 48%）。
+- **否决**：① 继续压行数（把可读的两行并成一行）——救得了这次，救不了下一个人，且把
+  「1000 行 = 设计问题」的护栏变成游戏；② 搬**远控升级护栏**（`request_upgrade_guarded` 一族，
+  约 250 行）或**结果容器解包**（`unpack_container`）——两者都要 `_request` / `DistError`，
+  单纯搬家会造出「子模块反向 import 门面」的顶层环，或得写延迟 import；本次按「无环 + 零打桩
+  迁移」选最小可搬的那块；③ 只搬 `dup_rate` 等单个函数——门面行数与 LOC 增量不成比例。
+- **验证**：LOC 守卫 7 例绿（`distribution.py` 931 / `race_metrics.py` 75）；门面对象恒等
+  （`d.race_stats is r.race_stats`）；`nn-python-gate` 全量 **5923 passed / 3 skipped**、
+  mypy 896 → **897** 文件、ruff 绿。全文 → `docs/nn/engineering.md §116`。
