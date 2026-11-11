@@ -767,6 +767,10 @@ def run_job(
                     job_dir, manifest, ts_dir=_ts_dir, log=log, ctx=rctx,
                     it=int(manifest.get("it", 0) or 0), collector=collector,
                 )
+                # ⚠ 这里是**有意重绑**，不是变量遮蔽的失误（M3 `2160b1da` 的原话：「本轮真正
+                #   要校验的 shard 是刚跑出来的（payload 里没有 shard），D14 必须看到它们」）。
+                #   自主腿的 payload 就是 `pack_payload([], …)`（`plan_run.py:520`）⇒ 解包出的
+                #   `landed.shard_dirs` 是空表；不重绑的话下面那段 D14 变成空转。
                 shard_dirs = list(iter_info["shard_dirs"])
             finally:
                 pool, rctx.pool = rctx.pool, None
@@ -792,6 +796,8 @@ def run_job(
 
     # ---- D14 语料血缘：job.course_fp == 每个 shard 的 manifest.course_fp ----
     # （跨课程语料绝不混训——发布端已保证 shard 集按 course_fp 过滤，这里再校验一次）
+    # 读的 `shard_dirs` 按 kind 不同：普通 job = 解包出的 payload shard；kind=iter = 本轮现场
+    # 跑出来的（见 iter 分支里那次重绑的注释）。
     _cfp = str(manifest["course_fp"])
     _corpus = str(manifest.get("corpus_fp", "") or "")
     for _sd in shard_dirs:
