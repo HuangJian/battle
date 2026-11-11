@@ -304,6 +304,8 @@ class RunContext:
         self.t0 = time.time()
         #: 上一轮结果的 opt 原始字节的 sha（→ 下一轮 manifest.opt_sha，命中 blob_cache）
         self.last_opt_sha: str = ""
+        #: greedy 语料（2026-11-11）：「课程声明了 greedy_quota 但 ctx.course 缺失」只 WARN 一次。
+        self.greedy_course_warned: bool = False
         #: 已报过的「配额漂移」原值（manifest 与计划不一致）——同值不重复报。
         #: 2026-10-30（用户口径「prep 行只留必要读数」）：漂移不再进 prep 那行，
         #: 改成「值变了才报一行」——静默会让人以为两边一致。

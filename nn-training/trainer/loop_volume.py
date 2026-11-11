@@ -1074,15 +1074,8 @@ class TrainingVolume:
         # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
         # `_greedy_report`（死数据），`write_rollout_end` / `write_iteration` 读的是
         # `self._report` ⇒ 控制台恒显示纯采样的 >98%，greedy 败局/超时局完全不可见。
-        # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数。
-        def _brief(rep: dict | None) -> dict:
-            rep = rep or {}
-            return {
-                "games": int(rep.get("games") or 0),
-                "winRate": float(rep.get("winRate") or 0.0),
-                "outcomes": dict(rep.get("outcomes") or {}),
-                "samples": int(rep.get("totalSamples") or 0),
-            }
+        # 合并前各存一份 brief，供控制台下钻「采样 vs greedy」两份读数（实现与云机腿共用一份）。
+        from worker.greedy_quota import report_brief as _brief
 
         sampling_report = _brief(self._report)
         greedy_report = _brief(self._greedy_report)

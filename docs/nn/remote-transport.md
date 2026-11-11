@@ -6,6 +6,79 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §147 自主云机离线包从不跑 greedy 语料：轮内补采集阶段（B 口径「挤进普通采样」）（2026-11-11）
+
+**现场**：`o2-notax` 自主段 300 轮，课程写着 `greedy_quota: 12%`，云机日志全文 `greedy` / `argmax` /
+`labelMode` / `teacher` **0 次**，账本只有 it1 的 `volume_stage_stats.greedy`（36 局）；it2–it300 一条都没有
+（对照 `o2-loot` 45 次 / `o2-reflex` 39 次）。后果：熵 1.5484→1.5579 不降、rollout/eval gap 恒定 −7.84pp、
+41 点平台期零突破 —— 部署口径（greedy）的失败从未进梯度。
+
+**根因（不是那个 `export_bundle` 守卫）**：自主腿的一轮由 `remote/worker.run_job` 在云机内闭环
+（`run_iter_rollout` → `run_training_core` 的 PPO），**trainer 不在场** ⇒ `trainer/loop_volume.py:851` 的
+`_volume_collect_greedy` 与它那三处守卫（`greedy_quota is None` / stream raise / `collect_only` /
+`export_bundle` 早退）一条都不会被执行到。那条 docstring「所有采集通道都支持 … `kind=iter` 云节点」说的是
+**trainer 仍当编排者**的拓扑（trainer 本机跑 volume 采集，节点只跑派下来的 argv），与自主包是两件事 ——
+这是本主题最容易浪费一天的坑。
+
+**三条结构事实（决定了落点只能在轮内）**
+
+1. 离线一轮是**原子**的：rollout 与 PPO 一次做完，`_run_iteration` 返回后再跑的局只能进下一轮；
+2. 云机 rollout **走流式采集**：`worker/stream_collect.py` 把 spec 的 `argv` 当**每关模板**（局由调度器
+   现场长、`_out_next = max(len(argv), top_out+1)`）⇒ 往 argv 里追加 greedy 行会被**静默忽略**，还会顶开
+   `--out` 编号（这是「先试最小改法」会走到的死路）；
+3. rollout 轮末是「**实产 == 声明**」逐位对账（`verify_shards` + `iter_expected_data_fp`）⇒ greedy 必须
+   自己的 spec + 自己的产出根，不能和普通波共用一个目录。
+
+**落地**
+
+- 新模块 `worker/greedy_round.py`：`greedy_argv_rows()`（该关模板 → `retarget_argv` +
+  `--teacher-argmax`）、`greedy_spec()`（显式 argv，不带 `volume`）、`run_greedy_round()`（波次循环 +
+  结算 + 与 trainer 同键的 stats）。配额/分档/种子全部复用 `worker.greedy_quota` / `worker.volume_alloc` /
+  `worker.volume_quota` 的纯函数，不另立第二份。
+- 接线住新模块 `remote/offline_greedy.py`（**L4**，已登记 `tests/helpers/remote_dag.py`）：
+  `collect_round()` = `run_iter_rollout` + greedy 波 + 并账，`remote/worker.run_job` 只留一行调用
+  （作业壳 LOC 999 已顶预算，且这段与网络/校验/分叉无关）。顺序仍是 `run_iter_rollout` 之后、
+  `run_training_core` 之前（长驻池仍在）；产出根 `<job>/greedy/wave{k}/`，`rctx` 已解析时经
+  `scratch.batch_rel` 按相对位置镜像进轮 scratch ⇒ 仍在 PPO 的单一装载根里，`discover_shards`
+  按路径序把 `greedy/` 排在 `w0/` 前。
+- 回落成「原地」档（`scratch` 没解析）时 shard 会落在 PPO 装载根外：`_under_ppo_root()` 用 `shutil.move`
+  搬进 `<shards_root>/greedy/`，搬不动**抛** `ProtocolError`（采到但训不到比不采更糟，而账本会好看）。
+  `run_job` 里 `collector` 在场时 `volume_stage_stats` 由「覆盖」改「合并」—— 否则本行会把刚并进去的
+  `greedy` 子键盖掉。
+- `ctx.course is None`（课程对象缺席）⇒ greedy 静默不生效，只在 `plan_run` 里 WARN 一次
+  （`ctx.greedy_course_warned`）——不 WARN 就重演「课程写着 12%、日志一个字都没有」。
+- 进度**只认 `shard_dirs`、不扫盘**：换根档下 job 目录里没有 shard（扫盘会看到 0 局 ⇒ 一路空转到波次上限）。
+- spec 两个新键 `greedy_quota` / `greedy_round_target`（`common/manifest.validate_rollout_spec` 白名单；
+  缺席的旧包归一化输出**逐字节不变**）。
+
+**B 口径（用户 2026-11-11 裁决「挤进去」）**：普通采样少采 greedy 那份，`per_stage_quota` 保持
+**减量前**的整轮值 ⇒ 每轮训练样本数不变、其中 12% 是 greedy。云机侧上限 = `plan.total_target`
+（不吃 `oversample_cap`，cap 仍进账本），分母 = **放大后**的整轮 target（用减量后的分母会把 12% 算成 13.6%）。
+与在线腿的差异记录在案：在线腿采 100% + 12% 再让 PPO 逐关截断（顺序决定丢哪几片）；离线腿按 B 减量，
+同一课程两腿的「每轮样本构成」**不是逐字节可比**。
+
+**账本**：`greedy_quota_stats`（含 `sampling_report` / `greedy_report`）、`volume_stage_stats["greedy"]`、
+顶层 `sampling_samples` / `sampling_games` —— 与 trainer 腿同键同名；`remote/train_core` 的 `iter_info`
+透传与 `remote/artifacts.LEDGER_FIELDS` 三行是必须的（离线腿的 iteration 行由 `plan_run._checkpoint` 写，
+不走 `biz/events.write_iteration`）。
+
+**验收**：`tests/worker/test_greedy_round.py`（9 条：模板/行生成、B 上限、普通 seed 排除、停波三态、
+stats 形状、硬配额响亮失败）+ `tests/remote/test_greedy_offline_wiring.py`（10 条：白名单与半份契约、
+B 减量、`collect_round` 接线与并账、`_under_ppo_root` 搬迁、`copy_iter_metrics`、账本搬运、旧包不变）；
+`nn-training/tests/remote` 全量 1859 pass。
+
+**顺手拆掉两处会被门禁记账的重复**（改完 LOC/复用账本才绿）：`greedy_quota.report_brief()`
+（`trainer/loop_volume` 与 `worker/greedy_round` 原本各抄一份 brief）、`rollout_argv.flag_value()`
+（L0 下沉；`worker.plan._flag_value` 改成 import 别名，第三份副本会被「同名散落 ≥3 模块」抓住）。
+
+**部署（不做就等于没修）**：`nn-training/**` 不进 codehash 集，但云机代码来自身 **`code.zip` 快照**
+⇒ 控制台**重打代码快照** + 重启；云机按包 sha12 认领 ⇒ 已收官的 notax 不会自动变好，验证要新开课
+（新 `out`/`traj` + DECISIONS 条目，AGENTS §15.5）。
+
+**未验证**：真机一轮的墙钟增量（预计 ≈ 30 局 × 亚秒级，但 `放大×2` 之上再挤 12% 的实际 `wall_sec` 要等
+P4 新腿读数）；以及课程 `soft=false` 时「greedy 三档填不满」是否会让整段失败——语义上应当失败
+（与 trainer 一致），但离线腿一轮失败会烧掉 3 次重试预算，需在 P4 观察。
+
 ## §146 自主段自己打死自己：blob 缓存读命中不 touch ⇒ prune 砍掉 kickstart ref 锚点；重进拍把产物根降维（2026-11-11）
 
 **现场**：用户报「自主云机 07:33 出错后一直没自行恢复，08:41 手动重跑 cell 才好」。日志

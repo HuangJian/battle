@@ -43,6 +43,10 @@ from worker.cmd import build_rollout_cmd
 #: 节点侧的采集调度器（`worker.stream_collect`，L3）也要用它，而本模块是 L4（靠 `worker.cmd`），
 #: L3 import L4 是**上向边**（而 `remote/worker.py` L5 顶层 import 那个调度器）。
 #: 本模块继续以同名转发，`worker.plan.retarget_argv` 对读者不变（同一个函数对象）。
+# 2026-11-11：`_flag_value` 与 `retarget_argv` 一样**下沉**到 L0 叶子（`worker.greedy_round`
+# 也要拆模板取值，第三份副本会被复用账本的同名散落判据抓住）；`worker.plan._flag_value`
+# 这个名字仍是同一个函数对象（老调用点/patch 不受影响）。
+from worker.rollout_argv import flag_value as _flag_value
 from worker.rollout_argv import retarget_argv
 
 #: `build_pairs` 实际读的 args 字段（纯函数入参 = 计划必须携带的全部信息）。
@@ -624,14 +628,6 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
                 f"计划自检失败：argv_template[{i}] 经 retarget_argv 后不再等于自身"
                 f"（重定向语义改了？{' '.join(row[:6])}…）"
             )
-
-
-def _flag_value(argv: list[str], flag: str) -> str | None:
-    """取 argv 里 `flag` 的值（无该 flag/值 → None）。"""
-    if flag not in argv:
-        return None
-    i = argv.index(flag) + 1
-    return argv[i] if i < len(argv) else None
 
 
 def stage_json_of(course: Any, stage: int) -> str:

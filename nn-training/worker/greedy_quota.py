@@ -183,6 +183,21 @@ def bin_targets(plan: GreedyQuotaPlan) -> dict[str, int]:
     }
 
 
+def report_brief(rep: Mapping[str, Any] | None) -> dict:
+    """采集报告的四个关键读数（采样 / greedy 两份 brief 的**唯一**实现）。
+
+    两腿都写进账本（`trainer/loop_volume` 本机腿与 `worker/greedy_round` 云机腿），
+    键名一致才能让控制台/`worker/resume` 用同一个解析器（复用账本也认这一份）。
+    """
+    rep = rep or {}
+    return {
+        "games": int(rep.get("games") or 0),
+        "winRate": float(rep.get("winRate") or 0.0),
+        "outcomes": dict(rep.get("outcomes") or {}),
+        "samples": int(rep.get("totalSamples") or 0),
+    }
+
+
 def load_manifests(
     shard_dirs: Sequence[str | Path],
     mem: Mapping[str, Mapping[str, Any]] | None = None,

@@ -309,6 +309,7 @@ from remote.job_lifecycle import (
 # `tests/remote/test_job_round_split.py`）。
 from remote.job_round import run_one_round
 from remote.lifecycle import Lifecycle
+from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
@@ -445,7 +446,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
-from worker.iter_rollout import RoundContext, resolve_bun, run_iter_rollout
+from worker.iter_rollout import RoundContext, resolve_bun
 from worker.stream_collect import StreamCollector
 
 # ------------------------------------------------------------------ PPO 执行
@@ -760,17 +761,11 @@ def run_job(
             try:
                 # ★ 先建 collector 再取池：from_spec 抛错时池还没被取走。
                 rctx.pool = acquire_rollout(pool_key, log)
-                iter_info = run_iter_rollout(
-                    job_dir,
-                    manifest["rollout"],
-                    ts_dir=_ts_dir,
-                    log=log,
-                    ctx=rctx,
-                    it=int(manifest.get("it", 0) or 0),
-                    next_game=None if collector is None else collector.next_game,
-                    on_game_settled=None if collector is None else collector.observe,
-                    # 收官读数并进轮末那一行（2026-10-29 日志瘦身：原来它自己一行）。
-                    volume_line=None if collector is None else collector.summary_line,
+                # 本轮 rollout（普通波 + 可选 greedy 波；后者在 PPO **之前**，见
+                # `remote/offline_greedy.collect_round` 与 plan/greedy-offline-autonomous）。
+                iter_info = collect_round(
+                    job_dir, manifest, ts_dir=_ts_dir, log=log, ctx=rctx,
+                    it=int(manifest.get("it", 0) or 0), collector=collector,
                 )
                 shard_dirs = list(iter_info["shard_dirs"])
             finally:
@@ -783,7 +778,12 @@ def run_job(
                 # ★ 2026-10-28（plan/it-stage-ratation §9.5）：另带一份**本机腿同形状**的分关账
                 #   （`trainer/loop_volume._volume_stage_stats`），随产物行回到账本 ⇒ 控制台的
                 #   「各关进度」列/面板在云机轮上也有读数（同一个解析器，不写第二个分支）。
-                iter_info["volume_stage_stats"] = collector.stage_stats()
+                # ★ 2026-11-11：合并而不是覆盖 —— greedy 波的 `volume_stage_stats["greedy"]`
+                #   已经先写进 `iter_info`（ `collect_round` 在 rollout 之后、这里之前跑）。
+                iter_info["volume_stage_stats"] = {
+                    **(iter_info.get("volume_stage_stats") or {}),
+                    **collector.stage_stats(),
+                }
                 # `collector.summary_line()` 已并进轮末那行（`volume_line=` 入参），不再单打。
 
     # ---- mode 红线（v1：仅 per-tick） ----

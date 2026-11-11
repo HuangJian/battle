@@ -244,10 +244,12 @@ def test_run_job_refusal_and_order_anchors() -> None:
     # W4 分流：restore 段按 legacy tar 里有没有 model.pt 决定，并把它记成 legacy_tar
     assert 'weights_src = "legacy_tar"' in core
     assert 'legacy_model = opt_dir / "model.pt"' in core
-    # 顺序约束（§3.3）：解析必须在 rollout 调用点之前
+    # 顺序约束（§3.3）：解析必须在 rollout 调用点之前（2026-11-11 起这一轮由
+    # `remote.offline_greedy.collect_round` 起头——内部就是 `run_iter_rollout` + greedy 波，
+    # 所以锚点跟着移动，断言强度不变：解析仍必须早于本轮的起点）。
     assert src.index("init_w, weights_src, weights_wire_bytes = _resolve_weights(") < src.index(
-        "iter_info = run_iter_rollout("
-    ), "权重解析必须早于 run_iter_rollout"
+        "iter_info = collect_round("
+    ), "权重解析必须早于本轮 rollout（collect_round）"
     # 且必须落在 BC 的 early-return 之后（哨兵 "bc" 不许进五源解析）
     assert src.index("return _run_bc_job(") < src.index(
         "init_w, weights_src, weights_wire_bytes = _resolve_weights("

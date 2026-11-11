@@ -618,6 +618,13 @@ LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     # 一份解析器适配两边，不写「这条曲线来自哪条腿」的分支）。缺数据 ⇒ 不给键（不编 0）。
     ("rotation", "row", "rotation"),
     ("volume_stage_stats", "row", "volume_stage_stats"),
+    # greedy 语料账（2026-11-11，plan/greedy-offline-autonomous）：本机腿由
+    # `trainer/loop_steps.write_iteration` 写，云机腿由 `remote/plan_run._row_extra` 写。
+    # 不搬这三键 ⇒ 自主腿的 greedy 采集在控制台/`worker/resume` 里完全不存在
+    # （same 键名，两腿同一解析器）。
+    ("greedy_quota_stats", "row", "greedy_quota_stats"),
+    ("sampling_samples", "row", "sampling_samples"),
+    ("sampling_games", "row", "sampling_games"),
 )
 
 

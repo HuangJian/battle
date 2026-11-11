@@ -11682,3 +11682,37 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
 - **fail closed**：日志缺席/读不到 ⇒ 不停（宁可不问，也不停一个说不准的页）。`requirePpoWorker:false`
   只作排障口。证据行补 `skipped_non_worker=N`，能直接看出「为什么没停我这一页」。
 - **验收**：dashboard `bun run test` **2069 pass**（新增 3 条：只停 worker 页 / 尾巴窗口 / 证据计数）。
+
+## §2026-11-11-goalnn-greedy-offline-round（自主云机轮内补 greedy 采集：B 口径「挤进普通采样」，账本三键与 trainer 同形）
+
+- **背景**：`o2-notax` 自主段 300 轮写着 `greedy_quota: 12%`，却从未执行（云机日志 `greedy`/`argmax` 0 次；
+  账本只有 it1 的 `volume_stage_stats.greedy`）。根因**不是** `export_bundle` 守卫：自主腿的一轮由
+  `remote/worker.run_job` 在云机内闭环（`run_iter_rollout` → PPO），trainer 的 `_volume_collect_greedy`
+  根本不在场（`loop_volume.py:851` 的 docstring 说「kind=iter 云节点都支持」——那说的是 trainer 仍当编排者的拓扑）。
+- **决定（落点）**：`remote/worker.run_job` 在 rollout 之后、`run_training_core` 之前插入 greedy 阶段
+  （新模块 `worker/greedy_round.py`）。产出根 = `<job>/greedy/wave{k}/`，经 `rctx` 的 `scratch.batch_rel`
+  镜像进轮 scratch ⇒ 仍在 PPO 的**单一装载根**里；`discover_shards` 按路径序把 `greedy/` 排在 `w0/` 之前。
+- **决定（B 口径，用户 2026-11-11 裁决「挤进去」）**：普通采样少采 greedy 那份，`per_stage_quota` 保持
+  **减量前**的整轮值 ⇒ 每轮训练样本数不变、其中 12% 是 greedy。云机侧本轮 greedy 上限 = `plan.total_target`
+  （不吃 `oversample_cap`；cap 仍进账本），分母 = **放大后**的整轮 target。
+- **契约**：spec 新增 `greedy_quota` / `greedy_round_target`（`common/manifest.validate_rollout_spec`
+  白名单；缺席的旧包归一化输出逐字节不变）；账本三键 `greedy_quota_stats` / `sampling_samples` /
+  `sampling_games` 过 `remote/train_core` 的 `iter_info` 透传与 `remote/artifacts.LEDGER_FIELDS`。
+- **否决**：① 往本轮 spec 的 argv 追加 greedy 行——云机带 `volume` 块时走 `StreamCollector`，argv 只当
+  每关模板 ⇒ 追加行被静默忽略，还会顶开 `--out` 编号；② plan_run 预采 greedy 再喂 payload——
+  `verify_shards` 只认「实产 == 声明」，要改包契约；③ 放开 `export_bundle` 守卫让 trainer 再派单——
+  自主段没有下载通道。
+- **与在线腿的差异（记录在案）**：在线腿采 100% + 12% 再让 PPO 逐关截断（不同序丢片）；离线腿按 B 减量
+  ⇒ 同一课程两腿的「每轮样本构成」不是逐字节可比。行为改善属训练侧观察，不作硬 DoD（AGENTS §0.2）。
+- **部署**：`nn-training/**` 不进 codehash 集，但云机代码来自身 `code.zip` 快照 ⇒ 必须重打代码快照 + 重启；
+  已收官的 notax 不会自动变好，验证要新开课（新 `out`/`traj` + 本条，AGENTS §15.5）。
+- **结构（实施后补记）**：接线住新模块 `remote/offline_greedy.py`（L4，已登记 DAG）——`remote/worker.py`
+  已顶着 LOC 999 预算；`collect_round()` = rollout + greedy 波 + 并账，作业壳只留一行。回落成「原地」档时
+  `_under_ppo_root()` 把落单 shard 搬进 `<shards_root>/greedy/`（搬不动抛 `ProtocolError`：采到但训不到比
+  不采更糟）；`collector` 在场时 `volume_stage_stats` 改**合并**（否则盖掉刚并进去的 `greedy` 子键）。
+  `ctx.course is None` ⇒ greedy 静默不生效，但 `plan_run` WARN 一次（否则重演「课程写着 12%、日志 0 次」）。
+- **顺手拆重复（门禁逼出来的）**：`greedy_quota.report_brief()`（原先 trainer 与 greedy_round 各一份 brief）
+  + `rollout_argv.flag_value()`（L0 下沉，`worker.plan._flag_value` 改 import 别名）——两处都过了
+  `tests/test_reuse_ledger.py` 的只降不升判据，没抬基线。
+- **验收**：`tests/worker/test_greedy_round.py` + `tests/remote/test_greedy_offline_wiring.py`（19 条）；
+  `nn-training/tests/remote` 全量 1859 pass；全文 → `docs/nn/remote-transport.md §147`。
