@@ -1,0 +1,317 @@
+// 课程 o2-gq —— o2 系列第 3 轮（与 `o2-fix` 并行）：greedy 混采臂（2026-11-10）
+//
+// 状态：**已结课 · 已停课**（2026-11-10 23:11，it272）· 结课报告（2026-11-10）
+//   A 层最终（末 eval it270）：**337/400 = 84.25%**（clear 333 / go 50 / to 17）；
+//     全程峰值 it265 **356/400 = 89.0%**；it100 起 A 层 84.5±3.8（n=22，77–91）平台期。
+//   B/C 官方锚（it80，800 局 / seed0 860001）= **691/800 = 86.4%**：vs it0 598/800
+//     （+11.6pp，p<1e-4）、vs o2-fast null it80 518/800（+21.6pp，p<1e-6）。
+//   判词：**有效，但没突破平台，且机制靶判错了**。greedy 12% 混采是本轮唯一有效杠杆，
+//     但主效应不是修顶墙（wall/1k 14.5 vs null 10.7 / it0 12.0，反而升），而是
+//     「敢打 + 打得准」：shots 16.6 vs null 12.0、kills 1.80 vs 1.44、dmg/1k 50.9 vs 92.2、
+//     zeroKill 6.4% vs 21.3%。§2 主 0（wallPress −30%）FAIL、主 1/主 2 PASS。
+//   停课原因 = **用户裁决**（看 eval 录像后改立两门针对三缺陷的新课），
+//     **非跑满 300 iters / 非熔断 / 非止损**；末点未跑 B/C，it80 是唯一官方锚。
+//   后继：`o2-reflex`（热启动 it272）接手躲弹/拾取/freeze 三缺陷；`o2-loot` 接手道具链。
+//   结课档案 = 本文件头注 + 尾部「★ 结课结算」；`docs/nn/experiments.md §139` 只收
+//   已停四腿（fast/def/fix/gqfix），**不含本课**。立项块 §0–§4 保留作历史，判词以本节为准。
+// 计划：`plan/o2-gq-and-truncated-clear.plan.md`（立项依据/判据/止损全文，历史）
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   任务侧、22 行奖励、PPO 缰绳、eval 面板**逐字同 o2-fast**；唯一改动 =
+//   `greedy_quota`（12% 的 transitions 走 `--teacher-argmax` 采集）。o2-fast 是
+//   本课的 null（无配额、90 轮净 +2 局、A 层 74.3→74.8%）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据（全部本仓实测；细节见 plan §1–§2）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **训练语料看不见贪心策略的主要过程税**：同一批权重，贪心出口（eval）的
+//     `wWall / wStuck` = −16.1 / −3.7，采样语料（rollout）只有 −0.22 / −0.16。
+//     PPO 只在自身采样上算 advantage ⇒ 这 ~20 分/局的过程税**从未进入梯度**。
+//   · **o1-gq 的先验**：o1-gq-fast（1 敌 / 6000 拍，从 .8313 起）clear .9750、
+//     wallMed 18→7、stuck≥800 69→21、timeout 38→4，8/8 主门 + 零反签名；但 null 腿
+//     未立 ⇒ 贡献不可分解。**o2-fast 就是那条一直缺的 null**（2 敌 / 3000 拍）。
+//   · **o1 的教训①（degraded 门）**：`degraded = any(bin<target)` 在 soft=true 下分不清
+//     「采集故障」与「策略变好 ⇒ 失败供给枯竭」（o1 两臂全程 degraded：252/257、255/255）。
+//     本课**不设** degraded 止损，只把三档 achieved/target 记进账本。
+//
+// ── 1.1 为什么是 12%，而不是照抄 o1 的 .10/.02/.045 ─────────────────────────
+//   o1 的配额是为「任务接近解、失败供给枯竭」设计的（fast 的 timeout 档 it1 起供给就 0）。
+//   o2 反过来：失败供给充足（o2-fast it90 贪心面板 gameover 14% / timeout 11–13%），
+//   而且缺陷同时长在**赢局**里（clear 桶 `wWall` −16.1 比 gameover −11.0 还重）
+//   ⇒ 用「自然结局比例的 greedy 分数」，不用「按结局配额去猎稀缺负样本」。
+//   本课比例 = win .09 / loss .020 / timeout .010（和 .12），贴近实测 .75/.14/.11；
+//   12% 在 24576 预算里 ≈ 2950 transitions ≈ 18–20 局/轮（4 关各 4–5 局）。
+//   不额外加量：`target_transitions` 保持 24576，greedy 在预算内 ⇒ 唯一变量 = 语料组成。
+//
+// ── 1.2 身份 ───────────────────────────────────────────────────────────────
+//   `greedy_quota` 三档比例 + 规则版本 v2 进 `corpus_identity_fp`（biz/corpus_fp.py）
+//   ⇒ 与本课 null（o2-fast）自动异血缘；旧 shard 不会被误收；**不得跨课续跑**（§15.5）。
+//   `paired_rotate_seed` 20261112（新语料）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 判据与止损（预注册；B/C 满池 = 4 关 × 200 seed、seed0 860001、800 局 greedy）
+// ══════════════════════════════════════════════════════════════════════════
+//   A 层（400 局/点，固定 seed）只作趋势；因果判决只用 B/C 与 null 的同 seed 配对。
+//   | 主 0 机制 | it80 贪心面板 wallPressTicks 均值比 o2-fast it80 低 ≥30%；wWall ≥ −12 |
+//   | 主 1 胜率 | 同 seed 配对 clear ≥ o2-fast it80 + 5pp，McNemar p<0.05 |
+//   |           | **null 的 it80 权重也要在同一张 B/C 面板跑一遍**（归档在，~30s dist）|
+//   | 主 2 不换命 | timeout ≤ null × 1.2；dmg/千 ≤ ×1.3；idle ≤ +5pp |
+//   | 主 3 留痕 | `greedy_quota_stats` 三档 achieved/target 全部记入账本（不进止损）|
+//   | 止损 | it40 时 wallPress 降 <15% ⇒ 停腿（greedy 数据没改变 argmax）|
+//   | 反签名 | clear < 74.3（it0）或 timeout > 2× null ⇒ 立即停腿复盘 |
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 已知局限 / 风险（写清，免得下一个人当 bug 修）
+// ══════════════════════════════════════════════════════════════════════════
+//   ① greedy 数据是确定性的：状态多样性低于采样 = 「exploit 不是 explore」，可能强化
+//      argmax 已有的盲点。缓解：只占 12%、采样仍是主体；主 2 盯 timeout/dmg/idle。
+//   ② 低概率动作的 PPO ratio：熵 ~1.67 时 argmax 动作的 logp 可能很低 ⇒ ratio 波动大。
+//      clip 0.2 已在；看 `kl`（o2-fast 当前 ~7e-3）是否被 greedy shard 推高。
+//   ③ 本 stack 的优化温度已偏高（90 轮净位移 31.2 vs 随机游走期望 20.7，方向效率 16%；
+//      每 5 轮固定 seed 面板 33–37% 的局翻转）⇒ 本课不解决它；若本课判平，下一腿应做
+//      「加量/降 lr」而不是继续调语料。
+//   ④ 本课沿用 o2-fast 的奖励（含截断全歼的 −40 偏差，贪心侧约 1.75% 的局）——与 null
+//      同源 ⇒ 不影响本课 vs null 的可比性；该偏差由并行腿 o2-fix 单独修。
+//   ⑤ 4 关定集有记忆化风险（§15.1）：B/C 面板用于判决，跨课读数只用于晋级。
+//   ⑥ 与 o1 系列 6000 拍面板不可相减（同 o2-fast §5⑤）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 预算 / 开工前置
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576` / `iters 300` / `max_hours 18` / `eval_every 5` /
+//   `eval_games_per_stage 50`（与 null 同预算 ⇒ 互比用每墙钟小时 pp）。
+//   ① bc 冻结归档已存在（it256，见配置段）。
+//   ② it0 锚点复用 o2-fast §4.1（面板与奖励无关；800 局 greedy / seed0 860001）：
+//      clear .7475 / gameover 158 / timeout 50 / wallMed 17.0 / stuck≥800 35 /
+//      clearTicksMed 1804 / dmg/千拍 56.00 / idle .3571。
+//   ③ 控制台 `bun run dashboard` :8900 → 选本课 → 开课；零 worker 就等，不就地降级。
+//   ④ 开训 30 秒自检 hub URL：`grep -h "hub=" tmp/o2-gq/training-loop.log | tail -1`
+//      必须等于当时活着的 hub URL。
+//   ⑤ 首轮看 `greedy_quota_stats` 的 achieved/target 与 cap_hit；**不要**用 degraded
+//      当停腿判据（§1 教训①）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下为配置段：任务侧 / 22 行奖励 / PPO 缰绳 / eval / 预算**逐字继承 o2-fast**；
+//   改动点 = 6 个身份键（name / paired_rotate_seed / out / traj / backup_*）+ 新增
+//   `greedy_quota` 块。判词以本立项说明与 plan 为准。
+// ══════════════════════════════════════════════════════════════════════════
+//
+{
+  "version": 5,
+  "name": "o2-gq",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "max_ticks": 3000,
+  "reward": {
+    "formula": [
+      // ① 击杀：每只 18 分（o2-fast §4.3 调参后）
+      "wKill*kills",
+      // ② 命中：每发 3；空射不单独定价（aimMisses 是 hit 镜像，会重复计价）
+      "+ wHit*aimHits",
+      // ③ 清关奖：无条件 60 分，但按走过格子打折（runCap 30 打满）
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      // ④ 快清关：清场越早一次性越多（fastCap 2000 拍内线性，>2000 拍为 0）
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      // ⑤ 移动拍：稠密走位奖；顶墙拍计入 idleTicks，所以 ticks-idleTicks 自动排除蹭墙拍
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      // ⑥ 开火成本：每发 0.02（几乎免费以鼓励开枪）
+      "- wShot*min(playerShots, shotCap)",
+      // ⑦ 撞墙（0–40 拍）：有前进意图 + 零位移，1.0/拍
+      "- wWall*min(wallPressTicks, wallCap)",
+      // ⑧ 撞墙（40–120 拍）：第二段 0.2/拍
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      // ⑨ 卡死（≤2000 拍）：最长连续「没换格且没打中」，0.01 每拍
+      "- wStuck*min(stuckTicks, stuckCap)",
+      // ⑩ 卡死（2000 拍以后）：第二段 0.002/拍
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      // ⑪ 不动（超出免费额度的前 1000 拍）：免费额度 = 35% × min(ticks, 1000)
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      // ⑫ 不动（继续超出）：第二段 0.005/拍
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      // ⑬ 承伤：每点 0.08；dmgCap 200 = 1 命上限，不会截断
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      // ⑭ 掉命：每人头 12；terminal 另有 −30
+      "- wDeath*playerDeaths",
+      // ⑮ 待在敌方射界（0–120 拍）：每拍 0.02 —— 满血时允许激进
+      "- wThreat*min(threatTicks, threatCap)",
+      // ⑯ 待在敌方射界（120–500 拍）：第二段 0.005 每拍
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      // ⑰ 射界里仍在移动：每拍 0.05 —— 躲弹动作的正奖，与 ⑮⑯ 配对
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      // ⑱ 残血别浪（0–100 拍）：低血量拍 0.3/拍
+      "- wDanger*min(dangerTicks, dangerCap)",
+      // ⑲ 残血别浪（100–600 拍）：第二段 0.05/拍
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      // ⑳ 基地威胁税（0–200 压力点）
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      // ㉑ 基地威胁税（200–500）：第二段 0.03/点
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      // ㉒ 反苟：按拍计费（每杀赠 1000 拍，窗口 800）
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 3.0,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 24.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1000.0,
+      "paceWindow": 800.0,
+      "paceCap": 46.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o1-gq-fast/o1-gq-fast.it256.20261110-073346.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.03,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261112,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o2-gq/weights.json",
+  "traj": "tmp/o2-gq",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o2-gq",
+  "backup_prefix": "o2-gq",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  // greedy 混采（plan rev4）：三档比例的分母 = 本轮总 transition；和 .12 = 12% 走 argmax。
+  // 比例贴近 o2-fast 贪心面板的自然结局分布（.75/.14/.11），不做失败过采（§1.1）。
+  "greedy_quota": {
+    "win": 0.09,
+    "loss": 0.02,
+    "timeout": 0.01,
+    "oversample_cap": 2.0,
+    "soft": true,
+  },
+}
+
+// ── 诊断工具 / 复现 ────────────────────────────────────────────────────────
+//  B/C 判决面板（3000 拍，默认 dist；**null 同 panels 都要跑**）：
+//    `bun tools/sim/eval-course-ckpt.ts --course tmp/o1-probe/o2-env-course.json
+//     --weights o2-fast.it80=<weights/o2-fast/o2-fast.it80...json>
+//               o2-gq.it80=<weights/o2-gq/o2-gq.it80...json>
+//     --games 800 --seed0 860001 --out tmp/o2-probe/gq-bc.jsonl`
+//  取数：`tmp/o2-verdict.mjs --file <jsonl> --labels <...> --weights <...>`
+//  贪心侧过程税：`tmp/o2-reward-decomp.mjs nn-training/curricula/o2-gq.jsonc <eval jsonl>`
+//
+// ── ★ 结课结算（2026-11-10 23:11，用户裁决停课）────────────────────────────
+//  停课点 **it272**（归档 `nn-training/weights/o2-gq/o2-gq.it272.20261110-230955.json`）；
+//  末次有评估支撑的点 = **it270**（23:06:11，wver `3ac5addaed028b15`，无 it271/272 eval）。
+//  共 **55 个 A 层 eval 点**（it0–it270，every 5）· 零 error · 零熔断 · 未跑满 300 iters。
+//  读数复现：`tmp/o2-closeout-report.py` → `tmp/o2-closeout-report.txt`（口径 =
+//  `eval_log.jsonl` 的 `eval_summary` + 逐局 90 列聚合）。
+//
+//  §1 A 层走势（400 局/点；win 用 `eval_summary.wins`，逐局 `cleared` 口径低 3–6 局）
+//   | it | win | go | to | shots | hitRate | idle | dmg/1k | hurt/1k | threat/1k | pickup |
+//   | 0   | 297 (74.25%) | 87 | 20 | 23.5 | .234 | 37.4% | 55.89 | 17.05 | 32.12 | .377 |
+//   | 40  | 331 (82.75%) | 48 | 22 | 23.1 | .270 | 41.4% | 52.40 | 14.66 | 27.92 | .396 |
+//   | 80  | 350 (87.50%) | 29 | 21 | 17.4 | .344 | 49.3% | 38.40 |  9.20 | 21.53 | .360 |
+//   | 160 | 333 (83.25%) | 45 | 24 | 16.5 | .350 | 46.8% | 39.86 | 12.16 | 24.70 | .462 |
+//   | 200 | 308 (77.00%) | 72 | 26 | 14.6 | .379 | 47.1% | 55.68 | 14.78 | 31.72 | .385 |
+//   | 245 | **253 (63.25%)** | 94 | 61 | — 单点低谷，非熔断 | | | | | | |
+//   | 265 | **356 (89.00%) 全程峰值** | 32 | 15 | — | | | | | | |
+//   | 270 | 337 (84.25%) | 50 | 17 | 16.4 | .357 | 45.6% | 48.86 | 12.05 | 27.65 | .424 |
+//  ⇒ it0→it80 **+13.25pp**，此后横盘；it245 63.25% → it265 89.0% → it270 84.25% 的
+//    ±26pp 摆动是 run/checkpoint 级噪声（20:45 gqfix 教训：单跑可达 ~18pp）⇒
+//    **不认单点，只认跨 3 点同向 + B/C**；A 层 400 局 σ≈5.6 局撑不起逐点判决（§136 教训②）。
+//
+//  §2 判据逐条（§2 预注册；B/C = 800 局 / seed0 860001 / 同 seed 配对）
+//   主 0 机制：wallPress 比 null it80 低 ≥30% ⇒ **FAIL**（wall/1k 14.5 vs null 10.7、
+//     it0 12.0，反而升）。16:15 结论：机制门只能作解释、不能作 stop-loss——机械执行
+//     it40 止损（wall 降 <15%）会误杀一条当时已 +8.5pp(p=.004) 的腿。
+//   主 1 胜率 ≥ null it80 +5pp、McNemar p<0.05 ⇒ **PASS**（691/800 vs 518/800 = +21.6pp，
+//     p<1e-6；vs it0 598/800 = +11.6pp，p<1e-4）。分关 2001 +17.5pp / 2003 +24pp /
+//     2002 +2.5pp / 2000 +2.5pp。
+//   主 2 不换命 ⇒ **PASS**（dmg/1k 50.9 vs null 92.2；zeroKill 6.4% vs 21.3%）。
+//   主 3 留痕 ⇒ PASS（greedy 实际保留 3100–4000 transitions/轮 = 12.4–16.3%；
+//     degraded/cap_hit 交替亮，按 o1 教训① 未用作门）。
+//   反签名 ⇒ 未触发（A 层从未 <74.3；timeout 未 >2×null）。
+//
+//  §3 判词 / 形态：本课把 o2 从 74.8% 抬到 86.4%（B/C it80），但**改的不是顶墙**。
+//   A 层末点相对 it0：shots 23.5→16.4、hitRate .234→.357、dmg/1k 55.89→48.86、
+//   hurt/1k 17.05→12.05、threat/1k 32.12→27.65；代价 idle 37.4%→45.6%、
+//   cells 57.2→51.3、wall 19.8→24.1 ⇒ 「更准 + 稍苟」，与 o2-fast null 的
+//   「开枪腰斩 + 承伤涨」纯苟签名不同（null 判退步 −10.0pp，A 层掩恶）。
+//   it270 gameover 桶：hurt/1k **61.99**、threat/1k **91.56**、`playerHits` 1.0（一发致命）
+//   ⇒ 用户三缺陷（不躲弹 / 不拾取 / freeze 不追杀）在停课时**仍未解决**：拾取率 .424、
+//   冻盾窗口命中 3.36/千窗拍、只有 37/400 局有窗口。
+//
+//  §4 遗留 / 后继
+//   ① **B/C 只跑 it80 一个点**（`tmp/o2-analysis/bc-it80.jsonl`，f80）；it270/it272 未跑
+//      ⇒ 「平台期」只有 A 层证据，不能声称 B/C 也平台；it80 86.4% 仍是本课官方锚。
+//   ② 用户 23:1x 看的 `replays/hard-s200{1..4}-*.replay` 即这批权重；三缺陷交由
+//      `o2-reflex`（bc=it272，火线/拾取/窗口定价）与 `o2-loot`（bc=gq100 it52）接手。
+//   ③ 本课是 **greedy 12% 的有效先例**：两门新课都继承 12% 配额，不继承 gq100 的 18%。
+//   ④ 停课非破坏（只删开课标记 + 暂停意图，队列/账本/权重全留）；复跑必须按 §15.5
+//      用新 out/traj，不得续跑 `tmp/o2-gq`。
+//   ⑤ `docs/nn/experiments.md §139` 不含本课；本结算节即结课档案。

@@ -11498,6 +11498,77 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
 - **验收**：`cd userscript && bun run check` 292 pass（新增 `test/modelscope.test.ts` 20 用例 +
   `test/fixtures/modelscope.html`）；`cd dashboard && bun run typecheck` 绿、`bun run test` 1983 pass
   （两个 `SITES` 白名单加 `modelscope`）。
+## §2026-11-10-goalnn-o2-3000-ticks（o2 系列终局拍数 = 3000：按人类体验口径前移，6000 只在 o1 有剂量依赖）
+
+- **背景**：o2-fast（两敌关，从 o1-gq-fast.it256 起）立项时用户裁决
+  「6000 拍太长了，改成 3000 拍！人类打的话 1200 拍足够」。o1 系列全部挂在 6000 拍上
+  （`o1-gq-*` §8b 曾以「任务侧不可动」保留 6000，另做 3000 只读诊断面板）；AGENTS §0.2
+  的难度唯一口径 = **人类熟练玩家体验**，6000 拍（≈5× 人类）不是体验口径。
+- **决定**：o2 系列课程 `max_ticks = 3000`（≈2.5× 熟练人类），写在各课程文件里（不关卡文件，
+  关卡是所有腿共享的环境语义）；训练 rollout / A 层 in-loop eval / B/C 判决面板统一 3000，
+  与 o1 的 6000 拍读数**不可相减**。3000 的截断代价有实测上界：it0 权重在 2 敌 / 6000 拍
+  面板的 623 个 clear 局里只有 27 局（4.3%）>3000 拍。
+- **否决**：保留 6000（o1 §8b 的理由是「已标定的三档供给 / 剂量 / 父课报告全挂 6000」，
+  o2 是新实验、无历史剂量依赖）；折中 4000（旧 o2 探针口径，仍 ≈3.3× 人类）；把 3000
+  写进关卡文件（会改动所有引用该关的腿，且 lossy）。
+- **影响**：reward 的时间项（`fastCap 2000` / `ticksShouldWin 1000` / pace 免费 1200×kills）
+  在 3000 内的比例变大但语义不变；§15.5「改课程语义 = 新实验」——o2-fast 本就是新 out/traj。
+  后续 o2 腿（如 o2-gq）继承 3000；o1 历史读数保持 6000 原样，不回填、不重算。
+  课程头注 `curricula/o2-fast.jsonc` §2/§4.2；实验记录 → `docs/nn/experiments.md`。
+## §2026-11-10-goalnn-o2-it0-params（o2-fast 开课前按 it0 失败结构重标 3 个奖励参数：wKill 15→18 / paceTicks 1200→1000 / paceWindow 1000→800）
+
+- **背景**：o2-fast（两敌 / 3000 拍 / 无配额）开课前，用户令「根据 it0 eval 的数据，
+  合理调整 params」。it0 判决面板（800 局 greedy）拆桶：clear 592 / gameover 158 /
+  max_ticks 50。超时桶 **45/50 恰好 1 杀**（idle 58.8%、stuck 中位 904、命中 4/48 发、
+  42% 零承伤）⇒「杀完第一只就不打了」；根因是反苟项按 6000 拍标定，1 杀局在 3000 拍
+  的罚分天花板 (3000−1200)/1000×8 = 14.4，恰好约等于一次击杀的 15 —— 拖满最后 1800 拍
+  的成本 ≈ 放弃的那一杀。158 个 gameover 全部死在 200 承伤（1 命 200 HP、标准弹 100/发），
+  2003 75 / 2001 51。
+- **决定**：只动 3 个参数，其余 19 项与 terminal 保持 o1 剂量：`wKill 15→18`（+20%，
+  2 敌下第二杀承载整条胜利路径，15 是 1 敌口径）；`paceTicks 1200→1000`、
+  `paceWindow 1000→800`（1 杀拖满罚 20、0 杀 30；clear 均值只多罚 1.3）。旧面板逐局
+  回放：clear 110.8→115.7、timeout −63.9→−66.5、gameover −56.6→−57.6 ⇒
+  clear−timeout 差 174.7→182.2。eval 面板不受奖励影响（greedy 不用奖励）⇒ it0 读数、
+  判据锚点逐字不变；`corpus_identity_fp` 含 reward ⇒ `71afd4f8…` → `ecbd26f1…`，
+  历史语料不得混续（AGENTS §15.5）。
+- **否决**：抬 danger 两档（hpRatio<0.4 才触发，1 命 200 HP / 标准弹 100 ⇒ 200→100→0
+  不经过 0.4，超时桶无作用面）；抬 wDmg/wThreat（gameover 是 2 敌同场的能力缺口，
+  抬「少挨打」的价格会连「去杀第二只」一起压）；抬 timeout terminal −40→−50
+  （o1 已定「超时最差」序，本课的问题是节奏税的 horizon 失配，不是终局价）；
+  动 wWin/wFast（快清奖只对 35% 的局有效，节奏税已由 pace 承担）。
+- **影响**：课程头注 §2/§4.3；实验记录 §137 追加段；开课仍由控制台拍板，agent 不启动。
+## §2026-11-10-goalnn-o2-def（o2 并行第 2 腿「防守定价臂」：两行超额密度税打 158 个开局命尽局，未开课）
+
+- **背景**：o2-fast 立项后用户令「再设计一门 o2 并行课，尝试其它训练方向」，四选一后
+  选定**防守定价臂**（否决 λ 0.99 / greedy_quota / 探索项三臂，见下）。it0 面板
+  （800 局 greedy，与 o2-fast 同批、面板与奖励无关）失败结构：gameover 158 里 **122 局
+  零击杀（77%）**、死亡拍中位 928、前 600 拍吃 112 伤 ⇒ 不是「打输了」是「没开打就死」；
+  三结局防守遥测完全分离（hurtWeight/千 9.6/85.0/5.1，threatTicks/千 25.0/128.2/13.5；
+  超时桶最低 ⇒ 防守定价不补贴拖局）。全式逐局回放（`tmp/o2-def-replay.mjs`）还显示
+  **失败价排序是反的**：早死 −90.1 比拖到 3000 拍 −80.4 便宜 9.7 分。
+- **决定**：新课 `nn-training/curricula/o2-def.jsonc`（与 o2-fast 并行）。任务侧 / bc
+  （o1-gq-fast.it256）/ 22 行奖励与参数 / PPO 缰绳 / eval 面板**逐字同** o2-fast；唯一
+  改动 = 奖励追加两行超额密度税：㉓ `- wHurtEx*min(hurtExCap, max(0, hurtWeight -
+  hurtRate*ticks))`（w .4 / 免罚线 12/千 / 帽 120 raw）+ ㉔ `- wThreatEx*min(
+  threatExCap, max(0, threatTicks - threatRate*ticks))`（w .15 / 30/千 / 帽 160 raw）。
+  800 局逐局回放剂量：clear −5.4（中位 0，34% 付）/ gameover **−35.7**（99% 付）/
+  timeout −2.2 ⇒ gameover −125.8 vs timeout −82.6（贵 43.2），clear−gameover 差
+  193.7 → 224.0（+15.7%）；相对剂量 18.4%（z2-r5tempo 同形税 9.3% 的 ~2×）。判据预注册
+  在课程头注 §3（主 0 gameover ≤ 110；111–134 = 欠剂量；≥135 = 停腿）。新语料：
+  paired_rotate_seed 20261111 / out·traj `tmp/o2-def` / backup `weights/o2-def`
+  ⇒ `corpus_identity_fp` ecbd26f1… → 655183e2…（§15.5，不得跨课续跑）。
+- **否决**：抬 wDmg（平税：clear 已付 5.61、gameover 只多 10.4，靶向性比本包差 6×）；
+  抬 wDanger（已在咬：gameover −30.63，且超时桶 148.4/千，分不开命尽与拖局）；
+  burst/damageWhileLow（与 damage 共线 r=0.902/0.909 > E2 门 0.8 ⇒ 该替换不该叠加）；
+  nearEnemy4Ticks/cornerWeightTicks（超时桶最高 ⇒ 定价=罚远离敌人，会补贴拖局）；
+  无帽税（2000 关一局 0 伤慢清关 threat 超额 982 ⇒ −147，把清关打成负分）；
+  动 terminal 命价（那是 z2-r5all 的腿，混进来无法分解「路径定价」本身）；λ 0.99 /
+  greedy_quota / 探索项（本轮另两臂的方向，留待后续单独立项）。
+- **影响**：两臂并行互比只读「同墙钟小时 pp」；因果解释只在同起点 + 同面板（B/C 满池
+  seed0 860001）内做；worker 份额互相挤压，一臂饿死则读数作废（课程 §6⑤）。若判平 ⇒
+  「过程项定价在该 stack 失效」而非剂量不够（z2 先例），下一代按 E2 门做「替换 wDmg」。
+  课程头注 §1–§6；实验记录 → `docs/nn/experiments.md §138`；开课仍由控制台 :8900
+  拍板，agent 不启动训练。
 ## §2026-11-11-goalnn-eval-wire-snapshot（控制台 eval 读数必须快照优先：云机实时体把白名单外的游戏列收进 `metricValues`）
 
 - **背景**：用户报障「自主云机训练时 eval 指标与本地集群跑的不一致」——`o2-reflex` it300 本地评
