@@ -17,6 +17,7 @@ import {
 } from '../src/notebook-companion/app/hub-sync'
 import {
   isHubUrl,
+  isIpHostUrl,
   minimalEdit,
   normalizeHubUrl,
   planHubUrlEdit,
@@ -122,6 +123,37 @@ describe('hub-url：只改值，不改别的字节', () => {
     }
   })
 
+  it('现值是手填的 IP 直连 ⇒ 钉住不换（changed:false + pinned）', () => {
+    const ip = CFG.replace('"hub_url": ""', '"hub_url": "http://100.64.0.1:8900"')
+    const plan = planHubUrlEdit(ip, HUB)
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.changed).toBe(false)
+    expect(plan.pinned).toBe(true)
+    expect(plan.replaced).toBe('http://100.64.0.1:8900')
+    expect(plan.text).toBe(ip)
+
+    // 隧道换了几次也一样钉住。
+    const again = planHubUrlEdit(plan.text, 'https://newer.trycloudflare.com')
+    expect(again.ok && again.changed).toBe(false)
+    expect(again.ok && again.text).toBe(ip)
+
+    // 主机不是 IP（域名 / 旧隧道）⇒ 照旧替换。
+    const named = planHubUrlEdit(
+      CFG.replace('"hub_url": ""', '"hub_url": "https://old.example"'),
+      HUB,
+    )
+    expect(named.ok && named.changed).toBe(true)
+  })
+
+  it('IP 字面量判据：IPv4 / 括起来的 IPv6 算，域名与空值不算', () => {
+    expect(isIpHostUrl('http://100.64.0.1:8900')).toBe(true)
+    expect(isIpHostUrl(`${HUB}/`)).toBe(false)
+    expect(isIpHostUrl('http://[::1]:8900')).toBe(true)
+    expect(isIpHostUrl('http://[fd7a:115c:a1e0::1]:8900')).toBe(true)
+    expect(isIpHostUrl('')).toBe(false)
+  })
+
   it('没有字面量 hub_url / URL 非法 ⇒ 带原因失败（绝不新加键）', () => {
     const none = planHubUrlEdit('CFG = {"hub_ip": ""}', HUB)
     expect(none.ok).toBe(false)
@@ -181,6 +213,10 @@ describe('hub-sync：找 cell / 取 URL / 写一次', () => {
       text: 'hub_url 未同步：dashboard 未起',
       tone: 'error',
     })
+    expect(describeHubSync({ ok: true, detail: 'kept http://100.64.0.1:8900' })).toEqual({
+      text: 'hub_url 保留手填 IP（http://100.64.0.1:8900）',
+      tone: 'ok',
+    })
   })
 
   it('fetchHubUrl：GET + 自定义头；尾部斜杠归一；空/非法/HTTP 错带原因', async () => {
@@ -237,6 +273,25 @@ describe('hub-sync：找 cell / 取 URL / 写一次', () => {
     expect(second.ok).toBe(true)
     if (second.ok) expect(second.detail).toBe(`unchanged ${HUB}`)
     expect(writes).toHaveLength(1)
+  })
+
+  it('现值是手填 IP ⇒ 一次写都不发，结果报 kept（不报已是最新）', async () => {
+    const ip = CFG.replace('"hub_url": ""', '"hub_url": "http://100.64.0.1:8900"')
+    const { adapter, writes } = adapterWith(['x = 1', ip])
+    const r = await startHubUrlSync({
+      runtime: runtimeReturning({ ok: true, hubUrl: HUB }),
+      dashboardBase: 'http://127.0.0.1:8900',
+      adapter,
+      markers: ['CFG = {'],
+      now: () => 0,
+      sleep: async () => {},
+      waitMs: 1000,
+      pollMs: 100,
+    }).done
+    expect(r).toEqual({ ok: true, detail: 'kept http://100.64.0.1:8900' })
+    expect(writes).toHaveLength(0)
+    expect(adapter.sourceText({ id: 'c1', index: 1, kind: 'code' })).toBe(ip)
+    expect(describeHubSync(r).text).toContain('保留手填 IP')
   })
 
   it('等不到 notebook ⇒ 到点带原因失败（不写）', async () => {

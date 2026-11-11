@@ -5,6 +5,7 @@
  *
  * 纪律：
  *   · 只改 `hub_url` 的**值**（注释/缩进/其它键逐字不动）；值相同 ⇒ 一次写都不发；
+ *   · 现值是手填的 IP 直连（`pinned`）⇒ 不换成隧道 URL，一次写都不发；
  *   · 拿不到 URL / 找不到 CFG cell / 编辑器拒绝写入 ⇒ 带原因失败，绝不假装成功；
  *   · 页首 notebook 可能还没挂好：有界轮询（默认 20s），到点就报「等不到」。
  */
@@ -116,12 +117,15 @@ export interface HubSyncView {
   tone: 'ok' | 'warn' | 'error'
 }
 
-/** 面板一句话：成功 → 新 URL；值相同 → 「已是最新」；失败 → 原因（不吞错）。 */
+/** 面板一句话：成功 → 新 URL；值相同 → 「已是最新」；钉住的 IP → 「保留」；失败 → 原因（不吞错）。 */
 export function describeHubSync(r: { ok: boolean; detail?: string; reason?: string }): HubSyncView {
   if (!r.ok) return { text: `hub_url 未同步：${r.reason ?? '未知原因'}`, tone: 'error' }
   const detail = r.detail ?? ''
   if (detail.startsWith('updated ')) {
     return { text: `hub_url 已更新 → ${detail.slice('updated '.length)}`, tone: 'ok' }
+  }
+  if (detail.startsWith('kept ')) {
+    return { text: `hub_url 保留手填 IP（${detail.slice('kept '.length)}）`, tone: 'ok' }
   }
   if (detail.startsWith('unchanged ')) {
     return { text: `hub_url 已是最新（${detail.slice('unchanged '.length)}）`, tone: 'ok' }
@@ -165,6 +169,9 @@ export function startHubUrlSync(deps: HubSyncDeps): HubSyncHandle {
           if (!plan.ok) {
             reason = plan.reason
             retry = false
+          } else if (plan.pinned) {
+            deps.log?.(`hub_url 是手填的 IP（${plan.replaced}）⇒ 不替换成 ${hub.url}`)
+            return { ok: true, detail: `kept ${plan.replaced}` }
           } else if (!plan.changed) {
             deps.log?.(`hub_url 已是最新（${hub.url}）`)
             return { ok: true, detail: `unchanged ${hub.url}` }

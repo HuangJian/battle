@@ -6,6 +6,8 @@
  *      其它键逐字不动）；
  *   ② 判断 URL 是否可信（http/https、无空白/尖括号/引号）；
  *   ③ 通过页面暴露的 Monaco model 做整段写回（Colab / AI Studio）。
+ * 另有纪律：现值的**主机是 IP 字面量**（手填的直连地址，如 `http://100.64.0.1:8900`）⇒
+ * 视为人为钉住，不换成隧道 URL（`pinned`）；否则 colab/kaggle 里手写的直连会被悄悄改掉。
  *
  * 为什么不整段重写 cell：CFG 里还有 token 占位、注释与别的键——整段替换会把仓库/用户
  * 的其它改动一起抹掉。改写范围 = 旧值与新值的**最小差异区间**（CM6 路径按它选 DOM Range）。
@@ -16,7 +18,8 @@ import type { CmdResult } from './types'
 const HUB_KEY = /(["'])hub_url\1\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/
 
 export type HubUrlPlan =
-  { ok: true; text: string; changed: boolean; replaced: string } | { ok: false; reason: string }
+  | { ok: true; text: string; changed: boolean; replaced: string; pinned?: boolean }
+  | { ok: false; reason: string }
 
 /** 可信的 hub 地址：cloudflared 隧道是 https，tailnet 兜底允许 http；模板占位不算。 */
 export function isHubUrl(value: string): boolean {
@@ -25,6 +28,21 @@ export function isHubUrl(value: string): boolean {
   try {
     const u = new URL(v)
     return (u.protocol === 'https:' || u.protocol === 'http:') && u.hostname.length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 主机是不是 IP 字面量：手填的直连地址（tailnet `100.x.y.z`、本机 `127.0.0.1`、IPv6）。
+ * `URL.hostname` 会把 IPv6 括成 `[::1]`，两种形态都认。
+ */
+export function isIpHostUrl(value: string): boolean {
+  const v = value.trim()
+  if (!v) return false
+  try {
+    const host = new URL(v).hostname
+    return /^\[[0-9a-f:.]+\]$/i.test(host) || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)
   } catch {
     return false
   }
@@ -47,6 +65,10 @@ export function planHubUrlEdit(source: string, url: string): HubUrlPlan {
   const literal = m[2]!
   const current = literal.slice(1, -1)
   if (current === next) return { ok: true, text: source, changed: false, replaced: current }
+  // 现值是 IP 直连 ⇒ 人写的，钉住不动（隧道 URL 换几次都不覆盖）。
+  if (isIpHostUrl(current)) {
+    return { ok: true, text: source, changed: false, replaced: current, pinned: true }
+  }
   // `at` 指向字面量的**第一个内容字符**（跳过开引号）；收尾也跳过闭引号。
   const at = m.index + m[0].length - literal.length + 1
   return {
