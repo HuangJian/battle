@@ -183,7 +183,7 @@ describe('goal/intent rollout --serve（persist 池）', () => {
     it(`${e.name}：握手 + 与一次性调用逐字节等价 + 坏行不致命 + 跨局不串`, async () => {
       const fixturePath = join(REPO_ROOT, 'tests', 'fixtures', e.fixture)
       if (!existsSync(fixturePath)) throw new Error(`missing ${relative(REPO_ROOT, fixturePath)}`)
-      const base = join(REPO_ROOT, 'tmp')
+      const base = join(REPO_ROOT, 'tmp', 'pytest-tmp')
       mkdirSync(base, { recursive: true })
       const work = mkdtempSync(join(base, `${e.name}-serve-`))
       const weights = slimWeights(work, e)

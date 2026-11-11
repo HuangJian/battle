@@ -52,7 +52,7 @@ TMP = REPO_ROOT / "tmp"
 RUN_LOCK = REPO_ROOT / "nn-training" / ".run_rl.lock"
 
 LOG_SUFFIXES = (".log", ".out", ".err", ".txt", ".jsonl")
-CACHE_NAMES = {".uv-cache", ".ruff-cache", ".mypy-cache"}
+CACHE_NAMES = {".uv-cache", ".ruff-cache", ".mypy-cache", ".pytest-cache"}
 # 永不触碰（各自有主）：agent 工作目录自管理；git 事故备份；控制台账本/状态
 PROTECTED = {"dist-agent", "git-repair-backup", "training-start"}
 # 长期资产（§7-3）：收到删除判决的目录里，这些子目录**原样留下**（只收它的兄弟）

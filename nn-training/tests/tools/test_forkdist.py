@@ -316,6 +316,10 @@ def test_forkdist_runs_everything_and_reports_honestly(tmp_path: Path) -> None:
             _bash_path(WRAPPER),
             "-m",
             "pytest",
+            # scratch 在 tmp/pytest-tmp 下（不在 nn-training 里）⇒ pytest 的 rootdir
+            # 会落到仓库根，默认 `.pytest_cache` 就写进仓根。这里只验 forkdist 行为，不需要缓存。
+            "-p",
+            "no:cacheprovider",
             str(scratch),
             "-p",
             "tools.forkdist",
@@ -370,6 +374,10 @@ def test_forkdist_reports_a_worker_that_dies_instead_of_dropping_the_item(tmp_pa
             _bash_path(WRAPPER),
             "-m",
             "pytest",
+            # scratch 在 tmp/pytest-tmp 下（不在 nn-training 里）⇒ pytest 的 rootdir
+            # 会落到仓库根，默认 `.pytest_cache` 就写进仓根。这里只验 forkdist 行为，不需要缓存。
+            "-p",
+            "no:cacheprovider",
             str(scratch),
             "-p",
             "tools.forkdist",
@@ -435,6 +443,10 @@ def test_timeout_reports_its_real_cause(tmp_path: Path) -> None:
             _bash_path(WRAPPER),
             "-m",
             "pytest",
+            # scratch 在 tmp/pytest-tmp 下（不在 nn-training 里）⇒ pytest 的 rootdir
+            # 会落到仓库根，默认 `.pytest_cache` 就写进仓根。这里只验 forkdist 行为，不需要缓存。
+            "-p",
+            "no:cacheprovider",
             str(scratch),
             "-p",
             "tools.forkdist",

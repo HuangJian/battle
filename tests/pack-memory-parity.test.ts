@@ -121,7 +121,7 @@ describe('pack-memory 端到端（③ 真跑 exporter 两次）', () => {
     const g = JSON.parse(
       readFileSync(join(import.meta.dir, 'fixtures', 'student-golden.json'), 'utf8'),
     ) as { h: number; d: number; params: Record<string, unknown> }
-    const base = join(process.cwd(), 'tmp')
+    const base = join(process.cwd(), 'tmp', 'pytest-tmp')
     mkdirSync(base, { recursive: true })
     const work = mkdtempSync(join(base, 'packmem-e2e-'))
     const weights = join(work, 'weights.json')

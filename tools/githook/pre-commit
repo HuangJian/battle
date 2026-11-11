@@ -161,7 +161,9 @@ bun_fmt_supported() {
 }
 
 hook_selftest() {
-  D="tmp/selftest-$$"
+  # 固定目录复用（截断不删除）：不会像旧 tmp/selftest-* 那样每次自检留一个新目录；
+  # 残留由 nn-clean-tmp.py 按 KEEP_DAYS 兜底（与 nn-python-gate.sh 的 GATE_TMP 同一先例）。
+  D="tmp/pytest-tmp/selftest"
   mkdir -p "$D"
   FAIL=0
   printf '%s\n' \
@@ -237,7 +239,7 @@ hook_selftest() {
     echo "selftest FAIL: EOL 归一器自检未过（见 $D/eol-selftest.log）"; FAIL=1
   fi
   # 零删除铁律（2026-09-15）：截断文件、不 rmdir（rmdir ✓ 也在沙箱包装清单上）。
-  # 残留的 tmp/selftest-$$ 0 字节目录由 periodic 清理兜底。
+  # 残留的 tmp/pytest-tmp/selftest 0 字节目录由 periodic 清理兜底。
   for __f in "$D"/*; do [ -e "$__f" ] && : > "$__f"; done
   if [ "$FAIL" -eq 0 ]; then
     echo "✓ hook selftest 全部通过"
@@ -262,12 +264,17 @@ fi
 echo "▶ Running pre-commit checks (bun: $BUN, $BUN_VERSION)..."
 
 # ---------- 提交内容清单（staged = 归因基准；dirty = 归因排除集） ----------
-STAGED_LIST="tmp/pre-commit-staged-$$.txt"
-DIRTY_LIST="tmp/pre-commit-dirty-$$.txt"
-TSC_LOG="tmp/pre-commit-tsc-$$.log"
-GATE_LOG="tmp/pre-commit-nn-$$.log"
-DASH_TSC_LOG="tmp/pre-commit-dash-$$.log"
-US_TSC_LOG="tmp/pre-commit-userscript-$$.log"
+# 临时文件放在固定目录 tmp/pytest-tmp/pre-commit/（与 nn-python-gate.sh 的 GATE_TMP 同一先例）：
+# 直接摊在 tmp/ 根时，每提交一次就留 6 个 0 字节文件、永不删除（2026-11-11 实测 1011 个）；
+# 固定目录复用 + EXIT 截断 ⇒ 不再每次提交长一个新目录（git index.lock 保证同 worktree 串行）。
+PCTMP="tmp/pytest-tmp/pre-commit"
+mkdir -p "$PCTMP"
+STAGED_LIST="$PCTMP/staged.txt"
+DIRTY_LIST="$PCTMP/dirty.txt"
+TSC_LOG="$PCTMP/tsc.log"
+GATE_LOG="$PCTMP/nn.log"
+DASH_TSC_LOG="$PCTMP/dash.log"
+US_TSC_LOG="$PCTMP/userscript.log"
 # EXIT 清理 = **截断不删除**（2026-09-15，进程树免疫的兜底铁律）：`rm -f` 是删除
 # syscall，会被沙箱识别（配额 FAIL_CLOSED / 弹人工删除审批）——v1 实测门禁全绿提交
 # 却被静默丢弃（2026-09-14：`✓ All pre-commit checks passed` 紧跟

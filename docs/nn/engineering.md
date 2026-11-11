@@ -2672,7 +2672,8 @@ it0 基线派 200 局只落 105：收工循环只看消费线程数（`pending` 
 ### 同一次扫描的别处
 
 - 根项目（TS/Bun，`bun tools/run-root-tests.ts`）：全仓 mtime 快照 + `git status` 前后 diff ⇒ 只写
-  `tmp/<用例名>/` 自己的 scratch（`eval-acc-*` / `intent-tagger-test` / `native-stale-probe`），
+  `tmp/pytest-tmp/<用例名>/` 自己的 scratch（`eval-acc-*` / `nn-parity-*` / `npb-wsl-*`；
+  `intent-tagger-test` / `native-stale-probe` 仍是固定 `tmp/<用例名>` 且自清），
   **零**真状态、零 tracked 文件改动；
 - `nn-training/tests/*/`（含 hub / trainer / worker 各子目录）：干净；
 - `EVALBOARD_CORPORA` / `ladder.json` / `corpora.json`：全仓无写者（只在 `dashboard/src/evalboard/`

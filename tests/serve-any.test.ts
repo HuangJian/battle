@@ -159,7 +159,7 @@ describe('serve-any --serve（同进程交替跑两种 mode）', () => {
       if (!existsSync(join(REPO_ROOT, 'tests', 'fixtures', f)))
         throw new Error(`missing tests/fixtures/${f}`)
     }
-    const base = join(REPO_ROOT, 'tmp')
+    const base = join(REPO_ROOT, 'tmp', 'pytest-tmp')
     mkdirSync(base, { recursive: true })
     const work = mkdtempSync(join(base, 'serve-any-'))
     const ev = evalTask(weightsFile(work, 'eval-w', 'student-golden.json', 'student'))

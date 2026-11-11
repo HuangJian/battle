@@ -76,7 +76,7 @@ describe('export-eval-game --serve', () => {
     if (!existsSync(join(REPO_ROOT, 'tests', 'fixtures', 'student-golden.json'))) {
       throw new Error('missing tests/fixtures/student-golden.json')
     }
-    const base = join(REPO_ROOT, 'tmp')
+    const base = join(REPO_ROOT, 'tmp', 'pytest-tmp')
     mkdirSync(base, { recursive: true })
     const work = mkdtempSync(join(base, 'eval-serve-'))
     const weights = slimWeights(work)

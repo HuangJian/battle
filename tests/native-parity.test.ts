@@ -16,7 +16,7 @@
  *
  * 缺编译器（>无 clang）时 ①② 优雅跳过并打一行说明——跳过是**响亮**的，不静默变绿。
  */
-import { describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -24,6 +24,12 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 process.chdir(ROOT)
+
+/** 本文件的 scratch 目录：跑完即删；被 kill 时由 nn-clean-tmp.py 兜底。 */
+const scratchDirs: string[] = []
+afterAll(() => {
+  for (const d of scratchDirs) fs.rmSync(d, { recursive: true, force: true })
+})
 
 const { runStudentConvWasm, runStudentFeatures } = await import('../src/nn/conv/conv.ts')
 // 生产模型构建入口（缓存键前提那条用例要断言它的实例语义）
@@ -227,9 +233,10 @@ describe('eval 侧记账（T4：eval 与 rollout 同咽喉 + 可查）', () => {
     const g = JSON.parse(
       fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', 'student-golden.json'), 'utf8'),
     ) as { h: number; d: number; params: Record<string, unknown> }
-    const base = path.join(ROOT, 'tmp')
+    const base = path.join(ROOT, 'tmp', 'pytest-tmp')
     fs.mkdirSync(base, { recursive: true })
     const work = fs.mkdtempSync(path.join(base, 'eval-acc-'))
+    scratchDirs.push(work)
     const weights = path.join(work, 'weights.json')
     fs.writeFileSync(
       weights,

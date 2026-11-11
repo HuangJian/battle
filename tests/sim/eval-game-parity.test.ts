@@ -1,9 +1,15 @@
-import { describe, it, expect } from 'bun:test'
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from 'node:fs'
+import { afterAll, describe, it, expect } from 'bun:test'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { runSimulation } from '../../tools/sim/simulation-runner'
 import { runEvalOne } from '../../tools/sim/export-eval-game'
 import { STAGES } from '../../src/config/stages'
+
+/** 本文件的 scratch 目录：跑完即删；被 kill 时由 nn-clean-tmp.py 兜底。 */
+const scratchDirs: string[] = []
+afterAll(() => {
+  for (const d of scratchDirs) rmSync(d, { recursive: true, force: true })
+})
 
 /**
  * v4.0 远程分发等价性（用户指令 2026-08-29：m1-eval 每批都要利用远程 agents）：
@@ -89,10 +95,12 @@ describe('export-eval-game nn 分支与 runSimulation 等价（决策时点/相�
       params: g.params,
     })
     // NNInput 走目录解析（resolveLatestWeights）：落一份 `weights.json` 到临时目录。
-    // 先建 tmp/ —— 它在 .gitignore 里，干净检出可能不存在。
-    const base = join(process.cwd(), 'tmp')
+    // 用 tmp/pytest-tmp/（gitignore + 由 nn-clean-tmp 按日清扫）—— 此前落在 tmp/ 根，
+    // 每次门禁留两个目录（实测累计 1171 个），只能手动清。
+    const base = join(process.cwd(), 'tmp', 'pytest-tmp')
     mkdirSync(base, { recursive: true })
     const dir = mkdtempSync(join(base, 'nn-parity-'))
+    scratchDirs.push(dir)
     writeFileSync(join(dir, 'weights.json'), weightsText)
     nnParity(0, 1, weightsText, dir, 3000)
     nnParity(0, 2, weightsText, dir, 3000)
@@ -129,9 +137,10 @@ function fixtureWeights(): string {
 
 /** 把权重写到临时目录（NNInput 走目录解析）。 */
 function weightsDir(weightsText: string): string {
-  const base = join(process.cwd(), 'tmp')
+  const base = join(process.cwd(), 'tmp', 'pytest-tmp')
   mkdirSync(base, { recursive: true })
   const dir = mkdtempSync(join(base, 'nn-parity-x2-'))
+  scratchDirs.push(dir)
   writeFileSync(join(dir, 'weights.json'), weightsText)
   return dir
 }

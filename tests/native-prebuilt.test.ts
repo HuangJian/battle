@@ -373,7 +373,7 @@ describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字�
     expect(runStudentConvWasm(model)).toBe(true)
     const expectBytes = Buffer.concat([buf(model.pooled), buf(model.bufA)])
 
-    const work = fs.mkdtempSync(path.join(ROOT, 'tmp', 'npb-wsl-'))
+    const work = fs.mkdtempSync(path.join(ROOT, 'tmp', 'pytest-tmp', 'npb-wsl-'))
     const inFile = path.join(work, 'in.bin')
     const outFile = path.join(work, 'out.bin')
     const pyFile = path.join(work, 'run.py')
