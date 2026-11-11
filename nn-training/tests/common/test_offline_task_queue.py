@@ -812,6 +812,56 @@ def test_run_auto_claims_runs_and_releases(monkeypatch: pytest.MonkeyPatch, tmp_
     assert seen["shas"] == {"c5-gae": "aa" * 32}
 
 
+def test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-11 07:33 事故的第二半：一门课跑挂之后重进的那一拍，清单里只剩它自己可领 ——
+    产物根**不许**因此从 `<root>/<course>` 掉回共享的 `<root>`。
+
+    现场：o2-notax 在 it163 失败后（同一会话里 o2-loot 已跑完 ⇒ 只剩 1 门可领），重进的这一拍
+    `multi` 算成 False ⇒ 产物根变成 `/dev/shm/battle2-offline`。那里面躺着**别的腿**的 it300，
+    于是读出「本机段落已完成（it300 ≥ end_it300）」⇒ `noop` rc=0 ⇒ 这份包被记成「本会话已跑过」
+    ⇒ 队列全终态 ⇒ 空转 300s 自行收工。真段停在 it162/163，只有人重跑 cell（新会话重新按
+    多课分层）才恢复。
+
+    判据改成「本会话见过几门课」（`tasks ∪ served`），而不是「本拍有几门」——布局在会话内必须稳定。
+    """
+    rounds = {"n": 0}
+
+    def fake_resolve(
+        cfg: dict, creds: dict, log: Any, **kw: Any
+    ) -> tuple[list[dict], list[dict], list[dict]]:
+        rounds["n"] += 1
+        if rounds["n"] == 1:
+            return [
+                {"course": "o2-notax", "pack_sha256": "aa" * 32},
+                {"course": "o2-loot", "pack_sha256": "bb" * 32},
+            ], [], []
+        if rounds["n"] == 2:
+            return [{"course": "o2-notax", "pack_sha256": "cc" * 32}], [], []
+        return [], [], []
+
+    seen: list[bool] = []
+
+    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
+        seen.append(multi)
+        for c in courses:
+            leases["served"][str(c)] = str(shas.get(c) or "x")
+        return 1  # 段内失败（真实 rc 不为 0）
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    rc = offline_boot._run_auto(
+        {"work_dir": str(tmp_path), "idle_wait_sec": 0},
+        {"HUB_TOKEN": "tok"},
+        lambda _m: None,
+        None,
+    )
+    assert rc == 1
+    assert seen == [True, True], f"重进那一拍把产物根降维成共享根了：multi={seen}"
+
+
 def test_run_auto_once_mode_returns_on_an_empty_queue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

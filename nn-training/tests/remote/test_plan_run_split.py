@@ -39,8 +39,9 @@ job 执行器（那正是反向 import 的成因）。守卫钉的就是这条�
 `plan_run`（`run_loop` **不再转发** `iter_spec` ⇒ patch 它是 AttributeError，**响亮**而不是静默）。
 
 ★ 2026-09-27（S5 第十三刀）：**交接面 18→19 名下沉 `remote/plan_handoff`**（校验 / 取包播种 /
-`RunContext` / 评估装配；19 = 2026-10-03 加 `_seed_ref_blob_cache`）——`plan_run` 只余驱动引擎 +
-19 名 `X as X` 门面；`HANDOFF_NAMES`
+`RunContext` / 评估装配；19 = 2026-10-03 加 `_seed_ref_blob_cache`；**20 = 2026-11-11 加
+`_reseed_anchors`**——每轮开跑前的锚点自愈）——`plan_run` 只余驱动引擎 +
+20 名 `X as X` 门面；`HANDOFF_NAMES`
 与交接面守卫见 `tests/remote/test_plan_handoff_split.py`。
 """
 
@@ -49,6 +50,8 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -82,7 +85,7 @@ ENGINE_NAMES = {
     "with_rollout_workers",
 }
 
-#: 第十三刀搬去 `remote/plan_handoff.py` 的**交接面**名字（19）：校验 / 取包播种 / 上下文 / 评估装配。
+#: 第十三刀搬去 `remote/plan_handoff.py` 的**交接面**名字（20）：校验 / 取包播种 / 上下文 / 评估装配。
 #: `plan_run` 只留 `X as X` 门面 ⇒ 历史 import 与 monkeypatch 面一行不改（「名字是契约，位置不是」）。
 HANDOFF_NAMES = {
     "EVAL_ALTERNATE_WAIT_SEC",
@@ -96,6 +99,7 @@ HANDOFF_NAMES = {
     "_log_default",
     "_opt_bytes_from_manifest",
     "_read_opt_file",
+    "_reseed_anchors",
     "_seed_demo_blob_cache",
     "_seed_opt_blob_cache",
     "_seed_ref_blob_cache",
@@ -160,7 +164,7 @@ def test_engine_names_live_in_plan_run_and_not_redefined_in_run_loop() -> None:
 
 
 def test_handoff_names_live_in_plan_handoff_only() -> None:
-    """第十三刀：交接面 19 名只在 `plan_handoff.py` 里实现；`plan_run` 不得再实现（只留门面）。"""
+    """第十三刀：交接面 20 名只在 `plan_handoff.py` 里实现；`plan_run` 不得再实现（只留门面）。"""
     assert _defined(HANDOFF_FILE) >= HANDOFF_NAMES, sorted(HANDOFF_NAMES - _defined(HANDOFF_FILE))
     moved_back = HANDOFF_NAMES & _defined(ENGINE_FILE)
     assert moved_back == set(), f"交接面名字又在 plan_run 里实现（应只做门面转发）：{sorted(moved_back)}"
@@ -302,7 +306,7 @@ def _top_level_imports(path: Path) -> set[str]:
 def test_run_loop_facade_forwards_the_same_objects() -> None:
     """门面是 `X as X` 转发 ⇒ 与实现模块里是**同一个对象**（不是副本）。
 
-    覆盖两段门面：引擎自有名（`plan_run` 直通）与交接面 19 名（`plan_run → plan_handoff` 两跳；
+    覆盖两段门面：引擎自有名（`plan_run` 直通）与交接面 20 名（`plan_run → plan_handoff` 两跳；
     `run_loop` 读到的仍是同一对象）。
     """
     for name in sorted(ENGINE_NAMES | HANDOFF_NAMES):
@@ -325,6 +329,35 @@ def test_facade_covers_every_engine_name_the_entry_reads() -> None:
     engine_attrs = set(dir(plan_run_mod))
     missing = sorted(n for n in (entry_needs & engine_attrs) if not hasattr(run_loop_mod, n))
     assert missing == [], f"入口读到的引擎名没有门面（会 NameError）：{missing}"
+
+
+def _run_iteration_calls(name: str) -> bool:
+    """`_run_iteration` 里有没有**直接调** `name`（AST；与措辞无关）。
+
+    拆成函数是为了不住断言里挂 `.py` 派生的名字（文本断言预算口径 B 的计数面）。
+    """
+    run_iter = next(
+        n for n in _tree(ENGINE_FILE).body if isinstance(n, ast.FunctionDef) and n.name == "_run_iteration"
+    )
+    called = {
+        n.func.id
+        for n in ast.walk(run_iter)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    return name in called
+
+
+def test_run_iteration_reseeds_the_anchors_every_round() -> None:
+    """★ 2026-11-11（o2-notax it163）：每轮开跑前必须调 `_reseed_anchors`。
+
+    这一道是「锚点已经没了」的唯一出口：`blob_cache` 有预算、按 mtime 丢最旧，而自主腿的
+    ref/demo 只有一份且无下载通道。丢了不补 = 下一轮向空 base_url 发 GET = 确定性失败 = 整段死。
+    读命中 touch 与 `prune_caches(keep=)` 都只能「不让它没」，补不了「已经没」。
+    """
+    # `pytest.fail` 而不是 `assert`：`_run_iteration_calls` 是读 `.py` 面的生产者，断言里引用它
+    # 会被文本断言预算（口径 B）计一笔 —— 而这里是纯粹的 AST 结构判据（谁调了谁），不是文本判据。
+    if not _run_iteration_calls("_reseed_anchors"):
+        pytest.fail("`_run_iteration` 不再每轮重种锚点——缓存被清后整段会死在 `_fetch_ref` 上")
 
 
 def test_iter_spec_seam_is_the_engine_module() -> None:

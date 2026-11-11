@@ -2817,6 +2817,23 @@ def _explicit_leases(cfg: dict, creds: dict, log: Callable[[str], None]) -> dict
     }
 
 
+def session_multi(courses: list[str], served: dict[str, str] | None = None) -> bool:
+    """本批的产物根要不要按课程分层（`multi`）——判据是**本会话见过几门课**，不是本拍有几门。
+
+    为什么不能用本拍的清单长度（2026-11-11 07:33 现场，o2-notax it163）：一门课跑挂之后重进的
+    那一拍，清单里只剩它自己可领 ⇒ `len(tasks) == 1` ⇒ `multi=False` ⇒ 产物根从
+    `<root>/<course>` 掉回**共享**的 `<root>`。那个根里躺着别的腿的 `it-300`，于是读出「本机
+    段落已完成」⇒ `noop` rc=0 ⇒ 这份包被记成「本会话已跑过」⇒ 队列全终态 ⇒ 空转 300s 自行
+    收工：真段停在 it162/163，只有人重跑 cell（新会话重新按多课分层）才恢复。
+
+    判据里带上 `served`（本会话已跑过的课）：布局在一个会话里必须**稳定**，否则同一门课
+    两次进店会落到两个根，第二次读到的是第一次不存在的账。
+    """
+    saw = {str(c) for c in (courses or ()) if str(c)}
+    saw |= {str(c) for c in (served or {}) if str(c)}
+    return len(saw) > 1
+
+
 def _run_batch(
     cfg: dict,
     creds: dict,
@@ -3039,7 +3056,7 @@ def _run_auto(
                 log,
                 keepalive_stop,
                 [str(t["course"]) for t in tasks],
-                multi=len(tasks) > 1,
+                multi=session_multi([str(t["course"]) for t in tasks], served),
                 leases=leases,
                 shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
             )

@@ -6,6 +6,74 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §146 自主段自己打死自己：blob 缓存读命中不 touch ⇒ prune 砍掉 kickstart ref 锚点；重进拍把产物根降维（2026-11-11）
+
+**现场**：用户报「自主云机 07:33 出错后一直没自行恢复，08:41 手动重跑 cell 才好」。日志
+（`tmp/notebook-logs/kaggle/…-1andil.log`，时间戳 UTC，`23:33` = 北京 `07:33`）里是两条互不相干的
+故障咬在一起：
+
+1. `[23:32:55] it163 首批按本机宽度重铺` 与 `cache prune: 丢 2 个最旧的缓存条目` 同一秒，
+   然后 it163 的 PPO 在 `_fetch_ref` 处 `ProtocolError: 没有 hub 地址（base_url 为空）却要下载
+   /jobs/f33b4d93dd61696d/blob?name=ref` ⇒ `自主段在 it163 处失败` ⇒ `run_loop 退出 rc=1`。
+   同一模式早在 `20:42:22`（o2-loot it184）就发生过一次，两次都是「prune 的那一拍 → 下一轮 ref miss」。
+2. 失败后 `_run_auto` 立刻重进同一门课：`产物根: /dev/shm/battle2-offline`（**没有** `/o2-notax`），
+   在那里读出 `本地产物齐全（it300）` ⇒ `本机段落已完成（it300 ≥ end_it300）` ⇒ `noop` rc=0 ⇒
+   `段末摘要已补传：it300 noop` ⇒ 这份包被记进 `served`（`本会话已跑过这份包`）⇒ 队列全终态 ⇒
+   每 15s 一拍空转到 300s 上限 ⇒ 会话自行收工。真段停在 it162/163。
+
+**根因一（读命中不 touch）**：`blob_cache/<sha>` 的写路径（`_cache_blob`）与 code/ts_code 的命中
+路径都按 A3 的规矩 `_touch` 了 mtime，唯独 `_resolve_blob` 与 `resolve_blobs_batch` 的**读命中**
+分支漏了。段启动时 `_seed_ref_blob_cache` 种进 `blob_cache` 的 kickstart ref（0.4MB）此后每轮都
+命中、却一次也没刷新 mtime ⇒ 在「三棵树合计 256MB、按 mtime 丢最旧」的 `prune_caches` 眼里，
+它永远是最旧的那一件。opt 不会这样：`_seed_opt_blob_cache` 每轮重写（mtime 每轮变新）。
+测量对得上：两次事故的会话分别跑了 ~97 / ~98 分钟才轮到它（prune 先吃真正冷掉的 code/ts 残留），
+失守的时刻就是 prune 的「最旧」轮到锚点的那一拍。
+
+**根因二（布局按本拍猜）**：`_run_auto` 传 `multi=len(tasks) > 1`。一门课跑挂后重进的那一拍，
+清单里只剩它自己可领 ⇒ `multi=False` ⇒ `local_root_path` 把显式 `CFG.local_root` 原样当产物根
+（单课语义），而那个**共享根**里躺着别的腿的 `it-300` 账本 ⇒ 「已完成」。会话开始时 3 门可领 ⇒
+`multi=True` ⇒ 每门课一个子目录，所以**只有失败后的重进拍**会掉进共享根，看起来就像「错了就再也
+不回来了」。8:41 手动重跑 cell 是新会话（3 门可领）⇒ 自动恢复。
+
+**落地（锚点三层兜底 + 布局稳定，四刀一起上）**：
+
+1. **不该丢** —— `download.py::_resolve_blob` / `resolve_blobs_batch` 的 cache 命中分支补
+   `_touch(cp)`（与 `_cache_blob` / `_ensure_code` / `_ensure_ts_code` 同规，判据同源改一处必须
+   改两处）。热件不再因为「只看不写」而被当成最旧。
+2. **不许删** —— `prune_caches(..., keep=…)` + 纯函数 `download.anchor_shas(manifest)`
+   （只认 64-hex 的 `ref_sha`/`demo_sha`/`opt_sha`/`init_weights_fp`；`bc`/空串是哨兵）：manifest
+   点名的那几件**永不参与淘汰**，哪怕它是最旧的。光锚点就超预算时不删、打一行
+   「锚点件 X MB 不可回收」（静默超限和静默删锚都是事故）。两个 prune 调用点
+   （`_ensure_code` / `_ensure_ts_code`）按各自那一轮的 manifest 传。
+3. **丢了能补** —— `plan_handoff._reseed_anchors`：`plan_run._run_iteration` 每轮开跑前调一次，
+   `blob_cache/<sha>` 不在时才从产物目录 `ref_weights.json` / `demo.npz`、包根 `blob.ref` 重种。
+   只看「在不在」（命中路径一个 `stat`，不哈希不写盘），所以每轮调不构成开销；它管的是前两道
+   都兜不住的情形（被外部清、盘满被系统清）。
+4. **布局稳定** —— `offline_boot.session_multi(courses, served)` 纯函数：`multi` = 「本会话见过
+   几门课」（`tasks ∪ served`），不再是「本拍有几门」。重进拍落回 `<root>/<course>`，续跑点回到
+   it162，不再撞共享根里别的腿的 it300。
+
+**为什么是三层而不是挑一层**：① 靠 touch = 概率；② 靠 keep = 保证「不丢」，但补不出已经丢的；
+③ 靠重种 = 自愈，但前提是本地还有字节源。2026-11-11 这次的现场三条都缺，所以三条一起补：
+任一条独立到场都能让 it163 那一拍活下来，叠起来才是「出事了下一轮自己站起来」。
+
+**被否决**：只加 touch（概率降到很低但非零，且完全无自愈）；把锚点搬进独立 `anchor_store/`
+（`plan/` 级结构改动、查找链多一源、磁盘按段无上限，为 0.4MB 掀整条链不划算）；放大 256MB 预算
+或按子树各给一份（上限会悄悄 ×3，A3 已否决，且锚点仍在同一个池里被挤）；失败后不记 `served`
+强制重试整段（重跑 rollout 白烧 33s/轮，且治不了根降维）；只加告警（它本来就不是偶发抖动）。
+
+**验收**：
+
+- `tests/remote/test_cache_persist.py`：读命中 touch ×2（改动前红：`mtime` 不动）·
+  `prune` 不删锚点 · 锚点占满预算时「不删 + 响亮说明」· `anchor_shas` 只收 64-hex ·
+  `_reseed_anchors` 清空缓存后**零网络**补回（并当场跑通 `_resolve_blob` 的 `cache` 命中）·
+  在就不重写（`mtime` 不变）。
+- `tests/remote/test_plan_run_split.py`：`_run_iteration` 必须每轮调 `_reseed_anchors`（AST 守卫，
+  删掉这条兜底即红）；交接面门面 19 → 20 名。
+- `tests/common/test_offline_task_queue.py`：重进拍布局不降维（改动前红：`multi=[True, False]`）。
+- 门禁：`tests/remote + tests/worker` **3380 passed / 1 skipped**（skipped = 无 paddle）·
+  `tests/common{,_layer,_progress_hook}` 全绿 · ruff / mypy 干净 · 根 `bun run check` 2737 pass。
+
 ## §145 采样节点远控重启：受监护模式退出，由 rollout_node 重新拉起（2026-11-09）
 
 **问题**：`rollout.ipynb` 的 `rollout_node` 是 sampler-agent 的外部监护者。agent 的

@@ -11527,3 +11527,31 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   `cellsVisited` / `playerLevel` / `puSpawn*` / `puGot*`；`enemyTotal` 曾对云机行恒落默认 20 ⇒
   A 层 `killCompletion` 同样是 ÷10 假值）。注意边界：进快照的是**数值**列，数组/对象类分析列
   （`moveHist` / `killOrder` / `exposureByKind`）仍只随离线包到达。
+
+## §2026-11-11-goalnn-blob-cache-touch-and-root-layout（自主段的两处自毁：blob 缓存读命中必须 touch；布局判据取「本会话见过几门课」）
+
+- **背景**：用户报「自主云机 07:33 出错后一直没自行恢复，08:41 手动重跑 cell 才好」。日志里是两条
+  故障咬在一起：① `it163` 的 PPO 在 `_fetch_ref` 处 `ProtocolError: 没有 hub 地址（base_url 为空）
+  却要下载 …/blob?name=ref`，同秒上面一行正是 `cache prune: 丢 2 个最旧的缓存条目`（同日 20:42
+  o2-loot it184 同模式）；② 失败后重进的那一拍产物根从 `/dev/shm/battle2-offline/o2-notax` 变成
+  共享的 `/dev/shm/battle2-offline`，在那里读到别的腿的 `it-300` ⇒ `本机段落已完成` ⇒ `noop`
+  rc=0 ⇒ 这份包记进 `served` ⇒ 队列全终态 ⇒ 空转 300s 自行收工，真段停在 it162/163。
+- **决定（锚点三层兜底 + 布局稳定，用户口径「要彻底兜住」）**：① **不该丢** ——
+  `download.py::_resolve_blob` / `resolve_blobs_batch` 的 cache **读命中**补 `_touch()`（A3 的规矩在
+  `_cache_blob`/`_ensure_code`/`_ensure_ts_code` 早就有，写路径修了、读路径漏了）；② **不许删** ——
+  `prune_caches(keep=anchor_shas(manifest))`：manifest 点名的 ref/demo/opt/init（只认 64-hex）永不
+  参与淘汰，光锚点超预算时**不删 + 一行响亮说明**；③ **丢了能补** ——
+  `plan_handoff._reseed_anchors`，`plan_run._run_iteration` 每轮开跑前调一次，缓存缺件才从产物目录
+  `ref_weights.json`/`demo.npz`、包根 `blob.ref` 重种（命中只一个 `stat`）；④ **布局稳定** ——
+  `offline_boot.session_multi(tasks, served)`：`multi` = 本会话**见过**几门课（`tasks ∪ served`），
+  重进拍落回 `<root>/<course>`、从 it162 续跑。三层各管一段：概率（touch）/ 保证不丢（keep）/
+  自愈（重种），任一条在场都能让 it163 那一拍活下来。
+- **否决**：只加 touch（概率非零且无自愈）；把锚点搬进独立 `anchor_store/`（为 0.4MB 掀整条取字节
+  查找链、磁盘按段无上限）；放大 256MB 预算 / 按子树各给一份（上限会悄悄 ×3，A3 已否决）；
+  失败后不记 `served` 强制重试整段（白烧 33s/轮 rollout，且治不了根降维）；只加告警。
+- **残留**：缓存与本地字节源**同时**都没了（包没带 ref、产物目录也被清）时仍会响亮失败——这是
+  输入缺失，不是缓存策略问题；此时报错原文即修法（重导带 ref 的任务包）。
+- **影响**：全文 → `docs/nn/remote-transport.md §146`；回归用例
+  `nn-training/tests/remote/test_cache_persist.py`（读命中 touch ×2）+ `nn-training/tests/common/
+  test_offline_task_queue.py::test_run_auto_keeps_the_per_course_layout_when_the_next_round_has_one_course`
+  （改动前红：`multi=[True, False]`）。

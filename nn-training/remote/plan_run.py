@@ -110,6 +110,9 @@ from remote.plan_handoff import (
     _read_opt_file as _read_opt_file,
 )
 from remote.plan_handoff import (
+    _reseed_anchors as _reseed_anchors,
+)
+from remote.plan_handoff import (
     _seed_demo_blob_cache as _seed_demo_blob_cache,
 )
 from remote.plan_handoff import (
@@ -422,6 +425,18 @@ def _run_iteration(
             "（worker 侧传 run_job 自己；CLI 侧传 remote.run_loop._real_run_job）——"
             "见 remote/plan_run.py 头部"
         )
+    # ★ 2026-11-11（o2-notax it163 现场）：每轮开跑前把工件锚点（ref/demo）**缺了就补**。
+    #   `blob_cache` 是有预算的（三树合计 256MB，按 mtime 丢最旧），而自主腿的锚点只有一份、
+    #   丢了下一轮就是向空 base_url 发 GET 的确定性失败。另两道（读命中 touch / prune 不删锚点）
+    #   各自在场，但都管不住「已经没了」（被外部清、被盘满清）；这一道管的就是它。
+    #   命中时只一个 stat（不哈希、不写盘），所以每轮调不构成开销。
+    _reseed_anchors(
+        manifest=m,
+        job_dir=Path(ctx.store.root),
+        work_dir=Path(ctx.work_dir),
+        artifacts_root=Path(ctx.store.root),
+        log=ctx.log,
+    )
     # 代码快照与 TS 运行时：**有随包字节就用字节**（全离线：节点无仓、不联网），没有就
     # 交给 `run_job` 走它本来的路（命中 code_cache / 向 hub 下载——半离线轮就是这条路：
     # worker 自己那一轮已把 code.zip 落进内容寻址缓存）。两个来源都存在时优先字节。

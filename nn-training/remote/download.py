@@ -89,6 +89,7 @@ __all__ = [
     "_progress_logger",
     "_resolve_blob",
     "_resolve_weights",
+    "anchor_shas",
     "download_blob",
     "download_blobs",
     "download_code",
@@ -344,6 +345,9 @@ def resolve_blobs_batch(
         if cp.exists():
             raw = cp.read_bytes()
             if hashlib.sha256(raw).hexdigest() == sha:
+                # ★ 读命中也要 touch（与 `_cache_blob`/`_ensure_code` 同规）：不 touch 的话
+                #   「高频命中但本会话没重写」的件在 `prune_caches` 眼里就是最旧的那一件。
+                _touch(cp)
                 _wire_hit(jid, f"blob:{name}")
                 out[name] = (raw, True, "cache")
                 continue
@@ -424,6 +428,33 @@ CODE_CACHE_MAX_BYTES = 256 * 1024 * 1024
 #: 缓存树的三个成员（`prune_job_dirs` 的豁免名单同源；加一个必须两处都加）。——见下。
 _CACHE_SUBDIRS = ("code_cache", "ts_code_cache", "blob_cache")
 
+#: 一轮 manifest 里「本机必须有字节、且自主腿拿不到第二次」的内容寻址键。
+#: `init_weights_fp` 的哨兵值（空串 / `bc`）与任何非 64-hex 值都不算地址。
+_ANCHOR_SHA_KEYS = ("ref_sha", "demo_sha", "opt_sha", "init_weights_fp")
+
+
+def _is_sha256_hex(s: str) -> bool:
+    return len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+
+
+def anchor_shas(manifest: dict) -> frozenset[str]:
+    """本轮 manifest 点名的**锚点** sha（ref / demo / opt / init）——prune 不许动的那几件。
+
+    为什么不能让 `prune_caches` 自己“看着办”（2026-11-11 o2-notax it163 现场）：锚点在段启动时
+    种进 `blob_cache` 后就再没有第二份字节了。自主腿没有下载通道 ⇒ 它被当作「最旧」删掉的那一刻
+    整段就死了（向空 base_url 发 GET = 确定性 ProtocolError）。读命中 touch（让它们不变成最旧）
+    和每轮重种（丢了能补）都在，这一份是第三道：**直接告诉 prune 这几件不许碰**，不依赖 mtime
+    这个概率。
+
+    只认 64-hex：manifest 里的 `init_weights_fp` 可能是 `bc` / 空串（哨兵，不是地址）。
+    """
+    out = set()
+    for k in _ANCHOR_SHA_KEYS:
+        v = str(manifest.get(k, "") or "").lower()
+        if _is_sha256_hex(v):
+            out.add(v)
+    return frozenset(out)
+
 
 def _touch(p: Path) -> None:
     """把 mtime 抬到现在（best-effort；失败只意味着这件更早被 prune 挑中）。"""
@@ -454,6 +485,7 @@ def prune_caches(
     cache_root: Path,
     *,
     budget_bytes: int = CODE_CACHE_MAX_BYTES,
+    keep: frozenset[str] | set[str] | tuple[str, ...] = frozenset(),
     log=lambda msg: None,
 ) -> int:
     """三棵内容寻址缓存**合计**超预算 ⇒ 按 mtime **最旧先丢**。返回删掉的条目数。
@@ -464,11 +496,18 @@ def prune_caches(
 
     为什么是「合计」而不是每棵单独封顶：无界增长的账本来就是三家之和；每棵各给 256MB
     等于把上限悄悄放成 768MB。预算 ≤0 = 关闭（旧行为）。
+
+    `keep` = 本轮 manifest 的锚点 sha（`anchor_shas`）：这些**永不删**，哪怕它们是最旧的。
+    为什么不靠「命中就 touch」就够：touch 只让它们不变成最旧，而配额是共享池，某一拍落进一批
+    大件时锚点仍可能被挑中；自主腿的锚点没有第二份字节（删 = 整段死）。光锚点就超预算时
+    **不删、但响亮说明**配额没兑现（静默超限和静默删锚都是事故）。
     """
     if int(budget_bytes) <= 0:
         return 0
-    entries: list[tuple[float, int, Path, bool]] = []
+    pinned = {str(k).lower() for k in (keep or ()) if str(k)}
+    entries: list[tuple[float, int, Path, bool, bool]] = []
     total = 0
+    pinned_bytes = 0
     for sub in _CACHE_SUBDIRS:
         d = cache_root / sub
         if not d.is_dir():
@@ -486,15 +525,18 @@ def prune_caches(
             except OSError:
                 continue
             nbytes = _dir_bytes(child)
-            entries.append((mtime, nbytes, child, is_dir))
+            is_pinned = child.name.lower() in pinned
+            entries.append((mtime, nbytes, child, is_dir, is_pinned))
             total += nbytes
+            if is_pinned:
+                pinned_bytes += nbytes
     if total <= int(budget_bytes):
         return 0
-    entries.sort(key=lambda t: t[0])  # 最旧先
+    movable = sorted((e for e in entries if not e[4]), key=lambda t: t[0])  # 最旧先
     from common.platform_utils import rmtree_best_effort
 
     dropped = 0
-    for _mt, nbytes, child, is_dir in entries:
+    for _mt, nbytes, child, is_dir, _pinned in movable:
         if total <= int(budget_bytes):
             break
         try:
@@ -512,6 +554,12 @@ def prune_caches(
         log(
             f"cache prune: 丢 {dropped} 个最旧的缓存条目（合计仍 {total / 1048576:.0f}MB / "
             f"上限 {int(budget_bytes) / 1048576:.0f}MB）"
+        )
+    if total > int(budget_bytes) and pinned_bytes:
+        log(
+            f"cache prune: 锚点件 {pinned_bytes / 1048576:.1f}MB（manifest 点名）不可回收"
+            f"——合计仍 {total / 1048576:.0f}MB 超上限 {int(budget_bytes) / 1048576:.0f}MB"
+            "（锚点被删 = 自主段下一轮必死，所以宁可超限）"
         )
     return dropped
 
@@ -542,6 +590,11 @@ def _resolve_blob(
         if cp.exists():
             raw = cp.read_bytes()
             if _hl.sha256(raw).hexdigest() == sha:
+                # ★ 2026-11-11（o2-notax it163 现场）：命中必须 touch。段启动时种子进 blob_cache 的
+                #   kickstart ref 之后每轮都命中、却一次也没刷新 mtime ⇒ 它在三棵树合计预算的 prune
+                #   里永远是「最旧」，跑了约 100 分钟被删掉；下一轮缓存 miss 只能向空 base_url 要字节
+                #   ⇒ 确定性 ProtocolError 打死整段（自主腿没有下载通道）。
+                _touch(cp)
                 _wire_hit(jid, f"blob:{name}")
                 return raw, True, "cache"
             log(f"blob {name}: cache 命中但 sha 不符（损坏）——重新取")
@@ -1011,7 +1064,7 @@ def _ensure_code(
     # E1 同规（plan/prefetch-stage-unpack §5/P3）：`prune_caches` 纯命中轮也照扫，它的墙钟要能读出来
     # ——「这棵树到底多大」与「值不值得加门禁」都只能从这一行读数判（无 bundle 时不打，行为零变化）。
     t_prune = time.time()
-    prune_caches(code_root.parent, log=log)
+    prune_caches(code_root.parent, keep=anchor_shas(manifest), log=log)
     if bundle is not None:
         bundle.add("cache prune", f"{secs(time.time() - t_prune)}s")
     return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
@@ -1086,7 +1139,7 @@ def _ensure_ts_code(
         log(f"job {jid}: {_line}")
     # A3：容量上限（`_ensure_code` 那条路径也会扫一遍，这里补上「只跑 kind=iter 的会话」）。
     t_prune = time.time()
-    prune_caches(ts_root.parent, log=log)
+    prune_caches(ts_root.parent, keep=anchor_shas(manifest), log=log)
     if bundle is not None:
         bundle.add("cache prune", f"{secs(time.time() - t_prune)}s")
     return cache, len(raw), False
