@@ -22,6 +22,7 @@ from remote import weights_standard
 from trainer.queue_local import (
     LocalLane,
     QueueEdgeGate,
+    abort_other_tags,
     drop_attempt,
     make_local_pool,
     next_attempt_tag,
@@ -578,7 +579,10 @@ class RolloutDispatcher:
         # 任务 → attempt tag → 远端取消目标（url/auth/task_key）。只有 ping.cancelSupport
         # 的节点才登记；旧 agent 保持「只断本端连接」的既有行为。
         inflight_targets: dict[tuple[int, int], dict[str, dict]] = {}
-        _tag_seq = [0]
+        # attempt tag 的起点：每波 dispatcher 都重建 `_tag_seq`，若从 1 重来，上一波
+        # 成功结算时 `abort_active_requests` 留下的同名 tag 会让下一波整批瞬断。
+        # tag 只是取消作用域，不是玩法随机；纳秒 epoch 让 tag 跨 dispatcher 唯一。
+        _tag_seq = [time.time_ns()]
 
         def worker(nd: dict | None, local_slot: int | None = None) -> None:
             suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
@@ -852,8 +856,7 @@ class RolloutDispatcher:
                                     inflight_ts.pop(task, None)
                                     inflight_nodes.pop(task, None)
                             # 已结算的任务不再需要任何在飞副本的算力：关掉它们的请求。
-                            for _lt in inflight_tags.pop(task, set()):
-                                common.distribution.abort_active_requests(_lt)
+                            abort_other_tags(inflight_tags.pop(task, set()), task_tag)
                             inflight_targets.pop(task, None)
                             # 输家副本退场：竞速双方都在锁外写盘、锁内结算——后到者
                             # 的 shard 目录若不删，发布端 iter_shard_dirs 会把同一
@@ -882,8 +885,7 @@ class RolloutDispatcher:
                             inflight_ts.pop(task, None)
                             inflight_nodes.pop(task, None)
                         # 胜者已定：其余竞速副本的结果注定被丢弃，立即断连止损。
-                        for _lt in inflight_tags.pop(task, set()):
-                            common.distribution.abort_active_requests(_lt)
+                        abort_other_tags(inflight_tags.pop(task, set()), task_tag)
                         inflight_targets.pop(task, None)
                         last_settle_at[0] = time.time()
                         streaks[nd_id] = 0
@@ -989,8 +991,7 @@ class RolloutDispatcher:
                                 inflight.pop(task, None)
                                 inflight_ts.pop(task, None)
                                 inflight_nodes.pop(task, None)
-                        for _lt in inflight_tags.pop(task, set()):
-                            common.distribution.abort_active_requests(_lt)
+                        abort_other_tags(inflight_tags.pop(task, set()), task_tag)
                         inflight_targets.pop(task, None)
                         race_drops["main_by_fanout"] += 1
                         if race_drops["main_by_fanout"] <= RACE_LOG_SAMPLE:

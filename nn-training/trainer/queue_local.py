@@ -762,6 +762,14 @@ def next_attempt_tag(iter_id: str, seq: list[int]) -> str:
     return f"rollout:{iter_id}:a{seq[0]}"
 
 
+def abort_other_tags(tags: set[str], current: str | None) -> None:
+    """把同一任务其余在飞副本断连；**当前 attempt 已经结束，不能连自己一起标
+    aborted**（旧实现把成功那份也标了，下一波 tag 从 a1 重来时整批瞬断）。"""
+    for tag in tags:
+        if tag != current:
+            common.distribution.abort_active_requests(tag)
+
+
 def remember_task_key(target: dict | None, key: str) -> None:
     """`fetch_task` 发请求前的回调：把 agent 认可的 taskKey 记到本次 attempt。"""
     if target is not None:

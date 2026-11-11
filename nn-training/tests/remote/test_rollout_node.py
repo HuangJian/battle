@@ -1313,6 +1313,9 @@ def test_ensure_bun_reuses_cache_and_skips_download(
         return SimpleNamespace(returncode=0, stdout="1.4.4", stderr="")
 
     monkeypatch.setattr(rn, "_sh", _fake_sh)
+    # `_ensure_bun` 命中缓存会把 cache 目录前插进 PATH（生产语义）；测试也必须
+    # 让 monkeypatch 负责还原，否则后续用例的 `shutil.which("bun")` 会拿到 fake bun。
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     got = rn._ensure_bun(tmp_path, {"bin_cache_dir": str(cache)}, lambda _m: None)
     assert got == str(bun)
     assert not any("bun.sh/install" in " ".join(c) for c in calls), "命中缓存就不该再下载"
@@ -1329,6 +1332,8 @@ def test_ensure_bun_stores_into_cache_after_install(
     )
     monkeypatch.setattr(rn, "_install_bun_mirror", lambda cfg, log: str(fake))
     monkeypatch.setattr(rn, "DOWNLOAD_BACKOFF", ())
+    # 同 `test_ensure_bun_reuses_cache_and_skips_download`：`_ensure_bun` 会改 PATH。
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     got = rn._ensure_bun(tmp_path, {"bin_cache_dir": str(cache)}, lambda _m: None)
     assert got == str(fake)
     assert (cache / "bun").is_file()

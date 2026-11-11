@@ -738,3 +738,21 @@ def test_local_slots_zero_falls_back_when_remote_dead(tmp_path, monkeypatch) -> 
     assert spawned == [0, 2], f"失联补孵不是 0 -> 2: {spawned}"
     assert sorted(local_calls) == [(2000, 1), (2000, 2)], local_calls
     assert report["dist"]["nodes"] == {"local": 2}, report["dist"]
+
+
+def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypatch) -> None:
+    """成功结算的 attempt tag 不许留在 `_ABORTED_TAGS`。
+
+    旧实现先 `clear_abort(task_tag)`、再在结算分支把**本任务的所有** tag（含刚成功
+    这一份）标成 aborted ⇒ 下一波 dispatcher 的 `_tag_seq` 从 1 重来，同名 tag 一取活
+    就抛 `aborted: settled complete`，整波白等 rescan（volume e2e 实测 +5s）。
+    """
+    common.distribution.clear_abort()
+    h = _Harness(tmp_path, monkeypatch, games=2)
+
+    def fetch(*_a, **_k):
+        return h.manifest(), {}
+
+    report = h.run(fetch)
+    assert report["missing"] == [], report.get("missing")
+    assert not common.distribution._ABORTED_TAGS, common.distribution._ABORTED_TAGS
