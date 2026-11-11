@@ -39,8 +39,8 @@ EVAL_SLOT_GROW_SEC = 15.0
 #: 连续「重 ping 没扩出线程」时的退避上限（秒）：空闲节点槽位没变化时，
 #: 15s 一拍纯属空转；翻倍到 60s，一旦真扩出线程立刻回到基准节拍。
 GROW_BACKOFF_MAX_SEC = 60.0
-#: 扩容 ping 的每节点预算 = 派发侧同一个缺省（`common.distribution.STATUS_TIMEOUT_SEC`，
-#: 2026-11-11 由 3s 抬到 8s：云机隧道空载就要 0.9~2.7s，3s 在忙时必超时）。
+#: 扩容 ping 的每节点预算 = 派发侧同一个缺省（`common.distribution.STATUS_TIMEOUT_SEC`）。
+#: 2026-11-11 曾抬到 8s，§149 收回 3s：真因是串行 connect 的每地址 timeout，不是预算紧。
 EVAL_GROW_PING_TIMEOUT_SEC = common.distribution.STATUS_TIMEOUT_SEC
 #: 收口轮询步长（秒）：只是定时醒来重判，正常路径靠事件/计数。
 SUPERVISE_TICK_SEC = 0.2

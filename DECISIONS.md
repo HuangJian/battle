@@ -11764,3 +11764,55 @@ det 签名不变（`ea915876…`）——det 语料里没有"卡死封线"的样
   `nn-python-gate` 全量 **5881 passed / 0 failed**。全文 → `docs/nn/remote-transport.md §148`。
 - **未闭的环**：tunnel 本身仍是结构性成本（换 URL、RTT 1s 起步）；固定入口（named tunnel / tailscale）
   与「同 id 多会话 last-writer-wins」单独评。
+
+## §2026-11-11-goalnn-rollout-racing-connect（rollout 每轮 63s 的真因：串行 connect 的「每地址 timeout」；更正并收回上一条的预算修法）
+
+- **现场**：`o2-loot3` / `o2-notax3` 每轮 rollout **63.6s / 62.8s**（预期 <40s）。分相计时：节点门
+  **43.4s / 41.7s（≈68%）**、真采集只有 15.7s / 16.3s。门每轮跑 2~3 次（主采样波 + greedy 波 + 补波），
+  每次 17~19s。`compute_code_hash` 0.03s、`dirty_hash_files` 0.15s ⇒ 与 codeHash 无关。
+- **根因**：`socket.create_connection` 对 `getaddrinfo` 的结果**串行**试，且 `timeout` 是**每地址**的、
+  不是总预算。本机没有到 Cloudflare 的可用 IPv6 路由：kaggle 主机名 = 2 个 IPv6（各失败 8.00/8.01s）
+  + 2 个 IPv4（各成功 0.21s）⇒ 一次 ping 的 tcp 段 **16.24s**（dns 0.04 / tls 0.22 / headers 0.53）。
+  乘数实测：`node_ping` timeout=3 → 6.97s、=8 → **16.84s**；探针 =5 → 10.82s、=15 → **30.83s**。
+  `urllib` **每请求新建连接**（无池）⇒ ping / 探针 / POST / 取任务 / 取结果各交一遍税。
+- **更正上一条（§2026-11-11-…-liveness-budgets）的决定 A 与 B②**：那两条的前提「云机空载应答
+  0.9~2.7s 是隧道 RTT」**是错的**——0.9~2.7s 本身就是税后的读数，IPv4 直连只要 0.21s。抬预算没有
+  减少失败，只是把每个黑洞地址的罚金从 3s 改成 8s。天然对照（同机器同课程）：it30–73 门 7~9s、
+  rollout **39~41s**（达标）；it74/76 起门 17~19s、rollout **53~95s**。故 `STATUS_TIMEOUT_SEC`
+  8.0 → **3.0**、缓存探针 `min(15.0,…)` → **`min(5.0,…)`**，本地 `rl-config.json` 的
+  `policy.statusTimeoutSec: 8` 覆盖一并删（它每轮热读，留着则代码收回等于没收回）。
+  **B①（ping 超时不摘权重账本）与 C（`node_slots` 取小）与本条无关，保留。**
+- **决定（竞速 connect）**：`common.net_http.racing_create_connection` —— 解析后按 `(family, sockaddr)`
+  去重；**单地址直接走 stdlib 原路**（回环 / LAN 的 IP 字面量 ⇒ 零行为差、零线程开销）；多地址
+  **同时开拨**，第一个成功的赢，`timeout` 变成**总预算**；输家（含主线程已放弃后才到的成功者）
+  一律 `close()`；线程一律 daemon（解释器退出不被黑洞挂住）。接缝用 CPython 留好的那个：
+  `HTTPConnection.__init__` 把 `_create_connection` 存成**实例**属性，源码注释明写「to allow unit
+  tests to replace it with a suitable mockup」⇒ 子类只换它，`connect()` 的 TCP_NODELAY / `_tunnel()` /
+  TLS wrap 全部原样保留。`common.distribution._request`（节点通信唯一出口）改走 `net_http.racing_urlopen`
+  （竞速 + 回环绕代理）；hub↔worker 的本机面继续用 `net_http.urlopen`，那条
+  `monkeypatch.setattr("urllib.request.urlopen", …)` 的缝不动。
+- **否决**：① 继续抬预算 / 抬到 20s+ —— 已试，方向反了（见上）；② 强制 IPv4 或关掉 IPv6 ——
+  DNS 答案会轮换（§148 期间 gcs 恰好只拿到 IPv4 ⇒ 0.43s，本次复测它也解析出 IPv6 了），
+  「某台云机不交税」是运气不是属性，写死地址族还会在纯 IPv6 环境全挂；③ 重写 `connect()` ——
+  要自己复刻 TCP_NODELAY / `_tunnel()` / TLS wrap 三条，漏一条就是隐性回归；④ 全局 monkeypatch
+  `socket.create_connection` —— 波及 hub / worker / 门禁里所有真连用例，blast radius 不成比例。
+- **实测（真机活节点，budget=3s，各 3 发）**：kaggle ping 9.11/6.81/6.81s → **0.88/0.81/1.08s**；
+  gcs 7.05/6.78/6.81s → **0.80/0.78/0.91s**；a97 0.11/0.01/0.03s → 0.02/0.06/0.02s；self 0.00s → 0.00s
+  （单地址快路径无回归）。探针同口径：kaggle 竞速 0.80~2.02s（串行 6.78~6.95s）。
+- **顺带答清「集群用满了吗 / 被慢节点拖累了吗」**：都不是。329 轮 / 26500 局份额 self 59.5%、
+  mac 22.9%、a95 8.5%、a97 8.1%、a96 0.4%、**kaggle 0.4%**、dsw 0.1%、**gcs 0**。kaggle
+  `avgElapsed=0.77s`/局（self 0.66s）——它不慢，是门 17s + 握手 31~75s 让它进场时配额已满、
+  本轮已收工。gcs 则是**永久拒收**：`diskFreeMB=2003` < `DISK_FLOOR_MB=2048` ⇒ 每个 `/v1/task`
+  回 503（日志尾 60 次），却仍 `enabled: true`、仍进门、仍收权重、仍起 2 worker。
+- **权重握手 75s 的分解**（收回预算后、trainer 尚未重启时的现场）：`-> kaggle (kept, 74.92s)`、
+  `-> gcs (purged, 74.81s)`，同批 `self 0.06s / a96 0.58s / a97 0.64s`。75s ≈ 探针 **30.83s**
+  （15s × 2 个 IPv6）+ 全额 POST **42.87s**（timeout=120 时两个 IPv6 各由 OS 在 ~21s 放弃）：
+  探针超时 ⇒ 退化整份上传 ⇒ 节点收完才回 `kept`。两段同一笔税。**只收回 rl-config 的探活预算
+  不够**——探针预算是代码常量，connect 才是乘数 ⇒ 必须重启 trainer（走控制台）才吃到修法。
+- **验收**：`tests/common/test_racing_connect.py` 5 条（对 HEAD 验红：竞速符号缺失 + `_request`
+  被黑洞串行拖住）；`tests/trainer/test_node_probe_budgets.py` 6 条随预算收回更新；
+  `nn-python-gate` 全量 **5886 passed / 11 skipped**。全文 → `docs/nn/remote-transport.md §149`。
+- **未闭的环**：① **没有连接池**——竞速只省 connect 段，TLS 0.22s + headers 0.53s 仍每请求各交一遍；
+  再往下压要复用连接，或让节点门一轮只跑一次而不是每波一次。② gcs 磁盘临界（清盘 / 停用；
+  `DISK_FLOOR_MB` 是冻结值，改它另案）——**本次未动**，用户未选该修法。③ 代码改动要重启 trainer
+  （走控制台）才生效；预算收回虽热读但不够（见上面 75s 分解）。

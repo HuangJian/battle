@@ -9,10 +9,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-#: 节点探活（`/v1/ping`）的**唯一**缺省预算（秒）。2026-11-11：3s 对云机隧道太紧——
-#: kaggle 节点**空载**答一次就要 0.9~2.7s（实测），忙起来直接超时 ⇒ 整轮被判
-#: `ping failed`（当天 07/08/09 各 84/97/88 次，而节点其实好好活着）。
-STATUS_TIMEOUT_SEC: float = 8.0
+#: 节点探活（`/v1/ping`）的**唯一**缺省预算（秒）。
+#: 2026-11-11 曾抬到 8s（§148，判词是「云机空载应答 0.9~2.7s，3s 太紧」）——**真因不是
+#: 预算紧**：`socket.create_connection` 串行试 `getaddrinfo` 的每个地址，且 timeout 是
+#: **每地址**的。本机无可用 IPv6 路由 ⇒ kaggle 一次 ping 的 tcp 段 16.24s（IPv4 只要
+#: 0.21s）。抬预算只是把这笔税从 6s 放大到 16s：同批课程 rollout 从 39~41s 变成 53~95s。
+#: connect 竞速（`common.net_http.racing_create_connection`）修好后收回 3s，见 §149。
+STATUS_TIMEOUT_SEC: float = 3.0
 
 
 def status_timeout_of(policy: Mapping[str, Any] | None) -> float:

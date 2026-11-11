@@ -2,13 +2,19 @@
 
 ## 现场（2026-11-11，kaggle 滚动机 rollout 节点）
 
-- 节点空载答 `/v1/ping` 要 **0.9~2.7s**（隧道 RTT），派发/评估的预算是 **3s**：
+- 节点答 `/v1/ping` 要 **0.9~2.7s**，而派发/评估的预算是 **3s**：
   07/08/09 三个小时各 `ping failed — excluded this round` **84 / 97 / 88 次**，
   eval 侧 `连续 9 次瞬时失败（背压/瞬断）— 停派`、`让出在飞 4 槽 ⇒ c=0/4`。
+  **§149 更正**：那 0.9~2.7s 不是隧道 RTT，是 `socket.create_connection` **串行**试
+  `getaddrinfo` 每个地址、且 timeout 按地址各给一份的 IPv6 税（kaggle 主机名 = 2 个
+  IPv6 黑洞 + 2 个 IPv4；tcp 段实测 16.24s，IPv4 只要 0.21s）。当时把预算 3s→8s
+  只是把税放大（同批课程 rollout 39~41s → 53~95s），已收回 3s；真修在
+  `common.net_http.racing_create_connection`（用例 `tests/common/test_racing_connect.py`）。
 - 一次 ping 超时就把该节点的**权重下发账本**摘掉（`forget_weights_node`）⇒ 下一轮
   重新握手；而云机“已缓存”的探针本身也可能超时（5s），于是退化成整份重传：
   日志里 `weights[rollout] -> kaggle (kept, 54.6s)`——**节点明明有这份权重**。
-  权重只有 0.38MB ⇒ 50s 不是带宽，是「探针超时 → 白传」。
+  权重只有 0.38MB ⇒ 50s 不是带宽，是「探针超时 → 白传」。（探针预算同样曾抬到 15s，
+  实测变成 30.83s，§149 一并收回 5s。）
 - 节点 `/v1/ping` 报 `cpus=2`（`physicalCores()`），而 rl-config 钉 `concurrency=4`、
   笔记本用 `effective_cores()`（4）起 worker ⇒ 4 个重型 native worker 抢 2 个物理核，
   HTTP 事件循环被饿住，反过来放大前两条。
@@ -34,18 +40,21 @@ from tests.trainer.test_rollout_dispatch_resilience import GOOD_PING, _Harness, 
 # ------------------------------------------------------------------ 1) 预算唯一来源
 
 
-def test_status_budget_default_is_shared_and_generous() -> None:
-    """缺省 8s（云机隧道空载就近 3s）；policy 显式值仍是权威。"""
-    assert common.distribution.STATUS_TIMEOUT_SEC == 8.0
-    assert common.distribution.status_timeout_of({}) == 8.0
-    assert common.distribution.status_timeout_of({"statusTimeoutSec": 3}) == 3.0
+def test_status_budget_default_is_shared() -> None:
+    """缺省 3s（§149 收回 §148 的 8s：真因是串行 connect，抬预算只放大 IPv6 税）。
+
+    policy 显式值仍是权威——「唯一来源」钉的是缺省不许各处再写死字面量，不是不许覆盖。
+    """
+    assert common.distribution.STATUS_TIMEOUT_SEC == 3.0
+    assert common.distribution.status_timeout_of({}) == 3.0
+    assert common.distribution.status_timeout_of({"statusTimeoutSec": 8}) == 8.0
     assert common.distribution.status_timeout_of({"statusTimeoutSec": "12"}) == 12.0
     # 坏值不许炸掉整轮探活（沿用「配置写错就当缺省」的既有口径）
-    assert common.distribution.status_timeout_of({"statusTimeoutSec": "abc"}) == 8.0
+    assert common.distribution.status_timeout_of({"statusTimeoutSec": "abc"}) == 3.0
 
 
 def test_dispatch_probes_with_the_shared_budget(tmp_path, monkeypatch) -> None:
-    """policy 不写 `statusTimeoutSec` 时，ping 的实际预算必须是共享常量（不是 3s）。"""
+    """policy 不写 `statusTimeoutSec` 时，ping 的实际预算必须是共享常量（不是另写死的字面量）。"""
     seen: list[float] = []
 
     def _ping(_url: str, _key: str, timeout: float = 0.0) -> dict[str, Any] | None:

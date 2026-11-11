@@ -51,6 +51,7 @@ import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from common import net_http
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
 from common.distribution_limits import status_timeout_of as status_timeout_of
@@ -470,13 +471,12 @@ def _request(
     if scope and abort_scope(scope):
         # 收工后不再发新请求（settled 已满 = 本单元不需要任何新结果）。
         raise DistError(0, "aborted: settled complete", transient=True)
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Authorization": f"Bearer {auth_key}", **(headers or {})},
-        method=method,
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    auth = {"Authorization": f"Bearer {auth_key}", **(headers or {})}
+    req = urllib.request.Request(url, data=data, headers=auth, method=method)
+    # 竞速 connect（2026-11-11）：云机隧道主机名解析出多个地址，stdlib 串行试、每个地址
+    # 各给一份 timeout ⇒ 本机无 IPv6 路由时一次 ping 的 tcp 段就要 16s（见 common/net_http.py）。
+    # 节点通信全走这条出口，所以 ping / 权重探针 / POST / 取任务 / 取结果一并受益。
+    with net_http.racing_urlopen(req, timeout=timeout) as resp:
         key = (scope, resp)
         with _ACTIVE_LOCK:
             _ACTIVE.add(key)
@@ -487,6 +487,8 @@ def _request(
                 _ACTIVE.discard(key)
 
 
+# 探活/槽位预算的门面（2026-11-11 下沉，见 `common/distribution_limits.py`）：上面三行
+# 与 `distribution_limits` 是同一个对象，缺省 3s 的来历与 §149 的收回理由都记在那里。
 def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> list[dict | None]:
     """**并行** ping 一批节点（保序返回，失败 = None）。
 
@@ -991,10 +993,11 @@ def post_weights(
     GET /v1/weights/cached；sha 已在桶内 → 不传 body 直接 'kept'（补波/同 it
     多波的权重握手主成本）。探针 404/失败（旧 agent）→ 完整 POST，语义不变。
     """
-    # 探针预算 5s → 15s（2026-11-11）：云机隧道空载单请求就要 0.9~2.7s，5s 在节点忙时
-    # 必超时 ⇒ 退化成整份重传（0.38MB 传了 54.6s，节点收完才说「我本来就有」）。探针
-    # 超时的代价不是 5s，而是后面那次全额 POST。
-    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(15.0, timeout))
+    # 探针预算 5s（2026-11-11 收回 §148 的 15s）：当时抬到 15s 是想兜「云机忙时探针超时
+    # ⇒ 退化成整份重传」，但真因是串行 connect 的**每地址** timeout（15s 实测变成 30.83s，
+    # 节点明明已有这份权重）。竞速后单请求 ≈1s，5s 够用；探针超时的代价仍是后面那次全额
+    # POST，所以别顺手改成 0/跳过。
+    cached = probe_weights_cached(url, auth_key, sha, kind=kind, timeout=min(5.0, timeout))
     if cached is True:
         return "kept"
     course_name = course_name_of() if course is None else course
