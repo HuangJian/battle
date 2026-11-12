@@ -1,6 +1,6 @@
 // BC 课程 g1-4s2e —— g 系列第二代：v6 三头 + 真 pf 的 God 语料（2026-11-12）
 //
-// 状态：**已立项 · 待开课**（开课由人在控制台 :8900 拍板；agent 不启动训练）
+// 状态：**已结课**（2026-11-12，24/80 epochs 早停；v6+pf 首版未兑现，后继 g1b/g1c）
 // 上位：`g0-4s2e`（legacy 5/2 + `policyExtra=false` 的探针课）→ 本课换成**与部署链同构**的
 //   v6 三头（hold2 / move4 / fire3）+ `POLICY_EXTRA(57)` 真值；用户 2026-11-12 12:31
 //   「以后 god 采样就按照 K=10 来采。接下来做 v6 三头 + 真 pf」；12:34「inner think 也按照
@@ -93,3 +93,18 @@
   "backup_dir": "nn-training/weights/g1-4s2e",
   "backup_prefix": "g1-4s2e",
 }
+
+// ── 结课报告（2026-11-12，24/80 epochs，早停）──────────────────────────────
+// ① 训练：配置 80 epoch / patience 10；**24 停**（滑动平均 val_loss 连续 10 轮无改善）；
+//    val_loss 0.9464（v6 三头 CE 总和，与 legacy 不可直接比）、move_acc .835 /
+//    fire_acc .881 / **hold_acc .963**；981.6s（云机 GPU）。
+// ② 课程内 eval（200 局/点）：ep10 **17.0%** / pickup 61.5% / timeout 51.0%；
+//    ep20 **24.0%** / pickup 56.0% / timeout 32.0%。
+// ③ 满池 800 局（860001）：**win 37.62%**（301/800）、拾取 67.5%、clearT 1947、
+//    gameover 290 / timeout 214、kills 0.98、dmg 137；
+//    分关 55.5 / 50.0 / 38.0 / **7.0**（Brickworks 崩）。
+// ④ 判词：v6+pf 首版未兑现——24 早停（g0 到 80 还在降）+ 首版语料/训练日程全变，
+//    不是单变量；Brickworks 7% 与 stop 24.3%（legacy 槽口径错位，见 g1b 报告）是当时
+//    的两个误读。后继 g1b 放宽 patience 并重导语料，g1c 把 weight_exponent 降到 0.3。
+// ⑤ 后继：g1b（60/20）→ g1c（w_exp 0.3）→ **g1c+joint（联合 argmax，held-out 70.5%）**。
+// 产物：`nn-training/weights/g1-4s2e/`；`tmp/o2-analysis/g1-4s2e-eval-800.jsonl`。

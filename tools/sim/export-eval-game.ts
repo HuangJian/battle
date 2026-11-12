@@ -55,7 +55,8 @@ import {
 } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { decodeMove } from '../../src/nn/action-space'
-import { decodeMove4 } from '../../src/nn/action-space-v6'
+import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
+import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
@@ -215,6 +216,13 @@ class ScriptedInput {
  */
 // 诊断探针开关（CLI 在 `main` 里写；默认关 ⇒ 行为与报告 schema 逐字节不变）。
 let probeFlag = false
+let holdFallback = false
+/** F3：v6 的 (move, hold) 联合 argmax（默认关，旧行为逐字节不变）。 */
+let jointArgmax = false
+/** 推理道具偏置（默认 0 = 关）。 */
+let pickupBias = 0
+let pickupRadius = 2
+let enemyClearCells = 4
 let ablateSpec = ''
 /** `--ablate-ch 16,17`：逐通道清零（obs 通道消融；`--ablate-extra` 是另一套，别混）。 */
 let ablateChSpec = ''
@@ -789,6 +797,14 @@ export function runEvalOne(
    * 透传（终判：K5 臂必须按 K=5 评估，否则训练/评估节奏不一致）。
    */
   decisionK: number = DEFAULT_DECISION_K,
+  /** 兜底实验：前方被挡时从可走方向里挑一个前进（默认 false = 旧行为）。 */
+  holdFallback = false,
+  /** F3：v6 的 (move, hold) 联合 argmax（默认 false = 旧行为）。 */
+  jointArgmax = false,
+  /** 推理道具偏置：>0 时在「道具近且无敌人」帧给朝道具的 move logits 加分。 */
+  pickupBias = 0,
+  pickupRadius = 2,
+  enemyClearCells = 4,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -1194,7 +1210,28 @@ export function runEvalOne(
           if (cleanHold && model!.holdLogits) model!.holdLogits.set(cleanHold)
           model!.valueOut.set(cleanValue)
         }
-        let mv = argmaxCat(model!.moveLogits, masks.move)
+        // 推理道具偏置（默认 0）：只在「道具近 + 无敌人 + 方向可走」时给 move 加分。
+        let moveScores: Float32Array = model!.moveLogits
+        if (v6 && pickupBias > 0) {
+          const p = world.player
+          if (p) {
+            const pu = new Float64Array(2)
+            const d = nearestPickupCenter(world, pu)
+            if (d >= 0 && d <= pickupRadius && nearestEnemyDistPx(world) > enemyClearCells * CELL) {
+              const dx = pu[0] - (p.x + p.w / 2)
+              const dy = pu[1] - (p.y + p.h / 2)
+              const dir =
+                Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+              const idx = MOVE4_DECODE.indexOf(dir)
+              if (idx >= 0 && corridorCells(world, p, dir, 1) > 0) {
+                const copy = Float32Array.from(model!.moveLogits)
+                copy[idx] += pickupBias
+                moveScores = copy
+              }
+            }
+          }
+        }
+        let mv = argmaxCat(moveScores, masks.move)
         if (isGoalMasked && goalSteering) {
           // 每 tick 先跑 God 全链（reflex 层 + 导航目标刷新）；eval 期可接受。
           if (goalGod) {
@@ -1207,13 +1244,13 @@ export function runEvalOne(
             // 1b-posthoc：软偏置 logits += β·align（诱导不禁止，保留机动）。
             const align = goalMoveBias(world, goalCell.col, goalCell.row)
             const biased = new Float32Array(model!.moveLogits.length)
-            for (let i = 0; i < 5; i++) biased[i] = model!.moveLogits[i] + goalBias * align[i]
+            for (let i = 0; i < 5; i++) biased[i] = moveScores[i] + goalBias * align[i]
             mv = argmaxCat(biased, masks.move)
           } else {
             // 1a：硬掩码，禁背离目标。
             const combined: number[] = [0, 0, 0, 0, 0]
             for (let i = 0; i < 5; i++) combined[i] = masks.move[i] === 1 && goal[i] === 1 ? 1 : 0
-            mv = argmaxCat(model!.moveLogits, combined)
+            mv = argmaxCat(moveScores, combined)
           }
         }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
@@ -1222,6 +1259,48 @@ export function runEvalOne(
         masks.hold[0] = 1
         masks.hold[1] = 1
         if (v6) restrictAdvanceMask(world, mv, masks)
+        // F3（2026-11-12）：(move, hold) 联合 argmax——只在 hold 头自己想前进、
+        // top move 被墙挡住时，改选「最好的可走方向 + advance」；不影响想停的帧。
+        // 旧实现先 argmax(move) 再掩 hold，会白掉一拍。
+        if (v6 && jointArgmax && model!.holdLogits && world.player) {
+          const p = world.player
+          const hl = model!.holdLogits
+          let best = -Infinity
+          let bm = mv
+          let bh = 0
+          for (let m = 0; m < 4; m++) {
+            const dir = MOVE4_DECODE[m] ?? MOVE4_DECODE[0]
+            const advanceOk = corridorCells(world, p, dir, 1) > 0
+            for (let h = 0; h < 2; h++) {
+              if (h === 0 && !advanceOk) continue
+              const s = moveScores[m] + hl[h]
+              if (s > best) {
+                best = s
+                bm = m
+                bh = h
+              }
+            }
+          }
+          mv = bm
+          masks.hold[0] = bh === 0 ? 1 : 0
+          masks.hold[1] = bh === 1 ? 1 : 0
+        }
+        // 兜底实验（2026-11-12）：前方 1 格被挡时，不选 hold=1 停住，改从 4 向里
+        // 挑一个可走方向（当前 → 右转 → 左转 → 反向），并强制 advance。4 向全被挡
+        // （真围死）才保持原样。默认关，旧读数逐字节不变。
+        if (v6 && holdFallback && masks.hold[0] === 0) {
+          const p = world.player
+          if (p) {
+            for (const cand of [mv, (mv + 1) % 4, (mv + 3) % 4, (mv + 2) % 4]) {
+              if (corridorCells(world, p, MOVE4_DECODE[cand] ?? MOVE4_DECODE[0], 1) > 0) {
+                mv = cand
+                masks.hold[0] = 1
+                masks.hold[1] = 0 // 强制前进，不许再用 turn-only 代替
+                break
+              }
+            }
+          }
+        }
         const hd = v6 && model!.holdLogits ? argmaxCat(model!.holdLogits!, masks.hold) : 0
         // 2026-11-12：拆「被迫 hold」（advance 被 restrictAdvanceMask 屏蔽）与
         // 「主动 hold」（hold 头在合法集合里选 1）。两者都计入 stopTicks，
@@ -1896,6 +1975,11 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--decision-events') decisionEvents = true
     else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
     else if (argv[i] === '--probe') probeFlag = true
+    else if (argv[i] === '--hold-fallback') holdFallback = true
+    else if (argv[i] === '--joint-argmax') jointArgmax = true
+    else if (argv[i] === '--pickup-bias') pickupBias = parseFloat(argv[++i])
+    else if (argv[i] === '--pickup-radius') pickupRadius = parseInt(argv[++i], 10)
+    else if (argv[i] === '--enemy-clear-cells') enemyClearCells = parseInt(argv[++i], 10)
     else if (argv[i] === '--ablate-extra') ablateSpec = argv[++i]
     else if (argv[i] === '--ablate-ch') ablateChSpec = argv[++i]
   }
@@ -1942,6 +2026,11 @@ export function main(argv: string[]): void {
     stageIdx,
     decisionEvents,
     decisionK,
+    holdFallback,
+    jointArgmax,
+    pickupBias,
+    pickupRadius,
+    enemyClearCells,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。

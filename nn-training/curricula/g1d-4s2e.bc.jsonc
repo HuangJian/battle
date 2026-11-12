@@ -1,0 +1,114 @@
+// BC 课程 g1d-4s2e —— g1c + DAgger：学生状态上的 God 标注（2026-11-12）
+//
+// 状态：**已结课**（2026-11-12，60/60 epochs；DAgger v1 判负：34.38%，比 g1c 低
+//   20.5pp；后继 g1e = 10% forced 帧、g1f = g1c warm start）
+// 依据：g1c（w_exp 0.3）满池 54.88%；probe 显示 hold 预测 37.0% =
+//   被迫 26.7pp（选错方向朝墙）+ 主动 10.3pp（已与语料 11.2% 对齐）。
+//   兜底实验（强行不许停）win 51→43 失败 ⇒ 停有防守价值，不能一律取消。
+//   唯一能教「什么时候停/走哪条」的数据，是学生自己会到的状态 + God 标注。
+//
+// ══ 0. 本课新增什么 ═══════════════════════════════════════════════════════
+//   语料 = **BC（God 状态）+ DAgger（学生状态）** 混合：
+//     · BC：`tmp/g1b-4s2e-corpus` 800 shards / 119,880 样本（v6+pf，God inner-K=10）；
+//     · DAgger：`tmp/g1d-dagger-corpus` 里每关取 60 seed 共 240 shards / ~63k 样本，
+//       由 `tools/sim/export-dagger-labels.ts --action-v6` 采集：
+//       学生 = g1c 权重驱动 World，God 作为纯观察者在**同一决策前状态**标注
+//       （v6 标签，STOP ⇒ hold=1 + 已提交朝向）。学生胜率 54.37%，与 g1c
+//       满池 54.88% 一致 ⇒ 轨迹确实是学生分布。
+//     混合目录 `tmp/g1d-4s2e-corpus`（BC 800 + DAgger 240；DAgger 占样本 ~34%）。
+//   训练 = 同 g1c：60 epoch / patience 20 / ckpt 5 / `weight_exponent 0.3` / v6+pf。
+//   新 out/traj/backup（§15.5，禁续跑 g1c）。
+//
+// ══ 1. 判据 ═══════════════════════════════════════════════════════════════
+//   主判据：probe 的**被迫 hold 26.7%** 是否下降（目标 <15%），以及满池
+//   win（g1c 54.88%）/ 拾取（67.3%）/ timeout（142）。若被迫停不降，说明
+//   DAgger 标注没覆盖到「朝墙」状态，需查采集时的 keep/filter。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1d-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1d-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "patience": 20,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "weight_exponent": 0.3,
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1d-4s2e/weights.json",
+  "traj": "tmp/g1d-4s2e",
+  "data_dir": "tmp/g1d-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1d-4s2e",
+  "backup_prefix": "g1d-4s2e",
+}
+
+// ── 结课报告（2026-11-12，60/60 epochs）─────────────────────────────────────
+// ① 训练账：60/60；课程内 eval（200 局/点）win 5.5 / 25.5 / 23.5 / 38.5 / 38.0 /
+//    **23.5%**（ep60），pickup 49.1 → 63.4%，timeout 46.5 → 24.0%。
+//    注：本课 `train.init_from` 为空 ⇒ **从随机权重起**（用户 19:26 指出；后继
+//    g1f 改为 g1c warm start），是失败因素之一：60 epoch 从零学，DAgger 的影响
+//    被「重新学一遍」稀释。
+// ② 满池 800 局（seed 860001..860200）：**win 275/800 = 34.38%**（g1c 54.88
+//    ⇒ **−20.5pp**）、拾取 67.1%（持平）、clearT 1979、gameover 309 / timeout 222、
+//    kills **0.90**（g1c 1.34）、stop **51.4%**（g1c 34.4）。
+//    分关：2000 52.0 / 2001 47.5 / **2002 6.5**（g1c 49.0，崩）/ 2003 31.5。
+// ③ probe 100 局：hold 预测 **54.6%**（g1c 37.0）、**被迫 48.0%**（g1c 26.7，
+//    翻倍）、主动 6.6%；被迫方向 **up 70.6%**（g1c right 43.9 / up 9.6）。
+// ④ 语料实现（DAgger v1）：学生 = g1c 权重驱动 World，God 作为纯观察者在同一
+//    决策前状态标注；全量 800 局 **211,840** 样本，全部学生决策帧（不筛状态）；
+//    混合 34%（BC 119,880 + DAgger 62,292 = 182,172）。
+//    DAgger 标签分布：up 35.5 / down 26.1 / left 17.7 / right 20.7、hold1 9.7%、
+//    **fire2 11.5%**（BC 6.5% 的 1.77×）。
+// ⑤ 判词：**DAgger v1 判负**，但错在实现方式，不是 DAgger 本身：
+//    ① **只标注不执行** —— 学生仍走自己的错轨迹，数据是「错状态 + God 孤立动作」，
+//       没有「从错状态恢复」的连续轨迹；God 的动作依赖其路径记忆，学生照做会撞墙
+//       （被迫方向 up 70.6%）；
+//    ② **34% 过采样坏状态** —— 学生局 265 帧/局（BC 150），DAgger 大量是卡住/
+//       绕路/超时状态，模型把「学生卡住」的状态先验学进去；
+//    ③ **开火分布翻倍** —— fire2 11.5% vs 6.5%，学生更爱开火但 kills 0.90。
+//    另：从随机权重起（`init_from` 空）使 DAgger 影响被稀释。
+// ⑥ 后继：
+//    · `g1e-4s2e`：只采「被迫」帧（55,477 样本）+ 混合 **10%**（133,035），仍随机起点；
+//    · `g1f-4s2e`：同 g1e 数据 + **g1c warm start**（20 epoch / lr 0.001 / patience 10）。
+// 产物：`nn-training/weights/g1d-4s2e/{weights.json, g1d-4s2e.it1.20261112-184434.json}`；
+//   `tmp/o2-analysis/g1d-4s2e-eval-800.jsonl`；`tmp/hold-probe-g1d/`；
+//   `tmp/g1d-dagger-corpus/`（211,840 样本）。

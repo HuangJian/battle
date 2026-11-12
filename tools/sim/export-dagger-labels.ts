@@ -46,6 +46,7 @@ import { STAGES } from '../../src/config/stages'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { START_LIVES } from '../../src/constants'
+import type { Direction } from '../../src/constants'
 import {
   ObsEncoder,
   decisionTick,
@@ -60,7 +61,9 @@ import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import { NNInput, type NNInputOptions } from '../../src/nn/policy-input'
 import { isArenaId, resolveArenaStage } from '../../src/nn/arena-ladder'
 import { decodeStageGrid, CUSTOM_STAGE_BASE } from '../../src/nn/config-stage'
-import { writeShard } from '../../src/nn/npy'
+import { writeNpy, writeShard } from '../../src/nn/npy'
+import { encodeMove4 } from '../../src/nn/action-space-v6'
+import { corridorCells } from '../../src/nn/danger-metrics'
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 
 const MAX_TICKS = 36000
@@ -73,12 +76,27 @@ interface Acc {
   extra: Float32Array[]
   actions: number[]
   masks: number[]
+  /** v6 三头（--action-v6 时才填；legacy 分支仍用 actions/masks）。 */
+  aMove: number[]
+  aFire: number[]
+  aHold: number[]
   conditions: number[]
   n: number
 }
 
 function newAcc(): Acc {
-  return { obs: [], scalars: [], extra: [], actions: [], masks: [], conditions: [], n: 0 }
+  return {
+    obs: [],
+    scalars: [],
+    extra: [],
+    actions: [],
+    masks: [],
+    aMove: [],
+    aFire: [],
+    aHold: [],
+    conditions: [],
+    n: 0,
+  }
 }
 
 type Outcome = 'stage_clear' | 'base_destroyed' | 'lives_exhausted' | 'timeout'
@@ -100,6 +118,10 @@ function runOne(
   nnOpts: NNInputOptions,
   // p3 任务三件套（与 export-godai-labels 同语义；全缺省 = 历史行为逐字节不变）：
   extra?: { stageJson?: string; livesOverride?: number; playerLevelOverride?: number },
+  /** true = 教师标签按 v6 三头落盘（move4/fire3/hold2 + extra 57）。 */
+  actionV6 = false,
+  /** true = 只保留「学生被迫 hold」帧（学生选的 move 方向前方 1 格不可走）。 */
+  keepForced = false,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -133,6 +155,8 @@ function runOne(
   const encoder = new ObsEncoder()
   const acc = newAcc()
   let prevDir: any = null
+  /** 教师最近一次非 null 方向（F4：STOP 标签不能用学生的朝向，那可能正朝墙）。 */
+  let lastTeacherDir: Direction | null = null
   let prevGuard = false
   let prevFrenzy = false
   let t = 0
@@ -146,6 +170,7 @@ function runOne(
     //     每帧 think 维护教师记忆连贯（path/camp/hunt-commit 逐帧演化），
     //     endFrame 推进其 per-tick 缓存；教师只读 World，从不改写。
     const tDir = teacher.getMoveDirection()
+    if (tDir !== null) lastTeacherDir = tDir
     const tFiring = teacher.isFiring()
     const tGuard = teacher.wasItemPressed('guard')
     const tFrenzy = teacher.wasItemPressed('frenzy')
@@ -164,18 +189,40 @@ function runOne(
       K,
     )
     if (isDecision) {
-      const label = actionFromFrame({
-        direction: tDir,
-        firing: tFiring,
-      })
-      const masks = computeMasks(world)
-      acc.obs.push(encoder.obs.slice())
-      acc.scalars.push(encoder.scalars.slice())
-      acc.extra.push(encoder.extra.slice())
-      acc.actions.push(label.move, label.fire)
-      acc.masks.push(...masks.move, ...masks.fire)
-      acc.conditions.push(condition)
-      acc.n++
+      // 「被迫」判据：学生选的 move 方向前方 1 格不可走（与 probe 的
+      // masks.hold[0]===0 同源）；`--keep-forced` 只采这些帧。
+      const p = world.player
+      const sdir = student.getMoveDirection()
+      const forced =
+        keepForced && p !== null && sdir !== null ? corridorCells(world, p, sdir, 1) === 0 : false
+      if (!keepForced || forced) {
+        acc.obs.push(encoder.obs.slice())
+        acc.scalars.push(encoder.scalars.slice())
+        acc.extra.push(encoder.extra.slice())
+        if (actionV6) {
+          // DAgger v6：教师 STOP ⇒ hold=1 + 已提交朝向；方向 ⇒ hold=0 + move4；
+          // legacy fire=true 等价「先转后开火」⇒ v6 fire=2。
+          acc.aMove.push(
+            tDir === null
+              ? encodeMove4(
+                  lastTeacherDir ?? world.player?.prevMoveDir ?? world.player?.dir ?? 'up',
+                )
+              : encodeMove4(tDir),
+          )
+          acc.aFire.push(tFiring ? 2 : 0)
+          acc.aHold.push(tDir === null ? 1 : 0)
+        } else {
+          const label = actionFromFrame({
+            direction: tDir,
+            firing: tFiring,
+          })
+          const masks = computeMasks(world)
+          acc.actions.push(label.move, label.fire)
+          acc.masks.push(...masks.move, ...masks.fire)
+        }
+        acc.conditions.push(condition)
+        acc.n++
+      }
     }
 
     // (4) 学生驱动 World 前进一步（学生内部在 sim.tick 内 think 并决策）。
@@ -203,7 +250,7 @@ function runOne(
   return { acc, outcome, ticks: t, studentWin }
 }
 
-function flushShard(acc: Acc, dir: string, manifest: unknown): void {
+function flushShard(acc: Acc, dir: string, manifest: unknown, actionV6 = false): void {
   // 注意：shard 不带 returns.npy —— 与 godai 混训且 --value-coef>0 时，value 头
   // 只从 godai 半学到东西；纯策略重训建议 coef 0（§15 value 压制策略头前科）。
   const N = acc.n
@@ -224,6 +271,35 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]
     conditions[i] = acc.conditions[i]
+  }
+  if (actionV6) {
+    // v6：与 export-godai-labels 的 v6 落盘同构（a_move/a_fire/a_hold/mask(9) + extra 57）。
+    const aMove = new Uint8Array(N)
+    const aFire = new Uint8Array(N)
+    const aHold = new Uint8Array(N)
+    const mask9 = new Uint8Array(N * 9)
+    const returns = new Float32Array(N)
+    for (let i = 0; i < N; i++) {
+      aMove[i] = acc.aMove[i]
+      aFire[i] = acc.aFire[i]
+      aHold[i] = acc.aHold[i]
+      for (let j = 0; j < 9; j++) mask9[i * 9 + j] = 1
+    }
+    mkdirSync(dir, { recursive: true })
+    writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
+    writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
+    writeNpy(`${dir}/extra.npy`, extra, [N, POLICY_EXTRA_DIM], 'f4')
+    writeNpy(`${dir}/a_move.npy`, aMove, [N], 'u1')
+    writeNpy(`${dir}/a_fire.npy`, aFire, [N], 'u1')
+    writeNpy(`${dir}/a_hold.npy`, aHold, [N], 'u1')
+    writeNpy(`${dir}/mask.npy`, mask9, [N, 9], 'u1')
+    writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')
+    writeNpy(`${dir}/returns.npy`, returns, [N], 'f4')
+    writeFileSync(
+      `${dir}/manifest.json`,
+      JSON.stringify({ ...(manifest as Record<string, unknown>), actionSpace: 'v6' }, null, 2),
+    )
+    return
   }
   writeShard(dir, { obs, scalars, extra, actions, masks, conditions }, manifest)
 }
@@ -251,6 +327,10 @@ function main(): void {
   let stageJsonFile = ''
   let livesOverride: number | undefined
   let playerLevelOverride: number | undefined
+  /** v6 三头 + extra 57 落盘（与 g1x 语料同构）；默认 false = legacy 5/2。 */
+  let actionV6 = false
+  /** 只采「学生被迫 hold」帧（前方 1 格不可走）。 */
+  let keepForced = false
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -262,6 +342,8 @@ function main(): void {
     else if (args[i] === '--stage-json-file') stageJsonFile = args[++i]
     else if (args[i] === '--lives-override') livesOverride = parseInt(args[++i], 10)
     else if (args[i] === '--player-level') playerLevelOverride = parseInt(args[++i], 10)
+    else if (args[i] === '--action-v6') actionV6 = true
+    else if (args[i] === '--keep-forced') keepForced = true
   }
   // 课程自定义关（与 export-godai-labels 同语义）：JSON 数组，第 i 项对应
   // stage 2000+i。不传时下面全空，行为逐字节不变。
@@ -309,6 +391,8 @@ function main(): void {
         maxTicks,
         nnOpts,
         { stageJson: extra.stageJson, livesOverride, playerLevelOverride },
+        actionV6,
+        keepForced,
       )
       outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
       if (studentWin) studentWins++
@@ -325,8 +409,10 @@ function main(): void {
         ticks,
         nSamples: acc.n,
         k: K,
+        actionSpace: actionV6 ? 'v6' : 'legacy',
+        keep: keepForced ? 'forced' : 'all',
       }
-      if (acc.n > 0) flushShard(acc, `${outDir}/${shardName}`, manifest)
+      if (acc.n > 0) flushShard(acc, `${outDir}/${shardName}`, manifest, actionV6)
       totalSamples += acc.n
       totalTicks += ticks
       perGame.push(

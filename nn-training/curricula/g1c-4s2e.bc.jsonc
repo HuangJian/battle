@@ -1,0 +1,112 @@
+// BC 课程 g1c-4s2e —— g1b 的 v3：压 hold 头过预测（2026-11-12）
+//
+// 状态：**已结课**（2026-11-12，60/60 epochs；hold 头已修好，走位 26.7% 留给 g1d）
+// 依据：g1b（60 epoch）满池 50.12% / 拾取 67.1%；probe 拆出 **hold 预测 48.4% =
+//   被迫 26.8pp（选错方向朝墙）+ 主动 21.6pp（hold 头在合法集合里选 1）**；
+//   语料 `a_hold` 只有 **11.2%** turn-only ⇒ 主动过预测 ~2×。
+//
+// ══ 0. 根因：v6 的 class weight 把 hold=1 加权了 4.46× ═════════════════════
+//   `train/bc.py:345-355`：`hold_class_weight[k] = (total/(2*count[k])) ** weight_exponent`。
+//   语料 hold 88.8:11.2 ⇒ `weight_exponent=1.0` 时
+//     hold=0 权重 0.563、hold=1 权重 **4.46**（相差 7.9×）。
+//   这与 v6 fire 的已知教训同型（`bc.py:326-327`：90:10:9 满额加权把正例从 9.7% 推到 23.6%），
+//   只是没人给 hold 头做过标定。
+//
+// ══ 1. 本课只改一个旋钮 ═══════════════════════════════════════════════════
+//   `weight_exponent: 1.0 → 0.3`（全局；hold=1 权重从 4.46 降到 **1.57**，
+//   fire 仍保留温和加权，避免退化成「永不发射」）。其余与 g1b **逐字相同**：
+//   60 epoch / patience 20 / ckpt_every 5 / v6+pf / God inner-K=10 语料 / course_env eval。
+//   out/traj/backup 新命名空间（§15.5，禁续跑 g1b）。
+//
+// ══ 2. 判据 ═══════════════════════════════════════════════════════════════
+//   主判据 = **hold 预测率**：g1b 48.4%（被迫 26.8 + 主动 21.6），目标把主动压到 ~11–15%、
+//   总 hold 降到 30% 量级；次判据 = 满池 win（g1b 50.12%）/ 拾取（67.1%）/ timeout（165）。
+//   走位 26.8% 的「被迫」是另一条腿，本课不动训练侧走位，只观察 hold 降后是否连带改善。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1c-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1b-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "patience": 20,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "weight_exponent": 0.3,
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1c-4s2e/weights.json",
+  "traj": "tmp/g1c-4s2e",
+  "data_dir": "tmp/g1c-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1c-4s2e",
+  "backup_prefix": "g1c-4s2e",
+}
+
+// ── 结课报告（2026-11-12，60/60 epochs）─────────────────────────────────────
+// ① 训练账：60/60 跑满；账本 `run_start=2` / `job_rejected=1`（第一次 job 被拒后
+//    重跑，eval ep10–50 在账本里重复两遍）；**交付权重 = 第二次 run 的 ep60**，
+//    满池用最终权重。manifest `weight_exponent=0.3` 确认生效。
+//    课程内 eval（200 局/点）win：15.0 / 40.5 / 45.0 / 55.5 / 53.5 / **50.5%**
+//    （ep10–60），pickup 63.4 / 76.7 / 68.1 / 64.6 / 72.7 / **62.0%**，
+//    timeout 50.5 → 15.5%。⚠ eval 面板（seed 1..50）与满池方向不一致，以满池为准。
+// ② 满池 800 局（seed 860001..860200）：**win 439/800 = 54.88%**、拾取 **67.3%**、
+//    clearT 1863、gameover 223 / timeout 142、kills 1.34、dmg 123、**stop 34.4%**。
+//    分关：2000 71.5 / 2001 61.5 / 2002 **49.0** / 2003 37.5。
+//    对照：g1b 50.12% / 67.1% / 1923 / stop 44.9；g0 61.75% / 78.0% / 1842 / stop 10.1；
+//    God inner-K=10 90.0%。配对 McNemar（同 800 seed）：g1c-only 204 / g1b-only 166，
+//    **+4.75pp，p=0.0543**（边缘，未达 0.05）。
+// ③ ★ hold 拆分（100 局 probe，20,669 决策）：**hold 预测 37.0%**（g1b 48.4）=
+//    **被迫 26.7pp**（advance 被 `restrictAdvanceMask` 屏蔽，g1b 26.8，**没动**）+
+//    **主动 10.3pp**（g1b 21.6 ⇒ 已回到语料 11.2% 附近）。⇒ `weight_exponent 0.3`
+//    把 hold=1 权重从 4.46 压到 1.57，**精准修好主动过预测**。
+// ④ 被迫方向（g1c）：right 43.9 / down 26.3 / left 20.1 / up 9.6（g1b right 36.9 /
+//    up 27.4 / left 22.0 / down 13.7）；`freeDirHist` 3 条路 = 71.2% ⇒ 选路失败，
+//    不是围死；pf 已有 `blkF/B/L/R`，不是看不见墙 ⇒ BC 分布外状态（covariate shift）。
+// ⑤ 兜底实验（负结果，200 局同面板）：control win 51.0% / pickup 63.3% / stop 36.2% /
+//    go 66；fallback（前方被挡强制选可走方向 + 强制前进）win **43.0%（−8pp）** /
+//    pickup 69.9% / stop 8.4% / go **82** ⇒ **停有防守价值，一律不许停会送死**。
+// ⑥ 判词：**hold 头结案**（主动 21.6→10.3，已对齐标签边缘）；胜率只 +4.76pp（边缘），
+//    剩余 6.9pp（vs g0）与 10.7pp 拾取主要来自**被迫 26.7% 的走位选路**。
+// ⑦ 后继：`g1d-4s2e`（DAgger：学生状态 + God 标注，混合语料 182,172 样本，
+//    DAgger 占 34%）。判据：被迫 hold 26.7% → <15%、win >54.88%、pickup >67.3%。
+// 产物：`nn-training/weights/g1c-4s2e/{weights.json, g1c-4s2e.it1.20261112-170444.json}`；
+//   `tmp/o2-analysis/g1c-4s2e-eval-800.jsonl`；`tmp/hold-probe-g1c/`（probe 明细）；
+//   `tmp/hold-fallback/`（兜底对照）。

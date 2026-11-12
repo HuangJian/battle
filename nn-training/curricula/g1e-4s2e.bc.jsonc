@@ -1,0 +1,87 @@
+// BC 课程 g1e-4s2e —— DAgger v2：只采被迫帧 + 10% 混合（2026-11-12）
+//
+// 状态：**已停课**（2026-11-12，ep13/60，无交付；同数据已被 g1f 覆盖）
+// 依据：g1d（DAgger v1：全量学生状态 34% 混合）满池 34.38%，比 g1c 低 20.5pp；
+//   probe 被迫 hold 26.7→48.0、被迫方向 up 70.6%、fire2 11.5%（BC 6.5%）⇒
+//   「只标注不执行 + 过采样坏状态 + 开火分布翻倍」三个实现错误。
+//
+// ══ 0. v2 只改三处 ════════════════════════════════════════════════════════
+//   ① **只采被迫帧**：`export-dagger-labels.ts --keep-forced`（学生选的 move 方向
+//      前方 1 格不可走）。全量 800 局只出 **55,477** 样本（v1 是 211,840）。
+//   ② **混合比例 10%**：`tmp/g1e-4s2e-corpus` = BC 800 shards（119,880）+
+//      forced 每关 48 seed 共 192 shards（~13.3k）⇒ DAgger 占 ~10%。
+//   ③ 训练同 g1c：60/20/5、`weight_exponent 0.3`、v6+pf、course_env eval。
+//      新 out/traj/backup（§15.5，禁续跑 g1d）。
+//
+// ══ 1. 判据 ═══════════════════════════════════════════════════════════════
+//   先看**被迫 hold 不升**（g1c 26.7%，g1d 48.0%；目标 ≤30%），再看满池
+//   win ≥ g1c 54.88%、pickup ≥ 67.3%、Steel Fortress 不崩（g1c 49.0%，g1d 6.5%）。
+//   若被迫仍升，说明「被迫帧的 God 标注」本身在教学生停（God 也认为该停）——
+//   那就不是数据比例问题，而是「被迫停有时是正确防守」，需要 β-混合执行而不是加数据。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1e-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1e-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "patience": 20,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "weight_exponent": 0.3,
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1e-4s2e/weights.json",
+  "traj": "tmp/g1e-4s2e",
+  "data_dir": "tmp/g1e-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1e-4s2e",
+  "backup_prefix": "g1e-4s2e",
+}
+
+// ── 停课记录（2026-11-12，ep13/60，无交付）─────────────────────────────────
+// ① 立项：g1d（全量学生状态 34% 混合）34.38% 后，只采「被迫」帧 + 10% 混合，
+//    仍随机起点、60 epoch。
+// ② 实际：开课后跑到 **ep13/60** 被停（用户 19:26 指出应从 g1c warm start；
+//    g1f 已覆盖「同数据 + warm start」）；**无结课权重、无满池读数**。
+// ③ 判词：未形成可判决读数；同数据的 g1f（20 ep，warm start）满池 ep10 43.38% /
+//    ep20 38.62%，仍输 g1c 54.88% ⇒ 停课正确，不要复活。
+// ④ 后继：g1f（warm start）/ g1g（β 混合执行）/ g1c+joint（推理联合 argmax）。
+// 账本：`tmp/g1e-4s2e/training_log.jsonl`（bc_epoch 到 ep13）。

@@ -13,12 +13,13 @@
  * (b) cuts inference count ~10x vs running every tick.
  */
 
-import type { Direction } from '../constants'
+import { CELL, type Direction } from '../constants'
 import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
 import { ObsEncoder, computeMasks, restrictAdvanceMask } from './obs-encoder'
 import { decodeMove } from './action-space'
-import { HOLD_DIM, decodeMove4 } from './action-space-v6'
+import { HOLD_DIM, MOVE4_DECODE, decodeMove4 } from './action-space-v6'
+import { corridorCells, nearestEnemyDistPx, nearestPickupCenter } from './danger-metrics'
 import {
   createDecisionGateConfig,
   createDecisionGateState,
@@ -48,6 +49,13 @@ export interface NNInputOptions {
    * **判决链与部署链必须同值**（tools/sim/eval-game-parity.test.ts 钉住）。
    */
   decisionEvents?: boolean
+  /**
+   * 推理道具偏置（2026-11-12）：>0 且「道具在 `pickupRadius` 格内、最近敌车 >
+   * `enemyClearCells` 格」时，给朝道具的 move logits 加这么多分。默认 0 = 关。
+   */
+  pickupBias?: number
+  pickupRadius?: number
+  enemyClearCells?: number
 }
 
 // ---- module-level model cache (one load per process / per worker thread) ----
@@ -116,6 +124,11 @@ export class NNInput implements InputLike {
   /** B1 v6: only meaningful when `usesHoldFire3()` is true. */
   private holding = false
   private fireBeforeTurn = false
+  // 推理道具偏置（默认 0 = 旧行为逐字节不变）
+  private pickupBias: number
+  private pickupRadius: number
+  private enemyClearCells: number
+  private readonly puCenter = new Float64Array(2)
 
   // A decision is committed (and holds until the next due tick). Only the lazy
   // fallback for callers that never reset()/endFrame() decides on read.
@@ -126,6 +139,26 @@ export class NNInput implements InputLike {
     this.model = loadModel(opts)
     this.K = opts.decisionK ?? 10
     this.gateCfg = createDecisionGateConfig(opts.decisionEvents === true, this.K)
+    this.pickupBias = opts.pickupBias ?? 0
+    this.pickupRadius = opts.pickupRadius ?? 2
+    this.enemyClearCells = opts.enemyClearCells ?? 4
+  }
+
+  /** 道具偏置方向（0..3）；不满足「近且无敌人/可走」⇒ -1。 */
+  private pickupBiasIdx(): number {
+    if (this.pickupBias <= 0) return -1
+    const p = this.world.player
+    if (!p || !p.alive) return -1
+    const d = nearestPickupCenter(this.world, this.puCenter)
+    if (d < 0 || d > this.pickupRadius) return -1
+    if (nearestEnemyDistPx(this.world) <= this.enemyClearCells * CELL) return -1
+    const dx = this.puCenter[0] - (p.x + p.w / 2)
+    const dy = this.puCenter[1] - (p.y + p.h / 2)
+    const dir: Direction =
+      Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up'
+    const idx = MOVE4_DECODE.indexOf(dir)
+    if (idx < 0) return -1
+    return corridorCells(this.world, p, dir, 1) > 0 ? idx : -1
   }
 
   /** 决策门读数（Δt/事件计数；测试与部署诊断用；只读）。 */
@@ -247,15 +280,45 @@ export class NNInput implements InputLike {
 
     if (v6) {
       // --- B1 v6: hold(2) / move(4) / fire(3) ---
+      // F3（2026-11-12）：(move, hold) 联合 argmax。旧实现先 argmax(move) 再掩 hold，
+      // 在「hold 头想前进、top-1 move 是墙」时会白掉一拍；联合 argmax 只在
+      // hold=0 合法（前方 1 格可走）时参与比较，等价于因子化策略的真 argmax。
       const mv = this.model.moveLogits
-      let bestMove = 0
-      for (let i = 1; i < 4; i++) if (mv[i] > mv[bestMove]) bestMove = i
-      this.moveDir = decodeMove4(bestMove)
-      // 朝向/转向不受地形限制；只限制「向这个方向前进」。先选 move 再定 hold 掩码。
-      restrictAdvanceMask(w, bestMove, masks)
+      // 推理道具偏置：只在「近且无敌人 + 该方向可走」时加分；默认 0 不复制。
+      let moveScores = mv
+      const biasIdx = this.pickupBiasIdx()
+      if (biasIdx >= 0) {
+        moveScores = Float32Array.from(mv)
+        moveScores[biasIdx] += this.pickupBias
+      }
       const hv = this.model.holdLogits
-      // hold[0] 被掩 ⇒ 必须 turn-only；否则按原 argmax（tie 保持 advance）。
-      this.holding = hv ? masks.hold[0] !== 1 || hv[1] > hv[0] : false
+      const p = w.player
+      if (hv && p) {
+        let best = -Infinity
+        let bestMove = 0
+        let bestHold = 0
+        for (let m = 0; m < 4; m++) {
+          const advanceOk = corridorCells(w, p, MOVE4_DECODE[m], 1) > 0
+          for (let h = 0; h < 2; h++) {
+            if (h === 0 && !advanceOk) continue
+            const s = moveScores[m] + hv[h]
+            if (s > best) {
+              best = s
+              bestMove = m
+              bestHold = h
+            }
+          }
+        }
+        this.moveDir = decodeMove4(bestMove)
+        this.holding = bestHold === 1
+      } else {
+        // 无 hold 头 / 无玩家：退化为旧行为（move argmax + 掩 advance）。
+        let bestMove = 0
+        for (let i = 1; i < 4; i++) if (moveScores[i] > moveScores[bestMove]) bestMove = i
+        this.moveDir = decodeMove4(bestMove)
+        restrictAdvanceMask(w, bestMove, masks)
+        this.holding = hv ? masks.hold[0] !== 1 || hv[1] > hv[0] : false
+      }
       const fr = this.model.fireLogits
       // Masked argmax over {0 no shot, 1 fire-before-turn, 2 fire-after-turn}.
       // fire[0] is always legal; 1/2 require the cooldown gate (masks.fire[i]).

@@ -1,0 +1,94 @@
+// BC 课程 g1f-4s2e —— g1e 的 warm-start 版：从 g1c 最佳权重续训（2026-11-12）
+//
+// 状态：**已结课**（2026-11-12，20/20 epochs；warm start + 10% forced，ep20 38.62%）
+// 背景（用户 19:26 指出）：g1d/g1e 的 `train.init_from` 都是空 ⇒ 从随机权重重新
+//   BC，而不是从 g1c 最佳权重 warm start。g1c 本身也是随机起点（与 g1b 同
+//   `train_seed=1234` ⇒ 同初始化，所以 g1b→g1c 的「只改 weight_exponent」对照成立）；
+//   但 g1d/g1e 是「在 g1c 之上加 DAgger」的腿，从随机起会把 g1c 已学会的策略
+//   冲掉，且 60 epoch 从零训练是在重复买 g1c 已经买到的东西。
+//
+// ══ 0. 与 g1e 的唯一差别 ═══════════════════════════════════════════════════
+//   ① `bc` / `train.init_from` = `nn-training/weights/g1c-4s2e/weights.json`
+//      （g1c ep60 交付权重；`bc` 与 `init_from` 两侧同值，满足 §384 一致性校验）；
+//   ② `epochs 60 → 20`、`lr 0.003 → 0.001`、`patience 20 → 10`：warm start 只做
+//      DAgger 微调，不再从头学；
+//   ③ 语料 / 动作空间 / 评估与 g1e **逐字相同**（10% forced DAgger + BC 混合，
+//      v6+pf，course_env eval）；新 out/traj/backup（§15.5，禁续跑 g1e）。
+//
+// ══ 1. 判据 ═══════════════════════════════════════════════════════════════
+//   以 g1c 满池 54.88% / 67.3% 为基线：warm start + 10% forced DAgger 的目标是
+//   **只涨不跌**（被迫 hold ≤30%、win ≥54.88%、pickup ≥67.3%、Steel Fortress
+//   不崩）。若 20 epoch 微调后反而低于 g1c，说明这 10% 数据本身有害，而不是
+//   「训练不够」或「起点不对」。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1f-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "bc": "nn-training/weights/g1c-4s2e/weights.json",
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1e-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 20,
+    "patience": 10,
+    "batch": 256,
+    "lr": 0.001,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "weight_exponent": 0.3,
+    "policy_extra": true,
+    "init_from": "nn-training/weights/g1c-4s2e/weights.json",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1f-4s2e/weights.json",
+  "traj": "tmp/g1f-4s2e",
+  "data_dir": "tmp/g1f-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1f-4s2e",
+  "backup_prefix": "g1f-4s2e",
+}
+
+// ── 结课报告（2026-11-12，20/20 epochs）────────────────────────────────────
+// ① 训练：20/20；val_loss 0.715→0.673 **一直降**、move_acc .813→.822、fire .94、
+//    hold .979 —— 训练指标改善，行为更差（BC 老问题）。
+// ② 满池 800（860001）：**ep20 38.62%** / pickup 71.6% / go 329 / kills 1.04；
+//    **ep10 43.38%** / pickup 73.2% / go 287 / kills 1.12；
+//    g1c 基线 54.88% / 67.3% / 223 / 1.34。
+// ③ probe（ep20）：hold **28.7%**（g1c 37.0）、被迫 **22.3%**（g1c 26.7）、主动 6.4%。
+// ④ 判词：warm start + 10% forced 买到「敢动」（pickup +5.9pp、stop −6.2pp），
+//    但 gameover +64、kills −0.22、win −11.5pp；ep10 > ep20 ⇒ 过训；最好点仍输 g1c。
+// ⑤ 后继：g1g（β 混合执行）、**g1c+joint（联合 argmax，held-out 70.5%）**。
+// 产物：`nn-training/weights/g1f-4s2e/`；`tmp/o2-analysis/g1f-4s2e-eval-800.jsonl`、
+//   `g1f-ep10-eval-800.jsonl`。
