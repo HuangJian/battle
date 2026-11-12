@@ -150,6 +150,12 @@ class BcEvalBlock(BaseModel):
     #: 评估地图（关卡引用；多张图各自出结果，控制台分图展示）
     levels: list[str] = []
 
+    #: **直接继承课程环境**（2026-11-12）：True ⇒ 忽略 `levels`，用课程自己解析后的
+    #: stage 集与四类覆盖（`stage_select` / `enemies` / `lives` / `star` + `max_ticks`），
+    #: 与训练语料逐字同源。只支持 `course.stages` 为 list 的课程（range 型没有逐关
+    #: stageJson，云端会把 stage 号当真实关跑）。与 `levels` 同时配置 ⇒ 加载时拒。
+    course_env: bool = False
+
     @field_validator("every_epochs", "games_per_stage")
     @classmethod
     def _nonneg(cls, v: int) -> int:
@@ -157,9 +163,22 @@ class BcEvalBlock(BaseModel):
             raise ValueError("eval 计数类字段必须 ≥ 0")
         return v
 
+    @model_validator(mode="after")
+    def _course_env_excludes_levels(self) -> BcEvalBlock:
+        """两份关集事实不可同时存在（否则 eval 面板说不清是课程还是关卡文件）。"""
+        if self.course_env and self.levels:
+            raise ValueError(
+                "eval.course_env=true 与 eval.levels 互斥：课程环境已含关集，不要另写 levels"
+            )
+        return self
+
     @property
     def enabled(self) -> bool:
-        return self.every_epochs > 0 and bool(self.levels) and self.games_per_stage > 0
+        return (
+            self.every_epochs > 0
+            and self.games_per_stage > 0
+            and (bool(self.levels) or self.course_env)
+        )
 
 
 class BcTrainBlock(BaseModel):
@@ -433,6 +452,21 @@ class BcCourseConfig(BaseModel, CustomStagesMixin):
                 "bc 与 train.init_from 不一致："
                 f"bc={bc!r}（{bc_path}） vs train.init_from={init!r}（{init_path}）；"
                 "两者必须指向同一权重文件（BC 课可只写 train.init_from）"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _course_env_requires_stages_list(self) -> BcCourseConfig:
+        """`eval.course_env` 只对 list 型 stages 生效（range 型没有逐关 stageJson）。
+
+        range 型课程（`stages: "0-34"`）的 stage 号是真实关号，云端 `mode=eval` 会按
+        `STAGES[stage]` 跑，课程的四类覆盖（enemies/lives/star）在关卡文件里根本没生效
+        ⇒ 静默跑错面板。这里 fail-closed。
+        """
+        if self.eval.course_env and not isinstance(self.stages, list):
+            raise ValueError(
+                "eval.course_env=true 需要课程 stages 是 list（自定义关/挑关后）；"
+                f"当前 stages={self.stages!r} 是范围串，云端会按真实关号跑、丢掉环境覆盖"
             )
         return self
 

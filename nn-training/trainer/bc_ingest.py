@@ -189,6 +189,8 @@ def run_epoch_eval(
             # B4：课程声明的面板与实际关卡值并存入行，跨面板不可相减。
             course_max_ticks=int(course.max_ticks),
             cfg=cfg,
+            course=course,
+            course_env=bool(course.eval.course_env),
             log=log,
         )
         append_ledger(jsonl_path, {"event": "bc_eval", "it": int(it), **result})

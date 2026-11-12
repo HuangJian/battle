@@ -62,14 +62,22 @@ def build_eval_panel(
     games_per_stage: int,
     stages: int,
     course_max_ticks: int | None = None,
+    source: str = "levels",
+    stage_ids: list[int] | None = None,
+    enemies: list[int] | None = None,
 ) -> dict[str, Any]:
     """eval 行/面板的**面板口径**（B4，2026-11-05）：max_ticks / lives / games / seed0。
 
     课程顶层 `max_ticks` 不进这条链（每图用自己关卡文件的值），所以读数**禁止跨面板相减**；
     两个值都写进去，漂移在面板上可见，而不是靠人记。`seed0` 固定 1（每 stage 的 seed 从 1 起）。
+
+    2026-11-12：加 `source`（`course` = 继承课程环境 / `levels` = 关卡文件）、
+    `stage_ids`（实际被评的关；eval 的 2000+i 与训练的 2000+i 可能同号不同关）、
+    `enemies`（课程 stages 的 count 集合）。跨面板分析先看这三个键。
     """
-    return {
+    panel = {
         "level": level_name,
+        "source": str(source),
         "max_ticks": int(max_ticks),
         "course_max_ticks": None if course_max_ticks is None else int(course_max_ticks),
         "difficulty": str(difficulty),
@@ -78,6 +86,11 @@ def build_eval_panel(
         "seed0": 1,
         "stages": int(stages),
     }
+    if stage_ids is not None:
+        panel["stage_ids"] = [int(s) for s in stage_ids]
+    if enemies is not None:
+        panel["enemies"] = [int(n) for n in enemies]
+    return panel
 
 
 def _ratio(num: float, den: float) -> float | None:
@@ -184,9 +197,19 @@ def dispatch_bc_eval(
     course_max_ticks: int | None = None,
     cfg: dict | None = None,
     nodes: list[dict] | None = None,
+    course: Any | None = None,
+    course_env: bool = False,
     log=lambda msg: print(msg, flush=True),
 ) -> dict:
-    """把一份 BC 权重在 eval.levels 各图上跑干净评估并聚合。
+    """把一份 BC 权重在 eval 图上跑干净评估并聚合。
+
+    两种图源（2026-11-12）：
+      - `course_env=False`（默认）：`eval_levels` 的关卡文件，各图用自己关卡文件的
+        stages/difficulty/max_ticks/player（旧行为，逐字不变）。
+      - `course_env=True`：直接继承**课程**解析后的 stage 集与环境覆盖
+        （`course.stage_ids` / `course.max_ticks` / `course.difficulty` /
+        `course.player.lives|level`），与训练语料同源；`eval_levels` 被忽略。
+        仅支持 `course.stages` 为 list 的课程（`BcEvalBlock` 加载时已拒 range 型）。
 
     返回 {"epoch", "wver", "levels": [{level, n, wins, win_rate, kills_mean,
     phits_mean, pickup_mean, timeout_frac, score_mean, mean_ticks, failed,
@@ -229,11 +252,46 @@ def dispatch_bc_eval(
 
     level_rows: list[dict[str, Any]] = []
     t0 = time.time()
-    for level_name in eval_levels:
-        lvl = load_course(str(resolve_level(level_name)))
+    sources: list[dict[str, Any]] = []
+    if course_env:
+        if course is None:
+            raise BcEvalError("course_env=true 但未传 course（调用点漏透传）")
+        sources.append(
+            {
+                "name": str(getattr(course, "name", "") or "course"),
+                "stage_ids": list(course.stage_ids),
+                "stage_json": course.custom_stage_payload,
+                "max_ticks": int(course.max_ticks),
+                "difficulty": str(course.difficulty),
+                "lives": course.player.lives,
+                "level": course.player.level,
+                "enemies": sorted(
+                    {int(s.get("count") or 0) for s in course.stages if isinstance(s, dict)}
+                ),
+                "kind": "course",
+            }
+        )
+    else:
+        for level_name in eval_levels:
+            lvl = load_course(str(resolve_level(level_name)))
+            sources.append(
+                {
+                    "name": level_name,
+                    "stage_ids": list(lvl.stage_ids),
+                    "stage_json": lvl.stage_json,
+                    "max_ticks": int(lvl.max_ticks),
+                    "difficulty": str(lvl.difficulty),
+                    "lives": getattr(lvl.player, "lives", None),
+                    "level": getattr(lvl.player, "level", 0),
+                    "enemies": None,
+                    "kind": "levels",
+                }
+            )
+    for src in sources:
+        level_name = str(src["name"])
         tasks: list[tuple[int, int]] = [
             (stage, seed)
-            for stage in lvl.stage_ids
+            for stage in src["stage_ids"]
             for seed in range(1, int(games_per_stage) + 1)
         ]
         rows: list[dict[str, Any]] = []
@@ -259,14 +317,14 @@ def dispatch_bc_eval(
                         wver=wver,
                         stage=stage,
                         seed=seed,
-                        max_ticks=int(lvl.max_ticks),
-                        difficulty=str(lvl.difficulty),
-                        timeout=max(120.0, float(lvl.max_ticks) * 0.5 + 120.0),
+                        max_ticks=int(src["max_ticks"]),
+                        difficulty=str(src["difficulty"]),
+                        timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
                         mode="eval",
                         policy="nn",
-                        stage_json=lvl.stage_json(stage) or "",
-                        lives_override=lvl.player.lives,
-                        player_level=lvl.player.level,
+                        stage_json=src["stage_json"](stage) or "",
+                        lives_override=src["lives"],
+                        player_level=src["level"],
                     )
                     reason = validate_eval_result(manifest, wver)
                     if reason:
@@ -322,9 +380,9 @@ def dispatch_bc_eval(
 
         ok_rows = [r for r in rows if not r.get("failed")]
         failed = len(rows) - len(ok_rows)
-        if course_max_ticks is not None and int(lvl.max_ticks) != int(course_max_ticks):
+        if course_max_ticks is not None and int(src["max_ticks"]) != int(course_max_ticks):
             log(
-                f"[bc-eval] {level_name}: 面板 max_ticks={int(lvl.max_ticks)} ≠ 课程声明 "
+                f"[bc-eval] {level_name}: 面板 max_ticks={int(src['max_ticks'])} ≠ 课程声明 "
                 f"{int(course_max_ticks)}——行内 panel 已记两个值，禁止与别的面板相减"
             )
         agg = aggregate_eval_rows(ok_rows)
@@ -334,12 +392,15 @@ def dispatch_bc_eval(
                 "failed": failed,
                 "panel": build_eval_panel(
                     level_name=level_name,
-                    max_ticks=int(lvl.max_ticks),
-                    difficulty=str(lvl.difficulty),
-                    lives=getattr(lvl.player, "lives", None),
+                    max_ticks=int(src["max_ticks"]),
+                    difficulty=str(src["difficulty"]),
+                    lives=src["lives"],
                     games_per_stage=int(games_per_stage),
-                    stages=len(lvl.stage_ids),
+                    stages=len(src["stage_ids"]),
                     course_max_ticks=course_max_ticks,
+                    source=str(src["kind"]),
+                    stage_ids=list(src["stage_ids"]),
+                    enemies=src.get("enemies"),
                 ),
             }
         )

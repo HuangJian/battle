@@ -77,6 +77,8 @@ def test_panel_records_both_ticks_declarations() -> None:
     )
     assert p == {
         "level": "arena6",
+        # 2026-11-12：panel 加 source（levels=关卡文件 / course=继承课程环境）
+        "source": "levels",
         "max_ticks": 36000,
         "course_max_ticks": 20000,
         "difficulty": "hard",

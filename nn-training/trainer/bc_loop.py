@@ -585,14 +585,16 @@ def train_local_bc(
                             log(f"[run_bc] it{it} ep{gepoch}: 本地 eval（ckpt 权重）")
                             try:
                                 result = dispatch_bc_eval(
-                                    weights_bytes=ckpt.read_bytes(),
-                                    eval_levels=list(course.eval.levels),
-                                    games_per_stage=int(course.eval.games_per_stage),
-                                    it=it,
-                                    epoch=gepoch,
-                                    cfg=cfg,
-                                    log=log,
-                                )
+                                weights_bytes=ckpt.read_bytes(),
+                                eval_levels=list(course.eval.levels),
+                                games_per_stage=int(course.eval.games_per_stage),
+                                it=it,
+                                epoch=gepoch,
+                                cfg=cfg,
+                                course=course,
+                                course_env=bool(course.eval.course_env),
+                                log=log,
+                            )
                                 if jsonl_path is not None:
                                     append_ledger(
                                         jsonl_path, {"event": "bc_eval", "it": int(it), **result}

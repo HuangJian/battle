@@ -1,0 +1,144 @@
+// BC 课程 g0-4s2e —— g 系列起点：God AI 语料 BC 单元探针（2026-11-12）
+//
+// 状态：**已结课**（2026-11-12，80/80 epochs，无早停；接棒者 `g1-4s2e` = v6 三头 + 真 pf）
+// 依据：用户 2026-11-12 09:49「开始 2敌/4关/800 局 bc」；10:17「不要本地跑训练，没有显卡！
+//   开个 bc 课程，我开云机 gpu worker 来接活」；10:26「课程命名改为 g 系列，改名为 g0-4s2e
+//   （4 stages, 2 enemies）；epochs 40 够不够？不 eval 怎么判断有没有学会？」。
+//
+// ══ 0. 命名规则（g 系列，2026-11-12 起）══════════════════════════════════
+//   `g<代>-<N>s<M>e` = N stages / M enemies。g0 = 这条 God-AI-BC 能力线的起点，
+//   后续课程接 g1-…。旧名 `bc-p0-godai` 已废弃，不再新建同族名字。
+//
+// ══ 1. 这一课判什么 ══════════════════════════════════════════════════════
+//   判「BC 能不能把 God AI 动作从 NN 的 obs 里学出来」：BC 每步有监督标签、没有信用
+//   分配问题 ⇒ BC 学不会 = 表征/观测缺信息；BC 会而 PPO 不会 = 训练法问题。
+//   God AI 同面板读数（97.75% / 98.5% / clearT 1182）只作观察线，不写进判据（§0.2 四禁令）。
+//
+// ══ 2. 语料：fixed，不重新采集 ═════════════════════════════════════════════
+//   `tmp/bc-p0-godai`（目录名保留，已产出的 800 局不因课程改名而断链）= 800 局 / 123,992
+//   决策样本：`export-godai-labels.ts --stage-json-file tmp/god-o2-four-stages.json
+//   --stages 2000-2003 --seeds 860001-860200 --difficulty hard --max-ticks 3000
+//   --lives-override 1 --player-level 0 --wins 0 --near-miss-times 0`。
+//   `corpus.source=fixed` ⇒ 不派采集；`publish_job(kind=bc)` 把 shard 打进 payload 随
+//   code.zip 下发云机 GPU worker，**不需要手工搬语料**。
+//
+// ══ 3. 为什么 epochs 是 80 不是 40（用户 10:26 问）════════════════════════
+//   按 update 数算：124K 样本 / batch 256 = 484 steps/epoch；40 epochs ≈ 19.4K updates。
+//   对照 `bc-v6-train`：447K 样本 / 256 × 80 ≈ 139K updates（GPU 2.7h）。
+//   本课 80 epochs ≈ 38.7K updates，仍只有 v6 的 28%，但 73K 参数 + 124K 样本的容量匹配
+//   （历史 BC 样本带 40–120K）⇒ 80 是「不设人为上限、让早停决定」的选择，不是保证。
+//   `patience=10` 按滑动平均 val_loss（window=5）早停；单点新低不算（fire 头噪声大）。
+//   `ckpt_every=10` 存中途 ckpt，便于切片诊断（bc-v6 的教训：交付权重 ep18、账本报 ep80）。
+//
+// ══ 4. 怎么判断「学会」——三层，缺一不可（用户 10:26 问）══════════════════
+//   ① **训练读数（过程哨兵，不是判决）**：val_loss 平台 + move/fire acc 显著高于多数基线
+//      （majority CE 全量 move=1.1851 / fire=0.0607）。⚠ bc-v6 先例：val .735「健康」但
+//      行为门只过一半 ⇒ val acc **不能**单独判学会。
+//   ② **课程内 eval（继承课程环境）**：`eval.course_env: true` —— 直接用课程解析后的
+//      4 关 + 2 敌 / 1 命 / 0 星 / hard / 3000 拍（`apply_level_file` 的产物），与训练
+//      逐字同源；不写 levels、不引 tmp、不新建 levels。每 10 epoch 4 关 × 50 局 = 200 局
+//      （seed 1..50，与训练语料 860001..860200 不重叠）。`sentinel_only=true`：周期 eval
+//      是哨兵，最终判决仍认 ③ 的离线 200/800 局行为门。
+//   ③ **离线满池判决（训练结束后）**：`eval-course-ckpt.ts --policy nn --games 800
+//      --seed0 860001` 在 `tmp/god-o2-four.jsonc` 上跑，与 God AI 同 (stage,seed) 逐局配对；
+//      这是唯一能回答「与教师差多少」的面板（禁前缀子集、面板名必须一起报）。
+//   ⇒ 「学会」的最低门槛（观察，不是 DoD）：②的 win 曲线显著高于多数动作基线、
+//      pickup 显著 >0、clearT 不随 epoch 发散；③的 800 局 win 与 God AI 差距 <10pp。
+//      达不到 ⇒ 先查表征（GAP/pf/obs 口径），不是加 epoch。
+//
+// ══ 5. ⚠ 语料的两个已知口径（别拿它训部署网络）══════════════════════════
+//   ① legacy 5/2 头（导出器只写 actions(N,2)/masks(N,7)，无 a_hold.npy）⇒ `action_v6=false`。
+//   ② `extra.npy` 全 0 占位（legacy 不产 POLICY_EXTRA(57)，npyio 要求文件存在；说明见
+//      `tmp/bc-p0-godai/_P0_EXTRA_PLACEHOLDER.txt`）⇒ `policy_extra=false`，占位不进梯度。
+//      **结论只判「不含 pf 的主干表征链」**，不外推到部署权重（policyExtra=true，pf/hidden=12~27×）。
+//
+// ══ 6. 血缘 / 纪律 ═══════════════════════════════════════════════════════
+//   新 out/traj/backup 命名空间（§15.5 新实验）；决策索引
+//   `DECISIONS.md §2026-11-12-goalnn-bc-p0-open`（ID 保留历史，正文已记改名）。
+//   教师语料只作存在性证明，不判可学性 / 不定 DoD / 不评难度 / 不设计梯度（§0.2 四禁令）。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g0-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  // 环境语义归关卡文件；四类覆盖 + max_ticks 是 BC/RL 共用规则（course_resolve §49）。
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": false,
+
+  "corpus": {
+    "source": "fixed",
+    // 语料目录保留原名（已产出 800 局，改名只制造断链）；课程/权重/账本全部用 g0-4s2e。
+    "fixed_dir": "D:/github/battle2/tmp/bc-p0-godai",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 80,
+    "patience": 10,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto",
+    "policy_extra": false,
+    "init_from": "",
+  },
+
+  "eval": {
+    // 直接继承课程环境（2026-11-12）：4 关 / 2 敌 / 1 命 / 0 星 / hard / 3000 拍，
+    // 与训练语料逐字同源。不写 levels、不引 tmp、不新建 levels 文件。
+    // eval 在 hub/trainer 侧解析（worker/bc_eval.py），派 mode=eval 给采样节点；
+    // GPU 训练 worker 不参与。每 10 epoch：4 关 × 50 局 = 200 局（seed 1..50）。
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g0-4s2e/weights.json",
+  "traj": "tmp/g0-4s2e",
+  "data_dir": "tmp/g0-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g0-4s2e",
+  "backup_prefix": "g0-4s2e",
+}
+
+// ── 结课报告（2026-11-12，80/80 epochs，无早停）─────────────────────────────
+// ① 训练账：val_loss **1.279 → 0.778**（仍在降），move_acc .766→**.827**，
+//    fire_acc .676→**.863**；`best_val_loss 0.766 @ ep73`（交付 ep73；账本 move/fire
+//    报 ep80 是 history[-1] 的旧口径，非交付权重）。80 epoch 全程 ~30s/epoch（云机 GPU）。
+// ② 课程内 eval（`course_env`：4 关 / 2 敌 / 1 命 / 3000 拍，seed 1..50，200 局/点）：
+//    win 51.0 / 63.0 / 59.5 / 57.5 / 67.5 / 63.5 / 56.5 / 61.5%（**摆动、无趋势**）；
+//    拾取 67.1→74.1→67.5→71.3→73.1→74.9→79.0→**81.5%**（单调爬升）；
+//    timeout 26.5→11.0%；clearT 2077→1780。ep80 eval 61.5% 与满池 61.75% 一致 ⇒ eval 可信。
+// ③ 满池 800 局（seed 860001..860200，与 God 同面板）：**win 494/800 = 61.75%**、
+//    拾取 **78.0%**、clearT **1842**、gameover 218、timeout 93；
+//    God AI 同面板 97.75% / 98.5% / 1182（go17/to1）⇒ **−36.0pp / −20.5pp / +660 拍**。
+//    分关：Crossroads 83.5 / Oasis 57.5 / **Steel Fortress 48.0** / Brickworks 58.0。
+// ④ K 消融（同权重、同 800 局）：K=5 **63.00%** / K=10 61.75% / K=20 61.12%
+//    ⇒ ±1.25pp（800 局 CI≈±3.4pp，噪声内）。God 自身全 35 关（2100 局）：
+//    K=1 95.86% / K=10（inner think 也按 K）**90.00%** ⇒ K 是 **5.9pp 执行税**，不是 28pp 差距的主因。
+// ⑤ 判词：**拾取链路通（78% vs 语料 0.96 个/局），胜率没学会（61.75%）**。
+//    gameover 218 局（27%）vs God 17 局 ⇒ 缺的是战斗/走位/承伤/清场节奏，不是「不会捡」；
+//    val_loss 一直降而 win 不涨（bc-v6 同型）：分布内拟合 ≠ 行为提升。
+// ⑥ 边界：legacy 5/2 头、`policyExtra=false`（`extra.npy` 全 0 占位）⇒ 只判「不含 pf 的主干
+//    表征链」，**不是部署权重**；结论不可直接外推到 v6+pf 的部署网络。
+// ⑦ 后继：`g1-4s2e`（v6 三头 + 真 pf + God inner-K=10 语料；教师上限按 90% 看）。
+// 产物：`nn-training/weights/g0-4s2e/{weights.json, g0-4s2e.it1.20261112-114729.json}`；
+//   `tmp/o2-analysis/g0-4s2e-bc-eval-800{,-k5,-k20}.jsonl`；`tmp/g0-4s2e/training_log.jsonl`（96 行）。
