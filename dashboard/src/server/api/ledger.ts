@@ -2,6 +2,7 @@
 import { readFileSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { curriculaDir, tmpLogsDir } from '../../core/paths'
+import { missingEpochs } from '../../web/view'
 import type { BcPointerView, CourseEdit } from '../../web/view'
 import { readCourseTail } from './course-source'
 
@@ -132,18 +133,22 @@ function bcSegmentStart(lines: string[]): number {
 
 /** BC 课的进度指针（侧栏「最近训练」与顶部 pill 的读数；2026-11-12 用户口径）。
  *
- *  `epoch` = 段内 `bc_epoch` 的最大 epoch（= 面板曲线的右端，两处同一个数）；
+ *  `epoch` = 段内 max(`bc_epoch`.max, `bc_round_completed.epochs_completed`)；
  *  `total` = 最近一条 `run_start` 声明的 `epochs`（课程总 epoch；旧账本没这个键 ⇒ null）。
  *  读不到任何一行 ⇒ `{ epoch: null, total: null }`（不可知，**不编 0**）。
+ *
+ *  `bc_round_completed.epochs` 是课程目标（早停时仍等于上限），实际完成数在
+ *  `epochs_completed`；旧账本没有后者才回落到 `epochs`。`epochs` 本义不能用来抬指针。
  */
 export function bcPointerFromLedgerTail(lines: string[]): BcPointerView {
-  let epoch: number | null = null
+  let metricsEpoch: number | null = null
+  let completedEpochs: number | null = null
   let total: number | null = null
   const from = bcSegmentStart(lines)
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i]!.trim()
     if (!t) continue
-    let r: { event?: unknown; epoch?: unknown; epochs?: unknown }
+    let r: { event?: unknown; epoch?: unknown; epochs?: unknown; epochs_completed?: unknown }
     try {
       r = JSON.parse(t) as typeof r
     } catch {
@@ -152,11 +157,29 @@ export function bcPointerFromLedgerTail(lines: string[]): BcPointerView {
     if (!r || typeof r !== 'object') continue
     // 总 epoch 属于**这一趟 run**（run_start 写在 job_pending 之前，不在段内）。
     if (r.event === 'run_start' && typeof r.epochs === 'number' && r.epochs > 0) total = r.epochs
-    if (i < from || r.event !== 'bc_epoch') continue
-    const ep = typeof r.epoch === 'number' && Number.isFinite(r.epoch) ? r.epoch : 0
-    if (ep > 0 && (epoch === null || ep > epoch)) epoch = ep
+    if (i < from) continue
+    if (r.event === 'bc_epoch') {
+      const ep = typeof r.epoch === 'number' && Number.isFinite(r.epoch) ? r.epoch : 0
+      if (ep > 0 && (metricsEpoch === null || ep > metricsEpoch)) metricsEpoch = ep
+    } else if (r.event === 'bc_round_completed') {
+      const raw = typeof r.epochs_completed === 'number' ? r.epochs_completed : r.epochs
+      const done = typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
+      if (done > 0 && (completedEpochs === null || done > completedEpochs)) completedEpochs = done
+    }
   }
-  return { epoch, total }
+  const epoch =
+    metricsEpoch == null
+      ? completedEpochs
+      : completedEpochs == null
+        ? metricsEpoch
+        : Math.max(metricsEpoch, completedEpochs)
+  if (total == null && completedEpochs != null) total = completedEpochs
+  // 只有完成事件把指针抬高、指标行没跟上时才写这个键（旧行为逐字节不变）。
+  const metricsEpochOut =
+    completedEpochs != null && completedEpochs > (metricsEpoch ?? 0) ? metricsEpoch : undefined
+  return metricsEpochOut !== undefined
+    ? { epoch, total, metricsEpoch: metricsEpochOut }
+    : { epoch, total }
 }
 
 export function bcRowsFromLedgerTail(lines: string[]): {
@@ -322,15 +345,25 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
   pointer: BcPointerView
+  /** 按**完整** epoch 行算出的缺号；面板只渲染最后 100 行，不能用切片后的行算。 */
+  missing: number[]
   codeSnapshot: BcCodeSnapshotRow | null
 }> {
   const noPointer: BcPointerView = { epoch: null, total: null }
   if (!course) {
-    return { epochs: [], evals: [], evalEveryEpochs: null, pointer: noPointer, codeSnapshot: null }
+    return {
+      epochs: [],
+      evals: [],
+      evalEveryEpochs: null,
+      pointer: noPointer,
+      missing: [],
+      codeSnapshot: null,
+    }
   }
   let epochs: BcEpochRow[] = []
   let evals: BcEvalRow[] = []
   let pointer: BcPointerView = noPointer
+  let missing: number[] = []
   try {
     // 读历史可回退备份（plan/course-metrics-persistence §3.3 R5）。
     const tail = await readCourseTail(course, 'training_log.jsonl', 4000)
@@ -338,6 +371,9 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
     epochs = parsed.epochs.slice(-100)
     evals = parsed.evals.slice(-20)
     pointer = bcPointerFromLedgerTail(tail)
+    // 必须在 slice 之前算：150 epoch 课的面板只拿到 ep51..150，用切片行算会把
+    // 实际存在的 ep1..50 全报成缺号。
+    missing = missingEpochs(parsed.epochs, pointer.epoch ?? 0)
   } catch {
     /* 无账本 → 空态 */
   }
@@ -349,5 +385,12 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   } catch {
     /* 非 BC 课程 / 读不到 → null */
   }
-  return { epochs, evals, evalEveryEpochs, pointer, codeSnapshot: latestBcCodeSnapshot(course) }
+  return {
+    epochs,
+    evals,
+    evalEveryEpochs,
+    pointer,
+    missing,
+    codeSnapshot: latestBcCodeSnapshot(course),
+  }
 }

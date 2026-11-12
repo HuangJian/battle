@@ -73,6 +73,7 @@ from trainer.bc_round_job import (
 )
 from trainer.bc_round_job import (
     land_bc_result,
+    positive_int_or,
     prune_remote_jobs,
     train_tuning_argv,
     train_tuning_meta,
@@ -613,6 +614,8 @@ def train_local_bc(
     sizes = wj.get("sizes", {})
     metrics = {
         "epochs": epochs,
+        # 早停时 weights.json 的实际完成数（旧产物没有该键 ⇒ 回落到课程目标）。
+        "epochs_completed": int(wj.get("epochs_completed", epochs) or epochs),
         "train_samples": int(sizes.get("train", 0) or 0),
         "val_samples": int(sizes.get("val", 0) or 0),
         "best_val_loss": float(wj.get("best_val_loss", 0.0) or 0.0),
@@ -1328,15 +1331,17 @@ class BcLoop:
         rt = self.runtime
         archive_round(rt.course, rt.course_key, it, rt.out_weights, metrics, smoke=smoke)
         if not smoke:
-            recorded = metrics.get("epochs")
-            if not isinstance(recorded, int) or isinstance(recorded, bool) or recorded < 1:
-                recorded = int(rt.course.train.epochs)
+            # `epochs` 仍是课程目标（续跑/预算扩大判据）；早停的实际完成数只放进
+            # `epochs_completed`，dashboard 读它，调度器继续读 `epochs`。
+            recorded = positive_int_or(metrics.get("epochs"), int(rt.course.train.epochs))
+            completed = positive_int_or(metrics.get("epochs_completed"), recorded)
             append_ledger(
                 rt.jsonl_path,
                 {
                     "event": ROUND_DONE_EVENT,
                     "it": int(it),
                     "epochs": int(recorded),
+                    "epochs_completed": int(completed),
                     "ts": time.time(),
                 },
             )

@@ -48,8 +48,10 @@ interface BcEpochsView {
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
-  /** 本课进度指针（账本段内最大 epoch + `run_start.epochs`）——表头 `ep57/60` 的来源。 */
+  /** 本课进度指针（账本段内 max(bc_epoch, 完成事件) + `run_start.epochs`）——表头 `ep57/60` 的来源。 */
   pointer: BcPointerView
+  /** 服务端按完整 epoch 行算好的缺号（150 epoch 课也正确）；旧服务端缺省 ⇒ 面板退回本地算。 */
+  missing?: number[]
   codeSnapshot: BcCodeSnapshot | null
 }
 
@@ -58,6 +60,7 @@ const EMPTY: BcEpochsView = {
   evals: [],
   evalEveryEpochs: null,
   pointer: { epoch: null, total: null },
+  missing: [],
   codeSnapshot: null,
 }
 
@@ -280,7 +283,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
         ) : null}
         {error ? <Pill tone="r">{error}</Pill> : null}
         {(() => {
-          const gaps = missingEpochs(epochs)
+          const gaps = view.missing ?? missingEpochs(epochs)
           if (gaps.length === 0) return null
           const head = gaps.slice(0, 6).join(', ')
           return (

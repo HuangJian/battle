@@ -52,11 +52,13 @@ function seriesOf(
 }
 
 /** 缺失的全局 epoch（B8）：面板据此标「数据不全」，而不是把缺口当连续曲线画。
- *  `expected` = 课程声明的总 epoch（0 = 用已观察到的最大 epoch 当右边界）。 */
+ *  `expected` = 右边界（通常为 pointer.epoch；0 = 用已观察到的最大 epoch 当右边界）。 */
 export function missingEpochs(epochs: BcEpochRow[], expected = 0): number[] {
   const have = new Set(epochs.map((r) => r.epoch).filter((e) => e > 0))
-  if (have.size === 0) return []
-  const last = expected > 0 ? expected : Math.max(...have)
+  // 完成事件在、但逐 epoch 指标行一行都没有时，缺口是 1..expected；
+  // expected=0（进行中/旧账本）仍返回 []：没有右边界就不猜。
+  const last = expected > 0 ? expected : have.size > 0 ? Math.max(...have) : 0
+  if (last <= 0) return []
   const out: number[] = []
   for (let e = 1; e <= last; e++) {
     if (!have.has(e)) out.push(e)

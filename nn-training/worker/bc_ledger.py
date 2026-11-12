@@ -90,6 +90,8 @@ def recorded_epochs(jsonl_path: str | Path, it: int) -> int:
 
     为什么同时读两处：旧账本没有 `bc_round_completed.epochs`（G3 起才写），但滚动回传的
     `bc_epoch` 行通常齐；反过来若指标行缺失，完成事件里的 `epochs` 仍能证明该轮跑到了哪。
+    完成事件的 `epochs` 是**课程目标**（预算扩大/续跑判据）；早停的实际值在
+    `epochs_completed`，本函数刻意不读它，避免把早停误判成「预算没跑满」。
     两处都没有 ⇒ 0（调用方必须把 0 当「不可判定」，不能当「0 epoch」去重开）。
     """
     want = int(it)

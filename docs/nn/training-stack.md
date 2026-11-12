@@ -8,6 +8,39 @@
 
 ---
 
+## §72 BC 末轮 eval 兜底 + 重启补评（2026-11-12）
+
+**背景**（g1e-4s2e 报障）：设了 `eval.every_epochs` 的 BC 课，末 epoch 权重已回传，但对应
+`bc_eval` 可能没写成。两条丢失路径：① eval 只由「本拍新入账的 `bc_epoch` 行」触发——末 epoch
+的指标行没上传（隧道丢行）时，READY 即使已带权重也没有触发点；② 重启自愈把 `bc_epoch` 与
+`bc_eval` 合成一份游标，`bc_epoch` ep60 已入账、`bc_eval` 没写成 ⇒ 被当成「已评过」，此后永不补评。
+
+**实现**（`trainer/bc_ingest.py`）
+- `BcWait.evaluated_epochs`：独立记账，只从 `bc_eval` 种；`_seed_from_ledger` 分流
+  `bc_epoch → ledger_epochs`、`bc_eval → evaluated_epochs`（`last_epoch` 仍取两者最大值）。
+- `_eval_epoch_if_due`：指标增量与 READY 末轮共用一个触发点；命中 `every_epochs` 且不在
+  `evaluated_epochs` 才派 eval，派前先记账（同批重复行不会派两次）。
+- `poll_once` READY：`result.metrics.epochs_completed` 是有效整数时兜底补末边界 eval；
+  旧 result 没这个键就不猜（不拿课程 `epochs` 代替）。
+- `ingest_bc_metrics`：eval 候选改为本拍所有行（不只是新入账行），重启重放时缺 `bc_eval`
+  的边界仍会补评；`late` 只由**本拍新入账**的行种——重复行不是 backlog 补发，不能把同批
+  已正常入账的边界从候选里误删。迟到补发行本身仍只入账、不派 eval。
+
+**验证**
+- `tests/trainer/test_bc_ingest_backfill.py`：末指标行缺失时 READY 仍补 ep4（旧实现红
+  `[2] != [2,4]`）；同批重复行不取消该边界 eval。
+- `tests/trainer/test_bc_ingest_restart.py`：`bc_epoch` ep4 已入账、`bc_eval` 缺失 ⇒ 重启补评
+  （旧实现红 `[] != [4]`）；既有「重启不重放/不重评」用例仍绿。
+- 两个用例文件 8 passed；trainer + worker 的 BC 全量 199 passed / 1 skipped（paddle 缺席）；
+  ruff + mypy（905 files）绿。
+- 完整 nn gate **5971 passed / 3 skipped / 0 failed**（基线 5966，+5 条用例）。
+
+**边界**：补评依赖 hub `/epoch-weights/{epoch}` 快照存在；404 时记「本边界跳过 eval」，那是
+数据缺失而不是触发丢失。只兜末 epoch（`epochs_completed` 命中边界）；中间边界若指标行全丢，
+无法推断该 epoch 是否存在。
+
+---
+
 ## §71 BC 账本末轮 flush + fixed 源落位口径 + 拒收响亮化（2026-11-08）
 
 **背景**：三门 fixed 源课（`w1-valueonly` / `w2-pickup-ft` / `w2-pickup-heads`）没有

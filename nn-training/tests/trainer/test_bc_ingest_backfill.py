@@ -95,6 +95,49 @@ def test_late_backfill_row_is_ledgered_without_eval(
     assert wait.seen_metrics == 3
 
 
+def test_duplicate_row_does_not_cancel_same_batch_boundary_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同批重复行（ep2 在 ep3 之后重发）只是重发，不得把它从 eval 候选里误删。"""
+    ledger = tmp_path / "training_log.jsonl"
+    evaluated: list[int] = []
+
+    def fake_eval(
+        hub_url: str,
+        token: str,
+        jid: str,
+        jsonl_path: Path,
+        it: int,
+        epoch: int,
+        course: BcCourseConfig,
+        cfg: dict | None,
+        log: object,
+    ) -> None:
+        evaluated.append(epoch)
+
+    monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
+    monkeypatch.setattr(
+        hub_http,
+        "_request",
+        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 2)}).encode("utf-8")),
+    )
+
+    wait = BcWait(jid="j" * 16)
+    ingest_bc_metrics(
+        wait,
+        hub_url="http://hub",
+        token="t",
+        jsonl_path=ledger,
+        it=1,
+        course=_course(),
+        cfg=None,
+        logger=lambda _m: None,
+    )
+
+    assert evaluated == [2], "重复行不是迟到补发行；边界 ep2 的 eval 必须照派"
+    assert _ledger_epochs(ledger) == [1, 2, 3]
+
+
 def test_ready_on_first_poll_flushes_metrics_before_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -132,6 +175,54 @@ def test_ready_on_first_poll_flushes_metrics_before_audit(
     audit = [e for e in events if e["event"] == "bc_ledger_audit"]
     assert audit and audit[-1]["complete"] is True
     assert wait.seen_metrics == 3
+
+
+def test_ready_evaluates_final_epoch_when_metric_row_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """READY 时最终权重已回，但末 epoch 的 bc_metrics 行可能没到；仍要补该边界 eval。"""
+    ledger = tmp_path / "training_log.jsonl"
+    evaluated: list[int] = []
+
+    def fake_eval(
+        hub_url: str,
+        token: str,
+        jid: str,
+        jsonl_path: Path,
+        it: int,
+        epoch: int,
+        course: BcCourseConfig,
+        cfg: dict | None,
+        log: object,
+    ) -> None:
+        evaluated.append(epoch)
+
+    def request(base: str, token: str, path: str, timeout: float = 0.0):
+        if path.endswith("/result"):
+            return 200, json.dumps(
+                {"metrics": {"epochs": 4, "epochs_completed": 4}}
+            ).encode("utf-8")
+        if path.endswith("/bc-metrics"):
+            # 末行 ep4 没上传：result 已带最终权重，但没有 bc_epoch 行可当触发点。
+            return 200, json.dumps({"rows": _rows(1, 2, 3)}).encode("utf-8")
+        return 404, b"{}"
+
+    monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
+    monkeypatch.setattr(hub_http, "_request", request)
+    wait = BcWait(jid="j" * 16)
+
+    status, _ = wait.poll_once(
+        hub_url="http://hub",
+        token="t",
+        jsonl_path=ledger,
+        it=1,
+        course=_course(),
+        cfg=None,
+        logger=lambda _m: None,
+    )
+
+    assert status == READY
+    assert evaluated == [2, 4]
 
 
 def test_in_order_rows_keep_evaluating_at_boundaries(

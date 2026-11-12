@@ -5659,3 +5659,28 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：BC 与 RL 共享排序/预算/停机语义；`_idle_take_bc` 只剩清单空/全被持有时的兜底。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-offline-bc-course-parity
+
+## §2026-11-12-goalnn-bc-completed-epoch-pointer（BC 完成事件区分目标与实际：dashboard 用 `epochs_completed`，调度器仍读 `epochs`）
+
+- **决定**：`bc_round_completed` 同时写 `epochs`（课程目标；续跑/预算扩大判据）与
+  `epochs_completed`（实际完成数，早停更小）；dashboard 指针取 max(`bc_epoch`, `epochs_completed`)，
+  旧账本缺新键时回落 `epochs`；`/api/bcEpochs.missing` 在 `slice(-100)` 前用完整行算。
+- **被否决**：把 `epochs` 改成实际值（会动续跑/预算语义）；只读 `bc_epoch`（g1e 末行丢失仍停
+  ep59/60）；在面板用切片后的 100 行算缺号（150 epoch 课误报 ep1..50）。
+- **后果**：完成事件多一个只读字段；`recorded_epochs` 仍读 `epochs`，调度器行为不变；
+  g1e 显示 `ep60/60`，悬停与黄 pill 保留「指标只到 ep59 / 缺 25,27,60」的诚实标注。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-completed-epoch-pointer
+
+## §2026-11-12-goalnn-bc-final-eval-backfill（BC 末轮 eval 不许漏：触发点与入账游标解耦，重启按 `bc_eval` 补评）
+
+- **决定**：`BcWait` 增独立的 `evaluated_epochs`（只由 `bc_eval` 种）；指标增量与 READY 共用
+  `_eval_epoch_if_due`，READY 用 `result.metrics.epochs_completed` 兜底末边界；重启重放行也参与
+  eval 候选（缺 `bc_eval` 才补评）；`late` 只由本拍新入账行种，重复行不得取消同批边界 eval。
+- **被否决**：继续只认「本拍新入账行」（末行丢失时没有触发点）；把 `bc_epoch` 与 `bc_eval`
+  合成一份游标（`bc_epoch` 在 ≠ eval 已写成）；READY 无条件按课程 `epochs` 评估（早停/预算扩大
+  会评一个不存在的边界）。
+- **后果**：末 epoch 权重回传后必有对应 eval（快照存在时）；重启只补缺失的边界，不重算已评边界；
+  旧 result 缺 `epochs_completed` 时行为不变。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-final-eval-backfill

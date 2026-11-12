@@ -150,12 +150,16 @@ def _archive_epoch_weights(
 
 
 def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
-    """把「**这个 job** 已经入账过哪些 epoch」从账本读回内存记账（重启自愈）。
+    """把「**这个 job** 已经入账过什么」从账本读回内存记账（重启自愈）。
 
     为什么必须有（2026-11-12，g1c-4s2e 报障）：`seen_metrics` / `ledger_epochs` 只是**内存**
     游标，trainer 一重启新会话就从 0 开始 ⇒ 下一拍把 hub `bc-metrics` 的**全量**行当成新行：
     同一个 epoch 在账本里写两次，且 `eval.every_epochs` 的每个边界**重跑 eval**
     （实测 ep10/20/30/40/50 各 200 局白算）。
+
+    ★2026-11-12 补：`bc_epoch` 只证明**指标行**已入账，不证明 eval 已写成。
+    因此两份游标分开种：`bc_epoch` → `ledger_epochs`，`bc_eval` → `evaluated_epochs`。
+    合并成一份会把「ep60 指标已入账、eval 还没写」误判成已评，重启后再也不会补评。
 
     job 身份在账本里（hub 发布时追加的 `job_pending`），而**重启不会多写一条**（同一 jid
     重认领不重发）⇒ 「最后一次指向本 jid 的 `job_pending` 之后的行」就是这个 job 的历史；
@@ -188,6 +192,7 @@ def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
     if anchor < 0:
         return
     epochs: list[int] = []
+    evaluated: list[int] = []
     last = 0
     for t in lines[anchor + 1 :]:
         t = t.strip()
@@ -197,7 +202,8 @@ def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
             row = json.loads(t)
         except ValueError:
             continue
-        if row.get("event") not in ("bc_epoch", "bc_eval"):
+        event = row.get("event")
+        if event not in ("bc_epoch", "bc_eval"):
             continue
         try:
             ep = int(row.get("epoch", 0) or 0)
@@ -205,11 +211,15 @@ def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
             continue
         if ep <= 0:
             continue
-        if ep not in epochs:
-            epochs.append(ep)
+        if event == "bc_epoch":
+            if ep not in epochs:
+                epochs.append(ep)
+        elif ep not in evaluated:
+            evaluated.append(ep)
         if ep > last:
             last = ep
     wait.ledger_epochs = epochs
+    wait.evaluated_epochs = evaluated
     wait.last_epoch = last
 
 
@@ -264,6 +274,38 @@ def run_epoch_eval(
         log(f"[run_bc] it{it} ep{epoch}: eval 异常 {type(e).__name__}: {e}")
 
 
+def _eval_epoch_if_due(
+    wait: BcWait,
+    *,
+    hub_url: str,
+    token: str,
+    jsonl_path: Path,
+    it: int,
+    epoch: int,
+    course: BcCourseConfig,
+    cfg: dict | None,
+    logger=log,
+) -> None:
+    """命中 `eval.every_epochs` 且该边界未写过 `bc_eval` 时才派 eval。
+
+    ★2026-11-12：触发点不能只认「本拍新入账的 bc_epoch 行」。末 epoch 的指标行可能
+    被隧道丢掉，但 result 已带 `epochs_completed`；重启后也可能只差 `bc_eval`。
+    两个入口（指标增量 / READY 末轮）共用本函数，`evaluated_epochs` 只由 `bc_eval` 种。
+    """
+    eval_cfg = course.eval
+    if not eval_cfg.enabled:
+        return
+    ep = int(epoch)
+    every = int(eval_cfg.every_epochs)
+    if ep <= 0 or every <= 0 or ep % every != 0:
+        return
+    if ep in wait.evaluated_epochs:
+        return
+    # 先记账再调用：同一批里重复的指标行不会把同一边界派两次。
+    wait.evaluated_epochs.append(ep)
+    run_epoch_eval(hub_url, token, wait.jid, jsonl_path, it, ep, course, cfg, logger)
+
+
 # ---- 等待（非阻塞探针 + 阻塞包装） -----------------------------------------
 
 #: 探针结论：`ready`（结果已到）/ `pending`（正常排队中）/ `transient`（网络错或 5xx，退避重问）。
@@ -293,8 +335,10 @@ class BcWait:
     idle_warned: bool = False
     #: 连续网络错/5xx 次数（退避用；404 = 正常排队，清零）。
     err_streak: int = 0
-    #: 已入账的 epoch（B8：同 epoch 重发只记一次；轮末用它做缺号审计）。
+    #: 已入账 `bc_epoch` 的 epoch（B8：同 epoch 重发只记一次；轮末用它做缺号审计）。
     ledger_epochs: list[int] = field(default_factory=list)
+    #: 已写过 `bc_eval` 的 epoch（只从 `bc_eval` 种；`bc_epoch` 存在 ≠ eval 成功）。
+    evaluated_epochs: list[int] = field(default_factory=list)
     #: 是否已经从账本种过一次（★2026-11-12：进程重启后新会话必须先自愈，见 `_seed_from_ledger`）。
     seeded: bool = False
 
@@ -356,6 +400,27 @@ class BcWait:
                         cfg=cfg,
                         logger=logger,
                     )
+                    # 末轮兜底：末 epoch 的 bc-metrics 行可能丢了，但 result 已带回实际完成数。
+                    # 只在 result 明确给 `epochs_completed` 时用，旧 result 没有该键就不猜。
+                    metrics = loaded.get("metrics")
+                    if isinstance(metrics, dict):
+                        final_epoch = metrics.get("epochs_completed")
+                        if (
+                            isinstance(final_epoch, int)
+                            and not isinstance(final_epoch, bool)
+                            and final_epoch > 0
+                        ):
+                            _eval_epoch_if_due(
+                                self,
+                                hub_url=hub_url,
+                                token=token,
+                                jsonl_path=jsonl_path,
+                                it=it,
+                                epoch=final_epoch,
+                                course=course,
+                                cfg=cfg,
+                                logger=logger,
+                            )
                     try:
                         audit = audit_bc_ledger(self.ledger_epochs, int(course.train.epochs))
                         append_ledger(
@@ -435,23 +500,23 @@ def ingest_bc_metrics(
                 # 拿新权重冒充旧 epoch 的结果比缺一行更糟。
                 late: set[int] = set()
                 dup = 0
-                #: 本拍**真的**入账了的行——eval 只认它们：已入账的 epoch（重启重放、同 epoch 重发）
-                #  在此之前的版本会在第二圈里再走一遍 ⇒ 同一个边界评两次。
-                fresh: list[dict] = []
                 for r in new_rows:
                     ep = int(r.get("epoch", 0) or 0)
                     # B8：同 epoch 重发（旧链路的 30 条重复行）只入账一次。
-                    if ep and ep in wait.ledger_epochs:
+                    dup_row = bool(ep and ep in wait.ledger_epochs)
+                    if dup_row:
                         dup += 1
-                        continue
-                    if ep:
-                        wait.ledger_epochs.append(ep)
-                    if ep and ep < wait.last_epoch:
+                    else:
+                        if ep:
+                            wait.ledger_epochs.append(ep)
+                        ledger_bc_epoch(jsonl_path, it, r)
+                        if ep:
+                            _archive_epoch_weights(hub_url, token, wait.jid, it, ep, course, logger)
+                    # 迟到判据只认**本拍新入账**的行：重复行是同 epoch 重发，不是 backlog
+                    # 补发的旧 epoch；让它进 late 会把同批里已正常入账的边界从 eval 候选里
+                    # 误删（例如 [1,2,3,2] 的第二条 ep2）。
+                    if not dup_row and ep and ep < wait.last_epoch:
                         late.add(ep)
-                    ledger_bc_epoch(jsonl_path, it, r)
-                    fresh.append(r)
-                    if ep:
-                        _archive_epoch_weights(hub_url, token, wait.jid, it, ep, course, logger)
                     if ep > wait.last_epoch:
                         wait.last_epoch = ep
                 logger(
@@ -465,14 +530,24 @@ def ingest_bc_metrics(
                         f"（ep{','.join(str(e) for e in sorted(late))}）——只入账，不派 eval"
                     )
                 if eval_cfg.enabled:
-                    for r in fresh:
+                    # ★2026-11-12：候选是**本拍所有行**，不只是本拍新入账的行。
+                    # 重启/重发时 bc_epoch 可能已在账本里（dup），但 bc_eval 可能没写成；
+                    # `_eval_epoch_if_due` 用独立的 evaluated_epochs 判重，仍会补评该边界。
+                    for r in new_rows:
                         ep = int(r.get("epoch", 0) or 0)
                         if not ep or ep in late:
                             continue
-                        if ep % int(eval_cfg.every_epochs) == 0:
-                            run_epoch_eval(
-                                hub_url, token, wait.jid, jsonl_path, it, ep, course, cfg, logger
-                            )
+                        _eval_epoch_if_due(
+                            wait,
+                            hub_url=hub_url,
+                            token=token,
+                            jsonl_path=jsonl_path,
+                            it=it,
+                            epoch=ep,
+                            course=course,
+                            cfg=cfg,
+                            logger=logger,
+                        )
     except Exception as e:
         logger(f"[run_bc] WARN 指标轮询失败（不致命）: {type(e).__name__}: {e}")
     # 无上限模式下唯一需要人介入的情形：云机没起来 ⇒ 永远等不到 epoch。

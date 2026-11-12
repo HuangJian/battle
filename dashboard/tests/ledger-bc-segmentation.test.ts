@@ -91,6 +91,16 @@ describe('bcRowsFromLedgerTail：run_start 分段', () => {
     expect(evals.map((e) => [e.it, e.epoch])).toEqual([[1, 2]])
   })
 
+  it('bc_round_completed 不参与曲线行（只认 bc_epoch / bc_eval）', () => {
+    const { epochs, evals } = bcRowsFromLedgerTail([
+      L('job_pending', { job_id: 'j', it: 1 }),
+      L('bc_epoch', { it: 1, epoch: 1, ts: 1 }),
+      L('bc_round_completed', { it: 1, epochs: 60, epochs_completed: 24 }),
+    ])
+    expect(epochs.map((e) => e.epoch)).toEqual([1])
+    expect(evals).toEqual([])
+  })
+
   it('无 run_start（旧账本/纯 local 训练）⇒ 不过滤（向后兼容）', () => {
     const { epochs } = bcRowsFromLedgerTail([
       L('bc_epoch', { it: 1, epoch: 1, val_loss: 1.5, move_acc: 0.5, ts: 1 }),

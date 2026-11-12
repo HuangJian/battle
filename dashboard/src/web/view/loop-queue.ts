@@ -117,10 +117,13 @@ export type CoursePillTone = 'g' | 'y' | 'r' | 'gray'
  *  读作进度等于没有。它的进度单位是 epoch（`bc.py`/`bc-metrics` 每个 epoch 回传一次，
  *  服务端从当天账本尾行取最大那条）。`null` 各自表示不可知，**不编 0**。 */
 export interface BcPointerView {
-  /** 已入账的最新 epoch（null = 一个都还没入账：job 刚起 / 账本还没写第一行）。 */
+  /** 进度指针：段内 max(bc_epoch.max, bc_round_completed.epochs_completed)。 */
   epoch: number | null
   /** 课程声明的总 epoch（账本 `run_start.epochs`；null = 旧账本没有这一行）。 */
   total: number | null
+  /** 完成事件把指针抬到 `epoch`，但逐 epoch 指标行只到这时（g1e：ep60 指标行丢失）。
+   *  `null` = 完成事件在、但一行 `bc_epoch` 都没有；缺省 = 两者同高，不写 tooltip。 */
+  metricsEpoch?: number | null
 }
 
 /** 课程「跑到哪了」的**读数词**（侧栏迷你读数与顶部 pill 共用这一处）。
@@ -164,6 +167,12 @@ export function pointerTitle(v: { it: number | null; bc?: BcPointerView | null }
   const total = bc.total && bc.total > 0 ? `，共 ${bc.total} 个 epoch` : ''
   if (bc.epoch == null) {
     return `BC 课还没入账任何 epoch（每个 epoch 算完回传一行 bc_epoch${total}）——不是「第 0 个」`
+  }
+  if (bc.metricsEpoch !== undefined) {
+    const base = `BC 课已结算 ep${bc.epoch}${total}`
+    return bc.metricsEpoch == null
+      ? `${base}；账本没有逐 epoch 指标行（进度取自 bc_round_completed）`
+      : `${base}；账本逐 epoch 指标只到 ep${bc.metricsEpoch}（缺 ep${bc.epoch} 一行，曲线右端少一点）`
   }
   return `BC 课已入账最新 ep${bc.epoch}${total}（进度单位是 epoch，不是轮：整段 BC 只有一张 job）`
 }

@@ -124,6 +124,61 @@ def test_restart_does_not_reingest_or_reeval_known_epochs(
     assert wait.last_epoch == 6
 
 
+def test_restart_evaluates_boundary_with_metric_row_but_no_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重启前 bc_epoch ep4 已入账、bc_eval ep4 没写成 ⇒ 重启后必须补评，不许把指标行当已评。"""
+    ledger = tmp_path / "training_log.jsonl"
+    _write(
+        ledger,
+        [
+            {"event": "job_pending", "job_id": JID, "runId": "bc-run-1", "it": 1},
+            *[
+                {"event": "bc_epoch", "it": 1, "epoch": ep, "ts": ep}
+                for ep in (1, 2, 3, 4)
+            ],
+            {"event": "bc_eval", "it": 1, "epoch": 2, "wver": "w2", "levels": [], "ts": 2},
+            {"event": "run_start", "runId": "bc-run-2", "epochs": 10},
+        ],
+    )
+    evaluated: list[int] = []
+
+    def fake_eval(
+        hub_url: str,
+        token: str,
+        jid: str,
+        jsonl_path: Path,
+        it: int,
+        epoch: int,
+        course: BcCourseConfig,
+        cfg: dict | None,
+        log: object,
+    ) -> None:
+        evaluated.append(epoch)
+
+    monkeypatch.setattr(bc_ingest, "run_epoch_eval", fake_eval)
+    monkeypatch.setattr(
+        hub_http,
+        "_request",
+        lambda *_a, **_k: (200, json.dumps({"rows": _rows(1, 2, 3, 4)}).encode("utf-8")),
+    )
+
+    wait = BcWait(jid=JID)
+    ingest_bc_metrics(
+        wait,
+        hub_url="http://hub",
+        token="t",
+        jsonl_path=ledger,
+        it=1,
+        course=_course(),
+        cfg=None,
+        logger=lambda _m: None,
+    )
+
+    assert evaluated == [4], "指标行已入账不等于 eval 已完成；缺 bc_eval 的边界必须补评"
+    assert [e["epoch"] for e in _ledger(ledger) if e["event"] == "bc_epoch"] == [1, 2, 3, 4]
+
+
 def test_new_job_starts_from_scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """换 job（新的 `job_pending`）⇒ 账本里上一份 job 的 epoch **不算数**，从 ep1 重新入账。"""
     ledger = tmp_path / "training_log.jsonl"

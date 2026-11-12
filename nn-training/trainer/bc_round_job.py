@@ -122,6 +122,13 @@ def train_tuning_argv(train: Any) -> list[str]:
     ]
 
 
+def positive_int_or(value: object, fallback: int) -> int:
+    """`value` 是 >=1 的 int 就用它（bool 不算），否则回落 `fallback`。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return int(value)
+    return int(fallback)
+
+
 def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
     """课程 `train.init_from` → 绝对路径（仓库根相对或绝对）；"" = 从随机起。
 

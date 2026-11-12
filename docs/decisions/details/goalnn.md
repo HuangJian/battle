@@ -7294,3 +7294,45 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `test_poll_path_has_no_course_input` 仍绿。
 - **违反后果**：BC 课会被 RL 课永久饿死，或云机把别的 BC 课的 job 领走（课程账本交错）；
   把 course 加回请求侧会重新绑死单进程单课程。
+
+## §2026-11-12-goalnn-bc-completed-epoch-pointer（BC 完成事件区分目标与实际：dashboard 用 `epochs_completed`）
+
+- **背景**（g1e-4s2e，2026-11-12）：ep60 指标行回传失败，账本里只有 `bc_epoch` 1..59，
+  但权重已交付 ep60；dashboard 因此停在 `ep59/60`。完成事件 `bc_round_completed` 虽有
+  `epochs=60`，它表示的是**课程目标**，不是实际完成数——早停时也会等于 60。
+- **根因**：① `bcPointerFromLedgerTail` 只读 `bc_epoch.max`；② 面板用已观察最大值当缺号右边界，
+  所以既抬不了指针，也报不出末行 ep60；③ 完成事件没有实际完成数字段，直接拿 `epochs` 无法区分
+  早停与正常完成。
+- **备选与否决**：① 把 `epochs` 改成实际值——否，`recorded_epochs` / 预算扩大还靠它判断课程目标；
+  ② 面板直接 `missingEpochs(epochs, pointer.epoch)`——否，服务端已把 `epochs` 截到最近 100 行，
+  150 epoch 课会把实际存在的 ep1..50 全报缺；③ 只读 `bc_epoch`——否，g1e 的末行已丢，指针仍错。
+- **决定**：`bc_round_completed` 保留 `epochs`（课程目标），新增 `epochs_completed`（实际完成数；
+  远端已有，本地从 weights.json 读；旧 metrics 缺键时回落 `epochs`）。dashboard 指针取
+  max(`bc_epoch.max`, `epochs_completed`)，旧账本没有新键才回落 `epochs`；`BcPointerView.metricsEpoch`
+  只在完成事件领先指标行时出现。`buildBcEpochsView` 在 `slice(-100)` 之前用完整行算 `missing`；
+  `missingEpochs([], expected>0)` 返回 1..expected，零指标行不再静默。
+- **回归**：`nn-training/tests/trainer/test_bc_loop.py`（目标/实际双字段与旧 metrics 回落）；
+  `dashboard/tests/ledger-bc-pointer.test.ts`（g1e / 早停 / 零指标 / 150 行切片）；
+  `bc-trend.test.ts`（零指标行、末行缺失）；`training-pills.test.ts`（完成态悬停）。
+- **违反后果**：早停会被读成满额，或 150 epoch 课被误报缺前 50 个；调度器如果改读新字段，
+  则早停轮会被误判成「预算没跑满」而重开。
+
+## §2026-11-12-goalnn-bc-final-eval-backfill（BC 末轮 eval 不许漏：触发点与入账游标解耦，重启按 `bc_eval` 补评）
+
+- **背景**（g1e-4s2e，2026-11-12）：设了 `eval.every_epochs`，末 epoch 权重已回传，但对应
+  `bc_eval` 可能没执行。① eval 候选只来自「本拍新入账的 `bc_epoch` 行」：末 epoch 指标行丢包时，
+  READY 已拿到权重却没有触发点；② 重启自愈把 `bc_epoch` / `bc_eval` 合成一份 `ledger_epochs`：
+  指标行在、eval 没写 ⇒ 被当成已评，永远不再补。
+- **备选与否决**：① 继续只认新入账行——否，末行丢失这一条路原样保留；② 合成一份游标——否，
+  「指标已入账」推不出「eval 已写成」（`run_epoch_eval` 失败/404 都会留下这个缺口）；③ READY
+  无条件按课程 `train.epochs` 评估——否，早停时 `epochs_completed < epochs`，会评一个不存在的边界；
+  ④ 用 `result.metrics.epochs` 兜底——否，那是课程目标不是实际完成数。
+- **决定**：`BcWait` 增 `evaluated_epochs`（只由 `bc_eval` 种）；`_eval_epoch_if_due` 统一
+  「命中边界 + 未评过才派」；`ingest_bc_metrics` 的候选改为本拍所有行（重启重放补评缺 `bc_eval`
+  的边界）；READY 仅在 `metrics.epochs_completed` 为有效整数时兜底末边界；`late` 只由本拍新入账
+  行种，重复行不得取消同批边界的 eval。
+- **证据**：修复前两个新用例分别红 `assert [2] == [2, 4]`、`assert [] == [4]`；修复后两个用例
+  文件 8 passed，trainer + worker 的 BC 全量 199 passed / 1 skipped（paddle 缺席），ruff + mypy
+  （905 files）绿。
+- **违反后果**：末 epoch 的 eval 静默丢失（权重在、指标没有），或重启后永久不补；反过来把
+  `bc_epoch` 当已评会让「已评」游标失去意义，历史缺评边界再也补不回来。

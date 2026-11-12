@@ -109,6 +109,17 @@ describe('missingEpochs（B8 数据不全）', () => {
   it('expected 右边界：末轮缺失也算（ep80 必达）', () => {
     expect(missingEpochs([ep(1), ep(2)], 4)).toEqual([3, 4])
   })
+
+  it('完成事件在、零指标行 ⇒ 1..expected 全缺（不再静默无缺口）', () => {
+    expect(missingEpochs([], 60)).toEqual(Array.from({ length: 60 }, (_, i) => i + 1))
+  })
+
+  it('g1e：指标 1..59 缺 25/27，expected=60 ⇒ 补上末行 60', () => {
+    const rows = Array.from({ length: 59 }, (_, i) => ep(i + 1)).filter(
+      (r) => r.epoch !== 25 && r.epoch !== 27,
+    )
+    expect(missingEpochs(rows, 60)).toEqual([25, 27, 60])
+  })
 })
 
 describe('evalWinByEpoch', () => {

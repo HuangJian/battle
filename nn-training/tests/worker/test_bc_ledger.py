@@ -183,6 +183,15 @@ def test_recorded_epochs_reads_metric_rows_and_completion_field(tmp_path: Path) 
     assert recorded_epochs(tmp_path / "missing.jsonl", 1) == 0
 
 
+def test_recorded_epochs_ignores_actual_completed_field(tmp_path: Path) -> None:
+    """调度器续跑判据仍用课程目标 `epochs`；早停实际值 `epochs_completed` 不得重开轮次。"""
+    p = _write(
+        tmp_path / "l.jsonl",
+        [{"event": ROUND_DONE_EVENT, "it": 1, "epochs": 60, "epochs_completed": 24}],
+    )
+    assert recorded_epochs(p, 1) == 60
+
+
 def test_last_round_reopened_is_the_latest_for_that_round(tmp_path: Path) -> None:
     p = _write(
         tmp_path / "l.jsonl",

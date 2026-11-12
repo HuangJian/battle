@@ -480,6 +480,18 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
     expect(view.pointerWord(rl)).toBe('it37')
   })
 
+  it('②f+ 完成事件抬到 ep60、指标只到 59 ⇒ 悬停说明末行缺失', () => {
+    const bc = { epoch: 60, total: 60, metricsEpoch: 59 }
+    expect(view.pointerWord({ it: 1, bc })).toBe('ep60')
+    const title = view.pointerTitle({ it: 1, bc })
+    expect(title).toContain('已结算 ep60')
+    expect(title).toContain('只到 ep59')
+    expect(title).toContain('缺 ep60')
+    expect(
+      view.pointerTitle({ it: 1, bc: { epoch: 60, total: 60, metricsEpoch: null } }),
+    ).toContain('没有逐 epoch 指标行')
+  })
+
   it('②g BC 课还没入账 epoch ⇒ `ep—`（不拿 it 充数，也不写 ep0）', () => {
     const [p] = view.coursePills({
       courses: ['g1c'],

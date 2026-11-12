@@ -360,6 +360,22 @@ def test_setup_writes_run_start_exactly_once(tmp_path: Path) -> None:
     assert starts[0]["course"] == "bc-c4-v3"
 
 
+def test_close_round_records_target_and_actual_epochs(
+    tmp_path: Path, rec: Recorder
+) -> None:
+    """`epochs` 保持课程目标（调度器读），`epochs_completed` 记实际完成数（早停更小）。"""
+    loop = _loop(tmp_path)
+    loop._close_round(1, {"epochs": 60, "epochs_completed": 24}, smoke=False)
+    loop._close_round(2, {"epochs": 60}, smoke=False)
+    done = [
+        e for e in read_events(loop.runtime.jsonl_path) if e.get("event") == ROUND_DONE_EVENT
+    ]
+    assert [(e["it"], e["epochs"], e["epochs_completed"]) for e in done] == [
+        (1, 60, 24),
+        (2, 60, 60),
+    ]
+
+
 def test_smoke_round_writes_no_run_start(tmp_path: Path) -> None:
     """冒烟轮不得污染真轮的账本语义（不写 run_start / 不写完成事件）。"""
     loop = _loop(tmp_path, smoke=True)
