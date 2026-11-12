@@ -1,0 +1,114 @@
+// BC 课程 g1b-4s2e —— g1 的 v2 重跑：修 STOP→hold 映射 + 放宽早停（2026-11-12）
+//
+// 状态：**已结课**（2026-11-12，60/60 epochs；hold 过预测 48.4% ⇒ 后继 g1c 把
+//   `weight_exponent` 降到 0.3；结课读数见文件尾）
+// 依据：g1 v1（24/80 早停）满池 37.62%，比 g0 低 24pp；诊断出两个可修的工程点：
+//   ① **STOP→hold=1 的映射不严格等价**（见下），Brickworks 关 down 39.4% / right 0% /
+//      kills 0.24 ⇒ 学生把「停」学成「原地转向下」，炮口离开敌人；
+//   ② `patience=10` 对 v6 三头 CE 太紧（g0 到 80 还在降，g1 24 就停）。
+//
+// ══ 0. STOP 语义（用户 13:23 问）═════════════════════════════════════════
+//   legacy：`getMoveDirection() === null` ⇒ `SimulationPlayer` 只置 `moving=false`，
+//   **不转向**（炮口保持已提交朝向）＝「站住且保持朝向」。
+//   v6：move 头没有 null 类；`hold=1 + move=d` = **转向到 d 但不前进**（turn-only）。
+//   ⇒ 只有 `d == 已提交朝向` 时两者物理等价；`d != 朝向` 时 v6 会原地转向，炮口跑偏。
+//   本课语料把 STOP 映射成 `hold=1 + encodeMove4(prevMoveDir ?? lastHeldDir ?? 'up')`
+//   （`prevMoveDir` = 已提交朝向），不再用「最近一次非 null 方向」。
+//
+// ══ 1. 与 g1 的差别 ═══════════════════════════════════════════════════════
+//   ① 语料：`tmp/g1b-4s2e-corpus`（重导 800 局，STOP 映射修正；其余同 g1：v6 三头 +
+//      真 pf + God inner-K=10）。
+//   ② 训练：`epochs 60` / `patience 20` / `ckpt_every 5`（v1 是 80/10/10，24 就停了）。
+//   ③ out/traj/backup 全部新命名空间（§15.5：禁续跑 g1）。
+//   镜像增强：`mirror_x` 已有 `_MOVE_FLIP_V6`（up/down 不变、left↔right），
+//   `dataset.py` 在 v6 下已启用（2026-11-05 B2）——v1 的 right 学丢不是镜像缺失。
+//
+// ══ 2. 判据 ═══════════════════════════════════════════════════════════════
+//   过程看 win/pickup/clearT + **Brickworks 分关**（v1 是 7%）；训后满池 800 局
+//   （seed 860001）与 g1/g0 对照。目标不是超 v1 的 37.62%，而是把「right 0% /
+//   down 39.4% / kills 0.24」这三个指纹拉回 g0 量级。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1b-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1b-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "patience": 20,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 5,
+    "fire_pos_weight": "auto",
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1b-4s2e/weights.json",
+  "traj": "tmp/g1b-4s2e",
+  "data_dir": "tmp/g1b-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1b-4s2e",
+  "backup_prefix": "g1b-4s2e",
+}
+
+// ── 结课报告（2026-11-12，60/60 epochs，无早停）─────────────────────────────
+// ① 训练账：60/60 跑满；课程内 eval（course_env，200 局/点）win
+//    21.0 → 31.0 → 39.5 → 45.5 → 49.0 → **58.0%**（ep60），
+//    pickup 69.4 → 68.3%，timeout 38.5 → 20.0%。权重 404,922 B（arch actionV6+
+//    policyExtra，73,668 params，head 185 = 128 hidden + 57 pf）。
+// ② 满池 800 局（seed 860001..860200）：**win 401/800 = 50.12%**、拾取 **67.1%**、
+//    clearT 1923、gameover 237 / timeout 165、kills 1.28、dmg 119。
+//    分关：2000 **69.5%** / 2001 59.5% / 2002 38.5% / 2003 **33.0%**。
+//    对照：g1（24 ep）37.62% / 67.5%；g0（legacy 80 ep）61.75% / 78.0%；God inner-K=10 90.0%。
+// ③ ★ hold 拆分（100 局 probe，19,585 决策）：**hold 预测 48.4%** =
+//    **被迫 26.8pp**（advance 被 `restrictAdvanceMask` 屏蔽）+ **主动 21.6pp**
+//    （advance 合法、hold 头仍选 1）。语料 `a_hold` 只有 11.2% turn-only
+//    ⇒ 主动过预测 ~2×；总 hold 过预测 ~4×。
+// ④ 被迫的成因：`pressedStill` 1.0%、撞墙 0.1%、`freeDirHist`
+//    0 条=0% / 2 条=28.8% / **3 条=71.2%** ⇒ **不是被围死，是选路失败**；
+//    被迫时选的 move 方向 right 36.9 / up 27.4 / left 22.0 / down 13.7。
+// ⑤ 根因：`train/bc.py:345-355` 的 hold class weight =
+//    `(total/(2*count)) ** weight_exponent`；`weight_exponent=1.0` 时
+//    hold=1 权重 **4.46×**、hold=0 0.563（相差 7.9×）——与 v6 fire 的 90:10
+//    教训同型（满额加权把正例从 9.7% 推到 23.6%），此前没给 hold 头标定。
+// ⑥ 判词：**v6+pf 第一条可部署链跑通了，但 hold 过预测压住了胜率与拾取**：
+//    48.4% 时间不前进 ⇒ 不去捡（67.1% vs g0 78.0%）、不推进清场
+//    （timeout 165 vs 93）。不是 right 方向丢失（实际 right 26.7%），也不是
+//    镜像缺失（`_MOVE_FLIP_V6` 已启用）。
+// ⑦ 后继：`g1c-4s2e`（`weight_exponent: 1.0 → 0.3`，hold=1 权重 4.46→1.57；
+//    其余逐字相同）。走位选路 26.8% 是另一条腿，本课不动训练侧。
+// 产物：`nn-training/weights/g1b-4s2e/{weights.json, g1b-4s2e.it1.20261112-141317.json}`；
+//   `tmp/o2-analysis/g1b-4s2e-eval-800.jsonl`；`tmp/hold-probe/`（100 局 probe 明细）。

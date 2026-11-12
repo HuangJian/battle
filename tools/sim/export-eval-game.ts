@@ -496,6 +496,14 @@ interface EvalResult {
     movedTicks: number
     pressedStillTicks: number
     holdTicks: number
+    /** v6 决策级 hold 拆分（2026-11-12）：被迫（advance 非法）vs 主动（hold 头选 1）。 */
+    holdDecisions: number
+    holdPredicted: number
+    holdForced: number
+    holdForcedPredicted: number
+    holdVoluntary: number
+    /** 被迫 hold 时学生选的 move 分布（v6 0..3 = up/down/left/right）——看它朝哪撞。 */
+    holdForcedMoveHist: number[]
     /** 场上有道具的 tick 数（补「捡不捡」的追击面：冲没冲 / 不敢冲）。 */
     puOnFieldTicks: number
     /** 最近道具 ≤96px（2 车半格）的 tick 数 —— 分子。 */
@@ -1020,6 +1028,12 @@ export function runEvalOne(
     movedTicks: 0,
     pressedStillTicks: 0,
     holdTicks: 0,
+    holdDecisions: 0,
+    holdPredicted: 0,
+    holdForced: 0,
+    holdForcedPredicted: 0,
+    holdVoluntary: 0,
+    holdForcedMoveHist: [0, 0, 0, 0],
     puOnFieldTicks: 0,
     puNearTicks: 0,
     puDistSum: 0,
@@ -1209,6 +1223,20 @@ export function runEvalOne(
         masks.hold[1] = 1
         if (v6) restrictAdvanceMask(world, mv, masks)
         const hd = v6 && model!.holdLogits ? argmaxCat(model!.holdLogits!, masks.hold) : 0
+        // 2026-11-12：拆「被迫 hold」（advance 被 restrictAdvanceMask 屏蔽）与
+        // 「主动 hold」（hold 头在合法集合里选 1）。两者都计入 stopTicks，
+        // 但前者是走位/贴墙问题，后者才是策略/头权重问题。
+        if (probeOn && v6) {
+          const forced = masks.hold[0] === 0
+          probe.holdDecisions++
+          if (hd === 1) probe.holdPredicted++
+          if (forced) {
+            probe.holdForced++
+            probe.holdForcedMoveHist[mv]++
+          }
+          if (forced && hd === 1) probe.holdForcedPredicted++
+          if (!forced && hd === 1) probe.holdVoluntary++
+        }
         scripted.setAction(mv, fr, hd)
         moveHist[mv]++
         decisions++

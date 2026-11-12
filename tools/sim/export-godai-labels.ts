@@ -330,7 +330,17 @@ export function exportGame(
       masks: [...masks.move, ...masks.fire],
       // legacy 5/2 → v6 三头：STOP ⇒ hold=1 + 保持朝向；方向 ⇒ hold=0 + move4；
       // legacy fire=1 在引擎里等价「先转后开火」⇒ v6 fire=2（after turn）。
-      v6Move: label.move === 0 ? encodeMove4(lastHeldDir ?? 'up') : label.move - 1,
+      // STOP ⇒ hold=1 + 保持**已提交朝向**（prevMoveDir）：legacy `dir=null` 是
+      // 「不动、不转向」，只有 hold=1 + 同向才等价；用 lastHeldDir 在转向被冷却拒绝
+      // 时会偏离实际朝向，hold 就变成「原地转向」而不是「站住」。
+      v6Move:
+        label.move === 0
+          ? encodeMove4(
+              // legacy 路径不写 `prevMoveDir`（那是 v6 转向冷却的字段）⇒ 用 `dir`
+              // （移动时写、STOP 时保持 = 实际已提交朝向），lastHeldDir 仅兜底。
+              world.player?.prevMoveDir ?? world.player?.dir ?? lastHeldDir ?? 'up',
+            )
+          : label.move - 1,
       v6Fire: label.fire === 1 ? 2 : 0,
       v6Hold: label.move === 0 ? 1 : 0,
       // God 语料是专家动作（全合法）；v6 mask 全 1 = 所有类参与 BCE/CE，
