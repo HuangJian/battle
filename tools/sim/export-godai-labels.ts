@@ -61,6 +61,10 @@ import {
   SCHEMA_FINGERPRINT,
 } from '../../src/nn/obs-encoder'
 import { decodeStageGrid, CUSTOM_STAGE_BASE } from '../../src/nn/config-stage'
+import { encodeMove4 } from '../../src/nn/action-space-v6'
+import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
+import type { Direction } from '../../src/constants'
+import type { InputLike } from '../../src/game/Input'
 import { writeNpy } from '../../src/nn/npy'
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { platform, arch, cpus } from 'os'
@@ -106,11 +110,55 @@ const RL_SCORE_CONFIG = {
 interface Sample {
   obs: Uint8Array
   scalars: Float32Array
+  /** POLICY_EXTRA(57) 真值（v5+；旧语料没有，新语料恒有）。 */
+  extra: Float32Array
   move: number
   fire: number
   masks: number[]
+  /** v6 三头标签（hold2 / move4 / fire3）；legacy 落盘时不用。 */
+  v6Move: number
+  v6Fire: number
+  v6Hold: number
+  v6Mask: number[]
   nearMiss: boolean
   cond: number
+}
+
+/** God 的 K 拍决策包装：**inner think 也只在决策拍跑**（与 NN 的 K 拍推理同节奏），
+ *  非决策拍不调用 inner、直接返回上一次决策，教师/学生才真正可比。 */
+class KHoldGod implements InputLike {
+  private tick = 0
+  private heldDir: Direction | null = null
+  private heldFire = false
+  constructor(
+    private inner: GodAIInput,
+    private k: number,
+  ) {}
+  private isDecisionTick(): boolean {
+    return this.tick % this.k === 0
+  }
+  getMoveDirection(): Direction | null {
+    if (this.isDecisionTick()) this.heldDir = this.inner.getMoveDirection()
+    return this.heldDir
+  }
+  isFiring(): boolean {
+    if (this.isDecisionTick()) this.heldFire = this.inner.isFiring()
+    return this.heldFire
+  }
+  wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean {
+    return this.isDecisionTick() ? this.inner.wasItemPressed(kind) : false
+  }
+  endFrame(): void {
+    // inner 的 per-tick 状态只在决策拍推进；中间 9 拍它完全不跑。
+    if (this.isDecisionTick()) this.inner.endFrame()
+    this.tick++
+  }
+  reset(): void {
+    this.inner.reset()
+    this.tick = 0
+    this.heldDir = null
+    this.heldFire = false
+  }
 }
 
 interface GameResult {
@@ -201,6 +249,8 @@ export function exportGame(
   stageJson?: string,
   livesOverride?: number,
   playerLevelOverride?: number,
+  /** God 输出保持 K 拍（2026-11-12 用户口径：以后 God 采样按 K=10；1 = 旧逐拍行为）。 */
+  godHoldK: number = 10,
 ): GameResult | 'loss-skipped' {
   const world = new World()
   world.rng.reseed(seed)
@@ -215,7 +265,9 @@ export function exportGame(
 
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const god = new GodAIInput(world, DEFAULT_GOD_AI_PARAMS, godRng)
-  const sim = new Simulation(world, god)
+  // 用户 2026-11-12：God 采样统一 K=10（与 NN 部署同节奏）；`godHoldK=1` 复现旧语料。
+  const input: InputLike = godHoldK > 1 ? new KHoldGod(god, godHoldK) : god
+  const sim = new Simulation(world, input)
   // 自定义关（课程 stageJson，plan/rl-training-config.md §5.2）：与 export-rl-rollout
   // 同款四守卫——① 短路在真实关表解析之前；② index-0 显式（loadStageData 第二参驱动
   // 1.05^index 关卡缩放，传 2003 会把 1 敌课程放大成满编关）；③ grid/出生点校验在
@@ -224,7 +276,7 @@ export function exportGame(
     ? decodeStageGrid(stageJson, stageIndex, seed) // seed → spawn_variants 确定性选点
     : STAGES[stageIndex]
   world.loadStageData(stage, stageJson ? 0 : stageIndex)
-  god.reset()
+  input.reset()
 
   const encoder = new ObsEncoder()
   const samples: Sample[] = []
@@ -240,6 +292,8 @@ export function exportGame(
   let outcome: GameResult['outcome'] = 'timeout'
   let phiFinal = 0
 
+  /** 最近一次非 null 朝向（v6 STOP → hold=1 + 保持朝向 需要它）。 */
+  let lastHeldDir: Direction | null = null
   const captureDecision = (
     dir: ReturnType<GodAIInput['getMoveDirection']>,
     firing: boolean,
@@ -270,9 +324,18 @@ export function exportGame(
     samples.push({
       obs: encoder.obs.slice(),
       scalars: encoder.scalars.slice(),
+      extra: encoder.extra.slice(),
       move: label.move,
       fire: label.fire,
       masks: [...masks.move, ...masks.fire],
+      // legacy 5/2 → v6 三头：STOP ⇒ hold=1 + 保持朝向；方向 ⇒ hold=0 + move4；
+      // legacy fire=1 在引擎里等价「先转后开火」⇒ v6 fire=2（after turn）。
+      v6Move: label.move === 0 ? encodeMove4(lastHeldDir ?? 'up') : label.move - 1,
+      v6Fire: label.fire === 1 ? 2 : 0,
+      v6Hold: label.move === 0 ? 1 : 0,
+      // God 语料是专家动作（全合法）；v6 mask 全 1 = 所有类参与 BCE/CE，
+      // 不做「非法类屏蔽」（BC 不需要 runtime mask 语义）。
+      v6Mask: [1, 1, 1, 1, 1, 1, 1, 1, 1],
       nearMiss: basePressed,
       cond: condition,
     })
@@ -282,10 +345,11 @@ export function exportGame(
     // obs(t): world state BEFORE this tick's input is consumed (plan §1.3).
     encoder.encode(world)
     // 逐 tick 读取（prevDir/prevGuard/prevFrenzy 每 tick 更新，供 decisionTick 判边）。
-    const dir = god.getMoveDirection()
-    const firing = god.isFiring()
-    const guard = god.wasItemPressed('guard')
-    const frenzy = god.wasItemPressed('frenzy')
+    const dir = input.getMoveDirection()
+    const firing = input.isFiring()
+    const guard = input.wasItemPressed('guard')
+    const frenzy = input.wasItemPressed('frenzy')
+    if (dir !== null) lastHeldDir = dir
     const { isDecision, condition } = decisionTick(
       t,
       world,
@@ -300,7 +364,7 @@ export function exportGame(
     if (isDecision) captureDecision(dir, firing, condition)
 
     sim.tick()
-    god.endFrame()
+    input.endFrame()
     prevDir = dir
     prevGuard = guard
     prevFrenzy = frenzy
@@ -441,23 +505,36 @@ function flushShard(
   dir: string,
   name: string,
   baseManifest: Record<string, unknown>,
+  /** true = v6 三头（a_move/a_fire/a_hold + mask.npy(9)）；false = legacy 5/2。 */
+  actionV6 = false,
 ): void {
   const N = res.samples.length
   if (N === 0) return
   const obs = new Uint8Array(N * OBS_N)
   const scalars = new Float32Array(N * SCALAR_DIM)
+  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * MASK_DIM)
+  const aMove = new Uint8Array(N)
+  const aFire = new Uint8Array(N)
+  const aHold = new Uint8Array(N)
+  const mask9 = new Uint8Array(N * 9)
   const conditions = new Uint8Array(N)
   const returns = new Float32Array(N)
   const ret = discountReturns(res.rewards)
   for (let i = 0; i < N; i++) {
-    obs.set(res.samples[i].obs, i * OBS_N)
-    scalars.set(res.samples[i].scalars, i * SCALAR_DIM)
-    actions[i * 2] = res.samples[i].move
-    actions[i * 2 + 1] = res.samples[i].fire
-    for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = res.samples[i].masks[j]
-    conditions[i] = res.samples[i].cond
+    const s = res.samples[i]
+    obs.set(s.obs, i * OBS_N)
+    scalars.set(s.scalars, i * SCALAR_DIM)
+    extra.set(s.extra, i * POLICY_EXTRA_DIM)
+    actions[i * 2] = s.move
+    actions[i * 2 + 1] = s.fire
+    for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = s.masks[j]
+    aMove[i] = s.v6Move
+    aFire[i] = s.v6Fire
+    aHold[i] = s.v6Hold
+    for (let j = 0; j < 9; j++) mask9[i * 9 + j] = s.v6Mask[j]
+    conditions[i] = s.cond
     returns[i] = ret[i]
   }
   const manifest = {
@@ -468,15 +545,25 @@ function flushShard(
     shard: name,
     teacher: 'god-ai',
     nSamples: N,
+    actionSpace: actionV6 ? 'v6' : 'legacy',
     ...baseManifest,
   }
   mkdirSync(dir, { recursive: true })
   writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
-  writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
-  writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
+  // 真 pf（POLICY_EXTRA 57）：v6/legacy 都写；旧语料没有，新语料恒有。
+  writeNpy(`${dir}/extra.npy`, extra, [N, POLICY_EXTRA_DIM], 'f4')
   writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')
   writeNpy(`${dir}/returns.npy`, returns, [N], 'f4')
+  if (actionV6) {
+    writeNpy(`${dir}/a_move.npy`, aMove, [N], 'u1')
+    writeNpy(`${dir}/a_fire.npy`, aFire, [N], 'u1')
+    writeNpy(`${dir}/a_hold.npy`, aHold, [N], 'u1')
+    writeNpy(`${dir}/mask.npy`, mask9, [N, 9], 'u1')
+  } else {
+    writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
+    writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
+  }
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }
 
@@ -508,6 +595,13 @@ function main(): void {
   // M1 探针证据：守家桶分歧率最高（base 74.6%）→ 濒危帧超采样默认 3×（守家回补）
   const nearMissTimes = parseInt(arg('near-miss-times', '3')!, 10)
   const determinism = has('verify-determinism')
+  // 2026-11-12 用户口径：God 采样统一 K=10（与 NN 部署同节奏）；1 = 旧逐拍语料。
+  const godHoldK = parseInt(arg('god-hold-k', '10')!, 10)
+  if (!Number.isInteger(godHoldK) || godHoldK < 1) {
+    console.error(`--god-hold-k 必须 ≥1 的整数（得到 ${arg('god-hold-k')}）`)
+    process.exit(2)
+  }
+  const actionV6 = has('action-v6')
 
   // 课程自定义关（`--stage-json-file <path>`）：JSON 数组，第 i 项对应 stage 2000+i
   // （decodeStageGrid 的 StageJson 载荷）。不传时逐字节不变（真实关表路径）——God AI
@@ -537,7 +631,8 @@ function main(): void {
   const seeds = parseRange(seedSpec)
   if (seeds.length === 0 || stages.length === 0) {
     console.error(
-      'usage: bun tools/sim/export-godai-labels.ts --stages all|N|N-M --seeds N|N-M [--out dir] [--wins 0|1] [--near-miss-times N] [--verify-determinism]',
+      'usage: bun tools/sim/export-godai-labels.ts --stages all|N|N-M --seeds N|N-M [--out dir] ' +
+        '[--wins 0|1] [--near-miss-times N] [--god-hold-k 10] [--action-v6] [--verify-determinism]',
     )
     process.exit(2)
   }
@@ -567,15 +662,23 @@ function main(): void {
           stageJsonFor(si),
           livesOverride,
           playerLevelOverride,
+          godHoldK,
         )
         if (res !== 'loss-skipped') {
-          flushShard(res, `${target}/${shardName}`, shardName, {
-            stage: si,
-            seed,
-            difficulty,
-            totalTicks: 0,
-            outcome: res.outcome,
-          })
+          flushShard(
+            res,
+            `${target}/${shardName}`,
+            shardName,
+            {
+              stage: si,
+              seed,
+              difficulty,
+              totalTicks: 0,
+              outcome: res.outcome,
+              godHoldK,
+            },
+            actionV6,
+          )
         }
       }
       const cmp = compareShards(`${detA}/${shardName}`, `${detB}/${shardName}`)
@@ -619,6 +722,7 @@ function main(): void {
         stageJsonFor(si),
         livesOverride,
         playerLevelOverride,
+        godHoldK,
       )
       games++
       if (res === 'loss-skipped') {
@@ -632,16 +736,23 @@ function main(): void {
         res.samples.length - res.nearMissFrames * (nearMissTimes > 1 ? nearMissTimes - 1 : 0)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       const name = `shard_s${String(si + 1).padStart(2, '0')}_seed${String(seed).padStart(3, '0')}`
-      flushShard(res, `${outDir}/${name}`, name, {
-        stage: si,
-        seed,
-        difficulty,
-        teacher: 'god-ai',
-        outcome: res.outcome,
-        gatedScore: res.gatedScore,
-        score: res.score,
-        nearMissFrames: res.nearMissFrames,
-      })
+      flushShard(
+        res,
+        `${outDir}/${name}`,
+        name,
+        {
+          stage: si,
+          seed,
+          difficulty,
+          teacher: 'god-ai',
+          outcome: res.outcome,
+          gatedScore: res.gatedScore,
+          score: res.score,
+          nearMissFrames: res.nearMissFrames,
+          godHoldK,
+        },
+        actionV6,
+      )
       perFile.push(
         `[OK] stage=${si + 1} seed=${seed} samples=${res.samples.length} nearMiss=${res.nearMissFrames} outcome=${res.outcome}`,
       )

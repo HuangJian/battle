@@ -1,0 +1,95 @@
+// BC 课程 g1-4s2e —— g 系列第二代：v6 三头 + 真 pf 的 God 语料（2026-11-12）
+//
+// 状态：**已立项 · 待开课**（开课由人在控制台 :8900 拍板；agent 不启动训练）
+// 上位：`g0-4s2e`（legacy 5/2 + `policyExtra=false` 的探针课）→ 本课换成**与部署链同构**的
+//   v6 三头（hold2 / move4 / fire3）+ `POLICY_EXTRA(57)` 真值；用户 2026-11-12 12:31
+//   「以后 god 采样就按照 K=10 来采。接下来做 v6 三头 + 真 pf」；12:34「inner think 也按照
+//   K 值来吧？这样教师学生才有可比性！」。
+//
+// ══ 0. 与 g0 的三个差别 ═══════════════════════════════════════════════════
+//   ① 动作空间：v6 三头（`action_v6: true`）——`a_move/a_fire/a_hold + mask.npy(9)`，
+//      不再是 legacy `actions(N,2)/masks(N,7)`。
+//   ② 观测：**真 pf** —— `extra.npy (N,57)` 由 `ObsEncoder.extra` 逐帧落盘（v6 与 legacy
+//      都写，旧语料才没有）；`train.policy_extra: true`，与 z5/z7 部署权重同构。
+//   ③ God 决策节奏：**inner think 也按 K=10**（`KHoldGod` 包装）——教师每 10 拍才 think
+//      一次、中间 9 拍完全不跑，与学生 NN 的 K 拍推理同节奏；标签在决策拍取（= 保持动作）。
+//      依据：全 35 关 2100 局实测 K=1 95.86% → inner-K=10 **90.00%**（−5.86pp）、
+//      clearT 6009→6871（+14.3%）；只保持输出、inner 每拍 think 是 93.00%（旧口径）。
+//
+// ══ 1. 语料 ═══════════════════════════════════════════════════════════════
+//   `tmp/g1-4s2e-corpus`（fixed，随 `kind=bc` payload 上传云机）：
+//     export-godai-labels.ts --stage-json-file tmp/god-o2-four-stages.json
+//       --stages 2000-2003 --seeds 860001-860200 --difficulty hard --max-ticks 3000
+//       --lives-override 1 --player-level 0 --wins 0 --near-miss-times 0
+//       --god-hold-k 10 --action-v6
+//   4 关 / 2 敌 / 1 命 / 0 星 / 3000 拍；每 shard 文件：
+//     obs(17,26,26) / scalars(46) / extra(57) / a_move / a_fire / a_hold / mask(9) /
+//     conditions / returns —— 训练栈 `npyio._load_dataset_v6` 已实测可加载。
+//
+// ══ 2. 训练 / 评估 ════════════════════════════════════════════════════════
+//   `arch=student` + `policy_extra=true` + `action_v6=true`；80 epochs / patience 10 /
+//   ckpt_every 10；课程内 eval 继续 `course_env: true`（4 关 × 50 局 / 10 epoch，seed 1..50）。
+//   判决仍认训后离线满池 800 局（`eval-course-ckpt --policy nn --seed0 860001`）。
+//
+// ══ 3. 边界 ═══════════════════════════════════════════════════════════════
+//   · 这是**第一条能直接接部署链**的 God-BC 权重（v6 + pf）；但 God 教师本身被 K=10 削弱
+//     到 90%，学生上限不应按 95.86% 的旧基线要求。
+//   · `mask.npy` 全 1（God 专家动作全合法）；不做 runtime 非法类屏蔽。
+//   · v6 采集**尚未**接云机 `mode=bc`（`export-godai-bc.ts` 仍 legacy）；本课走 fixed 语料，
+//     不依赖那条链。
+// ══════════════════════════════════════════════════════════════════════════
+{
+  "version": 1,
+  "name": "g1-4s2e",
+  "kind": "bc",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "star": 0,
+  "max_ticks": 3000,
+  "action_v6": true,
+
+  "corpus": {
+    "source": "fixed",
+    "fixed_dir": "D:/github/battle2/tmp/g1-4s2e-corpus",
+    "games_per_stage": 0,
+    "wins_only": false,
+    "near_miss_times": 0,
+    "seed_rotate": 0,
+    "outcome_policy": "all",
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 80,
+    "patience": 10,
+    "batch": 256,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "policy_coef": 1.0,
+    "train_heads": "all",
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto",
+    "policy_extra": true,
+    "init_from": "",
+  },
+
+  "eval": {
+    "every_epochs": 10,
+    "games_per_stage": 50,
+    "course_env": true,
+  },
+
+  "iters": 1,
+  "auto_stop": true,
+  "workers": 8,
+  "out": "nn-training/weights/g1-4s2e/weights.json",
+  "traj": "tmp/g1-4s2e",
+  "data_dir": "tmp/g1-4s2e/bc-data",
+  "backup_dir": "nn-training/weights/g1-4s2e",
+  "backup_prefix": "g1-4s2e",
+}
