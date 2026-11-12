@@ -25,6 +25,30 @@
 
 ---
 
+## §117 慢/抖用例清零：drain 判据换状态 + 精确二项递推（2026-11-12）
+
+**现场**：门禁同参（forkdist 8）连跑 4 次 `--durations=0`，第 2 轮
+`tests/remote/test_offline_eval_cloud.py::test_drain_is_bounded_and_reports_overrun` 红：
+`time.time() - t0 < 2.0` 实测 **2.06s**。该路径合法等待只有 `drain(timeout=0.2)`，多出的 1.8s
+是 8 worker 争用下的调度延迟——又一条拿机器快慢当契约（§21/§77 同族）。4 轮 min 的最慢单条是
+`test_exact_binomial_handles_large_n_without_overflow` **4.09s**（mean 4.37s），逼近 5s 警告线。
+
+**修法**
+- drain 用例：权威判据换成**状态**——返回 `False` 时该轮仍在飞（`inflight_it()==7`）且日志有
+  「收线超时」WARN；若 drain 忽略 timeout 等 fake job（5s）跑完，会返回 `True` / `_current`
+  已清空 ⇒ 当场红。删掉 `<2.0s` 墙钟断言；`started` 事件保证后台任务真的开跑后再 drain。
+  pytest `--timeout=60` + 30s 耗时预算仍是挂起护栏。
+- `tools/z11_seed_level.py`：`sign_test` / `mcnemar_exact` 的精确二项尾概率从逐项
+  `math.comb` 改成整数递推 `C(n,i)=C(n,i-1)*(n-i+1)//i`；同一整数和、同一除法，n≈5,000
+  的路径 **4.09s → 0.01s**。
+
+**读数**：4 轮并行门禁 **5971 / 5970（1 flake）/ 5971 / 5971**；改后 drain 单条 **10/10** 绿，
+`test_z11_seed_level.py` **14 passed**（最慢 call 0.01s）；完整 nn gate **5971 passed / 3 skipped**
+（pytest 54.33s）。**纪律**：并行门禁里 `<N s` 的绝对墙钟断言先问「测契约还是机器」；测状态的
+（返回码 / 在飞 / 事件）留，测延迟的删或换成远离危险分支的挂起护栏。
+
+---
+
 ## §116 `common/distribution.py` 再腾余量：竞速账 / 采集口径下沉 `common/race_metrics.py`（2026-11-11）
 
 **现场**：合并 `origin/goal-nn` 的 connect 竞速后，`common/distribution.py` **正好 1000 LOC**

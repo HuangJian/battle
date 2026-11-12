@@ -638,9 +638,11 @@ def test_submit_defers_the_job_build_to_the_background_thread(
 
 def test_drain_is_bounded_and_reports_overrun(monkeypatch: pytest.MonkeyPatch) -> None:
     """段末收线是**有界**的：跑不完就记一笔 WARN 返回 False（不无限挂住进程）。"""
+    started = threading.Event()
     release = threading.Event()
 
     def slow(**_job: object) -> dict:
+        started.set()
         release.wait(5)
         return {"ran": True}
 
@@ -648,10 +650,12 @@ def test_drain_is_bounded_and_reports_overrun(monkeypatch: pytest.MonkeyPatch) -
     logs, log = _logs()
     runner = CloudEvalRunner(lambda it: {"it": it}, log=log)
     assert runner.submit(7)
-    t0 = time.time()
+    assert started.wait(5), "后台任务没开始跑"
     assert runner.drain(timeout=0.2) is False
-    # timing-ok: 上界兜底（drain timeout=0.2s，2s 只挡挂起）
-    assert time.time() - t0 < 2.0
+    # ★ 权威判据是**状态**：drain 返回时该轮仍在飞（fake job 还停在 release.wait(5)）。
+    # 如果 drain 忽略 timeout 等它跑完，会返回 True / `_current` 已清空 ⇒ 这里当场红。
+    # 不拿墙钟当契约：2026-11-12 并行门禁 4 轮里这条 0.2s 路径曾量到 2.06s（假红）。
+    assert runner.inflight_it() == 7
     assert any("WARN" in m and "收线超时" in m for m in logs)
     release.set()
     assert runner.wait_idle(5.0)

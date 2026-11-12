@@ -169,6 +169,22 @@ def paired_diffs(
     return keys, [treated[k][0] - control[k][0] for k in keys]
 
 
+def _two_sided_binomial_tail(n: int, k: int) -> float:
+    """精确二项双侧尾概率（`k` = 较少的一侧次数）：整数递推求和，不逐项 `math.comb`。
+
+    2026-11-12：n≈5,000 时逐项 `math.comb` 要 4.1s（门禁最慢单条）；
+    `C(n,i)=C(n,i-1)*(n-i+1)//i` 递推后 <0.01s，整数和与除法结果与原式同源。
+    """
+    if k >= n:
+        return 1.0
+    total = 1
+    c = 1
+    for i in range(1, k + 1):
+        c = c * (n - i + 1) // i
+        total += c
+    return min(1.0, 2.0 * (total / (1 << n)))
+
+
 def sign_test(diffs: list[float]) -> dict[str, Any]:
     """配对 sign 检验（精确二项，双侧；零差记为 tie 并剔除）。"""
     pos = sum(1 for d in diffs if d > 0)
@@ -177,9 +193,13 @@ def sign_test(diffs: list[float]) -> dict[str, Any]:
     n = pos + neg
     if n == 0:
         return {"pos": pos, "neg": neg, "ties": ties, "n": 0, "p": 1.0}
-    k = min(pos, neg)
-    tail: float = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
-    return {"pos": pos, "neg": neg, "ties": ties, "n": n, "p": min(1.0, 2.0 * tail)}
+    return {
+        "pos": pos,
+        "neg": neg,
+        "ties": ties,
+        "n": n,
+        "p": _two_sided_binomial_tail(n, min(pos, neg)),
+    }
 
 
 def bootstrap_mean_ci(
@@ -211,9 +231,7 @@ def mcnemar_exact(n01: int, n10: int) -> float:
     n = n01 + n10
     if n == 0:
         return 1.0
-    k = min(n01, n10)
-    tail: float = sum(math.comb(n, i) for i in range(k + 1)) / (2**n)
-    return min(1.0, 2.0 * tail)
+    return _two_sided_binomial_tail(n, min(n01, n10))
 
 
 def naive_mcnemar(
