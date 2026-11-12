@@ -5647,3 +5647,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **决定**：v7 `IN_CH` 18→19 只有 `tools/agent/engine-bench.ts` 漏改 ⇒ 两后端形状守卫 `return false`、`BENCH-ARM unknown`、0.00x ms 假数字被永久缓存；立 `src/nn/conv/conv-shape.ts` 为形状单一来源，加基准自检非零退出 + `benchResultValid` / `benchSha` / mjs 源指纹 stamp 三道防线……
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/repo-governance.md` §2026-11-12-engine-bench-shape-drift
+
+## §2026-11-12-goalnn-offline-bc-course-parity（BC 课程与 RL 课程在自主云机队列里同等对待）
+
+- **决定**：`/offline/tasks` 每行带 `kind`；BC 课程与 RL 课程进同一个 `_run_batch` 按同一排序串行，
+  BC 走课程级 `run_bc_course`（反复领本课 BC job，完成看账本收官、独占看 `bc-exclusive.json`）；
+  `claim_offline` 对 BC 返回 `bc_course` 不建课程 hold；课程筛选只在客户端对 peek 响应做本地谓词，
+  请求仍不带 course。BC 冷启动从 hub `/code` 取代码，不再依赖先跑 RL 任务包。
+- **被否决**：继续 idle-only BC；把 `course` 加进取活链路的请求参数（违反
+  `test_poll_path_has_no_course_input`）；给 BC 造假 task pack。
+- **后果**：BC 与 RL 共享排序/预算/停机语义；`_idle_take_bc` 只剩清单空/全被持有时的兜底。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-offline-bc-course-parity

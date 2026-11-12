@@ -391,7 +391,40 @@ def pack_seg_end_kind(pack_path: Path) -> str:
     return ""
 
 
-def task_state(*, pack_exists: bool, stale: bool, held: bool) -> str:
+def course_finished(jsonl_path: Path, max_bytes: int = 256 * 1024) -> bool:
+    """课账本尾部：最后一条 `run_complete` 是不是在最后一次 `run_start` **之后**？
+
+    这是「这门课还要不要继续干」的唯一信号（`trainer/bc_loop` 与 RL 都写它）；
+    重启会写新的 `run_start` ⇒ 收官记录作废（又开工了）。读不到账本 ⇒ 未收官
+    （不可知不当作完成——过早停云机比多跑一轮贵）。
+
+    ★ 2026-11-12：从 `hub/queue_scope.py` 下沉到这里——`/offline/tasks` 的 BC 课程行
+    也要用同一把尺子（`queue_offline` 不能 import 兄弟混入），两处必须逐字同源。
+    """
+    try:
+        with open(jsonl_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    last_start = last_done = -1
+    for i, raw in enumerate(text.splitlines()):
+        try:
+            ev = json.loads(raw).get("event")
+        except (ValueError, AttributeError):
+            continue
+        if ev == "run_start":
+            last_start = i
+        elif ev == "run_complete":
+            last_done = i
+    return last_done > last_start
+
+
+def task_state(
+    *, pack_exists: bool, stale: bool, held: bool
+) -> str:
     """一门课在清单里的状态（纯函数，总表可单测）：前者优先。
 
     顺序：`claimed` > `no_pack` > `stale` > `ready`。为什么「有主」压过「没包」：状态要

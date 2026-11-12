@@ -223,7 +223,7 @@ CODE_DIR = "/tmp/worker-code"
 #: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
 #: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
 #: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
-BOOT_SELF = "boot-2026-10-14a"
+BOOT_SELF = "boot-2026-11-12a"
 
 #: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 #: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
@@ -2099,6 +2099,8 @@ def claim_course(
         手工导入结果包 / 到控制台重导任务包）；
       · `held`（★M1b / P0-4 后半，行为变更）：被别人 **live hold** 占据 ⇒ **本拍不跑，换下一门**
         （旧口径「照旧跑」= 同一份活两处跑；重复的那份由回传首写幂等丢弃）；
+      · `bc_course`（2026-11-12）：这是 BC 课程 ⇒ **不领课程租约**（BC 走课程级独占锁 +
+        `/jobs/{id}/claim`；先建 hold 反而会挡住自己领 BC job）——本拍不跑；
       · `proto`：对面 hub 嫌本端旧（Q4）⇒ 本拍不跑，刷新 notebook 后重开会话；
       · `no_pack`（404，人管课缺包）/ `net`（连不上）：照旧跑（训练永不因网络停摆；
         缺包由 `PackUnavailableError` 响亮收场）。
@@ -2122,6 +2124,9 @@ def claim_course(
                 f"{OFFLINE_CLAIM_PROTO}）：{doc.get('error') or ''}"
             )
             return "", "proto"
+        if doc.get("bc_course"):
+            log("这门是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）——本拍不跑")
+            return "", "bc_course"
         if doc.get("pending_export"):
             if doc.get("give_up"):
                 log(
@@ -2591,9 +2596,10 @@ def resolve_courses(
     worker: str = "",
     holds: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """本次要跑的课 → `([{"course", "pack_sha256"}], blocked, manifest)`。
+    """本次要跑的课 → `([{"course", "pack_sha256", "kind"}], blocked, manifest)`。
 
-    `picks` = 要跑的课（同旧形状）；**空 + `blocked` 也空 = 队列真的空**（正常的没事干）。
+    `picks` = 要跑的课；`kind` 区分 `rl` / `bc`（云机据它选 claim 课程还是 drain BC job）。
+    **空 + `blocked` 也空 = 队列真的空**（正常的没事干）。
     `manifest` = hub 的**原始清单行**（每个 dict 带 `state`/`claimable`/`pack`/`holder`…）——
     `picks`/`blocked` 都丢掉了 `state`，而 `_run_auto` 的终态收工判据要它（`all_terminal`）。
     非 hub 路（`CFG.course` 点名）没有清单 ⇒ 给空表（`all_terminal([]) is False`，不误触发）。
@@ -2619,7 +2625,8 @@ def resolve_courses(
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
-        return [{"course": c, "pack_sha256": ""} for c in explicit], [], []
+        # 点名腿先按 RL 算；`run()` 会用 `_explicit_kinds` 查一次清单覆盖它。
+        return [{"course": c, "pack_sha256": "", "kind": "rl"} for c in explicit], [], []
     if probe is not None and probe.get("unsupported"):
         raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
     hubs = hub_candidates(cfg, creds)
@@ -2661,7 +2668,11 @@ def resolve_courses(
     def _as_pick(t: dict) -> dict:
         pack_doc = t.get("pack")
         sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
-        return {"course": str(t.get("course") or ""), "pack_sha256": sha}
+        return {
+            "course": str(t.get("course") or ""),
+            "pack_sha256": sha,
+            "kind": str(t.get("kind") or "rl"),
+        }
 
     claimable_rows = [t for t in tasks if t.get("claimable") and _eligible(t)]
     # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
@@ -2832,6 +2843,31 @@ def _explicit_leases(cfg: dict, creds: dict, log: Callable[[str], None]) -> dict
     }
 
 
+def _explicit_kinds(
+    cfg: dict, creds: dict, log: Callable[[str], None]
+) -> dict[str, str]:
+    """点名腿的课程类型：`{course: "rl"|"bc"}`（查一次 `/offline/tasks`）。
+
+    点名腿（`CFG.course`）不走 `resolve_courses`，拿不到清单里的 `kind`；不查就会把 BC
+    课程当 RL 去 `claim_course`，被 hub 的 `bc_course` 拒掉。查不到清单 ⇒ 空表（全部按
+    RL 处理，与旧行为一致：老 hub 没有 kind 字段，BC 课程本来就不该由点名腿跑）。
+    """
+    hubs = hub_candidates(cfg, creds)
+    token = str(creds.get("HUB_TOKEN") or "")
+    if not hubs or not token:
+        return {}
+    tasks = fetch_task_list(
+        hubs[0], token, log, worker=worker_id_of(_queue_work_dir(cfg), log)
+    )
+    if tasks is None:
+        return {}
+    return {
+        str(t.get("course")): str(t.get("kind") or "rl")
+        for t in tasks
+        if t.get("course")
+    }
+
+
 def session_multi(courses: list[str], served: dict[str, str] | None = None) -> bool:
     """本批的产物根要不要按课程分层（`multi`）——判据是**本会话见过几门课**，不是本拍有几门。
 
@@ -2859,12 +2895,17 @@ def _run_batch(
     multi: bool,
     leases: dict | None = None,
     shas: dict[str, str] | None = None,
+    kinds: dict[str, str] | None = None,
 ) -> int:
     """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
 
       · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；末尾汇总，
         `M>0 ⇒ 非零 rc`，`N==0`（全跳过）⇒ 响亮 `SystemExit`；
       · 其它 `SystemExit`（课程名不一致 / 产物目录不完整）与训练 `rc≠0` ⇒ **照旧立即停**。
+
+    `kinds` 非空时按 `{course: "rl"|"bc"}` 分流：`rl` 走 claim → 取包 → run_one_course；
+    `bc` 走 `run_bc_course`（反复领本课的 BC job，不领课程租约）——两型都是**同一批**里
+    的普通课程，按同一排序串行执行（2026-11-12：BC 不再只是空档兜底）。
 
     `leases` 非空时逐课领租约（best-effort）+ 心跳线程 + 跑完交还，并把跑成功的包 sha 记进
     `leases["served"]`（防自激）。租约的任何失败都**不影响**训练。
@@ -2881,6 +2922,33 @@ def _run_batch(
     for i, course in enumerate(courses):
         rest = courses[i + 1 :]
         log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
+        kind = str((kinds or {}).get(course, "rl") or "rl").strip().lower()
+        if kind == "bc":
+            # BC 课程 = 课程级 drain：反复领**这门课**的 BC job（hub 用 bc-exclusive.json
+            # 保证一门课同一时刻只有一台盘在跑），跑到收官/停课/被别的主接管才交还。
+            try:
+                bc_rc = run_bc_course(cfg, creds, log, keepalive_stop, course=course)
+            except SystemExit as e:
+                if rest:
+                    log(
+                        f"课程 {course}（BC）未跑完（{e.code}）——串行到此为止，剩余 "
+                        f"{len(rest)} 门课未执行：{', '.join(rest)}"
+                    )
+                raise
+            if bc_rc != 0:
+                log(
+                    f"课程 {course}（BC）退出 rc={bc_rc} ——串行到此为止；"
+                    + (
+                        f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}"
+                        if rest
+                        else "它已是最后一门课"
+                    )
+                )
+                return bc_rc
+            ran += 1
+            if rest:
+                log(f"课程 {course}（BC）完成 —— 下一门：{rest[0]}")
+            continue
         # 租约上下文取成局部 dict（不用 `leases[...]`）：`finally` 里也要用，而 `leases` 是
         # 可选的（None = 老行为、不领租约）。空 dict 即「这条腿不领」。
         ctx = leases if leases is not None else {}
@@ -2888,7 +2956,15 @@ def _run_batch(
         beat: threading.Event | None = None
         if ctx:
             lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
-            if why in ("busy", "pending_export", "completed", "not_offline", "held", "proto"):
+            if why in (
+                "busy",
+                "pending_export",
+                "completed",
+                "not_offline",
+                "held",
+                "proto",
+                "bc_course",
+            ):
                 # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
                 # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
                 blockers[course] = why
@@ -2997,6 +3073,10 @@ def _run_auto(
     `idle_wait_sec` / `session_budget_sec` 用尽或收到停机信号（**空队列不是错误**）。
     ★ 2026-10-07：清单**全为终态**（或本会话已跑过它的包）⇒ 用**独立**的短窗口
     `idle_wait_terminal_sec` 收工——再等也不会自己变好，只有人介入才复活（`all_terminal`）。
+
+    ★ 2026-11-12：清单里的 BC 课程（`kind=bc`）与 RL 课程一起进同一个 `_run_batch`、
+    按同一排序串行执行；`_idle_take_bc()` 只是「清单为空 / 全被别人持有」时的兜底腿，
+    不再是 BC 的主入口。
     """
     served: dict[str, str] = {}
     probe: dict = {}
@@ -3065,6 +3145,12 @@ def _run_auto(
                 "worker": worker,
                 "served": served,
             }
+            kind_map = {
+                str(t["course"]): str(t.get("kind") or "rl") for t in tasks
+            }
+            # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧
+            # 调用方都不用改），而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
+            batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
             batch_rc = _run_batch(
                 cfg,
                 creds,
@@ -3074,6 +3160,7 @@ def _run_auto(
                 multi=session_multi([str(t["course"]) for t in tasks], served),
                 leases=leases,
                 shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
+                **batch_kwargs,
             )
             rc = batch_rc or rc
             gave_up.update(leases.get("gave_up") or [])
@@ -3176,13 +3263,40 @@ def _run_auto(
         time.sleep(poll)
 
 
+def _bc_code_ready() -> bool:
+    """包内 `remote.worker` 是否已经可导入（冷启动判据，不触发下载）。"""
+    try:
+        from remote.worker import worker_loop  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ensure_bc_code(hub: str, token: str, log: Callable[[str], None]) -> None:
+    """BC 冷启动：没有任务包也要能拿到**同一权威源**的代码（hub `/code`）。
+
+    旧 BC 兜底腿要求 `/tmp/worker-code` 已存在 —— 那份代码只有跑过 RL 任务包才会铺下来。
+    BC 既然与 RL 同等对待，就不能再依赖「先跑一门 RL」。这里复用 `ensure_code` 的权威序
+    （任务包 → hub `/code` → 本机产物；本次 `pack=None`），把代码铺进 `CODE_DIR` 后再
+    导入 `remote.worker`。
+    """
+    if _bc_code_ready():
+        return
+    log("BC：本机还没有包内代码 ⇒ 从 hub /code 取一份（与 RL 任务包同一权威源）")
+    ensure_code(None, log, hub=hub, token=token)
+
+
 def _run_bc_once(
     cfg: dict,
     hub: str,
     token: str,
     log: Callable[[str], None],
+    *,
+    course: str = "",
 ) -> int:
     """真的去领一份 BC 作业并跑完 → 处理了几份（★M5/Q5）。
+
+    `course` 非空 ⇒ 只领这门的 BC job（课程级 drain 用）；空 ⇒ 旧行为（任意 BC job）。
 
     **独立函数 = 注入点**：单测 patch 它，不在单测里拉包内代码 / 不起网络。
 
@@ -3211,9 +3325,121 @@ def _run_bc_once(
             once=True,
             max_idle_sec=BC_TAKE_IDLE_SEC,
             role="offline",
+            # 课程筛选只作用于 peek 的**响应候选**；请求本身不带课程（poll 路径的形参围栏）。
+            job_filter=(
+                (lambda c: str(c.get("course") or "") == course) if course else None
+            ),
             log=log,
         )
     )
+
+
+def run_bc_course(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: Any,
+    *,
+    course: str,
+) -> int:
+    """把一门 BC 课程当**课程级任务**跑到收官（2026-11-12：与 RL 课程同等对待）。
+
+    旧口径（★M5）只在「队列空了 / 全被别人持有」的空档领一份 BC——BC 是兜底腿，
+    有人占着 RL 课时 BC 课永远排在后面。现在 `/offline/tasks` 把 BC 课列成 `kind=bc` 的
+    普通课程行，`_run_batch` 按同一排序执行它，本函数就是它的执行腿：
+
+      · 反复调 `_run_bc_once(course=…)` 领**这门课**的 BC job（hub 的 `bc-exclusive.json`
+        是课程级独占锁，同一时刻只有一台盘能跑）；
+      · 一份 job 跑完立刻再问（`accept_result` 会 clear 课程的 BC 独占与进度锚，不占 900s）；
+      · 课程 `completed` / `not_offline` / 被别的盘独占 / 停机 / 会话预算用尽 ⇒ 返回 0
+        （交还课程，`_run_batch` 继续下一门）；
+      · 连续 `idle_wait_sec` 没有可领的 job ⇒ 返回 0（在线 trainer 还没发布下一份）；
+      · job 失败（rc<0）⇒ 返回 1（与 RL 的 `rc≠0 立即停` 同一条纪律）。
+    """
+    hubs = hub_candidates(cfg, creds)
+    token = str(creds.get("HUB_TOKEN") or "")
+    if not hubs or not token:
+        log(f"BC 课程 {course}：没有 hub/token ⇒ 本拍不跑（这门课由在线 trainer 发布 job）")
+        return 0
+    worker = worker_id_of(_queue_work_dir(cfg), log)
+
+    def _num(key: str, default: float) -> float:
+        raw = cfg.get(key)
+        if raw is None or raw == "":
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    budget = _num("session_budget_sec", 0.0)  # 0 = 不限
+    idle_wait = _num("idle_wait_sec", DEFAULT_WAIT_SEC)
+    if idle_wait <= 0:
+        idle_wait = DEFAULT_WAIT_SEC
+    start = time.monotonic()
+    idle_since = start
+    last_wait_log = start - 300.0
+    while True:
+        if keepalive_stop is not None and keepalive_stop.is_set():
+            log(f"BC 课程 {course}：收到停机信号 ⇒ 交还本课")
+            return 0
+        if budget > 0 and time.monotonic() - start >= budget:
+            log(f"BC 课程 {course}：会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 交还本课")
+            return 0
+        # 静默取清单：BC 课可能在等下一份 job，每 5s 打一遍「清单 N 条」会把日志刷爆。
+        # 取不到时由下面这一行说明（错误本身仍可见）。
+        tasks = fetch_task_list(hubs[0], token, lambda _m: None, worker=worker)
+        if tasks is None:
+            log(f"BC 课程 {course}：清单取不到 ⇒ 本拍收工（下一拍再来）")
+            return 0
+        row = next(
+            (t for t in tasks if str(t.get("course") or "") == course), None
+        )
+        if row is None:
+            log(f"BC 课程 {course}：清单里没有它（停课/未开课）⇒ 本课收工")
+            return 0
+        state = str(row.get("state") or "")
+        if state in ("completed", "not_offline"):
+            log(f"BC 课程 {course}：{state} ⇒ 本课收工")
+            return 0
+        if str(row.get("kind") or "rl") != "bc":
+            log(f"BC 课程 {course}：清单说 kind={row.get('kind')!r}（不是 bc）⇒ 本课收工")
+            return 0
+        owner = str(row.get("bc_owner") or "")
+        if (owner or row.get("bc_job")) and owner != worker:
+            log(f"BC 课程 {course}：已被 {owner or '未知'} 独占 ⇒ 换下一门")
+            return 0
+        # 只有确认「这门课现在真的可跑」才取代码：已收官/被别人独占的课不该白拉一份。
+        try:
+            _ensure_bc_code(hubs[0], token, log)
+        except SystemExit as e:
+            log(f"BC 课程 {course}：代码引导失败（{e.code}）⇒ 本课收工")
+            return 1
+        except Exception as e:
+            log(f"BC 课程 {course}：代码引导异常（{type(e).__name__}: {e}）⇒ 本课收工")
+            return 1
+        done = _run_bc_once(cfg, hubs[0], token, log, course=course)
+        if done < 0:
+            log(f"BC 课程 {course}：本份 job 失败（rc={done}）⇒ 停止本课")
+            return 1
+        now = time.monotonic()
+        if done > 0:
+            # 干了活就不算 idle（与 `_idle_take_bc` 同一口径）。
+            idle_since = now
+            last_wait_log = now - 300.0
+            continue
+        if now - idle_since >= idle_wait:
+            log(
+                f"BC 课程 {course}：{idle_wait:.0f}s 没有可领的 job ⇒ 本课收工（下一拍再来）"
+            )
+            return 0
+        if now - last_wait_log >= 300.0:
+            log(
+                f"BC 课程 {course}：等下一轮 BC job（已等 {now - idle_since:.0f}s / "
+                f"上限 {idle_wait:.0f}s）"
+            )
+            last_wait_log = now
+        time.sleep(BC_POLL_SEC)
 
 
 def try_take_bc_job(
@@ -3288,6 +3514,9 @@ def run(
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
+        explicit_kinds = _explicit_kinds(cfg, creds, log)
+        # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
+        extra = {"kinds": explicit_kinds} if explicit_kinds else {}
         return _run_batch(
             cfg,
             creds,
@@ -3296,6 +3525,7 @@ def run(
             explicit,
             multi=len(explicit) > 1,
             leases=_explicit_leases(cfg, creds, log),
+            **extra,
         )
     if not bool(cfg.get("auto_discover", True)):
         # 显式关掉自动发现 = 「我就是要手填 course」的口径 ⇒ 与今天逐字相同地响亮拒。

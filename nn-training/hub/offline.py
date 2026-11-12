@@ -567,6 +567,16 @@ class OfflineRoutes:
             takeover = _q("takeover").lower() in ("1", "true", "yes")
             lease, why = self.hub.claim_offline(course, worker, takeover=takeover)
             if not lease:
+                if why == "bc_course":
+                    self._json(
+                        {
+                            "error": "这是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）",
+                            "course": course,
+                            "bc_course": True,
+                        },
+                        409,
+                    )
+                    return
                 if why == "busy":
                     self._json(
                         {

@@ -49,6 +49,7 @@ from hub.task_pack import (
     TASK_STATE_NOT_OFFLINE,
     TASK_STATE_RANK,
     _file_sha256,
+    course_finished,
     hold_expires_in,
     hold_progress_at,
     hold_progress_stale_sec,
@@ -61,6 +62,32 @@ from hub.task_pack import (
     task_pack_stale_reason,
     task_state,
 )
+
+
+def _curricula_root(discover_root: Path | None) -> Path:
+    """课程文件目录：`<discover_root>/../curricula`（hub 的 discover root 是 `tmp/`）。
+
+    与 `remote.offline_boot` / dashboard 的 `curricula/` 约定一致；hub 不能 import
+    `worker.bc_config`（跨层），所以用文件是否存在判 BC（`<course>.bc.jsonc`）。
+    """
+    if discover_root is None:
+        return Path("curricula")
+    return Path(discover_root).parent / "curricula"
+
+
+def _course_kind(discover_root: Path | None, course: str) -> str:
+    """这门课是 BC 还是 RL？`curricula/<course>.bc.jsonc` 存在 ⇒ `bc`，否则 `rl`。
+
+    BC 课没有 task pack，有独立的 `bc-exclusive.json` 独占；把它标出来，云机才知道
+    该走 `/jobs/{id}/claim` 而不是 `claim_course`。
+    """
+    try:
+        if (_curricula_root(discover_root) / f"{course}.bc.jsonc").is_file():
+            return "bc"
+    except OSError:
+        pass
+    return "rl"
+
 
 # ── 接管（hold）与导包软态：派发状态（plan/worker-type-dispatch-model §3.2/§3.8）──
 #
@@ -309,8 +336,9 @@ class QueueOfflineMixin(QueuePeer):
     def offline_tasks(self, *, include_all: bool = False, worker: str = "") -> list[dict]:
         """`GET /offline/tasks` 的内容——**零副作用**（不触发重导、不写账本、不动游标）。
 
-        每行字段定死在 §3.1：`course/state/claimable/pack/run_id/it/end_it/stale_reason/
-        holder/progress`；`open_time` 是 hub 的排序键（★M4b：`seize` 与模式一起删）。
+        每行字段定死在 §3.1：`course/kind/state/claimable/pack/run_id/it/end_it/
+        stale_reason/holder/bc_owner/bc_job/progress`；`kind` 区分 `rl` / `bc`（BC 没有
+        task pack，完成看账本收官，独占看 `bc-exclusive.json`），`open_time` 是 hub 的排序键。
         ★M1b：另加 `hold`（接管镜像：worker/state/expires_in）· `pending_export`（导包软态，
         **不占闸**）· `busy`（一拖一按 worker 的布尔结果）；`busy`/`claimable` 按 `?worker=` 判
         （缺省 ⇒ 上界：不含一拖一，plan §69）。`state` 的 `held` 只算 **live** 的接管
@@ -329,6 +357,8 @@ class QueueOfflineMixin(QueuePeer):
                 pack_path = self.task_pack_path(course)
             except ProtocolError:
                 continue  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
+            kind = _course_kind(self._discover_root, course)
+            st = self._stores.get(course)
             # ★M4b：可领上位闸 = **开课标记在**（`stopped` 是唯一 opt-out）。课程不再有
             # 在线/离线模式 —— claim 成功即接管（hold），协作派发被 hold 闸压住；停课的
             # 行只在 `?include=all` 里出现（state=not_offline）。
@@ -336,14 +366,14 @@ class QueueOfflineMixin(QueuePeer):
             pack: dict | None = None
             meta = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
             stale_reason = ""
-            if pack_path.is_file():
+            if kind == "rl" and pack_path.is_file():
                 try:
-                    st = pack_path.stat()
+                    pstat = pack_path.stat()
                     pack = {
                         "name": pack_path.name,
-                        "bytes": int(st.st_size),
+                        "bytes": int(pstat.st_size),
                         "sha256": _file_sha256(pack_path),
-                        "mtime": float(st.st_mtime),
+                        "mtime": float(pstat.st_mtime),
                     }
                 except OSError:
                     pack = None
@@ -355,12 +385,45 @@ class QueueOfflineMixin(QueuePeer):
                             pack_path.parent / _JobStore.ACTIVE_WEIGHTS_NAME
                         ),
                     )
-            holder = self.holder_info(course)
-            pack_sha = str((pack or {}).get("sha256") or "")
-            completed = self.completion_blocked(course, pack_sha)
-            busy = self.busy_reason(course, worker) if runnable else ""
-            hold = self.hold_of(course)
-            pending_export = self.pending_export_of(course)
+            bc_owner = bc_job = ""
+            bc_held = False
+            if kind == "bc":
+                # BC 课没有 task pack：完成看账本收官，独占看课程的 `bc-exclusive.json`。
+                holder = None
+                if st is not None:
+                    bc_owner, bc_job = st.bc_exclusive_owner()
+                bc_held = bool(bc_owner or bc_job)
+                if bc_owner:
+                    # 合成一个 holder：`blocked_rows` / `holder_revoked` 等既有遥测
+                    # 只认 row["holder"]，这样 BC 被别的盘占住时云机也能看到等待原因。
+                    holder = {
+                        "worker_id": bc_owner,
+                        "age_sec": 0.0,
+                        # 进度静默阈：`blocked_poll_sec` 据此退避（0 会被钳到 1s，变成
+                        # 每秒打一次 hub；BC 的独占锁没有 TTL，只能等对方 release）。
+                        "expires_in": float(hold_progress_stale_sec()),
+                        "beat_at": 0.0,
+                        "silent_sec": 0.0,
+                        "progress_ago": -1.0,
+                        "stale": False,
+                        "revoked": False,
+                    }
+                pack_sha = ""
+                completed = course_finished(
+                    Path(st.jsonl_path)
+                    if st is not None
+                    else self.course_dir(course) / "training_log.jsonl"
+                )
+                hold = {}
+                pending_export = {}
+                busy = self.busy_reason(course, worker) if runnable else ""
+            else:
+                holder = self.holder_info(course)
+                pack_sha = str((pack or {}).get("sha256") or "")
+                completed = self.completion_blocked(course, pack_sha)
+                busy = self.busy_reason(course, worker) if runnable else ""
+                hold = self.hold_of(course)
+                pending_export = self.pending_export_of(course)
             holder_stale = bool(holder and holder.get("stale"))
             holder_revoked = bool(holder and holder.get("revoked"))
             treat_offline = runnable
@@ -374,9 +437,9 @@ class QueueOfflineMixin(QueuePeer):
                 state = TASK_STATE_COMPLETED
             elif treat_offline:
                 state = task_state(
-                    pack_exists=pack is not None,
+                    pack_exists=True if kind == "bc" else pack is not None,
                     stale=bool(stale_reason),
-                    held=holder_live,
+                    held=(bc_held if kind == "bc" else holder_live),
                 )
             else:
                 state = TASK_STATE_NOT_OFFLINE
@@ -384,7 +447,11 @@ class QueueOfflineMixin(QueuePeer):
             if not runnable:
                 reason = "not_offline: 这门课不在训练中（开课标记已删）"
             elif completed:
-                reason = "completed: 本段已跑满（等人停课 / 重导包）"
+                reason = (
+                    "completed: BC 全轮已完成（等人停课 / 新开一段）"
+                    if kind == "bc"
+                    else "completed: 本段已跑满（等人停课 / 重导包）"
+                )
             elif holder_revoked:
                 reason = (
                     f"held-revoked: {(holder or {}).get('worker_id') or '?'}"
@@ -396,7 +463,7 @@ class QueueOfflineMixin(QueuePeer):
                     # 退回心跳龄 —— `progress_ago < 0` 就是那一档。
                     # 哨兵是 `-1.0`，别用 `or`（真值 0.0 会被吃成缺失）
                     raw_ago = holder.get("progress_ago")
-                    ago = float(raw_ago) if raw_ago is not None else -1.0
+                    ago = float(raw_ago) if isinstance(raw_ago, (int, float)) else -1.0
                     what = "进度" if ago >= 0 else "心跳"
                     reason = (
                         f"held-stale: {holder.get('worker_id') or '?'}"
@@ -404,6 +471,8 @@ class QueueOfflineMixin(QueuePeer):
                     )
                 else:
                     reason = f"held: {holder.get('worker_id') or '?'}"
+            elif kind == "bc" and bc_held:
+                reason = f"held: {bc_owner or '?'}（BC 独占：持有者未知也挡）"
             elif busy:
                 reason = busy
             runs = progress.get(course) or {}
@@ -411,6 +480,7 @@ class QueueOfflineMixin(QueuePeer):
             rows.append(
                 {
                     "course": course,
+                    "kind": kind,
                     "state": state,
                     # 可领（判据唯一实现 `auto_claimable`）：可领闸 ∧ 无主（或主已失联/撤销）
                     # ∧ 未完成 ∧ 不忙；无包也算「可尝试领」（claim 会写 `pending_export` 并
@@ -419,11 +489,11 @@ class QueueOfflineMixin(QueuePeer):
                     # ★M4b：`authority`/`auto_handoff`/`seize` 三键随模式删除；停课一律 false。
                     "claimable": bool(runnable)
                     and auto_claimable(
-                        holder_present=holder is not None,
+                        holder_present=(bc_held if kind == "bc" else holder is not None),
                         completed=completed,
                         busy=bool(busy),
-                        holder_stale=holder_stale,
-                        holder_revoked=holder_revoked,
+                        holder_stale=False if kind == "bc" else holder_stale,
+                        holder_revoked=False if kind == "bc" else holder_revoked,
                     ),
                     "reason": reason,
                     #: ★M1b：**一拖一按 worker 判**的结果直接透出来（`bool(busy)`）。
@@ -439,6 +509,10 @@ class QueueOfflineMixin(QueuePeer):
                     "end_it": meta["end_it"],
                     "stale_reason": stale_reason,
                     "holder": holder,
+                    #: BC 课的课程级独占读数（`""` = 无主；RL 课恒为空）。云机靠它判断
+                    #: 「这门 BC 课是不是已经在被某个盘 drain」，不必去猜 `/jobs` 的进度。
+                    "bc_owner": bc_owner,
+                    "bc_job": bc_job,
                     #: ★M1b：接管镜像（`{}` = 无 hold）+ 导包软态（超窗读面即空）。
                     "hold": hold,
                     "pending_export": pending_export,
@@ -538,7 +612,8 @@ class QueueOfflineMixin(QueuePeer):
     ) -> tuple[dict, str]:
         """领一门课的自主租约 → `(租约, "")`；领不到 → `({}, 拒因)`。
 
-        拒因分流（HTTP 层映射成 409）：`not_offline`（停课）/ `busy` / `foreign` / `bad`。
+        拒因分流（HTTP 层映射成 409）：`not_offline`（停课）/ `bc_course`（BC 课不领课程
+        租约）/ `busy` / `foreign` / `bad`。
 
         · `mine`（同一个 `worker_id` 回来）与 `expired` 直接续上：cell 中断后重跑不该被
           **自己留下**的租约挡住（评审 G1）；`revoked`（墓碑）＝新主直接覆盖；
@@ -550,6 +625,10 @@ class QueueOfflineMixin(QueuePeer):
             return {}, "bad"
         if not self.course_open(course):
             return {}, "not_offline"
+        if _course_kind(self._discover_root, course) == "bc":
+            # BC 课不领课程租约：它走 `bc-exclusive.json` + `/jobs/{id}/claim`；
+            # 先建 hold 反而会被 `role_blocked` 的 hold 闸挡住自己领 BC job。
+            return {}, "bc_course"
         now = float(self._now())
         reclaimed_from = ""
         # 锁序契约：`_lease_lock → _dispatch_lock`（hold 镜像住派发记录）。`_leases` 只剩

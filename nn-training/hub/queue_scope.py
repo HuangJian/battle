@@ -32,7 +32,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -40,38 +39,11 @@ from typing import Any
 from common.protocol import WORKER_SEEN_WINDOW_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
+from hub.task_pack import course_finished as _course_finished
 from hub.task_pack import hold_progress_at
 
 #: 开课标记（与 `stack/courses.COURSE_ENABLE_MARKER` 同名；hub 不 import dashboard）。
 _ENABLE_MARKER = "training-enabled.txt"
-
-
-def _course_finished(jsonl_path: Path, max_bytes: int = 256 * 1024) -> bool:
-    """课账本尾部：最后一条 `run_complete` 是不是在最后一次 `run_start` **之后**？
-
-    这是「这门课还要不要继续干」的唯一信号（`trainer/bc_loop` 与 RL 都写它）；
-    重启会写新的 `run_start` ⇒ 收官记录作废（又开工了）。读不到账本 ⇒ 未收官
-    （不可知不当作完成——过早停云机比多跑一轮贵）。
-    """
-    try:
-        with open(jsonl_path, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - max_bytes))
-            text = f.read().decode("utf-8", "replace")
-    except OSError:
-        return False
-    last_start = last_done = -1
-    for i, raw in enumerate(text.splitlines()):
-        try:
-            ev = json.loads(raw).get("event")
-        except (ValueError, AttributeError):
-            continue
-        if ev == "run_start":
-            last_start = i
-        elif ev == "run_complete":
-            last_done = i
-    return last_done > last_start
 
 
 class QueueScopeMixin(QueuePeer):

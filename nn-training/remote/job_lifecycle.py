@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import common.env_probe as env_probe
@@ -440,6 +441,9 @@ def acquire_job(
     *,
     worker_id: str = "",
     role: str = ROLE_ONLINE,
+    #: 本地候选过滤（**不发给 hub**）：课程归属只来自 peek 响应，过滤只是「在这批候选里选」。
+    #: BC 课程级 drain 用；缺省 None = 旧行为（不筛）。
+    accept: Callable[[dict], bool] | None = None,
     depth: int = 3,
     on_drop: Any = None,
     log: Any = None,
@@ -451,6 +455,8 @@ def acquire_job(
 
     返回形状与旧轮询面 **逐字段兼容**（`{job_id, manifest, halt, lease_token, course}`
     或 `{"halt": True}` 或 None）——`worker_loop` 的下游（心跳/停机达令/run_job）零改动。
+
+    `accept` 非空 ⇒ 只在这批候选里选（本地谓词，不发给 hub；BC 课程级 drain 用）。
 
     选活规则：优先级降序，`none`（= 结果已落盘）**直接丢**（它同时是批量取消信号）；
     同一档内按 peek 给的顺序（= hub 的跨课程轮转序）取第一份。claim 回 `demoted` 时
@@ -473,6 +479,10 @@ def acquire_job(
     if peeked is None:
         return None
     cands, halt = peeked
+    if accept is not None:
+        # 只筛**响应里的候选**：HTTP 请求仍不带课程（`test_poll_path_has_no_course_input`
+        # 的形参围栏）；调用方（BC 课程级 drain）自己决定「这批里只要哪门课」。
+        cands = [c for c in cands if accept(c)]
     if not cands:
         return {"halt": True} if halt else None
     pr = request_priority(

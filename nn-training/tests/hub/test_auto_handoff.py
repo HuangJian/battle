@@ -72,6 +72,7 @@ _MISSING = object()
 #: 清单行的字段全集（★M4b 守卫：mode/authority/pinned/seize/auto_handoff 一个都不许回来）。
 ROW_KEYS = {
     "course",
+    "kind",
     "state",
     "claimable",
     "reason",
@@ -83,6 +84,8 @@ ROW_KEYS = {
     "end_it",
     "stale_reason",
     "holder",
+    "bc_owner",
+    "bc_job",
     "hold",
     "pending_export",
     "progress",

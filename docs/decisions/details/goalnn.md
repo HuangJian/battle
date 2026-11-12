@@ -7270,3 +7270,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `web-sidebar-recent.test.ts` 与 `training-pills.test.ts`（`ep57` 上屏、RL 不受影响、无 epoch 时 `ep—`）。
 - **违反后果**：任何直接拿 `it` 当 BC 进度的读数都永远停在 1；它会让「跑了 57/60 个 epoch」
   看起来像「一轮都没跑完」。
+
+## §2026-11-12-goalnn-offline-bc-course-parity（BC 课程与 RL 课程在自主云机队列里同等对待）
+
+- **背景**：`battle.offline.ipynb` 的自动队列只在「清单空 / 全被别人持有」时顺手领一份 BC；
+  有 RL 课可跑时 BC 永远排在后面。而 `/offline/tasks` 把有开课标记的 BC 课也列成 RL 形状的行，
+  云机 claim 后去要 task pack（BC 没有）⇒ 必失败。
+- **被否决**：① 继续把 BC 当 idle-only（用户本次要修的就是这个不对称）；② 把 `course` 加进
+  `acquire_job` / `worker_loop` / peek 请求（会违反 `test_poll_path_has_no_course_input`，
+  把「一个进程服务所有课程」绑回单课）；③ 给 BC 造一个假 task pack（BC 没有 plan/起始权重，
+  包里没有可执行轮次语义）。
+- **决定**：
+  - `/offline/tasks` 每行加 `kind`（`rl`/`bc`）；BC 行没有 pack，`completed` 看账本
+    `run_complete` 是否晚于最后一次 `run_start`，独占看课程级 `bc-exclusive.json`，
+    `claimable` 只看 BC 锁/忙/收官。`claim_offline` 对 BC 返回 `bc_course`（不建课程 hold）。
+  - `_run_auto` 把 BC 行与 RL 行放进同一个 `_run_batch`，按同一 state/open_time/course 排序串行；
+    `kind=bc` 分支调 `run_bc_course`：反复领本课 BC job，直到课程收官/停课/被别的盘独占/
+    停机/预算用尽/`idle_wait_sec` 无 job。
+  - 课程筛选只作用于 peek **响应候选**的本地谓词（`accept` / `job_filter`），请求仍不带 course。
+  - BC 冷启动复用 `ensure_code(None, …)`（hub `/code`），不再要求先跑过 RL 任务包。
+- **回归**：`tests/hub/test_offline_bc_course.py`（kind/pack/claim/独占/收官）、
+  `tests/remote/test_offline_bc_course.py`（同批排序、课程级 drain、筛选谓词、冷启动代码）；
+  `test_poll_path_has_no_course_input` 仍绿。
+- **违反后果**：BC 课会被 RL 课永久饿死，或云机把别的 BC 课的 job 领走（课程账本交错）；
+  把 course 加回请求侧会重新绑死单进程单课程。

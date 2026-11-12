@@ -40,6 +40,7 @@ import os
 import sys
 import tarfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -973,6 +974,8 @@ def worker_loop(
     # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
     # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
     role: str = ROLE_ONLINE,
+    #: 本地 job 选择谓词（**不发给 hub**；BC 课程级 drain 用）。缺省 None = 不筛。
+    job_filter: Callable[[dict], bool] | None = None,
     #: ★ 2026-10-27（评审）：PPO 训练框架（`""`/auto/torch/paddle），原样交给宿主 `run_job`
     #: （本模块不认识它的语义，与 `epoch_mult` 同一条路）。空串 = auto。
     backend: str = "",
@@ -1125,6 +1128,7 @@ def worker_loop(
                     token,
                     worker_id=worker_id,
                     role=role,  # 归属自报：本会话只领本盘的活
+                    accept=job_filter,  # 本地筛选（不发给 hub；BC 课程级 drain）
                     # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
                     on_drop=(pf_store.drop if pf_store is not None else None),
                     log=log,
