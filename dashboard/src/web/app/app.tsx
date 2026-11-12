@@ -588,6 +588,12 @@ export function App({ initial }: AppProps) {
                 />
               </PanelErrorBoundary>
             )}
+            {/* BC 区：与 RL 区**同位**（都在「服务」上方）——BC 课只出这一区，RL 课只出 Hero/EvalBoard。 */}
+            {stateView?.isBc ? (
+              <PanelErrorBoundary>
+                <BcPanel course={viewCourse} enabled={documentVisible} />
+              </PanelErrorBoundary>
+            ) : null}
             <PanelErrorBoundary>
               <ComponentCards
                 stateView={stateView}
@@ -649,11 +655,6 @@ export function App({ initial }: AppProps) {
                 />
               </PanelErrorBoundary>
             )}
-            {stateView?.isBc ? (
-              <PanelErrorBoundary>
-                <BcPanel course={viewCourse} enabled={documentVisible} />
-              </PanelErrorBoundary>
-            ) : null}
             {/* 组件日志入口由组件卡行内的「≡ 日志」承担（2026-09-20 P3c 下线 LogNavCard：
                 同一组入口在同页出现两处，且它那句轮询说明讲的是日志页自己的行为——
                 已并入组件卡的 ≡ 悬停文案）。 */}
