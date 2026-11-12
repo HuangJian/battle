@@ -136,6 +136,8 @@ async function render(
     loopQueue?: LoopQueueView | null
     /** 已封存课程（`stateView.archived`）——缺省 = 旧视图/未封存过。 */
     archived?: ArchivedCourseView[] | null
+    /** 逐课 BC epoch 指针（`stateView.bcProgress`）。 */
+    bcProgress?: Record<string, { epoch: number | null; total: number | null }> | null
     course?: string
     onAction?: (act: string, body: Record<string, unknown>) => void
   } = {},
@@ -150,6 +152,7 @@ async function render(
       onSelectCourse: () => {},
       onAction: props.onAction,
       archived: props.archived,
+      bcProgress: props.bcProgress,
     }),
   )
 }
@@ -230,6 +233,15 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     expect(html).toContain('aria-current="true"')
     expect(html).toContain('title="切到查看 c4"')
     expect(html).toContain('title="c5（当前查看）"')
+  })
+
+  // ★2026-11-12（用户口径）：BC 课的指针列读 epoch（`ep57`），不读恒为 1 的 `it`。
+  it('BC 课的指针列 = `ep57`（悬停给总 epoch；表头叫「指针」而不是 iter）', async () => {
+    const html = await render({ bcProgress: { c4: { epoch: 57, total: 60 } } })
+    expect(html).toContain('指针')
+    expect(html).toContain('ep57')
+    expect(html).toContain('共 60 个 epoch')
+    expect(html).not.toContain('it37') // 训练侧指针被 epoch 取代，不再上屏
   })
 
   it('iter 列：训练侧指针优先；只有 hub 侧账本尾行时也能显示（不是 `—`）', async () => {

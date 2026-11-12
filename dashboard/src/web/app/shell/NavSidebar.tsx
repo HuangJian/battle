@@ -21,6 +21,8 @@ import {
   isNavActive,
   NAV_GROUPS,
   NAV_ITEMS,
+  pointerTitle,
+  pointerWord,
   TC_SIDE_COLLAPSED,
   withCourse,
   type PageKey,
@@ -163,7 +165,8 @@ export function NavSidebar({
                 onClick={() => onPickCourse?.(c.course)}
               >
                 <span className="tc-side__recent-name">{c.course}</span>
-                {/* 右侧迷你读数：🔥 = 已开课（与顶栏 pill 同名单）；色点 = 状态；it = 最新指针。 */}
+                {/* 右侧迷你读数：🔥 = 已开课（与顶栏 pill 同名单）；色点 = 状态；
+                    读数词 = `pointerWord`（RL 课 `it37`，BC 课 `ep57`——BC 的轮 = 一张 job，`it` 恒 1）。 */}
                 <span className="tc-side__recent-readout">
                   {training ? (
                     <span className="tc-side__recent-fire" aria-hidden="true">
@@ -171,11 +174,8 @@ export function NavSidebar({
                     </span>
                   ) : null}
                   <span className={DOT[c.tone]} title={c.title} aria-hidden="true" />
-                  <span
-                    className="tc-side__recent-it"
-                    title={`最新 it${c.it ?? '—'}（账本指针：下一轮；收官后不再前进）`}
-                  >
-                    it{c.it ?? '—'}
+                  <span className="tc-side__recent-it" title={pointerTitle(c)}>
+                    {pointerWord(c)}
                   </span>
                 </span>
               </button>

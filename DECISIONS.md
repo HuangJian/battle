@@ -5630,3 +5630,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   面板分段优先 `job_pending`（同 job 重启不切曲线，换 job 才切）。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-restart-resume
+
+## §2026-11-12-goalnn-console-bc-ep-pointer（控制台的 BC 课读数用 `ep`，不用 `it`）
+
+- **决定**：BC 一段训练 = 一张 job，`it` 恒为 1 不配当进度 ⇒ `/api/state` stamp
+  `bcProgress: {course: {epoch, total}}`（账本段内 `bc_epoch` 最大值 + `run_start.epochs`，
+  与 BC 面板同一个段锥）；侧栏「最近训练」与顶部 pill 的读数词统一走 `pointerWord`：
+  BC = `ep57`（悬停给总 epoch），RL = `it37` 不变。BC 面板表头同口径：`/api/bcEpochs`
+  带同一个 `pointer`，写 `ep57/60`（取代「共 N epoch」的行数）。课程矩阵 / 课程管理页的指针列走
+  `pointerCell`（BC `ep57` / RL `it37`），列头改名「指针」。**不动** `it` 语义（它是 hub 的 job
+  身份/续训键）。
+
+—— 全文（背景 / 备选与否决 / 回归 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-console-bc-ep-pointer

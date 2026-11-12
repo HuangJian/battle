@@ -30,7 +30,7 @@ import type {
 } from './console-types'
 import type { CourseOverviewRow, ParallelOverviewView } from './course-overview'
 import { fmtRel } from './format'
-import type { LoopQueueRow, LoopQueueView } from './loop-queue'
+import type { BcPointerView, LoopQueueRow, LoopQueueView } from './loop-queue'
 import {
   type CourseMatrixRow,
   type MatrixCell,
@@ -68,6 +68,8 @@ export interface CourseAdminRow {
   /** 账本/队列指针（null = 还没有任何一轮）。 */
   iter: number | null
   iterSource: CourseMatrixRow['iterSource']
+  /** **BC 课的 epoch 指针**（`null` = 非 BC 课 / 旧视图没给）——指针列走 `pointerCell`。 */
+  bc: BcPointerView | null
   /** hub 侧两侧事实（供操作列判断哪些开关成立；缺 = 那一侧没有这门课）。 */
   ov: CourseOverviewRow | null
   lq: LoopQueueRow | null
@@ -91,6 +93,8 @@ export interface CourseAdminInput {
   queue: LoopQueueView | null
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——已收官的课在本页也不得报「在训」（与 pill / 课程矩阵同一派生）。 */
   loopCompletes?: Record<string, LoopComplete> | null
+  /** 逐课 BC epoch 指针（`stateView.bcProgress`；缺省 = 旧视图 ⇒ 指针列照旧读 `it`）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   archived?: ArchivedCourseView[] | null
   viewing: string
   /** 当下时刻（秒）——相对时间与「段内」陈旧判据都拿它，纯函数不读墙钟。 */
@@ -154,6 +158,7 @@ function activeRow(
     waiting: mr ? mr.waiting : ov?.hold ? holdWaitCell(ov) : waitingCell(null),
     iter: mr?.iter ?? null,
     iterSource: mr?.iterSource ?? null,
+    bc: mr?.bc ?? null,
     ov,
     lq: mr?.lq ?? null,
     canReleaseHold: mr?.canReleaseHold ?? false,
@@ -181,6 +186,7 @@ function archivedRow(a: ArchivedCourseView, viewing: string): CourseAdminRow {
     waiting: { text: '—', title: '封存课不进任何队列' },
     iter: a.finalIt,
     iterSource: null,
+    bc: null,
     ov: null,
     lq: null,
     canReleaseHold: false,
@@ -200,6 +206,8 @@ export function buildCourseAdmin(input: CourseAdminInput): CourseAdminView {
     loopCompletes: input.loopCompletes,
     // 同样把开课标记交给矩阵：已停课的课不报 `hub·无进程`（即使 hub 还压着残留 job）。
     enabledCourses: input.training,
+    // 指针列：BC 课读 epoch（`ep57`），与侧栏/pill/BC 面板同一个服务端指针。
+    bcProgress: input.bcProgress ?? null,
     viewing: input.viewing,
     nowSec: input.nowSec,
   })
@@ -264,6 +272,7 @@ export function courseAdminFromState(
     overview: s.overview ?? null,
     queue: s.loopQueue ?? null,
     loopCompletes: s.loopCompletes ?? null,
+    bcProgress: s.bcProgress ?? null,
     archived: s.archived ?? null,
     viewing,
     nowSec,

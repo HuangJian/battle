@@ -39,6 +39,7 @@ import type { CourseOverviewRow, ParallelOverviewView, ReadStaleView } from './c
 import { courseStatus, stepStage, type CourseStatus } from './course-status'
 import { fmtRel } from './format'
 import {
+  type BcPointerView,
   type LoopQueueRow,
   type LoopQueueView,
   STOPPED_TITLE,
@@ -421,6 +422,9 @@ export interface CourseMatrixRow {
    * （**不可知**，不是本地「下一轮」指针——本机这一段不跑这门课）。 */
   iter: number | null
   iterSource: 'queue' | 'ledger' | 'hold' | null
+  /** **BC 课的 epoch 指针**（`null` = 非 BC 课 / 旧服务端没给）——指针列走 `pointerCell`：
+   *  BC 课给 `ep57`，不再拿恒为 1 的 `it` 充数（2026-11-12 用户口径）。 */
+  bc: BcPointerView | null
   /** 两侧原始行（`null` = 那一侧没有这门课）。面板要用它们渲染各自的动作与徽章。 */
   ov: CourseOverviewRow | null
   lq: LoopQueueRow | null
@@ -527,6 +531,8 @@ export interface CourseMatrixInput {
   /** 开课标记清单（`stateView.trainingCourses`）；缺省 = 不可知（不改变旧行为）。
    *  已停课的课不会因为 hub 还压着 job 而报 `hub·无进程`。 */
   enabledCourses?: string[] | null
+  /** 逐课 BC epoch 指针（`stateView.bcProgress`；缺省 = 非 BC / 旧视图 ⇒ 指针列照旧读 `it`）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
   nowSec: number
@@ -601,6 +607,7 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
         : waitingCell(lq),
       hold: holdCell(ov, input.nowSec),
       kind: lq?.kind ?? 'rl',
+      bc: input.bcProgress?.[course] ?? null,
     }
   })
 }

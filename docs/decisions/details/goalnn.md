@@ -7245,3 +7245,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `dashboard/tests/ledger-bc-segmentation.test.ts`（重启段不重置 / 新 job_pending 重置 / 重写行折叠）。
 - **违反后果**：任何把「已算到哪」只存在内存里的入账游标，都会在进程重启时重算一次；
   「重启 = 重算」在大语料 BC 上是几千局的重支出，且面板会归零。
+
+## §2026-11-12-goalnn-console-bc-ep-pointer（控制台的 BC 课读数用 `ep`，不用 `it`）
+
+- **背景**（用户 2026-11-12）：「dashboard 左边栏最近训练的课程，bc 课程应该显示 epXXX，而非 itXXX。
+  顶部课程 pill 也是。」BC 一段训练 = **一张 job**，`it` 在整段里恒为 1——读作进度等于没有；
+  真正的进度是每个 epoch 回传的 `bc_epoch`（g1c 现场：`it1` + 60 个 epoch）。
+- **备选与否决**：① 把 BC 的 `it` 改成「epoch 计数」（动 `it` 语义）—— 否，`it` 是 hub 的 job
+  身份/恢复键（`bc-resume`、权重归档路径都按它），拿它当进度会连带改存档与续训；
+  ② 客户端直接拉 `/api/bcEpochs` 算——否，侧栏/pill 是 `stateView` 的一帧渲染，逐课再发请求
+  会把顶部渲染变成 N 个异步请求；③ 只改文字不改数据（把 `it1` 写成 `ep1`）—— 否，那就是撒谎。
+- **决定**：服务端在 `/api/state` 里 stamp `bcProgress: Record<course, {epoch,total}>`（只有 BC 课在表里）：
+  `epoch` = 账本段内 `bc_epoch` 的最大值（与面板曲线**同一个段锥** `job_pending`→`run_start`），
+  `total` = 最近一条 `run_start` 的 `epochs`。  客户端两处渲染器（侧栏迷你读数、顶部 pill）统一走
+  `pointerWord` / `pointerTitle`：BC ⇒ `ep57`（悬停给「共 60 个 epoch」），RL ⇒ `it37` 原义不变。
+  **BC 面板表头**同一口径：`/api/bcEpochs` 用同一个 `bcPointerFromLedgerTail` 带上 `pointer`，
+  表头写 `bcProgressWord` = `ep57/60`（原「共 N epoch」只是行数，且缺 epoch 时没有分母），
+  悬停与侧栏同一句 `pointerTitle`。
+  **课程矩阵与课程管理页**的指针列同口径（`pointerCell`：BC `ep57` / RL `it37` / 不可知 `—`），
+  列头由 `iter` / `it` 改名「指针」；为此 `bcProgress` 的候选集加上**全部 BC 课**（管理页列全课表，
+  历史 BC 课不在侧栏前 8；实测盘上只有 7 门 BC 课有 `tmp/`，账本尾行仍有逐拍 memo）。
+  账本尾行在 `state-view` 里**只读一次**（与收官判据 `loopCompletes` 共用 memo）。
+- **回归**：`dashboard/tests/ledger-bc-pointer.test.ts`（段锥/重启/换 job/空账本）、
+  `web-sidebar-recent.test.ts` 与 `training-pills.test.ts`（`ep57` 上屏、RL 不受影响、无 epoch 时 `ep—`）。
+- **违反后果**：任何直接拿 `it` 当 BC 进度的读数都永远停在 1；它会让「跑了 57/60 个 epoch」
+  看起来像「一轮都没跑完」。

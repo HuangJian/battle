@@ -3,7 +3,7 @@ import path from 'path'
 import { pidAlive } from '../../core/net'
 import { tmpCourseDir } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
-import { type ConsoleStateView, type MetricsView } from '../../web/view'
+import { type BcPointerView, type ConsoleStateView, type MetricsView } from '../../web/view'
 import { courseEnabled, enabledCoursesByOpenOrder, isBcCourse } from '../../stack/courses'
 import { evalboardEnabled } from '../../core/feature-flags'
 import { loadConsoleState } from '../actions'
@@ -27,6 +27,7 @@ import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
 import { collectLoopCompletes } from './loop-complete'
 import { readLogTail } from './logs'
+import { bcPointerFromLedgerTail } from './ledger'
 import { readClusterSnapshot } from '../bundles/snapshot'
 import {
   consoleWatched,
@@ -68,10 +69,20 @@ export async function buildStateView(
   //    历史课的账本都在盘上，逐拍全扫是浪费）；查看课无条件并入 ⇒ 「切到那门课就能看到」零回归。
   const trainerEntry = entryForCourse(loadRegistry(), 'trainingLoop', '')
   const loopAlive = !!trainerEntry && pidAlive(trainerEntry.pid)
+  // 逐课账本尾**只读一次**：收官判据（`collectLoopCompletes`）与 BC 的 epoch 指针读的是
+  // 同一批行，每拍读两遍纯浪费。命中缓存即复用（键 = 课程名，值 = 本拍的尾行）。
+  const tailCache = new Map<string, string[]>()
+  const ledgerTail = (c: string): string[] => {
+    const hit = tailCache.get(c)
+    if (hit) return hit
+    const lines = readLogTail(path.join(tmpCourseDir(c), 'training_log.jsonl'), 1000).lines
+    tailCache.set(c, lines)
+    return lines
+  }
   const loopCompletes = collectLoopCompletes(
     [...courses.filter((c) => courseEnabled(c)), course],
     loopAlive,
-    (c) => readLogTail(path.join(tmpCourseDir(c), 'training_log.jsonl'), 1000).lines,
+    ledgerTail,
   )
   // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
@@ -157,6 +168,18 @@ export async function buildStateView(
   //   的现序：那是 `discoverCourses` 按账本 mtime 新→旧排的，而账本每跑一轮就写——多门课并行
   //   时 pill 行每拍重排。开课标记只在开课那一刻写一次 ⇒ mtime = 开课时刻，固定不动。
   const training = enabledCoursesByOpenOrder(courses)
+  // ★2026-11-12：BC 课的进度指针（侧栏「最近训练」/ 顶部 pill / 课程矩阵 / 课程管理页的读数
+  //   单位是 **epoch**，不是轮）。候选 = 已开课 ∪ 查看课程 ∪ 最近几门（侧栏取前 5；多留三门余量）
+  //   ∪ **全部 BC 课**：管理页列全课表，历史 BC 课不在前 8 里，但那一页的指针列也要 `ep`。
+  //   非 BC 课不进表（客户端见 `bcProgress[course]` 才把读数换成 `ep`）——账本尾行走上面的
+  //   逐拍缓存，与收官判据读的是同一批行。
+  const bcProgress: Record<string, BcPointerView> = {}
+  const bcCandidates = new Set([...training, ...(course ? [course] : []), ...courses.slice(0, 8)])
+  for (const c of courses) if (isBcCourse(c)) bcCandidates.add(c)
+  for (const c of bcCandidates) {
+    if (!c || !isBcCourse(c)) continue
+    bcProgress[c] = bcPointerFromLedgerTail(ledgerTail(c))
+  }
   // 课程生命周期事实（2026-09-20：进程与课程解耦后，顶部「训练」入口与在训 pill 行的判据）。
   // 两个判据各自只有**一个**事实源，不在这里发明第三份：
   //  · enabled = **开课标记**（`training-enabled.txt`）——训练侧 `enabled_courses` 与 hub
@@ -276,6 +299,8 @@ export async function buildStateView(
     // 在训（= **已开课**）课程：课程 select 的多课高亮、顶部 pill 行、总览的「在训」列
     // 与门禁动作开关**同源**——一处判据修三次才会三处各说各话，故只在这里算一次。
     trainingCourses: training,
+    // BC 课的 epoch 指针（只有 BC 课在里面；RL 课客户端照旧读 `it`）。
+    bcProgress,
     overview,
     workerRegistry,
     offlinePush,

@@ -111,6 +111,63 @@ export interface LoopQueueRow {
 /** pill 圆点的色调（g=在跑 / y=有外部等待或暂停 / r=中止 / gray=没在推进）。 */
 export type CoursePillTone = 'g' | 'y' | 'r' | 'gray'
 
+/** **BC 课的进度指针**（账本 `bc_epoch` 的最新一条；2026-11-12 用户口径）。
+ *
+ *  为什么 BC 不读 `it`：BC 一轮就是一张 job，`it` 在整段（几十个 epoch）里恒为 1——
+ *  读作进度等于没有。它的进度单位是 epoch（`bc.py`/`bc-metrics` 每个 epoch 回传一次，
+ *  服务端从当天账本尾行取最大那条）。`null` 各自表示不可知，**不编 0**。 */
+export interface BcPointerView {
+  /** 已入账的最新 epoch（null = 一个都还没入账：job 刚起 / 账本还没写第一行）。 */
+  epoch: number | null
+  /** 课程声明的总 epoch（账本 `run_start.epochs`；null = 旧账本没有这一行）。 */
+  total: number | null
+}
+
+/** 课程「跑到哪了」的**读数词**（侧栏迷你读数与顶部 pill 共用这一处）。
+ *
+ *  BC = `ep57`（BC 的轮 = 一张 job，`it` 恒 1）；RL = `it37`（账本指针：下一轮）。 */
+export function pointerWord(v: { it: number | null; bc?: BcPointerView | null }): string {
+  if (v.bc) return `ep${v.bc.epoch ?? '—'}`
+  return `it${v.it ?? '—'}`
+}
+
+/** BC 面板表头的进度词：`ep57/60`（总 epoch 未知 ⇒ 只写 `ep57`，不编分母）。
+ *
+ *  与 `pointerWord` 的关系：侧栏/pill 的格子只放得下 `ep57`（悬停里给总数），
+ *  BC 面板表头是整行文字、要的就是「跑到哪 / 一共多少」这个比。 */
+export function bcProgressWord(p: BcPointerView | null | undefined): string {
+  const ep = `ep${p?.epoch ?? '—'}`
+  // 一个 epoch 都还没入账时只给 `ep—`：`ep—/60` 会被读成「第 60 个之前」
+  if (p?.epoch == null) return ep
+  return p.total && p.total > 0 ? `${ep}/${p.total}` : ep
+}
+
+/** 表格「指针」列的一格（课程矩阵 / 课程管理页共用）。
+ *
+ *  BC 课 ⇒ `ep57`（不读 `it`：整段只有一张 job）；RL 课 ⇒ `it37`，不可知 ⇒ `—`。
+ *  `title` 只在 BC 课给（RL 的悬停要按来源分「训练侧队列 / hub 账本尾行 / 云机回传」，
+ *  那份文案在面板里，不在这里编）。 */
+export function pointerCell(v: { it: number | null; bc?: BcPointerView | null }): {
+  text: string
+  title: string | null
+} {
+  if (v.bc) return { text: pointerWord(v), title: pointerTitle(v) }
+  return { text: v.it === null ? '—' : `it${v.it}`, title: null }
+}
+
+/** 读数词的悬停整句（与 `pointerWord` 同一处派生：两个渲染器不各写一份文案）。 */
+export function pointerTitle(v: { it: number | null; bc?: BcPointerView | null }): string {
+  const bc = v.bc
+  if (!bc) {
+    return `账本指针 it${v.it ?? '—'}：下一轮（本轮在飞时同号）；收官后不再前进`
+  }
+  const total = bc.total && bc.total > 0 ? `，共 ${bc.total} 个 epoch` : ''
+  if (bc.epoch == null) {
+    return `BC 课还没入账任何 epoch（每个 epoch 算完回传一行 bc_epoch${total}）——不是「第 0 个」`
+  }
+  return `BC 课已入账最新 ep${bc.epoch}${total}（进度单位是 epoch，不是轮：整段 BC 只有一张 job）`
+}
+
 /** 顶部「在训课程」pill 的一门课（用户 2026-09-20 口径：课程开训必须手动开）。
  *
  *  它是「顶部一次看全在训哪几门、各自到哪一轮」的最小事实：**课程名 + it 指针 + 一句状态**。
@@ -125,6 +182,8 @@ export interface CoursePillView {
   kind: LoopCourseKind
   /** 账本指针（下一轮）；null = 队列视图里没这门课（读面不可用，不是「第 0 轮」）。 */
   it: number | null
+  /** BC 课的 epoch 指针（`null`/缺省 = 不是 BC 课，或服务端没给）——读数词走 `pointerWord`。 */
+  bc?: BcPointerView | null
   /** 短状态（2-4 字；悬停有整句）——顶部一行里放不下整句，但也不能只给个圆点。 */
   status: string
   /** 展示用的**龄**（`fmtAge`；`<60s` 为空 ⇒ 省略）。与 `status` 分开是为了布局单行。 */
@@ -154,6 +213,9 @@ export function coursePills(input: {
   trainerRunning: boolean
   /** ★P1-11：训练侧读面新鲜度（`LoopQueueView.stale`）——读失败保旧值时改标注不改词。 */
   queueStale?: ReadStaleView | null
+  /** ★ 2026-11-12：逐课 BC epoch 指针（`stateView.bcProgress`）——只有 BC 课在里面。
+   *  缺省/null = 旧服务端没算（BC 课退回读 `it`，不报错）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   /** hub 侧事实（`stateView.overview`）：离线标记、**段内已回传轮数**、hub 是否认得这门课。
    *
    *  ★2026-09-23：由「离线课名集」升级为整个总览视图——旧形状只能回答「hub 说不说它离线」，
@@ -203,6 +265,7 @@ export function coursePills(input: {
       course,
       kind: r?.kind ?? 'rl',
       it: r?.it ?? null,
+      bc: input.bcProgress?.[course] ?? null,
       // 顶部 pill 只报状态（用户 2026-11-10）：`courseStatus` 的词是 `环节·归属`，上屏前摘掉
       // 归属（谁在做看悬停 / 课程矩阵）——映射只在 `pillStatusWord` 一处，pill 不自己拼词。
       status: pillStatusWord(st.text),
@@ -223,6 +286,8 @@ export interface RecentCourseView {
   course: string
   /** 最新 it（`null` = 不可知）。 */
   it: number | null
+  /** BC 课的 epoch 指针（`null`/缺省 = 非 BC 课或读不到）——上屏走 `pointerWord`。 */
+  bc?: BcPointerView | null
   /** 状态色点（与 pill 同一个 `tone` 词表）。 */
   tone: CoursePillTone
   /** 悬停全因（状态词 + 判据，直接给 pill 那份）。 */
@@ -236,6 +301,8 @@ export function recentCourseViews(input: {
   overview?: ParallelOverviewView | null
   trainerRunning: boolean
   loopCompletes?: Record<string, LoopComplete> | null
+  /** ★ 2026-11-12：BC epoch 指针（`stateView.bcProgress`；非 BC 课不在里面）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   /** 开课标记清单（`stateView.trainingCourses`）：已停课的课不报 hub 冲突。 */
   enabledCourses?: string[] | null
   limit?: number
@@ -258,10 +325,12 @@ export function recentCourseViews(input: {
       loopComplete: input.loopCompletes?.[course] ?? null,
       enabled: enabledSet ? enabledSet.has(course) : undefined,
     })
+    const bc = input.bcProgress?.[course] ?? null
     out.push({
       course,
       // 被接管：读云机回传的最新 it（本机这一段不跑这门课）。
       it: ov?.hold ? (ov.offlineLastIter ?? null) : (lq?.it ?? ov?.iter ?? null),
+      bc,
       tone: st.tone,
       title: st.title,
     })

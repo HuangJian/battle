@@ -462,6 +462,50 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
     expect(p).toMatchObject({ status: 'BC·卡住', age: '19m', tone: 'r' })
   })
 
+  // ★2026-11-12（用户口径）：「bc 课程应该显示 epXXX，而非 itXXX」——BC 的轮 = 一张 job，
+  //   `it` 恒为 1；进度单位是每 epoch 回传的 `bc_epoch`（`stateView.bcProgress`）。
+  it('②f BC 课读数是 `ep57`（不是 `it1`）；RL 课不受影响', () => {
+    const pills = view.coursePills({
+      courses: ['g1c', 'c'],
+      rows: [row({ course: 'g1c', kind: 'bc', it: 1 }), row({ course: 'c', it: 37 })],
+      trainerRunning: true,
+      bcProgress: { g1c: { epoch: 57, total: 60 } },
+    })
+    const bc = pills.find((p) => p.course === 'g1c')!
+    expect(bc.bc).toEqual({ epoch: 57, total: 60 })
+    expect(view.pointerWord(bc)).toBe('ep57')
+    expect(view.pointerTitle(bc)).toContain('ep57')
+    const rl = pills.find((p) => p.course === 'c')!
+    expect(rl.bc).toBeNull()
+    expect(view.pointerWord(rl)).toBe('it37')
+  })
+
+  it('②g BC 课还没入账 epoch ⇒ `ep—`（不拿 it 充数，也不写 ep0）', () => {
+    const [p] = view.coursePills({
+      courses: ['g1c'],
+      rows: [row({ course: 'g1c', kind: 'bc', it: 1 })],
+      trainerRunning: true,
+      bcProgress: { g1c: { epoch: null, total: 60 } },
+    })!
+    expect(view.pointerWord(p)).toBe('ep—')
+  })
+
+  it('②i 表格「指针」列：BC 课 `ep57`（带悬停），RL 课 `it37`，不可知 `—`', () => {
+    expect(view.pointerCell({ it: 1, bc: { epoch: 57, total: 60 } })).toEqual({
+      text: 'ep57',
+      title: view.pointerTitle({ it: 1, bc: { epoch: 57, total: 60 } }),
+    })
+    expect(view.pointerCell({ it: 37, bc: null })).toEqual({ text: 'it37', title: null })
+    expect(view.pointerCell({ it: null })).toEqual({ text: '—', title: null })
+  })
+
+  it('②h BC 面板表头的进度词 = `ep57/60`（分母未知就不写；一个 epoch 都没有只写 `ep—`）', () => {
+    expect(view.bcProgressWord({ epoch: 57, total: 60 })).toBe('ep57/60')
+    expect(view.bcProgressWord({ epoch: 57, total: null })).toBe('ep57')
+    expect(view.bcProgressWord({ epoch: null, total: 60 })).toBe('ep—')
+    expect(view.bcProgressWord(null)).toBe('ep—')
+  })
+
   it('③ 有活、没在飞、不在预取窗口 ⇒ 「PPO·无人取」（不再显示「采集中」假装在动）', () => {
     const [p] = view.coursePills({
       courses: ['c'],
@@ -784,6 +828,8 @@ async function viewWithPills(): Promise<ConsoleStateView> {
     course: 'a',
     courses: ['a', 'b', 'hist'],
     trainingCourses: ['b', 'a'],
+    // BC 课的读数单位 = epoch（服务端 `bcProgress`；RL 课不在表里）。
+    bcProgress: { b: { epoch: 5, total: 60 } },
     loopQueue: {
       blockedCourses: [],
       pools: {},
@@ -801,14 +847,19 @@ async function viewWithPills(): Promise<ConsoleStateView> {
 }
 
 describe('顶部在训课程 pill 行（SSR）', () => {
-  it('每门在训课一个 pill：课名 + it 数 + 状态 + ■ 停课；BC 课带徽标', async () => {
+  it('每门在训课一个 pill：课名 + 读数 + 状态 + ■ 停课；BC 课读数 = `ep` 且带徽标', async () => {
     const html = render.renderConsolePage(await viewWithPills())
     expect(html).toContain('class="tc-tpills"')
     expect(html).toContain('<b>a</b>')
+    // RL 课：账本指针 `it37`
     expect(html).toContain('it37')
     expect(html).toContain('等回传')
     expect(html).toContain('<b>b</b>')
-    expect(html).toContain('it5')
+    // ★2026-11-12（用户口径）：BC 课写 `ep5`，不写 `it5`（BC 的轮 = 一张 job，`it` 恒 1）
+    expect(html).toContain('ep5')
+    const group0 = html.match(/class="tc-tpills"[\s\S]*?<\/div>/)?.[0] ?? ''
+    expect(group0).toContain('ep5')
+    expect(group0).not.toContain('it5')
     expect(html).toContain('tc-tpill__kind')
     expect(html).toContain('aria-label="停课 a"')
     expect(html).toContain('aria-label="停课 b"')

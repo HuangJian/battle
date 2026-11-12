@@ -44,6 +44,7 @@ import {
   matrixBadgeTone,
   matrixDotTone,
   pauseOp,
+  pointerCell,
 } from '../../view'
 import type { ActionResult } from '../lib/api-client'
 import { Collapsible } from '../../components/Collapsible'
@@ -182,7 +183,8 @@ export function CourseAdmin({
                   <th scope="col">课程</th>
                   <th scope="col">状态</th>
                   <th scope="col">开课标记</th>
-                  <th scope="col">it</th>
+                  {/* 读数词与矩阵/pill 同一口径：RL = `it37`，BC = `ep57`。 */}
+                  <th scope="col">指针</th>
                   <th scope="col">在等什么</th>
                   <th scope="col">最后写入</th>
                   {onAction ? <th scope="col">操作</th> : null}
@@ -232,8 +234,11 @@ export function CourseAdmin({
                         {r.enabled ? '已开课' : r.tmp ? '未开课' : '未落盘'}
                       </span>
                     </td>
-                    <td className="tc-ca__num" title={iterTitle(r)}>
-                      {r.iter === null ? '—' : `it${r.iter}`}
+                    <td
+                      className="tc-ca__num"
+                      title={pointerCell({ it: r.iter, bc: r.bc }).title ?? iterTitle(r)}
+                    >
+                      {pointerCell({ it: r.iter, bc: r.bc }).text}
                     </td>
                     <td className="tc-ca__wait" title={r.waiting.title}>
                       {r.waiting.text}

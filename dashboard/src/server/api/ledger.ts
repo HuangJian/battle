@@ -2,7 +2,7 @@
 import { readFileSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { curriculaDir, tmpLogsDir } from '../../core/paths'
-import type { CourseEdit } from '../../web/view'
+import type { BcPointerView, CourseEdit } from '../../web/view'
 import { readCourseTail } from './course-source'
 
 export function courseEditFromLedgerTail(lines: string[]): CourseEdit | null {
@@ -95,12 +95,12 @@ export interface BcEvalRow {
   ts: number
 }
 
-export function bcRowsFromLedgerTail(lines: string[]): {
-  epochs: BcEpochRow[]
-  evals: BcEvalRow[]
-} {
-  const epochs: BcEpochRow[] = []
-  const evals: BcEvalRow[] = []
+/** 账本尾行的**段起点**：优先 `job_pending`（job 身份），没有才退回 `run_start`，两者都无 ⇒ 0。
+ *
+ *  面板（`bcRowsFromLedgerTail`）与侧栏/pill 的 epoch 指针（`bcPointerFromLedgerTail`）必须用
+ *  **同一个锚**：否则会出现「面板画到 ep57、侧栏写 ep58」这种两处各说一个数。
+ */
+function bcSegmentStart(lines: string[]): number {
   // 段锚**优先 job 身份**（hub 发布时追加的 `job_pending`，2026-11-12），退回 `run_start`
   // （2026-09-14）。为什么先 job：重启 trainer 会多写一条 `run_start`，但 **job 没换**
   // （hub 的 `bc-resume` 继续、重认领不重发）——按 run_start 分段会把重启前已算的 epoch
@@ -127,6 +127,45 @@ export function bcRowsFromLedgerTail(lines: string[]): {
   }
   if (jobAt >= 0) from = jobAt
   else if (startAt >= 0) from = startAt
+  return from
+}
+
+/** BC 课的进度指针（侧栏「最近训练」与顶部 pill 的读数；2026-11-12 用户口径）。
+ *
+ *  `epoch` = 段内 `bc_epoch` 的最大 epoch（= 面板曲线的右端，两处同一个数）；
+ *  `total` = 最近一条 `run_start` 声明的 `epochs`（课程总 epoch；旧账本没这个键 ⇒ null）。
+ *  读不到任何一行 ⇒ `{ epoch: null, total: null }`（不可知，**不编 0**）。
+ */
+export function bcPointerFromLedgerTail(lines: string[]): BcPointerView {
+  let epoch: number | null = null
+  let total: number | null = null
+  const from = bcSegmentStart(lines)
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i]!.trim()
+    if (!t) continue
+    let r: { event?: unknown; epoch?: unknown; epochs?: unknown }
+    try {
+      r = JSON.parse(t) as typeof r
+    } catch {
+      continue
+    }
+    if (!r || typeof r !== 'object') continue
+    // 总 epoch 属于**这一趟 run**（run_start 写在 job_pending 之前，不在段内）。
+    if (r.event === 'run_start' && typeof r.epochs === 'number' && r.epochs > 0) total = r.epochs
+    if (i < from || r.event !== 'bc_epoch') continue
+    const ep = typeof r.epoch === 'number' && Number.isFinite(r.epoch) ? r.epoch : 0
+    if (ep > 0 && (epoch === null || ep > epoch)) epoch = ep
+  }
+  return { epoch, total }
+}
+
+export function bcRowsFromLedgerTail(lines: string[]): {
+  epochs: BcEpochRow[]
+  evals: BcEvalRow[]
+} {
+  const epochs: BcEpochRow[] = []
+  const evals: BcEvalRow[] = []
+  const from = bcSegmentStart(lines)
   const num = (v: unknown): number | null =>
     typeof v === 'number' && Number.isFinite(v) ? v : null
   /** eval 行的 panel（B4）：旧账本没有它 ⇒ undefined；坏值逐键退 null，不整体丢行。 */
@@ -274,22 +313,31 @@ function latestBcCodeSnapshot(course: string): BcCodeSnapshotRow | null {
   }
 }
 
-/** BC epoch 面板视图：账本尾窗解析 + 课程 eval.every_epochs（面板头提示用）。 */
+/** BC epoch 面板视图：账本尾窗解析 + 课程 eval.every_epochs（面板头提示用）。
+ *
+ *  `pointer` 与侧栏/pill 的读数**同一个函数**（`bcPointerFromLedgerTail`，同一份尾行）——
+ *  面板表头的 `ep57/60` 与侧栏的 `ep57` 不会各说一个数。 */
 export async function buildBcEpochsView(course: string | undefined): Promise<{
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
+  pointer: BcPointerView
   codeSnapshot: BcCodeSnapshotRow | null
 }> {
-  if (!course) return { epochs: [], evals: [], evalEveryEpochs: null, codeSnapshot: null }
+  const noPointer: BcPointerView = { epoch: null, total: null }
+  if (!course) {
+    return { epochs: [], evals: [], evalEveryEpochs: null, pointer: noPointer, codeSnapshot: null }
+  }
   let epochs: BcEpochRow[] = []
   let evals: BcEvalRow[] = []
+  let pointer: BcPointerView = noPointer
   try {
     // 读历史可回退备份（plan/course-metrics-persistence §3.3 R5）。
     const tail = await readCourseTail(course, 'training_log.jsonl', 4000)
     const parsed = bcRowsFromLedgerTail(tail)
     epochs = parsed.epochs.slice(-100)
     evals = parsed.evals.slice(-20)
+    pointer = bcPointerFromLedgerTail(tail)
   } catch {
     /* 无账本 → 空态 */
   }
@@ -301,5 +349,5 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   } catch {
     /* 非 BC 课程 / 读不到 → null */
   }
-  return { epochs, evals, evalEveryEpochs, codeSnapshot: latestBcCodeSnapshot(course) }
+  return { epochs, evals, evalEveryEpochs, pointer, codeSnapshot: latestBcCodeSnapshot(course) }
 }

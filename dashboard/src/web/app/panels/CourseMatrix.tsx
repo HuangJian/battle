@@ -45,6 +45,7 @@ import { useState } from 'preact/hooks'
 import {
   FROZEN_RECLAIMS,
   type ArchivedCourseView,
+  type BcPointerView,
   frozenJobs,
   isTrainingRow,
   kindBadge,
@@ -58,6 +59,7 @@ import {
   matrixMeta,
   mergeCourseRows,
   pauseOp,
+  pointerCell,
   pendingTitle,
   stepTitle,
   waitingClass,
@@ -146,6 +148,9 @@ export interface CourseMatrixProps {
   /** 开课标记清单（`stateView.trainingCourses`）：已停课的课不报 `hub·无进程`。
    *  缺省/`null` = 不可知（旧视图，行为不变）。 */
   enabledCourses?: string[] | null
+  /** 逐课 BC epoch 指针（`stateView.bcProgress`）——指针列对 BC 课给 `ep57`。
+   *  缺省/`null` = 旧视图 ⇒ 指针列照旧读 `it`（行为不变）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
@@ -165,6 +170,7 @@ export function CourseMatrix({
   loopQueue,
   loopCompletes,
   enabledCourses,
+  bcProgress,
   course,
   onSelectCourse,
   onAction,
@@ -180,6 +186,7 @@ export function CourseMatrix({
     queue: loopQueue,
     loopCompletes,
     enabledCourses: enabledCourses ?? null,
+    bcProgress: bcProgress ?? null,
     viewing: course,
     nowSec,
   })
@@ -315,8 +322,9 @@ export function CourseMatrix({
               <tr>
                 <th scope="col">课程</th>
                 <th scope="col">状态</th>
+                {/* 读数词：RL = `it37`（账本指针），BC = `ep57`（整段只有一张 job，it 恒 1）。 */}
                 <th scope="col" className="tc-mx__num">
-                  iter
+                  指针
                 </th>
                 <th scope="col">本轮</th>
                 <th scope="col">训练侧 · 在等什么</th>
@@ -359,6 +367,7 @@ function MatrixTr({
   const kind = lq ? kindBadge(lq) : null
   const pause = pauseOp(lq)
   const badgeTone = matrixBadgeTone(r.status.tone)
+  const pc = pointerCell({ it: r.iter, bc: r.bc })
   return (
     <tr
       className={`tc-mx__row${r.viewing ? ' tc-mx__row--cur' : ''}${
@@ -404,8 +413,11 @@ function MatrixTr({
           {r.status.text}
         </span>
       </td>
-      <td className="tc-mx__num" title={r.iter === null ? iterMissingTitle(r) : iterTitle(r)}>
-        {r.iter === null ? '—' : `it${r.iter}`}
+      <td
+        className="tc-mx__num"
+        title={pc.title ?? (r.iter === null ? iterMissingTitle(r) : iterTitle(r))}
+      >
+        {pc.text}
       </td>
       <td className="tc-mx__round">
         {r.ov?.hold ? (

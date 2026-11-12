@@ -15,11 +15,14 @@
 
 import { useCallback, useEffect, useState } from 'preact/hooks'
 import {
+  bcProgressWord,
   buildBcTrend,
   evalWinByEpoch,
   missingEpochs,
+  pointerTitle,
   type BcEpochRow,
   type BcEvalRow,
+  type BcPointerView,
 } from '../../view'
 import { DataTable, type Col } from '../../components/DataTable'
 import { Pill } from '../../components/Pill'
@@ -45,6 +48,8 @@ interface BcEpochsView {
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
+  /** 本课进度指针（账本段内最大 epoch + `run_start.epochs`）——表头 `ep57/60` 的来源。 */
+  pointer: BcPointerView
   codeSnapshot: BcCodeSnapshot | null
 }
 
@@ -52,6 +57,7 @@ const EMPTY: BcEpochsView = {
   epochs: [],
   evals: [],
   evalEveryEpochs: null,
+  pointer: { epoch: null, total: null },
   codeSnapshot: null,
 }
 
@@ -229,6 +235,10 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
     <div className="tc-card tc-card--pad">
       <div className="tc-line tc-mb-2">
         <b>BC Epoch</b>
+        {/* 进度与侧栏/pill 同一口径（2026-11-12）：`ep57/60`，而不是「共 N epoch」的行数。 */}
+        <span className="tc-muted tc-small" title={pointerTitle({ it: null, bc: view.pointer })}>
+          {bcProgressWord(view.pointer)}
+        </span>
         {view.evalEveryEpochs !== null && view.evalEveryEpochs > 0 ? (
           <Pill tone="gray" title="课程 eval.every_epochs">
             每 {view.evalEveryEpochs} epoch eval
@@ -350,7 +360,12 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
           >
             <div className="tc-line">
               <h3 className="tc-m-0">BC Epoch 完整指标表</h3>
-              <span className="tc-muted tc-small">共 {epochs.length} epoch</span>
+              <span
+                className="tc-muted tc-small"
+                title={pointerTitle({ it: null, bc: view.pointer })}
+              >
+                {bcProgressWord(view.pointer)}
+              </span>
               <span className="tc-grow" />
               <button
                 type="button"

@@ -27,12 +27,15 @@
  */
 
 import {
+  type BcPointerView,
   coursePills,
   type CoursePillTone,
   type LoopComplete,
   type LoopQueueRow,
   type ParallelOverviewView,
   PILL_WORD_GUIDE,
+  pointerTitle,
+  pointerWord,
 } from '../../view'
 
 export interface TrainingPillsProps {
@@ -49,6 +52,9 @@ export interface TrainingPillsProps {
    *  于是**一件产物都没回传**的课也被写成「回传中」（用户报障：三个离线课显示为
    *  「回传中 ×2 + 等回传 ×1」，而三个都还没被云机取走）。`null` = hub 侧不可读。 */
   overview?: ParallelOverviewView | null
+  /** ★2026-11-12：逐课 BC epoch 指针（`stateView.bcProgress`）——BC 课的读数词是 `ep57`。
+   *  缺省/null = 旧服务端没算（BC 课退回读 `it`）。 */
+  bcProgress?: Record<string, BcPointerView> | null
   /** 登记在册的 push worker id（rl-config `nodes[].gpu_push`）：holder 不在表里 ⇒ 悬停点名。
    *  `null`/缺省 = 名单不可知（不点名）——与「未登记」是两件事。 */
   registeredWorkers?: string[] | null
@@ -78,6 +84,7 @@ export function TrainingPills({
   rows,
   trainerRunning,
   overview,
+  bcProgress,
   registeredWorkers,
   loopCompletes,
   viewCourse,
@@ -90,6 +97,7 @@ export function TrainingPills({
     rows,
     trainerRunning,
     overview,
+    bcProgress,
     registeredWorkers,
     loopCompletes,
   })
@@ -114,7 +122,7 @@ export function TrainingPills({
             role="button"
             tabIndex={0}
             aria-label={
-              `${p.course}，${p.status}${p.age ? ` ${p.age}` : ''}，it${p.it ?? '—'}` +
+              `${p.course}，${p.status}${p.age ? ` ${p.age}` : ''}，${pointerWord(p)}` +
               (active ? '（正在查看）' : '，点击查看其趋势与指标')
             }
             title={
@@ -132,11 +140,10 @@ export function TrainingPills({
             <span className={DOT[p.tone]} />
             {p.kind === 'bc' ? <span className="tc-tpill__kind">BC</span> : null}
             <b>{p.course}</b>
-            <span
-              className="v"
-              title={`账本指针 it${p.it ?? '—'}：下一轮（本轮在飞时同号）；收官后不再前进`}
-            >
-              it{p.it ?? '—'}
+            {/* 读数词走 `pointerWord`：RL 课 = `it37`（账本指针），BC 课 = `ep57`
+                （BC 的轮 = 一张 job，`it` 恒 1——读作进度等于没有）。 */}
+            <span className="v" title={pointerTitle(p)}>
+              {pointerWord(p)}
             </span>
             <span className="tc-tpill__state">
               {p.status}

@@ -430,6 +430,8 @@ export function App({ initial }: AppProps) {
     overview: stateView?.overview ?? null,
     trainerRunning,
     loopCompletes: stateView?.loopCompletes ?? null,
+    // BC 课的读数单位是 epoch（服务端从账本尾行取的 `bcProgress`；RL 课不在表里）。
+    bcProgress: stateView?.bcProgress ?? null,
     // 已停课的课在侧栏不报 hub 冲突（现场：hub 还压着 1 个 job）。
     enabledCourses: trainingCourses,
   })
@@ -503,6 +505,8 @@ export function App({ initial }: AppProps) {
                 rows={stateView?.loopQueue?.rows ?? []}
                 trainerRunning={trainerRunning}
                 overview={stateView?.overview ?? null}
+                // BC 课读数 = epoch（`bcProgress`；RL 课不在表里，照旧读 it 指针）。
+                bcProgress={stateView?.bcProgress ?? null}
                 // 收官停车态（账本尾行 run_complete）：已收官的课不得再报「推进中」
                 //（与告警坞的「✅ 训练已完成」同一份事实，resume 后服务端条目自动消失）。
                 loopCompletes={stateView?.loopCompletes ?? null}
@@ -618,6 +622,8 @@ export function App({ initial }: AppProps) {
                 loopCompletes={stateView?.loopCompletes ?? null}
                 // 已停课的课不报 `hub·无进程`（开课标记 = 唯一判据；缺省不可知）。
                 enabledCourses={stateView?.trainingCourses ?? null}
+                // BC 课的指针读 epoch（`ep57`），与侧栏/pill/BC 面板同一个服务端指针。
+                bcProgress={stateView?.bcProgress ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}

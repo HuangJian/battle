@@ -19,6 +19,7 @@ import {
   buildCourseAdmin,
   courseAdminSummary,
   lastWriteCell,
+  pointerCell,
 } from '../src/web/view'
 import type { CourseOverviewRow, ParallelOverviewView } from '../src/web/view/course-overview'
 import type { LoopQueueRow, LoopQueueView } from '../src/web/view/loop-queue'
@@ -286,5 +287,41 @@ describe('course-admin · 封存动作可用性', () => {
       archived: [manifest('gone')],
     })
     expect(courseAdminSummary(v)).toBe('已开课 1 · 已停 1 · 未落盘 1 · 已封存 1')
+  })
+})
+
+// ★2026-11-12（用户口径）：指针列对 BC 课读 epoch（`ep57`），不再是恒为 1 的 it。
+describe('课程管理页：BC 课的指针 = epoch', () => {
+  it('bcProgress 进行（与矩阵同一次合并），BC 课拿到 ep 指针', () => {
+    const view = buildCourseAdmin({
+      courses: ['g1c'],
+      training: ['g1c'],
+      facts: null,
+      overview: hub([{ course: 'g1c', training: true, iter: 1 }]),
+      queue: queue([queueRow('g1c', { kind: 'bc', it: 1, training: true })]),
+      bcProgress: { g1c: { epoch: 57, total: 60 } },
+      viewing: 'g1c',
+      nowSec: NOW,
+    })
+    const row = view.rows.find((r) => r.course === 'g1c')!
+    expect(row.bc).toEqual({ epoch: 57, total: 60 })
+    const cell = pointerCell({ it: row.iter, bc: row.bc })
+    expect(cell.text).toBe('ep57')
+    expect(cell.title).toContain('共 60 个 epoch')
+  })
+
+  it('非 BC 课（bcProgress 里没有它）⇒ 指针照旧是 `it7`', () => {
+    const view = buildCourseAdmin({
+      courses: ['c9'],
+      training: ['c9'],
+      facts: null,
+      overview: hub([{ course: 'c9', training: true, iter: 7 }]),
+      queue: queue([queueRow('c9', { training: true })]),
+      bcProgress: { g1c: { epoch: 57, total: 60 } },
+      viewing: 'c9',
+      nowSec: NOW,
+    })
+    const row = view.rows.find((r) => r.course === 'c9')!
+    expect(pointerCell({ it: row.iter, bc: row.bc })).toEqual({ text: 'it7', title: null })
   })
 })

@@ -409,6 +409,11 @@ export interface ConsoleStateView {
    *  （python 队列状态 `state`，2026-09-19 / R3-5）。课程 select 的多课高亮与总览的
    *  「在训」列同源；缺省（旧视图/测试直构）= 无在训课。 */
   trainingCourses?: string[]
+  /** **BC 课的 epoch 指针**（2026-11-12 用户口径：BC 课的读数应该是 `ep57`，不是 `it1`）。
+   *
+   *  取数面 = 该课训练账本尾行的 `bc_epoch`（与服务端面板同一个段锥）；**只有 BC 课在里面**，
+   *  所以「课程在不在表里」就是「要不要把读数换成 ep」的判据。缺省/旧视图 = 没算（UI 退回 `it`）。 */
+  bcProgress?: Record<string, { epoch: number | null; total: number | null }> | null
   /** 多课程并行总览（hub `/admin/queue` + 每课一行）；缺省/null = 无 hub 应答或未计算。 */
   overview?: ParallelOverviewView | null
   /** 课程生命周期事实（2026-09-20：进程启动与课程解耦后，顶部「开课/停课」入口的判据）。
