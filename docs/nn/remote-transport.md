@@ -6,6 +6,35 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §150 云机 BC 日志逐行时间戳（2026-11-12）
+
+**现场**（用户贴的 worker 日志）：`[11:30:51] [worker] job …: BC start …` 之后是整片没有时间的
+`[train]` / `[epoch …]` 行——「第 7 个 epoch 什么时候打完」无法与 hub 事件、隧道断连对齐。
+
+**根因**：worker 在**本进程内**调 `train/bc.py::train`（`remote/bc_job.py`，torch / paddle 两个后端
+同构），训练器的 `print` 直接落 stdout；`[worker]` 行的时间戳是 `bc_job` 的 `log=` lambda 自己加的，
+训练器那几条走的是另一条路。
+
+**改法**：训练器三处（`worker/train/bc.py`、`bc_paddle.py`、`device.py` 的退化 WARNING）统一走
+`common.log.say()`——`[HH:MM:SS] ` 前缀 + `flush=True`，**正文一字不改**（`[train]` / `[epoch …]`
+保持原位；设备退化那条的措辞是云端日志面板的抓取锚）。
+
+**契约**：本地 `trainer/bc_loop.py` 按行首解析 `[epoch …]`（账本 `bc_epoch` 与 eval 边界都锚在
+行首）⇒ 解析前用 `_strip_stamp()` 剥掉时间戳。不剥的后果是**静默停写**：本地训练看起来正常，
+账本/面板却没有新行。用例：`tests/worker/test_bc_log_stamp.py`（`say` 格式 + 退化 WARNING 带戳）、
+`tests/trainer/test_bc_loop_stamp.py`（带戳 epoch 行剥后仍匹配生产正则；无戳行原样）。
+
+**生效面**：云机跑的是代码快照 ⇒ 需要有新快照的发布（控制台「重打快照」后再发 BC job）；
+本地 BC 腿直接生效（顺带也有了时间戳，`log("[bc.py] …")` 不会双戳）。
+
+**同日措辞修正（v6 fire 加权行）**：v6 的 fire 是 **3 类**（no-shot / before-turn /
+after-turn），`fire_pos_weight` 只是「非 legacy 路径」的哨兵 `-1`——旧日志把它印成
+`fire_pos_weight=-1.00（正例加权开启） … neg=111651 pos=0`，读者会以为加权没生效
+（用户 2026-11-12 报障）。两行文案的唯一来源改到 `bc_core.fire_weight_log_lines`：
+v6 印 `fire class weight=inverse-freq（3 类 · 强度见 weight_exponent）` + 三类计数；
+legacy 二分类的原文案**一字不改**（历史产物/日志面板按它抓）。用例钉在
+`tests/worker/test_bc_log_stamp.py`（v6 不得出现「正例加权 / pos=」；legacy 逐字相等）。
+
 ## §149 rollout 每轮 63s 的真因：串行 connect 的「每地址 timeout」× 无 IPv6 路由（2026-11-11）
 
 > **本节更正 §148 的第 1、3 条修法**（探活 3s→8s、缓存探针 5s→15s 已收回）。

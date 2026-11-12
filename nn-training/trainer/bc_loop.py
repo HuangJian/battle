@@ -35,6 +35,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -45,6 +46,16 @@ from pathlib import Path
 
 from common.cli import house_parser
 from common.log import log
+
+# BC 训练器（`worker/train/bc.py` / `bc_paddle.py` / `device.py`）的每条日志自带
+# `[HH:MM:SS] ` 前缀（2026-11-12：云机 BC 日志逐行可对时）。解析前必须剥掉——
+# `line.startswith("[epoch")` 与账本正则都锚在行首，不剥就会**静默停写** bc_epoch。
+_STAMP_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ")
+
+
+def _strip_stamp(line: str) -> str:
+    """剥掉行首的 `[HH:MM:SS] `（无戳行原样返回）。"""
+    return _STAMP_PREFIX.sub("", line)
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.code_snapshot import (
     current_code_zip_path,
@@ -545,16 +556,19 @@ def train_local_bc(
     for raw in proc.stdout:
         line = raw.rstrip()
         out_lines.append(line)
-        if line.startswith(
+        # 训练器自带时间戳（2026-11-12）——中继与解析都走剥戳后的正文：`log()` 会再
+        # 加一道自己的时间戳，账本正则要的是 `[epoch` 在行首。
+        bare = _strip_stamp(line)
+        if bare.startswith(
             ("[epoch", "[train] done", "[train] samples", "[train] majority", "[train] checkpoint")
         ):
-            log(f"[bc.py] {line}")
+            log(f"[bc.py] {bare}")
         # 本地模式同权：epoch 行 → bc_epoch 账本；eval 边界 → ckpt 权重 → 多地图 eval
-        if jsonl_path is not None and line.startswith("[epoch"):
+        if jsonl_path is not None and bare.startswith("[epoch"):
             m = _re.match(
                 r"\[epoch\s+(\d+)/(\d+)\] train_loss=([\d.]+) val_loss=([\d.]+) "
                 r"acc move=([\d.]+) fire=([\d.]+)(?: value=[\d.]+ )?lr=([\d.eE+]+)",
-                line,
+                bare,
             )
             if m:
                 gepoch = int(m.group(1))
@@ -571,7 +585,7 @@ def train_local_bc(
                     },
                 )
             if eval_on:
-                m2 = _re.match(r"\[epoch\s+(\d+)/", line)
+                m2 = _re.match(r"\[epoch\s+(\d+)/", bare)
                 if m2:
                     gepoch = int(m2.group(1))
                     if (

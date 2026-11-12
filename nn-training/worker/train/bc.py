@@ -54,6 +54,7 @@ from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.cli import house_parser, run_main
+from common.log import say
 from common.schema import OBS_SCHEMA_MAJOR
 from worker.data.dataset import make_loaders
 from worker.data.weights_io import load_state_into, save_weights_json
@@ -65,6 +66,7 @@ from worker.models.student import PPOStudent, StudentNet
 from worker.train.bc_core import (
     SMOOTH_WINDOW,
     early_stop_epoch,
+    fire_weight_log_lines,
     resolve_fire_pos_weight,
 )
 from worker.train.bc_core import (
@@ -308,12 +310,12 @@ def train(args) -> dict:
         args.num_workers,
         action_v6=action_v6,
     )
-    print(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
+    say(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
 
     # Majority-class baseline: a floor to interpret val_loss against (audit gap #2).
     mb = _majority_baseline(train_dl, action_v6)
     _mb_tail = f" hold={mb['hold']:.4f}" if action_v6 else ""
-    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}{_mb_tail}")
+    say(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}{_mb_tail}")
 
     # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
@@ -358,13 +360,16 @@ def train(args) -> dict:
         fire_class_weight = (
             torch.tensor([1.0, float(fire_pos_weight)], device=dev) if fire_pos_weight > 0 else None
         )
-    print(
-        f"[train] fire_pos_weight={fire_pos_weight:.2f}"
-        f"{'（正例加权开启）' if fire_class_weight is not None else '（关闭）'}"
-        f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
-    )
-    if action_v6:
-        print(f"[train] weight_exponent={weight_exp:.2f}（0=不加权 / 1=完全 inverse-freq）")
+    # 措辞与分支住 `bc_core.fire_weight_log_lines`（v6 的三类加权 / legacy 的二分类权重
+    # 不能共用一句模板；2026-11-12）。
+    for _line in fire_weight_log_lines(
+        action_v6=action_v6,
+        weight_exp=weight_exp,
+        fire_pos_weight=fire_pos_weight,
+        fire_weighted=fire_class_weight is not None,
+        fire_counts=counts["fire"],
+    ):
+        say(_line)
     # v6 的 `PPOStudent.forward` 恒返回 4 元组（move/fire/hold/value）⇒ 即使 value_coef=0
     # 也必须用 PPOStudent（StudentNet 没有 value_head），否则解包失败。
     action_v6_pre = bool(getattr(args, "action_v6", False))
@@ -403,7 +408,7 @@ def train(args) -> dict:
         )
     )  # type: ignore
     if getattr(args, "resume", None):
-        print(f"[train] resuming from {args.resume}")
+        say(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
     model = model.to(dev)
     raw_model = model
@@ -429,11 +434,11 @@ def train(args) -> dict:
         # 静态事实（开机横幅已印 `device=`），DP 包装本身与 `raw_model` 的落盘纪律逐字不变。
         model = cast(Any, torch.nn.DataParallel(raw_model))
     n_params = param_count(raw_model)
-    print(
+    say(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"
     )
     if n_params > 200_000:
-        print(f"[train] WARNING: {n_params} > 200K budget; consider shrinking conv_ch/head_hidden")
+        say(f"[train] WARNING: {n_params} > 200K budget; consider shrinking conv_ch/head_hidden")
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
@@ -607,7 +612,7 @@ def train(args) -> dict:
         if ha is not None:
             history.setdefault("hold_acc", []).append(round(ha, 4))
         history["value_loss"].append(float("nan") if math.isnan(vl) else round(vl, 4))
-        print(
+        say(
             f"[epoch {gepoch:3d}/{epoch_total}] "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"acc move={ma:.3f} fire={fa:.3f} "
@@ -629,7 +634,7 @@ def train(args) -> dict:
                 }
         stop_at = early_stop_epoch(history["val_loss"], patience)
         if stop_at is not None and epoch >= stop_at:
-            print(
+            say(
                 f"[train] early stop at epoch {gepoch}/{epoch_total}："
                 f"滑动平均 val_loss（window={SMOOTH_WINDOW}）连续 {patience} epoch 无改善"
             )
@@ -648,7 +653,7 @@ def train(args) -> dict:
                     "ckpt": True,
                 },
             )
-            print(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
+            say(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
         # Per-epoch hook（BC 云端回传 2026-09-13）：worker/run_bc 以回调持久化/回传
         # 每 epoch 权重与指标——中断接续训练的落点。传 raw_model（裸键 state_dict）。
         on_epoch = getattr(args, "on_epoch", None)
@@ -718,7 +723,7 @@ def train(args) -> dict:
         torch.save(
             {"state_dict": raw_model.state_dict(), "arch": raw_model.arch(), "meta": meta}, args.checkpoint
         )
-    print(
+    say(
         f"[train] done in {time.time() - t0:.1f}s -> archive: {versioned} (active: {args.out}) schema_major={OBS_SCHEMA_MAJOR}"
     )
     return {
@@ -765,7 +770,7 @@ def _safe_copy(src: str, dst: str) -> None:
             return
         except PermissionError:
             if attempt == 29:
-                print(
+                say(
                     f"[warn] _safe_copy: cannot update {dst} after 30 s; archive {src} is safe",
                     file=sys.stderr,
                 )

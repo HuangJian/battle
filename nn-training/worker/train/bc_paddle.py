@@ -32,6 +32,7 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
+from common.log import say
 from common.schema import OBS_SCHEMA_MAJOR
 from worker.data.mirror import mirror_x
 from worker.data.npyio import load_dataset
@@ -46,6 +47,7 @@ from worker.train.bc_core import (
     EARLY_STOP_MIN_DELTA,
     SMOOTH_WINDOW,
     early_stop_epoch,
+    fire_weight_log_lines,
     resolve_fire_pos_weight,
     sanitize_json,
     smoothed_val_loss,
@@ -238,7 +240,7 @@ def train(args: Any) -> dict[str, Any]:
     policy_extra = bool(getattr(args, "policy_extra", False))
     data = load_dataset(str(args.data_dir), action_v6=action_v6)
     tr_idx, val_idx, sizes, split_kind = _split(data, float(args.val_split), seed)
-    print(
+    say(
         f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}"
         f" split={split_kind}"
     )
@@ -254,7 +256,7 @@ def train(args: Any) -> dict[str, Any]:
             else "cpu"
         )
     paddle.set_device(dev)
-    print(f"[train] backend=paddle device={paddle.get_device()}")
+    say(f"[train] backend=paddle device={paddle.get_device()}")
 
     use_value = (float(getattr(args, "value_coef", 0.0) or 0.0) > 0 or action_v6)
     model: paddle.nn.Layer = (
@@ -263,12 +265,12 @@ def train(args: Any) -> dict[str, Any]:
         else StudentNet(action_v6=action_v6, policy_extra=policy_extra)
     )
     if getattr(args, "resume", None):
-        print(f"[train] resuming from {args.resume}")
+        say(f"[train] resuming from {args.resume}")
         missing = load_state_into(model, str(args.resume))
         if missing:
-            print(f"[train] WARNING: resume 未装载 {len(missing)} 个键")
+            say(f"[train] WARNING: resume 未装载 {len(missing)} 个键")
     n_params = sum(int(p.numel()) for p in model.parameters())
-    print(
+    say(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: "
         f"{n_params <= 200_000}"
     )
@@ -276,7 +278,7 @@ def train(args: Any) -> dict[str, Any]:
     counts = _class_counts(data, tr_idx, action_v6)
     mb = _majority_baseline(counts)
     tail = f" hold={mb['hold']:.4f}" if action_v6 else ""
-    print(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}{tail}")
+    say(f"[train] majority-baseline CE: move={mb['move']:.4f} fire={mb['fire']:.4f}{tail}")
 
     weight_exp = float(getattr(args, "weight_exponent", 1.0) or 0.0)
     if weight_exp < 0:
@@ -306,13 +308,16 @@ def train(args: Any) -> dict[str, Any]:
             if fire_pos_weight > 0
             else None
         )
-    print(
-        f"[train] fire_pos_weight={fire_pos_weight:.2f}"
-        f"{'（正例加权开启）' if fire_class_weight is not None else '（关闭）'}"
-        f" fire counts neg={counts['fire'].get(0, 0)} pos={counts['fire'].get(1, 0)}"
-    )
-    if action_v6:
-        print(f"[train] weight_exponent={weight_exp:.2f}（0=不加权 / 1=完全 inverse-freq）")
+    # 措辞与分支住 `bc_core.fire_weight_log_lines`（v6 的三类加权 / legacy 的二分类权重
+    # 不能共用一句模板；2026-11-12）。
+    for _line in fire_weight_log_lines(
+        action_v6=action_v6,
+        weight_exp=weight_exp,
+        fire_pos_weight=fire_pos_weight,
+        fire_weighted=fire_class_weight is not None,
+        fire_counts=counts["fire"],
+    ):
+        say(_line)
 
     scheduler = paddle.optimizer.lr.CosineAnnealingDecay(
         learning_rate=float(args.lr), T_max=max(1, int(args.epochs))
@@ -473,7 +478,7 @@ def train(args: Any) -> dict[str, Any]:
         if ha is not None:
             history.setdefault("hold_acc", []).append(round(ha, 4))
         history["value_loss"].append(float("nan") if vl != vl else round(vl, 4))
-        print(
+        say(
             f"[epoch {gepoch:3d}/{epoch_total}] "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
             f"acc move={ma:.3f} fire={fa:.3f} "
@@ -492,7 +497,7 @@ def train(args: Any) -> dict[str, Any]:
                 best_state = {k: t.clone() for k, t in model.state_dict().items()}
         stop_at = early_stop_epoch(history["val_loss"], patience)
         if stop_at is not None and epoch >= stop_at:
-            print(
+            say(
                 f"[train] early stop at epoch {gepoch}/{epoch_total}："
                 f"滑动平均 val_loss（window={SMOOTH_WINDOW}）连续 {patience} epoch 无改善"
             )
@@ -510,7 +515,7 @@ def train(args: Any) -> dict[str, Any]:
                     "ckpt": True,
                 },
             )
-            print(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
+            say(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
         on_epoch = getattr(args, "on_epoch", None)
         if on_epoch is not None:
             on_epoch(
@@ -564,7 +569,7 @@ def train(args: Any) -> dict[str, Any]:
     )
     save_weights_json(model, versioned, extra_meta=meta)
     _activate(versioned, str(args.out))
-    print(
+    say(
         f"[train] done in {time.time() - t0:.1f}s -> archive: {versioned} "
         f"(active: {args.out}) schema_major={OBS_SCHEMA_MAJOR} backend=paddle"
     )

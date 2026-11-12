@@ -15,6 +15,7 @@ torch——`tests/worker/test_bc_course.py::test_resolve_fire_pos_weight` 因此
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 #: 平滑窗口（B3/B1，2026-11-05/07）：单点 val_loss 的抖动由 fire 头噪声主导（与
 #: fire_acc 相关 −0.965），拿单点做「新低」等于在噪声里抽签。早停与选权重共用。
@@ -27,6 +28,39 @@ def smoothed_val_loss(val_losses: list[float], window: int = SMOOTH_WINDOW) -> f
     """最近 `window` 个 val_loss 的算术平均（不足 window 时用已有的全部）。"""
     recent = val_losses[-max(1, window) :]
     return sum(recent) / len(recent)
+
+
+def fire_weight_log_lines(
+    *,
+    action_v6: bool,
+    weight_exp: float,
+    fire_pos_weight: float,
+    fire_weighted: bool,
+    fire_counts: Mapping[int, int],
+) -> list[str]:
+    """fire 头加权的日志行（v6 两行 / legacy 一行）——**措辞的唯一来源**（2026-11-12）。
+
+    同一句模板对两种头形会撑谎：
+      · **v6（3 类：no-shot / before-turn / after-turn）**：`fire_pos_weight` 只是
+        「非 legacy 路径」的哨兵 `-1`，真实加权是按类的 inverse-frequency、强度写在
+        `weight_exponent` 行。旧文案「正例加权开启 + pos=0（而 neg=11 万）」会被读成
+        「加权没生效」（用户 2026-11-12 报障）；
+      · **legacy（2 类）**：`fire_pos_weight` 就是正例权重，**原文案一字不改**
+        （历史产物 / 日志面板按它抓）。
+    """
+    if action_v6:
+        c = fire_counts
+        return [
+            f"[train] fire class weight={'inverse-freq' if fire_weighted else 'off'}"
+            f"（3 类 · 强度见 weight_exponent） fire counts"
+            f" no-shot={c.get(0, 0)} before-turn={c.get(1, 0)} after-turn={c.get(2, 0)}",
+            f"[train] weight_exponent={weight_exp:.2f}（0=不加权 / 1=完全 inverse-freq）",
+        ]
+    return [
+        f"[train] fire_pos_weight={fire_pos_weight:.2f}"
+        f"{'（正例加权开启）' if fire_weighted else '（关闭）'}"
+        f" fire counts neg={fire_counts.get(0, 0)} pos={fire_counts.get(1, 0)}"
+    ]
 
 
 def early_stop_epoch(

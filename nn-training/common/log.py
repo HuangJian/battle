@@ -66,6 +66,20 @@ def log(msg: str, *, course: str | None = None) -> None:
         _mirror(sink, line)
 
 
+def say(msg: str, *, file: Any = None) -> None:
+    """带 `[HH:MM:SS] ` 前缀的一行（训练器 stdout 日志；2026-11-12）。
+
+    为什么要它：云端 BC 作业由 worker 在**本进程内**调 `train/bc.py::train`——训练器
+    直接 `print` 的行没有时间戳，而它上下文的 `[worker]` 行都有，读日志时无法把
+    “epoch 7 是什么时候打完的”与 hub 事件对齐。训练器改用本函数后每行都可对时；
+    正文一字不改（`[train]` / `[epoch …]` 的前缀保持原位，本地 `trainer/bc_loop.py`
+    解析前会剥掉这个时间戳）。
+    与 `log()` 的区别：不参与课程前缀 / 镜像（那是 supervisor 的行路由，训练器的
+    行由栈上下文决定去哪）。
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True, file=file)
+
+
 def get_prefix() -> str:
     """当前课程前缀（诊断/测试用；读面上就是「这一行属于哪门课」）。"""
     return _PREFIX

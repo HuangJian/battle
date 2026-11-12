@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from common.log import say
+
 #: `--device` 里表示「多卡 DataParallel」的两个写法。
 DP_DEVICE_ALIASES = ("cuda-dp", "dp")
 
@@ -55,9 +57,9 @@ def resolve_bc_device(
     n = int(count) if available else 0
     if n > 1:
         return "cuda-dp", True
-    print(
+    # 措辞一字不改（云端日志面板按 `[train]` 抓）；只多一道时间戳（2026-11-12）。
+    say(
         f"[train] WARNING: 请求 cuda-dp 但可见 {n} 张卡——退化为单卡 "
-        f"{'cuda' if n else 'cpu'}（与 remote/worker 的 cuda-dp 退化语义一致）",
-        flush=True,
+        f"{'cuda' if n else 'cpu'}（与 remote/worker 的 cuda-dp 退化语义一致）"
     )
     return ("cuda" if n else "cpu"), False
