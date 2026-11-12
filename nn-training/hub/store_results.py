@@ -140,6 +140,8 @@ class ResultsMixin:
     _job_dir: Any
     #: 兄弟簇 `store_leases` 的方法（★M5：epoch 是 BC 唯一的进度信号，落盘即打点）
     note_job_progress: Any
+    #: 兄弟簇 `store_leases` 的方法（★2026-11-12：job 收官/失败 ⇒ 解除课程级 BC 独占）
+    _bc_lock_clear: Any
 
     # ---- 结果 ----
     def store_result(self, job_id: str, result: dict) -> bool:
@@ -155,6 +157,7 @@ class ResultsMixin:
             # weights_json / opt_tar 以 base64 存于 result.json（< 数 MB，可接受）
             # 备份授权随胜负结束（同一份 job 不会再有人回传）：及时收紧 token 闸。
             self._backup_authorized.discard(job_id)
+            self._bc_lock_clear(job_id)  # 收官 ⇒ 下一份 BC job 立刻可领（不等 900s 窗）
             return True
 
     def store_job_failure(self, job_id: str, rec: dict) -> bool:
@@ -178,6 +181,7 @@ class ResultsMixin:
             tmp = jd / (FAIL_NAME + ".tmp")
             tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, dst)
+            self._bc_lock_clear(job_id)
             return True
 
     # ---- BC 每 epoch 回传（2026-09-13，plan/bc-cloud-integration.plan.md）----

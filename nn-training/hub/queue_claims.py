@@ -246,6 +246,11 @@ class QueueClaimsMixin(QueuePeer):
         st = self._store_of(job_id)
         if st is None or st.job_kind(job_id) not in BOTH_ROLE_KINDS:
             return ""
+        # ★2026-11-12：课程级 BC 独占（落盘，hub/trainer 重启后仍有效）——同一门课只许
+        # 原独占者领；别的 worker 在进度窗内一个 BC job 也拿不到（含 trainer 重启后的新 job）。
+        owner, _held = st.bc_exclusive_owner()
+        if owner and owner != wid:
+            return f"bc_exclusive:{owner}"
         holds = self.worker_holds(wid)
         if not holds:
             return ""

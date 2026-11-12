@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 from collections import namedtuple
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -266,6 +267,7 @@ class LeaseMixin:
         now = self._now() if at is None else float(at)
         with self._progress_lock:
             self._last_progress[job_id] = now
+        self._bc_lock_touch(job_id)  # 课程级独占窗跟随 epoch 进度续命（落盘）
 
     def job_progress_at(self, job_id: str) -> float:
         """最近一次进度锚（`epoch`）时刻；从未有过 ⇒ `0.0`（哨兵：`>` 才是真值）。"""
@@ -310,6 +312,71 @@ class LeaseMixin:
             if prog > 0.0 and now - prog <= self._bc_progress_stale_sec():
                 return jid
         return ""
+
+    # ---- BC **课程级**独占锁（2026-11-12 用户口径：hub/trainer 重启也不丢）----
+    def _bc_lock_path(self) -> Path:
+        # 课程目录 = job 根的父级（`_JobStore` 每课程一份）→ 同课所有 job 共用一个锁文件。
+        return Path(self._job_dir("_probe_")).parent / "bc-exclusive.json"
+
+    def bc_exclusive_owner(self) -> tuple[str, str]:
+        """课程当前 BC 独占者 `(worker, job_id)`；无/已超窗 ⇒ `("", "")`。
+
+        判据与租约同一把尺子（**进度窗**；BC 腿没有心跳），记录**落盘** ⇒ hub 重启后
+        照样挡住别的 worker；trainer 重启换了 job_id 也挡（一门课同时只有一个 BC 跑者）。
+        """
+        try:
+            rec = json.loads(self._bc_lock_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "", ""
+        if not isinstance(rec, dict):
+            return "", ""
+        prog = float(rec.get("progress_at") or 0.0)
+        claimed = float(rec.get("claimed_at") or 0.0)
+        anchor = prog if prog > 0.0 else claimed
+        if anchor <= 0.0 or self._now() - anchor > self._bc_progress_stale_sec():
+            return "", ""
+        return str(rec.get("worker_id") or ""), str(rec.get("job_id") or "")
+
+    def _bc_lock_write(self, job_id: str, worker_id: str) -> None:
+        now = self._now()
+        rec = {"job_id": job_id, "worker_id": worker_id, "claimed_at": now, "progress_at": now}
+        p = self._bc_lock_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+    def _bc_lock_touch(self, job_id: str) -> None:
+        """原 worker 的 epoch 进度续独占窗；记录不属于本 job ⇒ 不动。"""
+        p = self._bc_lock_path()
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(rec, dict) or str(rec.get("job_id") or "") != job_id:
+            return
+        rec["progress_at"] = self._now()
+        try:
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError:
+            pass
+
+    def _bc_lock_clear(self, job_id: str) -> None:
+        p = self._bc_lock_path()
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(rec, dict) and str(rec.get("job_id") or "") == job_id:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     def job_kind(self, job_id: str) -> str:
         """job 的**kind**（`manifest.kind`；读不到 ⇒ `"ppo"`，与 `role_of` 同一兜底）。
@@ -445,20 +512,28 @@ class LeaseMixin:
         exp = self._leases.get(job_id)
         if exp is None:
             return LEASE_NONE  # 无租约（含 backup 副本：它只写 _last_heartbeat，从不写 _leases）
-        if exp <= now:
-            return LEASE_EXPIRED
-        if self._lease_workers.get(job_id, "").startswith(PUSH_WORKER_PREFIX):
-            return LEASE_ALIVE  # push 派发器代持：豁免（见 docstring）
         if self.job_kind(job_id) in BOTH_ROLE_KINDS:
             # ★M5（Q5）：bc 判活**只认进度**（`POST /jobs/{id}/epoch`）——心跳（60s）只说明
             # 进程还在，不说明在推进，而 drain 闸与让出回收都挂在推进上。进度静默超窗 ⇒
             # 孤儿（= 让出）：与过期**同路回收**（stale 记录 + 毒包计数 + 账本事件），
             # 下一个 worker 顶上。代价（有意，plan §3-M5）：原 holder 可能仍在跑——最坏这份
             # BC 被别人重跑一遍，有界（它自己的回传还是会被首写锁定挡掉）。
+            #
+            # ★2026-11-12（用户报障）：**进度闸排在 TTL 之前**。BC 腿从不发心跳
+            # （`remote/worker.py` 的 bc 分叉早退，没有 `job_round` 的心跳线程）⇒ 只靠
+            # 每 epoch 的进度锚续命；而旧顺序先看 `CLAIM_TTL_SEC=300s`，一门还在正常
+            # 回传权重的 BC 课认领满 5 分钟就回池，被第二台云机重领（双跑白烧 GPU）。
+            # 锚缺省回落到 claim 时刻：判据不全时宁可保守继续独占到窗口结束。
             prog = self.job_progress_at(job_id)
+            if prog <= 0.0:
+                prog = float((self._claimed.get(job_id) or {}).get("at") or 0.0)
             if prog <= 0.0 or now - prog > self._bc_progress_stale_sec():
                 return LEASE_ORPHAN
             return LEASE_ALIVE
+        if exp <= now:
+            return LEASE_EXPIRED
+        if self._lease_workers.get(job_id, "").startswith(PUSH_WORKER_PREFIX):
+            return LEASE_ALIVE  # push 派发器代持：豁免（见 docstring）
         at = (self._claimed.get(job_id) or {}).get("at")
         if at is None:
             return LEASE_ALIVE  # 判据不全（不该发生）⇒ 保守：不当孤儿
@@ -514,6 +589,12 @@ class LeaseMixin:
                 if self.ledger_net_state(job_id) != "job_pending":
                     return False, "", "cancelled"
                 self._cancelled.discard(job_id)
+            if self.job_kind(job_id) in BOTH_ROLE_KINDS:
+                # ★2026-11-12：课程级 BC 独占（落盘）——别的 worker 在窗口内领不走；
+                # 原 worker 重领自己的课放行（hub 重启内存丢租约时靠它续命）。
+                owner, _held = self.bc_exclusive_owner()
+                if owner and owner != worker_id:
+                    return False, "", f"bc_exclusive:{owner}"
             blocked = self.role_blocked(job_id, role)
             if blocked:
                 # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约
@@ -582,6 +663,8 @@ class LeaseMixin:
                 self._stale_holders.pop(job_id, None)  # 有人接手了 ⇒ 避让记录使命结束
             self._last_heartbeat[job_id] = now
             self.note_job_progress(job_id, now)  # ★M5：领取即第一个进度锚（同 hold 口径）
+            if self.job_kind(job_id) in BOTH_ROLE_KINDS:
+                self._bc_lock_write(job_id, worker_id)  # 课程级独占落盘（重启不丢）
             self._bump_epoch_locked()
             return True, token, "ok"
 
@@ -600,6 +683,7 @@ class LeaseMixin:
             self._lease_workers.pop(job_id, None)
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：放弃 ⇒ 进度锚一并清（不留死读数）
+            self._bc_lock_clear(job_id)
             self._stale_holders.pop(job_id, None)  # 主动放弃 ≠ 跑死，不该触发避让
             self._drop_commitment_locked(job_id)
             return True
@@ -629,6 +713,7 @@ class LeaseMixin:
         self._lease_owners.pop(job_id, None)
         self._lease_workers.pop(job_id, None)
         self._last_progress.pop(job_id, None)  # ★M5：回收 ⇒ 进度锚清（重领写新的）
+        self._bc_lock_clear(job_id)
         # 过期 = 承诺失效：不清的话「有人承诺在跑」会在死 worker 上永远挂着 ⇒
         # 该 job 的优先级永远上不到 highest（唯一性闸的判据）。
         self._drop_commitment_locked(job_id)
@@ -779,6 +864,7 @@ class LeaseMixin:
             self._stale_holders.pop(job_id, None)  # 主动还租约 = 不是「跑死了」，不该避让
             self._last_heartbeat.pop(job_id, None)
             self._last_progress.pop(job_id, None)  # ★M5：还租约 ⇒ 不再是 drain
+            self._bc_lock_clear(job_id)
             self._drop_commitment_locked(job_id)  # 还租约 = 撒销承诺（见该方法 docstring）
             return True
 

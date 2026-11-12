@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
+    BOTH_ROLE_KINDS,
     PRIORITY_NONE,
     ROLE_OFFLINE,
     WORKER_ERROR_TTL_SEC,
@@ -334,7 +335,19 @@ class QueueObserveMixin(QueuePeer):
         if st is None:
             return None
         exp = st._leases.get(job_id)
-        return None if exp is None else round(exp - st._now(), 1)
+        if exp is None:
+            return None
+        if st.job_kind(job_id) in BOTH_ROLE_KINDS:
+            # ★2026-11-12：BC 腿没有心跳（进度是唯一续命信号）⇒ 剩余独占时长按**进度窗**算，
+            # 与 `_lease_state` 同一把尺子；否则 `/jobs/{id}/status` 在 300s 后把一份仍在
+            # 正常回传的 BC 读成 pending（旧行为）。
+            now = float(st._now())
+            prog = float(st.job_progress_at(job_id))
+            if prog <= 0.0:
+                prog = float((st._claimed.get(job_id) or {}).get("at") or 0.0)
+            if prog > 0.0:
+                return round(max(0.0, float(st._bc_progress_stale_sec()) - (now - prog)), 1)
+        return round(float(exp) - float(st._now()), 1)
 
     def last_heartbeat_ago(self, job_id: str) -> float | None:
         """距上次心跳秒数；从未心跳/无归属 → None。"""
