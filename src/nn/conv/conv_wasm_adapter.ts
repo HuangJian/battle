@@ -24,6 +24,7 @@
  */
 
 import { readFileSync } from 'fs'
+import { D, H, IN_CH, SP, STEM_W } from './conv-shape'
 
 interface WasmRunner {
   /** 上传权重（实例变化时）并跑 features → pooled 与 bufA 均已填。返回 true=本次成功。
@@ -46,13 +47,7 @@ interface WasmRunner {
   ): boolean
 }
 
-const BOARD = 26
-// v7（2026-11-01）：stem 输入通道 = 17 obs + 2 coord（v3 起 16 + 2；v7 观测 ch16 新增）
-const IN_CH = 19
-const SP = BOARD * BOARD
-const H = 64
-const D = 8
-const STEM_W = IN_CH * 576
+// 形状常量走 ./conv-shape（与 native 侧、engine-bench 同一份；见该文件的事故说明）。
 const DW_W = D * H * 25
 const PW_W = D * H * H
 /** 权重 blob 的 float 数（== conv_native.h::CF_BLOB_FLOATS）。 */

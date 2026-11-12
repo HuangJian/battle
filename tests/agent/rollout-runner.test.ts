@@ -5,7 +5,9 @@ import path from 'node:path'
 import {
   MIN_NODE_MAJOR,
   NODE_FAIL_LIMIT,
+  BenchFn,
   EngineChoice,
+  benchResultValid,
   choiceValid,
   chooseByBench,
   bundleNameFor,
@@ -185,7 +187,12 @@ describe('createRolloutRunner', () => {
       writeFileSync(out, '// bundled\n')
       return { status: 0 }
     },
-    bench: () => ({ bunMs: 8.0, nodeMs: 5.0 }),
+    bench: () => ({
+      bunMs: 8.0,
+      nodeMs: 5.0,
+      bunArm: 'native' as const,
+      nodeArm: 'wasm' as const,
+    }),
     ...extra,
   })
 
@@ -382,20 +389,67 @@ describe('引擎微基准自动选择（§374）', () => {
     expect(parseBench('garbage')).toEqual({ ms: null, arm: 'unknown' })
   })
 
+  it('choiceValid：空转基准（BENCH-ARM unknown / ms≈0）不得当有效缓存长期复用', () => {
+    // 2026-11-12 现场：engine-choice.json 里 bunMs=0.002 / nodeMs=0 / 双臂 unknown，
+    // 版本与资产 sha 全对 ⇒ 老版 choiceValid 判有效，采样节点每次启动都吃假数字。
+    const bad: EngineChoice = {
+      winner: 'bun',
+      bunMs: 0.002,
+      nodeMs: 0,
+      bunVer: '1.4.4',
+      nodeVer: 'v22.23.2',
+      wasmSha: 'abc',
+      ts: 1,
+      bunArm: 'unknown',
+      nodeArm: 'unknown',
+      nativeSha: 'n1',
+    }
+    expect(choiceValid(bad, '1.4.4', 'v22.23.2', 'abc', 'n1')).toBe(false)
+  })
+
+  it('benchResultValid：unknown / 0ms / null / ts 一律不算有效基准', () => {
+    expect(benchResultValid({ ms: 2.5, arm: 'native' })).toBe(true)
+    expect(benchResultValid({ ms: 3.6, arm: 'wasm' })).toBe(true)
+    expect(benchResultValid({ ms: 0.002, arm: 'unknown' })).toBe(false)
+    expect(benchResultValid({ ms: 0, arm: 'wasm' })).toBe(false)
+    expect(benchResultValid({ ms: null, arm: 'native' })).toBe(false)
+    expect(benchResultValid({ ms: 2.5, arm: 'ts' })).toBe(false)
+  })
+
+  it('choiceValid：基准实现指纹变了就重测（旧缓存缺字段按有效处理）', () => {
+    const c: EngineChoice = {
+      winner: 'bun',
+      bunMs: 2.5,
+      nodeMs: 3.6,
+      bunVer: '1.4.4',
+      nodeVer: 'v22.23.2',
+      wasmSha: 'abc',
+      ts: 1,
+      bunArm: 'native',
+      nodeArm: 'wasm',
+      nativeSha: 'n1',
+      benchSha: 'b1',
+    }
+    expect(choiceValid(c, '1.4.4', 'v22.23.2', 'abc', 'n1', 'b1')).toBe(true)
+    expect(choiceValid(c, '1.4.4', 'v22.23.2', 'abc', 'n1', 'b2')).toBe(false)
+    const legacy = { ...c } as EngineChoice
+    delete legacy.benchSha
+    expect(choiceValid(legacy, '1.4.4', 'v22.23.2', 'abc', 'n1', '')).toBe(true)
+  })
+
   it('node 明显更快 → 选 node 且落缓存；二次创建读缓存不再跑基准', () => {
     const { repoRoot, bundleDir } = setup()
     let benchCalls = 0
-    const mk = (bench: () => { bunMs: number; nodeMs: number } | null) =>
-      createRolloutRunner(opts(repoRoot, bundleDir, { bench }))
+    const mk = (bench: BenchFn) => createRolloutRunner(opts(repoRoot, bundleDir, { bench }))
     const r1 = mk(() => {
       benchCalls++
-      return { bunMs: 8.0, nodeMs: 5.0 }
+      return { bunMs: 8.0, nodeMs: 5.0, bunArm: 'native' as const, nodeArm: 'wasm' as const }
     })
     expect(r1.engine).toBe('node')
     expect(benchCalls).toBe(1)
     const r2 = mk(() => {
       benchCalls++
-      return { bunMs: 8.0, nodeMs: 999 }
+      return { bunMs: 8.0, nodeMs: 999, bunArm: 'native' as const, nodeArm: 'wasm' as const }
     }) // 缓存命中→不应再测
     expect(r2.engine).toBe('node') // 沿用缓存
     expect(benchCalls).toBe(1)
@@ -404,7 +458,14 @@ describe('引擎微基准自动选择（§374）', () => {
   it('node 不达标(迟滞内) → 选 bun', () => {
     const { repoRoot, bundleDir } = setup()
     const r = createRolloutRunner(
-      opts(repoRoot, bundleDir, { bench: () => ({ bunMs: 8.0, nodeMs: 8.1 }) }),
+      opts(repoRoot, bundleDir, {
+        bench: () => ({
+          bunMs: 8.0,
+          nodeMs: 8.1,
+          bunArm: 'native' as const,
+          nodeArm: 'wasm' as const,
+        }),
+      }),
     )
     expect(r.engine).toBe('bun')
   })
@@ -413,6 +474,29 @@ describe('引擎微基准自动选择（§374）', () => {
     const { repoRoot, bundleDir } = setup()
     const r = createRolloutRunner(opts(repoRoot, bundleDir, { bench: () => null }))
     expect(r.engine).toBe('bun')
+  })
+
+  it('无效基准（unknown/0ms）不落缓存 → 回退 bun 且每次启动重测', () => {
+    const { repoRoot, bundleDir } = setup()
+    let calls = 0
+    const mk = () =>
+      createRolloutRunner(
+        opts(repoRoot, bundleDir, {
+          bench: () => {
+            calls++
+            return {
+              bunMs: 0.002,
+              nodeMs: 0,
+              bunArm: 'unknown' as const,
+              nodeArm: 'unknown' as const,
+            }
+          },
+        }),
+      )
+    expect(mk().engine).toBe('bun')
+    expect(mk().engine).toBe('bun')
+    expect(calls).toBe(2)
+    expect(existsSync(path.join(bundleDir, 'engine-choice.json'))).toBe(false)
   })
 
   it('native 臂让 bun 反超 node ⇒ 选 bun（T1′：native 参与引擎选择）', () => {
@@ -452,7 +536,12 @@ describe('引擎微基准自动选择（§374）', () => {
       opts(repoRoot, bundleDir, {
         log: (m: string) => logs.push(m),
         native: () => ({ ok: false, libPath: null, sha: '', reason: '探针：无库' }),
-        bench: () => ({ bunMs: 6.16, nodeMs: 3.6 }),
+        bench: () => ({
+          bunMs: 6.16,
+          nodeMs: 3.6,
+          bunArm: 'wasm' as const,
+          nodeArm: 'wasm' as const,
+        }),
       }),
     )
     expect(r.engine).toBe('node')
@@ -467,7 +556,7 @@ describe('引擎微基准自动选择（§374）', () => {
         forceNode: true,
         bench: () => {
           called = true
-          return { bunMs: 1, nodeMs: 1 }
+          return { bunMs: 1, nodeMs: 1, bunArm: 'wasm' as const, nodeArm: 'wasm' as const }
         },
       }),
     )

@@ -272,6 +272,8 @@ export function detectBestNode(opts: BestNodeOptions = {}): NodeRuntime | null {
 export const ENGINE_BENCH_MARGIN = 0.97
 const BENCH_ENTRY_TS = 'tools/agent/engine-bench.ts'
 const BENCH_MJS = 'engine-bench.mjs'
+/** engine-bench.ts 的源指纹 stamp：TS 源不在 codeHash 白名单里，产物得自己判陈旧。 */
+const BENCH_STAMP = 'engine-bench.mjs.sha'
 const CHOICE_FILE = 'engine-choice.json'
 const BENCH_ROUNDS = 2
 
@@ -289,6 +291,8 @@ export interface EngineChoice {
   nodeArm?: BenchArm
   /** native 共享库指纹（重建过就要重测）。 */
   nativeSha?: string
+  /** 微基准实现（engine-bench.ts）指纹：口径/形状一改就重测，旧数字不得沿用。 */
+  benchSha?: string
 }
 
 /** features 实际用到的后端（与 src/nn/conv/conv_native_adapter.ts 的 featuresEngine 对齐）。 */
@@ -313,8 +317,14 @@ export function engineChoiceFile(bundleDir: string): string {
 }
 
 /**
- * 缓存是否仍有效：bun/node 版本、wasm sha、**native 库指纹**都没变才算数。
- * nativeSha 是 2026-09-21 新加的口径（不带上它 ⇒ 换了 native 库还吃旧基准）。
+ * 缓存是否仍有效：bun/node 版本、wasm sha、**native 库指纹**、**基准实现指纹**都没变才算数。
+ * nativeSha 是 2026-09-21 新加的口径（不带上它 ⇒ 换了 native 库还吃旧基准）；
+ * benchSha 是 2026-11-12 新加的（engine-bench.ts 不在 codeHash 白名单，改了基准也不会
+ * 触发 bundle 清理 ⇒ 得自带指纹）。
+ *
+ * 另加**内容有效性**：显式 unknown 的 arm / 非正的耗时说明那一轮基准根本没跑进内核
+ * （形状漂移时的空转），这种数字即使版本全对也不是测量，必须重测，不能被永久复用。
+ * 旧缓存缺 arm/benchSha 字段时按有效处理（兼容升级前的正常结果）。
  */
 export function choiceValid(
   c: EngineChoice | null,
@@ -322,13 +332,17 @@ export function choiceValid(
   nodeVer: string,
   wasmSha: string,
   nativeSha = '',
+  benchSha = '',
 ): boolean {
+  if (!c) return false
+  if (c.bunArm === 'unknown' || c.nodeArm === 'unknown') return false
+  if (!(c.bunMs > 0) || !(c.nodeMs !== null && c.nodeMs > 0)) return false
   return (
-    !!c &&
     c.bunVer === bunVer &&
     c.nodeVer === nodeVer &&
     c.wasmSha === wasmSha &&
-    (c.nativeSha ?? '') === nativeSha
+    (c.nativeSha ?? '') === nativeSha &&
+    (c.benchSha ?? '') === benchSha
   )
 }
 
@@ -340,6 +354,17 @@ export function chooseByBench(
 ): RolloutEngine {
   if (nodeMs === null || !Number.isFinite(nodeMs) || nodeMs <= 0) return 'bun'
   return nodeMs <= bunMs * margin ? 'node' : 'bun'
+}
+
+/**
+ * 真跑结果是否算一次有效测量：**必须真的进了加速后端**（native/wasm）且耗时为正。
+ * `BENCH-ARM unknown` + `BENCH 0.00x` 是形状守卫把两个后端都挡掉后的空转，不是性能数据；
+ * 让它进引擎选择会得到恒为 bun 的假结论（chooseByBench 对 nodeMs<=0 的兜底正好掩盖了它）。
+ */
+export function benchResultValid(r: { ms: number | null; arm: BenchArm }): boolean {
+  return (
+    r.ms !== null && Number.isFinite(r.ms) && r.ms > 0 && (r.arm === 'native' || r.arm === 'wasm')
+  )
 }
 
 export interface BenchResult {
@@ -442,7 +467,19 @@ export function runEngineBench(
   try {
     fs.mkdirSync(bundleDir, { recursive: true })
     const mjs = path.join(bundleDir, BENCH_MJS)
-    if (!fs.existsSync(mjs)) {
+    const benchSrc = path.join(repoRoot, BENCH_ENTRY_TS)
+    // engine-bench.ts 不在 codeHash 白名单里：TS 源改了不会触发 prepareBundleDir 清理，
+    // 旧的 engine-bench.mjs 会被一直复用（2026-11-12 修形状漂移时发现的第二个坑）。
+    // 用源指纹 stamp 自行判陈旧：产物依赖变了就重打包。
+    const srcSha = fs.existsSync(benchSrc) ? sha256File(benchSrc) : ''
+    const stamp = path.join(bundleDir, BENCH_STAMP)
+    let stampSha: string | null = null
+    try {
+      stampSha = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8') : null
+    } catch {
+      /* 读不到 → 重打包 */
+    }
+    if (!fs.existsSync(mjs) || stampSha !== srcSha) {
       const b =
         build ??
         ((entry: string, out: string) => {
@@ -453,11 +490,12 @@ export function runEngineBench(
           })
           return { status: r.status ?? -1, stderr: String(r.stderr ?? '') }
         })
-      const r = b(path.join(repoRoot, BENCH_ENTRY_TS), mjs)
+      const r = b(benchSrc, mjs)
       if (r.status !== 0 || !fs.existsSync(mjs)) {
         log(`[rollout-runner] engine-bench 打包失败 rc=${r.status} → 略过微基准`)
         return null
       }
+      fs.writeFileSync(stamp, srcSha)
     }
     // 打包臂要自带 wasm 资产（wasm 适配器按模块相对路径解析；缺了会静默回退 TS 路径）
     const wasm = path.join(repoRoot, WASM_ASSET_REL)
@@ -492,11 +530,19 @@ export function runEngineBench(
           .slice(0, 200),
       }
     }
-    const bunR = run(bunPath, path.join(repoRoot, BENCH_ENTRY_TS))
+    const bunR = run(bunPath, benchSrc)
     const nodeR = run(node.bin, mjs)
-    if (!bunR || !nodeR || bunR.ms === null || nodeR.ms === null) {
+    // 显式 null 检查兼作类型收窄；benchResultValid 再挡「跑进了空转」的假数字。
+    if (
+      !bunR ||
+      !nodeR ||
+      bunR.ms === null ||
+      nodeR.ms === null ||
+      !benchResultValid(bunR) ||
+      !benchResultValid(nodeR)
+    ) {
       log(
-        `[rollout-runner] 微基准失败 bun=${bunR?.ms ?? null}(${bunR?.arm ?? '?'}) node=${nodeR?.ms ?? null}(${nodeR?.arm ?? '?'}) → 略过`,
+        `[rollout-runner] 微基准失败/无效（须 native|wasm 且耗时>0）bun=${bunR?.ms ?? null}(${bunR?.arm ?? '?'}) node=${nodeR?.ms ?? null}(${nodeR?.arm ?? '?'}) → 略过`,
       )
       return null
     }
@@ -587,6 +633,8 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
       const bunVer = engineVersion()
       const wasmPath = path.join(opts.repoRoot, WASM_ASSET_REL)
       const wasmSha = fs.existsSync(wasmPath) ? sha256File(wasmPath) : ''
+      const benchSrc = path.join(opts.repoRoot, BENCH_ENTRY_TS)
+      const benchSha = fs.existsSync(benchSrc) ? sha256File(benchSrc) : ''
       const choiceFile = engineChoiceFile(bundleDir)
       // native 资产（rollout-eval-opt T2）：bun 臂的加速来源；失败只降级、不抛。
       // 放在探测之后、基准之前 —— 基准要按「本机真实会跑的臂」计时。
@@ -600,7 +648,7 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
       try {
         if (fs.existsSync(choiceFile)) {
           const j = JSON.parse(fs.readFileSync(choiceFile, 'utf8')) as EngineChoice
-          if (choiceValid(j, bunVer, node.version, wasmSha, nat.sha)) loaded = j
+          if (choiceValid(j, bunVer, node.version, wasmSha, nat.sha, benchSha)) loaded = j
         }
       } catch {
         /* 缓存损坏 → 重测 */
@@ -631,8 +679,14 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
         const bench: BenchResult | null = raw
           ? { ...raw, bunArm: raw.bunArm ?? 'unknown', nodeArm: raw.nodeArm ?? 'unknown' }
           : null
-        if (!bench) {
-          reason = `node ${node.version} 可用但微基准失败 → bun`
+        // 纵深防御：真跑路径 runEngineBench 已挡过一次；注入路径（单测 / 未来别的调用方）
+        // 也不许把 unknown/0ms 的「空转」写进缓存，否则下次启动又会永久复用假数字。
+        const benchOk =
+          bench !== null &&
+          benchResultValid({ ms: bench.bunMs, arm: bench.bunArm }) &&
+          benchResultValid({ ms: bench.nodeMs, arm: bench.nodeArm })
+        if (!bench || !benchOk) {
+          reason = `node ${node.version} 可用但微基准失败/无效 → bun`
           node = null
         } else {
           engine = chooseByBench(bench.bunMs, bench.nodeMs)
@@ -647,6 +701,7 @@ export function createRolloutRunner(opts: RunnerOptions): RolloutRunner {
             bunArm: bench.bunArm,
             nodeArm: bench.nodeArm,
             nativeSha: nat.sha,
+            benchSha,
           }
           try {
             fs.mkdirSync(bundleDir, { recursive: true })

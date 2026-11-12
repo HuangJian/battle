@@ -2724,7 +2724,7 @@ if (import.meta.main) {
   console.log(
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${(cacheMaxBytes / (1024 * 1024)).toFixed(0)}MB/${cacheMaxItems} ` +
       `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS} ` +
-      `rolloutEngine=${rolloutRunner().engine}${rolloutRunner().node ? ` (${rolloutRunner().node!.version})` : ''} ` +
+      `rolloutEngine=${rolloutRunner().engine}${rolloutRunner().node ? ` (node ${rolloutRunner().node!.version})` : ''} ` +
       `guard=${instanceGuard} pid=${process.pid} bootId=${BOOT_ID}`,
   )
   // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
