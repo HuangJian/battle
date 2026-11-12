@@ -7,7 +7,10 @@
 ② 顶层补 `peeked_courses`：最近 `PEEKED_WINDOW_SEC` 内被 `peek_jobs` **返回过候选**的课程集，
    窗口外自动消失；旧路径 `claim_next` **不**记（它不是预取）；
 ③ 这些字段只被观测面读、不进任何派发判据——由 `queue_state` 的调用图与评审保证，
-   本文件钉住形状与窗口语义。
+   本文件钉住形状与窗口语义；
+④ inflight 行补 `progress_ago`（2026-11-12）：BC 作业**没有** `POST /start`（`remote/worker.py`
+   的 bc 分叉在 `job_round` 之前早退）⇒ 它的活性只在 `POST /jobs/{id}/epoch` 上。缺这一列，
+   一门每 epoch 都在回传权重/指标的 BC 课会在认领满 5 分钟后被控制台读成红色「卡住」（g1c-4s2e 报障）。
 """
 
 from __future__ import annotations
@@ -65,6 +68,31 @@ def test_inflight_rows_expose_claim_and_compute_ages(tmp_path: Path) -> None:
     row = hub.queue_state()["courses"]["c1"]["inflight"][0]
     assert row["claimed_ago"] == 35.0
     assert row["computing_ago"] == 5.0
+
+
+def test_bc_progress_shows_up_as_progress_ago(tmp_path: Path) -> None:
+    """④ BC 没有 `/start`：活性读 `POST /jobs/{id}/epoch`（`progress_ago`；没回传过 ⇒ None）。"""
+    clock = _Clock()
+    hub, jid = _hub_with_course(tmp_path, clock)
+    _publish(hub, "c1", jid)
+    token = hub.claim(jid, worker_id="w1")
+    assert token
+    store = hub._stores["c1"]
+
+    # 认领 320s 还没 `/start`（BC 从不打它），心跳续租（worker 的 60s 节拍）——
+    # 这时控制台唯一能看到的就只能是「认领了没开算」。
+    clock.t += 320.0
+    assert store.heartbeat(jid, token)
+    row = hub.queue_state()["courses"]["c1"]["inflight"][0]
+    assert row["computing_ago"] is None and row["claimed_ago"] == 320.0
+    assert row["progress_ago"] is None  # 还没回传过 epoch：不编 0
+
+    # 走真实落点：`POST /jobs/{id}/epoch` → `store_bc_epoch` → `note_job_progress`。
+    assert store.store_bc_epoch(jid, {"epoch": 1, "weights": "e30=", "metrics": {}})
+    clock.t += 95.0
+    row = hub.queue_state()["courses"]["c1"]["inflight"][0]
+    assert row["claimed_ago"] == 415.0 and row["computing_ago"] is None
+    assert row["progress_ago"] == 95.0
 
 
 def test_peeked_courses_is_a_rolling_window(tmp_path: Path) -> None:

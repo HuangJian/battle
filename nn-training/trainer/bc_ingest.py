@@ -149,6 +149,70 @@ def _archive_epoch_weights(
         return None
 
 
+def _seed_from_ledger(wait: BcWait, jsonl_path: Path) -> None:
+    """把「**这个 job** 已经入账过哪些 epoch」从账本读回内存记账（重启自愈）。
+
+    为什么必须有（2026-11-12，g1c-4s2e 报障）：`seen_metrics` / `ledger_epochs` 只是**内存**
+    游标，trainer 一重启新会话就从 0 开始 ⇒ 下一拍把 hub `bc-metrics` 的**全量**行当成新行：
+    同一个 epoch 在账本里写两次，且 `eval.every_epochs` 的每个边界**重跑 eval**
+    （实测 ep10/20/30/40/50 各 200 局白算）。
+
+    job 身份在账本里（hub 发布时追加的 `job_pending`），而**重启不会多写一条**（同一 jid
+    重认领不重发）⇒ 「最后一次指向本 jid 的 `job_pending` 之后的行」就是这个 job 的历史；
+    换 job 时那条标记把段切开（旧 job 的 epoch 不算数）。
+
+    读不到 / 旧账本没有 `job_pending`（纯 local 训练）⇒ 什么都**不**种（行为与改前一致：
+    宁可重放，也不编一份「已入账」出来）。
+    """
+    if not wait.jid:
+        return
+    try:
+        lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    # 便宜的预筛（账本可能很大）：只有带引号的两类行才值得 JSON.parse。
+    anchor = -1
+    for i in range(len(lines) - 1, -1, -1):
+        t = lines[i].strip()
+        if not t or '"job_pending"' not in t:
+            continue
+        try:
+            row = json.loads(t)
+        except ValueError:
+            continue
+        if row.get("event") != "job_pending":
+            continue
+        if str(row.get("job_id") or "") == wait.jid:
+            anchor = i
+            break
+    if anchor < 0:
+        return
+    epochs: list[int] = []
+    last = 0
+    for t in lines[anchor + 1 :]:
+        t = t.strip()
+        if not t or '"bc_' not in t:
+            continue
+        try:
+            row = json.loads(t)
+        except ValueError:
+            continue
+        if row.get("event") not in ("bc_epoch", "bc_eval"):
+            continue
+        try:
+            ep = int(row.get("epoch", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if ep <= 0:
+            continue
+        if ep not in epochs:
+            epochs.append(ep)
+        if ep > last:
+            last = ep
+    wait.ledger_epochs = epochs
+    wait.last_epoch = last
+
+
 def run_epoch_eval(
     hub_url: str,
     token: str,
@@ -231,6 +295,8 @@ class BcWait:
     err_streak: int = 0
     #: 已入账的 epoch（B8：同 epoch 重发只记一次；轮末用它做缺号审计）。
     ledger_epochs: list[int] = field(default_factory=list)
+    #: 是否已经从账本种过一次（★2026-11-12：进程重启后新会话必须先自愈，见 `_seed_from_ledger`）。
+    seeded: bool = False
 
     def backoff_sec(self) -> float:
         """瞬时错误后的退避（2 的幂，封顶 `POLL_MAX_SEC`）。"""
@@ -350,6 +416,11 @@ def ingest_bc_metrics(
 
     eval_cfg = course.eval
     try:
+        # ★2026-11-12：进程重启后的第一次入账前，先把「这个 job 已经算过什么」从账本读回来；
+        # 否则 hub 的全量 `bc-metrics` 会被当成新行重放（重复入账 + 重跑 eval）。
+        if not wait.seeded:
+            wait.seeded = True
+            _seed_from_ledger(wait, jsonl_path)
         mstatus, mbody = _request(hub_url, token, f"/jobs/{wait.jid}/bc-metrics", timeout=15.0)
         if mstatus == 200:
             rows = json.loads(mbody.decode("utf-8")).get("rows") or []
@@ -364,6 +435,9 @@ def ingest_bc_metrics(
                 # 拿新权重冒充旧 epoch 的结果比缺一行更糟。
                 late: set[int] = set()
                 dup = 0
+                #: 本拍**真的**入账了的行——eval 只认它们：已入账的 epoch（重启重放、同 epoch 重发）
+                #  在此之前的版本会在第二圈里再走一遍 ⇒ 同一个边界评两次。
+                fresh: list[dict] = []
                 for r in new_rows:
                     ep = int(r.get("epoch", 0) or 0)
                     # B8：同 epoch 重发（旧链路的 30 条重复行）只入账一次。
@@ -375,6 +449,7 @@ def ingest_bc_metrics(
                     if ep and ep < wait.last_epoch:
                         late.add(ep)
                     ledger_bc_epoch(jsonl_path, it, r)
+                    fresh.append(r)
                     if ep:
                         _archive_epoch_weights(hub_url, token, wait.jid, it, ep, course, logger)
                     if ep > wait.last_epoch:
@@ -390,7 +465,7 @@ def ingest_bc_metrics(
                         f"（ep{','.join(str(e) for e in sorted(late))}）——只入账，不派 eval"
                     )
                 if eval_cfg.enabled:
-                    for r in new_rows:
+                    for r in fresh:
                         ep = int(r.get("epoch", 0) or 0)
                         if not ep or ep in late:
                             continue

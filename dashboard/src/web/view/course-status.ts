@@ -25,6 +25,13 @@ import type { CoursePillTone, LoopQueueRow } from './loop-queue'
  *  与稳态 wall（58–73s）差 ≥4×。**纯展示层常量**——不得被 hub / 训练侧 import。 */
 export const PILL_STUCK_SEC = 300
 
+/** BC 作业的进度判活窗（秒）= hub `store_leases.py::BC_PROGRESS_STALE_SEC` 的**镜像常量**。
+ *
+ *  BC 没有 `/start` ⇒ 它的「在算」只能看每 epoch 的 `POST /jobs/{id}/epoch`（hub 的
+ *  `progress_ago`）；这个窗就是 hub 自己判 BC 让出/回收的那把尺子。拿 `PILL_STUCK_SEC`
+ *  顶替会把「epoch 比 5 分钟慢」的正常训练报成红色（g1c：60 epoch + 每 10 epoch 一次 eval）。 */
+export const BC_PROGRESS_STALE_SEC = 900
+
 /** 收官停车态的**续跑指引**（与告警坞 `alerts.ts::loopCompleteAlerts` 同句）。
  *
  *  ★2026-10-06：同一条盘上事实（账本尾行 `run_complete`）在两个 widget 上说话，文案只能一份
@@ -93,6 +100,15 @@ export const NO_TAKER_LABEL = 'PPO·无人取'
  *  防两类被读成一类（有持有者卡死 ≠ 没人要跑：处置方向相反）。 */
 export const STUCK_LABEL = 'PPO·卡住'
 
+/** 派发词的环节名：BC 课的在飞作业是 **BC job**（`kind=bc`，没有 PPO 更新），一律叫 `PPO·`
+ *  会把环节指错（pill 上已有 BC 徽标，词里再写 PPO 就是同屏自相矛盾）：
+ *  `PPO·卡住` / `PPO·无人取` / `PPO·云机算` → `BC·…`。词尾仍来自同一批常量，只换前缀。
+ *
+ *  `kind` 未知（旧视图 / 读面不可用）⇒ 保持 `PPO`（历史默认，不猜）。 */
+export function dispatchWord(kind: LoopQueueRow['kind'] | undefined, word: string): string {
+  return kind === 'bc' ? word.replace(/^PPO/, 'BC') : word
+}
+
 /** 13 步 → 人话环节（pill 的 `环节·归属` 左半边）。
  *
  *  为什么不用内部步骤名（`record_iteration` / `eval_join`）：pill 是给操作员扫读的，
@@ -130,7 +146,8 @@ export const PILL_WORD_GUIDE =
   '预取（刚被 worker 扫到）/ 无人取（有活、没人要）/ 已认领（有人领了、还在取包，未开算）/ ' +
   '在算（已开算，本机或远端都算）/ 卡住（认领超 5 分钟仍没开算）。' +
   '· 在跑 = 盘上没有外部等待（下一步未知）。· 本轮无待办 = 账本已结算或还没起第一轮。' +
-  '· 龄只给「已认领 / 在算 / 卡住」：最老一份的认领 / 开算龄，<60s 不显示。' +
+  '· 龄只给「已认领 / 在算 / 卡住」：最老一份的认领 / 开算龄（BC 课 = 最近一次进度回传龄），' +
+  '<60s 不显示。· BC 课的同组词写作 `BC·…`：BC job 不打 `/start`，活性看每 epoch 的进度回传。' +
   '· 已收官 / 已暂停 / 已中止 / 起不来 / 待进程 / 未在训是进程与配置事实，优先于以上所有词；' +
   '执行中 / 等接管 / 接管中 / 接管掉线 / 导包中 = 整课被自主 worker 接管。'
 
@@ -155,6 +172,9 @@ export function pillStatusWord(text: string): string {
     case 'PPO·本机算':
     case 'PPO·云机算':
       return 'PPO·在算'
+    case 'BC·本机算':
+    case 'BC·云机算':
+      return 'BC·在算'
     case '云机·接管':
       return '接管中'
     case '云机执行中':
@@ -187,6 +207,8 @@ function holderFacts(
   const bits = [`持有者 ${d.worker || '未知'}`]
   if (d.claimedAgo !== null) bits.push(`认领 ${ageLabel(d.claimedAgo)} 前`)
   if (d.computingAgo !== null) bits.push(`开算 ${ageLabel(d.computingAgo)} 前`)
+  // BC 的开算信号（每 epoch 的进度回传；PPO job 本来就没有这一条）。
+  if (d.progressAgo !== null) bits.push(`进度 ${ageLabel(d.progressAgo)} 前`)
   if (d.heartbeatAgo !== null) bits.push(`心跳 ${ageLabel(d.heartbeatAgo)} 前`)
   if (registered && d.worker && !registered.includes(d.worker)) {
     bits.push('不在 worker 登记表里')
@@ -685,7 +707,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'local-inflight',
-        'PPO·本机算',
+        dispatchWord(lq.kind, 'PPO·本机算'),
         'y',
         '本机在算（训练侧 inflight，但 hub 没有这门课的在飞 job）——非远端。' +
           hubDispatchTitle(hub, wait, input.registeredWorkers) +
@@ -699,7 +721,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'local-inflight',
-        'PPO·已发布',
+        dispatchWord(lq.kind, 'PPO·已发布'),
         'y',
         `训练侧在飞但没有 jid（旧训练侧）——无法与 hub 在飞对号；**谁在算未知**。${hubDispatchTitle(
           hub,
@@ -719,23 +741,57 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
         .map((d) => d.computingAgo)
         .filter((x): x is number => x !== null)
       const computingAge = computing.length ? Math.max(...computing) : null
+      // ★2026-11-12（用户报障 g1c-4s2e：BC 课一直在回传进度与权重，pill 写「PPO·卡住 19m」）：
+      //   BC 作业**不打 `/start`**（BC 执行链在 `job_round` 之前早退）⇒ `computing_ago` 恒为 null，
+      //   它唯一的活性信号是每 epoch 的进度回传（hub 的 `progress_ago`，也是 hub 判 BC 让出窗那个锚）。
+      //   缺这一列，「认领了却没开算」的 5 分钟门槛把正常训练的 BC 课画成红色故障。
+      const progress = hub.inflightDetail
+        .map((d) => d.progressAgo)
+        .filter((x): x is number => x !== null)
+      const progressAge = progress.length ? Math.max(...progress) : null
+      const progressAlive = progressAge !== null && progressAge <= BC_PROGRESS_STALE_SEC
+      // BC 的门槛用 hub 自己的让出窗（900s）：一个 epoch 就可能有几分钟，拿 PPO 的 300s
+      // 会把「还没回传第一个 epoch」的正常训练直接判成红故障（而 900s 零 epoch 仍是真可疑）。
+      const stuckAfter = lq.kind === 'bc' ? BC_PROGRESS_STALE_SEC : PILL_STUCK_SEC
       const title = hubDispatchTitle(hub, wait, input.registeredWorkers)
-      // 「卡住」只定义在**认领了却没开算**上：开算之后的时长是活（PPO 本来就几分钟），
-      // 拿认领龄当门槛会把正常计算报成红色故障。
-      if (claimed !== null && computingAge === null && claimed > PILL_STUCK_SEC) {
-        return out(input, 'dispatch-stuck', STUCK_LABEL, 'r', title, 'hub', {
+      // 「卡住」只定义在**认领了却没有任何活信号**上：开算 / BC 进度之后的时长是活
+      // （PPO 本来就几分钟、BC 一个 epoch 也可能几分钟），拿认领龄当门槛会把正常计算报成红故障。
+      if (claimed !== null && computingAge === null && !progressAlive && claimed > stuckAfter) {
+        return out(input, 'dispatch-stuck', dispatchWord(lq.kind, STUCK_LABEL), 'r', title, 'hub', {
           age: fmtAge(claimed) || null,
         })
       }
       if (computingAge !== null) {
-        return out(input, 'dispatch-inflight', 'PPO·云机算', 'y', title, 'hub', {
-          age: fmtAge(computingAge) || null,
-        })
+        return out(
+          input,
+          'dispatch-inflight',
+          dispatchWord(lq.kind, 'PPO·云机算'),
+          'y',
+          title,
+          'hub',
+          {
+            age: fmtAge(computingAge) || null,
+          },
+        )
+      }
+      // 只看到进度回传（BC）：算在算——龄取**最近一次进度**的龄（见 `PILL_WORD_GUIDE`）。
+      if (progressAlive) {
+        return out(
+          input,
+          'dispatch-inflight',
+          dispatchWord(lq.kind, 'PPO·云机算'),
+          'y',
+          title,
+          'hub',
+          {
+            age: fmtAge(progressAge) || null,
+          },
+        )
       }
       return out(
         input,
         'dispatch-claimed',
-        'PPO·已认领',
+        dispatchWord(lq.kind, 'PPO·已认领'),
         'y',
         `已有人认领、还没开算（认领后要取包 / 下 payload；这一步没有心跳）。${title}`,
         'hub',
@@ -747,7 +803,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'dispatch-queued',
-        'PPO·排队',
+        dispatchWord(lq.kind, 'PPO·排队'),
         'y',
         `hub 预取窗口不可知（旧版 hub）——无法区分「没人要跑」与「预取中」。${hubDispatchTitle(
           hub,
@@ -761,7 +817,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'dispatch-prefetched',
-        'PPO·预取',
+        dispatchWord(lq.kind, 'PPO·预取'),
         'g',
         `hub 有活且刚被 worker 预取扫到（在预取窗口内）。${hubDispatchTitle(
           hub,
@@ -774,7 +830,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
     return out(
       input,
       'dispatch-no-taker',
-      NO_TAKER_LABEL,
+      dispatchWord(lq.kind, NO_TAKER_LABEL),
       'y',
       `hub 有活、没有在飞、也不在预取窗口——没人要跑（与告警坞的 PPO 红条同一件事：` +
         `pill 说状态、告警坞在超时后升级）。${hubDispatchTitle(hub, wait, input.registeredWorkers)}`,
@@ -806,7 +862,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       return out(
         input,
         'dispatch-inflight',
-        'PPO·已发布',
+        dispatchWord(lq.kind, 'PPO·已发布'),
         'y',
         `训练侧说这一单已发布、还没回传；hub 这一拍没有它的在飞/排队读数（不可读或还没到 hub）` +
           `——**谁在算未知**。${wait}`,

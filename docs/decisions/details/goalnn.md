@@ -7191,3 +7191,57 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `g0-4s2e` 切 `course_env: true`（every 10 / 4 关 × 50 局 = 200 局，seed 1..50）。
 - **违反后果**：在 eval 里再引 tmp/新 levels，或让 eval 跑 level 全量环境 ⇒ 评估曲线与
   训练分布不同、读数不可比，重演「定集磨权重」；range 型课程开 `course_env` 会静默跑错面板。
+
+## §2026-11-12-goalnn-bc-progress-pill（BC 课的 pill：认领 ≠ 没开算——hub inflight 行补
+`progress_ago`，BC 的活性只在每 epoch 的进度回传上）
+
+- **背景**（用户 2026-11-12 报障）：`g1c-4s2e`（BC）一直在回传进度与权重，首页 pill 却写
+  「it1 PPO·卡住 19m」。
+- **根因**：`remote/worker.py` 的 bc 分叉在 `job_round`（`POST /jobs/{id}/start`）**之前**早退
+  ⇒ BC job 的 `computing_ago` 恒为 null；而 `course-status.ts` 的「卡住」判据是「最老认领龄
+  > 300s ∧ 没有任何开算龄」⇒ 一门完全正常的 BC 课在认领 5 分钟后必然被画成红色故障。
+- **备选与否决**：① 只把 `PILL_STUCK_SEC` 调大 —— 否，PPO 的真卡死会被一起拖成 19m 才报；
+  ② 给 BC job 补打 `/start` —— 否，`/start` 是掉队救援（R2-C1）的时基，BC 的活性口径是
+  **进度**（hub `BC_PROGRESS_STALE_SEC=900`），补打等于把「请求已发出」当进度；
+  ③ 控制台轮询 `/jobs/{id}/bc-metrics` —— 否，每课每拍多一次往返，且是第二份判据。
+- **决定**：hub `/admin/queue` 的 inflight 行**纯观测地**补 `progress_ago`（读 `note_job_progress`
+  的锚，与 hub 自己的 BC 让出窗同源）。**认领写的首锚要剔除**：`_claim_locked` 的
+  `note_job_progress` 只为让 drain 判活从领取那刻起算，不剔除则每份刚认领的活都长成「刚回传过」
+  ——那比没有这一列更糟（把卡死读成活）。控制台：`progress_ago ≤ 900` 即「在算」，BC 的
+  「卡住」门槛也用 900（一个 epoch 就可能几分钟，300 会把「第一个 epoch 之前」判红）。
+  词表按课程种类换前缀 `PPO·` / `BC·`（BC job 没有 PPO 更新；pill 上已有 BC 徽标，词里再写
+  PPO 是同屏自相矛盾）。
+- **回归**：`nn-training/tests/hub/test_queue_observe_pill.py::test_bc_progress_shows_up_as_progress_ago`、
+  `dashboard/tests/training-pills.test.ts` 的 ②d/②e（认领 19m + 进度 95s ⇒ `BC·在算`；进度
+  也静默 > 900s ⇒ `BC·卡住`）。
+- **违反后果**：再出现只看 `computing_ago` 的观测面 ⇒ BC 课在 5 分钟后又被画成红色故障
+  （同一个报障会再来一次）。
+
+## §2026-11-12-goalnn-bc-restart-resume（BC 重启不许重算：入账游标按账本自愈，面板分段优先 job 身份）
+
+- **背景**（用户 2026-11-12 报障）：重启 trainer 后，「BC Eval（多地图 · RL 口径）」里之前算过的
+  epoch 全没了、并且**重新算了一遍**。现场 `tmp/g1c-4s2e/training_log.jsonl`：112 条 `bc_epoch`
+  只对应 60 个 epoch（53 + 58 两次各写一遍），`bc_eval` 在 ep10/20/30/40/50 上各有两行。
+- **根因**：`BcWait.seen_metrics` / `ledger_epochs` 是**内存**游标（为「让位 → 回来再问」设计），
+  trainer 一重启新会话从 0 开始 ⇒ 把 hub `bc-metrics` 的全量行当成新行：重复入账 + 每个
+  `eval.every_epochs` 边界重跑 eval（5 边界 × 200 局白算）。同时面板按「最后一次 `run_start`
+  之后」分段 ⇒ 重启那一刻曲线归零，读起来正是「之前算的都丢了」。
+- **备选与否决**：① 把游标落盘成一个新 state 文件 —— 否，多一份会与账本漂的账；
+  ② 面板改成「全部行都画」—— 否，traj 复用下两轮（都挂 it=1）会拼成一条假曲线（2026-09-14
+  那个坑）；③ 靠 hub 的 `/resume` epoch 反推已入账 —— 否，resume 只说「最新到哪」，
+  回答不了「哪些边界已评过」，且迟到补发/中途失败都会让它偏。
+- **决定**：
+  - 账本已是两个问题的共同真源（hub 发布时追加的 `job_pending` 带 job 身份，重启用**同 jid
+    重认领不重发** ⇒ 它天然是「这个 job 的历史」的边界）。`_seed_from_ledger`：新会话第一次
+    入账前，把「最后一次指向本 jid 的 `job_pending` 之后」的 `bc_epoch`/`bc_eval` epoch 读回
+    `ledger_epochs`/`last_epoch`；读不到或旧账本没 `job_pending`（纯 local 训练）⇒ 不种（行为不变）。
+    换 job ⇒ 新 `job_pending` 把段切开，旧 job 的 epoch 不算数。
+  - eval 只派给**本拍真的入账了**的行（`fresh`），不再重扫 `new_rows` —— 旧写法下已入账/重发的行
+    仍会在第二圈派 eval，同一边界可以评两次。
+  - 面板分段优先 `job_pending`，其次 `run_start`：同 job 重启不切（曲线连续），换 job 才切。
+    另外按 `(it, epoch)` 折叠重写行（旧账本里已有的 112 行 / 60 epoch 不再把「共 N epoch」与
+    表行数说错；`it` 进键以防 iters>1 的课每轮都有 ep1）。
+- **回归**：`nn-training/tests/trainer/test_bc_ingest_restart.py`（重启不重入账/不重评；换 job 从零）；
+  `dashboard/tests/ledger-bc-segmentation.test.ts`（重启段不重置 / 新 job_pending 重置 / 重写行折叠）。
+- **违反后果**：任何把「已算到哪」只存在内存里的入账游标，都会在进程重启时重算一次；
+  「重启 = 重算」在大语料 BC 上是几千局的重支出，且面板会归零。

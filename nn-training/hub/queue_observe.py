@@ -144,6 +144,19 @@ class QueueObserveMixin(QueuePeer):
                 with st._lock:
                     claimed = dict(st._claimed.get(jid) or {})
                     computing = dict(st._computing.get(jid) or {})
+                # ★2026-11-12：BC 的唯一活性信号（`POST /jobs/{id}/epoch` → `note_job_progress`）。
+                # BC 作业**从不**打 `/start`（`remote/worker.py` 的 bc 分叉在 `job_round`
+                # 之前早退）⇒ 只给 `computing_ago` 的话，一门每 epoch 都在回传权重与指标的
+                # BC 课在认领满 5 分钟后会被控制台读成红色「卡住」（g1c-4s2e 报障）。
+                # 与 hub 自己的 BC 让出窗（`store_leases._bc_progress_stale_sec`）读同一个锚。
+                #
+                # **但认领写的第一个锚不算进度**（`_claim_locked` 的 `note_job_progress`，
+                # 它只为让 drain 判活从领取那一刻起算）：不剔除，每一份刚认领的活都会长成
+                # 「刚回传过」——那比没有这一列更糟（把卡死读成活）。
+                progress = st.job_progress_at(jid)
+                claimed_at = claimed.get("at")
+                if claimed_at is not None and progress <= float(claimed_at):
+                    progress = 0.0
                 inflight.append(
                     {
                         "job_id": jid,
@@ -158,6 +171,9 @@ class QueueObserveMixin(QueuePeer):
                         # `computing_ago == None` = 认领了但还没 `POST /start`（关键下载/取包中）
                         # —— 读面据此把它与真「计算中」分档，别把「已认领」一律叫计算中（F5）。
                         "computing_ago": _age_of(now, computing),
+                        # `progress_ago == None` = 还没回传过 epoch（PPO 本来就没有这个信号）
+                        # —— 不编 0：与上面两个龄同一纪律。
+                        "progress_ago": round(now - progress, 1) if progress > 0.0 else None,
                     }
                 )
             courses[course] = {

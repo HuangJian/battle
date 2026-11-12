@@ -101,24 +101,32 @@ export function bcRowsFromLedgerTail(lines: string[]): {
 } {
   const epochs: BcEpochRow[] = []
   const evals: BcEvalRow[] = []
-  // 只认**最近一次 run_start 之后**的行（2026-09-14 混轮修复）。run_bc 每轮启动写
-  // run_start（含 runId/epochs/seed），而 bc_epoch / bc_eval 全部留在同一份账本里：
-  // traj 目录不变、只换语料口径时，两轮的数据会挂同一个 it=1 —— 不过滤就会把上一轮
-  // 的 59 行与本轮的 150 行拼成一条曲线（实测 10:38 那轮）。无 run_start（旧账本、
-  // 纯 local 训练）⇒ 不过滤，保持原行为。
+  // 段锚**优先 job 身份**（hub 发布时追加的 `job_pending`，2026-11-12），退回 `run_start`
+  // （2026-09-14）。为什么先 job：重启 trainer 会多写一条 `run_start`，但 **job 没换**
+  // （hub 的 `bc-resume` 继续、重认领不重发）——按 run_start 分段会把重启前已算的 epoch
+  // 全遮掉，用户读成「之前算的都丢了」（g1c-4s2e 报障）。换 job 时新的 `job_pending` 把段
+  // 切开，这正是原本要防的「两轮拼一条曲线」（traj 不变、两轮都挂 it=1），而且比 run_start
+  // 更准：同一个 job 的重启不切。
+  // 旧账本没有 `job_pending`（纯 local 训练 / 旧链路）⇒ 退回 run_start；两者都没有 ⇒ 不过滤。
   let from = 0
+  let jobAt = -1
+  let startAt = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     const t = lines[i]!.trim()
     if (!t) continue
     try {
-      if ((JSON.parse(t) as { event?: string }).event === 'run_start') {
-        from = i
+      const ev = (JSON.parse(t) as { event?: string }).event
+      if (ev === 'job_pending') {
+        jobAt = i
         break
       }
+      if (ev === 'run_start' && startAt < 0) startAt = i
     } catch {
       /* 坏行跳过 */
     }
   }
+  if (jobAt >= 0) from = jobAt
+  else if (startAt >= 0) from = startAt
   const num = (v: unknown): number | null =>
     typeof v === 'number' && Number.isFinite(v) ? v : null
   /** eval 行的 panel（B4）：旧账本没有它 ⇒ undefined；坏值逐键退 null，不整体丢行。 */
@@ -187,7 +195,21 @@ export function bcRowsFromLedgerTail(lines: string[]): {
       })
     }
   }
-  return { epochs, evals }
+  // ★2026-11-12：同一 `(it, epoch)` 只留**第一条**。账本里出现第二次 = 同一个 epoch 被重写了
+  // 一遍（重启重放 / 旧链路那批 30 条重复行），面板按 epoch 连曲线，重复点只会把「共 N epoch」
+  // 与表行数说错（g1c 现场 112 行 / 60 epoch）。`it` 一起进键：iters>1 的课每轮都有 ep1。
+  const dedupe = <T extends { it: number; epoch: number }>(rows: T[]): T[] => {
+    const seen = new Set<string>()
+    const out: T[] = []
+    for (const r of rows) {
+      const k = `${r.it}:${r.epoch}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(r)
+    }
+    return out
+  }
+  return { epochs: dedupe(epochs), evals: dedupe(evals) }
 }
 
 /** 最近一轮 BC job 的代码快照旁挂（B7；旧 job 没有旁挂 ⇒ stale=null）。 */

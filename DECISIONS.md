@@ -5613,3 +5613,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `g0-4s2e` 切 `course_env: true`（4 关 × 50 局 / 10 epoch，seed 1..50）……
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-eval-course-env
+
+## §2026-11-12-goalnn-bc-progress-pill（BC 课 pill：认领 ≠ 没开算 —— hub inflight 行补 `progress_ago`，BC 活性只看每 epoch 进度）
+
+- **决定**：BC job 从不打 `/start`（bc 分叉早退）⇒ `computing_ago` 恒 null，旧的「卡住」判据（认领 >300s ∧ 无开算）
+  必然误报。hub `/admin/queue` 的 inflight 行纯观测补 `progress_ago`（剔除认领首锚）；控制台以 `≤900s` 判 BC 在算，
+  BC 的卡住门槛也用 900；词表按课程种类写 `PPO·` / `BC·`。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-progress-pill
+
+## §2026-11-12-goalnn-bc-restart-resume（BC 重启不许重算：入账游标按账本自愈，面板分段优先 job 身份）
+
+- **决定**：`BcWait` 的入账游标只是内存态 ⇒ 重启后把 hub 全量 `bc-metrics` 当新行（重复入账 +
+  每 10 epoch 重跑一次 eval，g1c-4s2e 实测 5 边界各 200 局）。改成：新会话首次入账前按账本
+  自愈（`job_pending` 到本 jid 之后的行 = 这个 job 的历史），且 eval 只派给本拍真入账的行；
+  面板分段优先 `job_pending`（同 job 重启不切曲线，换 job 才切）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-restart-resume

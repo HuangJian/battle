@@ -52,6 +52,12 @@ export interface HubInflightView {
   claimedAgo: number | null
   /** 开算龄（秒，`POST /jobs/{id}/start` 起算）；null = 未开算 / 旧 hub。 */
   computingAgo: number | null
+  /** 进度龄（秒，`POST /jobs/{id}/epoch` 起算）；null = 没有进度信号 / 旧 hub。
+   *
+   *  ★2026-11-12（g1c-4s2e 报障）：BC 作业**从不**打 `/start`（BC 执行链在 `job_round` 之前
+   *  早退）⇒ `computingAgo` 对 BC 永远是 null。它的活性只在每 epoch 的进度回传上；不读这一列，
+   *  「认领了却没开算」会在 5 分钟后把一门正常训练的 BC 课画成红色「卡住」。 */
+  progressAgo: number | null
 }
 
 /** **接管（hold）**：自主 worker 领到了这门课的整段（hub `queue_state` 每课行的 `hold`）。
@@ -298,6 +304,7 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
           heartbeatAgo: numOrNull(i.heartbeat_ago),
           claimedAgo: numOrNull(i.claimed_ago),
           computingAgo: numOrNull(i.computing_ago),
+          progressAgo: numOrNull(i.progress_ago),
         })
       }
     }

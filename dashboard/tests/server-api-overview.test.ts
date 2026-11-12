@@ -179,6 +179,8 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
         heartbeatAgo: 4,
         claimedAgo: 1620,
         computingAgo: null,
+        // 2026-11-12：BC 的唯一活性信号（`POST /jobs/{id}/epoch`）——体里没带 ⇒ null，不编 0。
+        progressAgo: null,
       },
     ])
     expect(q.peekedCourses).toEqual(['a', 'other'])

@@ -339,6 +339,7 @@ function fl(claimedAgo: number | null, over: Partial<HubInflightView> = {}): Hub
     heartbeatAgo: 4,
     claimedAgo,
     computingAgo: null,
+    progressAgo: null,
     ...over,
   }
 }
@@ -402,6 +403,63 @@ describe('★2026-10-02 coursePills：hub 派发态（已认领/云机算/卡住
     })!
     expect(p.status).toBe('PPO·在算')
     expect(p.tone).toBe('y') // 红点是「认领了却不开算」，不是「算得久」`
+  })
+
+  // ★2026-11-12（用户报障：BC 课 g1c-4s2e 一直在回传进度与权重，pill 却写「it1 PPO·卡住 19m」）。
+  //   BC 作业的执行链在 `remote/worker.py` 的 bc 分叉里**早退**（在 `job_round` 的
+  //   `POST /jobs/{id}/start` 之前）⇒ `computing_ago` 对它永远是 null；它唯一的活性信号是
+  //   每 epoch 的 `POST /jobs/{id}/epoch`（hub 的 `progress_ago`，也是 hub 判 BC 让出窗的那个锚）。
+  it('②d BC 课：认领 19 分钟、没有 /start，但每 epoch 进度回传 ⇒ 「BC·在算」，**不是**卡住', () => {
+    const q = view.parseHubQueue({
+      courses: {
+        g1c: {
+          pending_n: 0,
+          inflight: [
+            {
+              job_id: 'j1',
+              worker: 'gpu-7',
+              heartbeat_ago: 4,
+              claimed_ago: 1140,
+              computing_ago: null,
+              progress_ago: 95,
+            },
+          ],
+        },
+      },
+    })!
+    expect(q.courses.g1c!.inflightDetail[0]!.progressAgo).toBe(95)
+    const ovRowG1c = view.buildCourseRows({
+      courses: ['g1c'],
+      training: ['g1c'],
+      queue: q,
+      iters: { g1c: 1 },
+      nowSec: 1000,
+    })[0]!
+    const [p] = view.coursePills({
+      courses: ['g1c'],
+      rows: [row({ course: 'g1c', kind: 'bc', it: 1 })],
+      trainerRunning: true,
+      overview: ov(ovRowG1c),
+    })!
+    expect(p).toMatchObject({ status: 'BC·在算', age: '1m', tone: 'y' })
+    expect(p.title).toContain('认领 19m 前')
+    expect(p.title).toContain('进度 1m 前')
+  })
+
+  it('②e BC 课：连进度也静默超 hub 的让出窗（900s）⇒ 才算「BC·卡住」红点', () => {
+    const [p] = view.coursePills({
+      courses: ['g1c'],
+      rows: [row({ course: 'g1c', kind: 'bc', it: 1 })],
+      trainerRunning: true,
+      overview: ov(
+        hubRow('g1c', {
+          inflight: 1,
+          inflightDetail: [fl(1140, { progressAgo: 1000 })],
+          stuckSec: 1140,
+        }),
+      ),
+    })!
+    expect(p).toMatchObject({ status: 'BC·卡住', age: '19m', tone: 'r' })
   })
 
   it('③ 有活、没在飞、不在预取窗口 ⇒ 「PPO·无人取」（不再显示「采集中」假装在动）', () => {
