@@ -34,13 +34,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { NATIVE_ABI, nativeLibBasename, nativeTargetFor, PREBUILT_DIR } from './native-prebuilt'
+import { D, H, IN_CH, SP, STEM_W } from './conv-shape'
 
-const BOARD = 26
-const SP = BOARD * BOARD
-const H = 64
-const D = 8
-const IN_CH = 19
-const STEM_W = IN_CH * 576
+// 形状常量走 ./conv-shape（与 wasm 侧、engine-bench 同一份；见该文件的事故说明）。
 const DW_W = D * H * 25
 const PW_W = D * H * H
 /** 权重 blob 的 float 数（顺序必须与 src/nn/conv/conv_native.h 一致）。 */

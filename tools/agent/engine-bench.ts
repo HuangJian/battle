@@ -11,26 +11,28 @@
  *   TS 同一条链，见 src/nn/conv/conv.ts），基准测的就是生产真正走的路：
  *     - bun 臂装了共享库 ⇒ 测出来是 native（且首用 attestation 已被 warmup 吸收）；
  *     - node 臂无 bun:ffi ⇒ 测出来是 wasm；
- *     - 两者都没有 ⇒ TS（BENCH-ARM ts，调用方据此知道"加速没生效"）。
+ *     - **两臂都没跑起来 ⇒ 非零退出**，绝不输出 BENCH 数字（2026-11-12 事故：形状漂移
+ *       让两个后端在守卫处 return false，测出 0.00x ms 的"空转"，BENCH-ARM unknown，
+ *       假数字被 rollout-runner 缓存成引擎选择依据，且无人察觉）。
+ *
+ * ★ 2026-11-12 修：dummy 模型的形状不再自绘，一律取 ./conv-shape（与两个 adapter 同源）。
+ *   2026-09-21 只把「直接调 wasm」改成「调生产入口」，模型形状仍留了一份硬编码，
+ *   v7 把 IN_CH 18→19 时这份就漂了 —— 形状常量必须只有一处定义。
  *
  * 数值无关性：forward 是定长计算（MAC 数与数据值无关），故 dummy 权重/输入即可，无需真实权重。
  *
  * 用法（bun 跑 TS / node 跑打包后的 .mjs，接口一致）:
  *   <engine> engine-bench(.ts|.mjs) [rounds]
- * 输出（最后两行）:
+ * 输出（最后两行；仅成功时）:
  *   BENCH <avg_ms>              本引擎稳态 features 单次耗时（取各轮最小值）
- *   BENCH-ARM <native|wasm|ts>  实际测的是哪条后端（账本/日志用）
- * 退出码 0=成功。
+ *   BENCH-ARM <native|wasm>     实际测的是哪条后端（账本/日志用）
+ * 退出码 0=成功；1=未跑进加速后端（基准无效）。
  */
-const BOARD = 26
-const SP = BOARD * BOARD
-const H = 64
-const D = 8
-const IN_CH = 18
 
 // 静态 import：node 打包（bun build --target=node）能把它内联进来；
 // 用动态 URL import 在产物里会指向不存在的源文件（裸跑才有）。
 import { featuresEngine, runStudentFeatures } from '../../src/nn/conv/conv'
+import { D, H, IN_CH, SP, STEM_W } from '../../src/nn/conv/conv-shape'
 
 /** 确定性伪随机（LCG）；只为形状合法的假权重，不用 Math.random。 */
 function makeRng(seed: number): () => number {
@@ -53,7 +55,7 @@ function makeModel(): Record<string, unknown> {
   const rng = makeRng(1234)
   return {
     in16: new Float32Array(IN_CH * SP),
-    stemW: fill(rng, IN_CH * H * 9),
+    stemW: fill(rng, STEM_W),
     stemB: fill(rng, H),
     dwW: Array.from({ length: D }, () => fill(rng, H * 25)),
     dwB: Array.from({ length: D }, () => fill(rng, H)),
@@ -80,7 +82,19 @@ function main(): void {
     for (let i = 0; i < T; i++) once()
     best = Math.min(best, (performance.now() - t0) / T)
   }
+  const arm = featuresEngine()
+  // 空转守卫：形状一旦再漂，两个后端都会在形状检查处 return false，此时 featuresEngine()
+  // 仍是 unknown、耗时接近 0 —— 旧版照样打印 BENCH，把假数字喂给引擎选择。宁可让基准
+  // 失败（调用方回退 bun），也不产出看似合法的错误数据。
+  if (arm !== 'native' && arm !== 'wasm') {
+    console.error(`[engine-bench] 基准无效：未跑进加速后端（arm=${arm}，best=${best}）→ 拒绝输出`)
+    process.exit(1)
+  }
+  if (!Number.isFinite(best) || best <= 0) {
+    console.error(`[engine-bench] 基准无效：耗时非正（best=${best}，arm=${arm}）→ 拒绝输出`)
+    process.exit(1)
+  }
   console.log(`BENCH ${best.toFixed(3)}`)
-  console.log(`BENCH-ARM ${featuresEngine()}`)
+  console.log(`BENCH-ARM ${arm}`)
 }
 main()

@@ -134,3 +134,46 @@
 - **备选与否决**：① 只压第五轮搬走的 256 条 —— 否（其余 373 条同形，留下长短不一）；② 删除节录只留标题 + 指针 —— 否（标题之外没有决策内容，grep 时无法快速判断是否相关）；③ 压到 1 行 —— 否（`- **决定**：` 标签单独占一行时一行放不下有效内容，2 行是「标签 + 内容」的最小完整形态）。
 - **决定**：629 条已带 `—— 全文` 指针的索引节录压到 ≤2 行（优先保留 `**决定**` 起始行；截断加 `……`）；全文位置与编号不变，`bun tools/check-decisions.ts` 绿。
 - **违反后果**：文件重新向 8K/1MB 膨胀，注入截断与检索成本回归。
+
+---
+
+## §2026-11-12-engine-bench-shape-drift（2026-11-12，采样节点启动日志 `BENCH-ARM unknown` 排查）
+
+- **背景**：`bun ./tools/agent/sampler-agent.ts --port 8443 --workers 6` 启动日志出现
+  `engine=bun — 微基准缓存（winner=bun，bun 0.00ms[unknown] / node 0.00ms[unknown]）`；
+  `tmp/dist-agent/node-bundle/engine-choice.json` 实存
+  `bunMs=0.002 / nodeMs=0 / bunArm=nodeArm=unknown`。根因链：v7（2026-11-01）把 stem
+  输入通道 18→19（`src/nn/conv/conv_native.h:21` 的 `CF_IN_CH`；两个 adapter 的形状守卫
+  同步到 19），**只有 `tools/agent/engine-bench.ts` 的 dummy 模型仍写 `IN_CH = 18`**
+  ⇒ `runStudentFeatures` 的两个后端都在形状守卫处 `return false`
+  （`conv_wasm_adapter.ts` 的 `m.in16.length !== IN_CH * SP`、`conv_native_adapter.ts`
+  的 `shapeOk`）⇒ 计时的是空转函数、`featuresEngine()` 保持 `unknown` ⇒
+  输出 `BENCH 0.00x` + `BENCH-ARM unknown`。`chooseByBench` 对 `nodeMs<=0` 的兜底
+  恰好把这个假结果判成 bun，`choiceValid` 只比版本 / wasm sha / native sha，
+  版本与资产都没变 ⇒ 坏缓存每次启动复用、日志永远 unknown。这是 2026-09-21
+  「改为调生产入口」评审只修一半留下的复发口（入口统一了，模型形状仍自绘）。
+- **备选与否决**：① 只把 18 改 19 —— 否（第二次漂移只是时间问题，已漂过一次）；
+  ② 在 `choiceValid` 里按绝对耗时阈值判空转 —— 否（跨平台量级不同，会误杀）；
+  ③ 只靠 `bunArm !== 'unknown'` —— 否（还有打包产物陈旧这个独立坑：
+  `engine-bench.ts` 不在 `tools/agent/codehash-files.txt` 白名单，`runEngineBench`
+  原先只在 mjs 不存在时才打包，改 TS 源不会重建，node 臂会继续跑旧形状）。
+- **决定**：① 新建 `src/nn/conv/conv-shape.ts` 作为 TS 侧形状**唯一来源**，两个 adapter
+  与 `engine-bench.ts` 共用；`tests/agent/engine-bench.test.ts` 机械断言
+  `IN_CH === conv_native.h::CF_IN_CH`（跨语言契约）。② `engine-bench.ts` 自检：
+  非 `native|wasm` 或耗时非正 ⇒ **非零退出**，绝不打印 BENCH 数字。
+  ③ `rollout-runner.ts` 加 `benchResultValid()`（真跑结果必须进了加速后端且 ms>0）、
+  `choiceValid` 拒绝 `unknown` / 非正耗时的旧缓存并新增 `benchSha`（基准实现指纹，
+  改实现即重测）、`createRolloutRunner` 对注入结果同样校验（坏结果不落盘）、
+  `engine-bench.mjs` 按 TS 源指纹 stamp 重打包。④ `sampler-agent.ts` 启动日志把
+  `rolloutEngine=bun (v22.23.2)` 改成显式 `node v22.23.2`（括号里原本就是 node
+  版本，看着像 bun 版本）。
+- **证据**：修复前两侧均 `BENCH 0.003 / BENCH-ARM unknown`；修复后 bun 裸跑
+  `BENCH 2.921 / BENCH-ARM native`。带坏缓存启动的端到端复现：
+  `微基准：bun 3.05ms[native] vs node 5.43ms[wasm] → bun（node 未快过 3% 迟滞）`，
+  新缓存写回合法值且带 `benchSha`。结论 winner 仍是 bun，但这次是**有依据**的
+  （node 慢 78%），不是 `nodeMs=0` 兜底碰巧撞对。
+- **回归**：`tests/agent/engine-bench.test.ts`（端到端 spawn 断言 arm/ms + C 头对齐）、
+  `tests/agent/rollout-runner.test.ts`（坏缓存、`benchResultValid`、`benchSha`、
+  无效注入不落盘）；`bun run check` 绿。
+- **违反后果**：形状再漂时引擎选择会静默退化成「恒选 bun 且日志显示 unknown」，
+  在 V8 更快的 x64 Linux/Windows 节点上白丢 14–30% 吞吐，且因缓存命中永不自愈。

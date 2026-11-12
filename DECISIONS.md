@@ -5642,3 +5642,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   身份/续训键）。
 
 —— 全文（背景 / 备选与否决 / 回归 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-console-bc-ep-pointer
+## §2026-11-12-engine-bench-shape-drift（微基准空转：形状漂移让 rollout 引擎选择吃假数字）
+
+- **决定**：v7 `IN_CH` 18→19 只有 `tools/agent/engine-bench.ts` 漏改 ⇒ 两后端形状守卫 `return false`、`BENCH-ARM unknown`、0.00x ms 假数字被永久缓存；立 `src/nn/conv/conv-shape.ts` 为形状单一来源，加基准自检非零退出 + `benchResultValid` / `benchSha` / mjs 源指纹 stamp 三道防线……
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/repo-governance.md` §2026-11-12-engine-bench-shape-drift
