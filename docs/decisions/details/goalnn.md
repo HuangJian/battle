@@ -6995,3 +6995,199 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **验证**：LOC 守卫 7 例绿（`distribution.py` 931 / `race_metrics.py` 75）；门面对象恒等
   （`d.race_stats is r.race_stats`）；`nn-python-gate` 全量 **5923 passed / 3 skipped**、
   mypy 896 → **897** 文件、ruff 绿。全文 → `docs/nn/engineering.md §116`。
+
+## §2026-11-11-goalnn-o2-nomove-open（o2-pick 判负：撤掉方向无关的移动补贴 wMove，而不是继续抬拾取权重）
+
+- **背景**：用户「o2-pick 40 轮拾取几乎没变化，请分析原因」→ 追问「能不能像 x20 那样把拾取权重
+  调到最高」→ 拍板「**先摘 wMove 写探针课程，给每一行公式写上人话注释**」。
+- **判决（o2-pick 判负）**：A 层 12 个 eval 点 × 400 局，it0 → it55
+  **cellsVisited 52.92±0.98 → 61.83±1.05（+8.91，6.2σ）**，而
+  **拾取率 44.82%±2.53 → 45.45%±2.57（+0.63pp，0.2σ）**；未捡局终局 `pickupDist` 中位 14→15 格、
+  道具过期率 21.2%→27.5%、clear 358→334。逐点拾取率在 37.5–48.3% 摆动、OLS +0.061pp/it ⇒ 无趋势。
+  **策略学会了「多走路」，没学会「朝道具走」**。it40 的 48.3% 是摆动最高点（it45 回落 41.9%），不是进步。
+- **归因**：`wMove` 挂**累计计数** ⇒ `r=+0.03/移动拍` 是**真 dense reward**，满量程 **48**、
+  **100% 局触发**、it0 均值 +32.90 = 正奖励 **20.6%**（第三大项，且 40 it 里涨到 +34.78）。
+  `wNear`/`wApproach` 挂**势能** ⇒ 两端哨兵 −1 ⇒ `Σr = Φ_end − Φ_start = 0`（严格零和）。
+  每决策步（K=10）wMove **+0.30 不问方向** vs wApproach **+0.02/格** ⇒ 方向信号只占 **6.7%**；
+  wNear 只在 3 格内生效而未捡局中位 **14 格** ⇒ 陡区到不了；**21–28% 的局让道具 1200 拍过期**，
+  过期与捡到**同样退款** ⇒ 势能分不开「捡」与「拖到消失」。
+- **决定**：立 `nn-training/curricula/o2-nomove.jsonc`（**已立项 · 待开课**，agent 不启动训练）。
+  从 `o2-pick` **逐字**继承，**只删一行** `+ wMove*min(ticks - idleTicks, moveCap)`（30→**29** 行）
+  + 删死参数 `wMove`/`moveCap`（63→**61**）+ 5 个身份键（name/out/traj/backup_dir/backup_prefix）。
+  **29 行每行上方独立成行写人话注释**（用户要求：注释不写行尾）。**bc 与 `paired_rotate_seed` 20261123 故意与父腿相同**
+  —— 沿用 §2026-09-29-h4-nolane-open（同 bc + 同 rotate seed = McNemar 前提）；
+  it0 须复现 clear 358/400 · 拾取 44.82% · idle 36.75% · cells 52.92。
+  预算 iters 80 / max_hours 8（实测父腿 187 s/it 中位 ⇒ ≈4.2 h）。
+- **否决**：① **把 wPickup 抬到最高**（用户第二问）—— 硬闸 #6 把 o2 塑形封在 `0.5×wWin=30`，
+  24→30 只剩 +25%，而 12→24 已实测无效；且 24576 transitions 里只有 ~66 次拾取，
+  **抬稀疏尖峰不改「密集补贴 vs 稀疏事件」的密度比**；要压过 wKill 36/wWin 60 就得破闸或降主奖。
+  ② **继续加趋近势能权重** —— 零和结构不因权重而变，z5 已五次证伪线性势能。
+  ③ **降 wKill/wWin 来抬拾取相对价** —— wWin 是主奖、动它等于改优化目标。
+  ④ **改任务侧（敌数/命数/关卡）来提高掉落供给** —— AGENTS §0.2 任务侧不可动。
+  ⑤ **给 o2-nomove 独立的 rotate seed** —— 会毁掉逐局配对，80 it 探针读不出 ±2.5pp 的变化。
+- **剂量（真 RewardFn，o2-pick it0 400 局）**：S0 clear 126.42 / go −76.72 / to −57.87（Δret +18.86）；
+  **S1 clear 93.33 / go −99.44 / to −94.85（Δret +4.58）**，三桶排序 PASS。
+  赢−输价差 203.15→192.76（**收窄 5.1%**，真代价：清关局走得多 ⇒ wMove 在清关局给得更多）。
+  硬闸 #6：新增项 **0**（纯删除）⇒ 按构造 PASS；被删项满量程 48 本就超 30 包络 ⇒ 删它反而收口。
+  走−坐 边际差三口径：平均 0.0346→0.0050（6.9×）/ 边际 0.050→0.020（2.5×）/ 架枪 0.040→0.010（4.0×）。
+- **顺带查清一个长期误读**：**idx9 `stuckTicks` 是「当前连续段」长度、不是累计**
+  （真累计 `stuckTicksCum` 未进公式，`tools/sim/export-rl-rollout.ts:682`）⇒ 动一格**或打中敌人**
+  就清零 ⇒「站着开火且命中」完全绕开 `wStuck`。摘 wMove 后反站桩只剩
+  wIdle(≤10)+wIdle2(≤25)+wStuck(≤20，可绕)+wPace(≤46，局末才咬)+wFast(≤28)+wWin(≤60，需 cells≥30)。
+- **预注册判据**：主0 拾取 ≥70%@it80（it40 ≥60%）；主1 **不坍缩** clear ≥330 / cells ≥45 / idle ≤50%；
+  主2 未捡局 distMed ≤10 格 / 过期率 ≤21%。反签名（任一即停，不抢救）clear <300 / idle >55% /
+  cells <40 / 拾取 <40% 连续 3 点 / entropy <1.00 / kl breaker。分档：<50% 或 idle +10pp ⇒ **证伪**。
+- **诚实边界（预注册）**：删 wMove **不创造**方向梯度，只撤竞争者；势能零和与过期退款**本课未动**。
+  若 80 it 后拾取仍不动 ⇒ 瓶颈在**势能形式本身**，下一步换**非零和**趋近记账
+  （首次进入 N 格一次性给分 / 过期不退款的债务）或转查导航能力，**不是继续加权重**。
+- **验收**：`tmp/o2-nomove-check.py` 文本层 15 项全 PASS；`course_formula_hash`
+  `c622c26ebc756cc3` → **`6c214b603656c24c`**、`corpus_identity_fp` 亦变 ⇒ 异血缘禁续跑（§15.5）；
+  **奖励层逐元素** `Φ_child == Φ_parent − Φ_wMove`（max|resid| **8.5e-14**，n=400）；
+  `tmp/o2-nomove-ts-check.ts` 7 项全 PASS（`dashboard/src/core/jsonc.ts` 解析出同样 29 行，
+  行内 + 项间注释两侧加载器都支持，注释不进 identity hash）。全文 → `docs/nn/experiments.md §140`。
+- **未闭的环**：① 本课**待人在控制台 :8900 开课**，agent 不启动训练。② 父腿 o2-pick 立项时仍在跑
+  （it57），本课不触碰它的 out/traj/权重；父腿是否停跑由人拍板（其反签名已在 it40 触发）。
+  ③ 站桩坍缩是头号风险，主1 是硬门：拾取涨但 cells <40 不算成功。
+
+## §2026-11-11-goalnn-o2-polish-open（o2 胜率打磨：奖励压力已拉满 ⇒ 杠杆改走语料侧，钉短板关 + 抬 greedy 供给）
+
+- **背景**：用户「再设计一门**并行**课程，期望在 o2-nomove 学会捡道具的基础上把胜率打磨到
+  **>95%**，起始权重用 **o2-notax3 最新权重**」。
+- **决定**：立 `nn-training/curricula/o2-polish.jsonc`（**已立项 · 待开课**，agent 不启动训练）。
+  奖励 **29 行 / 61 参数逐字继承 o2-nomove**（已摘 wMove），改动**只在语料侧 13 键**：
+  bc=`o2-notax3.it236` · `paired_rotate_seed` **20261124** · rotation `pinned`/`"2002-2003"`/`per_it` **1** ·
+  `greedy_quota.oversample_cap` **2.0→4.0**（比例与 soft 不动）· iters **160**/max_hours **12** · 5 个身份键。
+- **为什么不是奖励侧（决定性反证）**：真 RewardFn 回放 notax3 末 5 点 2000 局，
+  **clear−timeout 已拉开 175.85 分**（nomove 配方 181.07），硬闸 #6 把新项封在 `0.5×wWin=30`
+  ⇒ 一个新项最多改 **17%**。价差前四 = wWin +59.37 / terminal +40.00 / wKill +17.89 / wPace +17.76，
+  且 **wMove −3.91（反胜率）**⇒ 继承 §140 的删除对胜率也是正贡献。§139 已独立判「形塑项大面积失效」。
+- **否决① `nearSqSum` 方向性 dense**：corr(kills) **+0.039**、原始总量是**时长代理**
+  （clear 195.22 < timeout 220.05，按密度反序）、方向关间不一致（2003 clear 257.84 < to 264.85），
+  2001 一局 **7412** 的全程贴敌架枪 ⇒ **定价它 = 奖励失败模式**。
+- **否决② 抬 greedy loss/timeout 比例**：实测**供给受限** —— loss 桶只填 **0.59×**、
+  `degraded=cap_hit=`**0.72** ⇒ 抬比例只加重 degraded；正确杠杆是抬 cap（4.0 ⇒ loss 预测 **119%**），
+  比例保持 §139 已验证的 **12% 剂量**。
+- **否决③ `per_it 0`（2× 密度）**：2000/2001 已 95–98%，撤出分布的**遗忘**风险大于收益 ⇒ 只作回退③。
+- **否决④ 延长 notax3**：236 it **mean_ret 73.9→76.4 升而胜率 84.50→84.97 平**，
+  McNemar it230→235 **103/400=25.8% 翻转** ⇒ **零净进步**，加跑 = 重复 notax2 的 reward hacking。
+- **剂量**：窗口恒 3 关，40 it 出现次数 2000:20/2001:20/2002:40/2003:40 ⇒ 配额 8192/关（基线 6144）
+  ⇒ 短板 **1.33×** vs 易关均 **0.67×** = **相对 2:1 且零遗忘**。缺陷实测：易关吃 **50.7%** 预算；
+  rollout 21.1s vs ppo 154.3s ⇒ C3 墙钟增量个位数秒/it；160 it ≈ **8.9h** < max_hours 12。
+- **顺带钉死一个判决口径**：`eval_summary.winRate`（win 旗标）与逐局 `outcome=="stage_clear"`
+  **系统性不等** —— 48 点里 **47 点有差**，Δ 1–10 局（均 4.02 局 ≈1pp，it200 差 2.5pp），
+  成因 = §139 ㉕ 的截断暴露面。**控制台 pill 是 win 旗标** ⇒ 对 95% 门高估 ~1pp；本课所有门一律
+  outcome 口径（课程 §4②）。
+- **预注册**：主0 B/C ≥**761/800=95.13%**（>95%；760 只算平目标），分档 ≥720(90%，史上首次)/
+  ≥700(87.5%，超 bc)/<bc−1pp 退步；主1 A 层 ≥92% 且 2002/2003 各 ≥85%；主2 **抗遗忘硬门**
+  2000/2001 各 ≥93%；主3 拾取 ≥60%；主4/主5 **诊断门非止损门**（§139 结论5）。反签名：
+  2000/2001 <88% / B/C <bc−3pp / entropy <1.00 / kl 熔断 / shots <11 / idle >55% / Δret ≤0。
+- **诚实边界**：o2 史上 B/C **从未 >90%**（最好 o2-gq 691/800=86.4%），短板关单点 **σ≈10pp**
+  ⇒ 7–10pp 缺口在噪声带里；落在 **700–760 必须补第二 seed/臂**。C2+C3 是**组合臂**，不做单变量归因。
+- **验收**：`tmp/o2-polish-verify.py` 6 节 **ALL PASS** —— `course_formula_hash` **不变** `6c214b603656c24c`、
+  `corpus_identity_fp` **变** `7d8600edb9127803→4945a406743f7152`（异血缘禁续跑）、**Φ 逐元素 max|Δ|=0**(n=2000)、
+  硬闸 #6 按构造 PASS、#7 全局 **+21.82** PASS（2001 −12.71 是 n=8 小样本 inversion，已预注册）；
+  `tmp/o2-polish-jsontest.ts` **TS ALL PASS**（兄弟课=空是预期，不污染 nomove↔pick）。
+  门禁：根 `bun run check` **2745 pass/0 fail**、nn pytest **125 pass/0 skip**。全文 → `docs/nn/experiments.md §141`。
+- **未闭的环**：① **B/C 锚 `polishbc` 未测**（notax3.it236 的 800 局 greedy；档内只有 notax2bc 690/800，
+  **不可代用**）② **worker 供给**待确认（立项时 notax3 在 `job_pending` 停 69 min）③ 本课**待人在
+  控制台 :8900 开课**；不触碰 nomove/pick/notax3 的 out/traj/权重。
+
+## §2026-11-12-goalnn-bc-p0-open（God AI 语料 BC 单元探针：2敌/4关/800 局，判「能不能学」）
+
+- **背景**：用户 2026-11-12 09:49「开始 2敌/4关/800 局 bc」。P0 的目的不是拿胜率，
+  而是分离「表征/架构 vs 信用分配/奖励」：BC 每步有监督标签、无信用分配问题，
+  若 BC 都学不会 God AI 动作 ⇒ 表征/观测缺信息；BC 会而 PPO 不会 ⇒ 训练法问题。
+  同日 09:46 用户已澄清：钢墙关 God AI 95.90% 可当观察线（不作 DoD）；
+  阶段 2 超越必然切 RL；§2026-09-28「God 禁入教师位置」实锤于 c20-lives1（未调优的
+  ladder 场景、权重不能迁移经典关）⇒ 对当前 classic35-safe-base 不适用，无需翻案。
+- **决定**：
+  ① 语料 = `tools/sim/export-godai-labels.ts --stage-json-file tmp/god-o2-four-stages.json
+     --stages 2000-2003 --seeds 860001-860200 --difficulty hard --max-ticks 3000
+     --lives-override 1 --player-level 0 --wins 0 --near-miss-times 0
+     --out tmp/bc-p0-godai` ⇒ 800 局 / 123,992 决策样本，`--wins 0` 保留败局、
+     `--near-miss-times 0` 不人为加权，动作分布完整。
+  ② 训练 = `bun dashboard/src/launch/cli.ts --script train_bc.py --data-dir …
+     --arch student --out tmp/bc-p0-weights/weights.json`。legacy 5/2 头（导出器只产
+     `actions(N,2)` / `masks(N,7)`），`--policy-extra OFF`；主干 stem/blocks/fc 与部署
+     权重同源，只有输出头不同。
+  ③ **`extra.npy` 全 0 占位**：legacy 导出器不产 POLICY_EXTRA(57)，而 `npyio.load_shard`
+     把它列为必需文件；`--policy-extra OFF` ⇒ 占位不进任何梯度。占位说明写在
+     `tmp/bc-p0-godai/_P0_EXTRA_PLACEHOLDER.txt`。
+  ④ CPU-only 全量 40 epochs 首个 epoch >10 分钟（实测 11m36s 无 epoch 输出、进程 CPU
+     4689s 在计算）⇒ 停掉，改 P0 快速判决：等距 200 局 / 30,173 样本
+     （`tmp/bc-p0-godai-fast`）+ `--epochs 10 --patience 3`；**全量语料原样保留给 P1**。
+- **否决**：① 全量 40 epochs 硬跑 ⇒ 数小时，与「便宜判决性探针」定位不符；
+  ② 改集内导出器让它产真实 pf ⇒ `tools/agent/codehash-files.txt` 字节一变全集群 stale
+  重启波，且要同步 Paddle 双生 parity；③ 走 v6 BC 语料链（`export-rl-rollout
+  --teacher-argmax`）⇒ 它要 NN 权重当教师，不是 God AI，答不了本题。
+- **诚实边界**：占位 pf + legacy 头 ⇒ 结论只判「不含 pf 的主干表征链」，不能直接外推到
+  部署权重（`policyExtra=true`，动作头 `pf/hidden=12~27×`）；God AI 读数只作观察线，
+  不写进课程判据/优化目标（AGENTS §0.2 四禁令）。
+- **验收**：训练读数（`val_loss` / move·fire acc vs majority baseline `move=1.1851
+  fire=0.0607`）+ 可选端到端 800 局评估；产物 `tmp/o2-analysis/bc-p0-summary.txt`。
+- **违反后果**：拿占位 pf 的语料去训 `policyExtra=true` 或当作部署级语料 ⇒ 57 维方向
+  直方图恒 0，结论全假；把 P0 快速探针的胜率当 God AI 对齐证据 ⇒ 重演「定集磨权重」。
+
+### 补充（2026-11-12 10:17，用户改令）
+
+- 用户「不要本地跑训练，没有显卡！开个 bc 课程，我开云机 gpu worker 来接活」。
+  本机 CPU-only 三次尝试（全量 40 epochs 11m36s、绝对路径重试、200 局子集 10 epochs
+  10m41s）全部无 epoch 读数 ⇒ **全部停止，无残留训练进程**。
+- 改令后：`nn-training/curricula/bc-p0-godai.bc.jsonc` 立项（**待人在控制台开课**，
+  agent 不启动训练）。`corpus.source=fixed` 指向本机全量 800 局 / 123,992 样本，
+  `publish_job(kind=bc)` 把 shard 打进 payload 随 code.zip 下发云机 GPU worker，
+  无需手工搬语料；`train.epochs=40`（GPU）、`arch=student`、`policy_extra=false`、
+  `action_v6=false`、`init_from=""`（随机起）、`iters=1`、`auto_stop=true`。
+- 全量语料（含 extra 占位）与快速子集都保留在 `tmp/bc-p0-godai{,-fast}`，供 P1 / 对照；
+  本机 `tmp/bc-p0-weights/weights.json` 未产出，不作为交付。
+- 校验：`load_bc_course` 通过（stage_ids 2000–2003 / count 2 / lives 1 / max_ticks 3000）、
+  TS `parseJsonc` 通过、fixed 语料根 800 shard 全部匹配 `*_s*_seed*` 且文件齐全、
+  `bun tools/check-decisions.ts` 绿。
+
+### 补充二（2026-11-12 10:26，课程改名 g 系列 + epochs/eval）
+
+- 用户：**课程命名改 g 系列**，`bc-p0-godai` → **`g0-4s2e`**（4 stages, 2 enemies）；
+  并问「epochs 40 够不够？不 eval 怎么判断有没有学会？」。
+- 改名：`curricula/g0-4s2e.bc.jsonc`（旧 `bc-p0-godai.bc.jsonc` 删除）。**不新建 levels
+  文件**（用户 10:29：「不要新建 nn-training/levels/g0-4s2e.jsonc，完全没用」）——环境用
+  `level: classic35-safe-base` + 四类覆盖 `stage_select 16,22,3,6 / enemies 2 / lives 1 /
+  star 0 / max_ticks 3000`，与训练语料逐字同源。
+  `out/traj/backup` 全改 `g0-4s2e`；语料目录 `tmp/bc-p0-godai` **保留原名**（已产 800 局，
+  改名只制造断链）。
+- **epochs 40 → 80 + patience 10 + ckpt_every 10**：按 update 数 124K/256×40≈19.4K，只有
+  `bc-v6-train`（447K/256×80≈139K）的 14%；80 仍只有 28%，但不设人为上限、让早停决定；
+  单点 val_loss 新低不作交付判据（bc-v6：交付权重 ep18、账本报 ep80）。
+- **eval 开（every_epochs=10 / games_per_stage=5）**：用户 10:38 纠正「eval 在
+  hub/trainer 侧跑，不是云机」；10:41 进一步否掉一切额外文件（`tmp/god-o2-four.jsonc`
+  与新建 `levels/`）——`eval.levels=["classic35-safe-base"]`，**就用课程自己声明的关卡
+  定义**。`worker/bc_eval.py:233` 在 **trainer 进程**里 `resolve_level` 解析关卡，再把
+  `mode=eval` 派给 eval-capable 采样节点（self/mac/a97/a96）；GPU 训练 worker 不参与。
+  每 10 epoch 35 关 × 5 局 = 175 局（seed 1..5）。
+  ⚠ 该 level 是 **35 关 / 20 敌 / 3 命 / 36000 拍**（课程 `max_ticks:3000` 不作用于
+  eval，eval 用关卡文件自己的值），与训练 2 敌 / 1 命 / 3000 拍**不同分布** ⇒ 只作
+  「有没有死」哨兵；且 eval 的 stage_ids 2000–2034 与训练 2000–2003 **同号不同关**，
+  账本分析必须带 `panel`。训练分布的 win/pickup/clearT 判决走离线满池
+  （`eval-course-ckpt --course tmp/god-o2-four.jsonc`）。`sentinel_only=true`；
+  `ckpt_every=10` 保留作切片诊断。
+- 校验：`load_bc_course`（stage_ids 2000–2003 / count 2 / lives 1 / max_ticks 3000 /
+  **eval enabled**）、`load_course(resolve_level(eval.levels[0]))`（stage_ids 2000–2003、
+  stage_json 非空）、TS `parseJsonc` 全绿。
+
+## §2026-11-12-goalnn-bc-eval-course-env（BC 周期 eval 继承课程环境：`eval.course_env`）
+
+- **背景**：用户 2026-11-12 10:44「RL 课程都支持 eval 覆盖了！bc 也要支持！」；
+  10:47「那就用课程配置覆盖他们」。`BcEvalBlock` 只有 `levels`（整份关卡文件）；
+  `g0-4s2e` 想在训练那 4 关、2 敌 / 1 命 / 3000 拍上做过程 eval，但
+  `classic35-safe-base` 是 35 关 / 20 敌 / 3 命 / 36000 拍。
+- **备选与否决**：① `eval.stage_select` + 仍用 level 环境 —— 否，eval 与训练分布不同、
+  曲线不可比；② 引 `tmp/god-o2-four.jsonc` —— 否，用户 10:41 明确否掉额外文件；
+  ③ 新建 `levels/g0-4s2e.jsonc` —— 否，用户 10:29「完全没用」；④ 给 eval 另立
+  `enemies/lives/star/max_ticks` 覆盖字段 —— 否，会造第二份环境事实。
+- **决定**：`BcEvalBlock.course_env: bool = False`。true ⇒ 用 `course.stage_ids` +
+  `course.custom_stage_payload` + `course.max_ticks/difficulty/player`（`apply_level_file`
+  的产物，与训练语料逐字同源），忽略 `levels`；与 `levels` 互斥、只支持 list 型 stages
+  （range 型云端会按真实关号跑、丢覆盖 ⇒ 加载时响亮拒）。`bc_eval` 的 `panel` 加
+  `source / stage_ids / enemies`；`bc_loop.py` / `bc_ingest.py` 透传 `course / course_env`。
+  `g0-4s2e` 切 `course_env: true`（every 10 / 4 关 × 50 局 = 200 局，seed 1..50）。
+- **违反后果**：在 eval 里再引 tmp/新 levels，或让 eval 跑 level 全量环境 ⇒ 评估曲线与
+  训练分布不同、读数不可比，重演「定集磨权重」；range 型课程开 `course_env` 会静默跑错面板。

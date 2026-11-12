@@ -5579,3 +5579,37 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ……
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/repo-governance.md` §2026-11-11-decisions-slim-round6
+
+## §2026-11-11-goalnn-o2-nomove-open（o2-pick 判负：撤掉方向无关的移动补贴 wMove，而不是继续抬拾取权重）
+
+- **决定**：立 `nn-training/curricula/o2-nomove.jsonc`（**已立项 · 待开课**，agent 不启动训练）。
+  从 `o2-pick` **逐字**继承，**只删一行** `+ wMove*min(ticks - idleTicks, moveCap)`（30→**29** 行）……
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-11-goalnn-o2-nomove-open
+
+## §2026-11-11-goalnn-o2-polish-open（o2 胜率打磨：奖励压力已拉满 ⇒ 杠杆改走语料侧，钉短板关 + 抬 greedy 供给）
+
+- **决定**：立 `nn-training/curricula/o2-polish.jsonc`（**已立项 · 待开课**，agent 不启动训练）。
+  奖励 **29 行 / 61 参数逐字继承 o2-nomove**（已摘 wMove），改动**只在语料侧 13 键**……
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-11-goalnn-o2-polish-open
+
+## §2026-11-12-goalnn-bc-p0-open（God AI 语料 BC 单元探针：2敌/4关/800 局，判「能不能学」而非拿胜率）
+
+- **决定**：立 `tmp/bc-p0-godai`（`export-godai-labels.ts --stage-json-file --wins 0 --near-miss-times 0`，
+  800 局 / 123,992 决策样本）+ `train_bc.py --arch student`（legacy 5/2 头、`--policy-extra OFF`）；
+  `extra.npy` 全 0 占位不进梯度。10:17 用户改令「不在本机训（无显卡），开 BC 课让云机
+  GPU worker 接活」⇒ 本机三次 CPU 尝试全部停止。10:26 课程改名 **`g0-4s2e`**（g 系列起点，
+  g<N>-<stages>s<enemies>e 命名规则）、epochs 80 + patience 10，eval 开 every 10 epoch ×
+  4 关 × 50 局（seed 1..50 与训练 860001+ 不重叠）……
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-p0-open
+
+## §2026-11-12-goalnn-bc-eval-course-env（BC 周期 eval 继承课程环境：`eval.course_env`，与训练同源）
+
+- **决定**：`BcEvalBlock.course_env: true` ⇒ eval 直接用课程解析后的 stage 集与四类覆盖
+  （`stage_select`/`enemies`/`lives`/`star` + `max_ticks`），忽略 `levels`；与 `levels` 互斥、
+  只支持 list 型 stages（range 型加载时拒）。`panel` 加 `source/stage_ids/enemies`；
+  `g0-4s2e` 切 `course_env: true`（4 关 × 50 局 / 10 epoch，seed 1..50）……
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-eval-course-env
