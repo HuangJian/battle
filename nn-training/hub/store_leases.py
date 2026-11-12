@@ -323,6 +323,7 @@ class LeaseMixin:
 
         判据与租约同一把尺子（**进度窗**；BC 腿没有心跳），记录**落盘** ⇒ hub 重启后
         照样挡住别的 worker；trainer 重启换了 job_id 也挡（一门课同时只有一个 BC 跑者）。
+        返回 `("", job_id)` = 有锁但持有者未知（epoch 在重启后重建的），调用方**仍须挡**。
         """
         try:
             rec = json.loads(self._bc_lock_path().read_text(encoding="utf-8"))
@@ -350,15 +351,34 @@ class LeaseMixin:
             pass
 
     def _bc_lock_touch(self, job_id: str) -> None:
-        """原 worker 的 epoch 进度续独占窗；记录不属于本 job ⇒ 不动。"""
+        """epoch 进度续独占窗；**锁文件缺失（旧代码认领 / 重启前认领）时按进度重建**。
+
+        2026-11-12 二次报障：锁是认领时写的；若认领发生在部署/重启之前，盘上根本没有锁，
+        重启后内存租约又全丢 ⇒ 另一台云机立刻领走同一份课。epoch 是持续存在的进度事实，
+        所以收到 epoch 就补一份「持有者未知（`""`）」的锁——窗内**谁也不能领**。
+
+        · 记录就是本 job ⇒ 只推进 `progress_at`（保留原认领者/认领时刻）；
+        · 记录缺失/损坏/属于已超窗的旧 job ⇒ 用本 job 重建；
+        · 记录属于**另一个仍新鲜**的 job ⇒ 不动（僵尸 epoch 不该抢走现行锁）。
+        """
         p = self._bc_lock_path()
+        now = self._now()
         try:
             rec = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return
-        if not isinstance(rec, dict) or str(rec.get("job_id") or "") != job_id:
-            return
-        rec["progress_at"] = self._now()
+            rec = {}
+        if not isinstance(rec, dict):
+            rec = {}
+        held = str(rec.get("job_id") or "")
+        if held == job_id:
+            rec["progress_at"] = now
+        elif held:
+            prog = float(rec.get("progress_at") or 0.0)
+            if prog > 0.0 and now - prog <= self._bc_progress_stale_sec():
+                return
+            rec = {"job_id": job_id, "worker_id": "", "claimed_at": now, "progress_at": now}
+        else:
+            rec = {"job_id": job_id, "worker_id": "", "claimed_at": now, "progress_at": now}
         try:
             tmp = p.with_suffix(".tmp")
             tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
@@ -377,6 +397,31 @@ class LeaseMixin:
                 p.unlink()
             except OSError:
                 pass
+
+    def release_bc_exclusive(self) -> dict:
+        """人工解除课程级 BC 独占（dashboard 按钮）：删锁文件并返回原持有者。
+
+        与 `_bc_lock_clear(job_id)` 的差别：**不要求**知道/匹配 job_id，也不看新鲜度
+        ——操作员点按钮的意思就是「现在放行」，陈旧锁一并清（幂等；无锁 ⇒ cleared False）。
+        """
+        p = self._bc_lock_path()
+        existed = p.exists()
+        rec: dict = {}
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                rec = loaded
+        except (OSError, ValueError):
+            pass
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return {
+            "cleared": existed,
+            "worker_id": str(rec.get("worker_id") or ""),
+            "job_id": str(rec.get("job_id") or ""),
+        }
 
     def job_kind(self, job_id: str) -> str:
         """job 的**kind**（`manifest.kind`；读不到 ⇒ `"ppo"`，与 `role_of` 同一兜底）。
@@ -589,12 +634,6 @@ class LeaseMixin:
                 if self.ledger_net_state(job_id) != "job_pending":
                     return False, "", "cancelled"
                 self._cancelled.discard(job_id)
-            if self.job_kind(job_id) in BOTH_ROLE_KINDS:
-                # ★2026-11-12：课程级 BC 独占（落盘）——别的 worker 在窗口内领不走；
-                # 原 worker 重领自己的课放行（hub 重启内存丢租约时靠它续命）。
-                owner, _held = self.bc_exclusive_owner()
-                if owner and owner != worker_id:
-                    return False, "", f"bc_exclusive:{owner}"
             blocked = self.role_blocked(job_id, role)
             if blocked:
                 # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约
@@ -625,6 +664,15 @@ class LeaseMixin:
                 self._backup_authorized.add(job_id)
                 self._last_heartbeat[job_id] = now  # 仅供观测（谁在跑）
                 return True, "", "backup"
+            if self.job_kind(job_id) in BOTH_ROLE_KINDS:
+                # ★2026-11-12（二次报障）：课程级 BC 独占是「窗内谁也不行」——worker 名是
+                # `kaggle-t` 这类**按环境**的标签（两台同环境云机同名），把「worker_id 相等」
+                # 当原机重领会把第二台放进来（同名 ⇒ 闸形同虚设）。原机正在跑时本就不需要
+                # 重领；它若真重启，等窗口结束即可。持有者未知（`""`，epoch 重建的锁）同样挡。
+                # 闸放在 backup 分支**之后**：bc 的备份拒因必须是 `no_backup`（语义优先）。
+                held_owner, held_jid = self.bc_exclusive_owner()
+                if held_owner or held_jid:
+                    return False, "", f"bc_exclusive:{held_owner or '?'}"
             state = self._lease_state(job_id, now)
             recovering = state in LEASE_DEAD
             if recovering:

@@ -246,15 +246,27 @@ class QueueClaimsMixin(QueuePeer):
         st = self._store_of(job_id)
         if st is None or st.job_kind(job_id) not in BOTH_ROLE_KINDS:
             return ""
-        # ★2026-11-12：课程级 BC 独占（落盘，hub/trainer 重启后仍有效）——同一门课只许
-        # 原独占者领；别的 worker 在进度窗内一个 BC job 也拿不到（含 trainer 重启后的新 job）。
-        owner, _held = st.bc_exclusive_owner()
-        if owner and owner != wid:
-            return f"bc_exclusive:{owner}"
+        # ★2026-11-12（二次报障）：课程级 BC 独占（落盘）——进度窗内**谁都不能领**：
+        # `kaggle-t` 这种 worker 名按环境命名，两台同环境云机同名，按名字放行 = 闸失效。
+        # 原机正在跑时本就不需要重领；它若真重启，等窗口结束即可。持有者未知（`""`）同样挡。
+        owner, held = st.bc_exclusive_owner()
+        if owner or held:
+            return f"bc_exclusive:{owner or '?'}"
         holds = self.worker_holds(wid)
         if not holds:
             return ""
         return f"holding:{holds[0]}"
+
+    def clear_bc_exclusive(self, course: str) -> dict:
+        """dashboard 的「解除 BC 独占」口：删该课锁文件（无锁 ⇒ 幂等 cleared=False）。
+
+        只动 `bc-exclusive.json`，不碰租约/进度/权重；在跑的 worker 下一次 epoch 会**重建**
+        锁（它还在推进）——按钮的语义是「让下一份能被别的盘领」，不是「杀掉正在跑的 job」。
+        """
+        st = self._stores.get(course)
+        if st is None:
+            raise ValueError(f"未知课程 {course!r}")
+        return {"course": course, **st.release_bc_exclusive()}
 
     def claim(
         self,
@@ -401,6 +413,8 @@ class QueueClaimsMixin(QueuePeer):
                     "payload_sha256": man.get("payload_sha256"),
                     "runId": man.get("runId"),
                     "it": man.get("it"),
+                    # kind 只读（预取侧据此跳过 BC：BC 整门课独占，不预取——2026-11-12）。
+                    "kind": st.job_kind(jid),
                     # 认领模式由 **hub** 定（它才知道有没有活租约）：客户端照发即可。
                     # 旧 hub 不发这个字段 ⇒ 客户端按 `exclusive` 处理（默认行为零变化）。
                     "mode": mode,

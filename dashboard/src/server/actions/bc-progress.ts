@@ -10,7 +10,7 @@
  */
 
 import { loadConfig } from '../../core/config'
-import { hubCandidates, hubClearBcResume } from '../../stack/hub-admin'
+import { hubCandidates, hubClearBcResume, hubReleaseBcExclusive } from '../../stack/hub-admin'
 import { readPauseFacts } from './loop-control'
 import type { ActionResult } from './result'
 
@@ -51,4 +51,36 @@ export async function clearBcResume(course: string): Promise<ActionResult> {
     }
   }
   return { ok: false, message: `清空失败：${last}` }
+}
+
+/** 2026-11-12：人工解除 BC 课程独占（落盘锁；**不要求**暂停——worker 已死/换机时紧急放行）。
+ *
+ *  只删 hub 的 `bc-exclusive.json`：在跑的 worker 下一次 epoch 会重建锁（它还在推进），
+ *  所以这不会「杀掉」正在训练的 job；它只是让下一份能被别的盘领。
+ */
+export async function releaseBcExclusive(course: string): Promise<ActionResult> {
+  const c = String(course ?? '').trim()
+  if (!c) return { ok: false, message: '缺少 course' }
+  const cfg = loadConfig()
+  const token = String(cfg.rl?.remote_token ?? '')
+  let last = '没有可用的 hub 地址'
+  for (const base of hubCandidates(cfg, c)) {
+    const r = await hubReleaseBcExclusive(base, token, c)
+    if (!r.reachable) {
+      last = r.message
+      continue
+    }
+    if (!r.ok) return { ok: false, message: `解除 BC 独占失败：${r.message}` }
+    return {
+      ok: true,
+      message: r.cleared
+        ? `已解除 ${c} 的 BC 独占（原 worker=${r.worker_id || '?'} job=${r.job_id || '?'}）——下一份可被其它盘领取`
+        : `${c} 当前没有 BC 独占（无需解除）`,
+      detail: [
+        '只删 hub 的 bc-exclusive.json；租约、进度、权重不动。',
+        '若原 worker 仍在跑，它下一次 epoch 会重建锁——那就等于没解除，先确认它已停止。',
+      ],
+    }
+  }
+  return { ok: false, message: `解除 BC 独占失败：${last}` }
 }

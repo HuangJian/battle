@@ -336,6 +336,70 @@ export async function hubClearBcResume(
   }
 }
 
+/** **人工解除 BC 课程独占**（2026-11-12）：`POST /admin/bc-exclusive/clear?course=<课>`。
+ *
+ *  只删 hub 的 `bc-exclusive.json`——不碰租约/进度/权重。在跑的 worker 下一次 epoch 会
+ *  重建锁，所以语义是「现在就放下一份进来」（worker 已死/换机时的手动出口）。
+ *  无锁 = 200 + `cleared:false`（幂等，不编「失败」）。 */
+export async function hubReleaseBcExclusive(
+  url: string,
+  token: string,
+  course: string,
+): Promise<{
+  reachable: boolean
+  ok: boolean
+  cleared: boolean
+  worker_id: string
+  job_id: string
+  message: string
+}> {
+  const base = url.replace(/\/+$/, '')
+  try {
+    const resp = await fetch(
+      `${base}/admin/bc-exclusive/clear?course=${encodeURIComponent(course)}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(3000),
+      },
+    )
+    const body = (await resp.json().catch(() => null)) as {
+      cleared?: unknown
+      worker_id?: unknown
+      job_id?: unknown
+      error?: unknown
+    } | null
+    if (resp.status === 200) {
+      return {
+        reachable: true,
+        ok: true,
+        cleared: body?.cleared === true,
+        worker_id: typeof body?.worker_id === 'string' ? body.worker_id : '',
+        job_id: typeof body?.job_id === 'string' ? body.job_id : '',
+        message: '已解除',
+      }
+    }
+    const err = typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+    return {
+      reachable: true,
+      ok: false,
+      cleared: false,
+      worker_id: '',
+      job_id: '',
+      message: err,
+    }
+  } catch (e) {
+    return {
+      reachable: false,
+      ok: false,
+      cleared: false,
+      worker_id: '',
+      job_id: '',
+      message: `hub 不可达：${e instanceof Error ? e.message : String(e)}`,
+    }
+  }
+}
+
 /** 直探一台 worker_server 的 `/ping`（登记/列表用）：`{online, busy}`。
  *  `online=false` 与「未探」是**两种**状态：前者是探过不通（隧道没起来/机器没开），
  *  后者是根本没法探（无鉴权键 / 已停用）——面板要给不同的提示。 */

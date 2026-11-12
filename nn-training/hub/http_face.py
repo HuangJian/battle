@@ -671,6 +671,9 @@ class HubHandler(
             elif path == "/admin/bc-resume/clear":
                 # #8：清空课程级 BC 续训索引（只删别名；权重/历史不动）。
                 self._admin_clear_bc_resume()
+            elif path == "/admin/bc-exclusive/clear":
+                # 2026-11-12：人工解除 BC 课程独占（dashboard 按钮）。
+                self._admin_release_bc_exclusive()
             elif path == ADMIN_CANCEL_JOB_PATH:
                 # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
                 self._admin_cancel_job()

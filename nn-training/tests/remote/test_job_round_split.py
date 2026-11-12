@@ -474,6 +474,69 @@ def test_host_bookkeeping_reads_the_round_outcome(monkeypatch, tmp_path: Path) -
 # ───────────────────────── ⑥ 账本：层号就是拓扑秩 ─────────────────────────
 
 
+def test_bc_round_starts_no_prefetch_but_ppo_round_does(monkeypatch, tmp_path: Path) -> None:
+    """★2026-11-12（用户口径）：BC 整门课独占 ⇒ 训练轮**不起预取**（其它课程/PPO 都不许）；
+    PPO 轮照旧起（闸不能误伤）。两侧同一断言，去掉任一侧就会漏掉「误伤」或「没修」。"""
+    from typing import Any, cast
+
+    from common.protocol import ROLE_ONLINE, JobCancelledError
+
+    started = threading.Event()
+
+    class _PF:
+        def take(self, _jid):
+            return None
+
+        def release_handoff(self) -> None:
+            pass
+
+    class _Uploader:
+        def submit(self, _task) -> None:
+            pass
+
+    def _cancel(*_a, **_k):
+        raise JobCancelledError("test")
+
+    monkeypatch.setattr(round_mod, "_prefetch_fill", lambda *_a, **_k: started.set())
+    monkeypatch.setattr(round_mod, "start_cancel_watcher", lambda *_a, **_k: None)
+    monkeypatch.setattr(round_mod, "abandon_job", lambda *_a, **_k: None)
+    monkeypatch.setattr(round_mod, "_wire_start", lambda *_a, **_k: None)
+    monkeypatch.setattr(round_mod, "_wire_flush", lambda *_a, **_k: None)
+
+    def _round(kind: str) -> bool:
+        started.clear()
+        job = {
+            "job_id": "b" * 16,
+            "manifest": {"kind": kind, "it": 1},
+            "status": "ok",
+            "lease_token": "",
+        }
+        round_mod.run_one_round(
+            "http://hub",
+            "tok",
+            job,
+            part_dir=tmp_path,
+            code_cache_dir=None,
+            pf_store=cast(Any, _PF()),  # 鸭子类型假件：只为断言「有没有起填充」
+            polls_since_accept=0,
+            worker_id="w-1",
+            device="cpu",
+            torch_threads=0,
+            echo=False,
+            restart_argv=None,
+            role=ROLE_ONLINE,
+            prefetch_depth=1,
+            prefetch_unpack=0,
+            uploader=cast(Any, _Uploader()),
+            run_job_fn=_cancel,
+            log=lambda _m: None,
+        )
+        return started.is_set()
+
+    assert _round("bc") is False, "BC 轮不许起预取（其它课程/PPO job 都不许）"
+    assert _round("ppo") is True, "PPO 轮照旧起预取（闸不能误伤）"
+
+
 def test_job_round_sits_below_the_host() -> None:
     """它必须在宿主**下面**（一个组装一轮，一个管轮询），且低于它依赖的业务簇之上一层。"""
     layers = dag.LAYERS

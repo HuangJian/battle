@@ -219,7 +219,12 @@ def _prefetch_fill(
             log(f"prefetch: peek 失败（{type(e).__name__}）——{PREFETCH_ROUND_SEC:.0f}s 后再试")
             stop.wait(PREFETCH_ROUND_SEC)
             continue
-        cands = list(peeked[0]) if peeked else []
+        # ★BC 独占（2026-11-12 用户口径）：预取**一律不碰 BC 课程**。hub 侧（课程锁）
+        # 已经把「别人正在训练的那门 BC」从 peek 候选中滤掉；这一层再按 kind 兜底，
+        # 保证即使旧 hub / 锁刚写下的窗口里，也不会白传一整份 BC payload。
+        cands = [
+            c for c in (peeked[0] if peeked else []) if str(c.get("kind") or "") != "bc"
+        ]
         picked = pick_candidates(cands, held=store.held(), skip=skip, depth=depth)
         if picked:
             # R8/M7（2026-10-13，plan/body-transfer-guard-v2 §4-M7）：`wall` 从**开始请求第一份**
@@ -417,8 +422,13 @@ def run_one_round(
     """
 
     jid = job["job_id"]
+    manifest = job.get("manifest") or {}
     # 本轮的 it（回传失败备份的文件名要它；§3.6）：hub 派的 job 必带，缺了就算 0。
-    job_it = int((job.get("manifest") or {}).get("it") or 0)
+    job_it = int(manifest.get("it") or 0)
+    # ★2026-11-12（用户口径）：BC 是整门课独占的长跑——训练期间**不起预取**。
+    # 预取的下行腿会抢带宽，而 BC 占用的是整张卡/整门课，下一个 job 也不该在它跑着时
+    # 提前下别人的 payload（尤其 PPO：那会白传一整份，还可能与另一个 worker 抢课）。
+    _is_bc = str(manifest.get("kind") or "") == "bc"
     _wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从 claim 起算
     lease_token = str(job.get("lease_token", "") or "")
     claim_mode = str(job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
@@ -463,39 +473,44 @@ def run_one_round(
             # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
             log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
             pf_store.drop(jid)  # staged 形状的暂存目录也要一起清（drop 连 _handoff 一起清）
-        # 先试子进程（下行腿已在进程外：网络 + 解包都不抢训练线程的 GIL）。
-        # `start_fill` 返回 False = 没交出去（子进程已降级/死了）：就地回退到进程内线程，
-        # 预取是提前量 —— 它没有自己的失败面（`prefetch.py` 头部 §2）。
-        remote_ok = bool(
-            pf_proc is not None
-            and pf_proc.fills_out_of_process
-            and pf_proc.start_fill(
-                base_url=base_url,
-                token=token,
-                worker_id=worker_id,
-                role=role,
-                depth=prefetch_depth,
-                unpack_n=prefetch_unpack,
-                skip={jid},
-                log=log,
+        if _is_bc:
+            # BC 独占：本轮**不起填充**（`take(jid)` 已在上方——上一轮若真暂存了本 job
+            # 的字节，照样零下载开算；但不再为下一份预热任何东西）。
+            pass
+        else:
+            # 先试子进程（下行腿已在进程外：网络 + 解包都不抢训练线程的 GIL）。
+            # `start_fill` 返回 False = 没交出去（子进程已降级/死了）：就地回退到进程内线程，
+            # 预取是提前量 —— 它没有自己的失败面（`prefetch.py` 头部 §2）。
+            remote_ok = bool(
+                pf_proc is not None
+                and pf_proc.fills_out_of_process
+                and pf_proc.start_fill(
+                    base_url=base_url,
+                    token=token,
+                    worker_id=worker_id,
+                    role=role,
+                    depth=prefetch_depth,
+                    unpack_n=prefetch_unpack,
+                    skip={jid},
+                    log=log,
+                )
             )
-        )
-        if not remote_ok:
-            pf_thread = threading.Thread(
-                target=_prefetch_fill,
-                args=(base_url, token, pf_store, _pf_stop),
-                kwargs={
-                    "worker_id": worker_id,
-                    "role": role,
-                    "depth": prefetch_depth,
-                    "unpack_n": prefetch_unpack,
-                    "skip": {jid},
-                    "log": log,
-                },
-                daemon=True,
-                name=f"pf-{jid[:8]}",
-            )
-            pf_thread.start()
+            if not remote_ok:
+                pf_thread = threading.Thread(
+                    target=_prefetch_fill,
+                    args=(base_url, token, pf_store, _pf_stop),
+                    kwargs={
+                        "worker_id": worker_id,
+                        "role": role,
+                        "depth": prefetch_depth,
+                        "unpack_n": prefetch_unpack,
+                        "skip": {jid},
+                        "log": log,
+                    },
+                    daemon=True,
+                    name=f"pf-{jid[:8]}",
+                )
+                pf_thread.start()
     _hb_stop = threading.Event()
     hb_thread = None
     if lease_token:

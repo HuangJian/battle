@@ -155,6 +155,8 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
   const [fullOpen, setFullOpen] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [clearMsg, setClearMsg] = useState('')
+  const [releasing, setReleasing] = useState(false)
+  const [releaseMsg, setReleaseMsg] = useState('')
   const [rebuilding, setRebuilding] = useState(false)
   const [snapshotMsg, setSnapshotMsg] = useState('')
 
@@ -171,6 +173,21 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
     const r = await postAction('clearBcResume', { course })
     setClearing(false)
     setClearMsg(r.message)
+  }
+
+  /** 2026-11-12：人工解除 BC 课程独占（落盘锁；不要求暂停——worker 已死/换机时紧急放行）。 */
+  const onReleaseExclusive = async (): Promise<void> => {
+    if (!course || releasing) return
+    const ok = window.confirm(
+      `解除 ${course} 的 BC 独占？\n\n` +
+        '只删 hub 的 bc-exclusive.json；不停止在跑的 job（它下一次 epoch 会重建锁）。\n' +
+        '用于 worker 已死/换机而进度窗还没耗尽的场景。',
+    )
+    if (!ok) return
+    setReleasing(true)
+    const r = await postAction('releaseBcExclusive', { course })
+    setReleasing(false)
+    setReleaseMsg(r.message)
   }
 
   /** B7：重打集群代码快照；只对下一次发布生效，不重启进程。 */
@@ -286,6 +303,15 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
         <button
           type="button"
           className="tc-btn tc-btn--sm"
+          disabled={releasing}
+          title="人工解除 BC 课程独占：删 hub 的 bc-exclusive.json（worker 已死/换机时用；在跑的 job 会重建锁）"
+          onClick={() => void onReleaseExclusive()}
+        >
+          {releasing ? '解除中…' : '解除 BC 独占'}
+        </button>
+        <button
+          type="button"
+          className="tc-btn tc-btn--sm"
           disabled={clearing}
           title="清空 hub 的课程级 (course,it) 续训索引（要求先暂停；下次开课从 ep1 起）"
           onClick={() => void onClearProgress()}
@@ -304,6 +330,7 @@ export function BcPanel({ course, enabled = true }: BcPanelProps) {
         ) : null}
       </div>
 
+      {releaseMsg ? <p className="tc-muted tc-small">{releaseMsg}</p> : null}
       {clearMsg ? <p className="tc-muted tc-small">{clearMsg}</p> : null}
       {snapshotMsg ? <p className="tc-muted tc-small">{snapshotMsg}</p> : null}
 

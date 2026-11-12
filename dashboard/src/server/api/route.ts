@@ -12,6 +12,7 @@ import {
   autoOfflineHandoff,
   busy,
   clearBcResume,
+  releaseBcExclusive,
   jobIdError,
   markCloudHaltRecovered,
   openCourse,
@@ -441,6 +442,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       // ---- #8：清空 BC 课程级续训索引（只删别名；要求先暂停，见 actions/bc-progress）----
       case 'clearBcResume':
         return okResp(await clearBcResume(ctx.course))
+      // ---- 2026-11-12：人工解除 BC 课程独占（落盘锁；不要求暂停，见 actions/bc-progress）----
+      case 'releaseBcExclusive':
+        return okResp(await releaseBcExclusive(ctx.course))
       // ---- B7：重打集群代码快照（只写 tmp/.code-snapshot；不重启进程）----
       case 'rebuildCodeSnapshot':
         return okResp(await rebuildCodeSnapshot())

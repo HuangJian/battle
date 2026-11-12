@@ -183,6 +183,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "worker_holds",
             "worker_bc_drain",
             "_drain_blocked",
+            # 2026-11-12：dashboard 的人工「解除 BC 独占」口（删课程级锁文件）。
+            "clear_bc_exclusive",
         ),
     ),
     "queue_resume": (
@@ -575,7 +577,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 134, len(DOMAIN_METHODS)
+    # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 135, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -585,7 +588,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 134, len(seen)
+    assert len(seen) == 135, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (

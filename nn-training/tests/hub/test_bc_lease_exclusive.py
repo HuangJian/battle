@@ -11,6 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from common.protocol import COURSE_ENABLE_MARKER
+from hub.server import _HubQueue
 from hub.store import _JobStore
 
 JID = "d" * 16
@@ -108,3 +112,69 @@ def test_course_lock_survives_hub_and_trainer_restart(tmp_path: Path) -> None:
     assert st2.claim(jid2, worker_id="cloud-2") is None
     clock.tick(400.0)  # 进度静默 > 900s ⇒ 让出
     assert st2.claim(jid2, worker_id="cloud-2")
+
+
+def test_same_worker_tag_cannot_steal(tmp_path: Path) -> None:
+    """两台同环境云机共用 `kaggle-t`（worker_name 按环境命名）——重启后新机也领不走。"""
+    clock = _Clock()
+    st = _store(tmp_path, clock)
+    st.publish(JID, _manifest(), b"PK\x03\x04fake")
+    assert st.claim(JID, worker_id="kaggle-t")
+    st2 = _store(tmp_path, clock)  # hub 重启：内存租约全丢，锁文件还在
+    jid2 = "f" * 16
+    st2.publish(jid2, _manifest(jid2, it=2), b"PK\x03\x04fake")
+    # 同一 worker 名（另一台机器）不能把同一门课的第二份 job 领走
+    assert st2.claim(jid2, worker_id="kaggle-t") is None
+    assert st2.claim(JID, worker_id="kaggle-t") is None
+    clock.tick(901.0)
+    assert st2.claim(jid2, worker_id="kaggle-t")
+
+
+def test_epoch_rebuilds_lock_when_file_missing(tmp_path: Path) -> None:
+    """认领发生在部署/重启前（盘上无锁）+ hub 重启 ⇒ 第一发 epoch 就重建锁，立刻挡人。"""
+    clock = _Clock()
+    st = _store(tmp_path, clock)
+    st.publish(JID, _manifest(), b"PK\x03\x04fake")
+    assert st.claim(JID, worker_id="kaggle-t")
+    st._bc_lock_clear(JID)  # 模拟旧代码认领：内存租约在、锁文件不在
+    st2 = _store(tmp_path, clock)  # hub 重启
+    assert st2.bc_exclusive_owner() == ("", "")
+    st2.note_job_progress(JID)  # 原 worker 的 epoch 到达（无租约也收）
+    assert st2.bc_exclusive_owner() == ("", JID)  # 持有者未知，但锁已重建
+    assert st2.claim(JID, worker_id="kaggle-t") is None
+    assert st2.claim(JID, worker_id="cloud-2") is None
+    clock.tick(901.0)
+    assert st2.claim(JID, worker_id="cloud-2")
+
+
+def _hub(tmp_path: Path, clock: _Clock) -> _HubQueue:
+    """两门课的最小 hub（真实目录 + 开课标记），用于 peek/解除独占的端到端断言。"""
+    for name in ("g1e-4s2e", "g1g-4s2e"):
+        (tmp_path / name / "remote-jobs").mkdir(parents=True, exist_ok=True)
+        (tmp_path / name / "training_log.jsonl").touch()
+        (tmp_path / name / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+    hub = _HubQueue({}, discover_root=tmp_path, now_fn=clock)
+    hub.discover(force=True)
+    return hub
+
+
+def test_locked_bc_course_is_not_offered_to_other_workers(tmp_path: Path) -> None:
+    """别的 worker 的 peek（预取/认领同一入口）看不到已独占的 BC 课程；其它课照旧。"""
+    clock = _Clock()
+    hub = _hub(tmp_path, clock)
+    bc = hub._stores["g1e-4s2e"]
+    ppo = hub._stores["g1g-4s2e"]
+    ppo_jid = "e" * 16
+    bc.publish(JID, _manifest(JID, kind="bc"), b"PK\x03\x04fake")
+    ppo.publish(ppo_jid, _manifest(ppo_jid, kind="ppo"), b"PK\x03\x04fake")
+    assert bc.claim(JID, worker_id="cloud-1")
+    hub2 = _hub(tmp_path, clock)  # hub 重启：内存租约全丢，独占记录在盘上
+    ids = {c["job_id"] for c in hub2.peek_jobs(worker_id="cloud-2")}
+    assert JID not in ids, "别人独占的 BC 课不许出现在 peek（预取腿同源）"
+    assert ppo_jid in ids, "另一门待训课照常可见"
+    # dashboard 的「解除 BC 独占」按钮：删锁后同课 job 立刻重新可见
+    info = hub2.clear_bc_exclusive("g1e-4s2e")
+    assert info["cleared"] is True and info["worker_id"] == "cloud-1", info
+    assert JID in {c["job_id"] for c in hub2.peek_jobs(worker_id="cloud-2")}
+    with pytest.raises(ValueError):
+        hub2.clear_bc_exclusive("no-such-course")

@@ -560,6 +560,33 @@ class AdminRoutes:
         )
         self._json({"course": course, "cleared": cleared}, 200)
 
+    def _admin_release_bc_exclusive(self) -> None:
+        """`POST /admin/bc-exclusive/clear?course=<课>`：人工解除 BC 课程独占。
+
+        为什么必须有：独占是**落盘**的（hub/trainer 重启也不丢），若 worker 已死/换机而
+        进度窗还没耗尽，操作员需要一个立即放行的把手（否则只能去 hub 机器上手删文件）。
+        只删 `bc-exclusive.json`；租约/进度/权重不动。在跑的 worker 下一次 epoch 会重建
+        ⇒ 语义是「放下一份进来」而非「停掉在跑的那份」。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        course = (qs.get("course") or [""])[0].strip()
+        if not course:
+            self._json({"error": "需要 course=<课>"}, 400)
+            return
+        try:
+            info = self.hub.clear_bc_exclusive(course)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工解除 BC 独占：course={course} "
+            f"（worker={info.get('worker_id') or '?'} job={info.get('job_id') or '?'}）",
+            flush=True,
+        )
+        self._json(info, 200)
+
     def _admin_cancel_job(self) -> None:
         """`POST /admin/cancel-job?job_id=<jid>`：人工作废**一个**未被认领的 job（W7）。
 
