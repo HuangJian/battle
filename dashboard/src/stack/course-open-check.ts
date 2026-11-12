@@ -38,8 +38,9 @@ const OUT_MARK = '__OPENCHECK__'
 /**
  * 体检脚本（`python -c`）：一次进程里做完三件事，任一件失败都进结论。
  *
- *   ① `load_course(课程文件)` —— 课程文件 schema（pydantic，`extra="forbid"`；
- *      `level` 引用、stages/player 冲突、未知键都在这里响亮）；
+ *   ① 课程文件 schema（pydantic，`extra="forbid"`；`level` 引用、stages/player 冲突、
+ *      未知键都在这里响亮）——**按 kind 分流**：BC 走 `load_bc_course`（`BcCourseConfig`，
+ *      与 `trainer/run_bc.py` 同一条链），RL 走 `load_course`（`CourseConfig`）；
  *   ② RL 课再跑 `course_openable(stem)` —— 与真开课**同一条**运行时链（rl-config → argparse →
  *      `apply_course` → 冲突检测 → `validate_args`，含 kickstart/门禁/互斥/范围）；
  *   ③ 基础权重：delta 容器先按消费者口径落地（`ensure_standard_weights`），再
@@ -58,8 +59,14 @@ def fail(msg):
     out["reason"] = msg
 
 try:
-    from biz.course_resolve import load_course
-    load_course(course_path)
+    if kind == "bc":
+        # BC 课必须用 BcCourseConfig（与 trainer/run_bc.py 同一条校验链）；
+        # 用 RL 的 CourseConfig 会把 kind/corpus/train/eval 全判成 extra_forbidden。
+        from worker.bc_config import load_bc_course
+        load_bc_course(course_path)
+    else:
+        from biz.course_resolve import load_course
+        load_course(course_path)
 except BaseException as e:
     fail(f"{type(e).__name__}: {e}")
 

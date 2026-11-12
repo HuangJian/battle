@@ -82,6 +82,13 @@ describe('接线：判据只在 python（TS 不重写课程 schema）', () => {
     }
   })
 
+  it('BC 课走 BcCourseConfig（load_bc_course），不走 RL 的 load_course', () => {
+    const src = read('src/stack/course-open-check.ts')
+    expect(src).toContain('worker.bc_config')
+    expect(src).toContain('load_bc_course')
+    expect(src).toMatch(/kind == "bc"/)
+  })
+
   it('开课在**写面之前**体检，拒绝时明说零副作用', () => {
     const src = read('src/server/actions/course-lifecycle.ts')
     const probeAt = src.indexOf('const probe = deps.probe ?? defaultProbe')
