@@ -1,0 +1,344 @@
+// 课程 o2-notax3 —— o2-notax2 的剂量修正后继（2026-11-11）
+//
+// 状态：**已结课 · 已停课**（2026-11-12 00:27，it236；用户裁决停课）· 结课报告（2026-11-12）
+//   A 层最终（末 eval it235，400 局定集）：**350/400 = 87.50%**（outcome 口径，go 22 / to 28）；
+//     win 旗标 351 = 87.75%。峰值 it60 **365**（旗标 370 = 92.50%），谷值 it200 **273**。
+//   B/C 官方面板（800 局 / seed0 860001 / greedy / 3000 拍）：**本课未测**，不下 B/C 晋级判词。
+//     档内只有父腿的 `notax2bc` 690/800 = 86.25%，**不可代用**；后继 `o2-polish` 已把
+//     `polishbc`（it236 同面板）列为开课前必做（其 §4 / §6）。
+//   判词：**236 it 零净进步 + mean_ret 升而胜率平 ⇒ 命中本课 §4② 预注册的「奖励与胜负
+//     脱钩」停腿条件**。立项的四处剂量修法确实止住了 notax2 的少开枪苟局（shots 12.8→18.2、
+//     idle 47.6%→34.1%），但没换回升：A 层首末 347→350、OLS −0.05 局/it、48 点均值 334.4。
+//     PPO 内部全健康（kl 均 .0097 / entropy 1.13–1.51（从不 <1.0）/ 零熔断）⇒ 不是优化器坏了，
+//     是**这条杠杆已经用完**。
+//   ⚠ **后继实测不支持把判词升级成「奖励排错序」**：真 RewardFn 回放本课末 5 点 2000 局，
+//     clear +120.24 / timeout −55.60 / gameover −90.23（clear−to **175.85**、Δret +34.63 PASS），
+//     三桶排序正确、硬闸 #6 把新项封在 30 ⇒ 再加塑形最多改价差 17%。所以 `o2-polish` **不动
+//     定价**、改走语料侧；本报告只判「本课止跌未回升」，不判「奖励定义错了」。
+//   停课原因 = **用户裁决**（`tmp/loop-control.applied.json` at 1794414436 = 2026-11-12 00:27:16，
+//     paused 含本课），非跑满（236/300）、非熔断（零 error / 零 circuit_break）；it236 后
+//     `job_pending` 挂起（worker 供给），training_log 末条 22:38:42。
+//   后继：`o2-polish`（bc = 本课 **it236**，钉短板关 + greedy 供给翻倍，目标 >95%）·
+//     `o2-pick` / `o2-nomove`（**只读引用**本课 **it175**）。控制台当前课程 =
+//     o2-nomove / o2-polish（heartbeat state=waiting，rounds_done 0）。
+//   结课档案 = 本文件头注 + 配置段前「★ 结课结算」；后继设计正文 →
+//     `docs/nn/experiments.md §141` · `DECISIONS.md §2026-11-11-goalnn-o2-polish-open`
+//     （全文 `docs/decisions/details/goalnn.md`）。
+//   立项块 §0–§5 保留作历史，**判词以本节为准**。
+// 依据：用户 2026-11-11 12:0x「两个都改，开 loot3/notax3」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   从 **o2-notax2.it78** 接续（⚠ 退步后的点，A 层 328/400，不是父腿 notax.it300 的 356）。
+//   配置逐字继承 notax2 的 28 行 / 59 参数，只改 4 处：`wHit 3→4.5`、
+//   `wWaste 20→8`、`wasteFrac .55→.60`、`threatRate .012→.020`（`ent_coef .015` 保持）。
+//   判据以**新 bc 自身**为锚（§3），不拿 356 当起跑线。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 立项依据：it70 剂量审计（`tmp/o2-analysis/l2n2-dose-audit.txt`）
+// ══════════════════════════════════════════════════════════════════════════
+//   notax2 it0 → it70（A 层 400 局/点）：
+//     win 356 → **328（−28）**（峰值 it35 **374**）；shots 16.7→**12.2（−27%）**；
+//     hitRate .335→**.463**；waste .674→**.540**；idle 43.4%→**48.9%（+5.5pp）**；
+//     threat/千 14.4→**27.3**；clearT 1712→1789；**timeout 15→35（×2.3）**；
+//     **mean_ret 64.3→73.4（反升）**；entropy 1.53→1.28。
+//   ⇒ 典型 **reward hacking**：行为目标（命中率↑、浪费↓）达成，但
+//     「少开枪 + 慢清 + 多拖」更省税 ⇒ 胜率跌、mean_ret 反升（奖励与胜负脱钩）。
+//   ⇒ **waste floor 已被跨过**：waste .540 < `wasteFrac .55` ⇒ 税触发率
+//     **71.2%→37.0%**，该目标基本达成，留着只剩「少开枪」副作用。
+//   ⇒ `threatRate .012` 相对新分布（22–29/千）偏低 ⇒ 超额税变均匀税，失去靶向。
+//   候选回放（it70 自身 400 局，`tmp/o2-analysis/l2n2-fix-dose.txt`）：
+//     `wHit 3→4.5`：clear−gameover **+3.14**、Δret +35.40 PASS、满量程 27 < 30；
+//     `threatRate .012→.020`：clear−go −0.32（中性）；
+//     `wWaste 20→8 + floor .60`：clear−go −0.28（中性）；
+//     组合：clear−go **+2.54**、Δret **+35.39 PASS**。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 配方（逐字继承 notax2；改动 = 6 身份键 + bc + 4 参数）
+// ══════════════════════════════════════════════════════════════════════════
+//   | 维度 | o2-notax2（父腿） | **o2-notax3（本课）** |
+//   | 任务侧 / 28 行 / PPO 其余 / eval / greedy 12% | — | 逐字同 |
+//   | 命中奖 wHit | 3.0 | **4.5**（抑制「少开枪」）|
+//   | 浪费率税 | wWaste 20 / floor .55 | **wWaste 8 / floor .60**（目标已达成，退剂量）|
+//   | 火线免罚线 | threatRate .012（12/千） | **.020（20/千）**（回到新分布 27.3/千 附近）|
+//   | ent_coef | .015 | .015（保持）|
+//   | bc | o2-notax.it300 | **o2-notax2.it78.20261111-120150.json** |
+//   | paired_rotate_seed | 20261120 | **20261122** |
+//   | out / traj / backup | tmp/o2-notax2 · weights/o2-notax2 | `tmp/o2-notax3` · `weights/o2-notax3` |
+//   · 其余 55 个参数逐字不动（含 `wFast 28` / `wPostHit .3` / `wWinHit 6`）。
+//   · **组合臂**（4 处改动），不做单变量归因。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据与止损（预注册；B/C = 800 局 / seed0 860001 / greedy / 3000 拍，
+//    与 bc 同面板同 seed 配对；A 层只作趋势）
+// ══════════════════════════════════════════════════════════════════════════
+//   it0 A 层锚（notax2.it78 附近，400 局）：win **328** / go 37 / to 35 /
+//     shots 12.2 / hit .463 / waste .540 / idle 48.9% / threat/千 27.3 / clearT 1789。
+//   it0 B/C 锚：`notax2bc` = **690/800 = 86.25%**（go 53 / to 59；分关 95.0/99.5/76.5/74.0；
+//     `tmp/o2-analysis/bc-l3n3-bc.jsonl`，seed0 860001，已跑）。
+//     ⚠ 与父腿 `notax.it300` 的 716/800 比退 26 局（−3.25pp），与 A 层 −28 局一致。
+//   | 主 0（止跌回升）| A 层 win ≥ **338**（bc +10）；且 ≥ **356**（父腿基线）|
+//   | 主 1（不许更苟）| shots ≥ **14**（现在 12.2，不许再降）；idle ≤ **48%**；
+//   |                | timeout ≤ **20**（现在 35，砍 43%）|
+//   | 主 2（质量不退化）| hitRate ≥ **.42**；waste ≤ **.60**；clearT ≤ **1789** |
+//   | 主 3（B/C）| cleared ≥ notax2bc −1pp；dmg/千 ≤ bc×1.30 |
+//   | 反签名 | shots < **11**（继续少开枪）/ idle 涨 >5pp / hitRate 掉 >15% /
+//   |        | timeout > **40** / entropy <1.00 / kl·熔断 ⇒ 任一触发即停腿复盘 |
+//   · 止损：**it20/it40 两次检查**；主 0 未动且 shots 仍降 ⇒ 停腿。
+//   · 回退顺序：① 仍少开枪 ⇒ `wHit` 4.5→5（满量程 30，边界）或降 `wWaste` 8→4；
+//     ② idle/timeout 不降 ⇒ `wFast` 28→30（满量程 30 边界）；③ hitRate 掉 ⇒ `wWinHit` 6→3；
+//     ④ 三项全不动 ⇒ 判「公式层无梯度」，转 `dirChanges`/`aimAlignedShots` 数值列。
+//   · 100% 胜率是愿景不是 DoD；不许用教师表现判可学性（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 已知局限 / 风险
+// ══════════════════════════════════════════════════════════════════════════
+//   ① **bc 是退步点**（328/400）：进步相对 328 判，356 只作回归基线。
+//   ② **本课的核心是修 reward hacking**：notax2 的 mean_ret 反升（64.3→73.4）而胜率跌
+//     ⇒ 若本课 mean_ret 仍升而 win 不升，按「奖励与胜负脱钩」停腿，不要加跑。
+//   ③ `wHit` 4.5 满量程 27 < 30；若改到 5.0 则 30 是硬闸边界（需加 cap，不许再高）。
+//   ④ 熵 1.28：`ent_coef .015` 保持；反签名 entropy <1.00。
+//   ⑤ greedy 配额必须走**本地集群采样**（自主云机离线包不采 greedy）。
+//   ⑥ 观测层不是天花板；数值列在 `metricValues` 90/90。
+//   ⑦ 单跑 checkpoint 差异 ~18pp；4 关定集记忆化；与 o1 6000 拍不可相减。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 预算 / 开工前置
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576` / `iters 300` / `max_hours 18` / `eval_every 5` /
+//   `eval_games_per_stage 50`；`kickstart_ref true` / `warmup_iters 0`；
+//   开训 30 秒自检 hub URL；B/C 默认 dist 全节点、`--weights` repeatable。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下配置段由父课程 `o2-notax2` 序列化生成（逐字继承），改动点 = §2 四处参数 + 身份键。
+// ══════════════════════════════════════════════════════════════════════════
+
+//
+// ── ★ 结课结算（2026-11-12 00:27，用户裁决停课；报告日 2026-11-12）────────────
+//  停课点 **it236**（归档 `nn-training/weights/o2-notax3/o2-notax3.it236.20261111-223820.json`，
+//  22:38:20）；末次有评估支撑的点 = **it235**（22:36:22），共 **48 个 A 层 eval 点**
+//  （it0–it235，every 5，400 局/点 = 4 关 × 50 × 2 seed）。首末 (stage,seed) 集合**逐字相同**
+//  ⇒ 定集，振荡 = 策略、不是语料轮换。**未跑满 300 iters（236/300）**；零 error / 零熔断 /
+//  零 run_complete；期间 3 次 run_start（worker 供给抖动）、1 次 job_rejected、2 次 job_cancelled。
+//
+//  §1 A 层走势（outcome 口径；48 点全表 `tmp/o2-analysis/o2-closeout-20261112.txt`）
+//   | it | clear | go | to | win旗标 | shots | hit | waste | idle | clearT | 中位 | pickup |
+//   | 0   | 347 | 22 | 31 | 350 | 12.8 | .455 | .535 | 47.6% | 1796 | 1778 | 36.9% |
+//   | 60  | **365（峰）** | 18 | 17 | 370 | 17.1 | .365 | .631 | 42.7% | 1823 | 1842 | 43.2% |
+//   | 175 | 358 | 17 | 25 | 361 | 15.9 | .381 | .611 | 36.7% | 1758 | 1736 | 44.8% |
+//   | 200 | **273（谷）** | 53 | 74 | 283 | 21.8 | .264 | .727 | 38.5% | 1919 | 1930 | 38.3% |
+//   | 230 | 313 | 35 | 52 | 320 | 16.6 | .348 | .644 | 39.7% | 1863 | 1880 | 42.9% |
+//   | 235 | **350** | 22 | 28 | 351 | 18.2 | .326 | .668 | 34.1% | 1754 | 1697 | 41.7% |
+//   ⇒ 首末 shots +5.4（不再少开枪）、idle −13.5pp（不再苟）、pickup +4.8pp，
+//     但 clear **+3**（OLS −0.05 局/it）、48 点均值 334.4、hitRate −.129、waste +.133。
+//     **「止跌」成立，「回升」不成立**。win 旗标与 outcome 系统性不等（47/48 点有差，
+//     Δ 1–10 局，`o2-polish-stage-trend.txt` §1）⇒ 预注册的 A 层 win 门按旗标读，
+//     分关 / 缺口按 outcome 读，两者不得混用。
+//
+//  §2 B/C 判决：**未测**（`tmp/o2-analysis/bc-*.jsonl` 无本课 label）
+//   `notax2bc` 690/800 = 86.25% 是**父腿 bc**、不是本课成绩；dmg/千 ≤ bc×1.30 亦不判。
+//   后继 `o2-polish` 的 `polishbc`（it236 同面板 800 局 greedy）仍是开课前必做项。
+//   ⇒ 本节所有结论只在 **A 层采样策略定集**上成立，不外推 greedy 部署模式（§15.3）。
+//
+//  §3 判据逐条（§3 预注册；末点 it235）
+//   主 0 A 层 win ≥338（bc+10）**PASS（351）**；且 ≥356（父腿基线）**FAIL（351）**
+//     ⇒ 主 0 整体 **FAIL / 部分达成**（止跌未回基线）。⚠ it0 实测 win 旗标 **350**、
+//     outcome 347，而立项 §3 写的 328 来自 notax2.it70 的另一面板 ⇒ 本课一律以
+//     **自身 it0** 复核，不拿 328 当起跑线。
+//   主 1 shots ≥14 **PASS（18.2）** · idle ≤48% **PASS（34.1）** · timeout ≤20 **FAIL（28；
+//     48 点里仅 3 点 ≤20）**
+//   主 2 hitRate ≥.42 **FAIL（.326）** · waste ≤.60 **FAIL（.668）** · clearT ≤1789 **PASS（1754）**
+//   主 3 B/C **不判**；dmg/千 末点 30.6（it0 35.8）只作趋势，不替代 B/C 配对
+//   **反签名**：hitRate 相对 it0 掉 >15% 命中 **20/48 点**、timeout >40 命中 **14/48 点**，
+//     并集 **28/48 点**（末点仍命中 hitRate）；shots <11 无（min 11.5）、idle +5pp 无、
+//     entropy <1.00 / kl 熔断 / circuit_break 全无。⚠ 这些是**定集上的振荡型触发**，
+//     不是单调漂移；真正趋势型的是 §4② 的 mean_ret↑ / win 平 ⇒ 按预注册停腿。
+//
+//  §4 PPO 内部读数（AGENTS §15.4；`o2-win-polish-stability.txt`）
+//   n=236：kl 首 .0068 / 末 .0090 / 均 .0097 / max .0573（>0.03 仅 3 轮，>0.1 = 0）；
+//     entropy 1.2943→1.1511，min **1.1337**（<1.0 = 0 轮）；lr 恒 5e-4；
+//     **mean_ret 73.95→76.39（升）而 rollout winRate 84.50%→84.97%（平）**；
+//     每 20 轮分段均值无长期漂移。McNemar it230→it235：**103/400 = 25.8% 的局换结局**
+//     （70 输→赢 / 33 赢→输，净 +37），翻转按关 {2000:6, 2001:12, **2002:47, 2003:38**}。
+//   ⇒ **236 轮买到零净进步**，密集钱花在已赢的局上；继续加跑同一配方 = 重复
+//     notax2 的 reward hacking（本课 §4② 已预注册「不要加跑」）。
+//   ⚠ **但「奖励排错序」被后继实测否决**：真 RewardFn 三桶 clear +120.24 / to −55.60 /
+//     go −90.23，clear−to **175.85**、Δret(to−go) **+34.63 PASS**；价差前四 =
+//     wWin +59.37 / terminal +40.00 / wKill +17.89 / wPace +17.76，硬闸 #6 的 30 分包络
+//     ⇒ 新塑形项最多改价差 17%（`o2-winpolish-gap.txt`）。**`wMove` 是唯一反胜率项
+//     （clear−to −3.91）** ⇒ 摘它把价差抬到 181.07，才有了 `o2-nomove` 的配方。
+//
+//  §5 缺口定位 / 后继 / 产物
+//   ① 短板在两关，不在全局：48 点分关均值（outcome）2000 **95.33%** / 2001 **94.98%** /
+//      **2002 72.17%（σ11.05）** / **2003 71.96%（σ10.20）**；末点 97/98/67/88。按后继
+//      >95% 目标需 ≥381 清，末点 350 ⇒ 缺 31 局（2002 缺 29、2003 缺 8）。末 5 点合并
+//      2000 局 clear 84.85% / timeout 9.15% / gameover 6.00% ⇒ 两种死法都得砍。
+//   ② 语料侧两处实测缺陷（`o2-win-polish-recon.txt` / `o2-polish-quota.txt`）：易关吃
+//      **50.7%** 采样预算（已饱和 95%+）；greedy **loss 桶只填 0.59×**、
+//      `degraded=cap_hit=0.72` ⇒ 抬比例是空操作，杠杆是抬 `oversample_cap`。
+//      ⇒ 后继 `o2-polish` 钉 2002/2003（相对浓度 2:1）+ cap 2→4，**不动奖励**。
+//   ③ 只读引用本腿权重的后继：`o2-pick` / `o2-nomove` 用 **it175**（拾取线）、
+//      `o2-polish` 用 **it236**（胜率线）。归档权重完整，停课**不破坏**任何后继起点。
+//   ④ **停课非破坏**；复跑须按 §15.5 用新 out/traj，禁续跑 `tmp/o2-notax3`。
+//   ⑤ **B/C 锚未测**是本课最大遗留；`polishbc` 未出前，不许把本节 A 层数字当 B/C 成绩。
+//   ⑥ 产物：`tmp/o2-notax3/{eval_log,training_log}.jsonl` · `weights/o2-notax3/*.json` ·
+//     `tmp/o2-analysis/o2-closeout-20261112.txt`（48 点全表 + 判据扫描）·
+//     `o2-win-polish-{recon,stability}.txt` · `o2-winpolish-{gap,probe}.txt` ·
+//     `o2-polish-{quota,stage-trend}.txt`；结课档案即本文件头注 + 本节。
+//   ⑦ 本结课报告**只改注释** ⇒ `course_formula_hash`（reward spec identity）不变；
+//     文件字节 sha256 变，本课已停课不再启动，不影响在跑腿。
+// ══════════════════════════════════════════════════════════════════════════
+
+{
+  "version": 5,
+  "name": "o2-notax3",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "max_ticks": 3000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      "- wShot*min(playerShots, shotCap)",
+      "- wWall*min(wallPressTicks, wallCap)",
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      "- wStuck*min(stuckTicks, stuckCap)",
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      "- wDeath*playerDeaths",
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      "- wDanger*min(dangerTicks, dangerCap)",
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wFreezePick*min(puGotFreeze, freezePickCap)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "- wWaste*min(wasteCap, max(0, (aimBricks + aimMisses)/max(1, playerShots) - wasteFrac))",
+      "- wThreatEx*min(threatExCap, max(0, threatTicks - threatRate*ticks))",
+      "- wPostHit*min(postHitLaneTicks, postHitCap)",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 4.5,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 28.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1000.0,
+      "paceWindow": 800.0,
+      "paceCap": 46.0,
+      "wPickup": 12.0,
+      "pickupCap": 2.0,
+      "wFreezePick": 8.0,
+      "freezePickCap": 1.0,
+      "wWinHit": 6.0,
+      "winHitCap": 4.0,
+      "wWaste": 8.0,
+      "wasteFrac": 0.6,
+      "wasteCap": 1.0,
+      "wThreatEx": 0.08,
+      "threatRate": 0.02,
+      "threatExCap": 160.0,
+      "wPostHit": 0.3,
+      "postHitCap": 60.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o2-notax2/o2-notax2.it78.20261111-120150.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 300,
+  "max_hours": 18,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.015,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261122,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o2-notax3/weights.json",
+  "traj": "tmp/o2-notax3",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o2-notax3",
+  "backup_prefix": "o2-notax3",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  "greedy_quota": {
+    "win": 0.09,
+    "loss": 0.02,
+    "timeout": 0.01,
+    "oversample_cap": 2.0,
+    "soft": true,
+  },
+}

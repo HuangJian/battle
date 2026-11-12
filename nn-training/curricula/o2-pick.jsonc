@@ -1,0 +1,386 @@
+// 课程 o2-pick —— o2 拾取专项探针（2026-11-11）
+//
+// 状态：**已结课 · 已停课**（2026-11-12 00:27，it57；用户裁决停课）· 结课报告（2026-11-12）
+//   A 层最终（末 eval it55，400 局定集）：clear **334/400**（go 40 / to 26）、
+//     拾取率 **45.45%**；it0 358 / 44.82% ⇒ 55 it **clear −24、拾取 +0.63pp（0.2σ，噪声）**，
+//     而 **cellsVisited 52.92→61.83（+8.91，6.2σ）**。拾取峰值 48.33%@it40，it45 回落 41.93%。
+//   判词：**判负**。策略学会了「多走路」，没学会「朝道具走」；`wPickup 12→24` + 两行趋近势能
+//     55 it 推不动拾取。§3 主 0 / 主 2 全 FAIL，反签名从 it5 起持续触发（12/12 点拾取 <50%）。
+//   根因（后继 `o2-nomove` §1.2–1.3 实测）：**wMove 是第三大正奖励**（it0 +32.90 = 20.6%，
+//     满量程 48、100% 局触发、it55 涨到 +35.79），每决策步 +0.30 **不问方向**；
+//     wApproach 每格 +0.02 ⇒ 方向信号只占 6.7%，且两项都是**严格零和势能**（Σr 两端抵消、
+//     过期与捡到同样退款），未捡局终局 distMed 14→15 格 ⇒ wNear 的 3 格陡区基本到不了，
+//     过期率 21.2%→27.5%。wPickup 只有 +10.38→+11.28（正奖励 6.5→7.1%）。
+//   B/C 官方面板**未测**（探针只判 A 层拾取，**不追胜率**），不下 B/C 判词。
+//   停课原因 = **用户裁决**（`tmp/loop-control.applied.json` at 1794414436 =
+//     2026-11-12 00:27:16，paused 含本课），非跑满（57/80）、非熔断（零 error /
+//     entropy 从不 <1.00 / kl max .0932）；控制台当前课程 = o2-nomove / o2-polish
+//     （heartbeat state=waiting，rounds_done 0）。
+//   后继：**`o2-nomove`** —— 同 bc（notax3.it175）+ 同 V（20261123）的**单变量对照臂**，
+//     只删 `wMove` 一行，80 it 探针，主判拾取 ≥70% / 不坍缩；本课 it0–it55 的定集逐局结果
+//     供 McNemar 配对。另有 `o2-polish`（bc = notax3.it236，语料侧，与拾取探针并行）。
+//   ⚠ **分档的有意偏离**：§3 原文写「<50% ⇒ o2 拾取在奖励层不可学，转查执行器/观测」。
+//     后继没有照搬这个判词，而是先做一次单变量反证（**撤掉方向无关的密集补贴**再判），
+//     理由与判据预注册在 `o2-nomove.jsonc` §1.3 / §4，并记进
+//     `DECISIONS.md §2026-11-11-goalnn-o2-nomove-open`。本报告**不把「不可学」写成定论**。
+//   结课档案 = 本文件头注 + 配置段前「★ 结课结算」；诊断正文 →
+//     `docs/nn/experiments.md §140` · `tmp/o2-analysis/o2-nomove-anchor.txt`。
+//   立项块 §0–§6 保留作历史，**判词以本节为准**。
+// 依据：用户 2026-11-11「道具拾取在 rollout 和 eval 都是 0.4/0.9，研究一下如何让 NN
+//   从 o2 开始就学会捡道具……wPickup 和 wApproach 应该都有用，x 系列就能练到 >90%
+//   拾取率。不要盲从之前课程的结课报告。」
+//   起点按用户 2026-11-11 19:2x 选择：**bc = o2-notax3.it175（最新权重）+ 继承 notax3 配方**，
+//   保证「单变量 = 两项势能 + wPickup 12→24」，不引入配方回退。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 0. 一句话
+// ══════════════════════════════════════════════════════════════════════════
+//   短探针（80 it），只回答一个问题：**o2 的拾取率能不能被奖励推到 ≥70%**。
+//   从 `o2-notax3.it175`（A 层 **358/400**、拾取率 **.448**）热启动；
+//   notax3 的 **28 行逐字继承**，只加 2 行势能 + `wPickup 12→24`（`pickupCap 2→1`）。
+//   **不追胜率**，判据只有拾取率 + 不换命。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 1. 诊断（2026-11-11 18:3x–19:2x，B/C 800 局 + it175 A 层 + 源码）
+// ══════════════════════════════════════════════════════════════════════════
+//   ── 1.1 拾取率与收益 ─────────────────────────────────────────────────────
+//   | 面板 | 拾取率 | 拾取局胜率 | 未拾局胜率 | 差 |
+//   | bcgq100 | 34.4% | 91.3% | 78.8% | +12.4pp |
+//   | loot300 | 43.5% | 95.8% | 82.0% | **+13.8pp** |
+//   | notax300 | 44.4% | 95.0% | 85.4% | +9.7pp |
+//   | **notax3.it175（本课 bc）** | **.448** | — | — | — |
+//   ⇒ 拾取局胜率显著更高（相关，非因果），「不捡白不捡」有数据支撑。
+//   ── 1.2 为什么不是「wPickup 不够大」───────────────────────────────────────
+//   x20 系配方 `wPickup 3.0 + wApproach .008`，拾取率峰值 **86.9%**；
+//   o2 现在 `wPickup 12`（**4 倍**）却只有 44% ⇒ 终点奖不是瓶颈。
+//   ── 1.3 三条真实缺口 ─────────────────────────────────────────────────────
+//   ① **没有接近过程的梯度**：notax3 的 28 行里没有 `wApproach`。道具落点相对
+//      **击杀点**（`SimulationPowerUps.ts:119-173`，near 50%/mid 30%/far 20%，1–6 格），
+//      BFS 绕墙后未捡局终局 `pickupDist` mean **17.0 格**（med 16 / p90 26）。
+//      专程 17 格往返 ≈ 500 拍 = 局时 30%，这 500 拍里「朝道具走」零信号。
+//   ② **短局机会成本**：`wFast 28` 在 clearT≈1790 时只值 ~3 分；跑 500 拍丢 ~7 分，
+//      再乘 1 命承伤风险（一发 8 分）⇒ 12 分的终点奖净收益很薄。
+//   ③ **命中价 4.5 抬高杀敌相对价**（notax3 已继承）⇒ 拾取相对更不值。
+//   ── 1.4 观测层看得见（不是「看不见」）───────────────────────────────────
+//   `pickupDist` / `pickupRelX` / `pickupRelY` 在 obs scalar s32–34，
+//   `arch.policyExtra=true` 进三头与 value 头 ⇒ 方向与距离都在网内。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 2. 配方（notax3 的 28 行逐字继承；加 2 行势能 + 改 2 参数）
+// ══════════════════════════════════════════════════════════════════════════
+//   | 维度 | o2-notax3（父腿） | **o2-pick（本课）** |
+//   | 任务侧 / 其余 28 行 / PPO / eval / greedy 12% | — | 逐字同 |
+//   | 命中价 wHit | 4.5 | 4.5（继承）|
+//   | 三道税（waste/threat/postHit） | 8 / .020 / .3 | 逐字继承（不制造配方回退）|
+//   | 拾取终点奖 | wPickup 12 / cap 2 | **24 / cap 1**（每局只 spawn 0.96 枚；满量程 24）|
+//   | ㉙ 近区势能 | 无 | **新增**（wNear 1.0 / nearR 3）|
+//   | ㉚ 线性势能 | 无 | **新增**（wApproach .02 / cap 20）|
+//   | bc | o2-notax.it300 | **o2-notax3.it175.20261111-191643.json** |
+//   | paired_rotate_seed | 20261120 | **20261123** |
+//   | iters / max_hours | 300 / 18 | **80 / 8**（探针预算）|
+//   | out / traj / backup | tmp/o2-notax3 · weights/o2-notax3 | `tmp/o2-pick` · `weights/o2-pick` |
+//   · **近区势能**：`- wNear*max(0, nearR - pickupDist)*where(pickupDist>=0, 1, 0)`。
+//     道具在 3 格外 ⇒ 0（**不会像线性项那样在生成瞬间打大负跳**）；靠近到 2 格 ⇒ −1；
+//     拾取瞬间哨兵翻 −1 ⇒ 归零 ⇒ **兑现 +1~3 分**。生成在 1–2 格时会有 −1~−2 的
+//     「持有值」负跳，那是势能的定义（把未来收益前置为债务），**不是 bug**；
+//     wPickup 24 的兑现远大于它。
+//   · **线性势能**：`- wApproach*min(max(0, pickupDist), 20)*where(...)`，最多 0.4 分，
+//     只做远区微弱引导（17 格处 −0.34，拾取时 +0.34）。
+//   · **不盲从结课报告**：z5 证伪的是**线性**势能（Σr 两端抵消）；分段近区形式未被证伪，
+//     且 z5 报告本身推荐「近区陡、远区平」。x20 的 86.9% 证明拾取可学。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 3. 判据（探针，只判拾取；**不追胜率**）
+// ══════════════════════════════════════════════════════════════════════════
+//   it0 锚（notax3.it175，A 层 400 局）：win **358** / go 17 / to 25；
+//     拾取率 **.448**（0.43/0.96）；shots 15.9 / hit .340 / waste .652 /
+//     idle 38.6% / dmg 30.5 每千拍。
+//   | 主 0（拾取）| `ΣpowerUpsCollected/ΣpowerUpsSpawned` ≥ **70%**（it40 中途 ≥60%）|
+//   | 主 1（不换命）| A 层 clear ≥ **350**（bc 358 − 8）；idle ≤ **43.6%**（+5pp）；
+//   |              | waste ≤ **.702**（+.05）|
+//   | 主 2（拾取质量）| 未捡局的终局 `pickupDist` 中位 ≤ **10 格**（现状 16）|
+//   | 反签名 | clear < **346**（bc−3pp）/ idle >43.6% / waste >.702 / shots >20.7（+30%）/
+//   |        | 拾取率 <50% ⇒ 停腿，不抢救 |
+//   · 结论分档：拾取率 ≥70% ⇒ **可学**，把参数搬进正式腿；
+//     50–70% ⇒ 部分可学，先抬 wPickup 到 30（cap 1，满量程 30 边界）再跑 40 it；
+//     <50% ⇒ **o2 拾取在奖励层不可学**，转查执行器/观测（或 drop 规则）。
+//   · 100% 胜率不是本课目标；不许用教师表现判可学性（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 4. 剂量标定（`tmp/o2-pick2-dose.py` → `tmp/o2-analysis/o2-pick2-dose.txt`）
+// ══════════════════════════════════════════════════════════════════════════
+//   notax3 **it175 A 层 400 局**（终局快照近似）：
+//   | 配方 | clear | gameover | timeout | Δret(to−go) | sorted |
+//   | S0 notax3 28 行 | 121.13 | −79.54 | −61.66 | +17.88 | PASS |
+//   | **S3 定稿** | **126.42** | **−76.72** | **−57.87** | **+18.86** | PASS |
+//   S3 相对 S0：clear +5.29 / go +2.82 / to +3.80 ⇒ clear−gameover 差 **+2.47**。
+//   ⚠ 硬闸 #6：三项满量程 = 近区 3.0 / 线性 0.4 / wPickup 24 ⇒ 全 < 30。
+//   ⚠ **终局快照上看不到势能**（近区 panel_max 1.00、线性 0.40；势能是逐决策步量，
+//     终局时道具多半已被捡 ⇒ 哨兵 −1）⇒ 本回放只验**安全性**（三桶排序 + Δret +
+//     满量程），**不能证明拾取率会涨**；那要靠 80 it 的实测。
+//   · `corpus_identity_fp` 含 reward ⇒ 与父腿异血缘，禁续跑（§15.5）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 5. 已知局限 / 风险
+// ══════════════════════════════════════════════════════════════════════════
+//   ① **bc 是波动点**：notax3 的 A 层 it160 313 / it165 322 / **it175 358** ⇒
+//      单点噪声大；本腿的一切对比以**自己 it0（358/400、.448）**为锚，
+//      不与 notax.it300 的 356/.385 直接相减（配方也不同）。
+//   ② **势能项在终局面板上不可验**（§4）；若 80 it 后拾取率不动，先查 shard 的
+//      `pickupDist` 是否随接近而下降（证明「靠近」被记账），再怪奖励。
+//   ③ **生成负跳**：道具出现在 1–2 格内时 Φ 会瞬时下降（持有值），是势能定义；
+//      若观察到「躲着不走过去」的反常，先摘近区、只留线性。
+//   ④ **短局机会成本**仍是主要对手：70% 门若卡在 60% 附近，优先抬 wPickup 而不是
+//      加线性势能（线性项在 z5 被证伪 5 次，只作微弱引导）。
+//   ⑤ 探针只 80 it，单跑噪声 ~18pp ⇒ 只看拾取率的**绝对水平**与趋势，不判胜率。
+//   ⑥ 4 关定集记忆化（§15.1）；与 o1 6000 拍不可相减。
+//   ⑦ greedy 配额走**本地集群采样**（自主云机离线包不采 greedy）。
+//   ⑧ `paired_rotate_seed` 独立（20261123）：不影响在跑腿的 kickstart_burn 参照物。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 6. 预算 / 开工前置
+// ══════════════════════════════════════════════════════════════════════════
+//   `target_transitions 24576` / **iters 80** / **max_hours 8** / `eval_every 5` /
+//   `eval_games_per_stage 50`；`kickstart_ref true` / `warmup_iters 0`；
+//   开训 30 秒自检 hub URL；B/C 只用默认 dist 全节点、`--weights` repeatable。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 以下配置段由父课程 `o2-notax3` 序列化生成（逐字继承），改动点 = §2 两行 + 两参数 + 身份键。
+// ══════════════════════════════════════════════════════════════════════════
+
+//
+// ── ★ 结课结算（2026-11-12 00:27，用户裁决停课；报告日 2026-11-12）────────────
+//  停课点 **it57**（归档 `nn-training/weights/o2-pick/o2-pick.it57.20261111-223911.json`，
+//  22:39:11）；末次有评估支撑的点 = **it55**（22:35:04），共 **12 个 A 层 eval 点**
+//  （it0–it55，every 5，400 局/点 = 4 关 × 50 × 2 seed）。首末 (stage,seed) 集合**逐字相同**
+//  ⇒ 定集，振荡 = 策略、不是语料轮换。**未跑满 80 iters（57/80）**；零 error / 零熔断 /
+//  零 run_complete。
+//
+//  §1 A 层走势（全表 `tmp/o2-analysis/o2-closeout-20261112.txt` / `o2-nomove-anchor.txt`）
+//   | it | clear | go | to | pickup | cells | idle | shots | waste | distMed | expired |
+//   | 0   | 358 | 17 | 25 | 44.82% | 52.9 | 36.7% | 15.9 | .611 | 14 | 21.2% |
+//   | 25  | 332 | 46 | 22 | 44.99% | 55.7 | 35.6% | 16.4 | .631 | 13 | 25.5% |
+//   | 40  | 336 | 14 | 50 | **48.33%（峰）** | 56.1 | 37.4% | 14.2 | .595 | 14 | 23.1% |
+//   | 45  | 329 | 14 | 57 | 41.93% | 58.4 | 37.3% | 14.3 | .600 | 15 | 23.7% |
+//   | 50  | **261（谷）** | 56 | 83 | 42.15% | 53.2 | **45.4%** | 14.0 | .619 | 16 | 22.4% |
+//   | 55  | 334 | 40 | 26 | 45.45% | **61.8** | 32.9% | 15.0 | .608 | 15 | 27.5% |
+//   ⇒ 拾取 OLS **+0.0606pp/it**（55 it 外推 +3.3pp，仍 <50%），首末 **+0.63pp = 0.2σ**；
+//     cells OLS +0.0847 格/it（**+8.91 = 6.2σ**）；clear OLS −0.5776 局/it（358→334）。
+//     it40 的 48.33% 是 12 点里的最高摆动，it45 立刻回落 41.93% ⇒ **不是趋势**。
+//
+//  §2 判据逐条（§3 预注册；探针只判拾取，**不追胜率**）
+//   主 0 拾取 ≥70%@it80 **FAIL（45.45%）**；it40 中途 ≥60% **FAIL（48.33%）**
+//     ⇒ 12 点全部 <50%，按 §3 分档本应判「<50% 不可学」；该分档的**有意偏离**见头注。
+//   主 1 clear ≥350 **FAIL（334；12 点里 11 点 <350，谷 261）** · idle ≤43.6% 末点
+//     **PASS（32.9%；it50 45.4 单点 FAIL）** · waste ≤.702 **PASS（末 .608，全程 max .666）**
+//   主 2 未捡局 distMed ≤10 **FAIL（15；it0 14、最好 13@it25）**；过期率 21.2→27.5%
+//     （+6.3pp，变差）
+//   **反签名**：clear <346 命中 **11/12 点**、拾取 <50% 命中 **12/12 点**、idle >43.6%
+//     命中 it50；waste >.702 / shots >20.7 未触发。按 §3「任一触发即停腿，不抢救」
+//     应早在 it5 停；实际超跑到 it57 由用户裁决停课 ⇒ **本报告如实记为超跑**，
+//     不把多出的 52 it 包装成「更多证据支持判负」。
+//   B/C **未测**，不下胜率判词（探针预注册里就没有 B/C 门）。
+//
+//  §3 机制归因（`tmp/o2-analysis/o2-pick-decomp.txt`；后继 `o2-nomove` §1.3 复核）
+//   终局快照 = 累计 Φ_end（n=400/点）：
+//   | 项 | it0 | 占正奖励 | it40 | 说明 |
+//   | wWin | +52.95 | 33.2% | +50.26 | 主奖 |
+//   | wKill | +33.62 | 21.1% | +32.85 | — |
+//   | **wMove** | **+32.90** | **20.6%** | **+34.78（22.0%）** | 方向无关 dense reward，满量程 48、100% 局触发；it55 涨到 +35.79 |
+//   | wPickup | +10.38 | 6.5% | +11.28（7.1%） | 12→24 翻倍后仍是小项 |
+//   | wNear / wApproach | −0.01 / −0.09 | — | −0.01 / −0.07 | 势能，终局看不见（两端哨兵归零） |
+//   | 净回报 | 110.05 | | 107.06（下降） | |
+//   每决策步（K=10）价目表：wMove **+0.30/步、不问方向** vs wApproach **+0.02/格**
+//     ⇒ 方向信号 / 方向无关信号 = **6.7%**；wNear 只在 3 格内生效而未捡局 distMed 14–15。
+//   ① wMove 挂**累计计数** ⇒ r = +0.03/移动拍，是**真 dense reward**；
+//   ② wNear / wApproach 挂**势能** ⇒ Σr = Φ_end − Φ_start = **0**（严格零和）；
+//   ③ 21–28% 的掉道具局让道具 1200 拍过期，**过期与捡到同样退款** ⇒ 分不开
+//      「捡起来」与「拖到它消失」。
+//   ⇒ **本课不是「终点奖不够大」，是「有一笔方向无关的大额补贴在抢梯度」**。
+//
+//  §4 PPO 内部读数（AGENTS §15.4；`o2-closeout-20261112.txt`）
+//   n=57：kl 均 .0192 / max .0932（>0.03 7 轮，>0.1 = 0）；entropy 1.1673→1.1676
+//     （min 1.1075，<1.0 = 0 轮）；mean_ret 80.06→80.80（平）；
+//     rollout winRate .8194→.8684。零熔断、零坍缩。
+//   ⇒ 优化器没坏，**信号结构**才是瓶颈（与 §3 三条机制一致）。
+//
+//  §5 遗留 / 后继 / 产物
+//   ① 后继 **`o2-nomove`**：逐字继承本课 30 行 / 63 参数，**只删 wMove 一行**
+//     + 两个死参数（→ 29 行 / 61 参数）；bc（notax3.it175）与 `paired_rotate_seed`
+//     **20261123 故意相同** ⇒ 逐局配对（McNemar 前提，同 bc + 同 V）。it0 必须复现本课
+//     clear **358** / 拾取 **44.82%** / idle **36.75%** / cells **52.92** / distMed **14** /
+//     过期 **21.24%**（`o2-nomove.jsonc` §2）；80 it，主判拾取 ≥70%、硬门不坍缩
+//     （clear ≥330 / cells ≥45 / idle ≤50%）。
+//   ② 后继 **`o2-polish`**（bc = notax3.it236）与拾取探针并行，继承 nomove 配方走语料侧。
+//   ③ **诚实边界**：删 wMove **不创造**方向梯度，只撤竞争者；势能零和 / 过期退款
+//     本课与后继**一个字没动** ⇒ 若 nomove 仍学不会，瓶颈在**势能形式本身**
+//     （非零和趋近记账：首次进入 N 格一次性给分 / 过期不退款）或导航能力，
+//     **不是继续加权重**。该判据已在 nomove §1.4 / §4 预注册。
+//   ④ 停课非破坏；复跑须按 §15.5 用新 out/traj，禁续跑 `tmp/o2-pick`；nomove 与本课
+//     **异血缘**（reward 改了）⇒ 禁互相续跑。
+//   ⑤ 产物：`tmp/o2-pick/{eval_log,training_log}.jsonl` · `weights/o2-pick/*.json` ·
+//     `tmp/o2-analysis/{o2-closeout-20261112,o2-nomove-anchor,o2-pick-decomp,
+//     o2-nomove-dose}.txt` · `tmp/o2-nomove-check.txt`；结课档案即本文件头注 + 本节，
+//     诊断正文 `docs/nn/experiments.md §140`。
+//   ⑥ 本结课报告**只改注释** ⇒ `course_formula_hash`（reward spec identity）不变；
+//     文件字节 sha256 变，本课已停课不再启动，不影响在跑腿。
+// ══════════════════════════════════════════════════════════════════════════
+
+{
+  "version": 5,
+  "name": "o2-pick",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "stage_select": "16,22,3,6",
+  "enemies": 2,
+  "lives": 1,
+  "max_ticks": 3000,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wWin*where(clearTick>=0, 1, 0)*min(cellsVisited/runCap, 1)",
+      "+ wFast*where(clearTick>=0, 1, 0)*max(0, fastCap - clearTick)/fastCap",
+      "+ wMove*min(ticks - idleTicks, moveCap)",
+      "- wShot*min(playerShots, shotCap)",
+      "- wWall*min(wallPressTicks, wallCap)",
+      "- wWall2*min(max(0, wallPressTicks - wallCap), wallCap2)",
+      "- wStuck*min(stuckTicks, stuckCap)",
+      "- wStuck2*min(max(0, stuckTicks - stuckCap), stuckCap2)",
+      "- wIdle*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin)), idleCap)",
+      "- wIdle2*min(max(0, idleTicks - idleFree*min(ticks, ticksShouldWin) - idleCap), idleCap2)",
+      "- wDmg*min(playerDamageTaken, dmgCap)",
+      "- wDeath*playerDeaths",
+      "- wThreat*min(threatTicks, threatCap)",
+      "- wThreat2*min(max(0, threatTicks - threatCap), threatCap2)",
+      "+ wLaneMove*min(onLaneMoveTicks, laneCap)",
+      "- wDanger*min(dangerTicks, dangerCap)",
+      "- wDanger2*min(max(0, dangerTicks - dangerCap), dangerCap2)",
+      "- wBasePressure*min(basePressureSum, basePressureCap)",
+      "- wBasePressure2*min(max(0, basePressureSum - basePressureCap), basePressureCap2)",
+      "- min(paceCap, wPace*max(0, ticks - kills*paceTicks)/paceWindow)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wFreezePick*min(puGotFreeze, freezePickCap)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "- wWaste*min(wasteCap, max(0, (aimBricks + aimMisses)/max(1, playerShots) - wasteFrac))",
+      "- wThreatEx*min(threatExCap, max(0, threatTicks - threatRate*ticks))",
+      "- wPostHit*min(postHitLaneTicks, postHitCap)",
+      "- wNear*max(0, nearR - pickupDist)*where(pickupDist>=0, 1, 0)",
+      "- wApproach*min(max(0, pickupDist), approachCap)*where(pickupDist>=0, 1, 0)",
+    ],
+    "params": {
+      "wKill": 18.0,
+      "wHit": 4.5,
+      "wWin": 60.0,
+      "runCap": 30.0,
+      "wFast": 28.0,
+      "fastCap": 2000.0,
+      "wMove": 0.03,
+      "moveCap": 1600.0,
+      "wShot": 0.02,
+      "shotCap": 120.0,
+      "wWall": 1.0,
+      "wallCap": 40.0,
+      "wWall2": 0.2,
+      "wallCap2": 80.0,
+      "wStuck": 0.01,
+      "stuckCap": 2000.0,
+      "wStuck2": 0.002,
+      "stuckCap2": 4000.0,
+      "wIdle": 0.01,
+      "idleCap": 1000.0,
+      "idleFree": 0.35,
+      "ticksShouldWin": 1000.0,
+      "wIdle2": 0.005,
+      "idleCap2": 5000.0,
+      "wDmg": 0.08,
+      "dmgCap": 200.0,
+      "wDeath": 12.0,
+      "wThreat": 0.02,
+      "threatCap": 120.0,
+      "wThreat2": 0.005,
+      "threatCap2": 380.0,
+      "wDanger": 0.3,
+      "dangerCap": 100.0,
+      "wDanger2": 0.05,
+      "dangerCap2": 500.0,
+      "wBasePressure": 0.15,
+      "basePressureCap": 200.0,
+      "wBasePressure2": 0.03,
+      "basePressureCap2": 300.0,
+      "wLaneMove": 0.05,
+      "laneCap": 200.0,
+      "wPace": 8.0,
+      "paceTicks": 1000.0,
+      "paceWindow": 800.0,
+      "paceCap": 46.0,
+      "wPickup": 24.0,
+      "pickupCap": 1.0,
+      "wFreezePick": 8.0,
+      "freezePickCap": 1.0,
+      "wWinHit": 6.0,
+      "winHitCap": 4.0,
+      "wWaste": 8.0,
+      "wasteFrac": 0.6,
+      "wasteCap": 1.0,
+      "wThreatEx": 0.08,
+      "threatRate": 0.02,
+      "threatExCap": 160.0,
+      "wPostHit": 0.3,
+      "postHitCap": 60.0,
+      "wNear": 1.0,
+      "nearR": 3.0,
+      "wApproach": 0.02,
+      "approachCap": 20.0,
+    },
+    "terminal": {
+      "stage_clear": 0.0,
+      "lives_exhausted": -30.0,
+      "base_destroyed": -35.0,
+      "timeout": -40.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/o2-notax3/o2-notax3.it175.20261111-191643.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 80,
+  "max_hours": 8,
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 1024,
+  "normalize_ret": false,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.0005,
+      "kl_cap": 0.2,
+      "ent_coef": 0.015,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261123,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/o2-pick/weights.json",
+  "traj": "tmp/o2-pick",
+  "breakers_off": false,
+  "ent_break": 0.25,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/o2-pick",
+  "backup_prefix": "o2-pick",
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5,
+  "greedy_quota": {
+    "win": 0.09,
+    "loss": 0.02,
+    "timeout": 0.01,
+    "oversample_cap": 2.0,
+    "soft": true,
+  },
+}
