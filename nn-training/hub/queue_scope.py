@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -40,6 +41,37 @@ from common.protocol import WORKER_SEEN_WINDOW_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import hold_progress_at
+
+#: 开课标记（与 `stack/courses.COURSE_ENABLE_MARKER` 同名；hub 不 import dashboard）。
+_ENABLE_MARKER = "training-enabled.txt"
+
+
+def _course_finished(jsonl_path: Path, max_bytes: int = 256 * 1024) -> bool:
+    """课账本尾部：最后一条 `run_complete` 是不是在最后一次 `run_start` **之后**？
+
+    这是「这门课还要不要继续干」的唯一信号（`trainer/bc_loop` 与 RL 都写它）；
+    重启会写新的 `run_start` ⇒ 收官记录作废（又开工了）。读不到账本 ⇒ 未收官
+    （不可知不当作完成——过早停云机比多跑一轮贵）。
+    """
+    try:
+        with open(jsonl_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    last_start = last_done = -1
+    for i, raw in enumerate(text.splitlines()):
+        try:
+            ev = json.loads(raw).get("event")
+        except (ValueError, AttributeError):
+            continue
+        if ev == "run_start":
+            last_start = i
+        elif ev == "run_complete":
+            last_done = i
+    return last_done > last_start
 
 
 class QueueScopeMixin(QueuePeer):
@@ -56,6 +88,9 @@ class QueueScopeMixin(QueuePeer):
     _discover_root: Path | None
     _halt_default: bool
     _halts: dict[str, bool]
+    #: 「本轮干完再停」的门闩：`halt_if_idle` 被别家活儿挡住时置位，
+    #: 下一次空闲 worker 来取活（`maybe_halt_when_idle`）时重新评估。
+    _halt_when_idle: bool
     _locate_cache: dict[str, str]
     _lock: Lock
     #: 启动参数里带过模式段的课程（`--course a=offline`；★M4b/P1-3：WARN + 忽略）。
@@ -85,8 +120,61 @@ class QueueScopeMixin(QueuePeer):
             return bool(self._solo.halt_workers)
         return bool(self._order) and all(self._halts.get(c, self._halt_default) for c in self._order)
 
+    def _work_left(self, exclude: str = "") -> str | None:
+        """还有活吗？→ 人读原因（None = 真的空闲）。
+
+        判据（用户 2026-11-12）：① 任何课程的**待领 job**（含 PPO）；② 任何课程的
+        **在飞 job**（活还没回传，停了也白等）；③ 除 `exclude` 外任何**已开课但未收官**
+        的课（PPO 一轮结束到下一轮发布之间队列是空的，只看队列会把它误判成收工）。
+        `exclude` = 刚跑完、正在请求停机的课（它的 `run_complete` 还没写）。
+        """
+        for course in self._order:
+            st = self._stores.get(course)
+            if st is None:
+                continue
+            pend = st.claimable_job_ids()
+            if pend:
+                return f"{course} 还有 {len(pend)} 个待领 job"
+            flying = st.inflight_job_ids()
+            if flying:
+                return f"{course} 还有 {len(flying)} 个在飞 job"
+            if course == exclude:
+                continue
+            if (st.jsonl_path.parent / _ENABLE_MARKER).exists() and not _course_finished(
+                st.jsonl_path
+            ):
+                return f"{course} 已开课且未收官"
+        return None
+
+    def halt_if_idle(self, course: str = "") -> tuple[bool, str]:
+        """**干完了才停**：还有活就不下停机达令，改为「空闲即停」门闩。
+
+        返回 `(是否已置停机, 原因)`。被挡住时不抛、不回 4xx——云机继续干活，
+        下一次空闲 worker 来取活时 `maybe_halt_when_idle` 会重新评估。
+        """
+        reason = self._work_left(course)
+        if reason:
+            self._halt_when_idle = True
+            return False, reason
+        self._halt_when_idle = False
+        self.set_halt(True)
+        return True, "无待领 job、也没有未收官的已开课课程"
+
+    def maybe_halt_when_idle(self) -> bool:
+        """门闩评估（**空闲取活时**调）：活全清了才真正置停机。"""
+        if not self._halt_when_idle:
+            return False
+        reason = self._work_left("")
+        if reason:
+            return False
+        self._halt_when_idle = False
+        self.set_halt(True)
+        return True
+
     def set_halt(self, halt: bool, course: str = "") -> bool:
         """置/解停机达令；未知 course → False（不猜、不静默改写全局）。"""
+        # 人工停机/恢复都覆盖「空闲即停」门闩（意图优先于之前的自动决策）。
+        self._halt_when_idle = False
         if self._solo is not None:
             self._solo.halt_workers = bool(halt)
             return True

@@ -890,6 +890,7 @@ def finish_all_rounds(
     *,
     hub_url: str = "",
     token: str = "",
+    course: str = "",
     log=lambda _m: None,
 ) -> None:
     """全轮完成的收尾（2026-09-14）——三件事：
@@ -900,8 +901,10 @@ def finish_all_rounds(
        非正常退出」红告警（实测 2026-09-14 07:32，训练其实已全部成功归档）。
     2. 落 `run_complete` 账本事件（RL 侧 `loop_lifecycle._park_after_completion` 同款）：
        console 的「✅ 训练已完成」info 横幅由账本尾行派生。
-    3. **停机操作**：向本课 hub 下发停机达令（用户 2026-09-14 定案「任务完成后执行
-       停机提示/操作」）。效力说明（不粉饰）：
+    3. **停机操作**：向 hub **申请**「干完才停」（`if_idle=1`）——用户 2026-11-12 口径：
+       hub 要先看还有没有其它 BC 课 / PPO job 待领，都没有才给云机下发停机达令；
+       有活时 hub 只置门闩，等空闲取活那一拍自己收工（不再由本课无条件全停）。
+       旧口径（2026-09-14「任务完成后执行停机提示/操作」）的效力说明（不粉饰）：
          · 对**已在轮询、当前无 job 可领**的 pull worker：达令随 job 下发，此刻无 job
            ⇒ 它收不到、不会因此停机。这类 worker 的真实释放姿势 = 云机侧 `--once`
            （跑完即退出）或人工关机，日志里明确提示。
@@ -915,7 +918,7 @@ def finish_all_rounds(
         try:
             from remote.hub_client import set_cloud_halt
 
-            if set_cloud_halt(hub_url, token, True, log=log):
+            if set_cloud_halt(hub_url, token, True, log=log, course=course, if_idle=True):
                 log("[run_bc] 停机操作已执行：hub 停机达令下发成功（本课不再需要 worker）")
             else:
                 log("[run_bc] 停机操作未生效：hub 不可达/拒绝（不阻断收尾）")
@@ -1372,6 +1375,8 @@ class BcLoop:
             int(rt.iters),
             hub_url=rt.hub_url if rt.transport == "hub" else "",
             token=rt.token,
+            # 课程归属：hub 的「还有没有别的活」判据要排除本课（run_complete 还没写）。
+            course=rt.course_key,
             log=self.log,
         )
 

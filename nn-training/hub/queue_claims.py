@@ -73,6 +73,8 @@ class QueueClaimsMixin(QueuePeer):
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
     _store_of: Callable[[str], _JobStore | None]
+    # 「干完才停」门闩评估（实现住 `queue_scope`；与 `_store_of` 同理，只被本簇调）。
+    maybe_halt_when_idle: Callable[[], bool]
     # ★M5：跨课程 drain 腿要读「别课上谁在跑」（同居 queue_offline 簇；与 `_store_of` 同理，
     # 不进共同声明面：它们只被这一个簇调）。
     offline_task_courses: Callable[[], list[str]]
@@ -103,6 +105,8 @@ class QueueClaimsMixin(QueuePeer):
         # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
         # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
         self.discover()
+        # 「干完才停」门闩：上一轮被别家活儿挡住时，空闲取活这一拍重评（queue_scope）。
+        self.maybe_halt_when_idle()
         active_workers = self.active_worker_count()
         for course in rotation_order(self._order, self._cursor):
             if not self._serves_course(course):
@@ -348,6 +352,7 @@ class QueueClaimsMixin(QueuePeer):
         优先级表的事（客户端 peek → `/jobs/priority` → claim 按表排序）。
         """
         self.discover()
+        self.maybe_halt_when_idle()
         self.sweep_dead_leases()
         # R2-2：登记表（避让链的唯一输入）改由 peek/priority 喂——缺它
         # `active_worker_count()` 恒 0 ⇒ 避让链静默失效（纯函数用例测不出「调用点为 0」）。

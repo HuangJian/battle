@@ -218,4 +218,6 @@ class _HubQueue(
         # 新发现的课也继承）；`?course=` = 只动那一门课的例外（`_halts`）。
         self._halt_default = False
         self._halts: dict[str, bool] = {}
+        # 「本轮干完再停」门闩（queue_scope.halt_if_idle 置位；空闲取活时重评）。
+        self._halt_when_idle = False
 

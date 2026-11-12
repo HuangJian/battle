@@ -124,6 +124,10 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
         (
             "halt_of",
             "all_halted",
+            # 2026-11-12（干完才停）：BC 收官只申请 `if_idle=1`，有活就先置门闩。
+            "halt_if_idle",
+            "maybe_halt_when_idle",
+            "_work_left",
             "set_halt",
             "add_course",
             "_adopt_solo",
@@ -397,6 +401,8 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_discover_root": frozenset({"__init__"}),
     "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
     "_halts": frozenset({"__init__", "set_halt", "drop_course"}),
+    #: 2026-11-12（干完才停）：被别家活儿挡住时置门闩，空闲取活那一拍重评（`set_halt` 清）。
+    "_halt_when_idle": frozenset({"__init__", "halt_if_idle", "maybe_halt_when_idle", "set_halt"}),
     "_locate_cache": frozenset({"__init__", "course_of", "drop_course"}),
     #: ★M4b：模式表 `_modes` 随「课程无模式」删除；只剩启动参数的模式段标记（只读）。
     "_mode_ignored": frozenset({"__init__"}),
@@ -569,7 +575,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-21（plan/offline-deliver-stall §2.3）：+1（`_dispatch_write`）⇒ 128。
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 131, len(DOMAIN_METHODS)
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 134, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -579,7 +585,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 131, len(seen)
+    assert len(seen) == 134, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (

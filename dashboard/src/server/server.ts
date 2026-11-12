@@ -97,6 +97,7 @@ import {
   missingLogMessage,
   NOTEBOOK_OP_MAX_BODY_BYTES,
   notebookLogPayload,
+  isPpoWorkerSession,
   notebookNavEntry,
   notebookOpsFilePath,
   parseAckDetail,
@@ -104,7 +105,9 @@ import {
   parseNotebookOp,
   parseStopOthers,
   pendingNotebookCmds,
+  putNotebookCmd,
   readBoundedJson,
+  readNotebookCmds,
   readNotebookOpsTail,
   resolveNotebookSession,
   withNotebookOps,
@@ -729,7 +732,40 @@ async function main(): Promise<void> {
     if (!isNotebookSite(site)) return json({ ok: false, reason: `site 非法：${site}` }, 400)
     const invalid = validateNotebookSession(session)
     if (invalid) return json({ ok: false, reason: `session：${invalid}` }, 400)
-    const cmds = pendingNotebookCmds(notebookLogsDir(), site, session, Date.now())
+    let cmds = pendingNotebookCmds(notebookLogsDir(), site, session, Date.now())
+    // ★2026-11-12（用户口径）：Kaggle 没有停机 API——hub 判定「没活了」置 halt 后，
+    // 由**本会话的取件口**把一条 `stop-session` 写进命令文件，页面自己的 userscript
+    // 下一次取件就点外层 Stop（不新增浏览器侧逻辑，用的就是既有的下行命令通道）。
+    // 只对 Kaggle worker 页生效；同一会话 10 分钟内不重复派（stop 失败下一轮还能重试，
+    // 但不会每 15s 换新 id 刷屏）。
+    if (
+      site === 'kaggle' &&
+      cmds.length === 0 &&
+      isPpoWorkerSession(notebookLogsDir(), site, session)
+    ) {
+      const [{ getHubAdmin }, { loadConfigSafe }] = await Promise.all([
+        import('./api/overview'),
+        import('./api/config'),
+      ])
+      const admin = await getHubAdmin(loadConfigSafe(), '').catch(() => null)
+      const now = Date.now()
+      const recent = readNotebookCmds(notebookLogsDir(), site, session).some(
+        (c) => c.by === 'hub:halt' && now - c.at < 10 * 60_000,
+      )
+      if (admin?.queue?.halt && !recent) {
+        putNotebookCmd(notebookLogsDir(), {
+          v: 1,
+          id: `halt-${now.toString(36)}`,
+          site,
+          session,
+          action: 'stop-session',
+          at: now,
+          by: 'hub:halt',
+          status: 'pending',
+        })
+        cmds = pendingNotebookCmds(notebookLogsDir(), site, session, now)
+      }
+    }
     return json({
       ok: true,
       cmds: cmds.map((c) => ({ id: c.id, action: c.action, at: c.at, by: c.by })),

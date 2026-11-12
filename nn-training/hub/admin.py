@@ -272,6 +272,15 @@ class AdminRoutes:
         """
         if not self._auth_ok():
             return
+        # ★2026-11-12（用户口径）：BC 课跑完不再无条件停云机——hub 先看还有没有其它
+        # BC 课/PPO job 待领，有就不下发（置「空闲即停」门闩，由空闲取活那一拍重评）。
+        if halt and "if_idle=1" in self.path:
+            ok, reason = self.hub.halt_if_idle(course)
+            idle_body: dict = {"halt": ok, "deferred": not ok, "reason": reason}
+            if course:
+                idle_body["course"] = course
+            self._json(idle_body, 200)
+            return
         if not self.hub.set_halt(halt, course):
             self._json(
                 {"error": f"未知 course（本 hub 的课程：{self.hub.courses()}）", "course": course},

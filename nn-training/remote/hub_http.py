@@ -158,6 +158,7 @@ def set_cloud_halt(
     timeout: float = 15.0,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
     course: str = "",
+    if_idle: bool = False,
 ) -> bool:
     """§386：向 hub 下发/解除云端停机达令（console 与 TrainingLoop 共用一端点）。
 
@@ -171,16 +172,30 @@ def set_cloud_halt(
     if not base_url or not token:
         return False
     path = "/admin/workers/halt" if halt else "/admin/workers/resume"
+    qs: list[str] = []
     if course:
-        path += "?course=" + urllib.parse.quote(course)
+        qs.append("course=" + urllib.parse.quote(course))
+    # `if_idle=1`（2026-11-12 用户口径）：hub 自判「还有没有别的活」，有就不下发。
+    if if_idle:
+        qs.append("if_idle=1")
+    if qs:
+        path += "?" + "&".join(qs)
     try:
-        st, _ = _request(base_url, token, path, timeout=timeout)
+        st, body = _request(base_url, token, path, timeout=timeout)
     except Exception as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
         log(f"cloud {'halt' if halt else 'resume'} 下发失败（{type(e).__name__}: {e}）")
         return False
     if st != 200:
         log(f"cloud {path} → HTTP {st}（不阻断训练）")
         return False
+    if if_idle:
+        try:
+            d = json.loads(body.decode("utf-8"))
+            if d.get("deferred"):
+                log(f"停机达令暂缓（hub）：{d.get('reason') or '还有活没干完'}")
+                return True
+        except ValueError:
+            pass
     log(f"cloud {'halt' if halt else 'resume'} 已下发（hub 采纳）")
     return True
 
