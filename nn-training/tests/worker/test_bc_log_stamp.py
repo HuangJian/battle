@@ -35,7 +35,10 @@ def test_device_warning_keeps_wording_and_gets_stamp(
     resolve_bc_device("cuda-dp", cuda_probe=lambda: (True, 1))
     out = capsys.readouterr().out
     assert STAMP.match(out), out
-    assert "[train] WARNING" in out and "退化" in out
+    assert STAMP.sub("", out).rstrip("\n") == (
+        "[train] WARNING: 请求 cuda-dp 但可见 1 张卡——退化为单卡 cuda"
+        "（与 remote/worker 的 cuda-dp 退化语义一致）"
+    )
 
 
 def test_v6_fire_weight_line_does_not_claim_pos_weight() -> None:
@@ -47,12 +50,11 @@ def test_v6_fire_weight_line_does_not_claim_pos_weight() -> None:
         fire_weighted=True,
         fire_counts={0: 1000, 1: 5, 2: 0},
     )
-    text = "\n".join(lines)
-    assert "正例加权" not in text
-    assert "pos=" not in text
-    assert "no-shot=1000 before-turn=5 after-turn=0" in text
-    assert "inverse-freq" in text
-    assert lines[-1].startswith("[train] weight_exponent=0.30")
+    assert lines == [
+        "[train] fire class weight=inverse-freq（3 类 · 强度见 weight_exponent） fire counts"
+        " no-shot=1000 before-turn=5 after-turn=0",
+        "[train] weight_exponent=0.30（0=不加权 / 1=完全 inverse-freq）",
+    ]
 
 
 def test_legacy_fire_weight_line_unchanged() -> None:

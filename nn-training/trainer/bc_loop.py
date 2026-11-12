@@ -77,6 +77,9 @@ from trainer.bc_round_job import (
     train_tuning_argv,
     train_tuning_meta,
 )
+from trainer.bc_round_job import (
+    resolve_bc_init_weights as resolve_bc_init_weights,
+)
 from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
 from worker.bc_collect import collect_corpus as _collect_corpus
@@ -221,26 +224,6 @@ def prune_bc_data(traj: Path, it: int, keep: int = BC_DATA_KEEP) -> None:
 
 
 # ---- 语料采集 --------------------------------------------------------------
-
-
-def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
-    """课程 `train.init_from` → 绝对路径（仓库根相对或绝对）；"" = 从随机起。
-
-    缺失文件响亮 SystemExit（publish 端 HubClientError 也是拒发，但这里先拦，
-    错误信息指到课程字段）。返回的路径原样进 payload（init_weights.json），
-    其 sha 进幂等键（换起点 = 不同 job）。"""
-    raw = str(getattr(course.train, "init_from", "") or "").strip()
-    if not raw:
-        return None
-    p = Path(raw)
-    if not p.is_absolute():
-        p = REPO_ROOT / raw
-    if not p.is_file():
-        raise SystemExit(
-            f"[run_bc] train.init_from 指向不存在的权重文件：{raw}（解析为 {p}）——"
-            "拒发（先确认路径；相对路径按仓库根解析）"
-        )
-    return p
 
 
 def collect_corpus(

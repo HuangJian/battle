@@ -31,6 +31,7 @@ from typing import Any, Protocol
 from common.log import log
 from remote.hub_client import verify_and_land_bc
 from remote.hub_http import JOB_CLOSED, JOB_UNKNOWN, JOB_UNREACHABLE, job_reconcile_state
+from trainer.dispatch_queue import REPO_ROOT
 from worker.bc_config import BcCourseConfig
 from worker.bc_ledger import ROUND_LAND_REJECTED_EVENT, append_ledger
 
@@ -119,6 +120,30 @@ def train_tuning_argv(train: Any) -> list[str]:
         "--patience",
         str(train.patience),
     ]
+
+
+def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
+    """课程 `train.init_from` → 绝对路径（仓库根相对或绝对）；"" = 从随机起。
+
+    缺失文件响亮 SystemExit（publish 端 HubClientError 也是拒发，但这里先拦，
+    错误信息指到课程字段）。返回的路径原样进 payload（init_weights.json），
+    其 sha 进幂等键（换起点 = 不同 job）。
+
+    2026-11-12：从 `trainer/bc_loop.py` 搬到发布面（本模块已持有 job 载荷的
+    tuning 片段；`bc_loop` 保留同名门面）——LOC 预算，行为零变化。
+    """
+    raw = str(getattr(course.train, "init_from", "") or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = REPO_ROOT / raw
+    if not p.is_file():
+        raise SystemExit(
+            f"[run_bc] train.init_from 指向不存在的权重文件：{raw}（解析为 {p}）——"
+            "拒发（先确认路径；相对路径按仓库根解析）"
+        )
+    return p
 
 
 def find_round_job(

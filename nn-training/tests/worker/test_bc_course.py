@@ -425,16 +425,35 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
 
     seen: dict = {}
 
-    def fake_halt(base_url: str, token: str, halt: bool, timeout: float = 15.0, log=None) -> bool:
-        seen.update(base=base_url, token=token, halt=halt)
+    def fake_halt(
+        base_url: str,
+        token: str,
+        halt: bool,
+        timeout: float = 15.0,
+        log=None,
+        course: str = "",
+        if_idle: bool = False,
+    ) -> bool:
+        seen.update(base=base_url, token=token, halt=halt, course=course, if_idle=if_idle)
         return True
 
     monkeypatch.setattr(hub_client, "set_cloud_halt", fake_halt)
     msgs: list[str] = []
     bc_loop.finish_all_rounds(
-        tmp_path / "training_log.jsonl", 1, hub_url="http://hub", token="t", log=msgs.append
+        tmp_path / "training_log.jsonl",
+        1,
+        hub_url="http://hub",
+        token="t",
+        course="bc-c4-v3",
+        log=msgs.append,
     )
-    assert seen == {"base": "http://hub", "token": "t", "halt": True}
+    assert seen == {
+        "base": "http://hub",
+        "token": "t",
+        "halt": True,
+        "course": "bc-c4-v3",
+        "if_idle": True,
+    }
     assert any("停机操作已执行" in m for m in msgs)
     assert any("云机可释放" in m for m in msgs)
 

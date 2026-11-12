@@ -48,7 +48,7 @@ def test_pending_job_defers_and_latch_fires_when_cleared(tmp_path: Path) -> None
     original = st.claimable_job_ids
     st.claimable_job_ids = lambda: ["j1"]  # type: ignore[method-assign]
     ok, reason = hub.halt_if_idle("a")
-    assert ok is False and "待领" in reason
+    assert ok is False and reason == "b 还有 1 个待领 job"
     assert hub.all_halted() is False
     # 活干完（PPO job 被领走并回传）⇒ 下一次空闲取活时门闩收口
     st.claimable_job_ids = original  # type: ignore[method-assign]
@@ -61,7 +61,7 @@ def test_other_enabled_unfinished_course_defers(tmp_path: Path) -> None:
     _enabled(tmp_path, "b")
     _ledger(tmp_path, "b", [{"event": "run_start", "epochs": 20}])
     ok, reason = hub.halt_if_idle("a")
-    assert ok is False and "未收官" in reason
+    assert ok is False and reason == "b 已开课且未收官"
     # b 收官（run_complete 在 run_start 之后）⇒ 不再挡
     _ledger(
         tmp_path,

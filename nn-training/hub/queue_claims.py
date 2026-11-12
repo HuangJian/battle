@@ -483,7 +483,9 @@ class QueueClaimsMixin(QueuePeer):
             return ClaimOutcome(False, "", "bad_mode", f"mode 必须是 {list(CLAIM_MODES)}")
         # ★M5（Q5）：跨课程 drain 腿——正带着某门课 hold 的盘不许领双角色 kind 的作业。
         # 住这里而不住 store：store 只有自己这门课的视野（本课那一半已在 ③ 里）。
-        drain = self._drain_blocked(job_id, worker_id)
+        # backup 副本不设租约，且 store 的 backup 分支先判 `no_backup`；在这里先拦
+        # `bc_exclusive` 会把语义优先的拒因盖掉（e2e test_hold_e2e ③）。
+        drain = "" if mode == CLAIM_MODE_BACKUP else self._drain_blocked(job_id, worker_id)
         if drain:
             return ClaimOutcome(False, "", drain, drain)
         avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
