@@ -1545,9 +1545,12 @@ manifest 取 outcome/score/metrics_version ⇒ 交给 slim 的必须是「`files
   paddle 却没装 ⇒ 就该在那台机器上报错，而不是悄悄换回 torch 跑一份看起来一样的产物）。
 - paddle 后端**只接 `kind=ppo`**（= §42 定的迁移范围），BC/iter 在**任何下载之前**拒单——
   别让 AI Studio 机器传完 payload 才炸 "No module named torch"。
-- `--device auto` 在 paddle 后端先问 `paddle_cuda_available()`（`normalize_ppo_device` 的 auto
-  问的是 torch，Paddle-only 机上恒 False ⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成
-  cpu，慢两个数量级且日志一切正常）。`normalize_ppo_device` 仍只有**一个**调用点。
+- `--device auto` 在 paddle 后端先问 `paddle_cuda_available()`，这条判据的唯一实现是
+  `bc_job.normalize_job_device`（`normalize_ppo_device` 的 auto 问的是 torch，Paddle-only 机上
+  恒 False ⇒ 不先问这一下，AI Studio 的 GPU 任务会被静默判成 cpu，慢两个数量级且日志一切正常）。
+  worker（`run_job`）与离线引导的 BC 腿（`offline_boot._run_bc_once`）都调它 —— 后者在
+  `worker_loop` 之前把 `auto` 解析掉，否则 worker 会打「--device 'auto' 未经解析」并把
+  BC 在 TPU 机上兜底成 cpu。
 - 训练核里 paddle 侧响亮拒收 XLA/DataParallel/MPS（torch 专属实验臂）；`--threads` 在 Paddle
   3.3 无等价旋钮（保留形参、值被忽略，`prep` 行可读）。
 

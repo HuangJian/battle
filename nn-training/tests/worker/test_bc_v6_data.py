@@ -112,6 +112,23 @@ def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
     assert torch.isfinite(ce)
 
 
+def test_lazy_dataset_items_are_writable_for_torch_collate(corpus: Path) -> None:
+    """★ 2026-11-13 现场（TPU 云机）：lazy 装载的 obs/scalars/extra 是 memmap **只读**视图 ⇒
+    torch 默认 collate 的 `as_tensor` 对每个只读 ndarray 发
+    「The given NumPy array is not writable」UserWarning。
+
+    `__getitem__` 必须交出**可写**数组（只在只读时复制那一帧；eager 路径零成本）。
+    """
+    data = load_dataset(str(corpus), action_v6=True, lazy=True)
+    ds = NNDataset(data, action_v6=True)
+    item = ds[0]
+    # v6 元组里的 ndarray 项：obs / scalars / extra / mask×3
+    for i in (0, 1, 2, 6, 7, 8):
+        arr = item[i]
+        assert isinstance(arr, np.ndarray), f"第 {i} 项不是 ndarray"
+        assert arr.flags.writeable, f"第 {i} 项是只读视图（torch collate 会告警）"
+
+
 def test_v6_mirror_augmentation_is_selfconsistent(corpus: Path) -> None:
     """B2：v6 增强不再被强制关闭；镜像后标签仍是 4 类，且与 `mirror_x` 同源。"""
     from worker.data.mirror import mirror_x

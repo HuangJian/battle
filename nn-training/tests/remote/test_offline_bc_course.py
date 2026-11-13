@@ -192,11 +192,70 @@ def test_run_bc_once_passes_the_course_to_worker_loop(
 
     monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
     monkeypatch.setattr(ob, "CODE_DIR", str(tmp_path))
-    assert ob._run_bc_once({}, "http://hub", "t", lambda _m: None, course="bc1") == 1
+    # 显式 cpu：本用例只钉形参透传，别让设备探测（子进程）拖慢它。
+    assert ob._run_bc_once(
+        {"device": "cpu"}, "http://hub", "t", lambda _m: None, course="bc1"
+    ) == 1
     filt = seen["job_filter"]
     assert filt({"course": "bc1"}) is True
     assert filt({"course": "rl1"}) is False
     assert seen["once"] is True and seen["role"] == "offline"
+
+
+def test_run_bc_once_resolves_auto_device_before_the_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-11-13 现场（TPU 云机）：`auto` 原样传进 `worker_loop` ⇒ worker 只做兜底归一化
+    （「--device 'auto' 未经解析，worker 兜底为 cpu」）。
+
+    引导层必须在 `worker_loop` 之前解析 `auto`（与 RL 腿同一份 `resolve_device`，按
+    CUDA → TPU → CPU 的序，`use_multi_gpu=False` 保持 BC「多卡显式 cuda-dp」的纪律）。
+    """
+    seen: dict[str, Any] = {}
+
+    def fake_loop(*a: Any, **kw: Any) -> int:
+        seen.update(kw)
+        return 1
+
+    monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
+    monkeypatch.setattr(ob, "CODE_DIR", str(tmp_path))
+    from remote import bc_job as bc_job
+    from remote import notebook_runtime as nr
+
+    monkeypatch.setattr(bc_job, "resolve_ppo_backend", lambda _b: "torch")
+
+    def fake_resolve(cfg: dict, _log: Any) -> str:
+        seen["resolve_cfg"] = dict(cfg)
+        return "tpu"
+
+    monkeypatch.setattr(nr, "resolve_device", fake_resolve)
+    assert ob._run_bc_once({"device": "auto"}, "http://hub", "t", lambda _m: None) == 1
+    assert seen["device"] == "tpu"
+    assert seen["resolve_cfg"]["use_multi_gpu"] is False, (
+        "BC 的多卡必须显式 cuda-dp（auto 不得悄悄开 DataParallel）"
+    )
+
+
+def test_run_bc_once_keeps_an_explicit_tpu_device(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """显式 `CFG.device='tpu'` 不再经过探测/归一化（TPU 是用户点名要的）。"""
+    seen: dict[str, Any] = {}
+
+    def fake_loop(*a: Any, **kw: Any) -> int:
+        seen.update(kw)
+        return 1
+
+    monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
+    monkeypatch.setattr(ob, "CODE_DIR", str(tmp_path))
+    from remote import notebook_runtime as nr
+
+    def _boom(_cfg: dict, _log: Any) -> str:
+        raise AssertionError("显式 tpu 不该再探测设备")
+
+    monkeypatch.setattr(nr, "resolve_device", _boom)
+    assert ob._run_bc_once({"device": "tpu"}, "http://hub", "t", lambda _m: None) == 1
+    assert seen["device"] == "tpu"
 
 
 def test_acquire_job_filters_candidates_to_the_requested_course(

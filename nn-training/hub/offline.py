@@ -758,8 +758,21 @@ class OfflineRoutes:
         它必须在「包里没有包」时也能推进状态，而不是让云机在 30 分钟超时后 SystemExit。
         ★M4b：写入软态与导包触发两件事都已在 `begin_pending_export` 里与触发账本同步
         （Q1：无包 claim **不建 hold、不翻任何模式**）。
+
+        ★ 2026-11-13：BC 课走 `bc_course` 409（不写 `pending_export`）——它没有任务包，
+        导包链对它不成立（详见 `queue_offline.begin_pending_export`）。
         """
         verdict, why = self.hub.begin_pending_export(course, worker_id)
+        if verdict == "bc_course":
+            self._json(
+                {
+                    "error": "这是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）",
+                    "course": course,
+                    "bc_course": True,
+                },
+                409,
+            )
+            return
         if verdict == "busy":
             self._json(
                 {

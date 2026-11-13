@@ -99,6 +99,7 @@ from remote.bc_job import (
 from remote.bc_job import (
     _run_bc_job as _run_bc_job,
 )
+from remote.bc_job import normalize_job_device
 from remote.bc_job import (
     normalize_ppo_device as normalize_ppo_device,
 )
@@ -648,11 +649,8 @@ def run_job(
     # 第一次只改了 PPO 的分派条件（else 仍 `torch.device(device)`），第二次才发现
     # BC 分叉也是直接透传原始 device。
     _raw_dev = str(device or "cpu").strip().lower()
-    if backend == "paddle" and _raw_dev == "auto":
-        # Paddle-only 机器上 `normalize_ppo_device` 问的是 torch（恒 False）⇒ 先替它问 paddle，
-        # 否则 AI Studio 的 GPU 任务会被静默判成 cpu（慢两个数量级，日志一切正常）。
-        device = "cuda" if paddle_cuda_available() else "cpu"
-    device = normalize_ppo_device(device)
+    # 探针按**本模块**的名字传入：`test_ppo_backend_switch` 打桩的是 `worker.paddle_cuda_available`。
+    device = normalize_job_device(device, backend, paddle_probe=paddle_cuda_available)
     if device != _raw_dev:
         log(
             f"job {jid}: --device {_raw_dev!r} 未经解析，worker 兜底为 {device}"

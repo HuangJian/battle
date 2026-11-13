@@ -31,6 +31,7 @@ import importlib.util
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -230,13 +231,39 @@ def _bc_backlog_replay(
 
 def _bc_device(dev_str: str) -> str:
     """BC 任务的设备透传（2026-09-13 多卡：train/bc.py 自带 cuda-dp 语义与
-    单卡/无卡响亮退化——worker 不再代为砍成单卡）；tpu/xla 确定性拒绝
-    （train/bc.py 无 xla 路径），绝不静默降级——设备语义错了的 benchmark
-    数据比没有更糟。"""
-    s = str(dev_str).lower()
-    if s in ("tpu", "xla"):
-        raise ProtocolError(f"bc 任务不支持设备 {dev_str!r}（v1 仅 cpu/cuda/cuda-dp）")
-    return s or "cpu"
+    单卡/无卡响亮退化——worker 不再代为砍成单卡）。
+
+    ★ 2026-11-13：tpu / xla 也透传 —— BC 训练核接了 XLA 路径（`worker/train/bc.py`
+    用 `worker/ppo/np_core` 的 `optimizer_step` / `xla_mark_step` / 批量 D2H，与 PPO
+    同一套助手）。非 TPU 的 XLA 后端由训练核按指纹拒跑，不在这一层猜。
+    """
+    return str(dev_str).strip().lower() or "cpu"
+
+
+def normalize_job_device(
+    device: object, backend: str, *, paddle_probe: Callable[[], bool] | None = None
+) -> str:
+    """作业设备归一化（PPO / BC 共用；`auto` 按**后端**解析成具体设备）。
+
+    ★ 2026-11-13（TPU 云机现场）：这两行原本内联在 `remote/worker.py::run_job` 里，
+    只有 worker 自己能做归一化；而离线引导的 BC 腿（`remote/offline_boot.py::_run_bc_once`）
+    在调用 `worker_loop` **之前**就把 `CFG.device`（缺省 `"auto"`）原样传了下去 ⇒ worker
+    打一行「--device 'auto' 未经解析，worker 兜底为 cpu」。那不只是噪声：它意味着
+    「谁负责解析」这件事在两条腿上各写了一半。现在归一化的**唯一实现**在这里，
+    worker 与引导层都调它。
+
+    `backend="paddle"` 且 `auto` 时问的是 **paddle** 的 CUDA（AI Studio 镜像没装 torch，
+    `normalize_ppo_device` 会把它判成 cpu，慢两个数量级）；其余走 `normalize_ppo_device`
+    （`auto` → 有 CUDA 用 `cuda`，否则 `cpu`；**绝不**自动升 `cuda-dp`）。
+
+    `paddle_probe` 是**探针注入口**：worker 传自己模块里的那个名字（`test_ppo_backend_switch`
+    按它打桩），缺省用本模块的 `paddle_cuda_available`。
+    """
+    raw = str(device or "cpu").strip().lower()
+    if backend == "paddle" and raw == "auto":
+        probe = paddle_probe or paddle_cuda_available
+        return "cuda" if probe() else "cpu"
+    return normalize_ppo_device(raw)
 
 
 def normalize_ppo_device(device: object, *, cuda_available: bool | None = None) -> str:

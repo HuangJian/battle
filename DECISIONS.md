@@ -5745,3 +5745,76 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   不进空闲闸）。旧版 dashboard 没有该端点 ⇒ 页面按「问不到」计拍，3 拍后同样停会话（行为对旧版仍是「省配额」）。
 
 —— 全文（背景 / 通道 / 边界 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-notebook-idle-stop
+
+## §2026-11-13-goalnn-offline-bc-kind-dir（自主云机领不到 BC 课：kind 判据改读权威 curricula + `pending_export` 只属于 RL）
+
+- **决定**：hub 的 BC/RL 判据从「`<discover_root>/../curricula` 找 `<课>.bc.jsonc`」改成读
+  `hub.store_offline.CURRICULA_DIR`（与归档/控制台同一份）；`begin_pending_export` 对 BC 课返回
+  `bc_course`（**不写** `pending_export`），缺包 claim 映射 409 `bc_course`；`offline_stalled`
+  忽略 BC 课的历史 `pending_export` 记录。
+- **被否决**：保留 `<discover_root>/../curricula` 并加「不存在再回退」——把「curricula 放哪」
+  重新变成隐式部署优先级；在 `queue_offline` 另抄一个 `CURRICULA_DIR`——与归档/控制台那份常量
+  必然漂移；在 claim 入口新增 hub 域方法做 BC 判断——白改成员计数/门面清单，且缺包腿之后的
+  BC 门仍然够不着。
+- **后果**：控制台起的 hub（`--traj-root <repo>/tmp`）下每门 BC 课的清单行是 `kind=bc` ⇒
+  自主云机走 `run_bc_course`（代码 bootstrap + `/jobs/{id}/claim`），不再每拍读回
+  `pending_export` 空转；盘上历史记录被读面忽略（不报假停滞）。**hub 需重启**才生效。
+
+—— 全文（背景 / 根因链 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-offline-bc-kind-dir
+
+## §2026-11-13-goalnn-bc-device-auto-and-mmap-warning（BC 云机两条 warning：`auto` 设备未解析 / memmap 只读数组喂 torch）
+
+- **决定**：① 设备归一化的唯一实现下沉到 `remote.bc_job.normalize_job_device(device, backend, *,
+  paddle_probe=…)`；worker 的 `run_job` 与离线引导的 `_run_bc_once` 都调它 —— BC 腿在
+  `worker_loop` **之前**把 `auto` 解析掉（TPU 机上落 cpu：BC 训练核无 XLA 路径，`_bc_device`
+  会拒 tpu）。② `NNDataset.__getitem__` 对只读数组逐帧 `np.array` 复制（lazy 的 obs/scalars/extra
+  是 `mmap_mode="r"` 只读视图），消掉 torch collate 的「NumPy array is not writable」UserWarning。
+- **被否决**：① BC 腿直接调 `notebook_runtime.resolve_device`——它会把 auto 解析成 `tpu`，随后
+  `_bc_device` 响亮拒单（BC 完全跑不了），TPU 机的正确落点是 cpu；② 只屏蔽那条 UserWarning——
+  torch 明确要求「copy the array or make it writable」，且未来版本可能直接拒收；③ 换自定义
+  collate——多一份 batch 组装语义（mask 分片/scalars）要维护，收益只是省一次 memcpy。
+- **后果**：设备落点与 worker 兜底结果**逐值相同**（torch：cuda/cpu；paddle：问 paddle），
+  但不再经过「未经解析」告警分支；lazy 语料每样本多一次 ~11 KiB memcpy（eager 路径零成本）。
+
+—— 全文（背景 / 备选与否决 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-device-auto-and-mmap-warning
+
+## §2026-11-13-goalnn-bc-tpu-xla（BC 上 TPU：训练核接 XLA 路径，`auto` 解析 CUDA → TPU → CPU）
+
+- **决定**：① `worker/train/bc.py` 接 `worker/ppo/np_core` 的 XLA 助手：训练步走
+  `optimizer_step`（`xm.optimizer_step`）+ 每批 `xla_mark_step`；新增 `_setup_xla`
+  （编译缓存 → 指纹/速度自检 → **非 TPU 的 XLA 后端拒跑**，与 PPO `train_core` 同一套判据）；
+  `_resolve_bc_device` 把 `tpu`/`xla` 映成 `xla_device()` 句柄。② 权重路径全部走 CPU 副本：
+  `best_state` 用 `to_cpu_batch` 一次批量 D2H、每 epoch 回传/ckpt 用 `HostModule`、参数计数
+  挪到 `.to(dev)` 之前；XLA 上 masked CE/acc/value-MSE 改**静态形状**（布尔索引会按有效样本数
+  每批重编译）。③ `remote/bc_job._bc_device` 透传 tpu/xla；离线引导 `_run_bc_once` 的 `auto`
+  改用 RL 腿同一份 `resolve_device`（`use_multi_gpu=False`：BC 多卡仍须显式 cuda-dp）。
+- **被否决**：① BC 腿继续调 `normalize_job_device`（`auto` 永不落 tpu——TPU 机永远跑 CPU）；
+  ② 直接 `torch.device("xla")`（部分 torch_xla 版本拿不到带序号的句柄，PPO 已踩过）；
+  ③ 让 `HostModule`/批量 D2H 只在收尾用、每 epoch 逐张量 `.cpu()`（42 参数 ≈10s/次 × 500 epoch）；
+  ④ 不改 `_masked_ce` 的布尔索引（XLA 图签名随批内有效样本数漂移 ⇒ 每批重编译）。
+- **后果**：TPU 云机上的 BC 真正跑在 XLA 设备上；设备解析/指纹/拒跑与 PPO 同源。CPU/CUDA 路径
+  逐位不变（所有 XLA 分支都有 `is_xla` 门）。边界：单设备 XLA（8 核 SPMD 见
+  §2026-11-13-goalnn-bc-tpu-spmd-8core）；每批 `.item()` 仍是一次设备同步（诊断读数要它）。
+
+—— 全文（背景 / 备选与否决 / 验证 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-tpu-xla
+
+## §2026-11-13-goalnn-bc-tpu-spmd-8core（BC 吃满 TPU v5e-8 的 8 核：单进程 SPMD 数据并行）
+
+- **决定**：`worker/train/bc.py` 在 XLA 多核（`global_device_count > 1`）时开 **单进程 SPMD**：
+  `_xla_spmd_mesh` 先用 `xr.use_spmd()`（必须先于 `xla_device()`）再建 1-D `data` mesh；
+  `_shard_model` 把参数**复制**到各核，`_shard_batch` 把 obs/scalars/extra/标签/掩码/return 按
+  dim0 切到 `data` 轴；`make_loaders(drop_last=<SPMD>)` 保证整批可整切、`_assert_spmd_batch`
+  要求 `--batch` 是核数倍数；SPMD 下训练步走**裸 `opt.step()`**（复制参数上的梯度已由 XLA
+  归约，再调 `xm.optimizer_step` 会二次归约、放大 world_size 倍）。单核/不可用 ⇒ 原单设备路径。
+- **被否决**：① `xmp.spawn` / `torchrun` 多进程数据并行——BC 的 job 生命周期（单份
+  stdout / resume / on_epoch 回传 / result）都在 `worker_loop` 一个进程里，多进程要重做 8 份
+  rank 收口；② SPMD 下仍调 `xm.optimizer_step`——`reduce_gradients` 可能再 all-reduce 一次；
+  ③ 不 drop_last、靠 ragged tail 切分——`mark_sharding` 不做非整切分；④ 切分参数（tensor
+  parallel）——73K 参数的小模型上收益为负，复制+数据并行才是正解。
+- **后果**：v5e-8 的 8 核全部参与前向/反向；**global batch 语义不变**（mb=256 ⇒ 每核 32，
+  LR/优化步数不变）。代价：尾批丢弃（每 epoch ≤ mb−1 个样本，g2b 877k 语料 ≈0.03%）；
+  每步多一次跨核 all-reduce（小模型上是主要新增开销，但仍远小于 8× 吞吐收益）。
+  CPU/CUDA 路径逐位不变（`drop_last` 缺省 False、mesh=None）。`world_size()` 在无复制时恒为 1，
+  核数判据用 `global_device_count`。
+
+—— 全文（背景 / 备选与否决 / 验证 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-tpu-spmd-8core

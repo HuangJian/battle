@@ -21,7 +21,7 @@
 
 ## 依赖方向
 
-`queue_offline → {common.protocol, hub.queue_peer, hub.store,
+`queue_offline → {common.protocol, hub.queue_peer, hub.store, hub.store_offline,
 hub.task_pack}`（严格向下；跨域调用一律走 `self.`，形参面由 `QueuePeer` 声明）。
 """
 
@@ -44,6 +44,7 @@ from common.protocol import (
 )
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
+from hub.store_offline import CURRICULA_DIR
 from hub.task_pack import (
     TASK_STATE_COMPLETED,
     TASK_STATE_NOT_OFFLINE,
@@ -64,25 +65,22 @@ from hub.task_pack import (
 )
 
 
-def _curricula_root(discover_root: Path | None) -> Path:
-    """课程文件目录：`<discover_root>/../curricula`（hub 的 discover root 是 `tmp/`）。
-
-    与 `remote.offline_boot` / dashboard 的 `curricula/` 约定一致；hub 不能 import
-    `worker.bc_config`（跨层），所以用文件是否存在判 BC（`<course>.bc.jsonc`）。
-    """
-    if discover_root is None:
-        return Path("curricula")
-    return Path(discover_root).parent / "curricula"
-
-
-def _course_kind(discover_root: Path | None, course: str) -> str:
+def _course_kind(course: str) -> str:
     """这门课是 BC 还是 RL？`curricula/<course>.bc.jsonc` 存在 ⇒ `bc`，否则 `rl`。
 
     BC 课没有 task pack，有独立的 `bc-exclusive.json` 独占；把它标出来，云机才知道
     该走 `/jobs/{id}/claim` 而不是 `claim_course`。
+
+    ★ 2026-11-13（用户报障「自主云机领不到 BC 课程」）：旧实现从 `<discover_root>/../curricula`
+    找课程文件 —— 那只在手工 `--traj-root nn-training/tmp` 的布局下成立。控制台起的 hub 用
+    `--traj-root <repo>/tmp`（dashboard/src/core/paths.ts 的 LOG_DIR）⇒ 算出来是
+    `<repo>/curricula`（不存在）⇒ **每门 BC 课都被判成 rl**，claim 于是走「缺包 ⇒ 写
+    pending_export + 请控制台导包」那条腿，而 BC 课永远不会有 task pack（现场：g2b-classic35
+    被记了一笔 pending_export，云机每拍都读回它、永远领不到）。权威目录就是
+    `hub.store_offline.CURRICULA_DIR`（与归档/控制台同一份），不随 `--traj-root` 漂移。
     """
     try:
-        if (_curricula_root(discover_root) / f"{course}.bc.jsonc").is_file():
+        if (CURRICULA_DIR / f"{course}.bc.jsonc").is_file():
             return "bc"
     except OSError:
         pass
@@ -357,7 +355,7 @@ class QueueOfflineMixin(QueuePeer):
                 pack_path = self.task_pack_path(course)
             except ProtocolError:
                 continue  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
-            kind = _course_kind(self._discover_root, course)
+            kind = _course_kind(course)
             st = self._stores.get(course)
             # ★M4b：可领上位闸 = **开课标记在**（`stopped` 是唯一 opt-out）。课程不再有
             # 在线/离线模式 —— claim 成功即接管（hold），协作派发被 hold 闸压住；停课的
@@ -625,7 +623,7 @@ class QueueOfflineMixin(QueuePeer):
             return {}, "bad"
         if not self.course_open(course):
             return {}, "not_offline"
-        if _course_kind(self._discover_root, course) == "bc":
+        if _course_kind(course) == "bc":
             # BC 课不领课程租约：它走 `bc-exclusive.json` + `/jobs/{id}/claim`；
             # 先建 hold 反而会被 `role_blocked` 的 hold 闸挡住自己领 BC job。
             return {}, "bc_course"
@@ -1085,9 +1083,14 @@ class QueueOfflineMixin(QueuePeer):
     def begin_pending_export(self, course: str, worker_id: str = "") -> tuple[str, str]:
         """claim 无包分支的软态写入（Q1）：过 busy 闸 → 记 `pending_export`（落盘）。
 
-        返回 verdict：`pending`（已记下「有人在导包」）/ `busy`（别课在跑）/ `not_open`
-        （未知课程 / 停课）。**不建租约、不建 hold、不占任何闸** —— 导包是几十分钟的
-        后台活，它的全部含义是「有人在导包」（别的盘排序靠后 + `offline_stalled` 的锚点）。
+        返回 verdict：`pending`（已记下「有人在导包」）/ `bc_course`（BC 课没有任务包，不导）/
+        `busy`（别课在跑）/ `not_open`（未知课程 / 停课）。**不建租约、不建 hold、不占任何闸** ——
+        导包是几十分钟的后台活，它的全部含义是「有人在导包」（别的盘排序靠后 +
+        `offline_stalled` 的锚点）。
+
+        ★ 2026-11-13：`bc_course` 这条腿是「`pending_export` 只属于 RL」的唯一写入口守卫。
+        在此之前 BC 课被判成 rl 时，缺包 claim 与 push 派发都会给它写一笔永远等不到包的
+        `pending_export`（云机每拍读回它 ⇒ 永远领不到；现场：g2b-classic35）。
 
         ★M4b：旧 `begin_auto_handoff` 的「翻 mode / claimed_* / 撤单」三腿随模式删除；
         「新一轮 ⇒ 重置导包触发账本」保留 —— 「新一轮」= 换主 ∨ 超窗（`.worker-id` 持久，
@@ -1098,6 +1101,10 @@ class QueueOfflineMixin(QueuePeer):
             return "not_open", "未知课程（不在本 hub 的课程表里）"
         if not self.course_open(course):
             return "not_open", "这门课不在训练中（开课标记已删）"
+        if _course_kind(course) == "bc":
+            # BC 课没有任务包（job 由在线 trainer 发布，走 `/jobs/{id}/claim`）——
+            # 不写 pending_export：那会让云机永远读回「正在导包」而领不到任何东西。
+            return "bc_course", "这是 BC 课程：没有任务包可导（BC job 走 /jobs/{id}/claim）"
         with self._lease_lock:
             busy = self._busy_locked(course, worker_id)  # D3：一拖一按 worker（同一台盘串行）
             if busy:
@@ -1227,6 +1234,7 @@ class QueueOfflineMixin(QueuePeer):
         for course in self.courses():
             if not self.course_open(course):
                 continue
+            kind = _course_kind(course)
             pack_sha = ""
             try:
                 pack = self.task_pack_path(course)
@@ -1240,7 +1248,13 @@ class QueueOfflineMixin(QueuePeer):
             # ★M4b 修：② 的锚必须读**盘上原文**，不能用会惰性过期的读面 `pending_export_of`
             # （F8 的窗只服务「有人正在导包吗」这个读面）——② 要报的恰恰是「窗过了还没动静」，
             # 锚跟着窗一起消失的话告警永远不响（窗 900s < 停滞阈 1800s，② 当场变死代码）。
-            pending = self.dispatch_record(course).get("pending_export") or {}
+            # ★ 2026-11-13：BC 课**没有任务包**，`pending_export` 对它没有语义 —— 旧 kind 误判
+            # 可能在盘上留下一笔历史记录，读面不能据此报「导包停滞」（否则告警永远响）。
+            pending = (
+                {}
+                if kind == "bc"
+                else (self.dispatch_record(course).get("pending_export") or {})
+            )
             runs = progress.get(course) or {}
             last = max((float(r.get("last_mtime") or 0.0) for r in runs.values()), default=0.0)
             why = stall_verdict(

@@ -21,30 +21,19 @@ import torch
 import worker.train.bc as bc_mod
 from worker.models.core import NNPolicy
 
-# ------------------------------------------------------------------ _resolve_bc_device
-# 判据在 tests/worker/test_bc_device.py（免 torch）；这里只钉「真探针接线 + torch.device 构造」。
+# ------------------------------------------------------------------ 设备名 → torch.device
+# 判据在 tests/worker/test_bc_device.py（免 torch）；这里只钉「cuda-dp 名字 → 真 cuda 设备」
+# 与 `_bc_raw` 的 "module." 前缀防线（TPU/XLA 的句柄与 SPMD 见 test_bc_xla.py）。
 
 
-def test_resolve_maps_the_dp_name_onto_a_real_torch_device(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`cuda-dp` 不是合法 device type：名字留给日志/台账，`torch.device` 必须是 `cuda`。
-
-    这条也是「真 torch.cuda 探针真的接上了」的接线锚——判据那侧传的是替身探针。
-    """
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    name, dev, use_dp = bc_mod._resolve_bc_device("cuda-dp")
-    assert (name, use_dp) == ("cuda-dp", True)
-    assert dev.type == "cuda"
+def test_dp_name_maps_onto_a_real_cuda_device() -> None:
+    """`cuda-dp` 不是合法 device type：名字留给日志/台账，`torch.device` 必须是 `cuda`。"""
+    assert bc_mod._bc_torch_device("cuda-dp", True).type == "cuda"
 
 
-@pytest.mark.parametrize("arg,expect", [("cuda", "cuda"), ("cpu", "cpu"), ("", "cpu")])
-def test_resolve_passthrough_builds_a_matching_device(arg: str, expect: str) -> None:
-    """非 cuda-dp 路径原样成 `torch.device`，且不触发 CUDA 探针（没 monkeypatch 也不炸）。"""
-    name, dev, use_dp = bc_mod._resolve_bc_device(arg)
-    assert name == expect and use_dp is False
-    assert dev.type == expect
+@pytest.mark.parametrize("arg", ["cuda", "cpu", "cuda:1"])
+def test_device_name_passthrough(arg: str) -> None:
+    assert bc_mod._bc_torch_device(arg, False).type == arg.split(":")[0]
 
 
 # ------------------------------------------------------------------ _bc_raw（"module." 前缀防线）

@@ -482,6 +482,10 @@ ALLOWED_IMPORTS = {
         "hub.queue_peer",
         "hub.store",
         "hub.task_pack",
+        # 2026-11-13：BC 判据的课程目录必须与归档/控制台同一份（`hub.store_offline`
+        # 的 `CURRICULA_DIR`）——旧实现按 `<discover_root>/../curricula` 推导，控制台起的
+        # hub（`--traj-root <repo>/tmp`）下永远不存在，BC 课会被判成 RL。
+        "hub.store_offline",
     },
     "hub.queue_store_face": {"hub.queue_peer", "hub.store"},
     "hub.queue_peer": {"common.protocol", "hub.store_leases"},

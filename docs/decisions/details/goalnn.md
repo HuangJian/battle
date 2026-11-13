@@ -7480,3 +7480,152 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   自主盘身份靠页面识别到 `battle.offline.ipynb` 的训练 cell（`offline:detected`）；识别不到时按协作盘口径判
   （只看可领/在飞，不会把 hold 算活）。页面分不清 live hold 是谁的 ⇒ 自主盘会把**别的盘**的 hold 也算成活
   （保守：多烧一点配额，绝不掐在训会话）；协作盘不看 hold，所以不会因此被钉住。
+
+## §2026-11-13-goalnn-offline-bc-kind-dir（2026-11-13，自主云机领不到 BC 课程：kind 判据的目录推导 + `pending_export` 误写）
+
+- **背景（现场）**：用户贴的 `battle.offline.ipynb` 日志：清单只有 `g2b-classic35` 一条，
+  `清单里可领：g2b-classic35` ⇒ `其中 g2b-classic35 正在导包（pending_export）` ⇒ 本拍不跑；
+  末尾 `BC：本机还没有包内代码——这一拍不领`。而盘上 `tmp/g2b-classic35/` 是一堂**正在训的 BC 课**
+  （`training_log.jsonl` 有 `run_start` + `job_pending`，`remote-jobs/<jid>/` 有 code.zip + payload），
+  且 `offline-dispatch.json` 真被写进了一笔 `pending_export`。
+- **根因链**：
+  1. hub 的 `_course_kind` 从 `<discover_root>/../curricula` 找 `<课>.bc.jsonc`。控制台起的 hub 用
+     `--traj-root <repo>/tmp`（`dashboard/src/core/paths.ts::LOG_DIR`）⇒ 算出来是 `<repo>/curricula`
+     （不存在）⇒ **所有 BC 课都被判成 `rl`**。该假设只在手工 `--traj-root nn-training/tmp` 时成立。
+  2. 判成 `rl` 后，清单行 `kind=rl`、`pack=null`、`claimable=true`；云机 claim ⇒ `hub/offline.py`
+     先走缺包腿 `_claim_without_pack` ⇒ `begin_pending_export` 写软态并请控制台导包。BC 课永远
+     不会有 task pack ⇒ 云机每拍读回 `pending_export`，永远领不到；`/admin/offline` 的 stalled
+     读面还会在超窗后永久报「导包停滞」。
+  3. 云端兜底腿 `try_take_bc_job` 的 `CODE_DIR` 预闸（「先跑一门课 / 用任务包引导」）只是表象：
+     主路径一旦按 `kind=bc` 分流，`run_bc_course` 会用 `_ensure_bc_code` 从 hub `/code` 冷启动。
+- **决定**：
+  - `_course_kind(course)` 读 `hub.store_offline.CURRICULA_DIR`（`REPO_ROOT/nn-training/curricula`，
+    与归档 `course_archive` / 控制台 `curriculaDir()` 同一份），不再从 `--traj-root` 推导；
+  - `begin_pending_export` 对 BC 课返回 `bc_course`（**不写** `pending_export`）——这是
+    「`pending_export` 只属于 RL」的唯一写入口守卫，pull claim 与 push 派发两条腿都覆盖到；
+  - `hub/offline._claim_without_pack` 把该 verdict 映射成 409 `{"bc_course": true}`（云机
+    `claim_course` 的既有分流原样命中）；
+  - `offline_stalled` 对 BC 课忽略盘上的历史 `pending_export`（旧误判留下的记录不该永久报警）。
+- **备选与否决**：① 保留原路径并加「不存在再回退到权威目录」——否（两套布局的隐式优先级会把
+  「curricula 放哪」重新变成部署细节，且测试/生产行为分叉）；② 在 `queue_offline` 另写一个
+  `CURRICULA_DIR`——否（必然与 `store_offline` / `course_archive` 漂移）；③ 在 claim HTTP 入口
+  新加一个 hub 域方法做 BC 判断——否（要同步 `test_hub_queue_split` 的成员计数/门面清单，且
+  真正的问题是「不写 pending_export」，守卫应住在写入口）；④ 只改云端（`try_take_bc_job` 去掉
+  `CODE_DIR` 预闸）——否（hub 仍把 BC 当 RL，云机拿不到 `kind=bc`，主路径依旧空转）。
+- **验证**：`tests/hub/test_offline_bc_course.py` 新增 4 例（控制台布局的 kind 判据 / claim 端点
+  409 `bc_course` 且不写 `pending_export` / `begin_pending_export` 拒绝 BC / 历史记录不触发
+  stalled）；`bun run pygate` 全绿（ruff + mypy 909 文件 + pytest **5994 passed / 10 skipped**）。
+- **边界**：hub 进程要**重启**才加载新代码；盘上已有的历史 `pending_export` **不删**（读面忽略，
+  下次正常流程不会再写）；`push` 派发器对 BC 课的 `_pack_for` 现在会拿到 `bc_course` verdict
+  （记一行日志 + 冷却，不再写软态），BC 的派发入口仍是云机 pull + `/jobs/{id}/claim`。
+
+## §2026-11-13-goalnn-bc-device-auto-and-mmap-warning（2026-11-13，BC 云机的两条 warning）
+
+- **背景（现场）**：TPU 云机领到 g2b-classic35 的 BC job，日志两条：
+  1. `--device 'auto' 未经解析，worker 兜底为 cpu（调用方应先 resolve_device；要多卡须显式
+     --device cuda-dp）`，紧跟 `BC start ... device=cpu`；
+  2. `torch/utils/data/_utils/collate.py:285: UserWarning: The given NumPy array is not writable …`。
+- **根因**：
+  1. 设备归一化的两行（paddle 探针 + `normalize_ppo_device`）**内联在** `worker.run_job` 里；
+     离线引导的 BC 腿 `offline_boot._run_bc_once` 把 `CFG.device`（缺省 `auto`）原样交给
+     `worker_loop` ⇒ 只有 worker 能归一化，且「谁负责解析」在两条腿上各写了一半。
+  2. `NNDataset` 的 lazy 装载把 `obs/scalars/extra` 存成 `ShardArray`（每 shard 一个
+     `np.load(mmap_mode="r")`）⇒ `__getitem__` 返回的是**只读** memmap 视图；torch 默认
+     collate 的 `as_tensor` 对每个只读 ndarray 发 UserWarning（`torch.stack` 之后本来也会复制）。
+- **决定**：
+  - 新 `remote.bc_job.normalize_job_device(device, backend, *, paddle_probe=None)` 作为**唯一实现**：
+    `paddle` + `auto` 问 `paddle_cuda_available()`，其余走 `normalize_ppo_device`（auto → cuda/cpu，
+    **不**自动升 cuda-dp）。worker 的 `run_job` 传 `paddle_probe=paddle_cuda_available`（保住
+    `test_ppo_backend_switch` 对 `worker.paddle_cuda_available` 的打桩缝）；`_run_bc_once` 用
+    `resolve_ppo_backend` + 该函数在 `worker_loop` 之前解析。**不调** `notebook_runtime.resolve_device`：
+    它会把 auto 解析成 `tpu`，而 BC 的 `_bc_device` 明确拒绝 tpu/xla（无 XLA 训练路径）。
+  - `worker/data/dataset.py::_writable(x)`：只读时 `np.array(x)` 复制一帧（~11 KiB），再返回给 collate；
+    eager 语料 `flags.writeable=True` ⇒ 零成本。
+  - `try_take_bc_job` 补 `except SystemExit`：设备探测 FATAL 是 `SystemExit`，空档兜底腿必须继续
+    「失败只记一行、不上抛」。
+- **备选与否决**：见 `DECISIONS.md` 索引行（resolve_device / 只屏蔽 warning / 自定义 collate 三条）。
+- **验证**：`tests/remote/test_offline_bc_course.py::test_run_bc_once_resolves_auto_device_before_the_worker`
+  （旧代码 `seen["device"] == "auto"` 红）；`tests/worker/test_bc_v6_data.py::test_lazy_dataset_items_are_writable_for_torch_collate`
+  （旧代码当场 `第 0 项是只读视图` 红）；`tests/remote/test_worker_device.py` 的源码守卫改钉
+  `normalize_job_device(device, backend` 新调用点；`bun run pygate` 全绿
+  （ruff + mypy 909 文件 + pytest **5996 passed / 10 skipped**）。
+- **边界**：设备落点与旧 worker 兜底**逐值相同**（torch：cuda/cpu；paddle：问 paddle），变化只在
+  「不再经过告警分支」；lazy 语料每样本一次 memcpy 是有意成本（换取 torch 无告警与未来版本兼容）。
+
+## §2026-11-13-goalnn-bc-tpu-xla（2026-11-13，BC 训练上 TPU）
+
+- **背景**：用户口径「BC 要上 TPU」。此前 `_bc_device` 对 tpu/xla **确定性拒绝**（注释：
+  `train/bc.py` 没有 xla 路径），TPU 云机上的 BC 只能落 CPU；离线引导的 `auto` 又只会解析成
+  cuda/cpu（`normalize_job_device`），所以即便训练核支持了 XLA，设备也到不了 TPU。
+- **决定**：
+  1. **训练核接 XLA**（`worker/train/bc.py`，复用 `worker/ppo/np_core` / `ppo.common` 的既有助手，
+     不新写一套）：
+     - `optimizer_step(opt, dev)`（XLA = `xm.optimizer_step`）+ 每批 `xla_mark_step(dev)`
+       （XLA 惰性图不显式落边界会越积越大；PPO engine 同款）；
+     - `_setup_xla`：编译缓存（**任何计算之前**）→ `xla_fingerprint` / `xla_device_speed_probe`
+       自检 → `tpu_backend_missing_reason` 非 TPU 后端**拒跑**（XLA 的 CPU 插件也返回 `xla:0`，
+       不拒就会「看起来正常、慢两个数量级」，判据与 PPO `train_core` 同源）；
+     - `_resolve_bc_device`：`tpu` / `xla` → `xla_device()` 句柄（`torch.device("xla")` 在部分
+       torch_xla 版本拿不到带序号的句柄）。
+  2. **权重路径一律 CPU 副本**（设备张量进 `save_weights_json` 是逐张量同步，42 参数 ≈10s/次）：
+     - `best_state` → `_cpu_state_dict`（XLA 用 `to_cpu_batch` 一次批量 D2H）；
+     - 每 epoch `on_epoch` 回传与 `--ckpt-every` → `HostModule` 只读主机视图；
+     - 参数计数 `param_count` 挪到 `.to(dev)` **之前**（XLA 上 `numel()` 是设备查询）；
+     - 收尾仍是 `model.to("cpu")` → 装 `best_state` → 落盘（与设备无关的逐字节稳定）。
+  3. **静态形状**：XLA 上 `_masked_ce` / `_masked_acc` / `_value_mse` 不再用布尔索引
+     （`z[keep]` / `ret[valid]` 的输出长度随批内有效样本数变化 ⇒ 每批一张新图、重编译）；
+     改为全批计算 + 掩码置零 + 按有效数求均值（数值口径相同）。CPU/CUDA 仍走原路径（逐位不变）。
+  4. **设备管道**：`remote/bc_job._bc_device` 透传 tpu/xla；离线引导 `_run_bc_once` 的 `auto`
+     改用 RL 腿的 `resolve_device`（CUDA → TPU → CPU），`use_multi_gpu=False` 保住「BC 多卡必须
+     显式 cuda-dp」的既有纪律；显式 `CFG.device='tpu'` 不再探测。Paddle 后端无 XLA 路径，仍走
+     `normalize_job_device("auto", "paddle")`。
+- **备选与否决**：① 让 `normalize_job_device` 的 auto 也落 tpu——否（它服务 PPO push-first 兜底，
+  改它会改变 `normalize_ppo_device` 的既有契约与用例；TPU 解析该按后端在引导层做）；
+  ② 直接 `torch.device("xla")`——否（见上，PPO 已有先例）；
+  ③ 收尾一次性批量 D2H、每 epoch 逐张量 `.cpu()`——否（42 参数 × 0.25s × 500 epoch ≈ 1.5h 白付）；
+  ④ 只改设备、不改 `_masked_ce` 的动态形状——否（BC 的 `keep` 每批都在变，TPU 上会退化成
+  每批重编译）。
+- **验证**：`tests/worker/test_bc_xla.py`（假 XLA 设备把训练循环走一遍：`optimizer_step` /
+  `xla_mark_step` 被调用、`best_state` 走批量 D2H、`on_epoch` 拿到 `HostModule`；非 TPU 指纹拒跑）
+  · `tests/worker/test_bc_dp.py`（tpu/xla → `xla_device()` 句柄）· `tests/worker/test_bc_device.py`
+  （`_bc_device` 透传 tpu/xla）· `tests/remote/test_offline_bc_course.py`（auto → `resolve_device`，
+  `use_multi_gpu=False`；显式 tpu 不探测）。`bun run pygate` 全绿（ruff + mypy 910 文件 +
+  pytest **6002 passed / 10 skipped**）。
+- **边界**：**单设备 XLA**（`xla_device()` 取一个地址空间设备；TPU v5e-8 的 8 核不会被自动用满，
+  与 PPO 现状一致——多核是后续独立课题）；每批 `.item()` 仍是一次设备同步（loss/acc 读数要它）；
+  本地 `--local` BC 仍固定 `--device cpu`（控制台主机的既有口径，本次不动）。
+
+## §2026-11-13-goalnn-bc-tpu-spmd-8core（2026-11-13，BC 吃满 TPU v5e-8 的 8 核）
+
+- **背景**：上一刀（§2026-11-13-goalnn-bc-tpu-xla）让 BC 跑上了 XLA，但只用一个地址空间设备
+  （`xla_device()`），v5e-8 的另外 7 核闲置。用户口径：「要支持 v5e-8 的 8 核并行使用」。
+- **决定**：**单进程 SPMD 数据并行**，训练循环的 Python 结构/指标/回传全不变。
+  1. `_xla_spmd_mesh()`：`torch_xla.runtime.global_device_count() > 1` 时 `xr.use_spmd()`
+     （**必须先于 `xla_device()`**，对已初始化设备无效）并建 1-D `data` mesh
+     （`xs.get_1d_mesh("data")`，旧版回退 `xs.Mesh(np.arange(n), (n,), ("data",))`）；
+     单核 / SPMD 不可用 ⇒ `(None, n)` 降级单设备（WARN 一行，训练照跑）。
+  2. 形状：`_shard_model` 把参数**复制**（`(None,)*dim`），`_shard_batch` 把 obs / scalars /
+     extra / move / fire / hold / 三段 mask / return 按 dim0 切到 `data` 轴。复制参数上的梯度
+     由 XLA 在消费点自动 all-reduce。
+  3. 训练步：SPMD 下**裸 `opt.step()`**；单设备 XLA 仍 `xm.optimizer_step`。理由：
+     `xm.optimizer_step` 内部 `reduce_gradients` 可能再做一次 all-reduce ⇒ 梯度被放大
+     world_size 倍（8×，静默改变优化语义）。`xla_mark_step` 两条路径都保留。
+  4. 整批：`make_loaders(drop_last=<SPMD>)`（dim0 切分要求 batch 能被核数整除，尾批丢弃）；
+     `_assert_spmd_batch` 在开训前响亮拒绝非整倍数的 mb。global batch 语义不变
+     （mb=256 ⇒ 每核 32，LR/步数不变）。
+  5. 设备入口重排：设备/SPMD 判定挪到 `make_loaders` **之前**（loader 要知道是否 drop_last），
+     `_resolve_bc_device` 拆成 `_bc_torch_device`（名字→`torch.device`）与 `_xla_entry`
+     （SPMD→编译缓存→设备→指纹/拒跑）。
+- **备选与否决**：① `xmp.spawn` / `torchrun` 多进程——否（BC 的 job 生命周期：单份 stdout /
+  resume / `on_epoch` 回传 / result 都在 `worker_loop` 一个进程；8 进程要重做 rank 收口与
+  回传去重）；② SPMD 下照用 `xm.optimizer_step`——否（二次归约，见上）；③ 不做 drop_last、
+  让 `mark_sharding` 自己处理 ragged tail——否（不做非整切分，直接报错）；④ tensor parallel
+  切模型——否（73K 参数的小模型切分收益为负，跨核通信反而更贵）。
+- **验证**：`tests/worker/test_bc_xla.py`：`use_spmd` 在 mesh 之前被调用（假 torch_xla 包）·
+  单核不开 SPMD · 参数复制/batch 按 dim0 切分的 spec 逐项对账 · mb 非 8 倍数响亮拒绝 ·
+  SPMD 全流程训练（假 mesh）里每个 batch 都被标注且 **`optimizer_step` 一次都没被调用**。
+  `bun run pygate` 全绿（ruff + mypy 910 文件 + pytest **6007 passed / 10 skipped**）。
+- **边界**：单进程 SPMD（不是多进程 DP）；`world_size()` 在无复制时恒为 1，核数判据用
+  `global_device_count`；每 epoch 尾批丢弃（g2b 877k 语料 ≈0.03%）；每步一次跨核 all-reduce
+  是主要新增开销（小模型下它是决定加速比的关键因素）；CPU/CUDA 路径逐位不变
+  （`drop_last` 缺省 False、mesh=None）。

@@ -70,14 +70,21 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
          ⇒ `auto` 照样喂进 torch（日志「兜底为 cuda」打了、job 仍炸 auto）；
       ② 归一化只写在 PPO 分支里 ⇒ BC 分叉（`device=device` → `_bc_device`）仍透传 `auto`。
     所以：一次、且在分叉前。
+
+    ★ 2026-11-13：归一化的**唯一实现**下沉到 `remote.bc_job.normalize_job_device`
+    （离线引导的 BC 腿也要在 `worker_loop` 之前解析 `auto`，见
+    `tests/remote/test_offline_bc_course.py::test_run_bc_once_resolves_auto_device_before_the_worker`）；
+    本用例随之钉新调用点。`paddle_probe` 按本模块名字传入，保住
+    `test_ppo_backend_switch` 对 `worker.paddle_cuda_available` 的打桩缝。
     """
     src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
     flat = " ".join(src.split())
 
-    assert flat.count("normalize_ppo_device(device)") == 1, (
+    call = "device = normalize_job_device(device, backend"
+    assert flat.count(call) == 1, (
         "run_job 应只归一化一次；每条链各自归一化必然漏掉其中一条"
     )
-    assert flat.index("device = normalize_ppo_device(device)") < flat.index('"kind"]) == "bc"'), (
+    assert flat.index(call) < flat.index('"kind"]) == "bc"'), (
         "设备归一化必须早于 BC/PPO 分叉，否则其中一条链会拿到未解析的 auto"
     )
 

@@ -3312,14 +3312,37 @@ def _run_bc_once(
     if code_dir not in sys.path:
         sys.path.insert(0, code_dir)
     # 包内代码（顶层 import 会破 standalone 契约：取到任务包之前 `remote` 不存在）。
+    from remote.bc_job import resolve_ppo_backend
     from remote.worker import worker_loop
+
+    # ★ 2026-11-13（TPU 云机现场）：`auto` 必须在进 worker 之前解析掉 —— 否则 worker 只做
+    # 兜底归一化，并打一行「--device 'auto' 未经解析，worker 兜底为 cpu」。
+    # ★ 2026-11-13（BC 上 TPU）：解析用 RL 腿同一份 `resolve_device`（CUDA → TPU → CPU）；
+    # `use_multi_gpu=False` 保持 BC「多卡必须显式 cuda-dp」的既有纪律（auto 不悄悄开 DP）。
+    # Paddle 后端没有 XLA 路径 ⇒ 仍交给 `normalize_job_device` 问 paddle 的 CUDA。
+    raw_dev = str(cfg.get("device") or "auto").strip().lower() or "auto"
+    if raw_dev != "auto":
+        device = raw_dev
+    else:
+        device = str(cfg.get("device_resolved") or "")
+        if not device or device == "auto":
+            backend = resolve_ppo_backend(str(cfg.get("backend") or "auto"))
+            if backend == "paddle":
+                from remote.bc_job import normalize_job_device
+
+                device = normalize_job_device("auto", "paddle")
+            else:
+                from remote.notebook_runtime import resolve_device  # CODE_DIR 已在 sys.path 上
+
+                device = resolve_device({"device": "auto", "use_multi_gpu": False}, log)
+            cfg["device_resolved"] = device
 
     return int(
         worker_loop(
             hub,
             token,
             work_dir=_queue_work_dir(cfg),
-            device=str(cfg.get("device") or "cpu"),
+            device=device,
             torch_threads=int(cfg.get("threads") or 0),
             poll_sec=BC_POLL_SEC,
             once=True,
@@ -3473,6 +3496,9 @@ def try_take_bc_job(
         return ""
     try:
         done = _run_bc_once(cfg, hubs[0], token, log)
+    except SystemExit as e:  # 设备探测 FATAL 走 SystemExit：同样是「这条腿不致命」
+        log(f"BC 领取/执行失败（不致命，不影响课程主循环）：SystemExit: {e.code}")
+        return ""
     except Exception as e:  # 这条腿 best-effort：任何异常都只记一行，不上抛
         log(f"BC 领取/执行失败（不致命，不影响课程主循环）：{type(e).__name__}: {e}")
         return ""

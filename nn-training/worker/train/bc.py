@@ -6,9 +6,9 @@ trains the 3-headed policy with masked cross-entropy:
   * Only samples where the invalid-action mask == 1 contribute to a head's loss
     (plan §1.3-4 — turn-locked / cooldown / zero-stock actions are masked out).
   * mirrorX online augmentation (prob --mirror-p) on the training split only.
-  * CPU by default; `--device cuda` trains on GPU (weights export stays CPU —
-    bitwise-stable files regardless of device). Small network (~77K params)
-    matches the 40-120K BC sample count (underfit-safe).
+  * CPU by default; `--device cuda` trains on GPU, `--device tpu` on TPU（torch_xla；
+    weights export stays CPU — bitwise-stable files regardless of device）. Small network
+    (~77K params) matches the 40-120K BC sample count (underfit-safe).
 
 Outputs:
   * <--out>  : JSON+base64 weights (plan §5), loadable by the TS runtime.
@@ -61,6 +61,21 @@ from worker.data.weights_io import load_state_into, save_weights_json
 from worker.models.core import NNPolicy, param_count
 from worker.models.student import PPOStudent, StudentNet
 
+# XLA/TPU 助手（与 PPO 同一套，2026-11-13 BC 上 TPU）：`np_core` 顶层零 torch；
+# `common` 的 HostModule / to_cpu_batch 负责**一次**批量 D2H（42 个参数逐张量同步 ≈10s/次）。
+from worker.ppo.common import HostModule, to_cpu_batch
+from worker.ppo.np_core import (
+    is_xla,
+    optimizer_step,
+    tpu_backend_missing_reason,
+    xla_device,
+    xla_device_speed_probe,
+    xla_enable_compile_cache,
+    xla_fingerprint,
+    xla_mark_step,
+    xla_world_size,
+)
+
 # 免 torch 的判据半边（2026-09-26，item 6f + 续扫）：BC 旋钮归一在 train/bc_core.py、
 # 设备串在 train/device.py。本模块 import 后自用 + 沿用旧名对外可见（既有调用点一行不改）。
 from worker.train.bc_core import (
@@ -81,23 +96,147 @@ from worker.train.bc_core import (
 from worker.train.device import resolve_bc_device
 
 
-def _resolve_bc_device(device: str) -> tuple[str, torch.device, bool]:
-    """设备解析（BC 多卡 2026-09-13）：
+def _bc_torch_device(name: str, use_dp: bool) -> torch.device:
+    """设备名 → `torch.device`：`cuda-dp` 不是合法 device type ⇒ 真设备是 `cuda`；
+    其余原样（2026-09-13 多卡语义，`tests/worker/test_bc_dp.py` 钉住）。"""
+    return torch.device("cuda" if use_dp else name)
 
-      * cuda-dp：可见 2+ 卡 → DataParallel（梯度归约顺序变化，与单卡 run 数值
-        不可逐位比——与 remote/worker 的 PPO DP 同一口径）；单卡/无卡**响亮退化**
-        （cuda / cpu），绝不静默；
-      * 其余（cuda / cpu / cuda:N）原样。
 
-    → (规范化 device 串, torch.device, use_dp)。
+def _xla_spmd_mesh() -> tuple[Any, int]:
+    """多核 XLA（TPU v5e-8 等）→ `(1-D data mesh, 核数)`；单核 / 不可用 ⇒ `(None, 核数)`。
 
-    判据住在 `train/device.py`（顶层零 torch，探针可注入 ⇒ `tests/worker/test_bc_device.py`
-    不必 import torch；2026-09-26 item 6f）。本函数只做两件事：**把真探针接上去** +
-    把名字映成真的 `torch.device`——`cuda-dp` 不是合法 device type，多卡时必须是
-    `torch.device("cuda")`（由 `tests/worker/test_bc_dp.py` 钉住），只有名字保留给日志/台账。
+    **必须在 `xla_device()` 之前调用**（`use_spmd` 对已初始化的设备无效）。任何一步失败都
+    降级为单设备（训练照跑，只是没吃满核）；返回值里的核数始终是真实读数（日志/批大小校验用）。
+
+    SPMD 的数据并行语义：参数**复制**到每个核、batch 按 dim0 切分；复制参数上的梯度由 XLA
+    在消费点自动 all-reduce（所以下面训练步在 SPMD 下**不能**再调 `xm.optimizer_step` ——
+    那会二次归约、把梯度放大 world_size 倍）。
     """
-    name, use_dp = resolve_bc_device(device)
-    return name, torch.device("cuda" if use_dp else name), use_dp
+    try:
+        import torch_xla.runtime as xr
+    except Exception:
+        return None, 1
+    try:
+        n = int(xr.global_device_count())
+    except Exception:
+        return None, 1
+    if n <= 1:
+        return None, n
+    try:
+        import torch_xla.distributed.spmd as xs
+    except Exception as e:
+        say(f"[train] WARN XLA 多核（{n}）但 SPMD 不可用（{type(e).__name__}: {e}）⇒ 单核")
+        return None, n
+    try:
+        xr.use_spmd()
+        fn = getattr(xs, "get_1d_mesh", None)
+        mesh = fn("data") if callable(fn) else xs.Mesh(np.arange(n), (n,), ("data",))
+    except Exception as e:
+        say(f"[train] WARN SPMD 初始化失败（{type(e).__name__}: {e}）⇒ 单核")
+        return None, n
+    say(f"[train] XLA SPMD 数据并行：{n} 核（global batch 按 dim0 切分，梯度由 XLA 归约）")
+    return mesh, n
+
+
+def _mark_sharding(t: Any, mesh: Any, spec: tuple) -> None:
+    """`xs.mark_sharding` 的薄封装（测试注入点：SPMD 用例不 import 真 torch_xla）。"""
+    import torch_xla.distributed.spmd as xs
+
+    xs.mark_sharding(t, mesh, spec)
+
+
+def _shard_model(model: torch.nn.Module, mesh: Any) -> int:
+    """SPMD 数据并行：参数在各核**复制**。返回标注过的参数数。"""
+    n = 0
+    for p in model.parameters():
+        if p.dim() > 0:
+            _mark_sharding(p, mesh, (None,) * p.dim())
+            n += 1
+    return n
+
+
+def _shard_batch(t: torch.Tensor, mesh: Any) -> torch.Tensor:
+    """batch 维（dim0）切到 `data` 轴，其余维复制（标签/掩码/return 同一切法）。"""
+    if not torch.is_tensor(t) or t.dim() == 0:
+        return t
+    _mark_sharding(t, mesh, (("data",),) + (None,) * (t.dim() - 1))
+    return t
+
+
+def _assert_spmd_batch(mb: int, n: int) -> None:
+    """SPMD 的 dim0 切分要求 batch 能被核数整除（`mark_sharding` 不做非整切分）。"""
+    if n > 1 and int(mb) % int(n) != 0:
+        raise ValueError(
+            f"--batch {mb} 不是 TPU 核数 {n} 的整数倍：SPMD 按 dim0 切分，"
+            f"请把课程 mb 改成 {n} 的倍数（如 {(int(mb) // n + 1) * n}）"
+        )
+
+
+def _xla_entry(args: Any) -> tuple[torch.device, Any]:
+    """TPU/XLA 入口：先开 SPMD（必须先于设备初始化）→ 编译缓存 → 设备/指纹/拒跑。
+
+    → `(device, mesh)`；`mesh=None` = 单设备（单核 TPU 或 SPMD 不可用）。
+    判据与 PPO（`remote/train_core.py`）同源：XLA 的 CPU 插件也返回 `xla:0`，
+    只看设备串会把「TPU 机静默跑 CPU」当正常（慢两个数量级，日志一切正常）。
+    """
+    mesh, n = _xla_spmd_mesh()
+    cache_dir = os.path.join(
+        os.path.dirname(os.path.abspath(getattr(args, "out", "bc-weights.json"))),
+        "xla-compile-cache",
+    )
+    say(f"[train] XLA 编译缓存: {xla_enable_compile_cache(cache_dir)}")
+    dev = xla_device()
+    fp = xla_fingerprint(dev)
+    spd = xla_device_speed_probe(dev)
+    say(
+        f"[train] XLA 设备 {dev}｜device_type={fp.get('device_type')}｜"
+        f"XLA {fp.get('global_device_count')}/{fp.get('addressable_device_count')}｜"
+        f"world_size={xla_world_size()}｜"
+        f"2048² matmul {('%.1f ms' % (spd * 1000)) if spd is not None else 'nan'}"
+    )
+    why = tpu_backend_missing_reason(fp)
+    if why:
+        raise RuntimeError(
+            f"要的是 TPU，但 XLA 运行时不是 TPU 后端（{why}）——拒跑。"
+            "在 CPU 上跑完整段会看起来完全正常、只慢两个数量级："
+            "① 确认 `PJRT_DEVICE=TPU` 在**任何** torch_xla import/初始化之前就已设置；"
+            "② 重开 runtime（设备可能被别的进程占着）。"
+        )
+    if mesh is not None:
+        _assert_spmd_batch(int(getattr(args, "batch", 0) or 0), n)
+    return dev, mesh
+
+
+def _cpu_state_dict(
+    model: torch.nn.Module, dev: torch.device
+) -> dict[str, torch.Tensor]:
+    """训练终态 → CPU 副本（XLA 上**一次**批量 D2H；CPU/CUDA 与原 clone 逐字节相同）。"""
+    sd = {k: v.detach() for k, v in model.state_dict().items()}
+    if not is_xla(dev):
+        return {k: v.clone() for k, v in sd.items()}
+    got = to_cpu_batch(list(sd.values()))
+    return dict(zip(sd.keys(), got, strict=True))
+
+
+def _host_view(model: torch.nn.Module, dev: torch.device) -> torch.nn.Module:
+    """落盘/回传用的 CPU 视图：XLA 上 `state_dict()` 必须是**一次**批量 D2H。
+
+    非 XLA 原样返回（CPU/CUDA 的既有落盘路径逐字节不变）。
+    """
+    return HostModule(model) if is_xla(dev) else model
+
+
+def _value_mse(
+    vpred: torch.Tensor, ret: torch.Tensor, valid: torch.Tensor
+) -> torch.Tensor:
+    """value 头的 MSE。XLA 上走**静态形状**：布尔索引会让图签名随有效样本数变化 ⇒ 每批重编译。
+
+    数值口径不变（只对 valid 求均值）；CPU/CUDA 仍走原来的切片路径（逐位不变）。
+    """
+    if not is_xla(ret.device):
+        return F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
+    diff = (vpred.squeeze(-1) - torch.nan_to_num(ret)) ** 2
+    return (diff * valid).sum() / valid.sum().clamp(min=1)
 
 
 def _bc_raw(model: torch.nn.Module) -> torch.nn.Module:
@@ -128,8 +267,14 @@ def _masked_ce(
     if not keep.any():
         return logits.sum() * 0.0  # 无可训练样本（全为单合法类）
     z = logits.masked_fill(~m, -1e9)
-    per = F.cross_entropy(z[keep], target[keep], reduction="none", weight=class_weight)
-    return per.mean()
+    if not is_xla(logits.device):
+        per = F.cross_entropy(z[keep], target[keep], reduction="none", weight=class_weight)
+        return per.mean()
+    # XLA：布尔索引的输出长度随批内有效样本数变化 ⇒ **每批一张新图**（重编译）。
+    # 静态形状版：全批算 CE，非 keep 行置 0 后按 keep 数求均值（数值口径相同）。
+    per = F.cross_entropy(z, target, reduction="none", weight=class_weight)
+    per = torch.where(keep, per, torch.zeros_like(per))
+    return per.sum() / keep.sum().clamp(min=1)
 
 
 def _masked_acc(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> float:
@@ -141,7 +286,11 @@ def _masked_acc(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) 
         return 0.0
     z = logits.masked_fill(~m, -1e9)
     pred = z.argmax(dim=-1)
-    return (pred[keep] == target[keep]).float().mean().item()
+    if not is_xla(logits.device):
+        return (pred[keep] == target[keep]).float().mean().item()
+    # XLA 静态形状（理由同 `_masked_ce`）。
+    hit = ((pred == target) & keep).float().sum()
+    return float((hit / keep.sum().clamp(min=1)).item())
 
 
 _WEIGHTS_MD_HEADER = """\
@@ -321,6 +470,14 @@ def train(args) -> dict:
     # v6 三头（2026-11-04 落地）：语料由 `export-rl-rollout.ts` 产出，键是
     # `a_move/a_fire/a_hold + mask.npy(9)`，与 legacy 的 `actions/masks(7)` 并存。
     action_v6 = bool(getattr(args, "action_v6", False))
+    # 设备/SPMD 必须先于 make_loaders：SPMD（TPU 多核）按 dim0 切分要求整批 ⇒ loader 要
+    # drop_last；而 `use_spmd` 又必须在 `xla_device()` 之前（见 `_xla_spmd_mesh`）。
+    dev_name, use_dp = resolve_bc_device(getattr(args, "device", "cpu"))
+    mesh: Any = None
+    if dev_name in ("tpu", "xla"):
+        dev, mesh = _xla_entry(args)
+    else:
+        dev = _bc_torch_device(dev_name, use_dp)
     train_dl, val_dl, sizes = make_loaders(
         args.data_dir,
         args.batch,
@@ -329,6 +486,7 @@ def train(args) -> dict:
         args.seed,
         args.num_workers,
         action_v6=action_v6,
+        drop_last=mesh is not None,
     )
     say(f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}")
 
@@ -340,7 +498,6 @@ def train(args) -> dict:
     # v2（M3）：语料带 returns.npy 且 --arch student 时构建 PPOStudent，按
     # `--value-coef` 把 MC return 作为 value 头回归目标（M2 ⑥ 的 value MC 预置）。
     # 纯 BC（无 returns）沿用 StudentNet / NNPolicy 双头。
-    dev_str, dev, use_dp = _resolve_bc_device(getattr(args, "device", "cpu"))
     # fire 头正例权重（2026-09-14）：默认 auto = 训练集 neg/pos。放 dev 之后构造，
     # 保证权重张量与 logits 同设备。
     counts = _class_counts(train_dl, action_v6)
@@ -430,8 +587,14 @@ def train(args) -> dict:
     if getattr(args, "resume", None):
         say(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)
-    model = model.to(dev)
     raw_model = model
+    # XLA 上 `p.numel()` 是一次**设备查询**（42 个参数 ≈33s 量级，见 HostModule 注释）
+    # ⇒ 参数计数必须在 `.to(dev)` **之前**做（此时模型还在 CPU）。
+    n_params = param_count(raw_model)
+    model = model.to(dev)
+    if mesh is not None:
+        # SPMD 数据并行：参数复制到各核（batch 在下面按 dim0 切分，梯度由 XLA 归约）。
+        _shard_model(raw_model, mesh)
     # P2-B（2026-11-08）：`--train-heads` 控制可训参数范围。trunk = stem/blocks/fc。
     # 背景：pickup 窗口微调（1 万步 / 3 epoch）把 trunk 拉偏，kills −2.8、base +25pp；
     # 冻结 trunk 才能只改「捡」不动「打」。
@@ -453,7 +616,6 @@ def train(args) -> dict:
         # `[train] DataParallel 生效（…）` 行同族同命（2026-10-06，同一条用户指令）：每轮重复的
         # 静态事实（开机横幅已印 `device=`），DP 包装本身与 `raw_model` 的落盘纪律逐字不变。
         model = cast(Any, torch.nn.DataParallel(raw_model))
-    n_params = param_count(raw_model)
     say(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"
     )
@@ -495,11 +657,14 @@ def train(args) -> dict:
         model.train()
         run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
+            dev_batch = [b.to(dev) for b in batch]
+            if mesh is not None:
+                dev_batch = [_shard_batch(b, mesh) for b in dev_batch]
             if action_v6:
-                obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = [b.to(dev) for b in batch]
+                obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
             else:
                 hd = mh = None
-                obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+                obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
             opt.zero_grad()
             out = model(obs, sc, ex)
             if action_v6:
@@ -516,7 +681,7 @@ def train(args) -> dict:
                     loss = policy_loss if policy_coef == 1.0 else policy_coef * policy_loss
                 valid = ~torch.isnan(ret)
                 if args.value_coef > 0 and valid.any():
-                    vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
+                    vloss = _value_mse(vpred, ret, valid)
                     loss = loss + args.value_coef * vloss
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
@@ -535,7 +700,7 @@ def train(args) -> dict:
                     loss = policy_loss if policy_coef == 1.0 else policy_coef * policy_loss
                 valid = ~torch.isnan(ret)
                 if valid.any():
-                    vloss = F.mse_loss(vpred.squeeze(-1)[valid], ret[valid])
+                    vloss = _value_mse(vpred, ret, valid)
                     loss = loss + args.value_coef * vloss
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
@@ -553,7 +718,14 @@ def train(args) -> dict:
             # P2-6f：梯度裁剪（与 ppo/engine.py、goal_bc.py 一致，max_norm=1.0）——
             # 此前 bc 无裁剪，坏批次（标注噪声）可一步炸权重。
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            opt.step()
+            # 设备感知步进：XLA 单设备走 `xm.optimizer_step`；SPMD 下复制参数上的梯度已由
+            # XLA 自动 all-reduce，**必须**裸 `opt.step()`（再调 optimizer_step 会二次归约，
+            # 把梯度放大 world_size 倍）。图执行边界单独落（PPO engine 同款）。
+            if mesh is None:
+                optimizer_step(opt, dev)
+            else:
+                opt.step()
+            xla_mark_step(dev)
             run["loss"] += loss.item() * obs.shape[0]
             run["n"] += obs.shape[0]
         scheduler.step()
@@ -574,11 +746,14 @@ def train(args) -> dict:
         }
         with torch.no_grad():
             for batch in val_dl:
+                dev_batch = [b.to(dev) for b in batch]
+                if mesh is not None:
+                    dev_batch = [_shard_batch(b, mesh) for b in dev_batch]
                 if action_v6:
-                    obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = [b.to(dev) for b in batch]
+                    obs, sc, ex, mv, fr, hd, mm, mf, mh, ret = dev_batch
                 else:
                     hd = mh = None
-                    obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+                    obs, sc, ex, mv, fr, mm, mf, ret = dev_batch
                 out_v = model(obs, sc, ex)
                 if action_v6:
                     lm, lf, lh, vpred = out_v
@@ -606,9 +781,8 @@ def train(args) -> dict:
                 if use_value:
                     valid = ~torch.isnan(ret)
                     if valid.any():
-                        v["vloss"] += float(
-                            F.mse_loss(vpred.squeeze(-1)[valid], ret[valid]).item()
-                        ) * int(valid.sum())
+                        vloss_t = _value_mse(vpred, ret, valid)
+                        v["vloss"] += float(vloss_t.item()) * int(valid.sum())
                         v["vn"] += int(valid.sum())
                 v["loss"] += loss.item() * obs.shape[0]
                 v["n"] += obs.shape[0]
@@ -649,9 +823,7 @@ def train(args) -> dict:
                 best_smoothed = smoothed
                 best_val = val_loss
                 best_epoch = gepoch
-                best_state = {
-                    k: v.detach().clone() for k, v in raw_model.state_dict().items()
-                }
+                best_state = _cpu_state_dict(raw_model, dev)
         stop_at = early_stop_epoch(history["val_loss"], patience)
         if stop_at is not None and epoch >= stop_at:
             say(
@@ -664,7 +836,7 @@ def train(args) -> dict:
         if ckpt_every > 0 and epoch % ckpt_every == 0:
             ckpt_path = f"{args.out}.ckpt.{gepoch}"
             save_weights_json(
-                raw_model,
+                _host_view(raw_model, dev),
                 ckpt_path,
                 extra_meta={
                     "epoch": gepoch,
@@ -675,12 +847,13 @@ def train(args) -> dict:
             )
             say(f"[train] checkpoint epoch {gepoch}/{epoch_total} -> {ckpt_path}")
         # Per-epoch hook（BC 云端回传 2026-09-13）：worker/run_bc 以回调持久化/回传
-        # 每 epoch 权重与指标——中断接续训练的落点。传 raw_model（裸键 state_dict）。
+        # 每 epoch 权重与指标——中断接续训练的落点。传 raw_model 的 CPU 视图
+        # （XLA 上一次批量 D2H；CPU/CUDA 原样）。
         on_epoch = getattr(args, "on_epoch", None)
         if on_epoch is not None:
             on_epoch(
                 gepoch,
-                raw_model,
+                _host_view(raw_model, dev),
                 {
                     "train_loss": round(train_loss, 4),
                     "val_loss": round(val_loss, 4),
@@ -705,7 +878,7 @@ def train(args) -> dict:
         best_epoch = epochs_done
         best_val = history["val_loss"][-1]
         best_smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
-        best_state = {k: v.detach().clone() for k, v in raw_model.state_dict().items()}
+        best_state = _cpu_state_dict(raw_model, dev)
 
     # Restore best on CPU (weights export/registry must be bitwise-stable
     # regardless of training device).
@@ -877,7 +1050,8 @@ def main():
         "--device",
         type=str,
         default="cpu",
-        help="torch device for training: cpu | cuda | cuda:N (weights export is always CPU, bits-stable)",
+        help="torch device for training: cpu | cuda | cuda:N | cuda-dp | tpu | xla "
+        "(weights export is always CPU, bits-stable)",
     )
     ap.add_argument(
         "--value-coef",

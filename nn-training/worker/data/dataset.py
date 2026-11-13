@@ -75,6 +75,18 @@ def _field(data: dict[str, ArrayField], key: str, dtype: DTypeLike) -> ArrayFiel
     return np.asarray(arr, dtype=dtype)
 
 
+def _writable(x: np.ndarray) -> np.ndarray:
+    """交给 torch collate 的 ndarray 必须**可写**（2026-11-13，TPU 云机现场）。
+
+    lazy 装载的 `obs` / `scalars` / `extra` 是 `np.load(mmap_mode="r")` 的**只读**视图；
+    torch 默认 collate 的 `torch.as_tensor` 会对每个只读数组发
+    「The given NumPy array is not writable … You may want to copy the array」UserWarning。
+    只读时复制**这一帧**（obs 约 11 KiB/样本；eager 语料本来就可写，零成本），
+    让 collate 走无告警路径。
+    """
+    return x if x.flags.writeable else np.array(x)
+
+
 class NNDataset(Dataset):
     """Wraps a concatenated sample dict; applies mirrorX on training draws.
 
@@ -126,13 +138,13 @@ class NNDataset(Dataset):
         return int(self.obs.shape[0])
 
     def __getitem__(self, idx: int):
-        obs = self.obs[idx]
-        sc = self.scalars[idx]
-        ex = self.extra[idx]
+        obs = _writable(self.obs[idx])
+        sc = _writable(self.scalars[idx])
+        ex = _writable(self.extra[idx])
         mv = int(self.actions[idx, 0])
         fr = int(self.actions[idx, 1])
-        mask = self.masks[idx]
-        ret = self.returns[idx]
+        mask = _writable(self.masks[idx])
+        ret = _writable(self.returns[idx])
         if self.augment and self.rng.random() < self.mirror_p:
             # extra 与 obs/scalars 同一抽签、同一次镜像（自洽不可分家）。
             obs, sc, mv, ex = mirror_x(obs, sc, mv, ex, action_v6=self.action_v6)
@@ -173,6 +185,7 @@ def make_loaders(
     num_workers: int = 0,
     action_v6: bool = False,
     lazy: bool = True,
+    drop_last: bool = False,
 ):
     """Build train/val DataLoaders from a directory of npy shards.
 
@@ -242,6 +255,8 @@ def make_loaders(
             num_workers=num_workers,
             generator=torch.Generator().manual_seed(seed + 1),  # P2-3：独立于全局 RNG
             worker_init_fn=_worker_init,
+            # SPMD（TPU 多核）按 dim0 切分要求整批 ⇒ 尾批丢弃（CPU/CUDA 缺省 False，逐字节不变）
+            drop_last=drop_last,
         ),
         DataLoader(
             val_ds,
@@ -249,6 +264,7 @@ def make_loaders(
             shuffle=False,
             num_workers=num_workers,
             worker_init_fn=_worker_init,
+            drop_last=drop_last,
         ),
         sizes,
     )
