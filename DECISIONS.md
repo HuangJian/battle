@@ -5760,3 +5760,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `TrainSpec` 字段集合」「Paddle 双生同签名」；旧/新 parser 在 3 种 mode × rl_args 覆盖值下逐 action
   与 `parse_args` 全等；`worker.py` LOC 贴线，构造收成 `spec = ...` + 单行调用后才回到 <1000。
   全量 5995 passed / 3 skipped，ruff / mypy 绿。
+
+- **后续（同日）**：`_flag_rows` 从 `build_argparser` 内提升到模块级（`(mode, rl_args)`），
+  `build_argparser` 只剩 7 行装配；`game_watch` 保持函数内 import，调用面不变。
+
+## §2026-11-13-nn-python-audit-round4-queue-workers（_run_queue 拆成 QueueState + 四段消费者）
+
+- **决定**：`_run_queue`（871 行）拆成 `_queue_plan`（79 行，续跑/复用/早退）、`_queue_setup`
+  （144 行，保留段/长驻池/共享容器）与 `trainer/queue_worker.py`；消费者按相位拆成
+  `_claim`（134）/ `_execute`（133）/ `_settle_success`（119）/ `_settle_failure`（144）/
+  `queue_worker`（26）/ `run_queue`（168），共享状态收进 `QueueState`，499 行 `worker` 闭包消失。
+- **被否决**：整段搬进新文件（871 行只是换家，形状门禁仍红）；把局部函数留在闭包里（AST 按外层
+  函数计长，`_run_queue` 不会变短）；上调 `LONG_FUNCS_BASELINE`（把新长函数登记成存量）。
+- **后果**：`dispatch.py` 长函数 2 → 0、LOC 958 → 473；`queue_worker.py` 所有函数 ≤168 行。
+  `log` / `run_local_rollout` / `record_agent_meta` 经 `QueueState` 注入，测试对 `trainer.dispatch`
+  的 monkeypatch 接缝不变。`test_dist_common_poll` 的 rollout 接线扫描面跟随到新家（按腿取并集 +
+  409/标记断言）。`_settle` 与 `remote/result_upload.py` / `remote/upload_proc.py` 同名 ≥3 触发复用
+  账本，改名 `_settle_attempt`。验证：ruff、mypy 913、全量 5995 收下（5992 passed / 3 skipped）。

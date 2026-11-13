@@ -214,6 +214,7 @@ TRAINER_ORCHESTRATION = frozenset(
         #: / `remote.hub_client`（快照 + 清停机态）⇒ **直接**编排成员（同前先红、再登记）。
         "once_shot",
         "queue_local",
+        "queue_worker",
         "rollout_phase",
         "run_bc",
         "run_rl",

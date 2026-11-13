@@ -330,32 +330,51 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     home = importlib.import_module(source_scan.logic_dotted(str(root), forwarders[0]))
     assert be.is_transient_error is home.is_transient_error, forwarders
 
-    a_layer = source_scan.read_text(str(root / "trainer" / "dispatch.py"))
+    # rollout 腿的单局执行面在 2026-11-13 拆到 `trainer/queue_worker.py`：
+    # 接线判据连新家一起扫，否则扫描面只是看起来还在。
+    a_layers = (
+        source_scan.read_text(str(root / "trainer" / "dispatch.py")),
+        source_scan.read_text(str(root / "trainer" / "queue_worker.py")),
+    )
     c_layer = source_scan.read_text(str(root / "trainer" / "eval_dispatch.py"))
     # 任务级统一派发（2026-11-04）后 eval 腿的单局执行面搬进 `worker/eval_exec.py`：
     # 瞬断/404/409 的判据与重取随它走——接线判据连它一起扫，否则扫描面只是看起来还在。
     exec_layer = source_scan.read_text(str(root / "worker" / "eval_exec.py"))
-    # 两条腿各自执行单局传输：rollout 在 A 层，eval 在 exec 层。
-    for src in (a_layer, exec_layer):
+    # 两条腿各自执行单局传输：rollout 在 A 层（dispatch + queue_worker），eval 在 exec 层。
+    rollout_called: set[str] = set()
+    for src in a_layers:
         tree = ast.parse(src)
-        called = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
-        # 接线判据 = 真的调到了那几个单源函数（AST 调用名，不是源码文本）
-        for name in (
-            "common.distribution.is_transient_error",
-            "common.distribution.refresh_weights",
-            # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
-            "common.distribution.is_task_lost_error",
-            "common.distribution.forget_weights_node",
-        ):
-            assert name in called, f"{name} 没接线"
-        # 409 是可刷新条件，必须显式分支（AST 常数，不是文本里有没有这三个字符）
-        assert any(
+        rollout_called |= {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    # 接线判据 = rollout 腿整体真的调到了那几个单源函数（AST 调用名，不是源码文本）
+    for name in (
+        "common.distribution.is_transient_error",
+        "common.distribution.refresh_weights",
+        # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
+        "common.distribution.is_task_lost_error",
+        "common.distribution.forget_weights_node",
+    ):
+        assert name in rollout_called, f"{name} 没接线"
+    def has_409(tree: ast.AST) -> bool:
+        return any(
             isinstance(n, ast.Constant) and n.value == 409 for n in ast.walk(tree)
-        ), "409 分支不见了（那是唯一的可刷新条件）"
-        # 带引号的标记字面量只许待在 common.distribution（注释里提到它无所谓）
-        assert not any(
-            isinstance(n, ast.Constant) and n.value == "task lost on node" for n in ast.walk(tree)
-        ), "标记字面量被复制进 A/C 层"
+        )
+
+    def has_task_lost_literal(tree: ast.AST) -> bool:
+        return any(
+            isinstance(n, ast.Constant) and n.value == "task lost on node"
+            for n in ast.walk(tree)
+        )
+
+    rollout_trees = [ast.parse(src) for src in a_layers]
+    # 409 是可刷新条件，rollout 腿必须有这一分支；标记字面量只许待在
+    # common.distribution（AST 常数，不是文本里有没有这三个字符）。
+    assert any(has_409(t) for t in rollout_trees) and not any(
+        has_task_lost_literal(t) for t in rollout_trees
+    ), "rollout 腿缺 409 分支，或标记字面量被复制进 A 层"
+    exec_tree = ast.parse(exec_layer)
+    assert has_409(exec_tree) and not has_task_lost_literal(exec_tree), (
+        "eval 执行层缺 409 分支，或标记字面量被复制进执行层"
+    )
     # eval 派发器只登记/下发权重：传输判据（含 409 分支）不得被它重新内联一份。
     c_consts = {n.value for n in ast.walk(ast.parse(c_layer)) if isinstance(n, ast.Constant)}
     assert c_consts.isdisjoint({409, "task lost on node"}), (
