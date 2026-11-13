@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import remote.course_cache as course_cache
+from common.logutil import course_tag, tagged
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     HEARTBEAT_SEC,
@@ -423,6 +424,13 @@ def run_one_round(
 
     jid = job["job_id"]
     manifest = job.get("manifest") or {}
+    # ★2026-11-13（用户口径）：云端 GPU worker 一机多课，而 jid 是幂等键的哈希 ⇒ 只看 jid
+    # 分不出正在训练的是哪门课。**一个 job 的每一行日志**（claim / 准备完成 / PPO 心跳 /
+    # 失败回报）都带上课程名；`course_name` 缺席 = 空串，旧行逐字节不变（见 `course_tag`）。
+    # ⚠ 预取腿必须用**未包装**的那份：它下的是**下一份**活（可能是另一门课），带上本 job 的
+    #   课程名就是谎报归属（而这些行本来就自带 `prefetch <jid8>` 标签）。
+    pf_log = log
+    log = tagged(log, course_tag(manifest))
     # 本轮的 it（回传失败备份的文件名要它；§3.6）：hub 派的 job 必带，缺了就算 0。
     job_it = int(manifest.get("it") or 0)
     # ★2026-11-12（用户口径）：BC 是整门课独占的长跑——训练期间**不起预取**。
@@ -492,7 +500,7 @@ def run_one_round(
                     depth=prefetch_depth,
                     unpack_n=prefetch_unpack,
                     skip={jid},
-                    log=log,
+                    log=pf_log,
                 )
             )
             if not remote_ok:
@@ -505,7 +513,7 @@ def run_one_round(
                         "depth": prefetch_depth,
                         "unpack_n": prefetch_unpack,
                         "skip": {jid},
-                        "log": log,
+                        "log": pf_log,
                     },
                     daemon=True,
                     name=f"pf-{jid[:8]}",

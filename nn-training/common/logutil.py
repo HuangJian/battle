@@ -25,7 +25,7 @@ import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
-__all__ = ["Clock", "kb", "log_line", "secs", "stamp", "tag_logger"]
+__all__ = ["Clock", "course_tag", "kb", "log_line", "secs", "stamp", "tag_logger", "tagged"]
 
 
 class Clock(Protocol):
@@ -73,6 +73,49 @@ def log_line(tag: str, msg: str, *, clock: Clock = time, stream: Any = None) -> 
     云机会话里「进度行每分钟一句」会攒成一大块——那正是这些日志存在的意义。
     """
     print(f"{stamp(clock)} [{tag}] {msg}", flush=True, file=stream or sys.stdout)
+
+
+def course_tag(source: Any) -> str:
+    """job 行的课程前缀：`[course=<课程名>] `（无课程名 ⇒ 空串）。
+
+    `source` 两种形状（同一个前缀格式的**两个来源**，不另写第二份字面量）：
+
+      · **manifest**（`dict`）⇒ 读 `course_name`——发布端写进 manifest 的**可读短名**
+        （`trainer/loop_remote_job.py` / `trainer/bc_loop.py`）。云端 worker 手上只有 manifest；
+      · **课名字符串** ⇒ 直接用。hub 侧（`remote/push_dispatch.py`）派发时手上的是 hub 的
+        课程键（与 `/admin/queue` 同字），拿它当课名。
+
+    为什么（2026-11-13，用户口径「hub 发布的 job 名字里带上课程名」）：一个共享 hub 会把
+    多门课的活派给**同一台**云端 GPU worker，而日志里每行只有 16 位 `job_id` —— 它是幂等键
+    的哈希（`common/job_identity.py`），**故意**不含课程名（身份不能跟着展示名漂）⇒ 看日志
+    的人分不出正在训练的是哪门课。缺席（旧发布端 / 无课程）= 空串，那些行逐字节旧形状。
+
+    与 `tag_logger` 的分工：那条给**进程级**固定 tag（`[worker]`），这条给**每个 job** 的
+    「这门课是谁」——同一个进程里逐 job 变，所以做成前缀而不是日志出口工厂。
+    """
+    name = ""
+    if isinstance(source, dict):
+        name = str(source.get("course_name") or "")
+    elif isinstance(source, str):
+        name = source
+    name = name.strip()
+    return f"[course={name}] " if name else ""
+
+
+def tagged(log: Callable[[str], None], tag: str) -> Callable[[str], None]:
+    """给下游每一行加同一段前缀（`tag` 为空 = 原样转发，连函数身份都不换）。
+
+    用法：`log = tagged(log, course_tag(manifest))`——之后 `run_job` 及其下游
+    （download / train_core / upload）的**每一行**都带上课程名，调用点不用逐个改字面量。
+    hub 侧同规：`jlog = tagged(self._log, course_tag(course))`（`push_dispatch._run_one`）。
+    """
+    if not tag:
+        return log
+
+    def _emit(msg: str) -> None:
+        log(tag + str(msg))
+
+    return _emit
 
 
 def tag_logger(tag: str, clock: Callable[[], Clock]) -> Callable[[str], None]:

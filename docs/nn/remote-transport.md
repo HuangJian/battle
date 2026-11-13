@@ -6,6 +6,33 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §151 hub 发布的 job 行带课程名（2026-11-13）
+
+**现场**（用户口径）：共享 hub 把多门课的活派给**同一台**云端 GPU worker，而云机日志每行只有一个
+16 位 `job_id` —— 它是幂等键的哈希（`common/job_identity.py`；**故意**不含课名：身份不能跟着展示名
+漂，改它会换 job 身份）⇒ 看云端日志分不出正在训练的是哪门课。
+
+**改法**：job 的日志出口包一层前缀 `[course=<course_name>] `（`common/logutil.py::course_tag` +
+`tagged`），两条腿各一处：pull（`remote/job_round.py::run_one_round`，从 claim 那一行起）与 push
+（`remote/worker_server.py::_execute_job`；另有受理/入队/幂等三行在主线程）。`course_name` 是发布端写进
+manifest 的可读短名（`trainer/loop_remote_job.py` / `trainer/bc_loop.py`）；**缺席 = 空串 = 逐字节旧行**
+（旧发布端 / 无课程），`tagged(log, "")` 连函数身份都不换。
+
+**hub 侧同规**（同日第二批）：`remote/push_dispatch.py` 的派发/回传日志也带同一前缀 —— `_run_one` 一
+开头建 `jlog = tagged(self._log, course_tag(course))`，再沿 `_await_result` / `_requeue` /
+`_cancel_others` / `_warn_slow_upload` / `_warn_slow_result` / `accept_result` 传下去；课名取 **hub 的
+课程键**（派发器就是按它轮转、与 `/admin/queue` 同字），不是 manifest 的 `course_name`。`_await_result`
+自己也有 `course`，所以缺省自建（直接调它的腿不会因忘传 `jlog` 退回旧形状）。`_note_starved` 原本写在
+括号里的课名改成同一前缀（一份日志两种写法会让「按课名捞」漏行）。
+
+**边界**：预取腿（`pf_store.start_fill` / `_prefetch_fill`）拿**未包装**的 log —— 它下的是**下一份**活
+（可能是另一门课），套上本 job 的课名就是谎报归属（那些行本来就自带 `prefetch <jid8>`）。
+判据 = `tests/remote/test_job_log_course.py`（worker 两条腿**全行**带前缀 / 无 `course_name` 时零变化 /
+hub 派发与 410 回传行带前缀）。
+
+**生效面**：云机跑的是代码快照 ⇒ 要发布新快照（控制台「重打快照」）并重启 worker / notebook 重跑
+push cell 之后，日志才有前缀。
+
 ## §150 云机 BC 日志逐行时间戳（2026-11-12）
 
 **现场**（用户贴的 worker 日志）：`[11:30:51] [worker] job …: BC start …` 之后是整片没有时间的

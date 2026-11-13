@@ -91,6 +91,9 @@ ALIVE_TEXT = "polling hub"
 #: `<job_dir>/backup/` —— 「作业工作区怎么摆」本就是 job_fs 的职责（`_persist_result` 同族），
 #: 放在这一轮里会让 job 目录布局知识漏进 L4。
 ALLOWED_PROJECT_IMPORTS = {
+    # 日志行格式的唯一来源（2026-11-13）：job 行带课程名（`course_tag`/`tagged`）——
+    # 共享 hub 一机多课时，云端日志只看 16 位 jid 分不出在训哪门课。
+    "common.logutil",
     "common.protocol",
     # 异常现场的最后一段（`exc_tail`）与云机错误上报腿（2026-10-16，
     # plan/component-error-registry §4.3-S3b）：三个 except 分支各报一条**纯观测**错误

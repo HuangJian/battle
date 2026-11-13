@@ -44,7 +44,7 @@ from threading import Lock
 from typing import Any
 
 from common import net_http
-from common.logutil import tag_logger
+from common.logutil import course_tag, tag_logger, tagged
 from common.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
@@ -899,17 +899,22 @@ class PushDispatcher:
                 (t - now for w, t in self._avoid.get(jid, {}).items() if w in avoid),
                 default=0.0,
             )
-        self._log(
-            f"{jid}（{course}）本拍未推：避让 {('、'.join(sorted(avoid)))} 冷却中"
+        # 课名走统一前缀（★2026-11-13，与 worker 侧同形）——原来写在括号里，同一份 hub 日志
+        # 里两套写法会让「按课名捞」漏行。
+        tagged(self._log, course_tag(course))(
+            f"{jid} 本拍未推：避让 {('、'.join(sorted(avoid)))} 冷却中"
             f"（剩 {max(0.0, left):.0f}s），池里没有其它可派机器——到期自动重试"
         )
 
-    def _warn_slow_upload(self, jid: str, wid: str, send: dict) -> None:
+    def _warn_slow_upload(self, jid: str, wid: str, send: dict, *, log: Any = None) -> None:
         """上传单段超阈值 ⇒ 一行 ★（2026-10-30：45–215s 的上传只在记账行括号里，没人比）。
 
         判据只看**运输**：节点自报的 `grad_sec` 一直是 35s，慢的是把 2–5MB 送过去这件事。
         这一行把「链路退化」和「算力/课程」当场分开 —— 事故里两者被混为一谈，绕了一圈。
+
+        `log` = 本 job 的带课名日志出口（`_run_one` 的 `jlog`）；缺省 = 本派发器的裸日志。
         """
+        log = self._log if log is None else log
         try:
             up = float(send.get("upload_sec") or 0.0)
             body = float(send.get("body_bytes") or 0) / 1e6
@@ -919,17 +924,22 @@ class PushDispatcher:
             return
         self.slow_upload += 1  # int += 在 GIL 下足够；两侧读数只用于判「链路还是算力」
         kbs = (body * 1e6 / up / 1024.0) if up > 0 else 0.0
-        self._log(
+        log(
             f"★ {jid} -> {wid} 上传 {up:.0f}s / {body:.2f}MB（{kbs:.0f}KB/s）"
             f"超 {PUSH_SLOW_UPLOAD_SEC:.0f}s —— 是链路退化，不是算力（节点 grad 另算）"
         )
 
-    def _warn_slow_result(self, jid: str, wid: str, t_pushed: float, t_done: float) -> None:
+    def _warn_slow_result(
+        self, jid: str, wid: str, t_pushed: float, t_done: float, *, log: Any = None
+    ) -> None:
         """结果取回腿超阈值 ⇒ 一行 ★（真机：`result-ready` 之后又取了 234s 才拿到 220KB）。
 
         参照点优先级：`result-ready` 时刻（= 纯运输）> 推送完成时刻（含算力，会偏宽松）。
         没有 ready 信号时用后者并把口径写在行里，别让人拿它当纯运输读数。
+
+        `log` 口径同 `_warn_slow_upload`（带课名的 job 日志出口）。
         """
+        log = self._log if log is None else log
         with self._lock:
             ready_at = self._ready_at.get(jid)
         t_ref = ready_at if ready_at is not None else t_pushed
@@ -938,7 +948,7 @@ class PushDispatcher:
             return
         self.slow_result += 1
         why = "结果就绪后" if ready_at is not None else "推送完成后（含算力）"
-        self._log(
+        log(
             f"★ {jid} <- {wid} {why} {lag:.0f}s 才取回"
             f"（> {PUSH_SLOW_RESULT_SEC:.0f}s）—— 取结果腿在退化，查隧道"
         )
@@ -973,11 +983,16 @@ class PushDispatcher:
         url = str(worker["url"])
         key = str(worker.get("key") or self.token)
         t0 = self._now()
+        # ★2026-11-13（用户口径）：hub 侧的**派发/回传**日志也要能反查是哪门课的活——日志里
+        # 只有 16 位 jid（幂等键哈希，故意不含课名）。本腿的每一行（推送/入队/等待/回灌/
+        # 回落/慢腿）统一带 `[course=<课>] `；课名取 hub 的课程键（派发器就是按它轮转的，
+        # 与 `/admin/queue` 同字）。
+        jlog = tagged(self._log, course_tag(course))
         try:
             payload_path = find_payload(jd)
             if payload_path is None:
                 # 本地盘上没有 payload：与 worker 无关，别把它拉黑。
-                self._requeue(jid, lease, wid, "payload 不在盘上", avoid_worker=False)
+                self._requeue(jid, lease, wid, "payload 不在盘上", avoid_worker=False, log=jlog)
                 return
             payload_bytes = payload_path.read_bytes()
             code_path = jd / "code.zip"
@@ -1001,7 +1016,7 @@ class PushDispatcher:
                 blobs=blobs,
                 ts_code_zip=ts_bytes,
                 attempts=self.push_attempts,
-                log=lambda m: self._log(f"{jid} -> {wid}: {m}"),
+                log=lambda m: jlog(f"{jid} -> {wid}: {m}"),
             )
             self.pushed += 1
             self.workers.note_push(wid, True)
@@ -1020,15 +1035,15 @@ class PushDispatcher:
             self.hub.record_push_wire(
                 jid, int(send["body_bytes"]), int(send["payload_bytes"]), float(send["upload_sec"])
             )
-            self._log(
+            jlog(
                 f"{jid} 已推送 {wid}（payload={send['payload_bytes']}B "
                 f"code={send['code_bytes']}B ts={send['ts_code_bytes']}B "
                 f"blob={send['blob_bytes']}B 上传 {send['upload_sec']}s attempts={send['attempts']}）"
             )
-            self._warn_slow_upload(jid, wid, send)
+            self._warn_slow_upload(jid, wid, send, log=jlog)
             if queued:
                 rec["state"] = "queued"
-                self._log(f"{jid} -> {wid}: 已入队（在跑的 job 结束后即顶上，传输已先做）")
+                jlog(f"{jid} -> {wid}: 已入队（在跑的 job 结束后即顶上，传输已先做）")
             else:
                 rec["state"] = "waiting"
             self._await_result(
@@ -1043,13 +1058,14 @@ class PushDispatcher:
                 # `started` = 「computing_at 已打（或不需要打）」；备份永不打点。
                 started=(not queued) or rec.get("mode") == CLAIM_MODE_BACKUP,
                 t_pushed=self._now(),
+                log=jlog,
             )
         except (RetryableError, ProtocolError) as e:
             # 推送本身没成：多半是这台 worker 此刻接不了（409 队满 / 428 缺缓存 /
             # 隧道抖动）——回落队首，换其它 worker 再试。
-            self._requeue(jid, lease, wid, f"{type(e).__name__}: {e}", avoid_worker=True)
+            self._requeue(jid, lease, wid, f"{type(e).__name__}: {e}", avoid_worker=True, log=jlog)
         except Exception as e:  # 线程绝不静默死掉
-            self._requeue(jid, lease, wid, f"{type(e).__name__}: {e}", avoid_worker=True)
+            self._requeue(jid, lease, wid, f"{type(e).__name__}: {e}", avoid_worker=True, log=jlog)
         finally:
             with self._lock:
                 self._inflight.pop(str(rec.get("slot") or jid), None)
@@ -1072,8 +1088,11 @@ class PushDispatcher:
         *,
         started: bool = True,
         t_pushed: float | None = None,
+        log: Any = None,
     ) -> None:
         """等 worker 出结果：续租 + 探活判死 + 到点回落。结果就地入账（两条腿同一函数）。
+
+        `log` = 本 job 的带课名日志出口（`_run_one` 的 `jlog`）；缺省 = 本派发器的裸日志。
 
         `started=False`（预推单还排在别人的 job 后面）时两把时钟分开：
           · **无结果预算**（`deadline`）只在真开算后计时——排队再久也不该被当成「节点失联」；
@@ -1083,6 +1102,9 @@ class PushDispatcher:
         `computing_at` 是 `job_priority` 的掉队阈时基，拿「在队里」当「在算」会给排队单
         开出一份多余的备份；同理，排队时间也不该吃掉「推送后多久没结果」。
         """
+        # 缺省出口自己带课名（本函数手上就有 `course`）——直接调它的调用方（用例 / 将来的第二条腿）
+        # 不会因为忘了传 `jlog` 而掉回「只有 jid」的旧形状。
+        log = tagged(self._log, course_tag(course)) if log is None else log
         deadline = self._now() + self.timeout_sec
         queue_deadline = self._now() + self.timeout_sec
         queue_logged = False
@@ -1095,14 +1117,19 @@ class PushDispatcher:
             if self._now() <= queue_deadline:
                 return False
             self._requeue(
-                jid, lease, wid, f"排队 {self.timeout_sec:.0f}s 仍未开算", avoid_worker=True
+                jid, lease, wid, f"排队 {self.timeout_sec:.0f}s 仍未开算", avoid_worker=True, log=log
             )
             return True
 
         while not self._stop.is_set():
             if started and self._now() > deadline:
                 self._requeue(
-                    jid, lease, wid, f"推送后 {self.timeout_sec:.0f}s 无结果", avoid_worker=True
+                    jid,
+                    lease,
+                    wid,
+                    f"推送后 {self.timeout_sec:.0f}s 无结果",
+                    avoid_worker=True,
+                    log=log,
                 )
                 return
             if not self.workers.is_online(wid):
@@ -1112,6 +1139,7 @@ class PushDispatcher:
                     wid,
                     f"worker 连续 {PUSH_DEAD_MISSES} 次探活失败（判定离场）",
                     avoid_worker=True,
+                    log=log,
                 )
                 return
             # hub 是这份 job 的租约持有人：不续租就会被 pull worker 领走（同一份活两处跑）。
@@ -1133,31 +1161,31 @@ class PushDispatcher:
                 try:
                     result = json.loads(body.decode("utf-8"))
                 except ValueError as e:
-                    self._requeue(jid, lease, wid, f"结果不是 JSON（{e}）", avoid_worker=True)
+                    self._requeue(jid, lease, wid, f"结果不是 JSON（{e}）", avoid_worker=True, log=log)
                     return
                 if not isinstance(result, dict):
-                    self._requeue(jid, lease, wid, "结果不是对象", avoid_worker=True)
+                    self._requeue(jid, lease, wid, "结果不是对象", avoid_worker=True, log=log)
                     return
                 code_, why = accept_result(
-                    self.hub, jid, result, lease, log=self._log, worker=push_worker_id_of(wid)
+                    self.hub, jid, result, lease, log=log, worker=push_worker_id_of(wid)
                 )
                 if code_ == 200:
-                    self._log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
+                    log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
                     self._warn_slow_result(
-                        jid, wid, t0 if t_pushed is None else t_pushed, self._now()
+                        jid, wid, t0 if t_pushed is None else t_pushed, self._now(), log=log
                     )
                     # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
-                    self._cancel_others(jid, wid)
+                    self._cancel_others(jid, wid, log=log)
                 elif code_ == 409:
                     # 别人已胜（首写锁定）：这份是备份/重复，**直接丢弃** —— 不回落重派
                     # （重派只会再输一次；§2.9 末段：409 与 403 不同待遇）。
-                    self._log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
+                    log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
                 elif code_ in (400, 403):
                     # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
                     self._requeue(jid, lease, wid, f"结果入账被拒 HTTP {code_}: {why}",
-                                  avoid_worker=True)
+                                  avoid_worker=True, log=log)
                 else:
-                    self._log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
+                    log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
                 return
             if status == 202:
                 # 节点在跑（accepted/running）：**等**，不是回落——把它读成「HTTP 202 ⇒
@@ -1172,7 +1200,7 @@ class PushDispatcher:
                         return
                     if not queue_logged:
                         queue_logged = True
-                        self._log(f"{jid} 在 {wid} 排队中（开算前不计无结果超时）")
+                        log(f"{jid} 在 {wid} 排队中（开算前不计无结果超时）")
                     self._wait_next_poll(jid)
                     continue
                 last_queued = False
@@ -1180,7 +1208,7 @@ class PushDispatcher:
                     started = True
                     deadline = self._now() + self.timeout_sec
                     self._mark_started(jid, wid)
-                    self._log(f"{jid} 在 {wid} 排队 {self._now() - t0:.0f}s 后开算")
+                    log(f"{jid} 在 {wid} 排队 {self._now() - t0:.0f}s 后开算")
                 self._wait_next_poll(jid)
                 continue
             if status == 410:
@@ -1192,18 +1220,18 @@ class PushDispatcher:
                 except ValueError:
                     fb = {}
                 self.hub.store_job_failure(jid, push_failure_record(fb, wid, self.hub._now()))
-                self._log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
+                log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
                 return
             if status in (409, 428):
                 self._requeue(jid, lease, wid, f"worker 拒绝这份活（HTTP {status}）",
-                              avoid_worker=True)
+                              avoid_worker=True, log=log)
                 return
             if status >= 500:
                 self._wait_next_poll(jid)
                 continue
-            self._requeue(jid, lease, wid, f"HTTP {status}", avoid_worker=True)
+            self._requeue(jid, lease, wid, f"HTTP {status}", avoid_worker=True, log=log)
             return
-        self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False)
+        self._requeue(jid, lease, wid, "派发器停机", avoid_worker=False, log=log)
 
     def worker_token_ok(self, token: str) -> bool:
         """这个 Bearer 是不是**某台已登记 push worker** 的 authKey（或派发器缺省 token）。
@@ -1274,12 +1302,15 @@ class PushDispatcher:
         except Exception:
             pass
 
-    def _cancel_others(self, jid: str, winner: str) -> None:
+    def _cancel_others(self, jid: str, winner: str, *, log: Any = None) -> None:
         """landed（结果已入账）⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
 
         推不到（节点断连/超时）⇒ 让它跑完，回传时按 409 丢弃 —— 不算失败。取消防的是
         「别人已经赢下的活还在烧 GPU」，不是正确性（正确性由首写锁定兜底）。
+
+        `log` 口径同 `_warn_slow_upload`（带课名的 job 日志出口）。
         """
+        log = self._log if log is None else log
         from remote.push_client import cancel_job
 
         with self._lock:
@@ -1292,16 +1323,21 @@ class PushDispatcher:
             if not url:
                 continue
             ok = cancel_job(url, key or self.token, jid)
-            self._log(
+            log(
                 f"{jid} landed ⇒ 向在途副本 {wid or '?'} 推取消帧"
                 + ("（已达：epoch 边界停算）" if ok else "（不可达：让它跑完，409 丢弃）")
             )
 
-    def _requeue(self, jid: str, lease: str, wid: str, why: str, *, avoid_worker: bool) -> None:
+    def _requeue(
+        self, jid: str, lease: str, wid: str, why: str, *, avoid_worker: bool, log: Any = None
+    ) -> None:
         """回落队首（放掉租约 ⇒ job 立刻可再领）并记下「别再给这台」。
 
         备份副本（`mode="backup"`）**没有租约**：`lease` 为空 ⇒ 跳过 release（它本就没占）。
+
+        `log` 口径同 `_warn_slow_upload`（带课名的 job 日志出口）。
         """
+        log = self._log if log is None else log
         if lease:
             self.hub.release(jid, lease)
         self.requeued += 1
@@ -1310,7 +1346,7 @@ class PushDispatcher:
             with self._lock:
                 self._avoid.setdefault(jid, {})[wid] = until
             self.workers.note_push(wid, False)
-        self._log(f"{jid} 回落队首（{why}）—— 改推其它 worker（避免 {wid if avoid_worker else '-'}）")
+        log(f"{jid} 回落队首（{why}）—— 改推其它 worker（避免 {wid if avoid_worker else '-'}）")
 
     # ---- 观测 ----
     def state(self) -> dict:
