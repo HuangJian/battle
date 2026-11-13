@@ -217,8 +217,9 @@ class ScriptedInput {
 // 诊断探针开关（CLI 在 `main` 里写；默认关 ⇒ 行为与报告 schema 逐字节不变）。
 let probeFlag = false
 let holdFallback = false
-/** F3：v6 的 (move, hold) 联合 argmax（默认关，旧行为逐字节不变）。 */
-let jointArgmax = false
+/** F3：v6 的 (move, hold) 联合 argmax（默认开，与部署链 NNInput 同口径；
+ * 复现旧读数用 --no-joint-argmax）。 */
+let jointArgmax = true
 /** 推理道具偏置（默认 0 = 关）。 */
 let pickupBias = 0
 let pickupRadius = 2
@@ -799,8 +800,8 @@ export function runEvalOne(
   decisionK: number = DEFAULT_DECISION_K,
   /** 兜底实验：前方被挡时从可走方向里挑一个前进（默认 false = 旧行为）。 */
   holdFallback = false,
-  /** F3：v6 的 (move, hold) 联合 argmax（默认 false = 旧行为）。 */
-  jointArgmax = false,
+  /** F3：v6 的 (move, hold) 联合 argmax（默认 true = 部署链同口径）。 */
+  jointArgmax = true,
   /** 推理道具偏置：>0 时在「道具近且无敌人」帧给朝道具的 move logits 加分。 */
   pickupBias = 0,
   pickupRadius = 2,
@@ -1980,6 +1981,7 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--pickup-bias') pickupBias = parseFloat(argv[++i])
     else if (argv[i] === '--pickup-radius') pickupRadius = parseInt(argv[++i], 10)
     else if (argv[i] === '--enemy-clear-cells') enemyClearCells = parseInt(argv[++i], 10)
+    else if (argv[i] === '--no-joint-argmax') jointArgmax = false
     else if (argv[i] === '--ablate-extra') ablateSpec = argv[++i]
     else if (argv[i] === '--ablate-ch') ablateChSpec = argv[++i]
   }
