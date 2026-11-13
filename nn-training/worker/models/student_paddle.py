@@ -101,7 +101,9 @@ class TorchLinear(nn.Layer):
         )
 
     def forward(self, x: paddle.Tensor) -> paddle.Tensor:
-        return paddle.matmul(x, self.weight, transpose_y=True) + self.bias
+        # paddle.matmul 在类型存根里返回 Any；显式接住再返回，别把 Any 漏出本函数。
+        out: paddle.Tensor = paddle.matmul(x, self.weight, transpose_y=True) + self.bias
+        return out
 
 
 class ConvMixerBlock(nn.Layer):

@@ -1151,7 +1151,8 @@ def _run_training_core_paddle(
             ref_model = student_paddle.build_ppo(str(ref_path))
             student_paddle.load_state_into(ref_model, str(ref_path))
             for p in ref_model.parameters():
-                p.requires_grad = False
+                # Paddle 的 requires_grad 是只读属性；冻结 ref 用底层的 stop_gradient。
+                p.stop_gradient = True
             ref_model.eval()
             prep_b.add("ref", f"{time.time() - t_ref:.1f}s（build+load）")
             log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
