@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -359,53 +360,43 @@ def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
 
 
 
-def run_training_core(
-    base_url: str,
-    token: str,
-    *,
-    jid: str,
-    job_dir: Path,
-    work_dir: Path,
-    manifest: dict,
-    iter_info: dict | None,
-    blob_root: Path,
-    payload_bytes: int,
-    payload_dl_sec: float,
-    unpack_sec: float,
-    ts_code_bytes: int,
-    ts_code_hit: bool,
-    device: Any,
-    torch_threads: int,
-    #: ★ 2026-10-30：本次落地时轮转掉几个旧 job 目录（`wire.prune_dirs`）。
-    #: 它**不进人读的那一行**——「准备完成」那行只留这一轮要回答的事。
-    prune_dirs: int = 0,
-    #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
-    #: 与离线盘 `CFG.epoch_mult` 同义：只改遍数，不改采样量/评估语料，也不改 manifest 身份。
-    epoch_mult: float = 1.0,
-    #: ★ 2026-10-27（用户口径②③）：本节点用哪个框架跑这段训练核（`"torch"` / `"paddle"`）。
-    #: 它是**节点本地事实**（作业壳的 `--backend` 显式参数一路传下来），不进 manifest、
-    #: 不上报 hub —— hub 只看到「谁认领、回传了什么」，两类 worker 混跑同一门课。
-    backend: str = "torch",
-    preloaded: dict | None,
-    # opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md §3.2/§3.3）：初始权重由**作业壳**
-    # 在 rollout **之前**解析好传进来（`_resolve_weights` 现在住 `remote/download.py`）。
-    # 为什么解析不能留在本模块：kind=iter 的 rollout argv 是 `--weights init_weights.json`
-    # （相对 job 目录），而本模块在 rollout **之后**才被调到 —— 权重不在就起不来。
-    # 另：`blob_hits` / `blob_miss_bytes` 的 init 那一手账也在壳里记，本模块只在其上累加。
-    init_w: Path | None,
-    weights_src: str,
-    #: 权重解析那一段**走网络**的字节数（命中/payload 恒 0）——`wire.weights_bytes` 的取值源。
-    weights_wire_bytes: int,
-    blob_hits: int,
-    blob_miss_bytes: int,
-    # 日志节食（2026-09-24）：作业壳把本 job 的「入口」读数先放进 prep 这个 bundle，
-    # 本模块再叠加「设备/装载」读数，装载完成时打**一行**（`nn-training/common/log_bundle.py`）。
-    prep: Any = None,
-    t_prep: float = 0.0,
-    should_cancel: Callable[[], bool] | None = None,
-    on_ppo_start: Callable[[], None] | None = None,
-    log: Callable[[str], None] = lambda _msg: None,
-) -> tuple[dict, Any]:
+@dataclass(frozen=True, kw_only=True)
+class TrainSpec:
+    """一次训练核的**全部输入**（签名曾摊成 27 个关键字参数）。
+
+    `backend` 是节点本地事实（`torch` / `paddle`）；Paddle 双生读同一对象，只是忽略它。
+    """
+
+    jid: str
+    job_dir: Path
+    work_dir: Path
+    manifest: dict
+    iter_info: dict | None
+    blob_root: Path
+    payload_bytes: int
+    payload_dl_sec: float
+    unpack_sec: float
+    ts_code_bytes: int
+    ts_code_hit: bool
+    device: Any
+    torch_threads: int
+    preloaded: dict | None
+    init_w: Path | None
+    weights_src: str
+    weights_wire_bytes: int
+    blob_hits: int
+    blob_miss_bytes: int
+    prune_dirs: int = 0
+    epoch_mult: float = 1.0
+    backend: str = "torch"
+    prep: Any = None
+    t_prep: float = 0.0
+    should_cancel: Callable[[], bool] | None = None
+    on_ppo_start: Callable[[], None] | None = None
+    log: Callable[[str], None] = lambda _msg: None
+
+
+def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict, Any]:
     """**训练核**：把一个轮次算出来、把产物落进 `job_dir`，返回 `(result, course)`。
 
     入参全是「作业壳已经测好的事实」：payload 的**字节数**与两段耗时（`wire` 账要用，但字节
@@ -415,39 +406,37 @@ def run_training_core(
 
     `base_url` / `token` 只为 blob 内容寻址下载（cache miss 时）——命中即零网络。
     """
+    jid = spec.jid
+    job_dir = spec.job_dir
+    work_dir = spec.work_dir
+    manifest = spec.manifest
+    iter_info = spec.iter_info
+    blob_root = spec.blob_root
+    payload_bytes = spec.payload_bytes
+    payload_dl_sec = spec.payload_dl_sec
+    unpack_sec = spec.unpack_sec
+    ts_code_bytes = spec.ts_code_bytes
+    ts_code_hit = spec.ts_code_hit
+    device = spec.device
+    torch_threads = spec.torch_threads
+    prune_dirs = spec.prune_dirs
+    epoch_mult = spec.epoch_mult
+    backend = spec.backend
+    preloaded = spec.preloaded
+    init_w = spec.init_w
+    weights_src = spec.weights_src
+    weights_wire_bytes = spec.weights_wire_bytes
+    blob_hits = spec.blob_hits
+    blob_miss_bytes = spec.blob_miss_bytes
+    prep = spec.prep
+    t_prep = spec.t_prep
+    should_cancel = spec.should_cancel
+    on_ppo_start = spec.on_ppo_start
+    log = spec.log
     if backend == "paddle":
         # ★ Paddle 核是**独立函数**（下面）而不是本函数里的分支：本函数第一段就 `import torch`，
         #   而 AI Studio 的训练任务镜像里根本没有 torch ⇒ 必须在它之前分出去。
-        return _run_training_core_paddle(
-            base_url,
-            token,
-            jid=jid,
-            job_dir=job_dir,
-            work_dir=work_dir,
-            manifest=manifest,
-            iter_info=iter_info,
-            blob_root=blob_root,
-            payload_bytes=payload_bytes,
-            payload_dl_sec=payload_dl_sec,
-            unpack_sec=unpack_sec,
-            ts_code_bytes=ts_code_bytes,
-            ts_code_hit=ts_code_hit,
-            device=device,
-            torch_threads=torch_threads,
-            prune_dirs=prune_dirs,
-            epoch_mult=epoch_mult,
-            preloaded=preloaded,
-            init_w=init_w,
-            weights_src=weights_src,
-            weights_wire_bytes=weights_wire_bytes,
-            blob_hits=blob_hits,
-            blob_miss_bytes=blob_miss_bytes,
-            prep=prep,
-            t_prep=t_prep,
-            should_cancel=should_cancel,
-            on_ppo_start=on_ppo_start,
-            log=log,
-        )
+        return _run_training_core_paddle(base_url, token, spec)
     if backend != "torch":
         raise ProtocolError(f"未知训练后端 backend={backend!r}（只认 torch / paddle）")
     prep_b = LogBundle(log) if prep is None else prep
@@ -974,35 +963,7 @@ def run_training_core(
 
 
 def _run_training_core_paddle(
-    base_url: str,
-    token: str,
-    *,
-    jid: str,
-    job_dir: Path,
-    work_dir: Path,
-    manifest: dict,
-    iter_info: dict | None,
-    blob_root: Path,
-    payload_bytes: int,
-    payload_dl_sec: float,
-    unpack_sec: float,
-    ts_code_bytes: int,
-    ts_code_hit: bool,
-    device: Any,
-    torch_threads: int,
-    prune_dirs: int = 0,
-    epoch_mult: float = 1.0,
-    preloaded: dict | None,
-    init_w: Path | None,
-    weights_src: str,
-    weights_wire_bytes: int,
-    blob_hits: int,
-    blob_miss_bytes: int,
-    prep: Any = None,
-    t_prep: float = 0.0,
-    should_cancel: Callable[[], bool] | None = None,
-    on_ppo_start: Callable[[], None] | None = None,
-    log: Callable[[str], None] = lambda _msg: None,
+    base_url: str, token: str, spec: TrainSpec
 ) -> tuple[dict, Any]:
     """`run_training_core` 的 **Paddle 双生**（2026-10-27，AI Studio 训练任务镜像无 torch）。
 
@@ -1025,6 +986,31 @@ def _run_training_core_paddle(
 
     顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
     """
+    jid = spec.jid
+    job_dir = spec.job_dir
+    manifest = spec.manifest
+    iter_info = spec.iter_info
+    blob_root = spec.blob_root
+    payload_bytes = spec.payload_bytes
+    payload_dl_sec = spec.payload_dl_sec
+    unpack_sec = spec.unpack_sec
+    ts_code_bytes = spec.ts_code_bytes
+    ts_code_hit = spec.ts_code_hit
+    device = spec.device
+    torch_threads = spec.torch_threads
+    prune_dirs = spec.prune_dirs
+    epoch_mult = spec.epoch_mult
+    preloaded = spec.preloaded
+    init_w = spec.init_w
+    weights_src = spec.weights_src
+    weights_wire_bytes = spec.weights_wire_bytes
+    blob_hits = spec.blob_hits
+    blob_miss_bytes = spec.blob_miss_bytes
+    prep = spec.prep
+    t_prep = spec.t_prep
+    should_cancel = spec.should_cancel
+    on_ppo_start = spec.on_ppo_start
+    log = spec.log
     prep_b = LogBundle(log) if prep is None else prep
     # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
     paddle_env.apply(torch_threads, prep_b)

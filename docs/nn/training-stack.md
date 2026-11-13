@@ -1507,7 +1507,8 @@ manifest 取 outcome/score/metrics_version ⇒ 交给 slim 的必须是「`files
   3.3 无等价旋钮（保留形参、值被忽略，`prep` 行可读）。
 
 **③ 混跑：两核同调用面、同产物、同读数**
-- `run_training_core(..., backend=…)` 在**同一入口**分流到 `_run_training_core_paddle`；作业壳
+- `run_training_core(base_url, token, spec)` 在**同一入口**按 `spec.backend` 分流到
+  `_run_training_core_paddle`；作业壳
   （`remote/worker.py`）的五源解析 / 取消 / 进度 / 结果落盘全在框架之外，逐字节不分叉。
 - 框架无关的一半拆到 `remote/train_common.py`（L2）：`effective_epochs` / `kick_kl_value` /
   `blob_wanted` / `ppo_shards_root` / `course_prep` / `decode_demo_bank` / `check_demo_bank`；

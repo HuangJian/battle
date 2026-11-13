@@ -252,8 +252,8 @@ def _drive_ppo_to_core(
     monkeypatch.setattr(worker, "_persist_result", lambda *_a, **_k: None)
     seen: dict = {}
 
-    def _core(*_a: object, **kw: object) -> tuple[dict, None]:
-        seen.update(kw)
+    def _core(_base: object, _token: object, spec: object, **_kw: object) -> tuple[dict, None]:
+        seen.update(device=spec.device, backend=spec.backend)  # type: ignore[attr-defined]
         return {"job_id": JID}, None
 
     monkeypatch.setattr(worker, "run_training_core", _core)

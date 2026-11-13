@@ -166,7 +166,7 @@ def test_worker_only_reaches_the_core_through_one_import() -> None:
         for a in n.names:
             assert a.asname is not None, f"{CORE_FN} 必须以 `X as X` 显式转发（ruff 认的 re-export）"
             aliases.append(a.asname)
-    assert aliases == [CORE_FN], aliases
+    assert aliases == ["TrainSpec", CORE_FN], aliases
     assert worker_mod.run_training_core is core_mod.run_training_core
 
 
@@ -179,36 +179,77 @@ def _core_params() -> tuple[list[str], list[str]]:
     return pos, [a.arg for a in fn.args.kwonlyargs]
 
 
-def test_the_call_site_passes_exactly_the_core_interface() -> None:
-    """★ **接口双向一致**：调用点的位置实参个数与关键字集合，必须与训练核的签名逐名相符。
+def _train_spec_fields() -> list[str]:
+    cls = next(
+        n
+        for n in _tree(CORE_FILE).body
+        if isinstance(n, ast.ClassDef) and n.name == "TrainSpec"
+    )
+    return [
+        n.target.id
+        for n in cls.body
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+    ]
 
-    这是本刀最可能的失误形态：搬完之后**漏传一个形参**。运行时不一定立刻炸（只有走到那条
-    分支才 NameError），而这条断言在**提交时**就红。反向也钉住：核里删了形参而调用点还传着。
+
+def test_the_call_site_passes_exactly_the_core_interface() -> None:
+    """★ **接口双向一致**：调用点只传 `(base_url, token, spec)`，`TrainSpec` 字段全覆盖。
+
+    这是本刀最可能的失误形态：搬完之后**漏传一个字段**。运行时不一定立刻炸（只有走到那条
+    分支才 NameError），而这条断言在**提交时**就红。反向也钉住：核里删了字段而调用点还传着。
     """
     pos, kwonly = _core_params()
-    assert pos == ["base_url", "token"], pos
+    job = _func(WORKER_FILE, "run_job")
     calls = [
         n
-        for n in ast.walk(_func(WORKER_FILE, "run_job"))
+        for n in ast.walk(job)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Name)
         and n.func.id == CORE_FN
     ]
-    assert len(calls) == 1, f"作业壳里应只有一处 `{CORE_FN}(...)`，实得 {len(calls)}"
-    call = calls[0]
-    assert len(call.args) == len(pos), (
-        f"位置实参应 {len(pos)} 个（{pos}），实得 {len(call.args)}"
+    assigns = [
+        n
+        for n in ast.walk(job)
+        if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "spec" for t in n.targets)
+    ]
+    call = calls[0] if len(calls) == 1 else None
+    spec_arg = call.args[2] if call is not None and len(call.args) == 3 else None
+    spec_call = assigns[0].value if len(assigns) == 1 else None
+    got = (
+        sorted(k.arg for k in spec_call.keywords if k.arg is not None)
+        if isinstance(spec_call, ast.Call)
+        else []
     )
-    got: list[str] = []
-    for k in call.keywords:
-        assert k.arg is not None, "调用点用了 `**` 展开 —— 接口必须逐名显式（否则这条双向一致形同虚设）"
-        got.append(k.arg)
-    got.sort()
-    assert got == sorted(kwonly), (
-        "调用点的关键字与训练核形参不一致：\n"
-        f"  多传/名字写错：{sorted(set(got) - set(kwonly))}\n"
-        f"  漏传：{sorted(set(kwonly) - set(got))}"
+    fields = sorted(_train_spec_fields())
+    assert (
+        (pos, kwonly) == (["base_url", "token", "spec"], [])
+        and len(calls) == 1
+        and len(assigns) == 1
+        and call is not None
+        and len(call.args) == 3
+        and isinstance(spec_arg, ast.Name)
+        and spec_arg.id == "spec"
+        and isinstance(spec_call, ast.Call)
+        and isinstance(spec_call.func, ast.Name)
+        and spec_call.func.id == "TrainSpec"
+        and all(k.arg is not None for k in spec_call.keywords)
+        and got == fields
+    ), (
+        f"核形参 {(pos, kwonly)} / calls={len(calls)} / assigns={len(assigns)} / "
+        f"spec_arg={ast.unparse(spec_arg) if spec_arg is not None else None} / "
+        f"spec_call={ast.unparse(spec_call) if spec_call is not None else None} / "
+        f"got={got} / fields={fields}"
     )
+
+
+def test_paddle_twin_takes_the_same_spec() -> None:
+    fn = _func(CORE_FILE, "_run_training_core_paddle")
+    assert (
+        [a.arg for a in fn.args.posonlyargs + fn.args.args],
+        fn.args.kwonlyargs,
+        fn.args.kwarg,
+    ) == (["base_url", "token", "spec"], [], None)
 
 
 def test_no_keyword_is_swallowed_by_kwargs() -> None:

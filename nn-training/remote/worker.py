@@ -328,6 +328,7 @@ from remote.result_upload import (
 from remote.result_upload import (
     ResultUploader as ResultUploader,
 )
+from remote.train_core import TrainSpec as TrainSpec
 from remote.train_core import (
     run_training_core as run_training_core,
 )
@@ -873,9 +874,7 @@ def run_job(
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
     try:
-        result, course = run_training_core(
-            base_url,
-            token,
+        spec = TrainSpec(
             jid=jid,
             job_dir=job_dir,
             work_dir=work_dir,
@@ -893,7 +892,7 @@ def run_job(
             epoch_mult=epoch_mult,
             backend=backend,
             preloaded=preloaded,
-            # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
+            # opt-blob-diet：五源解析在壳里做完（必须早于 rollout），训练核只消费结果。
             init_w=init_w,
             weights_src=weights_src,
             weights_wire_bytes=weights_wire_bytes,
@@ -905,6 +904,7 @@ def run_job(
             on_ppo_start=on_ppo_start,
             log=log,
         )
+        result, course = run_training_core(base_url, token, spec)
     finally:
         # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
         #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、

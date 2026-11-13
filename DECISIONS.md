@@ -5745,3 +5745,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （否则 helper 读到空串会把所有节点判掉）。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-trainspec-and-cli-table（训练核收 TrainSpec；92 个 CLI flag 收进数据表）
+
+- **决定**：`remote/train_core.py` 新增 frozen + kw_only `TrainSpec`（27 字段）；`run_training_core` 与
+  `_run_training_core_paddle` 签名都收成 `(base_url, token, spec)`，Paddle 双生读同一对象（忽略
+  `backend`）；`worker.run_job` 只构造一次 `spec = TrainSpec(...)`。`worker/cli.py::build_argparser`
+  的 92 个 `ap.add_argument(...)` 改成 `_flag_rows()` 返回的 `(flags, kwargs)` 元组表 + 一个装配循环
+  （650 → 171 行）。
+- **被否决**：继续用 `**kwargs`/dict 传 27 个字段（守卫失去逐名字段对账）；为 CLI 表另立模块
+  （表闭包读 `mode` / `_d` / `game_watch`，搬出去只会多传三个参数）；上调形状或文本断言基线
+  （断言合并后净增 0）。
+- **后果**：`test_train_core_split.py` 钉住「核形参 = (base_url, token, spec)」「`spec` 关键字集合 ==
+  `TrainSpec` 字段集合」「Paddle 双生同签名」；旧/新 parser 在 3 种 mode × rl_args 覆盖值下逐 action
+  与 `parse_args` 全等；`worker.py` LOC 贴线，构造收成 `spec = ...` + 单行调用后才回到 <1000。
+  全量 5995 passed / 3 skipped，ruff / mypy 绿。
