@@ -145,6 +145,73 @@ def test_dispatch_course_env_inherits_env(monkeypatch: pytest.MonkeyPatch) -> No
     assert res["sentinel_only"] is True
 
 
+def test_dispatch_writes_agent_meta_per_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-13 报障：BC 手动 evalA 的局数在节点页「今日贡献」全为 0。
+
+    根因：`dispatch_bc_eval` 只把聚合行写进课程账本，**没写 `dist-agent-meta.jsonl`**
+    （节点页唯一数据源）。这里钉住每局一条、带承载节点与 mode=eval。
+    """
+    c = load_bc_course("g0-4s2e")
+    _mock_engine(monkeypatch)
+    meta = tmp_path / "dist-agent-meta.jsonl"
+    be.dispatch_bc_eval(
+        weights_bytes=b"x",
+        eval_levels=[],
+        games_per_stage=2,
+        it=3,
+        epoch=10,
+        nodes=NODES,
+        course=c,
+        course_env=True,
+        meta_path=meta,
+        log=lambda m: None,
+    )
+    rows = [json.loads(x) for x in meta.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert len(rows) == 4 * 2  # 4 关 × 2 seed
+    assert {r["node"] for r in rows} == {"self"}
+    assert {r["mode"] for r in rows} == {"eval"}
+    assert {r["it"] for r in rows} == {3}
+    assert {r["stage"] for r in rows} == {2000, 2001, 2002, 2003}
+    assert {r["seed"] for r in rows} == {1, 2}
+    assert all(r["ok"] is True and r["win"] == 1 for r in rows)
+
+
+def test_dispatch_records_failed_games_in_agent_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """失败局同样入机器健康账（否则节点页成功率只看得见成功、把坏节点读健康）。"""
+    from common.distribution import DistError
+
+    c = load_bc_course("g0-4s2e")
+
+    def fail_fetch(url: str, key: str, **kw: object):
+        raise DistError(0, "boom")
+
+    monkeypatch.setattr(be, "fetch_task", fail_fetch)
+    monkeypatch.setattr(be, "post_weights_cached", lambda *a, **k: None)
+    meta = tmp_path / "dist-agent-meta.jsonl"
+    be.dispatch_bc_eval(
+        weights_bytes=b"x",
+        eval_levels=[],
+        games_per_stage=1,
+        it=1,
+        epoch=10,
+        nodes=NODES,
+        course=c,
+        course_env=True,
+        meta_path=meta,
+        log=lambda m: None,
+    )
+    rows = [json.loads(x) for x in meta.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert len(rows) == 4
+    assert all(r["ok"] is False for r in rows)
+    # 全等而不是子串：文本形态断言的计数护栏只许降（`tests/helpers/text_asserts.py` 口径 A）。
+    assert {r["reason"] for r in rows} == {"boom"}
+    assert {r["node"] for r in rows} == {"self"}
+
+
 def test_dispatch_levels_path_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     from worker.config import load_course, resolve_level
 

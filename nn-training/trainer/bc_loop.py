@@ -591,6 +591,7 @@ def train_local_bc(
                                 cfg=cfg,
                                 course=course,
                                 course_env=bool(course.eval.course_env),
+                                meta_path=jsonl_path.parent / "dist-agent-meta.jsonl",
                                 log=log,
                             )
                                 if jsonl_path is not None:

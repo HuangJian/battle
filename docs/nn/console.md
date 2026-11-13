@@ -13,6 +13,36 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §54 BC eval 也写机器健康账：节点页「今日贡献」不再漏掉手动 evalA（2026-11-13）
+
+**报障**：`/nodes` 的采样节点「今天」窗口全为 0，但操作员手动点了几次 BC epoch 表的 `evalA`（`tmp/g2-classic35/evalBc.log`
+有 4 次 n=700 的记录）。
+
+**根因（两条，都指向同一本账）**：
+1. `evalBcEpoch` → `eval_bc_once.py` → `bc_ingest.run_epoch_eval` → `worker/bc_eval.dispatch_bc_eval` 只把
+   聚合行写进课程账本（`training_log.jsonl` 的 `bc_eval`），**从不写 `dist-agent-meta.jsonl`**——而节点页的
+   窗口贡献/成功率/耗时的唯一数据源就是后者（`agent_meta` 模块 docstring 的调用者名单里也没有 BC eval）。
+2. `scanPoolStreams` 只认 `tmp/X` 与 `tmp/X/traj`；`tools/sim/eval-course-ckpt.ts` 的独立 eval run（`<out>.run/`）
+   虽然写了 meta，也被扫描层漏掉。
+
+**修法**：`dispatch_bc_eval` 新增 `meta_path` 参数，每局结算后写一行机器健康账（成功
+`{node, mode:"eval", it, stage, seed, ok:true, win, elapsedSec, ts}`；失败走 `record_eval_failed` 的
+`{node, mode, it, stage, seed, ok:false, reason, ts}`）。两个调用点——手动 `run_epoch_eval` 与本地 BC 腿
+`bc_loop`——都传 `jsonl_path.parent / "dist-agent-meta.jsonl"`（即 `tmp/<课程>/dist-agent-meta.jsonl`）。
+`scanPoolStreams` 在 depth 1 额外下探 `.run` 目录（只收 meta、不下探更深），独立 eval run 的局数也进池。
+
+**边界**：修复前已跑过的 evalA **没有 meta，无法回溯**（没有节点归属可恢复）；重跑一次才会上屏。节点 pill 的
+「最近完成轮贡献」仍只认训练账本的 `rollout_end` / `iteration`（BC 课没有这两种事件）⇒ 它继续显示「—」，
+**窗口内局数（`winEval`）与贡献度列表**则立刻有数。
+
+**门禁**：dashboard 全量 **2121 pass** · `pytest nn-training/tests/worker/test_bc_eval_course_env.py`（7 pass，含
+成功/失败两路 meta 断言）+ `test_bc_ingest_restart.py`（14）+ `test_bc_epoch_archive.py`（7）+ `test_bc_loop.py`
+（40）· `mypy` 909 文件 / `ruff check` 五条改动文件全绿。
+
+**现场验证（2026-11-13 12:13）**：修复后新起的一次 evalBc（it1 ep65）在 30s 内写出 137+ 条 meta；
+运行中的控制台 `/api/pool?days=today` 立即从全 0 变成 `self 72 / dsw 35 / mac 24 …`（eval 列）。
+独立 `.run` 流的 35 局在独立聚合里可见——**控制台进程需重启**才加载扫描层改动。
+
 ## §53 空闲自动停会话：hub 不可达 / 队列静默 ⇒ 云机会话自己收摊（2026-11-13）
 
 **背景**：云机 worker 页按分钟烧配额。两种情况下一整段时间都拿不到活：① hub 不可达（隧道挂 / hub 进程停）；
