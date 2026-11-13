@@ -57,12 +57,16 @@ def quick_eval(weights_path: str, data_dir: str) -> dict:
     model = NNPolicy()
     load_state_into(model, weights_path)
     model.eval()
-    data = load_dataset(data_dir)
-    obs = torch.from_numpy(data["obs"].astype(np.uint8))
-    sc = torch.from_numpy(data["scalars"].astype(np.float32))
+    data = load_dataset(data_dir)  # 默认 eager：本工具要把整份 obs 交给 torch
+    obs_arr, sc_arr, mask_arr = data["obs"], data["scalars"], data["masks"]
+    assert isinstance(obs_arr, np.ndarray), "quick_eval 需要 eager 装载（不接 lazy 分片视图）"
+    assert isinstance(sc_arr, np.ndarray), "quick_eval 需要 eager 装载（不接 lazy 分片视图）"
+    assert isinstance(mask_arr, np.ndarray), "quick_eval 需要 eager 装载（不接 lazy 分片视图）"
+    obs = torch.from_numpy(obs_arr.astype(np.uint8))
+    sc = torch.from_numpy(sc_arr.astype(np.float32))
     mv = data["actions"][:, 0]
     fr = data["actions"][:, 1]
-    masks = data["masks"].astype(np.float32)
+    masks = mask_arr.astype(np.float32)
 
     with torch.no_grad():
         lm, lf = model(obs, sc)

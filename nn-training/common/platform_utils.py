@@ -22,6 +22,8 @@ trainer/dispatch_queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WIN
     rollout 与 eval 都用它，谁都不为对方预留核数；≤4 核全给，5 核起 max(cores−2, 0.8×cores)。
   cores_note() —— 「可用核数」的**出处一行**（日志/诊断用）：cpu_count / 亲和 / cgroup
     配额三源原样报出 + 取小结果（压「可用核 4 被读成机器只有 4 核」那类误读）。
+  available_memory_bytes() —— 本机当前**可用**物理内存字节数（训练前内存预检；
+    读不到 ⇒ None，绝不猜）。
   popen_own_group(**extra) —— **自带进程组**的子进程 kwargs（POSIX 的 start_new_session）。
   kill_process_tree(proc) —— SIGKILL 掉整个进程组（连孤儿一起）；**不等回收**。
   reap_bounded(proc, timeout) —— 有界回收（waitpid）；超时返回 False，**绝不无限等**。
@@ -156,6 +158,52 @@ def _read_text(path: str) -> str | None:
             return f.read().strip()
     except OSError:
         return None
+
+
+def available_memory_bytes() -> int | None:
+    """本机当前**可用**物理内存（字节）；探测不到 ⇒ None。
+
+    为什么需要它（2026-11-13 g2-classic35）：Colab/Kaggle 的报错是内核把进程直接重启
+    （"Your notebook tried to allocate more memory than is available"），训练侧没有
+    任何机会解释原因。装载语料前先问一次可用内存，才能在分配之前响亮拒绝并给出
+    「用 mmap / 换更大机器 / 裁语料」的处置，而不是把整个 notebook 赔进去。
+
+    口径：Linux = `/proc/meminfo` 的 `MemAvailable`（已把可回收 page cache 算进来）；
+    Windows = `GlobalMemoryStatusEx().ullAvailPhys`；macOS 没有零依赖的等价物 ⇒ None
+    （诚实未知，不做「总量当可用」的猜测）。零新依赖：不引 psutil。
+    """
+    if sys.platform.startswith("linux"):
+        for line in (_read_text("/proc/meminfo") or "").splitlines():
+            if line.startswith("MemAvailable:"):
+                try:
+                    return int(line.split()[1]) * 1024
+                except (IndexError, ValueError):
+                    return None
+        return None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except Exception:  # 探测失败 = 拿不到事实，绝不打断训练
+            return None
+    return None
 
 
 def cgroup_cpu_quota() -> int | None:

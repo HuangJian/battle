@@ -225,10 +225,30 @@ def _class_counts(dl, action_v6: bool = False) -> dict:
     """训练集各头类别计数（2026-09-14 抽出）：多数类基线与 fire 正例权重的共同数据源。
 
     v6 三头（2026-11-04）：语料元组多一个 `hold`（10 元组）、move 是 4 类、fire 是 3 类。
+
+    2026-11-13：优先直接读训练 split 的**标签数组**。旧实现为此把整个 train_dl
+    迭代一遍（lazy 装载下 = 把 9.4 GB obs 从磁盘读一遍，白付一个 epoch 的 IO）；
+    标签只占几 MB，且镜像增强不改变各头类别分布（left↔right 互换）。DataLoader
+    形态不匹配时回退旧的全量迭代（保持其它调用方语义）。
     """
-    c_m: Counter[int] = Counter()
-    c_f: Counter[int] = Counter()
-    c_h: Counter[int] = Counter()
+    ds = getattr(dl, "dataset", None)
+    inner = getattr(ds, "inner", None)
+    indices = getattr(ds, "indices", None)
+    actions = getattr(inner, "actions", None)
+    if actions is not None and indices is not None:
+        idx = np.asarray(indices, dtype=np.int64)
+        c_m: Counter[int] = Counter(int(v) for v in actions[idx, 0].tolist())
+        c_f: Counter[int] = Counter(int(v) for v in actions[idx, 1].tolist())
+        if action_v6:
+            hold = getattr(inner, "hold", None)
+            c_h: Counter[int] = (
+                Counter(int(v) for v in hold[idx].tolist()) if hold is not None else Counter()
+            )
+            return {"move": c_m, "fire": c_f, "hold": c_h}
+        return {"move": c_m, "fire": c_f}
+    c_m = Counter()
+    c_f = Counter()
+    c_h = Counter()
     for batch in dl:
         if action_v6:
             _obs, _sc, _ex, mv, fr, hd, _mm, _mf, _mh, _ret = [b for b in batch]

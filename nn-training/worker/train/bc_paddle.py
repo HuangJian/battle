@@ -26,7 +26,7 @@ import random
 import shutil
 import time
 from collections import Counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import paddle
@@ -53,12 +53,15 @@ from worker.train.bc_core import (
     smoothed_val_loss,
 )
 
+if TYPE_CHECKING:
+    from worker.data.npyio import ArrayField
+
 #: 与 torch 侧同一组 torch-only 设备门（Paddle 没有 XLA/DataParallel/MPS 路径）。
 _TORCH_ONLY_DEVICES = ("tpu", "xla", "cuda-dp", "dp", "mps")
 
 
 def _split(
-    data: dict[str, np.ndarray], val_split: float, seed: int
+    data: dict[str, ArrayField], val_split: float, seed: int
 ) -> tuple[np.ndarray, np.ndarray, dict[str, int], str]:
     """train/val 下标（与 `data/dataset.make_loaders` 同判据）。
 
@@ -69,6 +72,8 @@ def _split(
     n_val = int(n * float(val_split))
     rng = np.random.default_rng(seed)
     shard_ids = data.get("shard_ids")
+    if shard_ids is not None and not isinstance(shard_ids, np.ndarray):
+        raise TypeError("[bc_paddle] shard_ids 必须是整份 ndarray（不走 lazy 分片视图）")
     if should_split_by_shards(shard_ids):
         assert shard_ids is not None
         n_shards = int(shard_ids.max()) + 1
@@ -86,7 +91,7 @@ def _split(
     return tr_idx, val_idx, sizes, "sample"
 
 
-def _class_counts(data: dict[str, np.ndarray], idx: np.ndarray, action_v6: bool) -> dict:
+def _class_counts(data: dict[str, ArrayField], idx: np.ndarray, action_v6: bool) -> dict:
     moves = Counter(int(v) for v in data["actions"][idx, 0])
     fires = Counter(int(v) for v in data["actions"][idx, 1])
     if action_v6:
@@ -152,7 +157,7 @@ def _clip_grad_norm(parameters, max_norm: float) -> paddle.Tensor:
 
 
 def _make_batch(
-    data: dict[str, np.ndarray],
+    data: dict[str, ArrayField],
     idx: np.ndarray,
     action_v6: bool,
     rng: np.random.Generator | None,
@@ -238,7 +243,14 @@ def train(args: Any) -> dict[str, Any]:
 
     action_v6 = bool(getattr(args, "action_v6", False))
     policy_extra = bool(getattr(args, "policy_extra", False))
-    data = load_dataset(str(args.data_dir), action_v6=action_v6)
+    # 2026-11-13：逐 shard mmap（大语料不再整份 concatenate），与 torch 侧同一条路。
+    data = load_dataset(
+        str(args.data_dir),
+        action_v6=action_v6,
+        lazy=True,
+        batch_size=int(args.batch),
+        num_workers=0,
+    )
     tr_idx, val_idx, sizes, split_kind = _split(data, float(args.val_split), seed)
     say(
         f"[train] samples total={sizes['total']} train={sizes['train']} val={sizes['val']}"

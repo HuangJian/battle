@@ -27,7 +27,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -46,6 +46,9 @@ from worker.models.core import NNPolicy
 from worker.models.student import StudentNet
 from worker.train.bc import _masked_ce
 
+if TYPE_CHECKING:
+    from worker.data.npyio import ArrayField
+
 
 def _repo_path(raw: str) -> Path:
     """相对路径一律按**仓根**解析（launcher 的 cwd = nn-training/，不能靠 cwd 猜）。"""
@@ -54,7 +57,7 @@ def _repo_path(raw: str) -> Path:
 
 
 def _split_indices(
-    data: dict[str, np.ndarray], n_shards: int, val_split: float, seed: int
+    data: dict[str, ArrayField], n_shards: int, val_split: float, seed: int
 ) -> tuple[list[int], list[int], str]:
     """按 shard 切（≥2 shards），单 shard 回退样本级（与 make_loaders 同判据）。"""
     n = int(data["obs"].shape[0])
@@ -62,6 +65,7 @@ def _split_indices(
     gen = torch.Generator().manual_seed(seed)
     if n_shards >= 2:
         shard_ids = data["shard_ids"]
+        assert isinstance(shard_ids, np.ndarray)
         perm = torch.randperm(n_shards, generator=gen).tolist()
         tr_idx, va_idx = plan_shard_split(shard_ids, n_val, perm)
         return tr_idx.tolist(), va_idx.tolist(), "shard"
@@ -173,7 +177,8 @@ def main() -> None:
     if not shards:
         raise SystemExit(f"no shards under {data_dir}")
     names = [Path(s).name for s in shards]
-    data = load_dataset(data_dir)
+    # 2026-11-13：大语料走逐 shard mmap（与训练同一装载路径），避免 2× 峰值。
+    data = load_dataset(data_dir, lazy=True, batch_size=args.batch)
     tr_idx, va_idx, split_kind = _split_indices(data, len(shards), args.val_split, args.seed)
     if not tr_idx or not va_idx:
         raise SystemExit(f"split 为空（train={len(tr_idx)} val={len(va_idx)}）")

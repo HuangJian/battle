@@ -5684,3 +5684,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   旧 result 缺 `epochs_completed` 时行为不变。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-final-eval-backfill
+
+## §2026-11-13-goalnn-bc-corpus-lazy-mmap（BC 大语料逐 shard mmap + 训练前内存预检）
+
+- **决定**：训练装载改 `lazy=True`（obs/scalars/extra 走 ShardArray，每 shard mmap），
+  `NNDataset` 不再整份 `.astype` 复制；装载前用 `available_memory_bytes` +
+  `check_corpus_memory` 在分配前拒绝，错误给出可用/需要/处置。
+- **被否决**：先写一份拼接后的 mmap `.npy`——多占一份磁盘，Colab/Kaggle 工作盘不够；
+  eager 装载只 warning——内核仍会重启 notebook；靠异常兜底——没有机会解释原因。
+- **后果**：g2-classic35 旧峰值 ~19.7 GiB → lazy ~1.1 GiB；代价是每 epoch 从本地盘随机读
+  9.4 GiB。`load_dataset` 默认仍 eager（小语料工具行为不变），只有训练路径默认 lazy。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-corpus-lazy-mmap

@@ -33,12 +33,18 @@ if _ilu.find_spec("common") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
 import random
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
 from common.schema import FIRE_DIM, MOVE_DIM
+
+if TYPE_CHECKING:
+    from numpy.typing import DTypeLike
+
+    from worker.data.npyio import ArrayField
 
 # mirrorX 的**纯 numpy**实现已抽到 data/mirror.py（2026-09-26：让只测镜像自洽的用例
 # 不必把 torch 拖进测试路径——本模块因 NNDataset/_AugWrapper 继承 Dataset 必须顶层
@@ -56,6 +62,19 @@ from worker.data.mirror import (  # noqa: F401  (re-export：既有调用点不�
 from worker.data.shard_split import plan_shard_split, should_split_by_shards
 
 
+def _field(data: dict[str, ArrayField], key: str, dtype: DTypeLike) -> ArrayField:
+    """按目标 dtype 取字段；**dtype 已对就不复制**（2026-11-13）。
+
+    旧实现一律 `.astype(...)`：lazy 的 mmap 分片视图会被整份物化（9.8 GB 语料
+    直接 OOM），eager 的 uint8 obs 也要白复制一份。这里只在 dtype 真的不同
+    （legacy 的 uint8 actions → int64）时才走 `np.asarray`。
+    """
+    arr = data[key]
+    if getattr(arr, "dtype", None) == np.dtype(dtype):
+        return arr
+    return np.asarray(arr, dtype=dtype)
+
+
 class NNDataset(Dataset):
     """Wraps a concatenated sample dict; applies mirrorX on training draws.
 
@@ -64,7 +83,7 @@ class NNDataset(Dataset):
 
     def __init__(
         self,
-        data: dict[str, np.ndarray],
+        data: dict[str, ArrayField],
         augment: bool = False,
         mirror_p: float = 0.5,
         rng: np.random.Generator | None = None,
@@ -73,23 +92,24 @@ class NNDataset(Dataset):
         #: v6 三头（move4/fire3/hold2）。语料由 `npyio._load_dataset_v6` 产出，多一个
         #: `hold` 键；legacy 语料没有它 ⇒ 只有 v6 分支读。
         self.action_v6 = bool(action_v6)
-        self.obs = data["obs"].astype(np.uint8)
-        self.scalars = data["scalars"].astype(np.float32)
+        # 2026-11-13：`_field` 在 dtype 已匹配时**原样保留** mmap 分片视图，绝不整份复制。
+        self.obs = _field(data, "obs", np.uint8)
+        self.scalars = _field(data, "scalars", np.float32)
         # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走；
         # 旧 shard（无该键）在 verify_shard_schema/调用方处已拦——这里缺失即 KeyError（响亮）。
-        self.extra = data["extra"].astype(np.float32)  # (N,9)
-        self.actions = data["actions"].astype(np.int64)  # (N,2) move,fire
-        self.masks = data["masks"].astype(np.float32)  # legacy (N,7) / v6 (N,9)
+        self.extra = _field(data, "extra", np.float32)  # (N,9)
+        self.actions = _field(data, "actions", np.int64)  # (N,2) move,fire
+        self.masks = _field(data, "masks", np.float32)  # legacy (N,7) / v6 (N,9)
         #: v6 第三头标签；legacy 语料无该键 ⇒ 全 0 占位（只被 v6 分支读）
         self.hold = (
-            data["hold"].astype(np.int64)
+            _field(data, "hold", np.int64)
             if self.action_v6 and "hold" in data
             else np.zeros(self.actions.shape[0], dtype=np.int64)
         )
-        self.conditions = data["conditions"].astype(np.int64)
+        self.conditions = _field(data, "conditions", np.int64)
         # v2: returns.npy（M3 value 头 MC 预置）可选——不存在时 n/a
         self.returns = (
-            data["returns"].astype(np.float32)
+            _field(data, "returns", np.float32)
             if "returns" in data
             else np.full(self.actions.shape[0], np.nan, dtype=np.float32)
         )
@@ -152,6 +172,7 @@ def make_loaders(
     seed: int = 1234,
     num_workers: int = 0,
     action_v6: bool = False,
+    lazy: bool = True,
 ):
     """Build train/val DataLoaders from a directory of npy shards.
 
@@ -172,12 +193,22 @@ def make_loaders(
         random.seed(seed + 2000 + wid)
         torch.manual_seed(seed + 3000 + wid)
 
-    data = load_dataset(data_dir, action_v6=action_v6)
+    # 2026-11-13：训练默认 lazy 装载（逐 shard mmap），否则 9.8 GB 语料会在
+    # `np.concatenate` 处吃掉 ~2× 内存。显式 `lazy=False` 保留旧的整份载入语义。
+    data = load_dataset(
+        data_dir,
+        action_v6=action_v6,
+        lazy=lazy,
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
     full = NNDataset(data, augment=False, action_v6=action_v6)
     n = len(full)
     n_val = int(n * val_split)
     gen = torch.Generator().manual_seed(seed)
     shard_ids = data.get("shard_ids")
+    if shard_ids is not None and not isinstance(shard_ids, np.ndarray):
+        raise TypeError("[dataset] shard_ids 必须是整份 ndarray（不走 lazy 分片视图）")
     if should_split_by_shards(shard_ids):
         # P2-6d：shard 级切分——val 取整 shard，样本数累计 ≥ n_val 即停。
         # 抽 shard 的顺序仍是 torch 的 randperm（gen 的消费顺序不变 ⇒ 切分结果逐字节不变），
@@ -227,7 +258,12 @@ class _AugWrapper(Dataset):
     """Thin wrapper exposing NNDataset.__getitem__ with augmentation on a split."""
 
     def __init__(
-        self, data: dict, indices: list[int], mirror_p: float, seed: int, action_v6: bool = False
+        self,
+        data: dict[str, ArrayField],
+        indices: list[int],
+        mirror_p: float,
+        seed: int,
+        action_v6: bool = False,
     ):
         self.inner = NNDataset(
             data,

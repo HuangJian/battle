@@ -83,6 +83,13 @@ def test_make_loaders_v6_and_three_head_ce(corpus: Path) -> None:
         str(corpus), batch_size=32, val_split=0.25, action_v6=True
     )
     assert sizes["total"] == N * 4
+    # 2026-11-13：训练装载默认 lazy（逐 shard mmap），NNDataset 不得把它整份复制。
+    from worker.data.dataset import _AugWrapper
+    from worker.data.npyio import ShardArray
+
+    train_ds = train_dl.dataset
+    assert isinstance(train_ds, _AugWrapper)
+    assert isinstance(train_ds.inner.obs, ShardArray)
     batch = next(iter(train_dl))
     assert len(batch) == 10
     obs, sc, ex, mv, fr, hd, mm, mf, mh, _ret = batch

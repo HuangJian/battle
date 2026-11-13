@@ -8,6 +8,48 @@
 
 ---
 
+## §73 BC 大语料内存：逐 shard mmap + 训练前预检（2026-11-13）
+
+**背景**（g2-classic35）：语料 1400 shards / 877,866 样本 / 9.7 GiB，Colab 训练报
+"Your notebook tried to allocate more memory than is available. It has restarted."。根因不在模型或
+批次，而在装载：`_load_dataset_v6` 对每个 shard `np.load` 后用 `np.concatenate` 拼全部
+（逐 shard 原数组 + 拼接结果 ≈ 2× ≈ 19.7 GiB），随后 `NNDataset.__init__` 的 `.astype(...)`
+又复制一份大张量。12–16 GiB 的 notebook 必死。
+
+**实现**
+- `worker/data/npyio.py::ShardArray`：只读拼接视图，每个 shard 一个
+  `np.load(mmap_mode="r")`；int / slice / 整数数组 / bool 索引按 shard 定位。**不实现
+  `__array__`**——整份物化只能显式 `materialize()`，防下游一句 `np.asarray` 把语料拉回内存。
+- `worker/data/npyio.py`：`load_dataset(..., lazy=True)` 让 `obs/scalars/extra` 走
+  `ShardArray`；动作/掩码这类小数组仍整份拼。`make_loaders` **默认 lazy=True**，
+  `bc_paddle` / `bc_learnability_probe` 同；评测小工具默认 eager（行为逐字节不变）。
+- `NNDataset._field`：dtype 已匹配就原样返回——旧 `.astype(np.uint8)` 会复制整份观测
+  （eager 路径也白付一份）。
+- `_class_counts`：训练前不再 iterate 整个 train DataLoader；直接从
+  `_AugWrapper.inner.actions/hold` 的标签数组计数（镜像只互换 left↔right，不改变类别
+  分布）。省掉一个「把 9.4 GiB obs 从盘上读一遍」的 epoch。
+- 预检：`plan_corpus_memory`（stat + 只开 obs 头取 N）→ `check_corpus_memory`。
+  eager 估计 `2× + 256 MiB`；lazy 估计 `非 obs 张量 + 在飞批次 + 768 MiB`。装不下在
+  **分配前** `MemoryError`，错误里给「语料 / 需要 / 可用 / 处置」。可用内存探测在
+  `common/platform_utils.available_memory_bytes()`（Linux `MemAvailable` / Windows
+  `GlobalMemoryStatusEx`；macOS 返回 `None`，不拿总量冒充可用）。>256 MiB 的语料打一行
+  `[npyio] 内存预检：…`。
+
+**g2-classic35 实测读数**（本机 13.9 GiB 可用）：旧路径估计峰值 **19.75 GiB ⇒ 预检拒绝**；
+mmap 路径估计峰值 **1.11 GiB ⇒ 放行**。代价：每个 epoch 从本地盘随机读 9.4 GiB
+（mmap page cache 可回收），比全内存慢；这是 12–16 GiB 机器能跑完的唯一路径。语料必须在
+**本地盘**（mmap 不适用于网络盘/流式目录）。
+
+**验证**：`tests/worker/test_corpus_memory.py`（lazy/eager 逐字节一致、跨 shard 边界/
+负下标/切片、预检拒绝与「可用内存未知不编造」）+ `test_bc_v6_data` 钉住 `make_loaders`
+的 `_AugWrapper.inner.obs` 是 `ShardArray`；ruff + mypy 绿，聚焦用例全绿。
+
+**边界**：`load_dataset(lazy=True)` 的 `obs/scalars/extra` 不再是 `np.ndarray`；需要整份
+数组的下游（`eval_bridge.quick_eval` 这类小语料工具）必须用默认 eager，或显式
+`.materialize()`。macOS 上无可用内存读数 ⇒ 预检只记录、不拒绝。
+
+---
+
 ## §72 BC 末轮 eval 兜底 + 重启补评（2026-11-12）
 
 **背景**（g1e-4s2e 报障）：设了 `eval.every_epochs` 的 BC 课，末 epoch 权重已回传，但对应

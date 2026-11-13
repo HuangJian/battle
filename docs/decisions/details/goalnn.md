@@ -7336,3 +7336,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （905 files）绿。
 - **违反后果**：末 epoch 的 eval 静默丢失（权重在、指标没有），或重启后永久不补；反过来把
   `bc_epoch` 当已评会让「已评」游标失去意义，历史缺评边界再也补不回来。
+
+## §2026-11-13-goalnn-bc-corpus-lazy-mmap（2026-11-13，g2-classic35 训练 OOM：notebook has restarted）
+
+- **背景**：g2-classic35 = 1400 shards / 877,866 样本 / 9.7 GiB。旧 `_load_dataset_v6` 把每个
+  shard `np.load` 进内存再 `np.concatenate`（逐 shard 原数组 + 拼接结果 ≈ 2× ≈ 19.7 GiB），
+  随后 `NNDataset.__init__` 的 `.astype(...)` 又整份复制；12–16 GiB notebook 被内核直接重启，
+  日志里没有可解释的训练侧错误。
+- **备选与否决**：① 先写一份拼接后的 mmap `.npy` 再训——否，多占 9.4 GiB 磁盘，Colab/Kaggle
+  工作盘不够，且多一次全量写；② eager 装载 + 超限 warning——否，警告挡不住内核 OOM 重启；
+  ③ 只把 `obs` 分块、其余整份拼接——否，问题在 `obs`（9.4 GiB）与 `.astype` 复制，分块接口
+  更复杂却不解决复制；④ 训练前检查内存但不改装载——否，能解释失败但跑不起来。
+- **决定**：`load_dataset(..., lazy=True)` 用 `ShardArray`（每 shard `mmap_mode="r"`）承载
+  `obs/scalars/extra`；`make_loaders` 默认 lazy，`bc_paddle` / `bc_learnability_probe` 同；
+  `NNDataset._field` 在 dtype 已匹配时**不复制**；`_class_counts` 直接读标签数组，不再为了
+  计数把整个训练集迭代一遍；`plan_corpus_memory` + `check_corpus_memory` 在分配前用
+  `available_memory_bytes()`（Linux MemAvailable / Windows GlobalMemoryStatusEx）判断，装不下
+  就 `MemoryError` 并给出处置。`ShardArray` 不实现 `__array__`，整份物化只能显式
+  `materialize()`。
+- **证据**：真实 g2 语料（本机 13.9 GiB 可用）预检：eager 19.75 GiB ⇒ 拒绝；lazy 1.11 GiB ⇒
+  放行。`tests/worker/test_corpus_memory.py` 钉 lazy/eager 逐字节一致（含跨 shard 边界、负
+  下标、切片）与预检拒绝路径；`test_bc_v6_data` 钉 `make_loaders` 的
+  `_AugWrapper.inner.obs` 是 `ShardArray`。ruff + mypy 绿，聚焦用例全绿。
+- **后果**：12–16 GiB 机器可以跑完 g2-classic35；代价是每 epoch 从本地盘随机读 9.4 GiB
+  （mmap page cache 可回收），比全内存慢；语料必须在本地盘。`load_dataset` 默认仍 eager，
+  需要整份 ndarray 的小工具（`eval_bridge.quick_eval`）行为不变；macOS 无可用内存读数时
+  预检只记录、不拒绝。
+- **违反后果**：再把大语料整份 `np.concatenate`/`.astype` 回来，会在训练前几秒把 notebook
+  打进重启，且日志没有任何训练侧读数。
