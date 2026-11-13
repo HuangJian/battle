@@ -105,34 +105,68 @@ def _bc_torch_device(name: str, use_dp: bool) -> torch.device:
 def _xla_spmd_mesh() -> tuple[Any, int]:
     """多核 XLA（TPU v5e-8 等）→ `(1-D data mesh, 核数)`；单核 / 不可用 ⇒ `(None, 核数)`。
 
-    **必须在 `xla_device()` 之前调用**（`use_spmd` 对已初始化的设备无效）。任何一步失败都
-    降级为单设备（训练照跑，只是没吃满核）；返回值里的核数始终是真实读数（日志/批大小校验用）。
+    ★ 顺序是硬约束（2026-11-13 真机事故：BC 在 v5e-8 上卡死 10+ 分钟）：
+      ① `use_spmd()` 必须在**任何** XLA runtime 初始化之前 —— `global_device_count()`
+         这个调用本身就会建 PJRT client。先数设备再 `use_spmd` 会走「runtime 已锁」的
+         force 分支（警告 + `_xla_force_spmd_device` + `wait_device_ops`），实测挂住；
+      ② SPMD 下的核数要用 `global_runtime_device_count()`（逻辑 runtime 设备）——
+         `global_device_count()` 在 SPMD 里可能只剩虚拟设备 XLA:0。
 
+    任何一步失败都降级为单设备（训练照跑，只是没吃满核）；核数始终是真实读数。
     SPMD 的数据并行语义：参数**复制**到每个核、batch 按 dim0 切分；复制参数上的梯度由 XLA
-    在消费点自动 all-reduce（所以下面训练步在 SPMD 下**不能**再调 `xm.optimizer_step` ——
+    在消费点自动 all-reduce（所以训练步在 SPMD 下**不能**再调 `xm.optimizer_step` ——
     那会二次归约、把梯度放大 world_size 倍）。
     """
+    t0 = time.monotonic()
+    say("[train] XLA 初始化：导入 torch_xla …")
     try:
+        import torch_xla
         import torch_xla.runtime as xr
-    except Exception:
+    except Exception as e:
+        say(f"[train] WARN torch_xla 不可用（{type(e).__name__}: {e}）⇒ 单核")
         return None, 1
+    # ★ 运行期已经初始化过（别的模块先建了非虚拟设备）⇒ SPMD 只能走 force 分支，
+    #   真机实测会炸在 `XlaDeviceToAtenDevice: devices_ordinals_`（2026-11-13）。
+    #   例外：**本进程前一份 BC job 已经把 SPMD 开起来**（`is_spmd()`）⇒ 复用即可。
     try:
-        n = int(xr.global_device_count())
+        locked = bool(torch_xla._XLAC._xla_get_spmd_config_is_locked())
     except Exception:
-        return None, 1
+        locked = False
+    if locked:
+        try:
+            already = bool(xr.is_spmd())
+        except Exception:
+            already = os.environ.get("XLA_USE_SPMD", "") == "1"
+        if not already:
+            say("[train] WARN XLA runtime 已初始化（非 SPMD）⇒ 退回单核（重开进程/会话才能吃满 8 核）")
+            return None, 1
+        say("[train] XLA SPMD 已在本进程启用（复用，不再改 runtime 模式）")
+    else:
+        try:
+            xr.use_spmd()  # 必须先于任何设备/runtime 初始化（见 docstring ①）
+        except Exception as e:
+            say(f"[train] WARN SPMD 初始化失败（{type(e).__name__}: {e}）⇒ 单核")
+            return None, 1
+    try:
+        n = int(xr.global_runtime_device_count())
+    except Exception:
+        try:
+            n = int(xr.global_device_count())
+        except Exception:
+            return None, 1
+    say(f"[train] XLA runtime 设备数={n}（{time.monotonic() - t0:.1f}s）")
     if n <= 1:
         return None, n
     try:
         import torch_xla.distributed.spmd as xs
     except Exception as e:
-        say(f"[train] WARN XLA 多核（{n}）但 SPMD 不可用（{type(e).__name__}: {e}）⇒ 单核")
+        say(f"[train] WARN XLA 多核（{n}）但 SPMD 模块不可用（{type(e).__name__}: {e}）⇒ 单核")
         return None, n
     try:
-        xr.use_spmd()
         fn = getattr(xs, "get_1d_mesh", None)
         mesh = fn("data") if callable(fn) else xs.Mesh(np.arange(n), (n,), ("data",))
     except Exception as e:
-        say(f"[train] WARN SPMD 初始化失败（{type(e).__name__}: {e}）⇒ 单核")
+        say(f"[train] WARN SPMD mesh 建不起来（{type(e).__name__}: {e}）⇒ 单核")
         return None, n
     say(f"[train] XLA SPMD 数据并行：{n} 核（global batch 按 dim0 切分，梯度由 XLA 归约）")
     return mesh, n
@@ -173,26 +207,39 @@ def _assert_spmd_batch(mb: int, n: int) -> None:
 
 
 def _xla_entry(args: Any) -> tuple[torch.device, Any]:
-    """TPU/XLA 入口：先开 SPMD（必须先于设备初始化）→ 编译缓存 → 设备/指纹/拒跑。
+    """TPU/XLA 入口：编译缓存（只设 env）→ SPMD（先于任何 runtime 初始化）→ 设备/指纹/拒跑。
 
     → `(device, mesh)`；`mesh=None` = 单设备（单核 TPU 或 SPMD 不可用）。
+    每一步都有一行日志（2026-11-13：v5e-8 上卡死过一次，没有相位日志无法定位）。
     判据与 PPO（`remote/train_core.py`）同源：XLA 的 CPU 插件也返回 `xla:0`，
     只看设备串会把「TPU 机静默跑 CPU」当正常（慢两个数量级，日志一切正常）。
     """
-    mesh, n = _xla_spmd_mesh()
+    t0 = time.monotonic()
+    say("[train] XLA 初始化：开始")
     cache_dir = os.path.join(
         os.path.dirname(os.path.abspath(getattr(args, "out", "bc-weights.json"))),
         "xla-compile-cache",
     )
+    # 编译缓存只设置 env（真正生效在首次计算时）；PPO 也在取设备之前调用。
     say(f"[train] XLA 编译缓存: {xla_enable_compile_cache(cache_dir)}")
+    mesh, n = _xla_spmd_mesh()
+    say("[train] XLA 初始化：取设备句柄 …")
     dev = xla_device()
+    say(f"[train] XLA 设备句柄 {dev}（{time.monotonic() - t0:.1f}s）")
     fp = xla_fingerprint(dev)
-    spd = xla_device_speed_probe(dev)
+    say("[train] XLA 初始化：后端指纹/速度自检 …")
+    # SPMD 下跳过 2048² 自检：未标注的大张量会被复制到全部核，首编译很慢，而且是训练
+    # 用不到的形状（后端指纹已足够识别「不是 TPU」）。单设备保留（与 PPO 同款判据）。
+    spd = None if mesh is not None else xla_device_speed_probe(dev)
+    _spd_txt = (
+        "跳过（SPMD）"
+        if mesh is not None
+        else (f"{spd * 1000:.1f} ms" if spd is not None else "nan")
+    )
     say(
         f"[train] XLA 设备 {dev}｜device_type={fp.get('device_type')}｜"
         f"XLA {fp.get('global_device_count')}/{fp.get('addressable_device_count')}｜"
-        f"world_size={xla_world_size()}｜"
-        f"2048² matmul {('%.1f ms' % (spd * 1000)) if spd is not None else 'nan'}"
+        f"world_size={xla_world_size()}｜2048² matmul {_spd_txt}"
     )
     why = tpu_backend_missing_reason(fp)
     if why:

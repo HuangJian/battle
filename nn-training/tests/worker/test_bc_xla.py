@@ -170,10 +170,18 @@ def test_xla_entry_rejects_a_non_tpu_backend(
 
 
 def _fake_xla_modules(
-    monkeypatch: pytest.MonkeyPatch, n: int = 8
+    monkeypatch: pytest.MonkeyPatch,
+    n: int = 8,
+    *,
+    locked: bool = False,
+    spmd_on: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
-    """假 `torch_xla` 包：不装 torch_xla 的机器也能测 `_xla_spmd_mesh` 的判定与顺序。"""
-    calls: dict[str, Any] = {"use_spmd": 0, "mesh_dims": []}
+    """假 `torch_xla` 包：不装 torch_xla 的机器也能测 `_xla_spmd_mesh` 的判定与顺序。
+
+    `locked=True` = XLA runtime 已被别的模块初始化（SPMD 只能走 force 分支，真机会炸）；
+    `spmd_on=True` = 本进程已经开过 SPMD（同一进程的第二份 BC job，复用）。
+    """
+    calls: dict[str, Any] = {"use_spmd": 0, "mesh_dims": [], "order": []}
     xla = types.ModuleType("torch_xla")
     rt = types.ModuleType("torch_xla.runtime")
     dist = types.ModuleType("torch_xla.distributed")
@@ -181,10 +189,19 @@ def _fake_xla_modules(
     mesh = object()
     # `cast(Any, …)`：ModuleType 的动态属性既过 mypy（attr-defined）又过 ruff（B010 禁 setattr）。
     rt_any, spmd_any, xla_any, dist_any = cast(Any, rt), cast(Any, spmd), cast(Any, xla), cast(Any, dist)
-    rt_any.global_device_count = lambda: n
+    xla_any._XLAC = types.SimpleNamespace(_xla_get_spmd_config_is_locked=lambda: locked)
+    rt_any.is_spmd = lambda: spmd_on
+
+    def _count() -> int:
+        calls["order"].append("count")
+        return n
+
+    rt_any.global_runtime_device_count = _count
+    rt_any.global_device_count = _count
 
     def _use_spmd() -> None:
         calls["use_spmd"] += 1
+        calls["order"].append("use_spmd")
 
     def _get_1d_mesh(dim: str) -> Any:
         calls["mesh_dims"].append(dim)
@@ -211,14 +228,39 @@ def test_spmd_mesh_enables_spmd_before_returning_the_data_mesh(
     mesh, calls = _fake_xla_modules(monkeypatch, n=8)
     got, n = bc_mod._xla_spmd_mesh()
     assert got is mesh and n == 8
-    assert calls["use_spmd"] == 1, "use_spmd 必须先于设备初始化"
+    # ★ 顺序硬约束：先 use_spmd、再数设备（数设备会初始化 runtime，之后 SPMD 只能走
+    #   「runtime 已锁」的 force 分支——2026-11-13 真机就是卡在那条分支上）。
+    assert calls["order"][:2] == ["use_spmd", "count"], calls["order"]
     assert calls["mesh_dims"] == ["data"], "1-D data mesh（参数复制 / batch 按 dim0 切分）"
 
 
 def test_spmd_mesh_is_none_on_single_core(monkeypatch: pytest.MonkeyPatch) -> None:
     _mesh, calls = _fake_xla_modules(monkeypatch, n=1)
     assert bc_mod._xla_spmd_mesh() == (None, 1)
-    assert calls["use_spmd"] == 0, "单核不该开 SPMD"
+    # use_spmd 必须先于「数设备」（后者会初始化 runtime）；单核照开无副作用，但不建 mesh。
+    assert calls["use_spmd"] == 1
+    assert calls["mesh_dims"] == []
+
+
+def test_spmd_mesh_falls_back_when_the_runtime_is_already_initialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 2026-11-13 真机：runtime 先被初始化 ⇒ `use_spmd` 的 force 分支把 `xla_device()`
+    炸在 `XlaDeviceToAtenDevice: devices_ordinals_`。这里必须**不**进 force，退回单核。"""
+    _mesh, calls = _fake_xla_modules(monkeypatch, n=8, locked=True)
+    assert bc_mod._xla_spmd_mesh() == (None, 1)
+    assert calls["use_spmd"] == 0 and calls["order"] == []
+
+
+def test_spmd_mesh_reuses_an_already_enabled_spmd_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一进程的第二份 BC job：runtime 已锁但 SPMD 已开 ⇒ 直接复用（不必再 use_spmd）。"""
+    mesh, calls = _fake_xla_modules(monkeypatch, n=8, locked=True, spmd_on=True)
+    got, n = bc_mod._xla_spmd_mesh()
+    assert got is mesh and n == 8
+    assert calls["use_spmd"] == 0
+    assert calls["mesh_dims"] == ["data"]
 
 
 def test_spmd_shards_batches_on_dim0_and_replicates_params(

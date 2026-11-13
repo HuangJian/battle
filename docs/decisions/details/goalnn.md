@@ -7601,8 +7601,10 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （`xla_device()`），v5e-8 的另外 7 核闲置。用户口径：「要支持 v5e-8 的 8 核并行使用」。
 - **决定**：**单进程 SPMD 数据并行**，训练循环的 Python 结构/指标/回传全不变。
   1. `_xla_spmd_mesh()`：`torch_xla.runtime.global_device_count() > 1` 时 `xr.use_spmd()`
-     （**必须先于 `xla_device()`**，对已初始化设备无效）并建 1-D `data` mesh
+     （**必须先于任何 runtime 初始化**——`global_device_count()` 本身就会建 PJRT client；
+     先数设备会让 SPMD 只能走 torch_xla 的 force 分支）并建 1-D `data` mesh
      （`xs.get_1d_mesh("data")`，旧版回退 `xs.Mesh(np.arange(n), (n,), ("data",))`）；
+     核数用 **SPMD 的 `global_runtime_device_count()`**（物理计数在 SPMD 里可能只剩 XLA:0）；
      单核 / SPMD 不可用 ⇒ `(None, n)` 降级单设备（WARN 一行，训练照跑）。
   2. 形状：`_shard_model` 把参数**复制**（`(None,)*dim`），`_shard_batch` 把 obs / scalars /
      extra / move / fire / hold / 三段 mask / return 按 dim0 切到 `data` 轴。复制参数上的梯度
@@ -7616,15 +7618,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   5. 设备入口重排：设备/SPMD 判定挪到 `make_loaders` **之前**（loader 要知道是否 drop_last），
      `_resolve_bc_device` 拆成 `_bc_torch_device`（名字→`torch.device`）与 `_xla_entry`
      （SPMD→编译缓存→设备→指纹/拒跑）。
+- **★ 2026-11-13 真机事故与修法（首版接线顺序错）**：首版先 `global_device_count()` 再
+  `use_spmd()`。前者已初始化 PJRT client（SPMD 配置被锁）⇒ torch_xla 打
+  「Replicating tensors already initialized … force SPMD mode」并走 `_xla_force_spmd_device()`
+  + `wait_device_ops()`（09:11 实测卡 10+ 分钟）；09:25 那次进一步崩在
+  `XlaDeviceToAtenDevice: Check failed: it != devices_ordinals_.end()`（`xla_device()` 的虚拟设备
+  与 ordinals 表不一致）。修法：`use_spmd()` 提到**一切 runtime 初始化之前**（编译缓存只设 env，
+  不初始化）→ `global_runtime_device_count()` → `xla_device()`；另加两道保险：
+  ① `_xla_get_spmd_config_is_locked()` 为真且 `is_spmd()` 为假（别的模块先初始化了 XLA）⇒
+  响亮退回单核、**不进** force 分支；已开 SPMD（同进程第二份 BC job）⇒ 复用；
+  ② SPMD 下跳过 2048² 速度自检（未标注大张量会复制到 8 核、首编译慢且非训练形状），
+  后端指纹仍照常拒非 TPU。`_xla_entry` 每相位一行日志（导入 / 编译缓存 / 设备句柄 / 指纹），
+  下次任何一步卡住可直接定位。
 - **备选与否决**：① `xmp.spawn` / `torchrun` 多进程——否（BC 的 job 生命周期：单份 stdout /
   resume / `on_epoch` 回传 / result 都在 `worker_loop` 一个进程；8 进程要重做 rank 收口与
   回传去重）；② SPMD 下照用 `xm.optimizer_step`——否（二次归约，见上）；③ 不做 drop_last、
   让 `mark_sharding` 自己处理 ragged tail——否（不做非整切分，直接报错）；④ tensor parallel
   切模型——否（73K 参数的小模型切分收益为负，跨核通信反而更贵）。
-- **验证**：`tests/worker/test_bc_xla.py`：`use_spmd` 在 mesh 之前被调用（假 torch_xla 包）·
-  单核不开 SPMD · 参数复制/batch 按 dim0 切分的 spec 逐项对账 · mb 非 8 倍数响亮拒绝 ·
+- **验证**：`tests/worker/test_bc_xla.py`：`use_spmd` 必须先于 `count`（顺序断言）· 单核不开
+  mesh · runtime 已初始化且非 SPMD ⇒ 退回单核（不进 force）· 已开 SPMD ⇒ 复用 ·
+  参数复制/batch 按 dim0 切分的 spec 逐项对账 · mb 非 8 倍数响亮拒绝 ·
   SPMD 全流程训练（假 mesh）里每个 batch 都被标注且 **`optimizer_step` 一次都没被调用**。
-  `bun run pygate` 全绿（ruff + mypy 910 文件 + pytest **6007 passed / 10 skipped**）。
+  `bun run pygate` 全绿（ruff + mypy 910 文件 + pytest **6009 passed / 10 skipped**）。
 - **边界**：单进程 SPMD（不是多进程 DP）；`world_size()` 在无复制时恒为 1，核数判据用
   `global_device_count`；每 epoch 尾批丢弃（g2b 877k 语料 ≈0.03%）；每步一次跨核 all-reduce
   是主要新增开销（小模型下它是决定加速比的关键因素）；CPU/CUDA 路径逐位不变

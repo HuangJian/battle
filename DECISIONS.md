@@ -5801,7 +5801,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 ## §2026-11-13-goalnn-bc-tpu-spmd-8core（BC 吃满 TPU v5e-8 的 8 核：单进程 SPMD 数据并行）
 
 - **决定**：`worker/train/bc.py` 在 XLA 多核（`global_device_count > 1`）时开 **单进程 SPMD**：
-  `_xla_spmd_mesh` 先用 `xr.use_spmd()`（必须先于 `xla_device()`）再建 1-D `data` mesh；
+  `_xla_spmd_mesh` 先 `xr.use_spmd()`（**必须先于任何 runtime 初始化**——`global_device_count()`
+  本身就会建 PJRT client，先数设备会走 force 分支并在 `xla_device()` 处崩）再建 1-D `data` mesh
+  （核数用 SPMD 的 `global_runtime_device_count()`）；
   `_shard_model` 把参数**复制**到各核，`_shard_batch` 把 obs/scalars/extra/标签/掩码/return 按
   dim0 切到 `data` 轴；`make_loaders(drop_last=<SPMD>)` 保证整批可整切、`_assert_spmd_batch`
   要求 `--batch` 是核数倍数；SPMD 下训练步走**裸 `opt.step()`**（复制参数上的梯度已由 XLA
