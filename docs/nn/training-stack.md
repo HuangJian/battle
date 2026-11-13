@@ -42,7 +42,10 @@ mmap 路径估计峰值 **1.11 GiB ⇒ 放行**。代价：每个 epoch 从本�
 
 **验证**：`tests/worker/test_corpus_memory.py`（lazy/eager 逐字节一致、跨 shard 边界/
 负下标/切片、预检拒绝与「可用内存未知不编造」）+ `test_bc_v6_data` 钉住 `make_loaders`
-的 `_AugWrapper.inner.obs` 是 `ShardArray`；ruff + mypy 绿，聚焦用例全绿。
+的 `_AugWrapper.inner.obs` 是 `ShardArray`；ruff + mypy 绿，聚焦用例全绿。Paddle 3.3.1
+（CPU）实跑 `tests/worker/test_bc_paddle.py` **4 passed**（此前无 Paddle 时整文件 skip），
+证明 `bc_paddle.train` 的 lazy 装载 / 逐帧取 batch 链路闭合；同时修正该测试对原始
+`best_val_loss` 与 4 位小数 `history` 的精度断言（生产代码未改）。
 
 **边界**：`load_dataset(lazy=True)` 的 `obs/scalars/extra` 不再是 `np.ndarray`；需要整份
 数组的下游（`eval_bridge.quick_eval` 这类小语料工具）必须用默认 eager，或显式
