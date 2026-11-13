@@ -5726,3 +5726,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   盘上有 `training-enabled.txt`，未开课目录不会因一次查询复活。
 
 —— 全文（背景 / 备选与否决 / 验证 / 恢复步骤）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-hub-restart-job-reconcile
+
+## §2026-11-13-goalnn-notebook-idle-stop（云机 worker 页空闲即停会话：hub 不可达 / 队列静默）
+
+- **决定**：伴生脚本新增面板开关「空闲自动停会话（省配额）」（**全局**键 `bnc:idleStop`，默认关）：每 60s
+  问一次 dashboard 新增的只读端点 `GET /api/hubQueue`（逐课合成 `pending`/`inflight`/`pendingUnheld`/
+  `heldLive`，与总览同一条 `liveHub()` 腿）；整条队列静默（`pendingUnheld=0 ∧ inflight=0`，自主盘再加
+  `heldLive=0`）满 10 分钟 ⇒ `empty`，连续 3 拍问不到 ⇒ `unreachable`；判决成立后走 60s 倒计时（可取消），
+  再按角色停会话（Kaggle host `stopNow()`：先 flush 再点外层 Stop；Colab/AI Studio/魔搭走本页 `stopSession`）。
+  每一步落 op（`idleStop:on/off/miss/quiet/due/cancel/stop`）。
+- **被否决**：① 页面直接问 hub（伴生脚本的 `@connect` 只有回环，隧道域名/tailnet IP 不可枚举，且 hub token
+  不该进浏览器）；② 以「cell 结束」为判据（worker 启动后空转与训练结束后静默同形，cell 状态读不到也不可靠）；
+  ③ 一拍就停（两轮之间训练侧还没发下一份 job ⇒ 白掐一次会话）；④ 按页存开关（Kaggle 面板在外层页，里层
+  不生效）；⑤ 把在飞当「没活」（本机正在算的那份就是 inflight，缺它 = 掐掉自己的 job）；⑥ 只看
+  `pending`/`inflight`、不看课程 live hold（自主盘整课在本机跑时 hub 队列全静默，开训 10 分钟后会掐掉在训
+  会话；协作盘反过来要剔除被 hold 压住的 pending）。
+- **后果**：云机会话在「没活可干」时自己收摊，不再空烧配额；hub/队列的读面完全不变（新增端点只读、`activity:false`
+  不进空闲闸）。旧版 dashboard 没有该端点 ⇒ 页面按「问不到」计拍，3 拍后同样停会话（行为对旧版仍是「省配额」）。
+
+—— 全文（背景 / 通道 / 边界 / 验证）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-notebook-idle-stop

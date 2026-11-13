@@ -66,6 +66,7 @@ import { monitorTouch } from '../core/reload-touch'
 import {
   buildBcEpochsView,
   buildCompareTrendsView,
+  buildHubQueueSummary,
   buildEvalCkptsView,
   buildEvalGamesView,
   buildEvalReplayJobView,
@@ -677,6 +678,18 @@ async function main(): Promise<void> {
     return json({ ok: true, hubUrl })
   }
 
+  // hub 队列汇总（云机 worker 页判「还要不要烧配额」）：只读 + 同一个自定义头。
+  // 页面只拿「有没有活」（合计 + 逐课计数），jid/持有人/接管面一概不出去。
+  const hubQueueRoute: RouteFn = async (req) => {
+    if (req.headers.get('X-Notebook-Companion') !== '1') {
+      return json(
+        { ok: false, reason: '缺少 X-Notebook-Companion: 1（跨源网页发不了这个头）' },
+        403,
+      )
+    }
+    return json(await buildHubQueueSummary())
+  }
+
   // 操作日志（面板按钮 / 命令 / 调度事件）：与 `/api/notebookLog` 同一套防线，但**零状态**
   // ——不占 epoch/offset/租约，只往 `<session>.ops.jsonl` 追加一行。
   const notebookOpRoute: RouteFn = async (req) => {
@@ -932,6 +945,7 @@ async function main(): Promise<void> {
     // 静态先于通配：这四条都必须在 `/api/log/*` 之前（typed POST：自定义头 + 有界 body）。
     '/api/notebookLogs': { GET: guard(notebookLogsRoute) },
     '/api/notebookHub': { GET: guard(notebookHubRoute) },
+    '/api/hubQueue': { GET: guard(hubQueueRoute, { activity: false }) },
     '/api/notebookLog': { POST: guard(notebookLogRoute, { activity: false }) },
     '/api/notebookOps': { GET: guard(notebookOpsRoute) },
     '/api/notebookOp': { POST: guard(notebookOpRoute, { activity: false }) },

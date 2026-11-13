@@ -188,3 +188,22 @@ export function loadStopPpo(runtime: Runtime, page: string, fallback = false): b
 export function saveStopPpo(runtime: Runtime, page: string, enabled: boolean): void {
   runtime.setValue(stopPpoKeyFor(page), enabled === true)
 }
+
+/**
+ * 面板「空闲自动停会话」——**全局**开关（不按页）：停的是这台机器/这个会话的配额，一个会话只有
+ * 一份，任何页面（host / 单文档站点）读到的是同一个值；多开页签各自停自己的会话本就该同时生效。
+ *
+ * 为什么不做成按页：Kaggle 的面板在外层页，而判据（hub 队列）在两层都能取，按页只会让
+ * 「我在外层开了开关、里层却不生效」变成一道没人猜得到的坑。
+ */
+export const IDLE_STOP_KEY = 'bnc:idleStop'
+
+/** 读全局开关；缺省 / 坏值 ⇒ fallback（默认关：停会话不可逆）。 */
+export function loadIdleStop(runtime: Runtime, fallback = false): boolean {
+  const raw = runtime.getValue(IDLE_STOP_KEY, null)
+  return typeof raw === 'boolean' ? raw : fallback
+}
+
+export function saveIdleStop(runtime: Runtime, enabled: boolean): void {
+  runtime.setValue(IDLE_STOP_KEY, enabled === true)
+}

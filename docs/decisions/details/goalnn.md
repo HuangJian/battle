@@ -7429,3 +7429,54 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   可作参考，需人工决定是否重开一轮。修复保证**下一次**重启不再把「hub 不认识」误判成 job 不存在。
 - **违反后果**：再让 `course_of` 只看内存课程表、或让 trainer 按 manifest 最新认领，会在任何
   hub/trainer 重启后重演「worker 在训、trainer 在等新 job、账本零行」。
+
+## §2026-11-13-goalnn-notebook-idle-stop
+
+- **背景**：云机 worker 页（Kaggle/Colab/AI Studio/魔搭）按分钟烧配额，而两种情况下它会**长时间**拿不到活：
+  ① hub 不可达（cloudflared 隧道换 URL / hub 进程停）；② 整条 hub 队列静默（没有 `pending`、没有 `inflight`）。
+  用户口径：「云机 worker 启动或者完成课程训练后，如果 hub 不可达或者没有待训练任务，则自动关闭对话节省配额。」
+  会话只能由浏览器停（Kaggle 的 Stop 在外层页，其余站点在页面里），所以判决必须落到伴生脚本。
+- **事实面（dashboard 侧，只读）**：`GET /api/hubQueue`（`src/server/api/hub-queue.ts`）——
+  `summarizeHubQueue(liveHub(cfg,''))` ⇒ `{ok, hubUrl, pending, inflight, pendingUnheld, heldLive, courses}`；
+  逐课 `pending`/`inflight` 夹成非负整数再合计，坏数字不传播成 `NaN`；`pendingUnheld` = 没有 live hold 的课的
+  pending（协作盘真能领的那部分），`heldLive` = 有 live hold 的课程数；没有 hub 应答 ⇒ `ok:false` + 空计数 +
+  `reason`。与 `/api/notebookHub` 同一道自定义头闸（`X-Notebook-Companion: 1`：跨源网页发不了），路由表登记 GET、
+  handler 用 `guard(..., {activity:false})`（轮询不算「有人在看」）。
+- **为什么不能只看 `pending`/`inflight`（2026-11-13 复核补的硬伤）**：自主盘整课在本机跑
+  rollout/ppo（`remote.run_loop`），hub 队列**完全静默**——trainer 侧按 `held` 列表等待、不发布新 job。
+  只按 `pending=0 ∧ inflight=0` 判空会在开训 10 分钟后把正在训练的云机会话掐掉。课程的 live hold
+  （`hold.state=live`，进度打点维持）是这条腿唯一可读的「正在训练」证据；`stale` 不算（那是掉线，
+  按设计可被自动接管）。反过来，协作盘领不到被 live hold 压住的课的 pending，那些计数不能把它钉活。
+- **判决（userscript 侧）**：`app/idle-stop.ts::createIdleStop`
+  - `facts()` 每拍调用；`null`（网络异常 / 非 200 / `ok:false` / 坏载荷）⇒ `misses += 1`，到
+    `UNREACHABLE_ATTEMPTS=3` ⇒ `unreachable`；中间问到一次就清零。
+  - `pendingUnheld + inflight > 0` ⇒ `busy`，计窗清零；**在飞也算活**（本机正在算的那份就是 inflight）；
+    被别的盘 live hold 压住的 pending 对协作盘不算活。
+  - **自主盘**（页面识别到 `battle.offline.ipynb` 的训练 cell，`autonomous: () => offlineDetected`）：
+    `heldLive > 0` 也算活——整课在跑时只有 hold 能证明「正在训练」。
+  - 静默起点记在 `quietSince`，满 `IDLE_WINDOW_MS=10min` ⇒ `empty`（detail 带可领/在飞/合计/hold 四个读数）。
+  - 判决只喊一次（`fired` 闩），`reset()` 重新武装（面板关掉/取消倒计时后调用）。
+  - 旧版 dashboard 没有新键 ⇒ `pendingUnheld` 退化成全部 `pending`、`heldLive=0`（保守：宁可不停）；
+    键在但值坏 ⇒ 整拍按「不可知」计，绝不当 0 处理。
+- **执行（`boot.ts`，host 与 single 两条腿同口径）**：`IDLE_POLL_MS=60s` 定时 `poll()`；`onDue` ⇒ 先
+  `await ops.flush()` 落证据（会话停掉后这份日志可能没人再搬），再 `panel.countdown('即将停会话：…', 60)`；
+  `doc.hidden`（后台页弹不出倒计时）按开关的预授权执行——与调度器 `confirm` 同一条口径。停会话：host 走
+  `stopNow()`（frame flush → 外层 Stop），single 走 `send('stopSession')`；收尾 op `idleStop:stop ok|fail …`。
+- **备选与否决**：① 页面直接 `GM_xmlhttpRequest` 问 hub——否（`@connect` 只有 `127.0.0.1`/`localhost`；隧道域名
+  与 tailnet IP 不可枚举，widening `@connect` 会把「只跟回环说话」这条前提打破，hub token 也不该进浏览器）；
+  ② 以 cell 执行态作判据——否（worker 启动后空转与训练结束后静默同形，Jupyter 状态栏在 Kaggle 常读不到）；
+  ③ 一拍就停——否（两轮之间训练侧往往隔几分钟才发下一份 job）；④ 开关按页存——否（Kaggle 面板在外层页，
+  按页会出现「外层开了里层不生效」）；⑤ 「没有 pending 就停」不看 inflight——否（会掐掉本机正在算的 job）；
+  ⑥ 只看 `pending`/`inflight`、不看课程 live hold——否（自主盘整课在本机跑时 hub 队列全静默，开训 10 分钟
+  后就会把正在训练的会话掐掉；协作盘反过来要剔除被 hold 压住的 pending，否则永远等不到「空」）。
+- **验证**：`dashboard/tests/hub-queue.test.ts`（合计/hold 口径/坏值/接线）；`userscript/test/idle-stop.test.ts`
+  （计窗、在飞算活、自主盘 live hold 算活、协作盘剔除 held pending、旧载荷兼容、连续 miss、reset、
+  不可知≠空队列）；`userscript/test/idle-wiring.test.ts`（两角色各挂判决器与定时拍、倒计时与 op 证据、
+  全局键、只问回环）；`userscript/test/config.test.ts` 补全局键用例。
+  门禁：dashboard typecheck + **2119 pass**；`cd userscript && bun run check`（typecheck 68 文件 / oxlint 0 /
+  **345 pass** / dist 两份重建）。
+- **边界**：只在本页开着时判决（关页签就没人判）；旧版 dashboard 没有 `/api/hubQueue` ⇒ 按「问不到」计拍，
+  3 拍后同样停会话（对旧版是「更省配额」而非失效）；静默窗口是常量（`IDLE_WINDOW_MS`），要调就改模块里那一个数。
+  自主盘身份靠页面识别到 `battle.offline.ipynb` 的训练 cell（`offline:detected`）；识别不到时按协作盘口径判
+  （只看可领/在飞，不会把 hold 算活）。页面分不清 live hold 是谁的 ⇒ 自主盘会把**别的盘**的 hold 也算成活
+  （保守：多烧一点配额，绝不掐在训会话）；协作盘不看 hold，所以不会因此被钉住。

@@ -75,6 +75,8 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
   { path: '/api/notebookLogs', methods: ['GET'] },
   // 当前 cloudflared 隧道 URL（userscript 页首把 CFG['hub_url'] 对齐到它）：只读 GET + 自定义头。
   { path: '/api/notebookHub', methods: ['GET'] },
+  // hub 队列汇总（userscript 判「还要不要烧配额」的**唯一事实面**）：只读 GET + 同一个自定义头。
+  { path: '/api/hubQueue', methods: ['GET'] },
   { path: '/api/notebookLog', methods: ['POST'] },
   // 操作日志（面板/命令/调度事件）：写入是 typed POST、读取仍是 GET。
   { path: '/api/notebookOps', methods: ['GET'] },

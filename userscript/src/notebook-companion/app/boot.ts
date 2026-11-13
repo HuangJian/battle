@@ -4,8 +4,10 @@ import {
   applyPageAutoSave,
   autoSaveKeyFor,
   loadConfig,
+  loadIdleStop,
   loadStopPpo,
   saveAutoSave,
+  saveIdleStop,
   saveStopPpo,
   type BncConfig,
 } from '../config'
@@ -45,6 +47,13 @@ import {
 import { installAutoContinue } from './auto-continue'
 import { runFrameCommand, type CommandDeps, type CommandReply } from './commands'
 import { createOfflineWatch } from './offline-watch'
+import {
+  createIdleStop,
+  fetchHubQueueFacts,
+  IDLE_CONFIRM_SEC,
+  IDLE_POLL_MS,
+  type IdleStopDue,
+} from './idle-stop'
 import { createStopCmdPoller } from './stop-cmd'
 import { describeHubSync, startHubUrlSync } from './hub-sync'
 import {
@@ -625,6 +634,14 @@ function startHost(
         op('stopPpo', enabled ? 'on' : 'off')
         return null
       },
+      // 全局开关（不按页）：停的是这台机器的会话，两个角色都读同一个键。
+      idleStop: loadIdleStop(runtime, false),
+      onIdleStopChange: (enabled) => {
+        saveIdleStop(runtime, enabled)
+        op('idleStop:switch', enabled ? 'on' : 'off')
+        idleStop?.reset() // 重新武装：刚打开的窗口从下一拍重新计
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -728,6 +745,43 @@ function startHost(
       })
     : null
   stopCmd?.start()
+
+  // 空闲停会话（选项在面板，开关全局）：hub 不可达 / 队列静默 ⇒ 倒计时（可取消）⇒ stopNow。
+  // 判据只看 dashboard 的 /api/hubQueue：页面不碰 hub 地址与 token（与 hub_url 同步同一条纪律）。
+  const onIdleDue = async (due: IdleStopDue): Promise<void> => {
+    const text =
+      due.kind === 'unreachable' ? `hub 不可达（${due.detail}）` : `没有待训练任务（${due.detail}）`
+    op('idleStop:due', text)
+    await ops.flush() // 先把证据排空：会话停掉之后这份日志可能没人再搬
+    panel?.setStatus(`空闲停会话：${text}`, 'warn')
+    // 后台页弹不出倒计时 ⇒ 按开关的预授权执行（与调度器 confirm 同一口径），证据行已落。
+    const proceed =
+      doc.hidden || !panel ? true : await panel.countdown(`即将停会话：${text}`, IDLE_CONFIRM_SEC)
+    if (!proceed) {
+      op('idleStop:cancel', text)
+      idleStop?.reset() // 取消后重新计窗（不然这次判决之后再也不喊）
+      panel?.setStatus('已取消：空闲停会话', 'ok')
+      return
+    }
+    const r = await stopNow()
+    op('idleStop:stop', `${r.ok ? 'ok' : 'fail'} ${text}${r.ok ? '' : `：${r.reason ?? '未知'}`}`)
+    panel?.setStatus(
+      r.ok ? '空闲停会话已执行（hub 上没活了）' : `空闲停会话失败：${r.reason ?? '未知'}`,
+      r.ok ? 'ok' : 'error',
+    )
+  }
+  const idleStop = config.enabled
+    ? createIdleStop({
+        enabled: () => loadIdleStop(runtime, false),
+        // 离线训练页（battle.offline.ipynb）：整课在本机跑时 hub 队列静默，得把 live hold 算成活。
+        autonomous: () => offlineDetected,
+        facts: () => fetchHubQueueFacts({ runtime, dashboardBase: config.dashboardBase }),
+        onEvent: op,
+        onDue: (due) => void onIdleDue(due),
+      })
+    : null
+  const idleTimer = idleStop ? setInterval(() => void idleStop.poll(), IDLE_POLL_MS) : null
+
   // 倒计时只上 cell 徽标：每秒把「运行 cell」的剩余时间刷进帧内（不占面板）；
   // 同一拍把标签页标题钉住（Kaggle 会把它覆写回固定文案）。
   const markTimer = setInterval(() => {
@@ -784,6 +838,7 @@ function startHost(
   return () => {
     clearInterval(timer)
     clearInterval(markTimer)
+    if (idleTimer !== null) clearInterval(idleTimer)
     autoContinue.dispose()
     stopCmd?.stop()
     sched?.stop()
@@ -1023,6 +1078,14 @@ function startSingle(
         op('stopPpo', enabled ? 'on' : 'off')
         return null
       },
+      // 全局开关（不按页）：停的是这台机器的会话，两个角色都读同一个键。
+      idleStop: loadIdleStop(runtime, false),
+      onIdleStopChange: (enabled) => {
+        saveIdleStop(runtime, enabled)
+        op('idleStop:switch', enabled ? 'on' : 'off')
+        idleStop?.reset() // 重新武装：刚打开的窗口从下一拍重新计
+        return null
+      },
       onScheduleAdd: async (input) => {
         op('schedule:add:request', `${input.action} ${input.at}`)
         if (!sched) {
@@ -1080,6 +1143,41 @@ function startSingle(
       })
     : null
   stopCmd?.start()
+
+  // 空闲停会话（与 host 同口径：开关全局、判据只看 /api/hubQueue）：停会话走本页适配器。
+  const onIdleDue = async (due: IdleStopDue): Promise<void> => {
+    const text =
+      due.kind === 'unreachable' ? `hub 不可达（${due.detail}）` : `没有待训练任务（${due.detail}）`
+    op('idleStop:due', text)
+    await ops.flush() // 先把证据排空：会话停掉之后这份日志可能没人再搬
+    panel?.setStatus(`空闲停会话：${text}`, 'warn')
+    // 后台页弹不出倒计时 ⇒ 按开关的预授权执行（与调度器 confirm 同一口径），证据行已落。
+    const proceed =
+      doc.hidden || !panel ? true : await panel.countdown(`即将停会话：${text}`, IDLE_CONFIRM_SEC)
+    if (!proceed) {
+      op('idleStop:cancel', text)
+      idleStop?.reset() // 取消后重新计窗（不然这次判决之后再也不喊）
+      panel?.setStatus('已取消：空闲停会话', 'ok')
+      return
+    }
+    const r = toCmd(await send('stopSession'))
+    op('idleStop:stop', `${r.ok ? 'ok' : 'fail'} ${text}${r.ok ? '' : `：${r.reason ?? '未知'}`}`)
+    panel?.setStatus(
+      r.ok ? '空闲停会话已执行（hub 上没活了）' : `空闲停会话失败：${r.reason ?? '未知'}`,
+      r.ok ? 'ok' : 'error',
+    )
+  }
+  const idleStop = config.enabled
+    ? createIdleStop({
+        enabled: () => loadIdleStop(runtime, false),
+        // 与 host 同口径：离线训练页整课在本机跑时，hub 队列静默只有 live hold 能证明在训。
+        autonomous: () => offlineDetected,
+        facts: () => fetchHubQueueFacts({ runtime, dashboardBase: config.dashboardBase }),
+        onEvent: op,
+        onDue: (due) => void onIdleDue(due),
+      })
+    : null
+  const idleTimer = idleStop ? setInterval(() => void idleStop.poll(), IDLE_POLL_MS) : null
 
   // 魔搭的 notebook 身份在 URL 里没有（帧地址只有 `?t=&lang=`），只能等工作台把标签渲染出来；
   // 读到就换日志键/任务桶，最多等 30s（换键 = 换一份日志，与 host 的 attach 同口径）。
@@ -1232,6 +1330,7 @@ function startSingle(
 
   return () => {
     clearInterval(markTimer)
+    if (idleTimer !== null) clearInterval(idleTimer)
     if (offlineTimer !== null) clearInterval(offlineTimer)
     if (identityTimer !== null) clearInterval(identityTimer)
     stopCmd?.stop()

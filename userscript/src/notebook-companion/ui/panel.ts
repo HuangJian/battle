@@ -106,6 +106,9 @@ export interface PanelOptions {
   /** 「启动后停止其它 ppo worker」本页设置（默认关；只在离线训练页显示）。 */
   stopPpo?: boolean
   onStopPpoChange?: (enabled: boolean) => string | null | void | Promise<string | null | void>
+  /** 「空闲自动停会话」全局设置（默认关：hub 不可达 / 队列静默 ⇒ 倒计时后停会话省配额）。 */
+  idleStop?: boolean
+  onIdleStopChange?: (enabled: boolean) => string | null | void | Promise<string | null | void>
 }
 
 interface ButtonSpec {
@@ -304,7 +307,10 @@ export function mountPanel(
     `<div class="group"><div class="glabel">自动</div>` +
     `<label class="arow"><input type="checkbox" data-auto="enabled"> 每 ` +
     `<input type="number" data-auto="minutes" min="1" max="1440" step="1" inputmode="numeric">` +
-    ` 分钟保存并清空</label></div>` +
+    ` 分钟保存并清空</label>` +
+    `<label class="arow" title="hub 不可达（连续 3 拍问不到）或整条队列静默 10 分钟 ⇒ 倒计时 60s 后停会话">` +
+    `<input type="checkbox" data-idle="enabled"> 空闲自动停会话（省配额）</label>` +
+    `<div class="snote">判据只看 hub 队列：没有可领的活、也没有在飞才算空闲；自主盘整课在跑时按课程 hold 算在训。停前 60s 倒计时可取消。</div></div>` +
     `<div class="group"><div class="glabel">定时（一次性 · <span data-tz></span> · 页面开着才跑）</div>` +
     `<div class="srow"><input type="text" data-sched="at" value="09:00" maxlength="5" inputmode="numeric"` +
     ` title="24 小时制 HH:MM；早于现在就是明天" placeholder="HH:MM">` +
@@ -346,6 +352,7 @@ export function mountPanel(
   const autoMinutes = shadow.querySelector('[data-auto="minutes"]') as HTMLInputElement
   const ppoGroup = shadow.querySelector('[data-ppo-group]') as HTMLElement
   const ppoEnabled = shadow.querySelector('[data-ppo="enabled"]') as HTMLInputElement
+  const idleEnabled = shadow.querySelector('[data-idle="enabled"]') as HTMLInputElement
   const ask = shadow.querySelector('[data-ask]') as HTMLElement
   const askText = shadow.querySelector('[data-ask-text]') as HTMLElement
   const askCancel = shadow.querySelector('[data-ask-cancel]') as HTMLElement
@@ -357,6 +364,7 @@ export function mountPanel(
   autoMinutes.value = String(autoSave.intervalMin)
   autoMinutes.disabled = !autoSave.enabled
   ppoEnabled.checked = options.stopPpo === true
+  idleEnabled.checked = options.idleStop === true
 
   // 本地时区（任务用墙钟，不存 UTC）：显示出来，操作员不用猜
   const offsetMin = -new Date().getTimezoneOffset()
@@ -729,6 +737,28 @@ export function mountPanel(
       .catch((e: unknown) => setStatus(e instanceof Error ? e.message : String(e), 'error'))
   }
   ppoEnabled.addEventListener('change', applyStopPpo)
+
+  function applyIdleStop(): void {
+    const enabled = idleEnabled.checked
+    const ret = options.onIdleStopChange?.(enabled)
+    if (ret === undefined) {
+      setStatus('空闲停会话未接线', 'warn')
+      return
+    }
+    void Promise.resolve(ret)
+      .then((err) => {
+        if (typeof err === 'string' && err) setStatus(err, 'error')
+        else
+          setStatus(
+            enabled
+              ? '已开启：hub 不可达 / 队列静默 10 分钟 ⇒ 倒计时后停会话'
+              : '已关闭：空闲停会话',
+            'ok',
+          )
+      })
+      .catch((e: unknown) => setStatus(e instanceof Error ? e.message : String(e), 'error'))
+  }
+  idleEnabled.addEventListener('change', applyIdleStop)
 
   schedAction.addEventListener('change', () => {
     schedAckWrap.hidden = schedAction.value !== 'stop-session'
