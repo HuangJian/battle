@@ -484,8 +484,9 @@ describe('console/api.buildStateView — 共享 trainer 心跳（plan/single-res
       const flipMs = (hbA!.ts + hbA!.ageSec + 0.5) * 1000
       while (Date.now() < flipMs + 20) await new Promise((r) => setTimeout(r, 5))
       const b = await api.buildStateView()
-      // ① 真的跨过了边界（复现当初的触发条件；不是「碰巧没跨」）
-      expect(b.trainerHeartbeat!.ageSec).toBe(hbA!.ageSec + 1)
+      // ① 真的跨过了边界（复现当初的触发条件；不是「碰巧没跨」）。
+      // 慢快照可能跨过不止一个整秒边界 ⇒ 只要求「至少 +1」，不把墙钟耗时写死。
+      expect(b.trainerHeartbeat!.ageSec).toBeGreaterThanOrEqual(hbA!.ageSec + 1)
       // ② 除墙钟龄之外的全部事实仍逐字相同——这句就是本条要钉的语义
       expect(hbFrozen(b.trainerHeartbeat)).toEqual(hbFrozen(a.trainerHeartbeat))
     } finally {
