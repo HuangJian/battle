@@ -9,14 +9,29 @@
 from __future__ import annotations
 
 import os
+import warnings
 from typing import Any
 
 from common.protocol import ProtocolError
+
+#: Paddle 3.x 在 `import paddle` 期探测 ccache（`utils/cpp_extension/extension_utils.py`），
+#: 找不到就 `warnings.warn`。本仓从不经 `cpp_extension` 编译算子（训练只用预编译 wheel），
+#: 这条提示永远是噪声 —— 只按**这条文案**屏蔽，其余 UserWarning 照旧可见。
+_CCACHE_WARNING: str = r"No ccache found\."
 
 #: Paddle 侧的线程旋钮走**环境变量**（Paddle 3.3 没有 `set_num_threads`）。
 #: 两个都设：`OMP_NUM_THREADS` 管 OpenMP 并行区，`MKL_NUM_THREADS` 管 oneDNN/MKL 的 GEMM ——
 #: 只设一个等于只管一半线程池。
 THREAD_ENVS: tuple[str, ...] = ("OMP_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def silence_import_warnings() -> None:
+    """在 `import paddle` **之前**调用：屏蔽 Paddle 探测 ccache 的那条 UserWarning。
+
+    为什么不抬 `GLOG_minloglevel` / 不 `simplefilter("ignore")`：那会把 Paddle 的设备 /
+    驱动提示与本仓全部 UserWarning 一起吞掉 —— 真出问题时日志里什么都不剩。
+    """
+    warnings.filterwarnings("ignore", message=_CCACHE_WARNING, category=UserWarning)
 
 
 def apply_thread_env(n: int, *, env: dict[str, str] | None = None) -> dict[str, str]:

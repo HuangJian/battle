@@ -25,6 +25,50 @@
 
 ---
 
+## §119 hub 重启后按盘找回未认领 job + trainer 优先有训练进度的 job（2026-11-13）
+
+**现场**：g2-classic35 BC job `230f…` 在 AI Studio 上把 ep1–ep7 全传回共享盘（`epoch-weights/`、
+`bc-metrics.jsonl` 7 行、`bc-resume.json`），课程账本 `training_log.jsonl` 的 `bc_epoch` 仍 0 行；
+同时 hub 上多了一个没人领的空 job `2edb…`。
+
+**根因 A（hub 侧）**：`discover()` 只登记 1h 新鲜窗内的课程；该课等 GPU 等了 9h，trainer 重启时
+课程不在 `_order` ⇒ `course_of()` 只扫 `_order` ⇒ `/jobs/{id}/status` 404 ⇒ trainer 判
+`unknown` 并重发布。**根因 B（trainer 侧）**：同一 `it` 盘上有两个 job 时，`find_round_job` 按
+manifest 最新认领 ⇒ 选中刚发布、没人领的空 job，真正在跑/已回传的旧 job 被永久跳过。
+
+**改动**：① `hub/queue_scope._locate_by_disk()`：`_order` 无归属时按
+`<root>/<course>/remote-jobs/<jid>` 找，唯一命中且课程有 `training-enabled.txt` ⇒ 锁内
+`add_course` 按需登记（未开课目录不许被一次读请求复活；歧义仍拒答）。②
+`trainer/bc_round_job._job_progress_rank()`：2 = 有 `result/result.json`，1 = 有
+`bc-resume.json` / `bc-metrics.jsonl` / `epoch-weights/`，0 = 空壳；`find_round_job` 探测完所有
+候选后优先认领 `rank>0` 的 job，`unreachable` 仍立即保守认领。
+
+**验证**：`tests/hub/test_multi_course_hub.py` 两条重启归属用例（stale job 按盘路由 / 未开课
+目录不复活）、`tests/trainer/test_bc_loop.py` 新用例（空 job manifest 更新也不遮住在跑的旧 job）；
+hub+trainer 聚焦 144 passed，ruff / mypy 绿。决策 →
+`DECISIONS.md §2026-11-13-goalnn-hub-restart-job-reconcile`。
+
+
+## §118 Paddle 训练日志两条 warning：ccache 按文案屏蔽 + 布尔下标换 `nonzero`/`gather`（2026-11-13）
+
+**现场**：BC job（paddle 3.3.1）日志每次开跑带两条：`No ccache found`（import 期）与
+`tensor.cc:111 ... uninitialized Tensor of the reshape method is deprecated`（开跑后一次）。
+
+**定位**：本机 CPU 探针按阶段打 marker，第二条落在 `_masked_ce` 的 `z[keep]` —— Paddle 3.3 的
+布尔掩码下标在 C++ 内部对未初始化 Tensor 调 `reshape`；forward/backward/optimizer/clip 都干净。
+`nonzero` + `gather` 是同序同值的无警告写法。
+
+**改动**：`remote/paddle_env.silence_import_warnings()`（只屏蔽 `No ccache found\.` 这一条
+UserWarning，在 `bc_job`/`train_core` 的 `import paddle` 前调用）；`bc_paddle` 的
+`_masked_ce`/`_masked_acc`/值头行选择与 `engine_paddle._demo_masked_ce` 改 `_kept`（`nonzero`+
+`gather`）。
+
+**验证**：探针改前两条都在、改后两条都无；`test_bc_paddle.py` 5 例（新增行剔除等价）+
+`test_paddle_thread_env.py` 5 例（新增只吞 ccache 文案）绿；ruff 绿。决策 →
+`DECISIONS.md §2026-11-13-paddle-import-warning-noise`。
+
+---
+
 ## §117 慢/抖用例清零：drain 判据换状态 + 精确二项递推（2026-11-12）
 
 **现场**：门禁同参（forkdist 8）连跑 4 次 `--durations=0`，第 2 轮

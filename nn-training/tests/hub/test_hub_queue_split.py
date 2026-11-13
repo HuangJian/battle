@@ -136,6 +136,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "active_worker_count",
             "courses",
             "course_of",
+            # 2026-11-13（hub 重启后认不出旧 job）：课程表是 discover 的产物，而 discover
+            # 只登记「新鲜」课程 ⇒ 表里没有时按盘上 `remote-jobs/<jid>` 找归属并按需登记。
+            "_locate_by_disk",
             "_store_of",
             # ★M4b：启动参数里的模式段标记（`--course a=offline` ⇒ WARN + 忽略）。
             "mode_ignored",
@@ -578,7 +581,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 135, len(DOMAIN_METHODS)
+    # 2026-11-13：+1（`_locate_by_disk`：hub 重启后课程表还没登记时，按盘上 job 目录
+    # 找归属并按需登记——否则 `/jobs/{id}/status` 404，trainer 会把在跑的旧 job 判丢）⇒ 136。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 136, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -588,7 +593,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 135, len(seen)
+    assert len(seen) == 136, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (

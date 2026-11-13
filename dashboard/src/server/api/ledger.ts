@@ -343,6 +343,8 @@ function latestBcCodeSnapshot(course: string): BcCodeSnapshotRow | null {
 export async function buildBcEpochsView(course: string | undefined): Promise<{
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
+  /** 全部已评 `(it, epoch)`（不随 `evals` 的最近 20 条截断，按钮据此判断是否已评）。 */
+  evaluated: Array<{ it: number; epoch: number }>
   evalEveryEpochs: number | null
   pointer: BcPointerView
   /** 按**完整** epoch 行算出的缺号；面板只渲染最后 100 行，不能用切片后的行算。 */
@@ -354,6 +356,7 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
     return {
       epochs: [],
       evals: [],
+      evaluated: [],
       evalEveryEpochs: null,
       pointer: noPointer,
       missing: [],
@@ -362,6 +365,7 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   }
   let epochs: BcEpochRow[] = []
   let evals: BcEvalRow[] = []
+  let evaluated: Array<{ it: number; epoch: number }> = []
   let pointer: BcPointerView = noPointer
   let missing: number[] = []
   try {
@@ -370,6 +374,8 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
     const parsed = bcRowsFromLedgerTail(tail)
     epochs = parsed.epochs.slice(-100)
     evals = parsed.evals.slice(-20)
+    // 必须在 slice 前收集：否则超过 20 个 eval 的课程会把老 epoch 误显示成「未评」。
+    evaluated = parsed.evals.map((e) => ({ it: e.it, epoch: e.epoch }))
     pointer = bcPointerFromLedgerTail(tail)
     // 必须在 slice 之前算：150 epoch 课的面板只拿到 ep51..150，用切片行算会把
     // 实际存在的 ep1..50 全报成缺号。
@@ -388,6 +394,7 @@ export async function buildBcEpochsView(course: string | undefined): Promise<{
   return {
     epochs,
     evals,
+    evaluated,
     evalEveryEpochs,
     pointer,
     missing,

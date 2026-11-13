@@ -1028,6 +1028,7 @@ def _run_training_core_paddle(
     prep_b = LogBundle(log) if prep is None else prep
     # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
     paddle_env.apply(torch_threads, prep_b)
+    paddle_env.silence_import_warnings()
     import numpy as np
     import paddle
 

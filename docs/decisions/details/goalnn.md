@@ -7364,3 +7364,68 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   预检只记录、不拒绝。
 - **违反后果**：再把大语料整份 `np.concatenate`/`.astype` 回来，会在训练前几秒把 notebook
   打进重启，且日志没有任何训练侧读数。
+
+## §2026-11-13-paddle-import-warning-noise（2026-11-13，BC 训练日志的两条 Paddle warning）
+
+- **现场**：AI Studio BC job（paddle 3.3.1，GPU CC 7.0）日志两条：①
+  `extension_utils.py:712: UserWarning: No ccache found...`（`import paddle` 期）；②
+  `W1113 ... tensor.cc:111] The function of resetting the shape of the uninitialized Tensor of
+  the reshape method is deprecated since version 2.3...`（开跑后 ~15s 一条，每进程一次）。
+- **定位**（本机 paddle 3.3.1 CPU 即可复现，不靠云机）：探针按阶段打 marker ⇒ 第二条落在
+  `_masked_ce` 的 `z[keep]`（布尔掩码下标），不在 forward / backward / optimizer / clip。Paddle 3.3
+  的 `Tensor.__getitem__` 对 bool mask 走 C++ `_getitem_dygraph`，内部对未初始化 Tensor 调
+  `reshape` ⇒ 命中 `LOG_FIRST_N(WARNING, 1)`。`paddle.nonzero(keep).flatten()` + `paddle.gather`
+  是同一选择语义且**不打**这条警告（探针同进程验证）。
+- **决定**：① ccache 提示：`remote/paddle_env.silence_import_warnings()` 按精确文案屏蔽
+  （`warnings.filterwarnings("ignore", message=r"No ccache found\.")`），在 `bc_job` 的
+  `paddle_cuda_available()` / paddle 训练分支、`train_core` 的 paddle 核 import 前各调用一次；
+  ② `tensor.cc:111`：`bc_paddle._masked_ce/_masked_acc`、值头 `valid` 行选择、
+  `engine_paddle._demo_masked_ce` 全改 `nonzero` + `gather`。
+- **被否决**：装 ccache（训练只用预编译 wheel，不经 `cpp_extension` 编译任何算子 ⇒ 装了只消警告、
+  不省时间，镜像也不保证有）；`GLOG_minloglevel=2`（吞掉 `gpu_resources` 的 device NOTE —— 那行是
+  GPU 任务唯一的设备指纹）；全局 `simplefilter("ignore")`（业务 UserWarning 一起消失）。
+- **边界**：`nonzero` 是数据相关输出，会同步设备；与布尔下标同量级（后者同样要同步取形状），
+  且索引按 batch 只算一次、两个张量共用。屏蔽只认这一条文案，Paddle 其它 import 期 UserWarning
+  不受影响（`test_paddle_thread_env.py` 行为用例：ccache 文案被吞、业务警告照旧进 record）。
+- **验证**：本机 `bash tools/githook/nn-py-safe.sh tmp/paddle-warn-probe.py`：改前 stderr 有
+  `No ccache` + `tensor.cc:111`，改后两条都无（走真实 `_masked_ce`/`_masked_acc`/值头路径）。
+  `tests/worker/test_bc_paddle.py`（5 例，含新增 `_masked_ce` 行剔除等价用例）+
+  `tests/remote/test_paddle_thread_env.py`（5 例）绿，ruff 绿。
+
+## §2026-11-13-goalnn-hub-restart-job-reconcile（2026-11-13，hub 重启后旧 job 的 epoch 没人认）
+
+- **现场**：g2-classic35 的 BC job `230f0ed1fb418205` 在 AI Studio 上正常训练，ep1–ep7 的权重、
+  `bc-metrics.jsonl`（7 行）、`bc-resume.json` 都已回传到共享盘；课程账本 `training_log.jsonl`
+  的 `bc_epoch` 仍是 0 行，控制台 BC 表空。与此同时 hub 上多了一个没人认领的空 job
+  `2edb947f0509902d`。
+- **时间线**：11-12 23:45 发布旧 job → 11-13 05:34 trainer abort → 08:41:58 trainer 重启，
+  探 `/jobs/230f…/status` 得 404（`bc_round_job_missing`, hub_state=unknown）→ 08:45:32 取消
+  旧 job 并发布 `2edb…` → 08:44–08:45:36 worker 认领的仍是旧 job，08:49–09:07 继续上传 ep1–ep7。
+- **根因 A（hub）**：`discover()` 只登记 `<root>/<course>` 修改时间在 `DISCOVER_FRESH_SEC`（1h）
+  内的课程；该课等 GPU 已 9h，trainer 重启时课程未登记。`course_of()` 只遍历已登记的
+  `_order` ⇒ 找不到归属 ⇒ `_job_or_404` 404 ⇒ trainer 把「hub 不认识」当成 job 不存在。
+- **根因 B（trainer）**：`find_round_job` 对同一 `it` 的候选按 manifest mtime 从新到旧取第一个
+  alive；重发布出的空 job 更新 ⇒ 被选中，旧 job 永远不认领。hub 的租约/认领状态在内存里，
+  重启即失，不能作为「哪个 job 在跑」的判据。
+- **决定**：
+  - hub：`QueueScopeMixin._locate_by_disk(jid)` —— `_order` 无归属时扫
+    `<root>/<course>/remote-jobs/<jid>`，只认已开课（`training-enabled.txt`）且课程名能过
+    `parse_course_arg` 的目录；唯一命中 ⇒ 锁内 `add_course` 按需登记（否则只有哨兵路径，
+    `/status`/`/result`/`/epoch-weights` 全 404）；歧义不猜（仍返回 None + 打点）。
+  - trainer：`_job_progress_rank()` 读**共享盘**判断「真干过活」：2 = `result/result.json`；
+    1 = `bc-resume.json` / `bc-metrics.jsonl` / `epoch-weights/`；0 = 空壳。`find_round_job` 先
+    对全部候选做 hub 对账（跳过 unknown/closed），再优先认领 `rank>0`；都没有进度才回到最新
+    alive。`JOB_UNREACHABLE` 仍在探测到的那一刻立即认领（不重发，保守方向不变）。
+- **备选与否决**：① hub 重启时无条件重扫全部课程目录——否，陈旧实验目录会被复活成可派发；
+  ② trainer 只认「manifest 最新」——否，正是本次事故；③ trainer 向 hub 要租约/认领记录——否，
+  hub 内存态重启即失，盘上的 resume/metrics/result 才是可靠证据；④ 只修 hub 不修 trainer——否，
+  旧 job 能被路由后，空 job 仍会在认领时抢在旧 job 前面。
+- **验证**：`tests/hub/test_multi_course_hub.py` 新增「重启后 stale BC job 按盘路由」与「未开课
+  目录不被查询复活」；`tests/trainer/test_bc_loop.py` 新增「manifest 更新的空 job 不遮住有
+  `bc-metrics.jsonl` 的旧 job」（断言探测了两个候选）；hub+trainer 聚焦 144 passed，ruff / mypy 绿。
+- **边界 / 恢复**：按需登记只对盘上有 `training-enabled.txt` 的课程生效；已有 `closed` 终局的
+  job 仍按 closed 处理（不会因为重启复活）。本次 `230f…` 已被 trainer 取消成 closed ⇒ 新代码
+  能路由它的 `/status`/`/epoch-weights`，但不会自动认领等待结果；旧 job 的 ep1–ep7 仍留在盘上
+  可作参考，需人工决定是否重开一轮。修复保证**下一次**重启不再把「hub 不认识」误判成 job 不存在。
+- **违反后果**：再让 `course_of` 只看内存课程表、或让 trainer 按 manifest 最新认领，会在任何
+  hub/trainer 重启后重演「worker 在训、trainer 在等新 job、账本零行」。

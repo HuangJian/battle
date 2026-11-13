@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-pytest.importorskip("paddle")
+paddle = pytest.importorskip("paddle")
 
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 from worker.models.student_paddle import PPOStudent, save_weights_json
@@ -126,3 +126,34 @@ def test_paddle_bc_rejects_torch_only_device(tmp_path) -> None:
     _write_v6_shard(tmp_path / "data" / "bc_s0_seed1")
     with pytest.raises(ValueError, match="torch 专属"):
         bc_paddle.train(_args(tmp_path, device="cuda-dp"))
+
+
+def test_paddle_masked_ce_drops_rows_with_fewer_than_two_legal_classes() -> None:
+    """行选择与 torch 版同语义：0/1 个合法类的样本整行剔除，2+ 保留（`_kept` 升序 gather）。
+
+    Paddle 3.3 的布尔下标 `x[keep]` 在 C++ 里对未初始化 Tensor 调 `reshape`，每进程打一条
+    `tensor.cc:111` 弃用警告（BC 训练日志里那条）；implementation 改走 `nonzero` + `gather`，
+    本用例就钉住「同序、同值」这条等价前提。
+    """
+    logits = np.array(
+        [[2.0, 0.5, -1.0], [0.1, 0.2, 0.3], [0.0, 0.0, 0.0], [-0.5, 1.5, 0.25]],
+        dtype=np.float32,
+    )
+    mask = np.array([[1, 1, 1], [1, 0, 0], [0, 0, 0], [1, 1, 0]], dtype=np.float32)
+    target = np.array([2, 1, 0, 1], dtype=np.int64)
+
+    loss = bc_paddle._masked_ce(
+        paddle.to_tensor(logits), paddle.to_tensor(target), paddle.to_tensor(mask)
+    )
+    acc = bc_paddle._masked_acc(
+        paddle.to_tensor(logits), paddle.to_tensor(target), paddle.to_tensor(mask)
+    )
+
+    z = np.where(mask > 0, logits, -1e9).astype(np.float32)
+    z = z - z.max(axis=1, keepdims=True)
+    logp = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+    kept = mask.sum(axis=1) >= 2
+    ref = float((-logp[np.arange(len(target)), target])[kept].mean())
+    assert float(loss) == pytest.approx(ref, rel=1e-5)
+    # 保留行：row0 预测 0（错）、row3 预测 1（对）⇒ 0.5。
+    assert acc == pytest.approx(0.5)

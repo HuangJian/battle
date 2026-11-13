@@ -52,6 +52,7 @@ import {
 } from '../bundles'
 import { runRunPythonAsyncModule } from '../run-python'
 import { launchEvalA } from '../eval-a-run'
+import { launchEvalBc } from '../eval-bc-run'
 import { ALL_COMPONENTS } from './component-meta'
 import { loadConfigSafe } from './config'
 import { actionCtx } from './courses'
@@ -176,6 +177,7 @@ const COURSE_MUTATING_ACTIONS = new Set([
   'stopCourse',
   'setCoursePaused',
   'evalA',
+  'evalBcEpoch',
   'evalReplays',
   'evalProbeRun',
   'evalLadderStart',
@@ -552,6 +554,17 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
           return errResp(r.message, r.code === 'busy' || r.code === 'full' ? 409 : 500)
         }
         // 忙时不再拒：r.message 是「已启动」或「已排队（前面 N 个…）」——面板直接上屏。
+        return okResp({ ok: true, message: r.message })
+      }
+      case 'evalBcEpoch': {
+        // BC Epoch 表的逐 epoch 补评：只启动一次性 python，结果由账本 bc_eval 回填。
+        if (!ctx.course) return errResp('缺少 course', 400)
+        const it = Number(body.it)
+        const epoch = Number(body.epoch)
+        if (!Number.isInteger(it) || it <= 0) return errResp('it 必须为正整数', 400)
+        if (!Number.isInteger(epoch) || epoch <= 0) return errResp('epoch 必须为正整数', 400)
+        const r = launchEvalBc(ctx.course, it, epoch)
+        if (!r.ok) return errResp(r.message, r.code === 'busy' ? 409 : 500)
         return okResp({ ok: true, message: r.message })
       }
       case 'exportTaskBundle': {

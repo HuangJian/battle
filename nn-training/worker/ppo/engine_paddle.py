@@ -91,7 +91,11 @@ def _demo_masked_ce(
     if not bool(keep.any()):
         return logits.sum() * 0.0
     z = paddle.where(m, logits, paddle.full_like(logits, -1e9))
-    per = F.cross_entropy(z[keep], target.astype("int64")[keep], reduction="none")
+    # `x[keep]`（布尔下标）在 Paddle 3.3 打一条 `tensor.cc:111` 弃用警告 ⇒ nonzero+gather（同序）。
+    idx = paddle.nonzero(keep).flatten()
+    per = F.cross_entropy(
+        paddle.gather(z, idx), paddle.gather(target.astype("int64"), idx), reduction="none"
+    )
     return per.mean()
 
 

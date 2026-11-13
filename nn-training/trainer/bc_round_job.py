@@ -153,6 +153,24 @@ def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
     return p
 
 
+def _job_progress_rank(job_dir: Path) -> int:
+    """job 目录的「真干过活」证据：2 = 有结果；1 = 有 BC 进度；0 = 空壳。
+
+    为什么读盘而不是问 hub（2026-11-13）：同一 `it` 重发布出两个 job 时，manifest 最新的
+    那个通常是**没人领的空 job**，而 hub 的内存租约一重启就没了；但训练产物（resume /
+    metrics / epoch 快照 / result）落在共享盘上，是重启后仍然可靠的「这个 job 真跑过」证据。
+    """
+    if (job_dir / "result" / "result.json").exists():
+        return 2
+    if (
+        (job_dir / "bc-resume.json").exists()
+        or (job_dir / "bc-metrics.jsonl").exists()
+        or (job_dir / "epoch-weights").is_dir()
+    ):
+        return 1
+    return 0
+
+
 def find_round_job(
     job_root: Path,
     it: int,
@@ -165,7 +183,7 @@ def find_round_job(
 ) -> tuple[str, dict] | None:
     """盘上找**这一轮已发布、还没收口**且 hub 仍可等的 job → `(jid, manifest)`。"""
     done = completed_jids or set()
-    cands: list[tuple[float, str, dict]] = []
+    cands: list[tuple[float, str, dict, Path]] = []
     try:
         entries = sorted(
             p
@@ -190,19 +208,20 @@ def find_round_job(
             mt = mp.stat().st_mtime
         except OSError:
             mt = 0.0
-        cands.append((mt, jid, m))
+        cands.append((mt, jid, m, mp.parent))
     if not cands:
         return None
     cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
     if len(cands) > 1:
-        others = ", ".join(j for _t, j, _m in cands[1:])
+        others = ", ".join(j for _t, j, _m, _d in cands[1:])
         log(
             f"[run_bc] it{it}: 盘上有 {len(cands)} 个未收口 bc job，按 manifest 时间从新到旧"
             f" 对账（其余不回收，可能仍在云机上跑：{others}）"
         )
     if not hub_url or not token:
         return cands[0][1], cands[0][2]
-    for _mt, jid, m in cands:
+    alive: list[tuple[str, dict, Path]] = []
+    for _mt, jid, m, jd in cands:
         state = job_reconcile_state(hub_url, token, jid)
         if state in (JOB_UNKNOWN, JOB_CLOSED):
             why = "hub 侧不存在" if state == JOB_UNKNOWN else "hub 已终局"
@@ -217,8 +236,23 @@ def find_round_job(
             log(
                 f"[run_bc] it{it}: 盘上 job {jid[:12]} 的 hub 状态不可达——保守认领，不重发"
             )
-        return jid, m
-    return None
+            return jid, m
+        alive.append((jid, m, jd))
+    if not alive:
+        return None
+    # ★ 2026-11-13（重启后旧 job 的 epoch/结果没人认）：同一 it 有两个 job 时，按 manifest
+    # 最新会选中「刚发布、没人领的空 job」，真正在跑/已回传的那个被永久跳过（控制台零行）。
+    # 证据读**本地盘**（hub 与 trainer 共享同一份），不依赖 hub 的内存租约 —— 那个东西
+    # hub 一重启就没了，而 `bc-resume.json` / `bc-metrics.jsonl` / `result/` 还在。
+    for jid, m, jd in alive:
+        if _job_progress_rank(jd) > 0:
+            if (jid, m, jd) != alive[0]:
+                log(
+                    f"[run_bc] it{it}: 盘上 job {jid[:12]} 已有训练进度/结果——优先认领"
+                    "（比它新的 job 还是空的；2026-11-13 重启事故）"
+                )
+            return jid, m
+    return alive[0][0], alive[0][1]
 
 
 def prune_remote_jobs(job_root: Path, keep: int = 3) -> None:

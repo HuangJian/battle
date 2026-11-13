@@ -1244,3 +1244,62 @@ def test_http_worker_picks_up_new_course_without_restart(tmp_path: Path) -> None
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5)
+
+
+# ------------------------------------------------------ 重启后的归属（2026-11-13）
+
+
+def _seed_stale_bc_job(
+    tmp_path: Path, *, marked: bool, course: str = "g2-classic35"
+) -> tuple[Path, str, Path]:
+    """造一个「已回传结果、但课程目录已超出 discover 新鲜窗」的旧 job。"""
+    root = tmp_path / "traj"
+    jid = "2" * 16
+    course_dir = root / course
+    job_dir = course_dir / "remote-jobs" / jid
+    job_dir.mkdir(parents=True)
+    if marked:
+        (course_dir / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+    (job_dir / "manifest.json").write_text(
+        json.dumps({"job_id": jid, "it": 1, "kind": "bc"}), encoding="utf-8"
+    )
+    (job_dir / "result").mkdir()
+    (job_dir / "result" / "result.json").write_text(
+        json.dumps({"job_id": jid, "metrics": {"epochs": 7}}), encoding="utf-8"
+    )
+    # 目录做旧到新鲜窗之外：`discover(force=True)` 明确不会登记它。
+    old = time.time() - 2 * _HubQueue.DISCOVER_FRESH_SEC
+    for p in (course_dir / "remote-jobs", job_dir, job_dir / "manifest.json"):
+        os.utime(p, (old, old))
+    return root, jid, job_dir
+
+
+def test_hub_restart_routes_unregistered_stale_job_by_disk(tmp_path: Path) -> None:
+    """hub 重启后课程还没进表（目录超出 1h 新鲜窗），也必须能路由旧 job 的结果。
+
+    2026-11-13 事故：BC job 在队列里等了 9h，hub 重启时 `discover` 因新鲜窗不登记该课
+    ⇒ `/jobs/{id}/status` 404 ⇒ trainer 判「job missing」并重新发布，而云机 worker 正
+    拿着旧 job 在训（epoch 全回传到旧 jid、课程账本零行、控制台空白）。
+    job 目录本身就是归属证据 ⇒ 表里没有时按盘找，找到即按需登记。
+    """
+    root, jid, job_dir = _seed_stale_bc_job(tmp_path, marked=True)
+    hub = _HubQueue({}, order=[], discover_root=root)
+    assert hub.discover(force=True) == [], "前提：不新鲜 ⇒ 常规发现不登记"
+
+    assert hub.course_of(jid) == "g2-classic35"
+    assert hub._stores.get("g2-classic35") is not None, (
+        "按需登记没建 store ⇒ 后续 claim/result 仍是 404"
+    )
+    assert hub._stores["g2-classic35"].job_root == job_dir.parent
+    assert hub._job_dir(jid) == job_dir
+    assert hub.get_result(jid) == {"job_id": jid, "metrics": {"epochs": 7}}
+    assert hub._locate_cache[jid] == "g2-classic35"
+
+
+def test_hub_restart_does_not_resurrect_unmarked_course(tmp_path: Path) -> None:
+    """未开课的目录不许被一次读请求复活（陈旧实验目录不重新进表、不变成可派发）。"""
+    root, jid, _job_dir = _seed_stale_bc_job(tmp_path, marked=False)
+    hub = _HubQueue({}, order=[], discover_root=root)
+    assert hub.course_of(jid) is None
+    assert hub._stores.get("g2-classic35") is None
+    assert jid not in hub._locate_cache

@@ -60,6 +60,7 @@ import {
   saveAnyComponent,
 } from '../core/registry'
 import { launchSpec } from '../core/proc'
+import { evalBcRunning } from './eval-bc-run'
 import { error, info, initConsoleLog, log, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
 import {
@@ -572,8 +573,10 @@ async function main(): Promise<void> {
   }
 
   // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
-  const bcEpochsRoute: RouteFn = async (_req, { viewCourse }) =>
-    json(await buildBcEpochsView(viewCourse || undefined))
+  const bcEpochsRoute: RouteFn = async (_req, { viewCourse }) => {
+    const view = await buildBcEpochsView(viewCourse || undefined)
+    return json({ ...view, evalRunning: viewCourse ? evalBcRunning(viewCourse) : false })
+  }
 
   // 备份库状态（plan/course-metrics-persistence §3.6）：热/冷逐课 + 冷存 memo 占用。
   const courseMetricsRoute: RouteFn = async () => json(courseMetricsStatusPayload())

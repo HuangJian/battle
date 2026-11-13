@@ -316,6 +316,10 @@ def paddle_cuda_available() -> bool:
     日志上一切正常）。异常一律按 False（CPU 机/驱动异常都只是「没有 GPU」）。
     """
     try:
+        # ccache 探测提示是 import paddle 期的噪声（见 remote/paddle_env.py）。
+        from remote import paddle_env
+
+        paddle_env.silence_import_warnings()
         import paddle
 
         return bool(paddle.is_compiled_with_cuda()) and int(paddle.device.cuda.device_count()) > 0
@@ -438,6 +442,7 @@ def _run_bc_job(
         from remote import paddle_env
 
         paddle_env.apply_thread_env(torch_threads)
+        paddle_env.silence_import_warnings()
         from worker.models.student_paddle import save_weights_json as _paddle_save_weights
         from worker.train.bc_paddle import train as bc_train
 

@@ -36,7 +36,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from common.protocol import WORKER_SEEN_WINDOW_SEC
+from common.protocol import WORKER_SEEN_WINDOW_SEC, ProtocolError, parse_course_arg
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import course_finished as _course_finished
@@ -288,7 +288,16 @@ class QueueScopeMixin(QueuePeer):
             except OSError:
                 continue
         if not holders:
-            return None
+            # ★ 2026-11-13（hub 重启后认不出旧 job）：课程表是 discover 的产物，而 discover
+            # 只登记「新鲜」课程（`_course_dir_live` 的 1h 窗）。一个等 GPU 等了 9h 的 BC
+            # job，在 hub 重启那一刻已经不新鲜 ⇒ 课程不在表里 ⇒ 这里返回 None ⇒
+            # `/jobs/{id}/status` 404 ⇒ trainer 判「job missing」并重发布，而云机 worker
+            # 正拿着旧 job 在训（epoch 全回传到旧 jid，课程账本一行没有）。
+            # job 目录本身就是归属证据（与上面同一条判据）⇒ 表里没有就按盘找。
+            found = self._locate_by_disk(jid)
+            if found is None:
+                return None
+            holders = [found]
         if len(holders) > 1:
             self._note_ambiguous(jid, holders)
             return None  # 歧义**绝不**进缓存（一次歧义会变成永久归属）
@@ -346,6 +355,51 @@ class QueueScopeMixin(QueuePeer):
             "worker_id": str(hold.get("worker_id") or ""),
             "last_progress_at": float(hold_progress_at(hold)),
         }
+
+    def _locate_by_disk(self, job_id: str) -> str | None:
+        """课程表里没有它时，按盘上 `<root>/<course>/remote-jobs/<jid>` 找归属。
+
+        只认**已开课**（`training-enabled.txt`）的课程：未开课的目录不许被一次读请求
+        复活（否则陈旧实验目录会在被问一次之后重新进表、变成可派发）。
+        唯一命中 ⇒ `add_course` 按需登记（不登记就只有哨兵路径，`/status`、`/result`、
+        `/epoch-weights` 全 404 —— 2026-11-13 事故）。找不到/歧义 ⇒ None（不猜）。
+        """
+        root = self._discover_root
+        if root is None:
+            return None
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return None
+        holders: list[str] = []
+        for ent in entries:
+            try:
+                if not ent.is_dir() or ent.name in self._stores:
+                    continue
+            except OSError:
+                continue
+            try:
+                parse_course_arg(ent.name)
+            except ProtocolError:
+                continue
+            if not (ent / _ENABLE_MARKER).exists():
+                continue
+            try:
+                if not (ent / "remote-jobs" / job_id).is_dir():
+                    continue
+            except OSError:
+                continue
+            holders.append(ent.name)
+        if not holders:
+            return None
+        if len(holders) > 1:
+            self._note_ambiguous(job_id, holders)
+            return None
+        course = holders[0]
+        with self._lock:
+            if course not in self._stores:
+                self.add_course(course)
+        return course if course in self._stores else None
 
     def _note_ambiguous(self, job_id: str, holders: list[str]) -> None:
         """歧义只报一次（按 jid 去重）：`course_of` 在每个 job 作用域请求上都会跑，

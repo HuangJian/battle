@@ -613,6 +613,28 @@ def test_find_round_job_ignores_hidden_deleted_dirs(tmp_path: Path) -> None:
     assert found is not None and found[0] == "real"
 
 
+def test_newer_empty_job_does_not_shadow_running_job(tmp_path: Path, hub: FakeHub) -> None:
+    """同一 it 两个 job：manifest 最新的是空壳，有 epoch 的旧 job 才是这一轮的活（2026-11-13）。
+
+    事故：重发布后旧 job 仍在云机上训练（`bc-metrics`/ep 快照持续写盘），而 trainer 重启时
+    按 manifest 最新认领会选中没人领的新 job，永久等下去、旧 job 的 epoch 一行也不入账。
+    """
+    job_root = tmp_path / "remote-jobs"
+    for jid in ("oldjid", "newjid"):
+        (job_root / jid).mkdir(parents=True, exist_ok=True)
+        (job_root / jid / "manifest.json").write_text(
+            json.dumps({"job_id": jid, "it": 1, "kind": "bc"}), encoding="utf-8"
+        )
+    (job_root / "oldjid" / "bc-metrics.jsonl").write_text('{"epoch": 1}\n', encoding="utf-8")
+    now = time.time()
+    os.utime(job_root / "oldjid" / "manifest.json", (now - 600, now - 600))
+    os.utime(job_root / "newjid" / "manifest.json", (now, now))
+
+    found = find_round_job(job_root, 1, hub_url="http://hub", token="t")
+    assert found is not None and found[0] == "oldjid", "更新的空 job 把在跑的 job 挡住了"
+    assert len([p for p in hub.paths if p.endswith("/status")]) == 2, hub.paths
+
+
 def test_hub_unusable_job_is_republished_and_resume_loss_is_recorded(
     tmp_path: Path, hub: FakeHub, rec: Recorder
 ) -> None:

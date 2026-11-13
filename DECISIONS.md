@@ -5696,3 +5696,33 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   9.4 GiB。`load_dataset` 默认仍 eager（小语料工具行为不变），只有训练路径默认 lazy。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-corpus-lazy-mmap
+
+## §2026-11-13-paddle-import-warning-noise（Paddle 日志两条噪声：ccache 提示按文案屏蔽 + 布尔下标换 `nonzero`/`gather`）
+
+- **决定**：`remote/paddle_env.silence_import_warnings()` 在 `import paddle` 前按**文案**
+  `No ccache found\.` 屏蔽那一条 UserWarning（不抬 `GLOG_minloglevel`、不全局静音）；Paddle 侧
+  布尔下标 `x[keep]` 全部换 `nonzero` + `gather`（`bc_paddle._kept` / `engine_paddle`），消掉
+  `tensor.cc:111` 的 reshape 弃用警告。
+- **被否决**：安装 ccache（本仓不经 `cpp_extension` 编译算子，装了只消警告不省时间）；
+  `GLOG_minloglevel=2` / 全局 `simplefilter("ignore")`（连 `gpu_resources` 的 device NOTE 与业务
+  UserWarning 一起吞）；只写文档保留提示（每次开跑都带红字，运维会当故障追）。
+- **后果**：BC/PPO 训练日志不再出现这两条；`nonzero` 与 `x[keep]` 同序同值（`_masked_ce` 单测
+  钉住），索引每 batch 只算一次、两个张量共用，设备同步量与布尔下标同量级。
+
+—— 全文（定位过程 / 证据 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-paddle-import-warning-noise
+
+## §2026-11-13-goalnn-hub-restart-job-reconcile（hub 重启后按盘找回未认领 job + trainer 优先有训练进度的 job）
+
+- **决定**：① hub 的 `course_of()` 在课程表无归属时按盘
+  `<root>/<course>/remote-jobs/<jid>` 找，唯一命中且该课有 `training-enabled.txt` ⇒ 按需
+  `add_course` 登记（歧义仍拒答）；② trainer 的 `find_round_job` 对同一 `it` 的多个未收口 job
+  先探测全部候选，优先认领盘上有结果/训练进度的（`result/` > `bc-resume`/`bc-metrics`/
+  `epoch-weights` > 空壳），`unreachable` 仍立即保守认领。
+- **被否决**：hub 重启时无条件重扫全部课程目录（陈旧实验目录会被复活、变成可派发）；
+  trainer 只按 manifest 最新认领（正是本次事故：新空 job 永久遮住旧 job 的 epoch）；trainer
+  向 hub 要「哪个 job 有租约」（租约在内存里，hub 一重启就没了）。
+- **后果**：等 GPU 超过 discover 新鲜窗的 job，在 hub 重启后 `/status`、`/result`、
+  `/epoch-weights` 仍可路由；重发布出的空 job 不再抢走旧 job 的认领权。可按需登记的课程仍需
+  盘上有 `training-enabled.txt`，未开课目录不会因一次查询复活。
+
+—— 全文（背景 / 备选与否决 / 验证 / 恢复步骤）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-hub-restart-job-reconcile

@@ -178,6 +178,8 @@ TRAINER_ORCHESTRATION = frozenset(
         #: 改名后 scrub 全删（本快照按**基名**登记，改名即改这里一格）。
         "dispatch_queue",
         "eval_a_once",
+        #: 2026-11-13：dashboard BC Epoch 表的手动补评入口（复用 bc_ingest.run_epoch_eval）。
+        "eval_bc_once",
         "eval_course_once",
         "eval_dispatch",
         "eval_m1",
