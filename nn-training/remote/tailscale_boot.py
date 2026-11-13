@@ -249,7 +249,9 @@ def start_daemon(log, order: str = "") -> str:
     """
     Path(SOCK).parent.mkdir(parents=True, exist_ok=True)
     Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
-    fd = open(DAEMON_LOG, "ab")
+    # 同一个 fd 要供多次 spawn 继承（按引擎顺序重试），不能就地 with；
+    # 它随守护进程生命周期存活。
+    fd = open(DAEMON_LOG, "ab")  # noqa: SIM115
     engines: dict[str, list[str]] = {
         "kernel": ["tailscaled"],
         "userspace": [

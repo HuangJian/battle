@@ -38,7 +38,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
-from remote.hub_client import publish_job, report_job_failure, wait_job
+from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
 from tests.remote.test_remote_ppo import (  # type: ignore
     _boot_server,
     _http,
@@ -287,16 +287,15 @@ def test_republish_same_job_clears_failure_marker(tmp_path: Path) -> None:
         epochs=1,
         mb=8,
         lr=3e-4,
-        log=_QUIET,
     )
-    m = publish_job(**kwargs)  # type: ignore[arg-type]
+    m = publish_job(PublishSpec(**kwargs), log=_QUIET)  # type: ignore[arg-type]
     jid = str(m["job_id"])
     jd = jroot / jid
     (jd / FAIL_NAME).write_text(json.dumps({"reason": "bun 未安装"}), encoding="utf-8")
     store = _JobStore(jroot, tmp_path / "log.jsonl")
     assert store.claimable_job_ids() == []  # 已失败 → 不回池
 
-    m2 = publish_job(**kwargs)  # type: ignore[arg-type]
+    m2 = publish_job(PublishSpec(**kwargs), log=_QUIET)  # type: ignore[arg-type]
     assert str(m2["job_id"]) == jid, "同幂等键必须得到同 job_id（否则测的不是重试路径）"
     assert not (jd / FAIL_NAME).exists()
     assert store.claimable_job_ids() == [jid]  # 重发即重试

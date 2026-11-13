@@ -1055,13 +1055,13 @@ def test_push_ahead_zero_keeps_the_busy_worker_untouched(tmp_path: Path) -> None
 def test_trainer_publish_with_dispatch_flag_flows_through_hub_push(
     tmp_path: Path, worker_factory
 ) -> None:
-    """训练侧**真发布**（`publish_job(dispatch="push")`）→ hub 推送 → 结果可读。
+    """训练侧**真发布**（`PublishSpec(dispatch="push")`）→ hub 推送 → 结果可读。
 
     这条把「训练侧 push 改走 hub」钉在真发布链上：manifest 落盘的 `dispatch` 字面量与
     hub 的认领判据（`push_job_wants_hub_push`）必须是同一个值——写错一处就是 job 永远
     躺在队首（训练侧一直等、hub 一直不动，而两边日志都很安静）。
     """
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
 
     w1 = worker_factory()
     wfile = tmp_path / "init_weights.json"
@@ -1071,27 +1071,29 @@ def test_trainer_publish_with_dispatch_flag_flows_through_hub_push(
     store = _JobStore(tmp_path / "jobs", jsonl)
     hub = _HubQueue({"x2": store}, order=["x2"])
     m = publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id="r",
-        it=1,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(wfile),
-        dispatch="push",
+        PublishSpec(
+            job_root=tmp_path / "jobs",
+            jsonl_path=jsonl,
+            run_id="r",
+            it=1,
+            traj_dir=tmp_path / "traj",
+            shard_dirs=[],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course='{"reward":{"formula":"score"}}',
+            course_fp="f" * 64,
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=512,
+            lr=3e-4,
+            init_weights_path=str(wfile),
+            dispatch="push",
+        ),
         log=_quiet,
     )
     jid = m["job_id"]

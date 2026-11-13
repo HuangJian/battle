@@ -128,13 +128,14 @@ def test_missing_or_bad_sink_never_breaks_logging(capsys: pytest.CaptureFixture[
         def flush(self) -> None:
             raise OSError("disk gone")
 
-    from common.log import _COURSE_SINKS
+    from common.log import default_router
 
-    _COURSE_SINKS["a"] = Boom()
+    sinks = default_router().sinks
+    sinks["a"] = Boom()
     with prefix_scope("a"):
         log("still visible")  # 镜像失败只吞
     assert "still visible" in capsys.readouterr().out
-    _COURSE_SINKS.pop("a", None)
+    sinks.pop("a", None)
 
 
 def test_reopen_same_course_replaces_handle(tmp_path: Path) -> None:

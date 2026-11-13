@@ -296,7 +296,7 @@ def test_slim_transforms_land_in_the_segment() -> None:
 def test_publish_job_uses_the_round_segments_and_their_slim(tmp_path: Path) -> None:
     """§3.2 的接线：`publish_job` 把本轮段**原样**打进 payload，且 `payload_fmt` 来自
     产出它们的那份 slim（另建一份会报「未改」—— 日志骗人）。"""
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
 
     files, man = _rl_files()
     name = f"rl_s{STAGE}_seed1"
@@ -318,29 +318,31 @@ def test_publish_job_uses_the_round_segments_and_their_slim(tmp_path: Path) -> N
     (d / "obs.npy").write_bytes(b"\x00disk")
 
     m = publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=tmp_path / "training_log.jsonl",
-        run_id="r",
-        it=1,
-        traj_dir=str(it_dir),
-        shard_dirs=[d],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course="{}",
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="fh",
-        metrics_version=12,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=8,
-        lr=3e-4,
-        wire_diet=True,
-        reward_spec=_spec(),
-        presegmented=took[0],
-        diet_slim=took[1],
+        PublishSpec(
+            job_root=tmp_path / "jobs",
+            jsonl_path=tmp_path / "training_log.jsonl",
+            run_id="r",
+            it=1,
+            traj_dir=str(it_dir),
+            shard_dirs=[d],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course="{}",
+            course_fp="f" * 64,
+            reward_formula="score",
+            formula_hash="fh",
+            metrics_version=12,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=8,
+            lr=3e-4,
+            wire_diet=True,
+            reward_spec=_spec(),
+            presegmented=took[0],
+            diet_slim=took[1],
+        ),
         log=lambda _m: None,
     )
     payload = tmp_path / "jobs" / str(m["job_id"]) / "payload.tar.xz"

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import os
@@ -82,6 +83,9 @@ def atomic_write_json(path: Path | str, obj: Any, *, indent: int = 1) -> None:
 #: 每条 tmp 路径都会建一个写者——没有空闲退场就是一条线程泄漏（测试面尤其明显）。
 _JSONL_WRITER_IDLE_EXIT_SEC = 30.0
 
+#: 队列关闭哨兵：写者按 FIFO 写完它前面的行后退场。
+_CLOSE = None
+
 
 class _JsonlWriter:
     """单条路径的追加执行者：队列收**已编码的整行**，逐行 open/append/close 并回 ack。
@@ -90,9 +94,10 @@ class _JsonlWriter:
     对象被改写的竞态）；写者只做 IO，因此「同一路径任何时刻至多一个追加句柄」恒成立。
     """
 
-    def __init__(self, key: str, path: str) -> None:
+    def __init__(self, key: str, path: str, ledger: JsonlLedger) -> None:
         self.key = key
         self.path = path
+        self._ledger = ledger
         self.closed = False
         self._q: queue.SimpleQueue = queue.SimpleQueue()
         self._thread = threading.Thread(
@@ -105,14 +110,13 @@ class _JsonlWriter:
             try:
                 item = self._q.get(timeout=_JSONL_WRITER_IDLE_EXIT_SEC)
             except queue.Empty:
-                # 退场与入队都在 `_JSONL_WRITERS_LOCK` 下判定 ⇒ 不会漏掉「刚好在这时
-                # 投递」的行（投递方看到 closed 就新建写者，队列先进先出不丢序）。
-                with _JSONL_WRITERS_LOCK:
-                    if not self._q.empty():
-                        continue
-                    if _JSONL_WRITERS.get(self.key) is self:
-                        _JSONL_WRITERS.pop(self.key, None)
-                    self.closed = True
+                # 退场与入队都在账本的锁下判定 ⇒ 不会漏掉「刚好在这时投递」的行
+                #（投递方看到 closed 就新建写者，队列先进先出不丢序）。
+                if self._ledger._retire_if_idle(self):
+                    return
+                continue
+            if item is _CLOSE:
+                self.closed = True
                 return
             text, fut = item
             try:
@@ -126,12 +130,88 @@ class _JsonlWriter:
                 fut.set_result(None)
 
 
-#: 按**规范化路径**索引的单写者（见 `append_jsonl`）。
-_JSONL_WRITERS: dict[str, _JsonlWriter] = {}
-_JSONL_WRITERS_LOCK = threading.Lock()
+class JsonlLedger:
+    """按**规范化路径**索引的单写者账本 —— 显式对象（一个进程一个默认实例）。
+
+    需要隔离的场景（测试、多宿主）自建 `JsonlLedger()` 并传 `ledger=`；模块级
+    `append_jsonl` / `close_jsonl_writers` 只是默认实例的薄包装。
+    """
+
+    def __init__(self) -> None:
+        self._writers: dict[str, _JsonlWriter] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def writers(self) -> dict[str, _JsonlWriter]:
+        """当前活着的写者（诊断/测试用）。"""
+        return self._writers
+
+    def _retire_if_idle(self, writer: _JsonlWriter) -> bool:
+        """空闲写者退场判定：True = 已退场；False = 队列又有活了（调用方继续循环）。"""
+        with self._lock:
+            if not writer._q.empty():
+                return False
+            if self._writers.get(writer.key) is writer:
+                self._writers.pop(writer.key, None)
+            writer.closed = True
+            return True
+
+    def append(self, jsonl_path: str | Path, event: dict) -> None:
+        p = Path(jsonl_path)
+        text = json.dumps(event, ensure_ascii=False) + "\n"
+        # 绝对路径入键：相对路径随 CWD 变，key 漂移会造出第二个写者写同一文件。
+        abs_path = os.path.abspath(str(p))
+        key = os.path.normcase(abs_path)
+        with self._lock:
+            writer = self._writers.get(key)
+            if writer is None or writer.closed:
+                writer = _JsonlWriter(key, abs_path, self)
+                self._writers[key] = writer
+            fut: Future = Future()
+            writer._q.put((text, fut))
+        fut.result()
+
+    def close(self, *, timeout: float = 5.0) -> None:
+        """停止全部写者，并**有界地**等它们把已投递的行写完。"""
+        with self._lock:
+            writers = list(self._writers.values())
+            self._writers.clear()
+        for w in writers:
+            w.closed = True
+            w._q.put(_CLOSE)
+        deadline = time.monotonic() + timeout
+        for w in writers:
+            w._thread.join(max(0.0, deadline - time.monotonic()))
 
 
-def append_jsonl(jsonl_path: str | Path, event: dict) -> None:
+_DEFAULT_LEDGER = JsonlLedger()
+
+
+def default_ledger() -> JsonlLedger:
+    """进程默认账本（需要隔离时自建 `JsonlLedger()` 并传 `ledger=`）。"""
+    return _DEFAULT_LEDGER
+
+
+def close_jsonl_writers(
+    *, timeout: float = 5.0, ledger: JsonlLedger | None = None
+) -> None:
+    """停止全部写者，并**有界地**等它们把已投递的行写完（进程收尾用）。
+
+    为什么需要：写者线程是 `daemon=True`，进程被 kill 时队列里尚未写出的行会静默丢失——
+    调用方还停在 `fut.result()` 上，没人能感知。`atexit` 注册一次收尾，让「在飞」的写入
+    变成「已落盘」或「已带异常返回」。
+
+    幂等；关闭后再 `append_jsonl` 会重建写者（单课程收尾后还可能有后续写入）。
+    """
+    (ledger or _DEFAULT_LEDGER).close(timeout=timeout)
+
+
+atexit.register(close_jsonl_writers)
+
+
+def append_jsonl(
+    jsonl_path: str | Path, event: dict, *, ledger: JsonlLedger | None = None
+) -> None:
     """向账本追加一行 JSON（父目录按需创建）；**返回即已落盘**（写者 ack 后才返回）。
 
     为什么不是「就地 open」：两轮评估可以重叠（`trainer/loop_eval._sweep_eval_tail`
@@ -147,19 +227,7 @@ def append_jsonl(jsonl_path: str | Path, event: dict) -> None:
     账本文件随时可能被**另一个进程**读取 ⇒ 只做「打开-追加-关闭」，绝不读改写；
     半写行由读侧负责跳过（见 `biz/bc_ledger.read_events`）。
     """
-    p = Path(jsonl_path)
-    text = json.dumps(event, ensure_ascii=False) + "\n"
-    # 绝对路径入键：相对路径随 CWD 变，key 漂移会造出第二个写者写同一文件。
-    abs_path = os.path.abspath(str(p))
-    key = os.path.normcase(abs_path)
-    with _JSONL_WRITERS_LOCK:
-        writer = _JSONL_WRITERS.get(key)
-        if writer is None or writer.closed:
-            writer = _JsonlWriter(key, abs_path)
-            _JSONL_WRITERS[key] = writer
-        fut: Future = Future()
-        writer._q.put((text, fut))
-    fut.result()
+    (ledger or _DEFAULT_LEDGER).append(jsonl_path, event)
 
 
 def extract_tar_bytes(tar_bytes: bytes, dest: Path | str) -> None:

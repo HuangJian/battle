@@ -84,7 +84,8 @@ def cut_one(
     m = np.vstack([metrics[:n][keep], metrics[n][None, :]])
     np.save(os.path.join(dst, METRICS), m)
 
-    man = json.load(open(os.path.join(src, MANIFEST), encoding="utf-8"))
+    with open(os.path.join(src, MANIFEST), encoding="utf-8") as f:
+        man = json.load(f)
     man["nSamples"] = n_keep
     man["window_cut"] = {"by": "pickupDist", "max_dist": int(max_dist), "from": n, "to": n_keep}
     with open(os.path.join(dst, MANIFEST), "w", encoding="utf-8") as f:

@@ -26,6 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # 版本矩阵：`.python-version`(3.12) 是开发/发布口径，3.10 是 `requires-python` 的
+        # 下界。两者都得在 CI 里真跑——否则「>=3.10」只是元数据里的一句承诺
+        #（2026-11 审计 python.refactor.md §P1-2：此前只在 3.12 上跑）。
+        python: ['3.12', '3.10']
+        exclude:
+          # Windows 跑下界成本高（torch CPU wheel / 杀软扫描），下界由 ubuntu 覆盖
+          - os: windows-latest
+            python: '3.10'
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -55,7 +63,7 @@ jobs:
         # 裸 `uv sync` = default-groups (dev + torch-cpu)。CI runner 无 GPU，
         # 装 CPU 变体；有 GPU 的自托管 runner 走 `uv sync --no-default-groups
         # --group dev --group torch-cu128`。
-        run: uv sync --frozen
+        run: uv sync --frozen --python "${{ matrix.python }}"
 
       - name: ruff lint
         run: uv run ruff check . --config pyproject.toml

@@ -1278,7 +1278,11 @@ def run_iter_rollout(
                 ceiling_sec = game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
                 inflight: dict[Any, int] = {}
 
-                def _fill() -> None:
+                def _fill(
+                    inflight: dict[Any, int] = inflight,
+                    pending: list[Any] = pending,
+                    ceiling_sec: float = ceiling_sec,
+                ) -> None:
                     """把**空出来的槽位**立刻填满：先补重投的局，再问调度器「下一局派哪一关」。
 
                     ★ 这就是「采完一局 → 立即判断差额最大的关 → 立即用空出的 worker 采它」：

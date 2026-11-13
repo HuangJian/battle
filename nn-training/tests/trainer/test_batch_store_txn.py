@@ -247,7 +247,7 @@ def test_ledger_publish_is_the_single_writer() -> None:
             continue
         owners: list[str] = []
 
-        def walk(node: ast.AST, owner: str) -> None:
+        def walk(node: ast.AST, owner: str, owners: list[str] = owners) -> None:
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     walk(child, f"{owner}.{child.name}" if owner else child.name)

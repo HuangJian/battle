@@ -234,8 +234,8 @@ def test_publish_records_code_snapshot_freshness(
     shard.mkdir()
     logs: list[str] = []
 
-    def fake_publish(**kw: Any) -> dict:
-        job_dir = Path(kw["job_root"]) / "jid-stale"
+    def fake_publish(spec: Any, **kw: Any) -> dict:
+        job_dir = Path(spec.job_root) / "jid-stale"
         job_dir.mkdir(parents=True, exist_ok=True)
         (job_dir / "manifest.json").write_text("{}", encoding="utf-8")
         return {"job_id": "jid-stale", "code_sha256": "a" * 64}

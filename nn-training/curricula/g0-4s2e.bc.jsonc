@@ -19,7 +19,7 @@
 //   决策样本：`export-godai-labels.ts --stage-json-file tmp/god-o2-four-stages.json
 //   --stages 2000-2003 --seeds 860001-860200 --difficulty hard --max-ticks 3000
 //   --lives-override 1 --player-level 0 --wins 0 --near-miss-times 0`。
-//   `corpus.source=fixed` ⇒ 不派采集；`publish_job(kind=bc)` 把 shard 打进 payload 随
+//   `corpus.source=fixed` ⇒ 不派采集；`PublishSpec(kind=bc)` 把 shard 打进 payload 随
 //   code.zip 下发云机 GPU worker，**不需要手工搬语料**。
 //
 // ══ 3. 为什么 epochs 是 80 不是 40（用户 10:26 问）════════════════════════

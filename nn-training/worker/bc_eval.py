@@ -297,7 +297,14 @@ def dispatch_bc_eval(
         rows: list[dict[str, Any]] = []
         failed = 0
 
-        def _run_one(node: dict, stage: int, seed: int) -> dict[str, Any] | None:
+        def _run_one(
+            node: dict,
+            stage: int,
+            seed: int,
+            *,
+            src: dict[str, Any] = src,
+            level_name: str = level_name,
+        ) -> dict[str, Any] | None:
             """单局评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
 
             为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
@@ -356,7 +363,12 @@ def dispatch_bc_eval(
             work.put(task)
         lock = _th.Lock()
 
-        def slot_worker(node: dict) -> None:
+        def slot_worker(
+            node: dict,
+            work: Any = work,
+            lock: Any = lock,
+            rows: list[dict[str, Any]] = rows,
+        ) -> None:
             while True:
                 try:
                     stage, seed = work.get_nowait()

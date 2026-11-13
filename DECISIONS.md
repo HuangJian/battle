@@ -5684,3 +5684,64 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   旧 result 缺 `epochs_completed` 时行为不变。
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-12-goalnn-bc-final-eval-backfill
+
+## §2026-11-13-nn-python-audit-round4-hardening（nn-training 第四轮审计：先清 lint 债与版本矩阵，再把函数形状 / L0 纯度做成门禁）
+
+- **决定**：`B023` / `SIM115` 从 ruff 全局 `ignore` 移除并清掉 40 处；`common/log.py` 的时间戳
+  改走 `common/logutil.stamp()`（删掉第二份格式化）；JSONL 写者加 `close_jsonl_writers()` +
+  `atexit` 有界收尾；CI 矩阵加 3.10 下界并用 `uv sync --python` 真用矩阵值；新增
+  `tests/test_python_shape_budget.py` 与 `tests/test_python_version_matrix.py`。
+- **被否决**：把 `requires-python` 收紧到 `>=3.12`（现役 venv 是 3.10，会让它变成「不受支持」；
+  且 `fs.extract_tar_bytes` 的 `<3.12` 分支从未被 CI 走过）；继续全局 ignore `B023`
+  （闭包捕获循环变量是真 bug 类，实测 25 处）；一次性重写 `dispatch._run` / `publish_job`
+  （无设计评审、无真跑验证的高风险改动）。
+- **后果**：ruff/mypy 零新增豁免；函数 >200 行 / >8 参数、`common/` 模块级可变容器、
+  `global` 语句全部「只许降不许升」；训练/评估行为不变（`pytest tests/ e2e/` 5986 例全绿，
+  3 例按平台跳过）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-publishspec-and-l0-objects（发布签名收成 PublishSpec；L0 三处状态对象化）
+
+- **决定**：`publish_job` 的 55 个字段搬进 `PublishSpec`（frozen + kw_only），签名只剩
+  `spec` / `log` / 过渡 `**fields`（旧 kwargs 在入口构造对象，两条路二选一）；`common` 的
+  `_COURSE_SINKS` / `_JSONL_WRITERS` / `_WEIGHTS_PUSHED` 分别收进 `LogRouter`（ContextVar 前缀）
+  / `JsonlLedger` / `WeightsLedger`，模块函数保留为默认实例的薄包装并支持 `router=` / `ledger=`。
+- **被否决**：一次性改完 20 个调用点（测试与 e2e 里的 kwargs 形态仍合法，先保留过渡适配器，
+  避免同一笔改动同时动生产与 15 个用例文件）；把 `log` 也塞进 spec（它是出口不是发布内容，
+  塞进去会让 frozen dataclass 的比较语义带上函数对象）；给 `traj_dir` 造用途（原函数就没读过它）。
+- **后果**：新增发布字段只改 `PublishSpec` + 绑定块；`PublishSpec` 与字段 kwargs 同时给会
+  `TypeError`；L0 两实例互不串味有专项用例；`common/` 容器门禁名册从 6 条降到 3 条。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-publish-spec-callsites（publish_job 只收 PublishSpec：删过渡适配器，26 个调用点改传对象）
+
+- **决定**：`publish_job` 签名收紧为 `(spec: PublishSpec, *, log)` —— 删掉 `**fields` 过渡适配器；
+  生产 / e2e / 测试共 26 个调用点全部改为 `publish_job(PublishSpec(...)[, log=...])`。`**dict`
+  形态的测试辅助函数把 `log` 从 dict 构造里剥出、在调用处单独传。
+  `tests/remote/test_publish_spec.py` 改为断言签名只有 `["spec","log"]`、kwargs 形态直接
+  `TypeError`、同 spec 两次发布幂等。
+- **被否决**：保留过渡适配器继续双轨（两处真相，每次加字段要同步两条路）；把 `log` 放进
+  `PublishSpec`（出口回调不是发布内容）；为省行数改掉测试里的 `log` 默认值（会掩盖「谁在打日志」）。
+- **后果**：`publish_job` 不再接受字段 kwargs，传错立刻 `TypeError`；新增字段只改 `PublishSpec`
+  + 绑定块；`tests/trainer/test_bc_loop.py` 的 `fake_publish` 改收 `spec` 位置参数；
+  `trainer/bc_loop.py` 的调用改成紧凑形态，LOC 回到 998（预算 1000）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」
+
+## §2026-11-13-nn-python-audit-round4-dispatch-phases（dispatch._run 按相位拆 5 方法 + DispatchState）
+
+- **决定**：`RolloutDispatcher._run`（1184 行）按既有 ①②③ 注释切成 `_ping_gate` /
+  `_prepare_weights` / `_run_queue` / `_settle_round`，`_run` 只做编排；相位配置别名与产物
+  收进 `DispatchState`；`DispatchState` 与节点准入循环一起搬进 `trainer/dispatch_state.py`
+  （`admit_rollout_nodes(st, probe_results, cfg_nodes, dedup_streak)`），`dispatch.py` LOC 回到预算内。
+- **被否决**：把 15 个局部别名作为参数逐个传递（相位间 30+ 参数）；一次性把 `worker` 闭包也
+  方法化（499 行 + 40 个闭包变量，需单独设计与真跑验证）；为通过形状门禁上调基线
+  （那是把新增长函数登记成存量）。
+- **后果**：`_run` ~30 行、`_ping_gate` ~120 行、`_prepare_weights` ~30 行、`_settle_round` ~85 行；
+  `_run_queue` 仍 893 行（含 worker 499 行），`trainer/dispatch.py` 的长函数计数仍为 2（未上调基线）。
+  dispatch 韧性用例 24/24 绿；`_ping_gate` 必须在调 helper 前把 codeHash/bootId 等写进 `st`
+  （否则 helper 读到空串会把所有节点判掉）。
+
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `python.refactor.md` §「处理状态（2026-11-13）」

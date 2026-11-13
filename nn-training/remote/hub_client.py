@@ -27,7 +27,7 @@ import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 import）
     from remote.payload_slim import ShardSlim
@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 im
 # import**：hub 进程（`hub.queue_observe → remote.code_snapshot → 本模块`）只借本模块的
 # `pack_code_zip`/`pack_ts_code_zip`，而那两个容器模块吃 **numpy/torch** —— 顶层 import 会把它们拖进
 # hub 的 import 闭包，让 hub-server 在没装三方包的环境里启动即退（2026-10-14 事故）。它们只在**用它们
-# 的那几个函数内**局部 import（`publish_job` / `_pack_opt_init` / `verify_and_land`）；判据 =
+# 的那几个函数内**局部 import（`publish_job` / `verify_and_land`）；判据 =
 # `tests/remote/test_hub_import_graph.py`（进程级：hub 闭包不得含这两个模块）。
 from common.code_sentinel import CODE_META_NAME, code_tree_provenance
 from common.fs import append_jsonl, extract_tar_bytes
@@ -77,6 +77,7 @@ from common.protocol import (
 # 门面不同：后者只依赖 stdlib + `common.*`，留在顶层对 hub 的闭包无害）。
 # 发布端 payload 封装已下沉 `remote.payload_pack`（2026-10-14）：实现搬家、名字留门面。
 from remote.payload_pack import pack_payload_zip as pack_payload_zip
+from remote.publish_spec import PublishSpec
 from worker.resume import merge_memory_shards, shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -674,125 +675,20 @@ def pack_ts_code_zip(
     return sha
 
 
+
+
 # ------------------------------------------------------------------ 发布（磁盘 IPC）
 
 
 def publish_job(
+    spec: PublishSpec,
     *,
-    job_root: str | Path,
-    jsonl_path: str | Path,
-    run_id: str,
-    it: int,
-    traj_dir: str | Path,
-    shard_dirs: list[Path],
-    commit: str,
-    code_sha256: str,
-    code_zip_path: str | Path | None = None,
-    course: str,
-    course_fp: str,
-    # 课程短名（plan P4-W2 / S9 归属）：`args.course_name`。三字段分工——`course` =
-    # 课程 jsonc 全文快照（D6 重建输入）；`course_name` = 可读短名（审计冗余）；
-    # `course_fp` = 血缘（D14 熔断）。空串 = 旧调用，manifest 不添键（字节不变）。
-    course_name: str = "",
-    # D14 语义版（§2026-09-13-level-extraction）：语料身份 = env+reward 解析值哈希。
-    # 与 course_fp 并存进 manifest；worker 装载校验优先比它（预算/路径类课程编辑
-    # 只动 course_fp，不得触发 shard 拒收）。空 = 缺席（worker 回退 legacy 比对）。
-    corpus_fp: str = "",
-    init_weights_path: str = "",
-    ckpt_remote_dir: str | Path | None = None,
-    reward_formula: str = "",
-    formula_hash: str = "",
-    metrics_version: int = 0,
-    gamma: float = 0.0,
-    lam: float = 0.0,
-    mode: str,
-    epochs: int,
-    mb: int,
-    lr: float,
-    kl_coef: float = 0.0,
-    kl_cap: float | None = None,
-    adv_norm: str = "auto",
-    normalize_ret: bool = False,
-    kickstart_kl: float = 0.0,
-    # 熵正则系数（2026-09-11 接线）：None = 用引擎常量 ENT_COEF（0.01）。
-    ent_coef: float | None = None,
-    ref_weights_b64: str = "",
-    ref_weights_fp: str = "",
-    # wire-diet（plan/wire-diet.plan.md §3 P1/P2，2026-10-14）：payload 字节瘦身。
-    # 缺省 False = 逐字节旧行为（A/B 通过后才在 trainer 侧翻 1）。
-    # `reward_spec` 是**显式**入参而不是读 `biz.reward_context` 的模块级 holder：打包点不止
-    # 训练进程一处（hub-server 重发 / smoke_loopback / plan_run），那些进程里 holder 缺省
-    # `it=1, reward_fn=None` ⇒ 读 holder 会**静默**按 it=1 算错整轮奖励（评审 P1-4）。
-    # None = 不做 P1（照旧带 metrics.npy），只做 P2。
-    wire_diet: bool = False,
-    reward_spec: object | None = None,
-    # 零落盘（plan/payload-zero-disk §3.2，2026-10-27）：`presegmented` = shard 名 → **已压好的
-    # tar 段**（dispatch 腿收到 sampler 回传的字节时就压好的那些，`ShardSegments.add`）。
-    # 命中即不再读盘/重压；缺的（local 兜底腿 / 预采子进程 / 配额裁剪后补漏）由
-    # `_pack_segmented` 现场从盘补 —— **同一个** `shard_segment` 函数体，不是第二条变换逻辑。
-    # `diet_slim` = 产出这些段的**那份** `ShardSlim`（`ShardSegments.take` 给）；不传就按
-    # `wire_diet` 自建。为什么要传：`payload_fmt` 与 `fmt_line()` 必须描述**真正发出去的字节**
-    # —— 段全部命中时打包腿一次成员变换都不会走，自建的 slim 会报「未改」（日志骗人）。
-    presegmented: Mapping[str, bytes] | None = None,
-    diet_slim: ShardSlim | None = None,
-    # 零落盘（2026-10-28）：dispatch 腿回传 shard 的 `name → manifest`（磁盘上没有这些目录）。
-    mem: Mapping[str, dict] | None = None,
-    # demo 混 batch（x20 后续）：demo bank npz 原始字节（调用方读文件一次，见 loop_steps；
-    # 3MB 级，blob 走内容寻址，worker 首轮下载后缓存命中）。空 = 关。
-    demo_bank_bytes: bytes | None = None,
-    demo_bc_coef: float = 0.0,
-    demo_per_mb: int = 0,
-    # value 门控牵引率 ρ（x26-obs it90 诊断；0.0 = 关，老行为逐字节不变）。
-    value_anchor: float = 0.0,
-    shuffle: bool = True,
-    schedule_raw: list | None = None,
-    # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
-    # 0 = 历史行为（全收）；由 run_rl 的 `_per_stage_quota()` 算好传入。
-    per_stage_quota: int = 0,
-    # M2（plan/remote-wire-remediation §4.2）：协议瘦身开关。
-    # True → opt/ref 走内容寻址 sha（不再内联），并去掉 payload 内冗余文件；
-    # False → 逐字节回到旧行为（内联 base64、带 opt_init.tar.b64）。
-    slim: bool = False,
-    # echo 冒烟需要 payload 内的 init_weights.json（无 opt 才需要；冒烟轮可能带 opt
-    # 但仍要回显）——调用方按 args.smoke 传 True 强制带上。
-    keep_init_weights: bool = False,
-    # 任务类型（BC 整合，plan/bc-cloud-integration.plan.md §4）：缺省 "ppo" =
-    # 原行为逐字节不变；"bc" = 行为克隆 job——manifest 免除 PPO 专有键
-    # （protocol.MANIFEST_BC_EXEMPT）并并入 `extra`（arch/val_split/mirror_p/
-    # value_coef/ckpt_every）。init_weights_path 空 = BC 无 warm-start（不拷 init
-    # 文件，init_weights_fp 恒 "bc"——幂等键分量仍稳定）。
-    kind: str = "ppo",
-    extra: dict | None = None,
-    # M3（plan/remote-wire-remediation §5.2）：kind="iter" = 一整轮上云。
-    # rollout_spec 已经过 `protocol.validate_rollout_spec`（argv 白名单 + 相对路径 +
-    # 逐局 stage/seed）——本函数不再二次信任，直接进 manifest。
-    # ts_code_zip_path = 节点跑 rollout 用的 TS 运行时 zip（拷进 job 目录供 /ts_code 取）。
-    rollout_spec: dict | None = None,
-    ts_code_sha256: str = "",
-    ts_code_zip_path: str | Path | None = None,
-    # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `biz.plan.dump_plan`
-    # 规范序列化）。节点靠它自主跑完 it+1..end_it——payload 必须带此文件，manifest 记
-    # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
-    # `trainer/`（方向单一）；规范化序列化只有 `biz.plan.dump_plan` 一份，调用方自己 dump。
-    plan_bytes: bytes | None = None,
-    # 全离线（2026-09-17）：`register=False` = **只建 job 目录、不记账本也不进待领池**。
-    # 用途：把这一段任务打成可上传云机的任务包（`remote/bundle.py`）——包里的 manifest
-    # 必须由训练侧生成（课程/超参/血缘的解析者），但这条腿不发 job（云机不在网络上），
-    # 记一条 `job_pending` 只会让控制台看到一条永远等不到工人的待领任务。
-    register: bool = True,
-    # hub 中介 push 派发（2026-09-18）：非空 = `manifest.dispatch` 告知 hub「这份活由你推给
-    # GPU worker，别等 pull 来领」。由训练侧 `--remote-transport hubpush` 写定。
-    # **在 job_id 算完之后注入**（同 course_name）：切传输方式不改变 job 身份——同一轮的活
-    # 换个传输腿走，幂等键没必要跟着变（变了会让重发变成两个 job，账本上出现两条）。
-    dispatch: str = "",
-    # 归属角色（2026-09-25）：空 = 由 `kind` 推（run ⇒ offline，其余 ⇒ online——同一个
-    # 快照）；显式传 `offline`/`online` 可覆盖（离线盘手工排活、将来加 kind 时的逃生口）。
-    role: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
 
-    返回已归一化 manifest（含 job_id / payload_sha256）。幂等：同 job_id
+    所有字段走 `spec`（`PublishSpec`，见 `remote/publish_spec.py`）；`log` 只是出口
+    回调，不是发布内容。返回已归一化 manifest（含 job_id / payload_sha256）。幂等：同 job_id
     （幂等键相同）已发布 → 覆盖 payload、不重复追加 pending。
 
     kind="iter"（M3）：payload 里**没有 shard**（只有 init_weights.json + 可选 blob），
@@ -800,6 +696,63 @@ def publish_job(
     + rollout.wver）算——节点跑完后对实产目录复算，两侧同函数，相等 ⇔ 实产集 ==
     声明集（计划 §5.5①）。
     """
+    # 字段绑定：下游 1000+ 行仍用旧局部名，唯一入口是 PublishSpec。
+    # 新增字段时只改 PublishSpec + 这里一行；函数签名不再出现第 4 个参数。
+    job_root = spec.job_root
+    jsonl_path = spec.jsonl_path
+    run_id = spec.run_id
+    it = spec.it
+    # `traj_dir` 只留在 spec（历史字段，函数体不读；绑定它会被 F841 抓）
+    shard_dirs = spec.shard_dirs
+    commit = spec.commit
+    code_sha256 = spec.code_sha256
+    course = spec.course
+    course_fp = spec.course_fp
+    mode = spec.mode
+    epochs = spec.epochs
+    mb = spec.mb
+    lr = spec.lr
+    code_zip_path = spec.code_zip_path
+    course_name = spec.course_name
+    corpus_fp = spec.corpus_fp
+    init_weights_path = spec.init_weights_path
+    ckpt_remote_dir = spec.ckpt_remote_dir
+    reward_formula = spec.reward_formula
+    formula_hash = spec.formula_hash
+    metrics_version = spec.metrics_version
+    gamma = spec.gamma
+    lam = spec.lam
+    kl_coef = spec.kl_coef
+    kl_cap = spec.kl_cap
+    adv_norm = spec.adv_norm
+    normalize_ret = spec.normalize_ret
+    kickstart_kl = spec.kickstart_kl
+    ent_coef = spec.ent_coef
+    ref_weights_b64 = spec.ref_weights_b64
+    ref_weights_fp = spec.ref_weights_fp
+    wire_diet = spec.wire_diet
+    reward_spec = spec.reward_spec
+    presegmented = spec.presegmented
+    diet_slim = spec.diet_slim
+    mem = spec.mem
+    demo_bank_bytes = spec.demo_bank_bytes
+    demo_bc_coef = spec.demo_bc_coef
+    demo_per_mb = spec.demo_per_mb
+    value_anchor = spec.value_anchor
+    shuffle = spec.shuffle
+    schedule_raw = spec.schedule_raw
+    per_stage_quota = spec.per_stage_quota
+    slim = spec.slim
+    keep_init_weights = spec.keep_init_weights
+    kind = spec.kind
+    extra = spec.extra
+    rollout_spec = spec.rollout_spec
+    ts_code_sha256 = spec.ts_code_sha256
+    ts_code_zip_path = spec.ts_code_zip_path
+    plan_bytes = spec.plan_bytes
+    register = spec.register
+    dispatch = spec.dispatch
+    role = spec.role
     # R3/M4 / R1/M3：形态位常量与 blob 重打**只在真正发布时**需要 ⇒ 局部 import（理由见模块头）。
     import remote.opt_delta as opt_delta
     import remote.weights_delta as weights_delta
@@ -1034,7 +987,7 @@ def publish_job(
     zip_path = jd / PAYLOAD_NAME
     _slim: ShardSlim | None = None
     if wire_diet:
-        _slim = diet_slim
+        _slim = cast("ShardSlim | None", diet_slim)
         if _slim is None:
             from remote.payload_slim import build_slim
 
@@ -1149,14 +1102,6 @@ def publish_job(
 
 
 
-
-
-def _pack_opt_init(ckpt_remote_dir: str | Path | None) -> str:
-    """上轮 ppo_ckpt_remote → **plain base64** tar（旧内联口径，slim=false 逐字节回退）。"""
-    import remote.opt_delta as opt_delta  # 局部 import：见模块头（hub 顶层不吃三方依赖）
-
-    raw = opt_delta.opt_tar_bytes(ckpt_remote_dir)
-    return base64.b64encode(raw).decode("ascii") if raw else ""
 
 
 def _append_ledger(jsonl_path: str | Path, event: dict) -> None:

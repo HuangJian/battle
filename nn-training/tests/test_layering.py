@@ -160,6 +160,7 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 「trainer 里每个模块都必须是编排」立刻看见这六个。
 TRAINER_ORCHESTRATION = frozenset(
     {
+        "dispatch_state",
         "batch_eval",
         "batch_plan",
         "batch_runner",

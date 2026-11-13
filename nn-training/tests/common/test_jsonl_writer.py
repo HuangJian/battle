@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -145,3 +147,31 @@ def test_record_agent_meta_swallows_write_errors(tmp_path) -> None:
     bad = tmp_path / "meta-is-a-dir"
     bad.mkdir()
     worker.agent_meta.record_agent_meta(bad, {"node": "n1", "ok": True})
+
+
+def test_close_jsonl_writers_flushes_queued_lines_and_reopens(tmp_path: Path) -> None:
+    """退出收尾：**已投递未 ack** 的行必须落盘；关闭后还能再次追加（重建写者）。
+
+    这是 `close_jsonl_writers()` 的存在理由：写者线程是 daemon，进程被 kill 时队列里
+    尚未写出的行会静默丢失（调用方还停在 `fut.result()` 上）。用例直接投递一行而
+    不等 ack，模拟的正是「在飞」的那一批。
+    """
+    path = tmp_path / "ledger.jsonl"
+    common.fs.append_jsonl(path, {"i": 0})
+    # 名册是**进程级**的：同文件其他用例可能留下写者，必须按规范化 key 精确取
+    key = os.path.normcase(os.path.abspath(str(path)))
+    writer = common.fs.default_ledger().writers[key]
+    fut: Future = Future()
+    writer._q.put((json.dumps({"i": 1}) + "\n", fut))
+
+    common.fs.close_jsonl_writers()
+
+    assert fut.done() and fut.result() is None
+    assert not common.fs.default_ledger().writers, "收尾后写者名册必须清空"
+    rows = [json.loads(line)["i"] for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [0, 1]
+
+    common.fs.append_jsonl(path, {"i": 2})
+    common.fs.close_jsonl_writers()
+    rows = [json.loads(line)["i"] for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows == [0, 1, 2]

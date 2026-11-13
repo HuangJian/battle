@@ -31,6 +31,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -550,7 +551,8 @@ def run_cloud_eval(
                     # 真活跑在一条**可放弃的 daemon 线程**里，本线程只在 `ceiling_sec` 内等：
                     # 超界（不可取消的阻塞）不会把这一轮的 slot 永远按住。
                     finished, manifest = call_bounded(
-                        lambda: run_local_eval_game(
+                        partial(
+                            run_local_eval_game,
                             bun_bin,
                             str(wpath),
                             int(stage),

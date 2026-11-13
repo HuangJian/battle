@@ -624,7 +624,7 @@ def _publish_iter(
     它决定 payload 带不带 `init_weights.json`（旧条件 `not use_opt_blob or keep_init_weights`）：
     有 opt blob ⇒ 不带（权重走 init blob）；首轮/导出包无 opt blob ⇒ 带（bundle 要它）。
     """
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
 
     w = tmp_path / "init_weights.json"
     w.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
@@ -638,33 +638,35 @@ def _publish_iter(
         ckpt.mkdir(parents=True)
         (ckpt / "opt.pt").write_bytes(b"adam-state")
     m = publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id="r",
-        it=1,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp="f" * 64,
-        corpus_fp="",
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(w) if init_weights_path is None else init_weights_path,
-        ckpt_remote_dir=str(ckpt) if with_ckpt else None,
-        kind="iter",
-        rollout_spec=spec,
-        ts_code_sha256="t" * 64,
-        ts_code_zip_path=ts,
-        slim=slim,
+        PublishSpec(
+            job_root=tmp_path / "jobs",
+            jsonl_path=jsonl,
+            run_id="r",
+            it=1,
+            traj_dir=tmp_path / "traj",
+            shard_dirs=[],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course='{"reward":{"formula":"score"}}',
+            course_fp="f" * 64,
+            corpus_fp="",
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=1,
+            mb=512,
+            lr=3e-4,
+            init_weights_path=str(w) if init_weights_path is None else init_weights_path,
+            ckpt_remote_dir=str(ckpt) if with_ckpt else None,
+            kind="iter",
+            rollout_spec=spec,
+            ts_code_sha256="t" * 64,
+            ts_code_zip_path=ts,
+            slim=slim,
+        ),
         log=lambda _m: None,
     )
     return m, w
@@ -798,7 +800,7 @@ def test_publish_iter_manifest_and_layout(tmp_path: Path) -> None:
 
 def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
     """混着发（既有本地 shard 又声明上云）= 双份采集 —— 发布端就拒。"""
-    from remote.hub_client import HubClientError, publish_job
+    from remote.hub_client import HubClientError, PublishSpec, publish_job
 
     spec = validate_rollout_spec(_spec([(3, 7)]))
     sd = tmp_path / shard_name(3, 7)
@@ -807,12 +809,58 @@ def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
     w.write_text("{}", encoding="utf-8")
     with pytest.raises(HubClientError) as e:
         publish_job(
+            PublishSpec(
+                job_root=tmp_path / "jobs",
+                jsonl_path=tmp_path / "run.jsonl",
+                run_id="r",
+                it=1,
+                traj_dir=tmp_path / "traj",
+                shard_dirs=[sd],
+                commit="c" * 40,
+                code_sha256="z" * 64,
+                course="c",
+                course_fp="f" * 64,
+                reward_formula="score",
+                formula_hash="h" * 40,
+                metrics_version=1,
+                gamma=0.995,
+                lam=0.95,
+                mode="per-tick",
+                epochs=1,
+                mb=512,
+                lr=3e-4,
+                init_weights_path=str(w),
+                kind="iter",
+                rollout_spec=spec,
+                ts_code_sha256="t" * 64,
+            ),
+            log=lambda _m: None,
+        )
+    assert "不接受本地 shard" in str(e.value)
+
+
+def test_publish_iter_needs_ts_code_sha(tmp_path: Path) -> None:
+    from remote.hub_client import HubClientError
+
+    with pytest.raises(HubClientError) as e:
+        _publish_iter_missing_ts(tmp_path)
+    assert "ts_code_sha256" in str(e.value)
+
+
+def _publish_iter_missing_ts(tmp_path: Path) -> dict:
+    from remote.hub_client import PublishSpec, publish_job
+
+    spec = validate_rollout_spec(_spec([(3, 7)]))
+    w = tmp_path / "w.json"
+    w.write_text("{}", encoding="utf-8")
+    return publish_job(
+        PublishSpec(
             job_root=tmp_path / "jobs",
             jsonl_path=tmp_path / "run.jsonl",
             run_id="r",
             it=1,
             traj_dir=tmp_path / "traj",
-            shard_dirs=[sd],
+            shard_dirs=[],
             commit="c" * 40,
             code_sha256="z" * 64,
             course="c",
@@ -829,49 +877,7 @@ def test_publish_iter_refuses_local_shards(tmp_path: Path) -> None:
             init_weights_path=str(w),
             kind="iter",
             rollout_spec=spec,
-            ts_code_sha256="t" * 64,
-            log=lambda _m: None,
-        )
-    assert "不接受本地 shard" in str(e.value)
-
-
-def test_publish_iter_needs_ts_code_sha(tmp_path: Path) -> None:
-    from remote.hub_client import HubClientError
-
-    with pytest.raises(HubClientError) as e:
-        _publish_iter_missing_ts(tmp_path)
-    assert "ts_code_sha256" in str(e.value)
-
-
-def _publish_iter_missing_ts(tmp_path: Path) -> dict:
-    from remote.hub_client import publish_job
-
-    spec = validate_rollout_spec(_spec([(3, 7)]))
-    w = tmp_path / "w.json"
-    w.write_text("{}", encoding="utf-8")
-    return publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=tmp_path / "run.jsonl",
-        run_id="r",
-        it=1,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course="c",
-        course_fp="f" * 64,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(w),
-        kind="iter",
-        rollout_spec=spec,
+        ),
         log=lambda _m: None,
     )
 

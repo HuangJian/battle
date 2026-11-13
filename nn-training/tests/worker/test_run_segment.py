@@ -8,7 +8,7 @@
     今天它只剩**一个**用途：`--export-bundle` 的终点（★M2 去掉了「声明这门课归云机」那半：
     归不归云机看 hub 的 hold，见 `tests/worker/test_loop_round.py` 的 `resolve_collect_mode`
     与 `tests/trainer/test_offline_leg_retired.py::test_retired_run_source_is_tolerated_not_bricked`）；
-  * 发布形状：`publish_job(kind="run", plan_bytes=…)` 把 `plan.json` 放进 **payload**、
+  * 发布形状：`PublishSpec(kind="run", plan_bytes=…)` 把 `plan.json` 放进 **payload**、
     manifest 记 `plan_sha256`；缺计划/带本地 shard 一律**拒发**（不是静默降级）——任务包
     （`--export-bundle`，带 `export_path` ⇒ `register=False`）靠的正是这套形状；
   * 计划区间：`max_iters=n-1` ⇒ 覆盖 it+1..it+n-1（模板 argv 是给**下一轮**的）；
@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
-from remote.hub_client import HubClientError, publish_job
+from remote.hub_client import HubClientError, PublishSpec, publish_job
 from trainer.loop_steps import (
     ROLLOUT_SRCS,
     ROLLOUT_SRCS_RETIRED,
@@ -254,11 +254,10 @@ def _publish(tmp_path: Path, *, n: int = 3, it: int = 1, **over: object) -> tupl
         ts_code_sha256="t" * 64,
         ts_code_zip_path=ts,
         plan_bytes=plan_bytes,
-        log=lambda _m: None,
     )
     kw.update(over)
     (tmp_path / "run.jsonl").write_text("", encoding="utf-8")
-    m = publish_job(**kw)
+    m = publish_job(PublishSpec(**kw), log=lambda _m: None)
     return m, plan_bytes
 
 

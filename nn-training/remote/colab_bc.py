@@ -238,10 +238,11 @@ def run_training(
 
     log(f"launch: {' '.join(args)}")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    lf = open(log_path, "ab")
-    proc = subprocess.Popen(
-        args, cwd=str(nn), stdout=lf, stderr=subprocess.STDOUT, start_new_session=True
-    )
+    # 子进程在 `Popen` 里继承/复制句柄，父进程随即关掉自己那一份（不再泄漏 fd）
+    with open(log_path, "ab") as lf:
+        proc = subprocess.Popen(
+            args, cwd=str(nn), stdout=lf, stderr=subprocess.STDOUT, start_new_session=True
+        )
     s.update({"running": True, "pid": proc.pid, "base": base})
     save_state(state_f, s)
     log(f"pid={proc.pid} -> {s['total']} epochs (log: {log_path})")

@@ -61,12 +61,13 @@ def start_cloudflared(
     """启动 quick tunnel；返回 (proc, url|None)。"""
     import re
 
-    log_f = open(log_path, "w", encoding="utf-8")
-    proc = subprocess.Popen(
-        [cf_bin, "tunnel", "--url", f"http://localhost:{port}", "--logfile", str(log_path)],
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-    )
+    # 子进程继承 stdout 句柄；父进程随后关闭自己那一份（cloudflared 可能跑很久）
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        proc = subprocess.Popen(
+            [cf_bin, "tunnel", "--url", f"http://localhost:{port}", "--logfile", str(log_path)],
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+        )
     t0 = time.time()
     url = None
     while time.time() - t0 < timeout_s:
@@ -200,7 +201,6 @@ def spawn_full_worker_server(
     """
     env = dict(os.environ)
     env["PYTHONPATH"] = str(code_dir) + os.pathsep + env.get("PYTHONPATH", "")
-    log_f = open(log_path, "w", encoding="utf-8")
     argv = [
         sys.executable,
         "-u",
@@ -220,12 +220,13 @@ def spawn_full_worker_server(
     hub = str(hub_url or "").strip().rstrip("/")
     if hub:
         argv += ["--hub-url", hub]
-    return subprocess.Popen(
-        argv,
-        stdout=log_f,
-        stderr=subprocess.STDOUT,
-        env=env,
-    )
+    with open(log_path, "w", encoding="utf-8") as log_f:
+        return subprocess.Popen(
+            argv,
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
 
 
 def wait_ping(port: int, token: str, timeout_s: float = 30.0) -> bool:

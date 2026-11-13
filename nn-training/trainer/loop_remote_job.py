@@ -232,6 +232,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
         from remote.code_snapshot import published_code_zip
         from remote.hub_client import (
+            PublishSpec,
             git_head,
             iter_shard_dirs,
             publish_job,
@@ -458,79 +459,81 @@ class TrainingRemoteJob(TrainingRemotePush):
         #   各占多少。不改 manifest、不写盘、失败也不影响流程（`time.time()` 不会抛）。
         t_std = time.time()
         manifest = publish_job(
-            job_root=job_root,
-            jsonl_path=str(self._jsonl_path),
-            run_id=run_id,
-            it=it,
-            traj_dir=args.traj,
-            shard_dirs=shard_dirs,
-            # 零落盘：dispatch 腿的 shard 只在内存账里（`data_fp` / 验收对账读它）。
-            mem=mem,
-            init_weights_path=args.out,
-            ckpt_remote_dir=ckpt_remote,
-            commit=commit,
-            code_sha256=self._code_sha256,
-            code_zip_path=self._code_zip_path,
-            course=course_text,
-            course_fp=course_fp,
-            # P4-W2 归属：课程短名（args.course_name，apply_course 挂上）；无课程为 ""。
-            course_name=str(getattr(args, "course_name", "") or ""),
-            corpus_fp=corpus_fp,
-            reward_formula=course.reward.formula,
-            formula_hash=course.reward_spec().identity(),
-            metrics_version=METRICS_VERSION,
-            gamma=float(getattr(args, "gamma", 0.995)),
-            lam=float(getattr(args, "lam", 0.95)),
-            mode=args.mode,
-            epochs=int(args.epochs),
-            mb=int(args.mb),
-            lr=float(args.lr),
-            kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
-            kl_cap=getattr(args, "_kl_cap", None),
-            ent_coef=getattr(args, "_ent_coef", None),
-            adv_norm=getattr(args, "adv_norm", "auto"),
-            normalize_ret=bool(getattr(args, "normalize_ret", 0)),
-            kickstart_kl=kick_kl,
-            ref_weights_b64=ref_b64,
-            ref_weights_fp=ref_fp,
-            demo_bank_bytes=demo_raw,
-            demo_bc_coef=demo_coef,
-            demo_per_mb=demo_per_mb,
-            # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关）。
-            value_anchor=float(getattr(args, "value_anchor", 0.0) or 0.0),
-            shuffle=True,
-            schedule_raw=course.ppo_schedule_dicts(),
-            # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
-            # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
-            per_stage_quota=self._per_stage_quota(it),
-            # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
-            slim=slim,
-            keep_init_weights=bool(getattr(args, "smoke", False)),
-            # wire-diet：真正生效的开关 + 本轮的奖励规格（课程公式的**显式**来源）。
-            wire_diet=wire_diet,
-            reward_spec=(course.reward_spec() if wire_diet else None),
-            # 零落盘：本轮已经压好的段 + 产出它们的那份 slim（`payload_fmt` 与读数同源）。
-            presegmented=presegmented,
-            diet_slim=diet_slim,
-            # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
-            # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
-            #
-            # kind=run 的**形状**保留：今天唯一带 `plan_bytes` 的调用者是 `--export-bundle`
-            # （它同时带 `export_path` ⇒ `register=False`：只建 job 目录当打包源、不进待领池）。
-            # 「发一份 kind=run 队列项、本机等 8h」那条腿 2026-09-25 退役（plan §7）——
-            # 所以谁若**不带** export_path 传 plan_bytes，就是复活了退役腿。
-            kind="run" if plan_bytes is not None else ("iter" if rollout_spec else "ppo"),
-            rollout_spec=rollout_spec,
-            plan_bytes=plan_bytes,
-            # 全离线导出：只建 job 目录（拿它当打包源），不记账本也不进待领池——
-            # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
-            register=export_path is None,
-            # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
-            dispatch="push" if hub_push else "",
-            ts_code_sha256=(
-                str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
+            PublishSpec(
+                job_root=job_root,
+                jsonl_path=str(self._jsonl_path),
+                run_id=run_id,
+                it=it,
+                traj_dir=args.traj,
+                shard_dirs=shard_dirs,
+                # 零落盘：dispatch 腿的 shard 只在内存账里（`data_fp` / 验收对账读它）。
+                mem=mem,
+                init_weights_path=args.out,
+                ckpt_remote_dir=ckpt_remote,
+                commit=commit,
+                code_sha256=self._code_sha256,
+                code_zip_path=self._code_zip_path,
+                course=course_text,
+                course_fp=course_fp,
+                # P4-W2 归属：课程短名（args.course_name，apply_course 挂上）；无课程为 ""。
+                course_name=str(getattr(args, "course_name", "") or ""),
+                corpus_fp=corpus_fp,
+                reward_formula=course.reward.formula,
+                formula_hash=course.reward_spec().identity(),
+                metrics_version=METRICS_VERSION,
+                gamma=float(getattr(args, "gamma", 0.995)),
+                lam=float(getattr(args, "lam", 0.95)),
+                mode=args.mode,
+                epochs=int(args.epochs),
+                mb=int(args.mb),
+                lr=float(args.lr),
+                kl_coef=float(getattr(args, "_kl_coef", 0.0) or 0.0),
+                kl_cap=getattr(args, "_kl_cap", None),
+                ent_coef=getattr(args, "_ent_coef", None),
+                adv_norm=getattr(args, "adv_norm", "auto"),
+                normalize_ret=bool(getattr(args, "normalize_ret", 0)),
+                kickstart_kl=kick_kl,
+                ref_weights_b64=ref_b64,
+                ref_weights_fp=ref_fp,
+                demo_bank_bytes=demo_raw,
+                demo_bc_coef=demo_coef,
+                demo_per_mb=demo_per_mb,
+                # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关）。
+                value_anchor=float(getattr(args, "value_anchor", 0.0) or 0.0),
+                shuffle=True,
+                schedule_raw=course.ppo_schedule_dicts(),
+                # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
+                # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
+                per_stage_quota=self._per_stage_quota(it),
+                # M2：瘦身开关 + 冒烟轮强制带 init_weights.json（echo 回显要用）。
+                slim=slim,
+                keep_init_weights=bool(getattr(args, "smoke", False)),
+                # wire-diet：真正生效的开关 + 本轮的奖励规格（课程公式的**显式**来源）。
+                wire_diet=wire_diet,
+                reward_spec=(course.reward_spec() if wire_diet else None),
+                # 零落盘：本轮已经压好的段 + 产出它们的那份 slim（`payload_fmt` 与读数同源）。
+                presegmented=presegmented,
+                diet_slim=diet_slim,
+                # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
+                # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
+                #
+                # kind=run 的**形状**保留：今天唯一带 `plan_bytes` 的调用者是 `--export-bundle`
+                # （它同时带 `export_path` ⇒ `register=False`：只建 job 目录当打包源、不进待领池）。
+                # 「发一份 kind=run 队列项、本机等 8h」那条腿 2026-09-25 退役（plan §7）——
+                # 所以谁若**不带** export_path 传 plan_bytes，就是复活了退役腿。
+                kind="run" if plan_bytes is not None else ("iter" if rollout_spec else "ppo"),
+                rollout_spec=rollout_spec,
+                plan_bytes=plan_bytes,
+                # 全离线导出：只建 job 目录（拿它当打包源），不记账本也不进待领池——
+                # 云机不在网络上，记一条 `job_pending` 只会让控制台看到一条永远等不到工人的任务。
+                register=export_path is None,
+                # hub 中介推送的意图（hub 读它决定「这份活由我推」；缺席 = pull，字节不变）。
+                dispatch="push" if hub_push else "",
+                ts_code_sha256=(
+                    str(getattr(self, "_ts_code_sha256", "") or "") if rollout_spec else ""
+                ),
+                ts_code_zip_path=getattr(self, "_ts_code_zip_path", None) if rollout_spec else None,
             ),
-            ts_code_zip_path=getattr(self, "_ts_code_zip_path", None) if rollout_spec else None,
             log=log,
         )
         t_pub = time.time()  # publish_job 返回点（= 打包 + 落盘 job 目录 + 写 blob/manifest 全部完成）

@@ -115,7 +115,8 @@ class _Child:
         #   单元输出里 ⇒ 同一份代码，两条腿看到的明细天差地别。
         #   现在用一根 **tee 线程**：同一份字节**同时**进 `run.log` 与 supervisor 日志，逐字透出、
         #   不加前缀（子进程自己带 `[HH:MM:SS]`）—— 因为"日志面只有一份措辞"（2026-10-25 口径）。
-        log_f = open(log_path, "a", encoding="utf-8", buffering=1)
+        # 句柄由 `_tee` 线程持有，在其 finally 里关闭（跨线程存活）
+        log_f = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
         try:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,

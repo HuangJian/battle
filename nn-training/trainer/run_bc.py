@@ -4,7 +4,7 @@
   每轮 it：
     1. 账本已有 `bc_round_completed(it)` → 跳过（断点续跑）；
     2. 语料缺额 → biz/bc_dispatch.py 派 LAN 节点采 God-AI 语料（mode=bc）；
-    3. publish_job(kind=bc) → 云端 worker 跑 train/bc.py → 回传 BC 权重；
+    3. PublishSpec(kind=bc) → 云端 worker 跑 train/bc.py → 回传 BC 权重；
     4. verify_and_land_bc → `tmp/<course>/weights.json`；
     5. 归档 backup_weights → `nn-training/weights/<prefix>/…it<N>.<ts>.json` + WEIGHTS.md 行。
 

@@ -139,7 +139,11 @@ MIN_LOCK_SITES: Final = 60
 #:     `trainer/eval_dispatch.py` 构造 `EvalRound` 时注入的两个模块级函数
 #:     （`course_logger(...)` / `record_eval_failed`），只收 round 的**数据**、收不到
 #:     round 实例 ⇒ 回不到 `EvalRound._lock`。
-MAX_OPAQUE_CALLS: Final = 18
+#:   * `JsonlLedger → 回调 _JsonlWriter`（2026-11-13，L0 对象化）—— `append()` 持锁只做
+#:     「查/建写者 + 入队」；`_JsonlWriter.__init__` 只建队列与线程，线程首动作是
+#:     `queue.get`，空闲退场取账本锁发生在 30s 超时之后（此时 `append` 已释放锁）；
+#:     `fut.result()` 在锁**外**等 ack ⇒ 不可能回头重入同一把。
+MAX_OPAQUE_CALLS: Final = 19
 
 LockKey = tuple[object, ...]
 

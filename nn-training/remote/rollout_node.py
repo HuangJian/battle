@@ -856,12 +856,14 @@ def _start_agent(
         "--cache-mb",
         str(int(cfg.get("cache_mb") or 2048)),
     ] + [str(a) for a in (cfg.get("agent_extra") or [])]
-    fh = open(agent_log, "a", encoding="utf-8", errors="replace")  # 交给 Popen 持有（本进程不关）
     env = dict(os.environ)
     env[AGENT_SUPERVISED_ENV] = "1"
-    return subprocess.Popen(
-        cmd, cwd=str(code_dir), stdout=fh, stderr=subprocess.STDOUT, env=env
-    )
+    # `Popen` 在启动时继承/复制句柄，父进程随后关掉自己那一份：长跑的 agent 不该
+    # 让 supervisor 每起一次就泄漏一个 fd。
+    with open(agent_log, "a", encoding="utf-8", errors="replace") as fh:
+        return subprocess.Popen(
+            cmd, cwd=str(code_dir), stdout=fh, stderr=subprocess.STDOUT, env=env
+        )
 
 
 def _wait_auth(agent: Any, auth_path: Path, timeout: float = 90.0) -> str:

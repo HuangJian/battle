@@ -53,7 +53,8 @@ def relabel_shard(src: str, dst: str, model, *, batch: int = 1024) -> int:
     """重写一个 shard 的动作标签；返回步数。"""
     import torch
 
-    meta = json.load(open(os.path.join(src, MANIFEST), encoding="utf-8"))
+    with open(os.path.join(src, MANIFEST), encoding="utf-8") as f:
+        meta = json.load(f)
     obs = np.load(os.path.join(src, "obs.npy"), mmap_mode="r")
     scalars = np.load(os.path.join(src, "scalars.npy"), mmap_mode="r")
     extra = np.load(os.path.join(src, "extra.npy"), mmap_mode="r")

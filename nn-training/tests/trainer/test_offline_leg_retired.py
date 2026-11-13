@@ -128,7 +128,7 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
     ]
     assert len(forwards) == 1 and "export_path=export_path" in forwards[0], forwards
 
-    # `publish_job(kind=run, plan_bytes=…)` 也只有这一处（它是上面那个发布点的内部跳）。
+    # `PublishSpec(kind=run, plan_bytes=…)` 也只有这一处（它是上面那个发布点的内部跳）。
     calls = [
         rel
         for rel, s in _prod_sources().items()

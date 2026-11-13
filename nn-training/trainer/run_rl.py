@@ -82,7 +82,8 @@ def _setup_log_redirect(args) -> None:
         try:
             p = Path(args.out_log)
             p.parent.mkdir(parents=True, exist_ok=True)
-            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))
+            # 进程级 stdout 重定向：句柄随进程退出关闭，不能就地 with
+            sys.stdout = _Tee(sys.stdout, open(p, "a", encoding="utf-8"))  # noqa: SIM115
             log(f"[launch] stdout -> {p} (tee console+file, append)")
         except Exception as e:
             log(f"WARN cannot redirect stdout to {args.out_log}: {e}")
@@ -90,7 +91,8 @@ def _setup_log_redirect(args) -> None:
         try:
             pe = Path(args.err_log)
             pe.parent.mkdir(parents=True, exist_ok=True)
-            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))
+            # 同上：进程级 stderr 重定向，句柄存活到进程退出
+            sys.stderr = _Tee(sys.stderr, open(pe, "a", encoding="utf-8"))  # noqa: SIM115
             log(f"[launch] stderr -> {pe} (tee console+file, append)")
         except Exception as e:
             log(f"WARN cannot redirect stderr to {args.err_log}: {e}")

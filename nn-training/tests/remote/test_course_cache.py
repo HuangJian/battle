@@ -261,7 +261,8 @@ def test_settle_leaves_pending_alone_on_unknown_status(tmp_path: Path) -> None:
 
 
 def _publish(tmp_path: Path, *, it: int, run_id: str = "r1", course_fp: str = COURSE_FP) -> dict:
-    from remote.hub_client import publish_job
+    from remote.hub_client import PublishSpec, publish_job
+    from tests.helpers.publish_spec import publish_fields
 
     wfile = tmp_path / "init_weights.json"
     if not wfile.exists():
@@ -270,26 +271,23 @@ def _publish(tmp_path: Path, *, it: int, run_id: str = "r1", course_fp: str = CO
     if not jsonl.exists():
         jsonl.write_text("", encoding="utf-8")
     return publish_job(
-        job_root=tmp_path / "jobs",
-        jsonl_path=jsonl,
-        run_id=run_id,
-        it=it,
-        traj_dir=tmp_path / "traj",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='{"reward":{"formula":"score"}}',
-        course_fp=course_fp,
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=1,
-        mb=512,
-        lr=3e-4,
-        init_weights_path=str(wfile),
+        PublishSpec(
+            **publish_fields(
+                tmp_path,
+                jsonl_path=jsonl,
+                run_id=run_id,
+                it=it,
+                traj_dir=tmp_path / "traj",
+                course='{"reward":{"formula":"score"}}',
+                course_fp=course_fp,
+                reward_formula="score",
+                formula_hash="h" * 40,
+                metrics_version=1,
+                mb=512,
+                lr=3e-4,
+                init_weights_path=str(wfile),
+            )
+        ),
         log=_quiet,
     )
 

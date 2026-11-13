@@ -63,6 +63,7 @@ from remote.code_snapshot import (
     workspace_code_sha,
 )
 from remote.hub_client import (
+    PublishSpec,
     git_head,
     iter_bc_shard_dirs,
     mark_job_completed,
@@ -316,7 +317,7 @@ def publish_bc_job(
     epochs = 1 if is_smoke else int(course.train.epochs)
     batch = min(int(course.train.batch), 256) if is_smoke else int(course.train.batch)
     init_src = resolve_bc_init_weights(course)
-    manifest = publish_job(
+    manifest = publish_job(PublishSpec(
         job_root=job_root,
         jsonl_path=jsonl_path,
         run_id=RUN_ID,
@@ -337,8 +338,7 @@ def publish_bc_job(
         kind="bc",
         init_weights_path=str(init_src) if init_src is not None else "",
         extra=bc_job_extra(course, it, smoke=is_smoke, course_key=course_key),
-        log=log,
-    )
+    ), log=log)
     # B7（2026-11-06）：快照是会话冻结的，但工作区可能已经变了。只告警、不拒发
     # （plan §16.2 B6）；结果落 job 旁挂文件，控制台据此显示「本次 job 快照 sha」
     # 与「过期」标记。按 pack_code_zip 的同一规则重打一份临时 zip 取 hash；

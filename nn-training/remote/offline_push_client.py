@@ -256,7 +256,8 @@ def post_task(
     except OSError:
         return None
     try:
-        fh = open(path, "rb")
+        # 流式上传需要句柄活过 `_open`，在 finally 里关闭
+        fh = open(path, "rb")  # noqa: SIM115
     except OSError:
         return None
     try:

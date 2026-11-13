@@ -1026,7 +1026,8 @@ class TrainingVolume:
             halt = threading.Event()
             live = {"total": int(total)}
 
-            def _watch(summary: object) -> None:
+            # 绑定本轮的 live/halt：回调可能在下一轮开始后才被调（避免串轮）
+            def _watch(summary: object, live: dict[str, int] = live, halt: Any = halt) -> None:
                 if not isinstance(summary, dict):
                     return
                 # 单局摘要的字段口径：本地 TS shard 写 nSamples，远端/队列 path 经

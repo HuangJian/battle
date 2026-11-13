@@ -261,6 +261,7 @@ LAYERS: dict[str, int] = {
     # 的类型 ⇒ **L0**；`hub_client` 站在它上面仍是 L1（若把它搞成 import `remote.payload_slim`，
     # 它的秩会升到 1 ⇒ hub_client 被迫升到 2 ⇒ code_snapshot 那串全要连坐重排）。
     "remote.payload_pack": 0,
+    "remote.publish_spec": 0,
     # wire-diet 的字节瘦身实现（同一 plan）：**只** import `common.*` + `numpy` +
     # `biz.reward_library` ⇒ **L0**。⚠ 它曾 import `worker.ppo.np_core` 拿文件名常量 —— 那会把
     # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到

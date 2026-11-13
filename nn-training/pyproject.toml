@@ -211,8 +211,6 @@ ignore = [
   "N806", # variable in function should be lowercase (intentional: N, B, PPO, etc.)
   "N812", # local variable should be lowercase (intentional: F for torch.nn.functional)
   "SIM105", # use contextlib.suppress (style preference, not a bug)
-  "SIM115", # use context manager for file operations (style preference)
-  "B023", # loop variable capture in closures (safe in immediately-called callbacks)
 ]
 unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-exports)
 
@@ -290,7 +288,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-ra -q --tb=short -x --timeout=60"
+addopts = "-ra -q --tb=short --timeout=60"
 # 2026-11-11：缓存迁到项目内 tmp/（与 ruff/mypy 同一理由；默认 `.pytest_cache` 落在
 # nn-training/ 根，既不在 gitignore 的 tmp/ 下，也没有任何清理器接手）。
 cache_dir = "../tmp/.pytest-cache"

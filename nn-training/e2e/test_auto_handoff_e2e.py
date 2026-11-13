@@ -724,7 +724,7 @@ from common.protocol import (
     OFFLINE_HEARTBEAT_PATH,
     ROLE_ONLINE,
 )
-from remote.hub_client import publish_job
+from remote.hub_client import PublishSpec, publish_job
 from remote.job_lifecycle import claim_job, peek_jobs
 
 
@@ -746,26 +746,28 @@ def _prod_publish(traj_root: Path, course: str, *, it: int, run_id: str) -> dict
     if not init.exists():
         init.write_text('{"format":"nn-weights-json","params":{}}', encoding="utf-8")
     return publish_job(
-        job_root=d / "remote-jobs",
-        jsonl_path=d / "training_log.jsonl",
-        run_id=run_id,
-        it=it,
-        traj_dir=d / "it-src",
-        shard_dirs=[],
-        commit="c" * 40,
-        code_sha256="z" * 64,
-        course='// course jsonc\n{"reward": {"formula": "score"}}',
-        course_fp="33" * 32,
-        init_weights_path=str(init),
-        reward_formula="score",
-        formula_hash="h" * 40,
-        metrics_version=1,
-        gamma=0.995,
-        lam=0.95,
-        mode="per-tick",
-        epochs=2,
-        mb=512,
-        lr=3e-4,
+        PublishSpec(
+            job_root=d / "remote-jobs",
+            jsonl_path=d / "training_log.jsonl",
+            run_id=run_id,
+            it=it,
+            traj_dir=d / "it-src",
+            shard_dirs=[],
+            commit="c" * 40,
+            code_sha256="z" * 64,
+            course='// course jsonc\n{"reward": {"formula": "score"}}',
+            course_fp="33" * 32,
+            init_weights_path=str(init),
+            reward_formula="score",
+            formula_hash="h" * 40,
+            metrics_version=1,
+            gamma=0.995,
+            lam=0.95,
+            mode="per-tick",
+            epochs=2,
+            mb=512,
+            lr=3e-4,
+        ),
         log=lambda _m: None,
     )
 

@@ -1471,7 +1471,9 @@ def test_progress_ping_409_outcomes_stop_pinging() -> None:
     ):
         hits: list[int] = []
 
-        def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0, _b: dict = body):
+        def fake_post(
+            url: str, token: str, log: Any, *, timeout: float = 0.0, _b: dict = body, hits: list = hits
+        ):
             hits.append(1)
             return 409, dict(_b)
 
