@@ -60,6 +60,8 @@ MOVED_NAMES = {
     "PlayerBlock",
     "StateInitBlock",
     "GreedyQuotaBlock",
+    # 2026-11-13 增 1：课程 `inference_rules` 块（评估/部署专用，训练链不认）。
+    "InferenceRulesBlock",
     "CourseConfig",
     "KickstartBurnBlock",
     "PairedKillBlock",

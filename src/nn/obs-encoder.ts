@@ -985,7 +985,7 @@ export function restrictAdvanceMask(world: World, moveIdx: number, masks: Masks)
   masks.hold[0] = corridorCells(world, p, dir, 1) > 0 ? 1 : 0
 }
 
-function isFireReady(world: World): boolean {
+export function isFireReady(world: World): boolean {
   const p = world.player
   if (!p) return false
   const iv = p.nextFireInterval ?? 0

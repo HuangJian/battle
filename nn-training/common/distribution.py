@@ -1323,6 +1323,22 @@ def fetch_task(
     # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
     # （fail-closed；本函数只透传，不查 ping）。
     decision_k: int = 10,
+    # 评估/部署链推理规则（课程 `inference_rules.skip_steel_only_shots`）：True ⇒
+    # agent 给 export-eval-game 拼 `--skip-steel-only-shots`（顶钢空枪门）。仅激活时
+    # 透传（缺席 = 老 agent 照旧，URL 逐字节不变）；agent taskKey 含 `:skipSteelShots`
+    # 后缀（缓存隔离）；旧 agent 无 skipSteelOnlyShotsSupport —— 由调用方提前排除
+    # （fail-closed；本函数只透传，不查 ping）。
+    skip_steel_only_shots: bool = False,
+    # 评估/部署链推理规则（课程 `inference_rules.break_bricks_on_path`）：True ⇒
+    # agent 拼 `--break-bricks-on-path`（拆砖免绕路）。仅激活时透传；agent taskKey
+    # 含 `:breakBricks` 后缀（缓存隔离）。
+    break_bricks_on_path: bool = False,
+    # B8 通用废射门（课程 `inference_rules.suppress_useless_fire`）：True ⇒ agent 拼
+    # `--suppress-useless-fire`。仅激活时透传；taskKey 含 `:suppressUselessFire`。
+    suppress_useless_fire: bool = False,
+    # B10 预测门（课程 `inference_rules.suppress_lead_miss_fire`）：True ⇒ agent 拼
+    # `--suppress-lead-miss-fire`。仅激活时透传；taskKey 含 `:suppressLeadMissFire`。
+    suppress_lead_miss_fire: bool = False,
     # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
     # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
     on_key: Callable[[str], None] | None = None,
@@ -1387,6 +1403,17 @@ def fetch_task(
     # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
     if int(decision_k) != 10:
         params["decisionK"] = str(int(decision_k))
+    # 顶钢空枪门：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
+    if skip_steel_only_shots:
+        params["skipSteelOnlyShots"] = "1"
+    # 拆砖免绕路：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
+    if break_bricks_on_path:
+        params["breakBricksOnPath"] = "1"
+    # B8/B10：仅激活时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
+    if suppress_useless_fire:
+        params["suppressUselessFire"] = "1"
+    if suppress_lead_miss_fire:
+        params["suppressLeadMissFire"] = "1"
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
@@ -1412,6 +1439,10 @@ def fetch_task(
                 str(params.get("decisionEvents", "")),
                 str(params.get("decisionK", "")),
                 str(params.get("labelMode", "")),
+                str(params.get("skipSteelOnlyShots", "")),
+                str(params.get("breakBricksOnPath", "")),
+                str(params.get("suppressUselessFire", "")),
+                str(params.get("suppressLeadMissFire", "")),
             )
         )
     qs = urllib.parse.urlencode(params)

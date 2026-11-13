@@ -5820,3 +5820,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   核数判据用 `global_device_count`。
 
 —— 全文（背景 / 备选与否决 / 验证 / 边界）→ `docs/decisions/details/goalnn.md` §2026-11-13-goalnn-bc-tpu-spmd-8core
+
+## §2026-11-13-goalnn-inference-rules-course-block（评估链推理规则：课程 `inference_rules` 块 + 部署面英文名）
+
+- **背景**：顶钢空枪门（历史 ID B1）确认 +6.00pp 后需要可部署的开关，但训练链必须恒关——规则会改写 PPO/DAgger 的动作分布，训练语料不再对应模型自身能力。旧方案 `--b1-gate` 是单点 CLI 且规则 ID 不直观。
+- **决定**：课程文件新增 `inference_rules` 块（默认全关；`extra="forbid"` 拼错即拒），当前唯一键 `skip_steel_only_shots`。只由 eval 链消费：`eval_course_once` → `args.skip_steel_only_shots` → 本机 `run_local_eval_game` / 远端 `fetch_task`（`?skipSteelOnlyShots=1`）→ agent 拼 `--skip-steel-only-shots`；节点能力位 `skipSteelOnlyShotsSupport`（旧 agent fail-closed）；任务键后缀 `:skipSteelShots`；报告归因 `inferenceRules.skipSteelOnlyShots`。规则 ID（B1/A3…）只作历史实验索引；配置/CLI/报告/节点参数一律用英文描述名。
+- **被否决**：① 评估链默认开——+6pp 只在 ep80/hard 上确认，其他 checkpoint/难度未验证，且历史读数会静默换口径；② 只保留 `export-eval-game` 手动开关——课程 judge/dashboard 永远用不到；③ 统一 `--inference-rules` bitmask——当前只有一条规则，先用课程块，等第二条规则过确认再抽象。
+- **后果**：课程不写块 = 行为逐字节不变；该块不进 `corpus_identity_fp`；训练 rollout 命令不读该开关（行为测试 + TS 源码门禁钉住）。代价：开启批次只派给有 `skipSteelOnlyShotsSupport` 的新 agent，旧节点被 fail-closed 排除。
+
+—— 全文 → `docs/nn/training-stack.md` §74
+
+## §2026-11-13-goalnn-break-bricks-v1-negative（拆砖免绕路 v1：判负降 dormant）
+
+- **背景**：部署面已支持课程 `inference_rules.break_bricks_on_path`（默认关；本机/远端/agent/能力位/任务键全链透传）。v1 定义 = 所选 move 方向被砖挡（hold）或 2 格内有砖（advance）且策略没开火时，朝该方向强制拆墙；基地保护圈砖不拆。
+- **决定**：175 对 screening（两臂 B1 开，ep80 × classic35-safe-base × seeds 2000002001-2005）control **46.86%** → rule **43.43%**，Δ **−3.43pp**；McNemar b=37/c=31 **p=0.545**；按关 bootstrap 95% CI **[−12.0, +5.14]**；kills 15.41→14.90。win 无改善 + CI 跨 0 ⇒ **不做确认/部署，B2 v1 降 dormant**；B1×B2 组合不再做。
+- **被否决**：① 以 pilot 继续冻结 20-seed 确认（点估计为负，先验方向不成立）；② 直接部署（违反“win 无显著改善一律不部署”）；③ 删除部署面（保留为默认关的实验开关，后续变体需新预注册）。
+- **后果**：`break_bricks_on_path` 默认 false，课程不写 = 行为逐字节不变；训练链仍不认该开关（源码门禁 + 行为测试）。B2 变体（如只在“砖是唯一阻挡且目标在砖后”时触发）需新预注册 + 新筛选段。
+
+—— 全文 → `docs/nn/training-stack.md` §74

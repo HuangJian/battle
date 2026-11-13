@@ -8,6 +8,89 @@
 
 ---
 
+## §75 评估链推理规则：B8/B10 空枪门接入 `inference_rules`（2026-11-13）
+
+**背景**：B8（通用废射门）与 B10（预测门）在 ep80/hard 的 700 对确认中分别
+**+16.29pp**（p=6.2e-12, CI [+12.43,+20.71]）与 **+13.29pp**（p=5.4e-8,
+CI [+8.86,+18.86]）。两者同一机制（抑制空枪），B10 多了「按子弹到达时刻外推」，
+按 plan §3.1 **不组合**。本轮只做部署面接线，**默认全关**，不改任何课程文件。
+
+**实现**
+- 课程块 `inference_rules` 新增两个键（`extra="forbid"`，默认 False）：
+
+  ```jsonc
+  // 二选一；同时写两个 = 课程文件响亮拒（同机制，不构成组合规则）
+  "inference_rules": { "suppress_useless_fire": true }
+  // 或
+  "inference_rules": { "suppress_lead_miss_fire": true }
+  ```
+
+  `InferenceRulesBlock` 加 `model_validator`：两键同真直接 `ValueError`。
+- 透传链与 §74 完全同构：`apply_course` 写扁平 `args.suppress_useless_fire` /
+  `args.suppress_lead_miss_fire` → `eval_course_once` 读课程块 → `BatchEvalRunner`
+  本机腿 `run_local_eval_game` / 远端腿 `fetch_task` → agent eval 分支拼
+  `--suppress-useless-fire` / `--suppress-lead-miss-fire`（rollout 分支不拼）。
+- 远端参数 `?suppressUselessFire=1` / `?suppressLeadMissFire=1`；能力位
+  `suppressUselessFireSupport` / `suppressLeadMissFireSupport`（旧 agent fail-closed）；
+  任务键仅激活时加 `:suppressUselessFire` / `:suppressLeadMissFire`；报告归因
+  `inferenceRules.{suppressUselessFire,suppressLeadMissFire}`。
+- `export-eval-game` 加同名 CLI；两 flag 同开直接 `exit 2`。默认关时报告 schema
+  与行为逐字节不变（`inferenceRules` 键不写）。
+
+**验证**：`nn-training/tests/worker/test_inference_rules_course.py` 10 例（默认/互斥/
+corpus 指纹不变/rollout 无开关/本机命令/远端参数与键/能力门）；
+`tests/agent/decision-events-taskkey.test.ts` 键后缀与顺序；
+`tests/nn/inference-rules.test.ts` 源码门禁（训练链三文件不得出现新开关与谓词）；
+`export-eval-game` 实跑 stage 0 seed 2000003001：B8/B10 各自报告归因正确，同开 exit 2。
+
+**边界**：部署面只承诺「可开、可归因、旧 agent 不混批」；**没有**任何课程默认开启，
+也没有把 `NNInput` 默认翻成 true。B8/B10 的跨 checkpoint / 难度泛化仍未测。
+
+---
+
+## §74 评估链推理规则：课程 `inference_rules` 块（2026-11-13）
+
+**背景**：顶钢空枪门（历史 ID B1）在 ep80/hard 上确认 +6.00pp（700 对，CI [+2.57,+9.57]），
+需要可部署、可归因的开关。规则改写模型输出后的动作 ⇒ **训练链必须恒关**（否则 PPO 的
+logprob 对不上实际动作、DAgger 标签分布被改），只允许评估/部署链显式开启。
+
+**实现**
+- 课程文件新增 `inference_rules` 块（`extra="forbid"`，默认全关），当前两个键
+  `skip_steel_only_shots` / `break_bricks_on_path`：
+
+  ```jsonc
+  // 只影响评估/判分链；不写 = 全关（命令与报告逐字节不变）
+  "inference_rules": { "skip_steel_only_shots": true, "break_bricks_on_path": false }
+  ```
+
+  `CourseConfig.inference_rules` 只做形状校验；
+  `apply_course` 单独写扁平 `args.skip_steel_only_shots` / `args.break_bricks_on_path`
+  （刻意不进 `flat_overrides`，训练 CLI 没有同名开关）。
+- `trainer/eval_course_once.py` 从课程文件读块（拼错响亮拒）→ 写上述两个 args；
+  `BatchEvalRunner` 的本机腿（`run_local_eval_game`）与远端腿（`fetch_task`）同值透传。
+- 远端：`?skipSteelOnlyShots=1` / `?breakBricksOnPath=1`；agent 在 **eval 分支**拼
+  `--skip-steel-only-shots` / `--break-bricks-on-path`（rollout 分支不拼）；节点能力位
+  `skipSteelOnlyShotsSupport` / `breakBricksOnPathSupport`，旧 agent fail-closed；
+  任务键仅激活时加 `:skipSteelShots` / `:breakBricks`（缓存隔离）。报告归因
+  `inferenceRules.{skipSteelOnlyShots,breakBricksOnPath}`。
+- 名称：规则 ID 只作历史索引；部署面统一英文描述名（`skip_steel_only_shots` /
+  `break_bricks_on_path` 及对应 camelCase / CLI / 能力位）。
+
+**验证**：`nn-training/tests/worker/test_inference_rules_course.py`（课程块默认/拒拼写错/
+corpus 身份不变/rollout 命令无开关/本机命令/远端参数与键/能力门）；TS
+`tests/nn/inference-rules.test.ts` 源码门禁（训练链三文件不得出现这些开关）与
+`tests/agent/decision-events-taskkey.test.ts` 键后缀；`bun run check` 与 `bun run pygate` 全绿。
+B2 v1 的 175 对 A/B（两臂 B1 开）为 **−3.43pp（p=0.545, CI [−12.0,+5.14]）** ⇒ 判负、
+降 dormant；`break_bricks_on_path` 保留为默认关的实验开关，**不得部署**。
+B4 v1（冰上反向 ⇒ 松键）的冰关 80 对 A/B 为 **−8.75pp（p=0.337, CI [−22.5,0]）** ⇒ 同样
+判负、降 dormant；`releaseReverseOnIce` 只保留为 NNInput 的实验口，**未接课程部署链**。
+
+**边界**：课程不写块 ⇒ 命令与报告逐字节不变；`inference_rules` 不进 `corpus_identity_fp`
+（训练语料身份不变）；开启批次只派给新 agent（能力位 fail-closed）；本批**不**把开关翻默认，
+B1 的跨 checkpoint/难度泛化仍需另测。
+
+---
+
 ## §73 BC 大语料内存：逐 shard mmap + 训练前预检（2026-11-13）
 
 **背景**（g2-classic35）：语料 1400 shards / 877,866 样本 / 9.7 GiB，Colab 训练报

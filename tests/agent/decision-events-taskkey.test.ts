@@ -89,3 +89,61 @@ describe('taskKey 决策周期 K 后缀（仅非默认值进键）', () => {
     )
   })
 })
+
+describe('taskKey 顶钢空枪门后缀（评估/部署专用，仅激活时进键）', () => {
+  it('缺席 = 历史键逐字节不变；开启 = 尾缀 :skipSteelShots', () => {
+    const base = taskKey('it1', 'eval', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '')).toBe(base)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '1')).toBe(
+      `${base}:skipSteelShots`,
+    )
+  })
+
+  it('与 de/k/lm 并存时顺序为 de→k→lm→skipSteelShots', () => {
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', 'de1', '5', 'argmax', '1')).toBe(
+      'it1:eval:rollout:2000:7:de1:k5:lmargmax:skipSteelShots',
+    )
+  })
+})
+
+describe('taskKey 拆砖免绕路后缀（评估/部署专用，仅激活时进键）', () => {
+  it('缺席 = 历史键逐字节不变；开启 = 尾缀 :breakBricks', () => {
+    const base = taskKey('it1', 'eval', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '')).toBe(base)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '1')).toBe(
+      `${base}:breakBricks`,
+    )
+  })
+
+  it('与顶钢门并存时顺序为 skipSteelShots→breakBricks', () => {
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '1', '1')).toBe(
+      'it1:eval:rollout:2000:7:skipSteelShots:breakBricks',
+    )
+  })
+})
+
+describe('taskKey B8/B10 空枪门后缀（评估/部署专用，仅激活时进键）', () => {
+  it('B8 缺席 = 历史键；开启 = 尾缀 :suppressUselessFire', () => {
+    const base = taskKey('it1', 'eval', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '', '')).toBe(base)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '', '1')).toBe(
+      `${base}:suppressUselessFire`,
+    )
+  })
+
+  it('B10 缺席 = 历史键；开启 = 尾缀 :suppressLeadMissFire', () => {
+    const base = taskKey('it1', 'eval', 'rollout', 2000, 7)
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '', '', '')).toBe(
+      base,
+    )
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '', '', '', '1')).toBe(
+      `${base}:suppressLeadMissFire`,
+    )
+  })
+
+  it('四个评估开关并存时顺序为 skipSteelShots→breakBricks→B8→B10', () => {
+    expect(taskKey('it1', 'eval', 'rollout', 2000, 7, '', '', '', '', '', '1', '1', '1', '1')).toBe(
+      'it1:eval:rollout:2000:7:skipSteelShots:breakBricks:suppressUselessFire:suppressLeadMissFire',
+    )
+  })
+})

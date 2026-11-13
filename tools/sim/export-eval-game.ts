@@ -54,6 +54,15 @@ import {
   BOARD,
 } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import {
+  brickAheadWithin,
+  brickBlocksAdvance,
+  leadMissShot,
+  steelOnlyShot,
+  turnWillCommit,
+  uselessShot,
+  usefulFire,
+} from '../../src/nn/inference-rules'
 import { decodeMove } from '../../src/nn/action-space'
 import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
 import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
@@ -217,6 +226,16 @@ class ScriptedInput {
 // 诊断探针开关（CLI 在 `main` 里写；默认关 ⇒ 行为与报告 schema 逐字节不变）。
 let probeFlag = false
 let holdFallback = false
+/** 顶钢空枪门（默认关；`--skip-steel-only-shots` 打开。只用于评估/部署推理，
+ *  训练链 export-rl-rollout / export-dagger-beta 不得打开）。 */
+let skipSteelOnlyShots = false
+/** 拆砖免绕路（默认关；`--break-bricks-on-path` 打开。只用于评估/部署推理，
+ *  训练链不得打开）：所选方向被砖挡/2 格内有砖且策略没开火时强制拆墙。 */
+let breakBricksOnPath = false
+/** B8 通用废射门（默认关；`--suppress-useless-fire` 打开。评估/部署专用，训练链恒关）。 */
+let suppressUselessFire = false
+/** B10 预测门（默认关；`--suppress-lead-miss-fire` 打开。评估/部署专用）。 */
+let suppressLeadMissFire = false
 /** F3：v6 的 (move, hold) 联合 argmax（默认开，与部署链 NNInput 同口径；
  * 复现旧读数用 --no-joint-argmax）。 */
 let jointArgmax = true
@@ -1317,7 +1336,66 @@ export function runEvalOne(
           if (forced && hd === 1) probe.holdForcedPredicted++
           if (!forced && hd === 1) probe.holdVoluntary++
         }
-        scripted.setAction(mv, fr, hd)
+        // 顶钢空枪门（默认关）：只抑制「即将发射方向首阻弹格是 steel、且
+        // lane 内没有可命中敌」的发射；fr=2 且转向会被拒时引擎本来就跳过，
+        // 不在此处理。与 `NNInput` 的 `skipSteelOnlyShots` 同谓词（`steelOnlyShot`）。
+        let fire = fr
+        if (skipSteelOnlyShots && v6 && fire !== 0 && world.player) {
+          const bp = world.player
+          let shotDir: Direction | null = null
+          if (fire === 1) {
+            shotDir = bp.prevMoveDir ?? bp.dir
+          } else {
+            const mvDir = MOVE4_DECODE[mv] ?? null
+            if (mvDir && turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS)) {
+              shotDir = mvDir
+            }
+          }
+          if (shotDir && steelOnlyShot(world, bp, shotDir)) fire = 0
+        }
+        // B8 通用废射门 / B10 预测门（默认关）：B1 的超集（B8）/ 加预测外推（B10）。
+        // fr=2 且转向会被拒时引擎本来就跳过，不在此处理；砖由 B2 管，谓词内豁免。
+        if ((suppressUselessFire || suppressLeadMissFire) && v6 && fire !== 0 && world.player) {
+          const bp = world.player
+          let shotDir: Direction | null = null
+          if (fire === 1) {
+            shotDir = bp.prevMoveDir ?? bp.dir
+          } else {
+            const mvDir = MOVE4_DECODE[mv] ?? null
+            if (mvDir && turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS)) {
+              shotDir = mvDir
+            }
+          }
+          if (shotDir) {
+            const suppress = suppressUselessFire
+              ? uselessShot(world, bp, shotDir)
+              : leadMissShot(world, bp, shotDir)
+            if (suppress) fire = 0
+          }
+        }
+        // 拆砖免绕路（默认关）：策略没开火、所选方向被砖挡/2 格内有砖 ⇒ 强制拆墙。
+        // 只在 fire gate ready 时置位；基地圈砖由 `brickAheadWithin` 排除。
+        if (breakBricksOnPath && v6 && fire === 0 && world.player) {
+          const bp = world.player
+          const mvDir = MOVE4_DECODE[mv] ?? null
+          if (mvDir) {
+            const wantBrick =
+              hd === 1
+                ? brickBlocksAdvance(world, bp, mvDir)
+                : brickAheadWithin(world, bp, mvDir, 2)
+            if (wantBrick && !usefulFire(world, bp, mvDir)) {
+              if (
+                turnWillCommit(world, bp, mvDir, (world.frame + 1) * TICK_MS) &&
+                masks.fire[2] === 1
+              ) {
+                fire = 2
+              } else if (bp.prevMoveDir === mvDir && masks.fire[1] === 1) {
+                fire = 1
+              }
+            }
+          }
+        }
+        scripted.setAction(mv, fire, hd)
         moveHist[mv]++
         decisions++
         // 「没在前进」的判据随动作空间变（与 export-rl-rollout 的 stopHeld 同源）：
@@ -1977,6 +2055,10 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
     else if (argv[i] === '--probe') probeFlag = true
     else if (argv[i] === '--hold-fallback') holdFallback = true
+    else if (argv[i] === '--skip-steel-only-shots') skipSteelOnlyShots = true
+    else if (argv[i] === '--break-bricks-on-path') breakBricksOnPath = true
+    else if (argv[i] === '--suppress-useless-fire') suppressUselessFire = true
+    else if (argv[i] === '--suppress-lead-miss-fire') suppressLeadMissFire = true
     else if (argv[i] === '--joint-argmax') jointArgmax = true
     else if (argv[i] === '--pickup-bias') pickupBias = parseFloat(argv[++i])
     else if (argv[i] === '--pickup-radius') pickupRadius = parseInt(argv[++i], 10)
@@ -1987,6 +2069,14 @@ export function main(argv: string[]): void {
   }
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     console.error(`[export-eval-game] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
+    process.exit(2)
+  }
+  // B8/B10 同机制（抑制空枪），按 plan/nn-input-inference-rules.plan.md §3.1 不组合；
+  // NNInput 里两者同开时 B8 优先，这里直接拒绝而不是静默改变语义。
+  if (suppressUselessFire && suppressLeadMissFire) {
+    console.error(
+      '[export-eval-game] --suppress-useless-fire 与 --suppress-lead-miss-fire 同机制，不得同时开启',
+    )
     process.exit(2)
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
@@ -2170,6 +2260,17 @@ export function main(argv: string[]): void {
     // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
     // 在 eval 侧同样要能事后看出来。与 wver **解耦**（本机直跑无 wver 也要记）。
     // 不进任何 data_fp（eval 侧本就没有）。
+    // 推理规则归因（默认关 ⇒ 不写键，旧报告逐字节不变）。
+    ...(skipSteelOnlyShots || breakBricksOnPath || suppressUselessFire || suppressLeadMissFire
+      ? {
+          inferenceRules: {
+            ...(skipSteelOnlyShots ? { skipSteelOnlyShots: true } : {}),
+            ...(breakBricksOnPath ? { breakBricksOnPath: true } : {}),
+            ...(suppressUselessFire ? { suppressUselessFire: true } : {}),
+            ...(suppressLeadMissFire ? { suppressLeadMissFire: true } : {}),
+          },
+        }
+      : {}),
     feat: featuresEngine(),
     ...(wver ? { wver, node: nodeLabel } : {}),
   }

@@ -234,7 +234,7 @@ const DIR_ORDER: readonly Direction[] = ['up', 'down', 'left', 'right']
  *
  * 零分配、只读 World。
  */
-function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: number): number {
+export function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: number): number {
   const p = world.player
   if (!p) return 0
   const vertical = dir === 'up' || dir === 'down'

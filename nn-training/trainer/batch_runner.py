@@ -45,6 +45,8 @@ from common.log import log
 from remote import weights_standard
 from trainer.batch_plan import (
     batch_iter_id,
+    eval_rule_kwargs,
+    eval_rules_reject_reason,
     is_transient_error,
     kind_for_policy,
     node_gate_reason,
@@ -713,6 +715,12 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
+        # 顶钢空枪门/拆砖：开启批只派给有能力位的节点（旧 agent 静默跑关闭态 = 混批）。
+        if sso_why := eval_rules_reject_reason(getattr(self.owner, "args", None), ping):
+            if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                log(f'[batcheval] node {nid}: {sso_why}')
+            lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
         # 本轮（本单元）bootId 核（plan/sampler-single-instance.plan.md §8-Q2）：就绪节点永不
         # 进本函数 ⇒ 这条只在「掉线重探 / 中途上线」上生效——回场时发现端口上换过进程，
         # 本单元拒派。复用 `given_up`（= 本单元不再等它）：主循环的「全部通道已放弃 ⇒ 收摊」
@@ -973,6 +981,8 @@ class _UnitLanes:
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
                 # 决策周期 K：手动 judge 由 spec.decisionK 驱动（缺席/10 = 老行为）。
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                # 顶钢空枪门/拆砖（课程 inference_rules；缺席 = 老行为）。
+                **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         else:
             m, _files = common.distribution.fetch_task(
@@ -996,6 +1006,8 @@ class _UnitLanes:
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
                 # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
                 decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
+                # 顶钢空枪门/拆砖：与本机份额同源（缺席 = 老行为）。
+                **eval_rule_kwargs(getattr(self.owner, "args", None)),
             )
         why = common.distribution.validate_eval_result(m, self.wver)
         if why:

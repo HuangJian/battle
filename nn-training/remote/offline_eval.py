@@ -576,6 +576,36 @@ def run_cloud_eval(
                             # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
                             # 缺席/10 = 老行为（getattr 缺省 10）。
                             decision_k=int(getattr(course, "decision_k", 10)),
+                            # 评估/部署链推理规则（课程 inference_rules；缺席 = 老行为）：
+                            # 云机与本机同语义，漏传 = 重放/评估静默换策略。
+                            skip_steel_only_shots=bool(
+                                getattr(
+                                    getattr(course, "inference_rules", None),
+                                    "skip_steel_only_shots",
+                                    False,
+                                )
+                            ),
+                            break_bricks_on_path=bool(
+                                getattr(
+                                    getattr(course, "inference_rules", None),
+                                    "break_bricks_on_path",
+                                    False,
+                                )
+                            ),
+                            suppress_useless_fire=bool(
+                                getattr(
+                                    getattr(course, "inference_rules", None),
+                                    "suppress_useless_fire",
+                                    False,
+                                )
+                            ),
+                            suppress_lead_miss_fire=bool(
+                                getattr(
+                                    getattr(course, "inference_rules", None),
+                                    "suppress_lead_miss_fire",
+                                    False,
+                                )
+                            ),
                         ),
                         ceiling_sec,
                         name=f"eval-{lab}",

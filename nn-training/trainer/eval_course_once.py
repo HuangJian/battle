@@ -39,6 +39,7 @@ from types import SimpleNamespace
 # 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "nn-training"))
+from biz.course_spec import InferenceRulesBlock
 from biz.reward_library import METRICS
 from common.cli import house_parser, run_main
 
@@ -276,6 +277,13 @@ def main() -> int:
     lives = int(player.get("lives", 3))
     level = int(player.get("level", 0))
     difficulty = str(course.get("difficulty") or spec.get("difficulty") or "hard")
+    # 评估/部署链的推理侧规则（默认全关；训练链不认）：块内键名拼错 = 响亮拒，
+    # 不静默忽略（`InferenceRulesBlock` 是 extra="forbid"）。
+    inference_rules = InferenceRulesBlock(**(course.get("inference_rules") or {}))
+    skip_steel_only_shots = bool(inference_rules.skip_steel_only_shots)
+    break_bricks_on_path = bool(inference_rules.break_bricks_on_path)
+    suppress_useless_fire = bool(inference_rules.suppress_useless_fire)
+    suppress_lead_miss_fire = bool(inference_rules.suppress_lead_miss_fire)
     policy = str(spec.get("policy") or "nn")
     games = int(spec["games"])
     seed0 = int(spec.get("seed0") or 0)
@@ -299,7 +307,10 @@ def main() -> int:
     _log(
         f"[course-once] course={course_path} stages={n_stages} games/weights={games} "
         f"policy={policy} weights={len(weights)} difficulty={difficulty} max_ticks={max_ticks} "
-        f"lives={lives} level={level} nodes={len(nodes)} runDir={run_dir}"
+        f"lives={lives} level={level} nodes={len(nodes)} runDir={run_dir} "
+        f"skip_steel_only_shots={skip_steel_only_shots} break_bricks_on_path={break_bricks_on_path} "
+        f"suppress_useless_fire={suppress_useless_fire} "
+        f"suppress_lead_miss_fire={suppress_lead_miss_fire}"
     )
 
     eval_log = run_dir / "eval_log.jsonl"
@@ -321,6 +332,12 @@ def main() -> int:
     # 决策周期 K（plan/k5-rhythm.plan.md）：手动 judge 由 TS 侧 --decision-k 驱动
     # （缺席/10 = 老行为；K≠10 时节点能力门在 BatchEvalRunner 内 fail-closed）。
     args.decision_k = int(spec.get("decisionK") or 10)
+    # 评估/部署链的推理侧规则：来自**课程文件**的 `inference_rules` 块（默认全关）；
+    # 只对 eval 生效，训练 rollout 不认（worker.cmd 无此开关）。
+    args.skip_steel_only_shots = skip_steel_only_shots
+    args.break_bricks_on_path = break_bricks_on_path
+    args.suppress_useless_fire = suppress_useless_fire
+    args.suppress_lead_miss_fire = suppress_lead_miss_fire
     bun = shutil.which("bun") or "bun"
     epoch = common.distribution.compute_engine_epoch()
 

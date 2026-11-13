@@ -1577,6 +1577,18 @@ async function runGame(
   // 决策周期 K（plan/k5-rhythm.plan.md）：`?decisionK=<n>` 时本局按该 K 跑
   // （评估/rollout 同传）；缺席/10 = 导出器缺省（旧训练侧逐字节不变）。
   decisionK: number = DEFAULT_DECISION_K,
+  // 评估/部署链推理规则（课程 `inference_rules.skip_steel_only_shots`）：
+  // `?skipSteelOnlyShots=1` 时评估局抑制「顶钢空枪」；缺席/false = 老行为。
+  // 训练 rollout 分支不消费（评估专用）。
+  skipSteelOnlyShots = false,
+  // 评估/部署链推理规则：`?breakBricksOnPath=1` 时评估局拆掉挡路的砖；
+  // 训练 rollout 分支不消费（评估专用）。
+  breakBricksOnPath = false,
+  // 评估/部署链推理规则：`?suppressUselessFire=1` 时评估局抑制「打不到任何坦克」的空枪。
+  // 与 suppressLeadMissFire 同机制，二者不得同开（提交端互斥校验）。
+  suppressUselessFire = false,
+  // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时按子弹到达时刻的敌人位置判空枪。
+  suppressLeadMissFire = false,
   // v6 BC 标签来源：argmax=教师最优动作，sampled=策略采样（BC 的行为克隆标签）。
   // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
   labelMode: string = 'argmax',
@@ -1675,6 +1687,11 @@ async function runGame(
         // 决策周期 K（plan/k5-rhythm.plan.md）：仅非默认值透传（缺席 = 导出器缺省 10，
         // 旧训练侧/旧调用逐字节不变）；评估必须与训练同节奏。
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
+        // 评估/部署链推理规则：顶钢空枪门（训练 rollout 分支不拼此开关）。
+        if (skipSteelOnlyShots) args.push('--skip-steel-only-shots')
+        if (breakBricksOnPath) args.push('--break-bricks-on-path')
+        if (suppressUselessFire) args.push('--suppress-useless-fire')
+        if (suppressLeadMissFire) args.push('--suppress-lead-miss-fire')
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
         // greedy 分层采集（plan/greedy-outcome-quota rev5）：**所有节点**都要能按 argmax
@@ -1917,6 +1934,15 @@ export function taskKey(
   // v6 BC 标签来源（argmax/sampled）：同一 iterId 下两种标签是不同语料，
   // 仅非空时进 `:lm<mode>` 后缀（legacy 键逐字节不变）。
   lm = '',
+  // 评估/部署链推理规则（顶钢空枪门）：同一 (stage, seed) 在开/关两态是不同局，
+  // 仅激活时进 `:skipSteelShots` 后缀（老键逐字节不变）。
+  sso = '',
+  // 拆砖免绕路：同 (stage, seed) 开/关是不同局，仅激活时进 `:breakBricks` 后缀。
+  bbo = '',
+  // B8 通用废射门：同 (stage, seed) 开/关是不同局，仅激活时进 `:suppressUselessFire`。
+  suf = '',
+  // B10 预测门：同 (stage, seed) 开/关是不同局，仅激活时进 `:suppressLeadMissFire`。
+  slm = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -1924,7 +1950,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}`
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}`
 }
 
 function beginTask(
@@ -1955,6 +1981,14 @@ function beginTask(
   decisionEvents = false,
   // 决策周期 K：`?decisionK=<n>` 时本局按该 K 跑；缺席/10 = 导出器缺省（同上）。
   decisionK: number = DEFAULT_DECISION_K,
+  // 评估/部署链推理规则：`?skipSteelOnlyShots=1` 时评估局抑制顶钢空枪。
+  skipSteelOnlyShots = false,
+  // 评估/部署链推理规则：`?breakBricksOnPath=1` 时评估局拆掉挡路的砖。
+  breakBricksOnPath = false,
+  // 评估/部署链推理规则：`?suppressUselessFire=1` 时抑制静态车道空枪。
+  suppressUselessFire = false,
+  // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时抑制预测空枪。
+  suppressLeadMissFire = false,
   // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
   labelMode: string = 'argmax',
 ): void {
@@ -1984,6 +2018,10 @@ function beginTask(
     course,
     decisionEvents,
     decisionK,
+    skipSteelOnlyShots,
+    breakBricksOnPath,
+    suppressUselessFire,
+    suppressLeadMissFire,
     labelMode,
     task.signal,
   )
@@ -2334,6 +2372,19 @@ async function handle(req: Request): Promise<Response> {
     const decisionK = dkRaw === null ? DEFAULT_DECISION_K : Number.parseInt(dkRaw, 10)
     if (!Number.isInteger(decisionK) || decisionK < 1)
       return jsonResponse({ error: `decisionK invalid: ${dkRaw}` }, 400)
+    // 评估/部署链推理规则：`?skipSteelOnlyShots=1` 时评估局抑制顶钢空枪；
+    // 缺席 = 老行为（训练 rollout 不发该参数）。
+    const skipSteelOnlyShots = url.searchParams.get('skipSteelOnlyShots') === '1'
+    // 拆砖免绕路：`?breakBricksOnPath=1`；缺席 = 老行为。
+    const breakBricksOnPath = url.searchParams.get('breakBricksOnPath') === '1'
+    // B8/B10（同机制，互斥）：`?suppressUselessFire=1` / `?suppressLeadMissFire=1`。
+    const suppressUselessFire = url.searchParams.get('suppressUselessFire') === '1'
+    const suppressLeadMissFire = url.searchParams.get('suppressLeadMissFire') === '1'
+    if (suppressUselessFire && suppressLeadMissFire)
+      return jsonResponse(
+        { error: 'suppressUselessFire 与 suppressLeadMissFire 同机制，不得同时开启' },
+        400,
+      )
     if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
       return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
@@ -2363,6 +2414,10 @@ async function handle(req: Request): Promise<Response> {
       decisionEvents ? 'de1' : '',
       decisionK !== DEFAULT_DECISION_K ? String(decisionK) : '',
       labelMode,
+      skipSteelOnlyShots ? '1' : '',
+      breakBricksOnPath ? '1' : '',
+      suppressUselessFire ? '1' : '',
+      suppressLeadMissFire ? '1' : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2412,6 +2467,10 @@ async function handle(req: Request): Promise<Response> {
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
         decisionEvents,
         decisionK,
+        skipSteelOnlyShots,
+        breakBricksOnPath,
+        suppressUselessFire,
+        suppressLeadMissFire,
         labelMode,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
@@ -2458,6 +2517,10 @@ async function handle(req: Request): Promise<Response> {
           course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
           decisionEvents,
           decisionK,
+          skipSteelOnlyShots,
+          breakBricksOnPath,
+          suppressUselessFire,
+          suppressLeadMissFire,
           labelMode,
           task.signal,
         )
@@ -2523,6 +2586,13 @@ async function handle(req: Request): Promise<Response> {
     const dkPoll = Number.parseInt(url.searchParams.get('decisionK') ?? '', 10)
     // v6 BC 标签来源：与提交端同配方（空串 = legacy 键不变）。
     const lmPoll = url.searchParams.get('labelMode') ?? ''
+    // 评估/部署链推理规则：与提交端同配方（缺席 = 老键不变）。
+    const ssoPoll = url.searchParams.get('skipSteelOnlyShots') === '1' ? '1' : ''
+    // 拆砖免绕路：与提交端同配方。
+    const bboPoll = url.searchParams.get('breakBricksOnPath') === '1' ? '1' : ''
+    // B8/B10：与提交端同配方（缺席 = 老键不变）。
+    const sufPoll = url.searchParams.get('suppressUselessFire') === '1' ? '1' : ''
+    const slmPoll = url.searchParams.get('suppressLeadMissFire') === '1' ? '1' : ''
     const key = taskKey(
       iterId,
       mode,
@@ -2534,6 +2604,10 @@ async function handle(req: Request): Promise<Response> {
       url.searchParams.get('decisionEvents') === '1' ? 'de1' : '',
       Number.isInteger(dkPoll) && dkPoll !== DEFAULT_DECISION_K ? String(dkPoll) : '',
       lmPoll,
+      ssoPoll,
+      bboPoll,
+      sufPoll,
+      slmPoll,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2664,6 +2738,19 @@ async function handle(req: Request): Promise<Response> {
       // 旧 agent 无此字段 ⇒ 训练侧不派 K≠10 任务（fail-closed：旧 agent 会静默按
       // K=10 跑，混批比不派更坏；同 decisionEventsSupport）。
       decisionKSupport: true,
+      // 评估/部署链推理规则支持位（课程 inference_rules.skip_steel_only_shots）：
+      // `/v1/task?skipSteelOnlyShots=1` 时评估局拼 --skip-steel-only-shots。
+      // 旧 agent 无此字段 ⇒ 训练侧不派开启批（fail-closed，同 decisionKSupport）。
+      skipSteelOnlyShotsSupport: true,
+      // 拆砖免绕路支持位：`/v1/task?breakBricksOnPath=1` 时评估局拼
+      // --break-bricks-on-path。旧 agent 无此字段 ⇒ 不派开启批（fail-closed）。
+      breakBricksOnPathSupport: true,
+      // B8 通用废射门支持位：`/v1/task?suppressUselessFire=1` 时评估局拼
+      // --suppress-useless-fire。旧 agent 无此字段 ⇒ 不派开启批（fail-closed）。
+      suppressUselessFireSupport: true,
+      // B10 预测门支持位：`/v1/task?suppressLeadMissFire=1` 时评估局拼
+      // --suppress-lead-miss-fire。旧 agent 无此字段 ⇒ 不派开启批。
+      suppressLeadMissFireSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,

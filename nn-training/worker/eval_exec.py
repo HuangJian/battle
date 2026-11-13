@@ -224,6 +224,10 @@ class EvalExecutors:
                 stage_json=stage_json_for_args(rnd.args, task[0]) or "",
                 decision_events=bool(getattr(rnd.args, "decision_events", False)),
                 decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
+                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
+                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
+                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
                 lives_override=int(_ov["lives_override"]) if "lives_override" in _ov else None,
                 player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
             )
@@ -298,6 +302,10 @@ class EvalExecutors:
                 player_level=int(_ov["player_level"]) if "player_level" in _ov else None,
                 decision_events=bool(getattr(rnd.args, "decision_events", False)),
                 decision_k=int(getattr(rnd.args, "decision_k", 10)),
+                skip_steel_only_shots=bool(getattr(rnd.args, "skip_steel_only_shots", False)),
+                break_bricks_on_path=bool(getattr(rnd.args, "break_bricks_on_path", False)),
+                suppress_useless_fire=bool(getattr(rnd.args, "suppress_useless_fire", False)),
+                suppress_lead_miss_fire=bool(getattr(rnd.args, "suppress_lead_miss_fire", False)),
             )
             why = common.distribution.validate_eval_result(manifest, rnd.wver)
             if why:

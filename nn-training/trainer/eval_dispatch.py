@@ -412,6 +412,43 @@ class EvalDispatcher:
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
                     continue
+                # 顶钢空枪门（课程 inference_rules.skip_steel_only_shots）：开启批只派给
+                # 有能力位的节点（旧 agent 静默跑关闭态 = 混批，fail-closed）。
+                if bool(getattr(args, "skip_steel_only_shots", False)) and not ping.get(
+                    "skipSteelOnlyShotsSupport"
+                ):
+                    _log(
+                        f"[eval] node {nid}: 顶钢空枪门 eval 需 skipSteelOnlyShotsSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                # 拆砖免绕路：同上，开启批只派给有能力位的节点。
+                if bool(getattr(args, "break_bricks_on_path", False)) and not ping.get(
+                    "breakBricksOnPathSupport"
+                ):
+                    _log(
+                        f"[eval] node {nid}: 拆砖 eval 需 breakBricksOnPathSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                # B8 通用废射门：同上，开启批只派给有能力位的节点。
+                if bool(getattr(args, "suppress_useless_fire", False)) and not ping.get(
+                    "suppressUselessFireSupport"
+                ):
+                    _log(
+                        f"[eval] node {nid}: 通用废射门 eval 需 suppressUselessFireSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                # B10 预测门：同上。
+                if bool(getattr(args, "suppress_lead_miss_fire", False)) and not ping.get(
+                    "suppressLeadMissFireSupport"
+                ):
+                    _log(
+                        f"[eval] node {nid}: 预测门 eval 需 suppressLeadMissFireSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
                 if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
                     _log(f"[eval] node {nid}: bun version mismatch — skipped")
                     continue

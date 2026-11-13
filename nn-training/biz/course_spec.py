@@ -602,6 +602,43 @@ class PlayerBlock(BaseModel):
     level: int | None = None
 
 
+class InferenceRulesBlock(BaseModel):
+    """课程 `inference_rules` 块：**评估/部署链**启用的推理侧规则（默认全关）。
+
+    单一事实来源 = `src/nn/inference-rules.ts` + `--skip-steel-only-shots`（plan/
+    nn-input-inference-rules.plan.md）。只作用于 `export-eval-game`（节点评估、
+    课程 judge、replay 导出）；**训练链（rollout / dagger）刻意不认**，因此
+    不进 `corpus_identity_fp`（训练语料身份不变）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 抑制“顶钢空枪”（沿发射方向首阻弹格是 steel、且车道内没有可命中敌）。
+    #: 默认 False = 行为逐字节不变。
+    skip_steel_only_shots: bool = False
+    #: 拆砖免绕路（所选 move 方向被砖挡/2 格内有砖、且策略没开火 ⇒ 强制拆墙）。
+    #: 默认 False；基地保护圈内的砖不拆。
+    break_bricks_on_path: bool = False
+    #: B8 通用废射门：要开火但该方向静态 `usefulFire=false` 且首阻弹格不是砖 ⇒ 抑制。
+    #: 700 对确认 +16.29pp；**与 suppress_lead_miss_fire 同机制，二者互斥**。
+    suppress_useless_fire: bool = False
+    #: B10 预测门：按子弹到达时刻的敌人位置外推仍打不到且首阻弹格不是砖 ⇒ 抑制。
+    #: 700 对确认 +13.29pp；**与 suppress_useless_fire 互斥**。
+    suppress_lead_miss_fire: bool = False
+
+    @model_validator(mode="after")
+    def _shot_gates_mutually_exclusive(self) -> InferenceRulesBlock:
+        """B8/B10 是同一机制的两个阈值（状态 vs 预测），同时开启不构成组合规则
+        （`NNInput` 里 B8 会静默优先）⇒ 课程文件直接拒，不制造“以为两个都开了”。"""
+        both_on = self.suppress_useless_fire and self.suppress_lead_miss_fire
+        if not both_on:
+            return self
+        raise ValueError(
+            "inference_rules：suppress_useless_fire 与 suppress_lead_miss_fire "
+            "同机制，不得同时开启"
+        )
+
+
 class StateInitBlock(BaseModel):
     """课程 `state_init` 块：rollout 的**起始分布** = 人类 demo 中段**世界快照**交棒
     （plan/x20-state-init.plan.md；课程 `curricula/x20-state-init.jsonc`）。
@@ -967,6 +1004,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 激活时：K 变 = 决策粒度变 ⇒ 样本身份变（同 decision_events 待遇）；
     #: ⚠ `est_samples_per_game` 必须按 K 重标定（= 局均 ticks ÷ K；K=5 时 ≈ 2×）。
     decision_k: int = 10
+    #: 评估/部署链的推理侧规则开关（默认全关；plan/nn-input-inference-rules.plan.md）。
+    #: 只由 eval 链消费（`export-eval-game --skip-steel-only-shots`），训练
+    #: rollout/dagger 不认；刻意不进 `corpus_identity_fp`（训练语料身份不变）。
+    inference_rules: InferenceRulesBlock = Field(default_factory=InferenceRulesBlock)
 
     @field_validator("decision_k", mode="before")
     @classmethod
@@ -1238,6 +1279,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 决策周期 K（plan/k5-rhythm.plan.md；漏映射 = 静默失效，同上）：
             # 缺席 = args 走 getattr 缺省 10 ⇒ 均匀 K=10 老行为。
             "decision_k": "decision_k",
+            # ⚠ `inference_rules` 刻意不在表里：它是 eval/deploy-only（block → 扁平
+            # `args.skip_steel_only_shots` 由 `worker.config.apply_course` 单独写），进本表
+            # 会让训练 rollout/CLI 以为存在同名训练开关（这里是有意不映射）。
             "bc": "bc",
             "lr": "lr",
             "epochs": "epochs",

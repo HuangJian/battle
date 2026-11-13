@@ -343,6 +343,17 @@ def run_local_eval_game(
     # 决策周期 K（plan/k5-rhythm.plan.md）：课程 decision_k（默认 10）——评估与训练同节奏
     # （train/deploy 不一致同属 plan 点名的静默分裂）；仅 ≠10 才透传，缺省命令逐字节不变。
     decision_k: int = 10,
+    # 评估/部署链的推理侧规则（课程 `inference_rules.skip_steel_only_shots`）：
+    # True ⇒ 本局追加 `--skip-steel-only-shots`（顶钢空枪门）。缺省 False = 老行为；
+    # 训练 rollout 不认此参数（`worker.cmd` 无该开关）。
+    skip_steel_only_shots: bool = False,
+    # 评估/部署链推理规则（课程 `inference_rules.break_bricks_on_path`）：
+    # True ⇒ 追加 `--break-bricks-on-path`（拆砖免绕路）。缺省 False = 老行为。
+    break_bricks_on_path: bool = False,
+    # B8 通用废射门：True ⇒ 追加 `--suppress-useless-fire`。缺省 False = 老行为。
+    suppress_useless_fire: bool = False,
+    # B10 预测门：True ⇒ 追加 `--suppress-lead-miss-fire`。缺省 False = 老行为。
+    suppress_lead_miss_fire: bool = False,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -390,6 +401,15 @@ def run_local_eval_game(
     # 决策周期 K：课程 decision_k ≠10 ⇒ 评估与训练同节奏（仅激活时透传，缺省逐字节不变）。
     if int(decision_k) != 10:
         cmd += ["--decision-k", str(int(decision_k))]
+    # 评估/部署链推理规则：仅激活时透传（缺席 = 老行为，命令逐字节不变）。
+    if skip_steel_only_shots:
+        cmd += ["--skip-steel-only-shots"]
+    if break_bricks_on_path:
+        cmd += ["--break-bricks-on-path"]
+    if suppress_useless_fire:
+        cmd += ["--suppress-useless-fire"]
+    if suppress_lead_miss_fire:
+        cmd += ["--suppress-lead-miss-fire"]
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()

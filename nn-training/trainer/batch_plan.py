@@ -88,6 +88,53 @@ def node_supports_decision_k(ping: dict) -> bool:
     return ping.get("decisionKSupport") is True
 
 
+def node_supports_skip_steel_only_shots(ping: dict) -> bool:
+    """顶钢空枪门能力位（纯函数，单测覆盖）：True = 可派该评估开关。
+
+    旧 agent 无此字段 ⇒ False（fail-closed，同 decisionEventsSupport：无位不派，
+    否则旧 agent 静默跑关闭态混入开启批）。
+    """
+    return ping.get("skipSteelOnlyShotsSupport") is True
+
+
+def node_supports_break_bricks_on_path(ping: dict) -> bool:
+    """拆砖免绕路能力位（纯函数，单测覆盖）：True = 可派该评估开关。"""
+    return ping.get("breakBricksOnPathSupport") is True
+
+
+def node_supports_suppress_useless_fire(ping: dict) -> bool:
+    """B8 通用废射门能力位：True = 可派该评估开关（旧 agent fail-closed）。"""
+    return ping.get("suppressUselessFireSupport") is True
+
+
+def node_supports_suppress_lead_miss_fire(ping: dict) -> bool:
+    """B10 预测门能力位：True = 可派该评估开关（旧 agent fail-closed）。"""
+    return ping.get("suppressLeadMissFireSupport") is True
+
+
+def eval_rules_reject_reason(args: object, ping: dict) -> str | None:
+    """批评估节点门的推理规则判据：None = 可派，否则拒派原因（供批执行器日志）。"""
+    if bool(getattr(args, "skip_steel_only_shots", False)) and not node_supports_skip_steel_only_shots(ping):
+        return "缺 skipSteelOnlyShotsSupport 能力位（旧 agent）——顶钢空枪门任务被拒；不降级"
+    if bool(getattr(args, "break_bricks_on_path", False)) and not node_supports_break_bricks_on_path(ping):
+        return "缺 breakBricksOnPathSupport 能力位（旧 agent）——拆砖任务被拒；不降级"
+    if bool(getattr(args, "suppress_useless_fire", False)) and not node_supports_suppress_useless_fire(ping):
+        return "缺 suppressUselessFireSupport 能力位（旧 agent）——通用废射门任务被拒；不降级"
+    if bool(getattr(args, "suppress_lead_miss_fire", False)) and not node_supports_suppress_lead_miss_fire(ping):
+        return "缺 suppressLeadMissFireSupport 能力位（旧 agent）——预测门任务被拒；不降级"
+    return None
+
+
+def eval_rule_kwargs(args: object) -> dict:
+    """评估/部署链推理规则 → `run_local_eval_game` / `fetch_task` 的共用关键字。"""
+    return {
+        "skip_steel_only_shots": bool(getattr(args, "skip_steel_only_shots", False)),
+        "break_bricks_on_path": bool(getattr(args, "break_bricks_on_path", False)),
+        "suppress_useless_fire": bool(getattr(args, "suppress_useless_fire", False)),
+        "suppress_lead_miss_fire": bool(getattr(args, "suppress_lead_miss_fire", False)),
+    }
+
+
 #: policy → agent 权重桶 `kind`。agent 的 `/v1/task` 按 **(kind, wver)** 精确查缓存桶
 #: （无 policy 豁免，2026-09-19 核实）⇒ 上传权重与查询任务的 kind **必须同值**，
 #: 否则一律 409 wver-not-cached。B 层（policy nn）与 C 层（policy god）用 'rollout'；
