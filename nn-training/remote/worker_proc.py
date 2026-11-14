@@ -156,13 +156,24 @@ def _release_cloud_machine(
         log("已写停机哨兵 /tmp/battle-halt-request（notebook keepalive 将检测并释放实例）")
     except OSError as e:
         log(f"写停机哨兵失败：{e}——请手工断开宿主会话")
-    # 兼容：如果 worker 恰好跑在 kernel 里（单测 / 非 supervise 场景），直接试一次
+    # 兼容：如果 worker 恰好跑在 kernel 里（单测 / 非 supervise 场景），直接试一次。
+    #
+    # 2026-11-14：探测与调用**分成两段**（同 `remote/child_proc.pump_lines` 的口径）。原先一条
+    # 宽捕 `pass` 把两件不同的事罩在一起，于是有了一处**假承诺**：日志先答应
+    # 「→ 直接调用 runtime.unassign()」，`unassign()` 抛了却没有任何后续 —— 读日志的人以为停机
+    # 已经安排好了，实例还在计费（§386 的全部意义就是「worker 退出 ≠ 停机省钱」）。而探测失败
+    # 才是真常态：非 Colab（Kaggle/CI/本机）根本没有 `google.colab`，worker 跑在子进程里
+    # `get_ipython()` 也永远是 None —— 那两件事留痕只会每次都喊狼来了。
     try:
         runtime_mod: Any = importlib.import_module("google.colab.runtime")
         ipython_mod = importlib.import_module("IPython")
-        if ipython_mod.get_ipython() is not None:
-            log("检测到 Colab kernel 环境 → 直接调用 runtime.unassign()")
-            runtime_mod.unassign()
-            return
     except Exception:
-        pass
+        return
+    if ipython_mod.get_ipython() is None:
+        return
+    log("检测到 Colab kernel 环境 → 直接调用 runtime.unassign()")
+    try:
+        runtime_mod.unassign()
+    except Exception as e:
+        # 这条不是「降级」，是「说了要停却没停」：把异常和行为一起写，别让读者以为是 API 慢。
+        log(f"runtime.unassign() 失败：{e!r} —— 机器未释放，靠 keepalive 读哨兵重试；否则请手工断开宿主会话")

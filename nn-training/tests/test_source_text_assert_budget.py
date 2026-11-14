@@ -383,7 +383,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   同批其余判据均为数值/对象断言。涉及 `tests/tools/test_p0_*`、
 #:   `test_c9_critic_calibration.py`、`test_z11_seed_level.py`、
 #:   `tests/biz/test_w1_horizon_guard.py`。这是**产物契约**，不是新开的文风。
-BASELINE_FORM = 1493
+#: 2026-11-14 抬到 **1498**（+5，实测）：`tests/remote/test_remote_hotswap.py` 新增两条停机留痕用例
+#:   —— `_release_cloud_machine` 的 `unassign()` 失败时，**日志正文本身**就是交付物（异常 repr + 「机器
+#:   未释放」+ 该怎么做）。行为面只能验「调了一次」，验不了「读日志的人知道机器还在计费」；
+#:   与上面 `test_notebook_runtime` / `test_offline_local_first` 同一类：操作员唯一的证据是那几行字。
+BASELINE_FORM = 1498
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

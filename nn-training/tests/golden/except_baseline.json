@@ -75,7 +75,7 @@
   "remote/upload_proc.py": 4,
   "remote/upload_worker.py": 2,
   "remote/worker.py": 2,
-  "remote/worker_proc.py": 2,
+  "remote/worker_proc.py": 3,
   "remote/worker_server.py": 4,
   "train/train_bc_v6.py": 1,
   "trainer/batch_eval.py": 1,

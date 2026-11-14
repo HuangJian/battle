@@ -317,6 +317,60 @@ def test_release_cloud_machine_prompts_manual_outside_colab(
     assert "哨兵" in joined and ("手工断开" in joined or "keepalive" in joined)
 
 
+def _fake_colab_kernel(monkeypatch: pytest.MonkeyPatch, unassign) -> None:
+    """把「kernel 里跑着 Colab」装进 sys.modules —— 走真的 `importlib.import_module` 探测。
+
+    叶子上用 `SimpleNamespace`（`import_module` 对已在 `sys.modules` 里的名字直接返回，
+    不碰父包属性），这样不必给 `ModuleType` 动态挂属性（那会同时得罪 mypy 与 ruff B010）。
+    """
+    import types
+
+    for name, mod in (
+        ("google", types.ModuleType("google")),
+        ("google.colab", types.ModuleType("google.colab")),
+        ("google.colab.runtime", types.SimpleNamespace(unassign=unassign)),
+        ("IPython", types.SimpleNamespace(get_ipython=lambda: object())),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
+def test_release_cloud_machine_reports_failed_unassign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`unassign()` 抛了 = 「说了要停却没停」：必须留一行（旧写法整块宽捕 `pass`）。
+
+    为什么这条重要：日志上先有一句「→ 直接调用 runtime.unassign()」，失败后没有任何后续 ⇒
+    读到的是「停机已经安排了」，而实例还在计费 —— §386 的全部意义正是「worker 退出 ≠ 停机省钱」。
+    静默只对探测成立（非 Colab / 子进程里 `get_ipython()` 为 None 是常态），对调用不成立。
+    """
+    calls: list[int] = []
+
+    def _boom() -> None:
+        calls.append(1)
+        raise RuntimeError("colab api 503")
+
+    _fake_colab_kernel(monkeypatch, _boom)
+    logs: list[str] = []
+    W._release_cloud_machine(log=logs.append)
+    joined = "\n".join(logs)
+    assert calls == [1], "探测成功就必须真调一次 unassign"
+    assert "unassign() 失败" in joined
+    assert "503" in joined, "异常 repr 要进日志，否则「调了但失败」和「根本没调」长得一样"
+    assert "手工断开" in joined, "失败时要给出人能执行的动作"
+
+
+def test_release_cloud_machine_stops_after_successful_unassign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成功路径不打第二条日志：留痕只跟失败走，别把正常停机刷成告警。"""
+    _fake_colab_kernel(monkeypatch, lambda: None)
+    logs: list[str] = []
+    W._release_cloud_machine(log=logs.append)
+    joined = "\n".join(logs)
+    assert "直接调用 runtime.unassign()" in joined
+    assert "失败" not in joined
+
+
 def test_prune_job_dirs_keeps_recent_and_skips_code_cache(tmp_path: Path) -> None:
     """保留最近 N 个（含在跑的），三棵内容寻址缓存永不删（M2 加 blob_cache、M3 加 ts_code_cache）。"""
     work = tmp_path / "remote-worker"

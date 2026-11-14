@@ -22,7 +22,7 @@
   "remote/rollout_node.py": 1,
   "remote/upload_worker.py": 1,
   "remote/worker.py": 1,
-  "remote/worker_proc.py": 2,
+  "remote/worker_proc.py": 1,
   "trainer/batch_runner.py": 1,
   "trainer/bc_loop.py": 1,
   "trainer/loop_dispatch.py": 1,

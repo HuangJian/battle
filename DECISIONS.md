@@ -6254,3 +6254,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   下是「无害的多余」，在 true 下被逼着二选一 —— 只留本平台真实触发的那个码；以及 mypy 报某条
   ignore「unused」不等于**整条**可以删（`[import-not-found, import-untyped]` 里可能只有一半过期），
   删完必须再跑一遍 mypy。
+
+## §2026-11-14-colab-unassign-must-say-when-it-fails（停机调用失败要留下「机器没停」）
+
+- **决定**：`remote/worker_proc._release_cloud_machine` 的 Colab 兼容路径拆成两段 —— **探测**
+  （`import google.colab.runtime` / `import IPython` + `get_ipython() is None`）仍静默；**调用**
+  `runtime.unassign()` 失败则留一行：异常 `repr` + 「机器未释放」+ 人能执行的动作（等 keepalive 读哨兵 /
+  手工断开宿主会话）。G9 该文件 2 → 1（55 → 54），G4 同笔 +1（442，记账在
+  `tests/test_broad_except_budget.py` 表头）。
+- **为什么（不是洁癖）**：旧写法把两件事罩在同一条宽捕 `pass` 下，而日志**先**打印
+  「检测到 Colab kernel 环境 → 直接调用 runtime.unassign()」。`unassign()` 抛了之后没有下文 ⇒ 读日志的人
+  得到的结论是「停机已经安排好了」，实例却还在计费 —— §386 的全部意义正是「worker 退出 ≠ 停机省钱」，
+  这条静默把该结论反过来写了一遍。
+- **为什么探测必须留静默**：非 Colab（Kaggle / CI / 本机）根本没有 `google.colab`；worker 跑在
+  supervisor 拉起的**子进程**里时 `get_ipython()` 永远是 `None`。这两件是**常态**，留痕等于每次停机都
+  喊一次狼来了，反而训练读者忽略真正的告警。
+- **判据**：`test_remote_hotswap.py` 两条 —— 失败路径必须恰有一次 `unassign` 调用 + 日志含 `unassign() 失败`
+  与异常文本（`503`）+ 给出动作；成功路径**不得**出现「失败」（留痕只跟失败走）。
