@@ -31,11 +31,13 @@ import json
 import math
 import os
 import secrets
+import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import (
     COURSE_ENABLE_MARKER,
     INIT_WEIGHTS_NAME,
@@ -62,6 +64,9 @@ from hub.task_pack import (
     task_pack_stale_reason,
     task_state,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
 
 
 def _curricula_root(discover_root: Path | None) -> Path:
@@ -668,10 +673,9 @@ class QueueOfflineMixin(QueuePeer):
                 pub["reclaimed"] = True
                 pub["reclaimed_from"] = reclaimed_from
         if reclaimed_from:
-            print(
-                f"[hub-server] offline-hold-reclaim {course}: {reclaimed_from} 进度静默超阈，"
+            _log(
+                f"offline-hold-reclaim {course}: {reclaimed_from} 进度静默超阈，"
                 f"{wid} 自动接管（旧主心跳将拿 409 taken）",
-                flush=True,
             )
         # 临界区外落账（盘 IO 不阻塞租约判定）：hold 镜像（含 pending_export 的清除）。
         self.note_hold(course, worker_id=wid, token=str(lease.get("token") or ""))
@@ -785,9 +789,8 @@ class QueueOfflineMixin(QueuePeer):
             self._sync_hold(course)
         had = rec is not None or held
         if had:
-            print(
-                f"[hub-server] offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
-                flush=True,
+            _log(
+                f"offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
             )
         return had
 
@@ -866,11 +869,10 @@ class QueueOfflineMixin(QueuePeer):
             # 也就是这一代只吃这一次宽限（保守方向：不复活）。
             rec["hold_restored_for_at"] = generation if generation > 0.0 else now
             self._dispatch_write(course, rec)
-        print(
-            f"[hub-server] hold-restored {course}: worker={hold.get('worker_id') or '?'} "
+        _log(
+            f"hold-restored {course}: worker={hold.get('worker_id') or '?'} "
             f"progress={max(0.0, now - progress):.0f}s 前"
             + ("" if generation > restored_for else "（本代已宽限过，不再续命）"),
-            flush=True,
         )
         return rec
 
@@ -912,7 +914,7 @@ class QueueOfflineMixin(QueuePeer):
             tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(tmp, path)
         except (OSError, ProtocolError) as e:
-            print(f"[hub-server] 派发状态落盘失败 {course}: {e}", flush=True)
+            _log(f"派发状态落盘失败 {course}: {e}")
 
     # ── 接管（hold）写入面与读数（★ M1a 双写，2026-10-07；plan §3-M1a）─────────
     #
@@ -1114,10 +1116,9 @@ class QueueOfflineMixin(QueuePeer):
         self.note_pending_export(course, by=new_owner)
         if new_round:
             reset_auto_handoff_triggers(course)
-            print(
-                f"[hub-server] pending-export {course}: 新一轮导包（"
+            _log(
+                f"pending-export {course}: 新一轮导包（"
                 f"{prev_by or '-'} → {new_owner or '-'}）⇒ 导包触发账本清零",
-                flush=True,
             )
         return "pending", ""
 

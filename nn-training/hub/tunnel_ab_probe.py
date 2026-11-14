@@ -47,8 +47,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.cli import house_parser, run_main
+from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW
 from hub.server import _JobStore, make_server
+
+#: 探针的行日志：格式与时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+#: 本文件保留的那一处 `print(json.dumps(...))` 是**机器读的结果面**（一次性 CLI 的交付物），
+#: 不是日志行 —— 别把它并进来。
+_log = tag_logger("ab", lambda: time)
 
 #: 探针客户端一律**不走环境代理**。
 #: 本机（zh-CN 开发环境）设了 `HTTPS_PROXY=http://127.0.0.1:7890`，而 `NO_PROXY` 只含
@@ -71,10 +77,6 @@ LEG_TIMEOUT_SEC = 900
 
 #: 从 cloudflared logfile 里抠出 quick tunnel 地址
 _URL_RE = re.compile(r"(https://[a-z0-9-]+\.trycloudflare\.com)")
-
-
-def _log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [ab] {msg}", flush=True)
 
 
 def _cloudflared_bin() -> str:
@@ -313,8 +315,8 @@ if __name__ == "__main__":
         run_main(main)
     except urllib.error.HTTPError as e:
         # 鉴权/越界类错误点名（**绝不重试**——D9）
-        print(f"[ab] HTTP {e.code}: {e.read()[:200]!r}", flush=True)
+        _log(f"HTTP {e.code}: {e.read()[:200]!r}")
         sys.exit(1)
     except Exception as e:  # CLI 顶层：把类型与消息打全再退非零
-        print(f"[ab] FAILED {type(e).__name__}: {e}", flush=True)
+        _log(f"FAILED {type(e).__name__}: {e}")
         sys.exit(1)

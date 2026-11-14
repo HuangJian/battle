@@ -35,6 +35,7 @@ from email.message import Message
 from io import BufferedIOBase
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
     CLAIM_MODE_BACKUP,
@@ -46,6 +47,9 @@ from common.protocol import (
     ROLE_OFFLINE,
     role_from_header,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
 
 
 class ScheduleRoutes:
@@ -158,11 +162,10 @@ class ScheduleRoutes:
             # ★ 判据用 **job 自己的 role**，不是课程当前 mode（后者会在热切后撒谎，
             #   而这一行存在的意义就是事后能对上账）。
             if self.hub.job_role(jid) == ROLE_OFFLINE and mode != CLAIM_MODE_BACKUP:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 整段交领："
+                _log(
+                    f"整段交领："
                     f"course={course or '-'} job={jid} worker={worker_id or '?'}"
                     f"（请求方自称 `{ROLE_HEADER}={role}`）",
-                    flush=True,
                 )
             # 领取标记（原轮询面也做这件事）：console 据此区分「排队等取」与「已在跑」。
             claim = self.hub._job_dir(jid) / "claimed"
@@ -276,12 +279,11 @@ class ScheduleRoutes:
             return
         jid, body = got
         self.hub.abandon(jid, str(body.get("worker_id") or self._worker_id()))
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] abandon job={jid} "
+        _log(
+            f"abandon job={jid} "
             f"course={self.hub.course_of(jid) or '-'} "
             f"worker={body.get('worker_id') or self._worker_id() or '?'} "
             f"reason={str(body.get('reason') or '-')[:80]}",
-            flush=True,
         )
         self._json({"job_id": jid, "status": "abandoned"})
 

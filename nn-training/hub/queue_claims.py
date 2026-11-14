@@ -32,6 +32,7 @@ import time
 from collections.abc import Callable
 from threading import Lock
 
+from common.logutil import tag_logger
 from common.protocol import (
     BOTH_ROLE_KINDS,
     CLAIM_MODE_BACKUP,
@@ -48,6 +49,10 @@ from common.protocol import (
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.store_leases import ClaimOutcome
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 #: 死租约周期清扫的最小间隔（秒，plan/dead-lease-sweep）。与 `DISCOVER_SCAN_MIN_SEC`
 #: 同款：挂在既有读面（`peek_jobs`）上，1s 已足够让死租约在下一个观测拍回池，又不会被多台
@@ -144,14 +149,13 @@ class QueueClaimsMixin(QueuePeer):
         froze = st.consume_freeze_announcement(jid) if st else None
         if froze is None:
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] ★ 熔断冻结："
+        _log(
+            f"★ 熔断冻结："
             f"job={jid} course={course or '-'} "
             f"—— 连续 {froze.get('reclaims')} 次认领后零回传"
             f"（最后一次认领者={froze.get('worker') or '?'}）；"
             "已从可领取池移除，**重发不清冻结**；"
             f"确认后解冻：POST /admin/unfreeze job_id={jid}",
-            flush=True,
         )
 
     def claimable_job_ids(self, course: str) -> list[str]:
@@ -327,10 +331,9 @@ class QueueClaimsMixin(QueuePeer):
                 # （test_poison_freeze 的日志用例当场抓到）。
                 self._announce_freeze(course, jid)
         if reaped:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 死租约清扫：回收 {reaped} 份"
+            _log(
+                f"死租约清扫：回收 {reaped} 份"
                 "（过期/孤儿 ⇒ 回池 + 毒包计数；见 plan/dead-lease-sweep）",
-                flush=True,
             )
         return reaped
 

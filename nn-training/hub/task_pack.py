@@ -39,8 +39,13 @@ import zipfile
 from pathlib import Path
 from threading import Lock
 
+from common.logutil import tag_logger
 from common.net_http import urlopen as _net_urlopen
 from common.protocol import PLAN_NAME
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 # ── 任务包新鲜度门（plan/offline-rerun-local-first §8，2026-09-24）────────────────
 #
@@ -241,8 +246,8 @@ _TASK_PACK_LOCK = Lock()
 
 
 def _hub_log(msg: str) -> None:
-    """hub 侧一行日志（带时刻；与文件里其它 `print` 同形）。"""
-    print(f"[{time.strftime('%H:%M:%S')}] [hub-server] {msg}", flush=True)
+    """hub 侧一行日志（带时刻；格式与时间戳走 `common/logutil`，与 hub 其余入口同源）。"""
+    _log(msg)
 
 
 def _file_sha256(path: Path) -> str:

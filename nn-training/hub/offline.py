@@ -22,6 +22,7 @@ from io import BufferedIOBase
 from pathlib import Path
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import (
     COURSE_ENABLE_MARKER,
     INIT_WEIGHTS_NAME,
@@ -71,6 +72,10 @@ from hub.task_pack import (
     trigger_auto_handoff,
     trigger_task_bundle_export,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 # 递字节端点允许的文件名 = 锚点三件（`OFFLINE_RESUME_BLOB_NAMES`），不再另立一个别名：
 # ★ 2026-10-15（用户口径）锚点**只发整份** —— hub 受理回传时已就地落地（`hub/deltas.py`），
@@ -185,10 +190,9 @@ class OfflineRoutes:
         except OSError as e:
             self._json({"error": f"读任务包失败: {e}", "course": course}, 500)
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] task-pack -> {p.name} "
+        _log(
+            f"task-pack -> {p.name} "
             f"({size} bytes)",
-            flush=True,
         )
         self._bytes_file(p, 200, "application/zip", filename=p.name)
 
@@ -240,10 +244,9 @@ class OfflineRoutes:
             self._json({"course": course, "resume": None}, 200)
             return
         pub = {k: v for k, v in anchor.items() if not k.startswith("_")}
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] resume-anchor -> {course} "
+        _log(
+            f"resume-anchor -> {course} "
             f"it{pub['it']}（{pub['source']}, wfp={str(pub['weights_fp'])[:12]}…）",
-            flush=True,
         )
         self._json({"course": course, "resume": pub}, 200)
 
@@ -630,10 +633,9 @@ class OfflineRoutes:
             # 同一台盘的 busy 闸同时失效（一拖一形同虚设）。带 token 重打：核对期间万一被
             # 别人 stale-接管，这一拍不会把旧主复活（`note_progress` 的令牌门）。
             self.hub.note_progress(course, token=str(lease.get("token") or ""))
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] offline-claim {course} "
+            _log(
+                f"offline-claim {course} "
                 f"worker={lease['worker_id']} takeover={int(takeover)}",
-                flush=True,
             )
             payload: dict = {"lease": lease}
             if handoff_note:

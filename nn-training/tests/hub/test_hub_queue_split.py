@@ -451,14 +451,23 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
 ALLOWED_IMPORTS = {
     # ★M1b：`queue_scope` 多一个向下依赖 —— `hub.task_pack.hold_progress_at`（推 hold 镜像时
     # 取进度锚；判据源与 `queue_offline` 同一份，不另抄一个「进度怎么读」）。
-    "hub.queue_scope": {"common.protocol", "hub.queue_peer", "hub.store", "hub.task_pack"},
-    "hub.queue_discover": {"common.protocol", "hub.queue_peer", "hub.store"},
+    # 2026-11-14（python.refactor.md §P0-6）：四个混入的行日志改走 `common.logutil`
+    # （`[HH:MM:SS] [tag] msg` 的唯一实现）；它是 stdlib-only 的 L0 格式模块 ⇒ 层号不变。
+    "hub.queue_scope": {
+        "common.logutil",
+        "common.protocol",
+        "hub.queue_peer",
+        "hub.store",
+        "hub.task_pack",
+    },
+    "hub.queue_discover": {"common.logutil", "common.protocol", "hub.queue_peer", "hub.store"},
     "hub.queue_auth": {
         "hub.auth",
         "hub.queue_peer",
         "hub.store",
     },
     "hub.queue_claims": {
+        "common.logutil",
         "common.protocol",
         "hub.queue_peer",
         "hub.store",
@@ -475,6 +484,7 @@ ALLOWED_IMPORTS = {
         "remote.code_snapshot",
     },
     "hub.queue_offline": {
+        "common.logutil",
         "common.protocol",
         "hub.queue_peer",
         "hub.store",
@@ -510,7 +520,9 @@ def _own_consts(path: Path, cls_name: str, *, valued: bool = True) -> set[str]:
     return out
 
 
-_MUTATORS = frozenset({"append", "extend", "clear", "pop", "update", "add", "discard", "remove", "setdefault"})
+_MUTATORS = frozenset(
+    {"append", "extend", "clear", "pop", "update", "add", "discard", "remove", "setdefault"}
+)
 
 
 def _self_attr(node: ast.AST) -> str | None:
@@ -672,8 +684,14 @@ def test_queue_auth_inherits_the_guard_so_its_unbound_calls_type_check() -> None
 
 def test_class_constants_are_reachable_through_the_mro() -> None:
     """类常量随簇搬走，但**名字是契约**（`hub.DISCOVER_FRESH_SEC` / `hub.BC_EPOCH_BODY_MAX`）。"""
-    assert _HubQueue.DISCOVER_FRESH_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_FRESH_SEC == 3600.0
-    assert _HubQueue.DISCOVER_SCAN_MIN_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_SCAN_MIN_SEC == 2.0
+    assert (
+        _HubQueue.DISCOVER_FRESH_SEC == discover_mix.QueueDiscoverMixin.DISCOVER_FRESH_SEC == 3600.0
+    )
+    assert (
+        _HubQueue.DISCOVER_SCAN_MIN_SEC
+        == discover_mix.QueueDiscoverMixin.DISCOVER_SCAN_MIN_SEC
+        == 2.0
+    )
     assert _HubQueue.BC_EPOCH_BODY_MAX == _JobStore.BC_EPOCH_BODY_MAX == 4 * 1024 * 1024
     assert set(OWN_CONSTS) <= _own_consts(QUEUE_MOD, "_HubQueue")
 
@@ -801,9 +819,7 @@ def test_every_facade_method_actually_forwards_to_the_store() -> None:
     `FACADE_OWN` 那一条（`note_worker`）**不在**这份名单里 —— 它的判据在下一段单独写。
     """
     owner = {m: d for d, (_, ms) in DOMAINS.items() for m in ms}
-    targets: dict[str, str] = dict.fromkeys(
-        (*FACADE_SAME_SIG, *FACADE_COURSE_EXTRA), "<same-name>"
-    )
+    targets: dict[str, str] = dict.fromkeys((*FACADE_SAME_SIG, *FACADE_COURSE_EXTRA), "<same-name>")
     targets.update(FACADE_RENAMED)
     # 异常名单里的条目**仍受签名承诺约束**（它在 `FACADE_SAME_SIG` 里），只是不当转发。
     for own in FACADE_OWN:
@@ -970,7 +986,9 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
         path = HUB_DIR / f"{domain}.py"
         valued = _own_consts(path, cls.__name__)
         # 类常量随簇走（发现簇两个）；除此之外不得带值。
-        allowed = {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_discover" else set()
+        allowed = (
+            {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"} if domain == "queue_discover" else set()
+        )
         assert valued == allowed, f"{domain} 冒出了带值声明：{sorted(valued - allowed)}"
     # 组合类的类体只有那两个常量（`_JobStore.BC_EPOCH_BODY_MAX` 的同源转发 + 形参缺省值）。
     assert _own_consts(QUEUE_MOD, "_HubQueue") == set(OWN_CONSTS)
@@ -1041,7 +1059,11 @@ def test_queue_peer_is_declarations_only() -> None:
         "混入 ≥L4 ⇒ hub.queue L5 ⇒ hub_server L6，与 smoke_loopback(L6) 同层"
     )
     # 它因此只能靠协议层 + `store_leases`（ClaimOutcome）⇒ L1
-dag.assert_remote_module("hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["hub.queue_peer"])
+
+
+dag.assert_remote_module(
+    "hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["hub.queue_peer"]
+)
 
 
 def test_queue_peer_signatures_match_the_real_implementations() -> None:
@@ -1079,7 +1101,9 @@ def test_the_renamed_forward_is_declared_where_it_lives() -> None:
         for n in ast.walk(ast.parse((HUB_DIR / "queue_store_face.py").read_text(encoding="utf-8")))
         if isinstance(n, ast.FunctionDef)
     }
-    assert face_defs & {"abandon"} == set(), "`abandon` 不该住门面簇（它带 release / 零 reclaim 语义）"
+    assert face_defs & {"abandon"} == set(), (
+        "`abandon` 不该住门面簇（它带 release / 零 reclaim 语义）"
+    )
 
 
 # ────────────── ⑥ 依赖方向 / 账本 ──────────────
@@ -1136,9 +1160,7 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
 
     resume = HUB_DIR / "queue_resume.py"
     tree = _tree(resume)
-    top_logic = {
-        _logic_layer_import(n) for n in tree.body if isinstance(n, ast.ImportFrom)
-    } - {""}
+    top_logic = {_logic_layer_import(n) for n in tree.body if isinstance(n, ast.ImportFrom)} - {""}
     assert top_logic == set(), f"queue_resume 顶层碰了业务层（trainer/biz）：{top_logic}"
     lazy: list[str] = []
     for n in ast.walk(tree):
@@ -1161,7 +1183,9 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
 def test_the_mixins_never_import_each_other_nor_the_host() -> None:
     """★ 跨域调用**一律经 `self`**：混入之间零 import，也不得反向 import 组装模块。"""
     siblings = {f"hub.{d}" for d in DOMAINS}
-    host_key = hs.__name__  # 从**对象**取名字，不写带引号的字面量（`test_subproc_util` 的 spawn marker）
+    host_key = (
+        hs.__name__
+    )  # 从**对象**取名字，不写带引号的字面量（`test_subproc_util` 的 spawn marker）
     for domain in DOMAINS:
         tree = _tree(HUB_DIR / f"{domain}.py")
         got: set[str] = set()
@@ -1198,15 +1222,23 @@ def test_the_sentinel_moved_with_its_only_reader() -> None:
     # `hub/boot.py`（S4 第十六刀；本刀之前住 `hub_server`），与发现簇的 `DISCOVER_SCAN_MIN_SEC`
     # （派发路径上的最小间隔闸）仍是两件事。
     assert hs.DISCOVER_SCAN_SEC == 5.0
-    assert _defined_names(BOOT) >= {"DISCOVER_SCAN_SEC"}, "常量没住在引导链里（换名/搬家会静默丢默认值）"
-    assert _defined_names(HUB_SERVER) & {"DISCOVER_SCAN_SEC"} == set(), "hub_server 又留了一份（搬漏）"
+    assert _defined_names(BOOT) >= {"DISCOVER_SCAN_SEC"}, (
+        "常量没住在引导链里（换名/搬家会静默丢默认值）"
+    )
+    assert _defined_names(HUB_SERVER) & {"DISCOVER_SCAN_SEC"} == set(), (
+        "hub_server 又留了一份（搬漏）"
+    )
 
 
 # ────────────── ⑦ ★ 功能性（跳出结构，真的跑） ──────────────
 
 
 def _make_hub(tmp_path: Path, *, courses: dict[str, _JobStore] | None = None) -> _HubQueue:
-    stores = courses if courses is not None else {"": _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")}
+    stores = (
+        courses
+        if courses is not None
+        else {"": _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")}
+    )
     return _HubQueue(stores, order=list(stores))
 
 

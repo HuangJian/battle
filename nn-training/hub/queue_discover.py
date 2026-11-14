@@ -34,13 +34,18 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import COURSE_ENABLE_MARKER, ProtocolError, parse_course_arg
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
 
 
 class QueueDiscoverMixin(QueuePeer):
@@ -124,9 +129,9 @@ class QueueDiscoverMixin(QueuePeer):
         # 不是给正在跑的活断电。
         dropped = self._drop_dead_courses(root)
         if dropped:
-            print(f"[hub-server] dropped courses: {', '.join(dropped)}", flush=True)
+            _log(f"dropped courses: {', '.join(dropped)}")
         if added:
-            print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
+            _log(f"discovered courses: {', '.join(added)}")
         return added
 
     def _drop_dead_courses(self, root: Path) -> list[str]:
@@ -179,10 +184,9 @@ class QueueDiscoverMixin(QueuePeer):
         with self._lock:
             if course not in self._no_marker_warned:
                 self._no_marker_warned.add(course)
-                print(
-                    f"[hub-server] 跳过未开课的 {course}：无 {COURSE_ENABLE_MARKER}"
+                _log(
+                    f"跳过未开课的 {course}：无 {COURSE_ENABLE_MARKER}"
                     "（控制台「训练」写入 / 「停课」删除）——队列原样保留，开课即恢复派发",
-                    flush=True,
                 )
         return False
 

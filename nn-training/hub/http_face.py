@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 from common.http_respond import respond_json
+from common.logutil import log_line, tag_logger
 from common.protocol import (
     ADMIN_CANCEL_JOB_PATH,
     ADMIN_WORKER_ERROR_PATH,
@@ -123,6 +124,15 @@ from hub.worker_pulse import WorkerPulse
 # 类属性 `push: PushDispatcher | None` 同理：注解要在模块级可解析。
 # 只 import 这一个名字（`PushWorkers` / `DEFAULT_PUSH_CONFIG` 是引导链的，住 `hub/boot.py`）。
 from remote.push_dispatch import PushDispatcher
+
+# ------------------------------------------------------------------ 日志出口
+
+#: 请求面/调度面的行日志：格式与时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+#: 迁移前本文件 8 处手拼 `[{time.strftime(...)}] [hub-server] …` ——输出逐字节不变
+#: （`stamp()` 就是 `[HH:MM:SS]`），只是不再有第二份时间戳实现（python.refactor.md §P0-6）。
+#: 固定 tag 用 `_log`；**tag 里带请求源**（`hub-server <ip> src=… via=cf`）的行直接调
+#: `log_line(<tag>, msg)` —— 动态 tag 不需要再包一层工厂。
+_log = tag_logger("hub-server", lambda: time)
 
 # ------------------------------------------------------------------ 来源判定
 
@@ -269,10 +279,7 @@ class HubHandler(
         hdrs = self.headers
         src_ip, via = attributed_source(peer, hdrs.get(CF_SOURCE_HEADER, "") if hdrs else "")
         tag = f"{peer} src={src_ip} via=cf" if via == "cf" else peer
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {tag}] {line}",
-            flush=True,
-        )
+        log_line(f"hub-server {tag}", line)
 
     def _auth_ok(self) -> bool:
         peer = self.client_address[0]
@@ -299,10 +306,11 @@ class HubHandler(
             counter = f"AUTH FAIL {n}/5"
             note = " — 已封禁该 IP 3600s（仅拒无效鉴权；合法 token 不受影响）" if n >= 5 else ""
         src = f"peer={peer}" if via == "peer" else f"peer={peer} src={ip} via=cf"
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] {counter} "
-            f"path={self.path.split('?', 1)[0]} {src}{note}",
-            flush=True,
+        # tag 里带变量（请求源）⇒ 用 `log_line` 直调；`log_line` 的 `[tag]` 位就是本仓的
+        # 「多段 tag」面（`hub-server <ip src=… via=cf>`），不必为它再包一层工厂。
+        log_line(
+            f"hub-server {ip}",
+            f"{counter} path={self.path.split('?', 1)[0]} {src}{note}",
         )
         self._json({"error": "unauthorized"}, 401)
         return False
@@ -314,13 +322,13 @@ class HubHandler(
         if now - HubHandler._blocked_logged.get(ip, 0.0) < 60:
             return
         HubHandler._blocked_logged[ip] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server {ip}] BLOCKED — 请求被拒 "
+        log_line(
+            f"hub-server {ip}",
+            "BLOCKED — 请求被拒 "
             f"path={self.path.split('?', 1)[0]} 剩余封禁 "
             f"{int(self.hub.blocked_remaining(ip))}s（5/5 次**无效**鉴权触发；"
             f"合法 token 照常放行——本次请求的 token 不匹配；"
             f"归因: peer={peer} via={via}）",
-            flush=True,
         )
 
     # 响应形状（头部顺序 / UTF-8 / ensure_ascii=False / 长度算法）= 线协议的一部分：
@@ -404,11 +412,10 @@ class HubHandler(
                     sent += n
         except OSError as e:
             stalled = True
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送**停滞** {path}："
+            _log(
+                f"响应发送**停滞** {path}："
                 f"已发 {sent}/{total} bytes 后 {time.time() - t0:.0f}s 无进展（{e!r}）"
-                "——对端半开，断开连接（不再永久占住 handler 线程）",
-                flush=True,
+                "——对端半开，断开连接（不再永久占住 handler 线程）"
             )
         finally:
             try:
@@ -416,11 +423,7 @@ class HubHandler(
             except OSError:
                 pass
         if not stalled and total >= SEND_LOG_MIN_BYTES:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 响应发送完成 {path} "
-                f"{sent} bytes in {time.time() - t0:.1f}s",
-                flush=True,
-            )
+            _log(f"响应发送完成 {path} {sent} bytes in {time.time() - t0:.1f}s")
 
     def _bytes(
         self,
@@ -830,11 +833,10 @@ class HubHandler(
         if now - last < WORKER_SOURCE_WARN_THROTTLE_SEC:
             return
         self._worker_source_warned[wid] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] ⚠ worker 名 {wid} 在 "
+        _log(
+            f"⚠ worker 名 {wid} 在 "
             f"{WORKER_SEEN_WINDOW_SEC:.0f}s 窗口内换了来源（{prev[0]} → {src}）——"
-            "「同环境单台」前提可能被打破（只观测，不改名/不入账）",
-            flush=True,
+            "「同环境单台」前提可能被打破（只观测，不改名/不入账）"
         )
 
     def _log_claim(self, jid: str, course: str, worker_id: str, mode: str, token: str) -> None:
@@ -846,12 +848,11 @@ class HubHandler(
         弄丢，等于把事故的取证面弄丢。`reclaims>0` 是「认领后零回传」计数（熔断前兆）。
         """
         n = self.hub.reclaims(jid)
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] claim job={jid} course={course or '-'} "
+        _log(
+            f"claim job={jid} course={course or '-'} "
             f"worker={worker_id or '?'} mode={mode} "
             f"lease={token[:8] if token else 'none'}"
-            + (f" reclaims={n}" if n else ""),
-            flush=True,
+            + (f" reclaims={n}" if n else "")
         )
 
     def _read_json_body(self, cap: int) -> dict | None:
@@ -927,9 +928,8 @@ class HubHandler(
         if now - self._REJECT_WARN_AT.get(key, 0.0) <= 60:
             return
         self._REJECT_WARN_AT[key] = now
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] {kind} 被拒: job={job_id} "
+        _log(
+            f"{kind} 被拒: job={job_id} "
             f"course={course or '-'} worker={worker or '?'} status={status} "
-            f"reason={reason or '-'}",
-            flush=True,
+            f"reason={reason or '-'}"
         )

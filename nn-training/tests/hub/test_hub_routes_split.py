@@ -149,9 +149,17 @@ ALLOWED_IMPORTS = {
     # 租约/归属状态）与 `hub.task_pack`（任务包新鲜度门 / 缺包自愈门的纯判据）。
     # ★ 2026-10-24（W5）：产物/段末入账抽进 `hub.offline_ingest`（两条入口共用一份）——
     # 补传端点只剩「鉴权 → 读体 → 定位课程」，判据住那边，所以这里多这一条。
-    "hub.offline": {"common.protocol", "hub.store", "hub.task_pack", "hub.offline_ingest"},
+    # 2026-11-14（python.refactor.md §P0-6）：行日志改走 `common.logutil`（stdlib-only 的 L0
+    # 格式模块 ⇒ 层号不变）。
+    "hub.offline": {
+        "common.logutil",
+        "common.protocol",
+        "hub.store",
+        "hub.task_pack",
+        "hub.offline_ingest",
+    },
     "hub.result": {"common.protocol", "remote.push_dispatch"},
-    "hub.schedule": {"common.protocol"},
+    "hub.schedule": {"common.logutil", "common.protocol"},
 }
 
 
@@ -290,9 +298,7 @@ def _assembly_imports(path: Path) -> list[str]:
     （标准库）的叶子也是 `server` ⇒ 叶子名判据会把 `hub/boot.py`（它 import `ThreadingHTTPServer`）
     误判成环。旧判据之所以能用叶子名，只是因为 `hub_server` 这个叶子名足够独特。
     """
-    return sorted(
-        i for i in _imports_of(path) if i == "hub.server" or i.startswith("hub.server.")
-    )
+    return sorted(i for i in _imports_of(path) if i == "hub.server" or i.startswith("hub.server."))
 
 
 def test_the_hub_package_never_imports_the_assembly_module() -> None:

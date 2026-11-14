@@ -41,16 +41,21 @@ from __future__ import annotations
 
 import functools
 import json
+import time
 from pathlib import Path
 
 import remote.delta_files as delta_files
 from common.hashing import sha256_file
+from common.logutil import tag_logger
 from common.protocol import ProtocolError, sanitize_run_id
 from hub import deltas as hub_deltas
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.store_offline import Stager, _round_is_complete
 from hub.task_pack import _hub_log
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
 
 
 class QueueResumeMixin(QueuePeer):
@@ -182,10 +187,9 @@ class QueueResumeMixin(QueuePeer):
             #   反而会把一个容器写进产物目录。这种轮只能是「hub 落地失败过」的（基准不在 hub
             #   侧）⇒ 退到更早那轮整份，而不是把问题传给云机。
             if delta_files.any_container_file(w_file) or delta_files.any_container_file(o_file):
-                print(
-                    f"[hub-server] 续跑锚点跳过 {course or '-'} it{int(it)}：权重/动量还是 delta 容器"
+                _log(
+                    f"续跑锚点跳过 {course or '-'} it{int(it)}：权重/动量还是 delta 容器"
                     "（hub 侧落地失败过）——退到更早的整份轮",
-                    flush=True,
                 )
                 continue
             try:

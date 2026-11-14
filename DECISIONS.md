@@ -6046,3 +6046,23 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ISO 时间戳**，不是日志行，`stamp()` 不适用）。
 - **后果**：print 存量 219 → 211 处、65 → 64 文件；`hub/` 的日志时间戳实现只剩 `common/logutil` 一处
   （除 `http_face` 的按 IP 拼 tag 那条线）。
+
+## §2026-11-14-nn-python-audit-round4-hub-print-zero（P0-6 / B2 收口：`hub/` 整包日志单源）
+
+- **决定**：`hub/` 剩下的 25 处 `print` 全部收口，只留 **1** 处 —— `hub/tunnel_ab_probe.py` 的
+  `print(json.dumps(results))`：那是**一次性探针 CLI 的机器读交付物**，不是日志行，改走 `log_line`
+  会往 JSON 前面塞时间戳，等于破坏读方契约。
+  两种出口按「tag 是否带变量」分工：固定 tag 用 `_log = tag_logger("<tag>", lambda: time)`
+  （`hub-server` / `smoke` / `backfill` / `ab`）；tag 里带请求源的行（`hub-server <ip> src=… via=cf`）
+  直接调 `log_line(<tag>, msg)` —— 动态 tag 不包工厂，`logutil` 的 `[tag]` 位本来就够。
+- **行为变更（有意，逐条）**：`hub/queue_discover` / `queue_offline` / `queue_resume` / `queue_scope`
+  / `backfill_offline` / `tunnel_ab_probe` 里原本**没有时间戳**的行现在带 `[HH:MM:SS]`；
+  `hub/offline` / `queue_claims` / `schedule` / `task_pack` / `smoke_loopback` / `tunnel_ab_probe`
+  里手拼 `time.strftime` 的行格式**逐字节不变**（`stamp()` 就是 `[HH:MM:SS]`）。
+- **被否决**：给 `tag_logger` 加 `tag_fn=` 之类的动态 tag 参数（`log_line` 已经是那个 API，
+  再加一层只是名字不同）；把 JSON 那行也「顺手统一」（破坏机器读面）；只做「有手拼时间戳」
+  的那几处（7 处没时间戳的行会留在同一个文件里继续混排，门禁计数也不降）。
+- **连带改动**：`tests/hub/test_hub_queue_split.py` / `test_hub_routes_split.py` 的
+  `ALLOWED_IMPORTS` 为受影响混入登记 `common.logutil`（stdlib-only 的 L0 ⇒ 层号不变）；
+  `hub/tunnel_ab_probe.py` 原有的本地 `_log(msg)` 包装删除（否则与 tag logger 同名，mypy `no-redef`）。
+- **后果**：print 存量 211 → **179** 处、64 → 53 文件；`hub/` 的日志时间戳只剩 `common/logutil` 一处实现。

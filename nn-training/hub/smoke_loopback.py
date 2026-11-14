@@ -36,6 +36,7 @@ REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
 from biz.reward_library import METRICS_VERSION
 from common.cli import house_parser, run_main
+from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW, rmtree_best_effort
 from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM  # 合成语料形状随 schema
@@ -50,6 +51,10 @@ from remote.hub_client import (
     wait_job,
 )
 from worker.config import load_course
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。迁移前是手拼
+#: `[{time.strftime('%H:%M:%S')}] [smoke] {msg}` 的 `print(..., flush=True)`（输出不变）。
+_log = tag_logger("smoke", lambda: time)
 
 # ------------------------------------------------------------------ shard 合成
 
@@ -145,7 +150,7 @@ def main() -> int:
     work.mkdir(parents=True)
 
     def log(msg: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] [smoke] {msg}", flush=True)
+        _log(f"{msg}")
 
     # ---- 0) 课程 + course_fp（D14：sha256 of 课程文件字节） ----
     course_path = ROOT / "curricula" / "p4-onset.jsonc"

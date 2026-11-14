@@ -32,15 +32,21 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import WORKER_SEEN_WINDOW_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import course_finished as _course_finished
 from hub.task_pack import hold_progress_at
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 #: 开课标记（与 `stack/courses.COURSE_ENABLE_MARKER` 同名；hub 不 import dashboard）。
 _ENABLE_MARKER = "training-enabled.txt"
@@ -353,12 +359,11 @@ class QueueScopeMixin(QueuePeer):
         if job_id in self._ambiguous:
             return
         self._ambiguous[job_id] = list(holders)
-        print(
-            f"[hub-server] ⚠ job 身份歧义：job={job_id} 同时存在于 "
+        _log(
+            f"⚠ job 身份歧义：job={job_id} 同时存在于 "
             f"{'、'.join(holders)} —— 一律拒答（不猜归属）。"
             "多半是旧 runId/旧代码留下的同名 job 目录：清掉非当前 runId 的 "
             "`remote-jobs/<jid>`（或换 runId 重跑）即可。",
-            flush=True,
         )
 
     def ambiguous_jids(self) -> dict[str, list[str]]:
