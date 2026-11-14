@@ -5939,3 +5939,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （另一类问题，口径要区分「处理器类型」与「处理器体」，留到真正开始 P0-7 收敛时再加）。
 - **后果**：新代码在内部路径上只能捕具体异常；确实位于进程边界时需 `logger.exception` 留痕。
   P0-7 的清理仍然没开始，但门禁把「越清越多」的旧循环切断了。
+
+## §2026-11-14-nn-python-audit-round4-suppression-gate（G6：抑制符只减不增）
+
+- **决定**：新增 `nn-training/tests/test_suppression_budget.py`，`tokenize` 只读 `COMMENT` token，
+  统计 `# noqa: F401` 与 `# type: ignore`（含 `[code]` 形态），按文件冻结在
+  `tests/golden/suppression_baseline.json`（25 处 / 11 文件；271 处 / 98 文件）。只拦增长，另加
+  「基线只许调小」；排除 `.venv`/`tmp`/`weights`/`ipynb`/`__pycache__`/`node_modules`。
+  扫全仓 `*.py`（生产 + 测试），因为两类抑制都在 tests 里最多。
+- **被否决**：用 grep 计 `# noqa`（`tests/test_source_text_assert_budget.py` 等门禁用例在**字符串**里
+  引用这些标记，grep 会把字样算成真抑制）；只统计生产包（98 个文件里 75 个在 `tests/`，
+  而 tests 正是 `type: ignore` 增长最快的地方）；一并统计裸 `# noqa`（口径只对 G6 点名的两类
+  负责，裸 noqa 的语义是全关，要单独一条规则）。
+- **后果**：新增抑制符必须先解释；`trainer/dispatch_queue.py`（7 处 re-export）之类存量仍在，
+  清理时基线随之调小。`mypy` 的 `warn_unused_ignores=false` 未动 —— 这仍意味着存量里可能有无用
+  ignore，但门禁至少保证了「不再变多」。
