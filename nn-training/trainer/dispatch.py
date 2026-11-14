@@ -12,7 +12,7 @@ from pathlib import Path
 
 import common.distribution
 import common.protocol
-from common import http_pool, node_report, node_speed
+from common import node_report, node_speed
 from common.log import log
 from common.platform_utils import rmtree_best_effort
 
@@ -592,6 +592,8 @@ class RolloutDispatcher:
         _tag_seq = [time.time_ns()]
 
         def worker(nd: dict | None, local_slot: int | None = None) -> None:
+            # 池计数分桶（2026-11-14）：本线程的 `/v1/task` 按 URL 推断成 `rollout` 桶（见
+            # `distribution._kind_from_url`），eval/batch 腿各自覆盖——不必在这里多写一行。
             suspended = False  # 本迭代持锁前先置初值（nd 非 None 时不赋值，v3.10 else 分支引用）
             cancel_target: dict | None = None
             while (
@@ -1263,10 +1265,12 @@ class RolloutDispatcher:
         missing = sorted(k for k in (set(attempts) if halted and self.pool_halt else all_tasks) if k not in seen)
         by_node = common.distribution.by_node_of(results)
         # 行尾带传输层复用率（2026-11-14 P4）：`NODE_HTTP_POOL=0` ⇒ 后缀为空。
+        # 分桶后同一条行同时打 rollout 与 eval（2026-11-14 评审）：同进程里 eval 与 rollout
+        # 并发，只打一个数永远说不清是谁的；两个桶相加才等于旧的进程级口径。
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
-            + http_pool.stats_suffix()
+            + common.distribution.pool_round_suffix()
         )
         # 竞速账 + 重复执行率（口径见 `common.distribution.race_stats`；2026-10-21 收口）
         if _race_line := common.distribution.race_log_line(

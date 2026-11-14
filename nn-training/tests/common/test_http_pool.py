@@ -146,6 +146,64 @@ def test_threads_do_not_share_connections(srv) -> None:
     assert _H.conns == 2, "两条线程必须各有一条连接（共享会串包）"
 
 
+def test_drop_reason_will_close(srv) -> None:
+    """服务端回 `Connection: close` ⇒ drop 记 `drop_will_close`（「每请求重连」最常见的真因）。"""
+    http_pool.request(f"{srv}/close")
+    st = http_pool.pool_stats()
+    assert st["drop"] == 1 and st.get("drop_will_close") == 1, st
+
+
+def test_drop_reason_error_before_headers(srv) -> None:
+    """响应头之前被断 ⇒ `drop_error`（不是 will_close：两者修法完全不同）。"""
+    assert http_pool.request(f"{srv}/drop")[0] == 200
+    st = http_pool.pool_stats()
+    assert st.get("drop_error") == 1, st
+    assert st.get("drop_will_close", 0) == 0, st
+
+
+def test_kind_buckets_are_isolated(srv) -> None:
+    """同一进程多课程/多用途并发时，读数必须按桶隔离（2026-11-14 评审）。"""
+    http_pool.request(f"{srv}/ok", bucket="c1/rollout")  # 建连
+    http_pool.request(f"{srv}/close", bucket="c1/eval")  # 复用该连接，服务端随即关掉
+    ro = http_pool.pool_stats("c1/rollout")
+    ev = http_pool.pool_stats("c1/eval")
+    assert ro["connect"] == 1 and ro["reuse"] == 0, ro
+    assert ev["connect"] == 0 and ev["reuse"] == 1, ev
+    assert ev.get("drop_will_close") == 1 and ro.get("drop_will_close", 0) == 0, (ro, ev)
+    taken = http_pool.take_stats("c1/rollout")
+    assert taken["connect"] == 1
+    assert http_pool.pool_stats("c1/rollout")["connect"] == 0, "分桶读走的只清自己"
+    merged = http_pool.pool_stats()
+    assert merged["reuse"] == 1 and merged["drop"] == 1, "合并视图里只剩 eval 那一条"
+
+
+def test_stats_suffix_labels_bucket(srv) -> None:
+    http_pool.request(f"{srv}/ok", bucket="g4-special/rollout")
+    http_pool.request(f"{srv}/close", bucket="g4-special/rollout")
+    # 行格式是操作员接口（日志行就是交付物）：整串前缀比较（不是子串断言，不计入口径 A）。
+    assert http_pool.stats_suffix("g4-special/rollout").startswith(
+        " pool[rollout] reuse=1 connect=1 drop=1(will_close=1) retry=0"
+    ), http_pool.pool_stats()
+
+
+def test_connect_ms_recorded(srv) -> None:
+    """握手耗时只在 miss 分支计时（热路径不新增分配）。"""
+    http_pool.request(f"{srv}/ok")
+    assert http_pool.pool_stats()["connect_ms"] >= 0
+
+
+def test_idle_age_eviction(srv, monkeypatch) -> None:
+    """`NODE_HTTP_POOL_IDLE_SEC` > 0 时超龄连接主动重连；默认（未设）= 不老化。"""
+    http_pool.request(f"{srv}/ok")
+    http_pool.request(f"{srv}/ok")
+    assert http_pool.pool_stats()["connect"] == 1, "默认必须复用（常量未定前不老化）"
+    monkeypatch.setenv("NODE_HTTP_POOL_IDLE_SEC", "0.01")
+    time.sleep(0.05)  # sleep-ok: 夹具模拟——制造「连接空闲已超龄」的现场，上限由常量 0.01s 定义
+    http_pool.request(f"{srv}/ok")
+    st = http_pool.pool_stats()
+    assert st["connect"] == 2 and st.get("drop_idle") == 1, st
+
+
 def test_abort_scope_closes_inflight_and_never_retries(srv) -> None:
     err: list[BaseException] = []
 
@@ -166,3 +224,5 @@ def test_abort_scope_closes_inflight_and_never_retries(srv) -> None:
     t.join(5)
     assert err and isinstance(err[0], urllib.error.URLError), err
     assert http_pool.pool_stats()["retry"] == 0, "收工断连不得重发（会把一局重新开起来）"
+    # 收工/竞速剪枝造成的 drop 单独记账（plan §2.4）：它和「服务端不 keep-alive」是两回事。
+    assert http_pool.pool_stats().get("drop_abort") == 1, http_pool.pool_stats()

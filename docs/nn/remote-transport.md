@@ -6,6 +6,59 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §153 节点池的读数与真凶：`NO_PROXY` 里的 LAN 网段 + 分桶/drop 原因（2026-11-14）
+
+**背景**：用户问「rollout 节点与 trainer 的长连接要不要改成一节点一多路复用 + 跨 it 保持」。原
+`plan/task-stream-chunked-keepalive.plan.md` 先把矛头指向「同步 `/v1/task` 是 close-delimited
+⇒ 每局重建 TCP/TLS」，并给出「connect=79 ≈ 65 局」的现场表。评审用本地探针 + 线上节点把它逐条
+推翻（全文见 plan §1）：
+
+1. **Bun 1.4.4 本来就发 chunked**。只给 `Content-Type` 的流式 `Response`：`curl -D -` 直接看到
+   `Transfer-Encoding: chunked`；Python `r.chunked=True / will_close=False / len=None`；显式再设
+   该头，响应逐字节无差别 ⇒ 「加 header」是空操作。用真 `common.http_pool.request` 打逐字节
+   复刻的 sync task 形状（空格心跳 + 末尾 payload）三连发 = `reuse=2 connect=1 drop=0`。
+2. **每请求重连的是 LAN 三台**（a96/a97/a98）。同一个 `/v1/status`：经 `127.0.0.1:7890`
+   → `Connection: close`（`will_close=True`，3 发 0.282s）；直连 `192.168.0.97:8443` → 无该头
+   （3 发 0.109s）。根因：`urllib.request.proxy_bypass()` 在 Windows 读注册表、**不读 env**，而
+   本机 `NO_PROXY=…,192.168.0.0/16` 本来就把 LAN 交给直连。
+3. **计数本身不可归因**。`http_pool._STATS` 是进程级、`take_stats()` 读后清零；同一个 serve
+   进程并发跑 10+ 课程（`y26-clear` 2576 行 / `g4-special` 2417 / `o2-gq` 1922 / `z2-*` …）
+   ⇒ 每行 `round done` 都在抢桶。`ok=n` 是结算局数不是请求数；`connect` 还含 ping/status/
+   weights/rescan/竞速副本/收工中断。§152 的「新建 0.77s vs 复用 0.32s」仍是有效读数，但
+   「谁在重连」当时读不出来。
+4. **tunnel 那一跳是好的**：dsw `/v1/status` 两连发 `Connection: keep-alive`、`num_connects=0`。
+5. **收工/竞速也在制造 drop**：`abort_scope` 关掉在飞响应 → `read()` 抛错 → `_drop_conn` +
+   `URLError`（`OSError` ⇒ `is_transient_error` ⇒ 重排）。与 framing 无关。
+
+**改了什么**：
+
+1. `common/http_pool.py`：计数改成**按桶** `_STATS[bucket][key]`（bucket = `<course>/<kind>`，由
+   `distribution.pool_bucket()` 拼）；`drop` 拆原因 `will_close|error|abort|redirect|idle`；
+   `connect_ms` 只在 miss 分支计时；`stats_suffix(bucket)` 行内标签取 kind 段；
+   `NODE_HTTP_POOL_IDLE_SEC`（默认 **0 = 不老化**）超龄主动重连。
+2. `common/net_http.py`：`env_no_proxy()`（`*` / 精确 / `.suffix` / IPv4 CIDR）+ `bypass_proxy()`
+   = 回环 ∪ `NO_PROXY`；`urlopen` / `racing_urlopen` / `http_pool._proxy_for` 三处同一判据
+   （`NODE_HTTP_POOL=0` 的回退腿也绕开 LAN 代理）。
+3. `common/distribution.py`：`set_request_tag(tag, kind=…)` / `set_request_kind()` / `request_kind()`
+   + `_kind_from_url()`（`/v1/task|result` 按 `mode=eval` 分 rollout/eval）+ `pool_round_suffix()`。
+4. `trainer/dispatch.py` 的 `[dist] round done` 行尾同时打 `pool[rollout]` 与 `pool[eval]`；
+   `worker/eval_exec.py` / `trainer/batch_runner.py` 用 `set_request_tag(..., kind="eval"|"batch")`
+   覆盖用途段。
+
+**现场复验（2026-11-14，同一台机）**：a96/a97/a98 三连发 `/v1/status` = `connect=1 reuse=2
+ drop=0`（修前每次 `drop_will_close`）；self 同口径也是 `connect=1 reuse=2`。
+
+**已知 latent（本次未修，先记账）**：https 目标经代理时，池路径建的是 `HTTPConnection` + 
+`set_tunnel`（**缺 TLS 包装**）⇒ 代理回「400 The plain HTTP request was sent to HTTPS port」。
+生产没触发是因为控制台 `shapeLoopbackNoProxy()` 把 `.trycloudflare.com` 写进 `NO_PROXY`（走直连）；
+一旦有人靠环境代理访问 tunnel 且没写 `NO_PROXY`，池路径就会整条腿失败。修法：https 目标用
+`racing_connection("https", proxy_host, proxy_port)` + `set_tunnel`（urllib 的 HTTPSHandler 就是这么做的），
+需要一条能跑的 CONNECT 代理 stub 才够测。
+
+**验收**：`tests/common/test_http_pool.py`（分桶隔离 / 四种 drop 原因 / idle 老化 / connect_ms）·
+`tests/common/test_net_http_env_no_proxy.py`（`*`、精确、`.suffix`、CIDR、回环回归）·
+`nn-python-gate` 6054 passed。
+
 ## §152 派工槽位不再取小 + 节点 workers ×2 + 长连接池 + 磁盘阈值可配（2026-11-14）
 
 **现场**（gcs，2 物理核，2026-11-14 00:29）：`/v1/status` `cpus=2 workers=2 persistReady=2`，

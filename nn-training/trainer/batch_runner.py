@@ -806,7 +806,8 @@ class _UnitLanes:
 
     def supervise(self, nd: dict) -> None:
         """一个节点的通道：未就绪 → 重探；就绪 → 起槽位线程；掉线 → 交回重探。"""
-        common.distribution.set_request_tag(self.req_scope)
+        # `kind="batch"`（2026-11-14）：节点腿自成 `batch` 计数桶（与同进程 rollout/eval 分开）。
+        common.distribution.set_request_tag(self.req_scope, kind="batch")
         lane = self.lane_state(nd)
         nid = str(lane["id"])
         while not self.all_done.is_set() and time.time() < self.deadline:
@@ -1016,7 +1017,7 @@ class _UnitLanes:
         return m
 
     def worker(self, nd: dict, lane: dict, slot: int) -> None:
-        common.distribution.set_request_tag(self.req_scope)
+        common.distribution.set_request_tag(self.req_scope, kind="batch")
         nid = str(nd["id"])
         while time.time() < self.deadline and not self.all_done.is_set():
             task = None

@@ -408,17 +408,70 @@ _ABORTED_TAGS: set[str] = set()
 _TAG = threading.local()
 
 
-def set_request_tag(tag: str) -> None:
+def set_request_tag(tag: str, kind: str | None = None) -> None:
     """给**当前线程**的 HTTP 请求打标（`abort_active_requests` 的作用域键）。
 
     线程本地，不继承：调用方须在每个自建线程（worker/supervisor）开头显式设置。
     空 tag = 不参与收工断连（rollout/A/C 层的既有行为逐字不变）。
+
+    `kind` 顺带设计数桶的用途段（`None` = 不动已有 kind）：tag 与 kind 同在请求上下文里，
+    两个都设时不必写两行（`trainer/dispatch.py` 等文件有 LOC 预算）。
     """
     _TAG.value = tag
+    if kind is not None:
+        set_request_kind(kind)
 
 
 def request_tag() -> str:
     return str(getattr(_TAG, "value", "") or "")
+
+
+#: 请求用途（`http_pool` 计数分桶的第二段）。thread-local，与 `_TAG` 同纪律。
+_KIND = threading.local()
+
+
+def set_request_kind(kind: str) -> None:
+    """给**当前线程**的 HTTP 请求打用途标签（`rollout|eval|batch|weights|probe|other`）。
+
+    2026-11-14 评审：池计数是进程级且读后清零，而一个 serve 进程并发跑 10+ 课程 ⇒
+    没有这一层就分不清「谁的 connect」。线程本地、不继承：调用方须在每个自建线程
+    （rollout worker / eval 节点腿 / batch supervisor）开头显式设置；空串 = 回到 path 推断。
+    """
+    _KIND.value = kind
+
+
+def request_kind() -> str:
+    return str(getattr(_KIND, "value", "") or "")
+
+
+def _kind_from_url(url: str) -> str:
+    """未显式设 kind 时的推断：探活 → probe · 权重面 → weights · 任务面按 `mode` 分
+    （`mode=eval` = 评估腿，其余 = rollout）。推断就够用的地方不设 thread-local（LOC 预算）。"""
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path or ""
+    if path in ("/v1/weights", "/v1/blob-sha", "/v1/code-sha"):
+        return "weights"
+    if path.startswith("/v1/ping") or path.startswith("/v1/status") or path == "/v1/restart":
+        return "probe"
+    if path in ("/v1/task", "/v1/result"):
+        mode = urllib.parse.parse_qs(parts.query).get("mode", [""])[0]
+        return "eval" if mode == "eval" else "rollout"
+    return "other"
+
+
+def pool_bucket(kind: str | None = None) -> str:
+    """`http_pool` 的计数桶 = `<course>/<kind>`（唯一拼法；空课程/空 kind 自动省略）。
+
+    为什么带课程名：同一个 trainer 进程同时跑多门课（现场 10+），而池计数是**进程级**的
+    ——只分 kind 不分课程，两个课程的行依然互相抢桶（plan §2.2）。
+    """
+    k = (request_kind() if kind is None else kind).strip()
+    return "/".join(p for p in (course_name_of(), k) if p)
+
+
+def pool_round_suffix(kinds: tuple[str, ...] = ("rollout", "eval")) -> str:
+    """`[dist] round done` 行尾的**全部**桶读数（只打一个数永远说不清是谁的）。"""
+    return "".join(http_pool.stats_suffix(pool_bucket(k)) for k in kinds)
 
 
 def abort_active_requests(tag: str = "") -> int:
@@ -490,6 +543,7 @@ def _request(
             headers=auth,
             method=method,
             scope=scope,
+            bucket=pool_bucket(request_kind() or _kind_from_url(url)),
         )
     req = urllib.request.Request(url, data=data, headers=auth, method=method)
     # 竞速 connect（2026-11-11）：云机隧道主机名解析出多个地址，stdlib 串行试、每个地址

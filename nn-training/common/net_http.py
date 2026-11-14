@@ -14,6 +14,14 @@
 回环流量在定义上就是本机的，绕开代理永远是对的；非回环（隧道/公网 URL）保持 urllib 默认
 ——云机侧「显式 ProxyHandler」的需求（Colab userspace 实测，见 `remote/worker.py`）不受影响。
 
+第三件事（2026-11-14）：**operator 在 `NO_PROXY` 里点名的网段也要绕开代理**（`env_no_proxy`）。
+上面那条坑只补了回环：本机 `NO_PROXY` 写的是 `192.168.0.0/16`（LAN 的三台采样节点），
+`proxy_bypass()` 在 Windows 读注册表、**不读 env**，实测 `proxy_bypass("192.168.0.97") is False`
+⇒ a96/a97/a98 的每一发请求都被送进局域网代理，而代理对每条响应回 `Connection: close`
+⇒ 长连接池白建（2026-11-14 实测：同一 `/v1/status` 经代理 3 发 0.282s / `will_close=True`，
+直连 3 发 0.109s / `will_close=False`）。判据是**读 operator 自己写的 `NO_PROXY`**（含 CIDR），
+不是硬编码私网段——§149「不做 LAN 例外」按这条实现才不冲突。
+
 第二件事（2026-11-11）：**多地址竞速 connect**（`racing_urlopen`，节点通信的出口）。
 `socket.create_connection` 串行试 `getaddrinfo` 的每个结果，且 `timeout` 是**每地址**的
 ⇒ 前 N 个地址黑洞时墙钟 = N×timeout。本机没有到 Cloudflare 的可用 IPv6 路由，kaggle
@@ -25,6 +33,8 @@
 from __future__ import annotations
 
 import http.client
+import ipaddress
+import os
 import socket
 import threading
 import time
@@ -36,14 +46,14 @@ from urllib.parse import urlsplit
 _NO_PROXY_OPENER: urllib.request.OpenerDirector | None = None
 
 
-def is_loopback(url_or_host: str) -> bool:
-    """回环判据：IPv4 `127.0.0.0/8`、IPv6 `::1`、`localhost`（含 `*.localhost`）。
+def host_of(url_or_host: str) -> str:
+    """从 URL / `host:port` / 裸 host 取出规范化 host（小写、去尾点）；拿不到 ⇒ 空串。
 
-    接受完整 URL（`http://127.0.0.1:8900/x`）与裸 host（`127.0.0.1:8900`）两种形态。
+    回环判据与 `env_no_proxy` 共用这一份解析（两条政策对「host 是什么」不能有两套答案）。
     """
     s = str(url_or_host or "").strip()
     if not s:
-        return False
+        return ""
     if "//" in s:
         host = urlsplit(s).hostname or ""
     else:
@@ -52,7 +62,17 @@ def is_loopback(url_or_host: str) -> bool:
             host = host[1:].split("]", 1)[0]
         elif host.count(":") == 1:  # 127.0.0.1:8900
             host = host.split(":", 1)[0]
-    host = host.strip().lower().rstrip(".")
+    return host.strip().lower().rstrip(".")
+
+
+def is_loopback(url_or_host: str) -> bool:
+    """回环判据：IPv4 `127.0.0.0/8`、IPv6 `::1`、`localhost`（含 `*.localhost`）。
+
+    接受完整 URL（`http://127.0.0.1:8900/x`）与裸 host（`127.0.0.1:8900`）两种形态。
+    """
+    host = host_of(url_or_host)
+    if not host:
+        return False
     if host in ("localhost", "::1"):
         return True
     if host.endswith(".localhost"):
@@ -61,6 +81,45 @@ def is_loopback(url_or_host: str) -> bool:
     if len(parts) == 4 and parts[0] == "127":
         return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts[1:])
     return False
+
+
+def env_no_proxy(url_or_host: str) -> bool:
+    """`no_proxy`/`NO_PROXY` 里是否点名了这个 host（`*` / 精确 / `.suffix` / IPv4 CIDR）。
+
+    为什么不用 `urllib.request.proxy_bypass()`：它**优先读 Windows 注册表**，env 里的 CIDR
+    （本机是 `192.168.0.0/16`）一律不认（见模块头第三件事）。这里按 operator 写下的字面判定，
+    政策来源单一：谁写 `NO_PROXY`，谁决定哪一跳不过代理。
+    """
+    host = host_of(url_or_host)
+    if not host:
+        return False
+    raw = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
+    for item in raw.split(","):
+        ent = item.strip().lower().rstrip(".")
+        if not ent:
+            continue
+        if ent == "*":
+            return True
+        if "/" in ent:  # CIDR（只对 IP 字面量有意义）
+            try:
+                net = ipaddress.ip_network(ent, strict=False)
+                addr = ipaddress.ip_address(host)
+            except ValueError:
+                continue
+            if addr.version == net.version and addr in net:
+                return True
+            continue
+        if ent.startswith("*."):
+            ent = ent[2:]
+        ent = ent.lstrip(".")
+        if host == ent or host.endswith("." + ent):
+            return True
+    return False
+
+
+def bypass_proxy(url_or_host: str) -> bool:
+    """该目标**必须**绕开环境代理：回环 + operator 在 `NO_PROXY` 里点名的网段/域名。"""
+    return is_loopback(url_or_host) or env_no_proxy(url_or_host)
 
 
 def no_proxy_opener() -> urllib.request.OpenerDirector:
@@ -79,7 +138,7 @@ def urlopen(req: Any, timeout: float = 30.0):
     `monkeypatch.setattr("urllib.request.urlopen", …)` 那条缝要留住。
     """
     url = getattr(req, "full_url", None) or str(req)
-    if is_loopback(url):
+    if bypass_proxy(url):
         return no_proxy_opener().open(req, timeout=timeout)
     return urllib.request.urlopen(req, timeout=timeout)
 
@@ -251,4 +310,4 @@ def racing_urlopen(req: Any, timeout: float = 30.0):
     节点（`common.distribution._request`）走这里——云机隧道主机名才是多地址的那个。
     """
     url = getattr(req, "full_url", None) or str(req)
-    return racing_opener(no_proxy=is_loopback(url)).open(req, timeout=timeout)
+    return racing_opener(no_proxy=bypass_proxy(url)).open(req, timeout=timeout)

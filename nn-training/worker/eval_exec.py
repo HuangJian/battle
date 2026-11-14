@@ -187,7 +187,8 @@ class EvalExecutors:
 
     def _execute_node(self, grant: Grant) -> None:
         rnd = grant.round
-        common.distribution.set_request_tag(rnd.req_scope)
+        # `kind="eval"`（2026-11-14）：节点腿自成 `eval` 计数桶，不与同进程的 rollout 互梃。
+        common.distribution.set_request_tag(rnd.req_scope, kind="eval")
         nd = rnd.node_info(grant.node)
         if nd is None:
             rnd.settle_task(
