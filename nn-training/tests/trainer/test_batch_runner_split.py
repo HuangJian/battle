@@ -91,7 +91,12 @@ RUNNER_IMPORTS = {
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
     "worker.eval_yield",
     "common.log",
-    "trainer.dispatch_queue",
+    # 2026-11-14 登记（`trainer.dispatch_queue` 的 re-export 面退役）：`bun_version` 回
+    # `common.proc`（缺省 fallback 就是 `"?"`），`_record_agent_meta` 回
+    # `worker.agent_meta.record_agent_meta`。历史名字留在**本模块**命名空间里 ——
+    # `monkeypatch.setattr(br, "bun_version" / "_record_agent_meta", …)` 打的就是这两处。
+    "common.proc",
+    "worker.agent_meta",
     "trainer.queue_local",
 }
 

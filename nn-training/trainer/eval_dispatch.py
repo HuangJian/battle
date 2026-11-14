@@ -30,9 +30,11 @@ import common.distribution
 import common.protocol
 from common.fs import append_jsonl
 from common.log import log
+from common.proc import bun_version
+from common.proc import version_mm as mm
 from remote import weights_standard
-from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
 from worker import node_identity
+from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.agent_meta import record_eval_failed
 from worker.archive import find_archive_weights  # noqa: F401 — 兼容旧引用
 from worker.eval_arbiter import EvalRound, eval_arbiter

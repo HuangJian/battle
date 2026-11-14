@@ -6166,3 +6166,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **基线**：G9 55 处 / 35 文件（本轮 `train_core` 2 处 + `push_dispatch` 1 处清零）。
 - **顺带**：`remote/job_round.py::_StartBeacon` 的注释原先写「`job_started` 本身是 `try/except pass`」，
   已改成「自己不抛、失败打一行」—— 注释描述的行为变了就得跟着改，否则下一刀会按错的假设动手。
+
+## §2026-11-14-retire-dispatch-queue-reexport-surface（第二个 import 面砍掉，留一条并写明为什么）
+
+- **决定**：`trainer/dispatch_queue.py` 的公共 re-export 面从 7 条削到 1 条。删掉的六条
+  （`_record_agent_meta` · `pick_race_target` · `pick_tail_race` · `race_tier_ok` ·
+  `register_inflight` · `run_rollout`）与附带的 `bun_version` 薄包装，消费方一律 direct import
+  真家：`common.proc`（`bun_version` / `version_mm as mm`）· `worker.agent_meta`
+  （`record_agent_meta as _record_agent_meta`）· `trainer.queue_local`（`run_rollout` + 竞速四件套）。
+  历史名字留在**消费方**命名空间里（`batch_runner.bun_version`、`eval_dispatch.mm`），
+  `monkeypatch.setattr(mod, "bun_version", …)` 这类接缝一条没动。
+- **为什么 `bun_version` 包装可以删**：`common.proc.bun_version` 的缺省 `fallback` 本来就是 `"?"`，
+  包装只是把默认值再抄一遍；`fallback` / `require_zero` 的两种历史口径仍在 `common.proc` 里按原样保留。
+- **刻意留下的那一条**：`trainer/batch_plan.py` 用 `from trainer.dispatch_queue import mm`。它不是便利，
+  而是 `tests/test_layering.py`「trainer/ 只有编排」那条的**唯一依据** —— batch_plan 除了这条边只依赖
+  `common.*`。把它改成 `common.proc.version_mm` 会让门禁立刻红（且红得对：batch_plan 是纯逻辑，
+  住错了包）。**删它的前提**是先决定 batch_plan 的归属（搬 `biz/`，涉及 150+ 处引用与 5 个测试文件；
+  或留在 trainer/ 并显式豁免），不是顺手改一行。
+- **记录这次暴露的东西**：一个纯逻辑模块之所以能在编排包里待着，靠的是**re-export 面伪造出来的一条
+  依赖边**。这正是审计 §0.1「债务在边界不存在」的活样本；门禁本身没瞎，是它被一条转发养成了绿灯。
+- **G6 基线**：`noqa_f401` 25 → **19 处 / 11 文件**（`dispatch_queue` 7 → 1）；
+  `tests/common/test_common_layer.py` 的 `bun_version` 定义点从 3 处降到 2 处（私有断言基线 3 → 2）。
+- **顺带**：`tests/trainer/test_batch_{runner,plan}_split.py` 的顶层 import 闭集已登记变动
+  （`dispatch_queue` → `common.proc` + `worker.agent_meta`）。

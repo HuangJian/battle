@@ -1,7 +1,7 @@
 {
   "tests/biz/test_course_spec_split.py": 3,
   "tests/biz/test_reward_golden.py": 3,
-  "tests/common/test_common_layer.py": 3,
+  "tests/common/test_common_layer.py": 2,
   "tests/common/test_dist_shard_split.py": 5,
   "tests/common/test_dist_weights_ledger_split.py": 2,
   "tests/common/test_offline_task_queue.py": 3,

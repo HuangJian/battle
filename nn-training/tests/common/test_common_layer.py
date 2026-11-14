@@ -37,7 +37,9 @@ import remote.artifacts
 import remote.bundle
 import remote.hub_client
 import remote.run_loop
+import trainer.batch_runner
 import trainer.dispatch_queue
+import trainer.eval_dispatch
 import trainer.stream
 import worker.agent_meta
 import worker.bc_ledger
@@ -159,7 +161,6 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
     # 从 `remote/` 搬到 `worker/` ⇒ 它从 `trainer/dispatch_queue.py` 的**前面**排到后面。
     assert _defs_of("bun_version") == [
         "common/proc.py",
-        "trainer/dispatch_queue.py",
         "worker/iter_rollout.py",
     ]
     assert _defs_of("exc_tail") == ["common/text.py"]
@@ -169,11 +170,15 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
 
 
 def test_delegating_call_sites_keep_their_public_names() -> None:
-    """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。"""
-    # trainer.dispatch_queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
-    assert trainer.dispatch_queue.bun_version("definitely-not-a-real-bun-binary") == "?"
-    assert trainer.dispatch_queue.mm("1.2.3") == "1.2"
-    assert trainer.dispatch_queue._record_agent_meta is worker.agent_meta.record_agent_meta
+    """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。
+
+    2026-11-14 起 `trainer.dispatch_queue` 不再是第二个 import 面（re-export 已删）：消费方
+    直接 import 真家，历史名字留在**消费方**的命名空间里（`batch_runner.bun_version` /
+    `eval_dispatch.mm`）—— 那正是 `monkeypatch.setattr(mod, "bun_version", ...)` 打桩的位置。
+    """
+    assert trainer.batch_runner.bun_version is common.proc.bun_version
+    assert trainer.eval_dispatch.bun_version is common.proc.bun_version
+    assert trainer.eval_dispatch.mm is common.proc.version_mm
     # 私有别名仍在各自模块命名空间里（monkeypatch.setattr(mod, "bun_version", ...) 依赖它）
     assert callable(worker.iter_rollout.bun_version)
     assert callable(remote.hub_client._sha256_file)

@@ -18,9 +18,9 @@ from trainer.dispatch_queue import (
     REPO_ROOT,
     RUN_ID,
     local_slots_max_of,
-    run_rollout,
     run_rollout_queue,
 )
+from trainer.queue_local import run_rollout
 
 
 def run_collect_only(args, traj_root, rotate_seed, bun) -> None:

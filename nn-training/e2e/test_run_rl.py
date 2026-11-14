@@ -1814,7 +1814,7 @@ def test_eval_fallback_only_healthy_remote(
 
 def test_race_tier_ok() -> None:
     """v3.11 竞速派档：慢节点不浪费竞速名额（用户"副本落到慢节点=白等"）。"""
-    from trainer.dispatch_queue import race_tier_ok
+    from trainer.queue_local import race_tier_ok
 
     spd = {"a": 5.0, "b": 20.0, "c": 8.0, "d": 60.0, "e": 12.0}
     # 按耗时升序：a(5) < c(8) < e(12) < b(20) < d(60) → top-3 = {a, c, e}
@@ -1834,7 +1834,7 @@ def test_race_tier_ok() -> None:
 def test_register_inflight_v314() -> None:
     """v3.14 主副本派发一律登记（it6 教训 2026-09-03：v3.7 只登记尾部，早派到
     慢节点的任务对 pick_tail_race 不可见，空闲槽无从竞速，整轮空等）。"""
-    from trainer.dispatch_queue import pick_tail_race, register_inflight
+    from trainer.queue_local import pick_tail_race, register_inflight
 
     inflight: dict[tuple[int, int], int] = {}
     register_inflight(inflight, (2000, 612570782))  # 早派（pending > tailFanoutN）也登记
@@ -1852,7 +1852,7 @@ def test_register_inflight_v314() -> None:
 
 def test_pick_tail_race() -> None:
     """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
-    from trainer.dispatch_queue import pick_tail_race
+    from trainer.queue_local import pick_tail_race
 
     check(pick_tail_race({}, 2) is None, "empty inflight -> None")
     check(pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked")
@@ -1876,7 +1876,7 @@ def test_pick_race_target_v316() -> None:
     - 无副本数上限（多副本仍可被其它节点竞速）
     - 字典序最小优先
     """
-    from trainer.dispatch_queue import pick_race_target
+    from trainer.queue_local import pick_race_target
 
     inflight = {(2000, 1): 1, (2000, 2): 1}
     nodes = {(2000, 1): {"a"}, (2000, 2): {"a"}}

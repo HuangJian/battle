@@ -42,6 +42,7 @@ from typing import NamedTuple
 import common.distribution
 from common.fs import append_jsonl
 from common.log import log
+from common.proc import bun_version
 from remote import weights_standard
 from trainer.batch_plan import (
     batch_iter_id,
@@ -52,7 +53,6 @@ from trainer.batch_plan import (
     node_supports_decision_k,
 )
 from trainer.batch_store import BatchStore, data_root
-from trainer.dispatch_queue import _record_agent_meta, bun_version
 
 # 尾竞速：与 A 层（trainer/eval_dispatch）**同一机制**（纯函数在 trainer/queue_local 单源）。
 from trainer.queue_local import (
@@ -62,6 +62,7 @@ from trainer.queue_local import (
     register_inflight,
 )
 from worker import node_identity
+from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.eval_local import (
     EVAL_TASK_ATTEMPTS,
     eval_census_fields,
