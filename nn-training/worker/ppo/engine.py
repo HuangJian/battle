@@ -52,8 +52,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
+from common.contracts import ActionSpace, HeadLayout, head_layout
 from common.log_bundle import LogBundle
-from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
+from common.schema import FIRE_DIM, MOVE_DIM
 from worker.data.weights_io import save_weights_json
 
 # 转发名：PPO 模型的 arch 驱动构建**只有一份实现**（`worker/models/arch_meta.py`，与 Paddle 双生共用）。
@@ -341,6 +342,8 @@ class PPOContext:
     t0: float = 0.0
     last_hb: float = 0.0
     start_epoch: int = 0
+    space: ActionSpace = ActionSpace.LEGACY
+    layout: HeadLayout = field(default_factory=lambda: head_layout(ActionSpace.LEGACY))
 
 
 def _setup_diag(device: Any) -> _Diag:
@@ -499,28 +502,21 @@ def _precompute_ref(ctx: PPOContext) -> list[tuple[torch.Tensor, ...] | None]:
                 #   （hold 两列被当 fire 的第 3 类），比崩掉更糟。
                 _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
                 _m = _e["mask"]
-                _ref_v6 = len(_ro) >= 4
-                _data_v6 = _e.get("a_hold") is not None
-                if _ref_v6 != _data_v6:
+                _ref_space = ActionSpace.from_forward_arity(len(_ro))
+                if _ref_space is not ctx.space:
                     raise ValueError(
                         f"[ppo] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-                        f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
-                        f"{'带' if _data_v6 else '不带'} a_hold（"
-                        f"{'v6' if _data_v6 else 'legacy'}）——掩码切片会静默错位，拒绝训练"
-                        "（ref 权重与 rollout 语料不是同一代）"
+                        f"（{_ref_space.value}），chunk 是 {ctx.space.value}"
+                        "——掩码切片会静默错位，拒绝训练（ref 权重与 rollout 语料不是同一代）"
                     )
-                if _ref_v6:
-                    # v6 掩码布局 [move4 | fire3 | hold2]（student.py 同源）。
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
-                        masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
-                    )
-                else:
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
-                    )
+                _layout = head_layout(_ref_space)
+                _heads: tuple[torch.Tensor, ...] = (
+                    masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+                    masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
+                )
+                if _layout.hold_slice is not None:
+                    _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+                ref_cache[_i] = _heads
                 xla_mark_step(device)
         # 注意：日志必须在 mark_step **之后**打——惰性 XLA 下循环里一次前向都没真跑，
         # 打在前面得到的是 0s 的假数字（这正是本次误判的由来）。
@@ -555,6 +551,9 @@ def _prepare(ctx: PPOContext) -> None:
     # values, ~epochs× less conversion overhead.
     ctx.tensored = tensored_chunks(ctx.chunks, device)
     ctx.total_steps = len(ctx.tensored) * ctx.epochs
+    # 动作空间只在数据边界嗅一次；下面的 ref 与每个 minibatch 都读这份契约。
+    ctx.space = ActionSpace.from_batch(ctx.tensored[0]) if ctx.tensored else ActionSpace.LEGACY
+    ctx.layout = head_layout(ctx.space)
     ctx.diag = _setup_diag(device)
     ctx.demo = _setup_demo(ctx)
     ctx.t0 = time.time()
@@ -611,28 +610,27 @@ def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
     mask = e["mask"]  # (T, 7) legacy / (T, 9) v6 —— 切片见下
 
     # B1 v6（2026-10-20）：`PPOStudent.forward` 在 `action_v6` 下返回 **4-tuple**
-    # `(move, fire, hold, value)`，legacy 是 3-tuple。判据 = shard 是否带 `a_hold`
-    # （数据事实），与 `load_shard` 的 v6 判据同一来源——不看模型，因为
-    # "模型是 v6 但数据是 5/2"正是必须炸掉的那种不同源。
+    # `(move, fire, hold, value)`，legacy 是 3-tuple。动作空间在 `_prepare` 已按
+    # shard 事实定一次（`ctx.space`），这里只消费契约，不再逐 chunk 嗅 `a_hold`。
+    layout = ctx.layout
     out = model(obs, sc, e.get("extra"))
-    if e.get("a_hold") is not None:
+    if layout.has_hold:
         mv, fr, hd, val = out
     else:
         mv, fr, val = out
         hd = None
-    # 掩码布局随动作空间变（**不能复用同一组切片**）：
+    # 掩码布局由 `HeadLayout` 给切片（**不能复用同一组切片**）：
     #   legacy [move5 | fire2]         ⇒ :5 / 5:7
     #   v6     [move4 | fire3 | hold2] ⇒ :4 / 4:7 / 7:9
     # 用 legacy 的 `MOVE_DIM=5` 去切 v6 掩码，会把 hold[0] 当成 fire 的第 3 类、
     # 同时切掉 move 的第 4 类（right）——静默错位，loss 照降。
-    if hd is not None:
-        move_logp = masked_logsoftmax(mv, mask[:, :MOVE4_DIM])
-        fire_logp = masked_logsoftmax(fr, mask[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM])
-        hold_logp = masked_logsoftmax(hd, mask[:, MOVE4_DIM + FIRE3_DIM :])
-    else:
-        move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-        fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
-        hold_logp = None
+    move_logp = masked_logsoftmax(mv, mask[:, layout.move_slice])
+    fire_logp = masked_logsoftmax(fr, mask[:, layout.fire_slice])
+    hold_logp = (
+        masked_logsoftmax(hd, mask[:, layout.hold_slice])
+        if layout.hold_slice is not None and hd is not None
+        else None
+    )
 
     lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
     lp_old = lp_move + lp_fire

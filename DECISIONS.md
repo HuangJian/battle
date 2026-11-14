@@ -5855,3 +5855,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `job_body_error` 分别落在 `_torch_opt/_torch_ref/_load_demo_bank/_torch_ppo`，delta 七调用
   扫 `_torch_artifacts` + `_paddle_artifacts`，`_wire_block` 唯一实现断言改读 `train_common`。
   验证：ruff、ruff format、mypy、train_core 相关 84 例、全量 5992 passed / 3 skipped。
+
+## §2026-11-14-nn-python-audit-round4-action-space（动作空间收成 common/contracts 单一契约）
+
+- **决定**：新增 stdlib-only 的 `common/contracts.py`：`ActionSpace`（`LEGACY` / `V6`）与
+  `HeadLayout`（move/fire/hold 宽度 + 三个掩码切片）。PPO torch 核在 `_prepare` 用
+  `ActionSpace.from_batch` 对数据边界嗅一次，存进 `PPOContext.space/layout`；Paddle 核在
+  `tensored_chunks` 后同样定一次。ref 预计算用 `from_forward_arity` 校验模型头数，两条腿
+  的逐 chunk `a_hold` / `len(out)` 判据与手写 `:5 / 5:7 / :4 / 4:7 / 7:9` 切片全部改为读
+  契约。`common.schema` 仍是张量布局的唯一来源，contracts 只派生切片并在 import 时校验
+  7/9 宽度自洽。
+- **被否决**：把枚举塞进 `common/schema.py`（TS 共享 schema 不该承担 Python 运行时分支）；
+  继续用 `model.action_v6` 判 ref 头数（DataParallel 下属性代理不可靠，历史注释已记录）；
+  在 `common` 里加 `RlShard` TypedDict（L0 不得 import numpy，`np.ndarray` 会破坏
+  code.zip 的 stdlib-only 前提；shard 类型化留到 worker 侧再做）；保留引擎内的数字切片
+  （正是 P0-4 的静默错位源）。
+- **后果**：动作空间判据从数据侧 2 处 + 模型侧 1 处收敛到契约的 3 个入口；掩码切片不再由
+  每个引擎各自维护。legacy/v6 的头数、切片、demo move CE 与 wire 字段逐项未改；新增
+  `tests/common/test_action_space_contract.py` 钉住存在性判据、arity 严格性与切片覆盖。
+  验证：ruff、mypy 915 文件、PPO/契约相关 50 例。

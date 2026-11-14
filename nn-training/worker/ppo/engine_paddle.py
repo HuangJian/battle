@@ -26,7 +26,8 @@ from typing import Any
 import numpy as np
 import paddle
 
-from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
+from common.contracts import ActionSpace, head_layout
+from common.schema import MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
 from worker.ppo.trainer import aggregate_stats, cat_entropy
 
@@ -186,6 +187,9 @@ def ppo_update(
     stats: list[dict[str, float]] = []
     tensored = tensored_chunks(chunks)
     total_steps = len(tensored) * epochs
+    # 动作空间只在数据边界嗅一次；ref 与每个 minibatch 都读这份契约。
+    space = ActionSpace.from_batch(tensored[0]) if tensored else ActionSpace.LEGACY
+    layout = head_layout(space)
     demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
     demo_t: dict[str, paddle.Tensor] = {}
     demo_n = 0
@@ -208,25 +212,20 @@ def ppo_update(
             for _i, _e in enumerate(tensored):
                 _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
                 _m = _e["mask"]
-                _ref_v6 = len(_ro) >= 4
-                _data_v6 = _e.get("a_hold") is not None
-                if _ref_v6 != _data_v6:
+                _ref_space = ActionSpace.from_forward_arity(len(_ro))
+                if _ref_space is not space:
                     raise ValueError(
-                        f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-                        f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
-                        f"{'带' if _data_v6 else '不带'} a_hold"
+                        f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 "
+                        f"{len(_ro)} 个头（{_ref_space.value}），chunk 是 {space.value}"
                     )
-                if _ref_v6:
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
-                        masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
-                    )
-                else:
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
-                    )
+                _layout = head_layout(_ref_space)
+                _heads: tuple[paddle.Tensor, ...] = (
+                    masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+                    masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
+                )
+                if _layout.hold_slice is not None:
+                    _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+                ref_cache[_i] = _heads
     t0 = time.time()
     last_hb = t0
     start_epoch, steps_done = load_ckpt(model, opt, ckpt_path)
@@ -250,19 +249,18 @@ def ppo_update(
             mask = e["mask"]
 
             out = model(obs, sc, e.get("extra"))
-            if e.get("a_hold") is not None:
+            if layout.has_hold:
                 mv, fr, hd, val = out
             else:
                 mv, fr, val = out
                 hd = None
-            if hd is not None:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE4_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM])
-                hold_logp = masked_logsoftmax(hd, mask[:, MOVE4_DIM + FIRE3_DIM :])
-            else:
-                move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
-                fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
-                hold_logp = None
+            move_logp = masked_logsoftmax(mv, mask[:, layout.move_slice])
+            fire_logp = masked_logsoftmax(fr, mask[:, layout.fire_slice])
+            hold_logp = (
+                masked_logsoftmax(hd, mask[:, layout.hold_slice])
+                if layout.hold_slice is not None and hd is not None
+                else None
+            )
 
             lp_new = cat_logprob(a_move, move_logp) + cat_logprob(a_fire, fire_logp)
             lp_old = lp_move + lp_fire
