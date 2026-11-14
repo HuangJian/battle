@@ -4,16 +4,11 @@ import secrets
 import threading
 from pathlib import Path
 
-# 本模块是**编排层**（`run_rollout_queue` 等），不是第二个 import 面：agent meta / 轮级竞速 /
-# `run_rollout` 的实现都在各自家里（`worker.agent_meta` · `trainer.queue_local`），调用方
-# 2026-11-14 起直接 import 那边（re-export 面已删，见 DECISIONS
-# §2026-11-14-retire-dispatch-queue-reexport-surface）。
-#
-# 唯一留下的转发是 `mm`，而它**不是**给调用方用的便利：`trainer/batch_plan.py`（B 层纯函数面）
-# 还住在本包里，靠这条边算「编排」，从而过得了 `tests/test_layering.py` 的「trainer/ 只有编排」
-# 那条。删掉它的前提是先把 batch_plan 的归属定下来（搬到 `biz/` 还是留在 trainer/ 并显式豁免），
-# 不是顺手把一行 import 改到 `common.proc` —— 那样会让门禁**静默塌成**「纯逻辑可以住在 trainer/」。
-from common.proc import version_mm as mm  # noqa: F401 — 见上：唯一保留的转发面
+# 本模块是**编排层**（`run_rollout_queue` 等），不是第二个 import 面：re-export 面已于
+# 2026-11-14 全部退役（版本探测 / agent meta / 轮级竞速 / `run_rollout` 都回到各自家里：
+# `common.proc` · `worker.agent_meta` · `trainer.queue_local`）。最后一条 `mm` 的后继是
+# 把 `batch_plan.py` 搬进 `biz/` —— 见 DECISIONS
+# §2026-11-14-retire-dispatch-queue-reexport-surface 与 §2026-11-14-batch-plan-belongs-to-biz。
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/trainer/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）

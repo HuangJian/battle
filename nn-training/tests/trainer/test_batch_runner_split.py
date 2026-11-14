@@ -83,7 +83,9 @@ RUNNER_IMPORTS = {
     # `BWD1`，hub 原样落位；容器会让本机指纹与节点 cache 键对不上、节点侧 `JSON.parse` 直接报
     # `Unexpected identifier "BWD1"`）。顶层名是**裸包 `remote`**。
     "remote",
-    "trainer.batch_plan",
+    # 2026-11-14：规划面（B 层纯函数）搬去 `biz/`（见 DECISIONS
+    # §2026-11-14-batch-plan-belongs-to-biz）—— 执行器照旧从**本模块**裸名取用。
+    "biz.batch_plan",
     "trainer.batch_store",
     "worker.eval_local",
     # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/

@@ -272,7 +272,7 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     """源码级守卫：判据只有一份实现，A/C 层真的接线（409 自愈也不得各写一套）。
 
     2026-09-25（S25/B1）：B 层那份**薄转发**随「批语料规划 + 判据/门」出包搬到了
-    `trainer/batch_plan.py`（原住 `trainer/batch_eval.py`）。本守卫因此不再写死文件名（写死的路径
+    `biz/batch_plan.py`（原住 `trainer/batch_eval.py`）。本守卫因此不再写死文件名（写死的路径
     下一次搬家就会**静默失效**），改成两条与位置无关的东西：
       ① 非 `common.distribution` 的同名定义**恰好一个**，且它必须是**纯转发**（判据不得复制回来）；
       ② `trainer.batch_eval` 仍拿得到**同一对象**（门面再导出）—— 按 ① 找到的那个模块比 `is`。

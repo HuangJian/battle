@@ -1,7 +1,13 @@
 """batch_plan — 批语料规划 + 判据 / 门（B 层纯函数面）。
 
 2026-09-25（S25/B1）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
-`tests/trainer/test_batch_plan_split.py`）。它只回答两个问题：
+`tests/trainer/test_batch_plan_split.py`）。
+
+★ 2026-11-14：**从 `trainer/` 搬到 `biz/`**。它一直是纯逻辑（除 `common.*` 外零依赖），
+之前之所以能住在「只有编排」的 `trainer/` 里，靠的是 `from trainer.dispatch_queue import mm`
+这条 re-export 伪造出来的依赖边（详见 DECISIONS §2026-11-14-retire-dispatch-queue-reexport-surface
+与 §2026-11-14-batch-plan-belongs-to-biz）。搬完依赖链归零：`common.proc.version_mm` 直接取。
+它只回答两个问题：
 
   ① **这一批要跑哪些 unit** —— ladder 批读 `dashboard/src/evalboard/ladder.json`，
      verdict 批读课程关卡文件的 `stages[]`（`plan_units` / `plan_verdict_units` /
@@ -25,7 +31,7 @@ from pathlib import Path
 
 import common.distribution
 from common.jsonc import load as jsonc_load
-from trainer.dispatch_queue import mm
+from common.proc import version_mm as mm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

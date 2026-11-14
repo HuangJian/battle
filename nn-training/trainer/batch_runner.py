@@ -2,7 +2,7 @@
 
 2026-09-25（S27/B3）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
 `tests/trainer/test_batch_runner_split.py`）—— 那是 §5.5.4 的第三步：B1 把纯规划/判据送到
-`trainer/batch_plan.py`、B2 把台账收进 `trainer/batch_store.py`，本模块收走**执行面**。
+`biz/batch_plan.py`、B2 把台账收进 `trainer/batch_store.py`，本模块收走**执行面**。
 一个单元 = 一个 100 局批次：通道机器（每节点各自 ping+权重就绪即派单）· 尾段竞速 ·
 背压重排 · 收尾三闸（settled / 僵死 / 零消费者宽限）。
 
@@ -40,11 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import common.distribution
-from common.fs import append_jsonl
-from common.log import log
-from common.proc import bun_version
-from remote import weights_standard
-from trainer.batch_plan import (
+from biz.batch_plan import (
     batch_iter_id,
     is_transient_error,
     kind_for_policy,
@@ -52,6 +48,10 @@ from trainer.batch_plan import (
     node_supports_decision_events,
     node_supports_decision_k,
 )
+from common.fs import append_jsonl
+from common.log import log
+from common.proc import bun_version
+from remote import weights_standard
 from trainer.batch_store import BatchStore, data_root
 
 # 尾竞速：与 A 层（trainer/eval_dispatch）**同一机制**（纯函数在 trainer/queue_local 单源）。

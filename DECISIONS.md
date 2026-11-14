@@ -6189,3 +6189,25 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `tests/common/test_common_layer.py` 的 `bun_version` 定义点从 3 处降到 2 处（私有断言基线 3 → 2）。
 - **顺带**：`tests/trainer/test_batch_{runner,plan}_split.py` 的顶层 import 闭集已登记变动
   （`dispatch_queue` → `common.proc` + `worker.agent_meta`）。
+
+## §2026-11-14-batch-plan-belongs-to-biz（把「假装是编排」的纯逻辑送回 B 层）
+
+- **决定**：`trainer/batch_plan.py` → **`biz/batch_plan.py`**，`from trainer.dispatch_queue import mm`
+  改回 `from common.proc import version_mm as mm`。`trainer/dispatch_queue.py` 的最后一条 re-export
+  随之归零（G6 `noqa_f401` 18 处 / 10 文件）。
+- **为什么是 `biz/` 而不是留在 `trainer/` 加豁免**：它的输入就是游戏领域的东西 —— 课程关卡文件的
+  `stages[]`、`dashboard/src/evalboard/ladder.json`、语料目录；`biz/` 里已经住着 `course*` /
+  `ladder_ledger` / `corpus_fp` / `reward*` 同族。豁免是「让门禁学会闭眼」，搬家是「让门禁继续睁眼」，
+  而这正是审计 §0.1 说缺的那种改动。
+- **为什么不是 `worker/`**：`worker/` 的口径是「支持本地 torch 训练的全部代码」，它一行 torch 都不碰；
+  而且 `worker/` 的模块在 `tests/helpers/remote_dag.py` 有层号账本，搬进去要多登记一次「它为什么在
+  L2」，收益为零。
+- **代价与护栏**：`biz/` 那条「不得 import `remote|worker|hub|trainer`」现在直接盖住它（它只依赖
+  `common.*`，本来就该受这条管）；`TRAINER_ORCHESTRATION` 快照少一员 —— 那条门禁的「少一个也红」
+  正是本轮的第一推动力；消费方 8 个文件改 import 路径（`batch_eval` 的门面 `X as X` 保留，既有
+  `from trainer.batch_eval import plan_units` 调用点一行不改）。
+- **守卫留在原地的理由**：`tests/trainer/test_batch_plan_split.py` 不跟着搬 —— 它钉的两条边
+  （`batch_eval` 门面恒等、`batch_runner` 入边调用点）都在 `trainer/`，搬走会让「谁在消费它」读不出来。
+- **教训（写给下一次）**：三条门禁（G9、G6、G3）都栽在同一件事上 —— **自检锚点选了一个正要被治好的
+  文件**，于是「门禁被治好」被误判成「扫描入口坏了」。锚点要选**还没退役**的样本（G9 现锚
+  `common/log.py` + `worker/forensics.py`，G6 现锚 `remote/offline_boot.py`）。

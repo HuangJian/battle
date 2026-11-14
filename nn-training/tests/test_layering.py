@@ -162,7 +162,9 @@ TRAINER_ORCHESTRATION = frozenset(
     {
         "dispatch_state",
         "batch_eval",
-        "batch_plan",
+        # 2026-11-14：`batch_plan` 搬去 `biz/`（纯逻辑，真回 B 层）。它此前住这里，靠的是
+        # `from trainer.dispatch_queue import mm` 这条 re-export 边 —— 一条转发就能让
+        # 「trainer/ 只有编排」这条门禁对纯逻辑视而不见，本集合的「少一个也红」正好接住。
         "batch_runner",
         "batch_store",
         "bc_ingest",

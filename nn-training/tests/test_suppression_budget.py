@@ -139,7 +139,10 @@ def test_scan_ignores_strings_and_other_lint_codes() -> None:
 def test_scan_sees_the_known_surface() -> None:
     """扫描入口自检：两类都有存量、已知文件在册、排除目录没混进来。"""
     baseline = _baseline()
-    assert baseline[NOQA_F401].get("trainer/dispatch_queue.py", 0) > 0, (
+    # 锚点选**还没退役**的转发壳：`remote/offline_boot.py` 的模块级 `__getattr__`（P1-11
+    # 清单里仍在）。此前锚 `trainer/dispatch_queue.py`，它的 re-export 面 2026-11-14 归零后
+    # 这条自检就红了 —— 锚点不能选「刚被修好的文件」，否则门禁一被治好就自证失效。
+    assert baseline[NOQA_F401].get("remote/offline_boot.py", 0) > 0, (
         "扫描入口坏了（re-export 壳没数到）"
     )
     assert sum(baseline[TYPE_IGNORE].values()) >= 200

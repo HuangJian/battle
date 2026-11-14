@@ -31,7 +31,7 @@
 `units.of == 0 == 未定型`。
 
 **本模块的来历**：`trainer/batch_eval.py` 拆分第二步 B2（§5.5.4）。B1 已把纯规划/判据搬到
-`trainer/batch_plan.py`；B2 收走台账（本模块）；B3 把执行器搬到 `trainer/batch_runner.py`。
+`biz/batch_plan.py`；B2 收走台账（本模块）；B3 把执行器搬到 `trainer/batch_runner.py`。
 `trainer/batch_eval.py` 逐个再导出本模块的公开名（`X as X`）⇒ 既有调用点与测试一行不改。
 """
 
@@ -47,8 +47,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from biz.batch_plan import REPO_ROOT
 from common.log import log
-from trainer.batch_plan import REPO_ROOT
 from worker.train.loop_util import acquire_lock, cleanup_lock
 
 #: EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。`data_root()` 同口径。

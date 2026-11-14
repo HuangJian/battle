@@ -10,7 +10,7 @@ import types
 import pytest
 from pydantic import ValidationError
 
-from trainer.batch_plan import node_supports_decision_k
+from biz.batch_plan import node_supports_decision_k
 from worker.cmd import build_rollout_cmd
 from worker.config import CourseConfig, corpus_identity_fp
 
