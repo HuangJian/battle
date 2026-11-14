@@ -5924,3 +5924,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：`common/net_http.py` 不再有模块级可变容器或 `global`；缓存无法显式清空，但
   `cached` 只有 2 个键、进程生命周期内 opener 本就应复用。G2 名册只剩 `distribution` /
   `platform_utils` 两组存量。
+
+## §2026-11-14-nn-python-audit-round4-broad-except-gate（G4：宽泛异常处理增长）
+
+- **决定**：新增 `nn-training/tests/test_broad_except_budget.py`，AST 扫生产包
+  （`common/biz/hub/remote/train/trainer/worker`，`worker/scripts/` 豁免）里的
+  `except Exception` / `except BaseException` / 裸 `except:`，按文件计数冻结在
+  `tests/golden/except_baseline.json`（446 处 / 144 文件）。只拦增长；另加一条「基线只许调小」，
+  某文件减少后不改基线就红，额度不会回流。`except (OSError, ValueError)` 等具体异常不计数。
+- **被否决**：启用 ruff `BLE001` + per-file-ignores（446 处分布在 144 个文件 ⇒ 一份 144 行的
+  忽略表，且 ruff 不会因为某文件减少而报「基线过期」；改 ruff select 还会牵动全量门的既有告警面）；
+  直接把 G4 写成 `*_boundary` 白名单（现存 446 处里绝大多数不在边界上，白名单会先红成一片，
+  等于要求一次性清零，违背 §8「冻结存量 + 禁止新增」）；同时冻结静默 `except ...: pass`
+  （另一类问题，口径要区分「处理器类型」与「处理器体」，留到真正开始 P0-7 收敛时再加）。
+- **后果**：新代码在内部路径上只能捕具体异常；确实位于进程边界时需 `logger.exception` 留痕。
+  P0-7 的清理仍然没开始，但门禁把「越清越多」的旧循环切断了。
