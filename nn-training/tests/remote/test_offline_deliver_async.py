@@ -42,7 +42,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote.deliver_proc import DelivererProcess, make_deliverer
 from remote.offline_deliver import OfflineDeliverer
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 
 class _FakeProc:
@@ -191,7 +191,7 @@ def test_background_errors_never_reach_the_trainer_and_thread_survives(tmp_path:
     rec = _Recorder(fail_first=1)  # 第一次探活就炸（瞬断）——之后必须恢复
     d = _deliverer(root, rec)
     logs: list[str] = []
-    d.log = logs.append  # type: ignore[method-assign]
+    d.log = logs.append
     d.start()
     try:
         d.submit_round(1)
@@ -284,7 +284,7 @@ def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> No
         run_id=RUN,
         artifacts_dir=root,
         background=True,
-        opener=_dead_530,  # type: ignore[arg-type]
+        opener=_dead_530,
         log=lambda _m: None,
     )
     d.start()
@@ -353,7 +353,7 @@ def test_unsent_repost_is_loud_and_persisted(tmp_path: Path) -> None:
         run_id=RUN,
         artifacts_dir=root,
         background=True,
-        opener=_dead_530,  # type: ignore[arg-type]
+        opener=_dead_530,
         log=logs.append,
     )
     d.start()
@@ -405,7 +405,7 @@ def test_process_mode_passes_the_token_by_env_never_by_argv(
     """
     seen: dict = {}
 
-    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+    def fake_popen(argv, *a, **kw):
         seen["argv"] = [str(x) for x in argv]
         seen["env"] = dict(kw.get("env") or {})
         seen["cwd"] = str(kw.get("cwd") or "")
@@ -451,7 +451,7 @@ def test_process_mode_passes_the_worker_name_by_env_never_by_argv(
     """
     seen: dict = {}
 
-    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+    def fake_popen(argv, *a, **kw):
         seen["argv"] = [str(x) for x in argv]
         seen["env"] = dict(kw.get("env") or {})
         return _FakeProc()
@@ -523,7 +523,7 @@ def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:
         token="tok",
         run_id=RUN,
         artifacts_dir=root,
-        opener=rec,  # type: ignore[arg-type]
+        opener=rec,
         log=lambda _m: None,
     )
     assert d.background is False

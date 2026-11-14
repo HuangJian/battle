@@ -138,7 +138,7 @@ def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     calls: list[tuple] = []
 
-    def _fake_bg(*a, **k):  # type: ignore[no-untyped-def]
+    def _fake_bg(*a, **k):
         calls.append(a)
         return threading.Thread()
 
@@ -319,14 +319,14 @@ def test_sweep_eval_tail_at_rollout_boundary(tmp_path: Path) -> None:
     """收拢点（下一轮 rollout 收官）：已收官的尾巴只清账；在跑的零等待，只记日志。"""
     joins: list = []
     ts = _steps(tmp_path)
-    ts._eval_tail = (_FinishedThread(joins), time.time() - 120.0)  # type: ignore[assignment]
+    ts._eval_tail = (_FinishedThread(joins), time.time() - 120.0)
     ts._eval_join_sec = 0.0
     ts._sweep_eval_tail()
     assert joins == [] and ts._eval_tail is None
 
     # 仍在跑：不 join、不计入 eval_join_sec（缺省 0 ⇒ 不补等）
     ts2 = _steps(tmp_path, _tag="running")
-    ts2._eval_tail = (_AliveThread(joins), time.time() - 30.0)  # type: ignore[assignment]
+    ts2._eval_tail = (_AliveThread(joins), time.time() - 30.0)
     ts2._sweep_eval_tail()
     assert joins == [] and ts2._eval_tail is None
     assert ts2._eval_join_sec == 0.0
@@ -334,7 +334,7 @@ def test_sweep_eval_tail_at_rollout_boundary(tmp_path: Path) -> None:
     # 应急旋钮 >0：边界处补等，秒数计入 eval_join_sec
     ts3 = _steps(tmp_path, _tag="soft")
     ts3._last_dist_cfg = {"policy": {"evalJoinSoftSec": 5}}
-    ts3._eval_tail = (_AliveThread(joins), time.time())  # type: ignore[assignment]
+    ts3._eval_tail = (_AliveThread(joins), time.time())
     ts3._sweep_eval_tail()
     assert joins == [5]
 
@@ -352,14 +352,14 @@ def test_tail_harvested_when_next_rollout_ends(
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
     ts = _steps(tmp_path)
-    ts._eval_tail = (_FinishedThread([]), time.time() - 300.0)  # type: ignore[assignment]
+    ts._eval_tail = (_FinishedThread([]), time.time() - 300.0)
     _archive(ts, 5, "{}")
     ts._dispatch_delayed_eval(6, {})  # 下一轮 rollout 收官
     assert ts._eval_tail is None  # 已收拢
 
     # 非评估轮（m=None）也要收拢：不是等评估轮才清账
     ts2 = _steps(tmp_path, _tag="none")
-    ts2._eval_tail = (_FinishedThread([]), time.time())  # type: ignore[assignment]
+    ts2._eval_tail = (_FinishedThread([]), time.time())
     ts2._dispatch_delayed_eval(7, {})
     assert ts2._eval_tail is None
 

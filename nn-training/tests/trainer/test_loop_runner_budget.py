@@ -105,4 +105,4 @@ def test_reopen_clears_finished_so_live_budget_takes_effect() -> None:
     loop.args.iters = 800
 
     assert runner.finished is False
-    assert [t.it for t in runner.planner("c", 501, None)] == [501]  # type: ignore[arg-type]
+    assert [t.it for t in runner.planner("c", 501, None)] == [501]

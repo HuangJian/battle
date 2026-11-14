@@ -723,7 +723,7 @@ def test_clean_attempt_survives_rglob_race(tmp_path: Path, monkeypatch: pytest.M
 
     real_rglob = Path.rglob
 
-    def racing_rglob(self: Path, pattern: str):  # type: ignore[no-untyped-def]
+    def racing_rglob(self: Path, pattern: str):
         # 只在扫 job 根时模拟「并发 rmtree 把目录删了」的窗口
         if self == job:
             raise FileNotFoundError(2, "No such file or directory", str(self / "r" / "w196"))

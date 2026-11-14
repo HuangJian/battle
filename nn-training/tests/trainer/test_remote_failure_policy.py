@@ -165,9 +165,9 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
     loop._leg_abort = True  # 由上面的判决段置位（真 mixin 写的）
     sleep_calls: list[float] = []
     publish_calls: list[str] = []
-    loop._ledger_apply = lambda _ev: None  # type: ignore[method-assign]
+    loop._ledger_apply = lambda _ev: None
     orig_sleep, orig_publish = hc.time.sleep, hc.publish_job
-    hc.time.sleep = lambda s: sleep_calls.append(float(s))  # type: ignore[assignment]
+    hc.time.sleep = lambda s: sleep_calls.append(float(s))
 
     def _spy_publish(jid: str, *a: object, **kw: object) -> object:
         publish_calls.append(str(jid))
@@ -183,7 +183,7 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
             with pytest.raises(JobFailedError):
                 loop.round_failure(e, 58, backoff=False)
     finally:
-        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish  # type: ignore[assignment]
+        hc.time.sleep, hc.publish_job = orig_sleep, orig_publish
     assert publish_calls == []  # 一个字都没再发出去
     assert sleep_calls == []  # 也没在「睡 30s 再试同一 job」的阶梯上转圈
     assert loop._consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
@@ -212,10 +212,10 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
     orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))
         out = wait_job("http://x", "t", "j1", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert out == {"ok": 1}
     assert sleeps == [5.0, 10.0, 20.0]  # 5 × 2^k，封顶 60
 
@@ -235,8 +235,8 @@ def test_wait_job_404_does_not_backoff() -> None:
     orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
     hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))
         wait_job("http://x", "t", "j2", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep
     assert sleeps == [5.0, 5.0]

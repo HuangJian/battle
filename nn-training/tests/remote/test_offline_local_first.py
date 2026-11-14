@@ -322,7 +322,7 @@ def test_ensure_code_refuses_a_pack_that_contradicts_the_index(
     calls: list[str] = []
 
     class _SpyZip(zipfile.ZipFile):
-        def extractall(self, *a, **k):  # type: ignore[no-untyped-def]
+        def extractall(self, *a, **k):
             calls.append("extractall")
             return super().extractall(*a, **k)
 

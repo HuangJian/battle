@@ -322,7 +322,7 @@ class HostModule(torch.nn.Module):
         self._param_names = tuple(n for n, _ in module.named_parameters())
         _log_if_slow("权重取回", t0, len(sd))
 
-    def state_dict(self, *args, **kwargs):  # type: ignore[override]
+    def state_dict(self, *args, **kwargs):
         """已物化的 CPU 副本（`*args/**kwargs` 只为签名兼容：`_ppo_save` 会无参调用）。"""
         return self._sd
 

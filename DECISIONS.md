@@ -6233,3 +6233,24 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   同一函数里被留下的那条宽捕 + `pass` 是**对的**，不该为了好看而消失。
 - **判据**：`tests/remote/test_child_proc_pump.py` 两条 —— 回调对第 2/4 行抛时好行一条不丢、恰好一行
   报数（`endswith` + `startswith` 对账）；读流截断时**零**日志（静默是对的，别把正常收线变成告警）。
+
+## §2026-11-14-warn-unused-ignores-and-pinned-platform（打开「无用 ignore」检查，并把平台钉死）
+
+- **决定**：mypy 配置 `warn_unused_ignores` 由 `false` 翻成 `true`，**同一笔**里加 `platform = "linux"`。
+  翻开关当场指出的 111 条无用 `# type: ignore`（54 个文件）一并删掉（含 3 条「整条删了会新红」的回修）。
+  G6 的 `type: ignore` 存量 271 处 / 98 文件 → **163 / 68**（`tests/golden/suppression_baseline.json`），
+  扫描健康度地板随之下调 200/80 → 150/60（是地板不是额度）。
+- **为什么值得改**：开着 `false` 时，`# type: ignore` 一落笔就再也不会被质疑 —— 它本来是「这里类型系统
+  管不到」的**证据**，过期之后却成了「这里类型系统管不到」的**假证**。实测 41% 的 ignore 已经什么都不压：
+  下一个人照着它跳过三行代码，改的人以为自己做了件安全的事。翻开关才有资格说「剩下 163 条都是承重的」。
+- **为什么必须成对钉平台**：`warn_unused_ignores` 判的是「按哪套 stubs 分析」。`os.sysconf` /
+  `os.fork` / `ctypes.windll` 在 Linux stubs 里不存在 ⇒ `[attr-defined]` 是**必需**；在 Windows stubs 里
+  存在 ⇒ 同一条注释被判**多余**。只翻开关 = 同一个仓库在两台机器上只能有一台绿（本仓开发机是 Windows，
+  门禁跑 Linux）。钉 `platform = "linux"` 让判定与门禁同源。
+- **被否决的备选**：① 维持 `false` 只做人工普查 —— 普查没有截止条件，就是不做；② 按平台写两套
+  `# type: ignore`（`sys.platform` 分支 + 各写一次）—— ignore 是行级的，两个平台的分支写在两行上，
+  各自只需一个码，但会把「跨平台」写进代码形状里，比钉配置贵得多。
+- **实操教训（写进 `python.refactor.md` §P1-4）**：多码 ignore（`[attr-defined, assignment]`）在 false
+  下是「无害的多余」，在 true 下被逼着二选一 —— 只留本平台真实触发的那个码；以及 mypy 报某条
+  ignore「unused」不等于**整条**可以删（`[import-not-found, import-untyped]` 里可能只有一半过期），
+  删完必须再跑一遍 mypy。

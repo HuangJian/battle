@@ -39,7 +39,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
 from hub.server import _JobStore
 from remote.hub_client import PublishSpec, publish_job, report_job_failure, wait_job
-from tests.remote.test_remote_ppo import (  # type: ignore
+from tests.remote.test_remote_ppo import (
     _boot_server,
     _http,
     _mini_manifest,
@@ -312,8 +312,8 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
         raise JobFailedError("job j 失败: bun 未安装 [kind=ProtocolError]", kind="ProtocolError")
 
     orig_submit, orig_wait = lt._push_submit, lt._push_wait_result
-    lt._push_submit = lambda *a, **k: {}  # type: ignore[assignment]
-    lt._push_wait_result = _boom  # type: ignore[assignment]
+    lt._push_submit = lambda *a, **k: {}
+    lt._push_wait_result = _boom
     try:
         nodes = [{"url": "http://a", "authKey": ""}, {"url": "http://b", "authKey": ""}]
         with pytest.raises(JobFailedError) as ei:
@@ -329,7 +329,7 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
             )
         assert "bun" in str(ei.value)  # 原因原样上浮，不被 RetryableError 吃掉
     finally:
-        lt._push_submit, lt._push_wait_result = orig_submit, orig_wait  # type: ignore[assignment]
+        lt._push_submit, lt._push_wait_result = orig_submit, orig_wait
 
 
 def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:

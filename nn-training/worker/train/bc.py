@@ -406,7 +406,7 @@ def train(args) -> dict:
             if args.arch == "student"
             else NNPolicy()
         )
-    )  # type: ignore
+    )
     if getattr(args, "resume", None):
         say(f"[train] resuming from {args.resume}")
         load_state_into(model, args.resume)

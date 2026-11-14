@@ -135,19 +135,21 @@ def _windows_env(fake: _FakeK32, kills: list[tuple[int, int]]) -> Iterator[None]
 
     os.name = "nt"
     sys.platform = "win32"
-    os.kill = _spy  # type: ignore[assignment]
+    os.kill = _spy
     # 忽略码在两个平台不同：Linux/mypy 眼里 `ctypes.windll` 根本不存在（`attr-defined`），
     # Windows 上它被解析为 `LibraryLoader[WinDLL]` 因此是赋值不兼容（`assignment`）。
-    # 两个码都列上（`warn_unused_ignores=false`，另一平台不会因多余码报错）。
-    ctypes.windll = SimpleNamespace(kernel32=fake)  # type: ignore[attr-defined, assignment]
+    # 2026-11-14 起只列 `attr-defined`：`warn_unused_ignores=true` 之后，多列的那一个
+    # （在 Linux 上永远不触发的 `assignment`）会被 mypy 判成「无用 ignore」而红。类型检查
+    # 在 Linux 上跑，Windows 上跑的是 pytest ⇒ 留 Linux 的真相。
+    ctypes.windll = SimpleNamespace(kernel32=fake)  # type: ignore[attr-defined]
     try:
         yield
     finally:
         os.name = real_name
         sys.platform = real_platform
-        os.kill = real_kill  # type: ignore[assignment]
+        os.kill = real_kill
         if had_windll:
-            ctypes.windll = prev_windll  # type: ignore[attr-defined, assignment]
+            ctypes.windll = prev_windll  # type: ignore[attr-defined]
         else:
             try:
                 del ctypes.windll  # type: ignore[attr-defined]

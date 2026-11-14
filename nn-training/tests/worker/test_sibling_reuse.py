@@ -62,7 +62,7 @@ def _reuse_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(sr, "CURRICULA_DIR", lib)
 
 
-def _course(name: str):  # type: ignore[no-untyped-def]
+def _course(name: str):
     return load_course(CURRICULA / f"{name}.jsonc")
 
 

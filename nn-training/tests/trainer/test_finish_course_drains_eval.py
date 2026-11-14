@@ -92,8 +92,8 @@ def _prep_run(loop: TrainingLoop, monkeypatch, outcome: RoundOutcome) -> None:
     monkeypatch.setattr(TrainingLoop, "_setup", lambda self: None)
     monkeypatch.setattr(TrainingLoop, "run_one_round", lambda self, it: outcome)
     loop._start_it = 1
-    loop._course_fp = None  # type: ignore[assignment]  # _setup 被替身跳过，手动补齐读点
-    loop._corpus_fp = None  # type: ignore[assignment]
+    loop._course_fp = None  # _setup 被替身跳过，手动补齐读点
+    loop._corpus_fp = None
     loop._collect_child = None
 
 

@@ -55,8 +55,8 @@ from remote.offline_deliver import (
 )
 from remote.offline_deliver import main as deliver_main
 from remote.run_loop import run_plan_job
-from tests.remote.test_remote_ppo import _boot_server, _http  # type: ignore
-from tests.remote.test_run_loop import _FakeRunJob, _prepare, _quiet  # type: ignore
+from tests.remote.test_remote_ppo import _boot_server, _http
+from tests.remote.test_run_loop import _FakeRunJob, _prepare, _quiet
 
 
 @pytest.fixture(autouse=True)
@@ -1214,7 +1214,7 @@ def test_status_reports_the_drawer_capacity_line(tmp_path: Path) -> None:
 
 def test_child_status_surface_carries_the_drawer_readings(tmp_path: Path) -> None:
     """子进程状态面是**白名单**（`deliver_worker._write_status`）⇒ 新读数不写进去 = 没实现（控制台看不见）。"""
-    from remote.deliver_worker import CtlReader, _write_status  # type: ignore
+    from remote.deliver_worker import CtlReader, _write_status
 
     root = _make_artifacts(tmp_path / "art", iters=(1,))
     _write_eval_log(root, it=1, games=1)

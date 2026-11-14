@@ -622,7 +622,7 @@ def test_golden_file() -> None:
         name = case["course"]
         if name not in cache:
             cache[name] = build_reward_fn(load_course(name).reward_spec())
-        fn = cache[name]  # type: ignore[index]
+        fn = cache[name]
         got = fn(
             np.asarray(case["metrics"], dtype=np.float64),
             case["outcome"],

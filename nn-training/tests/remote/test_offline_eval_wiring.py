@@ -325,7 +325,7 @@ def test_eval_landing_triggers_a_repost_of_that_round(
 
     ctx, logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course(eval_every=1))
     deliv = _Deliverer()
-    ctx.deliverer = deliv  # type: ignore[assignment]
+    ctx.deliverer = deliv
     _setup_cloud_eval(ctx)
     _maybe_cloud_eval(ctx, 2)
     assert ctx.eval_runner is not None and ctx.eval_runner.wait_idle(10.0)
@@ -674,7 +674,7 @@ def test_courses_of_accepts_string_list_and_comma_forms() -> None:
     assert offline_boot.courses_of({"course": ["b", " a", "a", "b"]}) == ["b", "a"]
     for bad_cfg in ({}, {"course": []}, {"course": "  "}):  # type: ignore[var-annotated]
         with pytest.raises(SystemExit):
-            offline_boot.courses_of(bad_cfg)  # type: ignore[arg-type]
+            offline_boot.courses_of(bad_cfg)
     for bad in ({"course": "a/b"}, {"course": ["../x"]}, {"course": "a" * 65}):
         with pytest.raises(SystemExit, match="非法"):
             offline_boot.courses_of(bad)

@@ -249,7 +249,7 @@ def test_landing_never_scans_the_os_temp_root(
     seen: list[Path] = []
     real = weights_standard.delta_files.candidate_files
 
-    def spy(path, roots, patterns):  # type: ignore[no-untyped-def]
+    def spy(path, roots, patterns):
         seen.extend(Path(r) for r in roots)
         return real(path, roots, patterns)
 

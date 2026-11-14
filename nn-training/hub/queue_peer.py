@@ -11,8 +11,8 @@
 三种写法里选了第三种：
 
 1. **`Any` 注解** —— mypy 看不见返回类型 ⇒ `return self.all_halted()` 会直接报
-   `no-any-return`，而用 `# type: ignore` 消音在本仓是禁的（`warn_unused_ignores=false` 只是
-   让 ignore 不留痕，不是许可）；
+   `no-any-return`，而用 `# type: ignore` 消音在本仓是禁的（2026-11-14 起 mypy 开着
+   `warn_unused_ignores`，多余的那条当场红，更不是许可）；
 2. **每个混入各抄一份 `Callable[[...], Ret]`** —— 签名会漂（默认值、关键字-only 表达不了），
    而且同一件事写七遍（正是本仓记过的「同一件事写多遍 = 漂移」）；
 3. **本模块一份 `Protocol`** —— 方法签名从原 `_HubQueue` 逐条生成（对账脚本逐字节比过）；

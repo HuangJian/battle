@@ -303,7 +303,7 @@ def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:
     clock = _Clock()
     store = _store(tmp_path, clock)
     _publish(store)
-    out = store.claim_outcome(JID, mode="race")  # type: ignore[arg-type]
+    out = store.claim_outcome(JID, mode="race")
     assert out.ok is False and out.status == "bad_mode"
     assert store._leases.get(JID) is None, "写错的模式绝不能静默降级成独占"
 

@@ -137,7 +137,7 @@ def test_read_pack_index_accepts_a_pack_written_by_the_exporter(
         "plan_sha256": sha256_bytes(plan),
         "commit": "c" * 40,
     }
-    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)  # type: ignore[arg-type]
+    monkeypatch.setattr(bundle_mod, "normalize_manifest", lambda m: m)
     w = tmp_path / "w"
     w.mkdir()
     (w / "init_weights.json").write_bytes(b"w")

@@ -1,8 +1,9 @@
 """G6：`# noqa: F401` / `# type: ignore` 的存量只减不增（`python.refactor.md` §8）。
 
-两类抑制符都是**关掉编译器/检查器**的语法，数量只会随「先写快一点」增长。本仓的现状是
-`warn_unused_ignores=false` ⇒ 没人知道 271 处 `# type: ignore` 里有多少已经无用
-（`python.refactor.md` §P1-3）；`# noqa: F401` 则被拿来给 re-export 壳模块续命。
+两类抑制符都是**关掉编译器/检查器**的语法，数量只会随「先写快一点」增长。`# type: ignore`
+的「有没有用」现在由 mypy 自己判（`warn_unused_ignores=true`，见 `DECISIONS.md`
+§2026-11-14-warn-unused-ignores-and-pinned-platform：打开当天清掉 111 条无用 ignore，
+存量 271/98 → 163/68）；`# noqa: F401` 则被拿来给 re-export 壳模块续命。
 没有门禁时，两种抑制都会继续堆积。这里按**文件计数**冻结在
 `tests/golden/suppression_baseline.json`：只拦增长，另加一条「基线只许调小」防止额度回流。
 
@@ -145,8 +146,11 @@ def test_scan_sees_the_known_surface() -> None:
     assert baseline[NOQA_F401].get("remote/offline_boot.py", 0) > 0, (
         "扫描入口坏了（re-export 壳没数到）"
     )
-    assert sum(baseline[TYPE_IGNORE].values()) >= 200
-    assert len(baseline[TYPE_IGNORE]) >= 80
+    # 下面两条是**扫描健康度地板**（不是额度）：`type: ignore` 真被清到接近零之前，几十个文件里
+    # 仍有存量 ⇒ 数出来太小就说明扫描入口坏了。2026-11-14 开 `warn_unused_ignores` 清掉 111 条
+    # 无用 ignore（271 → 163，98 → 68 文件）后，地板跟着从 200/80 降到 150/60。
+    assert sum(baseline[TYPE_IGNORE].values()) >= 150
+    assert len(baseline[TYPE_IGNORE]) >= 60
     assert not any(
         part in SKIP_DIRS
         for rel in (*baseline[NOQA_F401], *baseline[TYPE_IGNORE])

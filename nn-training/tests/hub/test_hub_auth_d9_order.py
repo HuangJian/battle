@@ -33,7 +33,7 @@ from typing import Any, cast
 import pytest
 
 # 复用现有测试基建（随机端口的真 hub-server）
-from tests.remote.test_remote_ppo import (  # type: ignore
+from tests.remote.test_remote_ppo import (
     _boot_server,
     _http,
     _mini_manifest,
@@ -265,7 +265,7 @@ def test_access_log_carries_attributed_source(capsys: Any, tmp_path: Path) -> No
     line = '"GET /code HTTP/1.1" 200 -'
 
     # 隧道：回环对端 + CF 头 → 补 src=/via=cf
-    HubHandler.log_message(  # type: ignore[arg-type]
+    HubHandler.log_message(
         cast(HubHandler, _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret", cf="203.0.113.7")),
         line,
     )
@@ -273,14 +273,14 @@ def test_access_log_carries_attributed_source(capsys: Any, tmp_path: Path) -> No
     assert "127.0.0.1 src=203.0.113.7 via=cf" in out, out
 
     # 本机组件（回环、无头）→ 不加噪（与旧格式逐字一致）
-    HubHandler.log_message(  # type: ignore[arg-type]
+    HubHandler.log_message(
         cast(HubHandler, _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret")), line
     )
     out = capsys.readouterr().out
     assert "[hub-server 127.0.0.1]" in out and "via=cf" not in out, out
 
     # 直连对端自带头 → 不采信（只写对端）
-    HubHandler.log_message(  # type: ignore[arg-type]
+    HubHandler.log_message(
         cast(
             HubHandler,
             _stub_handler(store, "sekret", "100.124.208.62", "Bearer sekret", cf="203.0.113.7"),
@@ -296,7 +296,7 @@ def test_access_log_survives_missing_headers(capsys: Any, tmp_path: Path) -> Non
     store = _boot_server(tmp_path)[1]
     h = _stub_handler(store, "sekret", "127.0.0.1", "Bearer sekret")
     h.headers = None  # type: ignore[assignment]
-    HubHandler.log_message(cast(HubHandler, h), '"GET /bad HTTP/1.1" 400 -')  # type: ignore[arg-type]
+    HubHandler.log_message(cast(HubHandler, h), '"GET /bad HTTP/1.1" 400 -')
     assert "[hub-server 127.0.0.1]" in capsys.readouterr().out
 
 

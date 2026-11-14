@@ -198,7 +198,7 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
 
     monkeypatch.setattr(offline_boot, "obtain_pack", spy_obtain)
     with pytest.raises(SystemExit, match="stop-here"):
-        offline_boot.run({"course": "c5-gae", "work_dir": str(tmp_path)}, _quiet, spy_secret)  # type: ignore[arg-type]
+        offline_boot.run({"course": "c5-gae", "work_dir": str(tmp_path)}, _quiet, spy_secret)
     assert order == ["secret:HUB_TOKEN", "secret:HUB_IP", "secret:TS_AUTHKEY", "obtain_pack"]
 
 

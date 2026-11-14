@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.offline_boot as offline_boot
-from tests.remote.test_offline_local_first import (  # type: ignore
+from tests.remote.test_offline_local_first import (
     _artifacts,
     _local,
     _pack,

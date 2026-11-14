@@ -38,7 +38,7 @@ from remote.deliver_outbox import (
     round_path,
 )
 from remote.offline_deliver import OfflineDeliverer
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 #: 两边共用的时钟（`ts` 是体里唯一随时间变的字段；不给同一个值就没法比字节）。
 NOW = 1_234_567.5

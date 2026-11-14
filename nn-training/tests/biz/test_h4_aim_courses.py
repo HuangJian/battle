@@ -27,7 +27,7 @@ ARMS = ("h4-aim-c0", "h4-aim-k10", "h4-aim-k25")
 WAIM = {"h4-aim-c0": None, "h4-aim-k10": 0.0205, "h4-aim-k25": 0.0512}
 
 
-def _course(name: str):  # type: ignore[no-untyped-def]
+def _course(name: str):
     return load_course(CURRICULA / f"{name}.jsonc")
 
 

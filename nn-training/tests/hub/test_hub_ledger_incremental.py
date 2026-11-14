@@ -55,7 +55,7 @@ class _ReadMeter:
                     me.bytes += len(b)
                     return b
 
-                f.read = read  # type: ignore[method-assign]
+                f.read = read
             return f
 
         monkeypatch.setattr(sl, "open", fake, raising=False)

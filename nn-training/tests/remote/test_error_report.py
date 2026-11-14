@@ -59,7 +59,7 @@ from remote.error_report import (
     report_error,
 )
 from remote.job_lifecycle import worker_tag
-from tests.remote.test_worker_reap_stall import (  # type: ignore
+from tests.remote.test_worker_reap_stall import (
     _job,
     _patch_hub,
     _run_loop,

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.remote.test_remote_ppo import (  # type: ignore
+from tests.remote.test_remote_ppo import (
     _boot_server,
     _mini_manifest,
     _next,

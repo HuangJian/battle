@@ -450,7 +450,7 @@ def test_tpu_holders_parses_fd_links(monkeypatch: pytest.MonkeyPatch) -> None:
             raise OSError("bad link")
         return v
 
-    def fake_open(path: Any, *a: Any, **kw: Any):  # type: ignore[no-untyped-def]
+    def fake_open(path: Any, *a: Any, **kw: Any):
         if path == "/proc/123/cmdline":
             return io.BytesIO(b"python\0-m\0remote.worker")
         return real_open(path, *a, **kw)

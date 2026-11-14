@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
 from common.protocol import AUTH_HEADER, normalize_manifest
 from hub.server import _JobStore, make_server
 from remote.hub_client import cancel_job
-from tests.remote.test_remote_ppo import _mini_manifest  # type: ignore
+from tests.remote.test_remote_ppo import _mini_manifest
 
 TOKEN = "sekret"
 

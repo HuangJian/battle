@@ -32,7 +32,7 @@ BURN_ARMS = {
 }
 
 
-def _course(name: str):  # type: ignore[no-untyped-def]
+def _course(name: str):
     return load_course(CURRICULA / f"{name}.jsonc")
 
 

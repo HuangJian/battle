@@ -388,7 +388,7 @@ def test_heartbeat_extends_and_reports_expired_or_taken(tmp_path: Path) -> None:
     st, raw = _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease=bogus", method="POST")
     assert st == 409 and _json(raw)["expired"] is False
     # 惰性过期：时钟一推过 TTL，租约当场无主（不用清理线程）。
-    hub._now = lambda: 10**10  # type: ignore[method-assign]
+    hub._now = lambda: 10**10
     st, raw = _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok}", method="POST")
     assert st == 409 and _json(raw)["expired"] is True
 
@@ -412,7 +412,7 @@ def test_release_of_an_expired_lease_is_a_noop_success(tmp_path: Path) -> None:
     base, hub, _srv = _offline_hub(tmp_path)
     _write_pack(tmp_path)
     tok = _lease_of(base)
-    hub._now = lambda: 10**10  # type: ignore[method-assign]
+    hub._now = lambda: 10**10
     st, _doc = _req(base, f"{OFFLINE_RELEASE_PATH}?course=c5-gae&lease={tok}", method="POST")
     assert st == 200
 
@@ -1655,7 +1655,7 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
     with hub._lease_lock:
         hub._leases["c5-gae"]["expires_at"] = now + 10_000.0
     real_now = hub._now
-    hub._now = lambda: now + 2_000.0  # type: ignore[method-assign]
+    hub._now = lambda: now + 2_000.0
     try:
         assert hub.hold_of("c5-gae")["state"] == "stale"
         detach, lines = _pinger(base, tok, token=TOKEN)
@@ -1665,7 +1665,7 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
         assert hub.hold_of("c5-gae")["state"] == "live", "打点刷活了 hold"
         assert detach() == ""
     finally:
-        hub._now = real_now  # type: ignore[method-assign]
+        hub._now = real_now
     # 2026-10-25：日志行与发报解耦 —— 「进度」那一行由 `progress_text` 单独打，
     # 送达另起一行（不再把 label 塞进送达行里重复一遍）。
     assert any(offline_boot._progress_label("iter", it=0, done=1, total=4) in ln for ln in lines), lines

@@ -101,7 +101,7 @@ def test_admin_mem_route_is_wired_and_auth_gated() -> None:
         if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant))
     ]
     assert isinstance(stmts[0], ast.If), f"第一条语句必须是鉴权闸：{ast.unparse(stmts[0])}"
-    assert ast.unparse(stmts[0].test) == "not self._auth_ok()", ast.unparse(  # type: ignore[union-attr]
-        stmts[0].test  # type: ignore[union-attr]
+    assert ast.unparse(stmts[0].test) == "not self._auth_ok()", ast.unparse(
+        stmts[0].test
     )
     assert hasattr(HubHandler, "_admin_mem")

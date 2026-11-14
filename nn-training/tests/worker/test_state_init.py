@@ -31,7 +31,7 @@ import trainer.dispatch as disp
 # 派发脚手架复用：起始分布的闸门住在 `dispatch.run()` 入口（2026-09-25 接线事故修复点），
 # 而「ping 门 / 权重下发 / worker 替身」那套确定性脚手架在 rollout 派发用例里——
 # 兄弟模块走 `tests.` 包路径 import（`tests/` 有 `__init__.py`，nn-training 在 sys.path 上）。
-from tests.trainer.test_rollout_dispatch_resilience import _Harness, _node  # type: ignore
+from tests.trainer.test_rollout_dispatch_resilience import _Harness, _node
 from worker.config import (
     CourseConfig,
     StateInitBlock,

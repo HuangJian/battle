@@ -39,7 +39,7 @@ from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import FINAL_NAME, read_state, round_path
 from remote.deliver_proc import DelivererProcess
 from remote.offline_deliver import SEG_END_KIND_ENV, OfflineDeliverer
-from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+from tests.remote.test_offline_deliver import RUN, _make_artifacts
 
 TOKEN = "sekret-proc"
 
@@ -439,9 +439,9 @@ def test_boot_failure_degrades_to_thread_mode_and_still_delivers(
     calls: list = []
     real_popen = subprocess.Popen
 
-    def counting_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+    def counting_popen(argv, *a, **kw):
         calls.append(list(argv))
-        return real_popen(argv, *a, **kw)  # type: ignore[arg-type]
+        return real_popen(argv, *a, **kw)
 
     monkeypatch.setattr(subprocess, "Popen", counting_popen)
     st = _State(tmp_path, hub, worker_module="remote.deliver_worker_missing_on_purpose")

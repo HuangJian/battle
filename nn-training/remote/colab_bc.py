@@ -119,7 +119,7 @@ def ensure_corpus(
     src = next((z for z in zips if z.exists()), None)
     if src is None:
         log(f"请上传语料 zip: {corpus_zip}")
-        from google.colab import files  # type: ignore
+        from google.colab import files
 
         up = files.upload()
         fname = next(iter(up))

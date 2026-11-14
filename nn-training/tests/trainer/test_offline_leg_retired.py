@@ -38,8 +38,8 @@ from common.protocol import (
 )
 from hub.server import _HubQueue, make_server
 from remote import worker as W
-from tests.hub.test_role_routing import OFF_JID, _manifest, _store  # type: ignore
-from tests.remote.test_worker_bun_precheck import _job as _worker_job  # type: ignore
+from tests.hub.test_role_routing import OFF_JID, _manifest, _store
+from tests.remote.test_worker_bun_precheck import _job as _worker_job
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
 from worker.loop_round import (

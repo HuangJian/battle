@@ -29,7 +29,7 @@ import pytest
 import remote.hub_http as hub_http
 from common.protocol import JobFailedError, normalize_manifest
 from remote.hub_client import HubClientError, JobCancelledError, cancel_job, wait_job
-from tests.remote.test_remote_ppo import _boot_server, _mini_manifest  # type: ignore
+from tests.remote.test_remote_ppo import _boot_server, _mini_manifest
 
 
 def _publish_unclaimed(tmp_path: Path):
@@ -148,7 +148,7 @@ def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
         asked.append(path)
         return real_request(base_url, token, path, *a, **k)
 
-    hub_http._request = _spy  # type: ignore[assignment]
+    hub_http._request = _spy
     try:
         # trainer 侧 M2 的撤单行（hub 与 trainer 共读同一份 training_log.jsonl）。
         assert cancel_job(
@@ -170,7 +170,7 @@ def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
         assert isinstance(ei.value, HubClientError)  # 可重试：与 M1 lost 同一条处置路
         assert asked.count("/admin/queue") == 0  # 早返回：不问在线 worker（那条路只服务 pending）
     finally:
-        hub_http._request = real_request  # type: ignore[assignment]
+        hub_http._request = real_request
         srv.shutdown()
         th.join()
     cancelled = [ln for ln in lines if "已被撤单" in ln]

@@ -519,7 +519,9 @@ def prompt_upload(log: Callable[[str], None]) -> Path | None:
     ——`files.upload()` 会**阻塞**在交互上，抢在重试前面弹就等于关掉了自动取包这条路。
     """
     try:
-        from google.colab import files  # type: ignore[import-not-found, import-untyped]
+        # 本机装了 `google.colab` 但仓库里没有它的 stubs：Mypy 只报 `import-untyped`。
+        # （此前还列着 `import-not-found`——那一条在装了包的机器上是用不到的，删。）
+        from google.colab import files  # type: ignore[import-untyped]
 
         log("弹出上传框：请选择控制台导出的 task-<课>.zip（在控制台「导出任务包」下载）")
         got = files.upload()

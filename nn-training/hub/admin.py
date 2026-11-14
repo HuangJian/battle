@@ -116,7 +116,7 @@ def rss_bytes() -> int:
             pages = int(f.read().split()[1])
         # `os.sysconf` 只在 POSIX 上（`typeshed` 按平台标注）⇒ 显式 `int()` 包住，
         # 别让 `Any` 顺着 return 溜出去（`mypy --strict` 的 no-any-return）。
-        page_size = int(os.sysconf("SC_PAGE_SIZE"))  # type: ignore[attr-defined]
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
         return pages * page_size
     except Exception:
         return 0

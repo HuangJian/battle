@@ -81,13 +81,13 @@ def _rss_mb_posix() -> tuple[float, float] | None:
     try:
         import resource
 
-        ru = resource.getrusage(resource.RUSAGE_SELF)  # type: ignore[attr-defined]  # POSIX 专用
+        ru = resource.getrusage(resource.RUSAGE_SELF)  # POSIX 专用
         # ru_maxrss：Linux 单位 KB，macOS 单位字节
         scale = 1024.0 if sys.platform.startswith("linux") else 1.0
         peak = float(ru.ru_maxrss) * scale
         cur = peak
         try:
-            page = os.sysconf("SC_PAGE_SIZE")  # type: ignore[attr-defined]  # POSIX 专用
+            page = os.sysconf("SC_PAGE_SIZE")  # POSIX 专用
             with open("/proc/self/statm", encoding="ascii") as f:
                 cur = float(int(f.read().split()[1]) * page)
         except Exception:

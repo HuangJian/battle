@@ -257,7 +257,7 @@ def _spawn(session: pytest.Session, n: int) -> list[_Worker]:
         for i in range(n):
             cmd_r, cmd_w = os.pipe()
             res_r, res_w = os.pipe()
-            pid = os.fork()  # type: ignore[attr-defined]  # POSIX-only：win32 stubs 里没这个符号（真跑到这里前已在入口拒）
+            pid = os.fork()  # POSIX-only：win32 stubs 里没这个符号（真跑到这里前已在入口拒）
             if pid == 0:
                 # ---- 子进程分支：这里没有返回值，_child_main 以 os._exit 结束 ----
                 os.close(cmd_w)
@@ -606,7 +606,7 @@ def _die_with_parent() -> None:
         import signal
 
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        if libc.prctl(1, signal.SIGKILL) != 0:  # type: ignore[attr-defined]  # PR_SET_PDEATHSIG = 1；SIGKILL 同理只在 POSIX stubs 里
+        if libc.prctl(1, signal.SIGKILL) != 0:  # PR_SET_PDEATHSIG = 1；SIGKILL 同理只在 POSIX stubs 里
             return
         if os.getppid() != _MASTER_PID:  # fork 与 prctl 之间父进程已经退出的竞态
             os._exit(70)

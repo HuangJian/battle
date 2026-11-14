@@ -512,7 +512,7 @@ class DeliverMetricsMixin:
         与课程侧 `training_log.jsonl`，**不创建 `it-N/`**（没权重不该让 `resume_anchor` 看见）。
         失败 ⇒ 不销账（`_metrics_sent` 不动）⇒ 下一拍照旧再试；统计可再生，不进 `_repost`。
         """
-        if not self.enabled or not self.metrics_parts or self._metrics_unsupported:  # type: ignore[attr-defined]
+        if not self.enabled or not self.metrics_parts or self._metrics_unsupported:
             return 0
         if not its:
             return 0

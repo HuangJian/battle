@@ -262,7 +262,18 @@ check_untyped_defs = true
 cache_dir = "../tmp/.mypy-cache"
 no_implicit_optional = true
 warn_redundant_casts = true
-warn_unused_ignores = false
+# 2026-11-14（`python.refactor.md` §P1-4）：打开「无用 ignore」检查。此前是 false ⇒ `type: ignore`
+# 一旦写下就永远不会被质疑，实测 111 条已经不再压任何错误（跨 54 个文件），它们只让下一个人以为
+# 「这里是类型系统管不到的地方」。现在多列的 code、过期的兼容注释都会当场红（清完这批才敢开）。
+# 已随之删掉的那批里有一类特别值得记：多码 ignore（`[attr-defined, assignment]`）里只有一半在
+# 本平台生效 —— 开着 false 时它是「无害的多余」，开着 true 时它被逼着二选一，而真相只有一个平台。
+warn_unused_ignores = true
+# 2026-11-14：与上面那条**必须成对**。`warn_unused_ignores` 判的是「按哪套 stubs 分析」——
+# 不钉平台的话，同一份 `# type: ignore[attr-defined]` 在 Linux（`os.sysconf` / `os.fork` /
+# `ctypes.windll` 都不存在）是**必需**、在 Windows 上是**多余**，于是同一个仓库在两台机器上
+# 只能有一台绿。钉成 linux = 类型检查以门禁所跑的那一套 stubs 为准（本仓 `bun run check`
+# 跑在 Linux 上），Windows 开发机得到同一份判定，而不是另一份。
+platform = "linux"
 show_error_codes = true
 exclude = ["\\.venv/", "weights/", "tmp/"]
 

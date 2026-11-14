@@ -1577,10 +1577,10 @@ class _FlakyPopen:
     def __new__(cls, argv: object, **kw: object) -> Any:
         joined = " ".join(str(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv]))
         if not cls.match or cls.match not in joined:
-            return cls.real(argv, **kw)  # type: ignore[misc]
+            return cls.real(argv, **kw)
         cls.made += 1
         if cls.made > cls.fail_first:
-            return cls.real(argv, **kw)  # type: ignore[misc]
+            return cls.real(argv, **kw)
         return object.__new__(cls)
 
     def __init__(self, argv: object, **_kw: object) -> None:
@@ -2180,7 +2180,7 @@ def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatc
     node = _stub(True)
     for it in (1, 2, 3):
         TrainingLoop._check_quota_incident(node, it)
-    assert msgs == [] and node._zero_shard_streak == 0  # type: ignore[attr-defined]
+    assert msgs == [] and node._zero_shard_streak == 0
     # 对照：本机轮行为逐字不变（连续 2 轮零 shard → 响亮告警）
     local = _stub(False)
     TrainingLoop._check_quota_incident(local, 1)
