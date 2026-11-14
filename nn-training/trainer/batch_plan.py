@@ -112,6 +112,11 @@ def node_supports_suppress_lead_miss_fire(ping: dict) -> bool:
     return ping.get("suppressLeadMissFireSupport") is True
 
 
+def node_supports_opening_connect(ping: dict) -> bool:
+    """Hybrid opening 能力位：True = 可派 --opening-connect（旧 agent fail-closed）。"""
+    return ping.get("openingConnectSupport") is True
+
+
 def eval_rules_reject_reason(args: object, ping: dict) -> str | None:
     """批评估节点门的推理规则判据：None = 可派，否则拒派原因（供批执行器日志）。"""
     if bool(getattr(args, "skip_steel_only_shots", False)) and not node_supports_skip_steel_only_shots(ping):
@@ -122,6 +127,10 @@ def eval_rules_reject_reason(args: object, ping: dict) -> str | None:
         return "缺 suppressUselessFireSupport 能力位（旧 agent）——通用废射门任务被拒；不降级"
     if bool(getattr(args, "suppress_lead_miss_fire", False)) and not node_supports_suppress_lead_miss_fire(ping):
         return "缺 suppressLeadMissFireSupport 能力位（旧 agent）——预测门任务被拒；不降级"
+    if bool(getattr(args, "opening_connect", False)) and not node_supports_opening_connect(ping):
+        return "缺 openingConnectSupport 能力位（旧 agent）——hybrid opening 任务被拒；不降级"
+    if bool(getattr(args, "decision_events", False)) and not node_supports_decision_events(ping):
+        return "缺 decisionEventsSupport 能力位（旧 agent）——事件任务被拒；不降级"
     return None
 
 
@@ -132,6 +141,8 @@ def eval_rule_kwargs(args: object) -> dict:
         "break_bricks_on_path": bool(getattr(args, "break_bricks_on_path", False)),
         "suppress_useless_fire": bool(getattr(args, "suppress_useless_fire", False)),
         "suppress_lead_miss_fire": bool(getattr(args, "suppress_lead_miss_fire", False)),
+        # Hybrid opening：eval/deploy 与训练 rollout 共用的 policy wrapper。
+        "opening_connect": bool(getattr(args, "opening_connect", False)),
     }
 
 

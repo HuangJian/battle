@@ -31,7 +31,7 @@ import {
 import { bfsDistance, goalMoveBias } from './goal-mask'
 import { isFireReady } from './obs-encoder'
 import { leadHitForDir } from './policy-extra'
-import { isBaseRingCell } from '../ai/god/ThreatBudget'
+import { isBaseRingCell } from '../utils/base-ring'
 
 /**
  * Frozen predicate version (plan §4.1.5). Any behaviour change must bump this
@@ -595,4 +595,4 @@ export function reachablePickupDir(
  * A3/A2 reuse the God-AI turn predicate verbatim — never copy it (plan §2.1 /
  * §4.1.5). Re-exported here so resolver consumers have one import site.
  */
-export { turnWillCommit } from '../ai/god/turn-gate'
+export { turnWillCommit } from '../utils/turn-gate'

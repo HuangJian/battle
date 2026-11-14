@@ -28,7 +28,7 @@ import paddle
 
 from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
-from worker.ppo.trainer import aggregate_stats, cat_entropy
+from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per
 
 CLIP_EPS = 0.2
 VF_COEF = 1.0
@@ -277,16 +277,31 @@ def ppo_update(
             ratio = paddle.exp(lp_new - lp_old)
             surr1 = ratio * adv
             surr2 = paddle.clip(ratio, 1.0 - clip, 1.0 + clip) * adv
-            policy_loss = -paddle.minimum(surr1, surr2).mean()
-
-            value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-            if hold_logp is not None:
-                entropy = entropy + cat_entropy(hold_logp)
-
-            loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-            if kl_coef > 0.0:
-                loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+            # Hybrid opening（torch 侧同源）：mask=0 的样本不算 policy/entropy/KL。
+            pm = e.get("policy_mask")
+            if pm is None:
+                policy_loss = -paddle.minimum(surr1, surr2).mean()
+                value_loss = F.mse_loss(val.squeeze(-1), ret)
+                entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
+                if hold_logp is not None:
+                    entropy = entropy + cat_entropy(hold_logp)
+                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
+                if kl_coef > 0.0:
+                    loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+            else:
+                surr = -paddle.minimum(surr1, surr2).reshape((-1,))
+                w = paddle.cast(pm.reshape((-1,)), surr.dtype)
+                denom = paddle.clip(w.sum(), min=1.0)
+                policy_loss = (surr * w).sum() / denom
+                ent_per = cat_entropy_per(move_logp) + cat_entropy_per(fire_logp)
+                if hold_logp is not None:
+                    ent_per = ent_per + cat_entropy_per(hold_logp)
+                entropy = (ent_per.reshape((-1,)) * w).sum() / denom
+                value_loss = F.mse_loss(val.squeeze(-1), ret)
+                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
+                if kl_coef > 0.0:
+                    kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape((-1,))
+                    loss = loss + kl_coef * (kl_per * w).sum() / denom
             kick_mean = _zero_scalar()
             _ref = ref_cache[int(i)]
             if _ref is not None:

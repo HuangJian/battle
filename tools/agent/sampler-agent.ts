@@ -1618,7 +1618,10 @@ async function runGame(
   suppressUselessFire = false,
   // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时按子弹到达时刻的敌人位置判空枪。
   suppressLeadMissFire = false,
-  // v6 BC 标签来源：argmax=教师最优动作，sampled=策略采样（BC 的行为克隆标签）。
+  // Hybrid opening：`?openingConnect=1` 时 eval/rollout 都拼 `--opening-connect`
+  // （默认条件接管：只对 strict 不连通的关生效）。缺席 = 老行为。
+  openingConnect = false,
+  // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
   labelMode: string = 'argmax',
   // 取消信号（/v1/cancel）：abort ⇒ 杀子进程 / 回收长驻 worker，结果不再回包。
@@ -1721,6 +1724,8 @@ async function runGame(
         if (breakBricksOnPath) args.push('--break-bricks-on-path')
         if (suppressUselessFire) args.push('--suppress-useless-fire')
         if (suppressLeadMissFire) args.push('--suppress-lead-miss-fire')
+        // Hybrid opening：评估局套 opening controller（默认条件接管）。
+        if (openingConnect) args.push('--opening-connect')
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
         // greedy 分层采集（plan/greedy-outcome-quota rev5）：**所有节点**都要能按 argmax
@@ -1732,6 +1737,8 @@ async function runGame(
         if (decisionEvents) args.push('--decision-events')
         // 决策周期 K：仅非默认值透传（缺席 = 导出器缺省 10，旧训练侧逐字节不变）。
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
+        // Hybrid opening：rollout 也套同一个 controller（policy_mask 由导出器落）。
+        if (openingConnect) args.push('--opening-connect')
         // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
         if (stageJson) args.push('--stage-json', stageJson)
         if (livesOverride) args.push('--lives-override', livesOverride)
@@ -1972,6 +1979,8 @@ export function taskKey(
   suf = '',
   // B10 预测门：同 (stage, seed) 开/关是不同局，仅激活时进 `:suppressLeadMissFire`。
   slm = '',
+  // Hybrid opening：bare / hybrid 是不同局，仅激活时进 `:hybridOpen`。
+  oc = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -1979,7 +1988,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}`
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}${oc ? ':hybridOpen' : ''}`
 }
 
 function beginTask(
@@ -2018,6 +2027,8 @@ function beginTask(
   suppressUselessFire = false,
   // 评估/部署链推理规则：`?suppressLeadMissFire=1` 时抑制预测空枪。
   suppressLeadMissFire = false,
+  // Hybrid opening：`?openingConnect=1` 时 eval/rollout 都拼 `--opening-connect`。
+  openingConnect = false,
   // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
   labelMode: string = 'argmax',
 ): void {
@@ -2051,6 +2062,7 @@ function beginTask(
     breakBricksOnPath,
     suppressUselessFire,
     suppressLeadMissFire,
+    openingConnect,
     labelMode,
     task.signal,
   )
@@ -2409,6 +2421,8 @@ async function handle(req: Request): Promise<Response> {
     // B8/B10（同机制，互斥）：`?suppressUselessFire=1` / `?suppressLeadMissFire=1`。
     const suppressUselessFire = url.searchParams.get('suppressUselessFire') === '1'
     const suppressLeadMissFire = url.searchParams.get('suppressLeadMissFire') === '1'
+    // Hybrid opening：评估/rollout 共用（缺省 = 老行为）。
+    const openingConnect = url.searchParams.get('openingConnect') === '1'
     if (suppressUselessFire && suppressLeadMissFire)
       return jsonResponse(
         { error: 'suppressUselessFire 与 suppressLeadMissFire 同机制，不得同时开启' },
@@ -2448,6 +2462,7 @@ async function handle(req: Request): Promise<Response> {
       breakBricksOnPath ? '1' : '',
       suppressUselessFire ? '1' : '',
       suppressLeadMissFire ? '1' : '',
+      openingConnect ? '1' : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2501,6 +2516,7 @@ async function handle(req: Request): Promise<Response> {
         breakBricksOnPath,
         suppressUselessFire,
         suppressLeadMissFire,
+        openingConnect,
         labelMode,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
@@ -2551,6 +2567,7 @@ async function handle(req: Request): Promise<Response> {
           breakBricksOnPath,
           suppressUselessFire,
           suppressLeadMissFire,
+          openingConnect,
           labelMode,
           task.signal,
         )
@@ -2623,6 +2640,7 @@ async function handle(req: Request): Promise<Response> {
     // B8/B10：与提交端同配方（缺席 = 老键不变）。
     const sufPoll = url.searchParams.get('suppressUselessFire') === '1' ? '1' : ''
     const slmPoll = url.searchParams.get('suppressLeadMissFire') === '1' ? '1' : ''
+    const ocPoll = url.searchParams.get('openingConnect') === '1' ? '1' : ''
     const key = taskKey(
       iterId,
       mode,
@@ -2638,6 +2656,7 @@ async function handle(req: Request): Promise<Response> {
       bboPoll,
       sufPoll,
       slmPoll,
+      ocPoll,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2785,6 +2804,8 @@ async function handle(req: Request): Promise<Response> {
       // B10 预测门支持位：`/v1/task?suppressLeadMissFire=1` 时评估局拼
       // --suppress-lead-miss-fire。旧 agent 无此字段 ⇒ 不派开启批。
       suppressLeadMissFireSupport: true,
+      // Hybrid opening：`/v1/task?openingConnect=1` 时 eval/rollout 拼 --opening-connect。
+      openingConnectSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,

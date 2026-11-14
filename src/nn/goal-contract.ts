@@ -22,7 +22,7 @@
 import { BASE_POS } from '../constants'
 import type { World } from '../game/World'
 import type { Cell } from '../utils/grid-search'
-import { detectCentralBreachRisk } from '../ai/god/stage-adapt'
+import { detectCentralBreachRisk } from '../utils/central-breach'
 
 /** 契约（§6.1 接口；targetCell/K 已随 target/K 头被砍，不得回加，§8.3.0b）。 */
 export interface GoalContract {

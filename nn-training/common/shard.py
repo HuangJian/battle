@@ -45,6 +45,9 @@ SHARD_FILES = (
 OPTIONAL_SHARD_FILES = (
     "a_hold.npy",
     "lp_hold.npy",
+    # Hybrid opening：仅 --opening-connect 的 rollout 落盘（per-decision
+    # 1=NN / 0=controller）；缺席 = 老 shard 逐字节不变。
+    "policy_mask.npy",
 )
 
 # M8 意图 RL shard 清单（export-intent-rollout.ts 产物）——意图步 semi-MDP：

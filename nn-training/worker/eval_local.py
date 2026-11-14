@@ -354,6 +354,9 @@ def run_local_eval_game(
     suppress_useless_fire: bool = False,
     # B10 预测门：True ⇒ 追加 `--suppress-lead-miss-fire`。缺省 False = 老行为。
     suppress_lead_miss_fire: bool = False,
+    # Hybrid opening（一次性课程评估 `--opening-connect`）：True ⇒ 本机 eval
+    # 命令追加 `--opening-connect`；与节点 agent 同口径。缺省 False = 老行为。
+    opening_connect: bool = False,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -410,6 +413,8 @@ def run_local_eval_game(
         cmd += ["--suppress-useless-fire"]
     if suppress_lead_miss_fire:
         cmd += ["--suppress-lead-miss-fire"]
+    if opening_connect:
+        cmd += ["--opening-connect"]
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()

@@ -63,8 +63,12 @@ import {
   uselessShot,
   usefulFire,
 } from '../../src/nn/inference-rules'
-import { decodeMove } from '../../src/nn/action-space'
-import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
+import { decodeMove, encodeMove } from '../../src/nn/action-space'
+import { decodeMove4, encodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
+import { OpeningController, type OpeningTraceEvent } from '../../src/nn/opening-controller'
+import { centralBrickCells, evaluateCorridor } from '../../src/nn/opening-corridor'
+import { RING_CELLS } from '../../src/utils/base-ring'
+import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { corridorCells, nearestPickupCenter } from '../../src/nn/danger-metrics'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
@@ -232,6 +236,44 @@ let skipSteelOnlyShots = false
 /** 拆砖免绕路（默认关；`--break-bricks-on-path` 打开。只用于评估/部署推理，
  *  训练链不得打开）：所选方向被砖挡/2 格内有砖且策略没开火时强制拆墙。 */
 let breakBricksOnPath = false
+/**
+ * Hybrid opening policy wrapper（默认关；`--opening-connect` 打开）。
+ * 与训练 rollout 共用 `OpeningController`；`inference_rules` 仍是 eval/deploy-only，
+ * 本开关是 policy wrapper，训练链也认。bare 报告逐字节不变（只在开启时加 `opening` 段）。
+ */
+let openingConnect = false
+/** 条件接管：只对 strict `evaluateCorridor` 判不连通的关启用（A/B 归因臂）。 */
+let openingAll = process.env.OPENING_ALL === '1'
+/** 关闭出袋（A/B 归因臂）：仍开挖通道，但 handoff 前不把坦克推到通道中点。 */
+let openingNoExit = process.env.OPENING_NO_EXIT === '1'
+interface OpeningReport {
+  activeTicks: number
+  bricksBroken: number
+  p1p2Connected: boolean
+  enemyConnected: boolean
+  corridorBand: string | null
+  corridorLength: number
+  corridorRelaxed: boolean
+  exitPocketDone: boolean
+  exitPocketTicks: number
+  abortReason: string | null
+  baseRingBreach: number
+  centralBreachCells: number
+  hardConstraintOk: boolean
+}
+let openingReport: OpeningReport | null = null
+
+/** 数当前地图上的砖（opening 期间相对 stage start 的 delta）。 */
+function countBrickTiles(world: World): number {
+  let n = 0
+  const g = world.tileMap.grid
+  for (let r = 0; r < GRID; r++) {
+    const row = g[r]
+    for (let c = 0; c < GRID; c++) if (row[c] === 'brick') n++
+  }
+  return n
+}
+
 /** B8 通用废射门（默认关；`--suppress-useless-fire` 打开。评估/部署专用，训练链恒关）。 */
 let suppressUselessFire = false
 /** B10 预测门（默认关；`--suppress-lead-miss-fire` 打开。评估/部署专用）。 */
@@ -912,6 +954,62 @@ export function runEvalOne(
   // scripted.reset() 使远程 god 局用默认参数打，与本地 runSimulation 不等价）。
   ai.reset()
   if (goalGod) goalGod.reset()
+
+  // ── Hybrid opening (--opening-connect) ─────────────────────────────────
+  // 只在 policy=nn 且显式开开关时接管；bare 路径连对象都不构造。
+  // 部署口径 = 全局出袋（用户 2026-11-14 裁定）；训练 rollout 用同一个 controller。
+  // 条件接管（归因臂）：strict 已连通的关保持 bare，避免给本来正常的关白加开局。
+  let openingWanted = openingConnect && policy === 'nn'
+  // 默认条件接管（用户 2026-11-15 拍板）：strict 已连通的关不抢方向盘，让 NN 自己学。
+  // --opening-all / OPENING_ALL=1 只作 A/B 的全局臂。
+  if (openingWanted && !openingAll) {
+    const sp = world.playerSpawnPoint
+    const p1 = { col: sp.col, row: sp.row }
+    const p2 = { col: computePlayer2SpawnCol(sp.col), row: sp.row }
+    openingWanted = !evaluateCorridor(world.tileMap, p1, p2).connected
+  }
+  const openingCtrl = openingWanted
+    ? new OpeningController({
+        exitPocket: !openingNoExit,
+        ...(process.env.OPENING_TRACE === '1'
+          ? {
+              onTrace: (e: OpeningTraceEvent) =>
+                console.error(
+                  `[opening-trace] central_gone col=${e.col} row=${e.row} planned=${e.planned}`,
+                ),
+            }
+          : {}),
+      })
+    : null
+  let openingDone = false
+  openingReport = null
+  let openingRingSolid0: boolean[] = []
+  let openingCentralKeys0 = new Set<string>()
+  let openingBricks0 = 0
+  if (openingCtrl) {
+    openingRingSolid0 = RING_CELLS.map((c) => {
+      const t = world.tileMap.get(c.col, c.row)
+      return t === 'brick' || t === 'steel' || t === 'base'
+    })
+    openingCentralKeys0 = new Set(centralBrickCells(world.tileMap).map((c) => `${c.col},${c.row}`))
+    openingBricks0 = countBrickTiles(world)
+    openingReport = {
+      activeTicks: 0,
+      bricksBroken: 0,
+      p1p2Connected: false,
+      enemyConnected: false,
+      corridorBand: null,
+      corridorLength: 0,
+      corridorRelaxed: false,
+      exitPocketDone: false,
+      exitPocketTicks: 0,
+      abortReason: null,
+      baseRingBreach: 0,
+      centralBreachCells: 0,
+      hardConstraintOk: true,
+    }
+  }
+
   // 录制（可选）：采样点契约与 simulation-runner 一致——loadStageData → reset →
   // startNew（克隆初始快照），循环内 sim.tick() → recordFrame → endFrame。
   const recorder = replayDir ? new InputRecorder() : null
@@ -1412,6 +1510,48 @@ export function runEvalOne(
     const pxBefore = world.player?.x ?? -1
     const pyBefore = world.player?.y ?? -1
     const freezeBefore = world.freezeTimer
+
+    // Hybrid opening：controller 每拍给动作，直接覆盖 scripted 的输出（NN 仍照常
+    // 决策/编码/计数，只是这一拍的动作不算它的）。done 之后本局不再触发。
+    if (openingCtrl && !openingDone && openingReport) {
+      const os = openingCtrl.step(world)
+      const act = os.action
+      const mvIdx = act.move === null ? 0 : v6 ? encodeMove4(act.move) : encodeMove(act.move)
+      const holdIdx = v6 && act.move === null ? 1 : 0
+      const fireIdx = act.fire ? (v6 ? 2 : 1) : 0
+      scripted.setAction(mvIdx, fireIdx, holdIdx)
+      openingReport.activeTicks++
+      if (os.done) {
+        openingDone = true
+        const snap = openingCtrl.snapshot()
+        openingReport.abortReason = os.abortReason
+        openingReport.p1p2Connected = snap.p1p2Connected
+        openingReport.enemyConnected = snap.enemyConnected
+        openingReport.corridorBand = snap.corridorBand
+        openingReport.corridorLength = snap.corridorLength
+        openingReport.corridorRelaxed = snap.corridorRelaxed
+        openingReport.exitPocketDone = snap.exitPocketDone
+        openingReport.exitPocketTicks = snap.exitPocketTicks
+        // 相对 stage start 的 delta，只在 openingActive 期间归因。
+        openingReport.bricksBroken = Math.max(0, openingBricks0 - countBrickTiles(world))
+        openingReport.baseRingBreach = RING_CELLS.reduce((n, c, i) => {
+          if (!openingRingSolid0[i]) return n
+          return n + (world.tileMap.get(c.col, c.row) === 'empty' ? 1 : 0)
+        }, 0)
+        openingReport.centralBreachCells = [...openingCentralKeys0].reduce((n, k) => {
+          const [c, r] = k.split(',').map(Number)
+          return n + (world.tileMap.get(c, r) === 'brick' ? 0 : 1)
+        }, 0)
+        openingReport.hardConstraintOk =
+          openingReport.baseRingBreach === 0 && openingReport.centralBreachCells <= 4
+        if (!openingReport.hardConstraintOk) {
+          console.error(
+            `[export-eval-game] OPENING HARD CONSTRAINT FAIL: ring=${openingReport.baseRingBreach} central=${openingReport.centralBreachCells}`,
+          )
+        }
+      }
+    }
+
     sim.tick()
     if (world.player?.alive && !world.player.moving) idleTicks++
     if (probeOn) {
@@ -2055,6 +2195,9 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
     else if (argv[i] === '--probe') probeFlag = true
     else if (argv[i] === '--hold-fallback') holdFallback = true
+    else if (argv[i] === '--opening-connect') openingConnect = true
+    else if (argv[i] === '--opening-all') openingAll = true
+    else if (argv[i] === '--opening-no-exit') openingNoExit = true
     else if (argv[i] === '--skip-steel-only-shots') skipSteelOnlyShots = true
     else if (argv[i] === '--break-bricks-on-path') breakBricksOnPath = true
     else if (argv[i] === '--suppress-useless-fire') suppressUselessFire = true
@@ -2273,6 +2416,8 @@ export function main(argv: string[]): void {
       : {}),
     feat: featuresEngine(),
     ...(wver ? { wver, node: nodeLabel } : {}),
+    // Hybrid opening 归因（默认关 ⇒ 不写键，bare 报告逐字节不变）。
+    ...(openingConnect && openingReport ? { opening: openingReport } : {}),
   }
   writeFileSync(`${outDir}/_eval_report.json`, JSON.stringify(report, null, 2))
   if (packPath) {

@@ -77,6 +77,9 @@ import { buildModelFromText } from '../../src/nn/infer'
 import { MOVE_DIM, decodeMove, encodeMove } from '../../src/nn/action-space'
 import { MASK_V6_DIM, decodeMove4, encodeMove4 } from '../../src/nn/action-space-v6'
 import { featuresEngine } from '../../src/nn/conv/conv'
+import { OpeningController } from '../../src/nn/opening-controller'
+import { evaluateCorridor } from '../../src/nn/opening-corridor'
+import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import {
   DANGER_HP_THRESHOLD,
@@ -199,6 +202,19 @@ export const RL_SHARD_FILES = [
  * 应该以事实为准（并且加载端会发现 mask 宽度对不上而响亮报错）。
  */
 export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'] as const
+
+/**
+ * Hybrid opening 的**可选**追加文件：仅 `--opening-connect` 时落盘。
+ * 1 = NN 控制，0 = 开场 controller 控制（PPO 在这些样本上不算 policy/entropy loss）。
+ * 缺席 = 老行为逐字节不变；加载端按文件存在性判据，缺失时补全 1。
+ */
+export const RL_SHARD_FILES_OPENING = [...RL_SHARD_FILES, 'policy_mask.npy'] as const
+
+/** 模块级 CLI 开关（runOne / packOneShard / main 共用；默认关 = 老行为逐字节不变）。 */
+let openingConnect = false
+/** --opening-all：A/B 的全局臂；默认 false = 条件接管（只 strict 不连通的关）。 */
+let openingAll = process.env.OPENING_ALL === '1'
+export const RL_SHARD_FILES_V6_OPENING = [...RL_SHARD_FILES_V6, 'policy_mask.npy'] as const
 
 // ---- 41 维指标列序（MUST mirror `nn-training/biz/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
@@ -995,6 +1011,8 @@ export interface ShardData {
   metrics: number[][]
   done: number[]
   mask: number[]
+  /** Hybrid opening：每决策步 1=NN / 0=controller（可选，缺省视为全 1）。 */
+  policyMask?: number[]
   n: number
 }
 
@@ -1014,6 +1032,7 @@ function newShard(v6 = false): ShardData {
     metrics: [],
     done: [],
     mask: [],
+    policyMask: [],
     n: 0,
   }
 }
@@ -1313,6 +1332,19 @@ function runOne(
     }
   }
   scripted.reset()
+  // Hybrid opening（--opening-connect）：与评估链同一个 controller；部署口径 = 全局出袋。
+  // 只在开局接管，done 之后本局不再触发；NN 仍照常编码/采样/记 logprob（mask=0 不算 loss）。
+  // 默认条件接管（用户 2026-11-15 拍板）：strict 已连通的关不抢方向盘，让 NN 自己学。
+  // --opening-all / OPENING_ALL=1 只作 A/B 的全局臂。
+  let openingWanted = openingConnect
+  if (openingWanted && !openingAll) {
+    const sp = world.playerSpawnPoint
+    const p1 = { col: sp.col, row: sp.row }
+    const p2 = { col: computePlayer2SpawnCol(sp.col), row: sp.row }
+    openingWanted = !evaluateCorridor(world.tileMap, p1, p2).connected
+  }
+  const openingCtrl = openingWanted ? new OpeningController({ exitPocket: true }) : null
+  let openingDone = false
   // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
   const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
@@ -1498,6 +1530,8 @@ function runOne(
     lpHold?: number
     value: number
     mask: number[]
+    /** per-decision：1 = NN 控制，0 = 开场 controller 控制。 */
+    policyMask: number
   } | null = null
   let t = initTick // 游戏时钟继续走：cut 吃掉 T（max_ticks 仍对游戏时钟算）
   let outcome = 'timeout'
@@ -1523,6 +1557,8 @@ function runOne(
       shard.lpHold.push(pending.lpHold ?? 0)
     }
     shard.value.push(pending.value)
+    // 只有真接管本局时才落 policy_mask（条件接管的未接管关保持老 shard 格式）。
+    if (openingCtrl) shard.policyMask!.push(pending.policyMask)
     shard.done.push(term ? 1 : 0)
     const mDim = maskDimFor(shard.v6)
     for (let j = 0; j < mDim; j++) shard.mask.push(pending.mask[j])
@@ -1595,6 +1631,8 @@ function runOne(
         value,
         // v6：掩码 = move4 + fire3 + hold2（9 位）；legacy = move5 + fire2（7 位）。
         mask: v6 ? [...masks.move, ...masks.fire, ...masks.hold] : [...masks.move, ...masks.fire],
+        // per-decision：controller 接管的样本不算 policy/entropy loss。
+        policyMask: openingCtrl && !openingDone ? 0 : 1,
         ...(hd !== null ? { aHold: hd.idx, lpHold: hd.logp } : {}),
       }
       scripted.setAction(aMove, fr.idx, hd ? hd.idx : 0)
@@ -1616,6 +1654,16 @@ function runOne(
     // metrics v13：本 tick 前的玩家位置 —— `wallPressTicks` 唯一判据（px，不是格）。
     const pxBefore = world.player?.x ?? -1
     const pyBefore = world.player?.y ?? -1
+    // controller 每 tick 给动作（NN 的决策仍每 K 拍跑一次并被 held 覆盖）。
+    if (openingCtrl && !openingDone) {
+      const os = openingCtrl.step(world)
+      const act = os.action
+      const mvIdx = act.move === null ? 0 : v6 ? encodeMove4(act.move) : encodeMove(act.move)
+      const holdIdx = v6 && act.move === null ? 1 : 0
+      const fireIdx = act.fire ? (v6 ? 2 : 1) : 0
+      scripted.setAction(mvIdx, fireIdx, holdIdx)
+      if (os.done) openingDone = true
+    }
     sim.tick()
     scripted.endFrame()
     t++
@@ -2105,6 +2153,15 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4') },
     { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
     { name: 'mask.npy', data: npyBytes(mask, [N, maskDim], 'u1') },
+    // Hybrid opening：仅开关开启时落盘，缺席 = 老 payload 逐字节不变。
+    ...(d.policyMask && d.policyMask.length > 0
+      ? [
+          {
+            name: 'policy_mask.npy',
+            data: npyBytes(new Uint8Array(d.policyMask ?? []), [N], 'u1'),
+          },
+        ]
+      : []),
   ]
   if (aHold && lpHold) {
     // 顺序 = `RL_SHARD_FILES_V6` 的尾部（pack 与校验按名取，不按位置）。
@@ -2236,6 +2293,8 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     // greedy 采集开关：BC 语料与 greedy 分层配额共用（plan/greedy-outcome-quota rev4）；
     // 动作取 argmax 而非采样。普通采样 rollout 不传 ⇒ 旧 manifest 逐字节不变。
     else if (args[i] === '--teacher-argmax') teacherArgmax = true
+    else if (args[i] === '--opening-connect') openingConnect = true
+    else if (args[i] === '--opening-all') openingAll = true
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
@@ -2532,7 +2591,15 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       // v6 shard 多 a_hold/lp_hold 两个文件；判据 = 盘上**实际**存在的那个（事实优先），
       // 不用 manifest 标志（标志与文件不一致时，以文件为准——加载端会因宽度对不上报错）。
       const hasHoldFiles = existsSync(`${shardDir}/a_hold.npy`)
-      entries = (hasHoldFiles ? RL_SHARD_FILES_V6 : RL_SHARD_FILES).map((name) => ({
+      const hasPolicyMask = existsSync(`${shardDir}/policy_mask.npy`)
+      const names = hasHoldFiles
+        ? hasPolicyMask
+          ? RL_SHARD_FILES_V6_OPENING
+          : RL_SHARD_FILES_V6
+        : hasPolicyMask
+          ? RL_SHARD_FILES_OPENING
+          : RL_SHARD_FILES
+      entries = names.map((name) => ({
         name,
         data: readFileSync(`${shardDir}/${name}`),
       }))

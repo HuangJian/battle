@@ -766,10 +766,10 @@ class RolloutDispatcher:
                             timeout=task_timeout,
                             kind=wkind,
                             replan=getattr(args, "replan", 0),
-                            reward=getattr(args, "reward", ""),
-                            dodge=getattr(args, "dodge", ""),
+                            reward=getattr(args, "reward", ""), dodge=getattr(args, "dodge", ""),
                             # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
+                            opening_connect=bool(getattr(args, "opening_connect", False)),
                             # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
                             decision_k=int(getattr(args, "decision_k", 10)),
                             on_key=lambda key: remember_task_key(cancel_target, key),

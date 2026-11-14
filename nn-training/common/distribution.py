@@ -1401,6 +1401,10 @@ def fetch_task(
     # B10 预测门（课程 `inference_rules.suppress_lead_miss_fire`）：True ⇒ agent 拼
     # `--suppress-lead-miss-fire`。仅激活时透传；taskKey 含 `:suppressLeadMissFire`。
     suppress_lead_miss_fire: bool = False,
+    # Hybrid opening（一次性课程评估 `--opening-connect`）：True ⇒ agent 给
+    # export-eval-game 拼 `--opening-connect`。仅激活时透传；taskKey 含
+    # `:hybridOpen` 后缀（bare/hybrid 缓存隔离）。缺省 False = 老行为逐字节不变。
+    opening_connect: bool = False,
     # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
     # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
     on_key: Callable[[str], None] | None = None,
@@ -1476,6 +1480,9 @@ def fetch_task(
         params["suppressUselessFire"] = "1"
     if suppress_lead_miss_fire:
         params["suppressLeadMissFire"] = "1"
+    # Hybrid opening：仅激活时透传（缺席 = 老 agent 照旧）。
+    if opening_connect:
+        params["openingConnect"] = "1"
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
@@ -1505,6 +1512,7 @@ def fetch_task(
                 str(params.get("breakBricksOnPath", "")),
                 str(params.get("suppressUselessFire", "")),
                 str(params.get("suppressLeadMissFire", "")),
+                str(params.get("openingConnect", "")),
             )
         )
     qs = urllib.parse.urlencode(params)

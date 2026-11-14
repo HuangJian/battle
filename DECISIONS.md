@@ -5852,6 +5852,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **验收**：`tests/common/test_http_pool.py` 8 条 + `tests/trainer/test_node_speed.py` 6 条 + `test_node_probe_budgets.py` 7 条 + `tests/remote/test_rollout_node.py` + `tests/agent/disk-level.test.ts` 17 条；`bun run check` 2780 passed、`bun run build` 过、`tests/{common,trainer,remote}` 全绿、`nn-python-gate` 绿。
 
 —— 全文（现场读数 / DoD / 风险 / 上线顺序）→ `plan/node-throughput-and-keepalive.plan.md`；链路细节 → `docs/nn/remote-transport.md` §152
+
+## §2026-11-14-goalnn-g4-special-course（g4-special：替换 g4-precision 的生存/特殊兵种臂）
+
+- **背景**：g4-precision 100 轮中期判负（胜率 −3.1pp vs it290；空射税只买到“少开枪”，远距/背击 gate fail）；g4-mobility 的胜率增益全部来自命耗尽 −1.59pp，机动机制（stuck/wall/freeze/brick）没动。用户裁定：每个关卡敌人种类/数量固定 ⇒ **不做 wKillPower/wKillArmor**；课程名 **g4-special**，不升序号；bc = `g4-mobility.it125`。
+- **决定**：新建 `nn-training/curricula/g4-special.jsonc`（500 it / 24h）。奖励 = g3 收入骨架 + mobility 生存四件套（threat/hurt/postHit/encl），**不新增任何价格项**；删除 precision 的 miss/back/side/far 与 mobility 的 stuck/wall/freeze/brick；低血/爆发税不重蹈（y21-chain2 判低血税“空气”，x24-stack5/x26-obs 判 wBurst 稀疏税判阴，damageWhileLow/damageBursts 只作读数）。训练侧 `rotation_mode: pinned` 钉 13 个失败贡献最高的关（2006/2007/2008/2010/2011/2013/2018/2019/2020/2024/2026/2030/2034），每轮 2 关余额；eval 仍全 35 关 ×20 seed。主判：it400–500 胜率 ≥83.5%，lives_ex ≤10.5%，hard13 ≥72.0%；守卫 stop ≤5% / cells ≥140 / max_ticks ≤6% / shots ≥70。
+- **被否决**：① 按兵种击杀定价（固定关集下等于给必经事件加价）；② 继续给 g4-precision 加价或续跑（§15.5）；③ 加大 stuck/wall 税修超时尾（g4-mobility 已证机制不动，瓶颈是能力不是价格）；④ 用 it125 单点 11.0% 当基线（同 arm it120 是 14.57%；用 110–130 五点窗口 12.26%）。
+- **后果**：g4-precision 由人在控制台停，本改动不操作训练开关；g4-special 新 out/traj/backup，禁与 g4-mobility/precision 续跑；bc 已在 `nn-training/weights/in-use/` 留备份（§379）。课程加载 + `test_jsonc_courses_load` 已过；开课仍由人在控制台点。
+
+—— 全文（价目校准 / 判据 / 风险）→ `nn-training/curricula/g4-special.jsonc`
+
 ## §2026-11-14-goalnn-node-transport-attribution（节点池计数按课程/用途分桶 + drop 原因 + `NO_PROXY` 让 LAN 直连）
 
 - **现场（2026-11-14 评审，实测而非推断）**：① 原 plan 的根因「同步 `/v1/task` 是 close-delimited」**不成立**——Bun 1.4.4 对流式 `Response` 自己就发 `Transfer-Encoding: chunked`（`curl -D -` + `resp.chunked=True/will_close=False`），显式加该头输出逐字节无差别；拿真 `common.http_pool.request` 打**逐字节复刻**的 sync task 形状三连发 = `reuse=2 connect=1 drop=0`。② 真正每请求重连的是 **LAN 三台**：`NO_PROXY` 里写着 `192.168.0.0/16`，但 `proxy_bypass()` 在 Windows 读注册表、不读 env ⇒ a96/a97/a98 全走 `127.0.0.1:7890`，代理对每条响应回 `Connection: close`（同一 `/v1/status`：经代理 3 发 0.282s / 直连 0.109s）。③ `[dist] round done` 的池计数是**进程级 + 读后清零**，而一个 serve 进程并发跑 10+ 课程（`y26-clear`/`g4-special`/`o2-gq`/`z2-*` …）⇒ 原 plan 的「connect=79 ≈ 65 局」是错误归因。④ kaggle/dsw 隧道本身 keep-alive 正常（`Connection: keep-alive`，`num_connects=0`）。
@@ -5861,3 +5871,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **验收**：`tests/common/test_http_pool.py` 13 条 + `tests/common/test_net_http_env_no_proxy.py` 8 条；`nn-python-gate` 6054 passed；现场读数：a96/a97/a98 三连发 = `connect=1 reuse=2 drop=0`。
 
 —— 全文（现场读数 / DoD / 分步）→ `plan/task-stream-chunked-keepalive.plan.md`；链路细节 → `docs/nn/remote-transport.md` §153
+
+## §2026-11-14-goalnn-safe-base-single-layer（classic35-safe-base 基地环单层化：只改环 8 格，环外恢复 classic35）
+
+- **背景/决定**：整格钢把 5 个 13×13 源格连带环外 12 格变成钢，S9 Twin Towers 等原本没有口袋的关被挤成出生点口袋（用户 2026-11-14 指出）。改为半格钢码 `(5,11)=20 BR / (6,11)=9 BOTTOM / (7,11)=19 BL / (5,12)=8 RIGHT / (7,12)=10 LEFT`；26×26 只差环 8 格（brick→steel），环外与 classic35 逐格一致。
+- **验收**：`bun tmp/verify-safe-base.ts` 35/35（diff=8、环外 0、可达 0.0%）；`test_bc_eval_course_env` 加载通过。滚动的 g4-mobility / g4-special 的 eval/rollout 语料变了，跨单层化前后的点不可横比（§15.5）。
+- **被否决**：整格钢（S9 口袋）；`tiles26`（Python `StageSpec.grid` 必须 13×13，`stage_json` 只下发 grid；半格码已能精确表达）。
+- **后果**：g4-open 以新地形重测的 `it380` 700 局为基线 B；旧地形 it380 的 84.43%/低杀 18 只作规划参照。
+
+—— 全文（地形差异 / 生成器 / 评测影响）→ `plan/g4-opening-hybrid.plan.md` §4.5
+
+## §2026-11-14-goalnn-shared-modules-from-god（`src/nn` 不再直接依赖 `src/ai/god`：公共件下沉）
+
+- **背景/决定**：用户 2026-11-14 要求 `src/nn` 不要从 `src/ai/god` 取公共件。A*（`src/utils/pathfind.ts`）、基地环（`src/utils/base-ring.ts`）、`ThreatBudget`（`src/ai/threat-budget.ts`）、turn gate（`src/utils/turn-gate.ts`）、冰面滑行（`src/utils/ice-glide.ts`）、中央突破判定（`src/utils/central-breach.ts`）下沉；`src/ai/god` 旧路径保留 re-export，现有 God-AI 调用点不改。`GoalExecutor` 的 `shouldFireInDirImpl` 改走 `GodAIInput.shouldFireInDir` 公共方法（同实现，少一层直接 import）。
+- **验收**：`grep "from '../ai/god" src/nn` 无命中；`bun run typecheck` / `bun run check` 绿（2809 pass）。
+- **被否决**：把 `OpeningController` 放进 `src/ai` 绕过边界——问题在公共件没有公共位置，不是 controller 的位置。
+- **后果**：`src/utils/pathfind.ts` 现在是 A* 唯一实现；`src/ai/god/pathfind.ts` 只是壳。新增跨层使用者应 import 共享层，不要再往 `src/ai/god` 加。

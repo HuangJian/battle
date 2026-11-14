@@ -50,7 +50,6 @@ from trainer.batch_plan import (
     is_transient_error,
     kind_for_policy,
     node_gate_reason,
-    node_supports_decision_events,
     node_supports_decision_k,
 )
 from trainer.batch_store import BatchStore, data_root
@@ -695,14 +694,11 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
-        # R2 事件 rung：本批要事件门 ⇒ 无能力位节点拒派（旧 agent 静默跑均匀局混入，
-        # 与 stageJsonSupport 同规；self.args 缺席 = 老行为不查）。
-        if bool(getattr(getattr(self.owner, "args", None), "decision_events", False)) and not node_supports_decision_events(ping):
+        # eval 规则 / 事件门 / hybrid opening：统一能力位门（旧 agent 拒派，不静默降级）。
+        why_rules = eval_rules_reject_reason(getattr(self.owner, "args", None), ping)
+        if why_rules:
             if lane["tries"] == 1 or lane["tries"] % 3 == 0:
-                log(
-                    f'[batcheval] node {nid}: 缺 decisionEventsSupport 能力位（旧 agent）——'
-                    f'事件任务被拒；不降级'
-                )
+                log(f'[batcheval] node {nid}: {why_rules}')
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
         # 决策周期 K（plan/k5-rhythm.plan.md）：本批 K≠10 ⇒ 无能力位节点拒派

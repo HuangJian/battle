@@ -50,7 +50,7 @@ import {
   uselessShot,
   usefulFire,
 } from './inference-rules'
-import { iceGlideAdjust } from '../ai/god/Navigator'
+import { iceGlideAdjust } from '../utils/ice-glide'
 import { resolveLatestWeights } from './weights'
 import { join } from 'path'
 import { readFileSync, existsSync } from 'fs'

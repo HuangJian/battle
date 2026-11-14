@@ -147,6 +147,8 @@ def test_apply_course_sets_eval_flag() -> None:
         "break_bricks_on_path": True,
         "suppress_useless_fire": False,
         "suppress_lead_miss_fire": False,
+        # Hybrid opening：默认关；课程显式开时才进 kwargs。
+        "opening_connect": False,
     }
     args_useless = types.SimpleNamespace(mode="per-tick")
     apply_course(args_useless, _course(inference_rules={"suppress_useless_fire": True}))

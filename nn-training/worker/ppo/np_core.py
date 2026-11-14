@@ -720,10 +720,12 @@ _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     # 填 0 会让 `a_hold` 恒为 0，训练时静默学一个"永不 hold"的策略）。
     "a_hold": ("a_hold.npy", np.int64),
     "lp_hold": ("lp_hold.npy", np.float32),
+    # Hybrid opening（可选）：controller 接管的样本不算 policy loss。
+    "policy_mask": ("policy_mask.npy", np.float32),
 }
 
 #: v6 专有字段（legacy shard 没有这些文件）。见 `load_shard_fields(optional=...)`。
-_RL_SHARD_OPTIONAL: frozenset[str] = frozenset({"a_hold", "lp_hold"})
+_RL_SHARD_OPTIONAL: frozenset[str] = frozenset({"a_hold", "lp_hold", "policy_mask"})
 
 #: 掩码宽度 → 是否为 v6（唯一判据来源；两侧常量在 TS `action-space-v6.ts` 与
 #: `common/schema.py`，这里只做"读到的东西自洽吗"的校验）。
@@ -769,6 +771,10 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     # 判据：`a_hold.npy` 存在 ⇔ 9 宽；不存在 ⇔ 7 宽。两侧不一致 = 导出端/加载端
     # 版本不同源（或有人只改了一半），必须响亮。
     is_v6 = "a_hold" in d
+    # 老 shard 没有 policy_mask ⇒ 全 1（老行为逐字节不变）；
+    # 必须补齐，否则 chunk_episodes 混用键集会 KeyError。
+    if "policy_mask" not in d:
+        d["policy_mask"] = np.ones(n_obs, dtype=np.float32)
     _check_mask_width(d["mask"], is_v6, dirpath)
     if has_metrics:
         metrics = d.pop("metrics")  # [N+1,76]
@@ -939,6 +945,7 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
         "adv",  # 占位：GAE 现算
         "ret",
         "mask",
+        "policy_mask",
     )
     fields = (*base, "a_hold", "lp_hold") if "a_hold" in d else base
     return episode_from_shard(

@@ -997,6 +997,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 进 `corpus_identity_fp`（仅激活时：transition 粒度变了，"一个样本是什么"已变，
     #: 与 seed_rotate/state_init 同类；缺席不进，老课程指纹不动）。
     decision_events: bool = False
+    #: Hybrid opening（plan/g4-opening-hybrid §13）：True ⇒ rollout/eval 都拼
+    #: `--opening-connect`（默认条件接管：只对 strict 不连通的关生效）。
+    #: 缺席/False = 老行为逐字节不变。
+    opening_connect: bool = False
     #: 决策周期 K（均匀决策门 `t % K === 0` 的 K；单一来源 = TS `src/nn/decision-gate.ts`
     #: 的 `DEFAULT_DECISION_K`，本字段是它在课程面的通道）。缺席/10 = 历史默认（全链
     #: 逐字节不变）。**仅 ≠10 激活**：只有非默认值才透传 `--decision-k` / wire `decisionK` /
@@ -1276,6 +1280,8 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 决策事件补充（§6 R2；漏映射 = 静默失效，ent_break/paired_rotate_seed 前科）：
             # 缺席 = args 走 getattr 缺省 False ⇒ 均匀 K 老行为。
             "decision_events": "decision_events",
+            # Hybrid opening（漏映射 = 静默失效）：缺席 = getattr 缺省 False。
+            "opening_connect": "opening_connect",
             # 决策周期 K（plan/k5-rhythm.plan.md；漏映射 = 静默失效，同上）：
             # 缺席 = args 走 getattr 缺省 10 ⇒ 均匀 K=10 老行为。
             "decision_k": "decision_k",

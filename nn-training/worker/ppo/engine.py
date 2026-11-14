@@ -65,6 +65,7 @@ from worker.ppo.common import (
     _ppo_save,
     approx_kl_est,
     cat_entropy,
+    cat_entropy_per,
     cat_logprob,
     chunk_episodes,
     demo_index,
@@ -577,17 +578,34 @@ def ppo_update(
             ratio = torch.exp(lp_new - lp_old)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            value_loss = F.mse_loss(val.squeeze(-1), ret)
-            entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
-            if hold_logp is not None:
-                entropy = entropy + cat_entropy(hold_logp)
-
-            loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
-            if kl_coef > 0.0:
-                # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
-                loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+            # Hybrid opening：policy_mask=0（controller 接管）的样本不产生
+            # policy/entropy/KL 梯度；value loss 仍用全 tick（价值目标有效）。
+            # 缺省（老 shard 无该字段）⇒ 走原 mean 分支，数值逐字节不变。
+            pm = e.get("policy_mask")
+            if pm is None:
+                policy_loss = -torch.min(surr1, surr2).mean()
+                value_loss = F.mse_loss(val.squeeze(-1), ret)
+                entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
+                if hold_logp is not None:
+                    entropy = entropy + cat_entropy(hold_logp)
+                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
+                if kl_coef > 0.0:
+                    # 对采样策略的 KL 惩罚（与 approx_kl_est 同估计量，可微项）
+                    loss = loss + kl_coef * ((ratio - 1.0) - (lp_new - lp_old)).mean()
+            else:
+                w = pm.reshape(-1).to(surr1.dtype)
+                denom = w.sum().clamp(min=1.0)
+                surr = -torch.min(surr1, surr2).reshape(-1)
+                policy_loss = (surr * w).sum() / denom
+                ent_per = cat_entropy_per(move_logp) + cat_entropy_per(fire_logp)
+                if hold_logp is not None:
+                    ent_per = ent_per + cat_entropy_per(hold_logp)
+                entropy = (ent_per.reshape(-1) * w).sum() / denom
+                value_loss = F.mse_loss(val.squeeze(-1), ret)
+                loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
+                if kl_coef > 0.0:
+                    kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape(-1)
+                    loss = loss + kl_coef * (kl_per * w).sum() / denom
             kick_mean = torch.zeros((), device=device)
             _ref = ref_cache[int(i)]
             if _ref is not None:

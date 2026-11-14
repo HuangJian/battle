@@ -62,3 +62,11 @@ def cat_entropy(logp: Any) -> Any:
     `worker.ppo.engine_paddle`（Paddle 侧）。数值逐位相同（exp / 乘 / sum / mean 同序）。
     """
     return -(logp.exp() * logp).sum(-1).mean()
+
+
+def cat_entropy_per(logp: Any) -> Any:
+    """逐样本熵（不带 mean）——Hybrid opening 的 masked mean 用。
+
+    `cat_entropy(logp) == cat_entropy_per(logp).mean()`；两个框架通用（位置参数 sum）。
+    """
+    return -(logp.exp() * logp).sum(-1)

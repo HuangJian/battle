@@ -338,6 +338,9 @@ def main() -> int:
     args.break_bricks_on_path = break_bricks_on_path
     args.suppress_useless_fire = suppress_useless_fire
     args.suppress_lead_miss_fire = suppress_lead_miss_fire
+    # Hybrid opening：一次性课程评估 `--opening-connect`（TS 侧 spec）。
+    # 走 eval_rule_kwargs 同时透传到本机 run_local_eval_game 与远端 fetch_task。
+    args.opening_connect = bool(spec.get("openingConnect"))
     bun = shutil.which("bun") or "bun"
     epoch = common.distribution.compute_engine_epoch()
 

@@ -27,6 +27,9 @@ def task_key(
     suppress_useless_fire: str = "",
     # B10 预测门：同一 (stage, seed) 开/关是不同局 ⇒ 仅激活时进 `:suppressLeadMissFire`。
     suppress_lead_miss_fire: str = "",
+    # Hybrid opening：同一 (stage, seed) 的 bare / hybrid 是不同局 ⇒ 仅激活时进
+    # `:hybridOpen`（老键逐字节不变）。
+    opening_connect: str = "",
 ) -> str:
     if stage_json_hash and course_fp:
         base = f"{iter_id}:{mode}:{kind}:{stage}:{seed}:{stage_json_hash}:{course_fp[:16]}"
@@ -45,4 +48,5 @@ def task_key(
         + (":breakBricks" if break_bricks_on_path else "")
         + (":suppressUselessFire" if suppress_useless_fire else "")
         + (":suppressLeadMissFire" if suppress_lead_miss_fire else "")
+        + (":hybridOpen" if opening_connect else "")
     )

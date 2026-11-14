@@ -396,6 +396,15 @@ class EvalDispatcher:
                     continue
                 # R2 事件 rung：事件课程的局只派给能力位节点（旧 agent 静默跑均匀局混入）。
                 # 缺席 = 老课程不查（getattr 缺省 False）。
+                # Hybrid opening：无能力位节点跳过（旧 agent 静默跑 bare 混入）。
+                if bool(getattr(args, "opening_connect", False)) and not ping.get(
+                    "openingConnectSupport"
+                ):
+                    _log(
+                        f"[eval] node {nid}: hybrid opening eval 需 openingConnectSupport"
+                        f"能力位（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
                 if bool(getattr(args, "decision_events", False)) and not ping.get(
                     "decisionEventsSupport"
                 ):

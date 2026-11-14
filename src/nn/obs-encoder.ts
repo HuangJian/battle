@@ -34,13 +34,13 @@ import {
 } from '../constants'
 import type { World } from '../game/World'
 import type { PowerUpType, Tank } from '../types'
+import { RING_CELLS } from '../utils/base-ring'
 import {
-  RING_CELLS,
   ticksUntilFire,
   ticksUntilLegalTurn,
   killAssessment,
   enemyDeadline,
-} from '../ai/god/ThreatBudget'
+} from '../ai/threat-budget'
 import { threatOnsetEdge } from './decision-gate'
 import {
   POLICY_EXTRA_DIM,

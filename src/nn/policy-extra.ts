@@ -39,7 +39,7 @@
 import { BASE_POS, CELL, GRID, type Direction } from '../constants'
 import type { World } from '../game/World'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist } from '../utils/helpers'
-import { RING_CELLS } from '../ai/god/ThreatBudget'
+import { RING_CELLS } from '../utils/base-ring'
 import {
   BASE_CENTER_X,
   BASE_CENTER_Y,
