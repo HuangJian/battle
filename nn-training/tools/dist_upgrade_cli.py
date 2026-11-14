@@ -40,7 +40,7 @@ reason 取值同 `request_upgrade_guarded`：`restart-requested` / `dedup` /
 
 退出码：0 = 已处理（即使全部失败，逐条 reason 说明）；2 = spec 非法（结构性错误）。
 
-注意：本进程是一次性的 ⇒ `common.distribution._RESTART_SEEN` 的跨代去重只在**本次调用内**
+注意：本进程是一次性的 ⇒ `common.distribution._RESTARTS.seen` 的跨代去重只在**本次调用内**
 有效；跨调用去重由调用方持久化 memo，并经 spec 的 `seen` 预置回来（`seed_restart_state`），
 判据本身仍只有 common.distribution 一处实现。`pingHash` 就是给调用方写 memo 用的。
 本文件不做任何删除/清理动作（沙箱安全），但仍按仓库纪律经

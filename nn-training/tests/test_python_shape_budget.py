@@ -159,8 +159,9 @@ WIDE_FUNCS_BASELINE = {
 #: `common/` 里**允许**在运行期被改写的模块级容器（P0-5 的存量，拆完即删）。
 #: 2026-11-13：`log` / `fs` / `weights_ledger` 已改成显式对象（`LogRouter` / `JsonlLedger` /
 #: `WeightsLedger`），名册里对应的三条随之删除。
+#: 2026-11-14：`distribution` 的在飞登记 / 收工标记 / 重启去重 memo 搬进 `RequestRegistry` /
+#: `RestartMemo`（模块只留 `_REQUESTS` / `_RESTARTS` 两个默认实例），三条也删。
 L0_MUTABLE_ALLOWED = {
-    "common/distribution.py": frozenset({"_ACTIVE", "_ABORTED_TAGS", "_RESTART_SEEN"}),
     "common/platform_utils.py": frozenset({"_UNREAPED"}),
 }
 

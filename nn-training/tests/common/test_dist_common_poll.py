@@ -426,8 +426,7 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
 
     common.distribution.set_request_tag("t-abort")
     key = ("t-abort", SlowResp())
-    with common.distribution._ACTIVE_LOCK:
-        common.distribution._ACTIVE.add(key)
+    common.distribution._REQUESTS.track(key)
     try:
         t0 = time.monotonic()
         n = common.distribution.abort_active_requests("t-abort")
@@ -442,8 +441,7 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         # 别的作用域不受影响（rollout 与 eval 同进程并发，绝不能误伤）
         assert common.distribution.abort_scope("rollout") is False
     finally:
-        with common.distribution._ACTIVE_LOCK:
-            common.distribution._ACTIVE.discard(key)
+        common.distribution._REQUESTS.untrack(key)
         common.distribution.clear_abort()
         common.distribution.set_request_tag("")
         assert common.distribution.abort_scope("t-abort") is False  # clear_abort 复位（下一单元可用）

@@ -228,7 +228,7 @@ def test_scan_expected_hash_defaults_to_local(tmp_path: Path, monkeypatch: pytes
 
 
 def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """跨调用 memo（seen）预置回 _RESTART_SEEN ⇒ dedup 分支与常驻循环逐字一致。"""
+    """跨调用 memo（seen）预置回 `_RESTARTS.seen` ⇒ dedup 分支与常驻循环逐字一致。"""
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     common.distribution.reset_restart_state()
     monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
@@ -296,7 +296,7 @@ def test_seed_restart_state_contract() -> None:
     )
     assert n == 1
     # 第三项是「该次下发时刻」（F3 冷却窗靠它）：缺 atSec ⇒ 记作现在（旧语义 = 立即 dedup）
-    got = common.distribution._RESTART_SEEN["mac"]
+    got = common.distribution._RESTARTS.seen["mac"]
     assert got[:2] == ("a" * 64, "b" * 64)
     assert isinstance(got[2], float) and abs(got[2] - time.time()) < 5
 

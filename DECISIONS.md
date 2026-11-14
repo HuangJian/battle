@@ -5966,3 +5966,23 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   再开第二条）；用 `grep "\\._"` 计数（注释/字符串里的 `._` 会假阳性，且无法区分断言与其他语句）。
 - **后果**：新用例不能再靠读私有状态通过；`tests/remote/test_rollout_node.py`（43）与
   `tests/worker/test_rollout_volume.py`（46）这类大户仍是存量，迁移到 `seams` 公开查询时基线随之调小。
+
+## §2026-11-14-nn-python-audit-round4-distribution-state（P0-5：distribution 的进程级状态对象化）
+
+- **决定**：`common/distribution.py` 的三份模块级可变状态搬进两个显式对象 ——
+  `RequestRegistry`（锁 / 在飞响应集合 / 收工标记集合，配 `begin_abort` / `clear_abort` /
+  `is_aborted` / `track` / `untrack`）与 `RestartMemo`（跨代去重 memo，`seen` + `reset`）。
+  方法名刻意避开 `register` / `unregister` / `clear`：`tests/test_reuse_ledger.py` 的「同名 ≥3 模块」
+  账本会把新名字算成欠账（实测 `unregister` / `clear` 各把一格从 2 推到 3 ⇒ 账本 110 → 112）。
+  模块顶层只留 `_REQUESTS` / `_RESTARTS` 两个默认实例；公开函数签名与语义逐字不变。
+  `tests/test_python_shape_budget.py::L0_MUTABLE_ALLOWED` 删除 `common/distribution.py` 条目
+  （名册只剩 `common/platform_utils.py::_UNREAPED`）。新增 `tests/common/test_dist_state.py`
+  证明两个实例互不可见（这才是对象化的收益：测试要隔离就 new 一个，不必清模块私有集合）。
+- **被否决**：给每个公开函数加 `state=` 参数（`abort_active_requests` / `_request` /
+  `request_upgrade_guarded` 等十余个调用点全要穿参，收益是纯测试便利，代价是生产签名变长——
+  与 `LogRouter` / `JsonlLedger` / `WeightsLedger` 的既有先例相反）；把 `UPGRADE_BRANCH` 与
+  `set_upgrade_branch` 的 `global` 一起搬进对象（`UPGRADE_BRANCH` 是**文档点名的进程级锁存**，
+  多处 `docs/` 与 TS 注释按该名叙述，本轮只收容器；`global` 仍在 G2 的 `GLOBAL_BASELINE` 里单项计账）。
+- **后果**：`common/` 的模块级可变容器只剩 `platform_utils._UNREAPED` 一个；测试不再触碰
+  `distribution._ACTIVE` / `_ABORTED_TAGS` / `_RESTART_SEEN`（现为 `_REQUESTS` / `_RESTARTS` 的公开属性）。
+  状态仍是进程级（收工断连与跨代去重本来就是进程级语义），但**所有权**从此写在类上而不是模块词典里。

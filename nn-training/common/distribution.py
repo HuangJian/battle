@@ -390,9 +390,7 @@ def is_task_lost_error(e: BaseException) -> bool:
     3 条就把**刚重启**的节点熔断整轮，还白耗 attempt 配额。
     """
     return (
-        isinstance(e, DistError)
-        and e.status == 404
-        and str(e.reason).startswith(TASK_LOST_MARKER)
+        isinstance(e, DistError) and e.status == 404 and str(e.reason).startswith(TASK_LOST_MARKER)
     )
 
 
@@ -402,10 +400,49 @@ def is_task_lost_error(e: BaseException) -> bool:
 # read 立刻抛（连接重置），而不是等慢节点把那一局算完（最长 taskTimeoutSec=900s）。
 # **作用域 = 线程 tag**：训练主循环里 rollout 与本层同进程并发，全局关连接会把别人的在飞
 # 请求一起打死（rollout 任务被当瞬断重排 = 白烧节点）⇒ 只关自己 tag 的请求。
-_ACTIVE_LOCK = threading.Lock()
-_ACTIVE: set[tuple[str, object]] = set()
-_ABORTED_TAGS: set[str] = set()
 _TAG = threading.local()
+
+
+class RequestRegistry:
+    """在飞 HTTP 响应登记 + 收工断连标记（显式对象；模块只留一个进程级默认实例）。
+
+    P0-5（`common/__init__.py` 契约 #4）：「`common/` 是 L0，模块级可变容器必须清零」
+    ⇒ 三份状态（锁 / 在飞集合 / 收工标记集）搬进本类，模块顶层只剩 `_REQUESTS` 这一个
+    对象。要隔离的测试自己 `RequestRegistry()`，不再去清/读模块私有集合。
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.active: set[tuple[str, object]] = set()
+        self.aborted: set[str] = set()
+
+    def begin_abort(self, scope: str) -> list[object]:
+        """置收工态并摘出该作用域的在飞响应（调用方负责异步 close）。"""
+        with self.lock:
+            self.aborted.add(scope)
+            return [r for t, r in self.active if t == scope]
+
+    def clear_abort(self, tag: str = "") -> None:
+        with self.lock:
+            if tag:
+                self.aborted.discard(tag)
+            else:
+                self.aborted.clear()
+
+    def is_aborted(self, tag: str) -> bool:
+        with self.lock:
+            return tag in self.aborted
+
+    def track(self, key: tuple[str, object]) -> None:
+        with self.lock:
+            self.active.add(key)
+
+    def untrack(self, key: tuple[str, object]) -> None:
+        with self.lock:
+            self.active.discard(key)
+
+
+_REQUESTS = RequestRegistry()
 
 
 def set_request_tag(tag: str) -> None:
@@ -434,9 +471,7 @@ def abort_active_requests(tag: str = "") -> int:
     调用方不再依赖它们的结果。
     """
     scope = tag or request_tag()
-    with _ACTIVE_LOCK:
-        _ABORTED_TAGS.add(scope)
-        targets = [r for t, r in _ACTIVE if t == scope]
+    targets = _REQUESTS.begin_abort(scope)
     if targets:
 
         def _closer() -> None:
@@ -457,17 +492,12 @@ def clear_abort(tag: str = "") -> None:
     全局清空会把兄弟单元刚落下的收工态重新解封（尾巴线程又获准发请求）。
     空 = 全清（旧调用方逐字不变）。
     """
-    with _ACTIVE_LOCK:
-        if tag:
-            _ABORTED_TAGS.discard(tag)
-        else:
-            _ABORTED_TAGS.clear()
+    _REQUESTS.clear_abort(tag)
 
 
 def abort_scope(tag: str = "") -> bool:
     """该作用域是否处于收工态（回包无用 ⇒ 调用方丢弃而不是重排）。"""
-    with _ACTIVE_LOCK:
-        return (tag or request_tag()) in _ABORTED_TAGS
+    return _REQUESTS.is_aborted(tag or request_tag())
 
 
 def _request(
@@ -489,13 +519,11 @@ def _request(
     # 节点通信全走这条出口，所以 ping / 权重探针 / POST / 取任务 / 取结果一并受益。
     with net_http.racing_urlopen(req, timeout=timeout) as resp:
         key = (scope, resp)
-        with _ACTIVE_LOCK:
-            _ACTIVE.add(key)
+        _REQUESTS.track(key)
         try:
             return resp.status, resp.read()
         finally:
-            with _ACTIVE_LOCK:
-                _ACTIVE.discard(key)
+            _REQUESTS.untrack(key)
 
 
 # 探活/槽位预算的门面（2026-11-11 下沉，见 `common/distribution_limits.py`）：上面三行
@@ -643,8 +671,22 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
 #: 跨调用继续压制）。冷却窗既保住「防连环杀」（2026-09-01 重启循环事故），又给不收敛节点
 #: 一条自愈路径。`NN_RESTART_DEDUP_COOLDOWN_S` 可覆盖（0 = 关闭去重，每轮都发）。
 RESTART_DEDUP_COOLDOWN_SEC = 600.0
-#: nid -> (agent_ping_hash, expected_hash, 该次下发时刻)。第三项只为冷却窗存在。
-_RESTART_SEEN: dict[str, tuple[str, str, float]] = {}
+
+
+class RestartMemo:
+    """跨代重启去重 memo（`nid -> (agent_ping_hash, expected_hash, 该次下发时刻)`）。
+
+    P0-5 同款：状态住显式对象，模块只留 `_RESTARTS` 默认实例；第三项（时刻）只为冷却窗存在。
+    """
+
+    def __init__(self) -> None:
+        self.seen: dict[str, tuple[str, str, float]] = {}
+
+    def reset(self) -> None:
+        self.seen.clear()
+
+
+_RESTARTS = RestartMemo()
 
 
 def restart_dedup_cooldown_sec(cooldown_sec: float | None = None) -> float:
@@ -661,12 +703,12 @@ def restart_dedup_cooldown_sec(cooldown_sec: float | None = None) -> float:
 
 
 def reset_restart_state() -> None:
-    """测试专用：清空跨代去重状态（模块级状态，测试间必须隔离）。"""
-    _RESTART_SEEN.clear()
+    """测试专用：清空默认实例里的跨代去重状态（进程级状态，测试间必须隔离）。"""
+    _RESTARTS.reset()
 
 
 def seed_restart_state(entries: list) -> int:
-    """把调用方持久化的跨代去重 memo 灌回 `_RESTART_SEEN`。返回灌入条数。
+    """把调用方持久化的跨代去重 memo 灌回 `_RESTARTS.seen`。返回灌入条数。
 
     一次性进程（CLI）专用：本模块的去重状态只活在进程内，调用方（TS 工具）把上次
     成功下发的 (nid, agent codeHash, 期望 hash) 存盘，下次调用前预置回来 ⇒ 守卫
@@ -687,7 +729,7 @@ def seed_restart_state(entries: list) -> int:
             continue
         at = e.get("atSec")
         ts = float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else now
-        _RESTART_SEEN[nid] = (ping_hash, exp_hash, ts)
+        _RESTARTS.seen[nid] = (ping_hash, exp_hash, ts)
         n += 1
     return n
 
@@ -819,7 +861,7 @@ def request_upgrade_guarded(
     if not is_self_node(url, nid) and dirty:
         return False, f"dirty-tree:{len(dirty)}"
     key = (ping_hash, expected_hash)
-    prev = _RESTART_SEEN.get(nid)
+    prev = _RESTARTS.seen.get(nid)
     # 冷却窗内 ⇒ dedup（防连环杀）；窗**已过**而节点仍 stale（pull 失败 / 环境不支持远端
     # 升级）⇒ 允许再发一次，并把时钟重置（下一窗内继续 dedup）。F3：旧行为是永久 dedup，
     # 这类节点会静默卡死到训练机出新提交为止（TS 工具的落盘 memo 还会跨调用压制）。
@@ -832,7 +874,7 @@ def request_upgrade_guarded(
     actual_branch = "" if is_self_node(url, nid) else branch
     ok = request_upgrade(url, auth_key, actual_branch, timeout=timeout)
     if ok:
-        _RESTART_SEEN[nid] = (ping_hash, expected_hash, time.time())
+        _RESTARTS.seen[nid] = (ping_hash, expected_hash, time.time())
     return ok, ("restart-requested" if ok else "restart-failed")
 
 
@@ -877,7 +919,7 @@ def upgrade_stale_nodes(
             cooldown_sec=cooldown_sec,
         )
         # pingHash 回传给调用方：一次性 CLI 要靠它把本次下发写进跨调用 memo
-        #（键 = (nid, agent ping hash, 期望 hash)，与 _RESTART_SEEN 同构）。
+        # （键 = (nid, agent ping hash, 期望 hash)，与 `_RESTARTS.seen` 同构）。
         out.append(
             {
                 "id": nid,
@@ -1229,9 +1271,7 @@ def check_node_capabilities(
             f"node {node_id} 缺 stageJsonSupport 能力位（旧 agent）——"
             "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
         )
-    if bool(getattr(args, "decision_events", False)) and not ping.get(
-        "decisionEventsSupport"
-    ):
+    if bool(getattr(args, "decision_events", False)) and not ping.get("decisionEventsSupport"):
         raise DistError(
             0,
             f"node {node_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
@@ -1244,9 +1284,7 @@ def check_node_capabilities(
             f"node {node_id} 缺 decisionKSupport 能力位（旧 agent）——"
             f"K={dk} 任务被拒；不降级（升级 agent 后自动加入）",
         )
-    if bool(getattr(args, "rollout_argmax", False)) and not ping.get(
-        "greedyRolloutSupport"
-    ):
+    if bool(getattr(args, "rollout_argmax", False)) and not ping.get("greedyRolloutSupport"):
         raise DistError(
             0,
             f"node {node_id} 缺 greedyRolloutSupport 能力位（旧 agent）——"
@@ -1390,7 +1428,7 @@ def fetch_task(
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
-    #（旧训练侧不传 → 空串桶，行为与改造前一致）。
+    # （旧训练侧不传 → 空串桶，行为与改造前一致）。
     if course is None:
         course = course_name_of()
     if course:

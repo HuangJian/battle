@@ -745,7 +745,7 @@ def test_local_slots_zero_falls_back_when_remote_dead(tmp_path, monkeypatch) -> 
 
 
 def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypatch) -> None:
-    """成功结算的 attempt tag 不许留在 `_ABORTED_TAGS`。
+    """成功结算的 attempt tag 不许留在登记表的收工标记里。
 
     旧实现先 `clear_abort(task_tag)`、再在结算分支把**本任务的所有** tag（含刚成功
     这一份）标成 aborted ⇒ 下一波 dispatcher 的 `_tag_seq` 从 1 重来，同名 tag 一取活
@@ -759,4 +759,4 @@ def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypa
 
     report = h.run(fetch)
     assert report["missing"] == [], report.get("missing")
-    assert not common.distribution._ABORTED_TAGS, common.distribution._ABORTED_TAGS
+    assert not common.distribution._REQUESTS.aborted, common.distribution._REQUESTS.aborted
