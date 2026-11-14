@@ -41,6 +41,7 @@ if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 im
 from common.code_sentinel import CODE_META_NAME, code_tree_provenance
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
+from common.logutil import tag_logger
 from common.platform_utils import rmtree_best_effort
 from common.proc import run_capture
 from common.protocol import (
@@ -146,6 +147,9 @@ from remote.hub_http import (
 from remote.hub_http import (
     wait_job as wait_job,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub", lambda: time)
 
 
 def git_head(repo_root: Path = REPO_ROOT) -> str:
@@ -683,7 +687,7 @@ def pack_ts_code_zip(
 def publish_job(
     spec: PublishSpec,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
 
@@ -1178,7 +1182,7 @@ def reap_job_dir(
     *,
     run_id: str = "",
     it: int | None = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """**带护栏**删除一个 job 目录（M1/M2/M3 共用；防误删本身就是新的事故源）。
 
@@ -1229,7 +1233,7 @@ def cancel_jobs_of_previous_runs(
     *,
     hub_url: str = "",
     hub_token: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> list[str]:
     """M2：把**上一个 runId** 留在本课账本里的 pending job 整体作废，并兑现到磁盘。
 
@@ -1325,7 +1329,7 @@ def verify_and_land(
     out_weights: str,
     state_init: bool = False,
     mem: Mapping[str, dict] | None = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> str:
     """三重校验（D12）+ 落盘（weights_json → args.out；opt tar → ppo_ckpt_remote）。
 
@@ -1454,7 +1458,7 @@ def verify_and_land_bc(
     round_name: str = "",
     data_root: str | Path | None = None,
     fixed_source: bool = False,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> str:
     """BC 结果校验 + 落盘（plan/bc-cloud-integration.plan.md §4；verify_and_land 的 BC 版）。
 

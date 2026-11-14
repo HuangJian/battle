@@ -46,7 +46,7 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
-from common.logutil import secs
+from common.logutil import log_line, secs, tag_logger
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
@@ -62,9 +62,7 @@ from common.protocol import (
 # `RetryableError` 是**显式转发**（`as` 自别名）：`tests/remote/test_soft_hold_prefetch.py` 从本模块
 # 命名空间取它（`W.RetryableError`）来构造瞬时失败。本模块自己已不用它（payload/code 的
 # sha 对账随物料落地搬到 `remote/download.py`）——但名字是契约：它曾是 worker 的公共面。
-from common.protocol import (
-    RetryableError as RetryableError,
-)
+from common.protocol import RetryableError as RetryableError
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
@@ -451,6 +449,8 @@ from remote.worker_proc import (
 from worker.iter_rollout import RoundContext, resolve_bun
 from worker.stream_collect import StreamCollector
 
+_log = tag_logger("worker", lambda: time)  # 日志格式/时间戳的唯一实现；监督器单点用 log_line
+
 # ------------------------------------------------------------------ PPO 执行
 
 
@@ -514,7 +514,7 @@ def run_job(
     # 的**唯一**时基；下载/解包/权重装载都已完成的那个瞬间）。
     should_cancel: Any = None,
     on_ppo_start: Any = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> dict:
     """执行单个 job：下载 → 校验 → PPO → 产出 weights_json + opt tar → POST。
 
@@ -995,7 +995,7 @@ def worker_loop(
     # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：None = 旧行为（缓存住 work_dir）。
     # 给了就只把**内容寻址缓存**挪过去（code/ts_code/blob），job 目录不动。
     cache_dir: Path | None = None,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
 
@@ -1400,10 +1400,10 @@ def main() -> None:
         try:
             token = Path(args.token_file).read_text(encoding="utf-8").strip()
         except OSError as e:
-            print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 读 --token-file 失败: {e}", flush=True)
+            _log(f"ERROR: 读 --token-file 失败: {e}")
             sys.exit(1)
     if not token:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: 需要 --token 或 --token-file", flush=True)
+        _log("ERROR: 需要 --token 或 --token-file")
         sys.exit(1)
     # 2026-09-08 双 tmp 统一：相对 work 路径锚定仓库根（remote/ 上溯 3 层），
     # 不再落到 nn-training/tmp（此前 spawn cwd=nn-training 时相对路径走偏）。
@@ -1415,10 +1415,10 @@ def main() -> None:
     raw_polls = args.poll if isinstance(args.poll, list) else [args.poll]
     hub_urls = [u.strip().rstrip("/") for p in raw_polls for u in str(p).split(",") if u.strip()]
     if not hub_urls:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] ERROR: --poll 为空", flush=True)
+        _log("ERROR: --poll 为空")
         sys.exit(1)
     if len(hub_urls) > 1:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] 多 hub 轮询（round-robin）：{hub_urls}", flush=True)
+        _log(f"多 hub 轮询（round-robin）：{hub_urls}")
     if os.environ.get("REMOTE_WORKER_CHILD") == "1":
         # ── 子进程模式（由监督器 supervise_worker / 新版 main() 拉起）──
         # 热替换必须退 HOT_RELOAD_EXIT(86) 让监督器重拉：worker_loop 以
@@ -1446,7 +1446,7 @@ def main() -> None:
             result_upload=args.result_upload,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         )
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
+        _log(f"done: {n} job(s) processed")
         # H8：--once 失败（返回 -1）→ 非零退出码
         sys.exit(0 if n >= 0 else 1)
     # ── 监督器模式（默认入口）──
@@ -1456,7 +1456,7 @@ def main() -> None:
     # sys.argv[1:] 就是可重放的热替换参数（argv[0] 可能是 -m 或脚本路径，统一由
     # supervise_worker 用 `-m remote.worker` 重建，故这里只取参数部分）。
     rc = supervise_worker(sys.argv[1:])
-    print(f"[{time.strftime('%H:%M:%S')}] [worker-supervisor] worker exited: rc={rc}", flush=True)
+    log_line("worker-supervisor", f"worker exited: rc={rc}")
     sys.exit(rc)
 
 

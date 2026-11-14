@@ -56,7 +56,7 @@ from typing import Any, NamedTuple
 
 import remote.course_cache as course_cache
 import remote.weights_standard as weights_standard
-from common.logutil import kb, secs
+from common.logutil import kb, secs, tag_logger
 from common.protocol import (
     BLOB_INIT,
     BLOB_OPT,
@@ -75,6 +75,9 @@ from remote.http import (
 )
 from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
 from remote.wire import _wire_hit
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
 
 __all__ = [
     "CODE_CACHE_MAX_BYTES",
@@ -122,7 +125,7 @@ def download_payload(
     attempts: int = 3,
     bulk_prio: str = BULK_P1_CRITICAL,
     wire_jid: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bytes:
     """取 payload 归档：**分块 + 进度行 + 停滞即断**（2026-09-20 事故的修复面）。
 
@@ -159,7 +162,7 @@ def download_code(
     jid: str,
     *,
     attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bytes:
     # code.zip 同样走隧道（1-3MB）：与 payload 同规的停滞判据与进度行。
     return _get_with_retry(
@@ -184,7 +187,7 @@ def download_ts_code(
     jid: str,
     *,
     attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bytes:
     """M3：取 TS 运行时 zip（kind=iter 的节点要用 bun 跑 rollout）。
 
@@ -213,7 +216,7 @@ def download_blob(
     name: str,
     *,
     attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bytes:
     """M2 B3：取内容寻址 blob（raw opt/ref）。404 = 确定性缺失（响亮失败，非静默降级）。"""
     return _get_with_retry(
@@ -270,7 +273,7 @@ def download_blobs(
     names: list[str],
     *,
     attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> dict[str, bytes]:
     """一次 GET 取多件 blob（plan/aistudio-transfer-hardening §3.4）。
 

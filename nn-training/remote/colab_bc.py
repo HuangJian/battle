@@ -25,10 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.cli import house_parser, run_main
+from common.logutil import log_line
 
 
 def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [bc] {msg}", flush=True)
+    log_line("bc", msg)
 
 
 def sh(args: list[str], **kw) -> subprocess.CompletedProcess:

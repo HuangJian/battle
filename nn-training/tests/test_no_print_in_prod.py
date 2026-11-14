@@ -93,6 +93,8 @@ def test_scan_sees_the_known_production_surface() -> None:
     assert baseline.get("remote/deliver_zip.py", 0) > 0
     assert baseline.get("common/log.py", 0) > 0
     assert actual.get("remote/deliver_zip.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
-    assert len(baseline) >= 50
+    # 文件数下限只是**扫描入口的活性下限**（不是额度）：`remote/` 那批回调在 2026-11-14 迁完后
+    # 从 63 掉到 44，越接近零这条越没有意义——只要还远大于「扫描器坏了」的量级（0）就够了。
+    assert len(baseline) >= 25
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

@@ -46,6 +46,7 @@ from common.instance_lock import (
     default_instance_lock_path,
     release_instance_lock,
 )
+from common.logutil import log_line, tag_logger
 from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
@@ -65,6 +66,9 @@ from remote.worker import _wire_start as worker_wire_start
 #: 命令行校验与 `serve_forever` 用**同一份**判据（别各写一遍）。
 from remote.worker import epoch_mult_of as epoch_mult_of
 from remote.worker import run_job
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker-serve", lambda: time)
 
 AUTH_HEADER = "Authorization"
 
@@ -325,7 +329,7 @@ def _execute_job(
     push_token: str = "",
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     epoch_mult: float = 1.0,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """后台执行：run_job 全套（preloaded push 路径）→ 状态落表。异常进 failed（HUB 可见）。"""
     jid = manifest["job_id"]
@@ -388,7 +392,7 @@ def make_worker_server(
     epoch_mult = epoch_mult_of(epoch_mult)
 
     def log(msg: str) -> None:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker-serve] {msg}", flush=True)
+        log_line("worker-serve", msg)
 
     class Handler(BaseHTTPRequestHandler):
         def _auth_ok(self) -> bool:

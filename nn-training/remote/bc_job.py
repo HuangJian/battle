@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.logutil import tag_logger
 from common.protocol import (
     ProtocolError,
     RetryableError,
@@ -45,6 +46,9 @@ from common.protocol import (
 )
 from remote.http import _request
 from remote.job_fs import _persist_result
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
 
 __all__ = [
     "BC_EPOCH_BACKLOG_MAX",
@@ -69,7 +73,7 @@ def _bc_fetch_resume(
     token: str,
     jid: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> tuple[int, bytes] | None:
     """GET /jobs/{id}/resume → (epoch, weights_bytes) | None（404 = 全新训练）。
 
@@ -132,7 +136,7 @@ def _bc_load_local_resume(work_dir: Path, jid: str) -> tuple[int, bytes] | None:
         d = json.loads(p.read_text(encoding="utf-8"))
         return int(d["epoch"]), decode_weights_json(str(d["weights"]))
     except (OSError, ValueError, KeyError, TypeError) as e:
-        print(f"[{time.strftime('%H:%M:%S')}] [worker] bc local resume 损坏（忽略，全新训练）: {e}", flush=True)
+        _log(f"bc local resume 损坏（忽略，全新训练）: {e}")
         return None
 
 
@@ -149,7 +153,7 @@ def _bc_post_epoch(
     body: dict,
     lease_token: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """POST /jobs/{id}/epoch（每 epoch 权重+指标回传；租约校验在 hub 侧）。
 
@@ -194,7 +198,7 @@ def _bc_backlog_add(
     body: dict,
     *,
     cap: int = BC_EPOCH_BACKLOG_MAX,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """把一次失败的回传 body 记进 backlog（有界：超限丢最老的并留一行日志）。
 
@@ -214,7 +218,7 @@ def _bc_backlog_replay(
     pending: list[dict],
     lease_token: str,
     *,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """按顺序重放 backlog；**遇到仍失败即停**（隧道还断着，接着捶只会拖慢训练）。
 
@@ -369,7 +373,7 @@ def _run_bc_job(
     token: str = "",
     lease_token: str = "",
     backend: str = "torch",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> dict:
     """云端 BC job（plan/bc-cloud-integration.plan.md §3；每 epoch 回传 2026-09-13）：
     D14 语料血缘校验 →（--echo 冒烟回显）→ **resume 接续**（hub bc-resume 优先，

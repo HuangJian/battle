@@ -45,6 +45,7 @@ from collections.abc import Callable
 from typing import Any
 
 import common.env_probe as env_probe
+from common.logutil import tag_logger
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
     CLAIM_MODE_BACKUP,
@@ -75,6 +76,9 @@ from remote.wire import (
     _wire_note_failed,
     _wire_note_wait,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
 
 __all__ = [
     "_failure_detail",
@@ -592,7 +596,7 @@ def post_result(
     attempts: int = 5,
     mode: str = "ok",
     worker_id: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> int:
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
     4xx = 确定性拒绝立即抛 ProtocolError；409 = hub 已有同 job 结果（幂等，按成功）。
@@ -687,7 +691,7 @@ def release_job(
     token: str,
     jid: str,
     lease_token: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> None:
     """瞬时失败后主动还租约（POST /jobs/{id}/release）：job 立即回池可重领，
     不再干等 30min 租约过期。尽力而为：release 本身不可达时由租约过期兜底。"""
@@ -776,7 +780,7 @@ def report_job_failure(
     detail: str = "",
     lease_token: str = "",
     worker_id: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）。
 

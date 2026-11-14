@@ -72,6 +72,8 @@ ALLOWED_IMPORTS = {
     "urllib.error",
     "urllib.parse",
     "urllib.request",
+    # 2026-11-14（python.refactor.md §P0-6）：`log=` 默认回调的时间戳不再手拼。
+    "common.logutil",
     "common.protocol",
     "common.net_http",
 }

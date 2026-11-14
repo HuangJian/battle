@@ -44,6 +44,7 @@ import threading
 from typing import Any
 
 #: 控制行前缀：与父侧**同源**（L0 常量，两个进程互不 import）。
+from common.logutil import log_line
 from remote.prefetch import PREFETCH_LINE_PREFIX, PrefetchStore
 
 #: `stopfill` 等填充线程的自然退出上限（秒）：`_prefetch_fill` 每轮最多一次 payload 下载，
@@ -52,7 +53,7 @@ STOP_JOIN_SEC = 30.0
 
 
 def _log(msg: str) -> None:
-    print(f"[payload] {msg}", flush=True)
+    log_line("payload", msg)
 
 
 def _reply(rid: Any, payload: dict[str, Any]) -> None:

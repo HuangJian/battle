@@ -40,6 +40,7 @@ from contextlib import nullcontext
 from typing import Any
 
 from common import net_http
+from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
     ROLE_HEADER,
@@ -82,6 +83,9 @@ from remote.wire import (
     _wire_note_resend,
     _wire_note_wait,
 )
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("worker", lambda: time)
 
 __all__ = [
     "BODY_CHUNK",
@@ -544,7 +548,7 @@ def _get_with_retry(
     *,
     timeout: float,
     attempts: int = 3,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+    log=_log,
     progress: Any = None,
     idle_timeout: float | None = BODY_IDLE_TIMEOUT_SEC,
     total_timeout: float | None = None,

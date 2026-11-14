@@ -18,6 +18,7 @@ NODE_RESULT_PATH = "/job/{jid}/result"
 
 # `_request` 仍是本模块其它函数（缓存查询、submit）的实现细节；结果探测自身走
 # `probe_job_result`（状态码分类的唯一实现，见 hub_http——**HTTP 面的所有者**）。
+from common.logutil import log_line
 from common.protocol import (
     BLOB_INIT,
     WIRE_JOB_CONTENT_TYPE,
@@ -30,7 +31,7 @@ from remote.hub_http import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_re
 
 
 def _default_log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] [push] {msg}", flush=True)
+    log_line("push", msg)
 
 
 #: (base_url, kind, sha) -> True 的**只记命中**记忆（2026-10-30）：探针失败时沿用它。

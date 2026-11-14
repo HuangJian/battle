@@ -34,7 +34,11 @@ import time
 import urllib.parse
 from typing import NamedTuple
 
+from common.logutil import tag_logger
 from common.protocol import AUTH_HEADER, FAIL_BODY_MAX, JobFailedError
+
+#: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+_log = tag_logger("hub", lambda: time)
 
 
 class HubClientError(RuntimeError):
@@ -103,7 +107,7 @@ def report_job_failure(
     detail: str = "",
     worker: str = "",
     lease_token: str = "",
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）——训练侧随即从
     `wait_job` 拿到 410 + 原因立刻停腿，不再等满超时。
@@ -156,7 +160,7 @@ def set_cloud_halt(
     token: str,
     halt: bool,
     timeout: float = 15.0,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
     course: str = "",
     if_idle: bool = False,
 ) -> bool:
@@ -227,7 +231,7 @@ def hub_halted(base_url: str, token: str, timeout: float = 10.0, course: str = "
 def clear_halt_on_startup(
     base_url: str,
     token: str,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
     course: str = "",
     timeout: float = 10.0,
 ) -> bool:
@@ -444,7 +448,7 @@ def unfreeze_job(
     jid: str,
     *,
     timeout: float = 15.0,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> bool:
     """best-effort 解冻一个被熔断的 job（`POST /admin/unfreeze?job_id=`）。
 
@@ -490,7 +494,7 @@ def admin_cancel_job(
     jid: str,
     *,
     timeout: float = 15.0,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> str:
     """best-effort 人工作废（`POST /admin/cancel-job?job_id=`）——**只对未被认领的 job 生效**。
 
@@ -588,7 +592,7 @@ def wait_job(
     poll_max_sec: float = 60.0,
     report_every_sec: float = WAIT_REPORT_SEC,
     now=time.time,
-    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+    log=_log,
 ) -> dict:
     """阻塞等待 job 完成（worker 已 POST 结果）→ 返回结果 dict。超时抛 HubClientError。
 

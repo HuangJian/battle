@@ -67,6 +67,8 @@ ALLOWED_IMPORTS = {
     # `common.env_probe`（plan/worker-name-readable）：worker_tag 的环境/link 判据——
     # 纯函数（同参同值、零状态），符合本簇「纯函数面」的定位。
     "common.env_probe",
+    # 2026-11-14（python.refactor.md §P0-6）：行日志时间戳改走 `common.logutil`。
+    "common.logutil",
     "common.protocol",
     "common.text",
     "remote.bulk_sched",

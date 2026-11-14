@@ -48,6 +48,9 @@ MOVED_NAMES = {
 }
 #: 允许的向下依赖（L2 内部 + L1 的延迟 import）。
 ALLOWED_IMPORTS = {
+    # 2026-11-14（python.refactor.md §P0-6）：行日志时间戳改走 `common.logutil`
+    # （stdlib-only 的 L0 格式模块 ⇒ 不引入新的向下边）。
+    "common.logutil",
     "common.protocol",
     "remote.http",
     "remote.job_fs",

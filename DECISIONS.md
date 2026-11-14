@@ -6066,3 +6066,28 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `ALLOWED_IMPORTS` 为受影响混入登记 `common.logutil`（stdlib-only 的 L0 ⇒ 层号不变）；
   `hub/tunnel_ab_probe.py` 原有的本地 `_log(msg)` 包装删除（否则与 tag logger 同名，mypy `no-redef`）。
 - **后果**：print 存量 211 → **179** 处、64 → 53 文件；`hub/` 的日志时间戳只剩 `common/logutil` 一处实现。
+
+## §2026-11-14-nn-python-audit-round5-remote-log-defaults（P0-6 / B2：`remote/` 的 `log=` 默认回调单源）
+
+- **决定**：`remote/` 里 13 个文件、43 处「自己拼 `[HH:MM:SS] [tag] msg`」的日志出口全部改走
+  `common/logutil`。两种形态分别处理：
+  * `log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True)` 这种**形参默认值**
+    → 模块级 `_log = tag_logger("<tag>", lambda: time)` + `log=_log`（默认值在 def 时求值，与原先每调用
+    新建 lambda 的时机差异不可观测：`tag_logger` 的 clock 是取值函数，不是绑定时刻）。
+  * `def _log(msg)` / `def _child_log(msg)` 这类包装 → body 换成 `log_line("<tag>", msg)`（不额外立工厂）。
+  tag 按模块语义固定：`worker` / `hub` / `worker-serve` / `push` / `bc` / `payload` / `upload` /
+  `offline-push`；`remote/worker.py` 需要两个（`worker` + `worker-supervisor`）。
+- **行为变更（有意）**：`payload` / `upload` / `offline-push` 三处原本**没有时间戳**，现在带 `[HH:MM:SS]`
+  （读方全是 substring 匹配，`tests/remote` 1881 例全绿）；其余 40 处输出**逐字节不变**（`stamp()` 就是
+  `[HH:MM:SS]`，`tests/remote/test_wire_report.py` 那套正则照常解析）。
+- **刻意不迁（写进基线、不是漏）**：
+  * `remote/worker_proc.py` 两个默认回调 —— 该模块是**纯 stdlib 的 L0**（`remote_dag` 秩 0），import
+    `common.*` 会当场破层号；
+  * `remote/deliver_zip.py` / `run_loop.py` / `offline_deliver.py` 的 `IMPORT_JSON_MARK` / 结果行 ——
+    机器读协议面，前面加时间戳等于改契约；`log=lambda m: print(m)` 这种**纯转发**（不加格式化）也保留，
+    因为那正是「父侧已定格式，子侧不许再包一层」的意思。
+- **连带改动**：三个 split 守卫的 `ALLOWED_IMPORTS`（`test_bc_job_split` / `test_hub_http_split` /
+  `test_job_lifecycle_split`）登记 `common.logutil`；G3 自检的「基线文件数 ≥ 50」活性下限降到 25
+  （那是扫描器坏没坏的判据，不是额度；文件数已从 63 掉到 44）。
+- **后果**：print 存量 179 → **138** 处、53 → 44 文件；`remote/` 88 → 47。手拼日志时间戳的出口
+  只剩 `remote/worker_proc.py`（L0 约束）与 `biz/` / `worker/` 的少量残留。
