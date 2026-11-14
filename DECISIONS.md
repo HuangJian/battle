@@ -5874,3 +5874,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   每个引擎各自维护。legacy/v6 的头数、切片、demo move CE 与 wire 字段逐项未改；新增
   `tests/common/test_action_space_contract.py` 钉住存在性判据、arity 严格性与切片覆盖。
   验证：ruff、mypy 915 文件、PPO/契约相关 50 例。
+
+## §2026-11-14-nn-python-audit-round4-print-gate（G3：生产包 print 只减不增）
+
+- **决定**：新增 `tests/test_no_print_in_prod.py`，用 AST 统计 `common/biz/hub/remote/train/trainer/worker`
+  七个生产包的 `print(...)` 调用，按**文件计数**冻结在 `tests/golden/print_baseline.json`
+  （当前 289 处 / 77 文件）。只拦增长，不要求本轮清零；`tools/` 与 `worker/scripts/`
+  是一次性脚本，按文档豁免；`tests/` 不在扫描面内。
+- **被否决**：用 `grep "print("` 计数（注释/文档串里的 print 会造成假阳性）；一次把 289 处
+  全换掉（会同时改输出格式与测试断言，超出 G3 的“冻结新增”范围）；把 `worker/scripts/`
+  也纳入（它们是手工探针，没有 logger 运行前提）。
+- **后果**：P0-6 的日志迁移可以分批进行，但新代码不能再绕过 `common.log`/logger 增加
+  `print`；删除 print 不需要改基线（只拦增长）。自检用例钉住扫描入口确实命中
+  `hub/boot.py` / `common/log.py`，并确认豁免面没有混进基线。
