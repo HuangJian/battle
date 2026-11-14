@@ -18,9 +18,12 @@ import { readFileSync } from 'node:fs'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import {
+  healthText,
   metStages,
   METRIC_COLS,
+  rotationHealth,
   stageRangeText,
+  stageTitle,
   volumeText,
   volumeTitle,
   windowText,
@@ -44,6 +47,12 @@ const VOLUME: IterVolume = {
     { stage: 2034, collected: 9, quota: 17, games: 1, capGames: 8, estS: 10, shortfall: 8 },
     { stage: 2035, collected: 0, quota: 17, games: 0, capGames: 8, estS: 0, shortfall: 17 },
   ],
+}
+
+/** 同一份逐关账，但每关都到达标线（健康）——面板据此默认收起。 */
+const HEALTHY: IterVolume = {
+  ...VOLUME,
+  stages: VOLUME.stages.map((s) => ({ ...s, collected: s.quota ?? s.collected, shortfall: 0 })),
 }
 
 function row(iter: number, over: Partial<IterRow> = {}): IterRow {
@@ -124,6 +133,41 @@ describe('展示纯函数（view/rotation.ts）', () => {
     expect(t).toContain('2033: 17/17')
     expect(volumeTitle(null)).toContain('没有分关采集账')
   })
+
+  it('健康判据：每关达标且没触顶才 ok；缺读数 / 缺达标线 = unknown（不冒充健康）', () => {
+    expect(rotationHealth({ volume: HEALTHY })).toBe('ok')
+    expect(rotationHealth({ volume: VOLUME })).toBe('gap')
+    expect(rotationHealth({ volume: HEALTHY, capped: true })).toBe('gap')
+    expect(rotationHealth({ volume: null })).toBe('unknown')
+    // 缺达标线 / 缺缺口读数 ⇒ 不可判（有缺口时仍要报 gap——那是真缺口，不是读数不全）。
+    expect(rotationHealth({ volume: { ...VOLUME, quota: null } })).toBe('gap')
+    expect(
+      rotationHealth({
+        volume: { ...HEALTHY, stages: [{ ...HEALTHY.stages[0]!, quota: null, shortfall: null }] },
+      }),
+    ).toBe('unknown')
+    expect(rotationHealth({ volume: { ...HEALTHY, stages: [] } })).toBe('unknown')
+    expect(healthText({ volume: HEALTHY })).toBe('采集健康 达标 3/3')
+    expect(healthText({ volume: VOLUME })).toBe('采集有缺口 达标 1/3')
+    // 触顶时达标数可能很好看，原因要说在正前方。
+    expect(healthText({ volume: VOLUME, capped: true })).toBe('采集有缺口 触硬顶')
+    expect(healthText({ volume: null })).toBe('采集读数不全')
+  })
+
+  it('逐关格 hover：收到 / 达标线 / 缺口 / 局数与硬顶 / est', () => {
+    const t = stageTitle(VOLUME.stages[1] as IterVolume['stages'][number])
+    expect(t).toContain('关 2034')
+    expect(t).toContain('收到 9')
+    expect(t).toContain('达标线 17')
+    expect(t).toContain('缺 8')
+    expect(t).toContain('局 1/8')
+    expect(t).toContain('est 10')
+    // 已达标的一关不写「缺 0」；没有 est / 局数就少说。
+    const ok = stageTitle({ ...VOLUME.stages[0]!, games: null, capGames: null, estS: null })
+    expect(ok).not.toContain('缺')
+    expect(ok).not.toContain('局')
+    expect(ok).not.toContain('est')
+  })
 })
 
 describe('StageRotationPanel 渲染', () => {
@@ -132,7 +176,37 @@ describe('StageRotationPanel 渲染', () => {
     expect(html).toBe('')
   })
 
-  it('有读数 ⇒ 窗口读数 + 逐关表 + 最近轮次一览', () => {
+  it('健康 ⇒ 默认收起：只留 badge，详情等「展开明细」', () => {
+    const html = renderToString(
+      h(StageRotationPanel, {
+        stateView: mkView([
+          row(12, { rotation: ROTATION, volume: HEALTHY }),
+          row(11, { rotation: ROTATION, volume: HEALTHY }),
+        ]),
+      }),
+    )
+    expect(html).toContain('采集健康')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('展开明细')
+    // 明细确实没铺（不是 hidden）：逐关格 / 最近轮次 / 展开键文案都不在。
+    expect(html).not.toContain('逐关采集账')
+    expect(html).not.toContain('最近 2 轮')
+    expect(html).not.toContain('收起明细')
+  })
+
+  it('有缺口 ⇒ 默认展开（问题不藏在一次点击后面）', () => {
+    const html = renderToString(
+      h(StageRotationPanel, {
+        stateView: mkView([row(12, { rotation: ROTATION, volume: VOLUME })]),
+      }),
+    )
+    expect(html).toContain('采集有缺口')
+    expect(html).toContain('aria-expanded="true"')
+    expect(html).toContain('收起明细')
+    expect(html).toContain('逐关采集账')
+  })
+
+  it('有读数 ⇒ 窗口读数 + 逐关明细 + 最近轮次一览', () => {
     const html = slice(
       renderToString(
         h(StageRotationPanel, {

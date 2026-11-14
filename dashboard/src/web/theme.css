@@ -3681,6 +3681,89 @@ a.tc-btn {
   margin: var(--sp-2) 0;
 }
 
+/* ── 「采集窗口」面板（/metrics 顶部，2026-11-14 集约化）───────────────────
+   健康 ⇒ 只有一条（badge + 「展开明细」）；有缺口 / 读数不全 ⇒ 默认展开。
+   明细不再用两张全宽表：逐关一格「关号 · 收到/达标线」（颜色 = 达标 / 缺口），
+   最近轮次一行一轮——同样的读数，高度约为原来的三分之一。 */
+.tc-rot {
+  padding: 6px 12px 8px;
+}
+.tc-rot__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+}
+.tc-rot__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: var(--fs-sm);
+}
+/* 逐关格与轮次格同一形状：胶囊、等宽数字、不换行（关号/读写成一团就连不上了）。 */
+.tc-rot__stages,
+.tc-rot__rounds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tc-rot__st,
+.tc-rot__rd {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--row-hover);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tc-rot__st b,
+.tc-rot__rd b {
+  font-weight: 700;
+}
+.tc-rot__st i {
+  font-style: normal;
+  color: var(--muted);
+}
+.tc-rot__st[data-tone='ok'] {
+  border-color: var(--green);
+  background: var(--green-bg);
+}
+.tc-rot__st[data-tone='gap'] {
+  border-color: var(--yellow);
+  background: var(--yellow-bg);
+}
+.tc-rot__st[data-tone='na'] {
+  color: var(--muted);
+  border-style: dashed;
+}
+.tc-rot__pin {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.tc-rot__gap {
+  color: var(--yellow);
+  font-weight: 700;
+}
+.tc-rot__recent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
 @media (max-width: 1279px) {
   /* 中档：8/4 分栏退为堆叠 */
   .tc-col-8,
