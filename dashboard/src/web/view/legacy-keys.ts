@@ -40,6 +40,8 @@ export const TC_TREND_VISIBILITY = `${TC_KEY_PREFIX}trend.visibility`
 export const TC_TREND_STAT = `${TC_KEY_PREFIX}trend.stat`
 /** hero 三张图的纵坐标档位（JSON `{kills, winHp, pu}`：'abs' 绝对值 / 'pct' 百分比）。 */
 export const TC_TREND_SCALE = `${TC_KEY_PREFIX}trend.scale`
+/** hero 走势图的上屏顺序（JSON 字符串数组 = **全部**走势键，含没勾选的；↑↓ 换位产生）。 */
+export const TC_TREND_ORDER = `${TC_KEY_PREFIX}trend.order`
 // 「比较课程」弹窗的本地偏好（5 键，plan/dashboard-compare-trends.plan.md §3.11）。
 // 恢复纪律与 Hero 的 TC_TREND_RANGE 同款：**首帧不读**（SSR/hydrate 一致），mount 后的
 // effect 里恢复 + 与当前 courses 求交（选过的课可能已封存/删除）。

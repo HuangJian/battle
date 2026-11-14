@@ -1949,6 +1949,90 @@ a.tc-btn {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+/* 「已选走势」（2026-11-14）：弹窗最顶端按上屏顺序列出勾选中的图，↑↓ 换位、✗ 取消（改完
+   点「完成」才生效）。三列排（用户 2026-11-14）：勾十几张时不用把下面的指标分组推出视野。 */
+.tc-trendcfg__picked {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tc-trendcfg__picked-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 5px 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.tc-trendcfg__picked-row:hover {
+  border-color: var(--accent);
+}
+/* × 取消显示后**原地置灰**（行不消失，点 ✓ 在同一位置恢复）；置灰行仍可 hover 看释义。 */
+.tc-trendcfg__picked-row--off {
+  border-style: dashed;
+  background: transparent;
+}
+.tc-trendcfg__picked-row--off .tc-trendcfg__cn,
+.tc-trendcfg__picked-row--off .tc-trendcfg__picked-i {
+  color: var(--muted);
+}
+.tc-trendcfg__picked-row--off .tc-trendcfg__key {
+  opacity: 0.55;
+}
+.tc-trendcfg__picked-row .tc-trendcfg__names {
+  flex: 1;
+}
+.tc-trendcfg__picked-i {
+  flex: 0 0 auto;
+  min-width: 18px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.tc-trendcfg__picked-mv {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+.tc-trendcfg__mv {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+.tc-trendcfg__mv:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tc-trendcfg__mv:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* 取消显示 / 恢复显示（2026-11-14）：与↑↓同一排，但 hover 转红（拿掉）或转绿（恢复）。
+   双类提特异性：上面那条 `:hover:not(:disabled)` 也是 0,3,0，同特异度后出现的赢。 */
+.tc-trendcfg__mv.tc-trendcfg__mv--off:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+.tc-trendcfg__mv.tc-trendcfg__mv--on:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
 .tc-trendcfg__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2041,7 +2125,8 @@ a.tc-btn {
 }
 @media (max-width: 760px) {
   .tc-trendcfg__grid,
-  .tc-trendcfg__grid--base {
+  .tc-trendcfg__grid--base,
+  .tc-trendcfg__picked {
     grid-template-columns: 1fr;
   }
   .tc-modal.tc-trendcfg {

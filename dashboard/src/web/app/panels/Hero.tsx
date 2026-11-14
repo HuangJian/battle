@@ -31,11 +31,13 @@ import {
   parseHiddenCols,
   parseTrendVisibility,
   resolveColOrder,
+  resolveTrendOrder,
   TC_HERO_ITER_VIEW,
   TC_HERO_ITERS_COLLAPSED,
   TC_HERO_ITERS_COLS,
   TC_HERO_ITERS_ORDER,
   TC_HERO_ITERS_STAT,
+  TC_TREND_ORDER,
   TC_TREND_RANGE,
   TC_TREND_SCALE,
   TC_TREND_SOURCE,
@@ -72,7 +74,9 @@ import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { buildMetricCols, type MetricRow } from './metric-table-cols'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
-import { TrendConfigModal } from './TrendConfigModal'
+import { TrendConfigModal, type TrendConfigDraft } from './TrendConfigModal'
+import { Fragment } from 'preact'
+import type { JSX } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { MetricsConfigModal } from './MetricsConfigModal'
 
@@ -770,15 +774,6 @@ export function Hero({
       /* 隐私模式等不可写场景忽略 */
     }
   }, [])
-  const onToggleChart = (k: TrendChartKey, on: boolean): void => {
-    const next = { ...visibility, [k]: on }
-    setVisibility(next)
-    try {
-      localStorage.setItem(TC_TREND_VISIBILITY, JSON.stringify(next))
-    } catch {
-      /* ignore */
-    }
-  }
   const [metricStats, setMetricStats] = useState<BehaviorMetricStatMap>(() => ({
     ...DEFAULT_BEHAVIOR_METRIC_STATS,
   }))
@@ -789,13 +784,30 @@ export function Hero({
       /* 隐私模式等不可写场景忽略 */
     }
   }, [])
-  const onMetricStat = (key: BehaviorMetricKey, s: MetricStatKey): void => {
-    const next = { ...metricStats, [key]: s }
-    setMetricStats(next)
+  // 走势图上屏顺序（用户 2026-11-14）：存的是**全部**走势键（含没勾选的），
+  // 和列顺序同一套路——只存可见键的话，取消勾选再勾回来位置就漂了。
+  // SSR 首帧 = 默认序（基础六图在前），hydrate 后恢复偏好。
+  const [trendOrder, setTrendOrder] = useState<string[] | null>(null)
+  useEffect(() => {
     try {
-      localStorage.setItem(TC_TREND_STAT, JSON.stringify(next))
+      setTrendOrder(parseColOrder(localStorage.getItem(TC_TREND_ORDER)))
     } catch {
-      /* ignore */
+      /* 隐私模式等不可写场景忽略 */
+    }
+  }, [])
+  const orderedCharts = resolveTrendOrder(trendOrder)
+  /** 「走势配置」点「完成」时一次性落三份偏好（草稿制：弹窗里的改动平时不写盘，
+   *  也不会让首页在弹窗底下重排）。「关闭 / Esc」= 不调这里。 */
+  const onApplyTrendConfig = (next: TrendConfigDraft): void => {
+    setVisibility(next.visibility)
+    setMetricStats(next.metricStats)
+    setTrendOrder(next.order)
+    try {
+      localStorage.setItem(TC_TREND_VISIBILITY, JSON.stringify(next.visibility))
+      localStorage.setItem(TC_TREND_STAT, JSON.stringify(next.metricStats))
+      localStorage.setItem(TC_TREND_ORDER, JSON.stringify(next.order))
+    } catch {
+      /* 隐私模式等不可写场景忽略 */
     }
   }
   const [configOpen, setConfigOpen] = useState(false)
@@ -848,6 +860,195 @@ export function Hero({
     )
   }
 
+  // 走势图节点表：键 → 节点。渲染处只按 `orderedCharts`（用户在「走势配置」里排的键序）铺，
+  // 不认模型序；勾选表只决定画不画。
+  const charts: Record<string, JSX.Element> = {
+    winRate: (
+      <TrendCell
+        series={winSeries}
+        seriesEval={evalSeries}
+        source={source}
+        fmt={fmtPct}
+        toneOf={winTone}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0.3}
+        title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: '胜率',
+            series: main,
+            series2: overlay,
+            fmt: fmtPct,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yFloor: 0.3,
+          })
+        }
+      />
+    ),
+    dmgPerKill: (
+      <TrendCell
+        series={dmgPerKillSeries}
+        seriesEval={evalDmgPerKillSeries}
+        source={source}
+        fmt={fmtPct}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0}
+        title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: '承伤/杀',
+            series: main,
+            series2: overlay,
+            fmt: fmtPct,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yFloor: 0,
+          })
+        }
+      />
+    ),
+    winTicks: (
+      <TrendCell
+        series={winTicksSeries}
+        seriesEval={evalWinTicksSeries}
+        source={source}
+        fmt={fmtInt}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
+        title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: '胜局耗时',
+            series: main,
+            series2: overlay,
+            fmt: fmtInt,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yMin: winTicksYMin(winTicksSeries, evalWinTicksSeries),
+          })
+        }
+      />
+    ),
+    // 纵坐标可切绝对值 ↔ 百分比的三张（击杀 / 胜局残血 / 道具）。
+    kills: (
+      <TrendCell
+        series={scales.kills === 'pct' ? killsPctSeries : killsAbsSeries}
+        seriesEval={scales.kills === 'pct' ? evalKillsPctSeries : evalKillsAbsSeries}
+        source={source}
+        fmt={scales.kills === 'pct' ? fmtPct : fmtDec1}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0}
+        scale={scales.kills}
+        onScale={(s) => onScale('kills', s)}
+        title={
+          scales.kills === 'pct'
+            ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
+            : '每局平均击杀（rollout 实线 · eval 橙点）'
+        }
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: scales.kills === 'pct' ? '击杀（歼灭率）' : '击杀（每局平均）',
+            series: main,
+            series2: overlay,
+            fmt: scales.kills === 'pct' ? fmtPct : fmtDec1,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yFloor: 0,
+          })
+        }
+      />
+    ),
+    winHp: (
+      <TrendCell
+        series={scales.winHp === 'pct' ? winHpSeries : winHpAbsSeries}
+        seriesEval={scales.winHp === 'pct' ? evalWinHpSeries : evalWinHpAbsSeries}
+        source={source}
+        fmt={scales.winHp === 'pct' ? fmtPct : fmtInt}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0}
+        scale={scales.winHp}
+        onScale={(s) => onScale('winHp', s)}
+        title={
+          scales.winHp === 'pct'
+            ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
+            : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
+        }
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: scales.winHp === 'pct' ? '胜局残血（百分比）' : '胜局残血（HP）',
+            series: main,
+            series2: overlay,
+            fmt: scales.winHp === 'pct' ? fmtPct : fmtInt,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yFloor: 0,
+          })
+        }
+      />
+    ),
+    pu: (
+      <TrendCell
+        series={scales.pu === 'pct' ? puPctSeries : puSeries}
+        seriesEval={scales.pu === 'pct' ? evalPuPctSeries : evalPuSeries}
+        source={source}
+        fmt={scales.pu === 'pct' ? fmtPct : fmtDec2}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0}
+        scale={scales.pu}
+        onScale={(s) => onScale('pu', s)}
+        title={
+          scales.pu === 'pct'
+            ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
+            : '每局平均拾取数（rollout 实线 · eval 橙点）'
+        }
+        onExpand={(main, overlay) =>
+          openZoom({
+            title: scales.pu === 'pct' ? '道具（拾取率）' : '道具（每局平均）',
+            series: main,
+            series2: overlay,
+            fmt: scales.pu === 'pct' ? fmtPct : fmtDec2,
+            color: source === 'eval' ? COLOR_EVAL : undefined,
+            yFloor: 0,
+          })
+        }
+      />
+    ),
+  }
+  // 逐局指标只给勾选中的建节点：92 个指标全算一遍序列是纯浪费。
+  for (const m of BEHAVIOR_METRICS) {
+    const key = behaviorTrendKey(m.key)
+    if (!visibility[key]) continue
+    const statKey = metricStats[m.key]
+    const fmt = (v: number | null): string => (v == null ? '—' : fmtMetricStat(v, m))
+    charts[key] = (
+      <TrendCell
+        series={behaviorMetricSeries(iters, m.key, statKey, 'rollout')}
+        seriesEval={behaviorMetricSeries(iters, m.key, statKey, 'eval')}
+        source={source}
+        fmt={fmt}
+        range={range}
+        hoverIter={hoverIter}
+        onHoverIter={setHoverIter}
+        yFloor={0}
+        title={`逐局统计（${METRIC_STAT_LABEL[statKey]}；rollout 实线 · eval 橙点）· ${m.title}`}
+        onExpand={() =>
+          openZoom({
+            title: `${m.label}·${METRIC_STAT_LABEL[statKey]}`,
+            fmt,
+            behavior: { key: m.key, iters, stat: statKey, source },
+          })
+        }
+      />
+    )
+  }
   return (
     <section className="tc-hero" aria-label="训练状态">
       <div className="tc-hero__right">
@@ -897,192 +1098,12 @@ export function Hero({
           <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} />
         ) : null}
         <div className="tc-trends">
-          {/* 行1：胜率 / 承伤·杀 / 胜局耗时（与击杀对调，2026-09-18） */}
-          {visibility.winRate ? (
-            <TrendCell
-              series={winSeries}
-              seriesEval={evalSeries}
-              source={source}
-              fmt={fmtPct}
-              toneOf={winTone}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yFloor={0.3}
-              title="rollout 采样胜率 + eval 胜率（橙色）；数据源档位可只看一边"
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: '胜率',
-                  series: main,
-                  series2: overlay,
-                  fmt: fmtPct,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yFloor: 0.3,
-                })
-              }
-            />
-          ) : null}
-          {visibility.dmgPerKill ? (
-            <TrendCell
-              series={dmgPerKillSeries}
-              seriesEval={evalDmgPerKillSeries}
-              source={source}
-              fmt={fmtPct}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yFloor={0}
-              title="每杀承伤 / (命数×满血)（rollout 实线 · eval 橙点）；越小越会周旋"
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: '承伤/杀',
-                  series: main,
-                  series2: overlay,
-                  fmt: fmtPct,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yFloor: 0,
-                })
-              }
-            />
-          ) : null}
-          {visibility.winTicks ? (
-            <TrendCell
-              series={winTicksSeries}
-              seriesEval={evalWinTicksSeries}
-              source={source}
-              fmt={fmtInt}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yMin={winTicksYMin(winTicksSeries, evalWinTicksSeries)}
-              title="胜局平均耗时（ticks；rollout 实线 · eval 橙点）；y 下界 = max(0, min×0.8, max×0.5)"
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: '胜局耗时',
-                  series: main,
-                  series2: overlay,
-                  fmt: fmtInt,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yMin: winTicksYMin(winTicksSeries, evalWinTicksSeries),
-                })
-              }
-            />
-          ) : null}
-          {/* 行2：击杀 / 胜局残血 / 道具（纵坐标可切 绝对值 ↔ 百分比） */}
-          {visibility.kills ? (
-            <TrendCell
-              series={scales.kills === 'pct' ? killsPctSeries : killsAbsSeries}
-              seriesEval={scales.kills === 'pct' ? evalKillsPctSeries : evalKillsAbsSeries}
-              source={source}
-              fmt={scales.kills === 'pct' ? fmtPct : fmtDec1}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yFloor={0}
-              scale={scales.kills}
-              onScale={(s) => onScale('kills', s)}
-              title={
-                scales.kills === 'pct'
-                  ? '歼灭率 = Σ击杀 / Σ关卡敌数（rollout 实线 · eval 橙点）'
-                  : '每局平均击杀（rollout 实线 · eval 橙点）'
-              }
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: scales.kills === 'pct' ? '击杀（歼灭率）' : '击杀（每局平均）',
-                  series: main,
-                  series2: overlay,
-                  fmt: scales.kills === 'pct' ? fmtPct : fmtDec1,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yFloor: 0,
-                })
-              }
-            />
-          ) : null}
-          {visibility.winHp ? (
-            <TrendCell
-              series={scales.winHp === 'pct' ? winHpSeries : winHpAbsSeries}
-              seriesEval={scales.winHp === 'pct' ? evalWinHpSeries : evalWinHpAbsSeries}
-              source={source}
-              fmt={scales.winHp === 'pct' ? fmtPct : fmtInt}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yFloor={0}
-              scale={scales.winHp}
-              onScale={(s) => onScale('winHp', s)}
-              title={
-                scales.winHp === 'pct'
-                  ? '胜局剩余总血量 / 单命满血（三命全在 = 300%；rollout 实线 · eval 橙点）'
-                  : '胜局平均剩余 HP（剩余命每命计满额；rollout 实线 · eval 橙点）'
-              }
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: scales.winHp === 'pct' ? '胜局残血（百分比）' : '胜局残血（HP）',
-                  series: main,
-                  series2: overlay,
-                  fmt: scales.winHp === 'pct' ? fmtPct : fmtInt,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yFloor: 0,
-                })
-              }
-            />
-          ) : null}
-          {visibility.pu ? (
-            <TrendCell
-              series={scales.pu === 'pct' ? puPctSeries : puSeries}
-              seriesEval={scales.pu === 'pct' ? evalPuPctSeries : evalPuSeries}
-              source={source}
-              fmt={scales.pu === 'pct' ? fmtPct : fmtDec2}
-              range={range}
-              hoverIter={hoverIter}
-              onHoverIter={setHoverIter}
-              yFloor={0}
-              scale={scales.pu}
-              onScale={(s) => onScale('pu', s)}
-              title={
-                scales.pu === 'pct'
-                  ? '拾取率 = Σ拾取 / Σ掉落（rollout 实线 · eval 橙点）'
-                  : '每局平均拾取数（rollout 实线 · eval 橙点）'
-              }
-              onExpand={(main, overlay) =>
-                openZoom({
-                  title: scales.pu === 'pct' ? '道具（拾取率）' : '道具（每局平均）',
-                  series: main,
-                  series2: overlay,
-                  fmt: scales.pu === 'pct' ? fmtPct : fmtDec2,
-                  color: source === 'eval' ? COLOR_EVAL : undefined,
-                  yFloor: 0,
-                })
-              }
-            />
-          ) : null}
-          {BEHAVIOR_METRICS.filter((m) => visibility[behaviorTrendKey(m.key)]).map((m) => {
-            const statKey = metricStats[m.key]
-            const rollout = behaviorMetricSeries(iters, m.key, statKey, 'rollout')
-            const evalSeries = behaviorMetricSeries(iters, m.key, statKey, 'eval')
-            const fmt = (v: number | null): string => (v == null ? '—' : fmtMetricStat(v, m))
-            return (
-              <TrendCell
-                key={m.key}
-                series={rollout}
-                seriesEval={evalSeries}
-                source={source}
-                fmt={fmt}
-                range={range}
-                hoverIter={hoverIter}
-                onHoverIter={setHoverIter}
-                yFloor={0}
-                title={`逐局统计（${METRIC_STAT_LABEL[statKey]}；rollout 实线 · eval 橙点）· ${m.title}`}
-                onExpand={() =>
-                  openZoom({
-                    title: `${m.label}·${METRIC_STAT_LABEL[statKey]}`,
-                    fmt,
-                    behavior: { key: m.key, iters, stat: statKey, source },
-                  })
-                }
-              />
-            )
-          })}
+          {/* 顺序 = 「走势配置」顶部排好的键序；勾选表只决定画不画，不再决定先后。 */}
+          {orderedCharts
+            .filter((k) => visibility[k])
+            .map((k) => (
+              <Fragment key={k}>{charts[k] ?? null}</Fragment>
+            ))}
           {!Object.values(visibility).some(Boolean) ? (
             <p className="tc-muted tc-small">走势图已全部隐藏；点「走势配置」重新显示。</p>
           ) : null}
@@ -1104,14 +1125,17 @@ export function Hero({
         refreshSec={refreshSec}
         onClose={() => setCompareOpen(false)}
       />
-      <TrendConfigModal
-        open={configOpen}
-        visibility={visibility}
-        metricStats={metricStats}
-        onToggleChart={onToggleChart}
-        onMetricStat={onMetricStat}
-        onClose={() => setConfigOpen(false)}
-      />
+      {/* 只在打开时挂载：草稿在挂载那一刻从 props 快照，避免开窗首帧先闪一下默认勾选。 */}
+      {configOpen ? (
+        <TrendConfigModal
+          open
+          order={orderedCharts}
+          visibility={visibility}
+          metricStats={metricStats}
+          onApply={onApplyTrendConfig}
+          onClose={() => setConfigOpen(false)}
+        />
+      ) : null}
       {/* 只在打开时挂载：首帧的可见统计量直接由 target 决定，不会先闪一下默认均值。 */}
       {zoom ? <TrendZoomModal target={zoom} range={range} onClose={() => setZoom(null)} /> : null}
     </section>
