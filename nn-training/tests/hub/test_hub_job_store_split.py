@@ -254,6 +254,10 @@ ALLOWED_IMPORTS = {
         # `hashlib.sha256(p.read_bytes())`——旧写法把几十 MB 权重整份读进内存只为算个哈希）。
         "common.hashing",
         "common.protocol",
+        # 2026-11-14（python.refactor.md §P0-6）：离线段的行日志改走
+        # `common.logutil.tag_logger`（`hub-server.out` 的时间轴只有一份实现）。它本身是
+        # stdlib-only 的 L0 格式模块（不 import 任何仓内模块）⇒ 本簇层号不变。
+        "common.logutil",
         "remote.artifacts",
         "remote.delta_files",
     },

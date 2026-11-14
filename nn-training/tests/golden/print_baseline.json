@@ -18,7 +18,6 @@
   "hub/queue_scope.py": 1,
   "hub/schedule.py": 2,
   "hub/smoke_loopback.py": 1,
-  "hub/store_offline.py": 12,
   "hub/task_pack.py": 1,
   "hub/tunnel_ab_probe.py": 4,
   "remote/bc_job.py": 6,

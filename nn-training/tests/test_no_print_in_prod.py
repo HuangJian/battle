@@ -67,14 +67,32 @@ def test_no_new_print_calls() -> None:
     )
 
 
+def test_baseline_only_shrinks() -> None:
+    """已经迁掉的文件必须从基线里删掉：否则旧额度会一直放行新 print。"""
+    actual = _scan()
+    baseline = _baseline()
+    stale = {
+        rel: (base, actual.get(rel, 0))
+        for rel, base in sorted(baseline.items())
+        if actual.get(rel, 0) < base
+    }
+    detail = "\n".join(f"  {rel}: 基线 {base}，实际 {n}" for rel, (base, n) in stale.items())
+    assert not stale, (
+        "以下文件的 `print()` 已经减少，但 `tests/golden/print_baseline.json` 还是旧数字：\n"
+        f"{detail}\n"
+        "  把基线数改成实际值（归零的条目直接删掉），额度才会真正下降。"
+    )
+
+
 def test_scan_sees_the_known_production_surface() -> None:
     """扫描入口自检：基线非空、实际扫描确实命中已知文件、豁免面没有混进来。"""
     baseline = _baseline()
     actual = _scan()
-    # `hub/boot.py` 已于 2026-11-14 迁完（26 → 0，改走 `common/logutil`），改用它旁边的存量面自检。
-    assert baseline.get("hub/store_offline.py", 0) > 0
+    # `hub/boot.py`（26）与 `hub/store_offline.py`（12）已于 2026-11-14 迁完 ⇒ 锚点取一个
+    # 尚未迁移、且不属于同批改动的大户（`remote/deliver_zip.py`）。
+    assert baseline.get("remote/deliver_zip.py", 0) > 0
     assert baseline.get("common/log.py", 0) > 0
-    assert actual.get("hub/store_offline.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
+    assert actual.get("remote/deliver_zip.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
     assert len(baseline) >= 50
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

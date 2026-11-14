@@ -6018,3 +6018,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   的 `listening on .*?:(\d+)`、控制台日志 tail），tests/hub 590 例全绿。
 - **后果**：`tests/golden/print_baseline.json` 去掉 `hub/boot.py: 26` ⇒ 257 → 231 处、67 → 66 文件；
   G3 自检改锚 `hub/store_offline.py`（原锚已归零）。
+
+## §2026-11-14-nn-python-audit-round4-store-offline-logging（P0-6 / B2 第二批：离线段回传日志）
+
+- **决定**：`hub/store_offline.py` 的 12 处 `print("[hub-server] …", flush=True)` 改走
+  `_log = tag_logger("hub-server", lambda: time)`（`common/logutil`），消息里手写的前缀删掉。
+  与上一批（`hub/boot.py`）同一族：`hub-server.out` 的时间轴只留一份实现。
+- **被否决**：复用 `hub/boot.py` 的 `_log`（跨模块 import 一个私有名会把两个入口绑在一起，
+  且 `hub/store_offline` 是混入层、要维持 `ALLOWED_IMPORTS` 里那条向下边的最小面）；
+  在混入里接一个 `log=` 形参（`OfflineRoundsMixin` 的调用面遍布 `hub/store` 与三个路由，
+  收益是纯测试便利，代价是所有构造点加参数）。
+- **连带改动**：`tests/hub/test_hub_job_store_split.py::ALLOWED_IMPORTS["hub.store_offline"]`
+  登记 `common.logutil`（stdlib-only 的 L0 格式模块 ⇒ 层号不变）；G3 门禁补一条
+  「基线只许调小」（与 G4/G5/G6/G8 同款），源码文本断言基线 1146 → 1147（+1）。
+- **后果**：print 存量 231 → 219 处、66 → 65 文件；`hub/` 只剩 `admin.py` / `http_face.py`
+  等按请求拼 tag 的面没迁（那一批要另设计「tag 带变量」的出口）。

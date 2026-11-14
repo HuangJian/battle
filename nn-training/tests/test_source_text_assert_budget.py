@@ -416,8 +416,9 @@ BASELINE_FORM = 1493
 #: 2026-11-14 抬到 **1140**（+8，实测）：G4 宽泛异常门禁 `tests/test_broad_except_budget.py`
 #:   同样用 AST 扫 `*.py` 源码面（口径 B 的同一已知限边：判据是结构计数，不是措辞；
 #:   口径 A 仍 0 条）。同批 G6 抑制符门禁 `tests/test_suppression_budget.py` 再 +2 到 **1142**
-#:   （同样读 `*.py` 面）；G5 私有断言门禁 `tests/test_private_assert_budget.py` 再 +4 到 **1146**。
-BASELINE_SRC = 1146
+#:   （同样读 `*.py` 面）；G5 私有断言门禁 `tests/test_private_assert_budget.py` 再 +4 到 **1146**；
+#:   同日 G3 补一条「基线只许调小」（新增 1 条读 `*.py` 面的断言）⇒ **1147**。
+BASELINE_SRC = 1147
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
@@ -37,6 +38,7 @@ from typing import Any
 import remote.delta_files as delta_files
 from common.fs import atomic_write_bytes, same_bytes
 from common.hashing import sha256_file
+from common.logutil import tag_logger
 from common.protocol import ProtocolError, decode_opt_tar, decode_weights_json, sanitize_run_id
 from remote.artifacts import (
     WEIGHTS_ARCHIVE_ROOT as WEIGHTS_ARCHIVE_ROOT,
@@ -51,6 +53,13 @@ from remote.artifacts import (
 from remote.artifacts import (
     weights_archive_root as _weights_archive_root,
 )
+
+#: 离线段的行日志：`hub-server.out` 的时间轴只认 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+#: 迁移前这里是 12 处手写 `"[hub-server] …"` 的 `print(..., flush=True)`；tag 现在由
+#: `log_line` 统一加，消息里不再写前缀。`clock` 传取值函数，
+#: `monkeypatch.setattr(store_offline, "time", 假钟)` 仍拦得到（`tag_logger` 的既有约定）。
+_log = tag_logger("hub-server", lambda: time)
+
 
 #: 仓库根 —— 课程配置与权重归档的相对路径基准。
 #: 2026-09-30（刀 1，hub 出包）：本模块从 `nn-training/remote/hub/store_offline.py` 搬到
@@ -397,10 +406,9 @@ class OfflineRoundsMixin:
                 if same_bytes(have_path, w_full) or same_bytes(have_path, wj):
                     healed = _heal_round(it_dir, to_write, w_full=w_full, wj=wj)
                     if healed:
-                        print(
-                            f"[hub-server] 补传 it{int(it)} 幂等命中：补落 {'、'.join(healed)}"
+                        _log(
+                            f"补传 it{int(it)} 幂等命中：补落 {'、'.join(healed)}"
                             "（内容同源，原件旁存）",
-                            flush=True,
                         )
                     return {
                         "status": "duplicate",
@@ -511,10 +519,9 @@ class OfflineRoundsMixin:
                 "——原件已保留；重启 hub 后跑 tools/offline-weights-restore.py 可补"
             )
         if note:
-            print(
-                f"[hub-server] 回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
+            _log(
+                f"回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
                 f"：{note}",
-                flush=True,
             )
         return {
             "status": "accepted",
@@ -656,9 +663,8 @@ class OfflineRoundsMixin:
             if ev is not None:
                 self._append_ledger(ev)
         except Exception as e:  # 观测面不拖垮回传
-            print(
-                f"[hub-server] 补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
-                flush=True,
+            _log(
+                f"补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
             )
 
     def _ledger_has_newer_iter(self, it: int) -> bool:
@@ -730,10 +736,9 @@ class OfflineRoundsMixin:
             return
         if not others:
             return
-        print(
-            f"[hub-server] WARN it{it} 归档里已有另一份权重（{', '.join(sorted(others)[:3])}）"
+        _log(
+            f"WARN it{it} 归档里已有另一份权重（{', '.join(sorted(others)[:3])}）"
             f"——同一轮被两条腿各算了一遍；按 fp 分辨来源，别按 it 号拼链",
-            flush=True,
         )
 
     def _course_backup_target(self, course: str) -> tuple[str, str]:
@@ -817,34 +822,31 @@ class OfflineRoundsMixin:
                     _write_bytes(mirror / delta_files.named_for("opt.tar", opt), opt)
                 _write_bytes(mirror / "row.json", row_bytes)
         except OSError as e:
-            print(f"[hub-server] 补传 it{it} 交付镜像失败（忽略）：{e}", flush=True)
+            _log(f"补传 it{it} 交付镜像失败（忽略）：{e}")
         # ② 活动权重推进（只在没有更新的轮次时；判据是账本，两腿共用）
         # ★P1-7：`advance_active=False`（人已切固定在线）⇒ 不推进；镜像/归档照落。
         if not advance_active:
-            print(
-                f"[hub-server] 补传 it{it} 不推进活动权重（课程已固定在线；旧会话的回传只归档）",
-                flush=True,
+            _log(
+                f"补传 it{it} 不推进活动权重（课程已固定在线；旧会话的回传只归档）",
             )
         elif not isinstance(row, dict):
             # ★ 2026-10-11 事故：起点（`ArtifactStore.checkpoint(row=None)`）没有账本行，却照样
             # 把活动权重推到了它自己 —— 「假轮次推进了当前进度」。判据看**请求体**的 `row`：
             # 落盘后的 `row.json` 无论真假都存在（无 row 时写裸行），反推不出来。
             # 不变量：**有账本行 ⟺ 真轮次**（客户端 `pending()` 用的是同一条）。
-            print(
-                f"[hub-server] 补传 it{it} 不推进活动权重：非真轮次"
+            _log(
+                f"补传 it{it} 不推进活动权重：非真轮次"
                 "（无账本行，疑似起点/半截写入）——镜像与归档照落",
-                flush=True,
             )
         elif not self._ledger_has_newer_iter(int(it)):
             try:
                 _write_bytes(traj / self.ACTIVE_WEIGHTS_NAME, weights_json)
                 fp12 = hashlib.sha256(weights_json).hexdigest()[:12]
-                print(
-                    f"[hub-server] 活动权重推进 → it{it}（{fp12}…，源 run={run_id}）",
-                    flush=True,
+                _log(
+                    f"活动权重推进 → it{it}（{fp12}…，源 run={run_id}）",
                 )
             except OSError as e:
-                print(f"[hub-server] 补传 it{it} 活动权重推进失败（忽略）：{e}", flush=True)
+                _log(f"补传 it{it} 活动权重推进失败（忽略）：{e}")
         # ③ 归档（evalA 的 iter 选择器只扫归档目录；**同一轮只写一次**）
         try:
             from worker.archive import backup_weights
@@ -857,7 +859,7 @@ class OfflineRoundsMixin:
             # （只扫 `*.json`）不会再列出一份解不开的容器；两种名字都算“已在”。
             wname = delta_files.named_for("weights.json", weights_json)
             if _archived(Path(bdir), prefix, int(it)):
-                print(f"[hub-server] 补传 it{it} 归档已在（跳过重复）", flush=True)
+                _log(f"补传 it{it} 归档已在（跳过重复）")
                 # ★ 2026-10-25：同号但**不是这一份** = 两条腿各算了一遍同一轮（真机 y34-hitfix
                 #   it103/it104：本机与本机并行的云机段）。归档里会同时存在两份不同分支的整份，
                 #   而按 it 号取「最大 it 的整份」会把两条链拼起来 ⇒ 这里必须响亮。
@@ -870,16 +872,14 @@ class OfflineRoundsMixin:
                     backup_dir=bdir,
                     suffix=Path(wname).suffix,
                 )
-                print(
-                    f"[hub-server] 补传 it{it} 权重已归档 → {dst}"
+                _log(
+                    f"补传 it{it} 权重已归档 → {dst}"
                     if dst
-                    else f"[hub-server] 补传 it{it} 归档未成（见上一条 WARN）",
-                    flush=True,
+                    else f"补传 it{it} 归档未成（见上一条 WARN）",
                 )
         except Exception as e:  # 归档不该拖垮回传（含 rl 包不在的截断快照）
-            print(
-                f"[hub-server] 补传 it{it} 归档不可用（忽略）：{type(e).__name__}: {e}",
-                flush=True,
+            _log(
+                f"补传 it{it} 归档不可用（忽略）：{type(e).__name__}: {e}",
             )
 
     def store_offline_result(self, body: dict) -> dict:
