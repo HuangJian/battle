@@ -140,7 +140,7 @@ import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../../src/snapshot/types'
 import { worldTickHash } from '../../src/replay/tickHash'
 import { basename } from 'path'
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 import { runServe } from './serve-loop'
 import {
   scoreRun,
@@ -2607,7 +2607,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     const packManifest = {
       ...(lastShardManifest ?? summary),
       mode: 'rollout',
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(packManifest, entries))
   }

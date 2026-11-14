@@ -23,6 +23,28 @@ import { gzipSync, gunzipSync } from 'node:zlib'
 
 export const PACK_MAGIC = 0x42435632
 
+/**
+ * 结果 manifest 的 `elapsedSec` 口径（rollout/eval 采样链路单一来源）。
+ *
+ * sampler-agent 每局把**接单时刻**用 `--service-started-at-ms` 透给导出器：容器在子进程里
+ * 一次成型，agent 不再为了改这一个字段把整个 BCV2 容器 gunzip + 重压。真实生产容器
+ * frame 3.1–12.6 MB，agent 侧重压实测 13–44 ms/局（最大包 43.6 ms，事件循环最大漂移
+ * 32.8 ms），而 eval 容器只有 3 KB（0.24 ms）——收益几乎全在 rollout 侧。
+ *
+ * 缺席该参数（本机直跑 / 旧调用方）⇒ 用导出器自己的 `t0`，旧口径逐字节不变。
+ * 注入 `nowMs` 只供单测固定时钟。
+ */
+export function serviceElapsedSec(
+  t0: number,
+  argv: readonly string[],
+  nowMs: number = Date.now(),
+): number {
+  const i = argv.indexOf('--service-started-at-ms')
+  const at = i >= 0 ? Number(argv[i + 1]) : NaN
+  const start = Number.isFinite(at) && at > 0 ? at : t0
+  return +((nowMs - start) / 1000).toFixed(1)
+}
+
 export interface PackEntry {
   name: string
   data: Buffer

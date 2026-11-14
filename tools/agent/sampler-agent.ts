@@ -1181,6 +1181,8 @@ interface PoolWorker {
   /** 预热「等这一个就绪」的钩子；就绪或退出各调一次（只挂在对它感兴趣的那段时间）。 */
   readyWait: ((ok: boolean) => void) | null
   buf: string
+  /** stderr 尾部（有界 4KB）：只用于 worker 异常退出时的诊断，不参与协议。 */
+  errTail: string
   pending: ((outcome: WorkerSettle, msg: string) => void) | null
   /** 空闲起点（ms）：在飞时置 null，settle 回池时刷新。空闲回收（reapPlan）的判据。 */
   idleSinceMs: number | null
@@ -1210,6 +1212,7 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       ready: false,
       readyWait: null,
       buf: '',
+      errTail: '',
       pending: null,
       idleSinceMs: Date.now(),
     }
@@ -1225,11 +1228,18 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
     }
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (c: string) => {
-      w.buf += c
-      let nl = w.buf.indexOf('\n')
-      while (nl >= 0) {
-        const line = w.buf.slice(0, nl).trim()
-        w.buf = w.buf.slice(nl + 1)
+      // 一次切出本拍所有完整行：旧实现每处理一行就 `buf.slice(nl + 1)` 复制剩余全串，
+      // 一个 chunk 含 N 行即 O(N × chunk)（导出器每局会往 stdout 打若干行汇总日志）。
+      const data = w.buf + c
+      const lastNl = data.lastIndexOf('\n')
+      if (lastNl < 0) {
+        w.buf = data
+        return
+      }
+      const lines = data.slice(0, lastNl).split('\n')
+      w.buf = data.slice(lastNl + 1)
+      for (const raw of lines) {
+        const line = raw.trim()
         if (line.startsWith('__SERVE_READY__')) {
           w.ready = true
           const wait = w.readyWait
@@ -1240,8 +1250,14 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
         } else if (line.startsWith('__SERVE_OK__')) settle('ok', '')
         else if (line.startsWith('__SERVE_ERR__'))
           settle('taskErr', line.slice('__SERVE_ERR__'.length).trim() || 'worker error')
-        nl = w.buf.indexOf('\n')
       }
+    })
+    // stdio 第三路是 'pipe' 就必须有人消费：worker 的报错/堆栈写满 64KB 管道后会
+    // 永久阻塞在 write 上，整局只能等 600s 超时回收。标记行协议只走 stdout，
+    // stderr 留 4KB 尾部供异常退出诊断。
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (c: string) => {
+      w.errTail = (w.errTail + c).slice(-4000)
     })
     child.on('error', () => settle('dead', 'spawn error'))
     child.on('close', (code, signal) => {
@@ -1254,7 +1270,8 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       // 正常关池（SIGTERM idle / restart）不刷屏；busy 中途被杀或异常退出才留痕
       if (w.busy || (code !== 0 && code !== null) || signal != null) {
         console.log(
-          `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
+          `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})` +
+            (w.errTail ? ` stderr=${w.errTail.slice(-600)}` : ''),
         )
       }
       settle('dead', 'worker exited')
@@ -1544,10 +1561,14 @@ async function runViaPersistWorker(
   detachAbort()
   taskTimer.cancel()
   if (settled === 'ok') {
-    if (fs.existsSync(path.join(gameDir, '_result.pack'))) return { outcome: 'ok', worker: null }
-    // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
-    recyclePersistWorker(w)
-    return { outcome: 'failed', worker: null }
+    try {
+      await fs.promises.access(path.join(gameDir, '_result.pack'))
+      return { outcome: 'ok', worker: null }
+    } catch {
+      // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
+      recyclePersistWorker(w)
+      return { outcome: 'failed', worker: null }
+    }
   }
   // taskErr：worker 健康（serve-loop 已在等下一行）⇒ 留着，由调用方按兜底结果定夺
   if (settled === 'taskErr') return { outcome: 'taskErr', worker: w }
@@ -1626,6 +1647,9 @@ async function runGame(
   labelMode: string = 'argmax',
   // 取消信号（/v1/cancel）：abort ⇒ 杀子进程 / 回收长驻 worker，结果不再回包。
   signal?: AbortSignal,
+  // 接单时刻：透给导出器，让它在打包时自己写 manifest.elapsedSec
+  // （单一来源 tools/sim/pack-container.ts::serviceElapsedSec）。0 = 旧口径（本机直跑）。
+  serviceStartedAtMs = 0,
 ): Promise<Buffer> {
   if (signal?.aborted) throw new Error('task cancelled')
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
@@ -1651,7 +1675,9 @@ async function runGame(
   const isGoalRollout = kind === 'goal' && !isEval
   const seq = ++gameSeq
   const gameDir = path.join(WORK_DIR, `game-${process.pid}-${seq}`)
-  fs.mkdirSync(gameDir, { recursive: true })
+  // 单线程事件循环服务里不做同步 FS：慢盘 / 挂载点抖动会卡住所有在飞请求
+  // （docs/nn/runtime-opt.md 记过挂载点挂住导致整轮拒收）。
+  await fs.promises.mkdir(gameDir, { recursive: true })
   try {
     // §353：exporter 入口先取出，交给 runner 决定用 bun 直跑 TS 还是 node 跑打包产物。
     const entryTs = isEval
@@ -1778,6 +1804,10 @@ async function runGame(
         '--pack-memory',
       )
     }
+    // 服务时长由导出器在子进程内一次写进容器 manifest：agent 侧不再为了改这一个
+    // 字段把整个 BCV2 容器 gunzip + 重压（真实容器 3.1–12.6 MB frame，实测
+    // 13–44 ms/局同步阻塞主线程）。缺席该参数时导出器回退自己的 t0，旧口径不变。
+    if (serviceStartedAtMs > 0) args.push('--service-started-at-ms', String(serviceStartedAtMs))
     const plan = runner.launch(entryTs, args)
     let packBuf: Buffer | null = null
     // §368：--persist 时 per-tick rollout 走长驻 worker（省每局进程启动/JIT 预热/wasm 编译），
@@ -1796,7 +1826,7 @@ async function runGame(
     if (attempt === 'ok') {
       persistBreaker = notePersistAttempt(persistBreaker, 'ok', Date.now())
       runner.noteSuccess(plan.engine)
-      packBuf = fs.readFileSync(packFile)
+      packBuf = await fs.promises.readFile(packFile)
     } else if (attempt === 'busy') {
       // 背压显式入账（状态不变）：旧实现把「池满」也算失败，3 连就把池永久关掉。
       persistBreaker = notePersistAttempt(persistBreaker, 'busy', Date.now())
@@ -1849,15 +1879,18 @@ async function runGame(
         notePoolFailure()
       }
       // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
-      // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
-      if (!fs.existsSync(packFile)) {
+      // 主线程只做一次异步顺序读——不再读 12 个 shard + base64 + gzip。
+      // 直接 read + catch，而非 existsSync 再 read（TOCTOU + 两次系统调用）。
+      try {
+        packBuf = await fs.promises.readFile(packFile)
+      } catch {
         throw new Error(`${scriptName} produced no result pack: ${tail}`)
       }
-      packBuf = fs.readFileSync(packFile)
     }
     return packBuf
   } finally {
-    fs.rmSync(gameDir, { recursive: true, force: true })
+    // 清理失败不得盖掉任务本身的结果/异常。
+    await fs.promises.rm(gameDir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -1873,6 +1906,13 @@ const admission = createAdmission({
   queueMax: admissionQueueMax,
   waitMs: admissionWaitMs,
 })
+
+/** Buffer → BodyInit 的**零拷贝视图**：TS 的 `BodyInit` 只接受
+ * `ArrayBufferView<ArrayBuffer>`，而 Node `Buffer` 的泛型是 `ArrayBufferLike`，
+ * 直接传会 TS2345；`new Uint8Array(buf)` 虽能过检但会整包复制一次。 */
+function bodyView(buf: Buffer): BodyInit {
+  return new Uint8Array(buf.buffer as ArrayBuffer, buf.byteOffset, buf.byteLength)
+}
 
 function jsonResponse(obj: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(obj), {
@@ -1900,13 +1940,15 @@ async function admit(signal?: AbortSignal): Promise<Response | null> {
   return admissionBusy(Date.now() - t0)
 }
 
-/** 服务耗时改口径（2026-09-06 用户指令）：elapsedSec 从「子进程内纯游戏耗时」改为
- * 「任务生命周期」= 接单（inflight startedAt；同步模式即 HTTP 请求起点）→ 结果就绪，
- * 含 bun 子进程冷启动（本机实测 ~2.2s/局）与打包开销——与 local 直跑的 Popen 墙钟
- * 同口径，节点间「平均耗时」可横向比（此前 local 4.2s vs 同机 self 2.0s 的差就是
- * 被排除的冷启动）。实现 = 解包 BCV2 → 改写 manifest.elapsedSec → 重打包（~1MB
- * 容器 gunzip+gzip 十几 ms，相对整局可忽略）；解包失败不吞结果——容器原样返回
- * （保留旧口径）。纯游戏时长不再单列（shard 的 ticks 可间接推算）。 */
+/** 旧实现（2026-09-06 起）：在 agent 主线程解包 BCV2 → 改写 manifest.elapsedSec
+ * → 重打包，让 elapsedSec 从「子进程纯游戏耗时」变成「接单 → 结果就绪」的任务
+ * 生命周期口径（与 local 直跑的 Popen 墙钟同口径，节点间可横向比）。
+ *
+ * 2026-11-14 起**停用**：真实生产容器 frame 3.1–12.6 MB，这段同步 gunzip+gzip 实测
+ * 13–44 ms/局（最大包 43.6 ms），8 workers 下占主线程 5–18%，2s 窗口内 10ms
+ * 定时器最大漂移 32.8 ms —— 原注释「~1MB / 十几 ms，相对整局可忽略」不成立。
+ * 计时已前移到导出器（`--service-started-at-ms` → `serviceElapsedSec`），容器在
+ * 子进程一次成型。本函数保留为回滚档与单测标的，**结果出口不得再调用它**。 */
 export function stampServiceSec(
   key: string,
   buf: Buffer,
@@ -1928,18 +1970,16 @@ export function stampServiceSec(
 }
 
 /**
- * 结果容器的**唯一出口**：盖章一次，**同一个** buffer 既进缓存又发给客户端。
+ * 结果容器的**唯一出口**：同一个 buffer 既进缓存又发给客户端。
  *
- * 为什么要有这个函数（2026-09-21 真机归因，docs/nn.progress.md §126）：同步路径曾经
- * `lruPut(key, stampServiceSec(key, buf))` 之后 `enqueue(new Uint8Array(buf))`——缓存里
- * 是盖章的、发出去的是原件 ⇒ 客户端拿到的 elapsedSec 缺了子进程冷启动（a95 实测同一局
- * 0.7s vs 真值 3.2s，只有第二次请求命中缓存才看到真值）。同步/异步两处都走这个出口，
- * 「盖章值 == 对外值」由**代码结构**保证，不靠人记得改两遍。
+ * 2026-09-21 真机归因（docs/nn.progress.md §126）：同步路径曾把盖章副本放进缓存、
+ * 原件发给客户端 ⇒ 同一局两个 elapsedSec。现在 elapsedSec 由导出器在打包时写定
+ * （见 runGame 的 `--service-started-at-ms`），出口只保证「缓存值 == 对外值」，
+ * 不再解包重压。结构钉子见 tests/agent/result-stamp.test.ts。
  */
 export function serveResult(key: string, buf: Buffer): Buffer {
-  const served = stampServiceSec(key, buf)
-  lruPut(key, served)
-  return served
+  lruPut(key, buf)
+  return buf
 }
 
 // ---------------- HTTP handler ----------------
@@ -2065,6 +2105,7 @@ function beginTask(
     openingConnect,
     labelMode,
     task.signal,
+    task.startedAt,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -2470,7 +2511,7 @@ async function handle(req: Request): Promise<Response> {
       // LRU touch
       resultCache.delete(key)
       resultCache.set(key, cached)
-      return new Response(new Uint8Array(cached.buf), {
+      return new Response(bodyView(cached.buf), {
         headers: { 'Content-Type': 'application/octet-stream' },
       })
     }
@@ -2570,17 +2611,20 @@ async function handle(req: Request): Promise<Response> {
           openingConnect,
           labelMode,
           task.signal,
+          task.startedAt,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
-            // 盖章 = 唯一出口（2026-09-21 修）：此前存盖章副本、发原件，客户端拿到的
-            // elapsedSec 漏掉子进程冷启动（a95 实测 0.7s vs 真值 3.2s）。
+            // 唯一出口（2026-09-21 修；2026-11-14 起不再盖章，只保证缓存 == 对外）：
+            // 此前存盖章副本、发原件，客户端拿到的 elapsedSec 漏掉子进程冷启动
+            // （a95 实测 0.7s vs 真值 3.2s）。
             const served = serveResult(key, buf)
             gamesDoneTotal++
             gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
             noteTaskOutput(mode, iterId, true)
             try {
-              controller.enqueue(new Uint8Array(served))
+              // Buffer 本身就是 Uint8Array：不需再 `new Uint8Array(buf)` 全量复制一遍。
+              controller.enqueue(served)
               controller.close()
             } catch {
               /* client gone */
@@ -2665,7 +2709,7 @@ async function handle(req: Request): Promise<Response> {
       cacheHits++
       resultCache.delete(key)
       resultCache.set(key, cached)
-      return new Response(new Uint8Array(cached.buf), {
+      return new Response(bodyView(cached.buf), {
         headers: { 'Content-Type': 'application/octet-stream' },
       })
     }

@@ -32,11 +32,12 @@ import {
   SCHEMA_FINGERPRINT,
 } from '../../src/nn/obs-encoder'
 import { npyBytes } from '../../src/nn/npy'
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 
 const EXPORTER_VERSION = '1.0.0'
 
 function main(): void {
+  const argv = process.argv.slice(2)
   const arg = (name: string, fallback = ''): string => {
     const i = process.argv.indexOf(`--${name}`)
     return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback
@@ -96,7 +97,7 @@ function main(): void {
       ticks: 0,
       nSamples: 0,
       node: nodeLabel,
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(manifest, []))
     console.log(`[export-godai-bc] s${stage}/seed${seed}: loss-skipped (wins-only)`)
@@ -146,7 +147,7 @@ function main(): void {
     gatedScore: +res.gatedScore.toFixed(4),
     nearMissFrames: res.nearMissFrames,
     node: nodeLabel,
-    elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+    elapsedSec: serviceElapsedSec(t0, argv),
   }
   const entries = [
     { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
