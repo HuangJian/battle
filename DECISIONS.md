@@ -5887,3 +5887,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：P0-6 的日志迁移可以分批进行，但新代码不能再绕过 `common.log`/logger 增加
   `print`；删除 print 不需要改基线（只拦增长）。自检用例钉住扫描入口确实命中
   `hub/boot.py` / `common/log.py`，并确认豁免面没有混进基线。
+
+## §2026-11-14-nn-python-audit-round4-torch-load-safe（P1-10：torch.load 显式 weights_only）
+
+- **决定**：生产包 8 处 `torch.load(...)` 全部显式传 `weights_only=True`，不再依赖 torch 2.7
+  的版本默认值；新增 `tests/test_torch_load_safe.py` AST 门禁，拦 `torch.load(...)` 与
+  `from torch import load; load(...)` 两种写法，`tools/` 一次性脚本豁免。
+- **被否决**：只改注释/文档（降级 torch 即回到 pickle RCE）；一次性换成 `common.torch_pickle`
+  白名单（它解决的是“写出可被安全读取的字节”，读侧仍需 `weights_only` 这个开关，且会扩大
+  本次范围）；把 `tests/` 里的 `torch.load` 也强转（测试独立构造样本，且 2.7 默认已安全）。
+- **后果**：`weights_only=True` 会拒绝非张量/非基本类型的 pickle 对象；本仓这些路径读的都是
+  `state_dict` / optimizer 张量树，已由 `paddle_parity` 与 `tests/remote/test_opt_*` 覆盖。
+  以后新增读取点若确实需要完整 pickle，必须在门禁里显式开例外并说明攻击面，而不是删掉
+  `weights_only`。

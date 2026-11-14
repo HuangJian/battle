@@ -240,4 +240,4 @@ class RoundForms:
             p = d / "opt.pt"
             if not p.is_file():
                 raise ProtocolError(f"{what} 里没有 opt.pt（{sorted(x.name for x in d.iterdir())}）")
-            return torch.load(p, map_location="cpu")
+            return torch.load(p, map_location="cpu", weights_only=True)

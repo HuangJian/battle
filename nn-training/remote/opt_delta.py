@@ -621,5 +621,8 @@ def land_opt_delta(
         f"（容器 {reported[:12]}… / 本机 {published[:12]}…）"
     )
     return rebuilt_opt_tar(
-        opt_blob, torch.load(base_p, map_location="cpu"), out_dir=ckpt_dir, log=log
+        opt_blob,
+        torch.load(base_p, map_location="cpu", weights_only=True),
+        out_dir=ckpt_dir,
+        log=log,
     )

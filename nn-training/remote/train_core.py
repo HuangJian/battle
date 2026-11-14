@@ -87,7 +87,7 @@ def _load_opt_state(path: str | Path) -> tuple[Any, int]:
     """
     import torch
 
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=True)
     raised = opt_delta.sanitize_adam_sq(state)
     return state, raised
 
@@ -587,7 +587,9 @@ def _torch_opt(st: _CoreRun) -> None:
             elif legacy_model.exists():
                 # ---- W4：旧形状 tar（改造前的字节 / hub 回退分支重打 / 旧 hub）----
                 # 权重在 tar 里 ⇒ 逐字节走今天的老路（§3.2 W4 / §3.5 的兼容面）。
-                model.load_state_dict(torch.load(legacy_model, map_location="cpu"))
+                model.load_state_dict(
+                    torch.load(legacy_model, map_location="cpu", weights_only=True)
+                )
                 weights_src = "legacy_tar"
             else:
                 raise ProtocolError(
@@ -900,7 +902,9 @@ def _torch_artifacts(st: _CoreRun) -> None:
             )
         from worker.ppo.common import _to_cpu_state  # torch 面：延迟 import（顶层零 torch）
 
-        base_state = _to_cpu_state(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+        base_state = _to_cpu_state(
+            torch.load(opt_dir / "opt.pt", map_location="cpu", weights_only=True)
+        )
         opt_sent_raw = opt_delta.pack_opt_delta(
             base_state,
             _to_cpu_state(opt.state_dict()),

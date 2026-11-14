@@ -419,7 +419,7 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
         return 0
     with open(sp, encoding="utf-8") as f:
         st = json.load(f)
-    model.load_state_dict(torch.load(mp, map_location="cpu"))
-    opt.load_state_dict(torch.load(op, map_location="cpu"))
+    model.load_state_dict(torch.load(mp, map_location="cpu", weights_only=True))
+    opt.load_state_dict(torch.load(op, map_location="cpu", weights_only=True))
     _unpack_np_state(st["rng"])
     return int(st.get("epochs_done", 0))
