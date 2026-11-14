@@ -6109,3 +6109,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **顺带**：`worker/stream_collect.py` 的两处 `log=` 默认回调（`[stream]`）迁到
   `common.logutil.tag_logger`。`worker/iter_rollout.py` 的 `[iter]` **刻意没迁**：该文件已 999/1000 行，
   加一个 import + 一个模块级 `_log` 就撞 LOC 预算 —— 先拆再迁（§P0-2），不为了迁移而抬预算。
+
+## §2026-11-14-g9-silent-except-gate-and-loop-util-retirement（捕了不做，也是事故）
+
+- **决定 1（门禁 G9）**：新增 `tests/test_silent_except_budget.py` + `tests/golden/silent_except_baseline.json`，
+  按文件冻结「宽泛捕获 + 体内只有一个 `pass`」（`except Exception/BaseException/裸 except:`，64 处 / 38 文件）。
+  只拦增长 + 基线只许调小。**与 G4 分开**：G4 管「捕得宽」，G9 管「捕了不做」——`except Exception` 里
+  写一行 `log_line(...)` 是处理，写 `pass` 是假装没发生，两者的现场可观测性完全不同。
+- **决定 2（P1-11 死代码）**：删除 `worker/train/loop_util.py` 里随「本地 BC 连续训练入口」退役
+  （`plan/single-resident-trainer` §1.4，2026-10-17）而失效的全部循环工具：`_emit` / `_TrainTee` /
+  `heartbeat` / `auto_export_corpus` / `parse_val_loss_from_output`，以及只有它们用的 import 与常量
+  （321 → 109 行）。**保留** `acquire_lock` / `cleanup_lock` / `course_lock_path` / `course_key_from_path` /
+  `validate_course_name`（`trainer/` 与 `biz` 侧的课程锁仍全用它）与 `_pid_alive`（Windows 安全薄壳：
+  `tests/common/test_pid_probe_windows_safe.py` 按名枚举四份壳必须委托唯一实现）。
+- **为什么现在删**：文件头早就写着「去留归 S3 判」，而 S1 落地至今已一个月、`grep` 全仓零调用。
+  死代码的代价不只是行数：它自带 `subprocess` / `threading` / `shutil` 的 import 面（读者会以为还有
+  人跑子进程），还把 5 处 `except Exception: pass` 挂在生产面基线上，给 G4/G9 制造「本来就是这么多」
+  的错觉。
+- **代价与边界**：`docs/nn/remote-transport.md` / `engineering.md` 里关于 `loop_util` 心跳与 Tee 的
+  叙述是**事故与决策记录**，不改（记录写的是当时事实）；`common/pid_probe.py` 里「2026-09-17 隐患」的
+  引用同理。要考虑「现在还有没有这条路径」的人，应读 `python.refactor.md` 的状态表（已更新）。
+- **顺带**：G3 134 处 / 42 文件、G4 440 处 / 143 文件（删掉的 1 处 print、6 处宽捕获同步从基线移除）；
+  文本断言源码面基线 +7（新门禁用 AST 扫 `*.py`，整个文件的 assert 都落进口径 B —— 与 G3/G4/G5/G6
+  同一已知限边，已在 `tests/test_source_text_assert_budget.py` 的注释表里逐笔记账）。

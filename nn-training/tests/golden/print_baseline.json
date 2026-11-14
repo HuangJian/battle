@@ -40,6 +40,5 @@
   "worker/models/student.py": 4,
   "worker/ppo/bench.py": 5,
   "worker/train/goal_bc.py": 1,
-  "worker/train/intent_probe.py": 7,
-  "worker/train/loop_util.py": 1
+  "worker/train/intent_probe.py": 7
 }

@@ -140,7 +140,6 @@
   "worker/sibling_reuse.py": 3,
   "worker/terminal_stats.py": 1,
   "worker/train/bc.py": 1,
-  "worker/train/loop_util.py": 6,
   "worker/trainer_heartbeat.py": 1,
   "worker/workdir_sweep.py": 1
 }

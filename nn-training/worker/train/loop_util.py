@@ -1,178 +1,28 @@
-"""loop_util —— 本地训练循环的单调工具（2026-09-02 从当时顶层的 BC 训练入口拆出）。
+"""loop_util —— 课程实例锁与课程键（唯一归宿；与 TS `slots.ts::lockName` 同构）。
 
-纯 stdlib 工具（无 torch 依赖，可在任何 import 顺序下加载）：状态行输出
-（_emit/_ts/_fmt_dur）、epoch 进度 Tee（_TrainTee）、心跳线程、单实例锁（PID 文件）、
-语料自动导出（auto_export_corpus）。
+纯 stdlib 工具（无 torch 依赖，可在任何 import 顺序下加载）。今天仍在用的是这两组：
 
-★ 2026-10-17（plan/single-resident-trainer §1.4，S1）：唯一使用者 "本地 BC 连续训练入口"
-已随本地 torch 训练腿退役而删除。今天仍被 `run_rl` / `run_bc` / `loop_serve` 用的是
-**锁/课程键**那几个函数（acquire_lock / cleanup_lock / course_lock_path /
-course_key_from_path / validate_course_name）；`_TrainTee` / 心跳线程 / auto_export_corpus /
-_emit 这几个**已无使用者**（核实过：grep 全仓零调用）——去留归 S3 判（不在这里删，
-免与 S1 的删除腿混提）。
+  * **课程锁**：`course_lock_path` / `course_key_from_path` / `validate_course_name` 定名，
+    `acquire_lock` / `cleanup_lock` 是 `common.instance_lock` 的薄壳（`trainer/run_bc` ·
+    `trainer/loop_serve` · `trainer/once_shot` · `trainer/batch_store` 共用）；
+  * **存活探测薄壳** `_pid_alive`：委托唯一实现 `common.pid_probe.pid_alive`（Windows 上裸
+    `os.kill` 会**杀掉**锁持有者，见 `docs/nn/remote-transport.md`）。
+
+★ 2026-11-14（`python.refactor.md` §P1-11 死代码清理）：本文件曾是「本地 BC 连续训练入口」的
+循环工具集——状态行 `_emit` / epoch 进度 Tee `_TrainTee` / 心跳线程 `heartbeat` /
+`auto_export_corpus` / `parse_val_loss_from_output`。那个入口随
+`plan/single-resident-trainer` §1.4 于 2026-10-17 退役，这些符号此后**零调用**
+（全仓 grep，`__pycache__` 与历史文档叙述之外无引用），本轮删除。它们还带走了 5 处
+`except Exception: pass`——日志文件写失败被静默成「本来就没事」，正是 §P0-7 与 G9 门禁要清的那一类。
 """
 
 from __future__ import annotations
 
-import glob
 import os
 import re
-import shutil
-import subprocess
-import threading
-import time
 
 from common.instance_lock import acquire_instance_lock, release_instance_lock
 from common.pid_probe import pid_alive
-
-# 子进程捕获统一走 common.proc.run_capture（显式 UTF-8 + Windows 隐藏窗口）。
-from common.proc import run_capture
-
-NN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO_ROOT = os.path.dirname(NN_ROOT)
-NN_DEMO_DIR = os.path.join(REPO_ROOT, "nn-demo")
-EXPORT_SCRIPT = os.path.join(REPO_ROOT, "tools", "replay", "export-observations.ts")
-
-# A round that finishes in less than this many seconds with no val_loss is
-# almost certainly a *spin* (train_bc exited early, crashed, or hit a
-# PermissionError). Real rounds take minutes. We surface this loudly
-# instead of silently continuing so the operator notices immediately.
-SPIN_WARN_S = 60.0
-
-
-def _fmt_dur(sec: float) -> str:
-    """Human-readable duration: 45s, 3m20s, 1h05m."""
-    sec = round(sec)
-    if sec < 60:
-        return f"{sec}s"
-    m, s = divmod(sec, 60)
-    if m < 60:
-        return f"{m}m{s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
-
-
-def _ts() -> str:
-    """Current time as [HH:MM:SS]."""
-    return time.strftime("%H:%M:%S")
-
-
-def _emit(line: str, log) -> None:
-    """Print to stdout (flush) AND append to the log file (flush).
-
-    Every log line is prefixed with a timestamp [HH:MM:SS] so the operator
-    can trace training progress and diagnose stalls without external tools."""
-    print(line, flush=True)
-    if log:
-        try:
-            log.write(f"[{_ts()}] {line}\n")
-            log.flush()
-        except Exception:
-            pass
-
-
-class _TrainTee:
-    """Tee ``train_bc.train()`` stdout to the console AND the log file, and update
-    epoch progress in ``state`` so the heartbeat reflects live training.
-
-    Running training in-process means ``train()`` prints directly to
-    ``sys.stdout``; swapping ``sys.stdout`` to this tee captures every
-    ``[epoch N/M]`` line live (console + log) without a subprocess pipe that the
-    launcher's double-spawn could spawn a bypassing, untracked trainer around.
-    """
-
-    _RE = re.compile(r"\[epoch\s+(\d+)/(\d+)\]")
-
-    def __init__(self, log, state, real_stdout):
-        self._log = log
-        self._state = state
-        self._out = real_stdout
-
-    def write(self, s):
-        if self._out:
-            try:
-                self._out.write(s)
-                self._out.flush()
-            except Exception:
-                pass
-        if self._log:
-            try:
-                # Prefix each line from train_bc with a timestamp.
-                ts = _ts()
-                for line in s.splitlines(True):
-                    self._log.write(f"[{ts}] {line}")
-                self._log.flush()
-            except Exception:
-                pass
-        m = self._RE.search(s)
-        if m:
-            self._state["epoch_in_round"] = int(m.group(1))
-
-    def flush(self):
-        if self._out:
-            try:
-                self._out.flush()
-            except Exception:
-                pass
-        if self._log:
-            try:
-                self._log.flush()
-            except Exception:
-                pass
-
-
-def parse_val_loss_from_output(text: str) -> float | None:
-    # The versioned archive name embeds _val<loss>.json. A round's output can
-    # contain TWO such occurrences: the --resume path (older weights) and the
-    # freshly written archive (this round's result). The LAST one is the
-    # round's own result, so we prefer it over the resume value (otherwise the
-    # loop would report the resume val and hide whether this round improved).
-    matches = re.findall(r"_val([\d.]+)\.json", text)
-    if matches:
-        return float(matches[-1])
-    m = re.search(r"val_loss=([\d.]+)", text)
-    if m:
-        return float(m.group(1))
-    return None
-
-
-def heartbeat(stop: threading.Event, interval: int, state: dict, log) -> None:
-    """Daemon thread: print a progress line every `interval` seconds.
-
-    Shows round/epoch progress AND a rolling estimate of round duration from
-    recent history, so even between epochs the operator can see pace + ETA
-    without inspecting the process."""
-    while not stop.wait(interval):
-        elapsed = time.time() - state["start"]
-        ep = state["epochs_per_round"] or 1
-        pct = int(100 * state["epoch_in_round"] / ep)
-        eta = ""
-        if state["round_durations"]:
-            avg = sum(state["round_durations"]) / len(state["round_durations"])
-            eta = f" avg_round={_fmt_dur(avg)}"
-        line = (
-            f"[loop] heartbeat t+{_fmt_dur(elapsed)} round={state['round']} "
-            f"epoch {state['epoch_in_round']}/{state['epochs_per_round']} ({pct}%) "
-            f"last_val={state['last_val']} last_round_done={state['last_round_done']}{eta}"
-        )
-        _emit(line, log)
-
-
-def _pid_alive(pid: int) -> bool:
-    """Cross-platform liveness probe: is a process with this PID still running?
-
-    本函数是 `acquire_lock` 判定陈旧锁的**唯一依据**——一个只读查询，因此实现必须是只读的。
-    2026-09-17：本处曾是裸 `os.kill(pid, 0)`，而 Windows 上那不是探测而是
-    `TerminateProcess(handle, 0)`——**查询动作会杀死锁持有者**（最坏：正在训练的 trainer），
-    且 `except Exception → False` 会把「我杀了它」记成「它本来就是死的」，双开护栏静默失效。
-
-    现已**委托唯一实现** `common.pid_probe.pid_alive`（stdlib-only 顶层模块，与 common.platform_utils 同层）：
-    该模块集中记录三个坑（Windows TerminateProcess / `pid<=0` 的进程组语义 / 宽捕获），
-    并由 `tests/common/test_pid_probe_windows_safe.py` 用注入的假 kernel32 直接回归。保留本函数名
-    只为调用点与测试稳定；**新增探测请直接用 `common.pid_probe.pid_alive`，不要再复制实现**。
-    """
-    return pid_alive(pid)
-
 
 # ────────────────────────── per-course 锁路径（plan multi-course-parallel-training §1.2/§3.1） ──
 # 2026-09-12：单实例护栏本身不能删（2026-09-06 双 trainer 并行写同一 traj 的事故），
@@ -192,9 +42,7 @@ def validate_course_name(course: str) -> str:
     if not c:
         return ""
     if ".." in c or not _COURSE_NAME_RE.match(c):
-        raise ValueError(
-            f"课程名非法: {c!r}——只允许 [A-Za-z0-9._-] 且不含 '..'（plan §1.1）"
-        )
+        raise ValueError(f"课程名非法: {c!r}——只允许 [A-Za-z0-9._-] 且不含 '..'（plan §1.1）")
     return c
 
 
@@ -223,6 +71,19 @@ def course_key_from_path(course_path: str) -> str:
     return validate_course_name(stem)
 
 
+def _pid_alive(pid: int) -> bool:
+    """跨平台存活探测薄壳：委托唯一实现 `common.pid_probe.pid_alive`。
+
+    2026-09-17：本处曾是裸 `os.kill(pid, 0)`，而 Windows 上那不是探测而是
+    `TerminateProcess(handle, 0)`——**查询动作会杀死锁持有者**（最坏：正在训练的 trainer）。
+    三个坑（Windows TerminateProcess / `pid<=0` 的进程组语义 / 宽捕获）现在只记在
+    `common.pid_probe`，并由 `tests/common/test_pid_probe_windows_safe.py` 用注入的假
+    kernel32 直接回归。保留本函数名只为调用点与测试稳定（该守卫按名枚举四份薄壳）；
+    **新增探测请直接用 `common.pid_probe.pid_alive`，不要再复制实现**。
+    """
+    return pid_alive(pid)
+
+
 def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "lock") -> bool:
     """PID 文件单实例锁（**薄壳**——实现唯一住在 `common/instance_lock`；锁文件格式仍是
     ``PID|EXE_PATH|START_TIMESTAMP``，裸 PID 旧文件仍兼容）。
@@ -246,76 +107,3 @@ def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "lock") -> b
 def cleanup_lock(lock_path: str) -> None:
     """Remove our lock file on exit (best-effort, only if we own it)."""
     release_instance_lock(lock_path)
-
-
-def auto_export_corpus(data_dir: str, log=None) -> int:
-    """Scan nn-demo/*.ndjson, export any new replays to *data_dir*.
-
-    Returns the number of NDJSON files that were (re-)exported.
-    Skips if nn-demo/ does not exist or contains no NDJSON files.
-    Uses ``--skip-verify`` because human-recorded replays were already
-    verified on first export; re-verification is redundant and slow.
-
-    The export script is idempotent: re-exporting the same NDJSON file
-    overwrites its shards with identical data.
-    """
-    ndjson_files = sorted(glob.glob(os.path.join(NN_DEMO_DIR, "*.ndjson")))
-    if not ndjson_files:
-        _emit("[export] no NDJSON files in nn-demo/ — skipping corpus export", log)
-        return 0
-
-    if not os.path.exists(EXPORT_SCRIPT):
-        _emit("[export] WARNING: export-observations.ts not found — skipping", log)
-        return 0
-
-    n = len(ndjson_files)
-    _emit(f"[export] exporting {n} NDJSON file(s) from nn-demo/ ...", log)
-    t0 = time.time()
-
-    # Find bun executable.  Pythonw.exe (no console) does not inherit the
-    # Git Bash PATH, so shutil.which() may fail.  Fall back to common
-    # Windows install locations.
-    bun_exe = shutil.which("bun")
-    if bun_exe is None:
-        # npm global install: %APPDATA%/npm/node_modules/bun/bin/bun.exe
-        appdata = os.environ.get("APPDATA", "")
-        candidate = os.path.join(appdata, "npm", "node_modules", "bun", "bin", "bun.exe")
-        if os.path.isfile(candidate):
-            bun_exe = candidate
-    if bun_exe is None:
-        _emit("[export] WARNING: 'bun' not found — skipping corpus export", log)
-        return 0
-
-    cmd = [
-        bun_exe,
-        "tools/replay/export-observations.ts",
-        "--skip-verify",
-        "--out",
-        data_dir,
-        *ndjson_files,
-    ]
-    try:
-        result = run_capture(
-            cmd,
-            cwd=REPO_ROOT,
-            timeout=300,  # 5 min budget — 101 replays take ~9s
-        )
-        dt = time.time() - t0
-        # Print last few lines of output (summary)
-        lines = (result.stdout + result.stderr).strip().splitlines()
-        for line in lines[-5:]:
-            _emit(f"[export] {line}", log)
-        if result.returncode != 0:
-            _emit(f"[export] WARNING: export exited with code {result.returncode}", log)
-        else:
-            _emit(f"[export] done in {dt:.1f}s", log)
-        return n
-    except FileNotFoundError:
-        _emit("[export] WARNING: 'bun' not found on PATH — skipping", log)
-        return 0
-    except subprocess.TimeoutExpired:
-        _emit("[export] WARNING: export timed out after 300s — skipping", log)
-        return 0
-    except Exception as e:
-        _emit(f"[export] WARNING: {e!r} — skipping", log)
-        return 0
