@@ -57,8 +57,10 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 
+from common.logutil import tag_logger
 from common.protocol import ProtocolError
 from worker.rollout_argv import retarget_argv
 from worker.volume_alloc import (
@@ -120,6 +122,10 @@ def _out_index(argv: list[str]) -> int:
     return -1
 
 
+#: 行日志：格式/时间戳只走 `common/logutil`。
+_log = tag_logger("stream", lambda: time)
+
+
 class StreamCollector:
     """逐局调度器：**每结算一局**就判「差额最大的关」，下一局派它。
 
@@ -135,7 +141,7 @@ class StreamCollector:
         spec: dict,
         vol: dict,
         *,
-        log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        log: Callable[[str], None] = _log,
         started_at: float | None = None,
     ) -> None:
         self.spec = spec
@@ -207,7 +213,7 @@ class StreamCollector:
         cls,
         spec: dict,
         *,
-        log: Callable[[str], None] = lambda msg: print(f"[stream] {msg}", flush=True),
+        log: Callable[[str], None] = _log,
         started_at: float | None = None,
     ) -> StreamCollector | None:
         """spec 带**启用的** `volume` 块 ⇒ 调度器；缺席/关闭 ⇒ `None`（老行为逐字不变）。

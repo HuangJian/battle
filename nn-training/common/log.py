@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from common.logutil import stamp
+from common.logutil import log_line, stamp
 
 
 class LogRouter:
@@ -36,6 +36,9 @@ class LogRouter:
             f"nn_log_prefix_{id(self)}", default=""
         )
         self._sinks: dict[str, Any] = {}
+        #: 已经喊过的失败键（`mirror:<课>` / `close:<课>`）：同一种失败只喊一次，
+        #: 否则日志自己坏掉时会每行刷一条 WARN。
+        self._warned: set[str] = set()
 
     # ---- 前缀 ----
     def get_prefix(self) -> str:
@@ -74,7 +77,33 @@ class LogRouter:
         who = course or self.get_prefix()
         sink = self._sinks.get(who) if who else None
         if sink is not None:
-            _mirror(sink, line)
+            self._mirror(sink, line, who)
+
+    def warn_once(self, key: str, msg: str) -> None:
+        """把**日志自己的**失败喊一次（同一 key 只喊一次）；喊也不能抛。
+
+        为什么不是 `pass`：镜像写失败以前完全静默 —— 该课日志在丢行，而控制台一切正常，
+        只有事后比对才发现少了半天。`pass` 会让「日志坏了」和「没有日志」长得一模一样。
+        """
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        try:
+            log_line("log", f"WARN {msg}")
+        except (OSError, ValueError):  # 喊话本身失败就到此为止（不许递归、不许抛）
+            pass
+
+    def _mirror(self, sink: Any, line: str, who: str) -> None:
+        """镜像一行到课日志；失败**不影响控制台**，但会喊一次（日志不得反向杀死训练）。"""
+        try:
+            sink.write(line + "\n")
+            sink.flush()
+        except Exception as e:  # 任何写失败都不许冒到训练循环
+            self.warn_once(
+                f"mirror:{who}",
+                f"课 {who} 的日志镜像写失败（{type(e).__name__}: {e}）"
+                "——控制台仍完整，该课日志文件在此刻丢行",
+            )
 
     # ---- 课日志句柄 ----
     def open_sink(self, course: str, path: str | Path) -> Any:
@@ -90,7 +119,7 @@ class LogRouter:
             p.parent.mkdir(parents=True, exist_ok=True)
             fh = open(p, "a", encoding="utf-8")  # noqa: SIM115
         except Exception as e:
-            print(f"[log] WARN 无法为课程 {course} 打开日志 {path}: {e}", flush=True)
+            log_line("log", f"WARN 无法为课程 {course} 打开日志 {path}: {e}")
             return None
         self._sinks[course] = fh
         return fh
@@ -106,8 +135,11 @@ class LogRouter:
             return
         try:
             fh.close()
-        except Exception:
-            pass
+        except Exception as e:  # 关闭失败只是句柄回收问题，不许冒
+            self.warn_once(
+                f"close:{course}",
+                f"课 {course} 的日志句柄关闭失败（{type(e).__name__}: {e}）——忽略（退出时由 OS 回收）",
+            )
 
     def close_sinks(self) -> None:
         """进程退出（或单课程入口收尾）时收敛全部课日志句柄。"""
@@ -121,15 +153,6 @@ _DEFAULT_ROUTER = LogRouter()
 def default_router() -> LogRouter:
     """进程默认路由（需要隔离时自建 `LogRouter()` 并传 `router=`）。"""
     return _DEFAULT_ROUTER
-
-
-def _mirror(sink: Any, line: str) -> None:
-    """镜像一行到课程日志；失败只吞（日志不得反向杀死训练）。"""
-    try:
-        sink.write(line + "\n")
-        sink.flush()
-    except Exception:
-        pass
 
 
 def format_line(msg: str, *, course: str | None = None) -> str:

@@ -6091,3 +6091,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （那是扫描器坏没坏的判据，不是额度；文件数已从 63 掉到 44）。
 - **后果**：print 存量 179 → **138** 处、53 → 44 文件；`remote/` 88 → 47。手拼日志时间戳的出口
   只剩 `remote/worker_proc.py`（L0 约束）与 `biz/` / `worker/` 的少量残留。
+
+## §2026-11-14-nn-python-audit-round6-log-router-visibility（日志层不许自己静默）
+
+- **决定**：`common/log.py::LogRouter` 里两处裸 `except Exception: pass` 改成「吞掉但喊一次」：
+  镜像写失败（`_mirror`）与课日志句柄关闭失败（`close_sink`）各按 `mirror:<课>` / `close:<课>`
+  去重喊一行 WARN。**异常类型不收紧**——日志路径的契约仍是「日志不得反向杀死训练」，收紧成
+  `(OSError, ValueError)` 会让一个 sink 的编程错误直接崩掉训练进程，代价远大于收益。
+- **为什么**：`pass` 让两种状态长得一模一样 —— 「这门课的日志文件正在丢行」和「这门课本来就没开
+  日志」。真实的现场是：控制台一切正常、课日志少了半天，只有事后比对才发现。丢信息的是**可观测性**，
+  不是功能。
+- **去重而非每行喊**：日志坏掉时每行一条 WARN 会把控制台刷成噪音，把真正的问题淹没；按「课 + 失败
+  种类」喊一次就够定位（重复出现说明没修）。
+- **出口**：WARN 走 `common/logutil.log_line("log", …)`（含 `[HH:MM:SS]`），不再直接 `print`；
+  `open_sink` 那条同族告警一并改走 `log_line` ⇒ `common/log.py` 的 print 由 3 降到 2（只剩
+  `log()` 与 `say()` 两个真正的出口）。
+- **顺带**：`worker/stream_collect.py` 的两处 `log=` 默认回调（`[stream]`）迁到
+  `common.logutil.tag_logger`。`worker/iter_rollout.py` 的 `[iter]` **刻意没迁**：该文件已 999/1000 行，
+  加一个 import + 一个模块级 `_log` 就撞 LOC 预算 —— 先拆再迁（§P0-2），不为了迁移而抬预算。
