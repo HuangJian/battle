@@ -1332,3 +1332,27 @@ def test_result_ready_endpoint_auth_and_shapes(tmp_path: Path, worker_factory) -
         srv2.shutdown()
         srv2.server_close()
         th2.join(timeout=5)
+
+
+def test_start_beacon_failure_is_logged(tmp_path: Path) -> None:
+    """推模式下 `computing_at` **只有** `_mark_started` 会打：失败必须留一行（2026-11-14）。
+
+    GPU 机在推模式里从不连 hub，`/jobs/{id}/start` 没别人替它调。打点失败曾经是裸 `pass`：
+    后果是这份 job 的 `computing_at` 永远为空 ⇒ hub 一直按「还没开算」判它掉队、再派一份，
+    而现场只看到「备份数量莫名其妙变多」。判据 = **不抛 + 恰好一行**（带 jid/wid + 异常类型）。
+    """
+    logs: list[str] = []
+
+    class _BrokenHub:
+        def start_job(self, *_a: object, **_k: object) -> None:
+            raise OSError("hub 不可达")
+
+    # 登记表在本用例里没人读（`_mark_started` 只碰 hub + 日志），给一份空表即可。
+    ws = PushWorkers(tmp_path / "push.json", log=_quiet)
+    disp = PushDispatcher(_BrokenHub(), ws, "sekret", log=logs.append)
+    disp._mark_started("jid-beacon-1", "w1")
+
+    assert len(logs) == 1, logs
+    head, _, cause = logs[0].partition("（")
+    assert head.endswith("jid-beacon-1 @ push:w1: 开算打点没打上")
+    assert cause.startswith("OSError('hub 不可达')")

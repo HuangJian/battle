@@ -745,10 +745,12 @@ def _torch_ppo(st: _CoreRun) -> None:
     st.shards_root = ppo_shards_root(spec.job_dir, iter_info)
     if on_ppo_start is not None:
         try:
-            # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。
             on_ppo_start()
-        except Exception:
-            pass
+        except Exception as e:
+            # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。
+            # 但这正是「hub 以为没人算、于是再派一份」的成因 —— 必须留痕，别让它只在
+            # 「备份数量莫名其妙变多」时才被发现。
+            log(f"job {jid}: PPO 开算打点没送到（{e!r}）—— 掉队阈值晚起算，可能多开一份备份")
     # ★ 2026-10-25（用户口径）：日志必须说清**在干什么** —— 采集（iter）之外，PPO 这一段
     #   此前一个事件都没有，云机上看起来就是「一直停在 it102 的 iter」。报一遍数（不按
     #   epoch 逐条：那要动 `ppo_update` 的回调契约，见 `tests/hub/test_priority_schedule.py:700`）。
@@ -1133,8 +1135,9 @@ def _paddle_ppo(st: _CoreRun) -> None:
     if spec.on_ppo_start is not None:
         try:
             spec.on_ppo_start()
-        except Exception:
-            pass
+        except Exception as e:
+            # 同 `_torch_ppo`：打点失败不致命，但它是「hub 再派一份备份」的成因。
+            spec.log(f"job {jid}: PPO 开算打点没送到（{e!r}）—— 掉队阈值晚起算，可能多开一份备份")
     _report_progress(
         "ppo",
         it=int(manifest.get("it", 0) or 0),

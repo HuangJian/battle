@@ -334,8 +334,8 @@ class _StartBeacon:
     （它是 `store_scheduling` 里 `computing_elsewhere_since` 的唯一时基）。
 
     ★ 失败路径（2026-10-21）：join 超时/线程报错 ⇒ **先 ready**（重复抑制优先）再同步补发
-    一次；仍失败只记一行 —— `job_started` 本身是 `try/except pass`，所以「失败」只能靠本类
-    的 `ok` 位判，不能靠异常。**绝不阻塞 PPO。**
+    一次；仍失败只记一行 —— `job_started` 自己不抛（2026-11-14 起它失败时会打一行，但那是
+    **日志**不是异常），所以「失败」只能靠本类的 `ok` 位判，不能靠异常。**绝不阻塞 PPO。**
     """
 
     __slots__ = ("_fn", "_thread", "ms", "ok")

@@ -6148,3 +6148,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判据（行为用例）**：`tests/remote/test_job_control_visibility.py` 逐条钉「调用不抛 + 恰好一行提到该 job
   + 行里带得上异常类型」，文案用 `partition`/`startswith`/`endswith` 对账，不挂整句措辞。
 - **基线**：G9 静默面 64 → **58 处 / 37 文件**（`job_lifecycle` 的 6 条清零，条目已删）。
+
+## §2026-11-14-start-beacon-never-silently-misses（`computing_at` 打不上 = hub 会再派一份）
+
+- **决定**：打完上次的 `job_started` 之后，把**同一个打点**在别处的三份拷贝一并改成留痕：
+  `remote/train_core.py` 的 `_torch_ppo`（`on_ppo_start()`）与 `_paddle_ppo`
+  （`spec.on_ppo_start()`）、`remote/push_dispatch.py::_mark_started`（`self.hub.start_job`）。
+  **行为不变**（仍不抛）—— 只把「掉队阈值的时基没打上」说出来。
+- **为什么这三处必须一起改**：`computing_at` 是 `store_scheduling` 里 `computing_elsewhere_since`
+  的唯一时基。推模式下 GPU 机从不连 hub，`_mark_started` 是**唯一**会打这个点的地方；训练腿里
+  `on_ppo_start` 是 worker 侧的那一发。任何一处静默失败都等价于「hub 以为没人算」，下场是多开
+  一份备份 —— 而备份本身是合法策略，于是**现场唯一可见的症状是「备份数量莫名其妙变多」**，
+  归因链断在最需要的地方。
+- **判据**：`tests/remote/test_hub_push_dispatch.py::test_start_beacon_failure_is_logged`
+  （假 hub 抛 `OSError` ⇒ 恰好一行、`endswith`/`startswith` 对账，不挂整句措辞）。训练腿的两处
+  没有可调用的运行时入口（要真 torch / 真课程），由代码评审 + G9 基线兜（条目已删 ⇒ 退回静默即红）。
+- **基线**：G9 55 处 / 35 文件（本轮 `train_core` 2 处 + `push_dispatch` 1 处清零）。
+- **顺带**：`remote/job_round.py::_StartBeacon` 的注释原先写「`job_started` 本身是 `try/except pass`」，
+  已改成「自己不抛、失败打一行」—— 注释描述的行为变了就得跟着改，否则下一刀会按错的假设动手。

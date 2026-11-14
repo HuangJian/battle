@@ -1271,8 +1271,13 @@ class PushDispatcher:
         """
         try:
             self.hub.start_job(jid, worker_id=push_worker_id_of(wid))
-        except Exception:
-            pass
+        except Exception as e:
+            # 推模式里 GPU 机从不连 hub，这个大点**只有这里**会打：失败 = 这份 job 的
+            # `computing_at` 永远是空的 ⇒ hub 按「还没开算」判它掉队/再派一份。
+            self._log(
+                f"{jid} @ {push_worker_id_of(wid)}: 开算打点没打上（{e!r}）—— "
+                f"hub 侧 computing_at 为空，会按掉队处理"
+            )
 
     def _cancel_others(self, jid: str, winner: str) -> None:
         """landed（结果已入账）⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。
