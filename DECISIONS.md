@@ -5986,3 +5986,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：`common/` 的模块级可变容器只剩 `platform_utils._UNREAPED` 一个；测试不再触碰
   `distribution._ACTIVE` / `_ABORTED_TAGS` / `_RESTART_SEEN`（现为 `_REQUESTS` / `_RESTARTS` 的公开属性）。
   状态仍是进程级（收工断连与跨代去重本来就是进程级语义），但**所有权**从此写在类上而不是模块词典里。
+
+## §2026-11-14-nn-python-audit-round4-distribution-io-gate（G8：L0 出站副作用只减不增）
+
+- **决定**：新增 `nn-training/tests/test_distribution_io_budget.py`，AST 按**点分调用名**
+  数 `common/distribution.py` 的出站副作用：`net_http.racing_urlopen`（网络出口）、
+  `urllib.request.Request`、`run_capture`（git ls-files）、`subprocess.run`（git cat-file），
+  按原语名冻结（各 1，共 4）。只拦增长；某键减少未同步基线 = 红（额度不回流）。
+  `_request(...)` 这类**内部漏斗**不计：它是同一处出口的复用，数它会把「调用点多」误报成「出口多」。
+- **被否决**：只数总数（总 4 处不变但把 git 换成 HTTP 也算「没涨」——方向错了，B8 要搬就搬到 `remote/`）；
+  把裸 `run` / `Request` 一律计入（任何对象的 `.run()` 都会撞进来）；用 `.py` 路径字面量定位源码
+  （会撞 `tests/helpers/text_asserts.py` 口径 B 的已知限边，让源码文本断言基线无谓抬格——这里用
+  `importlib` + `__file__` 定位，判据是整数计数而不是文本）。
+- **后果**：`common/distribution.py` 的 IO 面从此有账（4 处），B8 把线路搬去 `remote/` 时逐项归零、
+  删键即可；此前「往 L0 加一处 urlopen」不受任何门禁阻拦。
