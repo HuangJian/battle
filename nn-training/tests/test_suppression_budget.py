@@ -52,6 +52,10 @@ def _scan() -> dict[str, dict[str, int]]:
     for p in _iter_py():
         rel = p.relative_to(ROOT).as_posix()
         src = p.read_text(encoding="utf-8", errors="replace")
+        # 快速前置过滤：没有这两个子串的文件不可能含目标注释（全仓 tokenize 一遍 ~5s，
+        # 超过 conftest 的单用例 5s 警告阈值）。过滤只跳过“必然为 0”的文件，不改变计数。
+        if "noqa" not in src and "type:" not in src:
+            continue
         n_noqa = n_ignore = 0
         for tok in tokenize.generate_tokens(io.StringIO(src).readline):
             if tok.type != tokenize.COMMENT:

@@ -5954,3 +5954,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：新增抑制符必须先解释；`trainer/dispatch_queue.py`（7 处 re-export）之类存量仍在，
   清理时基线随之调小。`mypy` 的 `warn_unused_ignores=false` 未动 —— 这仍意味着存量里可能有无用
   ignore，但门禁至少保证了「不再变多」。
+
+## §2026-11-14-nn-python-audit-round4-private-assert-gate（G5：私有断言只减不增）
+
+- **决定**：新增 `nn-training/tests/test_private_assert_budget.py`，AST 扫 `tests/**` 的每条 `assert`，
+  判据表达式里出现私有属性（`x._private`，不含 `__dunder__`）或私有键下标（`d["_k"]`）即计数；
+  按文件冻结在 `tests/golden/private_assert_baseline.json`（703 条 / 126 文件）。只拦增长 +
+  「基线只许调小」。门禁自身的断言不读私有名 ⇒ 不占额度。
+- **被否决**：把私有属性**赋值**（385 处）与 `from x import _name`（146 处）一起冻结（P0-8 的
+  三种形态里，只有断言把实现细节钉成事实 API；赋值/导入的清理要连带改接缝，等 G5 存量真降下来
+  再开第二条）；用 `grep "\\._"` 计数（注释/字符串里的 `._` 会假阳性，且无法区分断言与其他语句）。
+- **后果**：新用例不能再靠读私有状态通过；`tests/remote/test_rollout_node.py`（43）与
+  `tests/worker/test_rollout_volume.py`（46）这类大户仍是存量，迁移到 `seams` 公开查询时基线随之调小。
