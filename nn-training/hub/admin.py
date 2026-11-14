@@ -42,6 +42,7 @@ from typing import Any
 
 from common import distribution
 from common.fs import atomic_write_json
+from common.logutil import tag_logger
 from common.protocol import (
     NODE_CAPABILITIES,
     NODE_KINDS,
@@ -59,6 +60,12 @@ WORKER_PREFETCH_BODY_MAX = 64 * 1024
 #: `/admin/worker-error` 请求体上限（plan/component-error-registry §4.3-S3b）：体里是一条错误
 #: 事件（含 `detail` ≤ 4000 字符）+ 几个标识字段——64KB 已宽裕一个数量级，超限 413 而不是读进内存。
 WORKER_ERROR_BODY_MAX = 64 * 1024
+
+
+#: `/admin/*` 的行日志：格式与时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
+#: 迁移前是 8 处手拼 `[{time.strftime(...)}] [hub-server] ` 的 `print(..., flush=True)`
+#: ——输出逐字节不变（`stamp()` 就是 `[HH:MM:SS]`），只是格式不再有第二份实现。
+_log = tag_logger("hub-server", lambda: time)
 
 
 def rss_bytes() -> int:
@@ -525,10 +532,9 @@ class AdminRoutes:
         if info is None:
             self._json({"job_id": jid, "unfrozen": False, "error": "该 job 未被冻结"}, 409)
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工解冻：job={jid} "
+        _log(
+            f"人工解冻：job={jid} "
             f"（冻于 {info.get('reclaims')} 次零回传后）——已回池可重领",
-            flush=True,
         )
         self._json(
             {"job_id": jid, "unfrozen": True, "reclaims": info.get("reclaims", 0)}, 200
@@ -553,10 +559,9 @@ class AdminRoutes:
         except ValueError as e:
             self._json({"error": str(e)}, 400)
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] 清空 BC 续训索引：course={course} "
+        _log(
+            f"清空 BC 续训索引：course={course} "
             f"（{cleared} 轮）",
-            flush=True,
         )
         self._json({"course": course, "cleared": cleared}, 200)
 
@@ -580,10 +585,9 @@ class AdminRoutes:
         except ValueError as e:
             self._json({"error": str(e)}, 400)
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工解除 BC 独占：course={course} "
+        _log(
+            f"人工解除 BC 独占：course={course} "
             f"（worker={info.get('worker_id') or '?'} job={info.get('job_id') or '?'}）",
-            flush=True,
         )
         self._json(info, 200)
 
@@ -614,10 +618,9 @@ class AdminRoutes:
             self._json(info, 409)
             return
         if info.get("cancelled"):
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工作废：job={jid} "
+            _log(
+                f"人工作废：job={jid} "
                 "（账本 job_cancelled；已从可领池移除）",
-                flush=True,
             )
         self._json(info, 200)
 
@@ -732,10 +735,9 @@ class AdminRoutes:
             except ProtocolError as e:
                 self._json({"error": str(e)}, 400)
                 return
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] push worker 登记（运行时）："
+            _log(
+                f"push worker 登记（运行时）："
                 f"{w['id']} -> {w['url']}",
-                flush=True,
             )
             self._json({"action": action, "worker": w}, 200)
             return
@@ -900,10 +902,9 @@ class AdminRoutes:
             )
             return
         if body.get("skipPing") is True:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点登记 skipPing=1 id={nid} url={url}"
+            _log(
+                f"节点登记 skipPing=1 id={nid} url={url}"
                 "（跳过 ping 门——排障路径，节点可能不可达）",
-                flush=True,
             )
         else:
             # push 类节点（GPU / 离线）的探活面是 worker_server 的 `GET /ping`（Bearer）；
@@ -946,11 +947,10 @@ class AdminRoutes:
             note = f"（{why}）"
         else:
             note = ""
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点登记 id={nid} url={url} action={action}"
+        _log(
+            f"节点登记 id={nid} url={url} action={action}"
             + note
             + f"（来源 {self.client_address[0]}）",
-            flush=True,
         )
         self._nodes_ack(nid, action, kind, merged)
 
@@ -1021,9 +1021,8 @@ class AdminRoutes:
         new_nodes = list(nodes)
         new_nodes[idx] = merged
         atomic_write_json(path, {**cfg, "nodes": new_nodes}, indent=2)
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点收工 id={nid}（enabled=false，"
+        _log(
+            f"节点收工 id={nid}（enabled=false，"
             f"下个会话注册时恢复）（来源 {self.client_address[0]}）",
-            flush=True,
         )
         self._json({"ok": True, "id": nid, "action": "unregistered"}, 200)

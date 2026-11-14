@@ -7,7 +7,6 @@
   "common/instance_lock.py": 4,
   "common/log.py": 3,
   "common/logutil.py": 1,
-  "hub/admin.py": 8,
   "hub/backfill_offline.py": 2,
   "hub/http_face.py": 8,
   "hub/offline.py": 3,

@@ -6033,3 +6033,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   「基线只许调小」（与 G4/G5/G6/G8 同款），源码文本断言基线 1146 → 1147（+1）。
 - **后果**：print 存量 231 → 219 处、66 → 65 文件；`hub/` 只剩 `admin.py` / `http_face.py`
   等按请求拼 tag 的面没迁（那一批要另设计「tag 带变量」的出口）。
+
+## §2026-11-14-nn-python-audit-round4-admin-logging（P0-6 / B2 第三批：/admin 人工操作行）
+
+- **决定**：`hub/admin.py` 的 8 处 `print(f"[{time.strftime('%H:%M:%S')}] [hub-server] …")` 改走
+  `_log = tag_logger("hub-server", lambda: time)`。这批**输出逐字节不变**（`stamp()` 的输出就是
+  `[HH:MM:SS]`），只是把「手拼时间戳」这份第二实现删掉——所以不需要改任何用例，也不需要像前两批
+  那样声明行为变更。
+- **被否决**：把 `hub/http_face.py` 一起做（它的 tag 带请求源 IP，`[hub-server 127.0.0.1]`，
+  要另设计「tag 带变量」的出口 + 改 `test_hub_auth_d9_order.py` 的文本断言；混进来会让这一刀
+  从「零行为变化」变成「有行为变化」）；把 `strftime` 全部清掉（`admin.py:1017` 那处是 **JSON 里的
+  ISO 时间戳**，不是日志行，`stamp()` 不适用）。
+- **后果**：print 存量 219 → 211 处、65 → 64 文件；`hub/` 的日志时间戳实现只剩 `common/logutil` 一处
+  （除 `http_face` 的按 IP 拼 tag 那条线）。
