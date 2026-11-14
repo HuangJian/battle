@@ -1,0 +1,265 @@
+// 课程 g4-mobility —— g3-survival 的并行后继·机动/走位/反卡位臂（2026-11-14）
+//
+// 状态：截稿报告（2026-11-14 20:09；it383/500；仍 enabled）。正式结课需控制台停课。
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────────
+//   起点 = g3-survival.it290；保留 g3-survival 的全部收入/生存骨架，只加 8 项
+//   “机动/走位/反卡位”价格：冻结窗口命中、破墙、反卡死、反顶墙、火线暴露、
+//   承伤暴露、挨打赖线、反互相卡位。与并行臂 g4-precision 同起点 / 同关卡 /
+//   同预算 / 同 eval；本臂只回答：
+//   **用“正破墙 + 窗内进攻 + 反死锁/反赖线”这套走位价格，能不能在不掉胜率的前提下
+//   把 g3-survival 的 507 顶墙拍/局、1078 卡死拍/局、9.3% 火线率压下去。**
+//
+// ── 1. 用户观察 → 两臂分工 ─────────────────────────────────────────────────
+//   用户 2026-11-14 对 g3-survival 录像的 10 条观察，拆成 5+5，两条并行臂各自可归因：
+//     并行臂（g4-precision）：
+//       ② 一直在乱枪打鸟
+//       ⑤ 一直在追逐近身杀敌，不会远距离狙击
+//       ⑥ 不追求安全杀伤——背击、侧击
+//       ⑦ 经常顶钢开火
+//       ⑩ 敌人不动时，一直在错开一格/半格、打不到它的位置开火
+//     本臂（g4-mobility）：
+//       ① 一直在无意义掉头
+//       ③ 冰冻期不会主动进攻
+//       ④ 不躲炮弹/炮口
+//       ⑧ 不会破墙开路
+//       ⑨ 和敌人互相卡住
+//   ⇒ 不把 10 项塞进一门课：两臂各 5 项，“赢的那臂”可以单独归因；下一课再合并。
+//
+// ── 2. 本臂的 5 项分别靠什么落地（含“没有直接列”的那一项）──────────────────
+//   ① 无意义掉头：**没有方向反转率列**。本臂用 `stuckTicks`（最长连续没换格且没打中）
+//      + `wallPressTicks`（有前进意图 + 零位移 + 前脸被挡）抓“走不动/顶墙”；
+//      用 `cellsVisited`、`stopTicks` 做守卫。若 it100 后 replay 抽检仍在无意义掉头，
+//      下一版需要新增“方向反转率”观测列（代码改动，不在本课范围）——不假装本课能直接测它。
+//   ③ 冰冻期不会主动进攻：`hitsInFreezeShieldWindow`（冻结 ∪ 道具盾窗口内的命中）正价。
+//   ④ 不躲炮弹/炮口：三条递进——`threatTicks`（站在火线上的拍数，事前）、
+//      `hurtWeight`（火线近失/命中加权，事中）、`postHitLaneTicks`（挨打后仍赖在同一条轴，事后）。
+//   ⑧ 不会破墙开路：`aimBricks`（真拆掉的格数）正价；它是正收入，不是“鼓励乱打墙”。
+//   ⑨ 和敌人互相卡住：`stuckTicks`（物理死锁）+ `enclWeightTicks`（同拍同行/同列 ≥2 辆的加权拍）。
+//
+// ── 3. 起点与选点口径 ──────────────────────────────────────────────────────
+//   bc = `nn-training/weights/g3-survival/g3-survival.it290.20261114-065008.json`（用户点名）。
+//   ⚠ it290 是固定 eval 种子上 700 局的单点峰值（82.6%），存在选点偏差；
+//     本课**不把 82.6% 当基线承诺**，只把它当用户指定起点。无偏参照 = g3-survival
+//     it250–300 晚期窗口均值 79.9%（11 点 × 700 局）。
+//   两臂同起点；`kickstart_ref: true` + `kickstart_init: 0.1` + `kickstart_decay: 0.5`：
+//   前几轮用 it290 当锚，防止新增价格导致的 value 头冲击把 g3-survival 的强项洗掉。
+//
+// ── 4. 价目表校准（真 eval 数据，不是拍脑袋）────────────────────────────────
+//   数据 = g3-survival it250–300 × 700 局/点 = 7700 局（本机 eval_log.jsonl）。
+//   基础 Φ 均值 327.6/局（与 g4-precision 同一份数据、同一套骨架）。
+//   本臂新增项 EV：
+//     冻结窗口命中 +6.58 · 破墙 +6.20 · 反卡死 −4.72 · 反顶墙 −4.78
+//     · 火线暴露 −9.32 · 承伤暴露 −10.83 · 挨打赖线 −7.61 · 反互卡 −6.36
+//     ⇒ 合计 **−30.84（−9.4% Φ）**。是“温和净税”，不是把 Φ 压成负值；
+//       value 头（g3-survival 晚期 ~0.58 loss）能吸收这个量级。
+//   机制锚（g3-survival it250–300 实测）：
+//     stuckTicks 均值 1078 / 中位 69 / P90 1025 · wallPressTicks 均值 507 / 中位 201 / P90 809
+//     · threat 率 9.3% · hurtWeight 181/局 · postHit 率 1.45% · encl 率 16.5%
+//     · freeze 窗命中 7.64/局 · aimBricks 7.16/局。
+//
+// ── 5. 预注册判据（主判只认 eval；训练 rollout 的 7 关轮换 winRate 不可比）────
+//   主 1（胜率）：
+//     it400–500 的 eval 均值（21 点 × 700 局）≥ **81.0%**（目标）；
+//     与 g3-survival it250–300 的同 (stage, seed) 配对差 ≥ **+0pp**（不劣化）；
+//     < 78.0% ⇒ 判负。
+//   主 2（反死锁·机制门）：stuckTicks 的 P90 从 1025 降到 **≤800**（均值 ≤850）。
+//   主 3（反顶墙·机制门）：wallPressTicks 均值从 507 降到 **≤420**（P90 ≤650）。
+//   主 4（躲火线·机制门）：threat 率从 9.3% 降到 **≤8.0%**；postHit 率从 1.45% 降到 **≤1.2%**。
+//   主 5（窗内进攻+破墙·机制门）：freeze 窗命中从 7.64 升到 **≥10/局**；
+//     aimBricks 从 7.16 升到 **≥8.5/局**。
+//   守卫（任一破 ⇒ 停腿复盘，不是“再调调看”）：
+//     kills ≥17.5 · deaths ≤1.9 · **stop ≤6%**（基线 2.04%，抬到 6% = 站桩签名）
+//     · **cellsVisited ≥130**（基线 149.9，掉 13% = 探索坍塌）· timeout ≤7%
+//     · shots/局 ≥70（不许为避税禁火）· 连续 2 个 eval 点 win <78%
+//     · KL ≥0.15 连续 2 轮 / entropy <0.25 连续 8 轮 / NaN ⇒ 正常熔断（breakers_off=false）。
+//   ⚠ 机制门只作解释项，不作停止判据（AGENTS §15.3）。
+//   ⚠ 本臂的最大风险 = **负税把策略压回站桩**（z5/y35/y36 的旧伤）。因此：
+//     stop >6% 或 cells <130 一出现就停，不要用“胜率还没掉”来辩护；
+//     站桩是延迟爆炸，先停再判因。
+//   ⚠ 若机制门都动了而胜率不动 ⇒ **不要加价**，瓶颈不在奖励侧。
+//   ⚠ 回退顺序（预注册）：
+//     ① stop 抬头 ⇒ 先削 wThreat 100→60，再削 wStuck 0.04→0.03；
+//     ② cells 掉 ⇒ 删 wEncl 40（它是唯一会压近身的项），保留反死锁/反顶墙；
+//     ③ 破墙正价把 shots 拉爆（>160/局）⇒ 把 wBrick 1.0→0.5，而不是删反死锁。
+//
+// ── 6. 预算与运行 ──────────────────────────────────────────────────────────
+//   500 it / 24h；target_transitions 24576；rotation even / 7 关；
+//   eval 35 关 × 20 seed 每 5 it。g3-survival 实测 300 it ≈ 8.5h（≈103s/it）
+//   ⇒ 500 it ≈ 14.3h，24h 预算内。
+//   lr 8e-5 / epochs 4 / mb 1024 / γ .998 / λ .95 / normalize_ret true；
+//   新 `paired_rotate_seed: 20261114`（两臂共用；不与 g3 的 20270225 续跑）。
+//
+// ── 7. 风险与限制 ──────────────────────────────────────────────────────────
+//   ① `threatTicks` / `postHitLaneTicks` / `enclWeightTicks` 都是“暴露/卡位”税；
+//      三项同向叠加时，模型可能学“离所有敌人远一点”。stop/cells 守卫就是防这个。
+//   ② `stuckTicks` 是**当前连续段**，不是累计（动一格或打中敌人就清零）；
+//      站着开火且命中可以绕开它。反站桩另有 wIdle（继承），本课不新增 wIdle。
+//   ③ `wallPressTicks` 只在“想走 + 走不动 + 前脸被挡”时计；正常绕墙/贴墙不算。
+//      但 35 关是迷宫，长时间顶墙仍可能出现；用 free 350 拍保护正常寻路。
+//   ④ 破墙正价只认 `aimBricks`（真拆掉的格子），不认“开了几炮”；
+//      空射税不在本臂，靠这个正价 + shots 守卫约束。
+//   ⑤ 推理规则 B1/B8/B10 是 eval/deploy-only，训练链刻意不认；本课不启用。
+//   ⑥ §15.5：新奖励 = 新实验 ⇒ 新 out/traj/backup；禁与 g3-survival 或 g4-precision 续跑。
+{
+  "version": 5,
+  "name": "g4-mobility",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      // ① 收入骨架 —— 与 g3-survival 逐字相同，先保住 79.9% 胜 / 18.5 杀 / 1.64 死。
+      // 杀一辆敌车 +15；晚期 18.5 杀/局 ⇒ +277.5，是最大收入项，不许为省弹弃战。
+      "wKill*kills",
+      // 每命中一发 +1.5；晚期 41.4 命中/局 ⇒ +62.1。冻结窗口命中的 +1.2 是它的增量价。
+      "+ wHit*aimHits",
+      // 命中率项：5×命中/开火；晚期约 +1.9。只奖励“打得准”，不奖励“打得多”。
+      "+ wAcc*aimHits/(playerShots+1)",
+      // ② 冰冻期主动进攻：冻结/护盾窗口内每命中 +1.2（有效命中价 2.7），封 12 发（+14.4）。
+      // 晚期 7.6 发/局 ⇒ +6.6；窗口内命中密度 0.00486/拍，目标是抬到 ≥0.007。
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // ③ 破墙开路：每拆一格砖 +1.0，封 12 格（+12）。晚期 7.2 格/局 ⇒ +6.2。
+      // 只认真拆掉的格子（aimBricks），不是“开了几炮”；空射税不在本臂，靠这个正价引导。
+      "+ wBrick*min(aimBricks, brickCap)",
+      // ④ 原有收入：拾取 / 通关 / 速度逐字继承。
+      // 捡一个道具 +4，封 6 个；晚期 5.35 个/局 ⇒ +21.4。拾取价不是本课变量。
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80；晚期 79.9% 胜率 ⇒ +63.9。这是主奖，任何走位税都不许把它压过去。
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 通关越快最多 +8：13000 拍拐点，1400 拍满速。逐字继承 g3-survival 的时轴。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      // ⑤ 原有生存价格：承伤 / 死亡 / 不动逐字继承。
+      // 每掉 1 点血 −0.12；晚期 513 血/局 ⇒ −61.5。只罚真掉血，不含致死那一击。
+      "- wDmg*playerDamageTaken",
+      // 每死一次 −24；晚期 1.64 次/局 ⇒ −39.4。与 wDmg 分工：这条管致死，那条管过程。
+      "- wDeath*playerDeaths",
+      // 不动拍占比 × 100；晚期 2.9% ⇒ −2.9。逐字继承，与新走位税一起防站桩。
+      "- wIdle*idleTicks/(ticks+1)",
+      // ⑥ 反卡死：最长连续“没换格且没打中”超过 300 拍的部分，每拍 −0.04，封 900 拍（−36）。
+      // 晚期中位 69 拍（不罚）、均值 1078（长尾）⇒ 只咬真正的死锁局，不税正常走位。
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // ⑦ 反顶墙：“有前进意图 + 零位移 + 前脸被挡”超过 350 拍的部分，每拍 −0.08，封 300 拍（−24）。
+      // 晚期中位 201 拍（不罚）、均值 507 ⇒ 只咬长时间硬顶；正常绕墙不受罚。
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // ⑧ 火线暴露：在敌方弹道/炮口线上的拍数占比，每 1 个百分点罚 1 分（wThreat 100×rate），封 30%（−30）。
+      // 晚期率 9.3% ⇒ −9.3/局；与 wDmg 分工：wDmg 罚真掉血，本项罚“站在弹道上”。
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // ⑨ 承伤暴露：hurtWeight 是敌弹火线的近失/命中加权和，每单位 −0.06，封 600（−36）。
+      // 晚期 181/局 ⇒ −10.8；这是在 wDmg 之外，对“贴着弹道挨打”再加一层过程价。
+      "- wHurt*min(hurtWeight, hurtCap)",
+      // ⑩ 挨打后赖线：被击中后仍留在源火线轴上的拍数占比，每 1 个百分点罚 6 分（wPostHit 600×rate），封 4%（−24）。
+      // 晚期率 1.45% ⇒ −7.6/局；一句话：挨了打就换道/换位，不要原地对射。
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // ⑪ 反互相卡位：同拍同行/同列（19px 带）敌车数 ≥2 的加权拍占比，每 1 个百分点罚 0.4 分（wEncl 40×rate），封 40%（−16）。
+      // 晚期率 16.5% ⇒ −6.4/局；只罚“被夹住/互相卡住”，不罚正常近战。
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 100.0,
+      "threatRateCap": 0.3,
+      "wHurt": 0.06,
+      "hurtCap": 600.0,
+      "wPostHit": 600.0,
+      "postHitRateCap": 0.04,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/g3-survival/g3-survival.it290.20261114-065008.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261114,
+  "decision_events": false,
+  "decision_k": 10,
+  "out": "tmp/g4-mobility/weights.json",
+  "traj": "tmp/g4-mobility",
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/g4-mobility",
+  "backup_prefix": "g4-mobility",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
+
+// ── 结课报告（截稿：2026-11-14 20:09，it383/500，仍 enabled）────────────────
+// ① 运行账：11-14 08:09:11 → 19:53:10，383/500 it（≈11h44m、≈110s/it）；
+//    仍 enabled，非正式停课。383 个 checkpoint，全部 397,757 bytes。
+//    eval 网格 77 点 × 700 局 = 53,900 局（每 5 it）。
+// ② 主曲线：it0 82.57% → it190 **86.0%**（峰值）→ it380 84.43%；
+//    最近 5 点（360–380）均值 **82.37%**；后期 79.86–84.43 震荡，未再回到 86%。
+// ③ 低杀超时（kills≤10 的 max_ticks）：
+//    it190 **15/700**（2.14%，占超时 51.7%）；it380 **18/700**（2.57%）；
+//    后期 15–19 震荡；主关 2020（8–10）、2008（4–6）、2032（1–2）。
+//    同一 stage/seed 在 it190/it250 重合 9/15 —— 结构性陷阱，不是随机噪声。
+//    低杀画像（it190）：kills 1.9 · cells 22 · shots 307 · miss 98.1% ·
+//    wallPress 4662 · stuck 7488 · 首杀 6729 · 承伤 102 · HP 0.77；
+//    9/15 零杀；up/down 占移动 79%；basePressure 2374（胜局 199）。
+// ④ 机制/画像：
+//    it190 lives_ex 9.86% · timeout 4.14% · hard13 **77.69%** ·
+//    kills 18.6 · deaths 1.55 · dmg 487；后期 lives_ex 10–14.9、timeout 4.4–6.9。
+//    生存四项把命耗尽从 g3 晚期 14.8% 压到 9.9%，但低杀超时没有下降；
+//    机动项（stuck/wall/freeze/brick）在 200+ 轮后仍没有稳定机制收益。
+//    hard13 最高是 **it245 78.85%**（总胜率 85.0、lowkill 19）。
+// ⑤ 判词：
+//    **it190 是本课程最佳权重**；之后 190 轮没有新高，后期均值 82.4%。
+//    它不是低杀超时的解（15–19/700 仍在）；A 方案（opening hybrid）应从这里起。
+//    若继续跑，唯一晋升门 = 新点总胜率 >86.0 且 lowkill ≤15/700 且 hard13 ≥77；
+//    否则用 it190，不再追后期权重。
+// ⑥ bc 建议：**g4-mobility.it190**（已备份到 weights/in-use/）。
+//    理由：总胜率最高 86.0；剔除低杀后的 normal win 87.88（并列最高）；
+//    hard13 77.69（第二）；lowkill 15（最少）。修低杀尾后上限约 88.1%。
+//    Fallback = it245（hard13 78.85，但 lowkill 19）/ special.it130（survival 最好）。
+// ⑦ 产物：tmp/g4-mobility/{training_log,eval_log}.jsonl；weights 383 个全量备份；
+//    最后完整 eval = it380；it383 checkpoint 存在但无完整 eval。
