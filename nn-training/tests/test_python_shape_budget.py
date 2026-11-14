@@ -161,7 +161,6 @@ WIDE_FUNCS_BASELINE = {
 #: `WeightsLedger`），名册里对应的三条随之删除。
 L0_MUTABLE_ALLOWED = {
     "common/distribution.py": frozenset({"_ACTIVE", "_ABORTED_TAGS", "_RESTART_SEEN"}),
-    "common/net_http.py": frozenset({"_RACING_OPENERS"}),
     "common/platform_utils.py": frozenset({"_UNREAPED"}),
 }
 
@@ -169,7 +168,6 @@ L0_MUTABLE_ALLOWED = {
 GLOBAL_BASELINE = {
     "biz/reward_context.py": 2,
     "common/distribution.py": 1,
-    "common/net_http.py": 1,
     "hub/admin.py": 1,
     "remote/http.py": 1,
     "remote/payload_slim.py": 1,

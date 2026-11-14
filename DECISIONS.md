@@ -5911,3 +5911,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （靠调用方纪律，不是代码级保证）。
 - **后果**：`common` 的布局错误在 `python -O` 下也会立即失败，而不是带着错布局继续训练。
   函数体内的调试期 assert 不受 G7 影响（P1-9 允许保留但要求注明）。
+
+## §2026-11-14-nn-python-audit-round4-net-http-cache（P0-5：net_http 懒单例）
+
+- **决定**：`common/net_http.py` 的 `_NO_PROXY_OPENER` 与 `_RACING_OPENERS` 两个模块级
+  可变缓存改成 `@functools.cache`（函数本体只负责 `build_opener`）；`global` 语句随之删除。
+  `tests/test_python_shape_budget.py` 的 L0 可变名册与 `GLOBAL_BASELINE` 同步删掉 net_http 条目。
+- **被否决**：保留 dict + 加锁（opener 是无状态缓存，锁只会把读路径串行化）；把 opener 做成
+  显式注入对象（调用点遍布 `urlopen`/`urlopen` 相关热路径，收益不抵改动面；`cache` 已是
+  stdlib 的线程安全缓存）；继续留在 G2 名册（名册的 `test_l0_allowlist_is_still_needed`
+  会判过期）。
+- **后果**：`common/net_http.py` 不再有模块级可变容器或 `global`；缓存无法显式清空，但
+  `cached` 只有 2 个键、进程生命周期内 opener 本就应复用。G2 名册只剩 `distribution` /
+  `platform_utils` 两组存量。
