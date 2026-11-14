@@ -48,6 +48,7 @@ from common.protocol import (
     is_content_sha,
 )
 from remote import download as download_mod
+from remote import train_common as train_common_mod
 from remote import train_core as train_core_mod
 from remote import worker as worker_mod
 from remote.worker_server import missing_blobs
@@ -323,6 +324,8 @@ def test_run_job_product_section_caches_weights() -> None:
     `worker.py` 会变成「读一份不再有这段的文件」，断言只会静默空过。
     """
     src = Path(train_core_mod.__file__).read_text(encoding="utf-8")
+    # 回传段（`_core_result`）已下沉到 train_common；一条口径跨两份源码，拼起来读。
+    src += Path(train_common_mod.__file__).read_text(encoding="utf-8")
     assert "_cache_produced_weights(blob_root, wj_raw, log)" in src
     # 且 opt tar 那一行仍在（两者同规、同一理由）
     assert "hashlib.sha256(opt_tar_raw).hexdigest()" in src

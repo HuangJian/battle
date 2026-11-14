@@ -22,11 +22,20 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from common.logutil import secs
-from common.protocol import BLOB_OPT, BLOB_REF, ProtocolError, coef_active
+from common.protocol import (
+    BLOB_OPT,
+    BLOB_REF,
+    ProtocolError,
+    coef_active,
+    encode_weights_json,
+    pack_result_v2,
+)
+from remote.wire import _wire_block
 
 
 def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
@@ -139,8 +148,7 @@ def course_prep(manifest: dict, job_dir: Path, epoch_mult: float, prep_b: Any) -
     if epoch_mult != 1.0:
         prep_b.add(
             "训练放大",
-            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs}"
-            f"（manifest {int(manifest.get('epochs') or 0)}）",
+            f"PPO epochs ×{epoch_mult:g} ⇒ {epochs}（manifest {int(manifest.get('epochs') or 0)}）",
         )
     return course, epochs
 
@@ -154,9 +162,7 @@ def decode_demo_bank(raw: bytes) -> dict:
     return {k: np.asarray(v) for k, v in dict(np.load(io.BytesIO(raw))).items()}
 
 
-def check_demo_bank(
-    jid: str, bank: dict, coef: float, per_mb: int, src: str, prep_b: Any
-) -> None:
+def check_demo_bank(jid: str, bank: dict, coef: float, per_mb: int, src: str, prep_b: Any) -> None:
     """demo bank 的字段安全阀 + 一行装载读数（缺字段 = 拒收，不静默当纯 PPO 跑）。"""
     need = {"obs", "scalars", "extra", "actions", "masks"}
     if not need.issubset(bank.keys()):
@@ -165,3 +171,143 @@ def check_demo_bank(
         "demo bank",
         f"N={bank['obs'].shape[0]} coef={coef:g} per_mb={per_mb} src={src}",
     )
+
+
+def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
+    """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
+
+    value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
+    ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
+    """
+    return {
+        "policy": float(agg.get("policy", 0.0)),
+        "value": float(agg.get("value", 0.0)),
+        "entropy": float(agg.get("entropy", 0.0)),
+        "kl": float(agg.get("kl", 0.0)),
+        "kickstart": float(agg.get("kickstart", 0.0)),
+        "demo_bc": float(agg.get("demo_bc", 0.0)),
+        "mean_ret": float(agg.get("mean_ret", 0.0)),
+        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
+        "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
+        "steps": int(sum(c["obs"].shape[0] for c in chunks)),
+        "steps_pooled": int(total_steps),
+        "chunks": len(chunks),
+    }
+
+
+@dataclass
+class _CoreRun:
+    """一次训练核的派生状态；输入仍住 `TrainSpec`。"""
+
+    base_url: str
+    token: str
+    spec: Any
+    prep_b: Any = None
+    course: Any = None
+    epochs_eff: int = 0
+    model: Any = None
+    opt: Any = None
+    device_t: Any = None
+    use_dp: bool = False
+    opt_raw: bytes = b""
+    opt_dir: Path = field(default_factory=Path)
+    opt_restore_sec: float = 0.0
+    opt_src: str = ""
+    steps_init: int = 0
+    steps_box: dict[str, int] = field(default_factory=dict)
+    weights_src: str = ""
+    blob_hits: int = 0
+    blob_miss_bytes: int = 0
+    kick_kl: float = 0.0
+    batch: dict = field(default_factory=dict)
+    wanted: dict = field(default_factory=dict)
+    ref_model: Any = None
+    demo_coef: float = 0.0
+    demo_per_mb: int = 0
+    demo_bank: dict | None = None
+    shards_root: str = ""
+    t_ppo: float = 0.0
+    train_b: Any = None
+    chunks: list = field(default_factory=list)
+    total_steps: int = 0
+    agg: dict = field(default_factory=dict)
+    ppo_sec: float = 0.0
+    wj_raw: bytes = b""
+    wj_sent_raw: bytes = b""
+    opt_tar_raw: bytes = b""
+    opt_sent_raw: bytes = b""
+    opt_tar_b64: str = ""
+    t_art: float = 0.0
+
+
+def _load_ppo_data(st: _CoreRun, engine) -> None:
+    """读 shard 并分块（torch/paddle 两条核共用同一组引擎契约）。"""
+    spec = st.spec
+    manifest = spec.manifest
+    prep_b = st.prep_b
+    episodes = engine.load_episodes(
+        st.shards_root,
+        float(manifest["gamma"]),
+        float(manifest["lam"]),
+        normalize_adv=str(manifest["adv_norm"]) != "none",
+        normalize_ret=bool(manifest.get("normalize_ret", False)),
+        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+        bundle=prep_b,
+    )
+    prep_b.emit(f"job {spec.jid}: 准备完成 {time.time() - spec.t_prep:.1f}s")
+    st.total_steps = sum(e["obs"].shape[0] for e in episodes)
+    st.chunks = engine.chunk_episodes(
+        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
+    )
+
+
+def _core_result(st: _CoreRun) -> tuple[dict, Any]:
+    """两条核共用的 result / wire 形状（字节已在产物段准备好）。"""
+    spec = st.spec
+    jid, manifest, iter_info = spec.jid, spec.manifest, spec.iter_info
+    agg, chunks, total_steps, ppo_sec = st.agg, st.chunks, st.total_steps, st.ppo_sec
+    wj_sent_raw, opt_tar_b64 = st.wj_sent_raw, st.opt_tar_b64
+    course, opt_restore_sec = st.course, st.opt_restore_sec
+    blob_hits, blob_miss_bytes = st.blob_hits, st.blob_miss_bytes
+    weights_src = st.weights_src
+    payload_bytes, payload_dl_sec = spec.payload_bytes, spec.payload_dl_sec
+    unpack_sec, prune_dirs = spec.unpack_sec, spec.prune_dirs
+    weights_wire_bytes = spec.weights_wire_bytes
+    ts_code_bytes, ts_code_hit = spec.ts_code_bytes, spec.ts_code_hit
+    _t_art = st.t_art
+    result = {
+        "job_id": jid,
+        "data_fp": manifest["data_fp"],
+        "init_weights_fp": manifest["init_weights_fp"],
+        # 回传的 weights_json：旧形态用的是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）；
+        # R1 形态位命中时这里是 delta 容器（本机那份全量仍是 `wj_raw`，见上面产物段）。
+        "weights_json": encode_weights_json(wj_sent_raw),
+        "opt_tar_b64": opt_tar_b64,
+        "agg": _agg_block(agg, chunks, total_steps),
+        "commit_echo": manifest["commit"],
+        "ppo_sec": ppo_sec,
+    }
+    # M3：节点自己跑的 rollout 的采集口径（两条后端腿共用一份；见 `train_common.copy_iter_metrics`）。
+    copy_iter_metrics(result, iter_info)
+    result["wire"] = _wire_block(
+        payload_bytes=payload_bytes,
+        payload_dl_sec=payload_dl_sec,
+        unpack_sec=unpack_sec,
+        prune_dirs=prune_dirs,
+        opt_restore_sec=opt_restore_sec,
+        grad_sec=ppo_sec,
+        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
+        art_sec=time.time() - _t_art,
+        blob_hits=blob_hits,
+        blob_miss_bytes=blob_miss_bytes,
+        weights_src=weights_src,
+        weights_bytes=weights_wire_bytes,
+        ts_code_bytes=ts_code_bytes,
+        ts_code_hit=ts_code_hit,
+        rollout_sec=(iter_info or {}).get("rollout_sec"),
+        bun_version=(iter_info or {}).get("bun_version"),
+    )
+    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    result["wire"]["result_bytes"] = len(pack_result_v2(result))
+    return result, course

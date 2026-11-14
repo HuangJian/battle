@@ -86,18 +86,18 @@ def test_classifier_returns_exception_not_raises() -> None:
 # ────────────────────────── ② 调用点守卫（run_job 太大，无法单测驱动） ──────────────────────────
 
 
-def _run_job_node() -> ast.FunctionDef:
-    """四处 `job_body_error` 包装的宿主：**训练核**（2026-09-24 S9 从 `run_job` 下沉）。
+PHASE_FNS = ("_torch_opt", "_torch_ref", "_load_demo_bank", "_torch_ppo")
 
-    它们服务的是「跑一个轮次」那条链（opt/ref/demo 装载与 PPO 更新），所以随训练核搬到
-    `remote/train_core.py::run_training_core`——作业壳（`worker.run_job`）只剩网络/校验/上报。
+
+def _run_job_nodes() -> list[ast.FunctionDef]:
+    """四处 `job_body_error` 包装的宿主：训练核的四个阶段 helper。
+
+    它们服务的是「跑一个轮次」那条链（opt/ref/demo 装载与 PPO 更新）；核入口
+    `run_training_core` 只编排。作业壳（`worker.run_job`）只剩网络/校验/上报。
     """
     src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
-    return next(
-        n
-        for n in ast.parse(src).body
-        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
-    )
+    fns = {n.name: n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)}
+    return [fns[name] for name in PHASE_FNS]
 
 
 def _job_body_error_call_phases(fn: ast.FunctionDef) -> list[str]:
@@ -122,7 +122,7 @@ def test_run_job_wraps_restore_and_grad_phases() -> None:
     ——正是 §4 事故的形状。所以用调用点清单钉住（这条链无法单测驱动，本仓既有同款源码
     守卫：`tests/remote/test_worker_device.py`）。
     """
-    phases = _job_body_error_call_phases(_run_job_node())
+    phases = [p for fn in _run_job_nodes() for p in _job_body_error_call_phases(fn)]
     assert len(phases) == 4, f"应有 4 处包装（restore×3 + grad），实得 {phases}"
     assert any("restore" in p and "opt" in p for p in phases), phases
     assert any("restore" in p and "ref" in p for p in phases), phases
@@ -132,23 +132,25 @@ def test_run_job_wraps_restore_and_grad_phases() -> None:
 
 def test_wrapped_blocks_re_raise_protocol_error_untouched() -> None:
     """包装块必须先 `except ProtocolError: raise`——否则上游已判定的确定性失败被降级重述。"""
-    fn = _run_job_node()
     handlers_with_body_error = 0
-    for n in ast.walk(fn):
-        if not isinstance(n, ast.Try):
-            continue
-        calls_body_error = any(
-            isinstance(c, ast.Call)
-            and isinstance(c.func, ast.Name)
-            and c.func.id == "job_body_error"
-            for h in n.handlers
-            for c in ast.walk(h)
-        )
-        if not calls_body_error:
-            continue
-        handlers_with_body_error += 1
-        bare = [
-            h for h in n.handlers if isinstance(h.type, ast.Name) and h.type.id == "ProtocolError"
-        ]
-        assert bare, "包装块缺少 `except ProtocolError: raise`（会覆盖上游判定）"
+    for fn in _run_job_nodes():
+        for n in ast.walk(fn):
+            if not isinstance(n, ast.Try):
+                continue
+            calls_body_error = any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Name)
+                and c.func.id == "job_body_error"
+                for h in n.handlers
+                for c in ast.walk(h)
+            )
+            if not calls_body_error:
+                continue
+            handlers_with_body_error += 1
+            bare = [
+                h
+                for h in n.handlers
+                if isinstance(h.type, ast.Name) and h.type.id == "ProtocolError"
+            ]
+            assert bare, "包装块缺少 `except ProtocolError: raise`（会覆盖上游判定）"
     assert handlers_with_body_error == 4, handlers_with_body_error

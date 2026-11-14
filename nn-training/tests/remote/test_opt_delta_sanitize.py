@@ -183,15 +183,9 @@ def test_load_opt_state_sanitizes_and_keeps_the_base_pristine(tmp_path: Path) ->
 
 def test_train_core_restore_uses_the_sanitizing_helper() -> None:
     tree = ast.parse((ROOT / "remote" / "train_core.py").read_text(encoding="utf-8"))
-    fn = next(
-        n
-        for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
-    )
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_torch_opt")
     names = {
-        n.func.id
-        for n in ast.walk(fn)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
     }
     assert names >= {"_load_opt_state"}
 

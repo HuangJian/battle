@@ -81,7 +81,8 @@ def test_paddle_bc_runs_one_v6_epoch_and_exports_weights(tmp_path) -> None:
     assert out["history"]["hold_acc"] and len(out["history"]["hold_acc"]) == 1
     assert out["history"]["train_loss"] and out["history"]["val_loss"]
     assert out["delivered_epoch"] == 1
-    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1])
+    # history 按 4 位小数落账，返回值是未舍入的原始 float：容差取落账精度。
+    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1], abs=1e-4)
     assert seen and seen[0][0] == 1 and set(seen[0][1]) >= {"hold_acc"}
     assert (tmp_path / "out" / "weights.json").is_file()
     meta = json.loads((tmp_path / "out" / "weights.json").read_text(encoding="utf-8"))
@@ -106,7 +107,7 @@ def test_paddle_bc_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path) -> None:
     assert delivered is not None and delivered >= SMOOTH_WINDOW
     assert out["delivered_epoch"] == delivered
     assert out["best_val_loss"] == pytest.approx(
-        out["history"]["val_loss"][delivered - 1]
+        out["history"]["val_loss"][delivered - 1], abs=1e-4
     )
     meta = json.loads((tmp_path / "out" / "weights.json").read_text(encoding="utf-8"))
     assert meta["delivered_epoch"] == delivered

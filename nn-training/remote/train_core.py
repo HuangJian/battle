@@ -53,9 +53,7 @@ from common.protocol import (
     JobCancelledError,
     ProtocolError,
     encode_opt_tar,
-    encode_weights_json,
     job_seed,
-    pack_result_v2,
 )
 from remote.download import (
     WEIGHT_SOURCES,
@@ -67,15 +65,17 @@ from remote.download import (
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
 from remote.train_common import (
+    _core_result,
+    _CoreRun,
+    _load_ppo_data,
     blob_wanted,
     check_demo_bank,
-    copy_iter_metrics,
     course_prep,
     decode_demo_bank,
     kick_kl_value,
     ppo_shards_root,
 )
-from remote.wire import _wire_block, _wire_time, note_ppo_tail
+from remote.wire import _wire_time, note_ppo_tail
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -337,29 +337,6 @@ def _ppo_done_log(
     return ppo_sec
 
 
-def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
-    """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
-
-    value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
-    ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
-    """
-    return {
-        "policy": float(agg.get("policy", 0.0)),
-        "value": float(agg.get("value", 0.0)),
-        "entropy": float(agg.get("entropy", 0.0)),
-        "kl": float(agg.get("kl", 0.0)),
-        "kickstart": float(agg.get("kickstart", 0.0)),
-        "demo_bc": float(agg.get("demo_bc", 0.0)),
-        "mean_ret": float(agg.get("mean_ret", 0.0)),
-        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
-        "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
-        "steps": int(sum(c["obs"].shape[0] for c in chunks)),
-        "steps_pooled": int(total_steps),
-        "chunks": len(chunks),
-    }
-
-
-
 @dataclass(frozen=True, kw_only=True)
 class TrainSpec:
     """一次训练核的**全部输入**（签名曾摊成 27 个关键字参数）。
@@ -396,49 +373,51 @@ class TrainSpec:
     log: Callable[[str], None] = lambda _msg: None
 
 
-def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict, Any]:
-    """**训练核**：把一个轮次算出来、把产物落进 `job_dir`，返回 `(result, course)`。
+def _load_demo_bank(st: _CoreRun) -> None:
+    """demo bank 的内容寻址、解码与校验（两条核共用）。"""
+    spec = st.spec
+    jid, manifest = spec.jid, spec.manifest
+    blob_root, base_url, token = spec.blob_root, st.base_url, st.token
+    preloaded, log = spec.preloaded, spec.log
+    prep_b = st.prep_b
+    blob_hits, blob_miss_bytes = st.blob_hits, st.blob_miss_bytes
+    # ---- demo 混 batch（x20 后续）：bank 内容寻址 + 装载校验 ----
+    # 安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO
+    # （那会让 demo 腿的整轮更新在日志一切正常下丢失 demo 项）。
+    demo_coef, demo_per_mb, demo_raw, demo_src, _h, _m = _fetch_demo(
+        jid=jid,
+        manifest=manifest,
+        blob_root=blob_root,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
+    blob_hits += _h
+    blob_miss_bytes += _m
+    demo_bank: dict | None = None
+    if demo_raw:
+        try:
+            bank = decode_demo_bank(demo_raw)
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（demo bank 装载）", e) from e
+        check_demo_bank(jid, bank, demo_coef, demo_per_mb, demo_src, prep_b)
+        demo_bank = bank
 
-    入参全是「作业壳已经测好的事实」：payload 的**字节数**与两段耗时（`wire` 账要用，但字节
-    本身不进来）、TS 代码缓存命中、blob 缓存根、本次 payload 预取命中（`preloaded`）。
-    出参只有两个：`result`（拿去做 `validate_result` + 上报 + 半离线尾巴合并）与 `course`
-    （半离线补传要用它把课程名带回去）。
+    st.demo_coef, st.demo_per_mb, st.demo_bank = demo_coef, demo_per_mb, demo_bank
+    st.blob_hits, st.blob_miss_bytes = blob_hits, blob_miss_bytes
 
-    `base_url` / `token` 只为 blob 内容寻址下载（cache miss 时）——命中即零网络。
-    """
-    jid = spec.jid
-    job_dir = spec.job_dir
-    work_dir = spec.work_dir
-    manifest = spec.manifest
-    iter_info = spec.iter_info
-    blob_root = spec.blob_root
-    payload_bytes = spec.payload_bytes
-    payload_dl_sec = spec.payload_dl_sec
-    unpack_sec = spec.unpack_sec
-    ts_code_bytes = spec.ts_code_bytes
-    ts_code_hit = spec.ts_code_hit
-    device = spec.device
-    torch_threads = spec.torch_threads
-    prune_dirs = spec.prune_dirs
-    epoch_mult = spec.epoch_mult
-    backend = spec.backend
-    preloaded = spec.preloaded
+
+def _torch_model(st: _CoreRun) -> None:
+    """课程上下文 / torch 设备 / 模型构建（原核的第一段）。"""
+    spec = st.spec
+    jid, job_dir, work_dir = spec.jid, spec.job_dir, spec.work_dir
+    manifest, epoch_mult = spec.manifest, spec.epoch_mult
+    device, torch_threads = spec.device, spec.torch_threads
+    prep, log = spec.prep, spec.log
     init_w = spec.init_w
-    weights_src = spec.weights_src
-    weights_wire_bytes = spec.weights_wire_bytes
-    blob_hits = spec.blob_hits
-    blob_miss_bytes = spec.blob_miss_bytes
-    prep = spec.prep
-    t_prep = spec.t_prep
-    should_cancel = spec.should_cancel
-    on_ppo_start = spec.on_ppo_start
-    log = spec.log
-    if backend == "paddle":
-        # ★ Paddle 核是**独立函数**（下面）而不是本函数里的分支：本函数第一段就 `import torch`，
-        #   而 AI Studio 的训练任务镜像里根本没有 torch ⇒ 必须在它之前分出去。
-        return _run_training_core_paddle(base_url, token, spec)
-    if backend != "torch":
-        raise ProtocolError(f"未知训练后端 backend={backend!r}（只认 torch / paddle）")
     prep_b = LogBundle(log) if prep is None else prep
     import numpy as np
 
@@ -451,7 +430,6 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     if torch_threads > 0:
         torch.set_num_threads(torch_threads)
     import worker.ppo.engine as ppo_engine
-    from worker.data.weights_io import load_state_into, save_weights_json
 
     # ---- per-job 确定性种子（D5）：load/chunk/update 前重新播种 ----
     # numpy RandomState 种子必须 < 2^32：sha256 前 8 个 hex 字符（32 bit）
@@ -556,6 +534,25 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
             f"{'' if _cu else ' (cpu)'}｜[0]={_gpu_name}｜cap={_gpu_cap}｜"
             f"dp={use_dp}｜threads={torch.get_num_threads()}",
         )
+    st.prep_b, st.course, st.epochs_eff = prep_b, course, epochs_eff
+    st.model, st.device_t, st.use_dp = model, device_t, use_dp
+
+
+def _torch_opt(st: _CoreRun) -> None:
+    """opt 解析 / restore / DataParallel 包装（原核的第二段）。"""
+    spec = st.spec
+    jid, job_dir, manifest = spec.jid, spec.job_dir, spec.manifest
+    blob_root, preloaded = spec.blob_root, spec.preloaded
+    init_w, log = spec.init_w, spec.log
+    base_url, token = st.base_url, st.token
+    prep_b, model, device_t, use_dp = st.prep_b, st.model, st.device_t, st.use_dp
+    blob_hits, blob_miss_bytes = st.blob_hits, st.blob_miss_bytes
+    weights_src, opt_dir = st.weights_src, st.opt_dir
+    dev_str = str(spec.device)
+    import torch
+
+    from worker.data.weights_io import load_state_into
+
     # ---- M2 B3 / R0 / B1：opt 解析（身份命中 → 批量 GET → 单取 → BOD1 落地）----
     # `blob_hits` / `blob_miss_bytes` 的 init 那一手账在作业壳的权重解析处建；本模块只在它
     # 上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
@@ -632,7 +629,8 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
             model.to(device_t)
             opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
             prep_b.add(
-                "opt", f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam"
+                "opt",
+                f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam",
             )
     except ProtocolError:
         raise  # 上游已判定的确定性失败（缺 blob / 缺 init 权重）原样上抛
@@ -644,7 +642,6 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     # 否则 ckpt 的键会长出 "module." 前缀。raw_model 始终指向未包装模块，产物落盘用它。
     # ⚠ DP 会改变梯度归约顺序 ⇒ 末位 ulp 变化，与单卡 run 的逐位 A/B 不可比；
     #   它是新开一条实验臂的开关，不是透明加速（plan/ppo-optimization.plan.md §3.4）。
-    raw_model = model
     if dev_str in ("cuda-dp", "dp"):
         if use_dp:
             # `job …: DataParallel 生效（… 卡 …）` 行已退役（2026-10-06，用户指令「删除云机 worker
@@ -658,11 +655,32 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
                 " —— 退化为单卡（行为等同 --device cuda）"
             )
 
+    st.opt, st.opt_raw, st.opt_dir = opt, opt_raw, opt_dir
+    st.opt_restore_sec, st.weights_src = opt_restore_sec, weights_src
+    st.blob_hits, st.blob_miss_bytes = blob_hits, blob_miss_bytes
+    st.kick_kl, st.batch, st.wanted = _kick_kl, _batch, _wanted
+    st.model, st.use_dp = model, use_dp
+
+
+def _torch_ref(st: _CoreRun) -> None:
+    """BC kickstart ref 的字节安全阀 + 冻结装载。"""
+    spec = st.spec
+    jid, manifest, job_dir = spec.jid, spec.manifest, spec.job_dir
+    blob_root, preloaded = spec.blob_root, spec.preloaded
+    log, prep_b, device_t, use_dp = spec.log, st.prep_b, st.device_t, st.use_dp
+    blob_hits, blob_miss_bytes = st.blob_hits, st.blob_miss_bytes
+    base_url, token = st.base_url, st.token
+    kick_kl, _batch, _wanted = st.kick_kl, st.batch, st.wanted
+    import torch
+
+    import worker.ppo.engine as ppo_engine
+    from worker.data.weights_io import load_state_into
+
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
     # ★ B1：判据**已上提**到 opt 解析之前（那里要用它决定 ref 进不进批量 GET）；这里只把
     #   上提算出的 `_kick_kl` 落回 `kick_kl`，字节获取走两核共用的 `_fetch_ref`。
-    kick_kl = _kick_kl
+    kick_kl = st.kick_kl
     ref_model: torch.nn.Module | None = None
     _ref = _fetch_ref(
         jid=jid,
@@ -700,31 +718,21 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
         except Exception as e:
             raise job_body_error("restore（kickstart ref 装载）", e) from e
 
-    # ---- demo 混 batch（x20 后续）：bank 内容寻址 + 装载校验 ----
-    # 安全阀同 ref：coef>0 而 bank 不可得 ⇒ 响亮失败，绝不静默降级为纯 PPO
-    # （那会让 demo 腿的整轮更新在日志一切正常下丢失 demo 项）。
-    demo_coef, demo_per_mb, demo_raw, demo_src, _h, _m = _fetch_demo(
-        jid=jid,
-        manifest=manifest,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log,
-    )
-    blob_hits += _h
-    blob_miss_bytes += _m
-    demo_bank: dict | None = None
-    if demo_raw:
-        try:
-            bank = decode_demo_bank(demo_raw)
-        except ProtocolError:
-            raise
-        except Exception as e:
-            raise job_body_error("restore（demo bank 装载）", e) from e
-        check_demo_bank(jid, bank, demo_coef, demo_per_mb, demo_src, prep_b)
-        demo_bank = bank
+    st.ref_model = ref_model
+    st.blob_hits, st.blob_miss_bytes = blob_hits, blob_miss_bytes
 
+
+def _torch_ppo(st: _CoreRun) -> None:
+    """PPO 装载 / chunk / update 与取消接线。"""
+    spec = st.spec
+    jid, manifest, iter_info = spec.jid, spec.manifest, spec.iter_info
+    should_cancel, on_ppo_start, log = spec.should_cancel, spec.on_ppo_start, spec.log
+    model, opt, device_t = st.model, st.opt, st.device_t
+    epochs_eff, ref_model, kick_kl = st.epochs_eff, st.ref_model, st.kick_kl
+    demo_bank, demo_coef, demo_per_mb = st.demo_bank, st.demo_coef, st.demo_per_mb
+    import worker.ppo.engine as ppo_engine
+
+    st.shards_root = ppo_shards_root(spec.job_dir, iter_info)
     # ---- PPO：load → chunk → update（同一 backend 调用链，D4） ----
     # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
     # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
@@ -732,7 +740,7 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     # ★ 2026-10-11（plan/rollout-topup-fastpath §3.5 / 评审 P0-1）：装载根由**产出方**给出
     # （`iter_info["shards_root"]`）。换根档下 shard 住在 scratch、不再搬回 job 目录 ⇒ 这里若
     # 仍写 `str(job_dir)` 就会以 0 局语料开练（静默训空）。见 `ppo_shards_root`。
-    shards_root = ppo_shards_root(job_dir, iter_info)
+    st.shards_root = ppo_shards_root(spec.job_dir, iter_info)
     if on_ppo_start is not None:
         try:
             # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。
@@ -769,24 +777,8 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     # 就什么都看不见）。
     train_b = LogBundle(log)
     try:
-        episodes = ppo_engine.load_episodes(
-            shards_root,
-            float(manifest["gamma"]),
-            float(manifest["lam"]),
-            normalize_adv=str(manifest["adv_norm"]) != "none",
-            normalize_ret=bool(manifest.get("normalize_ret", False)),
-            # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
-            # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
-            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-            bundle=prep_b,
-        )
-        # ★ 装载完成 = 「本 job 准备」这一段结束：**一行**把所有入口/设备/opt/demo/装载
-        # 读数一次说清（原来 ~10 行），随后才进 PPO（2026-09-24 日志节食）。
-        prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
-        chunks = ppo_engine.chunk_episodes(
-            episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
-        )
+        _load_ppo_data(st, ppo_engine)
+        total_steps, chunks = st.total_steps, st.chunks
         agg = ppo_engine.ppo_update(
             model,
             opt,
@@ -795,9 +787,7 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
             device_t,
             kl_coef=float(manifest["kl_coef"]),
             # ent_coef：None（旧 hub / 未配）→ 引擎常量 ENT_COEF；0.0 是合法值，不能 `or` 兜底。
-            ent_coef=(
-                None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
-            ),
+            ent_coef=(None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])),
             ref_model=ref_model,
             kickstart_kl=kick_kl,
             demo_bank=demo_bank,
@@ -827,6 +817,21 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     # ---- P1-4（2026-10-21）：产物段自己的账（save_weights_json / _ppo_save / pack_*）----    # 这一段在关键路径上、**不属于 `ppo=`**（`t_ppo` 在 `ppo_update` 之后就已结束），
     # 但日志的 `other=` 格又被当成「准备段 CPU」解释了 ⇒ 归因不闭合。读数只在
     # `PPO_CUDA_DIAG=1` 时打一行（稳态不增行，日志节食的约束不变）。
+    st.agg, st.ppo_sec = agg, ppo_sec
+
+
+def _torch_artifacts(st: _CoreRun) -> None:
+    """weights / ckpt / delta / blob_cache / 身份映射的产物段。"""
+    spec = st.spec
+    jid, job_dir, manifest, blob_root = spec.jid, spec.job_dir, spec.manifest, spec.blob_root
+    init_w, log = spec.init_w, spec.log
+    model, opt, device_t, epochs_eff = st.model, st.opt, st.device_t, st.epochs_eff
+    opt_raw, opt_dir = st.opt_raw, st.opt_dir
+    raw_model = model
+    import torch
+
+    from worker.data.weights_io import save_weights_json
+
     _t_art = time.time()
 
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
@@ -924,47 +929,343 @@ def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict,
     # 还是 io（编码+记账）。治它的那次真机证据：w=33.7s / opt=18.4s ⇒ 写盘与 XLA 调用。
     if time.time() - _t_art >= 1.0:
         log(f"[art] 分段 w={_a1 - _a0:.1f}s opt={_a2 - _a1:.1f}s io={time.time() - _a2:.1f}s")
-    result = {
-        "job_id": jid,
-        "data_fp": manifest["data_fp"],
-        "init_weights_fp": manifest["init_weights_fp"],
-        # 回传的 weights_json：旧形态用的是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）；
-        # R1 形态位命中时这里是 delta 容器（本机那份全量仍是 `wj_raw`，见上面产物段）。
-        "weights_json": encode_weights_json(wj_sent_raw),
-        "opt_tar_b64": opt_tar_b64,
-        "agg": _agg_block(agg, chunks, total_steps),
-        "commit_echo": manifest["commit"],
-        "ppo_sec": ppo_sec,
-    }
-    # M3：节点自己跑的 rollout 的采集口径（两条后端腿共用一份；见 `train_common.copy_iter_metrics`）。
-    copy_iter_metrics(result, iter_info)
-    result["wire"] = _wire_block(
-        payload_bytes=payload_bytes,
-        payload_dl_sec=payload_dl_sec,
-        unpack_sec=unpack_sec,
-        prune_dirs=prune_dirs,
-        opt_restore_sec=opt_restore_sec,
-        grad_sec=ppo_sec,
-        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
-        art_sec=time.time() - _t_art,
-        blob_hits=blob_hits,
-        blob_miss_bytes=blob_miss_bytes,
-        weights_src=weights_src,
-        weights_bytes=weights_wire_bytes,
-        ts_code_bytes=ts_code_bytes,
-        ts_code_hit=ts_code_hit,
-        rollout_sec=(iter_info or {}).get("rollout_sec"),
-        bun_version=(iter_info or {}).get("bun_version"),
+    st.wj_raw, st.wj_sent_raw = wj_raw, wj_sent_raw
+    st.opt_tar_raw, st.opt_sent_raw, st.opt_tar_b64 = opt_tar_raw, opt_sent_raw, opt_tar_b64
+    st.t_art = _t_art
+
+
+def run_training_core(base_url: str, token: str, spec: TrainSpec) -> tuple[dict, Any]:
+    """**训练核**：把一个轮次算出来、把产物落进 `job_dir`，返回 `(result, course)`。
+
+    入参全是「作业壳已经测好的事实」：payload 的**字节数**与两段耗时（`wire` 账要用，但字节
+    本身不进来）、TS 代码缓存命中、blob 缓存根、本次 payload 预取命中（`preloaded`）。
+    出参只有两个：`result`（拿去做 `validate_result` + 上报 + 半离线尾巴合并）与 `course`
+    （半离线补传要用它把课程名带回去）。
+
+    `base_url` / `token` 只为 blob 内容寻址下载（cache miss 时）——命中即零网络。
+    """
+    if spec.backend == "paddle":
+        # ★ Paddle 核是**独立函数**（下面）而不是本函数里的分支：本函数第一段就 `import torch`，
+        #   而 AI Studio 的训练任务镜像里根本没有 torch ⇒ 必须在它之前分出去。
+        return _run_training_core_paddle(base_url, token, spec)
+    if spec.backend != "torch":
+        raise ProtocolError(f"未知训练后端 backend={spec.backend!r}（只认 torch / paddle）")
+    st = _CoreRun(base_url=base_url, token=token, spec=spec)
+    _torch_model(st)
+    _torch_opt(st)
+    _torch_ref(st)
+    _load_demo_bank(st)
+    _torch_ppo(st)
+    _torch_artifacts(st)
+    return _core_result(st)
+
+
+def _paddle_model(st: _CoreRun) -> None:
+    spec = st.spec
+    jid, job_dir, manifest = spec.jid, spec.job_dir, spec.manifest
+    prep_b = LogBundle(spec.log) if spec.prep is None else spec.prep
+    st.prep_b = prep_b
+    # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
+    paddle_env.apply(spec.torch_threads, prep_b)
+    import numpy as np
+    import paddle
+
+    # ---- 课程上下文 + 本轮有效遍数（与 torch 版共用同一个实现）----
+    st.course, st.epochs_eff = course_prep(manifest, job_dir, spec.epoch_mult, prep_b)
+
+    # ---- 设备：XLA / DataParallel / MPS 是 torch 实验臂，Paddle 侧响亮拒 ----
+    dev_str = paddle_env.check_device(jid, spec.device)
+    try:
+        paddle.set_device(dev_str)
+    except Exception as e:
+        raise ProtocolError(
+            f"job {jid}: paddle 设备 {dev_str!r} 不可用（{e}）——检查 --device 与本机是否编译了 CUDA"
+        ) from None
+    prep_b.add("设备", f"{paddle.get_device()}｜backend=paddle｜cuda→gpu 由 paddle 归一")
+
+    # ---- per-job 确定性种子（D5）：与 torch 版同一条公式、同一个播种点 ----
+    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
+    np.random.seed(int(seed_hex[:8], 16))
+
+    import worker.models.student_paddle as student_paddle
+
+    t_build = time.time()
+    st.model = student_paddle.build_ppo(
+        str(spec.init_w) if (spec.init_w is not None and spec.init_w.exists()) else None
     )
-    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
-    return result, course
+    prep_b.add("建模型", f"{secs(time.time() - t_build)}s（student_paddle.build_ppo）")
 
 
-def _run_training_core_paddle(
-    base_url: str, token: str, spec: TrainSpec
-) -> tuple[dict, Any]:
+def _paddle_opt(st: _CoreRun) -> None:
+    spec = st.spec
+    jid, job_dir, manifest = spec.jid, spec.job_dir, spec.manifest
+    blob_root, log = spec.blob_root, spec.log
+    prep_b = st.prep_b
+    import paddle
+
+    import worker.models.student_paddle as student_paddle
+    import worker.ppo.checkpoint_paddle as checkpoint_paddle
+
+    # ---- opt 解析（与 torch 版共用 `_resolve_opt_init`；只是 BOD1 落地换成 numpy 实现）----
+    opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
+        jid=jid,
+        manifest=manifest,
+        job_dir=job_dir,
+        blob_root=blob_root,
+        base_url=st.base_url,
+        token=st.token,
+        preloaded=spec.preloaded,
+        log=log,
+        rebuild=opt_standard.rebuild_opt_tar_np,
+    )
+    st.blob_hits += _h
+    st.blob_miss_bytes += _m
+    st.kick_kl, st.batch, st.wanted = _kick_kl, _batch, _wanted
+    st.opt_raw = opt_raw
+
+    opt = None
+    opt_restore_sec = 0.0
+    steps_init = 0
+    opt_dir = job_dir / "opt_init"
+    weights_src = spec.weights_src
+    try:
+        if opt_raw:
+            t_opt = time.time()
+            unpack_opt_tar(opt_raw, opt_dir)
+            legacy_model = opt_dir / "model.pt"
+            if spec.init_w is not None and spec.init_w.exists():
+                student_paddle.load_state_into(st.model, str(spec.init_w))
+            elif legacy_model.exists():
+                checkpoint_paddle.load_model_pt(st.model, legacy_model)
+                weights_src = "legacy_tar"
+            else:
+                raise ProtocolError(
+                    "opt tar 无 model.pt 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
+            opt = paddle.optimizer.Adam(
+                learning_rate=float(manifest["lr"]), parameters=st.model.parameters()
+            )
+            steps_init = checkpoint_paddle.load_opt_pt(st.model, opt, opt_dir / "opt.pt")
+            opt_restore_sec = round(time.time() - t_opt, 3)
+            prep_b.add("opt", f"{opt_src}恢复 {secs(opt_restore_sec)}s 动量延续")
+        else:
+            if spec.init_w is None or not spec.init_w.exists():
+                raise ProtocolError(
+                    "无 opt_init 且权重四源皆尽"
+                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
+                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
+                    " —— 拒收（不许静默 warm-start，D5）"
+                )
+            t_warm = time.time()
+            student_paddle.load_state_into(st.model, str(spec.init_w))
+            opt = paddle.optimizer.Adam(
+                learning_rate=float(manifest["lr"]), parameters=st.model.parameters()
+            )
+            prep_b.add(
+                "opt",
+                f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam",
+            )
+    except ProtocolError:
+        raise
+    except Exception as e:
+        raise job_body_error("restore（model/opt 恢复）", e) from e
+    st.opt, st.steps_init = opt, steps_init
+    st.opt_restore_sec, st.opt_dir = opt_restore_sec, opt_dir
+    st.weights_src = weights_src
+
+
+def _paddle_ref(st: _CoreRun) -> None:
+    spec = st.spec
+    jid = spec.jid
+    import worker.models.student_paddle as student_paddle
+
+    ref_model = None
+    _ref = _fetch_ref(
+        jid=jid,
+        manifest=spec.manifest,
+        job_dir=spec.job_dir,
+        blob_root=spec.blob_root,
+        base_url=st.base_url,
+        token=st.token,
+        preloaded=spec.preloaded,
+        batch=st.batch,
+        wanted=st.wanted,
+        kick_kl=st.kick_kl,
+        log=spec.log,
+    )
+    if _ref is not None:
+        ref_path, _h, _m = _ref
+        st.blob_hits += _h
+        st.blob_miss_bytes += _m
+        try:
+            t_ref = time.time()
+            ref_model = student_paddle.build_ppo(str(ref_path))
+            student_paddle.load_state_into(ref_model, str(ref_path))
+            for p in ref_model.parameters():
+                # Paddle 的 requires_grad 是只读属性；冻结 = stop_gradient=True（语义等价）。
+                p.stop_gradient = True
+            ref_model.eval()
+            st.prep_b.add("ref", f"{time.time() - t_ref:.1f}s（build+load）")
+            spec.log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={st.kick_kl}）")
+        except ProtocolError:
+            raise
+        except Exception as e:
+            raise job_body_error("restore（kickstart ref 装载）", e) from e
+    st.ref_model = ref_model
+
+
+def _paddle_ppo(st: _CoreRun) -> None:
+    spec = st.spec
+    jid, manifest, iter_info = spec.jid, spec.manifest, spec.iter_info
+    model, opt = st.model, st.opt
+    import worker.ppo.engine_paddle as engine_paddle
+    import worker.ppo.np_core as ppo_np
+
+    shards_root = ppo_shards_root(spec.job_dir, iter_info)
+    st.shards_root = shards_root
+    if spec.on_ppo_start is not None:
+        try:
+            spec.on_ppo_start()
+        except Exception:
+            pass
+    _report_progress(
+        "ppo",
+        it=int(manifest.get("it", 0) or 0),
+        done=0,
+        total=st.epochs_eff,
+        force=True,
+    )
+
+    def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
+        if spec.should_cancel is None or not spec.should_cancel():
+            return
+        raise JobCancelledError(
+            f"job {jid}: 结果已 landed（别人先赢）——epoch {_ep_done} 边界停算丢弃"
+        )
+
+    if spec.should_cancel is not None and spec.should_cancel():
+        raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
+
+    t_ppo = time.time()
+    train_b = LogBundle(spec.log)
+    #: 引擎把**它自己数出来的**步数写回这里（`steps_out`）：调用方不许重算，见下面
+    #: `steps_total` 那一段。
+    steps_box: dict[str, int] = {}
+    try:
+        _load_ppo_data(st, ppo_np)
+        agg = engine_paddle.ppo_update(
+            model,
+            opt,
+            st.chunks,
+            st.epochs_eff,
+            # `ckpt_path=None`：model/opt 已在本函数上半场按「hub 的 opt tar」恢复过；
+            # 再传一遍会让引擎按 state.json 二次 resume（那是离线盘的续跑口径）。
+            ckpt_path=None,
+            kl_coef=float(manifest["kl_coef"]),
+            ent_coef=(None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])),
+            ref_model=st.ref_model,
+            kickstart_kl=st.kick_kl,
+            demo_bank=st.demo_bank,
+            demo_bc_coef=st.demo_coef,
+            demo_per_mb=st.demo_per_mb,
+            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+            on_epoch_done=(_cancel_at_epoch_boundary if spec.should_cancel is not None else None),
+            progress=train_b,
+            progress_head=f"job {jid}: PPO 训练中",
+            steps_out=steps_box,
+            log=spec.log,
+        )
+    except ProtocolError:
+        raise
+    except JobCancelledError:
+        raise
+    except Exception as e:
+        raise job_body_error("grad（PPO 更新）", e) from e
+    st.ppo_sec = _ppo_done_log(jid, t_ppo, train_b, st.chunks, st.total_steps, agg)
+    st.agg = agg
+    st.steps_box = steps_box
+
+
+def _paddle_artifacts(st: _CoreRun) -> None:
+    spec = st.spec
+    jid, job_dir, manifest, blob_root = spec.jid, spec.job_dir, spec.manifest, spec.blob_root
+    model, opt = st.model, st.opt
+    import worker.models.student_paddle as student_paddle
+    import worker.ppo.checkpoint_paddle as checkpoint_paddle
+    from common import torch_pickle
+
+    st.t_art = time.time()
+    wj_path = job_dir / "weights.json"
+    student_paddle.save_weights_json(model, str(wj_path))
+    wj_raw = wj_path.read_bytes()
+    _cache_produced_weights(blob_root, wj_raw, spec.log)
+    wj_sent_raw = wj_raw
+    if weights_delta.w_fmt_of(manifest) == weights_delta.W_DELTA_FMT:
+        if spec.init_w is None or not spec.init_w.exists():
+            raise ProtocolError(
+                "形态位是权重 delta 但本轮没有 base 权重（init_weights.json 不在）——拒发"
+            )
+        base_w = spec.init_w.read_bytes()
+        wj_sent_raw = weights_delta.pack_weights_delta(
+            base_w, wj_raw, base_sha=hashlib.sha256(base_w).hexdigest()
+        )
+        _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, spec.log)
+    ckpt_dir = job_dir / "ppo_final"
+    # Paddle 的 Adam 没有 `step`：本轮步数 = 载入时的 step + 引擎真正走的步数。
+    # 起点与 torch 侧同一条（`_load_opt_state` 读到的 torch `step`），所以混跑时它连续递增。
+    # ★ 2026-10-27（评审）：**不许**在这里重算 `steps_init + epochs × len(chunks)` ——
+    # 那个式子是引擎内部循环的复本，一旦哪天跳 chunk / 从 ckpt 中途起步就静默漂移，
+    # 而它要写进 `state.json` 与回传 opt 的 `step`（bias correction 的时基）。
+    # 单源 = 引擎经 `steps_out` 回传（`engine_paddle.ppo_update` 的收尾）。
+    steps_total = int(st.steps_box.get("steps_done", st.steps_init))
+    checkpoint_paddle.save_ckpt(
+        model, opt, str(ckpt_dir), epochs_done=st.epochs_eff, steps_done=steps_total
+    )
+    opt_tar_raw = pack_opt_tar(ckpt_dir)
+    _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, spec.log)
+    opt_sent_raw = opt_tar_raw
+    if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
+        if not st.opt_raw:
+            raise ProtocolError(
+                "形态位是 delta 但本轮没有 base opt（manifest.opt_init/opt_sha 为空）——拒发"
+            )
+        # 基准 = **盘上那份**（消毒只发生在活优化器上；base 两边必须逐字节同源），
+        # 与 torch 版 `torch.load(opt_dir / "opt.pt")` 读的是同一个文件。
+        base_state = torch_pickle.load_torch_pickle((st.opt_dir / "opt.pt").read_bytes())
+        sent_state = checkpoint_paddle.torch_opt_state(
+            model, opt, steps_done=steps_total, node_ref=base_state
+        )
+        if len(sent_state["state"]) != len(base_state["state"]):
+            # 缺项补齐会在活优化器里留下「基准里没有的零动量节点」⇒ 回传前按基准投影掉
+            # （`drop_vacuous_nodes`；动量非零会拒发）。留一行读数，免得它成为静默动作。
+            st.prep_b.add(
+                "opt delta",
+                f"节点 {len(base_state['state'])}→{len(sent_state['state'])}（惰性节点按基准投影）",
+            )
+        opt_sent_raw = opt_delta.pack_opt_delta(
+            base_state,
+            sent_state,
+            base_sha=hashlib.sha256(st.opt_raw).hexdigest(),
+        )
+    st.wj_raw, st.wj_sent_raw = wj_raw, wj_sent_raw
+    st.opt_tar_raw, st.opt_sent_raw = opt_tar_raw, opt_sent_raw
+    st.opt_tar_b64 = encode_opt_tar(opt_sent_raw)
+    course_cache.record_pending(
+        course_cache.cache_root_of(blob_root),
+        str(manifest.get("course_fp", "") or ""),
+        job_id=jid,
+        it=int(manifest.get("it", 0) or 0),
+        run_id=str(manifest.get("runId", "") or ""),
+        weights=(hashlib.sha256(wj_raw).hexdigest(), len(wj_raw)),
+        opt=(hashlib.sha256(opt_tar_raw).hexdigest(), len(opt_tar_raw)),
+        log=spec.log,
+    )
+
+
+def _run_training_core_paddle(base_url: str, token: str, spec: TrainSpec) -> tuple[dict, Any]:
     """`run_training_core` 的 **Paddle 双生**（2026-10-27，AI Studio 训练任务镜像无 torch）。
 
     调用面、产物、结果字典与 torch 版**逐字段相同**：hub 侧不认识框架，落盘/对账/回传只认
@@ -986,366 +1287,11 @@ def _run_training_core_paddle(
 
     顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
     """
-    jid = spec.jid
-    job_dir = spec.job_dir
-    manifest = spec.manifest
-    iter_info = spec.iter_info
-    blob_root = spec.blob_root
-    payload_bytes = spec.payload_bytes
-    payload_dl_sec = spec.payload_dl_sec
-    unpack_sec = spec.unpack_sec
-    ts_code_bytes = spec.ts_code_bytes
-    ts_code_hit = spec.ts_code_hit
-    device = spec.device
-    torch_threads = spec.torch_threads
-    prune_dirs = spec.prune_dirs
-    epoch_mult = spec.epoch_mult
-    preloaded = spec.preloaded
-    init_w = spec.init_w
-    weights_src = spec.weights_src
-    weights_wire_bytes = spec.weights_wire_bytes
-    blob_hits = spec.blob_hits
-    blob_miss_bytes = spec.blob_miss_bytes
-    prep = spec.prep
-    t_prep = spec.t_prep
-    should_cancel = spec.should_cancel
-    on_ppo_start = spec.on_ppo_start
-    log = spec.log
-    prep_b = LogBundle(log) if prep is None else prep
-    # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
-    paddle_env.apply(torch_threads, prep_b)
-    import numpy as np
-    import paddle
-
-    # ---- 课程上下文 + 本轮有效遍数（与 torch 版共用同一个实现）----
-    course, epochs_eff = course_prep(manifest, job_dir, epoch_mult, prep_b)
-
-    # ---- 设备：XLA / DataParallel / MPS 是 torch 实验臂，Paddle 侧响亮拒 ----
-    dev_str = paddle_env.check_device(jid, device)
-    try:
-        paddle.set_device(dev_str)
-    except Exception as e:
-        raise ProtocolError(
-            f"job {jid}: paddle 设备 {dev_str!r} 不可用（{e}）——"
-            "检查 --device 与本机是否编译了 CUDA"
-        ) from None
-    prep_b.add("设备", f"{paddle.get_device()}｜backend=paddle｜cuda→gpu 由 paddle 归一")
-
-    # ---- per-job 确定性种子（D5）：与 torch 版同一条公式、同一个播种点 ----
-    seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
-    np.random.seed(int(seed_hex[:8], 16))
-
-    import worker.models.student_paddle as student_paddle
-    import worker.ppo.checkpoint_paddle as checkpoint_paddle
-    import worker.ppo.engine_paddle as engine_paddle
-    import worker.ppo.np_core as ppo_np
-    from common import torch_pickle
-
-    t_build = time.time()
-    model = student_paddle.build_ppo(
-        str(init_w) if (init_w is not None and init_w.exists()) else None
-    )
-    prep_b.add("建模型", f"{secs(time.time() - t_build)}s（student_paddle.build_ppo）")
-
-    # ---- opt 解析（与 torch 版共用 `_resolve_opt_init`；只是 BOD1 落地换成 numpy 实现）----
-    opt_raw, opt_src, _kick_kl, _wanted, _batch, _h, _m = _resolve_opt_init(
-        jid=jid,
-        manifest=manifest,
-        job_dir=job_dir,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log,
-        rebuild=opt_standard.rebuild_opt_tar_np,
-    )
-    blob_hits += _h
-    blob_miss_bytes += _m
-
-    opt = None
-    opt_restore_sec = 0.0
-    steps_init = 0
-    opt_dir = job_dir / "opt_init"
-    try:
-        if opt_raw:
-            t_opt = time.time()
-            unpack_opt_tar(opt_raw, opt_dir)
-            legacy_model = opt_dir / "model.pt"
-            if init_w is not None and init_w.exists():
-                student_paddle.load_state_into(model, str(init_w))
-            elif legacy_model.exists():
-                checkpoint_paddle.load_model_pt(model, legacy_model)
-                weights_src = "legacy_tar"
-            else:
-                raise ProtocolError(
-                    "opt tar 无 model.pt 且权重四源皆尽"
-                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
-                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
-                    " —— 拒收（不许静默 warm-start，D5）"
-                )
-            opt = paddle.optimizer.Adam(
-                learning_rate=float(manifest["lr"]), parameters=model.parameters()
-            )
-            steps_init = checkpoint_paddle.load_opt_pt(model, opt, opt_dir / "opt.pt")
-            opt_restore_sec = round(time.time() - t_opt, 3)
-            prep_b.add(
-                "opt", f"{opt_src}恢复 {secs(opt_restore_sec)}s 动量延续"
-            )
-        else:
-            if init_w is None or not init_w.exists():
-                raise ProtocolError(
-                    "无 opt_init 且权重四源皆尽"
-                    f"（试过 {'/'.join(WEIGHT_SOURCES[:4])}）"
-                    f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
-                    " —— 拒收（不许静默 warm-start，D5）"
-                )
-            t_warm = time.time()
-            student_paddle.load_state_into(model, str(init_w))
-            opt = paddle.optimizer.Adam(
-                learning_rate=float(manifest["lr"]), parameters=model.parameters()
-            )
-            prep_b.add(
-                "opt", f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam"
-            )
-    except ProtocolError:
-        raise
-    except Exception as e:
-        raise job_body_error("restore（model/opt 恢复）", e) from e
-
-    # ---- BC kickstart ref（同一条安全阀：系数>0 而字节缺失 ⇒ 拒收；字节走共用的 `_fetch_ref`）----
-    kick_kl = _kick_kl
-    ref_model = None
-    _ref = _fetch_ref(
-        jid=jid,
-        manifest=manifest,
-        job_dir=job_dir,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        batch=_batch,
-        wanted=_wanted,
-        kick_kl=kick_kl,
-        log=log,
-    )
-    if _ref is not None:
-        ref_path, _h, _m = _ref
-        blob_hits += _h
-        blob_miss_bytes += _m
-        try:
-            t_ref = time.time()
-            ref_model = student_paddle.build_ppo(str(ref_path))
-            student_paddle.load_state_into(ref_model, str(ref_path))
-            for p in ref_model.parameters():
-                p.requires_grad = False
-            ref_model.eval()
-            prep_b.add("ref", f"{time.time() - t_ref:.1f}s（build+load）")
-            log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
-        except ProtocolError:
-            raise
-        except Exception as e:
-            raise job_body_error("restore（kickstart ref 装载）", e) from e
-
-    # ---- demo 混 batch（bank 内容寻址 + 装载校验，与 torch 版共用同一组 helper）----
-    demo_coef, demo_per_mb, demo_raw, demo_src, _h, _m = _fetch_demo(
-        jid=jid,
-        manifest=manifest,
-        blob_root=blob_root,
-        base_url=base_url,
-        token=token,
-        preloaded=preloaded,
-        log=log,
-    )
-    blob_hits += _h
-    blob_miss_bytes += _m
-    demo_bank: dict | None = None
-    if demo_raw:
-        try:
-            bank = decode_demo_bank(demo_raw)
-        except ProtocolError:
-            raise
-        except Exception as e:
-            raise job_body_error("restore（demo bank 装载）", e) from e
-        check_demo_bank(jid, bank, demo_coef, demo_per_mb, demo_src, prep_b)
-        demo_bank = bank
-
-    # ---- PPO：load → chunk → update（numpy 装载 + paddle 更新）----
-    shards_root = ppo_shards_root(job_dir, iter_info)
-    if on_ppo_start is not None:
-        try:
-            on_ppo_start()
-        except Exception:
-            pass
-    _report_progress(
-        "ppo",
-        it=int(manifest.get("it", 0) or 0),
-        done=0,
-        total=epochs_eff,
-        force=True,
-    )
-
-    def _cancel_at_epoch_boundary(_ep_done: int, _mdl: Any) -> None:
-        if should_cancel is None or not should_cancel():
-            return
-        raise JobCancelledError(
-            f"job {jid}: 结果已 landed（别人先赢）——epoch {_ep_done} 边界停算丢弃"
-        )
-
-    if should_cancel is not None and should_cancel():
-        raise JobCancelledError(f"job {jid}: 结果已 landed（下载期间）——开算前丢弃")
-
-    t_ppo = time.time()
-    train_b = LogBundle(log)
-    #: 引擎把**它自己数出来的**步数写回这里（`steps_out`）：调用方不许重算，见下面
-    #: `steps_total` 那一段。
-    steps_box: dict[str, int] = {}
-    try:
-        episodes = ppo_np.load_episodes(
-            shards_root,
-            float(manifest["gamma"]),
-            float(manifest["lam"]),
-            normalize_adv=str(manifest["adv_norm"]) != "none",
-            normalize_ret=bool(manifest.get("normalize_ret", False)),
-            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-            bundle=prep_b,
-        )
-        prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
-        chunks = ppo_np.chunk_episodes(
-            episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
-        )
-        agg = engine_paddle.ppo_update(
-            model,
-            opt,
-            chunks,
-            epochs_eff,
-            # `ckpt_path=None`：model/opt 已在本函数上半场按「hub 的 opt tar」恢复过；
-            # 再传一遍会让引擎按 state.json 二次 resume（那是离线盘的续跑口径）。
-            ckpt_path=None,
-            kl_coef=float(manifest["kl_coef"]),
-            ent_coef=(
-                None if manifest.get("ent_coef") is None else float(manifest["ent_coef"])
-            ),
-            ref_model=ref_model,
-            kickstart_kl=kick_kl,
-            demo_bank=demo_bank,
-            demo_bc_coef=demo_coef,
-            demo_per_mb=demo_per_mb,
-            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
-            on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
-            progress=train_b,
-            progress_head=f"job {jid}: PPO 训练中",
-            steps_out=steps_box,
-            log=log,
-        )
-    except ProtocolError:
-        raise
-    except JobCancelledError:
-        raise
-    except Exception as e:
-        raise job_body_error("grad（PPO 更新）", e) from e
-    ppo_sec = _ppo_done_log(jid, t_ppo, train_b, chunks, total_steps, agg)
-    _t_art = time.time()
-
-    # ---- 产物：weights JSON + **torch 格式** ckpt（hub 只认 torch 字节，见模块头口径①）----
-    wj_path = job_dir / "weights.json"
-    student_paddle.save_weights_json(model, str(wj_path))
-    wj_raw = wj_path.read_bytes()
-    _cache_produced_weights(blob_root, wj_raw, log)
-    wj_sent_raw = wj_raw
-    if weights_delta.w_fmt_of(manifest) == weights_delta.W_DELTA_FMT:
-        if init_w is None or not init_w.exists():
-            raise ProtocolError(
-                "形态位是权重 delta 但本轮没有 base 权重（init_weights.json 不在）——拒发"
-            )
-        base_w = init_w.read_bytes()
-        wj_sent_raw = weights_delta.pack_weights_delta(
-            base_w, wj_raw, base_sha=hashlib.sha256(base_w).hexdigest()
-        )
-        _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
-    ckpt_dir = job_dir / "ppo_final"
-    # Paddle 的 Adam 没有 `step`：本轮步数 = 载入时的 step + 引擎真正走的步数。
-    # 起点与 torch 侧同一条（`_load_opt_state` 读到的 torch `step`），所以混跑时它连续递增。
-    # ★ 2026-10-27（评审）：**不许**在这里重算 `steps_init + epochs × len(chunks)` ——
-    # 那个式子是引擎内部循环的复本，一旦哪天跳 chunk / 从 ckpt 中途起步就静默漂移，
-    # 而它要写进 `state.json` 与回传 opt 的 `step`（bias correction 的时基）。
-    # 单源 = 引擎经 `steps_out` 回传（`engine_paddle.ppo_update` 的收尾）。
-    steps_total = int(steps_box.get("steps_done", steps_init))
-    checkpoint_paddle.save_ckpt(
-        model, opt, str(ckpt_dir), epochs_done=epochs_eff, steps_done=steps_total
-    )
-    opt_tar_raw = pack_opt_tar(ckpt_dir)
-    _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
-    opt_sent_raw = opt_tar_raw
-    if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
-        if not opt_raw:
-            raise ProtocolError(
-                "形态位是 delta 但本轮没有 base opt（manifest.opt_init/opt_sha 为空）——拒发"
-            )
-        # 基准 = **盘上那份**（消毒只发生在活优化器上；base 两边必须逐字节同源），
-        # 与 torch 版 `torch.load(opt_dir / "opt.pt")` 读的是同一个文件。
-        base_state = torch_pickle.load_torch_pickle((opt_dir / "opt.pt").read_bytes())
-        sent_state = checkpoint_paddle.torch_opt_state(
-            model, opt, steps_done=steps_total, node_ref=base_state
-        )
-        if len(sent_state["state"]) != len(base_state["state"]):
-            # 缺项补齐会在活优化器里留下「基准里没有的零动量节点」⇒ 回传前按基准投影掉
-            # （`drop_vacuous_nodes`；动量非零会拒发）。留一行读数，免得它成为静默动作。
-            prep_b.add(
-                "opt delta",
-                f"节点 {len(base_state['state'])}→{len(sent_state['state'])}"
-                "（惰性节点按基准投影）",
-            )
-        opt_sent_raw = opt_delta.pack_opt_delta(
-            base_state,
-            sent_state,
-            base_sha=hashlib.sha256(opt_raw).hexdigest(),
-        )
-    opt_tar_b64 = encode_opt_tar(opt_sent_raw)
-    course_cache.record_pending(
-        course_cache.cache_root_of(blob_root),
-        str(manifest.get("course_fp", "") or ""),
-        job_id=jid,
-        it=int(manifest.get("it", 0) or 0),
-        run_id=str(manifest.get("runId", "") or ""),
-        weights=(hashlib.sha256(wj_raw).hexdigest(), len(wj_raw)),
-        opt=(hashlib.sha256(opt_tar_raw).hexdigest(), len(opt_tar_raw)),
-        log=log,
-    )
-
-    # 产物段的秒数不再靠 `PPO_CUDA_DIAG`（那要人记得开）：随 `wire.art_sec` 进账本行，
-    # 由 `plan_run` 拼进既有的落盘行（零新增行、每轮都有读数）。
-    result = {
-        "job_id": jid,
-        "data_fp": manifest["data_fp"],
-        "init_weights_fp": manifest["init_weights_fp"],
-        "weights_json": encode_weights_json(wj_sent_raw),
-        "opt_tar_b64": opt_tar_b64,
-        "agg": _agg_block(agg, chunks, total_steps),
-        "commit_echo": manifest["commit"],
-        "ppo_sec": ppo_sec,
-    }
-    # 与 torch 腿同一行（M3）；见 `train_common.copy_iter_metrics`。
-    copy_iter_metrics(result, iter_info)
-    result["wire"] = _wire_block(
-        payload_bytes=payload_bytes,
-        payload_dl_sec=payload_dl_sec,
-        unpack_sec=unpack_sec,
-        prune_dirs=prune_dirs,
-        opt_restore_sec=opt_restore_sec,
-        grad_sec=ppo_sec,
-        # 产物段（save/pack/identity）自己的账：它不在 `ppo=` 里，是云机轮墙钟最大的一块暗区。
-        art_sec=time.time() - _t_art,
-        blob_hits=blob_hits,
-        blob_miss_bytes=blob_miss_bytes,
-        weights_src=weights_src,
-        weights_bytes=weights_wire_bytes,
-        ts_code_bytes=ts_code_bytes,
-        ts_code_hit=ts_code_hit,
-        rollout_sec=(iter_info or {}).get("rollout_sec"),
-        bun_version=(iter_info or {}).get("bun_version"),
-    )
-    # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
-    result["wire"]["result_bytes"] = len(pack_result_v2(result))
-    return result, course
+    st = _CoreRun(base_url=base_url, token=token, spec=spec)
+    _paddle_model(st)
+    _paddle_opt(st)
+    _paddle_ref(st)
+    _load_demo_bank(st)
+    _paddle_ppo(st)
+    _paddle_artifacts(st)
+    return _core_result(st)

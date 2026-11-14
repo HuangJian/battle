@@ -53,7 +53,7 @@ def test_called_before_importing_paddle_and_numpy() -> None:
     文件头部的顶层 import 不含它们。
     """
     src = (ROOT / "remote" / "train_core.py").read_text(encoding="utf-8")
-    call = src.index("paddle_env.apply(torch_threads, prep_b)")
+    call = src.index("paddle_env.apply(spec.torch_threads, prep_b)")
     np_import = src.index("    import numpy as np\n    import paddle")
     assert call < np_import, "线程环境变量必须在 import paddle/numpy 之前写"
     # 两个变量都覆盖由 `test_sets_both_envs_when_absent` 的**行为**断言保证（返回的键集合），

@@ -5777,3 +5777,81 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   的 monkeypatch 接缝不变。`test_dist_common_poll` 的 rollout 接线扫描面跟随到新家（按腿取并集 +
   409/标记断言）。`_settle` 与 `remote/result_upload.py` / `remote/upload_proc.py` 同名 ≥3 触发复用
   账本，改名 `_settle_attempt`。验证：ruff、mypy 913、全量 5995 收下（5992 passed / 3 skipped）。
+
+## §2026-11-13-nn-python-audit-round4-ppo-update（ppo_update 拆成 PPOContext + 七段函数）
+
+- **决定**：`worker/ppo/engine.py::ppo_update`（598 行 / 17 参）保留 17 参签名作为
+  `trainer/stream.py` backend 契约的薄适配器（~85 行），运行时状态收进 `PPOContext`，
+  阶段拆成 `_prepare`（profiler / tensored / XLA 诊断 / demo / ref cache / 续跑）、
+  `_train_step`（一次 minibatch 的 forward/loss/backward/step，177 行）、`_record_diag`、
+  `_maybe_heartbeat`、`_finish_epoch`、`_finish`、`_aggregate`。XLA `xla_mark_step` 边界、
+  诊断读数时机、`np.random.permutation` / demo 采样顺序、ref cache 每 chunk 一次、profiler
+  采样窗口与 `_step_walls` 记录条件都逐字搬移；`_Diag` / `_Demo` 只承载原局部变量。
+- **被否决**：抽 `PPOLoop` 类（只是把闭包换成 `self`，跨阶段共享的仍是同一批张量）；
+  `LossTerms` 注册表（kl / kickstart / demo / value_anchor 共享前向结果与 RNG，拆对象只会多传
+  上下文，且新增损失项仍需改 `_train_step`）；改 17 参公开签名及全部调用点（训练后端契约，
+  收益与风险不成比例）；上调形状/文本断言基线（本轮净增 0）。
+- **后果**：`ppo_update` 598 → ~85 行，`engine.py` 无新增 >200 行或 >8 参函数（最长
+  `_train_step` 177 行）；`_record_diag` 显式接收 `wall_s`，不再跨函数读 `_step_t0`。
+  `test_xla_step_diag.py` 的两条源码接线断言按新函数边界重锚（仍要求 mark 后立刻取时、
+  物化夹在转换与循环之间）。验证：ruff、mypy、全量 5992 passed / 3 skipped。
+
+## §2026-11-13-nn-python-audit-round4-iter-rollout（run_iter_rollout 拆成 _IterRun + 六段）
+
+- **决定**：`worker/iter_rollout.py::run_iter_rollout`（604 行 / 9 参）保留原签名，入口只做
+  `_IterRun` 构造与阶段调用；批级状态收进 `_IterRun`，阶段拆成 `_setup_run`（路径 / bun /
+  并发口径 / 日志）、`_setup_scratch`（轮级 scratch + 批镜像 + 产出根）、`_setup_pool`
+  （长驻池）、`_drive_games`（流式调度 + 带超时 wait + 机器级停滞重投）、`_run_games`
+  （pool 收尾 / 中断现场）、`_finish_run`（对账 / 聚合 / 返回）。`_samples_of` 改为
+  `(exec_jd, argv)` 的模块函数，`_clean_stuck` 独立承担卡局半截产出清理。
+- **被否决**：把整个函数改写成 `self` 类（`__init__` 会新增一个 9 参宽函数，且所有局部引用
+  都要重写）；把 `_drive_games` 再按「单次尝试 / 重投」拆开（每次重建 executor，并要额外搬运
+  `pending` / `settled_n` / `supply_open` 等跨尝试状态）；为凑 LOC 把 setup 搬去新模块
+  （拆分只是换家，且破坏本模块与 `worker.serve_pool` 的层内聚）。
+- **后果**：`run_iter_rollout` 604 → ~50 行；最长新函数 `_drive_games` 172 行；源 LOC 回到
+  1000 以下。`retry_cap` 原先是 `try` 前的纯局部量，拆分时必须进 `_IterRun`，否则
+  `NN_ROLLOUT_ROUND_RETRY_MAX` 的退出阀静默失效（`test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it`
+  当场抓到）。`_setup_pool` 必须以 `rctx.pool` 为复用源（新建 `_IterRun.pool` 是 `None`）；
+  删掉这行会让补差批重建池，`test_round_ctx` 两例立刻红。流式调度、池生命周期、scratch 回退、
+  轮末逐位对账与日志顺序均未改。
+  验证：ruff、mypy、rollout 相关 187 例、全量 5992 passed / 3 skipped。
+
+## §2026-11-13-nn-python-audit-round4-eval-dispatch（EvalDispatcher.run 拆成 _EvalRun + 五段）
+
+- **决定**：`trainer/eval_dispatch.py::EvalDispatcher.run`（589 行）保留公开方法与恒 `False`
+  返回契约，`run` 只做 `_EvalRun` 构造与阶段调用；派生状态（语料/去重/复用/快照/阈值/节点
+  列表）收进 dataclass `_EvalRun`，阶段拆成 `_eval_prepare` / `_eval_register` /
+  `_eval_admit` / `_eval_start` / `_eval_close`。`_meta_ok` / `_record_failed_meta` 随
+  `EvalRound` 登记移进 `_eval_register`，`_on_weight_ready` 留在 `_eval_admit`；异常与
+  `finally` 的 unregister / release_owner 仍在 `run`。
+- **被否决**：把状态挂到 `self`（同一 dispatcher 实例会跨轮残留，且隐藏状态）；按节点拆
+  `_eval_admit`（ping 循环的顺序、日志与 `alive` 保序是判据的一部分）；把收工对账再拆成独立
+  文件（本模块已贴 LOC 预算，拆文件只是换家）；保留通用方法名 `_prepare/_register/_admit/
+  _start/_close`（同名散落账本 110→111）。
+- **后果**：`run` 589 → ~77 行；最长新方法 `_eval_admit` 193 行；方法名统一 `_eval_*`
+  前缀，复用账本回到 110。`EvalDispatcher.run` 的调用点、`ed.log` 的 monkeypatch 接缝、
+  节点门/权重 POST/收工 summary 顺序均未改。验证：ruff、mypy、eval 相关 272 例、全量
+  5992 passed / 3 skipped。
+
+## §2026-11-14-nn-python-audit-round4-train-core（run_training_core 与 Paddle 双生各拆成 _CoreRun + 五阶段）
+
+- **决定**：`remote/train_core.py` 的两条核都保留公开签名 `(base_url, token, spec)`，入口只做
+  `_CoreRun` 构造与阶段调用。torch 核拆成 `_torch_model` / `_torch_opt` / `_torch_ref` /
+  `_torch_ppo` / `_torch_artifacts`；Paddle 核拆成 `_paddle_model` / `_paddle_opt` /
+  `_paddle_ref` / `_paddle_ppo` / `_paddle_artifacts`。两条腿共用的框架无关状态与结果面
+  （`_CoreRun`、`_load_ppo_data`、`_core_result`、`_agg_block`）下沉到已有的
+  `remote/train_common.py`（L2）；`train_common` 不反向 import `train_core`，`_CoreRun.spec`
+  用 `Any` 切断类型环。Paddle 侧复用 `_load_demo_bank` 与 `_load_ppo_data`，不再复制 demo
+  装载与 shard 分块。
+- **被否决**：把 torch/paddle 阶段搬到新模块再抬 `train_core` 的层号（`worker` 等下游要连锁
+  抬层，只为 LOC 破坏拓扑秩）；把 Paddle 核留在 `run_training_core` 内做分支（第一段就
+  `import torch`，AI Studio 无 torch 镜像会直接死）；把 `_CoreRun` 拆成 torch/paddle 两份
+  dataclass（字段与生命周期几乎相同，只会制造第二份契约）；上调 LOC/形状/文本断言基线。
+- **后果**：`run_training_core`（原 torch 核）与 `_run_training_core_paddle`（387 行）→ 两个
+  入口各 24/30 行；最长新函数 `_torch_model` 126 行、`_torch_opt` 122 行；`train_core.py` 源 LOC
+  1098 → 929（预算 <1000），长/宽函数基线仍为 2/5。`paddle_env.apply` 仍在 `import numpy /
+  paddle` 之前，Paddle 的「Adam 无 step」记账仍只认引擎 `steps_out`，两条腿的结果字典与
+  wire 字段逐项未改。测试锚点从入口跟到阶段：设备 `_torch_model`、消毒 `_torch_opt`、四处
+  `job_body_error` 分别落在 `_torch_opt/_torch_ref/_load_demo_bank/_torch_ppo`，delta 七调用
+  扫 `_torch_artifacts` + `_paddle_artifacts`，`_wire_block` 唯一实现断言改读 `train_common`。
+  验证：ruff、ruff format、mypy、train_core 相关 84 例、全量 5992 passed / 3 skipped。

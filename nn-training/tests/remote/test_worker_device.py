@@ -92,7 +92,7 @@ def test_run_job_normalizes_device_once_before_kind_fork() -> None:
     fn = next(
         n
         for n in ast.parse(core_src).body
-        if isinstance(n, ast.FunctionDef) and n.name == "run_training_core"
+        if isinstance(n, ast.FunctionDef) and n.name == "_torch_model"
     )
     dev_args: list[str] = []
     for n in ast.walk(fn):

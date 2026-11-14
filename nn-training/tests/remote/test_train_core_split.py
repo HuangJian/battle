@@ -96,11 +96,7 @@ def _defs(path: Path) -> set[str]:
 
 
 def _func(path: Path, name: str) -> ast.FunctionDef:
-    return next(
-        n
-        for n in _tree(path).body
-        if isinstance(n, ast.FunctionDef) and n.name == name
-    )
+    return next(n for n in _tree(path).body if isinstance(n, ast.FunctionDef) and n.name == name)
 
 
 def _all_imports(tree: ast.Module) -> set[str]:
@@ -164,7 +160,9 @@ def test_worker_only_reaches_the_core_through_one_import() -> None:
         if not (isinstance(n, ast.ImportFrom) and n.module == "remote.train_core"):
             continue
         for a in n.names:
-            assert a.asname is not None, f"{CORE_FN} 必须以 `X as X` 显式转发（ruff 认的 re-export）"
+            assert a.asname is not None, (
+                f"{CORE_FN} 必须以 `X as X` 显式转发（ruff 认的 re-export）"
+            )
             aliases.append(a.asname)
     assert aliases == ["TrainSpec", CORE_FN], aliases
     assert worker_mod.run_training_core is core_mod.run_training_core
@@ -181,9 +179,7 @@ def _core_params() -> tuple[list[str], list[str]]:
 
 def _train_spec_fields() -> list[str]:
     cls = next(
-        n
-        for n in _tree(CORE_FILE).body
-        if isinstance(n, ast.ClassDef) and n.name == "TrainSpec"
+        n for n in _tree(CORE_FILE).body if isinstance(n, ast.ClassDef) and n.name == "TrainSpec"
     )
     return [
         n.target.id
@@ -203,9 +199,7 @@ def test_the_call_site_passes_exactly_the_core_interface() -> None:
     calls = [
         n
         for n in ast.walk(job)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == CORE_FN
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == CORE_FN
     ]
     assigns = [
         n
@@ -308,18 +302,37 @@ def test_torch_stays_a_deferred_import_inside_the_core() -> None:
     两面一起钉：顶层**没有**（防回归）+ 函数体**有**（防漏搬）。
     """
     top = _top_imports(CORE_FILE)
-    for mod in ("torch", "numpy", "ppo", "worker.ppo.engine", "worker.ppo.common", "torch_xla", "worker.data.weights_io"):
+    for mod in (
+        "torch",
+        "numpy",
+        "ppo",
+        "worker.ppo.engine",
+        "worker.ppo.common",
+        "torch_xla",
+        "worker.data.weights_io",
+    ):
         assert not any(m == mod or m.startswith(mod + ".") for m in top), (
             f"train_core 顶层 import 了 {mod}（本仓硬规：顶层零 torch）"
         )
-    fn = _func(CORE_FILE, CORE_FN)
+    fns = [
+        n
+        for n in _tree(CORE_FILE).body
+        if isinstance(n, ast.FunctionDef) and (n.name == CORE_FN or n.name.startswith("_torch_"))
+    ]
     inner: set[str] = set()
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Import):
-            inner.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            inner.add(node.module)
-    for mod in ("torch", "numpy", "worker.ppo.engine", "worker.ppo.common", "worker.data.weights_io"):
+    for fn in fns:
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Import):
+                inner.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                inner.add(node.module)
+    for mod in (
+        "torch",
+        "numpy",
+        "worker.ppo.engine",
+        "worker.ppo.common",
+        "worker.data.weights_io",
+    ):
         assert any(m == mod or m.startswith(mod + ".") for m in inner), (
             f"{mod} 没在训练核体内出现 —— 要么漏搬，要么改成了顶层 import"
         )
@@ -351,7 +364,12 @@ def test_worker_proc_is_pure_stdlib() -> None:
 
 def test_worker_proc_names_are_forwarded_as_the_same_objects() -> None:
     """四个名字在 `worker` 侧是**同一对象**——既有注入点（`setattr(W, …)`）因此照旧有效。"""
-    for name in ("HOT_RELOAD_EXIT", "_release_cloud_machine", "_request_reload", "supervise_worker"):
+    for name in (
+        "HOT_RELOAD_EXIT",
+        "_release_cloud_machine",
+        "_request_reload",
+        "supervise_worker",
+    ):
         assert hasattr(worker_mod, name), f"remote.worker.{name} 不见了（既有注入点）"
         assert getattr(worker_mod, name) is getattr(proc_mod, name), (
             f"remote.worker.{name} 不是 remote.worker_proc.{name}（转发成了副本）"
@@ -376,8 +394,10 @@ def test_wire_block_has_exactly_one_implementation() -> None:
     assert "_wire_block" in _defs(WIRE_FILE)
     assert "_wire_block" not in _defs(WORKER_FILE)
     assert worker_mod._wire_block is wire_mod._wire_block
-    # 训练核也从 wire 取（不是自己抄一份）
-    assert core_mod._wire_block is wire_mod._wire_block
+    # 核的结果段已随 `_core_result` 下沉到 train_common，仍从 wire 取（不是自己抄一份）
+    from remote import train_common as common_mod
+
+    assert common_mod._wire_block is wire_mod._wire_block
 
 
 # ──────────────────── ⑦ 账本：层号就是拓扑秩 ────────────────────
@@ -487,7 +507,12 @@ def test_delta_form_branch_keeps_the_local_f32_copy() -> None:
     ③ `record_pending`（身份映射的 pending）也在同一段：M0 与 R1/R3 必须共处一个函数，否则
        「本机权威副本」与「回传形态」两天各说一套。
     """
-    called = _named_calls(_func(CORE_FILE, CORE_FN))
+    called: set[str] = set()
+    for name in ("_torch_artifacts", "_paddle_artifacts"):
+        try:
+            called |= _named_calls(_func(CORE_FILE, name))
+        except StopIteration:
+            continue
     assert {
         "opt_fmt_of",
         "w_fmt_of",

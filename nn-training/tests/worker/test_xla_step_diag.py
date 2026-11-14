@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -258,16 +259,17 @@ class TestEngineWiring:
 
     def test_diag_is_taken_after_mark_step(self) -> None:
         """读数必须在 mark_step 之后（编译/执行已被 drain），否则那些量恒为 0。"""
-        i_mark = self.src.index("xla_mark_step(device)\n            now = time.time()")
-        i_snap = self.src.index("_snap = xla_metrics_snapshot()", i_mark)
-        assert i_snap > i_mark
+        m = re.search(r"xla_mark_step\(device\)\n\s+now = time\.time\(\)", self.src)
+        assert m is not None, "每步 mark_step 后必须立刻取时"
+        i_snap = self.src.index("_snap = xla_metrics_snapshot()", m.end())
+        assert i_snap > m.end()
 
     def test_tensors_are_materialized_before_the_loop(self) -> None:
         """chunk/demo 张量必须在进循环前物化：否则每个 chunk 的**首次使用**会把 host→device
         转移内联进那张图 ⇒ 各付一次全图编译（真机 epoch1 累计 41 次新编译、epoch2 后降到
         0.9~2.4s/步——变体集被填满的形态）。"""
-        i_conv = self.src.index("tensored = tensored_chunks(chunks, device)")
-        i_loop = self.src.index("for ep in range(start_epoch, epochs):")
+        i_conv = self.src.index("ctx.tensored = tensored_chunks(ctx.chunks, device)")
+        i_loop = self.src.index("for ep in range(ctx.start_epoch, ctx.epochs):")
         i_pre = self.src.rindex("xla_mark_step(device)", i_conv, i_loop)
         assert i_conv < i_pre < i_loop, "预物化必须夹在转换之后、循环之前"
         assert "is_xla(device)" in self.src

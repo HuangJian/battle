@@ -102,7 +102,8 @@ def test_bc_train_reports_the_epoch_it_actually_delivers(tmp_path: Path) -> None
     """B1：窗口未满（2 < 5）时交最后一轮，`best_val` 是该轮的原始 val_loss。"""
     out = bc_train(_bc_args(tmp_path))
     assert out["delivered_epoch"] == 2
-    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1])
+    # history 按 4 位小数落账，返回值是未舍入的原始 float：容差取落账精度。
+    assert out["best_val_loss"] == pytest.approx(out["history"]["val_loss"][-1], abs=1e-4)
     assert out["best_smoothed_val_loss"] == pytest.approx(
         smoothed_val_loss(out["history"]["val_loss"], window=SMOOTH_WINDOW)
     )
@@ -115,7 +116,7 @@ def test_bc_train_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path: Path) -> 
     assert delivered is not None and delivered >= SMOOTH_WINDOW
     assert out["delivered_epoch"] == delivered
     assert out["best_val_loss"] == pytest.approx(
-        out["history"]["val_loss"][delivered - 1]
+        out["history"]["val_loss"][delivered - 1], abs=1e-4
     )
     meta = json.loads((tmp_path / "bc-weights.json").read_text(encoding="utf-8"))
     assert meta["delivered_epoch"] == delivered
