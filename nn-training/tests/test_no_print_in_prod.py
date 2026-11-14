@@ -71,9 +71,10 @@ def test_scan_sees_the_known_production_surface() -> None:
     """扫描入口自检：基线非空、实际扫描确实命中已知文件、豁免面没有混进来。"""
     baseline = _baseline()
     actual = _scan()
-    assert baseline.get("hub/boot.py", 0) > 0
+    # `hub/boot.py` 已于 2026-11-14 迁完（26 → 0，改走 `common/logutil`），改用它旁边的存量面自检。
+    assert baseline.get("hub/store_offline.py", 0) > 0
     assert baseline.get("common/log.py", 0) > 0
-    assert actual.get("hub/boot.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
+    assert actual.get("hub/store_offline.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
     assert len(baseline) >= 50
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

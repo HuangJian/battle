@@ -9,7 +9,6 @@
   "common/logutil.py": 1,
   "hub/admin.py": 8,
   "hub/backfill_offline.py": 2,
-  "hub/boot.py": 26,
   "hub/http_face.py": 8,
   "hub/offline.py": 3,
   "hub/queue_claims.py": 2,

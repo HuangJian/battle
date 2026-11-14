@@ -6000,3 +6000,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `importlib` + `__file__` 定位，判据是整数计数而不是文本）。
 - **后果**：`common/distribution.py` 的 IO 面从此有账（4 处），B8 把线路搬去 `remote/` 时逐项归零、
   删键即可；此前「往 L0 加一处 urlopen」不受任何门禁阻拦。
+
+## §2026-11-14-nn-python-audit-round4-hub-boot-logging（P0-6 / B2 首批：hub 进程入口日志统一）
+
+- **决定**：`hub/boot.py` 的 26 处 `print(..., flush=True)` 全部改走 `common/logutil`
+  （`log_line` 的工厂 `tag_logger`）：`_log = tag_logger("hub-server", lambda: time)`、
+  `_PUSH_LOG` / `_OFFLINE_PUSH_LOG` 两个派发器 tag；消息里冗余的 `[hub-server] ` 前缀随之删掉
+  （tag 由 `log_line` 加）。`ensure_cluster_snapshot(log=…)` 那个 `lambda m: print(m, flush=True)`
+  直接改成 `log=_log`（快照模块产出的 `[code-snapshot] …` 现在也带上时间戳）。
+- **被否决**：只把 `time.strftime` 的字面量换成 `stamp()`（还有 21 处根本没有时间戳，混排不变，
+  门禁计数也不降）；保留 `[hub-server] ` 前缀让 `log_line` 再加一次 tag（`[ts] [hub-server] [hub-server] …`）；
+  顺手把 `hub/http_face.py` / `hub/admin.py` 一起迁（`http_face` 的 tag 是**按请求源 IP** 拼的
+  `[hub-server 127.0.0.1]`，`tests/hub/test_hub_auth_d9_order.py` 直接断言这段文本 ⇒ 那一批要按
+  「tag 里带变量」另设计，混在本次只会把两类语义搅在一起）。
+- **行为变更**（有意）：原来无时间戳的 21 行现在带 `[HH:MM:SS]`，原来手拼时间戳的 5 行格式
+  不变（`stamp()` 就是 `[HH:MM:SS]`）。读方全是 substring/regex（`tests/subproc_util`
+  的 `listening on .*?:(\d+)`、控制台日志 tail），tests/hub 590 例全绿。
+- **后果**：`tests/golden/print_baseline.json` 去掉 `hub/boot.py: 26` ⇒ 257 → 231 处、67 → 66 文件；
+  G3 自检改锚 `hub/store_offline.py`（原锚已归零）。
