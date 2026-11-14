@@ -329,8 +329,10 @@ def job_started(base_url: str, token: str, jid: str, *, worker_id: str = "", tim
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 不可达不致命，但**必须留痕**：`computing_at` 是掉队阈值的唯一时基，没送到就意味着
+        # 这份 job 的阈值晚起算（hub 侧看不到「已在算」）。
+        _log(f"job {jid}: start 通知没送到（{e!r}）—— 掉队阈值晚起算，本轮照跑")
 
 
 def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeout: float = 15.0) -> None:
@@ -345,8 +347,9 @@ def job_ready(base_url: str, token: str, jid: str, *, worker_id: str = "", timeo
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 没送到 ⇒ 别人的优先级不降（P0 小包的全部作用就是降别人优先级），租约兜底。
+        _log(f"job {jid}: ready 通知没送到（{e!r}）—— 其他 worker 的优先级不会降，等租约")
 
 
 def abandon_job(
@@ -373,8 +376,10 @@ def abandon_job(
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-    except Exception:
-        pass  # 不可达：租约过期兜底（与 release_job 同策略）
+    except Exception as e:
+        # 不可达：租约过期兜底（与 release_job 同策略）—— 但 hub 侧的 claimed/computing/ready
+        # 可见性会一直挂着，所以这行是操作员看见「放弃没生效」的唯一迹象。
+        _log(f"job {jid}: abandon 没送到（{e!r}）—— 租约过期兜底，hub 侧可见性会滞后")
 
 
 def job_status(
@@ -510,8 +515,9 @@ def acquire_job(
             if on_drop is not None:
                 try:
                     on_drop(jid)
-                except Exception:  # 丢副本失败绝不影响选活
-                    pass
+                except Exception as e:  # 丢副本失败绝不影响选活
+                    # 不致命，但副本留在盘上 = 下次 peek 还会看到它（存储慢泄漏），得留痕。
+                    _log(f"job {jid}: 丢弃本地副本失败（{e!r}）—— 不影响选活，副本会留在盘上")
             continue
         alive.append(cand)
     if not alive:
@@ -704,8 +710,10 @@ def release_job(
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )
-    except Exception:
-        pass  # release 不可达：租约过期兜底（30min），与旧行为一致
+    except Exception as e:
+        # 租约过期兜底（30min），与旧行为一致——但这条 job 会在这半小时里**看起来还在跑**，
+        # 别的 worker 领不走，所以这行是操作员唯一的解释。
+        _log(f"job {jid}: release 没送到（{e!r}）—— 这份活要等租约过期（30min）才回池")
 
 
 def worker_tag(offline: bool = False, hub_url: str = "") -> str:
@@ -841,5 +849,7 @@ def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> Non
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )
-    except Exception:
-        pass  # 心跳失败不致命：下一次轮询/心跳再续
+    except Exception as e:
+        # 心跳失败不致命（下一次再续），但连续失败 = 租约在走向过期：那是「活干完了 hub 却
+        # 把活派给别人」的前兆，必须看得见。周期 60s，一条/分钟，不构成刷屏。
+        _log(f"job {jid}: 续租心跳失败（{e!r}）—— 租约仍在倒计时，下一个心跳再试")

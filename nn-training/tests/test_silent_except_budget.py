@@ -38,9 +38,11 @@ EXEMPT_PREFIXES = ("worker/scripts/",)
 #: 与 G4 同一份宽泛定义（`tests/test_broad_except_budget.py::BROAD_NAMES`）。
 BROAD_NAMES = frozenset({"Exception", "BaseException"})
 
-#: 自检锚点：扫描必须命中的两个已知文件（`remote/job_lifecycle.py` 的控制面 POST、
-#: `common/log.py` 的镜像/关闭路径都是「该有替代路径才静默」的典型）。
-_ANCHORS = ("remote/job_lifecycle.py", "common/log.py")
+#: 自检锚点：扫描必须命中的两个已知文件（`common/log.py` 的镜像/关闭路径与
+#: `worker/forensics.py` 的降级测量都还在基线里 —— 前者是「该有替代路径才静默」的典型，
+#: 后者是「静默即降级」的合法样板；`remote/job_lifecycle.py` 那 6 处控制面 POST 已于
+#: 2026-11-14 改成留痕，不再适合当锚点）。
+_ANCHORS = ("common/log.py", "worker/forensics.py")
 
 
 def _is_broad(handler: ast.ExceptHandler) -> bool:

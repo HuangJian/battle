@@ -6132,3 +6132,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **顺带**：G3 134 处 / 42 文件、G4 440 处 / 143 文件（删掉的 1 处 print、6 处宽捕获同步从基线移除）；
   文本断言源码面基线 +7（新门禁用 AST 扫 `*.py`，整个文件的 assert 都落进口径 B —— 与 G3/G4/G5/G6
   同一已知限边，已在 `tests/test_source_text_assert_budget.py` 的注释表里逐笔记账）。
+
+## §2026-11-14-job-control-notices-leave-a-trace（控制面失败：不致命 ≠ 不必说）
+
+- **决定**：`remote/job_lifecycle.py` 的五个控制面通知（`job_started` / `job_ready` / `abandon_job` /
+  `release_job` / `heartbeat`）与 `acquire_job` 的 `on_drop` 回调，从 `except Exception: pass` 改成
+  `except Exception as e:` + 一行 `_log(...)`。**失败仍然不抛**（租约过期是设计好的兜底，行为一字未改），
+  只是把「兜底正在被触发」说出来：行里带 job id、异常 repr、以及这条失败的**实际后果**。
+- **为什么不是一律喊 WARN**：这些路径的错误语义是「尽力而为」，把它们升级成致命会改行为；但静默的代价是
+  另一回事 —— `start` 没送到 ⇒ hub 侧 `computing_at` 不起算（掉队阈值晚起算）；`ready` 没送到 ⇒ 别的
+  worker 优先级不降（P0 小包的全部作用）；`release` 没送到 ⇒ 这份活干等 30min 才回池、别的 worker 领不走；
+  `heartbeat` 连续失败 ⇒ 租约走向过期，最坏是「活干完了 hub 派给了别人」。这些状态在控制台上此前**完全不可见**。
+- **频度**：心跳周期 60s（`common/protocol.HEARTBEAT_SEC`）⇒ 持续不可达时一条/分钟，可接受；其余四个是
+  每 job 至多一次的事件，不需要去重计数器（不给这条路径引入模块级状态）。
+- **判据（行为用例）**：`tests/remote/test_job_control_visibility.py` 逐条钉「调用不抛 + 恰好一行提到该 job
+  + 行里带得上异常类型」，文案用 `partition`/`startswith`/`endswith` 对账，不挂整句措辞。
+- **基线**：G9 静默面 64 → **58 处 / 37 文件**（`job_lifecycle` 的 6 条清零，条目已删）。
