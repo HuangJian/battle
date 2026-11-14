@@ -451,7 +451,7 @@ class PayloadProcess:
                 return
             self._log(s)
 
-        pump_lines(proc.stdout if proc is not None else None, _on_line)
+        pump_lines(proc.stdout if proc is not None else None, _on_line, log=self._log)
         # EOF：子进程没了。收线过程中（`_closed`）由 `close()` 负责，不在这里降级。
         if not self._closed and self._local is None:
             code = None if proc is None else proc.poll()

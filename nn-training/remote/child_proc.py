@@ -22,10 +22,14 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable
 from typing import IO, Any
 
+from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW
+
+_log = tag_logger("child", lambda: time)
 
 #: 收线时给子进程自己的余量（秒）：关 stdin 之后它最多还需要把手上那一份做完。
 REAP_GRACE_SEC = 5.0
@@ -103,22 +107,44 @@ def reap_child(proc: subprocess.Popen | None, *, grace: float = REAP_GRACE_SEC) 
                 pass
 
 
-def pump_lines(stream: IO[str] | None, on_line: Callable[[str], None]) -> None:
-    """逐行读 `stream`（去行尾、跳过空行、整段吞异常），每行交给 `on_line`。EOF 即返回。
+def pump_lines(
+    stream: IO[str] | None,
+    on_line: Callable[[str], None],
+    *,
+    log: Callable[[str], None] | None = None,
+) -> None:
+    """逐行读 `stream`（去行尾、跳过空行），每行交给 `on_line`。EOF 即返回。**不抛**。
 
-    「整段吞异常」是有意的：管道可能被子进程的退出截断（`ValueError: I/O operation on closed
-    file` / `OSError`），那时**真正的信号是 EOF**（调用方据此判「子进程没了」），不是这条例外。
+    两种异常必须分开处理（2026-11-14）：
+
+    * **读流抛**（管道被子进程的退出截断：`ValueError: I/O operation on closed file` / `OSError`）
+      ⇒ 静默。那时**真正的信号是 EOF**（调用方据此判「子进程没了」），这条例外只是它的回声。
+    * **回调抛** ⇒ 那是**我们自己**的解析/记账代码出了 bug。旧实现让它把整个行泵一起带走：
+      线程当场停摆，调用方从此再也看不到子进程的任何一行（协议行也在其中），只能等到超时，
+      现场零线索。现在逐行兜住、继续读，收尾时一次性报「丢了几行 + 第一次的异常」——
+      坏行不进账，好行照走，**且这件事不再是静音的**。
     """
     if stream is None:
         return
+    dropped = 0
+    first: BaseException | None = None
     try:
         for line in stream:
             s = str(line).rstrip("\r\n")
             if not s:
                 continue
-            on_line(s)
+            try:
+                on_line(s)
+            except Exception as e:
+                dropped += 1
+                if first is None:
+                    first = e
     except Exception:
         pass
+    if dropped:
+        (log or _log)(
+            f"行泵：{dropped} 行被回调丢弃（第一次 {first!r}）—— 子进程仍在跑，其余行照读"
+        )
 
 
 def join_all(threads: Iterable[threading.Thread | None], *, timeout: float = 2.0) -> None:
