@@ -48,7 +48,7 @@ import { ReachMasker, selectGoal } from '../../src/ai/goal/reach-mask'
 import { writeNpy } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs'
 import { RNG } from '../../src/utils/RNG'
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 import { runServe } from './serve-loop'
 import { INTENT_REWARD, potential } from '../../src/nn/intent-rl-reward'
 import {
@@ -713,7 +713,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       stage: stages[0],
       seed: seeds[0],
       mode: 'rollout',
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(packManifest, entries))
   }

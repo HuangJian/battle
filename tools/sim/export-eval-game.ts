@@ -154,7 +154,7 @@ function enemyKindIndex(kind: string): number {
       return -1
   }
 }
-import { buildPack } from './pack-container'
+import { buildPack, serviceElapsedSec } from './pack-container'
 import { runServe } from './serve-loop'
 
 const MAX_TICKS = 36000
@@ -2280,7 +2280,7 @@ export function main(argv: string[]): void {
     const packManifest = {
       ...report,
       mode: 'eval',
-      elapsedSec: +((Date.now() - t0) / 1000).toFixed(1),
+      elapsedSec: serviceElapsedSec(t0, argv),
     }
     writeFileSync(packPath, buildPack(packManifest, []))
   }
