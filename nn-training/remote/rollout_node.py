@@ -46,6 +46,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from common import node_report
 from common.env_probe import probe_cloud_env, worker_name
 from common.proc import run_capture
 from remote import tailscale_boot
@@ -257,28 +258,33 @@ def _terminate(p: Any) -> None:
 
 
 def _slot_count(explicit: int) -> tuple[int, str]:
-    """并发槽位：显式值 > `physical_cores()` **全核**（采样节点不预留，用户 2026-11-04）。
+    """并发槽位：显式值 > `min(有效核, 物理核) × 2`（2026-11-14 P3）。
 
     与训练侧 `cpu_worker_slots()`（留 2 核给数据回传）分家：采样节点只跑采样/评估，
-    满核才够用；8 物理核机器起 8 个 worker。
+    满核才够用（8 物理核机器 ⇒ 16 个 worker）。
 
-    ★ 2026-11-11 用**物理核**（不是 `effective_cores()`）：口径必须与 agent 自己的
-      `CPUS = physicalCores()`（`tools/lib/cores.ts`）一致——同一个节点两套口径就会
+    ★ 2026-11-11：用**物理核**（不是 `effective_cores()` 的逻辑核）——同一个节点两套口径就会
       出现「笔记本按 4 开池、agent 自报 2 核」的超额认购（kaggle 实测，父进程 HTTP
-      被饿到 30~60s）。HT sibling 只共享执行单元与 L1/L2，每个 worker 是 ~75–100MB
-      的重型进程，按物理核铺才是「满核」。
+      被饿到 30~60s）。HT sibling 只共享执行单元与 L1/L2，每个 worker 是 ~75–100MB 的重型进程。
+    ★ 2026-11-14（P3）：在物理核基础上 ×2（IO 重叠）——槽位实际只被服务段占住（`svc 2.16s /
+      wall 9.33s`），另一局可以在装载/打包的空档里跑。这确实是 §2026-11-11 事故的同型配置，
+      所以护栏从「默认值」改成「观测 + 显式回退」：`workers 自检` / `★ workers 超额认购` 行 +
+      `CFG.workers = 物理核数` 即回到旧口径。
     """
     cores = os.cpu_count() or 1
     try:
         from common.platform_utils import effective_cores, physical_cores
 
         cores = min(effective_cores(), physical_cores())
-        note = f"platform_utils 物理核={cores} 全核"
+        note = f"platform_utils 物理核={cores}"
     except Exception as e:  # 拉不起 platform_utils 时的兜底：同样用满
         note = f"内联回退({type(e).__name__}) cores={cores}"
     if int(explicit or 0) > 0:
         return int(explicit), note + "（CFG.workers 显式）"
-    return int(cores), note
+    # auto = 物理核 ×2（IO 重叠因子）：单局 `svc 2.16s / wall 9.33s`，槽位只被服务段占住，
+    # 多一倍的池槽能把装载/打包的空档叠起来。**回退口径：CFG.workers = 物理核数**（§5 R3，
+    # §2026-11-11 同型事故靠 `workers 自检` 行最早发现；这里不设默认护栏）。
+    return int(cores) * 2, note + f" ×2（auto；回退填 CFG.workers={cores}）"
 
 
 #: 内置 GitHub 镜像（前缀式）：直连不通时**自动**依次尝试，不需要填任何开关。
@@ -855,6 +861,9 @@ def _start_agent(
         str(workers),
         "--cache-mb",
         str(int(cfg.get("cache_mb") or 2048)),
+        # 磁盘阈值（P3）：agent 侧回显的 `diskFloorMB/diskWarnMB` 必须是**生效值**，
+        # 否则控制台看 2048、真正拒收用的却是另一个数。
+        *node_report.agent_disk_args(cfg),
     ] + [str(a) for a in (cfg.get("agent_extra") or [])]
     fh = open(agent_log, "a", encoding="utf-8", errors="replace")  # 交给 Popen 持有（本进程不关）
     env = dict(os.environ)
@@ -914,27 +923,15 @@ def _status(
 
 
 def emit_output_summary(port: int, auth: str, log: Callable[[str], None]) -> None:
-    """打一行「近 30 分钟产出」（监护循环每 10 分钟调一次）。**绝不抛**。
+    """打两行：近 30 分钟产出 + 磁盘水位（监护循环每 10 分钟调一次）。**绝不抛**。
 
-    读 `/v1/status` 失败 ⇒ `output_line(None)` 那一档「不可知」：可丢的观测不该让监护循环炸，
-    也不该被读成「节点不健康」（判活是 `_ping` 的职责）。
+    **只取一次** `/v1/status`（零额外请求）；两行读同一份快照，日志里是同一时刻的事。
+    读失败 ⇒ 两行各自走「不可知」档：可丢的观测不该让监护循环炸，也不该被读成
+    「节点不健康」（判活是 `_ping` 的职责）。
     """
-    log(output_line(_status(port, auth)))
-
-
-def output_line(status: dict | None) -> str:
-    """把 `/v1/status` 的产出摘要拼成**一行**（空/旧 agent 如实说不可知）。
-
-    分母、窗口、分列全在 agent 侧算好（`outputLine`）——这里不重算任何数字：
-    notebook 日志与 `sampler-agent.log` 必须逐字相同，否则两个日志对账时先要怀疑口径。
-    """
-    if not isinstance(status, dict):
-        return "近30min产出 不可知（agent 未应答）"
-    line = status.get("outputLine")
-    if isinstance(line, str) and line.strip():
-        return f"近30min产出 {line.strip()}"
-    # 旧 agent（没随本仓同步升级）不能编一个「窗口」出来：累计数冒充 30 分钟窗口是静默错数。
-    return "近30min产出 不可知（旧 agent 无 outputLine）"
+    status = _status(port, auth)
+    log(node_report.output_line(status))
+    log(node_report.disk_line(status))
 
 
 def _try_register_once(
@@ -1027,11 +1024,17 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     link = resolve_link(env, str(cfg.get("link") or "auto"), has_ts)
     port = int(cfg.get("agent_port") or 8443)
     workers, slot_note = _slot_count(int(cfg.get("workers") or 0))
+    # 磁盘阈值（P3）：校验在**起 agent 之前**（响了就停，不静默夹取）。
+    (floor_mb, warn_mb), _disk_why = node_report.startup_disk(cfg)
+    if _disk_why:
+        log(f"FATAL: {_disk_why}")
+        return 2
     node_id = str(cfg.get("node_id") or "").strip() or f"rollout-{env}"
     hub_url = registry_url(hub_ip, hub_port, cfg_hub_url) if (hub_ip or cfg_hub_url) else ""
     hub_configured = bool(hub_url and hub_token)
     log(
-        f"环境={env} 通道={link} workers={workers}（{slot_note}）node_id={node_id} "
+        f"环境={env} 通道={link} workers={workers}（{slot_note}）"
+        f" 磁盘={floor_mb}/{warn_mb}MB node_id={node_id} "
         f"hub={'已配置' if hub_configured else '未配置（降级为手工登记）'}"
     )
 
@@ -1101,7 +1104,11 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     auth_path = entry.parent / "agent.auth"
     agent = _start_agent(bun, entry, code_dir, port, workers, cfg, agent_log)
     auth = _wait_auth(agent, auth_path)
+    _t_ping0 = time.time()
     ping = _ping(port, auth)
+    # 超额认购自检的基准（P3）：worker 刚预热完、还没有任务时的 ping 延迟。
+    # agent 未就绪（ping=None）时基准记 0：拿一次超时的 5s 当基准会把告警永久压死。
+    ping_base_ms = max(1, int((time.time() - _t_ping0) * 1000)) if ping is not None else 0
     if ping is None:
         log("agent 30–60s 未就绪 —— 下面是 agent 日志尾部（真因通常在这）：")
         _dump_tail(agent_log, log)
@@ -1173,6 +1180,11 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     ):
         log(line)
 
+    # 超额认购自检（P3）：默认 `workers=物理核×2` 就是 §2026-11-11 事故的配方，基线 ping
+    # 是唯一能提前看见「父进程事件循环被饿」的读数（事故里 1.8s → 30~60s）。
+    disk_state: dict = {"level": None, "rejecting": False, "warned_at": 0.0}
+    log(node_report.workers_selfcheck_line(workers, slot_note, ping_base_ms))
+
     # ── 7. 监护：agent 死重启 / 隧道换名重注册 / 会话到点收线 ─────────────
     deadline = time.time() + max(0.0, float(cfg.get("max_session_hours") or 0)) * 3600
     restart_limit = int(cfg.get("restart_limit") or 5)
@@ -1193,12 +1205,17 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             else:
                 tick += 1
                 if tick % 6 == 0:
-                    if _ping(port, auth) is None:
+                    _t_probe = time.time()
+                    _probe = _ping(port, auth)
+                    _probe_ms = max(1, int((time.time() - _t_probe) * 1000))
+                    if _probe is None:
                         miss += 1
                         if miss >= 3:
                             dead, why = True, "HTTP 探活连续 3 次失败"
                     else:
                         miss = 0
+                        # 磁盘档位切换即时行 + 超额认购监控（都复用这一拍 ping，零额外请求）。
+                        node_report.monitor_tick(_probe, _probe_ms, ping_base_ms, disk_state, log)
             if dead:
                 planned = agent.returncode == AGENT_RESTART_EXIT_CODE
                 if planned:

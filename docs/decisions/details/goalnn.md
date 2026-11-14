@@ -7644,3 +7644,51 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `global_device_count`；每 epoch 尾批丢弃（g2b 877k 语料 ≈0.03%）；每步一次跨核 all-reduce
   是主要新增开销（小模型下它是决定加速比的关键因素）；CPU/CUDA 路径逐位不变
   （`drop_last` 缺省 False、mesh=None）。
+
+## §2026-11-14-goalnn-dispatch-slots-and-keepalive（派工槽位不再取小 + 节点 workers ×2 + 长连接池 + 磁盘阈值可配）
+
+- **现场（gcs，2 物理核，2026-11-14 00:29~00:30）**：`/v1/status` `cpus=2 workers=2 persistReady=2`，
+  `admission active=2 waiting=2~3 peakWaiting=5`；30 分钟 599 局（rollout 219 / eval 380）= 20 局/分
+  （**混算**，rollout-only ≈7.3 局/分）。节点侧 `svc 2.16s / wall 9.33s` ⇒ 槽位占用 **36%**
+  （20×2.16 ÷ (2×60)），即节点 64% 时间没在算。派发日志 `concurrency=2` 而 `rl-config.gcs.concurrency=4`
+  ——`node_slots = min(config, ping.cpus)` 把操作者旋钮吃掉一半。传输侧：本机→节点新建连接 **0.77s**
+  （中位）/ 复用 **0.32s**（curl `num_connects=0` 证明边缘支持 keep-alive）；单局结果包 74~330KB
+  （均值 163KB，≈0.43Mbps）⇒ 与带宽无关。批量压缩实测否决：10 局拼接 +0.5%、列拼 −2.3%、
+  level 9 −11%（deflate 32KB 窗口 < 单局 6.6MB，跨局复用不到）。
+- **决定**：
+  ① **派工槽位**：`node_slots(configured, cpus, workers)` = 显式 config 优先，缺省回落 `ping.workers`
+  → `cpus` → 1；`/v1/ping` 增报 `workers`；rollout / eval / rescan / batch **四处共用**（eval 的
+  `eval_slot_cap` 让位保留）。**修订 §2026-11-11 决定 C**：派工线程每局被隧道往返与回传整段占住，
+  按核数取小会让节点 2 个游戏槽 64% 时间空转；超额认购的防线改由 agent 准入队列（有界排队/503）承担。
+  ② **节点 workers**：`CFG.workers=0` 的 auto 从「物理核」改为 `min(有效核, 物理核) × 2`（IO 重叠因子；
+  记忆预算是每 worker ~75–100MB）。护栏不是默认值而是观测：`workers 自检: workers=N ping=…ms` +
+  `★ workers 超额认购`（ping ≥1.5×基准且 ≥1s）——§2026-11-11 事故里 1.8s→30~60s 正是这条信号。
+  ③ **派工顺序**：每节点 50 局 `wallSec` 滑动窗口均值升序启动（K=50 / 冷启动 5 局 /
+  `policy.nodeOrderBySpeed`），**只排序不减槽**（慢节点仍拿满 `c_cap`，尾部交给 tail-race）。
+  数据源 = 每轮现读 `dist-agent-meta.jsonl` 尾部（结算时追加 `wallMs`），不驻留内存、不新增落盘文件。
+  生效面有限：worker 从同一个
+  `pending` 队列抢活，排序只影响开轮第一波；`need` 节点在权重 POST 回调里孵化，那部分尽力而为。
+  ④ **长连接**：`common/http_pool.py`（thread-local，键 = scheme/host/port/proxy），复用
+  `net_http.racing_connection`（§149 的竞速 connect 不复制第二份）；**每请求刷新 socket timeout**
+  （任务 900s / ping 3s 共用池）；**重发白名单**：仅「传输异常 ∧ 未拿到响应头 ∧ 不在收工态」重试 1 次，
+  `/v1/task` 不重发（agent 同步路径不查 inflight，重发 = 再开一局）。
+  ⑤ **磁盘阈值可配**：`CFG.disk_floor_mb / disk_warn_mb` + agent `--disk-floor-mb / --disk-warn-mb`；
+  `ping`/`status` 回显**生效值**；10min 周期行与档位切换 `★ 磁盘…` 即时行共用同一次 `/v1/status`。
+- **被否决**：① `min(config, workers)`——节点没重启（workers=2）时等于本案没修，用户现场正是这个形态；
+  ② 速度加权有效槽位（v1 草案）与中央列表调度（要重写 worker 循环 + 竞速/取消/分配超时三条路径，
+  留作 P5）；③ 批量派发 + 跨局 gzip（+0.5% / −2.3%）；④ 「传输失败一律重发」（sync `/v1/task` 会重复开局）；
+  ⑤ 把拒收地板默认抬到 4~5GB（§2026-10-09 已否：实测训练中盘长期 1.2–1.8GB）。
+- **后果 / 回滚**：派工线程可超过节点池容量——多出的是**准入排队**，不是故障（`[dist]` 打超额告警行，
+  判据换成 `admission.waiting` 与 `timedOut`）；`workers=物理核×2` 在 2 核机上是 §2026-11-11 事故同型
+  配置，靠 `★ workers 超额认购` + 显式回退；eval 与 rollout 共用一条并发旋钮（用户裁定），
+  eval 抢槽风险由 `eval_slot_cap` 兜底并记在 plan R8。三个回退旋钮都不改代码：
+  `CFG.workers=物理核数` / `policy.nodeOrderBySpeed=0` / `NODE_HTTP_POOL=0`。
+- **验收**：`tests/common/test_http_pool.py` 8 条（复用、`Connection: close` 重连、按请求 timeout、
+  503→HTTPError、白名单重发、`/v1/task` 不重发、多线程不共享、abort 不重发）·
+  `tests/trainer/test_node_speed.py` 6 条 · `test_node_probe_budgets.py` 7 条（config 优先 + 三档回落）·
+  `tests/remote/test_rollout_node.py`（`_slot_count ×2`、CFG→argv、`disk_line` 三档+不可知+生效阈值、
+  两行摘要同拍）· `tests/agent/disk-level.test.ts` 17 条；`bun run check` **2780 passed**、
+  `bun run build` 过、`tests/{common,trainer,remote}` 全绿、`nn-python-gate` 见下。
+- **未闭的环**：① 2 核机上 ×2 的真实 ping 读数与 `★ 超额认购` 是否出现（需真机跑一轮）；
+  ② eval 调高后抢槽的实测（R8）；③ 批量流式回传与中央列表调度（P5）；④ 上线前必须清盘
+  （现场 free=2706MB，距熔断 2048 只剩 658MB）。

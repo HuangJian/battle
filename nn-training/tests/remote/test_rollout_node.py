@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from common import node_report
 from remote import rollout_node as rn
 from remote import rollout_tunnel as rt
 from remote import tailscale_boot
@@ -213,9 +214,9 @@ def test_output_line_prefers_the_agent_line_verbatim() -> None:
     两处格式化 = 两套口径，对账时先要怀疑日志。
     """
     line = "games=412（rollout=380 / eval=32） · 13.7 局/分（30min） · 失败=3 · 轮次=2"
-    assert rn.output_line({"outputLine": line}) == f"近30min产出 {line}"
+    assert node_report.output_line({"outputLine": line}) == f"近30min产出 {line}"
     # 两侧空白不是新事实（日志行不带缩进）
-    assert rn.output_line({"outputLine": f"  {line}  "}) == f"近30min产出 {line}"
+    assert node_report.output_line({"outputLine": f"  {line}  "}) == f"近30min产出 {line}"
 
 
 def test_output_line_is_honest_when_unknown() -> None:
@@ -224,9 +225,9 @@ def test_output_line_is_honest_when_unknown() -> None:
     用**全等**而不是子串：这两种不可知形态是仅有的两档，判据没必要挂在措辞的一部分上
     （文本断言计数护栏只许降不许升，全等不计）。
     """
-    assert rn.output_line(None) == "近30min产出 不可知（agent 未应答）"
-    assert rn.output_line({"gamesDoneTotal": 1240}) == "近30min产出 不可知（旧 agent 无 outputLine）"
-    assert rn.output_line({"outputLine": "   "}) == "近30min产出 不可知（旧 agent 无 outputLine）"
+    assert node_report.output_line(None) == "近30min产出 不可知（agent 未应答）"
+    assert node_report.output_line({"gamesDoneTotal": 1240}) == "近30min产出 不可知（旧 agent 无 outputLine）"
+    assert node_report.output_line({"outputLine": "   "}) == "近30min产出 不可知（旧 agent 无 outputLine）"
 
 
 def test_status_reads_local_agent_with_auth_and_never_raises() -> None:
@@ -246,21 +247,37 @@ def test_output_summary_cadence_is_ten_minutes() -> None:
     assert rn.OUTPUT_STATUS_EVERY_SEC == 600.0
 
 
-def test_emit_output_summary_prints_exactly_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
-    """监护循环每 10 分钟调的就是它：读一次 `/v1/status`、打一行。
+def test_emit_output_summary_prints_output_and_disk_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """监护循环每 10 分钟调的就是它：读**一次** `/v1/status`、打两行（产出 + 磁盘）。
 
-    钉在这里而不是钉源码文本：notebook 侧看不到的正是「算了但没上屏」，而这条用例走的是
-    **监护循环真正调用的入口**（`_status` 注入，不打真网络）。
+    2026-11-14（P3）：磁盘水位要与产出同拍上屏（plan/node-throughput-and-keepalive D4）——
+    两行共用一个快照，`_status` 只许调一次（零额外请求）。钉在这里而不是钉源码文本：
+    notebook 侧看不到的正是「算了但没上屏」。
     """
-    monkeypatch.setattr(rn, "_status", lambda port, auth: {"outputLine": "games=7（rollout=7 / eval=0）"})
+    calls: list[int] = []
+    status = {
+        "outputLine": "games=7（rollout=7 / eval=0）",
+        "diskFreeMB": 2706,
+        "diskLevel": "warn",
+        "diskWarnMB": 4096,
+        "diskFloorMB": 2048,
+    }
+
+    def _st(port: int, auth: str) -> dict:
+        calls.append(1)
+        return status
+
+    monkeypatch.setattr(rn, "_status", _st)
     seen: list[str] = []
     rn.emit_output_summary(8443, "tok", seen.append)
-    assert seen == ["近30min产出 games=7（rollout=7 / eval=0）"]
-    # agent 不可达 ⇒ 仍是一行（不可知），不是零行、不是抛
+    assert len(calls) == 1, "磁盘行与产出行必须共用同一次 /v1/status（零额外请求）"
+    assert seen[0] == "近30min产出 games=7（rollout=7 / eval=0）"
+    assert seen[1] == "磁盘 free=2706MB（warn<4096 / 熔断<2048） · 档位=warn · 拒收=否 · 距熔断 658MB"
+    # agent 不可达 ⇒ 两行都如实说不可知（不是零行、不是抛）
     monkeypatch.setattr(rn, "_status", lambda port, auth: None)
     seen.clear()
     rn.emit_output_summary(8443, "tok", seen.append)
-    assert seen == ["近30min产出 不可知（agent 未应答）"]
+    assert seen == ["近30min产出 不可知（agent 未应答）", "磁盘 free=不可知（agent 未应答）"]
 
 
 # ---------------------------------------------------------------- GitHub 不通时的下载路
@@ -437,23 +454,119 @@ def test_cloudflared_download_retries_after_whole_round_fails(
     assert "gh-proxy.com" in downloads[4]
 
 
-def test_slot_count_uses_all_physical_cores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """采样节点不预留核：8 **物理**核起 8 个 worker（训练侧 `cpu_worker_slots` 的留 2 核不适用）。
+def test_slot_count_auto_is_twice_physical_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CFG.workers=0` ⇒ `min(有效核, 物理核) × 2`（2026-11-14 P3）。
 
-    口径必须是物理核（= agent 自己的 `CPUS = physicalCores()`）：两套口径并存就会出现
-    「笔记本按 4 开池、agent 自报 2 核」的超额认购（2026-11-11 kaggle：父进程 HTTP 被饿到
-    30~60s，连带 ping/权重握手成批超时）。HT sibling 只共享执行单元与 L1/L2，每个 worker
-    是 ~75–100MB 的重型进程 ⇒ 按物理核铺才是「满核」。
+    为什么 ×2（plan/node-throughput-and-keepalive D4）：单局 `svc 2.16s / wall 9.33s`，
+    节点槽位只被服务段占住（装载/打包时不占 CPU）⇒ 多一倍的池槽把空档叠起来。
+    口径仍与 agent 的 `CPUS = physicalCores()` 同源（cgroup 配额更小时取小），
+    否则「笔记本按 4 开池、agent 自报 2 核」的超额认购会重演（2026-11-11 kaggle：
+    父进程 HTTP 被饿到 30~60s）。回退口径：显式 `CFG.workers = 物理核数`。
     """
     from common import platform_utils
 
     monkeypatch.setattr(platform_utils, "effective_cores", lambda: 8)
     monkeypatch.setattr(platform_utils, "physical_cores", lambda: 4)
-    assert rn._slot_count(0)[0] == 4
-    assert rn._slot_count(3)[0] == 3
-    # 容器配额比物理核更小（cgroup 限流）⇒ 取小，别按机器型号报数
+    assert rn._slot_count(0)[0] == 8  # 4 核 ×2
+    assert rn._slot_count(3)[0] == 3  # 显式值完全照填
+    # 容器配额比物理核更小（cgroup 限流）⇒ 取小，再 ×2
     monkeypatch.setattr(platform_utils, "effective_cores", lambda: 2)
-    assert rn._slot_count(0)[0] == 2
+    assert rn._slot_count(0)[0] == 4
+
+
+def test_disk_thresholds_defaults_and_derivation() -> None:
+    """默认 2048/4096；只给 floor ⇒ `max(floor+512, floor×2)`；两个都给 ⇒ 照填。"""
+    assert node_report.disk_thresholds({}) == (2048, 4096)
+    assert node_report.disk_thresholds({"disk_floor_mb": 1024}) == (1024, 2048)
+    assert node_report.disk_thresholds({"disk_floor_mb": 4096}) == (4096, 8192)
+    assert node_report.disk_thresholds({"disk_floor_mb": 3000, "disk_warn_mb": 8000}) == (3000, 8000)
+
+
+def test_disk_thresholds_validation_is_loud() -> None:
+    """非法阈值不静默夹取：启动期 FATAL（返回可读理由）。"""
+    assert node_report.validate_disk_thresholds(2048, 4096) == ""
+    assert node_report.validate_disk_thresholds(100, 4096).startswith("disk_floor_mb")
+    assert node_report.validate_disk_thresholds(70000, 80000).startswith("disk_floor_mb")
+    # warn < floor+512 ⇒ 拒（回差不足会在阈值附近抖振）
+    assert node_report.validate_disk_thresholds(2048, 2300).startswith("disk_warn_mb")
+
+
+def test_start_agent_passes_disk_thresholds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CFG → agent argv：阈值必须透传，否则 ping/status 回显的是默认值、真正生效的是另一个数。"""
+    seen: list[list[str]] = []
+
+    class _P:
+        def poll(self):
+            return None
+
+    def _fake_popen(cmd: list[str], **_kw: object) -> _P:
+        seen.append(cmd)
+        return _P()
+
+    monkeypatch.setattr(rn.subprocess, "Popen", _fake_popen)
+    rn._start_agent(
+        "bun",
+        tmp_path / "a.ts",
+        tmp_path,
+        8443,
+        4,
+        {"disk_floor_mb": 3000, "disk_warn_mb": 8000},
+        tmp_path / "agent.log",
+    )
+    cmd = seen[0]
+    assert cmd[cmd.index("--disk-floor-mb") + 1] == "3000"
+    assert cmd[cmd.index("--disk-warn-mb") + 1] == "8000"
+    assert cmd[cmd.index("--workers") + 1] == "4"
+
+
+def test_disk_line_three_levels_and_unknown() -> None:
+    """周期行三档 + 不可知 + **生效**阈值（文本只引 status 的数字，不写死常量）。"""
+    warn = {"diskFreeMB": 2706, "diskLevel": "warn", "diskWarnMB": 4096, "diskFloorMB": 2048}
+    assert node_report.disk_line(warn) == (
+        "磁盘 free=2706MB（warn<4096 / 熔断<2048） · 档位=warn · 拒收=否 · 距熔断 658MB"
+    )
+    crit = {"diskFreeMB": 1800, "diskLevel": "critical", "diskWarnMB": 4096, "diskFloorMB": 2048}
+    assert node_report.disk_line(crit) == (
+        "磁盘 free=1800MB（warn<4096 / 熔断<2048） · 档位=critical · 拒收=是 · 已破熔断 248MB"
+    )
+    # 生效阈值被 CFG 覆盖后文本跟着变（不是常量 2048/4096）
+    ow = {"diskFreeMB": 3500, "diskLevel": "warn", "diskWarnMB": 8192, "diskFloorMB": 4096}
+    assert node_report.disk_line(ow) == (
+        "磁盘 free=3500MB（warn<8192 / 熔断<4096） · 档位=warn · 拒收=是 · 已破熔断 596MB"
+    )
+
+    assert node_report.disk_line(None) == "磁盘 free=不可知（agent 未应答）"
+    assert node_report.disk_line({}) == "磁盘 free=不可知（旧 agent 无磁盘字段）"
+    assert node_report.disk_line({"diskFreeMB": None}) == "磁盘 free=不可知（旧 agent 无磁盘字段）"
+
+
+def test_over_subscribed_verdict() -> None:
+    """≥1s 且 >1.5× 基准才算超额认购（§2026-11-11 的最早信号）。"""
+    assert node_report.over_subscribed(900, 300) is False
+    assert node_report.over_subscribed(1000, 300) is True
+    assert node_report.over_subscribed(420, 300) is False  # 1.4×
+    assert node_report.over_subscribed(1000, 0) is True  # 无基准：只看 1s
+
+
+def test_note_disk_tick_only_on_change() -> None:
+    """档位切换 / 正在拒收才打 ★；首拍不刷屏，但首拍就在拒收要可见。"""
+    logs: list[str] = []
+    st: dict = {"level": None, "rejecting": False, "warned_at": 0.0}
+    ok = {"diskFreeMB": 5000, "diskLevel": "ok", "diskWarnMB": 4096, "diskFloorMB": 2048}
+    node_report.note_disk_tick(ok, st, logs.append)
+    assert logs == []  # 首拍基线
+    node_report.note_disk_tick(dict(ok, diskFreeMB=3000, diskLevel="warn"), st, logs.append)
+    assert len(logs) == 1 and logs[0].startswith("★ 磁盘")
+    node_report.note_disk_tick(dict(ok, diskFreeMB=2800, diskLevel="warn"), st, logs.append)
+    assert len(logs) == 1  # 同档不重复
+
+    logs2: list[str] = []
+    st2: dict = {"level": None, "rejecting": False, "warned_at": 0.0}
+    low = {"diskFreeMB": 1000, "diskLevel": "critical", "diskWarnMB": 4096, "diskFloorMB": 2048}
+    node_report.note_disk_tick(low, st2, logs2.append)
+    assert len(logs2) == 1 and logs2[0].startswith("★ 磁盘")
 
 
 def test_cloudflared_discovery_ignores_login_shell_banner(

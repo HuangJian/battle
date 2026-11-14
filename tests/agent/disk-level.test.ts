@@ -19,6 +19,7 @@ import {
   DISK_WARN_MB,
   classifyDiskFree,
   decideTaskAdmission,
+  diskThresholds,
   type DiskLevel,
 } from '../../tools/agent/sampler-agent'
 
@@ -103,9 +104,23 @@ describe('上报接线（源码守卫：handler 在闭包里，两处必须同�
     expect(src.split('...diskReport(),').length - 1).toBe(2)
   })
 
-  it('准入调用的是 decideTaskAdmission(free)，不是内联的裸 2048', () => {
-    expect(src).toContain("decideTaskAdmission(free) === 'low-disk'")
+  it('准入调用的是 decideTaskAdmission(free, 生效地板)，不是内联的裸 2048', () => {
+    // 2026-11-14（P3）：地板可由 --disk-floor-mb / CFG.disk_floor_mb 覆盖 ⇒
+    // 读的是生效值 `diskFloorMb`，而不是常量（否则控制台看 2048、真正拒收用另一个数）。
+    expect(src).toContain("decideTaskAdmission(free, diskFloorMb) === 'low-disk'")
     expect(src).not.toContain('free !== null && free < 2048')
+  })
+
+  it('diskReport 用的是生效阈值变量（不是直读冻结常量）', () => {
+    const block = src.slice(
+      src.indexOf('function diskReport():'),
+      src.indexOf('/**\n * 工作目录磁盘收敛'),
+    )
+    expect(block).toContain('diskWarnMB: diskWarnMb')
+    expect(block).toContain('diskFloorMB: diskFloorMb')
+    expect(block).toContain(
+      'classifyDiskFree(free, diskLevel, { floor: diskFloorMb, warn: diskWarnMb })',
+    )
   })
 
   it('diskReport 单点产出五个 wire 字段（ping/status 不得各拼一遍）', () => {
@@ -116,5 +131,20 @@ describe('上报接线（源码守卫：handler 在闭包里，两处必须同�
     for (const k of ['diskFreeMB', 'diskLevel', 'diskWarnMB', 'diskFloorMB', 'diskLevelSince']) {
       expect(block).toContain(k)
     }
+  })
+})
+
+describe('阈值覆盖（P3：默认冻结、可配置）', () => {
+  const src = readFileSync(new URL('../../tools/agent/sampler-agent.ts', import.meta.url), 'utf8')
+
+  it('未给 CLI 覆盖 ⇒ 生效值 = 冻结默认（2048/4096）', () => {
+    expect(diskThresholds()).toEqual({ floorMB: 2048, warnMB: 4096 })
+  })
+
+  it('启动参数接上 --disk-floor-mb / --disk-warn-mb，并做范围校验（响了就停）', () => {
+    expect(src).toContain("a === '--disk-floor-mb'")
+    expect(src).toContain("a === '--disk-warn-mb'")
+    expect(src).toContain('diskFloorMb >= 512 && diskFloorMb <= 65536')
+    expect(src).toContain('diskWarnMb >= diskFloorMb + DISK_HYST_MB')
   })
 })

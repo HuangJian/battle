@@ -762,8 +762,9 @@ class _UnitLanes:
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
         common.distribution.note_weights_pushed(self.wver, nid)
-        lane["c"] = max(
-            1, int(lane["raw"].get("concurrency") or ping.get("cpus") or 1)
+        # 与 rollout/eval 腿同一份口径（2026-11-14）：config 优先，缺省 workers → cpus。
+        lane["c"] = common.distribution.node_slots(
+            lane["raw"].get("concurrency"), ping.get("cpus"), ping.get("workers")
         )
         lane["ready"] = True
         with self.lock:

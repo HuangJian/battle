@@ -12,6 +12,7 @@ from pathlib import Path
 
 import common.distribution
 import common.protocol
+from common import http_pool, node_report, node_speed
 from common.log import log
 from common.platform_utils import rmtree_best_effort
 
@@ -340,10 +341,13 @@ class RolloutDispatcher:
                     },
                 )
                 continue
-            # 并发按「配置 vs 节点自报核数」取小（2026-11-11）：kaggle 只报 2 核而 config 钉 4
-            # 时，4 个重型 worker 抢 2 个核会把父进程的 HTTP 拖成几十秒（评审见 node_slots）。
-            c_n = common.distribution.node_slots(n.get("concurrency"), ping.get("cpus"))
-            log(f"[dist] node {nid}: online, concurrency={c_n}")
+            # 派工槽位（2026-11-14 收口，plan/node-throughput-and-keepalive P1）：显式 config 是
+            # 操作者旋钮（控制台「并发」），缺省回落节点自报池容量 `workers` → `cpus`。
+            # 不再与核数取小——派工线程每局被隧道往返与回传整段占住（wall 9.3s / svc 2.3s），
+            # 按核数取小会让节点 2 个游戏槽 64% 时间空转。超额认购的防线交给 agent
+            # 准入队列（有界排队 / 503），多出的线程是**排队**，不是故障。
+            c_n, _online = node_report.node_online(nid, n, ping)
+            log(_online)
             nodes.append(
                 {
                     "id": nid,
@@ -393,6 +397,9 @@ class RolloutDispatcher:
         with open(rl_path, "rb") as f:
             weights_bytes = f.read()
         reuse, need = common.distribution.partition_weights_nodes(nodes, wver, kind=wkind)
+        # 快节点先拿首波（**不减槽**，开关 `policy.nodeOrderBySpeed`）；need 节点的线程在权重
+        # POST 完成回调里孵化（并行）⇒ 这层排序对它是尽力而为。
+        reuse, need = node_speed.order_round(nodes, reuse, need, meta_path, policy, log)
         if reuse:
             log(
                 f"[dist] weights[{wkind}] reuse wver={wver[:12]}… skip POST for "
@@ -1255,9 +1262,11 @@ class RolloutDispatcher:
         #   竞速副本不进 `attempts`：它们跑了却没回结果，halted 时算 missing 是正确语义。
         missing = sorted(k for k in (set(attempts) if halted and self.pool_halt else all_tasks) if k not in seen)
         by_node = common.distribution.by_node_of(results)
+        # 行尾带传输层复用率（2026-11-14 P4）：`NODE_HTTP_POOL=0` ⇒ 后缀为空。
         log(
             f"[dist] round done: ok={len(results)}/{n_total_tasks} missing={len(missing)} "
             f"retried={stats['retried']} byNode={json.dumps(by_node)}"
+            + http_pool.stats_suffix()
         )
         # 竞速账 + 重复执行率（口径见 `common.distribution.race_stats`；2026-10-21 收口）
         if _race_line := common.distribution.race_log_line(

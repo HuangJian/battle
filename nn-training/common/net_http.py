@@ -201,6 +201,19 @@ class _RacingHTTPSConnection(http.client.HTTPSConnection):
         self._create_connection = racing_create_connection
 
 
+def racing_connection(
+    scheme: str, host: str, port: int, timeout: float
+) -> http.client.HTTPConnection:
+    """建一条**竞速 connect** 的（未发起请求）连接：长连接池与测试共用这一处。
+
+    为什么不自建 `http.client` 子类：竞速 connect 的修复（§149 的 IPv6 税）只住在这两个
+    子类里，第二份实现迟早漂移成两种 connect 行为。
+    """
+    if str(scheme).lower() == "https":
+        return _RacingHTTPSConnection(host, port, timeout=timeout)
+    return _RacingHTTPConnection(host, port, timeout=timeout)
+
+
 class _RacingHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req: Any):
         return self.do_open(_RacingHTTPConnection, req)

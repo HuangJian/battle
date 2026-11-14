@@ -6,6 +6,42 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §152 派工槽位不再取小 + 节点 workers ×2 + 长连接池 + 磁盘阈值可配（2026-11-14）
+
+**现场**（gcs，2 物理核，2026-11-14 00:29）：`/v1/status` `cpus=2 workers=2 persistReady=2`，
+30 分钟 599 局（rollout 219 / eval 380）＝ 20 局/分；节点侧 `svc 2.16s / wall 9.33s` ⇒
+槽位占用 **36%**（20×2.16 ÷ (2×60)）。派发日志却是 `concurrency=2`，而 `rl-config.gcs.concurrency=4`
+—— `node_slots = min(config, ping.cpus)` 把操作者的旋钮吃掉了一半。传输侧：新建连接 **0.77s**（中位）
+/ 复用 **0.32s**，单局结果包只有 163KB（≈0.43Mbps）⇒ 瓶颈不是带宽。
+
+**改了什么**（全文 / DoD / 风险 → `plan/node-throughput-and-keepalive.plan.md`）：
+
+1. `node_slots(configured, cpus, workers)` = 显式 config 优先，缺省 `ping.workers → cpus`；
+   `/v1/ping` 增报 `workers`；rollout / eval / rescan / batch 四处共用（eval 的 `eval_slot_cap`
+   让位逻辑保留）。**这取代 §148 决定 C 的「并发取小」**：派工线程每局被隧道往返与结果回传整段
+   占住，按核数取小让节点 64% 时间空转；超额认购的防线改由 agent 准入队列（有界排队/503）承担。
+2. 节点 `CFG.workers=0` 的 auto 从「物理核」改为「**物理核 ×2**」，并打 `workers 自检: … ping=…ms`；
+   `★ workers 超额认购` 用「ping ≥1.5×基准且 ≥1s」判（§148 事故里 1.8s→30~60s 就是这条信号）。
+3. 派工顺序按 50 局 `wallSec` 窗口均值升序启动（`policy.nodeOrderBySpeed`），**只排序不减槽**；
+   数据源 = 每轮现读 `dist-agent-meta.jsonl` 尾部（结算时追加 `wallMs`），不驻留内存、不新增落盘文件。
+   生效面有限：worker 从同一个
+   `pending` 队列抢活，排序只影响开轮第一波；`need` 节点在权重 POST 回调里孵化，那部分尽力而为。
+4. `common/http_pool.py`：thread-local keep-alive（键 = scheme/host/port/proxy），复用
+   `net_http.racing_connection`（§149 的竞速 connect 不复制第二份）；**每请求刷新 socket timeout**
+   （任务 900s / ping 3s 共用池）；重发**白名单**：仅「传输异常 ∧ 未拿到响应头 ∧ 不收工」重试 1 次，
+   `/v1/task` 不重发（agent 同步路径不认重名任务，重发 = 再开一局）。`NODE_HTTP_POOL=0` 逐字节回退。
+5. `CFG.disk_floor_mb` / `disk_warn_mb`（默认 2048/4096，**默认值不抬高**）+ agent
+   `--disk-floor-mb/--disk-warn-mb`；`ping`/`status` 回显**生效值**；10 分钟周期行与档位切换
+   `★ 磁盘…` 即时行共用同一次 `/v1/status`（零额外请求）。
+
+**验收**：`tests/common/test_http_pool.py` 8 条 · `tests/trainer/test_node_speed.py` 6 条 ·
+`test_node_probe_budgets.py` 7 条 · `tests/remote/test_rollout_node.py`（`_slot_count ×2`、CFG→argv、
+`disk_line`、两行摘要）· `tests/agent/disk-level.test.ts` 17 条；`bun run check` 2780 passed、
+`bun run build` 过、`tests/{common,trainer,remote}` 全绿。
+
+**回退（三处都不改代码）**：`CFG.workers=物理核数` 重跑 cell · `policy.nodeOrderBySpeed=0` ·
+`NODE_HTTP_POOL=0`。
+
 ## §151 hub 发布的 job 行带课程名（2026-11-13）
 
 **现场**（用户口径）：共享 hub 把多门课的活派给**同一台**云端 GPU worker，而云机日志每行只有一个

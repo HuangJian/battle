@@ -5552,6 +5552,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/decisions/details/goalnn.md` §2026-11-11-goalnn-rollout-node-liveness-budgets
 
+> **2026-11-14 修订**：**决定 C（并发取小）已被 §2026-11-14-goalnn-dispatch-slots-and-keepalive 取代**
+> ——派工线程要覆盖隧道往返与回传（`wall 9.3s` / `svc 2.3s`），按核数取小让节点 64% 时间空转。
+> 决定 A/B（探活预算、超时不摘权重账本）仍成立。
+
 ## §2026-11-11-goalnn-rollout-racing-connect（rollout 每轮 63s 的真因：串行 connect 的「每地址 timeout」；更正并收回上一条的预算修法）
 
 - **现场**：`o2-loot3` / `o2-notax3` 每轮 rollout **63.6s / 62.8s**（预期 <40s）。分相计时：节点门
@@ -5838,3 +5842,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：`break_bricks_on_path` 默认 false，课程不写 = 行为逐字节不变；训练链仍不认该开关（源码门禁 + 行为测试）。B2 变体（如只在“砖是唯一阻挡且目标在砖后”时触发）需新预注册 + 新筛选段。
 
 —— 全文 → `docs/nn/training-stack.md` §74
+
+## §2026-11-14-goalnn-dispatch-slots-and-keepalive（派工槽位不再取小 + 节点 workers ×2 + 长连接池 + 磁盘阈值可配）
+
+- **现场（gcs，2 物理核，2026-11-14 00:29）**：30min 599 局（rollout 219 / eval 380）＝ 20 局/分；节点侧 `svc 2.16s / wall 9.33s` ⇒ 槽位占用 36%。派发日志 `concurrency=2` 而配置是 4——`node_slots = min(config, cpus)` 把操作者旋钮吃掉一半。传输：新建连接 0.77s / 复用 0.32s，结果包 163KB ⇒ 瓶颈不是带宽。
+- **决定**：① `node_slots(configured, cpus, workers)` = 显式 config 优先，缺省 `ping.workers → cpus`；`/v1/ping` 增报 `workers`；rollout/eval/rescan/batch 四处共用（**修订 §2026-11-11 决定 C**）。② 节点 `CFG.workers=0` auto = `min(有效核, 物理核) × 2` + `workers 自检` 行（`★ workers 超额认购`：ping ≥1.5×基准且 ≥1s）。③ 派工顺序按 50 局 `wallSec` 窗口升序，**只排序不减槽**（`policy.nodeOrderBySpeed`，K=50 / 冷启动 5 局；窗口每轮现读 `dist-agent-meta.jsonl` 尾部，不驻留内存）。④ `common/http_pool.py` thread-local keep-alive，**每请求刷新 timeout**，**白名单重发**（收工态与 `/v1/task` 不重发）。⑤ `CFG.disk_floor_mb/disk_warn_mb` 可配（默认 2048/4096 不抬高）+ agent 两个 CLI + 10min 周期行 + 档位切换即时行（同一次 `/v1/status`）。
+- **被否决**：`min(config, workers)`（节点没重启时等于没修）；速度加权减槽 / 中央列表调度；批量派发 + 跨局 gzip（实测 +0.5% / −2.3%）；「传输失败一律重发」（sync `/v1/task` 在 agent 侧不幂等，会重复开局）；把拒收地板默认抬到 4~5GB（§2026-10-09 已否）。
+- **后果**：派工线程可超过节点池容量（多出的是准入排队，不是故障），护栏 = `[dist]` 超额告警行 + `admission.waiting`；`workers=物理核×2` 在 2 核机上是 §2026-11-11 事故同型配置，护栏 = `★ workers 超额认购` 行 + `CFG.workers=物理核` 回退；eval 与 rollout 共用一条并发旋钮（用户裁定），抢槽风险由 `eval_slot_cap` 让位兜底并记在风险 R8。三个回退旋钮都不改代码：`CFG.workers` / `nodeOrderBySpeed=0` / `NODE_HTTP_POOL=0`。
+- **验收**：`tests/common/test_http_pool.py` 8 条 + `tests/trainer/test_node_speed.py` 6 条 + `test_node_probe_budgets.py` 7 条 + `tests/remote/test_rollout_node.py` + `tests/agent/disk-level.test.ts` 17 条；`bun run check` 2780 passed、`bun run build` 过、`tests/{common,trainer,remote}` 全绿、`nn-python-gate` 绿。
+
+—— 全文（现场读数 / DoD / 风险 / 上线顺序）→ `plan/node-throughput-and-keepalive.plan.md`；链路细节 → `docs/nn/remote-transport.md` §152

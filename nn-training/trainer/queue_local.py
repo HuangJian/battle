@@ -655,7 +655,10 @@ def rescan_nodes(
             if boot_why:
                 log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
                 continue
-            c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+            # 与 rollout 腿同一份口径（2026-11-14）：config 优先，缺省 workers → cpus。
+            c_n = common.distribution.node_slots(
+                n.get("concurrency"), ping.get("cpus"), ping.get("workers")
+            )
             # 权重：新上线节点走进程内复用缓存；**回场节点强制重握手**（它可能刚重启，
             # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
             # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重

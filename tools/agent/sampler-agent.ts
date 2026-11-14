@@ -14,8 +14,7 @@
  *                     结果缓存 LRU：同键重入直接回放。
  *   GET  /v1/result   异步取包：200 容器 | 202 在跑 | 500 局失败（一次性消费）| 404 过期。
  *   POST /v1/cancel   按 taskKey 取消在飞任务（分配超时后停掉远端算力；404 = 已结束/过期）。
- *   GET  /v1/status   健康快照（巡检用）。
- *   GET  /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus。
+ *   GET  /v1/status   健康快照（巡检用）。 *   GET /v1/ping     存活 + codeHash + bunVersion + agentVersion + cpus + workers。
  *
  * 仅用 bun/node 内建（Bun.serve / node:child_process / node:zlib / node:crypto /
  * node:fs），零 npm 第三方依赖、无构建步骤（bun 直跑 TS 源码）。Bun.serve 若出现
@@ -165,6 +164,10 @@ let cacheMaxItems = 32
  *  `--admission-wait-ms 0` = 回退档（逐字节旧行为：池满立即 busy）。 */
 let admissionWaitMs = ADMISSION_WAIT_MS
 let admissionQueueMax = ADMISSION_QUEUE_MAX
+/** 磁盘阈值的**覆盖槽**（0 = 用冻结默认值）。为什么先存覆盖值再算生效值： `DISK_FLOOR_MB`
+ *  等常量声明在文件的磁盘段（更靠后），在这里直接读会踩 `const` 的 TDZ。生效值在那边算。 */
+let diskFloorOverride: number | null = null
+let diskWarnOverride: number | null = null
 /** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
 let forceBun = false
 /** 长驻 worker（§368 提速④）：默认开（2026-09-08 用户指令"全量开关"）；
@@ -196,6 +199,8 @@ let missLogSuppressed = 0
     else if (a === '--no-prewarm') prewarmEnabled = false
     else if (a === '--pool-idle-ms') poolIdleMs = Math.max(0, parseInt(argv[++i], 10))
     else if (a === '--pool-floor') poolFloor = Math.max(1, parseInt(argv[++i], 10))
+    else if (a === '--disk-floor-mb') diskFloorOverride = parseInt(argv[++i], 10)
+    else if (a === '--disk-warn-mb') diskWarnOverride = parseInt(argv[++i], 10)
     else if (a === '--takeover') cliTakeover = true
   }
 }
@@ -882,6 +887,30 @@ export const DISK_WARN_MB = 4096
 /** 回差：入档用严格 `<`、出档要 `>= 阈值 + 回差` ⇒ 阈值附近不抖振（512 MB ≈ 2.5h 排水量）。 */
 export const DISK_HYST_MB = 512
 
+/** **生效阈值**（2026-11-14，plan/node-throughput-and-keepalive P3）：默认 = 上面两个冻结常量，
+ *  可被 `--disk-floor-mb` / `--disk-warn-mb` 覆盖（rollout_node 从 `CFG.disk_floor_mb` 透传）。
+ *  `ping`/`status` 回显与 `/v1/task` 的拒收门都读**这两个值**，不再直读常量——否则控制台看到
+ *  的阈值和真正生效的阈值会不是一回事。
+ *  范围校验（响亮失败）：floor ∈ [512, 65536]、warn ≥ floor + 512。 */
+// `??` 而不是 `||`：手工传 `--disk-floor-mb abc` ⇒ NaN ⇒ 下面的范围校验会响亮失败，
+// 而不是静默退回默认值（「阈值填坏了」必须在启动时就看见）。
+let diskFloorMb = diskFloorOverride ?? DISK_FLOOR_MB
+let diskWarnMb = diskWarnOverride ?? DISK_WARN_MB
+if (!(diskFloorMb >= 512 && diskFloorMb <= 65536)) {
+  console.error(`[sampler-agent] --disk-floor-mb 需在 [512, 65536]，收到 ${diskFloorMb}`)
+  process.exit(2)
+}
+if (!(diskWarnMb >= diskFloorMb + DISK_HYST_MB)) {
+  console.error(
+    `[sampler-agent] --disk-warn-mb 需 ≥ floor+${DISK_HYST_MB}（floor=${diskFloorMb}），收到 ${diskWarnMb}`,
+  )
+  process.exit(2)
+}
+/** 生效值（观测/测试用；agent 是单实例进程，启动后不变）。 */
+export function diskThresholds(): { floorMB: number; warnMB: number } {
+  return { floorMB: diskFloorMb, warnMB: diskWarnMb }
+}
+
 /** 磁盘档位（wire 契约；dashboard 侧同口径类型见 `web/view/console-types.ts::DiskLevel`）。 */
 export type DiskLevel = 'ok' | 'warn' | 'critical'
 
@@ -932,11 +961,11 @@ function diskReport(): {
     return {
       diskFreeMB: null,
       diskLevel: null,
-      diskWarnMB: DISK_WARN_MB,
-      diskFloorMB: DISK_FLOOR_MB,
+      diskWarnMB: diskWarnMb,
+      diskFloorMB: diskFloorMb,
       diskLevelSince: null,
     }
-  const next = classifyDiskFree(free, diskLevel)
+  const next = classifyDiskFree(free, diskLevel, { floor: diskFloorMb, warn: diskWarnMb })
   if (next !== diskLevel) {
     diskLevel = next
     diskLevelSince = Date.now()
@@ -944,8 +973,8 @@ function diskReport(): {
   return {
     diskFreeMB: free,
     diskLevel,
-    diskWarnMB: DISK_WARN_MB,
-    diskFloorMB: DISK_FLOOR_MB,
+    diskWarnMB: diskWarnMb,
+    diskFloorMB: diskFloorMb,
     diskLevelSince,
   }
 }
@@ -2395,8 +2424,9 @@ async function handle(req: Request): Promise<Response> {
     if (mode === 'eval' && policy === 'goal' && !latestWeightsOfKind('goal'))
       return jsonResponse({ error: 'goal weights not cached (POST /v1/weights x-kind=goal)' }, 409)
     const free = diskFreeMB()
-    // 地板是冻结的 2048（plan/self-node-disk-alert §4.1）；判据住纯函数（守门用例吃它）。
-    if (decideTaskAdmission(free) === 'low-disk')
+    // 地板缺省冻结 2048（plan/self-node-disk-alert §4.1），可被 CFG/CLI 覆盖（P3）；
+    // 判据住纯函数（守门用例吃它）。
+    if (decideTaskAdmission(free, diskFloorMb) === 'low-disk')
       return jsonResponse({ error: `low disk: ${free}MB` }, 503)
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
     // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
@@ -2722,6 +2752,10 @@ async function handle(req: Request): Promise<Response> {
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
       cpus: CPUS,
+      // 派工缺省（2026-11-14，plan/node-throughput-and-keepalive P1）：trainer 的派工槽位在
+      // config 缺省时回落到这里（节点自报的池容量 = `--workers`）；旧消费方忽略未知字段。
+      // 与 `/v1/status.workers` 同源（同一个模块变量），不是新事实。
+      workers,
       // 节点门唯一指纹就是上面的 codeHash（rollout 与 eval 同一判据，唯一事实来源 =
       // codehash-files.txt）。2026-09-17 起不再报 engineEpoch：它是账本记录值，不是门。
       // §353：rollout 引擎与 node 版本（纯观测；调度口径不变）
@@ -2787,8 +2821,9 @@ if (import.meta.main) {
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--pool-idle-ms 1800000] [--pool-floor 4] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]\n' +
-        '       --workers/cpus default = physical cores；idle reap: idle≥--pool-idle-ms down to --pool-floor (0 = off)',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--pool-idle-ms 1800000] [--pool-floor 4] [--disk-floor-mb 2048] [--disk-warn-mb 4096] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]\n' +
+        '       --workers/cpus default = physical cores；idle reap: idle≥--pool-idle-ms down to --pool-floor (0 = off)\n' +
+        '       --disk-floor-mb/--disk-warn-mb override the frozen 2048/4096 thresholds (warn ≥ floor+512)',
     )
     process.exit(0)
   }

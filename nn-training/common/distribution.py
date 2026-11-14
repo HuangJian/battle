@@ -51,7 +51,7 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from common import net_http
+from common import http_pool, net_http
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
 from common.distribution_limits import status_timeout_of as status_timeout_of
@@ -424,6 +424,9 @@ def request_tag() -> str:
 def abort_active_requests(tag: str = "") -> int:
     """停发同作用域的新请求 + **交 daemon 线程**关闭其全部在飞连接（返回待关条数）。
 
+    同时通知长连接池（`common.http_pool`）：池内响应也要关、该作用域不得再重发
+    （「收工即断连」不允许把一局重新开起来）。
+
     **为什么关连接必须异步**（2026-09-19 实测）：`HTTPResponse.close()` 可能阻塞——
     若响应体正被读线程消费，close 要等它让出内部锁；800 局探针实测主线程在
     `abort_active_requests` 里卡了 **81 秒**（该批 181s 就跑完 800 局，收工却占掉 32%
@@ -434,19 +437,11 @@ def abort_active_requests(tag: str = "") -> int:
     调用方不再依赖它们的结果。
     """
     scope = tag or request_tag()
+    http_pool.abort_scope(scope)
     with _ACTIVE_LOCK:
         _ABORTED_TAGS.add(scope)
         targets = [r for t, r in _ACTIVE if t == scope]
-    if targets:
-
-        def _closer() -> None:
-            for r in targets:
-                try:
-                    r.close()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-
-        threading.Thread(target=_closer, daemon=True, name="abort-close").start()
+    http_pool.close_async(targets, "abort-close")
     return len(targets)
 
 
@@ -462,6 +457,7 @@ def clear_abort(tag: str = "") -> None:
             _ABORTED_TAGS.discard(tag)
         else:
             _ABORTED_TAGS.clear()
+    http_pool.clear_abort(tag)
 
 
 def abort_scope(tag: str = "") -> bool:
@@ -483,6 +479,18 @@ def _request(
         # 收工后不再发新请求（settled 已满 = 本单元不需要任何新结果）。
         raise DistError(0, "aborted: settled complete", transient=True)
     auth = {"Authorization": f"Bearer {auth_key}", **(headers or {})}
+    # 长连接池（2026-11-14，P4）：本机→节点每请求新建连接要 0.77s，复用 0.32s。池内保留
+    # **竞速 connect**（§149 的 IPv6 税修复住那里）与 urllib 的异常语义（HTTPError/URLError）；
+    # `NODE_HTTP_POOL=0` 逐字节回退到下面的 racing_urlopen 分支。
+    if http_pool.enabled():
+        return http_pool.request(
+            url,
+            timeout=timeout,
+            data=data,
+            headers=auth,
+            method=method,
+            scope=scope,
+        )
     req = urllib.request.Request(url, data=data, headers=auth, method=method)
     # 竞速 connect（2026-11-11）：云机隧道主机名解析出多个地址，stdlib 串行试、每个地址
     # 各给一份 timeout ⇒ 本机无 IPv6 路由时一次 ping 的 tcp 段就要 16s（见 common/net_http.py）。

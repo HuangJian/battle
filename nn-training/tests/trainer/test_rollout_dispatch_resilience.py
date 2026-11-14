@@ -34,6 +34,8 @@ GOOD_PING: dict[str, Any] = {
     "codeHash": "deadbeef",
     "bunVersion": "1.1.0",
     "cpus": 1,
+    # 2026-11-14 起 `/v1/ping` 也报池容量（派工缺省回落用）；旧 agent 无此字段。
+    "workers": 1,
     "stageJsonSupport": True,
 }
 

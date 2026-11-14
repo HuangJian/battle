@@ -475,7 +475,11 @@ class EvalDispatcher:
                         },
                     )
                     continue
-                base_c = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
+                # 与 rollout 腿同一份口径（2026-11-14）：显式 config 优先，缺省回落
+                # 节点自报 `workers` → `cpus`（见 common.distribution.node_slots）。
+                base_c = common.distribution.node_slots(
+                    n.get("concurrency"), ping.get("cpus"), ping.get("workers")
+                )
                 # 让位（2026-11-01，docs/nn/runtime-opt.md §39）：节点自报在飞 = 本课 rollout
                 # （以及别的腿/课程）正占着的槽。eval 只拿剩下的，不把自己的 concurrency
                 # 再加一遍；**不留 floor**（2026-11-03 用户口径「全力保证 rollout」）——

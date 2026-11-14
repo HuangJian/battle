@@ -34,16 +34,36 @@ def status_timeout_of(policy: Mapping[str, Any] | None) -> float:
     return v if v > 0 else STATUS_TIMEOUT_SEC
 
 
-def node_slots(configured: Any, cpus: Any) -> int:
-    """节点并发槽位 = `min(config concurrency, 节点自报 cpus)`（任一缺 ⇒ 用另一个）。
+def node_slots_note(configured: Any, cpus: Any, workers: Any) -> str:
+    """`[dist] node … online` 行的后缀：config/workers/cpus + 超额派工提示。
 
-    为什么取小：`/v1/ping.cpus` 是 `physicalCores()`（min(物理核, cgroup 配额, 掩码)），
-    而 config 里的 `concurrency` 是人手填的旧值——kaggle 会话只给 2 个物理核，
-    config 却钉着 4 ⇒ 4 个重型 native worker 抢 2 个核，父进程的事件循环被饿住，
-    于是 1s 的 HTTP 变成 30~60s（2026-11-11：权重握手 54.6s、ping 成批超时）。
+    超额（`config > 2×池容量`）是**排队**不是故障（见 `node_slots`）——但值得一行，
+    否则「派了 8 条却只跑 2 局」看起来像丢任务。
     """
     cfg = int(configured or 0)
-    rep = int(cpus or 0)
-    if cfg > 0 and rep > 0:
-        return max(1, min(cfg, rep))
-    return max(1, cfg or rep or 1)
+    cap = max(1, int(workers or cpus or 1))
+    note = f"（config={cfg} workers={workers} cpus={cpus}）"
+    if cfg > 2 * cap:
+        note += " 超额派工：多出的线程在准入队列等待（waitMs=12s / qMax=32）"
+    return note
+
+
+def node_slots(configured: Any, cpus: Any, workers: Any = None) -> int:
+    """节点派工槽位：显式 `concurrency` 是操作者旋钮，**不再被节点核数取小**。
+
+    2026-11-14 收回 2026-11-11 的「`min(config, ping.cpus)`」——它把「节点能同时跑几个
+    游戏进程」误当成「派工线程该有几个」，而两者不是一回事：派工线程每局会被**隧道往返
+    与结果回传**整段占住（gcs 实测 `wall=9.3s` / 节点服务 `elapsed=2.3s`），要几条线程
+    叠起来才能把节点 CPU 喂满。按核数取小的后果是每台云机只派 2 条线程 ⇒ 2 个游戏槽
+    64% 时间空转（槽位占用 36% = 20 局/分 × 2.16s ÷ (2 槽 × 60s)；用户 2026-11-14 报障）。
+
+    「超额认购把父进程饿死」的防线改由**节点自己**承担：agent 准入队列按 `workers`
+    （缺省 = 物理核）发牌、池满有界排队/503，它才知道真实容量；`ping.workers` 这里只做
+    观测与缺省回落。故「没人手填就按核数」的口径不变（`configured` 缺省时回落
+    `workers` → `cpus` → 1），有人手填就照填——UI 上那个「并发 N」必须真的生效。
+    """
+    cfg = int(configured or 0)
+    if cfg > 0:
+        return cfg
+    rep = int(workers or 0) or int(cpus or 0)
+    return max(1, rep or 1)
