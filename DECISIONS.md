@@ -5900,3 +5900,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `state_dict` / optimizer 张量树，已由 `paddle_parity` 与 `tests/remote/test_opt_*` 覆盖。
   以后新增读取点若确实需要完整 pickle，必须在门禁里显式开例外并说明攻击面，而不是删掉
   `weights_only`。
+
+## §2026-11-14-nn-python-audit-round4-common-asserts（P1-9 / G7）
+
+- **决定**：`common/schema.py` 的 5 处模块级 `assert` 改成显式 `RuntimeError`；两套布局
+  不变量收进 `_check_layout(name, layout, dim)`。新增 `tests/test_common_module_asserts.py`
+  扫 `common/**` 函数/类作用域外的 assert，并直接调用 `_check_layout` 验证坏输入抛错。
+- **被否决**：只把 assert 换成 `if not ...: assert ...`（同样在 `-O` 下消失）；把校验挪进
+  import 时执行的测试（校验仍需在生产 import 时生效）；保留 assert 并禁止 `python -O`
+  （靠调用方纪律，不是代码级保证）。
+- **后果**：`common` 的布局错误在 `python -O` 下也会立即失败，而不是带着错布局继续训练。
+  函数体内的调试期 assert 不受 G7 影响（P1-9 允许保留但要求注明）。
