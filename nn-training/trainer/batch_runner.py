@@ -49,7 +49,7 @@ from biz.batch_plan import (
     node_supports_decision_k,
 )
 from common.fs import append_jsonl
-from common.log import log
+from common.log import default_router, log
 from common.proc import bun_version
 from remote import weights_standard
 from trainer.batch_store import BatchStore, data_root
@@ -96,13 +96,22 @@ NODE_RECOVERY_TRIES = 3
 
 
 def _heartbeat(**patch: object) -> None:
-    """R4-G1：写 EvalBoard 心跳（失败静默——心跳绝不打断单元）。"""
+    """R4-G1：写 EvalBoard 心跳（心跳绝不打断单元，但失败**不复述成静默**）。
+
+    `write_state` 自己会把落盘失败喊出来（`worker/eval_heartbeat.py`），这里兜的是它**之前**
+    的失败：`worker.eval_heartbeat` 导不进来（打包/路径）、以及它内部任何别的异常。这两种在
+    console 上的表现与「心跳根本没调」长得一模一样 —— 「批评估忙了一小时」和「心跳早就不写了」
+    都只是屏幕上的一行旧状态，而唯一会去看的人正是靠它决定要不要干预。
+    """
     try:
         from worker.eval_heartbeat import write_state
 
         write_state(**patch)
-    except Exception:
-        pass
+    except Exception as e:  # 契约：降级，绝不反杀单元
+        default_router().warn_once(
+            "eval_heartbeat:batch",
+            f"批评估心跳没写成：{e!r}——console 的 runner_state 会停在旧值",
+        )
 
 
 class _UnitPlan(NamedTuple):

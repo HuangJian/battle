@@ -134,5 +134,8 @@ class TrainingGuardsSweep:
                 swept = sweep_failed_wave_dirs(self._traj_dir, log=log)
                 if swept:
                     log(f"[run_rl] workdir-sweep it{it}: {swept} failed wave dir(s) removed")
-            except BaseException:
-                pass
+            except Exception as e:
+                # 收窄自 `BaseException` + `pass`：清理是批尾的尽力而为，但它会删目录（可能
+                # 慢）—— 原先连 Ctrl-C 都一起吞掉，按了中断却在下一轮接着跑。失败仍不致命，
+                # 但要说一行：`swept 0` 与「清理器自己炸了」在日志里必须长得不一样。
+                log(f"[run_rl] workdir-sweep it{it} skipped: {e!r}")

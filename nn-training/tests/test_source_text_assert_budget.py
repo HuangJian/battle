@@ -395,7 +395,14 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-11-15 抬到 **1501**（+1，实测）：`tests/remote/test_lifecycle.py` 的 SIGTERM 自投失败用例 ——
 #:   要钉的正是那句「进程仍在跑，hub 会当这台已下线」（重复计费）。行为面只能验「没抛 + 写了一次」，
 #:   验不了「读日志的人知不知道机器还在计费」；与上面几条同一类：措辞本身是交付物。
-BASELINE_FORM = 1501
+#: 2026-11-15 抬到 **1508**（+7，实测）：G9 第十四批（`trainer/batch_runner._heartbeat` 留痕 /
+#:   `worker/loop_guards_sweep` 收窄 `BaseException` / `remote/hub_client.git_head` 带成因）的
+#:   判据就是「读日志的人看没看到这一行、上面有没有成因」—— 行为面只能验「没抛 + 调了一次」，
+#:   验不了「`swept 0` 与『清理器炸了』在日志里长得不一样」。逐笔：心跳 2 条
+#:   （`runner_state 会停在旧值` / `ModuleNotFoundError`）、git_head 2 条（`TimeoutExpired` /
+#:   退出码 `128`）、`workdir-sweep it5 skipped` + `OSError` + `磁盘只读` 3 条。与上面几条同类：
+#:   措辞本身是交付物 ⇒ 这是口径 A 里少数几个**该有**的文本判据。
+BASELINE_FORM = 1508
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

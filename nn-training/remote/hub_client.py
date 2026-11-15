@@ -161,11 +161,16 @@ def git_head(repo_root: Path = REPO_ROOT) -> str:
     """
     try:
         r = run_capture(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=30)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except Exception:
-        pass
-    raise HubClientError("无法解析 git HEAD——远程模式要求 hub 在 git 工作区内")
+    except Exception as e:  # git 不存在 / 超时 / cwd 没了：结论一样，但成因必须带上去
+        raise HubClientError(
+            f"无法解析 git HEAD（{e!r}）——远程模式要求 hub 在 git 工作区内"
+        ) from e
+    head = r.stdout.strip()
+    if r.returncode != 0 or not head:
+        raise HubClientError(
+            f"无法解析 git HEAD（git 退出码 {r.returncode}）——远程模式要求 hub 在 git 工作区内"
+        )
+    return head
 
 
 def _sha256_file(path: str) -> str:

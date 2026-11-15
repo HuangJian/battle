@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from trainer.batch_runner import _heartbeat
 from trainer.loop_dispatch import TrainingDispatch
 
 
@@ -94,3 +95,31 @@ def test_evalboard_idle_reports_heartbeat_failure_once(
     out = capsys.readouterr().out
     assert out.count("开窗心跳没写成") == 1, f"同一 key 只许喊一次，实际：{out!r}"
     assert claimed == [3, 4], "心跳只是记录，开窗与认领必须照做"
+
+
+# ── 第三个调用点：批评估（`trainer/batch_runner._heartbeat`）──
+#
+# 它包的是「写心跳」这件事的**整块**（含 `from worker.eval_heartbeat import …`），所以比另外
+# 两个点多兜一种成因：包导不进来。那在 console 上与「心跳根本没调」完全同形。
+
+
+def test_batch_heartbeat_writes_the_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setitem(sys.modules, "worker.eval_heartbeat", _recorder(calls))
+    _heartbeat(it=7, unit_total=3)
+    assert calls == [{"it": 7, "unit_total": 3}], "心跳入参必须原样落到 write_state"
+
+
+def test_batch_heartbeat_reports_failure_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setitem(sys.modules, "worker.eval_heartbeat", None)
+    _heartbeat(it=1)  # 不抛即契约：心跳绝不打断单元
+    _heartbeat(it=2)
+
+    out = capsys.readouterr().out
+    assert out.count("批评估心跳没写成") == 1, f"同一 key 只许喊一次，实际：{out!r}"
+    assert "runner_state 会停在旧值" in out, "要写清后果：console 那一栏读的就是它"
+    assert "ModuleNotFoundError" in out, (
+        "成因要带上（这里是包导不进来），否则又变成一句没有信息量的话"
+    )

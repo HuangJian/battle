@@ -6589,3 +6589,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   现在比的是 `_scan()` 的结果。
 - **判据**：`tests/test_budget_floor.py` +1（两个入口同口径）；实测把 `worker` 从 G6 的扫描面排除
   ⇒ 该门禁两条红；把 `worker` 从 G4 的 `PROD_DIRS` 去掉 ⇒ 两条红。还原后全绿。
+
+## §2026-11-15-visible-degradation-covers-the-wrapper-not-just-the-inner-call
+
+- **决定**：G9 第十四批收敛三处「先吞后说」——
+  ① `trainer/batch_runner._heartbeat`（批评估心跳）：`except Exception: pass` → `warn_once`
+  + 带成因；② `worker/loop_guards_sweep._rotate_cleanup` 的孤儿波次清理：
+  `except BaseException: pass` → `except Exception` + 一行 `skipped: <repr>`；
+  ③ `remote/hub_client.git_head`：先 `pass` 再抛固定文案 → `raise … from e`，退出码非 0 与
+  空输出各自具名。G9 35 → **32**。
+- **为什么 ①不是第六批的重复**：第六批修的是 `write_state` **内部**落盘失败（O(1) 那条也不抛）。
+  这一处包的是「写心跳」这件事的整块，包括 `from worker.eval_heartbeat import …` —— 打包/路径
+  问题会让整块变成静默，而它在 console 上的表现与「心跳根本没调」逐字相同。
+- **为什么 ②必须收窄而不只是加日志**：`BaseException` 把 **Ctrl-C** 一起吞掉，而批量 rmtree
+  是本轮最慢的动作之一 —— 按了中断却在下一轮接着跑，中断「看起来没生效」。这种形状在仓库里
+  已有先例（第十二批 `notebook_runtime._run_probe`）。
+- **为什么 ③算「信息丢失」而不算风格**：`git 没装 / cwd 没了 / 30s 超时 / 不是 git 仓库` 四种
+  成因的处置完全不同，压成一句「不在 git 工作区」等于把诊断成本全推给现场。
+- **判据**：三处各自改回旧行为 ⇒ 6 条新用例红（心跳 1 / 波次清理 2 / git_head 3）。全量
+  6096 passed / 2 skipped；mypy 933 文件。
