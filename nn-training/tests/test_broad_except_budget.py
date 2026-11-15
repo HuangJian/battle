@@ -34,6 +34,8 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers.budget import sanity_floor
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "tests" / "golden" / "except_baseline.json"
 
@@ -120,9 +122,10 @@ def test_scan_sees_the_known_production_surface() -> None:
     assert actual.get("remote/train_core.py", 0) > 0, (
         "扫描入口坏了（AST 没数到已知 except Exception）"
     )
-    # 地板随清理下调（2026-11-15：423 → 397，见文件头 hub_http / distribution / notebook_runtime 三批）；
-    # 它只防「AST 没数到东西」，不是质量目标。
-    assert sum(actual.values()) >= 370, "生产面计数异常偏低，扫描可能漏了包"
+    assert sum(actual.values()) >= sanity_floor(baseline), (
+        f"生产面计数 {sum(actual.values())} 低于基线九成（{sanity_floor(baseline)}）"
+        "—— 扫描可能漏了包（这条只防扫描入口坏，不是质量目标）"
+    )
     assert len(baseline) >= 100
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

@@ -25,7 +25,8 @@
     了这条：遗言读数（`/proc` / NVML / statvfs）与探测腿（venv python 能不能 import torch）
     的失败面都是具体的；两处**真信息丢失**（state 文件读不了、SIGTERM 自投失败）改成留一行，
     而不是窄捕了事 —— 后者意味着「进程活着而 hub 当它已下线」（重复计费）却没有任何痕迹。
-    该批 51 → **44**（colab_bc 4→0，lifecycle 3→0），扫描地板随之下调 50 → 40。
+    该批 51 → **44**（colab_bc 4→0，lifecycle 3→0）；扫描地板当时手改 50 → 40（2026-11-15 起
+    改为派生式 `tests/helpers/budget.sanity_floor`，不再需要人工回填）。
     紧接着 `remote/hub_http.py` 的 2 处 `except Exception: pass` 也走窄捕（同一条 `NET_ERRORS`）
     ⇒ 44 → **42**；那两处原本把「探测回执读不了」与「本模块 bug」抹平，正是本条要抓的形状。
     `remote/notebook_runtime.py` 的 token 文件 `chmod` 同批改 `except OSError`（Colab FUSE 挂载点
@@ -40,6 +41,8 @@ import ast
 import json
 from functools import cache
 from pathlib import Path
+
+from tests.helpers.budget import sanity_floor
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "tests" / "golden" / "silent_except_baseline.json"
@@ -138,9 +141,10 @@ def test_scan_sees_the_known_production_surface() -> None:
     for rel in _ANCHORS:
         assert baseline.get(rel, 0) > 0, f"基线丢了已知文件 {rel}"
         assert actual.get(rel, 0) > 0, "扫描入口坏了（AST 没数到已知 `except …: pass`）"
-    # 地板随清理下调（2026-11-15：51 → 44 → 40 → 35，见文件头第八/第十/第十三批）；
-    # 它只防「AST 没数到东西」。
-    assert sum(actual.values()) >= 30, "生产面计数异常偏低，扫描可能漏了包"
+    assert sum(actual.values()) >= sanity_floor(baseline), (
+        f"生产面计数 {sum(actual.values())} 低于基线九成（{sanity_floor(baseline)}）"
+        "—— 扫描可能漏了包（这条只防扫描入口坏，不是质量目标）"
+    )
     assert len(baseline) >= 25
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)
