@@ -126,9 +126,14 @@ def select_best_epoch(val_losses: list[float], window: int = SMOOTH_WINDOW) -> i
 
 
 def sanitize_json(o):
-    """递归把 float NaN → None（json.dump 默认写出非标准 `NaN` 字面量，
-    TS JSON.parse 会直接抛错——weights 文件里不能带 NaN）。"""
-    if isinstance(o, float) and math.isnan(o):
+    """递归把**非有限** float（NaN / ±Infinity）→ None。
+
+    `json.dump` 默认写出 `NaN` / `Infinity` / `-Infinity` 三个**非标准**字面量，TS 端
+    `JSON.parse` 直接抛错——坏的是「文件打开就崩」而不是「数值不准」。2026-11-15 之前只判
+    `isnan`，±inf 会原样落盘；而 val_loss 发散到 inf 是真实形状，那时 `best_val_loss` /
+    `best_smoothed_val_loss` 恰好是 inf。
+    """
+    if isinstance(o, float) and not math.isfinite(o):
         return None
     if isinstance(o, dict):
         return {k: sanitize_json(v) for k, v in o.items()}

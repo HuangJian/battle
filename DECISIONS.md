@@ -6353,6 +6353,28 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `test_select_best_epoch_skips_non_finite_windows`（前 5 个窗口吃 NaN、只有最后一个有限 ⇒ 选 10，
   且**不是 0**；旧实现返回 0，先红后绿）与
   `test_select_best_epoch_with_only_non_finite_windows_is_none`（全 NaN / 全 inf ⇒ None）。
-- **未动（另记）**：全 NaN 时会走 fallback，`meta["best_smoothed_val_loss"]` 会写成 `NaN`
-  （`round(nan,4)`），而 `sanitize_json` 只覆盖 `majority_ce`。目前没有生产/TS 消费者读这个字段
-  （只有文档与用例），且修复得动 meta 的 schema（float → null），所以不在本次范围。
+- **落盘面（同日补齐，见 §2026-11-15-non-finite-json-is-null）**：当时我写这里说「全 NaN 时 meta
+  会写出 `NaN`」——**这条判断是错的**：两条训练核都做了 `meta = sanitize_json(meta)`，`NaN` 早已落成
+  `null`。真正的洞是 **±Infinity**（旧 `sanitize_json` 只判 `isnan`），已修。
+
+## §2026-11-15-non-finite-json-is-null（weights.json 里不许有 NaN / Infinity 字面量）
+
+- **决定**：`worker/train/bc_core.sanitize_json` 由「NaN → None」扩成「**非有限**（NaN / +Inf /
+  -Inf）→ None」。两条训练核（`bc.py` / `bc_paddle.py`）本来就把整份 meta 过这个函数，所以
+  `best_val_loss` / `best_smoothed_val_loss` / `history.*` 一并变成标准 JSON 的 `null`。
+- **为什么**：`json.dump` 默认写出 `NaN` / `Infinity` / `-Infinity` 三个**非标准**字面量；TS 端
+  `JSON.parse` 遇到直接抛错 —— 失败形态是「文件打开就崩」，不是「数值不准」。`weights.json` 是
+  TS 运行时与 dashboard 都读的落盘面。
+- **先确认了「NaN 那条早就没有」**：`test_bc_epoch_resume.py::test_bc_train_writes_null_when_val_loss_is_not_finite`
+  用**真实切分**造 NaN 验证集（先 `make_loaders` 取 val 下标，只把那些行写成 NaN ⇒ 训练行梯度干净、
+  权重有限、文件照写），跑完后用 `json.loads(raw, parse_constant=...)` 拒绝非标准字面量：NaN 场景
+  在改动**之前**就是 `null`（`meta = sanitize_json(meta)` 的既有功劳），所以这半条是**补用例**、
+  不是补代码。
+- **为什么用 `parse_constant` 而不是 grep 文本**：权重是 base64，随便就会撞出 `"NaN"` 子串（第一版
+  断言就是这么假红的——它指着 base64 里的一段说「这里有个 NaN」）。判「标准 JSON」只能靠解析器。
+- **判据**：`tests/worker/test_bc_early_stop.py::test_sanitize_json_turns_every_non_finite_into_none`
+  （NaN/±inf 以及嵌套结构 → None；旧实现 inf 原样通过，先红后绿）+
+  上面那条端到端（NaN 验证集 → 文件里那两个字段是 `null`，且整份文件能被严格解析）。
+- **未动**：`out`（返回值，进程内）与归档文件名仍带原始 `nan`/`inf`（文件名形如 `..._valnan.json`）；
+  返回值不是落盘面，调用方（`trainer/bc_loop` / `remote/bc_job`）读 file 且对 `None` 有 `or 0.0`
+  兜底。文件名只是可读性瑕疵，没有消费者解析它。

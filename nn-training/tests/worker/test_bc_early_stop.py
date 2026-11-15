@@ -87,3 +87,31 @@ def test_select_best_epoch_with_only_non_finite_windows_is_none() -> None:
     """一个有限窗口都没有 ⇒ None（= 「交最后一轮」），不是 0、也不是任何具体 epoch。"""
     assert select_best_epoch([float("nan")] * 6, window=5) is None
     assert select_best_epoch([float("inf")] * 6, window=5) is None
+
+
+def test_sanitize_json_turns_every_non_finite_into_none() -> None:
+    """`weights.json` 只能有标准 JSON：NaN **和** ±Infinity 都要落成 `null`。
+
+    `json.dump` 默认写出 `NaN` / `Infinity` / `-Infinity` 三个**非标准**字面量，TS 端
+    `JSON.parse` 直接抛错 —— 坏的是「打开就崩」而不是「数值不准」。旧实现只判 `isnan`，
+    ±inf 会原样落盘；而 val_loss 溢出到 inf 是真实存在的形状（发散），那时
+    `best_val_loss` / `best_smoothed_val_loss` 就是 inf。
+    """
+    from worker.train.bc_core import sanitize_json
+
+    got = sanitize_json(
+        {
+            "nan": float("nan"),
+            "inf": float("inf"),
+            "neg_inf": float("-inf"),
+            "ok": 1.5,
+            "nested": [float("inf"), {"x": float("nan")}],
+        }
+    )
+    assert got == {
+        "nan": None,
+        "inf": None,
+        "neg_inf": None,
+        "ok": 1.5,
+        "nested": [None, {"x": None}],
+    }
