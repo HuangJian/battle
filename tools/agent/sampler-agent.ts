@@ -2819,6 +2819,13 @@ async function handle(req: Request): Promise<Response> {
       // config 缺省时回落到这里（节点自报的池容量 = `--workers`）；旧消费方忽略未知字段。
       // 与 `/v1/status.workers` 同源（同一个模块变量），不是新事实。
       workers,
+      // 准入排队（2026-11-15，加法）：与 `/v1/status.admission` 同源同值。训练侧把
+      // `queueFull/timedOut` 的**累计增量**打进每轮日志（503 归因）；旧消费方忽略。
+      admission: {
+        active: admission.active(),
+        waiting: admission.waiting(),
+        ...admission.counters(),
+      },
       // 节点门唯一指纹就是上面的 codeHash（rollout 与 eval 同一判据，唯一事实来源 =
       // codehash-files.txt）。2026-09-17 起不再报 engineEpoch：它是账本记录值，不是门。
       // §353：rollout 引擎与 node 版本（纯观测；调度口径不变）

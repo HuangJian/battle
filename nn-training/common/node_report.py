@@ -32,7 +32,36 @@ def node_online(nid: str, node: dict, ping: dict) -> tuple[int, str]:
     """
     slots = (node.get("concurrency"), ping.get("cpus"), ping.get("workers"))
     c_n = node_slots(*slots)
-    return c_n, f"[dist] node {nid}: online, concurrency={c_n}" + node_slots_note(*slots)
+    return c_n, (
+        f"[dist] node {nid}: online, concurrency={c_n}"
+        f"{node_slots_note(*slots)}{admission_note(ping)}"
+    )
+
+
+def admission_note(ping: dict) -> str:
+    """`/v1/ping` 的准入计数（2026-11-15）：池被压时的排队/超时**事实**。
+
+    旧 agent 无 `admission` 字段 ⇒ 空串（不编数字，也不每轮刷 8 行「不可知」）。
+    `active/workers` 是瞬时值；`peakWaiting/queueFull/timedOut` 是进程累计值
+    （相邻轮相减 = 本轮新增；503 归因靠的就是这个增量）。
+    """
+    adm = ping.get("admission")
+    if not isinstance(adm, dict):
+        return ""
+
+    def num(key: str) -> str:
+        v = adm.get(key)
+        return str(v) if isinstance(v, int) and not isinstance(v, bool) else "?"
+
+    active = num("active")
+    workers = ping.get("workers")
+    if active != "?" and isinstance(workers, int):
+        active = f"{active}/{workers}"
+    return (
+        f" · 准入 active={active} waiting={num('waiting')}"
+        f" peakWaiting={num('peakWaiting')} queueFull={num('queueFull')}"
+        f" timedOut={num('timedOut')}"
+    )
 
 
 def disk_thresholds(cfg: dict) -> tuple[int, int]:

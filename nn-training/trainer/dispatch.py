@@ -25,6 +25,8 @@ from trainer.queue_local import (
     QueueEdgeGate,
     abort_other_tags,
     drop_attempt,
+    halt_missing_split,
+    join_targets,
     make_local_pool,
     next_attempt_tag,
     note_cancel_target,
@@ -1041,7 +1043,7 @@ class RolloutDispatcher:
                         pending.append(task)
                         stats["retried"] += 1
                         log(
-                            f"[dist] s{task[0]}/seed{task[1]} failed ({err}) — requeued "
+                            f"[dist] s{task[0]}/seed{task[1]} node={nd_id or 'local'} failed ({err}) — requeued "
                             f"(attempt {attempt}/{MAX_TASK_ATTEMPTS}"
                             + (
                                 ", busy"
@@ -1239,19 +1241,16 @@ class RolloutDispatcher:
         halted = halt_event is not None and halt_event.is_set()
         tail_join_sec = resolve_tail_join_sec(policy, all_settled.is_set(), halted)
         join_until = time.time() + max(0.0, tail_join_sec)
-        seen_join: set[int] = set()
-        for t in list(threads) + list(extra_threads):
-            tid = id(t)
-            if tid in seen_join:
-                continue
-            seen_join.add(tid)
+        for t in join_targets(threads, extra_threads):
             if t.ident is None and not t.is_alive():
                 continue  # 尚未 start（或已从列表里被复用）——join 会 RuntimeError
             try:
                 t.join(timeout=max(0.0, join_until - time.time()))
             except RuntimeError:
                 pass
-        stuck = [t.name for t in list(threads) + list(extra_threads) if t.is_alive()]
+        # 两张表**有交集**（节点 worker 同时进两表、rescan 只进 extra_threads）：
+        # 去重前相加会把在飞 worker 报成近 2×（现场 89，实际约一半）。
+        stuck = [t.name for t in join_targets(threads, extra_threads) if t.is_alive()]
         if stuck:
             log(
                 f"[dist] tail-join grace {tail_join_sec:.0f}s 到期：{len(stuck)} 个 worker "
@@ -1311,9 +1310,17 @@ class RolloutDispatcher:
         combined["dist_phase_sec"] = round((t_dist_done_box[0] or time.time()) - t_queue_enter, 1)
         if halt_event is not None and halt_event.is_set():
             combined["halt_aborted"] = True
+            # 停派原因必须在行里分开（2026-11-15 现场）：原实现写死「KL halt」，而 g5 的停
+            # **全部**来自 volume 的逐关配额 ⇒ 读日志的人把「配额收工」误当熔断，还把
+            # missing 当成「没派出去」。判据只有 `pool_halt`（外部熔断不置位它）。
+            combined["halt_kind"] = "quota" if self.pool_halt else "external"
+            # missing 的三个去向互不相交（inflight=派过未结算 · never_dispatched=从未派出，
+            # 只有非 pool_halt 才计入 missing · failed=试满 MAX_TASK_ATTEMPTS），同行分开报。
+            combined["halt_split"] = split = halt_missing_split(attempts, all_tasks, seen, missing_keys)
             log(
-                f"[dist] KL halt active — dispatch stopped early "
-                f"({len(missing)} task(s) left undispatched/unsettled)"
+                f"[dist] {combined['halt_kind']} halt — dispatch stopped early "
+                f"(missing={len(missing)} · inflight={split['inflight']} "
+                f"never_dispatched={split['never_dispatched']} failed={split['failed']})"
             )
         # rollout 采集耗时（用户口径 2026-09-19）：权重就绪开始分发 → 样本齐可交 PPO。
         # 边分发边开采下含与采集重叠的分发墙钟（端到端，不是「纯仿真」）。

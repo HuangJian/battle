@@ -144,7 +144,7 @@ class _Harness:
 
     def run(
         self, fetch, halt_event=None, on_shard=None,
-        on_queue_drained=None, on_queue_active=None,
+        on_queue_drained=None, on_queue_active=None, pool_halt: bool = False,
     ) -> dict:
         common.distribution.weights_push_cache_reset()
         self.mp.setattr(common.distribution, "fetch_task", fetch)
@@ -162,6 +162,7 @@ class _Harness:
             on_queue_drained=on_queue_drained,
             on_queue_active=on_queue_active,
             on_shard=on_shard,
+            pool_halt=pool_halt,
         ).run()
 
     def stop_when_rearm_exhausted(self, monkeypatch) -> threading.Event:
@@ -574,8 +575,49 @@ def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
     report = h.run(fetch, halt_event=halt)
     elapsed = time.monotonic() - t0
     assert report.get("halt_aborted") is True, report
+    # 外部置位（KL 熔断等）必须与配额收工区分（2026-11-15：原来一律写「KL halt active」）。
+    assert report.get("halt_kind") == "external", report
+    # 同一行把 missing 的三去向分开报（外部停派：没派出去的局也算缺口）。
+    assert report["halt_split"] == {
+        "inflight": 1,
+        "never_dispatched": 3,
+        "failed": 0,
+    }, report
     # timing-ok: 上界兜底（halt 后不得白等窗口，3s 只挡挂起）
     assert elapsed < 3.0, f"halt 后不得白等窗口（实测 {elapsed:.1f}s）"
+
+
+def test_quota_halt_reports_kind_and_splits_missing(tmp_path, monkeypatch) -> None:
+    """配额收工（`pool_halt=True`）与外部熔断分开报，`missing` 的三个去向也分开报。
+
+    现场（2026-11-15 g5 四腿）：这一行原写死「KL halt active — (24 task(s) left
+    undispatched/unsettled)」，而停派全是 volume 的逐关配额；`missing=24` 被读成
+    「24 局没派出去」，实际是**在飞**（结果迟到、无人读）。
+
+    pool_halt 的语义（候选池「满额即停」）：没派出去的候选不算缺口 ⇒ `missing` 只含
+    派过的局；日志行仍把 `never_dispatched` 单独报出来，两种口径可对账。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=4, policy={"queueWindowSec": 30})
+    halt = threading.Event()
+
+    def fetch(*_a, **_kw):
+        # 首局一取活就置位（确定性）：worker 的 while 条件在下一次迭代前就会看到 halt。
+        halt.set()
+        raise common.distribution.DistError(0, "validate: bad manifest")
+
+    report = h.run(fetch, halt_event=halt, pool_halt=True)
+    assert report.get("halt_aborted") is True, report
+    assert report.get("halt_kind") == "quota", report
+    # 只派过 1 局 ⇒ 池语义下缺口就 1（其余 3 局从未派出，不进 missing）。
+    # 具体是哪一局不定（队列按 RUN_ID 洗牌）——只钉「缺口=已派过的那些」。
+    assert len(report["missing"]) == 1, report["missing"]
+    assert tuple(report["missing"][0]) in {(2000, i + 1) for i in range(4)}, report["missing"]
+    # 三个去向分开报（行里同一组数）：池语义下 never_dispatched 不进 missing，但照样报出来。
+    assert report["halt_split"] == {
+        "inflight": 1,
+        "never_dispatched": 3,
+        "failed": 0,
+    }, report
 
 
 def test_alloc_timeout_aborts_original_and_requeues(tmp_path, monkeypatch) -> None:
@@ -762,3 +804,23 @@ def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypa
     report = h.run(fetch)
     assert report["missing"] == [], report.get("missing")
     assert not common.distribution._ABORTED_TAGS, common.distribution._ABORTED_TAGS
+
+
+def test_requeue_line_names_the_node(tmp_path, monkeypatch) -> None:
+    """503 回队行带 node（2026-11-15）：只有池级总数时无法归因到哪台节点被压。
+
+    判据用 token 全等而不是子串（行本身是操作员接口；文本断言预算只许降）。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2, nodes=[_node("a97")], workers=1)
+    calls: list[int] = []
+
+    def fetch(*_a, **_k):
+        if not calls:
+            calls.append(1)
+            raise common.distribution.DistError(503, '{"error":"busy"}')
+        return h.manifest(), {}
+
+    report = h.run(fetch)
+    assert report["missing"] == [], report.get("missing")
+    tokens = [tok for line in h.logs for tok in line.split()]
+    assert any(tok == "node=a97" for tok in tokens), h.logs

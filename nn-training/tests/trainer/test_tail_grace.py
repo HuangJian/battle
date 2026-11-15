@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 
 from trainer.dispatch import resolve_tail_join_sec
+from trainer.queue_local import join_targets
 
 
 def test_tail_grace_default_zero_when_settled() -> None:
@@ -33,6 +35,28 @@ def test_race_loser_wait_has_no_data_value() -> None:
     assert plan <= settled
     assert inflight_race_copy in settled
     assert resolve_tail_join_sec({}, True, False) == 0.0
+
+
+def test_join_targets_dedupes_partial_overlap() -> None:
+    """`threads` 与 `extra_threads` 是**部分交集**，不是包含关系。
+
+    节点 worker 在 `_spawn_node_workers` 里同时进两表（边分发边开采），rescan 补孵的线程
+    只进 `extra_threads`。旧实现 `list(threads) + list(extra_threads)` 把节点 worker 数成
+    两份 ⇒ 2026-11-15 现场 `tail-join grace … 89 个 worker`，实际约一半。
+    """
+
+    class _T:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def is_alive(self) -> bool:  # 与 threading.Thread 同接口（本用例只用到这两个属性）
+            return True
+
+    a, b, c = _T("node-1"), _T("node-2"), _T("rescan")
+    threads: list[Any] = [a, b]
+    extra: list[Any] = [a, b, c]
+    got = [t.name for t in join_targets(threads, extra)]
+    assert got == ["node-1", "node-2", "rescan"], got
 
 
 def test_join_timeout_zero_returns_immediately() -> None:

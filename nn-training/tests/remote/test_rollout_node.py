@@ -230,6 +230,43 @@ def test_output_line_is_honest_when_unknown() -> None:
     assert node_report.output_line({"outputLine": "   "}) == "近30min产出 不可知（旧 agent 无 outputLine）"
 
 
+# ---------------------------------------------------------------- 准入计数（2026-11-15）
+
+def test_node_online_carries_admission_counters() -> None:
+    """503 归因：每轮那行 online 带 agent 的准入计数（零新增探测，ping 顺带）。
+
+    `active` 要对照 workers 才读得懂（零余量 = `8/8`）；peakWaiting/queueFull/timedOut
+    是进程累计值，相邻轮相减 = 本轮新增。用**全等**钉形状（文本断言预算只许降）。
+    """
+    ping = {
+        "cpus": 8,
+        "workers": 8,
+        "admission": {
+            "active": 8,
+            "waiting": 3,
+            "admitted": 120,
+            "rejected": 0,
+            "queueFull": 1,
+            "timedOut": 97,
+            "peakWaiting": 5,
+        },
+    }
+    c_n, line = node_report.node_online("self", {"concurrency": 8}, ping)
+    note = node_report.node_slots_note(8, 8, 8)  # 槽位注释另有它自己的用例，这里只管准入段
+    assert (c_n, line) == (
+        8,
+        f"[dist] node self: online, concurrency=8{note}"
+        " · 准入 active=8/8 waiting=3 peakWaiting=5 queueFull=1 timedOut=97",
+    )
+
+
+def test_node_online_omits_admission_for_old_agent() -> None:
+    """旧 agent 的 ping 没有 admission 字段 ⇒ 不追加（不编数字，也不每轮刷「不可知」）。"""
+    c_n, line = node_report.node_online("a97", {"concurrency": 2}, {"cpus": 4, "workers": 4})
+    note = node_report.node_slots_note(2, 4, 4)
+    assert (c_n, line) == (2, f"[dist] node a97: online, concurrency=2{note}")
+
+
 def test_status_reads_local_agent_with_auth_and_never_raises() -> None:
     calls: list = []
     body = {"outputLine": "games=1（rollout=1 / eval=0）"}

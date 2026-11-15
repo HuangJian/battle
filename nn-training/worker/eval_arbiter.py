@@ -651,8 +651,8 @@ class EvalRound:
                     if leg < self.attempts_transient_max and task not in self.seen:
                         self._requeue_locked(task, True, leg)
                         self._log(
-                            f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
-                            " — requeued（瞬断/背压，不计节点故障）"
+                            f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                            f" failed ({err}) — requeued（瞬断/背压，不计节点故障）"
                         )
                     elif task not in self.seen:
                         self._record_failed_locked(task, nid, err, err_errno, msg_head)
@@ -669,7 +669,10 @@ class EvalRound:
                     )
                 elif leg < self.attempts_max and task not in self.seen:
                     self._requeue_locked(task, False, leg)
-                    self._log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                    self._log(
+                        f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                        f" failed ({err}) — requeued"
+                    )
                 elif task not in self.seen:
                     self._record_failed_locked(task, nid, err, err_errno, msg_head)
                     self._log(
@@ -689,7 +692,8 @@ class EvalRound:
                     else ""
                 )
                 self._log(
-                    f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued{suffix}"
+                    f"[eval] s{task[0]}/seed{task[1]} node={nid}"
+                    f" failed ({err}) — requeued{suffix}"
                 )
             elif task not in self.seen:
                 self._fail_recorder(self.meta_path, self.it, task, nid, err)

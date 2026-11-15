@@ -739,6 +739,40 @@ def resolve_tail_join_sec(policy: dict, all_settled: bool, halted: bool) -> floa
     return float(policy.get("tailGraceJoinSecDeadline", 5))
 
 
+def halt_missing_split(
+    attempts: dict[tuple[int, int], int],
+    all_tasks: list[tuple[int, int]],
+    seen: set[tuple[int, int]],
+    missing_keys: set[tuple[int, int]],
+) -> dict[str, int]:
+    """停派时 `missing` 的三个互不相交去向（`inflight / never_dispatched / failed`）。
+
+    2026-11-15 现场：日志原写「KL halt active — (24 task(s) left undispatched/unsettled)」，
+    而 g5 的停派**全部**来自 volume 的逐关配额，那 24 个缺口也**全是在飞**（结果迟到、
+    无人读）。`pool_halt` 语义下没派出去的候选不计入 `missing`，所以 `never_dispatched`
+    必须单独报，两种口径才能对账。
+    """
+    return {
+        "inflight": sum(1 for k in attempts if k not in seen and k not in missing_keys),
+        "never_dispatched": sum(1 for k in all_tasks if k not in attempts),
+        "failed": sum(1 for k in attempts if k in missing_keys),
+    }
+
+
+def join_targets(
+    threads: list[threading.Thread], extra_threads: list[threading.Thread]
+) -> list[threading.Thread]:
+    """join 与「仍在收尾」统计的**唯一口径**：按身份去重后合并两张表。
+
+    两个列表是**部分交集**，不是包含关系：`dispatch._spawn_node_workers` 的节点 worker
+    同时进 `threads` 与 `extra_threads`（边分发边开采），而 rescan 补孵的线程只进
+    `extra_threads`。旧实现 `list(threads) + list(extra_threads)` 把节点 worker 数成两份
+    ⇒ 2026-11-15 现场 `tail-join grace … 89 个 worker`，实际约一半；join 也会对同一线程
+    join 两次（第二遍白等一份 grace）。
+    """
+    return list(dict.fromkeys([*threads, *extra_threads]))
+
+
 def ensure_games(m: dict) -> dict:
     """将单局 agent manifest（无 games 键）转换为 combine_reports 可消费的格式。
 
