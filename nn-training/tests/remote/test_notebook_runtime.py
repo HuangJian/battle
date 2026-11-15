@@ -1405,3 +1405,65 @@ def test_push_registry_register_goes_through_proxy_aware_opener(
     # test_source_text_assert_budget.py` 的口径 A 就是给这种断言准备的，这里用不着它）
     paths = [urlsplit(str(getattr(r, "full_url", ""))).path for r in seen["reqs"]]
     assert paths == ["/admin/nodes/register", "/admin/nodes/unregister"], paths
+
+
+# ------------------------------------------------ 捕获面：hub 不可达 vs 我们自己的 bug（G4，2026-11-15）
+
+
+def test_pull_unreachable_hub_still_exits_minus2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """网络层失败（隧道过期 / DNS / 连接被拒）仍是「hub 不可达」⇒ -2（不重启、不白跑）。"""
+
+    def _down(req: Any, timeout: float = 15) -> Any:
+        raise OSError("tunnel expired")
+
+    monkeypatch.setattr(nbr, "_hub_open", _down)
+    assert nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None) == -2
+
+
+def test_pull_programmer_error_is_not_reported_as_an_unreachable_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本模块自己的 bug 必须穿出去（改回 `except Exception` ⇒ 本用例红）。
+
+    旧行为把它打成「FATAL: hub 不可达（AttributeError: ...）——检查隧道 URL 是否过期」并返回 -2：
+    现场是一条**确定性的错误指引**（去查隧道），而真因是回执形状变了。这种误诊比崩溃贵得多
+    —— 崩溃带 traceback，误诊带一段言之凿凿的错方向。
+    """
+
+    def _buggy(req: Any, timeout: float = 15) -> Any:
+        raise AttributeError("'NoneType' object has no attribute 'read'")
+
+    monkeypatch.setattr(nbr, "_hub_open", _buggy)
+    with pytest.raises(AttributeError):
+        nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None)
+
+
+def test_unstartable_probe_child_falls_back_to_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探测子进程起不来（`OSError`）⇒ 真·未知 ⇒ 回落 CPU（与「装坏了 ⇒ FATAL」分开）。"""
+
+    def _no_python(argv, timeout=0):
+        raise OSError("interpreter missing")
+
+    monkeypatch.setattr(nbr, "run_capture", _no_python)
+    assert nbr.resolve_device(_base_cfg(tmp_path), lambda m: None) == "cpu"
+
+
+def test_probe_does_not_swallow_ctrl_c(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`KeyboardInterrupt` 必须穿出去：旧代码 `except BaseException` 把 Ctrl-C 变成「按未知处理」。
+
+    torch 探测最长 60s、两条核加起来两分钟——这期间按 Ctrl-C 却看着它继续跑，比崩掉更糟。
+    改回 `except BaseException` ⇒ 本用例红。
+    """
+
+    def _interrupted(argv, timeout=0):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(nbr, "run_capture", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        nbr.resolve_device(_base_cfg(tmp_path), lambda m: None)

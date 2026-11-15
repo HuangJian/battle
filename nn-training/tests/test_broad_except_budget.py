@@ -16,6 +16,7 @@
 
 | 日期 | 文件 | Δ | 为什么只能宽捕 |
 |---|---|---|---|
+| 2026-11-15 | `remote/notebook_runtime.py` | −7（7 → 0） | notebook cell 的 hub / worker_server 出站点：原来一律 `except Exception` 打成「FATAL: hub 不可达（X）——检查隧道 URL 是否过期」。那是最贵的一种误诊——真因可能是本模块自己的 bug（`AttributeError` / `KeyError`），而运维被指去查隧道。hub ping 与 `/ping` 探针改 `NET_ERRORS` / `PROBE_ERRORS`（探针多一个 `ValueError`：200 但 body 不是 JSON）；`md.version` 收窄成 `PackageNotFoundError`（「版本未知」不许替本模块的 bug 说话）；token 文件 `chmod` 收窄成 `OSError`（Colab/Kaggle 的 FUSE 挂载点不一定支持）。顺带修一处**`except BaseException` 吞 Ctrl-C**（`_run_probe` 的子进程探测，最长 60s × 2 核）：现在 `KeyboardInterrupt` 穿出去。判据 `tests/remote/test_notebook_runtime.py` +4（不可达仍 -2 / 程序员错穿出 / 探不起来回落 CPU / Ctrl-C 不被吞；各自改回宽捕实测红）。 |
 | 2026-11-15 | `common/distribution.py` | −9（11 → 2） | 探活 / 探测 / 取消十来个出站点的失败返回值（`node_ping → None`、`weights_cached_on_node → False`）**不是「没答」而是业务结论**：宽捕把「连不上」与本模块自己的 bug 抹平后，现场表现是「全部节点突然不可用、份额落回本地」而真因无痕。改为 `NET_ERRORS`（`_BASE_NET_ERRORS` + `http.client.HTTPException`）；探活类再并上 `ValueError`（200 但 body 不是 JSON，见同文件的 `PING_ERRORS`）。留下的 2 处是**第三条边界**：`_closer`（对任意 `HTTPResponse` 尽力 `close()`，异常族由对端决定）与 `fetch_task` 的「非 `DistError` 的确定性失败」兜底（解包错种类不定，且必须保留真实 message）。判据 `tests/common/test_dist_ping_errors.py`（3 条）+ `test_dist_common_poll.py::test_poll_result_lets_a_programmer_error_through`（各自改回宽捕实测红）。 |
 | 2026-11-14 | `remote/child_proc.py` | +1（6 → 7） | `pump_lines` 把「读流异常」与「回调异常」分开：回调是**两个代理各自传进来的行解析/记账代码**（`upload_proc` / `payload_proc`），它抛什么类型这里一概不知（`ValueError` / `KeyError` / 自己的异常族），而这条边界的义务是「坏行不进账、好行照读、收尾报数」。改成具体异常＝把「未知 bug 静默变成线程崩溃」。同函数里**读流**那一侧仍是宽捕 + `pass`（那是 EOF 的回声，见该函数 docstring），所以净 +1 是**新增的一条边界**，不是旧代码放松。 |
 
@@ -118,7 +119,9 @@ def test_scan_sees_the_known_production_surface() -> None:
     assert actual.get("remote/train_core.py", 0) > 0, (
         "扫描入口坏了（AST 没数到已知 except Exception）"
     )
-    assert sum(actual.values()) >= 400, "生产面计数异常偏低，扫描可能漏了包"
+    # 地板随清理下调（2026-11-15：423 → 397，见文件头 hub_http / distribution / notebook_runtime 三批）；
+    # 它只防「AST 没数到东西」，不是质量目标。
+    assert sum(actual.values()) >= 370, "生产面计数异常偏低，扫描可能漏了包"
     assert len(baseline) >= 100
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

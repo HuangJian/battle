@@ -9,7 +9,6 @@
   "remote/error_report.py": 1,
   "remote/hub_client.py": 1,
   "remote/job_fs.py": 1,
-  "remote/notebook_runtime.py": 1,
   "remote/offline_deliver.py": 1,
   "remote/offline_push_client.py": 1,
   "remote/payload_worker.py": 1,

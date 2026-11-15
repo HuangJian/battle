@@ -6516,3 +6516,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判据落地**：`tests/common/test_dist_ping_errors.py`（垃圾回执 → `None`；`AttributeError` /
   `KeyError` 穿出）与 `test_dist_common_poll.py::test_poll_result_lets_a_programmer_error_through`。
   实测把对应处理器改回 `except Exception` ⇒ 前者 `DID NOT RAISE`、后者抛 `deadline exceeded`，还原绿。
+
+## §2026-11-15-notebook-cells-do-not-call-every-failure-an-unreachable-hub
+
+- **决定**：`remote/notebook_runtime.py` 的 7 处宽捕收窄（`NET_ERRORS` / `PROBE_ERRORS` /
+  `PackageNotFoundError` / `OSError`），并修掉 `_run_probe` 的 `except BaseException`（现在
+  `KeyboardInterrupt` 穿出去）。G4 404 → 397、G9 41 → 40。
+- **为什么**：这七处的旧文案是「FATAL: hub 不可达（X）——检查隧道 URL 是否过期」。它把**所有**失败
+  都说成网络问题 ⇒ 真因是本模块的 `AttributeError` / `KeyError` 时，最后一线索反而把人指向隧道
+  （一段言之凿凿的错方向，比带 traceback 的崩溃贵得多）。网络层才该说网络层。
+- **`_probe_cuda/_paddle` 的 Ctrl-C**：旧代码 `except BaseException` 把 `KeyboardInterrupt` 变成
+  「按未知处理」，而这两条探测最长 60s × 2 核 —— 按了 Ctrl-C 看着它继续跑，比崩掉更糟。
+  收窄成 `(OSError, subprocess.SubprocessError)`（起不来 / 超时）后两者语义分明。
+- **`md.version` 与 `chmod`**：前者只该吞 `PackageNotFoundError`（「版本未知」不许替本模块的 bug
+  说话）；后者只吞 `OSError`（Colab/Kaggle 的 FUSE 挂载点不一定支持 chmod，权限位是纵深防御）。
+- **判据**：`tests/remote/test_notebook_runtime.py` +4 —— 不可达仍 `-2`、程序员错穿出、探不起来回落
+  CPU、Ctrl-C 不被吞；逐条改回宽捕实测红（`DID NOT RAISE`）。

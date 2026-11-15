@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -43,6 +44,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from common.env_probe import probe_cloud_env
+from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
@@ -54,6 +56,20 @@ from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_
 #: 2026-10-11（plan/nn-training-reuse-and-deps §S2）：4 份同形 `_log_default` 收敛为工厂；
 #: `lambda: time` 保留「每次重读本模块 `time`」的注入缝（7 处假钟用例钉着）。
 _log_default = tag_logger("battle-rl", lambda: time)
+
+#: hub / 本地 worker_server 的**网络层**异常面（2026-11-15，G4 窄捕；基底见 `common/errors.py`）。
+#:
+#: notebook cell 里这些出站点原本一律 `except Exception`，打成「FATAL: hub 不可达（X）——检查隧道
+#: URL 是否过期」。那是最贵的一种误诊：真因可能是本模块自己的 bug（`AttributeError` / `KeyError`），
+#: 而运维被指去排查隧道 —— 顺着这句话查上半小时也不会碰到真问题。
+#: `OSError` 覆盖 URLError / TimeoutError / SSLError / 连接重置；`HTTPException` 是 stdlib 协议层
+#: 错乱（`IncompleteRead` / `BadStatusLine`）；`RetryableError` / 防御性 `RuntimeError` 同基底。
+#: 见 DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HTTPException)
+
+#: `/ping` 类**探针**：网络面 + 回执读不出来（200 但 body 不是 JSON ⇒ `ValueError`）。探针的义务是
+#: 「这一拍拿没拿到可用状态」，读不出来与连不上同档；而看字段的错（形状变了）仍照抛。
+PROBE_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
 
 def _epoch_mult_of(cfg: dict[str, Any]) -> float:
     """`CFG.epoch_mult`：PPO 每轮更新遍数 × N（缺省 1.0 = 课程/manifest 原样）。
@@ -151,7 +167,11 @@ def _run_probe(log, code: str, what: str) -> dict | None:
         # run_capture 显式 UTF-8：这台机器上 torch 可能吐出带中文的 warning/错误行，
         # 裸 text=True 会在读线程里抛 UnicodeDecodeError ⇒ stdout 变成 None（§19）。
         r = run_capture([sys.executable, "-u", "-c", code], timeout=60)
-    except BaseException as e:  # 子进程起不来/超时——探测失败按未知
+    except (OSError, subprocess.SubprocessError) as e:
+        # 子进程起不来（`OSError`：解释器没了 / 权限）/ 超时（`TimeoutExpired` 是
+        # `SubprocessError`）⇒ 探测失败按未知。**故意不含 `BaseException`**：原来那条宽捕
+        # 连 Ctrl-C（`KeyboardInterrupt`）都吞成「按未知处理」—— 在两分钟的 torch 探测里
+        # 按了 Ctrl-C 却看着它继续跑，比崩掉更糟（2026-11-15，G4 窄捕）。
         log(f"{what} 探测子进程异常（{type(e).__name__}: {e}）—— 按未知处理")
         return None
     if r.returncode != 0:
@@ -376,7 +396,9 @@ def resolve_device(cfg: dict[str, Any], log) -> str:
     if iu.find_spec("torch_xla") is not None:
         try:
             xla_ver: str = md.version("torch_xla")
-        except Exception:
+        except md.PackageNotFoundError:
+            # 唯一合理的失败：`find_spec` 看见了但元数据缺（精简镜像）。别的错照抛 ——
+            # 「版本未知」这句不许把本模块的 bug 也说成它。
             xla_ver = "（已安装，版本未知）"
         os.environ.setdefault("PJRT_DEVICE", "TPU")
         log(f"torch_xla {xla_ver}（内核未导入——设备留给 worker 子进程）")
@@ -493,7 +515,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     except HTTPError as e:
         log(f"FATAL: hub /ping HTTP {e.code} — {'token 不匹配' if e.code in (401, 403) else 'hub 异常'}")
         return -2
-    except Exception as e:
+    except NET_ERRORS as e:
         log(f"FATAL: hub 不可达（{type(e).__name__}: {e}）——检查隧道 URL 是否过期")
         return -2
 
@@ -525,7 +547,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         token_file.write_text(hub_token, encoding="utf-8")
         try:
             token_file.chmod(0o600)
-        except Exception:
+        except OSError:
+            # Colab/Kaggle 的 FUSE 挂载点不一定支持 chmod（EOPNOTSUPP）。文件本来就只有本进程读，
+            # 权限位是纵深防御 —— 这一段失败不影响 token 有效性。
             pass
         specs.append(
             (
@@ -759,7 +783,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
                 with urlopen(req, timeout=4) as r:
                     obj = json.loads(r.read().decode("utf-8", "replace"))
                 return obj if isinstance(obj, dict) else None
-            except Exception:
+            except PROBE_ERRORS:
                 return None
 
         try:
@@ -859,7 +883,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
             )
             with urlopen(req, timeout=5) as r:
                 return bool(r.status == 200)
-        except Exception:
+        except NET_ERRORS:
             return False
 
     t0 = time.time()
@@ -939,7 +963,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
 
             obj = _json.loads(body.decode("utf-8", "replace"))
             return obj if isinstance(obj, dict) else None
-        except Exception:
+        except PROBE_ERRORS:
             return None
 
     log("进入推送守候（转发 serve.log + /ping 状态；中断本 cell 停机）")
