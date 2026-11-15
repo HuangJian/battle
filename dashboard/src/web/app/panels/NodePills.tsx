@@ -29,18 +29,23 @@
  *  绝不出「最近完成轮贡献（局）」那一列。
  */
 
-import { useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import {
+  BRIEF_ALL,
+  compactSummary,
   type ContributionBrief,
   nodeHealth,
   type NodeLocalView,
   nodeRole,
   type NodeView,
+  type PoolWindowKey,
   type PpoWorkerLiveView,
+  WINDOW_OPTIONS,
 } from '../../view'
 import { Switch } from '../../components/Switch'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
+import { fetchPool } from '../lib/api-client'
 import { PpoBrief, PpoWorkerRows, SamplingBrief } from './WorkerContribution'
 
 export interface NodePillsProps {
@@ -70,10 +75,113 @@ export interface NodePillsProps {
   /** 探测列**还在后台**（服务端首帧 `probesPending`）：贡献数未知 ⇒ 画中性「探测中」，
    *  不画红「离线」（未知 ≠ 贡献 0）。见 `ConsoleStateView.probesPending`。 */
   probesPending?: boolean
+  /** `/api/state` 每一拍的时间戳（`ConsoleStateView.time`）：非默认时间跨度的合计读数
+   *  跟着服务端刷新节奏重取，不另立一套轮询。缺省 = 只在切换档位时取一次（测试/旧调用）。 */
+  stateTick?: string
 }
 
 /** 只读视图的节点行提示。 */
 const RO_TITLE = '只读模式：节点编辑/冒烟仅限本机 localhost'
+
+/** 合计读数的时间跨度默认档：**近 24 小时**滚动窗（2026-11-15 用户口径；也是首页 brief
+ *  此前写死的窗口，换成 select 后默认值保持不变）。 */
+const DEFAULT_BRIEF_WINDOW: PoolWindowKey = '24h'
+
+/** 合计读数的时间跨度选择（用户指令 2026-11-15：在「采样合计」与「PPO 合计」前各放一枚，
+ *  options 与节点统计页同档 `WINDOW_OPTIONS`）。
+ *
+ *  两枚选择器**互相独立**（同日用户追加：不要联动）：采样块切到「7 天」不会动 PPO 块，
+ *  反之亦然——两种单位各有自己的时间口径。放在各自块头，读数 + 它的窗口始终在同一行。 */
+function BriefWindowSelect({
+  value,
+  onChange,
+  failed,
+  label,
+}: {
+  value: PoolWindowKey
+  onChange: (v: PoolWindowKey) => void
+  failed: boolean
+  label: string
+}) {
+  return (
+    <select
+      className="tc-sel tc-nodes__window"
+      aria-label={label}
+      title={
+        failed
+          ? '该时间跨度的合计读数加载失败：先不显示读数，避免拿另一窗口的数字冒充'
+          : '该块合计读数的时间跨度（与节点统计页同档；两块各自独立）'
+      }
+      value={value}
+      onChange={(e) => onChange((e.target as HTMLSelectElement).value as PoolWindowKey)}
+    >
+      {WINDOW_OPTIONS.map((o) => (
+        <option key={o.key} value={o.key}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  )
+}
+
+/** 一块合计读数的时间跨度状态（采样 / PPO **各一份、互不联动**——2026-11-15 用户）。
+ *
+ *  默认档仍吃 `/api/state` 后台算好的 24h brief（零新增请求）；其它档按 `/api/pool?days=`
+ *  的同一份窗口投影取。两块选了同一非默认档时，这里会各发一次同 URL 的请求——SWR 命中，
+ *  毫秒级，且换来两套状态完全解耦，比共享缓存再拆错的代价小。 */
+function useWindowBrief(
+  defaultBrief: ContributionBrief | null,
+  stateTick: string | undefined,
+): {
+  windowKey: PoolWindowKey
+  brief: ContributionBrief | null
+  failed: boolean
+  setWindow: (v: PoolWindowKey) => void
+} {
+  const [windowKey, setWindowKey] = useState<PoolWindowKey>(DEFAULT_BRIEF_WINDOW)
+  const [brief, setBrief] = useState<ContributionBrief | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  /** 切档：先清掉上一档读数，绝不让新窗口标签配旧窗口数字。 */
+  const setWindow = (v: PoolWindowKey): void => {
+    if (v === windowKey) return
+    setBrief(null)
+    setFailed(false)
+    setWindowKey(v)
+  }
+
+  useEffect(() => {
+    if (windowKey === DEFAULT_BRIEF_WINDOW) {
+      setBrief(null)
+      setFailed(false)
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const p = await fetchPool(false, windowKey)
+        if (cancelled) return
+        setBrief(p.contribution ? compactSummary(p.contribution, BRIEF_ALL, BRIEF_ALL) : null)
+        setFailed(false)
+      } catch {
+        if (cancelled) return
+        // 失败时不回退到另一窗口的旧数字：窗口标签与读数必须是同一口径。
+        setBrief(null)
+        setFailed(true)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [windowKey, stateTick])
+
+  return {
+    windowKey,
+    brief: windowKey === DEFAULT_BRIEF_WINDOW ? (defaultBrief ?? null) : brief,
+    failed,
+    setWindow,
+  }
+}
 
 /** 停用折叠行的计数文案。 */
 export function disabledSummary(disabled: number): string {
@@ -380,10 +488,14 @@ export function NodePills({
   onMore,
   readOnly,
   probesPending,
+  stateTick,
 }: NodePillsProps) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [showDisabled, setShowDisabled] = useState(false)
+  /** 两块合计各自的窗口状态（互不联动）：默认都是近 24 小时。 */
+  const sampling = useWindowBrief(brief ?? null, stateTick)
+  const ppo = useWindowBrief(brief ?? null, stateTick)
 
   // ★ 2026-11-02：先按**能力键**分家（`nodeRole`）——push 节点与采样节点同住 rl-config `nodes[]`，
   //   但单位（job / 局）与派发腿都不同，采样块的「贡献 vs 并发」判据对它们无意义。
@@ -447,7 +559,9 @@ export function NodePills({
 
   // PPO 块：有 push 节点（登记事实）或有 PPO 读数（贡献 / 在飞）就出——不画空壳标题，
   // 也不因为「这个窗口没有 job」就把已登记的 push 机器藏掉。
-  const showPpo = pushNodes.length > 0 || brief != null || (live != null && live.length > 0)
+  // `ppo.brief` 一起判：切到其它时间跨度时读数会短暂为空，块不能因此在取数途中消失。
+  const showPpo =
+    pushNodes.length > 0 || brief != null || ppo.brief != null || (live != null && live.length > 0)
 
   return (
     <div className="tc-nodes" aria-label="节点">
@@ -462,9 +576,22 @@ export function NodePills({
       >
         <div className="tc-nodes__grouphd">
           <b>采样节点</b>
-          <span className="tc-muted tc-small">rollout / eval · 单位：局</span>
+          <span className="tc-muted tc-small">rollout / eval</span>
+          {/* 时间跨度选择（2026-11-15 用户）：紧挨在「采样合计」前，只换窗口、不换人群/单位。
+              与 PPO 块头那枚共用同一个档位。 */}
+          <BriefWindowSelect
+            value={sampling.windowKey}
+            onChange={sampling.setWindow}
+            failed={sampling.failed}
+            label="采样块时间跨度"
+          />
           {/* 采样合计并入块头（2026-11-09 用户）：与标题、单位同一行，不再在块尾单开一条。 */}
-          <SamplingBrief brief={brief ?? null} />
+          <SamplingBrief brief={sampling.brief} />
+          {sampling.failed ? (
+            <span className="tc-errtext tc-small" title="不显示另一时间跨度的旧数字">
+              合计读数加载失败
+            </span>
+          ) : null}
           {/* 深链（全页唯一入口）：住采样块头右上角（2026-11-02 用户口径）——
               块里的读数都是纯展示，不各自带按钮。 */}
           <button
@@ -505,9 +632,20 @@ export function NodePills({
         <section className="tc-nodes__group tc-nodes__group--ppo" aria-label="PPO worker（push）">
           <div className="tc-nodes__grouphd">
             <b>PPO worker</b>
-            <span className="tc-muted tc-small">云端 push · 单位：job</span>
+            {/* 与采样块头**互不联动**：两块各选各的时间跨度。 */}
+            <BriefWindowSelect
+              value={ppo.windowKey}
+              onChange={ppo.setWindow}
+              failed={ppo.failed}
+              label="PPO 块时间跨度"
+            />
             {/* PPO 合计并入块头（2026-11-09 用户）：与「PPO worker」同一行，不再在登记行下面单开一条。 */}
-            <PpoBrief brief={brief ?? null} />
+            <PpoBrief brief={ppo.brief} />
+            {ppo.failed ? (
+              <span className="tc-errtext tc-small" title="不显示另一时间跨度的旧数字">
+                合计读数加载失败
+              </span>
+            ) : null}
           </div>
           {/* 登记行：谁在 push 池里、走哪条派发腿、启停（2026-11-02 起住这里，不再混进采样块）。 */}
           {pushNodes.map((n) => (

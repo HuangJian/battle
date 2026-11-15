@@ -2548,6 +2548,13 @@ a.tc-btn {
 .tc-nodes__grouphd > b {
   font-size: var(--fs-sm);
 }
+/* 块头里的时间跨度选择（2026-11-15 用户）：合计读数不再是固定 24h 窗口。
+   两处块头各一枚、各自独立；块头是单行 pill 行，用紧凑尺寸别把标题/深链挤掉。 */
+.tc-nodes__grouphd .tc-nodes__window {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  font-size: var(--fs-sm);
+}
 /* push 节点行（`gpu_push` / `offline_push`，2026-11-02 两块分家）：住在 PPO 块里，身份先于读数。
    徽章 = 走了哪条派发腿（两条腿挑机器的能力键不同，必须能分开看）；行内不出「局」那一列。 */
 .tc-badge--push-gpu {
