@@ -6642,3 +6642,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   该名字与定义模块）；还原后绿。另有一条口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` 必须被判活）
   与一条入口自检（转发名 ≥ 90，由派生地板给出）。
 - **现状**：103 个转发名，**零死名**（人工普查的结论与门禁一致）。
+
+## §2026-11-15-forward-gate-covers-every-facade
+
+- **决定**：上一节的门禁从「`remote/worker.py` 一张表」推广成**全仓门面**：
+  `tests/test_forward_names_are_live.py` 自动收录所有含 ≥3 个 `name as name` 转发的文件
+  （今天 15 个：`remote/worker` 103 名、`common/protocol` 84、`worker/config` 48 …），
+  逐名判活。
+- **为什么推广**：一张表只管得住那一个文件；同样的死别名在别的门面一样会长。推广后立刻抓到
+  真例：`common/protocol.GOAL_SCRIPT` / `INTENT_SCRIPT` —— 定义模块（`common/manifest.py`）自己
+  还在用，但**门面上这两个别名零读者**，已删。
+- **一个差点自证的坑**（值得记）：第一版判活用「全仓文本含该名字」，而门禁文件自己的说明里
+  点名了 `GOAL_SCRIPT` 作例子 ⇒ 它自己成了「还有人引用」的证据，两个死名被判活。修法：门禁
+  自身排除出扫描面（`SELF`）。**判据文件的示例文字不得成为判据的输入**。
+- **性能**：一次分词建 `{标识符: 文件集合}` 倒排索引（`@cache`），逐名字判活 O(1)；
+  三个用例合计 ~4s（不做索引时是 17s）。
+- **判据**：① 真例红→绿（`GOAL_SCRIPT`/`INTENT_SCRIPT` 删前红、删后绿）；② 合成探针
+  `ZZ_PROBE_SENTINEL` 从 `common/manifest` 转发进 **`trainer/batch_eval.py`**（另一个门面）⇒ 红
+  并点名；③ 口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` / `ProtocolError` 必须被判活）+
+  入口地板（门面 ≥ 13、转发名 ≥ 270，均为派生地板）。

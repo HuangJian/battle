@@ -67,12 +67,6 @@ from common.manifest import (
     EVAL_SCRIPT as EVAL_SCRIPT,
 )
 from common.manifest import (
-    GOAL_SCRIPT as GOAL_SCRIPT,
-)
-from common.manifest import (
-    INTENT_SCRIPT as INTENT_SCRIPT,
-)
-from common.manifest import (
     ITER_NODE_LABEL as ITER_NODE_LABEL,
 )
 from common.manifest import (
