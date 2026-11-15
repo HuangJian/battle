@@ -78,6 +78,7 @@ import { MOVE_DIM, decodeMove, encodeMove } from '../../src/nn/action-space'
 import { MASK_V6_DIM, decodeMove4, encodeMove4 } from '../../src/nn/action-space-v6'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { OpeningController } from '../../src/nn/opening-controller'
+import { encodeOpeningAction } from '../../src/nn/opening-input'
 import { evaluateCorridor } from '../../src/nn/opening-corridor'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
@@ -1658,10 +1659,10 @@ function runOne(
     if (openingCtrl && !openingDone) {
       const os = openingCtrl.step(world)
       const act = os.action
-      const mvIdx = act.move === null ? 0 : v6 ? encodeMove4(act.move) : encodeMove(act.move)
-      const holdIdx = v6 && act.move === null ? 1 : 0
-      const fireIdx = act.fire ? (v6 ? 2 : 1) : 0
-      scripted.setAction(mvIdx, fireIdx, holdIdx)
+      // plan/opening-null-move：v6 null → 当前已提交朝向 + hold（原地不动）。
+      const currentDir = world.player?.prevMoveDir ?? world.player?.dir ?? 'up'
+      const sa = encodeOpeningAction(act, v6, currentDir)
+      scripted.setAction(sa.move, sa.fire, sa.hold)
       if (os.done) openingDone = true
     }
     sim.tick()

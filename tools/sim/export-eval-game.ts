@@ -63,9 +63,10 @@ import {
   uselessShot,
   usefulFire,
 } from '../../src/nn/inference-rules'
-import { decodeMove, encodeMove } from '../../src/nn/action-space'
-import { decodeMove4, encodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
+import { decodeMove } from '../../src/nn/action-space'
+import { decodeMove4, MOVE4_DECODE } from '../../src/nn/action-space-v6'
 import { OpeningController, type OpeningTraceEvent } from '../../src/nn/opening-controller'
+import { encodeOpeningAction } from '../../src/nn/opening-input'
 import { centralBrickCells, evaluateCorridor } from '../../src/nn/opening-corridor'
 import { RING_CELLS } from '../../src/utils/base-ring'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
@@ -260,6 +261,11 @@ interface OpeningReport {
   baseRingBreach: number
   centralBreachCells: number
   hardConstraintOk: boolean
+  /** plan/opening-null-move：move=null tick 的诊断（additive）。 */
+  nullTicks: number
+  nullTurned: number
+  nullTurnedUp: number
+  nullMoved: number
 }
 let openingReport: OpeningReport | null = null
 
@@ -1007,6 +1013,10 @@ export function runEvalOne(
       baseRingBreach: 0,
       centralBreachCells: 0,
       hardConstraintOk: true,
+      nullTicks: 0,
+      nullTurned: 0,
+      nullTurnedUp: 0,
+      nullMoved: 0,
     }
   }
 
@@ -1510,16 +1520,20 @@ export function runEvalOne(
     const pxBefore = world.player?.x ?? -1
     const pyBefore = world.player?.y ?? -1
     const freezeBefore = world.freezeTimer
+    let openingNullTick = false
+    let openingDirBefore: string | null = null
 
     // Hybrid opening：controller 每拍给动作，直接覆盖 scripted 的输出（NN 仍照常
     // 决策/编码/计数，只是这一拍的动作不算它的）。done 之后本局不再触发。
     if (openingCtrl && !openingDone && openingReport) {
       const os = openingCtrl.step(world)
       const act = os.action
-      const mvIdx = act.move === null ? 0 : v6 ? encodeMove4(act.move) : encodeMove(act.move)
-      const holdIdx = v6 && act.move === null ? 1 : 0
-      const fireIdx = act.fire ? (v6 ? 2 : 1) : 0
-      scripted.setAction(mvIdx, fireIdx, holdIdx)
+      // plan/opening-null-move：v6 null → 当前已提交朝向 + hold（原地不动）。
+      const currentDir = world.player?.prevMoveDir ?? world.player?.dir ?? 'up'
+      const sa = encodeOpeningAction(act, v6, currentDir)
+      openingNullTick = act.move === null
+      openingDirBefore = world.player?.dir ?? null
+      scripted.setAction(sa.move, sa.fire, sa.hold)
       openingReport.activeTicks++
       if (os.done) {
         openingDone = true
@@ -1553,6 +1567,17 @@ export function runEvalOne(
     }
 
     sim.tick()
+    if (openingNullTick && openingReport) {
+      openingReport.nullTicks++
+      const afterDir = world.player?.dir ?? null
+      if (openingDirBefore !== afterDir) {
+        openingReport.nullTurned++
+        if (afterDir === 'up') openingReport.nullTurnedUp++
+      }
+      if ((world.player?.x ?? -1) !== pxBefore || (world.player?.y ?? -1) !== pyBefore) {
+        openingReport.nullMoved++
+      }
+    }
     if (world.player?.alive && !world.player.moving) idleTicks++
     if (probeOn) {
       probe.ticks++

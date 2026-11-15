@@ -5915,3 +5915,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 —— 全文（课程形状 / 执行面 / 风险）→ `docs/nn/training-stack.md` §76
 
 —— 全文（现场 / 风险）→ `nn-training/common/distribution.py::reference_code_hash` 与 `trainer/dispatch.py` 注释
+
+## §2026-11-15-goalnn-opening-null-move（v6 opening `move=null`：直接采用适配器修复，不保留开关）
+
+- **背景/决定**：v6 `OpeningController.move=null` 旧适配写成 `hold=1 + move=0(up)`，按 `SimulationPlayer` 的 turn-only 语义会在转向冷却允许时把坦克转向 up。修复放在适配器：新增 `src/nn/opening-input.ts::encodeOpeningAction()`，v6 null → **当前已提交朝向**（`prevMoveDir ?? dir ?? 'up'`）+ `hold=1`；不碰 `SimulationPlayer` 的 hold/move 正交语义，也不改 OpeningController。**用户 2026-11-15 拍板直接采用，默认即新行为；不设 `OPENING_HOLD_CURRENT` / `--opening-hold-current` / `--opening-null-turn`，旧路径从生产代码移除。**
+- **证据**：探针 6 关/30 个 null tick：v6 null 转向 4→0、位移 0→0；legacy 两臂均 0。g5-safe2.it185 700 局 eval：总体 81.86%→80.71%（−1.14pp），opening 13 关 80.77%→77.69%（−3.08pp，McNemar p=0.302），非 opening 440 局逐局相同；opening clearTick −270、stuck −52、baseWallIntact +0.15、playerDamageTaken +8.8。
+- **被否决**：在 `SimulationPlayer` 加「hold 忽略 move」（用户已否决非正交语义，影响所有 v6 动作）；在 OpeningController 返回当前朝向（controller 不该知道朝向/冷却）；只修 rollout 不修 eval（口径分叉）；**保留旧行为/运行时开关**（用户明确「不用留开关」，旧 `null→up+hold` 路径移除）。
+- **后果**：所有 eval/rollout 默认走新行为；采用后是新 baseline，跨采用前后的 eval/训练点不可横比。A/B 负点估计不作为否决（机制正确性优先），但记录在新 baseline 里；若采用后出现回归，回滚方式是 git revert 本次改动，而不是运行时 flag。
+
+—— 全文（映射表 / A/B / 分关读数）→ `plan/opening-null-move.plan.md` §9
