@@ -62,7 +62,7 @@ from typing import Any
 
 import common.distribution
 from biz.course import resolve_rotate_seed
-from common.log import log
+from common.log import default_router, log
 from trainer.dispatch_queue import REPO_ROOT, RUN_ID
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_steps import kickstart_coef
@@ -750,12 +750,16 @@ class TrainingLifecycle:
         """
         self._eb_window.set()
         # R4-G1 心跳：开窗（后续单元起止由 batch_eval 续写 batch/unit/rung）。
+        # 失败不抛（心跳不得反过来打断训练），但按 key 喊一次：console 的「训练忙碌中」读的就是
+        # 这个心跳 —— 写不进去与真卡住长得一模一样，而训练侧其实一切正常。
         try:
             from worker.eval_heartbeat import write_state
 
             write_state(window_open=True)
-        except Exception:
-            pass
+        except Exception as e:  # 心跳是可选落盘，失败边界就在本函数
+            default_router().warn_once(
+                "eval_heartbeat:open", f"开窗心跳没写成：{e!r}——console 会显示旧状态"
+            )
         t_prev = self._eb_thread
         if t_prev is not None and t_prev.is_alive():
             return

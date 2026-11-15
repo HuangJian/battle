@@ -387,7 +387,11 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   —— `_release_cloud_machine` 的 `unassign()` 失败时，**日志正文本身**就是交付物（异常 repr + 「机器
 #:   未释放」+ 该怎么做）。行为面只能验「调了一次」，验不了「读日志的人知道机器还在计费」；
 #:   与上面 `test_notebook_runtime` / `test_offline_local_first` 同一类：操作员唯一的证据是那几行字。
-BASELINE_FORM = 1498
+#: 2026-11-14 再抬到 **1500**（+2，实测）：`tests/trainer/test_loop_heartbeat_visibility.py` +
+#:   `tests/worker/test_eval_heartbeat.py` 的心跳留痕用例 —— 要钉的是**那行 WARN 里的后果说明**
+#:   （「console 会显示旧状态」/「runner_state 会停在旧值」）。行为面能验「喊了一次」，验不了
+#:   「读日志的人知道要不要管」；与上面几条同一类：措辞本身是交付物。
+BASELINE_FORM = 1500
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

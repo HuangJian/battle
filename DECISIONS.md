@@ -6271,3 +6271,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   喊一次狼来了，反而训练读者忽略真正的告警。
 - **判据**：`test_remote_hotswap.py` 两条 —— 失败路径必须恰有一次 `unassign` 调用 + 日志含 `unassign() 失败`
   与异常文本（`503`）+ 给出动作；成功路径**不得**出现「失败」（留痕只跟失败走）。
+
+## §2026-11-14-eval-heartbeat-failures-are-visible（心跳写不进去要说一声）
+
+- **决定**：EvalBoard runner 心跳的三层都改成「失败仍不抛，但按 key 喊一次」——
+  ① `worker/eval_heartbeat.write_state` 的落盘 `OSError`（`warn_once(f"eval_heartbeat:{落点}", …)`）；
+  ② `trainer/loop_lifecycle._evalboard_idle` 开窗（key `eval_heartbeat:open`）；
+  ③ `trainer/loop_dispatch._evalboard_yield` 关窗（key `eval_heartbeat:close`）。
+  G9 54/35 → **52/33**（两个文件从基线消失）。
+- **为什么**：静默的后果不是「少写一个 JSON」。`dashboard/data/evalboard/runner_state.json` 是 console
+  判断「训练空闲 / 忙碌中已等 N 分钟」的**唯一**输入；写不进去 ⇒ 屏幕上永久停在旧值，而训练侧一切
+  正常。读者会去查训练、查 hub、查 GPU，唯一不会去查的是「那个文件根本没写」。这正是 G9 口径里
+  「失败即信息丢失」那一类，不是「该有替代路径」那一类。
+- **为什么必须去重**：开窗/关窗是**每轮**都写的，热路径逐次喊会把控制台刷成噪音；`LogRouter.warn_once`
+  按键只喊一次，落盘失败的 key 还带路径（不同课/不同落点各喊一次）。
+- **为什么保留「不抛」**：心跳是观测面，绝不能反过来打断训练主链 —— 这条契约不变，改的只是「留不留痕」。
+- **判据**：`tests/trainer/test_loop_heartbeat_visibility.py` 三条（正常路径记录到
+  `window_open=False` + 关窗时刻；两条失败路径各恰好一行、且认领/开窗照做）+ 
+  `test_eval_heartbeat.py::test_write_failure_is_reported_once_and_never_raises`（落点是文件 ⇒
+  mkdir 失败，两次写只喊一次，且不抛）。两条都**不读私有字段**（G5）：走延迟 import 的 DI seam 验入参。

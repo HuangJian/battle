@@ -142,7 +142,9 @@ TOP_IMPORTS = {
     "trainer/loop_iter_dir.py": frozenset(
         {"common.distribution", "common.platform_utils", "trainer.collect_only", "common.log", "worker.resume"}
     ),
-    "trainer/loop_dispatch.py": frozenset({"trainer.rollout_phase"}),
+    # 2026-11-14：加 `common.log` —— `_evalboard_yield` 的心跳失败留痕（`warn_once`）。
+    # 这是 L0 日志出口，同簇的 `loop_baseline` / `loop_iter_dir` 早已登记同一项；不是重依赖。
+    "trainer/loop_dispatch.py": frozenset({"common.log", "trainer.rollout_phase"}),
 }
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 
