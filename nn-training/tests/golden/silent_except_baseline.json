@@ -5,7 +5,7 @@
   "remote/child_proc.py": 3,
   "remote/cloud_pool.py": 1,
   "remote/colab_bc.py": 4,
-  "remote/deliver_proc.py": 3,
+  "remote/deliver_proc.py": 2,
   "remote/deliver_worker.py": 1,
   "remote/error_report.py": 1,
   "remote/hub_client.py": 1,

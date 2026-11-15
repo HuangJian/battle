@@ -142,9 +142,14 @@ def pump_lines(
     except Exception:
         pass
     if dropped:
-        (log or _log)(
-            f"行泵：{dropped} 行被回调丢弃（第一次 {first!r}）—— 子进程仍在跑，其余行照读"
-        )
+        try:
+            (log or _log)(
+                f"行泵：{dropped} 行被回调丢弃（第一次 {first!r}）—— 子进程仍在跑，其余行照读"
+            )
+        except (OSError, ValueError):
+            # 喊话本身失败 = 出口（stdout/管道）已经关了，到此为止。不吞的话这行会把整条行泵
+            # 带走：线程带着 traceback 死掉，调用方看到的还是「腿卡住」——正是本函数要治的形状。
+            pass
 
 
 def join_all(threads: Iterable[threading.Thread | None], *, timeout: float = 2.0) -> None:

@@ -33,7 +33,7 @@
   "remote/control_pool.py": 1,
   "remote/deliver_outbox.py": 1,
   "remote/deliver_parts.py": 2,
-  "remote/deliver_proc.py": 8,
+  "remote/deliver_proc.py": 7,
   "remote/deliver_worker.py": 4,
   "remote/deliver_zip.py": 2,
   "remote/download.py": 3,

@@ -6290,3 +6290,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `window_open=False` + 关窗时刻；两条失败路径各恰好一行、且认领/开窗照做）+ 
   `test_eval_heartbeat.py::test_write_failure_is_reported_once_and_never_raises`（落点是文件 ⇒
   mkdir 失败，两次写只喊一次，且不抛）。两条都**不读私有字段**（G5）：走延迟 import 的 DI seam 验入参。
+
+## §2026-11-14-deliver-forwarder-reuses-pump-lines（补传腿的转发线程不再自己写一遍行泵）
+
+- **决定**：`remote/deliver_proc.DelivererProcess._forward` 改为 `pump_lines(stream, on_line, log=self.log)`，
+  `on_line` 先判 `boot ok` 置 `_boot`、再 `self.log(msg)`（顺序与旧实现逐字一致）。同时补上
+  `pump_lines` 自己的一处漏：**报数那行也是往 stdout 写**，出口关了会抛，而它在 try 之外 ⇒
+  把整条行泵带走。现在 `except (OSError, ValueError)` 到此为止（与 `LogRouter.warn_once` 同一口径）。
+  G9 52/33 → **51/33**（`deliver_proc` 3 → 2），G4 442 → **441**（该文件 8 → 7）。
+- **为什么**：这段手写循环与 `pump_lines` 是同一件事的第二个实现，且复制的是**修之前**的那一版：
+  读流截断（EOF 的回声，该静）与回调自己抛（我们的 bug，该响）共罩一条 `pass`。后果具体：
+  `self.log` 最终往 stdout 写，父进程 stdout 被关/管道断掉时 `print` 抛 `ValueError` ⇒ 转发线程停摆，
+  而 `_boot` **只有这条线程会置位** ⇒ 子进程明明已经打了 `boot ok`，父侧仍然只看到
+  「等 `boot ok` 超时（5s）」并 sticky 降级到进程内线程模式。诊断成本极高：现场既没有那行 `boot ok`，
+  也没有任何一行说「转发线程死了」。
+- **为什么不各自修一遍**：行泵的口径（哪一侧静、哪一侧响、怎么报数）已经写进 `pump_lines` 的
+  docstring 与 `tests/remote/test_child_proc_pump.py`；第二份实现迟早再漂一次。搬过来 = 口径单源。
+- **判据**：`test_offline_deliver_proc.py::test_forward_keeps_watching_after_log_callback_raises`
+  （日志回调对每一行都抛，流里 `boot ok` 在第二行 ⇒ `_boot` 仍必须置位；旧实现在第一行就死了，先红后绿）
+  + `test_child_proc_pump.py::test_summary_log_that_itself_raises_does_not_escape`（喊话本身失败不逃出）。

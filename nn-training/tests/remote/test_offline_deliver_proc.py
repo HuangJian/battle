@@ -18,6 +18,7 @@ opener，所以这一层用真 socket 说真话）。快层（假对象、秒级
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -631,3 +632,28 @@ def test_outbox_boot_failure_degrades_to_in_process_and_still_writes(tmp_path: P
         d.close(timeout=15.0)
     assert read_state(out)["rounds"]["1"]["rev"] == 1
     assert d.pending() == [], "线程兜底也要把积压物化完"
+
+
+def test_forward_keeps_watching_after_log_callback_raises() -> None:
+    """日志回调抛了 ⇒ 仍继续读流：`_boot` 只有这条线程会置位。
+
+    旧写法让回调的异常直接结束转发线程 ⇒ 子进程其实已经打了 `boot ok`，父侧却只能看到
+    「等 boot ok 超时」并 sticky 降级（现场零线索）。`self.log` 在生产里会抛：它最终是往
+    stdout 写，父进程的 stdout 被关/管道断掉时 `print` 抛 `ValueError`。
+    """
+    probe = object.__new__(DelivererProcess)
+    probe._boot = threading.Event()
+    seen: list[str] = []
+
+    def boom(msg: str) -> None:
+        seen.append(msg)
+        raise ValueError("I/O operation on closed file")
+
+    probe.log = boom
+    probe._forward(io.StringIO("第一行就抛\nboot ok\n"))  # 不抛
+
+    # 判据 = 「回调抛了还继续读」：`boot ok` 那行也走到了回调（置位由同一个 callback 先做，
+    # 所以它到了这里就等于 `_boot` 已置位 —— 不去读混入的私有 Event）。
+    # 末尾那一条是行泵的收尾报数（`log` 传的就是这个必然抛的回调，所以也进 `seen`）。
+    assert seen[:2] == ["第一行就抛", "boot ok"]
+    assert seen[2].startswith("行泵：2 行被回调丢弃")

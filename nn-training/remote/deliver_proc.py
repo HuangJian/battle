@@ -28,6 +28,7 @@ from typing import IO, Protocol
 from common.platform_utils import POPEN_NO_WINDOW
 from common.protocol import sanitize_run_id
 from remote import deliver_parts
+from remote.child_proc import pump_lines
 from remote.deliver_outbox import LocalOutboxDeliverer
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
@@ -360,19 +361,21 @@ class DelivererProcess:
         return f"等 `boot ok` 超时（{PROC_BOOT_TIMEOUT_SEC:g}s）"
 
     def _forward(self, stream: IO[str] | None) -> None:
-        """子进程输出**逐行**转发（前缀/时间戳由调用方的日志约定给；同一套 `[deliver]` 行格式）。"""
-        if stream is None:
-            return
-        try:
-            for line in stream:
-                msg = str(line).rstrip("\r\n")
-                if not msg:
-                    continue
-                if "boot ok" in msg:
-                    self._boot.set()
-                self.log(msg)
-        except Exception:
-            pass
+        """子进程输出**逐行**转发（前缀/时间戳由调用方的日志约定给；同一套 `[deliver]` 行格式）。
+
+        逐行搬运交给 `remote.child_proc.pump_lines`（2026-11-14）：那里把「读流被截断」（EOF 的
+        回声，静默是对的）与「回调自己抛」分成两种口径，后者逐行兜住、继续读、收尾报数。
+        以前两者共罩一条宽捕 `pass`：`self.log` 一抛（它最终往 stdout 写 —— 父进程 stdout 被关/
+        管道断掉时 `print` 抛 `ValueError`），转发线程当场停摆，而 `_boot` **只有这条线程会置位**
+        ⇒ 子进程明明已打了 `boot ok`，父侧却只能看到「等 boot ok 超时」并 sticky 降级，现场零线索。
+        """
+
+        def on_line(msg: str) -> None:
+            if "boot ok" in msg:
+                self._boot.set()
+            self.log(msg)
+
+        pump_lines(stream, on_line, log=self.log)
 
     def _stop_child(
         self, proc: subprocess.Popen | None, *, budget: float, grace: float | None = None

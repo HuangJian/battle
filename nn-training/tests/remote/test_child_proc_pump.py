@@ -65,3 +65,20 @@ def test_truncated_stream_stays_silent() -> None:
 
     assert seen == ["一行正常的日志"]
     assert logs == [], f"读流截断不该报错（那是 EOF 的回声）：{logs}"
+
+
+def test_summary_log_that_itself_raises_does_not_escape() -> None:
+    """喊话本身失败（stdout 关了 ⇒ `print` 抛 ValueError）⇒ 吞掉，**不把行泵也带走**。
+
+    `pump_lines` 的契约是「不抛」：这里是它在生产里最可能被违反的一行（报数那行也是往 stdout 写）。
+    冒出去的话，线程带着 traceback 死掉，调用方看到的仍是「腿卡住」——正是这次拆分要治的形状。
+    """
+
+    class _Stream:
+        def __iter__(self) -> Iterator[str]:
+            yield "一行\\n"
+
+    def boom(_msg: str) -> None:
+        raise ValueError("I/O operation on closed file")
+
+    child_proc.pump_lines(cast("IO[str]", _Stream()), boom, log=boom)  # 不抛即通过
