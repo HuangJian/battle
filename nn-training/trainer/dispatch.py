@@ -39,6 +39,7 @@ from trainer.queue_local import (
     resolve_tail_join_sec,
     run_local_rollout,
     run_rollout,
+    spawn_node_workers,
     split_local_head,
     waste_block,
 )
@@ -197,11 +198,10 @@ class RolloutDispatcher:
         # ping 超时（statusTimeoutSec=3s）全部并行——7 死节点从串行 ~21s/轮 压到 ~3s；
         # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
         # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
-        code_hash = common.distribution.compute_code_hash()
-        # 脏工作区护栏（2026-09-01 重启循环修复①）：期望 codeHash 由训练机工作区算出，
-        # 含未提交改动时远端 git pull 永不收敛 ⇒ 对远端节点下发 pull+restart 是无效扰动
-        # （实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
-        # 每轮检测一次；self/回环节点不受限（代码同源，纯重启即可拾取工作区代码）。
+        # 脏工作区护栏（2026-09-01 重启循环修复①）：参考 codeHash 以 self 自报为准
+        # （self 缺失才回退工作区现算）。含未提交改动时远端 git pull 永不收敛 ⇒ 下发
+        # pull+restart 是无效扰动（实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan
+        # 再杀一次，无限重启循环）。self/回环节点不受限（代码同源，纯重启即可拾取）。
         dirty_files = common.distribution.dirty_hash_files()
         if dirty_files:
             log(
@@ -228,6 +228,7 @@ class RolloutDispatcher:
             with ThreadPoolExecutor(max_workers=min(8, len(cfg_nodes))) as _ex:
                 probe_results = list(_ex.map(_probe, cfg_nodes))
 
+        code_hash = common.distribution.reference_code_hash(cfg_nodes, probe_results)
         nodes = []
         for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
             if ping is None:
@@ -1104,22 +1105,17 @@ class RolloutDispatcher:
         alive_lock = threading.Lock()
 
         def _spawn_node_workers(nd: dict) -> None:
-            """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。
-
-            **先 start 再入列表**：join 快照可能与 append 竞态，对未 start 的线程
-            join 会 RuntimeError（stream smoke：local 秒结后 push/spawn 尚未启动）。
-            """
-            with alive_lock:
-                if nd["id"] in spawned_ids:
-                    return
-                spawned_ids.add(nd["id"])
-                if nd not in alive:
-                    alive.append(nd)
-            for _ in range(nd["c"]):
-                t = threading.Thread(target=worker, args=(nd,), daemon=True)
-                t.start()
-                threads.append(t)
-                extra_threads.append(t)
+            """单节点权重就绪后立刻孵化其采样线程（POST 成功回调 / reuse / rescan）。"""
+            spawn_node_workers(
+                nd,
+                lock=alive_lock,
+                alive=alive,
+                spawned_ids=spawned_ids,
+                threads=threads,
+                extra_threads=extra_threads,
+                worker=worker,
+                log=log,
+            )
 
         # 本地线程先孵化：本地权重已在磁盘（rl_path），不依赖远端 POST。
         # B3：初始只开 local_slots 条（0 = 不开）；失联补孵由 LocalLane 守护。

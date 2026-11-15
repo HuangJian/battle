@@ -5895,3 +5895,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：`elapsedSec` 口径从「agent 结果就绪」变为「子进程打包完成」，差 = readFileSync + 微任务 ≪ 0.1 s，而字段本身 `toFixed(1)` ⇒ 对 `race_metrics.effective_slots` 的 E 判据无实质影响。真机 A/B：rollout / eval 两容器除 `elapsedSec` 外 manifest 与 13 个 entries **逐字节一致**；出口 14.285 ms → **0.001 ms**。⚠ `sampler-agent.ts` + 5 导出器 + `pack-container.ts` 全在 codeHash SSOT ⇒ **触发全集群升级波**；混跑由 codeHash 门挡住（同 commit 部署是既有惯例）。
 - **验收**：`tests/agent/result-stamp.test.ts` 6 例（serviceElapsedSec 纯函数、serveResult 原样返回、源码级回归钉子）；`bun run check` / `bun run build` 绿。
 - **修订（同日 22:00，用户裁定「P1 剩余各项若合最佳实践，即使墙钟无改善也可改」）**：判据从「实测收益」改为「工程最佳实践 + 不破坏契约」，补做 4 项，均在 `sampler-agent.ts`：① 结果出口零拷贝——`/v1/task` 与 `/v1/result` 缓存命中改 `new Response(bodyView(cached.buf))`、同步流改 `controller.enqueue(served)`，去掉 3 处整包 `new Uint8Array(buf)` 复制；`bodyView()` 用 `buf.buffer as ArrayBuffer` 造零拷贝视图（Node `Buffer<ArrayBufferLike>` 不满足 `BodyInit`，直接传会 TS2345），真实容器实测 byte-equal 且共享底层，结构钉子同步更新；② `runGame` 生命周期同步 FS 全改 `fs.promises`（mkdir/read/rm），并用 `read + catch` 替掉 `existsSync → read` 的 TOCTOU，finally 清理吞异常以免盖掉主结果；③ persist worker 的 stderr 管道加消费者并留 4KB 尾部诊断（写满 64KB 会把 worker 永久堵在 write 上，只能等 600s 超时）；④ stdout 由「逐行 `buf.slice(nl+1)`」改成按 chunk `lastIndexOf('\n')` 一次切行，消掉 O(N²) 复制。**仍不做**：跳过 `_rl_report.json`/`_eval_report.json` 落盘（B4 哨兵 + `queue_local.py`/`iter_rollout.py`/`workdir_sweep.py` 等是真实消费方，属契约不是死写）；`statfsSync` 缓存与权重 miss 负缓存（把「当前事实」变成带 TTL 的模块状态，与磁盘告警回差同拍、磁盘回查语义冲突）。新增 `tests/agent/persist-pool.test.ts` 3 条源码级 IO 卫生钉子。
+
+## §2026-11-15-goalnn-self-codehash-reference（rollout 节点门基准 = self 自报的 codeHash）
+
+- **动机（用户 2026-11-15 点名）**：hub 工作区有未提交改动时 `compute_code_hash()` 算的是「谁都没在跑的那份」；节点门拿它当 expected ⇒ 全部远端节点判 `codeHash mismatch` 被排除（本地改代码 = 全集群瘫痪，只剩本机腿）。
+- **决定**：rollout 派工（`trainer/dispatch._run`，rescan 共用同一参数）的参考 hash 改走 `common.distribution.reference_code_hash(cfg_nodes, probes)`：**self 节点 `/v1/ping` 自报的 codeHash 优先**（节点 id = self 或回环 URL），self 缺失/未报才回落 `compute_code_hash()`。self 的 agent 报的是实际在跑的代码，与远端同一把尺子。
+- **被否决**：① 不设门（真 stale 节点会静默跑旧代码）；② 多数节点投票当基准（少数派会被判 stale，且引入跨轮投票状态）；③ 只在 `dirty_files` 时跳门（那是工作区事实，不是「self 在跑哪份」的证据）。
+- **后果**：self 未重启时基准 = 旧代码 ⇒ 集群按旧代码继续跑（用户口径：宁跑不瘫）；提交+push+重启 self 后基准自动跟进。eval/batch 腿仍用工作区现算（本次未改）。`dirty_files` 仍只用于「远端 pull 不可收敛 ⇒ 抑制 restart」，语义不变。
+- **验收**：`tests/trainer/test_rollout_dispatch_resilience.py` 3 条（prefers self / fallback / dirty workspace keeps cluster，`slotsOnline=2`）；`dispatch.py` LOC 仍 999；`bun run check` + `bun run pygate` 绿。
+
+—— 全文（现场 / 风险）→ `nn-training/common/distribution.py::reference_code_hash` 与 `trainer/dispatch.py` 注释

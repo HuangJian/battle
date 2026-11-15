@@ -231,8 +231,10 @@ def test_on_shard_gets_the_memory_bytes_before_the_disk_write(tmp_path, monkeypa
         return h.manifest(), files
 
     report = h.run(fetch, on_shard=on_shard)
-    assert report["missing"] == [], report.get("missing")
-    assert len(got) == 2, got
+    # 失败时把 dispatch 的日志带上：这例曾在并行门禁里偶发（两局都 missing），
+    # 没有日志就只能看到空 list；原因几乎总在日志那一行 fetch/write 的错误里。
+    assert report["missing"] == [], (report.get("missing"), h.logs)
+    assert len(got) == 2, (got, h.logs)
     for name, files, _man in got:
         assert name.startswith("rl_s2000_seed"), name
         assert files["obs.npy"] == b"mem-bytes", "必须是内存里那份，不是落盘后的副本"
@@ -824,3 +826,89 @@ def test_requeue_line_names_the_node(tmp_path, monkeypatch) -> None:
     assert report["missing"] == [], report.get("missing")
     tokens = [tok for line in h.logs for tok in line.split()]
     assert any(tok == "node=a97" for tok in tokens), h.logs
+
+
+def test_reference_code_hash_prefers_self_node() -> None:
+    """集群基准 = self 自报的那份（2026-11-15）：不是 hub 工作区现算的那份。"""
+    probes: list[tuple[str, dict | None]] = [
+        ("a97", {"codeHash": "aaa"}),
+        ("self", {"codeHash": "bbb"}),
+    ]
+    nodes = [{"id": "a97", "url": "http://a97:8443"}, {"id": "self", "url": "http://127.0.0.1:8443"}]
+    assert common.distribution.reference_code_hash(nodes, probes) == "bbb"
+
+
+def test_reference_code_hash_falls_back_to_workspace(monkeypatch) -> None:
+    """self 不在候选表 ⇒ 回落本机现算（老行为不变）。"""
+    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "local")
+    nodes = [{"id": "a97", "url": "http://a97:8443"}]
+    assert common.distribution.reference_code_hash(nodes, [("a97", {"codeHash": "aaa"})]) == "local"
+
+
+def test_dirty_workspace_does_not_exclude_the_cluster(tmp_path, monkeypatch) -> None:
+    """hub 有未提交改动 ⇒ 仍以 self 报的 hash 为准，self+远端都不被排除（旧实现全群红）。"""
+    cluster = "c" * 64
+    h = _Harness(
+        tmp_path,
+        monkeypatch,
+        games=2,
+        nodes=[_node("self"), _node("a97")],
+        ping_fn=lambda *_a, **_k: dict(GOOD_PING, codeHash=cluster),
+    )
+    # 工作区现算的是「谁都没在跑」的那份（模拟本地改代码未 commit/push）
+    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "d" * 64)
+
+    report = h.run(lambda *_a, **_k: (h.manifest(), {}))
+
+    assert report["missing"] == [], report.get("missing")
+    assert report["dist"]["slotsOnline"] == 2, report["dist"]
+
+
+def test_spawn_failure_rolls_back_so_rescan_can_retry(monkeypatch) -> None:
+    """`Thread.start()` 抛（并行门禁实测 `can't start new thread`）⇒ 回滚 spawned_ids。
+
+    旧实现先打标记再 start ⇒ 该节点整轮静默判死，任务在窗口到期时全记 missing
+    （2026-11-15 门禁偶发：一轮两局都 missing，日志里只有 push 线程被 abort）。
+    """
+    class _Boom:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+
+        def start(self) -> None:
+            if self.fail:
+                raise RuntimeError("can't start new thread")
+
+    started: list[str] = []
+    state = {"fail": True}
+
+    def _factory(target, args):
+        t = _Boom(state["fail"])
+        real_start = t.start
+
+        def start() -> None:
+            real_start()
+            started.append("started")
+
+        t.start = start  # type: ignore[method-assign]
+        return t
+
+    monkeypatch.setattr(ql, "_thread_for", _factory)
+    alive: list = []
+    threads: list = []
+    extra: list = []
+    spawned: set[str] = set()
+    nd = {"id": "a97", "c": 1}
+    kw: dict[str, Any] = dict(
+        lock=threading.Lock(),
+        alive=alive,
+        spawned_ids=spawned,
+        threads=threads,
+        extra_threads=extra,
+        worker=lambda _nd: None,
+        log=lambda _m: None,
+    )
+    ql.spawn_node_workers(nd, **kw)
+    assert spawned == set(), "一线程都没起来就必须回滚，rescan 才能补孵"
+    state["fail"] = False
+    ql.spawn_node_workers(nd, **kw)
+    assert spawned == {"a97"} and started == ["started"] and len(threads) == 1

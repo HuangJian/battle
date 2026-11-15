@@ -38,6 +38,54 @@ REPO_ROOT = (
     Path(__file__).resolve().parents[2]
 )  # 仓库根 battle2（trainer/ 上溯 3 层，修正 2026-09-02）
 
+
+def _thread_for(target, args):
+    """采样线程工厂（单测注入点）：门禁并行时 `Thread.start()` 会抛 `can't start new thread`。"""
+    return threading.Thread(target=target, args=args, daemon=True)
+
+
+def spawn_node_workers(
+    nd: dict,
+    *,
+    lock: Any,
+    alive: list,
+    spawned_ids: set[str],
+    threads: list,
+    extra_threads: list,
+    worker: Callable[[dict], None],
+    log: Callable[[str], None],
+) -> None:
+    """单节点权重就绪后立即孵化采样线程（POST 成功回调 / reuse / rescan）。
+
+    2026-11-15 从 `trainer/dispatch.py` 搬来（那边已到 1000 LOC）。**先 start 再入列表**：
+    join 快照可能与 append 竞态，对未 start 的线程 join 会 RuntimeError。
+
+    `spawned_ids` = 「这轮已经派过工」的标记。旧写法**先打标记再 start**，`Thread.start()`
+    抛（并行门禁/机器打满时实测 `can't start new thread`）⇒ 整个节点静默判死到窗口到期
+    （同日门禁偶发：一轮两局全 missing，日志里只有 push 线程被 abort）。现在**一线程都
+    没起来才回滚标记**（rescan 能在窗口内补孵），并响亮记一行。
+    """
+    with lock:
+        if nd["id"] in spawned_ids:
+            return
+        spawned_ids.add(nd["id"])
+        if nd not in alive:
+            alive.append(nd)
+    first = True
+    for _ in range(nd["c"]):
+        try:
+            t = _thread_for(worker, (nd,))
+            t.start()
+        except RuntimeError as e:
+            if first:
+                with lock:
+                    spawned_ids.discard(nd["id"])
+            log(f"[dist] node {nd['id']}: spawn failed ({e}) — 本轮不派该节点")
+            return
+        threads.append(t)
+        extra_threads.append(t)
+        first = False
+
 #: 本机腿交给长驻池的单局硬顶（秒）——**故意远大于任何合法长局**。
 #:
 #: 本机口径一直是「不限」（`game_watch` 对 `DEFAULT_GAME_TIMEOUT_SEC` 的注释：本机卡住的是
