@@ -426,5 +426,10 @@ def test_publish_job_ships_replay_converter_and_identity(tmp_path: Path) -> None
     # 同 data_fp 的 full job 是另一个身份（传输格式进幂等键）。
     from common.job_identity import idempotency_key
 
-    assert idempotency_key(m)[-1] == "replay"
+    key = idempotency_key(m)
+    assert key[-2] == "replay" and key[-1] == conv_sha
     assert len(idempotency_key({**m, "corpus_fmt": "full"})) == 5
+    # 换转换器 ⇒ 换身份（同 data_fp 也不能复用旧 job/结果）。
+    from common.job_identity import job_id
+
+    assert job_id({**m, "replay_converter_sha256": "0" * 64}) != job_id(m)

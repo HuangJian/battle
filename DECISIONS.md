@@ -5916,6 +5916,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 
 —— 全文（现场 / 风险）→ `nn-training/common/distribution.py::reference_code_hash` 与 `trainer/dispatch.py` 注释
 
+## §2026-11-15-goalnn-conv-wasm-clang20-retest（clang20 下档位/ReLU 复测：现役组合即局部最优，不动）
+
+- **现场（用户 2026-11-15 点名复跑 `conv-wasm-clang20-retry.md`）**：本机 clang 20.1.0 按 `wasmBuildFlags()` 重编 8px 得到**与现役 `conv.wasm` 逐字节相同**的产物（`6e506781…` / 7350 B）⇒ 测量对象就是生产内核。三问全部为「否」：① clang20 下 **16px 比 8px 慢 5%**（clang22 上 8→16 是断崖提速，方向相反）；② **无分支 ReLU（fabs/mulbool/ltzero）都不提速**（clang20 的 `x > 0 ? x : 0` 本来就出 `f32x4.pmax` 16 处、`replace_lane` 0 处，改写只增 mul/add）；③ **`-mrelaxed-simd` 产出字节相同的 wasm**（clang22 上 4.75 ms 的收益来自绕开 gt/select 退化，clang20 无此退化可绕）。档位补扫 4/12/20/24/32 分别 2.59×/1.117×/1.116×/1.112×/1.123×，8px 是双侧局部最优。native 那一臂同样：8/12/20/24/32 px 分别 1.053/1.151/2.352/1.085/1.235×，16px 最优。
+- **决定**：**保持现役，不改 `src/nn/conv/*`、不重编 prebuilt**（判定标准「内核 >5% 且端到端同向」无变体满足）。同时确认生产实跑的是 **native**（prebuilt + `NN_NATIVE_LIB`），wasm 只是回落臂；本机 native 比 wasm 快 **1.45~1.52× 端到端**（rollout 1511~1522 vs 2181~2315 ms；eval 1466~1510 vs 2208~2228 ms），内核层 1.63×（1.65 vs 2.73 ms/forward），且两次 rollout 的 13 个 `.npy` **逐字节相同**、manifest 只差 `feat` 字段 ⇒ 后端选择不影响轨迹与语料。
+- **被否决**：① 统一到 16px（clang20 上更慢，且 clang20 的 8px 已无退化）；② 预先改成 fabs 以防「未来后端退化」（慢 2.4%，退化应由代码生成门禁抓）；③ `-mrelaxed-simd`（零字节差异、改 NaN 语义）；④ FMA（本机实测 native px16 `-mfma -ffp-contract=fast` 只 **+8.4%** 内核 / 端到端 −7.5%，远低于 macOS 文档的 +23%；且会被运行期 attestation 整条关掉——见同条「FMA 补测」）。
+- **FMA 补测（用户 2026-11-15 二次点名「训练侧全 native、wasm 只留浏览器」）**：本机只加收缩 flags、其余按生产配方，native px16 `-mfma -ffp-contract=fast` = **0.9228× 时间（+8.4% 吞吐，92/100 轮）**，`vmulps 151→35`/`vaddps 158→42`/`vfmadd 0→166`；`-ffp-contract=fast` 单开（无 `-mfma`）产出**字节相同**的 DLL（AVX1 无 FMA 指令）；`fma8` 1.0203×、`fma24` 1.1532×、`avx2+fma` 0.9206×（无额外收益）⇒ px16 仍最优。数值上 `bufA` 66.7% 元素差 1e-7 量级；**端到端同局轨迹不变**（s16/seed860001 + 860002–860013 共 13/13 局动作、分数、obs/mask 全同，仅 `lp_*`/`value` 末位不同）——即 FMA 只改 PPO 梯度数值，不改采样轨迹。但仍然不落地：① 运行期 attestation 实测打印「attestation 失败 → 回落 wasm」（要么改成按目标入库 golden 自证，要么白丢 native 1.63×）；② arm64 换 `-ffp-contract=fast` 会自动融合（`fmla 0→60`），x64↔arm64 是否逐位相同本机不可验；③ `native-parity` 门会红 + x64 基线抬到 Haswell（2013+）+ `data_fp` 变更新纪元。
+- **口径教训（可复用）**：共享桌面（Chrome + 训练 worker 常驻，总 CPU 20~25%）上，「每变体独立进程取中位」**不可用**——A/A 对照（四个相同二进制）都能差 7~16%。改成**成对交替比值**（每轮紧邻两臂、奇偶轮换先后、取比值中位）后偏置降到 **0.4%**（自编 native px16 vs 现役 DLL = 1.0039×）。以后在本机做内核 A/B 一律用这个口径，别用 `tools/perf/conv-ab.ts`（`IN_CH=18` 已过时，见交接文档 §3.2）。
+- **后果**：`src/nn/` 不变 ⇒ 无 codeHash 升级波。剩下的墙钟杠杆不在内核：每局固定开销 ~215 ms / 1.5 s（14%，一局一进程，`export-rl-rollout.ts` 头部禁止在该文件加池），以及**当前迭代墙钟主要卡在 PPO worker 缺位**（`job … pending 已等 370s；hub 在线 worker = 0`，而 `pure_collect_sec=12.6`）—— 抠内核 3% 远不如补训练 worker。
+- **验收**：合成内核 10 个变体 × 3 组输入哈希全对（`4870538e41f3`/`94fe41d85c0a`/`68cd276a2c3c`）；native↔wasm 端到端 shard 逐字节相同；`--check-prebuilt` 保持 fresh。完整数据 → `conv-wasm-clang20-retry.md` §10（harness 在 `tmp/retry/`，gitignored）。
+
 ## §2026-11-15-goalnn-opening-null-move（v6 opening `move=null`：直接采用适配器修复，不保留开关）
 
 - **背景/决定**：v6 `OpeningController.move=null` 旧适配写成 `hold=1 + move=0(up)`，按 `SimulationPlayer` 的 turn-only 语义会在转向冷却允许时把坦克转向 up。修复放在适配器：新增 `src/nn/opening-input.ts::encodeOpeningAction()`，v6 null → **当前已提交朝向**（`prevMoveDir ?? dir ?? 'up'`）+ `hold=1`；不碰 `SimulationPlayer` 的 hold/move 正交语义，也不改 OpeningController。**用户 2026-11-15 拍板直接采用，默认即新行为；不设 `OPENING_HOLD_CURRENT` / `--opening-hold-current` / `--opening-null-turn`，旧路径从生产代码移除。**
@@ -5924,3 +5934,11 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：所有 eval/rollout 默认走新行为；采用后是新 baseline，跨采用前后的 eval/训练点不可横比。A/B 负点估计不作为否决（机制正确性优先），但记录在新 baseline 里；若采用后出现回归，回滚方式是 git revert 本次改动，而不是运行时 flag。
 
 —— 全文（映射表 / A/B / 分关读数）→ `plan/opening-null-move.plan.md` §9
+
+## §2026-11-15-goalnn-replay-corpus-p1p2（replay 语料运输：请求级 corpus_fmt + 两段 wire + worker pre-pass）
+
+- **背景/决定**：35 关按 7 关轮换的根因是 payload 体积。采用**请求级 `corpus_fmt=full|replay`**：replay 只产 `replay.json` + `replay_meta.json` + 非 obs 标签，obs/scalars/extra 由 worker 用纯 JS 转换器重建。full 仍逐字节旧路径；`kind=iter`/eval 强制 full。转换器由 trainer 预构建（`bun build --target=node`）随 kind=ppo payload 根下发，worker 只跑不建；世界只由 `ReplayInput` 驱动，不重跑 OpeningController、不用 `a_*` 驱动。
+- **关键契约**：`replay_meta` 带 `nSamples/decisionTicksList/obsHash/tickHashes/codeSha/initTick/opening`；`decisionTicksList` **相对 replay 帧序号**（state_init 的绝对游戏时钟会错位）；`payload_slim` 在 replay 时 DROP obs/scalars/extra 且格式不符响亮拒收；`corpus_fmt` + `replay_converter_sha256` 进 job 幂等键（full 省略分量，旧 job_id 不变）；worker pre-pass 为 shard 级事务（`<shard>.conv-tmp` 硬链接输入 → 转换+校验+完成标记 → 目录换入；失败原目录不动）。
+- **本机证据（2026-11-15）**：1015 局（35 关 × 29 seed，hard，1200 tick）= 121,702 决策 / 1,216,991 tick；Bun 进程内、Node bundle、WSL Linux Node 三端 obs/scalars/extra **0 mismatch**。Node 转换 12.7 µs/tick；WSL（/mnt/d 9p）57 µs/tick。录制开销：60 局 full 14,454 ms vs replay 14,601 ms（+1.02%）；recordFrame+hash 1.2 ms/局。60 样本 shard 体积：full_raw 10,976 B / full_diet 9,200 B / replay_diet 3,928 B。
+- **被否决**：① replay-only（worker 重算前向/metrics 在 2 vCPU 上净亏）；② packer 事后看 `replay.json` 猜格式（请求显式声明）；③ 在 sampler 端转换（同机无 wire 收益，白烧 CPU）；④ 只做逐文件原子写（崩溃留半成品；改为 shard 级事务）；⑤ 用 `a_*` 标签驱动世界（opening 接管段 `a_*` ≠ 执行动作）。
+- **后果/未完成**：默认 full，生产课尚未切 replay；同机 `replay+eager` vs `full+eager` 的真 PPO 数值对账、2 vCPU 云机写盘/重哈希墙钟、hub 显式 capability 仍未验。完整方案 → `plan/replay-corpus.plan.md`；代码 → `tools/sim/replay-to-shard.ts`、`nn-training/remote/replay_corpus.py`、`tools/agent/sampler-agent.ts`。

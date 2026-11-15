@@ -56,7 +56,8 @@ def idempotency_key(manifest: dict) -> tuple:
     # 不能当同一单）。**full 省略该分量** ⇒ 旧 job_id 逐字节不变。
     fmt = str(manifest.get("corpus_fmt") or "full")
     if fmt != "full":
-        key = (*key, fmt)
+        # 转换器契约也进身份：同一 data_fp 换转换器 = 不同产物，不能复用旧 job/结果。
+        key = (*key, fmt, str(manifest.get("replay_converter_sha256") or ""))
     return key
 
 

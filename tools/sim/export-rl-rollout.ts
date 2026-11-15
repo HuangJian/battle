@@ -81,6 +81,7 @@ import { OpeningController } from '../../src/nn/opening-controller'
 import { encodeOpeningAction } from '../../src/nn/opening-input'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { serializeReplayFile } from '../../src/replay/file'
+import { computeCodeHash } from '../agent/codehash-files'
 import { evaluateCorridor } from '../../src/nn/opening-corridor'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
@@ -1166,6 +1167,19 @@ export interface ReplayArtifact {
   meta: Record<string, unknown>
 }
 
+/** rollout 侧 TS 代码身份（惰性；同一进程只算一次，失败退空串不阻断导出）。 */
+let replayCodeShaMemo: string | null = null
+function replayCodeSha(): string {
+  if (replayCodeShaMemo === null) {
+    try {
+      replayCodeShaMemo = computeCodeHash()
+    } catch {
+      replayCodeShaMemo = ''
+    }
+  }
+  return replayCodeShaMemo
+}
+
 interface RunResult {
   shard: ShardData
   /** 起始分布注入的事实（未注入 = 空串 / 0 / null；manifest 只在注入时追加这三个字段）。 */
@@ -1370,6 +1384,10 @@ function runOne(
   }
   const openingCtrl = openingWanted ? new OpeningController({ exitPocket: true }) : null
   let openingDone = false
+  /** replay_meta 的 opening 审计面（D4）：done 的 tick / abort 原因 / 最终 phase。 */
+  let openingDoneTick: number | null = null
+  let openingAbortReason: string | null = null
+  let openingPhase: string | null = null
   // P1（plan/replay-corpus.plan.md）：replay 格式逐局录制输入；full 不创建 recorder，
   // 不 clone 世界、不算 tickHash ⇒ full 路径内存/字节不变。
   const recorder = corpusFmt === 'replay' ? new InputRecorder() : null
@@ -1608,7 +1626,9 @@ function runOne(
   while (t < maxTicks) {
     if (decisionDue(t, world, gate, gateCfg)) {
       // full 路径不分配（旧行为零额外内存）；replay 才需要显式决策 tick 列表。
-      if (corpusFmt === 'replay') decisionTickList.push(t)
+      // ★ 相对 replay 帧序号（state_init 从 initTick 起录）：转换器按 frames[0..] 遍历，
+      //   绝对游戏时钟会让交棒段的决策 tick 全部错位。
+      if (corpusFmt === 'replay') decisionTickList.push(t - initTick)
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
@@ -1703,7 +1723,12 @@ function runOne(
       const currentDir = world.player?.prevMoveDir ?? world.player?.dir ?? 'up'
       const sa = encodeOpeningAction(act, v6, currentDir)
       scripted.setAction(sa.move, sa.fire, sa.hold)
-      if (os.done) openingDone = true
+      openingPhase = os.phase
+      if (!openingDone && os.done) {
+        openingDone = true
+        openingDoneTick = t
+        openingAbortReason = os.abortReason
+      }
     }
     sim.tick()
     // InputRecorder 契约：post-tick、endFrame 前读输入（GameLoop 同序）。
@@ -2116,7 +2141,8 @@ function runOne(
           seed,
           difficulty,
           k: decisionK,
-          ticks: t,
+          /** replay 帧数（不是游戏时钟；state_init 时游戏时钟 = initTick + ticks）。 */
+          ticks: rec.tickCount,
           decisionTicks,
           decisionTicksList: decisionTickList,
           nSamples: shard.n,
@@ -2129,7 +2155,13 @@ function runOne(
             all: openingAll,
             wanted: openingWanted,
             done: openingDone,
+            doneTick: openingDoneTick,
+            abortReason: openingAbortReason,
+            phase: openingPhase,
           },
+          /** rollout 侧 TS 代码身份（D4；converter 用它判定「重建端代码是否同源」）。 */
+          codeSha: replayCodeSha(),
+          initTick,
         },
       }
     : null
@@ -2340,6 +2372,8 @@ export function runOneBench(
   init: { path: string } | null = null,
   /** x2 事件 rung（R2）：同 `runOne`。 */
   decisionEvents = false,
+  /** P0 identity 批量校验：同 `runOne`（默认 full）。 */
+  corpusFmt: 'full' | 'replay' = 'full',
 ): RunResult {
   return runOne(
     stageIdx,
@@ -2354,6 +2388,9 @@ export function runOneBench(
     playerLevelOverride,
     init,
     decisionEvents,
+    DEFAULT_DECISION_K,
+    false,
+    corpusFmt,
   )
 }
 

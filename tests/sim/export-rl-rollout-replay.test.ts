@@ -23,6 +23,7 @@ import { join } from 'path'
 import { unpackContainer } from '../../tools/sim/pack-container'
 
 const WEIGHTS = 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'
+const LEVEL = 'nn-training/levels/classic35-safe-base.jsonc'
 const MAX_TICKS = '600'
 const SHARD = 'rl_s0_seed1'
 
@@ -30,7 +31,7 @@ let root = ''
 let fullShard = ''
 let replayShard = ''
 
-function runRollout(outDir: string, extra: string[]): void {
+function runRollout(outDir: string, extra: string[], stage = '0'): void {
   const p = Bun.spawnSync(
     [
       'bun',
@@ -38,7 +39,7 @@ function runRollout(outDir: string, extra: string[]): void {
       '--out',
       outDir,
       '--stages',
-      '0',
+      stage,
       '--seeds',
       '1',
       '--max-ticks',
@@ -158,6 +159,42 @@ describe('export-rl-rollout: --corpus-fmt=replay', () => {
     delete memMeta.recordMs
     delete diskMeta.recordMs
     expect(memMeta).toEqual(diskMeta)
+  }, 60_000)
+
+  it('hybrid opening 接管段：policy_mask 与 replay identity 均成立', async () => {
+    const level = Bun.JSONC.parse(await Bun.file(LEVEL).text()) as { stages: unknown[] }
+    const stageJson = JSON.stringify(level.stages[20])
+    const out = join(root, 'opening')
+    const base = ['--stage-json', stageJson, '--opening-connect', '--max-ticks', '2000']
+    runRollout(join(out, 'full'), base, '2020')
+    runRollout(join(out, 'replay'), [...base, '--corpus-fmt', 'replay'], '2020')
+    const fullShardO = join(out, 'full', 'rl_s2020_seed1')
+    const replayShardO = join(out, 'replay', 'rl_s2020_seed1')
+
+    // policy_mask 属于标签，两条路径必须逐字节相同，且确有 controller 接管段（0）。
+    expect(existsSync(join(replayShardO, 'policy_mask.npy'))).toBe(true)
+    expect(
+      sameBytes(join(fullShardO, 'policy_mask.npy'), join(replayShardO, 'policy_mask.npy')),
+    ).toBe(true)
+    const pm = readFileSync(join(replayShardO, 'policy_mask.npy'))
+    expect([...pm].includes(0)).toBe(true)
+
+    const conv = join(out, 'converted')
+    const p = runConvert(replayShardO, conv)
+    expect(p.exitCode).toBe(0)
+    for (const name of ['obs.npy', 'scalars.npy', 'extra.npy']) {
+      expect(sameBytes(join(fullShardO, name), join(conv, name))).toBe(true)
+    }
+
+    const meta = JSON.parse(readFileSync(join(replayShardO, 'replay_meta.json'), 'utf8')) as {
+      codeSha: string
+      opening: { wanted: boolean; done: boolean; doneTick: number | null; phase: string | null }
+    }
+    expect(meta.codeSha).toMatch(/^[0-9a-f]{16,64}$/)
+    expect(meta.opening.wanted).toBe(true)
+    expect(meta.opening.done).toBe(true)
+    expect(meta.opening.doneTick).toBeGreaterThanOrEqual(0)
+    expect(meta.opening.phase).toBe('done')
   }, 60_000)
 
   it('坏 replay_meta 响亮失败且不写半成品', () => {

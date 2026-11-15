@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import ProtocolError
+from common.platform_utils import rmtree_best_effort
 from common.proc import run_capture
 
 CONVERTER_NAME = "replay_converter.js"
@@ -87,6 +89,30 @@ def _marker_ok(shard_dir: Path, converter_sha: str) -> bool:
     return all((shard_dir / n).is_file() for n in ("obs.npy", "scalars.npy", "extra.npy"))
 
 
+def _link_or_copy(src: str, dst: str) -> str:
+    """shard 事务的工作副本：优先硬链接（零拷贝）；不支持时退回复制。"""
+    try:
+        os.link(src, dst)
+        return dst
+    except OSError:
+        return shutil.copy2(src, dst)
+
+
+def _clean_stale_transaction(shard_dir: Path) -> None:
+    """清掉上次崩溃留下的 `.conv-tmp` / `.conv-old`（否则 copytree/rename 会撞）。"""
+    parent, name = shard_dir.parent, shard_dir.name
+    tmp = parent / (name + ".conv-tmp")
+    old = parent / (name + ".conv-old")
+    if tmp.exists():
+        rmtree_best_effort(tmp, ignore_errors=True)
+    if old.exists():
+        if shard_dir.exists():
+            rmtree_best_effort(old, ignore_errors=True)
+        else:
+            # 崩在两次 rename 之间：原目录在 .conv-old，先复位再继续。
+            old.rename(shard_dir)
+
+
 def convert_shard(
     shard_dir: Path,
     *,
@@ -95,48 +121,59 @@ def convert_shard(
     runtime: str,
     timeout_sec: float = SHARD_TIMEOUT_SEC,
 ) -> bool:
-    """转换一个 shard；返回 True = 复用标记（未跑子进程）。失败抛 ProtocolError。"""
+    """转换一个 shard；返回 True = 复用标记（未跑子进程）。失败抛 ProtocolError。
+
+    事务：输入硬链接到 `<shard>.conv-tmp` → 在临时目录里转换 + 校验 + 写完成标记 →
+    `shard`→`.conv-old`、`.conv-tmp`→`shard`、删 `.conv-old`。失败时原目录**一字未动**。
+    """
     if _marker_ok(shard_dir, converter_sha):
         return True
-    # 标记在但产物不全/转换器变了 ⇒ 删标记重跑（产物由转换器覆盖）。
-    marker = shard_dir / MARKER_NAME
-    if marker.exists():
-        try:
-            marker.unlink()
-        except OSError:
-            pass
+    _clean_stale_transaction(shard_dir)
+    parent, name = shard_dir.parent, shard_dir.name
+    tmp = parent / (name + ".conv-tmp")
+    old = parent / (name + ".conv-old")
+    shutil.copytree(shard_dir, tmp, copy_function=_link_or_copy)
     try:
         # `run_capture` 自带显式 UTF-8 + Windows 无黑窗（AGENTS §19 / POPEN_NO_WINDOW）。
         p = run_capture(
-            [runtime, str(converter), "--shard-dir", str(shard_dir)],
+            [runtime, str(converter), "--shard-dir", str(tmp)],
             timeout=timeout_sec,
         )
+        if p.returncode != 0:
+            raise ProtocolError(
+                f"replay 转换失败（{name}，rc={p.returncode}）："
+                f"{(p.stderr or p.stdout)[-800:]}"
+            )
+        missing = [n for n in ("obs.npy", "scalars.npy", "extra.npy") if not (tmp / n).is_file()]
+        if missing:
+            raise ProtocolError(f"replay 转换器返回 0 但产物缺失（{name}: {missing}）——拒收")
+        replay = tmp / "replay.json"
+        meta = {
+            "version": MARKER_VERSION,
+            "converter_sha256": converter_sha,
+            "replay_sha256": _sha256_file(replay) if replay.is_file() else "",
+        }
+        (tmp / MARKER_NAME).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        # 原子换入：原目录先挪开，临时目录顶上；第二步失败则复位。
+        os.replace(shard_dir, old)
+        try:
+            os.replace(tmp, shard_dir)
+        except OSError:
+            os.replace(old, shard_dir)
+            raise
+        rmtree_best_effort(old, ignore_errors=True)
+        return False
     except subprocess.TimeoutExpired as e:
+        rmtree_best_effort(tmp, ignore_errors=True)
         raise ProtocolError(
-            f"replay 转换超时（{shard_dir.name}，>{timeout_sec:.0f}s）—— 确定性失败，不重试"
+            f"replay 转换超时（{name}，>{timeout_sec:.0f}s）—— 确定性失败，不重试"
         ) from e
     except OSError as e:
+        rmtree_best_effort(tmp, ignore_errors=True)
         raise ProtocolError(f"replay 转换器起不来（{runtime}）：{e}") from e
-    if p.returncode != 0:
-        raise ProtocolError(
-            f"replay 转换失败（{shard_dir.name}，rc={p.returncode}）："
-            f"{(p.stderr or p.stdout)[-800:]}"
-        )
-    missing = [n for n in ("obs.npy", "scalars.npy", "extra.npy") if not (shard_dir / n).is_file()]
-    if missing:
-        raise ProtocolError(
-            f"replay 转换器返回 0 但产物缺失（{shard_dir.name}: {missing}）——拒收"
-        )
-    replay = shard_dir / "replay.json"
-    meta = {
-        "version": MARKER_VERSION,
-        "converter_sha256": converter_sha,
-        "replay_sha256": _sha256_file(replay) if replay.is_file() else "",
-    }
-    tmp = shard_dir / (MARKER_NAME + ".tmp")
-    tmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(marker)
-    return False
+    except Exception:
+        rmtree_best_effort(tmp, ignore_errors=True)
+        raise
 
 
 def convert_replay_corpus(
@@ -208,14 +245,19 @@ def prepass(
     return got
 
 
-def attach_converter(
-    extra_files: list[Path], tmp_dir: str | Path, path: str | Path
-) -> str:
-    """把预构建转换器放进 payload 根（`publish_job` 的 extra_files），返回 sha256。"""
+def converter_sha(path: str | Path) -> str:
+    """预构建转换器的字节 sha256（缺失/空路径 = 响亮拒发）。"""
     if not str(path or "") or not Path(path).is_file():
         raise ProtocolError(
             f"corpus_fmt=replay 必须带 trainer 预构建的转换器（收到 {path!r}）——拒发"
         )
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def attach_converter(
+    extra_files: list[Path], tmp_dir: str | Path, path: str | Path
+) -> str:
+    """把预构建转换器放进 payload 根（`publish_job` 的 extra_files），返回 sha256。"""
     raw = Path(path).read_bytes()
     copy = Path(tmp_dir) / CONVERTER_NAME
     copy.write_bytes(raw)
@@ -223,26 +265,13 @@ def attach_converter(
     return hashlib.sha256(raw).hexdigest()
 
 
-def attach_converter_for(
-    extra_files: list[Path],
-    tmp_dir: str | Path,
-    corpus_fmt: str,
-    path: str | Path,
-    manifest: dict,
-) -> None:
-    """按请求格式挂转换器（full = 一步不做，manifest/payload 逐字节旧行为）。"""
-    if str(corpus_fmt or "full") != "replay":
-        return
-    manifest["replay_converter_sha256"] = attach_converter(extra_files, tmp_dir, path or "")
-
-
 __all__ = [
     "CONVERTER_NAME",
     "MARKER_NAME",
     "attach_converter",
-    "attach_converter_for",
     "convert_replay_corpus",
     "convert_shard",
+    "converter_sha",
     "prepass",
     "resolve_js_runtime",
     "verify_converter",

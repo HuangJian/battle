@@ -281,9 +281,12 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
     if (recordedFinal.lives !== world.lives) {
       throw new Error(`[replay-to-shard] lives ${world.lives} != recorded ${recordedFinal.lives}`)
     }
-    if (recordedFinal.ticks !== replay.totalTicks) {
+    // finalState.ticks 是**游戏时钟**；state_init 时 = 交棒 tick + replay 帧数。
+    const initTick = Number.isInteger(meta.initTick) ? Number(meta.initTick) : 0
+    if (recordedFinal.ticks !== replay.totalTicks + initTick) {
       throw new Error(
-        `[replay-to-shard] finalState.ticks ${recordedFinal.ticks} != totalTicks ${replay.totalTicks}`,
+        `[replay-to-shard] finalState.ticks ${recordedFinal.ticks} != ` +
+          `totalTicks ${replay.totalTicks} + initTick ${initTick}`,
       )
     }
   }
@@ -314,28 +317,53 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
 
 if (import.meta.main) {
   const argv = process.argv.slice(2)
-  let shardDir = ''
+  const shardDirs: string[] = []
+  let listFile = ''
   let outDir = ''
   let verifyOnly = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--shard-dir') shardDir = argv[++i] ?? ''
+    if (a === '--shard-dir') shardDirs.push(argv[++i] ?? '')
+    else if (a === '--shard-list') listFile = argv[++i] ?? ''
     else if (a === '--out') outDir = argv[++i] ?? ''
     else if (a === '--verify-only') verifyOnly = true
     else throw new Error(`[replay-to-shard] unknown arg ${a}`)
   }
-  if (!shardDir) {
+  if (listFile) {
+    for (const line of readFileSync(listFile, 'utf8').split(/\r?\n/)) {
+      const s = line.trim()
+      if (s) shardDirs.push(s)
+    }
+  }
+  if (shardDirs.length === 0) {
     console.error(
-      'usage: bun tools/sim/replay-to-shard.ts --shard-dir <dir> [--out <dir>] [--verify-only]',
+      'usage: bun tools/sim/replay-to-shard.ts --shard-dir <dir>|--shard-list <file> ' +
+        '[--out <dir>] [--verify-only]',
     )
     process.exit(2)
   }
+  let samples = 0
+  let ticks = 0
+  let convertMs = 0
   try {
-    const r = convertReplayShard({ shardDir, outDir: outDir || undefined, verifyOnly })
-    console.log(
-      `[replay-to-shard] OK samples=${r.nSamples} ticks=${r.ticks} ` +
-        `convertMs=${r.convertMs} written=${r.written.join(',') || '(none)'} obsHash=${r.obsHash}`,
-    )
+    for (const shardDir of shardDirs) {
+      const r = convertReplayShard({ shardDir, outDir: outDir || undefined, verifyOnly })
+      samples += r.nSamples
+      ticks += r.ticks
+      convertMs += r.convertMs
+      if (shardDirs.length === 1) {
+        console.log(
+          `[replay-to-shard] OK samples=${r.nSamples} ticks=${r.ticks} ` +
+            `convertMs=${r.convertMs} written=${r.written.join(',') || '(none)'} obsHash=${r.obsHash}`,
+        )
+      }
+    }
+    if (shardDirs.length > 1) {
+      console.log(
+        `[replay-to-shard] OK shards=${shardDirs.length} samples=${samples} ticks=${ticks} ` +
+          `convertMs=${convertMs.toFixed(1)}`,
+      )
+    }
   } catch (e) {
     console.error(e instanceof Error ? e.message : String(e))
     process.exit(1)
