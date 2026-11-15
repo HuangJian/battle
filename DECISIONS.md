@@ -6608,3 +6608,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   成因的处置完全不同，压成一句「不在 git 工作区」等于把诊断成本全推给现场。
 - **判据**：三处各自改回旧行为 ⇒ 6 条新用例红（心跳 1 / 波次清理 2 / git_head 3）。全量
   6096 passed / 2 skipped；mypy 933 文件。
+
+## §2026-11-15-uptime-signals-and-a-dead-git-head-twin
+
+- **决定**：G9 第十五批 —— ① `worker/terminal_stats.write_terminal_stats` 写盘失败改
+  `warn_once(WARN_KEY, …)`；② `worker/serve_pool.begin_round` 的 `w.kill()` 失败逐次留一行；
+  ③ **删掉** `remote/job_fs._git_head`（连同 `__all__` 条目与 `remote/worker.py` 的转发块）。
+  G9 32 → **29**，G4 398 → **397**。
+- **为什么 ③不是「同 ②一样加日志」**：它没有生产调用者 —— `remote/code_snapshot.py` 有自己的
+  `_git_head`（走 `run_capture` 防 Windows 闪窗，那条纪律见 details §20），job_fs 这份只是
+  `remote/worker.py` 转发名养着的死双生。给死代码加日志是给维护成本再加一层。
+- **为什么 ①要按 key 去重**：它每轮都会走到；坏了就是每轮都坏，逐轮喊会把日志刷成噪音。
+  ② 则在轮边界最多几次，逐次留痕更有用（能数出「这个轮死了几个 worker」）。
+- **顺带**：G9 门禁的绝对文件数下限（`>= 25`）删除。存量清到 22 个文件后，它就是又一处
+  「清理到哪手改到哪」的回填；扫描面活性已由派生根数地板（基线九成）覆盖。
+- **判据**：①② 还原成旧行为 ⇒ 2 条新用例红；③ 由既有 `test_moved_names_…` /
+  `test_worker_forwards_every_moved_name` 覆盖（名字从 `MOVED_NAMES` 移除后仍绿）。全量
+  6098 passed / 2 skipped；mypy 933 文件。

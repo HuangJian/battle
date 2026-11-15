@@ -1164,3 +1164,25 @@ def test_subprocess_imports_are_used_not_shell(tmp_path: Path) -> None:
     ]
     assert popens, "池不再用 subprocess.Popen 直起（下面的 import 成了空壳）"
     assert subprocess.Popen is not None  # 反向断言：上面的 import 不是空壳
+
+
+def test_begin_round_reports_a_kill_that_failed(tmp_path: Path) -> None:
+    """kill 失败 = **留下还在吃内存的孤儿**；`killed` 已经把它算进去了，所以必须说出来。"""
+    import threading
+
+    msgs: list[str] = []
+    pool = ServePool("bun", tmp_path, 2, msgs.append)
+
+    class Bad:
+        dead = True
+        ready = threading.Event()
+
+        def kill(self) -> None:
+            raise OSError("进程组已消失但信号递不出去")
+
+    bad = Bad()
+    pool._workers = cast("list[serve_pool._Worker]", [bad])
+    pool.begin_round()  # 不抛：轮边界不因一个 kill 失败停摆
+
+    assert any("kill 失败" in m for m in msgs), f"孤儿要留一行，实际：{msgs!r}"
+    assert any("OSError" in m for m in msgs), "成因要带上（这里是递信号失败）"

@@ -145,7 +145,8 @@ def test_scan_sees_the_known_production_surface() -> None:
         f"生产面计数 {sum(actual.values())} 低于基线九成（{sanity_floor(baseline)}）"
         "—— 扫描可能漏了包（这条只防扫描入口坏，不是质量目标）"
     )
-    assert len(baseline) >= 25
+    # 文件数不再单独设下限：存量被清到 20 出头之后，任何绝对值都只是「清理到哪就该手改到哪」
+    # 的回填；「扫描面坏了」由上面的派生根数地板兜住（21 个文件全丢 ⇒ 条数必然低于九成）。
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)
 

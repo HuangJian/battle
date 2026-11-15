@@ -30,7 +30,6 @@ import tarfile
 from pathlib import Path
 
 from common.fs import extract_tar_bytes
-from common.proc import run_capture
 from common.protocol import ProtocolError, unpack_payload
 from common.scratch import DRAIN_STAGE_SUFFIX
 from common.wire_codec import pack_result_v2
@@ -40,7 +39,6 @@ __all__ = [
     "JOB_DIR_KEEP",
     "REPO_ROOT",
     "RESULT_BACKUP_DIR",
-    "_git_head",
     "_persist_result",
     "backup_failed_result",
     "pack_opt_tar",
@@ -243,13 +241,3 @@ def pack_opt_tar(src_dir: Path) -> bytes:
         if p.exists():
             tf.add(p, arcname="opt.pt")
     return buf.getvalue()
-
-
-def _git_head(repo_root: Path = REPO_ROOT) -> str:
-    try:
-        r = run_capture(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout=30)
-        if r.returncode == 0:
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return ""

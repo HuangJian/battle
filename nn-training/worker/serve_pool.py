@@ -398,8 +398,10 @@ class ServePool:
         for w in dead:
             try:
                 w.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                # 「只从列表剔掉会留尸」正是这段存在的理由（见 docstring）⇒ 连 kill 自己失败
+                # 也必须说出来：那一份是**仍在吃内存**的孤儿，而 `killed` 已经把它算进去了。
+                self.log(f"[pool] dead worker kill 失败（进程可能仍在）：{e!r}")
 
     def close(self) -> None:
         self.closed = True

@@ -40,7 +40,7 @@
   "remote/error_report.py": 3,
   "remote/http.py": 3,
   "remote/hub_client.py": 2,
-  "remote/job_fs.py": 3,
+  "remote/job_fs.py": 2,
   "remote/job_lifecycle.py": 1,
   "remote/job_round.py": 4,
   "remote/notebook_boot.py": 2,

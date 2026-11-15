@@ -219,9 +219,6 @@ from remote.job_fs import (
     JOB_DIR_KEEP as JOB_DIR_KEEP,
 )
 from remote.job_fs import (
-    _git_head as _git_head,
-)
-from remote.job_fs import (
     _persist_result as _persist_result,
 )
 from remote.job_fs import (

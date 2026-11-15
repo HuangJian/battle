@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from common.cli import run_main
 from common.platform_utils import rmtree_best_effort
@@ -180,3 +183,21 @@ def main() -> None:
 
 if __name__ == "__main__":
     run_main(main)
+
+
+def test_write_failure_is_reported_once(
+    tmp_path: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写不进去与「这轮没有终局数据」在盘上同形 ⇒ 失败必须留一行（按 key 去重，不刷屏）。"""
+    from worker import terminal_stats as ts
+
+    def _boom(*_a: Any, **_k: Any) -> dict[str, Any]:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(ts, "terminal_stats", _boom)
+    ts.write_terminal_stats(str(tmp_path), it=1, iter_dir=str(tmp_path))  # 不抛即契约
+    ts.write_terminal_stats(str(tmp_path), it=2, iter_dir=str(tmp_path))
+
+    out = capsys.readouterr().out
+    assert out.count("iteration-terminal.jsonl") == 1, f"同一 key 只许喊一次，实际：{out!r}"
+    assert "No space left on device" in out, "成因要带上，否则与「本来就没有终局数据」分不开"
