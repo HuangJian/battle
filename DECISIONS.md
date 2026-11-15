@@ -6661,3 +6661,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `ZZ_PROBE_SENTINEL` 从 `common/manifest` 转发进 **`trainer/batch_eval.py`**（另一个门面）⇒ 红
   并点名；③ 口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` / `ProtocolError` 必须被判活）+
   入口地板（门面 ≥ 13、转发名 ≥ 270，均为派生地板）。
+
+## §2026-11-15-g9-remaining-29-classified-26-contractual-3-leaks
+
+- **决定**：G9 剩余 **29 处 / 22 文件**逐条定性完毕（全文见审计档 `python.refactor.md` 附录 C）：
+  **A 契约静默 26 处（不再动）· B 漏网 3 处（待窄捕）· C 已留痕 0 处**。
+  - **A**：日志层 `Tee` 的三处 sink（递归风险）、进程收尾级联的最后一层（`close→wait→terminate→
+    wait→kill`，`child_proc` / `deliver_proc` / `rollout_node` / `worker_proc`）、返回 dict 的
+    能力探测（`torch_xla` 三项）、观测回调（`bulk_sched._notify_p1`、`error_report._send`、
+    `offline_deliver._guard`、`cloud_pool._log_line`）、返回值即结论的探针（`push_bootstrap.wait_ping`、
+    `push_register` 读 error body、`deliver_worker._watch_stdin`、`child_proc` 读流截断）、
+    平台降级（`payload_worker` / `upload_worker` 的 `reconfigure`、Windows 控制台不接受≠错）、
+    以及**被既有契约用例钉死**的 `trainer/loop_transport._course_cf_tunnel`（配置读不到 ⇒ 缺省）。
+  - **B**：`remote/push_client._probe_sha`（200 但 body 非 JSON 被读成「问不到」⇒ 重复上传）、
+    `remote/worker.run_job` 的结果复用（校验器 bug 被读成「缓存损坏」⇒ 静默重算 PPO）、
+    `trainer/bc_loop.append_weights_md_row`（git 取不到 vs 命令拼错同形）。
+- **为什么 A 类“不再动”要写成决定**：这 26 处每一处都**看起来**像「降级即静默」的旧债，不写下来
+  下一个人会重审一遍，或更糟 —— 给收尾级联的最后一层加日志（在已经不受控的地方再加一次可能
+  失败的操作）、给日志层内部加日志（递归）。判据是「再加一层能不能更好」，不是「静默是否难听」。
+- **为什么不给 A 类加白名单/noqa**：G9 基线只许调小，A 类冻结即够；表达「这是契约」的正确位置
+  是**代码注释**（就近），不是一份需要同步维护的清单。
+- **现状与下一步**：B 三处都是「窄捕不改语义」的形状（`NET_ERRORS`+`ValueError` /
+  `(OSError, ValueError, ProtocolError)` / `(OSError, SubprocessError)`），各配一条「程序员错误
+  必须穿出」用例即可。
