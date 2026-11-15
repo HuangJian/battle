@@ -10,6 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import common.codehash_ref as codehash_ref
 import common.distribution
 import common.protocol
 from common import node_report, node_speed
@@ -213,7 +214,6 @@ class RolloutDispatcher:
         # `ping failed — excluded this round`（判据见 `common/protocol.sampler_nodes`）。
         cfg_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
         # F6：跨轮 dedup 计数（模块级 dict 的局部别名）
-        dedup_streak = DEDUP_STREAK
 
         def _probe(n: dict):
             nid = str(n.get("id") or n.get("url") or "?")
@@ -228,7 +228,7 @@ class RolloutDispatcher:
             with ThreadPoolExecutor(max_workers=min(8, len(cfg_nodes))) as _ex:
                 probe_results = list(_ex.map(_probe, cfg_nodes))
 
-        code_hash = common.distribution.reference_code_hash(cfg_nodes, probe_results)
+        code_hash = codehash_ref.reference_code_hash(cfg_nodes, probe_results)
         nodes = []
         for (nid, ping), n in zip(probe_results, cfg_nodes, strict=False):
             if ping is None:
@@ -255,7 +255,7 @@ class RolloutDispatcher:
                         f"[dist] node {nid}: codeHash mismatch "
                         f"(local={local_short} remote={remote_short}) — excluded (red)"
                     )
-                    dedup_streak.pop(nid, None)
+                    DEDUP_STREAK.pop(nid, None)
                     continue
                 ok, reason = common.distribution.request_upgrade_guarded(
                     nid,
@@ -280,15 +280,15 @@ class RolloutDispatcher:
                 elif reason == "dedup":
                     # F6：连续 ≥3 轮 dedup 且非 self ⇒ 显式告警——dedup 是静默排除，
                     # mac 事故 40+ 轮无任何提示；指引用 codehash-report 双侧 diff 定位。
-                    dedup_streak[nid] = dedup_streak.get(nid, 0) + 1
+                    DEDUP_STREAK[nid] = DEDUP_STREAK.get(nid, 0) + 1
                     log(
                         f"[dist] node {nid}: codeHash mismatch "
                         f"(local={local_short} remote={remote_short}) — restart already "
                         f"sent for this agent codeHash (dedup) — excluded this round"
                     )
-                    if not common.distribution.is_self_node(n["url"], nid) and dedup_streak[nid] >= 3:
+                    if not common.distribution.is_self_node(n["url"], nid) and DEDUP_STREAK[nid] >= 3:
                         log(
-                            f"[dist] WARN node {nid}: stale for {dedup_streak[nid]} "
+                            f"[dist] WARN node {nid}: stale for {DEDUP_STREAK[nid]} "
                             f"rounds, upgrade suppressed by dedup （去重有"
                             f"{int(common.distribution.restart_dedup_cooldown_sec())}s 冷却窗，"
                             f"窗过后会自动重发一次）— 在节点执行 "
@@ -309,9 +309,9 @@ class RolloutDispatcher:
                         f"failed ({reason}) — excluded this round"
                     )
                 if reason != "dedup":
-                    dedup_streak.pop(nid, None)
+                    DEDUP_STREAK.pop(nid, None)
                 continue
-            dedup_streak.pop(nid, None)
+            DEDUP_STREAK.pop(nid, None)
             remote_full = str(ping.get("bunVersion", "?"))
             if mm(remote_full) != mm(local_bun):
                 log(

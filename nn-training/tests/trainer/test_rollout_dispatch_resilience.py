@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+import common.codehash_ref
 import common.distribution
 import common.shard
 import trainer.dispatch as disp
@@ -835,14 +836,31 @@ def test_reference_code_hash_prefers_self_node() -> None:
         ("self", {"codeHash": "bbb"}),
     ]
     nodes = [{"id": "a97", "url": "http://a97:8443"}, {"id": "self", "url": "http://127.0.0.1:8443"}]
-    assert common.distribution.reference_code_hash(nodes, probes) == "bbb"
+    assert common.codehash_ref.reference_code_hash(nodes, probes) == "bbb"
 
 
 def test_reference_code_hash_falls_back_to_workspace(monkeypatch) -> None:
     """self 不在候选表 ⇒ 回落本机现算（老行为不变）。"""
     monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "local")
     nodes = [{"id": "a97", "url": "http://a97:8443"}]
-    assert common.distribution.reference_code_hash(nodes, [("a97", {"codeHash": "aaa"})]) == "local"
+    assert common.codehash_ref.reference_code_hash(nodes, [("a97", {"codeHash": "aaa"})]) == "local"
+
+
+def test_reference_code_hash_pings_only_self_when_no_probes(monkeypatch) -> None:
+    """eval/batch/BC 腿没有现成 ping 结果 ⇒ 只探 self 一台（不是全集群再来一遍）。"""
+    seen: list[str] = []
+
+    def fake_ping(url, _key="", timeout=0):
+        seen.append(url)
+        return {"codeHash": "selfhash"}
+
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
+    nodes = [
+        {"id": "a97", "url": "http://a97:8443"},
+        {"id": "self", "url": "http://127.0.0.1:8443"},
+    ]
+    assert common.codehash_ref.reference_code_hash(nodes) == "selfhash"
+    assert seen == ["http://127.0.0.1:8443"], seen
 
 
 def test_dirty_workspace_does_not_exclude_the_cluster(tmp_path, monkeypatch) -> None:

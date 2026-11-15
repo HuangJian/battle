@@ -1,0 +1,39 @@
+"""common/codehash_ref.py — 节点门的**参考 codeHash**（2026-11-15 用户口径）。
+
+为什么单独成模块：`common/distribution.py` 已顶到 1000 LOC 预算（AGENTS §9 的
+`test_python_loc_budget`），而这段判据要被 rollout / eval / batch / BC 四条腿共用。
+
+口径：**以 self 节点自报的为准**。hub 工作区有未提交改动时 `compute_code_hash()`
+算的是「还没人在跑的那份」——拿它当基准，所有远端节点都被判 mismatch（本地改代码 =
+全集群瘫痪）。self 的 agent 报的是实际在跑的代码，与远端同一把尺子；self 缺失/未报
+⇒ 回落本机现算（老行为，保持可跑）。
+"""
+
+from __future__ import annotations
+
+import common.distribution as dist
+
+
+def reference_code_hash(
+    cfg_nodes: list[dict],
+    probes: list[tuple[str, dict | None]] | None = None,
+    *,
+    timeout: float = 3.0,
+) -> str:
+    """返回集群参考 codeHash；`probes` = 调用方已并行 ping 好的 `(节点 id, ping)`。
+
+    给了 `probes`（rollout / eval 腿本来就要 ping 全集群）⇒ **零新增请求**；
+    没给（batch / BC 腿在规划期还没有 ping 结果）⇒ 只 ping self 一台。
+    """
+    if probes is None:
+        probes = []
+        for n in cfg_nodes:
+            nid = str(n.get("id") or n.get("url") or "?")
+            if dist.is_self_node(str(n.get("url") or ""), nid):
+                ping = dist.node_ping(n["url"], n.get("authKey", ""), timeout=timeout)
+                probes = [(nid, ping)]
+                break
+    for n, (nid, ping) in zip(cfg_nodes, probes, strict=False):
+        if ping and ping.get("codeHash") and dist.is_self_node(str(n.get("url") or ""), nid):
+            return str(ping["codeHash"])
+    return dist.compute_code_hash()

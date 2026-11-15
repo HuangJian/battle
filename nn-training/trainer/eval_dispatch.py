@@ -24,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 
+import common.codehash_ref as codehash_ref
 import common.distribution
 import common.protocol
 from common.fs import append_jsonl
@@ -364,7 +365,6 @@ class EvalDispatcher:
             # 该清单）。不再比 ping.engineEpoch：该字段已从 /v1/ping 移除（engine_epoch
             # 退为账本记录值），也不再需要「旧 agent 无字段→过渡期放行」的分支——
             # codeHash 是 rollout 门一直都在用的字段。
-            code_hash_local = common.distribution.compute_code_hash()
             alive = []
             # 并行 ping（保序）：串行墙钟 = Σ 每台延迟（两台超时即 ~7s），而节点门每轮
             # 重跑一次；并行 == 最慢一台（同 batch_eval，2026-09-19 审计 B2）。
@@ -372,6 +372,12 @@ class EvalDispatcher:
             # （否则每轮评估都在日志里留一条「ping 失败/超时」，见 `sampler_nodes`）。
             enabled_nodes = common.protocol.sampler_nodes(cfg.get("nodes", []))
             pings = common.distribution.ping_nodes_parallel(enabled_nodes, timeout=status_timeout)
+            # 参考 hash = self 自报的（同 rollout 门，2026-11-15）：零新增请求（复用上面的 pings）。
+            probes = [
+                (str(n.get("id") or n.get("url") or "?"), p)
+                for n, p in zip(enabled_nodes, pings, strict=True)
+            ]
+            code_hash_local = codehash_ref.reference_code_hash(enabled_nodes, probes)
             for n, ping in zip(enabled_nodes, pings, strict=True):
                 nid = str(n.get("id") or n.get("url") or "?")
                 if ping is None:

@@ -39,6 +39,7 @@ from collections import deque
 from pathlib import Path
 from typing import NamedTuple
 
+import common.codehash_ref as codehash_ref
 import common.distribution
 from common.fs import append_jsonl
 from common.log import log
@@ -324,8 +325,6 @@ class BatchEvalRunner:
         local_weights = snapshot_path or ((self.rl_path or "no-weights-god") if god else None)
 
         local_bun = bun_version(self.bun)
-        # 节点门指纹（2026-09-17 统一）：与 rollout 门同源 = SSOT 清单的 codeHash。
-        code_hash_local = common.distribution.compute_code_hash()
         # ---- 派发通道：**每节点各自就绪、各自派单**（用户 2026-09-19 五条裁定）----
         # 旧实现是三个**串行阶段**：ping 全部节点 → 全部节点收权重 → 才开派。慢节点把整批
         # 拖住（实测 gate 6.83s + weights 0.79s，**且每个单元重跑一遍**），而**已经就绪的
@@ -333,6 +332,8 @@ class BatchEvalRunner:
         # 节点一条通道：ping 通 → 传权重 → **立刻**派活，不等任何别的节点；就绪的节点不再
         # 被 ping、不再重传同一份权重；失联节点每 recover_ping_sec 重探，通了立即派单。
         enabled_nodes = [n for n in self.cfg.get("nodes", []) if n.get("enabled", True)]
+        # 节点门指纹（2026-09-17 统一；2026-11-15 起参考值 = self 自报）：与 rollout 同源。
+        code_hash_local = codehash_ref.reference_code_hash(enabled_nodes, timeout=status_timeout)
         # 本机槽位不需要任何门/权重 ⇒ 与节点通道并行、**立刻**开工。
         local_on = local_weights is not None and local_slots > 0
         log(

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
+from common import codehash_ref
 from common.distribution import fetch_task, node_ping, post_weights_cached, validate_eval_result
 from worker.agent_meta import record_agent_meta, record_eval_failed
 
@@ -33,7 +34,10 @@ class BcEvalError(RuntimeError):
 
 def eval_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
     """enabled + evalSupport + codeHash 与训练机一致的节点。"""
-    expected = common.distribution.compute_code_hash()
+    # 参考值 = self 自报（2026-11-15，同 rollout/eval/batch）：hub 有未提交改动时不再全群 stale。
+    expected = codehash_ref.reference_code_hash(
+        [n for n in (cfg or {}).get("nodes", []) if n.get("enabled", True)]
+    )
     out: list[dict] = []
     for n in (cfg or {}).get("nodes", []):
         if not n.get("enabled", True):

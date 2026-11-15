@@ -69,6 +69,9 @@ RUNNER_IMPORTS = {
     "time",
     "typing",
     "common.distribution",
+    # 2026-11-15 登记：节点门参考 hash 改以 self 自报为准（rollout/eval/batch/BC 四条腿
+    # 共用），判据单独成模块 —— `common/distribution.py` 已到 LOC 预算。
+    "common.codehash_ref",
     # 2026-11-02 登记（z4-polish.it60 缺局）：B/C 行与 A 层共用 `eval_log.jsonl` /
     # `dist-agent-meta.jsonl`，落账改走 `common.fs.append_jsonl` 的每路径单写者
     # （重叠的 eval 轮不再各自 open 互相覆盖行首）。

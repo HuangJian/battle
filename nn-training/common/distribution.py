@@ -317,20 +317,6 @@ def compute_engine_epoch() -> str:
     return hashlib.sha256(compute_code_hash().encode()).hexdigest()[:16]
 
 
-def reference_code_hash(cfg_nodes: list[dict], probes: list[tuple[str, dict | None]]) -> str:
-    """集群参考 codeHash（2026-11-15 用户口径）：**以 self 节点自报的为准**。
-
-    hub 工作区有未提交改动时，`compute_code_hash()` 算的是「还没人在跑的那份」：
-    拿它当基准，所有远端节点都被判 mismatch ⇒ 本地改代码 = 全集群瘫痪。
-    self 的 agent 报的是**实际在跑的代码**（与远端同一把尺子）；self 缺失/未报
-    ⇒ 回落本机现算（老行为，保持可跑）。
-    """
-    for n, (nid, ping) in zip(cfg_nodes, probes, strict=False):
-        if ping and ping.get("codeHash") and is_self_node(str(n.get("url") or ""), nid):
-            return str(ping["codeHash"])
-    return compute_code_hash()
-
-
 def check_code_hash(ping: dict, expected: str) -> str | None:
     """节点可用性判据（rollout 与 eval 同一门）：None=通过，否则拒收原因。
 
