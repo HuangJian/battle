@@ -1,0 +1,252 @@
+// 课程 g5-aim —— g4-mobility 的瞄准/弹药效率臂（2026-11-15）
+// 状态：**已停课**（2026-11-15，it231/500；由 g5-aim2 接替；主判 fail / 机制门名义过）。
+//   结课读数与判词见文件尾「结课报告」；本臂权重不被任何后继采用。
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────────
+//   起点 = g4-mobility.it380（用户 2026-11-15 点名，与 g4-open 同起点）；保留 g4-mobility 的全部收入/生存/
+//   机动骨架，只加两项“打得准”的价格：**空射税**（aimMisses）与**命中率超额奖**
+//   （aimHits/shots 超过基线的部分）。本臂只回答：
+//   **在不掉胜率、不靠少开枪的前提下，把命中率从 40.5% 抬到 ≥48%、把空射从 53.6/局
+//   压到 ≤40/局。**
+//
+// ── 1. 剂量基线（新地形 classic35-safe-base × it380 × 700 局，2026-11-15）─────
+//   playerShots 105.31 · aimHits 42.63（40.48%）· aimMisses **53.58（50.88%）**
+//   · aimBricks 7.26 · aimIgnited 1.84。
+//   恒等式：playerShots = aimHits + aimBricks + aimIgnited + aimMisses
+//   ⇒ **aimMisses 不含拆砖**，空射税不会误罚开路。
+//   其他骨架读数（同一批）：kills 18.64 · deaths 1.34 · dmg 439.8 · threat 6.7%
+//   · hurtWeight 156.6 · postHit 0.85% · damageBursts 1.14 · cells 149.9。
+//
+// ── 2. 本臂只改两项（其余逐字继承 g4-mobility）──────────────────────────────
+//   ⑫ `- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)`：**累进空射税**。
+//      前 40 发免税（正常局 miss 39.9/局 ⇒ 0，保护开局对枪/试探），超出部分二次累进：
+//      80 发 −2.4、120 发 −9.6、≥130 发封顶 −12。低杀超时局 370 发只罚 12。
+//      ⚠ 封顶必须 ≤12：timeout 局本来就是空射大户，实测封顶 20 会把
+//      Φ(timeout)−Φ(gameover) 从 +33.4 压到 +6.1（会鼓励送死）；12 给出 +17.3 安全垫。
+//   ⑬ `+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))`：
+//      命中率超过 **45%** 的部分每 1pp +2 分（wAccGood 200），封 15pp（满量程 +30）。
+//      基线 40.5% ⇒ **0**（不白送）；目标 50% ⇒ +10；55% ⇒ +20。
+//      命中率低**不再额外罚**（由 ⑫ 负责），
+//      避免“双罚少开枪”。
+//   ⇒ 净额基线 ≈ **+13.6/局**（accGood 在准局给奖；miss 税只有 31 个超时局各 −12）。
+//      Φ 整体上移由 value 头（value_anchor 0.001）吸收；若前两个 eval 点 value loss 飙升，
+//      先降 wAccGood 200→120，不要动 miss 项（它守的是 Φ(timeout)>Φ(gameover)）。
+//
+// ── 3. 预注册判据（主判只认 eval；训练 rollout 的 7 关轮换 winRate 不可比）────
+//   主 1（瞄准·机制门）：eval 命中率 **≥48%**；aimMisses/局 **≤40**（基线 53.6）。
+//   主 2（胜率）：it400–500 的 eval 均值 ≥ **81.0%**（新地形 B=80.29）；
+//     与 g4-mobility 同期同 (stage,seed) 配对差 ≥ **0pp**。
+//   守卫（任一破 ⇒ 停腿复盘，不是“再调调看”）：
+//     kills ≥17.5 · deaths ≤1.9 · **shots ≥70/局**（不许靠禁火换命中率）
+//     · stop ≤6% · cells ≥130 · timeout ≤7% · 连续 2 个 eval 点 win <78%。
+//   ⚠ 本臂最大风险 = **少开枪**：miss 税 + 命中率奖都会压 shots。shots <70 立刻停，
+//     不要用“命中率涨了”辩护——那是把“打得准”换成了“不敢打”。
+//
+// ── 4. 纪律 ────────────────────────────────────────────────────────────────
+//   ① 新奖励 = 新实验 ⇒ 新 out/traj/backup；禁与 g4-mobility / g4-precision 续跑。
+//   ② 每关敌人种类/数量固定 ⇒ 不做按兵种定价、不做 wKillPower/wKillArmor。
+//   ③ `inference_rules` B1/B8/B10 是 eval/deploy-only，本课不启用。
+//   ④ 机制门只作解释项，不作停止判据（AGENTS §15.3）。
+{
+  "version": 5,
+  "name": "g5-aim",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      // ① 收入骨架（与 g4-mobility 逐字相同）。
+      // 杀一辆敌车 +15；基线 18.6 杀/局 ⇒ +279.5，最大收入项，不许为省弹弃战。
+      "wKill*kills",
+      // 每命中一发 +1.5；基线 42.6 命中/局 ⇒ +63.9。
+      "+ wHit*aimHits",
+      // 命中率项 5×命中率（hits/shots）；基线 40.5% ⇒ +2.0，只奖“准”不奖“多”。
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻/盾窗内命中 +1.2/发，封 12 发（+14.4）；基线 8.47 发 ⇒ +10.2。
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 每拆一格砖 +1.0，封 12 格（+12）；基线 7.26 格 ⇒ +7.3，只认真拆掉的格。
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 捡一个道具 +4，封 6 个（+24）；基线 5.38 个 ⇒ +21.5。
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80；基线 80.3% 胜率 ⇒ +64.2。主奖，任何税不许把它压过去。
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 通关提速最多 +8（13000 拍拐点、1400 拍满速）；基线 clearTick 7476 ⇒ 多数局满速 +8。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      // ② 生存/机动价格（与 g4-mobility 逐字相同）。
+      // 每掉 1 血 −0.12；基线 439.8 血/局 ⇒ −52.8，只罚真掉血。
+      "- wDmg*playerDamageTaken",
+      // 每死一次 −24；基线 1.34 次/局 ⇒ −32.2。
+      "- wDeath*playerDeaths",
+      // 不动拍占比 ×100；基线 2.9% ⇒ −2.9，防站桩。
+      "- wIdle*idleTicks/(ticks+1)",
+      // 死锁超过 300 拍的部分 −0.04/拍，封 900 拍（−36）。
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 顶墙超过 350 拍的部分 −0.08/拍，封 300 拍（−24）。
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // 火线拍占比 ×100，封 30%（−30）；基线 6.7% ⇒ −6.7。
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // 火线近失/命中加权 −0.06/点，封 600（−36）；基线 156.6 ⇒ −9.4。
+      "- wHurt*min(hurtWeight, hurtCap)",
+      // 挨打后赖线拍占比 ×600，封 4%（−24）；基线 0.85% ⇒ −5.1。
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // 被夹（同行/同列 ≥2 敌车）拍占比 ×40，封 40%（−16）；基线 16.5% ⇒ −6.6。
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+      // ③ 本臂新增：空射税 + 命中率超额奖。
+      // ⑫ 累进空射税：前 40 发免税，超出部分二次累进，封顶 12。
+      //    正常局 39.9 发 ⇒ 0；80 发 ⇒ −2.4；120 发 ⇒ −9.6；超时局 370 发 ⇒ −12。
+      "- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)",
+      // ⑬ 命中率超额奖：超过 45% 的部分每 1pp +2 分，封 15pp（+30）。
+      //    基线 40.5% ⇒ 0；通关局 50.8% ⇒ +11.6；命中率低不额外罚（由 ⑫ 负责）。
+      "+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 100.0,
+      "threatRateCap": 0.3,
+      "wHurt": 0.06,
+      "hurtCap": 600.0,
+      "wPostHit": 600.0,
+      "postHitRateCap": 0.04,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+      "wMiss2": 0.0015,
+      "missFree": 40.0,
+      "missCap2": 12.0,
+      "wAccGood": 200.0,
+      "accFree": 0.45,
+      "accCap": 0.15,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 500,
+  "max_hours": 24.0,
+  "lr": 0.00008,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 0.00008,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261115,
+  "decision_events": false,
+  "decision_k": 10,
+  // Hybrid opening（用户 2026-11-15 02:00 要求）：eval/rollout 都套条件接管；
+  // 只对 strict 不连通的 13 关生效（如 s2021），路本来就通的关不抢方向盘。
+  "opening_connect": true,
+  "out": "tmp/g5-aim/weights.json",
+  "traj": "tmp/g5-aim",
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/g5-aim",
+  "backup_prefix": "g5-aim",
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 5,
+}
+
+// ── 结课报告（2026-11-15，231/500 it，人工停课）───────────────────────────────
+// ① 运行账：11-15 02:02:44 → 07:45:38，**231/500 it**（≈5h43m、≈89s/it）；
+//    停课 = 用户人工停 + 由 g5-aim2 接替（09:01:31 开课），不是熔断。
+//    最后完整 eval = it230（行时间 07:44:38–07:47:30 回齐）；最后 checkpoint = it231（07:45:38）；
+//    it232 采集已发布（07:45:57）但从未回包，不计入交付点。
+//    `breakers_off: true` 全程未触发：KL max 0.0012 / min 0.0002，entropy min 0.4323（阈值 0.25）。
+//    正式链 checkpoint = it1–231（231 个）；权重目录另有 01:20/01:47 两次试跑的 it1–12 残件
+//    （无 eval 网格），不计入本账。
+//    eval 47 点（it0…230）× 700 局 = **32,900 局**（35 关 × 20 seed）。
+// ② 主曲线（铁律：连续 5 点 = 25 it = 3500 局；基线 = 起始窗 it0–20）：
+//    起始窗 **79.57%** → 末窗 it210–230 **80.14%**（+0.57pp，SE 0.90，p=0.54，不显著）。
+//    单点峰值 82.70% @ it195；**五点窗峰值 80.86% @ it195–215**。
+//    最后三窗 80.40 / 80.40 / 80.14（跨度 0.26pp ⇒ 已平台化）。
+//    ⚠ it230 单点 76.7% 不得当结论：同 5 点窗是 80.14%（§1 的单点陷阱）。
+//    预注册主 2（it400–500 ≥81.0%）**窗口未到，按末窗判 fail**（80.14 < 81.0）。
+//    预注册的「与 g4-mobility 同期同 (stage,seed) 配对 ≥0pp」**作废**：
+//      g4-mobility 的 eval 日志在旧地形（其 it380 读数 84.43%，新地形重测 80.29%），
+//      与本课不同面板；按 11-15 铁律也不拿历史课程当基线。存档读数 −2.29pp 不可用。
+// ③ 行为账（起始窗 → 末窗，3500 局/窗）：
+//    kills 18.72 → 18.77 · deaths 1.45 → 1.45 · dmg 465.1 → 466.8（+1.7，p=0.73）
+//    · **shots 94.91 → 87.75（−7.16，p=0.0001）** · hits 42.57 → 42.62（±0，p=0.79）
+//    · **misses 42.07 → 35.59（−6.49，p=0.0003）** · bricks 8.63 → 8.08 · ignited 1.64 → 1.47
+//    · acc（hits/shots）**44.85% → 48.57%**；逐局命中率 53.2% → 56.0%（+2.8pp）
+//    · cells 150.8 → 152.9（+2.1，p=0.007）· stuck 883 → 959 · threat 7.43% → 7.42%
+//    · clearTick 7001 → 7105（+104；配对 +77±122，p=0.21）· 胜局残血 62.3% → 62.4%
+//    ⇒ 机制是「少浪费」：命中数基本没动（+0.05），靠少打 7.2 发（空射 −6.5、拆砖 −0.6）
+//      把命中率抬过 48%。机制方向对，但没有换成胜率，还慢了约 100 拍。
+// ④ 机制门 / 守卫（末窗）：
+//    主 1 命中率 ≥48% **pass**（48.57%）；空射 ≤40/局 **pass**（35.59，起点 42.07）。
+//    守卫全过：kills 18.77 ≥17.5 · deaths 1.45 ≤1.9 · shots 87.75 ≥70 · stop 1.17% ≤6%
+//      · cells 152.9 ≥130 · timeout 2.71% ≤7% · 连续 <78% 最长 1 点（无 2 连）。
+//    ⇒ 不是被守卫杀的；是主 2 未达 + 后继接替的人工停课。
+// ⑤ 分关（末窗，100 局/关）：
+//    最差 2030 **50%** · 2018 55% · 2026 59% · 2032 63% · 2006 70%（<70 共 4 关，<60 共 3 关）。
+//    自身 Δ（起始窗→末窗）：2030 −12pp · 2029 −9 · 2013/2020/2021 −6；
+//      改善 2008 +10 · 2004 +9 · 2034/2033/2028 +7 ⇒ pooled +0.6pp 是分关互抵。
+//    失败结构（695/3500）：gameover 600（86.3%）· max_ticks 95（13.7%）；低杀超时 22（0.63%）。
+// ⑥ 剂量账（3500 局/窗，按课程公式逐局算 Φ，含 terminal）：
+//    Φ **326.63 → 330.29（+3.66/局）**；设计估的「两项净额 +13.6」没有兑现。
+//    两项在起始窗合计 **+16.3/局**：⑬ accGood **+17.1**（设计假设「40.5% ⇒ 0」），
+//      ⑫ 空射税只有 **−0.79**（21.9% 局触发、4.4% 顶格）；末窗 +18.6（+19.2 / −0.61）。
+//    accGood 的逐局分布（起始窗）：74.6% 的局为正、**37.3% 顶到 15pp 满量程**；
+//      <60 发的局平均 +11.0pp、≥100 发的局只有 +0.7pp；顶格局均 67.2 发、零奖局 158.8 发
+//      ⇒ 这一项天然奖励「少开枪的小样本高命中率」，与「不许靠禁火换命中率」直接对冲；
+//      shots −7.2 就是它的价格。下一轮已改：g5-aim2 用空射**份额**税 + wHit 2.5，
+//      accGood 这类逐局非线性奖不再使用。
+// ⑦ off-policy 诊断（关闭 opening_connect 的单点 700 局；违反 11-15 铁律，**不作主判**）：
+//    it380 基线 B（`tmp/g4-open/baseline-B.jsonl`）→ it230（`tmp/g5-aim/bare-it230.jsonl`），
+//    同 `classic35-safe-base` / hard / 同 700 (stage,seed)：
+//    win **80.29% → 75.86%（−4.43pp，SE 2.06，p=0.032）**；shots −16.5（p<1e-4）
+//      · hits −1.09（p=0.018）· kills −0.41（p=0.017）· maxD120 +9.0（p=0.007）
+//      · dmg +16.9（p=0.14）· 胜局耗时 −185（p=0.26）· acc 40.48% → 46.78%。
+//    ⇒ 去掉训练时一直依赖的开局接管后，这一臂的自身能力是**显著掉胜率**的
+//      「少开枪换命中率」；hybrid 面板的 +0.57pp 掩盖了这条退化。
+//      该读数解释「为什么本臂权重不被任何后继采用」，不替代 ② 的主曲线。
+// ⑧ 判词：**机制门名义过、主判 fail，负结果，不建议续跑**。
+//    ① 命中率 48.57% 是「少打 7.2 发」换的：hits 基本没涨（+0.05），shots −7.5%、耗时 +104。
+//    ② 主 2 未到（80.14 < 81.0）；off-policy 面板 −4.43pp（p=0.032）比 hybrid 面板更差。
+//    ③ 分关互抵 + 三窗跨度 0.26pp ⇒ 231 轮没有找到新的能力面。
+//    后继 g5-aim2（bc = g5-safe.it230，不是本臂）已按 ⑥ 的教训重写瞄准价目。
+// ⑨ 产物：`tmp/g5-aim/{training_log,eval_log}.jsonl`（231 it；eval 47 点 / 32,900 行）、
+//    `tmp/g5-aim/weights.json`、`nn-training/weights/g5-aim/`（正式链 it1–231）。
+//    交付点 = it230（最后完整 eval）/ it231（最后 checkpoint）；本臂权重不被任何后继采用。
+//    ⚠ 本次只改注释（无可执行键变化）⇒ `course_fp` 随文件字节变；本课已停，禁续跑（§15.5）。
