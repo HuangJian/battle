@@ -6625,3 +6625,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判据**：①② 还原成旧行为 ⇒ 2 条新用例红；③ 由既有 `test_moved_names_…` /
   `test_worker_forwards_every_moved_name` 覆盖（名字从 `MOVED_NAMES` 移除后仍绿）。全量
   6098 passed / 2 skipped；mypy 933 文件。
+
+## §2026-11-15-forwarded-names-must-stay-live
+
+- **决定**：新增门禁 `tests/test_worker_forward_names_are_live.py` —— `remote/worker.py` 里每个
+  `from remote.X import (name as name)` 转发名，在**除定义模块与它自己那行声明之外**的 `.py` 里
+  必须至少被提到一次；只活在转发声明里的名字 = 死别名，门禁判红（提示删掉，或加进 `ALLOWED`
+  并写理由 —— 今天 `ALLOWED` 为空）。
+- **为什么**：`remote/job_fs._git_head`（上一批）就是这样活了一年的 —— 全仓零调用，只因 worker
+  的转发名还在就没人删，直到有人差点给它加日志。一次人工 grep 能发现，但**没有东西阻止下一个**；
+  这条纪律与 G5/G9 同形：冻结不了就判据化。
+- **口径**：只认 `name as name`（改名转发不算）；`worker.py` 自己**算在扫描面里**（`PPO_BACKENDS`
+  喂 argparse、`YIELD_AFTER_SEC_DEFAULT` 喂让路判据都是活引用），但 `NAME as NAME,` 声明行会被
+  先剥掉 —— 否则每个名字都「在 import 里提到过自己」而永远判活。
+- **判据**：临时给 `remote/job_fs.py` 加 `ZZ_PROBE_SENTINEL` 并从 worker 转发 ⇒ 门禁红（并点名
+  该名字与定义模块）；还原后绿。另有一条口径自检（`JOB_DIR_KEEP` / `pack_opt_tar` 必须被判活）
+  与一条入口自检（转发名 ≥ 90，由派生地板给出）。
+- **现状**：103 个转发名，**零死名**（人工普查的结论与门禁一致）。

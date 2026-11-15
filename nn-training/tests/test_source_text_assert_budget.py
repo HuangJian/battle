@@ -444,7 +444,10 @@ BASELINE_FORM = 1511
 #: 2026-11-14 抬到 **1154**（+7，实测）：G9「宽泛捕获 + 只 pass」门禁
 #:   `tests/test_silent_except_budget.py` 同样用 AST 扫 `*.py` 源码面（口径 B 的同一已知限边：
 #:   判据是结构计数与基线账，不是措辞；口径 A 仍 0 条，是真「行为断言」）。
-BASELINE_SRC = 1154
+#: 2026-11-15 抬到 **1155**（+1，实测）：新门禁 `tests/test_worker_forward_names_are_live.py`
+#:   （`remote/worker.py` 的转发名不得是死名）扫描面就是 `*.py` 全文 —— 与上面几格同一已知限边
+#:   （判据是「名字还有没有引用」，不是措辞）。口径 A 仍 0 条。
+BASELINE_SRC = 1155
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:
