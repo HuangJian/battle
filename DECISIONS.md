@@ -6402,3 +6402,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （调用方已自带 sanitize；且它对非有限**权重**是拒绝写出，语义不同）、`remote/deliver_wire.py`
   的自定义编码（已自带 `math.isfinite` 过滤）、`remote/offline_boot.py` 的生成物拼接。它们各有
   自己的口径，不属于「漏过滤」。
+
+## §2026-11-15-narrow-catch-is-the-third-disposition（窄捕是第三种处置，不是「留着 pass」）
+
+- **背景**：G9（宽捕 + 只 `pass`）在清理「控制面尽力而为」路径时的两种处置是 ①留痕 ②带理据留基线。
+  2026-11-15 第八批（`remote/lifecycle.py` 4 处 + `remote/colab_bc.py` 4 处）确认了**第三种**：捕获面
+  本来就只该是具体的 —— 遗言读数 `/proc`（OSError）/ NVML（RuntimeError）/ `statvfs`（OSError）、探测腿
+  `subprocess.run`（OSError / SubprocessError）。此时 `except (OSError, ValueError): pass` 不属「宽」
+  也不属「静默」：它让**本模块自己的 bug**（AttributeError / KeyError / 拼错的名字）照常抛出，这正是
+  门禁要的那半条命。判据从「语法形状」升级为「这次失败**能由哪种异常解释**」。
+- **代价（实测抓到）**：窄捕当场暴露了两个被宽捕掩盖的东西 ——
+  ① `tests/remote/test_lifecycle.py` 的 `LC.os` 假 `os` 少了 `stat`，`readings` 一直在**静默降级**
+  （磁盘项恒为空）而用例看不见；补 `stat=os.stat` 后读数恢复；
+  ② `_rss_gb` 的 `Path` 拆解、`shutil.disk_usage` 的各自失败面从此分得清。
+- **例外（不窄捕，改留痕）**：`remote/colab_bc.load_state` 读不了（现场只看到「进度莫名归零」，与
+  disk 满/半行 JSON 长得一样）与 `remote/lifecycle` 的 **SIGTERM 自投失败**（进程活着而 hub 当这台已
+  下线 = 重复计费）。这两处是「信息丢失」而不是「读不到」，宽的意义在于**异常族未知**，窄会漏掉真正的
+  成因；所以保留宽度、只加一行。第三方的 `mount_drive` 同样保留宽捕 + 日志（`drive.mount` 抛什么这里
+  不知道，且义务是「失败仍继续」）。
+- **读数**：G9 51/33 → **44/31**（扫描地板 50 → 40，算术 = 51−7）；G4 441/143 → **433/142**
+  （lifecycle 4→0、colab_bc 5→1；抬/降都记在 `tests/test_broad_except_budget.py` 表头）。
+- **判据**：`tests/remote/test_lifecycle.py` +3 条行为用例（缺 `/proc` 与读不到盘 ⇒ 读数仍成形且 `rss_gb`
+  为 None；NVML 抽风 ⇒ 只丢 `gpu`；自投失败 ⇒ 不抛 + 恰一行 + 上报仍先发）。文本形态断言 1500 → 1501
+  （理由记在 `tests/test_source_text_assert_budget.py` 的 `BASELINE_FORM` 上方）。

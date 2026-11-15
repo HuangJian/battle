@@ -57,7 +57,9 @@ def _rss_gb() -> float | None:
         for line in Path("/proc/self/status").read_text().splitlines():
             if line.startswith("VmRSS:"):
                 return float(line.split()[1]) / 1024.0**2
-    except Exception:
+    except (OSError, ValueError, IndexError):
+        # 只在「这条读数本来就取不到」的地方闭眼：Windows 没有 `/proc`（OSError）、内核格式变了
+        # （ValueError/IndexError）。宽捕会连本模块自己的 bug 一起吞掉，而这一路是遗言的最后一段。
         pass
     return None
 
@@ -88,7 +90,9 @@ def readings(work_dir: Path | str, device: str = "") -> dict[str, Any]:
                         {"index": i, "free_gb": round(free / 1024.0**3, 1),
                          "total_gb": round(total / 1024.0**3, 1)}
                     )
-        except Exception:  # 驱动/NVML 抽风不该让一条读数变成异常
+        except (RuntimeError, OSError, ValueError):
+            # 驱动/NVML 抽风不该让一条读数变成异常 —— 但也只该是为这三种：
+            # torch 的 CUDA 错误走 RuntimeError，驱动句柄走 OSError，显存算不出来走 ValueError。
             pass
     seen: set[Any] = set()
     for label, path in (("work", Path(work_dir)), ("kaggle-working", Path("/kaggle/working"))):
@@ -104,7 +108,7 @@ def readings(work_dir: Path | str, device: str = "") -> dict[str, Any]:
                 {"label": label, "free_gb": round(usage.free / 1024.0**3, 1),
                  "total_gb": round(usage.total / 1024.0**3, 1)}
             )
-        except Exception:
+        except OSError:
             continue
     rss = _rss_gb()
     if rss is not None:
@@ -268,5 +272,8 @@ class Lifecycle:
         try:
             signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
-        except Exception:
-            pass
+        except (ValueError, OSError, AttributeError) as e:
+            # 自投失败 = 进程活着、而 hub 以为这台已下线（它不再派发，机器却还在计费）。
+            # 这是本模块唯一会改变进程结局的失败，所以必须留一行，不能与「没人处理」长得一样。
+            if self._log is not None:
+                self._log(f"SIGTERM 自投失败（进程仍在跑，hub 会当这台已下线）：{e!r}")

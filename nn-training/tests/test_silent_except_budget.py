@@ -19,6 +19,13 @@
   * **失败即信息丢失的**（日志落盘、账本写回、重试判定）→ 换成可见出口（`log_line` /
     `warn_once` / 计数器），顺手把基线调小；
   * 热点路径（每 tick / 每行日志）去重要按 key 去重，别把控制台刷成噪音。
+  * **第三种处置：窄捕**（2026-11-15 补）。捕获面本来就只该是某几种异常时，`except (OSError,
+    ValueError): pass` 既不属「宽」也不属「静默」—— 它把「本模块自己的 bug」放出去，正是这条
+    门禁想要的那半条命。第八批 `remote/lifecycle.py`（4 处）+ `remote/colab_bc.py`（4 处）就走
+    了这条：遗言读数（`/proc` / NVML / statvfs）与探测腿（venv python 能不能 import torch）
+    的失败面都是具体的；两处**真信息丢失**（state 文件读不了、SIGTERM 自投失败）改成留一行，
+    而不是窄捕了事 —— 后者意味着「进程活着而 hub 当它已下线」（重复计费）却没有任何痕迹。
+    该批 51 → **44**（colab_bc 4→0，lifecycle 3→0），扫描地板随之下调 50 → 40。
 """
 
 from __future__ import annotations
@@ -122,7 +129,8 @@ def test_scan_sees_the_known_production_surface() -> None:
     for rel in _ANCHORS:
         assert baseline.get(rel, 0) > 0, f"基线丢了已知文件 {rel}"
         assert actual.get(rel, 0) > 0, "扫描入口坏了（AST 没数到已知 `except …: pass`）"
-    assert sum(actual.values()) >= 50, "生产面计数异常偏低，扫描可能漏了包"
+    # 地板随清理下调（2026-11-15：51 → 44，见文件头第八批）；它只防「AST 没数到东西」。
+    assert sum(actual.values()) >= 40, "生产面计数异常偏低，扫描可能漏了包"
     assert len(baseline) >= 30
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)

@@ -69,15 +69,15 @@ def find_python(nn: Path) -> str:
             if sh([str(venv_py), "-c", "import torch,numpy"], check=False).returncode == 0:
                 log(f"venv: {venv_py}")
                 return str(venv_py)
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError):
+            pass  # venv 还在装 / 跑不起来 = 常态，下面换系统 python 再说
     sys_py = shutil.which("python3") or shutil.which("python") or "python3"
     try:
         if sh([sys_py, "-c", "import torch,numpy"], check=False).returncode == 0:
             log(f"系统 python: {sys_py}")
             return sys_py
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError):
+        pass  # 同上：探测失败不等于没有 python，交给 bootstrap 兜底
     log("bootstrap …")
     sh([sys_py, str(nn / "tools" / "tools.bootstrap.py")], cwd=str(nn))
     return str(venv_py)
@@ -165,8 +165,10 @@ def load_state(state_f: Path, total: int) -> dict:
             if isinstance(s, dict):
                 s["total"] = total
                 return s
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            # 读不了就从头起（下面返回默认值），但**说一句** —— 否则现场只看到「进度莫名归零」，
+            # 而 disk 满 / 半行 JSON 这两种成因长得一模一样。
+            log(f"state 读不了（{state_f}，从 0 起）：{e!r}")
     return {"total": total, "done": 0, "base": 0, "running": False, "pid": None}
 
 
@@ -260,8 +262,8 @@ def run_training(
                 if "epoch" in line.lower() and "loss" in line:
                     print("[train]", line.strip()[:160])
             pos = len(txt)
-        except Exception:
-            pass
+        except OSError:
+            pass  # 日志文件还没建 / 被轮转：这一轮少打几行，下轮从原 pos 续读
         el = int(time.time() - t0)
         if el - last_print >= 120:
             last_print = el

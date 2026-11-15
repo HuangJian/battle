@@ -17,6 +17,7 @@ cell 输出上报的，人不在电脑前就断）。本文件钉住补上的那
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from pathlib import Path
@@ -179,7 +180,9 @@ def test_sigterm_reports_before_dying(
     monkeypatch.setattr(
         LC,
         "os",
-        SimpleNamespace(getpid=lambda: 0, kill=lambda pid, s: calls.append(("kill", s))),
+        SimpleNamespace(
+            getpid=lambda: 0, kill=lambda pid, s: calls.append(("kill", s)), stat=os.stat
+        ),
     )
 
     lc = _life(tmp_path, _Clock())
@@ -206,3 +209,83 @@ def test_close_without_why_marks_unknown(tmp_path: Path, sent: list[dict[str, An
     lc = _life(tmp_path, _Clock())
     lc.close(done=1)
     assert sent[0]["reason"].startswith("worker 收线（未标注")
+
+
+# ── 读数缺席 ≠ 读数崩掉（2026-11-15）──────────────────────────────────
+# `readings` 是「遗言的最后一段」：任何一处取不到都只该让那一项缺席，绝不该把整条读数（乃至
+# 上报腿）弄丢。判据是「窄捕后的行为」——以前是 `except Exception: pass/continue`，连本模块
+# 自己的 bug 一起吞掉，于是「这台机器没 GPU」与「torch 读显存时炸了」在控制台上长得一样。
+
+def test_readings_survive_missing_proc_and_unreadable_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pathlib
+
+    from remote import lifecycle as lc_mod
+
+    real_path = pathlib.Path
+
+    def _fake_path(arg: Any = ".", *a: Any, **k: Any) -> Any:
+        # 只替换 `/proc/self/status` 这一次读（Windows / 权限不足的形状），其余照常。
+        if str(arg) == "/proc/self/status":
+            return SimpleNamespace(read_text=lambda *_: (_ for _ in ()).throw(OSError("no /proc")))
+        return real_path(arg, *a, **k)
+
+    monkeypatch.setattr(lc_mod, "Path", _fake_path)
+    monkeypatch.setattr(
+        lc_mod.shutil, "disk_usage", lambda *_: (_ for _ in ()).throw(OSError("statvfs 挂了"))
+    )
+
+    r = readings(tmp_path, "cpu")
+    assert r["rss_gb"] is None  # 取不到就不编数（不是 0，也不是 NaN）
+    assert r["disk"] == []  # 盘读不到 ⇒ 这一项缺席，但整条读数还在
+    assert r["device"] == "cpu"
+
+
+def test_readings_survive_nvml_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """torch 在场、CUDA 也「可用」，但真去读显存时 NVML 抽风 ⇒ 只丢 `gpu` 这一项。"""
+
+    class _Cuda:  # 与 torch.cuda 同形状（只用到 is_available/device_count/mem_get_info）
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            return 1
+
+        @staticmethod
+        def mem_get_info(index: int) -> Any:
+            raise RuntimeError("NVML ERROR: driver not loaded")
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=_Cuda))
+    r = readings(tmp_path, "cuda:0")
+    assert r["gpu"] == []
+    assert r["disk"]  # 别的项照常
+
+
+def test_sigterm_selfkill_failure_is_reported(
+    tmp_path: Path, sent: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自投 SIGTERM 失败 = 进程活着而 hub 当它已下线 ⇒ **必须留一行**（且不抛）。
+
+    这是本模块里唯一会改变进程结局的失败：静默的话现场只有「这台机器明明在计费，hub 却说它
+    早下线了」，且与「没人处理 SIGTERM」的形状完全一样。
+    """
+    monkeypatch.setattr(LC, "signal", _SignalShim([]))
+    monkeypatch.setattr(
+        LC,
+        "os",
+        SimpleNamespace(
+            getpid=lambda: 0,
+            kill=lambda pid, s: (_ for _ in ()).throw(OSError("kill 被拒")),
+            stat=os.stat,
+        ),
+    )
+    lines: list[str] = []
+    lc = _life(tmp_path, _Clock(), log=lines.append)
+    lc._on_signal(signal.SIGTERM, None)  # 不抛
+
+    assert sent and sent[0]["reason"].startswith("worker 收到 SIGTERM")  # 上报照旧先发
+    assert len(lines) == 1
+    assert "自投失败" in lines[0] and "OSError" in lines[0]
