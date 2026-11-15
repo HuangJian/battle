@@ -32,7 +32,10 @@ from pathlib import Path
 # ------------------------------------------------------------------ 下沉（S5 第六刀，2026-09-27）
 # 「失败类型族」→ `common/errors.py`；「传输编码 / v1+v2 线格式」→ `common/wire_codec.py`。
 # 实现搬家、名字留门面 ⇒ 全仓 `from common.protocol import …` 一行不改。
-# ⚠ `errors` 是**叶子**（零 import）——`wire_codec` 与 `protocol` 都向下依赖它，勿把边反过来。
+# ⚠ `errors` 是**叶子**（stdlib only）——`wire_codec` 与 `protocol` 都向下依赖它，勿把边反过来。
+from common.errors import (
+    NET_ERRORS as NET_ERRORS,
+)
 from common.errors import (
     CodeChangedError as CodeChangedError,
 )

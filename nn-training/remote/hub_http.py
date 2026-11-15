@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.parse
@@ -36,9 +37,20 @@ from typing import NamedTuple
 
 from common.logutil import tag_logger
 from common.protocol import AUTH_HEADER, FAIL_BODY_MAX, JobFailedError
+from common.protocol import NET_ERRORS as _BASE_NET_ERRORS
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("hub", lambda: time)
+
+#: 传输薄壳能抛出的**网络层**异常面（2026-11-15，G4 窄捕；口径同 `remote/http.py`）。
+#:
+#: 十处 `except Exception` 原本把「hub 没答」与「我们自己的 bug」抹成同一分支：探针把
+#: `AttributeError`（回执形状变了）读成 `PROBE_TRANSIENT`，于是轮询环永远「还没好」——
+#: 静默挂死，真因从不出现。基底来自 `common.errors.NET_ERRORS`（`common.protocol` 门面转发，
+#: 保持本文件的依赖闭集不变），这里只追加本层自己会撞上的 `http.client` 协议错乱
+#: （`IncompleteRead` / `BadStatusLine` 不是 `OSError`）。**不含**程序员错：让它穿出去。
+#: 见 DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HTTPException)
 
 
 class HubClientError(RuntimeError):
@@ -145,7 +157,7 @@ def report_job_failure(
                 **({"X-Lease-Token": lease_token} if lease_token else {}),
             },
         )
-    except Exception as e:
+    except NET_ERRORS as e:
         log(f"job {jid} 失败回报未送达（{type(e).__name__}）——训练侧将走超时兜底")
         return False
     if st == 200:
@@ -186,7 +198,7 @@ def set_cloud_halt(
         path += "?" + "&".join(qs)
     try:
         st, body = _request(base_url, token, path, timeout=timeout)
-    except Exception as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
+    except NET_ERRORS as e:  # 网络层（tunnel 抖动等）——基础设施不可用，不阻断训练
         log(f"cloud {'halt' if halt else 'resume'} 下发失败（{type(e).__name__}: {e}）")
         return False
     if st != 200:
@@ -217,7 +229,7 @@ def hub_halted(base_url: str, token: str, timeout: float = 10.0, course: str = "
         path += "?course=" + urllib.parse.quote(course)
     try:
         st, body = _request(base_url, token, path, timeout=timeout)
-    except Exception:
+    except NET_ERRORS:
         return None
     if st != 200:
         return None
@@ -345,7 +357,7 @@ def probe_job_result(
         # `timeout` 走**关键字**：测试里的假 `_request` 常把它声明成 keyword-only
         # （位置传参会 TypeError，症状是「探针一调就炸」而不是「问了没答」）。
         status, body = _request(base_url, token, path.format(jid=jid), timeout=timeout)
-    except Exception as e:  # 瞬时网络错误：与 404 一样是「没答」，不是失败
+    except NET_ERRORS as e:  # 瞬时网络错误：与 404 一样是「没答」，不是失败
         return ProbeResult(PROBE_TRANSIENT, None, f"{type(e).__name__}")
     if status == 200:
         loaded = json.loads(body.decode("utf-8"))
@@ -400,7 +412,7 @@ def job_reconcile_state(
     """
     try:
         status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
-    except Exception:
+    except NET_ERRORS:
         return JOB_UNREACHABLE
     if status == 404:
         return JOB_UNKNOWN
@@ -433,7 +445,7 @@ def job_liveness(
     """
     try:
         status, _body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
-    except Exception:  # 网络层（隧道抖动/DNS/连接拒绝）——不是「它没了」
+    except NET_ERRORS:  # 网络层（隧道抖动/DNS/连接拒绝）——不是「它没了」
         return JOB_UNREACHABLE
     if status == 200:
         return JOB_ALIVE
@@ -470,7 +482,7 @@ def unfreeze_job(
             timeout=timeout,
             method="POST",
         )
-    except Exception as e:
+    except NET_ERRORS as e:
         log(f"job {jid} 解冻请求未送达（{type(e).__name__}）——继续（重发可能吃 410）")
         return False
     if status == 200:
@@ -513,7 +525,7 @@ def admin_cancel_job(
             timeout=timeout,
             method="POST",
         )
-    except Exception:
+    except NET_ERRORS:
         return ADMIN_CANCEL_UNREACHABLE
     if status == 200:
         return ADMIN_CANCEL_DONE
@@ -548,7 +560,7 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
                     left = info.get("lease_expires_in")
                     hb = info.get("last_heartbeat_ago")
                     extra = f"; 租约剩 {left}s, 上次心跳 {hb}s 前" if left is not None else ""
-    except Exception:  # 观测失败不影响等待语义（本行只为日志服务）
+    except NET_ERRORS:  # 观测失败不影响等待语义（本行只为日志服务）
         pass
     if state == "leased":
         return f"job {jid} 执行中（state=leased{extra}）（已等 {waited:.0f}s）"
@@ -574,7 +586,7 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
             q = json.loads(body2.decode("utf-8"))
             if isinstance(q, dict) and q.get("active_workers") is not None:
                 workers = str(q["active_workers"])
-    except Exception:  # 同上：拿不到 worker 数就只说状态
+    except NET_ERRORS:  # 同上：拿不到 worker 数就只说状态
         pass
     return (
         f"job {jid} **等待认领中**（state={state}，已等 {waited:.0f}s；hub 在线 worker = {workers}）"

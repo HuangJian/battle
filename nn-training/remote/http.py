@@ -41,6 +41,7 @@ from contextlib import nullcontext
 from typing import Any
 
 from common import net_http
+from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
@@ -98,11 +99,9 @@ _log = tag_logger("worker", lambda: time)
 #: 「重试耗尽却无结果（不应到这里）」。程序员的错（拼错属性、类型不对）不在这条边界里 ——
 #: 让它抛出去，那才是它该有的形状（见 DECISIONS §2026-11-15-narrow-catch-is-the-third-disposition）。
 NET_ERRORS: tuple[type[BaseException], ...] = (
-    OSError,
+    *_BASE_NET_ERRORS,
     http.client.HTTPException,
     WireSlowError,
-    RetryableError,
-    RuntimeError,
 )
 
 __all__ = [

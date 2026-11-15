@@ -116,3 +116,28 @@ class CodeChangedError(RuntimeError):
             f"代码已变更：本进程加载 {loaded_sha[:12]}… != job 要求 {job_sha[:12]}…"
             "（继续跑会用旧代码产出看似正常的结果）"
         )
+
+
+#: **网络层的异常面**（2026-11-15）：凡「等一次 HTTP 往返」的调用点（`remote/http._request`、
+#: `remote/hub_http._request` 的十几处包装）都该用它做窄捕，而不是 `except Exception`。
+#:
+#: 为什么要有这个名字：宽捕把两类东西抹成同一分支 —— 「连不上」（网络层，租约/重试兜底是设计
+#: 好的语义）与「我们自己的 bug」（`AttributeError` 拼错字段 / `TypeError` 签名漂了 / `KeyError`
+#: 形状变了）。后者的现场表现是「hub 不可达，本轮照跑」，于是真因永远进不了 hindsight。
+#:
+#: 成员与判据的对应（一个都不能少，少了就变成「真的连不上时进程崩」）：
+#:   * `OSError` —— `urllib.error.URLError` / `TimeoutError` / `ssl.SSLError` / 连接重置全是它的子类；
+#:   * `http.client.HTTPException` 不在这里 —— 它是**传输层**的错乱形状（`BadStatusLine` /
+#:     `IncompleteRead`），由各传输壳自己追加进自己的元组（`remote/http.py` / `remote/hub_http.py`）；
+#:     本模块必须保住「零 import」这条（`test_protocol_split.py::test_errors_is_a_leaf_module`）；
+#:   * `RetryableError` —— 本仓对「瞬时网络失败」的分类（大 body 重试用尽时抛的就是它）；
+#:   * `RuntimeError` —— 传输壳层「重试耗尽却无结果」的两处**防御性** raise。
+#:
+#: **刻意不含**：`ProtocolError`（4xx/字段级确定性拒绝，调用方要据此走放弃/首写胜出 —— 吞掉
+#: 它等于把确定性失败降级成网络抖动）、以及一切程序员错（拼错属性、类型不对）。见
+#: DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    RetryableError,
+    RuntimeError,
+)

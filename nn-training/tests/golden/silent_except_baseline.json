@@ -8,7 +8,6 @@
   "remote/deliver_worker.py": 1,
   "remote/error_report.py": 1,
   "remote/hub_client.py": 1,
-  "remote/hub_http.py": 2,
   "remote/job_fs.py": 1,
   "remote/notebook_runtime.py": 1,
   "remote/offline_deliver.py": 1,

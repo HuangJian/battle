@@ -6476,3 +6476,23 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **代价（已知）**：控制面通知里若有真正的编程错，worker 这一轮会崩而不是继续 —— 这是刻意的
   （AGENTS §G4 的原始理由：宽捕顺带吞掉「真正的编码 bug」）。崩溃点带完整 traceback，而旧行为
   只留一行「没送到」。
+
+## §2026-11-15-net-errors-tuple-lands-in-errors-leaf-composed-per-transport
+
+- **决定**：`NET_ERRORS` 的**基底**（`OSError` / `RetryableError` / 防御性 `RuntimeError`）落
+  `common/errors.py`，由 `common/protocol.py` 以 `NET_ERRORS as NET_ERRORS` 门面转发；传输层各自
+  追加自己会撞上的形状 —— `remote/http.py` 追加 `http.client.HTTPException` + `WireSlowError`，
+  `remote/hub_http.py` 追加 `http.client.HTTPException`（同批把薄壳 10 处 `except Exception` 全改窄，
+  G4 423 → 413、G9 44 → 42）。
+- **为什么不把 `HTTPException` 放进基底**：`common/errors.py` 的「**零 import** 叶子」是硬契约
+  （`test_protocol_split.py::test_errors_is_a_leaf_module`，两边都向下依赖它才不会成环）。给它加
+  `import http.client` 能把门禁改绿，但那是为省一行去拆一条结构不变式。`BadStatusLine` /
+  `IncompleteRead` 本来就是**传输**撞上的形状 ⇒ 该由传输壳点名。
+- **为什么经 `common.protocol` 门面**：`remote/hub_http.py` 的依赖闭集是刻意的（薄壳 = 「可注入的
+  单点」，导入期不攥住网络栈）。窄捕需要一条共享的错误面，就借已有的门面，而不是给薄壳开新依赖边
+  （`http.client` 一个 stdlib 名字例外，已在该测试的 `ALLOWED_IMPORTS` 旁记账）。
+- **判据**：`test_hub_http_split.py::test_probe_does_not_disguise_a_programmer_error_as_transient`
+  （`_request` 抛 `AttributeError` ⇒ `probe_job_result` 必须穿出去）。实测把那一处改回
+  `except Exception` ⇒ `DID NOT RAISE AttributeError` 红，还原后绿。
+- **代价（已知）**：同一条元组在两处组装，若将来新增成员要记得两处都追加。接受：两处各自负责的
+  层不同（`remote/http.py` 还有 `WireSlowError`），合并回基底就得先破叶子契约。
