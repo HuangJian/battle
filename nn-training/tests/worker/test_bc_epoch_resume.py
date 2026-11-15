@@ -120,9 +120,24 @@ def test_bc_train_delivers_epoch_chosen_by_smoothed_val_loss(tmp_path: Path) -> 
     )
     meta = json.loads((tmp_path / "bc-weights.json").read_text(encoding="utf-8"))
     assert meta["delivered_epoch"] == delivered
-    assert meta["best_smoothed_val_loss"] == pytest.approx(
-        out["best_smoothed_val_loss"]
-    )
+    # 落账口径对落账口径（2026-11-15，双生同步）：meta 是 `round(best_smoothed, 4)`，返回值是原始
+    # float。`pytest.approx(raw)` 的默认相对容差 1e-6 挡不住 4dp 舍入（最大 5e-5）⇒ 值 ≳5 时
+    # 会偶发红（paddle 双生那条就是这么红的）。两边取 4dp = 精确相等。
+    assert meta["best_smoothed_val_loss"] == round(out["best_smoothed_val_loss"], 4)
+
+
+def test_ledger_value_must_be_compared_at_ledger_precision() -> None:
+    """2026-11-15 门禁偶发红的根因存档：4dp 落账值不能拿**默认相对容差**跟原始 float 对账。
+
+    现场值：`best_smoothed_val_loss` 原始 `25.586440000000003`、落账 `25.5864`，差 **4e-5**；
+    `pytest.approx(raw)` 的默认 `rel=1e-6` 在 25 量级只给 2.6e-5 余量 ⇒ 判红。触发条件是
+    「原始值的尾巴恰好落在 4dp 网格外」，所以它**偶发**：同一份语料换个 epoch 曲线就绿了。
+    上面几条对账因此都改成「两边都取 4dp」——精确相等，不需要容差，也不会再偶发。
+    """
+    raw = 25.586440000000003
+    assert raw != round(raw, 4), "前提：这个现场值确实不在 4dp 网格上"
+    assert round(raw, 4) != pytest.approx(raw), "默认相对容差挡不住 4dp 舍入（这就是那个 flake）"
+    assert round(raw, 4) == round(raw, 4)
 
 
 def test_bc_train_resume_continues_epoch_numbering(tmp_path: Path) -> None:

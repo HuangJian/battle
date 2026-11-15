@@ -6309,3 +6309,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判据**：`test_offline_deliver_proc.py::test_forward_keeps_watching_after_log_callback_raises`
   （日志回调对每一行都抛，流里 `boot ok` 在第二行 ⇒ `_boot` 仍必须置位；旧实现在第一行就死了，先红后绿）
   + `test_child_proc_pump.py::test_summary_log_that_itself_raises_does_not_escape`（喊话本身失败不逃出）。
+
+## §2026-11-15-ledger-values-compare-ledger-to-ledger（落账值对落账值，别拿相对容差碰原始 float）
+
+- **根因（2026-11-15，用户点名查的偶发红）**：`meta["best_smoothed_val_loss"]` 写的是
+  `round(best_smoothed, 4)`，而 `out["best_smoothed_val_loss"]` 是未舍入的原始 float；两条双生用例
+  （`test_bc_paddle` / `test_bc_epoch_resume`）用 `pytest.approx(原始值)` 对账 —— 默认容差是
+  **相对** 1e-6，在 25 量级只给 **2.6e-5** 余量，而 4dp 舍入的最大误差是 **5e-5**。于是「原始值的
+  尾巴是否恰好落在 4dp 网格外」决定这条断言红不红 —— 而 epoch 曲线逐进程不同（paddle 首次调用的
+  状态差异），所以它是**偶发**，不是环境问题。实测：12 个新进程各跑一次，旧写法 **3/12 红**
+  （现场值 `25.586440000000003 → 25.5864`），新写法 0/12。
+- **决定**：两边都取 4dp 再比 —— `meta[...] == round(out[...], 4)`。这是**精确相等**，不需要任何
+  容差，比原来的 `approx` 更严，也不再有触发条件。
+- **为什么不是「把容差放大到 abs=1e-4」**：那只是让边界更远（仍是拍一个够不够的数）；落账口径本来
+  就是 4dp，两边对齐后误差恒为 0 —— 对账的判据应该是「同一个量」，而不是「差不多」。
+- **另一侧同样修**：`meta["best_val_loss"] == round(out["best_val_loss"], 4)`（同一类量、同一类
+  舍入），`history[...]` 与原始 float 的对账继续用 `abs=1e-4`（那是数据面精度的既有约定）。
+- **判据**：`tests/worker/test_bc_epoch_resume.py::test_ledger_value_must_be_compared_at_ledger_precision`
+  —— 把现场值钉下来：`raw != round(raw, 4)`（前提）、`round(raw, 4) != approx(raw)`（这就是那个
+  flake）、`round(raw, 4) == round(raw, 4)`（新口径）。谁把对账改回 `approx(原始值)` 这条就红。
+- **附带发现（未改，另记）**：`bc_core.select_best_epoch` 在「所有窗口都非有限」时返回 `0`（不是
+  `None`）——`NaN < inf` 恒 False ⇒ `best_at` 留在初始值。调用方拿 0 当「epoch 0」用，而窗口未满
+  那条分支会交最后一轮 ⇒ 两者对不上。本机 12+ 次训练没观察到 NaN（6 样本 shard 上 val_loss 会
+  剧烈跳动但有限），所以不是这次 flake 的成因；修它属于独立改动。
