@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -218,3 +220,58 @@ def test_log_snapshot_writes_jsonl(tmp_path: Path) -> None:
     assert len(lines) == 1 and lines[0]["tag"] == "ppo_local_pre it1"
     assert lines[0]["event"] == "forensics"
     assert snap["rss_mb"] >= 0
+
+
+# ---- forensics：降级要说得清为什么（G9 第二种处置，2026-11-15） ----
+
+
+def test_snapshot_records_why_the_rss_probe_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RSS 探针失败 ⇒ 值仍是 0（绝不反杀训练），但快照里留有成因。
+
+    这份 jsonl 的读者是事故后的人：「rss_mb: 0」与「探针自己失败了」在文件里长得一模一样，
+    而 OOM 判定恰恰只认这个数。降级不等于静默 —— 缺省值旁边要有一行「为什么」。
+    """
+    import worker.forensics as forensics
+
+    if os.name == "nt":
+        pytest.skip("POSIX 探针分派（Windows 走 _rss_mb_windows）")
+
+    def _boom(errors=None):
+        raise OSError("/proc/self/status 不可读")
+
+    monkeypatch.setattr(forensics, "_rss_mb_posix", _boom)
+    snap = forensics.snapshot("oom-check", paths=[tmp_path])
+    assert snap["rss_mb"] == 0.0 and snap["rss_peak_mb"] == 0.0
+    # 取键即断言（缺 `rss` 会 KeyError）；前缀判据钉住「成因类型」而不钉文案全文。
+    assert snap["probe_errors"]["rss"].startswith("OSError")
+
+
+def test_rss_mb_never_raises_even_when_the_probe_explodes(monkeypatch) -> None:
+    """`rss_mb()` 的契约是「绝不出错」——探针自己炸了也必须降级成 (0.0, 0.0)。"""
+    import worker.forensics as forensics
+
+    if os.name == "nt":
+        pytest.skip("POSIX 探针分派（Windows 走 _rss_mb_windows）")
+
+    def _boom(errors=None):
+        raise RuntimeError("probe bug")
+
+    monkeypatch.setattr(forensics, "_rss_mb_posix", _boom)
+    assert forensics.rss_mb() == (0.0, 0.0)
+
+
+def test_snapshot_records_a_disk_path_it_could_not_measure(tmp_path: Path) -> None:
+    """量不到的盘要留名（`disk:<path>`）：静默丢键看起来就像「这里没有盘压力」。"""
+    missing = tmp_path / "no-such-dir"
+    snap = snapshot("disk-check", paths=[missing])
+    assert set(snap) == {k for k in snap if k != "disk_free_mb"}  # 没有 disk_free_mb 这个键
+    assert set(snap["probe_errors"]) == {f"disk:{missing}"}
+
+
+def test_snapshot_stays_schema_clean_when_everything_works(tmp_path: Path) -> None:
+    """全好时不出现 `probe_errors`（干净路径的 schema 逐字不变）。"""
+    snap = snapshot("ok", paths=[tmp_path])
+    assert {"event", "tag", "ts", "pid", "rss_mb", "rss_peak_mb", "disk_free_mb"} <= set(snap)
+    assert set(snap).isdisjoint({"probe_errors"})

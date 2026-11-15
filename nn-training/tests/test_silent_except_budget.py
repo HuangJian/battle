@@ -55,7 +55,10 @@ BROAD_NAMES = frozenset({"Exception", "BaseException"})
 #: `worker/forensics.py` 的降级测量都还在基线里 —— 前者是「该有替代路径才静默」的典型，
 #: 后者是「静默即降级」的合法样板；`remote/job_lifecycle.py` 那 6 处控制面 POST 已于
 #: 2026-11-14 改成留痕，不再适合当锚点）。
-_ANCHORS = ("common/log.py", "worker/forensics.py")
+#: 扫描入口自检的锚：必须**两个方向都有存量**的文件。2026-11-15 换掉 `worker/forensics.py`
+#: （那 5 处改成「降级但记入快照」后体内不再只有 `pass`，它已不是静默样本）⇒ 换成
+#: `remote/child_proc.py`（行泵的读流 EOF 静默，那条是刻意的）。
+_ANCHORS = ("common/log.py", "remote/child_proc.py")
 
 
 def _is_broad(handler: ast.ExceptHandler) -> bool:
@@ -135,9 +138,10 @@ def test_scan_sees_the_known_production_surface() -> None:
     for rel in _ANCHORS:
         assert baseline.get(rel, 0) > 0, f"基线丢了已知文件 {rel}"
         assert actual.get(rel, 0) > 0, "扫描入口坏了（AST 没数到已知 `except …: pass`）"
-    # 地板随清理下调（2026-11-15：51 → 44 → 40，见文件头第八/第十批）；它只防「AST 没数到东西」。
-    assert sum(actual.values()) >= 36, "生产面计数异常偏低，扫描可能漏了包"
-    assert len(baseline) >= 28
+    # 地板随清理下调（2026-11-15：51 → 44 → 40 → 35，见文件头第八/第十/第十三批）；
+    # 它只防「AST 没数到东西」。
+    assert sum(actual.values()) >= 30, "生产面计数异常偏低，扫描可能漏了包"
+    assert len(baseline) >= 25
     assert not any(rel.startswith(EXEMPT_PREFIXES) for rel in baseline)
     assert not any(rel.startswith("tools/") for rel in baseline)
 

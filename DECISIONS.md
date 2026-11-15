@@ -6532,3 +6532,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   说话）；后者只吞 `OSError`（Colab/Kaggle 的 FUSE 挂载点不一定支持 chmod，权限位是纵深防御）。
 - **判据**：`tests/remote/test_notebook_runtime.py` +4 —— 不可达仍 `-2`、程序员错穿出、探不起来回落
   CPU、Ctrl-C 不被吞；逐条改回宽捕实测红（`DID NOT RAISE`）。
+
+## §2026-11-15-degrading-a-probe-is-not-the-same-as-staying-silent
+
+- **决定**：`worker/forensics.py` 的 5 处 `except Exception: pass` 改成 `_note(errors, …)`：
+  值仍然降级（`rss_mb()` 还是 `(0.0, 0.0)`、量不到的盘仍然不写键），但**成因进快照的
+  `probe_errors`**（`{字段: "异常类型: 文本"}`）。G9 该文件 5 → 0；同笔给 `rss_mb()` 补一个
+  进程边界兜底（G4 +1，记账在 `test_broad_except_budget.py` 表头）。
+- **为什么 G9 的第二条处置在这里成立**：这个模块的**唯一读者**是事故后的人（OOM / 写盘失败不留堆栈，
+  快照是临终状态）。而 `rss_mb: 0` 与「探针自己失败了」在 jsonl 里逐字相同 ⇒ 那份文件答不了它唯一
+  该答的问题（「上一轮到底有没有 OOM」）。留一行成因，成本是一个 dict 键，收益是判读从「猜」变「读」。
+- **为什么不顺手窄捕**：平台探针（`ctypes`/PSAPI、`/proc`、`shutil.disk_usage`、torch 驱动）的异常族
+  本来就由对方决定，而且本模块的硬契约是「绝不反杀训练」——宽捕在这里是对的，静默不是。
+- **判据**：`tests/worker/test_commit_journal.py` +4 —— 探针失败留成因、探针自己炸也不抛、量不到的盘
+  留名、全好时 schema 逐字不变（不出现 `probe_errors`）。把 `_note` 退回 `pass` 实测 2 条红。

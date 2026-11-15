@@ -116,7 +116,7 @@
   "worker/eval_replays_once.py": 3,
   "worker/eval_self_rescue.py": 1,
   "worker/eval_track.py": 2,
-  "worker/forensics.py": 7,
+  "worker/forensics.py": 8,
   "worker/iter_rollout.py": 2,
   "worker/loop_guards_gate.py": 5,
   "worker/loop_guards_leg.py": 5,

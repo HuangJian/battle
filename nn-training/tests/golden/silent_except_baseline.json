@@ -23,7 +23,6 @@
   "trainer/bc_loop.py": 1,
   "trainer/loop_transport.py": 1,
   "worker/eval_gate.py": 1,
-  "worker/forensics.py": 5,
   "worker/loop_guards_sweep.py": 1,
   "worker/ppo/np_core.py": 3,
   "worker/serve_pool.py": 1,
