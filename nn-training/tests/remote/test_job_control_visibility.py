@@ -76,3 +76,25 @@ def test_heartbeat_failure_says_the_lease_is_still_running(
     lines = [ln for ln in capsys.readouterr().out.splitlines() if JID in ln]
     assert len(lines) == 1, lines
     assert lines[0].endswith("下一个心跳再试"), lines[0]
+
+
+@pytest.mark.parametrize("name", sorted(_NOTICES))
+def test_programmer_error_is_not_disguised_as_a_network_failure(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """窄捕的**另一半**：程序员自己的错不许被读成「hub 不可达」。
+
+    这五条控制面通知原来一律 `except Exception` —— 于是 `AttributeError`（拼错字段）、
+    `TypeError`（签名漂了）、`KeyError`（形状变了）全都会被吞成一行「没送到，租约兜底」，
+    现场看到的是网络问题，真相在我们自己的代码里。2026-11-15 改成 `NET_ERRORS`（网络层 +
+    那两处防御性 RuntimeError）后，这些错**抛出去**才是它该有的形状。
+    """
+    import remote.http as http_mod
+
+    def _buggy(*_a: object, **_k: object) -> None:
+        raise AttributeError("'NoneType' object has no attribute 'job_id'")
+
+    monkeypatch.setattr(jl, "_request", _buggy)
+    assert issubclass(AttributeError, http_mod.NET_ERRORS) is False  # 口径自检
+    with pytest.raises(AttributeError):
+        _NOTICES[name]()

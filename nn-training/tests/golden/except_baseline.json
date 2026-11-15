@@ -42,7 +42,7 @@
   "remote/hub_client.py": 2,
   "remote/hub_http.py": 10,
   "remote/job_fs.py": 3,
-  "remote/job_lifecycle.py": 11,
+  "remote/job_lifecycle.py": 1,
   "remote/job_round.py": 4,
   "remote/notebook_boot.py": 2,
   "remote/notebook_runtime.py": 7,

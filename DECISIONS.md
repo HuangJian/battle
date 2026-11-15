@@ -6458,3 +6458,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **保留的三处 `契约上界`**：`test_rollout_scratch` ×2（阈值按被测自己的 `DRAIN_CEILING_SEC`
   推导，实测 5× 余量）、`e2e/test_autonomous_round_flow_e2e`（桩每轮固定 0.07s，阈值 1s）。
   审计过、不假红；新加的不走这条。
+
+## §2026-11-15-network-error-surface-is-a-named-tuple
+
+- **决定**：`remote/http.py` 导出 `NET_ERRORS`（`OSError` / `http.client.HTTPException` /
+  `WireSlowError` / `RetryableError` / 防御性 `RuntimeError`），`remote/job_lifecycle.py` 的十条
+  控制面通知改用它做窄捕（G4 11 → 1；剩下那处是 `on_drop` 回调边界，异常族由调用方决定）。
+- **为什么这不算放松**：宽捕把两类东西抹平了 —— 「连不上」（网络层，租约兜底是设计好的语义）与
+  「我们自己的 bug」（`AttributeError` 拼错字段 / `TypeError` 签名漂了 / `KeyError` 形状变了）。
+  后者的现场表现是「hub 不可达，本轮照跑」，于是真因永远进不了 hindsight。
+- **为什么 `RetryableError` 在内、`ProtocolError` 在外**：前者就是本仓对「瞬时网络失败」的分类
+  （5xx / 抖动 / 传输损坏），重试即可能修好；后者是 4xx/字段级**确定性拒绝**，调用方要能分辨它
+  去走「首写胜出 / 放弃」那条路 —— 吞掉它等于把确定性失败降级成网络抖动。
+- **判据**：`test_job_control_visibility.py::test_programmer_error_is_not_disguised_as_a_network_failure`
+  （五条通知逐条：`_request` 抛 `AttributeError` 必须穿出去）。实测把 `job_started` 改回
+  `except Exception` ⇒ 该参数化用例红，日志里写着「hub 不可达」，还原后绿。
+- **代价（已知）**：控制面通知里若有真正的编程错，worker 这一轮会崩而不是继续 —— 这是刻意的
+  （AGENTS §G4 的原始理由：宽捕顺带吞掉「真正的编码 bug」）。崩溃点带完整 traceback，而旧行为
+  只留一行「没送到」。

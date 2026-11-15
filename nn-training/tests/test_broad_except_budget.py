@@ -18,6 +18,7 @@
 |---|---|---|---|
 | 2026-11-14 | `remote/child_proc.py` | +1（6 → 7） | `pump_lines` 把「读流异常」与「回调异常」分开：回调是**两个代理各自传进来的行解析/记账代码**（`upload_proc` / `payload_proc`），它抛什么类型这里一概不知（`ValueError` / `KeyError` / 自己的异常族），而这条边界的义务是「坏行不进账、好行照读、收尾报数」。改成具体异常＝把「未知 bug 静默变成线程崩溃」。同函数里**读流**那一侧仍是宽捕 + `pass`（那是 EOF 的回声，见该函数 docstring），所以净 +1 是**新增的一条边界**，不是旧代码放松。 |
 
+| 2026-11-15 | `remote/job_lifecycle.py` | −10（11 → 1） | 十条控制面通知的捕获面收敛成 `remote.http.NET_ERRORS`（OSError 覆盖 URLError/TimeoutError/SSLError、`HTTPException`、`WireSlowError`、两处防御性 `RuntimeError`）。**不是放松而是收紧**：原来 `AttributeError`/`TypeError`/`KeyError` 会被吞成「hub 不可达（租约兜底）」，现场永远像网络问题。留下那 1 处是 `on_drop` 回调边界（调用方传进来的删副本逻辑，异常族未知）。判据 `test_job_control_visibility.py::test_programmer_error_is_not_disguised_as_a_network_failure`（改回宽捕即红）。 |
 | 2026-11-15 | `remote/lifecycle.py` / `remote/colab_bc.py` | −8（lifecycle 4 → 0，colab_bc 5 → 1） | 全是**窄捕**（G9 第八批）：遗言读数 `/proc`（OSError）/ NVML（RuntimeError）/ `statvfs`（OSError）、探测腿 `subprocess.run`（OSError / SubprocessError）。`colab_bc` 留下的那 1 处是 `mount_drive` —— `google.colab.drive.mount` 抛什么这里不知道，且该边界的义务是「失败仍继续、Drive 只用来放进度」，宽捕 + 日志是正确形状。 |
 | 2026-11-14 | `remote/worker_proc.py` | +1（1 → 2） | `_release_cloud_machine` 原先把「探测 Colab kernel」与「调 `runtime.unassign()`」罩在同一条宽捕里 `pass`，等于把「机器没停」说成了「这里没事」。拆开后**探测**那一侧仍是宽捕（非 Colab / 子进程里 `get_ipython()` 为 None 是常态，具体化只会把 import 的形状写进日志），**调用**那一侧是第三方 API 边界（`google.colab.runtime.unassign` 抛什么这里不知道，且这条边界的义务恰是「失败必须留一行」）。净 +1 = 多出一条边界，不是旧代码放松；同笔 G9 该文件 2 → 1。 |
 """

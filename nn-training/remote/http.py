@@ -31,6 +31,7 @@ heartbeat/release/fail）· 下载（payload/code/ts_code/blob）· 结果回传
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -87,12 +88,30 @@ from remote.wire import (
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
 
+#: `_request` / 控制面池能抛出的**网络层**异常面（2026-11-15，G4 窄捕）。
+#:
+#: 为什么需要它：`remote/` 里十来个控制面调用点原本一律 `except Exception` —— 那既把「连不上」
+#: 和「我们自己的 bug」抹成同一分支（`AttributeError` / `TypeError` / `KeyError` 全被吞成
+#: 「hub 不可达」），又让日志里的成因永远像是网络问题。判据是**这次失败能由哪种异常解释**：
+#: `OSError` 覆盖 URLError / TimeoutError / SSLError / 断开重连；`HTTPException` 是 stdlib 的
+#: 协议层错乱；`WireSlowError` 是「慢到该换连接」；`RuntimeError` 是这两处防御性的
+#: 「重试耗尽却无结果（不应到这里）」。程序员的错（拼错属性、类型不对）不在这条边界里 ——
+#: 让它抛出去，那才是它该有的形状（见 DECISIONS §2026-11-15-narrow-catch-is-the-third-disposition）。
+NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    http.client.HTTPException,
+    WireSlowError,
+    RetryableError,
+    RuntimeError,
+)
+
 __all__ = [
     "BODY_CHUNK",
     "BODY_IDLE_TIMEOUT_SEC",
     "BODY_PROGRESS_MIN_SEC",
     "BODY_TOTAL_TIMEOUT_SEC",
     "CONTROL_TIMEOUT_BULK_FACTOR",
+    "NET_ERRORS",
     "_POLL_WARN_AT",
     "BodyTimeoutError",
     "_get_opener",
