@@ -67,6 +67,7 @@ from worker.train.bc_core import (
     SMOOTH_WINDOW,
     early_stop_epoch,
     fire_weight_log_lines,
+    is_improvement,
     resolve_fire_pos_weight,
 )
 from worker.train.bc_core import (
@@ -623,9 +624,11 @@ def train(args) -> dict:
         epochs_done = gepoch
         # B1：选权重看**完整窗口**的滑动平均 val_loss，单点新低不再当选（2026-11-07）。
         # 在早停 break 之前判：停的那一轮也可能是平滑曲线的新低（严格 <，无 min_delta）。
+        # 2026-11-15：NaN 窗口不是候选（`is_improvement`）—— 与 `select_best_epoch` 同一判据，
+        # 否则某轮 val_loss 发散会让这里「按 history 重算」对不上。
         if len(history["val_loss"]) >= SMOOTH_WINDOW:
             smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
-            if smoothed < best_smoothed:
+            if is_improvement(smoothed, best_smoothed):
                 best_smoothed = smoothed
                 best_val = val_loss
                 best_epoch = gepoch

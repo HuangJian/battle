@@ -69,3 +69,21 @@ def test_select_best_epoch_is_not_raw_argmin() -> None:
     losses = [1.0, 2.0, 2.0, 2.0, 2.0, 1.9]
     assert min(range(len(losses)), key=losses.__getitem__) + 1 == 1
     assert select_best_epoch(losses, window=5) == 5
+
+
+def test_select_best_epoch_skips_non_finite_windows() -> None:
+    """NaN 窗口不是候选（2026-11-15）：`NaN < inf` 恒 False ⇒ 旧实现把 `best_at` 留在初值。
+
+    旧行为的具体后果不是「选得不准」，而是返回 **0** —— 调用方拿它当「epoch 0」，而
+    「没有候选」那条分支会交最后一轮 ⇒ 两者对不上（`test_bc_paddle` 的 `delivered_epoch`
+    对账就是这么红的形状）。这里前半段全是 NaN、只有最后一个窗口有限。
+    """
+    losses = [1.0, float("nan"), float("nan"), float("nan"), float("nan"), 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert select_best_epoch(losses, window=5) == 10
+    assert select_best_epoch(losses, window=5) != 0, "0 不是合法 epoch（1-based）"
+
+
+def test_select_best_epoch_with_only_non_finite_windows_is_none() -> None:
+    """一个有限窗口都没有 ⇒ None（= 「交最后一轮」），不是 0、也不是任何具体 epoch。"""
+    assert select_best_epoch([float("nan")] * 6, window=5) is None
+    assert select_best_epoch([float("inf")] * 6, window=5) is None

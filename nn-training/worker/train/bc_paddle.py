@@ -48,6 +48,7 @@ from worker.train.bc_core import (
     SMOOTH_WINDOW,
     early_stop_epoch,
     fire_weight_log_lines,
+    is_improvement,
     resolve_fire_pos_weight,
     sanitize_json,
     smoothed_val_loss,
@@ -488,9 +489,10 @@ def train(args: Any) -> dict[str, Any]:
         )
         epochs_done = gepoch
         # B1：与 bc.py 同一判据——完整窗口的滑动平均 val_loss，单点新低不当选。
+        # 2026-11-15：NaN 窗口不是候选（`is_improvement`，与 `select_best_epoch` 同一判据）。
         if len(history["val_loss"]) >= SMOOTH_WINDOW:
             smoothed = smoothed_val_loss(history["val_loss"], window=SMOOTH_WINDOW)
-            if smoothed < best_smoothed:
+            if is_improvement(smoothed, best_smoothed):
                 best_smoothed = smoothed
                 best_val = val_loss
                 best_epoch = gepoch

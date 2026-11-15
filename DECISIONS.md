@@ -6328,7 +6328,31 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **判据**：`tests/worker/test_bc_epoch_resume.py::test_ledger_value_must_be_compared_at_ledger_precision`
   —— 把现场值钉下来：`raw != round(raw, 4)`（前提）、`round(raw, 4) != approx(raw)`（这就是那个
   flake）、`round(raw, 4) == round(raw, 4)`（新口径）。谁把对账改回 `approx(原始值)` 这条就红。
-- **附带发现（未改，另记）**：`bc_core.select_best_epoch` 在「所有窗口都非有限」时返回 `0`（不是
-  `None`）——`NaN < inf` 恒 False ⇒ `best_at` 留在初始值。调用方拿 0 当「epoch 0」用，而窗口未满
-  那条分支会交最后一轮 ⇒ 两者对不上。本机 12+ 次训练没观察到 NaN（6 样本 shard 上 val_loss 会
-  剧烈跳动但有限），所以不是这次 flake 的成因；修它属于独立改动。
+- **附带发现**：`bc_core.select_best_epoch` 在「所有窗口都非有限」时返回 `0`（不是 `None`）——
+  `NaN < inf` 恒 False ⇒ `best_at` 留在初始值。本机 12+ 次训练没观察到 NaN（6 样本 shard 上
+  val_loss 会剧烈跳动但有限），所以**不是**这次 flake 的成因；已作为独立改动于同日修掉，见
+  §2026-11-15-nonfinite-window-is-not-a-candidate。
+
+## §2026-11-15-nonfinite-window-is-not-a-candidate（NaN 窗口不是候选，别让选取给出 epoch 0）
+
+- **决定**：`worker/train/bc_core.py` 新增 `is_improvement(candidate, best)`（有限且严格更小），
+  `select_best_epoch` 与两条训练循环（`bc.py` / `bc_paddle.py` 双生）都用它；`select_best_epoch`
+  在没有有限窗口时返回 **None**（= 「交最后一轮」），不再是 0。
+- **为什么**：`NaN < inf` 恒 False，于是旧实现里「所有完整窗口都含 NaN」会让 `best_at` 停在初值
+  **0** 并原样返回。0 不是合法 epoch（该函数 1-based），而调用方对 `None` 有一套既定语义
+  （「不足窗口轮次 ⇒ 交最后一轮」）。于是出现过这种分叉：训练循环那条 `if smoothed < best_smoothed`
+  同样不成立 ⇒ `best_state is None` ⇒ 走 fallback 交最后一轮（比如 6）；按 `history` 重算的
+  `select_best_epoch` 却给 0 ⇒ 交付 epoch 与账本对不上，且 `assert delivered >= SMOOTH_WINDOW`
+  直接红。
+- **为什么判据要单列一个函数**：选权重这条判据有两个消费者 —— 纯函数（可被测试/对账脚本按
+  history 重算）与训练循环（流式）。它们各写一遍比较，就会在 NaN / inf 这种边界上漂；
+  `is_improvement` 让「有没有改善」只有一个定义，双生两侧也只剩一个 import 差异。
+- **为什么不把 NaN 当成「很差」**：`float("inf")` 才是「很差」，NaN 是「这个数算不出来」——
+  把它排进候选顺序里等于给它编了一个名次；跳过才是诚实的（inf 也不该当选）。
+- **判据**：`tests/worker/test_bc_early_stop.py`
+  `test_select_best_epoch_skips_non_finite_windows`（前 5 个窗口吃 NaN、只有最后一个有限 ⇒ 选 10，
+  且**不是 0**；旧实现返回 0，先红后绿）与
+  `test_select_best_epoch_with_only_non_finite_windows_is_none`（全 NaN / 全 inf ⇒ None）。
+- **未动（另记）**：全 NaN 时会走 fallback，`meta["best_smoothed_val_loss"]` 会写成 `NaN`
+  （`round(nan,4)`），而 `sanitize_json` 只覆盖 `majority_ce`。目前没有生产/TS 消费者读这个字段
+  （只有文档与用例），且修复得动 meta 的 schema（float → null），所以不在本次范围。
