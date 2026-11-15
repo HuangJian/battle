@@ -17,7 +17,8 @@
      而**设计内生命周期**（取消 `JobCancelledError` / 热替换 `CodeChangedError` / 已走 E2 的
      `ProtocolError`）**一个都不报**（F15：往列表里灌噪音 = 没人再看这个列表）。
 
-墙钟判据只有一处上界（「立即返回」是契约），已按 `tests/test_no_sleep_as_sync.py` 的口径标注。
+「立即返回」的判据是**事件**（返回时发送还在半路），不是墙钟上界：`elapsed < 0.25s` 那种写法
+在并行门禁满载时会红，而它红的理由与代码无关（2026-11-15 换掉，见该用例 docstring）。
 """
 
 from __future__ import annotations
@@ -271,21 +272,58 @@ def test_report_error_lands_in_a_real_hub_ring(tmp_path: Path) -> None:
 # ────────────────────────── ③ 不阻塞 / 失败留痕 ──────────────────────────
 
 
-def test_report_error_returns_immediately_while_the_hub_hangs() -> None:
-    """★ G9 核心：hub 卡住 1s，`report_error` 也必须**立刻**返回（发送在 daemon 线程里）。
+def test_report_error_returns_before_the_send_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ G9 核心：调用方**不等发送完成**就返回（发送在 daemon 线程里）。
 
     破了这条就是把观测面接进了 pull 轮询的关键路径（`state.kick()` 的时序会被网络抖动拖走）。
+
+    **判据为什么不是「耗时 < 0.25s」**（2026-11-15）：那是墙钟上界，16 路 fork 满载时同一份
+    代码量到 2.0s 就红了 —— 红灯说的是「机器忙」，不是「代码同步等了网络」。真正要钉的语义
+    与机器快慢无关：**发送还卡在半路时，调用方已经回来了**。所以把发送那一发换成可控的桩
+    （进去置位、由测试放行），于是：
+      * 同步实现 ⇒ 调用方永远等不到「进去之后放行」，`done` 在 10s 内不会置位 ⇒ 红；
+      * 线程实现 ⇒ `done` 先置位、桩**仍在里面**（`finished` 未置位）⇒ 绿。
+    唯一的墙钟是 10s 的**挂起兜底**（liveness），不是延迟断言：负载只改变先后，不改变对错。
     """
-    with _FakeHub(delay=1.0) as hub:
-        t0 = time.time()
-        report_error(hub.base, TOKEN, reason=REASON, detail="Traceback …")
-        elapsed = time.time() - t0
-        # timing-ok: 契约上界（「立即返回」就是契约本身；1s 的慢 hub 只挡同步阻塞）
-        assert elapsed < 0.25, f"上报不许占调用方的关键路径：{elapsed:.3f}s"
-        assert hub.calls == [], "此刻不该已经送达（发送在线程里，1s 才回）"
-        # 后台那一发确实发出去了（不是「不阻塞 = 什么都不发」）
-        assert _wait_for(lambda: len(hub.calls) == 1, timeout=5.0), "后台线程必须真的送达"
-    assert hub.calls[0]["body"]["reason"] == REASON
+    import remote.error_report as ER
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    sent: list[dict[str, Any]] = []
+
+    def _blocking_post(base: str, token: str, payload: dict[str, Any], **_: Any) -> bool:
+        entered.set()
+        sent.append(payload)
+        try:
+            release.wait(timeout=30.0)  # 兜住挂起；正常路径由测试放行
+        finally:
+            finished.set()
+        return True
+
+    monkeypatch.setattr(ER, "post_error", _blocking_post)
+
+    done = threading.Event()
+
+    def _call() -> None:
+        report_error("http://hub.invalid:8787", TOKEN, reason=REASON, detail="Traceback …")
+        done.set()
+
+    th = threading.Thread(target=_call, daemon=True)
+    th.start()
+    try:
+        assert done.wait(timeout=10.0), "report_error 同步等了发送完成（调用方被观测面拖住）"
+        assert entered.is_set(), "发送根本没在后台跑起来"
+        # ★ 核心判据：调用方回来的时候，那一发**还没结束**（同步实现到不了这里）
+        assert not finished.is_set(), "返回时发送已完成 ⇒ 调用方等了网络"
+        assert [p["reason"] for p in sent] == [REASON]  # 「不阻塞」不等于「什么都不发」
+        assert not th.is_alive()
+    finally:
+        release.set()
+        th.join(timeout=10.0)
+    assert finished.wait(timeout=10.0), "放行之后后台那一发必须自己跑完（不是被 kill 掉的孤儿）"
 
 
 def test_report_error_is_silent_without_a_hub_and_leaves_one_line_when_dropped() -> None:
