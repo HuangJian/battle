@@ -15,6 +15,8 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers.budget import sanity_floor
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "tests" / "golden" / "print_baseline.json"
 
@@ -93,6 +95,12 @@ def test_scan_sees_the_known_production_surface() -> None:
     assert baseline.get("remote/deliver_zip.py", 0) > 0
     assert baseline.get("common/log.py", 0) > 0
     assert actual.get("remote/deliver_zip.py", 0) > 0, "扫描入口坏了（AST 没数到已知 print）"
+    # 条数地板 = 基线九成（派生，见 `tests/helpers/budget.py`）：防「扫描面掉了一半」，
+    # 与「存量多少」无关 ⇒ 清理基线时不用回填数字。（此前只有下面那条文件数下限，
+    # 而它挡不住「文件都在、AST 少数一半」。）
+    assert sum(actual.values()) >= sanity_floor(baseline), (
+        f"print 计数 {sum(actual.values())} 低于基线九成 —— 扫描面可能坏了"
+    )
     # 文件数下限只是**扫描入口的活性下限**（不是额度）：`remote/` 那批回调在 2026-11-14 迁完后
     # 从 63 掉到 44，越接近零这条越没有意义——只要还远大于「扫描器坏了」的量级（0）就够了。
     assert len(baseline) >= 25

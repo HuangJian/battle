@@ -21,6 +21,14 @@ from __future__ import annotations
 SANITY_RATIO = 0.9
 
 
+def sanity_floor_of(total: int) -> int:
+    """单个计数器的地板：该计数器基线的 9 成（向下取整）。
+
+    给「基线不是 `{文件: 整数}` 一张表」的门禁用（G6 抑制符按类别分两表、文本断言两个口径）。
+    """
+    return int(total * SANITY_RATIO)
+
+
 def sanity_floor(baseline: dict[str, int]) -> int:
     """扫描入口自检的地板：基线总和的 9 成（向下取整；空基线 ⇒ 0）。"""
-    return int(sum(baseline.values()) * SANITY_RATIO)
+    return sanity_floor_of(sum(baseline.values()))

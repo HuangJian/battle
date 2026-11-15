@@ -21,6 +21,8 @@ import tokenize
 from functools import cache
 from pathlib import Path
 
+from tests.helpers.budget import sanity_floor_of
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "tests" / "golden" / "suppression_baseline.json"
 
@@ -146,10 +148,18 @@ def test_scan_sees_the_known_surface() -> None:
     assert baseline[NOQA_F401].get("remote/offline_boot.py", 0) > 0, (
         "扫描入口坏了（re-export 壳没数到）"
     )
-    # 下面两条是**扫描健康度地板**（不是额度）：`type: ignore` 真被清到接近零之前，几十个文件里
-    # 仍有存量 ⇒ 数出来太小就说明扫描入口坏了。2026-11-14 开 `warn_unused_ignores` 清掉 111 条
-    # 无用 ignore（271 → 163，98 → 68 文件）后，地板跟着从 200/80 降到 150/60。
-    assert sum(baseline[TYPE_IGNORE].values()) >= 150
+    # 下面是**扫描健康度地板**（不是额度）：`type: ignore` 真被清到接近零之前，几十个文件里
+    # 仍有存量 ⇒ 数出来太小就说明扫描入口坏了。条数地板 = 基线九成（派生，见
+    # `tests/helpers/budget.py`）⇒ 清理基线时不必回填数字；文件数地板仍是绝对值
+    # （「十成里的几成文件」是自指，没有意义），只在 re-export 壳成批退役时需要看一眼。
+    # 比的是**实际扫描**与基线的九成（拿基线比自己比是恒等式，等于没写这条）。
+    actual = _scan()
+    assert sum(actual[TYPE_IGNORE].values()) >= sanity_floor_of(
+        sum(baseline[TYPE_IGNORE].values())
+    ), (
+        f"type: ignore 计数 {sum(actual[TYPE_IGNORE].values())} 低于基线九成"
+        " —— 扫描面可能坏了"
+    )
     assert len(baseline[TYPE_IGNORE]) >= 60
     assert not any(
         part in SKIP_DIRS

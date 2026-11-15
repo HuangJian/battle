@@ -17,6 +17,8 @@ import json
 from functools import cache
 from pathlib import Path
 
+from tests.helpers.budget import sanity_floor
+
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = ROOT / "tests" / "golden" / "private_assert_baseline.json"
 
@@ -101,7 +103,11 @@ def test_scan_sees_the_known_surface() -> None:
     actual = _scan()
     assert baseline.get("tests/remote/test_rollout_node.py", 0) > 0
     assert actual.get("tests/worker/test_rollout_volume.py", 0) > 0
-    assert sum(actual.values()) >= 500, "私有断言计数异常偏低，扫描面可能坏了"
+    # 地板 = 基线九成（派生，见 `tests/helpers/budget.py`）：它只防「扫描面坏了」，
+    # 与「存量多少」无关，所以清理基线时不用回填任何数字。
+    assert sum(actual.values()) >= sanity_floor(baseline), (
+        f"私有断言计数 {sum(actual.values())} 低于基线九成 —— 扫描面可能坏了"
+    )
     assert len(baseline) >= 100
 
 

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from tests.helpers.budget import SANITY_RATIO, sanity_floor
+from tests.helpers.budget import SANITY_RATIO, sanity_floor, sanity_floor_of
 
 
 def test_floor_is_nine_tenths_of_the_baseline() -> None:
@@ -33,3 +33,14 @@ def test_floor_follows_the_baseline_down() -> None:
 def test_floor_of_an_empty_baseline_is_zero() -> None:
     """空基线由各门禁自己的「锚文件非零」断言兜住，地板本身不该 pretend 有存量。"""
     assert sanity_floor({}) == 0
+
+
+def test_floor_of_a_single_counter_matches_the_table_form() -> None:
+    """两个入口是同一口径：`sanity_floor(table) == sanity_floor_of(sum(table))`。
+
+    为什么要有两个名字：G4/G9/G5/G3 的基线是「{文件: 整数}」一张表，G6 与文本断言是**多个
+    独立的计数器**（按类别分表 / 两个口径）。口径必须只有一份，否则两条会慢慢漂开。
+    """
+    table = {"a": 40, "b": 10}
+    assert sanity_floor(table) == sanity_floor_of(50)
+    assert sanity_floor_of(0) == 0

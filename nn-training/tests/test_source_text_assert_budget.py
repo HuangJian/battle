@@ -330,6 +330,7 @@ from pathlib import Path
 
 from tests.helpers import scan_cache
 from tests.helpers import text_asserts as TA
+from tests.helpers.budget import sanity_floor_of
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -433,8 +434,14 @@ BASELINE_FORM = 1501
 #:   `tests/test_silent_except_budget.py` 同样用 AST 扫 `*.py` 源码面（口径 B 的同一已知限边：
 #:   判据是结构计数与基线账，不是措辞；口径 A 仍 0 条，是真「行为断言」）。
 BASELINE_SRC = 1154
-#: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
-SANITY_FLOOR = (400, 200)
+#: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
+#: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
+def _floor_of_form() -> int:
+    return sanity_floor_of(BASELINE_FORM)
+
+
+def _floor_of_src() -> int:
+    return sanity_floor_of(BASELINE_SRC)
 
 
 def test_text_assert_counts_only_go_down() -> None:
@@ -442,8 +449,9 @@ def test_text_assert_counts_only_go_down() -> None:
     # 判据与口径不变；命中率坏了也只影响快慢，不影响结论。
     cache = scan_cache.Cache("text-asserts", version=TA.CACHE_VERSION, root=ROOT)
     form, src, per_file = TA.totals(ROOT, cache=cache)
-    assert form > SANITY_FLOOR[0] and src > SANITY_FLOOR[1], (
-        f"计数异常偏小（形态 {form} / 源码面 {src}）—— 扫描面或口径坏了，护栏会恒绿"
+    assert form > _floor_of_form() and src > _floor_of_src(), (
+        f"计数异常偏小（形态 {form} / 源码面 {src}，地板 {_floor_of_form()}/{_floor_of_src()}）"
+        "—— 扫描面或口径坏了，护栏会恒绿"
     )
     top = sorted(per_file.items(), key=lambda kv: -kv[1][1])[:5]
     hint = "；".join(f"{rel}={s}" for rel, (_, s) in top)
