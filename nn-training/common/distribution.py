@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import struct
@@ -55,6 +56,7 @@ from common import net_http
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
 from common.distribution_limits import status_timeout_of as status_timeout_of
+from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.hashing import sha256_file
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from common.proc import run_capture
@@ -188,6 +190,25 @@ class DistError(RuntimeError):
         self.status = status
         self.reason = reason
         self.transient = bool(transient)
+
+
+#: 节点交互能抛出的**网络层**异常面（2026-11-15，G4 窄捕；基底见 `common/errors.py`）。
+#:
+#: 本模块十来个「探活 / 探测 / 取消」出站点原本一律 `except Exception`，把
+#: 「节点没答」（连不上 / 超时 / 隧道抖动 —— 探活返回 None、探测返回 False 都是设计好的语义）
+#: 与本模块自己的 bug（回执形状变了 ⇒ `AttributeError`，字段拼错 ⇒ `KeyError`）抹成同一分支。
+#: 后者的现场表现是「全部节点不可用」：整批节点被静默排除、份额落到本地，而真因一行日志都没有。
+#: 因此这里点名：`OSError`（URLError / TimeoutError / SSLError / 10054）、
+#: `http.client.HTTPException`（`IncompleteRead` / `BadStatusLine`）、`RetryableError`、
+#: 防御性 `RuntimeError`（含本模块的 `DistError`：收工态自投，不是故障而是「本单元不需要了」）。
+#: 程序员的错不在这条边界里 —— 让它抛出去。
+#: 见 DECISIONS §2026-11-15-network-error-surface-is-a-named-tuple。
+NET_ERRORS: tuple[type[BaseException], ...] = (*_BASE_NET_ERRORS, http.client.HTTPException)
+
+#: 探活类出站点：网络面 + 回执读不出来（`200` 但 body 不是 JSON ⇒ `JSONDecodeError` /
+#: `UnicodeDecodeError`，都是 `ValueError`）。多一个成员就让探活返回「不可用」而不是崩，
+#: 这不削弱判据：形状不看字段（`AttributeError` / `KeyError`）的错仍照抛。
+PING_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
 
 
 def load_dist_config(path: str = CONFIG_PATH) -> dict | None:
@@ -562,7 +583,7 @@ def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> d
             # json.loads 返回 Any；节点 /v1/ping 契约固定为 dict。
             info: dict = json.loads(body.decode("utf-8"))
             return info
-    except Exception:
+    except PING_ERRORS:
         return None
     return None
 
@@ -580,7 +601,7 @@ def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None
         if status == 200:
             info: Any = json.loads(body.decode("utf-8"))
             return info if isinstance(info, dict) else None
-    except Exception:
+    except PING_ERRORS:
         return None
     return None
 
@@ -608,7 +629,8 @@ def is_self_node(url: str, node_id: str = "") -> bool:
         return True
     try:
         host = (urllib.parse.urlparse(url).hostname or "").lower()
-    except Exception:
+    except ValueError:
+        # `.hostname` 只在端口非法时抛（如 `http://host:abc`）：这是配置错，判「不是本机」。
         return False
     return host in ("127.0.0.1", "localhost", "::1")
 
@@ -643,7 +665,7 @@ def request_upgrade(url: str, auth_key: str, branch: str, timeout: float = 20.0)
             method="POST",
         )
         return status in (200, 202)
-    except Exception:
+    except NET_ERRORS:
         return False
 
 
@@ -818,7 +840,9 @@ def dirty_hash_files() -> list[str]:
     try:
         idx = _git_index_blobs([rel for rel, _ in entries])
         blobs = _git_cat_blobs(sorted(set(idx.values())))
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # git 不可用 / 超时（`TimeoutExpired` 是 `SubprocessError`）/ 输出格式变了（`int()` 失败）：
+        # 一律保守放行（`dirty=[]`），跨代去重护栏仍兜底防循环。别的错（本函数自己的 bug）照抛。
         return []
     dirty: list[str] = []
     for rel, content in entries:
@@ -962,9 +986,11 @@ def weights_cached_on_node(
             url.rstrip("/") + f"/v1/weights?{qs}", auth_key, timeout, method="GET"
         )
         if status == 200:
-            return bool(json.loads(body.decode("utf-8")).get("cached"))
-    except Exception:
-        pass
+            info = json.loads(body.decode("utf-8"))
+            # 形状显式判（旧 agent / 中间代理返回数组或裸值时不许把 `AttributeError` 藏进宽捕）。
+            return bool(info.get("cached")) if isinstance(info, dict) else False
+    except PING_ERRORS:
+        return False
     return False
 
 
@@ -1009,7 +1035,7 @@ def probe_weights_cached(
             headers={"X-Weights-Sha256": sha, "X-Kind": kind},
             method="GET",
         )
-    except Exception:
+    except NET_ERRORS:
         return None
     if status != 200:
         return None
@@ -1310,7 +1336,7 @@ def cancel_task(base_url: str, auth_key: str, key: str, timeout: float = 3.0) ->
             method="POST",
         )
         return bool(status == 200)
-    except Exception:
+    except NET_ERRORS:
         return False
     finally:
         set_request_tag(old_tag)
@@ -1565,8 +1591,9 @@ def _poll_result(
                 # 与「裸 404 = 路径写错」区分开。
                 raise DistError(404, f"{TASK_LOST_MARKER} (restart/purge): {detail}") from e
             raise DistError(e.code, detail) from e
-        except Exception:
+        except NET_ERRORS:
             # 瞬断（休眠/SSH 重连/隧道抖动）：结果仍在节点缓存里，睡一下继续拉。
+            # 窄捕：解包/记账里的程序员错不许伪装成「节点慢」而重试到 deadline。
             if time.monotonic() >= deadline:
                 raise
             time.sleep(min(poll_s, max(0.5, deadline - time.monotonic())))

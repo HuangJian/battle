@@ -28,6 +28,8 @@
     该批 51 → **44**（colab_bc 4→0，lifecycle 3→0），扫描地板随之下调 50 → 40。
     紧接着 `remote/hub_http.py` 的 2 处 `except Exception: pass` 也走窄捕（同一条 `NET_ERRORS`）
     ⇒ 44 → **42**；那两处原本把「探测回执读不了」与「本模块 bug」抹平，正是本条要抓的形状。
+    `common/distribution.py` 的 `weights_cached_on_node` 同批走窄捕（形状显式判 `isinstance`）
+    ⇒ 42 → **41**；同文件另 1 处（`_closer` 对任意响应对象尽力 `close()`）是第三条边界，保留。
 """
 
 from __future__ import annotations

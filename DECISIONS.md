@@ -6496,3 +6496,23 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `except Exception` ⇒ `DID NOT RAISE AttributeError` 红，还原后绿。
 - **代价（已知）**：同一条元组在两处组装，若将来新增成员要记得两处都追加。接受：两处各自负责的
   层不同（`remote/http.py` 还有 `WireSlowError`），合并回基底就得先破叶子契约。
+
+## §2026-11-15-probe-return-values-are-conclusions-not-a-catch-all-boundary
+
+- **决定**：`common/distribution.py` 的探活 / 探测 / 取消出站点窄捕到 `NET_ERRORS`，探活类再并上
+  `ValueError`（`PING_ERRORS`）：`node_ping` / `push_node_ping` / `request_upgrade` / `cancel_task` /
+  `probe_weights_cached` / `weights_cached_on_node` / `_poll_result`。G4 413 → 404、G9 42 → 41。
+- **判据**：这些函数返回 `None` / `False` 不是「这里没什么可报」而是**结论**——「这台节点本轮不可用」，
+  下游据此把它排除出分发、份额落回本地。宽捕于是把「连不上」与「我们自己的 bug」变成同一个结论，
+  且后者不留痕（同族事故：`hub_http` 探针把 `AttributeError` 读成 `PROBE_TRANSIENT`，轮询环永远
+  「还没好」）。
+- **为什么探活类要多一个 `ValueError`**：`200` 但 body 不是 JSON（`JSONDecodeError` /
+  `UnicodeDecodeError` 都是 `ValueError`）确实属于「这台节点此刻不可用」，与连不上同档；而看字段的
+  错（`AttributeError` / `KeyError`）仍照抛 —— 多出来的那个成员只放过「读不出来」，不放过「形状变了」。
+- **留下的两处**（第三条边界，不是偷懒）：`abort_active_requests` 的 `_closer` 线程对**任意**
+  `HTTPResponse` 尽力 `close()`（异常族由对端实现决定，且它在 daemon 线程里，抛出去也没人接）；
+  `fetch_task` 对「非 `DistError` 的确定性失败」的兜底（解包错种类不定，且要保留真实 message，
+  注释里写着「不标 transient」）。
+- **判据落地**：`tests/common/test_dist_ping_errors.py`（垃圾回执 → `None`；`AttributeError` /
+  `KeyError` 穿出）与 `test_dist_common_poll.py::test_poll_result_lets_a_programmer_error_through`。
+  实测把对应处理器改回 `except Exception` ⇒ 前者 `DID NOT RAISE`、后者抛 `deadline exceeded`，还原绿。

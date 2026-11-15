@@ -506,3 +506,28 @@ def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
     out = common.distribution.ping_nodes_parallel(nodes, timeout=1.0)
     assert [x is not None for x in out] == [True, True, True]
     assert seen == [("http://a", "K1"), ("http://b", "K2"), ("http://c", "K3")]
+
+
+def test_poll_result_lets_a_programmer_error_through(monkeypatch) -> None:
+    """窄捕的另一半：轮询里的程序员错不许被读成「节点慢」，重试到 deadline 再报超时。
+
+    2026-11-15 之前这里是 `except Exception`（注释写着「瞬断」）——于是 `_request` 回包之后
+    解包/记账里抛的 `AttributeError` / `KeyError` 也被当成隧道抖动，睡一下重试，直到预算耗尽抛
+    `deadline exceeded`。现场得到的是「节点跑了 X 分钟还没回结果」，真因一行都没有（与
+    `remote/hub_http.py` 探针那条同族）。改成 `NET_ERRORS` 后这类错立刻穿出去。
+    """
+
+    def buggy_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
+        raise AttributeError("'bytes' object has no attribute 'get'")
+
+    monkeypatch.setattr(common.distribution, "_request", buggy_request)
+    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
+
+    with pytest.raises(AttributeError):
+        common.distribution._poll_result(
+            "http://node",
+            "tok",
+            {"iterId": "r.1", "stage": 0, "seed": 1},
+            budget=0.05,
+            poll_s=0.01,
+        )

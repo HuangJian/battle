@@ -16,6 +16,7 @@
 
 | 日期 | 文件 | Δ | 为什么只能宽捕 |
 |---|---|---|---|
+| 2026-11-15 | `common/distribution.py` | −9（11 → 2） | 探活 / 探测 / 取消十来个出站点的失败返回值（`node_ping → None`、`weights_cached_on_node → False`）**不是「没答」而是业务结论**：宽捕把「连不上」与本模块自己的 bug 抹平后，现场表现是「全部节点突然不可用、份额落回本地」而真因无痕。改为 `NET_ERRORS`（`_BASE_NET_ERRORS` + `http.client.HTTPException`）；探活类再并上 `ValueError`（200 但 body 不是 JSON，见同文件的 `PING_ERRORS`）。留下的 2 处是**第三条边界**：`_closer`（对任意 `HTTPResponse` 尽力 `close()`，异常族由对端决定）与 `fetch_task` 的「非 `DistError` 的确定性失败」兜底（解包错种类不定，且必须保留真实 message）。判据 `tests/common/test_dist_ping_errors.py`（3 条）+ `test_dist_common_poll.py::test_poll_result_lets_a_programmer_error_through`（各自改回宽捕实测红）。 |
 | 2026-11-14 | `remote/child_proc.py` | +1（6 → 7） | `pump_lines` 把「读流异常」与「回调异常」分开：回调是**两个代理各自传进来的行解析/记账代码**（`upload_proc` / `payload_proc`），它抛什么类型这里一概不知（`ValueError` / `KeyError` / 自己的异常族），而这条边界的义务是「坏行不进账、好行照读、收尾报数」。改成具体异常＝把「未知 bug 静默变成线程崩溃」。同函数里**读流**那一侧仍是宽捕 + `pass`（那是 EOF 的回声，见该函数 docstring），所以净 +1 是**新增的一条边界**，不是旧代码放松。 |
 
 | 2026-11-15 | `remote/job_lifecycle.py` | −10（11 → 1） | 十条控制面通知的捕获面收敛成 `remote.http.NET_ERRORS`（OSError 覆盖 URLError/TimeoutError/SSLError、`HTTPException`、`WireSlowError`、两处防御性 `RuntimeError`）。**不是放松而是收紧**：原来 `AttributeError`/`TypeError`/`KeyError` 会被吞成「hub 不可达（租约兜底）」，现场永远像网络问题。留下那 1 处是 `on_drop` 回调边界（调用方传进来的删副本逻辑，异常族未知）。判据 `test_job_control_visibility.py::test_programmer_error_is_not_disguised_as_a_network_failure`（改回宽捕即红）。 |
