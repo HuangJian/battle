@@ -754,9 +754,7 @@ class RolloutDispatcher:
                         _cfp = course_fp_for_args(args)  # D14 语料血缘
                         # 节点能力握手（4 个能力位，fail-closed）拆到传输层，
                         # 见 common.distribution.check_node_capabilities。
-                        common.distribution.check_node_capabilities(
-                            args, nd_id, nd, stage_json=_sj
-                        )
+                        common.distribution.check_node_capabilities(args, nd_id, nd, stage_json=_sj)
                         manifest, files = common.distribution.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -789,6 +787,8 @@ class RolloutDispatcher:
                             if "player_level" in _ov
                             else None,
                             course_fp=_cfp,
+                            # P2：语料格式（仅 per-tick RL rollout；eval/BC 不走这条腿）。
+                            corpus_fmt=str(getattr(args, "corpus_fmt", "full") or "full"),
                             # 竞速收尾洞修复（2026-09-06）：all_settled 后竞速副本必是
                             # 输家——fetch 内部轮询立即放弃，trainer 不再等慢节点把
                             # 注定丢弃的局跑完（实测拖住发布 4.5 分钟）。

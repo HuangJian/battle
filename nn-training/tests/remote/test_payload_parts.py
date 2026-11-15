@@ -219,6 +219,26 @@ def test_take_rejects_a_different_wire_diet() -> None:
     assert parts.take(3, wire_diet=False) is not None
 
 
+def test_take_rejects_a_different_corpus_fmt() -> None:
+    """P1（plan/replay-corpus.plan.md）：full↔replay 热切换不许复用旧段。
+
+    两种格式的成员集不同（replay 没有 obs/scalars/extra）；把 full 段发给 replay 轮
+    = 一份与请求格式不符的字节，属于必须退回读盘/响亮失败的形态。
+    """
+    parts = ShardSegments()
+    parts.begin(3, wire_diet=False, corpus_fmt="replay")
+    parts.add(
+        f"rl_s{STAGE}_seed1", _files(1), {**_manifest(1), "corpus_fmt": "replay"}
+    )
+    assert parts.take(3, wire_diet=False, corpus_fmt="full") is None, "replay 段不能冒充 full"
+    assert parts.take(3, wire_diet=False, corpus_fmt="replay") is not None
+    # 缺省 corpus_fmt = full（旧调用点无感）。
+    parts2 = ShardSegments()
+    parts2.begin(4, wire_diet=False)
+    parts2.add(f"rl_s{STAGE}_seed1", _files(1), _manifest(1))
+    assert parts2.take(4, wire_diet=False) is not None
+
+
 def _npy(arr: np.ndarray) -> bytes:
     buf = io.BytesIO()
     np.save(buf, arr)
@@ -351,3 +371,60 @@ def test_publish_job_uses_the_round_segments_and_their_slim(tmp_path: Path) -> N
     assert got[f"{name}/obs.npy"] == files["obs.npy"], "段被原样采用（不是被改写后的盘）"
     # `payload_fmt` 来自**产出那些段的那份** slim（另建一份会报「未改」——日志骗人）
     assert m["payload_fmt"] == "reward+f16"
+
+
+def test_publish_job_ships_replay_converter_and_identity(tmp_path: Path) -> None:
+    """P2（plan/replay-corpus.plan.md）：replay job 的 manifest 带格式/转换器身份，
+    payload 根下发预构建转换器；full 时两者都缺席（旧字节不变）。"""
+    import hashlib
+
+    from remote.hub_client import publish_job
+
+    it_dir = tmp_path / "it1"
+    name = f"rl_s{STAGE}_seed1"
+    d = it_dir / "dist" / "node" / name
+    d.mkdir(parents=True)
+    (d / "replay.json").write_text("{}", encoding="utf-8")
+    (d / "replay_meta.json").write_text('{"nSamples": 1}', encoding="utf-8")
+    (d / "metrics.npy").write_bytes(b"m")
+    (d / "manifest.json").write_text(
+        json.dumps({"corpus_fmt": "replay", "stage": STAGE, "seed": 1}), encoding="utf-8"
+    )
+    conv = tmp_path / "replay_converter.js"
+    conv.write_bytes(b"// converter")
+    conv_sha = hashlib.sha256(conv.read_bytes()).hexdigest()
+
+    m = publish_job(
+        job_root=tmp_path / "jobs",
+        jsonl_path=tmp_path / "training_log.jsonl",
+        run_id="r",
+        it=1,
+        traj_dir=str(it_dir),
+        shard_dirs=[d],
+        commit="c" * 40,
+        code_sha256="z" * 64,
+        course="{}",
+        course_fp="f" * 64,
+        reward_formula="score",
+        formula_hash="fh",
+        metrics_version=12,
+        gamma=0.995,
+        lam=0.95,
+        mode="per-tick",
+        epochs=1,
+        mb=8,
+        lr=3e-4,
+        corpus_fmt="replay",
+        replay_converter_path=conv,
+        log=lambda _m: None,
+    )
+    assert m["corpus_fmt"] == "replay"
+    assert m["replay_converter_sha256"] == conv_sha
+    got = _members(tmp_path / "jobs" / str(m["job_id"]) / "payload.tar.xz")
+    assert got["replay_converter.js"] == b"// converter"
+    assert {f"{name}/replay.json"} <= set(got)
+    # 同 data_fp 的 full job 是另一个身份（传输格式进幂等键）。
+    from common.job_identity import idempotency_key
+
+    assert idempotency_key(m)[-1] == "replay"
+    assert len(idempotency_key({**m, "corpus_fmt": "full"})) == 5

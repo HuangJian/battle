@@ -589,6 +589,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         " metrics.npy）+ 训练输入字段存 f16；**1=默认**，0=逐字节旧行为（回退旋钮："
         "rl-config 的 rl.wire_diet）。取值进 iteration 事件的 wire.wire_diet（归因用）",
     )
+    ap.add_argument(
+        "--corpus-fmt",
+        default=_d("corpus_fmt", "full"),
+        choices=("full", "replay"),
+        help="语料运输格式（plan/replay-corpus.plan.md P2）：full=现有 obs npy（默认，"
+        "逐字节旧行为）；replay=rollout 只产 replay+非 obs 标签，worker 侧用转换器重建"
+        " obs/scalars/extra。只对 per-tick RL rollout + kind=ppo 生效；kind=iter/eval 强制 full。",
+    )
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
     # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。

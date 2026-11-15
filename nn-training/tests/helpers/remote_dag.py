@@ -266,6 +266,9 @@ LAYERS: dict[str, int] = {
     # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到
     # `common/shard.py`（两边都够得着的唯一定义处）。
     "remote.payload_slim": 0,
+    # P2 replay 语料 pre-pass（2026-11-15）：只 import `common.errors` / `common.proc`（叶子）
+    # + stdlib ⇒ **L0**。读者是 `download`(L3) 与 `hub_client`(L1)（只取 attach 辅助），边向下。
+    "remote.replay_corpus": 0,
     # R0/M0：本机权威副本的**身份映射**（2026-10-14，plan/wire-diet.plan.md §3 R0）。只 import
     # stdlib（json/hashlib/os/time/pathlib）——刻意不碰 `common.*`/`worker.*` 以外的东西，
     # 也不 import `remote.*` ⇒ **L0**（写它的 `download`(L3)/`train_core`(L4) 都在它上面）。

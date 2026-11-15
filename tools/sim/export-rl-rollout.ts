@@ -79,6 +79,8 @@ import { MASK_V6_DIM, decodeMove4, encodeMove4 } from '../../src/nn/action-space
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { OpeningController } from '../../src/nn/opening-controller'
 import { encodeOpeningAction } from '../../src/nn/opening-input'
+import { InputRecorder } from '../../src/replay/InputRecorder'
+import { serializeReplayFile } from '../../src/replay/file'
 import { evaluateCorridor } from '../../src/nn/opening-corridor'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
@@ -210,6 +212,17 @@ export const RL_SHARD_FILES_V6 = [...RL_SHARD_FILES, 'a_hold.npy', 'lp_hold.npy'
  * 缺席 = 老行为逐字节不变；加载端按文件存在性判据，缺失时补全 1。
  */
 export const RL_SHARD_FILES_OPENING = [...RL_SHARD_FILES, 'policy_mask.npy'] as const
+
+/**
+ * replay 格式（`--corpus-fmt=replay`）的 shard 成员：不产 obs/scalars/extra
+ * （worker 从 replay 重建），加 replay.json + replay_meta.json。
+ * 顺序 = `writeRlShard` 的落盘顺序（标签 → replay），与内存 `--pack-memory` 路径一致。
+ */
+const OBS_SHARD_FILES: ReadonlySet<string> = new Set(['obs.npy', 'scalars.npy', 'extra.npy'])
+export const RL_SHARD_REPLAY_EXTRA = ['replay.json', 'replay_meta.json'] as const
+export function replayShardFileNames(names: readonly string[]): string[] {
+  return [...names.filter((n) => !OBS_SHARD_FILES.has(n)), ...RL_SHARD_REPLAY_EXTRA]
+}
 
 /** 模块级 CLI 开关（runOne / packOneShard / main 共用；默认关 = 老行为逐字节不变）。 */
 let openingConnect = false
@@ -1146,6 +1159,13 @@ export function applyInitSnapshot(
   if (playerLevelOverride !== null) world.playerLevel = playerLevelOverride
 }
 
+export interface ReplayArtifact {
+  /** `.replay` 文件正文（JSON 字符串；磁盘/内存共用同一份字节）。 */
+  file: string
+  /** `replay_meta.json`（诊断/闸门用；不参与 frames 解码）。 */
+  meta: Record<string, unknown>
+}
+
 interface RunResult {
   shard: ShardData
   /** 起始分布注入的事实（未注入 = 空串 / 0 / null；manifest 只在注入时追加这三个字段）。 */
@@ -1215,6 +1235,8 @@ interface RunResult {
   startLives: number
   puGotTank: number
   puGotOther: number
+  /** `--corpus-fmt=replay` 时的逐局 replay 产物；full = null。 */
+  replay: ReplayArtifact | null
 }
 
 /** dodge 模式解析（卡 A3）：arena → l0；真实关 → off（既有 rollout 逐字节不变）。 */
@@ -1275,6 +1297,8 @@ function runOne(
    *  行为策略是 δ(a)，正确权重应为 π_new(a)，而 `engine.py` 用的是 π_new/π_old
    *  （相差 1/π_old(a)）。首 epoch ratio=1 只说明数值自洽，不说明权重正确。 */
   teacherArgmax = false,
+  /** `--corpus-fmt=replay`：逐局录制 replay（默认 full = 旧 shard 逐字节不变）。 */
+  corpusFmt: 'full' | 'replay' = 'full',
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -1346,6 +1370,11 @@ function runOne(
   }
   const openingCtrl = openingWanted ? new OpeningController({ exitPocket: true }) : null
   let openingDone = false
+  // P1（plan/replay-corpus.plan.md）：replay 格式逐局录制输入；full 不创建 recorder，
+  // 不 clone 世界、不算 tickHash ⇒ full 路径内存/字节不变。
+  const recorder = corpusFmt === 'replay' ? new InputRecorder() : null
+  const obsHasher = recorder ? new Bun.CryptoHasher('sha256') : null
+  recorder?.startNew(world)
   // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
   const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
@@ -1537,6 +1566,10 @@ function runOne(
   let t = initTick // 游戏时钟继续走：cut 吃掉 T（max_ticks 仍对游戏时钟算）
   let outcome = 'timeout'
   let decisionTicks = 0 // 决策步数（K 间隔；事件模式下含事件步——分布看 decisionReadout）
+  /** replay_meta 用：事件模式下决策 tick 不是均匀 K，必须显式记录。 */
+  const decisionTickList: number[] = []
+  /** P1 录制开销读数（只 replay 格式计时；full = 0，零开销）。 */
+  let recordMs = 0
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
   // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行、每行 METRICS_DIM 列
@@ -1545,9 +1578,14 @@ function runOne(
 
   const flushPending = (term: boolean): void => {
     if (!pending) return
-    shard.obs.push(pending.obs)
-    shard.scalars.push(pending.sc)
-    shard.extra.push(pending.ex)
+    // replay_meta 的 obsHash：与决策 obs 同序；full 路径无 hasher，零开销。
+    obsHasher?.update(pending.obs)
+    // replay 格式不保留 obs/scalars/extra（worker 用 replay 重建）；full 逐字节不变。
+    if (corpusFmt === 'full') {
+      shard.obs.push(pending.obs)
+      shard.scalars.push(pending.sc)
+      shard.extra.push(pending.ex)
+    }
     shard.aMove.push(pending.aMove)
     shard.aFire.push(pending.aFire)
     shard.lpMove.push(pending.lpMove)
@@ -1569,6 +1607,8 @@ function runOne(
 
   while (t < maxTicks) {
     if (decisionDue(t, world, gate, gateCfg)) {
+      // full 路径不分配（旧行为零额外内存）；replay 才需要显式决策 tick 列表。
+      if (corpusFmt === 'replay') decisionTickList.push(t)
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
@@ -1666,6 +1706,12 @@ function runOne(
       if (os.done) openingDone = true
     }
     sim.tick()
+    // InputRecorder 契约：post-tick、endFrame 前读输入（GameLoop 同序）。
+    if (recorder) {
+      const recT0 = performance.now()
+      recorder.recordFrame(scripted)
+      recordMs += performance.now() - recT0
+    }
     scripted.endFrame()
     t++
 
@@ -2014,8 +2060,83 @@ function runOne(
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
   }
+  // P1：replay 产物在局末统一落成同一份文本；full = null（旧路径零变化）。
+  const rec = recorder?.finalize() ?? null
+  const stageName = String((stage as { name?: unknown })?.name ?? stageIdx)
+  const replayStage = customStage || isArenaId(stageIdx) ? 0 : stageIdx
+  const replayStatus: 'clear' | 'base' | 'died' | 'timeout' =
+    outcome === 'stage_clear'
+      ? 'clear'
+      : outcome === 'base_destroyed'
+        ? 'base'
+        : outcome === 'gameover'
+          ? 'died'
+          : 'timeout'
+  const replay: ReplayArtifact | null = rec
+    ? {
+        file: serializeReplayFile({
+          source: 'sim',
+          seed,
+          sim: {
+            seed,
+            difficulty,
+            stageIndex: replayStage,
+            stageName,
+            outcome,
+            status: replayStatus,
+            maxTicks,
+          },
+          finalState: {
+            score: gatedScore,
+            lives: world.lives,
+            killCount: world.killCount,
+            ticks: t,
+          },
+          initialSnapshot: rec.snapshot,
+          frames: rec.frames,
+          totalTicks: rec.tickCount,
+          metadata: {
+            stage: replayStage,
+            stageName,
+            difficulty,
+            lives: world.lives,
+            playerLevel: world.playerLevel,
+            score: gatedScore,
+            killCount: world.killCount,
+            enemiesTotal: tel.enemyTotal,
+            playTimeMs: rec.tickCount * (1000 / 60),
+          },
+          tickHashes: rec.tickHashes,
+        }),
+        meta: {
+          version: 1,
+          corpus_fmt: 'replay',
+          stage: replayStage,
+          stageName,
+          seed,
+          difficulty,
+          k: decisionK,
+          ticks: t,
+          decisionTicks,
+          decisionTicksList: decisionTickList,
+          nSamples: shard.n,
+          obsHash: obsHasher ? `sha256:${obsHasher.digest('hex')}` : null,
+          tickHashes: rec.tickHashes.length,
+          /** P1 录制开销（recordFrame 含每 100 tick 的 worldTickHash）；full 路径不存在。 */
+          recordMs: +recordMs.toFixed(1),
+          opening: {
+            connect: openingConnect,
+            all: openingAll,
+            wanted: openingWanted,
+            done: openingDone,
+          },
+        },
+      }
+    : null
+  if (replay) replay.meta.bytes = Buffer.byteLength(replay.file, 'utf8')
   return {
     shard,
+    replay,
     initSnapshot: initSnapshotName,
     initTick,
     initCounters,
@@ -2083,24 +2204,48 @@ function visitedCellsAdd(set: Set<number>, col: number, row: number): void {
   set.add(row * GRID + col)
 }
 
-export function writeRlShard(dir: string, d: ShardData, manifest: unknown): void {
+export function writeRlShard(
+  dir: string,
+  d: ShardData,
+  manifest: unknown,
+  replay: ReplayArtifact | null = null,
+  corpusFmt: 'full' | 'replay' = 'full',
+): void {
   mkdirSync(dir, { recursive: true })
-  for (const { name, data } of shardNpyEntries(d)) {
+  for (const { name, data } of shardNpyEntries(d, corpusFmt)) {
     writeFileSync(`${dir}/${name}`, data)
+  }
+  if (replay) {
+    for (const { name, data } of replayEntries(replay)) writeFileSync(`${dir}/${name}`, data)
   }
   writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
 }
 
-/** 局末 shard → 内存 npy 字节（与 writeRlShard 同布局；sampler 热路径 / perf 对比用）。 */
-export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffer }> {
+/** replay 的两个 shard 成员（磁盘/内存同一份字节；P1 零落盘入口复用）。 */
+export function replayEntries(replay: ReplayArtifact): Array<{ name: string; data: Buffer }> {
+  return [
+    { name: 'replay.json', data: Buffer.from(replay.file, 'utf8') },
+    { name: 'replay_meta.json', data: Buffer.from(JSON.stringify(replay.meta, null, 2), 'utf8') },
+  ]
+}
+
+/**
+ * 局末 shard → 内存 npy 字节（与 writeRlShard 同布局；sampler 热路径 / perf 对比用）。
+ * `corpusFmt='replay'`：不产 obs/scalars/extra（worker 从 replay 重建），其余成员与 full 同字节。
+ */
+export function shardNpyEntries(
+  d: ShardData,
+  corpusFmt: 'full' | 'replay' = 'full',
+): Array<{ name: string; data: Buffer }> {
   const N = d.n
   if (N === 0) return []
   if (d.metrics.length !== N + 1) {
     throw new Error(`metrics row count ${d.metrics.length} != n+1=${N + 1} —— 指标行失配，拒绝打包`)
   }
-  const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
-  const scalars = new Float32Array(N * SCALAR_DIM)
-  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
+  const withObs = corpusFmt === 'full'
+  const obs = withObs ? new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD) : null
+  const scalars = withObs ? new Float32Array(N * SCALAR_DIM) : null
+  const extra = withObs ? new Float32Array(N * POLICY_EXTRA_DIM) : null
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
   // v6：第三头的动作与 logp（legacy shard 不落这两个文件 —— 消费方按文件存在性判 v6）。
@@ -2122,9 +2267,11 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   const maskDim = maskDimFor(v6)
   const mask = new Uint8Array(N * maskDim)
   for (let i = 0; i < N; i++) {
-    obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
-    scalars.set(d.scalars[i], i * SCALAR_DIM)
-    extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
+    if (obs && scalars && extra) {
+      obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
+      scalars.set(d.scalars[i], i * SCALAR_DIM)
+      extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
+    }
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
     if (aHold && lpHold) {
@@ -2141,9 +2288,13 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
     metrics.set(d.metrics[i], i * METRICS_DIM)
   }
   const out = [
-    { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
-    { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
-    { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
+    ...(obs && scalars && extra
+      ? [
+          { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
+          { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
+          { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
+        ]
+      : []),
     { name: 'a_move.npy', data: npyBytes(aMove, [N], 'u1') },
     { name: 'a_fire.npy', data: npyBytes(aFire, [N], 'u1') },
     { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },
@@ -2280,6 +2431,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   // 决策周期 K（plan/k5-rhythm.plan.md）：缺省 = 单一来源常量（10，旧行为逐字节不变）；
   // 仅课程 decision_k≠10 时由 --decision-k 显式传入（值非法 = 响亮拒，不静默回退）。
   let decisionK = DEFAULT_DECISION_K
+  // P1（plan/replay-corpus.plan.md）：语料运输格式。full = 旧 11 npy 逐字节不变；
+  // replay = 额外落 replay.json + replay_meta.json（wire 瘦身在 P2）。
+  let corpusFmt: 'full' | 'replay' = 'full'
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -2296,6 +2450,13 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--teacher-argmax') teacherArgmax = true
     else if (args[i] === '--opening-connect') openingConnect = true
     else if (args[i] === '--opening-all') openingAll = true
+    else if (args[i] === '--corpus-fmt') {
+      const v = args[++i]
+      if (v !== 'full' && v !== 'replay') {
+        throw new Error(`--corpus-fmt 只接受 full|replay，收到：${v}`)
+      }
+      corpusFmt = v
+    }
     // 分布式溯源字段（plan/distributed-rollout.md v3.3）：仅在显式传入时写入，
     // 保证本机既有调用的 manifest/_rl_report 逐字节不变。
     else if (args[i] === '--wver') wver = args[++i]
@@ -2381,6 +2542,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         decisionEvents,
         decisionK,
         teacherArgmax,
+        corpusFmt,
       )
       decisionReadouts.push(res.decisionReadout)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
@@ -2403,6 +2565,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         // greedy 采集 provenance（plan/greedy-outcome-quota rev4）：只在 --teacher-argmax
         // 时写；旧 shard 无此键 = 采样语料（逐字节不变）。trim/兄弟复用据此判模式。
         ...(teacherArgmax ? { labelMode: 'greedy' } : {}),
+        ...(corpusFmt === 'replay' ? { corpus_fmt: 'replay' } : {}),
         difficulty,
         stage: si,
         seed,
@@ -2476,9 +2639,12 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       if (res.shard.n > 0) {
         lastShardManifest = manifest
         if (packMemory && packPath) {
-          lastPackEntries = shardNpyEntries(res.shard)
+          lastPackEntries = [
+            ...shardNpyEntries(res.shard, corpusFmt),
+            ...(res.replay ? replayEntries(res.replay) : []),
+          ]
         } else {
-          writeRlShard(`${outDir}/${shardName}`, res.shard, manifest)
+          writeRlShard(`${outDir}/${shardName}`, res.shard, manifest, res.replay, corpusFmt)
         }
       }
       totalSamples += res.shard.n
@@ -2593,13 +2759,14 @@ export function main(argv: string[] = process.argv.slice(2)): void {
       // 不用 manifest 标志（标志与文件不一致时，以文件为准——加载端会因宽度对不上报错）。
       const hasHoldFiles = existsSync(`${shardDir}/a_hold.npy`)
       const hasPolicyMask = existsSync(`${shardDir}/policy_mask.npy`)
-      const names = hasHoldFiles
+      const fullNames = hasHoldFiles
         ? hasPolicyMask
           ? RL_SHARD_FILES_V6_OPENING
           : RL_SHARD_FILES_V6
         : hasPolicyMask
           ? RL_SHARD_FILES_OPENING
           : RL_SHARD_FILES
+      const names = corpusFmt === 'replay' ? replayShardFileNames(fullNames) : fullNames
       entries = names.map((name) => ({
         name,
         data: readFileSync(`${shardDir}/${name}`),

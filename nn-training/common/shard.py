@@ -33,6 +33,17 @@ SHARD_FILES = (
     "mask.npy",
 )
 
+#: replay 语料（plan/replay-corpus.plan.md P2）的额外成员：rollout 只产 replay + 非 obs 标签
+#: ⇒ 结果容器里没有 obs/scalars/extra，但多这两个文件。
+REPLAY_SHARD_EXTRA: tuple[str, ...] = ("replay.json", "replay_meta.json")
+
+
+def replay_shard_files() -> tuple[str, ...]:
+    """`corpus_fmt=replay` 的结果文件集：`SHARD_FILES` 去掉三张 obs 张量 + replay 两成员。"""
+    drop = {"obs.npy", "scalars.npy", "extra.npy"}
+    return tuple(f for f in SHARD_FILES if f not in drop) + REPLAY_SHARD_EXTRA
+
+
 #: **可选** shard 文件（2026-10-20，B1 v6）：出现了才允许，**不强制要求**。
 #:
 #: v6 的三头 shard 多落这两列（`hold` 的动作与 logp），legacy 5/2 shard 没有它们。
@@ -125,6 +136,9 @@ def _shard_files_for(manifest: dict) -> tuple:
         return BC_SHARD_FILES
     if manifest.get("collector") == "INTENT-RL" or "a_intent.npy" in manifest:
         return INTENT_SHARD_FILES
+    # replay 语料（P2）：只少 obs/scalars/extra、多 replay 两成员。旧 manifest 无该键 = full。
+    if str(manifest.get("corpus_fmt") or "full") == "replay":
+        return replay_shard_files()
     return SHARD_FILES
 
 

@@ -871,6 +871,32 @@ def _adopt_staged(
     )
 
 
+def _ensure_payload(
+    base_url: str,
+    token: str,
+    jid: str,
+    manifest: dict,
+    work_dir: Path,
+    *,
+    preloaded: dict | None = None,
+    log=lambda msg: None,
+    bundle: Any = None,
+) -> PayloadLanded:
+    """payload 落地 + replay 语料 pre-pass（P2；非 replay 原样返回，零行为变化）。
+
+    位置契约：转换必须在 D14/PPO 装载**之前**完成 —— 后面两步都要看到重建出的 obs.npy。
+    保留本名作为调用入口（`run_job` 的 patch 接缝 = `remote.worker._ensure_payload`）。
+    """
+    landed = _ensure_payload_raw(
+        base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=bundle
+    )
+    if landed is not None:
+        from remote.replay_corpus import prepass
+
+        prepass(landed.job_dir, list(landed.shard_dirs), manifest, log=log, bundle=bundle)
+    return landed
+
+
 class CodeLanded(NamedTuple):
     """code.zip 落地后的三处目录——**三处都要回传**，调用方不许自己再推导一遍。
 
@@ -888,7 +914,7 @@ class CodeLanded(NamedTuple):
     blob_root: Path
 
 
-def _ensure_payload(
+def _ensure_payload_raw(
     base_url: str,
     token: str,
     jid: str,

@@ -27,7 +27,7 @@ import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 import）
     from remote.payload_slim import ShardSlim
@@ -770,6 +770,11 @@ def publish_job(
     rollout_spec: dict | None = None,
     ts_code_sha256: str = "",
     ts_code_zip_path: str | Path | None = None,
+    # P2（plan/replay-corpus.plan.md）：语料运输格式 + trainer 预构建的 replay 转换器 bundle。
+    # replay 时必须给 converter（随 payload 附件下发，worker 只跑不建）；
+    # full 时两者都省略 ⇒ manifest/payload 逐字节旧行为。
+    corpus_fmt: str = "full",
+    replay_converter_path: str | Path | None = None,
     # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `biz.plan.dump_plan`
     # 规范序列化）。节点靠它自主跑完 it+1..end_it——payload 必须带此文件，manifest 记
     # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
@@ -874,7 +879,7 @@ def publish_job(
     tmp_extra_dir = job_root_p / ".extra_tmp"
     # ⚠ 这个 mkdir 刻意**挪到守卫之后**（下方 4b）：守卫要求「拒发时不留任何痕迹」，
     # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
-    m = {
+    m: dict[str, Any] = {
         "proto": 1,
         "runId": run_id,
         "it": it,
@@ -911,6 +916,8 @@ def publish_job(
         "slim": bool(slim),
         "data_fp": fp,
         "payload_sha256": "",
+        # P2：语料格式进身份（full 省略 = 旧 job_id 逐字节不变；必须在 make_job_id 之前）。
+        **({"corpus_fmt": "replay"} if str(corpus_fmt or "full") == "replay" else {}),
     }
     # job 身份：幂等键的五个分量在上面那份字面量里就齐了（下面只补**非键**字段），
     # 所以刻意在这里算出来——守卫要在**任何写盘之前**用它。
@@ -935,6 +942,10 @@ def publish_job(
             "处置：给其中一门课不同的课程文件（改注释也算），或换 runId 重启那条腿。"
         )
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
+    # trainer 预构建的转换器 bundle：随 payload 根下发（worker 只跑不建；full = no-op）。
+    from remote.replay_corpus import attach_converter_for
+
+    attach_converter_for(extra_files, tmp_extra_dir, corpus_fmt, replay_converter_path or "", m)
     if rollout_spec is not None:
         m["ts_code_sha256"] = str(ts_code_sha256)
         m["rollout"] = rollout_spec

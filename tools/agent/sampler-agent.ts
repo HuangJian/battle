@@ -1645,6 +1645,9 @@ async function runGame(
   // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   // 仅 mode=bc-v6 消费；legacy bc / rollout 保持原行为。
   labelMode: string = 'argmax',
+  // P2（plan/replay-corpus.plan.md）：`replay` = 导出器逐局录 replay、不产 obs/scalars/extra。
+  // 只对 per-tick RL rollout 生效（eval/BC/intent/goal 由 /v1/task 提前 400，强制 full）。
+  corpusFmt: 'full' | 'replay' = 'full',
   // 取消信号（/v1/cancel）：abort ⇒ 杀子进程 / 回收长驻 worker，结果不再回包。
   signal?: AbortSignal,
   // 接单时刻：透给导出器，让它在打包时自己写 manifest.elapsedSec
@@ -1765,6 +1768,9 @@ async function runGame(
         if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
         // Hybrid opening：rollout 也套同一个 controller（policy_mask 由导出器落）。
         if (openingConnect) args.push('--opening-connect')
+        // P2：replay 语料（仅 per-tick RL rollout；intent/goal 已在 /v1/task 拒收）。
+        if (corpusFmt === 'replay' && !isIntentRollout && !isGoalRollout)
+          args.push('--corpus-fmt', 'replay')
         // M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2，导出器端四守卫）。
         if (stageJson) args.push('--stage-json', stageJson)
         if (livesOverride) args.push('--lives-override', livesOverride)
@@ -2021,6 +2027,9 @@ export function taskKey(
   slm = '',
   // Hybrid opening：bare / hybrid 是不同局，仅激活时进 `:hybridOpen`。
   oc = '',
+  // replay 语料（plan/replay-corpus.plan.md P2）：同 (stage,seed) 的 full/replay 是不同
+  // 产物，仅 replay 时进 `:cfr` 后缀（full 键逐字节不变）。
+  cf = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -2028,7 +2037,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}${oc ? ':hybridOpen' : ''}`
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}${lm ? `:lm${lm}` : ''}${sso ? ':skipSteelShots' : ''}${bbo ? ':breakBricks' : ''}${suf ? ':suppressUselessFire' : ''}${slm ? ':suppressLeadMissFire' : ''}${oc ? ':hybridOpen' : ''}${cf ? ':cfr' : ''}`
 }
 
 function beginTask(
@@ -2071,6 +2080,8 @@ function beginTask(
   openingConnect = false,
   // v6 BC 标签来源（argmax/sampled）；legacy bc/rollout 忽略。
   labelMode: string = 'argmax',
+  // P2：`replay` = 导出器逐局录 replay、不产 obs/scalars/extra（仅 per-tick RL rollout）。
+  corpusFmt: 'full' | 'replay' = 'full',
 ): void {
   const task = newInflightTask(stage, seed)
   inflight.set(key, task)
@@ -2104,6 +2115,7 @@ function beginTask(
     suppressLeadMissFire,
     openingConnect,
     labelMode,
+    corpusFmt,
     task.signal,
     task.startedAt,
   )
@@ -2464,6 +2476,20 @@ async function handle(req: Request): Promise<Response> {
     const suppressLeadMissFire = url.searchParams.get('suppressLeadMissFire') === '1'
     // Hybrid opening：评估/rollout 共用（缺省 = 老行为）。
     const openingConnect = url.searchParams.get('openingConnect') === '1'
+    // P2（plan/replay-corpus.plan.md）：`?corpusFmt=replay` 让 rollout 只产 replay+标签。
+    // 值非法 = 400；eval/BC/intent/goal 强制 full（请求 replay 直接拒，不静默降级）。
+    const cfRaw = url.searchParams.get('corpusFmt')
+    if (cfRaw !== null && cfRaw !== 'full' && cfRaw !== 'replay')
+      return jsonResponse({ error: `corpusFmt invalid: ${cfRaw}` }, 400)
+    const corpusFmt: 'full' | 'replay' = cfRaw === 'replay' ? 'replay' : 'full'
+    if (
+      corpusFmt === 'replay' &&
+      (mode === 'eval' || mode === 'bc' || mode === 'bc-v6' || kind === 'intent' || kind === 'goal')
+    )
+      return jsonResponse(
+        { error: 'corpusFmt=replay 只支持 per-tick RL rollout（eval/BC/intent/goal 强制 full）' },
+        400,
+      )
     if (suppressUselessFire && suppressLeadMissFire)
       return jsonResponse(
         { error: 'suppressUselessFire 与 suppressLeadMissFire 同机制，不得同时开启' },
@@ -2504,6 +2530,7 @@ async function handle(req: Request): Promise<Response> {
       suppressUselessFire ? '1' : '',
       suppressLeadMissFire ? '1' : '',
       openingConnect ? '1' : '',
+      corpusFmt === 'replay' ? 'replay' : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2559,6 +2586,7 @@ async function handle(req: Request): Promise<Response> {
         suppressLeadMissFire,
         openingConnect,
         labelMode,
+        corpusFmt,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -2610,6 +2638,7 @@ async function handle(req: Request): Promise<Response> {
           suppressLeadMissFire,
           openingConnect,
           labelMode,
+          corpusFmt,
           task.signal,
           task.startedAt,
         )
@@ -2685,6 +2714,8 @@ async function handle(req: Request): Promise<Response> {
     const sufPoll = url.searchParams.get('suppressUselessFire') === '1' ? '1' : ''
     const slmPoll = url.searchParams.get('suppressLeadMissFire') === '1' ? '1' : ''
     const ocPoll = url.searchParams.get('openingConnect') === '1' ? '1' : ''
+    // P2：replay 语料键后缀（与提交端同配方；缺席 = 老键不变）。
+    const cfPoll = url.searchParams.get('corpusFmt') === 'replay' ? 'replay' : ''
     const key = taskKey(
       iterId,
       mode,
@@ -2701,6 +2732,7 @@ async function handle(req: Request): Promise<Response> {
       sufPoll,
       slmPoll,
       ocPoll,
+      cfPoll,
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2857,6 +2889,10 @@ async function handle(req: Request): Promise<Response> {
       suppressLeadMissFireSupport: true,
       // Hybrid opening：`/v1/task?openingConnect=1` 时 eval/rollout 拼 --opening-connect。
       openingConnectSupport: true,
+      // replay 语料支持位（plan/replay-corpus.plan.md P2）：`?corpusFmt=replay` 时
+      // export-rl-rollout 逐局录 replay、不产 obs/scalars/extra。旧 agent 无此字段 ⇒
+      // 训练侧只在有此能力位的节点上派 replay 任务（fail-closed，同 decisionKSupport）。
+      replayCorpusSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,

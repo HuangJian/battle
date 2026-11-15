@@ -44,6 +44,10 @@ from common.shard import (
 #: 允许降精度传输的**文件名**（由字段清单派生：读端 `_RL_SHARD_SPEC` 里 key → `<key>.npy`）。
 F16_FILES: frozenset[str] = frozenset(f"{k}.npy" for k in RL_F16_FIELDS)
 
+#: `corpus_fmt=replay` 时**不进 payload** 的三张张量（worker 用 replay 重建；
+#: plan/replay-corpus.plan.md D2）。只在请求 replay 时启用；full 请求一律不 DROP。
+REPLAY_DROP_FILES: frozenset[str] = frozenset({"obs.npy", "scalars.npy", "extra.npy"})
+
 #: `METRICS_DIM` 缓存（`biz.reward_library` 是重模块，import 期不进包）。
 _METRICS_DIM = 0
 
@@ -170,12 +174,15 @@ class ShardSlim:
         it: int,
         metrics_version: int,
         formula_hash: str,
+        corpus_fmt: str = "full",
         log: Callable[[str], None] = lambda _m: None,
     ) -> None:
         self.reward_spec = reward_spec
         self.it = int(it)
         self.metrics_version = int(metrics_version)
         self.formula_hash = str(formula_hash or "")
+        #: `replay` 时 DROP obs/scalars/extra（worker pre-pass 重建）；缺省 full = 旧字节。
+        self.corpus_fmt = str(corpus_fmt or "full")
         self.log = log
         self.n_reward_dirs = 0
         self.n_untouched_dirs = 0
@@ -196,6 +203,13 @@ class ShardSlim:
         got = self._kind.get(src.name)
         if got is not None:
             return got
+        # 请求格式与 shard 自述必须一致（full/replay 不混包）。旧 shard 没有该键 = full。
+        declared = str(src.manifest().get("corpus_fmt") or "full")
+        if declared != self.corpus_fmt:
+            raise ProtocolError(
+                f"{src.name}: shard corpus_fmt={declared} != 本轮请求 {self.corpus_fmt}"
+                "——拒绝把两种格式混进同一份 payload"
+            )
         if not src.has(METRICS_NAME):
             got = "skip:non-rl"
         elif src.has(REWARD_NAME):
@@ -221,6 +235,10 @@ class ShardSlim:
     def _member(self, src: _MemberSource, filename: str) -> MemberBytes:
         if self._kind_of(src) != "slim":
             return None
+        # replay：三张 obs 张量不进 payload（worker pre-pass 重建）。必须排在 f16 之前——
+        # scalars/extra 也在 F16_FILES 里，先量化再丢弃是白付一次算术。
+        if self.corpus_fmt == "replay" and filename in REPLAY_DROP_FILES:
+            return DROP_MEMBER
         if filename == METRICS_NAME:
             if self.reward_spec is None:
                 return None  # 缺 spec ⇒ P1 不做（照旧带 metrics，逐字节旧行为）
@@ -297,6 +315,11 @@ class ShardSlim:
                 "——写盘端行构造与列常量脱钩（同一版本内的 bug），拒绝打包"
             )
         n_obs = src.obs_rows()
+        # replay shard 没有 obs.npy（它正是被 DROP 的那张）⇒ 用 manifest 的 nSamples 对账。
+        if n_obs is None and self.corpus_fmt == "replay":
+            raw_n = manifest.get("nSamples")
+            if isinstance(raw_n, int) and not isinstance(raw_n, bool) and raw_n >= 0:
+                n_obs = raw_n
         if n_obs is not None and metrics.shape[0] != n_obs + 1:
             raise ProtocolError(
                 f"{src.name}: metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}"
@@ -324,6 +347,8 @@ class ShardSlim:
     def fmt(self) -> str:
         """本轮 payload 形态自述（进 job manifest 的 `payload_fmt`）：`reward+f16` / `f16` / 空。"""
         parts: list[str] = []
+        if self.corpus_fmt == "replay":
+            parts.append("replay")
         if self.n_reward_dirs:
             parts.append("reward")
         if self.n_f16_files:
@@ -346,6 +371,7 @@ def build_slim(
     it: int = 0,
     metrics_version: int = 0,
     formula_hash: str = "",
+    corpus_fmt: str = "full",
     log: Callable[[str], None] = lambda _m: None,
 ) -> ShardSlim:
     """`ShardSlim` 的工厂（调用方只 import 它 —— 留出以后换实现的口）。
@@ -367,8 +393,9 @@ def build_slim(
         it=it,
         metrics_version=metrics_version,
         formula_hash=formula_hash,
+        corpus_fmt=corpus_fmt,
         log=log,
     )
 
 
-__all__ = ["F16_FILES", "ShardSlim", "build_slim"]
+__all__ = ["F16_FILES", "REPLAY_DROP_FILES", "ShardSlim", "build_slim"]

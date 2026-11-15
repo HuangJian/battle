@@ -152,6 +152,72 @@ def test_round_trip_drops_metrics_and_ships_reward(tmp_path: Path) -> None:
     assert slim.fmt == "reward+f16", slim.fmt_line()
 
 
+def _write_replay_shard(root: Path, name: str, n: int) -> Path:
+    """replay 形态的 per-tick shard：没有 obs/scalars/extra，多 replay 两成员。"""
+    d = _write_rl_shard(root, name, n)
+    for fname in ("obs.npy", "scalars.npy", "extra.npy"):
+        (d / fname).unlink()
+    (d / "replay.json").write_text("{}", encoding="utf-8")
+    (d / "replay_meta.json").write_text("{}", encoding="utf-8")
+    man = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    man["corpus_fmt"] = "replay"
+    (d / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    return d
+
+
+def test_replay_corpus_drops_obs_tensors(tmp_path: Path) -> None:
+    """P2（plan/replay-corpus.plan.md）：replay 请求 ⇒ obs/scalars/extra 不进 payload。
+
+    其余 wire-diet 变换照旧：metrics → reward、lp_* → f16；replay 两成员原样保留。
+    """
+    src = tmp_path / "src"
+    shard = _write_replay_shard(src, "rl_s2000_seed1", 12)
+    out = tmp_path / "payload.tar.xz"
+    slim = build_slim(
+        reward_spec=_spec(),
+        it=IT,
+        metrics_version=METRICS_VERSION,
+        corpus_fmt="replay",
+    )
+    _pack([shard], out, slim)
+    _m, dirs = unpack_payload(out, tmp_path / "un")
+    got = Path(dirs[0])
+
+    for fname in ("obs.npy", "scalars.npy", "extra.npy"):
+        assert not (got / fname).exists(), f"replay 请求不许带 {fname}"
+    assert (got / "replay.json").exists() and (got / "replay_meta.json").exists()
+    assert not (got / "metrics.npy").exists()
+    assert (got / REWARD_NAME).exists()
+    assert np.load(got / "lp_move.npy").dtype == np.float16
+    assert slim.fmt == "replay+reward+f16", slim.fmt_line()
+
+
+def test_mixed_corpus_fmt_is_rejected(tmp_path: Path) -> None:
+    """请求 full 却收到 replay shard ⇒ 响亮拒收（绝不把两种格式混进同一份 payload）。"""
+    src = tmp_path / "src"
+    shard = _write_replay_shard(src, "rl_s2000_seed1", 12)
+    slim = build_slim(
+        reward_spec=_spec(),
+        it=IT,
+        metrics_version=METRICS_VERSION,
+        corpus_fmt="full",
+    )
+    with pytest.raises(ProtocolError, match="corpus_fmt"):
+        _pack([shard], tmp_path / "payload.tar.xz", slim)
+
+
+def test_full_request_keeps_replay_json_audit_artifact(tmp_path: Path) -> None:
+    """请求 full 时，目录里的 replay.json 只是审计产物 —— 一律不 DROP。"""
+    src = tmp_path / "src"
+    shard = _write_rl_shard(src, "rl_s2000_seed1", 12)
+    (shard / "replay.json").write_text('{"audit":1}', encoding="utf-8")
+    out = tmp_path / "payload.tar.xz"
+    _pack([shard], out, _slim())
+    _m, dirs = unpack_payload(out, tmp_path / "un")
+    got = Path(dirs[0])
+    assert (got / "replay.json").read_text(encoding="utf-8") == '{"audit":1}'
+
+
 def test_only_adds_what_the_reader_contract_names(tmp_path: Path) -> None:
     """⑤ 加字段/改名只改一边 ⇒ 这里红：`RL_F16_FIELDS` 必须是装载规格里的 **f32** 字段。"""
     for key in RL_F16_FIELDS:

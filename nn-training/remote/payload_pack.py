@@ -172,9 +172,14 @@ class ShardSegments:
         self.it = -1
         #: 建账时的 `wire_diet`（见不变量 3）。
         self.wire_diet = False
+        #: 建账时的语料格式（`full` / `replay`；plan/replay-corpus.plan.md P1）。
+        #: 格式不同 = 段里的成员集不同（replay 没有 obs/scalars/extra），不许互相冒充。
+        self.corpus_fmt = "full"
 
     # ------------------------------------------------------------ 轮生命周期
-    def begin(self, it: int, *, wire_diet: bool, slim: Any = None) -> None:
+    def begin(
+        self, it: int, *, wire_diet: bool, slim: Any = None, corpus_fmt: str = "full"
+    ) -> None:
         """切到第 `it` 轮（同一 it 重复调用无副作用 —— 动态采集一轮里有多次派发）。
 
         `slim` 由调用方（`trainer/rollout_phase.begin_payload_parts`）建好传进来：本模块是
@@ -196,6 +201,7 @@ class ShardSegments:
             self._slim = slim
             self.it = it
             self.wire_diet = bool(wire_diet)
+            self.corpus_fmt = str(corpus_fmt or "full")
 
     # ------------------------------------------------------------ dispatch 回调
     def add(self, name: str, files: Mapping[str, bytes], manifest: Mapping) -> None:
@@ -261,14 +267,21 @@ class ShardSegments:
             return list(self._metrics.values())
 
     # ------------------------------------------------------------ 打包读取
-    def take(self, it: int, *, wire_diet: bool) -> tuple[Mapping[str, bytes], Any] | None:
-        """本轮可用的 `(presegmented, slim)`；轮号或开关对不上 / 一个段都没有 ⇒ `None`。
+    def take(
+        self, it: int, *, wire_diet: bool, corpus_fmt: str = "full"
+    ) -> tuple[Mapping[str, bytes], Any] | None:
+        """本轮可用的 `(presegmented, slim)`；轮号/开关/语料格式对不上或没有段 ⇒ `None`。
 
         返回的是**浅拷贝**（值是不可变 bytes，拷贝只复制引用）：调用方（`publish_job`）
         不该拿到一个还在被 dispatch 线程写的字典。
         """
         with self._lock:
-            if int(it) != self.it or bool(wire_diet) != self.wire_diet or not self._parts:
+            if (
+                int(it) != self.it
+                or bool(wire_diet) != self.wire_diet
+                or str(corpus_fmt or "full") != self.corpus_fmt
+                or not self._parts
+            ):
                 return None
             return dict(self._parts), self._slim
 

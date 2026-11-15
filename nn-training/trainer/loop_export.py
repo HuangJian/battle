@@ -44,12 +44,14 @@ import 后，陈旧的 `trainer.loop_steps.<名字>` 会**响亮** `AttributeErr
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
 
 import common.distribution
 from common.log import log
+from common.proc import run_capture
 from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from remote import weights_standard
 from worker.archive import backup_weights
@@ -69,6 +71,12 @@ class TrainingExport:
     #: 本簇自己的懒建缓存：写在这里、被 `TrainingRemote` 读（见头注「跨模块槽位」）。
     _ts_code_sha256: Any
     _ts_code_zip_path: Any
+    #: P2（plan/replay-corpus.plan.md）：replay 转换器 bundle（trainer 侧预构建，
+    #: 随 kind=ppo job 附件下发；worker 只跑不建）。
+    _replay_converter_sha256: Any
+    _replay_converter_path: Any
+    #: 训练进程的 bun 可执行（组合根注入；build 转换器用）。
+    bun: Any
 
     #: 兄弟混入的方法（混入常态：在组合实例上解析）——声明类型，理由同 `trainer/loop_volume.py`。
     _remote_ppo: Any
@@ -96,6 +104,46 @@ class TrainingExport:
         )
         self._ts_code_sha256 = sha
         self._ts_code_zip_path = zp
+
+    def _ensure_replay_converter(self, job_root: str, *, log: Any) -> tuple[str, str]:
+        """P2：把 `tools/sim/replay-to-shard.ts` 预构建成单文件 Node bundle，返回 `(path, sha256)`。
+
+        为什么在 trainer 侧建（plan D5）：2 vCPU 的 PPO worker 不该付 `bun build` 的
+        5–10 s；trainer 有 bun、有同源 TS 树。bundle 随 kind=ppo job 的 payload 附件下发，
+        worker 只跑不建。缓存键 = 进程内一份（源码在训练进程生命周期内不变；实验臂换代码
+        会换 runId/进程，不会跨版本复用）。
+        """
+        cached = str(getattr(self, "_replay_converter_path", "") or "")
+        if cached and Path(cached).exists():
+            return cached, str(getattr(self, "_replay_converter_sha256", "") or "")
+        repo_root = Path(__file__).resolve().parents[2]
+        out_dir = Path(self._traj_root) / ".cache" / "replay_converter"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / "replay-to-shard.node.js"
+        tmp = out_dir / "replay-to-shard.node.js.tmp"
+        bun = str(self.bun or "bun")
+        p = run_capture(
+            [
+                bun,
+                "build",
+                "tools/sim/replay-to-shard.ts",
+                "--target=node",
+                "--outfile",
+                str(tmp),
+            ],
+            cwd=repo_root,
+        )
+        if p.returncode != 0:
+            raise SystemExit(
+                f"[run_rl] replay 转换器 bundle 构建失败（bun build rc={p.returncode}）："
+                f"{(p.stderr or p.stdout)[-800:]}"
+            )
+        os.replace(tmp, out)
+        sha = hashlib.sha256(out.read_bytes()).hexdigest()
+        self._replay_converter_path = str(out)
+        self._replay_converter_sha256 = sha
+        log(f"[run_rl] replay 转换器 bundle: {out.name} sha={sha[:12]}… ({out.stat().st_size} B)")
+        return str(out), sha
 
     def _volume_plan_block(self, it: int) -> dict | None:
         """计划要带上的**动态采集块**（`target_transitions > 0` 时；见 `biz/volume_waves`）。

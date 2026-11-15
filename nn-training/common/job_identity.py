@@ -29,7 +29,7 @@ from pathlib import Path
 
 
 def idempotency_key(manifest: dict) -> tuple:
-    """D1 幂等键 = (runId, **course_fp**, it, init_weights_fp, data_fp)。云 worker 崩溃
+    """D1 幂等键 = (runId, **course_fp**, it, init_weights_fp, data_fp[, corpus_fmt])。云 worker 崩溃
     重拉同一 job 时按此去重；hub 账本记 job 状态，不重复发包已完成 job。
 
     ★ `course_fp` 是 2026-09-24 加的（plan/job-identity-collision.plan.md）：原来的四个
@@ -45,13 +45,19 @@ def idempotency_key(manifest: dict) -> tuple:
     ⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
     （`<discover-root>/<目录名>`，= 课程文件 stem）——本键只用来分开身份，不用来路由。
     """
-    return (
+    key: tuple[object, ...] = (
         manifest["runId"],
         manifest["course_fp"],
         manifest["it"],
         manifest["init_weights_fp"],
         manifest["data_fp"],
     )
+    # P2（plan/replay-corpus.plan.md）：传输格式进身份（同 data_fp 的 full/replay 两种包
+    # 不能当同一单）。**full 省略该分量** ⇒ 旧 job_id 逐字节不变。
+    fmt = str(manifest.get("corpus_fmt") or "full")
+    if fmt != "full":
+        key = (*key, fmt)
+    return key
 
 
 def job_id(manifest: dict) -> str:

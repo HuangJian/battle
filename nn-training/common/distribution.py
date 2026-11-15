@@ -1306,6 +1306,14 @@ def check_node_capabilities(
             f"node {node_id} 缺 decisionKSupport 能力位（旧 agent）——"
             f"K={dk} 任务被拒；不降级（升级 agent 后自动加入）",
         )
+    if str(getattr(args, "corpus_fmt", "full") or "full") == "replay" and not ping.get(
+        "replayCorpusSupport"
+    ):
+        raise DistError(
+            0,
+            f"node {node_id} 缺 replayCorpusSupport 能力位（旧 agent）——"
+            "replay 语料任务被拒；升级 sampler-agent 后自动加入（fail-closed，不降级成 full）",
+        )
     if bool(getattr(args, "rollout_argmax", False)) and not ping.get(
         "greedyRolloutSupport"
     ):
@@ -1405,6 +1413,11 @@ def fetch_task(
     # export-eval-game 拼 `--opening-connect`。仅激活时透传；taskKey 含
     # `:hybridOpen` 后缀（bare/hybrid 缓存隔离）。缺省 False = 老行为逐字节不变。
     opening_connect: bool = False,
+    # 语料运输格式（plan/replay-corpus.plan.md P2）：`replay` ⇒ agent 给
+    # export-rl-rollout 拼 `--corpus-fmt replay`（不产 obs/scalars/extra）。
+    # 仅 rollout 路径；eval/BC/intent/goal 由 agent 端 400 拒收（强制 full）。
+    # 缺省 full = 老 agent/老 URL 逐字节不变；taskKey 含 `:cfr` 后缀（缓存隔离）。
+    corpus_fmt: str = "full",
     # 键回调：请求发出前把 agent 认可的 taskKey 交回调用方。分配超时取消
     # （/v1/cancel）必须与提交端逐字节同键，故由这里统一算，调用方不再复制配方。
     on_key: Callable[[str], None] | None = None,
@@ -1483,6 +1496,9 @@ def fetch_task(
     # Hybrid opening：仅激活时透传（缺席 = 老 agent 照旧）。
     if opening_connect:
         params["openingConnect"] = "1"
+    # replay 语料：仅 replay 时透传（缺席 = 老 agent 照旧，URL 逐字节不变）。
+    if str(corpus_fmt or "full") == "replay":
+        params["corpusFmt"] = "replay"
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
@@ -1513,6 +1529,7 @@ def fetch_task(
                 str(params.get("suppressUselessFire", "")),
                 str(params.get("suppressLeadMissFire", "")),
                 str(params.get("openingConnect", "")),
+                str(params.get("corpusFmt", "")),
             )
         )
     qs = urllib.parse.urlencode(params)
@@ -1602,6 +1619,9 @@ def _poll_result(
     # v6 BC：labelMode 进提交端 taskKey 后缀，轮询端必须同配方（否则 async 必 404）。
     if params.get("labelMode"):
         qparams["labelMode"] = params["labelMode"]
+    # replay 语料：`corpusFmt` 进提交端 taskKey 后缀 `:cfr`，轮询端必须同配方。
+    if params.get("corpusFmt"):
+        qparams["corpusFmt"] = params["corpusFmt"]
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(POLL_MIN_BUDGET_SEC, budget)
     while True:

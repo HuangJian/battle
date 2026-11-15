@@ -30,6 +30,9 @@ def task_key(
     # Hybrid opening：同一 (stage, seed) 的 bare / hybrid 是不同局 ⇒ 仅激活时进
     # `:hybridOpen`（老键逐字节不变）。
     opening_connect: str = "",
+    # replay 语料（plan/replay-corpus.plan.md P2）：同 (stage, seed) 的 full/replay 是
+    # 不同产物 ⇒ 仅 replay 时进 `:cfr`（full 键逐字节不变）。
+    corpus_fmt: str = "",
 ) -> str:
     if stage_json_hash and course_fp:
         base = f"{iter_id}:{mode}:{kind}:{stage}:{seed}:{stage_json_hash}:{course_fp[:16]}"
@@ -49,4 +52,5 @@ def task_key(
         + (":suppressUselessFire" if suppress_useless_fire else "")
         + (":suppressLeadMissFire" if suppress_lead_miss_fire else "")
         + (":hybridOpen" if opening_connect else "")
+        + (":cfr" if corpus_fmt else "")
     )

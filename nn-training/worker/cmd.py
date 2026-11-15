@@ -96,6 +96,10 @@ def build_rollout_cmd(
         # 普通 rollout 不置位 ⇒ 命令逐字节不变。TS 侧据此写 manifest labelMode。
         if bool(getattr(args, "rollout_argmax", False)):
             cmd.append("--teacher-argmax")
+        # P2（plan/replay-corpus.plan.md）：replay 语料只产 replay+标签（不产 obs 三张）。
+        # 只在显式 replay 时追加 ⇒ full 命令逐字节不变。
+        if str(getattr(args, "corpus_fmt", "full") or "full") == "replay":
+            cmd += ["--corpus-fmt", "replay"]
         # goal-nn 卡 A2/A3：玩具奖励臂 / dodge 模式覆盖（''=不传，导出器按 stage 解析默认）。
         # A2 已废（plan/rl-training-config.md §4：奖励由课程配置公式驱动，TS 不再算
         # reward）——不再追加 --reward；--dodge 保留透传。
