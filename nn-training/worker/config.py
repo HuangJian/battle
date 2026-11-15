@@ -86,6 +86,12 @@ from biz.course_spec import (
     STAGE_JSON_MAX_BYTES as STAGE_JSON_MAX_BYTES,
 )
 from biz.course_spec import (
+    AutonomousCloudOverridesBlock as AutonomousCloudOverridesBlock,
+)
+from biz.course_spec import (
+    CloudSamplingProfile as CloudSamplingProfile,
+)
+from biz.course_spec import (
     CourseConfig as CourseConfig,
 )
 from biz.course_spec import (

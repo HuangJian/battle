@@ -8,6 +8,51 @@
 
 ---
 
+## §76 课程级云端采样覆盖 `autonomous_cloud_overrides`（GPU/TPU 分档；2026-11-15）
+
+**背景**：同一门课程会在 GPU / TPU 云机之间交替训练（用户 2026-11-15 更正）。设备不同 ⇒ 每轮
+能采的局数/窗口不同，课程需要**按设备各一套**采集策略；同时有覆盖块时 notebook 的
+`sample_mult` / `epoch_mult` 不再生效（否则同一档被乘两次）。
+
+**课程形状**
+
+```jsonc
+"autonomous_cloud_overrides": {
+  "gpu": { "target_transitions": 24576, "rotation_mode": "even", "rotation_per_it": 7 },
+  "tpu": { "target_transitions": 24576, "rotation_mode": "pinned", "rotation_per_it": 2,
+           "rotation_pinned": [2033, 2034] }
+}
+```
+
+- 每档**自包含**：`target_transitions`（StrictInt > 0）、`rotation_mode`（`even` / `pinned`）、
+  `rotation_per_it`（even ≥1，pinned ≥0）；pinned 必须带非空 `rotation_pinned`。
+- 档名是**设备类别**不是机器：`cuda*` → `gpu`，`tpu` / `xla*` → `tpu`；CPU/未知设备不选档。
+- 块在场 ⇒ 课程必须 `mode=per-tick`、顶层 `target_transitions > 0`、顶层 `rotation_mode` 非空
+  （顶层是 hub/导出用的基线；档在运行时整体替换 target + rotation）。
+- 导出计划必须带 `est_s_all`（档窗口重解 volume 用）；缺 → 执行面 `ProtocolError`。
+
+**执行面**
+
+- `remote/plan_run._sampling_profile(ctx)` 在**首轮前**按 `ctx.device` 选档并缓存；块里没有当前
+  设备档 ⇒ `ProtocolError`（不静默回落）。
+- 选中档 ⇒ `ctx.sample_mult = ctx.epoch_mult = 1.0` + 一行「忽略 CFG.sample_mult/epoch_mult」；
+  CPU/未知设备保持 notebook 倍数。
+- `worker/cloud_sampling.plan_for_profile` 把顶层计划换成档计划：`volume` 按 `est_s_all` 重解窗口
+  （按比例抬高 topup cap），`rotation` 写档配方；`plan_run` 后续 `volume_for_round` / `pairs_for`
+  / `rotation_event` 全用档计划，并 `pop("rotation")` 防 `pairs_for` 二次派生。
+- 每轮产物带 `sampling_profile`，`remote/artifacts.LEDGER_FIELDS` 搬到课程账本；块**不进**
+  `flat_overrides` / `corpus_identity_fp`（同 `sample_mult`：执行变体，不是语料身份）。
+  GPU/TPU 实际 pairs 不同 ⇒ 各自独立 run/traj，不能横比。
+
+**刻意不做**：`target % mb` 警告（`chunk_episodes` 丢尾，且 `mb` 可被 `ppo_schedule` 逐段改）；
+`even + per_it=0` 允许（加载期拒）；bool 经 `StrictInt` 混入（拒）。
+
+**验证**：`tests/biz/test_autonomous_cloud_overrides.py`（模型/前置/身份/倍数无关）、
+`tests/worker/test_cloud_sampling.py`（设备归一/缺档/档计划/volume 重解）、
+`tests/remote/test_plan_run_cloud_sampling.py`（倍数归 1/缓存/缺档/账本搬运）。
+
+---
+
 ## §75 评估链推理规则：B8/B10 空枪门接入 `inference_rules`（2026-11-13）
 
 **背景**：B8（通用废射门）与 B10（预测门）在 ep80/hard 的 700 对确认中分别

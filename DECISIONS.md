@@ -5904,4 +5904,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果**：self 未重启时基准 = 旧代码 ⇒ 集群按旧代码继续跑（用户口径：宁跑不瘫）；提交+push+重启 self 后基准自动跟进。eval/batch 腿仍用工作区现算（本次未改）。`dirty_files` 仍只用于「远端 pull 不可收敛 ⇒ 抑制 restart」，语义不变。
 - **验收**：`tests/trainer/test_rollout_dispatch_resilience.py` 3 条（prefers self / fallback / dirty workspace keeps cluster，`slotsOnline=2`）；`dispatch.py` LOC 仍 999；`bun run check` + `bun run pygate` 绿。
 
+## §2026-11-15-goalnn-autonomous-cloud-overrides（课程级 `autonomous_cloud_overrides`：GPU/TPU 各一套语料采集策略）
+
+- **背景**：同一门课程会**先后在 GPU / TPU 云机交替训练**（用户 2026-11-15 更正）——设备不同，每轮能采的局数/窗口不同；只写一套顶层 target 会让另一类设备欠采样。同时有覆盖块时 notebook `CFG.sample_mult` / `CFG.epoch_mult` **不再生效**（用户同日更正 ②），否则同一档被乘两次。
+- **决定**：课程新增 `autonomous_cloud_overrides: {gpu: 档, tpu: 档}`，每档自包含 `target_transitions`（StrictInt>0）+ `rotation_mode`（even/pinned）+ `rotation_per_it`（even≥1，pinned≥0，pinned 需 `rotation_pinned`）。选档在**执行面** `remote/plan_run._sampling_profile` 按 `ctx.device` 做（cuda*→gpu，tpu/xla*→tpu）；缺档首轮前 `ProtocolError`，不回落。选中档 ⇒ 两个倍数强制 1.0 并打一行「忽略 CFG 倍数」；`worker/cloud_sampling.plan_for_profile` 用档 target + 档 rotation 重解 `volume`（按 `est_s_all` 抬 topup cap），后续 `volume_for_round` / `pairs_for` / `rotation_event` 全走档计划。块**不进** `flat_overrides` / `corpus_identity_fp`；每轮产物 `sampling_profile` 进账本。课程前置：`mode=per-tick` + 顶层 `target_transitions>0` + 顶层 `rotation_mode` 非空。
+- **被否决**：① 只写 per-device `rotation_per_it` 而沿用顶层小 target（漏乘，TPU 档仍欠采样）；② 课程级 `effective_sampling` 双真源（计划与课程各一套，改一处静默失效）；③ 开课 `target % mb` 警告（`chunk_episodes` 丢尾，`mb` 可被 `ppo_schedule` 逐段改）；④ 允许 `even + per_it=0`（等于关轮换却写 even，静默）；⑤ 用 int 收 bool（`true` 会变 1 混过校验）。
+- **后果**：不写块 = 行为逐字节不变；块生效时 notebook 倍数是**死旋钮**（日志留痕）。GPU/TPU 档实际 pairs 不同 ⇒ 各自独立 run/traj，不能横比；块本身不是语料身份（同 `sample_mult`）。CPU/未知设备不选档，倍数照旧。`n % mb` 尾部丢弃仍存在（本轮不修）。
+- **验收**：`tests/biz/test_autonomous_cloud_overrides.py`、`tests/worker/test_cloud_sampling.py`、`tests/remote/test_plan_run_cloud_sampling.py`；`bun run pygate` 绿。
+
+—— 全文（课程形状 / 执行面 / 风险）→ `docs/nn/training-stack.md` §76
+
 —— 全文（现场 / 风险）→ `nn-training/common/distribution.py::reference_code_hash` 与 `trainer/dispatch.py` 注释

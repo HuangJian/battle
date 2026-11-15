@@ -42,6 +42,7 @@ from typing import Any
 import remote.land_provider as land_provider
 import remote.opt_standard as opt_standard
 import remote.weights_standard as weights_standard
+import worker.cloud_sampling as cloud_sampling
 from common import progress_hook
 from common.log_bundle import LogBundle
 from common.platform_utils import (
@@ -363,17 +364,24 @@ def _run_iteration(
     #   重解（`worker/plan.volume_for_round`）——否则第 2 轮起还在采第 1 轮的关集。
     #   笔记本开关（`ctx.rotation`，三态）在这里落地：
     #     auto = 跟随计划；on = 计划没带轮换就拒跑（不猜）；off = 把窗口降级成全关（记账）。
+    profile = _sampling_profile(ctx)
+    _plan_in = ctx.plan
+    if profile is not None:
+        try:
+            _plan_in = cloud_sampling.plan_for_profile(ctx.plan, profile)
+        except ValueError as e:
+            raise ProtocolError(f"采样覆盖 {profile['name']} 应用失败：{e}") from e
     _policy = str(getattr(ctx, "rotation", "auto") or "auto")
-    window_override, rotation_override = rotation_window_for_round(ctx.plan, it, _policy)
+    window_override, rotation_override = rotation_window_for_round(_plan_in, it, _policy)
     if rotation_override:
-        recipe = rotation_recipe(ctx.plan) or {}
+        recipe = rotation_recipe(_plan_in) or {}
         ctx.log(
             f"WARN it{it}: 笔记本 --rotation off —— 本段把计划里的轮换"
             f"（mode={recipe.get('mode')!r} per_it={recipe.get('per_it')}）降级为**全关采样**；"
             "语料分布与导包时不同（账本 rotation.override=off 留痕）"
         )
-    vol_probe = volume_for_round(ctx.plan, it, window_override=window_override)
-    if isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
+    vol_probe = volume_for_round(_plan_in, it, window_override=window_override)
+    if profile is None and isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
         # 先放大再走本机宽度的「加宽」逻辑：两张牌都是纯函数，顺序不影响同源校验。
         vol_probe = _scaled_volume(vol_probe, ctx.sample_mult)
     if isinstance(vol_probe, dict):
@@ -419,9 +427,10 @@ def _run_iteration(
                 f"it{it} greedy 预算：普通 {_ordinary_t} + greedy {int(_gplan.total_target)}"
                 f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {_full_per_stage}）"
             )
-    _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
-    if window_override is not None:
-        # 降级轮：块已经按全关解好，**不要再**让 `pairs_for` 按配方派生一次（那会解回窗口）。
+    _plan = dict(_plan_in, volume=vol_probe) if isinstance(vol_probe, dict) else _plan_in
+    if window_override is not None or profile is not None:
+        # 降级/选档轮：块已经按当轮窗口解好，**不要再**让 `pairs_for` 按配方派生一次
+        # （那会解回窗口/另一份 target）。profile 的 rotation 已进 _plan_in 用于解块与读数。
         _plan.pop("rotation", None)
     pairs = pairs_for(_plan, it)
     if not isinstance(vol_probe, dict):
@@ -564,11 +573,15 @@ def _run_iteration(
         log=ctx.log,
     )
     validate_result(result, m, commit_echo_must_match=False)
+    if profile is not None:
+        # 账本行留痕（`_row_extra` → `LEDGER_FIELDS`）：GPU/TPU 两档的分布不同，
+        # 但语料身份相同 ⇒ 每轮必须说清这一轮用的是哪一档。
+        result["sampling_profile"] = profile
     # ★ 2026-10-28（云机轮换）：本轮窗口读数随结果带回落账（`_checkpoint` 写进行）。
     #   云机轮此前只有 `volume_stage_stats` 的键可看（而它本身还没进行账）⇒ 账本里
     #   看不出「这段在轮换、这一轮采了哪 12 关」；`override` 非空 = 笔记本开关改过语料面。
     _rot = rotation_event(
-        ctx.plan,
+        _plan_in,
         int(it),
         window=[int(s) for s in (vol_probe or {}).get("stages", ())],
         override=rotation_override,
@@ -610,6 +623,38 @@ def _pack_full_for(ctx: RunContext) -> Callable[[Path, int], Mapping[str, Path]]
 def _weight_bytes(result: dict) -> bytes:
     """`result.weights_json` → weights.json 字节。"""
     return bytes(decode_weights_json(str(result.get("weights_json") or "")))
+
+
+def _sampling_profile(ctx: RunContext) -> dict | None:
+    """本段生效的云端采样覆盖（device → 档；一次性解析并缓存）。
+
+    块生效时把 `sample_mult` / `epoch_mult` 归 1（用户 2026-11-15 更正 ②：覆盖块与
+    notebook 倍数不叠加）。缺档/坏计划在**第一轮开始前**转 `ProtocolError`，不静默回落。
+    """
+    if ctx.sampling_profile_checked:
+        return ctx.sampling_profile
+    try:
+        profile = cloud_sampling.profile_for_course(ctx.course, ctx.device)
+    except ValueError as e:
+        raise ProtocolError(f"云端采样覆盖不可用：{e}") from e
+    ctx.sampling_profile_checked = True
+    ctx.sampling_profile = profile
+    if profile is not None:
+        rot = profile["rotation"]
+        if ctx.sample_mult != 1.0 or ctx.epoch_mult != 1.0:
+            ctx.log(
+                f"采样覆盖 {profile['name']} 生效：target={profile['target_transitions']} "
+                f"rotation={rot['mode']}/{rot['per_it']} —— 忽略 CFG.sample_mult="
+                f"{ctx.sample_mult:g} / CFG.epoch_mult={ctx.epoch_mult:g}（覆盖块生效时倍数不叠加）"
+            )
+        else:
+            ctx.log(
+                f"采样覆盖 {profile['name']} 生效：target={profile['target_transitions']} "
+                f"rotation={rot['mode']}/{rot['per_it']}（device={ctx.device}）"
+            )
+        ctx.sample_mult = 1.0
+        ctx.epoch_mult = 1.0
+    return profile
 
 
 def rotation_window_for_round(
@@ -654,6 +699,10 @@ def _row_extra(result: dict, phase: str) -> dict | None:
     rot = result.get("rotation")
     if isinstance(rot, dict) and rot:
         extra["rotation"] = rot
+    # 云端采样覆盖（2026-11-15）：GPU/TPU 两档分布不同但语料身份相同 ⇒ 每轮留痕。
+    sp = result.get("sampling_profile")
+    if isinstance(sp, dict) and sp:
+        extra["sampling_profile"] = sp
     vstats = result.get("volume_stage_stats")
     if isinstance(vstats, dict) and vstats:
         extra["volume_stage_stats"] = vstats

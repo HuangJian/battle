@@ -21,7 +21,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from biz.reward_library import OUTCOMES
 
@@ -858,6 +858,58 @@ def block_dict(block: Any) -> dict | None:
     return None
 
 
+class CloudSamplingProfile(BaseModel):
+    """自主云机某一类设备（gpu / tpu）的**完整采样策略**。
+
+    2026-11-15（用户更正 ①）：同一门课可能先后在 GPU / TPU 云机交替训练 ⇒ 采集策略必须
+    按设备分档，且每档**自包含**（target + 窗口），避免「只改 per_it、忘了抬 target」的
+    静默退化（评审阻塞项）。
+
+    `target_transitions` 与 `rotation_mode` 必填；`rotation_per_it` 在 even 下必须 ≥1
+    （0 会让窗口退化成 1 关——见 `window_for` 的 clamp），pinned 下 0 = 只采 pinned。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    target_transitions: StrictInt = Field(gt=0, description="本设备每轮总 transitions（必填，>0）")
+    rotation_mode: Literal["even", "pinned"]
+    rotation_per_it: StrictInt = Field(default=0, ge=0)
+    rotation_pinned: str = ""
+
+    @model_validator(mode="after")
+    def _even_needs_per_it(self) -> CloudSamplingProfile:
+        if self.rotation_mode == "even" and int(self.rotation_per_it) < 1:
+            raise ValueError(
+                "autonomous_cloud_overrides.*.rotation_per_it 在 even 下必须 ≥1"
+                "（0 会让窗口退化成 1 关；加载期拒，不等到第一轮）"
+            )
+        return self
+
+
+class AutonomousCloudOverridesBlock(BaseModel):
+    """课程文件里的云端采样覆盖：**按设备分档**，只在云机执行面按本机 device 选一档。
+
+    2026-11-15 用户更正：同一门课在 GPU / TPU 云机交替训练，两套语料策略必须共存于同一
+    课程文件；顶层四键仍是 hub 基线（导出计划与 `est_s_all` 的来源），块只在
+    `remote/plan_run` 按 `ctx.device` 生效。块**不**进 `corpus_identity_fp` /
+    `flat_overrides`（它是执行变体，见 `docs/nn/training-stack.md` §76）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpu: CloudSamplingProfile | None = None
+    tpu: CloudSamplingProfile | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> AutonomousCloudOverridesBlock:
+        if self.gpu is None and self.tpu is None:
+            raise ValueError(
+                "autonomous_cloud_overrides 不能是空块：至少写 gpu 或 tpu 一档"
+                "（空块 = 无操作，多半是写错了键）"
+            )
+        return self
+
+
 class CourseConfig(BaseModel, CustomStagesMixin):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
@@ -953,6 +1005,12 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 模式 2 的 pinned 关号规格串（与 `--stages`/`--seeds` 同一个 `parse_stages_arg`，例 `"2033-2034"`）。
     #: 刻意不用 list：`flat_overrides` 只产出**扁平标量** dest（argparse 侧没有 dict/list 型 dest 先例）。
     rotation_pinned: str = ""
+    #: 云端采样覆盖（2026-11-15）：按**本机 device**（gpu / tpu）选一档完整采样策略，
+    #: 只在云机执行面（`remote/plan_run`）生效；顶层 `target_transitions` / `rotation_*`
+    #: 仍是 hub 基线（导出计划与 `est_s_all` 的来源）。缺席 = 老行为逐字节不变。
+    #: ⚠ 刻意**不进** `flat_overrides` / `corpus_identity_fp`：它是执行变体（同 `sample_mult`），
+    #: 每轮账本 `sampling_profile` 留痕；GPU/TPU 段各自独立 run/traj。
+    autonomous_cloud_overrides: AutonomousCloudOverridesBlock | None = None
 
     @model_validator(mode="after")
     def _rotation_requires_dynamic_volume(self) -> CourseConfig:
@@ -976,6 +1034,19 @@ class CourseConfig(BaseModel, CustomStagesMixin):
                 "rotation_mode 需要 target_transitions > 0：窗口的达标线 = ceil(target / 窗口关数)，"
                 "没有它窗口一个函数都不会被调到（采样照旧全关，且不报错）"
             )
+        if self.autonomous_cloud_overrides is not None:
+            if self.mode != "per-tick":
+                raise ValueError(
+                    "autonomous_cloud_overrides 只在 mode=per-tick 下生效（当前 mode="
+                    f"{self.mode!r}）：档里的 target/窗口是 per-tick 动态采集的量"
+                )
+            if int(self.target_transitions) <= 0 or not str(self.rotation_mode).strip():
+                raise ValueError(
+                    "autonomous_cloud_overrides 需要顶层 target_transitions > 0 且 "
+                    "rotation_mode 非空：云端覆盖是在 hub 导出的 volume 计划上逐轮重解"
+                    "（计划必须带 est_s_all 全关估计），不是凭空生成采样计划——"
+                    "请先把 hub 基线写成一份完整策略"
+                )
         return self
     seeds: str = "0-3"
     #: 只对 `"level": ...` 课程生效的四类**环境覆盖**（2026-10-28，docs/nn/training-stack.md §49）。

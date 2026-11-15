@@ -60,6 +60,9 @@ MOVED_NAMES = {
     "PlayerBlock",
     "StateInitBlock",
     "GreedyQuotaBlock",
+    # 2026-11-15 增 2：自主云机采样覆盖（按设备分档，只在 remote/plan_run 生效）。
+    "AutonomousCloudOverridesBlock",
+    "CloudSamplingProfile",
     # 2026-11-13 增 1：课程 `inference_rules` 块（评估/部署专用，训练链不认）。
     "InferenceRulesBlock",
     "CourseConfig",

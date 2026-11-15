@@ -604,6 +604,9 @@ LAYERS: dict[str, int] = {
     # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
     # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
     "worker.volume_waves": 3,
+    # 云端采样覆盖（2026-11-15）：顶层只靠 `worker.volume_waves`(L3) 的 `parse_stages_arg`
+    # ⇒ 秩 4（与 `worker.plan` 同级）；唯一账本内读者 `remote.plan_run`(L5) 在它上面。
+    "worker.cloud_sampling": 4,
     # 逐轮采样子集（窗口，2026-10-27，plan/it-stage-ratation）：顶层只靠
     # `worker.volume_waves`(L3) 的 `parse_stages_arg`（pinned 规格串与 `--stages` 同一个解析器）
     # ⇒ 秩 4。消费者全在 `trainer/`（导出 / 本机连续配额 / `_per_stage_quota`），
