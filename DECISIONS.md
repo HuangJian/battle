@@ -6684,3 +6684,25 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **现状与下一步**：B 三处都是「窄捕不改语义」的形状（`NET_ERRORS`+`ValueError` /
   `(OSError, ValueError, ProtocolError)` / `(OSError, SubprocessError)`），各配一条「程序员错误
   必须穿出」用例即可。
+
+## §2026-11-15-b-class-narrowed-probe-cache-and-sha
+
+- **决定**：把附录 C 里 B 类三处宽捕收窄（G9 29 → **26** 处 / 19 文件，G4 397 → **394**）：
+  ① `remote/push_client._probe_sha` → 模块级 `PROBE_ERRORS = (*NET_ERRORS, ValueError)`；
+  **200 但 body 不是 JSON 照抛**。② `remote/worker.run_job` 的结果复用 →
+  `except (OSError, ValueError, ProtocolError)`。③ `trainer/bc_loop.append_weights_md_row` 取 sha →
+  `except (OSError, subprocess.SubprocessError)`，取不到仍写 `"n/a"`。
+- **为什么 ①必须抛**：`_probe_sha` 的 `None` 被上层读成「问不到 ⇒ 沿用上次命中 / 保守上传」。
+  节点回执形状变了（200 + 非 JSON）是**确定性**问题，读成 `None` 的结果是每轮白传 `code.zip`
+  （1.69MB + opt 1MB），链路越慢越必然超时 —— 真因永不出现。与 `common/distribution` 探针、
+  `hub_http` 薄壳同一条判据。
+- **为什么 ②重要**：`validate_result` 自己的 bug（TypeError）原被读成「缓存坏了」⇒ **静默重算
+  一次 PPO**（几十分钟 + 权重与上次不同），日志里只有「缓存无效」。
+- **为什么 ③算漏网**：`"n/a"` 是显式降级（不是静默），但宽捕让「git 不在 PATH / 超时」与
+  「命令拼错」同形，而这一列是模型档案的**溯源列**。
+- **判据**：三处各自撤回 `except Exception: pass` ⇒ 4 条新用例红（非 JSON 被读成问不到 /
+  `TypeError` 被吞 / `TypeError` 记成 n/a / 校验器崩了被当缓存坏）；恢复后全绿。全量
+  6113 passed / 2 skipped；mypy 936 文件。
+- **附带发现（测试纪律）**：`LogRouter.warn_once` 去重是**进程级**的。断言「同一 key 只喊一次」
+  的用例必须注入**同一个** `LogRouter()` 实例 —— 每次 `lambda: LogRouter()` 都 new 一个等于把
+  去重关掉（断言退化成「喊了几次就是几次」）。这条是「全量 forkdist 分片一变就随机红」的成因。

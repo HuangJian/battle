@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from common.log import LogRouter
+from trainer import batch_runner
 from trainer.batch_runner import _heartbeat
 from trainer.loop_dispatch import TrainingDispatch
 
@@ -113,6 +115,11 @@ def test_batch_heartbeat_writes_the_patch(monkeypatch: pytest.MonkeyPatch) -> No
 def test_batch_heartbeat_reports_failure_once(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
+    # `warn_once` 的去重是**进程级**的（同一 key 只喊一次）。别的用例也会走到这个 key
+    # （`test_batch_runner_split` 的「心跳不抛」那条就先把 `write_state` 打爆），
+    # 于是「喊了几次」取决于谁先跑 —— 换一个**新的** router 让本用例自足。
+    fresh = LogRouter()  # **同一个**实例：每次 new 一个等于把去重关掉
+    monkeypatch.setattr(batch_runner, "default_router", lambda: fresh)
     monkeypatch.setitem(sys.modules, "worker.eval_heartbeat", None)
     _heartbeat(it=1)  # 不抛即契约：心跳绝不打断单元
     _heartbeat(it=2)

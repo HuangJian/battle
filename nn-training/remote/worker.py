@@ -566,8 +566,10 @@ def run_job(
             validate_result(cached, manifest, commit_echo_must_match=False)
             log(f"job {jid}: 复用上次算完的结果（上次回传失败）——直接重传")
             return cached
-        except Exception:
+        except (OSError, ValueError, ProtocolError):
             pass  # 缓存缺失/跨 manifest/损坏 → 清场走全流程
+        # 其余异常照抛：`validate_result` 自己的 bug（TypeError/AttributeError…）若被当成
+        # 「缓存坏了」，现场就是**静默重算一次 PPO**（几十分钟 + 权重不同），真因永不出现。
 
     # ---- 能力自检（plan/train-mode-hot-switch.plan.md L3.2，2026-09-24）------
     # 缺 bun 在**零下载**时就拒单：`kind=iter` 的活要节点自己跑 rollout

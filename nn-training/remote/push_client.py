@@ -21,6 +21,7 @@ NODE_RESULT_PATH = "/job/{jid}/result"
 from common.logutil import log_line
 from common.protocol import (
     BLOB_INIT,
+    NET_ERRORS,
     WIRE_JOB_CONTENT_TYPE,
     ProtocolError,
     RetryableError,
@@ -28,6 +29,10 @@ from common.protocol import (
     pack_job_v2,
 )
 from remote.hub_http import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
+
+#: 探针的「问不到」面：网络/传输类（`NET_ERRORS`）**加** `ValueError`（200 但 body 不是
+#: JSON）。必须模块级具名 tuple —— `except (*NET_ERRORS, ValueError)` 的星号形式 mypy 不收。
+PROBE_ERRORS: tuple[type[BaseException], ...] = (*NET_ERRORS, ValueError)
 
 
 def _default_log(msg: str) -> None:
@@ -50,14 +55,20 @@ def forget_cache_hit(base_url: str, kind: str, sha: str) -> None:
 
 
 def _probe_sha(base_url: str, token: str, path: str, timeout: float) -> bool | None:
-    """一次内容寻址探针：`True/False` = 节点明说了；`None` = **问不到**（不是「没有」）。"""
+    """一次内容寻址探针：`True/False` = 节点明说了；`None` = **问不到**（不是「没有」）。
+
+    `None` 的语义是「链路/服务端暂时答不了」，不是「什么都算」：**200 但 body 不是 JSON**
+    是节点契约变了（`/code-sha` 的回执形状），那必须当场炸出来 —— 否则调用方把它读成
+    「问不到 ⇒ 保守上传」，于是每轮都白传 `code.zip`，而真因永不出现（与
+    `common/distribution` 的探针、`remote/hub_http` 的薄壳同一条判据）。
+    """
     try:
         status, body = _request(base_url, token, path, timeout=timeout)
-        if status == 200:
-            return bool(json.loads(body.decode("utf-8")).get("cached"))
-    except Exception:
-        pass
-    return None
+    except PROBE_ERRORS:
+        return None
+    if status != 200:
+        return None
+    return bool(json.loads(body.decode("utf-8")).get("cached"))
 
 
 def _cached_or_last_hit(

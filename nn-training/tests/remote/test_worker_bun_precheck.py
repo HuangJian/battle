@@ -166,3 +166,59 @@ def test_cached_result_is_reused_even_without_bun(
     (job_dir / "_result.json").write_text(json.dumps(cached), encoding="utf-8")
     assert worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path) == cached
     assert downloads == []
+
+
+# ── 结果复用块的**吞掉面**：缓存坏 ≠ 校验器坏了 ──
+#
+# `_result.json` 复用块原先 `except Exception: pass`：把「缓存坏了 ⇒ 清场重算」与
+# 「`validate_result` 自己抛 TypeError」揉成同一分支。后者的现场是**静默重算一次 PPO**
+# （几十分钟 + 权重与上次不同），而日志里只会看到「缓存无效」—— 真因永不出现。
+
+
+def _write_cache(job_dir: Path, payload: dict | str) -> None:
+    job_dir.mkdir(parents=True, exist_ok=True)
+    text = payload if isinstance(payload, str) else json.dumps(payload)
+    (job_dir / "_result.json").write_text(text, encoding="utf-8")
+
+
+def test_a_corrupt_cache_falls_through_to_the_full_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, downloads: list[str]
+) -> None:
+    """缓存不是合法 JSON = 缓存坏了 ⇒ 清场走全流程（`ValueError` 这一档）。"""
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/bun")
+    _write_cache(tmp_path / JID, "{not json")
+    with pytest.raises(_DownloadedError):
+        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+    assert downloads == [JID]
+
+
+def test_a_validation_failure_falls_through_to_the_full_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, downloads: list[str]
+) -> None:
+    """跨 manifest / 字段不符是**具名**的 `ProtocolError` ⇒ 同样清场重算。"""
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/bun")
+    _write_cache(tmp_path / JID, {"job_id": JID})
+
+    def _reject(*_a: object, **_k: object) -> None:
+        raise ProtocolError("result 缺失字段 games")
+
+    monkeypatch.setattr(worker, "validate_result", _reject)
+    with pytest.raises(_DownloadedError):
+        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+    assert downloads == [JID]
+
+
+def test_a_broken_validator_is_not_a_broken_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, downloads: list[str]
+) -> None:
+    """校验器自己的 bug（`TypeError`）必须穿出去 —— 不许被读成「缓存无效」。"""
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/local/bin/bun")
+    _write_cache(tmp_path / JID, {"job_id": JID})
+
+    def _wrong_arity(*_a: object, **_k: object) -> None:
+        raise TypeError("validate_result() got an unexpected keyword argument")
+
+    monkeypatch.setattr(worker, "validate_result", _wrong_arity)
+    with pytest.raises(TypeError):
+        worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
+    assert downloads == [], "校验器崩了不许继续下 payload（那会把 bug 变成一次白算）"

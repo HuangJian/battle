@@ -190,8 +190,10 @@ def append_weights_md_row(
                 **_POPEN_NO_WINDOW,
             )
             sha = raw.decode().strip() or "n/a"
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError):
+            pass  # git 不在 PATH / 超时 / cwd 没了 ⇒ 溯源列记 "n/a"（列本身是显式的）
+        # 其余照抛：命令拼错（TypeError/IndexError）与「git 不可用」是两件事，后者是本列
+        # 允许的降级，前者是我们自己的 bug。
         row = (
             f"| {trained_at} | `{Path(archive_path).name}` | {epochs} "
             f"| {samples[0]}/{samples[1]} | {best_val:.4f} "

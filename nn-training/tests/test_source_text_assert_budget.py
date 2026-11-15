@@ -406,7 +406,10 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   （`runner_state 会停在旧值` / `ModuleNotFoundError`）、git_head 2 条（`TimeoutExpired` /
 #:   退出码 `128`）、`workdir-sweep it5 skipped` + `OSError` + `磁盘只读` 3 条。与上面几条同类：
 #:   措辞本身是交付物 ⇒ 这是口径 A 里少数几个**该有**的文本判据。
-BASELINE_FORM = 1511
+#: 2026-11-15 抬到 **1513**（+2，实测）：B 类三处窄捕的用例 —— `processor` 侧只验了「没抛/返回值」，
+#:   但「节点回执不是 JSON 时要炸」「校验器崩了不许被读成缓存坏」这两条**只能看错误信息是否说明
+#:   了后果**（`_probe_sha` 的那句 docstring 就是交付物）。逐笔 2 条，全在 `test_push_probe_errors.py`。
+BASELINE_FORM = 1513
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；
