@@ -58,6 +58,24 @@ serve_pool 端到端 / `bulk_sched` 单通道 / `eval_local` 硬顶 / `push_prio
     （余量小，是 flake 源）。当场回答「它属于哪一族」，答不出就是在赌机器够快。
 
 红检：删掉任一 `# timing-ok:` 标注 ⇒ 同样逐条报出。
+
+## 第三条规则（2026-11-15）：`契约上界` 是**过渡**标注，不是终点
+
+标注只让人当场回答「你在赌什么」，它不改变「紧上界在满载机器上会假红」这件事。2026-11-15
+把 `契约上界` 族里**阈值 ≤ 0.5s 且语义是「立即返回 / 不许阻塞」**的八处改成了与负载无关的
+判据（`test_error_report` / `test_offline_eval_cloud` ×2 / `test_dist_common_poll` /
+`test_precollect_ready` ×2 / `test_tail_grace` / `test_bulk_sched` /
+`e2e/test_deliver_backup_contract_e2e`）。可复用的四种形状：
+
+  1. **事件门**：把被测路径依赖的那件事换成「进去置位 → 测试放行 → 打完置位」的桩。
+     返回时桩**仍在里面** = 没等它；放行后它自己跑完 = 不是「什么都不做」。
+     同步实现拿不到 `done`，10s 的 liveness 兜底把它变成可读的红（挂起而不是假绿）。
+  2. **调用计数**：「问一句就答」= 读盘/探测恰一次；轮询实现会 N 次。
+  3. **炸弹**：把 `time.sleep` / 同步物化那条路换成 `pytest.fail` —— 走了就红，没走就证明没走。
+  4. **状态**：`is_alive()` / `inflight_it()` / `not finished` 这类**事实**，与机器快慢无关。
+
+留下来的 `契约上界` 只有三处，都实测有 ≥5× 余量（`test_rollout_scratch` 的两条按被测自己的
+`DRAIN_CEILING_SEC` 推导、e2e 那条桩每轮固定 0.07s 而阈值 1s）。新加的一律先试上面四种。
 """
 
 from __future__ import annotations

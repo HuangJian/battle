@@ -171,20 +171,28 @@ def test_failed_round_is_backed_up_only_after_the_grace(tmp_path: Path) -> None:
     assert (drawer / "it-001").is_dir(), f"落下来的应当就是那一轮：{sorted(drawer.rglob('*'))}"
 
 
-def test_submit_round_does_not_block_on_a_hanging_hub(tmp_path: Path) -> None:
+def test_submit_round_does_not_block_on_a_hanging_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """③ hub 挂死（`/ping` 挂 3s）时 `submit_round` 必须**立刻**返回：训练线程不等网络。
 
     现场：传输走的是**独立进程**，但父侧 `submit_round` 里曾同步做「观测账本 + 备份」——
     那一次 1.5MB 的网络盘写入就压在训练线程上（`art` 从 1.1s 抖到 88s）。
+
+    判据是**结构**，不是耗时（2026-11-15）：`background=True` 下 `submit_round` 的义务只有
+    「置位唤醒后台写者」，**一次都不许**走同步推积压（`sync()`）。所以把那条路换成炸弹 ——
+    它一旦被调用就当场失败。原来的 `dt < 0.3s` 在并行门禁满载时会红（线程/进程创建本身就要
+    几十到几百毫秒），而它想表达的语义与机器快慢无关。
     """
     hub = _Hub(mode="ok", hang_sec=3.0)
     d = _deliverer(_artifacts(tmp_path), tmp_path / "network" / "backup", hub, background=True)
+    monkeypatch.setattr(
+        d,
+        "sync",
+        lambda *a, **k: pytest.fail("background 模式下 submit_round 不许在调用线程推积压"),
+    )
     try:
-        t0 = time.monotonic()
         d.submit_round(1)  # 挂死的 hub 也不能让这一句变慢
-        dt = time.monotonic() - t0
-        # timing-ok: 契约上界 ——「非阻塞」的判据就是它不等**挂住 3s** 的端点（相对那个夹具）
-        assert dt < 0.3, f"submit_round 被网络拖住了：{dt:.2f}s"
     finally:
         d.close(timeout=0.1)
         hub.close()

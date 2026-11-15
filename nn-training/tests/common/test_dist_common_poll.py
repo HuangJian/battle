@@ -419,21 +419,36 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
     本函数只登记与计数，绝不等待；且置位后同作用域的新请求直接抛（transient）。
     """
 
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
     class SlowResp:
         def close(self) -> None:
-            # sleep-ok: 夹具模拟的工作量：close() 等读线程让出内部锁的那 81s（实测值）
-            time.sleep(5.0)
+            # 夹具模拟的工作量：close() 等读线程让出内部锁（实测 81s）；这里改成**由测试放行**，
+            # 于是「abort 有没有等它」成了事件判据，而不是耗时上界（2026-11-15 换掉 `dt < 0.5`）。
+            entered.set()
+            try:
+                release.wait(30.0)
+            finally:
+                finished.set()
 
     common.distribution.set_request_tag("t-abort")
     key = ("t-abort", SlowResp())
     common.distribution._REQUESTS.track(key)
+    counted: list[int] = []
+
+    def _abort() -> None:
+        counted.append(common.distribution.abort_active_requests("t-abort"))
+
     try:
-        t0 = time.monotonic()
-        n = common.distribution.abort_active_requests("t-abort")
-        dt = time.monotonic() - t0
-        assert n == 1, n
-        # timing-ok: 契约上界（收工路径不许等 close，上界即契约）
-        assert dt < 0.5, f"abort 阻塞了 {dt:.2f}s（收工路径不许等 close）"
+        th = threading.Thread(target=_abort, daemon=True)
+        th.start()
+        th.join(timeout=10.0)
+        assert not th.is_alive(), "abort 没回来 ⇒ 它在等 close()"
+        assert counted == [1], counted
+        # ★ 核心判据：abort 回来的时候 close() **还在里面**（同步实现到不了这里）
+        assert not finished.is_set(), "abort 返回时 close 已完成 ⇒ 收工路径等了它"
         assert common.distribution.abort_scope("t-abort") is True
         with pytest.raises(common.distribution.DistError) as ei:
             common.distribution._request("http://127.0.0.1:9/never", "", 1.0)
@@ -441,6 +456,9 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         # 别的作用域不受影响（rollout 与 eval 同进程并发，绝不能误伤）
         assert common.distribution.abort_scope("rollout") is False
     finally:
+        release.set()
+        assert entered.wait(10.0), "收工路径必须真的去关连接（不是只置位）"
+        assert finished.wait(10.0), "放行后 close() 必须自己跑完"
         common.distribution._REQUESTS.untrack(key)
         common.distribution.clear_abort()
         common.distribution.set_request_tag("")

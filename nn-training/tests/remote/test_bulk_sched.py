@@ -413,15 +413,22 @@ def test_yield_stops_at_budget_even_if_control_stays():
     # 故删除：契约由 `spent`（循环记账）+ `yield_count`（步数）确定性钉住。
 
 
-def test_no_yield_when_no_control():
-    """没有控制面在途 ⇒ 让路点零成本（不能让每次分片都睡一格）。"""
+def test_no_yield_when_no_control(monkeypatch):
+    """没有控制面在途 ⇒ 让路点零成本（不能让每次分片都睡一格）。
+
+    判据是**一格都没睡**，不是耗时（2026-11-15）：`spent == 0.0` 是循环自己的记账，再把
+    `time.sleep` 换成炸弹 —— 真睡了就当场失败。`elapsed < 0.05s` 那种写法在满载机器上会红
+    （OS 把一次空调用跑成 60ms 是常事），而它想表达的语义与机器快慢无关。
+    """
+    import remote.bulk_sched as bs_mod
+
+    monkeypatch.setattr(
+        bs_mod.time, "sleep", lambda *_a, **_k: pytest.fail("无控制面时让路点不许睡")
+    )
     s = _sched()
     with s.slot(BULK_P1_CRITICAL, label="payload") as tok:
-        t0 = time.time()
         spent = s.pause_if_needed(tok)
     assert spent == 0.0
-    # timing-ok: 契约上界（无控制面 ⇒ 让路点零成本，上界即契约）
-    assert time.time() - t0 < 0.05
 
 
 # ─────────── 3b. 条件让路 / 按传输累计上限（2026-10-02，plan/transfer-residual W1/W1b） ───────────
