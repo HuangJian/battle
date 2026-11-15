@@ -275,3 +275,28 @@ def test_snapshot_stays_schema_clean_when_everything_works(tmp_path: Path) -> No
     snap = snapshot("ok", paths=[tmp_path])
     assert {"event", "tag", "ts", "pid", "rss_mb", "rss_peak_mb", "disk_free_mb"} <= set(snap)
     assert set(snap).isdisjoint({"probe_errors"})
+
+
+def test_log_line_names_the_fields_that_could_not_be_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """控制台上那行也要说得清：`rss=0MB` 旁边得有 `probe_errors=rss`（全文在 jsonl 里）。"""
+    import worker.forensics as forensics
+
+    if os.name == "nt":
+        pytest.skip("POSIX 探针分派（Windows 走 _rss_mb_windows）")
+
+    def _boom(errors=None):
+        raise OSError("/proc/self/status 不可读")
+
+    monkeypatch.setattr(forensics, "_rss_mb_posix", _boom)
+    forensics.log_snapshot("t", tmp_path / "tl.jsonl")
+    assert capsys.readouterr().out.count("probe_errors=rss") == 1
+
+
+def test_log_line_stays_short_when_everything_works(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """干净路径不出现该后缀（那行本来就短；只有一个字段坏了才加它）。"""
+    log_snapshot("ok", tmp_path / "tl.jsonl", paths=[tmp_path])
+    assert capsys.readouterr().out.count("probe_errors") == 0

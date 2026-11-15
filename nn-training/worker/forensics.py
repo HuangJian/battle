@@ -182,6 +182,19 @@ def snapshot(tag: str, paths: list[str | Path] | None = None) -> dict:
     return snap
 
 
+def _log_line(tag: str, snap: dict) -> str:
+    """快照 → 那行人读日志（`log_snapshot` 与用例共用；措辞就是交付物）。"""
+    line = f"[forensics] {tag}: rss={snap.get('rss_mb')}MB (peak {snap.get('rss_peak_mb')}MB)"
+    if "disk_free_mb" in snap:
+        line += f" disk_free={snap['disk_free_mb']}"
+    errors = snap.get("probe_errors") or {}
+    if errors:
+        # 只点名字，不贴异常全文：这行要在训练控制台上扫读，`rss=0MB` 旁边得立刻看出
+        # 「这个 0 是量到的还是量不到的」。全文在 jsonl 的 `probe_errors` 里。
+        line += f" probe_errors={','.join(sorted(errors))}"
+    return line
+
+
 def log_snapshot(tag: str, jsonl_path: str | Path, paths: list[str | Path] | None = None) -> dict:
     """采集 + 落 jsonl（event=forensics）+ 打一行人读日志。落盘失败只记日志。"""
     snap = snapshot(tag, paths)
@@ -190,8 +203,5 @@ def log_snapshot(tag: str, jsonl_path: str | Path, paths: list[str | Path] | Non
             f.write(json.dumps(snap, ensure_ascii=True) + "\n")
     except OSError as e:
         log(f"[forensics] {tag}: jsonl 落盘失败（{e}）——rss={snap.get('rss_mb')}MB")
-    log(
-        f"[forensics] {tag}: rss={snap.get('rss_mb')}MB (peak {snap.get('rss_peak_mb')}MB)"
-        + (f" disk_free={snap['disk_free_mb']}" if "disk_free_mb" in snap else "")
-    )
+    log(_log_line(tag, snap))
     return snap

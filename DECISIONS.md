@@ -6546,3 +6546,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   本来就由对方决定，而且本模块的硬契约是「绝不反杀训练」——宽捕在这里是对的，静默不是。
 - **判据**：`tests/worker/test_commit_journal.py` +4 —— 探针失败留成因、探针自己炸也不抛、量不到的盘
   留名、全好时 schema 逐字不变（不出现 `probe_errors`）。把 `_note` 退回 `pass` 实测 2 条红。
+
+## §2026-11-15-probe-evidence-must-reach-the-line-people-actually-read
+
+- **决定**：`worker/forensics.log_snapshot` 的人读日志行在有降级字段时追加
+  `probe_errors=<字段名,…>`（只点名字，异常全文留在 jsonl）。`_log_line(tag, snap)` 独立成函数
+  以便用例直接钉这行（它是交付物，不是实现细节）。
+- **为什么**：前一条决定让快照**文件**说得清「这个 0 是量到的还是量不到的」，但现场最先被看到的
+  是控制台上那行 `[forensics] it103: rss=0MB ...`。只改 jsonl ⇒ 值班的人在事故发生当天仍然读不到
+  证据，要等事后有人想起来翻文件。
+- **代价**：干净路径的行短一个字都不多（无降级就不加后缀），坏路径多一段字段名列表。
+- **判据**：`tests/worker/test_commit_journal.py` +2 —— 降级时该后缀恰好出现一次、干净时不得出现。
+  把后缀那行改回 `pass` 实测红。
