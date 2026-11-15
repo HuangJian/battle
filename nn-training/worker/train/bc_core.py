@@ -125,21 +125,10 @@ def select_best_epoch(val_losses: list[float], window: int = SMOOTH_WINDOW) -> i
     return best_at or None
 
 
-def sanitize_json(o):
-    """递归把**非有限** float（NaN / ±Infinity）→ None。
-
-    `json.dump` 默认写出 `NaN` / `Infinity` / `-Infinity` 三个**非标准**字面量，TS 端
-    `JSON.parse` 直接抛错——坏的是「文件打开就崩」而不是「数值不准」。2026-11-15 之前只判
-    `isnan`，±inf 会原样落盘；而 val_loss 发散到 inf 是真实形状，那时 `best_val_loss` /
-    `best_smoothed_val_loss` 恰好是 inf。
-    """
-    if isinstance(o, float) and not math.isfinite(o):
-        return None
-    if isinstance(o, dict):
-        return {k: sanitize_json(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [sanitize_json(v) for v in o]
-    return o
+# `sanitize_json` 2026-11-15 提到 `common.stats`（与 `common/fs` 的两个写入口共用一份实现：
+# 本模块只负责「weights meta 里的非有限值」，写盘那一侧不归这里管）。留转发名 —— `bc.py` /
+# `bc_paddle.py` 的调用点与 `__all__` 一行不改。
+from common.stats import sanitize_json as sanitize_json
 
 
 def resolve_fire_pos_weight(raw: object, counts: dict) -> float:

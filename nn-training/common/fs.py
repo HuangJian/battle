@@ -27,6 +27,8 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
+from common.stats import sanitize_json
+
 __all__ = [
     "append_jsonl",
     "atomic_write_bytes",
@@ -75,8 +77,13 @@ def atomic_write_bytes(path: Path | str, data: bytes) -> None:
 
 
 def atomic_write_json(path: Path | str, obj: Any, *, indent: int = 1) -> None:
-    """`atomic_write_bytes` + JSON 编码（`ensure_ascii=False`：中文可读）。"""
-    atomic_write_bytes(path, json.dumps(obj, ensure_ascii=False, indent=indent).encode("utf-8"))
+    """`atomic_write_bytes` + JSON 编码（`ensure_ascii=False`：中文可读）。
+
+    2026-11-15：编码前过 `common.stats.sanitize_json` —— `json.dumps` 会把 NaN / ±Infinity 写成
+    **非标准**字面量（TS 端 `JSON.parse` 直接抛错），而这个函数是全仓 JSON **文件**写入口。
+    """
+    safe = sanitize_json(obj)
+    atomic_write_bytes(path, json.dumps(safe, ensure_ascii=False, indent=indent).encode("utf-8"))
 
 
 #: 写者空闲多久自行退场（写者不持有句柄，退场只回收线程；下次 append 会重建）。
@@ -158,7 +165,8 @@ class JsonlLedger:
 
     def append(self, jsonl_path: str | Path, event: dict) -> None:
         p = Path(jsonl_path)
-        text = json.dumps(event, ensure_ascii=False) + "\n"
+        # 同一口径（2026-11-15）：行里的 NaN / ±Infinity 落成 `null`，别把非标准 JSON 写进账本。
+        text = json.dumps(sanitize_json(event), ensure_ascii=False) + "\n"
         # 绝对路径入键：相对路径随 CWD 变，key 漂移会造出第二个写者写同一文件。
         abs_path = os.path.abspath(str(p))
         key = os.path.normcase(abs_path)

@@ -6378,3 +6378,27 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **未动**：`out`（返回值，进程内）与归档文件名仍带原始 `nan`/`inf`（文件名形如 `..._valnan.json`）；
   返回值不是落盘面，调用方（`trainer/bc_loop` / `remote/bc_job`）读 file 且对 `None` 有 `or 0.0`
   兜底。文件名只是可读性瑕疵，没有消费者解析它。
+
+## §2026-11-15-json-writes-sanitize-nonfinite（非有限值在**写入口**收口，不在几十个调用点收）
+
+- **决定**：`sanitize_json`（非有限 float → `None`）从 `worker/train/bc_core.py` 提到
+  **`common/stats.py`**（与 `num_or_none` 同族：都是「观测字段的口径」），并在全仓两个 JSON
+  **写入口**上应用：`common/fs.atomic_write_json` 与 `JsonlLedger.append`。`bc_core` 留转发名
+  （`bc.py` / `bc_paddle.py` 的调用点一行不改）。
+- **为什么在写入口**：`json.dumps` 会把 NaN / ±Infinity 写成**非标准**字面量，TS 端 `JSON.parse`
+  直接抛错 —— 失败形态是「文件/账本打开就崩」。而 NaN/inf 在训练侧是**真实形状**（val_loss 发散、
+  gnorm 爆炸、A-eval 的 delta 算不出来）。逐个 `json.dump` 调用点加过滤是 O(调用点) 且新代码必漏；
+  两个 Chokepoint 是 O(1)，且新写者也自动继承。
+- **为什么不改 `num_or_none`**：它的语义是「数值化」，非有限值原样透传是**刻意的**
+  （`tests/common/test_stats.py::test_non_finite_is_still_a_number` 钉着），判定面（
+  `loop_guards_trip._is_nonfinite` → 熔断）要吃 NaN。落盘面与判定面口径不同，这正是本条的理由。
+- **代价（已知）**：行/文件的编码多走一次递归（metrics 行是小字典，实测全量 6060 用例无感）。
+  顺带把 tuple 变成 list（`json.dumps` 本来就输出 list，逐字节不变）。
+- **判据**：`tests/common/test_json_nonfinite.py` —— 两个写入口各一条（写 NaN/±inf 后**严格解析**
+  回来必须是 `null`；`parse_constant` 是 `json.loads` 对那三个字面量的唯一钩子，grep 文本会假红）、
+  一条口径单源（`bc_core.sanitize_json is common.stats.sanitize_json`）、两条纯函数边界。
+  前两条在改动前确认**红**（临时还原写入口跑的：2/7 failed）。
+- **未收口（另列）**：绕过这两个入口的直写仍在 —— `worker/data/weights_io.save_weights_json`
+  （调用方已自带 sanitize；且它对非有限**权重**是拒绝写出，语义不同）、`remote/deliver_wire.py`
+  的自定义编码（已自带 `math.isfinite` 过滤）、`remote/offline_boot.py` 的生成物拼接。它们各有
+  自己的口径，不属于「漏过滤」。
