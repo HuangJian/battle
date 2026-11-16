@@ -6833,3 +6833,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ⇒ 这些 dict 缺的是**字段表**（`TypedDict` / dataclass / 只读面 `Mapping[str, object]`），
   收益只能按数据边界逐个拿。故本批只落 **G14**（`tests/test_any_budget.py`：1176 处 / 182 文件
   按文件冻结、只减不增、`Any as A` 改名绕过单独拦），先把「只涨不跌」掐掉。
+- **2026-11-16（P1-4 第一处：`demo_bank` 上 `TypedDict`）**：`demo_bank` 原是全链裸 `dict` +
+  字符串键，`remote/train_common` 的字段安全阀自带一份手抄名单（`need = {...}`），与
+  `engine_paddle` 的 `if "extra" in demo_bank` 各说各话 —— 缺 `extra` 时它是**静默跳过**，
+  BC 项少一半而日志正常。新增 `worker/ppo/demo.py::DemoBank`（L0，只 import numpy/typing）：
+  五键具名；`DEMO_BANK_FIELDS` 由 `__required_keys__` 派生，安全阀与类型只有一份名单。
+  消费面四处改注（`decode_demo_bank` / `check_demo_bank` / `_CoreRun` / 两侧 `ppo_update`）。
+  判据 `tests/remote/test_demo_bank_contract.py`（字段表 == 导出端五个 / 安全阀同源 / 缺 extra 拒收）。

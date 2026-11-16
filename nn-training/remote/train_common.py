@@ -24,7 +24,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from common.logutil import secs
 from common.protocol import (
@@ -36,6 +36,7 @@ from common.protocol import (
     pack_result_v2,
 )
 from remote.wire import _wire_block
+from worker.ppo.demo import DEMO_BANK_FIELDS, DemoBank
 
 
 def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
@@ -153,18 +154,25 @@ def course_prep(manifest: dict, job_dir: Path, epoch_mult: float, prep_b: Any) -
     return course, epochs
 
 
-def decode_demo_bank(raw: bytes) -> dict:
-    """demo bank 的 `.npz` 字节 → `{name: ndarray}`（numpy 只在函数体内 import）。"""
+def decode_demo_bank(raw: bytes) -> DemoBank:
+    """demo bank 的 `.npz` 字节 → `DemoBank`（numpy 只在函数体内 import）。
+
+    字段名对不对由 `check_demo_bank` 的安全阀判（这里只解码；`.npz` 的键是运行期才知道的，
+    所以返回处是 `cast` 而不是逐个取键 —— 取键会把「缺字段」变成 `KeyError`，而那种情况要
+    走安全阀那句「缺字段 X —— 拒收」）。
+    """
     import io
 
     import numpy as np
 
-    return {k: np.asarray(v) for k, v in dict(np.load(io.BytesIO(raw))).items()}
+    return cast(DemoBank, {k: np.asarray(v) for k, v in dict(np.load(io.BytesIO(raw))).items()})
 
 
-def check_demo_bank(jid: str, bank: dict, coef: float, per_mb: int, src: str, prep_b: Any) -> None:
+def check_demo_bank(
+    jid: str, bank: DemoBank, coef: float, per_mb: int, src: str, prep_b: Any
+) -> None:
     """demo bank 的字段安全阀 + 一行装载读数（缺字段 = 拒收，不静默当纯 PPO 跑）。"""
-    need = {"obs", "scalars", "extra", "actions", "masks"}
+    need = DEMO_BANK_FIELDS
     if not need.issubset(bank.keys()):
         raise ProtocolError(f"job {jid}: demo bank 缺字段 {sorted(need - set(bank.keys()))}——拒收")
     prep_b.add(
@@ -224,7 +232,7 @@ class _CoreRun:
     ref_model: Any = None
     demo_coef: float = 0.0
     demo_per_mb: int = 0
-    demo_bank: dict | None = None
+    demo_bank: DemoBank | None = None
     shards_root: str = ""
     t_ppo: float = 0.0
     train_b: Any = None

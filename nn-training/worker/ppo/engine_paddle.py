@@ -29,6 +29,7 @@ import paddle
 from common.contracts import ActionSpace, head_layout
 from common.schema import MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
+from worker.ppo.demo import DemoBank
 from worker.ppo.trainer import aggregate_stats, cat_entropy
 
 CLIP_EPS = 0.2
@@ -158,7 +159,7 @@ def ppo_update(
     ref_model=None,
     kickstart_kl: float = 0.0,
     ent_coef: float | None = None,
-    demo_bank: dict | None = None,
+    demo_bank: DemoBank | None = None,
     demo_bc_coef: float = 0.0,
     demo_per_mb: int = 0,
     progress: Any = None,

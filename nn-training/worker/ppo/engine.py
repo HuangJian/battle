@@ -73,6 +73,7 @@ from worker.ppo.common import (
     masked_logsoftmax,
     sync_scalars,
 )
+from worker.ppo.demo import DemoBank
 from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = RolloutBackend 契约)
     # `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
     # `trainer/stream.py` 运行期从「本模式的后端模块」上取；engine 自己**不调用**它，所以
@@ -316,7 +317,7 @@ class PPOContext:
     ref_model: Any
     kickstart_kl: float
     ent_c: float
-    demo_bank: dict | None
+    demo_bank: DemoBank | None
     demo_bc_coef: float
     demo_per_mb: int
     progress: LogBundle | None
@@ -1016,7 +1017,7 @@ def ppo_update(
     ref_model=None,
     kickstart_kl: float = 0.0,
     ent_coef: float | None = None,
-    demo_bank: dict | None = None,
+    demo_bank: DemoBank | None = None,
     demo_bc_coef: float = 0.0,
     demo_per_mb: int = 0,
     progress: LogBundle | None = None,
@@ -1046,8 +1047,8 @@ def ppo_update(
     口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
 
     demo_bank + demo_bc_coef + demo_per_mb（demo 混 batch，x20 后续）：
-    demo_bank = {obs (N,16,26,26) u1 / scalars (N,40) f4 / actions (N,2) i64
-    [move,fire] / masks (N,7)}（v5 口径；scalars 维度以 common.schema.SCALAR_DIM 为准）；
+    字段表见 `worker.ppo.demo.DemoBank`（obs / scalars / extra / actions / masks；形状与 dtype
+    以 `tools/build_demo_bank.py` 为准，scalars 维度以 `common.schema.SCALAR_DIM` 为准）；
     每 PPO minibatch 步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确
     复现），loss += demo_bc_coef · CE_move（**fire 头不做 demo BC**：fire 的 mask 语义是
     「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；43744 个可训练 fire

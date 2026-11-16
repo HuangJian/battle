@@ -505,6 +505,7 @@ LAYERS: dict[str, int] = {
     # 2026-10-27（Paddle 双生）：纯 numpy 的 torch⇄Paddle Adam 状态翻译 + 逐次 f32 幂重放
     # ——只 import numpy + `common.errors` ⇒ **L0**。
     "worker.ppo.ckpt_convert": 0,
+    "worker.ppo.demo": 0,  # 2026-11-16：demo bank 的字段表（`TypedDict` + frozenset，只 import numpy/typing）
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,

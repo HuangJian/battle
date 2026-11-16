@@ -76,6 +76,7 @@ from remote.train_common import (
     ppo_shards_root,
 )
 from remote.wire import _wire_time, note_ppo_tail
+from worker.ppo.demo import DemoBank
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -395,7 +396,7 @@ def _load_demo_bank(st: _CoreRun) -> None:
     )
     blob_hits += _h
     blob_miss_bytes += _m
-    demo_bank: dict | None = None
+    demo_bank: DemoBank | None = None
     if demo_raw:
         try:
             bank = decode_demo_bank(demo_raw)
