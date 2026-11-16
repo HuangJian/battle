@@ -760,7 +760,12 @@ def run_queue(q: QueueState) -> None:
             if nd not in q.alive:
                 q.alive.append(nd)
         for _ in range(nd["c"]):
-            t = threading.Thread(target=worker, args=(nd,), daemon=True)
+            t = threading.Thread(
+                target=worker,
+                args=(nd,),
+                name=f"queue-worker:{nd.get('id')}",
+                daemon=True,
+            )
             t.start()
             q.threads.append(t)
             q.extra_threads.append(t)

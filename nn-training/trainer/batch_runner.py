@@ -96,6 +96,17 @@ NO_CONSUMER_GRACE_SEC = 180.0
 NODE_RECOVERY_TRIES = 3
 
 
+def _spawn_thread(target, name: str, *args: object) -> threading.Thread:
+    """起一个**具名** daemon 线程并立即 start（G15：线程转储里要认得出是谁）。
+
+    `name` 是必填关键字 —— 没名字的线程在 `faulthandler` / `py-spy` 里只显示 `Thread-N`，
+    出事时现场分不清它是在等本机队列、监管某个节点，还是采样线程。
+    """
+    t = threading.Thread(target=target, args=args, name=name, daemon=True)
+    t.start()
+    return t
+
+
 def _heartbeat(**patch: object) -> None:
     """R4-G1：写 EvalBoard 心跳（心跳绝不打断单元，但失败**不复述成静默**）。
 
@@ -801,9 +812,7 @@ class _UnitLanes:
     def spawn_workers(self, nd: dict, lane: dict, count: int) -> list[threading.Thread]:
         ws: list[threading.Thread] = []
         for i in range(count):
-            t = threading.Thread(target=self.worker, args=(nd, lane, i), daemon=True)
-            t.start()
-            ws.append(t)
+            ws.append(_spawn_thread(self.worker, f"batch-worker:{nd.get('id')}-{i}", nd, lane, i))
         return ws
 
     def supervise(self, nd: dict) -> None:
@@ -1217,13 +1226,11 @@ class _UnitLanes:
             threads += self.spawn_workers({"id": "local"}, local_lane, self.local_slots)
         # 每节点一条通道：各自就绪即派单；失联每 recover_ping_sec 重探（req 1/3/5）。
         for nd in self.enabled_nodes:
-            t = threading.Thread(target=self.supervise, args=(nd,), daemon=True)
-            t.start()
-            threads.append(t)
+            threads.append(_spawn_thread(self.supervise, f"batch-supervise:{nd.get('id')}", nd))
         if self.trace:
             # 每 2s 一行在飞采样：掉档时一眼看出是「队列空了」还是「派发停了」。
 
-            threading.Thread(target=self._watch, daemon=True).start()
+            _spawn_thread(self._watch, "batch-watch")
         # 收尾等待：settled 一满（all_done 由最后结算的 worker 置位）或墙钟到点即收工。
         # 「零消费者」只在**整批从未有过任何消费者**时生效（无节点就绪过 + 本机槽位 0）
         # ⇒ 有界响亮收摊，而不是默认 86400s 窗口里干等。

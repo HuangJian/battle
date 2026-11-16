@@ -107,7 +107,9 @@ def _boot_hub(port: int, token: str) -> object:
     work = Path(tempfile.mkdtemp(prefix="tunnel-ab-"))
     store = _JobStore(work / "jobs", work / "training_log.jsonl")
     srv = make_server(store, port, token, host="127.0.0.1")
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=srv.serve_forever, name="tunnel-ab-hub", daemon=True
+    ).start()
     return srv
 
 

@@ -331,7 +331,9 @@ def run_push_first(cfg: dict[str, Any], log: Callable[[str], None]) -> int:
     )
     import threading
 
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=srv.serve_forever, name="push-bootstrap", daemon=True
+    ).start()
     log(f"push bootstrap 就绪 :{port}（无 hub /code 依赖）")
     cf_bin = ensure_cloudflared(log, str(cfg.get("cloudflared_path") or ""))
     cf_proc, cf_url = start_cloudflared(cf_bin, port, work / "cloudflared.log")

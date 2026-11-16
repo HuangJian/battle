@@ -189,7 +189,7 @@ def main() -> int:
     port = srv.server_address[1]
     import threading
 
-    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th = threading.Thread(target=srv.serve_forever, name="smoke-hub-server", daemon=True)
     th.start()
     hub_url = f"http://127.0.0.1:{port}"
     log(f"hub-server (fake cloud) on {hub_url}")

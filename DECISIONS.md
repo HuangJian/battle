@@ -6840,3 +6840,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   五键具名；`DEMO_BANK_FIELDS` 由 `__required_keys__` 派生，安全阀与类型只有一份名单。
   消费面四处改注（`decode_demo_bank` / `check_demo_bank` / `_CoreRun` / 两侧 `ppo_update`）。
   判据 `tests/remote/test_demo_bank_contract.py`（字段表 == 导出端五个 / 安全阀同源 / 缺 extra 拒收）。
+- **2026-11-16（P1-6 第一刀：线程必须有名字 + G15）**：55 处 `Thread(` 里最后 10 处补上 `name=`
+  （`batch-worker:<node>-<i>` / `batch-supervise:<node>` / `batch-watch` / `queue-local:<node>` /
+  `queue-worker:<node>` / `stream-collector` / `push-bootstrap` / `smoke-hub-server` / `tunnel-ab-hub`），
+  新增**零容忍门禁** `tests/test_thread_names.py`（AST 要求 `Thread(...)` 带 `name=` 关键字；
+  位置参数不算）。`Runtime`（executor 生命周期 / 有界共享池）不在本批，属 B6，见 §P1-6。
+  顺带：`trainer/batch_runner.py` 顶在 1000 行 LOC 预算上，三处 spawn 收进 `_spawn_thread(...)`
+  ⇒ 1000 → 997，没有开新豁免。

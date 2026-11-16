@@ -705,7 +705,12 @@ def rescan_nodes(
                     f"（第 {rearm_counts[nid]}/{rearm_cap} 次）"
                 )
             for _ in range(c_n):
-                t = threading.Thread(target=worker, args=(nd,), daemon=True)
+                t = threading.Thread(
+                    target=worker,
+                    args=(nd,),
+                    name=f"queue-local:{nd.get('id')}",
+                    daemon=True,
+                )
                 t.start()
                 extra_threads.append(t)
 

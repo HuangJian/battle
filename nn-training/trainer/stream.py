@@ -375,7 +375,7 @@ def run_rollout_stream(
                 f"collect-only for the rest of this round; task dispatch stopped"
             )
 
-    th = threading.Thread(target=_collector, daemon=True)
+    th = threading.Thread(target=_collector, name="stream-collector", daemon=True)
     t0 = time.time()
     log(
         f"[stream] collector started (local_slots={local_slots}, "
