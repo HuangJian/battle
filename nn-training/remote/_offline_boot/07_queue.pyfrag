@@ -1,0 +1,335 @@
+# ═══ part 7/12: 07_queue — 队列面：任务清单 / 认领 / 心跳 / 进度端点 / 重新领租约 ═══
+def _json_dict(raw: bytes) -> dict:
+    """小 JSON 应答 → dict（解不开 → `{}`：一个坏应答不该把取包/排队流程炸掉）。"""
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT) -> tuple[int, dict]:
+    """小 JSON POST（带 Bearer）→ `(状态码, dict)`；`HTTPError` → `(码, 正文 dict)`；连不上 → `(0, {})`。
+
+    为什么不用 `_fetch_guarded`：那是给**大 body**（几 MB 任务包）准备的停滞/低速护栏；
+    这里是几百字节的控制消息，且要的是「失败也要拿到状态码与正文」（护栏会抛）。
+    """
+    req = urllib.request.Request(
+        url, data=b"", method="POST", headers=_headers(token)
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return int(resp.status), _json_dict(resp.read())
+    except urllib.error.HTTPError as e:
+        body, doc = _http_error_parts(e)
+        if body and body not in ("（空正文）", "（无正文）"):
+            log(f"  hub 说：{body}")
+        return int(e.code), doc
+    except Exception as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
+        log(f"  端点连不上（{type(e).__name__}: {e}）")
+        return 0, {}
+
+
+def _queue_work_dir(cfg: dict) -> Path:
+    """worker 身份的落点：显式 `work_dir`，否则 `<download_dir>/battle-offline`（与 `course_work_dir` 同源）。"""
+    explicit = str(cfg.get("work_dir") or "").strip()
+    return Path(explicit).expanduser() if explicit else _load_deliverable().download_dir(cfg) / "battle-offline"
+
+
+def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
+    """本机 worker 身份：**持久化**在 `<work>/.worker-id`（评审 G1）。
+
+    为什么必须是文件、不是每次现生成：cell 中断/重跑时同一台机器会看到**自己**留下的租约；
+    只按「陌生人持有」拒绝就等于被自己挡在门外，白等到 900s 过期（Kaggle 上十几分钟的会话
+    预算，这一等就是整个会话）。同一个 `work_dir` 复用同一个 id ⇒ hub 判 `mine` 直接续上。
+    """
+    p = work / WORKER_ID_NAME
+    try:
+        old = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        old = ""
+    if old:
+        return old
+    wid = f"{os.environ.get('HOSTNAME') or 'node'}-{uuid.uuid4().hex[:8]}"
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        p.write_text(wid + "\n", encoding="utf-8")
+        log(f"本机 worker id: {wid}（写在 {p}；重跑本 cell 会复用它）")
+    except OSError as e:
+        # 写不进去不是致命（下次重生成一个新 id，只是会被自己的旧租约挡一次）。
+        log(f"⚠ 写 {p} 失败（{e}）——本次会话的 worker id 不持久（重跑可能被自己的旧租约挡）")
+    return wid
+
+
+def fetch_task_list(
+    hub: str,
+    token: str,
+    log: Callable[[str], None],
+    *,
+    worker: str = "",
+    timeout: float = PING_TIMEOUT,
+) -> list[dict] | None:
+    """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。
+
+    ★M1b / Q3：带 `?worker=` 时清单会把「一拖一」算进去（`busy` / `claimable` 按**这台盘**
+    判）——这才是云机该看的那份（不带 = 上界语义，可能把「你这台盘正在跑别的课」漏掉，
+    于是选了一门 claim 必吃 409 的课）。
+    """
+    url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
+    if worker:
+        url += f"?worker={urllib.parse.quote(worker)}"
+    req = urllib.request.Request(url, headers=_headers(token))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            doc = _json_dict(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            log(f"清单端点被拒 HTTP {e.code} —— HUB_TOKEN 不一致（本次降级到 CFG.course）")
+        elif e.code in (404, 405):
+            log("hub 没有 /offline/tasks（老 hub）⇒ 降级到 CFG.course（升级 hub 后即可不填 course）")
+        else:
+            log(f"清单端点取失败 HTTP {e.code}：{_http_error_body(e)}")
+        return None
+    except Exception as e:
+        log(f"清单端点连不上（{type(e).__name__}: {e}）⇒ 降级到 CFG.course")
+        return None
+    tasks = doc.get("tasks")
+    if not isinstance(tasks, list):
+        log("清单端点回了意外形状（没有 tasks 列表）⇒ 降级到 CFG.course")
+        return None
+    log(f"hub 清单：{len(tasks)} 条（hub_version={doc.get('hub_version')}）")
+    return [t for t in tasks if isinstance(t, dict)]
+
+
+def claim_course(
+    hub: str,
+    token: str,
+    course: str,
+    worker: str,
+    log: Callable[[str], None],
+    *,
+    takeover: bool = False,
+    timeout: float = CLAIM_TIMEOUT,
+) -> tuple[str, str]:
+    """领一门课的离线租约 → `(lease_token, "")`；没领到 → `("", reason)`。
+
+    ★ 2026-10-03（plan/auto-offline-handoff §3.1a / 二轮评审 P0）：返回值从裸 token 升级为
+    `(token, reason)` —— 自动交接下这几类拒绝**必须区别对待**（旧口径「一律照旧跑」会把
+    无包 claim 的 409 当成「被别人持有」，于是没有租约就进入 run、干等 30 分钟再整会话
+    `SystemExit`，busy 闸/stalled 告警全被绕开）：
+
+      · `pending_export`：hub 已记下导包意向（`pending_export`）、正在等控制台导包（分钟级）⇒ 本拍**不跑**，
+        过一会儿再问；
+      · `busy`：另一门课正在跑（U2 一拖一，闸在 hub 侧）⇒ 本拍**不跑**，等它 release；
+      · `completed`：当前包已跑满（U6）⇒ 本拍**不跑**（重导包后 sha 变会自动解封）；
+      · `not_offline`：这门课不在训练中（停课）⇒ 本拍**不跑**；
+      · `give_up`：hub 触发导包已到上界 ⇒ **本会话放弃这门课**（三条出路留给人：TPU 重连 /
+        手工导入结果包 / 到控制台重导任务包）；
+      · `held`（★M1b / P0-4 后半，行为变更）：被别人 **live hold** 占据 ⇒ **本拍不跑，换下一门**
+        （旧口径「照旧跑」= 同一份活两处跑；重复的那份由回传首写幂等丢弃）；
+      · `bc_course`（2026-11-12）：这是 BC 课程 ⇒ **不领课程租约**（BC 走课程级独占锁 +
+        `/jobs/{id}/claim`；先建 hold 反而会挡住自己领 BC job）——本拍不跑；
+      · `proto`：对面 hub 嫌本端旧（Q4）⇒ 本拍不跑，刷新 notebook 后重开会话；
+      · `no_pack`（404，人管课缺包）/ `net`（连不上）：照旧跑（训练永不因网络停摆；
+        缺包由 `PackUnavailableError` 响亮收场）。
+    """
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_CLAIM_PATH}?proto={OFFLINE_CLAIM_PROTO}"
+        f"&course={urllib.parse.quote(course)}"
+        f"&worker={urllib.parse.quote(worker)}" + ("&takeover=1" if takeover else "")
+    )
+    code, doc = _post_json(url, token, log, timeout=timeout)
+    lease = doc.get("lease")
+    if code == 200 and isinstance(lease, dict):
+        log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
+        return str(lease.get("token") or ""), ""
+    if code == 409:
+        if doc.get("proto_required"):
+            # ★M1b：hub 显式拒旧端（本文件没带 `?proto=`）。正常不会发生（上面已带上），
+            # 真的发生了就是「克隆的 notebook 太旧 / 这份文件被改过」⇒ 响亮说清怎么修。
+            log(
+                f"hub 要求派发协议 v{doc.get('proto_required')}（本会话的客户端是 v"
+                f"{OFFLINE_CLAIM_PROTO}）：{doc.get('error') or ''}"
+            )
+            return "", "proto"
+        if doc.get("bc_course"):
+            log("这门是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）——本拍不跑")
+            return "", "bc_course"
+        if doc.get("pending_export"):
+            if doc.get("give_up"):
+                log(
+                    "hub 触发导包已到上界 —— 本会话放弃这门课（三条出路：TPU 重连 / "
+                    "手工导入结果包 / 到控制台重导任务包）"
+                )
+                return "", "give_up"
+            log("这门课正在导包（hub 已记下 pending_export，导包约需数分钟）——本拍不跑，稍后再问")
+            return "", "pending_export"
+        if doc.get("busy"):
+            log(f"别的课正在跑（一拖一）：{doc.get('error') or 'busy'}——本拍不跑，稍后再问")
+            return "", "busy"
+        if doc.get("completed"):
+            log("这门课的当前任务包已跑满（等人停课 / 重导包）——本拍不跑")
+            return "", "completed"
+        if doc.get("not_offline"):
+            log("这门课不在训练中（停课 ⇒ 不是自动候选）——本拍不跑")
+            return "", "not_offline"
+        # ★M4b：旧的 `pinned_online`（人固定在在线）随模式退役 —— hub 不会再发这一档；
+        # 万一对面是旧 hub，它会落到下面这条「有主」腿（保守不跑，不双跑）。
+        holder = doc.get("holder") or {}
+        left = float(holder.get("expires_in") or 0.0)
+        # ★M1b / P0-4 后半（行为变更）：`held` 从「照旧跑」改成**本拍不跑，换下一门**。
+        # 为什么：hold v2 把「谁在跑」变成**互斥**（不是观测）——别人持着 live hold 时本机
+        # 再跑一遍 = 同一份活两处跑（数据损坏级）；hub 侧的 live hold 也不可被顶（不变量 3）。
+        # 旧口径「产物照落、回传被判 duplicate 丢弃」只在**没有互斥**的时代成立。
+        log(
+            f"这门课正被 {holder.get('worker_id') or '?'} 接管（{left:.0f}s 内无进度即自动可接管）"
+            "——本拍不跑，换下一门（或等它静默后被本机自动接管）"
+        )
+        return "", "held"
+    if code == 404:
+        log("hub 说这门课还没有任务包（人管课：先到控制台「导出任务包」）")
+        return "", "no_pack"
+    return "", "net"
+
+
+def heartbeat_loop(
+    hub: str,
+    token: str,
+    course: str,
+    lease: str,
+    log: Callable[[str], None],
+    *,
+    interval: float = HEARTBEAT_SEC,
+) -> threading.Event:
+    """起一个**守护线程**按 `interval` 续租；返回它的 stop event（调用方 `finally` 里 set）。
+
+    为什么必须另起线程：`run_loop_main(argv)` 同步阻塞到整段跑完（本文件里那行调用），
+    主线程发不了心跳。心跳失败**只记日志**：租约过期/被接管绝不能让已经在跑的训练停下来
+    （plan §1.4-4）。
+    """
+    done = threading.Event()
+    url = (
+        f"{hub.rstrip('/')}{OFFLINE_HEARTBEAT_PATH}?course={urllib.parse.quote(course)}"
+        f"&lease={urllib.parse.quote(lease)}"
+    )
+
+    def _beat() -> None:
+        while not done.wait(interval):
+            code, doc = _post_json(url, token, log)
+            if code == 200:
+                continue
+            if code == 409:
+                if doc.get("revoked"):
+                    # ★M1b / M4b：人强制解除了接管（`/admin/courses?release_hold=1`）——**停止再领**，
+                    # 当前段在下一个轮边界收尾并打包（旧 worker 照旧跑完，兼容降级）。
+                    # 为什么在此处置事件：心跳线程是唯一知道「接管被强制解除」的地方，而
+                    # `run_loop` 的轮边界读的就是这个停止信号（不能杀正在算的那一轮）。
+                    log(
+                        "⚠ 租约已被撤销（人强制解除了接管）——停止再领本课；"
+                        "当前段在下一个轮边界收尾并打包（回传可能被判 duplicate 丢弃）"
+                    )
+                    done.set()
+                    return
+                log(
+                    f"⚠ 租约失效（{'已过期' if doc.get('expired') else '已被接管'}）"
+                    "——继续跑完并打包（回传可能被判 duplicate 丢弃）"
+                )
+                return
+            log(f"心跳失败 HTTP {code}（不影响训练，下一跳再试）")
+
+    threading.Thread(target=_beat, name=f"offline-heartbeat-{course}", daemon=True).start()
+    return done
+
+
+def progress_url(hub: str, course: str, lease: str) -> str:
+    """`POST /offline/progress?course=<课>&lease=<token>`（纯函数：形状就是契约）。"""
+    return (
+        f"{hub.rstrip('/')}{OFFLINE_PROGRESS_PATH}?course={urllib.parse.quote(course)}"
+        f"&lease={urllib.parse.quote(lease)}"
+    )
+
+
+def _progress_label(kind: str, *, it: int, done: int, total: int) -> str:
+    """打点日志的标签 —— **只进日志**，不上线。
+
+    ★ 2026-10-25（用户口径）：「自主云机不管 pull/push，rollout/ppo/eval 的输出日志应该一致，
+    仅仅网络传输模块各自不同」。所以这里**不再自己拼措辞**，直接转 `common.progress_text`
+    —— 与 push 腿（云机 supervisor / hub 侧）逐字同一份实现，唯一差别是这里没有 `seq`
+    （那是 push 腿 outbox 的游标，属于传输面）。
+    """
+    try:
+        # 延迟 import：本模块是 **standalone 引导文件**（notebook 逐文件从 raw 拉），顶层不能
+        # 假手 `common.*`；而 `run_one_course` 真正跑起来的形态里 `code.zip` 带了 `common/`。
+        from common.progress_text import progress_text
+    except Exception:  # 引导形态：没有 common 包 ⇒ 退回最小标签（日志面，不影响判据）
+        return str(kind or "ping")
+    return progress_text(
+        kind=str(kind or ""), it=int(it), done=int(done), total=int(total)
+    )
+
+
+def _should_log_progress(
+    shown: tuple[str, int, int, int] | None, *, kind: str, it: int, done: int, total: int
+) -> bool:
+    """这条进度事件要不要打日志行（`common.progress_text.should_log_progress` 的引导形态）。
+
+    与 `_progress_label` 同一套**延迟 + 兜底** import：本文件是 standalone 引导（notebook
+    逐文件从 raw 拉，`common/` 要到 `code.zip` 解开后才在 `sys.path` 上）。引导形态里读不到
+    那份判据 ⇒ **恒打**（宁可多说一句，也不能把进度行吞光）。
+    """
+    try:
+        from common.progress_text import should_log_progress
+    except Exception:
+        return True
+    try:
+        return bool(
+            should_log_progress(shown, kind=str(kind or ""), it=int(it), done=int(done), total=int(total))
+        )
+    except Exception:
+        return True
+
+
+def _iter_log_due(state: dict, kind: str, now: float, it: int = 0) -> bool:
+    """`iter`（采集局）那族的**日志行**节流：一轮只在该轮跑超过 `ITER_LOG_MIN_SEC` 后才开口。
+
+    为什么不并进 `_should_log_progress`：那份判据是**纯函数**（`(prev, kind, it, done, total)`），
+    没有时钟也不该有时钟（hub / push / pull 三条腿共用同一份）。时间窗只有打点层有 —— 所以
+    「25% 一桶」照旧决定**要不要**，这一层只决定「这一轮先别打」。
+
+    一轮的**第一条**恒不打（它必然是 `1/94 局`：没有信息量，最终数在轮末那行）；换轮即重置窗口
+    ⇒ 3s 的一轮 0 行，跑了一分钟以上的一轮每分钟 1 行（长了仍然看得见活着）。
+    """
+    if str(kind or "") != "iter":
+        return True
+    if int(it) != int(state.get("iter_it", 0)):
+        state["iter_it"] = int(it)
+        state["iter_shown_at"] = now
+        return False
+    if (now - float(state.get("iter_shown_at", float("-inf")))) < ITER_LOG_MIN_SEC:
+        return False
+    state["iter_shown_at"] = now
+    return True
+
+
+def _reclaim_lease(
+    hub: str, token: str, course: str, work: Path, log: Callable[[str], None]
+) -> str:
+    """打点收到 409（`expired`/`taken`）后**重新领一次租约** → 新 lease（拿不到 ⇒ 空串）。
+
+    为什么需要（2026-10-16，评审 F1 / plan §4.2-2）：旧口径是「整段哑」——进度停在最后一条
+    成功打点（现场「进度停在 it125」的直接成因之一），而 409 往往只是租约 TTL 到期 / 别的盘
+    抢了一次；同一台机重新 claim 自己的课是允许的（hub 侧 `mine` 优先），拿不到就只记一行。
+
+    任何意外都**不得影响训练**（观测腿纪律）：异常 → 空串。`worker_id_of` 读的就是 claim 时
+    写下的 `<work>/.worker-id`（同一次会话内不变）。
+    """
+    try:
+        lease, why = claim_course(hub, token, course, worker_id_of(work, log), log)
+    except Exception as e:
+        log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+        return ""
+    if not lease:
+        log(f"[打点] 重新领租约没成功（{why or '未知原因'}）——本段继续跑完并打包")
+    return str(lease or "")
+
+

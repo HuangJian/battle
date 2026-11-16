@@ -1,0 +1,209 @@
+# ═══ part 2/12: 02_consts — 常量与超时：包名 / 端点 / 心跳与打点预算 / 取包超时 / opener ═══
+
+#: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
+BUNDLE_INDEX = "tools.task.json"
+CODE_NAME = "code.zip"
+BUNDLE_MAGIC = "battle2-task-bundle"
+
+#: 解包目录（与 notebook_boot 的 `CODE_DIR` 同值：同一个进程里两份引导不打架）。
+CODE_DIR = "/tmp/worker-code"
+
+#: 引导模块自述指纹（**只给 notebook 加载后打日志用**，不参与任何逻辑）：磁盘 sha 只说明
+#: 「文件刷新成功」，说不了「内存里跑的哪一份」—— 2026-09-25 真机事故里两者恰好相反
+#: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
+#: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
+#: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
+BOOT_SELF = "boot-2026-11-12a"
+
+#: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
+#: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
+PLAN_NAME = "plan.json"
+MANIFEST_NAME = "manifest.json"
+STATE_NAME = "state.json"
+#: TS 运行时树 / 运行时 zip（与 `bundle.TS_TREE_NAME` / `protocol.TS_CODE_NAME` 逐字相同）。
+TS_TREE_NAME = "ts_code"
+TS_CODE_NAME = "ts_code.zip"
+
+#: 离线**任务清单 / 租约**端点（与 `common/protocol.py` 逐字相同；**本模块不得 import
+#: `remote.*`**：包到手之前那个包还不存在）。清单协议版本与租约时长同理（测试守逐字相同）。
+#: 为什么 cloud 侧也要有一份：`offline_boot.py` 是 notebook 每次会话从 GitHub raw 刷新的那份，
+#: 而 hub 可能在**更旧**的机器上跑（老 hub 没有清单端点）⇒ 兼容必须靠运行时降级，不能靠一起发版。
+OFFLINE_TASKS_PATH = "/offline/tasks"
+OFFLINE_CLAIM_PATH = "/offline/claim"
+OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
+OFFLINE_RELEASE_PATH = "/offline/release"
+OFFLINE_PROGRESS_PATH = "/offline/progress"
+#: push 腿的**本地**进度面文件名（`{seq, at, kind, it, done, total}`）。
+#: 与 `common/protocol.OFFLINE_PUSH_PROGRESS_NAME` 逐字相同（本文件是 notebook 从 GitHub raw
+#: 刷的那份，不能在顶层 import 仓内包；两字串由 `tests/remote/test_offline_boot_push.py` 钉住）。
+OFFLINE_PUSH_PROGRESS_NAME = "progress.json"
+#: **续跑锚点两条端点**（与 `common/protocol.py::OFFLINE_RESUME_PATH` /
+#: `OFFLINE_RESUME_BLOB_PATH` 逐字相同；对账用例 `tests/common/test_offline_task_queue.py`）：
+#: 前者递元信息（`it`/指纹/来源），后者递那一轮的**字节**
+#: （`?it=N&name=weights.json|opt.tar|row.json`）。
+#: ★ 2026-10-14 事故（plan/offline-segment-restart §1.3）：三件的字节曾经也从**元信息**那条取 ——
+#: hub 按**路径等值**分派（`hub/http_face.py:425/427`），`?it=&name=` 被整个忽略 ⇒ 每次拿回那段
+#: 55KB 元信息 JSON ⇒ `run_loop` 的指纹闸判「传输损坏」丢弃 ⇒ **锚点在云机侧 100% 失效**且不报错。
+#: 两条路径必须分开写；hub 那边另加了「元信息路径带 `name=` ⇒ 400」的响亮门。
+OFFLINE_RESUME_PATH = "/offline/resume"
+OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
+OFFLINE_QUEUE_VERSION = 1
+OFFLINE_LEASE_TTL_SEC = 900
+#: **派发协议版本**（★M1b / plan/worker-type-dispatch-model §1.5.2-P0-4）：claim 必须带
+#: `?proto=2`。新 hub 对缺它的请求一律 409（`busy:true` + `proto_required:2`）——所以这个
+#: 常量不是「能力声明」，是**入场券**：漏了它本会话什么都领不到（会响亮地打一行日志）。
+OFFLINE_CLAIM_PROTO = 2
+#: 本机 worker 身份的落点（`<work>/.worker-id`）：**持久化** ⇒ cell 中断后重跑不会被**自己**
+#: 留下的租约挡在门外（hub 判 `mine` 直接续上；评审 G1）。
+WORKER_ID_NAME = ".worker-id"
+#: ★M5（需求 7）：空档领 BC 作业的轮询节拍（秒）——包内 `worker_loop` 的 peek 间隔。
+BC_POLL_SEC = 5.0
+#: ★M5：没有 BC 可领时最多转多久就回来（秒）。有活时它跑完为限（`once=True`）：
+#: 这段时长是**阻塞**的，所以给个小上限，别让一个空转的 BC 轮询把课程轮回拖住。
+BC_TAKE_IDLE_SEC = 60.0
+
+#: 心跳周期（秒）：租约 900s ⇒ 60s 一跳留了 15 次补跳的余量（网络抖动 / 长轮之间）。
+HEARTBEAT_SEC = 60.0
+#: ★M3 / Q2：**轮内打点**的时间节流（秒）——「每 M 秒最多一句」，M ≤ 300s。hub 的 hold
+#: 活性只看 `last_progress_at`（缺省 900s 无进度 = stale ⇒ 别的盘可自动接管），而心跳只刷
+#: TTL（§68：心跳活、进度死）。取 240s：丢两三拍也还在 900s 以内，日志上每小时 ~15 行。
+PROGRESS_MIN_INTERVAL_SEC = 240.0
+#: 打点 POST 的超时（秒）：它是「顺手报一句」，绝不能把训练卡住（超时即放弃，下一拍再试）。
+PROGRESS_TIMEOUT_SEC = 5.0
+#: 连丢这么多拍 ⇒ **降频**（不是停打点；见 `install_progress_pinger` 的为什么）。
+#: 2026-10-16（评审 F1 / plan §2.2-2）：旧口径是「连丢 3 拍永久哑」，而抖动盖住 ~1 分钟就够了
+#: ⇒ hub 900s 后判 hold stale ⇒ 权重到了也不推活动起点（现场「进度冻在 it125」的一半成因）。
+PROGRESS_FAIL_LIMIT = 3
+#: 降频窗（秒）：按连丢次数取，封顶最后一档；**下一个成功即复位**。
+PROGRESS_COOLDOWN_SEC = (240.0, 480.0, 900.0)
+#: `iter`（采集局）这族**日志行**的最短间隔（秒）：口径与 `common/game_watch.PROGRESS_LOG_SEC`
+#: / `ppo/engine.py` 的 HB_SEC 同一个「每分钟一句」。2026-10-29 用户口径（log 瘦身）：一轮 239 局
+#: 的采集只要 3s，而 `should_log_progress` 的 25% 一桶会打 5 行（1/94、31/124、93/186、180/239、
+#: 239/239）——它们说的同一件事已经写在轮末那行（`进度=239/239 games settled`）。
+#: 实现：**换轮即重置窗口且第一条不打**（那条必然是 `1/94`）⇒ 3s 的一轮 0 行；真跑超一分钟的
+#: 一轮仍然每分钟 1 行（长了要看得见活着）。`should_log_progress` 照旧先过（25% 桶/换阶段）。
+#: ⚠ 只管**日志行**：发报仍按 `PROGRESS_MIN_INTERVAL_SEC` 走（「发不发」只有一处决定，
+#: 上报口永远只报事实）。
+ITER_LOG_MIN_SEC = 60.0
+#: 打点层在 `sys.modules` 里的注册名（与 `common/progress_hook.HOOK_NAME` 逐字相同；测试守——
+#: 本模块不许 import 本仓代码，理由见文件头）。快照侧（`plan_run` / `iter_rollout`）就靠这个
+#: 名字找到这一层：`common/progress_hook.report(kind, it=…, done=…, total=…)`。
+PROGRESS_HOOK_NAME = "bcity_offline_progress"
+
+#: 角色头（与 `common/protocol.py::ROLE_HEADER` / `ROLE_HEADER_VALUE` 逐字相同；测试守——
+#: 本模块**不得 import `remote.*`**，理由见文件头）。
+#:
+#: ★ 2026-09-25（plan/online-offline-role-routing §7.0.1 #2）：跑本 notebook 的云机**天生
+#: 就是离线盘** —— 它自报这一条，hub 才认得出「离线盘在线」（`/admin/queue` 的
+#: `offline_disk` 读数），也才拦得住别人拿走离线课的任务包（与 job 腿共用同一份归属判据）。
+#: 这是**这块盘的身份**，不是「每门课一个开关」：不因此要求 ipynb 填课程名
+#: （`requested_courses` 空 ⇒ 照旧走 `/offline/tasks` 清单发现）。
+ROLE_HEADER = "X-Battle-Offline"
+ROLE_HEADER_VALUE = "1"
+
+
+def _headers(token: str) -> dict[str, str]:
+    """hub 请求头：口令 + **身份**（`X-Battle-Offline`，见 `ROLE_HEADER` 的理由）。
+
+    所有 hub 调用（探活 / 取包 / 续跑锚点 / 代码 / 清单 / 租约 / 补传）都走它：少一处
+    就等于那一次「这块盘没报名」，而漏掉的后果是**静默**的（读数少一个、包可能被别处拿走）。
+    """
+    return {"Authorization": "Bearer " + token, ROLE_HEADER: ROLE_HEADER_VALUE}
+#: 清单轮询的缺省间隔（秒）——`CFG.queue_poll_sec`（与等包轮询同档）。
+DEFAULT_QUEUE_POLL_SEC = 15.0
+
+#: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
+DEFAULT_WAIT_SEC = 1800.0
+#: **清单全为终态**时的收工窗口（秒）——`CFG.idle_wait_terminal_sec`。
+#: 为什么和 `DEFAULT_WAIT_SEC` 分开：1800s 是「活还没到」的窗口（等新开课 / 等导出），
+#: 而终态（`completed` = 本段跑满待人重导包 / `not_offline` = 人固定在离线之外）只有**人介入**
+#: 才复活 ⇒ 再等下去纯烧会话时间（2026-10-07 现场：17:04 已全终态，却空转到 17:33 = 29 分钟）。
+#: 300s 只给人一个「重导包」的介入窗口；0 = 立刻收工，1800 = 恢复旧行为。
+IDLE_WAIT_TERMINAL_SEC = 300.0
+#: 等包循环的轮询间隔（秒）——两条源都在这条间隔上轮。
+DEFAULT_POLL_SEC = 15.0
+
+
+def blocked_poll_sec(rows: list[dict], poll: float) -> float:
+    """有活但被别人持有时，按最近租约到期缩短再问间隔（P2-1）。
+
+    空队列仍用 15s（没有可观测的到活信号）；但「2s 后过期」的课不该也等满 15s。
+    下限 1s（测试可把 `poll` 压到毫秒级），上限就是配置的 `queue_poll_sec`。
+    """
+    if not rows or poll <= 0:
+        return max(0.0, poll)
+    try:
+        soonest = min(float(r.get("expires_in") or poll) for r in rows)
+    except (TypeError, ValueError):
+        return poll
+    return min(poll, max(min(1.0, poll), soonest))
+#: hub 取包的重试上限（轮数；`CFG["hub_tries"]`，0 = 不限）。到顶就转「等上传」模式。
+DEFAULT_HUB_TRIES = 10
+#: 探活与取包的超时（秒）。取包给得宽：任务包几 MB～几十 MB，云机的下行不一定快。
+PING_TIMEOUT = 8.0
+PACK_TIMEOUT = 300.0
+#: `claim` 的客户端超时（秒）。**必须**大于 hub 在这条应答里可能花掉的时间：
+#: 成功分支里 `hub/offline.py::_ask_console_freshness` 会**同步**请一次控制台核对包新鲜度
+#: （预算 `hub/task_pack.py::TASK_PACK_TRIGGER_TIMEOUT_SEC` = 8s，控制台挂住时就是整 8s）
+#: ⇒ 旧值 `PING_TIMEOUT`（8.0）与 hub 的预算**撞在同一个数上**，客户端恰好先到点。
+#: 为什么这是 bug 而不只是「重试一次」：claim 是**写**——hub 可能已经把租约发出去、hold
+#: 已落盘，客户端却只看到 `net`（按纪律照旧跑、**无租约**）⇒ 那份 hold 没人交还，一拖一
+#: 把本盘其余课全挡在 `busy` 上等 900s（2026-10-20 实测：e2e 的三门课只跑成第一门）。
+#: 20s 之外的余量留给同一分支里的包 sha256（几十~几百 MB 的包要真读一遍）。
+CLAIM_TIMEOUT = 30.0
+#: 手动上传的搜索位置（浅扫，不递归大树）：工作目录/挂载点/平台默认落点。
+UPLOAD_GLOBS = (
+    ".",
+    "/content",
+    "/kaggle/working",
+    "/kaggle/input/*",
+    "/content/drive/MyDrive",
+)
+
+
+def is_kaggle(env: dict | None = None, *, exists: Callable[[str], bool] = os.path.isdir) -> bool:
+    """是否在 Kaggle 容器里（与 `remote/artifacts.py::is_kaggle` 同一判据）。
+
+    本模块**不能** import `remote.*`（拿包之前它还不存在），所以判据在这里重写一份，
+    由 `tests/remote/test_offline_boot.py` 盯着两边同值：官方标记 `KAGGLE_KERNEL_RUN_TYPE`、
+    交付面 `offline_deliverable.download_dir()` 已在用的 `KAGGLE_URL_BASE`，或 `/kaggle/working` 存在。
+    """
+    e = os.environ if env is None else env
+    if e.get("KAGGLE_KERNEL_RUN_TYPE") or e.get("KAGGLE_URL_BASE"):
+        return True
+    return bool(exists("/kaggle/working"))
+
+
+def _load_tailscale_boot() -> Any:
+    """随 code.zip 下发时是 `remote.tailscale_boot`；从 GitHub raw 拉到临时目录时是顶层模块。"""
+    for _name in ("remote.tailscale_boot", "tailscale_boot"):
+        try:
+            return importlib.import_module(_name)
+        except ImportError:
+            continue
+    raise ImportError("找不到 tailscale_boot（远端引导模块拉取失败？）")
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """显式 ProxyHandler —— Colab 的 `urlopen()` 不读 HTTP_PROXY 环境变量（2026-09-16 实测）。
+
+    与 `remote/notebook_boot.py::_build_opener` 同一份判断；离线盘多抄十行也值，
+    因为少了它，userspace tailscale 一开，hub 就再也够不着了（而离线模式里
+    「够不着」会静默退化成「等人上传」——最难查的一种）。
+    """
+    proxies: dict[str, str] = {}
+    for k in ("http_proxy", "HTTP_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["http"] = v
+            break
+    for k in ("https_proxy", "HTTPS_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            proxies["https"] = v
+            break
+    if proxies:
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+    return urllib.request.build_opener()
+
+

@@ -1,0 +1,70 @@
+# ═══ part 12/12: 12_entry — 入口：run（三步曲编排）+ _redact ═══
+def run(
+    cfg: dict,
+    log: Callable[[str], None],
+    secret: Callable[..., str],
+    keepalive_stop: Any = None,
+) -> int:
+    """cell 的唯一入口。返回 rc（交给 `SystemExit`）。
+
+    `cfg` 见 `ipynb/battle.offline.ipynb` 的 CFG。两条路（2026-09-25 新增第二条）：
+
+      · **`CFG.course` 非空** ⇒ 点名跑哪几门，顺序即执行序（★M3 起**先 claim 再取包**，
+        理由见 `_explicit_leases`：取包门要看 hold，而「谁在跑」只剩 hold 一个真源）。
+        塞拿到包的课**跳过继续**下一门（末尾汇总、`M>0` 非零 rc、全跳过 ⇒ 响亮 `SystemExit`）；
+        配置错误与训练 `rc≠0` 照旧**立即停**；
+      · **`CFG.course` 留空** ⇒ **向 hub 问清单**（`GET /offline/tasks`）：可领的逐个
+        `claim` → 取包 → 跑完 → `release`；`queue_mode` 缺省 `drain`（跑完一批继续驻守），
+        受 `session_budget_sec` / `idle_wait_sec` / 停机信号限制；**队列空 = 正常收工（rc=0）**。
+        老 hub（没有清单端点）⇒ 降级回「必须填 course」，此时空 ⇒ `SystemExit`。
+
+    边界（评审 X1，与 plan/offline-switch-auto-bundle §3.5 是同一句话的两半）：
+    「**点名**（CFG 或清单）要跑的课取不到包」是**异常**（响亮）；「队列本来就空」是**正常**。
+    """
+    # ★ 凭据一律在任何网络改动**之前**读完（2026-09-17 Kaggle 事故的时序约束）：
+    #   userspace 引导会把平台 Secrets（公网 HTTPS）变成够不着的东西。
+    creds = {
+        "HUB_TOKEN": secret("HUB_TOKEN", cfg.get("hub_token")),
+        "HUB_IP": secret("HUB_IP", cfg.get("hub_ip")),
+        "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
+    }
+    log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
+    explicit = _load_deliverable().requested_courses(cfg)
+    if explicit:
+        log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
+        explicit_kinds = _explicit_kinds(cfg, creds, log)
+        # 老 hub 没有 `kind`（空表）⇒ 逐字旧行为：全部按 RL 跑。
+        extra = {"kinds": explicit_kinds} if explicit_kinds else {}
+        return _run_batch(
+            cfg,
+            creds,
+            log,
+            keepalive_stop,
+            explicit,
+            multi=len(explicit) > 1,
+            leases=_explicit_leases(cfg, creds, log),
+            **extra,
+        )
+    if not bool(cfg.get("auto_discover", True)):
+        # 显式关掉自动发现 = 「我就是要手填 course」的口径 ⇒ 与今天逐字相同地响亮拒。
+        raise SystemExit(
+            "[offline] CFG.course 没填，且 auto_discover=False ⇒ 不知道跑哪几门课。\n"
+            "  ① 填 CFG.course（可以多门，列表按顺序串行）；\n"
+            "  ② 或把 auto_discover 打开（缺省 True）⇒ 云机向 hub 问清单。"
+        )
+    log("CFG.course 留空 ⇒ 向 hub 问任务清单（plan/offline-task-discovery）")
+    return _run_auto(cfg, creds, log, keepalive_stop)
+
+
+def _redact(argv: list[str]) -> list[str]:
+    """日志用的 argv（token 只走文件，这里只是防御性地不打印任何 token 形参）。"""
+    out: list[str] = []
+    skip = False
+    for a in argv:
+        if skip:
+            out.append("***")
+            skip = False
+            continue
+        out.append(a)
+        skip = a in ("--hub-token", "--hub-lease")
+    return out

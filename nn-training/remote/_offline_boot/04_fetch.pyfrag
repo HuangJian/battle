@@ -1,0 +1,431 @@
+# ═══ part 4/12: 04_fetch — 取包：重试预算 / HTTP 错误分类 / fetch_task_pack / fetch_resume / obtain_pack / 隧道 ═══
+def _fetch_guarded(
+    url: str, headers: dict[str, str], log: Callable[[str], None], label: str, total_timeout: float
+) -> bytes:
+    """取一个**大 body**：走引导期传输护栏（进度行 / 停滞 / 超预算 / 低速重抽）。
+
+    护栏住 `tailscale_boot`（三个 notebook 都拉它）——它必须在 `code.zip` **之前**可用，
+    而任务包正是被下载的那个东西（鸡生蛋）。万一它没加载（纯离线兑底路径），退回
+    朴素整读并**响亮记一笔**：任务包几 MB～几十 MB，没护栏时一次坏签就是「一行日志
+    都没多，干等」——绝不静默降级。
+    """
+    try:
+        ts = _load_tailscale_boot()
+    except ImportError as e:
+        log(f"引导传输护栏不可用（{e}）——本次取包只有整超时，无停滞/低速判据")
+        req = urllib.request.Request(url, headers=headers)
+        with _build_opener().open(req, timeout=total_timeout) as resp:
+            return resp.read()  # type: ignore[no-any-return]
+    got: bytes = ts.fetch_guarded(
+        url, headers=headers, log=log, label=label, total_timeout=total_timeout, attempts=3
+    )
+    return got
+
+
+class PackUnavailableError(SystemExit):
+    """「这门课没拿到任务包」——**只表示取包失败**，不等于训练失败。
+
+    单开一类（`SystemExit` 的子类，message 逐字不变）是为了让 `run()` 能**只**放行这一类：
+    多课程串行时跳过它继续下一门（plan/offline-switch-auto-bundle §3.5），而课程名不一致、
+    产物目录不完整这类**配置错误**照旧立即停（继续跑没有意义）。
+
+    为什么必须是 `SystemExit` 子类：既有用例与 notebook 都按 `SystemExit` 处理取包失败
+    （`pytest.raises(SystemExit)` / cell 末尾 `raise SystemExit(_rc)`）——子类让它们逐字不变。
+    """
+
+
+def _http_error_parts(
+    e: urllib.error.HTTPError, limit: int = 400
+) -> tuple[str, dict]:
+    """HTTPError 的响应正文 → `(人读正文, 解析出的 dict)`。**只读一次**。
+
+    为什么要合成一个函数（评审 F2）：HTTPError 的 fp **读完即空** ⇒ 「先 `_http_error_body(e)`
+    再读一次拿 `path`/`known_courses`」第二次只会拿到 `b""`（现场表现是「hub 说：（空正文）」）。
+    这里一次 `e.read()`，正文文本与结构体都从同一份 bytes 出。
+    """
+    try:
+        raw = e.read()
+    except Exception:  # 正文读不出来不该盖掉 HTTP 状态本身
+        return "（无正文）", {}
+    try:
+        loaded = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        loaded = None
+    doc = loaded if isinstance(loaded, dict) else {}
+    if doc.get("error"):
+        return str(doc["error"])[:limit], doc
+    text = raw.decode("utf-8", "replace").strip()
+    return (text[:limit] or "（空正文）"), doc
+
+
+def _http_error_body(e: urllib.error.HTTPError, limit: int = 400) -> str:
+    """HTTPError 的响应正文（优先取 json 的 `error` 字段；读不到就说清「无正文」）。
+
+    ⚠ 只能读一次：既要不只正文、又要正文里的字段时用 `_http_error_parts`（F2）。
+    """
+    return _http_error_parts(e, limit)[0]
+
+
+def fetch_task_pack(
+    hub: str,
+    token: str,
+    course: str,
+    dest_dir: Path,
+    log: Callable[[str], None],
+    timeout: float = PACK_TIMEOUT,
+    *,
+    lease: str = "",
+) -> Path | None:
+    """`GET /offline/task-pack?course=<课>[&lease=<token>]` → 落到 `dest_dir/task-<课>.zip`。
+
+    返回 None = **这一次**没取到（404 还没导出 / 网络抖动）——调用方据此重试或转手动。
+    401/403 也不抛：包可能已经在用户手上，手动路仍然能把任务做完，所以只响亮记一笔。
+
+    ★M1b / P1-2：hub 的取包门现在还会问「这门课有没有 **live hold**」——有主时（包括
+    **本机自己**刚 claim 完）不带 `?lease=` 会吃 409。所以 `_run_batch` 领到租约后必须把
+    token 一路传到这里（空 = 老路径：没领租约的 `CFG.course` 腿，只有「无人持」时才取得到）。
+    """
+    url = f"{hub.rstrip('/')}/offline/task-pack?course={urllib.parse.quote(course)}"
+    if lease:
+        url += f"&lease={urllib.parse.quote(lease)}"
+    try:
+        raw = _fetch_guarded(
+            url, _headers(token), log, "task-pack", timeout
+        )
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            log(f"取包被拒 HTTP {e.code} —— HUB_TOKEN 不一致（手动上传仍然可行）")
+        elif e.code == 404:
+            # ★ 2026-09-25（plan/offline-switch-auto-bundle §3.2）：hub 的 404 正文里带
+            #   诊断字段（`path` / `known_courses` / 触发回执），而此前只打一行固定文案 ⇒
+            #   现场无法区分「包没导出」「hub 的 traj-root 不对」「hub 压根没发现这门课」
+            #   （三条的表现逐字相同，用户 2026-09-25 因此白等 28 分钟）。这里把正文读出来。
+            body, doc = _http_error_parts(e)
+            log(f"hub 上还没有 task-{course}.zip —— 先在控制台「导出任务包」")
+            if body and body not in ("（空正文）", "（无正文）"):
+                log(f"  hub 说：{body}")
+            path_s = str(doc.get("path") or "")
+            known = doc.get("known_courses")
+            if path_s:
+                log(f"  hub 找的落点：{path_s}")
+            if isinstance(known, list):
+                names = ", ".join(str(x) for x in known)
+                if course in [str(x) for x in known]:
+                    log(f"  hub 已知课程：{names or '（无）'}（含本门 ⇒ hub 找得到课，只是没这个包）")
+                else:
+                    log(
+                        f"  hub 已知课程：{names or '（一门都没有）'}（**没有本门** ⇒ hub 还没发现"
+                        "这门课：课程名不一致 / 训练目录不新鲜 / hub 的 --traj-root 不是本机 tmp）"
+                    )
+            if doc:
+                if doc.get("give_up"):
+                    log("  hub 动作：重导已到上界 —— 请到控制台手动「导出任务包」")
+                elif doc.get("triggered"):
+                    log(f"  hub 动作：{doc.get('trigger_note') or '已替我们触发了一次重导'}，稍后会重试")
+                elif doc.get("trigger_note"):
+                    log(f"  hub 动作：{doc['trigger_note']}")
+        elif e.code == 409:
+            # 409 = hub 判「包已过期」（可能已经替我们触发重导）——**正文就是下一步**：
+            # 只打一个数字的话，人在云机上看到的是「取包失败」，而真实原因已经写在正文里了
+            # （plan/offline-rerun-local-first §8.3 第 3 条）。
+            log(f"hub 说任务包已过期（HTTP 409）：{_http_error_body(e)}")
+        else:
+            log(f"取包失败 HTTP {e.code}：{_http_error_body(e)}")
+        return None
+    except Exception as e:
+        log(f"取包异常（{type(e).__name__}: {e}）—— 稍后重试")
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"task-{course}.zip"
+    dest.write_bytes(raw)
+    sha12 = hashlib.sha256(raw).hexdigest()[:12]
+    log(f"任务包就位: {dest}（{len(raw)} bytes, sha12={sha12}）")
+    return dest
+
+
+def fetch_resume(
+    hub: str,
+    token: str,
+    course: str,
+    dest_dir: Path,
+    log: Callable[[str], None],
+    timeout: float = PING_TIMEOUT,
+) -> Path | None:
+    """`GET /offline/resume?course=<课>` → 把锚点轮次铺进 `dest_dir`（秒级小请求，失败= None）。
+
+    云机重领任务时「任务包比 hub 上的进度旧」是常态（包是导出那一刻的快照，而云机可能
+    已被回收又重开）。锚点三件（weights/opt/指标行）拿到手后交给 `run_loop --resume-dir`，
+    它把那一轮采纳进产物目录、从之后接着跑（用户口径：必须**同轮齐全**，否则退到更早轮
+    ——所以这里只认 hub 给的那一轮，不在客户端自己扫描/凑件）。
+
+    **拿到的就是整份**（2026-10-15 用户口径）：delta 只活在「回传进程 + hub 落地器」之间
+    ——hub 受理回传时就地把压缩版重建为整份（`hub/deltas.py`），锚点也只交整份轮次；
+    所以这里只是按 hub 报的实际文件名把三件取回来（`files`；老 hub 没这个键 ⇒ 两个候选名
+    各试一次），客户端不做任何重建/凑链。
+
+    任何失败都**不影响训练**（安静回 None，日志里留一行原因）：锚点只是「少跑几轮」的
+    优化，包自带的起点永远能跑。
+    """
+    url = f"{hub.rstrip('/')}{OFFLINE_RESUME_PATH}?course={urllib.parse.quote(course)}"
+    try:
+        req = urllib.request.Request(url, headers=_headers(token))
+        with _build_opener().open(req, timeout=timeout) as resp:
+            meta = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        log(f"取续跑锚点失败（{type(e).__name__}: {e}）——从任务包自带起点跑")
+        return None
+    resume = meta.get("resume") if isinstance(meta, dict) else None
+    if not isinstance(resume, dict):
+        log("hub 上没有比任务包更新的完整轮次——从任务包自带起点跑")
+        return None
+    try:
+        it = int(resume["it"])
+    except (KeyError, TypeError, ValueError):
+        log(f"续跑锚点元信息缺 it（{resume}）——忽略")
+        return None
+    ac_dir = dest_dir / f"it-{it:03d}"
+    ac_dir.mkdir(parents=True, exist_ok=True)
+    # ★ 字节走 `.../resume/blob`，**不是**上面那条元信息 URL（2026-10-14 事故，见常量处注释）：
+    # hub 的 GET 分派按**路径等值**，`?it=&name=` 加在元信息路径上会被整个忽略 ⇒ 拿回来的是
+    # 那段元信息 JSON，`run_loop` 的指纹闸当场判「传输损坏」⇒ 锚点永远用不上。
+    blob_url = (
+        f"{hub.rstrip('/')}{OFFLINE_RESUME_BLOB_PATH}?course={urllib.parse.quote(course)}"
+    )
+    # 件名：hub 在 meta 里报**实际文件名**（`files`，名字跟着内容走）；老 hub 没有这个键 ⇒
+    # 两个候选名各试一次（整份名优先，与 `remote.delta_files.variants` 同序）。
+    adv = resume.get("files") if isinstance(resume.get("files"), dict) else {}
+    got: dict[str, str] = {}
+    for part, cands in _RESUME_PART_NAMES.items():
+        want = str(adv.get(part) or "")  # type: ignore[union-attr]
+        names = (want, *(n for n in cands if n != want)) if want else cands
+        for name in names:
+            q = f"{blob_url}&it={it}&name={urllib.parse.quote(name)}"
+            try:
+                req = urllib.request.Request(q, headers=_headers(token))
+                with _build_opener().open(req, timeout=timeout) as resp:
+                    data = resp.read()
+            except Exception as e:
+                log(f"取续跑锚点件 {name} 失败（{type(e).__name__}: {e}）")
+                continue
+            (ac_dir / name).write_bytes(data)
+            got[part] = name
+            break
+        else:
+            # 三件不齐 = 这个锚点不可用（不是「少一件也能跑」）：退回包自带起点。
+            log(f"取续跑锚点件 {part}（{'/'.join(names)}）一个都没取到——放弃该锚点")
+            return None
+    (dest_dir / "resume.json").write_text(
+        json.dumps({**resume, "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                   ensure_ascii=False, indent=1),
+        encoding="utf-8",
+    )
+    log(
+        f"续跑锚点就位：it{it}（来源 {resume.get('source')}，run={resume.get('run_id')}，"
+        f"{got.get('weights')}/{got.get('opt')}，wfp={str(resume.get('weights_fp'))[:12]}…）"
+        "——本段从它之后继续"
+    )
+    return dest_dir
+
+
+#: 锚点三件的**件名 → 候选文件名**（`remote.delta_files.variants` 的口径在此留一份：本模块
+#: 顶层不得 import `remote.*`）。`row.json` 只有一种名字（它是账本行，不是权重/动量）。
+_RESUME_PART_NAMES: dict[str, tuple[str, ...]] = {
+    "weights": ("weights.json", "weights.delta"),
+    "opt": ("opt.tar", "opt.delta"),
+    "row": ("row.json",),
+}
+
+
+# ── 拿包：hub 与手动两条源，一个等待循环 ───────────────────────────────────
+
+
+def _try_hubs(
+    hubs: list[str],
+    broken: list[str],
+    creds: dict,
+    course: str,
+    work_dir: Path,
+    log: Callable[[str], None],
+    *,
+    lease: str = "",
+) -> Path | None:
+    """对着候选逐个试一轮取包（探活 → 取包），返回包或 None（纯函数壳，只求可测）。
+
+    `broken` 就地记下**探活失败**的候选：够不着 ≠ 取不到 —— 够不着的候选在本次等待里不再探
+    （探活超时 8s，无谓地重复探一个死地址就是白等），而「在线但没包」不算黑名单事件，
+    它由调用方的重试上限兜住。**一轮只真取一次**（第一个够得着的候选说了算）——
+    同一个包对 N 个候选各取一遍只是让日志变长。
+    """
+    tok = str(creds.get("HUB_TOKEN") or "")
+    for hub in hubs:
+        if hub in broken:
+            continue
+        if not probe_hub(hub, tok, log):
+            broken.append(hub)
+            continue
+        log(f"hub 在线: {hub}")
+        if not course:
+            log("没填 CFG.course —— 没法按课程取包（去控制台看课程名，或在 CFG 里填）")
+            return None
+        return fetch_task_pack(hub, tok, course, work_dir, log, lease=lease)
+    return None
+
+
+def obtain_pack(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    work_dir: Path,
+    stop: Any = None,
+    *,
+    optional: bool = False,
+    lease: str = "",
+) -> Path | None:
+    """拿任务包：显式路径 → 已有落点 → （hub 取 / 等人传）等到 deadline 为止。
+
+    `optional=True`（本机已有产物时的「本机优先」路径）：**只试一次就收手**——包这时只是
+    「代码/TS 的备源」，为一个可选的东西等 30 分钟（甚至因为等不到而拒绝起跑）正是用户
+    抱怨的那种白等。所以：`wait_s` 归零、不弹上传框、取不到**返回 `None`**（不是
+    `SystemExit`——`0s` 的既有语义是「不等待，立刻报错」，与本模式无关）。
+
+    **两条源在同一个循环里轮询**（每轮先看落点、再试 hub）：用户随时可能上传，hub 也随时
+    可能被点上「导出」——把它们排成先后两步，会让「上传之后又等满 hub 的超时」这种事发生。
+    **上传框只在 hub 试满上限之后弹一次**（2026-10-04：`files.upload()` 阻塞在交互上，
+    抢在重试前面弹 = 重试机制失效）；没配 hub 时立刻弹（那已是唯一的路）。
+
+    **hub 只试 `CFG["hub_tries"]` 轮**（缺省 `DEFAULT_HUB_TRIES` = 10，0 = 不限）：连试这么多
+    轮还没拿到就不再碰 hub，**转入「等上传」模式**并响亮说明（用户口径 2026-09-23）。原来
+    没有上限，hub 没导出时就把 30 分钟全花在每 15s 一次的探活/取包上：云机侧看起来像死了，
+    而实际上它只是在一个永远不会成功的请求上刷日志。到点仍无包 ⇒ `SystemExit`，正文就是
+    下一步该做什么（不猜、不静默重试）。
+    """
+    explicit = str(cfg.get("task_zip") or "").strip()
+    if explicit and Path(explicit).expanduser().is_file():
+        p = Path(explicit).expanduser()
+        log(f"用 CFG.task_zip 指定的任务包: {p}")
+        return p
+
+    found = find_uploaded_pack(cfg, log)
+    if found is not None:
+        log(f"落点里已有任务包: {found}")
+        return found
+
+    course = str(cfg.get("course") or "").strip()
+    # 注意 `0` 是**合法**值（「不等待，立刻报错」）——不能用 `or` 兜底（falsy-zero 陷阱）。
+    wait_s = DEFAULT_WAIT_SEC if cfg.get("wait_pack_sec") is None else float(cfg["wait_pack_sec"])
+    if optional:
+        wait_s = 0.0  # 本机优先：只试一次（下面的 prompt 门也是 `wait_s > 0`）
+    poll_s = max(0.05, float(cfg.get("poll_sec") or DEFAULT_POLL_SEC))
+    # 同样注意 `0` 是**合法**值（不限轮数）——不能用 `or` 兜底（falsy-zero 陷阱，实测踩过）。
+    tries_raw = cfg.get("hub_tries")
+    max_hub_tries = DEFAULT_HUB_TRIES if tries_raw is None else max(0, int(tries_raw))
+    deadline = time.time() + max(0.0, wait_s)
+    hubs = hub_candidates(cfg, creds)
+    hubs_tried_ts = False
+    prompted = False
+    hub_broken: list[str] = []
+    hub_tries = 0
+    hub_parked = False
+    if optional:
+        log(
+            f"本机已有产物 ⇒ 只试一次 hub 取包（不等、不弹上传框）："
+            f"hub 候选 {hubs or '(没配 hub 地址)'}"
+        )
+    else:
+        log(
+            f"等任务包（上限 {wait_s:.0f}s）：hub 候选 {hubs or '(没配 hub 地址)'}"
+            + (f"，hub 最多试 {max_hub_tries} 轮" if max_hub_tries else "，hub 不限轮数")
+        )
+    while True:
+        found = find_uploaded_pack(cfg, log)
+        if found is not None:
+            log(f"收到任务包: {found}")
+            return found
+        if stop is not None and stop.is_set():
+            raise SystemExit("[offline] 收到停机信号 —— 等包中止（未开始任何训练）")
+        if not hub_parked and hubs:
+            hub_tries += 1
+            got = _try_hubs(hubs, hub_broken, creds, course, work_dir, log, lease=lease)
+            if got is not None:
+                return got
+            if not hubs_tried_ts and all(h in hub_broken for h in hubs):
+                # 所有候选都够不着：**这时**才值得去起 tailscale（可能只是还没入 tailnet）。
+                ip = ensure_tailscale(cfg, creds, log)
+                hubs_tried_ts = True
+                if ip:
+                    # 之前的失败是「还没入 tailnet」，不是「地址不对」——清掉黑名单重试全部候选。
+                    hub_broken.clear()
+                    hubs = hub_candidates(cfg, creds)
+                    continue
+            if max_hub_tries and hub_tries >= max_hub_tries:
+                hub_parked = True
+                log(
+                    f"hub 取包试了 {hub_tries} 轮都没成功（CFG.hub_tries={max_hub_tries}）"
+                    "⇒ 转入「等上传」模式，不再轮询 hub：去控制台「导出任务包」→ 上传到本 "
+                    "notebook（Colab 上传框 / Kaggle Add Data），或写进 CFG['task_zip']；"
+                    "若你刚导出、想让它自己取，**重跑本 cell** 即可"
+                )
+        # ★ 2026-10-04 Colab 现场：弹框（`files.upload()`）会**阻塞**在交互上——抢在 hub
+        #   重试前面弹，等于把「hub 正在导包、稍后自动取到」这条路一刀切断（现场日志：
+        #   hub 刚说「已替你触发一次重导，稍后重试」，下一行就是上传框 ⇒ 重试机制失效）。
+        #   用户口径：先让 hub 试满 `hub_tries` 轮（转「等上传」模式）**才**弹。没配 hub
+        #   时无重试可破坏，照旧立刻弹（那是唯一的路）。
+        if (
+            not prompted
+            and (hub_parked or not hubs)
+            and cfg.get("prompt_upload", True)
+            and wait_s > 0
+        ):
+            prompted = True
+            got = prompt_upload(log)
+            if got is not None:
+                return got
+        if time.time() >= deadline:
+            break
+        time.sleep(max(0.05, min(poll_s, deadline - time.time())))
+
+    if optional:
+        log("本机优先：这次没取到包 —— 代码/TS 从产物目录取，回传 best-effort（不因此停跑）")
+        return None
+    raise PackUnavailableError(
+        f"[offline] {wait_s:.0f}s 内没拿到任务包 —— 两条路任选其一：\n"
+        f"  ① hub 取包：控制台「导出任务包」（导出要求该课训练已停）→ 保持 hub 在线"
+        f"（{'、'.join(hubs) if hubs else 'CFG.hub_url / HUB_IP 未配'}）→ 重跑本 cell；"
+        f"\n  ② 手动送包：控制台下载 `task-<课>.zip` → 上传到本 notebook（Colab 上传框 / "
+        f"Kaggle Add Data）或写进 `CFG['task_zip']` → 重跑本 cell。"
+    )
+
+
+def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
+    """best-effort 起 tailscale（离线模式**不因它失败而终止**：没隧道还有手动路）。
+
+    ★ 凭据必须在进本函数之前读完：`ensure` 会把进程代理改写成只转发 Tailscale IP 的
+    userspace 代理，之后平台 Secrets（公网 HTTPS）就够不着了（2026-09-17 Kaggle 事故）。
+
+    ★ **Kaggle 上一律跳过**（用户口径 2026-09-23）：那里既没有 NET_ADMIN 也换不得网络
+    命名空间，**正是**上面那个事故的现场；换不来隧道，只换来一个改坏了的代理环境。
+    所以这一层（而不是调用点）做短路：任何将来新增的调用点都不会绕过它。
+    """
+    if is_kaggle():
+        log("Kaggle 环境 ⇒ 跳过 tailscale（起不来隧道，且 userspace 引导会改坏平台代理）")
+        return ""
+    key = str(creds.get("TS_AUTHKEY") or "").strip()
+    if not key:
+        log("没有 TS_AUTHKEY —— 跳过 tailscale（只走公网 hub_url / 手动送包）")
+        return ""
+    try:
+        ts = _load_tailscale_boot().ensure(
+            {
+                "ts_authkey": key,
+                "ts_ephemeral": bool(cfg.get("ts_ephemeral", True)),
+                "proxy_env": True,
+                "engine": str(cfg.get("ts_engine") or ""),
+            },
+            log,
+        )
+        return str(ts.get("ip") or "")
+    except Exception as e:
+        log(f"tailscale 起不来（{type(e).__name__}: {e}）—— 继续走手动送包")
+        return ""
+
+

@@ -6853,3 +6853,22 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   拒绝 `extra=None`（明确「不静默用 0」）⇒ torch「demo 开 + 带 extra 模型」腿每次更新直接炸；
   legacy 模型看不出差别。修 `_setup_demo` 与 Paddle 同口径（存在即物化）；先红后修用例
   `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`。详见 `docs/nn/training-stack.md` §73。
+- **2026-11-17（B8：`remote/offline_boot.py` 改生成物，12 段源码 `.pyfrag` + 拼接器）**：审计 §0.4-12 /
+  §7.6 要求「3554 行改成生成物：源码拆多文件、构建时拼成单文件发行」。动前的约束是硬的：
+  `offline_boot` 是 **standalone 运输单元**（notebook 引导格从 GitHub raw **按文件名**拉它，那时
+  `code.zip` 还没进 `sys.path`）⇒ 拆成可 import 的模块会直接破掉运输契约，所以拆的只能是**源码**：
+  `remote/_offline_boot/*.pyfrag` 12 段（按**顶层块边界**切，每段都能独立 `ast.parse`，最大 441 行），
+  `tools/build_offline_boot.py` 按 `PARTS` 逐字节拼回发行物（6 行「不要手改」文件头 + 12 行分段头 + 段间 11 个空行
+  ⇒ 与拆分前 **+29 行、其余逐字节相同**，一次性切分脚本先对账过 `"".join(parts) == 原文件`）。
+  **分片后缀刻意是 `.pyfrag` 不是 `.py`**：生产树的静态门禁（print / 宽捕获 / `Any` / 函数形状 / LOC /
+  层级账本 / 抑制符）全部按 `rglob("*.py")` 扫**发行物**，分片叫 `.py` 会把同一行字数两遍 ⇒ 只剩两条
+  坏路（抬基线，本仓禁；或给每个门禁加排除名单 = 让门禁看不见代码）。`.pyfrag` 让「被检查的东西」与
+  「被运输的东西」是同一个文件。代价写进明处：分片不被 mypy/ruff 解析，一致性与语法靠「重建 → mypy +
+  用例」兜住（分段头编号漂号也会被守卫当场抓住）。
+  **LOC 豁免因此改成有条件的**：`offline_boot.py` 之所以还豁免，不再是「拆不开」，只剩「运输契约要
+  单文件」 ⇒ `tests/test_python_loc_budget.py` 新增逐分片 LOC 判据（同一个 `loc_of`；实测往
+  `12_entry.pyfrag` 塞 1000 行 ⇒ 红），下一个「懒得拆」的巨段长不出来。
+  守卫 `tests/remote/test_offline_boot_is_generated.py` 四条（提交物 == `build()` · 分片目录无表外分片 /
+  无 `.py` · 分段头与位置一致 · 每段以换行收尾），四向证伪实测红（手改生成物 / 加表外分片 / 混进
+  `.py` / 分段头漂号）。`test_module_doc_budget`（53 行）与 G3/G4/G14 读数**一个都没动**。
+  全文 → `docs/nn/engineering.md` §118。

@@ -1,0 +1,442 @@
+# ═══ part 6/12: 06_run — 跑一局：build_run_argv + run_one_course（产物） ═══
+def build_run_argv(
+    cfg: dict,
+    pack: Path | None,
+    dest: Path,
+    hub: str,
+    token_file: str,
+    resume_dir: str | Path | None = None,
+    *,
+    local_first: bool = False,
+    lease_file: str = "",
+    backup_root: str | Path | None = None,
+    outbox: str | Path = "",
+    stop_file: str = "",
+    floor_it: int = 0,
+) -> list[str]:
+    """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
+
+    `cfg["course"]` 在这一层恒是**单个**课程名（`run_one_course` 已把多课程列表拆开），
+    它同时是补传的归位键（hub 侧 `<traj>/<课>/` 的目录名）与任务包名的一部分。
+
+    `local_first=True`（本机已有产物）或根本没拿到包 ⇒ **不传 `--bundle`**：包不参与，
+    plan/manifest/代码/TS 全从产物目录读（`run_loop.main` 允许 `--artifacts` 单独用）。
+    这是本 plan 的核心动作：**不存在"包覆盖本机计划"这条路径**（评审 F1/F3）。
+    """
+    course = str(cfg.get("course") or "").strip()
+    argv: list[str] = []
+    if pack is not None and not local_first:
+        argv += ["--bundle", str(pack)]
+    argv += ["--artifacts", str(dest)]
+    device = str(cfg.get("device") or "").strip()
+    if device:
+        argv += ["--device", device]
+    if int(cfg.get("threads") or 0):
+        argv += ["--threads", str(int(cfg["threads"]))]
+    if int(cfg.get("max_iters") or 0):
+        argv += ["--max-iters", str(int(cfg["max_iters"]))]
+    if float(cfg.get("budget_sec") or 0):
+        argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
+    # ★ 2026-10-24（用户口径）：高配云机的两个**训练侧**放大旋钮。缺省 1.0 = 不传
+    #   （旧包/旧 argv 逐字不变）；只放大采样量与 PPO 更新遍数，不动评估语料。
+    for _key, _flag in (("sample_mult", "--sample-mult"), ("epoch_mult", "--epoch-mult")):
+        _raw = cfg.get(_key, 1.0)
+        if _raw is None or _raw == "":
+            _raw = 1.0
+        try:
+            _v = float(_raw)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"CFG.{_key} 必须是正数（当前 {_raw!r}）") from e
+        if not math.isfinite(_v) or _v <= 0:
+            raise ValueError(f"CFG.{_key} 必须是有限正数（当前 {_raw!r}）")
+        if _v != 1.0:
+            # `:g` 去掉 `2.0` 这类无意义尾零；数值本身不做四舍五入。
+            argv += [_flag, f"{_v:g}"]
+    # ★ 2026-10-28（云机轮换）：笔记本开关（`CFG["rotation"]`，三态）。
+    #   缺省 `auto`（= 跟随计划）**不进 argv** —— 旧包/旧 argv 逐字不变；只有显式
+    #   `on` / `off` 才传（`off` 会把计划里的轮换降级成全关采样，并在账本里留痕）。
+    _rot = str(cfg.get("rotation") or "auto").strip().lower() or "auto"
+    if _rot not in ("auto", "on", "off"):
+        raise ValueError(f"CFG.rotation 只认 auto / on / off（当前 {_rot!r}）")
+    if _rot != "auto":
+        argv += ["--rotation", _rot]
+    # rollout 并行局数：缺省（不传）= 按云机核数 `cpu_worker_slots`（≤4 核全给，否则
+    # max(cores−2, cores×0.8)），与云机 eval 同一口径。
+    # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`
+    # 提交后有界等本轮评估收线，见那里的 EVAL_ALTERNATE_WAIT_SEC：两条腿同时开满会把单局
+    # 墙钟推过 5s 硬顶，2026-09-25 云机卡死就是这么来的）。
+    if int(cfg.get("rollout_workers") or 0):
+        argv += ["--rollout-workers", str(int(cfg["rollout_workers"]))]
+    # 云机 A 层评估（`eval_on_cloud`）：语料/口径全部由课程（随包的 course.jsonc）决定，
+    # 这里只传两个执行面旋钮（并发/单局超时）——不在 notebook 里重复一遍语料定义。
+    # ★ 2026-10-03（plan/auto-offline-handoff U5）：缺省改 **True**，与 notebook 的 CFG 同值
+    # （此前两处不一致：notebook 默认 True、这里写死 False ⇒ 非 notebook 调用方静默少跑评估）。
+    if bool(cfg.get("eval_on_cloud", True)):
+        argv += ["--eval-on-cloud"]
+        if int(cfg.get("eval_slots") or 0):
+            argv += ["--eval-slots", str(int(cfg["eval_slots"]))]
+        if float(cfg.get("eval_game_timeout_sec") or 0):
+            argv += ["--eval-game-timeout-sec", str(float(cfg["eval_game_timeout_sec"]))]
+    # 续跑锚点（hub 递回的最新「同轮齐全」轮次）：有它就从那儿接，没有就从包自带起点。
+    if resume_dir and Path(resume_dir).is_dir():
+        argv += ["--resume-dir", str(resume_dir)]
+    # 网络侧备份抽屉（★ 2026-10-14，plan/offline-local-disk-first §3.4 C1）：产物落本地盘之后，
+    # 「这一轮的产物没能回传给 hub」是**唯一**该写网络盘的时机（每轮观测 + 段末 sweep）。
+    if backup_root:
+        argv += ["--backup-root", str(backup_root)]
+    if outbox:
+        # ★ 2026-10-23（plan/push-mode-notebooks §6.4 / P1-9）：push 腿的**唯一**出口是本地
+        # outbox —— 与 `--no-deliver` 同时给是**有意**的：`--outbox` 的语义就是「只关 HTTP
+        # 补传，outbox 必须活」（P0-1 的不变量，见 `deliver_proc.make_deliverer`）。
+        # 同时**不传** `--hub-url`：传了就会把这条腿变回 HTTP 补传（而 push 包里不带 token）。
+        argv += ["--outbox", str(outbox), "--no-deliver"]
+        if int(floor_it or 0) > 0:
+            # ★ 2026-10-24（F7）：hub 已有的最高一轮（任务包的 resume_it）——
+            # `it <= floor` 的轮不物化（否则整段重跑会白写几十 MB 的已知轮）。
+            argv += ["--floor-it", str(int(floor_it))]
+    elif bool(cfg.get("live_backfeed", True)) and hub and token_file:
+        argv += ["--hub-url", hub, "--hub-token-file", token_file]
+        # 补传的**归位键**（多课程 hub 必需）：`CFG.course` 就是控制台里那门课的名字，
+        # 也是 hub 侧 `<traj>/<课>/` 的目录名（hub 靠它把每一轮落进正确的课程目录）。
+        # 缺了它，多课程 hub 会以「无法归属课程」把每条补传拒掉（400）——训练不受影响，
+        # 但控制台上看不到段内进度，只剩「跑完自己下载导入」那条路。
+        if course:
+            argv += ["--hub-course", course]
+        # ★M1b / P1-1：本课的租约 token → 补传体里的 `lease_token`。**没有它照样跑**
+        # （补传照落、只是不推进活动起点：hub 侧 `offline_advance_ok` 的三态之一），
+        # 所以缺租约（老 hub / 没 claim 成）不是错误。
+        if lease_file:
+            argv += ["--hub-lease-file", lease_file]
+    else:
+        argv += ["--no-deliver"]
+    # 取消（worker 的 `/offline/push/cancel` 写这个文件）：`plan_run` 在**轮边界**看它。
+    if stop_file:
+        argv += ["--stop-file", str(stop_file)]
+    return argv
+
+
+def run_one_course(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: Any,
+    *,
+    course: str,
+    multi: bool = False,
+    run_loop_main: Callable[[list[str]], int] | None = None,
+    lease: str = "",
+    progress: dict | None = None,
+    push_mode: bool = False,
+    assigned_pack: str | Path | None = None,
+    assigned_resume: str | Path | None = None,
+    push_outbox: str | Path = "",
+    stop_file: str = "",
+    push_floor_it: int = 0,
+) -> int:
+    """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
+
+    `multi=True`（同一会话里还有别的课）时工作目录再套一层课程名——见 `course_work_dir`。
+    `run_loop_main` 是测试用的注入点（生产走 `remote.run_loop.main`）。
+    `lease` = 本课的租约 token（`_run_batch` 领到后传进来）：取包要带它（P1-2 的 live hold 门），
+    空值只在「没领租约/老 hub」时出现。
+    `progress` 非空时，本段结束会把打点层给出的**租约结局**写进去（`{"outcome": …}`，
+    ★M3：`revoked` ⇒ 本会话别再领这一课）；不传就是纯观测腿。
+
+    ★ 2026-10-23（`plan/push-mode-notebooks` §6.4 / W4，P1-9）：`push_mode=True` 是**同一段代码**
+    的另一种起点 —— hub 已经把包/锚点/outbox 都给定了（worker 服务端收的任务包），所以这条腿
+    **不探 hub、不取包、不取锚点、不装 HTTP 打点、不打交付 zip**；训练进度写
+    `<outbox>/progress.json`，产物写进 `--outbox`（`LocalOutboxDeliverer`）。
+
+    为什么不另写一份 `run_push_course`：这两条路的差异是**输入来源**，而本函数里最容易出错的
+    东西（两个产物根、半截目录闸、本机优先、code.zip 引导、argv 装配）两边逐字相同 —— 复制一份
+    就等着两边漂开（P1-9 的原始动机就是「不要让 push 分支变成半成品」）。
+    """
+    deliverable = _load_deliverable()
+    # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
+    # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
+    ccfg = {**cfg, "course": course}
+    work = deliverable.net_root(cfg, course, multi=multi)
+    work.mkdir(parents=True, exist_ok=True)
+    log(f"工作目录（网络侧：下载缓存/任务包/job 目录）: {work}")
+    # ── 两个根（★ 2026-10-14，`plan/offline-local-disk-first` §3.2 / 评审 P0-1）────────────
+    # 拍板-1 的**生效点在这里**：产物的落点由 `--artifacts` 决定（`offline_boot` 无条件传），
+    # 而不是 `resolve_artifact_dir` 的默认分支（那条在生产路径上从不被求值）。网络侧产物根
+    # 只喂 C1 备份与 B4 交付面 —— 补传全成功的一段，它一个字节都不写。
+    net = Path(deliverable.net_artifacts_dir(cfg, course, multi=multi))
+    # `rounds` 只喂 B2 的容量判据（`resolve_local_root` 的 `artifact_need_bytes`）：本段的轮数
+    # 上限就是 `CFG.max_iters`（下面 `build_run_argv` 把它当 `--max-iters` 用），取不到 ⇒ 缺省段长。
+    dest, dest_why = deliverable.resolve_local_root(
+        ccfg, course, multi=multi, rounds=int(ccfg.get("max_iters") or 0)
+    )
+    if dest_why:
+        # 拍板-2：取不到本地盘就回落网络盘 + **响亮一行**（不改成响亮失败：产物根没有第二处落脚）
+        log(f"WARN 本地产物根不可用（{dest_why}）⇒ 本段产物回落网络盘：{dest}")
+    else:
+        log(f"产物根: {dest}（本地盘）｜网络侧只作备份/交付面: {net}")
+    if Path(dest) != net:
+        # 恢复腿必须在下面 `local_artifacts(dest)` **之前**：它决定「本机优先还是取包起跑」。
+        restore_from_backup(dest, net / deliverable.BACKUP_DIR_NAME, log)
+
+    # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
+    #    ★ 2026-10-14 收紧（plan/offline-segment-restart §2-J1）：**包是本机进度的加长段时收包**。
+    #    人在控制台「停课 → 改大 iters → 开课」= 明确要下一段，而控制台那一步会把包重打一份
+    #    ⇒ 这里看到的就是「起点 = 本机 last_it、终点更长」。不收它，云机会拿旧段的计划跑成
+    #    「本机段落已完成」的 noop（本次现场：`续跑起点 it100（计划 it0 → it100）`）。
+    # 为什么决策住在这里（而不是 `run_loop`/`bundle`）：notebook 每次会话都从 GitHub raw
+    # 刷新本文件，而 `remote.run_loop`/`remote.bundle` 来自**代码快照**（= 本机优先要保护的
+    # 那份，可能很旧）——把新参数传给旧快照只会 argparse 崩或静默退化（评审 F1）。
+    local = local_artifacts(dest)
+    explicit_zip = str(ccfg.get("task_zip") or "").strip()
+    force_pack = bool(ccfg.get("force_pack", False)) or bool(explicit_zip)
+    if (dest / STATE_NAME).is_file() and local is None:
+        # 半截产物目录：让包进来会**重置**本机 state（`ArtifactStore.start` 在 run_id/plan_sha
+        # 不符时重开一段）⇒ 本机 `it-NNN/` 被重跑覆盖，比丢进度严重。这里响亮拒，不猜。
+        raise SystemExit(
+            f"[offline] 本机产物目录不完整（{dest}）：有 {STATE_NAME} 但缺 "
+            f"{PLAN_NAME}/{MANIFEST_NAME}。让任务包补齐会重置本机进度并**重跑**已跑过的轮次。\n"
+            "  ① 想接着本机进度跑：把缺的件找回来（上一轮的产物/备份）；\n"
+            f"  ② 想用包从头跑：清空 {dest}（或换 CFG.work_dir）后重跑本 cell。"
+        )
+    if local is not None and force_pack:
+        log(
+            f"CFG.{'task_zip' if explicit_zip else 'force_pack'} 显式指定 ⇒ 用包覆盖本机计划/清单"
+            f"（本机 it{local['last_it']}，计划 it{local['start_it']}→it{local['end_it']}）"
+        )
+
+    # 本机有产物（且人没显式点名包）⇒ 取包**不等待**：它是判据的输入，不是起点。
+    has_local = local is not None and not force_pack
+    # ★ 类型上显式可为空：push 分支给的是 `Path`，pull 分支给的是 `obtain_pack()`（可能 None）。
+    pack: Path | None = None
+    adopt = False
+    if push_mode:
+        # ★ W4（P1-9）：包与锚点由 hub 的任务包给 —— 这里一个网络调用都不发。
+        # 缺包是**任务侧的错误**（服务端已在收包时校验过 sha256），响亮拒而不是就地��包。
+        if not assigned_pack or not Path(assigned_pack).is_file():
+            raise SystemExit(
+                f"[offline-push] 任务包缺失（{assigned_pack or '未给'}）——push 腿不从 hub 取包；"
+                "这是服务端收包时该拦下的错误（删掉任务目录、让 hub 重派）"
+            )
+        pack = Path(assigned_pack)
+        # 同一段的中途重启（worker 重启 / 子进程重拉）⇒ 本机产物才是权威：不再回放包里的
+        # 计划/清单（与 `local_first` 同义），否则 `ArtifactStore.start` 会按包重开一段。
+        local_first = local is not None
+        log(
+            f"push 腿：使用 hub 派发的任务包 {pack.name}"
+            + ("（本机已有产物 ⇒ 沿用本机计划，包只作代码/TS 来源）" if local_first else "")
+        )
+    elif has_local and local is not None:  # 写出来给类型收窄
+        log(
+            f"本机已有产物 it{local['last_it']}（计划 it{local['start_it']} → it{local['end_it']}，"
+            f"run={local['run_id'] or '-'}）——取包只为判一件事：它是不是本机进度的加长段"
+        )
+        pack = obtain_pack(
+            ccfg, creds, log, work, stop=keepalive_stop, optional=True, lease=lease
+        )
+        if pack is None:
+            log("本机优先：这次没取到任务包 —— 代码/TS 从产物目录取，回传 best-effort")
+    else:
+        if local is None:
+            log(f"本机没有可续跑的产物（{dest}）——按老规矩取包起跑")
+        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, lease=lease)
+
+    if push_mode:
+        pass  # `local_first` 已在上面的分支定下（本机优先的判据不同：包是**任务**不是候选）
+    else:
+        if has_local and pack is not None and local is not None:
+            adopt = pack_extends_local(local, read_pack_plan(pack))
+        local_first = has_local and not adopt
+    if adopt and local is not None:
+        log(
+            f"包是本机进度的**加长段**（同起点 it{local['last_it']}、终点更长）⇒ 收包："
+            "换段只往后接，本机已有的轮次一条不重跑"
+        )
+
+    idx: dict = {}
+    if pack is not None:
+        idx = read_pack_index(pack)
+        log(
+            f"任务包: {idx.get('run_id')} it{idx.get('it')} → it{idx.get('end_it')}"
+            f"（commit {_sha12(idx.get('commit'))}，{idx.get('created_at')}）"
+        )
+        in_name = course_from_pack_name(pack)
+        if in_name and in_name != course:
+            raise SystemExit(
+                f"[offline] 文件名里的课程（{in_name}）与 CFG.course（{course}）不一致 —— "
+                "跑错课的包会把权重接在别的课程账本上。确认是它就把 CFG.course 改对，"
+                "否则去控制台导正确那门课的包"
+            )
+        if local is not None:
+            log(describe_local_vs_pack(local, idx, adopt=adopt))
+    if local_first and local is not None and local["last_it"] >= local["end_it"]:
+        log(
+            f"本机段落已完成（it{local['last_it']} ≥ end_it{local['end_it']}）——"
+            "run_loop 会立刻收尾（不再跑轮次）；要用新段请清空产物目录、等新包，或置 "
+            "CFG.force_pack=true"
+        )
+
+    token = str(creds.get("HUB_TOKEN") or "")
+    hub = ""
+    # hub 探活**只做一次**：回传、续跑锚点、代码兜底三条腿共用同一个连通性结论（它们都是
+    # 「hub 此刻在不在」的问题，探两次只会让日志里出现两个可能不一致的结论）。
+    # ★ push 腿**不探**：这条链的方向是 hub 调 worker；在这里发一个出站探活只会在用户说的
+    # 「hub 入站隧道不稳定」那一侧多一次失败（而且它一旦偶然通了，就会把这条腿悄悄改回
+    # HTTP 补传 —— P0-1 的同一种病）。
+    if not push_mode:
+        for cand in hub_candidates(ccfg, creds):
+            if probe_hub(cand, token, log):
+                hub = cand
+                break
+    else:
+        log("push 腿：跳过 hub 探活（方向是 hub 来拉；本段零出站控制请求）")
+
+    ensure_code(pack, log, dest=dest, hub=hub, token=token)
+    ensure_ts_tree(pack, log, dest=dest)
+    from remote.notebook_runtime import resolve_device  # code.zip 已在 sys.path 上
+
+    if run_loop_main is None:
+        from remote.run_loop import main as _run_loop_main
+
+        run_loop_main = _run_loop_main
+    if not str(ccfg.get("device") or "").strip() or str(ccfg["device"]).strip() == "auto":
+        # `auto` 不能原样传下去（下游不认这个名字，2026-09-15 事故）——先解析成 cuda/tpu/cpu。
+        ccfg = {
+            **ccfg,
+            "device": resolve_device(
+                {
+                    "device": ccfg.get("device", "auto"),
+                    "use_multi_gpu": bool(ccfg.get("use_multi_gpu", True)),
+                },
+                log,
+            ),
+        }
+
+    resume_dir: Path | None = None
+    if push_mode:
+        # 锚点由任务包给（hub 侧的 `resume_anchor` 已铺成 `resume/it-NNN/`）——不取。
+        anchor = Path(assigned_resume) if assigned_resume else None
+        if anchor is not None and anchor.is_dir():
+            resume_dir = anchor
+            log(f"push 腿：用任务包里的续跑锚点 {anchor}")
+    elif hub:
+        # 续跑锚点：hub 手里可能有更新的（自回传 / 人工导入的）完整轮次。先取它，
+        # 再交给 run_loop——于是「重领任务」= 从最新进度接着跑，而不是从头重跑。
+        resume_dir = fetch_resume(hub, token, course, work / "resume", log)
+    # ★ `tok_file` 必须先置空：`live_backfeed=False`（或 hub 不可达）时下面不会赋值，
+    #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
+    tok_file = ""
+    lease_file = ""
+    if push_mode:
+        log(f"push 腿：产物只落本地 outbox（{push_outbox or '未指定'}）——hub 自己来拉，不做 HTTP 回传")
+    elif bool(ccfg.get("live_backfeed", True)):
+        if hub:
+            tok_file = write_token_file(work, token)
+            lease_file = write_lease_file(work, lease)
+            log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
+        else:
+            log("实时回传开着，但此刻够不着 hub —— 改为纯离线（产物照样逐轮落盘）")
+    else:
+        log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
+
+    argv = build_run_argv(
+        ccfg,
+        pack,
+        dest,
+        hub,
+        tok_file,
+        resume_dir,
+        local_first=local_first,
+        lease_file=lease_file,
+        # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
+        # ⇒ 传了也只是个路径，不写任何东西。push 腿也不立抽屉：outbox 本身就是耐久副本。
+        backup_root=None if push_mode else net / deliverable.BACKUP_DIR_NAME,
+        outbox=push_outbox if push_mode else "",
+        stop_file=stop_file if push_mode else "",
+        floor_it=int(push_floor_it or 0) if push_mode else 0,
+    )
+    log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
+    # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
+    # 事件（`plan_run` 的轮边界 / `iter_rollout` 的每 N 局完）会经
+    # `common.progress_hook` 找到它。`finally` 里**必须撤销注册**：同一会话后面还要跑别的课，
+    # 留着一个指向上一课的 URL 的打点层就会把下一段的进度报到别人账上。
+    detach_progress: Callable[[], str] | None = None
+    if push_mode and push_outbox:
+        # push 腿的打点落**文件**（`/offline/push/progress` 的读面就是它）：不节流 ——
+        # 写几百字节比一次 HTTP POST 便宜几个数量级，节流只会让 hub 看到更慢的进度。
+        detach_progress = install_local_progress_sink(
+            Path(push_outbox) / OFFLINE_PUSH_PROGRESS_NAME, log
+        )
+    elif hub and lease:
+        detach_progress = install_progress_pinger(
+            hub,
+            token,
+            course,
+            lease,
+            log,
+            # 409 expired/taken ⇒ 重新领一次（评审 F1 / plan §4.2-2）：旧口径是整段哑。
+            reclaim=lambda: _reclaim_lease(hub, token, course, work, log),
+        )
+    try:
+        try:
+            rc = int(run_loop_main(argv) or 0)
+        except Exception as e:
+            # ★ 2026-10-29（现场：同 kernel 重跑 cell ⇒ `CodeChangedError` 裸抛，看着像崩溃）：
+            #   `remote/worker.py` 的 `_ACTIVE_CODE_SHA` 是**进程级**的——本 kernel 上一段导入的
+            #   代码若与这一段的任务包/commit 不同，第一轮就被守卫拒跑（它拒得对：继续跑会用旧
+            #   代码产出「看似正常」的结果）。但 remedy 在日志里从来没写过，而人第一反应是
+            #   「重跑这一格」。这里翻成一句可执行的：**必须换进程**。
+            #   按类名判而不 import：本模块是 standalone 运输单元（顶层不许 import 本仓代码）。
+            if type(e).__name__ == "CodeChangedError":
+                raise SystemExit(
+                    "[offline] 本 kernel 已经 import 过**上一段的代码**（"
+                    f"{str(getattr(e, 'loaded_sha', ''))[:12]}…），本段要求 "
+                    f"{str(getattr(e, 'job_sha', ''))[:12]}…——同 kernel 重跑本 cell **不会**"
+                    "重新导入模块。处置：Runtime → Restart session（或换新会话）后再跑本格；"
+                    "本地产物与会话无关（/tmp 若被清，本机会从网络盘备份或任务包锚点续跑）。"
+                ) from e
+            raise
+        log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
+    finally:
+        if detach_progress is not None:
+            outcome = detach_progress()
+            if progress is not None:
+                progress["outcome"] = outcome
+
+    # ── 段末交付面（★ 2026-10-14 B4 / 评审 P0-2 + 拍板-3）─────────────────────────────
+    # 常态（补传全成功）**不许**把一个大 zip 拷到慢挂点上 —— 那正是本计划要移除的那类等待。
+    # 只有三种情形才落交付档：① **没有 hub**（纯手工递送：产物只在本地根，交付档是唯一动线）；
+    # ② 网络侧**有备份抽屉**（= 有轮次没送出去，人需要一份能导入控制台的包）；③ 人显式点了
+    # `download_dir`（那块钱由人主动付）。
+    drawer = Path(net) / deliverable.BACKUP_DIR_NAME
+    explicit_dl = bool(str(ccfg.get("download_dir") or "").strip())
+    if push_mode:
+        # 交付面 = outbox（hub 来拉）+ 本地产物目录；在慢挂点上再拷一个大 zip 只会多一次
+        # 「看起来挂住」的等待，而那正是 push 模式要移除的那类等待。
+        log(f"push 腿：本段产物在 {dest}；outbox 是交付面，不打 deliver zip")
+        got = None
+    elif hub and not explicit_dl and not drawer.exists():
+        log(
+            f"本段产物在本地根 {dest}（补传全成功 ⇒ 没有交付档）；要一份能导入控制台的 zip，"
+            "点 notebook 底部那个「中途取回」cell（或显式给 CFG.download_dir）"
+        )
+        got = None
+    else:
+        if not hub:
+            log(f"本段无 hub（纯手工递送）：产物只在本地根 {dest}，会话结束即失——仍落一次交付物")
+        elif drawer.exists():
+            log(f"网络侧有备份抽屉（{drawer}）⇒ 收尾仍打一份交付物（那些轮次没能回传）")
+        got = deliverable.package_deliverable(dest, course, deliverable.download_dir(ccfg), log)
+    if hub:
+        log(
+            "轮次已尽力回传给 hub（控制台按课程账户看进度）；"
+            + ("上面的 zip 是**兜底**：hub 掉线时用它导入" if got else f"备份包没打出来，产物目录还在：{dest}")
+        )
+    elif got:
+        log(
+            f"纯离线完成。下一步：把上面的 `{got.name}` 下载到本机 → 控制台「导入产物」上传 "
+            "→ 自动起 A 层评估"
+        )
+    else:
+        log(f"纯离线完成，但没打出交付物 zip（见上面的报错）—— 产物目录还在：{dest}")
+    return rc
+
+

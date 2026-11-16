@@ -1,0 +1,379 @@
+# ═══ part 10/12: 10_batch — 批与自动：_run_batch / _run_auto ═══
+def _run_batch(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: Any,
+    courses: list[str],
+    *,
+    multi: bool,
+    leases: dict | None = None,
+    shas: dict[str, str] | None = None,
+    kinds: dict[str, str] | None = None,
+) -> int:
+    """串行跑一批课；返回 rc。失败分两类（plan/offline-switch-auto-bundle §3.5）：
+
+      · **取不到任务包**（`PackUnavailableError`）⇒ 记一行、**跳过继续下一门**；末尾汇总，
+        `M>0 ⇒ 非零 rc`，`N==0`（全跳过）⇒ 响亮 `SystemExit`；
+      · 其它 `SystemExit`（课程名不一致 / 产物目录不完整）与训练 `rc≠0` ⇒ **照旧立即停**。
+
+    `kinds` 非空时按 `{course: "rl"|"bc"}` 分流：`rl` 走 claim → 取包 → run_one_course；
+    `bc` 走 `run_bc_course`（反复领本课的 BC job，不领课程租约）——两型都是**同一批**里
+    的普通课程，按同一排序串行执行（2026-11-12：BC 不再只是空档兜底）。
+
+    `leases` 非空时逐课领租约（best-effort）+ 心跳线程 + 跑完交还，并把跑成功的包 sha 记进
+    `leases["served"]`（防自激）。租约的任何失败都**不影响**训练。
+    """
+    rc = 0
+    skipped: list[str] = []
+    # 自动交接的两个「不跑」名单（§3.1a/§3.3a）：中间态（等下一拍）与会话放弃。
+    blockers: dict[str, str] = {}
+    gave_up: list[str] = []
+    # ★M3：打点层报回「租约被撤销」（人强制解除了接管）的课——本会话不再领它
+    # （段已跑完并打包；hub 也已经不收它了）。
+    revoked: list[str] = []
+    ran = 0
+    for i, course in enumerate(courses):
+        rest = courses[i + 1 :]
+        log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
+        kind = str((kinds or {}).get(course, "rl") or "rl").strip().lower()
+        if kind == "bc":
+            # BC 课程 = 课程级 drain：反复领**这门课**的 BC job（hub 用 bc-exclusive.json
+            # 保证一门课同一时刻只有一台盘在跑），跑到收官/停课/被别的主接管才交还。
+            try:
+                bc_rc = run_bc_course(cfg, creds, log, keepalive_stop, course=course)
+            except SystemExit as e:
+                if rest:
+                    log(
+                        f"课程 {course}（BC）未跑完（{e.code}）——串行到此为止，剩余 "
+                        f"{len(rest)} 门课未执行：{', '.join(rest)}"
+                    )
+                raise
+            if bc_rc != 0:
+                log(
+                    f"课程 {course}（BC）退出 rc={bc_rc} ——串行到此为止；"
+                    + (
+                        f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}"
+                        if rest
+                        else "它已是最后一门课"
+                    )
+                )
+                return bc_rc
+            ran += 1
+            if rest:
+                log(f"课程 {course}（BC）完成 —— 下一门：{rest[0]}")
+            continue
+        # 租约上下文取成局部 dict（不用 `leases[...]`）：`finally` 里也要用，而 `leases` 是
+        # 可选的（None = 老行为、不领租约）。空 dict 即「这条腿不领」。
+        ctx = leases if leases is not None else {}
+        lease = ""
+        beat: threading.Event | None = None
+        if ctx:
+            lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
+            if why in (
+                "busy",
+                "pending_export",
+                "completed",
+                "not_offline",
+                "held",
+                "proto",
+                "bc_course",
+            ):
+                # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
+                # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
+                blockers[course] = why
+                log(
+                    f"课程 {course} 本拍不跑（{why}）"
+                    + (f"——继续看下一门：{rest[0]}" if rest else "——等下一拍")
+                )
+                continue
+            if why == "give_up":
+                gave_up.append(course)
+                log(f"课程 {course} 本会话放弃（hub 触发导包到上界）——等下一门/等处理")
+                continue
+            if lease:
+                beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
+        progress: dict = {}
+        try:
+            rc = run_one_course(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                course=course,
+                multi=multi,
+                lease=lease,
+                progress=progress,
+            )
+        except PackUnavailableError as e:
+            # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
+            #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。
+            skipped.append(course)
+            log(f"课程 {course} 跳过（取不到任务包）：{e.code}")
+            if rest:
+                log(f"  —— 继续下一门：{rest[0]}（末尾会汇总；训练失败/配置错误仍然立即停）")
+            continue
+        except SystemExit as e:
+            if rest:
+                log(
+                    f"课程 {course} 未跑完（{e.code}）——串行到此为止，剩余 {len(rest)} 门课未执行："
+                    f"{', '.join(rest)}"
+                )
+            raise
+        finally:
+            if beat is not None:
+                beat.set()
+            if lease:
+                release_course(ctx["hub"], ctx["token"], course, lease, log)
+        outcome = str(progress.get("outcome") or "")
+        if outcome:
+            log(f"课程 {course} 的租约结局：{outcome}（段已跑完并打包）")
+            if outcome == "revoked":
+                revoked.append(course)
+        if rc != 0:
+            log(
+                f"课程 {course} 退出 rc={rc} ——串行到此为止；"
+                + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
+            )
+            return rc
+        ran += 1
+        if ctx and shas:
+            sha = str(shas.get(course) or "")
+            if sha:
+                ctx["served"][course] = sha
+        if rest:
+            log(f"课程 {course} 完成 —— 下一门：{rest[0]}")
+    if skipped:
+        done = len(courses) - len(skipped)
+        log(
+            f"本会话完成 {done} 门 / 跳过 {len(skipped)} 门（取不到任务包）"
+            f"：{', '.join(skipped)}"
+        )
+        if done == 0:
+            # 响亮失败：一门都没跑（**不谎报成功**）。注意这与「向 hub 问清单、队列为空」
+            # 是两回事 —— 后者是正常的没事干（plan/offline-task-discovery §3.3）。
+            raise SystemExit(
+                f"[offline] 没有任何一门课拿到任务包（{len(skipped)} 门全被跳过）："
+                f"{', '.join(skipped)}\n"
+                "  ① hub 取包：控制台「导出任务包」→ 保持 hub 在线 → 重跑本 cell；\n"
+                "  ② 手动送包：控制台下载 task-<课>.zip → 上传到本 notebook（或写进 "
+                "CFG['task_zip']）→ 重跑本 cell。"
+            )
+        return rc if rc else 1
+    if leases is not None:
+        # 回填给 `_run_auto`：它据此决定「这拍到底跑了没有」与「下拍跳过谁」。
+        leases["blockers"] = blockers
+        leases["gave_up"] = gave_up
+        leases["revoked"] = revoked
+        leases["ran"] = ran
+    if blockers or gave_up:
+        log(
+            f"本拍结束：跑了 {ran} 门；{len(blockers)} 门等下一拍"
+            f"（{', '.join(f'{c}:{w}' for c, w in blockers.items()) or '无'}）；"
+            f"{len(gave_up)} 门本会话放弃（{', '.join(gave_up) or '无'}）"
+        )
+    else:
+        log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
+    return rc
+
+
+def _run_auto(
+    cfg: dict, creds: dict, log: Callable[[str], None], keepalive_stop: Any
+) -> int:
+    """`CFG.course` 留空时的队列循环（plan/offline-task-discovery §3.3）。
+
+    一轮：问清单 → 领租约 → 取包 → 跑完 → 交还 → 记 `served[course]=包 sha`。
+    队列空 ⇒ `queue_mode="once"` 直接收工；缺省 `"drain"` 驻守轮询，直到
+    `idle_wait_sec` / `session_budget_sec` 用尽或收到停机信号（**空队列不是错误**）。
+    ★ 2026-10-07：清单**全为终态**（或本会话已跑过它的包）⇒ 用**独立**的短窗口
+    `idle_wait_terminal_sec` 收工——再等也不会自己变好，只有人介入才复活（`all_terminal`）。
+
+    ★ 2026-11-12：清单里的 BC 课程（`kind=bc`）与 RL 课程一起进同一个 `_run_batch`、
+    按同一排序串行执行；`_idle_take_bc()` 只是「清单为空 / 全被别人持有」时的兜底腿，
+    不再是 BC 的主入口。
+    """
+    served: dict[str, str] = {}
+    probe: dict = {}
+    #: 本会话已放弃的课（hub 触发导包到上界）：别再每轮领一次（`resolve_courses(skip=…)`）。
+    gave_up: set[str] = set()
+    rc = 0
+    mode = str(cfg.get("queue_mode") or "drain").strip().lower()
+
+    def _num(key: str, default: float) -> float:
+        """数值旋钮（**`0` 是合法值**：`or 缺省` 那套写法会把「立刻收工」悄悄变成等半小时）。"""
+        v = cfg.get(key)
+        if v is None or v == "":
+            return default
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    #: ★M5：本盘自己此刻还持着的课（`resolve_courses` 回填）——BC 前置闸读它（Q5）。
+    holds: dict = {}
+
+    def _idle_take_bc() -> bool:
+        """空档（清单都払不到 / 都被别人持有）里顺路领一份 BC 作业跑掉（★M5）。
+
+        返回 True = 真跑了一份（调用方据此重置空转锚：干了活就不算 idle，否则一段长 BC
+        会把 `idle_wait_sec` 提前吃满——会话看着有产出却自我收工）。
+        """
+        summary = try_take_bc_job(cfg, creds, log, holding=bool(holds.get("mine")))
+        if not summary:
+            return False
+        log(summary)
+        return True
+
+    budget = _num("session_budget_sec", 0.0)  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
+    idle_wait = _num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC))
+    # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
+    idle_wait_terminal = _num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC)
+    poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
+    start = time.monotonic()
+    idle_since = start
+    #: 终态窗口的锚点（`None` = 本拍不是「全终态」）。在**非终态**的每一拍复位。
+    terminal_since: float | None = None
+    while True:
+        # 本机 worker id 在**取清单之前**备好：`resolve_courses` 要拿它认「自己的租约」
+        # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
+        # 它持久化在 `<work>/.worker-id`，重复调用只读文件（不打日志）。
+        worker = worker_id_of(_queue_work_dir(cfg), log)
+        holds.clear()
+        tasks, blocked_rows, manifest = resolve_courses(
+            cfg,
+            creds,
+            log,
+            served=served,
+            probe=probe,
+            skip=gave_up,
+            worker=worker,
+            holds=holds,
+        )
+        if tasks:
+            idle_since = time.monotonic()
+            terminal_since = None  # 有活 ⇒ 终态窗口作废（下一拍若全终态，重新起算）
+            hubs = hub_candidates(cfg, creds)
+            leases = {
+                "hub": hubs[0] if hubs else "",
+                "token": str(creds.get("HUB_TOKEN") or ""),
+                "worker": worker,
+                "served": served,
+            }
+            kind_map = {
+                str(t["course"]): str(t.get("kind") or "rl") for t in tasks
+            }
+            # 只在真有 BC 课时多传一个参数：RL-only 的批保持旧调用形状（测试桩 / 旧
+            # 调用方都不用改），而 BC 课一旦出现就与 RL 课走同一次 `_run_batch`。
+            batch_kwargs = {"kinds": kind_map} if "bc" in kind_map.values() else {}
+            batch_rc = _run_batch(
+                cfg,
+                creds,
+                log,
+                keepalive_stop,
+                [str(t["course"]) for t in tasks],
+                multi=session_multi([str(t["course"]) for t in tasks], served),
+                leases=leases,
+                shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
+                **batch_kwargs,
+            )
+            rc = batch_rc or rc
+            gave_up.update(leases.get("gave_up") or [])
+            # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完
+            # 并打包）。与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
+            revoked_now = leases.get("revoked")
+            if revoked_now:
+                log(
+                    "本会话不再领这些课（租约已被撤销）："
+                    + "、".join(str(c) for c in revoked_now)
+                )
+                gave_up.update(str(c) for c in revoked_now)
+            raw_blockers = leases.get("blockers")
+            blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
+            if not leases.get("ran") and (blockers or leases.get("gave_up")):
+                # 全是自动交接的中间态（导包是分钟级 / 别的课在跑）：**不消耗 idle_wait_sec
+                # 预算**（否则排导包的这几分钟会被当成空转、会话提前收工），但要给自己一个
+                # backoff，别 tight loop 打爆 hub。
+                log(
+                    f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
+                    f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+                )
+                if _idle_take_bc():  # ★M5：空档里领一份 BC（跑完才回来）
+                    idle_since = time.monotonic()
+                time.sleep(poll)
+            continue
+        # ★P1-9（R3-g）：`tasks` 空但 `blocked` 非空 = 「还得等一会儿」（别人的有效租约，
+        # 通常等 release / TTL / 接管），与「空队列」是两件事：退避再问、**不消耗**
+        # `idle_wait_sec`（重置 idle 锚点），只受会话预算与停机信号约束。
+        # ⚠ 与上面 `leases["blockers"]`（tasks 非空时的交接中间态）同名不同物。
+        if blocked_rows:
+            _idle_take_bc()  # ★M5：都被别人持着 ⇒ 用空档领一份 BC（Q5：两型均可领）
+            wait = blocked_poll_sec(blocked_rows, poll)
+            log(
+                "清单里有活但都被别人持有："
+                + "、".join(
+                    f"{b['course']}@{b['holder'] or '?'}（{float(b['expires_in']):.0f}s 后过期）"
+                    for b in blocked_rows
+                )
+                + f"—— {wait:g}s 后再问（不占 idle 预算）"
+            )
+            if keepalive_stop is not None and keepalive_stop.is_set():
+                log("收到停机信号 ⇒ 收工")
+                return rc
+            if budget > 0 and time.monotonic() - start >= budget:
+                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+                return rc
+            idle_since = time.monotonic()
+            terminal_since = None  # 有活（被别人持有）⇒ 同上，别让终态窗口提前收工
+            time.sleep(wait)
+            continue
+        if mode != "drain":
+            log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")
+            return rc
+        # ★ 2026-10-07：清单**全为终态**（跑满待人重导包 / 人固定在离线之外）或**本会话已跑过这份包**
+        #   ⇒ 再等也不会自己变好（只有人介入才复活）。用**独立**的短窗口收工，而不是烧满
+        #   `idle_wait_sec`（现场：17:04 已全终态，却空转到 17:33 = 29 分钟）。
+        #   判据走 `all_terminal(manifest, served)`——注意是**原始清单**：`tasks`/`blocked_rows` 都不带 `state`。
+        if all_terminal(manifest, served):
+            now = time.monotonic()
+            if terminal_since is None:
+                terminal_since = now
+                log(
+                    "清单全为终态（completed / not_offline）或本会话已跑过它的包："
+                    + "、".join(str(t.get("course") or "?") for t in manifest)
+                    + f" —— 等 {idle_wait_terminal:.0f}s 确认无人介入后收工"
+                    "（要立刻收工把它设成 0；要恢复旧行为设成 1800）"
+                )
+            if now - terminal_since >= idle_wait_terminal:
+                log(
+                    f"清单全终态且已等满 idle_wait_terminal_sec={idle_wait_terminal:.0f}s ⇒ 收工"
+                )
+                return rc
+            if budget > 0 and now - start >= budget:
+                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+                return rc
+            if keepalive_stop is not None and keepalive_stop.is_set():
+                log("收到停机信号 ⇒ 收工")
+                return rc
+            log(
+                f"清单全终态 —— {poll:.0f}s 后再问"
+                f"（已等 {now - terminal_since:.0f}s / 上限 {idle_wait_terminal:.0f}s）"
+            )
+            time.sleep(poll)
+            continue
+        terminal_since = None
+        waited = time.monotonic() - idle_since
+        if waited >= idle_wait:
+            log(f"队列空且已等满 idle_wait_sec={idle_wait:.0f}s ⇒ 收工")
+            return rc
+        if budget > 0 and time.monotonic() - start >= budget:
+            log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+            return rc
+        if keepalive_stop is not None and keepalive_stop.is_set():
+            log("收到停机信号 ⇒ 收工")
+            return rc
+        log(f"队列为空 —— {poll:.0f}s 后再问一次（idle 已等 {waited:.0f}s / 上限 {idle_wait:.0f}s）")
+        if _idle_take_bc():  # ★M5：队列空 = 自主盘最典型的空档（会话还在 wait）
+            idle_since = time.monotonic()
+        time.sleep(poll)
+
+

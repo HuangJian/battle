@@ -1,0 +1,304 @@
+# ═══ part 3/12: 03_pack — 任务包识别：索引 / 计划 / 落点扫描 / 上传框 / 本机产物对账 / hub 候选 ═══
+# ── 任务包识别（只靠 zipfile，不 import remote）────────────────────────────
+
+
+def read_pack_index(zip_path: str | Path) -> dict:
+    """读任务包索引（`task.json`）；不是任务包就抛 `ValueError`（调用方决定响亮还是跳过）。
+
+    刻意**不**复用 `remote.bundle.read_bundle_index`：本函数要在 `remote` 进 `sys.path`
+    **之前**可用（先有包才有代码）。两边的判据（magic）有测试对账。
+    """
+    p = Path(zip_path)
+    try:
+        with zipfile.ZipFile(p) as zf:
+            idx = json.loads(zf.read(BUNDLE_INDEX).decode("utf-8"))
+    except KeyError as e:
+        raise ValueError(f"不是任务包（缺 {BUNDLE_INDEX}）: {p}") from e
+    except (OSError, ValueError, zipfile.BadZipFile) as e:
+        raise ValueError(f"任务包不可读（{type(e).__name__}: {e}）: {p}") from e
+    if not isinstance(idx, dict) or idx.get("magic") != BUNDLE_MAGIC:
+        raise ValueError(f"任务包身份不符（magic != {BUNDLE_MAGIC}）: {p}")
+    return idx
+
+
+def read_pack_plan(zip_path: str | Path) -> dict:
+    """读任务包里的 `plan.json`（读不到 / 不是 dict ⇒ `{}`，**永不抛**）。
+
+    为什么需要它（2026-10-14，plan/offline-segment-restart §2-J1）：「包是不是本机进度的
+    **加长段**」要用包自己的 `start_it`/`end_it`——而且必须是**与 `run_loop`/`ArtifactStore`
+    将要用的同一份字节**。索引（`task.json`）里的 `it` 是「下一轮」= `start_it + 1`，
+    拿它减一是**另一条**算术，等于多一处能错的地方（差一格就会把合法续段判成「不是续段」）。
+    读不到 ⇒ 调用方按「不收包」处理（保守方向 = 本机优先，一个字都不变）。
+    """
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return {}
+    return plan if isinstance(plan, dict) else {}
+
+
+def course_from_pack_name(path: str | Path) -> str:
+    """从 `task-<课>.zip` 里取出 `<课>`（不符合习惯命名 → 空串，不猜）。
+
+    控制台导出写的就是这个名字，`remote/bundle` 的索引里**没有** course 键（课程全文在
+    `course.jsonc` 里，解析它得先进 `remote` 包）。所以「跑的是哪门课」这一步只靠文件名，
+    而且**只用于对账** —— 取不到就不对账，绝不用猜值去拦人。与
+    `remote/deliver_zip.py::course_from_filename` 同一条命名约定。
+    """
+    m = re.fullmatch(r"task-(.+)\.zip", Path(path).name, re.IGNORECASE)
+    if not m:
+        return ""
+    name = m.group(1).strip()
+    return name if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name) else ""
+
+
+def is_task_pack(path: str | Path) -> bool:
+    """是不是任务包（`read_pack_index` 的无异常外壳）——扫目录时用，绝不因一个坏 zip 炸整轮。"""
+    try:
+        read_pack_index(path)
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def find_uploaded_pack(cfg: dict, log: Callable[[str], None]) -> Path | None:
+    """在 `task_zip` 指定处或若干落点里找**新的**任务包（按 mtime 取最新）。
+
+    为什么按 mtime 取最新而不是按名字：同一门课会导出多次（改超参后重导），而用户的
+    动作永远是「把刚下载的那个传上来」——最新的那个就是他要跑的那个。
+    """
+    explicit = str(cfg.get("task_zip") or "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_file():
+            return p
+        log(f"CFG.task_zip 指向的包不存在，改去落点里找：{p}")
+    cands: list[Path] = []
+    for pat in UPLOAD_GLOBS:
+        base = Path(pat).expanduser()
+        try:
+            if base.is_file():
+                cands.append(base)
+            elif base.is_dir():
+                cands.extend(q for q in base.glob("*.zip") if q.is_file())
+        except OSError:
+            continue
+    cands = sorted({q.resolve() for q in cands}, key=lambda q: q.stat().st_mtime, reverse=True)
+    for q in cands:
+        if is_task_pack(q):
+            return q
+    return None
+
+
+def prompt_upload(log: Callable[[str], None]) -> Path | None:
+    """Colab：弹一次文件上传框（用户口径「等待用户手动上传」的最短路径）。
+
+    只在 Colab 且 `prompt_upload` 开着时可用；任何失败都**不致命**——叫不动就退回轮询
+    （Kaggle 没有上传框，只能靠 Add Data 挂数据集；那里轮询才是正路）。
+
+    **调用点约束**（2026-10-04）：只许在 hub 重试到上界（`hub_parked`）或没配 hub 之后调
+    ——`files.upload()` 会**阻塞**在交互上，抢在重试前面弹就等于关掉了自动取包这条路。
+    """
+    try:
+        # 本机装了 `google.colab` 但仓库里没有它的 stubs：Mypy 只报 `import-untyped`。
+        # （此前还列着 `import-not-found`——那一条在装了包的机器上是用不到的，删。）
+        from google.colab import files  # type: ignore[import-untyped]
+
+        log("弹出上传框：请选择控制台导出的 task-<课>.zip（在控制台「导出任务包」下载）")
+        got = files.upload()
+        for name in got or {}:
+            if str(name).lower().endswith(".zip"):
+                log(f"已收到上传文件: {name}")
+    except Exception as e:  # 非 Colab / 无交互内核 / 用户取消
+        log(f"上传框不可用（{type(e).__name__}: {e}）——改为轮询文件落点")
+        return None
+    return find_uploaded_pack({}, log)
+
+
+# ── 本机产物优先（plan/offline-rerun-local-first §3/§4.1）─────────────────────
+
+
+def _read_json_file(p: Path) -> dict | None:
+    """读一个小 json（缺失/损坏/非对象 → None）：本机产物判据**绝不因半截文件炸**。"""
+    try:
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable[[str], None]) -> dict | None:
+    """恢复腿：本地产物**三件不齐** ∧ 网络盘备份**三件齐** ⇒ 从备份反向恢复到本地根。
+
+    ★ 2026-10-14（`plan/offline-local-disk-first` §3.5 / 评审 P1-3）：这是「产物落本地盘」的
+    **配套必要条件** —— 没有它，「产物落本地 + cell 死」= 段进度静默归零（`local_first` 判据永远
+    不成立 ⇒ 会去重新取包开段）。
+
+    **优先级 = 本地根 > hub 锚点 > 网络 `backup/`**（§3.5 的表）：
+      · 本地**已有**三件 ⇒ 一个字都不动（本地更新是常态，备份是恢复窗口）——这是「本地根」那一档；
+      · 本地空、备份齐 ⇒ 恢复（**hub 锚点那一档不必在这里分先后**：恢复完 `--resume-dir`
+        照旧递给 `run_loop`，它自己会「不新于产物当前进度就丢弃」——两条路都过「同轮齐全」判据）；
+      · 两边都不齐 ⇒ `None`，交给今天的行为（取包起跑）。
+
+    ⚠ 恢复过来的只有**产物面**（三件 + 轮次 + 全量包）：`code.zip` / TS 树不在备份里
+    （计划 §3.4 的抽屉只装这些）⇒ 恢复后的会话仍要靠任务包或 hub `/code` 拿工具态
+    （那是 `ensure_code` 的既有顺序，不是新的失败面）。
+    """
+    local = local_artifacts(dest)
+    if local is not None:
+        log(f"本地产物齐全（it{local['last_it']}）—— 不看网络盘备份（恢复只在本地空时发生）")
+        return local
+    deliverable = _load_deliverable()
+    ready = deliverable.backup_ready(backup_root)
+    if ready is None:
+        log(f"本地产物空（{dest}），网络盘备份也不齐（{backup_root}）——按老规矩取包起跑")
+        return None
+    log(f"本地产物空，网络盘备份齐（it{ready['last_it']}）⇒ 反向恢复到本地根（{backup_root} → {dest}）")
+    if not deliverable.install_backup(backup_root, Path(dest), log):
+        log(f"WARN 从备份恢复到本地根失败（{backup_root} → {dest}）—— 按老规矩重来（不拿半截当产物）")
+        return None
+    after = local_artifacts(dest)
+    if after is None:
+        log(f"WARN 恢复后本地产物仍不齐（{dest}）—— 按老规矩重来")
+        return None
+    log(f"已从网络盘备份恢复 it{after['last_it']}（三件齐全、权重在位）: {dest}")
+    return after
+
+
+def local_artifacts(dest: str | Path) -> dict | None:
+    """本机产物目录的「续跑真值」（三件齐全才认，否则 None）。
+
+    三件 = `state.json`（续跑点）+ `plan.json`（本段契约）+ `manifest.json`（代码/血统）。
+    **为什么三件都要**：`run_loop` 的 `load_planned_manifest` 就是这么判的（缺一即拒）——
+    这里不猜，只回答一个问题：要不要让包来改写这一段的计划与清单。
+    """
+    root = Path(dest)
+    st = _read_json_file(root / STATE_NAME)
+    plan = _read_json_file(root / PLAN_NAME)
+    man = _read_json_file(root / MANIFEST_NAME)
+    last_it = (st or {}).get("last_it")
+    if st is None or plan is None or man is None:
+        return None
+    if not isinstance(last_it, int) or isinstance(last_it, bool):
+        return None
+    return {
+        "root": root,
+        "last_it": last_it,
+        "start_it": int(plan.get("start_it", 0) or 0),
+        "end_it": int(plan.get("end_it", 0) or 0),
+        "plan_sha256": str(st.get("plan_sha256", "") or ""),
+        "run_id": str(st.get("run_id", "") or ""),
+        "code_sha256": str(man.get("code_sha256", "") or ""),
+        "ts_code_sha256": str(man.get("ts_code_sha256", "") or ""),
+    }
+
+
+def pack_extends_local(local: dict, plan: dict) -> bool:
+    """包是不是**本机进度的加长段**（纯函数；plan/offline-segment-restart §2-J1）。
+
+    两条都成立才算：
+
+      · `plan.start_it == local.last_it` —— **同一起点**。收包不会把本机已有的轮次往回拖
+        （`start_it < last_it` = 回退重跑），也不会把本机没跑的那几轮抹掉
+        （`start_it > last_it` = 直接从云机消失）。
+      · `plan.end_it > local.end_it` —— **终点加长**。等长或更短 ⇒ 没有「新段」可言。
+
+    ★ 这是对 `DECISIONS §2026-09-24-goalnn-offline-local-first`（本机优先）的**局部推翻**：
+    那条要防的是「让包**重跑**本机已跑的轮次」，而这两条真的时候收包只会**往后接**——
+    `ArtifactStore.start` 换段 ⇒ 新 state 的 `last_it = plan.start_it` ⇒ `plan_run` 的
+    `todo = [it for it in planned_range() if it > last_it]` 正好是 `last_it+1 … 新 end_it`，
+    一条旧轮都不重跑。判据**只在这两条上松口**，其余一切情形仍然本机优先。
+    """
+    try:
+        local_last = int(local["last_it"])
+        local_end = int(local["end_it"])
+        pack_start = int(plan["start_it"])
+        pack_end = int(plan["end_it"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return pack_start == local_last and pack_end > local_end
+
+
+def _sha12(text: object) -> str:
+    s = str(text or "")
+    return s[:12] if s else "-"
+
+
+def describe_local_vs_pack(local: dict, idx: dict, *, adopt: bool = False) -> str:
+    """G2 的对照行（本机 vs 包）：同段/异段一眼可辨 —— **绝不许静默换段**。
+
+    ★ 2026-10-14（plan/offline-segment-restart §2-J1）：`adopt=True` = 包是本机进度的**加长段**，
+    这一行必须把「收包」和它的边界（一条旧轮都不重跑）说出来 —— 静默换段与静默**不收**包一样难查。
+    """
+    same_plan = bool(local.get("plan_sha256")) and local["plan_sha256"] == str(
+        idx.get("plan_sha256", "") or ""
+    )
+    head = "包与本机计划一致（同一段）" if same_plan else "★ 包与本机不是同一段"
+    tail = (
+        "——**收包**：包是本机进度的加长段（起点 it{last} 不变，终点 it{end} → it{pack_end}），"
+        "本机已有的轮次一条不重跑".format(
+            last=local["last_it"], end=local["end_it"], pack_end=idx.get("end_it")
+        )
+        if adopt
+        else "——本机优先：**不**用包改写计划/清单（要换段请清空产物目录，或置 CFG.force_pack=true）"
+    )
+    return (
+        f"{head}：本机 it{local['last_it']}"
+        f"（计划 it{local['start_it']}→it{local['end_it']}，plan_sha12={_sha12(local['plan_sha256'])}）"
+        f" vs 包 it{idx.get('it')}→it{idx.get('end_it')}"
+        f"（commit {_sha12(idx.get('commit'))}，plan_sha12={_sha12(idx.get('plan_sha256'))}）"
+        f"{tail}"
+    )
+
+
+def _local_sha(root: Path, fname: str, key: str) -> str:
+    """从产物目录的一个 json 件里取一个 sha 字段（读不到/空 ⇒ `""` = 不设门）。"""
+    return str((_read_json_file(root / fname) or {}).get(key, "") or "")
+
+
+# ── hub 侧：解析地址 → 探活 → 取包 ─────────────────────────────────────────
+
+
+def hub_candidates(cfg: dict, creds: dict) -> list[str]:
+    """hub 候选地址（去重、保序）：`CFG.hub_url`（公网隧道 URL 或手填）→ `HUB_IP`（tailnet）。
+
+    离线盘两条路都可能通：本机 hub 用 cloudflared 暴露成公网 URL 时**不需要 tailscale**；
+    只有走 tailnet IP 时才需要（那条路才去起 tailscale）。
+
+    **Kaggle 上不给 tailnet 候选**（用户口径 2026-09-23）：起了隧道也不通，把它放在候选里
+    只会每次探活都白等一个超时；tailnet 地址与「起 tailscale」是同一条路的两半，一起跳过
+    （只留 `hub_url` 那条公网路）。
+    """
+    out: list[str] = []
+    u = str(cfg.get("hub_url") or "").strip().rstrip("/")
+    if u and "<" not in u:
+        out.append(u)
+    ip = "" if is_kaggle() else str(creds.get("HUB_IP") or "").strip()
+    if ip:
+        try:
+            resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
+        except Exception:
+            resolved = ""
+        if resolved and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def probe_hub(hub: str, token: str, log: Callable[[str], None], timeout: float = PING_TIMEOUT) -> bool:
+    """`GET /ping` 探活：True/False（**只判连通性**，鉴权错也算「通」——那是配置问题不是网络问题）。"""
+    try:
+        req = urllib.request.Request(
+            hub.rstrip("/") + "/ping", headers=_headers(token)
+        )
+        with _build_opener().open(req, timeout=timeout) as resp:
+            resp.read(1)
+        return True
+    except urllib.error.HTTPError as e:
+        log(f"{hub} 应答 HTTP {e.code}（hub 在线，但鉴权/路由不对）")
+        return e.code == 401 or e.code == 403
+    except Exception as e:
+        log(f"{hub} 连不上（{type(e).__name__}: {e}）")
+        return False
+
+

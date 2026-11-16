@@ -1,3 +1,10 @@
+# ════════════════════════════════════════════════════════════════════════════════
+# 生成物 —— 不要手改这个文件。
+# 源码 = remote/_offline_boot/*.pyfrag（按 tools/build_offline_boot.py 的 PARTS 顺序拼接）。
+# 重建： python nn-training/tools/build_offline_boot.py
+# 对账： python nn-training/tools/build_offline_boot.py --check
+# ════════════════════════════════════════════════════════════════════════════════
+# ═══ part 1/12: 01_front — 门面：模块 docstring / imports / 交付面转发（PEP 562） ═══
 """remote/offline_boot.py — 全离线训练 notebook 的运行时（`ipynb/battle.offline.ipynb`）。
 
 **离线模式与在线模式的分工**（用户口径 2026-09-19）：
@@ -210,6 +217,8 @@ def __getattr__(name: str) -> Any:
         return getattr(_load_deliverable(), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
+# ═══ part 2/12: 02_consts — 常量与超时：包名 / 端点 / 心跳与打点预算 / 取包超时 / opener ═══
+
 #: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
 BUNDLE_INDEX = "tools.task.json"
 CODE_NAME = "code.zip"
@@ -417,6 +426,8 @@ def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener()
 
 
+
+# ═══ part 3/12: 03_pack — 任务包识别：索引 / 计划 / 落点扫描 / 上传框 / 本机产物对账 / hub 候选 ═══
 # ── 任务包识别（只靠 zipfile，不 import remote）────────────────────────────
 
 
@@ -720,6 +731,8 @@ def probe_hub(hub: str, token: str, log: Callable[[str], None], timeout: float =
         return False
 
 
+
+# ═══ part 4/12: 04_fetch — 取包：重试预算 / HTTP 错误分类 / fetch_task_pack / fetch_resume / obtain_pack / 隧道 ═══
 def _fetch_guarded(
     url: str, headers: dict[str, str], log: Callable[[str], None], label: str, total_timeout: float
 ) -> bytes:
@@ -1150,6 +1163,8 @@ def ensure_tailscale(cfg: dict, creds: dict, log: Callable[[str], None]) -> str:
         return ""
 
 
+
+# ═══ part 5/12: 05_code — 代码引导：code.zip 装配 + 导入哨兵 / TS 运行时树 / token 与租约文件 ═══
 # ── 跑：code.zip 引导 → run_loop（与云端 worker 同一条链）──────────────────
 
 
@@ -1532,6 +1547,8 @@ def write_lease_file(dest_dir: Path, lease: str) -> str:
     return str(p)
 
 
+
+# ═══ part 6/12: 06_run — 跑一局：build_run_argv + run_one_course（产物） ═══
 def build_run_argv(
     cfg: dict,
     pack: Path | None,
@@ -1973,6 +1990,8 @@ def run_one_course(
     return rc
 
 
+
+# ═══ part 7/12: 07_queue — 队列面：任务清单 / 认领 / 心跳 / 进度端点 / 重新领租约 ═══
 def _json_dict(raw: bytes) -> dict:
     """小 JSON 应答 → dict（解不开 → `{}`：一个坏应答不该把取包/排队流程炸掉）。"""
     try:
@@ -2307,6 +2326,8 @@ def _reclaim_lease(
     return str(lease or "")
 
 
+
+# ═══ part 8/12: 08_progress — 打点：install_progress_pinger / install_local_progress_sink / 交还租约 ═══
 def install_progress_pinger(
     hub: str,
     token: str,
@@ -2587,6 +2608,8 @@ def release_course(
         log(f"租约没交还成功（{doc.get('error') or '不是当前持有人'}）——不影响本课成果")
 
 
+
+# ═══ part 9/12: 09_session — 会话面：课程解析 / 终局判据 / 显式租约与 kind / session_multi ═══
 def resolve_courses(
     cfg: dict,
     creds: dict,
@@ -2887,6 +2910,8 @@ def session_multi(courses: list[str], served: dict[str, str] | None = None) -> b
     return len(saw) > 1
 
 
+
+# ═══ part 10/12: 10_batch — 批与自动：_run_batch / _run_auto ═══
 def _run_batch(
     cfg: dict,
     creds: dict,
@@ -3265,6 +3290,8 @@ def _run_auto(
         time.sleep(poll)
 
 
+
+# ═══ part 11/12: 11_bc — BC 腿：代码就绪 / 取一次 BC 作业 / run_bc_course / try_take_bc_job ═══
 def _bc_code_ready() -> bool:
     """包内 `remote.worker` 是否已经可导入（冷启动判据，不触发下载）。"""
     try:
@@ -3483,6 +3510,8 @@ def try_take_bc_job(
     return f"BC：本轮跑完 {done} 份作业并已交回（hub={hubs[0]}）"
 
 
+
+# ═══ part 12/12: 12_entry — 入口：run（三步曲编排）+ _redact ═══
 def run(
     cfg: dict,
     log: Callable[[str], None],

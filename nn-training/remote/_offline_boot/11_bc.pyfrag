@@ -1,0 +1,219 @@
+# ═══ part 11/12: 11_bc — BC 腿：代码就绪 / 取一次 BC 作业 / run_bc_course / try_take_bc_job ═══
+def _bc_code_ready() -> bool:
+    """包内 `remote.worker` 是否已经可导入（冷启动判据，不触发下载）。"""
+    try:
+        from remote.worker import worker_loop  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ensure_bc_code(hub: str, token: str, log: Callable[[str], None]) -> None:
+    """BC 冷启动：没有任务包也要能拿到**同一权威源**的代码（hub `/code`）。
+
+    旧 BC 兜底腿要求 `/tmp/worker-code` 已存在 —— 那份代码只有跑过 RL 任务包才会铺下来。
+    BC 既然与 RL 同等对待，就不能再依赖「先跑一门 RL」。这里复用 `ensure_code` 的权威序
+    （任务包 → hub `/code` → 本机产物；本次 `pack=None`），把代码铺进 `CODE_DIR` 后再
+    导入 `remote.worker`。
+    """
+    if _bc_code_ready():
+        return
+    log("BC：本机还没有包内代码 ⇒ 从 hub /code 取一份（与 RL 任务包同一权威源）")
+    ensure_code(None, log, hub=hub, token=token)
+
+
+def _run_bc_once(
+    cfg: dict,
+    hub: str,
+    token: str,
+    log: Callable[[str], None],
+    *,
+    course: str = "",
+) -> int:
+    """真的去领一份 BC 作业并跑完 → 处理了几份（★M5/Q5）。
+
+    `course` 非空 ⇒ 只领这门的 BC job（课程级 drain 用）；空 ⇒ 旧行为（任意 BC job）。
+
+    **独立函数 = 注入点**：单测 patch 它，不在单测里拉包内代码 / 不起网络。
+
+    代理 = 包内 `remote.worker.worker_loop(once=True, role="offline")`：它自己 peek →
+    claim → `run_one_round`（**同一套单 job 生命周期**，不与协作盘另写一份）。归属闸
+    天然只放行 bc：ppo 作业全是在线归属，自主角色领不到；bc 是双角色 kind（Q5）⇒
+    「只领 BC」不需要新端点。
+
+    ★ 领 BC 后**不得再 claim 课程**（到跑完/让出）：本函数是**阻塞**的（`once=True` 跑到
+    作业终局才回来），调用点（`_run_auto` 的空档分支）在它返回前不会回课程轮询。
+    """
+    code_dir = str(CODE_DIR)
+    if code_dir not in sys.path:
+        sys.path.insert(0, code_dir)
+    # 包内代码（顶层 import 会破 standalone 契约：取到任务包之前 `remote` 不存在）。
+    from remote.worker import worker_loop
+
+    return int(
+        worker_loop(
+            hub,
+            token,
+            work_dir=_queue_work_dir(cfg),
+            device=str(cfg.get("device") or "cpu"),
+            torch_threads=int(cfg.get("threads") or 0),
+            poll_sec=BC_POLL_SEC,
+            once=True,
+            max_idle_sec=BC_TAKE_IDLE_SEC,
+            role="offline",
+            # 课程筛选只作用于 peek 的**响应候选**；请求本身不带课程（poll 路径的形参围栏）。
+            job_filter=(
+                (lambda c: str(c.get("course") or "") == course) if course else None
+            ),
+            log=log,
+        )
+    )
+
+
+def run_bc_course(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    keepalive_stop: Any,
+    *,
+    course: str,
+) -> int:
+    """把一门 BC 课程当**课程级任务**跑到收官（2026-11-12：与 RL 课程同等对待）。
+
+    旧口径（★M5）只在「队列空了 / 全被别人持有」的空档领一份 BC——BC 是兜底腿，
+    有人占着 RL 课时 BC 课永远排在后面。现在 `/offline/tasks` 把 BC 课列成 `kind=bc` 的
+    普通课程行，`_run_batch` 按同一排序执行它，本函数就是它的执行腿：
+
+      · 反复调 `_run_bc_once(course=…)` 领**这门课**的 BC job（hub 的 `bc-exclusive.json`
+        是课程级独占锁，同一时刻只有一台盘能跑）；
+      · 一份 job 跑完立刻再问（`accept_result` 会 clear 课程的 BC 独占与进度锚，不占 900s）；
+      · 课程 `completed` / `not_offline` / 被别的盘独占 / 停机 / 会话预算用尽 ⇒ 返回 0
+        （交还课程，`_run_batch` 继续下一门）；
+      · 连续 `idle_wait_sec` 没有可领的 job ⇒ 返回 0（在线 trainer 还没发布下一份）；
+      · job 失败（rc<0）⇒ 返回 1（与 RL 的 `rc≠0 立即停` 同一条纪律）。
+    """
+    hubs = hub_candidates(cfg, creds)
+    token = str(creds.get("HUB_TOKEN") or "")
+    if not hubs or not token:
+        log(f"BC 课程 {course}：没有 hub/token ⇒ 本拍不跑（这门课由在线 trainer 发布 job）")
+        return 0
+    worker = worker_id_of(_queue_work_dir(cfg), log)
+
+    def _num(key: str, default: float) -> float:
+        raw = cfg.get(key)
+        if raw is None or raw == "":
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    budget = _num("session_budget_sec", 0.0)  # 0 = 不限
+    idle_wait = _num("idle_wait_sec", DEFAULT_WAIT_SEC)
+    if idle_wait <= 0:
+        idle_wait = DEFAULT_WAIT_SEC
+    start = time.monotonic()
+    idle_since = start
+    last_wait_log = start - 300.0
+    while True:
+        if keepalive_stop is not None and keepalive_stop.is_set():
+            log(f"BC 课程 {course}：收到停机信号 ⇒ 交还本课")
+            return 0
+        if budget > 0 and time.monotonic() - start >= budget:
+            log(f"BC 课程 {course}：会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 交还本课")
+            return 0
+        # 静默取清单：BC 课可能在等下一份 job，每 5s 打一遍「清单 N 条」会把日志刷爆。
+        # 取不到时由下面这一行说明（错误本身仍可见）。
+        tasks = fetch_task_list(hubs[0], token, lambda _m: None, worker=worker)
+        if tasks is None:
+            log(f"BC 课程 {course}：清单取不到 ⇒ 本拍收工（下一拍再来）")
+            return 0
+        row = next(
+            (t for t in tasks if str(t.get("course") or "") == course), None
+        )
+        if row is None:
+            log(f"BC 课程 {course}：清单里没有它（停课/未开课）⇒ 本课收工")
+            return 0
+        state = str(row.get("state") or "")
+        if state in ("completed", "not_offline"):
+            log(f"BC 课程 {course}：{state} ⇒ 本课收工")
+            return 0
+        if str(row.get("kind") or "rl") != "bc":
+            log(f"BC 课程 {course}：清单说 kind={row.get('kind')!r}（不是 bc）⇒ 本课收工")
+            return 0
+        owner = str(row.get("bc_owner") or "")
+        if (owner or row.get("bc_job")) and owner != worker:
+            log(f"BC 课程 {course}：已被 {owner or '未知'} 独占 ⇒ 换下一门")
+            return 0
+        # 只有确认「这门课现在真的可跑」才取代码：已收官/被别人独占的课不该白拉一份。
+        try:
+            _ensure_bc_code(hubs[0], token, log)
+        except SystemExit as e:
+            log(f"BC 课程 {course}：代码引导失败（{e.code}）⇒ 本课收工")
+            return 1
+        except Exception as e:
+            log(f"BC 课程 {course}：代码引导异常（{type(e).__name__}: {e}）⇒ 本课收工")
+            return 1
+        done = _run_bc_once(cfg, hubs[0], token, log, course=course)
+        if done < 0:
+            log(f"BC 课程 {course}：本份 job 失败（rc={done}）⇒ 停止本课")
+            return 1
+        now = time.monotonic()
+        if done > 0:
+            # 干了活就不算 idle（与 `_idle_take_bc` 同一口径）。
+            idle_since = now
+            last_wait_log = now - 300.0
+            continue
+        if now - idle_since >= idle_wait:
+            log(
+                f"BC 课程 {course}：{idle_wait:.0f}s 没有可领的 job ⇒ 本课收工（下一拍再来）"
+            )
+            return 0
+        if now - last_wait_log >= 300.0:
+            log(
+                f"BC 课程 {course}：等下一轮 BC job（已等 {now - idle_since:.0f}s / "
+                f"上限 {idle_wait:.0f}s）"
+            )
+            last_wait_log = now
+        time.sleep(BC_POLL_SEC)
+
+
+def try_take_bc_job(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    *,
+    holding: bool = False,
+) -> str:
+    """空档里顺路领一份 BC 作业跑掉 → 一句话摘要；不该领 / 没领到 ⇒ `""`（★M5 / 需求 7）。
+
+    为什么这条路落在自主腿：Q5 定死「BC 两型均可领」，而自主盘的空档（清单里全是别人的
+    hold / 队列空但会话还在 wait）正是白白的算力——今天它只能轮询。
+
+    前置闸（两条，与 hub 侧同源，写在这里只为省一趟往返）：
+      · `holding=True`（本 worker 此刻带着课程 hold）⇒ 直接不领——Q5 的「hold 与 BC 互斥」
+        （**真正的闸在 hub**：`claim_offline` 的 busy 腿与 `role_blocked` 的 drain 腿）；
+      · hub 地址 / token 缺一、或包内代码还没就绪 ⇒ 不领（这条腿是 best-effort，
+        绝不打断课程主循环）。
+
+    失败一律**消化成本地日志**（不抛）：一段白跑的 BC 不该把整个会话带走。
+    """
+    if holding:
+        return ""
+    hubs = hub_candidates(cfg, creds)
+    token = str(creds.get("HUB_TOKEN") or "")
+    if not hubs or not token:
+        return ""
+    if not Path(CODE_DIR).is_dir():
+        log("BC：本机还没有包内代码（先跑一门课 / 用任务包引导）——这一拍不领")
+        return ""
+    try:
+        done = _run_bc_once(cfg, hubs[0], token, log)
+    except Exception as e:  # 这条腿 best-effort：任何异常都只记一行，不上抛
+        log(f"BC 领取/执行失败（不致命，不影响课程主循环）：{type(e).__name__}: {e}")
+        return ""
+    if done <= 0:
+        return ""
+    return f"BC：本轮跑完 {done} 份作业并已交回（hub={hubs[0]}）"
+
+

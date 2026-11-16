@@ -25,6 +25,72 @@
 
 ---
 
+## §118 单文件发行物改生成物：`offline_boot` 拆 12 段 `.pyfrag` + 拼接器（2026-11-17）
+
+**现场**（`python.refactor.md` §0.4-12 / §7.6 / §10-B8）：`remote/offline_boot.py` 3554 行 / 70+ 个顶层
+函数，是全仓最大的单文件。它不能按常规拆：notebook 引导格把它从 GitHub raw **按文件名**单独拉进容器，
+那时 `code.zip` 还没进 `sys.path` —— 所以它① 顶层不得 import `remote.*`，②必须是**单文件**。
+「LOC 豁免」因此一直挂着（`test_python_loc_budget.py::EXEMPT_FILES`），而豁免理由「取包面闭包 47/86
+节点、拆不开」在 2026-11-17 重算后只剩后半句：「它得是一份，但源码不必是一坨」。
+
+**做法**：拆**源码**，不拆发行物。
+
+```
+remote/_offline_boot/            源码（12 段，按顶层块边界切，最大 441 行）
+  01_front.pyfrag       门面：模块 docstring / imports / 交付面转发（PEP 562）
+  02_consts.pyfrag      常量与超时（包名 / 端点 / 心跳与打点预算 / 取包超时 / opener）
+  03_pack.pyfrag        任务包识别（索引 / 计划 / 落点扫描 / 上传框 / 本机产物对账 / hub 候选）
+  04_fetch.pyfrag       取包（重试预算 / HTTP 错误分类 / fetch_* / obtain_pack / 隧道）
+  05_code.pyfrag        代码引导（code.zip 装配 + 导入哨兵 / TS 树 / token 与租约文件）
+  06_run.pyfrag         跑一局（build_run_argv + run_one_course）
+  07_queue.pyfrag       队列面（清单 / 认领 / 心跳 / 进度端点 / 重领租约）
+  08_progress.pyfrag    打点（pinger / local sink / 交还租约）
+  09_session.pyfrag     会话面（课程解析 / 终局判据 / 显式租约与 kind / session_multi）
+  10_batch.pyfrag       批与自动（_run_batch / _run_auto）
+  11_bc.pyfrag          BC 腿（代码就绪 / 取一次 / run_bc_course / try_take_bc_job）
+  12_entry.pyfrag       入口 run（三步曲编排）+ _redact
+tools/build_offline_boot.py     拼接器（PARTS 是数据；--check 只对账；无变化不写盘）
+remote/offline_boot.py          生成物（6 行文件头 + 逐字节拼接）
+```
+
+切点取**顶层块边界**（函数 / 常量 / 注释分隔行），所以每段都能独立 `ast.parse` —— 这意味着
+`loc_of` 这类 AST 口径对分片仍然可用（下面那条 LOC 判据就靠它）。一次性切分脚本先对账过
+`"".join(parts) == 原文件`（逐字节），再写入；生成的发行物与拆分前 **+18 行**（6 行文件头 + 12 行分段头），
+其余逐字节相同（另加段间 11 个空行：拼接器在缝上补空行，分片自身不动，所以单个分片文件里
+分段头永远在第 1 行）。
+
+**为什么分片后缀是 `.pyfrag` 而不是 `.py`**（本批最值得记的一条）：生产树的静态门禁全部按
+`rglob("*.py")` 扫**发行物** —— print（G3）· 宽捕获（G4）· 静默捕获（G9）· `Any`（G14）· 函数形状（G1）·
+LOC · 层级账本（`remote_dag`）· 抑制符（G6）。分片若叫 `.py`，同一行字会被数两遍，只剩两条坏路：
+抬基线（本仓禁）或给每个门禁加一份排除名单（= 让门禁看不见代码）。`.pyfrag` 让「被检查的东西」与
+「被运输的东西」是**同一个文件**：分片只被拼接器读，`offline_boot.py` 仍是唯一的 AST 输入。
+代价写在明处：分片不被 mypy/ruff 解析 ⇒ 一致性与语法由「重建 → mypy + 用例」兜住。
+
+**LOC 豁免从「拆不开」改成「运输契约要单文件」**：`test_python_loc_budget.py` 新增
+`test_generated_offline_boot_sources_stay_under_the_limit` —— 逐分片用**同一个** `loc_of` 量（分片能
+`ast.parse`，所以口径不是另一套宽松版）；实测往 `12_entry.pyfrag` 塞 1000 行 ⇒ 1046 行判红。
+于是豁免不再是「合法的历史遗留」，而是「发行物大、源码不胖」；下一个懒得拆的巨段长不出来。
+
+**判据**（`tests/remote/test_offline_boot_is_generated.py`，四条）：提交物 == `build()`（并顺带
+`ast.parse`）· 分片目录无表外分片 / 无 `.py` / 每段以换行收尾 · 分段头 `part N/12: <文件名主干>` 的
+编号与位置一致 · 分片目录与发行物同父目录。四向证伪实测红：手改生成物（末尾加一行注释）· 加表外分片
+`99_stray.pyfrag` · 混进 `scratch.py` · 把 `03_pack` 的分段头改成 `part 4/12`。
+
+**读数（全部不动，这正是选 `.pyfrag` 的目的）**：G3 print / G4 宽捕 / G9 静默 / G14 `Any` 1176·182 /
+`test_module_doc_budget` 的 `remote/offline_boot.py: 53` / G12 / G6 —— 一个都没抬也没降。
+全量 `bash tools/githook/nn-py-safe.sh -m pytest tests/ e2e/ -p tools.forkdist --forkdist 16
+--timeout=60 -q` ⇒ **6153 收下 / 2 skipped**（6148 + 5 条新用例）；mypy **868 文件 Success**。
+
+**否决的三条**：
+
+1. **拆成可 import 的模块**（`remote/offline_boot/{front,pack,...}.py` + `__init__` 重导出）：直接破掉
+   运输契约（notebook 只拉一个文件），而且会造出第二个 import 面。
+2. **分片用 `.py`**：见上（会逼着抬基线或给门禁开洞）。
+3. **把 `offline_deliverable` 一起拼进来**：引导格是**按文件名**把两个文件一起从 raw 拉的，合并
+   等于改运输契约；`__getattr__` 门面（36 名闭集）因此继续留着（`python.refactor.md` §P1-11 已改记）。
+
+---
+
 ## §117 慢/抖用例清零：drain 判据换状态 + 精确二项递推（2026-11-12）
 
 **现场**：门禁同参（forkdist 8）连跑 4 次 `--durations=0`，第 2 轮
