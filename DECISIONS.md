@@ -6736,3 +6736,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   对象的 `store=` 让用例自己造账本（新用例断言注入的那个不碰默认实例）。
   名册本体不删：`test_l0_allowlist_is_still_needed` 靠它继续拦「过期豁免」，将来真有拆不动的
   存量时加条目仍要在表头写日期与理由。
+- **2026-11-16（动作空间判据单源）**：`worker/ppo/np_core.py` 的两处 `"a_hold" in d`
+  （掩码宽校验、episode 字段集）改走 `ActionSpace.from_batch(d).is_v6`；新增门禁
+  `tests/common/test_action_space_contract.py::test_only_one_place_decides_v6` —— 生产面除
+  `common/contracts.py` 外不许再自己判 `a_hold`（`ast.Compare(In)` 与 `.get("a_hold")` 都算）。
+  为什么值得一条门禁：第二处判据拼错一个字母 ⇒ 静默走 legacy ⇒ 9 宽掩码按 7 宽切、hold 头
+  永不训练，loss 照降；这类错误没有任何运行时现象。`_RL_SHARD_SPEC` 里的 `"a_hold": (...)` 是
+  键名声明不是判据，所以门禁只认 `in` / `.get` 形态（不是「出现即红」）。

@@ -22,6 +22,7 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
+from common.contracts import ActionSpace
 from common.errors import ProtocolError
 from common.log import log
 from common.schema import (
@@ -772,7 +773,9 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     # 静默读到训练完才表现异常（第 4–6 列被当 fire、第 7–8 列不存在）。
     # 判据：`a_hold.npy` 存在 ⇔ 9 宽；不存在 ⇔ 7 宽。两侧不一致 = 导出端/加载端
     # 版本不同源（或有人只改了一半），必须响亮。
-    is_v6 = "a_hold" in d
+    # 判据只有一处（`ActionSpace.from_batch`）：本文件不再自己查 `a_hold` 在不在，
+    # 否则「v6 是什么」就有第二个定义，拼错键名只会静默走 legacy（§0.1 第 3 条）。
+    is_v6 = ActionSpace.from_batch(d).is_v6
     _check_mask_width(d["mask"], is_v6, dirpath)
     if has_metrics:
         metrics = d.pop("metrics")  # [N+1,76]
@@ -944,7 +947,7 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
         "ret",
         "mask",
     )
-    fields = (*base, "a_hold", "lp_hold") if "a_hold" in d else base
+    fields = (*base, "a_hold", "lp_hold") if ActionSpace.from_batch(d).is_v6 else base
     return episode_from_shard(
         d,
         lambda x: compute_gae(x["reward"], x["value"], x["done"], gamma, lam),
