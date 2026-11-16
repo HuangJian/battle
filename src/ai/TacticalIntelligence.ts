@@ -19,7 +19,15 @@ import { snap, aabb } from '../utils/helpers'
 import { INTELLIGENCE_LEVELS } from './config'
 import { capabilityBias } from '../config/combat'
 import type { IntelligenceConfig, Situation, Perception } from './types'
-import { perceive, analyze, dirToward, manhattan, computeOpenDirs } from './perception'
+import {
+  perceive,
+  analyzeReactive,
+  analyzeTactical,
+  blankPerception,
+  dirToward,
+  manhattan,
+  computeOpenDirs,
+} from './perception'
 
 // Flat direction vectors (perf): `DIR_VECTORS[d]` is a Record lookup that
 // returns an object; in the per-tick hot loop of updateNoneTank's re-roll,
@@ -59,6 +67,13 @@ const _noneOpenBuf: Direction[] = ['up', 'up', 'up', 'up']
  */
 export class TacticalIntelligence {
   private readonly dt = TICK_MS // ms per simulation tick
+
+  /**
+   * perceive 的复用缓冲（每坦克每 tick 一次调用）。`perceive` 逐字段整体覆写，
+   * 消费者都在同一次 updateTank 内同步读完、无人保留引用 —— 省掉每次调用一个
+   * 14 字段对象（语料级 ~300 万次）。契约见 perception.ts 的 `out` 参数。
+   */
+  private readonly _perception = blankPerception()
 
   /** Entry point called by Simulation.updateEnemyAI. */
   update(world: World, fire: (tank: Tank) => void): void {
@@ -219,12 +234,21 @@ export class TacticalIntelligence {
     // and reactiveDodge (only when a bullet threat exists). On the rare ticks
     // where reactiveDodge needs it but perceive skipped it, compute on demand.
     const willTacticalThink = brain.thinkTimer <= 0
-    const p = perceive(world, tank, cfg, willTacticalThink, allTanks)
-    const s = analyze(world, tank, p, cfg)
+    // 节拍半部的两个消费者（strategicThink / tacticalThink）各自的闸门——照抄下文
+    // 调用点的条件，保证「算」与「用」同拍。`perceive`/`analyzeReactive` 只读 World，
+    // 闸门计算与使用之间无任何字段被改动。
+    const willStrategicThink =
+      cfg.strategicThinking && tank.id === world.activeCommanderId && brain.strategicTimer <= 0
+    const willThink = willTacticalThink || willStrategicThink
+    const p = perceive(world, tank, cfg, willTacticalThink, allTanks, this._perception, willThink)
+    // LOS 四布尔只有 updateFiring 每拍读，而它第一行就在 `fireTimer > 0` 时早退 ⇒
+    // 本拍不开火、也不跑 tacticalThink 时可以不扫（fireTimer 250–500ms ⇒ ~1/15 的拍子需要）。
+    const s = analyzeReactive(world, tank, p, cfg, brain.fireTimer <= 0 || willTacticalThink)
+    if (willThink) analyzeTactical(world, tank, p, cfg, s)
 
     // --- Strategic layer (stable long-term objective) — active Commander
     // only: inactive Commanders lose strategic thinking (revision §4).
-    if (cfg.strategicThinking && tank.id === world.activeCommanderId && brain.strategicTimer <= 0) {
+    if (willStrategicThink) {
       this.strategicThink(world, tank, brain, cfg, p, s)
       brain.strategicTimer = STRATEGIC_INTERVAL_MS * (0.85 + world.rng.next() * 0.3)
     }
@@ -705,6 +729,10 @@ export class TacticalIntelligence {
   }
 
   /** Terrain-only step check along `dir` (ignores transient tank blocks).
+   *
+   * (perf 2026-11-16, REJECTED) 把左右两趟合并成一趟 6×2 格扫描（步长是 TANK=2 格，
+   * 左右 swept-rect 并集）代码正确但**实测完全中性**（2.4% → 2.4% total）—— 多出的
+   * 逐格分支抵掉了少跑的一趟，按“架构更简”原则回退。
    *
    * (perf §126, REJECTED) Hand-inlining World.isInBounds + rectHitsTerrain
    * here (the rect is always a CELL-aligned 64×32, so the Math.floor calls

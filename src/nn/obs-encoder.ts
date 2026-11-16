@@ -39,7 +39,8 @@ import {
   ticksUntilFire,
   ticksUntilLegalTurn,
   killAssessment,
-  enemyDeadline,
+  enemyDeadlineCached,
+  type EnemyDeadline,
 } from '../ai/threat-budget'
 import { threatOnsetEdge } from './decision-gate'
 import {
@@ -252,6 +253,26 @@ const _pickupCenter = new Float64Array(2)
 /** s7 的层级构成复用缓冲（§14.1：去掉了每 tick 的 `[0,0,0,0,0]` 分配）。 */
 const _tierCounts = [0, 0, 0, 0, 0]
 
+/** ch0–ch5（地形 5 通道 + 基地 1 通道）只由 TileMap 决定 ⇒ 可整块缓存，见 `encode()`。 */
+const TERRAIN_ONLY_CHANNELS = 6
+const TERRAIN_ONLY_BYTES = TERRAIN_ONLY_CHANNELS * BOARD * BOARD
+if (CH.base + 1 !== TERRAIN_ONLY_CHANNELS) {
+  throw new Error(`terrain 通道块必须以 base 结尾（CH.base=${CH.base}）`)
+}
+
+/**
+ * ch16 归一化 LUT：`d ↦ min(254, round(255·d/dRef))`（d ≤ 675）。
+ * 逐格做一次除法 + `Math.round` 是每次 encode 676 次；查表等价且零浮点。
+ */
+const DIST_ENEMY_LUT = (() => {
+  const out = new Uint8Array(BOARD * BOARD)
+  for (let d = 0; d < out.length; d++) {
+    const v = Math.round((255 * d) / DIST_ENEMY_DREF)
+    out[d] = v > 254 ? 254 : v
+  }
+  return out
+})()
+
 const WAVE_HEAT_TICKS = 600 // K = 600 ticks (10s), plan §1.1 ch13
 /** waveHeat 轮转计数复用缓冲（§14.1：v2 为每次 encode 分配 [0,0,0]）。 */
 const WAVE_HEAT_COUNTS = Array.from({ length: 8 }, () => 0)
@@ -273,19 +294,76 @@ function clamp01(x: number): number {
  * 消费方（导出器 / 模型）拷走；旧布局权重不读它（纯增量、零破坏）。
  */
 export class ObsEncoder {
-  readonly obs: Uint8Array = new Uint8Array(OBS_CHANNELS * BOARD * BOARD)
-  readonly scalars: Float32Array = new Float32Array(SCALAR_DIM)
-  readonly extra: Float32Array = new Float32Array(POLICY_EXTRA_DIM)
+  /** 自有缓冲（未 `bind()` 时使用；改了值就走 `_own*`）。 */
+  private readonly _ownObs = new Uint8Array(OBS_CHANNELS * BOARD * BOARD)
+  private readonly _ownScalars = new Float32Array(SCALAR_DIM)
+  private readonly _ownExtra = new Float32Array(POLICY_EXTRA_DIM)
+  obs: Uint8Array = this._ownObs
+  scalars: Float32Array = this._ownScalars
+  extra: Float32Array = this._ownExtra
+  /** `bind(..., zeroed=true)` 的一次性标记：下一拍 `encode()` 跳过清零。 */
+  private _zeroed = false
+
+  /**
+   * 直写绑定：把 obs/scalars/extra 指向外部大张量的窗口，省掉消费方每样本三次
+   * `.set()` 拷贝（2026-11-16 profile：`set [native]` 2.0%，51 KB 的 obs 拷贝是主体）。
+   *
+   * `zeroed=true` 是调用方对「目标窗口已经是 0」的断言（例如直接切新建大张量的一格）
+   * —— 它让 `encode()` 省掉 51 KB 的 `fill(0)`（整轮约 6.6 GB 的 memset）。传 `null` 恢复自有缓冲。
+   */
+  bind(
+    obs: Uint8Array | null,
+    scalars: Float32Array | null,
+    extra: Float32Array | null,
+    zeroed = false,
+  ): void {
+    this.obs = obs ?? this._ownObs
+    this.scalars = scalars ?? this._ownScalars
+    this.extra = extra ?? this._ownExtra
+    this._zeroed = zeroed
+  }
   /** ch16 多源 BFS 复用缓冲（§14.1：676 格，禁每 tick 分配；队列每格至多入队一次）。 */
-  private readonly _bfsDist = new Int32Array(BOARD * BOARD)
   private readonly _bfsQueue = new Int32Array(BOARD * BOARD)
+  /**
+   * `_bfsSeen[i] === stamp` ⇒ 本拍已访问（取代每拍 `dist.fill(-1)` 的 676 次写）。
+   * 距离不落数组：BFS 按层推进，发现即写 `obs`（`lut[level]`）。
+   */
+  private readonly _bfsSeen = new Int32Array(BOARD * BOARD)
+  private _bfsStamp = 0
+  /**
+   * ch16 的**可走四邻表**：`_bfsNext[i*4+k]` = 第 k 个邻居的格子号，`-1` = 越界或不可走。
+   * 钢/水过滤被烘进表里 —— BFS 内层因此不再查可通行字节（每次 encode 省 2704 次查表）。
+   * 按 `TileMap.revision` 失效（纯派生缓存，命中与重算等价）。
+   */
+  private readonly _bfsNext = new Int16Array(BOARD * BOARD * 4)
+  private _bfsNextMap: World['tileMap'] | null = null
+  private _bfsNextRev = -1
+  /** ch0–5 的整块缓存（地形 + 基地），按 `TileMap.revision` 失效。 */
+  private readonly _terrainSlice = new Uint8Array(TERRAIN_ONLY_BYTES)
+  private _terrainMap: World['tileMap'] | null = null
+  private _terrainRev = -1
 
   encode(world: World): void {
-    this.obs.fill(0)
-    this.scalars.fill(0)
-    const hasBase = world.tileMap.hasBase()
-    this.encodeTerrain(world)
-    this.encodeBase(world, hasBase)
+    const map = world.tileMap
+    const hasBase = map.hasBase()
+    // `bind(..., zeroed=true)` 已断言目标窗口全 0 ⇒ 本拍不必再清零（只用一次）。
+    const zeroed = this._zeroed
+    this._zeroed = false
+    // 地形 6 通道（ch0–ch5）只由 TileMap 决定 —— revision 未变时整块 memcpy 回去，
+    // 省掉每次 encode 的 676×switch 重扫（2026-11-16 profile：encodeTerrain 2.4 µs/决策）。
+    // 语义与「先 fill(0) 再重扫」逐字节相同：ch≥6 仍由各自的 encoder 在清零后写入。
+    if (this._terrainMap === map && this._terrainRev === map.revision) {
+      this.obs.set(this._terrainSlice)
+      if (!zeroed) this.obs.fill(0, TERRAIN_ONLY_BYTES)
+    } else {
+      if (!zeroed) this.obs.fill(0)
+      this.encodeTerrain(world)
+      this.encodeBase(world, hasBase)
+      this._terrainSlice.set(this.obs.subarray(0, TERRAIN_ONLY_BYTES))
+      this._terrainMap = map
+      this._terrainRev = map.revision
+    }
+    if (!zeroed) this.scalars.fill(0)
     this.encodeSelf(world)
     this.encodeEnemies(world)
     this.encodeDistEnemy(world)
@@ -418,63 +496,125 @@ export class ObsEncoder {
    */
   private encodeDistEnemy(world: World): void {
     const N = BOARD * BOARD
-    const dist = this._bfsDist
     const queue = this._bfsQueue
-    dist.fill(-1)
+    const seen = this._bfsSeen
+    const stamp = ++this._bfsStamp
+    const base = CH.distEnemy * N
+    const obs = this.obs
+    const lut = DIST_ENEMY_LUT
     let head = 0
     let tail = 0
-    for (const t of world.tanks) {
+    const tanks = world.tanks
+    for (let k = 0; k < tanks.length; k++) {
+      const t = tanks[k]
       if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
       const c = Math.floor((t.x + t.w / 2) / CELL)
       const r = Math.floor((t.y + t.h / 2) / CELL)
       if (c < 0 || c >= BOARD || r < 0 || r >= BOARD) continue
       const i = r * BOARD + c
-      if (dist[i] === 0) continue // 同格多源只入队一次
-      dist[i] = 0
+      if (seen[i] === stamp) continue // 同格多源只入队一次
+      seen[i] = stamp
       queue[tail++] = i
     }
-    if (tail === 0) return
-    const grid = world.tileMap.grid
+    if (tail === 0) return // 无激活敌 ⇒ 通道保持 encode() 的清零（缺席 0）
+    // 有敌 ⇒ 先铺不可达哨兵 255（native `fill`，比 676 次 JS 循环快一个量级），
+    // 源格与可达格随后直接写入 obs —— 不再维护 dist 数组，也没有最后的汇写循环。
+    obs.fill(255, base, base + N)
+    for (let q = 0; q < tail; q++) obs[base + queue[q]] = lut[0]
+    const nb = this.bfsNeighbors(world.tileMap)
+    // 逐层推进：层号即路距，发现即写 `lut[level]`。层序与旧「队列 + dist 数组」
+    // 逐节点一致（单位成本 BFS，首访即最短），故 obs 逐字节相同。
+    // 四邻（越界已烘进 nb 表 = -1）
+    let level = 0
+    let levelEnd = tail
     while (head < tail) {
-      const cur = queue[head++]
-      const c = cur % BOARD
-      const r = (cur - c) / BOARD
-      const nd = dist[cur] + 1
-      // 四邻（顺序无关：单位成本 BFS，首访即最短）
-      if (c + 1 < BOARD) tail = this._bfsRelax(grid, dist, queue, tail, cur + 1, nd)
-      if (c > 0) tail = this._bfsRelax(grid, dist, queue, tail, cur - 1, nd)
-      if (r + 1 < BOARD) tail = this._bfsRelax(grid, dist, queue, tail, cur + BOARD, nd)
-      if (r > 0) tail = this._bfsRelax(grid, dist, queue, tail, cur - BOARD, nd)
-    }
-    const base = CH.distEnemy * N
-    for (let i = 0; i < N; i++) {
-      const d = dist[i]
-      if (d < 0) {
-        this.obs[base + i] = 255 // 有敌但本格不可达（哨兵；可达值另截到 254）
-        continue
+      level++
+      const end = levelEnd
+      const val = lut[level]
+      let nextEnd = tail
+      while (head < end) {
+        const cur = queue[head++]
+        const o = cur * 4
+        let nx = nb[o]
+        if (nx >= 0 && seen[nx] !== stamp) {
+          seen[nx] = stamp
+          obs[base + nx] = val
+          queue[nextEnd++] = nx
+        }
+        nx = nb[o + 1]
+        if (nx >= 0 && seen[nx] !== stamp) {
+          seen[nx] = stamp
+          obs[base + nx] = val
+          queue[nextEnd++] = nx
+        }
+        nx = nb[o + 2]
+        if (nx >= 0 && seen[nx] !== stamp) {
+          seen[nx] = stamp
+          obs[base + nx] = val
+          queue[nextEnd++] = nx
+        }
+        nx = nb[o + 3]
+        if (nx >= 0 && seen[nx] !== stamp) {
+          seen[nx] = stamp
+          obs[base + nx] = val
+          queue[nextEnd++] = nx
+        }
       }
-      const v = Math.round((255 * d) / DIST_ENEMY_DREF)
-      this.obs[base + i] = v > 254 ? 254 : v
+      tail = nextEnd
+      levelEnd = nextEnd
     }
   }
 
-  /** ch16 BFS 的单步松弛：未访问且可通行 ⇒ 写距离、入队，返回新的 tail。 */
-  private _bfsRelax(
-    grid: ReadonlyArray<ReadonlyArray<string>>,
-    dist: Int32Array,
-    queue: Int32Array,
-    tail: number,
-    i: number,
-    nd: number,
-  ): number {
-    if (dist[i] !== -1) return tail
-    const c = i % BOARD
-    const r = (i - c) / BOARD
-    const t = grid[r][c]
-    if (t === 'steel' || t === 'water') return tail
-    dist[i] = nd
-    queue[tail] = i
-    return tail + 1
+  /**
+   * ch16 的可走四邻表（钢/水不可走；砖按 1 步计入），按 `TileMap.revision` 失效。
+   * 纯派生缓存：地形一变 revision 就变，命中与重扫**逐字节等价**。
+   */
+  private bfsNeighbors(map: World['tileMap']): Int16Array {
+    if (this._bfsNextMap === map && this._bfsNextRev === map.revision) return this._bfsNext
+    const grid = map.grid
+    const out = this._bfsNext
+    // 内联可通行判定 + 行指针：676×4 次闭包调用（2026-11-16 profile：本函数 1.3% self，
+    // 重建发生在每次砖块被打掉后的 encode）在这条路上占了大部分，改成本地比较。
+    for (let r = 0; r < BOARD; r++) {
+      const row = grid[r]
+      const rowDown = r + 1 < BOARD ? grid[r + 1] : null
+      const rowUp = r > 0 ? grid[r - 1] : null
+      const rowBase = r * BOARD
+      for (let c = 0; c < BOARD; c++) {
+        const o = (rowBase + c) * 4
+        // 右
+        let nb = -1
+        if (c + 1 < BOARD) {
+          const t = row[c + 1]
+          if (t !== 'steel' && t !== 'water') nb = rowBase + c + 1
+        }
+        out[o] = nb
+        // 左
+        nb = -1
+        if (c > 0) {
+          const t = row[c - 1]
+          if (t !== 'steel' && t !== 'water') nb = rowBase + c - 1
+        }
+        out[o + 1] = nb
+        // 下
+        nb = -1
+        if (rowDown !== null) {
+          const t = rowDown[c]
+          if (t !== 'steel' && t !== 'water') nb = rowBase + BOARD + c
+        }
+        out[o + 2] = nb
+        // 上
+        nb = -1
+        if (rowUp !== null) {
+          const t = rowUp[c]
+          if (t !== 'steel' && t !== 'water') nb = rowBase - BOARD + c
+        }
+        out[o + 3] = nb
+      }
+    }
+    this._bfsNextMap = map
+    this._bfsNextRev = map.revision
+    return out
   }
 
   private encodeBullets(world: World): void {
@@ -536,6 +676,8 @@ export class ObsEncoder {
   // ---- scalar vector (plan §1.2) ----
 
   private encodeScalars(world: World, hasBase: boolean): void {
+    // 本次 encode 的 enemyDeadline 备忘录（同一世界状态内的纯函数）。跨 encode 丢弃。
+    _deadlineCache.clear()
     const s = this.scalars
     const p = world.player
     const FIELD_DIAG = 26 * CELL * 1.5
@@ -551,7 +693,7 @@ export class ObsEncoder {
       const e = allTanks[i]
       if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
       enemyCount++
-      const ka = killAssessmentSlack(world, p, e)
+      const ka = killAssessmentSlack(world, p, e, _deadlineCache)
       if (ka.killSlack < minKillSlack) minKillSlack = ka.killSlack
       if (ka.baseDeadline < minBaseDeadline) minBaseDeadline = ka.baseDeadline
     }
@@ -841,10 +983,21 @@ export function mirrorScalars(scalars: Float32Array): void {
 // around ThreatBudget so the encoder stays a pure function of (world).
 // ---------------------------------------------------------------
 
-function killAssessmentSlack(world: World, p: Tank | null, e: Tank) {
+/**
+ * 每-encode 的 `enemyDeadline` 备忘录。同一拍内世界不变，所以命中与重算逐字段相同；
+ * 在 `encodeScalars` 开头 `clear()`，不跨 tick（不会读到陈旧世界）。
+ */
+const _deadlineCache = new Map<number, EnemyDeadline>()
+
+function killAssessmentSlack(
+  world: World,
+  p: Tank | null,
+  e: Tank,
+  cache?: Map<number, EnemyDeadline>,
+) {
   if (!p) return { killSlack: Infinity, baseDeadline: Infinity }
-  const ka = killAssessment(world, p, e)
-  const dl = enemyDeadline(world, e)
+  const ka = killAssessment(world, p, e, undefined, cache)
+  const dl = enemyDeadlineCached(world, e, cache)
   return { killSlack: ka.killSlack, baseDeadline: dl.enemyDamageDeadline }
 }
 

@@ -122,6 +122,9 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
   // = floor(sx/CELL) + dx·k for integer k, and cx = col·CELL + (sx mod CELL)
   // — byte-identical cells and pixels.
   const allies = world.allies
+  // 界内直读 grid：`TileMap.get` 只有「越界 → steel / 界内 → grid[row][col]」两条路，
+  // 而越界已在循环里先行 return，所以两者逐值等价（省一次方法派发 + 一次重复界内判断）。
+  const grid = world.tileMap.grid
   const offX = sx - Math.floor(sx / CELL) * CELL
   const offY = sy - Math.floor(sy / CELL) * CELL
   let col = Math.floor(sx / CELL)
@@ -133,20 +136,19 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     // Out-of-bounds is treated as steel (impassable) — matches TileMap.get's
     // behavior for the original string grid.
     if (col < 0 || col >= GRID || row < 0 || row >= GRID) return 'steel'
-    const tt = world.tileMap.get(col, row)
+    const tt = grid[row][col]
     if (tt === 'base') return 'base'
     if (tt === 'brick') return 'wall'
     if (tt === 'steel') return 'steel'
+    // 本格像素中心只算一次（旧实现在 player / player2 / decoy 三处各重算一遍）。
+    const cx = col * CELL + offX
+    const cy = row * CELL + offY
     if (player && player.alive) {
-      const cx = col * CELL + offX
-      const cy = row * CELL + offY
       if (aabb(cx - 1, cy - 1, 2, 2, player.x, player.y, player.w, player.h)) {
         return 'player'
       }
     }
     if (player2 && player2.alive) {
-      const cx = col * CELL + offX
-      const cy = row * CELL + offY
       if (aabb(cx - 1, cy - 1, 2, 2, player2.x, player2.y, player2.w, player2.h)) {
         return 'player'
       }
@@ -159,8 +161,6 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
     for (let ai = 0; ai < allies.length; ai++) {
       const dec = allies[ai]
       if (!dec.alive || !dec.isDecoy || dec.spawnTimer > 0) continue
-      const cx = col * CELL + offX
-      const cy = row * CELL + offY
       if (aabb(cx - 1, cy - 1, 2, 2, dec.x, dec.y, dec.w, dec.h)) {
         return 'decoy'
       }
@@ -171,6 +171,12 @@ export function scanAhead(world: World, tank: Tank, dir: Direction, maxDist: num
 
 // Hoisted constant — avoids allocating a 4-element array on every perceive call.
 const PERCEIVE_DIRS: readonly Direction[] = ['up', 'down', 'left', 'right']
+
+/**
+ * 「这拍没算 openDirs」的共享空数组。只读：`reactiveDodge` 需要时是**整体替换字段**
+ * （`p.openDirs = computeOpenDirs(...)`），从不 push。
+ */
+const EMPTY_DIRS: Direction[] = []
 
 /** Compute open directions (4 × canStep). Exported for lazy on-demand use
  * by reactiveDodge when perceive skipped this computation (perf: the scan
@@ -201,6 +207,8 @@ export function perceive(
   cfg: IntelligenceConfig,
   needOpenDirs = true,
   all?: Tank[],
+  out?: Perception,
+  needAggregates = true,
 ): Perception {
   const sx = tank.x + tank.w / 2
   const sy = tank.y + tank.h / 2
@@ -271,7 +279,9 @@ export function perceive(
   let decoyX = 0
   let decoyY = 0
   let nearestDecoyDist = Infinity
-  for (let i = 0; i < list.length; i++) {
+  // 队友/诱饵/拥挤聚合的消费者全在节拍上（evaluateGoals / targetForGoal /
+  // strategicThink）——每拍消费者只用 hasThreat/threatDir。非节拍拍子整趟跳过。
+  for (let i = 0; needAggregates && i < list.length; i++) {
     const o = list[i]
     if (o === tank || !o.alive || o.spawnTimer > 0) continue
     if (o.isPlayer) continue
@@ -293,75 +303,141 @@ export function perceive(
     if (manhattan(sx, sy, ocx, ocy) < CELL * 8) congestion++
   }
 
-  const openDirs: Direction[] = needOpenDirs ? computeOpenDirs(world, tank, list) : []
+  const openDirs: Direction[] = needOpenDirs ? computeOpenDirs(world, tank, list) : EMPTY_DIRS
 
+  // `out` 是调用方提供的复用缓冲（TacticalIntelligence 的每-tank 热路径）：逐字段覆写，
+  // 避免每调用分配一个 14 字段对象（语料级 ~300 万次）。契约：**调用方不得保留返回引用**
+  // —— 下一次 perceive() 会覆写它；现有消费者都在同一次 updateTank 内同步读完。
+  const o = out ?? blankPerception()
+  o.selfX = sx
+  o.selfY = sy
+  o.selfDir = tank.dir
+  o.hasPlayer = !!(player && player.alive)
+  o.playerX = player ? player.x + player.w / 2 : 0
+  o.playerY = player ? player.y + player.h / 2 : 0
+  o.hasBase = !!base
+  o.baseX = base ? base.x + CELL : 0
+  o.baseY = base ? base.y + CELL : 0
+  o.hasDecoy = hasDecoy
+  o.decoyX = decoyX
+  o.decoyY = decoyY
+  o.hasThreat = hasThreat
+  o.threatDir = threatDir
+  o.teammateCount = teammateCount
+  o.teammateSumX = teammateSumX
+  o.teammateSumY = teammateSumY
+  o.congestion = congestion
+  o.openDirs = openDirs
+  return o
+}
+
+/** 全字段默认值的 Perception（供复用缓冲初始化；perceive 会整体覆写）。 */
+export function blankPerception(): Perception {
   return {
-    selfX: sx,
-    selfY: sy,
-    selfDir: tank.dir,
-    hasPlayer: !!(player && player.alive),
-    playerX: player ? player.x + player.w / 2 : 0,
-    playerY: player ? player.y + player.h / 2 : 0,
-    hasBase: !!base,
-    baseX: base ? base.x + CELL : 0,
-    baseY: base ? base.y + CELL : 0,
-    hasDecoy,
-    decoyX,
-    decoyY,
-    hasThreat,
-    threatDir,
-    teammateCount,
-    teammateSumX,
-    teammateSumY,
-    congestion,
-    openDirs,
+    selfX: 0,
+    selfY: 0,
+    selfDir: 'up',
+    hasPlayer: false,
+    playerX: 0,
+    playerY: 0,
+    hasBase: false,
+    baseX: 0,
+    baseY: 0,
+    hasDecoy: false,
+    decoyX: 0,
+    decoyY: 0,
+    hasThreat: false,
+    threatDir: 'up',
+    teammateCount: 0,
+    teammateSumX: 0,
+    teammateSumY: 0,
+    congestion: 0,
+    openDirs: EMPTY_DIRS,
   }
 }
 
-/** Convert perception into tactical knowledge (analysis only, no decisions). */
+/**
+ * 每拍必算的「响应式」半部 —— 只写**每 tick 消费者**会读的字段。
+ *
+ * 消费者证据（`TacticalIntelligence` 内全部 `s.` 读点）：
+ *   - `reactiveDodge`（每拍）：`hasThreat`、`threatDir`
+ *   - `updateFiring`（每拍）：`baseInLineOfFire`、`playerInLineOfFire`、
+ *     `decoyInLineOfFire`、`wallInLineOfFire`
+ *   - `maybeTunnelOut`：不读 Situation
+ * 节拍字段（`distToBase`/`distToPlayer`/`pathBlocked`/`baseDanger`）在这里只给中性默认值，
+ * 由 `analyzeTactical` 在「本拍会跑 tactical/strategic think」时覆写。
+ */
+export function analyzeReactive(
+  world: World,
+  tank: Tank,
+  p: Perception,
+  cfg: IntelligenceConfig,
+  needLos = true,
+): Situation {
+  const losRange = cfg.predictionDepth * CELL + TANK
+  // `needLos=false` ⇒ 四个布尔全为 false（'none' 不匹配任何分支）。只在「本拍
+  // updateFiring 会真正执行（fireTimer<=0）」或「本拍跑 tacticalThink」时才需要它们。
+  const baseLOS: ScanHit = needLos ? scanAhead(world, tank, tank.dir, losRange) : 'none'
+  // 字面量顺序与拆分前完全一致（同形对象，便于 diff/热路径稳定）。
+  return {
+    distToBase: Infinity,
+    distToPlayer: Infinity,
+    baseInLineOfFire: baseLOS === 'base',
+    playerVisible: p.hasPlayer,
+    playerInLineOfFire: baseLOS === 'player',
+    decoyInLineOfFire: baseLOS === 'decoy',
+    wallInLineOfFire: baseLOS === 'wall',
+    pathBlocked: false,
+    hasThreat: p.hasThreat,
+    threatDir: p.hasThreat ? p.threatDir : null,
+    baseDanger: 0,
+    teammateCount: p.teammateCount,
+    congestion: p.congestion,
+    openDirs: p.openDirs,
+  }
+}
+
+/**
+ * 节拍半部 —— 只在 `tacticalThink`（`thinkTimer <= 0`）或 `strategicThink`
+ * （指挥官 `strategicTimer <= 0`）会跑的那一拍调用，覆写四个节拍字段。
+ *
+ * 惰性时机是纯性能选择：目标朝向的 `scanAhead` 是每拍整段网格步行，却只喂 `pathBlocked`
+ * （仅 `evaluateGoals` 读）。**字段值与拆分前逐字节相同**：`scanAhead` 是
+ * `(World, tank, dir, maxDist)` 的纯函数（不读 RNG、不写 World），重扫与复用同一行的
+ * 结果一致，因此不再需要「与朝向相同就复用」的短路。
+ */
+export function analyzeTactical(
+  world: World,
+  tank: Tank,
+  p: Perception,
+  cfg: IntelligenceConfig,
+  s: Situation,
+): void {
+  const maxDist = FIELD
+  s.distToBase = p.hasBase ? manhattan(p.selfX, p.selfY, p.baseX, p.baseY) : Infinity
+  s.distToPlayer = p.hasPlayer ? manhattan(p.selfX, p.selfY, p.playerX, p.playerY) : Infinity
+
+  // Path blocked by a breakable brick directly ahead toward the objective?
+  const losRange = cfg.predictionDepth * CELL + TANK
+  const objX = p.hasBase ? p.baseX : p.playerX
+  const objY = p.hasBase ? p.baseY : p.playerY
+  const objDir = p.hasBase || p.hasPlayer ? dirToward(p.selfX, p.selfY, objX, objY) : tank.dir
+  s.pathBlocked = scanAhead(world, tank, objDir, losRange) === 'wall'
+
+  s.baseDanger = p.hasBase ? Math.max(0, 1 - s.distToBase / maxDist) : 0
+}
+
+/**
+ * 完整分析 = 响应式半部 + 节拍半部（公开 API）。
+ * 对同一个 World/tank/p/cfg，返回值与拆分前的 `analyze` 逐字段相同。
+ */
 export function analyze(
   world: World,
   tank: Tank,
   p: Perception,
   cfg: IntelligenceConfig,
 ): Situation {
-  const maxDist = FIELD
-  const distToBase = p.hasBase ? manhattan(p.selfX, p.selfY, p.baseX, p.baseY) : Infinity
-  const distToPlayer = p.hasPlayer ? manhattan(p.selfX, p.selfY, p.playerX, p.playerY) : Infinity
-
-  const losRange = cfg.predictionDepth * CELL + TANK
-  const baseLOS = scanAhead(world, tank, tank.dir, losRange)
-  const baseInLineOfFire = baseLOS === 'base'
-  const playerInLineOfFire = baseLOS === 'player'
-  const decoyInLineOfFire = baseLOS === 'decoy'
-  const wallInLineOfFire = baseLOS === 'wall'
-
-  // Path blocked by a breakable brick directly ahead toward the objective?
-  const objX = p.hasBase ? p.baseX : p.playerX
-  const objY = p.hasBase ? p.baseY : p.playerY
-  const objDir = p.hasBase || p.hasPlayer ? dirToward(p.selfX, p.selfY, objX, objY) : tank.dir
-  // The objective sits in the tank's current facing direction → the base
-  // scan already covers it, so reuse it instead of re-walking the same line.
-  // Result is identical to scanning objDir again (pure perf win).
-  const ahead = objDir === tank.dir ? baseLOS : scanAhead(world, tank, objDir, losRange)
-  const pathBlocked = ahead === 'wall'
-
-  const baseDanger = p.hasBase ? Math.max(0, 1 - distToBase / maxDist) : 0
-
-  return {
-    distToBase,
-    distToPlayer,
-    baseInLineOfFire,
-    playerVisible: p.hasPlayer,
-    playerInLineOfFire,
-    decoyInLineOfFire,
-    wallInLineOfFire,
-    pathBlocked,
-    hasThreat: p.hasThreat,
-    threatDir: p.hasThreat ? p.threatDir : null,
-    baseDanger,
-    teammateCount: p.teammateCount,
-    congestion: p.congestion,
-    openDirs: p.openDirs,
-  }
+  const s = analyzeReactive(world, tank, p, cfg)
+  analyzeTactical(world, tank, p, cfg, s)
+  return s
 }

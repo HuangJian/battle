@@ -853,6 +853,10 @@ export class World {
     // V8 folds into a tight compare chain; inserting an extra branch to
     // short-circuit the common case costs more than the compares it saves.
     // Do not "optimize" this ordering again.
+    //
+    // (perf 2026-11-16, REJECTED) 把逐格比较换成本位图（按 `revision` 失效）实测快 1.5%，
+    // 但测试/工具会直接写 `world.tileMap.grid[r][c]` 而不 bump revision ⇒ 陈旧位图，
+    // 44 个 God-AI 用例红。**只要 `grid` 还能被直接改写，就不要给本函数加缓存。**
     for (let r = r0; r <= r1; r++) {
       const row = grid[r]
       for (let c = c0; c <= c1; c++) {

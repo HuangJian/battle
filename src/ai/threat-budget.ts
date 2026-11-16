@@ -655,6 +655,49 @@ function bricksBetween(world: World, col: number, row: number): number {
 }
 
 /**
+ * `enemyDeadline` 的**可选备忘录版本**。`enemyDeadline` 是 `(world, enemy)` 的纯函数，
+ * 但在同一个世界状态下会被反复问到（`killAssessment` 的第二威胁循环对每个敌人再算一遍，
+ * 编码器又对每个敌人各调一次 ⇒ O(N²)）。传一个 `Map<enemyId, EnemyDeadline>` 就能把
+ * 一次 encode 内的代价压回 O(N)。
+ *
+ * 契约：`cache` 只在**同一世界状态**内有效（调用方负责每次 encode 前 `clear()`）；
+ * 命中时若传了 `out` 就拷字段进去（划痕缓冲 `_DL` 不能被别名），否则直接返回缓存对象
+ * （调用方只读）。在 `killAssessment` 内部由调用方透传。
+ */
+export function enemyDeadlineCached(
+  world: World,
+  e: Tank,
+  cache?: Map<number, EnemyDeadline>,
+  out?: EnemyDeadline,
+): EnemyDeadline {
+  if (cache !== undefined) {
+    const hit = cache.get(e.id)
+    if (hit !== undefined) {
+      if (out === undefined) return hit
+      out.enemyArrivalLowerBound = hit.enemyArrivalLowerBound
+      out.enemyDamageEarliest = hit.enemyDamageEarliest
+      out.enemyDamageDeadline = hit.enemyDamageDeadline
+      out.enemyDamageWindow = hit.enemyDamageWindow
+      out.enemyUrgency = hit.enemyUrgency
+      out.directThreat = hit.directThreat
+      return out
+    }
+  }
+  const dl = enemyDeadline(world, e, out)
+  if (cache !== undefined) {
+    cache.set(e.id, {
+      enemyArrivalLowerBound: dl.enemyArrivalLowerBound,
+      enemyDamageEarliest: dl.enemyDamageEarliest,
+      enemyDamageDeadline: dl.enemyDamageDeadline,
+      enemyDamageWindow: dl.enemyDamageWindow,
+      enemyUrgency: dl.enemyUrgency,
+      directThreat: dl.directThreat,
+    })
+  }
+  return dl
+}
+
+/**
  * Plan §5.3 — player kill/intercept slack for one enemy.
  *
  * killSlack is measured against `enemyDamageDeadline` (the SAFE deadline =
@@ -668,13 +711,14 @@ export function killAssessment(
   p: Tank,
   e: Tank,
   out?: KillAssessment,
+  deadlineCache?: Map<number, EnemyDeadline>,
 ): KillAssessment {
   const ec = tankCenterCell(e, _CELL_A)
   const pc = tankCenterCell(p, _CELL_B)
   const aimDir = aimDirTo(ec.col, ec.row, pc.col, pc.row) ?? p.dir
   const shots = playerShotsToKill(world, e)
   const eta = playerActionEta(world, p, ec.col, ec.row, aimDir, shots, _ETA)
-  const dl = enemyDeadline(world, e, _DL)
+  const dl = enemyDeadlineCached(world, e, deadlineCache, _DL)
   // Copy BEFORE the second-threat loop (it reuses _DL — nested calls would
   // otherwise clobber `dl` before the return reads it).
   const damageDeadline = dl.enemyDamageDeadline
@@ -685,7 +729,7 @@ export function killAssessment(
   let missesSecondThreat = false
   for (const t of world.tanks) {
     if (t.id === e.id || !t.alive || t.spawnTimer > 0) continue
-    if (enemyDeadline(world, t, _DL).enemyDamageDeadline < eta.total) {
+    if (enemyDeadlineCached(world, t, deadlineCache, _DL).enemyDamageDeadline < eta.total) {
       missesSecondThreat = true
       break
     }

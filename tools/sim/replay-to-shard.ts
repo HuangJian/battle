@@ -16,7 +16,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'fs'
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { STAGES } from '../../src/config/stages'
@@ -24,7 +24,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
-import { npyBytes } from '../../src/nn/npy'
+import { writeNpyFile } from '../../src/nn/npy'
 import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import { parseReplayFile } from '../../src/replay/file'
 import { ReplayInput } from '../../src/replay/ReplayInput'
@@ -96,16 +96,22 @@ function npyRowCount(path: string): number | null {
   return m ? parseInt(m[1], 10) : null
 }
 
-function writeAtomic(path: string, data: Uint8Array): void {
+/** `.tmp` + rename 原子落盘，但**不**先 `npyBytes` 整块拷贝（obs 是 3.97 GB 量级）。 */
+function writeNpyAtomic(
+  path: string,
+  view: ArrayBufferView,
+  shape: number[],
+  dtype: 'u1' | 'f4',
+): void {
   const tmp = `${path}.tmp`
-  writeFileSync(tmp, data)
+  writeNpyFile(tmp, view, shape, dtype)
   try {
     renameSync(tmp, path)
   } catch (e) {
     try {
       unlinkSync(tmp)
     } catch {
-      /* 临时文件可能已被移走；原始错误更有价值 */
+      /* 同上 */
     }
     throw e
   }
@@ -188,8 +194,6 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
       )
     }
   }
-  const decisionSet = new Set(ticks)
-
   // ---- 标签行数必须与决策 tick 对齐（缺文件 = 确定性失败） ----
   for (const label of ['a_move.npy', 'a_fire.npy', 'done.npy', 'mask.npy']) {
     const p = `${shardDir}/${label}`
@@ -220,20 +224,27 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
   const obsFlat = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalarsFlat = new Float32Array(N * SCALAR_DIM)
   const extraFlat = new Float32Array(N * POLICY_EXTRA_DIM)
-  // Node 兼容：worker 可能用 Node ≥22 跑预建 bundle（D3）；Bun 也实现了 node:crypto。
-  const hasher = createHash('sha256')
   const tickHashes: string[] = []
   const obsStride = OBS_CHANNELS * BOARD * BOARD
-  let i = 0
+  /** 决策游标（`ticks` 严格递增，故单调前移即可；旧实现每 tick 查一次 Set）。 */
+  let di = 0
 
   for (let t = 0; t < replay.totalTicks; t++) {
-    if (decisionSet.has(t)) {
+    // `ticks` 已校验为严格递增 ⇒ 单调游标与 Set 查表等价（且每 tick 零查表）。
+    if (di < N && ticks[di] === t) {
+      // 直写：把编码器的三块缓冲绑到大张量的本样本窗口（新建、全 0）——
+      // 省掉三次 `.set()`（其中 obs 是 51 KB/样本），也不用再 `fill(0)`。
+      const o0 = di * obsStride
+      const s0 = di * SCALAR_DIM
+      const e0 = di * POLICY_EXTRA_DIM
+      encoder.bind(
+        obsFlat.subarray(o0, o0 + obsStride),
+        scalarsFlat.subarray(s0, s0 + SCALAR_DIM),
+        extraFlat.subarray(e0, e0 + POLICY_EXTRA_DIM),
+        true,
+      )
       encoder.encode(world)
-      obsFlat.set(encoder.obs, i * obsStride)
-      scalarsFlat.set(encoder.scalars, i * SCALAR_DIM)
-      extraFlat.set(encoder.extra, i * POLICY_EXTRA_DIM)
-      hasher.update(encoder.obs)
-      i++
+      di++
     }
     sim.tick()
     input.advance()
@@ -246,10 +257,12 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
       )
     }
   }
-  if (i !== N) throw new Error(`[replay-to-shard] encoded ${i} samples != nSamples ${String(N)}`)
+  if (di !== N) throw new Error(`[replay-to-shard] encoded ${di} samples != nSamples ${String(N)}`)
 
   // ---- 确定性校验：obsHash / tickHash 链 / 终局 ----
-  const obsHash = `sha256:${hasher.digest('hex')}`
+  // obsHash 规格 = `sha256(concat(obs_i))`（D4）；obsFlat 就是那份拼接（决策序、无空隙）
+  // ⇒ 一次 update 与「逐决策 update」字节等价，但省掉 N 次原生调用（profile 6.5%）。
+  const obsHash = `sha256:${createHash('sha256').update(obsFlat).digest('hex')}`
   if (meta.obsHash && obsHash !== meta.obsHash) {
     throw new Error(`[replay-to-shard] obsHash mismatch: computed ${obsHash}, meta ${meta.obsHash}`)
   }
@@ -296,13 +309,14 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
   if (!opts.verifyOnly) {
     const outDir = opts.outDir ?? shardDir
     mkdirSync(outDir, { recursive: true })
-    const files: Array<[string, Uint8Array]> = [
-      ['obs.npy', npyBytes(obsFlat, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')],
-      ['scalars.npy', npyBytes(scalarsFlat, [N, SCALAR_DIM], 'f4')],
-      ['extra.npy', npyBytes(extraFlat, [N, POLICY_EXTRA_DIM], 'f4')],
+    // 三张张量直写目标文件（不经过 `npyBytes` 的整块拷贝）；形状/dtype 与 D4 同源。
+    const files: Array<[string, ArrayBufferView, number[], 'u1' | 'f4']> = [
+      ['obs.npy', obsFlat, [N, OBS_CHANNELS, BOARD, BOARD], 'u1'],
+      ['scalars.npy', scalarsFlat, [N, SCALAR_DIM], 'f4'],
+      ['extra.npy', extraFlat, [N, POLICY_EXTRA_DIM], 'f4'],
     ]
-    for (const [name, data] of files) {
-      writeAtomic(`${outDir}/${name}`, data)
+    for (const [name, view, shape, dtype] of files) {
+      writeNpyAtomic(`${outDir}/${name}`, view, shape, dtype)
       written.push(name)
     }
   }
