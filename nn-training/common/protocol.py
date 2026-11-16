@@ -480,6 +480,11 @@ def push_worker_id_of(worker_id: str) -> str:
 #: 注册 wire 上的 `kind` 只是那一次请求的说法，不落盘（见 `hub.admin` 的合并语义）。
 CAP_GPU_PUSH = "gpu_push"
 CAP_OFFLINE_PUSH = "offline_push"
+#: 功能能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：claim 请求与 worker `/ping`
+#: 用它声明「本进程能跑 replay 语料的 worker 侧 pre-pass」。**不是**节点 kind，故不进
+#: `NODE_CAPABILITIES`（那份名单只服务 kind 切换清理）。未声明 = 旧 worker ⇒ hub 拒发
+#: replay job（fail-closed，绝不把它当 0 样本训练）。
+CAP_REPLAY_CORPUS = "replay_corpus"
 #: 全部能力键（切换 kind 时按这份名单清理 ⇒ 新增能力不会漏清）。
 NODE_CAPABILITIES = (CAP_GPU_PUSH, CAP_OFFLINE_PUSH)
 #: 注册 `kind` 的白名单。`sampler` = 采样节点（老客户端**根本不发** `kind`，见 §4.2-P0）。
@@ -549,6 +554,7 @@ def pick_push_worker(
     avoid: Iterable[str] = (),
     *,
     ahead: int = 0,
+    require: str = "",
 ) -> dict | None:
     """挑一个**现在就能接活**的 worker；没有空闲者 → None。
 
@@ -566,12 +572,18 @@ def pick_push_worker(
 
     为什么 `ahead` 缺省 0：预推把租约的起点提前到「job 还在队里」的时刻，这不是所有
     调用方都愿意接受的时钟；GPU 派发器显式传 `--push-ahead`（缺省 1）。
+
+    `require`（2026-11-16，plan/replay-corpus.plan.md D2/B7）：非空时只挑声明了该能力位
+    的 worker（例如 replay job 需要 `replay_corpus`）；缺省空串 = 旧行为（不看能力）。
     """
     blocked = set(avoid)
 
     def _fits(w: dict, wid: str, boost: int) -> bool:
         limit = int(w.get("concurrency") or 1) + int(boost)
         return int(inflight.get(wid, 0)) < limit
+
+    def _has_cap(w: dict) -> bool:
+        return not require or bool(w.get(require))
 
     for w in workers:
         if not isinstance(w, dict):
@@ -581,6 +593,8 @@ def pick_push_worker(
             continue
         if not w.get("online"):
             continue  # 从没答过 / 连续失败达阈值：不往它身上推
+        if not _has_cap(w):
+            continue  # 声明不了所需能力（旧 worker / replay 等）
         if w.get("busy"):
             continue  # 节点自报在跑
         if not _fits(w, wid, 0):
@@ -595,6 +609,8 @@ def pick_push_worker(
         if not wid or wid in blocked:
             continue
         if not w.get("online"):
+            continue
+        if not _has_cap(w):
             continue
         if not w.get("busy"):
             continue  # 第一轮已经处理过空闲机

@@ -50,6 +50,7 @@ from common.protocol import (
     BLOB_NAMES,
     BOTH_ROLE_KINDS,
     CAP_GPU_PUSH,
+    CAP_REPLAY_CORPUS,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
@@ -449,6 +450,12 @@ class PushWorkers:
                     rec["busy"] = bool(body.get("busy"))
                     rec["queued"] = int(body.get("queued") or 0)
                     rec["done"] = int(body.get("done") or 0)
+                    # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：旧 worker_server
+                    # 的 /ping 没有该字段 ⇒ False；replay job 不会推给它。
+                    caps = body.get("capabilities")
+                    rec["replay_corpus"] = (
+                        isinstance(caps, list) and CAP_REPLAY_CORPUS in caps
+                    )
                 else:
                     rec["misses"] = int(rec.get("misses", 0)) + 1
                     if rec["misses"] >= PUSH_DEAD_MISSES:
@@ -828,6 +835,9 @@ class PushDispatcher:
                 manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            # 语料能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：replay job 只推给
+            # /ping 声明了 `replay_corpus` 的 worker；claim 也带同一能力，store 再 fail-closed。
+            need_replay = str(manifest.get("corpus_fmt") or "full") == "replay"
             avoid = set(view.avoid.get(jid, ()))
             # 备份不预推：它是保险，不是吞吐（预推一份备份 = 提前烧一张 GPU 的可能）。
             worker = pick_push_worker(
@@ -835,6 +845,7 @@ class PushDispatcher:
                 counts,
                 avoid,
                 ahead=0 if mode == CLAIM_MODE_BACKUP else self.push_ahead,
+                require=CAP_REPLAY_CORPUS if need_replay else "",
             )
             if worker is None:
                 self._note_starved(course, jid, avoid)
@@ -846,6 +857,7 @@ class PushDispatcher:
                 worker_id=push_worker_id_of(wid),
                 mode=mode,
                 role=ROLE_ONLINE,  # push 腿只有在线盘（登记表无角色字段）
+                capabilities=[CAP_REPLAY_CORPUS] if need_replay else None,
             )
             if lease is None:
                 continue  # 活租约在持 / 并发领取竞负 / 熔断冻结

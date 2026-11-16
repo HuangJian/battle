@@ -50,6 +50,7 @@ from common.logutil import course_tag, tagged
 from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
+    CAP_REPLAY_CORPUS,
     RESULT_READY_PATH,
     WIRE_JOB_MAGIC,
     CodeChangedError,
@@ -423,6 +424,10 @@ def make_worker_server(
                             "busy": state.busy(),
                             "queued": state.queued(),
                             "done": state.done_total,
+                            # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：
+                            # 本进程含 replay pre-pass；push 派发器据此不把 replay job
+                            # 推给旧 worker_server（additive）。
+                            "capabilities": [CAP_REPLAY_CORPUS],
                         }
                     )
                 elif path == "/code-sha":

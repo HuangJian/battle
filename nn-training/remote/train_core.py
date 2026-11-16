@@ -339,6 +339,9 @@ def run_training_core(
     #: ★ 2026-10-30：本次落地时轮转掉几个旧 job 目录（`wire.prune_dirs`）。
     #: 它**不进人读的那一行**——「准备完成」那行只留这一轮要回答的事。
     prune_dirs: int = 0,
+    #: D10（plan/replay-corpus.plan.md）：replay pre-pass 的读数（`convert_replay_corpus`）；
+    #: full 路径为 None。只进 `wire` 账，不参与训练数学。
+    replay_info: dict | None = None,
     #: ★ 2026-10-26：训练侧放大 —— PPO 每轮更新遍数 × N（缺省 1.0 = manifest 原样）。
     #: 与离线盘 `CFG.epoch_mult` 同义：只改遍数，不改采样量/评估语料，也不改 manifest 身份。
     epoch_mult: float = 1.0,
@@ -395,6 +398,7 @@ def run_training_core(
             device=device,
             torch_threads=torch_threads,
             prune_dirs=prune_dirs,
+            replay_info=replay_info,
             epoch_mult=epoch_mult,
             preloaded=preloaded,
             init_w=init_w,
@@ -936,6 +940,13 @@ def run_training_core(
         ts_code_hit=ts_code_hit,
         rollout_sec=(iter_info or {}).get("rollout_sec"),
         bun_version=(iter_info or {}).get("bun_version"),
+        # D10（plan/replay-corpus.plan.md）：语料格式 + replay pre-pass 的墙钟/字节账。
+        corpus_fmt=str(manifest.get("corpus_fmt") or "full"),
+        replay_bytes=(replay_info or {}).get("replay_bytes"),
+        labels_bytes=(replay_info or {}).get("labels_bytes"),
+        convert_sec=(replay_info or {}).get("sec"),
+        convert_jobs=(replay_info or {}).get("convert_jobs"),
+        convert_fallback=(replay_info or {}).get("convert_fallback"),
     )
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
     result["wire"]["result_bytes"] = len(pack_result_v2(result))
@@ -961,6 +972,7 @@ def _run_training_core_paddle(
     device: Any,
     torch_threads: int,
     prune_dirs: int = 0,
+    replay_info: dict | None = None,
     epoch_mult: float = 1.0,
     preloaded: dict | None,
     init_w: Path | None,
@@ -1332,6 +1344,13 @@ def _run_training_core_paddle(
         ts_code_hit=ts_code_hit,
         rollout_sec=(iter_info or {}).get("rollout_sec"),
         bun_version=(iter_info or {}).get("bun_version"),
+        # D10（plan/replay-corpus.plan.md）：语料格式 + replay pre-pass 的墙钟/字节账。
+        corpus_fmt=str(manifest.get("corpus_fmt") or "full"),
+        replay_bytes=(replay_info or {}).get("replay_bytes"),
+        labels_bytes=(replay_info or {}).get("labels_bytes"),
+        convert_sec=(replay_info or {}).get("sec"),
+        convert_jobs=(replay_info or {}).get("convert_jobs"),
+        convert_fallback=(replay_info or {}).get("convert_fallback"),
     )
     # 两遍收敛（同 echo 路径）：result_bytes 与自身体长自指，一遍差它的十进制位数。
     result["wire"]["result_bytes"] = len(pack_result_v2(result))

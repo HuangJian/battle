@@ -106,6 +106,48 @@ def test_resume_reuses_matching_markers(tmp_path: Path) -> None:
     assert got["reused"] == 2
 
 
+def test_convert_readout_bytes_and_jobs(tmp_path: Path) -> None:
+    """D10：replay/labels 字节、实际转换 job 数、运行时回落位。"""
+    job, man, shards = _job(tmp_path)
+    for d in shards:
+        (d / "a_move.npy").write_bytes(b"x" * 10)
+        (d / "metrics.npy").write_bytes(b"y" * 5)
+        (d / "obs.npy").write_bytes(b"z" * 7)  # 重建产物：不计入 labels
+    got = rc.convert_replay_corpus(job, shards, man, workers=2)
+    assert got["corpus_fmt"] == "replay"
+    assert got["replay_bytes"] == 4, "两个 shard 各 2 B 的 replay.json"
+    assert got["labels_bytes"] == 30, "labels = 除 obs/scalars/extra 外的 npy 字节和"
+    assert got["convert_jobs"] == 2
+    assert got["convert_fallback"] == 1, "本用例的运行时是 python，不是 node"
+    # 复用轮：没有真正起转换子进程 ⇒ convert_jobs=0。
+    got2 = rc.convert_replay_corpus(job, shards, man, workers=2)
+    assert got2["reused"] == 2 and got2["convert_jobs"] == 0
+
+
+def test_ensure_payload_carries_replay_readout(tmp_path: Path, monkeypatch) -> None:
+    """D10：pre-pass 读数必须随 PayloadLanded 交给训练核（full 路径保持 None）。"""
+    from remote import download as dl
+
+    job = tmp_path / "job"
+    job.mkdir()
+    landed = dl.PayloadLanded(
+        payload_nbytes=1, job_dir=job, shard_dirs=[], dl_sec=0.0, unpack_sec=0.0
+    )
+    monkeypatch.setattr(dl, "_ensure_payload_raw", lambda *_a, **_k: landed)
+    monkeypatch.setattr(
+        rc,
+        "prepass",
+        lambda *_a, **_k: {"corpus_fmt": "replay", "sec": 1.2, "convert_jobs": 3},
+    )
+    got = dl._ensure_payload("u", "t", "j" * 16, {"corpus_fmt": "replay"}, tmp_path)
+    assert got.replay is not None
+    assert got.replay["corpus_fmt"] == "replay" and got.replay["convert_jobs"] == 3
+    # full：prepass 返回 None ⇒ landed.replay 保持 None（旧行为）。
+    monkeypatch.setattr(rc, "prepass", lambda *_a, **_k: None)
+    got_full = dl._ensure_payload("u", "t", "j" * 16, {"corpus_fmt": "full"}, tmp_path)
+    assert got_full.replay is None
+
+
 def test_failed_conversion_is_loud_and_leaves_no_marker(tmp_path: Path) -> None:
     job, man, shards = _job(tmp_path, n_shards=1)
     (shards[0] / "FAIL").write_text("1", encoding="utf-8")

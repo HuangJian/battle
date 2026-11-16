@@ -188,6 +188,10 @@ def _ppo_done_log(
     train_b.add("chunks", chunk_count(chunks))
     train_b.add("loader", loader_desc(chunks))
     train_b.add("kl", agg.get("kl"))
+    # D8/D10：逐步 KL 与 clip fraction（旧 worker 无键 ⇒ 回落 kl / 0）。
+    per_step_kl = agg.get("per_step_kl", agg.get("kl"))
+    train_b.add("per_step_kl", per_step_kl)
+    train_b.add("clip", agg.get("clip_fraction"))
     ppo_line = train_b.text()
     if ppo_line:
         note_ppo_tail(jid, ppo_line)
@@ -207,6 +211,10 @@ def _agg_block(agg: dict, chunks: Any, total_steps: int) -> dict:
         "value": float(agg.get("value", 0.0)),
         "entropy": float(agg.get("entropy", 0.0)),
         "kl": float(agg.get("kl", 0.0)),
+        "per_step_kl": float(agg.get("per_step_kl", agg.get("kl", 0.0)) or 0.0),
+        "clip_fraction": float(agg.get("clip_fraction", 0.0) or 0.0),
+        # D8 轮内中止阈值是否触发（缺省关闭 ⇒ False；旧 worker 无键 ⇒ False）。
+        "early_stopped": bool(agg.get("early_stopped", False)),
         "kickstart": float(agg.get("kickstart", 0.0)),
         "demo_bc": float(agg.get("demo_bc", 0.0)),
         "mean_ret": float(agg.get("mean_ret", 0.0)),

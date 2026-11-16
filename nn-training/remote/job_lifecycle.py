@@ -47,6 +47,7 @@ from typing import Any
 import common.env_probe as env_probe
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
+    CAP_REPLAY_CORPUS,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
@@ -273,6 +274,7 @@ def claim_job(
     worker_id: str = "",
     role: str = ROLE_ONLINE,
     expected_epoch: int | None = None,
+    capabilities: list[str] | None = None,
     timeout: float = 30.0,
     log: Any = None,
 ) -> dict | None:
@@ -283,11 +285,18 @@ def claim_job(
         hub 会回 `demoted`，调用方按 low 处理（还有别的活就换，只剩它就算备份）；
       · `status="backup"` 时 `lease_token` 为空串（备份无租约）⇒ 不心跳、不续租；
       · 409（冻结/避让/未知 job）→ None，调用方丢副本。
+      · `capabilities`（2026-11-16，plan/replay-corpus.plan.md D2/B7）：None = 旧调用形状
+        （body 不含该键，逐字节不变）；非 None 时随 body 声明本 worker 的能力位，hub 据此
+        fail-closed 拒发 replay job 给旧 worker。
     """
-    payload = json.dumps(
-        {"mode": mode, "worker_id": worker_id, "expected_epoch": expected_epoch},
-        ensure_ascii=False,
-    ).encode("utf-8")
+    req_body: dict = {
+        "mode": mode,
+        "worker_id": worker_id,
+        "expected_epoch": expected_epoch,
+    }
+    if capabilities is not None:
+        req_body["capabilities"] = list(capabilities)
+    payload = json.dumps(req_body, ensure_ascii=False).encode("utf-8")
     status, body = _request(
         base_url,
         token,
@@ -446,6 +455,7 @@ def acquire_job(
     accept: Callable[[dict], bool] | None = None,
     depth: int = 3,
     on_drop: Any = None,
+    capabilities: list[str] | None = None,
     log: Any = None,
 ) -> dict | None:
     """job 边界的取活三件套：`peek → priority → claim`（§2.3 / §2.6）。
@@ -467,7 +477,12 @@ def acquire_job(
     没人拿着租约（池里那半）；`backup` = **有人正在跑、但还没回传结果**（在飞集那半）——
     用户口径「只要没有回传结果都是没完成，都能发给 worker 竞速」，备份副本无租约、
     先回传者胜、输家 409 丢弃（R1-1/R2-3）。旧 hub 不发这个字段 ⇒ 按 `exclusive`（默认零变化）。
+
+    `capabilities`（2026-11-16）：缺省（None）= 本 worker 代码声明 `replay_corpus`
+    （调用方是含 replay pre-pass 的 worker 进程）；显式空表 = 不声明（旧 worker 形状）。
     """
+    if capabilities is None:
+        capabilities = [CAP_REPLAY_CORPUS]
     peeked = peek_jobs(
         base_url,
         token,
@@ -528,6 +543,7 @@ def acquire_job(
             worker_id=worker_id,
             role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
             expected_epoch=epoch,
+            capabilities=capabilities,
             log=log,
         )
         if got is None:

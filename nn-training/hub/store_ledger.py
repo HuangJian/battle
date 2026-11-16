@@ -86,6 +86,8 @@ class LedgerMixin:
     _roles: dict[str, str]
     #: job → kind 缓存（★M1b：`publish` 要和 `_roles` 一起失效它 —— Q5 的 bc 豁免读它）。
     _kinds: dict[str, str]
+    #: job → corpus_fmt 缓存（2026-11-16：`publish` 也要一起失效它 —— claim 能力闸读它）。
+    _fmts: dict[str, str]
     _role_lock: Lock
     #: ★M5：BC 进度锚（同住 `store_leases`）——重发 = 新一轮，`publish` 要把它一并作废
     #: （旧一轮的 epoch 时间戳会把新租约当场判成「在推进」）。
@@ -356,6 +358,7 @@ class LedgerMixin:
         with self._role_lock:
             self._roles.pop(job_id, None)
             self._kinds.pop(job_id, None)  # 同理由：新的 manifest 可能换了 kind（Q5 的闸读它）
+            self._fmts.pop(job_id, None)  # 同理由：新的 manifest 可能换了 corpus_fmt
         # ★M5：重发 = 新一轮跑（进度锚同属旧一轮）⇒ 一并作废，否则重发后一个旧 epoch
         # 时间戳会把新租约当场判成「在推进」。
         self._last_progress.pop(job_id, None)

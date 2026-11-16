@@ -959,6 +959,24 @@ def test_wire_from_result_maps_both_halves() -> None:
     # 旧形态（无任何 wire）= 全 None，不炸（additive）
     w3 = _wire_from_result({}, is_push=False)
     assert w3["up_bytes"] is None and w3["worker"] is None
+    # D10（2026-11-16）：语料格式与 replay pre-pass 账从 worker 半原样透传。
+    r2 = {
+        "wire": {
+            "payload_bytes": 100,
+            "corpus_fmt": "replay",
+            "replay_bytes": 4096,
+            "labels_bytes": 8192,
+            "convert_sec": 3.5,
+            "convert_jobs": 4,
+            "convert_fallback": 1,
+        }
+    }
+    w4 = _wire_from_result(r2, is_push=False)
+    assert w4["corpus_fmt"] == "replay"
+    assert w4["replay_bytes"] == 4096 and w4["labels_bytes"] == 8192
+    assert w4["convert_sec"] == 3.5
+    assert w4["convert_jobs"] == 4 and w4["convert_fallback"] == 1
+    assert w3["corpus_fmt"] is None, "旧 worker 缺键必须是 None（未上报），不能伪造成 0"
 
 
 def test_hub_net_probe_auth_and_deterministic(tmp_path: Path) -> None:

@@ -277,11 +277,15 @@ class QueueClaimsMixin(QueuePeer):
         mode: str | None = None,
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> str | None:
         """（单份领取；多课程的挑选入口是 `claim_next`——归属/停摆闸在 store 里，两处共用。）
 
         这条路的调用者包括 **push 派发**（`push_dispatch._dispatch`）——它**不是**由
         `claim_job` 转过来的，所以闸必须住在 `_claim_locked` 里而不是各调用点。
+
+        `capabilities`（2026-11-16）：claim 方声明的功能能力位；None/空 = 旧调用形状。
+        replay job 需要 `replay_corpus`，缺能力在 store 的唯一租约入口被拒。
         """
         st = self._store_of(job_id)
         if st is None:
@@ -294,6 +298,7 @@ class QueueClaimsMixin(QueuePeer):
             mode=mode,
             expected_epoch=expected_epoch,
             role=role,
+            capabilities=capabilities,
         )
 
     def sweep_dead_leases(self) -> int:
@@ -457,6 +462,7 @@ class QueueClaimsMixin(QueuePeer):
         worker_id: str = "",
         expected_epoch: int | None = None,
         role: str = ROLE_ONLINE,
+        capabilities: list[str] | None = None,
     ) -> ClaimOutcome:
         """新 claim 面（`POST /jobs/{id}/claim`）的唯一实现入口。
 
@@ -496,6 +502,7 @@ class QueueClaimsMixin(QueuePeer):
             avoid_stale_holder=avoid,
             expected_epoch=expected_epoch,
             role=role,
+            capabilities=capabilities,
         )
         if out.ok:
             course = self.course_of(job_id) or ""

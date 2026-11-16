@@ -884,6 +884,7 @@ def run_job(
             payload_dl_sec=payload_dl_sec,
             unpack_sec=unpack_sec,
             prune_dirs=pruned_dirs,
+            replay_info=landed.replay,
             ts_code_bytes=ts_code_bytes,
             ts_code_hit=ts_code_hit,
             device=device,

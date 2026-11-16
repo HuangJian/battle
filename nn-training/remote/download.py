@@ -785,6 +785,8 @@ class PayloadLanded(NamedTuple):
     * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）；`staged` 时它是**预取时**的读数。
     * `staged` —— 本次是「预取已解好、只搬入」（plan/prefetch-stage-unpack §2.2）。
     * `pruned_dirs` —— 本次轮转掉几个旧 job 目录（**不进人读的那一行**，进 `wire.prune_dirs`）。
+    * `replay` —— replay pre-pass 的读数（`convert_replay_corpus` 的返回值）；full 路径为
+      `None`（2026-11-16，plan/replay-corpus.plan.md D10 墙钟账）。
     """
 
     payload_nbytes: int
@@ -794,6 +796,7 @@ class PayloadLanded(NamedTuple):
     unpack_sec: float
     staged: bool = False
     pruned_dirs: int = 0
+    replay: dict | None = None
 
 
 def _scan_shard_dirs(dest: Path) -> list[str]:
@@ -893,7 +896,12 @@ def _ensure_payload(
     if landed is not None:
         from remote.replay_corpus import prepass
 
-        prepass(landed.job_dir, list(landed.shard_dirs), manifest, log=log, bundle=bundle)
+        got = prepass(
+            landed.job_dir, list(landed.shard_dirs), manifest, log=log, bundle=bundle
+        )
+        if got is not None:
+            # D10：把转换读数随 landed 交给训练核，最终进 result["wire"]。
+            landed = landed._replace(replay=got)
     return landed
 
 

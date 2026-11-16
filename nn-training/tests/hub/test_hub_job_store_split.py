@@ -187,6 +187,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_roles",
             "_role_lock",
             "_kinds",
+            # 2026-11-16：job → corpus_fmt（claim 能力闸的缓存；`publish` 与 `_kinds` 一起失效）。
+            "_fmts",
             "hold_meta",
             # ★M5（Q5）：BC 进度锚 + 它的锁（`POST /jobs/{id}/epoch` 是**唯一**写入点）
             "_last_progress",

@@ -80,6 +80,7 @@ from common.protocol import (
     ADMIN_WORKER_ERRORS_PATH,
     ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
+    CAP_REPLAY_CORPUS,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CLAIM_PATH,
     OFFLINE_HEARTBEAT_PATH,
@@ -569,7 +570,11 @@ class HubHandler(
             if path == "/ping" or path == "/":
                 if not self._auth_ok():
                     return
-                self._json({"status": "ok"}, 200)
+                # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
+                # replay 语料（claim 闸 + 转换器合同已在本进程）。additive；旧客户端忽略。
+                self._json(
+                    {"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200
+                )
             elif path == "/code":
                 self._get_shared_code()
             elif path == "/jobs/peek":

@@ -176,6 +176,25 @@ def convert_shard(
         raise
 
 
+def _corpus_bytes(shard_dirs: list[Path]) -> tuple[int, int]:
+    """(replay.json 字节和, labels 字节和)。
+
+    `labels` 口径（D10）：shard 里除 obs/scalars/extra 三张重建产物之外的所有 `.npy`
+    （a_* / lp_* / value / reward / done / mask / policy_mask / metrics）。它们与 replay
+    一起构成 trainer→worker payload 的非 obs 部分；metrics 是否单列留给 P0 分解表。
+    """
+    replay_bytes = 0
+    labels_bytes = 0
+    for sd in shard_dirs:
+        rp = sd / "replay.json"
+        if rp.is_file():
+            replay_bytes += rp.stat().st_size
+        for f in sd.glob("*.npy"):
+            if f.name not in ("obs.npy", "scalars.npy", "extra.npy"):
+                labels_bytes += f.stat().st_size
+    return replay_bytes, labels_bytes
+
+
 def convert_replay_corpus(
     job_dir: str | Path,
     shard_dirs: list[Path],
@@ -191,6 +210,8 @@ def convert_replay_corpus(
     runtime = resolve_js_runtime()
     t0 = time.time()
     reused = 0
+    # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
+    replay_bytes, labels_bytes = _corpus_bytes(shard_dirs)
 
     def _one(sd: Path) -> bool:
         return convert_shard(
@@ -203,16 +224,24 @@ def convert_replay_corpus(
             if got:
                 reused += 1
     sec = time.time() - t0
+    runtime_name = Path(runtime).name
     log(
         f"replay 转换完成：{len(shard_dirs)} shard（复用 {reused}），"
-        f"{sec:.1f}s runtime={Path(runtime).name} converter={conv_sha[:12]}…"
+        f"{sec:.1f}s runtime={runtime_name} converter={conv_sha[:12]}…"
     )
     return {
         "shards": len(shard_dirs),
         "reused": reused,
         "sec": round(sec, 1),
         "converter_sha256": conv_sha,
-        "runtime": Path(runtime).name,
+        "runtime": runtime_name,
+        # D10（plan/replay-corpus.plan.md）：iteration `wire` 子字典的新字段。
+        "corpus_fmt": "replay",
+        "replay_bytes": replay_bytes,
+        "labels_bytes": labels_bytes,
+        "convert_jobs": len(shard_dirs) - reused,
+        # Node 优先（bundle 目标）；用 Bun 跑 = 回落路径，单独计数。
+        "convert_fallback": 0 if runtime_name == "node" else 1,
     }
 
 

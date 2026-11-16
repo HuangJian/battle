@@ -329,6 +329,7 @@ def ppo_update(
     progress_head: str = "[ppo] PPO",
     value_anchor: float = 0.0,
     lazy: bool = False,
+    target_kl: float = 0.0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -366,6 +367,10 @@ def ppo_update(
     物化 numpy）。此时**不**建 `tensored_chunks` 全量副本，每步 `tensored_batch`
     现转当前 minibatch 并上卡；ref 缓存改为 chunk 首次使用时现算（ref 冻结，数值
     逐位相同）。默认 False = 旧路径逐字节不变。
+
+    target_kl（D8，plan/replay-corpus.plan.md §7.2 第 8 条）：>0 时每个 epoch 末尾
+    检查本 epoch 的平均 approx KL，超过即打印并停止剩余 epoch（镜像 intent 后端）。
+    缺省 0 = 关闭，数学与步数逐字节不变；读数 `per_step_kl`/`clip_fraction` 恒开。
     """
     model.train()
     clip = CLIP_EPS
@@ -427,6 +432,7 @@ def ppo_update(
         if os.environ.get("PPO_XLA_DIAG", "1") not in ("0", "false", "False")
         else {}
     )
+    early_stopped = False
     if _diag_base:
         diag_first = max(1, int(os.environ.get("PPO_XLA_DIAG_FIRST", "12")))
         diag_every = max(1, int(os.environ.get("PPO_XLA_DIAG_EVERY", "16")))
@@ -596,6 +602,9 @@ def ppo_update(
             ratio = torch.exp(lp_new - lp_old)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
+            # 标准 PPO clip fraction（D8/D10 读数）：ratio 落在 [1-ε, 1+ε] 之外的样本占比。
+            # 只读、不参与 loss；有 policy_mask 时用同一份 w/denom 做掩码加权。
+            clipped = (ratio < 1.0 - clip) | (ratio > 1.0 + clip)
             # Hybrid opening：policy_mask=0（controller 接管）的样本不产生
             # policy/entropy/KL 梯度；value loss 仍用全 tick（价值目标有效）。
             # 缺省（老 shard 无该字段）⇒ 走原 mean 分支，数值逐字节不变。
@@ -604,6 +613,7 @@ def ppo_update(
                 policy_loss = -torch.min(surr1, surr2).mean()
                 value_loss = F.mse_loss(val.squeeze(-1), ret)
                 entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
+                clip_frac = clipped.to(surr1.dtype).mean()
                 if hold_logp is not None:
                     entropy = entropy + cat_entropy(hold_logp)
                 loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
@@ -621,6 +631,7 @@ def ppo_update(
                 entropy = (ent_per.reshape(-1) * w).sum() / denom
                 value_loss = F.mse_loss(val.squeeze(-1), ret)
                 loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
+                clip_frac = (clipped.to(surr1.dtype).reshape(-1) * w).sum() / denom
                 if kl_coef > 0.0:
                     kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape(-1)
                     loss = loss + kl_coef * (kl_per * w).sum() / denom
@@ -685,16 +696,21 @@ def ppo_update(
             policy_new_rms = policy_new_rms_of(model)
 
             with torch.no_grad():
-                # 一次同步取全部 8 个标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
+                # 一次同步取全部标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
                 # 同步（每次 drain 队列，把 CPU/GPU 流水线串起来）——详见
                 # ppo/common.sync_scalars 的说明。数值逐位不变。
+                # D8/D10：`per_step_kl` 与 `kl` 是同一个估计量（保留 `kl` 供既有熔断/日志）；
+                # `clip_fraction` 是 ratio 出界样本占比。二者都只读，不改变梯度。
+                kl_est = approx_kl_est(lp_old, lp_new)
                 stats.append(
                     sync_scalars(
                         {
                             "policy": policy_loss,
                             "value": value_loss,
                             "entropy": entropy,
-                            "kl": approx_kl_est(lp_old, lp_new),
+                            "kl": kl_est,
+                            "per_step_kl": kl_est,
+                            "clip_fraction": clip_frac,
                             "kickstart": kick_mean,
                             "demo_bc": demo_bc_mean,
                             "mean_ret": ret.mean(),
@@ -847,6 +863,16 @@ def ppo_update(
                 f"到 epoch {ep + 1}: {_sum} | 累计编译={diag_compile:.0f}s"
                 f"（新编译 {diag_uncached:.0f} 次）/ 总墙钟={time.time() - t0:.0f}s"
             )
+        if target_kl > 0.0:
+            # D8 轮内中止阈值（镜像 intent 后端）：只在本 epoch 结束后判，缺省关闭。
+            _ep_kl = sum(s["kl"] for s in ep_stats) / n_e
+            if _ep_kl > target_kl:
+                log(
+                    f"[ppo] target_kl={target_kl:g} exceeded (epoch {ep + 1} "
+                    f"kl={_ep_kl:.4f}) — early stopping remaining epochs"
+                )
+                early_stopped = True
+                break
     # ---- 组 2 收尾：诊断一行（完成为止的读数集合，等价替换原来的 ~25 行/轮）----
     if diag_on:
         if diag_epoch_series:
@@ -903,14 +929,18 @@ def ppo_update(
             "value": 0.0,
             "entropy": 0.0,
             "kl": 0.0,
+            "per_step_kl": 0.0,
+            "clip_fraction": 0.0,
             "kickstart": 0.0,
             "demo_bc": 0.0,
             "gnorm": 0.0,
             "mean_ret": 0.0,
             "value_new_rms": 0.0,
             "policy_new_rms": 0.0,
+            "early_stopped": False,
         }
     agg = aggregate_stats(stats, list(stats[0].keys()))
+    agg["early_stopped"] = early_stopped
     return agg
 
 
@@ -968,6 +998,12 @@ def main():
         help="PPO 语料装载器：eager=整份 concatenate（旧行为，默认）；"
         "lazy=obs 逐 shard mmap + 逐 minibatch 上卡（P3，小内存/小 VRAM）",
     )
+    ap.add_argument(
+        "--target-kl",
+        type=float,
+        default=0.0,
+        help=">0：每个 epoch 末尾 kl 超阈值即停剩余 epoch（D8；缺省 0 = 关闭）",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)
@@ -1022,7 +1058,13 @@ def main():
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     agg = ppo_update(
-        model, opt, chunks, args.epochs, device, lazy=args.ppo_loader == "lazy"
+        model,
+        opt,
+        chunks,
+        args.epochs,
+        device,
+        lazy=args.ppo_loader == "lazy",
+        target_kl=float(args.target_kl),
     )
 
     model.to("cpu")
