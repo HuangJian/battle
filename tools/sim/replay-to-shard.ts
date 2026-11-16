@@ -16,7 +16,15 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs'
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { STAGES } from '../../src/config/stages'
@@ -25,7 +33,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { ObsEncoder, OBS_CHANNELS, BOARD, SCALAR_DIM } from '../../src/nn/obs-encoder'
 import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import { writeNpyFile } from '../../src/nn/npy'
-import { restoreWorld } from '../../src/snapshot/WorldSerializer'
+import { cloneWorld, restoreWorld } from '../../src/snapshot/WorldSerializer'
 import { parseReplayFile } from '../../src/replay/file'
 import { ReplayInput } from '../../src/replay/ReplayInput'
 import { runServe } from './serve-loop'
@@ -229,6 +237,15 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
   /** 决策游标（`ticks` 严格递增，故单调前移即可；旧实现每 tick 查一次 Set）。 */
   let di = 0
 
+  // ---- 调试开关（默认关；plan/tickhash-flake.plan.md §3.3）----
+  const shardBase = shardDir.split(/[\\/]/).filter(Boolean).pop() ?? shardDir
+  const tracePath = process.env.CONV_TRACE ?? ''
+  const snapDir = process.env.CONV_SNAP_DIR ?? ''
+  const snapShard = process.env.CONV_SNAP_SHARD ?? ''
+  const snapTick = Number(process.env.CONV_SNAP_TICK ?? '-1')
+  const snapFrom = Number(process.env.CONV_SNAP_FROM ?? '-1')
+  const snapTo = Number(process.env.CONV_SNAP_TO ?? '-1')
+
   for (let t = 0; t < replay.totalTicks; t++) {
     // `ticks` 已校验为严格递增 ⇒ 单调游标与 Set 查表等价（且每 tick 零查表）。
     if (di < N && ticks[di] === t) {
@@ -250,6 +267,17 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
     input.advance()
     // 与 export-rl-rollout 主循环同序：每 tick 消费事件，tickHash 才与录像一致。
     world.consumeEvents()
+    const tickNow = t + 1
+    if (tracePath) appendFileSync(tracePath, `${shardBase}\t${tickNow}\t${worldTickHash(world)}\n`)
+    if (
+      snapDir &&
+      shardBase === snapShard &&
+      ((snapTick >= 0 && tickNow === snapTick) ||
+        (snapFrom >= 0 && snapTo >= 0 && tickNow >= snapFrom && tickNow <= snapTo))
+    ) {
+      mkdirSync(snapDir, { recursive: true })
+      writeFileSync(`${snapDir}/${shardBase}.t${tickNow}.json`, JSON.stringify(cloneWorld(world)))
+    }
     if ((t + 1) % 100 === 0) tickHashes.push(worldTickHash(world))
     if (isTerminal(world.state) && t + 1 < replay.totalTicks) {
       throw new Error(

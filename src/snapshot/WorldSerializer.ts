@@ -1,4 +1,5 @@
 import type { World, SpawnEntry } from '../game/World'
+import { reserveNextId } from '../game/ids'
 import type { Tank, Bullet, PowerUp, TerrainType } from '../types'
 import type { WorldSnapshot } from './types'
 import { DEFAULT_P2_SPAWN, GRID } from '../constants'
@@ -118,6 +119,37 @@ export function cloneWorld(world: World): WorldSnapshot {
 }
 
 /**
+ * The global id allocator must never reissue an id that the restored snapshot
+ * already contains. Snapshot ids can come from another process (replay
+ * playback, corpus rebuild, imported save), while the local counter may still
+ * be low — without this bump, a later spawn can collide with a live tank's id
+ * and identity checks (`ownerId === tank.id`, tickHash canonicalisation) start
+ * resolving to the wrong entity. First observed 2026-11-17 as a rare
+ * worker-history-dependent tickHash mismatch in replay→shard write pools.
+ *
+ * Scans every id-bearing field: entity ids, bullet ownerIds (owners may be dead
+ * and absent from the entity arrays), active commander, and mines.
+ */
+function reserveSnapshotIds(snap: WorldSnapshot): void {
+  let maxId = 0
+  const track = (id: number | null | undefined): void => {
+    if (typeof id === 'number' && id > maxId) maxId = id
+  }
+  track(snap.player?.id)
+  track(snap.player2?.id)
+  for (const t of snap.tanks) track(t.id)
+  for (const t of snap.allies ?? []) track(t.id)
+  for (const b of snap.bullets) {
+    track(b.id)
+    track(b.ownerId)
+  }
+  for (const p of snap.powerUps) track(p.id)
+  for (const m of snap.mines ?? []) track(m.id)
+  track(snap.activeCommanderId)
+  if (maxId > 0) reserveNextId(maxId)
+}
+
+/**
  * Restore the World from a snapshot. Every gameplay field is overwritten
  * atomically; transient visual data (explosions, popups, events) is
  * cleared. The World object identity is preserved so that all existing
@@ -128,6 +160,8 @@ export function cloneWorld(world: World): WorldSnapshot {
  * loading a snapshot restores history, it does not rewrite it).
  */
 export function restoreWorld(world: World, snap: WorldSnapshot): void {
+  reserveSnapshotIds(snap)
+
   // Tile grid
   for (let r = 0; r < GRID; r++) {
     for (let c = 0; c < GRID; c++) {

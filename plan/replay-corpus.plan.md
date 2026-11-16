@@ -69,11 +69,11 @@
 | 单进程顺序 · `--verify-only` | ~27 s | 5.4 µs/tick | 700/700 |
 | **池化 7 worker · `--verify-only`** | **8.5–8.8 s** | **1.7 µs/tick · 12.2 ms/shard** | **700/700**，worker 利用率 99.9% |
 | **池化 3 worker · write** | **15.5 s**（best-of-2；另一跑 31.0 s） | 3.1 µs/tick · 22 ms/shard | **700/700** |
-| 池化 7 worker · write | 11.3 s | 2.2 µs/tick | **699/700 ⚠** |
+| **池化 7 worker · write** | **10.7–12.8 s**（2026-11-17 修复后 5 轮；另有一轮 115.8 s 为盘噪声） | 2.2 µs/tick | **700/700**（5 轮 3500/3500） |
 | 一次性静态 7×100 · write | 11.0 s | 2.2 µs/tick | 700/700（无 work-stealing） |
 
 - 池化 = 常驻 `--serve` worker（生产协议 `serve-loop.ts`：`__SERVE_READY__` / 每行 `["conv","--shard-dir",dir]` / `__SERVE_OK__`），按 `replay_meta.ticks` 降序 LPT 派发、worker 一空即取下一个；驱动 `tmp/g5-conv-pool.ts`（临时脚本，未入库）。
-- **写盘池化 >3 worker 暂不可信**：7/10 worker 各出现 **1 次 tickHash 窗口偏离**（不同 shard）。两个 shard 隔离单跑 15×、同进程 15×、3 worker 池、以及 7 worker 的 1,400 次 verify-only 全部通过 ⇒ 低频且与写压力相关，根因未定（头号嫌疑：`Math.pow`/`Math.hypot` 等**实现定义型**数学函数的 JIT 分层差异），须单独立项；查清前生产写盘池宽度 ≤3，verify-only 可放心用满 7。
+- **写盘池宽度 ≤3 已解除（2026-11-17）**：此前的 1/700 `tickHash` 偏离**不是** JIT/写盘/哈希实现问题，而是 `restoreWorld` 装入跨进程快照后没有把本地 `genId()` 推进到快照 id 之上 ⇒ 新实体重发仍活着的 id，`tickHash` 首现重映射撞号。修复（`reserveSnapshotIds`）后 7-worker 写盘池 **700 shard × 5 轮 = 3500/3500**，每轮 `samples=503963 ticks=5035728` 逐项相等；7-worker verify-only 700/700。根因/证据/决策 → `plan/tickhash-flake.plan.md` §1.5 + `DECISIONS.md §2026-11-17-sim-tickhash-id-space`。写盘宽度可回到全核，写盘口径仍取 best-of-N。
 - 写盘吞吐波动大（同一份 5.9 GB：11 s / 15.5 s / 31 s ≈ 190–536 MB/s）是盘回收/杀软噪声，写盘口径一律 best-of-N。
 - 语料常数：35 关 × 20 seed 平均 **7,194 tick/局、720 样本/局**（decision-k 10）；早期 20× 语料实测 3.45M tick（**494 样本/局**，不是 702）。
 - **worker 侧无重哈希**（obsHash 在转换循环里增量算，见 §8 P0 进展与 §9 转换预算），相对 PPO 13.5 min 可忽略。

@@ -43,15 +43,9 @@ import {
   RESPAWN_SHIELD_MS,
 } from '../constants'
 
-// Deliberate hidden-state exemption (refactor.trae.md §4.3): the module-level
-// id counter survives World resets so restored snapshots never reissue ids that
-// are still live in replay/undo history. Rationale recorded at types.ts
-// (WorldSnapshot id field doc) — this does NOT contradict the "no hidden state"
-// banner below, which is about gameplay state.
-let nextId = 1
-export function genId(): number {
-  return nextId++
-}
+// Entity ids live in ./ids (process-global allocator + cross-process reserve).
+// Re-exported here because every existing caller imports `genId` from World.
+export { genId } from './ids'
 
 /** Spawn queue entry */
 export interface SpawnEntry {
