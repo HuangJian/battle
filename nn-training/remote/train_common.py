@@ -14,8 +14,11 @@
 `remote/train_core.py` 已顶到 LOC 预算（`tests/test_python_loc_budget.py`）。放在这里还顺手钉住
 「两核共用同一份判据」——哪天只改一边，混跑就开始分叉。
 
-层号 **L2**（`tests/helpers/remote_dag.py`）：只碰 `common.protocol`(L0)；`worker.config`(L1) 与
-`biz.reward_*` 都在**函数内**延迟 import。`train_core`(L4) 站在本模块上面。
+层号 **L2**（`tests/helpers/remote_dag.py`）：顶层只碰 `common.*`(L0) 与 `remote.wire`(L1)；
+`worker.config`(L1) 与 `biz.reward_*` 都在**函数内**延迟 import。`train_core`(L4) 站在本模块上面。
+
+2026-11-16（P3）：PPO 收尾账（`_ppo_done_log` / `_agg_block` + lazy chunks 的步数/装载器
+读数）从 `train_core` 搬来这里——同一类「两条核共用的账」判据，也让训练核回到 LOC 预算内。
 """
 
 from __future__ import annotations
@@ -25,8 +28,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.log_bundle import LogBundle
 from common.logutil import secs
 from common.protocol import BLOB_OPT, BLOB_REF, ProtocolError, coef_active
+from remote.wire import _wire_time, note_ppo_tail
 
 
 def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
@@ -165,3 +170,49 @@ def check_demo_bank(
         "demo bank",
         f"N={bank['obs'].shape[0]} coef={coef:g} per_mb={per_mb} src={src}",
     )
+
+
+def _ppo_done_log(
+    jid: str, t_ppo: float, train_b: LogBundle, chunks: Any, total_steps: int, agg: dict
+) -> float:
+    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。
+
+    不再单列 `job … PPO done in …` 一行：steps/chunks/kl + engine 折叠读数并入下游 wire
+    总账行（`wire._wire_flush` 读取 `_WIRE[jid]["ppo_line"]` 拼到行尾，2026-10-28）。
+    """
+    from worker.ppo.trainer import chunk_count, chunk_rows, loader_desc
+
+    ppo_sec = round(time.time() - t_ppo, 1)
+    _wire_time(jid, "ppo", time.time() - t_ppo)
+    train_b.add("steps", f"{chunk_rows(chunks)}/{total_steps}（训练/池子）")
+    train_b.add("chunks", chunk_count(chunks))
+    train_b.add("loader", loader_desc(chunks))
+    train_b.add("kl", agg.get("kl"))
+    ppo_line = train_b.text()
+    if ppo_line:
+        note_ppo_tail(jid, ppo_line)
+    return ppo_sec
+
+
+def _agg_block(agg: dict, chunks: Any, total_steps: int) -> dict:
+    """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
+
+    value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
+    ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
+    """
+    from worker.ppo.trainer import chunk_count, chunk_rows
+
+    return {
+        "policy": float(agg.get("policy", 0.0)),
+        "value": float(agg.get("value", 0.0)),
+        "entropy": float(agg.get("entropy", 0.0)),
+        "kl": float(agg.get("kl", 0.0)),
+        "kickstart": float(agg.get("kickstart", 0.0)),
+        "demo_bc": float(agg.get("demo_bc", 0.0)),
+        "mean_ret": float(agg.get("mean_ret", 0.0)),
+        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
+        "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
+        "steps": chunk_rows(chunks),
+        "steps_pooled": int(total_steps),
+        "chunks": chunk_count(chunks),
+    }

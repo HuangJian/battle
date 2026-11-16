@@ -16,6 +16,29 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
+
+def tensored_batch(item: dict, device, memory_format=None) -> dict:
+    """单批 numpy dict → torch dict（P3 lazy loader 的逐批上卡）。
+
+    与 `tensored_chunks` 的逐字段规则**逐字相同**：`torch.from_numpy(v).to(device)`，
+    `memory_format` 只作用于 `obs`。只读数组（`np.load(mmap_mode="r")` 的切片视图）
+    先复制成可写 —— 否则 torch 会对每批发 "not writable" UserWarning（BC lazy
+    路径同样的 `_writable` 处理）。fancy index 产出的数组本来就可写，这里零成本。
+    """
+    import torch
+
+    out: dict = {}
+    for k, v in item.items():
+        if not v.flags.writeable:
+            v = np.array(v)
+        t = torch.from_numpy(v).to(device)
+        if memory_format is not None and k == "obs":
+            t = t.contiguous(memory_format=memory_format)
+        out[k] = t
+    return out
+
 
 def tensored_chunks(chunks: list[dict], device, memory_format=None) -> list[dict]:
     """numpy minibatch chunks → torch（一次性转换，避免每 epoch 重复）。
@@ -39,6 +62,33 @@ def tensored_chunks(chunks: list[dict], device, memory_format=None) -> list[dict
             item[k] = t
         out.append(item)
     return out
+
+
+def corpus_samples(corpus: Any) -> int:
+    """语料总行数：lazy 语料读 `.samples`（**不物化**）；eager episode 列表求和。"""
+    n = int(getattr(corpus, "samples", 0) or 0)
+    return n or int(sum(e["obs"].shape[0] for e in corpus))
+
+
+def chunk_count(chunks: Any) -> int:
+    """minibatch 数：lazy chunks 读 `.sizes`（不物化），eager 列表直接 len。"""
+    sizes = getattr(chunks, "sizes", None)
+    return len(sizes) if sizes is not None else len(chunks)
+
+
+def chunk_rows(chunks: Any) -> int:
+    """实际训练步数：lazy chunks 带 `.sizes`（不物化），eager 列表按 obs 行数求和。"""
+    sizes = getattr(chunks, "sizes", None)
+    if sizes is not None:
+        return int(sum(int(x) for x in sizes))
+    return int(sum(c["obs"].shape[0] for c in chunks))
+
+
+def loader_desc(chunks: Any) -> str:
+    """PPO 装载器读数：`eager` 或 `lazy peak=…MB`（plan/replay-corpus D10）。"""
+    name = str(getattr(chunks, "loader", "eager"))
+    peak = getattr(chunks, "peak_mb", None)
+    return f"{name} peak={float(peak):.0f}MB" if peak is not None else name
 
 
 def aggregate_stats(stats: list[dict[str, float]], keys: list[str]) -> dict[str, float]:

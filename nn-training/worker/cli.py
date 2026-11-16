@@ -333,6 +333,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "(faster PPO, smaller per-iteration KL drift)",
     )
     ap.add_argument(
+        "--ppo-loader",
+        choices=("eager", "lazy"),
+        default=_d("ppo_loader", "eager"),
+        help="PPO 语料装载器（P3，plan/replay-corpus.plan.md D6）：eager=整份 "
+        "concatenate（旧行为，默认）；lazy=obs 逐 shard mmap + 逐 minibatch 上卡"
+        "（491k 样本峰值 ≤2 GB，4–6 GB VRAM 可跑）。独立开关，回滚 = eager。",
+    )
+    ap.add_argument(
         "--lr",
         type=float,
         default=_d("lr", 3e-4),

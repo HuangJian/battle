@@ -291,6 +291,7 @@ def test_manifest_normalize_required_and_defaults() -> None:
     assert m["kl_cap"] is None
     assert m["adv_norm"] == "auto"
     assert m["shuffle"] is True
+    assert m["ppo_loader"] == "eager"  # P3：旧 hub 缺键 ⇒ eager（旧行为）
     assert m["schedule_raw"] == []
     assert m["opt_init"] == ""
 
@@ -299,6 +300,14 @@ def test_manifest_normalize_missing_field_fails() -> None:
     m = _mini_manifest()
     del m["course_fp"]
     with pytest.raises(ProtocolError, match="course_fp"):
+        normalize_manifest(m)
+
+
+def test_manifest_rejects_unknown_ppo_loader() -> None:
+    """P3：装载器拼错时**拒收**，不得静默退化成 eager（manifest 与日志各说各话）。"""
+    m = _mini_manifest()
+    m["ppo_loader"] = "lazi"
+    with pytest.raises(ProtocolError, match="ppo_loader"):
         normalize_manifest(m)
 
 

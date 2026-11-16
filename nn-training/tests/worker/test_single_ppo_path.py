@@ -63,13 +63,20 @@ def _option_strings(argv_parser) -> list[str]:
 
 
 def test_argparser_has_no_ppo_flag_nor_attribute() -> None:
-    """`--ppo` 旗标与 `args.ppo` 属性**都不存在**（不是一个「留着但没用」的空壳）。"""
+    """`--ppo` 旗标与 `args.ppo` 属性**都不存在**（不是一个「留着但没用」的空壳）。
+
+    P3（2026-11-16）唯一豁免 = `--ppo-loader`（语料装载器 eager|lazy，不是
+    「PPO 跑在哪」的后端旋钮）；其余任何带 ppo 的 option string 仍一票否决。
+    """
     from worker.cli import build_argparser
 
     ap = build_argparser("per-tick", {})
-    assert not [s for s in _option_strings(ap) if "ppo" in s.lower()]
+    opts = _option_strings(ap)
+    assert {"--ppo-loader"} <= set(opts), "P3 的装载器开关应存在（默认 eager）"
+    assert not [s for s in opts if "ppo" in s.lower() and s != "--ppo-loader"]
     ns = ap.parse_args([])
     assert not hasattr(ns, "ppo")
+    assert ns.ppo_loader == "eager"
     # 反向：`--ppo remote` 现在必须是**未识别参数**（响亮失败，不是静默吃下）
     with pytest.raises(SystemExit):
         ap.parse_args(["--ppo", "remote"])

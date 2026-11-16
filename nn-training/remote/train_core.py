@@ -66,6 +66,8 @@ from remote.download import (
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
 from remote.train_common import (
+    _agg_block,
+    _ppo_done_log,
     blob_wanted,
     check_demo_bank,
     copy_iter_metrics,
@@ -74,7 +76,7 @@ from remote.train_common import (
     kick_kl_value,
     ppo_shards_root,
 )
-from remote.wire import _wire_block, _wire_time, note_ppo_tail
+from remote.wire import _wire_block
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -315,48 +317,6 @@ def _fetch_demo(
     hit = 1 if (demo_hit and demo_src == "cache") else 0
     miss = len(demo_raw) if demo_src == "download" else 0
     return coef, per_mb, demo_raw, demo_src, hit, miss
-
-
-def _ppo_done_log(
-    jid: str, t_ppo: float, train_b: LogBundle, chunks: list, total_steps: int, agg: dict
-) -> float:
-    """PPO 收尾读数（两条核同一组账、同一行措辞）→ 返回 `ppo_sec`（产物账要用）。
-
-    不再单列 `job … PPO done in …` 一行：steps/chunks/kl + engine 折叠读数并入下游 wire
-    总账行（`wire._wire_flush` 读取 `_WIRE[jid]["ppo_line"]` 拼到行尾，2026-10-28）。
-    """
-    ppo_sec = round(time.time() - t_ppo, 1)
-    _wire_time(jid, "ppo", time.time() - t_ppo)
-    train_b.add("steps", f"{sum(c['obs'].shape[0] for c in chunks)}/{total_steps}（训练/池子）")
-    train_b.add("chunks", len(chunks))
-    train_b.add("kl", agg.get("kl"))
-    ppo_line = train_b.text()
-    if ppo_line:
-        note_ppo_tail(jid, ppo_line)
-    return ppo_sec
-
-
-def _agg_block(agg: dict, chunks: list, total_steps: int) -> dict:
-    """进 `result.agg` 的读数——两条核同一份字段（hub 侧按 backend 无关的同一形状读）。
-
-    value/policy 的 `*_new_rms` 是门控遥测（x26-obs it90 / x27 冻结判决）：旧 worker 无此键
-    ⇒ 0.0，additive；`steps` 是 mb 对齐后**实际训练**的步数（池子总量另有 `steps_pooled`）。
-    """
-    return {
-        "policy": float(agg.get("policy", 0.0)),
-        "value": float(agg.get("value", 0.0)),
-        "entropy": float(agg.get("entropy", 0.0)),
-        "kl": float(agg.get("kl", 0.0)),
-        "kickstart": float(agg.get("kickstart", 0.0)),
-        "demo_bc": float(agg.get("demo_bc", 0.0)),
-        "mean_ret": float(agg.get("mean_ret", 0.0)),
-        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
-        "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
-        "steps": int(sum(c["obs"].shape[0] for c in chunks)),
-        "steps_pooled": int(total_steps),
-        "chunks": len(chunks),
-    }
-
 
 
 def run_training_core(
@@ -779,22 +739,31 @@ def run_training_core(
     # ——与装载段的 `prep_b` 分开两本账：装载行**必须**在进 PPO 之前落下来（否则卡在 PPO 里
     # 就什么都看不见）。
     train_b = LogBundle(log)
+    # P3（plan/replay-corpus.plan.md D6）：默认 eager；manifest 带 ppo_loader=lazy
+    # 才走 mmap + 逐批上卡。lazy 是独立开关，回滚 = 不带这个键。
+    ppo_loader = str(manifest.get("ppo_loader", "eager") or "eager")
     try:
-        episodes = ppo_engine.load_episodes(
+        from worker.ppo.lazy_corpus import load_ppo_corpus
+
+        episodes = load_ppo_corpus(
             shards_root,
-            float(manifest["gamma"]),
-            float(manifest["lam"]),
+            loader=ppo_loader,
+            gamma=float(manifest["gamma"]),
+            lam=float(manifest["lam"]),
             normalize_adv=str(manifest["adv_norm"]) != "none",
             normalize_ret=bool(manifest.get("normalize_ret", False)),
             # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
             # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
             per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+            mb=int(manifest["mb"]),
             bundle=prep_b,
         )
         # ★ 装载完成 = 「本 job 准备」这一段结束：**一行**把所有入口/设备/opt/demo/装载
         # 读数一次说清（原来 ~10 行），随后才进 PPO（2026-09-24 日志节食）。
         prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
+        from worker.ppo.trainer import corpus_samples
+
+        total_steps = corpus_samples(episodes)
         chunks = ppo_engine.chunk_episodes(
             episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
         )
@@ -823,6 +792,7 @@ def run_training_core(
             # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。
             progress=train_b,
             progress_head=f"job {jid}: PPO 训练中",
+            lazy=ppo_loader == "lazy",
         )
     except ProtocolError:
         raise
@@ -1026,6 +996,8 @@ def _run_training_core_paddle(
     顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
     """
     prep_b = LogBundle(log) if prep is None else prep
+    # P3：lazy loader 只实现了 torch 路径（`tensored_batch` 逐批上卡）。
+    paddle_env.check_ppo_loader(jid, manifest)
     # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
     paddle_env.apply(torch_threads, prep_b)
     paddle_env.silence_import_warnings()

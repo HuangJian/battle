@@ -102,6 +102,8 @@ def load_shard_fields(
     spec: dict[str, tuple[str, npt.DTypeLike]],
     shapes: dict[str, tuple[int, ...]] | None = None,
     optional: set[str] | None = None,
+    *,
+    mmap: bool = False,
 ) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
@@ -117,13 +119,20 @@ def load_shard_fields(
     `optional`（B1 v6，2026-10-20）：这些键**文件缺失时整键省略**，不报错也不填 None。
     用途 = v6 才有的 `a_hold`/`lp_hold`（legacy shard 没有）。判据是**文件存在性**
     （事实），调用方据此决定走 5/2 还是 4/3/2。
+
+    `mmap`（P3 lazy loader，2026-11-16）：`np.load(mmap_mode="r")` 读盘。dtype 已符合
+    时 astype(copy=False) 返回同一个只读 memmap（零拷贝），只读取到的页进内存 ——
+    `worker.ppo.lazy_corpus` 用它把 5.65 GB obs 留给 page cache。默认 False =
+    eager 路径逐字节不变。
     """
     out: dict[str, np.ndarray] = {}
     for key, (fname, dtype) in spec.items():
         path = os.path.join(dirpath, fname)
         if optional and key in optional and not os.path.exists(path):
             continue
-        arr = np.load(path).astype(dtype, copy=False)
+        arr = np.load(
+            path, allow_pickle=False, mmap_mode="r" if mmap else None
+        ).astype(dtype, copy=False)
         exp = (shapes or {}).get(key)
         if exp is not None and tuple(arr.shape[1:]) != tuple(exp):
             got = tuple(arr.shape[1:])
@@ -504,7 +513,16 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     逐字节不变（`idx` 的抽样顺序未动）。
     归一化（load_episodes_common 的 adv/ret）覆盖**整池**（含被丢的 <mb 步）——
     刻意保持「归一化粒度 = 本轮池」的既有语义，不因丢弃而改变。
+
+    P3 lazy loader：`episodes` 可以是 `worker.ppo.lazy_corpus.LazyCorpus`（鸭子类型
+    判据 `make_chunks`）——此时 chunk 在 `.get(i)` 才物化，但 RNG 消费与切块
+    规则由 lazy 侧复刻同一套（不在本函数重复实现）。
     """
+    maker = getattr(episodes, "make_chunks", None)
+    if callable(maker):
+        # lazy corpus：返回 LazyChunks（鸭子类型序列）；签名保留 list 是为了不把
+        # lazy_corpus 的类型拖进这个 numpy-only 核心（双向 import = 环）。
+        return cast(list[dict], maker(mb, shuffle=shuffle))
     if not shuffle or len(episodes) <= 1:
         out: list[dict] = []
         for e in episodes:
@@ -743,7 +761,7 @@ def discover_rl_shards(root: str) -> list[str]:
     return discover_shards(root, ("obs.npy",), need_any=RL_REWARD_FILES)
 
 
-def load_shard(dirpath: str) -> dict[str, np.ndarray]:
+def load_shard(dirpath: str, *, mmap: bool = False) -> dict[str, np.ndarray]:
     """读 shard 字段 + manifest → `reward`（N 样本）。
 
     两条奖励来源（wire-diet，2026-10-14，§3 P1）：
@@ -753,6 +771,9 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
         （`reward_meta.json` 的 it / metrics_version / formula_hash vs holder）后直读。
         校验不是可选项：奖励在别处算，`it` 用错在数值上与正常 reward 无从区分 —— 只有 meta
         里记的「实际用过的 it/版本/指纹」抓得到（评审 P1-4）。
+
+    `mmap=True`（P3 lazy loader）：字段走 `np.load(mmap_mode="r")`；奖励仍**当场算完**
+    （metrics 只在这一步用，随后丢弃），训练期只留 obs 的 mmap 与小字段。
     """
     manifest: dict = {}
     mp = os.path.join(dirpath, "manifest.json")
@@ -762,7 +783,7 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     has_metrics = os.path.exists(os.path.join(dirpath, METRICS_NAME))
     spec = _RL_SHARD_SPEC if has_metrics else _RL_SHARD_SPEC_REWARD
     d = load_shard_fields(
-        dirpath, spec, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL)
+        dirpath, spec, _RL_SHARD_SHAPES, optional=set(_RL_SHARD_OPTIONAL), mmap=mmap
     )
     n_obs = int(d["obs"].shape[0])
     # ★ B1 v6 掩码宽度校验（2026-10-20）：`mask` 此前**完全没有形状校验**

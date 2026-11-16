@@ -513,6 +513,9 @@ class TrainingRemoteJob(TrainingRemotePush):
             value_anchor=float(getattr(args, "value_anchor", 0.0) or 0.0),
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
+            # P3（plan/replay-corpus.plan.md D6）：lazy loader 独立开关；eager 为默认，
+            # 此时 build_ppo_job 不写这个键（manifest 逐字节旧行为）。
+            ppo_loader=str(getattr(args, "ppo_loader", "eager") or "eager"),
             # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，
             # 保证 remote 与本机两条 PPO 路径装载口径一致。0 = 全收（历史行为）。
             per_stage_quota=self._per_stage_quota(it),

@@ -266,7 +266,9 @@ class TestEngineWiring:
         """chunk/demo 张量必须在进循环前物化：否则每个 chunk 的**首次使用**会把 host→device
         转移内联进那张图 ⇒ 各付一次全图编译（真机 epoch1 累计 41 次新编译、epoch2 后降到
         0.9~2.4s/步——变体集被填满的形态）。"""
-        i_conv = self.src.index("tensored = tensored_chunks(chunks, device)")
+        # P3（2026-11-16）：转换点改成 `chunks if lazy else tensored_chunks(chunks, device)`，
+        # 判据从整句赋值退到**转换调用**本身（位置语义不变：转换 → 预物化 mark → 循环）。
+        i_conv = self.src.index("tensored_chunks(chunks, device)")
         i_loop = self.src.index("for ep in range(start_epoch, epochs):")
         i_pre = self.src.rindex("xla_mark_step(device)", i_conv, i_loop)
         assert i_conv < i_pre < i_loop, "预物化必须夹在转换之后、循环之前"

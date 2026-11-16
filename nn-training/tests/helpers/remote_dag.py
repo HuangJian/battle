@@ -566,6 +566,11 @@ LAYERS: dict[str, int] = {
     # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：靠 `worker.volume_quota`(L1)
     # 的 `target_per_stage` 与 `worker.volume_math`(L0) ⇒ 2026-10-11 S3 起秩 2。
     "worker.volume_alloc": 2,
+    # 2026-11-16（P3，plan/replay-corpus.plan.md D6）：PPO lazy 语料（obs 逐 shard
+    # mmap + 常驻小字段 + row_map）。顶层靠 `worker.ppo.np_core`(L1) 与
+    # `worker.data.npyio`(L0) ⇒ **L2**。读者是 `worker.ppo.engine`(L3，函数内延迟)
+    # 与 `remote.train_core`(L5)；np_core **不**反向 import 它（否则就是环）。
+    "worker.ppo.lazy_corpus": 2,
     # 结局分类（bc_dispatch 与 bc_corpus 共用；无 worker 依赖）⇒ **L0**。
     "worker.bc_outcome": 0,
     "worker.bc_config": 2,

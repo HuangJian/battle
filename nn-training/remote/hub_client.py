@@ -745,7 +745,7 @@ def publish_job(
     # value 门控牵引率 ρ（x26-obs it90 诊断；0.0 = 关，老行为逐字节不变）。
     value_anchor: float = 0.0,
     shuffle: bool = True,
-    schedule_raw: list | None = None,
+    schedule_raw: list | None = None, ppo_loader: str = "eager",
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
     # 0 = 历史行为（全收）；由 run_rl 的 `_per_stage_quota()` 算好传入。
     per_stage_quota: int = 0,
@@ -904,7 +904,8 @@ def publish_job(
         "ref_weights_b64": "" if use_ref_blob else ref_weights_b64,
         "ref_weights_fp": ref_weights_fp,
         "shuffle": shuffle,
-        "schedule_raw": schedule_raw,
+        # P3：eager 时省略（旧 manifest 逐字节不变）；lazy 才显式声明。
+        "schedule_raw": schedule_raw, **({"ppo_loader": ppo_loader} if ppo_loader != "eager" else {}),
         "per_stage_quota": int(per_stage_quota),
         "init_weights_fp": init_weights_fp,
         "opt_init": opt_init,
