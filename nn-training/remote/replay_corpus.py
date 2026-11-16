@@ -40,14 +40,20 @@ SHARD_TIMEOUT_SEC = 900.0
 
 
 def resolve_js_runtime() -> str:
-    """转换器运行时：Node 优先（bundle 目标），Bun 兜底；都没有 = 响亮失败。"""
-    for name in ("node", "bun"):
+    """转换器运行时：**Bun 优先**，Bun 缺失才回落 Node；都没有 = 响亮失败。
+
+    项目标准运行时是 Bun（所有环境开工前先装 bun）；环境预装 Node 只在 bun 装不上时兜底
+    （<1%，plan/replay-corpus.plan.md D5）。探测顺序写反过：2026-11-16 前是
+    `("node", "bun")`，而 Kaggle/Colab 两者都装 ⇒ 稳定挑到 Node，白丢云机实测
+    22.1 → 25.4 µs/tick（1.15×）的换算速度。
+    """
+    for name in ("bun", "node"):
         found = shutil.which(name)
         if found:
             return found
     raise ProtocolError(
-        "replay 语料需要 Node ≥22 或 Bun 运行预建转换器，但本机两者都没有"
-        "（plan/replay-corpus.plan.md D5：Bun 失败回落 Node；两者皆无即失败）"
+        "replay 语料需要 Bun（首选）或 Node ≥20（兜底）运行预建转换器，但本机两者都没有"
+        "（plan/replay-corpus.plan.md D5：Bun 优先，Bun 装不上才回落 Node；两者皆无即失败）"
     )
 
 
