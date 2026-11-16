@@ -29,6 +29,7 @@ import paddle
 from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
 from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per
+from worker.ppo.vram import paddle_free_bytes, require_corpus
 
 CLIP_EPS = 0.2
 VF_COEF = 1.0
@@ -188,6 +189,8 @@ def ppo_update(
     clip = CLIP_EPS
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
+    # 与 torch 侧同规：全量上卡前查显存（探测不到就放行，绝不误拦 CPU 训练）。
+    require_corpus(chunks, paddle_free_bytes(device))
     tensored = tensored_chunks(chunks)
     total_steps = len(tensored) * epochs
     demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0

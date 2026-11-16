@@ -110,6 +110,7 @@ from worker.ppo.trainer import (
     tensored_batch,
     tensored_chunks,
 )
+from worker.ppo.vram import require_corpus, torch_free_bytes
 
 # ---------------- hyper-params (CLI-overridable) ----------------
 # R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级
@@ -394,6 +395,9 @@ def ppo_update(
     # Convert numpy -> torch ONCE per chunk (not once per epoch): identical
     # values, ~epochs× less conversion overhead.
     # P3 lazy：chunks 自己就是按需物化的序列，这里不物化全量（每步 tensored_batch）。
+    # eager 全量上卡前查显存：不足响亮拒绝（用户 2026-11-16）；探测不到则放行。
+    if not lazy:
+        require_corpus(chunks, torch_free_bytes(device))
     tensored: Any = chunks if lazy else tensored_chunks(chunks, device)
     n_chunks = chunk_count(chunks)
     total_steps = n_chunks * epochs

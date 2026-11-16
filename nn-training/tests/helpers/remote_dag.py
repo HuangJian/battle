@@ -511,6 +511,8 @@ LAYERS: dict[str, int] = {
     #: （`episode_from_shard`）——只 import numpy ⇒ 秩 0。
     "worker.ppo._episode": 0,
     "worker.ppo.trainer": 0,
+    #: 2026-11-16 显存预检：纯判定 + `common.errors`（叶子），两侧 ppo engine 共用 ⇒ 秩 0。
+    "worker.ppo.vram": 0,
     "worker.reports": 0,
     "worker.resume": 0,
     # 同族课程产物直取（plan/episode-reuse.plan.md）：`common.log` + 延迟 import 的
