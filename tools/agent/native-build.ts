@@ -3,12 +3,14 @@
  * **唯一**构建入口。
  *
  * 为什么必须有这个脚本（2026-09-21 评审 B2/B3）：
- *  ① **flags 钉死**：`-march=native` 会打开 FMA/AVX-512，而 clang 默认
- *     `-ffp-contract=fast` ⇒ 乘加融合 ⇒ 与 wasm 路径不再逐位（累加顺序没变也救不了
- *     收缩）。异质节点（win/mac/a95/a97 混跑）各自编译 ⇒ 同一 job 的 shard 字节抖动
- *     ⇒ data_fp 漂移、历史语料被判异血缘。故 flags/link 参数只在
- *     `src/nn/conv/native-prebuilt.ts` 里定一次，本脚本照用（`-ffp-contract=off`、
- *     `-fno-fast-math`、x64 只到 AVX1）。
+ *  ① **flags 钉死**：`-march=native` 会把 CPU 基线钉到编译机（AVX-512/老 CPU SIGILL），
+ *     故 flags/link 参数只在 `src/nn/conv/native-prebuilt.ts` 里定一次，本脚本照用。
+ *     2026-11-16 起：全目标 `-ffp-contract=fast`、`-fno-fast-math` 不变、wasm 仍
+ *     `-ffp-contract=off`；x64 的 prebuilt 发**两条**（基线 `-mavx -msse4.2` 与
+ *     `-mfma` 变体，后者 +8.4% 吞吐、需 Haswell 2013+），运行时探针选，见
+ *     `src/nn/conv/native-variant.ts`。本机构建固定用基线 flags（`hostTarget`）。
+ *     ⇒ native 与 wasm 不再逐位（1e-6 量级），闸门因此从逐字节改为容差（见
+ *     `src/nn/conv/conv_native_adapter.ts` 的 `ATTEST_TOLERANCE`）。
  *  ② **可复现**：T0 的「8/8 逐位一致」原先只剩一个手工脚本 + tmp 里的 .exe（工具还不
  *     负责构建），tmp 一清就再验不了。本脚本产出 `native-build.json` 指纹（源码 sha +
  *     flags + cc 版本 + 产物 sha），`--check` 可判「盘上产物是否仍是这份源码编的」。
@@ -22,7 +24,7 @@
  * 用法（仓根）:
  *   bun tools/agent/native-build.ts               # 本机共享库 + CLI → tmp/native（默认）
  *   bun tools/agent/native-build.ts --check       # 校验本机指纹/产物是否过期（exit 1 = 过期）
- *   bun tools/agent/native-build.ts --cross       # 全量交叉编译 prebuilt → src/nn/conv/prebuilt
+ *   bun tools/agent/native-build.ts --cross       # 全量交叉编译 prebuilt（9 目标）→ src/nn/conv/prebuilt
  *   bun tools/agent/native-build.ts --wasm        # 只重建 wasm32 产物 → prebuilt/wasm/conv.wasm
  *   bun tools/agent/native-build.ts --check-prebuilt   # prebuilt 与源码/产物 sha 是否同源
  *   bun tools/agent/native-build.ts --json        # 构建后打印 manifest（供 runner/测试读）
@@ -47,12 +49,14 @@ import {
   nativeLibBasename,
   nativeLinkArgs,
   nativeTargetFor,
+  nativeTargetVariants,
   wasmBuildFlags,
   type NativeTarget,
   type PrebuiltEntry,
   type PrebuiltManifest,
   type PrebuiltWasmEntry,
 } from '../../src/nn/conv/native-prebuilt'
+import { preferredVariants } from '../../src/nn/conv/native-variant'
 
 export { NATIVE_ABI, PREBUILT_DIR, PREBUILT_MANIFEST_NAME }
 export type { PrebuiltEntry, PrebuiltManifest }
@@ -76,6 +80,9 @@ export function hostTarget(
     triple: 'host',
     kind: platform === 'win32' ? 'coff' : platform === 'darwin' ? 'macho' : 'elf',
     lib: nativeLibBasename(platform),
+    // 本机构建一律用**基线** flags（不跟 `-mfma`）：它是「未知机器上的开发便利路径」，
+    // 而 `-mfma` 会让 ≤SandyBridge 的机器 SIGILL。FMA 的收益走入库 prebuilt 的 `-fma` 变体
+    // （运行时探针选择，见 src/nn/conv/native-variant.ts）。
     vector: arch === 'x64' ? ['-mavx', '-msse4.2'] : [],
   }
 }
@@ -97,7 +104,7 @@ export const CONV_SRC_DIR = 'src/nn/conv'
  * 内核真正依赖的源码（算法核心 + 两个目标的 ABI 头）。
  *
  * 三个文件放同一份：`conv_wasm.h` 只影响 wasm 目标、`conv_native.h` 只影响 native 目标，
- * 但预编产物（6 native + 1 wasm）是**一起发**的 ⇒ 用同一份源码清单才能一次抓全
+ * 但预编产物（9 native + 1 wasm）是**一起发**的 ⇒ 用同一份源码清单才能一次抓全
  * 「改了 conv.c/头文件却只重编了一部分」这种缺口（`--check-prebuilt` 是唯一闸门）。
  */
 export function nativeLibSourceFiles(repoRoot: string): string[] {
@@ -334,10 +341,14 @@ export function nativeStaleReason(
     return `指纹不可读: ${e instanceof Error ? e.message : String(e)}`
   }
   if (m.abi !== NATIVE_ABI) return `ABI 不符（盘上 ${m.abi}，期望 ${NATIVE_ABI}）`
-  if (m.target !== `${opts.platform ?? process.platform}-${process.arch}`)
-    return `目标不符（盘上 ${m.target}）`
+  const platform = opts.platform ?? process.platform
+  if (m.target !== `${platform}-${process.arch}`) return `目标不符（盘上 ${m.target}）`
   const srcProblem = sourcesStaleReason(repoRoot, m.sources)
   if (srcProblem) return srcProblem
+  // flags 也要比：`-mfma`/`-ffp-contract` 这类只改编译参数的改动不改源码 sha，
+  // 漏比这一项就会「改了 flags、再次构建 clone reuse 旧库」——正是本次 FMA 切换踩到的那条。
+  const wantFlags = nativeFlags(hostTarget(platform)).join(' ')
+  if (m.flags.join(' ') !== wantFlags) return `flags 已变（盘上 ${m.flags.join(' ')}）`
   for (const a of [m.artifacts.lib, m.artifacts.exe]) {
     const p = path.join(dir, a.name)
     if (!fs.existsSync(p)) return `缺产物 ${a.name}`
@@ -418,7 +429,7 @@ export interface WasmBuildResult {
 }
 
 /**
- * 编译 wasm32 产物（与 6 个 native 目标**同一份** `conv.c`）。
+ * 编译 wasm32 产物（与 9 个 native 目标**同一份** `conv.c`）。
  *
  * 与 buildPrebuilt 一样**不做 reuse**：漏编 wasm 是仓库记录过的最危险失败模式
  * （`run()` 静静回落 TS 路径 = 41 ms/forward > 16.7 ms 帧预算，plan/obs-schema-v3.plan.md
@@ -557,7 +568,7 @@ export function buildPrebuilt(
     log.push(`ok   ${t.id}: ${path.relative(repoRoot, out)} ${bytes}B ${sha.slice(0, 12)}…`)
   }
 
-  // ---- wasm32 目标（与 6 个 native 目标同门禁：改 conv.c 就必须重编） ----
+  // ---- wasm32 目标（与 9 个 native 目标同门禁：改 conv.c 就必须重编） ----
   // `--only` 未点名 wasm32 时沿用旧条目；否则重建（失败则不写条目 ⇒ --check-prebuilt 报「缺」）
   const prev = readPrebuiltManifest(dir)
   const wantWasm = !only || only.has(WASM_TARGET.id)
@@ -677,6 +688,9 @@ export interface ResolvedNativeLib {
   path: string | null
   /** env 指路 / 入库 prebuilt / 本机 tmp/native 构建 / 无。 */
   kind: 'env' | 'prebuilt' | 'local' | null
+  /** 解析到的目标 id（`win32-x64` / `win32-x64-fma` / …）；env 与无库时为空串。
+   *  rollout-runner 按它把库镜到 bundle 的同名目录（变体不能混装）。 */
+  targetId: string
   sha: string
   reason: string
 }
@@ -696,27 +710,52 @@ export function resolveNativeLib(
   const arch = opts.arch ?? process.arch
   const env = process.env.NN_NATIVE_LIB
   if (env && fs.existsSync(env)) {
-    return { path: env, kind: 'env', sha: sha256File(env), reason: 'NN_NATIVE_LIB' }
+    return {
+      path: env,
+      kind: 'env',
+      targetId: '',
+      sha: sha256File(env),
+      reason: 'NN_NATIVE_LIB',
+    }
   }
-  if (nativeTargetFor(platform, arch)) {
-    const p = path.join(repoRoot, PREBUILT_DIR, `${platform}-${arch}`, nativeLibBasename(platform))
-    if (fs.existsSync(p)) {
-      return {
-        path: p,
-        kind: 'prebuilt',
-        sha: sha256File(p),
-        reason: `prebuilt ${platform}-${arch}`,
+  const variants = nativeTargetVariants(platform, arch)
+  if (variants.length > 0) {
+    const cands = variants.map((t) => ({
+      t,
+      p: path.join(repoRoot, PREBUILT_DIR, t.id, nativeLibBasename(platform)),
+    }))
+    // 变体偏好与 src/ 侧同一口径（同一个探针 + 同一份缓存）：探针不过就只指向基线产物。
+    const order = preferredVariants(
+      cands.map((c) => ({ variant: c.t.variant, libPath: fs.existsSync(c.p) ? c.p : '' })),
+      { abi: NATIVE_ABI },
+    )
+    for (const v of order) {
+      const c = cands.find((x) => (x.t.variant ?? 'baseline') === v)
+      if (c && fs.existsSync(c.p)) {
+        return {
+          path: c.p,
+          kind: 'prebuilt',
+          targetId: c.t.id,
+          sha: sha256File(c.p),
+          reason: `prebuilt ${c.t.id}`,
+        }
       }
     }
   }
   const local = nativeLibPath(repoRoot, { platform })
   if (local)
-    return { path: local, kind: 'local', sha: sha256File(local), reason: 'tmp/native（本机构建）' }
+    return {
+      path: local,
+      kind: 'local',
+      targetId: `${platform}-${arch}`,
+      sha: sha256File(local),
+      reason: 'tmp/native（本机构建）',
+    }
   const why =
     nativeTargetFor(platform, arch) === null
       ? `prebuilt 矩阵无 ${platform}-${arch}`
       : `prebuilt 缺 ${platform}-${arch}（跑 bun tools/agent/native-build.ts --cross）且无本机构建`
-  return { path: null, kind: null, sha: '', reason: why }
+  return { path: null, kind: null, targetId: '', sha: '', reason: why }
 }
 
 function main(): void {

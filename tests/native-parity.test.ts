@@ -1,5 +1,11 @@
 /**
- * native-parity.test.ts —— native features 内核 vs wasm 的**逐字节**等价门（评审 B2/B3）。
+ * native-parity.test.ts —— native features 内核 vs wasm 的**容差等价门**（评审 B2/B3）。
+ *
+ * 2026-11-16 起两侧**不再逐位**：native 用 `-ffp-contract=fast`（x64 加 `-mfma`）换
+ * +8.4% 内核吞吐，FMA 把「一次乘法 + 一次加法各舍入」变成「一次舍入」⇒ 末位差 ~1e-7，
+ * 实测 `bufA` 最大差 6e-5（该张量 max 152）。口径改为同 attestation 的
+ * `ATTEST_TOLERANCE`（相对张量最大绝对值的 1e-5，两侧各留 ~20×/10^5 倍余量），
+ * 逐位断言换成独立重实现的容差断言（阈值是契约，比较器在测试里自己写）。
  *
  * 为什么这个测试必须存在（rollout-eval-opt.plan.md §4 T0′）：
  *  原先「native 与 wasm 8/8 逐位一致」只存在于一个手工脚本里（硬编码 tmp/conv_cli.exe、
@@ -35,6 +41,7 @@ const { runStudentConvWasm, runStudentFeatures } = await import('../src/nn/conv/
 // 生产模型构建入口（缓存键前提那条用例要断言它的实例语义）
 const { buildModelFromText } = await import('../src/nn/infer.ts')
 const {
+  ATTEST_TOLERANCE,
   featuresEngine,
   nativeLibCandidates,
   nativeStatus,
@@ -106,6 +113,22 @@ function bytesOf(a: Float32Array): Buffer {
   return Buffer.from(a.buffer, a.byteOffset, a.byteLength)
 }
 
+/**
+ * 容差断言（独立重实现，不复用生产比较器）：`max|got−want| ≤ ATTEST_TOLERANCE × max(1, max|want|)`。
+ * 返回实测最大差，供日志/失败信息用。
+ */
+function maxDiffWithinTolerance(got: Float32Array, want: Float32Array): number {
+  let scale = 1
+  for (let i = 0; i < want.length; i++) if (Math.abs(want[i]) > scale) scale = Math.abs(want[i])
+  let maxDiff = 0
+  for (let i = 0; i < got.length; i++) {
+    const d = Math.abs(got[i] - want[i])
+    if (d > maxDiff) maxDiff = d
+  }
+  expect(maxDiff).toBeLessThanOrEqual(ATTEST_TOLERANCE * scale)
+  return maxDiff
+}
+
 /** 参考 CLI 的入参协议：magic u32 + in16 + wblob（顺序见 conv_native.h）。 */
 function packCliInput(m: TestModel): Buffer {
   const parts: Float32Array[] = [m.in16, m.stemW, m.stemB, ...m.dwW, ...m.dwB, ...m.pwW, ...m.pwB]
@@ -127,12 +150,13 @@ if (!nativeOk) {
   )
 }
 
-describe('native 内核 vs wasm（逐字节）', () => {
-  it.skipIf(!nativeOk)(`共享库 8 次随机输入 pooled+bufA 逐字节一致`, () => {
+describe('native 内核 vs wasm（容差）', () => {
+  it.skipIf(!nativeOk)(`共享库 8 次随机输入 pooled+bufA 在容差内一致`, () => {
     resetNativeConvForTest()
     const m = makeModel()
     const rng = makeRng(7)
     let trials = 0
+    let worst = 0
     for (let t = 0; t < TRIALS; t++) {
       randInput(m, rng)
       // 参考：wasm
@@ -141,16 +165,58 @@ describe('native 内核 vs wasm（逐字节）', () => {
       const wBufA = Float32Array.from(m.bufA)
       // 被测：native（生产入口；首次会先做 attestation）
       expect(runStudentConvNative(m, { runWasm: (x) => runStudentConvWasm(x) })).toBe(true)
-      expect(bytesOf(m.pooled).equals(bytesOf(wPooled))).toBe(true)
-      expect(bytesOf(m.bufA).equals(bytesOf(wBufA))).toBe(true)
+      worst = Math.max(worst, maxDiffWithinTolerance(m.pooled, wPooled))
+      worst = Math.max(worst, maxDiffWithinTolerance(m.bufA, wBufA))
       trials++
     }
+    console.log(
+      `[native-parity] 共享库 ${TRIALS} 次最大差 ${worst.toExponential(2)}（容差 ${ATTEST_TOLERANCE}）`,
+    )
     expect(trials).toBe(TRIALS)
     expect(featuresEngine()).toBe('native')
     expect(nativeStatus().available).toBe(true)
   })
 
-  it.skipIf(!nativeOk)('参考 CLI（独立进程）与 wasm 逐字节一致（T0 可复现）', () => {
+  it('基线变体（x64 无 -mfma 那份）也能过 attestation —— 老 CPU 的回落臂被实测过', () => {
+    // 为什么单独一条：FMA 变体是首选路径，测试总是跑到它；而「≤Haswell 的机器」拿到的
+    // 是基线产物，如果它只在老机器上被验证，等于把库的正确性赌在一台没人摸过的机器上。
+    const rel = path.join(
+      ROOT,
+      'src',
+      'nn',
+      'conv',
+      'prebuilt',
+      `${process.platform}-${process.arch}`,
+    )
+    const lib = path.join(rel, nativeArtifactNames().lib)
+    if (!fs.existsSync(lib)) {
+      console.warn(
+        `[native-parity] 仓里无 ${process.platform}-${process.arch} 基线 prebuilt → 跳过（非静默变绿）`,
+      )
+      return
+    }
+    const prev = process.env.NN_NATIVE_LIB
+    process.env.NN_NATIVE_LIB = lib
+    resetNativeConvForTest()
+    try {
+      const m = makeModel(20261116)
+      randInput(m, makeRng(5))
+      expect(runStudentConvWasm(m)).toBe(true)
+      const wPooled = Float32Array.from(m.pooled)
+      const wBufA = Float32Array.from(m.bufA)
+      expect(runStudentConvNative(m, { runWasm: (x) => runStudentConvWasm(x) })).toBe(true)
+      maxDiffWithinTolerance(m.pooled, wPooled)
+      maxDiffWithinTolerance(m.bufA, wBufA)
+      expect(nativeStatus().available).toBe(true)
+      expect(nativeStatus().variant).toBe('baseline')
+    } finally {
+      if (prev === undefined) delete process.env.NN_NATIVE_LIB
+      else process.env.NN_NATIVE_LIB = prev
+      resetNativeConvForTest()
+    }
+  })
+
+  it.skipIf(!nativeOk)('参考 CLI（独立进程）与 wasm 在容差内一致（T0 可复现）', () => {
     const exe = path.join(build.dir, nativeArtifactNames().exe)
     expect(fs.existsSync(exe)).toBe(true)
     const m = makeModel(4242)
@@ -166,8 +232,8 @@ describe('native 内核 vs wasm（逐字节）', () => {
       expect(out.length).toBe((H + H * SP) * 4)
       const gotPooled = new Float32Array(out.buffer, out.byteOffset, H)
       const gotBufA = new Float32Array(out.buffer, out.byteOffset + H * 4, H * SP)
-      expect(bytesOf(gotPooled).equals(bytesOf(wPooled))).toBe(true)
-      expect(bytesOf(gotBufA).equals(bytesOf(wBufA))).toBe(true)
+      maxDiffWithinTolerance(gotPooled, wPooled)
+      maxDiffWithinTolerance(gotBufA, wBufA)
     }
   })
 

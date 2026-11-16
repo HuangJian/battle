@@ -8,6 +8,93 @@
 
 ---
 
+## §45 x64 发两份内核产物（基线 + `-fma`）+ 子进程试跑选；arm64 真机验 FMA（2026-11-16）
+
+**用户口径**：①「x64 CPU 基线从 Sandy Bridge 抬到 Haswell —— 能不能保留两个 prebuilt，不支持 FMA
+的用无 FMA 的那份？」②「本机没有 arm64 —— a95 节点已 USB 连本机，adb 可用」。
+
+### 一、双产物（`src/nn/conv/native-prebuilt.ts`）
+
+矩阵 6 → **9 个 native 目标**：x64 三平台各两条（`<p>-x64` = `-mavx -msse4.2`，Sandy Bridge 2011+；
+`<p>-x64-fma` = `+ -mfma`，Haswell 2013+），**独立目录 + 独立 manifest 条目**；arm64 仍一条（FMA 属
+基础 ISA，`-ffp-contract=fast` 一条 flag 就融合）。本机构建（`hostTarget`）固定基线 flags —— 它是
+「未知机器的便利路径」，不该跟 `-mfma`。
+
+### 二、怎么选（新 `src/nn/conv/native-variant.ts`）
+
+**子进程试跑，不信字符串**：`bun -e` 里 dlopen 变体产物 → 问 ABI → 用 dummy 权重跑一次
+`cf_student_features`；**退出码 0 才算本机可用**。SIGILL 死在子进程里，父进程只看到非 0。
+解析 `/proc/cpuinfo` / `sysctl` / 注册表一律否决：三套平台三套解析会漂，且「字符串里有 fma」不代表
+OS/虚拟化真让你用；而选错的代价是**节点整局挂**。结果落盘 `tmp/nn-native-variant.json`（键 = 平台/架构
++ 探针版本 + 产物 sha），一台机器一次 ~40–120 ms；写不进去只影响速度（每进程多一次 spawn）。
+
+调用链：`nativeLibCandidates()` → `variantOrder()`（探针不过 ⇒ 变体**连候选都不进**）→
+`preferredVariants()`；`NativeStatus.variant` 让「这局到底用了哪份」可查；`rollout-runner` 按
+`resolveNativeLib().targetId` 把库镜进 bundle 同名目录（**变体不能混装**：镜到基线目录会让适配器以为
+自己用了基线）。
+
+### 三、证据
+
+- **本机 win32-x64**：默认解析 `win32-x64-fma`；`NN_NATIVE_LIB=<基线>` 走基线且 attest 通过。
+  生产 A/B（s16/seed860001，同权重，6 对交替）：fma 2180/2200/2375/2392/2445/2518 ms vs 基线
+  2556/2690/2720/2728/2793/2881 ms（成对中位比 **≈0.86×**）；outcome/score/ticks 完全相同。
+- **WSL 真机**：`linux-x64` 基线与 wasm **逐字节 0 差**（无 FMA ⇒ 融合不可能发生）、`linux-x64-fma`
+  最大差 1.43e-6。两条产物都在门禁里真 dlopen。
+- **a95（Android 12 / arm64-v8a / M2002J9E）真机**：**两条臂都是入库产物，设备上零编译**
+  （用户 2026-11-16 点名「不要现编，用代码库里的老版本」）——参考臂 = `git show
+  HEAD:src/nn/conv/prebuilt/linux-arm64/conv_native.so`（clang 20、`-ffp-contract=off`、`fmla 0`，
+  即老版本/本机 wasm 等价物），被测臂 = 现役 `prebuilt/linux-arm64/conv_native.so`（同 clang 20、
+  `-ffp-contract=fast`、`fmla 60`）⇒ 两臂之间**唯一的变量就是乘加融合**（没有 clang 21 vs 20 这类
+  额外差异）。harness 用设备上的 python3 + ctypes（`.so` 只有 9 KB，`adb push` 即用，不需要 clang）：
+  ① 入库产物在 bionic 上**真能 dlopen**（此前只有设计声明）；② 真实权重 × 3 组随机输入：worst
+  `bufA` 9.155e-5 @ 张量 max 198.7（相对 4.6e-7，容差线 1.99e-3 ⇒ 余量 21×），`pooled` 4.77e-7 ⇒
+  **ATTEST=PASS**；③ 内核稳态 **6.42–6.70 ms → 4.36–4.49 ms（−30~35%，3 次重跑 0.697/0.651/0.683×）**。
+  旁证：早一版「设备上现编 clang 21 参考臂」给出的差值逐位相同（4.768e-7 / 9.155e-5）⇒
+  编译器版本确实不是变量，但结论不该依赖这个巧合。
+
+⇒ arm64 的 FMA 收益比 x64（+8.4%）大得多，「训练侧全 native」在 arm64 节点上是强赚的；x64 老机器
+则自动落到基线产物，既不会 SIGILL 也不丢新机器的 8%。
+
+**复核已固化成一条命令**（2026-11-16，用户点名「提成正式脚本」）：
+
+```
+bun tools/diag/arm64-prebuilt-probe.ts     # USB 连着 arm64 设备即可；约 15 s；exit 0 = PASS
+```
+
+它自己干完这些：`git show HEAD:src/nn/conv/prebuilt/linux-arm64/conv_native.so` 取参考臂 →
+训练机侧用真实权重（`buildModelFromText`）产 blob + 3 组 ±1 输入（与 `attest()` 同种子）→ `adb push`
+到 Termux 并 `run-as` 执行 `tools/diag/arm64-prebuilt-probe.py`（设备自带 python3 + ctypes，
+**零编译**，两臂都直接 dlopen 入库产物）→ 打印逐张量差值/容差线/吞吐比 → 清理设备侧目录。
+开关：`--serial`（多设备点名）/ `--weights`（默认取 `tmp/**` 最新）/ `--rev` 或 `--old-lib`（换参考臂）/
+`--new-lib` / `--keep`（保留设备侧文件）。无设备/非 arm64/缺 `python3` 都响亮 exit 1 并指路
+`tools/agent/agent-setup.md` §3。
+
+## §44 native 内核 FMA 落地：x64 `-mfma` + 全目标 `-ffp-contract=fast`，逐位门变容差门（2026-11-16）
+
+**用户口径**：「所有训练提速都是有价值的，FMA 能上尽量上」。此前 `-ffp-contract=off` 的唯一理由是
+native↔wasm 逐位一致，代价就是丢掉乘加融合（决策与实测 → `DECISIONS.md`
+§2026-11-16-goalnn-conv-fma）。
+
+**改了什么**：`native-prebuilt.ts::nativeFlags()` 全目标 `-ffp-contract=fast`；x64 三个目标 vector
+加 `-mfma`；arm64 不需要 `-mfma`（FMA 属基础 ISA，`fast` 单 flag 就融合）；`-fno-fast-math` 不变；
+wasm 仍 `off`（产物字节不变，仍 `6e506781…`）。
+
+**证据（本机 clang 20.1.0）**：
+
+- 内核 ffi 微基准成对 100 轮 **0.9228× 时间 / +8.4% 吞吐**；`vmulps 151→35`、`vaddps 158→42`、
+  `vfmadd 0→166`；`fma8` / `fma24` / `avx2+fma` 都不如 `fma16` ⇒ px16 仍最优。
+- 端到端 A/B（s16/seed860001，同权重交替 5 轮）：native 1448 ms → FMA **1340 ms（−7.5%）**。
+- **生产路径零旁路**（入库 prebuilt + 真 attestation）13 种子 860001–860013 对 wasm 臂：
+  `a_move/a_fire/a_hold/obs/mask/scalars` **13/13 局全 0 元素不同**，outcome/score/ticks 相同；
+  native/wasm 单局墙钟比 0.59–0.67×。⇒ FMA 只动 `lp_*`/`value` 末位（PPO 梯度数值），不动采样轨迹。
+- 三个逐位门改容差门：运行期 attestation（`ATTEST_TOLERANCE = 1e-5 × max(1, max|wasm 张量|)`）、
+  `tests/native-parity.test.ts`、`tests/native-prebuilt.test.ts` 的 WSL 真机（实测最大差 1.43e-6）。
+
+**代价**：x64 CPU 基线抬到 **Haswell(2013)**（更老的 CPU 首用即 SIGILL，保命开关 `NN_NATIVE=0`）；
+arm64 融合是 clang 自动收缩，真值证据只能来自节点自己的容差 attestation（产物 `fmla 60` 已核实）。
+
+**顺带**：`nativeStaleReason()` 补上 flags 比对（此前只改编译参数的改动会 reuse 旧库，实测踩中）。
+
 ## §43 云机 serve pool 跨轮保留 + 采集 α 单腿（2026-11-04，P0a/P0b/P1）
 
 **现场**：TPU 云机 330GB 内存只用了 ~16GB，但每个 kind=iter 轮、每个 eval 点都要重付 94 个 bun

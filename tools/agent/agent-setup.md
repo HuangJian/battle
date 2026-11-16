@@ -170,6 +170,10 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 `--pool-idle-ms 0` 关）——池「只涨不回缩」的最大项由它兜住，热路径常见波次仍零冷启。
 全程插电；热节流导致后期变慢是物理现象，不是故障。
 
+复核**入库的 arm64 内核产物**（不改任何代码、设备上零编译）：USB 连着设备就能跑
+`bun tools/diag/arm64-prebuilt-probe.ts`（exit 0 = PASS；比的是 `git show HEAD:` 里的老产物与现役
+`prebuilt/linux-arm64/conv_native.so`，用 Termux 自带 python3，约 15 s）。
+
 ## 4. Google Cloud Shell（cloudflared 出站隧道）
 
 ### 4.1 为什么必须走隧道
@@ -318,7 +322,7 @@ diff local.tsv mac.tsv
 | 节点多出 `.DS_Store` / 临时文件（`.pyc`/`*~`/`*.log` 等） | 删除；此类噪声已由 F3 过滤规则永久免疫（双侧同规则） |
 | 节点有本地未提交改动 | 决定 commit+push，或 `git checkout -- <文件>` 还原（**禁用 git stash**） |
 | `core.autocrlf` 与训练机（`input`）不一致 | 对齐后重新 checkout 集内文件 |
-| `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 6 native + wasm） |
+| `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 9 native + wasm） |
 | 分支/目录不对 | 确认 agent 的 `REPO_ROOT` 与分支 = 训练机 `UPGRADE_BRANCH` |
 
 > 训练机侧自身先自查：`common.distribution.dirty_hash_files()` 非空（集内有未提交改动）时，远端

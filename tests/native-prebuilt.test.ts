@@ -36,14 +36,18 @@ const {
   WASM_TARGET,
   prebuiltLibPath,
   nativeTargetFor,
+  nativeTargetVariants,
   nativeLibBasename,
   wasmBuildFlags,
 } = await import('../src/nn/conv/native-prebuilt.ts')
+const { preferredVariants, resetVariantCacheForTest, variantKernelRuns } =
+  await import('../src/nn/conv/native-variant.ts')
 const { prebuiltStaleReason, resolveNativeLib, sha256File } =
   await import('../tools/agent/native-build.ts')
 const { runStudentConvWasm } = await import('../src/nn/conv/conv_wasm_adapter.ts')
 // src/ 侧的同类解析（两处优先级必须一致：src/ 不得依赖 tools/ ⇒ 只能各写一份，见下一段用例）
-const { nativeLibCandidates, nativeStatus } = await import('../src/nn/conv/conv_native_adapter.ts')
+const { ATTEST_TOLERANCE, nativeLibCandidates, nativeStatus } =
+  await import('../src/nn/conv/conv_native_adapter.ts')
 
 const PREBUILT_DIR_ABS = path.join(ROOT, PREBUILT_DIR)
 const BOARD = 26
@@ -84,7 +88,7 @@ describe('prebuilt 分发物（同源/齐全）', () => {
     expect(why).toBe('')
   })
 
-  it('矩阵 6 native 目标 + wasm32 齐全，manifest 记的 sha256 与文件一致、ABI 一致', () => {
+  it('矩阵 9 native 目标（x64 三平台各两条）+ wasm32 齐全，manifest 记的 sha256 与文件一致、ABI 一致', () => {
     const m = JSON.parse(fs.readFileSync(path.join(PREBUILT_DIR_ABS, 'manifest.json'), 'utf8')) as {
       abi: number
       targets: Array<{ id: string; sha256: string; bytes: number; lib: string }>
@@ -98,7 +102,7 @@ describe('prebuilt 分发物（同源/齐全）', () => {
       expect(sha256File(p)).toBe(t.sha256)
       expect(fs.statSync(p).size).toBe(t.bytes)
     }
-    // wasm32 与 6 个 native 目标同一门禁（缺条目/字节不符 ⇒ 一定有人漏重编）
+    // wasm32 与 9 个 native 目标同一门禁（缺条目/字节不符 ⇒ 一定有人漏重编）
     expect(m.wasm?.id).toBe(WASM_TARGET.id)
     const wp = path.join(PREBUILT_DIR_ABS, WASM_TARGET.dir, WASM_TARGET.lib)
     expect(
@@ -308,6 +312,59 @@ describe('共享库解析优先级（env → prebuilt → 本机构建）', () =
     expect(prebuiltLibPath('win32', 'x64')).toBe(`${PREBUILT_DIR}/win32-x64/conv_native.dll`)
     expect(prebuiltLibPath('freebsd', 'x64')).toBe('')
     expect(nativeTargetFor('plan9', 'x64')).toBeNull()
+    // x64 的融合变体是**同平台另一条产物**（目录名带 -fma），不是覆盖基线
+    expect(prebuiltLibPath('win32', 'x64', 'fma')).toBe(
+      `${PREBUILT_DIR}/win32-x64-fma/conv_native.dll`,
+    )
+    expect(prebuiltLibPath('linux', 'x64', 'fma')).toBe(
+      `${PREBUILT_DIR}/linux-x64-fma/conv_native.so`,
+    )
+    expect(nativeTargetFor('linux', 'x64', 'fma')?.id).toBe('linux-x64-fma')
+    // arm64 没有变体（FMA 属基础 ISA）
+    expect(prebuiltLibPath('linux', 'arm64', 'fma')).toBe('')
+  })
+
+  it('x64 基线与变体的 flags 分房：基线不带 -mfma（≤SandyBridge 可跑），变体带', () => {
+    for (const p of ['win32', 'linux', 'darwin']) {
+      const variants = nativeTargetVariants(p, 'x64')
+      expect(variants.map((t) => t.variant ?? 'baseline')).toEqual(['baseline', 'fma'])
+      const base = variants.find((t) => !t.variant)!
+      const fma = variants.find((t) => t.variant === 'fma')!
+      expect(base.vector).not.toContain('-mfma')
+      expect(fma.vector).toContain('-mfma')
+      // 两侧都是同一份源码编的（同 triple / 同产物名），只有 vector flags 不同
+      expect(fma.triple).toBe(base.triple)
+      expect(fma.lib).toBe(base.lib)
+    }
+    // arm64 只有一条
+    expect(nativeTargetVariants('linux', 'arm64').length).toBe(1)
+  })
+
+  it('变体探针：跑不起来的 fma 产物 ⇒ 偏好只剩基线（失败方向保守）', () => {
+    // 伪产物（不是合法共享库）：dlopen 必失败 ⇒ 探针判 false 并落盘缓存。
+    // 这正是「≤Haswell 的机器」在真实场景下走的那条分支（只是它死于 SIGILL，这里死于加载）。
+    const dir = fs.mkdtempSync(path.join(ROOT, 'tmp', 'pytest-tmp', 'npb-probe-'))
+    const fake = path.join(dir, 'conv_native.dll')
+    fs.writeFileSync(fake, `not-a-library-${Date.now()}`)
+    try {
+      expect(variantKernelRuns(fake, { abi: NATIVE_ABI })).toBe(false)
+      // 第二次直接命中缓存（不再起子进程），结论必须一致
+      expect(variantKernelRuns(fake, { abi: NATIVE_ABI })).toBe(false)
+      expect(
+        preferredVariants(
+          [
+            { variant: 'fma', libPath: fake },
+            { libPath: path.join(PREBUILT_DIR_ABS, 'linux-x64', 'conv_native.so') },
+          ],
+          { abi: NATIVE_ABI },
+        ),
+      ).toEqual(['baseline'])
+      // 缺变体产物时根本不探测（不进子进程）⇒ 仍回基线
+      expect(preferredVariants([{ libPath: fake }], { abi: NATIVE_ABI })).toEqual(['baseline'])
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+      resetVariantCacheForTest()
+    }
   })
 })
 
@@ -336,10 +393,22 @@ const WSL_OK =
 if (!WSL_OK)
   console.warn('[native-prebuilt] 无 WSL+python3 → linux-x64 真机执行证据跳过（非静默变绿）')
 
-describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字节', () => {
-  it.skipIf(!WSL_OK)('WSL 里 dlopen 入库 .so，pooled+bufA 与 wasm 逐字节相同', () => {
-    const so = path.join(PREBUILT_DIR_ABS, 'linux-x64', 'conv_native.so')
-    expect(fs.existsSync(so)).toBe(true)
+describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 容差', () => {
+  it.skipIf(!WSL_OK)('WSL 里 dlopen 入库 .so（基线 + fma 两条都真跑），与 wasm 对得上容差', () => {
+    // 两条产物都要被真加载过：基线是「≤Haswell 的机器」拿到的回落臂，fma 才是本机首选。
+    // fma 只在宿主 CPU 真支持时才跑（同一台机器的探针结论，否则 SELinux/WSL 里直接 SIGILL）。
+    const hostFma = path.join(
+      PREBUILT_DIR_ABS,
+      `${process.platform}-${process.arch}-fma`,
+      nativeLibBasename(process.platform),
+    )
+    const canFma =
+      process.arch === 'x64' && fs.existsSync(hostFma)
+        ? variantKernelRuns(hostFma, { abi: NATIVE_ABI })
+        : true // arm64：FMA 属基础 ISA，不存在「跑不了」的分叉
+    if (!canFma)
+      console.warn('[native-prebuilt] 宿主 CPU 无 FMA ⇒ linux-x64-fma 执行证据跳过（非静默变绿）')
+    const SO_TARGETS = canFma ? ['linux-x64', 'linux-x64-fma'] : ['linux-x64']
 
     // 确定性输入（LCG，同 native-parity 口径）：in16 + 权重 blob，直接写 float32 小端
     const rng = makeRng(20260921)
@@ -371,6 +440,8 @@ describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字�
       bufA: new Float32Array(H * SP),
     }
     expect(runStudentConvWasm(model)).toBe(true)
+    const wantPooled = Float32Array.from(model.pooled)
+    const wantBufA = Float32Array.from(model.bufA)
     const expectBytes = Buffer.concat([buf(model.pooled), buf(model.bufA)])
 
     const work = fs.mkdtempSync(path.join(ROOT, 'tmp', 'pytest-tmp', 'npb-wsl-'))
@@ -406,17 +477,54 @@ describe('linux-x64 prebuilt 真执行（WSL + python3 ctypes）vs wasm 逐字�
       { encoding: 'utf8' },
     )
 
-    const r = spawnSync(
-      'wsl.exe',
-      ['-e', 'python3', toWslPath(pyFile), toWslPath(so), toWslPath(inFile), toWslPath(outFile)],
-      { encoding: 'utf8', timeout: 120_000 },
-    )
     try {
-      expect(r.status, `WSL python 失败: ${r.stdout}\n${r.stderr}`).toBe(0)
-      console.log(`[native-prebuilt] WSL: ${r.stdout.trim()}`)
-      const got = fs.readFileSync(outFile)
-      expect(got.length).toBe(expectBytes.length)
-      expect(got.equals(expectBytes)).toBe(true)
+      for (const id of SO_TARGETS) {
+        const so = path.join(PREBUILT_DIR_ABS, id, 'conv_native.so')
+        expect(fs.existsSync(so), `缺 ${path.relative(ROOT, so)}`).toBe(true)
+        const r = spawnSync(
+          'wsl.exe',
+          [
+            '-e',
+            'python3',
+            toWslPath(pyFile),
+            toWslPath(so),
+            toWslPath(inFile),
+            toWslPath(outFile),
+          ],
+          { encoding: 'utf8', timeout: 120_000 },
+        )
+        expect(r.status, `WSL python 失败(${id}): ${r.stdout}\n${r.stderr}`).toBe(0)
+        console.log(`[native-prebuilt] WSL ${id}: ${r.stdout.trim()}`)
+        const got = fs.readFileSync(outFile)
+        expect(got.length).toBe(expectBytes.length)
+        // 2026-11-16 起 x64 FMA 变体与 wasm 同口径的容差断言（不再逐字节）。
+        const tol = ATTEST_TOLERANCE
+        const within = (gotA: Float32Array, wantA: Float32Array): number => {
+          let scale = 1
+          for (let i = 0; i < wantA.length; i++)
+            if (Math.abs(wantA[i]) > scale) scale = Math.abs(wantA[i])
+          let maxDiff = 0
+          for (let i = 0; i < gotA.length; i++) {
+            const d = Math.abs(gotA[i] - wantA[i])
+            if (d > maxDiff) maxDiff = d
+          }
+          expect(maxDiff).toBeLessThanOrEqual(tol * scale)
+          return maxDiff
+        }
+        const gotPooled = new Float32Array(got.buffer, got.byteOffset, H)
+        const gotBufA = new Float32Array(got.buffer, got.byteOffset + H * 4, H * SP)
+        const dP = within(gotPooled, wantPooled)
+        const dB = within(gotBufA, wantBufA)
+        console.log(
+          `[native-prebuilt] WSL ${id} 最大差 pooled=${dP.toExponential(2)} bufA=${dB.toExponential(2)}`,
+        )
+        // 基线不带 FMA ⇒ 融合根本不可能发生 ⇒ 与 wasm **逐字节**相同（这是它的结构性质，
+        // 也是「≤Haswell 机器上的结果与今天完全一致」的依据）。
+        if (id === 'linux-x64') {
+          expect(dP).toBe(0)
+          expect(dB).toBe(0)
+        }
+      }
     } finally {
       // 只清自己的现场（失败也清：内容已在断言里）
       fs.rmSync(work, { recursive: true, force: true })

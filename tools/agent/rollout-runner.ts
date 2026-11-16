@@ -409,18 +409,18 @@ export function ensureNativeAssets(
       reason: `${resolved.reason}${why ? `；本机指纹: ${why}` : ''}`,
     }
   }
-  log(`[rollout-runner] native 资产就绪 source=${resolved.kind ?? 'build'} lib=${lib}`)
+  // 目标 id 必须带上变体（`win32-x64` vs `win32-x64-fma`）：镜到「基线」目录会在
+  // SIGILL 边界上骗过适配器的变体判定（目录名决定它以为用了哪份）。
+  const targetId = resolved.targetId || `${process.platform}-${process.arch}`
+  log(
+    `[rollout-runner] native 资产就绪 source=${resolved.kind ?? 'build'} target=${targetId} lib=${lib}`,
+  )
   const sha = shortSha(lib)
   try {
     // 按**同一相对路径**镜像进 bundle：native 适配器的候选里有
-    // `new URL(\`prebuilt/<平台>/<库>\`, import.meta.url)`，于是打包产物与源码两种形态
+    // `new URL(\`prebuilt/<目标>/<库>\`, import.meta.url)`，于是打包产物与源码两种形态
     // 走同一条解析路径（不再依赖“库与产物同级”的旧约定）。
-    const dst = path.join(
-      bundleDir,
-      'prebuilt',
-      `${process.platform}-${process.arch}`,
-      path.basename(lib),
-    )
+    const dst = path.join(bundleDir, 'prebuilt', targetId, path.basename(lib))
     fs.mkdirSync(path.dirname(dst), { recursive: true })
     if (!fs.existsSync(dst) || shortSha(dst) !== sha) fs.copyFileSync(lib, dst)
   } catch (e) {
