@@ -80,6 +80,7 @@ import { featuresEngine } from '../../src/nn/conv/conv'
 import { OpeningController } from '../../src/nn/opening-controller'
 import { encodeOpeningAction } from '../../src/nn/opening-input'
 import { InputRecorder } from '../../src/replay/InputRecorder'
+import { type ReplayType, replayTypeFromOutcome } from '../../src/replay/types'
 import { serializeReplayFile } from '../../src/replay/file'
 import { computeCodeHash } from '../agent/codehash-files'
 import { evaluateCorridor } from '../../src/nn/opening-corridor'
@@ -2089,14 +2090,10 @@ function runOne(
   const rec = recorder?.finalize() ?? null
   const stageName = String((stage as { name?: unknown })?.name ?? stageIdx)
   const replayStage = customStage || isArenaId(stageIdx) ? 0 : stageIdx
-  const replayStatus: 'clear' | 'base' | 'died' | 'timeout' =
-    outcome === 'stage_clear'
-      ? 'clear'
-      : outcome === 'base_destroyed'
-        ? 'base'
-        : outcome === 'gameover'
-          ? 'died'
-          : 'timeout'
+  // 终局四态 → ReplayType 的唯一映射（历史 bug：此处曾写 `outcome === 'gameover'`，
+  // 而 'gameover' 不是 outcome 取值 ⇒ lives_exhausted 局全被写成 'timeout'，
+  // 转换器 `final status died != recorded timeout` 硬失败。见 src/replay/types.ts 注释）。
+  const replayStatus: ReplayType = replayTypeFromOutcome(outcome)
   const replay: ReplayArtifact | null = rec
     ? {
         file: serializeReplayFile({
