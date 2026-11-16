@@ -38,6 +38,14 @@
 **边界**：本机只跑了 torch 侧；`tools/paddle_parity.py` 的八用例没在本机重跑（缺 paddle 解释器），
 所以「两侧现在真的同输入」只由代码同口径 + torch 侧行为用例保证，没有跨框架数值对账。
 
+**2026-11-17 补（类型化的收尾）**：`demo_bank: DemoBank | None` 落地后，按门禁口径跑 `mypy .`
+（951 文件；此前手工只跑 `common worker remote trainer biz tests e2e` = 868，漏了 `tools/`）在
+`tools/paddle_parity.py` 留两处红：该工具造的是**四键 legacy bank**（`_needs_extra(arch)` 为假时
+不给 `extra`），而 `DemoBank` 五键全必需。修法是工具侧的 `_as_bank()`：一次**有据**的 `cast` ——
+键集只差 `extra` 那一列，正是上文「缺 `extra` 的只可能是没走安全阀的调用方，那种 bank 对 legacy
+模型仍有效」的形态；返回注仍写 `DemoBank | None`，引擎侧的口径不动。行为零变化（cast 运行期是
+恒等内容），但 `tools/paddle_parity.py` 自此被我的 mypy 口径覆盖 —— 本机仍无 paddle，八用例未重跑。
+
 ## §72 BC 末轮 eval 兜底 + 重启补评（2026-11-12）
 
 **背景**（g1e-4s2e 报障）：设了 `eval.every_epochs` 的 BC 课，末 epoch 权重已回传，但对应

@@ -38,7 +38,7 @@ import base64
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -57,6 +57,10 @@ from common.schema import (
     POLICY_EXTRA_DIM,
     SCALAR_DIM,
 )
+
+# 顶层就取（只带 numpy/typing）：`_as_bank` 的返回注要它，而 torch / paddle 两条腿
+# 仍是函数内延迟 import（本文件的约定：`--help` 与 fixture 侧不该拖后端）。
+from worker.ppo.demo import DemoBank
 
 SEED = 20261027
 B = 8
@@ -208,6 +212,17 @@ def _masked_logsoftmax_np(logits: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return z
 
 
+def _as_bank(bank: dict[str, np.ndarray] | None) -> DemoBank | None:
+    """parity 的本地 bank → 引擎的 `DemoBank` 形参（**legacy 用例刻意只有四键**）。
+
+    引擎按「存在即物化」处理 `extra`（`engine._setup_demo` 的原话：缺 `extra` 的只可能是
+    没走 wire 安全阀的调用方，那种 bank 对 legacy 模型仍然有效）。本工具正是在造这种
+    bank（`_needs_extra(arch)` 为假时不给 `extra`），所以这里是一次**有据的**断言，
+    不是消音：`make_demo` 的键集由 `_needs_extra(arch)` 决定，两处只差那一列。
+    """
+    return cast(DemoBank, bank) if bank is not None else None
+
+
 def make_demo(rng: np.random.Generator, arch: str) -> dict:
     v6 = ARCHS[arch]["action_v6"]
     demo: dict[str, np.ndarray] = {
@@ -324,7 +339,7 @@ def run_fixture(out: Path) -> None:
             ref_model=ref_model,
             kickstart_kl=case.get("kickstart_kl", 0.0),
             ent_coef=case.get("ent_coef"),
-            demo_bank=demo,
+            demo_bank=_as_bank(demo),
             demo_bc_coef=case.get("demo_bc_coef", 0.0),
             demo_per_mb=case.get("demo_per_mb", 0),
             value_anchor=case.get("value_anchor", 0.0),
@@ -447,7 +462,7 @@ def run_check(
             ref_model=ref_model,
             kickstart_kl=cfg["kickstart_kl"],
             ent_coef=cfg["ent_coef"],
-            demo_bank=demo,
+            demo_bank=_as_bank(demo),
             demo_bc_coef=cfg["demo_bc_coef"],
             demo_per_mb=cfg["demo_per_mb"],
             value_anchor=cfg["value_anchor"],
@@ -505,9 +520,7 @@ def run_check(
             if abs(stats[k] - expected[k]) > atol_stats + rtol_stats * abs(expected[k])
         ]
         # 单坐标离群时，更新后前向的差额是那一步权重差的后果 ⇒ 容差随 d_w 放一条窄缝。
-        after_ok = d_after <= atol_after or (
-            single_outlier and d_after <= atol_after + 2.0 * d_w
-        )
+        after_ok = d_after <= atol_after or (single_outlier and d_after <= atol_after + 2.0 * d_w)
         ok = d_fwd <= atol_forward and not stats_bad and weights_ok and after_ok
         failed += 0 if ok else 1
         suffix = ""
@@ -517,8 +530,7 @@ def run_check(
             suffix = f" [{n_big}-coord-outlier]"
         print(
             f"{'PASS' if ok else 'FAIL'} {case['name']:<14} "
-            f"fwd={d_fwd:.2e} stats={d_stats:.2e} weights={d_w:.2e} after={d_after:.2e}"
-            + suffix
+            f"fwd={d_fwd:.2e} stats={d_stats:.2e} weights={d_w:.2e} after={d_after:.2e}" + suffix
         )
         if stats_bad:
             for k in stats_bad:
@@ -572,9 +584,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     )
     mstate = load_torch_pickle((dst / "model.pt").read_bytes())
     sd = model.state_dict()
-    d_load = max(
-        float(np.abs(sd[k].numpy() - np.asarray(v)).max()) for k, v in mstate.items()
-    )
+    d_load = max(float(np.abs(sd[k].numpy() - np.asarray(v)).max()) for k, v in mstate.items())
     ostate = load_torch_pickle((dst / "opt.pt").read_bytes())
     want, want_steps = torch_state_to_paddle(ostate, named_params(model))
     flat = {k: v.numpy() for k, v in opt.state_dict().items()}
@@ -582,9 +592,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     assert want_steps == steps_done
 
     chunk2 = dict(np.load(cdir / "chunk2.npz"))
-    stats2 = engine_paddle.ppo_update(
-        model, opt, [chunk2], epochs=2, ckpt_path=str(dst)
-    )
+    stats2 = engine_paddle.ppo_update(model, opt, [chunk2], epochs=2, ckpt_path=str(dst))
     expected2 = json.loads((cdir / "expected2.json").read_text(encoding="utf-8"))
     d_stats2 = max(
         float(abs(stats2[k] - expected2[k]) / (1.0 + abs(expected2[k]))) for k in expected2
@@ -795,7 +803,12 @@ def _bc_forward_torch(model, root: Path, out_name: str) -> dict[str, np.ndarray]
         sc = torch.from_numpy(data["scalars"])
         ex = torch.from_numpy(data["extra"])
         out = model(obs, sc, ex)
-    arr = {"move": out[0].numpy(), "fire": out[1].numpy(), "hold": out[2].numpy(), "value": out[3].numpy()}
+    arr = {
+        "move": out[0].numpy(),
+        "fire": out[1].numpy(),
+        "hold": out[2].numpy(),
+        "value": out[3].numpy(),
+    }
     np.savez(root / out_name, **arr)
     return arr
 
@@ -829,7 +842,10 @@ def bc_fixture(root: Path) -> None:
     load_state_into(trained, str(root / "bc-torch" / "weights.json"))
     trained.eval()
     _bc_forward_torch(trained, root, "bc-torch-after.npz")
-    shown = {k: metrics["history"][k] for k in ("train_loss", "val_loss", "move_acc", "fire_acc", "hold_acc")}
+    shown = {
+        k: metrics["history"][k]
+        for k in ("train_loss", "val_loss", "move_acc", "fire_acc", "hold_acc")
+    }
     print(f"bc-fixture: metrics={shown}")
 
 
