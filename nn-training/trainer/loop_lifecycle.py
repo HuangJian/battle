@@ -63,7 +63,8 @@ from typing import Any
 import common.distribution
 from biz.course import resolve_rotate_seed
 from common.log import default_router, log
-from trainer.dispatch_queue import REPO_ROOT, RUN_ID
+from common.paths import REPO_ROOT
+from trainer.dispatch_queue import RUN_ID
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_steps import kickstart_coef
 from trainer.rollout_phase import join_precollect_child

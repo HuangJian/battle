@@ -10,7 +10,6 @@ from pathlib import Path
 # 把 `batch_plan.py` 搬进 `biz/` —— 见 DECISIONS
 # §2026-11-14-retire-dispatch-queue-reexport-surface 与 §2026-11-14-batch-plan-belongs-to-biz。
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/trainer/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
 
 

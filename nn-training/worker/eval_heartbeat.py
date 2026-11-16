@@ -17,8 +17,9 @@ import time
 from pathlib import Path
 
 from common.log import default_router
+from common.paths import REPO_ROOT
 
-_DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "dashboard" / "data" / "evalboard"
+_DEFAULT_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
 
 
 def data_root() -> Path:

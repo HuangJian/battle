@@ -13,9 +13,9 @@ from pathlib import Path
 import common.distribution
 from biz.course import build_pairs
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import popen_kwargs
 from trainer.dispatch_queue import (
-    REPO_ROOT,
     RUN_ID,
     local_slots_max_of,
     run_rollout_queue,

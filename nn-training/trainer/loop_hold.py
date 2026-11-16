@@ -212,6 +212,6 @@ def file_held(course: str, *, now: float | None = None) -> bool:
     c = str(course or "")
     if not c:
         return False
-    from trainer.loop_control import read_control
+    from worker.loop_control import read_control
 
     return c in read_control(now=now).held

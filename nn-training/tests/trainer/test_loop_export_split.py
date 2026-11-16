@@ -119,6 +119,9 @@ TOP_IMPORTS = frozenset(
         "common.distribution",
         "worker.archive",
         "common.log",
+        # 2026-11-16：仓根单源（`common/paths.py`）—— 此前这里写 `Path(__file__).parents[2]`,
+        # 数层数与 `hub/store_offline.py` 是同一类静默故障。
+        "common.paths",
         "worker.modes",
         "common.protocol",
         "remote",

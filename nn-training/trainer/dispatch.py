@@ -44,8 +44,6 @@ from worker.reports import combine_reports
 from worker.resume import completed_pairs, resumed_manifests, state_init_enabled
 from worker.sibling_reuse import reuse_rollouts
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
 # 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
 RUN_ID = secrets.token_hex(8)

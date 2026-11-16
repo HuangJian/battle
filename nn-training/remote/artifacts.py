@@ -53,9 +53,9 @@ from typing import Any
 
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.hashing import sha256_bytes, sha256_file  # re-export：调用点与测试不变
+from common.paths import REPO_ROOT
 
-#: 仓库根（`nn-training/remote/artifacts.py` 上溯两层）。
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 仓库根：唯一实现在 `common/paths.py`（本文件不再自己数层数）。
 #: 权重归档根（`nn-training/weights/`；即 `biz.archive.backup_weights` 的缺省目录）。
 #: **唯一定义处**（2026-10-15 去重）：回传落归档的 `hub.store_offline` 与读侧落地的
 #: `remote.weights_standard` 都站在它上面 —— 之前两处各留一份副本，各自定义 `_archive_root` /

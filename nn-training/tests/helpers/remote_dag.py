@@ -496,6 +496,9 @@ LAYERS: dict[str, int] = {
     "worker.kickstart_burn": 1,
     #: 本机评估失败的保真类型（plan/eval-gap-honesty D1）：只用 stdlib（re）⇒ L0。
     "worker.local_eval_error": 0,
+    #: 2026-11-16：控制台 ⇄ supervisor 的控制文件契约（从 `trainer/` 搬来）——
+    #: 依赖面 = stdlib + `common.{hold_window,log,paths}` ⇒ **L0**，与 `worker.gate_halt` 同型。
+    "worker.loop_control": 0,
     "worker.loop_tasks": 0,
     "worker.metrics_stats": 0,
     "worker.models.rl_model": 0,

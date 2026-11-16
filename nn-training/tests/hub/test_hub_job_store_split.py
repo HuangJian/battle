@@ -258,6 +258,9 @@ ALLOWED_IMPORTS = {
         # `common.logutil.tag_logger`（`hub-server.out` 的时间轴只有一份实现）。它本身是
         # stdlib-only 的 L0 格式模块（不 import 任何仓内模块）⇒ 本簇层号不变。
         "common.logutil",
+        # 2026-11-16：仓根改从 `common.paths` 取单源（此前本模块自己数层数 —— `remote/hub/` →
+        # `hub/` 那次少了一层，静默指到仓库父目录）。`common.paths` 是 L0（stdlib `pathlib`）。
+        "common.paths",
         "remote.artifacts",
         "remote.delta_files",
     },

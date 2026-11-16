@@ -47,6 +47,7 @@ from typing import Any
 from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
 from common.logutil import log_line, secs, tag_logger
+from common.paths import REPO_ROOT
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
@@ -1408,7 +1409,7 @@ def main() -> None:
     # 不再落到 nn-training/tmp（此前 spawn cwd=nn-training 时相对路径走偏）。
     out = Path(args.out)
     if not out.is_absolute():
-        out = Path(__file__).resolve().parents[2] / out
+        out = REPO_ROOT / out
     out.mkdir(parents=True, exist_ok=True)
     # P3b：--poll 可重复/逗号分隔（同 token）；单值 = 旧行为。顺序即轮询顺序。
     raw_polls = args.poll if isinstance(args.poll, list) else [args.poll]

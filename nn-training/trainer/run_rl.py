@@ -39,10 +39,10 @@ from common.cli import run_main
 from common.instance_lock import acquire_instance_lock, release_instance_lock
 from common.log import Tee as _Tee
 from common.log import log
+from common.paths import REPO_ROOT
 from common.pid_probe import pid_alive as _pid_alive_impl
 from common.platform_utils import force_utf8_stdio
 from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
-    REPO_ROOT,
     run_rollout_queue,
 )
 from worker.cli import build_argparser
@@ -214,7 +214,7 @@ def main() -> None:
     # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 2 → 3
     # （仓根仍是父目录的父目录的父目录）。层数写错 = cwd 停在 nn-training/ ⇒ 上面那些
     # tmp/ 默认路径全部错位。
-    os.chdir(str(Path(__file__).resolve().parents[2]))
+    os.chdir(str(REPO_ROOT))
     ap, args, course, _rl_src, _rl_args = _parse(sys.argv[1:])
     if getattr(args, "echo_config", False):
         # 纯 dump 面（对拍 oracle 读它的 stdout）：**在分流之前**短路——`--echo-config`

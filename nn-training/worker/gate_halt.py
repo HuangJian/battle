@@ -28,7 +28,7 @@
 
 控制台光看意图文件只能显示「我让它 notify」，回答不了「训练那边真读到了吗、真生效的是什么」。
 所以训练侧把**自己实际施加了什么**写 `tmp/gate-halt.applied.json`（逐课 `effective_mode` +
-`source` + `until` + `at`），与 `trainer/loop_control.py` 的 `loop-control.applied.json` 同规：
+`source` + `until` + `at`），与 `worker/loop_control.py` 的 `loop-control.applied.json` 同规：
 · **只在结果变化时**写（不心跳、不轮询写盘）；· 按课程**合并**（多进程在跑时互不覆盖）；
 · 两侧都**原子替换**（`tmp` + `replace`）⇒ 读者要么读到旧的、要么读到新的，永不读到半个。
 · 回执失败**不影响训练**（观测面坏不得变成训练的故障）。
@@ -46,9 +46,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common.log import log
+from common.paths import REPO_ROOT
 
-#: 仓库根（本模块住 nn-training/worker/，上溯两级 —— 与 biz/course_archive.py 同规）。
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 仓库根（唯一实现在 `common/paths.py`）。
 
 #: 平台意图文件默认位置（repo 根 `tmp/`——训练机与控制台共享的工作区，已 gitignore）。
 DEFAULT_INTENT_PATH = str(REPO_ROOT / "tmp" / "gate-halt.json")
@@ -63,7 +63,7 @@ def intent_path() -> str:
     """意图文件路径（`NN_GATE_HALT` 可覆盖：测试/多工作区隔离）。
 
     与 dashboard 侧 `BCITY_GATE_HALT` 是**对偶**（同一惯例：python 侧 `NN_*`、控制台侧
-    `BCITY_*`，见 `trainer/loop_control.py` 与 `dashboard/src/core/paths.ts`）。
+    `BCITY_*`，见 `worker/loop_control.py` 与 `dashboard/src/core/paths.ts`）。
     """
     return os.environ.get("NN_GATE_HALT") or DEFAULT_INTENT_PATH
 

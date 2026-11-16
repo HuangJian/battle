@@ -39,6 +39,7 @@ import zipfile
 from pathlib import Path
 from threading import Lock
 
+from common.hold_window import hold_progress_stale_sec
 from common.logutil import tag_logger
 from common.net_http import urlopen as _net_urlopen
 from common.protocol import PLAN_NAME
@@ -89,26 +90,13 @@ TASK_STATE_COMPLETED = "completed"
 # 本块只做第三件：**活性只认进度信号**，心跳（60s）只续租约 TTL —— 2026-10-05/06 的
 # 「假活」（心跳活、进度死）正是把心跳当活性算出来的（docs/nn/remote-transport.md §68）。
 #
-# 为什么与 `AUTO_HANDOFF_PENDING_SEC` 分开写：两者都是 900s 是**巧合**（一个是导包窗口、
-# 一个是接管活性），调一个会误伤另一个 —— plan §1.5.2-P0-1 明令**禁止合并常量**。
-#: 接管后连续静默（无任何进度信号）超过它 ⇒ 判「掉线」（惰性判据：谁读谁算，不养清理线程）。
-#: env 覆盖 `BCITY_HOLD_PROGRESS_STALE_SEC`（e2e/单测调秒级）。**唯一**的离线段静默阈值
-#: （★M4b：旧的 180s `OFFLINE_LEASE_STALE_SEC` 与 `lease_verdict` 的 beat_at 退回腿已删）。
-HOLD_PROGRESS_STALE_SEC = 900.0
+# 窗口本体与 env 旋钮 2026-11-16 下沉 `common/hold_window.py`：训练侧（`worker/loop_control`
+# 读控制文件的 `held` 缓存时自判活）用的是**同一把尺子**，它原先靠 `from hub.task_pack import`
+# 拿这个数 ⇒ 一个常量把纯逻辑模块钉成「碰网络的」。这里只留名字给既有调用点。
 #: hub 重启给**盘上恢复的 hold** 的宽限（秒）：把 `last_progress_at`/`touch_at` 抬到 `now - 它`。
 #: 为什么需要：重启时盘上的时间是旧的，而 worker 大概率还活着（它不知道自己「被重启」了）——
 #: 不抬就会把活着的盘判掉线，协作派发与本机 held 会一起解开（plan §1.5.4-P2-2）。
 HOLD_RESTORE_GRACE_SEC = 300.0
-
-
-def hold_progress_stale_sec() -> float:
-    """生效的接管静默阈值（env 覆盖；非法 / 非正数 ⇒ 缺省）。**调用时读 env**（可 monkeypatch）。"""
-    raw = os.environ.get("BCITY_HOLD_PROGRESS_STALE_SEC", "").strip()
-    try:
-        v = float(raw)
-    except ValueError:
-        return HOLD_PROGRESS_STALE_SEC
-    return v if v > 0 else HOLD_PROGRESS_STALE_SEC
 
 
 def hold_progress_at(hold: object) -> float:

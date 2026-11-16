@@ -115,6 +115,9 @@ TOP_IMPORTS = frozenset(
         "biz.course",
         "worker.events",
         "common.log",
+        # 2026-11-16：仓根单源（`common/paths.py`）。此前 `REPO_ROOT` 从 `trainer.dispatch_queue`
+        # 转发过来 —— 取一个路径常量却欠下整条传输面的依赖（`loop_control` 就栽在这条边上）。
+        "common.paths",
         "trainer.loop_guards",
         "worker.loop_round",
         "trainer.loop_steps",

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from common.cli import house_parser, run_main
+from common.paths import REPO_ROOT
 from remote.worker_server import epoch_mult_of, serve_forever
 
 
@@ -56,7 +57,7 @@ def main() -> None:
     # （specs 以 cwd=nn-training spawn 时相对路径走偏）。
     work = Path(args.work)
     if not work.is_absolute():
-        work = Path(__file__).resolve().parents[2] / work
+        work = REPO_ROOT / work
     serve_forever(
         args.port,
         token,

@@ -51,7 +51,8 @@ PLAN_EXPORTS = (
     "LADDER_JSON",
     "LEVELS_DIR",
     "REGRESSION_EVERY",
-    "REPO_ROOT",
+    # 2026-11-16：`REPO_ROOT` 不再是门面的转发项 —— 它现在直接住 `common/paths.py`
+    # （谁要就 `from common.paths import REPO_ROOT`），门面里那条 `X as X` 自别名已删。
     "SEGMENT_LEN",
     "batch_iter_id",
     "corpora_path",

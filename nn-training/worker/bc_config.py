@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from biz.course_resolve import apply_level_file
 from biz.course_spec import CustomStagesMixin
 from common.hashing import sha256_file
+from common.paths import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 CURRICULA_DIR = Path(__file__).resolve().parent.parent / "curricula"
 LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"
 

@@ -39,6 +39,7 @@ import remote.delta_files as delta_files
 from common.fs import atomic_write_bytes, same_bytes
 from common.hashing import sha256_file
 from common.logutil import tag_logger
+from common.paths import REPO_ROOT
 from common.protocol import ProtocolError, decode_opt_tar, decode_weights_json, sanitize_run_id
 from remote.artifacts import (
     WEIGHTS_ARCHIVE_ROOT as WEIGHTS_ARCHIVE_ROOT,
@@ -61,12 +62,9 @@ from remote.artifacts import (
 _log = tag_logger("hub-server", lambda: time)
 
 
-#: 仓库根 —— 课程配置与权重归档的相对路径基准。
-#: 2026-09-30（刀 1，hub 出包）：本模块从 `nn-training/remote/hub/store_offline.py` 搬到
-#: `nn-training/hub/store_offline.py`，**少了一层** ⇒ 上溯 4 层变 3 层（`parents[3]` → `parents[2]`）。
-#: 这是个静默类错误：层数是错的，但代码不报错，只是 REPO_ROOT 指到了仓库的**父目录**
-#: （工装用例 `tests/hub/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 当场抓住）。
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 仓库根 —— 课程配置与权重归档的相对路径基准。**唯一实现在 `common/paths.py`**（2026-11-16 去重）：
+#: 本模块自己数层数那回（2026-09-30 刀 1，`remote/hub/` → `hub/`）少了一层，静默指到仓库父目录，
+#: 靠 `tests/hub/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 当场抓住。
 #: 权重归档根/开关与取用入口（`_weights_archive_root`）的**唯一定义**已下沉到 `remote.artifacts`
 #: （2026-10-15 去重）：本模块与 `remote.weights_standard` 曾各留一份逐字节相同的实现 ——
 #: reuse 账本当场红，而两者都够得着的最低层就是那个 L0 产物模块。名字一律 `import ... as ...`

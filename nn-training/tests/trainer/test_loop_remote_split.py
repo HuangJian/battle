@@ -218,11 +218,11 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
     # 落位失败要**按类型**判「三重校验拒收」（`TripleCheckError`）才好清会话/不重落，
     # 而本模块的相位方法都走「方法体内自带 import」的既有形状（同 loop_remote_job）。
     # 2026-10-13（plan/ppo-job-lifecycle-ownership §2/§4，M1/M3）：`remote.hub_http`
-    # （看门狗三态 `job_liveness` + 三态假件的唯一实现）与 `trainer.loop_control`
+    # （看门狗三态 `job_liveness` + 三态假件的唯一实现）与 `worker.loop_control`
     # （redo 意图/回执的读面）进延迟集——同上：相位方法自带 import，且 `hub_http` 这份
     # 薄壳住测试可 patch 的**宿主命名空间**（提前到顶层会改变打桩面，见 `test_hub_http_split`）。
     "loop_remote_drive.py": frozenset(
-        {"worker.iter_job", "remote.hub_client", "remote.hub_http", "trainer.loop_control"}
+        {"worker.iter_job", "remote.hub_client", "remote.hub_http", "worker.loop_control"}
     ),
 }
 

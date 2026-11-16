@@ -3021,7 +3021,7 @@ v2（评审后修订）把方案拆成 M0–M7；本次落地 **M1+M2**，开关
   「歧义绝不猜」口径）。
 * 失败面：hub 不可达 ⇒ 只降级（账本照写、目录照删），**永不抛**——清不掉不能阻断开课。
 
-### M3 「重发本轮 PPO」意图（`trainer/loop_control.py` + `loop_remote_drive._maybe_consume_redo` + 控制台）
+### M3 「重发本轮 PPO」意图（`worker/loop_control.py` + `loop_remote_drive._maybe_consume_redo` + 控制台）
 
 为什么不新造通道：控制台与训练进程之间**已有**一套「意图文件 + 幂等回执」
 （`tmp/loop-control.json` 的暂停/恢复，用户 2026-09-18 定案：不为此在训练进程里再挂 HTTP 服务）。

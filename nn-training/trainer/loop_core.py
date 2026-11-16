@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from common.log import log
+from common.paths import REPO_ROOT
 from common.proc import run_capture
 from remote.payload_pack import ShardSegments
-from trainer.dispatch_queue import REPO_ROOT
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_lifecycle import TrainingLifecycle
 from trainer.loop_round_steps import RoundSteps

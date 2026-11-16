@@ -6755,3 +6755,25 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   随之收紧的判据：`tests/test_distribution_io_budget.py` 的扫描面从「一个模块」扩成
   `L0_IO_MODULES = (distribution, codehash)` 并按「模块 + 原语」记账 —— 搬家不能把副作用
   从账本上搬没。
+- **2026-11-16（仓根锚点单源：`common/paths.py`）**：`REPO_ROOT` 原来有 13 份「自己数层数」的副本
+  （`biz/ hub/ remote/ trainer/ worker/` 各自 `Path(__file__).resolve().parents[2]`）。这不是重复代码，
+  是重复**算术**：`hub/store_offline.py` 从 `remote/hub/` 搬到 `hub/` 那次少了一层，代码不报错，只是
+  所有相对路径指到仓库父目录（靠一个工装用例才抓住）。所以口径定为「仓根只在 `common/paths.py`
+  算一次，类型是 `Path`」，13 个模块改 import；`trainer/batch_eval.py` 的 `from biz.batch_plan import
+  REPO_ROOT as REPO_ROOT` 自别名一并删（`X as X` 门面正是这轮 P1-11 在清的债）。
+  **入口脚本例外**：`train/train_bc_v6.py`、`trainer/eval_*_once.py`、`worker/eval_replays_once.py`、
+  `worker/ppo/bench.py`、`worker/models/*`、`worker/data/*` 要在 import `common` **之前**算出根来插
+  `sys.path`，那种自举只能在本地算（写错是 ImportError，不是静默类错误）—— 它们按文件冻进
+  `tests/test_repo_root_anchor.py` 的 BASELINE，只许调小。
+- **2026-11-16（hold 判活窗下沉 `common/hold_window.py`）**：「接管后多久没进度算掉线」是**两侧共用**的
+  判据（hub 判 hold 活性 / 训练侧读控制文件时就地自判活），原先只有 `hub/task_pack.py` 一份，训练侧靠
+  函数内 `from hub.task_pack import hold_progress_stale_sec` 取 —— 一个阈值就造出一条「纯逻辑模块碰网络」
+  的边。搬到 L0 后两侧都只依赖 `common/`。**没有**合并 `AUTO_HANDOFF_PENDING_SEC`（导包窗口，巧合同值）、
+  也没有合并 `hub/store_leases.py` 的 BC 进度租约窗：语义不同，plan §1.5.2-P0-1 明令禁合并。
+- **2026-11-16（`loop_control` 归属：`trainer/` → `worker/`）**：它只 import `common.*`（纯逻辑），此前被
+  算作「编排」全靠 `from trainer.dispatch_queue import REPO_ROOT` —— 为取一个路径常量而存在的一条边，
+  与 `biz/batch_plan.py` 那笔同一型。仓根收口删掉这条边后，`test_trainer_holds_only_orchestration_modules`
+  立刻红（这正是那条门禁的用途）。归属按既有口径定：纯控制面契约住 `worker/`（`worker/gate_halt.py` 同族），
+  搬家顺带正过来一条反向边（`worker/loop_hold` 曾 import `trainer.loop_control`）。同步改了
+  `TRAINER_ORCHESTRATION`、`remote_dag.LAYERS`（`worker.loop_control: 0`）、`test_production_isolation`
+  的路径钉与 dashboard/docs 里的指针。

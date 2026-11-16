@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from common.hold_window import HOLD_PROGRESS_STALE_SEC
 from common.protocol import COURSE_ENABLE_MARKER
 from hub.queue_offline import (
     AUTO_HANDOFF_PENDING_SEC,
@@ -35,7 +36,6 @@ from hub.queue_offline import (
 )
 from hub.server import _HubQueue
 from hub.task_pack import (
-    HOLD_PROGRESS_STALE_SEC,
     HOLD_RESTORE_GRACE_SEC,
     hold_expires_in,
     hold_progress_at,
@@ -341,8 +341,8 @@ def test_store_gate_windows_match_task_pack_constants(
 ) -> None:
     """`store_leases` 里那份窗常量是**抄本**（它不许 import 调度上层）⇒ 这份对账必须有。"""
     import hub.store_leases as sl
+    from common.hold_window import HOLD_PROGRESS_STALE_SEC as TP_STALE
     from hub.server import _JobStore
-    from hub.task_pack import HOLD_PROGRESS_STALE_SEC as TP_STALE
 
     assert sl.HOLD_STALE_SEC == TP_STALE == 900.0
     assert sl.HOLD_STALE_ENV == STALE_ENV
@@ -455,7 +455,7 @@ def test_bc_liveness_is_progress_only_and_a_dead_lease_is_conceded(
 ) -> None:
     """★M5：bc 判活**只认 epoch**（心跳不算）；超窗 ⇒ 孤儿 ⇒ 让出（别人立刻能领）。"""
     import hub.store_leases as sl
-    from hub.task_pack import HOLD_PROGRESS_STALE_SEC
+    from common.hold_window import HOLD_PROGRESS_STALE_SEC
 
     #: 两个窗巧合同值、语义不同（P0-1 禁合并）——两个名字都得在，且都可由 env 调。
     assert sl.BC_PROGRESS_STALE_SEC == 900.0 == HOLD_PROGRESS_STALE_SEC

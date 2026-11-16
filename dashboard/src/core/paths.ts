@@ -108,7 +108,7 @@ export function consoleStatePath(): string {
  *
  *  它是「暂停/恢复某课」的唯一通道（用户 2026-09-18 定案：不为此在训练进程里再挂一个
  *  HTTP 服务）。两侧共享同一个工作区 ⇒ 一份意图文件最省，且 hub 挂了也能用。
- *  **python 侧默认路径必须与这里一致**：`nn-training/trainer/loop_control.py::control_path()`
+ *  **python 侧默认路径必须与这里一致**：`nn-training/worker/loop_control.py::control_path()`
  *  （那边 `NN_LOOP_CONTROL` 可覆盖，本侧用 `BCITY_LOOP_CONTROL`；单测各自重定向）。
  *  故这里**惰性**取值。 */
 export function loopControlPath(): string {
@@ -119,7 +119,7 @@ export function loopControlPath(): string {
  *
  *  内容 = 「我（pid）此刻实际把哪几门课暂停着」。它存在的唯一理由：意图文件回答不了
  *  「生效了没」——进程可能没在跑，也可能还没轮到读文件。
- *  对应 `nn-training/trainer/loop_control.py::applied_path()`（`NN_LOOP_CONTROL_APPLIED`）。 */
+ *  对应 `nn-training/worker/loop_control.py::applied_path()`（`NN_LOOP_CONTROL_APPLIED`）。 */
 export function loopAppliedPath(): string {
   return process.env.BCITY_LOOP_APPLIED ?? path.join(LOG_DIR, 'loop-control.applied.json')
 }

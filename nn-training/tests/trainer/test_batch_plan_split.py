@@ -68,8 +68,9 @@ MOVED_FUNCS = (
     "batch_iter_id",
     "select_next_unit",
 )
+#: 2026-11-16：`REPO_ROOT` 从这份名单里去掉 —— 它不再是某个模块的私有常量，而是
+#: `common/paths.py` 的单源（`MOVED` 的口径是「这个落地模块自己定义的名字」）。
 MOVED_CONSTS = (
-    "REPO_ROOT",
     "LADDER_JSON",
     "CORPORA_JSON",
     "LEVELS_DIR",
@@ -115,6 +116,8 @@ PLAN_IMPORTS = {
     # 这条闭包仍然不含传输层、不含 trainer 内部。
     "common.codehash",
     "common.jsonc",
+    # 2026-11-16：仓根常量改从单源取（`common/paths.py`），不再自己数层数。
+    "common.paths",
     # 2026-11-14：`mm` 从 `common.proc.version_mm` 直接取（此前经 `trainer.dispatch_queue`
     # 的 re-export 面转发 —— 那正是它「假装碰传输层」的那条边）。
     "common.proc",

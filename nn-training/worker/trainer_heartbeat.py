@@ -43,8 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from common.log import log
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from common.paths import REPO_ROOT
 
 #: 写线程周期（秒）。**不变式：HEARTBEAT_SEC << 控制台判死窗口 STALE=300s**（评审 P0-2 的护栏 4）。
 HEARTBEAT_SEC = 5.0

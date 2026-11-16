@@ -56,6 +56,7 @@ _STAMP_PREFIX = re.compile(r"^\[\d{2}:\d{2}:\d{2}\] ")
 def _strip_stamp(line: str) -> str:
     """剥掉行首的 `[HH:MM:SS] `（无戳行原样返回）。"""
     return _STAMP_PREFIX.sub("", line)
+from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.code_snapshot import (
     current_code_zip_path,
@@ -82,7 +83,6 @@ from trainer.bc_round_job import (
 from trainer.bc_round_job import (
     resolve_bc_init_weights as resolve_bc_init_weights,
 )
-from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
 from worker.bc_collect import collect_corpus as _collect_corpus
 from worker.bc_collect import smoke_overrides as smoke_overrides

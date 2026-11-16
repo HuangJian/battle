@@ -47,7 +47,6 @@ from biz.batch_plan import KIND_FOR_POLICY as KIND_FOR_POLICY
 from biz.batch_plan import LADDER_JSON as LADDER_JSON
 from biz.batch_plan import LEVELS_DIR as LEVELS_DIR
 from biz.batch_plan import REGRESSION_EVERY as REGRESSION_EVERY
-from biz.batch_plan import REPO_ROOT as REPO_ROOT
 from biz.batch_plan import SEGMENT_LEN as SEGMENT_LEN
 from biz.batch_plan import batch_iter_id as batch_iter_id
 from biz.batch_plan import corpora_path as corpora_path

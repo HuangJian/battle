@@ -40,10 +40,9 @@ from typing import Any
 
 from biz.course_resolve import CURRICULA_DIR
 from common.log import close_course_sinks, log, open_course_sink, prefix_scope
+from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
-from trainer.dispatch_queue import REPO_ROOT
-from trainer.loop_control import ControlApplier, read_control
 from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
     course_enabled,
@@ -67,6 +66,7 @@ from worker.course_args import (
     course_args,
 )
 from worker.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
+from worker.loop_control import ControlApplier, read_control
 from worker.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from worker.loop_tasks import RoundFacts, Task, abort, pending_tasks
 from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
@@ -921,7 +921,7 @@ def serve(
     ★ **发现判据从「有账本」改成「有开课标记」**（2026-09-20 用户口径：「课程开训需要用户
     手动开启」）：旧判据下 tmp/ 里的历史课会被一起拉起来跑（实测一启动就 21 门）。
 
-    每拍的**控制面**（`trainer/loop_control.py`）：读 `tmp/loop-control.json` 的暂停意图 →
+    每拍的**控制面**（`worker/loop_control.py`）：读 `tmp/loop-control.json` 的暂停意图 →
     `Supervisor.pause/resume`。暂停只影响调度，队列/账本不动（用户口径「保留队列，不删」）。
 
     退出条件（`ServeReport.stop_reason` 如实记录是哪一条——运维要能一眼分辨「跑完」与「被停」）：

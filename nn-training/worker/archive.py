@@ -19,9 +19,8 @@ import time
 from pathlib import Path
 
 from common.log import log
+from common.paths import REPO_ROOT
 from common.proc import run_capture
-
-REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/biz/ 上溯 3 层）
 
 WEIGHTS_BACKUP_DIR = REPO_ROOT / "nn-training" / "weights"
 WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（tools/weights_prune.py）的参考配额；backup_weights 不自动删

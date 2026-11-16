@@ -45,11 +45,11 @@ import 后，陈旧的 `trainer.loop_steps.<名字>` 会**响亮** `AttributeErr
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
 import common.distribution
 from common.log import log
+from common.paths import REPO_ROOT
 from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from remote import weights_standard
 from worker.archive import backup_weights
@@ -90,7 +90,7 @@ class TrainingExport:
             return
         from remote.code_snapshot import published_ts_code_zip
 
-        repo_root = Path(__file__).resolve().parents[2]  # nn-training/trainer/x.py -> 仓根
+        repo_root = REPO_ROOT  # 仓根单源：`common/paths.py`
         zp, sha, _from_snapshot = published_ts_code_zip(
             job_root, repo_root=repo_root, log=lambda m: log(f"[run_rl] {m}")
         )

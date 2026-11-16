@@ -24,6 +24,7 @@ from typing import Any
 import common.distribution
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote import weights_standard
 
@@ -33,10 +34,6 @@ from worker import node_identity, serve_pool
 from worker.cmd import build_rollout_cmd, corpus_fp_for_args, course_fp_for_args
 from worker.reports import combine_reports
 from worker.sibling_reuse import reuse_rollout, rollout_sources
-
-REPO_ROOT = (
-    Path(__file__).resolve().parents[2]
-)  # 仓库根 battle2（trainer/ 上溯 3 层，修正 2026-09-02）
 
 #: 本机腿交给长驻池的单局硬顶（秒）——**故意远大于任何合法长局**。
 #:

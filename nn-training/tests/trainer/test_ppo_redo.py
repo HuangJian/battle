@@ -2,7 +2,7 @@
 
 被测 = `TrainingRemoteDrive._maybe_consume_redo` 接在 `_remote_ppo_step` 那一拍上的行为，
 意图文件 = 控制台写的 `tmp/<课>/redo-ppo.json`（形状 `{version,it,at}`，契约住
-`trainer/loop_control.py`，控制台半边由 `dashboard/tests/redo-ppo.test.ts` 钉）。
+`worker/loop_control.py`，控制台半边由 `dashboard/tests/redo-ppo.test.ts` 钉）。
 
 四条性质（每条都是「不做就会静默地不对」的那类）：
 
@@ -27,8 +27,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.loop_remote_drive as drive_mod
-from trainer.loop_control import read_redo_applied
 from trainer.loop_steps import TrainingSteps
+from worker.loop_control import read_redo_applied
 from worker.loop_round import RemotePpoJob, RoundContext
 
 JID = "j" * 16

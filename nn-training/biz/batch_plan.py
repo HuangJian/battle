@@ -32,9 +32,8 @@ from pathlib import Path
 import common.codehash
 import common.distribution
 from common.jsonc import load as jsonc_load
+from common.paths import REPO_ROOT
 from common.proc import version_mm as mm
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 LADDER_JSON = REPO_ROOT / "dashboard" / "src" / "evalboard" / "ladder.json"
 #: 判决语料注册表（P2，2026-09-19「中方案」）：课程关卡文件 + 池外 seed 段 + 多 ckpt。

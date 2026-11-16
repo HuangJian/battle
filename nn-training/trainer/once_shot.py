@@ -35,8 +35,8 @@ import time
 from pathlib import Path
 
 from common.log import log
+from common.paths import REPO_ROOT
 from common.proc import run_capture
-from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import ensure_current_branch_pushed
 from worker.train.loop_util import (
     acquire_lock,

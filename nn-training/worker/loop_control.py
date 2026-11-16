@@ -1,5 +1,10 @@
 """loop_control —— 控制台 → 单进程 supervisor 的**控制文件**契约（R2d 操作面）。
 
+2026-11-16 从 `trainer/` 搬到 `worker/`：它是**纯逻辑**，而 `trainer/` 只许住编排（见
+`tests/test_layering.py` 的集合相等）。它从前「算编排」靠的是 `from trainer.dispatch_queue import
+REPO_ROOT`（为取一个路径常量而存在的边，与 `biz/batch_plan.py` 同一型）；搬家顺带正过来一条
+反向边：`worker/loop_hold.py` 曾要 `from trainer.loop_control import read_control`。
+
 为什么是文件而不是 HTTP 服务：训练侧（`trainer/loop_serve.py`）已经是「一个进程服务 N 门课」，
 控制台要能**暂停/恢复某一课**却又不想在训练进程里再挂一个服务器（多一个端口、多一份鉴权、
 多一处故障域）。而两侧本来就共享一个工作区（`tmp/` 是训练产物与账本的落脚处）⇒ 用一份
@@ -32,10 +37,8 @@
 **保守方向是刻意的**：读不到 / 解析失败 / 形状不对 ⇒ 一律当作「没有任何暂停意图」——
 宁可持续训练，绝不因为控制面坏掉而误停整条腿（与 `already_done` 的「算不出的判据不得
 当成完成」同一条纪律）。反过来，暂停只影响**调度**：队列与账本一个字都不动（用户口径
-「暂停 = 保留队列，不删」），恢复后从原处接着跑。
-
-失效安全与可见性：本模块只在**意图变化时**产出日志行（每秒轮询不得刷屏），解析失败也只报
-一次（记住上次的错误签名）。
+「暂停 = 保留队列，不删」），恢复后从原处接着跑。失效安全与可见性：只在**意图变化时**产出
+日志行（每秒轮询不得刷屏），解析失败也只报一次（记住上次的错误签名）。
 
 ## 回执面（意图 ≠ 事实）
 
@@ -55,8 +58,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from common.hold_window import hold_progress_stale_sec
 from common.log import log
-from trainer.dispatch_queue import REPO_ROOT
+from common.paths import REPO_ROOT
 
 #: 控制文件默认位置（repo 根 `tmp/`——训练机与控制台共享的工作区）。
 DEFAULT_CONTROL_PATH = str(REPO_ROOT / "tmp" / "loop-control.json")
@@ -163,8 +167,6 @@ def parse_held(raw: object, *, now: float) -> tuple[set[str], str]:
     条目形状 `{"course": c, "last_progress_at": t}`；缺 `/ 非法 / 超窗` ⇒ **不新鲜**
     （只认进度：零进度不算活着，与 hub 的 `hold_state` 同一口径）。
     """
-    from hub.task_pack import hold_progress_stale_sec
-
     if raw is None:
         return set(), ""
     if not isinstance(raw, list):
@@ -314,9 +316,7 @@ def read_redo_applied(traj_dir: str | os.PathLike[str]) -> tuple[int, float]:
         return 0, 0.0
 
 
-def consume_redo(
-    traj_dir: str | os.PathLike[str], it: int
-) -> tuple[RedoIntent | None, str]:
+def consume_redo(traj_dir: str | os.PathLike[str], it: int) -> tuple[RedoIntent | None, str]:
     """把某课的重发意图消费成一次动作（幂等）。
 
     返回 `(intent, error)`：`intent` 非 None = **本次该执行**（调用方随后必须
@@ -380,7 +380,9 @@ class ControlApplier:
             want_paused = course in control.paused
             if want_paused and q.state != "paused":
                 sup.pause(course, reason=f"控制台暂停（{where}）")
-                lines.append(f"[loopcontrol] 暂停课程 {course}（队列与账本保留，恢复后从原处接着跑）")
+                lines.append(
+                    f"[loopcontrol] 暂停课程 {course}（队列与账本保留，恢复后从原处接着跑）"
+                )
             elif not want_paused and q.state == "paused":
                 sup.resume(course)
                 lines.append(f"[loopcontrol] 恢复课程 {course}")

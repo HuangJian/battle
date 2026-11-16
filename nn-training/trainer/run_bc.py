@@ -40,10 +40,10 @@ sys.path.insert(0, str(_SCRIPT_DIR.parent))
 
 from common.cli import run_main
 from common.log import log
+from common.paths import REPO_ROOT
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
 from trainer.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
-from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import ensure_current_branch_pushed
 from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 

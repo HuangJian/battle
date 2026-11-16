@@ -46,9 +46,9 @@ from typing import Any
 
 from common.cli import house_parser, run_main
 from common.hashing import sha256_bytes, sha256_file  # re-export：唯一实现在 common/hashing.py
+from common.paths import REPO_ROOT
 from common.platform_utils import rmtree_best_effort
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAJ_ROOT = REPO_ROOT / "tmp"
 DEFAULT_ARCHIVE_ROOT = REPO_ROOT / "archive" / "courses"
 CURRICULA_DIR = REPO_ROOT / "nn-training" / "curricula"

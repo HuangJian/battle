@@ -4148,7 +4148,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 **② 控制通道 = 一份意图文件（`tmp/loop-control.json`）**
 - 控制台写 `{"version":1,"paused":["c5"]}`（`dashboard/src/server/actions/loop-control.ts`，**原子写**
   tmp+rename：训练侧每拍都在读，读到半个 JSON = 读到坏文件 = 静默失效），训练侧每拍读一次并施加到
-  调度器（`trainer/loop_control.py`）。hub 挂了也能用，**文件本身就是状态**（对比 hub 的 course-mode 是
+  调度器（`worker/loop_control.py`）。hub 挂了也能用，**文件本身就是状态**（对比 hub 的 course-mode 是
   volatile，那边要靠回灌）。
 - **保守方向是刻意的**：读不到 / 解析失败 / 形状不对 ⇒ 当作「没有任何暂停意图」（继续训练）。控制面
   坏掉不该停掉整条腿——这与 `already_done` 的「算不出的判据不得当成完成」同一条纪律。两侧各自单测。
@@ -5014,7 +5014,7 @@ supervisor 每轮判定读）+ `tmp/gate-halt.applied.json` 回执（逐课 `eff
 升格成全平台，违背「平台级是人显式切的」⇒ 取「忽略 + 首次告警 + 控制台提示可删」。② 把开关做成
 rl-config 键——它每进程启动才读一次，而平台开关要**每轮热读**（且 rl-config 承载密钥、写面重）。
 ③ 离线腿「也能 notify」——今天云机侧没有读点（读点只在 supervisor），不为此改 hub 下发链路；
-取 `NN_GATE_HALT_LEG=offline` 短路 + `source=default` 日志兜底。④ 顺手重构 `trainer/loop_control.py`
+取 `NN_GATE_HALT_LEG=offline` 短路 + `source=default` 日志兜底。④ 顺手重构 `worker/loop_control.py`
 （同构范式）——不动：它有自己的契约与用例，同构不等于同体。
 
 **为什么值得记**（AGENTS §6.3）：① 有被否决备选（上面四条）；② **未来会重犯**——「把操作员的
