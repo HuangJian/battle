@@ -56,6 +56,13 @@ function toWslPath(p: string): string {
 }
 
 const games = Math.max(1, Number(arg('--games', '1015')))
+/**
+ * 起始局号（默认 0）。存在理由：**一个进程跑满 350 局会长局 OOM**（2026-11-16 云机实测，
+ * 57/350 处 `RangeError: Out of memory`；本机 40 局 RSS 只到 ~315 MB 就平了 ⇒ 那是
+ * 环境的 cgroup 上限，不是这一局的数据大）。切块必须能指定起点，否则每块都从 i=0 重跑
+ * 同一批 `(stage, seed)`，切了等于没切。局号映射不变：`stage = i % 35`、`seed = base + i//35`。
+ */
+const gameOffset = Math.max(0, Number(arg('--game-offset', '0')))
 const maxTicks = Math.max(50, Number(arg('--max-ticks', '1200')))
 const weightsPath = resolve(
   arg('--weights', 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'),
@@ -85,10 +92,12 @@ let convMs = 0
 let recordMsTotal = 0
 let sampleTotal = 0
 console.log(
-  `[verify] games=${games} maxTicks=${maxTicks} stages=${STAGES.length} work=${work} runtimes=${[...runtimes].join(',')}`,
+  `[verify] games=${games} offset=${gameOffset} maxTicks=${maxTicks} stages=${STAGES.length} ` +
+    `work=${work} runtimes=${[...runtimes].join(',')}`,
 )
 
-for (let i = 0; i < games; i++) {
+for (let k = 0; k < games; k++) {
+  const i = gameOffset + k
   const stage = i % STAGES.length
   const seed = 2000000001 + Math.floor(i / STAGES.length)
   const stageObj = STAGES[stage]
@@ -158,12 +167,12 @@ for (let i = 0; i < games; i++) {
   }
   refs.push(row)
   writeFileSync(refPath, JSON.stringify(row) + '\n', { flag: 'a' })
-  if ((i + 1) % 25 === 0 || i + 1 === games) {
+  if ((k + 1) % 25 === 0 || k + 1 === games) {
     const sec = (Date.now() - t0) / 1000
-    const rate = (i + 1) / sec
-    const eta = (games - i - 1) / Math.max(0.001, rate)
+    const rate = (k + 1) / sec
+    const eta = (games - k - 1) / Math.max(0.001, rate)
     console.log(
-      `[verify] ${i + 1}/${games} samples=${row.nSamples} elapsed=${sec.toFixed(1)}s ` +
+      `[verify] ${k + 1}/${games} (i=${i}) samples=${row.nSamples} elapsed=${sec.toFixed(1)}s ` +
         `rate=${rate.toFixed(2)}/s eta=${eta.toFixed(0)}s`,
     )
   }
