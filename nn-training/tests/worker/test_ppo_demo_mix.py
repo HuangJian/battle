@@ -13,25 +13,27 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
-from common.schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.models.student import PPOStudent
+from worker.ppo.demo import DemoBank
 from worker.ppo.engine import ppo_update
 
 
-def _chunks(n_chunks: int = 2, b: int = 8, seed: int = 0) -> list[dict]:
+def _chunks(n_chunks: int = 2, b: int = 8, seed: int = 0, *, extra: bool = False) -> list[dict]:
     rng = np.random.default_rng(seed)
-    return [
-        {
+    out: list[dict] = []
+    for _ in range(n_chunks):
+        c: dict = {
             "obs": rng.integers(0, 256, (b, OBS_CHANNELS, 26, 26), dtype=np.uint8),
             "scalars": rng.standard_normal((b, SCALAR_DIM)).astype(np.float32),
             "a_move": rng.integers(0, 5, (b,), dtype=np.int64),
@@ -42,8 +44,10 @@ def _chunks(n_chunks: int = 2, b: int = 8, seed: int = 0) -> list[dict]:
             "ret": rng.standard_normal(b).astype(np.float32),
             "mask": np.ones((b, 7), dtype=np.float32),
         }
-        for _ in range(n_chunks)
-    ]
+        if extra:  # policy_extra 模型的 train chunk 也必须带 extra（少了模型当场 ValueError）
+            c["extra"] = rng.standard_normal((b, POLICY_EXTRA_DIM)).astype(np.float32)
+        out.append(c)
+    return out
 
 
 def _bank(n: int = 64, seed: int = 1, single_mask: bool = False) -> dict:
@@ -145,3 +149,42 @@ def test_demo_fire_labels_do_not_reach_fire_head() -> None:
     assert not torch.equal(base["move_head.weight"], init["move_head.weight"]), (
         "move 头没更新——先确认 ppo_update 真的跑了"
     )
+
+
+def test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model() -> None:
+    """`policy_extra=True` 的模型必须拿到 bank 的 `extra` —— 两侧后端要喂同一份输入。
+
+    `engine_paddle` 一直把 bank 的 `extra` 物化进 `demo_t`；torch 侧 `_setup_demo` 只建了
+    obs/scalars/actions/masks，于是 demo BC 的前向拿到 `extra=None`，而 `StudentNet.
+    _require_extra` 在 `policy_extra=True` 时**必须**有值（它拒绝静默用 0）⇒ torch 侧
+    「demo 开 + 带 extra 的模型」这条腿直接炸，paddle 侧却正常跑。这条用例钉住：
+    bank 里有 `extra` 就必须喂到模型。
+    """
+    np.random.seed(7)
+    torch.manual_seed(1234)
+    model = PPOStudent(h=8, d=1, policy_extra=True)
+    opt = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    # `DemoBank` 的五个键都是必需的；`_bank()` 刻意不建 `extra`（那几条用例走的是
+    # 「bank 没有 extra」的兼容面），所以这里补上再标成字段表。
+    bank: DemoBank = cast(
+        DemoBank,
+        {
+            **_bank(),
+            "extra": np.random.default_rng(3)
+            .standard_normal((64, POLICY_EXTRA_DIM))
+            .astype(np.float32),
+        },
+    )
+    agg = ppo_update(
+        model,
+        opt,
+        _chunks(extra=True),
+        1,
+        torch.device("cpu"),
+        kl_coef=0.0,
+        demo_bank=bank,
+        demo_bc_coef=0.02,
+        demo_per_mb=8,
+    )
+    assert np.isfinite(agg["demo_bc"])
+    assert agg["demo_bc"] > 0.0, f"demo_bc={agg['demo_bc']}，BC 项疑似未生效"

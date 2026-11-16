@@ -6847,3 +6847,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   位置参数不算）。`Runtime`（executor 生命周期 / 有界共享池）不在本批，属 B6，见 §P1-6。
   顺带：`trainer/batch_runner.py` 顶在 1000 行 LOC 预算上，三处 spawn 收进 `_spawn_thread(...)`
   ⇒ 1000 → 997，没有开新豁免。
+- **2026-11-16（bugfix：torch 侧 demo BC 缺 `extra`，两后端输入分叉）**：`demo_bank` 有五个字段，
+  `engine_paddle` 一直把 `extra` 物化进 `demo_t`，torch 侧 `_setup_demo` 只建 obs/scalars/actions/masks
+  ⇒ 同 bank 两侧喂给模型的输入不同。`policy_extra=True` 的 `StudentNet` 在 `_require_extra` 处
+  拒绝 `extra=None`（明确「不静默用 0」）⇒ torch「demo 开 + 带 extra 模型」腿每次更新直接炸；
+  legacy 模型看不出差别。修 `_setup_demo` 与 Paddle 同口径（存在即物化）；先红后修用例
+  `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`。详见 `docs/nn/training-stack.md` §73。

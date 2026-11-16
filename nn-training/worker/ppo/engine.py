@@ -428,17 +428,20 @@ def _setup_demo(ctx: PPOContext) -> _Demo:
     if demo_on:
         assert demo_bank is not None  # 由 demo_on 保证，mypy 收窄用
         try:
-            demo_t = tensored_chunks(
-                [
-                    {
-                        "obs": np.asarray(demo_bank["obs"]),
-                        "scalars": np.asarray(demo_bank["scalars"]).astype(np.float32),
-                        "actions": np.asarray(demo_bank["actions"]).astype(np.int64),
-                        "masks": np.asarray(demo_bank["masks"]).astype(np.float32),
-                    }
-                ],
-                device,
-            )[0]
+            demo_src: dict[str, np.ndarray] = {
+                "obs": np.asarray(demo_bank["obs"]),
+                "scalars": np.asarray(demo_bank["scalars"]).astype(np.float32),
+                "actions": np.asarray(demo_bank["actions"]).astype(np.int64),
+                "masks": np.asarray(demo_bank["masks"]).astype(np.float32),
+            }
+            # bank 有 `extra` 就必须喂给模型：`policy_extra=True` 的 StudentNet 在
+            # `_require_extra` 处**拒绝** `extra=None`（拒绝静默用 0），而 paddle 侧
+            # 一直物化它（2026-11-16 前 torch 侧漏了这一步 ⇒ 同 bank 两侧输入不同，
+            # torch 的 demo 腿在 policy_extra 模型上直接炸）。缺 `extra` 的只可能是
+            # 没走安全阀的调用方，那种 bank 对 legacy 模型仍然有效（模型不看这一列）。
+            if "extra" in demo_bank:
+                demo_src["extra"] = np.asarray(demo_bank["extra"]).astype(np.float32)
+            demo_t = tensored_chunks([demo_src], device)[0]
             demo_n = int(demo_t["actions"].shape[0])
             demo_on = demo_n > 0
             if demo_on:

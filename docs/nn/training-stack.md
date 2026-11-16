@@ -8,6 +8,36 @@
 
 ---
 
+## §73 demo BC 的 `extra` 只在 Paddle 侧进模型：同 bank 两侧输入不同（2026-11-16）
+
+**背景**（做 `demo_bank` 类型化时发现）：`demo_bank` 的 `.npz` 有五个字段
+（`obs` / `scalars` / `extra` / `actions` / `masks`），安全阀 `check_demo_bank` **五个都要求**。
+但两侧引擎物化方式不同：
+
+- `engine_paddle.ppo_update`：`demo_t` 建了 extra（`if demo_on and "extra" in demo_bank`）⇒
+  demo BC 前向拿到真值；
+- `engine.py::_setup_demo`（torch）：只建 obs/scalars/actions/masks，**`extra` 从未物化** ⇒
+  demo 段前向拿到 `extra=None`。
+
+后果分两种模型：
+1. **`policy_extra=True` / spatial 模型**：`StudentNet._require_extra` 拒绝 `extra=None`
+   （它明确「extra=None 会静默用 0」）⇒ torch 侧「demo 开 + 带 extra 的模型」这条腿
+   **每次更新直接 ValueError**。Paddle 侧正常。
+2. legacy 模型：模型不看这一列，看不出差别 —— 正是「两侧输入不同但都绿」的形态。
+
+**修复**（`worker/ppo/engine.py::_setup_demo`）：把 bank 的 `extra`（存在时）一并物化进
+`demo_src`，与 Paddle 侧同一口径。缺失时仍然跳过 —— 缺 `extra` 的只可能是不走安全阀的调用方
+（生产链上 `check_demo_bank` 已拒收），legacy 模型对那一列无感。
+
+**判据**（先红后修，`tests/worker/test_ppo_demo_mix.py`）
+- `test_demo_bc_feeds_the_bank_extra_to_a_policy_extra_model`：`PPOStudent(policy_extra=True)` +
+  带 `extra` 的 bank ⇒ 旧实现当场 `ValueError: student: policy_extra=True 的模型必须喂
+  POLICY_EXTRA(57)`，修复后 `demo_bc > 0` 且有限（7 passed）。
+- 既有五条 demo 用例（关闭恒等 / 开启非零 / 同种子逐位 / 单合法类 / fire 不参与）仍绿。
+
+**边界**：本机只跑了 torch 侧；`tools/paddle_parity.py` 的八用例没在本机重跑（缺 paddle 解释器），
+所以「两侧现在真的同输入」只由代码同口径 + torch 侧行为用例保证，没有跨框架数值对账。
+
 ## §72 BC 末轮 eval 兜底 + 重启补评（2026-11-12）
 
 **背景**（g1e-4s2e 报障）：设了 `eval.every_epochs` 的 BC 课，末 epoch 权重已回传，但对应
