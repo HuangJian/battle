@@ -454,7 +454,10 @@ BASELINE_FORM = 1513
 #:   `*.py` 面数 env 直读 —— 与 G3/G4/G6/G9 同一已知限边（判据是「每个文件读了几次、旋钮有没有
 #:   第二个家」，不是措辞；口径 A 仍 0 条）。同批 `tests/trainer/test_batch_plan_split.py` 删掉一条
 #:   文本判据（那份路径常量已搬进 `common/settings.py`，改由 G13 行为化地抓）⇒ FORM 未动。
-BASELINE_SRC = 1157
+#: 2026-11-16 抬到 **1159**（+2，实测）：新门禁 `tests/test_any_budget.py`（G14）用 AST 扫 `*.py` 面
+#:   数 `Any` 注解，并在同一文件里对**自己那两段示例源码**做口径自检（「注释里的字样不算 / `*.Any`
+#:   算」）—— 与 G13/G4/G6/G9 同一已知限边（判据是结构计数，不是措辞；口径 A 仍 0 条）。
+BASELINE_SRC = 1159
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:
