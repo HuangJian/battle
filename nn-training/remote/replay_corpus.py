@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import ProtocolError
-from common.platform_utils import rmtree_best_effort
+from common.platform_utils import effective_cores, rmtree_best_effort
 from common.proc import run_capture
 
 CONVERTER_NAME = "replay_converter.js"
@@ -250,6 +250,32 @@ def _corpus_bytes(shard_dirs: list[Path]) -> tuple[int, int]:
     return replay_bytes, labels_bytes
 
 
+def convert_workers(requested: int | None = None, shards: int | None = None) -> int:
+    """转换承载宽度：显式值优先；缺省 **用完本进程所有可用核**（`effective_cores()`）。
+
+    两个约束决定了这个口径（用户 2026-11-16 两次点明）：
+      1. **GPU 云机的 CPU 核数是浮动的** —— 低配 2 物理 / 4 逻辑、中配 4/8、高配 24。写死 2 在高配上
+         白扔一个数量级；
+      2. **转换腿不与他人共享 CPU** —— 它是训练前的 pre-pass，跑完就结束，同机没有 rollout/eval
+         在并行（那两条腿才需要留核给数据回传，所以它们走 `cpu_worker_slots()`）。这里留核 =
+         纯白等墙钟。
+
+    为什么不用 `cpu_worker_slots()`：那条口径是「rollout 与 eval 交替、给回传留两三个核」的槽位，
+    属于**并发腿之间**的分配；转换是单腿独占阶段，直接 `effective_cores()`（读 cgroup 配额与亲和掩码，
+    不采信宿主机的 `os.cpu_count()`）。
+
+    `shards` 给了就按 `min(cores, shards)` 收敛 —— 3 个 shard 时起 19 个 worker 只是多付启动。
+
+    实测校准（Kaggle 2 物理 / 4 逻辑，350 shard）：`w=2` 22.9 s、`w=4` 21.6 s（超线程只值 6%，
+    但仍不该留核）；本机 8 物理 / 16 逻辑、60 shard：`w=2` 2.8 s、`w=14` 2.3 s。单 worker 常驻
+    ~120 MB（一次只持一个 shard），19 worker ≈ 2.3 GB，相对 GPU 机内存可忽略。
+    """
+    n = max(1, int(requested)) if requested is not None else max(1, int(effective_cores()))
+    if shards is not None:
+        n = max(1, min(n, int(shards)))
+    return n
+
+
 def convert_fallback_flag(runtime_name: str) -> int:
     """`convert_fallback` 读数：0 = 主运行时（bun），1 = 走了回落（任何非 bun）。
 
@@ -266,7 +292,7 @@ def convert_replay_corpus(
     manifest: dict,
     *,
     log: Callable[[str], None] = lambda _m: None,
-    workers: int = 2,
+    workers: int | None = None,
     pool_factory: Callable[[str, Path, int], Any] | None = None,
 ) -> dict[str, Any]:
     """把一整轮 replay shard 就地转成 obs/scalars/extra，返回读数。
@@ -281,14 +307,13 @@ def convert_replay_corpus(
         raise ProtocolError("corpus_fmt=replay 但 payload 里没有任何 shard——拒收（不训空）")
     converter, conv_sha = verify_converter(job_dir, manifest)
     runtime = resolve_js_runtime()
+    n_workers = convert_workers(workers, len(shard_dirs))
     t0 = time.time()
     reused = 0
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
     replay_bytes, labels_bytes = _corpus_bytes(shard_dirs)
 
-    pool = (
-        pool_factory(runtime, converter, max(1, int(workers))) if pool_factory is not None else None
-    )
+    pool = pool_factory(runtime, converter, n_workers) if pool_factory is not None else None
 
     def _submit_via_pool(tmp: Path, label: str) -> None:
         """池里跑一次；池给不出确定成功 ⇒ 回退一次性 spawn（**只慢不错**）。"""
@@ -314,7 +339,7 @@ def convert_replay_corpus(
         )
 
     try:
-        n = max(1, min(int(workers), len(shard_dirs)))
+        n = max(1, min(n_workers, len(shard_dirs)))
         with ThreadPoolExecutor(max_workers=n) as ex:
             for got in ex.map(_one, shard_dirs):
                 if got:
@@ -327,7 +352,7 @@ def convert_replay_corpus(
     runtime_name = Path(runtime).name
     log(
         f"replay 转换完成：{len(shard_dirs)} shard（复用 {reused}），"
-        f"{sec:.1f}s runtime={runtime_name} converter={conv_sha[:12]}…"
+        f"{sec:.1f}s runtime={runtime_name} workers={n_workers} converter={conv_sha[:12]}…"
     )
     return {
         "shards": len(shard_dirs),
@@ -335,6 +360,7 @@ def convert_replay_corpus(
         "sec": round(sec, 1),
         "converter_sha256": conv_sha,
         "runtime": runtime_name,
+        "convert_workers": n_workers,
         # D10（plan/replay-corpus.plan.md）：iteration `wire` 子字典的新字段。
         "corpus_fmt": "replay",
         "replay_bytes": replay_bytes,
@@ -353,6 +379,7 @@ def prepass(
     log: Callable[[str], None] = lambda _m: None,
     bundle: Any = None,
     pool_factory: Callable[[str, Path, int], Any] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any] | None:
     """`run_job` 的 replay pre-pass 入口：非 replay 原样返回 None（零行为变化）。
 
@@ -366,7 +393,9 @@ def prepass(
             f"corpus_fmt=replay 只支持 kind=ppo，收到 kind={manifest.get('kind')!r}"
             "——kind=iter 的节点自跑 rollout 强制 full（plan/replay-corpus.plan.md D2）"
         )
-    got = convert_replay_corpus(job_dir, shard_dirs, manifest, log=log, pool_factory=pool_factory)
+    got = convert_replay_corpus(
+        job_dir, shard_dirs, manifest, log=log, pool_factory=pool_factory, workers=workers
+    )
     if bundle is not None:
         bundle.add(
             "replay 转换",
@@ -401,6 +430,7 @@ __all__ = [
     "attach_converter",
     "convert_replay_corpus",
     "convert_shard",
+    "convert_workers",
     "converter_sha",
     "prepass",
     "resolve_js_runtime",

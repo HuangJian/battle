@@ -162,3 +162,46 @@ def test_pool_passed_fixed_mode_and_bundle_entry() -> None:
     assert seen['entry'] == 'replay_converter.js'
     assert seen['fixed_mode'] == 'conv'
     assert seen['for_script'] == str(Path('/x/replay_converter.js'))
+
+
+def test_convert_workers_uses_all_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """转换宽度 = **所有可用核**（不是 `cpu_worker_slots` 的留核口径）。
+
+    GPU 云机核数浮动（低配 2 物理/4 逻辑、中配 4/8、高配 24）；转换是训练前的单腿 pre-pass，
+    同机没有 rollout/eval 并行 ⇒ 留核就是纯白等墙钟。显式值必须能覆盖（测试/压测要）。
+    """
+    for cores in (2, 4, 8, 24, 1):
+        monkeypatch.setattr(rc, 'effective_cores', lambda c=cores: c)
+        assert rc.convert_workers() == cores, f'cores={cores}'
+    # 显式值优先，且非法值收敛到 ≥1
+    assert rc.convert_workers(1) == 1
+    assert rc.convert_workers(8) == 8
+    assert rc.convert_workers(0) == 1
+    assert rc.convert_workers(-3) == 1
+    # 少于核数时按 shard 数收敛（别为 3 个 shard 起 19 个 worker）
+    monkeypatch.setattr(rc, 'effective_cores', lambda: 19)
+    assert rc.convert_workers(shards=3) == 3
+    assert rc.convert_workers(shards=350) == 19
+
+
+def test_pool_width_and_readout_follow_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """池宽度与读数都跟着解析出的宽度走（不是跟着缺省值走）。"""
+    job, man, shards = _job(tmp_path)
+    pool = _FakePool()
+    seen: list[int] = []
+
+    def fake_factory(runtime: str, converter: Path, workers: int):
+        seen.append(workers)
+        return pool
+
+    monkeypatch.setattr(rc, 'effective_cores', lambda: 7)
+    got = rc.convert_replay_corpus(job, shards, man, pool_factory=fake_factory)
+    # 2 个 shard ⇒ 宽度收敛到 2（不为 2 个 shard 起 7 个 worker）
+    assert seen == [2], '工厂拿到的是 min(核数, shard 数)'
+    assert got['convert_workers'] == 2, '读数里要能看见实际宽度'
+
+    # 显式 width 覆盖（同样受 shard 数约束）
+    got2 = rc.convert_replay_corpus(job, shards, man, workers=3, pool_factory=fake_factory)
+    assert seen == [2, 2] and got2['convert_workers'] == 2
