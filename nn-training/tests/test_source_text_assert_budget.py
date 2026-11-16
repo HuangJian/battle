@@ -450,7 +450,11 @@ BASELINE_FORM = 1513
 #: 2026-11-15 抬到 **1155**（+1，实测）：新门禁 `tests/test_worker_forward_names_are_live.py`
 #:   （`remote/worker.py` 的转发名不得是死名）扫描面就是 `*.py` 全文 —— 与上面几格同一已知限边
 #:   （判据是「名字还有没有引用」，不是措辞）。口径 A 仍 0 条。
-BASELINE_SRC = 1155
+#: 2026-11-16 抬到 **1157**（+2，实测）：新门禁 `tests/test_env_reads_budget.py`（G13）用 AST 扫
+#:   `*.py` 面数 env 直读 —— 与 G3/G4/G6/G9 同一已知限边（判据是「每个文件读了几次、旋钮有没有
+#:   第二个家」，不是措辞；口径 A 仍 0 条）。同批 `tests/trainer/test_batch_plan_split.py` 删掉一条
+#:   文本判据（那份路径常量已搬进 `common/settings.py`，改由 G13 行为化地抓）⇒ FORM 未动。
+BASELINE_SRC = 1157
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。派生式（基线九成，见
 #: `tests/helpers/budget.py`）：两个计数器各自随自己的基线收紧，清理基线时不必回填数字。
 def _floor_of_form() -> int:

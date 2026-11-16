@@ -6791,3 +6791,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `select_delayed_eval_it` + `resolve_tail_join_sec` 的消费方改到真家，`trainer/loop.py` 的
   `run_inspect` / `log_iter_error` 因全仓零消费直接删。G6 基线 18 处 / 10 文件 → 6 处 / 6 文件。
   口径不变：**转发面只在有停机条件时成立**；测是读者，就该跟测试一起迁走。
+- **2026-11-16（P1-5 第一批：`common/settings.py` + G13「env 直读只减不增」）**：审计说「130 处 env
+  直读 ⇒ 建 `Settings` 层」。先量后动：AST 数出生产面 **94 处 / 44 个变量**，被 >1 个模块读的只有 5 个，
+  真「同一根旋钮两个默认值」的只有 2 个（`EVALBOARD_DATA`：`trainer/batch_store` 与
+  `worker/eval_heartbeat` 各解一次，而 `worker/` 不能 import `trainer/`；`BATTLE_HUB_TOKEN`：
+  `remote/run_loop` 与 `remote/deliver_worker` 各抄一遍 strip 归一化）。所以这批**不**建穿透签名的
+  `Settings` 对象（那是给 44 个旋钮加一层转发面），只建 `common/settings.py` 收多读者旋钮，形态沿用
+  `common/hold_window`：常量 + 调用时读 env 的纯函数 + `env=` 注入（不给测试塞 `monkeypatch.setenv`）。
+  **G13** `tests/test_env_reads_budget.py` 按文件冻结直读次数（63 / 32，只许调小）+ 旋钮单家判据；
+  豁免 `STANDALONE_BOOT_MODULES`（它们不许 import `common.*`，本地解是有意为之）。

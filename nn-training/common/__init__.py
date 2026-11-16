@@ -72,9 +72,10 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 |------|------|
 | `common.hashing` | `sha256_bytes` / `sha256_file` |
 | `common.proc` | `run_capture`（显式 UTF-8）/ `bun_version` / `version_mm` / `POPEN_NO_WINDOW` |
+| `common.paths` / `common.settings` | **仓根**（`REPO_ROOT`，唯一一份）与**env 旋钮的家**（被 ≥2 个模块读的旋钮只解一次：`evalboard_data_root` / `hub_token_from_env`；调用时读，不养模块状态）。G13 钉住「旋钮单家 + 直读只减不增」（P1-5 第一批） |
 | `common.fs` | `atomic_write_bytes` / `atomic_write_json` / `append_jsonl` / `extract_tar_bytes` |
 | `common.text` | `exc_tail`（异常 traceback 尾段） |
-| `common.logutil` | `log_line` / `stamp`（带时间戳的行格式） |
+| `common.logutil` | `log_line` / `stamp`（带时间戳的行格式）· `log_bundle`（纯文本攒行，无状态） |
 | `common.stats` | **观测字段数值化口径**（`num_or_none`：bool / 非数值 → `None`）——`worker/loop_guards_trip` 与 `worker/train_ledger` 的唯一实现（S2，2026-10-11） |
 | `common.cli` | **入口约定**（`house_parser`：全仓 `ArgumentParser` 唯一构造点 · `run_main`：`None→0` / `int→该码` / `Ctrl-C→130`）——用户裁定「一次性全迁 + `--help`/退出码非契约，**只保 flags 语义**」（S2，2026-10-11；实测 54 个构造点 + 62 个出口，flags 面 diff 0） |
 | `common.http_respond` | **JSON 响应形状**（`respond_json`：头部顺序 / UTF-8 / `ensure_ascii=False` / 长度按字节）——`hub/http_face` 与 `remote/worker_server` 的唯一实现；`remote/push_bootstrap`（code.zip 之前的内联态）**故意不 import 它**（S2，2026-10-11） |
@@ -91,7 +92,6 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.schema` | 张量布局常量（`OBS_CHANNELS` / `MOVE_DIM` / `SCALAR_LAYOUT` …）——TS 侧 `src/nn/{obs-encoder,infer}.ts` 逐字镜像 |
 | `common.platform_utils` | 跨平台子进程 / 核数（`effective_cores`，cgroup 配额优先）/ `rmtree_best_effort` |
 | `common.pid_probe` | `pid_alive`（唯一实现；进程重用判别） |
-| `common.log_bundle` | 纯文本攒行（无状态） |
 | `common.jsonc` | JSONC 解析（`dashboard/src/core/jsonc.ts` 的权威）——原 `common/jsonc.py` |
 | `common.net_http` | 回环 HTTP **绕代理**（4 处消费者跨 3 层）——原 `remote/net_http.py` |
 | `common.instance_lock` | 单实例锁（`O_CREAT|O_EXCL` + 可接管陈旧锁）——原 `remote/_instance_lock.py`（去 `_` 前缀） |

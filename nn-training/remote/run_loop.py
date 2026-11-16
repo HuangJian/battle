@@ -34,6 +34,7 @@ from typing import Any
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
+from common.settings import hub_token_from_env
 from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.cloud_pool import CLOUD_EVAL_POOL, CLOUD_ROLLOUT_POOL
@@ -441,9 +442,7 @@ def _resolve_hub_token(inline: str, token_file: str) -> str:
         except OSError as e:
             print(f"[run] 读 --hub-token-file 失败：{e}", file=sys.stderr, flush=True)
             return ""
-    import os
-
-    return (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
+    return hub_token_from_env()
 
 
 def _read_secret_file(path: str, flag: str) -> str:

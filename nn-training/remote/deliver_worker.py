@@ -41,6 +41,7 @@ import time
 from pathlib import Path
 
 from common.cli import house_parser, run_main
+from common.settings import hub_token_from_env
 from remote import deliver_parts
 from remote.artifacts import atomic_write_json
 from remote.deliver_outbox import LocalOutboxDeliverer
@@ -266,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     """每 tick：读控制行 → 按预算推积压 → 落状态。**永不把异常带出去**（退出码说话）。"""
     args = build_argparser().parse_args(argv)
     # token **只从环境变量读**（argv 里会出现 `/proc/<pid>/cmdline` 上，全机可读）。
-    token = (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
+    token = hub_token_from_env()
     # 租约 token 同走 env（★M1b/P1-1；父侧 `deliver_proc.HUB_LEASE_ENV` 塞的）。
     lease = (os.environ.get(HUB_LEASE_ENV) or "").strip()
     # 可读名同走 env（plan/offline-leg-ppo-attribution；父侧 `deliver_proc.WORKER_NAME_ENV` 塞的）。

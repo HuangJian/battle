@@ -298,7 +298,14 @@ def test_default_root_follows_evalboard_data(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
     assert bs.data_root() == tmp_path
     assert bs.BatchStore().root == tmp_path
-    assert bs.DEFAULT_DATA_ROOT == bs.REPO_ROOT / "dashboard" / "data" / "evalboard"
+    # 根常量已住 `common/settings.py`（`EVALBOARD_DATA` 有两个读者，而 `worker/` 不能 import
+    # `trainer/`）；store 里那份只是门面名，值与函数同源。
+    from common.paths import REPO_ROOT
+    from common.settings import EVALBOARD_DATA_ROOT, evalboard_data_root
+
+    assert bs.DEFAULT_DATA_ROOT is EVALBOARD_DATA_ROOT
+    assert EVALBOARD_DATA_ROOT == REPO_ROOT / "dashboard" / "data" / "evalboard"
+    assert evalboard_data_root() == tmp_path
 
 
 # ───────────────────────── ③ ★ 功能性：两条特例语义 ─────────────────────────

@@ -342,8 +342,11 @@ def test_moved_constants_are_only_reexported_never_used_by_the_old_home() -> Non
         for n in ast.walk(ast.parse(store_src))
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
     ]
-    assert store_names.count("REPO_ROOT") == 1
-    assert 'DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"' in store_src
+    # 2026-11-16：那份路径常量搬去 `common/settings.py`（`EVALBOARD_DATA` 有两个读者：本包的
+    # 台账与 `worker/eval_heartbeat` 的心跳，而 `worker/` 不能 import `trainer/`）⇒ 旧家零次
+    # `REPO_ROOT`、也不再自己拼 `dashboard/data/evalboard`。
+    assert store_names.count("REPO_ROOT") == 0
+    # 旋钮「只在一处解读」由 G13（`tests/test_env_reads_budget.py`）行为化地抓着，这里不再抄文本判据。
 
 
 # ────────────────────────── ⑤ 功能性：从**新家**直接调（不经门面）──────────────────────────

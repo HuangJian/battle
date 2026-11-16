@@ -17,14 +17,16 @@ import time
 from pathlib import Path
 
 from common.log import default_router
-from common.paths import REPO_ROOT
-
-_DEFAULT_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
+from common.settings import evalboard_data_root
 
 
 def data_root() -> Path:
-    """EvalStore 数据根（EVALBOARD_DATA 覆盖；与 `batch_store.data_root` 同口径）。"""
-    return Path(os.environ.get("EVALBOARD_DATA", str(_DEFAULT_ROOT)))
+    """EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。
+
+    解读住 `common.settings.evalboard_data_root`：本模块是训练侧唯一写者，而**读者**（`trainer/`
+    的台账 / console）各有一份自己的取根逻辑 —— 同一根旋钮解两次就可能在盘上指到两个目录。
+    """
+    return evalboard_data_root()
 
 
 def now_ms() -> int:
