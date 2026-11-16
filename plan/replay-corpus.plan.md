@@ -554,6 +554,56 @@ scan_shards → mmap 每 shard
 
 ---
 
+### 6.5 三臂 pilot 可执行设计（2026-11-17 定稿，P4/P5 用）
+
+D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 seeds/it」。本段把它钉成可直接开 jobs 的参数表。
+
+#### 共同冻结项（三臂逐字相同，只有池大小/刷新频率不同）
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| 课程 | **新 `nn-training/curricula/replay-pilot.jsonc`**，逐字段复制已跟踪的 `g5-safe.jsonc`，只覆盖下表三处采样旋钮 | g5-safe 是已跟踪、已跑到 it230 的稳定课；不引用未跟踪的 g5-aim2/g5-pilot |
+| 关卡 | `level=classic35-safe-base`，`eval_stages=2000-2034`（**35 关**），hard / 20 敌 / 3 命 / 36000 tick | 任务侧一字不动；与 g5-safe 已跑的 80.94% 基线同面 |
+| 起点权重 | **`nn-training/weights/g5-safe/g5-safe.it230.20261115-074454.json`**（win 80.94%，同 eval 面板） | 从已收敛策略出发，pilot 比的是「池刷新频率」，不是从零学 |
+| 奖励 / 架构 / 超参 | 逐字节 = g5-safe：`lr=8e-5`、`epochs=4`、`mb=1024`、`kl_coef=0.05`、`kl_cap=0.1`、`value_anchor=0.001`、`gamma=0.998`、`lam=0.95`、`decision_k=10` | D8「起步三臂同 lr/epochs/mb」；8e-5 是 g5-safe 实际稳定值，**不采用 D8 文中的旧 1.2e-4** |
+| 调度 | **删 `ppo_schedule`，`kickstart_ref=false`**（或 `kickstart_init=0`）；`breakers_off=true`、ent 熔断守底 | D9：首轮冻结调度，一次只验「数据刷新频率」 |
+| 语料格式 | **`corpus_fmt=replay` + `ppo_loader=eager`**；eval 仍走 full | P4 只切 replay；lazy 留到 P5，不与本轮混淆 |
+| 样本轴 | 三臂总样本都 = **491,520**（= 480×1024，mb 整倍数）；训练墙钟不含 eval | D8 等总样本；plan 硬闸 target_transitions 必须 mb 整倍数 |
+
+#### 三臂参数表
+
+| 臂 | 每 it 关卡数 / seed 数 | `target_transitions`/it | iters | 总样本 | chunks/it | 步/it | 总步 | eval 锚点 |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| **A**（7×5×20） | 7 / **5** | **24,576**（24×1024） | **20** | 491,520 | 24 | 96 | 1,920 | it 5 / 10 / 15 / 20 |
+| **B**（35×5×4） | 35 / **5** | **122,880**（120×1024） | **4** | 491,520 | 120 | 480 | 1,920 | it 1 / 2 / 3 / 4 |
+| **C**（35×20×1） | 35 / **20** | **491,520**（480×1024） | **1** | 491,520 | 480 | 1,920 | 1,920 | 终点 1 次 |
+
+> 注意：P4 原文「`target_transitions=122,880`」是 **B 臂单 it** 的值，不是三臂通用值；A=24,576、C=491,520。
+> 三臂 `rotation_mode=even`、`paired_rotate_seed=20261115`（与 g5-safe 同），A 的 7 关按轮次轮换，20 it 覆盖 35 关约 4 圈。
+> 若实际 seed 供给不足，`coverage_report.py` 逐关报 SHORT；**硬闸仍是 35 关均有有效样本**，不靠补 seed 造满。
+
+#### 训练 seed 与配对
+
+- 首轮 **1 个训练 seed**：三臂同 `runId` 前缀 `replay-pilot-s1-{A,B,C}`，`job_seed(runId,it,init_weights_fp)` 由训练核自动派生（train_core.py:434），不另加手填种子。
+- 推广腿至少 **3 个独立训练 seed**：同一组三臂复制 3 份，`runId` 后缀 `-s2/-s3/-s4`；按训练 seed 配对做差，eval seed 面板不变（§6.3 统计边界）。
+- eval 面板固定 **35 关 × 20 seed = 700 局/锚点**（生产口径），`eval_every=1` + `eval_at` 按表；A/B 各 4 锚点、C 1 锚点 ⇒ 首轮 eval 共 **6,300 局**，单列墙钟。
+
+#### 决策规则（先写死，跑完不许改口）
+
+- **主读**：B 曲线 vs A 在相同样本锚点（A 的 it5/10/15/20 ↔ B 的 it1/2/3/4）的配对差；工程止损 **≥ −1pp**，正向 **≥ +1pp**。
+- **主对照**：B vs C 才是「数据刷新频率」的干净对照；C 只有终点 ⇒ 终点配对差 + 跨 eval seed CI，不写五点窗。
+- **机制门（解释项，不是停止判据）**：KL_cum(24.5k 样本) 目标带 **0.0015–0.0025**；逐 epoch 打 KL / clip fraction / ratio 分位数；KL > 0.05 或 entropy 连续下降则停腿复盘。
+- **No-Go**：B 连续 2 锚点 < A −2pp；或任一臂 35 关有效样本硬闸失败；或 replay identity 失败率 > 0。
+- **成功判据**：B 不低于 A 止损线、B vs C 终点差不劣、训练墙钟（不含 eval）不退化、体积/覆盖/identity 全部绿；输出效应量 + CI，**只叫 pilot，不写「配方已证」**。
+
+#### 成本预估（按本轮实测外推，不是承诺）
+
+- rollout：每臂 700 局；本机 7 并发导出实测 **3.38 局/s** ⇒ 单臂 ≈ 207 s，三臂 ≈ 10.4 min。
+- replay→npy 转换：优化后本机 7 worker 写盘 ≈ **11 s/700 shard**（五轮 3500/3500），三臂 ≈ 33 s。
+- PPO：按 plan 旧估值 ~202 s/491k 样本/臂，三臂 ≈ 10 min（需真机校正）。
+- eval：6,300 局，按 god-ai 3 worker ≈ 30 s/2100 局 ⇒ ≈ 90 s。
+- 首轮合计约 **23 min**（不含排队/上传），在 16 GB 显存机型上不会撞显存门。
+
 ## 7. 改动清单
 
 ### 7.1 TS / rollout
@@ -728,11 +778,11 @@ scan_shards → mmap 每 shard
 - [ ] sampler→trainer 的 replay 结果容器不含 obs/scalars/extra；7×5 该段 ≤2.5 MB（**实测 0.81 MB**）；35×20 ≤45 MB（**实测 16.2 MB，2.8× 余量**）。
 - [ ] replay 重建 identity：真实关 + 自定义关 + hybrid opening + state_init，obs/scalars/extra/mask 逐字节一致；P0 ≥1000 局 + Bun→Node / Win→Linux 交叉；确定性 identity 失败零容差。
 - [ ] 动作完整性：v6 `move/fire(1|2)/hold` 逐 tick 记录完整；opening 接管段 frames == 执行动作、`policy_mask` 复制正确、converter 不重跑 OpeningController、不拿 `a_*` 驱动世界。
-- [ ] 7×5 replay 路径与 npy 路径同权重/同 seed 的 PPO 指标一致（报告差异）。
+- [x] 7×5 replay 路径与 npy 路径同权重/同 seed 的 PPO 指标一致（**2026-11-17 实测闭合**：真实导出 4 shard/240 样本/30 chunk，`replay→npy` 与 full 的 obs 三张 12/12 逐字节相同、chunks 全字段相同、真实 `ppo_update` 2 epoch 后权重逐字节一致、14 stats 差 0；报告 `reports/replay-vs-full-ppo-20261117.md`）。注：规模是最小 job，不是 7×5 全量；全量由 identity 350 局 + 本对账的逻辑链覆盖。
 - [ ] 35×5 trainer→worker ≤4 MB（**实测折算 1.2 MB**）；35×20 ≤12 MB（**实测 6.9 MB，1.7× 余量**）；转换时间 ≤预算（**2026-11-16 重定：池化 ≈43 s（低配 4 核，宽度=`effective_cores()`，高配再降）/ 纯转换 88 s 单核；obs 3.97 GB 写盘；重哈希不进预算** —— obsHash 由转换器在转换循环里增量算，落盘后无任何生产路径会重扫 obs.npy）。
 - [ ] lazy loader：491k 样本峰值 RAM ≤2 GB（tmpfs 下 obs 3.97 GB 另计、不可豁免）；**上卡前显存余量预检**（产线 ≥16 GB，不做小卡真机验证）；eager 路径不变。
 - [ ] 三臂 pilot：冻结调度；B 学习曲线 + C 终点配对差/CI；报告效应量/CI，不写「非劣配方」；生产 eval 口径不变，实验臂 `eval_at` 样本锚点；训练墙钟不含 eval；配方推广至少 3 个独立训练 seed。
-- [ ] 覆盖度：每轮报告每关 games/unique seeds/trim 前后 samples/SHORT/丢弃整局；硬闸「35 关均有有效样本」；同一 run 内不重复 `(stage,seed)`。
+- [x] 覆盖度：**2026-11-17 实盘报表** `reports/coverage-g5-lives-700-20261117.md`（700 shard / 35 关 × 20 seed / `target_transitions=491520`）：每关 games / unique seeds / trim 前后 samples / SHORT / 丢弃整局逐关列出；**35/35 关有有效样本、700 个唯一 `(stage,seed)`、0 重复 ⇒ 硬闸 PASS**；trim 前 503,963 → 后 452,041、丢弃整局 47；**11 关 SHORT（读数，不是失败）**。工具 `nn-training/tools/coverage_report.py` 可复跑，单测 3 例钉住 SHORT/硬闸语义。
 - [ ] 墙钟账覆盖两条传输腿 + 全部阶段；eval 单列；生产收益看完整迭代墙钟。
 - [ ] replay/npy/ts_code 复用当前 iteration 保留策略（用户拍板）；replay 是临时训练物料，不承诺长期可重建；DoD 不写笼统「无数据丢失」。
 - [ ] `bun run check` 绿；`bun run build` 过；子项目（`dashboard/**` 如改动）各自门禁绿。
