@@ -79,7 +79,13 @@ SERVE_ERR = "__SERVE_ERR__"
 ROLLOUT_SCRIPT = _protocol.ROLLOUT_SCRIPT
 EVAL_SCRIPT = _protocol.EVAL_SCRIPT
 
-SERVE_CAPABLE_SCRIPTS: frozenset[str] = frozenset({ROLLOUT_SCRIPT, EVAL_SCRIPT})
+#: 预建 bundle 型入口（replay 转换器）的 mode token：协议行仍是 `[mode, ...argv]`，
+#: 只是它不进 `SERVE_MODE_BY_SCRIPT`（那张表与 `serve-any.ts::SERVE_MODES` 必须同集）。
+_BUNDLE_MODE = "conv"
+
+SERVE_CAPABLE_SCRIPTS: frozenset[str] = frozenset(
+    {ROLLOUT_SCRIPT, EVAL_SCRIPT, "replay_converter.js"}
+)
 
 #: 池 worker 的**唯一入口**（同质）：一个进程按每行首个 mode token 分派到任一导出器。
 #: 与 TS 侧 `persist-pool.ts::PERSIST_SERVE_ENTRY` 同一个值；mode 表在 `common/manifest.py`
@@ -156,6 +162,7 @@ def make_pool(
     for_script: str | None = None,
     entry: str = SERVE_ANY_SCRIPT,
     ready_timeout_sec: float = READY_TIMEOUT_SEC,
+    fixed_mode: str | None = None,
 ) -> ServePool | None:
     """两件**便宜且确定**的事，不靠试：开关开着、且本条腿要跑的导出器在准入名单内。
 
@@ -174,8 +181,52 @@ def make_pool(
     if for_script is None or not serve_capable([str(for_script)]):
         return None
     return ServePool(
-        bun, Path(ts_dir), workers, log, entry=entry, ready_timeout_sec=ready_timeout_sec
+        bun,
+        Path(ts_dir),
+        workers,
+        log,
+        entry=entry,
+        ready_timeout_sec=ready_timeout_sec,
+        fixed_mode=fixed_mode,
     )
+
+
+def pool_for_bundle(
+    runtime: str,
+    converter: Path,
+    workers: int,
+    log=lambda msg: None,
+) -> ServePool | None:
+    """给「预建 bundle 型」入口建**单模式池**（replay 转换腿用；2026-11-16）。
+
+    与 `make_pool` 的差别只有两点，都因为这条腿的入口不是导出器、是 payload 里那份
+    `replay_converter.js`：
+      * `entry` = bundle 自己（payload 里没有 TS 树，`serve-any` 根本不在盘上）；
+      * `fixed_mode='conv'`——`SERVE_MODE_BY_SCRIPT` 的值域必须与 `serve-any.ts::SERVE_MODES`
+        逐字相同，不能为一个不进同质入口的脚本加键。
+
+    ⚠ 入口与 cwd 必须是**绝对路径**：`ServePool._spawn` 把 `entry` 拼在 `ts_dir` 后面、又拿
+    `ts_dir` 当 cwd，相对路径会按 cwd 再解析一次 ⇒ 起不来且 `start()` 只返回 0（静默回退）。
+
+    建不起来/一个都没就绪 ⇒ 返回 None（调用方走逐 shard 一次性 spawn：只慢不错）。
+    """
+    bundle_dir = Path(converter).resolve().parent
+    pool = make_pool(
+        runtime,
+        bundle_dir,
+        max(1, int(workers)),
+        log,
+        for_script=str(converter),
+        entry=Path(converter).name,
+        fixed_mode=_BUNDLE_MODE,
+    )
+    if pool is None:
+        return None
+    if not pool.start():
+        log(f"replay 转换池起不来（{workers} worker 未就绪）⇒ 逐 shard 一次性 spawn")
+        pool.close()
+        return None
+    return pool
 
 
 class TaskOutcome(NamedTuple):
@@ -272,10 +323,16 @@ class ServePool:
         *,
         entry: str = SERVE_ANY_SCRIPT,
         ready_timeout_sec: float = READY_TIMEOUT_SEC,
+        fixed_mode: str | None = None,
     ) -> None:
         self.bun = bun
         #: 池 worker 的入口（生产固定 = 同质入口；单测用它换成 python 桩）。
         self.entry = entry
+        #: 单模式池（一个入口只服务一种 mode）时显式指定的 token；None = 按 `SERVE_MODE_BY_SCRIPT` 查。
+        #: 存在的意义：replay 转换腿的入口是**预建 bundle**（`replay_converter.js`），它不在
+        #: 导出器→mode 的协议表里（那张表的值域必须与 `serve-any.ts::SERVE_MODES` 逐字相同，
+        #: 不能为一个不进同质入口的脚本加键）。
+        self.fixed_mode = fixed_mode
         self.ts_dir = Path(ts_dir)
         self.max_workers = max(1, int(max_workers))
         self.log = log
@@ -416,8 +473,11 @@ class ServePool:
         只防「喂错池」：准入（`SERVE_CAPABLE_SCRIPTS` + 开关）已在建池时过一次，这里是
         **每条任务**再过一次的同一道门（池不认识就交回调用方的一次性路径）。
         """
-        mode = serve_mode_for(argv0)
-        return mode if mode is not None and serve_capable([str(argv0)]) else None
+        if not serve_capable([str(argv0)]):
+            return None
+        if self.fixed_mode is not None:
+            return self.fixed_mode
+        return serve_mode_for(argv0)
 
     def _acquire(
         self, timeout_sec: float | None = None, *, replenish: bool = True

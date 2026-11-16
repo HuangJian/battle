@@ -28,6 +28,7 @@ import { npyBytes } from '../../src/nn/npy'
 import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import { parseReplayFile } from '../../src/replay/file'
 import { ReplayInput } from '../../src/replay/ReplayInput'
+import { runServe } from './serve-loop'
 import { worldTickHash } from '../../src/replay/tickHash'
 import type { GameState } from '../../src/types'
 
@@ -315,8 +316,14 @@ export function convertReplayShard(opts: ConvertOptions): ConvertResult {
   }
 }
 
-if (import.meta.main) {
-  const argv = process.argv.slice(2)
+/**
+ * CLI 与长驻池共用的入口。**失败一律 `throw`，不在这里 `process.exit`。**
+ *
+ * 池化（`--serve`）的协议是「失败打一行 `__SERVE_ERR__` 后继续服务下一个 shard」
+ * —— `process.exit` 会把整池 worker 连同后面几百个 shard 一起带走。一次性路径的退出码
+ * 由文件末尾的 CLI 包装负责。
+ */
+export function main(argv: string[]): void {
   const shardDirs: string[] = []
   let listFile = ''
   let outDir = ''
@@ -336,36 +343,61 @@ if (import.meta.main) {
     }
   }
   if (shardDirs.length === 0) {
-    console.error(
+    throw new Error(
       'usage: bun tools/sim/replay-to-shard.ts --shard-dir <dir>|--shard-list <file> ' +
         '[--out <dir>] [--verify-only]',
     )
-    process.exit(2)
   }
   let samples = 0
   let ticks = 0
   let convertMs = 0
-  try {
-    for (const shardDir of shardDirs) {
-      const r = convertReplayShard({ shardDir, outDir: outDir || undefined, verifyOnly })
-      samples += r.nSamples
-      ticks += r.ticks
-      convertMs += r.convertMs
-      if (shardDirs.length === 1) {
-        console.log(
-          `[replay-to-shard] OK samples=${r.nSamples} ticks=${r.ticks} ` +
-            `convertMs=${r.convertMs} written=${r.written.join(',') || '(none)'} obsHash=${r.obsHash}`,
-        )
-      }
-    }
-    if (shardDirs.length > 1) {
+  for (const shardDir of shardDirs) {
+    const r = convertReplayShard({ shardDir, outDir: outDir || undefined, verifyOnly })
+    samples += r.nSamples
+    ticks += r.ticks
+    convertMs += r.convertMs
+    if (shardDirs.length === 1) {
       console.log(
-        `[replay-to-shard] OK shards=${shardDirs.length} samples=${samples} ticks=${ticks} ` +
-          `convertMs=${convertMs.toFixed(1)}`,
+        `[replay-to-shard] OK samples=${r.nSamples} ticks=${r.ticks} ` +
+          `convertMs=${r.convertMs} written=${r.written.join(',') || '(none)'} obsHash=${r.obsHash}`,
       )
     }
-  } catch (e) {
-    console.error(e instanceof Error ? e.message : String(e))
-    process.exit(1)
+  }
+  if (shardDirs.length > 1) {
+    console.log(
+      `[replay-to-shard] OK shards=${shardDirs.length} samples=${samples} ticks=${ticks} ` +
+        `convertMs=${convertMs.toFixed(1)}`,
+    )
+  }
+}
+
+/**
+ * `--serve` 分派：每行 = `['conv', ...该 shard 的 argv]`（与 `serve-any.dispatch` 的
+ * `[mode, ...argv]` 同规）。未知 mode 抛 —— 静默跑错比响亮报错贵得多。
+ *
+ * 本转换器**不走** `serve-any.ts` 的同质入口：它在 worker payload 里只有预建 bundle
+ * （`replay-to-shard.node.js`），没有 TS 树 ⇒ 池的入口就是 bundle 自己。协议实现仍是
+ * `serve-loop.ts::runServe`（唯一实现，不许各抄一份）。
+ */
+export function dispatch(argv: string[]): void {
+  const mode = argv[0]
+  if (mode !== 'conv') {
+    throw new Error(
+      `replay-to-shard: unknown mode ${mode === undefined ? '(missing)' : `'${mode}'`} — 合法：conv`,
+    )
+  }
+  main(argv.slice(1))
+}
+
+if (import.meta.main) {
+  if (process.argv.includes('--serve')) {
+    runServe(dispatch)
+  } else {
+    try {
+      main(process.argv.slice(2))
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e))
+      process.exit(1)
+    }
   }
 }

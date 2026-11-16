@@ -62,3 +62,14 @@ def test_probe_order_is_bun_then_node(monkeypatch: pytest.MonkeyPatch) -> None:
     rc.resolve_js_runtime()
     # 两个都装时 bun 命中即返回，node 连探测都不该发生。
     assert seen == ['bun']
+
+
+def test_convert_fallback_flag_counts_by_primary_runtime() -> None:
+    """`convert_fallback` 以 bun 为主：bun=0，其余（node/未知）=1。
+
+    同一次改动里的配套读数——只改探测顺序不改这里，正常 bun 转换会被记成 fallback=1。
+    """
+    assert rc.convert_fallback_flag('bun') == 0
+    assert rc.convert_fallback_flag('bun.exe') == 0
+    assert rc.convert_fallback_flag('node') == 1
+    assert rc.convert_fallback_flag('python3.13') == 1

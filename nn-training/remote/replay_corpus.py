@@ -119,6 +119,97 @@ def _clean_stale_transaction(shard_dir: Path) -> None:
             old.rename(shard_dir)
 
 
+def _prepare_shard(shard_dir: Path, converter_sha: str) -> Path | None:
+    """开事务：返回待转换的临时目录；`None` = 标记命中，直接复用（不跑子进程）。"""
+    if _marker_ok(shard_dir, converter_sha):
+        return None
+    _clean_stale_transaction(shard_dir)
+    parent, name = shard_dir.parent, shard_dir.name
+    tmp = parent / (name + ".conv-tmp")
+    shutil.copytree(shard_dir, tmp, copy_function=_link_or_copy)
+    return tmp
+
+
+def _finish_shard(shard_dir: Path, tmp: Path, converter_sha: str) -> None:
+    """校验产物 → 写完成标记 → 原子换入（失败复位）。"""
+    name = shard_dir.name
+    missing = [n for n in ("obs.npy", "scalars.npy", "extra.npy") if not (tmp / n).is_file()]
+    if missing:
+        raise ProtocolError(f"replay 转换器返回 0 但产物缺失（{name}: {missing}）——拒收")
+    replay = tmp / "replay.json"
+    meta = {
+        "version": MARKER_VERSION,
+        "converter_sha256": converter_sha,
+        "replay_sha256": _sha256_file(replay) if replay.is_file() else "",
+    }
+    (tmp / MARKER_NAME).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    old = shard_dir.parent / (name + ".conv-old")
+    os.replace(shard_dir, old)
+    try:
+        os.replace(tmp, shard_dir)
+    except OSError:
+        os.replace(old, shard_dir)
+        raise
+    rmtree_best_effort(old, ignore_errors=True)
+
+
+def _run_oneshot(
+    tmp: Path, *, converter: Path, runtime: str, timeout_sec: float, label: str
+) -> None:
+    """一次性 spawn 转换一个事务目录（池不可用/池回退时的唯一路径）。"""
+    # 绝对路径：一次性路径继承调用方 cwd，池里的 worker 的 cwd 是 **bundle 所在目录**
+    # （`ServePool._spawn` 用 ts_dir 当 cwd）⇒ 相对路径在池里必然解析错。
+    p = run_capture(
+        [runtime, str(converter), "--shard-dir", str(Path(tmp).resolve())],
+        timeout=timeout_sec,
+    )
+    if p.returncode != 0:
+        raise ProtocolError(
+            f"replay 转换失败（{label}，rc={p.returncode}）：" f"{(p.stderr or p.stdout)[-800:]}"
+        )
+
+
+def _convert_tx(
+    shard_dir: Path,
+    *,
+    converter: Path,
+    converter_sha: str,
+    runtime: str,
+    timeout_sec: float,
+    submit: Callable[[Path], None] | None = None,
+) -> bool:
+    """事务化转换一个 shard；返回 True = 复用标记（未跑子进程）。
+
+    `submit(tmp)` 决定「谁来跑这一次转换」：缺省/`None` = 一次性 spawn（池不可用、池回退、
+    单测桩）；批量路径传池的提交函数（暖 worker，省掉每 shard 的进程启动）。
+    事务本身与两条路径无关：输入硬链接到 `<shard>.conv-tmp` → 转换 → 校验 + 写标记 →
+    原子换入。**失败时原目录一字未动。**
+    """
+    tmp = _prepare_shard(shard_dir, converter_sha)
+    if tmp is None:
+        return True
+    run = submit or (
+        lambda t: _run_oneshot(
+            t, converter=converter, runtime=runtime, timeout_sec=timeout_sec, label=shard_dir.name
+        )
+    )
+    try:
+        run(tmp)
+        _finish_shard(shard_dir, tmp, converter_sha)
+        return False
+    except subprocess.TimeoutExpired as e:
+        rmtree_best_effort(tmp, ignore_errors=True)
+        raise ProtocolError(
+            f"replay 转换超时（{shard_dir.name}，>{timeout_sec:.0f}s）—— 确定性失败，不重试"
+        ) from e
+    except OSError as e:
+        rmtree_best_effort(tmp, ignore_errors=True)
+        raise ProtocolError(f"replay 转换器起不来（{runtime}）：{e}") from e
+    except Exception:
+        rmtree_best_effort(tmp, ignore_errors=True)
+        raise
+
+
 def convert_shard(
     shard_dir: Path,
     *,
@@ -127,59 +218,17 @@ def convert_shard(
     runtime: str,
     timeout_sec: float = SHARD_TIMEOUT_SEC,
 ) -> bool:
-    """转换一个 shard；返回 True = 复用标记（未跑子进程）。失败抛 ProtocolError。
+    """转换一个 shard（**一次性路径**）；返回 True = 复用标记（未跑子进程）。
 
-    事务：输入硬链接到 `<shard>.conv-tmp` → 在临时目录里转换 + 校验 + 写完成标记 →
-    `shard`→`.conv-old`、`.conv-tmp`→`shard`、删 `.conv-old`。失败时原目录**一字未动**。
+    批量路径见 `convert_replay_corpus`（同一套事务，子进程换成池里的暖 worker）。
     """
-    if _marker_ok(shard_dir, converter_sha):
-        return True
-    _clean_stale_transaction(shard_dir)
-    parent, name = shard_dir.parent, shard_dir.name
-    tmp = parent / (name + ".conv-tmp")
-    old = parent / (name + ".conv-old")
-    shutil.copytree(shard_dir, tmp, copy_function=_link_or_copy)
-    try:
-        # `run_capture` 自带显式 UTF-8 + Windows 无黑窗（AGENTS §19 / POPEN_NO_WINDOW）。
-        p = run_capture(
-            [runtime, str(converter), "--shard-dir", str(tmp)],
-            timeout=timeout_sec,
-        )
-        if p.returncode != 0:
-            raise ProtocolError(
-                f"replay 转换失败（{name}，rc={p.returncode}）："
-                f"{(p.stderr or p.stdout)[-800:]}"
-            )
-        missing = [n for n in ("obs.npy", "scalars.npy", "extra.npy") if not (tmp / n).is_file()]
-        if missing:
-            raise ProtocolError(f"replay 转换器返回 0 但产物缺失（{name}: {missing}）——拒收")
-        replay = tmp / "replay.json"
-        meta = {
-            "version": MARKER_VERSION,
-            "converter_sha256": converter_sha,
-            "replay_sha256": _sha256_file(replay) if replay.is_file() else "",
-        }
-        (tmp / MARKER_NAME).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        # 原子换入：原目录先挪开，临时目录顶上；第二步失败则复位。
-        os.replace(shard_dir, old)
-        try:
-            os.replace(tmp, shard_dir)
-        except OSError:
-            os.replace(old, shard_dir)
-            raise
-        rmtree_best_effort(old, ignore_errors=True)
-        return False
-    except subprocess.TimeoutExpired as e:
-        rmtree_best_effort(tmp, ignore_errors=True)
-        raise ProtocolError(
-            f"replay 转换超时（{name}，>{timeout_sec:.0f}s）—— 确定性失败，不重试"
-        ) from e
-    except OSError as e:
-        rmtree_best_effort(tmp, ignore_errors=True)
-        raise ProtocolError(f"replay 转换器起不来（{runtime}）：{e}") from e
-    except Exception:
-        rmtree_best_effort(tmp, ignore_errors=True)
-        raise
+    return _convert_tx(
+        shard_dir,
+        converter=converter,
+        converter_sha=converter_sha,
+        runtime=runtime,
+        timeout_sec=timeout_sec,
+    )
 
 
 def _corpus_bytes(shard_dirs: list[Path]) -> tuple[int, int]:
@@ -201,6 +250,16 @@ def _corpus_bytes(shard_dirs: list[Path]) -> tuple[int, int]:
     return replay_bytes, labels_bytes
 
 
+def convert_fallback_flag(runtime_name: str) -> int:
+    """`convert_fallback` 读数：0 = 主运行时（bun），1 = 走了回落（任何非 bun）。
+
+    主运行时是 bun（项目纪律：一律 bun 优先，node 只在 bun 装不上时兜底）。
+    2026-11-16 前这里按 node 为主判定（`0 if runtime_name == "node" else 1`），
+    改成 bun 顺序后若不同步，每次正常转换都会被记成 fallback=1。
+    """
+    return 0 if runtime_name.startswith("bun") else 1
+
+
 def convert_replay_corpus(
     job_dir: str | Path,
     shard_dirs: list[Path],
@@ -208,8 +267,16 @@ def convert_replay_corpus(
     *,
     log: Callable[[str], None] = lambda _m: None,
     workers: int = 2,
+    pool_factory: Callable[[str, Path, int], Any] | None = None,
 ) -> dict[str, Any]:
-    """把一整轮 replay shard 就地转成 obs/scalars/extra，返回读数。"""
+    """把一整轮 replay shard 就地转成 obs/scalars/extra，返回读数。
+
+    `pool_factory(runtime, converter, workers)` = 长驻转换池的工厂，**由调用方注入**
+    （生产 = `worker.serve_pool.pool_for_bundle`）。为什么不在这里直接 import：
+    `remote/` 不能依赖 `worker/` —— `tests/test_remote_dag.py` 按 import 边算拓扑秩，
+    本模块被 `hub_client`(L1) 与 `download`(L3) 依赖，抬高自己的秩会连坐整串。
+    缺省 None = 逐 shard 一次性 spawn（行为与接池前逐字节相同）。
+    """
     if not shard_dirs:
         raise ProtocolError("corpus_fmt=replay 但 payload 里没有任何 shard——拒收（不训空）")
     converter, conv_sha = verify_converter(job_dir, manifest)
@@ -219,16 +286,43 @@ def convert_replay_corpus(
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
     replay_bytes, labels_bytes = _corpus_bytes(shard_dirs)
 
+    pool = (
+        pool_factory(runtime, converter, max(1, int(workers))) if pool_factory is not None else None
+    )
+
+    def _submit_via_pool(tmp: Path, label: str) -> None:
+        """池里跑一次；池给不出确定成功 ⇒ 回退一次性 spawn（**只慢不错**）。"""
+        argv = [str(converter), "--shard-dir", str(Path(tmp).resolve())]
+        got = (
+            pool.try_capture(argv, SHARD_TIMEOUT_SEC, label=label, kind="conv", where=str(tmp))
+            if pool is not None
+            else None
+        )
+        if got is None:
+            _run_oneshot(
+                tmp, converter=converter, runtime=runtime, timeout_sec=SHARD_TIMEOUT_SEC, label=label
+            )
+
     def _one(sd: Path) -> bool:
-        return convert_shard(
-            sd, converter=converter, converter_sha=conv_sha, runtime=runtime
+        return _convert_tx(
+            sd,
+            converter=converter,
+            converter_sha=conv_sha,
+            runtime=runtime,
+            timeout_sec=SHARD_TIMEOUT_SEC,
+            submit=lambda tmp: _submit_via_pool(tmp, sd.name),
         )
 
-    n = max(1, min(int(workers), len(shard_dirs)))
-    with ThreadPoolExecutor(max_workers=n) as ex:
-        for got in ex.map(_one, shard_dirs):
-            if got:
-                reused += 1
+    try:
+        n = max(1, min(int(workers), len(shard_dirs)))
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            for got in ex.map(_one, shard_dirs):
+                if got:
+                    reused += 1
+    finally:
+        if pool is not None:
+            log(pool.summary())
+            pool.close()
     sec = time.time() - t0
     runtime_name = Path(runtime).name
     log(
@@ -246,8 +340,8 @@ def convert_replay_corpus(
         "replay_bytes": replay_bytes,
         "labels_bytes": labels_bytes,
         "convert_jobs": len(shard_dirs) - reused,
-        # Node 优先（bundle 目标）；用 Bun 跑 = 回落路径，单独计数。
-        "convert_fallback": 0 if runtime_name == "node" else 1,
+        # 主运行时 = bun（见 convert_fallback_flag）。
+        "convert_fallback": convert_fallback_flag(runtime_name),
     }
 
 
@@ -258,6 +352,7 @@ def prepass(
     *,
     log: Callable[[str], None] = lambda _m: None,
     bundle: Any = None,
+    pool_factory: Callable[[str, Path, int], Any] | None = None,
 ) -> dict[str, Any] | None:
     """`run_job` 的 replay pre-pass 入口：非 replay 原样返回 None（零行为变化）。
 
@@ -271,7 +366,7 @@ def prepass(
             f"corpus_fmt=replay 只支持 kind=ppo，收到 kind={manifest.get('kind')!r}"
             "——kind=iter 的节点自跑 rollout 强制 full（plan/replay-corpus.plan.md D2）"
         )
-    got = convert_replay_corpus(job_dir, shard_dirs, manifest, log=log)
+    got = convert_replay_corpus(job_dir, shard_dirs, manifest, log=log, pool_factory=pool_factory)
     if bundle is not None:
         bundle.add(
             "replay 转换",

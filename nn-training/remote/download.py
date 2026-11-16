@@ -895,9 +895,18 @@ def _ensure_payload(
     )
     if landed is not None:
         from remote.replay_corpus import prepass
+        from worker import serve_pool
 
+        # 池工厂**在这里**注入而不是在 `replay_corpus` 里 import：`remote/` 不能依赖
+        # `worker/`（`tests/test_remote_dag.py` 按 import 边算拓扑秩）。本模块是 L3，够得着。
+        # payload 里只有预建 `replay_converter.js`（没有 TS 树）⇒ 走单模式 bundle 池。
         got = prepass(
-            landed.job_dir, list(landed.shard_dirs), manifest, log=log, bundle=bundle
+            landed.job_dir,
+            list(landed.shard_dirs),
+            manifest,
+            log=log,
+            bundle=bundle,
+            pool_factory=serve_pool.pool_for_bundle,
         )
         if got is not None:
             # D10：把转换读数随 landed 交给训练核，最终进 result["wire"]。
