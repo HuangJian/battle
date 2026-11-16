@@ -6784,3 +6784,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   后删除，并把守护测试翻转（断言 engine 上**没有**这些影子）。**反面教训**：契约成员不能用
   `y = X.y` 赋值发布 —— 静态契约扫描器只认 `from X import y`，赋值会判 `<unresolved>` 而
   `test_backend_contract_runtime` 红；那一条 `noqa` 留着，并在 import 里写清来路。
+- **2026-11-16（`trainer/` 的 "re-exported for tests" 面归零）**：`trainer/{run_rl,eval_dispatch,loop,dispatch}.py`
+  上 12 条 `# noqa: F401` 的注释都写着「for tests / 兼容外部引用」，但那些读者只有 `e2e/test_run_rl.py` 与
+  两个单测。停机条件本来是「tests 全量改完后删除」，一直没兑现是因为没人量过谁在用。这批把 5 个
+  `worker.resume` 名 + `run_rollout_queue` + `find_archive_weights` / `report_winrate_safe` /
+  `select_delayed_eval_it` + `resolve_tail_join_sec` 的消费方改到真家，`trainer/loop.py` 的
+  `run_inspect` / `log_iter_error` 因全仓零消费直接删。G6 基线 18 处 / 10 文件 → 6 处 / 6 文件。
+  口径不变：**转发面只在有停机条件时成立**；测是读者，就该跟测试一起迁走。

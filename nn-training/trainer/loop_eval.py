@@ -279,7 +279,7 @@ class TrainingEval:
         （latest-wins）：本课轮一收工就派最新那个；被顶掉的旧轮由补账/收官 drain 从
         归档补，不占训练期的产能。
         """
-        from trainer.eval_dispatch import select_delayed_eval_it
+        from worker.eval_yield import select_delayed_eval_it
 
         args = self.args
         # 本轮采集刚落幕（rollout 收官）= 上一轮 eval 尾巴的自然收拢点：先收拢，再派新轮。
@@ -320,7 +320,8 @@ class TrainingEval:
     def _dispatch_eval_round(self, m: int, it: int, dist_cfg: dict | None) -> None:
         """为一轮已完成权重 W(m) 派发（读归档；归档缺席回落活指针 + WARN）。"""
         from trainer.dispatch_queue import RUN_ID
-        from trainer.eval_dispatch import dispatch_eval_bg, find_archive_weights
+        from trainer.eval_dispatch import dispatch_eval_bg
+        from worker.archive import find_archive_weights
 
         args = self.args
         src = find_archive_weights(

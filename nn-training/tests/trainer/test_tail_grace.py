@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from trainer.dispatch import resolve_tail_join_sec
+from trainer.queue_local import resolve_tail_join_sec
 
 
 def test_tail_grace_default_zero_when_settled() -> None:

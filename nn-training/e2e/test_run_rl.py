@@ -60,8 +60,16 @@ from common.schema import (
 )
 from tests.subproc_util import run_utf8
 from trainer import run_rl
+from trainer.dispatch_queue import run_rollout_queue  # 真家（旧经 trainer.run_rl 再导出）
 from trainer.stream import (
     run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
+)
+from worker.resume import (
+    completed_pairs,
+    last_completed_iter,
+    last_rotate_seed,
+    peak_entropy,
+    resumed_manifests,
 )
 
 FAILS: list[str] = []
@@ -172,11 +180,11 @@ def test_resume_scope(tmp: Path) -> None:
     _mk_shard(traj, 9, 999, wver)  # 计划外残留（跨配置断点）
     _mk_shard(traj, 5, 555, "b" * 64)  # 旧权重代际
     plan = {(0, 111), (3, 222)}
-    done_all = run_rl.completed_pairs(traj, wver)
+    done_all = completed_pairs(traj, wver)
     check(done_all == {(0, 111), (3, 222), (9, 999)}, "done filters by wver only")
     done_plan = done_all & plan
     check(done_plan == {(0, 111), (3, 222)}, "plan intersection")
-    rm = run_rl.resumed_manifests(traj, wver, only=plan)
+    rm = resumed_manifests(traj, wver, only=plan)
     check(
         {(m["stage"], m["seed"]) for m in rm} == {(0, 111), (3, 222)},
         "resumed honors only=plan (drops off-plan)",
@@ -188,18 +196,18 @@ def test_resume_scope(tmp: Path) -> None:
         len(legacy) == 1 and legacy[0]["games"] == 1 and legacy[0]["totalSamples"] == 30,
         "legacy schema converted to aggregate shape",
     )
-    rm_ex = run_rl.resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
+    rm_ex = resumed_manifests(traj, wver, only=plan, exclude={(0, 111)})
     check({(m["stage"], m["seed"]) for m in rm_ex} == {(3, 222)}, "exclude=seen honored")
 
     # 吞吐 T4 提前预采：double-wver 对账——本轮 θ_N(wver) 之外还需认上一轮 epoch3
     # 快照（extra_wver）采的首波 shard（预采首波 wver=θ_{N,e3}，否则被当未完成清场）。
     _mk_shard(traj, 7, 777, "e" * 64)  # 模拟预采首波：wver=快照指纹（extra）
-    e_done = run_rl.completed_pairs(traj, wver, extra_wver="e" * 64)
+    e_done = completed_pairs(traj, wver, extra_wver="e" * 64)
     check((7, 777) in e_done, "extra-wver precollected shard counted as done")
-    rm_e = run_rl.resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
+    rm_e = resumed_manifests(traj, wver, only={(7, 777)}, extra_wver="e" * 64)
     check(len(rm_e) == 1 and rm_e[0]["stage"] == 7, "resumed honors extra-wver shard")
     check(
-        (7, 777) not in run_rl.completed_pairs(traj, wver),
+        (7, 777) not in completed_pairs(traj, wver),
         "without extra_wver precollected shard NOT treated as current-θ shard",
     )
 
@@ -216,9 +224,9 @@ def test_jsonl_anchors(tmp: Path) -> None:
         {"event": "circuit_break", "iter": 7},
     ]
     jl.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
-    check(run_rl.last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)")
-    check(run_rl.last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start")
-    check(run_rl.peak_entropy(jl) is None, "no entropy field -> no F4 ENT baseline (cold start)")
+    check(last_completed_iter(jl) == 7, "last iteration event wins (errors ignored)")
+    check(last_rotate_seed(jl) == 42, "rotateSeed inherited from last run_start")
+    check(peak_entropy(jl) is None, "no entropy field -> no F4 ENT baseline (cold start)")
 
     rows2 = [
         {"event": "iteration", "iter": 1, "entropy": 0.254},
@@ -230,7 +238,7 @@ def test_jsonl_anchors(tmp: Path) -> None:
         "\n".join(json.dumps(r) for r in rows2) + "\n", encoding="utf-8"
     )
     check(
-        run_rl.peak_entropy(tmp / "log2.jsonl") == 0.377,
+        peak_entropy(tmp / "log2.jsonl") == 0.377,
         "peak entropy inherited (F4 ENT relative-collapse baseline survives relaunch)",
     )
 
@@ -602,7 +610,7 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         traj = tmp_path / "i1"
         traj.mkdir()
         drained_ts, result_ts = [], []
-        rep = run_rl.run_rollout_queue(
+        rep = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -648,7 +656,7 @@ def test_it_halt_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         ev = threading.Event()
         ev.set()
         calls = []
-        rep2 = run_rl.run_rollout_queue(
+        rep2 = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -858,7 +866,7 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         traj.mkdir()
         susp = threading.Event()
         susp.set()
-        rep5a = run_rl.run_rollout_queue(
+        rep5a = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -884,7 +892,7 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         # 旋钮，与 test_volume_e2e「副本略慢 ⇒ 主副本赢」同一用法）：主副本（本机）稳赢，
         # 竞速道照旧被触发（dup 仍会派发，只是不再与断言赛跑）。
         srv.dup_hang = 0.5
-        rep5b = run_rl.run_rollout_queue(
+        rep5b = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -928,7 +936,7 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
                 "enabled": True,
             }
         )
-        rep6 = run_rl.run_rollout_queue(
+        rep6 = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -981,7 +989,7 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         if not srv.eval_dispatched.wait(timeout=30.0):
             raise AssertionError("I7 eval round never dispatched a game")
         t_collect = time.time()
-        rep7 = run_rl.run_rollout_queue(
+        rep7 = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -1199,7 +1207,7 @@ def test_it_mixed_cluster_rollout_only_freezes_own_course_eval(
         )
 
         # —— 真混跑：A 的 rollout 在 B 的 3 局 eval 仍在飞时跑完整轮 ——
-        rep = run_rl.run_rollout_queue(
+        rep = run_rollout_queue(
             bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix.7",
             local_slots_max=0,
         )
@@ -1306,7 +1314,7 @@ def test_it_mixed_cluster_rollout_pauses_new_eval_grants_but_keeps_inflight(
         froze = True
 
         # —— 混跑：在飞局仍被按着，rollout 跑完整轮 ——
-        rep = run_rl.run_rollout_queue(
+        rep = run_rollout_queue(
             bun, str(w_a), traj_a, [(0, 111), (3, 222)], args_a, cfg, "mix2.7",
             local_slots_max=0,
         )
@@ -1466,7 +1474,7 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         srv.slow_first = {(0, 111)}
         srv._slowed_once = set()
         t0 = time.time()
-        rep9 = run_rl.run_rollout_queue(
+        rep9 = run_rollout_queue(
             bun, str(WEIGHTS), traj, plan9, args, cfg, "i9.9", local_slots_max=0
         )
         took9 = time.time() - t0
@@ -1521,7 +1529,7 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         srv.dup_hang = 30.0
         srv.dispatched = set()
         t0 = time.time()
-        rep10 = run_rl.run_rollout_queue(
+        rep10 = run_rollout_queue(
             bun,
             str(WEIGHTS),
             traj,
@@ -1582,7 +1590,6 @@ def test_chunk_episodes() -> None:
 
 
 def test_backup_weights(tmp: Path) -> None:
-    from trainer import run_rl
     from worker import archive as rl_archive
 
     print("[fast] backup_weights (归档；只归档不自动清理——2026-09-02 用户指令)")

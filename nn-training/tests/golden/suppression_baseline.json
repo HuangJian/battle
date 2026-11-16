@@ -2,10 +2,6 @@
   "noqa_f401": {
     "hub/smoke_loopback.py": 1,
     "remote/offline_boot.py": 1,
-    "trainer/dispatch.py": 1,
-    "trainer/eval_dispatch.py": 3,
-    "trainer/loop.py": 2,
-    "trainer/run_rl.py": 6,
     "worker/data/dataset.py": 1,
     "worker/data/weights_io.py": 1,
     "worker/ppo/common.py": 1,

@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from trainer.eval_dispatch import find_archive_weights, select_delayed_eval_it
 from trainer.loop_steps import TrainingSteps
+from worker.archive import find_archive_weights
 from worker.eval_local import (
     EVAL_JOIN_SOFT_SEC_DEFAULT,
     EVAL_LOCAL_EARLY_EPOCHS_DEFAULT,
@@ -31,6 +31,7 @@ from worker.eval_local import (
     eval_tail_overran,
     local_gate_release_plan,
 )
+from worker.eval_yield import select_delayed_eval_it
 
 
 def _every5(m: int) -> bool:

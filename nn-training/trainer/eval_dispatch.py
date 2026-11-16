@@ -37,7 +37,6 @@ from remote import weights_standard
 from worker import node_identity
 from worker.agent_meta import record_agent_meta as _record_agent_meta
 from worker.agent_meta import record_eval_failed
-from worker.archive import find_archive_weights  # noqa: F401 — 兼容旧引用
 from worker.eval_arbiter import EvalRound, eval_arbiter
 from worker.eval_exec import eval_executors
 
@@ -51,7 +50,6 @@ from worker.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
     eval_row,
-    report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
     run_local_eval_game,
     settle_eval_summary,
 )
@@ -68,7 +66,6 @@ from worker.eval_yield import (
     inflight_grace_cap,
     release_local_gate_if_starved,
     reserve_local_slots,
-    select_delayed_eval_it,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
 )
 from worker.sibling_reuse import REUSE_NODE, reuse_eval_round
 

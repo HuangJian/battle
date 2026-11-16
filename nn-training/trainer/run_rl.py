@@ -42,18 +42,8 @@ from common.log import log
 from common.paths import REPO_ROOT
 from common.pid_probe import pid_alive as _pid_alive_impl
 from common.platform_utils import force_utf8_stdio
-from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
-    run_rollout_queue,
-)
 from worker.cli import build_argparser
 from worker.modes import apply_mode_flags, merged_mode_args, resolve_mode
-from worker.resume import (
-    completed_pairs,  # noqa: F401 — re-exported for tests
-    last_completed_iter,  # noqa: F401 — re-exported for tests
-    last_rotate_seed,  # noqa: F401 — 轮换 seed 的唯一实现（预采腿用它；e2e/test_run_rl 直读）
-    peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
-    resumed_manifests,  # noqa: F401 — re-exported for tests
-)
 from worker.rl_config_schema import check_rl_config
 from worker.schedule import kickstart_coef
 from worker.train.loop_util import course_key_from_path

@@ -23,7 +23,6 @@ from trainer.dispatch_state import DispatchState, admit_rollout_nodes
 from trainer.queue_local import (
     QueueEdgeGate,
     make_local_pool,
-    resolve_tail_join_sec,  # noqa: F401  (re-export: tests/trainer/test_tail_grace.py)
     run_local_rollout,
     run_rollout,
     split_local_head,
