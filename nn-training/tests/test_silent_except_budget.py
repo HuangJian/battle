@@ -112,6 +112,23 @@ def _baseline() -> dict[str, int]:
 MARKER = "契约静默（G9 冻结"
 
 
+#: `MARKER` 的字节形态：用来在**不解析**的情况下先缩小候选集（见 `_marker_audit`）。
+MARKER_BYTES = MARKER.encode("utf-8")
+
+
+@cache
+def _prod_paths() -> dict[str, Path]:
+    """生产包里全部 `*.py`（相对仓库根的 posix 路径 → 路径）。只 rglob，不读内容。"""
+    out: dict[str, Path] = {}
+    for d in PROD_DIRS:
+        for p in (ROOT / d).rglob("*.py"):
+            rel = p.relative_to(ROOT).as_posix()
+            if rel.startswith(EXEMPT_PREFIXES):
+                continue
+            out[rel] = p
+    return out
+
+
 @cache
 def _marker_audit() -> tuple[dict[str, list[int]], dict[str, list[int]]]:
     """`(缺标记的静默宽捕, 孤儿标记)` —— 前者按处、后者按**行**，都以 `{文件: [行号]}` 返回。
@@ -120,45 +137,51 @@ def _marker_audit() -> tuple[dict[str, list[int]], dict[str, list[int]]]:
       说明（下一个人只能从零判断它该不该宽）。
     * 孤儿标记 = 注释还在，但它已经不在任何一个静默宽捕里（那处窄捕了 / 删了）—— 留着会
       让下一次统计虚高，也会误导读代码的人以为这儿的静默还有契约依据。
+
+    **扫描面有意比 `_scan()` 窄**：只看「基线里的文件」+「文本里出现这句标记的文件」。
+    ① 语义上这才是「**冻结**的静默」——新冒出来的静默宽捕（哪怕在新文件里）是 G9 自己的增长
+    检查该报的事，与「理由写没写」无关；② 成本：生产面 330 个文件全 `ast.parse` 要 1.2s，
+    而这两个集合加起来只有十几个文件（标记是字面量，用字节初筛就够，不解析）。
     """
     missing: dict[str, list[int]] = {}
     stray: dict[str, list[int]] = {}
-    for d in PROD_DIRS:
-        for p in (ROOT / d).rglob("*.py"):
-            rel = p.relative_to(ROOT).as_posix()
-            if rel.startswith(EXEMPT_PREFIXES):
+    baseline = _baseline()
+    candidates: dict[str, Path] = {}
+    for rel, p in _prod_paths().items():
+        if rel in baseline or MARKER_BYTES in p.read_bytes():
+            candidates[rel] = p
+    for rel in sorted(candidates):
+        src = candidates[rel].read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(src)
+        text_lines = src.splitlines()
+        marked: set[int] = set()  # 已带标记的静默宽捕（按 `except` 行号）
+        inside: set[int] = set()  # 真正落在那些处理块里的标记注释行
+        for h in ast.walk(tree):
+            if not isinstance(h, ast.ExceptHandler):
                 continue
-            src = p.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(src)
-            text_lines = src.splitlines()
-            marked: set[int] = set()  # 已带标记的静默宽捕（按 `except` 行号）
-            inside: set[int] = set()  # 真正落在那些处理块里的标记注释行
-            for h in ast.walk(tree):
-                if not isinstance(h, ast.ExceptHandler):
-                    continue
-                if not (_is_broad(h) and _is_silent(h)):
-                    continue
-                if MARKER not in (ast.get_source_segment(src, h) or ""):
-                    continue
-                marked.add(h.lineno)
-                inside |= {
-                    i
-                    for i in range(h.lineno + 1, (h.end_lineno or h.lineno) + 1)
-                    if MARKER in text_lines[i - 1]
-                }
-            # 标记行不落在任何「已认定的静默宽捕」块里 = 注释没跟着代码走（那处窄捕 / 删了，
-            # 或换到了别的语句上）。嵌套情形不算：内层处理块标记了，外层段里也会扫到这一行。
-            for i, line in enumerate(text_lines, start=1):
-                if MARKER in line and i not in inside:
-                    stray.setdefault(rel, []).append(i)
-            for h in ast.walk(tree):
-                if (
-                    isinstance(h, ast.ExceptHandler)
-                    and _is_broad(h)
-                    and _is_silent(h)
-                    and h.lineno not in marked
-                ):
-                    missing.setdefault(rel, []).append(h.lineno)
+            if not (_is_broad(h) and _is_silent(h)):
+                continue
+            if MARKER not in (ast.get_source_segment(src, h) or ""):
+                continue
+            marked.add(h.lineno)
+            inside |= {
+                i
+                for i in range(h.lineno + 1, (h.end_lineno or h.lineno) + 1)
+                if MARKER in text_lines[i - 1]
+            }
+        # 标记行不落在任何「已认定的静默宽捕」块里 = 注释没跟着代码走（那处窄捕 / 删了，
+        # 或换到了别的语句上）。嵌套情形不算：内层处理块标记了，外层段里也会扫到这一行。
+        for i, line in enumerate(text_lines, start=1):
+            if MARKER in line and i not in inside:
+                stray.setdefault(rel, []).append(i)
+        for h in ast.walk(tree):
+            if (
+                isinstance(h, ast.ExceptHandler)
+                and _is_broad(h)
+                and _is_silent(h)
+                and h.lineno not in marked
+            ):
+                missing.setdefault(rel, []).append(h.lineno)
     return missing, stray
 
 
