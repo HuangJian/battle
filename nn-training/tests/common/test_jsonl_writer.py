@@ -18,7 +18,6 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +102,7 @@ def test_same_path_never_has_two_append_handles(tmp_path, monkeypatch) -> None:
         t.start()
     for t in threads:
         t.join(timeout=30)
-    assert not any(t.is_alive() for t in threads), "追加调用挂死（写者线程没给 ack）"
+    assert not any(t.is_alive() for t in threads), "追加调用挂死（锁没释放）"
     assert errors == [], errors
     assert state["max"] == 1, (
         f"同一账本出现 {state['max']} 个并发追加句柄（{state['opens']} 次 open）"
@@ -122,7 +121,7 @@ def test_same_path_never_has_two_append_handles(tmp_path, monkeypatch) -> None:
 
 
 def test_write_error_reaches_caller_and_writer_keeps_running(tmp_path, monkeypatch) -> None:
-    """写失败必须回到调用方（`_record_with_retry` 靠它重试），且写者线程不得随之死掉。"""
+    """写失败必须回到调用方（`_record_with_retry` 靠它重试），且一次失败不得毒化后续追加。"""
     path = tmp_path / "nested" / "ledger.jsonl"
     real_open = builtins.open
     calls = {"n": 0}
@@ -149,29 +148,30 @@ def test_record_agent_meta_swallows_write_errors(tmp_path) -> None:
     worker.agent_meta.record_agent_meta(bad, {"node": "n1", "ok": True})
 
 
-def test_close_jsonl_writers_flushes_queued_lines_and_reopens(tmp_path: Path) -> None:
-    """退出收尾：**已投递未 ack** 的行必须落盘；关闭后还能再次追加（重建写者）。
+def test_append_returns_only_after_the_line_is_readable(tmp_path: Path) -> None:
+    """**返回即已落盘**：另一个读者在 `append_jsonl` 返回后立刻能读到完整一行。
 
-    这是 `close_jsonl_writers()` 的存在理由：写者线程是 daemon，进程被 kill 时队列里
-    尚未写出的行会静默丢失（调用方还停在 `fut.result()` 上）。用例直接投递一行而
-    不等 ack，模拟的正是「在飞」的那一批。
+    旧实现的判据是「已投递未 ack 的行在 `close_jsonl_writers()` 时被排空」—— 那批行只
+    在写者线程的队列里存在过（daemon 被 kill 就静默丢）。2026-11-16 去掉线程后不再有
+    「在飞」这个状态，判据换成它真正承诺的那件事：返回时行已经在文件里，没有排空可言。
     """
     path = tmp_path / "ledger.jsonl"
-    common.fs.append_jsonl(path, {"i": 0})
-    # 名册是**进程级**的：同文件其他用例可能留下写者，必须按规范化 key 精确取
-    key = os.path.normcase(os.path.abspath(str(path)))
-    writer = common.fs.default_ledger().writers[key]
-    fut: Future = Future()
-    writer._q.put((json.dumps({"i": 1}) + "\n", fut))
+    common.fs.append_jsonl(path, {"i": 0, "note": "中文"})
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines == [json.dumps({"i": 0, "note": "中文"}, ensure_ascii=False)]
 
     common.fs.close_jsonl_writers()
+    assert not common.fs.default_ledger().writers, "收尾后名册必须清空"
 
-    assert fut.done() and fut.result() is None
-    assert not common.fs.default_ledger().writers, "收尾后写者名册必须清空"
+    common.fs.append_jsonl(path, {"i": 1})  # 关掉还能再追加（重建追加位）
+    common.fs.close_jsonl_writers()
     rows = [json.loads(line)["i"] for line in path.read_text(encoding="utf-8").splitlines()]
     assert rows == [0, 1]
 
-    common.fs.append_jsonl(path, {"i": 2})
-    common.fs.close_jsonl_writers()
-    rows = [json.loads(line)["i"] for line in path.read_text(encoding="utf-8").splitlines()]
-    assert rows == [0, 1, 2]
+
+def test_no_writer_thread_is_spawned_per_path(tmp_path) -> None:
+    """**追加不再建线程**（P1-12）：每路径一把锁，写就在调用方线程里做完。"""
+    for i in range(4):
+        common.fs.append_jsonl(tmp_path / f"l{i}.jsonl", {"i": i})
+    names = [t.name for t in threading.enumerate() if t.name.startswith("jsonl-writer")]
+    assert names == [], f"还有写者线程在跑：{names}"

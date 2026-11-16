@@ -1,7 +1,6 @@
 {
   "common/distribution.py": 2,
   "common/env_probe.py": 1,
-  "common/fs.py": 1,
   "common/log.py": 6,
   "common/net_http.py": 1,
   "common/payload.py": 2,

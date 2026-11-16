@@ -19,11 +19,9 @@ import atexit
 import io
 import json
 import os
-import queue
 import tarfile
 import threading
 import time
-from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -86,55 +84,23 @@ def atomic_write_json(path: Path | str, obj: Any, *, indent: int = 1) -> None:
     atomic_write_bytes(path, json.dumps(safe, ensure_ascii=False, indent=indent).encode("utf-8"))
 
 
-#: 写者空闲多久自行退场（写者不持有句柄，退场只回收线程；下次 append 会重建）。
-#: 每条 tmp 路径都会建一个写者——没有空闲退场就是一条线程泄漏（测试面尤其明显）。
-_JSONL_WRITER_IDLE_EXIT_SEC = 30.0
+class _JsonlPath:
+    """单条路径的追加位：一把锁 + 已建过的父目录。
 
-#: 队列关闭哨兵：写者按 FIFO 写完它前面的行后退场。
-_CLOSE = None
+    **锁是那条不变式的全部**：同一路径任何时刻至多一个追加句柄（Windows 上两个追加
+    句柄不是原子的 O_APPEND，会互相覆盖行首 —— 2026-11-02 z4-polish.it60 的断头行）。
 
-
-class _JsonlWriter:
-    """单条路径的追加执行者：队列收**已编码的整行**，逐行 open/append/close 并回 ack。
-
-    行在调用方线程里先 `json.dumps`（序列化语义与旧实现逐字节一致，也避免入队后
-    对象被改写的竞态）；写者只做 IO，因此「同一路径任何时刻至多一个追加句柄」恒成立。
+    2026-11-16（P1-12）：原来是「每路径一个写者线程 + 队列 + Future ack」。实测
+    161us/行，其中 ~99us 是跨线程 ack 的等锁延迟、写盘只占 28us —— 线程在这里是纯
+    开销。改成「就地追加」后 35us/行，且 `append` 抛的异常天然就是调用方的异常
+    （旧实现要经 Future 转一次），`close()` 也不再需要「排空队列」。
     """
 
-    def __init__(self, key: str, path: str, ledger: JsonlLedger) -> None:
-        self.key = key
-        self.path = path
-        self._ledger = ledger
-        self.closed = False
-        self._q: queue.SimpleQueue = queue.SimpleQueue()
-        self._thread = threading.Thread(
-            target=self._run, name=f"jsonl-writer:{Path(path).name}", daemon=True
-        )
-        self._thread.start()
+    __slots__ = ("lock", "parent_ready")
 
-    def _run(self) -> None:
-        while True:
-            try:
-                item = self._q.get(timeout=_JSONL_WRITER_IDLE_EXIT_SEC)
-            except queue.Empty:
-                # 退场与入队都在账本的锁下判定 ⇒ 不会漏掉「刚好在这时投递」的行
-                #（投递方看到 closed 就新建写者，队列先进先出不丢序）。
-                if self._ledger._retire_if_idle(self):
-                    return
-                continue
-            if item is _CLOSE:
-                self.closed = True
-                return
-            text, fut = item
-            try:
-                p = Path(self.path)
-                p.parent.mkdir(parents=True, exist_ok=True)
-                with open(p, "a", encoding="utf-8") as f:
-                    f.write(text)
-            except Exception as e:  # 写失败回给调用方（`_record_with_retry` 靠它重试）
-                fut.set_exception(e)
-            else:
-                fut.set_result(None)
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.parent_ready = False
 
 
 class JsonlLedger:
@@ -145,51 +111,41 @@ class JsonlLedger:
     """
 
     def __init__(self) -> None:
-        self._writers: dict[str, _JsonlWriter] = {}
+        self._paths: dict[str, _JsonlPath] = {}
         self._lock = threading.Lock()
 
     @property
-    def writers(self) -> dict[str, _JsonlWriter]:
-        """当前活着的写者（诊断/测试用）。"""
-        return self._writers
-
-    def _retire_if_idle(self, writer: _JsonlWriter) -> bool:
-        """空闲写者退场判定：True = 已退场；False = 队列又有活了（调用方继续循环）。"""
-        with self._lock:
-            if not writer._q.empty():
-                return False
-            if self._writers.get(writer.key) is writer:
-                self._writers.pop(writer.key, None)
-            writer.closed = True
-            return True
+    def writers(self) -> dict[str, _JsonlPath]:
+        """当前有追加位的路径（诊断/测试用；名字沿用旧称）。"""
+        return self._paths
 
     def append(self, jsonl_path: str | Path, event: dict) -> None:
-        p = Path(jsonl_path)
         # 同一口径（2026-11-15）：行里的 NaN / ±Infinity 落成 `null`，别把非标准 JSON 写进账本。
+        # 编码在锁外（各线程并行），只有「打开-追加-关闭」进临界区。
         text = json.dumps(sanitize_json(event), ensure_ascii=False) + "\n"
-        # 绝对路径入键：相对路径随 CWD 变，key 漂移会造出第二个写者写同一文件。
-        abs_path = os.path.abspath(str(p))
+        # 绝对路径入键：相对路径随 CWD 变，key 漂移会造出第二个位写同一文件。
+        abs_path = os.path.abspath(str(jsonl_path))
         key = os.path.normcase(abs_path)
         with self._lock:
-            writer = self._writers.get(key)
-            if writer is None or writer.closed:
-                writer = _JsonlWriter(key, abs_path, self)
-                self._writers[key] = writer
-            fut: Future = Future()
-            writer._q.put((text, fut))
-        fut.result()
+            slot = self._paths.get(key)
+            if slot is None:
+                slot = _JsonlPath()
+                self._paths[key] = slot
+        with slot.lock:
+            p = Path(abs_path)
+            if not slot.parent_ready:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                slot.parent_ready = True
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(text)
 
-    def close(self, *, timeout: float = 5.0) -> None:
-        """停止全部写者，并**有界地**等它们把已投递的行写完。"""
+    def close(self) -> None:
+        """清空追加位名册（没有在飞的行要等：`append` 返回 = 已写进文件）。
+
+        关掉再 `append` 会重建追加位（单课程收尾后还可能有后续写入）。
+        """
         with self._lock:
-            writers = list(self._writers.values())
-            self._writers.clear()
-        for w in writers:
-            w.closed = True
-            w._q.put(_CLOSE)
-        deadline = time.monotonic() + timeout
-        for w in writers:
-            w._thread.join(max(0.0, deadline - time.monotonic()))
+            self._paths.clear()
 
 
 _DEFAULT_LEDGER = JsonlLedger()
@@ -200,18 +156,14 @@ def default_ledger() -> JsonlLedger:
     return _DEFAULT_LEDGER
 
 
-def close_jsonl_writers(
-    *, timeout: float = 5.0, ledger: JsonlLedger | None = None
-) -> None:
-    """停止全部写者，并**有界地**等它们把已投递的行写完（进程收尾用）。
+def close_jsonl_writers(*, ledger: JsonlLedger | None = None) -> None:
+    """清空追加位名册（进程收尾用；`atexit` 已注册一次）。
 
-    为什么需要：写者线程是 `daemon=True`，进程被 kill 时队列里尚未写出的行会静默丢失——
-    调用方还停在 `fut.result()` 上，没人能感知。`atexit` 注册一次收尾，让「在飞」的写入
-    变成「已落盘」或「已带异常返回」。
-
-    幂等；关闭后再 `append_jsonl` 会重建写者（单课程收尾后还可能有后续写入）。
+    现在它只是「把名册放掉」：`append_jsonl` 返回时行已经写进文件，没有队列里在飞的行
+    等着落盘（旧实现的写者线程是 daemon，被 kill 时那批行会静默丢失 —— 这个理由随线程
+    一起消失）。幂等；关闭后再 `append_jsonl` 会重建追加位。
     """
-    (ledger or _DEFAULT_LEDGER).close(timeout=timeout)
+    (ledger or _DEFAULT_LEDGER).close()
 
 
 atexit.register(close_jsonl_writers)
@@ -220,14 +172,14 @@ atexit.register(close_jsonl_writers)
 def append_jsonl(
     jsonl_path: str | Path, event: dict, *, ledger: JsonlLedger | None = None
 ) -> None:
-    """向账本追加一行 JSON（父目录按需创建）；**返回即已落盘**（写者 ack 后才返回）。
+    """向账本追加一行 JSON（父目录按需创建）；**返回即已落盘**（close 过句柄才返回）。
 
-    为什么不是「就地 open」：两轮评估可以重叠（`trainer/loop_eval._sweep_eval_tail`
+    为什么不能各写各的：两轮评估可以重叠（`trainer/loop_eval._sweep_eval_tail`
     刻意不 join it55 的尾巴，it60 已开评），而各轮的 `jsonl_lock` 只管自己那一轮。
     Windows 上两个追加句柄**不是**原子的 O_APPEND：后写者按自己句柄的偏移落笔，
     覆盖前写者刚写的行首——2026-11-02 z4-polish.it60 因此留下 119 字节断头行，
     summary 重扫少一局（`_record_agent_meta` 的 meta 行同遭）。锁住「轮内」挡不住
-    「轮与轮」，所以写入口收敛到**每路径一个写者线程**：调用方只投递 + 等 ack。
+    「轮与轮」，所以写入口收敛到**每路径一把锁**（`_JsonlPath.lock`）。
 
     只串行化**同进程**的追加（本仓的 eval/rollout 都住在 trainer 进程内）；跨进程同时
     写同一账本不在本原语的保证内（各课程各有自己的 eval_log）。
