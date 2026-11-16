@@ -44,10 +44,9 @@
     「整轮停滞十几分钟」取证：一条线程永不返回 ⇒ 轮循环收不齐 ⇒ 轮内重投那套护栏一次都
     触发不了）。超界由腿侧按机器级停滞收场（清半截产出 + 整轮重投），**不**就地重跑。
 
-为什么重试而不是「竞速副本」（用户 2026-09-22 提的两条路）：argv 不变 ⇒ out 目录不变 ⇒
-声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同 (stage,seed) 的 shard 目录，直接撞上
-「实产集 == 声明集」那道门。竞速在**多节点**在线路径上成立是因为那里有 hub 侧的候选表
-（`trainer/queue_local.py` 的 `pick_race_target` 等）；云机离线只有一个节点，重试是同一效果的最小实现。
+为什么重试而不是「竞速副本」（用户 2026-09-22 的两条路）：argv 不变 ⇒ out 目录与声明的 shard
+集（`data_fp`）逐字节不变；副本会多产一个同 (stage,seed) 的目录，撞上「实产集 == 声明集」那道门。
+竞速只在**多节点**在线路径成立（hub 侧有候选表，`trainer/queue_local.py::pick_race_target`）；单节点重试等价且更小。
 """
 
 from __future__ import annotations
@@ -296,9 +295,7 @@ def retry_line(
     )
 
 
-def clean_ceiling_line(
-    kind: str, label: str, ceiling_sec: float, attempt: int, where: str
-) -> str:
+def clean_ceiling_line(kind: str, label: str, ceiling_sec: float, attempt: int, where: str) -> str:
     """重试路径**清理超界**行：半截产出清不掉 ⇒ **不就地重跑**，按机器级停滞交整轮重投。
 
     为什么不能「照常重跑这一局」：被放弃的那条 daemon 线程还在跑 rmtree，它删的正是新一次尝试
