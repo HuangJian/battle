@@ -293,11 +293,61 @@ def test_gae_variable_dt_matches_fixed_when_dt1() -> None:
     np.testing.assert_array_equal(ret_var, ret_fixed)
 
 
+def _gae_reference(rewards, values, dones, gamma, lam, dt=None):
+    """2026-11-16 向量化之前的循环实现，逐字保留 —— 独立重实现对账用（§8）。"""
+    N = len(rewards)
+    adv = np.zeros(N, dtype=np.float32)
+    last = 0.0
+    for t in reversed(range(N)):
+        non_term = 1.0 - float(dones[t])
+        gamma_step = float(gamma) if dt is None else float(gamma ** float(dt[t]))
+        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
+        delta = float(rewards[t]) + gamma_step * next_value - float(values[t])
+        last = delta + gamma_step * lam * non_term * last
+        adv[t] = last
+    return adv, adv + np.asarray(values, dtype=np.float32)
+
+def test_gae_bit_exact_against_reference_loop() -> None:
+    """P1-12 向量化必须是**逐字节**改写（不是 `allclose`）。
+
+    `adv` 按 float64 累积再落 float32、`ret = adv + values` 也是 float32 加法，所以任何
+    舍入顺序的改动都会动 golden 签名。六种长度 × 三种终止密度 × 三种 γ × 三种 dt 路径
+    全覆盖，含 N=0 边界与 Python list 输入（Sequence 契约）+ 大动态范围。
+    """
+    rng = np.random.default_rng(20261116)
+    cases = 0
+    for n in (0, 1, 2, 5, 33, 200):
+        r = rng.standard_normal(n).astype(np.float32)
+        v = rng.standard_normal(n).astype(np.float32)
+        for done_rate in (0.0, 0.05, 0.5):
+            d = (rng.random(n) < done_rate).astype(np.int64)
+            for gamma in (0.99, 0.995, 1.0):
+                for dt in (None, rng.integers(0, 9, n).astype(np.int64),
+                           rng.integers(1, 3, n).astype(np.float64)):
+                    got = np_core.compute_gae(r, v, d, gamma, 0.95, dt)
+                    want = _gae_reference(r, v, d, gamma, 0.95, dt)
+                    for a, b in zip(got, want, strict=True):
+                        assert a.dtype == np.float32 and b.dtype == np.float32
+                        np.testing.assert_array_equal(a.view(np.int32), b.view(np.int32))
+                    cases += 1
+    big_r = [1e30, -1e30, 0.5, 0.0, 1.0, 2.0, 3.0]
+    big_v = [1e30, 1e20, -3.0, 0.0, 0.0, 7.0, 8.0]
+    big_d = [0, 0, 1, 0, 0, 0, 1]
+    for dt in (None, np.full(7, 3, dtype=np.int64)):
+        got = np_core.compute_gae(big_r, big_v, big_d, 1.0, 0.95, dt)
+        want = _gae_reference(big_r, big_v, big_d, 1.0, 0.95, dt)
+        for a, b in zip(got, want, strict=True):
+            np.testing.assert_array_equal(a.view(np.int32), b.view(np.int32))
+        cases += 1
+    print(f"ok: GAE 向量化版与循环参照逐字节一致（{cases} 组）")
+
+
 def main() -> None:
     _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parents[2] / "tmp" / "manual-tests"))
     test_gae_dt1_degradation()
     test_gae_hand_computed()
     test_gae_variable_differs()
+    test_gae_bit_exact_against_reference_loop()
     test_chunk_episodes()
     test_chunk_episodes_shuffle_preserves_data()
     test_np_state_roundtrip()

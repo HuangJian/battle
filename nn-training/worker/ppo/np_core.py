@@ -67,19 +67,39 @@ def compute_gae(
 
     dt=None — 定长 per-tick 折扣（ppo.py 原路径，逐字节一致）。
     dt 给定 — 变步长折扣 γ_step = γ^Δt（ppo_intent.py 原路径；Δt≡1 时退化为定长）。
+
+    2026-11-16（P1-12）：能向量化的那半（γ_step / δ / carry）挪进 numpy，tick 循环里只剩
+    一行递推（64→4096 步实测 3.1~4.5x）。**逐字节不变**靠三条约束：
+    ① 递推仍逐 tick 串行 —— 写成 cumprod(1/P_t · Σ P_k δ_k) 形式会改舍入，而 `adv` 虽存
+      float32 却按 float64 累积，累乘再相除与逐项乘加不是同一个数；
+    ② γ^Δt 走 **Python pow 查表**，不用 `np.power`：numpy 对整数指数有自己的快路径，
+      末位不保证与 Python pow 相同；表只按 distinct Δt 建（变步长语料的 Δt 取值个数远小于 N）；
+    ③ 中间量先转 Python float 列表再递推 —— 列表下标比 numpy 标量快，`.tolist()` 是精确转换。
     """
     N = len(rewards)
-    adv = np.zeros(N, dtype=np.float32)
+    if N == 0:
+        adv: npt.NDArray[np.float32] = np.zeros(0, dtype=np.float32)
+        return adv, adv + np.asarray(values, dtype=np.float32)
+    v = np.asarray(values, dtype=np.float64)
+    if dt is None:
+        gamma_step: npt.NDArray[np.float64] = np.full(N, float(gamma), dtype=np.float64)
+    else:
+        dt64 = np.asarray(dt, dtype=np.float64)
+        uniq = np.unique(dt64)
+        pow_lut = np.array([float(gamma ** float(u)) for u in uniq.tolist()], dtype=np.float64)
+        gamma_step = pow_lut[np.searchsorted(uniq, dt64)]
+    v_next = np.empty_like(v)  # V(s_{t+1})；末 tick 之后无状态 ⇒ 0.0
+    v_next[:-1] = v[1:]
+    v_next[-1] = 0.0
+    delta = (np.asarray(rewards, dtype=np.float64) + gamma_step * v_next - v).tolist()
+    carry = (gamma_step * lam * (1.0 - np.asarray(dones, dtype=np.float64))).tolist()
+    adv_out = [0.0] * N
     last = 0.0
-    for t in reversed(range(N)):
-        non_term = 1.0 - float(dones[t])
-        gamma_step = float(gamma) if dt is None else float(gamma ** float(dt[t]))
-        next_value = 0.0 if t + 1 >= N else float(values[t + 1])
-        delta = float(rewards[t]) + gamma_step * next_value - float(values[t])
-        last = delta + gamma_step * lam * non_term * last
-        adv[t] = last
-    ret = adv + np.asarray(values, dtype=np.float32)
-    return adv, ret
+    for t in range(N - 1, -1, -1):
+        last = delta[t] + carry[t] * last
+        adv_out[t] = last
+    adv = np.asarray(adv_out, dtype=np.float32)
+    return adv, adv + np.asarray(values, dtype=np.float32)
 
 # ---------------- shard discovery / loading ----------------
 def discover_shards(

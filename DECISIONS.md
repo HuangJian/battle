@@ -6812,3 +6812,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   4 名（`_MOVE_FLIP` / `BULLET_MIRROR_LUT` / `ENEMY_MIRROR_LUT` / `_flip_direction`）**全仓零读者**；
   `weights_io` 的 6 名里唯一有外部读者的是 `latest_weights_path`（`eval_bridge`，改直取 `weights_meta`），
   另有两个（`latest_weights_path` / `validate_weights_meta`）本就是文档里的字。收成真 import ⇒ G6 5 → 3 文件。
+- **2026-11-16（P1-12：`compute_gae` 向量化，逐字节不变）**：GPU/CPU 上 GAE 原本每个
+  transition 都做 4 次 `float()` 装箱 + 1 次 `pow`。改法只向量化**无递推的那半**（γ_step、δ、
+  carry），tick 循环里留一行 `last = δ[t] + carry[t]·last` —— 实测 2.2~4.3×（N=128→4096）。
+  审计档原建议「按 done 分段后 `np.cumsum` 折扣前缀积」**被否**：它要乘一遍再除一遍，舍入顺序
+  与逐项递推不同（`adv` 虽落 float32 但按 float64 累积），golden 签名会变；且 `P_t` 长局上下溢。
+  `γ^Δt` 也**不用 `np.power`**（整数指数走 numpy 自己的快路径，末位不保证一致）⇒ 按 distinct Δt
+  建 Python `pow` 查表。回归用例把旧循环逐字留作独立实现做逐位对账。
