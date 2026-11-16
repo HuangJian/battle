@@ -161,9 +161,10 @@ WIDE_FUNCS_BASELINE = {
 #: `WeightsLedger`），名册里对应的三条随之删除。
 #: 2026-11-14：`distribution` 的在飞登记 / 收工标记 / 重启去重 memo 搬进 `RequestRegistry` /
 #: `RestartMemo`（模块只留 `_REQUESTS` / `_RESTARTS` 两个默认实例），三条也删。
-L0_MUTABLE_ALLOWED = {
-    "common/platform_utils.py": frozenset({"_UNREAPED"}),
-}
+#: 2026-11-16：`platform_utils` 的 `_UNREAPED` 搬进 `UnreapedProcs` ⇒ **名册清零**。
+#: 这里保持一个空表而不是删掉名册：`test_l0_allowlist_is_still_needed` 靠它继续成立，
+#: 将来真有无法立刻拆的存量时，往这里加条目仍然要在上面写清日期与理由。
+L0_MUTABLE_ALLOWED: dict[str, frozenset[str]] = {}
 
 #: `global` 语句的存量（按文件计数；出现在新文件 = 红）。
 GLOBAL_BASELINE = {

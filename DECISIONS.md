@@ -6728,3 +6728,11 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   读到；搬走等于把契约挪到读者不会去的地方，与 §9「注释离代码太远」自己矛盾。门禁只做止损：
   新模块不许一出生就超 50 行，已超的不许更长；顺手删短就顺手把基线调小。
   口径只数**模块**级 docstring（函数/类的不算：它们的长度由 G1 的函数形状与可读性另管）。
+- **2026-11-16（G2 名册清零：`UnreapedProcs`）**：`common/platform_utils.py` 的模块级
+  `_UNREAPED: list[Any]` 搬进 `UnreapedProcs`（`keep` / `sweep` / `__len__`），三个公开函数
+  `keep_unreaped` / `sweep_unreaped` / `unreaped_count` 签名不变、多一个 `store=` 注入位，
+  `L0_MUTABLE_ALLOWED` 清空。`common/` 至此零模块级可变容器（`common/__init__.py` 契约 #4）。
+  为什么不留 `list` + 锁：那是一本**进程级账本**，锁只是让并发写不打架，测试里仍然无法隔离；
+  对象的 `store=` 让用例自己造账本（新用例断言注入的那个不碰默认实例）。
+  名册本体不删：`test_l0_allowlist_is_still_needed` 靠它继续拦「过期豁免」，将来真有拆不动的
+  存量时加条目仍要在表头写日期与理由。
