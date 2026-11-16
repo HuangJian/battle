@@ -129,6 +129,8 @@ def _watch_stdin(parent_gone: threading.Event) -> None:
             if not chunk:
                 break
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：_watch_stdin 外层；读到 EOF / 坏管道即 break，
+        # 结论本身就是「父进程没了」（parent_gone.set()）。
         pass
     parent_gone.set()
 

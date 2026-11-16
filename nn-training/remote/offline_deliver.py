@@ -629,6 +629,8 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             try:
                 self.log(f"补传后台异常（忽略，线程继续）：{type(e).__name__}: {e}")
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：_guard 的契约 = 后台腿不得因任何异常死掉；
+                # 日志写不出去 ≠ 线程该死。
                 pass
 
     # ------------------------------------------------------------ 探活

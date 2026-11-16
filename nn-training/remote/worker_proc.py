@@ -129,6 +129,8 @@ def supervise_worker(
             try:
                 proc.kill()
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：紧跟 raise —— 中断本来就要往上走，
+                # kill 失败不该把它改写成另一个异常。
                 pass
             raise
         if rc == HOT_RELOAD_EXIT:

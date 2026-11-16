@@ -213,6 +213,8 @@ def _download(
         try:
             resp.close()
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：已在 finally，成功/失败路径都要走；
+            # 这里抛只会把已有结论替换成「关连接失败」。
             pass
 
 

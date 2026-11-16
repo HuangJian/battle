@@ -393,6 +393,8 @@ class DelivererProcess:
             if proc.stdin is not None:
                 proc.stdin.close()  # stdin EOF = 第二条「父进程收线了」通道
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：stdin EOF 是「父进程收线了」的第二条通道，
+            # 关不掉不影响主通道（wait 超时后仍有 terminate→kill 级联）。
             pass
         try:
             proc.wait(timeout=max(0.0, float(budget)) + float(grace))
@@ -405,6 +407,8 @@ class DelivererProcess:
                 try:
                     proc.kill()
                 except Exception:
+                    # 契约静默（G9 冻结，非旧债）：_stop_child 级联的最后一级（同 child_proc）——
+                    # kill 失败 = 子进程已不受控，没有别的动作可做。
                     pass
         for t in self._forwarders:
             t.join(timeout=2.0)

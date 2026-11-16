@@ -93,6 +93,8 @@ def reap_child(proc: subprocess.Popen | None, *, grace: float = REAP_GRACE_SEC) 
         if proc.stdin is not None:
             proc.stdin.close()
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：收尾级联的第一步 —— 管道已被对端关掉时 close 会抛，
+        # 而「父进程收线了」的结论已由读流 EOF 拿到，不靠这里。
         pass
     try:
         proc.wait(timeout=float(grace))
@@ -104,6 +106,8 @@ def reap_child(proc: subprocess.Popen | None, *, grace: float = REAP_GRACE_SEC) 
             try:
                 proc.kill()
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：级联最后一级 —— terminate+wait 都失败才走到 kill，
+                # kill 再失败 = 进程已不受控；没有可做的事，也不该把收尾异常抛回调用方。
                 pass
 
 
@@ -140,6 +144,8 @@ def pump_lines(
                 if first is None:
                     first = e
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：读流被截断 =「管道关了」这条正常收线（EOF 的回声）；
+        # 回调自己抛的异常上面已单独兜住并报数（dropped / first）。
         pass
     if dropped:
         try:

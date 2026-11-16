@@ -243,6 +243,8 @@ def wait_ping(port: int, token: str, timeout_s: float = 30.0) -> bool:
                 if r.status == 200:
                     return True
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：每 0.5s 一次的 /ping 探测 ——「这次不通」是
+            # 下一次迭代的输入，不是错误；结论由 wait_ping 的返回值表达。
             pass
         time.sleep(0.5)
     return False

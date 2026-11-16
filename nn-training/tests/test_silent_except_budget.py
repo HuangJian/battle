@@ -33,6 +33,12 @@
     不一定支持 chmod）⇒ 44 → **40**；该文件另 6 处 `except Exception` 也在同批收窄（见 G4 记账表）。
     `common/distribution.py` 的 `weights_cached_on_node` 同批走窄捕（形状显式判 `isinstance`）
     ⇒ 42 → **41**；同文件另 1 处（`_closer` 对任意响应对象尽力 `close()`）是第三条边界，保留。
+  * **留在基线里的每一处都要在**现场**写明理由**（2026-11-15 补，`_marker_audit`）。
+    `python.refactor.md` 附录 C 把 26 处 A 类逐条定性成「静默就是契约」—— 但那张表在仓库根，
+    改这几行代码的人看不到它，于是同一批 `except Exception: pass` 每隔几个月就被重新审计一遍。
+    规矩：**在 `pass` 上方写一行以 `契约静默（G9 冻结` 开头的注释**（说清为什么静默），
+    由 `test_frozen_silent_sites_say_why_in_place` 钉住「每处都在场有理由、且没有孤儿注释」。
+    这**不是**豁免机制：标记不减轻 G9 的计数，新增静默宽捕照样红。
 """
 
 from __future__ import annotations
@@ -98,6 +104,77 @@ def _scan() -> dict[str, int]:
 def _baseline() -> dict[str, int]:
     data: dict[str, int] = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     return data
+
+
+#: 「静默就是契约」的就近标记前缀（附录 C 的 A 类 26 处逐条写在各自的 `pass` 上方）。
+#: 为什么不新增清单文件：清单离代码远 ⇒ 改代码的人永远看不到它（附录 C 的结论一样）。
+#: 前缀之外的理由文字自由写；前缀**逐字**一致，好让 `grep -rn` 一次数全 26 处。
+MARKER = "契约静默（G9 冻结"
+
+
+@cache
+def _marker_audit() -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    """`(缺标记的静默宽捕, 孤儿标记)` —— 前者按处、后者按**行**，都以 `{文件: [行号]}` 返回。
+
+    * 缺标记 = 本文件认定的「宽泛捕获 + 只有 `pass`」却找不到那句话：留在基线里等于欠一张
+      说明（下一个人只能从零判断它该不该宽）。
+    * 孤儿标记 = 注释还在，但它已经不在任何一个静默宽捕里（那处窄捕了 / 删了）—— 留着会
+      让下一次统计虚高，也会误导读代码的人以为这儿的静默还有契约依据。
+    """
+    missing: dict[str, list[int]] = {}
+    stray: dict[str, list[int]] = {}
+    for d in PROD_DIRS:
+        for p in (ROOT / d).rglob("*.py"):
+            rel = p.relative_to(ROOT).as_posix()
+            if rel.startswith(EXEMPT_PREFIXES):
+                continue
+            src = p.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(src)
+            text_lines = src.splitlines()
+            marked: set[int] = set()  # 已带标记的静默宽捕（按 `except` 行号）
+            inside: set[int] = set()  # 真正落在那些处理块里的标记注释行
+            for h in ast.walk(tree):
+                if not isinstance(h, ast.ExceptHandler):
+                    continue
+                if not (_is_broad(h) and _is_silent(h)):
+                    continue
+                if MARKER not in (ast.get_source_segment(src, h) or ""):
+                    continue
+                marked.add(h.lineno)
+                inside |= {
+                    i
+                    for i in range(h.lineno + 1, (h.end_lineno or h.lineno) + 1)
+                    if MARKER in text_lines[i - 1]
+                }
+            # 标记行不落在任何「已认定的静默宽捕」块里 = 注释没跟着代码走（那处窄捕 / 删了，
+            # 或换到了别的语句上）。嵌套情形不算：内层处理块标记了，外层段里也会扫到这一行。
+            for i, line in enumerate(text_lines, start=1):
+                if MARKER in line and i not in inside:
+                    stray.setdefault(rel, []).append(i)
+            for h in ast.walk(tree):
+                if (
+                    isinstance(h, ast.ExceptHandler)
+                    and _is_broad(h)
+                    and _is_silent(h)
+                    and h.lineno not in marked
+                ):
+                    missing.setdefault(rel, []).append(h.lineno)
+    return missing, stray
+
+
+def test_frozen_silent_sites_say_why_in_place() -> None:
+    """基线里的每一处静默都要**在现场**说清「这是契约，不是旧债」（理由就地表达，不靠清单）。"""
+    missing, stray = _marker_audit()
+    gaps = "\n".join(f"  {rel}: 第 {lns} 行" for rel, lns in sorted(missing.items()))
+    assert not missing, (
+        f"这些「宽泛捕获 + 什么也不做」没写在现场的静默理由（前缀 `{MARKER}…`）：\n{gaps}\n"
+        "  要么给它一个可见出口 / 窄捕（顺手把基线调小），要么在 `pass` 上方写明为什么静默是对的。"
+    )
+    stale = "\n".join(f"  {rel}: 第 {lns} 行" for rel, lns in sorted(stray.items()))
+    assert not stray, (
+        f"这些「{MARKER}…」注释已经对不上任何静默宽捕（那段代码窄捕 / 删掉了）：\n{stale}\n"
+        "  注释跟着代码走 —— 顺手删掉它，别让下一次统计把已经修好的地方又算成契约。"
+    )
 
 
 def test_no_new_silent_broad_except() -> None:

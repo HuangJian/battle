@@ -84,6 +84,8 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
         proto = proto or str(course.get("cf_protocol") or rl.get("cf_protocol") or "") or None
         edge = edge or str(course.get("cf_edge_ip") or rl.get("cf_edge_ip") or "") or None
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：既有契约「配置读不到 ⇒ 用缺省隧道参数」
+        # （tests 里 test_config_read_failure_is_silent 等三条钉死）；改它会破契约。
         pass
     return proto, edge
 

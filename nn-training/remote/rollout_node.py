@@ -253,6 +253,8 @@ def _terminate(p: Any) -> None:
         try:
             p.kill()
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：terminate+wait 失败后的最后一级 kill；
+            # 节点收尾不该把「kill 也没成功」变成一个新的异常。
             pass
 
 

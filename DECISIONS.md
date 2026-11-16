@@ -6706,3 +6706,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **附带发现（测试纪律）**：`LogRouter.warn_once` 去重是**进程级**的。断言「同一 key 只喊一次」
   的用例必须注入**同一个** `LogRouter()` 实例 —— 每次 `lambda: LogRouter()` 都 new 一个等于把
   去重关掉（断言退化成「喊了几次就是几次」）。这条是「全量 forkdist 分片一变就随机红」的成因。
+- **2026-11-15 补（A 类就地注明）**：附录 C 的 26 处 A 类逐条在**各自的 `pass` 上方**写了
+  `# 契约静默（G9 冻结，非旧债）：<理由>`，并由
+  `tests/test_silent_except_budget.py::test_frozen_silent_sites_say_why_in_place` 双向钉住
+  （缺理由 ⇒ 红；注释对不上静默宽捕 ⇒ 红）。**不新增 noqa / 清单文件 / 例外表**：清单离代码远，
+  改代码的人看不到它，这正是同一批 `except Exception: pass` 被反复重审的成因。
+  标记**不减轻** G9 计数 —— 它是「理由已就近表达」的证据，不是豁免凭证。

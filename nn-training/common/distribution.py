@@ -500,6 +500,8 @@ def abort_active_requests(tag: str = "") -> int:
                 try:
                     r.close()  # type: ignore[attr-defined]
                 except Exception:
+                    # 契约静默（G9 冻结，非旧债）：守护线程里尽力关响应对象，没人在等它关完；
+                    # 目标类型不保证有 close（上面已显式 isinstance 筛过）。
                     pass
 
         threading.Thread(target=_closer, daemon=True, name="abort-close").start()

@@ -75,6 +75,8 @@ class CloudPoolKeeper:
         try:
             self._log(f"[pool:{self.leg}] {msg}")
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：包的是「说一句话」，不是说这句话的内容；
+            # 池的日志钩子可能是坏掉的 stdout。
             pass
 
     def _detach_locked(self) -> Any:

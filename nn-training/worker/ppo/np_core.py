@@ -299,17 +299,21 @@ def xla_fingerprint(device: object = None) -> dict:
         try:
             out[key] = fn()
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：torch_xla 的能力探测 —— 不同版本属性集合不同，
+            # 缺项进 out 就是「这台机器没有这个信息」，返回 dict 少 key 已是显式结论。
             pass
     try:
         out["replication_devices"] = int(
             torch_xla._XLAC._xla_get_replication_devices_count()
         )
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：同上，复制设备数在非 PJRT 后端不存在。
         pass
     try:
         dev = str(device) if device is not None else str(xla_device())
         out["attrs"] = str(xr.runtime_device_attributes(dev))
     except Exception:
+        # 契约静默（G9 冻结，非旧债）：同上，设备属性串是诊断信息，缺了就少一个键。
         pass
     return out
 

@@ -216,6 +216,8 @@ def main() -> int:
         try:
             reconfigure(encoding="utf-8", errors="replace")
         except Exception:
+            # 契约静默（G9 冻结，非旧债）：Windows 控制台不接受 reconfigure 时退化成运行环境缺省；
+            # 协议行是纯 ASCII，不影响正确性（没有该方法的情形上面已 getattr 判过）。
             pass
     _log(f"下行腿已就绪（pid={os.getpid()}，hub 由父侧逐轮下发）")
     engine = _Engine()

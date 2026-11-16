@@ -231,11 +231,15 @@ class Tee:
             try:
                 st.write(s)
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：日志层不能因为某个 sink 失败而失败 ——
+                # 在这里「报告失败」只能再走日志 ⇒ 递归。缺行 / 磁盘满由产物侧露头。
                 pass
         if self._on_line is not None:
             try:
                 self._on_line(s)
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：行回调是外部传入的观测钩子，它坏了不该拖死写日志；
+                # 而报告它的唯一通道就是这条日志本身。
                 pass
 
     def flush(self) -> None:
@@ -243,6 +247,8 @@ class Tee:
             try:
                 st.flush()
             except Exception:
+                # 契约静默（G9 冻结，非旧债）：flush 失败同样只是「某个 sink 坏了」，没有别的话筒；
+                # 在这里抛会替换掉调用方本来要处理的结论。
                 pass
 
     def isatty(self) -> bool:
