@@ -6800,3 +6800,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `common/hold_window`：常量 + 调用时读 env 的纯函数 + `env=` 注入（不给测试塞 `monkeypatch.setenv`）。
   **G13** `tests/test_env_reads_budget.py` 按文件冻结直读次数（63 / 32，只许调小）+ 旋钮单家判据；
   豁免 `STANDALONE_BOOT_MODULES`（它们不许 import `common.*`，本地解是有意为之）。
+- **2026-11-16（P1-11 第三批：拆 `ppo/common` → `np_core` 的再导出门牌）**：`worker/ppo/common.py` 再导出
+  29 个 `np_core` 名字，其中 10 个全仓零读者；其余 19 个只有 5 个文件消费，而 `worker/ppo/__init__.py`
+  的便捷名表**已经声明**这些名字住 `np_core` ⇒ 这层是第三份门牌，撤名字时看不见第二入口。5 处
+  `from worker.ppo.common import …` 改直取 `np_core`（`remote/train_core` 那条是延迟 import，`np_core`
+  免 torch，顺带少拖一次）；`common` 只留自己真用的四个名字，`# noqa: F401` 消失 ⇒ G6 6 → 5 文件。
+  **判据换代**：`test_ppo_common.py` 原来断言「四个再导出面仍在、但必须是同一对象」——白名单会替壳背书；
+  改成结构判据「`common` 里 `from … np_core import X` 的 X 必须在本模块体内被引用」，整类壳被禁。

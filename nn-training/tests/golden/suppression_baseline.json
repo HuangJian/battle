@@ -4,7 +4,6 @@
     "remote/offline_boot.py": 1,
     "worker/data/dataset.py": 1,
     "worker/data/weights_io.py": 1,
-    "worker/ppo/common.py": 1,
     "worker/ppo/engine.py": 1
   },
   "type_ignore": {

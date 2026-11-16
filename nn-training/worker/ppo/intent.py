@@ -54,15 +54,17 @@ from worker.ppo.common import (
     _ppo_load,
     _ppo_save,
     approx_kl_est,
+    log,
+    masked_logsoftmax,
+    sync_scalars,
+)
+from worker.ppo.np_core import (
     chunk_episodes,
     compute_gae,
     discover_shards,
     load_episodes_common,
     load_shard_fields,
-    log,
-    masked_logsoftmax,
     optimizer_step,
-    sync_scalars,
 )
 from worker.ppo.trainer import tensored_chunks
 

@@ -33,7 +33,8 @@ import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
-from worker.ppo.common import discover_shards, log
+from worker.ppo.common import log
+from worker.ppo.np_core import discover_shards
 
 UNREACH = 65535
 LOAD_LOG_EVERY = 128

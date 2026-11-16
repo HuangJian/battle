@@ -457,7 +457,7 @@ def _torch_model(st: _CoreRun) -> None:
     use_dp = False
     if dev_str in ("tpu", "xla"):
         # 统一走 ppo.common.xla_device()（torch_xla.device() 优先，旧版回退 xm.xla_device()）
-        from worker.ppo.common import (
+        from worker.ppo.np_core import (
             tpu_backend_missing_reason,
             xla_device,
             xla_device_speed_probe,
@@ -841,7 +841,8 @@ def _torch_artifacts(st: _CoreRun) -> None:
     # ---- 产物：weights_json（save_weights_json，D12/G1）+ _ppo_save tar（D5） ----
     # XLA：先落图执行边界再物化回主机。否则 state_dict() / save_weights_json 读到的是
     # 尚未执行的惰性图（权重是最新一轮 `mark_step` 时的快照，不是本轮终态）。
-    from worker.ppo.common import HostModule, _ppo_save, xla_mark_step
+    from worker.ppo.common import HostModule, _ppo_save
+    from worker.ppo.np_core import xla_mark_step
 
     xla_mark_step(device_t)
     # ⚠ 用 raw_model 而非 model：DP 包装的 state_dict 键带 "module." 前缀（已实证），写出去会让

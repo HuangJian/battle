@@ -159,11 +159,25 @@ def test_np_core_is_the_only_home_for_gae_and_shard_loading() -> None:
     assert engine.load_episode_from_shard is np_core.load_episode_from_shard, (
         "worker.ppo.engine.load_episode_from_shard 断了：RolloutBackend 契约成员必须在后端模块上"
     )
-    # `ppo.common` 的四个面**仍然保留**（torch 侧的既有 import 行不改），但必须指向同一对象。
-    for name in ("compute_gae", "discover_shards", "load_episodes_common", "load_shard_fields"):
-        assert getattr(ppo_common, name) is getattr(np_core, name), (
-            f"worker.ppo.common.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
-        )
+    # `ppo.common` 不许再把 np_core 的名字挂在自己身上（2026-11-16）：那层再导出没人需要，
+    # 却让 np_core 有第二个门牌 —— 消费方写 `from ppo.common import chunk_episodes` 也能过，
+    # 于是撤 np_core 的某个名字时看不见第二个入口。判据不是白名单：`common` 里每条
+    # `from worker.ppo.np_core import X` 的 X 都必须在本模块体内真被引用，否则就是再导出。
+    import ast
+
+    src = Path(ppo_common.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "worker.ppo.np_core"
+        for alias in node.names
+    }
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    assert imported <= used, (
+        "worker.ppo.common 又给 np_core 挂了门牌（这些名字本模块并不使用）："
+        f"{sorted(imported - used)} —— 请让消费方直接从 worker.ppo.np_core 取"
+    )
 
 
 def _kick_chunks() -> list[dict]:

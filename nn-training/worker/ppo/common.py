@@ -41,39 +41,14 @@ import torch.nn.functional as F
 # 本模块自身不再直接调用它 ⇒ 显式 `log as log` + noqa 标成公开再导出，勿当死代码删）。
 from common.log import log as log
 
-# 纯 numpy/stdlib 核心已拆到 ppo/np_core.py（2026-09-26：让业务逻辑用例不必拖 torch）。
-# 这里再导出，既有 `from ppo.common import compute_gae / chunk_episodes / ...` 一行不改。
-from worker.ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
-    _DUR_RE,
-    _SPEED_PROBE,
-    _UNIT_SEC,
-    _XLA_CACHE_STATE,
-    TPU_ATTR_KEYS,
-    XLA_COUNTERS,
-    XLA_TIME_METRICS,
-    _pack_np_state,
-    _parse_xla_duration,
-    _RNGState,
-    _unpack_np_state,
-    chunk_episodes,
-    compute_gae,
-    discover_shards,
-    is_xla,
-    load_episodes_common,
-    load_shard_fields,
-    optimizer_step,
-    tpu_backend_missing_reason,
-    trim_shard_arrays,
-    xla_delta_str,
-    xla_device,
-    xla_device_speed_probe,
-    xla_enable_compile_cache,
-    xla_fingerprint,
-    xla_mark_step,
-    xla_metrics_delta,
-    xla_metrics_snapshot,
-    xla_world_size,
-)
+# 纯 numpy/stdlib 核心住 `worker/ppo/np_core.py`（2026-09-26：让业务逻辑用例不必拖 torch）。
+# 本模块**只取自己用到的四个名字**；其余（GAE / shard 装载 / XLA 面）的读者一律从 np_core
+# 直取 —— 包根 `worker/ppo/__init__.py` 的便捷名表本来就指向 np_core。
+# 2026-11-16：删掉那层再导出。它从没被任何调用点需要，却让 np_core 有了第二个门牌：
+# 谁写 `from ppo.common import chunk_episodes` 都能过，撤 np_core 的某个名字时也没人看得见
+# 第二个入口；顺带 29 个名字里 10 个（`_DUR_RE` / `XLA_COUNTERS` / `trim_shard_arrays` …）
+# 连一个读者都没有。
+from worker.ppo.np_core import _pack_np_state, _unpack_np_state, is_xla, xla_mark_step
 
 # `cat_entropy` 的实现是**两个框架通用**的位置参数写法（torch 的 `dim=` / Paddle 的 `axis=`
 # 只有位置形式两边都收）⇒ 单一实现住在 `worker.ppo.trainer`(L0，免框架)，这里再导出：

@@ -68,19 +68,10 @@ from worker.ppo.common import (
     approx_kl_est,
     cat_entropy,
     cat_logprob,
-    chunk_episodes,
     demo_index,
-    is_xla,
     log,
     masked_logsoftmax,
-    optimizer_step,
     sync_scalars,
-    xla_delta_str,
-    xla_device_speed_probe,
-    xla_fingerprint,
-    xla_mark_step,
-    xla_metrics_delta,
-    xla_metrics_snapshot,
 )
 from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = RolloutBackend 契约)
     # `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
@@ -94,8 +85,17 @@ from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = Rol
     # 只剩两个 worker 测试在属性上取，已改成从 np_core 直取，影子删掉。
     GAMMA,
     LAM,
+    chunk_episodes,
+    is_xla,
     load_episode_from_shard,
     load_episodes,
+    optimizer_step,
+    xla_delta_str,
+    xla_device_speed_probe,
+    xla_fingerprint,
+    xla_mark_step,
+    xla_metrics_delta,
+    xla_metrics_snapshot,
 )
 from worker.ppo.trainer import aggregate_stats, tensored_chunks
 
