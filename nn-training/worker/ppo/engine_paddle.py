@@ -280,11 +280,14 @@ def ppo_update(
             ratio = paddle.exp(lp_new - lp_old)
             surr1 = ratio * adv
             surr2 = paddle.clip(ratio, 1.0 - clip, 1.0 + clip) * adv
+            # 与 torch 侧同口径的**只读**读数（D8/D10）：ratio 出界占比。
+            clipped = (ratio < 1.0 - clip) | (ratio > 1.0 + clip)
             # Hybrid opening（torch 侧同源）：mask=0 的样本不算 policy/entropy/KL。
             pm = e.get("policy_mask")
             if pm is None:
                 policy_loss = -paddle.minimum(surr1, surr2).mean()
                 value_loss = F.mse_loss(val.squeeze(-1), ret)
+                clip_frac = paddle.cast(clipped, surr1.dtype).mean()
                 entropy = cat_entropy(move_logp) + cat_entropy(fire_logp)
                 if hold_logp is not None:
                     entropy = entropy + cat_entropy(hold_logp)
@@ -301,6 +304,7 @@ def ppo_update(
                     ent_per = ent_per + cat_entropy_per(hold_logp)
                 entropy = (ent_per.reshape((-1,)) * w).sum() / denom
                 value_loss = F.mse_loss(val.squeeze(-1), ret)
+                clip_frac = (paddle.cast(clipped, surr1.dtype).reshape((-1,)) * w).sum() / denom
                 loss = policy_loss + VF_COEF * value_loss - ent_c * entropy
                 if kl_coef > 0.0:
                     kl_per = ((ratio - 1.0) - (lp_new - lp_old)).reshape((-1,))
@@ -337,13 +341,16 @@ def ppo_update(
             value_new_rms = apply_value_anchor_pull(model, value_anchor)
             policy_new_rms = policy_new_rms_of(model)
 
+            kl_est = approx_kl_est(lp_old, lp_new)
             stats.append(
                 sync_scalars(
                     {
                         "policy": policy_loss,
                         "value": value_loss,
                         "entropy": entropy,
-                        "kl": approx_kl_est(lp_old, lp_new),
+                        "kl": kl_est,
+                        "per_step_kl": kl_est,
+                        "clip_fraction": clip_frac,
                         "kickstart": kick_mean,
                         "demo_bc": demo_bc_mean,
                         "mean_ret": ret.mean(),
@@ -394,7 +401,11 @@ def ppo_update(
                 "policy_new_rms",
             )
         }
-    return aggregate_stats(stats, list(stats[0].keys()))
+    agg = aggregate_stats(stats, list(stats[0].keys()))
+    # torch 侧 `ppo_update` 总会带这个键（early-stop 门是 torch 侧专属；paddle 无该门 ⇒ 恒 False）。
+    # 返回键集必须与 torch 同形，否则 parity harness 报 KeyError 而不是数值差异。
+    agg["early_stopped"] = False
+    return agg
 
 
 update = ppo_update

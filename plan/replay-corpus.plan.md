@@ -585,7 +585,7 @@ scan_shards → mmap 每 shard
   - `tests/remote/test_payload_replay.py`：sampler→trainer 结果容器不含 obs/scalars/extra；trainer→worker payload 只含 replay+标签+reward；请求 full 时 replay.json 不被 DROP；P0 逐成员字节分解；**零落盘内存段==磁盘段、零目录、换轮隔离、`corpus_fmt` 热切换拒绝复用、full/replay 不混包**。
   - `tests/remote/test_worker_replay_prepass.py`：伪 replay → 转换 → `load_episodes` 成功；坏 replay 不落盘；converter bundle/ts_code 缺失或 sha 不符响亮失败；Bun 失败回落 Node；**shard 级事务三类故障注入**（成员写完即崩溃、复用完整产物、拒绝不完整/旧 converter 产物）。
   - `tests/remote/test_corpus_capability.py`：trainer→hub→sampler→worker 端到端 `replay_corpus` 协商；旧 sampler/worker 不派/不领 replay；结果格式不符拒收；converter 契约版本进结果身份。
-  - `tests/worker/test_ppo_lazy_loader.py`：eager vs lazy 同 seed 的 `row_map`/全局行序/GAE/adv/ret/minibatch/demo RNG/最终权重一致；五条对账；冷/热 page cache 吞吐读数；**小 VRAM**：lazy 不调用 `tensored_chunks`、每批只搬 mb 行（u1 ≈11.8 MB/批，mb=1024）。
+  - `tests/worker/test_ppo_lazy_loader.py`：**已绿（9/9）**——eager vs lazy 同 seed 的 `row_map`/全局行序/GAE/adv/ret/minibatch/demo RNG/最终权重一致；五条对账；冷/热 page cache 吞吐读数；**小 VRAM**：lazy 不调用 `tensored_chunks`、每批只搬 mb 行（u1 ≈11.8 MB/批，mb=1024）。
   - `tests/worker/test_fixed_samples_shortfall.py`：固定样本量下每关 `games/unique seeds/samples/SHORT/丢弃整局` 账本正确；35 关均有有效样本硬闸。
   - `tests/trainer/test_schedule_frozen.py`：首轮三臂冻结调度——kickstart/ppo_schedule 不被读取；真实 PPO 集成断言 C 不整 it 吃 it1 段。
   - `tests/trainer/test_eval_at_experiment.py`：实验臂 `eval_every=1` + `eval_at` 在 A/B/C 的样本锚点派发；生产 `eval_every=5` 不变。
@@ -636,8 +636,11 @@ scan_shards → mmap 每 shard
     - **重哈希：生产不存在**。`payload_sha256` 只管压缩包、marker 的 `replay_sha256` 只管 `replay.json`，
       obs 的 identity 由 `replay_meta.obsHash`（转换循环内增量算）承担；落盘后重扫实测 255 MB/s
       （`sha256sum` 无 SHA-NI，**tmpfs 与 /tmp 同速** ⇒ 与介质无关），不进任何预算。
-    - 未做：`replay+eager` vs `full+eager` 的真 PPO 数值对账（**仍需 GPU**，16 GB 生产卡即可，
-      不必找小卡）；**4–6 GB VRAM gate 已按用户口径移除**（产线平台均 ≥16 GB，改显存预检）。
+    - **eager/lazy 数值等价：已在本地 CPU 验证，不需要 GPU**（用户 2026-11-16 点明）。最小 job = 2 shard
+      ×12 样本、mb=8、2 epoch，`test_ppo_update_eager_lazy_final_weights_identical` **5.34 s 绿**：
+      `row_map`/全局行序/逐 chunk 字段、GAE/adv/ret、demo RNG、最终权重逐字节一致，stats 差 <1e-12。
+      同文件另 8 条（quota 截断/drop_last/v6 可选列/逐批上卡/吞吐）全绿。**这条从待办里移除。**
+    - `replay+eager` vs `full+eager` 的门**由两段已成立的证据闭合，无需另跑 PPO**：① replay→obs/scalars/extra 与 full 逐字节相同（TS identity 测试 + 云机 350 局 mismatches=0）；② 同一份 chunks 在同 seed 下 ppo_update 结果相同（上面 CPU 最小 job）。**4–6 GB VRAM gate 已移除**（产线均 ≥16 GB）。
 
 ### P1 rollout 录制（additive；k3 B2/4.3）
 
@@ -668,7 +671,7 @@ scan_shards → mmap 每 shard
   - 事务：worker pre-pass 改为 `<shard>.conv-tmp`（硬链接输入）→ 转换 + 校验 + 完成标记 → 原目录 `.conv-old` / 临时目录顶上 / 删除旧目录；失败原目录一字未动，崩溃残留由下一次 `_clean_stale_transaction` 复位。
   - **hub / PPO worker 能力协商（2026-11-16）**：新增 `CAP_REPLAY_CORPUS`；worker claim body 声明能力位，hub 在唯一租约入口（`_claim_locked`）对 `corpus_fmt=replay` fail-closed 拒绝缺能力者（拒因 `no_replay_corpus`）；hub `GET /ping` 与 worker_server `/ping` 均声明该能力；push 派发按 `/ping` 能力选机。测试：`tests/remote/test_corpus_capability.py`。
   - **D10 墙钟账（2026-11-16）**：worker `wire` 新增 `corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_jobs`/`convert_fallback`；trainer `_wire_from_result` 透传到 iteration `wire` 顶层。full 路径为 `full`/0。
-  - 未完成：同机 `replay+eager` vs `full+eager` 的真 PPO 数值对账（需 GPU/权重）、2 vCPU 云机转换墙钟。
+  - 未完成：同机 `replay+eager` vs `full+eager` 的数值对账（**可在 CPU 最小 job 做**，不必等 GPU）、2 vCPU 云机转换墙钟**已测**（见 §8 P0 进展）。
 - **Gate 绿后**：7×5 生产课只切 `corpus_fmt=replay`（仍是 eager）；`full` 保留回滚；前 2 个五点窗盯 identity 失败率/`convert_sec`/per-step KL/clip。**不在此阶段切 lazy。**
 - **No-Go**：确定性 identity 失败 >0，或可重试失败率 >1%。
 
