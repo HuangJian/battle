@@ -6807,3 +6807,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   免 torch，顺带少拖一次）；`common` 只留自己真用的四个名字，`# noqa: F401` 消失 ⇒ G6 6 → 5 文件。
   **判据换代**：`test_ppo_common.py` 原来断言「四个再导出面仍在、但必须是同一对象」——白名单会替壳背书；
   改成结构判据「`common` 里 `from … np_core import X` 的 X 必须在本模块体内被引用」，整类壳被禁。
+- **2026-11-16（P1-11 第四批：`worker/data/{dataset,weights_io}.py` 的 split 残壳）**：两处都是
+  2026-09-26「把免 torch 的那一半搬出去、留层再导出以便调用点不改」的产物。量出：`dataset` 的 5 名里
+  4 名（`_MOVE_FLIP` / `BULLET_MIRROR_LUT` / `ENEMY_MIRROR_LUT` / `_flip_direction`）**全仓零读者**；
+  `weights_io` 的 6 名里唯一有外部读者的是 `latest_weights_path`（`eval_bridge`，改直取 `weights_meta`），
+  另有两个（`latest_weights_path` / `validate_weights_meta`）本就是文档里的字。收成真 import ⇒ G6 5 → 3 文件。

@@ -48,7 +48,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common.cli import house_parser, run_main
 from common.schema import FIRE_DIM, MOVE_DIM
 from worker.data.npyio import load_dataset
-from worker.data.weights_io import latest_weights_path, load_state_into
+from worker.data.weights_io import load_state_into
+from worker.data.weights_meta import latest_weights_path
 from worker.models.core import NNPolicy
 
 
