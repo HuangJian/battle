@@ -33,6 +33,7 @@ REPO = Path(__file__).resolve().parents[3]
 NN_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(NN_DIR))
 
+import common.codehash
 import common.distribution
 from tests.helpers import net_seams
 from tests.subproc_util import run_utf8
@@ -422,7 +423,7 @@ def test_parse_porcelain() -> None:
         'R  old_name.ts -> "new name.ts"\n'
         "\n"
     )
-    got = common.distribution._parse_porcelain(text)
+    got = common.codehash._parse_porcelain(text)
     check(
         got
         == [
@@ -437,7 +438,7 @@ def test_parse_porcelain() -> None:
 
 def test_dirty_hash_files_smoke() -> None:
     """dirty_hash_files 冒烟：真实仓库上不抛异常、返回 list。"""
-    d = common.distribution.dirty_hash_files()
+    d = common.codehash.dirty_hash_files()
     check(isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}")
 
 
@@ -448,26 +449,26 @@ def test_dirty_hash_files_eol_blindspot() -> None:
     git status（core.autocrlf=input 会先规范化再比较）判为干净 ⇒ dirty=[] ⇒
     训练机期望 codeHash 与远端干净 checkout 不等，节点卡了 40 分钟零贡献。
     """
-    real = common.distribution._collect_code_hash_files()
+    real = common.codehash._collect_code_hash_files()
     if not real:
         check(False, "codeHash 文件集非空（前置条件）")
         return
     rel, content = real[0]
-    orig = common.distribution._collect_code_hash_files
+    orig = common.codehash._collect_code_hash_files
     try:
-        common.distribution._collect_code_hash_files = lambda: [(rel, content)]
-        got = common.distribution.dirty_hash_files()
+        common.codehash._collect_code_hash_files = lambda: [(rel, content)]
+        got = common.codehash.dirty_hash_files()
         check(got == [], f"工作区字节=索引 → clean, got {got}")
         # 仅行尾差异（语义等价、字节不同）必须判 dirty——git status 看不见它
-        common.distribution._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
-        got = common.distribution.dirty_hash_files()
+        common.codehash._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
+        got = common.codehash.dirty_hash_files()
         check(got == [rel], f"纯 CRLF 污染 → dirty（autocrlf 盲区）, got {got}")
         # 未跟踪文件（远端 pull 拿不到）同样 dirty
-        common.distribution._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
-        got = common.distribution.dirty_hash_files()
+        common.codehash._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
+        got = common.codehash.dirty_hash_files()
         check(got == ["no/such/untracked.ts"], f"未跟踪 → dirty, got {got}")
     finally:
-        common.distribution._collect_code_hash_files = orig
+        common.codehash._collect_code_hash_files = orig
 
 
 def test_codehash_f3_noise_filtering() -> None:
@@ -477,7 +478,7 @@ def test_codehash_f3_noise_filtering() -> None:
     （禁止污染仓库），测试后清理。"""
     import time
 
-    real_manifest = common.distribution.CODE_HASH_MANIFEST
+    real_manifest = common.codehash.CODE_HASH_MANIFEST
     base = (
         Path(common.distribution.REPO_ROOT)
         / "tmp"
@@ -510,8 +511,8 @@ def test_codehash_f3_noise_filtering() -> None:
         encoding="utf-8",
     )
     try:
-        common.distribution.CODE_HASH_MANIFEST = str(manifest)
-        entries = common.distribution._collect_code_hash_files()
+        common.codehash.CODE_HASH_MANIFEST = str(manifest)
+        entries = common.codehash._collect_code_hash_files()
         rels = [rel for rel, _c in entries]
         included = sorted(r for r in rels if r.startswith(rel_dir))
         want = sorted(
@@ -540,7 +541,7 @@ def test_codehash_f3_noise_filtering() -> None:
                 f"目录递归过滤 {bad}",
             )
     finally:
-        common.distribution.CODE_HASH_MANIFEST = real_manifest
+        common.codehash.CODE_HASH_MANIFEST = real_manifest
         rmtree_best_effort(base, ignore_errors=True)
 
 
@@ -548,9 +549,9 @@ def test_code_hash_report() -> None:
     """F4：code_hash_report() 输出格式——每行 `sha8\tsize\trelPath`，末行
     `codeHash=<full>`；行数 = 文件数 + 1。与 codehash-report.ts 同格式（双侧
     diff 定位 stale 的前提）。"""
-    report = common.distribution.code_hash_report()
+    report = common.codehash.code_hash_report()
     lines = report.splitlines()
-    n_files = len(common.distribution._collect_code_hash_files())
+    n_files = len(common.codehash._collect_code_hash_files())
     check(
         len(lines) == n_files + 1,
         f"报告行数 = 文件数+1 (got {len(lines)} vs {n_files}+1)",
@@ -567,7 +568,7 @@ def test_code_hash_report() -> None:
 def test_codehash_manifest_expansion() -> None:
     """SSOT 清单 codehash-files.txt 展开：目录条目递归、文件条目直接纳入，relPath 全
     正斜杠且无重复；本次事故的 3 个关键文件必须在集内。"""
-    entries = common.distribution._collect_code_hash_files()
+    entries = common.codehash._collect_code_hash_files()
     rels = [rel for rel, _content in entries]
     check(len(rels) > 10, f"清单展开非空（got {len(rels)} files）")
     # 2026-09-01 事故：Python 侧加了这 3 个文件、TS 侧漏同步 → 节点被永久误判 stale。
@@ -668,7 +669,7 @@ def test_codehash_bilingual_contract() -> None:
         f_files = pool.submit(
             run_utf8, [bun, str(agent), "--print-code-hash-files"], cwd=str(REPO), timeout=120
         )
-        py_hash = common.distribution.compute_code_hash()
+        py_hash = common.codehash.compute_code_hash()
         try:
             proc = f_hash.result()
         except Exception as e:
@@ -691,7 +692,7 @@ def test_codehash_bilingual_contract() -> None:
         return
     # 行形态由 `_parse_code_hash_files` 认（boot 日志行会落在 stdout 上，别按行号解析）
     ts_files, hash_line = _parse_code_hash_files(proc2.stdout)
-    py_files = {rel for rel, _c in common.distribution._collect_code_hash_files()}
+    py_files = {rel for rel, _c in common.codehash._collect_code_hash_files()}
     check(
         ts_files == py_files,
         f"双侧文件集逐文件一致 (TS={len(ts_files)} vs Python={len(py_files)})",

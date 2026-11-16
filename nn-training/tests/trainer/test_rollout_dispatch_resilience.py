@@ -99,7 +99,7 @@ class _Harness:
         self.local_slots = local_slots
         # 本机腿的测试统一打桩：不启真 bun、不建长驻池。
         monkeypatch.setattr(disp, "make_local_pool", lambda *a, **k: None)
-        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(disp, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(
             common.distribution,

@@ -10,6 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+import common.codehash
 import common.distribution
 import common.protocol
 from common.log import log
@@ -194,12 +195,12 @@ class RolloutDispatcher:
         # ping 超时（statusTimeoutSec=3s）全部并行——7 死节点从串行 ~21s/轮 压到 ~3s；
         # 判定与日志按配置顺序串行回放（保序、保线程安全）。节点中途上线的接管仍靠
         # 下一轮迭代的 ping 门（与 rollout 既有语义一致）。
-        code_hash = common.distribution.compute_code_hash()
+        code_hash = common.codehash.compute_code_hash()
         # 脏工作区护栏（2026-09-01 重启循环修复①）：期望 codeHash 由训练机工作区算出，
         # 含未提交改动时远端 git pull 永不收敛 ⇒ 对远端节点下发 pull+restart 是无效扰动
         # （实测：节点拉到最新提交后 hash 仍不等 → 每轮 rescan 再杀一次，无限重启循环）。
         # 每轮检测一次；self/回环节点不受限（代码同源，纯重启即可拾取工作区代码）。
-        dirty_files = common.distribution.dirty_hash_files()
+        dirty_files = common.codehash.dirty_hash_files()
         if dirty_files:
             log(
                 f"[dist] WARN: {len(dirty_files)} uncommitted file(s) in codeHash set "

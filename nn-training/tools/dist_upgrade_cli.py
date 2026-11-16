@@ -12,7 +12,7 @@
   A) 扫描模式（**推荐**，调用方不 ping）：
     {
         "cfg_path": "nn-training/rl-config.json",   # 本 CLI 自己 ping 每个 enabled 节点
-        "expected_hash": "<64hex>",       # 可省 = common.distribution.compute_code_hash()
+        "expected_hash": "<64hex>",       # 可省 = common.codehash.compute_code_hash()
         "branch": "goal-nn",              # 远端 pull 分支；self/回环节点恒为空（禁 pull）
         "seen": [ {"id":"mac","pingHash":"<64hex>","expectedHash":"<64hex>",
                    "atSec": 1758300000} ],  # 可选：跨调用去重 memo 预置（见下）；
@@ -57,6 +57,7 @@ from pathlib import Path
 # common.distribution`）⇒ 前置 nn-training 根，不是脚本目录。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import common.codehash
 import common.distribution
 from common.cli import run_main
 
@@ -91,7 +92,7 @@ def run_scan(spec: dict) -> dict:
     cfg_path = str(spec.get("cfg_path") or "").strip()
     if not cfg_path:
         raise ValueError("cfg_path 缺失")
-    expected = str(spec.get("expected_hash") or "").strip() or common.distribution.compute_code_hash()
+    expected = str(spec.get("expected_hash") or "").strip() or common.codehash.compute_code_hash()
     branch = str(spec.get("branch") or "").strip()
     try:
         timeout = float(spec.get("timeout") or 20.0)
@@ -156,7 +157,7 @@ def run_scan(spec: dict) -> dict:
 def _report_dirty() -> list[str]:
     """调用方要在日志里说明「为什么远端被拒」——取不到就不报（守卫侧仍会自行判定）。"""
     try:
-        return list(common.distribution.dirty_hash_files())
+        return list(common.codehash.dirty_hash_files())
     except Exception:
         return []
 
@@ -200,7 +201,7 @@ def run_spec(spec: dict) -> dict:
             # dry 只看 dirty 与身份，不发 POST：给调用方一次「先说清楚再动手」的机会。
             eff_dirty = dirty
             if eff_dirty is None:
-                eff_dirty = [] if common.distribution.is_self_node(str(n["url"]), nid) else common.distribution.dirty_hash_files()
+                eff_dirty = [] if common.distribution.is_self_node(str(n["url"]), nid) else common.codehash.dirty_hash_files()
             why = (
                 f"dirty-tree:{len(eff_dirty)}"
                 if eff_dirty and not common.distribution.is_self_node(str(n["url"]), nid)

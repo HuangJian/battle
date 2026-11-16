@@ -93,17 +93,18 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
     import hashlib
     import inspect
 
+    import common.codehash
     import common.distribution
 
-    ch = common.distribution.compute_code_hash()
-    ep = common.distribution.compute_engine_epoch()
+    ch = common.codehash.compute_code_hash()
+    ep = common.codehash.compute_engine_epoch()
     assert ep == hashlib.sha256(ch.encode()).hexdigest()[:16]
     assert len(ep) == 16
     # 不掺 git：实现里不得出现 git 调用（旧式为 sha256(git_head + gameplay)）
     import ast
     import textwrap
 
-    epoch_tree = ast.parse(textwrap.dedent(inspect.getsource(common.distribution.compute_engine_epoch)))
+    epoch_tree = ast.parse(textwrap.dedent(inspect.getsource(common.codehash.compute_engine_epoch)))
     epoch_strings = [
         n.value
         for n in ast.walk(epoch_tree)
@@ -113,7 +114,7 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
         "engine_epoch 掺了 git（旧式 sha256(git_head + gameplay)）"
     )
     # 引擎文件已并入 SSOT 清单（改引擎 ⇒ codeHash 变 ⇒ eval 节点门变红）
-    rels = [rel for rel, _c in common.distribution._collect_code_hash_files()]
+    rels = [rel for rel, _c in common.codehash._collect_code_hash_files()]
     for need in (
         "src/game/SimulationCombat.ts",
         "tools/det-golden.v1.sha256",
@@ -126,7 +127,7 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
     assert not any(r.startswith(("dashboard/", "nn-training/")) for r in rels)
     # 节点门（2026-09-17 统一）：rollout 与 eval 同一判据 = codeHash；
     # engine_epoch 只是账本记录值，不再进 /v1/ping、也不再是门。
-    assert common.distribution.check_code_hash({"codeHash": ch}, ch) is None
-    assert common.distribution.check_code_hash({}, ch) is not None
-    assert common.distribution.check_code_hash({"codeHash": "0" * 64}, ch) is not None
+    assert common.codehash.check_code_hash({"codeHash": ch}, ch) is None
+    assert common.codehash.check_code_hash({}, ch) is not None
+    assert common.codehash.check_code_hash({"codeHash": "0" * 64}, ch) is not None
     assert not hasattr(common.distribution, "check_engine_epoch")

@@ -6743,3 +6743,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   为什么值得一条门禁：第二处判据拼错一个字母 ⇒ 静默走 legacy ⇒ 9 宽掩码按 7 宽切、hold 头
   永不训练，loss 照降；这类错误没有任何运行时现象。`_RL_SHARD_SPEC` 里的 `"a_hold": (...)` 是
   键名声明不是判据，所以门禁只认 `in` / `.get` 形态（不是「出现即红」）。
+- **2026-11-16（B8 第一刀：`common/codehash.py`）**：`common/distribution.py`（1622 → 1409 行）
+  的代码身份面整体搬到 `common/codehash.py`：`compute_code_hash` / `CODE_HASH_MANIFEST` /
+  `_collect_code_hash_files` / `_skip_codehash_{dir,file}` / `code_hash_report` /
+  `compute_engine_epoch` / `check_code_hash` / `dirty_hash_files` / `_parse_porcelain` /
+  `_git_{index,cat}_blobs`。仓库根锚点同时单源成 `common/paths.py::REPO_ROOT`（原先在
+  distribution 里自己上溯 3 层，`common/codehash.py` 若照抄就是第二份）。
+  **不留 `X as X` 门面**（与前几次搬家不同）：调用点 16 文件全部改成 `common.codehash.X`，
+  打桩面（`monkeypatch.setattr(common.codehash, ...)`）跟着走 —— 门面会让「codeHash 在哪」
+  永远有两个答案，而这次搬迁的动机正是「一个 1600 行的杂物间里没人找得到它」。
+  随之收紧的判据：`tests/test_distribution_io_budget.py` 的扫描面从「一个模块」扩成
+  `L0_IO_MODULES = (distribution, codehash)` 并按「模块 + 原语」记账 —— 搬家不能把副作用
+  从账本上搬没。

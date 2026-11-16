@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import common.codehash
 import common.distribution
 import common.protocol
 from common.fs import append_jsonl
@@ -400,7 +401,7 @@ class EvalDispatcher:
         # 该清单）。不再比 ping.engineEpoch：该字段已从 /v1/ping 移除（engine_epoch
         # 退为账本记录值），也不再需要「旧 agent 无字段→过渡期放行」的分支——
         # codeHash 是 rollout 门一直都在用的字段。
-        code_hash_local = common.distribution.compute_code_hash()
+        code_hash_local = common.codehash.compute_code_hash()
         alive = []
         # 并行 ping（保序）：串行墙钟 = Σ 每台延迟（两台超时即 ~7s），而节点门每轮
         # 重跑一次；并行 == 最慢一台（同 batch_eval，2026-09-19 审计 B2）。
@@ -451,7 +452,7 @@ class EvalDispatcher:
             if mm(str(ping.get("bunVersion", "?"))) != mm(local_bun):
                 _log(f"[eval] node {nid}: bun version mismatch — skipped")
                 continue
-            ch_why = common.distribution.check_code_hash(ping, code_hash_local)
+            ch_why = common.codehash.check_code_hash(ping, code_hash_local)
             if ch_why:
                 _log(f"[eval] node {nid}: {ch_why} — skipped")
                 continue

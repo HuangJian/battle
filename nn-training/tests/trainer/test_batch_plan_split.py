@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import biz.batch_plan as bp
+import common.codehash
 import common.distribution
 import trainer.batch_eval as be
 
@@ -109,6 +110,10 @@ PLAN_IMPORTS = {
     "os",
     "pathlib",
     "common.distribution",
+    # 2026-11-16：codeHash 判据搬到 `common/codehash.py`（B8 第一刀）⇒ 入边从
+    # `common.distribution` 分出一条。两个模块都是 L0（只读文件 / 只发 HTTP），
+    # 这条闭包仍然不含传输层、不含 trainer 内部。
+    "common.codehash",
     "common.jsonc",
     # 2026-11-14：`mm` 从 `common.proc.version_mm` 直接取（此前经 `trainer.dispatch_queue`
     # 的 re-export 面转发 —— 那正是它「假装碰传输层」的那条边）。
@@ -217,7 +222,7 @@ def _ok_ping() -> dict:
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 2,
-        "codeHash": common.distribution.compute_code_hash(),
+        "codeHash": common.codehash.compute_code_hash(),
     }
 
 
@@ -414,7 +419,7 @@ def test_select_next_unit_runs_from_the_new_home() -> None:
 
 
 def test_gate_and_classification_run_from_the_new_home() -> None:
-    h = common.distribution.compute_code_hash()
+    h = common.codehash.compute_code_hash()
     ok = _ok_ping()
     assert bp.node_gate_reason(ok, "9.9.9", h) is None
     assert "evalSupport" in (bp.node_gate_reason({**ok, "evalSupport": False}, "9.9.9", h) or "")

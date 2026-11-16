@@ -29,6 +29,7 @@ import json
 import os
 from pathlib import Path
 
+import common.codehash
 import common.distribution
 from common.jsonc import load as jsonc_load
 from common.proc import version_mm as mm
@@ -64,7 +65,7 @@ def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | 
     """节点门判据（纯函数，单测覆盖）：None = 可用，否则拒派原因。
 
     门 = evalSupport ∧ stageJsonSupport ∧ bun major.minor 一致 ∧ codeHash 一致
-    （codeHash 与 rollout 门同源，实现在 `common.distribution.check_code_hash`）。
+    （codeHash 与 rollout 门同源，实现在 `common.codehash.check_code_hash`）。
     """
     if not ping.get("evalSupport"):
         return "lacks evalSupport"
@@ -73,7 +74,7 @@ def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | 
     node_ver = str(ping.get("bunVersion", "?"))
     if mm(node_ver) != mm(local_bun):
         return f"bun version mismatch (node {node_ver} vs local {local_bun})"
-    return common.distribution.check_code_hash(ping, code_hash_local)
+    return common.codehash.check_code_hash(ping, code_hash_local)
 
 
 def node_supports_decision_events(ping: dict) -> bool:

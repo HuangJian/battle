@@ -138,6 +138,7 @@ def main() -> int:
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
+    import common.codehash
     import common.distribution
     from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
     from trainer.dispatch_queue import RUN_ID
@@ -185,7 +186,7 @@ def main() -> int:
         eval_window_sec=float(spec.get("windowSec") or 86400),
     )
     bun = shutil.which("bun") or "bun"
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
     weights_path = str(spec.get("weights") or "") or None
 
     for i, unit in enumerate(units):

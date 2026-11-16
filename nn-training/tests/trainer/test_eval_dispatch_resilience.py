@@ -100,7 +100,7 @@ class _Harness:
             "nodes": [{"id": "a97", "url": "http://a97.local", "concurrency": 1}],
             "policy": {"nodeFailStreak": 3},
         }
-        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(
             common.distribution,
             "node_ping",
@@ -554,7 +554,7 @@ class _LaneHarness:
                 for n in nodes_
             ]
 
-        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(common.distribution, "node_ping", ping)
         monkeypatch.setattr(common.distribution, "post_weights_parallel", post)
         monkeypatch.setattr(common.distribution, "refresh_weights", lambda *a, **k: True)

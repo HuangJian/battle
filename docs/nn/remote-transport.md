@@ -8308,7 +8308,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   其余文件的接线早已完成）。
 - 闪窗第二三轮排查（看门狗实证法：EnumWindows 扫可见 ConsoleWindowClass 窗口记
   PID）：漏网点共两处——`remote/hub_client.git_head`（每次发布）与
-  `common.distribution.dirty_hash_files`（每轮派发的 dirty-tree 检查）——均已补接。dirty 检查
+  `common.codehash.dirty_hash_files`（每轮派发的 dirty-tree 检查）——均已补接。dirty 检查
   本身保留：它只管**远端** pull 节点的 restart 循环护栏（self 节点经 is_self_node
   豁免、纯重启零 git 操作，2026-08-30 修订），与 code.zip 直接打包无关。
 - `tools/hub-start.ts drainStaleJobs`：TrainingLoop 新启动前下架陈旧 pending job
@@ -9537,7 +9537,7 @@ round`）并在 C 层按 attempt 打光即 `dropped`（**丢局**）——与 §
 **F2（节点侧，`tools/agent/sampler-agent.ts`）——`/v1/update` 不得让节点「报新代码、跑旧代码」**：
 旧实现在 pull 成功后 `codeHashMemo.value = null` / `gitShortMemo.value = null`，而 `/v1/ping` 报的正是
 `memoizedCodeHash()` ⇒ pull 过但**没重启**的节点会以**新 hash** 通过 codeHash 门
-（`common.distribution.check_code_hash`）、静默跑启动时那份代码——正是该门要拦的东西的反向漏网。
+（`common.codehash.check_code_hash`）、静默跑启动时那份代码——正是该门要拦的东西的反向漏网。
 - 决定：memo 的**生命周期 = 本进程**，永不因 pull 失效；pull 只留一行响亮日志（新代码重启后生效）。抽
   `applyPullResult(r)`（导出，供单测钉住不变量），HTTP 分支只调它。要换 hash 只有 `/v1/restart`（可带 pullBranch）。
 - 顺带：`/v1/restart` 分支在 `process.exit(0)` 前显式 `killPersistPool()`——池靠 stdin EOF 自灭，但**忙** worker

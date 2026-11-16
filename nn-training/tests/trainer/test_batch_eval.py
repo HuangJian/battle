@@ -159,11 +159,12 @@ def test_hooks_decoupled_from_a_eval() -> None:
         alias.name for n in ast.walk(ed_tree) if isinstance(n, ast.ImportFrom) for alias in n.names
     }
     assert ed_refs >= {"check_code_hash"}
+    import common.codehash
     import common.distribution
 
     # engine_epoch 仍是账本记录值（EvalGameRow.engine / 心跳），但不再是节点门判据
-    assert hasattr(common.distribution, "compute_engine_epoch")
-    assert hasattr(common.distribution, "check_code_hash")
+    assert hasattr(common.codehash, "compute_engine_epoch")
+    assert hasattr(common.codehash, "check_code_hash")
 
 
 def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
@@ -204,20 +205,21 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     import threading
     import types
 
+    import common.codehash
     import common.distribution
     import trainer.batch_eval as be
 
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
     ping = {
         "evalSupport": True,
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 1,
         # 节点门指纹 = codeHash（2026-09-17 起；engine_epoch 不再进 ping）
-        "codeHash": common.distribution.compute_code_hash(),
+        "codeHash": common.codehash.compute_code_hash(),
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
@@ -319,19 +321,20 @@ def _run_unit(
 ):
     import types
 
+    import common.codehash
     import common.distribution
     import trainer.batch_eval as be
 
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
     ping = {
         "evalSupport": True,
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 1,
-        "codeHash": common.distribution.compute_code_hash(),
+        "codeHash": common.codehash.compute_code_hash(),
     }
     monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
     monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
@@ -379,6 +382,7 @@ def _ok_manifest(stage: int, seed: int, wver: str) -> dict:
 
 def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypatch) -> None:
     """连接被重置（10054）→ 背压重排、不计节点失败：全部仍由节点完成。"""
+    import common.codehash
     import common.distribution
 
     seen_calls: dict[tuple[int, int], int] = {}
@@ -421,6 +425,7 @@ def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypa
 
 def test_hard_failure_still_trips_node(tmp_path: Path, monkeypatch) -> None:
     """真失败（非瞬断）照旧熔断——背压通道不能把坏节点洗成健康。"""
+    import common.codehash
     import common.distribution
 
     def fake_fetch(url, key, **kw):
@@ -452,6 +457,7 @@ def test_hard_failure_still_trips_node(tmp_path: Path, monkeypatch) -> None:
 
 def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
     """远端 0 参与（全节点失败 + 本地槽位兜底）→ 响亮告警，不再静默降级。"""
+    import common.codehash
     import common.distribution
 
     calls = {"n": 0}
@@ -496,6 +502,7 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
     """
     import time
 
+    import common.codehash
     import common.distribution
 
     calls: list[tuple[str, tuple[int, int]]] = []
@@ -545,6 +552,7 @@ def test_backpressure_requeue_does_not_drain_attempts(tmp_path: Path, monkeypatc
 
     本用例：一局连吃 8 次 503（> busyRetryLimit=6）之后才成功 —— 修复前该局会被丢弃。
     """
+    import common.codehash
     import common.distribution
 
     calls: dict[tuple[int, int], int] = {}
@@ -589,6 +597,7 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
     本用例：一局始终硬失败（HTTP 400，非瞬断）直到被丢弃，其余 99 局正常完成 ⇒
     收尾必须在 STUCK_GRACE_SEC 内以「收尾僵死」收工。
     """
+    import common.codehash
     import common.distribution
     import trainer.batch_runner as br
 
@@ -646,6 +655,7 @@ def _channels_runner(
     """通道测试基座：调用方自己 patch `common.distribution.{node_ping,post_weights,fetch_task}`。"""
     import types
 
+    import common.codehash
     import common.distribution
     import trainer.batch_eval as be
 
@@ -679,7 +689,7 @@ def _channels_runner(
         0,
         1,
         "run1",
-        common.distribution.compute_engine_epoch(),
+        common.codehash.compute_engine_epoch(),
         "nn",
         None,
         "",
@@ -688,6 +698,7 @@ def _channels_runner(
 
 
 def _ok_ping() -> dict:
+    import common.codehash
     import common.distribution
 
     return {
@@ -695,16 +706,17 @@ def _ok_ping() -> dict:
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 2,
-        "codeHash": common.distribution.compute_code_hash(),
+        "codeHash": common.codehash.compute_code_hash(),
     }
 
 
 def test_node_gate_reason_pure() -> None:
     """节点门判据是纯函数（单测直接钉四种拒绝原因，不必起线程）。"""
+    import common.codehash
     import common.distribution
     from trainer.batch_eval import node_gate_reason
 
-    h = common.distribution.compute_code_hash()
+    h = common.codehash.compute_code_hash()
     ok = _ok_ping()
     assert node_gate_reason(ok, "9.9.9", h) is None
     assert "evalSupport" in (node_gate_reason({**ok, "evalSupport": False}, "9.9.9", h) or "")
@@ -716,6 +728,7 @@ def test_node_gate_reason_pure() -> None:
 
 def test_working_node_is_never_repinged_or_reuploaded(tmp_path: Path, monkeypatch) -> None:
     """req 3：一个节点跑 100 局，只允许 1 次 ping + 1 次权重 POST。"""
+    import common.codehash
     import common.distribution
 
     counts = {"ping": 0, "post": 0}
@@ -746,6 +759,7 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
     """req 5：首探失联（agent 重启中）⇒ recover_ping_sec 后重探，通了立即派单。"""
     import time
 
+    import common.codehash
     import common.distribution
 
     st: dict[str, float] = {"pings": 0.0, "ping_ok_at": 0.0, "first_fetch_at": 0.0}
@@ -794,6 +808,7 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
     import threading
     import time
 
+    import common.codehash
     import common.distribution
 
     t: dict[str, float] = {}
@@ -839,6 +854,7 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
     import threading
     import time
 
+    import common.codehash
     import common.distribution
 
     release = threading.Event()
@@ -882,6 +898,7 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
 
 def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
     """req 2 接线：单单元跨多关时，逐局必须拿到**本关**的 stageJson/lives/level/maxTicks。"""
+    import common.codehash
     import common.distribution
 
     got: dict[int, dict] = {}

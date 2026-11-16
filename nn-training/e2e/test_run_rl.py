@@ -43,6 +43,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
+import common.codehash
 import common.distribution
 import trainer.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
 from biz.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
@@ -397,7 +398,7 @@ class FakeAgent(BaseHTTPRequestHandler):
                     # 与 dispatch.bun_version(缺失) 的失败回落同 "?" → mm 门恒匹配
                     cache["bun"] = "?"
             if "codeHash" not in cache:
-                cache["codeHash"] = common.distribution.compute_code_hash()
+                cache["codeHash"] = common.codehash.compute_code_hash()
             self._json(
                 {
                     "codeHash": cache["codeHash"],

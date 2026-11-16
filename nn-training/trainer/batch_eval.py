@@ -19,7 +19,7 @@
 关键契约（原文照搬 —— 别在门面里改语义）：
   - 节点门（§6.6）：enabled ∧ ping ∧ evalSupport ∧ stageJsonSupport ∧
     bunVersion 一致 ∧ **codeHash 一致**（= rollout 门同一判据；2026-09-17 起不再比
-    ping.engineEpoch——见 common.distribution.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
+    ping.engineEpoch——见 common.codehash.check_code_hash）——**严格拒派，不静默降级**（P2 DoD）。
   - iterId 命名空间 `{runId}.b{batchShort}u{unit}`（runner.ts）：agent taskKey
     无 policy 分量，命名空间隔离是 god/nn 不串键的唯一保证。
   - 窗口（§6.5）：只在窗口开时派新局；在途局自然跑完（taskTimeoutSec 封顶）；
@@ -33,6 +33,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import common.codehash
 import common.distribution
 
 # 再导出约定：`from <home> import X as X` 自别名，逐条一行（ruff `combine-as-imports = false`）。
@@ -152,7 +153,7 @@ def maybe_dispatch_batch(
         log("[batcheval] nn unit without weights — 退回队列")
         store.requeue(str(batch.get("batch_id")))
         return None
-    epoch = common.distribution.compute_engine_epoch()
+    epoch = common.codehash.compute_engine_epoch()
     eval_log = traj_dir.parent / "eval_log.jsonl"
     # 定型只走 store 的具名转移。这里**不**再就地改 `batch`（旧实现「就地改台账再落盘」的残留：
     # store 交回的是**认领时的快照**，执行器只读它的 batch_id/iter（`unit_of` 走参数传入）

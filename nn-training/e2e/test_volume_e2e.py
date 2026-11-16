@@ -47,6 +47,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.codehash
 import common.distribution
 from biz.reward_library import METRICS_DIM
 from common.platform_utils import POPEN_NO_WINDOW, rmtree_best_effort
@@ -238,7 +239,7 @@ class _VolAgent(BaseHTTPRequestHandler):
             c = _VolAgent._cache
             bun = self._bun_version()
             if "codeHash" not in c:
-                c["codeHash"] = common.distribution.compute_code_hash()
+                c["codeHash"] = common.codehash.compute_code_hash()
             self._json(
                 {
                     "codeHash": c["codeHash"],

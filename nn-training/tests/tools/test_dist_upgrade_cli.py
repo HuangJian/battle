@@ -84,7 +84,7 @@ def test_dirty_none_probes_really(monkeypatch: pytest.MonkeyPatch) -> None:
         probed.append(1)
         return ["src/y.ts"]
 
-    monkeypatch.setattr(common.distribution, "dirty_hash_files", probe)
+    monkeypatch.setattr(common.codehash, "dirty_hash_files", probe)
     monkeypatch.setattr(common.distribution, "request_upgrade_guarded", lambda *a, **k: (False, "dirty-tree:1"))
     out = dist_upgrade_cli.run_spec({**SPEC, "dirty": None})
     assert probed, "dirty=null 必须由本进程探测（字节级判据单源在 common.distribution）"
@@ -201,7 +201,7 @@ def test_scan_pings_itself_and_only_stale_is_upgraded(
         return {"codeHash": "b" * 64, "agentVersion": "def"}
 
     monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
-    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])
+    monkeypatch.setattr(common.codehash, "dirty_hash_files", lambda: [])
     posted: list[str] = []
     monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
     out = dist_upgrade_cli.run_scan(
@@ -219,7 +219,7 @@ def test_scan_pings_itself_and_only_stale_is_upgraded(
 def test_scan_expected_hash_defaults_to_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     common.distribution.reset_restart_state()
-    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "a" * 64)
+    monkeypatch.setattr(common.codehash, "compute_code_hash", lambda: "a" * 64)
     monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
     posted: list[str] = []
     monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
@@ -235,7 +235,7 @@ def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.M
     # 工作区脏不脏与用例语义无关（scan 不传 dirty ⇒ 守卫会字节级探测）——如果断言真的
     # 依赖「本仓此刻恰好没有未提交的 SSOT 文件」，那改 tools/agent/** 就会把这个用例弄红
     # （实测 2026-09-19 F2）。固定为「干净」。
-    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])
+    monkeypatch.setattr(common.codehash, "dirty_hash_files", lambda: [])
     posted: list[str] = []
     monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
     # 第一次：真发（并返回 pingHash 供调用方持久化）。
@@ -311,7 +311,7 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     """
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
     monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
-    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])  # 同上一用例：与工作区无关
+    monkeypatch.setattr(common.codehash, "dirty_hash_files", lambda: [])  # 同上一用例：与工作区无关
     posted: list[str] = []
     monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
 

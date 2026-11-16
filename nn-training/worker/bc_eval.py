@@ -18,6 +18,7 @@ import hashlib
 import time
 from typing import Any
 
+import common.codehash
 import common.distribution
 from common.distribution import fetch_task, node_ping, post_weights_cached, validate_eval_result
 
@@ -31,7 +32,7 @@ class BcEvalError(RuntimeError):
 
 def eval_capable_nodes(cfg: dict | None, log=lambda msg: None) -> list[dict]:
     """enabled + evalSupport + codeHash 与训练机一致的节点。"""
-    expected = common.distribution.compute_code_hash()
+    expected = common.codehash.compute_code_hash()
     out: list[dict] = []
     for n in (cfg or {}).get("nodes", []):
         if not n.get("enabled", True):

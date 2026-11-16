@@ -9083,7 +9083,7 @@ it1–it4 四节点同因全 skip）。用户指令：两者统一用 `tools/age
 
   /v1/ping 只报 codeHash = hash(清单展开) —— 唯一的节点门字段
   rollout 门（dispatch / rescan）与 eval 门（eval_dispatch §6.6 / batch_eval 严格）同用
-    common.distribution.check_code_hash(ping, 本机 codeHash)
+    common.codehash.check_code_hash(ping, 本机 codeHash)
   engine_epoch = sha256(codeHash)[0:16]（训练机侧算）= **账本记录值**：进
     EvalGameRow.engine / 心跳 / S10 哨兵；**不再是门**，故不进 ping（原 check_engine_epoch 删）
 ```

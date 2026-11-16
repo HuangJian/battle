@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.codehash
 import common.distribution
 from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_json
 from hub.server import _JobStore, make_server
@@ -215,7 +216,7 @@ class _FakeEvalNodeHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "evalSupport": True,
-                    "codeHash": common.distribution.compute_code_hash(),
+                    "codeHash": common.codehash.compute_code_hash(),
                     "concurrency": 2,
                 }
             )
