@@ -46,6 +46,7 @@ from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
+from common.scratch import warn_if_tmpfs
 from remote.push_tunnel import find_cloudflared, start_quick_tunnel, tunnel_url_of
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
@@ -483,6 +484,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
     # work_dir 可被 cfg 覆盖（单测注入 tmp 目录；缺省 /tmp——Kaggle/Colab 语义）
     work_dir = Path(str(cfg.get("work_dir") or "/tmp/remote-worker"))
     work_dir.mkdir(parents=True, exist_ok=True)
+    # 落点体检：payload 与**重建的 obs.npy** 都住这里，落 tmpfs 会把 3.97 GB 钉成不可回收的
+    # RAM（与 torch 抢预算）。缺省 /tmp 是磁盘，正确；cfg.work_dir 指到 /dev/shm 时才喊。
+    warn_if_tmpfs(work_dir, say=_log_default)
 
     log(f"连接 hub: {hub_url}（/ping 探测…）")
     try:
