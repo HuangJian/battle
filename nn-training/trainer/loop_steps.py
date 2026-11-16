@@ -629,7 +629,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         )
 
     def _record_iteration(self, it: int) -> None:
-        """iteration 事件落账（字段契约在 biz/events.py::write_iteration）。
+        """iteration 事件落账（字段契约在 worker/events.py::write_iteration）。
 
         R2a：写入后立刻并入 `LedgerView`（`_ledger_apply`）——视图因此始终 == 盘上
         账本，且没有第二次全文件扫描（用户 2026-09-18 裁决：每课只读一遍）。

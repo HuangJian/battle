@@ -31,7 +31,7 @@ from typing import Any
 
 from worker.config import CURRICULA_DIR
 
-#: 课程键名（与 `biz/config.py::CourseConfig.paired_rotate_seed` 同名字面量）。
+#: 课程键名（与 `biz/course_spec.py::CourseConfig.paired_rotate_seed` 同名字面量）。
 PAIRED_KEY = "paired_rotate_seed"
 
 #: 账本里要读的事件名（`training_log.jsonl` 的启动事件）。

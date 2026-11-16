@@ -577,7 +577,7 @@ run_id      : {self.run_id}
 
 
 #: 产物账本行 → **课程账本行**（`training_log.jsonl` 的 `iteration` 事件）的字段搬运表。
-#: 左 = 课程账本字段名（`biz/events.py::write_iteration`，也是控制台读的那一份），
+#: 左 = 课程账本字段名（`worker/events.py::write_iteration`，也是控制台读的那一份），
 #: 右 = (来源, 键)：`agg` = 产物行的聚合子字典，`report` = 采集报告子字典，`row` = 行本身；
 #: 键写成元组就是**下探路径**（如 `("scoreStats", "mean")`）——产物行是分层的，而课程账本平铺。
 #: 两个落地方（人工导入 `remote/deliver_zip`、实时补传 `hub.server`）走**同一张表**：

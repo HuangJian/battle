@@ -81,7 +81,7 @@ def bc_inflight(traj: Path, *, it: int | None = None) -> list[dict]:
     """BC 课的**在飞集**——与 `inflight_from_journals` **逐字段同形**的记录列表。
 
     BC 不写 `commit_journal`（那是 RL 远端 PPO / 半离线的 WAL），它的在飞事实在**账本**
-    （`publish_job` 的 `job_pending`，见 `biz/bc_ledger.py::inflight_jobs`），`dispatch` 在 job 目录的
+    （`publish_job` 的 `job_pending`，见 `worker/bc_ledger.py::inflight_jobs`），`dispatch` 在 job 目录的
     manifest 里。归一成同一形状是刻意的：下游 `waiting_state` 只认这一种记录——不然
     「在等什么」会对 BC 课说谎（它们明明在等 GPU 回传，却因为找不到 journal 而报「没有外部等待」）。
 

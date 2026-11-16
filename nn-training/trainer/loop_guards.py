@@ -1,11 +1,11 @@
 """loop_guards —— TrainingGuards mixin：训练护栏（2026-09-02 从 trainer/loop_core.py 拆出）。
 
 训练护栏的**组合根**。四簇护栏各自住一个模块（S4 第二十三刀，判据同源）：
-  · `biz/loop_guards_trip.py::TrainingGuardsTrip`  —— **过程面**硬边界（F4 熔断 / 止损）；
-  · `biz/loop_guards_leg.py::TrainingGuardsLeg`    —— **结果面**停腿（干烧回锚 / 配对杀臂）；
-  · `biz/loop_guards_gate.py::TrainingGuardsGate`  —— **课程结束门**（M1 第四守卫，
+  · `worker/loop_guards_trip.py::TrainingGuardsTrip`  —— **过程面**硬边界（F4 熔断 / 止损）；
+  · `worker/loop_guards_leg.py::TrainingGuardsLeg`    —— **结果面**停腿（干烧回锚 / 配对杀臂）；
+  · `worker/loop_guards_gate.py::TrainingGuardsGate`  —— **课程结束门**（M1 第四守卫，
     plan/course-exit-and-shutdown.md §4）求值 + 判决落地 + 预算硬断；
-  · `biz/loop_guards_sweep.py::TrainingGuardsSweep` —— keepIters 目录轮转与目录回收。
+  · `worker/loop_guards_sweep.py::TrainingGuardsSweep` —— keepIters 目录轮转与目录回收。
 判据本体全在纯函数模块（`biz/breaker.py` / `biz/stop_loss.py` / `biz/kickstart_burn.py` /
 `biz/paired_kill.py` / `biz/gate_check.py`）；四簇只做「读训练状态 → 判 → 落日志/事件」。
 

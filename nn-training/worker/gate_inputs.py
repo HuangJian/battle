@@ -24,7 +24,7 @@ _OVERRIDE_VERDICTS: frozenset[str] = frozenset(
     {"ADVANCE", "REMEDIATE", "STOP", "PAUSE", "ABORT", "HOLD"}
 )
 
-#: run_start 事件时间格式（biz/events.py:66）。
+#: run_start 事件时间格式（`worker/events.py::write_run_start` 里同一个字面量）。
 _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 

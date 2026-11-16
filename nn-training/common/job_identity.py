@@ -40,7 +40,7 @@ def idempotency_key(manifest: dict) -> tuple:
     结果，各自落进自己的 `args.out`（静默污染，且让下一轮 `init_weights_fp` 继续相同 ⇒ 自持）。
 
     为什么用 `course_fp` 而不是课程名：它是 manifest 必填字段、语义就是「课程身份」，
-    且在**同一进程内恒定**（课程字节装载时冻结：`biz/config.py::course_from_args` 落
+    且在**同一进程内恒定**（课程字节装载时冻结：`biz/course_resolve.py::course_from_args` 落
     `args.course_frozen_bytes`）⇒ mid-run 热加载编辑不会换 job id、不产生孤儿。
     ⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
     （`<discover-root>/<目录名>`，= 课程文件 stem）——本键只用来分开身份，不用来路由。
