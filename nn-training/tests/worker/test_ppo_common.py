@@ -122,42 +122,48 @@ def test_backend_params_match_config() -> None:
     assert_backend_constants()
 
 
-def test_engine_and_common_still_re_export_the_np_core_names() -> None:
-    """搬家的代价守卫：搬进 np_core 后，旧访问点（engine / common）必须仍然可达。
+def test_np_core_is_the_only_home_for_gae_and_shard_loading() -> None:
+    """搬家守卫（2026-11-16 翻转）：这些名字现在**只**在 `ppo.np_core`，engine 不再转发。
 
-    2026-09-26 实测踩坑（本守卫的由来）：trajectory 装载块搬去 `ppo/np_core` 后，
-    engine 里那四个**只被属性取用**的再导出（`compute_gae` / `discover_shards` /
-    `load_episodes_common` / `load_shard_fields`）被 ruff F401 判成死代码删掉 ⇒
-    `tests/worker/test_ppo_goal.py`（`import worker.ppo.engine as ppo; worker.ppo.compute_gae(...)` 当定长
-    参照）当场 AttributeError。**「没人 `import` 这个名」≠「没人在属性上取它」**。
+    2026-09-26 的踩坑留下过一个「engine 必须继续再导出」的守卫：当时
+    `tests/worker/test_ppo_goal.py` 用 `import ppo.engine as ppo` 后靠属性取
+    `ppo.compute_gae(...)` 当定长参照，再导出被 ruff F401 判成死代码删掉 ⇒ 当场
+    AttributeError。**「没人 `import` 这个名」≠「没人在属性上取它」**——解药是让那两个
+    测试改从 np_core 直取，而不是永久保留一层没有任何生产消费方的转发面；今天两者都做了，
+    所以这里断言方向反过来：`engine` 上不该再有这些影子。
+
+    `GAMMA` / `LAM` / `load_episodes` / `chunk_episodes` **不在断言里**：engine 自己要用
+    它们（`--gamma` / `--lam` 缺省值、手算路径、minibatch 分块），那是真属性不是转发。
     """
-    import worker.ppo
+    import worker.ppo.common as ppo_common
     import worker.ppo.engine as engine
     import worker.ppo.np_core as np_core
 
-    # 两条再导出链各自的公开面：common 从最早那一刀起就有的四个，engine 还多带
-    # trajectory 装载那一组（2026-09-26 搬来，旧访问点 `worker.ppo.engine.load_episodes` 等要活）。
-    BOTH = ("compute_gae", "discover_shards", "load_episodes_common", "load_shard_fields")
-    ENGINE_ONLY = (
-        "discover_rl_shards",
-        "load_episode_from_shard",
-        "load_episodes",
-        "load_shard",
-        "GAMMA",
-        "LAM",
+    RETIRED_FROM_ENGINE = (
         "_RL_SHARD_SPEC",
+        "compute_gae",
+        "discover_rl_shards",
+        "discover_shards",
+        "load_episodes_common",
+        "load_shard",
+        "load_shard_fields",
     )
-    for name in BOTH + ENGINE_ONLY:
-        assert getattr(engine, name) is getattr(np_core, name), (
-            f"worker.ppo.engine.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
+    for name in RETIRED_FROM_ENGINE:
+        assert hasattr(np_core, name), f"np_core 丢了 {name}（它现在是唯一出处）"
+        assert not hasattr(engine, name), (
+            f"worker.ppo.engine.{name} 又长回来了：请把消费方改到 worker.ppo.np_core，"
+            f"而不是在 engine 上补一条转发/`# noqa: F401`"
         )
-    for name in BOTH:
+    # `load_episode_from_shard` **必须留着**：它是 `RolloutBackend` 的契约成员，
+    # `trainer/stream.py` 在运行期从「本模式的 backend 模块」上取它（engine 自己并不调用）。
+    assert engine.load_episode_from_shard is np_core.load_episode_from_shard, (
+        "worker.ppo.engine.load_episode_from_shard 断了：RolloutBackend 契约成员必须在后端模块上"
+    )
+    # `ppo.common` 的四个面**仍然保留**（torch 侧的既有 import 行不改），但必须指向同一对象。
+    for name in ("compute_gae", "discover_shards", "load_episodes_common", "load_shard_fields"):
         assert getattr(ppo_common, name) is getattr(np_core, name), (
             f"worker.ppo.common.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
         )
-    # 根级便捷名也指向新家（`worker.ppo.compute_gae` 不得再拖 torch）。
-    assert worker.ppo.compute_gae is np_core.compute_gae
-    assert worker.ppo.load_episodes is np_core.load_episodes
 
 
 def _kick_chunks() -> list[dict]:

@@ -200,7 +200,7 @@ def write_shard(
     ② 顺序天然是「先交字节、后写盘」。缺省 `None` = 逐字节旧行为。
 
     2026-09-03 修正：补写 manifest.json——M1 metrics 方案下 engine 加载器
-    （ppo.engine.load_shard → _reward_from_metrics）需要 outcome/score/metrics_version
+    （ppo.np_core.load_shard → _reward_from_metrics）需要 outcome/score/metrics_version
     在**落盘目录内**（分布式/self-node 局的单局 manifest 此前只存在于 fetch 返回的
     内存对象，落盘即丢 → 被当成 timeout 错标，奖励错算）。
     queue_local 路径由 exporter 直接写盘不受影响；此处补齐 dist 路径两侧同规。

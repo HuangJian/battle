@@ -6777,3 +6777,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   搬家顺带正过来一条反向边（`worker/loop_hold` 曾 import `trainer.loop_control`）。同步改了
   `TRAINER_ORCHESTRATION`、`remote_dag.LAYERS`（`worker.loop_control: 0`）、`test_production_isolation`
   的路径钉与 dashboard/docs 里的指针。
+- **2026-11-16（`worker/ppo/engine.py` 的转发面：11 名 → 1 名）**：`RolloutBackend` 契约（`worker/backend.py`）
+  要求 `per-tick` 后端模块上有 `load_episode_from_shard`，`trainer/stream.py` 运行期取 —— 这条是契约，不是
+  旧名字。其余 7 个（`compute_gae` / `discover_*` / `load_shard*` / `load_episodes_common` /
+  `_RL_SHARD_SPEC`）的唯一消费方是两个 worker 测试的属性取用，改成 `from worker.ppo.np_core import …`
+  后删除，并把守护测试翻转（断言 engine 上**没有**这些影子）。**反面教训**：契约成员不能用
+  `y = X.y` 赋值发布 —— 静态契约扫描器只认 `from X import y`，赋值会判 `<unresolved>` 而
+  `test_backend_contract_runtime` 红；那一条 `noqa` 留着，并在 import 里写清来路。

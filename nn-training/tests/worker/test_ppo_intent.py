@@ -1,7 +1,7 @@
 """test_ppo_intent.py — ppo_intent.py 常驻回归测试（无真实训练、不碰节点）。
 
 覆盖：
-  1) Δt≡1 退化字节一致（P1-7k3）：compute_gae_variable(dt=1) ≡ ppo.compute_gae（定长 γ）。
+  1) Δt≡1 退化字节一致（P1-7k3）：compute_gae_variable(dt=1) ≡ ppo_np.compute_gae（定长 γ）。
   2) 变步长 GAE：dt 变化时结果与定长不同（半 MDP 语义生效）。
   3) IntentRLNet 含 value 头：export/load 往返 + 三头 + value 头 shape 断言（预注册 #8）。
   4) ppo_update_intent 微型 shard 冒烟：不崩、policy loss 有限、early-stop 逻辑可触发。
@@ -27,8 +27,8 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-import worker.ppo.engine as ppo
 import worker.ppo.intent as ppo_intent
+import worker.ppo.np_core as ppo_np
 from worker.data.weights_io import load_weights_json
 from worker.models.intent_net import export_intent_weights
 
@@ -51,7 +51,7 @@ def test_dt1_degradation() -> None:
     dones[-1] = 1
     dt = np.ones(N, dtype=np.int64)
 
-    adv_fixed, ret_fixed = ppo.compute_gae(
+    adv_fixed, ret_fixed = ppo_np.compute_gae(
         rewards, values, dones, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
     )
     adv_var, ret_var = ppo_intent.compute_gae_variable(rewards, values, dones, dt)
@@ -68,7 +68,7 @@ def test_dt1_degradation() -> None:
     # 中间 done（子局断点）路径也要一致。
     dones2 = dones.copy()
     dones2[60] = 1
-    a2f, r2f = ppo.compute_gae(
+    a2f, r2f = ppo_np.compute_gae(
         rewards, values, dones2, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
     )
     a2v, r2v = ppo_intent.compute_gae_variable(rewards, values, dones2, dt)
@@ -87,7 +87,7 @@ def test_variable_dt_differs() -> None:
     dt = rng.randint(1, 50, size=N).astype(np.int64)  # 可变窗口
 
     adv_var, ret_var = ppo_intent.compute_gae_variable(rewards, values, dones, dt)
-    adv_fixed, ret_fixed = ppo.compute_gae(
+    adv_fixed, ret_fixed = ppo_np.compute_gae(
         rewards, values, dones, gamma=ppo_intent.GAMMA_TICK, lam=ppo_intent.LAM
     )
     check(not np.array_equal(adv_var, adv_fixed), "dt 可变: adv 与定长不同（半 MDP 折扣生效）")

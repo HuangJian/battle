@@ -82,27 +82,20 @@ from worker.ppo.common import (
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
-
-# 2026-09-26：trajectory 装载的**家**在 `ppo/np_core.py`（顶栏注释）；此处仅再导出，
-# 访问点不变（`ppo.engine.load_episodes` / `load_shard` / `_rl_shard_spec`）。
-#
-# ★ `compute_gae` / `discover_shards` / `load_episodes_common` / `load_shard_fields`
-#   这四个也**必须留着**：engine 是对外的访问点——`tests/worker/test_ppo_goal.py` /
-#   `test_ppo_intent.py` 用 `import ppo.engine as ppo` 后把 `ppo.compute_gae(...)`
-#   当定长参照。搬走装载块后它们一度被 ruff F401 判成死代码而删掉，门禁当场红：
-#   **「没人 `import` 这个名字」≠「没人在属性上取」**。
-from worker.ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
-    _RL_SHARD_SPEC,
+from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = RolloutBackend 契约)
+    # `load_episode_from_shard` 是 `worker/backend.py::RolloutBackend` 的成员，由
+    # `trainer/stream.py` 运行期从「本模式的后端模块」上取；engine 自己**不调用**它，所以
+    # 必须靠 noqa 撑住 F401。要 import 形态而不是 `y = X.y` 赋值：静态契约扫描器只认
+    # `from X import y`（记为 `import:X`），赋值别名会变成 `<unresolved>`，
+    # `tests/worker/test_backend_contract_runtime.py` 的双向对账当场红。
+    #
+    # 2026-11-16 清账：`compute_gae` / `discover_shards` / `discover_rl_shards` /
+    # `load_episodes_common` / `load_shard` / `load_shard_fields` / `_RL_SHARD_SPEC`
+    # 只剩两个 worker 测试在属性上取，已改成从 np_core 直取，影子删掉。
     GAMMA,
     LAM,
-    compute_gae,
-    discover_rl_shards,
-    discover_shards,
     load_episode_from_shard,
     load_episodes,
-    load_episodes_common,
-    load_shard,
-    load_shard_fields,
 )
 from worker.ppo.trainer import aggregate_stats, tensored_chunks
 
@@ -147,8 +140,9 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 
 # 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）
-# 已搬进 `ppo/np_core.py`（与 load_episodes_common 同家）——本模块只从那里再导出，
-# 调用点（trainer/stream.py / remote/train_core.py / ppo/bench.py / ppo/__init__ 的便捷名）一行不改。
+# 已搬进 `ppo/np_core.py`。本模块只保留自己调用到的三个名字 + 一条 `RolloutBackend`
+# 契约导出（见顶部 import 处的注释）；其余消费方（stream.py / train_core.py / bench.py /
+# ppo/__init__ 的便捷名）都从 np_core 或包根取。
 
 
 

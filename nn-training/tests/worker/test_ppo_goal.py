@@ -1,7 +1,7 @@
 """test_ppo_goal.py — ppo_goal.py 常驻回归测试（无真实训练、不碰节点）。
 
 覆盖（T7.2 验收 + T9a.1b 采样一致性）：
-  1) Δt≡1 退化：compute_gae_variable(dt=1) ≡ ppo.compute_gae（定长 γ）。
+  1) Δt≡1 退化：compute_gae_variable(dt=1) ≡ ppo_np.compute_gae（定长 γ）。
   2) 变步长 GAE：dt 变化时结果与定长不同。
   3) GoalRLNet export/load 往返 + goal(676)/engage(2)/value(1) 头 shape 断言。
   4) coarse 块聚合：块 logit = 块内 logsumexp（形状/单调/可导）。
@@ -29,8 +29,8 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-import worker.ppo.engine as ppo
 import worker.ppo.goal as ppo_goal
+import worker.ppo.np_core as ppo_np
 from worker.data.weights_io import load_weights_json
 from worker.models.goal_net import export_goal_weights
 
@@ -54,9 +54,9 @@ def test_dt1_degradation() -> None:
     done[-1] = 1
     dt = np.ones(N, dtype=np.int64)
     a1, r1 = ppo_goal.compute_gae_variable(reward, value, done, dt)
-    a2, r2 = ppo.compute_gae(reward, value, done, 0.995, 0.95)
-    check(np.array_equal(a1, a2), "dt≡1: adv ≡ ppo.compute_gae 定长路径")
-    check(np.array_equal(r1, r2), "dt≡1: ret ≡ ppo.compute_gae 定长路径")
+    a2, r2 = ppo_np.compute_gae(reward, value, done, 0.995, 0.95)
+    check(np.array_equal(a1, a2), "dt≡1: adv ≡ ppo_np.compute_gae 定长路径")
+    check(np.array_equal(r1, r2), "dt≡1: ret ≡ ppo_np.compute_gae 定长路径")
 
 
 def test_variable_dt_differs() -> None:
