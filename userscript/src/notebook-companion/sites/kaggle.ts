@@ -6,6 +6,11 @@
  */
 import { normalizeNewlines } from '../../utils'
 import { deepQuery, deepQueryAll, MIME, SEL } from '../selectors'
+import {
+  createTabTitleSync as createBaseTabTitleSync,
+  stripTabMarks,
+  type TabTitleSync,
+} from '../ui/tab-title'
 import { minimalEdit } from './hub-url'
 import type { CellRef, CmdResult, FrameAdapter, SessionAdapter, SiteId } from './types'
 
@@ -1034,20 +1039,12 @@ export function preferredNotebookTitle(currentTitle: string, href: string): stri
  * 为什么需要：Kaggle 把编辑页标题写死成「Kaggle Notebook Editor」，多开几个 notebook
  * 页签时标签栏上分不出哪个是哪个。名字按当前 URL 记忆——页面自己给过名字就一直用它，
  * 免得每拍在「页面给的名字 / slug」之间来回跳；SPA 换到别的 notebook（URL 变）才重新解析。
- * 非 notebook 页（解析不出名字）⇒ 不动标题。
+ * 非 notebook 页（解析不出名字）⇒ 不动标题。状态图标（⏹️/▶️）由通用层加，解析名字前先剥掉。
  */
-export function createTabTitleSync(doc: { title: string }, getHref: () => string): () => string {
-  let key: string | null = null
-  let name = ''
-  return () => {
-    const href = getHref()
-    if (href !== key) {
-      key = href
-      name = preferredNotebookTitle(doc.title, href)
-    }
-    if (name && doc.title !== name) doc.title = name
-    return name
-  }
+export function createTabTitleSync(doc: { title: string }, getHref: () => string): TabTitleSync {
+  return createBaseTabTitleSync(doc, getHref, {
+    resolve: (title, href) => preferredNotebookTitle(stripTabMarks(title), href),
+  })
 }
 
 export class KaggleSessionAdapter implements SessionAdapter {
@@ -1077,6 +1074,14 @@ export class KaggleSessionAdapter implements SessionAdapter {
     if (/Stop session/i.test(text) && /Draft Session/i.test(text)) return 'idle'
     if (/Stop session/i.test(text)) return 'running'
     return 'unknown'
+  }
+
+  /** 标题告警：`Starting` 是正在起会话，不是中止（标题不能一直挂着 ⏹️）。 */
+  titleState(): 'running' | 'idle' | 'stopped' | 'unknown' {
+    const text = this.statusText()
+    if (/\bStopped\b/i.test(text)) return 'stopped'
+    if (/\bStarting\b/i.test(text)) return 'running'
+    return this.sessionState()
   }
 
   async stopSession(): Promise<CmdResult> {

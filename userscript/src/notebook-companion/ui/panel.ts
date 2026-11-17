@@ -171,10 +171,16 @@ function clampToViewport(
   }
 }
 
+/**
+ * 浮窗要压在页面原生弹窗之上：32 位有符号整数上限。面板住 Shadow DOM、position: fixed，
+ * 再加上这个 z-index 就不会被 Kaggle/Colab 的 MUI / Closure 弹层盖住。
+ */
+export const PANEL_Z_INDEX = 2147483647
+
 const STYLE = `
 :host { all: initial; }
 .bnc {
-  position: fixed; right: 16px; bottom: 16px; z-index: 2147483646;
+  position: fixed; right: 16px; bottom: 16px; z-index: ${PANEL_Z_INDEX};
   font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #e8eef7; background: rgba(16, 22, 32, .94);
   border: 1px solid rgba(120, 170, 255, .35); border-radius: 10px;
@@ -200,7 +206,7 @@ const STYLE = `
 .bnc[hidden] { display: none; }
 /* 最小化后的小方块：自己是拖拽手柄，点一下还原。 */
 .mini {
-  position: fixed; right: 16px; bottom: 16px; z-index: 2147483646;
+  position: fixed; right: 16px; bottom: 16px; z-index: ${PANEL_Z_INDEX};
   width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;
   color: #dbe7ff; background: rgba(16, 22, 32, .94);
   border: 1px solid rgba(120, 170, 255, .45); border-radius: 10px;

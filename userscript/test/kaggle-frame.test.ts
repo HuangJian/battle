@@ -522,6 +522,18 @@ describe('KaggleSessionAdapter：会话名与停止', () => {
     ).toBe('unknown')
   })
 
+  it('titleState：Starting 只是「正在起会话」，标题不能报中止（停会话后置条件仍当 done）', () => {
+    const href = 'https://www.kaggle.com/code/a/b/edit'
+    const starting = new KaggleSessionAdapter(
+      docOf(dom('<html><body>Starting</body></html>')),
+      href,
+    )
+    expect(starting.sessionState()).toBe('stopped')
+    expect(starting.titleState()).toBe('running')
+    const stopped = new KaggleSessionAdapter(docOf(dom('<html><body>Stopped</body></html>')), href)
+    expect(stopped.titleState()).toBe('stopped')
+  })
+
   it('stopSession：点按钮 → 无对话框 → 状态变 stopped 才 ok；状态不变 ⇒ 失败', async () => {
     const href = 'https://www.kaggle.com/code/example/rollout/edit/run/123'
     const w = dom(OUTER, href)
