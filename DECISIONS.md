@@ -5949,7 +5949,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **背景/决定**：eager 的 `load_episodes → chunk_episodes` 先 `np.concatenate` 全量再 fancy-index ⇒ 峰值 ≈3× obs（491k = 5.65 GB obs ⇒ 11–17 GB），且 `tensored_chunks` 把全部 chunk 常驻 VRAM。新增 `--ppo-loader=eager|lazy`（默认 eager，逐字节旧路径）；lazy = obs 逐 shard `mmap_mode="r"` + 其余字段（≈200 MB）常驻 + 全局 `np.random.permutation`（与 eager 同一条 RNG 流）+ 显式 `row_map`（`row_shard`/`row_local`）+ 每 minibatch 只 fancy-index mb 行、`tensored_batch` 逐批 `.to(device)`；kickstart ref 改为 chunk 首次使用时现算（ref 冻结，数值逐位相同）。分派唯一入口 = `worker/ppo/lazy_corpus.load_ppo_corpus`；`ppo_loader` 走课程 CLI → `build_ppo_job`（eager **省略** manifest 键）→ `train_core`；Paddle 后端响亮拒收 lazy。
 - **对账契约**：shard 顺序/行序 = eager 的 `discover_rl_shards` + concatenate 顺序；quota 截断在 GAE 之前；adv/ret 归一含被丢尾部；`drop_last`/单 shard 不裁尾/全局置换顺序与 eager 相同；demo bank 的 np RNG 逐步同序；逐批转换不引入 `channels_last`（eager 当前也未传 `memory_format`，两路同源，代码赢）。
 - **本机证据（2026-11-16）**：`tests/worker/test_ppo_lazy_loader.py` 9 条——eager/lazy 同 seed 的 row_map/行序/GAE/adv・ret/minibatch/demo RNG/kickstart/最终权重逐字节一致；`per_stage_quota` 截断在 GAE 前；drop_last 与单 shard；v6 可选列；混装拒收；lazy 路径不调用 `tensored_chunks`（逐批 8 行上卡）；491k/mb=1024 峰值公式 ≈1.0 GiB ≤2 GiB；合成语料 gather 冷/热 ≈693/654 MB/s。
-- **被否决**：① 默认直接切 lazy（未做真机 35×20 墙钟/VRAM 验证）；② 让 lazy 依赖 `np_core.load_episodes` 的返回类型（会造成 worker 层成环）；③ 把 lazy 塞进 `np_core`（LOC 预算 + numpy-only 核心职责）；④ Paddle 侧静默回退 eager（manifest 与日志各说各话）。
+- **被否决**：① ~~默认直接切 lazy~~（**2026-11-17 撤销**：装载段实测 + 缺省已切，见 §2026-11-17-goalnn-ppo-lazy-default）；② 让 lazy 依赖 `np_core.load_episodes` 的返回类型（会造成 worker 层成环）；③ 把 lazy 塞进 `np_core`（LOC 预算 + numpy-only 核心职责）；④ Paddle 侧静默回退 eager（manifest 与日志各说各话）。
 - **后果/未完成**：生产默认仍 eager；35×20 真语料的 scan+GAE/H2D/update 端到端墙钟、4–6 GB VRAM 真机、冷/热 page cache 仍未验。完整方案 → `plan/replay-corpus.plan.md` §5/P3；代码 → `nn-training/worker/ppo/lazy_corpus.py`、`worker/ppo/engine.py`、`remote/train_core.py`。
 
 ## §2026-11-16-goalnn-conv-fma（native features 内核乘加融合：x64 `-mfma` + 全目标 `-ffp-contract=fast`，逐位门 → 容差门）
@@ -5990,3 +5990,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：① H1 跨 shard 模块级 cache（失败前缀可复现，但 `advance-ids 1` 即消失 ⇒ 不是 cache 内容）；② H2 写盘扰动（verify-only 也走同一 restore，且 no-JIT 仍失败）；③ H4 哈希 memo/增量实现（同快照重复算稳定，且两遍唯一差异是 id 字段）；④ H5 记录侧 tickHash 错（隔离重放能通过，录像链本身自洽）；⑤ H6 JIT/硬件 bit flip（no-JIT 5/5 复现、失败点确定性）；⑥ 失败后重试（掩盖问题，违反零重试纪律）。
 - **代价/风险**：不改玩法语义、不改 replay 格式、不改 tickHash 规格；restore 多一次 O(entities) 扫描（每 shard 一次，可忽略）。`genId` 仍是进程级隐藏计数器（原豁免不变）——现在它只会单调增长，跨进程快照的 id 空间在 restore 时被显式预留。旧 replay/快照无需迁移（id 只要求唯一，不要求从 1 连续）。
 - **后果**：`plan/replay-corpus.plan.md` §1.4 的「写盘池 ≤3」解除，生产写盘池可回到全核宽度；`plan/tickhash-flake.plan.md` 收尾。转换器保留 env-gated 诊断装置（`CONV_TRACE` 每 tick hash、`CONV_SNAP_*` 窗口快照），默认零开销。
+
+## §2026-11-17-goalnn-ppo-lazy-default（P3 收尾：PPO 装载器缺省切 lazy）
+
+- **背景**：`plan/replay-corpus.plan.md` P3/D6 的懒装载器与等价测试 2026-11-16 已落地，但缺省仍是 `eager`（当时的否决理由①=未做真机 35×20 墙钟/VRAM 验证）。用户 2026-11-17 指令：按 plan P3 落地 lazy loader、压训练轮墙钟。
+- **决定**：三处缺省同值切 `lazy` —— `worker/cli.py --ppo-loader`（`_d("ppo_loader","lazy")`；生产真源 = rl-config `rl.ppo_loader`，本机该键未写）、`worker/ppo/engine.py` 独立 CLI、`biz/course_spec.py::CourseConfig.ppo_loader`（文档值，「显式才覆盖」）。**协议缺省不动**：`common/manifest.py` 与 `remote/train_core.py` 仍 `"eager"`，发布端只在 `!= "eager"` 时写键 ⇒ 旧 manifest 逐字节旧路径、lazy 永远显式声明；回滚 = `--ppo-loader eager` / `rl.ppo_loader:"eager"`（课程里的显式值优先）。Paddle 后端仍**响亮拒收** lazy（实验臂必须显式 eager，不静默退回）。
+- **证据（本机 2026-11-17，`tools/perf/ppo-loader-bench.py`：40 shard × 502 = 20,080 样本 / obs 220 MB / mb=1024）**：scan+GAE eager **2.14 s** vs lazy **0.20 s**；随机 gather 90 MB **0.09 s（1,002 MB/s）**；每 mb 转 torch（CPU）**6 ms / 8 批**；`gather(rows)` 与 eager `concatenate()[rows]` **逐字节相同**。等价测试 10 例绿（chunk / 最终权重逐字节 + 新增「缺省必须是 lazy」钉子）。
+- **仍未被本机证明**：35×20 真语料的 GPU H2D / update 墙钟与显存余量（本机无 GPU；RSS 探针缺 psutil ⇒ 留空不编数）——判据在 plan §6.6 五档 verify（`verify-fl` vs `verify-fe` 即装载器 A/B），回滚一个 flag。
+- **否决**：① 继续等 GPU 真机再切（装载段已有量级差，且 lazy 峰值与语料总量无关，等下去只是继续付 ~3× obs 峰值）；② 只切课程缺省、不动 CLI（rl-config 缺键时仍 eager ⇒ 生产不生效，账实不符）；③ 连协议缺省一起切（旧 manifest 会从 eager 变 lazy，等于**静默**改变历史包语义）；④ paddle 静默退回 eager（manifest 与日志各说各话，2026-11-16 已否决，维持）。
+- 全文 → `docs/nn/remote-transport.md` §156；代码 `nn-training/worker/{cli,ppo/engine}.py` · `biz/course_spec.py` · `tools/perf/ppo-loader-bench.py` · `tests/worker/test_ppo_lazy_loader.py`。

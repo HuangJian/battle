@@ -6,6 +6,44 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §156 P3 落地：PPO 语料装载器缺省切 lazy（2026-11-17）
+
+**背景**：P3（`plan/replay-corpus.plan.md` D6/§5）的两半已在 2026-11-16 落过 —— lazy 装载器
+（`worker/ppo/lazy_corpus.py`）与等价测试；缺的只有「测试绿之后把缺省切过来」这一步（当时的
+否决理由：未做真机 35×20 墙钟/VRAM 验证）。
+
+**改了什么**（三处缺省，同值 lazy）：
+
+* `worker/cli.py --ppo-loader` → `_d("ppo_loader", "lazy")`（生产真源 = rl-config `rl.ppo_loader`；
+  本机 rl-config 未写该键 ⇒ 立刻生效）；
+* `worker/ppo/engine.py` 独立 CLI 缺省 lazy；
+* `biz/course_spec.py::CourseConfig.ppo_loader` 文档缺省 lazy（该字段是「显式才覆盖」）。
+
+**协议缺省不动**：`common/manifest.py` 仍 `"eager"`、`remote/train_core.py` 仍
+`manifest.get(..., "eager")` —— 发布端只在 `ppo_loader != "eager"` 时写键 ⇒ 旧 manifest 逐字节跑
+旧路径，lazy 永远显式声明。回滚 = `--ppo-loader eager` / `rl.ppo_loader: "eager"`（课程里的显式值
+照旧优先）。Paddle 后端仍**响亮拒收** lazy（`remote/paddle_env.check_ppo_loader`）——实验臂必须
+显式写 eager，不静默退回。
+
+**同机 A/B**（新台架 `tools/perf/ppo-loader-bench.py`；合成语料 40 shard × 502 = 20,080 样本 /
+obs 220 MB / mb=1024，win32 2 vCPU 本机）：
+
+| 段 | eager | lazy | 读法 |
+|---|---:|---:|---|
+| scan+GAE 装载 | 2.14 s | **0.20 s** | lazy 不 concatenate 全量，只 GAE + 常驻小字段 |
+| 随机 gather（8×1024 行 = 90 MB obs） | — | 0.09 s ⇒ **1,002 MB/s** | 与云机实测 1,749 MB/s 同量级 |
+| 每 mb 转 torch 张量（CPU） | — | 6 ms / 8 批 | GPU 的 H2D 只能在目标云机量 |
+| 逻辑等价 | — | — | `gather(rows)` 与 eager `concatenate()[rows]` **逐字节相同** |
+
+**未在此机验证**（照旧记账，不假装有）：35×20 真语料的 GPU H2D / update 墙钟与显存余量 —— 那是
+plan §6.6 五档 verify 的事（`verify-fl`/`verify-rl` 就是装载器对照臂）；本机无 GPU，RSS 探针也缺
+psutil ⇒ 不编数字。
+
+**为什么可以先切**：lazy 的峰值 = 常驻小字段 + mb 行（491k 样本 ≈ 1.0 GiB，测试锚），与语料总量
+无关；装载段实测快一个量级；等价测试 10 例（chunk 逐字节 + 最终权重逐字节，含新增的「缺省必须是
+lazy」钉子）绿。风险面只剩「目标卡上的 H2D/update 吞吐」，而它在 `verify-fl` vs `verify-fe` 的
+A/B 里立刻可见，回滚一个 flag。
+
 ## §155 `corpus_fmt` 缺省翻成 replay + A2（取消 f16 单边偏置）（2026-11-17）
 
 **拍板**：用户令「A2，把 replay 设为默认！」。§154 已把 replay 定为常态，本节补两件落地的事：
@@ -93,13 +131,45 @@ obs/scalars/extra 必须逐字节重算。
 对账：`obsHash`/`framesBase64`/`tickHashes`/`finalState`/`initialSnapshot` 全部逐字符相同；
 full 模式 14/14 分片文件 sha 不变；`bun run check` 绿。
 
+④ **`codeSha` 不再每进程遍历整棵树**（2026-11-17，用户指令「消掉 codeHash 开销」）：
+`worker/cmd.py::local_code_sha()`（进程内记忆，≈0.03 s/次）算好 codeHash，`build_rollout_cmd`
+在 **`--corpus-fmt replay` 同一条分支**追加 `--code-sha <64hex>`；导出器拿到就直接用
+（`replayCodeShaOverride`），零遍历。三个口径点：
+
+* **只在本机腿透传**：远端跑的树是 job 里解出来的 `ts_code.zip`，拿 hub 的 hash 当它的身份就是
+  撒谎；而 `node_side` 一律 full（没有 `replay_meta`）——两条纪律正好落同一条分支。
+* **自算路径也变快**：`collectCodeHashEntries` 去掉 ~200 次冗余 `stat`/`existsSync`（目录判定改
+  `withFileTypes` 的 dirent，缺失/非普通文件只在读失败后用一次 stat 兜底区分）⇒ 15.3 → 13.5 ms，
+  `codeHash` **值逐字符不变**（旧/新实现同进程对拍 `hashSame=true`、`codeHashReport()` 全等）。
+* **收益的诚实口径**：池化腿本来每个 worker 只付一次（`make_local_pool` / dispatcher 每个权重
+  版本一个池）⇒ 真实节省 = `workers×13.5 ms → 0`（8 worker ≈ 108 ms/轮，≈0.01% 的 808 s 轮）。
+  它真正消灭的是**逐局 spawn 腿**（`NN_SERVE_POOL=0` 回退 / 直跑 CLI / 云机单局）那 ~1.7%/局的
+  固定开销。别指望它在训练墙钟上看得出来——这条的目的是「身份字段不该带 I/O」。
+
+⑤ **metrics.npy 改列主序**（payload 瘦身 B，2026-11-17，用户指令「评估并落地 metrics 传输瘦身」）：
+`metrics` 是 **90 列计数器**（87/90 列逐值整型），行主序把「同一列的相邻行」隔了 360 B ⇒
+仅能拿 13× 压缩。改成**列主序**（`npyBytes(..., 'F')` → 头里 `'fortran_order': True`）后
+**逻辑数组完全不变**（`np.load` 直接还原，shape/dtype 不变），而 deflate 看到的是连续同列：
+
+| 量 | 行主序 | 列主序 | 变化 |
+|---|---:|---:|---:|
+| `metrics.npy` 盘上字节 | 244,568 | 244,568 | 0（只是重排） |
+| `metrics.npy` gz6 | 19,032 | **14,401** | **−24.3%** |
+| replay shard 的 BCV2 容器（真传输形态） | 32,388 | **27,880** | **−13.9%** |
+
+对账（同一局 stage 3 / seed 2000000001 / 678 样本）：`np.array_equal(旧, 新) == True`；
+转换器 `OK samples=678 ticks=6771 obsHash=sha256:7e6b4b06…`（与改前逐字符相同）；
+`obs.npy` 与 full 路径逐字节相同。全部 metrics 消费者走的都是 `np.load`
+（`npyio.read_npy` / `np_core.load_shard_fields` / 分析脚本），**无一手工字节读**；
+TS 侧只解析头（`npyRowCount`），不读数据 ⇒ 读侧零改动。
+
 ### 测过但明确不值得动
 
 - `src/config/stages.ts::decodeLevel`（模块加载期 35 关）：**1.9 ms/进程**（profile 里 14% 是采样
   假象）。池化后每 worker 一次，忽略。
-- `computeCodeHash()`（`replay_meta.codeSha`）：**25–27 ms/进程**，已被 `replayCodeShaMemo` 按进程
-  记忆；只有「逐局起子进程」的腿才每局付一次。要消掉得让 sampler 把自己的 codeHash 透传进来
-  （协议改动），收益 ~1.7%/局，暂不做。
+- `computeCodeHash()`（`replay_meta.codeSha`）：初测 **15–17 ms/进程**（180 个文件 / 2.67 MB，
+  sha256 本身 ≈0 ms——成本全在 180 次 open+read 的 syscall）。用户点名后两刀已落地（见下文 ④）：
+  本机腿**归零**（launcher 透传 `--code-sha`），自算路径 13.5 ms。
 - 转换器 7.8 MB `Uint8Array` 分配：**0.76 ms**（profile 的 `Float32Array` 7.7% 同样是假象）。
 - 转换器每决策 3 次 `subarray()`、`npyRowCount` 整文件读、`.tmp`+rename：均在噪声内。
 
@@ -107,8 +177,14 @@ full 模式 14/14 分片文件 sha 不变；`bun run check` 绿。
 
 replay 形态的新增成本只有两处：**录制 ~12 ms/局（0.8%）+ 转换 26–32 µs/tick**（云机池化 =
 43 s / 491k 样本轮，≈ PPO 808 s 的 5%）。继续压墙钟请去 ① PPO 侧（plan P3 的 lazy loader）
-② 采样侧 NN 前向 ③ metrics 传输（241 KB/局 × 35 局 ≈ 8.4 MB/轮，是 replay 的 13 倍）——
-**别在 replay 编解码上找倍数**。
+② 采样侧 NN 前向 —— **别在 replay 编解码上找倍数**。
+
+⚠ **「metrics 241 KB/局 ≈ 8.4 MB/轮，是 replay 的 13 倍」是记账口径错误**（2026-11-17 复测）：
+241 KB 是 `metrics.npy` 的**盘上**字节，而它 gzip 本身就是 13× —— 两个数并不独立。真传输形态是
+BCV2 容器（**整包** gzip6）：实测一局 replay shard 容器 **32.4 KB**（其中 metrics 19.0 KB = 59%、
+`replay.json` 2.9 KB、`value`+`lp_*` 8.3 KB、其余 1.3 KB），35 局一轮 ≈ **1.1 MB**，列主序后 ≈ **0.98 MB**
+—— 不是 8.4 MB。metrics 确实是 replay 容器里的**头号成员**（这是真的），但它的绝对值已经小到
+`<1 s/轮` 的隧道时间量级。
 
 ## §153 节点池的读数与真凶：`NO_PROXY` 里的 LAN 网段 + 分桶/drop 原因（2026-11-14）
 

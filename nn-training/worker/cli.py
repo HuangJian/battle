@@ -335,10 +335,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--ppo-loader",
         choices=("eager", "lazy"),
-        default=_d("ppo_loader", "eager"),
-        help="PPO 语料装载器（P3，plan/replay-corpus.plan.md D6）：eager=整份 "
-        "concatenate（旧行为，默认）；lazy=obs 逐 shard mmap + 逐 minibatch 上卡"
-        "（491k 样本峰值 ≤2 GB，4–6 GB VRAM 可跑）。独立开关，回滚 = eager。",
+        # 2026-11-17（P3 收尾）：缺省切 lazy。判据 = 等价测试（eager vs lazy 同 seed 的 chunk
+        # 逐字节一致 + 最终权重逐字节一致，tests/worker/test_ppo_lazy_loader.py）+ 装载段峰值
+        # 从「~3× obs」降到「~1× mb」。回滚 = `--ppo-loader eager` 或 rl-config 的
+        # `rl.ppo_loader: "eager"`（课程里的 ppo_loader 是显式覆盖，不依赖这里的缺省）。
+        default=_d("ppo_loader", "lazy"),
+        help="PPO 语料装载器（P3，plan/replay-corpus.plan.md D6）：lazy=obs 逐 shard "
+        "mmap + 逐 minibatch 上卡（默认；峰值 ≈ 常驻小字段 + mb 行，与语料总量无关）；"
+        "eager=整份 concatenate（回滚档；峰值 ≈ 3× obs）。",
     )
     ap.add_argument(
         "--lr",

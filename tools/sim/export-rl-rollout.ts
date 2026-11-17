@@ -1170,7 +1170,19 @@ export interface ReplayArtifact {
 
 /** rollout 侧 TS 代码身份（惰性；同一进程只算一次，失败退空串不阻断导出）。 */
 let replayCodeShaMemo: string | null = null
+/**
+ * `--code-sha`：launcher 已在**同一份树**上算过 codeHash（`worker/cmd.py::local_code_sha`，
+ * 与 `computeCodeHash()` 是「同字节同哈希」的双语契约）⇒ 直接采用，跳过整棵树的遍历。
+ *
+ * 为什么要这个口子：`computeCodeHash()` 实测 13.5 ms/进程（180 个文件 / 2.67 MB；sha256 本身
+ * ≈0 ms，成本全在 180 次 open+read 的 syscall 上），而它是**每进程常量** —— 池化腿每个 worker
+ * 付一次、逐局 spawn 的腿每局付一次。给了就用 launcher 那份；没给（直跑 CLI / `runOneBench` /
+ * 节点腿）照旧现算。每次 `main()` 都会重设本变量 ⇒ `serve-any.ts` 长驻进程不会把上一局的
+ * 覆盖值带到下一局。
+ */
+let replayCodeShaOverride = ''
 function replayCodeSha(): string {
+  if (replayCodeShaOverride) return replayCodeShaOverride
   if (replayCodeShaMemo === null) {
     try {
       replayCodeShaMemo = computeCodeHash()
@@ -2199,7 +2211,8 @@ function runOne(
             abortReason: openingAbortReason,
             phase: openingPhase,
           },
-          /** rollout 侧 TS 代码身份（D4；converter 用它判定「重建端代码是否同源」）。 */
+          /** rollout 侧 TS 代码身份（D4；converter 用它判定「重建端代码是否同源」）。
+           * 有 `--code-sha` 时逐字符等于该值（launcher 同一份树现算），否则本进程现算。 */
           codeSha: replayCodeSha(),
           initTick,
         },
@@ -2357,7 +2370,13 @@ export function shardNpyEntries(
     for (let j = 0; j < maskDim; j++) mask[i * maskDim + j] = d.mask[i * maskDim + j]
   }
   for (let i = 0; i <= N; i++) {
-    metrics.set(d.metrics[i], i * METRICS_DIM)
+    // ★ 2026-11-17（payload 瘦身 B，docs/nn/remote-transport.md §154 ⑤）：metrics 填成
+    //   **列主序**（元素 (i,j) 在 `i + j*rows`），随 `npyBytes(..., 'F')` 落盘。
+    //   90 列计数器在列方向几乎不变、行方向隔了 360 B ⇒ 行主序让 deflate 只能拿 13×，
+    //   列主序拿 20×（gz6 实测 19,032 → 14,403 B）。numpy 按头里的 `fortran_order` 还原
+    //   成同一逻辑数组（shape/dtype 不变），**读侧零改动**。
+    const row = d.metrics[i]
+    for (let j = 0; j < METRICS_DIM; j++) metrics[j * (N + 1) + i] = row[j]
   }
   const out = [
     ...(obs && scalars && extra
@@ -2374,7 +2393,8 @@ export function shardNpyEntries(
     { name: 'value.npy', data: npyBytes(value, [N], 'f4') },
     // ★ 2026-10-26：`'f8'` → `'f4'`（payload 瘦身 A）。79 列全是整型计数器，f4 精确；
     //   读侧 `np.asarray(float64)` 一进来就升回 f8 ⇒ 公式引擎与旧语料逐位等价。
-    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4') },
+    // ★ 2026-11-17：列主序 + `fortran_order: True`（payload 瘦身 B，见上方填值处的注释）。
+    { name: 'metrics.npy', data: npyBytes(metrics, [N + 1, METRICS_DIM], 'f4', 'F') },
     { name: 'done.npy', data: npyBytes(done, [N], 'u1') },
     { name: 'mask.npy', data: npyBytes(mask, [N, maskDim], 'u1') },
     // Hybrid opening：仅开关开启时落盘，缺席 = 老 payload 逐字节不变。
@@ -2511,6 +2531,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   // P1（plan/replay-corpus.plan.md）：语料运输格式。full = 旧 11 npy 逐字节不变；
   // replay = 额外落 replay.json + replay_meta.json（wire 瘦身在 P2）。
   let corpusFmt: 'full' | 'replay' = 'full'
+  // 2026-11-17（docs/nn/remote-transport.md §154）：launcher 透传的 TS 代码身份。
+  // 缺席 = 本进程现算 `computeCodeHash()`（旧行为，直跑 CLI 与节点腿逐字节不变）。
+  let codeShaArg = ''
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -2545,7 +2568,15 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--init-snapshot') initSnapshotPath = args[++i]
     else if (args[i] === '--decision-events') decisionEvents = true
     else if (args[i] === '--decision-k') decisionK = parseInt(args[++i], 10)
+    else if (args[i] === '--code-sha') codeShaArg = args[++i]
   }
+  // 格式错 = 响亮拒：半截值一旦写进 replay_meta 就是一条假身份，比缺字段更糟。
+  if (codeShaArg && !/^[0-9a-f]{16,64}$/.test(codeShaArg)) {
+    throw new Error(
+      `[export-rl-rollout] --code-sha 只收 16–64 位小写 hex（收到 ${JSON.stringify(codeShaArg)}）`,
+    )
+  }
+  replayCodeShaOverride = codeShaArg
   if (!Number.isInteger(decisionK) || decisionK < 1) {
     throw new Error(`[export-rl-rollout] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
   }

@@ -61,6 +61,30 @@ def test_no_overrides_no_flags() -> None:
     assert "--player_level" not in cmd
 
 
+def test_replay_corpus_passes_local_code_sha() -> None:
+    """2026-11-17（docs/nn/remote-transport.md §154）：replay 语料透传本机 codeHash。
+
+    导出器拿到就不必自己遍历 180 个文件（实测 13.5 ms/进程，成本全在 syscall）。
+    只有**本机腿**透传：远端跑的树是 job 里解出来的 ts_code.zip，拿 hub 的 hash
+    当它的身份就是撒谎；而 node_side 一律 full（没有 replay_meta），两条纪律同一条分支。
+    """
+    from worker.cmd import local_code_sha
+
+    cmd = _cmd(corpus_fmt="replay")
+    assert cmd.count("--code-sha") == 1
+    got = cmd[cmd.index("--code-sha") + 1]
+    assert got == local_code_sha()
+    assert len(got) == 64 and set(got) <= set("0123456789abcdef")
+
+    node = build_rollout_cmd(
+        "bun", _args(corpus_fmt="replay"),
+        weights="w.json", out_dir="w0", stage=2000, seed=7,
+        wver="abc", node_label="iter", node_side=True,
+    )
+    # 集合判据（非文本断言，口径 C）：本机腿才带 `--code-sha`；`node_side` 恒 full ⇒ 两个 flag 都不该出现。
+    assert {"--code-sha", "--corpus-fmt"}.isdisjoint(node)
+
+
 def test_teacher_argmax_only_when_requested() -> None:
     """greedy 第二遍才追加 `--teacher-argmax`；普通采集逐字节不变。"""
     assert _cmd().count("--teacher-argmax") == 0

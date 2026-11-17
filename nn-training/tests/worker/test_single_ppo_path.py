@@ -72,11 +72,13 @@ def test_argparser_has_no_ppo_flag_nor_attribute() -> None:
 
     ap = build_argparser("per-tick", {})
     opts = _option_strings(ap)
-    assert {"--ppo-loader"} <= set(opts), "P3 的装载器开关应存在（默认 eager）"
+    assert {"--ppo-loader"} <= set(opts), "P3 的装载器开关应存在（2026-11-17 起默认 lazy）"
     assert not [s for s in opts if "ppo" in s.lower() and s != "--ppo-loader"]
     ns = ap.parse_args([])
     assert not hasattr(ns, "ppo")
-    assert ns.ppo_loader == "eager"
+    # P3 收尾（2026-11-17）：缺省翻成 lazy（DECISIONS §2026-11-17-goalnn-ppo-lazy-default）；
+    # 这里只钉「缺省是什么」，`--ppo-loader eager` 的回滚档由 test_ppo_lazy_loader 钉。
+    assert ns.ppo_loader == "lazy"
     # 反向：`--ppo remote` 现在必须是**未识别参数**（响亮失败，不是静默吃下）
     with pytest.raises(SystemExit):
         ap.parse_args(["--ppo", "remote"])

@@ -1201,7 +1201,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     # 为什么进课程而不是只留 CLI：run_rl 是「课程单一事实来源，无 CLI 逐参覆盖」，
     # 四档验证课必须能各自声明这两个开关，否则就得靠 BCITY_RL_CONFIG 分叉。
     corpus_fmt: Literal["full", "replay"] = "replay"
-    ppo_loader: Literal["eager", "lazy"] = "eager"
+    # 2026-11-17（P3 收尾）：缺省 lazy（与 `worker/cli.py --ppo-loader` 同值）。
+    # 验证臂必须**显式写**（verify-fe2/re = eager），否则五档对照全变成 lazy、归因失效。
+    ppo_loader: Literal["eager", "lazy"] = "lazy"
 
     # ---- 课程结束门（可选；缺席 = 关闭，老课程逐字节不变）----
     gates: GatesSpec | None = None

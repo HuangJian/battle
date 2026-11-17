@@ -10,11 +10,11 @@
  *   version 0x01 0x00            (2 bytes)
  *   hdr_len uint16 LE            (2 bytes)
  *   header  dict repr + spaces   (64-byte aligned total prefix)
- *   raw     C-order bytes
+ *   raw     C-order bytes（缺省；`order: 'F'` 时是列主序，头里写 `fortran_order: True`）
  *
- * We use C-order (fortran_order: False) — the plan's "fortran 序" referred to
- * the deterministic layout, which C-order already guarantees for our fixed
- * shapes. numpy.load does not require fortran order.
+ * 缺省 C-order（fortran_order: False）—— 确定性布局；`order: 'F'` 是**压缩友好**的变体：
+ * 列方向连续的同一列数据在 deflate 里压缩率明显更高（metrics.npy 实测 gz6 −24%，
+ * 见 docs/nn/remote-transport.md §154 ⑤）。numpy 两种都能读，读侧无需分叉。
  */
 
 import { closeSync, mkdirSync, openSync, writeFileSync, writeSync } from 'fs'
@@ -23,6 +23,9 @@ import { OBS_CHANNELS, BOARD, SCALAR_DIM, SCHEMA_FINGERPRINT } from './obs-encod
 import { POLICY_EXTRA_DIM } from './policy-extra'
 
 export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
+
+/** 数据布局：`C` = 行主序（缺省，与历史字节逐字节相同）；`F` = 列主序（压缩友好）。 */
+export type NpyOrder = 'C' | 'F'
 
 const DESCR: Record<NpyDtype, string> = {
   u1: '<u1',
@@ -41,12 +44,12 @@ const DESCR: Record<NpyDtype, string> = {
  * `.npy` 头（magic + version + hlen + 64 字节对齐的 dict）。`npyBytes` 与
  * `writeNpyFile` 共用这一份 —— 两条路径落盘的字节必须完全相同。
  */
-export function npyHeader(shape: number[], dtype: NpyDtype): Buffer {
+export function npyHeader(shape: number[], dtype: NpyDtype, order: NpyOrder = 'C'): Buffer {
   // A 1-D shape like [N] must serialize as "(N,)" — Python parses "(N)" as a
   // bare integer, not a tuple, and numpy.load rejects it. Multi-dim is fine
   // either way, so always add the trailing comma for the single-dim case.
   const shapeStr = shape.length === 1 ? `(${shape[0]},)` : `(${shape.join(', ')})`
-  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': False, 'shape': ${shapeStr}, }`
+  const header = `{'descr': '${DESCR[dtype]}', 'fortran_order': ${order === 'F' ? 'True' : 'False'}, 'shape': ${shapeStr}, }`
   const headerBytes = Buffer.from(header, 'latin1')
   // Data offset = 6 (magic) + 2 (version) + 2 (len) + len(header) + pad
   // must be a multiple of 64 (numpy alignment).
@@ -65,10 +68,18 @@ export function npyHeader(shape: number[], dtype: NpyDtype): Buffer {
 
 /**
  * Serialize one array to raw `.npy` bytes (in memory).
+ *
+ * `order: 'F'` 要求 `view` 已经是**列主序**排列（元素 (i,j) 在 `i + j*rows`），本函数
+ * 只负责照实写头——转置由调用方做（它本来就在填缓冲）。
  */
-export function npyBytes(view: ArrayBufferView, shape: number[], dtype: NpyDtype): Buffer {
+export function npyBytes(
+  view: ArrayBufferView,
+  shape: number[],
+  dtype: NpyDtype,
+  order: NpyOrder = 'C',
+): Buffer {
   const dataBuf = Buffer.from(view.buffer, view.byteOffset, view.byteLength)
-  return Buffer.concat([npyHeader(shape, dtype), dataBuf])
+  return Buffer.concat([npyHeader(shape, dtype, order), dataBuf])
 }
 
 /**

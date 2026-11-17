@@ -21,6 +21,7 @@ import {
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { unpackContainer } from '../../tools/sim/pack-container'
+import { METRICS_COLUMN_NAMES } from '../../tools/sim/export-rl-rollout'
 
 const WEIGHTS = 'nn-training/weights/g4-mobility/g4-mobility.it380.20261114-194719.json'
 const LEVEL = 'nn-training/levels/classic35-safe-base.jsonc'
@@ -131,6 +132,74 @@ describe('export-rl-rollout: --corpus-fmt=replay', () => {
       expect(existsSync(join(out, name))).toBe(true)
       expect(sameBytes(join(fullShard, name), join(out, name))).toBe(true)
     }
+  }, 60_000)
+
+  it('metrics.npy 列主序（fortran_order=True）且逻辑值仍按 [行, 列] 取', () => {
+    // payload 瘦身 B（docs/nn/remote-transport.md §154 ⑤）：列主序只为压缩率，
+    // **逻辑数组不变**。独立解码（不 import 写端）：头里 fortran_order=True、
+    // 元素 (i,j) 在 `i + j*rows`，最后一列与 manifest.metricValues 逐列对得上。
+    const buf = readFileSync(join(replayShard, 'metrics.npy'))
+    const hlen = buf.readUInt16LE(8)
+    const header = buf.toString('latin1', 10, 10 + hlen)
+    const meta = JSON.parse(readFileSync(join(replayShard, 'replay_meta.json'), 'utf8')) as {
+      nSamples: number
+    }
+    expect(header).toContain("'fortran_order': True")
+    const shape = (/'shape': \(([^)]*)\)/.exec(header)?.[1] ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map(Number)
+    expect(shape).toEqual([meta.nSamples + 1, METRICS_COLUMN_NAMES.length])
+    const rows = shape[0]!
+    const at = (i: number, j: number): number => buf.readFloatLE(10 + hlen + 4 * (i + j * rows))
+    const manifest = JSON.parse(readFileSync(join(replayShard, 'manifest.json'), 'utf8')) as {
+      metricValues: Record<string, number>
+    }
+    const cols = Object.entries(manifest.metricValues)
+    expect(cols.length).toBe(METRICS_COLUMN_NAMES.length)
+    for (const [name, v] of cols) {
+      const j = METRICS_COLUMN_NAMES.indexOf(name)
+      expect(j).toBeGreaterThanOrEqual(0)
+      // f4 存储 vs manifest 的 JS number（终局行 = metrics 最后一行）。
+      expect(Math.abs(at(rows - 1, j) - v)).toBeLessThan(1e-6)
+    }
+  })
+
+  it('--code-sha 透传：codeSha 逐字符等于 launcher 给的值（导出器跳过整树遍历）', () => {
+    const out = join(root, 'codesha')
+    const sha = 'ab'.repeat(32)
+    runRollout(out, ['--corpus-fmt', 'replay', '--code-sha', sha])
+    const meta = JSON.parse(readFileSync(join(out, SHARD, 'replay_meta.json'), 'utf8')) as {
+      codeSha: string
+    }
+    expect(meta.codeSha).toBe(sha)
+  }, 60_000)
+
+  it('--code-sha 非法 ⇒ 响亮失败（绝不写半截身份）', () => {
+    const p = Bun.spawnSync(
+      [
+        'bun',
+        'tools/sim/export-rl-rollout.ts',
+        '--out',
+        join(root, 'bad-sha'),
+        '--stages',
+        '0',
+        '--seeds',
+        '1',
+        '--weights',
+        WEIGHTS,
+        '--lives-override',
+        '3',
+        '--corpus-fmt',
+        'replay',
+        '--code-sha',
+        'NOT-HEX',
+      ],
+      { cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' },
+    )
+    expect(p.exitCode).not.toBe(0)
+    expect(p.stderr?.toString() ?? '').toContain('--code-sha')
   }, 60_000)
 
   it('--pack-memory：replay 走内存容器，不创建 shard 目录（零落盘 dispatch 腿）', () => {

@@ -88,6 +88,25 @@ def _lazy(root: Path, **kwargs):
         return load_lazy_corpus(str(root), **kwargs)
 
 
+def test_loader_default_is_lazy() -> None:
+    """P3 收尾（2026-11-17）：生产缺省 = lazy，回滚靠**显式** eager。
+
+    三处缺省必须一致（`worker/cli.py` 的 argparse ← rl-config / `ppo/engine.py` 的独立 CLI /
+    课程的文档值）；否则「课程写 lazy、实际跑 eager」这类错账只有日志能看出来。
+    """
+    from worker.cli import build_argparser
+
+    p = build_argparser("per-tick", {})
+    assert p.parse_args([]).ppo_loader == "lazy"
+    # rl-config 里显式写 eager 仍然赢（回滚档，不许被缺省盖掉）。
+    p2 = build_argparser("per-tick", {"ppo_loader": "eager"})
+    assert p2.parse_args([]).ppo_loader == "eager"
+
+    from biz.course_spec import CourseConfig
+
+    assert CourseConfig.model_fields["ppo_loader"].default == "lazy"
+
+
 def _chunk_count(chunks) -> int:
     sizes = getattr(chunks, "sizes", None)
     return len(sizes) if sizes is not None else len(chunks)

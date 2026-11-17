@@ -998,9 +998,10 @@ def main():
     ap.add_argument(
         "--ppo-loader",
         choices=("eager", "lazy"),
-        default="eager",
-        help="PPO 语料装载器：eager=整份 concatenate（旧行为，默认）；"
-        "lazy=obs 逐 shard mmap + 逐 minibatch 上卡（P3，小内存/小 VRAM）",
+        # P3 收尾（2026-11-17）：与 `worker/cli.py` 同一缺省 —— lazy。回滚 = eager。
+        default="lazy",
+        help="PPO 语料装载器：lazy=obs 逐 shard mmap + 逐 minibatch 上卡（默认）；"
+        "eager=整份 concatenate（回滚档，峰值 ≈ 3× obs）",
     )
     ap.add_argument(
         "--target-kl",
