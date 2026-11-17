@@ -62,7 +62,7 @@ from pathlib import Path
 # ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
 # 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 import remote.delta_files as delta_files
-from common import net_http
+from common import net_http, runtime
 from common.cli import house_parser, run_main
 from common.logutil import tag_logger
 from common.protocol import (
@@ -243,6 +243,8 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         now_fn: Callable[[], float] | None = None,
         log: Callable[[str], None] = _log_default,
     ) -> None:
+        #: 后台补传线程归这里（`offline-deliver-drain-loop`）。
+        self._rt = runtime.Runtime(scope="offline-deliver")
         self.base_url = str(base_url or "").rstrip("/")
         self.token = str(token or "")
         #: run_id 同时是 hub 侧目录名：**在本端就先校验**（错在这里 = 一行明确日志，
@@ -420,10 +422,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         """
         if not self.background or not self.enabled or self._thread is not None:
             return
-        self._thread = threading.Thread(
-            target=self._drain_loop, name="offline-deliver", daemon=True
-        )
-        self._thread.start()
+        self._thread = self._rt.thread(self._drain_loop, name="drain-loop", daemon=True)
 
     def submit_round(self, it: int) -> None:
         """一轮落盘后请求补传（**非阻塞**）：后台模式下只置位，立刻返回给训练循环。"""

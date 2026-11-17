@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from common import protocol as _protocol
+from common import runtime
 from common.platform_utils import kill_process_tree, popen_own_group
 from common.protocol import SERVE_ANY_SCRIPT as _SERVE_ANY_SCRIPT
 from common.protocol import serve_mode_for as _serve_mode_for
@@ -192,6 +193,8 @@ class _Worker:
 
     def __init__(self, proc: subprocess.Popen) -> None:
         self.proc = proc
+        #: 读线程归这里（`serve-worker-<pid>-read`）：同一池里多条 worker，pid 才是区分位。
+        self._rt = runtime.Runtime(scope=f"serve-worker-{proc.pid}")
         self.busy = False
         self.dead = False
         #: 就绪或**已退出**都会置位 —— 等待方靠它立刻醒，不会为一个死进程等满就绪上限。
@@ -200,8 +203,7 @@ class _Worker:
         self.result: tuple[bool, str] | None = None  # (ok, msg)
         self._lock = threading.Lock()
         self._lines: list[str] = []
-        self._thread = threading.Thread(target=self._read, name="serve-reader", daemon=True)
-        self._thread.start()
+        self._thread = self._rt.thread(self._read, name="read", daemon=True)
 
     def _read(self) -> None:
         """读线程：分离「协议标记」与「对局日志」，前者唤醒等待者，后者留给 submit 落盘。"""

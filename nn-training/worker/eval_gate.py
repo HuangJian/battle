@@ -28,6 +28,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
+from common import runtime
 from worker.eval_arbiter import eval_arbiter
 
 
@@ -49,6 +50,10 @@ class EvalGate:
     """rollout 冻结计数 + 整轮后台执行（语义见模块 docstring）。"""
 
     def __init__(self) -> None:
+        #: 每轮 eval 的执行线程归这里（`eval-gate-<序号>`）：并发多轮时同名线程在转储里
+        #: 分不清是哪一轮，序号至少能对上提交顺序。
+        self._rt = runtime.Runtime(scope="eval-gate")
+        self._seq = 0
         self._cond = threading.Condition()
         self._running = 0
         self._rollouts = 0
@@ -95,13 +100,11 @@ class EvalGate:
 
     def submit(self, job: Callable[[], object], *, name: str = "") -> threading.Thread:
         """起一条 daemon 线程执行整轮 `job()`；返回的线程 join 到整轮真正收工为止。"""
-        thread = threading.Thread(
-            target=self._serve, args=(job,), daemon=True, name=name or "eval-gate"
-        )
         with self._cond:
             self._running += 1
-        thread.start()
-        return thread
+            self._seq += 1
+            seq = self._seq
+        return self._rt.thread(self._serve, job, daemon=True, name=f"{name or 'round'}-{seq}")
 
     def status(self) -> dict:
         """读面（日志/诊断）：`queued` 恒 0（无排队概念），`running`/`active` = 在跑轮数，

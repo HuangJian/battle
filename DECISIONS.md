@@ -6953,3 +6953,17 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `False` = 只登记不开跑，何时开跑由当事人定（所有者仍负责名字 / 登记 / 收尾）。**不**放宽
   `test_two_eval_rounds_share_dispatch_round_robin` 的 A,B,A,B —— 那是用户口径 1 的验收判据。
   迁移下一个类之前先读它的启动顺序有没有别处依赖。全文 → `docs/nn/engineering.md` §122。
+
+- **2026-11-17（§122 第三批：十一个类 + 两个派发器的 `start` 合成一份）**：收编 `hub/offline_push`
+  （`-tick` / `-pump-*`）· `remote/push_dispatch`（`-tick`）· `deliver_outbox`（`-loop`）· `job_round._StartBeacon`
+  （`-run`）· `offline_deliver`（`-drain-loop`）· `offline_push._Child`（`-tee-*` / `-wait-*`）· `payload_proc`
+  （`-out`）· `payload_worker._Engine`（`-fill`）· `result_upload`（`-run`）· `trainer/loop_eval`（`-it<轮>`）·
+  `worker/eval_gate`（`-<name|round>-<序号>`）· `worker/serve_pool._Worker`（`serve-worker-<pid>-read`）。三条判据：
+  ① **mixin 没有 `__init__` 就不许造类属性 Runtime**（`TrainingEval._eval_rt` 走实例属性懒建 —— 类属性 = 所有课程
+  共享一条 Runtime = 隐藏单例，正是 §122 拒绝的形态）；② **调用方给的 `name=` 是语义名不是唯一名**（`EvalGate`
+  并发多轮时加序号，否则转储里三条约同名线程读不出是哪一轮）；③ **两个派发器的 `start()` 逐字节相同** ⇒ 按重用
+  账本抽共用（`remote.push_dispatch.start_tick_thread()` + `TickLoopHost`），既让 `exact_groups` 回到 14，也把
+  `hub/offline_push.py` 从 1046 行压回 **997**（1000 行 LOC 预算）。顺带两条基线往小改：G15 地板 40 → 3（那条只防
+  扫描入口写歪，扫描器正确性由同文件的合成源码用例盯），`any_baseline` 的 `push_dispatch` 11 → 10（`Callable[[], Any]`
+  收成 `Callable[..., dict]`）。存量 40 → **27 处 / 21 文件**（`rt.thread(...)` 24 处）。读数 6194 收下 / 2 skipped ·
+  mypy 958 · ruff 全绿 · 全量 ×6（5 绿，第 4 次一条墙钟上界的计时 flake，单跑全绿）。全文 → `docs/nn/engineering.md` §123。

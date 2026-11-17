@@ -50,6 +50,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from remote.child_proc import join_all, pump_lines, reap_child, repo_root, spawn_module
 from remote.prefetch import (
     PREFETCH_BUDGET_BYTES_DEFAULT,
@@ -97,6 +98,8 @@ class PayloadProcess:
         worker_module: str = PAYLOAD_WORKER_MODULE,
         spawn: Callable[[list[str]], subprocess.Popen] | None = None,
     ) -> None:
+        #: 读线程归这里（`payload-proc-out`）：下行腿独立成进程后，它是父侧唯一的长驻线程。
+        self._rt = runtime.Runtime(scope="payload-proc")
         self._work_dir = str(work_dir)
         self._budget_bytes = int(budget_bytes)
         self._staged_max = int(staged_max)
@@ -147,8 +150,7 @@ class PayloadProcess:
             return
         proc = self._proc
         self.pid = proc.pid if proc is not None else None
-        self._reader = threading.Thread(target=self._read_loop, name="payload-out", daemon=True)
-        self._reader.start()
+        self._reader = self._rt.thread(self._read_loop, name="out", daemon=True)
         # `init` 既是建 store 也是握手（`boot ok` 只是一行给人读的日志）：应答到了 = 依赖链
         # 真能 import + `prefetch/` 的孤儿清扫跑完了。
         task = (

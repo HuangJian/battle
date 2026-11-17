@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.logutil import tag_logger
 from common.progress_text import progress_text, should_log_progress
 from common.protocol import (
@@ -69,7 +70,7 @@ from hub.offline_push_pack import build_task_zip as _build_task_zip
 from hub.offline_push_workers import OfflinePushWorkers
 from hub.task_pack import pack_index_meta
 from remote import offline_push_client as client
-from remote.push_dispatch import run_tick_loop
+from remote.push_dispatch import TickLoopHost
 
 #: 调度拍（秒）：与 GPU 派发器同一量级；hub 的派发延迟 = 一拍 + 一次 zip 组装。
 OFFLINE_PUSH_POLL_SEC = 10.0
@@ -118,7 +119,7 @@ class _PumpState:
     shown: tuple[str, int, int, int] | None = None
 
 
-class OfflinePushDispatcher:
+class OfflinePushDispatcher(TickLoopHost):
     """hub 侧的离线 push 派发器（调度拍 + 每单一条 pump 线程）。
 
     `assignments` / `port` 决定在途账本落点（`<root>/offline-push.<port>.json`）；`root`
@@ -141,6 +142,9 @@ class OfflinePushDispatcher:
         log: Any = _log_default,
         client_mod: Any = client,
     ) -> None:
+        #: tick 线程与每课 pump 的属性（`hub-offline-push-tick` / `-pump-<course>`）。
+        #: hub 侧派发器与 worker 侧同构，线程名也同一套（转储里一眼分清是谁在推）。
+        self._rt = runtime.Runtime(scope="hub-offline-push")
         self.hub = hub
         self.workers = workers
         self.token = str(token or "")
@@ -176,23 +180,6 @@ class OfflinePushDispatcher:
         except Exception:
             root = None
         return Path(root) if root is not None else Path.cwd()
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=run_tick_loop,
-            kwargs={
-                "stop": self._stop,
-                "wake": self._wake,
-                "poll_sec": self.poll_sec,
-                "tick": self.tick,
-                "log": self._log,
-            },
-            name="hub-offline-push",
-            daemon=True,
-        )
-        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -534,13 +521,16 @@ class OfflinePushDispatcher:
             if old is not None and old.thread is not None and old.thread.is_alive():
                 return
             self._pumps[course] = st
-        st.thread = threading.Thread(
-            target=self._pump,
-            args=(course, dict(rec), url, key, st),
-            name=f"hub-offline-push-{course[:12]}",
+        st.thread = self._rt.thread(
+            self._pump,
+            course,
+            dict(rec),
+            url,
+            key,
+            st,
+            name=f"pump-{course[:12]}",
             daemon=True,
         )
-        st.thread.start()
 
     def _pump(self, course: str, rec: dict, url: str, key: str, st: _PumpState) -> None:
         """一条 assignment 的整条腿（提议 → **云机受理** → 接管 → 逐轮拉取 → ack → 收尾）。"""

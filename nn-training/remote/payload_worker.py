@@ -43,6 +43,8 @@ import sys
 import threading
 from typing import Any
 
+from common import runtime
+
 #: 控制行前缀：与父侧**同源**（L0 常量，两个进程互不 import）。
 from common.logutil import log_line
 from remote.prefetch import PREFETCH_LINE_PREFIX, PrefetchStore
@@ -73,6 +75,8 @@ class _Engine:
     """命令 → `PrefetchStore` / 填充线程的映射（**全部状态住在这里**，模块级零可变状态）。"""
 
     def __init__(self) -> None:
+        #: 填充器线程归这里（`payload-worker-fill`）：每轮重起一条，旧的先停再换。
+        self._rt = runtime.Runtime(scope="payload-worker")
         self.store: PrefetchStore | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -103,13 +107,7 @@ class _Engine:
             # 否则两个填充器会同时 peek 同一份候选 ⇒ 白下一次（幂等，但纯浪费）。
             self._stopf(int(STOP_JOIN_SEC))
         self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=_fill_once,
-            args=(self, cmd, self._stop),
-            daemon=True,
-            name="payload-fill",
-        )
-        self._thread.start()
+        self._thread = self._rt.thread(_fill_once, self, cmd, self._stop, name="fill", daemon=True)
         return {"ok": True}
 
     def stopfill(self, _cmd: dict[str, Any]) -> dict[str, Any]:

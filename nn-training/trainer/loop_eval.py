@@ -51,6 +51,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import common.runtime
 from common.log import log
 from trainer.eval_m1 import read_eval_summary
 
@@ -93,6 +94,9 @@ class TrainingEval:
     _eval_join_sec: float = 0.0
     #: `block=False` 收官 drain 的后台线程（serve 用；观测句柄，daemon 随进程退出）。
     _eval_drain_thread: threading.Thread | None = None
+    #: 收尾 drain 线程的属性（`eval-drain-*`）。mixin 没有 `__init__`，所以**首次使用时建**
+    #: （实例属性，非类属性 —— 类属性会被所有课程共享，等于一个隐藏单例）。
+    _eval_rt: common.runtime.Runtime | None = None
     #: 重启补账（F1）扫出的剩余旧缺口（升序 `(m, archive_path)`）：每轮延迟派发补一个。
     #: None = 还没扫（每进程一次）；[] = 扫过且无缺口。
     _eval_backfill: list[tuple[int, str]] | None = None
@@ -549,9 +553,11 @@ class TrainingEval:
             if block:
                 _drain_rounds()
             else:
-                self._eval_drain_thread = threading.Thread(
-                    target=_drain_rounds, daemon=True, name="eval-drain"
+                if self._eval_rt is None:
+                    self._eval_rt = common.runtime.Runtime(scope="eval-drain")
+                # 名字带起始轮号：收尾可能一次补很多轮（`cand` 升序），转储里要看出从哪轮起。
+                self._eval_drain_thread = self._eval_rt.thread(
+                    _drain_rounds, daemon=True, name=f"it{cand[0]}"
                 )
-                self._eval_drain_thread.start()
         except Exception as e:
             log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")

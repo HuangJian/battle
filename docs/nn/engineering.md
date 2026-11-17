@@ -25,6 +25,55 @@
 
 ---
 
+## §123 裸线程收编第三批：十一个「自己就知道自己是谁」的类（2026-11-17）
+
+第三批按 §122 的迁移顺序走完第二批（类持有生命周期的）—— 这一批都是**手上已经有 `Runtime` 或
+天然该有一个**的地方，所以没有一处需要在模块里造隐藏所有者。**27 处 / 21 文件** 仍在账上
+（G18 从 40/30 调下来），剩下的多为模块级扇出（`abort_active_requests`、`_cancel_remote_targets`、
+`rescan_nodes`、`batch_runner._spawn_thread`、notebook 腿），那批得先把 runtime 从调用方递下来。
+
+**线程名表（新增部分；一律 `<scope>-<name>`）**
+
+| 所有者 | scope | 线程名 |
+|---|---|---|
+| `hub.offline_push.OfflinePushDispatcher` | `hub-offline-push` | `-tick` / `-pump-<course[:12]>` |
+| `remote.push_dispatch.PushDispatcher` | `hub-push` | `-tick`（不变，只是改经 `TickLoopHost`） |
+| `remote.deliver_outbox.LocalOutboxDeliverer` | `deliver-outbox` | `-loop` |
+| `remote.job_round._StartBeacon` | `ppo-start` | `-run` |
+| `remote.offline_deliver.OfflineDeliverer` | `offline-deliver` | `-drain-loop` |
+| `remote.offline_push._Child` | `push-child` | `-tee-<task>` / `-wait-<task>` |
+| `remote.payload_proc.PayloadProcess` | `payload-proc` | `-out` |
+| `remote.payload_worker._Engine` | `payload-worker` | `-fill` |
+| `remote.result_upload.ResultUploader` | `result-upload` | `-run` |
+| `trainer.loop_eval.TrainingEval` | `eval-drain`（懒建） | `-it<起始轮号>` |
+| `worker.eval_gate.EvalGate` | `eval-gate` | `-<name|round>-<序号>` |
+| `worker.serve_pool._Worker` | `serve-worker-<pid>` | `-read` |
+
+**这一批逼出来的三件事**
+
+* **`TrainingEval` 是 mixin，没有 `__init__`** ⇒ `_eval_rt` 用**实例**属性懒建（`None` 到首次用才
+  建）。写成类属性 = 所有课程共享一条 Runtime，等于把「无主线程」换成「隐藏单例」，正是 §122
+  拒绝的形态。线程名带起始轮号（收尾可能一次补很多轮，转储里要看出从哪轮起）。
+* **`EvalGate.submit(name=…)` 的调用方给的名字是语义名，不是唯一名**：并发多轮时三条约同名线程在
+  转储里读不出是哪一轮，所以名字变成 `<name|round>-<序号>`，序号在既有 `_cond` 里加。
+* **`hub/offline_push.py` 正好卡在 1000 行 LOC 预算上（997）**：第一批迁移的 `start()` 与
+  `remote/push_dispatch` **逐字节相同**，重放账本当场顶红（`exact_groups` 15 > 14）。按账本的要求抽共用：
+  `remote.push_dispatch.start_tick_thread()`（起线程的唯一实现）+ `TickLoopHost`（`start()` 的唯一实现），
+  两个派发器都继承它。净效果：`hub/offline_push.py` 回到 **997** 行、`exact_groups` 回到 14。
+
+**顺带纠正的两条基线（都只往小改）**
+
+* **G15 地板 40 → 3**（`tests/test_thread_names.py`）：那条 `total >= 40` 只防「扫描入口写歪 ⇒ 一处都
+  扫不到」。收编推进到只剩所有者本人（`common/runtime.py`）与引导期单文件（`remote/*_boot.py`）时，
+  「至少 40 处」必然误报。扫描器本身对不对由同文件下一个**合成源码**用例盯（两种拼写 / `Executor`
+  不算 / 无名算），那条不依赖存量规模。
+* **`any_baseline.json` 的 `remote/push_dispatch.py` 11 → 10**：新增的 `tick: Callable[[], Any]`
+  收成 `Callable[..., dict]`（两家 `tick` 都返 dict），是净减不是放宽。
+
+**读数**：27 处 / 21 文件（G18 40→27）· 全量 **6194 收下 / 2 skipped** · mypy 958 · ruff 全绿 ·
+全量 ×6（5 绿；第 4 次 `tests/remote/test_rollout_scratch.py::…a_step_exceeds_its_ceiling` 单条红：
+`2.46s < 1.5s` 的墙钟上界，满载下的计时 flake，单跑 37 条全绿，与本刀无交集 —— 记账不掩盖）。
+
 ## §122 裸线程的所有者：`Runtime.thread()` + G18 存量闸（2026-11-17）
 
 **现场**（`python.refactor.md` §P1-6 的另一半 / §10-B6 的收尾）：池那一半 2026-11-17 结了（§119，

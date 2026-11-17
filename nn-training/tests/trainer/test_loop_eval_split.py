@@ -98,6 +98,9 @@ TOP_LEVEL_ALLOWED = {
     "typing",
     "trainer.eval_m1",
     "common.log",
+    # 收尾 drain 线程归 `Runtime` 名下（§P1-6 第三批）：`common.runtime` 是 L0、stdlib-only
+    # 的并发所有者；定时器/重依赖仍留在调用方或延迟 import。
+    "common.runtime",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。

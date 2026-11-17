@@ -65,7 +65,10 @@ def test_every_thread_has_a_name() -> None:
             total += 1
             if not has_name:
                 offenders.append(f"  {rel}:{line}")
-    assert total >= 40, f"只扫到 {total} 处 `Thread(`，扫描入口可能坏了"
+    #: 地板只防「扫描入口坏了」（路径/口径写歪 ⇒ 一处都扫不到）：§P1-6 把就地构造收进
+    #: `Runtime` 之后，本面只剩所有者本人（`common/runtime.py`）与引导期单文件
+    #: （`remote/*_boot.py`）的几处。扫描器本身对不对由下一个用例的合成源码盯。
+    assert total >= 3, f"只扫到 {total} 处 `Thread(`，扫描入口可能坏了"
     assert not offenders, (
         "这些线程没有名字（线程转储里只显示 `Thread-N`，出事时认不出是谁）：\n"
         + "\n".join(offenders)

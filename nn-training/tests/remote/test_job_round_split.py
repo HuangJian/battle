@@ -92,6 +92,9 @@ ALIVE_TEXT = "polling hub"
 #: 放在这一轮里会让 job 目录布局知识漏进 L4。
 ALLOWED_PROJECT_IMPORTS = {
     "common.protocol",
+    # `_StartBeacon` 的「已开跑」线程归 `Runtime` 名下（§P1-6 第三批）：`common.runtime` 是
+    # L0、stdlib-only 的并发所有者，与本模块的依赖面同层。
+    "common.runtime",
     # 异常现场的最后一段（`exc_tail`）与云机错误上报腿（2026-10-16，
     # plan/component-error-registry §4.3-S3b）：三个 except 分支各报一条**纯观测**错误
     # （失败即丢、不进任何派发判据），见 `remote/error_report.py`。

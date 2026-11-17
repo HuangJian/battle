@@ -551,7 +551,7 @@ def run_tick_loop(
     stop: threading.Event,
     wake: threading.Event,
     poll_sec: float,
-    tick: Callable[[], Any],
+    tick: Callable[..., dict],
     log: Callable[[str], None],
 ) -> None:
     """后台派发器的标准节拍（**唯一实现**：GPU 派发器与离线派发器共用）。
@@ -570,7 +570,59 @@ def run_tick_loop(
         wake.clear()
 
 
-class PushDispatcher:
+def start_tick_thread(
+    rt: runtime.Runtime,
+    *,
+    stop: threading.Event,
+    wake: threading.Event,
+    poll_sec: float,
+    tick: Callable[..., dict],
+    log: Callable[[str], None],
+) -> threading.Thread:
+    """起一条跑 `run_tick_loop` 的线程（**两家派发器共用**：名字恒为 `<scope>-tick`）。
+
+    GPU 派发器与离线派发器的「起线程」一字不差 —— 抄两份就是等着它们慢慢分叉
+    （一边 `daemon=True`、一边忘了传 `log`）。
+    """
+    return rt.thread(
+        run_tick_loop,
+        name="tick",
+        kwargs={"stop": stop, "wake": wake, "poll_sec": poll_sec, "tick": tick, "log": log},
+        daemon=True,
+    )
+
+
+class TickLoopHost:
+    """「一条 tick 线程」的宿主（GPU 派发器与离线派发器的 `start` **一字不差**）。
+
+    两份同样的 `start` 已经在重用账本里撞成对（2026-11-17，B6 第三批）：与其让它们各自
+    漂（一边忘 `daemon=True`、一边忘了登记），不如把那一份留在基类里。子类只需要提供
+    `_rt` / `_stop` / `_wake` / `poll_sec` / `tick` / `_log` 六个面（名字两边本来就一样）。
+    """
+
+    _rt: runtime.Runtime
+    _stop: threading.Event
+    _wake: threading.Event
+    _thread: threading.Thread | None
+    poll_sec: float
+    tick: Callable[..., dict]
+    _log: Callable[[str], None]
+
+    def start(self) -> None:
+        """起 tick 线程（幂等：已经在跑就什么都不做）。"""
+        if self._thread is not None:
+            return
+        self._thread = start_tick_thread(
+            self._rt,
+            stop=self._stop,
+            wake=self._wake,
+            poll_sec=self.poll_sec,
+            tick=self.tick,
+            log=self._log,
+        )
+
+
+class PushDispatcher(TickLoopHost):
     """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
         挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
     **每课程 1 主 + N 备份**（§2.9）：课程内的轮次有硬序（轮 N+1 的 init 权重就是轮 N
@@ -649,22 +701,6 @@ class PushDispatcher:
         self.slow_result = 0
 
     # ---- 生命周期 ----
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = self._rt.thread(
-            run_tick_loop,
-            name="tick",
-            kwargs={
-                "stop": self._stop,
-                "wake": self._wake,
-                "poll_sec": self.poll_sec,
-                "tick": self.tick,
-                "log": self._log,
-            },
-            daemon=True,
-        )
-
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()

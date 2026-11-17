@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import common.runtime
 import remote.course_cache as course_cache
 from common.protocol import (
     CLAIM_MODE_BACKUP,
@@ -338,10 +339,13 @@ class _StartBeacon:
     **日志**不是异常），所以「失败」只能靠本类的 `ok` 位判，不能靠异常。**绝不阻塞 PPO。**
     """
 
-    __slots__ = ("_fn", "_thread", "ms", "ok")
+    __slots__ = ("_fn", "_rt", "_thread", "ms", "ok")
 
     def __init__(self, fn: Callable[[], None]) -> None:
         self._fn = fn
+        #: 这条「已开跑」的旁证线程归这里（`ppo-start-run`）：它的毫秒数会进 A/B 读数，
+        #: 名字在转储里要能一眼认出来。
+        self._rt = common.runtime.Runtime(scope="ppo-start")
         self._thread: threading.Thread | None = None
         self.ms = 0.0
         self.ok = False
@@ -358,8 +362,7 @@ class _StartBeacon:
             finally:
                 self.ms = (time.time() - t0) * 1000.0
 
-        self._thread = threading.Thread(target=_run, daemon=True, name="ppo-start")
-        self._thread.start()
+        self._thread = self._rt.thread(_run, name="run", daemon=True)
 
     def settle(self, timeout: float = START_JOIN_SEC) -> bool:
         if self._thread is None:

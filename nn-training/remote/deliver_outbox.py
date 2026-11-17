@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import remote.delta_files as delta_files
+from common import runtime
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.logutil import tag_logger
 from common.protocol import OFFLINE_ARTIFACT_BODY_MAX, OFFLINE_PUSH_OUTBOX_WARN_BYTES
@@ -402,6 +403,8 @@ class LocalOutboxDeliverer:
         now: Callable[[], float] = time.time,
         log: Callable[[str], None] = _log_default,
     ) -> None:
+        #: 后台同步线程归这里（`deliver-outbox-loop`）：名字 / 登记 / 收尾 join 一处管。
+        self._rt = runtime.Runtime(scope="deliver-outbox")
         self.outbox = Path(outbox_dir)
         self.root = Path(artifacts_dir)
         self.run_id = str(run_id or "")
@@ -779,8 +782,7 @@ class LocalOutboxDeliverer:
         """后台模式起线程（同步模式 = 空操作，与 `OfflineDeliverer` 同义）。"""
         if not self.background or self._thread is not None:
             return
-        self._thread = threading.Thread(target=self._loop, name="deliver-outbox", daemon=True)
-        self._thread.start()
+        self._thread = self._rt.thread(self._loop, name="loop", daemon=True)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -796,6 +798,7 @@ class LocalOutboxDeliverer:
         if t is not None:
             t.join(timeout=max(0.0, float(timeout)))
             self._thread = None
+        self._rt.join_threads(max(0.0, float(timeout)))
         self._sync_once()
         left = self.pending()
         if left:

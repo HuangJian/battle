@@ -37,6 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.env_probe import probe_cloud_env
 from common.logutil import tag_logger
 from common.proc import POPEN_NO_WINDOW
@@ -90,6 +91,9 @@ class _Child:
     """当前训练子进程的句柄（一个任务一个；退出后保留 rc 供 `/state` 读）。"""
 
     def __init__(self) -> None:
+        #: 两条旁路线程（`push-child-tee-<id>` / `push-child-wait-<id>`）：一条把子进程的
+        #: 输出同时写日志文件与日志行，一条等它退出。
+        self._rt = runtime.Runtime(scope="push-child")
         self.proc: subprocess.Popen[bytes] | None = None
         self.task_id = ""
         self._lock = threading.Lock()
@@ -152,7 +156,7 @@ class _Child:
                     except OSError:
                         pass
 
-        threading.Thread(target=_tee, name=f"push-child-tee-{task_id}", daemon=True).start()
+        self._rt.thread(_tee, name=f"tee-{task_id}", daemon=True)
 
         def _wait() -> None:
             rc = int(proc.wait())
@@ -160,7 +164,7 @@ class _Child:
                 self.proc = None
             on_exit(rc)
 
-        threading.Thread(target=_wait, name=f"push-child-{task_id}", daemon=True).start()
+        self._rt.thread(_wait, name=f"wait-{task_id}", daemon=True)
 
     def request_stop(self, *, stop_file: Path, grace: float = CANCEL_GRACE_SEC) -> None:
         """写 stop 文件 → 有界等 → 还在就 terminate（产物在轮边界已是自洽的）。
