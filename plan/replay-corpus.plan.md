@@ -66,15 +66,20 @@
 | 形态 · 700 shard 全量 | 墙钟 | 换算 | 结果 |
 |---|---:|---|---|
 | 单进程顺序 · write（基线） | 38 s | 7.5 µs/tick · 74.8 µs/样本 | 700/700 |
-| 单进程顺序 · `--verify-only` | ~27 s | 5.4 µs/tick | 700/700 |
+| 单进程顺序 · `--verify-only` | 27–29 s | 5.4–5.7 µs/tick | 700/700 |
 | **池化 7 worker · `--verify-only`** | **8.5–8.8 s** | **1.7 µs/tick · 12.2 ms/shard** | **700/700**，worker 利用率 99.9% |
 | **池化 3 worker · write** | **15.5 s**（best-of-2；另一跑 31.0 s） | 3.1 µs/tick · 22 ms/shard | **700/700** |
 | **池化 7 worker · write** | **10.7–12.8 s**（2026-11-17 修复后 5 轮；另有一轮 115.8 s 为盘噪声） | 2.2 µs/tick | **700/700**（5 轮 3500/3500） |
+| **池化 8 worker · write** | **10.75–11.6 s**（8 轮；best 10.75） | 2.1 µs/tick | **700/700** |
+| **池化 11 worker · write** | **10.54–11.33 s**（2 轮；best 10.54） | 2.1 µs/tick | **700/700** |
+| **池化 11 worker · `--verify-only`** | **7.51–7.89 s**（6 轮；best 7.51） | 1.5 µs/tick · 10.7 ms/shard | **700/700**，利用率 99.9% |
 | 一次性静态 7×100 · write | 11.0 s | 2.2 µs/tick | 700/700（无 work-stealing） |
 
 - 池化 = 常驻 `--serve` worker（生产协议 `serve-loop.ts`：`__SERVE_READY__` / 每行 `["conv","--shard-dir",dir]` / `__SERVE_OK__`），按 `replay_meta.ticks` 降序 LPT 派发、worker 一空即取下一个；驱动 `tmp/g5-conv-pool.ts`（临时脚本，未入库）。
-- **写盘池宽度 ≤3 已解除（2026-11-17）**：此前的 1/700 `tickHash` 偏离**不是** JIT/写盘/哈希实现问题，而是 `restoreWorld` 装入跨进程快照后没有把本地 `genId()` 推进到快照 id 之上 ⇒ 新实体重发仍活着的 id，`tickHash` 首现重映射撞号。修复（`reserveSnapshotIds`）后 7-worker 写盘池 **700 shard × 5 轮 = 3500/3500**，每轮 `samples=503963 ticks=5035728` 逐项相等；7-worker verify-only 700/700。根因/证据/决策 → `plan/tickhash-flake.plan.md` §1.5 + `DECISIONS.md §2026-11-17-sim-tickhash-id-space`。写盘宽度可回到全核，写盘口径仍取 best-of-N。
+- **写盘池宽度 ≤3 已解除（2026-11-17）**：此前的 1/700 `tickHash` 偏离**不是** JIT/写盘/哈希实现问题，而是 `restoreWorld` 装入跨进程快照后没有把本地 `genId()` 推进到快照 id 之上 ⇒ 新实体重发仍活着的 id，`tickHash` 首现重映射撞号。修复（`reserveSnapshotIds`）后 7-worker 写盘池 **700 shard × 5 轮 = 3500/3500**，每轮 `samples=503963 ticks=5035728` 逐项相等；7-worker verify-only 700/700。根因/证据/决策 → `plan/tickhash-flake.plan.md` §1.5 + `DECISIONS.md §2026-11-17-sim-tickhash-id-space`。写盘宽度不用回全核：2026-11-17 宽度扫描给出 verify 11 / write 8–11（见下），写盘口径仍取 best-of-N。
 - 写盘吞吐波动大（同一份 5.9 GB：11 s / 15.5 s / 31 s ≈ 190–536 MB/s）是盘回收/杀软噪声，写盘口径一律 best-of-N。
+- **宽度扫描（2026-11-17，修复后，700 shard）**：`--verify-only` **11w 最快 7.51–7.89 s**（12w 7.73–8.14、7w 8.23–8.50、16w 8.44–8.51）；write 受盘回收尖峰支配，**8w 最稳 10.75–11.6 s**（11w best 10.54 s；7w 12.35 s；10w 10.88 s 但两轮 27–29 s；12w 29.7/67.7 s；16w 15.1/17.9 s）⇒ 生产缺省已接线：**write = 物理核数 / verify-only = ⌈11/8 × 物理核⌉**（`remote/replay_corpus.convert_workers`，`physical_cores()` 已含 cgroup 配额/亲和掩码；再受 shard 数收敛，显式 `workers` 可覆盖），写盘一律 best-of-N。8/11 只是本机 8 物理核的标定值，不是常量。
+- **已否决的调优（2026-11-17 同批实测，勿重复试）**：① LPT 按 `samples` 排序 7w 9.6–9.8 s（按 ticks 8.2–8.5）；② worker 绑物理核 8w 10.4–10.9 s、12w 8.5–8.7 s（不绑 8.3–9.3 / 7.7–8.1）；③ `--smol` 顺序 700 shard 33.5/33.9 s vs 基线 33.5–34.5 s（无差）；④ serve 内复用 obs/scalars/extra A/B 无差（顺序 27.75/27.91 fresh vs 27.78/27.76 reuse；11w 7.76 vs 7.86；8w write 10.90 vs 11.19）⇒ 已回退；⑤ npy 预分配/`writev` 仅写盘段 +2.4%/+5.0%（端到端 <1%，且 `writev` 有短写风险，不改生产）；⑥ 帧解码去对象化上限 = parse 0.07 µs/tick（≈1.3% 单核），`worldTickHash` 7.82 µs/hash（≈1.2%）、`ObsEncoder.encode` 2.50 µs/op（≈3.7%），均不抵改动风险。
 - 语料常数：35 关 × 20 seed 平均 **7,194 tick/局、720 样本/局**（decision-k 10）；早期 20× 语料实测 3.45M tick（**494 样本/局**，不是 702）。
 - **worker 侧无重哈希**（obsHash 在转换循环里增量算，见 §8 P0 进展与 §9 转换预算），相对 PPO 13.5 min 可忽略。
 
@@ -373,7 +378,7 @@ replay 语料由转换器以 f4 重造**。同一份 rollout 的两种表示**�
 ### D10. 可观测与数据保留
 
 - **统一墙钟账（k3 4.1）**：`sampler 编码/录制 → sampler 回传压缩与上传 → trainer 接收/段压缩 → pack → trainer→worker 下载 → unpack → replay 转换 → lazy 装载/update`；eval 单列。实验主比较排除 eval，生产收益看完整迭代墙钟（不能只看 wire）。
-- iteration 的 `wire` 子字典新增：`replay_bytes` · `labels_bytes` · `convert_sec` · `convert_jobs` · `convert_fallback` · `corpus_fmt`。
+- iteration 的 `wire` 子字典新增：`replay_bytes` · `labels_bytes` · `convert_sec` · `convert_workers` · `convert_jobs` · `convert_fallback` · `corpus_fmt`。
 - PPO 日志新增：`loader=lazy|eager` · `loader_peak_mb` · `ppo_vram_mb` · `chunks` · `steps` · `per_step_kl` · `clip_fraction`；eval 时间单列。
 - replay/npy/ts_code **复用当前 iteration 保留策略**（用户拍板），不新增保留规则；npy 按现有 prune 清理。
 - **保留语义（k3 4.5）**：按用户拍板，replay 是**临时训练物料**，随 job 回收，**不承诺长期可重建**；DoD 不写笼统「无数据丢失」。若未来要做可重建档案，replay+meta+converter+对应 ts_code/bundle 必须同生命周期保留，另立 plan。
@@ -906,7 +911,7 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
   - 身份：`corpus_fmt` + `replay_converter_sha256` 均进 job 幂等键（full 省略；换转换器 = 换 job/结果身份）。
   - 事务：worker pre-pass 改为 `<shard>.conv-tmp`（硬链接输入）→ 转换 + 校验 + 完成标记 → 原目录 `.conv-old` / 临时目录顶上 / 删除旧目录；失败原目录一字未动，崩溃残留由下一次 `_clean_stale_transaction` 复位。
   - **hub / PPO worker 能力协商（2026-11-16）**：新增 `CAP_REPLAY_CORPUS`；worker claim body 声明能力位，hub 在唯一租约入口（`_claim_locked`）对 `corpus_fmt=replay` fail-closed 拒绝缺能力者（拒因 `no_replay_corpus`）；hub `GET /ping` 与 worker_server `/ping` 均声明该能力；push 派发按 `/ping` 能力选机。测试：`tests/remote/test_corpus_capability.py`。
-  - **D10 墙钟账（2026-11-16）**：worker `wire` 新增 `corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_jobs`/`convert_fallback`；trainer `_wire_from_result` 透传到 iteration `wire` 顶层。full 路径为 `full`/0。
+  - **D10 墙钟账（2026-11-16）**：worker `wire` 新增 `corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_workers`/`convert_jobs`/`convert_fallback`；trainer `_wire_from_result` 透传到 iteration `wire` 顶层。full 路径为 `full`/0。
   - 未完成：同机 `replay+eager` vs `full+eager` 的数值对账（**可在 CPU 最小 job 做**，不必等 GPU）、2 vCPU 云机转换墙钟**已测**（见 §8 P0 进展）。
 - **Gate 绿后**：7×5 生产课只切 `corpus_fmt=replay`（仍是 eager）；`full` 保留回滚；前 2 个五点窗盯 identity 失败率/`convert_sec`/per-step KL/clip。**不在此阶段切 lazy。**
 - **No-Go**：确定性 identity 失败 >0，或可重试失败率 >1%。
@@ -956,7 +961,7 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
 - [ ] lazy loader：491k 样本峰值 RAM ≤2 GB（tmpfs 下 obs 3.97 GB 另计、不可豁免）；**上卡前显存余量预检**（产线 ≥16 GB，不做小卡真机验证）；eager 路径不变。**（估算过、真机待测）** 峰值 ≈1.0 GiB 来自 `tests/worker/test_ppo_lazy_loader.py` 的公式（491k / mb=1024 × 逐批 8 行），**不是真机 RSS**；「上卡前显存余量预检」尚未实现（代码里没有 pre-check，目前靠产线卡 ≥16 GB 的经验值）；eager 逐字节不变已由 10 条对账用例钉住（含 2026-11-17 新增「缺省必须是 lazy、rl-config 显式 eager 仍赢」钉子）；**2026-11-17 缺省已切 lazy**，回滚 = `--ppo-loader=eager`。
 - [ ] 三臂 pilot：冻结调度；B 学习曲线 + C 终点配对差/CI；报告效应量/CI，不写「非劣配方」；生产 eval 口径不变，实验臂 `eval_at` 样本锚点；训练墙钟不含 eval；配方推广至少 3 个独立训练 seed。
 - [x] 覆盖度：**2026-11-17 实盘报表** `reports/coverage-g5-lives-700-20261117.md`（700 shard / 35 关 × 20 seed / `target_transitions=491520`）：每关 games / unique seeds / trim 前后 samples / SHORT / 丢弃整局逐关列出；**35/35 关有有效样本、700 个唯一 `(stage,seed)`、0 重复 ⇒ 硬闸 PASS**；trim 前 503,963 → 后 452,041、丢弃整局 47；**11 关 SHORT（读数，不是失败）**。工具 `nn-training/tools/coverage_report.py` 可复跑，单测 3 例钉住 SHORT/硬闸语义。
-- [ ] 墙钟账覆盖两条传输腿 + 全部阶段；eval 单列；生产收益看完整迭代墙钟。**（字段已齐，读数待 P2 gate）** §D10 的六个 wire 字段（`corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_jobs`/`convert_fallback`）已于 2026-11-16 由 `_wire_from_result` 透传进 iteration 的 `wire`，full 路径恒为 `full`/0；转换器侧墙钟（174–216 ms/局、26–32 µs/tick）已测。**未完成**：完整迭代墙钟（含 rollout/pack/download/unpack/convert/update）与 eval 单列分解。
+- [ ] 墙钟账覆盖两条传输腿 + 全部阶段；eval 单列；生产收益看完整迭代墙钟。**（字段已齐，读数待 P2 gate）** §D10 的七个 wire 字段（`corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_workers`/`convert_jobs`/`convert_fallback`）已于 2026-11-16 由 `_wire_from_result` 透传进 iteration 的 `wire`，full 路径恒为 `full`/0；转换器侧墙钟（174–216 ms/局、26–32 µs/tick）已测。**未完成**：完整迭代墙钟（含 rollout/pack/download/unpack/convert/update）与 eval 单列分解。
 - [x] replay/npy/ts_code 复用当前 iteration 保留策略（用户拍板）；replay 是临时训练物料，不承诺长期可重建；DoD 不写笼统「无数据丢失」。**（陈述性条目，§D10 已把拍板写成契约，无待办）**
 - [x] `bun run check` 绿；`bun run build` 过；子项目（`dashboard/**` 如改动）各自门禁绿。**（2026-11-17 实测，HEAD `f32c9255` + 待入库课程文件在场）** `bun run check` = typecheck + `check-decisions` + `check-agents-budget` + root tests：**2972 pass / 7 skip / 0 fail**（276 文件 / 2979 用例 / 40.5 s / 130,430 expect）；`bun run build` 绿（vite 305 ms，仅 chunk-size 警告）。`dashboard/**` 本工作线未改动。
 - [x] 无新增 Simulation `Math.random()` / 隐藏状态 / canvas UI；任务侧一字未动。**（按 diff 取证）** 本工作线两个提交在 `src/` 的改动：`c170ba26` 只有 `src/replay/InputRecorder.ts`（+5/−2，单人局不写 coop padding 帧），`f32c9255` 的 `src/` 改动为 **0 文件**。唯一动到 `src/game/**` 的是 `45bdcc30`（restore 时预留快照 id 空间，P0 立项的 tickHash flake 修复，见 `§2026-11-17-sim-tickhash-id-space`）——它只让 `genId` 单调抬到快照最大 id 之上，**不改玩法语义、不改 replay 格式、不改 tickHash 规格**，也无新随机源。当前 worktree 相对 HEAD 只有 `plan/` `nn-training/curricula/` `tmp/` 变动。

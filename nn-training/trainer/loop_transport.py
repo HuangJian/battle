@@ -576,6 +576,7 @@ def _wire_from_result(
         "replay_bytes": w.get("replay_bytes"),
         "labels_bytes": w.get("labels_bytes"),
         "convert_sec": w.get("convert_sec"),
+        "convert_workers": w.get("convert_workers"),
         "convert_jobs": w.get("convert_jobs"),
         "convert_fallback": w.get("convert_fallback"),
         # worker 侧拆分原样挂上（观测用；plan §2.2 未把它写进 hub 字典，但两半

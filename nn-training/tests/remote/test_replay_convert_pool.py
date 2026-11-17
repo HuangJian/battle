@@ -103,6 +103,16 @@ class _DeadPool(_FakePool):
         return None
 
 
+class _RecordingPool(_FakePool):
+    """只记任务形状、不跑子进程 —— 用于验证 verify-only 不落产物。"""
+
+    def try_capture(
+        self, argv, timeout_sec, *, label='?', attempt=1, kind='eval', where=''
+    ):  # type: ignore[no-untyped-def]
+        self.tasks.append(list(argv))
+        return (0.01, [])
+
+
 def test_pool_path_converts_and_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     job, man, shards = _job(tmp_path)
     pool = _FakePool()
@@ -164,24 +174,35 @@ def test_pool_passed_fixed_mode_and_bundle_entry() -> None:
     assert seen['for_script'] == str(Path('/x/replay_converter.js'))
 
 
-def test_convert_workers_uses_all_cores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """转换宽度 = **所有可用核**（不是 `cpu_worker_slots` 的留核口径）。
+def test_convert_workers_scales_with_physical_cores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺省宽度 = 物理核数（write）/ ⌈11/8 × 物理核⌉（verify-only），再受 shard 数收敛。
 
-    GPU 云机核数浮动（低配 2 物理/4 逻辑、中配 4/8、高配 24）；转换是训练前的单腿 pre-pass，
-    同机没有 rollout/eval 并行 ⇒ 留核就是纯白等墙钟。显式值必须能覆盖（测试/压测要）。
+    8 物理/16 逻辑的标定：write 8w 最稳、verify-only 11w 最快。宽度必须跟着机器走，
+    不能把 8/11 写死（4 核云机会过订阅，16 物理核又白留一半）。
     """
-    for cores in (2, 4, 8, 24, 1):
-        monkeypatch.setattr(rc, 'effective_cores', lambda c=cores: c)
-        assert rc.convert_workers() == cores, f'cores={cores}'
-    # 显式值优先，且非法值收敛到 ≥1
+    # (物理核, write, verify-only)
+    for cores, write, verify in (
+        (1, 1, 2),
+        (2, 2, 3),
+        (4, 4, 6),
+        (6, 6, 9),
+        (8, 8, 11),
+        (12, 12, 17),
+    ):
+        monkeypatch.setattr(rc, 'physical_cores', lambda c=cores: c)
+        assert rc.convert_workers() == write, f'physical={cores}'
+        assert rc.convert_workers(verify_only=True) == verify, f'physical={cores}'
+    # 显式值优先（不被核数夹取），非法值收敛到 ≥1
+    monkeypatch.setattr(rc, 'physical_cores', lambda: 8)
     assert rc.convert_workers(1) == 1
-    assert rc.convert_workers(8) == 8
+    assert rc.convert_workers(12) == 12
     assert rc.convert_workers(0) == 1
     assert rc.convert_workers(-3) == 1
-    # 少于核数时按 shard 数收敛（别为 3 个 shard 起 19 个 worker）
-    monkeypatch.setattr(rc, 'effective_cores', lambda: 19)
+    # 少于宽度时按 shard 数收敛（别为 3 个 shard 起 11 个 worker）
     assert rc.convert_workers(shards=3) == 3
-    assert rc.convert_workers(shards=350) == 19
+    assert rc.convert_workers(shards=350) == 8
+    assert rc.convert_workers(verify_only=True, shards=3) == 3
+    assert rc.convert_workers(verify_only=True, shards=350) == 11
 
 
 def test_str_shard_dirs_from_unpack_are_accepted(
@@ -213,6 +234,35 @@ def test_str_shard_dirs_from_unpack_are_accepted(
     assert pool.closed is True
 
 
+def test_verify_only_uses_11_width_and_skips_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verify-only 是诊断路径：缺省 11（受 shard 收敛），且不写产物/标记/事务目录。"""
+    job, man, shards = _job(tmp_path)
+    pool = _RecordingPool()
+    seen: list[int] = []
+
+    def fake_factory(runtime: str, converter: Path, workers: int):
+        seen.append(workers)
+        return pool
+
+    monkeypatch.setattr(rc, 'physical_cores', lambda: 8)
+    got = rc.convert_replay_corpus(job, shards, man, verify_only=True, pool_factory=fake_factory)
+
+    assert seen == [2], '11 受 2 个 shard 收敛'
+    assert got['convert_workers'] == 2
+    assert got['convert_jobs'] == 2 and got['reused'] == 0
+    for argv in pool.tasks:
+        assert argv[1] == '--shard-dir'
+        assert not argv[2].endswith('.conv-tmp'), 'verify-only 打真实 shard，不建事务目录'
+        assert argv[-1] == '--verify-only'
+    for d in shards:
+        assert not (d / rc.MARKER_NAME).exists(), 'verify-only 不写完成标记'
+        for name in ('obs.npy', 'scalars.npy', 'extra.npy'):
+            assert not (d / name).exists(), f'verify-only 不写 {name}'
+    assert pool.closed is True and pool.summarised == 1
+
+
 def test_pool_width_and_readout_follow_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -225,7 +275,7 @@ def test_pool_width_and_readout_follow_workers(
         seen.append(workers)
         return pool
 
-    monkeypatch.setattr(rc, 'effective_cores', lambda: 7)
+    monkeypatch.setattr(rc, 'physical_cores', lambda: 7)
     got = rc.convert_replay_corpus(job, shards, man, pool_factory=fake_factory)
     # 2 个 shard ⇒ 宽度收敛到 2（不为 2 个 shard 起 7 个 worker）
     assert seen == [2], '工厂拿到的是 min(核数, shard 数)'

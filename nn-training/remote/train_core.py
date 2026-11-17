@@ -945,6 +945,7 @@ def run_training_core(
         replay_bytes=(replay_info or {}).get("replay_bytes"),
         labels_bytes=(replay_info or {}).get("labels_bytes"),
         convert_sec=(replay_info or {}).get("sec"),
+        convert_workers=(replay_info or {}).get("convert_workers"),
         convert_jobs=(replay_info or {}).get("convert_jobs"),
         convert_fallback=(replay_info or {}).get("convert_fallback"),
     )
@@ -1349,6 +1350,7 @@ def _run_training_core_paddle(
         replay_bytes=(replay_info or {}).get("replay_bytes"),
         labels_bytes=(replay_info or {}).get("labels_bytes"),
         convert_sec=(replay_info or {}).get("sec"),
+        convert_workers=(replay_info or {}).get("convert_workers"),
         convert_jobs=(replay_info or {}).get("convert_jobs"),
         convert_fallback=(replay_info or {}).get("convert_fallback"),
     )

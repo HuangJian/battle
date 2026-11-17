@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from common.errors import ProtocolError
-from common.platform_utils import effective_cores, rmtree_best_effort
+from common.platform_utils import physical_cores, rmtree_best_effort
 from common.proc import run_capture
 
 CONVERTER_NAME = "replay_converter.js"
@@ -37,6 +37,13 @@ MARKER_VERSION = 1
 #: 单 shard 转换上界（秒）。一局最多 ~36000 tick；实测 600 tick 约 60ms，
 #: 36000 tick 约 3.6s；900s 是「机器假死」与「真慢」的分界。
 SHARD_TIMEOUT_SEC = 900.0
+
+#: 池化宽度**按机器物理核数推导**，不是写死值（2026-11-17，8 物理 / 16 逻辑，700 shard /
+#: 5,035,728 tick）：write 8w = 物理核数 8；verify-only 11w = ⌈11/8 × 物理核⌉。
+#: verify-only 只读重建可轻微过订阅（8w 8.23–8.50 s → 11w 7.51–7.89 s）；write 受盘回收
+#: 尖峰支配，物理核数已是最稳点（16w 15–18 s，12w 有 30–68 s 轮）。两者再受 shard 数收敛。
+VERIFY_WORKERS_NUM = 11
+VERIFY_WORKERS_DEN = 8
 
 
 def resolve_js_runtime() -> str:
@@ -154,15 +161,21 @@ def _finish_shard(shard_dir: Path, tmp: Path, converter_sha: str) -> None:
 
 
 def _run_oneshot(
-    tmp: Path, *, converter: Path, runtime: str, timeout_sec: float, label: str
+    tmp: Path,
+    *,
+    converter: Path,
+    runtime: str,
+    timeout_sec: float,
+    label: str,
+    verify_only: bool = False,
 ) -> None:
     """一次性 spawn 转换一个事务目录（池不可用/池回退时的唯一路径）。"""
     # 绝对路径：一次性路径继承调用方 cwd，池里的 worker 的 cwd 是 **bundle 所在目录**
     # （`ServePool._spawn` 用 ts_dir 当 cwd）⇒ 相对路径在池里必然解析错。
-    p = run_capture(
-        [runtime, str(converter), "--shard-dir", str(Path(tmp).resolve())],
-        timeout=timeout_sec,
-    )
+    argv = [runtime, str(converter), "--shard-dir", str(Path(tmp).resolve())]
+    if verify_only:
+        argv.append("--verify-only")
+    p = run_capture(argv, timeout=timeout_sec)
     if p.returncode != 0:
         raise ProtocolError(
             f"replay 转换失败（{label}，rc={p.returncode}）：" f"{(p.stderr or p.stdout)[-800:]}"
@@ -250,27 +263,34 @@ def _corpus_bytes(shard_dirs: list[Path]) -> tuple[int, int]:
     return replay_bytes, labels_bytes
 
 
-def convert_workers(requested: int | None = None, shards: int | None = None) -> int:
-    """转换承载宽度：显式值优先；缺省 **用完本进程所有可用核**（`effective_cores()`）。
+def convert_workers(
+    requested: int | None = None,
+    shards: int | None = None,
+    *,
+    verify_only: bool = False,
+) -> int:
+    """转换承载宽度：显式值优先；缺省按**物理核数**推导，再按 shard 数收敛。
 
-    两个约束决定了这个口径（用户 2026-11-16 两次点明）：
-      1. **GPU 云机的 CPU 核数是浮动的** —— 低配 2 物理 / 4 逻辑、中配 4/8、高配 24。写死 2 在高配上
-         白扔一个数量级；
-      2. **转换腿不与他人共享 CPU** —— 它是训练前的 pre-pass，跑完就结束，同机没有 rollout/eval
-         在并行（那两条腿才需要留核给数据回传，所以它们走 `cpu_worker_slots()`）。这里留核 =
-         纯白等墙钟。
+    2026-11-17 实测（8 物理 / 16 逻辑，700 shard / 5,035,728 tick，plan §1.4）：
+      * write：**8w = 物理核数**最稳（10.75–11.6 s）；16w 15–18 s，12w 有 30–68 s 盘回收尖峰；
+      * verify-only：**11w = ⌈11/8 × 物理核⌉** 最快（7.51–7.89 s；8w 8.23–8.50 s）——
+        只读重建不写盘，轻微过订阅划算。
 
-    为什么不用 `cpu_worker_slots()`：那条口径是「rollout 与 eval 交替、给回传留两三个核」的槽位，
-    属于**并发腿之间**的分配；转换是单腿独占阶段，直接 `effective_cores()`（读 cgroup 配额与亲和掩码，
-    不采信宿主机的 `os.cpu_count()`）。
+    为什么不用逻辑核（`effective_cores()`）：这台机器 16 逻辑 = 8 物理，超线程 sibling 共享
+    执行单元；按 16 开 write 池实测反而更慢。`physical_cores()` 已取「物理核、cgroup 配额、
+    亲和掩码」三者最小值，云机配额缩小时会跟着缩。
 
-    `shards` 给了就按 `min(cores, shards)` 收敛 —— 3 个 shard 时起 19 个 worker 只是多付启动。
-
-    实测校准（Kaggle 2 物理 / 4 逻辑，350 shard）：`w=2` 22.9 s、`w=4` 21.6 s（超线程只值 6%，
-    但仍不该留核）；本机 8 物理 / 16 逻辑、60 shard：`w=2` 2.8 s、`w=14` 2.3 s。单 worker 常驻
-    ~120 MB（一次只持一个 shard），19 worker ≈ 2.3 GB，相对 GPU 机内存可忽略。
+    `min(…, shards)` 避免为 3 个 shard 起 11 个 worker；显式 `requested` 不被核数夹取
+    （压测/复现要能指定），但同样受 shard 数约束。
     """
-    n = max(1, int(requested)) if requested is not None else max(1, int(effective_cores()))
+    if requested is not None:
+        n = max(1, int(requested))
+    else:
+        p = max(1, int(physical_cores()))
+        if verify_only:
+            n = max(p, (p * VERIFY_WORKERS_NUM + VERIFY_WORKERS_DEN - 1) // VERIFY_WORKERS_DEN)
+        else:
+            n = p
     if shards is not None:
         n = max(1, min(n, int(shards)))
     return n
@@ -294,6 +314,7 @@ def convert_replay_corpus(
     log: Callable[[str], None] = lambda _m: None,
     workers: int | None = None,
     pool_factory: Callable[[str, Path, int], Any] | None = None,
+    verify_only: bool = False,
 ) -> dict[str, Any]:
     """把一整轮 replay shard 就地转成 obs/scalars/extra，返回读数。
 
@@ -302,6 +323,9 @@ def convert_replay_corpus(
     `remote/` 不能依赖 `worker/` —— `tests/test_remote_dag.py` 按 import 边算拓扑秩，
     本模块被 `hub_client`(L1) 与 `download`(L3) 依赖，抬高自己的秩会连坐整串。
     缺省 None = 逐 shard 一次性 spawn（行为与接池前逐字节相同）。
+
+    `verify_only=True`：只重建 + 校验，不写 obs/scalars/extra、不写完成标记、不做事务
+    （诊断/演练用；生产 pre-pass 恒 False）。宽度缺省此时是 11（write 是 8）。
 
     ★ `shard_dirs` **两种形状都收**（2026-11-17 现场事故）：`unpack_payload` 扫出来的
     是 **str**（`download.py:810` 的 `str(p) for p in ...`），而单测与 `convert_shard`
@@ -318,7 +342,7 @@ def convert_replay_corpus(
         raise ProtocolError("corpus_fmt=replay 但 payload 里没有任何 shard——拒收（不训空）")
     converter, conv_sha = verify_converter(job_dir, manifest)
     runtime = resolve_js_runtime()
-    n_workers = convert_workers(workers, len(dirs))
+    n_workers = convert_workers(workers, len(dirs), verify_only=verify_only)
     t0 = time.time()
     reused = 0
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
@@ -326,20 +350,31 @@ def convert_replay_corpus(
 
     pool = pool_factory(runtime, converter, n_workers) if pool_factory is not None else None
 
-    def _submit_via_pool(tmp: Path, label: str) -> None:
+    def _submit_via_pool(target: Path, label: str) -> None:
         """池里跑一次；池给不出确定成功 ⇒ 回退一次性 spawn（**只慢不错**）。"""
-        argv = [str(converter), "--shard-dir", str(Path(tmp).resolve())]
+        argv = [str(converter), "--shard-dir", str(Path(target).resolve())]
+        if verify_only:
+            argv.append("--verify-only")
         got = (
-            pool.try_capture(argv, SHARD_TIMEOUT_SEC, label=label, kind="conv", where=str(tmp))
+            pool.try_capture(argv, SHARD_TIMEOUT_SEC, label=label, kind="conv", where=str(target))
             if pool is not None
             else None
         )
         if got is None:
             _run_oneshot(
-                tmp, converter=converter, runtime=runtime, timeout_sec=SHARD_TIMEOUT_SEC, label=label
+                target,
+                converter=converter,
+                runtime=runtime,
+                timeout_sec=SHARD_TIMEOUT_SEC,
+                label=label,
+                verify_only=verify_only,
             )
 
     def _one(sd: Path) -> bool:
+        if verify_only:
+            # 诊断路径：直接对真实 shard 跑 `--verify-only`，不建事务目录、不写标记/产物。
+            _submit_via_pool(sd, sd.name)
+            return False
         return _convert_tx(
             sd,
             converter=converter,
@@ -363,7 +398,8 @@ def convert_replay_corpus(
     runtime_name = Path(runtime).name
     log(
         f"replay 转换完成：{len(shard_dirs)} shard（复用 {reused}），"
-        f"{sec:.1f}s runtime={runtime_name} workers={n_workers} converter={conv_sha[:12]}…"
+        f"{sec:.1f}s runtime={runtime_name} workers={n_workers} "
+        f"{'verify-only ' if verify_only else ''}converter={conv_sha[:12]}…"
     )
     return {
         "shards": len(shard_dirs),
@@ -391,6 +427,7 @@ def prepass(
     bundle: Any = None,
     pool_factory: Callable[[str, Path, int], Any] | None = None,
     workers: int | None = None,
+    verify_only: bool = False,
 ) -> dict[str, Any] | None:
     """`run_job` 的 replay pre-pass 入口：非 replay 原样返回 None（零行为变化）。
 
@@ -405,7 +442,13 @@ def prepass(
             "——kind=iter 的节点自跑 rollout 强制 full（plan/replay-corpus.plan.md D2）"
         )
     got = convert_replay_corpus(
-        job_dir, shard_dirs, manifest, log=log, pool_factory=pool_factory, workers=workers
+        job_dir,
+        shard_dirs,
+        manifest,
+        log=log,
+        pool_factory=pool_factory,
+        workers=workers,
+        verify_only=verify_only,
     )
     if bundle is not None:
         bundle.add(

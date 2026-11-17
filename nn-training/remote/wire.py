@@ -103,6 +103,7 @@ def _wire_block(**over: object) -> dict:
         "replay_bytes": 0,
         "labels_bytes": 0,
         "convert_sec": 0.0,
+        "convert_workers": 0,
         "convert_jobs": 0,
         "convert_fallback": 0,
     }

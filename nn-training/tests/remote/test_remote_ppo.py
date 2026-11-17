@@ -967,6 +967,7 @@ def test_wire_from_result_maps_both_halves() -> None:
             "replay_bytes": 4096,
             "labels_bytes": 8192,
             "convert_sec": 3.5,
+            "convert_workers": 8,
             "convert_jobs": 4,
             "convert_fallback": 1,
         }
@@ -974,7 +975,7 @@ def test_wire_from_result_maps_both_halves() -> None:
     w4 = _wire_from_result(r2, is_push=False)
     assert w4["corpus_fmt"] == "replay"
     assert w4["replay_bytes"] == 4096 and w4["labels_bytes"] == 8192
-    assert w4["convert_sec"] == 3.5
+    assert w4["convert_sec"] == 3.5 and w4["convert_workers"] == 8
     assert w4["convert_jobs"] == 4 and w4["convert_fallback"] == 1
     assert w3["corpus_fmt"] is None, "旧 worker 缺键必须是 None（未上报），不能伪造成 0"
 

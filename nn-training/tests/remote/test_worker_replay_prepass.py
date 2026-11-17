@@ -118,6 +118,7 @@ def test_convert_readout_bytes_and_jobs(tmp_path: Path) -> None:
     assert got["replay_bytes"] == 4, "两个 shard 各 2 B 的 replay.json"
     assert got["labels_bytes"] == 30, "labels = 除 obs/scalars/extra 外的 npy 字节和"
     assert got["convert_jobs"] == 2
+    assert got["convert_workers"] == 2, "显式宽度要随读数上报"
     assert got["convert_fallback"] == 1, "本用例的运行时是 python，不是 bun（主运行时）"
     # 复用轮：没有真正起转换子进程 ⇒ convert_jobs=0。
     got2 = rc.convert_replay_corpus(job, shards, man, workers=2)
