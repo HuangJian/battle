@@ -1393,6 +1393,37 @@ function runOne(
   // 不 clone 世界、不算 tickHash ⇒ full 路径内存/字节不变。
   const recorder = corpusFmt === 'replay' ? new InputRecorder() : null
   const obsHasher = recorder ? new Bun.CryptoHasher('sha256') : null
+  /**
+   * replay 格式的 obs 直写缓冲：决策 obs 按 64 样本一块连续落盘，块满即喂哈希器、尾块局末补齐
+   * （D4 规格 = `sha256(concat(obs_i))` ⇒ 分块 update 与逐决策 / 整局一次 update 都字节等价）。
+   *
+   * 为什么要有它（2026-11-17 profile，678 决策 / 6771 tick 的局）：旧写法每决策
+   * `encoder.obs.slice()`（51 KB 拷贝，实测 4.2 ms/局）+ 一次 `hasher.update`（678 次原生
+   * 调用合计 4.0 ms/局，而整块一次 update 只要 3.8 ms）。改成直写后两项都消失，只剩
+   * 678 × `.set()` ≈ 1.1 ms/局。full 路径不分配（`obsFlat = null`，旧行为逐字节不变）。
+   *
+   * **固定块**（64 样本，≈735 KB）而不是整局一块：`max_ticks` 拉到 36k 时整局缓冲 = 41 MB/局，
+   * 手机/小内存节点 × 多个并发 worker 会顶到 GB 级；分块后内存有界（块满即喂哈希器，
+   * 顺序仍是决策序，与一次 update 字节等价）。
+   */
+  const obsStride = OBS_CHANNELS * BOARD * BOARD
+  /** 每次哈希的决策样本数（64 × 11,492 B ≈ 735 KB/块）。 */
+  const OBS_HASH_CHUNK = 64
+  const obsEstSamples = Math.max(1, Math.ceil(Math.max(0, maxTicks - initTick) / decisionK) + 2)
+  let obsFlat: Uint8Array | null = obsHasher
+    ? new Uint8Array(Math.min(OBS_HASH_CHUNK, obsEstSamples) * obsStride)
+    : null
+  let obsSamples = 0
+  /**
+   * replay 的 obsHash（D4 = `sha256(concat(obs_i))`）：满块已在决策拍增量喂过，这里只补尾块
+   * （不足 64 样本的那一段）再取摘要 —— 与「整局一块一次 update」逐字节等价。
+   */
+  const obsHashHex = (): string | null => {
+    if (!obsHasher || !obsFlat) return null
+    const tail = obsSamples % OBS_HASH_CHUNK
+    if (tail > 0) obsHasher.update(obsFlat.subarray(0, tail * obsStride))
+    return `sha256:${obsHasher.digest('hex')}`
+  }
   recorder?.startNew(world)
   // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
   const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
@@ -1567,9 +1598,10 @@ function runOne(
   }
 
   let pending: {
-    obs: Uint8Array
-    sc: Float32Array
-    ex: Float32Array
+    /** full 才有（replay 的 obs 已直写进 `obsFlat`，scaler/extra 无人消费）。 */
+    obs?: Uint8Array
+    sc?: Float32Array
+    ex?: Float32Array
     aMove: number
     aFire: number
     lpMove: number
@@ -1597,10 +1629,9 @@ function runOne(
 
   const flushPending = (term: boolean): void => {
     if (!pending) return
-    // replay_meta 的 obsHash：与决策 obs 同序；full 路径无 hasher，零开销。
-    obsHasher?.update(pending.obs)
     // replay 格式不保留 obs/scalars/extra（worker 用 replay 重建）；full 逐字节不变。
-    if (corpusFmt === 'full') {
+    // replay 的 obsHash 在局末对 `obsFlat` 一次算（不再逐决策 update）。
+    if (corpusFmt === 'full' && pending.obs && pending.sc && pending.ex) {
       shard.obs.push(pending.obs)
       shard.scalars.push(pending.sc)
       shard.extra.push(pending.ex)
@@ -1633,6 +1664,13 @@ function runOne(
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
+      if (obsFlat && obsHasher) {
+        // replay：直写进固定块（`set` 11.5 KB ≈ 1.7 µs/决策）；块满即喂哈希器。
+        const slot = obsSamples % OBS_HASH_CHUNK
+        obsFlat.set(encoder.obs, slot * obsStride)
+        obsSamples++
+        if (slot === OBS_HASH_CHUNK - 1) obsHasher.update(obsFlat)
+      }
       model.forward(encoder.obs, encoder.scalars, encoder.extra)
       // 掩码宽度随权重走（legacy 7 / v6 9）；`computeMasks` 的 v6 分支返回
       // move4/fire3/hold2（`obs-encoder.ts:848-858`），legacy 返回 move5/fire2。
@@ -1683,9 +1721,14 @@ function runOne(
       if (pending) flushPending(false)
 
       pending = {
-        obs: encoder.obs.slice(),
-        sc: encoder.scalars.slice(),
-        ex: encoder.extra.slice(),
+        // full 才拷三张张量（旧行为零变化）；replay 的 obs 直写进 `obsFlat`，另两张无人读。
+        ...(corpusFmt === 'full'
+          ? {
+              obs: encoder.obs.slice(),
+              sc: encoder.scalars.slice(),
+              ex: encoder.extra.slice(),
+            }
+          : {}),
         aMove,
         aFire: fr.idx,
         lpMove,
@@ -2143,7 +2186,7 @@ function runOne(
           decisionTicks,
           decisionTicksList: decisionTickList,
           nSamples: shard.n,
-          obsHash: obsHasher ? `sha256:${obsHasher.digest('hex')}` : null,
+          obsHash: obsHashHex(),
           tickHashes: rec.tickHashes.length,
           /** P1 录制开销（recordFrame 含每 100 tick 的 worldTickHash）；full 路径不存在。 */
           recordMs: +recordMs.toFixed(1),

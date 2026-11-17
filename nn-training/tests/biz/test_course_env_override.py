@@ -193,3 +193,26 @@ def test_duplicate_positions_are_kept(tmp_path: Path) -> None:
     c = load_course(_course(tmp_path, stage_select="2,2"))
     assert c.stage_ids == [2000, 2001]
     assert _stage(c, 2000)["name"] == _stage(c, 2001)["name"]
+
+
+def test_corpus_format_and_loader_are_course_keys(tmp_path: Path) -> None:
+    """GPU 真机验证课程必须能在 JSONC 里声明 corpus_fmt/ppo_loader。
+
+    这两个键不是 CLI 逐参：run_rl 是「课程单一事实来源，无 CLI 覆盖」，
+    课程里写了却不映射 = 静默失效（ent_break 前科）。
+    缺省必须保持 full/eager ⇒ 存量课程逐字节不变。
+    """
+    plain = load_course(_course(tmp_path, name='t-plain'))
+    ov = plain.flat_overrides()
+    # 只输出显式写过的键 ⇒ 存量课程零行为变化（仍走 rl-config/argparse 默认 full/eager）
+    assert ov.get('corpus_fmt') is None and ov.get('ppo_loader') is None
+
+    replay_lazy = load_course(
+        _course(tmp_path, name='t-replay-lazy', corpus_fmt='replay', ppo_loader='lazy')
+    )
+    ov2 = replay_lazy.flat_overrides()
+    assert ov2['corpus_fmt'] == 'replay' and ov2['ppo_loader'] == 'lazy'
+
+    bad = _course(tmp_path, name='t-bad', corpus_fmt='bogus')
+    with pytest.raises(ValueError):
+        load_course(bad)

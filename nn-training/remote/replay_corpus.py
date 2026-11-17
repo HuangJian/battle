@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -288,7 +288,7 @@ def convert_fallback_flag(runtime_name: str) -> int:
 
 def convert_replay_corpus(
     job_dir: str | Path,
-    shard_dirs: list[Path],
+    shard_dirs: Sequence[Path | str],
     manifest: dict,
     *,
     log: Callable[[str], None] = lambda _m: None,
@@ -302,16 +302,27 @@ def convert_replay_corpus(
     `remote/` 不能依赖 `worker/` —— `tests/test_remote_dag.py` 按 import 边算拓扑秩，
     本模块被 `hub_client`(L1) 与 `download`(L3) 依赖，抬高自己的秩会连坐整串。
     缺省 None = 逐 shard 一次性 spawn（行为与接池前逐字节相同）。
+
+    ★ `shard_dirs` **两种形状都收**（2026-11-17 现场事故）：`unpack_payload` 扫出来的
+    是 **str**（`download.py:810` 的 `str(p) for p in ...`），而单测与 `convert_shard`
+    调用方传 `Path`。以前只在 docstring 里写 `list[Path]`、函数体直接 `sd / "replay.json"`，
+    云端第一次真跑 replay 就在 `_corpus_bytes` 炸 `TypeError: unsupported operand
+    type(s) for /: 'str' and 'str'`（job 报 FAILED 后无限重领 ⇒ 队列看着像卡住）。
+    入口一次性归一成 `Path`，下游（`_one`/`sd.name`/`_convert_tx`）就不必各自防御。
     """
-    if not shard_dirs:
+    # `Sequence` 而不是 `list[Path | str]`（2026-11-17）：`list` 不变性让 `list[Path]`
+    # 的调用方（单测 / `convert_shard`）mypy 全红；归一后的形状单独用 `dirs` 承载，
+    # 下游只看到 `Path`（原先重绑参数变量，声明类型不变 ⇒ 仍报 list[Path | str]）。
+    dirs: list[Path] = [p if isinstance(p, Path) else Path(p) for p in shard_dirs]
+    if not dirs:
         raise ProtocolError("corpus_fmt=replay 但 payload 里没有任何 shard——拒收（不训空）")
     converter, conv_sha = verify_converter(job_dir, manifest)
     runtime = resolve_js_runtime()
-    n_workers = convert_workers(workers, len(shard_dirs))
+    n_workers = convert_workers(workers, len(dirs))
     t0 = time.time()
     reused = 0
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
-    replay_bytes, labels_bytes = _corpus_bytes(shard_dirs)
+    replay_bytes, labels_bytes = _corpus_bytes(dirs)
 
     pool = pool_factory(runtime, converter, n_workers) if pool_factory is not None else None
 
@@ -339,9 +350,9 @@ def convert_replay_corpus(
         )
 
     try:
-        n = max(1, min(n_workers, len(shard_dirs)))
+        n = max(1, min(n_workers, len(dirs)))
         with ThreadPoolExecutor(max_workers=n) as ex:
-            for got in ex.map(_one, shard_dirs):
+            for got in ex.map(_one, dirs):
                 if got:
                     reused += 1
     finally:
@@ -373,7 +384,7 @@ def convert_replay_corpus(
 
 def prepass(
     job_dir: str | Path,
-    shard_dirs: list[Path],
+    shard_dirs: list[Path | str],
     manifest: dict,
     *,
     log: Callable[[str], None] = lambda _m: None,

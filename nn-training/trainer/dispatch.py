@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import secrets
 import threading
@@ -57,7 +58,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # 分布式采样（plan/distributed-rollout.md v3.3）：runId 使 iterId={runId}.{it} 全局唯一，
 # 杜绝 relaunch 后旧 run 未取结果与新 run 任务在 agent 侧混叠。
-RUN_ID = secrets.token_hex(8)
+# GPU 真机验证课（plan/replay-corpus.plan.md §6.6）：四档共用同一个 runId ⇒
+# `job_seed(runId,it,init_weights_fp)` 在档间可比；未给 env 时保持随机（旧行为逐字节不变）。
+RUN_ID = os.environ.get("NN_VERIFY_RUN_ID") or secrets.token_hex(8)
 
 # F6（plan/dist-codehash-stale-fix.md）：dedup 静默排除的显式告警计数。RolloutDispatcher
 # 每迭代新建实例，计数器必须挂模块级才跨轮累积；连续 ≥3 轮 dedup 且非 self ⇒ WARN。

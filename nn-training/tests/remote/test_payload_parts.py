@@ -306,8 +306,9 @@ def test_slim_transforms_land_in_the_segment() -> None:
         "metrics_version": 12,
         "formula_hash": "fh",
     }
-    # P2：f16 字段换了精度，obs（不在名单）原样。
-    assert np.load(io.BytesIO(got[f"{name}/scalars.npy"])).dtype == np.float16
+    # P2：f16 字段换了精度（A2 后只剩 lp_*），obs/scalars/extra（不在名单）原样。
+    assert np.load(io.BytesIO(got[f"{name}/lp_move.npy"])).dtype == np.float16
+    assert np.load(io.BytesIO(got[f"{name}/scalars.npy"])).dtype == np.float32, "A2：不量化"
     assert got[f"{name}/obs.npy"] == files["obs.npy"]
     # 打包端的读数来自**同一份** slim（段全部命中时打包腿一次变换都不会走）。
     assert slim.fmt == "reward+f16", slim.fmt

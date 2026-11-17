@@ -123,9 +123,20 @@ RL_REWARD_FILES: tuple[str, ...] = (METRICS_NAME, REWARD_NAME)
 #: 入选判据（实测 `tmp/wire-audit6.txt` §3）：绝对误差上界 ≤1e-3 且都是 O(1) 输入。
 #: ⛔ `value` **不在表内** —— 它是 GAE 基线，误差经 `δ_t = r + γV' − V` → GAE → `adv_norm`
 #: 放大，而只省 3.3%（55,868 B）：收益小、风险不对称。
-#: 加字段/改名时：这里 + `plan/wire-diet.plan.md` §3 P2 的误差实测表**必须**同 commit 改
-#: （`tests/remote/test_payload_slim.py` 拿本表与读端的 `_RL_SHARD_SPEC` 对账）。
-RL_F16_FIELDS: tuple[str, ...] = ("scalars", "extra", "lp_move", "lp_fire")
+#:
+#: ★★ 2026-11-17 A2：`scalars`/`extra` **移出本表**（原四项 = scalars/extra/lp_move/lp_fire）。
+#: 判据不是"误差多大"，是"**两种语料表示必须语义等价**"：`corpus_fmt=replay` 时
+#: `payload_slim._member` 先按 `REPLAY_DROP_FILES` 把这两张 DROP 掉，f16 只在 **full** 侧发生
+#: ⇒ 同一份 rollout 的 full 语料是 f16、replay 语料由转换器以 f4 重造，两臂**精度不等价**。
+#: 五臂真机实测（`reports/replay-corpus-five-arm-20261117.md`）：pair 逐字相同的前三项读数下，
+#: re/rl 与 fe 的终态权重 max|Δ| = 9.5e-3、changed 18940/73668，it2 语料即分叉 ⇒ 这是训练
+#: 分叉的**唯一**已证根因。代价（实测 xz 后）：payload +474 KB / +10.5%（4.50 → 4.98 MB）。
+#: `lp_*` 可以留：两臂都不过 DROP，f16 是对称的（且 xz 后只多 ~10 KB）。
+#: 加字段/改名时：这里 + `reports/wire-diet-2026-10-14.md` 的误差实测表**必须**同 commit 改
+#: （`tests/remote/test_payload_slim.py` 拿本表与读端的 `_RL_SHARD_SPEC` 对账，另有一条
+#: 断言本集合与 `REPLAY_DROP_FILES` **不相交**）。
+#: ⚠ 原注释指向的 `plan/wire-diet.plan.md` 已不存在（全仓只有 reports/ 那份）；改指真实出处。
+RL_F16_FIELDS: tuple[str, ...] = ("lp_move", "lp_fire")
 
 
 # ---------------- 结果校验（先验后落盘的红线所在） ----------------

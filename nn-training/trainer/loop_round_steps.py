@@ -291,6 +291,19 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         #   ≤3s、异常全消化）——这是本模块唯一新增的轮边界 IO。
         src = _rollout_source(args)
         ctx.seg = _run_segment_iters(args)
+        # ★★ A2（2026-11-17，plan/replay-corpus.plan.md §2）：**语料格式在轮边界裁决一次**。
+        # 判据不是"用户想要什么"，而是"rollout 与 PPO 是否同一台机器"——
+        #   · `kind=ppo`（本机/节点 rollout → **远端** PPO）：语料要上路 ⇒ replay 有收益；
+        #   · `kind=iter`（`rollout_src=node`：节点自己 rollout + PPO）与 `kind=run`
+        #     （`--export-bundle` 离线包）：同机 ⇒ **零 wire 收益**，转换只白烧 CPU，
+        #     且节点盘上从此没有 obs（任何同机读 shard 的工具都会断）。
+        # 为什么在**这里**：`args` 是下游唯一事实源（`build_rollout_cmd` 的 argv、
+        # dispatch 的 `corpusFmt`、`begin_payload_parts` 的段身份、`publish_job` 的 manifest
+        # 全读它）。在这里改一次，四处自动同源；散在各处判会漂（段身份与 manifest 打架
+        # 就是 `take()` 失配 → 零落盘轮 SystemExit）。
+        # 为什么**不是**沉默改写：显式写了 replay 却被降级，必须有一行日志（去重），
+        # 否则「我明明开了 replay」会变成一句没人能解释的话。
+        self._resolve_corpus_fmt(src)
         # M3/接管：node 时本机**完全不采样**（也不预采/不补波），由 `_remote_iter`
         # （kind=iter）派发；被接管的课本机什么都不做。eval 不动（仍在本地 hub 跑，§5.4）。
         # ★ 2026-10-23（plan/offline-hold-stale-fallback §2/§3-S1）：降级是**正交事实**，
@@ -346,6 +359,42 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 self._held_note = note
             return finish(ROUND_HELD_EXIT, HELD_WAIT_HINT)
         return None
+
+    def _resolve_corpus_fmt(self, src: str) -> None:
+        """A2：**同机腿强制 `full`**，其余听请求（每轮边界重算，`args` 是共享可变体）。
+
+        判据（plan/replay-corpus.plan.md §2 原文）：「同机没有 wire 收益，转换只会白烧 CPU」。
+        ⇒ 只有 `kind=ppo`（本机/节点 rollout → 远端 PPO）允许 `replay`：
+
+          | 轮形态 | rollout 在 | PPO 在 | replay |
+          |---|---|---|---|
+          | `rollout_src=local`（默认） | 本机/采样节点 | hub 上的 worker | ✅ |
+          | `rollout_src=node`（kind=iter） | 节点 | **同一台节点** | ❌ 强制 full |
+          | `--export-bundle`（kind=run） | 节点 | **同一台节点** | ❌ 强制 full |
+
+        改的是 `args.corpus_fmt`（而不是某个局部变量）：下游四处**都读它**——`build_rollout_cmd`
+        拼 argv、dispatch 的 `corpusFmt` 查询参数、`begin_payload_parts` 的段身份、`publish_job`
+        的 manifest。任一处漏判都会让段身份与 manifest 打架（`take()` 失配 → 零落盘轮 SystemExit）。
+        原始请求存进 `args._corpus_fmt_req`：本函数可重入（每轮都调），必须从**请求**而不是
+        上一轮的**结果**起算，否则一次降级会把整门课永久钉在 full。
+        """
+        args = self.args
+        req = str(
+            getattr(args, "_corpus_fmt_req", "") or getattr(args, "corpus_fmt", "full") or "full"
+        )
+        args._corpus_fmt_req = req
+        same_machine = src == "node" or bool(getattr(args, "export_bundle", ""))
+        want = "full" if same_machine else req
+        if want != req and want != getattr(self, "_corpus_fmt_note", ""):
+            self._corpus_fmt_note = want
+            log(
+                f"[run_rl] 语料格式：请求 {req} 被降级为 {want} —— "
+                f"rollout_src={src or 'local'}"
+                f"{'/--export-bundle' if getattr(args, 'export_bundle', '') else ''}"
+                " 是**同机** rollout+PPO（kind=iter/run），语料不上路：replay 零收益，"
+                "且节点盘上不再有 obs（同机读 shard 的腿会断）"
+            )
+        args.corpus_fmt = want
 
     def _note_collect_fallback(
         self, fallback: str, silent_sec: float | None, volume_note: str

@@ -2,8 +2,8 @@
 
 钉住五件事（每条对应评审 `plan/wire-diet.review-bf.md` 的一条判据）：
 
-  ① **往返**：DROP 的成员真不在、替换的成员是 f16、`manifest.json` 与 `value.npy` 逐字节不变、
-     非 per-tick 目录（无 `metrics.npy`）整目录不动；
+  ① **往返**：DROP 的成员真不在、替换的成员是 f16（A2 后只剩 `lp_*`）、`manifest.json` 与
+     `value.npy` 逐字节不变、非 per-tick 目录（无 `metrics.npy`）整目录不动；
   ② **决定性**：同一输入打两次**逐字节相同** —— 这是「变换走内存字节而不是临时文件」的判据
      （临时文件的 mtime 会进 tar 头，同一份内容每打一次 `payload_sha256` 都变）；
   ③ **reward 等价**：打包端算出的 reward == 节点按 `metrics.npy` 算出的 reward（逐元素相同）
@@ -141,13 +141,20 @@ def test_round_trip_drops_metrics_and_ships_reward(tmp_path: Path) -> None:
     assert (got / "manifest.json").read_bytes() == before["manifest.json"]
     assert (got / "value.npy").read_bytes() == before["value.npy"]
     assert np.load(got / "value.npy").dtype == np.float32
-    # f16 字段：盘上是 f16，加载端 astype 回 f32 的绝对误差 ≤ 实测上界（2 字节舍入 ⇒ 相对 2^-11）
-    for fname in ("scalars.npy", "extra.npy", "lp_move.npy", "lp_fire.npy"):
+    # f16 字段（A2 后只剩 lp_*）：盘上是 f16，加载端 astype 回 f32 的绝对误差 ≤ 实测上界
+    # （2 字节舍入 ⇒ 相对 2^-11）
+    for fname in ("lp_move.npy", "lp_fire.npy"):
         raw = np.load(got / fname)
         assert raw.dtype == np.float16, f"{fname} 应为 f16"
         ref = np.load(shard / fname).astype(np.float32)
         err = np.abs(raw.astype(np.float32) - ref).max()
         assert err <= np.abs(ref).max() * 2**-11 + 1e-7, f"{fname} f16 误差超界：{err}"
+    # A2（2026-11-17）：`scalars`/`extra` **不**量化 —— 它们逐字节原样（f32）。
+    # 判据不是精度而是**两臂等价**：replay 请求下这两张被 DROP，full 请求若量化它们，
+    # 同一份 rollout 的两种表示精度就不同（五臂实测 9.5e-3 权重分叉的唯一根因）。
+    for fname in ("scalars.npy", "extra.npy"):
+        assert (got / fname).read_bytes() == before[fname], f"{fname} 不许量化（A2）"
+        assert np.load(got / fname).dtype == np.float32, f"{fname} 应为 f32（A2）"
     assert not (got / "obs.npy").is_file() or np.load(got / "obs.npy").dtype == np.uint8
     assert slim.fmt == "reward+f16", slim.fmt_line()
 
@@ -227,6 +234,25 @@ def test_only_adds_what_the_reader_contract_names(tmp_path: Path) -> None:
         assert np.dtype(dtype) == np.float32, f"{key} 不是 f32（f16 变换的前提没了）"
         assert fname in F16_FILES
     assert "value" not in RL_F16_FIELDS, "value 是 GAE 基线，明确不在 f16 表内（§3 P2）"
+
+
+def test_f16_set_never_intersects_replay_drop_set() -> None:
+    """⑤' A2 的**根因护栏**：进 f16 表的字段不得在 replay 下被 DROP。
+
+    2026-11-17 五臂事故的机制正是这两张表**相交**：`scalars`/`extra` 既在 `F16_FILES`
+    又在 `REPLAY_DROP_FILES`，而 `_member` 先 DROP 后 f16 ⇒ full 语料被量化、replay 语料
+    （转换器以 f4 重造）没有被量化 ⇒ 同一份 rollout 的两种表示**精度不等价**，it1 语料
+    同源、it2 权重就分叉（max|Δ|=9.5e-3，changed 18940/73668）。
+
+    这条断言比"逐字段查精度"更贴近判据：它不问误差多大，只问**两臂是否被同等对待**。
+    """
+    from remote.payload_slim import REPLAY_DROP_FILES
+
+    overlap = set(F16_FILES) & set(REPLAY_DROP_FILES)
+    assert not overlap, (
+        f"{sorted(overlap)} 同时在 f16 表与 replay DROP 表里 ⇒ full/replay 语料精度不等价。"
+        "要么把它移出 RL_F16_FIELDS，要么让转换器按同精度重造（plan/replay-corpus D2-A2）"
+    )
 
 
 def test_non_rl_dir_is_untouched(tmp_path: Path) -> None:
@@ -339,7 +365,8 @@ def test_without_reward_spec_keeps_metrics_but_still_f16(tmp_path: Path) -> None
     got = Path(dirs[0])
     assert (got / "metrics.npy").exists(), "缺 reward_spec ⇒ P1 不做（照旧带 metrics）"
     assert not (got / REWARD_NAME).exists()
-    assert np.load(got / "scalars.npy").dtype == np.float16, "P2 与 P1 正交，仍生效"
+    assert np.load(got / "lp_move.npy").dtype == np.float16, "P2 与 P1 正交，仍生效"
+    assert np.load(got / "scalars.npy").dtype == np.float32, "A2：scalars 不量化"
     assert slim.fmt == "f16", slim.fmt_line()
 
 

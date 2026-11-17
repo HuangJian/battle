@@ -99,8 +99,11 @@ export class InputRecorder {
         hold: input2.isHolding?.() ?? false,
         fireBeforeTurn: input2.isFireBeforeTurn?.() ?? false,
       })
-    } else {
-      // Pad with idle frame to keep streams aligned
+    } else if (this.coopAtStart || this.spectateDualAtStart) {
+      // Pad with idle frame to keep streams aligned — **only when a coop stream is
+      // possible**. `finalize()` gates `hasCoopInput` on these same two flags, so a
+      // single-player session never reads the padding: writing it was one wasted
+      // object allocation per tick (replay 录制 6771 tick/局 ≈ 一半的 recordFrame 分配).
       this.frames2.push({ direction: null, firing: false, guard: false, frenzy: false })
     }
 

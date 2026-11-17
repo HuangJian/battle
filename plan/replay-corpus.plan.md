@@ -227,6 +227,38 @@ replay 只有输入流；PPO 需要 `lp_move/lp_fire/lp_hold/value/reward/done/m
 - **端到端能力协商（k3 B7）**：trainer 发布前确认 hub 支持 `corpus_fmt`；sampler/rollout 节点声明 `replay_corpus`，不支持则不派 replay 采样；PPO worker 同名能力；结果 manifest 与请求 `corpus_fmt` 不一致即拒收；converter 契约版本进结果身份，或明确要求新 runId。
 - 零落盘测试补：replay 内存段 == 磁盘段、零目录、换轮隔离、`corpus_fmt` 热切换拒绝复用、full/replay 不混包。
 
+#### D2-A2. f16 单边泄漏 → 取消 f16 + 默认翻 replay（2026-11-17 拍板）
+
+**事故**（`reports/replay-corpus-five-arm-20261117.md`）：五臂真机 A/B 里，`fe/fe2/fl` 三臂逐字节相同，
+而 `re/l`（replay 语料）与它们的 it1 语料**同源**（samples 65026=65026、30 shard、kept 24577、
+rotation/volume_stage_stats 逐字相同）却在 it2 就分叉（终态权重 max|Δ| 9.5e-3、changed 18940/73668）。
+
+根因：`payload_slim._member` 里 `REPLAY_DROP_FILES` 排在 f16 **之前**，而 `scalars`/`extra`
+同时出现在 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES` 里 ⇒ **full 语料的这两张被量化成 f16，
+replay 语料由转换器以 f4 重造**。同一份 rollout 的两种表示**精度不等价**，这不是"误差多大"
+的问题，是"两臂必须被同等对待"的问题。plan §7 没抓到是因为那次对账是**离线比两份 npy**，
+绕过了 `payload_slim`（f16 只在上线传输时发生）。
+
+**拍板（用户 2026-11-17）**：取消单边偏置 + 把 replay 设为默认。
+
+1. **`RL_F16_FIELDS` 收窄成 `("lp_move", "lp_fire")`**（`scalars`/`extra` 移出）。
+   `lp_*` 两臂都不过 DROP ⇒ f16 对称，保留（xz 后只多 ~10 KB）。
+   代价实测（xz 后）：payload **+474 KB / +10.5%**（4.50 → 4.98 MB），下载 +0.3 s；
+   obs 才是压缩大头，所以"翻倍"的直觉估法不成立。
+2. **默认值翻成 `replay`**：`worker/cli.py --corpus-fmt`、`rl-config.json` 的 `rl.corpus_fmt`、
+   `biz/course_spec.CourseSpec.corpus_fmt`（后者是文档值，`model_fields_set` 决定它显式才生效）。
+3. **默认不是全局**（同机腿零收益）：轮边界 `trainer/loop_round_steps._resolve_corpus_fmt`
+   按"rollout 与 PPO 是否同一台机器"裁决，`rollout_src=node`（kind=iter）与 `--export-bundle`
+   （kind=run）**强制回 full** 并留一行日志（显式请求被降级必须可解释）。
+   `worker/cmd.build_rollout_cmd(node_side=True)` 是同一规则的第二道闸（节点自己的 CLI 缺省已是 replay）。
+4. **护栏**：`tests/remote/test_payload_slim.py::test_f16_set_never_intersects_replay_drop_set`
+   断言两表**不相交**（根因铸成断言，而不是逐字段查精度）；`trainer/stream.py` 的本机 PPO
+   兜底读盘遇 replay 显式 `SystemExit`（该腿自 `plan/accident.plan.md §3` 起 `args.stream` 恒 0，
+   正常跑不到，但绝不静默炸在"找不到 obs.npy"上）。
+5. **迁移口径**：历史权重链的"语料精度"**一次性断代** —— 2026-11-17 之前的 full 语料是 f16 版
+   `scalars/extra`，之后的 full 语料是 f32。跨这条线的权重比较里，`changed` 是**下界**
+   （微差被 i16 权重容器吃掉），不据此判"没学到东西"。已训练权重本身不受影响（不 bump shard schema）。
+
 ### D3. 转换器是纯 JS 单文件 bundle，不碰模型/native
 
 - 新增 `tools/sim/replay-to-shard.ts`：只 import `World/Simulation/ObsEncoder/ReplayInput/parseReplayFile/restoreWorld/npyBytes`。
@@ -632,6 +664,77 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 - eval：6,300 局，按 god-ai 3 worker ≈ 30 s/2100 局 ⇒ ≈ 90 s。
 - 首轮合计约 **23 min**（不含排队/上传），在 16 GB 显存机型上不会撞显存门。
 
+### 6.6 GPU 云机真机验证课程（2026-11-17，五档，独立于 §6.5 pilot）
+
+目的：在**真 GPU + 真 PPO job**上验证三件事，不回答学习优劣（那是 §6.5 的 pilot）：
+  ① `corpus_fmt=replay` 与 `full` 在相同起点/采样/seed 下 PPO 结果一致（P2）；
+  ② `ppo_loader=lazy` 与 `eager` 在同语料下结果一致（P3 的真机复验，CPU 最小 job 已绿）；
+  ③ 同配置重复跑的 GPU 噪声底，防止把「GPU 非确定性」误判成 replay/lazy 的差异。
+
+**五档课程**（`nn-training/curricula/verify-*.jsonc`，同一 g5-safe 骨架，仅差最后三行）：
+
+| 课程 | corpus_fmt | ppo_loader | 角色 |
+|---|---|---|---|
+| `verify-fe` | full | eager | 基线 |
+| `verify-fe2` | full | eager | **同配置重复**：GPU 噪声底 |
+| `verify-re` | replay | eager | P2：只换语料格式 |
+| `verify-fl` | full | lazy | P3：只换装载器（full 侧） |
+| `verify-rl` | replay | lazy | P3：生产组合（replay+lazy） |
+
+**共同冻结项**（五档逐字相同）：
+
+- 起点：`nn-training/weights/replay-verify/replay-verify-s5.json`（由 g5-safe.it230 派生，
+  固定 seed 20261117、只扰动三个 policy head bias scale=5；完整 35×20 面板 pass **64.1%**，
+  有 14.6pp 上坡，避免平台起点掩盖差异）。`sha256` 由五档共用，`init_weights_fp` 必须相同。
+- 关卡：**7 个哨兵关**（原关号 2002/2007/2018/2022/2023/2030/2032，经 `stage_select` 重编号为
+  2000–2006）；hard / 20 敌 / 3 命 / 36000 tick，任务侧不动。
+- 采样：`rotation_mode=even`、`rotation_per_it=7`、`seeds=1-5`、`paired_rotate_seed=20261117`、
+  `target_transitions=24576`（24×1024，mb 整倍数）⇒ 每关约 5 seed、每档约 35 局/轮。
+- 训练：`iters=2`、`mb=1024`、`epochs=4`、`lr=8e-5`、`kl_coef=0.05`/`kl_cap=0.1`、
+  `value_anchor=0.001`；**关 kickstart、单段常值 schedule、`breakers_off=true`**。
+- eval：`eval_every=2`、`eval_stages=2000-2006`、`eval_games_per_stage=20` ⇒ 每档终点
+  **140 局**；只做 sanity，不拿它当等价主判。
+- 输出：`out=tmp/replay-verify/<档>/weights.json`、`traj=tmp/replay-verify/<档>`、
+  `backup_dir=nn-training/weights/replay-verify/<档>`，五档互不覆盖。
+
+**同 seed 协议（必须遵守，否则差异不可归因）**：
+
+1. 五档由**同一台 GPU 机型**顺序跑（不并发），记录 `nvidia-smi` 的 GPU 名/驱动/显存、
+   torch/cuda 版本；同一 `PYTHONPATH` 与同一 `code.zip` 快照。
+2. 启动前设 **`NN_VERIFY_RUN_ID=replay-verify-s1`**（五档同一个值）。`trainer/dispatch.py` 与
+   `trainer/dispatch_queue.py` 已支持该 env 覆盖；未设时仍随机（生产零行为变化）。
+   这样 `job_seed(runId,it,init_weights_fp)` 在五档间**逐字相同**；课程名/out 不同只影响
+   幂等键与落点，不影响 RNG。
+3. 采样 seed 只由 `paired_rotate_seed + it + stage` 派生；五档课程除 `corpus_fmt/ppo_loader/name/out`
+   外必须逐字段相同（课程文件由同一脚本生成，`diff` 只应出现这几行）。
+4. **`--local-ppo-slots` 必须 ≥1，不能为了「PPO 全下云」写 0**（2026-11-17 现场踩过）：
+   `ppo` 这一步在调度器里**无条件**占 `local_ppo` 池票（`worker/loop_tasks.py::RESOURCE_OF`），
+   容量 0 ⇒ `try_acquire` 恒 False ⇒ 五门课每 15 s 刷一条 `blocked_pool ppo local_ppo
+   无空闲票（0/0）`，**永远不发布 job**，而日志里除了这行没有任何报错（云机 worker 只能一直
+   `no job yet`）。正解是容量 **1**：票由在飞的那门课**持着**（远端发布返回 WAIT+hold），
+   于是同一时刻只有一份远端 PPO 在跑——「worker 逐个领任务」正是这张票的效果，不是靠禁池。
+
+**判读**（主判 = 权重/stats，eval 只作 sanity）：
+
+- 先算 `fe` vs `fe2` 的**噪声底**：最终权重逐字节相同 ⇒ 底为 0；否则记录 max|Δ| 与 stats 差。
+- `re` vs `fe` 的差值必须 ≤ 噪声底；`fl` vs `fe`、`rl` vs `re` 同理。
+  **若超过噪声底，先查 `corpus_fmt`/`loader` 线，不要用 eval 波动解释。**
+- 每档读 `wire` 子字典：`corpus_fmt`、`replay_bytes`、`labels_bytes`、`convert_sec`、
+  `convert_jobs`、`convert_fallback`、`convert_workers`；PPO 日志读 `per_step_kl`/`clip_fraction`。
+- 显存：当前 PPO 日志**没有** `loader_peak_mb`/`ppo_vram_mb`（D10 预期字段尚未实现），
+  验证时用外部 `nvidia-smi --query-gpu=memory.used --format=csv -l 1` 采样，记录每档峰值；
+  不要假装代码里有该读数。
+- **PASS**：五档的 `re`/`fl`/`rl` 与基线差 ≤ 噪声底；`convert_fallback=0`；无 identity/转换失败；
+  `rl` 的峰值显存 ≤ 卡容量且不低于 eager；训练墙钟单列 eval。
+- **FAIL 处理**：`re` 与 `fe` 不等 ⇒ P2 未过，回到 replay 重建/标签差异；`rl` 与 `re` 不等 ⇒
+  lazy gather/行序问题；`fl` 与 `fe` 不等 ⇒ loader 本身问题（与 replay 无关）。三类失败禁止混在一起改。
+
+**成本**（按本轮实测外推）：每档 35 局/轮 × 2 轮 + 140 局 eval；五档约 350 局 rollout + 700 局 eval，
+rollout 7 并发 ~2 min、PPO 49k 样本/档 ~20 s、eval ~3 min；**首轮总墙钟约 10–15 min**（不含上传）。
+
+**不证明**：本课程不回答「刷新频率/池大小对学习的影响」（那是 §6.5 的三臂 pilot），
+也不替代 §6.5 的 491,520 样本等样本设计；它只把运输/装载路径钉成「同结果」。
+
 ## 7. 改动清单
 
 ### 7.1 TS / rollout
@@ -747,6 +850,7 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
   - 跨运行时（本机 Bun→Node + Windows→WSL Linux）：`bun build --target=node` 出单文件 bundle；1015 局三端 0 mismatch（见 §8 P0 进展），转换器使用 `node:crypto`，无 Bun 运行时依赖。
   - `replay_meta` 审计面补齐：`codeSha`（rollout 侧 TS 代码 hash，惰性缓存）、`initTick`、`opening{doneTick,abortReason,phase}`；`decisionTicksList` 改为**相对 replay 帧序号**（state_init 从 initTick 起录时，绝对游戏时钟会错位）。
   - 测试覆盖：hybrid opening 接管段（policy_mask=0 + replay identity + opening 元数据）、state_init 交棒段（initTick=300 + 逐字节 identity）；P1 录制开销读数见 §8 P0（+1.02% 墙钟 / 1.2 ms 每局）。
+  - **全链路性能 pass（2026-11-17）**：replay 录制从「逐决策 `obs.slice()`（51 KB）+ 逐次 `hasher.update`」改成直写 64 样本固定块 `obsFlat` + 块满即喂哈希器（内存恒 ~735 KB，不随 `max_ticks` 涨）；`InputRecorder` 不再为单机局写 frames2 空闲填充。实测（6771 tick / 678 决策一局）：录制 17.1 → **11.5 ms**，obs 拷贝+哈希 8.2 → **1.1 ms**（+ 整块一次 update 3.8 ms），`replay` 相对 `full` 的单局墙钟差 **+110–120 ms → 噪声内**。identity 不变：`obsHash`/frames/tickHashes/finalState/snapshot 逐字符相同，full 模式 14/14 分片文件 sha 不变。转换腿 174–216 ms/局（26–32 µs/tick = sim 47% + encode 15% + 写盘 7%），属确定性重放固有成本，无倍数余量；下一步墙钟不在本链路（PPO / NN 前向 / metrics 传输）。详见 `docs/nn/remote-transport.md §154`。
 
 ### P2 两段 wire + worker pre-pass（只切 replay+eager）
 
@@ -844,7 +948,7 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 | 实验臂 eval 派发 | B/C 无 eval 点 | 实验臂 `eval_every=1` + `eval_at`；生产口径不变；C 终点 CI |
 | schedule 未按样本求值 | C 整段吃 it1 kickstart/lr | 首轮三臂**冻结调度**；`it_equiv` 只作未来生产功能，需真 PPO 集成测试 |
 
-**回滚**：`--corpus-fmt full`（默认）+ `--ppo-loader=eager` = 逐字节旧路径；不 bump shard schema；不删旧 npy 路径。replay 是 additive 产物，回滚不影响已训练权重。
+**回滚**：`--corpus-fmt full`（2026-11-17 起默认是 `replay`，回滚即显式给 `full`）+ `--ppo-loader=eager` = 逐字节旧路径；不 bump shard schema；不删旧 npy 路径。replay 是 additive 产物，回滚不影响已训练权重。
 
 ---
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import threading
 from pathlib import Path
@@ -14,7 +15,9 @@ from common.proc import version_mm as mm  # noqa: F401 — re-export
 from worker.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401 — re-export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/trainer/ 上溯 3 层）
-RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
+# GPU 真机验证课（plan/replay-corpus.plan.md §6.6）：四档共用同一个 runId ⇒
+# `job_seed(runId,it,init_weights_fp)` 在档间可比；未给 env 时保持随机（旧行为逐字节不变）。
+RUN_ID = os.environ.get("NN_VERIFY_RUN_ID") or secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）
 from trainer.queue_local import (
     pick_race_target,  # noqa: F401 — re-exported（in-flight race 选靶+节点排除，tests 引用）
     pick_tail_race,  # noqa: F401 — re-exported（tests 引用）

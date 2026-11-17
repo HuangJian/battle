@@ -6,6 +6,110 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §155 `corpus_fmt` 缺省翻成 replay + A2（取消 f16 单边偏置）（2026-11-17）
+
+**拍板**：用户令「A2，把 replay 设为默认！」。§154 已把 replay 定为常态，本节补两件落地的事：
+**缺省值**与**两臂等价性**（f16 那一处曾经不等价）。
+
+### 为什么 replay 可以当默认（三个硬约束都已就位）
+
+| 约束 | 状态 |
+|---|---|
+| payload 4.7× 小（4.50 → 0.96 MB）、下载 2.81 s → 0.71 s | 五臂真机实测 |
+| 转换腿有确定兜底（bun 优先、node 兜底），`convert_fallback` 进账 | `serve_pool spawned=4 killed=0 fallback=0` |
+| 旧 worker / 旧 agent 收 replay 单 | **fail-closed**：`replayCorpusSupport` / `CAP_REPLAY_CORPUS` 双能力位 + `payload 缺 obs ⇒ 0 shard ⇒ SystemExit`，不静默训 0 样本 |
+
+### A2：`scalars`/`extra` 移出 `RL_F16_FIELDS`（唯一已证的分叉根因）
+
+五臂实测的机制：`payload_slim._member` 里 `REPLAY_DROP_FILES` 排在 f16 **之前**，而这两张同时
+出现在 f16 表与 DROP 表里 ⇒ **full 臂训练在 f16 语料上、replay 臂在 f32 上**（转换器以 `'f4'`
+重造）。it1 语料同源（samples 65026 逐字相同）却 it2 就分叉：终态权重 max|Δ| 9.5e-3、
+changed 18940/73668。
+
+- 收窄后 `RL_F16_FIELDS = ("lp_move", "lp_fire")`（`lp_*` 两臂都不过 DROP ⇒ f16 对称）。
+- 护栏：`test_f16_set_never_intersects_replay_drop_set` —— **两表必须不相交**。判据不是"误差
+  多大"，是"两臂是否被同等对待"；逐字段查精度抓不到这条（它只比对同一份表示的舍入）。
+- 代价（xz 后实测）：payload **+474 KB / +10.5%**（4.50 → 4.98 MB）、下载 +0.3 s。
+- **迁移口径**：2026-11-17 之前产的 full 语料是 f16 版 `scalars/extra`，之后是 f32 ⇒ 历史权重链
+  的"语料精度"一次性断代；跨线的 `changed` 是**下界**（i16 权重容器吃掉微差）。
+
+### 默认**不是**全局：同机腿在轮边界被降级（`_resolve_corpus_fmt`）
+
+判据 = 「rollout 与 PPO 是否同一台机器」：
+
+| 轮形态 | rollout 在 | PPO 在 | 结果 |
+|---|---|---|---|
+| `rollout_src=local`（默认） | 本机 / 采样节点 | hub 上的 worker | replay ✓ |
+| `rollout_src=node`（kind=iter） | 节点 | **同一台节点** | 强制 full + 一行日志 |
+| `--export-bundle`（kind=run） | 节点 | **同一台节点** | 强制 full + 一行日志 |
+
+改的是 `args.corpus_fmt`（下游四处同源：`build_rollout_cmd` 的 argv / dispatch 的 `corpusFmt` /
+`begin_payload_parts` 的段身份 / `publish_job` 的 manifest）—— 任一处单独判都会让段身份与
+manifest 打架（`take()` 失配 → 零落盘轮 `SystemExit`）。原始请求另存 `args._corpus_fmt_req`
+（函数每轮可重入，必须从请求而非上一轮结果起算）。
+
+回滚：`--corpus-fmt full`。⚠ `nn-training/rl-config.json` 是 gitignored 的（含 token），
+所以**代码里的 argparse 缺省才是真源**，该文件的 `rl.corpus_fmt` 只是本机覆盖。
+
+## §154 replay 语料全链路 profile：录制侧与转换侧的热点、两条已落地的提速（2026-11-17）
+
+**背景**：用户定为常态 —— 所有课程训练的 rollout 都走「导出 replay → worker 转换 npy」。这份记录
+回答「这条链路还剩多少可掩的墙钟」。样本 = stage 3 / hard / seed 2000000001 / **6771 tick /
+678 决策**（一局 1.46–1.64 s）。方法：`bun --cpu-prof-md` **只用来排序**（它采样很疏：1.55 s 的局
+只出 315 个样本），所有数字用直接计时对账。
+
+### 归因（一局）
+
+| 段 | 成本 | 占比 | 说明 |
+|---|---:|---:|---|
+| NN 前向（native conv） | 1.77 s / 2.34 s profile | 74% | rollout 的真大头，与语料格式无关 |
+| sim tick | ~110 ms | 5% | 采样腿 |
+| ObsEncoder | ~33 ms | 1.5% | 每决策一次 |
+| replay 录制（`recordFrame` 自计时） | 17.1 → **11.5 ms** | 0.8% | 见下 ② |
+| 每决策 obs 拷贝 + 哈希 | 8.2 → **1.1 ms**（+局末一次 3.8 ms 等价） | 0.4% | 见下 ① |
+| 分片落盘（标签 + replay + manifest） | ~15 ms | 1% | 两种格式共有 |
+
+转换腿（`tools/sim/replay-to-shard.ts`，一局一进程）：**convertMs 174–216 ms**（含写 7.9 MB obs）
+= sim ~105 ms（47%）· encode ~33 ms（15%）· 写盘 ~16 ms（7%）· 分配/解析 ~25 ms（12%）·
+obsHash ~4 ms（2%）· import ~9 ms ⇒ **26–32 µs/tick**。plan §1.4 的池化实测（2.2 µs/tick、
+7 worker）是另一台机器的口径，**这里不存在倍数级余量**：转换器是确定性重放，sim 不能跳、
+obs/scalars/extra 必须逐字节重算。
+
+### 已落地（identity 逐字节不变）
+
+① **replay 不再逐决策 `encoder.obs.slice()` + 逐次 `hasher.update`**：决策 obs 直写进一块
+**64 样本固定块** `obsFlat`（`.set` 11.5 KB/决策，块满即喂哈希器、尾块在局末补喂）。实测
+678 决策：slice 4.2 ms + 678 次 update 4.0 ms → 678 次 `.set` 1.1 ms（整块一次 update
+3.8 ms，11 次分块 update 同量级）。`obsHash` 仍是 `sha256(concat(obs_i))`（D4 规格未动），
+新旧值逐字符相同。full 不分配该缓冲；固定块而非整局一块是**内存纪律**：`max_ticks=36k` 时
+整局缓冲 = 41 MB/局，手机上 × 6 并发就顶到 GB 级，分块后恒为 ~735 KB。
+
+② **`InputRecorder` 只在 coop/spectateDual 局写 frames2 的空闲填充**：旧代码每 tick 无脑 push
+一个 `{direction:null,…}`（单机局 6771 个/局，`finalize` 直接丢掉）。`recordFrame` 自计时
+17.1 → 11.5 ms/局。
+
+③ 合起来：`replay` 相对 `full` 的单局墙钟差从 **+110–120 ms（+6%）降到噪声内**
+（best-of-4：replay 1461 ms / full 1468 ms；改前 replay 1923 vs full 1805）。
+对账：`obsHash`/`framesBase64`/`tickHashes`/`finalState`/`initialSnapshot` 全部逐字符相同；
+full 模式 14/14 分片文件 sha 不变；`bun run check` 绿。
+
+### 测过但明确不值得动
+
+- `src/config/stages.ts::decodeLevel`（模块加载期 35 关）：**1.9 ms/进程**（profile 里 14% 是采样
+  假象）。池化后每 worker 一次，忽略。
+- `computeCodeHash()`（`replay_meta.codeSha`）：**25–27 ms/进程**，已被 `replayCodeShaMemo` 按进程
+  记忆；只有「逐局起子进程」的腿才每局付一次。要消掉得让 sampler 把自己的 codeHash 透传进来
+  （协议改动），收益 ~1.7%/局，暂不做。
+- 转换器 7.8 MB `Uint8Array` 分配：**0.76 ms**（profile 的 `Float32Array` 7.7% 同样是假象）。
+- 转换器每决策 3 次 `subarray()`、`npyRowCount` 整文件读、`.tmp`+rename：均在噪声内。
+
+### 结论
+
+replay 形态的新增成本只有两处：**录制 ~12 ms/局（0.8%）+ 转换 26–32 µs/tick**（云机池化 =
+43 s / 491k 样本轮，≈ PPO 808 s 的 5%）。继续压墙钟请去 ① PPO 侧（plan P3 的 lazy loader）
+② 采样侧 NN 前向 ③ metrics 传输（241 KB/局 × 35 局 ≈ 8.4 MB/轮，是 replay 的 13 倍）——
+**别在 replay 编解码上找倍数**。
+
 ## §153 节点池的读数与真凶：`NO_PROXY` 里的 LAN 网段 + 分桶/drop 原因（2026-11-14）
 
 **背景**：用户问「rollout 节点与 trainer 的长连接要不要改成一节点一多路复用 + 跨 it 保持」。原

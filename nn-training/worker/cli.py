@@ -599,11 +599,18 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--corpus-fmt",
-        default=_d("corpus_fmt", "full"),
+        # ★★ A2（2026-11-17，用户令「把 replay 设为默认」）：缺省从 full 翻成 replay。
+        # 代价与判决见 `common/shard.py` 的 `RL_F16_FIELDS` 注释 +
+        # `reports/replay-corpus-five-arm-20261117.md`；迁移口径（历史 full 权重链是一次性
+        # 断代）见 plan/replay-corpus.plan.md §2。
+        # ⚠ 这个缺省**不是**全局：同机腿（kind=iter / --export-bundle）在轮边界被强制回
+        # full（`trainer/loop_round_steps._resolve_corpus_fmt`）——那里写着判据。
+        default=_d("corpus_fmt", "replay"),
         choices=("full", "replay"),
-        help="语料运输格式（plan/replay-corpus.plan.md P2）：full=现有 obs npy（默认，"
-        "逐字节旧行为）；replay=rollout 只产 replay+非 obs 标签，worker 侧用转换器重建"
-        " obs/scalars/extra。只对 per-tick RL rollout + kind=ppo 生效；kind=iter/eval 强制 full。",
+        help="语料运输格式（plan/replay-corpus.plan.md P2）：replay（默认）=rollout 只产 "
+        "replay+非 obs 标签，worker 侧用转换器重建 obs/scalars/extra（payload 4.7× 小、"
+        "下载 2.8s→0.7s）；full=现有 obs npy（回滚旋钮）。只对 per-tick RL 的 kind=ppo 生效；"
+        "kind=iter/run 与 eval 一律 full（同机没有 wire 收益，轮边界自动降级+一行日志）。",
     )
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；

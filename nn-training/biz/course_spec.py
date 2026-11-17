@@ -1192,6 +1192,17 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 必须人工盯 `kl` / `mean_ret` / `value`；判完立刻改回 False。
     breakers_off: bool = False
 
+    # ---- 语料/装载器（plan/replay-corpus.plan.md §6.6 GPU 云机真机验证）----
+    # A2（2026-11-17）：缺省与 argparse 对齐成 replay（真源 = `worker/cli.py --corpus-fmt`
+    # ← rl-config 的 `rl.corpus_fmt`）。**注意这个字段是"显式才生效"**：`flat_overrides`
+    # 靠 `model_fields_set` 判定 ⇒ 课程不写就一行都不覆盖（所以这里的缺省只是文档值，
+    # 真正生效的缺省在 argparse 侧）。同机腿（kind=iter / --export-bundle）由
+    # `trainer/loop_round_steps._resolve_corpus_fmt` 在轮边界强制回 full。
+    # 为什么进课程而不是只留 CLI：run_rl 是「课程单一事实来源，无 CLI 逐参覆盖」，
+    # 四档验证课必须能各自声明这两个开关，否则就得靠 BCITY_RL_CONFIG 分叉。
+    corpus_fmt: Literal["full", "replay"] = "replay"
+    ppo_loader: Literal["eager", "lazy"] = "eager"
+
     # ---- 课程结束门（可选；缺席 = 关闭，老课程逐字节不变）----
     gates: GatesSpec | None = None
 
@@ -1400,6 +1411,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             # 关闭全部过程熔断（KL/熵/NaN）。漏映射 = 静默失效（ent_break 前科）——
             # 课程里写了 true 却照常熔断，会被误读成「开关没用」。
             "breakers_off": "breakers_off",
+            # replay 真机验证的四个执行档（同上：显式才覆盖；漏映射 = 课程写了也不生效）。
+            "corpus_fmt": "corpus_fmt",
+            "ppo_loader": "ppo_loader",
         }
         out: dict[str, Any] = {}
         for src_key, dst_key in mapping.items():

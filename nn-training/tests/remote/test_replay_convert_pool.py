@@ -184,6 +184,35 @@ def test_convert_workers_uses_all_cores(monkeypatch: pytest.MonkeyPatch) -> None
     assert rc.convert_workers(shards=350) == 19
 
 
+def test_str_shard_dirs_from_unpack_are_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**生产形状**：`unpack_payload` 扫出来的是 str 目录（`download.py:810`）。
+
+    2026-11-17 云端第一次真跑 replay：`_corpus_bytes` 里 `sd / "replay.json"` 收到 str ⇒
+    `TypeError: unsupported operand type(s) for /: 'str' and 'str'`，job 报 FAILED 后
+    无限重领，队列看着像卡住（日志只有一行 FAILED，没有 traceback）。这里把入口归一
+    钉住：str 与 Path 两种形状必须产出同一份读数与产物。
+    """
+    job, man, shards = _job(tmp_path)
+    pool = _FakePool()
+    monkeypatch.setattr(serve_pool, 'make_pool', lambda *a, **k: pool)
+
+    as_str = [str(d) for d in shards]
+    got = rc.convert_replay_corpus(
+        job, as_str, man, workers=2, pool_factory=serve_pool.pool_for_bundle
+    )
+
+    assert got['convert_jobs'] == 2 and got['reused'] == 0
+    assert got['shards'] == 2
+    for d in shards:
+        for name in ('obs.npy', 'scalars.npy', 'extra.npy'):
+            assert (d / name).is_file(), f'str 入口也必须真的转出来：{d.name}/{name}'
+    # 池任务的 label 取的是 `sd.name`（str 上没有 .name ⇒ 入口归一前必炸）
+    assert all(argv[2].endswith('.conv-tmp') for argv in pool.tasks)
+    assert pool.closed is True
+
+
 def test_pool_width_and_readout_follow_workers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

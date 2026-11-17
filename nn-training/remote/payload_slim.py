@@ -236,7 +236,10 @@ class ShardSlim:
         if self._kind_of(src) != "slim":
             return None
         # replay：三张 obs 张量不进 payload（worker pre-pass 重建）。必须排在 f16 之前——
-        # scalars/extra 也在 F16_FILES 里，先量化再丢弃是白付一次算术。
+        # 顺序在 A2（2026-11-17）之后不再是"省一次算术"的问题，而是**语义**问题：
+        # `scalars`/`extra` 已移出 `RL_F16_FIELDS`，但若有人把它们加回表内，本行的先后
+        # 决定了两臂是否对称（full 被量化 / replay 不量化 = 语料不等价，见 `common/shard.py`
+        # `RL_F16_FIELDS` 的注释）。DROP 先判 = 至少不会"量化一张马上要丢的表"。
         if self.corpus_fmt == "replay" and filename in REPLAY_DROP_FILES:
             return DROP_MEMBER
         if filename == METRICS_NAME:
