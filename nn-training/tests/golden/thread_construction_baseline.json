@@ -4,27 +4,5 @@
     "迁移到 `Runtime.thread(...)` 之后**必须调小**（归零的条目删掉）；数字只许减。",
     "豁免：common/runtime.py（所有者本人）与 remote/*_boot.py（引导期单文件，import 不到 Runtime）。"
   ],
-  "thread_construction": {
-    "common/distribution.py": 1,
-    "common/net_http.py": 1,
-    "common/platform_utils.py": 1,
-    "hub/boot.py": 2,
-    "hub/smoke_loopback.py": 1,
-    "hub/tunnel_ab_probe.py": 1,
-    "remote/deliver_worker.py": 1,
-    "remote/error_report.py": 1,
-    "remote/job_lifecycle.py": 1,
-    "remote/job_round.py": 2,
-    "remote/notebook_runtime.py": 1,
-    "remote/offline_push.py": 1,
-    "remote/push_bootstrap.py": 1,
-    "remote/worker_server.py": 1,
-    "trainer/batch_runner.py": 2,
-    "trainer/eval_m1.py": 1,
-    "trainer/queue_local.py": 2,
-    "trainer/queue_worker.py": 3,
-    "trainer/stream.py": 1,
-    "worker/bc_dispatch.py": 1,
-    "worker/bc_eval.py": 1
-  }
+  "thread_construction": {}
 }

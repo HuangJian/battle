@@ -240,7 +240,8 @@ def run_push(
     server = make_face_server(state, port, push_token, log=log)
     # 隧道要指向**实际绑上的**端口（`push_port=0` 时与入参不同）。
     port = int(server.server_address[1])
-    threading.Thread(target=server.serve_forever, name="offline-push-face", daemon=True).start()
+    #: 服务线程归它自己那份 Runtime（`offline-push-face-serve`）：进程活多久它活多久。
+    runtime.Runtime(scope="offline-push-face").thread(server.serve_forever, name="serve", daemon=True)
     log(f"worker 服务已监听 :{port}（端点 /offline/push/*，Bearer 鉴权）")
 
     child = _Child()

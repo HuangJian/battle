@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import common.runtime
 from common import net_http
 from common.http_respond import respond_json
 from common.instance_lock import (
@@ -565,29 +566,28 @@ def make_worker_server(
                 self._json({"error": "internal"}, 500)
 
     def _starter(jid: str, item: dict) -> None:
-        threading.Thread(
-            target=_execute_job,
-            args=(
-                state,
-                item["manifest"],
-                item["payload_zip"],
-                item["code_zip"],
-                item.get("ts_code_zip"),
-                item.get("blobs"),
-                state.work_dir,
-                device,
-                torch_threads,
-                item["echo"],
-                # `threading.Thread(args=…)` 只收位置参数：缺省参数必须按形参顺序放进来
-                # （写成 `epoch_mult=…` 会让整个文件语法错误）。
-                hub_url,
-                token,
-                epoch_mult,
-                log,
-            ),
+        #: 一个 job 一条线程（`worker-job-<jid前8>-run`）：它跑完自己把状态写回 `state`。
+        common.runtime.Runtime(scope=f"worker-job-{jid[:8]}").thread(
+            _execute_job,
+            state,
+            item["manifest"],
+            item["payload_zip"],
+            item["code_zip"],
+            item.get("ts_code_zip"),
+            item.get("blobs"),
+            state.work_dir,
+            device,
+            torch_threads,
+            item["echo"],
+            # `Runtime.thread(...)` 只收位置参数：缺省参数必须按形参顺序放进来
+            # （写成 `epoch_mult=…` 会让整个文件语法错误）。
+            hub_url,
+            token,
+            epoch_mult,
+            log,
             daemon=True,
-            name=f"job-{jid[:8]}",
-        ).start()
+            name="run",
+        )
 
     state.set_starter(_starter)
     return ThreadingHTTPServer((host, port), Handler)

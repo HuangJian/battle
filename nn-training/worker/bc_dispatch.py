@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
+import common.runtime
 from common.distribution import (
     BC_MODE,
     BC_V6_MODE,
@@ -383,13 +384,13 @@ def dispatch_bc_corpus(
                                 " 与节点日志定位）"
                             )
 
+    #: 槽位线程归这里（`bc-<槽位>`）：本函数自己起、自己 join，收尾即散。
+    rt = common.runtime.Runtime(scope="bc")
     threads = [
-        threading.Thread(target=slot_worker, args=(node,), daemon=True, name=f"bc-{idx}")
+        rt.thread(slot_worker, node, daemon=True, name=f"{idx}")
         for idx, (node, _slot_i) in enumerate(slots)
     ]
     t0 = time.time()
-    for t in threads:
-        t.start()
     for t in threads:
         t.join()
     stats["elapsed_sec"] = round(time.time() - t0, 1)

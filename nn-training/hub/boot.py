@@ -29,8 +29,9 @@ import sys
 import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
 from typing import Any
+
+import common.runtime
 
 # 单实例锁 / 端口守卫（2026-09-17 双实例事故的两道闸）：与调度面无关，纯进程生命周期。
 from common.cli import house_parser
@@ -375,7 +376,8 @@ def main() -> None:
                     except Exception as e:  # 扫描失败不该让调度面死掉
                         _log(f"discover 扫描失败: {e}")
 
-            Thread(target=_scan_loop, daemon=True, name="hub-discover").start()
+            #: 发现扫描线程归 hub 域（`hub-discover-scan`）：进程活多久它活多久。
+            common.runtime.Runtime(scope="hub-discover").thread(_scan_loop, name="scan", daemon=True)
     else:
         if not args.job_root or not args.jsonl:
             _log(
@@ -461,7 +463,8 @@ def main() -> None:
                 except Exception as e:  # 观测面坏掉不该让进程死（同 discover 扫描失败）
                     _log(f"静默哨兵扫描失败: {e}")
 
-        Thread(target=_pulse_loop, daemon=True, name="hub-worker-pulse").start()
+        #: 静默哨兵线程归 hub 域（`hub-worker-pulse-scan`）：只观测，没人等它。
+        common.runtime.Runtime(scope="hub-worker-pulse").thread(_pulse_loop, name="scan", daemon=True)
         _log(
             f"worker 静默哨兵已挂载：阈值={args.worker_silence_sec:g}s "
             f"扫描={WORKER_PULSE_SWEEP_SEC:g}s ⇒ 静默事件进 /admin/errors（只观测）",

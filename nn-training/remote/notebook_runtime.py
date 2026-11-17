@@ -38,11 +38,11 @@ import math
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, cast
 
+import common.runtime
 from common.env_probe import probe_cloud_env
 from common.errors import NET_ERRORS as _BASE_NET_ERRORS
 from common.logutil import tag_logger
@@ -593,12 +593,9 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         except KeyboardInterrupt:
             rcs[name] = 0
 
-    threads = [
-        threading.Thread(target=_run, args=(name, argv), name=f"sup-{name}", daemon=True)
-        for name, argv in specs
-    ]
-    for t in threads:
-        t.start()
+    #: 每个实例一条监督器线程（`notebook-supervise-<实例>`）：本函数自己 join。
+    rt = common.runtime.Runtime(scope="notebook-supervise")
+    threads = [rt.thread(_run, name, argv, name=f"{name}", daemon=True) for name, argv in specs]
     try:
         for t in threads:
             t.join()

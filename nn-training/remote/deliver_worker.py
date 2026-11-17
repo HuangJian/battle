@@ -40,6 +40,7 @@ import threading
 import time
 from pathlib import Path
 
+import common.runtime
 from common.cli import house_parser, run_main
 from common.settings import hub_token_from_env
 from remote import deliver_parts
@@ -313,9 +314,10 @@ def main(argv: list[str] | None = None) -> int:
     tick = max(0.05, float(args.tick_sec))
     idle = max(60.0, float(args.idle_timeout))
     parent_gone = threading.Event()
-    threading.Thread(
-        target=_watch_stdin, args=(parent_gone,), name="deliver-stdin", daemon=True
-    ).start()
+    #: 父进程消失的守望线程（`deliver-stdin-watch`）：只负责置位，没人等它。
+    common.runtime.Runtime(scope="deliver-stdin").thread(
+        _watch_stdin, parent_gone, name="watch", daemon=True
+    )
     last_ctl_at = time.monotonic()
     stop_deadline: float | None = None
     stop_budget = 0.0

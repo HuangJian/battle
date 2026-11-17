@@ -25,6 +25,56 @@
 
 ---
 
+## §124 裸线程收编第四批：模块级扇出清零，G18 转零容忍（2026-11-17）
+
+第三批之后账上还剩 **27 处 / 21 文件**，全部在**模块级函数**里（§122 当初把它们留账的理由是
+「手上没有 Runtime，得先把 runtime 从调用方传下来」）。这一批证明那个理由在每一处都不成立：
+它们本来就有一个**自然的域**，只是没写成对象。
+
+**做法：域就在函数作用域里。** 需要一"轮/一个单元/一个 job"的，在那个函数里建一份**局部**
+`Runtime`，随函数收尾而散 —— 不造模块级单例（那只是把「无主线程」换成「无主 Runtime」，§122
+拒绝的形态没变）。有 `self` 的（`BatchEvalRunner` / `_UnitLanes`）把 `_rt` 挂到实例上，
+有 `q` 的（`run_queue`）挂到本轮的状态旁边。
+
+| 域 | 归属 | 线程名 |
+|---|---|---|
+| `queue` | `trainer/queue_worker.run_queue`（局部） | `-worker:<节点>` / `-weights-push` / `-rollout-rescan` |
+| `queue-rescan` | `trainer/queue_local.rescan_nodes`（本线程体内） | `-rearm:<节点>` |
+| `alloc-cancel` | `reap_alloc_timeouts`（一次事件一份） | `-fire` |
+| `batcheval-u<idx>` | `BatchEvalRunner`（实例） | `-run` / `-worker:..` / `-supervise:..` / `-watch` |
+| `stream` · `eval-m1-it<n>` | `run_rollout_stream` · `dispatch_eval` | `-collector` · `-body` |
+| `bc` · `bc-eval` | `worker/bc_dispatch` · `worker/bc_eval` | `-<槽位>` |
+| `job-<jid前8>` | `remote/job_round.run_one_round` | `-pf` / `-hb` |
+| `abort` · `race` · `bounded` | `common/distribution` · `net_http` · `platform_utils` | `-close-drop` · `-connect:<i>` · `-<名字>` |
+| `hub-discover` · `hub-worker-pulse` · `smoke-hub` · `tunnel-ab-hub` | hub 侧常驻/探针 | `-scan` · `-server` · `-serve` |
+| `error-report` · `cancel-<jid前8>` · `deliver-stdin` · `notebook-supervise-<实例>` · `worker-job-<jid前8>` | remote 侧 | `-send` · `-watch` · `-<实例>` · `-run` |
+
+**踩到的三处坑（都是「迁移改变语义」，不是风格问题）**
+
+1. **`rt.thread(...)` 只收位置参数**：`threading.Thread(target=f, args=c)` 里的 `args` 是**一个元组**，
+   照抄成 `rt.thread(f, c)` 就是把元组当**一个**实参递进去 —— `net_http` 的竞速连接因此全部
+   在 target 里抛 `TypeError`，`done` 永不置位，用例卡满预算（`test_racing_connect` 3 条红）。
+   正解是 `rt.thread(f, *c, ...)`。
+2. **`start()` 已经代调**：`bc_dispatch` / `bc_eval` / `stream` 原来「先造一列表、再统一 start」，
+   迁移后那个 `for t in threads: t.start()` 必须一起删（否则 `RuntimeError: threads can only be
+   started once`，`test_bc_course` 当场红）。`eval_m1` 的 `dispatch_*` 同理。
+3. **`remote/push_bootstrap.py` 属于引导期**：它顶层**一个仓内 import 都没有**（整份被塞进 notebook
+   cell，代码包解出来之前就要跑），所以它连 `common.runtime` 都不能拿 ⇒ 进 `EXEMPT`（与
+   `remote/*_boot.py` 同一处境，只是不走 `STANDALONE_BOOT_MODULES` 那条 DAG 判据）。
+
+**G18 转零容忍**（存量归零之后按老口径写会自相矛盾）：
+* 基线清空（`{"thread_construction": {}}`）—— 新代码再就地 `Thread(...)` 直接红，要开额度得先解释。
+* 原来的「9 成地板」换成 `test_scan_entry_sees_the_face_and_the_owner`：① 真扫到 >200 个生产面文件；
+  ② **所有者本人**（`common/runtime.py`）那两处 `Thread(...)` 还能被数出来。存量归零后「数到多少处」
+  证明不了扫描器活着，只有这两条能。
+* 两向护栏的下限从 1 抬到 **40**（实测 49 处 `Runtime.thread(...)`）：迁移被无声回退要红。
+* 顺带把 G15 的 `total >= 40` 之前那刀（§123）落到位：现在只剩所有者 + 引导期文件。
+
+**读数**：就地 `Thread(...)` **0 处**（`rt.thread(...)` 49 处）· 全量 **6194 收下 / 2 skipped** ·
+mypy 958 · ruff 全绿 · 全量 ×3（2 绿；1 次 `test_push_bootstrap_teardown::test_port_free_for_next_bind_
+after_teardown` 红在 `bind` 的 `Address already in use`——端口回收的满载计时 flake，单跑 6/6 绿，
+该文件本刀没动过）。
+
 ## §123 裸线程收编第三批：十一个「自己就知道自己是谁」的类（2026-11-17）
 
 第三批按 §122 的迁移顺序走完第二批（类持有生命周期的）—— 这一批都是**手上已经有 `Runtime` 或

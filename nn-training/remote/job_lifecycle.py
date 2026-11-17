@@ -45,6 +45,7 @@ from collections.abc import Callable
 from typing import Any
 
 import common.env_probe as env_probe
+import common.runtime
 from common.logutil import tag_logger
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
@@ -432,9 +433,8 @@ def start_cancel_watcher(
                 cancelled.set()
                 return
 
-    th = threading.Thread(target=_loop, daemon=True, name=f"cancel-{jid[:8]}")
-    th.start()
-    return th
+    #: 取消观察线程归这里（`cancel-<jid前8>-watch`）：调用方拿句柄决定等不等。
+    return common.runtime.Runtime(scope=f"cancel-{jid[:8]}").thread(_loop, name="watch", daemon=True)
 
 
 def _priority_rank(prio: str) -> int:

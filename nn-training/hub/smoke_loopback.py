@@ -34,6 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
+import common.runtime
 from biz.reward_library import METRICS_VERSION
 from common.cli import house_parser, run_main
 from common.logutil import tag_logger
@@ -187,10 +188,10 @@ def main() -> int:
     store = _JobStore(work / "jobs", work / "training_log.jsonl")
     srv = make_server(store, 0, args.token, host="127.0.0.1")
     port = srv.server_address[1]
-    import threading
 
-    th = threading.Thread(target=srv.serve_forever, name="smoke-hub-server", daemon=True)
-    th.start()
+    th = common.runtime.Runtime(scope="smoke-hub").thread(
+        srv.serve_forever, name="server", daemon=True
+    )
     hub_url = f"http://127.0.0.1:{port}"
     log(f"hub-server (fake cloud) on {hub_url}")
 

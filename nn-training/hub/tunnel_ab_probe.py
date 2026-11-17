@@ -36,7 +36,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.runtime
 from common.cli import house_parser, run_main
 from common.logutil import tag_logger
 from common.platform_utils import POPEN_NO_WINDOW
@@ -107,9 +107,10 @@ def _boot_hub(port: int, token: str) -> object:
     work = Path(tempfile.mkdtemp(prefix="tunnel-ab-"))
     store = _JobStore(work / "jobs", work / "training_log.jsonl")
     srv = make_server(store, port, token, host="127.0.0.1")
-    threading.Thread(
-        target=srv.serve_forever, name="tunnel-ab-hub", daemon=True
-    ).start()
+    #: 探针里的假 hub 线程（`tunnel-ab-hub-serve`）：探针结束随进程退出。
+    common.runtime.Runtime(scope="tunnel-ab-hub").thread(
+        srv.serve_forever, name="serve", daemon=True
+    )
     return srv
 
 

@@ -524,6 +524,10 @@ def rescan_nodes(
         腿的中途上线节点会把权重发进 rollout 桶，任务全 409；
       · `nd` 带 `ping`（旧实现漏带 ⇒ stageJson 任务在回场节点上被能力握手拒掉）。
     """
+    #: 补孵的采样线程归它（名字 `queue-rescan-rearm:<节点>`）。建在**本线程体内**：
+    #: 这份 Runtime 的生命期 = rescan 线程自己，不是跨轮单例；谁等线程仍由调用方的
+    #: `extra_threads` 决定（与 `LocalLane` 同口径：所有者不替人 join）。
+    rt = common.runtime.Runtime(scope="queue-rescan")
     configured = [n for n in cfg.get("nodes", []) if n.get("enabled", True)]
     streaks = {} if streaks is None else streaks
     soft_streaks = {} if soft_streaks is None else soft_streaks
@@ -702,13 +706,7 @@ def rescan_nodes(
                     f"（第 {rearm_counts[nid]}/{rearm_cap} 次）"
                 )
             for _ in range(c_n):
-                t = threading.Thread(
-                    target=worker,
-                    args=(nd,),
-                    name=f"queue-local:{nd.get('id')}",
-                    daemon=True,
-                )
-                t.start()
+                t = rt.thread(worker, nd, name=f"rearm:{nd.get('id')}", daemon=True)
                 extra_threads.append(t)
 
 
@@ -891,12 +889,9 @@ def reap_alloc_timeouts(
     # 断本端连接只省本端的等待；有 cancelSupport 的节点还要真正停掉远端算力。
     # daemon 线程：reaper 在 dispatch 锁内跑，HTTP 不得持锁。
     if cancel_targets:
-        threading.Thread(
-            target=_cancel_remote_targets,
-            args=(cancel_targets, log),
-            daemon=True,
-            name="alloc-cancel",
-        ).start()
+        common.runtime.Runtime(scope="alloc-cancel").thread(
+            _cancel_remote_targets, cancel_targets, log, name="fire", daemon=True
+        )
     return len(reaped)
 
 

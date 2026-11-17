@@ -20,6 +20,7 @@ from typing import Any
 
 import common.codehash
 import common.distribution
+import common.runtime
 from common.distribution import fetch_task, node_ping, post_weights_cached, validate_eval_result
 
 #: 与 biz/config.GATE_PLATEAU_METRICS 同词表（RL eval 展示口径）
@@ -382,12 +383,11 @@ def dispatch_bc_eval(
                     else:
                         rows.append(m)
 
+        #: 槽位线程归这里（`bc-eval-<槽位>`）：本函数自己起、自己 join。
+        rt = common.runtime.Runtime(scope="bc-eval")
         threads = [
-            _th.Thread(target=slot_worker, args=(n,), daemon=True, name=f"bc-eval-{i}")
-            for i, n in enumerate(slots)
+            rt.thread(slot_worker, n, daemon=True, name=f"{i}") for i, n in enumerate(slots)
         ]
-        for t in threads:
-            t.start()
         for t in threads:
             t.join()
 

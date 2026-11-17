@@ -41,6 +41,7 @@ from typing import NamedTuple
 
 import common.codehash
 import common.distribution
+import common.runtime
 from biz.batch_plan import (
     batch_iter_id,
     is_transient_error,
@@ -94,17 +95,6 @@ NO_CONSUMER_GRACE_SEC = 180.0
 #: 单节点「恢复后仍 0 局成功」的最大轮次（`policy.nodeRecoveryTries` 可覆盖）——
 #: 有进展即清零，见 BatchEvalRunner.mark_tripped。
 NODE_RECOVERY_TRIES = 3
-
-
-def _spawn_thread(target, name: str, *args: object) -> threading.Thread:
-    """起一个**具名** daemon 线程并立即 start（G15：线程转储里要认得出是谁）。
-
-    `name` 是必填关键字 —— 没名字的线程在 `faulthandler` / `py-spy` 里只显示 `Thread-N`，
-    出事时现场分不清它是在等本机队列、监管某个节点，还是采样线程。
-    """
-    t = threading.Thread(target=target, args=args, name=name, daemon=True)
-    t.start()
-    return t
 
 
 def _heartbeat(**patch: object) -> None:
@@ -204,6 +194,9 @@ class BatchEvalRunner:
         self.unit = unit
         self.unit_idx = unit_idx
         self.unit_of = unit_of
+        #: 本单元的所有线程（节点槽位 / 监管 / 每 2s 采样）归这里 —— 一端一份，名字带单元号，
+        #: 转储里能直接对上是哪一批；谁 join 仍由调用方的 `threads` 表决定。
+        self._rt = common.runtime.Runtime(scope=f"batcheval-u{unit_idx}")
         self.run_id = run_id
         self.engine_epoch = engine_epoch
         self.policy = policy
@@ -809,10 +802,18 @@ class _UnitLanes:
                 f' — 本单元不再等它（其余节点/本机槽位继续；查节点日志与 /v1/ping）'
             )
 
+    def _spawn(self, target, name: str, *args: object) -> threading.Thread:
+        """起一个**具名** daemon 线程（归本单元的 `Runtime`：名字 `batcheval-u<idx>-<name>`）。
+
+        没名字的线程在 `faulthandler` / `py-spy` 里只显示 `Thread-N`，出事时现场分不清它是
+        在等本机队列、监管某个节点，还是采样线程。
+        """
+        return self.owner._rt.thread(target, *args, name=name, daemon=True)
+
     def spawn_workers(self, nd: dict, lane: dict, count: int) -> list[threading.Thread]:
         ws: list[threading.Thread] = []
         for i in range(count):
-            ws.append(_spawn_thread(self.worker, f"batch-worker:{nd.get('id')}-{i}", nd, lane, i))
+            ws.append(self._spawn(self.worker, f"worker:{nd.get('id')}-{i}", nd, lane, i))
         return ws
 
     def supervise(self, nd: dict) -> None:
@@ -1226,11 +1227,11 @@ class _UnitLanes:
             threads += self.spawn_workers({"id": "local"}, local_lane, self.local_slots)
         # 每节点一条通道：各自就绪即派单；失联每 recover_ping_sec 重探（req 1/3/5）。
         for nd in self.enabled_nodes:
-            threads.append(_spawn_thread(self.supervise, f"batch-supervise:{nd.get('id')}", nd))
+            threads.append(self._spawn(self.supervise, f"supervise:{nd.get('id')}", nd))
         if self.trace:
             # 每 2s 一行在飞采样：掉档时一眼看出是「队列空了」还是「派发停了」。
 
-            _spawn_thread(self._watch, "batch-watch")
+            self._spawn(self._watch, "watch")
         # 收尾等待：settled 一满（all_done 由最后结算的 worker 置位）或墙钟到点即收工。
         # 「零消费者」只在**整批从未有过任何消费者**时生效（无节点就绪过 + 本机槽位 0）
         # ⇒ 有界响亮收摊，而不是默认 86400s 窗口里干等。
@@ -1331,7 +1332,5 @@ def dispatch_batch_bg(
         window_event,
         init_sha16,
     )
-    t_ = threading.Thread(target=runner.run, daemon=True, name=f"batcheval-u{unit_idx}")
-    t_.start()
-    return t_
+    return runner._rt.thread(runner.run, name="run", daemon=True)
 

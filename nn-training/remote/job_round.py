@@ -449,6 +449,9 @@ def run_one_round(
     preloaded: dict | None = None
     _pf_stop = threading.Event()
     pf_thread: threading.Thread | None = None
+    #: 本轮的预取填充与心跳两条旁证线程归这里（`job-<jid前8>-pf` / `-hb`）：
+    #: 与 job 同生命周期（结束就在 finally 里 join），不是常驻线程。
+    rt = common.runtime.Runtime(scope=f"job-{jid[:8]}")
     # 下行腿在**哪**跑（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
     # `PayloadProcess` 且**未降级** ⇒ 填充在子进程里（这里只下一道 `fill` 命令）；
     # 其余（`PrefetchStore` / 降级后的 `PayloadProcess`）⇒ 旧的进程内填充线程。
@@ -499,9 +502,13 @@ def run_one_round(
                 )
             )
             if not remote_ok:
-                pf_thread = threading.Thread(
-                    target=_prefetch_fill,
-                    args=(base_url, token, pf_store, _pf_stop),
+                pf_thread = rt.thread(
+                    _prefetch_fill,
+                    base_url,
+                    token,
+                    pf_store,
+                    _pf_stop,
+                    name="pf",
                     kwargs={
                         "worker_id": worker_id,
                         "role": role,
@@ -511,9 +518,7 @@ def run_one_round(
                         "log": log,
                     },
                     daemon=True,
-                    name=f"pf-{jid[:8]}",
                 )
-                pf_thread.start()
     _hb_stop = threading.Event()
     hb_thread = None
     if lease_token:
@@ -522,8 +527,7 @@ def run_one_round(
             while not _hb_stop.wait(HEARTBEAT_SEC):
                 heartbeat(base_url, token, jid, lease_token)
 
-        hb_thread = threading.Thread(target=_hb_loop, daemon=True, name=f"hb-{jid[:8]}")
-        hb_thread.start()
+        hb_thread = rt.thread(_hb_loop, name="hb", daemon=True)
     job_ok = False
     stop = False  # CodeChangedError + 无监督器 ⇒ 整条循环退出（宿主据此 `return done`）
     uploaded = False  # P2.5：本 job 有没有走到「交回传」（没走到 = finally 里照旧 flush）

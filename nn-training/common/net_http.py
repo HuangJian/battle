@@ -33,6 +33,8 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlsplit
 
+from common import runtime
+
 
 def is_loopback(url_or_host: str) -> bool:
     """回环判据：IPv4 `127.0.0.0/8`、IPv6 `::1`、`localhost`（含 `*.localhost`）。
@@ -159,11 +161,10 @@ def racing_create_connection(
         else:
             done.set()
 
-    threads = [
-        threading.Thread(target=_attempt, args=c, name="race-connect", daemon=True) for c in cands
-    ]
-    for t in threads:
-        t.start()
+    #: 竞速连接线程归这里（`race-connect-<序号>`）：同一批里每条要认得出是第几个候选。
+    rt = runtime.Runtime(scope="race")
+    for i, c in enumerate(cands):
+        rt.thread(_attempt, *c, name=f"connect-{i}", daemon=True)
     done.wait(None if deadline is None else max(0.0, deadline - time.monotonic()))
     with lock:
         # 置位后晚到的成功者会自关（见 _attempt）——否则主线程放弃 = 漏一个 fd。

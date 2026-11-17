@@ -385,7 +385,8 @@ def abort_active_requests(tag: str = "") -> int:
                     # 目标类型不保证有 close（上面已显式 isinstance 筛过）。
                     pass
 
-        threading.Thread(target=_closer, daemon=True, name="abort-close").start()
+        #: 收尾线程归这里（`abort-close-drop`）：只关连接、没人等它（daemon）。
+        runtime.Runtime(scope="abort").thread(_closer, name="close-drop", daemon=True)
     return len(targets)
 
 

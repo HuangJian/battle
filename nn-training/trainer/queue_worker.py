@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
+import common.runtime
 from common.platform_utils import rmtree_best_effort
 from trainer.queue_local import (
     LocalLane,
@@ -740,6 +741,9 @@ def run_queue(q: QueueState) -> None:
     worker = partial(queue_worker, q)
     q.threads = []
     q.extra_threads = []
+    #: 本轮的采样/下发/rescan 线程都归它（名字统一 `queue-*`，`describe()` 里可读）。
+    #: 建在 `run_queue` 里而不是模块级：一轮一份，收尾即散，不制造跨轮的单例。
+    rt = common.runtime.Runtime(scope="queue")
 
 
     # alive / spawned_ids：权重就绪后才 append（边分发边开采；rescan 共享）。
@@ -760,13 +764,7 @@ def run_queue(q: QueueState) -> None:
             if nd not in q.alive:
                 q.alive.append(nd)
         for _ in range(nd["c"]):
-            t = threading.Thread(
-                target=worker,
-                args=(nd,),
-                name=f"queue-worker:{nd.get('id')}",
-                daemon=True,
-            )
-            t.start()
+            t = rt.thread(worker, nd, name=f"worker:{nd.get('id')}", daemon=True)
             q.threads.append(t)
             q.extra_threads.append(t)
 
@@ -815,10 +813,7 @@ def run_queue(q: QueueState) -> None:
             q.t_dist_done_box[0] = time.time()
 
     if q.need:
-        push_t = threading.Thread(
-            target=_push_need_and_spawn, daemon=True, name="weights-push"
-        )
-        push_t.start()
+        push_t = rt.thread(_push_need_and_spawn, name="weights-push", daemon=True)
         q.threads.append(push_t)
     else:
         q.t_dist_done_box[0] = q.t_dist_start_box[0]
@@ -826,8 +821,8 @@ def run_queue(q: QueueState) -> None:
     # v3.9 动态节点发现：rescan 线程周期 ping 配置里未上线的节点，合格则
     # 权重下发 + 孵化新 worker 线程（与初始节点同等待遇，共享 pending 队列）。
     if q.rescan_sec > 0 and q.cfg.get("nodes"):
-        scan_t = threading.Thread(
-            target=rescan_nodes,
+        scan_t = rt.thread(
+            rescan_nodes,
             # **全部关键字传参**：本调用有 20+ 实参，历史上第 19 个位置参数错位
             # 过（线程启动即抛，运行中上线的节点永远不被发现——见函数 docstring）。
             kwargs=dict(
@@ -864,7 +859,6 @@ def run_queue(q: QueueState) -> None:
             name="rollout-rescan",
         )
         q.threads.append(scan_t)
-        scan_t.start()
 
     # v3.17 收尾兜底（2026-09-06，竞速收尾洞②）：旧实现对每个线程
     # join(window + task_timeout) = 2700s —— 只要有一个 worker 卡在**不可中断**

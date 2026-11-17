@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.runtime
 import trainer.batch_eval as be
 import trainer.batch_runner as br
 
@@ -69,6 +70,9 @@ RUNNER_IMPORTS = {
     "time",
     "typing",
     "common.distribution",
+    # 2026-11-17（§P1-6 第四批）：单元线程归 `Runtime`（`batcheval-u<idx>-*`），
+    # `common.runtime` 是 L0、stdlib-only 的并发所有者。
+    "common.runtime",
     # 2026-11-16 登记（B8 第一刀）：codeHash 实现搬到 `common/codehash.py`，
     # `compute_code_hash()` 的入边随之拆成两条；其余分发面仍走 `common.distribution`。
     "common.codehash",
@@ -313,6 +317,9 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
     class FakeRunner:
         def __init__(self, *a, **k):
             calls["args"] = a
+            #: `dispatch_batch_bg` 现在用**单元自己的** Runtime 起线程（§P1-6 第四批）：
+            #: 名字 = `<scope>-run`，FakeRunner 也得有一份才像真的。
+            self._rt = common.runtime.Runtime(scope="batcheval-u0")
 
         def run(self) -> dict:
             calls["ran"] = True
@@ -335,7 +342,7 @@ def test_dispatch_batch_bg_starts_a_daemon_thread_from_the_new_home(monkeypatch)
     t.join(timeout=10)
     assert calls.get("ran") is True
     assert t.daemon is True
-    assert t.name == "batcheval-u0"
+    assert t.name == "batcheval-u0-run"
     assert calls["args"][0] == "bun" and calls["args"][6] == {"rung": "c4l1"}
 
 

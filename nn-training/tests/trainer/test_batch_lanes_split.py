@@ -41,6 +41,9 @@ MACHINE_METHODS = (
     "lane_state",
     "bringup",
     "mark_tripped",
+    # 2026-11-17（§P1-6 第四批）：单元的线程改由 `self.owner._rt` 起（名字带单元号、
+    # 登记在本域），`_spawn` 是那个唯一入口（顺序照类体）。
+    "_spawn",
     "spawn_workers",
     "supervise",
     "window_open",

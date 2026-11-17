@@ -11,6 +11,7 @@ from typing import Any, TypedDict
 import numpy as np
 
 import common.distribution
+import common.runtime
 from common.log import log
 from common.text import exc_tail
 from trainer.dispatch_queue import local_slots_max_of, run_rollout_queue
@@ -387,7 +388,8 @@ def run_rollout_stream(
                 f"collect-only for the rest of this round; task dispatch stopped"
             )
 
-    th = threading.Thread(target=_collector, name="stream-collector", daemon=True)
+    #: 收集线程归这里（`stream-collector`）：本函数自己等它，收尾即散。
+    th = common.runtime.Runtime(scope="stream").thread(_collector, name="collector", daemon=True)
     t0 = time.time()
     log(
         f"[stream] collector started (local_slots={local_slots}, "
@@ -419,7 +421,6 @@ def run_rollout_stream(
                 f"[stream] seeded {_pre_seeded} precollected first-wave shards "
                 f"(extra wver {extra_wver[:12]}…) into training queue"
             )
-    th.start()
     while True:
         with lock:
             n_pending = len(pend)

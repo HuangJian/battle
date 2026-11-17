@@ -6967,3 +6967,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   扫描入口写歪，扫描器正确性由同文件的合成源码用例盯），`any_baseline` 的 `push_dispatch` 11 → 10（`Callable[[], Any]`
   收成 `Callable[..., dict]`）。存量 40 → **27 处 / 21 文件**（`rt.thread(...)` 24 处）。读数 6194 收下 / 2 skipped ·
   mypy 958 · ruff 全绿 · 全量 ×6（5 绿，第 4 次一条墙钟上界的计时 flake，单跑全绿）。全文 → `docs/nn/engineering.md` §123。
+
+- **2026-11-17（§P1-6 第四批：模块级扇出清零，G18 转零容忍）**：第三批剩下的 27 处全在模块级函数里，
+  §122 当初留账的理由是「手上没有 Runtime」。这一批证明每处都有自然的域：拥有一轮/一个单元/一个 job 的
+  函数里建**局部** `Runtime`（随函数收尾而散，不造模块级单例 —— 那只是把「无主线程」换成「无主 Runtime」），
+  有 `self` 的挂实例（`BatchEvalRunner._rt`），有 `q` 的挂本轮状态。三处「迁移改变语义」的坑写进
+  §124：① `rt.thread` 只收位置参数（`args=c` 的元组要 `*c`，否则 target 里抛 TypeError 且 `done` 永不置位）；
+  ② `start()` 已代调，原来的「先造列表再统一 start」必须删（否则 `threads can only be started once`）；
+  ③ `remote/push_bootstrap.py` 整份进 notebook cell、顶层零仓内 import ⇒ 进 G18 的 `EXEMPT`（连
+  `common.runtime` 都不能拿）。**G18 转零容忍**：基线清空、旧的 9 成地板换成「扫到 >200 文件 + 所有者本人那两处
+  还数得出」（存量归零后「数到多少处」证明不了扫描器活着）、两向护栏下限 1 → 40（实测 49 处）。存量
+  **51 → 0 处**（四批）。读数：6194 收下 / 2 skipped · mypy 958 · ruff 全绿 · 全量 ×3（1 次端口回收计时 flake，
+  单跑全绿）。全文 → `docs/nn/engineering.md` §124。

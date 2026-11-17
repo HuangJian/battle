@@ -1,4 +1,4 @@
-"""G18：裸 `threading.Thread(...)` 的存量**只减不增**（`python.refactor.md` §P1-6 / B6 的最后一半）。
+"""G18：生产面不许再就地 `threading.Thread(...)`（`python.refactor.md` §P1-6 / B6 的最后一半）。
 
 ## 为什么需要这道闸
 
@@ -8,12 +8,14 @@
 转储里也看不出它属于哪一轮。
 
 `Runtime.thread(target, name=…)` 是它们的所有者（统一名 `<scope>-<name>`、登记、`close()` 时 join、
-`describe()["threads"]` 报是否还活着）。**但接缝不会让人自动少造线程** —— 所以配这道闸：存量按文件
-冻结，新代码想再就地 `Thread(...)` 就得先在这里加额度，而加额度时你会看到「同一族里已经有人搬过了」。
+`describe()["threads"]` 报是否还活着）。2026-11-17 的四批迁移把**生产面这一处存量搬到了 0**（先搬
+类持有生命周期的，再搬模块级扇出：后者的做法是**在拥有一轮/一个单元的那个函数里**建一份局部
+`Runtime`，随函数收尾而散，不造跨轮单例）。存量归零之后这道闸就是**零容忍**：新代码再就地
+`Thread(...)` 直接红。
 
-为什么不一次搬完：剩下的站点多数在**模块级函数**里（`_cancel_remote_targets` / 一次性扇出 /
-`rearm` 补孵），手上没有 `Runtime` —— 要搬得先把 runtime 从调用方传下来（§P1-4 的接缝），
-那是设计题；为了少一行在模块里造个隐藏单例，只是把「无主线程」换成「无主 Runtime」。
+真要新开一处就地构造前先问一句「这一轮/这个对象手上有没有 runtime」—— 四批里每一处都有，
+包括模块级扇出（它们本来就有 `q` / `self` / 一个函数作用域）。剩下的唯一理由是「引导期就要跑、
+import 不到 `common.*`」，那种文件在下面的 `EXEMPT` 里登记。
 
 ## 口径
 
@@ -35,7 +37,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.budget import sanity_floor
 from tests.helpers.remote_dag import STANDALONE_BOOT_MODULES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,10 +49,16 @@ FACE = ("biz", "common", "hub", "remote", "train", "trainer", "worker")
 OWNER_HOME = "common/runtime.py"
 
 #: 豁免文件（相对 `nn-training/`）：引导期单独拉取，顶层不得 import 仓内。
-EXEMPT = frozenset(f"{m.replace('.', '/')}.py" for m in STANDALONE_BOOT_MODULES)
+EXEMPT = frozenset(f"{m.replace('.', '/')}.py" for m in STANDALONE_BOOT_MODULES) | {
+    # 2026-11-17（§P1-6 第四批）：push-first 引导面**整份**被塞进 notebook cell（代码包
+    # 解出来之前就要跑），所以它顶层不许 import 仓内任何模块 —— 包括 `common.runtime`。
+    # 它与 `remote/*_boot.py` 同一处境，只是不走 `STANDALONE_BOOT_MODULES` 那条 DAG 判据。
+    "remote/push_bootstrap.py",
+}
 
-#: 迁移处数下限：`Runtime.thread(...)` 至少还有这么多调用点（0 = 迁移被无声回退）。
-MIGRATED_FLOOR = 1
+#: 迁移处数下限：四批搬完之后 `Runtime.thread(...)` 的调用点实测 49 处。留给后续再涨，
+#: 但不许掉回来（掉了 = 有人把裸线程写回去了，或者扫描口径被改坏）。
+MIGRATED_FLOOR = 40
 
 
 def _iter_face_py() -> list[Path]:
@@ -138,10 +145,16 @@ def test_baseline_only_shrinks() -> None:
         )
 
 
-def test_scan_floor() -> None:
-    """扫描入口自检：AST 没数到东西（walk 坏了 / 包名改了）时立刻红。"""
-    total = sum(_scan()[0].values())
-    assert total >= sanity_floor(_baseline()), f"只数到 {total} 处就地建线程，扫描入口可能坏了"
+def test_scan_entry_sees_the_face_and_the_owner() -> None:
+    """扫描入口自检（存量归零后不能再靠「数到多少处」证明自己活着）。
+
+    两向都判：① 真扫到了生产面的一批文件（路径写歪 ⇒ 一个文件都没有）；② **所有者本人**
+    那几处 `Thread(...)` 还能被数出来（AST 识别坏掉时它会变成 0，而扫描面判据仍绿）。
+    """
+    face = _iter_face_py()
+    assert len(face) > 200, len(face)
+    direct, _ = _scan_file((ROOT / OWNER_HOME).read_text(encoding="utf-8"))
+    assert direct >= 1, f"{OWNER_HOME} 里数不到 `Thread(...)` —— AST 识别或路径可能坏了"
 
 
 def test_the_owner_is_actually_used() -> None:

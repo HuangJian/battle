@@ -42,6 +42,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from common import runtime
+
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 POPEN_NO_WINDOW: dict[str, Any] = {}
 if sys.platform == "win32":
@@ -560,8 +562,8 @@ def call_bounded(fn: Callable[[], Any], timeout: float, *, name: str = "") -> tu
         finally:
             done.set()
 
-    t = threading.Thread(target=_run, name=name or "bounded-call", daemon=True)
-    t.start()
+    #: 有界调用线程归这里（`bounded-<名字>`）：超时就把它丢在后台（daemon）。
+    runtime.Runtime(scope="bounded").thread(_run, name=name or "call", daemon=True)
     if not done.wait(max(0.0, float(timeout))):
         return False, None
     err = box.get("error")
