@@ -49,6 +49,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import as_completed
+from dataclasses import dataclass
 from typing import Any
 
 from common import net_http, runtime
@@ -940,6 +941,21 @@ def refresh_weights(
     return True
 
 
+@dataclass(frozen=True)
+class PushHooks:
+    """`post_weights_parallel` 的三个可选出口（一个对象顶三根可选参数：§P0-3「>7 参数 = 缺对象」）。
+
+    * `log`：每节点完成 / 阶段收尾各一行；
+    * `on_alive`：该节点 POST 成功的瞬间回调（worker 线程里，须线程安全）；
+    * `monotonic`：**本段计时的读数**（§P1-6 的 clock 半边）—— 注入它，那两行里的秒数就是
+      确定的差值，而不是「日志里大概有个 0.xs」。
+    """
+
+    log: Callable[[str], None] | None = None
+    on_alive: Callable[[dict], None] | None = None
+    monotonic: Callable[[], float] = time.monotonic
+
+
 def post_weights_parallel(
     nodes: list,
     iter_id: str,
@@ -947,8 +963,7 @@ def post_weights_parallel(
     weights_bytes: bytes,
     timeout: float,
     kind: str = "rollout",
-    log=None,
-    on_alive=None,
+    hooks: PushHooks | None = None,
 ) -> list:
     """并行 POST 权重到全部节点 → alive 节点列表（保持入参顺序）。
 
@@ -956,10 +971,13 @@ def post_weights_parallel(
     `on_alive(nd)` 在**该节点 POST 成功的瞬间**于 worker 线程回调（须线程安全），
     调用方可立刻孵化该节点采样线程，无需等其它节点。返回值仍按入参顺序。
     日志在每节点完成时输出。pure_collect 锚点由调用方定义（用户 2026-09-19：
-    权重开始分发 → 样本齐可交 PPO）。
+    权重开始分发 → 样本齐可交 PPO）。三个可选出口见 `PushHooks`。
     """
     if not nodes:
         return []
+    hk = hooks or PushHooks()
+    log = hk.log
+    on_alive = hk.on_alive
 
     def _key_of(nd) -> str:
         return str(nd.get("key") if nd.get("key") is not None else nd.get("authKey", ""))
@@ -985,15 +1003,17 @@ def post_weights_parallel(
 
     n = len(nodes)
     ok_ids: set[str] = set()
-    t0 = time.monotonic()
-    with runtime.Runtime(scope="weights-push", workers=min(8, n)) as ex:
+    with runtime.Runtime(scope="weights-push", workers=min(8, n), monotonic=hk.monotonic) as ex:
+        # 本段的两处计时都走本域的单调钟（§P1-6 的 clock 半边）：注入的时钟一换，
+        # 「每个节点多久就绪 / 整批多久铺开」就完全可复现，不必再 mock 模块里的 `time`。
+        t0 = ex.monotonic()
         futs = {ex.submit(_push, nd): nd for nd in nodes}
-        t_sub: dict[int, float] = {id(f): time.monotonic() for f in futs}
+        t_sub: dict[int, float] = {id(f): ex.monotonic() for f in futs}
         for fut in as_completed(futs):
             nid, nd, mode, err = fut.result()
             # 事件：**该节点权重就绪时刻**（用户 2026-09-19：排查「等十几秒 CPU 才满」
             # 与评测中途的掉档——没有这条就看不出权重阶段占了多久）。
-            dt = time.monotonic() - t_sub[id(fut)]
+            dt = ex.monotonic() - t_sub[id(fut)]
             if err is not None:
                 if log is not None:
                     log(f"[dist] weights POST to {nid} failed ({err}, {dt:.2f}s) — excluded")
@@ -1004,12 +1024,12 @@ def post_weights_parallel(
             if on_alive is not None:
                 on_alive(nd)
             ok_ids.add(nid)
-    if log is not None:
-        # 事件：**权重传输完毕**（阶段墙钟）——分发起点就是它。
-        log(
-            f"[dist] weights[{kind}] ready on {len(ok_ids)}/{n} nodes "
-            f"in {time.monotonic() - t0:.2f}s (sha {wver[:12]}…)"
-        )
+        if log is not None:
+            # 事件：**权重传输完毕**（阶段墙钟）——分发起点就是它。
+            log(
+                f"[dist] weights[{kind}] ready on {len(ok_ids)}/{n} nodes "
+                f"in {ex.monotonic() - t0:.2f}s (sha {wver[:12]}…)"
+            )
     return [nd for nd in nodes if str(nd.get("id") or nd.get("url") or "?") in ok_ids]
 
 

@@ -187,7 +187,7 @@ def dispatch_bc_corpus(
             weights_bytes=label_bytes,
             timeout=120.0,
             kind="rollout",
-            log=log,
+            hooks=common.distribution.PushHooks(log=log),
         )
         if not alive:
             raise BcDispatchError("label_policy 权重下发失败：无可用节点")

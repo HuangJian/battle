@@ -1739,7 +1739,8 @@ def test_weights_post_pipelines_node_start(tmp_path, monkeypatch) -> None:
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     def post(nodes_, *a: Any, **k: Any) -> list:
-        on_alive = k.get("on_alive")
+        hooks = k.get("hooks")
+        on_alive = hooks.on_alive if hooks is not None else None
         saw["on_alive_passed"] = on_alive is not None
         if on_alive is not None:
             on_alive(nodes_[0])  # 快节点的权重先就绪

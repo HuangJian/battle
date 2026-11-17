@@ -193,11 +193,32 @@ def test_ceiling_defaults_to_the_core_count_floor() -> None:
 def test_describe_is_json_safe_and_reports_lifecycle() -> None:
     rt = runtime.Runtime(scope="unit", ceiling=4)
     d = rt.describe()
-    assert set(d) == {"scope", "ceiling", "workers", "over", "pools", "stopped", "closed"}
+    assert set(d) == {"scope", "ceiling", "workers", "over", "pools", "stopped", "closed", "clock"}
     assert d["scope"] == "unit"
     assert d["stopped"] is False and d["closed"] is False
+    # 时钟读数：缺省就是真钟（注入后这一行会变成测试自己的可调用名）
+    assert d["clock"] == "time.time/time.monotonic", d["clock"]
     rt.close()
     assert rt.describe()["closed"] is True
+
+
+def test_time_reads_are_injectable() -> None:
+    """§P1-6 clock 半边：两个读数（墙钟/单调钟）缺省是真钟，注入后整段计时可复现。
+
+    为什么要两个：墙钟只用于时间戳（会被 NTP 拉回），单调钟只用于时长/超时（绝不回跳）。
+    收成一个 `now()` 就是邀请「拿单调值比墙钟时间戳」那类只在跨机器时差下才显形的错。
+    """
+    assert runtime.Runtime(scope="t").clock is time.time
+    assert runtime.Runtime(scope="t").monotonic is time.monotonic
+    ticks = iter([100.0, 100.25, 101.5])
+    rt = runtime.Runtime(scope="t", clock=lambda: 4_000_000_000.0, monotonic=lambda: next(ticks))
+    assert rt.clock() == 4_000_000_000.0
+    assert (rt.monotonic(), rt.monotonic(), rt.monotonic()) == (100.0, 100.25, 101.5)
+    declared = str(rt.describe()["clock"])
+    assert declared.count("<lambda>") == 2, declared  # 两个读数各一个，一眼看得出被换过
+    # 真等待与时钟注入正交：`sleep` 仍是 `stop.wait`（注入只改「读到几点」）。
+    rt.request_stop()
+    assert rt.sleep(5.0) is False  # sleep-ok: 夹具模拟（stop 已置位 ⇒ 立即返回）
 
 
 def test_scope_is_mandatory() -> None:

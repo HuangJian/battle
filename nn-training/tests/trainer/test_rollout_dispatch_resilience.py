@@ -122,8 +122,9 @@ class _Harness:
         monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
 
         def fake_post(
-            nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", log=None, on_alive=None
+            nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", hooks=None
         ):
+            on_alive = hooks.on_alive if hooks is not None else None
             out = []
             for n in nodes:
                 nd = {

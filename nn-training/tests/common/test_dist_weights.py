@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import threading
 import time
 from urllib.error import URLError
@@ -167,7 +168,7 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
         b"{}",
         timeout=5.0,
         kind="rollout",
-        log=logs.append,
+        hooks=common.distribution.PushHooks(log=logs.append),
     )
     assert [n["id"] for n in alive] == ["self", "a97"]  # 入参顺序
     assert sorted(seen) == ["http://a97", "http://mac", "http://self"]
@@ -179,6 +180,36 @@ def test_post_weights_parallel_order_and_failures(monkeypatch) -> None:
     assert "weights[rollout] -> a97 (purged," in joined
     # 阶段总计（分发起点）：ready on N/M + 总墙钟 + sha 前 12 位
     assert "ready on 2/3 nodes" in joined and "sha wwwwwwwwwwww" in joined
+
+
+def test_post_weights_parallel_timings_come_from_the_injected_clock(monkeypatch) -> None:
+    """§P1-6 的 clock 半边：阶段计时读的是 `Runtime(monotonic=)`，不是模块里的 `time`。
+
+    判据刻意用**确定的数字**（注入 4 个 tick）而不是「日志里有 `0.xs`」—— 后者在任何人把计时
+    换回 `time.monotonic()` 之后照样绿，而这道接缝存在的理由正是「这段时长能被固定下来」。
+    """
+    nodes = [{"id": "self", "url": "http://self", "key": "k", "c": 8}]
+    logs: list[str] = []
+
+    def fake_post(url, auth_key, iter_id, sha, weights_bytes, timeout=120.0, kind="rollout"):
+        return "kept"
+
+    # 单节点 ⇒ 四个读数全在主线程、顺序确定：t0 / 提交 / 完成 / 收尾。
+    ticks = iter([100.0, 100.5, 101.0, 102.5])
+    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    alive = common.distribution.post_weights_parallel(
+        nodes,
+        "run.1",
+        "w" * 64,
+        b"{}",
+        timeout=5.0,
+        hooks=common.distribution.PushHooks(log=logs.append, monotonic=lambda: next(ticks)),
+    )
+    assert [n["id"] for n in alive] == ["self"]
+    # 判据是**数值**（不是子串）：两条行里的秒数必须恰好是注入时钟给的差
+    # （逐节点 101.0-100.5=0.5s，阶段总计 102.5-100.0=2.5s）。
+    got = [float(x) for line in logs for x in re.findall(r"(\d+\.\d+)s", line)]
+    assert got == [0.5, 2.5], (got, logs)
 
 
 def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) -> None:
@@ -202,7 +233,13 @@ def test_post_weights_parallel_excludes_node_on_raw_socket_error(monkeypatch) ->
 
     monkeypatch.setattr(common.distribution, "post_weights", fake_post)
     alive = common.distribution.post_weights_parallel(
-        nodes, "run.19", "w" * 64, b"{}", timeout=5.0, kind="eval", log=logs.append
+        nodes,
+        "run.19",
+        "w" * 64,
+        b"{}",
+        timeout=5.0,
+        kind="eval",
+        hooks=common.distribution.PushHooks(log=logs.append),
     )
     assert [n["id"] for n in alive] == ["self", "a97"]
     # 「就绪 2/3」由上面的 alive 行为面覆盖；文本只钉操作员归因：为什么剔的是 kaggle。
@@ -313,7 +350,7 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
         "d" * 64,
         b"x",
         timeout=5.0,
-        on_alive=lambda nd: spawned.append(nd["id"]),
+        hooks=common.distribution.PushHooks(on_alive=lambda nd: spawned.append(nd["id"])),
     )
     assert sorted(spawned) == ["fast", "slow"]
     assert "fail" not in spawned

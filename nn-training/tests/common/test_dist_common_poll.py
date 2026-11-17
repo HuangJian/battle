@@ -404,7 +404,13 @@ def test_post_weights_parallel_logs_per_node_and_ready(monkeypatch) -> None:
 
     nd = {"id": "n1", "url": "http://n1"}
     ok = common.distribution.post_weights_parallel(
-        [nd], "it1", "ab" * 32, b"{}", timeout=5.0, kind="eval", log=lines.append
+        [nd],
+        "it1",
+        "ab" * 32,
+        b"{}",
+        timeout=5.0,
+        kind="eval",
+        hooks=common.distribution.PushHooks(log=lines.append),
     )
 
     assert ok == [nd]

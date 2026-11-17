@@ -6905,4 +6905,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `REQUIRED_UPDATE_KWARGS` 加 `rng`（四条线的签名自动对账）+ 账本 `worker.ppo.rng` L0、
   `checkpoint_paddle` 2→1、`engine_paddle` 3→2。读数：6181 收下 / 2 skipped · mypy 956 · ruff 全绿；
   本机无 paddle ⇒ `paddle_parity` 八用例仍未跑。全文 → `docs/nn/engineering.md` §120。
+- **2026-11-17（B6 收官：时钟进 `Runtime`，量 `clock()`/`monotonic()` 两读数）**：审计 §P1-6 / §7.4。
+  生产面 **95 文件 / 517 处** `time.time()/monotonic()/perf_counter()` 全就地读 —— 要固定「现在几点」
+  只能 monkeypatch 模块里的 `time`（改全局，同进程用例一起变），于是超时/过期/租约这些最该测的逻辑
+  基本不测。现在 `Runtime(clock=, monotonic=)` 收两个零参可调用（缺省 `time.time` / `time.monotonic`），
+  调用点 `rt.clock()` / `rt.monotonic()`，`describe()["clock"]` 报可调用名。**两个而非一个**：墙钟只做
+  时间戳（会被 NTP 拉回）、单调钟只做时长/超时（绝不回跳），收成一个 `now()` 就是邀请跨机器时差才显形
+  的错。**不建 `Clock` 类型**：既有约定已是 `clock: Callable[[], float] = time.time`（5 个模块在用），
+  再造同名 Protocol 会与 `common/logutil.Clock` 撞名。`sleep()` 仍是真等待（注入不改时间流逝）。
+  首个迁移点 `common/distribution.post_weights_parallel` 的 4 处计时走 `ex.monotonic()`，顺带被
+  `test_python_shape_budget` 逼出 **`PushHooks`**（`log`/`on_alive`/`monotonic` 三根可选参数收成一个
+  frozen dataclass ⇒ 签名 9→7，§P0-3「>7 参数 = 缺对象」），于是注入是**真能用**的：用例断言秒数
+  `[0.5, 2.5]` 而不是「日志里有 0.xs」。存量 482 处 / 92 文件按文件冻结进
+  `tests/golden/wall_clock_baseline.json`（只许调小；`common/runtime.py` 与 `remote/offline_boot.py` 豁免），
+  新门禁 **G17** `tests/test_wall_clock_budget.py`（冻结 + 只降 + 扫描自检 + **两向护栏**：seam 点分调用 ≥4）。
+  读数：6188 收下 / 2 skipped · mypy 957 · ruff 全绿；**paddle 3.3.1 实跑** `tools/paddle_parity.py`
+  六条命令全绿（8 个 PPO 用例含 `ckpt_resume` 的 `rng_streams` 往返 + BC 三段），此前「本机无 paddle」
+  的结论作废。全文 → `docs/nn/engineering.md` §121（paddle 读数在 §120 末）。
 

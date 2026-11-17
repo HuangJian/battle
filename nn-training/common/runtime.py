@@ -25,6 +25,20 @@
 * **不接管裸 `threading.Thread`**：那 55 处的搬迁是 B6 的另一半。
 * **不替调用方接 `halt_event`**：把 6 个模块的 halt 语义一起改需要一轮真跑；`stop=` 已经吃
   `threading.Event`，接的时候是调用方一行的事。    设计说明与读数 → `docs/nn/engineering.md` §119。
+
+## 时钟：两个可注入的读数（2026-11-17，B6 的 clock 半边）
+
+`Runtime(clock=…, monotonic=…)` 收两个**零参可调用**（缺省 `time.time` / `time.monotonic`），
+调用点写 `rt.clock()` / `rt.monotonic()`。为什么是两个而不是一个：这两个读数在语义上不可互换 ——
+墙钟用于**时间戳**（台账 `ts`、与 hub 给的时间比先后），单调钟用于**时长/超时**（绝不回跳）。
+收成一个 `now()` 就等于邀请「拿单调钟去比墙钟时间戳」这类错，而这类错只在跨机器时差下才显形。
+
+不新建 `Clock` 类型：仓里已有既成约定 `clock: Callable[[], float] = time.time`（`remote/prefetch` /
+`remote/bulk_sched` / `remote/offline_push_face` …），再发明一个同名 Protocol 只会和
+`common/logutil.Clock`（那是「能给时间戳 + `strftime` 的东西」）撞名。
+
+**`sleep()` 仍是真等待**：时钟注入改变的是「读到了几点」，不是「时间怎么流逝」。想跳过等待的用例
+别 mock 时钟 —— 用 `stop` 已置位 + 断言返回 `False`（那正是既有的取消语义）。
 """
 
 from __future__ import annotations
@@ -32,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from types import TracebackType
@@ -56,6 +71,7 @@ def thread_ceiling() -> int:
     """
     return max(MIN_CEILING, os.cpu_count() or MIN_CEILING)
 
+
 #: 派生种子的域标签：改它 = 把所有流**重新洗一遍**（下游可复现性断代，别随手改）。
 SEED_TAG = "nn-runtime-stream-v1"
 
@@ -68,10 +84,20 @@ def substream(seed: int, name: str) -> tuple[int, int]:
     `SEED_TAG:seed:name` 取摘要：跨进程 / 跨机器 / 跨版本逐位稳定，改流名就换流，互不干扰。
     返回值直接可喂 `np.random.default_rng([a, b])`（numpy 侧不必知道派生规则）。
     """
-    digest = hashlib.blake2b(
-        f"{SEED_TAG}:{int(seed)}:{name}".encode(), digest_size=16
-    ).digest()
+    digest = hashlib.blake2b(f"{SEED_TAG}:{int(seed)}:{name}".encode(), digest_size=16).digest()
     return int.from_bytes(digest[:8], "big"), int.from_bytes(digest[8:], "big")
+
+
+def _callable_name(fn: Callable[..., object]) -> str:
+    """`describe()["clock"]` 的读数：`time.time` / 测试里的 `<lambda>` 一眼分得清。
+
+    不用 `repr`：它带内存地址 ⇒ 同一轮两次 `describe()` 不一样（读数要能进 JSON 台账）。
+    """
+    mod = getattr(fn, "__module__", None) or getattr(fn, "__name__", None)
+    qual = getattr(fn, "__qualname__", None) or getattr(fn, "__name__", None)
+    if mod and qual:
+        return f"{mod}.{qual}"
+    return type(fn).__name__
 
 
 class RuntimeCancelledError(RuntimeError):
@@ -106,6 +132,8 @@ class Runtime:
         stop: threading.Event | None = None,
         ceiling: int | None = None,
         seed: int | None = None,
+        clock: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not scope:
             raise ValueError("Runtime 必须给 scope（线程名/日志里要认得出是谁）")
@@ -114,6 +142,10 @@ class Runtime:
         #: 本域的根种子；`substream()` 从它派生。None = 这个域不碰随机（纯并发）。
         self.seed = seed
         self._streams: dict[str, tuple[int, int]] = {}
+        #: 本域的两个时间读数（见模块 docstring「时钟」）：`clock()` = 墙钟秒（时间戳），
+        #: `monotonic()` = 单调秒（时长/超时）。缺省就是 `time` 模块那两个函数。
+        self.clock = clock
+        self.monotonic = monotonic
         self.ceiling = ceiling if ceiling is not None else thread_ceiling()
         # `stop` 允许外部传入：`halt_event` 那种已有的事件不用复制一份语义。
         self._stop = stop if stop is not None else threading.Event()
@@ -147,6 +179,9 @@ class Runtime:
 
         返回布尔而不是抛异常：轮询循环里「被打断」通常是**正常出路**（该退了），
         逼调用方写 `try/except` 会把控制流藏进异常里。
+
+        注意这是**真等待**（`stop.wait(sec)`）：注入的时钟只改「读到的值」，不改时间流逝 ——
+        想跳过等待的用例用「`stop` 已置位 + 断言 `False`」，别去 mock 时钟。
         """
         if sec <= 0:
             return not self._stop.is_set()
@@ -254,6 +289,8 @@ class Runtime:
                 "pools": pools,
                 "stopped": self._stop.is_set(),
                 "closed": self._closed,
+                # 读数：这一轮用的是不是被测试换过的时钟（`time.time/time.monotonic` = 真钟）。
+                "clock": f"{_callable_name(self.clock)}/{_callable_name(self.monotonic)}",
             }
 
     def close(self, *, wait: bool = True) -> None:

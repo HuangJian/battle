@@ -528,7 +528,8 @@ class EvalDispatcher:
         nodes_ok = (
             common.distribution.post_weights_parallel(
                 alive, iter_id, wver, weights_bytes, timeout=post_budget,
-                kind=EVAL_WEIGHTS_KIND, log=_log, on_alive=_on_weight_ready,
+                kind=EVAL_WEIGHTS_KIND,
+                hooks=common.distribution.PushHooks(log=_log, on_alive=_on_weight_ready),
             )
             if alive else []
         )

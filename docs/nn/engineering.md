@@ -25,6 +25,53 @@
 
 ---
 
+## §121 时钟也进 `Runtime`：`clock()` / `monotonic()` + `PushHooks` + G17（2026-11-17）
+
+**现场**（`python.refactor.md` §P1-6 / §7.4 / B6 的最后一块）：生产面量到 **95 个文件 / 517 处**
+`time.time() / time.monotonic() / time.perf_counter()`。代价不是性能而是**不可测**：要固定「现在几点」
+只能 `monkeypatch` 模块里的 `time`（改的是全局，同进程所有用例一起变），于是超时、过期、租约这些
+最该被测的逻辑，测试里基本不测。
+
+**做法**
+
+* `Runtime(clock=…, monotonic=…)` 收两个**零参可调用**（缺省 `time.time` / `time.monotonic`），
+  调用点写 `rt.clock()` / `rt.monotonic()`；`describe()["clock"]` 报出这两个可调用名
+  （`time.time/time.monotonic` = 真钟，测试注入后一眼看得出被换过）。
+  **两个而不是一个**：墙钟只用于时间戳（会被 NTP 拉回），单调钟只用于时长/超时（绝不回跳）；
+  收成一个 `now()` 就是邀请「拿单调值比墙钟时间戳」那类只在跨机器时差下才显形的错。
+* **不新建 `Clock` 类型**：仓里已有既成约定 `clock: Callable[[], float] = time.time`
+  （`remote/prefetch` / `remote/bulk_sched` / `remote/offline_push_face` …），再造一个同名 Protocol
+  只会与 `common/logutil.Clock`（「能给时间戳 + `strftime` 的东西」）撞名。
+* `sleep()` **仍是真等待**（`stop.wait`）：注入只改「读到几点」，不改时间流逝。想跳过等待的用例用
+  「`stop` 已置位 + 断言返回 `False`」（既有取消语义），别 mock 时钟。
+* 首个迁移点：`common/distribution.post_weights_parallel` 的 4 处计时改 `ex.monotonic()`。
+  顺手撞出一条形状门禁：加第 9 个参数时 `test_python_shape_budget` 当场红（「>7 参数 = 缺对象」
+  §P0-3）⇒ 把 `log` / `on_alive` / `monotonic` 收进 `PushHooks`（frozen dataclass），签名回到 7 个；
+  **注入因此是真的可用**：`PushHooks(log=…, monotonic=迭代器)` 让那两行里的秒数成为确定的差值，
+  用例按数值断言（`[0.5, 2.5]`）而不是「日志里有 `0.xs`」。3 个生产调用点 + 5 个用例同步改。
+
+**存量怎么处理（有意不做全量迁移）**
+
+482 处 / 92 文件按文件冻结进 `tests/golden/wall_clock_baseline.json`，**只许调小**；`common/runtime.py`
+（钟的家）与 `remote/offline_boot.py`（引导期单文件，不许 import `common.*`）豁免。为什么不一次迁完：
+绝大多数站点在 `Runtime` 够不着的模块级函数里（`_poll_result` / 租约判定 / 日志节流），要迁就得先把
+runtime 传进去 —— 那是「拿不到 runtime 的函数该长什么样」的设计题，不是替换一行。迁移顺序建议：
+先动**手上已经有 runtime** 的函数（`post_weights_parallel` 已是一例），再动被测试反复 mock 时钟的。
+
+**门禁 G17** `tests/test_wall_clock_budget.py`（4 条 + 1 条口径自检）
+
+* 按文件冻结（`test_no_new_wall_clock_reads`）+ 只许调小（`test_baseline_only_shrinks`）+
+  扫描入口自检（`sanity_floor`，与 G3/G4/G9/G13 同一地板口径）。
+* **两向护栏**（`test_the_seam_is_actually_used`）：`rt.clock()` / `ex.monotonic()` 的**点分调用**
+  处数 ≥ 4 —— 迁移被无声回退时它与扫描入口坏掉是两种不同的红，但都会红。
+* 口径自检：注释 / docstring / 字符串里的字样不算；`contextlib` 之外的密集扫描按 `ast.walk` 一遍。
+
+**读数**：`pytest tests/ e2e/ --forkdist 16` ⇒ **6188 收下 / 2 skipped**；mypy **957 文件 Success**；
+`ruff check .` 全绿。基线两处新数字：墙钟 482/92 文件（G17 首次冻结）· 形态口径 1513 未动
+（新用例的时长判据是数值相等，不是子串断言）。
+
+---
+
 ## §120 PPO 的三条显式随机流：`PPORng` + ckpt 存 bit generator（2026-11-17）
 
 **现场**（`python.refactor.md` §P1-7 / §10-B6 后半）：训练序列住在**全局 `np.random`** 上——入口
@@ -76,8 +123,11 @@
 
 **读数**：`pytest tests/ e2e/ --forkdist 16` ⇒ **6181 收下 / 2 skipped**（基线 6174 + 7 条新用例，无 skip 变化）；
 `mypy . --config-file pyproject.toml` ⇒ **956 文件 Success**；`ruff check .` 全绿。
-⚠ 本机无 paddle 解释器 ⇒ `engine_paddle` / `checkpoint_paddle` 的新签名只过了 mypy 与静态契约，
-`tools/paddle_parity.py` 八用例仍未跑过（与 §119 同一限制）。
+**paddle 侧已实跑**（paddle 3.3.1 就在本机 `.venv` 里，此前「本机无 paddle」的结论是错的）：
+`tools/paddle_parity.py` 六条命令全绿 —— `fixture` / `check` / `verify` 的 8 个 PPO 用例
+（含 `ckpt_resume` 的 `load_ckpt(rng=)` + `rng_streams` 往返），以及 `bc-fixture` / `bc-check` /
+`bc-verify`。最差读数：fwd 1.73e-06 · stats 1.37e-05 · weights 5.96e-04（≤8 坐标离群口径）·
+paddle→torch 2.38e-05 · BC forward 9.20e-07 / 4.04e-07。
 
 ---
 

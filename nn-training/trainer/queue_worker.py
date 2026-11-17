@@ -804,8 +804,9 @@ def run_queue(q: QueueState) -> None:
                 q.weights_bytes,
                 timeout=min(300.0, max(60.0, q.task_timeout)),
                 kind=q.wkind,
-                log=q.log,
-                on_alive=_spawn_node_workers,
+                hooks=common.distribution.PushHooks(
+                    log=q.log, on_alive=_spawn_node_workers
+                ),
             )
         except Exception as e:
             # Fake/真节点在采集结束时被关掉会 URLError；不拖垮 push 线程。
