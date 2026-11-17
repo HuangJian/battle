@@ -62,6 +62,19 @@ cell 文本与 `remote/rollout_node.py` 的源码 —— 「cell 能不能 `comp
 同一批新用例里能改成行为判据的全改了（errno/首行/阈值/队列收敛/落盘集合/镜像文件的**计数**均走
 等值或属性判据），所以这一格是 3 而不是 20（首轮实测 +20 已压到 +3）。
 
+**2026-11-17 抬 FORM 一格的账**（探活失败归因：hub 的 422 读面 + 云机转述；形态 1493 → **1498**
+= +5，SOURCE 未动 = 1121）：这 5 条全在**操作员现场读数行**上 —— 真机上「HTTP 400 / 连接超时 /
+authKey 不符」被压成一句「无应答，或 authKey 不符」，现场只能另起 curl 猜（`6e4e42cf` 的故障）：
+
+  · `tests/hub/test_node_register.py` **4**：`节点探活失败` 那一行必须同时带 URL、端点、原因与耗时
+    （`ms）——回 422，不写盘`）。同一用例的机读面已按结构判据钉住（`probe["url"/"path"/"reason"/"ms"]`、
+    `last[2] == 422`、`error.startswith("节点 ping 不通")`），文本只剩「这行有没有把归因写出来」。
+  · `tests/remote/test_push_register.py` **1**：老 hub 的 422 没有 `probe` 键 ⇒ 云机日志必须照旧转述
+    原始 detail（不静默、不编原因）。`hint == ""`、`status == 422` 与 `ok is False` 已另按结构判据钉住。
+
+⚠ 同一批里能改成结构判据的都改了（节点探测的返回/落盘/422 状态全部读字段与返回值）——这一格是
+**+5** 而不是整段测试的 +20；留下的都是「日志行本身就是交付物」的 A 类（模块头的分类）。
+
 **2026-10-14 抬 SOURCE 一格的账**（`plan/wire-diet.plan.md` §12 切片 2；+1，FORM 未动）：
 R3/M4 把 opt 回传改成 **delta 容器**，而「哪个形态位 + 哪几个调用**同处产物段**」是这一刀的
 **接口面**：`run_training_core` 的产物段必须同时调 `opt_fmt_of`（形态位唯一口径）· `pack_opt_delta`
@@ -383,7 +396,10 @@ ROOT = Path(__file__).resolve().parents[1]
 #:   同批其余判据均为数值/对象断言。涉及 `tests/tools/test_p0_*`、
 #:   `test_c9_critic_calibration.py`、`test_z11_seed_level.py`、
 #:   `tests/biz/test_w1_horizon_guard.py`。这是**产物契约**，不是新开的文风。
-BASELINE_FORM = 1493
+#: 2026-11-17 抬到 **1498**（+5 = 探活失败归因的两条操作员读面：hub 的 422 归因行 4 + 云机转述
+#:   老 hub detail 1；机读面已经按 `probe` 字段/状态码钉住，文本只补「有没有把归因写出来」；
+#:   理由见模块头末段）。
+BASELINE_FORM = 1498
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
 #: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）；

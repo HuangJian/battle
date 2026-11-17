@@ -621,8 +621,7 @@ def node_probe(
 
 def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
     """GET /v1/ping → dict；任何失败返回 None（调用侧决定排除该节点）。"""
-    info, _why = node_probe(url, auth_key, timeout)
-    return info
+    return node_probe(url, auth_key, timeout)[0]
 
 
 def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
@@ -633,8 +632,7 @@ def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None
     `/v1/ping`（query token）。同一个 hub 同时伺候两种节点，判据必须按 `kind` 分流
     （`hub.admin._admin_nodes_register`）——两者共用 `node_probe` 的实现与归因。
     """
-    info, _why = node_probe(url, auth_key, timeout, path="/ping")
-    return info
+    return node_probe(url, auth_key, timeout, path="/ping")[0]
 
 
 # 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个

@@ -344,6 +344,10 @@ def _args_and_loop(tmp_path: Path, hub_url: str, weights: Path) -> tuple[Trainin
     args.stream = 0
     args.max_ticks = 60
     loop = TrainingLoop(args, None, "bun", {})
+    # A2（2026-11-17）：`corpus_fmt` 缺省已翻到 replay，而本用例直接调 `_remote_iter`
+    # （kind=iter）跳过了轮边界的 `_resolve_corpus_fmt`。生产里同机腿在那一处强制 full；
+    # 这里照同一裁决走一遍，否则会撞发布端的「kind=iter 不收 replay」闸（不是本用例的判据）。
+    loop._resolve_corpus_fmt("node")
     loop._jsonl_path = traj / "training_log.jsonl"
     loop._traj_dir = traj / f"it{IT}"
     return loop, traj, Path(args.backup_dir)
