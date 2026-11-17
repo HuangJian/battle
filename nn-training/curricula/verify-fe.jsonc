@@ -1,0 +1,175 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// verify-fe.jsonc — GPU 云机 replay 语料「真机验证课」，**不是候选训练课**
+//
+// 0. 这门课回答什么
+//    只验证三条等价性（plan/replay-corpus.plan.md §6.6）：
+//      ① full vs replay 的 PPO 结果一致（P2）
+//      ② eager vs lazy 的 PPO 结果一致（P3，真机复验）
+//      ③ 同配置重复跑的 GPU 噪声底（verify-fe2），防止把 GPU 非确定性误判成格式/装载器差异。
+//    它**不回答**学习效果、刷新频率、配方优劣——那是 §6.5 的三臂 pilot，别拿这门课的
+//    eval 胜率写训练结论。
+//
+// 1. 本档角色
+//    基线档：full + eager。五档里其余四档都拿它做参照；不要单独把它当训练课跑长期。
+//
+// 2. 五档必须一起跑（缺一档就无法归因）
+//    verify-fe  full+eager   基线
+//    verify-fe2 full+eager   同配置重复 = 噪声底
+//    verify-re  replay+eager 只换格式
+//    verify-fl  full+lazy    只换装载器（full 侧）
+//    verify-rl  replay+lazy  生产组合
+//
+// 3. 共同冻结项（五档逐字段相同，只有 name/out/traj/backup 与 corpus_fmt/ppo_loader 不同）
+//    · 起点：nn-training/weights/replay-verify/replay-verify-s5.json
+//      = g5-safe.it230 + 固定 seed 20261117、只扰动 move/fire/hold 三个 policy head bias
+//      （scale=5×该张量 std）；完整 35×20 面板 pass 64.1%（原 78.7%），保留 14.6pp 上坡。
+//      sha256=bec039d88e2dcc9eea752c27ddf309043164610cf01a4755687ee3ef6f5f7f8b…
+//    · 关卡：7 个哨兵关（原 2002/2007/2018/2022/2023/2030/2032，经 stage_select
+//      3,8,19,23,24,31,33 重编号为 2000–2006）；hard / 20 敌 / 3 命 / 36000 tick。
+//    · 采样：rotation_mode=even、rotation_per_it=7、seeds=1-5、paired_rotate_seed=20261117、
+//      target_transitions=24576（24×1024，mb 整倍数）⇒ 每档约 35 局/轮。
+//    · 训练：iters=2、mb=1024、epochs=4、lr=8e-5、kl_coef=0.05 / kl_cap=0.1、
+//      value_anchor=0.001；**关 kickstart、单段常值 schedule、breakers_off=true**。
+//    · eval：eval_every=2、eval_stages=2000-2006、eval_games_per_stage=20
+//      ⇒ 每档终点 140 局；只作 sanity，不拿它当等价主判。
+//
+// 4. 开跑前必须做（否则差异不可归因）
+//    · 五档串行跑在**同一台 GPU**；记录 GPU 名/驱动/显存、torch/cuda 版本、code.zip 快照。
+//    · 五档都设 **NN_VERIFY_RUN_ID=replay-verify-s1**（同一个值！）
+//      ⇒ job_seed(runId,it,init_weights_fp) 五档逐字相同；课程名/out 不同只影响幂等键与落点。
+//    · 不要用 CLI 传 --corpus-fmt / --ppo-loader：课程是单一事实来源，显式 CLI 会拒启。
+//
+// 5. 判读（主判是权重/stats，不是 eval）
+//    先算 verify-fe vs verify-fe2 的噪声底；再要求 re/fl/rl 与基线的差不超过它。
+//    超过就分别查：re↔fe 查 replay 重建/标签；rl↔re 查 lazy gather/行序；
+//    fl↔fe 查 loader 本身。三类失败不许混在一起改。
+//
+// ⚠ 本文件由 tmp/gen-verify-courses.py 生成；五档的冻结项必须由同一脚本保证。
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "verify-fe",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 7,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtWeight, hurtCap)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+      "- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)",
+      "+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))",
+      "- wBurst*min(damageBursts, burstCap)",
+      "- wMaxDmg*min(max(0, maxDamage120 - maxDmgFree), maxDmgCap)",
+      "- wLowDmg*min(damageWhileLow, lowDmgCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 130.0,
+      "threatRateCap": 0.25,
+      "wHurt": 0.09,
+      "hurtCap": 500.0,
+      "wPostHit": 800.0,
+      "postHitRateCap": 0.035,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+      "wMiss2": 0.0015,
+      "missFree": 40.0,
+      "missCap2": 12.0,
+      "wAccGood": 200.0,
+      "accFree": 0.45,
+      "accCap": 0.15,
+      "wBurst": 4.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.1,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.03,
+      "lowDmgCap": 600.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/replay-verify/replay-verify-s5.json",
+  "kickstart_ref": false,
+  "kickstart_init": 0,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 2,
+  "max_hours": 1.0,
+  "lr": 8e-5,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 8e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 24576,
+  "paired_rotate_seed": 20261117,
+  "decision_events": false,
+  "decision_k": 10,
+  "opening_connect": true,
+  "out": "tmp/verify-fe/weights.json",
+  "traj": "tmp/verify-fe",
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/replay-verify/verify-fe",
+  "backup_prefix": "verify-fe",
+  "eval_stages": "2000-2006",
+  "eval_games_per_stage": 20,
+  "eval_every": 2,
+  "stage_select": "3,8,19,23,24,31,33",
+  "rotation_pinned": "",
+  "seeds": "1-5",
+  "corpus_fmt": "full",
+  "ppo_loader": "eager",
+}
