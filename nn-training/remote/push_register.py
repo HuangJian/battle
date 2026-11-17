@@ -115,6 +115,31 @@ def classify_error(exc: BaseException) -> str:
     return "unknown"
 
 
+def probe_hint(detail: str) -> str:
+    """422 应答体里的 `probe` 段 → 一句人话；老 hub（没这个键）⇒ 空串。
+
+    2026-11-17：hub 的注册门把「hub 连不到你的隧道」压成一句「无应答，或 authKey 不符」，
+    云机日志只能照抄，得人去翻 hub 日志对时间。现在 hub 在 422 体里带机读的
+    `probe{url,path,reason,ms}`，这里翻成 `探活失败：HTTPError 400（/v1/ping 412ms）`；
+    解析不出来就返回空串、由调用方回落原始 detail —— **不编原因**（老 hub 静默忽略未知键）。
+    """
+    try:
+        body = json.loads(detail) if detail else {}
+    except ValueError:
+        return ""
+    probe = body.get("probe") if isinstance(body, dict) else None
+    if not isinstance(probe, dict):
+        return ""
+    reason = str(probe.get("reason") or "").strip()
+    if not reason:
+        return ""
+    path = str(probe.get("path") or "").strip()
+    ms = probe.get("ms")
+    tail = f"{ms:g}ms" if isinstance(ms, (int, float)) and not isinstance(ms, bool) else ""
+    where = " ".join(x for x in (path, tail) if x)
+    return f"探活失败：{reason}" + (f"（{where}）" if where else "")
+
+
 def manual_snippet(node_id: str, url: str, auth_key: str, kind: str) -> str:
     """手工兜底的一行 `nodes[]` 片段（★ 只有它可以被粘进 rl-config）。"""
     cap = "offline_push" if str(kind or "") == "offline_push" else "gpu_push"
@@ -194,7 +219,8 @@ def register(
         except Exception:  # 读体失败不改判定
             pass
         kind = classify_error(e)
-        log(f"注册被拒: HTTP {e.code}（{kind}）{detail}")
+        hint = probe_hint(detail)
+        log(f"注册被拒: HTTP {e.code}（{kind}）{hint or detail}")
         return {
             "ok": False,
             "status": int(e.code),
@@ -202,6 +228,7 @@ def register(
             "body": {},
             "capabilities": [],
             "error": detail,
+            "hint": hint,
             "kind": kind,
         }
     except Exception as e:  # 网络/超时/坏 JSON/其它
@@ -615,6 +642,7 @@ __all__ = [
     "default_node_id",
     "dispatch_mount_note",
     "manual_snippet",
+    "probe_hint",
     "probe_offline_dispatch",
     "register",
     "register_or_warn",

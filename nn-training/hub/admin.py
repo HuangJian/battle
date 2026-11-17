@@ -928,7 +928,15 @@ class AdminRoutes:
                 self._json(
                     {
                         "error": f"节点 ping 不通（{url}{probe_path} "
-                        "无应答，或 authKey 不符）——不写盘"
+                        "无应答，或 authKey 不符）——不写盘",
+                        # 机读面（2026-11-17）：云机把原因直接打进自己的日志，不必再去翻 hub
+                        # 日志对时间；旧节点忽略未知键，`error` 前缀逐字不变。
+                        "probe": {
+                            "url": url,
+                            "path": probe_path,
+                            "reason": why or "无应答",
+                            "ms": round(probe_ms, 1),
+                        },
                     },
                     422,
                 )

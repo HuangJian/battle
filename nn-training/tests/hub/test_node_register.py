@@ -255,6 +255,12 @@ def test_ping_gate_failure_logs_url_reason_and_elapsed(
     assert "http://100.64.0.5:8443/v1/ping" in out, out
     assert "HTTPError 400" in out, out
     assert "ms）——回 422，不写盘" in out, out
+    # 机读面：云机拿 `probe` 直接打日志（不用人去翻 hub 日志对时间）。
+    probe = st.last[1]["probe"]
+    assert probe["url"] == "http://100.64.0.5:8443" and probe["path"] == "/v1/ping"
+    assert probe["reason"] == "HTTPError 400" and probe["ms"] >= 0
+    # 人读面逐字不变（节点侧按前缀识别 422）。
+    assert st.last[1]["error"].startswith("节点 ping 不通")
 
 
 def test_skip_ping_bypasses_the_gate(cfg_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

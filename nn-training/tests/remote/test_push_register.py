@@ -57,11 +57,13 @@ def _opener(resp: _Resp | None = None, exc: BaseException | None = None, calls: 
     return _open
 
 
-def _http_error(code: int) -> urllib.error.HTTPError:
+def _http_error(code: int, body: dict | None = None) -> urllib.error.HTTPError:
     from email.message import Message
+    from io import BytesIO
 
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     return urllib.error.HTTPError(
-        url="http://h/x", code=code, msg="x", hdrs=Message(), fp=None
+        url="http://h/x", code=code, msg="x", hdrs=Message(), fp=BytesIO(raw) if raw else None
     )
 
 
@@ -135,6 +137,48 @@ def test_register_surfaces_body_and_capabilities() -> None:
     req = calls[0]
     assert req.full_url == "http://hub:8787/admin/nodes/register"
     assert req.get_header("Authorization") == "Bearer tok"
+
+
+def test_register_422_surfaces_the_hub_probe_reason() -> None:
+    """hub 探活门的 422 体带 `probe{reason,path,ms}` ⇒ 云机日志直接写原因（2026-11-17）。"""
+    msgs: list[str] = []
+    out = register(
+        _opener(
+            exc=_http_error(
+                422,
+                {
+                    "error": "节点 ping 不通（https://t/v1/ping 无应答，或 authKey 不符）——不写盘",
+                    "probe": {
+                        "url": "https://t",
+                        "path": "/v1/ping",
+                        "reason": "HTTPError 400",
+                        "ms": 412.0,
+                    },
+                },
+            )
+        ),
+        "http://h",
+        "tok",
+        {},
+        msgs.append,
+    )
+    assert out["ok"] is False and out["status"] == 422
+    assert out["hint"] == "探活失败：HTTPError 400（/v1/ping 412ms）", out
+    assert out["hint"] in "\n".join(msgs), msgs
+
+
+def test_register_422_old_hub_falls_back_to_raw_detail() -> None:
+    """老 hub 没有 `probe` 键 ⇒ 照旧打原始 detail（不吞信息，也不编原因）。"""
+    msgs: list[str] = []
+    out = register(
+        _opener(exc=_http_error(422, {"error": "节点 ping 不通——不写盘"})),
+        "http://h",
+        "tok",
+        {},
+        msgs.append,
+    )
+    assert out["hint"] == ""
+    assert "节点 ping 不通——不写盘" in "\n".join(msgs)
 
 
 def test_register_never_raises_and_classifies() -> None:
@@ -316,8 +360,11 @@ def test_registry_registers_against_a_real_hub(tmp_path, monkeypatch) -> None:
     cfg = tmp_path / "rl-config.json"
     cfg.write_text(json.dumps({"version": 1, "nodes": []}), encoding="utf-8")
     monkeypatch.setenv("BCITY_RL_CONFIG", str(cfg))
+    # 探活缝在 `node_probe`（`node_ping`/`push_node_ping` 的唯一实现，2026-11-17）。
     monkeypatch.setattr(
-        distribution, "push_node_ping", lambda url, key, timeout=3.0: {"ok": True, "busy": False}
+        distribution,
+        "node_probe",
+        lambda url, key, timeout=3.0, **kw: ({"ok": True, "busy": False}, ""),
     )
     hub = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
