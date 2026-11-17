@@ -202,7 +202,7 @@ def _proxy_for(scheme: str, host: str) -> str:
 
 
 def _proxy_addr(proxy: str) -> tuple[str, str, int]:
-    """代理串 → `(scheme, host, port)`；**连代理用代理自己的 scheme**（http 代理不能做 TLS）。"""
+    """代理串 → `(scheme, host, port)`（代理本身怎么连；目标是否 TLS 由 `_conn_for` 决定）。"""
     s = proxy if "//" in proxy else f"//{proxy}"
     parts = urlsplit(s)
     scheme = (parts.scheme or "http").lower()
@@ -234,7 +234,14 @@ def _conn_for(
         t0 = time.monotonic()
         if proxy:
             pscheme, phost, pport = _proxy_addr(proxy)
-            conn = net_http.racing_connection(pscheme, phost, pport, timeout)
+            # ★ 连接类按**目标** scheme 选，不按代理 scheme：https 目标必须是 TLS 连接类
+            #   （`HTTPSConnection.connect()` = TCP→CONNECT→对目标 TLS）。用代理的 http 去挑类
+            #   就会把**明文**请求穿过 CONNECT 隧道发到 443，边缘回 `400 Bad Request` ——
+            #   2026-11-17 现场：hub 探活门（`distribution.node_ping`）对每个云机隧道恒 None ⇒
+            #   `nodes/register` 全 422，而同一条隧道 curl / `racing_urlopen` 都是 200。
+            conn = net_http.racing_connection(
+                "https" if scheme == "https" else pscheme, phost, pport, timeout
+            )
             if scheme == "https":
                 conn.set_tunnel(host, port)
         else:

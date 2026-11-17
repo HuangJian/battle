@@ -6,7 +6,7 @@
 `nodes[]` · unregister 语义 · GET 脱敏。
 
 文件面走 env `BCITY_RL_CONFIG`（fixture 自带的 tmp 配置），不碰本机那份未入库的 rl-config；
-网络面 monkeypatch `common.distribution.node_ping`。
+网络面 monkeypatch `common.distribution.node_probe`（`node_ping`/`push_node_ping` 的唯一实现）。
 """
 
 from __future__ import annotations
@@ -75,7 +75,9 @@ def cfg_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def ping_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(distribution, "node_ping", lambda url, key, timeout=3.0: {"ok": True})
+    monkeypatch.setattr(
+        distribution, "node_probe", lambda url, key, timeout=3.0, **kw: ({"ok": True}, "")
+    )
 
 
 def _nodes(path: Path) -> list[dict]:
@@ -229,7 +231,9 @@ def test_label_domain(ping_ok: None) -> None:
 # ---------------------------------------------------------------- ping 门
 
 def test_ping_gate_blocks_write(cfg_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(distribution, "node_ping", lambda url, key, timeout=3.0: None)
+    monkeypatch.setattr(
+        distribution, "node_probe", lambda url, key, timeout=3.0, **kw: (None, "HTTPError 400")
+    )
     before = cfg_path.read_bytes()
     st = _Stub({"id": "n", "url": "http://h:1", "authKey": "k"})
     st._admin_nodes_register()
@@ -237,14 +241,30 @@ def test_ping_gate_blocks_write(cfg_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert cfg_path.read_bytes() == before
 
 
+def test_ping_gate_failure_logs_url_reason_and_elapsed(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """422 必须留下**可归因**的一行：URL + 端点 + 原因 + 耗时（2026-11-17 现场）。"""
+    monkeypatch.setattr(
+        distribution, "node_probe", lambda url, key, timeout=3.0, **kw: (None, "HTTPError 400")
+    )
+    st = _reg_default()
+    assert st.last[2] == 422
+    out = capsys.readouterr().out
+    assert "节点探活失败" in out, out
+    assert "http://100.64.0.5:8443/v1/ping" in out, out
+    assert "HTTPError 400" in out, out
+    assert "ms）——回 422，不写盘" in out, out
+
+
 def test_skip_ping_bypasses_the_gate(cfg_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
 
-    def _boom(url: str, key: str, timeout: float = 3.0):
+    def _boom(url: str, key: str, timeout: float = 3.0, **kw: Any):
         called.append(url)
-        raise AssertionError("skipPing 不该调 node_ping")
+        raise AssertionError("skipPing 不该调探活")
 
-    monkeypatch.setattr(distribution, "node_ping", _boom)
+    monkeypatch.setattr(distribution, "node_probe", _boom)
     st = _Stub({"id": "n", "url": "http://h:1", "authKey": "k", "skipPing": True})
     st._admin_nodes_register()
     assert called == []
@@ -461,20 +481,15 @@ def test_list_redacts_authkey_and_filters_managed(cfg_path: Path, ping_ok: None)
 
 
 def _push_ping(monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], list[str]]:
-    """两个探活面各自记账：push kind 走 `push_node_ping`（`/ping`），采样 kind 走 `/v1/ping`。"""
+    """两个探活面各自记账：push kind 探 `/ping`，采样 kind 探 `/v1/ping`（同一 `node_probe`）。"""
     push_called: list[str] = []
     sample_called: list[str] = []
 
-    def _push(url: str, key: str, timeout: float = 3.0):
-        push_called.append(url)
-        return {"ok": True, "busy": False}
+    def _probe(url: str, key: str, timeout: float = 3.0, *, path: str = "/v1/ping"):
+        (push_called if path == "/ping" else sample_called).append(url)
+        return {"ok": True, "busy": False}, ""
 
-    def _sample(url: str, key: str, timeout: float = 3.0):
-        sample_called.append(url)
-        return {"ok": True}
-
-    monkeypatch.setattr(distribution, "push_node_ping", _push)
-    monkeypatch.setattr(distribution, "node_ping", _sample)
+    monkeypatch.setattr(distribution, "node_probe", _probe)
     return push_called, sample_called
 
 

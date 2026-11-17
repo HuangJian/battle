@@ -588,17 +588,41 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
         return list(ex.map(_one, nodes))
 
 
+def node_probe(
+    url: str,
+    auth_key: str,
+    timeout: float = STATUS_TIMEOUT_SEC,
+    *,
+    path: str = "/v1/ping",
+) -> tuple[dict | None, str]:
+    """探活 + **失败归因**：返回 `(info, why)`，成功时 `why == ""`。
+
+    `node_ping`（采样 `/v1/ping`）与 `push_node_ping`（push `/ping`）都只是它的薄壳。
+
+    为什么把原因带出来（2026-11-17 真机）：hub 的注册门对每台云机恒 422，而日志只有
+    「无应答，或 authKey 不符」——`400`、连接超时、authKey 不符三种完全不同的故障被压成
+    一句话，现场只能另起 curl 猜。归因串**只进日志**，不进任何 HTTP 应答；判定仍是
+    `info is None`（逐字不变）。
+    """
+    try:
+        status, body = _request(url.rstrip("/") + path, auth_key, timeout)
+        if status != 200:
+            return None, f"HTTP {status}"
+        # json.loads 返回 Any；节点探活契约固定为 dict。
+        info: Any = json.loads(body.decode("utf-8"))
+        if not isinstance(info, dict):
+            return None, f"应答不是对象（{type(info).__name__}）"
+        return info, ""
+    except urllib.error.HTTPError as e:
+        return None, f"HTTPError {e.code}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
     """GET /v1/ping → dict；任何失败返回 None（调用侧决定排除该节点）。"""
-    try:
-        status, body = _request(url.rstrip("/") + "/v1/ping", auth_key, timeout)
-        if status == 200:
-            # json.loads 返回 Any；节点 /v1/ping 契约固定为 dict。
-            info: dict = json.loads(body.decode("utf-8"))
-            return info
-    except Exception:
-        return None
-    return None
+    info, _why = node_probe(url, auth_key, timeout)
+    return info
 
 
 def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
@@ -607,16 +631,10 @@ def push_node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None
     为什么不能复用 `node_ping`：push 类节点（`gpu_push` / `offline_push`）跑的是
     `remote/worker_server.py`，它的探活面是 **`/ping`**（Bearer），不是 rollout agent 的
     `/v1/ping`（query token）。同一个 hub 同时伺候两种节点，判据必须按 `kind` 分流
-    （`hub.admin._admin_nodes_register`）。
+    （`hub.admin._admin_nodes_register`）——两者共用 `node_probe` 的实现与归因。
     """
-    try:
-        status, body = _request(url.rstrip("/") + "/ping", auth_key, timeout)
-        if status == 200:
-            info: Any = json.loads(body.decode("utf-8"))
-            return info if isinstance(info, dict) else None
-    except Exception:
-        return None
-    return None
+    info, _why = node_probe(url, auth_key, timeout, path="/ping")
+    return info
 
 
 # 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个

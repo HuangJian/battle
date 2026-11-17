@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import threading
 import time
@@ -226,3 +227,24 @@ def test_abort_scope_closes_inflight_and_never_retries(srv) -> None:
     assert http_pool.pool_stats()["retry"] == 0, "收工断连不得重发（会把一局重新开起来）"
     # 收工/竞速剪枝造成的 drop 单独记账（plan §2.4）：它和「服务端不 keep-alive」是两回事。
     assert http_pool.pool_stats().get("drop_abort") == 1, http_pool.pool_stats()
+
+
+def test_https_through_proxy_uses_tls_connection() -> None:
+    """经 http 代理的 **https 目标**：连接类按目标 scheme 选，且 CONNECT 到目标。
+
+    2026-11-17 现场（`nodes/register` 对每个云机隧道恒 422）：`_conn_for` 用**代理**的 scheme
+    选连接类 ⇒ 明文请求穿过 CONNECT 隧道发到 443，Cloudflare 回 `400 Bad Request` ⇒ hub 的
+    探活门 `node_ping` 恒 None；同一条隧道 curl / `racing_urlopen` 都是 200（实测）。
+    """
+    http_pool.reset()
+    proxy = "http://127.0.0.1:7890"
+    conn, _key = http_pool._conn_for("", "https", "probe.trycloudflare.com", 443, proxy, 3.0)
+    try:
+        assert isinstance(conn, http.client.HTTPSConnection), (
+            "https 目标选了明文连接类 ⇒ 明文会穿过 CONNECT 隧道打到 443（现场 400）"
+        )
+        assert getattr(conn, "_tunnel_host", "") == "probe.trycloudflare.com", "必须对目标发 CONNECT"
+        assert conn.port == 7890, "先把 TCP 连到代理，再在隧道上对目标做 TLS"
+    finally:
+        conn.close()
+        http_pool.reset()
