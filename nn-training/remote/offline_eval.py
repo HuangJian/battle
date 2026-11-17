@@ -29,7 +29,6 @@ import os
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -37,7 +36,7 @@ from typing import Any
 
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from common import game_watch
+from common import game_watch, runtime
 from common.fs import append_jsonl
 from common.log import log as _rl_log
 from common.log_bundle import LogBundle
@@ -662,10 +661,8 @@ def run_cloud_eval(
                     for task in pending:
                         run_one(task)
                 else:
-                    with ThreadPoolExecutor(
-                        max_workers=n_slots, thread_name_prefix="cloud-eval"
-                    ) as ex:
-                        list(ex.map(run_one, pending))
+                    with runtime.Runtime(scope="cloud-eval") as rt:
+                        rt.map(run_one, pending, workers=n_slots)
                 if not machine_stuck:
                     break
                 # `round_retries` = **真的重投过几次**（计数在重投前自增），所以上限判在自增之前。

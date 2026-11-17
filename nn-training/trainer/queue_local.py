@@ -17,11 +17,12 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Any
 
 import common.distribution
+import common.runtime
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
 from common.paths import REPO_ROOT
@@ -373,7 +374,7 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
         t0 = time.time()
         last_log_at = t0
         results: list[tuple[int, dict | None]] = [(1, None)] * len(pairs)
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        with common.runtime.Runtime(scope="local-rollout", workers=workers) as ex:
             futures = {ex.submit(run_one, i, si, sd): i for i, (si, sd) in enumerate(pairs)}
             for done_n, fut in enumerate(as_completed(futures), 1):
                 results[futures[fut]] = fut.result()

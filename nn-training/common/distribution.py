@@ -48,9 +48,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import as_completed
 from typing import Any
 
-from common import net_http
+from common import net_http, runtime
 from common.codehash import dirty_hash_files as dirty_hash_files
 from common.distribution_limits import STATUS_TIMEOUT_SEC as STATUS_TIMEOUT_SEC
 from common.distribution_limits import node_slots as node_slots
@@ -440,7 +441,6 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
     """
     if not nodes:
         return []
-    from concurrent.futures import ThreadPoolExecutor
 
     def _one(nd: dict) -> dict | None:
         # 键名兼容 `key`（归一化配置，eval_dispatch/batch_eval 用的形态）与 `authKey`
@@ -452,8 +452,8 @@ def ping_nodes_parallel(nodes: list, timeout: float = STATUS_TIMEOUT_SEC) -> lis
             timeout=timeout,
         )
 
-    with ThreadPoolExecutor(max_workers=min(8, len(nodes))) as ex:
-        return list(ex.map(_one, nodes))
+    with runtime.Runtime(scope="ping-nodes") as rt:
+        return rt.map(_one, nodes, workers=min(8, len(nodes)))
 
 
 def node_ping(url: str, auth_key: str, timeout: float = STATUS_TIMEOUT_SEC) -> dict | None:
@@ -958,8 +958,6 @@ def post_weights_parallel(
     日志在每节点完成时输出。pure_collect 锚点由调用方定义（用户 2026-09-19：
     权重开始分发 → 样本齐可交 PPO）。
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     if not nodes:
         return []
 
@@ -988,7 +986,7 @@ def post_weights_parallel(
     n = len(nodes)
     ok_ids: set[str] = set()
     t0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=min(8, n)) as ex:
+    with runtime.Runtime(scope="weights-push", workers=min(8, n)) as ex:
         futs = {ex.submit(_push, nd): nd for nd in nodes}
         t_sub: dict[int, float] = {id(f): time.monotonic() for f in futs}
         for fut in as_completed(futs):

@@ -37,7 +37,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, wait
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -48,7 +48,7 @@ from typing import Any, cast
 # 重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from common import game_watch, progress_hook, scratch
+from common import game_watch, progress_hook, runtime, scratch
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
@@ -1311,7 +1311,7 @@ def _drive_games(r: _IterRun) -> None:
     log, pool, next_game = r.log, r.pool, r.next_game
     on_game_settled, it, t0, rb = r.on_game_settled, r.it, r.t0, r.rb
     round_retries, retry_cap = r.round_retries, r.retry_cap
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    with runtime.Runtime(scope="iter-rollout", workers=workers) as ex:
         last_log_at = t0
         settled_n = 0
         # `pending` = 还没拿到结果的局（**跨重投存活**）：机器级停滞重投时只补这几个，

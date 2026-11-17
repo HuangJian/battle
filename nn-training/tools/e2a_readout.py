@@ -21,7 +21,7 @@ import base64
 import json
 import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "nn-training"))
 
+import common.runtime
 from biz.course_resolve import load_course
 from common.cli import house_parser, run_main
 from common.proc import run_capture
@@ -231,7 +232,7 @@ def main() -> None:
     )
     reports: list[dict[str, Any]] = []
     done = 0
-    with ThreadPoolExecutor(max_workers=args.parallel) as ex:
+    with common.runtime.Runtime(scope="e2a-readout", workers=args.parallel) as ex:
         futs = {
             ex.submit(
                 _run_one,

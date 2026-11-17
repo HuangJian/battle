@@ -144,9 +144,14 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 共享实现已抽到 `tools/p0_common.py`（见其文件头）；`BASELINE_EXACT=14` /
 #: `BASELINE_CLONE=17` 仍绿 ⇒ 没有真实重复被这条计数门放过。
 #: 这是**记账口径调整**，不是放宽检测：再引入新同名族仍会把 110 顶红。
+#: 2026-11-17 抬到 **113**（+3，实测）：新模块 `common/runtime.py`（B6 的 `Runtime`，线程池唯一所有者）
+#:   带来三个跨过「≥3 模块」线的名字 —— `__enter__` / `__exit__`（context manager 协议名）与
+#:   `describe`（读数；与 `biz/reward_library` / `worker/stage_rotation` 的同名函数语义无关）。
+#:   **这不是复制实现**：`BASELINE_EXACT` 14 / `BASELINE_CLONE` 17 两条都未动（真重复会被那两条抓）。
+#:   协议名（dunder）在任何类里都同名，本条只防「同一个名字又被复制了一份」。
 BASELINE_EXACT = 14
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 110
+BASELINE_SAME_NAME_GE3 = 113
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

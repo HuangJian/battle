@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.payload import (
     PAYLOAD_PERTURB_NAME,
     PAYLOAD_XZ_CHUNKS,
@@ -295,8 +296,6 @@ def _pack_segmented(
     sampler 回传的字节就把段压好存住，这里直接取用；缺的（local 兜底腿 / 补漏）现场从盘补，
     **同一个 `shard_segment` 函数体**，没有第二条变换逻辑。
     """
-    import concurrent.futures as cf
-
     dirs = {Path(d).name: Path(d) for d in shard_dirs}
     names = sorted(dirs)  # 确定性：同内容必同字节序 ⇒ 同 sha
 
@@ -317,8 +316,8 @@ def _pack_segmented(
 
     parts: list[bytes] = []
     if names:
-        with cf.ThreadPoolExecutor(max_workers=max(1, min(chunks, len(names)))) as ex:
-            parts = list(ex.map(seg_one, names))
+        with runtime.Runtime(scope="payload-pack") as rt:
+            parts = rt.map(seg_one, names, workers=max(1, min(chunks, len(names))))
 
     root: dict[str, bytes] = {}
     for xf in extra_files:

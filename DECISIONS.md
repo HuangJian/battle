@@ -6872,3 +6872,21 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   无 `.py` · 分段头与位置一致 · 每段以换行收尾），四向证伪实测红（手改生成物 / 加表外分片 / 混进
   `.py` / 分段头漂号）。`test_module_doc_budget`（53 行）与 G3/G4/G14 读数**一个都没动**。
   全文 → `docs/nn/engineering.md` §118。
+- **2026-11-17（B6 第一刀：`Runtime` = 线程池的唯一所有者 + G16）**：全仓 10 处
+  `with ThreadPoolExecutor(...) as ex:` 就地建池（生产包 9 + `tools/e2a_readout` 1），四个缺口同时存在 —— 没有所有者（池的生死绑在
+  词法作用域上）、没有上限（`min(8, len(nodes))` ×2 / `len(items)` / `n_slots` 叠加无人报数）、
+  没有取消点（`halt_event` 到不了池边）、线程名各写各的（10 处只有 1 处带 `thread_name_prefix`）。
+  新增 `common/runtime.py`（L0，stdlib-only）的 `Runtime`，做成 **`ThreadPoolExecutor` 的同形替身**
+  （`with Runtime(scope=…, workers=N) as ex:` 后 `ex.submit/map` 照旧，转发默认池 `"main"`）：
+  池按名存在 Runtime 里、`close()` 一次收完；线程名 `<scope>-<pool>`（scope 必填）；取消点 =
+  `request_stop()` / `check()` / `sleep()` / `submit|map` 拒绝新活（已开跑的不打断 —— Python 线程
+  杀不掉）；`describe()` 首次让「开了几个线程、超没超」可见。
+  **三条有意不做**：① 不静默节流（`workers=N` 是操作员的决定，静默砍并发 = 拿吞吐换好看的数字，
+  而上限只约束隐式请求 `workers=None` 并只报数）；② 不读 env（G13 只许调小，且并发旋钮不许再
+  种一遍「同一根旋钮两个默认值」）；③ 不替调用方接 `halt_event`（6 个模块的 halt 语义一起改要真跑，
+  `stop=` 已吃 `Event`，接线是调用方一行）。`RuntimeCancelledError` 不并进 `common.errors`（失败分类
+  ≠ 取消）。门禁 **G16** `tests/test_executor_ownership.py`（零容忍无基线：生产包只许 `common/runtime.py`
+  构造池 + `Runtime(` 必须带 `scope=` + 迁移处数下限），落地时迁移前红（9 违规 / 0 处使用）、迁移后绿。
+  两笔基线有意抬并逐笔记账：SOURCE 1159→1160（G16 两向护栏被口径 B 计入，与 G3/G4/G13/G14 同一限边）、
+  同名散落 110→113（`__enter__`/`__exit__` 协议名 + `describe`；exact 14 / clone 17 未动 ⇒ 无实现被复制）。
+  全文 → `docs/nn/engineering.md` §119。

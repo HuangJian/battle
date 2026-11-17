@@ -13,6 +13,7 @@ from pathlib import Path
 import common.codehash
 import common.distribution
 import common.protocol
+import common.runtime
 from common.log import log
 
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
@@ -216,10 +217,8 @@ class RolloutDispatcher:
 
         probe_results: list = []
         if cfg_nodes:
-            from concurrent.futures import ThreadPoolExecutor
-
-            with ThreadPoolExecutor(max_workers=min(8, len(cfg_nodes))) as _ex:
-                probe_results = list(_ex.map(_probe, cfg_nodes))
+            with common.runtime.Runtime(scope="dispatch-probe") as _rt:
+                probe_results = list(_rt.map(_probe, cfg_nodes, workers=min(8, len(cfg_nodes))))
 
         # 准入判据从 `st` 读：先把本相位算出的字段写进去（方法末尾的写入是给后续相位的）。
         st.code_hash, st.upgrade_branch = code_hash, upgrade_branch

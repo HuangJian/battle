@@ -41,11 +41,11 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from common import runtime
 from common.env_probe import probe_cloud_env, worker_name
 from common.proc import run_capture
 from remote import tailscale_boot
@@ -358,8 +358,8 @@ def _rank_fastest(
         return []
     if len(items) == 1:
         return [items[0][0]]
-    with ThreadPoolExecutor(max_workers=len(items)) as pool:
-        speeds = list(pool.map(lambda it: _speed_probe(it[1]), items))
+    with runtime.Runtime(scope="speed-probe") as rt:
+        speeds = rt.map(lambda it: _speed_probe(it[1]), items, workers=len(items))
     order = sorted(range(len(items)), key=lambda i: (-speeds[i], i))
     log(
         f"{label} 测速: "

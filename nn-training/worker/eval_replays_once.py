@@ -33,8 +33,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
 # 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
 # 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
-from concurrent.futures import ThreadPoolExecutor
-
+import common.runtime
 from common.cli import house_parser, run_main
 
 _FILENAME_RE = re.compile(r"-s(\d+)-[a-z]+-l\d+-t\d+-seed(\d+)\.replay$")
@@ -347,8 +346,8 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
             log(f"[replay-exp] progress {done}/{len(games)} ok={ok} fail={failed} "
                 f"elapsed={time.time() - t0:.0f}s")
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(one, games))
+    with common.runtime.Runtime(scope="replay-export") as rt:
+        rt.map(one, games, workers=workers)
 
     files, errors = _manifest_for(games, out_dir)
     shutil.rmtree(tmp_reports, ignore_errors=True)

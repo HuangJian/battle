@@ -25,6 +25,65 @@
 
 ---
 
+## §119 并发的唯一所有者：`Runtime`（executor 生命周期 / 取消点 / 线程名）+ G16（2026-11-17）
+
+**现场**（`python.refactor.md` §P1-6 / §10-B6）：全仓 **10 处** `with ThreadPoolExecutor(...) as ex:`
+就地建池（生产包 9 —— `common/distribution` ×2 · `remote/{offline_eval,payload_pack,rollout_node}` ·
+`trainer/{dispatch,queue_local}` · `worker/{eval_replays_once,iter_rollout}` · `tools/e2a_readout`），
+四件事一件也守不住：
+
+| 缺口 | 现场读数 |
+|---|---|
+| 没有所有者 | 池的生死绑在词法作用域上；提前 `return` / 异常 / `break` 就能把「还有在飞的活」与「池」分家，没有任何地方能说「这一轮结束了，别再投了」 |
+| 没有上限 | `min(8, len(nodes))` 出现两次、`len(items)` 一次、`n_slots`（云 eval 槽位，按几十量级）一次；同进程两层并发叠加，谁都不报数 |
+| 没有取消点 | `halt_event` 已是 6 个模块的事实约定，但它到不了池边：`submit` 完就只能等 |
+| 线程名各写各的 | 10 处里只有 1 处写了 `thread_name_prefix`，其余在 `py-spy` / `faulthandler` 里都是 `ThreadPoolExecutor-3_0` |
+
+**做法**：`common/runtime.py`（L0，stdlib-only）里的 `Runtime`，它**就是 `ThreadPoolExecutor` 的同形替身**：
+`with Runtime(scope=…, workers=N) as ex:` 之后 `ex.submit(...)` / `ex.map(...)` 照旧（转发到默认池 `"main"`）。
+
+* **单一所有者**：池按名字存在 Runtime 里（同域同名 = 同一个池），`close()` 一次收完，`__exit__` 调它。
+  正常退出 `shutdown(wait=True)` 且**不**取消排队活（与 `with ThreadPoolExecutor` 同语义 —— 提前
+  `return` 不该丢掉已投出去的局）；**只有** `stop` 已置位时才 `cancel_futures=True`。
+* **线程名**：`thread_name_prefix="<scope>-<pool>"`，scope 必填（空串直接 `ValueError`）—— G15 只管
+  `Thread(` 构造，池这一半在这里补上。
+* **取消点**：`request_stop()` · `stop_event`（可传外部 `threading.Event`，即 `halt_event` 那种）·
+  `check()`（置位即抛 `RuntimeCancelledError`）· `sleep(sec)`（可取消，返回布尔而不是抛 —— 轮询里
+  「被打断」通常是正常出路）· `submit`/`map` 在置位后拒绝新活；`map` 每投一个前 `check()` 一次，
+  置位后已投的取消、**已开跑的不打断**（Python 线程杀不掉，假装能杀才是坑）。
+* **上限与读数**：`describe()` 一行给 `{scope, ceiling, workers, over, pools, stopped, closed}`，
+  `over=True` 就是超订 —— 这个数此前**没有任何地方能看见**。
+
+`RuntimeCancelledError` 刻意**不**并进 `common.errors`：那族表达失败分类（网络 / 协议 / 节点），
+取消表达「这一轮不许再往下走」；混一族就会把熔断记成故障。
+
+**这一刀没做**（注释与审计档同步写明，免得被当成隐藏的债）：
+
+1. **不节流**：`workers=N` 是调用方给的（多半来自 `--workers` / 课程配置），一律照办 —— 静默砍并发是
+   拿吞吐换好看的数字，而这个仓的并发数此前没有读数可依据。上限只约束**隐式**请求（`workers=None`）
+   与 `over` 的报数。
+2. **不读 env**：上限走 `Runtime(ceiling=)` 参数。`os.environ` 直读有 G13 计数（只许调小），给并发再加
+   一根环境变量旋钮等于把「同一根旋钮两个默认值」的病再种一遍（§P1-5）。
+3. **不接管裸 `threading.Thread`**：那 55 处是 B6 的另一半。
+4. **不替调用方接 `halt_event`**：6 个模块的 halt 语义一起改需要一轮真跑；`stop=` 已经吃 `Event`，
+   接线是调用方一行。
+
+**门禁 G16** `tests/test_executor_ownership.py`（零容忍、无基线）：AST 扫生产包，
+`ThreadPoolExecutor(...)` / `ProcessPoolExecutor(...)` 只许出现在 `common/runtime.py`；`Runtime(...)` 必须带
+`scope=`；另有一条**两向护栏**（生产面 `Runtime(` 处数 ≥ 8 —— 「迁移被无声回退」与「扫描入口坏了」都要红）。
+口径自检用合成源码（三种写法都认、`Executor` 变量与字符串不算）。落地读数：迁移前那条门禁**当场红**
+（9 处违规 + `Runtime(` 0 处），迁移后绿 —— 红-绿两向都是实测。
+
+**读数**：G3 print / G4 宽捕获 / G9 静默 / G14 `Any` / 函数形状**一个都没动**；`worker/iter_rollout.py`
+的 LOC 仍 **999**（`Runtime(workers=…) as ex` 替掉 `with ThreadPoolExecutor(max_workers=workers) as ex:` 是
+等行数替换；写成 `as rt` + `rt.pool(...)` 会顶到 1000 被 LOC 门禁拦下 —— 这也是把它做成「同形替身」的
+理由之一）。两笔基线是有意抬的、逐笔记账：SOURCE 1159 → **1160**（G16 那条两向护栏被口径 B 计入，
+与 G3/G4/G13/G14 同一已知限边）、同名散落 110 → **113**（`__enter__` / `__exit__` 协议名 + `describe`；
+`BASELINE_EXACT` 14 / `BASELINE_CLONE` 17 两条未动 ⇒ 没有实现被复制）。
+
+**下一步（B6 后半）**：`Runtime` 里补 rng/clock 注入（PPO 改 `default_rng`、ckpt 存 bit generator），
+再把 6 个模块的 `halt_event` 接到 `Runtime(stop=…)` —— 那是会改 halt 语义的一刀，需要一轮真跑。
+
 ## §118 单文件发行物改生成物：`offline_boot` 拆 12 段 `.pyfrag` + 拼接器（2026-11-17）
 
 **现场**（`python.refactor.md` §0.4-12 / §7.6 / §10-B8）：`remote/offline_boot.py` 3554 行 / 70+ 个顶层
