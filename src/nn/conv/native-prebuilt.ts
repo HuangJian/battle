@@ -332,6 +332,30 @@ export function nativeLinkArgs(t: NativeTarget): string[] {
   }
 }
 
+/**
+ * 只影响「重建可复现性」、不影响链接语义的参数子集（给**参考 CLI** 用）。
+ *
+ * CLI 链系统 libc（stdio/malloc），用不了 `nativeLinkArgs` 那套 freestanding 参数
+ * （`-nostdlib` / `-noentry` 会直接编不出来），于是它一直**漏掉**了可复现性开关：
+ * 2026-11-17 实测，同一份源码间隔 3 秒编两次，共享库已逐字节相同、**CLI 仍不同**
+ * —— 差在 PE 头的 TimeDateStamp（`-Brepro` 才能钉住）。
+ *
+ * 所以把这三行拆出来给 CLI 复用，别再把「库的可复现」当成「整个构建的可复现」。
+ */
+export function reproducibleLinkArgs(t: NativeTarget): string[] {
+  switch (t.kind) {
+    case 'coff':
+      // lld-link 的 reproducible：PE TimeDateStamp 写 0 而不是当前时间
+      return ['-Wl,-Brepro']
+    case 'macho':
+      // lld 默认给可执行文件塞随机 LC_UUID
+      return ['-Wl,-no_uuid']
+    case 'elf':
+      // ELF 默认不带时间戳；`--build-id` 也是内容哈希，天然可复现
+      return []
+  }
+}
+
 /** prebuilt manifest 里的一个目标条目。 */
 export interface PrebuiltEntry {
   id: string
@@ -357,11 +381,15 @@ export interface PrebuiltManifest {
   abi: number
   cc: string
   ccVersion: string
-  sources: Array<{ path: string; sha256: string }>
+  /** 源码条目：新格式只有 `digest`（剥注释摘要）；旧格式只有 `sha256`（原始字节）。 */
+  sources: Array<{ path: string; digest?: string; sha256?: string }>
   targets: PrebuiltEntry[]
   /** wasm32 产物（与 6 个 native 目标**同一门禁**：改了 conv.c 就必须重编）。
    *  缺这个键 = 上一次构建没编成 wasm ⇒ `--check-prebuilt` 会响亮报「缺 wasm32 产物」。 */
   wasm?: PrebuiltWasmEntry
+  /** 摘要口径（`tools/agent/native-build.ts` 的 `SOURCE_DIGEST_SCHEME`）。
+   *  缺 = 旧 manifest，门禁按原始 sha256 判过期（改注释会误报，重建一次即迁移）。 */
+  sourceDigest?: string
   builtAt: string
 }
 

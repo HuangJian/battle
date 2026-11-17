@@ -50,6 +50,7 @@ import {
   nativeLinkArgs,
   nativeTargetFor,
   nativeTargetVariants,
+  reproducibleLinkArgs,
   wasmBuildFlags,
   type NativeTarget,
   type PrebuiltEntry,
@@ -137,13 +138,195 @@ export interface NativeManifest {
   ccVersion: string
   target: string
   flags: string[]
-  sources: Array<{ path: string; sha256: string }>
+  sources: SourceEntry[]
   artifacts: { lib: NativeArtifact; exe: NativeArtifact }
+  /** 摘要口径（`SOURCE_DIGEST_SCHEME`）；缺 = 旧 manifest，按原始 sha256 判过期。 */
+  sourceDigest?: string
   builtAt: string
 }
 
 export function sha256File(p: string): string {
   return new Bun.CryptoHasher('sha256').update(fs.readFileSync(p)).digest('hex')
+}
+
+/* ─────────────────── 源码摘要：剥掉 C 注释后再算（2026-11-17） ─────────────────── */
+
+/**
+ * 摘要口径版本（写进 manifest 的 `sourceDigest` 字段）。
+ *
+ * 改口径 = 换字符串；旧 manifest 的 `digest` 与新版算出来的必然不等 ⇒ 判「过期需重建」，
+ * **这是安全方向**（宁可多编一次，不可少编一次）。
+ */
+export const SOURCE_DIGEST_SCHEME = 'c-strip-comments+lf/v1'
+
+/**
+ * 剥掉 C 的两种注释（行注释、块注释），并把**不影响编译的空白**归一化。
+ *
+ * **为什么**：`prebuilt/**` 的过期判据以前是源码**原始字节** sha256，于是改一个注释字节
+ * 就让 10 个目标全判「需重建」—— 而注释不参与编译，产物一个字节都不会变。这类假警报每次
+ * 都逼着人重跑 `--cross`（数秒）+ 让 manifest 大段 diff，久了就会有人开始绕过门禁。
+ *
+ * **归一化到什么程度**（只抹编译器看不见的东西）：
+ *   · 注释 → 一个空格（`a` + 空块注释 + `b` 在 C 里就是两个 token，退化成 `ab` 会跟标识符 `ab` 撞）；
+ *   · 行内连续空白 → 一个空格，行尾空白丢弃（缩进/对齐改动不影响编译）；
+ *   · **换行保留**（`#define` 的宏体止于行尾 —— 压掉换行会让两个不同的预处理程序撞同一摘要，
+ *     那是假负例：该重建时不重建，方向不安全）；
+ *   · **字面量内部的空白原样保留**（`"a  b"` 与 `"a b"` 是两个不同常量）。
+ * `#if 0` 块**不**剥：那是预处理语义，抹掉才是真骗人。
+ *
+ * 按 **latin1** 逐字节处理：utf8 解码会把非 ASCII 注释里的坏字节替换成 U+FFFD，两个不同
+ * 文件可能因此撞同一串替换符；latin1 是 1 char = 1 byte 的直映射，`Buffer.from(out,'latin1')`
+ * 还原后与原字节一一对应，零编码损失。
+ */
+export function stripCComments(text: string): string {
+  const n = text.length
+  let out = ''
+  let i = 0
+  // 未决空白：代码区里的空白 / 一段注释都等价于「一个空格」，等下一个非空白字符再落地
+  let space = false
+  // 行首（含文件开头）：这一行的缩进一律丢弃 —— 对齐方式不影响编译
+  let lineStart = true
+  const flush = (): void => {
+    // 行首不落地（缩进丢弃）；行中多个空白/注释压成一个空格
+    if (space && !lineStart) out += ' '
+    space = false
+    lineStart = false
+  }
+  while (i < n) {
+    const c = text[i]!
+    const d = i + 1 < n ? text[i + 1]! : ''
+    if (c === '/' && d === '/') {
+      // 行注释：吃到行尾（`space` 置位 = 注释等价一个空格；换行由下面的分支保留）
+      i += 2
+      while (i < n && text[i] !== '\n') i++
+      space = true
+      continue
+    }
+    if (c === '/' && d === '*') {
+      // 块注释：整体等价一个空格。内部换行按 C 标准一并删除（`a/*\n*/b` 在 C 里是 `a b`）
+      i += 2
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++
+      i = Math.min(i + 2, n)
+      space = true
+      continue
+    }
+    if (c === '\n') {
+      space = false // 行尾空白丢弃，不写空格
+      out += '\n'
+      lineStart = true
+      i++
+      continue
+    }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f' || c === '\v') {
+      space = true
+      i++
+      continue
+    }
+    if (c === '"' || c === "'") {
+      // 字符串 / 字符字面量：原样搬运，反斜杠转义不拆（`"a//b"` 里的 `//` 不是注释），
+      // 内部空白**不**压缩（`"a  b"` ≠ `"a b"`）
+      flush()
+      out += c
+      i++
+      while (i < n) {
+        const ch = text[i]!
+        if (ch === '\\') {
+          out += ch + (i + 1 < n ? text[i + 1]! : '')
+          i += 2
+          continue
+        }
+        out += ch
+        i++
+        if (ch === c) break
+      }
+      continue
+    }
+    flush()
+    out += c
+    i++
+  }
+  // 文件末尾的未决空白不落地（尾随空白不影响编译）
+  return out
+}
+
+/** 归一化：`\r\n` / 单独 `\r` → `\n`（autocrlf 噪音不该算「源码变了」）。 */
+export function normalizeSourceText(text: string): string {
+  return stripCComments(text.replace(/\r\n?/g, '\n'))
+}
+
+/** 单个 C 源文件的**剥注释摘要**（manifest 的判据）。 */
+export function sourceDigestFile(p: string): string {
+  const text = fs.readFileSync(p, 'latin1')
+  return new Bun.CryptoHasher('sha256')
+    .update(Buffer.from(normalizeSourceText(text), 'latin1'))
+    .digest('hex')
+}
+
+/** `{ path, digest }` 条目（manifest `sources` 的写法）。`digest` 缺 = 旧格式。 */
+export interface SourceEntry {
+  path: string
+  /** 剥注释摘要（新格式判据）。 */
+  digest?: string
+  /** 原始字节 sha256 —— **仅旧 manifest** 才有；新格式不再写（改注释后它必然与盘上不符）。 */
+  sha256?: string
+}
+
+/** 按源码清单生成 manifest 条目（统一从这里出，两个 manifest 同口径）。 */
+function sourceEntries(repoRoot: string, files: string[]): SourceEntry[] {
+  return files.map((p) => ({
+    path: path.relative(repoRoot, p).replace(/\\/g, '/'),
+    digest: sourceDigestFile(p),
+  }))
+}
+
+/**
+ * 临时产物路径：**pid 只进目录名，绝不进文件名**。
+ *
+ * 以前的写法是 `<out>.tmp-<pid>`，结果 pid 被编进产物：PE 的导出表 / Debug 目录会记录
+ * **输出文件名**（实测 `.rdata` 里出现 `conv_native.dll.tmp-5680` 这串 ASCII），于是
+ * 「同一份源码两次构建」字节不同 —— `-Brepro` 只压得住 PE 头的 TimeDateStamp，压不住这一处。
+ * 2026-11-17 实测：固定输出名连编两次 = 逐字节相同；换个名字 = 立刻不同；同 basename 换目录 = 相同。
+ * 所以把 pid 挪到**目录**上：目录名不进产物，原子性（先写临时再 rename）与可复现性同时拿到。
+ *
+ * 返回路径**总是**位于 `<dir>/.build-<pid>/`，故 `commitTmp`/`dropTmp` 删那个子目录永远不会
+ * 误删产物本身。
+ */
+function tmpSibling(out: string): string {
+  const sub = path.join(path.dirname(out), `.build-${process.pid}`)
+  fs.mkdirSync(sub, { recursive: true })
+  return path.join(sub, path.basename(out))
+}
+
+/**
+ * 原子提交：rename 到最终名 + 清掉 `.build-<pid>` 子目录（成功失败都清，不清就在仓里留垃圾）。
+ *
+ * Windows 有一条**必然踩到**的坑：正在被进程映射的 `.dll` 不能被 rename 覆盖（EPERM），
+ * 于是「本机 hub / worker / dashboard 活着 → 重建 prebuilt」会失败，且只失败在**它加载的那个变体**
+ * （x64 上优先 `win32-x64-fma`，所以现象是「9 个目标里只有 fma 红」）。2026-11-17 实测复现两次。
+ * 这里把原因翻译成人话，别让人去猜「为什么只失败一个」。
+ */
+function commitTmp(tmp: string, out: string): void {
+  try {
+    fs.renameSync(tmp, out)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? String(e)
+    throw new Error(
+      `落盘失败 ${path.basename(out)}（${code}）：Windows 上正被进程加载的产物不能覆盖 —— ` +
+        `先停掉用它的一方（本机 hub / worker / dashboard）再重建；其余目标可能已更新，` +
+        `manifest 未写 ⇒ --check-prebuilt 会红，重跑一次即可。`,
+    )
+  } finally {
+    dropTmp(tmp)
+  }
+}
+
+/** 失败路径也要清：`.build-<pid>` 落在 prebuilt/ 下时不清就是一堆未跟踪文件。 */
+function dropTmp(tmp: string): void {
+  try {
+    fs.rmSync(path.dirname(tmp), { recursive: true, force: true })
+  } catch {
+    /* ignore */
+  }
 }
 
 export function nativeOutDir(repoRoot: string, outDir?: string): string {
@@ -237,14 +420,10 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
   const implib = target.kind === 'coff' ? ['-Wl,/noimplib'] : []
 
   // ---- 共享库（原子落盘：先写临时名再 rename，避免并发读到半截 .dll） ----
-  const libTmp = `${lib}.tmp-${process.pid}`
+  const libTmp = tmpSibling(lib)
   const libBuild = run(cc, [...flags, ...nativeLinkArgs(target), ...implib, '-o', libTmp, srcCore])
   if (libBuild.status !== 0 || !fs.existsSync(libTmp)) {
-    try {
-      fs.rmSync(libTmp, { force: true })
-    } catch {
-      /* ignore */
-    }
+    dropTmp(libTmp)
     return {
       ok: false,
       reason: `共享库编译失败 rc=${libBuild.status}`,
@@ -252,13 +431,15 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
       log: [...log, libBuild.stderr.slice(0, 400)],
     }
   }
-  fs.renameSync(libTmp, lib)
+  commitTmp(libTmp, lib)
   log.push(`lib ok: ${path.relative(repoRoot, lib)}`)
 
   // ---- 参考 CLI（链系统 libc：stdio/malloc；不走 -nostdlib） ----
-  const exeTmp = `${exe}.tmp-${process.pid}`
+  const exeTmp = tmpSibling(exe)
   const exeBuild = run(cc, [
     ...nativeFlags(target, false),
+    // 链 libc 用不了 nativeLinkArgs 全套，但可复现性开关必须带上（否则 PE 头带时间戳）
+    ...reproducibleLinkArgs(target),
     ...implib,
     '-o',
     exeTmp,
@@ -266,11 +447,7 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
     srcCore,
   ])
   if (exeBuild.status !== 0 || !fs.existsSync(exeTmp)) {
-    try {
-      fs.rmSync(exeTmp, { force: true })
-    } catch {
-      /* ignore */
-    }
+    dropTmp(exeTmp)
     return {
       ok: false,
       reason: `CLI 编译失败 rc=${exeBuild.status}`,
@@ -279,7 +456,7 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
       log: [...log, exeBuild.stderr.slice(0, 400)],
     }
   }
-  fs.renameSync(exeTmp, exe)
+  commitTmp(exeTmp, exe)
   log.push(`cli ok: ${path.relative(repoRoot, exe)}`)
 
   // clang 在 Windows 上还会留下 .exp/.lib 导出文件（`/noimplib` 只挡 .lib）——手动清掉，
@@ -298,14 +475,12 @@ export function buildNative(repoRoot: string, opts: BuildOptions = {}): BuildRes
     ccVersion,
     target: `${platform}-${arch}`,
     flags,
-    sources: nativeSourceFiles(repoRoot).map((p) => ({
-      path: path.relative(repoRoot, p).replace(/\\/g, '/'),
-      sha256: sha256File(p),
-    })),
+    sources: sourceEntries(repoRoot, nativeSourceFiles(repoRoot)),
     artifacts: {
       lib: { name: names.lib, sha256: sha256File(lib), bytes: fs.statSync(lib).size },
       exe: { name: names.exe, sha256: sha256File(exe), bytes: fs.statSync(exe).size },
     },
+    sourceDigest: SOURCE_DIGEST_SCHEME,
     builtAt: new Date().toISOString(),
   }
   fs.writeFileSync(nativeManifestPath(dir), JSON.stringify(manifest, null, 2), { encoding: 'utf8' })
@@ -357,14 +532,27 @@ export function nativeStaleReason(
   return ''
 }
 
-function sourcesStaleReason(
-  repoRoot: string,
-  sources: Array<{ path: string; sha256: string }>,
-): string {
+/**
+ * 源码是不是「编这份产物时的那份源码」。
+ *
+ * 判据分两种格式（**故意不对称**，见 `stripCComments` 的理由）：
+ *   · 条目带 `digest`（新格式）→ 比**剥注释摘要**：改注释 / 改行尾 = 不算变（产物确实不变）；
+ *   · 条目只有 `sha256`（旧 manifest）→ 只能比原始字节，改一个注释字节就报过期。
+ *     这条回落路径是**迁移期**用的：重建一次（`--cross` / 本机 build）manifest 就升级成新格式，
+ *     之后再改注释不再触发。没有它，盘上现存的 prebuilt 会被判「一律过期」。
+ */
+function sourcesStaleReason(repoRoot: string, sources: SourceEntry[]): string {
   for (const s of sources) {
     const p = path.join(repoRoot, s.path)
     if (!fs.existsSync(p)) return `缺源文件 ${s.path}`
-    if (sha256File(p) !== s.sha256) return `源码已变 ${s.path}（需重建）`
+    if (s.digest) {
+      if (sourceDigestFile(p) !== s.digest) return `源码已变 ${s.path}（需重建）`
+    } else if (s.sha256) {
+      if (sha256File(p) !== s.sha256) return `源码已变 ${s.path}（需重建）`
+    } else {
+      // 两个字段都缺 = manifest 手改坏了；判过期比放行安全
+      return `源码条目缺摘要 ${s.path}（manifest 需重建）`
+    }
   }
   return ''
 }
@@ -448,21 +636,17 @@ export function buildWasm(
   if (ver.status !== 0) return { ok: false, path: '', reason: `编译器不可用: ${cc}` }
   const out = prebuiltWasmPath(dir)
   fs.mkdirSync(path.dirname(out), { recursive: true })
-  const tmp = `${out}.tmp-${process.pid}`
+  const tmp = tmpSibling(out)
   const r = run(cc, [...wasmBuildFlags(), '-o', tmp, srcCore])
   if (r.status !== 0 || !fs.existsSync(tmp)) {
-    try {
-      fs.rmSync(tmp, { force: true })
-    } catch {
-      /* ignore */
-    }
+    dropTmp(tmp)
     const why = `rc=${r.status}: ${r.stderr.split(/\r?\n/).find((l) => l.trim()) ?? ''}`.slice(
       0,
       300,
     )
     return { ok: false, path: out, reason: why }
   }
-  fs.renameSync(tmp, out)
+  commitTmp(tmp, out)
   return { ok: true, path: out, sha256: sha256File(out), bytes: fs.statSync(out).size }
 }
 
@@ -526,16 +710,12 @@ export function buildPrebuilt(
     const tdir = path.join(dir, t.id)
     fs.mkdirSync(tdir, { recursive: true })
     const out = path.join(tdir, t.lib)
-    const tmp = `${out}.tmp-${process.pid}`
+    const tmp = tmpSibling(out)
     const flags = nativeFlags(t)
     const args = ['--target=' + t.triple, ...flags, ...nativeLinkArgs(t), '-o', tmp, srcCore]
     const r = run(cc, args)
     if (r.status !== 0 || !fs.existsSync(tmp)) {
-      try {
-        fs.rmSync(tmp, { force: true })
-      } catch {
-        /* ignore */
-      }
+      dropTmp(tmp)
       const why = `rc=${r.status}: ${r.stderr.split(/\r?\n/).find((l) => l.trim()) ?? ''}`.slice(
         0,
         300,
@@ -544,7 +724,7 @@ export function buildPrebuilt(
       log.push(`FAIL ${t.id}: ${why}`)
       continue
     }
-    fs.renameSync(tmp, out)
+    commitTmp(tmp, out)
     // Windows 会给 DLL 顺手吐 .exp/.lib（`/noimplib` 只挡 .lib）
     for (const stray of [`${out}.exp`, `${out}.lib`]) {
       try {
@@ -612,12 +792,10 @@ export function buildPrebuilt(
     abi: NATIVE_ABI,
     cc,
     ccVersion,
-    sources: nativeLibSourceFiles(repoRoot).map((p) => ({
-      path: path.relative(repoRoot, p).replace(/\\/g, '/'),
-      sha256: sha256File(p),
-    })),
+    sources: sourceEntries(repoRoot, nativeLibSourceFiles(repoRoot)),
     targets: entries,
     wasm: wasmEntry,
+    sourceDigest: SOURCE_DIGEST_SCHEME,
     builtAt: new Date().toISOString(),
   }
   fs.writeFileSync(prebuiltManifestPath(dir), `${JSON.stringify(manifest, null, 2)}\n`, {

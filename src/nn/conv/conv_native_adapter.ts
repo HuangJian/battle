@@ -333,8 +333,9 @@ interface AttestRef {
 }
 
 /**
- * 首用 attestation：真实权重 + 确定性伪随机输入 ×3，native 与 wasm 逐字节对拍。
- * 通过 ⇒ available；任何一处不符/抛错 ⇒ 关 native（响亮）。
+ * 首用 attestation：真实权重 + 确定性伪随机输入 ×3，native 与 wasm **容差对拍**
+ * （阈值见下方 `ATTEST_TOLERANCE`；不是逐字节相同 —— FMA 收缩让两侧差 ~1 ulp）。
+ * 通过 ⇒ available；任何一处超出容差/抛错 ⇒ 关 native（响亮）。
  */
 /**
  * attestation 容差：`max|native−wasm| ≤ ATTEST_TOLERANCE × max(1, max|wasm|)`（逐张量）。

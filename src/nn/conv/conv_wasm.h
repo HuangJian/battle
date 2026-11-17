@@ -8,7 +8,9 @@
  *  ② 目标条件常量 `CF_PW_PX`：定义在 conv_native.h 的 `#if defined(__wasm32__)` 分支里
  *     （wasm = 8，其余 = 16 —— 理由与实测见那里的注释），本头不重复定义。
  *
- * 编译（见 tools/agent/native-build.ts --wasm；`-ffp-contract=off` 是逐位一致的硬要求）：
+ * 编译（见 tools/agent/native-build.ts --wasm；`-ffp-contract=off` 是**必须保留**的硬要求 ——
+ * 它保证 wasm 侧不收缩 FMA，从而与 native（`-ffp-contract=fast`）的差停在 `ATTEST_TOLERANCE`
+ * 之内；两侧**不是逐位一致**，是容差等价）：
  *   clang --target=wasm32 -msimd128 -O3 -ffp-contract=off -fno-fast-math -fno-builtin
  *         -fno-stack-protector -nostdlib -Wl,--no-entry -Wl,--export-memory
  *         -o prebuilt/wasm/conv.wasm conv.c

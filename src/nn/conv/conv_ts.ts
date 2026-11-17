@@ -3,9 +3,12 @@
  *
  * 选择链（rollout 与 eval 同路径，见 ./conv.ts）：native（bun:ffi）→ wasm32 SIMD →
  * **TS（本文件）**。前两个由 `conv.c` 编出（native 16px / wasm 8px，见 conv_native.h），
- * 本文件是那份算式的 TS 手工展开版 —— 三者的输出必须逐位一致（native↔wasm 由
- * tests/native-parity.test.ts 机械守护；TS 侧由 tests/nn/student-infer.test.ts 等 golden
- * 与 eval 的 `feat='ts'` 记账用例覆盖）。
+ * 本文件是那份算式的 TS 手工展开版。三者的等价强度**不一样**，别混：
+ *   · **TS ↔ wasm：逐位一致**（同一算术顺序，两侧都没有 FMA 收缩；wasm 用 `-ffp-contract=off`）；
+ *   · **TS/wasm ↔ native：只到容差**（native 用 `-ffp-contract=fast`、x64 加 `-mfma`，
+ *     末位差 ~1 ulp；阈值 `ATTEST_TOLERANCE=1e-5`，见 conv_native_adapter.ts）。
+ * 机械守护：native↔wasm 由 tests/native-parity.test.ts（容差断言，不是逐位）；
+ * TS 侧由 tests/nn/student-infer.test.ts 等 golden 与 eval 的 `feat='ts'` 记账用例覆盖。
  *
  * 为什么要单独一个文件（而不是留在 infer.ts 的类里）：
  *   ① 三个后端应当并排可见 —— 改 `conv.c` 时必须能一眼看到 TS 侧的对应实现（此前它散在
@@ -13,7 +16,7 @@
  *      加速后端一旦可疑（attestation 之外的人工排查、新平台第一次跑），拿它对拍最直接；
  *   ③ 与 `infer.ts` 解耦：本文件不 import 任何模型/权重类型，入参只是一个 buffer 视图。
  *
- * **改动纪律**：这里的算术顺序是「逐位一致」契约的一半 —— 只允许做**不改变每元素累加次序**
+ * **改动纪律**：这里的算术顺序是「TS↔wasm 逐位一致」契约的一半 —— 只允许做**不改变每元素累加次序**
  * 的改写（与 conv.c 的四项重排同一口径）；任何改累加序的"优化"都是语义变更，会让上面那些
  * golden/对拍一起红（那是信号，不是噪声）。性能上这里不需要手写向量化：生产档（h64/d8）必走
  * native/wasm，本路径只在架构不符或两个加速后端都不可用时生效（瘦身 fixture、BC/小模型、

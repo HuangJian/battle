@@ -1,8 +1,8 @@
 /* conv_cli.c —— native features CLI（字节对拍 + 离线基准的参考可执行文件）。
  *
  * 算法**不在这里**：本文件只做 stdin/stdout 编解码，计算全部来自
- * `conv.c`（与生产共享库同源）。T0 的「native 与 wasm 逐位一致」由
- * tests/native-parity.test.ts 用共享库断言；本 CLI 保留是因为它是最容易在任意
+ * `conv.c`（与生产共享库同源）。native 与 wasm 的**容差等价**（不是逐位 —— FMA 收缩让
+ * 末位差 ~1 ulp）由 tests/native-parity.test.ts 用共享库断言；本 CLI 保留是因为它是最容易在任意
  * 机器上复现的独立参考（无需 JS/FFI）。
  *
  * 二进制协议（小端）:
