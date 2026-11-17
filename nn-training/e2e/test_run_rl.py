@@ -496,14 +496,14 @@ class _StubPpo:
             "gnorm": 1.0,
         }
 
-    def _ppo_load(self, path, model, opt) -> int:
+    def _ppo_load(self, path, model, opt, rng) -> int:
         return 0  # 无 checkpoint 路径 → 轮内零结算走全盘更新分支
 
     def load_episodes(self, path, gamma=0.995, lam=0.95):
         # full-disk 回放路径（无 fresh settles 时）→ ep["obs"].shape[0] 即 steps
         return [{"obs": np.zeros(30, dtype=np.uint8)}]
 
-    def chunk_episodes(self, eps, mb):
+    def chunk_episodes(self, eps, mb, rng=None):
         return list(eps)
 
     def load_episode_from_shard(self, shard_dir, gamma=0.995, lam=0.95):
@@ -1568,6 +1568,7 @@ def test_compute_gae() -> None:
 
 def test_chunk_episodes() -> None:
     import worker.ppo as ppo_mod
+    from worker.ppo.rng import PPORng
 
     print("[fast] ppo.chunk_episodes (mb 对齐；无 ragged 末块)")
     # 多 episode 池才走「全局重排」路径——单池分支不重排（对齐单池会丢到"局末"，有偏）。
@@ -1575,7 +1576,8 @@ def test_chunk_episodes() -> None:
         {"obs": np.zeros((600, 2)), "adv": np.arange(600)},
         {"obs": np.zeros((400, 2)), "adv": np.arange(400)},
     ]
-    chs = ppo_mod.chunk_episodes(eps, 600)
+    # §P1-7：重排必须由调用方给流（本用例只关心形状/守恒，种子 0 足够）。
+    chs = ppo_mod.chunk_episodes(eps, 600, rng=PPORng.from_seed(0).chunk)
     sizes = [c["obs"].shape[0] for c in chs]
     # 2026-09-23：全部恰好 mb；尾部 1000%600=400 步被丢弃（旧行为是一块 ragged 400）。
     check(sizes == [600], f"all chunks exactly mb (got {sizes})")

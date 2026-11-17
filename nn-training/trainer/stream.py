@@ -149,6 +149,18 @@ def run_rollout_stream(
     box: dict = {}
     backend = backend or _default_ppo_backend()
     update_kwargs = update_kwargs or {}
+    # 延迟 import：`worker/ppo/__init__` 会拉起 engine(torch)，本模块的模块级面不许有 torch
+    # （同 `_default_ppo_backend` 的理由；`--collect-only` 子进程也加载本模块）。
+    from worker.ppo.rng import PPORng
+
+    # §P1-7（2026-11-17）：本轮的三条显式流。旧版吃进程级全局 RNG（上一轮停在哪、这一轮
+    # 从哪接着抽），换成本地可复现的派生：同 seed + 同 iter 重跑逐位一致，跨轮各自独立
+    # ⇒ 「同一 seed ⇒ 同一条轨迹」终于只是本函数的性质，不依赖进程里有没有别人抽随机数。
+    # 调用方已在 update_kwargs 给了流就照用（分片/回灌场景要能钉死）。
+    ppo_rng = update_kwargs.get("rng") or PPORng.from_seed(
+        int(getattr(args, "seed", 0)), scope=f"stream-{iter_id}"
+    )
+    update_kwargs["rng"] = ppo_rng
     if on_epoch_done is not None:
         update_kwargs["on_epoch_done"] = on_epoch_done
     halt_ev = threading.Event()  # 置位 → 队列停止派发新任务（R1 熔断止损）
@@ -342,7 +354,7 @@ def run_rollout_stream(
         eps = _load_wave(took)
         if not eps:
             return
-        chs = backend.chunk_episodes(eps, args.mb)
+        chs = backend.chunk_episodes(eps, args.mb, rng=ppo_rng.chunk)
         t_p = time.time()
         if not ppo_started_ev.is_set():
             ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
@@ -456,7 +468,7 @@ def run_rollout_stream(
         raise RuntimeError("stream collector produced no report")
     # 断点续跑轮可能零结算（全部秒回）
     if state["chunks"] == 0 and int(getattr(args, "epochs", 0)) > 0:
-        eps_done = backend._ppo_load(str(traj_dir / "ppo_ckpt"), model, opt)
+        eps_done = backend._ppo_load(str(traj_dir / "ppo_ckpt"), model, opt, ppo_rng)
         if eps_done >= args.epochs:
             # 该轮 PPO 已在先前进程中完整跑完：权重以当前状态收尾即可，
             # 重复调用 ppo_update 会走"剩余 0 epoch"路径（空聚合）。
@@ -471,7 +483,7 @@ def run_rollout_stream(
                 float(getattr(args, "gamma", 0.995)),
                 float(getattr(args, "lam", 0.95)),
             )
-            chunks = backend.chunk_episodes(episodes, args.mb)
+            chunks = backend.chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
             t_p = time.time()
             state["last_agg"] = backend.update(
                 model,

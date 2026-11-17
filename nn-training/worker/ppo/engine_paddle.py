@@ -30,6 +30,7 @@ from common.contracts import ActionSpace, head_layout
 from common.schema import MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
 from worker.ppo.demo import DemoBank
+from worker.ppo.rng import PPORng
 from worker.ppo.trainer import aggregate_stats, cat_entropy
 
 CLIP_EPS = 0.2
@@ -169,12 +170,14 @@ def ppo_update(
     #: `epochs × len(chunks)` 自己重算 —— 引擎一旦跳 chunk / 从 ckpt 中途起步，重算就会静默
     #: 漂移，而那个数要写进 `state.json` 与回传的 opt `step`（bias correction 的时基）。
     steps_out: dict[str, int] | None = None,
+    rng: PPORng | None = None,
     log=lambda _msg: None,
 ):
     """Paddle PPO update. Same math as `worker.ppo.engine.ppo_update`; see module doc.
 
-    `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/RNG），
-    每个 epoch 尾落盘一次；torch 与 Paddle 写出的 checkpoint 互相可读。
+    `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/三条随机流的
+    `bit_generator.state`），每个 epoch 尾落盘一次；torch 与 Paddle 写出的 checkpoint
+    互相可读。`rng` 与 torch 侧同口径（None = 种子 0，仅冒烟/工具用）。
     """
     model.train()
     if device is not None:
@@ -186,6 +189,7 @@ def ppo_update(
     clip = CLIP_EPS
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
+    ppo_rng = rng if rng is not None else PPORng.from_seed(0)
     tensored = tensored_chunks(chunks)
     total_steps = len(tensored) * epochs
     # 动作空间只在数据边界嗅一次；ref 与每个 minibatch 都读这份契约。
@@ -229,14 +233,14 @@ def ppo_update(
                 ref_cache[_i] = _heads
     t0 = time.time()
     last_hb = t0
-    start_epoch, steps_done = load_ckpt(model, opt, ckpt_path)
+    start_epoch, steps_done = load_ckpt(model, opt, ckpt_path, ppo_rng)
     if start_epoch:
         log(
             f"[ppo-paddle] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done "
             f"(continuing remaining {epochs - start_epoch}, steps_done={steps_done})"
         )
     for ep in range(start_epoch, epochs):
-        perm = np.random.permutation(len(tensored))
+        perm = ppo_rng.epoch.permutation(len(tensored))
         for j, i in enumerate(perm):
             e = tensored[int(i)]
             obs = e["obs"]
@@ -294,7 +298,7 @@ def ppo_update(
                 loss = loss + kickstart_kl * kick_mean
             demo_bc_mean = _zero_scalar()
             if demo_on:
-                _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
+                _didx = ppo_rng.demo.integers(0, demo_n, size=int(demo_per_mb))
                 _didx_t = paddle.to_tensor(_didx.astype(np.int64))
                 _dm = model(
                     demo_t["obs"][_didx_t],
@@ -347,7 +351,9 @@ def ppo_update(
                     # ——它之前没人用（静默失效的形参），现在与 torch 逐字对应。
                     progress.beat(progress_head)
         if ckpt_path:
-            save_ckpt(model, opt, ckpt_path, epochs_done=ep + 1, steps_done=steps_done)
+            save_ckpt(
+                model, opt, ckpt_path, epochs_done=ep + 1, steps_done=steps_done, rng=ppo_rng
+            )
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
     if steps_out is not None:

@@ -37,6 +37,7 @@ from common.protocol import (
 )
 from remote.wire import _wire_block
 from worker.ppo.demo import DEMO_BANK_FIELDS, DemoBank
+from worker.ppo.rng import PPORng
 
 
 def effective_epochs(manifest_epochs: int, epoch_mult: float) -> int:
@@ -234,6 +235,10 @@ class _CoreRun:
     demo_per_mb: int = 0
     demo_bank: DemoBank | None = None
     shards_root: str = ""
+    #: §P1-7 的三条显式随机流：两腿在算 per-job 种子那一行派生（`PPORng.from_seed`），
+    #: 切块重排与 PPO 循环都从它取 —— 全局 `np.random` 不再进训练序列。缺省 = 种子 0，
+    #: 只为工具/测试手工构造的 `_CoreRun`（生产两条腿在训练前一定会覆盖它）。
+    rng: PPORng = field(default_factory=lambda: PPORng.from_seed(0))
     t_ppo: float = 0.0
     train_b: Any = None
     chunks: list = field(default_factory=list)
@@ -264,8 +269,9 @@ def _load_ppo_data(st: _CoreRun, engine) -> None:
     )
     prep_b.emit(f"job {spec.jid}: 准备完成 {time.time() - spec.t_prep:.1f}s")
     st.total_steps = sum(e["obs"].shape[0] for e in episodes)
+    # `st.rng` 一定在位（两腿在算 per-job 种子时派生；手工构造的用字段缺省=种子 0）。
     st.chunks = engine.chunk_episodes(
-        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
+        episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"]), rng=st.rng.chunk
     )
 
 

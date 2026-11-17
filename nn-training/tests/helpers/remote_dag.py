@@ -506,6 +506,10 @@ LAYERS: dict[str, int] = {
     # ——只 import numpy + `common.errors` ⇒ **L0**。
     "worker.ppo.ckpt_convert": 0,
     "worker.ppo.demo": 0,  # 2026-11-16：demo bank 的字段表（`TypedDict` + frozenset，只 import numpy/typing）
+    #: 2026-11-17（§P1-7）：PPO 的三条显式随机流（`chunk`/`epoch`/`demo`）与 ckpt 状态——
+    #: 只 import numpy + `common.runtime`（不在本账本内）⇒ **L0**。四条训练线的随机面都从这里取，
+    #: 因此它必须待在 np_core(1)/common(2) 之下，不能反向。
+    "worker.ppo.rng": 0,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,
@@ -592,9 +596,10 @@ LAYERS: dict[str, int] = {
     # import `common.schema` 与 `worker.data.weights_meta`(L0) ⇒ **L1**。
     "worker.models.student_paddle": 2,
     # Paddle worker 的 torch 格式 checkpoint I/O（model.pt/opt.pt/state.json）：靠 `common.torch_pickle`
-    # / `common.adam_sq`（都不在账本内）+ `worker.ppo.ckpt_convert`(L0) 与 `worker.ppo.np_core`(L1)
-    # ⇒ **L2**。零 `remote.*` 依赖（分层硬禁：worker → remote）。
-    "worker.ppo.checkpoint_paddle": 2,
+    # / `common.adam_sq`（都不在账本内）+ `worker.ppo.ckpt_convert`(L0) 与 `worker.ppo.rng`(L0)
+    # ⇒ **L1**（2026-11-17 §P1-7：RNG 状态改存 `PPORng`，不再取 np_core(L1)，故降一层）。
+    # 零 `remote.*` 依赖（分层硬禁：worker → remote）。
+    "worker.ppo.checkpoint_paddle": 1,
     # 2026-10-11（S3）：`load_episode_from_shard` 的骨架提到 `worker.ppo._episode`(L0)
     # （np-core 不再自含那两行）⇒ 从 L0 升为 **L1**。
     "worker.ppo.np_core": 1,
@@ -626,8 +631,9 @@ LAYERS: dict[str, int] = {
     "worker.models.intent_net": 3,
     "worker.ppo.engine": 3,
     # 2026-10-27（Paddle 双生）：`engine` 的 Paddle 版（update 数学逐行对应）；顶层靠
-    # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L2) ⇒ **L3**。
-    "worker.ppo.engine_paddle": 3,
+    # `worker.ppo.trainer`(L0) 与 `worker.ppo.checkpoint_paddle`(L1) ⇒ **L2**（随 checkpoint_paddle
+    # 同日降层；它不 import torch 侧 engine）。
+    "worker.ppo.engine_paddle": 2,
     # v4（plan/policy-spatial-head.plan.md S0-c）：腿 A/B 起点权重转换（一次性 CLI；
     # 函数内 import worker.models.student（L2）⇒ 拓扑秩 = L3）。
     "worker.scripts.init_spatial_leg": 3,

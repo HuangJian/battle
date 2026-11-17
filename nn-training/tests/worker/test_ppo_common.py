@@ -34,6 +34,7 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import worker.ppo.common as ppo_common
+from worker.ppo.rng import PPORng
 
 FAILS: list[str] = []
 
@@ -79,14 +80,19 @@ def test_ppo_save_load(tmp_path: Path) -> None:
     model = nn.Linear(4, 2)
     opt = torch.optim.Adam(model.parameters(), lr=0.1)
     td = tempfile.mkdtemp(dir=str(tmp_path))
-    ppo_common._ppo_save(td, model, opt, 3)
+    # §P1-7：随机流状态随 ckpt 落盘（旧全局 MT19937 那份已退役）。
+    rng = PPORng.from_seed(11)
+    _ = rng.epoch.permutation(8)  # 走一段，别停在原点
+    ppo_common._ppo_save(td, model, opt, 3, rng)
     # 文件齐备
     for f in ("model.pt", "opt.pt", "state.json"):
         check(os.path.exists(os.path.join(td, f)), f"checkpoint 文件 {f} 存在")
     # 加载返回 epochs_done
     m2 = nn.Linear(4, 2)
     o2 = torch.optim.Adam(m2.parameters(), lr=0.1)
-    done = ppo_common._ppo_load(td, m2, o2)
+    want_next = rng.epoch.permutation(8).tolist()
+    rng2 = PPORng.from_seed(11)
+    done = ppo_common._ppo_load(td, m2, o2, rng2)
     check(done == 3, f"_ppo_load 返回 epochs_done=3 (got {done})")
     check(
         np.array_equal(m2.weight.detach().numpy(), model.weight.detach().numpy()),
@@ -95,7 +101,11 @@ def test_ppo_save_load(tmp_path: Path) -> None:
     # 无 checkpoint 路径
     m3 = nn.Linear(4, 2)
     o3 = torch.optim.Adam(m3.parameters(), lr=0.1)
-    check(ppo_common._ppo_load(None, m3, o3) == 0, "ckpt_path=None → 0")
+    check(
+        rng2.epoch.permutation(8).tolist() == want_next,
+        "续跑的 epoch 顺序从 ckpt 里那一点接着抽（不是从种子重来）",
+    )
+    check(ppo_common._ppo_load(None, m3, o3, PPORng.from_seed(0)) == 0, "ckpt_path=None → 0")
 
 
 def main() -> None:

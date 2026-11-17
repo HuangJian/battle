@@ -50,9 +50,6 @@ from common.shard import (
 )
 from worker.ppo._episode import episode_from_shard
 
-# numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
-# 实测返回的是 legacy 元组。显式传 legacy=True 并断言元组形态，双层保险。
-_RNGState = tuple[str, np.ndarray, int, int, float]
 
 # ---------------- GAE ----------------
 def compute_gae(
@@ -156,16 +153,9 @@ def load_shard_fields(
         out[key] = arr
     return out
 
-# ---------------- checkpoint (epoch-granularity, RNG-preserving) ----------------
-def _pack_np_state() -> list:
-    """numpy MT19937 全局状态 → JSON 可序列化（续跑需精确重建 epoch 乱序）。"""
-    s = cast(_RNGState, np.random.get_state(legacy=True))
-    return [s[0], s[1].tolist(), s[2], s[3], s[4]]
-
-def _unpack_np_state(packed: list) -> None:
-    np.random.set_state(
-        (packed[0], np.asarray(packed[1], dtype=np.uint32), packed[2], packed[3], packed[4])
-    )
+# ---------------- checkpoint (epoch-granularity) ----------------
+# RNG 面的存取已搬到 `worker/ppo/rng.py::PPORng`（显式三条流 + `bit_generator.state`）：
+# 全局 MT19937 状态不再是任何东西的续跑依据（§P1-7）。
 
 def is_xla(device) -> bool:
     """device 是否为 XLA/TPU（torch.device('xla') 或 xm.xla_device()）。"""
@@ -506,7 +496,13 @@ def xla_delta_str(d: dict[str, float]) -> str:
     )
 
 # ---------------- minibatch chunking ----------------
-def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[dict]:
+def chunk_episodes(
+    episodes: list[dict],
+    mb: int,
+    shuffle: bool = True,
+    *,
+    rng: np.random.Generator | None = None,
+) -> list[dict]:
     """Split per-episode dicts into fixed-size minibatch chunks (every chunk exactly `mb`).
 
     GAE is computed per-episode BEFORE chunking; chunks are only an update-
@@ -517,8 +513,10 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
     严重违反（梯度方差大 → KL spikes → 熔断/早停；H1 假设的主因）。默认改为
     **全局 transition 级重排**：展平全部 episodes → 单次 permutation → 按 mb 切片。
     GAE/adv/ret 是逐 transition 存储的，重排不改变任何数学（on-policy 正确性
-    不受影响）；RNG 用全局 np.random（由 main 播种，可复现）。
-    shuffle=False 保留旧行为（逐字节一致，供对照实验）。
+    不受影响）。重排必须由调用方给 `rng`（`PPORng.chunk`，2026-11-17 §P1-7）：
+    不再读全局 `np.random` —— 全局流与 epoch 顺序/demo 抽样共用一本账时，
+    任何第三方抽一次数就会把训练序列改掉。
+    shuffle=False 保留旧行为（逐字节一致，供对照实验），此时不需要 `rng`。
 
     mb 对齐（2026-09-23，见 docs/nn.progress.md §140）：重排路径**丢弃尾部
     `n % mb` 步**，让每个 chunk 恰为 `mb` 行（旧行为是末块 ragged）。为什么值这个
@@ -537,10 +535,15 @@ def chunk_episodes(episodes: list[dict], mb: int, shuffle: bool = True) -> list[
             for s in range(0, n, mb):
                 out.append({k: v[s : s + mb] for k, v in e.items()})
         return out
+    if rng is None:
+        raise ValueError(
+            "chunk_episodes(shuffle=True) 必须给 rng（PPORng.chunk）："
+            "重排不许再读全局 np.random（§P1-7）"
+        )
     keys = list(episodes[0].keys())
     flat = {k: np.concatenate([e[k] for e in episodes], axis=0) for k in keys}
     n = flat["obs"].shape[0]
-    idx = np.random.permutation(n)
+    idx = rng.permutation(n)
     n_used = (n // mb) * mb
     if n_used == 0:
         # 池子不足一个 mb（只在小样本冒烟/单测里出现）：保留旧的一块 ragged。

@@ -25,6 +25,62 @@
 
 ---
 
+## §120 PPO 的三条显式随机流：`PPORng` + ckpt 存 bit generator（2026-11-17）
+
+**现场**（`python.refactor.md` §P1-7 / §10-B6 后半）：训练序列住在**全局 `np.random`** 上——入口
+`np.random.seed(args.seed)` 播种，`np_core.chunk_episodes` 的切块重排、每 epoch 的 minibatch 顺序、
+每 minibatch 的 demo 抽样**共用同一本账**。三个后果：① 任何第三方抽一次随机数就改动了训练序列
+（「同一 seed ⇒ 同一条轨迹」成了不可执行的前提，而两处注释把它写成保证）；② 加一处抽样就推歪别处
+（demo 系数从 0 改到 >0 ⇒ 之后每个 epoch 的重排全变，于是「只改了 demo」的实验实际动了两个变量）；
+③ ckpt 只能存**全局 MT19937 状态**（`state.json["rng"]`），续跑的精确性又依赖①这条不可执行的前提。
+
+**做法**
+
+* `common/runtime.py`（L0，stdlib-only）加 `SEED_TAG` + 模块级 `substream(seed, name) -> tuple[int,int]`
+  （`hashlib.blake2b(digest_size=16)`：128 bit、跨进程/跨机器稳定、**不引 numpy**），`Runtime(seed=)`
+  与 `Runtime.substream(name)`（同名缓存；无 seed 时抛 `ValueError`）。派生规则只有这一份。
+* 新 `worker/ppo/rng.py`（L0）：`PPORng` 持**三条** `np.random.Generator` —— `chunk`（语料切块重排）、
+  `epoch`（每 epoch 的 minibatch 顺序）、`demo`（demo bank 抽样），`from_seed/from_runtime` 构造、
+  `state()` 存每条流的 `bit_generator.state`（纯 JSON）、`restore()` 缺项/坏项/换位生成器 ⇒ **整份拒收**
+  返回 `False`（不做半份续跑）。三条而不是一条，正是 P1-7 的诉求：加/删一处抽样不移动另外两条。
+* ckpt：`_ppo_save` / `checkpoint_paddle.save_ckpt` 写 `state.json["rng_streams"]`（旧 `"rng"` 退役）；
+  `_ppo_load` / `load_ckpt` 用 `rng.restore(...)`，`False` 时**响亮记一行 WARN**（权重/动量照常接着用，
+  顺序从种子重建）——不静默装成精确续跑。
+* `np_core.chunk_episodes(shuffle=True)` 不给 `rng` ⇒ `ValueError`（不保留「没给就读全局」的后门）；
+  `shuffle=False` 不抽样，仍不需要。
+* 四条训练线（`engine` / `engine_paddle` / `goal` / `intent`）的 `ppo_update*` 各加 `rng` 参数，
+  `PPOContext.rng` 承载；两个调用点 `remote/train_core`（两腿在算 per-job 种子那一行派生，
+  种子改用**完整 hex**，不再截 32 bit）与 `trainer/stream`（`PPORng.from_seed(args.seed, scope=f"stream-{iter_id}")`：
+  同 iter 重跑逐位一致、跨轮各自独立）显式传；`bench` / `tools/paddle_parity` 固定种子 0。
+
+**两个有意取舍**
+
+* **数值断代**：PCG64 ≠ MT19937 ⇒ 同一 seed 的轨迹与历史**不可逐位对照**。这是 P1-7 要求的代价，
+  写进 `worker/ppo/rng.py` 的模块 docstring 免得下一个人当成 bug；统计等价由「同 seed 两遍逐位一致」守。
+* `remote/train_core.py` 那行 `np.random.seed(int(seed_hex[:8], 16))` **保留**：PPO 序列已不读它，
+  它留给本进程里其他历史抽样（删掉会让那些路径从「确定」变「未定义」，属超范围）。PPO 侧改为
+  `st.rng = PPORng.from_seed(int(seed_hex, 16))`，与它并列且互不影响。
+
+**门禁**
+
+* 新 `tests/worker/test_ppo_rng_streams.py`（6 条）：同 seed 两遍逐位一致 / 不同 seed 不同 ·
+  `from_runtime ≡ from_seed`（换个 scope 就是另一组流）· 三条流互不干扰 · `chunk_episodes` 不动全局流
+  （重播判据）· ckpt 存/取流状态 + 旧 ckpt 不抛 · **AST 零容忍**：`worker/ppo/**` 不许出现
+  `np.random.{seed,permutation,randint,shuffle,choice,get_state,set_state,...}`（新增一处就是回归，
+  它不会让今天的用例变红，只会让半年后的可复现性悄悄失效）。
+* `tests/worker/test_np_core.py`：`_pack/_unpack_np_state` 用例换成 `PPORng` 状态往返 + 「缺 rng 必 ValueError」。
+* `worker/backend.py` 的 `REQUIRED_UPDATE_KWARGS` 加 `rng` ⇒ 四条训练线的 `update` 签名被自动对账；
+  `chunk_episodes` 协议同步（注解用 `object`：契约模块不 import 实现，否则 L0 被推到 L1）。
+* 账本：`worker.ppo.rng` 记 **L0**；`checkpoint_paddle` 2→**1**、`engine_paddle` 3→**2**（不再取
+  `np_core`(L1)，最高依赖降到 `ckpt_convert`(L0)/`rng`(L0)）。
+
+**读数**：`pytest tests/ e2e/ --forkdist 16` ⇒ **6181 收下 / 2 skipped**（基线 6174 + 7 条新用例，无 skip 变化）；
+`mypy . --config-file pyproject.toml` ⇒ **956 文件 Success**；`ruff check .` 全绿。
+⚠ 本机无 paddle 解释器 ⇒ `engine_paddle` / `checkpoint_paddle` 的新签名只过了 mypy 与静态契约，
+`tools/paddle_parity.py` 八用例仍未跑过（与 §119 同一限制）。
+
+---
+
 ## §119 并发的唯一所有者：`Runtime`（executor 生命周期 / 取消点 / 线程名）+ G16（2026-11-17）
 
 **现场**（`python.refactor.md` §P1-6 / §10-B6）：全仓 **10 处** `with ThreadPoolExecutor(...) as ex:`

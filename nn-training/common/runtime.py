@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from collections.abc import Callable, Iterable
@@ -54,6 +55,23 @@ def thread_ceiling() -> int:
     那么「和机器一样宽」是唯一有依据的缺省。自己给了数字的调用方不受它约束（见 `pool`）。
     """
     return max(MIN_CEILING, os.cpu_count() or MIN_CEILING)
+
+#: 派生种子的域标签：改它 = 把所有流**重新洗一遍**（下游可复现性断代，别随手改）。
+SEED_TAG = "nn-runtime-stream-v1"
+
+
+def substream(seed: int, name: str) -> tuple[int, int]:
+    """`(seed, 流名)` → **128 bit** 派生种子（两条 64 bit 整数）。
+
+    为什么不用 `hash()` / `random.seed(seed + n)`：前者带进程级盐（`PYTHONHASHSEED`）⇒ 不可复现，
+    后者在名字多了以后必然撞（「demo + 1」与「epoch」同种）。这里用 `blake2b` 对
+    `SEED_TAG:seed:name` 取摘要：跨进程 / 跨机器 / 跨版本逐位稳定，改流名就换流，互不干扰。
+    返回值直接可喂 `np.random.default_rng([a, b])`（numpy 侧不必知道派生规则）。
+    """
+    digest = hashlib.blake2b(
+        f"{SEED_TAG}:{int(seed)}:{name}".encode(), digest_size=16
+    ).digest()
+    return int.from_bytes(digest[:8], "big"), int.from_bytes(digest[8:], "big")
 
 
 class RuntimeCancelledError(RuntimeError):
@@ -87,11 +105,15 @@ class Runtime:
         workers: int | None = None,
         stop: threading.Event | None = None,
         ceiling: int | None = None,
+        seed: int | None = None,
     ) -> None:
         if not scope:
             raise ValueError("Runtime 必须给 scope（线程名/日志里要认得出是谁）")
         self.scope = scope
         self.workers = workers
+        #: 本域的根种子；`substream()` 从它派生。None = 这个域不碰随机（纯并发）。
+        self.seed = seed
+        self._streams: dict[str, tuple[int, int]] = {}
         self.ceiling = ceiling if ceiling is not None else thread_ceiling()
         # `stop` 允许外部传入：`halt_event` 那种已有的事件不用复制一份语义。
         self._stop = stop if stop is not None else threading.Event()
@@ -131,6 +153,23 @@ class Runtime:
         return not self._stop.wait(sec)
 
     # ── 池 ───────────────────────────────────────────────────────────────────
+
+    def substream(self, name: str) -> tuple[int, int]:
+        """本域里名为 `name` 的派生种子（**同域同名 = 同一个数**，与调用次数无关）。
+
+        这就是「随机从哪来」的单一入口：调用方拿它喂 `np.random.default_rng([...])`，
+        于是同一个 seed 下每条流各走各的 —— 加一次 demo 抽样不会把 epoch 顺序推歪。
+        """
+        if self.seed is None:
+            raise ValueError(
+                f"Runtime[{self.scope}] 没有 seed，派不出子流 {name!r}"
+                "（要么给 Runtime(seed=…)，要么这个域本来就不该要随机数）"
+            )
+        cached = self._streams.get(name)
+        if cached is None:
+            cached = substream(self.seed, name)
+            self._streams[name] = cached
+        return cached
 
     @property
     def in_use(self) -> int:

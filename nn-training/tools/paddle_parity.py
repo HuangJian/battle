@@ -362,9 +362,11 @@ def run_fixture(out: Path) -> None:
             import shutil
 
             from worker.ppo.common import _ppo_save
+            from worker.ppo.rng import PPORng
 
             ckpt = cdir / "ckpt_torch"
-            _ppo_save(str(ckpt), model, opt, epochs_done=1)
+            # 两侧都从种子 0 的三条流起步（下面的续跑各自 restore 同一份 state.json）。
+            _ppo_save(str(ckpt), model, opt, epochs_done=1, rng=PPORng.from_seed(0))
             # 续跑**用副本**：torch 引擎在 epoch 尾会写回 ckpt_path，直接拿 ckpt_torch 续跑
             # 会把「epoch 1 快照」覆盖成 epoch 2 的（check 侧就再也读不到起点）。
             ckpt_run = cdir / "ckpt_torch_run"
@@ -571,6 +573,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
     from worker.ppo import engine_paddle
     from worker.ppo.checkpoint_paddle import load_ckpt, named_params
     from worker.ppo.ckpt_convert import torch_state_to_paddle
+    from worker.ppo.rng import PPORng
 
     dst = cdir / "ckpt_paddle"
     shutil.rmtree(dst, ignore_errors=True)
@@ -578,7 +581,7 @@ def _check_ckpt(cdir: Path, arch: str, atol_weights: float) -> bool:
 
     model = PPOStudent(h=64, d=8, head_hidden=128, **ARCHS[arch])
     opt = paddle.optimizer.Adam(learning_rate=LR, parameters=model.parameters())
-    epochs_done, steps_done = load_ckpt(model, opt, str(dst))
+    epochs_done, steps_done = load_ckpt(model, opt, str(dst), PPORng.from_seed(0))
     assert (epochs_done, steps_done) == (1, 1), (
         f"load_ckpt 返回 ({epochs_done}, {steps_done})，期望 (1, 1)"
     )

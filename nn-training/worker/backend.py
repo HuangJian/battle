@@ -45,8 +45,15 @@ class RolloutBackend(Protocol):
         """单个 shard 目录 → 可训练 episode dict（adv/ret 未归一）；空/坏 shard 返回 None。"""
         ...
 
-    def chunk_episodes(self, episodes: list[dict], mb: int) -> list[dict]:
-        """episodes → 固定大小 minibatch chunks（末尾 ragged）。"""
+    def chunk_episodes(
+        self, episodes: list[dict], mb: int, shuffle: bool = True, *, rng: object | None = None
+    ) -> list[dict]:
+        """episodes → 固定大小 minibatch chunks（末尾 ragged）。
+
+        `shuffle=True` 必须给 `rng`（`PPORng.chunk`，§P1-7）：切块重排不再读全局
+        `np.random`，`shuffle=False` 才允许省略。注解是 `object`（**契约模块不 import 实现**：
+        `worker/backend` 靠「零依赖」占 L0，拉 `worker.ppo.rng` 会把它推上一层）。
+        """
         ...
 
     def update(
@@ -69,7 +76,7 @@ class RolloutBackend(Protocol):
         """目录 → 全量 episodes（adv 已归一）。断点续跑零结算时的回退路径。"""
         ...
 
-    def _ppo_load(self, ckpt_path: str | None, model: Any, opt: Any) -> int:
+    def _ppo_load(self, ckpt_path: str | None, model: Any, opt: Any, rng: object) -> int:
         """返回已完成 epoch 数（0 = 无 checkpoint / 无法加载）。"""
         ...
 
@@ -79,6 +86,7 @@ class RolloutBackend(Protocol):
 REQUIRED_UPDATE_KWARGS: frozenset[str] = frozenset(
     {
         "ckpt_path",  # 每 epoch 落盘 checkpoint（stream.py:390 的回退路径）
+        "rng",  # §P1-7：三条显式随机流（stream.py 每轮派生一个，四条训练线都收）
         "on_epoch_done",  # 双缓冲提前预采的触发点（stream.py:123-124 无条件注入）
     }
 )

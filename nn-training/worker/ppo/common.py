@@ -14,7 +14,7 @@ checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把�
   * load_episodes_common（2026-09-26 已搬到 ppo/np_core，此处再导出）同时覆盖
     ppo.load_episodes（只归一 adv）与 ppo_intent.load_episodes_intent（adv+ret 双归一）；
     日志前缀/措辞按原样参数化。
-  * _ppo_save / _ppo_load / _pack_np_state / _unpack_np_state 原样搬移——
+  * _ppo_save / _ppo_load 原样搬移——
     ppo_intent 原内联的 checkpoint 段改为调用本实现（逐字节相同）。
 
 2026-09-26（续扫「免 torch 半边」）：**XLA 设备 / 诊断助手**（xla_device / optimizer_step /
@@ -48,7 +48,8 @@ from common.log import log as log
 # 谁写 `from ppo.common import chunk_episodes` 都能过，撤 np_core 的某个名字时也没人看得见
 # 第二个入口；顺带 29 个名字里 10 个（`_DUR_RE` / `XLA_COUNTERS` / `trim_shard_arrays` …）
 # 连一个读者都没有。
-from worker.ppo.np_core import _pack_np_state, _unpack_np_state, is_xla, xla_mark_step
+from worker.ppo.np_core import is_xla, xla_mark_step
+from worker.ppo.rng import PPORng
 
 # `cat_entropy` 的实现是**两个框架通用**的位置参数写法（torch 的 `dim=` / Paddle 的 `axis=`
 # 只有位置形式两边都收）⇒ 单一实现住在 `worker.ppo.trainer`(L0，免框架)，这里再导出：
@@ -363,9 +364,11 @@ def _save_buffered(path: str, obj) -> None:
         torch.save(obj, f)
 
 
-def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
-    """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + numpy RNG。
-    恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。"""
+def _ppo_save(ckpt_path: str, model, opt, epochs_done: int, rng: PPORng) -> None:
+    """epoch 粒度 checkpoint：model+optimizer 状态 + 已完成 epoch 数 + 三条随机流的状态。
+
+    恢复粒度 = 一个 epoch（从最近 checkpoint 续，重跑该 epoch 的梯度步，秒级）。
+    RNG 存的是**每条流的 `bit_generator.state`**（§P1-7）：全局 MT19937 状态不再参与续跑。"""
     os.makedirs(ckpt_path, exist_ok=True)
     t0 = time.monotonic()
     model_cpu = _to_cpu_state(model.state_dict())
@@ -380,11 +383,11 @@ def _ppo_save(ckpt_path: str, model, opt, epochs_done: int) -> None:
     _save_buffered(os.path.join(ckpt_path, "opt.pt"), opt_cpu)
     _log_if_slow("opt torch.save", t0)
     with open(os.path.join(ckpt_path, "state.json"), "w", encoding="utf-8") as f:
-        json.dump({"epochs_done": epochs_done, "rng": _pack_np_state()}, f)
+        json.dump({"epochs_done": epochs_done, "rng_streams": rng.state()}, f)
 
 
-def _ppo_load(ckpt_path: str | None, model, opt) -> int:
-    """返回已完成 epoch 数（0=无 checkpoint / 无法加载）。加载 model/opt + 恢复 RNG。"""
+def _ppo_load(ckpt_path: str | None, model, opt, rng: PPORng) -> int:
+    """返回已完成 epoch 数（0=无 checkpoint / 无法加载）。加载 model/opt + 恢复三条随机流。"""
     if not ckpt_path:
         return 0
     sp = os.path.join(ckpt_path, "state.json")
@@ -396,5 +399,11 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
         st = json.load(f)
     model.load_state_dict(torch.load(mp, map_location="cpu", weights_only=True))
     opt.load_state_dict(torch.load(op, map_location="cpu", weights_only=True))
-    _unpack_np_state(st["rng"])
+    if not rng.restore(st.get("rng_streams")):
+        # 旧 ckpt（全局 MT19937 时代）没有这一段：模型/优化器照常接着用，但**这一段的
+        # minibatch 顺序与崩溃前不同** —— 响亮说清楚，而不是假装「精确续跑」。
+        log(
+            "[ppo] WARN 旧 checkpoint 无 rng_streams（全局 MT19937 时代产物）—— "
+            "随机流从种子重建：本段顺序与崩溃前不同，权重/动量照常接着用"
+        )
     return int(st.get("epochs_done", 0))

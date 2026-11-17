@@ -6890,3 +6890,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   两笔基线有意抬并逐笔记账：SOURCE 1159→1160（G16 两向护栏被口径 B 计入，与 G3/G4/G13/G14 同一限边）、
   同名散落 110→113（`__enter__`/`__exit__` 协议名 + `describe`；exact 14 / clone 17 未动 ⇒ 无实现被复制）。
   全文 → `docs/nn/engineering.md` §119。
+- **2026-11-17（B6 第二刀：PPO 的三条显式随机流 `PPORng` + ckpt 存 bit generator）**：审计 §P1-7 /
+  §10-B6。原先切块重排 / 每 epoch 的 minibatch 顺序 / demo 抽样共吃**全局 `np.random`**，ckpt 存的是
+  全局 MT19937 状态 ⇒「同一 seed ⇒ 同一条轨迹」实际依赖「进程里没别人抽随机数」这条不可执行的前提。
+  现在：`common/runtime.py`（L0，stdlib-only）加 `substream(seed, name)`（blake2b·128bit，不引 numpy）
+  + `Runtime(seed=)`/`Runtime.substream()`；新 `worker/ppo/rng.py::PPORng` 持 **三条**流
+  （`chunk`/`epoch`/`demo`，加/删一处抽样不移动另外两条）；ckpt 改存 `state.json["rng_streams"]`
+  （每条流的 `bit_generator.state`），旧 ckpt 缺这段 ⇒ `restore()` 返回 False + 响亮 WARN（不半份续跑、
+  也不装成精确续跑）；`chunk_episodes(shuffle=True)` 缺 rng ⇒ `ValueError`（不留全局后门）；四条训练线
+  + `remote/train_core`（种子改用完整 hex）+ `trainer/stream`（`scope=f"stream-{iter_id}"`：同 iter 可复现、
+  跨轮独立）显式传流。**有意代价**：PCG64 ≠ MT19937 ⇒ 与历史轨迹数值断代（写进模块 docstring，不当 bug）；
+  `train_core` 那行全局 `np.random.seed` 保留给本进程其他历史抽样，PPO 已不读它。门禁
+  `tests/worker/test_ppo_rng_streams.py`（含 AST 零容忍：`worker/ppo/**` 不许消费全局 numpy 随机）+
+  `REQUIRED_UPDATE_KWARGS` 加 `rng`（四条线的签名自动对账）+ 账本 `worker.ppo.rng` L0、
+  `checkpoint_paddle` 2→1、`engine_paddle` 3→2。读数：6181 收下 / 2 skipped · mypy 956 · ruff 全绿；
+  本机无 paddle ⇒ `paddle_parity` 八用例仍未跑。全文 → `docs/nn/engineering.md` §120。
+

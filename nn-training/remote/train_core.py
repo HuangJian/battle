@@ -77,6 +77,7 @@ from remote.train_common import (
 )
 from remote.wire import _wire_time, note_ppo_tail
 from worker.ppo.demo import DemoBank
+from worker.ppo.rng import PPORng
 
 
 def _load_opt_state(path: str | Path) -> tuple[Any, int]:
@@ -436,6 +437,9 @@ def _torch_model(st: _CoreRun) -> None:
     # numpy RandomState 种子必须 < 2^32：sha256 前 8 个 hex 字符（32 bit）
     seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
     np.random.seed(int(seed_hex[:8], 16))
+    # §P1-7（2026-11-17）：PPO 的切块/顺序/demo 抽样只认这三条显式流（种子用完整 hex，
+    # 不再截到 32 bit）。上面那行全局播种留给本进程里其他历史抽样，训练序列不再读它。
+    st.rng = PPORng.from_seed(int(seed_hex, 16))
 
     # ---- 模型构建：opt_init（_ppo_save tar）优先，否则 init 权重 + 新 opt ----
     # hub 侧免 torch（D2）：模型权重/opt 由 tar 或 weights_json 提供，worker 负责
@@ -800,6 +804,7 @@ def _torch_ppo(st: _CoreRun) -> None:
             demo_per_mb=demo_per_mb,
             # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关，老行为逐字节不变）。
             value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+            rng=st.rng,
             # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
             # 「跑完才响应」。训练侧那条（`trainer/stream.py`）传的是双缓冲预采回调，
             # 与这里不是同一个调用点，别去动那一条。
@@ -887,7 +892,7 @@ def _torch_artifacts(st: _CoreRun) -> None:
         #   地址是「整份」还是「delta」，本机都不会重传自己已经持有的字节。
         _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
     ckpt_dir = job_dir / "ppo_final"
-    _ppo_save(str(ckpt_dir), host, opt, epochs_eff)
+    _ppo_save(str(ckpt_dir), host, opt, epochs_eff, st.rng)
     # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身
     opt_tar_raw = pack_opt_tar(ckpt_dir)
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
@@ -994,6 +999,8 @@ def _paddle_model(st: _CoreRun) -> None:
     # ---- per-job 确定性种子（D5）：与 torch 版同一条公式、同一个播种点 ----
     seed_hex = job_seed(manifest["runId"], int(manifest["it"]), manifest["init_weights_fp"])
     np.random.seed(int(seed_hex[:8], 16))
+    # §P1-7：与 torch 版同一条派生（同 manifest ⇒ 两条核的切块顺序一致）。
+    st.rng = PPORng.from_seed(int(seed_hex, 16))
 
     import worker.models.student_paddle as student_paddle
 
@@ -1181,6 +1188,7 @@ def _paddle_ppo(st: _CoreRun) -> None:
             demo_bc_coef=st.demo_coef,
             demo_per_mb=st.demo_per_mb,
             value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
+            rng=st.rng,
             on_epoch_done=(_cancel_at_epoch_boundary if spec.should_cancel is not None else None),
             progress=train_b,
             progress_head=f"job {jid}: PPO 训练中",
@@ -1231,7 +1239,12 @@ def _paddle_artifacts(st: _CoreRun) -> None:
     # 单源 = 引擎经 `steps_out` 回传（`engine_paddle.ppo_update` 的收尾）。
     steps_total = int(st.steps_box.get("steps_done", st.steps_init))
     checkpoint_paddle.save_ckpt(
-        model, opt, str(ckpt_dir), epochs_done=st.epochs_eff, steps_done=steps_total
+        model,
+        opt,
+        str(ckpt_dir),
+        epochs_done=st.epochs_eff,
+        steps_done=steps_total,
+        rng=st.rng,
     )
     opt_tar_raw = pack_opt_tar(ckpt_dir)
     _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, spec.log)

@@ -7,8 +7,9 @@ ret 归一），却因同住一个 `import torch` 的测试文件而在无 torch
 
 覆盖：
   * compute_gae：定长手算 / dt=1 变步长退化 / dt≠1 确有差异；
-  * chunk_episodes：mb 对齐（尾部丢弃）与 shuffle=False 对照路径、重排守恒；
-  * _pack/_unpack_np_state：RNG 状态精确往返；
+  * chunk_episodes：mb 对齐（尾部丢弃）与 shuffle=False 对照路径、重排守恒、
+    `shuffle=True` 缺 rng 必须响亮拒（§P1-7：不给全局 np.random 留后门）；
+  * PPORng：`chunk` 流状态往返后逐位接上；
   * discover_shards / load_shard_fields：marker 过滤 + 零拷贝 astype 字段表；
   * load_episodes_common：normalize_ret off/on 的逐字节锚。
 
@@ -30,6 +31,7 @@ from common.schema import OBS_CHANNELS
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import worker.ppo.np_core as np_core
+from worker.ppo.rng import PPORng
 
 FAILS: list[str] = []
 
@@ -98,8 +100,8 @@ def test_chunk_episodes() -> None:
         {"obs": np.zeros((10, 3), dtype=np.uint8), "adv": np.zeros(10)},
         {"obs": np.zeros((5, 3), dtype=np.uint8), "adv": np.zeros(5)},
     ]
-    np.random.seed(0)
-    chunks = np_core.chunk_episodes(eps, 4)
+    rng = PPORng.from_seed(0)
+    chunks = np_core.chunk_episodes(eps, 4, rng=rng.chunk)
     sizes = [c["obs"].shape[0] for c in chunks]
     assert sizes == [4, 4, 4], f"每块恰为 mb=4（15 步裁到 12）(got {sizes})"
     assert sum(sizes) == 12 == (15 // 4) * 4, "尾部 15%4=3 步丢弃"
@@ -112,10 +114,10 @@ def test_chunk_episodes() -> None:
         and seq[3]["obs"][0, 0] == eps[1]["obs"][0, 0]
     ), "shuffle=False 不跨 episode 混数据"
     # 单池：不重排、不裁（裁尾有偏）。
-    one = np_core.chunk_episodes([eps[0]], 4)
+    one = np_core.chunk_episodes([eps[0]], 4, rng=PPORng.from_seed(0).chunk)
     assert [c["obs"].shape[0] for c in one] == [4, 4, 2], "单池保持旧形状"
     # 池子 < mb：保留一块（裁成 0 块 = 静默不训练）。
-    tiny = np_core.chunk_episodes([eps[0], eps[1]], 99)
+    tiny = np_core.chunk_episodes([eps[0], eps[1]], 99, rng=PPORng.from_seed(0).chunk)
     assert [c["obs"].shape[0] for c in tiny] == [15], "池子 < mb 时不裁"
 
 def test_chunk_episodes_shuffle_preserves_data() -> None:
@@ -136,7 +138,7 @@ def test_chunk_episodes_shuffle_preserves_data() -> None:
     old_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=False)
     np.testing.assert_array_equal(old_chunks[0]["obs"], eps[0]["obs"][:8])
     # shuffle=True：行数守恒 + 元素集合不变（拼回后与 flatten 一致）
-    sh_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=True)
+    sh_chunks = np_core.chunk_episodes(eps, mb=8, shuffle=True, rng=PPORng.from_seed(7).chunk)
     assert sum(c["obs"].shape[0] for c in sh_chunks) == total
     flat_adv = np.concatenate([e["adv"] for e in eps])
     got_adv = np.concatenate([c["adv"] for c in sh_chunks])
@@ -145,14 +147,45 @@ def test_chunk_episodes_shuffle_preserves_data() -> None:
     first_flat = np.concatenate([e["adv"] for e in eps])
     assert not np.array_equal(got_adv, first_flat), "应发生重排"
 
-def test_np_state_roundtrip() -> None:
-    np.random.seed(42)
-    _ = np.random.permutation(100)  # 消耗一些状态
-    packed = np_core._pack_np_state()
-    expected = np.random.permutation(50).copy()
-    np_core._unpack_np_state(packed)
-    got = np.random.permutation(50).copy()
-    check(np.array_equal(got, expected), "numpy RNG 状态 pack/unpack 精确重建")
+def test_chunk_episodes_requires_rng() -> None:
+    """§P1-7：`shuffle=True` 不给 rng ⇒ ValueError（旧路径读全局 np.random，已拆）。
+
+    为什么不是「None 就退回全局」：那等于留一条谁都能踩、谁也不会注意的后门 ——
+    「同一 seed ⇒ 同一条轨迹」的前提就又没了。`shuffle=False` 不抽样，故不需要 rng。
+    """
+    # 两局起才走重排路径（单池不重排 ⇒ 本来就不需要 rng，见 `len(episodes) <= 1`）。
+    eps: list[dict] = [
+        {"obs": np.zeros((4, 3), dtype=np.uint8), "adv": np.zeros(4)},
+        {"obs": np.zeros((4, 3), dtype=np.uint8), "adv": np.zeros(4)},
+    ]
+    try:
+        np_core.chunk_episodes(eps, 2)
+    except ValueError as e:
+        check("rng" in str(e), f"报错要指名 rng（got {e}）")
+    else:
+        raise AssertionError("chunk_episodes(shuffle=True) 缺 rng 必须 ValueError")
+    # 对照：shuffle=False 照旧无需 rng
+    seq = np_core.chunk_episodes(eps, 2, shuffle=False)
+    check(
+        [c["obs"].shape[0] for c in seq] == [2, 2, 2, 2],
+        "shuffle=False 不需要 rng（两局各切两块）",
+    )
+
+
+def test_ppo_rng_state_roundtrip() -> None:
+    """ckpt 存的 `bit_generator.state` 灌回去 ⇒ 下一位抽样逐位相同（§P1-7）。"""
+    a = PPORng.from_seed(123)
+    _ = a.chunk.permutation(64)  # 先走一段，别停在原点
+    blob = a.state()
+    want = a.chunk.permutation(32).copy()
+    b = PPORng.from_seed(123)  # 另一个同种子的实例，靠 restore 接上
+    check(b.restore(blob), "restore 应接受自家 state")
+    np.testing.assert_array_equal(b.chunk.permutation(32), want)
+    check(a.epoch.permutation(16).tolist() == b.epoch.permutation(16).tolist(),
+          "另两条流不受 chunk 消耗影响")
+    # 旧 ckpt（全局 MT19937 时代）没有 rng_streams ⇒ False，且不抛
+    check(PPORng.from_seed(0).restore(None) is False, "缺项 ⇒ False")
+    check(PPORng.from_seed(0).restore({"chunk": {}}) is False, "坏项 ⇒ 整份拒收")
 
 def test_discover_and_load_shard_fields(tmp_path: Path) -> None:
     td = tempfile.mkdtemp(dir=str(tmp_path))
@@ -350,7 +383,8 @@ def main() -> None:
     test_gae_bit_exact_against_reference_loop()
     test_chunk_episodes()
     test_chunk_episodes_shuffle_preserves_data()
-    test_np_state_roundtrip()
+    test_chunk_episodes_requires_rng()
+    test_ppo_rng_state_roundtrip()
     test_discover_and_load_shard_fields(Path(_td))
     if FAILS:
         print(f"\n{len(FAILS)} FAILED")

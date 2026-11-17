@@ -66,6 +66,7 @@ from worker.ppo.np_core import (
     load_shard_fields,
     optimizer_step,
 )
+from worker.ppo.rng import PPORng
 from worker.ppo.trainer import tensored_chunks
 
 # ---- hyper-params（与 ppo.py 同源；γ 换算口径 P1-5③）----
@@ -208,6 +209,7 @@ def ppo_update_intent(
     ref_model: IntentNet | None = None,
     kl_coef: float = 0.0,
     on_epoch_done=None,
+    rng: PPORng | None = None,
 ):
     """chunks: intent 步 minibatch dicts（obs/scalars/inject/a_intent/lp_intent/adv/ret/mask）。
 
@@ -236,6 +238,9 @@ def ppo_update_intent(
             "mean_ret": 0.0,
             "early_stopped": False,
         }
+    # §P1-7（2026-11-17）：随机流显式给（`PPORng`），全局 `np.random` 不再参与；
+    # 没给就是工具/冒烟的调用面（种子参数仍在，保持它们原来的默认值）。
+    ppo_rng = rng if rng is not None else PPORng.from_seed(seed)
     # P1-5（2026-09-02）：**不在 update 内重播种 RNG**。旧实现每次 update 调
     # np.random.seed(seed) → 流式模式每波调用 update → 每波 minibatch permutation
     # 序列逐字节相同（叠加连续切片的强相关性，等于每波用同一顺序消化高度相关语料）。
@@ -250,7 +255,7 @@ def ppo_update_intent(
     last_hb = t0
     start_epoch = 0
     if ckpt_path:
-        start_epoch = _ppo_load(ckpt_path, model, opt)
+        start_epoch = _ppo_load(ckpt_path, model, opt, ppo_rng)
         if start_epoch:
             log(f"[ppo_intent] resume PPO from checkpoint: epoch {start_epoch}/{epochs} done")
 
@@ -260,7 +265,7 @@ def ppo_update_intent(
         # warmup 只训 value 头（冻结主干+三头，防扰动 B′ 策略特征）；否则全量可训。
         for name, p in model.named_parameters():
             p.requires_grad = (not warmup) or name.startswith("value_head.")
-        perm = np.random.permutation(len(tensored))
+        perm = ppo_rng.epoch.permutation(len(tensored))
         n_ep_start = len(stats)
         for j, i in enumerate(perm):
             e = tensored[int(i)]
@@ -337,7 +342,7 @@ def ppo_update_intent(
                     f"value={sum(s['value'] for s in recent) / n_r:.4f}"
                 )
         if ckpt_path:
-            _ppo_save(ckpt_path, model, opt, ep + 1)
+            _ppo_save(ckpt_path, model, opt, ep + 1, ppo_rng)
         if on_epoch_done is not None:
             on_epoch_done(ep + 1, model)
         ep_stats = stats[n_ep_start:]
@@ -408,7 +413,8 @@ def main():
     ap.add_argument("--threads", type=int, default=8)
     args = ap.parse_args()
 
-    np.random.seed(args.seed)
+    # 全局播种已退役（§P1-7）：训练序列只由 `PPORng.from_seed(args.seed)` 决定。
+    ppo_rng = PPORng.from_seed(args.seed)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     try:
@@ -434,7 +440,7 @@ def main():
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     log(f"[ppo_intent] total intent-steps={total_steps}")
 
-    chunks = chunk_episodes(episodes, args.mb)
+    chunks = chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
     log(f"[ppo_intent] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -458,6 +464,7 @@ def main():
         value_warmup_epochs=args.value_warmup_epochs,
         ref_model=ref_model,
         kl_coef=args.kl_coef,
+        rng=ppo_rng,
     )
 
     model.to("cpu")

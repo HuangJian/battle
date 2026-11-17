@@ -98,6 +98,7 @@ from worker.ppo.np_core import (  # noqa: F401  (`load_episode_from_shard` = Rol
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
+from worker.ppo.rng import PPORng
 from worker.ppo.trainer import aggregate_stats, tensored_chunks
 
 # ---------------- hyper-params (CLI-overridable) ----------------
@@ -148,8 +149,8 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 
 # ---------------- PPO update ----------------
-# checkpoint 原语（_pack_np_state/_unpack_np_state/_ppo_save/_ppo_load）与
-# chunk_episodes 由 ppo_common 提供（re-export 见顶部 import），行为逐字节一致。
+# checkpoint 原语（_ppo_save/_ppo_load）与 chunk_episodes 由 ppo_common 提供（re-export
+# 见顶部 import），行为逐字节一致；随机流状态自 2026-11-17 起由 `PPORng` 存（§P1-7）。
 
 
 def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -323,6 +324,8 @@ class PPOContext:
     progress: LogBundle | None
     progress_head: str
     value_anchor: float
+    #: 三条显式随机流（§P1-7）：epoch 顺序 / demo 抽样都在这里，全局 np.random 不再参与。
+    rng: PPORng = field(default_factory=lambda: PPORng.from_seed(0))
     clip: float = CLIP_EPS
     tensored: list[dict] = field(default_factory=list)
     total_steps: int = 0
@@ -571,7 +574,7 @@ def _prepare(ctx: PPOContext) -> None:
                 f"{len(ctx.tensored)} 个 chunk + demo 张量已落设备"
                 f"（循环前一次 mark；否则每个 chunk 首次使用各付一次全图编译）",
             )
-    ctx.start_epoch = _ppo_load(ctx.ckpt_path, model, opt)
+    ctx.start_epoch = _ppo_load(ctx.ckpt_path, model, opt, ctx.rng)
     if ctx.start_epoch:
         log(
             f"[ppo] resume PPO from checkpoint: epoch {ctx.start_epoch}/{ctx.epochs} done "
@@ -667,8 +670,9 @@ def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
         loss = loss + kickstart_kl * kick_mean
     demo_bc_mean = torch.zeros((), device=device)
     if demo_on:
-        # np RNG ⇒ 与 chunk permutation 同一条 ckpt 流，断点续跑精确复现。
-        _didx = np.random.randint(0, demo_n, size=int(demo_per_mb))
+        # demo 流（`PPORng.demo`）：与 epoch 顺序**分开** —— 改动 demo 系数/抽样量不会
+        # 推歪哪个 chunk 先训（§P1-7）；状态随 ckpt 落盘，续跑从同一点接着抽。
+        _didx = ctx.rng.demo.integers(0, demo_n, size=int(demo_per_mb))
         # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
         # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
         _didx_t = demo_index(demo_idx_dev, _didx)
@@ -879,7 +883,7 @@ def _finish_epoch(ctx: PPOContext, ep: int, n_ep_start: int) -> None:
     )
     diag_epoch_series = ctx.diag.epoch_series
     if ckpt_path:
-        _ppo_save(ckpt_path, model, opt, ep + 1)
+        _ppo_save(ckpt_path, model, opt, ep + 1, ctx.rng)
     if on_epoch_done is not None:
         on_epoch_done(ep + 1, model)
     ep_stats = stats[n_ep_start:]
@@ -1026,11 +1030,18 @@ def ppo_update(
     progress: LogBundle | None = None,
     progress_head: str = "[ppo] PPO",
     value_anchor: float = 0.0,
+    rng: PPORng | None = None,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
-    ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/numpy RNG），
-    并支持断点续跑（重启后从已完成 epoch 数继续，minibatch 乱序精确复现）。
+    ckpt_path: 非空则每 epoch 落盘 checkpoint（model/opt/epochs_done/三条随机流的
+    `bit_generator.state`），并支持断点续跑（重启后从已完成 epoch 数继续，minibatch
+    乱序精确复现 —— 精确的前提现在**只**是那份 ckpt，不再依赖「没人碰过全局
+    np.random」，见 `worker/ppo/rng.py`）。
+
+    rng（§P1-7，2026-11-17）：`PPORng` 三条显式流。None = 从种子 0 派生（**只为
+    兼容冒烟/工具**；训练入口一律显式传 `PPORng.from_seed(args.seed)`），此处不打日志
+    以免污染逐字节对照 —— 判据在 `tests/worker/test_ppo_rng_streams.py`。
     on_epoch_done(ep_done, model): 每个 epoch 完成后同步回调（双缓冲提前预采的
     触发点——stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn 首波预采，PPO 继续
     最后一个 epoch；模型在此处即当前 epoch 训练完的状态）。
@@ -1077,10 +1088,11 @@ def ppo_update(
         progress=progress,
         progress_head=progress_head,
         value_anchor=value_anchor,
+        rng=rng if rng is not None else PPORng.from_seed(0),
     )
     _prepare(ctx)
     for ep in range(ctx.start_epoch, ctx.epochs):
-        perm = np.random.permutation(len(ctx.tensored))
+        perm = ctx.rng.epoch.permutation(len(ctx.tensored))
         n_ep_start = len(ctx.stats)
         for j, i in enumerate(perm):
             _train_step(ctx, ep, j, int(i))
@@ -1138,7 +1150,9 @@ def main():
     )
     args = ap.parse_args()
 
-    np.random.seed(args.seed)
+    # 全局播种已退役（§P1-7）：训练序列只由 `PPORng.from_seed(args.seed)` 的三条流决定
+    # ⇒ 进程里任何第三方抽随机数都不再改动训练轨迹。
+    ppo_rng = PPORng.from_seed(args.seed)
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     try:
@@ -1180,11 +1194,11 @@ def main():
     total_steps = sum(e["obs"].shape[0] for e in episodes)
     log(f"[ppo] total transition steps={total_steps}")
 
-    chunks = chunk_episodes(episodes, args.mb)
+    chunks = chunk_episodes(episodes, args.mb, rng=ppo_rng.chunk)
     log(f"[ppo] {len(episodes)} episodes -> {len(chunks)} minibatch chunks (mb={args.mb})")
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    agg = ppo_update(model, opt, chunks, args.epochs, device)
+    agg = ppo_update(model, opt, chunks, args.epochs, device, rng=ppo_rng)
 
     model.to("cpu")
     save_weights_json(model, args.out)
