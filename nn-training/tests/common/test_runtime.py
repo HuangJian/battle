@@ -259,6 +259,16 @@ def test_threads_are_owned_by_the_runtime() -> None:
     with pytest.raises(ValueError, match="name"):
         runtime.Runtime(scope="unit-threads3").thread(lambda: None, name="")
 
+    # `start=False`：登记了但没开跑（`eval_exec` 的槽位池要先挂进池子再起线程）。
+    rt3 = runtime.Runtime(scope="unit-threads4")
+    ran = threading.Event()
+    t3 = rt3.thread(ran.set, name="deferred", start=False)
+    assert rt3.describe()["threads"] == {"unit-threads4-deferred": False}
+    assert not ran.wait(0.05), "start=False 的线程不许自己跑起来"
+    t3.start()
+    assert ran.wait(5.0)
+    assert rt3.join_threads(5.0) == []
+
 
 def test_scope_is_mandatory() -> None:
     with pytest.raises(ValueError, match="scope"):

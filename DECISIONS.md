@@ -6936,3 +6936,20 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `tests/test_thread_ownership_budget.py` + `tests/golden/thread_construction_baseline.json`：按文件冻结、
   只许调小、扫描自检 9 成地板、两向护栏（`rt.thread(...)` ≥1）；豁免只有 `common/runtime.py`（所有者本人）
   与 `remote/*_boot.py`（引导期单文件）。全文 → `docs/nn/engineering.md` §122。
+- **2026-11-17（§122 第二批：五个类各自持 `Runtime`）**：`DelivererProcess`（`deliver-proc-out/-err`）·
+  `UploaderProcess`（`upload-proc-out` 先起、`-in` 后起 —— `boot ok` 只可能被 reader 读到，顺序是原注释
+  里的契约，迁移不许改）· `PushDispatcher`（`hub-push-tick` + `hub-push-<jid>`；空 jid 退化成 `-job`，
+  旧代码的 `hub-push-` 本来也不算名字，而 `thread()` 拒空名 —— 不为一个坏 jid 抛异常）·
+  `HeartbeatPublisher`（`trainer-heartbeat-write`）· `EvalExecutors`（`eval-exec-<key>-<i>`：节点池伸缩，
+  同名槽位在转储里等于没名字；`close_pools` 用 `join_threads(0.0)` 只清登记不等线程，因为调用点可能在
+  仲裁锁里）。**`Runtime.thread()` 起新线程时丢掉已退出的登记**：这两个长驻对象会一批批换线程，
+  不收的话 `describe()["threads"]` 只涨不落。存量 48 → **40 处 / 30 文件**（`rt.thread(...)` 11 处），
+  G18 基线同步调小。全文 → `docs/nn/engineering.md` §122。
+- **2026-11-17（§122 第三刀：`Runtime.thread(start=False)` —— 顺序也是契约）**：把 `EvalExecutors`
+  的槽位线程收进 `Runtime` 时，默认形态（起线程即登记）与它就是**先挂进池子、再开跑**的顺序冲突：
+  一个已经能领牌的 worker 在池里还看不见 ⇒ `_resize_locked` 当成「池子空」再孵一条同节点线程
+  ⇒ 同一节点两条 worker，公平发牌退化成 `A,A,B,B`（满载实测 3/10 次红；`start=False` 后 6/6 绿，
+  该判据是 2026-11-04 决策的验收面，**不许**放宽）。决定：`thread()` 加 `start: bool = True`，
+  `False` = 只登记不开跑，何时开跑由当事人定（所有者仍负责名字 / 登记 / 收尾）。**不**放宽
+  `test_two_eval_rounds_share_dispatch_round_robin` 的 A,B,A,B —— 那是用户口径 1 的验收判据。
+  迁移下一个类之前先读它的启动顺序有没有别处依赖。全文 → `docs/nn/engineering.md` §122。

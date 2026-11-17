@@ -42,6 +42,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import runtime
 from common.log import log
 from common.paths import REPO_ROOT
 
@@ -96,6 +97,8 @@ class HeartbeatPublisher:
         self._enabled = heartbeat_enabled() if enabled is None else bool(enabled)
         self._lock = threading.Lock()
         self._fields: dict[str, Any] = {}
+        #: 写线程的属性（`trainer-heartbeat-write`）：名字 / 登记 / 收尾 join 都在 `Runtime` 里。
+        self._rt = runtime.Runtime(scope="trainer-heartbeat")
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._last_write = 0.0
@@ -145,9 +148,7 @@ class HeartbeatPublisher:
                 except Exception as e:  # 写线程绝不许把主进程带下去
                     self._log(f"[heartbeat] WARN: 写线程异常（{e}）")
 
-        t = threading.Thread(target=_loop, name="trainer-heartbeat", daemon=True)
-        self._thread = t
-        t.start()
+        self._thread = self._rt.thread(_loop, name="write", daemon=True)
         self._log(
             f"[heartbeat] 启动：{self._path or heartbeat_path()}（每 {self._interval:g}s；"
             f"不变式 最长合法无心跳间隔 ≈{self._interval:g}s << 判死窗口 300s）"
@@ -159,6 +160,7 @@ class HeartbeatPublisher:
         if t is not None:
             t.join(timeout=2.0)
             self._thread = None
+        self._rt.join_threads(2.0)
 
 
 def read_heartbeat(path: str | None = None) -> dict | None:

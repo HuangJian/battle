@@ -207,6 +207,7 @@ class Runtime:
         name: str,
         kwargs: dict[str, object] | None = None,
         daemon: bool = False,
+        start: bool = True,
     ) -> threading.Thread:
         """起一个**本域的**线程并登记：名字 `<scope>-<name>`、`close()` 时 join。
 
@@ -217,12 +218,20 @@ class Runtime:
 
         取消语义与池一致：**已开跑的不打断**（Python 线程杀不掉），target 想支持中途收工就自己调
         `rt.check()` / `rt.sleep()` —— 本方法不往你的 target 里塞任何东西（见模块 docstring）。
+
+        `start=False` 只给「必须先挂号、后开跑」的调用方（`worker/eval_exec` 的槽位池：
+        先 `pool.append(_Slot(t, stop))` 再 `t.start()`，否则一个已经能领牌的 worker 会在
+        池里还没有它的时候被当成「池子空」再孵一个 —— 同一节点两条线程，公平发牌当场错乱）。
+        登记在这时就发生，收尾仍归 `close()` / `join_threads()`。
         """
         if not name:
             raise ValueError("Runtime.thread 必须给 name（转储里靠它分清是谁）")
         with self._lock:
             if self._closed:
                 raise RuntimeError(f"Runtime[{self.scope}] 已关闭，不能再起线程 {name!r}")
+            # 登记表只留活着的：长驻对象（补传代理按需重启子进程、节点池伸缩）会一批批起线程，
+            # 攒着已退出的那些只会让 `describe()` 越读越长。收尾要 join 仍走 `join_threads()`。
+            self._threads = [t for t in self._threads if t.is_alive()]
             t = threading.Thread(
                 target=target,
                 args=args,
@@ -231,7 +240,8 @@ class Runtime:
                 daemon=daemon,
             )
             self._threads.append(t)
-        t.start()
+        if start:
+            t.start()
         return t
 
     def join_threads(self, timeout: float | None = None) -> list[str]:

@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Protocol
 
+from common import runtime
 from common.platform_utils import POPEN_NO_WINDOW
 from common.protocol import sanitize_run_id
 from remote import deliver_parts
@@ -171,11 +172,7 @@ class DelivererProcess:
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
         self.backup_root = Path(backup_root) if backup_root else None
-        self.work_dir = (
-            Path(work_dir)
-            if work_dir is not None
-            else (self.root / "work")
-        )
+        self.work_dir = Path(work_dir) if work_dir is not None else (self.root / "work")
         self._ctl_path_arg = Path(ctl_path) if ctl_path is not None else None
         self._status_path_arg = Path(status_path) if status_path is not None else None
         self.log = log
@@ -198,6 +195,9 @@ class DelivererProcess:
         # 跨线程互斥语义不变（只有 `_append` 用这把锁）。
         self._lock = threading.RLock()
         self._proc: subprocess.Popen | None = None
+        #: 两条管道线程的属性（名字 / 登记 / 收尾 join）在 `Runtime` 里：补传代理会**按需重启**
+        #: 子进程，重启一次就换一对线程，登记表只在活着的时候占位（见 `Runtime.thread`）。
+        self._rt = runtime.Runtime(scope="deliver-proc")
         self._forwarders: list[threading.Thread] = []
         self._boot = threading.Event()
         self._ctl: Path | None = None
@@ -280,7 +280,7 @@ class DelivererProcess:
             f"{self._tick_sec:g}",
         ]
         # ★ 2026-10-23（P0-1）：两条腿的**唯一 argv 差别**。outbox 模式不传 `--hub-url`
-        #（也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
+        # （也就没有 token 那一环），子进程里一个 HTTP 客户端都不会被构造。
         if self.outbox is not None:
             argv += ["--outbox", str(self.outbox)]
             if self._floor_it > 0:
@@ -311,7 +311,7 @@ class DelivererProcess:
         if self.worker_name:
             env[WORKER_NAME_ENV] = self.worker_name
         # 段末三态（J2）同理：控制文件是主通道，这里另带一份供**子进程重启**后仍拿得到
-        #（老快照两个都不认 ⇒ hub 从包里的 plan.json 反推，见 `hub.task_pack.pack_seg_end_kind`）。
+        # （老快照两个都不认 ⇒ hub 从包里的 plan.json 反推，见 `hub.task_pack.pack_seg_end_kind`）。
         if self._seg_end_kind:
             env[SEG_END_KIND_ENV] = self._seg_end_kind
         self._boot = threading.Event()
@@ -335,15 +335,9 @@ class DelivererProcess:
             return f"Popen 失败（{type(e).__name__}: {e}）"
         self._proc = proc
         self._forwarders = [
-            threading.Thread(
-                target=self._forward, args=(proc.stdout,), name="deliver-out", daemon=True
-            ),
-            threading.Thread(
-                target=self._forward, args=(proc.stderr,), name="deliver-err", daemon=True
-            ),
+            self._rt.thread(self._forward, proc.stdout, name="out", daemon=True),
+            self._rt.thread(self._forward, proc.stderr, name="err", daemon=True),
         ]
-        for t in self._forwarders:
-            t.start()
         # 等 `boot ok`：**子进程一退就立刻判失败**（在飞的包里没有这个模块 ⇒ `No module named`
         # 是毫秒级的；等满 5s 只会白白拖慢降级）。
         deadline = time.monotonic() + PROC_BOOT_TIMEOUT_SEC
@@ -410,9 +404,9 @@ class DelivererProcess:
                     # 契约静默（G9 冻结，非旧债）：_stop_child 级联的最后一级（同 child_proc）——
                     # kill 失败 = 子进程已不受控，没有别的动作可做。
                     pass
-        for t in self._forwarders:
-            t.join(timeout=2.0)
         self._forwarders = []
+        # 收尾交给所有者：join + 清登记（名字是 `deliver-proc-out` / `deliver-proc-err`）。
+        self._rt.join_threads(2.0)
 
     def _ensure_alive(self) -> None:
         """子进程**死了就按需重启**（★C1）——否则 `submit_*` 只是在往无人读的文件里写。
@@ -869,7 +863,7 @@ def make_deliverer(
         hub_lease=hub_lease,
         worker_name=worker_name,
         backup_root=backup_root,
-            background=background if kind == "thread" else False,
+        background=background if kind == "thread" else False,
         eval_every=int(eval_every or 0),
         metrics_parts=bool(metrics_parts),
         adaptive=bool(adaptive),

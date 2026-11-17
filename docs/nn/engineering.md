@@ -58,7 +58,23 @@ G16 零容差），**裸 `threading.Thread(...)`** 还剩 50 处 / 35 文件（G
 （9 成地板）与**两向护栏**（`rt.thread(...)` 调用点 ≥1，迁移被无声回退即红）。豁免只有两处：
 `common/runtime.py`（所有者本人）与 `remote/*_boot.py`（引导期单文件，import 不到 Runtime）。
 
-**读数**：48 处 / 35 文件（迁移后）· `rt.thread(...)` 3 处 · 全量 **6194 收下 / 2 skipped** · mypy 958 ·
+**第二批（同日）：五个类各自持 Runtime。** `DelivererProcess`（`deliver-proc-out` / `-err`，收尾
+`join_threads(2.0)` 替掉手写 join 循环）· `UploaderProcess`（`upload-proc-out` 先起、`-in` 后起 ——
+`boot ok` 只可能被 reader 读到，这个顺序在原代码里有注释，迁移必须保住）· `PushDispatcher`
+（`hub-push-tick` + 每份 job `hub-push-<jid>`；空 jid 退化成 `-job`，别让它撞上 `thread()` 的空名拒收，
+而旧代码的 `hub-push-` 本来也不算名字）· `HeartbeatPublisher`（`trainer-heartbeat-write`）·
+`EvalExecutors`（`eval-exec-<key>-<i>`：节点池会伸缩，同名槽位在转储里等于没名字）。
+`EvalExecutors` 那一处逼出了 `thread(..., start=False)`：槽位池的顺序是**先挂进池子、再开跑**
+（`pool.append(_Slot(t, stop))` 之后 `t.start()`）。照「起线程即登记」的默认形态写，一个已经能领牌的
+worker 在池里还看不见 ⇒ `_resize_locked` 把它当成「池子空」再孵一条同节点线程，同一节点两条 worker，
+公平发牌在满载时退化成 `A,A,B,B`（实测：默认形态 **3/10** 次红，`start=False` 之后 **6/6** 绿；
+`test_two_eval_rounds_share_dispatch_round_robin` 这条是 §2026-11-04 决策的验收判据，不许放宽）。
+`start=False` 只登记不开跑，`t.start()` 仍由当事人调 —— 所有者负责名字 / 登记 / 收尾，不替人决定何时开跑。
+`EvalExecutors.close_pools` 用 `join_threads(0.0)`：只清登记不等线程（调用点可能在仲裁锁里）。
+`Runtime.thread()` 起新线程时顺手丢掉已退出的登记 —— 这两个长驻对象会一批批换线程，
+不收的话 `describe()["threads"]` 只涨不落。
+
+**读数**：40 处 / 30 文件（两批迁移后；`rt.thread(...)` 11 处）· 全量 **6194 收下 / 2 skipped** · mypy 958 ·
 ruff 全绿。用例：`tests/common/test_runtime.py::test_threads_are_owned_by_the_runtime`（名字 / 登记 / join /
 关掉后拒新线程 / 空 name 拒收）+ G18 的 5 条（只增 / 只降 / 扫描地板 / 所有者护栏 / 口径自检）。逐批迁移的顺序写在 §P1-6：先类持有生命周期的（`DelivererProcess` / `UploaderProcess` /
 `PushDispatcher` / `HeartbeatPublisher` / `EvalExecutors` 一族），再模块级扇出（那些同时要补「谁 join」）。

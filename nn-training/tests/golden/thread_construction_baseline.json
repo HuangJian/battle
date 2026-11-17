@@ -13,7 +13,6 @@
     "hub/smoke_loopback.py": 1,
     "hub/tunnel_ab_probe.py": 1,
     "remote/deliver_outbox.py": 1,
-    "remote/deliver_proc.py": 2,
     "remote/deliver_worker.py": 1,
     "remote/error_report.py": 1,
     "remote/job_lifecycle.py": 1,
@@ -24,9 +23,7 @@
     "remote/payload_proc.py": 1,
     "remote/payload_worker.py": 1,
     "remote/push_bootstrap.py": 1,
-    "remote/push_dispatch.py": 2,
     "remote/result_upload.py": 1,
-    "remote/upload_proc.py": 2,
     "remote/worker_server.py": 1,
     "trainer/batch_runner.py": 2,
     "trainer/eval_m1.py": 1,
@@ -36,9 +33,7 @@
     "trainer/stream.py": 1,
     "worker/bc_dispatch.py": 1,
     "worker/bc_eval.py": 1,
-    "worker/eval_exec.py": 1,
     "worker/eval_gate.py": 1,
-    "worker/serve_pool.py": 1,
-    "worker/trainer_heartbeat.py": 1
+    "worker/serve_pool.py": 1
   }
 }

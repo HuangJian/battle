@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
+from common import runtime
 from worker.eval_arbiter import LOCAL_NODE, EvalRound, Grant, eval_arbiter
 
 
@@ -34,6 +35,9 @@ class EvalExecutors:
     def __init__(self, arbiter: Any | None = None) -> None:
         self._arb = arbiter if arbiter is not None else eval_arbiter()
         self._lock = threading.Lock()
+        #: 每个槽位的线程都归这里（`eval-exec-<key>-<i>`）：节点池会**伸缩**，登记表只留活着的
+        #: （`Runtime.thread` 起新线程时顺手丢掉已退出的）；谁等它们仍由 `close_pools` 的预算定。
+        self._rt = runtime.Runtime(scope="eval-exec")
         self._pools: dict[str, list[_Slot]] = {}
         # 每个 owner（一轮 eval）对节点的期望线程数；同节点取 max，轮收工时释放。
         self._wants: dict[str, dict[int | None, int]] = {}
@@ -78,8 +82,12 @@ class EvalExecutors:
             add = max(0, target_n - len(pool))
             for _ in range(add):
                 stop = threading.Event()
-                t = threading.Thread(
-                    target=target, args=(key, stop), daemon=True, name=name
+                # ⚠ 顺序是契约（`start=False`）：**先挂进池子再开跑**。反过来的话，一个已经能领牌
+                # 的 worker 在池里还看不见，`_resize_locked` 会当成「池子空」再孵一条同节点线程 ——
+                # 同一节点两条 worker，公平发牌（`test_two_eval_rounds_share_dispatch_round_robin`
+                # 的 A,B,A,B）在满载时会退化成 A,A,B,B（2026-11-17 实测 3/10 次）。
+                t = self._rt.thread(
+                    target, key, stop, daemon=True, name=f"{name}-{len(pool)}", start=False
                 )
                 pool.append(_Slot(t, stop))
                 t.start()
@@ -87,9 +95,7 @@ class EvalExecutors:
         finally:
             self._lock.release()
 
-    def ensure_node(
-        self, nd: dict[str, Any], want: int, owner: Any | None = None
-    ) -> int:
+    def ensure_node(self, nd: dict[str, Any], want: int, owner: Any | None = None) -> int:
         nid = str(nd["id"])
         return self._ensure(nid, want, self._node_loop, f"eval-{nid}", owner)
 
@@ -125,10 +131,7 @@ class EvalExecutors:
     def node_alive_for(self, rnd: EvalRound) -> bool:
         """本机改派判据：该轮还有**可路由**节点且它的池子还有能领牌的线程。"""
         now = time.time()
-        return any(
-            rnd.node_routable(nid, now) and self.active(nid) > 0
-            for nid in rnd.node_ids()
-        )
+        return any(rnd.node_routable(nid, now) and self.active(nid) > 0 for nid in rnd.node_ids())
 
     def close_pools(self) -> None:
         with self._lock:
@@ -138,6 +141,8 @@ class EvalExecutors:
                     slot.stop.set()
             self._pools.clear()
             self._wants.clear()
+        # 登记表跟着清（线程靠 `stop` 自己退；这里不等它们 —— 调用点可能在仲裁锁里）。
+        self._rt.join_threads(0.0)
 
     # —— 线程循环 ——
 
@@ -151,7 +156,9 @@ class EvalExecutors:
             try:
                 self._execute_node(grant)
             except Exception as e:  # 单局异常不得杀死整条腿（旧 worker 同样兜底）
-                self._log_round(grant.round, f"[eval] exec error (ignored): {type(e).__name__}: {e}")
+                self._log_round(
+                    grant.round, f"[eval] exec error (ignored): {type(e).__name__}: {e}"
+                )
                 grant.round.settle_task(
                     grant,
                     ok=False,
@@ -170,7 +177,9 @@ class EvalExecutors:
             try:
                 self._execute_local(grant)
             except Exception as e:
-                self._log_round(grant.round, f"[eval] local exec error (ignored): {type(e).__name__}: {e}")
+                self._log_round(
+                    grant.round, f"[eval] local exec error (ignored): {type(e).__name__}: {e}"
+                )
                 grant.round.settle_task(
                     grant,
                     ok=False,
@@ -251,9 +260,7 @@ class EvalExecutors:
                 transient = True
             task_lost = common.distribution.is_task_lost_error(e)
             if task_lost:
-                common.distribution.forget_weights_node(
-                    nd["id"], kind=rnd.weights_kind
-                )
+                common.distribution.forget_weights_node(nd["id"], kind=rnd.weights_kind)
                 transient = True
         wall_sec = round(time.time() - grant.started, 3)
         accepted = rnd.settle_task(

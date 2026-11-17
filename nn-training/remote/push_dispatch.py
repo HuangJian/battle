@@ -43,7 +43,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from common import net_http
+from common import net_http, runtime
 from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
@@ -218,7 +218,9 @@ def accept_result(
     if not hub.result_token_ok(jid, lease_token):
         return 403, "lease mismatch — 非本 job 租约持有人"
     if not hub.store_result(jid, result):
-        _append_attribution(hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)")
+        _append_attribution(
+            hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)"
+        )
         return 409, "result already stored (duplicate write-back)"
     _append_attribution(hub, jid, "job_result_accepted", worker, "")
     # ★ 结果落地 ⇒ 这份活**已结束**，租约当场就该收（2026-10-11 用户报障：首页把一台机的
@@ -382,8 +384,10 @@ class PushWorkers:
             for wid, w in self._extra.items():
                 if wid in self._removed:
                     continue
-                merged[wid] = {**w, **{k: v for k, v in merged.get(wid, {}).items()
-                                       if k in _KEEP_ON_RELOAD}}
+                merged[wid] = {
+                    **w,
+                    **{k: v for k, v in merged.get(wid, {}).items() if k in _KEEP_ON_RELOAD},
+                }
         return list(merged.values())
 
     def last_ping_at(self) -> float:
@@ -632,6 +636,8 @@ class PushDispatcher:
         self._ready_at: dict[str, float] = {}
         self._stop = threading.Event()
         self._wake = threading.Event()
+        #: tick 线程与每份 job 的派发线程都归这里（`hub-push-tick` / `hub-push-<jid>`）。
+        self._rt = runtime.Runtime(scope="hub-push")
         self._thread: threading.Thread | None = None
         self.ticks = 0
         self.pushed = 0
@@ -646,8 +652,9 @@ class PushDispatcher:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(
-            target=run_tick_loop,
+        self._thread = self._rt.thread(
+            run_tick_loop,
+            name="tick",
             kwargs={
                 "stop": self._stop,
                 "wake": self._wake,
@@ -655,15 +662,12 @@ class PushDispatcher:
                 "tick": self.tick,
                 "log": self._log,
             },
-            name="hub-push",
             daemon=True,
         )
-        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-
 
     # ---- 单拍（可单测：不依赖线程） ----
     def tick(self, *, now: float | None = None, ping: bool | None = None) -> dict:
@@ -671,8 +675,10 @@ class PushDispatcher:
         now = self._now() if now is None else float(now)
         reloaded = self.workers.reload()
         pinged: dict[str, str] = {}
-        due = ping if ping is not None else (
-            now - self.workers.last_ping_at() >= self.workers.ping_sec
+        due = (
+            ping
+            if ping is not None
+            else (now - self.workers.last_ping_at() >= self.workers.ping_sec)
         )
         if due:
             pinged = self.workers.ping_all()
@@ -865,13 +871,20 @@ class PushDispatcher:
             with self._lock:
                 self._inflight[slot] = rec
             counts[wid] = counts.get(wid, 0) + 1
-            t = threading.Thread(
-                target=self._run_one,
-                args=(course, jid, worker, lease, manifest, jd, rec),
-                name=f"hub-push-{jid[:10]}",
+            self._rt.thread(
+                self._run_one,
+                course,
+                jid,
+                worker,
+                lease,
+                manifest,
+                jd,
+                rec,
+                # 空 jid 不给名字 ⇒ 会被 `Runtime.thread` 拒收（旧代码只是叫 `hub-push-`，
+                # 那不是「有名字」）；这里退化成腿名而不是抛异常。
+                name=jid[:10] or "job",
                 daemon=True,
             )
-            t.start()
             started.append(jid)
         return started
 
@@ -984,11 +997,7 @@ class PushDispatcher:
             code_bytes = code_path.read_bytes() if code_path.exists() else None
             ts_path = jd / TS_CODE_NAME
             ts_bytes = ts_path.read_bytes() if ts_path.exists() else None
-            blobs = {
-                n: p.read_bytes()
-                for n in BLOB_NAMES
-                if (p := blob_path(jd, n)).exists()
-            }
+            blobs = {n: p.read_bytes() for n in BLOB_NAMES if (p := blob_path(jd, n)).exists()}
             from remote.push_client import submit_job
 
             rec["state"] = "upload"
@@ -1154,8 +1163,9 @@ class PushDispatcher:
                     self._log(f"{jid} 结果被拒 409（{why}）——别人已胜，本份丢弃")
                 elif code_ in (400, 403):
                     # 结果本身不合契约：换一台重跑是合理的（不把这份结果投毒进账本）。
-                    self._requeue(jid, lease, wid, f"结果入账被拒 HTTP {code_}: {why}",
-                                  avoid_worker=True)
+                    self._requeue(
+                        jid, lease, wid, f"结果入账被拒 HTTP {code_}: {why}", avoid_worker=True
+                    )
                 else:
                     self._log(f"{jid} 结果入账返回 HTTP {code_}（{why}）——继续等")
                 return
@@ -1195,8 +1205,9 @@ class PushDispatcher:
                 self._log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
                 return
             if status in (409, 428):
-                self._requeue(jid, lease, wid, f"worker 拒绝这份活（HTTP {status}）",
-                              avoid_worker=True)
+                self._requeue(
+                    jid, lease, wid, f"worker 拒绝这份活（HTTP {status}）", avoid_worker=True
+                )
                 return
             if status >= 500:
                 self._wait_next_poll(jid)
@@ -1315,7 +1326,9 @@ class PushDispatcher:
             with self._lock:
                 self._avoid.setdefault(jid, {})[wid] = until
             self.workers.note_push(wid, False)
-        self._log(f"{jid} 回落队首（{why}）—— 改推其它 worker（避免 {wid if avoid_worker else '-'}）")
+        self._log(
+            f"{jid} 回落队首（{why}）—— 改推其它 worker（避免 {wid if avoid_worker else '-'}）"
+        )
 
     # ---- 观测 ----
     def state(self) -> dict:
