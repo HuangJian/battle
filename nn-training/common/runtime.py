@@ -18,13 +18,13 @@
 ## 这一刀**没做**什么（写在这里，免得下一个人当成隐藏的债）
 
 * **不节流**：`pool(workers=N)` 的 N 是调用方给的（多半来自 `--workers` / 课程配置），一律照办 ——
-  静默砍并发是拿吞吐换好看的数字，而这个仓的并发数**此前没有读数**可依据。上限只约束**隐式**
-  请求（`workers=None`）与 `describe()["over"]` 的报数。
+  静默砍并发是拿吞吐换好看的数字。上限只约束**隐式**请求（`workers=None`）与 `describe()["over"]`。
 * **不读 env**：上限走 `Runtime(ceiling=)` 参数。`os.environ` 直读有 G13 计数（只许调小），
   给并发再加一根环境变量旋钮等于把「同一根旋钮两个默认值」的病再种一遍（§P1-5）。
-* **不接管裸 `threading.Thread`**：那 55 处的搬迁是 B6 的另一半。
+* **不接管裸 `threading.Thread`**：`thread()` 只提供所有者那一半（名字 / 登记 / join），存量按文件冻结逐步搬。
 * **不替调用方接 `halt_event`**：把 6 个模块的 halt 语义一起改需要一轮真跑；`stop=` 已经吃
-  `threading.Event`，接的时候是调用方一行的事。    设计说明与读数 → `docs/nn/engineering.md` §119。
+  `threading.Event`，接的时候是调用方一行的事。
+设计说明与读数 → `docs/nn/engineering.md` §119 / §122。
 
 ## 时钟：两个可注入的读数（2026-11-17，B6 的 clock 半边）
 
@@ -33,12 +33,20 @@
 墙钟用于**时间戳**（台账 `ts`、与 hub 给的时间比先后），单调钟用于**时长/超时**（绝不回跳）。
 收成一个 `now()` 就等于邀请「拿单调钟去比墙钟时间戳」这类错，而这类错只在跨机器时差下才显形。
 
-不新建 `Clock` 类型：仓里已有既成约定 `clock: Callable[[], float] = time.time`（`remote/prefetch` /
-`remote/bulk_sched` / `remote/offline_push_face` …），再发明一个同名 Protocol 只会和
-`common/logutil.Clock`（那是「能给时间戳 + `strftime` 的东西」）撞名。
+不新建 `Clock` 类型：既成约定是 `clock: Callable[[], float] = time.time`（`remote/prefetch` 一族），
+再造同名 Protocol 只会与 `common/logutil.Clock`（「能给时间戳 + `strftime` 的东西」）撞名。
 
 **`sleep()` 仍是真等待**：时钟注入改变的是「读到了几点」，不是「时间怎么流逝」。想跳过等待的用例
 别 mock 时钟 —— 用 `stop` 已置位 + 断言返回 `False`（那正是既有的取消语义）。
+
+## 裸线程的归属（2026-11-17，B6 的最后一半）
+
+`ThreadPoolExecutor` 的账收完了（G16）；**裸 `threading.Thread(...)`** 还剩一批（50 处 / 35 文件，
+G18 按文件冻结、只许调小）。`rt.thread(target, name=…)` 是它们的所有者：名字 `<scope>-<name>`、
+登记在本域、`close()` 时 join（`join_threads()` 报仍活着的名字）、`describe()["threads"]` 可读。
+**不替 target 包 `check()`**（往别人线程体里塞可能抛异常的取消点会改写各家退出语义）；手上没有
+`Runtime` 的（模块级扇出）先把 runtime 从调用方传下来，别在模块里造隐藏单例 —— 详见 §122。
+
 """
 
 from __future__ import annotations
@@ -151,6 +159,8 @@ class Runtime:
         self._stop = stop if stop is not None else threading.Event()
         self._pools: dict[str, ThreadPoolExecutor] = {}
         self._sizes: dict[str, int] = {}
+        #: 本域起过的裸线程（`thread()`）；`close()` 会 join 它们。
+        self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._closed = False
 
@@ -186,6 +196,55 @@ class Runtime:
         if sec <= 0:
             return not self._stop.is_set()
         return not self._stop.wait(sec)
+
+    # ── 裸线程 ───────────────────────────────────────────────────────────────
+
+    def thread(
+        self,
+        target: Callable[..., object],
+        /,
+        *args: object,
+        name: str,
+        kwargs: dict[str, object] | None = None,
+        daemon: bool = False,
+    ) -> threading.Thread:
+        """起一个**本域的**线程并登记：名字 `<scope>-<name>`、`close()` 时 join。
+
+        名字要带上区分位（`worker-3` 而不是三个同名的 `worker`）：`Thread` 不会像池那样自动补序号，
+        转储里三条同名线程和一条没名字没区别。`start()` 已代为调用（本仓 51 处裸线程没有一处
+        是先造后等的形态）；要「造好再起」就直接用 `threading.Thread` —— 那种形态的归属问题
+        不是名字，而是谁在等它。
+
+        取消语义与池一致：**已开跑的不打断**（Python 线程杀不掉），target 想支持中途收工就自己调
+        `rt.check()` / `rt.sleep()` —— 本方法不往你的 target 里塞任何东西（见模块 docstring）。
+        """
+        if not name:
+            raise ValueError("Runtime.thread 必须给 name（转储里靠它分清是谁）")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError(f"Runtime[{self.scope}] 已关闭，不能再起线程 {name!r}")
+            t = threading.Thread(
+                target=target,
+                args=args,
+                kwargs=kwargs or {},
+                name=NAME_FORMAT.format(scope=self.scope, pool=name),
+                daemon=daemon,
+            )
+            self._threads.append(t)
+        t.start()
+        return t
+
+    def join_threads(self, timeout: float | None = None) -> list[str]:
+        """join 本域登记的线程，返回**仍活着**的那些名字（空表 = 都收尾了）。
+
+        为什么返回名字而不是布尔：收尾失败时人要看的是「谁没收」，不是「有没有失败」。
+        """
+        with self._lock:
+            threads = list(self._threads)
+            self._threads.clear()
+        for t in threads:
+            t.join(timeout)
+        return sorted(t.name for t in threads if t.is_alive())
 
     # ── 池 ───────────────────────────────────────────────────────────────────
 
@@ -287,6 +346,8 @@ class Runtime:
                 "workers": used,
                 "over": used > self.ceiling,
                 "pools": pools,
+                # 本域起过的裸线程：名字 → 还活不活（`close()` 之后再问就是空表）。
+                "threads": {t.name: t.is_alive() for t in self._threads},
                 "stopped": self._stop.is_set(),
                 "closed": self._closed,
                 # 读数：这一轮用的是不是被测试换过的时钟（`time.time/time.monotonic` = 真钟）。
@@ -305,6 +366,9 @@ class Runtime:
             cancel = self._stop.is_set()
         for ex in pools:
             ex.shutdown(wait=wait, cancel_futures=cancel)
+        if wait:
+            # 裸线程不能取消（Python 线程杀不掉），只能等 —— 与池的「正常退出不取消排队活」同一口径。
+            self.join_threads()
 
     def __enter__(self) -> Runtime:
         return self

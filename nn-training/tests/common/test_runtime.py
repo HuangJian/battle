@@ -193,7 +193,17 @@ def test_ceiling_defaults_to_the_core_count_floor() -> None:
 def test_describe_is_json_safe_and_reports_lifecycle() -> None:
     rt = runtime.Runtime(scope="unit", ceiling=4)
     d = rt.describe()
-    assert set(d) == {"scope", "ceiling", "workers", "over", "pools", "stopped", "closed", "clock"}
+    assert set(d) == {
+        "scope",
+        "ceiling",
+        "workers",
+        "over",
+        "pools",
+        "threads",
+        "stopped",
+        "closed",
+        "clock",
+    }
     assert d["scope"] == "unit"
     assert d["stopped"] is False and d["closed"] is False
     # 时钟读数：缺省就是真钟（注入后这一行会变成测试自己的可调用名）
@@ -219,6 +229,35 @@ def test_time_reads_are_injectable() -> None:
     # 真等待与时钟注入正交：`sleep` 仍是 `stop.wait`（注入只改「读到几点」）。
     rt.request_stop()
     assert rt.sleep(5.0) is False  # sleep-ok: 夹具模拟（stop 已置位 ⇒ 立即返回）
+
+
+def test_threads_are_owned_by_the_runtime() -> None:
+    """§P1-6 裸线程那一半：`rt.thread(...)` 给出 `<scope>-<name>`、登记、`close()` 时 join。"""
+    gate = threading.Event()
+    done = threading.Event()
+
+    def body() -> None:
+        gate.wait(5.0)  # 卡住它，好让下面的「还活着」断言有意义
+        done.set()
+
+    rt = runtime.Runtime(scope="unit-threads")
+    t = rt.thread(body, name="worker-1")
+    assert t.name == "unit-threads-worker-1"
+    assert rt.describe()["threads"] == {"unit-threads-worker-1": True}
+    gate.set()
+    assert done.wait(5.0)
+    assert rt.join_threads(5.0) == [], "收尾后没有活着的线程"
+    # 关掉之后不再接新线程（与池同一口径），且 join 是 close 的一部分
+    rt2 = runtime.Runtime(scope="unit-threads2")
+    fin = threading.Event()
+    rt2.thread(lambda: fin.wait(5.0), name="slow", daemon=True)
+    fin.set()
+    rt2.close()
+    assert rt2.describe()["threads"] == {}
+    with pytest.raises(RuntimeError, match="已关闭"):
+        rt2.thread(lambda: None, name="late")
+    with pytest.raises(ValueError, match="name"):
+        runtime.Runtime(scope="unit-threads3").thread(lambda: None, name="")
 
 
 def test_scope_is_mandatory() -> None:

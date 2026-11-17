@@ -152,6 +152,9 @@ class LocalLane:
         self.deadline = deadline
         self.lock = lock
         self.threads = threads
+        #: 本机槽线程的属性在这里（§P1-6 裸线程那一半）：名字 `rollout-local-<槽位>`、
+        #: 登记在本域。谁等它们仍由调用方的 `threads` 表决定（`LocalLane` 不替人 join）。
+        self._rt = common.runtime.Runtime(scope="rollout-local")
         self._slots: list[tuple[int, threading.Thread]] = []
         #: 本机槽「有容量却无活」的累计线程秒（P2-2 观测；不进 dupRate）。
         self.idle_sec = 0.0
@@ -163,18 +166,15 @@ class LocalLane:
     def spawn(self, n: int) -> None:
         for _ in range(max(0, n)):
             slot = len(self._slots)
-            t = threading.Thread(
-                target=self.worker, args=(None, slot), daemon=True, name="rollout-local"
-            )
-            t.start()
+            # 名字带槽位：三条约同名线程在转储里等于没名字。
+            t = self._rt.thread(self.worker, None, slot, name=f"worker-{slot}", daemon=True)
             self.threads.append(t)
             self._slots.append((slot, t))
 
     def slot_allowed(self, slot: int) -> bool:
         """失联补孵的槽位在远端恢复后返回 False（调用方持锁）。"""
         return (
-            slot < self.local_cap[0]
-            or time.time() - self.last_remote_ok[0] > self.remote_dead_sec
+            slot < self.local_cap[0] or time.time() - self.last_remote_ok[0] > self.remote_dead_sec
         )
 
     def watch(self) -> None:
@@ -199,11 +199,7 @@ class LocalLane:
     def start(self) -> None:
         self.spawn(self.local_slots)
         if self.local_slots < self.cap_full:
-            t = threading.Thread(
-                target=self.watch, daemon=True, name="rollout-local-watch"
-            )
-            t.start()
-            self.threads.append(t)
+            self.threads.append(self._rt.thread(self.watch, name="watch", daemon=True))
 
 
 def make_local_pool(
@@ -834,9 +830,7 @@ def _cancel_remote_targets(targets: list[dict], log: Any) -> None:
         if not key:
             continue
         tried += 1
-        if common.distribution.cancel_task(
-            str(t.get("url") or ""), str(t.get("auth") or ""), key
-        ):
+        if common.distribution.cancel_task(str(t.get("url") or ""), str(t.get("auth") or ""), key):
             ok += 1
     if tried:
         log(f"[dist] alloc-timeout: cancelled {ok}/{tried} remote task(s)")
@@ -884,10 +878,7 @@ def reap_alloc_timeouts(
                 f"({timeout_sec:.0f}s) — re-queued, cooling nodes: {blocked}"
             )
         else:
-            log(
-                f"[dist] alloc-timeout s{task[0]}/seed{task[1]} "
-                f"({timeout_sec:.0f}s) — re-queued"
-            )
+            log(f"[dist] alloc-timeout s{task[0]}/seed{task[1]} ({timeout_sec:.0f}s) — re-queued")
 
     # 关掉超时那一份的 HTTP 响应（异步轮询会立刻抛；同步请求若已拿到响应头也能被
     # reset）。关不到的部分由原请求自己的 timeout 兜底——至少不再让 reaper 被

@@ -233,6 +233,9 @@ class CloudEvalRunner:
         self._idle.set()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        #: 后台线程的属性在这里（§P1-6 裸线程那一半）：名字统一成 `cloud-eval-runner-loop`、
+        #: 登记在本域，`drain` 的 join 语义不变（谁等它仍由 `drain` 决定）。
+        self._rt = runtime.Runtime(scope="cloud-eval-runner")
         #: 已跑完的评估结果（`run_cloud_eval` 的返回 dict，按提交顺序）
         self.results: list[dict] = []
 
@@ -314,8 +317,7 @@ class CloudEvalRunner:
     def _ensure_thread(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="cloud-eval-runner")
-        self._thread.start()
+        self._thread = self._rt.thread(self._loop, name="loop", daemon=True)
 
     def _loop(self) -> None:
         """后台循环：**已提交的活一定跑完**，只有在「要停且无事可做」时才退出。
@@ -497,9 +499,7 @@ def run_cloud_eval(
                     "单局失败自动回退一次性 spawn",
                 )
             else:
-                eb.note(
-                    f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn"
-                )
+                eb.note(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
                 pool.close()
                 pool = None
         lock = threading.Lock()
@@ -519,6 +519,7 @@ def run_cloud_eval(
         # 重试放宽（`attempt_timeout_sec`）——理由与 rollout 逐字相同。
         explicit = float(game_timeout_sec or 0.0) > 0
         base_cap = float(game_timeout_sec) if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
+
         def run_one(task: tuple[int, int]) -> None:
             stage, seed = task
             game_dir = Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}"
@@ -561,9 +562,7 @@ def run_cloud_eval(
                             plan.difficulty,
                             float(cap),
                             key16,
-                            stage_json=(
-                                course.stage_json(int(stage)) if course is not None else ""
-                            )
+                            stage_json=(course.stage_json(int(stage)) if course is not None else "")
                             or "",
                             lives_override=plan.lives,
                             player_level=plan.level,
@@ -701,7 +700,7 @@ def run_cloud_eval(
                     )
         finally:
             if pool is not None:
-                finished, pool = pool, None      # 防止外层 finally 再关
+                finished, pool = pool, None  # 防止外层 finally 再关
                 eb.add("servePool", finished.summary())
                 # ★ 评审 C2 的最终处置：读取/写 out 都在这里；原 :692-705 那段已删。
                 out["servePool"] = {

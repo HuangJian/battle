@@ -25,6 +25,44 @@
 
 ---
 
+## §122 裸线程的所有者：`Runtime.thread()` + G18 存量闸（2026-11-17）
+
+**现场**（`python.refactor.md` §P1-6 的另一半 / §10-B6 的收尾）：池那一半 2026-11-17 结了（§119，
+G16 零容差），**裸 `threading.Thread(...)`** 还剩 50 处 / 35 文件（G18 口径，不含所有者自己与引导期
+单文件）。它们的问题与池同源，只是没有 `shutdown` 可以接管：名字各写各的（G15 只判「有没有
+`name=`」，不判「归属于谁」）、**没人 join**（进程退出靠 daemon 硬切，在飞的活静默没掉）、
+`describe()` 里也看不出某个线程属于哪一轮。
+
+**做法**
+
+* `Runtime.thread(target, *args, name=…, kwargs=…, daemon=False)` —— 起一个**本域的**线程并登记：
+  名字统一成 `<scope>-<name>`（与池同一格式），`describe()["threads"]` 报「名字 → 还活不活」，
+  `join_threads(timeout)` 返回**仍活着**的名字（空表 = 都收尾了；收尾失败时人要看的是「谁没收」），
+  `close()` 在 `wait=True` 时一并 join（与池「正常退出不取消排队活」同一口径：线程杀不掉，只能等）。
+  `start()` 已代调 —— 本仓 50 处没有一处是「先造后等」，所以不留那个缝。
+* **不替 target 包一层 `check()`**：往别人的线程体里塞一次可能抛异常的取消点，会改写各家自己的退出
+  语义（「已跑完这一轮再走」vs「立刻走」）。取消点仍是当事人在 target 里自己调 `rt.check()` /
+  `rt.sleep()`；所有者负责的是**名字、登记、收尾**这三件。
+* 名字要带区分位（`worker-3`，而不是三条约同名线程）：`Thread` 不会像池那样自动补序号，
+  三条约同名和一条没名字在转储里一样不可读 —— `queue_local.LocalLane` 顺手这么改了。
+* 首批迁移（接缝已经在那儿的）：`remote/offline_eval.CloudEvalRunner`（`__init__` 里持有
+  `Runtime(scope="cloud-eval-runner")`，后台线程名 `cloud-eval-runner-loop`；`drain` 的 join 语义不动）
+  与 `trainer/queue_local.LocalLane`（`worker-<slot>` / `watch`，谁等它们仍由调用方的 `threads` 表定）。
+* **剩下的 48 处为什么不一次搬完**：它们多数在模块级函数里（`abort_active_requests` 的收尾线程、
+  `_cancel_remote_targets`、一次性扇出、`rearm` 补孵），手上没有 `Runtime` —— 要搬得先把 runtime
+  从调用方传下来（§P1-4 的接缝）。为了少一行在模块里造个隐藏单例，只是把「无主线程」换成
+  「无主 Runtime」，所以宁可留账。
+
+**门禁 G18** `tests/test_thread_ownership_budget.py` + `tests/golden/thread_construction_baseline.json`：
+就地 `Thread(...)` 按文件冻结（首量 50 处 / 35 文件），**只许调小**；配扫描入口自检
+（9 成地板）与**两向护栏**（`rt.thread(...)` 调用点 ≥1，迁移被无声回退即红）。豁免只有两处：
+`common/runtime.py`（所有者本人）与 `remote/*_boot.py`（引导期单文件，import 不到 Runtime）。
+
+**读数**：48 处 / 35 文件（迁移后）· `rt.thread(...)` 3 处 · 全量 **6194 收下 / 2 skipped** · mypy 958 ·
+ruff 全绿。用例：`tests/common/test_runtime.py::test_threads_are_owned_by_the_runtime`（名字 / 登记 / join /
+关掉后拒新线程 / 空 name 拒收）+ G18 的 5 条（只增 / 只降 / 扫描地板 / 所有者护栏 / 口径自检）。逐批迁移的顺序写在 §P1-6：先类持有生命周期的（`DelivererProcess` / `UploaderProcess` /
+`PushDispatcher` / `HeartbeatPublisher` / `EvalExecutors` 一族），再模块级扇出（那些同时要补「谁 join」）。
+
 ## §121 时钟也进 `Runtime`：`clock()` / `monotonic()` + `PushHooks` + G17（2026-11-17）
 
 **现场**（`python.refactor.md` §P1-6 / §7.4 / B6 的最后一块）：生产面量到 **95 个文件 / 517 处**

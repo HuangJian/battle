@@ -6923,3 +6923,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   六条命令全绿（8 个 PPO 用例含 `ckpt_resume` 的 `rng_streams` 往返 + BC 三段），此前「本机无 paddle」
   的结论作废。全文 → `docs/nn/engineering.md` §121（paddle 读数在 §120 末）。
 
+- **2026-11-17（B6 真正的收尾：裸线程收进 `Runtime.thread()`，配 G18 存量闸）**：审计 §P1-6 另一半。
+  池那一半同日结了（G16 零容差），裸 `threading.Thread(...)` 还剩 **50 处 / 35 文件** —— 与池同源的问题
+  但没有 `shutdown` 可接管：名字各写各的（G15 只判「有没有 `name=`」）、**没人 join**（退出靠 daemon 硬切，
+  在飞的活静默没掉）、`describe()` 看不出某线程属于哪一轮。`Runtime.thread(target, *args, name=, …)`
+  是所有者：名字统一 `<scope>-<name>`、登记在本域、`describe()["threads"]` 报是否还活、
+  `join_threads()` 返回仍活着的名字、`close(wait=True)` 一并 join。**不替 target 包 `check()`**（往别人线程体里
+  塞可能抛异常的取消点会改写各家退出语义 —— 「跑完这轮再走」vs「立刻走」），取消点仍由当事人自己调。
+  **不建隐藏单例**：剩下 48 处多在模块级函数、手上没有 Runtime，要搬得把 runtime 从调用方传下来（§P1-4 接缝）;
+  为省一行而造模块级 Runtime 只是把「无主线程」换成「无主 Runtime」。首批迁移 `CloudEvalRunner` +
+  `LocalLane`（顺手把三条同名 `rollout-local` 改成 `worker-<slot>`）。门禁 **G18**
+  `tests/test_thread_ownership_budget.py` + `tests/golden/thread_construction_baseline.json`：按文件冻结、
+  只许调小、扫描自检 9 成地板、两向护栏（`rt.thread(...)` ≥1）；豁免只有 `common/runtime.py`（所有者本人）
+  与 `remote/*_boot.py`（引导期单文件）。全文 → `docs/nn/engineering.md` §122。
