@@ -37,7 +37,6 @@ LONG_FUNCS_BASELINE = {
     "remote/rollout_node.py": 1,
     "remote/train_core.py": 2,
     "remote/worker.py": 2,
-    "tools/paired_power.py": 1,
     "trainer/dispatch.py": 2,
     "trainer/eval_dispatch.py": 1,
     "trainer/loop_remote_job.py": 1,

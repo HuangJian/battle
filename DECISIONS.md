@@ -7494,3 +7494,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   439、`stream.run_rollout_stream` 442、`loop_remote_job._remote_ppo_publish` 444、
   `bc.train` 456、`paired_power.main` 625），纯搬移无干净切面；逐条理由与下一步接法
   → `docs/nn/engineering.md` §201。**不是欠账消失**：门禁读数仍是 15。
+- **2026-11-18（长函数存量第二十三刀：配对功效报表 tools）**：`tools/paired_power.py::main`
+  625 → **35** 行（按 §1–§11 报表段拆出 11 个 `_print_*` helper，打印与判据逐字不变），
+  长函数存量 **15 → 14**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §202。

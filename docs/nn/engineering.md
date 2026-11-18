@@ -25,6 +25,30 @@
 
 ---
 
+## §202 长函数存量第二十三刀：配对功效报表（tools）625 → 35（2026-11-18）
+
+`tools/paired_power.py::main` **625 → 35 行**，长函数存量 **15 → 14**
+（`LONG_FUNCS_BASELINE` 删除 `tools/paired_power.py` 条目）。
+
+十一刀纯搬移（报表段落；打印内容 / 判据 / 返回码逐字不变，`print` 逐条 AST 比对一致）：
+- `_print_health(games, all_its, paired_its)`：§1 体检 → `bad`。
+- `_print_pairing_gain(games, paired_its)`：§2 配对增益。
+- `_print_archive_recheck(games, paired_its)`：§3 复算归档 → `(agree, se_by_it, bases, mde_ok)`。
+- `_print_wave2_n(bases, se_it20, se_worst)`：§4 Wave 2 的 N。
+- `_print_secondary_endpoints(rows, paired_its)`：§5 次要终点 → `(needs, ep_st)`。
+- `_print_tail_merge(rows, paired_its, se_by_it, se_it20)`：§6 尾巴合并 → `(ses_rel, between2, sampling)`。
+- `_print_longer_horizon(games, paired_its, se_by_it, ses_rel, sampling)`：§7 更长时程 → `base0`。
+- `_print_criteria_table(se_by_it, paired_its, between2, needs, ep_st)`：§8 判据表装配。
+- `_print_preregister_thresholds(ep_st, needs)`：§11 预注册阈值表。
+- `_print_wave1_backfill(rows, games, paired_its, base0)`：§9 Wave 1 回填。
+- `_print_extended_pool(rows, paired_its)`：§10 §67 补评估重算 → `ext_ok`。
+
+`main` 现在只做 §0 语料检查 + 共享局部量（`rows` / `games` / `paired_its`）+ 按序调用
+报表段 + 汇总返回码。§7 里的 `count_at(CONTROL, 0)` 改写成等价的
+`any(i == 0 for i, _s in games[CONTROL])`（`count_at` 闭包留在 `main` 供配对点筛选）。
+
+---
+
 ## §201 长函数存量本轮收口：37 → 15（2026-11-18）
 
 从 `python.refactor.md` 附录 B「真·下一批」第 1 项开工，本轮共 **22 刀**，
