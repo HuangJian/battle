@@ -25,6 +25,26 @@
 
 ---
 
+## §164 G5 第二十五批：课程 store 与即时闸的公开读面（2026-11-18）
+
+`tests/hub/test_auto_handoff.py` 私有断言 **8 → 0**（G5 **335 → 327**，107 → 106 文件）。
+
+三处读的是**别的对象的状态**（课程 store / 它的租约表 / 即时撤单闸），补两条公开入口：
+
+- `QueueScopeMixin.course_store(course)`：课程 → store 的只读查询（未知课程 ⇒ `None`；
+  不改课程表、不建 store）。`_stores` 是登记表，诊断与用例要问的是「这门课队列此刻
+  长什么样」，不该伸手进表本体。三处 `hub._stores[c].hold_blocked()` 改走它；
+  三处 `claimable_job_ids` 直接用既有门面（`hub.claimable_job_ids(course)`）。
+- `LedgerMixin.is_cancelled(job_id)`：进程内**即时闸**的当前成员（不按账本对账 —— 真闸是
+  `claimable_job_ids()` + `claim` 的净态检查）。revive 用例末尾那句「claim 成功后它已不在
+  即时闸里」改读它；`"gone-1" not in store._leases` 改用既有的 `lease_worker(jid) == ""`
+  （被拒的认领若留下租约，它是新鲜的 ⇒ 一定非空）。
+
+守卫同步：`test_hub_queue_split.py` 的 `DOMAIN_METHODS` 136 → 137、实现名 138 → 139；
+`test_hub_job_store_split.py` 的 `MIXIN_METHODS` 71 → 72（`is_cancelled` 进 ledger 簇）。
+
+---
+
 ## §163 G5 第二十四批：D9 闭锁的读数 `auth_state()`（2026-11-18）
 
 `tests/hub/test_hub_auth_d9_order.py` 私有断言 **8 → 0**（G5 **343 → 335**，108 → 107 文件）。

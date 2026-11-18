@@ -286,6 +286,15 @@ class LedgerMixin:
         self._drop_commitment_locked(job_id)
         self._cancelled.add(job_id)
 
+    def is_cancelled(self, job_id: str) -> bool:
+        """该 job 现在**在进程内即时闸里**吗（`cancel_*` 写入、`claim` 对账后放行）。
+
+        只读查询：**不按账本对账**——真闸是 `claimable_job_ids()`（账本净态）加 `claim` 的
+        净态检查；这里回答的是「秒级窗口那道闸此刻还挡不挡它」（观测 / 用例用）。
+        """
+        with self._lock:
+            return job_id in self._cancelled
+
     def cancel_unsettled_jobs(self, *, reason: str = "mode-switch") -> list[str]:
         """把**未被认领**的可领取 job 作废（写 `job_cancelled` 账本事件）。返回被撤的 jid。
 

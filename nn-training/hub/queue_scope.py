@@ -301,6 +301,15 @@ class QueueScopeMixin(QueuePeer):
         self._locate_cache[jid] = holders[0]
         return holders[0]
 
+    def course_store(self, course: str) -> _JobStore | None:
+        """这门课的 store（未知课程 ⇒ None）。**只读查询**：不改课程表、不建 store。
+
+        为什么需要公开入口：`_stores` 只是课程 → store 的登记表，而「这门课的队列此刻
+        长什么样」（hold 闸 / 可领池 / 即时闸）都住在 store 上——诊断与用例要问的是后者，
+        不该伸手进登记表本体。
+        """
+        return self._stores.get(str(course or ""))
+
     def _store_of(self, job_id: str) -> _JobStore | None:
         course = self.course_of(job_id)
         return None if course is None else self._stores.get(course)

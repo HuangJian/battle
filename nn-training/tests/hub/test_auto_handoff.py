@@ -830,7 +830,7 @@ def test_claim_with_pack_grants_hold_and_leaves_the_job_queue_alone(tmp_path: Pa
         assert disk["hold"]["worker_id"] == "w1" and disk["v"] == 2
         assert "mode" not in disk and "claimed_offline" not in disk
         # 队列一字不动（既没撤单、也照旧可被在线盘领）
-        assert hub._stores["c5-gae"].claimable_job_ids() == ["job-1"]
+        assert hub.claimable_job_ids("c5-gae") == ["job-1"]
         assert not (tmp_path / "c5-gae" / "remote-jobs" / "job_cancelled.jsonl").exists()
     finally:
         srv.shutdown()
@@ -895,7 +895,9 @@ def test_claim_hold_anchor_is_stamped_when_the_lease_reaches_the_client(
     assert hold["state"] == "live", hold
     assert hold["last_progress_at"] == pytest.approx(1005.0)
     # 闸的镜像同拍跟随（否则「拿到租约」与「别人能不能碰这门课」分叉）
-    assert hub._stores["c5-gae"].hold_blocked() == "held:w1"
+    store = hub.course_store("c5-gae")
+    assert store is not None
+    assert store.hold_blocked() == "held:w1"
 
 
 def test_claim_with_pack_degrades_when_console_unreachable(tmp_path: Path, monkeypatch) -> None:
@@ -929,7 +931,9 @@ def test_restart_keeps_the_hold_from_disk(tmp_path: Path) -> None:
     assert hub2.mode_ignored("c5-gae") is True, "启动参数的模式段只记 WARN 标记"
     row = next(r for r in hub2.offline_tasks() if r["course"] == "c5-gae")
     assert row["state"] == "claimed" and row["claimable"] is False
-    assert hub2._stores["c5-gae"].hold_blocked() == "held:w1"
+    store2 = hub2.course_store("c5-gae")
+    assert store2 is not None
+    assert store2.hold_blocked() == "held:w1"
 
 
 def test_busy_gate_blocks_the_same_worker_and_releases(tmp_path: Path) -> None:
@@ -1462,7 +1466,7 @@ def test_missing_pack_claim_does_not_drop_unclaimed_jobs(tmp_path: Path, monkeyp
         )
         assert st == 409 and _json(raw)["pending_export"] is True, raw[:200]
         assert _cancelled_ids(hub, "c5-gae") == set()
-        assert hub._stores["c5-gae"].claimable_job_ids() == ["stale-1"]
+        assert hub.claimable_job_ids("c5-gae") == ["stale-1"]
         # 有包的那条腿同样不撤单
         _pack(tmp_path, "c5-gae")
         st2, raw2 = _req(
@@ -1470,7 +1474,7 @@ def test_missing_pack_claim_does_not_drop_unclaimed_jobs(tmp_path: Path, monkeyp
         )
         assert st2 == 200, raw2[:200]
         assert _cancelled_ids(hub, "c5-gae") == set()
-        assert hub._stores["c5-gae"].claimable_job_ids() == ["stale-1"]
+        assert hub.claimable_job_ids("c5-gae") == ["stale-1"]
     finally:
         srv.shutdown()
 
@@ -1484,11 +1488,12 @@ def test_cancelled_job_is_rejected_even_with_stale_peek(tmp_path: Path) -> None:
     try:
         _course(tmp_path, hub, "c5-gae")
         _publish_job(hub, "c5-gae", "gone-1")
-        store = hub._stores["c5-gae"]
+        store = hub.course_store("c5-gae")
+        assert store is not None
         assert store.cancel_unsettled_jobs(reason="test") == ["gone-1"]
         assert store.claimable_job_ids() == []  # 账本真闸：池子里没有它了
         assert store.claim("gone-1", worker_id="w1") is None  # 即时闸：硬领也被拒
-        assert "gone-1" not in store._leases, "被拒的认领不该留下租约"
+        assert store.lease_worker("gone-1") == "", "被拒的认领不该留下租约"
     finally:
         srv.shutdown()
 
@@ -1501,7 +1506,8 @@ def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
     try:
         _course(tmp_path, hub, "c5-gae")
         _publish_job(hub, "c5-gae", "rev-1")
-        st = hub._stores["c5-gae"]
+        st = hub.course_store("c5-gae")
+        assert st is not None
         assert st.cancel_unsettled_jobs(reason="test") == ["rev-1"]
         assert st.claim("rev-1", worker_id="w1") is None  # 未复活：净态仍是撤单
         # 逐字复刻生产写者的那一行（同一 jsonl、同一事件形状）
@@ -1515,7 +1521,7 @@ def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
         assert "rev-1" in st.claimable_job_ids()  # 池可见
         token = st.claim("rev-1", worker_id="w1")  # 即时闸对账 ⇒ 放行
         assert token is not None
-        assert "rev-1" not in st._cancelled
+        assert st.is_cancelled("rev-1") is False
     finally:
         srv.shutdown()
 
@@ -1697,7 +1703,9 @@ def test_discovered_course_inherits_hold_from_dispatch_record(tmp_path: Path) ->
     hub.discover(force=True)
     assert "c5-gae" in hub.courses()
     assert hub.hold_of("c5-gae")["worker_id"] == "cloud-1"
-    assert hub._stores["c5-gae"].hold_blocked() == "held:cloud-1"
+    store = hub.course_store("c5-gae")
+    assert store is not None
+    assert store.hold_blocked() == "held:cloud-1"
 
 
 # ───────────────── M1b（plan/worker-type-dispatch-model §3-M1b，2026-10-07）─────────────────

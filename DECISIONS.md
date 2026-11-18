@@ -7306,3 +7306,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `hub/queue_auth.py` 按鉴权四则同一条「单课程借 store」路径转发。`test_hub_queue_split.py`
   同步四处账本（门面闭集 34 → 35 / declared 38 → 39、DOMAINS、DOMAIN_METHODS 135 → 136、
   实现名 137 → 138）。全文 → `docs/nn/engineering.md` §163。
+- **2026-11-18（G5 第二十五批：课程 store 与即时闸的公开读面）**：
+  `tests/hub/test_auto_handoff.py` 私有断言 8 → **0**（G5 335 → **327**，106 文件）。
+  新增 `QueueScopeMixin.course_store(course)`（课程 → store 的只读查询，未知课程 None）与
+  `LedgerMixin.is_cancelled(job_id)`（进程内即时闸的当前成员，不按账本对账）；可领池断言
+  改用既有门面 `hub.claimable_job_ids(course)`，租约断言改用 `lease_worker(jid) == ""`。
+  守卫同步：`DOMAIN_METHODS` 136 → 137、实现名 138 → 139、store `MIXIN_METHODS` 71 → 72。
+  全文 → `docs/nn/engineering.md` §164。

@@ -8,7 +8,6 @@
   "tests/common/test_protocol_split.py": 1,
   "tests/common/test_stats.py": 2,
   "tests/hub/test_admin_cancel_job.py": 3,
-  "tests/hub/test_auto_handoff.py": 8,
   "tests/hub/test_dead_lease_sweep.py": 5,
   "tests/hub/test_hold.py": 2,
   "tests/hub/test_hub_discover_eviction.py": 3,

@@ -136,6 +136,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "active_worker_count",
             "courses",
             "course_of",
+            # 2026-11-18（G5）：课程 → store 的只读入口（诊断/用例不再伸手进 `_stores`）。
+            "course_store",
             "_store_of",
             # ★M4b：启动参数里的模式段标记（`--course a=offline` ⇒ WARN + 忽略）。
             "mode_ignored",
@@ -599,8 +601,8 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-23（plan/offline-deliver-full-and-gaps §3.4）：+1（`store_offline_metrics`）⇒ 129。
     # 2026-11-07（plan/dead-lease-sweep）：+1（`sweep_dead_leases`：周期清扫死租约）⇒ 130。
     # 2026-11-12：+1（`clear_bc_exclusive`：dashboard 的人工「解除 BC 独占」口）⇒ 135。
-    # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 136, len(DOMAIN_METHODS)
+    # 2026-11-18（G5）：+1（`auth_state`：D9 闭锁的只读快照）⇒ 136；再 +1（`course_store`）⇒ 137。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 137, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -610,7 +612,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 136, len(seen)
+    assert len(seen) == 137, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
