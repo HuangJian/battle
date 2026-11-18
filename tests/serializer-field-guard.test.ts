@@ -40,6 +40,8 @@ const EXCLUDED: Record<string, string> = {
   rules: 're-derived from snap.difficultyKey via RULES[]',
   difficulty: 're-derived from snap.difficultyKey via DIFFICULTIES[]',
   theme: 're-derived from snap.themeKey via THEMES[]',
+  fenceRevertAll:
+    '§2026-11-18-fence-ownership legacy-fence compat flag: restoreWorld derives it from the presence of snap.fenceCells (absent ⇒ old save ⇒ revert-all), so serializing it would be a second source of truth. reset by updateFence on expiry',
 
   // Transient presentation/event data — cleared on restore, rebuilt by
   // PresentationLayer (AGENTS §2.5 presentation-is-disposable).

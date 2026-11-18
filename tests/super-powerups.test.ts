@@ -11,6 +11,8 @@ import {
 } from '../src/constants'
 import type { Direction } from '../src/constants'
 import type { PowerUpType } from '../src/types'
+import { cloneWorld, restoreWorld } from '../src/snapshot/WorldSerializer'
+import type { WorldSnapshot } from '../src/snapshot/types'
 import {
   SUPER_POWERUP_TYPES,
   SUPER_POWERUP_DROP_CHANCE,
@@ -392,6 +394,95 @@ describe('Super power-up — 栅栏 (fence) 20s steel ring reverts to brick (DEC
       expect(world.tileMap.get(col, row)).toBe('steel')
     }
     expect(world.fenceExpireFrame).toBeDefined()
+  })
+
+  // ── §2026-11-18-fence-ownership 栅栏归属 ──────────────────────────────────────────────────────────
+  // 旧实现到期回滚「环上所有 steel」，把环本来就是**永久钢**的关卡
+  // （classic35-safe-base / z5-safe-base / g5-*）不可逆地降级成砖环。
+  // 后果见 reports/safe-base-fence-ring-20261118.md：it230@3 命 700 局里
+  // 15.6% 中招，环破局基地被毁 52.3%，全池胜率被吃掉 8.1pp。
+  it('does NOT downgrade steel the fence never laid (permanent steel ring level)', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    const updateFence = sim.systems.powerUps.updateFence.bind(sim.systems.powerUps)
+    // classic35-safe-base：关卡开局环 8 格就是永久钢
+    for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'steel')
+
+    apply('fence')
+    // fence 无处可铺（全是钢），归属表必须为空
+    expect(world.fenceCells.length).toBe(0)
+
+    world.frame = world.fenceExpireFrame!
+    updateFence()
+
+    for (const { col, row } of baseRingCells()) {
+      expect(world.tileMap.get(col, row)).toBe('steel')
+    }
+    expect(world.fenceExpireFrame).toBeUndefined()
+  })
+
+  it('reverts only the cells the fence laid when the ring mixes steel and empty', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    const updateFence = sim.systems.powerUps.updateFence.bind(sim.systems.powerUps)
+    const cells = baseRingCells()
+    const permanent = cells.slice(0, 4) // 顶边 4 格 = 关卡永久钢
+    for (const { col, row } of cells) world.tileMap.set(col, row, 'empty')
+    for (const { col, row } of permanent) world.tileMap.set(col, row, 'steel')
+
+    apply('fence')
+    expect(world.fenceCells.length).toBe(4) // 只登记自己补的那 4 格
+
+    world.frame = world.fenceExpireFrame!
+    updateFence()
+
+    for (const { col, row } of permanent) expect(world.tileMap.get(col, row)).toBe('steel')
+    for (const { col, row } of cells.slice(4)) expect(world.tileMap.get(col, row)).toBe('brick')
+  })
+
+  it('fence ownership survives a snapshot round-trip (rewind mid-fence)', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    const cells = baseRingCells()
+    const permanent = cells.slice(0, 4)
+    for (const { col, row } of cells) world.tileMap.set(col, row, 'empty')
+    for (const { col, row } of permanent) world.tileMap.set(col, row, 'steel')
+    apply('fence')
+
+    const snap = cloneWorld(world)
+    const restored = new World()
+    restoreWorld(restored, snap)
+    const rsim = new Simulation(restored, new Input())
+
+    expect(restored.fenceRevertAll).toBe(false)
+    expect(restored.fenceCells.slice().sort()).toEqual(world.fenceCells.slice().sort())
+
+    restored.frame = restored.fenceExpireFrame!
+    rsim.systems.powerUps.updateFence()
+
+    for (const { col, row } of permanent) expect(restored.tileMap.get(col, row)).toBe('steel')
+    for (const { col, row } of cells.slice(4)) expect(restored.tileMap.get(col, row)).toBe('brick')
+  })
+
+  it('legacy snapshot (no fenceCells) keeps the old revert-all semantics', () => {
+    const { world, sim } = buildSeededWorld(5)
+    const apply = sim.systems.powerUps.applyPowerUp.bind(sim.systems.powerUps)
+    for (const { col, row } of baseRingCells()) world.tileMap.set(col, row, 'steel')
+    apply('fence')
+
+    const snap = cloneWorld(world) as unknown as Record<string, unknown>
+    delete snap.fenceCells // 模拟 §2026-11-18-fence-ownership 之前写下的存档/replay
+    const restored = new World()
+    restoreWorld(restored, snap as unknown as WorldSnapshot)
+    const rsim = new Simulation(restored, new Input())
+
+    expect(restored.fenceRevertAll).toBe(true) // 无归属 ⇒ 只能按旧语义
+    restored.frame = restored.fenceExpireFrame!
+    rsim.systems.powerUps.updateFence()
+
+    for (const { col, row } of baseRingCells()) {
+      expect(restored.tileMap.get(col, row)).toBe('brick')
+    }
   })
 })
 

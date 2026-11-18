@@ -545,6 +545,9 @@ export class PowerUpSystem {
         }
         if (stillBlocked) continue
         w.tileMap.set(pos.col, pos.row, 'steel')
+        // §2026-11-18-fence-ownership 归属登记：只有本道具铺下去的格才允许到期回滚。
+        const idx = pos.row * GRID + pos.col
+        if (!w.fenceCells.includes(idx)) w.fenceCells.push(idx)
         placed++
       }
     }
@@ -624,19 +627,44 @@ export class PowerUpSystem {
   }
 
   /**
-   * Tick the fence power-up: when its steel ring timer expires, revert the ring
-   * cells that are still steel back to brick walls. Cells left as steel are the
-   * ones the fence created; original brick/empty/steel terrain is untouched.
+   * Tick the fence power-up: when its steel ring timer expires, revert **the
+   * cells this fence laid down** back to brick walls.
+   *
+   * §2026-11-18-fence-ownership —— 旧实现回滚「环上所有 steel」，注释还假设 *"cells left as steel are
+   * the ones the fence created"*。这个假设在 classic35（环是砖）成立，在
+   * `classic35-safe-base`（环是**永久钢**）不成立：`applyFencePowerUp` 只往
+   * empty/brick 上铺钢，永远不会碰已存在的钢，但到期却把永久钢一起改回砖——
+   * 且砖再也没有路径变回钢，**不可逆**。后果（`reports/safe-base-fence-ring-20261118.md`）：
+   * it230@3 命 700 局里 109 局（15.6%）环被降级，其中 52.3% 基地被打掉，
+   * 环完好的 591 局基地被毁 **0 次**、胜率 90.52% vs 全池 83.00%。
+   *
+   * 现在只回滚 `w.fenceCells`（本道具自己铺的格）：
+   *   - 仍是 steel ⇒ 改回 brick（回到 fence 之前的砖/空语义，与原行为一致）；
+   *   - 已被打掉（empty）⇒ 不动，不凭空砌回一堵墙。
+   * 老存档没有归属信息 ⇒ `fenceRevertAll` 走旧语义，保证旧 replay/save 复现不破。
    */
   updateFence(): void {
     const w = this.d.world
     if (w.fenceExpireFrame === undefined) return
     if (w.frame < w.fenceExpireFrame) return
-    for (const pos of baseRingPositions()) {
-      if (w.tileMap.get(pos.col, pos.row) === 'steel') {
-        w.tileMap.set(pos.col, pos.row, 'brick')
+    if (w.fenceRevertAll) {
+      // 旧快照兼容路径：没有归属表，只能按旧行为回滚环上所有 steel。
+      for (const pos of baseRingPositions()) {
+        if (w.tileMap.get(pos.col, pos.row) === 'steel') {
+          w.tileMap.set(pos.col, pos.row, 'brick')
+        }
+      }
+    } else {
+      for (const idx of w.fenceCells) {
+        const col = idx % GRID
+        const row = (idx - col) / GRID
+        if (w.tileMap.get(col, row) === 'steel') {
+          w.tileMap.set(col, row, 'brick')
+        }
       }
     }
+    w.fenceCells = []
+    w.fenceRevertAll = false
     w.fenceExpireFrame = undefined
   }
 

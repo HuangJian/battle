@@ -185,6 +185,9 @@ export interface WorldSnapshot {
   frenzyInterval?: number
   frenzyDir?: Direction
   fenceExpireFrame?: number // 栅栏道具: 钢墙到期帧（之后恢复为砖墙）
+  /** §2026-11-18-fence-ownership 栅栏归属: 该 fence 自己铺下的环格（`row * GRID + col`）。
+   *  缺省 = 旧快照（无归属信息），restoreWorld 会置 fenceRevertAll 走旧语义。 */
+  fenceCells?: number[]
 
   // ---- obs v3 sN4 / reward stuckTicks（dsf A4 同源）----
   stuckTicks: number // 连续停滞 tick 数（旧快照缺省 0，ms F3 兼容）

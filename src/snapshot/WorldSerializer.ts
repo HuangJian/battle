@@ -107,6 +107,7 @@ export function cloneWorld(world: World): WorldSnapshot {
     frenzyStock: world.frenzyStock,
     sacrificeStock: world.sacrificeStock,
     fenceExpireFrame: world.fenceExpireFrame,
+    fenceCells: world.fenceCells.slice(),
     // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：跨 tick 状态入快照。
     // playerHitEnemyThisTick 是 intra-tick 瞬态（快照边界恒 false），不入快照。
     stuckTicks: world.stuckTicks,
@@ -273,6 +274,16 @@ export function restoreWorld(world: World, snap: WorldSnapshot): void {
   world.frenzyStock = snap.frenzyStock ?? 0
   world.sacrificeStock = snap.sacrificeStock ?? 0
   world.fenceExpireFrame = snap.fenceExpireFrame
+  // §2026-11-18-fence-ownership 栅栏归属：新快照带 `fenceCells`（本道具自己铺的格）。旧快照没有该字段，
+  // 而到期回滚必须复刻当时的旧语义（回滚环上所有 steel），否则旧 replay/save 会在
+  // fence 到期那一拍出现地形分歧 ⇒ 用 `fenceRevertAll` 显式标记，别偷偷改变历史行为。
+  if (snap.fenceCells !== undefined) {
+    world.fenceCells = snap.fenceCells.slice()
+    world.fenceRevertAll = false
+  } else {
+    world.fenceCells = []
+    world.fenceRevertAll = snap.fenceExpireFrame !== undefined
+  }
   // obs v3 sN4：旧快照（无该字段）默认 0/null（ms F3 快照兼容）
   world.stuckTicks = snap.stuckTicks ?? 0
   world.prevStuckCell = snap.prevStuckCell ?? null
