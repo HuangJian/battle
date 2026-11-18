@@ -25,6 +25,28 @@
 
 ---
 
+## §165 G5 第二十六批：收工读数的两条入口（2026-11-18）
+
+`tests/trainer/test_loop_park.py` 私有断言 **6 → 1**（G5 **327 → 322**，106 文件不变）。
+
+- `TrainingGuardsGate._budget_hard_cut(loop, 239)` 是驱动入口 ⇒ 调用移出 assert。
+- 停腿原因两格（`_stop_cause` / `_stop_detail`）新增
+  `TrainingLifecycle.stop_reason() -> tuple[str, str]`：**只读、不清账**（`finish_course` 仍是
+  唯一消费者，读完立刻清空 —— 「读一次即清」的语义不放宽，只是不再让用例伸手进槽位）。
+  `finish_course` 内部也改用它，读法只有一处。
+- 在飞预采子进程新增 `TrainingLifecycle.collect_child()`：返回**活引用**（`Popen | None`），
+  只读契约；`finish_course` 的收敛分支同样改用它。
+- **留下 1 处**：`test_node_rollout_is_initialized_at_construction` 的
+  `loop._node_rollout is False` —— 它钉的是「组合根 `__init__` 必须给初值」这条**构造契约**
+  （事故：裸读 AttributeError ⇒ 该课每秒重启一次）。它不是执行面读数，公开它只会多一个
+  「为了用例而存在的查询」，故按「被测对象本体」保留。
+
+`test_loop_lifecycle_split.py` 的成员闭集 7 → 9（`stop_reason` / `collect_child`），stdlib 闭集
+加 `subprocess`（`collect_child()` 的返回类型 = `subprocess.Popen | None`；槽位本身仍声明
+`Any`，读取处用 `cast` —— 不给「新增一个 Any」开口子，G14 不动）。
+
+---
+
 ## §164 G5 第二十五批：课程 store 与即时闸的公开读面（2026-11-18）
 
 `tests/hub/test_auto_handoff.py` 私有断言 **8 → 0**（G5 **335 → 327**，107 → 106 文件）。

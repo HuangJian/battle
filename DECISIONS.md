@@ -7313,3 +7313,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   改用既有门面 `hub.claimable_job_ids(course)`，租约断言改用 `lease_worker(jid) == ""`。
   守卫同步：`DOMAIN_METHODS` 136 → 137、实现名 138 → 139、store `MIXIN_METHODS` 71 → 72。
   全文 → `docs/nn/engineering.md` §164。
+- **2026-11-18（G5 第二十六批：收工读数）**：`tests/trainer/test_loop_park.py` 6 → **1**
+  （G5 327 → **322**，106 文件）。新增 `TrainingLifecycle.stop_reason()`（只读、不清账）与
+  `collect_child()`（活引用），`finish_course` 内部同步改用；`_budget_hard_cut` 的调用移出
+  assert。留 1 处 `_node_rollout` 初值断言 —— 它是**构造契约**（AttributeError 事故），
+  不是执行面读数。lifecycle 拆分守卫成员闭集 7 → 9。全文 → `docs/nn/engineering.md` §165。

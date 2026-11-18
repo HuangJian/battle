@@ -54,12 +54,13 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import common.distribution
 from biz.course import resolve_rotate_seed
@@ -524,6 +525,18 @@ class TrainingLifecycle:
             # （调度器的退避是 `TaskResult.retry` 的 resume_at，不在任务体里睡 30s）。
             return self.round_failure(e, ctx.it, backoff=True)
 
+    def stop_reason(self) -> tuple[str, str]:
+        """下一次收官会用的停腿原因 `(cause, detail)` —— **只读，不清账**。
+
+        `finish_course` 把两格写进 `run_complete` 后立即清空（「读一次即清」：重启/重开不得
+        复用旧因）。诊断与用例要在任意时刻问「现在是什么原因」，走这条读面，不去碰槽位。
+        """
+        return str(self._stop_cause or ""), str(self._stop_detail or "")
+
+    def collect_child(self) -> subprocess.Popen | None:
+        """在飞预采子进程（无 ⇒ `None`）。活引用：调用方只读（`poll()` / 观测）。"""
+        return cast("subprocess.Popen | None", self._collect_child)
+
     def finish_course(self, it: int, *, drain: bool = True, block: bool = True) -> None:
         """**本课程**收官（一轮跑满）的四件事，不含停车循环（R2d 拆分）。
 
@@ -542,7 +555,7 @@ class TrainingLifecycle:
         total = args.iters if args.iters > 0 else "∞"
         # 在飞预采子进程（门判决等中途 break 时可能残留）：收敛掉，不留孤儿空烧。
         # 正常跑满时 spawn_next_collect 已因 it==iters 短路，child 恒为 None。
-        child = getattr(self, "_collect_child", None)
+        child = self.collect_child()
         if child is not None:
             try:
                 if child.poll() is None:
@@ -563,8 +576,7 @@ class TrainingLifecycle:
         #   ② 无限课程（`iters<=0`）从来不会因为"跑满"到这里 ⇒ 记 `unknown`（**绝不编原因**）。
         #   `reason` 尾部追加 `：<detail>`，保持旧词头与旧尾串逐字不变（手工 grep 与老读面
         #   不受影响：`正常收官（it238/500）` 仍是前缀）。
-        cause = str(getattr(self, "_stop_cause", "") or "")
-        detail = str(getattr(self, "_stop_detail", "") or "")
+        cause, detail = self.stop_reason()
         if not cause:
             cause, detail = ("iters", "跑满声明的轮数") if int(args.iters or 0) > 0 else ("unknown", "")
         self._stop_cause, self._stop_detail = "", ""  # 读一次即清（重启/重开不得复用旧因）
