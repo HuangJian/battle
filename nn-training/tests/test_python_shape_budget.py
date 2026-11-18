@@ -62,7 +62,6 @@ LONG_FUNCS_BASELINE = {
     "worker/bc_dispatch.py": 1,
     "worker/bc_eval.py": 1,
     "worker/cli.py": 1,
-    "worker/eval_replays_once.py": 1,
     "worker/eval_track.py": 1,
     "worker/iter_rollout.py": 1,
     "worker/ppo/engine.py": 1,

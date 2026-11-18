@@ -25,6 +25,26 @@
 
 ---
 
+## §179 长函数存量第一刀：replay 导出 202 → 157（2026-11-18）
+
+`python.refactor.md` 附录 B 的「真·下一批」第 1 项（37 个 >200 行函数）开刀：
+`worker/eval_replays_once.py::_export` **202 → 157 行**，长函数存量 **37 → 36**
+（`tests/test_python_shape_budget.py` 的 `LONG_FUNCS_BASELINE` 删除
+`worker/eval_replays_once.py` 条目）。
+
+两段纯搬移（逐字保留原有失败语义与返回码）：
+
+- `_load_games(args, manifest_path, log)`：读 `--games` 清单 → 合法 `(stage, seed)` 列表；
+  不可读 / 空表 ⇒ 写失败 manifest 并返回 `None`（调用方仍返回 2）。
+- `_read_replay_ledger(traj, it, wver)`：`eval_log.jsonl` 里该 `(iter, wver)` 的逐局行
+  （坏行跳过、缺失文件返回空表）——确定性对账的唯一基准。
+
+为什么先动这一支：它是最小的超标函数（202 行，只超 2 行），两个相位边界干净
+（输入解析 / 账本读取），拆完基线能真正删一行；`remote/worker.run_job`（439）、
+`trainer/stream.run_rollout_stream`（442）那类留给后续独立刀，不混在一批里。
+
+---
+
 ## §178 G5 第三十九批：三处既有状态的公开读数（2026-11-18）
 
 三个文件清零：`test_rollout_dispatch_resilience.py` / `test_prefetch_proc.py` /
