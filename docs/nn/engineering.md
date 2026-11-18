@@ -25,6 +25,48 @@
 
 ---
 
+## §148 G5 第五批：租约用例（2026-11-18）
+
+`tests/hub/test_hub_leases.py` 6 → **2**。这条用例守「claim 同时置 owner + 到期 + 心跳」，
+原判据是三个字典的**精确值**：
+
+| 旧判据 | 换成 | 为什么等价 |
+|---|---|---|
+| `store._job_dir(jid) / PAYLOAD_NAME` | `store.job_root / jid / PAYLOAD_NAME` | `job_root` 本来就是公开属性 |
+| `_lease_owners[jid] == token` | `result_token_ok(jid, token) is True` | 「这个 token 能代表持有人」正是 owner 映射的用途 |
+| `_leases[jid] == now + CLAIM_TTL_SEC` | `claimable_job_ids() == []` | 领取后立刻可领 ⇒ 等于没租约 |
+| `_last_heartbeat[jid] == now` | 紧跟的 `heartbeat(...) is True` 就是它 | 心跳无效恰恰是「只写 `_leases` 不写心跳」的旧 bug |
+
+留下 2 处：错 token 心跳之后 `_leases` 不变、`_last_heartbeat` 未被戳 —— 「**没**延长」这种
+否定断言没有公开读数能表达（公开面只说「现在能不能领」，说不出「截止时刻一动没动」）。
+
+读数：G5 **679 → 675**（126 文件）· G4 339 · G9 25 · G3 126。
+
+---
+
+## §147 度量脚本入库：从 `tmp/` 到 `tools/audit/`（2026-11-18）
+
+`python.refactor.md` 的每个读数（LOC / 函数形状 / `except` 分布 / 模块级容器 / env 直读 /
+近似克隆）都来自两份脚本，而它们一直躺在**被 gitignore 的** `tmp/` 里 —— 换句话说，
+「基线只许降」这个纪律背后的度量是**不可复跑**的：换台机器、清一次 tmp，就只剩文档里的数字。
+
+现在它们住在 `nn-training/tools/audit/`：
+
+* `py_audit.py` —— AST 度量，输出 `tmp/py-audit.json` + 终端摘要；
+* `py_clones.py` —— 归一化 12 行窗口的跨模块重复。
+
+两处都改成 `ROOT = Path(__file__).resolve().parents[2]`：从任何目录跑都指向 `nn-training/`，
+不再要求「cwd 必须是仓库根」。顺手清掉 `sys` 未用 import、一个空转的 `for a in args + [...]` 循环
+与两处未使用的循环变量（它们原本只是脚本，进仓库就得过 ruff）。
+
+**这里是「可复跑」，不是「会变红」**：把度量接成门禁是另一件事（每个读数都变成断言会
+把「看一眼」变成「过一遍 CI」），需要时单独开一刀并给出判据。
+
+读数（本次实跑）：965 文件 / 318798 行 / `except` 分布 `OSError` 402 · `Exception` 353 ·
+`ValueError` 179 · …；克隆 47 个重复窗口（最密 `worker/ppo/goal.py` ↔ `intent.py` 11 窗口）。
+
+---
+
 ## §146 G5 第四批：优先级/租约用例（2026-11-18）
 
 `tests/hub/test_priority_schedule.py` 9 → **3**。这批换的全是「已经存在但没人用」的读数：

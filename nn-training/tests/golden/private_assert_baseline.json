@@ -15,7 +15,7 @@
   "tests/hub/test_hub_discover_eviction.py": 3,
   "tests/hub/test_hub_entry_split.py": 2,
   "tests/hub/test_hub_job_store_split.py": 9,
-  "tests/hub/test_hub_leases.py": 6,
+  "tests/hub/test_hub_leases.py": 2,
   "tests/hub/test_hub_ledger_incremental.py": 1,
   "tests/hub/test_hub_queue_split.py": 11,
   "tests/hub/test_hub_routes_split.py": 5,

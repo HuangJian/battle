@@ -7190,3 +7190,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `job_root` / `stale_holder` / `lease_worker` / `courses` / `queue_state()["cursor"]` 全是既有公开面。
   留下的 3 处读的是**别的查询不覆盖的字段**（租约截止时刻、token→owner 映射、承诺痕迹归属人），
   不是同义改写 —— 口径仍是「只降耦合，不降被测对象」。全文 → `docs/nn/engineering.md` §146。
+- **2026-11-18（度量脚本入库：`tmp/` → `nn-training/tools/audit/`）**：`py_audit.py` / `py_clones.py`
+  从 gitignored 的 `tmp/` 移进仓库（`python.refactor.md` 附录 A 的明确要求）。理由：文档里每个
+  基线读数都靠它们，而它们**不可复跑**（换机器/清 tmp 就只剩数字）。路径改 `Path(__file__)`
+  推导，不依赖 cwd；顺手清 ruff（未用 import、空转循环、未使用循环变量）。
+  口径：这一步只保证「可复跑」，**没有**把它们接成门禁 —— 每个读数都变成断言会把「看一眼」
+  变成「跑一遍 CI」，需要时另开一刀并给判据。全文 → `docs/nn/engineering.md` §147。
+- **2026-11-18（G5 第五批）**：`tests/hub/test_hub_leases.py` 6 → **2**（G5 679 → **675**）。
+  `job_root` / `result_token_ok` / `claimable_job_ids()`（领取后立刻可领 = 没租约）/ 紧跟的
+  `heartbeat(...) is True` 覆盖了 owner、到期与心跳三件事。留下的 2 处是**否定断言**（错 token
+  心跳后截止时刻与心跳时刻「一动没动」）—— 公开面只说「现在能不能领」，说不出「一刻没动」。
+  全文 → `docs/nn/engineering.md` §148。

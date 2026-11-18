@@ -69,7 +69,7 @@ def _store(tmp_path: Path, clock: _Clock) -> _JobStore:
 
 def _publish(store: _JobStore, jid: str = "j" * 16) -> None:
     store.publish(jid, _mini_manifest(jid), b"payload-bytes")
-    assert ((store._job_dir(jid)) / PAYLOAD_NAME).exists()
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _events(store: _JobStore) -> list[dict]:
@@ -122,10 +122,12 @@ def test_claim_sets_owner_and_expiry_together(tmp_path: Path) -> None:
     _publish(store)
     token = store.claim("j" * 16)
     assert isinstance(token, str)
-    assert store._lease_owners.get("j" * 16) == token
-    assert store._leases.get("j" * 16) == clock.t + CLAIM_TTL_SEC
-    assert store._last_heartbeat.get("j" * 16) == clock.t
-    # 领取即有 owner → 心跳立即有效（旧 bug：只写 _leases 时恒 False）
+    # owner：token 对得上（公开口径是「这个 token 能代表持有人」，不是字典里有这行）
+    assert store.result_token_ok("j" * 16, token) is True
+    # expiry：领取后**立刻**还能让出去就是没租约 —— 公开面只回答「现在可不可领」不回答「到几点」
+    assert store.claimable_job_ids() == [], "领取后立即回池 ⇒ 根本没设租约"
+    # 心跳：领取即有 owner ⇒ 心跳立即有效（旧 bug：只写 `_leases` 时恒 False）。
+    # 这一条同时就是「`_last_heartbeat` 被戳了一记」的公开证据。
     assert store.heartbeat("j" * 16, token) is True
 
 
