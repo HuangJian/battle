@@ -7477,3 +7477,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   207 → **151** 行（拆出 `_tpu_parser`：整张 argv 表），长函数存量 **18 → 17**，
   形状基线删除该文件条目；notebook 脚本 cell 由 `sync_tpu_probe_nb.py` 重新生成。
   全文 → `docs/nn/engineering.md` §198。
+- **2026-11-18（长函数存量第二十一刀：空间探针 tools）**：`tools/spatial-probe.py::main`
+  232 → **152** 行（拆出 `_probe_linear_bufa` / `_probe_region16`），长函数存量
+  **17 → 16**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §199。

@@ -25,6 +25,18 @@
 
 ---
 
+## §199 长函数存量第二十一刀：空间探针（tools）232 → 152（2026-11-18）
+
+`tools/spatial-probe.py::main` **232 → 152 行**，长函数存量 **17 → 16**
+（`LONG_FUNCS_BASELINE` 删除 `tools/spatial-probe.py` 条目；`WIDE_FUNCS_BASELINE` 的
+2 条保留）。
+
+两刀纯搬移：
+- `_probe_linear_bufa(...)`：S0′-1 bufA 线性探针（含方向混淆矩阵与 pincer 诊断）。
+- `_probe_region16(bufa, is_train, is_test, seed)`：S0′-2b 原始区块 16 类线性分类。
+
+---
+
 ## §198 长函数存量第二十刀：TPU 探针（tools）207 → 151（2026-11-18）
 
 `tools/tpu-probe.py::main` **207 → 151 行**，长函数存量 **18 → 17**
