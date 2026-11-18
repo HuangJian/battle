@@ -25,6 +25,19 @@
 
 ---
 
+## §193 长函数存量第十五刀：多课程服务循环 275 → 186（2026-11-18）
+
+`trainer/loop_serve.py::serve` **275 → 186 行**，长函数存量 **23 → 22**
+（`LONG_FUNCS_BASELINE` 删除 `trainer/loop_serve.py` 条目；`WIDE_FUNCS_BASELINE` 的
+1 条保留）。
+
+三刀纯搬移：
+- `_discover_tick(...)`：发现模式每拍（收官重开 / 可复活跳过 / 新课程入队）。
+- `_publish_heartbeat(heartbeat, report, sup)`：心跳快照（主线程只读 `sup.courses`）。
+- `_finish_serve(...)`：收尾（课程状态快照 / 心跳收线 / 池释放 / 退出日志）。
+
+---
+
 ## §192 长函数存量第十四刀：BC 云端作业 263 → 184（2026-11-18）
 
 `remote/bc_job.py::_run_bc_job` **263 → 184 行**，长函数存量 **24 → 23**

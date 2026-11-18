@@ -889,6 +889,124 @@ def _revive_aborted(
     return True
 
 
+def _discover_tick(
+    sup,
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport,
+    done_hooked: set[str],
+    seen_marker: dict[str, int],
+    argv: list[str] | None,
+    traj_root: str,
+    step_mode: bool,
+) -> None:
+    """发现模式每拍（自 `serve` 原样搬出）：收官重开 / 重试可复活跳过 / 发现新课程。"""
+    # 收官后重开的课：只重置队列、复用原 runtime 与热引擎（2026-09-25）——
+    # 重走 `_open_courses` 会建一个 runner=None 的新 runtime，而池里还是旧引擎，
+    # `ensure_ready` 只对引擎对象不对 runner，之后每轮断言失败进无限 RETRY。
+    # 复活本来就是"指针续跑"，引擎本来就是热的。
+    for _c in reopened_parked(
+        {c: q.state for c, q in sup.courses.items()},
+        done_hooked,
+        seen_marker,
+        traj_root,
+    ):
+        try:
+            _revive_hygiene(runtimes.get(_c))  # ★ W3：先清判决态（评审 F1）
+            _old_rounds = sup.courses[_c].rounds_done if _c in sup.courses else 0
+            _enqueue(sup, runtimes, _c, step_mode=step_mode)
+            # 新队列的 rounds_done 从 0 起：把收官前的计数带过去（状态面不断档）。
+            sup.courses[_c].rounds_done += _old_rounds
+        except BaseException as _e:
+            log(f"[serve] 课程 {_c} 复活入队失败，本次仍停车：{type(_e).__name__}: {_e}")
+            continue
+        # ★ W4（评审 F3）：这条通道复活成功后从跳过记账里摘名——否则同一空转拍内
+        # `reopenable_skipped` 会对同一个 trigger 再复活一次（双入队/双日志）。
+        report.skipped.pop(_c, None)
+        report.skipped_at.pop(_c, None)
+        done_hooked.discard(_c)
+        _m = _marker_mtime_ns(traj_root, _c)
+        if _m is not None:
+            seen_marker[_c] = _m
+        log(f"[serve] 课程 {_c} 收官后被重开——重新入队，指针续跑（引擎热复用）")
+    # ★ 被跳过的课**不是终身黑名单**（2026-10-05 事故，plan §3.4）：判据
+    # （课程文件/开课标记/锁/账本）变了 ⇒ 重试；没变 ⇒ 不重试、不刷日志。
+    for _c in reopenable_skipped(report.skipped_at, traj_root):
+        if not course_enabled(course_traj(traj_root, _c)):
+            continue  # 用户已停课：不重开（再开课时标记变 ⇒ 下一拍自然复活）
+        if _c in runtimes:
+            _revive_aborted(
+                sup, runtimes, report, _c, step_mode=step_mode, traj_root=traj_root
+            )
+        else:
+            _revive_skipped(
+                sup,
+                runtimes,
+                report,
+                _c,
+                argv=argv,
+                traj_root=traj_root,
+                step_mode=step_mode,
+            )
+        _m = _marker_mtime_ns(traj_root, _c)
+        if _m is not None:
+            seen_marker[_c] = _m
+    fresh = [c for c in enabled_courses(traj_root) if c not in runtimes]
+    fresh = [c for c in fresh if c not in report.skipped]
+    if fresh:
+        log(f"[serve] 发现新课程：{', '.join(fresh)}")
+        _newly = _open_courses(fresh, runtimes, report, argv=argv, traj_root=traj_root)
+        for _c in _newly:
+            _m = _marker_mtime_ns(traj_root, _c)
+            if _m is not None:
+                seen_marker[_c] = _m
+        _enqueue_opened(sup, runtimes, report, _newly, step_mode=step_mode, traj_root=traj_root)
+
+
+def _publish_heartbeat(heartbeat, report: ServeReport, sup) -> None:
+    """心跳快照（自 `serve` 原样搬出）：这一拍的步数 + 每课状态（主线程只读）。"""
+    heartbeat.publish(
+        steps=report.steps,
+        waiting=sum(
+            1 for q in sup.courses.values() if str(getattr(q, "state", "")).startswith("WAIT")
+        ),
+        courses={
+            c: {
+                "state": q.state,
+                "rounds_done": q.rounds_done,
+                "next_it": q.next_it,
+            }
+            for c, q in sup.courses.items()
+        },
+    )
+
+
+def _finish_serve(
+    report: ServeReport, sup, pool, own_pool: bool, heartbeat
+) -> ServeReport:
+    """收尾（自 `serve` 原样搬出）：课程状态快照 → 心跳收线 → 池释放 → 退出日志。"""
+    report.courses = {
+        course: {
+            "state": q.state,
+            "next_it": q.next_it,
+            "rounds_done": q.rounds_done,
+            "current": q.current.kind if q.current else "",
+            "reason": q.reason,
+            "engine": "loaded" if pool.peek(course) is not None else "cold",
+        }
+        for course, q in sup.courses.items()
+    }
+    heartbeat.shutdown()
+    if own_pool:
+        pool.close()  # 自己建的池：退出前释放全部 torch 栈（注入的池归调用方管）
+    report.engines = pool.snapshot()  # 快照在 close 之后：`loaded` 为空、计数器保留
+    close_course_sinks()
+    log(
+        f"[serve] 退出（{report.stop_reason}）：步数={report.steps} 课程="
+        + ", ".join(f"{c}:{v['state']}/it{v['next_it']}" for c, v in report.courses.items())
+    )
+    return report
+
+
 def serve(
     courses: list[str] | None = None,
     *,
@@ -1053,88 +1171,19 @@ def serve(
             if report.stop_reason == "all_settled" and not discover:
                 break
             if discover:
-                # 收官后重开的课：只重置队列、复用原 runtime 与热引擎（2026-09-25）——
-                # 重走 `_open_courses` 会建一个 runner=None 的新 runtime，而池里还是旧引擎，
-                # `ensure_ready` 只对引擎对象不对 runner，之后每轮断言失败进无限 RETRY。
-                # 复活本来就是"指针续跑"，引擎本来就是热的。
-                for _c in reopened_parked(
-                    {c: q.state for c, q in sup.courses.items()},
+                _discover_tick(
+                    sup,
+                    runtimes,
+                    report,
                     done_hooked,
                     seen_marker,
+                    argv,
                     traj_root,
-                ):
-                    try:
-                        _revive_hygiene(runtimes.get(_c))  # ★ W3：先清判决态（评审 F1）
-                        _old_rounds = (
-                            sup.courses[_c].rounds_done if _c in sup.courses else 0
-                        )
-                        _enqueue(sup, runtimes, _c, step_mode=step_mode)
-                        # 新队列的 rounds_done 从 0 起：把收官前的计数带过去（状态面不断档）。
-                        sup.courses[_c].rounds_done += _old_rounds
-                    except BaseException as _e:
-                        log(f"[serve] 课程 {_c} 复活入队失败，本次仍停车：{type(_e).__name__}: {_e}")
-                        continue
-                    # ★ W4（评审 F3）：这条通道复活成功后从跳过记账里摘名——否则同一空转拍内
-                    # `reopenable_skipped` 会对同一个 trigger 再复活一次（双入队/双日志）。
-                    report.skipped.pop(_c, None)
-                    report.skipped_at.pop(_c, None)
-                    done_hooked.discard(_c)
-                    _m = _marker_mtime_ns(traj_root, _c)
-                    if _m is not None:
-                        seen_marker[_c] = _m
-                    log(f"[serve] 课程 {_c} 收官后被重开——重新入队，指针续跑（引擎热复用）")
-                # ★ 被跳过的课**不是终身黑名单**（2026-10-05 事故，plan §3.4）：判据
-                # （课程文件/开课标记/锁/账本）变了 ⇒ 重试；没变 ⇒ 不重试、不刷日志。
-                for _c in reopenable_skipped(report.skipped_at, traj_root):
-                    if not course_enabled(course_traj(traj_root, _c)):
-                        continue  # 用户已停课：不重开（再开课时标记变 ⇒ 下一拍自然复活）
-                    if _c in runtimes:
-                        _revive_aborted(
-                            sup, runtimes, report, _c, step_mode=step_mode, traj_root=traj_root
-                        )
-                    else:
-                        _revive_skipped(
-                            sup,
-                            runtimes,
-                            report,
-                            _c,
-                            argv=argv,
-                            traj_root=traj_root,
-                            step_mode=step_mode,
-                        )
-                    _m = _marker_mtime_ns(traj_root, _c)
-                    if _m is not None:
-                        seen_marker[_c] = _m
-                fresh = [c for c in enabled_courses(traj_root) if c not in runtimes]
-                fresh = [c for c in fresh if c not in report.skipped]
-                if fresh:
-                    log(f"[serve] 发现新课程：{', '.join(fresh)}")
-                    _newly = _open_courses(
-                        fresh, runtimes, report, argv=argv, traj_root=traj_root
-                    )
-                    for _c in _newly:
-                        _m = _marker_mtime_ns(traj_root, _c)
-                        if _m is not None:
-                            seen_marker[_c] = _m
-                    _enqueue_opened(
-                        sup, runtimes, report, _newly, step_mode=step_mode, traj_root=traj_root
-                    )
+                    step_mode,
+                )
             # 心跳快照：这一拍的步数 + 每课状态。在**主线程**里取（只读 sup.courses），写线程
             # 只做落盘 —— 就不会有「写线程遍历主线程正在改的 dict」那种竞态。
-            heartbeat.publish(
-                steps=report.steps,
-                waiting=sum(
-                    1 for q in sup.courses.values() if str(getattr(q, "state", "")).startswith("WAIT")
-                ),
-                courses={
-                    c: {
-                        "state": q.state,
-                        "rounds_done": q.rounds_done,
-                        "next_it": q.next_it,
-                    }
-                    for c, q in sup.courses.items()
-                },
-            )
+            _publish_heartbeat(heartbeat, report, sup)
             if max_seconds and (now() - t0) >= max_seconds:
                 report.stop_reason = "max_seconds"
                 break
@@ -1143,27 +1192,7 @@ def serve(
         report.stop_reason = "interrupted"
         log("[serve] 收到中断——干净退出（各课账本已落盘，指针续跑可用）")
 
-    report.courses = {
-        course: {
-            "state": q.state,
-            "next_it": q.next_it,
-            "rounds_done": q.rounds_done,
-            "current": q.current.kind if q.current else "",
-            "reason": q.reason,
-            "engine": "loaded" if pool.peek(course) is not None else "cold",
-        }
-        for course, q in sup.courses.items()
-    }
-    heartbeat.shutdown()
-    if own_pool:
-        pool.close()  # 自己建的池：退出前释放全部 torch 栈（注入的池归调用方管）
-    report.engines = pool.snapshot()  # 快照在 close 之后：`loaded` 为空、计数器保留
-    close_course_sinks()
-    log(
-        f"[serve] 退出（{report.stop_reason}）：步数={report.steps} 课程="
-        + ", ".join(f"{c}:{v['state']}/it{v['next_it']}" for c, v in report.courses.items())
-    )
-    return report
+    return _finish_serve(report, sup, pool, own_pool, heartbeat)
 
 
 def _planner(runtimes: dict[str, CourseRuntime]) -> Callable[[str, int, Any], list[Any]]:

@@ -7450,3 +7450,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_bc_train_namespace`），长函数存量 **24 → 23**，形状基线删除该文件的长函数条目
   （宽参数条目保留）；`test_bc_job_split` 的延迟 import 断言改锚 `_load_bc_trainer`。
   全文 → `docs/nn/engineering.md` §192。
+- **2026-11-18（长函数存量第十五刀：多课程服务循环）**：`trainer/loop_serve.py::serve`
+  275 → **186** 行（拆出 `_discover_tick` / `_publish_heartbeat` / `_finish_serve`），
+  长函数存量 **23 → 22**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §193。
