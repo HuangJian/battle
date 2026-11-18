@@ -7424,3 +7424,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   238 → **180** 行（拆出 `_scan_ledger` + `_LedgerTally` 读数对象，行过滤/去重口径
   逐字不变），长函数存量 **30 → 29**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §186。
+- **2026-11-18（长函数存量第九刀：动态节点回场）**：`trainer/queue_local.py::rescan_nodes`
+  242 → **184** 行（拆出 `_rescan_stale_code` / `_rescan_push_weights`，codeHash 门与
+  权重重握手口径逐字不变），长函数存量 **29 → 28**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §187。

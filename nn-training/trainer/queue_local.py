@@ -466,6 +466,94 @@ def run_local_rollout(
     return report
 
 
+def _rescan_stale_code(
+    nid: str, n: dict, ping: dict, code_hash: str, upgrade_branch, dirty_files
+) -> bool:
+    """rescan 的 codeHash 门（自 `rescan_nodes` 原样搬出）。
+
+    ping 与本地一致 ⇒ False（继续正常回场）；不一致 ⇒ 视情形请求 guarded 重启、
+    记日志，返回 True（本节点本 pass 不再回场）。日志文案与去重口径逐字保留。
+    """
+    if ping.get("codeHash") == code_hash:
+        return False
+    # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
+    # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
+    # 与 ping 门同口径，运维一眼看出差异在哪一侧。
+    common.distribution.forget_weights_node(nid)
+    local_short = code_hash[:8]
+    remote_short = str(ping.get("codeHash") or "")[:8] or "none"
+    if not upgrade_branch:
+        return True
+    ok, reason = common.distribution.request_upgrade_guarded(
+        nid,
+        n["url"],
+        n.get("authKey", ""),
+        upgrade_branch,
+        str(ping.get("codeHash")),
+        dirty=dirty_files,
+        expected_hash=code_hash,
+    )
+    if reason == "restart-requested":
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — requested "
+            f"upgrade to {upgrade_branch} (accepted)"
+        )
+    elif reason.startswith("dirty-tree"):
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — remote restart "
+            f"suppressed ({reason}: uncommitted training-tree changes)"
+        )
+    elif common.distribution.is_self_node(n["url"], nid):
+        log(
+            f"[dist] rescan {nid}: self node stale "
+            f"(local={local_short} remote={remote_short}) — restart-only "
+            f"({reason})"
+        )
+    elif reason != "dedup":
+        log(
+            f"[dist] rescan {nid}: codeHash stale "
+            f"(local={local_short} remote={remote_short}) — upgrade "
+            f"request failed ({reason})"
+        )
+    return True
+
+
+def _rescan_push_weights(
+    nid: str,
+    n: dict,
+    why: str,
+    iter_id: str,
+    wver: str,
+    weights_bytes,
+    task_timeout: float,
+    wkind: str,
+) -> str | None:
+    """为回场/新上线节点备好权重 → mode；POST 失败返回 None（调用方跳过本节点）。
+
+    自 `rescan_nodes` 原样搬出：新节点走进程内复用缓存；回场节点强制重握手（先
+    forget，post_weights 自带 cached 探针）。kind 与 rollout 腿一致的口径不变。
+    """
+    if why == "new" and common.distribution.weights_already_pushed(wver, nid, kind=wkind):
+        return "kept(cache)"
+    if why == "rearm":
+        common.distribution.forget_weights_node(nid)
+    try:
+        return common.distribution.post_weights(
+            n["url"],
+            n.get("authKey", ""),
+            iter_id,
+            wver,
+            weights_bytes,
+            timeout=min(300.0, max(60.0, task_timeout)),
+            kind=wkind,
+        )
+    except common.distribution.DistError as e:
+        log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
+        return None
+
+
 def rescan_nodes(
     cfg,
     code_hash,
@@ -597,48 +685,7 @@ def rescan_nodes(
                             f"不再补孵（节点持续失败，见日志根因）"
                         )
                     continue
-            if ping.get("codeHash") != code_hash:
-                # guarded 重启（跨代去重 + 脏树拒发，同 ping 门）；dedup 静默跳过
-                # （rescan 周期 ~15s，重复刷屏无信息量）。F2：日志带两侧 hash——
-                # 与 ping 门同口径，运维一眼看出差异在哪一侧。
-                common.distribution.forget_weights_node(nid)
-                local_short = code_hash[:8]
-                remote_short = str(ping.get("codeHash") or "")[:8] or "none"
-                if not upgrade_branch:
-                    continue
-                ok, reason = common.distribution.request_upgrade_guarded(
-                    nid,
-                    n["url"],
-                    n.get("authKey", ""),
-                    upgrade_branch,
-                    str(ping.get("codeHash")),
-                    dirty=dirty_files,
-                    expected_hash=code_hash,
-                )
-                if reason == "restart-requested":
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — requested "
-                        f"upgrade to {upgrade_branch} (accepted)"
-                    )
-                elif reason.startswith("dirty-tree"):
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — remote restart "
-                        f"suppressed ({reason}: uncommitted training-tree changes)"
-                    )
-                elif common.distribution.is_self_node(n["url"], nid):
-                    log(
-                        f"[dist] rescan {nid}: self node stale "
-                        f"(local={local_short} remote={remote_short}) — restart-only "
-                        f"({reason})"
-                    )
-                elif reason != "dedup":
-                    log(
-                        f"[dist] rescan {nid}: codeHash stale "
-                        f"(local={local_short} remote={remote_short}) — upgrade "
-                        f"request failed ({reason})"
-                    )
+            if _rescan_stale_code(nid, n, ping, code_hash, upgrade_branch, dirty_files):
                 continue
             remote_full = str(ping.get("bunVersion", "?"))
             # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
@@ -654,28 +701,11 @@ def rescan_nodes(
                 log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
-            # 权重：新上线节点走进程内复用缓存；**回场节点强制重握手**（它可能刚重启，
-            # 桶里那份也可能已被别的客户端挤掉；post_weights 自带 cached 探针，命中即
-            # 'kept'）。kind 必须与 rollout 腿一致——旧实现漏传，goal/intent 腿会把权重
-            # 发进 rollout 桶，任务全 409（与 A1 同一类陷阱）。
-            if why == "new" and common.distribution.weights_already_pushed(wver, nid, kind=wkind):
-                mode = "kept(cache)"
-            else:
-                if why == "rearm":
-                    common.distribution.forget_weights_node(nid)
-                try:
-                    mode = common.distribution.post_weights(
-                        n["url"],
-                        n.get("authKey", ""),
-                        iter_id,
-                        wver,
-                        weights_bytes,
-                        timeout=min(300.0, max(60.0, task_timeout)),
-                        kind=wkind,
-                    )
-                except common.distribution.DistError as e:
-                    log(f"[dist] rescan {nid}: weights POST failed ({e}) — skip this round")
-                    continue
+            mode = _rescan_push_weights(
+                nid, n, why, iter_id, wver, weights_bytes, task_timeout, wkind
+            )
+            if mode is None:
+                continue
             # nd 带 ping：漏带会让 stageJson 任务在回场/中途上线节点上被能力握手拒掉
             # （旧实现 bug，自定义关课程下等于把这些节点白孵）。
             nd = {

@@ -25,6 +25,20 @@
 
 ---
 
+## §187 长函数存量第九刀：动态节点回场 242 → 184（2026-11-18）
+
+`trainer/queue_local.py::rescan_nodes` **242 → 184 行**，长函数存量 **29 → 28**
+（`LONG_FUNCS_BASELINE` 删除 `trainer/queue_local.py` 条目；`WIDE_FUNCS_BASELINE` 的
+3 条保留——签名/邻近函数仍宽参）。
+
+两刀纯搬移：
+- `_rescan_stale_code(nid, n, ping, code_hash, upgrade_branch, dirty_files)`：codeHash 门
+  （一致 ⇒ False 继续回场；不一致 ⇒ guarded 重启 + 四类日志，返回 True 跳过本节点）。
+- `_rescan_push_weights(nid, n, why, iter_id, wver, weights_bytes, task_timeout, wkind)`：
+  新节点缓存命中 / 回场强制重握手；POST 失败返回 None（调用方 continue）。
+
+---
+
 ## §186 长函数存量第八刀：评估结算 238 → 180（2026-11-18）
 
 `worker/eval_track.py::settle_eval_summary` **238 → 180 行**，长函数存量 **30 → 29**
