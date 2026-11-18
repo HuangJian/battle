@@ -191,6 +191,50 @@ def test_backfeed_lands_delta_containers_into_full_files(
         srv.shutdown()
 
 
+def test_a_corrupt_opt_payload_costs_only_the_opt(tmp_path: Path) -> None:
+    """★ `_WIRE_DECODE_ERRORS` 的边界（P0-7 第十九批）：传输真坏的三种形态只丢 opt。
+
+    `decode_opt_tar` → `_unpack_wire` 的路面实测就是这三样：base64 坏字符（`binascii.Error`，
+    ValueError 子类）、截断的 gzip 流（`EOFError`，**不是** `BadZipFile`）、魔数对但 deflate 坏
+    （`zlib.error`，`gzip.decompress` 不把它包成 `BadZipFile`）。它们的共同后果只是「hub 侧续跑
+    Adam 归零」，权重是唯一不可再生的东西 ⇒ 该收的照收。
+
+    反向判据：把 `decode_opt_tar` 换成**我们的形状 bug**（`AttributeError`）⇒ 该穿到 handler
+    顶层变 500，而不是被读成「opt 损坏」收下。
+    """
+    base_url, _hub, srv = _boot(tmp_path)
+    try:
+        good = _weights_json({"stem.weight": [0.1]})
+        bad_forms = {
+            "base64 坏字符": "!!!not-base64!!!",
+            "截断的 gzip": base64.b64encode(b"\x1f\x8b" + b"garbage").decode("ascii"),
+            "坏 deflate": base64.b64encode(b"\x1f\x8b\x08\x00" + b"x" * 40).decode("ascii"),
+        }
+        for i, (why, bad) in enumerate(bad_forms.items(), start=2):
+            body = _round_body(i, good, run_id="run-opt")
+            body["opt_tar_b64"] = bad
+            st, res = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+            assert st == 200 and res.get("status") == "accepted", (why, st, res)
+            it_dir = tmp_path / COURSE / "remote-jobs" / "offline" / "run-opt" / f"it-{i:03d}"
+            assert (it_dir / "weights.json").is_file(), why
+            assert not (it_dir / "opt.tar").is_file(), why
+
+        # 反向：我们自己的形状 bug 不许被当成「传输坏了」
+        import hub.store_offline as store_offline_mod
+
+        def buggy(_b64: str) -> bytes:
+            raise AttributeError("wire decoder lost .decode")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(store_offline_mod, "decode_opt_tar", buggy)
+            body = _round_body(9, good, run_id="run-opt")
+            body["opt_tar_b64"] = encode_opt_tar(b"opt")
+            st2, _res2 = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+        assert st2 == 500, st2
+    finally:
+        srv.shutdown()
+
+
 def _container_pair() -> tuple[bytes, bytes]:
     """`(基准整份, delta 容器)` —— 闭环用的一对（容器头指向那份基准）。"""
     from remote.weights_delta import pack_weights_delta

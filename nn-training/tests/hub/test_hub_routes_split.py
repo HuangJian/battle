@@ -57,6 +57,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import hub.blob as blob_mod
 import hub.offline as offline_mod
 import hub.result as result_mod
@@ -550,6 +552,57 @@ def test_read_raw_body_leaves_the_bound_to_the_caller(tmp_path: Path) -> None:
     assert rec.calls_json == [
         ({"error": "read body failed: invalid literal for int() with base 10: 'oops'"}, 400)
     ], rec.calls_json
+
+
+class _DeadBody(BytesIO):
+    """`rfile` 的**坏形态**：`read()` 直接抛调用方指定的异常（对端断 / 我们自己的 bug）。
+
+    继承 `BytesIO` 而不是自写一个读面类：`_Probe.rfile` 的声明类型是 `BufferedIOBase`，
+    假读面只在**行为**上不同（不返回字节而是抛），用子类才能保持类型一致。
+    """
+
+    def __init__(self, err: BaseException) -> None:
+        super().__init__(b"")
+        self.err = err
+
+    def read(self, size: int | None = -1) -> bytes:
+        raise self.err
+
+
+def test_a_dead_body_is_a_400_but_our_own_bug_is_not(tmp_path: Path) -> None:
+    """★ `_BODY_READ_ERRORS` 的边界（P0-7 第十九批）：对端断 ⇒ 400；我们读体的姿势坏了 ⇒ 500。
+
+    两个助手（`_read_raw_body` / `_read_capped_body`）都把「解析 `Content-Length`」与
+    「`rfile.read`」包在同一条捕里，所以该集里必须有 `ValueError`（非整数头）与 `OSError`
+    （断连 / 半开 / 超时）。反过来：`rfile` 形状变了（`AttributeError`）是**我们的** bug，
+    把它记成「客户端发错了」就等于给了个假诊断 —— 它要浮到 `do_POST` 的顶层变 500。
+
+    从**公开入口**（`do_POST`）验，不是从助手验：这是客户端真的看得见的那两个应答。
+    """
+    hub = _FakeHub(_job(tmp_path, manifest=True))
+
+    def _record() -> _Probe:
+        rec = _Probe("/jobs/j1/epoch", hub=hub).auth(True)
+        rec.client_address = ("100.64.0.9", 12345)  # `log_message` 要知道对端
+        rec.headers["Content-Length"] = "8"
+        return rec
+
+    dead = _record()
+    dead.rfile = _DeadBody(OSError("peer reset by 100.64.0.9"))
+    dead.do_POST()
+    assert dead.calls_json == [
+        ({"error": "read body failed: peer reset by 100.64.0.9"}, 400)
+    ], dead.calls_json
+
+    dropped = _record()
+    dropped.rfile = _DeadBody(ConnectionResetError("tunnel dropped"))
+    dropped.do_POST()
+    assert dropped.calls_json == [({"error": "read body failed: tunnel dropped"}, 400)]
+
+    bug = _record()
+    bug.rfile = _DeadBody(AttributeError("rfile is no longer a buffered reader"))
+    bug.do_POST()
+    assert bug.calls_json == [({"error": "internal"}, 500)], bug.calls_json
 
 
 class _FakeHub:

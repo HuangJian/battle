@@ -7063,3 +7063,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   落到 cwd；`traj_root` 抛 `AttributeError` ⇒ 构造失败）—— 抬基线会把这批的诚实换掉。判据
   `tests/hub/test_offline_push_dispatch.py` +3。G4 379 → **371**（138 文件）、G9 25 不变。
   全文 → `docs/nn/engineering.md` §134。
+
+- **2026-11-18（P0-7 第十九批：四条 fail-open 读面的具名集）**：`hub/http_face.py` 4→2、
+  `hub/store_offline.py` 3→0、`worker/sibling_reuse.py` 3→1、`remote/bc_job.py` 4→2（G4 371→**362**）。
+  共同判据一句话：**这个变量坏了，能不能被读成那个结论？** ① 请求体读：`rfile` 形状变了
+  （`AttributeError`）原来答成 400「read body failed」= 把我们的 bug 说成客户端发错了 ⇒
+  `_BODY_READ_ERRORS = (OSError, ValueError)`（`ValueError` 必留：两个助手都把
+  `int(Content-Length)` 包在同一条 try 里）。② 回传 wire 解码：实测路面是
+  `binascii.Error`(ValueError) / `EOFError`（截断 gzip，**不是** `BadGzipFile`）/ `zlib.error`
+  （魔数对但 deflate 坏，`gzip.decompress` 不包装）/ `BadGzipFile`(OSError) ⇒ `_WIRE_DECODE_ERRORS`；
+  两条「观测面不拖垮回传」改成 `_LAND_ERRORS`（盘错 + 行形状错）。③ 兄弟课程：`load_course` 只捕
+  文件面 `(OSError, ValueError, KeyError)`；`episode_identity_fp(other)` 对**过了 pydantic 的**
+  `CourseConfig` 是全函数 ⇒ try 整段删（旧的 `except Exception: continue` 让训练照跑、复用默默死掉）。
+  ④ BC 两条回传腿：`_BC_HTTP_ERRORS = (OSError, RetryableError, ProtocolError)` = `_request` 的全部
+  路面 ⇒ `AttributeError` 不再被记成「网络不通」而白等两轮退避。留下的 5 处都就地注释了为什么只能宽
+  （handler 顶层分 400/500、torch 探针、调用方给的任意课程对象）。判据 4 处全部从公开入口/可观察结果
+  验，四组反向判据改回宽捕各实测红。全文 → `docs/nn/engineering.md` §135。

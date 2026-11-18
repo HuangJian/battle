@@ -141,6 +141,13 @@ _log = tag_logger("hub-server", lambda: time)
 #: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
 CF_SOURCE_HEADER = "CF-Connecting-IP"
 
+#: 「读请求体失败」的真失败形态（`_read_raw_body` / `_read_capped_body` 的路面）：
+#: 对端断/半开/半截 → `OSError`（`ConnectionResetError` / `TimeoutError` / `socket.timeout`
+#: 都是它）；`Content-Length` 不是整数 → `int()` 的 `ValueError`（两个助手都把解析包在
+#: 同一个 try 里，所以它也是 400）。**编程错不落这个集**：`AttributeError`（`rfile` 形状变了 /
+#: 头部对象被换掉）与 `TypeError` 是我们的 bug，该在日志里炸成 500 而不是声称「客户端发错了」。
+_BODY_READ_ERRORS = (OSError, ValueError)
+
 #: 同名 worker「异来源」告警的节流（秒）——两台机器交替轮询时避免每请求一行
 #: （plan/worker-name-readable G7；先例 = 本模块 `_blocked_logged` 的每分钟一条）。
 WORKER_SOURCE_WARN_THROTTLE_SEC = 60.0
@@ -799,7 +806,7 @@ class HubHandler(
         """
         try:
             return self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        except Exception as e:
+        except _BODY_READ_ERRORS as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
 
@@ -896,7 +903,7 @@ class HubHandler(
             return None
         try:
             raw = self.rfile.read(n)
-        except Exception as e:
+        except _BODY_READ_ERRORS as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
         if len(raw) != n:

@@ -50,6 +50,13 @@ from remote.job_fs import _persist_result
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("worker", lambda: time)
 
+#: 「这一发 BC 传输没成」的真失败形态 —— `_request` 的路面就这三类：urllib 的
+#: `URLError`/`HTTPError` 与 socket 面都是 `OSError`；体半途断/首块太慢是 `RetryableError`；
+#: 响应体不像话是 `ProtocolError`（ValueError 子类，重试耗尽后上层拿到的又是
+#: `RetryableError`）。**编程错不在集里**：`AttributeError`/`TypeError` 是读响应姿势坏了，
+#: 不该被记成「网络不通」→ 白重试三轮再把有一半信息的失败当成瞬时失败。
+_BC_HTTP_ERRORS = (OSError, RetryableError, ProtocolError)
+
 __all__ = [
     "BC_EPOCH_BACKLOG_MAX",
     "PPO_BACKENDS",
@@ -83,7 +90,7 @@ def _bc_fetch_resume(
     for attempt in range(1, 4):
         try:
             status, body = _request(base_url, token, f"/jobs/{jid}/resume", timeout=30.0)
-        except Exception as e:
+        except _BC_HTTP_ERRORS as e:
             status, body = None, repr(e).encode()
         if status == 200:
             try:
@@ -178,7 +185,7 @@ def _bc_post_epoch(
                     **({"X-Lease-Token": lease_token} if lease_token else {}),
                 },
             )
-        except Exception as e:
+        except _BC_HTTP_ERRORS as e:
             status, resp = None, repr(e).encode()
         if status in (200, 201):
             return True

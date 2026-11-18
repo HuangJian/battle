@@ -91,20 +91,21 @@ def sibling_courses(course: Any) -> list[tuple[str, Path]]:
 
     try:
         want = episode_identity_fp(course)
-    except Exception:
+    except Exception:  # 复用是**可选优化**：指纹算不出 ⇒ 关掉复用，不能拖死训练主循环
         return []
     out: list[tuple[str, Path]] = []
     for f in sorted(CURRICULA_DIR.glob("*.jsonc")):
         try:
             other = load_course(f)
-        except Exception:
+        except (OSError, ValueError, KeyError):  # 坏课/缺 level/盘错 ⇒ 跳这一个文件
             continue
         if other.name == course.name or other.mode != course.mode:
             continue
-        try:
-            if episode_identity_fp(other) != want:
-                continue
-        except Exception:
+        # 这一份已经过了 pydantic 校验（上面 load_course）：`episode_identity_fp` 对
+        # `CourseConfig` 是全函数（`_identity_payload` 两种 `stages` 形状都吃）⇒ 它再抛就不是
+        # 「坏课」而是我们的形状假设坏了。旧代码在这里 `except Exception: continue` 把这种 bug
+        # 读成「不重复用」，训练照跑但复用默默死了。
+        if episode_identity_fp(other) != want:
             continue
         root = _resolve_dir(str(other.traj))
         if root is None:

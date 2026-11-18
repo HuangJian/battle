@@ -25,6 +25,38 @@
 
 ---
 
+## §135 P0-7 第十九批：四条 fail-open 读面捕什么（2026-11-18）
+
+这一批的共同形状：**失败权本来就在对方手里**（客户端 / 传输 / 课文件 / hub 网络），而我们自己的
+形状假设也住在同一条 `except` 里。于是收窄的问法就一句：**这个变量坏了能不能被读成那个结论？**
+
+| 位置 | 宽捕会读成的假结论 | 修法 |
+|---|---|---|
+| `hub/http_face._read_raw_body` / `_read_capped_body` | `rfile` 形状变了（`AttributeError`）⇒ 400「read body failed」= 告诉客户端「你发错了」 | `_BODY_READ_ERRORS = (OSError, ValueError)`（`ValueError` 要留着：两个助手都把 `int(Content-Length)` 包在同一条 try 里） |
+| `hub/store_offline` 的 `decode_opt_tar` | 用 *任何* 异常都当「opt 传坏了」⇒ 收下这轮、只丢 opt。字节坏了确实该这样，我们的 bug 不该 | `_WIRE_DECODE_ERRORS`：`binascii.Error`(ValueError) / `EOFError`（截断 gzip）/ `zlib.error`（魔数对但 deflate 坏）/ `BadGzipFile`(OSError) |
+| `hub/store_offline._land_round_metrics` / `_land_offline_round_extras` | 读行/落盘的姿势坏了 ⇒ 一行「度量落位失败（忽略）」，现场像那条链本来就慢 | `_LAND_ERRORS`（OSError / ValueError / TypeError / KeyError = 盘错 + 行形状错） |
+| `worker/sibling_reuse.sibling_courses` | 已过 pydantic 的课程指纹抛 `AttributeError` ⇒ `continue` = 「不重复用」（训练照跑、复用默默死） | `load_course` 只捕文件面 `(OSError, ValueError, KeyError)`；`episode_identity_fp(other)` 的 try 整段删（对 `CourseConfig` 它是全函数） |
+| `remote/bc_job._bc_fetch_resume` / `_bc_post_epoch` | 读响应的姿势坏了 ⇒ 「网络不通」⇒ 白等两轮退避 + 一半信息的 WARN | `_BC_HTTP_ERRORS = (OSError, RetryableError, ProtocolError)` = `_request` 的全部路面 |
+
+留着的 5 处（都留了**就地注释**说明为什么它只能宽）：`do_GET` / `do_POST` 的 handler 顶层（单请求
+不许弄死服务线程，且分 400/500 两层）、`paddle_cuda_available` / `normalize_ppo_device`（torch 探针，
+C++ 侧异常族由对端决定）、`sibling_courses` 的 `want = episode_identity_fp(course)`（入参是**调用方**
+给的任意对象，而复用是可选优化 ⇒ 算不出就回 `[]`）。
+
+判据（全部从**公开入口/可观察结果**验，不戳私有）：
+
+1. `do_POST` + 坏 `rfile`：`OSError` ⇒ 400（带原因）；`AttributeError` ⇒ 500 `internal`；
+2. 坏 opt 的三种真形态（坏 base64 / 截断 gzip / 坏 deflate）⇒ `accepted` 且 `it-NNN/` 里没有 `opt.tar`；
+   把解码器换成 `AttributeError` ⇒ 500；
+3. 坏课文件（jsonc 坏）⇒ 只跳过它；兄弟课指纹抛 `AttributeError` ⇒ 穿出去；
+4. BC 腿：`OSError` / `ProtocolError` ⇒ 3 拍后 `RetryableError`；`AttributeError` ⇒ **只调 1 次**；
+   `epoch` 腿 ⇒ `False` + 一行「回传失败」、`TypeError` ⇒ 穿出。
+
+读数：G4 **371 → 362**（`http_face` 4→2、`store_offline` 3→0、`sibling_reuse` 3→1、`bc_job` 4→2；
+137 文件）· G9 25 不变 · G5 不变。四组反向判据都把实现改回宽捕实测红过（G4 门禁本身也会拦回退）。
+
+---
+
 ## §134 P0-7 第十八批：`hub/offline_push` 的八个「读不到就编」（2026-11-18）
 
 派发器的运气**不应该**决定于一本书读不读得出来，所以这些位置必须捕。问题在于宽捕把

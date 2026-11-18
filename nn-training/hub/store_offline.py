@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
@@ -60,6 +61,19 @@ from remote.artifacts import (
 #: `log_line` 统一加，消息里不再写前缀。`clock` 传取值函数，
 #: `monkeypatch.setattr(store_offline, "time", 假钟)` 仍拦得到（`tag_logger` 的既有约定）。
 _log = tag_logger("hub-server", lambda: time)
+
+#: 「线上传回来的那份字节解不开」的真失败形态（`decode_opt_tar` → `_unpack_wire` 的路面）：
+#: base64 坏字符 → `binascii.Error`（ValueError 子类）；gzip 流截断 → `EOFError`；
+#: 魔数对但 deflate 坏 → `zlib.error`（实测**不会**被包成 `BadGzipFile`）；其余 gzip 结构错
+#: → `BadGzipFile`（OSError 子类）。编程错（`AttributeError` / `TypeError`）**不在**集里：
+#: 字节解不开是传输的锅（丢 opt 就够，见调用点），读错字段是我们自己的锅（要穿出去）。
+_WIRE_DECODE_ERRORS = (OSError, ValueError, EOFError, zlib.error)
+
+#: 「补传里那几样**观测面**落不下去」的真失败形态：盘错（OSError）、行形状错
+#: （ValueError / TypeError / KeyError）。这些落位是尽力而为（`_land_*` 全都不许拖垮回传），
+#: 但编程错（`AttributeError`）不落这个集 —— 它意味着我们读行的姿势坏了，不该被记成
+#: 「这一轮度量落位失败」而静默过去。
+_LAND_ERRORS = (OSError, ValueError, TypeError, KeyError)
 
 
 #: 仓库根 —— 课程配置与权重归档的相对路径基准。**唯一实现在 `common/paths.py`**（2026-11-16 去重）：
@@ -354,7 +368,7 @@ class OfflineRoundsMixin:
         if isinstance(opt_raw, str) and opt_raw:
             try:
                 opt = decode_opt_tar(opt_raw)
-            except Exception:  # opt 损坏不必拒整轮：代价只是「hub 侧续跑 Adam 归零」
+            except _WIRE_DECODE_ERRORS:  # opt 损坏不必拒整轮：代价只是「hub 侧续跑 Adam 归零」
                 opt = b""
         # ★ 2026-10-15（用户口径）：回传的可能是 **delta 容器** ⇒ **在 hub 进程里就地重建为整份**
         #   ——此后 hub 树里的一切（回传树/镜像/归档/活动指针/锚点）都是整份，派发侧永远只发
@@ -660,7 +674,7 @@ class OfflineRoundsMixin:
                 )
             if ev is not None:
                 self._append_ledger(ev)
-        except Exception as e:  # 观测面不拖垮回传
+        except _LAND_ERRORS as e:  # 观测面不拖垮回传（盘错 / 行形状错）
             _log(
                 f"补传 it{it} 的课程侧度量落位失败（忽略）：{type(e).__name__}: {e}",
             )
@@ -875,7 +889,7 @@ class OfflineRoundsMixin:
                     if dst
                     else f"补传 it{it} 归档未成（见上一条 WARN）",
                 )
-        except Exception as e:  # 归档不该拖垮回传（含 rl 包不在的截断快照）
+        except _LAND_ERRORS as e:  # 归档不该拖垮回传（含 rl 包不在的截断快照）
             _log(
                 f"补传 it{it} 归档不可用（忽略）：{type(e).__name__}: {e}",
             )
