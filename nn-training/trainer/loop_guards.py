@@ -25,6 +25,7 @@ S4 第二十三刀把 13 个成员按**判据同源**切成四簇（trip / leg /
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import common.distribution
@@ -35,6 +36,15 @@ from worker.loop_guards_gate import TrainingGuardsGate
 from worker.loop_guards_leg import TrainingGuardsLeg
 from worker.loop_guards_sweep import TrainingGuardsSweep
 from worker.loop_guards_trip import TrainingGuardsTrip
+
+
+@dataclass(frozen=True)
+class GuardStateView:
+    """门禁判决的**执行面**读数（判据词表与规则本体不在这里）。"""
+
+    cloud_halted: bool
+    leg_abort: bool
+    soft_remediate_count: int
 
 
 class TrainingGuards(
@@ -68,6 +78,14 @@ class TrainingGuards(
     _cloud_halted: bool
     #: R2a 账本视图（`loop_lifecycle._setup_common` 建立；缺失时各使用点退化，不阻断训练）。
     _ledger: Any
+
+    def guard_state(self) -> GuardStateView:
+        """这一层的公开读数（用例 / 诊断共用；不改变任何判决与停机语义）。"""
+        return GuardStateView(
+            cloud_halted=bool(getattr(self, "_cloud_halted", False)),
+            leg_abort=bool(getattr(self, "_leg_abort", False)),
+            soft_remediate_count=int(getattr(self, "_soft_remediate_count", 0) or 0),
+        )
 
     def _ledger_apply(self, event: dict | None) -> None:
         """把刚写入账本的事件并入本进程的 `LedgerView`（R2a，2026-09-18）。

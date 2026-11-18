@@ -101,7 +101,9 @@ MEMBERS = tuple(HOMES)
 
 #: 留根四人 + 三个判决词表常量（常量是**类属性**，不是模块级名——`trainer.loop_lifecycle` 与
 #: `test_train_ledger.py` 按 `TrainingGuards.NO_CLOUD_HALT_KINDS` 取，故必须仍挂在根上）。
-STAYS = ("_ledger_apply", "_is_soft_verdict", "_gate_halt_mode", "_sync_cloud_halt")
+#: 2026-11-18（G5）：`guard_state` 是根的**公开读数**（门禁执行面快照），不是第五个 sink ——
+#: 它与四个 sink 同住根是因为它读的就是根这一层的 `_cloud_halted` / `_leg_abort` / 软计数。
+STAYS = ("_ledger_apply", "_is_soft_verdict", "_gate_halt_mode", "_sync_cloud_halt", "guard_state")
 ROOT_CONSTS = ("CLOUD_HALT_VERDICTS", "NO_CLOUD_HALT_KINDS", "GATE_HALT_MODES")
 
 #: 一族五个文件 → 类名。
@@ -419,14 +421,14 @@ def test_members_live_in_exactly_their_new_home() -> None:
 
 
 def test_root_keeps_exactly_the_shared_sinks() -> None:
-    """组合根的成员闭集**恰好**是四个共享 sink（多一个 = 有人顺手塞了新方法）。"""
+    """组合根的成员闭集**恰好**是四个共享 sink + 公开读数（多一个 = 有人顺手塞了新方法）。"""
     got = sorted(_methods(_home("loop_guards.py"), "TrainingGuards"))
     assert got == sorted(STAYS), f"组合根多/少了方法：{got}"
 
 
 def test_helpers_moved_with_their_only_consumer() -> None:
-    """三个模块级助手跟着唯一使用者走；组合根顶层只剩类本身。"""
-    assert _top_level_names(_home("loop_guards.py")) == {"TrainingGuards"}
+    """三个模块级助手跟着唯一使用者走；组合根顶层只剩类本身（+ 它的读数视图）。"""
+    assert _top_level_names(_home("loop_guards.py")) == {"GuardStateView", "TrainingGuards"}
     for helper, fname in HELPERS.items():
         assert helper in _top_level_names(_home(fname)), f"{helper} 应住 {fname}"
         for other in FAMILY:

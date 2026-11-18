@@ -86,7 +86,6 @@
   "tests/trainer/test_loop_eval_split.py": 12,
   "tests/trainer/test_loop_export_split.py": 6,
   "tests/trainer/test_loop_gate_nopark.py": 5,
-  "tests/trainer/test_loop_gate_soft_remediate.py": 19,
   "tests/trainer/test_loop_guards_split.py": 9,
   "tests/trainer/test_loop_lifecycle_split.py": 1,
   "tests/trainer/test_loop_park.py": 6,

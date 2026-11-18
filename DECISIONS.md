@@ -7242,3 +7242,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `fallback_logged`；判据本体没动。测试替身的 `_halt_calls` 改成公开 `halt_calls`（替身自己的
   记录表，不是生产状态）；`assert leg._kickstart_burn(...)` 这类驱动被测入口的私有方法调用
   移出 assert 表达式。守卫的 stdlib 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §153。
+- **2026-11-18（G5 第十一批：门禁执行面的读数）**：`tests/trainer/test_loop_gate_soft_remediate.py`
+  私有断言 19 → **0**（G5 526 → **507**，122 文件）。新增 `GuardStateView`（frozen dataclass）+
+  `TrainingGuards.guard_state()`：`cloud_halted` / `leg_abort` / `soft_remediate_count`。
+  `_apply_verdict` / `_gate_halt_mode` 这类驱动被测入口的私有方法调用移出 assert 表达式。
+  守卫三处同步：`STAYS` + `guard_state`、顶层名字闭集 + `GuardStateView`、stdlib + `dataclasses`。
+  全文 → `docs/nn/engineering.md` §154。

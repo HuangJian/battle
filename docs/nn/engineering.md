@@ -25,6 +25,24 @@
 
 ---
 
+## §154 G5 第十一批：门禁执行面的读数 `guard_state()`（2026-11-18）
+
+`tests/trainer/test_loop_gate_soft_remediate.py` 私有断言 **19 → 0**（G5 **526 → 507**，123 → 122 文件）。
+
+这条用例守的是「G4 plateau 的 REMEDIATE 不得下发 cloud halt」与后续三条（硬门照停 /
+软计数阈值 / notify 平台开关）。断言里的私有量分两类：**执行面状态**
+（`_cloud_halted` / `_leg_abort` / `_soft_remediate_count`）与**驱动被测入口**
+（`TrainingGuards._apply_verdict` / `_gate_halt_mode`）。前者新增
+`GuardStateView`（frozen dataclass）+ `TrainingGuards.guard_state()`：
+`cloud_halted` / `leg_abort` / `soft_remediate_count`；后者移出 assert 表达式
+（`applied = …; assert applied is False`），口径同 §149 / §153。
+
+守卫 `test_loop_guards_split.py` 三处同步：`STAYS` + `guard_state`（它读的就是组合根这一层，
+与四个共享 sink 同住根，不是第五个 sink）、顶层名字闭集 + `GuardStateView`、stdlib 闭集
++ `dataclasses`（上一批已加）。
+
+---
+
 ## §153 G5 第十批：干烧熔断执行面的读数 `burn_view()`（2026-11-18）
 
 `tests/worker/test_kickstart_burn_guard.py` 私有断言 **20 → 0**（G5 **546 → 526**，124 → 123 文件）。
