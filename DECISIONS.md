@@ -7371,3 +7371,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `lease_worker()` / `scheduling_facts()`；纯判据调用移出 assert。store 拆分守卫
   `MIXIN_METHODS` 74 → 75。`_block_dict` 两处身份契约刻意保留。全文 →
   `docs/nn/engineering.md` §174。
+- **2026-11-18（G5 第三十六批：心跳读数、哨兵快照与十处纯判据）**：12 个文件各 2 → 0
+  （G5 219 → **195**，72 文件）。新增 `LeaseMixin.heartbeat_at()`（错 token 心跳不许动
+  心跳锚）与 `HubHandler.pulse_readout()`（哨兵只读快照；`pulse_events` 会推进状态）；
+  其余为纯判据调用移出 assert。store 守卫 `MIXIN_METHODS` 75 → 76。转发名 / 身份 /
+  兼容参数 / 归属缓存本体等 6 个文件刻意保留。全文 → `docs/nn/engineering.md` §175。

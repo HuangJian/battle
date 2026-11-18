@@ -862,6 +862,15 @@ class LeaseMixin:
         with self._lock:
             return self._leases.get(job_id)
 
+    def heartbeat_at(self, job_id: str) -> float | None:
+        """最近一次**成功**心跳的时刻（本 store 时钟；没有 → None）。纯读、不回收。
+
+        与 `lease_expiry` 的区别：那是「这行租约还在不在」，这是「持有人在不在」——
+        错 token 的心跳两者都不该动。
+        """
+        with self._lock:
+            return self._last_heartbeat.get(job_id)
+
     def lease_worker(self, job_id: str) -> str:
         """当前租约持有人身份（无 → 空串）；同时在租约为死（过期 ∨ 孤儿）时走**同一个**
         回收入口（`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`

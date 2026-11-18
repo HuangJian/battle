@@ -130,7 +130,8 @@ def test_to_cpu_state_returns_object_when_no_tensor(monkeypatch) -> None:
     monkeypatch.setattr(common, "is_xla", lambda _dev: True)
     monkeypatch.setattr(common, "_xla_fetch_cat", lambda ts: pytest.fail("不该被调用"))
     obj = {"a": 1, "b": [2, 3]}
-    assert common._to_cpu_state(obj) == obj
+    same = common._to_cpu_state(obj)
+    assert same == obj
 
 
 def test_host_module_batches_once_and_keeps_values(fake_xla) -> None:
@@ -183,7 +184,8 @@ def test_log_if_slow_only_when_over_threshold(monkeypatch) -> None:
     logs: list[str] = []
     monkeypatch.setattr(common.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(common, "log", logs.append)
-    assert common._log_if_slow("快", 100.0, 42) < 5.0
+    fast = common._log_if_slow("快", 100.0, 42)
+    assert fast < 5.0
     assert logs == [], "没超阈值不许打"
     clock["t"] = 140.0
     common._log_if_slow("慢", 100.0, 126)

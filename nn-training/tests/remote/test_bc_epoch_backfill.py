@@ -63,7 +63,10 @@ def test_backlog_replay_posts_every_missing_epoch_then_clears(monkeypatch) -> No
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
     pending = [_body(5), _body(6)]
-    assert bc_job._bc_backlog_replay("http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None) == 0
+    left = bc_job._bc_backlog_replay(
+        "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None
+    )
+    assert left == 0
     assert pending == []
     assert [b["epoch"] for b in posted] == [5, 6]
 
@@ -79,7 +82,10 @@ def test_backlog_replay_keeps_rows_when_tunnel_still_down(monkeypatch) -> None:
 
     monkeypatch.setattr(bc_job, "_request", fake_request)
     pending = [_body(5), _body(6)]
-    assert bc_job._bc_backlog_replay("http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None) == 2
+    left = bc_job._bc_backlog_replay(
+        "http://hub", "t", "j" * 16, pending, "tok", log=lambda _m: None
+    )
+    assert left == 2
     assert [b["epoch"] for b in pending] == [5, 6]
     # 第一条就失败 ⇒ 不接着捶剩下的（隧道断着时多打两次只是拖慢训练）
     assert calls == [f"/jobs/{'j' * 16}/epoch"] * 2

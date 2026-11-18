@@ -180,7 +180,9 @@ def test_do_get_touches_the_pulse() -> None:
     h = _handler("kaggle-c")
     for _ in range(WORKER_PULSE_MIN_TOUCHES):
         HubHandler.do_GET(h)
-    assert _PingHandler._worker_pulse.readout()["kaggle-c"]["touches"] == WORKER_PULSE_MIN_TOUCHES
+    touches = _PingHandler.pulse_readout()["kaggle-c"]["touches"]
+    assert touches == WORKER_PULSE_MIN_TOUCHES
 
     HubHandler.do_GET(_handler(""))
-    assert list(_PingHandler._worker_pulse.readout()) == ["kaggle-c"]  # 无身份不打点
+    seen = list(_PingHandler.pulse_readout())
+    assert seen == ["kaggle-c"]  # 无身份不打点

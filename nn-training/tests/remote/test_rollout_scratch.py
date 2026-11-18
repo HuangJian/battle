@@ -748,8 +748,10 @@ def test_clean_partial_shape_is_unchanged_on_the_fallback_path(tmp_path: Path) -
     job.mkdir()
     argv = ["stub.py", "--out", "w0", "--stages", "0", "--seeds", "0"]
     ex = tmp_path / "ex"
-    assert iter_rollout._clean_partial(job, job, argv).keywords == {}, "回退档不多传参数"
-    assert iter_rollout._clean_partial(job, ex, argv).keywords == {"exec_root": ex}
+    same_root = iter_rollout._clean_partial(job, job, argv)
+    other_root = iter_rollout._clean_partial(job, ex, argv)
+    assert same_root.keywords == {}, "回退档不多传参数"
+    assert other_root.keywords == {"exec_root": ex}
     iter_rollout._clean_attempt(job, argv)  # 两参直调（替身的形状）照旧可用
 
 

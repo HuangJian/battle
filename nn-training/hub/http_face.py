@@ -265,6 +265,11 @@ class HubHandler(
         """
         cls._worker_pulse = WorkerPulse(silence_sec=silence_sec)
 
+    @classmethod
+    def pulse_readout(cls) -> dict:
+        """当前哨兵快照（只读；诊断 / 用例用——`pulse_events` 会推进状态，不能拿它看）。"""
+        return cls._worker_pulse.readout()
+
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
         # 静默高频只读访问（/ping 健康检查、/jobs/peek 拉活、result/payload 轮询含 404）
         # ——这些在多 worker 下每秒可打多行，把 hub-server.out 刷爆。POST result、

@@ -451,12 +451,14 @@ def test_combined_rejects_result_without_any_report(tmp_path: Path) -> None:
 
 def test_sample_scale_adds_new_seeds_instead_of_rerunning_the_same_games() -> None:
     pairs = [(0, 1), (1, 2)]
-    assert plan_run_mod._scaled_pairs(pairs, 1.0) is pairs  # 缺省逐字原样
+    same = plan_run_mod._scaled_pairs(pairs, 1.0)
+    assert same is pairs  # 缺省逐字原样
     got = plan_run_mod._scaled_pairs(pairs, 1.5)
     assert got[:2] == pairs
     assert len(got) == 3, "1.5 × 2 局 = 3 局（向上取整）"
     assert got[2][0] == 0 and got[2][1] != 1, "多出来的一局必须是新种子，不是重跑"
-    assert plan_run_mod._scaled_pairs(pairs, 0.5) == pairs[:1], "倍数 <1 按原顺序截短"
+    short = plan_run_mod._scaled_pairs(pairs, 0.5)
+    assert short == pairs[:1], "倍数 <1 按原顺序截短"
 
 
 def test_sample_scale_rebuilds_volume_quota_and_games_consistently() -> None:

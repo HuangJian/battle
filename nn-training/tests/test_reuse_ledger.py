@@ -226,7 +226,8 @@ def test_cached_funcs_match_a_fresh_parse(report: reuse_audit.Report) -> None:
     cached = _cached_funcs(cache)
     step = max(1, len(files) // 7)
     for path in files[::step][:7]:
-        assert cached(path) == reuse_audit._funcs(path), f"缓存与鲜解析不一致：{path}"
+        fresh = reuse_audit._funcs(path)
+        assert cached(path) == fresh, f"缓存与鲜解析不一致：{path}"
 
 
 def test_ledger_counts_only_go_down(report: reuse_audit.Report) -> None:
@@ -397,7 +398,8 @@ def test_split_lines_and_segment_match_stdlib() -> None:
     assert nodes, "样例源码没解析出节点"
     for node in nodes:
         expected = ast.get_source_segment(src, node)
-        assert reuse_audit._segment(lines, node) == (expected or ""), ast.dump(node)
+        got = reuse_audit._segment(lines, node)
+        assert got == (expected or ""), ast.dump(node)
 
 
 def test_docstring_does_not_affect_the_fingerprint(tmp_path: Path) -> None:

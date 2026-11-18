@@ -153,11 +153,11 @@ def test_failed_heartbeat_does_not_extend(tmp_path: Path) -> None:
     _publish(store)
     token = store.claim("j" * 16)
     assert isinstance(token, str)
-    expiry_before = store._leases["j" * 16]
+    expiry_before = store.lease_expiry("j" * 16)
     assert store.heartbeat("j" * 16, "wrong-token") is False
     assert store.heartbeat("no-such-job", token) is False
-    assert store._leases["j" * 16] == expiry_before  # 失败不延长
-    assert store._last_heartbeat["j" * 16] == clock.t  # 未动
+    assert store.lease_expiry("j" * 16) == expiry_before  # 失败不延长
+    assert store.heartbeat_at("j" * 16) == clock.t  # 未动
 
 
 def test_release_returns_to_pool_immediately(tmp_path: Path) -> None:

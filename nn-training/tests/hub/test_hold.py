@@ -349,9 +349,11 @@ def test_store_gate_windows_match_task_pack_constants(
     # 缺省与 env 两条路都对得上（同一把尺子：窗在两边都必须能调）
     store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
     monkeypatch.delenv(STALE_ENV, raising=False)
-    assert store._hold_stale_sec() == 900.0
+    default_sec = store._hold_stale_sec()
+    assert default_sec == 900.0
     monkeypatch.setenv(STALE_ENV, "7")
-    assert store._hold_stale_sec() == 7.0
+    env_sec = store._hold_stale_sec()
+    assert env_sec == 7.0
 
 
 def test_live_hold_blocks_every_kind_until_it_goes_stale(

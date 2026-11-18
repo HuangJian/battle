@@ -456,5 +456,7 @@ def test_batch_iter_id_namespace_from_the_new_home() -> None:
 
 def test_forces_of_is_the_ladder_stage_json_helper() -> None:
     """`_forces_of` 是 `plan_units` 写 stageJson 的一环：私有，但影响 agent 的缓存键。"""
-    assert bp._forces_of({"enemies": ["basic", "power", "player"]}) == "aca"
-    assert bp._forces_of({"enemies": []}) == ""
+    mixed = bp._forces_of({"enemies": ["basic", "power", "player"]})
+    empty = bp._forces_of({"enemies": []})
+    assert mixed == "aca"
+    assert empty == ""

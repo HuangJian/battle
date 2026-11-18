@@ -25,6 +25,30 @@
 
 ---
 
+## §175 G5 第三十六批：心跳读数 + 哨兵快照 + 十处纯判据（2026-11-18）
+
+十二个文件清零：`test_hub_leases.py` / `test_hold.py` / `test_offline_metrics.py` /
+`test_worker_pulse.py` / `test_bc_epoch_backfill.py` / `test_body_transfer_guard.py` /
+`test_control_pool.py` / `test_rollout_scratch.py` / `test_run_loop.py` /
+`test_reuse_ledger.py` / `test_batch_plan_split.py` / `test_to_cpu_batch.py` 各 **2 → 0**
+（G5 **219 → 195**，84 → 72 文件）。
+
+- 新增 `LeaseMixin.heartbeat_at(job_id)`：最近一次**成功**心跳的时刻（纯读）。错 token
+  心跳那条用例要钉两件事——租约没被延长（`lease_expiry` 已是公开面）、心跳锚也没被写
+  （`_last_heartbeat` 此前无公开读名）。store 拆分守卫 `MIXIN_METHODS` 75 → 76。
+- 新增 `HubHandler.pulse_readout()`：哨兵快照的只读入口（`pulse_events()` 会推进状态，
+  不能拿它看）；测试子类覆盖 `_worker_pulse` 时 `cls.` 解析到替身，进程级类属性不被污染。
+- 其余十处都是**纯判据**（`_hold_stale_sec` / `_ledger_has_newer_iter` / `_bc_backlog_replay` /
+  `_recv_some` / `_proxy_for` / `_clean_partial` / `_scaled_pairs` / `_funcs` & `_segment` /
+  `_forces_of` / `_to_cpu_state` & `_log_if_slow`）：调用赋给局部变量后再断言。
+
+**仍留在基线里的同型文件（刻意）**：`test_common_layer`（转发名兼容面）、`test_stats` /
+`test_train_core_split` / `test_gate_judges_split`（同一份对象的**身份**契约）、
+`test_rl_remote_fixes`（`_kl_*` 兼容参数名本身是契约）、`test_job_identity_collision`
+（归属缓存本体 + `_job_dir`）。
+
+---
+
 ## §174 G5 第三十五批：租约到期读数 + 三处纯判据（2026-11-18）
 
 四个文件：`test_priority_schedule.py` **3 → 0**、`test_batch_runner_split.py` **3 → 0**、

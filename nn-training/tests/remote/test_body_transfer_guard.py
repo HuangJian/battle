@@ -468,13 +468,15 @@ def _stub_decision(monkeypatch, verdicts: list[bool]) -> list[tuple]:
 
 def test_recv_some_prefers_read1_and_keeps_read_only_doubles_usable() -> None:
     """M1：真响应走 `read1`；只实现 `read` 的测试替身仍可用（回退不改字节流）。"""
-    assert http_mod._recv_some(_DripResp(chunks=1, size=8), 4096) == b"x" * 8
+    got = http_mod._recv_some(_DripResp(chunks=1, size=8), 4096)
+    assert got == b"x" * 8
 
     class _ReadOnly:
         def read(self, _n: int) -> bytes:
             return b"y" * 3
 
-    assert http_mod._recv_some(_ReadOnly(), 4096) == b"y" * 3
+    fallback = http_mod._recv_some(_ReadOnly(), 4096)
+    assert fallback == b"y" * 3
 
 
 def test_recv_some_does_not_wait_for_the_full_amount() -> None:
