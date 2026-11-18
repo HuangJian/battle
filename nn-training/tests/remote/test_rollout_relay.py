@@ -533,3 +533,114 @@ def test_new_link_sweeps_before_polling(monkeypatch: pytest.MonkeyPatch) -> None
         assert swept == [1]
     finally:
         link.stop()
+
+
+# ------------------------------------------------- 预检第三层：TCP 通了再切 TLS（2026-11-18 DSW 第二次）
+
+
+def _stub_layers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tls: tuple[str, str],
+    ctrl: tuple[str, str] | None = None,
+) -> None:
+    """把预检的三层全部打桩：只验判词分叉，不碰网络（真机行为由 DSW 现场日志背书）。
+
+    只收 `(verdict, 人读)` 双元组（同一条结论对每个地址成立）—— 这一层要判的是
+    「哪一类失败」，不是「哪个地址特殊」，多地址差异由真机日志背书。
+
+    `ctrl=None` = **对照主机解析不出地址**（连问都问不到）—— 这时不该出现 `tls_ctrl` 键，
+    判词也不许借对照分叉；用它同时钉住「对照缺失时退回保守判词」这条边界。
+    """
+    monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
+    monkeypatch.setattr(
+        rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
+    )
+
+    def _ips(host: str, _port: int) -> list[str]:
+        if host == rr.CTRL_HOST:
+            return ["104.16.230.132"] if ctrl is not None else []
+        return ["104.16.231.132"]
+
+    def _sweep(ips: list[str], _port: int, sni: str, _t: float) -> dict[str, tuple[str, str]]:
+        # 按 SNI 分叉：对照主机与 hub 拿到的结论必须能不同，否则「按域名掐」判不出来。
+        spec = ctrl if (sni == rr.CTRL_HOST and ctrl is not None) else tls
+        return {ip: spec for ip in ips}
+
+    monkeypatch.setattr(rr, "_resolve_ips", _ips)
+    monkeypatch.setattr(rr, "_tcp_sweep", lambda ips, port, t: {ip: "ok" for ip in ips})
+    monkeypatch.setattr(rr, "_tls_sweep", _sweep)
+
+
+def test_hint_names_tls_block_when_control_host_also_stalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TCP 通 + 握手全无应答 + 对照主机也卡 ⇒ 掐的是「到 CF 边缘的 TLS」（换承载/走代理）。"""
+    _stub_layers(monkeypatch, tls=("timeout", "握手无应答"), ctrl=("timeout", "握手无应答"))
+    ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert ok is False
+    assert facts["hint"] == "tls-blocked", facts
+    # 两层读数都要进 `facts`：人读行只给现场看，机器判据不能靠子串。
+    assert facts["tls"] == {"104.16.231.132": "timeout"}, facts
+    assert facts["tls_ctrl"] == {"104.16.230.132": "timeout"}, facts
+
+
+def test_hint_names_sni_block_when_control_host_handshakes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """对照主机（同边缘、不同域名）握手成功 ⇒ 按域名/SNI 掐：换隧道域名或换入口。"""
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+    )
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "sni-blocked", facts
+
+
+def test_hint_points_at_hub_when_tls_handshake_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """握手成功、只有 HTTPS 无应答 ⇒ 别再查节点出网，去 hub 那侧看进程与隧道。"""
+    _stub_layers(monkeypatch, tls=("ok:TLSv1.3", "TLSv1.3（150ms）"))
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "app-stall", facts
+    assert facts["tls"]["104.16.231.132"] == "ok:TLSv1.3"
+
+
+def test_tls_verdict_reports_timeout_and_handshake_error() -> None:
+    """`_tls_verdict` 的两条真路径：对端**不说话** = timeout；对端**接了又关** = TLS 错误。"""
+    silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(1)
+    port = int(silent.getsockname()[1])
+    accepted: list[socket.socket] = []
+
+    def _accept_once() -> None:
+        conn, _addr = silent.accept()
+        accepted.append(conn)  # 收下但不回任何字节：TLS 侧只能等 → timeout
+
+    threading.Thread(target=_accept_once, daemon=True).start()
+    try:
+        verdict, _human = rr._tls_verdict("127.0.0.1", port, "hub.example.com", 0.4)
+        assert verdict == "timeout", verdict
+    finally:
+        for c in accepted:
+            c.close()
+        silent.close()
+
+    closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    closed.bind(("127.0.0.1", 0))
+    closed.listen(1)
+    port2 = int(closed.getsockname()[1])
+
+    def _accept_and_close() -> None:
+        conn, _addr = closed.accept()
+        conn.close()  # 立刻关：握手拿不到 ServerHello，直接 EOF
+
+    threading.Thread(target=_accept_and_close, daemon=True).start()
+    try:
+        verdict2, _h2 = rr._tls_verdict("127.0.0.1", port2, "hub.example.com", 2.0)
+        assert verdict2.startswith("err:tls") or verdict2.startswith("err:conn"), verdict2
+    finally:
+        closed.close()

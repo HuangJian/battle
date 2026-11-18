@@ -26,6 +26,7 @@ import base64
 import errno
 import json
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -56,6 +57,12 @@ PROBE_TIMEOUT_SEC = 6.0
 #: 预检失败后逐 IP 的裸 TCP 探测预算（秒）：只分「连得上 / 连不上」，2s 足够；
 #: 它和 `PROBE_TIMEOUT_SEC` 分开，是因为这层要的是**区分**地址而不是等应答。
 TCP_PROBE_SEC = 2.0
+#: 裸 TLS 握手预算（秒）：CF 边缘握手正常 ~150ms，3s 还不回 ServerHello 就是被中间层丢了。
+#: 比 HTTPS 的 6s 短，因为这一层只需要「握手能不能起来」。
+TLS_PROBE_SEC = 3.0
+#: TLS 对照主机：**同一个 CF 边缘、同一套泛域名证书**，但不带「隧道域名」的随机前缀。
+#: hub 卡而它通 ⇒ 掐的是这个域名；它也卡 ⇒ 掐的是「本机到 CF 边缘的 TLS」——两者修法不同。
+CTRL_HOST = "api.trycloudflare.com"
 #: 网关类状态码：**中间层（代理 / Cloudflare 边缘）到不了上游**，因此不算「路由通」。
 #: 502/504 来自代理或 CF；52x 是 CF 的 origin 不可达族；530 是 CF 隧道/DNS 解析失败。
 #: `503` 故意不在内：hub 自己的 503（磁盘熔断）说明链路是通的，那是业务拒绝。
@@ -193,11 +200,60 @@ def _tcp_sweep(ips: list[str], port: int, timeout: float) -> dict[str, str]:
     return {ip: out.get(ip, "?") for ip in ips}
 
 
-def _fail_hint(tcp: dict[str, str]) -> tuple[str, str]:
-    """逐 IP 的 TCP 结论 → `(kind, 一句该改什么)`。
+def _tls_verdict(ip: str, port: int, sni: str, timeout: float) -> tuple[str, str]:
+    """对单个地址做一次**裸 TLS 握手**（不发 HTTP），返回 `(verdict, 人读片段)`。
 
-    `kind ∈ {"dns", "blackhole", "tls", "unroutable"}` 是**判据**，措辞只是给人看的：
-    用例钉 `kind`，改文案不会把用例弄红（否则红得没有意义）。
+    为什么还要这一层（2026-11-18 DSW 第二次真机）：逐 IP 的 TCP 已经全 `ok`、HTTPS 却全超时 ——
+    但「TCP 通 + HTTPS 超时」仍然同时意味着三件事，而三件事的修法完全不同：
+      ① 握手就被丢（DPI 按 SNI 过滤 / 路径 MTU 黑洞：ClientHello 出去，ServerHello 回不来）；
+      ② 握手成功、HTTP 请求无应答（hub/隧道那一侧不回话）；
+      ③ 握手被中间人顶掉（证书校验失败）。
+    这一层只花一条握手的钱，就把 ①②③ 分开。`verdict ∈ {"ok:<TLS版本>", "timeout", "err:<原因>"}`。
+    """
+    ctx = ssl.create_default_context()
+    t0 = time.monotonic()
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as raw:
+            raw.settimeout(timeout)
+            with ctx.wrap_socket(raw, server_hostname=sni) as tls:
+                ms = (time.monotonic() - t0) * 1000
+                ver = tls.version() or "?"
+                return f"ok:{ver}", f"{ver}（{ms:.0f}ms）"
+    except TimeoutError:
+        return "timeout", "握手无应答"
+    except ssl.SSLCertVerificationError as e:  # 子类先判：中间人/证书链不对
+        return f"err:cert:{e.verify_message or 'verify failed'}", "证书校验失败（中间人？）"
+    except ssl.SSLError as e:
+        return f"err:tls:{e.reason or e.__class__.__name__}", f"TLS 错误（{e.reason or e}）"
+    except OSError as e:  # 连接期失败（连不上/被拒/不可路由）
+        return f"err:conn:{e.errno}", f"连接失败（errno={e.errno}）"
+
+
+def _tls_sweep(ips: list[str], port: int, sni: str, timeout: float) -> dict[str, tuple[str, str]]:
+    """并行对每个地址做裸 TLS（有多个 IP 时串行 = N×timeout，没意义）。"""
+    out: dict[str, tuple[str, str]] = {}
+
+    def _sweep_tls(ip: str) -> None:
+        out[ip] = _tls_verdict(ip, port, sni, timeout)
+
+    threads = [threading.Thread(target=_sweep_tls, args=(ip,), daemon=True) for ip in ips]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {ip: out.get(ip, ("timeout", "?")) for ip in ips}
+
+
+def _fail_hint(
+    tcp: dict[str, str],
+    tls: dict[str, str] | None = None,
+    ctrl: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """逐 IP 的 TCP（+ TLS、+ 对照）结论 → `(kind, 一句该改什么)`。
+
+    `kind` 是**判据**，措辞只是给人看的：用例钉 `kind`，改文案不会把用例弄红
+    （否则红得没有意义）。`kind ∈ {dns,blackhole,unroutable,tls-blocked,sni-blocked,
+    tls-error,app-stall}`。
     """
     if not tcp:
         return "dns", "DNS 没给出任何地址：hub_url 拼写或节点 DNS 不通"
@@ -207,14 +263,34 @@ def _fail_hint(tcp: dict[str, str]) -> tuple[str, str]:
             "所有地址连 TCP 都不通（不只是 HTTPS）⇒ 对端是黑洞，重试无用："
             "先排 hub_url 拼写/DNS，再查节点出网策略与 CFG.net_proxy，否则换承载（非 CF 入口）或机器"
         )
-    if "ok" in vals:
-        return "tls", (
-            "TCP 通而 HTTPS 不通 ⇒ 掐在 TLS/SNI 层（按域名的策略）：换 hub_url 的域名或走代理；"
-            "这不是「地址不可达」"
+    if "ok" not in vals:
+        return (
+            "unroutable",
+            "按上面逐 IP 的结论：refused/unreachable 说明该地址段不可路由（不是「慢」）"
+            "—— 查 hub_url 的 DNS 与出网策略",
         )
-    return (
-        "unroutable",
-        "按上面逐 IP 的结论：refused/unreachable 说明该地址段不可路由（不是「慢」）—— 查 hub_url 的 DNS 与出网策略",
+    # TCP 通了才轮到 TLS 这一层说话（`tls` 为空 = 没探，只能给最保守的那句）。
+    if not tls:
+        return "tls", "TCP 通而 HTTPS 不通 ⇒ 掐在 TLS 之上的一层：换 hub_url 的域名或走代理"
+    tls_vals = set(tls.values())
+    if any(v.startswith("ok:") for v in tls_vals):
+        return "app-stall", (
+            "TCP 与 TLS 都通、只有 HTTPS 请求无应答 ⇒ 问题在 hub 那一侧（进程没在跑 / "
+            "quick tunnel 已死但域名还在 / 反向代理挂住）—— 去 hub 机器看服务与隧道，不要再查节点出网"
+        )
+    if any(v.startswith("err:cert") or v.startswith("err:tls") for v in tls_vals):
+        return "tls-error", (
+            "TCP 通但握手被回绝（证书/TLS 错误）⇒ 中间层在顶替对端（企业代理 MITM / 证书链不对）："
+            "走代理并确认其根证书，或换成不经过该中间层的入口"
+        )
+    if ctrl and any(v.startswith("ok:") for v in set(ctrl.values())):
+        return "sni-blocked", (
+            f"TCP 通、握手全无应答，而对照 {CTRL_HOST} 握手成功 ⇒ 按**域名/SNI** 掐："
+            "换一条隧道域名（重建 quick tunnel）或换入口；这不是「这台机器上不了网」"
+        )
+    return "tls-blocked", (
+        "TCP 通、握手全无应答（连对照主机也一样）⇒ 到 CF 边缘的 TLS 被中间层丢弃："
+        "用 CFG.net_proxy 走出站代理 / 换非 CF 入口 / 换机器；重试无用"
     )
 
 
@@ -276,7 +352,47 @@ def probe_hub(
         facts["tcp"] = tcp
         if tcp:
             line += " ｜ TCP=" + ",".join(f"{ip}:{port} {verdict}" for ip, verdict in tcp.items())
-        kind, hint = _fail_hint(tcp)
+        # TCP 通了才值得再往下切一刀：**裸 TLS 握手**。同一次真机实测（TCP 全 ok、HTTPS 全超时）
+        # 就卡在这一层的三种可能之间，而「握手被丢 / 握手成功但 hub 不回话 / 中间人」的修法
+        # 互不相干。对照主机（同边缘、不同域名）一起探，用**同一个支付一次**的预算。
+        tls: dict[str, str] = {}
+        ctrl: dict[str, str] = {}
+        ok_ips = [ip for ip, verdict in tcp.items() if verdict == "ok"]
+        # TLS 这一层只对 `https://` 有意义：`http://1.2.3.4:8787` 上的裸握手必然失败，
+        # 那不是「被掐」，把它的失败写成 `tls-blocked` 只会把人送去换机器。
+        scheme = (urllib.parse.urlsplit(str(hub_url)).scheme or "").lower()
+        if ok_ips and scheme == "https":
+            ctl_out: dict[str, dict[str, str]] = {}
+
+            def _ctl_probe() -> None:
+                # 对照恒用 443：要问的是「本机到 CF 边缘的 TLS 通不通」，与 hub 的端口无关。
+                ctl_ips = _resolve_ips(CTRL_HOST, 443)
+                if ctl_ips:
+                    swept = _tls_sweep(ctl_ips, 443, CTRL_HOST, TLS_PROBE_SEC)
+                    ctl_out["v"] = {ip: v for ip, (v, _h) in swept.items()}
+
+            ctl_thread = threading.Thread(target=_ctl_probe, daemon=True)
+            ctl_thread.start()  # 与下面那轮 hub TLS 并行：对照不该再加一份预算
+            tls_out = _tls_sweep(ok_ips, port, host, TLS_PROBE_SEC)
+            ctl_thread.join()
+            tls = {ip: v for ip, (v, _h) in tls_out.items()}
+            ctrl = ctl_out.get("v", {})
+            facts["tls"] = tls
+            if ctrl:
+                facts["tls_ctrl"] = ctrl
+            line += " ｜ TLS=" + ",".join(
+                f"{ip} {v}（{human}）" for ip, (v, human) in tls_out.items()
+            )
+            if ctrl:
+                vals = list(ctrl.values())
+                # 四个地址各不相同会把这行淹掉；一致时只说一次 + 地址数。
+                tail = (
+                    f"{vals[0]}（{len(vals)} 个地址一致）"
+                    if len(set(vals)) == 1
+                    else ",".join(vals)
+                )
+                line += f"；对照 {CTRL_HOST}=" + tail
+        kind, hint = _fail_hint(tcp, tls, ctrl)
         facts["hint"] = kind
         line += " ⇒ " + hint
         line += "；hub 未升级只会 404，不会超时"
@@ -732,11 +848,13 @@ class RelayChannel:
 
 __all__ = [
     "BODY_MAX",
+    "CTRL_HOST",
     "POLL_WAIT_SEC",
     "POLL_WORKERS",
     "PORT_WAIT_SEC",
     "PROBE_TIMEOUT_SEC",
     "TCP_PROBE_SEC",
+    "TLS_PROBE_SEC",
     "RelayChannel",
     "RelayLink",
     "RelayUnreachable",

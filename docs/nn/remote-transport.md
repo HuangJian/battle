@@ -174,6 +174,83 @@ reclaim -> killed=24552 用时 1.5s；child.poll()=1
 动作都以身份核验为前置，避免误伤同机的训练进程；`SIGKILL` 分支会留孤儿子进程，日志如实说「手动 kill 后
 重跑」；同一个 kernel 里 cell 无法真正并发（Jupyter 排队执行）⇒ ②只覆盖「被双 Ctrl-C 打断」这条窄路。
 
+### §159.3 第三次真机（同日 18:46）：`TCP 通而 HTTPS 不通` 还不够 —— 再切一刀到**裸 TLS 握手** + 对照主机
+
+§159.1 那层「逐 IP 裸 TCP」在第三次现场给出了**决定性读数**，也第一次让故障自证到「不是地址黑洞」：
+
+```
+[18:47:05] relay 预检 reason-labor-deluxe-electric.trycloudflare.com:443 →
+  DNS=104.16.230.132(v4),104.16.231.132(v4),2606:4700::6810:e684(v6),2606:4700::6810:e784(v6)
+  ｜ inherit=timeout（…） ｜ direct=timeout（…）
+  ｜ TCP=104.16.230.132:443 ok,104.16.231.132:443 ok,
+        2606:4700::6810:e684:443 unreachable,2606:4700::6810:e784:443 unreachable
+  ⇒ TCP 通而 HTTPS 不通 ⇒ 掐在 TLS/SNI 层（按域名的策略）：换 hub_url 的域名或走代理
+```
+
+两件事当场被钉死：① 两个 v4 地址的 **TCP 全通** ⇒ 不是黑洞、不是 DNS、不是「这台机器上不了网」；
+② 两个 v6 地址 `unreachable` ⇒ DSW 没有 v6 路由（正常，不该当成故障来修）。
+
+**但这条判词仍然一句话盖着三种互斥的修法。** `TCP 通 + HTTPS 无应答` 至少三种成因，分别指向
+「换域名 / 修 hub / 换机器」——只差最后那一刀：
+
+| 形态 | 本质 | 该改什么 |
+|---|---|---|
+| 握手就被丢 | DPI 按 **SNI** 过滤，或路径 MTU 黑洞（ClientHello 出得去、ServerHello 回不来） | 换隧道域名 / 换入口 |
+| 握手成功、HTTP 无应答 | 隧道已死但域名还在 / hub 进程没跑 / 反代挂住 | **去 hub 机器**看服务与隧道 |
+| 握手被顶替 | 中间层 MITM，证书链对不上 | 走代理并信它的根证书 / 换入口 |
+
+⇒ 加**第四层：裸 TLS 握手**（`_tls_verdict` / `_tls_sweep`）：不发 HTTP，只问「握手能不能起来」。
+`TLS_PROBE_SEC=3.0`（CF 边缘正常 ~150ms），多地址**并行**；`verdict ∈ {ok:<版本>, timeout,
+err:cert:…, err:tls:…, err:conn:<errno>}`。
+
+**再配一个对照主机，判词才真正分叉**：`CTRL_HOST = "api.trycloudflare.com"` —— **同一个 CF 边缘、
+同一套泛域名证书**，但不带「隧道域名」那段随机前缀。问的就是「本机到 CF 边缘的 TLS 通不通」，
+与 hub 的端口无关 ⇒ 对照恒用 443。
+
+| hub 握手 | 对照主机握手 | `kind` | 结论 / 修法 |
+|---|---|---|---|
+| 无应答 | 也卡 | `tls-blocked` | 到 CF 边缘的 TLS 被中间层丢弃 ⇒ `CFG.net_proxy` / 非 CF 入口 / 换机器 |
+| 无应答 | **成功** | `sni-blocked` | 按**域名/SNI** 掐 ⇒ 重建 quick tunnel 换域名（最便宜的一档） |
+| 成功 | — | `app-stall` | 两层都通、只有 HTTP 不回 ⇒ 问题在 hub 那侧，别再查节点出网 |
+| 证书/TLS 错误 | — | `tls-error` | 中间人在顶替对端 ⇒ 查代理根证书 / 换入口 |
+
+对照主机的四个地址会把这一行淹掉 ⇒ 结论一致时压成 `ok:TLSv1.3（4 个地址一致）`。hub 与对照两条
+探测**并行**（对照不该再吃一份预算，`TLS_PROBE_SEC` 一份就够）。TLS 层只在 `https://` 上跑 ——
+`http://1.2.3.4:8787` 的裸握手必然失败，把它写成 `tls-blocked` 只会把人送去换机器。
+
+**真机冒烟（本机 Windows，两条都实测，非推断）**
+
+```
+== ① 公网隧道（出网正常）==
+ok=True
+… ｜ inherit=HTTP 401（1656ms） ｜ direct=HTTP 401（1031ms）     （通了就不切 ⇒ 无 TLS= 行）
+hint=None
+
+== ② 本机裸 TCP 监听 + https（TCP 通、握手不回话）==
+ok=False
+… ｜ TCP=127.0.0.1:14033 ok ｜ TLS=127.0.0.1 timeout（握手无应答）；
+  对照 api.trycloudflare.com=ok:TLSv1.3（4 个地址一致）
+  ⇒ TCP 通、握手全无应答，而对照 api.trycloudflare.com 握手成功 ⇒ 按**域名/SNI** 掐…
+hint=sni-blocked
+```
+
+②是**人为构造**的形态（本机监听只 accept 不说话），但它证的正是要证的事：同一台机器上
+「hub 域名的握手被丢」与「到 CF 边缘的握手是好的」能分开 ⇒ `sni-blocked` 判得出来。
+
+**对 18:46 那次的判读**：TCP 全通 + HTTPS 全超时，落在 `tls-blocked` / `sni-blocked` 之间，
+**必须等 DSW 上跑出带 `TLS=` 与 `对照 api.trycloudflare.com=` 的新日志才能定** —— 对照也卡 ⇒
+走代理 / 换非 CF 入口 / 换机器；对照成功 ⇒ 重建 quick tunnel 换域名就够。旧判词「换域名或走代理」
+两边都指得对，但**成本差一个量级**，所以这一层值得加。
+
+**单测**：`test_rollout_relay.py` +4 例（`tls-blocked` 对照也卡 / `sni-blocked` 对照成功 /
+`app-stall` 握手成功 / `_tls_verdict` 两条真路径：只 accept 不说话的监听 → `timeout`、accept 后
+立刻 close → `err:tls*`）。判据全部钉在 `facts["hint"]` / `facts["tls"]` / `facts["tls_ctrl"]` 上，
+**不钉子串**（文本形态断言本层 **+0**，护栏仍在 1502）。
+
+**边界**：裸握手不验应用层，`ok` 只说明「能握手」；对照主机只覆盖 CF 这一条路径，
+hub 若换成非 CF 入口（自建反代 / 内网直连），对照要跟着换，否则 `sni-blocked` 会误报。
+`__all__` 已导出 `TLS_PROBE_SEC` / `CTRL_HOST`，外部（现场脚本 / 烟雾用例）不必摸私有名。
+
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 
 **现场（ModelScope / 阿里云 8C32G，`rollout.ipynb`）**：连续多个会话死在同一个点。
