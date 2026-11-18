@@ -25,6 +25,53 @@
 
 ---
 
+## §126 B5 第二块：shard / episode 的数据面契约（2026-11-18）
+
+P0-4 剩下的那半边（「manifest/result 仍是裸 dict」）的第一步，按审计档 §7.2 的落地顺序：先给
+shard 加 TypedDict（**零运行时成本**），manifest 的 pydantic 化留后。
+
+**契约住 `common/contracts.py`**（那里已是动作空间的唯一判据）：
+
+| 契约 | 是什么 | 谁在用 |
+|---|---|---|
+| `Shard` | per-tick RL shard **加载后**的 12 个键 | `np_core.load_shard` 的返回 |
+| `ShardV6(Shard)` | 多 `a_hold` / `lp_hold` 两列 | v6 盘上才带（`optional=`） |
+| `Episode` | `load_episode_from_shard` 的 10 个键**与序** | `EPISODE_FIELDS[,_V6]` 由声明序派生 |
+
+`np.ndarray` 只在 `TYPE_CHECKING` 下可见 —— L0 的运行时依赖仍是 stdlib（子进程查
+`sys.modules` 的用例钉住这一点）。运行期 `TypedDict` 类就是 `dict`（`__mro__ == (cls, dict, object)`），
+构造、取值、序列化都没有包装层。
+
+**收益是「拼错即红」，不再靠人工对名称**：`_as_shard` 把那 12/14 个键**逐个写出来**，就是检查点。
+实测红检：把 `a_hold=d["a_hold"]` 写成 `a_holdd=…`，mypy 当场两条错
+（`Missing key "a_hold"` + `Extra key "a_holdd"`）—— 而那正是 P0-4 记的事故形态（拼错的键
+静默走 legacy 分支，loss 照降）。
+
+**字段表 ↔ 契约的同源判据住在被测代码里**（import 哨兵，同 `contracts.py` 里 HeadLayout↔schema 那条）：
+
+```
+_V6_ONLY_KEYS = ShardV6 − Shard          # 必须 == _RL_SHARD_OPTIONAL
+Shard        == _RL_SHARD_SPEC − {metrics} − v6 专有 + {reward, stage}
+```
+
+不成立就 **import 当场炸**（实测：往 `_RL_SHARD_SPEC` 天一个 `metricsx` ⇒ 导入报出错清单）。
+为什么不写成用例：那样守卫得读两处**私有**字段表，而 G5 只拦增长、基线又只许调小（本仓
+「私有断言」的既定纪律）—— 放在生产侧反而更强（不用跑测试，也不用扫描）。
+
+**与骨架的交界仍然显式宽一档**：三个 backend（ppo / goal / intent）共用一个装载骨架，键集各不相同，
+而 `TypedDict` 在 mypy 里既不是 `dict` 的子型、又只认字面量键 ⇒ 骨架面的类型是
+`_episode.ShardRow = Mapping[str, Any]`（**名字 + 一段理由**，而不是散在四个签名的 `dict[str, Any]`）。
+这不是松绑：`object` 在骨架里跑不通（GAE / 归一化要 `.shape` 与算术，P1-4 实测过那一把会 406 个红点），
+而严格类型的两个端点现在都有名有姓。G14 读数因此 **-1**（`_episode.py` 3 → 2，基线同步调下）。
+
+`load_episode_from_shard` 的返回**故意仍是裸 `dict`**：`RolloutBackend` 契约与 `trainer/stream`
+要可写的 dict（wave 内归一化会改写 `ep["adv"]`），收紧到 `Episode` 是一笔跨三层的改造 ——
+键集与序已由 `EPISODE_FIELDS*` + 守卫钉住，类型化留给 B5 后续。
+
+**读数**：mypy 959 绿（新增 1 个守卫文件）· ruff 绿 · `tests/common` + `tests/worker/{np_core,ppo_quota,
+episode_skeleton,shard_action_space_v6,shard_schema_shape}` + `tests/remote/test_payload_slim` 53 绿 ·
+门禁 G5/G14/G3/G4/G12 全过。
+
 ## §125 两处满载计时 flake 的**源头**：事件门 + 「让号重试」（2026-11-17）
 
 §124 的三连全量里有一红，另一处同源红在 2026-11-17 的其它批次。两处都不是被测代码出错，而是

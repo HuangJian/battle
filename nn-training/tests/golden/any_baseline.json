@@ -162,7 +162,7 @@
     "worker/paired_kill.py": 9,
     "worker/plan.py": 7,
     "worker/ppo/__init__.py": 1,
-    "worker/ppo/_episode.py": 3,
+    "worker/ppo/_episode.py": 2,
     "worker/ppo/checkpoint_paddle.py": 4,
     "worker/ppo/ckpt_convert.py": 8,
     "worker/ppo/common.py": 1,

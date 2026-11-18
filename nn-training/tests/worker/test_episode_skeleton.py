@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -34,7 +35,7 @@ def _shard(n: int = 3) -> dict[str, Any]:
     }
 
 
-def _gae_zero(d: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+def _gae_zero(d: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     n = d["obs"].shape[0]
     return np.zeros(n, np.float64), np.zeros(n, np.float64)
 
@@ -79,9 +80,9 @@ def test_optional_fields_only_when_present_in_the_shard() -> None:
 
 def test_gae_is_computed_from_the_whole_shard() -> None:
     """`gae` 吃的是**整个 shard dict**（goal/intent 的变步长 GAE 需要 `dt`/`done`）。"""
-    seen: list[dict[str, Any]] = []
+    seen: list[Mapping[str, Any]] = []
 
-    def spy(d: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    def spy(d: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
         seen.append(d)
         return np.ones(d["obs"].shape[0], np.float64), np.zeros(d["obs"].shape[0], np.float64)
 

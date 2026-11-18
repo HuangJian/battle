@@ -22,7 +22,7 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from common.contracts import ActionSpace
+from common.contracts import ActionSpace, Episode, EpisodeV6, Shard, ShardV6
 from common.errors import ProtocolError
 from common.log import log
 from common.schema import (
@@ -48,7 +48,7 @@ from common.shard import (
     REWARD_VERSION,
     RL_REWARD_FILES,
 )
-from worker.ppo._episode import episode_from_shard
+from worker.ppo._episode import ShardRow, episode_from_shard
 
 
 # ---------------- GAE ----------------
@@ -555,7 +555,7 @@ def chunk_episodes(
     ]
 
 # ---------------- episode loading skeleton (ppo / ppo_intent 共用) ----------------
-def trim_shard_arrays(d: dict[str, np.ndarray], keep: int) -> dict[str, np.ndarray]:
+def trim_shard_arrays(d: ShardRow, keep: int) -> ShardRow:
     """把 shard 的逐 step 数组截到前 `keep` 步（**在 GAE 之前**调用）。
 
     为什么必须在 GAE 之前：GAE 是**反向递推**（从局末往回算），保留段的 advantage
@@ -592,8 +592,8 @@ def load_episodes_common(
     #: 奖励面的「或」判据（wire-diet §3 P1）：per-tick RL 是 metrics.npy **或** reward.npy。
     #: 缺省空 = 逐字节旧行为（intent/goal/BC 调用点不传）。
     need_any_files: Sequence[str] = (),
-    shard_loader: Callable[[str], dict[str, np.ndarray]],
-    gae: Callable[[dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
+    shard_loader: Callable[[str], ShardRow],
+    gae: Callable[[ShardRow], tuple[np.ndarray, np.ndarray]],
     gae_name: str,
     normalize_ret: bool,
     load_log_every: int = 128,
@@ -764,12 +764,32 @@ _RL_SHARD_SPEC_REWARD: dict[str, tuple[str, npt.DTypeLike]] = {
     k: v for k, v in _RL_SHARD_SPEC.items() if k != "metrics"
 }
 
+#: 字段表里有、但读时被算成 `reward` 后 pop 掉的一列（所以不在 `Shard` 契约里）。
+DROPPED_SHARD_KEYS: frozenset[str] = frozenset({"metrics"})
+#: 加载端现算、不在字段表里的两列（`load_shard` 最后追加）。
+COMPUTED_SHARD_KEYS: frozenset[str] = frozenset({"reward", "stage"})
+
+# 与数据面契约的自洽哨兵（同 `common/contracts.py` 里 HeadLayout↔schema 那一条）：字段表
+# （`_RL_SHARD_SPEC`，loader 用）与契约（`common.contracts.Shard`/`ShardV6`，mypy 用）是两处
+# 声明。只改一边时 **import 当场炸**，而不是等训练时报 ValueError 或静默少读一列。
+# 换算：`metrics` 读时被算成 `reward` 后 pop 掉；`reward` / `stage` 是加载端现算的两列。
+_V6_ONLY_KEYS = frozenset(ShardV6.__annotations__) - frozenset(Shard.__annotations__)
+if _V6_ONLY_KEYS != _RL_SHARD_OPTIONAL or frozenset(Shard.__annotations__) != (
+    frozenset(_RL_SHARD_SPEC) - frozenset(DROPPED_SHARD_KEYS) - _V6_ONLY_KEYS
+    | frozenset(COMPUTED_SHARD_KEYS)
+):
+    raise AssertionError(
+        "字段表与 common.contracts 不同源："
+        f"spec={sorted(_RL_SHARD_SPEC)}、optional={sorted(_RL_SHARD_OPTIONAL)}、"
+        f"Shard={sorted(Shard.__annotations__)}、v6 多出={sorted(_V6_ONLY_KEYS)}"
+    )
+
 
 def discover_rl_shards(root: str) -> list[str]:
     return discover_shards(root, ("obs.npy",), need_any=RL_REWARD_FILES)
 
 
-def load_shard(dirpath: str) -> dict[str, np.ndarray]:
+def load_shard(dirpath: str) -> Shard | ShardV6:
     """读 shard 字段 + manifest → `reward`（N 样本）。
 
     两条奖励来源（wire-diet，2026-10-14，§3 P1）：
@@ -815,7 +835,47 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
     # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
     d["stage"] = np.asarray(int(manifest.get("stage", -1)))
-    return d
+    return _as_shard(d, is_v6=is_v6)
+
+
+def _as_shard(d: dict[str, np.ndarray], *, is_v6: bool) -> Shard | ShardV6:
+    """裸 dict（字段表 `_RL_SHARD_SPEC` 派生）→ 具名契约（`common.contracts.Shard`）。
+
+    键名逐个写出来是**有意的**：这就是契约的检查点 —— 字段表的键与契约的键
+    对不上时（拼错 / 只改一边）mypy 当场报错，而不是等到训练时 ValueError 或静默错位。
+    一次 shard 级拷贝（十几行指针），与每 shard 上百 MB 的数组相比可忽。
+    """
+    if not is_v6:
+        return Shard(
+            obs=d["obs"],
+            scalars=d["scalars"],
+            extra=d["extra"],
+            a_move=d["a_move"],
+            a_fire=d["a_fire"],
+            lp_move=d["lp_move"],
+            lp_fire=d["lp_fire"],
+            value=d["value"],
+            done=d["done"],
+            mask=d["mask"],
+            reward=d["reward"],
+            stage=d["stage"],
+        )
+    return ShardV6(
+        obs=d["obs"],
+        scalars=d["scalars"],
+        extra=d["extra"],
+        a_move=d["a_move"],
+        a_fire=d["a_fire"],
+        lp_move=d["lp_move"],
+        lp_fire=d["lp_fire"],
+        value=d["value"],
+        done=d["done"],
+        mask=d["mask"],
+        reward=d["reward"],
+        stage=d["stage"],
+        a_hold=d["a_hold"],
+        lp_hold=d["lp_hold"],
+    )
 
 
 def _check_mask_width(mask: np.ndarray, is_v6: bool, dirpath: str) -> None:
@@ -949,28 +1009,28 @@ def _reward_from_npy(dirpath: str, n_obs: int) -> np.ndarray:
     return np.asarray(r, dtype=np.float32)
 
 
+#: episode 的字段与**序**都从契约派生（`common/contracts.Episode` 的声明序）——手写第二份
+#: 元组就是第二份真相：契约改了而元组没改，键序静默变化（`episode_from_shard` 按此序组装）。
+#: 公开名字：守卫（`tests/common/test_shard_contract.py`）与对账脚本要引它。
+EPISODE_FIELDS: tuple[str, ...] = tuple(Episode.__annotations__)
+EPISODE_FIELDS_V6: tuple[str, ...] = tuple(EpisodeV6.__annotations__)
+
+
 def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
     """流式 backend 接口（trainer/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
 
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
+
+    返回类型仍是裸 `dict`（不收紧到 `Episode`）：`RolloutBackend` 契约与 `trainer/stream`
+    要**可写入**的 dict（wave 内归一化会改写 `ep["adv"]`），把 TypedDict 换上去是一笔跨三层
+    的改造（B5 后续），不是这一刀。键集与序由 `_EPISODE_FIELDS*` 钉住（守卫见
+    `tests/common/test_shard_contract.py`）。
     """
     d = load_shard(dirpath)
     # B1 v6：多两个字段（存在性判据，见 `_RL_SHARD_OPTIONAL`）。legacy 分支的
     # `fields` 元组逐字不变 ⇒ 历史 shard 的 episode 字典键集也逐字不变。
-    base = (
-        "obs",
-        "scalars",
-        "a_move",
-        "a_fire",
-        "lp_move",
-        "lp_fire",
-        "value",
-        "adv",  # 占位：GAE 现算
-        "ret",
-        "mask",
-    )
-    fields = (*base, "a_hold", "lp_hold") if ActionSpace.from_batch(d).is_v6 else base
+    fields = EPISODE_FIELDS_V6 if ActionSpace.from_batch(d).is_v6 else EPISODE_FIELDS
     return episode_from_shard(
         d,
         lambda x: compute_gae(x["reward"], x["value"], x["done"], gamma, lam),

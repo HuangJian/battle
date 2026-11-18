@@ -1,4 +1,4 @@
-"""动作空间与头布局的显式契约（P0-4 / B5 第一块）。
+"""动作空间、头布局与数据面的显式契约（P0-4 / B5）。
 
 历史实现把「legacy 5/2」与「v6 4/3/2 + hold」的差异散落在 PPO 引擎里：
 `len(out) >= 4` 推 ref 头数、`e.get("a_hold") is not None` 推数据动作空间、
@@ -11,7 +11,8 @@
   （数据侧 `from_batch`，模型侧 `from_forward_arity`）；
 * `HeadLayout` —— 由动作空间派生的头宽与掩码切片，引擎不再手写数字。
 
-纯 stdlib + `common.schema` 常量，符合 `common` 的 L0 契约；不 import numpy/torch。
+纯 stdlib + `common.schema` 常量，符合 `common` 的 L0 契约；不 import numpy/torch
+（数据面契约里的 `np.ndarray` 只在 `TYPE_CHECKING` 下可见，运行时仍是纯 stdlib）。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from common.schema import (
     FIRE3_DIM,
@@ -120,3 +121,74 @@ if _LEGACY.mask_dim != MASK_DIM or _V6.mask_dim != MASK_V6_DIM:
         f"HeadLayout 与 schema 不同源：legacy={_LEGACY.mask_dim}（期望 {MASK_DIM}）、"
         f"v6={_V6.mask_dim}（期望 {MASK_V6_DIM}）"
     )
+
+
+# ---------------- 数据面契约（B5 第二块）：shard / episode 的键 ----------------
+#
+# 这两个契约只干两件事：① 拼错的键名由 mypy **当场**报（`d["a_holdd"]` 今天不会报错，
+# 只会静默走 legacy 分支 —— 即 P0-4 记的那种「y32 事故」形态）；② 让「v6 多哪两列」
+# 「episode 的键与序是哪十个」成为可引用的事实，而不是散在几个手写元组里。
+#
+# **零运行时成本**：`TypedDict` 在运行期就是一个 dict，这些类只在类型检查时存在；
+# numpy 也只在 `TYPE_CHECKING` 下可见，`import common.contracts` 仍不碰第三方包。
+
+if TYPE_CHECKING:
+    import numpy as np
+
+
+class Shard(TypedDict):
+    """per-tick RL shard（`worker/ppo/np_core.load_shard`）的**加载后**键集。
+
+    盘上字段表是 `np_core._RL_SHARD_SPEC`（多一列 `metrics`：读到就算成 `reward` 后 pop 掉，
+    所以不在这里）；`reward` / `stage` 是加载端现算的两列。
+
+    ⚠ BC 语料（`worker/data/npyio.py::load_shard`）是**另一套**形状（`a_hold` 在那里必存在、
+    并被改名成 `hold`）—— 两套不共用本契约，否则「有 a_hold 就是 v6」这条判据会被搅浑。
+    """
+
+    obs: np.ndarray
+    scalars: np.ndarray
+    extra: np.ndarray
+    a_move: np.ndarray
+    a_fire: np.ndarray
+    lp_move: np.ndarray
+    lp_fire: np.ndarray
+    value: np.ndarray
+    done: np.ndarray
+    mask: np.ndarray
+    reward: np.ndarray
+    stage: np.ndarray
+
+
+class ShardV6(Shard):
+    """v6 shard = `Shard` + 两列 hold（`a_hold.npy` 在盘上才带，见 `load_shard_fields`）。"""
+
+    a_hold: np.ndarray
+    lp_hold: np.ndarray
+
+
+class Episode(TypedDict):
+    """`load_episode_from_shard` 产出的键**与序**。
+
+    序是契约的一部分：`_episode.episode_from_shard` 按 `fields` 元组组装，而那个元组由本类的
+    声明序派生（`np_core.EPISODE_FIELDS`）—— 历史 shard 的 episode 字典键序因此逐字不变。
+    `adv` / `ret` 不在 shard 里，是 GAE 现算的占位；它们排在 `mask` **之前**，别为了好看挪走。
+    """
+
+    obs: np.ndarray
+    scalars: np.ndarray
+    a_move: np.ndarray
+    a_fire: np.ndarray
+    lp_move: np.ndarray
+    lp_fire: np.ndarray
+    value: np.ndarray
+    adv: np.ndarray
+    ret: np.ndarray
+    mask: np.ndarray
+
+
+class EpisodeV6(Episode):
+    """v6 episode = `Episode` + 两列 hold（多出来的两键**追加在末尾**，与历史键序一致）。"""
+
+    a_hold: np.ndarray
+    lp_hold: np.ndarray
