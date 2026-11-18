@@ -7454,3 +7454,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   275 → **186** 行（拆出 `_discover_tick` / `_publish_heartbeat` / `_finish_serve`），
   长函数存量 **23 → 22**，形状基线删除该文件的长函数条目（宽参数条目保留）。
   全文 → `docs/nn/engineering.md` §193。
+- **2026-11-18（长函数存量第十六刀：单轮执行）**：`remote/plan_run.py::_run_iteration`
+  276 → **162** 行（拆出 `_round_volume` / `_apply_greedy_budget` / `_iter_manifest`），
+  长函数存量 **22 → 21**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §194。

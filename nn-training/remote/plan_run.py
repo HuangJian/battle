@@ -302,6 +302,154 @@ def _volume_with_target(volume: Mapping[str, Any], target: int) -> dict:
     return out
 
 
+def _round_volume(ctx: RunContext, it: int):
+    """本轮采哪些关 + 放大/加宽（自 `_run_iteration` 原样搬出）。
+
+    返回 `(vol_probe, window_override, rotation_override)`；`window_override` 非空 =
+    本轮是轮换降级轮（调用方让 `pairs_for` 不再按配方派生）。
+    """
+    # ★ 2026-10-22（用户口径「有几个 worker 铺多少局」）：自主机自己 rollout ⇒ 宽度就是
+    #   `ctx.rollout_workers`（缺省 = 本机 `cpu_worker_slots()`，见 plan_handoff 的装配），
+    #   **不 ping 任何人、不看 hub 的 plan 声明**。plan 里的 `games_per_stage_by_stage` 是
+    #   打包时的缺口形状（est 反解），本机核数比它多就按宽度重铺；派发侧逐关满额即停，
+    #   多出来的候选不会白跑。无 `volume` 的老课程逐字走 `pairs_for`。
+    # ★ 2026-10-22 补（同源面的那一刀）：加宽必须**连 `widen_width` 一起写进块**——块里的
+    #   `games_per_stage_by_stage` 要过 `validate_runtime_volume` 的同源复算（首批局数 =
+    #   `widen_by_width(est 反解值, widen_width)`），只改 games 不声明宽度会被节点/`iter_spec`
+    #   响亮拒收（现场：y30-stack it156，9 局/关被铺到 24 局/关 ⇒ ProtocolError 整段死）。
+    # ★ 2026-10-28（云机轮换，plan/it-stage-ratation §9.5）：本轮采哪些关 = **当轮窗口**。
+    #   `ctx.plan["volume"]` 是导出那一轮的那一份（一份块），开了轮换后每轮都要按配方
+    #   重解（`worker/plan.volume_for_round`）——否则第 2 轮起还在采第 1 轮的关集。
+    #   笔记本开关（`ctx.rotation`，三态）在这里落地：
+    #     auto = 跟随计划；on = 计划没带轮换就拒跑（不猜）；off = 把窗口降级成全关（记账）。
+    _policy = str(getattr(ctx, "rotation", "auto") or "auto")
+    window_override, rotation_override = rotation_window_for_round(ctx.plan, it, _policy)
+    if rotation_override:
+        recipe = rotation_recipe(ctx.plan) or {}
+        ctx.log(
+            f"WARN it{it}: 笔记本 --rotation off —— 本段把计划里的轮换"
+            f"（mode={recipe.get('mode')!r} per_it={recipe.get('per_it')}）降级为**全关采样**；"
+            "语料分布与导包时不同（账本 rotation.override=off 留痕）"
+        )
+    vol_probe = volume_for_round(ctx.plan, it, window_override=window_override)
+    if isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
+        # 先放大再走本机宽度的「加宽」逻辑：两张牌都是纯函数，顺序不影响同源校验。
+        vol_probe = _scaled_volume(vol_probe, ctx.sample_mult)
+    if isinstance(vol_probe, dict):
+        from worker.volume_alloc import widen_by_width
+
+        _per = vol_probe.get("games_per_stage_by_stage")
+        _width = int(ctx.rollout_workers or 0)
+        if isinstance(_per, dict) and _per and _width > 0:
+            _wide = widen_by_width(_per, _width)
+            if sum(_wide.values()) > sum(int(v) for v in _per.values()):
+                ctx.log(
+                    f"it{it} 首批按本机宽度重铺：{sum(int(v) for v in _per.values())} → "
+                    f"{sum(_wide.values())} 局（workers={_width}）"
+                )
+                vol_probe = dict(
+                    vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
+                )
+    return vol_probe, window_override, rotation_override
+
+
+def _apply_greedy_budget(ctx: RunContext, it: int, vol_probe, full_per_stage: int):
+    """greedy 语料预算（自 `_run_iteration` 原样搬出）：普通采样减量，整轮总量不变。
+
+    返回 `(vol_probe, greedy)`；`greedy is None` = 本轮未激活。
+    """
+    # ---- greedy 语料预算（2026-11-11，plan/greedy-offline-autonomous）----
+    # 用户口径 B「挤进去」：普通采样少采 greedy 的那一份，**整轮总量不变**。
+    # `per_stage_quota` 必须是**减量前**的整轮值 —— PPO 的逐关上限就是「整轮总量/关数」，
+    # 换成减量后的值会把 greedy 那份一并截掉（训到的 greedy 样本 = 0，账本却好看）。
+    _greedy: tuple[Any, int, dict] | None = None
+    if (
+        isinstance(vol_probe, dict)
+        and ctx.course is None
+        and "greedy_quota" in str(ctx.manifest.get("course") or "")
+        and not ctx.greedy_course_warned
+    ):
+        # 课程声明了 greedy 但快照没加载（只可能发生在非 notebook 入口）——说出来，不静默。
+        ctx.greedy_course_warned = True
+        ctx.log(
+            "WARN: ctx.course 缺失 ⇒ 本段 greedy_quota **不生效**（按老路径跑）；"
+            "需要 greedy 的腿请用 `--artifacts <目录>`（目录里有 course.jsonc）"
+        )
+    if isinstance(vol_probe, dict):
+        _greedy = _greedy_budget(ctx.course, vol_probe)
+        if _greedy is not None:
+            _gplan, _total_t, _block = _greedy
+            _ordinary_t = max(1, _total_t - int(_gplan.total_target))
+            vol_probe = _volume_with_target(vol_probe, _ordinary_t)
+            ctx.log(
+                f"it{it} greedy 预算：普通 {_ordinary_t} + greedy {int(_gplan.total_target)}"
+                f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {full_per_stage}）"
+            )
+    return vol_probe, _greedy
+
+
+def _iter_manifest(
+    ctx: RunContext,
+    it: int,
+    spec: dict,
+    init_fp: str,
+    epochs_eff: int,
+    vol,
+    greedy,
+    full_per_stage: int,
+) -> dict:
+    """合成第 it 轮 manifest（自 `_run_iteration` 原样搬出）：与 hub 发布的 kind=iter 同构。"""
+    # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
+    m = dict(ctx.manifest)
+    m.update(
+        {
+            "kind": "iter",
+            "it": int(it),
+            "epochs": epochs_eff,
+            "rollout": spec,
+            "init_weights_fp": init_fp,
+            "data_fp": iter_expected_data_fp(spec),
+            # opt 走内容寻址：上一轮 PPO 已把原始 tar 写进 blob_cache ⇒ 命中即零传输
+            "opt_init": "",
+            "opt_sha": str(ctx.last_opt_sha or ""),
+            "opt_bytes": 0,
+            "seed": job_seed(str(m["runId"]), int(it), init_fp),
+        }
+    )
+    # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
+    # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
+    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
+    # ★ 2026-10-30（用户口径「prep 行只留必要读数」）：漂移**不进 prep 那行**了
+    #   （那一行只留「这一轮发生了什么」）⇒ 改成**值变了才报一行**（首轮必报；同值不再报）。
+    #   为什么不静默：manifest 与计划对不上是**真异常**（节点按计划值跑，hub 按 manifest 值算），
+    #   全程静默就没人知道两边不一致 ⇒ 但也不能每轮报一行（值恒定 ⇒ 390 轮 390 条一样的话）。
+    drift = 0
+    want = 0
+    if isinstance(vol, dict):
+        # greedy 激活时用**减量前**的整轮值（见上面 B 口径那段：减量后的值会连 greedy 一起截掉）。
+        want = (
+            int(full_per_stage or vol["per_stage_quota"])
+            if greedy
+            else int(vol["per_stage_quota"])
+        )
+        have = int(m.get("per_stage_quota", 0) or 0)
+        drift = have if (have and have != want) else 0
+        m["per_stage_quota"] = want
+    if drift:
+        _drift_note = f"manifest {drift}/关 → 按计划 {want}/关"
+        if _drift_note != ctx.quota_drift_reported:
+            ctx.quota_drift_reported = _drift_note
+            ctx.log(f"WARN 配额漂移：{_drift_note}（本轮按计划值生效）")
+    # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
+    # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
+    # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
+    if ctx.round_forms is not None:
+        ctx.round_forms.prepare_manifest(m, it)
+    m["job_id"] = make_job_id(m)
+    m = normalize_manifest(m)
+    return m
+
+
 def _run_iteration(
     ctx: RunContext, it: int, *, prev_it: int, on_ppo_start: Callable[[], None] | None = None
 ) -> dict:
@@ -349,76 +497,9 @@ def _run_iteration(
     except ProtocolError as e:
         ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
         ctx.last_opt_sha = ""
-    # ★ 2026-10-22（用户口径「有几个 worker 铺多少局」）：自主机自己 rollout ⇒ 宽度就是
-    #   `ctx.rollout_workers`（缺省 = 本机 `cpu_worker_slots()`，见 plan_handoff 的装配），
-    #   **不 ping 任何人、不看 hub 的 plan 声明**。plan 里的 `games_per_stage_by_stage` 是
-    #   打包时的缺口形状（est 反解），本机核数比它多就按宽度重铺；派发侧逐关满额即停，
-    #   多出来的候选不会白跑。无 `volume` 的老课程逐字走 `pairs_for`。
-    # ★ 2026-10-22 补（同源面的那一刀）：加宽必须**连 `widen_width` 一起写进块**——块里的
-    #   `games_per_stage_by_stage` 要过 `validate_runtime_volume` 的同源复算（首批局数 =
-    #   `widen_by_width(est 反解值, widen_width)`），只改 games 不声明宽度会被节点/`iter_spec`
-    #   响亮拒收（现场：y30-stack it156，9 局/关被铺到 24 局/关 ⇒ ProtocolError 整段死）。
-    # ★ 2026-10-28（云机轮换，plan/it-stage-ratation §9.5）：本轮采哪些关 = **当轮窗口**。
-    #   `ctx.plan["volume"]` 是导出那一轮的那一份（一份块），开了轮换后每轮都要按配方
-    #   重解（`worker/plan.volume_for_round`）——否则第 2 轮起还在采第 1 轮的关集。
-    #   笔记本开关（`ctx.rotation`，三态）在这里落地：
-    #     auto = 跟随计划；on = 计划没带轮换就拒跑（不猜）；off = 把窗口降级成全关（记账）。
-    _policy = str(getattr(ctx, "rotation", "auto") or "auto")
-    window_override, rotation_override = rotation_window_for_round(ctx.plan, it, _policy)
-    if rotation_override:
-        recipe = rotation_recipe(ctx.plan) or {}
-        ctx.log(
-            f"WARN it{it}: 笔记本 --rotation off —— 本段把计划里的轮换"
-            f"（mode={recipe.get('mode')!r} per_it={recipe.get('per_it')}）降级为**全关采样**；"
-            "语料分布与导包时不同（账本 rotation.override=off 留痕）"
-        )
-    vol_probe = volume_for_round(ctx.plan, it, window_override=window_override)
-    if isinstance(vol_probe, dict) and ctx.sample_mult != 1.0:
-        # 先放大再走本机宽度的「加宽」逻辑：两张牌都是纯函数，顺序不影响同源校验。
-        vol_probe = _scaled_volume(vol_probe, ctx.sample_mult)
-    if isinstance(vol_probe, dict):
-        from worker.volume_alloc import widen_by_width
-
-        _per = vol_probe.get("games_per_stage_by_stage")
-        _width = int(ctx.rollout_workers or 0)
-        if isinstance(_per, dict) and _per and _width > 0:
-            _wide = widen_by_width(_per, _width)
-            if sum(_wide.values()) > sum(int(v) for v in _per.values()):
-                ctx.log(
-                    f"it{it} 首批按本机宽度重铺：{sum(int(v) for v in _per.values())} → "
-                    f"{sum(_wide.values())} 局（workers={_width}）"
-                )
-                vol_probe = dict(
-                    vol_probe, games_per_stage_by_stage=_wide, widen_width=_width
-                )
-    # ---- greedy 语料预算（2026-11-11，plan/greedy-offline-autonomous）----
-    # 用户口径 B「挤进去」：普通采样少采 greedy 的那一份，**整轮总量不变**。
-    # `per_stage_quota` 必须是**减量前**的整轮值 —— PPO 的逐关上限就是「整轮总量/关数」，
-    # 换成减量后的值会把 greedy 那份一并截掉（训到的 greedy 样本 = 0，账本却好看）。
-    _greedy: tuple[Any, int, dict] | None = None
+    vol_probe, window_override, rotation_override = _round_volume(ctx, it)
     _full_per_stage = int(vol_probe["per_stage_quota"]) if isinstance(vol_probe, dict) else 0
-    if (
-        isinstance(vol_probe, dict)
-        and ctx.course is None
-        and "greedy_quota" in str(ctx.manifest.get("course") or "")
-        and not ctx.greedy_course_warned
-    ):
-        # 课程声明了 greedy 但快照没加载（只可能发生在非 notebook 入口）——说出来，不静默。
-        ctx.greedy_course_warned = True
-        ctx.log(
-            "WARN: ctx.course 缺失 ⇒ 本段 greedy_quota **不生效**（按老路径跑）；"
-            "需要 greedy 的腿请用 `--artifacts <目录>`（目录里有 course.jsonc）"
-        )
-    if isinstance(vol_probe, dict):
-        _greedy = _greedy_budget(ctx.course, vol_probe)
-        if _greedy is not None:
-            _gplan, _total_t, _block = _greedy
-            _ordinary_t = max(1, _total_t - int(_gplan.total_target))
-            vol_probe = _volume_with_target(vol_probe, _ordinary_t)
-            ctx.log(
-                f"it{it} greedy 预算：普通 {_ordinary_t} + greedy {int(_gplan.total_target)}"
-                f" = {_total_t} transitions（B 口径：整轮总量不变，逐关上限仍 {_full_per_stage}）"
-            )
+    vol_probe, _greedy = _apply_greedy_budget(ctx, it, vol_probe, _full_per_stage)
     _plan = dict(ctx.plan, volume=vol_probe) if isinstance(vol_probe, dict) else ctx.plan
     if window_override is not None:
         # 降级轮：块已经按全关解好，**不要再**让 `pairs_for` 按配方派生一次（那会解回窗口）。
@@ -463,54 +544,7 @@ def _run_iteration(
         prep_b.add_raw(
             f"放大×{ctx.sample_mult:g} ⇒ {len(pairs)} 局；epochs×{ctx.epoch_mult:g} ⇒ {epochs_eff}"
         )
-    # ---- 合成第 it 轮 manifest：与 hub 发布的 kind=iter 逐字段同构 ----
-    m = dict(ctx.manifest)
-    m.update(
-        {
-            "kind": "iter",
-            "it": int(it),
-            "epochs": epochs_eff,
-            "rollout": spec,
-            "init_weights_fp": init_fp,
-            "data_fp": iter_expected_data_fp(spec),
-            # opt 走内容寻址：上一轮 PPO 已把原始 tar 写进 blob_cache ⇒ 命中即零传输
-            "opt_init": "",
-            "opt_sha": str(ctx.last_opt_sha or ""),
-            "opt_bytes": 0,
-            "seed": job_seed(str(m["runId"]), int(it), init_fp),
-        }
-    )
-    # 动态采集的**训练侧一半**：逐关严格样本量配额（`ceil(target/关数)`）必须逐轮随
-    # manifest 走。hub 发布的头一份 manifest 里通常已经有它（`loop_steps._remote_ppo` 发布时
-    # 算好），但计划才是自洽契约（包里/manual 导入的那份可能更旧）——按**计划**的值走。
-    # ★ 2026-10-30（用户口径「prep 行只留必要读数」）：漂移**不进 prep 那行**了
-    #   （那一行只留「这一轮发生了什么」）⇒ 改成**值变了才报一行**（首轮必报；同值不再报）。
-    #   为什么不静默：manifest 与计划对不上是**真异常**（节点按计划值跑，hub 按 manifest 值算），
-    #   全程静默就没人知道两边不一致 ⇒ 但也不能每轮报一行（值恒定 ⇒ 390 轮 390 条一样的话）。
-    drift = 0
-    want = 0
-    if isinstance(vol, dict):
-        # greedy 激活时用**减量前**的整轮值（见上面 B 口径那段：减量后的值会连 greedy 一起截掉）。
-        want = (
-            int(_full_per_stage or vol["per_stage_quota"])
-            if _greedy
-            else int(vol["per_stage_quota"])
-        )
-        have = int(m.get("per_stage_quota", 0) or 0)
-        drift = have if (have and have != want) else 0
-        m["per_stage_quota"] = want
-    if drift:
-        _drift_note = f"manifest {drift}/关 → 按计划 {want}/关"
-        if _drift_note != ctx.quota_drift_reported:
-            ctx.quota_drift_reported = _drift_note
-            ctx.log(f"WARN 配额漂移：{_drift_note}（本轮按计划值生效）")
-    # 回传形态按轮定（`plan/anchor-full-rounds` §4）：锚点轮弹 `w_fmt`（worker 回整份权重），
-    # 其余写 `W_DELTA_FMT`；`opt_fmt` 一律弹掉（opt 的形态在**写完盘之后**由 `after_write` 定，
-    # 那里才有「盘上最近一份整份」当基准）。`None` = 旧行为（manifest 原样）。
-    if ctx.round_forms is not None:
-        ctx.round_forms.prepare_manifest(m, it)
-    m["job_id"] = make_job_id(m)
-    m = normalize_manifest(m)
+    m = _iter_manifest(ctx, it, spec, init_fp, epochs_eff, vol, _greedy, _full_per_stage)
     # ---- 本轮 payload：只有 init_weights.json（shard 由节点现场产，与 kind=iter 一致）----
     it_dir = ctx.work_dir / m["job_id"]
     it_dir.mkdir(parents=True, exist_ok=True)

@@ -25,6 +25,19 @@
 
 ---
 
+## §194 长函数存量第十六刀：单轮执行 276 → 162（2026-11-18）
+
+`remote/plan_run.py::_run_iteration` **276 → 162 行**，长函数存量 **22 → 21**
+（`LONG_FUNCS_BASELINE` 删除 `remote/plan_run.py` 条目；`WIDE_FUNCS_BASELINE` 的
+1 条保留）。
+
+三刀纯搬移：
+- `_round_volume(ctx, it)`：当轮窗口 / rotation 降级 / sample_mult 放大 / 本机宽度加宽。
+- `_apply_greedy_budget(ctx, it, vol_probe, full_per_stage)`：greedy 减量预算。
+- `_iter_manifest(...)`：kind=iter manifest 合成（含 per_stage_quota 漂移告警）。
+
+---
+
 ## §193 长函数存量第十五刀：多课程服务循环 275 → 186（2026-11-18）
 
 `trainer/loop_serve.py::serve` **275 → 186 行**，长函数存量 **23 → 22**
