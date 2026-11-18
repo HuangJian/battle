@@ -25,6 +25,24 @@
 
 ---
 
+## §211 长函数存量第三十二刀：离线单课编排（remote）323 → 183（2026-11-18）
+
+`remote/offline_boot.py::run_one_course` **323 → 183 行**，长函数存量 **6 → 5**
+（`LONG_FUNCS_BASELINE` 删除 `remote/offline_boot.py` 条目）。
+
+改的是**生成源** `remote/_offline_boot/06_run.pyfrag`，重建后 `offline_boot.py` 逐字更新：
+- `_prepare_roots(cfg, course, multi, log)`：工作目录 + 两个产物根 + 备份恢复。
+- `_choose_pack(ctx)`：本机优先 vs 收包的判定（返回 `pack/adopt/local_first/idx`）；
+  ctx 用 `types.SimpleNamespace`（不引 dataclass：该模块要求「无 sys.modules 注册也能
+  exec」的独立导入，dataclass 在 3.10 下会炸）。
+- `_probe_hub(ccfg, creds, token, log, push_mode)`：hub 探活只做一次。
+- `_deliver(deliverable, ccfg, dest, net, course, hub, push_mode, log)`：段末交付面。
+
+178 处 `log` 逐条比对文案与顺序不变；`test_offline_notebook` 的凭据时序判据随
+`obtain_pack` 搬到 `_choose_pack`。
+
+---
+
 ## §210 长函数存量第三十一刀：Torch BC 训练循环（worker）456 → 145（2026-11-18）
 
 `worker/train/bc.py::train` **456 → 145 行**，长函数存量 **7 → 6**

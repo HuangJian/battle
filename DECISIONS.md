@@ -7540,3 +7540,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `run_epochs` / `_emit_epoch` / `finalize_bc`），长函数存量 **7 → 6**；
   形状基线删除该文件条目，并清掉三条已归零的历史条目（`train_core` / `dispatch` /
   `eval_dispatch`）。全文 → `docs/nn/engineering.md` §210。
+- **2026-11-18（长函数存量第三十二刀：离线单课编排 remote）**：
+  `remote/offline_boot.py::run_one_course` 323 → **183** 行（改生成源
+  `_offline_boot/06_run.pyfrag`，拆出 `_prepare_roots` / `_choose_pack` /
+  `_probe_hub` / `_deliver`；ctx 用 `SimpleNamespace` 以保持独立导入），
+  长函数存量 **6 → 5**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §211。
