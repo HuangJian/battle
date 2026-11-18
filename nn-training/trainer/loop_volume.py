@@ -90,6 +90,20 @@ class VolumeView:
     greedy_waves: int
 
 
+@dataclass(frozen=True, slots=True)
+class GreedyView:
+    """greedy 采集槽位的只读快照（采集阶段写、发布阶段读、跨轮清零）。
+
+    `report` 是发布阶段的留痕（`_greedy_report`）；跨轮清零是契约（旧槽位不许漏进下一轮
+    的发布预筛），而这条契约原本只能伸进 `_greedy_*` 私有槽位去断言。
+    """
+
+    plan: object | None
+    stats: dict | None
+    report: dict | None
+    waves: int
+
+
 def _learned_samples_per_game(samples: int, games: int) -> int:
     """**本轮自己**已结算的局 → 局均 samples（自校准；`0` = 还学不到/不可用）。
 
@@ -192,6 +206,15 @@ class TrainingVolume:
             greedy_plan=self._greedy_plan,
             greedy_stats=self._greedy_stats,
             greedy_waves=int(self._greedy_waves),
+        )
+
+    def greedy_view(self) -> GreedyView:
+        """greedy 槽位的只读快照（字段语义见 `GreedyView`；不改变任何状态）。"""
+        return GreedyView(
+            plan=self._greedy_plan,
+            stats=self._greedy_stats,
+            report=self._greedy_report,
+            waves=int(self._greedy_waves),
         )
 
     # ------------------------------------------------- 零落盘（按轮）

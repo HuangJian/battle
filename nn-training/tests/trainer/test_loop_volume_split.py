@@ -60,7 +60,7 @@ CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 ROUND_STEPS_PY = NN_ROOT / "trainer" / "loop_round_steps.py"
 
-#: 这一簇的成员（闭集）：12 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
+#: 这一簇的成员（闭集）：13 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
 CLUSTER = (
     "_volume_active",
     "_volume_stages",
@@ -78,6 +78,9 @@ CLUSTER = (
     # 2026-11-18（G5）：公开只读观测面 —— 测试断言配额/分关账/greedy 读数走它，
     # 不再逐条伸进私有槽位（`tests/worker/test_rollout_volume.py` 46 → 2）。
     "volume_view",
+    # 2026-11-18（G5）：greedy 槽位的只读快照 —— 跨轮清零的契约改读它
+    # （`tests/worker/test_greedy_rollout_chain.py` 6 → 0）。
+    "greedy_view",
 )
 
 #: 随簇搬走的七个槽位（新家 = `TrainingVolume`）。
@@ -189,7 +192,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_volume_only() -> None:
-    """12 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
+    """13 个成员定义在 `TrainingVolume`；`TrainingLoop` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingVolume` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。
@@ -199,7 +202,7 @@ def test_cluster_is_defined_in_loop_volume_only() -> None:
     assert set(CLUSTER) <= in_volume, sorted(set(CLUSTER) - in_volume)
     crept_back = sorted(set(CLUSTER) & in_core)
     assert crept_back == [], f"这些方法又回到 TrainingLoop 了：{crept_back}"
-    # 闭集：新家只装这 12 个方法（顺手往里塞 helper 会在这里红）
+    # 闭集：新家只装这 13 个方法（顺手往里塞 helper 会在这里红）
     assert in_volume == set(CLUSTER), sorted(in_volume ^ set(CLUSTER))
     # 旧模块里只剩**指路注释**（不是实现）：读者找 `_volume_topup` 时不会两手空空。
     core_src = CORE_PY.read_text(encoding="utf-8")

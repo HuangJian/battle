@@ -25,6 +25,23 @@
 
 ---
 
+## §161 G5 第二十二批：greedy 槽位的读数 `greedy_view()`（2026-11-18）
+
+`tests/worker/test_paired_kill.py` **6 → 0**、`tests/worker/test_greedy_rollout_chain.py`
+**6 → 0**（G5 **361 → 349**，111 → 109 文件）。
+
+- **paired kill 的 6 条**全是驱动入口：`g._paired_kill(3)` 的返回值与随后的账本才是判据，
+  统一 `killed = …; assert killed is True/False`（§149 口径）。
+- **greedy 链的 6 条**读的是 `loop._greedy_plan` / `_greedy_stats` / `_greedy_report`：
+  「node 腿每轮清零上轮 greedy 槽位」是**跨轮契约**，槽位本身是采集/发布两相之间的交接面。
+  新增 `GreedyView`（frozen dataclass）+ `TrainingVolume.greedy_view()`：
+  `plan` / `stats` / `report` / `waves`。用例的脚手架从 `SimpleNamespace` 换成继承
+  `TrainingVolume` 的最小 `_NodeLoop`（同样的字段，多这条读数），因此断言走的是**生产类**
+  的真实查询方法，而不是替身自己伪造的属性。`test_loop_volume_split.py` 的成员闭集
+  12 → 13（新增 `greedy_view`）。
+
+---
+
 ## §160 G5 第二十一批：notebook 运行时的四个探测入口（2026-11-18）
 
 `tests/remote/test_notebook_runtime.py` 私有断言 **8 → 0**（G5 **369 → 361**，112 → 111 文件）。

@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from trainer.loop_remote_job import _trim_shards_to_quota
 from trainer.loop_round_steps import RoundSteps
+from trainer.loop_volume import TrainingVolume
 from worker.events import write_iteration, write_rollout_end
 from worker.greedy_quota import (
     greedy_progress,
@@ -197,15 +198,22 @@ class _Gate:
         pass
 
 
-def _node_loop(gq: dict) -> SimpleNamespace:
-    return SimpleNamespace(
-        args=SimpleNamespace(greedy_quota=gq),
-        _remote_iter=lambda it, pairs: None,
-        # 上一轮残留：node 分支不跑采集，但发布相位仍会读这三个槽位。
-        _greedy_plan={"stale": True},
-        _greedy_stats={"stale": True},
-        _greedy_report={"stale": True},
-    )
+class _NodeLoop(TrainingVolume):
+    """node 腿的最小脚手架：字段与旧 `SimpleNamespace` 一致，另带 `greedy_view()`。"""
+
+    _remote_iter: Any
+
+
+def _node_loop(gq: dict) -> _NodeLoop:
+    loop = _NodeLoop()
+    loop.args = SimpleNamespace(greedy_quota=gq)
+    loop._remote_iter = lambda it, pairs: None
+    # 上一轮残留：node 分支不跑采集，但发布相位仍会读这三个槽位。
+    loop._greedy_plan = {"stale": True}
+    loop._greedy_stats = {"stale": True}
+    loop._greedy_report = {"stale": True}
+    loop._greedy_waves = 2
+    return loop
 
 
 def _node_ctx() -> SimpleNamespace:
@@ -231,9 +239,10 @@ def test_node_path_accepts_active_greedy_quota(
     _patch_node_round(monkeypatch)
     loop = _node_loop({"win": 0.1, "timeout": 0.075})
     assert RoundSteps.step_rollout(cast(Any, loop), cast(Any, _node_ctx())) is None
-    assert loop._greedy_plan is None
-    assert loop._greedy_stats is None
-    assert loop._greedy_report is None
+    greedy = loop.greedy_view()
+    assert greedy.plan is None
+    assert greedy.stats is None
+    assert greedy.report is None
 
 
 def test_node_gate_allows_zero_quota_and_clears_slots(
@@ -243,6 +252,7 @@ def test_node_gate_allows_zero_quota_and_clears_slots(
     _patch_node_round(monkeypatch)
     loop = _node_loop({"win": 0, "loss": 0, "timeout": 0})
     assert RoundSteps.step_rollout(cast(Any, loop), cast(Any, _node_ctx())) is None
-    assert loop._greedy_plan is None
-    assert loop._greedy_stats is None
-    assert loop._greedy_report is None
+    greedy = loop.greedy_view()
+    assert greedy.plan is None
+    assert greedy.stats is None
+    assert greedy.report is None

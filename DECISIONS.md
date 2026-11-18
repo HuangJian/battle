@@ -7288,3 +7288,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_tpu_holders` / `_hub_base_of` 都是被测入口本身（前两个还是夹具注入点 / 被 monkeypatch），
   改名带不来契约收益 ⇒ 一律把调用移出 assert，判据本体不动。
   全文 → `docs/nn/engineering.md` §160。
+- **2026-11-18（G5 第二十二批：greedy 槽位的读数）**：`test_paired_kill.py` 6 → 0、
+  `test_greedy_rollout_chain.py` 6 → 0（G5 361 → **349**，109 文件）。paired kill 全是驱动入口
+  （调用移出 assert）；greedy 链的「跨轮清零」改读新增的 `GreedyView` +
+  `TrainingVolume.greedy_view()`（`plan` / `stats` / `report` / `waves`），用例脚手架换成继承
+  `TrainingVolume` 的最小 `_NodeLoop`；volume 拆分守卫成员闭集 12 → 13。
+  全文 → `docs/nn/engineering.md` §161。
