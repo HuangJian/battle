@@ -7299,3 +7299,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `rejected`（升序轮次）与 `ledger_readable`（抽屉删除的硬门槛，DoD-3c），
   D6 的 TTL/人工重置用例改读它；`_reject_round(...)` 的调用移出 assert。
   全文 → `docs/nn/engineering.md` §162。
+- **2026-11-18（G5 第二十四批：D9 闭锁的读数）**：`tests/hub/test_hub_auth_d9_order.py`
+  私有断言 8 → **0**（G5 343 → **335**，107 文件）。新增 `AuthState`（frozen dataclass）+
+  `_AuthGuard.auth_state()`：`failures` / `blocked_until`，两份 dict 锁内复制（请求线程持续改写，
+  测试要的是某一刻的一致快照）；`_JobStore` 继承 `_AuthGuard`，既有入口可直接读；
+  `hub/queue_auth.py` 按鉴权四则同一条「单课程借 store」路径转发。`test_hub_queue_split.py`
+  同步四处账本（门面闭集 34 → 35 / declared 38 → 39、DOMAINS、DOMAIN_METHODS 135 → 136、
+  实现名 137 → 138）。全文 → `docs/nn/engineering.md` §163。

@@ -25,6 +25,23 @@
 
 ---
 
+## §163 G5 第二十四批：D9 闭锁的读数 `auth_state()`（2026-11-18）
+
+`tests/hub/test_hub_auth_d9_order.py` 私有断言 **8 → 0**（G5 **343 → 335**，108 → 107 文件）。
+
+这条用例守的是 D9 的**顺序语义**（合法 token 先验 / 封禁只拒无效尝试 / 回环永不计数 /
+伪造 `CF-Connecting-IP` 不得连坐别人），判据里要读的是两张表：失败计数与封禁到期时刻。
+新增 `AuthState`（frozen dataclass，两份 dict 在锁内**复制**）+ `_AuthGuard.auth_state()`：
+`failures` / `blocked_until`。返回副本而不是活引用——这两张表会被请求线程持续改写，
+测试读到的必须是**某一刻**的一致快照；`is_blocked()` / `blocked_remaining()` 的判据不变。
+`_JobStore` 继承 `_AuthGuard` ⇒ 既有 `store.auth_state()` 直接可用（多课程侧同源）。
+`_HubQueue` 的鉴权面是**覆写簇**（`hub/queue_auth.py`：单课程借 store、多课程用自己那份），
+所以 `auth_state` 也走同一条委派；`test_hub_queue_split.py` 的四处账本同步：
+门面同名闭集 34 → 35（`declared` 38 → 39）、`DOMAINS["queue_auth"]` + `auth_state`、
+`DOMAIN_METHODS` 135 → 136、实现名总数 137 → 138。
+
+---
+
 ## §162 G5 第二十三批：补传视图补上拒收面（2026-11-18）
 
 `tests/remote/test_offline_deliver.py` 私有断言 **6 → 0**（G5 **349 → 343**，109 → 108 文件）。

@@ -78,8 +78,9 @@ def test_loopback_failures_never_count_or_block(tmp_path: Path) -> None:
         for i in range(12):
             assert _ping(base, BAD) == 401, f"回环第 {i + 1} 次失败应仍是 401（永不 403）"
         assert store.is_blocked("127.0.0.1") is False
-        assert store._auth_fail == {}, "回环失败不得计数"
-        assert store._auth_blocked_until == {}, "回环失败不得产生封禁记录"
+        state = store.auth_state()
+        assert state.failures == {}, "回环失败不得计数"
+        assert state.blocked_until == {}, "回环失败不得产生封禁记录"
     finally:
         srv.shutdown()
         th.join()
@@ -136,9 +137,9 @@ def test_remote_ip_valid_auth_resets_counter(tmp_path: Path) -> None:
     store = _boot_server(tmp_path)[1]
     for _ in range(4):
         store.auth_failure(REMOTE)
-    assert store._auth_fail.get(REMOTE) == 4
+    assert store.auth_state().failures.get(REMOTE) == 4
     store.auth_success(REMOTE)
-    assert store._auth_fail == {}, "合法鉴权后计数应清零"
+    assert store.auth_state().failures == {}, "合法鉴权后计数应清零"
     assert store.auth_failure(REMOTE) == 1, "清零后重新从 1 计"
     assert store.is_blocked(REMOTE) is False
 
@@ -207,7 +208,7 @@ def test_blocked_remote_ip_invalid_token_gets_403(tmp_path: Path) -> None:
     h = _stub_handler(store, "sekret", REMOTE, f"Bearer {BAD}")
     assert _auth_ok(h) is False
     assert h.sent == [(403, {"error": "ip blocked"})]
-    assert store._auth_fail == {}, "封禁期内的无效尝试不得再累计"
+    assert store.auth_state().failures == {}, "封禁期内的无效尝试不得再累计"
 
 
 def test_invalid_attempts_end_in_ban_on_sixth(tmp_path: Path) -> None:
@@ -229,7 +230,7 @@ def test_loopback_never_reaches_ban_through_handler(tmp_path: Path) -> None:
         h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}")
         assert _auth_ok(h) is False
         assert h.sent == [(401, {"error": "unauthorized"})]
-    assert store._auth_blocked_until == {}
+    assert store.auth_state().blocked_until == {}
 
 
 # ────────────────────────── 归因来源（B：隧道入口来源还原） ──────────────────────────
@@ -337,7 +338,7 @@ def test_local_component_without_cf_header_still_exempt(tmp_path: Path) -> None:
         h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}")
         assert _auth_ok(h) is False
         assert h.sent == [(401, {"error": "unauthorized"})]
-    assert store._auth_blocked_until == {}
+    assert store.auth_state().blocked_until == {}
 
 
 def test_direct_peer_cannot_declare_itself(tmp_path: Path) -> None:
@@ -364,7 +365,7 @@ def test_forged_loopback_header_is_harmless(tmp_path: Path) -> None:
         h = _stub_handler(store, "sekret", "127.0.0.1", f"Bearer {BAD}", cf="127.0.0.1")
         assert _auth_ok(h) is False
         assert h.sent == [(401, {"error": "unauthorized"})]
-    assert store._auth_blocked_until == {}, "伪造回环值不得产生任何封禁"
+    assert store.auth_state().blocked_until == {}, "伪造回环值不得产生任何封禁"
 
     # 受害者 = tailnet 上的真 worker：被人伪造其 IP 打了 5 次无效，仍持合法 token 照常放行
     victim = "100.124.208.62"
