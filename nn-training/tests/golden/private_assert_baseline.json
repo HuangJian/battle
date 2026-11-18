@@ -40,7 +40,6 @@
   "tests/remote/test_http_split.py": 1,
   "tests/remote/test_job_identity_collision.py": 2,
   "tests/remote/test_lifecycle.py": 3,
-  "tests/remote/test_notebook_runtime.py": 8,
   "tests/remote/test_offline_bc_course.py": 1,
   "tests/remote/test_offline_boot.py": 1,
   "tests/remote/test_offline_deliver.py": 6,

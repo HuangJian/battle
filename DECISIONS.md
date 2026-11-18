@@ -7283,3 +7283,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_adopt_existing` / `_settle_assignment` / `_settle_retry` 的调用移出 assert；新增
   `OfflinePushDispatcher.pump_count()` 回答「拉取线程退干净没有」（账本先空、线程后退出，
   与 `tick()["assignments"]` 不是同一时刻的同一件事）。全文 → `docs/nn/engineering.md` §159。
+- **2026-11-18（G5 第二十一批：notebook 运行时的探测入口）**：`tests/remote/test_notebook_runtime.py`
+  私有断言 8 → **0**（G5 369 → **361**，111 文件）。`_resolve_backend` / `_run_probe` /
+  `_tpu_holders` / `_hub_base_of` 都是被测入口本身（前两个还是夹具注入点 / 被 monkeypatch），
+  改名带不来契约收益 ⇒ 一律把调用移出 assert，判据本体不动。
+  全文 → `docs/nn/engineering.md` §160。

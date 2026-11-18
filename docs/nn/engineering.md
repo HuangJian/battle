@@ -25,6 +25,23 @@
 
 ---
 
+## §160 G5 第二十一批：notebook 运行时的四个探测入口（2026-11-18）
+
+`tests/remote/test_notebook_runtime.py` 私有断言 **8 → 0**（G5 **369 → 361**，112 → 111 文件）。
+
+四条私有名都是**被测入口本身**，且其中三个是 autouse 夹具的注入点 / 会被 monkeypatch
+（`_resolve_backend`、`_tpu_holders`）——给它们改名会把夹具、假货与本文件之外的历史注释
+一起拖进来，换不到任何契约收益。因此一律按「驱动入口移出 assert」处置：
+
+- `_resolve_backend()`：`backend = …; assert backend == "paddle:auto"`；
+- `_run_probe(...)`（两处）：`probed = …; assert probed == {…}` / `assert probed is None`；
+- `_tpu_holders()`（两处）：`holders = …; assert holders == [...]`；
+- `_hub_base_of(...)`（三处）：`base = …; assert base == "https://b"`。
+
+判据本体（三态契约、vfio 命中、`registry_url > hub_url`）一字不改。
+
+---
+
 ## §159 G5 第二十批：派发器的线程读数与替身字段（2026-11-18）
 
 `tests/hub/test_offline_push_dispatch.py` 私有断言 **7 → 0**（G5 **376 → 369**，113 → 112 文件）。

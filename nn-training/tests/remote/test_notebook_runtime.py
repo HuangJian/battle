@@ -384,7 +384,8 @@ def test_backend_comes_from_the_worker_resolver_not_a_local_copy(
         nbr, "_resolve_backend", _REAL_RESOLVE_BACKEND
     )  # 撤掉 autouse 的 torch 假货
     monkeypatch.setattr(bc_job, "resolve_ppo_backend", lambda req: f"paddle:{req}")
-    assert nbr._resolve_backend() == "paddle:auto"
+    backend = nbr._resolve_backend()
+    assert backend == "paddle:auto"
     monkeypatch.setattr(bc_job, "resolve_ppo_backend", real)
 
 
@@ -406,7 +407,8 @@ def test_run_probe_reads_last_json_line(monkeypatch: pytest.MonkeyPatch) -> None
             stdout="一些噪声\n" + '{"v": "3.3.1", "n": 1, "names": ["A100"]}\n'
         ),
     )
-    assert nbr._run_probe(lambda m: None, "code", "paddle") == {
+    probed = nbr._run_probe(lambda m: None, "code", "paddle")
+    assert probed == {
         "v": "3.3.1",
         "n": 1,
         "names": ["A100"],
@@ -432,7 +434,8 @@ def test_run_probe_unparsable_output_is_none(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         nbr, "run_capture", lambda argv, timeout=0: _FakeCompleted(stdout="not json\n")
     )
-    assert nbr._run_probe(lambda m: None, "code", "paddle") is None
+    probed = nbr._run_probe(lambda m: None, "code", "paddle")
+    assert probed is None
 
 
 # ------------------------------------------------------------------ _tpu_holders
@@ -458,12 +461,14 @@ def test_tpu_holders_parses_fd_links(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nbr.os, "readlink", fake_readlink)
     monkeypatch.setattr("builtins.open", fake_open)
     # vfio 命中（cmdline 解析）收录；非 vfio（空串 / accel）跳过
-    assert nbr._tpu_holders() == [(123, "/dev/vfio/0", "python -m remote.worker")]
+    holders = nbr._tpu_holders()
+    assert holders == [(123, "/dev/vfio/0", "python -m remote.worker")]
 
 
 def test_tpu_holders_no_proc_no_crash() -> None:
     # Windows / 非 Linux：glob 空列表 → 空 holders（本机即为真）
-    assert nbr._tpu_holders() == []
+    holders = nbr._tpu_holders()
+    assert holders == []
 
 
 # ------------------------------------------------------------------ run_pull_worker
@@ -1243,9 +1248,12 @@ def test_sha12_matches_sha256_prefix() -> None:
 
 def test_hub_base_prefers_registry_url() -> None:
     """通知与注册**同一个**地址：`registry_url` > `hub_url`，去尾斜杠。"""
-    assert nbr._hub_base_of({"hub_url": "http://a/", "registry_url": "https://b/"}) == "https://b"
-    assert nbr._hub_base_of({"hub_url": "http://a/"}) == "http://a"
-    assert nbr._hub_base_of({}) == ""
+    base = nbr._hub_base_of({"hub_url": "http://a/", "registry_url": "https://b/"})
+    assert base == "https://b"
+    base = nbr._hub_base_of({"hub_url": "http://a/"})
+    assert base == "http://a"
+    base = nbr._hub_base_of({})
+    assert base == ""
 
 
 def test_push_worker_passes_result_ready_hub_url(
