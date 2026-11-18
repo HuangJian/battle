@@ -1047,3 +1047,75 @@ def test_progress_judgement_tolerates_only_a_stale_bundle(
     stale.__dict__.update(should_log_progress=buggy_signature)
     with pytest.raises(AttributeError):
         offline_boot._should_log_progress(None, kind="ping", it=1, done=1, total=4)
+
+
+def test_boot_net_errors_only_cover_the_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_BOOT_NET_ERRORS` 的边界（P0-7 第二十四批）：引导态的三处读面只吞传输面。
+
+    `_post_json`（控制面小 JSON）与 `_http_error_parts`（HTTPError 的正文）在「连不上 / 体读不出来」
+    时都有正确缺省（`(0, {})` / `（无正文）`）；但把 `AttributeError` 也读成那件事，现场就是
+    「hub 时好时坏」，而真因（我们读响应/读配置的姿势坏了）一次也不会进日志。
+    """
+    from typing import Any, cast
+
+    lines: list[str] = []
+
+    def dead(*_a: object, **_k: object) -> Any:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(offline_boot.urllib.request, "urlopen", dead)
+    status, body = offline_boot._post_json("http://hub.invalid/x", "t", lines.append)
+    assert (status, body) == (0, {}), "连不上 ⇒ (0, {})（训练永不因网络停摆）"
+    assert len(lines) == 1, "失败要恰留一行（多一行是刷屏、零行是静默）"
+
+    class _TruncatedError:
+        def read(self) -> bytes:
+            raise ConnectionResetError("body truncated")
+
+    text, doc = offline_boot._http_error_parts(cast("Any", _TruncatedError()))
+    assert text == "（无正文）" and doc == {}, "体读不出来 ⇒ 保状态码优先，正文说清「无」"
+
+    class _BuggyError:
+        def read(self) -> bytes:
+            raise AttributeError("HTTPError lost .fp")
+
+    with pytest.raises(AttributeError):
+        offline_boot._http_error_parts(cast("Any", _BuggyError()))
+
+    def buggy(*_a: object, **_k: object) -> Any:
+        raise AttributeError("urlopen lost .read")
+
+    monkeypatch.setattr(offline_boot.urllib.request, "urlopen", buggy)
+    with pytest.raises(AttributeError):
+        offline_boot._post_json("http://hub.invalid/x", "t", lines.append)
+
+
+def test_hub_candidates_tolerates_a_missing_sibling_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`hub_candidates` 的 tailnet 候选（P0-7 第二十四批）：兄弟文件没拉下来 / 配置脏值 ⇒ 少一条候选；
+    `resolve_hub_url` 自己的 bug ⇒ 穿出去。
+
+    为什么值得分开：`resolve_hub_url` 是**纯字符串**函数（没有地址就返空串，不抛），所以它真抛
+    只能是我们的 bug；把它读成「没有 tailnet 候选」＝ 云机改用公网 URL 并**白起隧道**，而日志
+    看不出来少了什么。
+    """
+    monkeypatch.setattr(offline_boot, "is_kaggle", lambda: False)
+    cfg = {"hub_url": "http://hub.tailnet.ts.net:8787", "hub_port": 8787}
+    creds = {"HUB_IP": "100.64.0.5"}
+
+    class _MissingSibling:
+        def resolve_hub_url(self, *_a: object) -> str:
+            raise ImportError("tailscale_boot.py was not pulled")
+
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _MissingSibling())
+    only_public = offline_boot.hub_candidates(cfg, creds)
+    assert only_public == ["http://hub.tailnet.ts.net:8787"], only_public
+
+    class _BuggySibling:
+        def resolve_hub_url(self, *_a: object) -> str:
+            raise AttributeError("resolve_hub_url lost .split")
+
+    monkeypatch.setattr(offline_boot, "_load_tailscale_boot", lambda: _BuggySibling())
+    with pytest.raises(AttributeError):
+        offline_boot.hub_candidates(cfg, creds)

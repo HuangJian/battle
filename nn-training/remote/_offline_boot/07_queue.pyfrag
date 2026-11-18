@@ -25,7 +25,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
         if body and body not in ("（空正文）", "（无正文）"):
             log(f"  hub 说：{body}")
         return int(e.code), doc
-    except Exception as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
+    except _BOOT_NET_ERRORS as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
         log(f"  端点连不上（{type(e).__name__}: {e}）")
         return 0, {}
 

@@ -1,5 +1,16 @@
 # ═══ part 2/12: 02_consts — 常量与超时：包名 / 端点 / 心跳与打点预算 / 取包超时 / opener ═══
 
+#: 「这一发没答」的真失败形态（控制面小 JSON / HTTPError 正文读面共用；`common.errors.NET_ERRORS`
+#: 的 standalone 版 —— 本文件不得 import 本仓代码）：`OSError` 盖 URLError / 超时 / TLS / socket，
+#: `HTTPException` 是状态行或体被截断，`ValueError` 是 URL / 头拼不对。**4xx/5xx 不算**（那是「有答」，
+#: 走 `HTTPError` 分支）。程序员错（`AttributeError` / `KeyError`）不落这个集：把它读成「连不上」
+#: 会让「hub 时好时坏」永远盖住一个真 bug。
+_BOOT_NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    http.client.HTTPException,
+    ValueError,
+)
+
 #: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
 BUNDLE_INDEX = "tools.task.json"
 CODE_NAME = "code.zip"

@@ -45,7 +45,7 @@ def _http_error_parts(
     """
     try:
         raw = e.read()
-    except Exception:  # 正文读不出来不该盖掉 HTTP 状态本身
+    except _BOOT_NET_ERRORS:  # 正文读不出来不该盖掉 HTTP 状态本身
         return "（无正文）", {}
     try:
         loaded = json.loads(raw.decode("utf-8", "replace"))

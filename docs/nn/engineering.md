@@ -25,6 +25,31 @@
 
 ---
 
+## §140 P0-7 第二十四批：引导态的控制面读面（2026-11-18）
+
+`remote/offline_boot.py` 16 → **13**（仍是生成物：改分片 → `tools/build_offline_boot.py`）。
+关键区别：本文件**不得 import 本仓代码**（standalone 运输单元）⇒ 它不能复用
+`common.errors.NET_ERRORS`，只能就地组装一份 standalone 版：
+
+```python
+_BOOT_NET_ERRORS = (OSError, http.client.HTTPException, ValueError)
+```
+
+| 位置 | 结论 | 宽捕读错时 |
+|---|---|---|
+| `_post_json`（控制面小 JSON） | 「这一发没答 ⇒ `(0, {})`」（训练永不因网络停摆） | 我们读响应的姿势坏了 ⇒ 也当成「端点连不上」——现场是「hub 时好时坏」 |
+| `_http_error_parts`（HTTPError 正文） | 「没有正文」但**保状态码** | 同上，且会把「我方 bug」写进「hub 说：（无正文）」的字段里 |
+| `hub_candidates`（tailnet 候选） | 少一条候选（兄弟文件没拉 / 配置脏值） | `resolve_hub_url` 是**纯字符串**函数（没地址返空串、不抛）⇒ 它抛只能是我们的 bug；读成「没候选」= 云机改走公网 URL 并**白起隧道**，日志里看不出少了什么 |
+
+判据（`tests/remote/test_offline_boot.py` +2）：`urlopen` 抛 `OSError` ⇒ `_post_json` 返回 `(0, {})`
+且恰一行日志；`AttributeError` ⇒ 穿出（两处：`urlopen` 与 `HTTPError.read`）；
+`_load_tailscale_boot().resolve_hub_url` 抛 `ImportError` ⇒ 只剩公网候选，抛 `AttributeError` ⇒ 穿出。
+
+读数：G4 **346 → 343**（137 文件）· G9 25 不变 · 用例 6238。累计（第十六~二十四批）：
+**397 → 343**（139 → 137 文件）。
+
+---
+
 ## §139 P0-7 第二十三批：引导形态的两类边界（2026-11-18）
 
 `remote/offline_boot.py`（**生成物**：源码在 `remote/_offline_boot/*.pyfrag`，改完跑

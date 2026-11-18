@@ -56,6 +56,7 @@ hub 刚说「已替你触发一次重导，稍后重试」，下一行就是框�
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib
 import io
 import json

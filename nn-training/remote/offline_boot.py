@@ -62,6 +62,7 @@ hub 刚说「已替你触发一次重导，稍后重试」，下一行就是框�
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib
 import io
 import json
@@ -218,6 +219,17 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ═══ part 2/12: 02_consts — 常量与超时：包名 / 端点 / 心跳与打点预算 / 取包超时 / opener ═══
+
+#: 「这一发没答」的真失败形态（控制面小 JSON / HTTPError 正文读面共用；`common.errors.NET_ERRORS`
+#: 的 standalone 版 —— 本文件不得 import 本仓代码）：`OSError` 盖 URLError / 超时 / TLS / socket，
+#: `HTTPException` 是状态行或体被截断，`ValueError` 是 URL / 头拼不对。**4xx/5xx 不算**（那是「有答」，
+#: 走 `HTTPError` 分支）。程序员错（`AttributeError` / `KeyError`）不落这个集：把它读成「连不上」
+#: 会让「hub 时好时坏」永远盖住一个真 bug。
+_BOOT_NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    http.client.HTTPException,
+    ValueError,
+)
 
 #: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
 BUNDLE_INDEX = "tools.task.json"
@@ -707,7 +719,10 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     if ip:
         try:
             resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
-        except Exception:
+        except (ImportError, ValueError, TypeError):
+            # 两类**真**失败：① 兄弟文件没拉下来（`ImportError`，引导形态常态）；② 配置里的
+            # `hub_port` 是脏值（`ValueError` / `TypeError`）。`resolve_hub_url` 本身是纯字符串函数
+            # （没有地址就返空串，不抛），所以它真抛就是我们的 bug —— 那档现在穿出去。
             resolved = ""
         if resolved and resolved not in out:
             out.append(resolved)
@@ -779,7 +794,7 @@ def _http_error_parts(
     """
     try:
         raw = e.read()
-    except Exception:  # 正文读不出来不该盖掉 HTTP 状态本身
+    except _BOOT_NET_ERRORS:  # 正文读不出来不该盖掉 HTTP 状态本身
         return "（无正文）", {}
     try:
         loaded = json.loads(raw.decode("utf-8", "replace"))
@@ -2018,7 +2033,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
         if body and body not in ("（空正文）", "（无正文）"):
             log(f"  hub 说：{body}")
         return int(e.code), doc
-    except Exception as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
+    except _BOOT_NET_ERRORS as e:  # 连不上/超时：best-effort（训练永不因网络停摆）
         log(f"  端点连不上（{type(e).__name__}: {e}）")
         return 0, {}
 

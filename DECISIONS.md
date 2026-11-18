@@ -7128,3 +7128,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   ③ 我们自己读错（`AttributeError` / `KeyError`）现在穿出去 —— 否则「进度行全消失」永远被读成
   「引导形态本来就这样」，真因一次也不会进日志。判据 `tests/remote/test_offline_boot.py` +1；
   改回 `except Exception` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §139。
+
+- **2026-11-18（P0-7 第二十四批：引导态的控制面读面）**：`remote/offline_boot.py` 16 → **13**
+  （G4 346 → **343**；生成物，改分片后 `tools/build_offline_boot.py` 重建）。新点：本文件
+  **不得 import 本仓代码**（standalone 运输单元）⇒ 不能复用 `common.errors.NET_ERRORS`，就地组装
+  standalone 版 `_BOOT_NET_ERRORS = (OSError, http.client.HTTPException, ValueError)`，供
+  `_post_json`（连不上仍 `(0, {})` + 一行日志）与 `_http_error_parts`（HTTPError 正文读不出来仍
+  「（无正文）」、状态码优先）。`hub_candidates` 收窄成 `(ImportError, ValueError, TypeError)`
+  （兄弟文件没拉下来 / `hub_port` 脏值）：`resolve_hub_url` 是**纯字符串**函数（没地址返空串、不抛），
+  旧宽捕把它读成「没有 tailnet 候选」⇒ 云机改走公网 URL 并**白起隧道**且日志看不出少了什么。
+  判据 `tests/remote/test_offline_boot.py` +2。全文 → `docs/nn/engineering.md` §140。
+  累计第十六~二十四批：G4 **397 → 343**（139 → 137 文件）。

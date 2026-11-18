@@ -278,7 +278,10 @@ def hub_candidates(cfg: dict, creds: dict) -> list[str]:
     if ip:
         try:
             resolved = _load_tailscale_boot().resolve_hub_url("", ip, int(cfg.get("hub_port") or 0))
-        except Exception:
+        except (ImportError, ValueError, TypeError):
+            # 两类**真**失败：① 兄弟文件没拉下来（`ImportError`，引导形态常态）；② 配置里的
+            # `hub_port` 是脏值（`ValueError` / `TypeError`）。`resolve_hub_url` 本身是纯字符串函数
+            # （没有地址就返空串，不抛），所以它真抛就是我们的 bug —— 那档现在穿出去。
             resolved = ""
         if resolved and resolved not in out:
             out.append(resolved)

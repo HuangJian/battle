@@ -41,7 +41,7 @@
   "remote/job_lifecycle.py": 1,
   "remote/job_round.py": 4,
   "remote/notebook_boot.py": 2,
-  "remote/offline_boot.py": 16,
+  "remote/offline_boot.py": 13,
   "remote/offline_deliver.py": 6,
   "remote/offline_deliverable.py": 1,
   "remote/offline_eval.py": 6,
