@@ -241,6 +241,28 @@ def test_status_reads_local_agent_with_auth_and_never_raises() -> None:
     assert rn._status(8443, urlopen=_opener(_Resp([1, 2]))) is None
 
 
+def test_probe_errors_are_transport_only_not_our_own_shape_bug() -> None:
+    """`_NODE_PROBE_ERRORS` 的边界（P0-7 第二十一批）：「探不活」只许是传输面的结论。
+
+    `_ping` 的结论是「节点死了 ⇒ 重启 agent」——把 `AttributeError`（回执形状变了）也读成
+    不健康就是一个重启环。`_status` 同理，后果轻些（摘要变「不可知」）。
+    反向判据：把两个 `except` 改回 `Exception` ⇒ 下面两条 DID NOT RAISE。
+    """
+    # 判据全在**返回值**上（G5：断言表达式不出现私有名）
+    for exc in (ConnectionResetError("tunnel dropped"), TimeoutError("idle"), ValueError("bad")):
+        empty_status = rn._status(8443, urlopen=_opener(exc=exc))
+        empty_ping = rn._ping(8443, urlopen=_opener(exc=exc))
+        assert empty_status is None and empty_ping is None, exc
+    not_json = rn._status(8443, urlopen=_opener(_Resp("not json")))
+    assert not_json is None, "200 但 body 不是 JSON 也只能是「不可知」"
+
+    # 我们自己的 bug：直接穿出去（两处都得抛，`_ping` 那条最贵）
+    with pytest.raises(AttributeError):
+        rn._status(8443, urlopen=_opener(exc=AttributeError("resp lost .read")))
+    with pytest.raises(AttributeError):
+        rn._ping(8443, urlopen=_opener(exc=AttributeError("resp lost .read")))
+
+
 def test_output_summary_cadence_is_ten_minutes() -> None:
     """10 分钟一行（用户 2026-10-18 口径）——节拍是口径本身，写死值相等判据。"""
     assert rn.OUTPUT_STATUS_EVERY_SEC == 600.0
@@ -1403,3 +1425,40 @@ def test_start_cloudflared_caches_after_download(
     )
     assert out is not None
     assert stored and stored[0][0] == cache and stored[0][1] == "cloudflared"
+
+
+def test_bun_mirror_install_swallows_transport_and_bad_zip_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_BUN_INSTALL_ERRORS` 的边界（P0-7 第二十一批）：装不上 ⇒ `""`（回落直连），但只对
+    「网/盘/坏 zip」这一族；`zip` 布局假设变了（`AttributeError`）要穿出去。
+
+    为什么值得分开：这个函数的返回值是「镜像装没装上」，调用方据此回落直连。把我们的 bug
+    记成「镜像不可用」= 一个永久静默失效的优化路径（现场只会看到「镜像总是不行」）。
+    """
+    monkeypatch.setattr(rn.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(rn, "_bun_target", lambda *_a: "bun-linux-x64")
+    logs: list[str] = []
+
+    def fake_download(_urls, dest, _log, **_kw):
+        Path(dest).write_bytes(b"not a zip")
+        return True
+
+    monkeypatch.setattr(rn, "_download_retry", fake_download)
+    monkeypatch.setattr(rn, "_latest_bun_version", lambda _txt: "1.2.3")
+    monkeypatch.setattr(
+        rn.urllib.request,
+        "urlopen",
+        lambda *a, **k: _Resp("bun-v1.2.3"),
+    )
+    installed = rn._install_bun_mirror({}, logs.append)
+    assert installed == "", "坏 zip ⇒ 回落直连，不抛"
+    assert len(logs) >= 1, "失败要留痕（否则现场只看到「镜像总是不行」而不知道是坏包）"
+
+    class _BadZip:
+        def __init__(self, *_a, **_k):
+            raise AttributeError("zipfile API changed shape")
+
+    monkeypatch.setattr(rn.zipfile, "ZipFile", _BadZip)
+    with pytest.raises(AttributeError):
+        rn._install_bun_mirror({}, logs.append)

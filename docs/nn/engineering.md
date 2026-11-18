@@ -25,6 +25,30 @@
 
 ---
 
+## §137 P0-7 第二十一批：探活面的结论最贵（2026-11-18）
+
+`remote/rollout_node.py` 8 → **4**。这一批的关键不是「捕得宽不宽」，而是**结论有多贵**：
+
+| 位置 | 结论 | 宽捕读错时的后果 | 修法 |
+|---|---|---|---|
+| `_ping` | 「agent 健不健康」 | **重启环**：一个回执形状的 `AttributeError` 被读成不健康 ⇒ 杀 agent、重拉、再杀 | `_NODE_PROBE_ERRORS` = `NET_ERRORS` + `http.client.HTTPException` + `ValueError` |
+| `_status` | 「近 30min 产出可不可知」 | 只让摘要变「不可知」——可丢的观测，但同一句假话 | 同上集 |
+| `_probe_https` | 「公网通不通」 | 姿势选择落到错的候选（白等一个超时） | 同上集 |
+| `_install_bun_mirror` | 「镜像装没装上」 | 回落直连，于是镜像路径**永久静默失效**（现场只看到「镜像总是不行」） | `_BUN_INSTALL_ERRORS` = OSError / RuntimeError / BadZipFile / EOFError |
+
+留下的 4 处：`_terminate` 的两级 kill（terminate+wait 失败后的最后一级 kill，收尾不该制造新异常，
+G9 冻结）、`_slot_count` 的 platform_utils 兜底（已把异常类型写进 `note`）、`_open_tailscale`
+（`tailscale_boot.ensure` 的异常族由那边定义，边界义务是「失败仍继续走手动送包」）。
+
+判据（`tests/remote/test_rollout_node.py` +2）：
+
+1. 断连 / 超时 / 200-非-JSON ⇒ `_ping` 与 `_status` 都 `None`；`AttributeError` ⇒ 两处都穿出去；
+2. 坏 zip ⇒ `_install_bun_mirror` 返回 `""` 并留一行「安装失败」；`ZipFile` 抛 `AttributeError` ⇒ 穿出。
+
+读数：G4 **356 → 352**（137 文件）· G9 25 不变 · 反向判据（把集改回 `(Exception,)`）实测红。
+
+---
+
 ## §136 P0-7 第二十批：补传腿的「不可达 / 没送达」不许当成垃圾桶（2026-11-18）
 
 `remote/offline_deliver.py` 12 → **6**。这里两句话经常被合写成一句：

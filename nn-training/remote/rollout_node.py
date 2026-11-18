@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import platform
@@ -47,6 +48,7 @@ from typing import Any
 
 from common import runtime
 from common.env_probe import probe_cloud_env, worker_name
+from common.errors import NET_ERRORS
 from common.proc import run_capture
 from remote import tailscale_boot
 
@@ -72,6 +74,27 @@ from remote.rollout_tunnel import wait_url as _wait_tunnel_url
 #: 通道名（与 hub/nodes 注册载荷里的 url 形态对应）。
 LINK_TAILSCALE = "tailscale"
 LINK_CLOUDFLARED = "cloudflared"
+
+#: 「探不活」的真失败形态（`_probe_https` / `_ping` / `_status` 共用）：传输面 = `NET_ERRORS`
+#: （OSError 盖住 URLError/超时/TLS/socket 被拒，`RuntimeError` 是传输壳「重试耗尽无结果」的
+#: 防御性 raise），再加 `http.client.HTTPException`（体被截断/状态行乱）与 `ValueError`（200 但
+#: body 不是 JSON）。**程序员错不落这个集**：`_ping` 的结论是「节点死了 ⇒ 重启 agent」，把
+#: `AttributeError`（回执形状变了）读成不健康就是重启环，而那是最贵的一种误诊。
+_NODE_PROBE_ERRORS: tuple[type[BaseException], ...] = (
+    *NET_ERRORS,
+    http.client.HTTPException,
+    ValueError,
+)
+
+#: bun 镜像安装的真失败形态：网络/盘（OSError）、下载重试用尽（我们自己的 RuntimeError）、
+#: zip 坏了或截断（`BadZipFile` / `EOFError`）。`zip` 里没有那个目录是我们自己的
+#: `FileNotFoundError`（⊂ OSError）⇒ 同样落到「镜像没装上、回落直连」。
+_BUN_INSTALL_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    RuntimeError,
+    zipfile.BadZipFile,
+    EOFError,
+)
 
 #: 退避上限（net/server 类失败）。
 RETRY_MAX_SEC = 300.0
@@ -205,7 +228,7 @@ def _probe_https(
             return True
     except urllib.error.HTTPError:
         return True  # 404/405 也说明 DNS/TLS/代理链通了
-    except Exception:
+    except _NODE_PROBE_ERRORS:
         return False
 
 
@@ -493,7 +516,7 @@ def _install_bun_mirror(cfg: dict, log: Callable[[str], None]) -> str:
             shutil.copyfile(src, final)
             final.chmod(0o755)
             return str(final)
-    except Exception as e:
+    except _BUN_INSTALL_ERRORS as e:
         log(f"bun 镜像安装失败（{type(e).__name__}: {e}）")
         return ""
 
@@ -893,7 +916,7 @@ def _ping(port: int, auth: str = "", timeout: float = 5.0, urlopen: RegisterFn |
         with opener(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
             return data if isinstance(data, dict) else None
-    except Exception:
+    except _NODE_PROBE_ERRORS:
         return None
 
 
@@ -913,7 +936,7 @@ def _status(
         with opener(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
             return data if isinstance(data, dict) else None
-    except Exception:
+    except _NODE_PROBE_ERRORS:
         return None
 
 

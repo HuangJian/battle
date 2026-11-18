@@ -7094,3 +7094,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   留下的 6 处全部就地写明只能宽的理由。判据 `tests/remote/test_offline_deliver.py` +3（全走公开面：
   断连仍不可达 / 本模块 bug 穿出 / 非法 run_id 是唯一构造失败 + 备份判据面）。
   全文 → `docs/nn/engineering.md` §136。
+
+- **2026-11-18（P0-7 第二十一批：探活面的结论最贵）**：`remote/rollout_node.py` 8 → **4**
+  （G4 356 → **352**）。判据从「捕得宽不宽」换成「结论有多贵」：`_ping` 的回答是「节点死了 ⇒
+  重启 agent」，旧宽捕让一个回执形状的 `AttributeError` 也答成不健康 ⇒ **重启环**；`_status` 同集
+  （后果轻些：摘要变「不可知」）；`_probe_https` 用同一集（姿势选择落到错候选）。三处共用
+  `_NODE_PROBE_ERRORS = (*NET_ERRORS, http.client.HTTPException, ValueError)`（`ValueError` = 200 但
+  body 不是 JSON）。`_install_bun_mirror` 的返回值是「镜像装没装上」，所以只吞「网/盘/坏 zip」
+  （`_BUN_INSTALL_ERRORS` = OSError / RuntimeError / BadZipFile / EOFError）——把自家 bug 记成
+  「镜像不行」等于让镜像路径永久静默失效。留下的 4 处：`_terminate` 的两级 kill（G9 冻结的收尾
+  边界）、`_slot_count` 的 platform_utils 兜底（异常类型已写进 `note`）、`_open_tailscale`（异常族
+  由 `tailscale_boot.ensure` 定义）。判据 `tests/remote/test_rollout_node.py` +2；反向把集改回
+  `(Exception,)` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §137。
