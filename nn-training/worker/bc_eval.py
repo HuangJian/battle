@@ -189,72 +189,11 @@ BUSY_RETRY_LIMIT = 4
 BUSY_BACKOFF_SEC = 0.5
 
 
-def dispatch_bc_eval(
-    *,
-    weights_bytes: bytes,
-    eval_levels: list[str],
-    games_per_stage: int,
-    it: int,
-    epoch: int,
-    course_max_ticks: int | None = None,
-    cfg: dict | None = None,
-    nodes: list[dict] | None = None,
-    course: Any | None = None,
-    course_env: bool = False,
-    log=lambda msg: print(msg, flush=True),
-) -> dict:
-    """把一份 BC 权重在 eval 图上跑干净评估并聚合。
-
-    两种图源（2026-11-12）：
-      - `course_env=False`（默认）：`eval_levels` 的关卡文件，各图用自己关卡文件的
-        stages/difficulty/max_ticks/player（旧行为，逐字不变）。
-      - `course_env=True`：直接继承**课程**解析后的 stage 集与环境覆盖
-        （`course.stage_ids` / `course.max_ticks` / `course.difficulty` /
-        `course.player.lives|level`），与训练语料同源；`eval_levels` 被忽略。
-        仅支持 `course.stages` 为 list 的课程（`BcEvalBlock` 加载时已拒 range 型）。
-
-    返回 {"epoch", "wver", "levels": [{level, n, wins, win_rate, kills_mean,
-    phits_mean, pickup_mean, timeout_frac, score_mean, mean_ticks, failed,
-    pickup_rate, pickup_spawn_mean, cells_mean, move_frac, panel}],
-    "sentinel_only": True, "ts"}。
-
-    B4/B5（2026-11-05）：每行带 `panel`（max_ticks / difficulty / lives / games / seed0）——
-    课程顶层的 `max_ticks` 不进这条链（各图用自己关卡文件的值），所以面板读数**禁止跨
-    面板相减**；`sentinel_only=True` 写死「周期 eval 只作哨兵，判决只认 200 局行为门」。
-    无可用节点 / 权重推送全败 → BcEvalError（调用方决定降级或中止）。
-    """
+def _build_eval_sources(*, course_env: bool, course, eval_levels: list[str]) -> list[dict]:
+    """构造每个评估图源的配置（课程环境 / 关卡文件两路；自 `dispatch_bc_eval` 搬出）。"""
     from worker.config import load_course, resolve_level
 
-    if nodes is None:
-        from common.distribution import load_dist_config
-
-        nodes = eval_capable_nodes(cfg if cfg is not None else load_dist_config(), log=log)
-    if not nodes:
-        raise BcEvalError("无可用 eval 节点（enabled + evalSupport + codeHash 一致）")
-
-    wver = hashlib.sha256(weights_bytes).hexdigest()
-    iter_id = f"bc-eval-it{it}-ep{epoch}-{wver[:8]}"
-    pushed = 0
-    for n in nodes:
-        try:
-            post_weights_cached(
-                n["url"], n.get("authKey", ""), iter_id, wver, weights_bytes, kind="rollout"
-            )
-            pushed += 1
-        except common.distribution.DistError as e:
-            log(f"[bc-eval] weights 推送失败 {n.get('id')}: {e.reason[:120]}")
-    if pushed == 0:
-        raise BcEvalError("weights 推送全部失败——本 epoch 评估放弃")
-
-    # 任务槽位 = 节点并发（评估局短，槽位即并发）
-    slots: list[dict] = []
-    for n in nodes:
-        for _ in range(max(1, int(n.get("concurrency", 1) or 1))):
-            slots.append(n)
-
-    level_rows: list[dict[str, Any]] = []
-    t0 = time.time()
-    sources: list[dict[str, Any]] = []
+    sources: list[dict] = []
     if course_env:
         if course is None:
             raise BcEvalError("course_env=true 但未传 course（调用点漏透传）")
@@ -289,6 +228,139 @@ def dispatch_bc_eval(
                     "kind": "levels",
                 }
             )
+    return sources
+
+
+def _run_bc_eval_one(
+    node: dict,
+    stage: int,
+    seed: int,
+    *,
+    iter_id: str,
+    wver: str,
+    src: dict,
+    level_name: str,
+    log,
+) -> dict | None:
+    """单局 BC 评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
+
+    为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
+    两次都撞 busy 就丢弃该局 —— 实测 10:38 那轮 mac 的 busy 让 arena6 只跑成
+    n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
+    不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
+
+    自 `dispatch_bc_eval` 的 `_run_one` 闭包原样搬出（求值参数改为显式透传）。
+    """
+    attempts = 0
+    busy_tries = 0
+    while attempts < 2:
+        attempts += 1
+        try:
+            manifest, _files = fetch_task(
+                node["url"],
+                node.get("authKey", ""),
+                iter_id=iter_id,
+                wver=wver,
+                stage=stage,
+                seed=seed,
+                max_ticks=int(src["max_ticks"]),
+                difficulty=str(src["difficulty"]),
+                timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
+                mode="eval",
+                policy="nn",
+                stage_json=src["stage_json"](stage) or "",
+                lives_override=src["lives"],
+                player_level=src["level"],
+            )
+            reason = validate_eval_result(manifest, wver)
+            if reason:
+                raise common.distribution.DistError(0, f"validate: {reason}")
+            return manifest
+        except common.distribution.DistError as e:
+            reason = str(e.reason)
+            if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
+                busy_tries += 1
+                attempts -= 1  # busy 不消耗 attempt 配额
+                time.sleep(BUSY_BACKOFF_SEC * busy_tries)
+                continue
+            log(
+                f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
+                f"attempt {attempts} failed: {reason[:140]}"
+            )
+        except Exception as e:
+            log(
+                f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
+                f"attempt {attempts} error: {type(e).__name__}: {e}"
+            )
+    return None
+
+
+def dispatch_bc_eval(
+    *,
+    weights_bytes: bytes,
+    eval_levels: list[str],
+    games_per_stage: int,
+    it: int,
+    epoch: int,
+    course_max_ticks: int | None = None,
+    cfg: dict | None = None,
+    nodes: list[dict] | None = None,
+    course: Any | None = None,
+    course_env: bool = False,
+    log=lambda msg: print(msg, flush=True),
+) -> dict:
+    """把一份 BC 权重在 eval 图上跑干净评估并聚合。
+
+    两种图源（2026-11-12）：
+      - `course_env=False`（默认）：`eval_levels` 的关卡文件，各图用自己关卡文件的
+        stages/difficulty/max_ticks/player（旧行为，逐字不变）。
+      - `course_env=True`：直接继承**课程**解析后的 stage 集与环境覆盖
+        （`course.stage_ids` / `course.max_ticks` / `course.difficulty` /
+        `course.player.lives|level`），与训练语料同源；`eval_levels` 被忽略。
+        仅支持 `course.stages` 为 list 的课程（`BcEvalBlock` 加载时已拒 range 型）。
+
+    返回 {"epoch", "wver", "levels": [{level, n, wins, win_rate, kills_mean,
+    phits_mean, pickup_mean, timeout_frac, score_mean, mean_ticks, failed,
+    pickup_rate, pickup_spawn_mean, cells_mean, move_frac, panel}],
+    "sentinel_only": True, "ts"}。
+
+    B4/B5（2026-11-05）：每行带 `panel`（max_ticks / difficulty / lives / games / seed0）——
+    课程顶层的 `max_ticks` 不进这条链（各图用自己关卡文件的值），所以面板读数**禁止跨
+    面板相减**；`sentinel_only=True` 写死「周期 eval 只作哨兵，判决只认 200 局行为门」。
+    无可用节点 / 权重推送全败 → BcEvalError（调用方决定降级或中止）。
+    """
+    if nodes is None:
+        from common.distribution import load_dist_config
+
+        nodes = eval_capable_nodes(cfg if cfg is not None else load_dist_config(), log=log)
+    if not nodes:
+        raise BcEvalError("无可用 eval 节点（enabled + evalSupport + codeHash 一致）")
+
+    wver = hashlib.sha256(weights_bytes).hexdigest()
+    iter_id = f"bc-eval-it{it}-ep{epoch}-{wver[:8]}"
+    pushed = 0
+    for n in nodes:
+        try:
+            post_weights_cached(
+                n["url"], n.get("authKey", ""), iter_id, wver, weights_bytes, kind="rollout"
+            )
+            pushed += 1
+        except common.distribution.DistError as e:
+            log(f"[bc-eval] weights 推送失败 {n.get('id')}: {e.reason[:120]}")
+    if pushed == 0:
+        raise BcEvalError("weights 推送全部失败——本 epoch 评估放弃")
+
+    # 任务槽位 = 节点并发（评估局短，槽位即并发）
+    slots: list[dict] = []
+    for n in nodes:
+        for _ in range(max(1, int(n.get("concurrency", 1) or 1))):
+            slots.append(n)
+
+    level_rows: list[dict[str, Any]] = []
+    t0 = time.time()
+    sources = _build_eval_sources(
+        course_env=course_env, course=course, eval_levels=eval_levels
+    )
     for src in sources:
         level_name = str(src["name"])
         tasks: list[tuple[int, int]] = [
@@ -298,64 +370,6 @@ def dispatch_bc_eval(
         ]
         rows: list[dict[str, Any]] = []
         failed = 0
-
-        def _run_one(
-            node: dict,
-            stage: int,
-            seed: int,
-            *,
-            src: dict[str, Any] = src,
-            level_name: str = level_name,
-        ) -> dict[str, Any] | None:
-            """单局评估；**busy 走退避重排**（2026-09-14，与 biz/bc_dispatch 同语义）。
-
-            为什么加：节点并发槽满时回 503 busy，旧实现把它当普通失败「立刻重试一次」，
-            两次都撞 busy 就丢弃该局 —— 实测 10:38 那轮 mac 的 busy 让 arena6 只跑成
-            n=14/30（评估样本不足 ⇒ 均值噪声大，误判能力变化）。busy 是**限流信号**，
-            不是节点故障：退避等槽位释放，且**不消耗** attempt 配额。
-            """
-            attempts = 0
-            busy_tries = 0
-            while attempts < 2:
-                attempts += 1
-                try:
-                    manifest, _files = fetch_task(
-                        node["url"],
-                        node.get("authKey", ""),
-                        iter_id=iter_id,
-                        wver=wver,
-                        stage=stage,
-                        seed=seed,
-                        max_ticks=int(src["max_ticks"]),
-                        difficulty=str(src["difficulty"]),
-                        timeout=max(120.0, float(src["max_ticks"]) * 0.5 + 120.0),
-                        mode="eval",
-                        policy="nn",
-                        stage_json=src["stage_json"](stage) or "",
-                        lives_override=src["lives"],
-                        player_level=src["level"],
-                    )
-                    reason = validate_eval_result(manifest, wver)
-                    if reason:
-                        raise common.distribution.DistError(0, f"validate: {reason}")
-                    return manifest
-                except common.distribution.DistError as e:
-                    reason = str(e.reason)
-                    if "busy" in reason[:64].lower() and busy_tries < BUSY_RETRY_LIMIT:
-                        busy_tries += 1
-                        attempts -= 1  # busy 不消耗 attempt 配额
-                        time.sleep(BUSY_BACKOFF_SEC * busy_tries)
-                        continue
-                    log(
-                        f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempts} failed: {reason[:140]}"
-                    )
-                except Exception as e:
-                    log(
-                        f"[bc-eval] {node.get('id')} {level_name} s{stage} seed{seed} "
-                        f"attempt {attempts} error: {type(e).__name__}: {e}"
-                    )
-            return None
 
         import queue as _q
         import threading as _th
@@ -370,13 +384,24 @@ def dispatch_bc_eval(
             work: Any = work,
             lock: Any = lock,
             rows: list[dict[str, Any]] = rows,
+            src: dict[str, Any] = src,
+            level_name: str = level_name,
         ) -> None:
             while True:
                 try:
                     stage, seed = work.get_nowait()
                 except _q.Empty:
                     return
-                m = _run_one(node, stage, seed)
+                m = _run_bc_eval_one(
+                    node,
+                    stage,
+                    seed,
+                    iter_id=iter_id,
+                    wver=wver,
+                    src=src,
+                    level_name=level_name,
+                    log=log,
+                )
                 with lock:
                     if m is None:
                         rows.append({"failed": True})

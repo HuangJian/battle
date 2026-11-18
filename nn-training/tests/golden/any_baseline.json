@@ -125,7 +125,7 @@
     "worker/bc_config.py": 1,
     "worker/bc_corpus.py": 4,
     "worker/bc_dispatch.py": 1,
-    "worker/bc_eval.py": 14,
+    "worker/bc_eval.py": 12,
     "worker/bc_outcome.py": 1,
     "worker/bc_resume.py": 1,
     "worker/cli.py": 1,

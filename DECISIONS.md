@@ -7432,3 +7432,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   243 → **181** 行（拆出 `_decode_offline_artifact` / `_write_offline_round` /
   `_artifact_land_note`），长函数存量 **28 → 27**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §188。
+- **2026-11-18（长函数存量第十一刀：BC 周期评估）**：`worker/bc_eval.py::dispatch_bc_eval`
+  244 → **163** 行（拆出 `_build_eval_sources` / `_run_bc_eval_one`，busy 退避与聚合
+  口径逐字不变），长函数存量 **27 → 26**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）；新 helper 不新增 `Any`，该文件 `Any` 存量 14 → 12
+  （G14 基线同步调小）。全文 → `docs/nn/engineering.md` §189。

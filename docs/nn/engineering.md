@@ -25,6 +25,22 @@
 
 ---
 
+## §189 长函数存量第十一刀：BC 周期评估 244 → 163（2026-11-18）
+
+`worker/bc_eval.py::dispatch_bc_eval` **244 → 163 行**，长函数存量 **27 → 26**
+（`LONG_FUNCS_BASELINE` 删除 `worker/bc_eval.py` 条目；`WIDE_FUNCS_BASELINE` 的 2 条保留）。
+
+两刀纯搬移：
+- `_build_eval_sources(*, course_env, course, eval_levels)`：课程环境 / 关卡文件两路图源配置。
+- `_run_bc_eval_one(node, stage, seed, *, iter_id, wver, src, level_name, log)`：单局评估
+  （busy 退避不消耗 attempt 配额的语义与日志逐字保留）。`slot_worker` 默认绑定
+  `src` / `level_name`（ruff B023 的晚绑定红线）。
+
+顺带降 G14：两个新 helper 用 `dict` / 未注解边界，不新增 `Any`；该文件 `Any` 存量
+**14 → 12**（`tests/golden/any_baseline.json` 同步调小，只许收紧）。
+
+---
+
 ## §188 长函数存量第十刀：离线产物落账 243 → 181（2026-11-18）
 
 `hub/store_offline.py::store_offline_artifact` **243 → 181 行**，长函数存量 **28 → 27**
