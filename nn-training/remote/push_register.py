@@ -339,6 +339,11 @@ class Registry:
         """hub/token 齐不齐（缺任一把 = 自动注册不可用，重试也不会变好）。"""
         return bool(self.hub and self.hub_token)
 
+    @property
+    def retry_step(self) -> int:
+        """当前退避档位（0 = 从未失败；诊断 / 用例用）。"""
+        return self._step
+
     def info(self) -> dict:
         return {
             "node_id": self.node_id,

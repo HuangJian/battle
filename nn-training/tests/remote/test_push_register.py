@@ -453,7 +453,7 @@ def test_register_or_warn_names_the_ping_gate_not_unreachable_hub() -> None:
     assert any(line.strip().startswith('{"nodes"') for line in msgs), "窗口用完要给可粘贴片段"
     assert '"offline_push":true' in joined
     # 窗口用完 ⇒ 退避梯子退回起点（后续主循环别继承这几次的步数）
-    assert reg._step == 0 and reg.next_at == 0.0
+    assert reg.retry_step == 0 and reg.next_at == 0.0
     assert opener.calls >= 3
 
 

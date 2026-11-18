@@ -25,6 +25,20 @@
 
 ---
 
+## §178 G5 第三十九批：三处既有状态的公开读数（2026-11-18）
+
+三个文件清零：`test_rollout_dispatch_resilience.py` / `test_prefetch_proc.py` /
+`test_push_register.py` 各 **1 → 0**（G5 **175 → 172**，53 → 50 文件）。
+
+- `common.distribution.aborted_tags()`：当前收工态作用域的**副本**（`RequestRegistry.tags()`）。
+  那条用例要判「成功结算有没有把 tag 留在登记表里」——`abort_scope()` 只回答调用者自己的
+  作用域，回答不了「全表干净」。
+- `PayloadProcess.local_store`：降级后的进程内实现（未降级 `None`）。`fills_out_of_process`
+  只回答真假，回答不了「降到的就是那份 `PrefetchStore`」。
+- `PushRegister.retry_step`：当前退避档位（0 = 从未失败）。`next_at` 早已公开，档位此前没有。
+
+---
+
 ## §177 G5 第三十八批：派发器在飞快照 + 两处既有读数（2026-11-18）
 
 三个文件清零：`test_rollout_end_event.py` / `test_offline_deliver_proc.py` /

@@ -292,7 +292,7 @@ def test_boot_failure_degrades_to_in_process_store(tmp_path: Path) -> None:
         # 降级的**原因**是状态面字段（不是日志文本）：日志只是给人读的那一份
         assert st["degrade_reason"], "降级必须留下原因（否则后人只能看到「变慢了」）"
         # 降级后**逐字**像 PrefetchStore：填充线程那几个方法都得在（`__getattr__` 转发）
-        assert isinstance(pf._local, PrefetchStore)
+        assert isinstance(pf.local_store, PrefetchStore)
         assert pf.held() == set() and pf.stats()["held"] == 0
         # `start_fill` 明确返回 False（`job_round` 据此起旧线程）
         assert pf.start_fill(base_url="", token="") is False

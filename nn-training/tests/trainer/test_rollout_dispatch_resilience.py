@@ -760,4 +760,4 @@ def test_successful_round_does_not_leave_aborted_attempt_tags(tmp_path, monkeypa
 
     report = h.run(fetch)
     assert report["missing"] == [], report.get("missing")
-    assert not common.distribution._REQUESTS.aborted, common.distribution._REQUESTS.aborted
+    assert not common.distribution.aborted_tags(), common.distribution.aborted_tags()

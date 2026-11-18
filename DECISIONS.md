@@ -7388,3 +7388,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （G5 178 → **175**，53 文件）。新增 `PushDispatcher.inflight_records()`（同步状态副本，
   防止把快慢读成先后）；`ctl_offset` 改读 `status()`（它本就并入子进程状态面）；断言里的
   `_traj_dir` 改读脚手架路径。全文 → `docs/nn/engineering.md` §177。
+- **2026-11-18（G5 第三十九批：三处既有状态的公开读数）**：`test_rollout_dispatch_resilience.py` /
+  `test_prefetch_proc.py` / `test_push_register.py` 各 1 → 0（G5 175 → **172**，50 文件）。
+  新增 `common.distribution.aborted_tags()`（全表收工态副本）、`PayloadProcess.local_store`
+  （降级后的进程内实现）、`PushRegister.retry_step`（退避档位）。全文 →
+  `docs/nn/engineering.md` §178。

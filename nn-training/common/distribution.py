@@ -335,6 +335,11 @@ class RequestRegistry:
         with self.lock:
             return tag in self.aborted
 
+    def tags(self) -> set[str]:
+        """当前处于收工态的**全部**作用域（副本；诊断 / 用例用）。"""
+        with self.lock:
+            return set(self.aborted)
+
     def track(self, key: tuple[str, object]) -> None:
         with self.lock:
             self.active.add(key)
@@ -403,6 +408,11 @@ def clear_abort(tag: str = "") -> None:
 def abort_scope(tag: str = "") -> bool:
     """该作用域是否处于收工态（回包无用 ⇒ 调用方丢弃而不是重排）。"""
     return _REQUESTS.is_aborted(tag or request_tag())
+
+
+def aborted_tags() -> set[str]:
+    """当前处于收工态的全部作用域（副本；诊断 / 用例用——判「成功结算有没有留脏」）。"""
+    return _REQUESTS.tags()
 
 
 def _request(

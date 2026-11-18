@@ -140,6 +140,11 @@ class PayloadProcess:
         """下行腿此刻是否真在子进程里（降级后 False ⇒ `job_round` 走旧填充线程）。"""
         return self._local is None
 
+    @property
+    def local_store(self) -> PrefetchStore | None:
+        """降级后的进程内实现（未降级 → None；`fills_out_of_process` 只回答真假）。"""
+        return self._local
+
     def start(self) -> None:
         """拉起子进程并完成 `init` 握手；**起不来是预期形态**（在飞的代码树里没有它）。"""
         if self._proc is not None or self._local is not None:
