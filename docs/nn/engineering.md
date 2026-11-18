@@ -25,6 +25,32 @@
 
 ---
 
+## §152 G5 第九批：推模式派发用例走队列的公开结果面（2026-11-18）
+
+`tests/remote/test_hub_push_dispatch.py` 私有断言 **17 → 0**（G5 **563 → 546**，125 → 124 文件）。
+
+这条用例守的是 push 派发器的「谁算在飞 / 什么时候该备份 / 结果对账」；它一直用
+`hub._stores[<course>].get_result(...)` / `.store_result(...)` / `.wire_stats(...)` /
+`.scheduling_facts(...)` 直接访问 `_HubQueue` 的私有 store 表。队列其实早就有公开查询：
+
+| 旧判据 | 换成 |
+|---|---|
+| `hub._stores[c].get_result(jid)` | `hub.get_result(jid)` |
+| `hub._stores[c].store_result(jid, r)` | `hub.store_result(jid, r)` |
+| `hub._stores[c].wire_stats(jid)` | `hub.wire_stats(jid)` |
+| `hub._stores[c].scheduling_facts(jid)["computing_at"]` | `hub.job_status(jid)["computing_at"]` |
+| `disp._inflight`（`#b0` 备份槽） | `disp.tick()["inflight"]` |
+
+这些都是 `queue_store_face` / `queue_observe` 已有的门面方法（`job_status` 的 `computing_at`
+与 `scheduling_facts` 同源），所以不是「为测试新开的口」；`tick()` 返回的 `inflight` 是派发器
+每拍本来就给 `/admin/push-workers` 的快照。测试不再知道「结果住在哪个 store、在飞账长什么样」。
+
+`_publish` 夹具仍直接用 `hub._stores[course].publish(...)`（**造场景**而非断言，G5 不计）；
+`_in_flight_primary` 的两个 `disp._inflight[...] =` 也是场景搭建。私有**赋值**与场景注入
+不在这一批的口径里。
+
+---
+
 ## §151 G5 第八批：in-loop 评估链的公开读数 `eval_timing()`（2026-11-18）
 
 `tests/worker/test_eval_timing.py` 私有断言 **32 → 0**（G5 **595 → 563**，126 → 125 文件）。

@@ -7230,3 +7230,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `backfill`（元组快照，队列会被 pop）/ `pending_m` / `open_threads`。顺手给
   `_eval_thread` / `_eval_gate` 补类级 `None` 默认值（裸构造脚手架在「还没派发」时能读）。
   成员闭集守卫同步 14 → 15、import 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §151。
+- **2026-11-18（G5 第九批：推模式派发用例走公开结果面）**：`tests/remote/test_hub_push_dispatch.py`
+  私有断言 17 → **0**（G5 563 → **546**，124 文件）。`hub._stores[c].get_result/store_result/
+  wire_stats/scheduling_facts` 全部换成队列已有的公开门面（`hub.get_result` / `store_result` /
+  `wire_stats` / `job_status(...)["computing_at"]`），派发器在飞账改读 `disp.tick()["inflight"]`
+  （本来就是 `/admin/push-workers` 的快照）。不是为测试新开口；造场景的 `_publish` 与
+  `_inflight[...] =` 不在 G5 口径内，保持原样。全文 → `docs/nn/engineering.md` §152。

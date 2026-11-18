@@ -40,7 +40,6 @@
   "tests/remote/test_deliver_outbox.py": 1,
   "tests/remote/test_download_split.py": 1,
   "tests/remote/test_http_split.py": 1,
-  "tests/remote/test_hub_push_dispatch.py": 17,
   "tests/remote/test_job_identity_collision.py": 2,
   "tests/remote/test_lifecycle.py": 3,
   "tests/remote/test_notebook_runtime.py": 8,

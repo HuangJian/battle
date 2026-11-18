@@ -402,7 +402,7 @@ def test_dispatch_pushes_to_idle_worker_and_ingests_result(tmp_path: Path, worke
     disp = _dispatcher(hub, ws)
 
     disp.tick()
-    assert _wait_until(lambda: hub._stores["x2"].get_result("j" * 16) is not None), "结果应落盘"
+    assert _wait_until(lambda: hub.get_result("j" * 16) is not None), "结果应落盘"
     assert w1.received == ["j" * 16]
     # 真 hub 端点读它（训练侧 wait_job 走的就是这条）：
     srv = make_server(hub, 0, "sekret", host="127.0.0.1")
@@ -416,7 +416,7 @@ def test_dispatch_pushes_to_idle_worker_and_ingests_result(tmp_path: Path, worke
         assert status == 200 and body["agg"]["policy"] == 0.1
         assert body["data_fp"] == m["data_fp"] and body["init_weights_fp"] == m["init_weights_fp"]
         # 传输账：hub 代发的实测字节（训练侧 iteration 行的 wire.up_bytes 来源）
-        wire = hub._stores["x2"].wire_stats("j" * 16)
+        wire = hub.wire_stats("j" * 16)
         assert wire["payload_bytes"] == len(PAYLOAD) and wire["body_bytes"] > 0
         assert wire["upload_sec"] >= 0.0
         # 派发器状态：在途已清、无避让残留
@@ -454,9 +454,9 @@ def test_busy_worker_is_skipped_and_held_course_is_not_dispatched(
     # 被接管的课：队列里躺着也没人推（job 仍在池里等接管解除/掉线）
     assert hub.claimable_job_ids("off") == ["b" * 16]
     assert hub.role_blocked("b" * 16, "online").startswith("held:")
-    assert hub._stores["off"].get_result("b" * 16) is None
+    assert hub.get_result("b" * 16) is None
     # 在线课推完即出结果
-    assert _wait_until(lambda: hub._stores["on"].get_result("a" * 16) is not None)
+    assert _wait_until(lambda: hub.get_result("a" * 16) is not None)
 
 
 def test_bc_job_is_never_backed_up_by_the_push_leg(
@@ -541,7 +541,7 @@ def test_backup_claim_of_settled_job_is_refused_by_the_store_gate(
     jid = "j" * 16
     _publish(hub, "c1", jid)
     # 主副本赢下首写（result/ 落盘）——它此刻可能还没 pop 在飞记录
-    assert hub._stores["c1"].store_result(jid, {"job_id": jid, "agg": {}}) is True
+    assert hub.store_result(jid, {"job_id": jid, "agg": {}}) is True
     assert hub.claimable_job_ids("c1") == [], "已落盘 ⇒ 出池（这一半是既有语义）"
 
     ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
@@ -551,7 +551,7 @@ def test_backup_claim_of_settled_job_is_refused_by_the_store_gate(
 
     tick = disp.tick()
     assert tick["started"] == [], tick
-    assert not any(str(s).endswith("#b0") for s in disp._inflight), disp._inflight
+    assert not any(str(s).endswith("#b0") for s in tick["inflight"]), tick
     # 立刻断言「什么也没收到」——**不需要** sleep 等「它会不会真发出去」（2026-11-01）：
     # `started` 是 `_dispatch` 里**唯一**的推送线程生成点（`t.start()` 之后紧接着 append），
     # 它为空 ⇒ 本进程此刻没有任何在飞的推送线程 ⇒ 这一读之后也不会有 POST 冒出来。
@@ -619,7 +619,7 @@ def test_dead_worker_requeues_to_queue_head_and_another_worker_takes_it(
     dying.fail_ping = True  # 推出去之后这台挂了（结果永远出不来）
     disp.timeout_sec = 60.0  # 把兜底上限拉远：本次要验证的是「探活判死」而不是超时
     assert _pump(disp, lambda: disp.requeued >= 1), "失联必须触发回落"
-    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None)
+    assert _pump(disp, lambda: hub.get_result("j" * 16) is not None)
     assert rescue.received == ["j" * 16], "回落队首后必须改推另一台"
     assert dying.received == ["j" * 16], "跑死它的那台不得再拿同一份活"
     assert disp.state()["avoid"]["j" * 16] == ["g1"]
@@ -636,7 +636,7 @@ def test_push_timeout_requeues(tmp_path: Path, worker_factory) -> None:
 
     disp.tick()
     assert _pump(disp, lambda: disp.requeued >= 1)
-    assert hub._stores["x2"].get_result("j" * 16) is None
+    assert hub.get_result("j" * 16) is None
     assert disp.state()["pushed"] == 1 and slow.received == ["j" * 16]
     # 回落 = 租约已放掉：job 立刻回到可领池（换 worker 的下一次 tick 会重新挑）
     assert hub.claimable_job_ids("x2") == ["j" * 16]
@@ -655,7 +655,7 @@ def test_worker_refusing_job_requeues_to_another(tmp_path: Path, worker_factory)
     disp = _dispatcher(hub, ws, push_attempts=1)
 
     disp.tick()
-    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None)
+    assert _pump(disp, lambda: hub.get_result("j" * 16) is not None)
     assert refusing.received == [] and ok.received == ["j" * 16]
     assert disp.state()["requeued"] >= 1
 
@@ -706,7 +706,7 @@ def test_single_worker_cooldown_expires_and_job_is_retried(
     assert any("冷却" in ln for ln in logs), f"跳过时必须留一行可查的日志：{logs[-6:]}"
 
     clock["t"] += 601.0  # 冷却到期
-    assert _pump(disp, lambda: hub._stores["x2"].get_result("j" * 16) is not None), (
+    assert _pump(disp, lambda: hub.get_result("j" * 16) is not None), (
         "冷却到期必须重试——否则单 worker 机群会把一次瞬时抖动变成本课程的永久停摆"
     )
     assert flaky.received == ["j" * 16]
@@ -785,7 +785,7 @@ def test_slow_result_fetch_logs_a_loud_line(tmp_path: Path, worker_factory, monk
     # can return (and assert) before the increment lands under load.
     assert _pump(
         disp,
-        lambda: hub._stores["x2"].get_result("j" * 16) is not None
+        lambda: hub.get_result("j" * 16) is not None
         and disp.state()["slow_result"] >= 1,
     ), logs[-5:]
 
@@ -880,7 +880,7 @@ def test_tampered_result_is_rejected_not_stored(tmp_path: Path, worker_factory) 
 
     disp.tick()
     assert _pump(disp, lambda: disp.requeued >= 1)
-    assert hub._stores["x2"].get_result("j" * 16) is None, "对不上账的结果绝不能落盘"
+    assert hub.get_result("j" * 16) is None, "对不上账的结果绝不能落盘"
     assert not (tmp_path / "x2" / "remote-jobs" / ("j" * 16) / "result").exists()
     assert hub.claimable_job_ids("x2") == ["j" * 16]
 
@@ -990,23 +990,23 @@ def test_push_ahead_queues_the_next_job_and_defers_start_marker(tmp_path: Path) 
             lambda: (state.get(second) or {}).get("state") == "queued"
         ), disp.state()
         assert state.queued() == 1
-        assert hub._stores[second_course].scheduling_facts(second)["computing_at"] is None
+        assert hub.job_status(second)["computing_at"] is None
 
         clock[0] += 8.0  # 排队 8s（< 10s 队龄上限）
         state.set_result(first, result_of(ms[first_course]))
         state.kick()
         # 先把第一份收尾干净再跳钟（否则假时钟越过 a 的 10s 预算、而 hub 还没收到它的
         # 结果时，会被「无结果」回落——那是测试自己挤出来的竞态，不是被测语义）。
-        assert _wait_until(lambda: hub._stores[first_course].get_result(first) is not None)
+        assert _wait_until(lambda: hub.get_result(first) is not None)
         assert _wait_until(lambda: second in started), (started, disp.state())
         clock[0] += 5.0  # 总龄 13s > timeout 10s，但开算后才 5s
         assert _wait_until(
-            lambda: hub._stores[second_course].scheduling_facts(second)["computing_at"]
+            lambda: hub.job_status(second)["computing_at"]
             is not None
         ), disp.state()
         state.set_result(second, result_of(ms[second_course]))
         assert _wait_until(
-            lambda: hub._stores[second_course].get_result(second) is not None
+            lambda: hub.get_result(second) is not None
         ), disp.state()
         assert disp.state()["requeued"] == 0
     finally:
@@ -1276,14 +1276,14 @@ def test_result_ready_wakes_the_waiter_within_one_poll(
     assert _wait_until(
         lambda: w1.polled.count(jid) >= 2, timeout=3.0
     ), "通知应让等待线程立刻再问一次（旧行为要等满 5s 的那一拍）"
-    assert hub._stores["x2"].get_result(jid) is None, "通知本身绝不能入账"
+    assert hub.get_result(jid) is None, "通知本身绝不能入账"
 
     with w1._lock:
         w1.results[jid] = result_of(m)
     assert disp.note_ready(jid) is True
     t0 = time.monotonic()
     assert _wait_until(
-        lambda: hub._stores["x2"].get_result(jid) is not None, timeout=3.0
+        lambda: hub.get_result(jid) is not None, timeout=3.0
     ), "通知后结果应在 3s 内落地（旧行为要等满 5s 的那一拍）"
     # timing-ok: 夹具模拟——poll_sec=5s，「3s 内落地」区分「被叫醒」与「等满一拍」。
     assert time.monotonic() - t0 < 3.0
