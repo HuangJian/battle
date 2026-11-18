@@ -25,6 +25,38 @@
 
 ---
 
+## §214 长函数存量第三十五刀：作业壳（remote）439 → 134（2026-11-18）
+
+`remote/worker.py::run_job` **439 → 134 行**，长函数存量 **3 → 2**
+（`LONG_FUNCS_BASELINE` 删除 `remote/worker.py` 条目）。
+
+七段相位搬进新模块 `remote/job_shell.py`（L4，LOC 297），宿主只按**原顺序**编排：
+`precheck_job`（离线腿拒收 / 后端解析 / 结果复用 / bun 自检）→ `land_materials`（payload +
+code 落地）→ `bc_or_none` → `resolve_job_weights`（五源）→ `run_iter_phase`（TS + rollout +
+轮级资源收线）→ `check_mode_and_d14` → `echo_smoke_result`。状态住 `JobState`（15 个输入 +
+17 个相位产物）。
+
+**刻意留在宿主的两件**：`_guard_code_and_device`（`_ACTIVE_CODE_SHA` 是 worker 的模块级
+单例，`test_worker_state_contract` 钉住宿主）与 `TrainSpec` / `run_training_core` 调用
+（`remote.train_core` 是 L4，搬进 job_shell 会把它顶到 L5）。
+
+**接缝 / 锚点迁移**（随调用点走，判据不变）：
+`test_soft_hold_prefetch.py` / `test_worker_bun_precheck.py` 的 `validate_result` 补丁、
+`test_ppo_backend_switch.py` 的三个物料/权重补丁改指 `remote.job_shell`；
+`test_download_split.py` 的宿主断言改对 `land_materials` / `run_iter_phase`；
+`test_opt_blob_shape.py` 的顺序锚点改成 `run_job` 的**相位调用顺序**、`test_plan_run_split.py`
+的拒收文案锚点改读 job_shell、`test_worker_device.py` 改查
+`normalize_ppo_device(st.device)` + guard 先于 bc 分叉。`collect_round` /
+`resolve_ppo_backend` / `_run_bc_job` 由宿主**传值注入**（既是接缝，也让 job_shell
+不必 import 两个 L4 邻居）。墙钟基线随之搬家：worker 13 → 10，job_shell 0 → 3。
+
+同批的**预算腾挪**（worker.py 已到 LOC 996）：`_bulk_yield_params` / `_setup_bulk_yield` /
+`epoch_mult_of` 下沉 `remote/worker_session.py`（L2），worker 侧保留同名转发。
+`worker.py` LOC 996 → 807；`worker_session.py` 72 → 105。
+`test_module_doc_budget` 的模块头同步改写（旧的「三个都不宜再拆」已作废）。
+
+---
+
 ## §213 长函数存量第三十四刀：worker 轮询壳（remote）334 → 196（2026-11-18）
 
 `remote/worker.py::worker_loop` **334 → 196 行**，长函数存量 **4 → 3**

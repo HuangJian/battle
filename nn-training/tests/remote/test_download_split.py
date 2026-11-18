@@ -52,6 +52,9 @@ DL_FILE = ROOT / "remote" / "download.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
 #: S4 第十刀后 `_prefetch_fill` 住这里（它也是 `download_*` 的一个宿主调用点）。
 ROUND_FILE = ROOT / "remote" / "job_round.py"
+#: 2026-11-18（长函数第三十五刀）：物料落地的宿主调用点随 `run_job` 的相位搬到这里
+#: （`land_materials`）。`run_job` 自身不再读 `_ensure_*`。
+SHELL_FILE = ROOT / "remote" / "job_shell.py"
 
 MOVED_NAMES = {
     "_cache_blob",
@@ -203,58 +206,71 @@ def _bare_loads(path: Path, names: set[str]) -> dict[str, set[str]]:
 def test_host_callers_still_resolve_their_own_host_namespace() -> None:
     """宿主侧相反档位：裸名字解析在**调用点所在的模块**。
 
-    * `run_job`（`worker.py`）现在只读**物料落地三兄弟**——`download_payload` /
-      `download_code` 的调用点已随第十二刀进了本模块 ⇒ 对它们 patch `remote.worker` 会**静默失效**；
+    * `land_materials`（`remote/job_shell.py`，2026-11-18 从 `run_job` 搬出）只读
+      **物料落地三兄弟**——`download_payload` / `download_code` 的调用点已随第十二刀
+      进了 `remote.download` ⇒ 对它们 patch `remote.worker` / `remote.job_shell` 都**静默失效**；
     * `_prefetch_fill`（第十刀搬到 `remote/job_round.py`）仍读 `download_payload` ⇒
       `tests/remote/test_soft_hold_prefetch.py` 要 patch `remote.job_round`。
 
     若哪天某一处改成 `download.download_payload(...)`（属性访问），对应的 patch 会静默失效——
     本断言就是那个警报。
     """
-    host = _bare_loads(WORKER_FILE, {"run_job"})
-    assert set(host) == {"run_job"}, f"worker.py 的 `download_*` 宿主变了：{set(host)}"
-    for name in LANDING_NAMES:
-        assert name in host["run_job"], f"run_job 不再读 {name}（落地搬走了吗？）"
+    host = _bare_loads(SHELL_FILE, {"land_materials", "run_iter_phase"})
+    assert set(host) == {"land_materials", "run_iter_phase"}, (
+        f"job_shell.py 的 `download_*` 宿主变了：{set(host)}"
+    )
+    for name in ("_ensure_payload", "_ensure_code"):
+        assert name in host["land_materials"], f"land_materials 不再读 {name}（落地搬走了吗？）"
+    assert "_ensure_ts_code" in host["run_iter_phase"], "run_iter_phase 不再读 _ensure_ts_code"
     for name in ("download_payload", "download_code"):
-        assert name not in host["run_job"], (
-            f"run_job 又直接读 {name} 了——物料落地应当只在 remote.download 里发生"
+        assert name not in host["land_materials"], (
+            f"land_materials 又直接读 {name} 了——物料落地应当只在 remote.download 里发生"
         )
+    assert "download_ts_code" not in host["run_iter_phase"], (
+        "run_iter_phase 又直接读 download_ts_code 了——TS 落地应当只在 remote.download 里发生"
+    )
 
     fill = _bare_loads(ROUND_FILE, {"_prefetch_fill"})
     assert set(fill) == {"_prefetch_fill"}, f"job_round.py 里没有 `_prefetch_fill`：{set(fill)}"
     assert "download_payload" in fill["_prefetch_fill"]
 
     # 且两处都**没有**属性式访问（否则就是换了命名空间）
-    for path in (WORKER_FILE, ROUND_FILE):
+    for path in (SHELL_FILE, ROUND_FILE):
         text = source_scan.read_text(str(path))
         assert "download.download_" not in text and "download_mod.download_" not in text, path.name
 
 
 def test_run_job_no_longer_calls_any_download_helper() -> None:
-    """★ 第十二刀的形状断言：`run_job` 里**零** `download_*` 调用点（它们全在落地函数里）。
+    """★ 第十二刀 + 第三十五刀的形状断言：落地相位里**零** `download_*` 调用点。
 
     这条比「名字还在不在」更硬：可以把调用点写成 `download.download_payload(...)` 或
     另抄一段内联逻辑而不碰任何名字表，AST 级的「不许有调用点」两种都挡。
     """
-    for node in _tree(WORKER_FILE).body:
-        if not isinstance(node, ast.FunctionDef) or node.name != "run_job":
+    called: dict[str, set[str]] = {}
+    for node in _tree(SHELL_FILE).body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in {
+            "land_materials",
+            "run_iter_phase",
+        }:
             continue
-        called = {
+        called[node.name] = {
             n.func.id
             for n in ast.walk(node)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
         }
-    assert called, "没找到 run_job"
-    stray = sorted(
-        n for n in called if n.startswith("download_") or n in {"_cache_blob", "_resolve_blob"}
-    )
-    assert stray == [], f"run_job 里还有下载/缓存的调用点：{stray}——物料落地应当在 _ensure_* 里"
-    for name in LANDING_NAMES:
-        assert name in called, f"run_job 没有调 {name}"
+    assert called, "没找到 land_materials / run_iter_phase"
+    for func, names in called.items():
+        stray = sorted(
+            n for n in names if n.startswith("download_") or n in {"_cache_blob", "_resolve_blob"}
+        )
+        assert stray == [], f"{func} 里还有下载/缓存的调用点：{stray}——物料落地应当在 _ensure_* 里"
+    for name in ("_ensure_payload", "_ensure_code"):
+        assert name in called["land_materials"], f"land_materials 没有调 {name}"
+    assert "_ensure_ts_code" in called["run_iter_phase"], "run_iter_phase 没有调 _ensure_ts_code"
 
 
 def test_landing_call_sites_pass_every_parameter() -> None:
-    """★ 接口双向一致：`run_job` 对落地函数的**每个**形参都传了（漏一个就红）。
+    """★ 接口双向一致：`land_materials` 对落地函数的**每个**形参都传了（漏一个就红）。
 
     这是本刀最可能的失误形态（13 个形参跨两个调用）。位置实参按序对齐 `signature.parameters`，
     关键字参数按名对齐；两边合起来必须**恰好**等于形参集合——多传（打错关键字名）也红。
@@ -266,8 +282,8 @@ def test_landing_call_sites_pass_every_parameter() -> None:
         for name in ("_ensure_payload", "_ensure_code")
     }
     seen: set[str] = set()
-    for node in _tree(WORKER_FILE).body:
-        if not isinstance(node, ast.FunctionDef) or node.name != "run_job":
+    for node in _tree(SHELL_FILE).body:
+        if not isinstance(node, ast.FunctionDef) or node.name != "land_materials":
             continue
         for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
             if not isinstance(call.func, ast.Name) or call.func.id not in sigs:
@@ -288,7 +304,7 @@ def test_landing_call_sites_pass_every_parameter() -> None:
                 f"{func} 的形参没被完整覆盖：漏了 {sorted(set(params) - covered)}；"
                 f"多传/打错名 {sorted(covered - set(params))}"
             )
-    assert seen == {"_ensure_payload", "_ensure_code"}, f"run_job 没调全落地函数：{seen}"
+    assert seen == {"_ensure_payload", "_ensure_code"}, f"land_materials 没调全落地函数：{seen}"
 
 
 def test_payload_and_code_downloads_resolve_in_this_module(monkeypatch, tmp_path: Path) -> None:

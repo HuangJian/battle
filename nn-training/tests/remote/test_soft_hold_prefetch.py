@@ -40,6 +40,7 @@ import remote.download as DL
 import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.job_round as JR
+import remote.job_shell as SHELL
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 from remote.prefetch import (
@@ -1043,7 +1044,10 @@ def test_a_handed_off_stage_never_eats_the_cached_result(
     (staged / "w0").mkdir(parents=True)
     (staged / "w0" / "manifest.json").write_text("{}", encoding="utf-8")
 
-    monkeypatch.setattr(W, "validate_result", lambda *_a, **_k: None)
+    # 2026-11-18（长函数第三十五刀）：`_result.json` 的复用判据搬进
+    # `remote.job_shell.precheck_job` ⇒ 拦截点随之搬到该模块（patch `W.validate_result`
+    # 自本刀起是**空操作**——判据仍是同一条：复用路径不下载、不吃缓存）。
+    monkeypatch.setattr(SHELL, "validate_result", lambda *_a, **_k: None)
     monkeypatch.setattr(DL, "download_payload", lambda *_a, **_k: pytest.fail("复用路径不该下载"))
     got = W.run_job(
         "http://hub",

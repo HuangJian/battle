@@ -66,6 +66,8 @@ ENGINE_FILE = ROOT / "remote" / "plan_run.py"
 HANDOFF_FILE = ROOT / "remote" / "plan_handoff.py"
 ENTRY_FILE = ROOT / "remote" / "run_loop.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
+#: 2026-11-18（长函数第三十五刀）：kind=run 的退役拒收随 `run_job` 的相位搬到这里。
+SHELL_FILE = ROOT / "remote" / "job_shell.py"
 
 #: 留守引擎的名字（引擎的**自有名**；不含它从别处 import 的东西）。
 ENGINE_NAMES = {
@@ -243,9 +245,9 @@ except 尾巴要 `verify_plan_file` / `run_plan_job` 并 `run_job_fn=run_job` �
       ③ 它更不 import 入口（`remote.run_loop`）——这条是**环**的底线，与引擎侧那条守卫
          （`test_plan_run_never_imports_worker_or_run_loop`）配对。
     """
-    assert "kind=run（半离线整段）这条腿已于 2026-09-25 退役" in WORKER_FILE.read_text(
+    assert "kind=run（半离线整段）这条腿已于 2026-09-25 退役" in SHELL_FILE.read_text(
         encoding="utf-8"
-    ), "worker 没有对 kind=run 的退役拒收（或消息被静默换掉了）"
+    ), "worker 作业壳没有对 kind=run 的退役拒收（或消息被静默换掉了）"
     tree = _tree(WORKER_FILE)
     # ② 拒收之后 engine 的名字在 worker 里**一个都不该剩**（引用也算：引用 = 那条尾巴还在）
     refs = {

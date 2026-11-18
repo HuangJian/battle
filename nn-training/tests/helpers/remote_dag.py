@@ -420,6 +420,12 @@ LAYERS: dict[str, int] = {
     # `bulk_sched`·`cloud_pool`·`prefetch`·`result_upload`(L0) ⇒ 拓扑秩 **L2**；
     # `remote.worker`(L5) 站在它上面，边严格向下。
     "remote.worker_session": 2,
+    # `run_job` 的**作业壳相位**（2026-11-18，长函数存量第三十五刀）：下载前拒收 / 物料落地 /
+    # bc 分叉 / 权重五源 / iter rollout / 红线与 D14 / 回显。最深依赖 `remote.download`(L3)
+    # ⇒ 拓扑秩 **L4**；三个 L4 邻居靠宿主**注入**（`collect_round` / `resolve_ppo_backend` /
+    # `_run_bc_job`），不 import `offline_greedy`·`bc_job`，否则会顶到 L5。
+    # `remote.worker`(L5) 站在它上面，边严格向下。
+    "remote.job_shell": 4,
     "remote.worker": 5,
     # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。

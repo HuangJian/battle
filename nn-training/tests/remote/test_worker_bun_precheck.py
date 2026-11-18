@@ -28,6 +28,7 @@ from common.protocol import ProtocolError, normalize_manifest
 #: `download_payload` 只是转发名 ⇒ patch `worker.download_payload` 是**静默空操作**
 #: （真 HTTP 打到 `http://hub`，报 502 退避重试，用例变红在面外）。
 from remote import download as DL
+from remote import job_shell as SHELL
 from remote import worker
 
 JID = "j" * 16
@@ -159,7 +160,9 @@ def test_cached_result_is_reused_even_without_bun(
     `validate_result` 在这里被打桩成通过 —— 本用例钉的是**顺序**（复用优先于能力自检），
     不是结果体的字段校验（那由 `test_remote_ppo` 一族覆盖）。
     """
-    monkeypatch.setattr(worker, "validate_result", lambda *_a, **_k: None)
+    # 2026-11-18（长函数第三十五刀）：复用块搬进 `remote.job_shell.precheck_job`
+    # ⇒ 拦截点随之搬到该模块（patch `worker.validate_result` 自本刀起是空操作）。
+    monkeypatch.setattr(SHELL, "validate_result", lambda *_a, **_k: None)
     cached = {"job_id": JID, "kind": "iter", "echo": False}
     job_dir = tmp_path / JID
     job_dir.mkdir(parents=True)
@@ -202,7 +205,7 @@ def test_a_validation_failure_falls_through_to_the_full_path(
     def _reject(*_a: object, **_k: object) -> None:
         raise ProtocolError("result 缺失字段 games")
 
-    monkeypatch.setattr(worker, "validate_result", _reject)
+    monkeypatch.setattr(SHELL, "validate_result", _reject)
     with pytest.raises(_DownloadedError):
         worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
     assert downloads == [JID]
@@ -218,7 +221,7 @@ def test_a_broken_validator_is_not_a_broken_cache(
     def _wrong_arity(*_a: object, **_k: object) -> None:
         raise TypeError("validate_result() got an unexpected keyword argument")
 
-    monkeypatch.setattr(worker, "validate_result", _wrong_arity)
+    monkeypatch.setattr(SHELL, "validate_result", _wrong_arity)
     with pytest.raises(TypeError):
         worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path)
     assert downloads == [], "校验器崩了不许继续下 payload（那会把 bug 变成一次白算）"

@@ -7559,3 +7559,11 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_poll_halt` 与 `make_uploader` 调用点因 `W.*` patch 点留在宿主），长函数存量 **4 → 3**，
   形状基线 `remote/worker.py` 2 → 1。
   全文 → `docs/nn/engineering.md` §213。
+- **2026-11-18（长函数存量第三十五刀：作业壳 remote）**：
+  `remote/worker.py::run_job` 439 → **134** 行（七段相位搬进新模块
+  `remote/job_shell.py`：`precheck_job` / `land_materials` / `bc_or_none` /
+  `resolve_job_weights` / `run_iter_phase` / `check_mode_and_d14` / `echo_smoke_result`，
+  状态住 `JobState`；热替换护栏与训练核调用留在宿主），长函数存量 **3 → 2**，
+  形状基线删除 `remote/worker.py` 条目。同批把 `_bulk_yield_params` /
+  `_setup_bulk_yield` / `epoch_mult_of` 下沉 `worker_session.py`（worker LOC 996 → 807）。
+  全文 → `docs/nn/engineering.md` §214。

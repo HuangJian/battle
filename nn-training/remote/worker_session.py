@@ -14,13 +14,74 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from remote.bulk_sched import yield_worth_it
+from remote.bulk_sched import PAUSE_BUDGET_SEC, YIELD_AFTER_SEC_DEFAULT, yield_worth_it
 from remote.cloud_pool import CLOUD_ROLLOUT_POOL
 from remote.lifecycle import Lifecycle
 from remote.payload_proc import PayloadProcess
 from remote.prefetch import PrefetchStore
 from remote.result_upload import UploaderLike
-from remote.wire import _BULK
+from remote.wire import _BULK, set_bulk_log
+
+
+def epoch_mult_of(value: object) -> float:
+    """`--epoch-mult` 的取值：**PPO 每轮更新遍数**的放大倍数（训练侧旋钮）。
+
+    与离线盘 `CFG.epoch_mult` 同一口径：有限正数、缺省 `1.0` = manifest/课程原样；
+    只放大 PPO 遍数（向上取整、最少 1），不改采样量/评估语料，也不改 manifest 身份。
+    非法值在**开跑之前**拒绝（argparse 报错 / `serve_forever` 启动即停）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）")
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"epoch_mult 必须是正数（当前 {value!r}）") from e
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        raise ValueError(f"epoch_mult 必须是有限正数（当前 {value!r}）")
+    return v
+
+
+def _bulk_yield_params(mode: str) -> tuple[float, float | None]:
+    """CLI 档位 → `(after_sec, total_budget_sec)`（判据看函数名，不看 argparse）。
+
+    * `auto`（缺省）= 条件让路：控制面在途 ≥ `YIELD_AFTER_SEC_DEFAULT` 才让，单条传输累计 ≤5s；
+    * `always` = **逐字旧语义**（控制面一在途就让，无累计上限）——现场逃生口 / A/B 基线；
+    * `never` = 永不让路（`after=inf`）——量「让路到底买到了什么」的极端臂。
+    """
+    if mode == "always":
+        return 0.0, None
+    if mode == "never":
+        return float("inf"), None
+    return YIELD_AFTER_SEC_DEFAULT, PAUSE_BUDGET_SEC
+
+
+def _setup_bulk_yield(
+    bulk_yield: str, log
+) -> tuple[tuple[float, float | None], object, dict[int, PrefetchStore | PayloadProcess]]:
+    """装配 bulk 让路策略 + P1 协同广播；返回 (旧策略, 旧观察者, 预取暂存区表) 供 finally 还原。"""
+    set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
+    # bulk 让路策略（W1）：装配 + 启动行（可见即判据）。`configure_yield` 返回旧策略，
+    # **退出时必须还原**：`_BULK` 是进程单例，不还原会把 auto 泄漏给同进程后续使用者
+    # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
+    _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
+    _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
+    # 下行腿分进程后的 P1 协同（2026-10-20）：预取的 P2 在**子进程**里，而本进程的关键下载/回传
+    # （P1）要能挡住它。`_BULK` 的 P1 进出等待在这里广播给每个预取子进程（`foreign_p1` 同口径：
+    # 不开新工 + 当场打断在飞的那份）。**多个 hub ⇒ 多个子进程 ⇒ 全广播**（每一条 P2 都该让）。
+    # 与 `configure_yield` 同一条纪律：`_BULK` 是进程单例 ⇒ 退出时必须还原。
+    pf_stores: dict[int, PrefetchStore | PayloadProcess] = {}
+
+    def _p1_broadcast(waiting: bool) -> None:
+        for _pf in list(pf_stores.values()):
+            note = getattr(_pf, "note_p1", None)
+            if note is not None:
+                note(waiting)
+
+    _prev_p1_observer = _BULK.set_p1_observer(_p1_broadcast)
+    _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
+    _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
+    log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
+    return _prev_yield, _prev_p1_observer, pf_stores
 
 
 def hub_plan(

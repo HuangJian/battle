@@ -63,21 +63,25 @@ class TestPassthrough:
 
 
 def test_run_job_normalizes_device_once_before_kind_fork() -> None:
-    """调用点源码守卫：`run_job` 必须在 **kind 分叉之前** 归一化设备，且全会只此一处。
+    """调用点源码守卫：设备归一化在 **kind 分叉之前**，且全会只此一处。
 
     两次真实事故的回归形态（`run_job` 太大、无法单测驱动，只能源码守）：
       ① 只把 PPO 的分派条件换成 `dev_str`，else 仍写 `torch.device(device)`
          ⇒ `auto` 照样喂进 torch（日志「兜底为 cuda」打了、job 仍炸 auto）；
       ② 归一化只写在 PPO 分支里 ⇒ BC 分叉（`device=device` → `_bc_device`）仍透传 `auto`。
     所以：一次、且在分叉前。
+
+    2026-11-18（长函数第三十五刀）：两个调用点都搬了家 —— 归一化留在宿主的
+    `_guard_code_and_device`（`_ACTIVE_CODE_SHA` 同处），bc 分叉进了 `remote/job_shell`。
+    判据不变：`run_job` 的调用顺序里 guard 必须早于 bc 分叉，且归一化只有一处。
     """
     src = (ROOT / "remote" / "worker.py").read_text(encoding="utf-8")
     flat = " ".join(src.split())
 
-    assert flat.count("normalize_ppo_device(device)") == 1, (
-        "run_job 应只归一化一次；每条链各自归一化必然漏掉其中一条"
+    assert flat.count("normalize_ppo_device(st.device)") == 1, (
+        "应只归一化一次；每条链各自归一化必然漏掉其中一条"
     )
-    assert flat.index("device = normalize_ppo_device(device)") < flat.index('"kind"]) == "bc"'), (
+    assert flat.index("_guard_code_and_device(st)") < flat.index("bc_or_none(st"), (
         "设备归一化必须早于 BC/PPO 分叉，否则其中一条链会拿到未解析的 auto"
     )
 
