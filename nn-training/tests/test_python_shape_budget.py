@@ -28,9 +28,9 @@ FUNC_LINE_LIMIT = 200
 PARAM_LIMIT = 8
 
 #: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
-LONG_FUNCS_BASELINE = {
-    "trainer/loop_remote_job.py": 1,
-}
+#: 2026-11-19：**清零**（第 37 刀拆掉最后一个 `_remote_ppo_publish`）——此后任何 >200 行
+#: 函数都是新增，直接红。
+LONG_FUNCS_BASELINE: dict[str, int] = {}
 
 #: 存量：包含 >8 参数函数的文件 → 个数。
 WIDE_FUNCS_BASELINE = {

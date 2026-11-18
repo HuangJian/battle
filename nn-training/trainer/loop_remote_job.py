@@ -196,33 +196,14 @@ class TrainingRemoteJob(TrainingRemotePush):
         - 校验：init_weights_fp == 当前 args.out 指纹 + data_fp == 本地重算 + commit 一致；
         - 落位：weights_json → args.out（原子 replace）+ opt tar → it{it}/ppo_ckpt_remote。
         hub 全程免 torch（D2）：只做文件搬运 + sha256。
+
+        相位（2026-11-19，长函数存量第三十七刀）：传输裁决 / 课程+shard 集 / 代码快照 /
+        kickstart+demo / 打包开关 / 发布收尾 / 离线导出七段住本类的 `_remote_*` 助手；
+        本方法只保留**顺序编排**与 `PublishSpec` 本身（那一整块是数据，不是逻辑）。
         """
         args = self.args
-        it_dir = self._traj_dir
         t_ppo = time.time()
-        # ★ 2026-09-25（plan/online-offline-role-routing §7）：kind=run 的**队列项**退役。
-        # 生产端唯一的发布者（发一份带段长的队列项、随后等 8h 的那个方法）已删，
-        # 取包链（`--export-bundle` ⇒ 任务包）是它的完整替代（原方法名见 plan §7.6）。
-        #
-        # 谁还带 plan_bytes 而不带 export_path，就是复活那条腿——而队列里**没有消费者**
-        # （`remote/worker.py` 对 kind=run 响亮拒收）⇒ 本机会白等一整段（老代码是 8h），
-        # 症状是「队列不降、没人报错」。所以在这里**当场**拒，并把该走哪条路写进消息里
-        # （这是 kind=run 的唯一咽喉：`--export-bundle` 是唯一合法调用者，它带 export_path）。
-        if plan_bytes is not None and export_path is None:
-            raise SystemExit(
-                "[run_rl] kind=run（离线队列项）这条腿已于 2026-09-25 退役——离线课不再经"
-                " hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
-                "（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传，"
-                "控制台「导入产物」推进本机账本）。本机此刻要发的是**任务包**："
-                "控制台「切离线」会自动跑 --export-bundle，或手工 `--export-bundle <zip>`。"
-                "（本拒绝点住 `_remote_ppo_publish`：任何新调用者只要不带 export_path 就撞上"
-                "这里，不必等谁去读代码。）"
-            )
-        # 半离线（kind="run"）：plan_bytes 非空 = 本 job 之后还要节点自主把计划跑完。
-        if plan_bytes is not None and rollout_spec is None:
-            raise SystemExit(
-                "[run_rl] kind=run 必须同时带 rollout_spec（本 job 自己那一轮的采集规格）"
-            )
+        self._remote_guard_plan(plan_bytes, rollout_spec, export_path)
         # I1 WAL：远端提交序列（打包→发布→等待→校验→落位）的 started/done 台账；
         # 重启后见 pending ⇒ 按同 it 重发 job（publish 幂等键 = run_id+it+wver，
         # verify_and_land 三重校验防错位落盘）。
@@ -230,228 +211,36 @@ class TrainingRemoteJob(TrainingRemotePush):
         self._forensics(f"remote_pre it{it}")
         # 本相位只做「打包 + 发布」：等结果与校验落位各在自己的相位里（三相拆分后
         # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
-        from remote.code_snapshot import published_code_zip
+        from biz.reward_library import METRICS_VERSION
         from remote.hub_client import (
             PublishSpec,
             git_head,
-            iter_shard_dirs,
             publish_job,
         )
 
-        hub_url = str(getattr(args, "remote_hub_url", "") or "")
-        token = str(getattr(args, "remote_token", "") or "")
-        # Push 优先解析（纯 push 不再依赖本地 hub-server / cloudflared）：
-        # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
-        # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
-        transport = str(getattr(args, "remote_transport", "auto") or "auto")
-        # 直推清单与 hub 中介推送由**同一处**裁决（`resolve_route`）：gpu_push 登记项同时是
-        # hub 派发器的登记项 ⇒ auto 下两者会同时成立；hub 赢时直推清单必须清空，否则同一
-        # jid 被推两份，而 `sess.transport` 只看节点（2026-10-26 it72 白等 600s，见该函数）。
-        gpu_nodes, hub_push = resolve_route(
-            transport, hub_url, token, _gpu_push_nodes(token), _hub_push_opt_in()
+        hub_url, token, gpu_nodes, hub_push, job_root = self._remote_transport(args)
+        course, course_text, course_fp, corpus_fp, shard_dirs, mem = self._remote_course_and_shards(
+            it, rollout_spec, export_path, args
         )
-        require_remote_transport(hub_url, token, gpu_nodes)
-        log(
-            f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
-            f"hub_push={hub_push} hub={hub_url or '-'}"
-        )
-        job_root = str(getattr(args, "remote_job_root", "") or "") or str(
-            Path(args.traj) / "remote-jobs"
-        )
-        # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
-        # ★ 顺序：**先**算血缘（course_fp/corpus_fp）、**再**扫 shard——扫描要用它们过滤。
-        course = getattr(args, "course_obj", None)
-        if course is None:
-            raise SystemExit(
-                "[run_rl] PPO 走 hub 队列需要课程（--course <name>，D13 课程指针）——"
-                "reward 公式/超参/关卡由课程单一事实来源"
-            )
-        course_path = Path(getattr(args, "course_path", "") or "")
-        if not course_path.exists():
-            course_path = Path(getattr(args, "course", "") or "")
-        if not course_path.exists():
-            from worker.config import resolve_course
-
-            course_path = resolve_course(course.name)
-        # 课程全文快照 + course_fp = sha256(**启动冻结字节**)——与
-        # biz/cmd.course_fp_for_args / trainer/loop_lifecycle._course_file_fp 同算法同字节源（D14），
-        # 否则 CRLF 换行下 read_text 的通用换行翻译会使指纹不一致、血缘断裂。
-        # 冻结 = 热加载编辑（含被拒的语料身份改动）永不进 D13 快照/指纹（不泄漏云端）。
-        frozen = getattr(args, "course_frozen_bytes", None)
-        course_bytes = frozen if frozen else course_path.read_bytes()
-        course_text = course_bytes.decode("utf-8")
-        course_fp = hashlib.sha256(course_bytes).hexdigest()
-        # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，biz/config.corpus_identity_fp）。
-        # 与 course_fp（文件血缘）并存进 manifest；worker 装载校验优先比 corpus_fp——
-        # 预算/路径类 mid-run 课程编辑只动 course_fp，不再触发整轮 shard 拒收。
-        from worker.config import corpus_identity_fp
-
-        corpus_fp = corpus_identity_fp(course)
-        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
-        # 三条分支的判定抽在 `_gate_round_shards`（纯函数，回归见 test_remote_ppo_gate_fields）。
-        # D14 血缘过滤（2026-09-20 事故）：`it{it}` 是累积目录，课程文件被编辑过/换过
-        # runId 时里面会躺着旧血缘 shard；云端 worker 逐 shard 拒收 ⇒ 整份 job 退回，
-        # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
-        # 与云端同源（`common.protocol.d14_corpus_match`），故「打进 payload 的集合」
-        # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
-        # 起始分布（P3.5）：开了 state_init 时，缺 initTick 的 shard 不进 payload——
-        # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
-        # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args。
-        # （提到扫 shard 之前：行宽版本门也要用它。）
-        from biz.reward_library import METRICS_VERSION
-        from worker.resume import state_init_enabled
-
-        # ★ 零落盘（2026-10-28）：dispatch 腿回传的 shard **从来不在盘上** —— 本轮的内存账
-        #   就是它们的「目录替代物」（名字 + manifest）。轮号对不上（旧轮/没派发）⇒ 空表，
-        #   下面每条腿都退回读盘（local 腿 / 旧轮次逐字节旧行为）。
-        mem: dict[str, dict] = (
-            self._payload_parts.manifests()
-            if int(getattr(self._payload_parts, "it", -1)) == int(it)
-            else {}
-        )
-        local_shards = iter_shard_dirs(
-            args.traj,
-            it,
-            log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
-            course_fp=course_fp,
-            corpus_fp=corpus_fp,
-            state_init=state_init_enabled(args),
-            # 行宽版本门（2026-09-29 事故）：节点侧 rollout 代码比本机旧/新时，shard 的
-            # metrics 行宽与云端读取口径不符 ⇒ 发布端按 shard 自己的声明拦下，不把
-            # 「必炸的字节」送去占 GPU。判据同源 = 本进程的 METRICS_VERSION。
-            metrics_version=int(METRICS_VERSION),
-            mem=mem,
-        )
-        shard_dirs = _gate_round_shards(
-            local_shards=local_shards,
-            rollout_spec=rollout_spec,
-            exporting=export_path is not None,
-            it=it,
-            it_dir=str(it_dir),
-        )
-        # ★ 2026-10-26：**打包前**按 per_stage_quota 裁掉超采（见 `_trim_shards_to_quota`
-        #   的 docstring）。裁在发布端 ⇒ payload / data_fp / 云机装载集三者**同时变小且自洽**；
-        #   PPO 侧 `per_stage_quota` 的截断保留作第二道保险（裁后几乎不会再有触发）。
-        #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
-        quota = self._per_stage_quota(it)
-        protected: set[str] = set()
-        plan = getattr(self, "_greedy_plan", None)
-        if plan is not None and export_path is None and shard_dirs:
-            # greedy 分层预筛（plan/greedy-outcome-quota rev4）：必须在配额裁剪**之前**，
-            # 把多余 greedy 局按 outcome/逐关丢掉，保住子集交给 trim 的 protected。
-            from worker.greedy_quota import (
-                load_manifests,
-                merge_greedy_stats,
-                select_greedy_shards,
-            )
-
-            manifests = load_manifests(shard_dirs, mem)
-            sel = select_greedy_shards([p.name for p in shard_dirs], manifests, plan, it=it)
-            if sel.drop:
-                shard_dirs = [p for p in shard_dirs if p.name not in sel.drop]
-                log(f"it{it}: greedy 预筛丢 {len(sel.drop)} 局（逐关/三档配额）")
-            protected = set(sel.keep)
-            # 采集阶段的留痕（degraded / cap_hit / waves / targets / total）**不得**被预筛
-            # 读数覆盖：本方法在 `step_rollout` 之后、`record_iteration` 之前跑，两处事件
-            # 读的是同一个槽位。预筛读数挂子键 ⇒ iteration 事件同时可归因采集与预筛
-            # （plan rev4 §5.1/§5.2 的「是否触发降级要写 iteration 事件」）。
-            self._greedy_stats = merge_greedy_stats(
-                getattr(self, "_greedy_stats", None), sel.stats
-            )
-            log(f"it{it}: greedy 预筛 stats={sel.stats}")
-        if quota > 0 and export_path is None:
-            kept, n_trimmed, n_kept = _trim_shards_to_quota(
-                shard_dirs, quota, mem=mem, protected=protected or None
-            )
-            if n_trimmed:
-                log(
-                    f"it{it}: 打包前按配额裁剪 shard —— 丢 {n_trimmed} 局未传"
-                    f"（每关 ≤{quota} samples）；保留 {len(kept)} 局 / {n_kept} samples"
-                    f"（共采 {len(shard_dirs)} 局）"
-                )
-            shard_dirs = kept
-        # 零落盘：发布/验收只认**保留集**的内存账 —— 被配额裁掉的段不进 payload，
-        # 也不该出现在「活目录 == 发布快照」的对账里（否则每轮都报一条假 WARN）。
-        mem = {p.name: mem[p.name] for p in shard_dirs if p.name in mem}
-        #: 验收相位（`_remote_ppo_land`）的活目录对账要用的同一份内存账。
-        self._published_mem = mem
-
         commit = git_head()
-        # 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）：「只要不重启，所有
-        # 课程都用同一份 code.zip」——快照由**启动路径**建（hub/boot · run_rl_cluster · run_rl），
-        # 消费侧**只读、永不换代**（半死集群里开新课不该悄悄换代码）。
-        # 快照缺失（从没起过 hub/trainer，或 tmp 被清理过）⇒ **回落 per-course 打包**（改动前
-        # 的逐字节行为）+ 响亮 WARN：绝不在这里悄悄把工作区变成新锚——那正是本需求要防的
-        # 「改代码中开新课拿到不同代码」。进程内缓存保留：一进程一份，逐轮零成本。
-        if not hasattr(self, "_code_sha256"):
-            nn_root = Path(__file__).resolve().parent.parent
-            _zip, _sha, _from_snapshot = published_code_zip(
-                job_root, pack_root=nn_root, log=lambda m: log(f"[run_rl] {m}")
-            )
-            self._code_sha256 = _sha
-            self._code_zip_path = _zip
+        self._remote_code_snapshot(job_root)
+
         # code.zip 已包含当前源码快照（含未提交修改），无需 git commit-pin 检查。
         from trainer.dispatch_queue import RUN_ID
 
         run_id = RUN_ID
         ckpt_remote_path = Path(args.traj) / f"it{it - 1}" / "ppo_ckpt_remote"
         ckpt_remote: Path | None = ckpt_remote_path if ckpt_remote_path.exists() else None
-        # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减（ref 传 None——
-        # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
-        kick_on = bool(getattr(args, "kickstart_ref", False))
-        kick_kl = kickstart_coef(args, it) if kick_on else 0.0
-        # 原先只看 kick_on 开关 ⇒ 缰绳早已松开、ref 权重还在每轮空运（~0.36 MB 原始，
-        # 是 payload 里可观的一块）。系数退火到阈值以下就不再附字节。
-        kick_live = kick_on and coef_active(kick_kl)
-        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
-        # demo 混 batch（x20 后续）：bank 静态（同 run 内逐轮同字节），首轮读一次缓存。
-        # 三键半开即拒（缺 bank 发 coef = 静默纯 PPO，不可接受；缺 coef 发 bank = 空运）。
-        demo_bank_path = str(getattr(args, "demo_bank", "") or "")
-        demo_coef = float(getattr(args, "demo_bc_coef", 0.0) or 0.0)
-        demo_per_mb = int(getattr(args, "demo_per_mb", 0) or 0)
-        demo_raw: bytes | None = None
-        if demo_bank_path or demo_coef > 0 or demo_per_mb > 0:
-            if not (demo_bank_path and demo_coef > 0 and demo_per_mb > 0):
-                raise SystemExit(
-                    "[run_rl] demo 三键须齐全（demo_bank/demo_bc_coef/demo_per_mb）——半开拒发"
-                )
-            if not hasattr(self, "_demo_raw"):
-                bp = Path(demo_bank_path)
-                if not bp.exists():
-                    raise SystemExit(f"[run_rl] demo_bank 不存在：{demo_bank_path!r}——检查课程路径")
-                self._demo_raw = bp.read_bytes()
-                log(f"[run_rl] demo bank 已装载：{demo_bank_path} {len(self._demo_raw) / 1e6:.1f}MB")
-            demo_raw = self._demo_raw
+        kick_on, kick_kl, ref_b64, ref_fp, demo_raw, demo_coef, demo_per_mb = (
+            self._remote_kickstart_demo(args, it)
+        )
         # I1 取证：publish 前的临终对照点（上传大 payload 前的 RSS/磁盘基线）。
         self._forensics(f"remote_pre_publish it{it}")
         # M0：打包（tar.xz + 编码）/ 落盘墙钟——iteration 事件的 wire.pack_sec。
         t_pack = time.time()
-        # M2：协议瘦身开关（rl.slim / --remote-slim；默认开）。关 → 逐字节旧行为。
-        slim = bool(int(getattr(args, "remote_slim", 1) or 0))
-        # wire-diet（plan/wire-diet.plan.md §3 P1/P2）：payload 字节瘦身，**缺省开**
-        # （2026-10-14 用户令「全部启用」，缺省值的家是 `worker/cli` 的 `--wire-diet`）。
-        # 批 `reward_spec` 显式传下去（不读 biz.reward_context 的模块级 holder——打包点不止
-        # 本进程一处，读 holder 会在重发路径上按 it=1 静默算错整轮奖励，评审 P1-4）。
-        wire_diet = bool(int(getattr(args, "wire_diet", 1) or 0))
-        # ★ 零落盘（plan/payload-zero-disk §3.2）：本轮 dispatch 腿**收到就压好**的 shard 段。
-        #   命中即不再读盘/重压（打包只剩拼接 + sha256）；缺的（local 兜底腿 / 预采子进程 /
-        #   配额裁剪后补漏）由 `_pack_segmented` 现场读盘。轮号或 `wire_diet` 对不上 ⇒ `None`
-        #   （宁可慢一轮，也不发一份与 manifest 自述不符的字节）。
-        _taken = self._payload_parts.take(it, wire_diet=wire_diet)
-        if mem and _taken is None:
-            # 零落盘轮没有盘上副本可回退（`take` 的降级路只在有磁盘 shard 时成立）。
-            raise SystemExit(
-                f"[run_rl] it{it}: 零落盘轮但段账不可用（轮号/`wire_diet` 对不上）——"
-                "盘上没有 shard 可退回读盘，拒绝发一份缺语料的包"
-            )
-        presegmented, diet_slim = _taken if _taken is not None else (None, None)
-        if rollout_spec:
-            # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
-            self._ensure_ts_code(job_root, log=log)
-        # ★ 2026-10-15：发布出去的 init 必须是**整份**——`publish_job` 用它算
-        #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
-        #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。
-        weights_standard.ensure_standard_weights(args.out, log=log)
+        slim, wire_diet, presegmented, diet_slim = self._remote_pack_inputs(
+            args, it, rollout_spec, job_root, mem
+        )
         # ★ 2026-10-26 分段计时（**纯观测，跑一轮就撤**）：`pack_sec` 一直是黑盒——
         #   实测 `pack_payload_zip` 在 2.3 GB / 666 shard 上只要 54 s（`tmp/probe-it8-pack.py`），
         #   而现场 `pack_sec` = 161 s（it2）/ 243 s（it1）⇒ **约 93 s 不在这三段里的某一段**。
@@ -538,52 +327,11 @@ class TrainingRemoteJob(TrainingRemotePush):
         )
         t_pub = time.time()  # publish_job 返回点（= 打包 + 落盘 job 目录 + 写 blob/manifest 全部完成）
         jid = manifest["job_id"]
-        # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
-        # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
-        # `_commit_journal` 就能报出「在等哪个 job、推给了谁」，而不是只报一个 round 号。
-        # ★ 2026-09-22（§course-error-isolation-loud）：`--export-bundle` 是只读快照且
-        # **不与训练抢 per-course 锁**——此时**不得**往 journal 写 attach：这份在飞集属于
-        # 真正服务的训练循环，导出并行写会让重启后「在等什么」报出一条永远等不到的幽灵
-        # job（与上方 `register=export_path is None` 同一个门）。
-        if export_path is None:
-            self._commit_journal().attach(
-                "ppo_remote",
-                str(it),
-                jid=jid,
-                dispatch="push" if hub_push else "pull",
-                ts=time.time(),
-            )
-        pack_sec = round(time.time() - t_pack, 3)
-        t_jend = time.time()
-        log(
-            f"[pack-breakdown] it{it}: 标准权重整份化 {t_std - t_pack:.1f}s"
-            f"｜publish_job(含打包) {t_pub - t_std:.1f}s"
-            f"｜journal+收尾 {t_jend - t_pub:.1f}s"
-            f"｜合计 {pack_sec:.1f}s｜{len(shard_dirs)} shard"
+        pack_sec = self._remote_after_publish(
+            it, jid, hub_push, export_path, (t_pack, t_std, t_pub), shard_dirs
         )
         if export_path is not None:
-            # 全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。
-            from remote.bundle import export_bundle
-
-            assert plan_bytes is not None  # 调用方保证（kind=run）
-            index = export_bundle(
-                export_path,
-                manifest=manifest,
-                plan_bytes=plan_bytes,
-                init_weights_path=args.out,
-                code_zip_path=self._code_zip_path,
-                job_dir=Path(job_root) / jid,
-                hub_url=hub_url,
-                note=f"run_rl --export-bundle（it{it} 之后整段；course={getattr(args, 'course_name', '') or '-'}）",
-            )
-            log(
-                f"[run_rl] 全离线任务包已导出：{export_path}"
-                f"（{index['run_id']} it{index['it']} → it{index['end_it']}，"
-                f"{sum(int(p['bytes']) for p in index['parts'].values()) / 1e6:.1f} MB）—"
-                "上传 Kaggle/Colab 后：remote.bundle import + remote.run_loop"
-            )
-            self._bundle_index = index
-            raise BundleExportedError(str(export_path))
+            self._remote_export_bundle(export_path, manifest, plan_bytes, args, job_root, jid, hub_url)
         # ---- 会话成型：三相之间**唯一**的载体（发布 → 等结果 → 落位） ----
         # 超时预算在这里算定：同一份 job 的等待预算不该因为「谁先问了一句」而变
         # （细粒度路径会让位后再回来，那时 `wait_timeout_sec` 已经不在作用域里了）。
@@ -617,6 +365,325 @@ class TrainingRemoteJob(TrainingRemotePush):
         if gpu_nodes:
             self._push_submit_first(sess)
         return sess
+
+    def _remote_guard_plan(self, plan_bytes, rollout_spec, export_path) -> None:
+        """kind=run 的唯一咽喉：两条退役/形状守卫（拒发点仍住发布相位）。"""
+        # ★ 2026-09-25（plan/online-offline-role-routing §7）：kind=run 的**队列项**退役。
+        # 生产端唯一的发布者（发一份带段长的队列项、随后等 8h 的那个方法）已删，
+        # 取包链（`--export-bundle` ⇒ 任务包）是它的完整替代（原方法名见 plan §7.6）。
+        #
+        # 谁还带 plan_bytes 而不带 export_path，就是复活那条腿——而队列里**没有消费者**
+        # （`remote/worker.py` 对 kind=run 响亮拒收）⇒ 本机会白等一整段（老代码是 8h），
+        # 症状是「队列不降、没人报错」。所以在这里**当场**拒，并把该走哪条路写进消息里
+        # （这是 kind=run 的唯一咽喉：`--export-bundle` 是唯一合法调用者，它带 export_path）。
+        if plan_bytes is not None and export_path is None:
+            raise SystemExit(
+                "[run_rl] kind=run（离线队列项）这条腿已于 2026-09-25 退役——离线课不再经"
+                " hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
+                "（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传，"
+                "控制台「导入产物」推进本机账本）。本机此刻要发的是**任务包**："
+                "控制台「切离线」会自动跑 --export-bundle，或手工 `--export-bundle <zip>`。"
+                "（本拒绝点住 `_remote_ppo_publish`：任何新调用者只要不带 export_path 就撞上"
+                "这里，不必等谁去读代码。）"
+            )
+        # 半离线（kind="run"）：plan_bytes 非空 = 本 job 之后还要节点自主把计划跑完。
+        if plan_bytes is not None and rollout_spec is None:
+            raise SystemExit(
+                "[run_rl] kind=run 必须同时带 rollout_spec（本 job 自己那一轮的采集规格）"
+            )
+
+    def _remote_export_bundle(
+        self, export_path, manifest, plan_bytes, args, job_root, jid, hub_url
+    ) -> None:
+        """全离线：不等待、不发 job——把这一段任务打成能上传 Kaggle/Colab 的任务包。"""
+        from remote.bundle import export_bundle
+
+        assert plan_bytes is not None  # 调用方保证（kind=run）
+        index = export_bundle(
+            export_path,
+            manifest=manifest,
+            plan_bytes=plan_bytes,
+            init_weights_path=args.out,
+            code_zip_path=self._code_zip_path,
+            job_dir=Path(job_root) / jid,
+            hub_url=hub_url,
+            note=f"run_rl --export-bundle（it{manifest['it']} 之后整段；"
+            f"course={getattr(args, 'course_name', '') or '-'}）",
+        )
+        log(
+            f"[run_rl] 全离线任务包已导出：{export_path}"
+            f"（{index['run_id']} it{index['it']} → it{index['end_it']}，"
+            f"{sum(int(p['bytes']) for p in index['parts'].values()) / 1e6:.1f} MB）—"
+            "上传 Kaggle/Colab 后：remote.bundle import + remote.run_loop"
+        )
+        self._bundle_index = index
+        raise BundleExportedError(str(export_path))
+
+    def _remote_transport(self, args) -> tuple[str, str, list[dict], bool, str]:
+        """hub / push 传输裁决 + job 根；返回 (hub_url, token, gpu_nodes, hub_push, job_root)。"""
+        # Push 优先解析（纯 push 不再依赖本地 hub-server / cloudflared）：
+        # 有 gpu_push 节点或 REMOTE_PUSH_NODE 时，payload/code 直推云机隧道，
+        # hub_url 可缺省。token 仍要（pull 回落 / env 节点鉴权）；配置节点自带 authKey。
+        hub_url = str(getattr(args, "remote_hub_url", "") or "")
+        token = str(getattr(args, "remote_token", "") or "")
+        transport = str(getattr(args, "remote_transport", "auto") or "auto")
+        # 直推清单与 hub 中介推送由**同一处**裁决（`resolve_route`）：gpu_push 登记项同时是
+        # hub 派发器的登记项 ⇒ auto 下两者会同时成立；hub 赢时直推清单必须清空，否则同一
+        # jid 被推两份，而 `sess.transport` 只看节点（2026-10-26 it72 白等 600s，见该函数）。
+        gpu_nodes, hub_push = resolve_route(
+            transport, hub_url, token, _gpu_push_nodes(token), _hub_push_opt_in()
+        )
+        require_remote_transport(hub_url, token, gpu_nodes)
+        log(
+            f"[run_rl] remote ppo transport={transport} push_nodes={len(gpu_nodes)} "
+            f"hub_push={hub_push} hub={hub_url or '-'}"
+        )
+        job_root = str(getattr(args, "remote_job_root", "") or "") or str(
+            Path(args.traj) / "remote-jobs"
+        )
+        return hub_url, token, gpu_nodes, hub_push, job_root
+
+    def _remote_course_and_shards(self, it: int, rollout_spec, export_path, args):
+        """课程快照 + 本轮 shard 集（D14 / state_init / 行宽门 / greedy 预筛 / 配额裁剪）。
+
+        返回 `(course, course_text, course_fp, corpus_fp, shard_dirs, mem)`——发布相位
+        只读这六个值；`self._published_mem` 的就地更新也在这里（验收相位要用同一份账）。
+        """
+        it_dir = self._traj_dir
+        # 课程快照（D13/D14）：课程文件全文 + course_fp = sha256(文件字节)
+        # ★ 顺序：**先**算血缘（course_fp/corpus_fp）、**再**扫 shard——扫描要用它们过滤。
+        course = getattr(args, "course_obj", None)
+        if course is None:
+            raise SystemExit(
+                "[run_rl] PPO 走 hub 队列需要课程（--course <name>，D13 课程指针）——"
+                "reward 公式/超参/关卡由课程单一事实来源"
+            )
+        course_path = Path(getattr(args, "course_path", "") or "")
+        if not course_path.exists():
+            course_path = Path(getattr(args, "course", "") or "")
+        if not course_path.exists():
+            from worker.config import resolve_course
+
+            course_path = resolve_course(course.name)
+        # 课程全文快照 + course_fp = sha256(**启动冻结字节**)——与
+        # biz/cmd.course_fp_for_args / trainer/loop_lifecycle._course_file_fp 同算法同字节源（D14），
+        # 否则 CRLF 换行下 read_text 的通用换行翻译会使指纹不一致、血缘断裂。
+        # 冻结 = 热加载编辑（含被拒的语料身份改动）永不进 D13 快照/指纹（不泄漏云端）。
+        frozen = getattr(args, "course_frozen_bytes", None)
+        course_bytes = frozen if frozen else course_path.read_bytes()
+        course_text = course_bytes.decode("utf-8")
+        course_fp = hashlib.sha256(course_bytes).hexdigest()
+        # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，biz/config.corpus_identity_fp）。
+        # 与 course_fp（文件血缘）并存进 manifest；worker 装载校验优先比 corpus_fp——
+        # 预算/路径类 mid-run 课程编辑只动 course_fp，不再触发整轮 shard 拒收。
+        from worker.config import corpus_identity_fp
+
+        corpus_fp = corpus_identity_fp(course)
+        # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
+        # 三条分支的判定抽在 `_gate_round_shards`（纯函数，回归见 test_remote_ppo_gate_fields）。
+        # D14 血缘过滤（2026-09-20 事故）：`it{it}` 是累积目录，课程文件被编辑过/换过
+        # runId 时里面会躺着旧血缘 shard；云端 worker 逐 shard 拒收 ⇒ 整份 job 退回，
+        # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
+        # 与云端同源（`common.protocol.d14_corpus_match`），故「打进 payload 的集合」
+        # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
+        # 起始分布（P3.5）：开了 state_init 时，缺 initTick 的 shard 不进 payload——
+        # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
+        # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args。
+        # （提到扫 shard 之前：行宽版本门也要用它。）
+        from biz.reward_library import METRICS_VERSION
+        from remote.hub_client import iter_shard_dirs
+        from worker.resume import state_init_enabled
+
+        # ★ 零落盘（2026-10-28）：dispatch 腿回传的 shard **从来不在盘上** —— 本轮的内存账
+        #   就是它们的「目录替代物」（名字 + manifest）。轮号对不上（旧轮/没派发）⇒ 空表，
+        #   下面每条腿都退回读盘（local 腿 / 旧轮次逐字节旧行为）。
+        mem: dict[str, dict] = (
+            self._payload_parts.manifests()
+            if int(getattr(self._payload_parts, "it", -1)) == int(it)
+            else {}
+        )
+        local_shards = iter_shard_dirs(
+            args.traj,
+            it,
+            log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
+            # 行宽版本门（2026-09-29 事故）：节点侧 rollout 代码比本机旧/新时，shard 的
+            # metrics 行宽与云端读取口径不符 ⇒ 发布端按 shard 自己的声明拦下，不把
+            # 「必炸的字节」送去占 GPU。判据同源 = 本进程的 METRICS_VERSION。
+            metrics_version=int(METRICS_VERSION),
+            mem=mem,
+        )
+        shard_dirs = _gate_round_shards(
+            local_shards=local_shards,
+            rollout_spec=rollout_spec,
+            exporting=export_path is not None,
+            it=it,
+            it_dir=str(it_dir),
+        )
+        # ★ 2026-10-26：**打包前**按 per_stage_quota 裁掉超采（见 `_trim_shards_to_quota`
+        #   的 docstring）。裁在发布端 ⇒ payload / data_fp / 云机装载集三者**同时变小且自洽**；
+        #   PPO 侧 `per_stage_quota` 的截断保留作第二道保险（裁后几乎不会再有触发）。
+        #   `exporting` 档（`--export-bundle`，只读快照 + 不训练）不裁：那份包是给人看的全量。
+        quota = self._per_stage_quota(it)
+        protected: set[str] = set()
+        plan = getattr(self, "_greedy_plan", None)
+        if plan is not None and export_path is None and shard_dirs:
+            # greedy 分层预筛（plan/greedy-outcome-quota rev4）：必须在配额裁剪**之前**，
+            # 把多余 greedy 局按 outcome/逐关丢掉，保住子集交给 trim 的 protected。
+            from worker.greedy_quota import (
+                load_manifests,
+                merge_greedy_stats,
+                select_greedy_shards,
+            )
+
+            manifests = load_manifests(shard_dirs, mem)
+            sel = select_greedy_shards([p.name for p in shard_dirs], manifests, plan, it=it)
+            if sel.drop:
+                shard_dirs = [p for p in shard_dirs if p.name not in sel.drop]
+                log(f"it{it}: greedy 预筛丢 {len(sel.drop)} 局（逐关/三档配额）")
+            protected = set(sel.keep)
+            # 采集阶段的留痕（degraded / cap_hit / waves / targets / total）**不得**被预筛
+            # 读数覆盖：本方法在 `step_rollout` 之后、`record_iteration` 之前跑，两处事件
+            # 读的是同一个槽位。预筛读数挂子键 ⇒ iteration 事件同时可归因采集与预筛
+            # （plan rev4 §5.1/§5.2 的「是否触发降级要写 iteration 事件」）。
+            self._greedy_stats = merge_greedy_stats(
+                getattr(self, "_greedy_stats", None), sel.stats
+            )
+            log(f"it{it}: greedy 预筛 stats={sel.stats}")
+        if quota > 0 and export_path is None:
+            kept, n_trimmed, n_kept = _trim_shards_to_quota(
+                shard_dirs, quota, mem=mem, protected=protected or None
+            )
+            if n_trimmed:
+                log(
+                    f"it{it}: 打包前按配额裁剪 shard —— 丢 {n_trimmed} 局未传"
+                    f"（每关 ≤{quota} samples）；保留 {len(kept)} 局 / {n_kept} samples"
+                    f"（共采 {len(shard_dirs)} 局）"
+                )
+            shard_dirs = kept
+        # 零落盘：发布/验收只认**保留集**的内存账 —— 被配额裁掉的段不进 payload，
+        # 也不该出现在「活目录 == 发布快照」的对账里（否则每轮都报一条假 WARN）。
+        mem = {p.name: mem[p.name] for p in shard_dirs if p.name in mem}
+        #: 验收相位（`_remote_ppo_land`）的活目录对账要用的同一份内存账。
+        self._published_mem = mem
+        return course, course_text, course_fp, corpus_fp, shard_dirs, mem
+
+    def _remote_code_snapshot(self, job_root: str) -> None:
+        """集群代码快照（只读、永不换代）：进程内缓存一份 code.zip + sha。"""
+        # 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）：「只要不重启，所有
+        # 课程都用同一份 code.zip」——快照由**启动路径**建（hub/boot · run_rl_cluster · run_rl），
+        # 消费侧**只读、永不换代**（半死集群里开新课不该悄悄换代码）。
+        # 快照缺失（从没起过 hub/trainer，或 tmp 被清理过）⇒ **回落 per-course 打包**（改动前
+        # 的逐字节行为）+ 响亮 WARN：绝不在这里悄悄把工作区变成新锚——那正是本需求要防的
+        # 「改代码中开新课拿到不同代码」。进程内缓存保留：一进程一份，逐轮零成本。
+        if hasattr(self, "_code_sha256"):
+            return
+        from remote.code_snapshot import published_code_zip
+
+        nn_root = Path(__file__).resolve().parent.parent
+        _zip, _sha, _from_snapshot = published_code_zip(
+            job_root, pack_root=nn_root, log=lambda m: log(f"[run_rl] {m}")
+        )
+        self._code_sha256 = _sha
+        self._code_zip_path = _zip
+
+    def _remote_kickstart_demo(self, args, it: int) -> tuple[bool, float, str, str, bytes | None, float, int]:
+        """BC 缰绳（kickstart）与 demo bank：返回发布相位要的七个值。"""
+        # BC-anchored kickstart（§363）：缰绳系数走 update_kwargs 衰减（ref 传 None——
+        # 系数是纯数学，不需模型）；ref 权重读课程 bc 文件（一次，base64 进 manifest）。
+        kick_on = bool(getattr(args, "kickstart_ref", False))
+        kick_kl = kickstart_coef(args, it) if kick_on else 0.0
+        # 原先只看 kick_on 开关 ⇒ 缰绳早已松开、ref 权重还在每轮空运（~0.36 MB 原始，
+        # 是 payload 里可观的一块）。系数退火到阈值以下就不再附字节。
+        kick_live = kick_on and coef_active(kick_kl)
+        ref_b64, ref_fp = _kickstart_ref_payload(args) if kick_live else ("", "")
+        # demo 混 batch（x20 后续）：bank 静态（同 run 内逐轮同字节），首轮读一次缓存。
+        # 三键半开即拒（缺 bank 发 coef = 静默纯 PPO，不可接受；缺 coef 发 bank = 空运）。
+        demo_bank_path = str(getattr(args, "demo_bank", "") or "")
+        demo_coef = float(getattr(args, "demo_bc_coef", 0.0) or 0.0)
+        demo_per_mb = int(getattr(args, "demo_per_mb", 0) or 0)
+        demo_raw: bytes | None = None
+        if demo_bank_path or demo_coef > 0 or demo_per_mb > 0:
+            if not (demo_bank_path and demo_coef > 0 and demo_per_mb > 0):
+                raise SystemExit(
+                    "[run_rl] demo 三键须齐全（demo_bank/demo_bc_coef/demo_per_mb）——半开拒发"
+                )
+            if not hasattr(self, "_demo_raw"):
+                bp = Path(demo_bank_path)
+                if not bp.exists():
+                    raise SystemExit(f"[run_rl] demo_bank 不存在：{demo_bank_path!r}——检查课程路径")
+                self._demo_raw = bp.read_bytes()
+                log(f"[run_rl] demo bank 已装载：{demo_bank_path} {len(self._demo_raw) / 1e6:.1f}MB")
+            demo_raw = self._demo_raw
+        return kick_on, kick_kl, ref_b64, ref_fp, demo_raw, demo_coef, demo_per_mb
+
+    def _remote_pack_inputs(self, args, it: int, rollout_spec, job_root: str, mem: dict[str, dict]):
+        """打包开关 + 零落盘段账 + TS 运行时 + 标准权重整份化；返回 (slim, wire_diet, presegmented, diet_slim)。"""
+        # M2：协议瘦身开关（rl.slim / --remote-slim；默认开）。关 → 逐字节旧行为。
+        slim = bool(int(getattr(args, "remote_slim", 1) or 0))
+        # wire-diet（plan/wire-diet.plan.md §3 P1/P2）：payload 字节瘦身，**缺省开**
+        # （2026-10-14 用户令「全部启用」，缺省值的家是 `worker/cli` 的 `--wire-diet`）。
+        # 批 `reward_spec` 显式传下去（不读 biz.reward_context 的模块级 holder——打包点不止
+        # 本进程一处，读 holder 会在重发路径上按 it=1 静默算错整轮奖励，评审 P1-4）。
+        wire_diet = bool(int(getattr(args, "wire_diet", 1) or 0))
+        # ★ 零落盘（plan/payload-zero-disk §3.2）：本轮 dispatch 腿**收到就压好**的 shard 段。
+        #   命中即不再读盘/重压（打包只剩拼接 + sha256）；缺的（local 兜底腿 / 预采子进程 /
+        #   配额裁剪后补漏）由 `_pack_segmented` 现场读盘。轮号或 `wire_diet` 对不上 ⇒ `None`
+        #   （宁可慢一轮，也不发一份与 manifest 自述不符的字节）。
+        _taken = self._payload_parts.take(it, wire_diet=wire_diet)
+        if mem and _taken is None:
+            # 零落盘轮没有盘上副本可回退（`take` 的降级路只在有磁盘 shard 时成立）。
+            raise SystemExit(
+                f"[run_rl] it{it}: 零落盘轮但段账不可用（轮号/`wire_diet` 对不上）——"
+                "盘上没有 shard 可退回读盘，拒绝发一份缺语料的包"
+            )
+        presegmented, diet_slim = _taken if _taken is not None else (None, None)
+        if rollout_spec:
+            # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
+            self._ensure_ts_code(job_root, log=log)
+        # ★ 2026-10-15：发布出去的 init 必须是**整份**——`publish_job` 用它算
+        #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
+        #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。
+        weights_standard.ensure_standard_weights(args.out, log=log)
+        return slim, wire_diet, presegmented, diet_slim
+
+    def _remote_after_publish(
+        self,
+        it: int,
+        jid: str,
+        hub_push: bool,
+        export_path,
+        pack_ts: tuple[float, float, float],
+        shard_dirs,
+    ) -> float:
+        """发布后的 WAL attach + 分段计时行（`--export-bundle` 不写 attach）。"""
+        t_pack, t_std, t_pub = pack_ts
+        # R2b（plan/r2-loop-task-queue §2.3）：把刚发布的 job 补进 WAL 的**在飞集**——
+        # job_id 是 publish 的返回值（start 时还没有），只能上这条 attach。重启后
+        # `_commit_journal` 就能报出「在等哪个 job、推给了谁」，而不是只报一个 round 号。
+        # ★ 2026-09-22（§course-error-isolation-loud）：`--export-bundle` 是只读快照且
+        # **不与训练抢 per-course 锁**——此时**不得**往 journal 写 attach：这份在飞集属于
+        # 真正服务的训练循环，导出并行写会让重启后「在等什么」报出一条永远等不到的幽灵
+        # job（与上方 `register=export_path is None` 同一个门）。
+        if export_path is None:
+            self._commit_journal().attach(
+                "ppo_remote",
+                str(it),
+                jid=jid,
+                dispatch="push" if hub_push else "pull",
+                ts=time.time(),
+            )
+        pack_sec = round(time.time() - t_pack, 3)
+        t_jend = time.time()
+        log(
+            f"[pack-breakdown] it{it}: 标准权重整份化 {t_std - t_pack:.1f}s"
+            f"｜publish_job(含打包) {t_pub - t_std:.1f}s"
+            f"｜journal+收尾 {t_jend - t_pub:.1f}s"
+            f"｜合计 {pack_sec:.1f}s｜{len(shard_dirs)} shard"
+        )
+        return pack_sec
 
     def _remote_ppo_probe(self, sess: RemotePpoJob) -> dict | None:
         """相位②的**非阻塞**版：问一句就走（就绪 → 结果；未就绪 / 瞬时错 → None）。

@@ -7573,3 +7573,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   输入与运行时状态收进 `_StreamCtx`；PPO RNG 派生留在宿主函数体，模块顶层仍零 torch），
   长函数存量 **2 → 1**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §215。
+- **2026-11-19（长函数存量第三十七刀：发布相位 trainer）**：
+  `trainer/loop_remote_job.py::TrainingRemoteJob._remote_ppo_publish` 444 → **192** 行
+  （七段相位拆成本类 `_remote_*` 助手：guard_plan / transport / course_and_shards /
+  code_snapshot / kickstart_demo / pack_inputs / after_publish / export_bundle），
+  长函数存量 **1 → 0**——`LONG_FUNCS_BASELINE` **清空**（存量清零，此后一律按新增判）。
+  全文 → `docs/nn/engineering.md` §216。

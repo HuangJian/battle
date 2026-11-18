@@ -25,6 +25,25 @@
 
 ---
 
+## §216 长函数存量第三十七刀：发布相位（trainer）444 → 192（2026-11-19）
+
+`trainer/loop_remote_job.py::TrainingRemoteJob._remote_ppo_publish` **444 → 192 行**，
+长函数存量 **1 → 0**——`LONG_FUNCS_BASELINE` 清空（此后 >200 行函数一律是新增）。
+
+七段相位拆成本类的 `_remote_*` 助手（同文件，方法不触发模块级依赖账本）：
+`_remote_guard_plan`（kind=run 两条守卫）· `_remote_transport`（hub/push 裁决 + job 根）·
+`_remote_course_and_shards`（课程快照 + D14/state_init/行宽门/greedy 预筛/配额裁剪，
+返回 `course/course_text/course_fp/corpus_fp/shard_dirs/mem` 六值）· `_remote_code_snapshot` ·
+`_remote_kickstart_demo`（七值）· `_remote_pack_inputs`（瘦身开关/零落盘段账/TS/标准权重）·
+`_remote_after_publish`（WAL attach + 分段计时，返回 `pack_sec`）· `_remote_export_bundle`。
+
+纪律逐条保持：8 处 `log` 与 7 处 `raise` 用 AST 比对（归一化 `self.`）——全等；
+`commit = git_head()` 仍在代码快照之前、`_pack` 的三段计时点与 `pack_sec` 的口径
+（`time.time() - t_pack`）不变、`--export-bundle` 的 note 文案逐字不变
+（`it` 改从 `manifest["it"]` 取，值同）。`trainer/loop_remote_job.py` LOC 501 → 538。
+
+---
+
 ## §215 长函数存量第三十六刀：流式迭代（trainer）442 → 112（2026-11-18）
 
 `trainer/stream.py::run_rollout_stream` **442 → 112 行**，长函数存量 **2 → 1**
