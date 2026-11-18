@@ -25,6 +25,21 @@
 
 ---
 
+## §157 G5 第十八批：worker 名册的读数 `workers()`（2026-11-18）
+
+`tests/worker/test_remote_serve_pool.py` 私有断言 **10 → 0**（G5 **400 → 390**，116 → 115 文件）。
+
+两类命中。第一类是**驱动入口**：5 条建池前置断言直接调用 `iter_rollout._make_pool(...)`，
+把调用赋给 `built` 再断言（同 §149 的口径）。第二类是池的 worker 名册（`_workers`）：
+`begin_round` 的「暖 / booting 一个不动」与 P0-1 的「未就绪 ≠ 坏，不杀」都要求看**同一个
+worker 对象**（身份）与它的 `proc.poll()`（存活），不是只看计数 —— 所以新增
+`ServePool.workers()` 返回**活引用元组**（锁内取快照；元组只防调用方拿走列表本体，
+池后续增删不影响已取的快照），而不是 `worker_count()` 一类的计数读数。三条计数断言
+（1/3 个）与两条存活断言随之改读它；`dead` / `ready` / `proc` 仍是宿主面。
+O(池宽) 的拷贝只在用例与诊断里发生，不在每局热路径。
+
+---
+
 ## §156 G5 第十六~十七批：调用移出 assert 与两处传输/补传读数（2026-11-18）
 
 ### 第十六批：驱动被测入口的调用移出 assert 表达式（`tests/worker/test_kickstart_plan.py` 15 → 0、`tests/trainer/test_ppo_watchdog.py` 13 → 0）

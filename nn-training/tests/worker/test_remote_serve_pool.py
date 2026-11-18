@@ -402,19 +402,24 @@ def test_make_pool_gates_on_env_allowlist_and_single_script(
     """建池的三个前置（开关 / 准入名单 / 单一脚本）——缺一即不建，行为同上云前。"""
     ok = [["tools/sim/export-rl-rollout.ts", "--out", "w0"]]
     monkeypatch.delenv(serve_pool.ENV_SWITCH, raising=False)
-    assert iter_rollout._make_pool("bun", tmp_path, ok, 2, lambda _m: None) is not None
+    built = iter_rollout._make_pool("bun", tmp_path, ok, 2, lambda _m: None)
+    assert built is not None
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
-    assert iter_rollout._make_pool("bun", tmp_path, ok, 2, lambda _m: None) is None
+    built = iter_rollout._make_pool("bun", tmp_path, ok, 2, lambda _m: None)
+    assert built is None
     monkeypatch.delenv(serve_pool.ENV_SWITCH, raising=False)
     # 名单外的导出器（goal/intent 走 agent 池，节点侧不池化）不建池
-    assert iter_rollout._make_pool(
+    built = iter_rollout._make_pool(
         "bun", tmp_path, [["tools/sim/export-goal-rollout.ts"]], 2, lambda _m: None
-    ) is None
+    )
+    assert built is None
     # 同一轮两个脚本：池按脚本建 ⇒ 不建（保守）
-    assert iter_rollout._make_pool(
+    built = iter_rollout._make_pool(
         "bun", tmp_path, [*ok, ["tools/sim/export-goal-rollout.ts"]], 2, lambda _m: None
-    ) is None
-    assert iter_rollout._make_pool("bun", tmp_path, [], 2, lambda _m: None) is None
+    )
+    assert built is None
+    built = iter_rollout._make_pool("bun", tmp_path, [], 2, lambda _m: None)
+    assert built is None
 
 
 def test_pool_enabled_defaults_on_and_env_kills_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -453,7 +458,7 @@ def test_begin_round_resets_counters_and_reaps_dead_workers(tmp_path: Path) -> N
     begin_pool.begin_round()
     assert (begin_pool.served, begin_pool.spawned) == (0, 0)
     assert begin_pool.killed == 1 and dead.kills == 1, "dead 必须被 kill/reap"
-    assert begin_pool._workers == [warm, booting], "暖/正在 booting 的 worker 一个不动"
+    assert begin_pool.workers() == (warm, booting), "暖/正在 booting 的 worker 一个不动"
     assert begin_pool.unready == 1, "unready 只数仍在 booting 的，不是无条件 0"
     assert (begin_pool.fallback, begin_pool.bypassed, begin_pool.disabled) == (0, 0, False)
     assert begin_pool.fallback_reasons == {}
@@ -794,8 +799,8 @@ def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_p
     # 就是这次冷启动白付 + 之后补位再付一次（「一次超时 → 三份进程」的第三份）。它之后就绪了
     # 照样入池（`_acquire` 只发真就绪的）。本次任务照旧走一次性（`no-slot`）。
     assert pool.fallback_reasons == {"no-slot": 1}
-    assert pool.killed == 0 and pool.unready == 1 and len(pool._workers) == 1
-    assert pool._workers[0].proc.poll() is None, "进程还活着就不该被杀（P0-1）"
+    assert pool.killed == 0 and pool.unready == 1 and len(pool.workers()) == 1
+    assert pool.workers()[0].proc.poll() is None, "进程还活着就不该被杀（P0-1）"
     pool.close()
 
 
@@ -823,8 +828,8 @@ def test_start_counts_only_real_ready(tmp_path: Path) -> None:
     assert p2.start() == 0
     # timing-ok: 上界兜底（静默桩只有共享 deadline 能结束它；10s 只挡挂起）
     assert time.time() - t0 < 10.0
-    assert p2.unready == 3 and p2.killed == 0 and len(p2._workers) == 3
-    assert all(w.proc.poll() is None for w in p2._workers), "未就绪不等于「坏」：不杀（P0-1）"
+    assert p2.unready == 3 and p2.killed == 0 and len(p2.workers()) == 3
+    assert all(w.proc.poll() is None for w in p2.workers()), "未就绪不等于「坏」：不杀（P0-1）"
     p2.close()
 
 

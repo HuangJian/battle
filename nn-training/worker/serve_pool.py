@@ -405,6 +405,16 @@ class ServePool:
                 # 也必须说出来：那一份是**仍在吃内存**的孤儿，而 `killed` 已经把它算进去了。
                 self.log(f"[pool] dead worker kill 失败（进程可能仍在）：{e!r}")
 
+    def workers(self) -> tuple[_Worker, ...]:
+        """池里当前持有的 worker（**活引用**，顺序 = 尝试顺序）。
+
+        只读快照：返回元组（调用方拿不走列表本体，池后续的增删不影响它）；元素是**同一个**
+        worker 对象 —— 用例靠这一点断言「跨轮复用不重建」「未就绪不杀」，诊断也靠它问
+        `proc.poll()` / `dead` / `ready`。
+        """
+        with self._lock:
+            return tuple(self._workers)
+
     def close(self) -> None:
         self.closed = True
         with self._lock:

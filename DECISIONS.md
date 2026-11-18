@@ -7267,3 +7267,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `metrics_stat` / `metrics_unsupported` / `mode`），`status()` 的 operator 字典面不变；
   读数按 LOC 预算（腿本体 1008 行）下沉成 `remote/deliver_state.py`（L1，拓扑账本同步）。
   全文 → `docs/nn/engineering.md` §156。
+- **2026-11-18（G5 第十八批：worker 名册的读数）**：`tests/worker/test_remote_serve_pool.py`
+  私有断言 10 → **0**（G5 400 → **390**，115 文件）。5 条建池前置断言把
+  `iter_rollout._make_pool(...)` 的调用移出 assert；另外 5 条读 `_workers` 的断言改读新增的
+  `ServePool.workers()` —— 返回**活引用元组**（锁内快照），因为「跨轮复用不重建」与
+  「未就绪不杀」两条契约要看同一个 worker 的身份和它的 `proc.poll()`，计数读数不够。
+  全文 → `docs/nn/engineering.md` §157。
