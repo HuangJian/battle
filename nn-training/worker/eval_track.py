@@ -43,7 +43,14 @@ from common.log import log
 ROLLOUT_SEED_MAX = 2**30
 EVAL_SEEDS_BASE = 2_000_000_001
 EVAL_SEEDS = tuple(range(EVAL_SEEDS_BASE, EVAL_SEEDS_BASE + 200))
-assert EVAL_SEEDS_BASE > ROLLOUT_SEED_MAX, "评估池必须在 rollout 抽签区间之外"
+# 显式 `raise` 而不是 `assert`：这条不变量是「评估读数与训练局不相交」的地基，而 `python -O`
+# 会把 assert 整段删掉（G7 禁止生产包用模块级 assert 做运行时校验）。两侧都是常量，
+# import 期就炸，不会等到第一轮读数。
+if EVAL_SEEDS_BASE <= ROLLOUT_SEED_MAX:
+    raise RuntimeError(
+        f"评估池必须在 rollout 抽签区间之外：EVAL_SEEDS_BASE={EVAL_SEEDS_BASE} "
+        f"<= ROLLOUT_SEED_MAX={ROLLOUT_SEED_MAX}"
+    )
 
 #: 日常 A-eval 每关局数（用户口径 2026-10-22：「100，与今天双轨总量持平」）。
 #: 课程写 `eval_games_per_stage: 50` 是双轨时代「锚点那一半」的配置；双轨退场后**成本与

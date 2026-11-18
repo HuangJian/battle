@@ -6995,3 +6995,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `test_manifest_split::ALLOWED_IMPORTS`——加第二个第三方包必须先改这三处，不能顺手。
   读数：6210 收下 / 2 skipped · mypy 959 · ruff 绿 · G14/G5 不动 · 模块 docstring 与文本断言基线**都没抬**。
   全文 → `docs/nn/engineering.md` §128。
+
+- **2026-11-18（P1-9 第二刀：G7 扩到全生产面，函数级 assert 转冻结存量）**：模块级 assert 是
+  「`python -O` 一关就消失的正确性根基」，但 G7 自 2026-11-14 起只扫 `common/**`。扩面后抓到仅剩
+  两处 —— `trainer/loop_round_steps.py` 的步骤表同步、`worker/eval_track.py` 的「评估池必须落在
+  rollout 抽签区间之外」—— 都改成 import 期显式 `raise RuntimeError`（消息里带上两侧集合/常量）。
+  函数体里那 62 处**不清零**：P1-9 原裁定是「热路径的 assert 保留但注明」，清零等于把它们改成
+  永远执行的 `if … raise`（热路径代价 + 语义从调试期变成生产期）⇒ 按文件冻结进
+  `tests/golden/assert_baseline.json`，只许调小、归零删条目（豁免 `worker/scripts/` 与
+  `hub/smoke_loopback.py` —— 冒烟脚本的 assert 就是结论）。同文件补第三条门禁：可执行命令面
+  （`tools/githook/*.sh` / `Makefile` / CI / `package.json` scripts）不得出现 `python -O`。
+  G7 文件随之改名 `tests/test_common_module_asserts.py` → `tests/test_module_asserts.py`（它已不只
+  管 `common/`）。全文 → `docs/nn/engineering.md` §129。

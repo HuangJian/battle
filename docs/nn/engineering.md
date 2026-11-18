@@ -25,6 +25,42 @@
 
 ---
 
+## §129 G7 扩面：生产面模块级 `assert` 归零，函数级转冻结存量（2026-11-18）
+
+P1-9 的判据很简单：`python -O` 会把 assert 整段删掉，而模块级 assert 校验的是「布局与 TS 侧逐字
+一致」「步骤表与实现一一对应」这类**正确性根基**。2026-11-14 只清了 `common/**`（5 处改
+`_check_layout`），其余生产包无人看。这次把门禁扫面扩到全部生产包，扩面立刻抓到仅剩两处：
+
+| 位置 | 不变量 | 现在 |
+|---|---|---|
+| `trainer/loop_round_steps.py` | `STEP_METHOD` ↔ `ROUND_TASKS` 一一对应 | `raise RuntimeError(...)`，带上「缺实现 / 多声明」两个集合 |
+| `worker/eval_track.py` | 评估种子池起点 > rollout 抽签上界（读数独立性的地基） | `raise RuntimeError(...)`，两个常量都印在消息里 |
+
+两处都是**常量对照**：import 期就炸，不会等到第一轮训练/读数。
+
+### 为什么函数级不清零
+
+函数体里还有 **62 处 / 33 文件**。P1-9 原裁定是「热路径的 assert 保留但加注释」——一批清零等于
+把它们改成永远执行的 `if … raise`（热路径多一次比较与分支，语义也从「调试期」变成「生产期」）。
+所以这一半只拦增长：`tests/golden/assert_baseline.json` 按文件冻结，只许调小、归零删条目（与
+G3/G4/G6/G9/G14 同一形态）。豁免面：`worker/scripts/` 一次性脚本与 `hub/smoke_loopback.py`
+（冒烟脚本里 `assert` 就是结论，P1-9 自己认定为可接受）。
+
+### 第三条：`python -O` 不得出现在命令面
+
+前两半只保住了 assert 本身；「没人换个优化级别跑」是它们的前提。新用例扫 `tools/githook/*.sh` ·
+`Makefile` · `.github/workflows/*.yml` · `package.json` scripts（并自检真的扫到了 `pre-commit` /
+`nn-python-gate.sh`，防空转）。实测全仓零命中（只有散文里提到 `python -O` 是本问题的成因，
+不在命令面）。
+
+### 读数
+
+扫描面 378 个生产文件；模块级断言 **2 → 0**；函数级 **62 处 / 33 文件**冻结；mypy 959 · ruff 绿 ·
+全量门禁绿。G7 文件改名 `tests/test_common_module_asserts.py` → `tests/test_module_asserts.py`
+（它已不只管 `common/`）。
+
+---
+
 ## §128 B5 第四块：manifest / result 的 pydantic 模型（`model_validate` 成为校验的唯一实现，2026-11-18）
 
 `common/manifest.normalize_manifest` 曾是一条 ~110 行的 `isinstance` 链：能校验，但错误信息靠拼
