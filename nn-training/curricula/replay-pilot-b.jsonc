@@ -1,0 +1,183 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// replay-pilot-b.jsonc — replay 语料三臂 pilot（plan/replay-corpus.plan.md §6.5），**不是生产课**
+//
+// ⚠ 本文件由 `tmp/gen-replay-pilot.py` 生成；三臂的共同冻结项由同一脚本保证。
+//   手改这里 ⇒ 三臂不再同源，pilot 的判决作废。改配方请改生成器再重跑。
+//
+// 1. 这门课回答什么
+//    「数据刷新频率 / on-policy 滞后」对样本效率有没有可测影响。三臂**等总样本、
+//    等 mb、等 epochs**，梯度步数相同，差别只有池大小与刷新频率：
+//      A  7 关/it  × 20 it   target 24,576/it   ← 每 96 步换新池
+//      B  35 关/it ×  4 it   target 122,880/it
+//      C  35 关/it ×  1 it   target 491,520     ← 整轮冻结在同一个池上
+//    它**不回答**传输/装载器等价性（那是 §6.6 的 verify 五档），也不回答配方优劣。
+//
+// 2. 本档角色：35 关/it：每轮换一次池；B vs C 才是「刷新频率」的干净对照。
+//
+// 3. 共同冻结项（三臂逐字段相同，只有 name/iters/target_transitions/rotation_per_it/
+//    eval_every 与四个落点键不同）
+//    · 起点：`nn-training/weights/replay-verify/replay-verify-s5.json`（g5-safe.it230 + seed 20261117 只扰动三个 policy head bias
+//      scale=5；完整 35×20 面板 pass 64.1%，留 14.6pp 上坡 ⇒ 平台期「三臂全平」
+//      这种不可判决结果被排除）。三臂必须消费**同一份** JSON（sha256 对账）。
+//    · 关卡：classic35-safe-base / 35 关（2000–2034）/ hard / 20 敌 / 3 命 / 36000 tick。
+//      **任务侧一字不动**（AGENTS §0.2）。
+//    · 奖励 / 架构 / 超参：逐字节继承 g5-safe（lr 8e-5、epochs 4、mb 1024、
+//      kl_coef 0.05 / kl_cap 0.1、value_anchor 0.001、gamma 0.998、lam 0.95、K=10）。
+//    · 调度：关 kickstart、单段常值 `ppo_schedule`、`breakers_off: true`（ent 熔断守底）。
+//    · 执行档：`corpus_fmt=replay` + `ppo_loader=lazy`（= 2026-11-17 起的生产组合）。
+//    · eval：生产面板 35 关 × 20 seed = 700 局/锚点，`eval_every` 见下。
+//
+// 4. 样本轴：**目标 491,520 不可达**（`per_stage_quota = ceil(target/本轮关数)`，而 35×20
+//    的语料实测只能吃到 452,041）⇒ 三臂 realized ≈ **451,584 = 441×1024，1,764 步**。
+//    `target_transitions` 仍写 mb 整倍数（改小会把配额压得更低）。判读一律用**实测**
+//    `n_used`，并断言三臂差 ≤1 chunk。
+//
+// 5. 三臂共享的是「等量 + 同覆盖面（35 关 × ~20 个唯一 seed）」，**不共享 seed 集合**：
+//    seed 由 `(rotate_seed, it, stage, wave)` 派生 ⇒ 同一关在不同 it 必然不同 seed，
+//    重复 pair 构造上不可能；但也别把报告写成「三臂同语料」。课程里**不写 `seeds`**——
+//    `target_transitions>0` 时它没有读者（volume 路径不调 `build_pairs`）。
+//
+// 6. 开跑前必须做（否则差异不可归因）
+//    · **先给三臂各自的 `out` 预置同一份起点权重**（`cp
+//      nn-training/weights/replay-verify/replay-verify-s5.json tmp/replay-pilot-<key>/weights.json`）。
+//      单一 PPO 路径下本机**不** build_model：`out` 既是本机权威权重、也是发给 PPO worker 的
+//      init_weights ⇒ 文件不存在时 it1 直接 `FileNotFoundError: .../weights.json`（2026-11-17
+//      三课首次开跑就是死在这，5 次重试后 aborted）。三份副本的 sha256 必须相同。
+//    · 三臂**串行**在同一台 GPU 上跑，记录 GPU 名/驱动/显存、torch/cuda 版本、code.zip 快照；
+//    · 三臂都设 **`NN_VERIFY_RUN_ID=replay-pilot-s1`**（同一个值！）⇒ `job_seed(runId,it,
+//      init_weights_fp)` 三臂逐字相同；换 s2 复跑时改 `-s2`，别复用 s1 的值；
+//    · **`--local-ppo-slots` 必须 ≥1**（写 0 = 每 15s 刷 `blocked_pool ppo` 且永不发布 job）；
+//    · 不要用 CLI 传 `--corpus-fmt` / `--ppo-loader`：课程是单一事实来源，显式 CLI 会拒启。
+//
+// 7. 判读（先写死，跑完不许改口）
+//    · 主读：恢复曲线 —— B vs A 在相同样本锚点（A 的 it5/10/15/20 ↔ B 的 it1/2/3/4）
+//      的配对差（止损 ≥−1pp、正向 ≥+1pp）+ 回到 ≥78% 所需样本数；C 只有终点 ⇒ 终点
+//      配对差 + 跨 eval seed CI。原始 it230（80.94%）另作稳态第二读数，不进主判。
+//    · 机制门（解释项，不是停止判据）：KL_cum(24.5k 样本) 0.0015–0.0025；KL > 0.05
+//      或 entropy 连续下降则停腿复盘。
+//    · No-Go：B 连续 2 锚点 < A −2pp；或 35 关有效样本硬闸失败；或 replay identity 失败 >0。
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  "version": 5,
+  "name": "replay-pilot-b",
+  "mode": "per-tick",
+  "level": "classic35-safe-base",
+  "rotation_mode": "even",
+  "rotation_per_it": 35,
+  "reward": {
+    "formula": [
+      "wKill*kills",
+      "+ wHit*aimHits",
+      "+ wAcc*aimHits/(playerShots+1)",
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      "+ wBrick*min(aimBricks, brickCap)",
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (13000-clearTick)/1400)), 0)",
+      "- wDmg*playerDamageTaken",
+      "- wDeath*playerDeaths",
+      "- wIdle*idleTicks/(ticks+1)",
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      "- wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      "- wHurt*min(hurtWeight, hurtCap)",
+      "- wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      "- wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+      "- min(missCap2, wMiss2*max(0, aimMisses - missFree)**2)",
+      "+ wAccGood*min(accCap, max(0, aimHits/(playerShots+1) - accFree))",
+      "- wBurst*min(damageBursts, burstCap)",
+      "- wMaxDmg*min(max(0, maxDamage120 - maxDmgFree), maxDmgCap)",
+      "- wLowDmg*min(damageWhileLow, lowDmgCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 1.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 8.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.04,
+      "stuckFree": 300.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      "wThreat": 130.0,
+      "threatRateCap": 0.25,
+      "wHurt": 0.09,
+      "hurtCap": 500.0,
+      "wPostHit": 800.0,
+      "postHitRateCap": 0.035,
+      "wEncl": 40.0,
+      "enclRateCap": 0.4,
+      "wMiss2": 0.0015,
+      "missFree": 40.0,
+      "missCap2": 12.0,
+      "wAccGood": 200.0,
+      "accFree": 0.45,
+      "accCap": 0.15,
+      "wBurst": 4.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.1,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.03,
+      "lowDmgCap": 600.0,
+    },
+    "terminal": {
+      "timeout": -50.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  "dodge": "",
+  "bc": "nn-training/weights/replay-verify/replay-verify-s5.json",
+  "kickstart_ref": false,
+  "kickstart_init": 0.0,
+  "kickstart_decay": 0.5,
+  "warmup_iters": 0,
+  "value_anchor": 0.001,
+  "iters": 4,
+  "max_hours": 6.0,
+  "lr": 8e-5,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.05,
+      "lr": 8e-5,
+      "kl_cap": 0.1,
+    },
+  ],
+  "target_transitions": 122880,
+  "paired_rotate_seed": 20261115,
+  "decision_events": false,
+  "decision_k": 10,
+  "opening_connect": true,
+  "breakers_off": true,
+  "ent_break": 0.25,
+  "ent_break_consec": 8,
+  "ent_break_max_winrate": 0.0,
+  "eval_stages": "2000-2034",
+  "eval_games_per_stage": 20,
+  "eval_every": 1,
+  "corpus_fmt": "replay",
+  "ppo_loader": "lazy",
+  "out": "tmp/replay-pilot-b/weights.json",
+  "traj": "tmp/replay-pilot-b",
+  "backup_dir": "nn-training/weights/replay-pilot-b",
+  "backup_prefix": "replay-pilot-b",
+}

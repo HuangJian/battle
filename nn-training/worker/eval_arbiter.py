@@ -1036,6 +1036,17 @@ class EvalArbiter:
         with self._cond:
             return sum(1 for rnd in self._rounds if rnd.course_fp == course_fp)
 
+    def active_its(self, course_fp: str) -> set[int]:
+        """该课**仍在飞**的评估轮号（登记了但还没收工）。
+
+        用途：收官 drain 的**去重**（2026-11-17 事故）——drain 用 `eval_summary` 判「哪轮
+        没覆盖」，而在飞的轮还没写 summary ⇒ 会被判成未覆盖**再派一次**，同一 `(stage,seed)`
+        落两行（现场 `replay-a-cont` it20：700 + 469 = 1,169 行）。判据要问「这轮是不是已经
+        有人在做」，而不是「账上有没有结论」。
+        """
+        with self._cond:
+            return {int(rnd.it) for rnd in self._rounds if rnd.course_fp == course_fp}
+
     def reset_for_tests(self) -> None:
         with self._cond:
             self._shutdown = True

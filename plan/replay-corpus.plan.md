@@ -1,6 +1,7 @@
 # Replay 语料运输 + 懒加载 PPO + 大 batch 缩放（plan v8）
 
-> 状态：**待评审 v8；P1 已实现并测试（2026-11-15）**（2026-11-15 已处理 qw v4 + k3 v6 两轮评审，并补用户核查：动作捕获完整性 / opening 接管。v8 新增：v3 move/fire/hold 逐 tick 记录契约、converter 只用 frames 不用 `a_*`、OpeningController 不重跑、`opening-null-move` 疑点探针。用户拍板见 §11.1，评审处置见 §1.8/§1.9，重新拍板见 §11.3。P1 进展见 §8 P1：`--corpus-fmt`、replay 录制、生产转换器、identity/零落盘/坏 replay 测试全绿。）
+> 状态：**P0–P5 全部完成并封口（2026-11-18）**。P2 gate PASS（判据 C）· P3 lazy 缺省切换 + 真机 RSS 1,030 MB · P4 三臂 pilot + 两批后续腿共 10 条 · 结论：刷新频率有效但处在**等分面**，语料调度已到头。P2 gate 于 2026-11-17 18:01 按**判据 C** 判 PASS（`reports/p2-verdict-c-20261117.md`：44 张量 41 个逐位相同、余 3 个各 1 ulp；`NN_NATIVE=0` 下 obs/scalars/extra **逐字节相同**）；P3 lazy 已于 2026-11-17 切生产缺省（`§2026-11-17-goalnn-ppo-lazy-default`）。**下一步 = §6.5 三臂 pilot**；§6.5 的参数表按实测改过五处（loader 改 lazy / P3.5 不再前置 / eval 锚点走 `eval_every` / PPO 成本与体积用真机读数 / **样本轴回到 491,520**——18:20 那版「451,584」是按离线 20-seed 语料推错的，19:51 真机推翻）。
+> 历史：v8 待评审稿（2026-11-15 处理 qw v4 + k3 v6 两轮评审，并补用户核查：动作捕获完整性 / opening 接管。v8 新增：v3 move/fire/hold 逐 tick 记录契约、converter 只用 frames 不用 `a_*`、OpeningController 不重跑、`opening-null-move` 疑点探针。用户拍板见 §11.1，评审处置见 §1.8/§1.9，重新拍板见 §11.3。P1 进展见 §8 P1。）
 > 来源：g5 系列在 35 关上「每 it 轮换 7 关」的传输瓶颈；目标 35×5 / 35×20 样本量。
 > 关联：AGENTS §15.1/§15.5/§0.2 · `plan/it-stage-ratation.plan.md` · `plan/autonomous-cloud-overrides.plan.md` · `docs/nn/remote-transport.md` · `docs/nn/training-stack.md`
 > 非目标：不改 PPO 数学（engine 的 clip/GAE/entropy 一行不动）· 不改任务侧（关卡/命数/敌数/max_ticks/终局标准）· 不把游戏仿真搬到 GPU · 不删除 npy 路径 · 不在本 plan 内改 eval 口径或难度。
@@ -11,7 +12,11 @@
 
 请求（任务/rollout spec）显式声明 `corpus_fmt = full | replay`：`full` 走现有 obs npy；`replay` 让 rollout sampler 直接产出 replay + 非 obs 标签，**sampler→trainer 与 trainer→PPO worker 两段传输都变小**，worker 用 replay 重建 obs/scalars/extra。同时把 PPO 装载改成 BC 同款 **lazy mmap + 逐批上卡**，让每轮样本量由训练需求决定，而不是由传输体积决定。
 
-预期（按 qw 评审修正后的保守口径）：7 关轮换的 wire 从 ~21 s/轮降到 ~5 s/轮（不是 ~1 s）；35×20 的 wire 从 ~430 s/轮降到 ~85 s/轮；**等样本墙钟收益约 15–25%/样本（待 P3 实测；lazy 吞吐尚未证明，见 §5.1）**，以及「能不能跑 35×20」从不可行变可行。代价是 worker 端多一次「replay → npy」的 CPU 转换（2 vCPU 约 1–2 min/35×20 轮，含写盘/重哈希需 P0 实测），以及一次 loader 重构。**不是 20× 加速**；35×20 的收益主要是解锁样本量与覆盖度，不是吞吐倍数。
+**实测回填（2026-11-17/18）**：wire 确实变小 —— 24.5k 样本 s2t **0.81 MB**、491k **16.2 MB**，
+trainer→worker payload A **0.84 MB** / B **2.87 MB** / C **9.54 MB**（门 ≤12 MB）；转换 4.9 / 15.8 / **54.0 s**。
+**但「等样本墙钟收益 15–25%」没有兑现**：A（20 轮）PPO 墙钟 **2,510 s** vs C（1 轮）**555 s** ——
+高频刷新**更慢**，差额是每轮固定开销（≈25 s 等 worker + 打包/回传），不是 PPO 计算（三臂 431/423/428 s）。
+⇒ replay 的真实收益是 **「35×20 从不可行变可行」+ 传输 12×**，**不是**吞吐加速；而 35×20 本身后来被证是最差档（68.1%）。
 
 ---
 
@@ -48,7 +53,7 @@
 | 自定义关 s2030（g5 关卡） | 11,163 / 1,117 | 逐字节相同 | 相同 | 相同 | 相同 | 相同 |
 
 路径：`InputRecorder`（录制）→ replay JSON → `ReplayInput` + `restoreWorld`（重建）。自定义关不依赖 `STAGES` 表；快照自带地形/出生点/RNG/基地 HP。
-注意：**同平台已验证；Windows→Linux 2 vCPU 尚未验证**，进 P0/P2 必须真机复测。
+注意：**跨平台已验证（2026-11-15）** —— 1,015 局（35 关 × 29 seed）在 Bun 进程内 / `bun build --target=node` bundle / **WSL Linux Node** 三端 obs·scalars·extra **0 mismatch**，详见 §9 覆盖度条。
 
 ### 1.4 转换耗时（Ryzen 7 5800H，Bun 1.4.4）
 
@@ -114,7 +119,11 @@
 | 245k（10×） | 240 | 960 | ~404 s |
 | 491k（20×） | 480 | 1,920 | **~808 s（约 13.5 min）** |
 
-**1×20 与 20×1 的总 PPO GPU 时间相同**（按样本计，**不含 lazy loader 的额外开销**；后者待 P3 实测）；大 batch 省的是 wire/pack 和迭代开销，不是 20× 加速。
+**1×20 与 20×1 的总 PPO GPU 时间相同**（按样本计）；大 batch 省的是 wire/pack 和迭代开销，不是 20× 加速。
+
+**实测修正（2026-11-17，Tesla T4 ×2 / `device=cuda-dp` / threads=2）**：上表的线性外推**高估 1.9×** ——
+491k 样本实测 `ppo=428.1 s`（A 20 轮合计 431 s、B 4 轮 423 s、C 1 轮 428 s），
+而外推值是 808 s；`dp=True` 把算力摊到两张卡。lazy 装载开销已并入这 428 s（`peak≈1,030 MB`，逐批上卡）。
 
 ### 1.8 qw 评审处置（v5）
 
@@ -372,6 +381,7 @@ replay 语料由转换器以 f4 重造**。同一份 rollout 的两种表示**�
 **eval（生产口径不变，实验臂派发改）**：
 - 生产课继续 `eval_every=5 it`，eval 网格/seed/难度不变。
 - 实验臂单独 `eval_every=1` + `eval_at`：A 5/10/15/20；B 1/2/3/4（每 it = 123k 样本，与 A 的样本锚点对齐）；C 只有 1 it ⇒ 终点单点 + 跨 seed 置信区间，**放弃 C 的五点窗**。主判 = B 的学习曲线配对 + C 的终点配对差。
+  **⚠ 2026-11-17 实现修正**：`eval_at` **不是课程键**（`CourseConfig` 无此字段、`extra="forbid"` 会拒加载，只有 `--eval-at` CLI 面）。落地改用 **`eval_every` 表达同一组锚点**：A=5、B=1、C=1 ⇒ 评估点与上表逐点相同，且不多付一次 eval。详见 §6.5「训练 seed 与配对」。
 - 墙钟读数单列 eval 时间；主判用「训练墙钟（不含 eval）」，避免 C 因不付 eval 时间而占便宜。
 - 三臂 it 节奏天然不同（20/4/1），**删掉「同 it 节奏比较」**；能对齐的只有样本轴。
 
@@ -493,7 +503,9 @@ scan_shards → mmap 每 shard
 3. 全局 `idx` 与 eager 使用同一次 `np.random.permutation(n)`，demo_bank 的 np RNG 消费顺序不变；
 4. quota 截断在 GAE 之前，截断后的全局行数与 eager 相同。
 
-**吞吐 gate（k3 B4）**：P3 必须做同机端到端 benchmark，分报 scan+GAE、随机 gather、逐批转换、H2D、纯 update、总墙钟。**2026-11-16 修正「冷/热 page cache」这一档**：训练落 tmpfs（`/dev/shm`）时 obs 是**常驻 RAM 页**，不存在冷/热之分 —— 该档改为「RAM 容量闸（3.97 GB obs 计入容器内存）」；只有 obs 确实落盘时才保留冷/热两读数。随机 gather 已在云机实测 **1,749 MB/s**（350 shard、168 批 ×1024 行、gate 500 MB/s ⇒ 3.5×）；除数值等价外，设「最大允许吞吐退化阈值」（**2026-11-17 P3 已填**：同机随机 gather ≥ **500 MB/s**，低于即判退化；装载 scan+GAE 不得劣于 eager）。在实测前，§0 的 15–25%/样本、§1.7 的线性 PPO 时间只能标记为**待验证假设**。
+**吞吐 gate（k3 B4）**：P3 必须做同机端到端 benchmark，分报 scan+GAE、随机 gather、逐批转换、H2D、纯 update、总墙钟。**2026-11-16 修正「冷/热 page cache」这一档**：训练落 tmpfs（`/dev/shm`）时 obs 是**常驻 RAM 页**，不存在冷/热之分 —— 该档改为「RAM 容量闸（3.97 GB obs 计入容器内存）」；只有 obs 确实落盘时才保留冷/热两读数。随机 gather 已在云机实测 **1,749 MB/s**（350 shard、168 批 ×1024 行、gate 500 MB/s ⇒ 3.5×）；除数值等价外，设「最大允许吞吐退化阈值」（**2026-11-17 P3 已填**：同机随机 gather ≥ **500 MB/s**，低于即判退化；装载 scan+GAE 不得劣于 eager）。~~在实测前，§0 的 15–25%/样本、§1.7 的线性 PPO 时间只能标记为待验证假设。~~
+**2026-11-17/18 已实测并回填**：§0 的「15–25% 收益」**未兑现**（高频刷新更慢，每轮固定开销主导）；
+§1.7 的线性外推（491k → 808 s）**高估 1.9×**（T4×2 实测 428 s）。两处都已按真机读数改完，不再是假设。
 
 ### 5.2 契约
 
@@ -570,7 +582,7 @@ scan_shards → mmap 每 shard
 ### 6.2 超参调整顺序（qw + k3 评审修正）
 
 1. **P3.5 是 lr+epochs 组合干预筛选腿**（新 `--out`，不动生产）：lr 1.2e-4 → 2–3e-4、epochs 4→8；结论只叫「筛选」，不做单变量归因；若要归因需拆单变量或析因。
-2. P3.5 正向后再开三臂；**三臂用同一组固定配置并冻结调度**（关 kickstart、关分段 `ppo_schedule`，固定 lr/epochs/mb/ent/kl/value_anchor）。
+2. **P3.5 不作三臂的前置（2026-11-17 拍板）**：§6.5 已把 pilot 超参冻结在 g5-safe 的实测稳定值 `lr=8e-5 / epochs=4`，本条的「1.2e-4 → 2–3e-4」是 D8 旧基线的口径，已过时；lr/epochs 的组合探索降级为 **pilot 之后的独立腿**（新 `--out`、不动生产、结论只叫筛选）。三臂本身**用同一组固定配置并冻结调度**（关 kickstart、关分段 `ppo_schedule`，固定 lr/epochs/mb/ent/kl/value_anchor）。
 3. 三臂判据用 **KL_cum(24.5k 样本)**：`KL_cum = Σ_{mb in 24.5k samples} mean( (logπ_new(a|s) − logπ_old(a|s))^2 )`（approx KL，非负；与 engine 的 approx KL 同口径）；三臂同带 **0.0015–0.0025**。`per-step KL = KL_cum / (24.5k/mb)` 只作读数；per-it KL 不作判据。
 4. 若 C 在等步数下劣化，先试更频繁刷新（缩小池）或降 epochs，不要直接加 lr；KL >0.05 或 entropy 连续下降则停腿复盘。
 
@@ -599,13 +611,13 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 
 | 项 | 值 | 理由 |
 |---|---|---|
-| 课程 | **新 `nn-training/curricula/replay-pilot.jsonc`**，逐字段复制已跟踪的 `g5-safe.jsonc`，只覆盖下表三处采样旋钮 | g5-safe 是已跟踪、已跑到 it230 的稳定课；不引用未跟踪的 g5-aim2/g5-pilot |
+| 课程 | **三份新文件 `nn-training/curricula/replay-pilot-{a,b,c}.jsonc`**，由同一脚本从已跟踪的 `g5-safe.jsonc` 派生，彼此只差下表的三处采样旋钮 + `name/out/traj/backup` | g5-safe 是已跟踪、已跑到 it230 的稳定课；不引用未跟踪的 g5-aim2/g5-pilot。**三份必须由同一脚本生成**（`diff` 只应出现那几行），否则「共同冻结项」是嘴上的 |
 | 关卡 | `level=classic35-safe-base`，`eval_stages=2000-2034`（**35 关**），hard / 20 敌 / 3 命 / 36000 tick | 任务侧一字不动；与 g5-safe 已跑的 80.94% 基线同面 |
 | 起点权重 | **同一份受控扰动的 g5-safe.it230**（`scale=5`，实测起始 pass 64.1%；见下「上坡硬闸」）；原始 it230（78.7% / 历史五点窗 80.94%）作**第二读数** | 用户 2026-11-17 指出：g5-safe it210–230 末三窗 80.74 / 81.31 / 80.94 已平台，三臂都「持平」时**无法区分「刷新频率无效」与「起点无梯度」**。必须制造可恢复的上坡 |
 | 奖励 / 架构 / 超参 | 逐字节 = g5-safe：`lr=8e-5`、`epochs=4`、`mb=1024`、`kl_coef=0.05`、`kl_cap=0.1`、`value_anchor=0.001`、`gamma=0.998`、`lam=0.95`、`decision_k=10` | D8「起步三臂同 lr/epochs/mb」；8e-5 是 g5-safe 实际稳定值，**不采用 D8 文中的旧 1.2e-4** |
 | 调度 | **删 `ppo_schedule`，`kickstart_ref=false`**（或 `kickstart_init=0`）；`breakers_off=true`、ent 熔断守底 | D9：首轮冻结调度，一次只验「数据刷新频率」 |
-| 语料格式 | **`corpus_fmt=replay` + `ppo_loader=eager`**；eval 仍走 full | P4 只切 replay；lazy 留到 P5，不与本轮混淆 |
-| 样本轴 | 三臂总样本都 = **491,520**（= 480×1024，mb 整倍数）；训练墙钟不含 eval | D8 等总样本；plan 硬闸 target_transitions 必须 mb 整倍数 |
+| 语料格式 | **`corpus_fmt=replay` + `ppo_loader=lazy`**；eval 仍走 full | **2026-11-17 改**：原文写 `eager`，依据是「P4 只切 replay、lazy 留到 P5」（k3 B1「一次只动一个开关」）。该前提已消解——P2 按判据 C 判绿、P3 在真机 `fl`≡`fe`/`rl`≡`re` 判绿，且 lazy 自 2026-11-17 起就是生产缺省。pilot 必须跑**产线组合**，否则测的是没人跑的路径，还白付 eager 的 3× obs 峰值 |
+| 样本轴 | **491,520（= 480×1024，mb 整倍数）**；真机实测三臂逐 it 都吃满（C: 491,540 池 / 491,520 训练 / 0 dropped shard）；训练墙钟不含 eval | 见下「样本轴实测」：原先按**离线 20-seed 语料**推的 452,041 上限不适用于在线连续配额采集 |
 
 #### 上坡硬闸（2026-11-17 新增；不过闸不许开三臂）
 
@@ -633,11 +645,33 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 
 #### 三臂参数表
 
-| 臂 | 每 it 关卡数 / seed 数 | `target_transitions`/it | iters | 总样本 | chunks/it | 步/it | 总步 | eval 锚点 |
+| 臂 | 每 it 关卡数 / seed 数 | `target_transitions`/it | iters | 总样本（目标） | chunks/it | 步/it | 总步（目标） | eval 锚点 |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | **A**（7×5×20） | 7 / **5** | **24,576**（24×1024） | **20** | 491,520 | 24 | 96 | 1,920 | it 5 / 10 / 15 / 20 |
 | **B**（35×5×4） | 35 / **5** | **122,880**（120×1024） | **4** | 491,520 | 120 | 480 | 1,920 | it 1 / 2 / 3 / 4 |
 | **C**（35×20×1） | 35 / **20** | **491,520**（480×1024） | **1** | 491,520 | 480 | 1,920 | 1,920 | 终点 1 次 |
+
+#### 样本轴实测（2026-11-17 19:51 真机推翻「451,584」：三臂各 it 都吃满配额）
+
+**先说结论：原 plan 的 491,520 / 480 chunk / 1,920 步是对的；我 18:20 那版「realized 451,584」是错的。**
+
+19:33–19:51 在 kaggle（Tesla T4 ×2，`device=cuda-dp`）跑出的逐 it 实账（`配额=` 行）：
+
+| 臂 | it | 池子 steps | 训练 steps | chunks | dropped shard |
+|---|---:|---:|---:|---:|---:|
+| A | 1 | 24,577 | 24,576 | 24 | 0 |
+| A | 2 | 24,577 | 24,576 | 24 | 0 |
+| B | 1 | 122,885 | 122,880 | 120 | 0 |
+| C | 1 | **491,540** | **491,520** | **480** | 0 |
+
+**为什么之前算错**：452,041 是**固定 35×20 seed 的离线语料**（`tmp/g5-lives-corpus.ts` 那种脚本，`reports/coverage-g5-lives-700-20261117.md`）的上限。在线课程走的是 `_volume_collect_continuous`：采到每关样本 ≥ `per_stage_quota` 才停，`max_games_per_stage=0`（无上限）⇒ 弱关会自己补到 30+ 局，**SHORT 不发生**。我把离线脚本的 20-seed 天花板当成了训练器的天花板，这是错的。
+
+**因此（撤回 18:20 的「接受 451,584」）**：
+
+1. 样本轴 = **491,520/臂**（A 24,576×20、B 122,880×4、C 491,520×1 逐字相等），1,920 步，`chunks` 分别 24/120/480。
+2. 三臂 `n_used` 差 **0**（裁剪后逐字相同），§6.5 的「≤1 chunk」断言自动满足，不需要按最小臂对齐。
+3. eval 锚点就是 25/50/75/100% × 491,520（= 122,880 的整数倍），不需要按实测重标。
+4. it1 采集确实**超采**（A 31,754 vs 目标 24,576，冷启动 `est=0` 先每关 1 局再 ×2 补差），但裁剪回到配额 ⇒ 不影响「固定样本量」。
 
 > 注意：P4 原文「`target_transitions=122,880`」是 **B 臂单 it** 的值，不是三臂通用值；A=24,576、C=491,520。
 > 三臂 `rotation_mode=even`、`paired_rotate_seed=20261115`（与 g5-safe 同），A 的 7 关按轮次轮换，20 it 覆盖 35 关约 4 圈。
@@ -645,11 +679,44 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 
 #### 训练 seed 与配对
 
-- 首轮 **1 个训练 seed**：三臂同 `runId` 前缀 `replay-pilot-s1-{A,B,C}`，且**共用同一份扰动起点 JSON**
+- 首轮 **1 个训练 seed**：三臂**共用同一个 runId**（`NN_VERIFY_RUN_ID=replay-pilot-s1`，三臂同一值），且**共用同一份扰动起点 JSON**
   ⇒ `init_weights_fp` 相同、每 it 的 `job_seed(runId,it,init_weights_fp)` 在三臂间可比；
   由训练核自动派生（train_core.py:434），不另加手填种子。
+  **⚠ 别给三臂各配一个 runId 后缀**（`-a/-b/-c`）：runId 是 `job_seed` 的输入，各配一个就把 PPO 侧随机性也换掉了，
+  「刷新频率」这个唯一变量被污染。三臂的区别只在课程名（⇒ 幂等键与落点不同），不在 runId。
+  **⚠ runId 随 trainer 进程变**：没设 `NN_VERIFY_RUN_ID` 时它 = `secrets.token_hex(8)`（`trainer/dispatch.py:63`），
+  每次重启换一个（现场：19:19 是 `8e55750dde376dca`，19:29 重启后变 `98b8d9b9386ff64e`）。⇒ **三臂必须在同一个 trainer 进程里跑完**；
+  中途重启就得把三臂都已经跑过的轮次当废数据（或设死 `NN_VERIFY_RUN_ID` 再重来）。
 - 推广腿至少 **3 个独立训练 seed**：同一组三臂复制 3 份，`runId` 后缀 `-s2/-s3/-s4`；按训练 seed 配对做差，eval seed 面板不变（§6.3 统计边界）。
-- eval 面板固定 **35 关 × 20 seed = 700 局/锚点**（生产口径），`eval_every=1` + `eval_at` 按表；A/B 各 4 锚点、C 1 锚点 ⇒ 首轮 eval 共 **6,300 局**，单列墙钟。
+- eval 面板固定 **35 关 × 20 seed = 700 局/锚点**（生产口径）；**锚点用 `eval_every` 表达，不用 `eval_at`**：A=5（评 it5/10/15/20）、B=1（评 1/2/3/4）、C=1（评 it1）⇒ A/B 各 4 锚点、C 1 锚点，首轮 eval 共 **6,300 局**，单列墙钟。
+  **为什么不是 `eval_at`（2026-11-17 实现时发现）**：`eval_at` **不是课程键**——`CourseConfig` 里没有该字段、`flat_overrides` 也没映射，而课程模型是 `extra="forbid"` ⇒ 写进 `.jsonc` 会**拒绝加载**。它只有 CLI 面（`worker/cli.py:434 --eval-at`），而 pilot 的规矩是「课程是单一事实来源、不用 CLI 传执行档」。上表的三个 `eval_every` 取值恰好让评估点落在 §6.5 预注册的样本锚点上，**零额外 eval、零代码改动**。
+  **⚠ 实测账（2026-11-17 19:30）**：`it0` 的『起点基线』**无条件跑一次 700 局**（日志 `[eval] it0: dispatch 700 greedy games … [it0 基线 · bc 权重]`），不受 `eval_every` 管。所以真实 eval = A 5 点（it0/5/10/15/20）· B 5 点（it0/1/2/3/4）· C 2 点（it0/1）= **12 × 700 = 8,400 局**（原写 6,300 漏了三个 it0）。按 4 节点并采约 5–8 min，仍单列墙钟。
+
+#### 开跑前置（2026-11-17 19:19 首次开课全部失败后补写）
+
+三课开课后 it1 立刻 `FileNotFoundError` ×5 ⇒ `[serve] aborted prepare_iter 连续失败`，**一局都没采**。三条硬前置：
+
+1. **`out` 指向的起始权重必须预先存在**：单一 PPO 路径下本机不 `build_model`，`out` 既是本机权威权重、也是发给 PPO worker 的 `init_weights`（`weights_standard.is_delta_weights_file` 直接读文件）。
+   ```
+   for a in a b c; do mkdir -p tmp/replay-pilot-$a; done
+   cp nn-training/weights/replay-verify/replay-verify-s5.json tmp/replay-pilot-a/weights.json   # 三份各自一份
+   ```
+   三份副本 sha256 必须相同（`bec039d88e2d…`）⇒ `init_weights_fp` 才一致。
+2. **`out`/`traj`/`backup_dir` 用扁平 `tmp/<课程名>`**，不建 `tmp/replay-pilot/{a,b,c}` 这类嵌套目录：控制台按「课程名 = 目录名」发现，嵌套会刷
+   `WARN 课程 … 的 traj 与发现路径不一致`。
+3. **改了课程文件必须重启常驻 trainer 才生效**：`stopCourse` + `openCourse` 走的是「复用原 runtime/引擎」，**不会重读课程 JSON**
+   （现场证据：改完 traj 后仍去读旧的 `tmp/replay-pilot/a/weights.json`）。正确顺序 = 控制台 `stop component=trainingLoop` → `start` → 再 `openCourse` 三课。
+
+#### 三臂共享什么、不共享什么（2026-11-17 拍板 A：接受派生，不钉 fixed games）
+
+- **共享**：总样本量（真机实测 **491,520/臂**，三臂逐字相同）、mb/epochs/步数（480/120/24 chunk × 4 epoch = 同一批 1,920 步）、覆盖面（35 关全在，弱关自动补到配额）、起点权重、奖励/超参/调度。
+- **不共享**：**seed 集合本身**。seed 由 `(rotate_seed, it, stage, wave_idx)` 派生（`worker/volume_waves.py:175-192`）⇒ A 臂同一关在 4 个 it 里各抽 5 个、C 臂一次抽 20 个，两批 seed 不重叠也不同值。**报告里不许写「三臂同语料」**，只能写「等量、同覆盖面、seed 集合不同」。
+- **课程里不写 `seeds`**：`target_transitions>0` 走 volume 路径（`loop_volume._iteration_pairs`），`build_pairs` 不被调用 ⇒ `seeds` 无读者（`est_samples_per_game` 同样是死键）。写了只会让人以为它是旋钮。
+- **每关局数不是声明的**，是「采到 `per_stage_quota` 样本就停」的结果：A 每轮 3,511/关（≈5 局）累计 4 轮，C 一轮 14,044/关（≈20 局）。两臂都在配额处被裁剪（`_trim_shards_to_quota`）⇒ 总样本收敛到同一上限，差在几十~几百样本。
+- **判读前置断言（两条都必须过）**：
+  1. 三臂 realized `n_used` 差 **≤1 chunk（1024 样本）**；
+  2. 每关 `unique (stage,seed)` **≥18**（20 局允许丢 2 局）。
+  任一不过 ⇒ 先对齐到最小臂再读胜率，或该锚点作废；**不许把样本量差解释成刷新频率效应**。
 
 #### 决策规则（先写死，跑完不许改口）
 
@@ -665,9 +732,107 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
 
 - rollout：每臂 700 局；本机 7 并发导出实测 **3.38 局/s** ⇒ 单臂 ≈ 207 s，三臂 ≈ 10.4 min。
 - replay→npy 转换：优化后本机 7 worker 写盘 ≈ **11 s/700 shard**（五轮 3500/3500），三臂 ≈ 33 s。
-- PPO：按 plan 旧估值 ~202 s/491k 样本/臂，三臂 ≈ 10 min（需真机校正）。
-- eval：6,300 局，按 god-ai 3 worker ≈ 30 s/2100 局 ⇒ ≈ 90 s。
-- 首轮合计约 **23 min**（不含排队/上传），在 16 GB 显存机型上不会撞显存门。
+- **PPO（2026-11-17 19:51 真机实测，kaggle Tesla T4 ×2 / `device=cuda-dp` / threads=2）**：
+
+  | 臂 | it | chunks | 训练 steps | `ppo` | `wall`（含收尾/上传） | `loader=lazy` peak | payload |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | A | 1–2 | 24 | 24,576 | **21–24 s** | 27–40 s | 824–825 MB | 0.84 MB |
+  | B | 1 | 120 | 122,880 | **103.9 s** | 122.0 s | 872 MB | 2.87 MB |
+  | C | 1 | 480 | 491,520 | **428.1 s** | 490.0 s | **1,030 MB** | 9.54 MB |
+
+  ⇒ 首轮 PPO 总量 ≈ A 20×24 + B 4×104 + C 428 ≈ **1.3 ks ≈ 22 min**。
+  §1.7 的线性外推（491k → 808 s）**高估 1.9×**：T4×2 的 `dp=True` 摊掉一半，实测 428 s。
+- replay→npy 转换（GPU 机 2 worker，实测）：A 4.9 s/35 shard · B 15.8 s/148 · **C 54.0 s/553**（预算 ≤2 min，余 2.2×）。
+- eval：**8,400 局**（it0 基线必跑 + A 5 点 / B 5 点 / C 2 点，见上），4 节点并采 ≈ 5–8 min。
+- 首轮合计 **≈ 35–45 min**（不含排队/上传）。体积门：C 臂 payload **9.54 MB ≤ 12 MB**（余 1.26×）。
+
+#### 三臂实测结果（2026-11-17 20:20，全文 `reports/replay-pilot-verdict-20261117.md`）
+
+| 臂 | 累计样本 | it0 | 122,880 | 245,760 | 368,640 | 491,520 |
+|---|---:|---:|---:|---:|---:|---:|
+| A（20 次刷新） | 494,592 | 67.3% | 69.3% | 76.1% | **77.7%** | 75.0% |
+| B（4 次） | 490,496 | 67.3% | 72.3% | 72.6% | 71.1% | 72.4% |
+| C（1 次冻结） | 491,520 | 67.3% | — | — | — | 68.1% |
+
+配对差：B−A = **+3.00 / −3.57 / −6.57 / −2.57pp**（CI 见报告）⇒ **No-Go 触发（3 连 < −2pp）**；
+C−B（干净对照）= **−4.29pp** [−9.00, +0.29]；C−A = **−6.86pp** [−11.29, −2.29]。
+PPO 算力三臂 431/423/428 s（步数都是 1,920）⇒ 学习差异不是算力差异。墙钟：A 35.9 min / B 19.1 / C ≈9，
+差额几乎全是每轮固定开销（A 每轮 PPO 21 s，其余 ≈104 s 是打包/发布/等 worker/回传）。
+
+**判决**：刷新频率有效，方向与假设一致（越频繁越好）；冻结大池最差。**P5 的「10×/20× 扩量」前提被否定**
+（扩量正是 C 的做法）。下一步改成：① 补 3 个训练 seed 复跑 A vs C 端点；② 压每轮固定开销；③ 若要自动调频，
+才需要 §D9 的 it 内样本轴调度。
+
+#### 剂量-响应第二档 `replay-dose2`（2026-11-17 立项）
+
+pilot 只证明了「池子 491k→24.5k 单调变好」，没回答「再往下降会怎样」。本腿把池子**再砍一半**：
+
+| 项 | A（对照） | **D2（本腿）** |
+|---|---|---|
+| `rotation_per_it` | 7 | 7 |
+| `target_transitions`/it | 24,576 | **12,288**（12×1024） |
+| iters | 20 | **40** |
+| 总样本 / 步数 | 491,520 / 1,920 | **491,520 / 1,920**（守恒） |
+| eval 锚点（`eval_every`） | it5/10/15/20（=5） | it10/20/30/40（=**10**） |
+| 其余（奖励/超参/起点/关卡/执行档） | — | **与 A 逐字节相同**（生成器带 diff 断言） |
+
+- 生成：`tmp/gen-replay-dose2.py` → `nn-training/curricula/replay-dose2.jsonc`（从已入库的 `replay-pilot-a.jsonc` 派生，diff 只许 `{name,iters,target_transitions,eval_every,out,traj,backup_dir,backup_prefix}`）。
+- 判读：`tmp/cmp-replay-pilot.py` 新增 §2.1「D2−A」段（同锚点配对差）。**判据先写死**：终点 Δ ≥ +1pp ⇒ 继续降池；±1pp ⇒ 拐点在 A 附近，停止降池；≤ −1pp ⇒ 池子过小，A 是最优档。
+- 已知风险：12 chunk/轮 ⇒ adv 方差更大；每轮固定开销（≈25 s 等待）在 40 轮上放大到 ≈17 min，读数要连墙钟一起看。
+
+#### 并行后续腿（2026-11-17 20:39 开跑，填 PPO 排队空等）
+
+判读工具 `tmp/cmp-replay-pilot.py` 已支持多臂；三条腿都由 `tmp/gen-replay-followups.py` 从 `replay-pilot-a.jsonc` 派生
+（每条只许改极少数键，生成器逐条 diff 断言）。**四条课并行**，PPO job 在单 GPU worker 上自然排队，rollout/eval 走 5 个采样节点。
+
+| 课程 | 问什么 | 与 A 的差异 | 判据（先写死） |
+|---|---|---|---|
+| `replay-dose2` | 池子减半（12,288 × 40 it）还有没有边际收益 | `target_transitions` / `iters` / `eval_every` | 终点 ≥ A +1pp ⇒ 继续降；±1pp ⇒ 拐点；≤ −1pp ⇒ A 最优 |
+| `replay-a-cont` | A 跑满 491k 后**同配方再训 20 轮**是否还涨 | `bc` = A 的 it20 快照 + `paired_rotate_seed=20261119` | 终点 > 75.0% ⇒ 未到平台；≤75.0% 且中点不涨 ⇒ 确认平台 |
+| `replay-a-lr2` | lr 8e-5 → **2e-4**（§6.2 P3.5），kl 只有 0.0027 说明更新偏保守 | `lr` + `ppo_schedule[0].lr`（**两处必须同改**） | 终点 ≥ A +1pp 且 kl<0.02 ⇒ 采纳；kl>0.05 或 ent 连续下降 ⇒ 停腿 |
+| `replay-a-s2` | A 的结论是否依赖**那一批局** | 只改 `paired_rotate_seed=20261118` | 曲线同向、终点差 ≤3pp ⇒ 不依赖单批局；反号 ⇒ 之前读数可疑 |
+
+两条容易踩的坑（都已铸进生成器断言）：
+1. **续训必须换 `paired_rotate_seed`**：同 rotateSeed 会让 it1–20 重放 A 训过的那 700 局（记忆化，不是"更多数据"）。
+2. **lr 必须同时改顶层与 `ppo_schedule[0].lr`**：`loop_steps` 走 `resolve_ppo_schedule`，只改顶层会被 schedule 静默覆盖。
+
+**实测结果（2026-11-17 21:43，四条腿全部收官；全文 `reports/replay-pilot-verdict-20261117.md` 附节）**
+
+| 腿 | 终点(491,520) | Δ vs A | 结论 |
+|---|---:|---:|---|
+| A（池 24,576 × 20） | 75.0% | — | 曲线 67.3→77.7→**75.0**（先涨后掉） |
+| **D2（池 12,288 × 40）** | **82.0%** | **+7.00pp** [+3.00,+11.29] | ✅ 继续降池有货；**高于 g5-safe 80.94% 平台**；单调不回落 |
+| CONT（A it20 续训） | 78.9%（it15 **81.3%**） | +3.86pp | ✅ **A 的「平台」是抽样低点**，不是配方上限 |
+| LR2（lr 2e-4） | 78.1% | +3.14pp [−1.00,+7.43] | ➖ 落在散布内，不采纳；记为 D2 的组合候选 |
+| S2（换批局） | 79.0% | +4.00pp [−0.29,+8.43] | ⚖️ **散布标尺**：同配方换数据即差 4pp |
+
+⇒ **新增判读纪律：单 run 内 <4pp 的差不作结论**（S2 实测散布 4pp），这条同时下调 pilot 里 B−A（−2.57~−6.57pp）的证据强度。
+⇒ P5 下一步 = 「**6,144 × 80 it** 继续降池」+「D2 × lr 组合腿」，但**开跑前先修 iters 边界**（见下）。
+
+**harness 缺陷（2026-11-17 发现并修复）**：`replay-a-cont` 声明 `iters=20` 却跑了 **21 轮**
+（`run_complete` 于 it20 写完「it20/20」后又跑 it21，同一 `run_start`），且 it20 的 eval **重复派发 469 局**
+（1,169 行含重复 `(stage,seed)`）。⇒ 每条腿多烧一轮、最后一点不再是 700 局、`run_complete.cause=iters` 语义失真。
+**修法（22:00，两处 + 回归）**：① `LoopRunner._pending_steps` 加预算闸（`budget_exhausted` ⇒ 空表，
+判据与 `planner` 同源）——回退实现即红（返回 13 步）；② `EvalArbiter.active_its` + `drop_inflight_rounds`：
+收官 drain 把在飞的轮剔出候选（原判据只看 `eval_summary`，在飞轮必然无 summary）。
+⚠ 22:05 复查发现 `replay-a-lr2` 同样跑 it21 ⇒ **系统性缺陷**，不是 cont 独有。修后需重启 trainer 生效。
+
+**第二批三腿实测（2026-11-18 00:05；换 runId `375bfcf6…`，只按 eval 面板配对）**
+
+| 腿 | 与 D2 差异 | 终点 | Δ vs D2 |
+|---|---|---:|---:|
+| D2（参考） | — | 82.0% | — |
+| `replay-d35` | 窗口 7→35 关 | 77.7% | **−4.29pp** [−8.29,−0.14] |
+| `replay-dose4` | 池 6,144 × 80 it | 77.6%（峰值 80.0@it60） | **−4.43pp** [−8.71,−0.29] |
+| `replay-dose2-lr2` | + lr 2e-4 | 77.0% | **−5.00pp** [−9.00,−1.00] |
+
+⇒ **D2 的 82.0% 判为高抽样，真实平台 77–79%**（三条独立腿全在 77.0–77.7%，S2 实测散布 4pp）。
+⇒ **语料调度这条线到此为止**：池大小 / 每轮关数 / 刷新次数全扫过，同一簇。
+⇒ **新纪律：新腿只跑 25 万样本就够判**——后半程（245k→491k）平均只值 **+0.37pp**，八条腿里四条为负。
+
+⚠ `replay-a-s2` **不是**独立训练 seed（runId 同进程固定 ⇒ `job_seed` 不变），它只换数据抽样；真正的 3-seed 复现要换 runId（= 换 trainer 进程）。
+
+---
 
 ### 6.6 GPU 云机真机验证课程（2026-11-17，五档，独立于 §6.5 pilot）
 
@@ -726,9 +891,9 @@ D8/D9 只给了等样本框架，没钉「用哪门课、哪个起点、各臂 s
   **若超过噪声底，先查 `corpus_fmt`/`loader` 线，不要用 eval 波动解释。**
 - 每档读 `wire` 子字典：`corpus_fmt`、`replay_bytes`、`labels_bytes`、`convert_sec`、
   `convert_jobs`、`convert_fallback`、`convert_workers`；PPO 日志读 `per_step_kl`/`clip_fraction`。
-- 显存：当前 PPO 日志**没有** `loader_peak_mb`/`ppo_vram_mb`（D10 预期字段尚未实现），
-  验证时用外部 `nvidia-smi --query-gpu=memory.used --format=csv -l 1` 采样，记录每档峰值；
-  不要假装代码里有该读数。
+- 显存：D10 预期的字段名 `loader_peak_mb`/`ppo_vram_mb` **仍未实现**，不要假装代码里有；
+  但**真机读数已拿到** —— kaggle worker 的 PPO 收尾行自报 `loader=lazy peak=1030MB`（491,520 样本 / 553 shard），
+  A/B 为 824/872 MB，均 ≪2 GB（**不含 page cache**）。GPU 峰值可用 `nvidia-smi -l 1` 另采。
 - **PASS**：五档的 `re`/`fl`/`rl` 与基线差 ≤ 噪声底；`convert_fallback=0`；无 identity/转换失败；
   `rl` 的峰值显存 ≤ 卡容量且不低于 eager；训练墙钟单列 eval。
 - **FAIL 处理**：`re` 与 `fe` 不等 ⇒ P2 未过，回到 replay 重建/标签差异；`rl` 与 `re` 不等 ⇒
@@ -744,9 +909,10 @@ rollout 7 并发 ~2 min、PPO 49k 样本/档 ~20 s、eval ~3 min；**首轮总�
 
 **s1 五档跑完（`reports/replay-corpus-five-arm-20261117.md`）后的三件事**：
 
-1. **噪声底实测 = 0（不是假设）**。`fe` vs `fe2` 是同配方重复臂：两轮 `kl/policy/value/entropy`
+1. **~~噪声底实测 = 0（不是假设）~~ → 该结论已被 s2/s3 推翻，见 §6.6.2**。`fe` vs `fe2` 是同配方重复臂：两轮 `kl/policy/value/entropy`
    `repr` 完全相同，44 个权重张量**全部 uint32 逐元素相等**，`samples/steps/chunks` 逐轮相等。
-   所以「≤ 噪声底」这个说法可以删掉——判据直接写**逐位相同**，任何非零即真差，不需要容差讨论。
+   当时的推论是「判据直接写逐位相同，不需要容差」—— 错了：那只是**一对样本**的运气，第三、
+   第四对（`fe-s2↔fe-s3`、`re-s2↔re-s3`）就抖出 0–1.2e-9 / 3.6e-7。
 2. **`re`/`rl` 与 `fe` 在 it1 就分叉**（不是 it2 累积）：it1 的 `samples` 两臂都是 65026（语料逐字相同），
    但 `kl` 差 1.25e-5、`entropy` 差 1.0e-5、44 张量只有 4 个 bit-identical。根因 = f16 单边
    （`scalars`/`extra` 同时进 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES`），已由 **A2**（`c170ba26`）修掉。
@@ -778,6 +944,37 @@ python tmp/cmp-verify-s2.py --a tmp/verify-fe --b tmp/verify-re --expect full:re
 脚本把「腿有效性」也当判据：两臂 fmt 不是 `full:replay` 时直接判 `INVALID`（同路径重复臂的
 PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯路径差异**（起点同源、数据同量），
 **it1 绿而 it2 起分叉 = 轮间产物被丢精度**（典型是权重往返 f16 累积）。
+
+#### 6.6.2 2026-11-17 s2 判 FAIL → s3 测噪声底 → 判据 C，P2 判 PASS
+
+**s2 结果**：`verify-fe-s2`(full) vs `verify-re-s2`(replay) 在 it1 仍非逐位相同（44 张量里 4 个完全相同，
+另 3 个各差 1–2 个元素、每个正好 1 ulp）。照 s1 的「逐位无容差」判据 ⇒ FAIL。
+
+**s3 的作用**（`verify-fe-s3`/`verify-re-s3`，与 s2 只差 `name/out/traj/backup/max_hours`）：回答
+「同 fmt、同 runId、同 seed 的两次独立跑是否逐位相同」。**答案是否**：
+
+| 噪声对 | kl | policy | value | entropy | mean_ret | 张量最大 |
+|---|---|---|---|---|---|---|
+| `fe-s2↔fe-s3` | 3.517e-11 | 4.366e-11 | 6.209e-10 | **0** | 7.761e-11 | 2.384e-07 |
+| `re-s2↔re-s3` | 2.728e-11 | 5.772e-10 | 1.242e-09 | 3.104e-10 | 3.881e-11 | 3.576e-07 |
+
+四臂 it1 的 `shards=30` / `data_fp=75f03448f325` **全同** ⇒ 噪声对与 A/B 对是同一批局，标尺成立。
+
+**根因**：`conv_native_adapter.ts:347` 的 `ATTEST_TOLERANCE=1e-5` 是**相对容差**，rollout 每局在
+native（FMA，一次舍入）与 wasm（两次舍入）之间动态选 ⇒ 同配置两次采集**构造上就不逐位相同**。
+「逐位无容差」这个判据在混合后端下不可达，不是被测对象有问题。
+
+**判据改为 C**（可复算）：`容差(项) = max(实测噪声底(项), 2×ulp32(|x|))`，逐项 `|Δ| ≤ 容差`。
+2 ulp 预算是必须的：噪声底是有限对样本，包不住下一次抽样的尾部。
+
+**s2 按判据 C 的判决 = PASS**（`reports/p2-verdict-c-20261117.md`）：权重 41/44 逐位相同、余 3 个各 1 ulp；
+`value`/`entropy` 逐位相同；`policy` 1.649e-10 ≤ 底；`kl` 4.123e-11（0.2 ulp，超底 1.17×，靠预算兜住，已单列）；
+`mean_ret` 落在相邻量化档。**且**：钉死后端（`NN_NATIVE=0`）后零容差直比，`obs`/`scalars`/`extra`
+三张 **sha256 逐字节相同** ⇒ replay 传输+转换与 full 直出等价，与 `corpus_fmt` 无关的 2.38e-07 全部来自后端选择。
+
+**顺带修正的三条旧说法**：①「entropy 天然免疫（被 f16 抹平）」——`re` 对抖 3.104e-10，那只是运气；
+②「`lp_*` 都是 f16」——实际 `RL_F16_FIELDS=("lp_move","lp_fire")`，`lp_hold`/`reward`/`value` 是 f32；
+③「重建 = 零 diff」原本不成立（同源码连编两次差 11 字节），已修成逐字节可复现（`reports/build-repro-20261117.md`）。
 
 ---
 
@@ -902,7 +1099,7 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
 
 - 任务 spec `corpus_fmt` 透传（sampler→trainer）；结果容器按格式；trainer→worker payload；trainer 预构建 bundle + ppo job 附件；pre-pass；端到端 capability 协商；shard 级事务。
 - **Gate**：同机同数据 `replay+eager` vs `full+eager` 的 PPO 结果一致（固定确定性环境比最终权重或明确数值容差）；sampler→trainer ≤2.5 MB（**实测 0.81 MB / 24,576 样本，2.8× 余量**）；trainer→worker ≤0.85 MB（**实测 0.35 MB，2.4× 余量**）；**转换 ≤5 s（24,576 样本 = 6.2 s 单核 ⇒ 池化后按核数再除；必须走池，逐 shard 冷启动是 259 ms/shard 的量级）**；完整迭代墙钟不退化；旧 payload 兼容；坏 replay fallback 绿。
-- **进展（2026-11-15，机制已落地；端到端 PPO 数值对账待跑）**：
+- **进展（2026-11-15 机制落地；2026-11-17 18:01 端到端 PPO 数值对账 PASS，见 §6.6.2）**：
   - Sampler：`/v1/task?corpusFmt=replay` → `export-rl-rollout --corpus-fmt replay`；eval/BC/intent/goal 直接 400（强制 full）；taskKey 加 `:cfr`；ping 新增 `replayCorpusSupport`。
   - Trainer：`--corpus-fmt full|replay`（缺省 full）；dispatch 透传 `corpusFmt` 且按能力位 fail-closed；`validate_result` 接受 replay 文件集（标签 + replay 两成员，无 obs 三张）；`payload_slim` 在 replay 请求下 DROP obs/scalars/extra，格式不符响亮拒收；`publish_job` manifest 写 `corpus_fmt`/`replay_converter_sha256`，幂等键第 6 分量仅 replay 追加（full 旧 job_id 逐字节不变）。
   - Bundle：`_ensure_replay_converter` 在 trainer 侧 `bun build --target=node` 预构建并缓存，随 kind=ppo payload 根下发；worker 只跑不建。
@@ -912,8 +1109,9 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
   - 事务：worker pre-pass 改为 `<shard>.conv-tmp`（硬链接输入）→ 转换 + 校验 + 完成标记 → 原目录 `.conv-old` / 临时目录顶上 / 删除旧目录；失败原目录一字未动，崩溃残留由下一次 `_clean_stale_transaction` 复位。
   - **hub / PPO worker 能力协商（2026-11-16）**：新增 `CAP_REPLAY_CORPUS`；worker claim body 声明能力位，hub 在唯一租约入口（`_claim_locked`）对 `corpus_fmt=replay` fail-closed 拒绝缺能力者（拒因 `no_replay_corpus`）；hub `GET /ping` 与 worker_server `/ping` 均声明该能力；push 派发按 `/ping` 能力选机。测试：`tests/remote/test_corpus_capability.py`。
   - **D10 墙钟账（2026-11-16）**：worker `wire` 新增 `corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_workers`/`convert_jobs`/`convert_fallback`；trainer `_wire_from_result` 透传到 iteration `wire` 顶层。full 路径为 `full`/0。
-  - 未完成：同机 `replay+eager` vs `full+eager` 的数值对账（**可在 CPU 最小 job 做**，不必等 GPU）、2 vCPU 云机转换墙钟**已测**（见 §8 P0 进展）。
-- **Gate 绿后**：7×5 生产课只切 `corpus_fmt=replay`（仍是 eager）；`full` 保留回滚；前 2 个五点窗盯 identity 失败率/`convert_sec`/per-step KL/clip。**不在此阶段切 lazy。**
+  - ~~未完成：同机 `replay+eager` vs `full+eager` 的数值对账~~ → **2026-11-17 判 PASS（判据 C）**，见 §6.6.2 与 `reports/p2-verdict-c-20261117.md`；2 vCPU 云机转换墙钟已测（§8 P0 进展）。
+  - **replay 已翻成生产缺省（A2，2026-11-17）**：`corpus_fmt` 默认 `replay`，但 `_resolve_corpus_fmt` 对同机腿（`rollout_src=node` / `--export-bundle`）强制回 `full`。回滚 = 请求里显式 `corpus_fmt=full`。
+- **Gate 绿后**：7×5 生产课只切 `corpus_fmt=replay`（仍是 eager）；`full` 保留回滚；前 2 个五点窗盯 identity 失败率/`convert_sec`/per-step KL/clip。**不在此阶段切 lazy。** —— **该条已于 2026-11-17 执行完毕**（生产缺省 = replay；lazy 的切换是 P3 的独立一步，见下节与 §6.5）。
 - **No-Go**：确定性 identity 失败 >0，或可重试失败率 >1%。
 
 ### P3 lazy loader + 小 VRAM（独立切换）
@@ -926,24 +1124,37 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
   - `np_core.load_shard(mmap=True)` / `chunk_episodes` 鸭子类型分派；`ppo_update(lazy=True)` 逐批 `tensored_batch` + kickstart ref 首次使用现算；`tensored_chunks` 仅 eager 使用。
   - `--ppo-loader` 贯通 `worker/cli.py` → `build_ppo_job`（eager **省略** manifest 键）→ `manifest.py` 可选默认 + 值域校验 → `train_core`；Paddle 后端 `check_ppo_loader` 响亮拒收 lazy。
   - `tests/worker/test_ppo_lazy_loader.py` 9 条：row_map/行序/GAE/adv・ret/minibatch/demo RNG/kickstart/最终权重逐字节一致；quota 截断在 GAE 前；drop_last / 单 shard 不裁尾；v6 可选列；混装拒收；lazy 不调用 `tensored_chunks`（逐批 mb 行）；491k/mb=1024 峰值公式 ≈1.0 GiB ≤2 GiB；合成语料 gather 冷/热 ≈693/654 MB/s。
-  - **未完成**：真机 35×20 的 scan+GAE/H2D/update 端到端墙钟（需真语料/GPU，**用产线的 ≥16 GB 卡**）；上卡前显存预检尚未实现；默认值仍 eager。
+  - **状态（2026-11-17 收尾）**：① **上卡前显存预检已实现**（`worker/ppo/vram.py` 的 `require_corpus`/`torch_free_bytes`/`paddle_free_bytes`，`engine.py:398` 与 `engine_paddle.py:192` 在 eager 全量上卡前调用；探测不到就放行，绝不误拦 CPU 训练）——原文「尚未实现」作废。② **缺省已切 lazy**（三处同值；协议缺省仍 eager；回滚 `--ppo-loader=eager`；`§2026-11-17-goalnn-ppo-lazy-default`）——原文「默认值仍 eager」作废。③ **两项真机读数已于 2026-11-17 19:51 由 C 臂量到**（kaggle Tesla T4 ×2）：491,520 步的端到端 `ppo=428.1s`（`wall=490.0s`，含收尾/上传）；`loader=lazy peak=1030MB`（A/B 为 824/872 MB，均 ≪2 GB，且**不含 page cache**）。
   - **D8/D10 读数（2026-11-16）**：`per_step_kl` / `clip_fraction` 已进 engine 逐步 stats 与 PPO 收尾日志（`kl` 保留给既有熔断）；可选 `target_kl` 在 epoch 末尾中止剩余 epoch，缺省 0 = 关闭、数学逐字节不变。测试：`tests/worker/test_ppo_scalar_sync.py`。
 
-### P3.5 lr+epochs 组合干预筛选腿（k3 B5）
+### P3.5 lr+epochs 组合干预筛选腿（k3 B5；**2026-11-17 降级为 pilot 之后的独立腿，不作 P4 前置**）
 
 - 新 `--out`，不动生产；lr 1.2e-4 → 2–3e-4、epochs 4→8；结论只叫「组合筛选」，不做单变量归因。
-- **Gate**：1× 腿正向（五点窗不劣化）且 per-step KL 进目标带；否则三臂维持 1.2e-4/4/1024，不先验加 lr。
+  **注**：这里的 1.2e-4 是 D8 旧基线口径；§6.5 的 pilot 用 g5-safe 实测稳定值 8e-5/4，两者不是同一条腿。
+- **Gate**：1× 腿正向（五点窗不劣化）且 per-step KL 进目标带；否则维持该腿起点值，不先验加 lr。
 
-### P4 35×5 pilot（冻结调度 + 单训练 seed）
+### P4 三臂 pilot（冻结调度 + 单训练 seed）
 
-- 课程 `rotation_per_it=35`、**固定样本量**，`target_transitions=122,880`；replay 路径；实验臂 `eval_every=1` + `eval_at`（A 5/10/15/20；B 1/2/3/4）；**关 kickstart、关分段 ppo_schedule**，固定 lr/epochs/mb/ent/kl/value_anchor。
+- **参数唯一来源 = §6.5**（A=7×5×20 / B=35×5×4 / C=35×20×1）。`target_transitions` **按臂取值**：A **24,576**、B **122,880**、C **491,520**（122,880 是 B 的单 it 值，不是三臂通用值）——三者都是 mb 整倍数。**真机实测三臂都吃满 491,520/臂**（见 §6.5「样本轴实测」）。
+- **课程文件已生成（2026-11-17）**：`nn-training/curricula/replay-pilot-{a,b,c}.jsonc`，全部由 `tmp/gen-replay-pilot.py` 从已跟踪的 `g5-safe.jsonc` 派生。生成器自带三条自检并已跑绿：三份都能被 `load_course` 加载（`extra="forbid"`）· `reward` 块 sha256 三份相同（`93d1bd9acaaa81cb`）· 三份逐字段 diff 的键集合 ⊆ `{name,iters,target_transitions,rotation_per_it,eval_every,out,traj,backup_dir,backup_prefix}`。**手改课程 = 三臂不再同源 ⇒ 改生成器重跑。**
+- **判读脚本已就绪（2026-11-17 20:0x）**：`tmp/cmp-replay-pilot.py`（一次性，不入库）。五段输出 = 前置闸（`replay`/`lazy`/起点同 sha/it0 `wver` 同源）· 锚点读数（样本轴 = Σ 裁剪后 `steps`）· **同锚点样本对齐硬闸（≤1 chunk）** · 主读配对差 + bootstrap CI（配对单元 = eval 的 `(stage,seed)`，固定 seed 可复算）· 机制读数 + 分关 SHORT。
+  **锚点按累计样本命中匹配**（不是按 it 索引）：`122,880 / 245,760 / 368,640 / 491,520` → A it5/10/15/20 · B it1-4 · C it1 自动落位。
+  **自检**：`it0 vs it0` 必得 `Δ=0, CI=[0,0]`（配对路径正确）；`B it2 vs C it1` 冒烟得 −4.43pp（CI [−8.71, 0.00]）——只验代码路径，**不是判决**。
+- **2026-11-17 19:19 首次开课 = 全灭，19:29 修复后起跑**：三课 it1 全死在同一处——`out` 指向的起始权重文件不存在（`FileNotFoundError` ×5 ⇒ `aborted prepare_iter`），**一局未采**。修法见 §6.5「开跑前置」三条：预置同 sha 起点权重 → `traj/out` 改扁平 `tmp/<课程名>` → **重启常驻 trainer**（stop/open 不重读课程 JSON）。修复后证据：A 臂 it1 采集完成，`remote-jobs/<job>/payload.tar.xz` **320 成员 / 20 shard 全是 replay 形态**（`replay.json`+`replay_meta.json`+标签，无 `obs/scalars/extra`），manifest `corpus_fmt=replay`；随后进入 `it0` 起点基线 eval（700 局）。B 并发采样中。
+- 课程 `rotation_mode=even`、`paired_rotate_seed=20261115`；**固定样本量**（不改 fixed games）；replay 路径 + **lazy 装载**（2026-11-17 拍板）；实验臂 eval 锚点走 `eval_every`（A=5 / B=1 / C=1，`eval_at` 不是课程键）；**关 kickstart、关分段 ppo_schedule**，固定 lr=8e-5/epochs=4/mb=1024/ent/kl/value_anchor。
 - **Gate**：B 的学习曲线 vs A 不劣化（工程止损线 ≥−1pp）；B vs C 才是数据刷新主对照；C 终点配对差 + 跨 seed CI；训练墙钟（不含 eval）不退化；报告效应量/CI，不写「非劣配方」。
 - **No-Go**：B 连续 2 个样本锚点 < A −2pp，或 entropy 连续下降/崩溃。
 
-### P5 10× / 20×（pilot + 扩量 gate）
+### P5 10× / 20× —— **已执行，Gate 判 FAIL，扩量路线作废**
 
-- 只有 P4 正向才做；**固定样本量**，20× 必须用 lazy；每关实际 seed 数按 `games/samples/shortfall` 记账；硬闸「35 关均有有效样本」。
-- **Gate**：C 终点配对差 + 跨 seed CI 不劣化；无 OOM；转换/PPO 墙钟在预算内；数据覆盖/identity/转换失败/端到端墙钟/学习读数同时看；配方推广至少补 3 个独立训练 seed。
+- **执行**：原计划的 20× = C 臂（35 关 × 20 seed × 1 it，491,520 样本），已在 P4 pilot 中跑完。
+- **Gate 结果**：C 终点 **68.1%**，对比 A（24.5k × 20 轮）75.0% = **−6.86pp** [−11.29, −2.29]；
+  对比 D2（12.3k × 40 轮）82.0%（后判为高抽样，真实簇 77–79%）。**20× 不劣化不成立 ⇒ FAIL。**
+- **两个 P3 遗留读数已收**：① 491k 端到端 `ppo=428.1 s / wall=490.0 s`（T4 ×2）；
+  ② lazy 真机峰值 **1,030 MB**（A/B 824/872 MB）。无 OOM，转换 54 s/553 shard 在 ≤2 min 预算内。
+- **后续改写**：原 P5 的「继续扩量」取消，改为两批单变量后续腿（dose2 / cont / lr2 / s2 / d35 / dose4 / dlr，共 7 条），
+  结论：**语料调度处在等分面（77–79%），25 万样本即饱和**（`reports/replay-pilot-verdict-20261117.md` 附二/附三）。
+  再往后转奖励诊断（`reports/reward-terms-vs-win-20261118.md`）。
 
 ---
 
@@ -951,17 +1162,17 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
 
 - [x] 请求 `corpus_fmt=full|replay` 两态可用；字段进 `rollout` spec + idempotency；`kind=iter`/eval 硬校验 full；端到端 `replay_corpus` 能力协商；`full` 逐字节兼容；旧 payload 可被新 worker 读；新 replay payload 对旧 worker **显式拒收**。**（2026-11-17 判绿）** 能力位 `CAP_REPLAY_CORPUS` 在 hub 唯一租约入口 `_claim_locked` fail-closed（拒因 `no_replay_corpus`，`tests/remote/test_corpus_capability.py`）；`kind=iter`/eval 在 sampler 侧直接 400，trainer 侧由 `loop_round_steps._resolve_corpus_fmt` 按轮形态降级（同机腿强制 full）；`full` 的 job_id 逐字节不变（幂等键第 6 分量仅 replay 追加）；**旧 payload 可读性不靠表推断**——npy 头自带 dtype，读端 `worker/ppo/np_core.py:41` 明写「`RL_F16_FIELDS` 本端不用（纯写端策略）」，新 manifest 键走 `common/payload.py:387` 的「有则读、无则 `{}`」；`kind≠ppo` 的 replay 与旧 worker 均显式拒收。
 - [x] P1：full 不创建 recorder/不算 tickHash/不复制 snapshot；replay dispatch 零目录；内存段==磁盘段；`ShardSegments` 身份含 `corpus_fmt`。**（2026-11-15 机制落地 + 单测绿）** `export-rl-rollout.ts --corpus-fmt full|replay`（full 路径 `obsFlat=null`、不建 recorder）；`--pack-memory` 的 memory entries 含 replay 两成员、dispatch 腿不创建 shard 目录；`ShardSegments.begin/take` 身份加 `corpus_fmt`（缺省 full = 旧行为）；`tests/sim/export-rl-rollout-replay.test.ts` 8 条钉住：full/replay 文件集、meta 自洽、identity 逐字节、pack-memory 零目录、hybrid opening identity、坏 decisionTick / 坏 obsHash / 缺 replay 响亮失败；热切换拒复用见 `test_payload_parts.py` 的 `corpus_fmt` 用例。
-- [ ] P2：只切 `replay+eager`（不切 lazy）；同机同数据 vs `full+eager` 的 PPO 结果一致（固定确定性环境比最终权重或明确数值容差）；完整迭代墙钟不退化。**（2026-11-17 现场：机制全落地，gate 待闭合）** 五臂真机实测（`reports/replay-corpus-five-arm-20261117.md`）在 **it1 就分叉**（`re`/`rl` ≠ `fe`），根因是 f16 单边——`scalars`/`extra` 同时出现在 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES`，full 侧被量化成 f16、replay 侧由转换器以 f4 重造 ⇒ 两臂精度不等价。A2（`c170ba26`）已把表收窄为 `("lp_move","lp_fire")` 并加护栏 `test_f16_set_never_intersects_replay_drop_set`。**判据定为逐位相同、无容差**：噪声底已实测 = 0（`fe` vs `fe2` 两轮 44/44 张量 bit-identical，`tmp/cmp-verify-s2.py --expect full:full` 可复现），故任何非零即真差。复跑 = `verify-fe-s2`(full) vs `verify-re-s2`(replay)，同 `NN_VERIFY_RUN_ID=replay-verify-s2`、同起点 `bec039d88e2d…`、`--local-ppo-slots 1`（0 会让 job 永不发布）。
-- [ ] P3：eager/lazy 的 `row_map`/全局行序/GAE/adv/ret/minibatch/demo RNG/最终权重对账；吞吐 gate 过（随机 gather 实测 1,749 MB/s；「冷/热 page cache」在 tmpfs 上不成立，改记 RAM 容量闸）；之后才单独切 lazy。**（对账已绿，缺 2 项真机读数）** `tests/worker/test_ppo_lazy_loader.py` 9 条已证 eager/lazy 同 seed 的 row_map/行序/GAE/adv·ret/minibatch/demo RNG/kickstart/最终权重逐字节一致、`per_stage_quota` 截断在 GAE 之前、lazy 走逐批 `tensored_batch` 不上全量卡。**2026-11-17 缺省已切 lazy**（三处缺省同值；协议缺省仍 eager；回滚 `--ppo-loader=eager`；DECISIONS §2026-11-17-goalnn-ppo-lazy-default、`docs/nn/remote-transport.md` §156）：本机 A/B 台架 `tools/perf/ppo-loader-bench.py`（20,080 样本 / obs 220 MB / mb=1024）scan+GAE **0.20 s vs eager 2.14 s**、随机 gather **1,002 MB/s**、逐批转 torch（CPU）6 ms / 8 批、`gather(rows)` 与 eager `concatenate()[rows]` **逐字节相同**。**未完成（真机）**：35×20 的 H2D/update 端到端墙钟（需 ≥16 GB 产线卡）、上卡前显存余量预检、本机 RSS 读数（venv 无 psutil）。
+- [x] P2：只切 `replay+eager`（不切 lazy）；同机同数据 vs `full+eager` 的 PPO 结果一致（固定确定性环境比最终权重或明确数值容差）；完整迭代墙钟不退化。**（2026-11-17 18:01 判 PASS，判据 C —— `reports/p2-verdict-c-20261117.md`）** 五臂真机实测（`reports/replay-corpus-five-arm-20261117.md`）在 **it1 就分叉**（`re`/`rl` ≠ `fe`），根因是 f16 单边——`scalars`/`extra` 同时出现在 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES`，full 侧被量化成 f16、replay 侧由转换器以 f4 重造 ⇒ 两臂精度不等价。A2（`c170ba26`）已把表收窄为 `("lp_move","lp_fire")` 并加护栏 `test_f16_set_never_intersects_replay_drop_set`。**判据 C（2026-11-17 修正，取代原先的「逐位相同、无容差」）**：`容差(项) = max(实测噪声底(项), 2×ulp32(|x|))`，逐项判 `|Δ| ≤ 容差`。原判据在混合后端下**构造上不可达**——rollout 每局在 native(FMA，一次舍入) 与 wasm(两次舍入) 之间动态选，`conv_native_adapter.ts:347` 的 `ATTEST_TOLERANCE=1e-5` 放行 1 ulp 差 ⇒ 同配置两次独立采集本来就不逐位相同（`fe-s2↔fe-s3` 与 `re-s2↔re-s3` 两对实测噪声底：读数 0–1.2e-9、张量 3.6e-7）。**判决**：`verify-fe-s2`(full) vs `verify-re-s2`(replay) 的 it1，44 张量 **41 个逐位相同**、另 3 个各差 1–2 个元素且每个正好 1 ulp(2.3842e-07)；`value`/`entropy` 逐位相同、`policy` 1.649e-10 ≤ 底、`kl` 4.123e-11（0.2 ulp，靠预算兜住、已单列）、`mean_ret` 落在同一量化档。**并且**：钉死后端（`NN_NATIVE=0`）后零容差直比，两路的 `obs`/`scalars`/`extra` **sha256 逐字节相同** ⇒ P2 的原始命题成立，残余 2.38e-07 全部来自后端选择、与 `corpus_fmt` 无关。运行时另有零容差闸常年守着：`tools/sim/replay-to-shard.ts:290-295` 的 `obsHash`/`nSamples`/`decisionTicks`/tickHash 链/终局状态五项，不符即 `throw` 不写半成品。
+- [x] P3：eager/lazy 的 `row_map`/全局行序/GAE/adv/ret/minibatch/demo RNG/最终权重对账；吞吐 gate 过（随机 gather 实测 1,749 MB/s；「冷/热 page cache」在 tmpfs 上不成立，改记 RAM 容量闸）；之后才单独切 lazy。**（2026-11-17 三项全绿；2 项真机读数移交 P5，见该条）** `tests/worker/test_ppo_lazy_loader.py` 9 条已证 eager/lazy 同 seed 的 row_map/行序/GAE/adv·ret/minibatch/demo RNG/kickstart/最终权重逐字节一致、`per_stage_quota` 截断在 GAE 之前、lazy 走逐批 `tensored_batch` 不上全量卡。**2026-11-17 缺省已切 lazy**（三处缺省同值；协议缺省仍 eager；回滚 `--ppo-loader=eager`；DECISIONS §2026-11-17-goalnn-ppo-lazy-default、`docs/nn/remote-transport.md` §156）：本机 A/B 台架 `tools/perf/ppo-loader-bench.py`（20,080 样本 / obs 220 MB / mb=1024）scan+GAE **0.20 s vs eager 2.14 s**、随机 gather **1,002 MB/s**、逐批转 torch（CPU）6 ms / 8 批、`gather(rows)` 与 eager `concatenate()[rows]` **逐字节相同**。**转入 P5 的两项真机读数**：35×20 的 H2D/update 端到端墙钟（需 ≥16 GB 产线卡）、本机 lazy 峰值 RSS（venv 无 psutil）。**上卡前显存余量预检不再欠账**——`worker/ppo/vram.py::require_corpus` 已在 `engine.py:398` / `engine_paddle.py:192` 的 eager 全量上卡前生效（探测不到就放行，不误拦 CPU 训练）。
 - [x] sampler→trainer 的 replay 结果容器不含 obs/scalars/extra；7×5 该段 ≤2.5 MB（**实测 0.81 MB**）；35×20 ≤45 MB（**实测 16.2 MB，2.8× 余量**）。**（2026-11-15 实测已填）** 容器只含 `replay.json` + `replay_meta.json` + 非 obs 标签，`validate_result` 拒收带 obs 的 replay 结果集。
 - [x] replay 重建 identity：真实关 + 自定义关 + hybrid opening + state_init，obs/scalars/extra/mask 逐字节一致；P0 ≥1000 局 + Bun→Node / Win→Linux 交叉；确定性 identity 失败零容差。**（2026-11-15/16 闭合）** 真实关 stage 30（2,742 tick / 275 决策）与自定义关 s2030（11,163 tick / 1,117 决策）的 obs/scalars/extra/mask/终局 tickHash 全逐字节相同（§1.3）；hybrid opening 接管段（`policy_mask=0` + opening 元数据）与 state_init 交棒段（`initTick=300`）各有独立 identity 用例；**1015 局（35 关 × 29 seed）在 Bun 进程内 / `bun build --target=node` bundle / WSL Linux Node 三端 obs·scalars·extra 0 mismatch**（§8 P0）。注：转换器用 `node:crypto`，无 Bun 运行时依赖 ⇒ 跨运行时链路由 obsHash+tickHash 双闸钉住。
 - [x] 动作完整性：v6 `move/fire(1|2)/hold` 逐 tick 记录完整；opening 接管段 frames == 执行动作、`policy_mask` 复制正确、converter 不重跑 OpeningController、不拿 `a_*` 驱动世界。**（2026-11-15 用例闭合）** `recordFrame(scripted) → endFrame()` 逐决策落 frames；opening 接管段以 `policy_mask=0` 复制且 frames 即执行动作；converter 世界只由 `ReplayInput` 驱动（不读 `a_*`、不重跑 OpeningController）；`f3ae58b2` 的 v3 帧格式已把 hold/fireBeforeTurn 保住。
 - [x] 7×5 replay 路径与 npy 路径同权重/同 seed 的 PPO 指标一致（**2026-11-17 实测闭合**：真实导出 4 shard/240 样本/30 chunk，`replay→npy` 与 full 的 obs 三张 12/12 逐字节相同、chunks 全字段相同、真实 `ppo_update` 2 epoch 后权重逐字节一致、14 stats 差 0；报告 `reports/replay-vs-full-ppo-20261117.md`）。注：规模是最小 job，不是 7×5 全量；全量由 identity 350 局 + 本对账的逻辑链覆盖。
-- [x] 35×5 trainer→worker ≤4 MB（**实测折算 1.2 MB**）；35×20 ≤12 MB（**实测 6.9 MB，1.7× 余量**）；转换时间 ≤预算（**2026-11-16 重定：池化 ≈43 s（低配 4 核，宽度=`effective_cores()`，高配再降）/ 纯转换 88 s 单核；obs 3.97 GB 写盘；重哈希不进预算** —— obsHash 由转换器在转换循环里增量算，落盘后无任何生产路径会重扫 obs.npy）。**（2026-11-16/17 两项体积实测均已在括号内；转换预算为预算值而非实测，真机 `convert_sec`/`convert_jobs` 已由 D10 落进 iteration `wire`，随 P2 gate 复跑刷新）**
-- [ ] lazy loader：491k 样本峰值 RAM ≤2 GB（tmpfs 下 obs 3.97 GB 另计、不可豁免）；**上卡前显存余量预检**（产线 ≥16 GB，不做小卡真机验证）；eager 路径不变。**（估算过、真机待测）** 峰值 ≈1.0 GiB 来自 `tests/worker/test_ppo_lazy_loader.py` 的公式（491k / mb=1024 × 逐批 8 行），**不是真机 RSS**；「上卡前显存余量预检」尚未实现（代码里没有 pre-check，目前靠产线卡 ≥16 GB 的经验值）；eager 逐字节不变已由 10 条对账用例钉住（含 2026-11-17 新增「缺省必须是 lazy、rl-config 显式 eager 仍赢」钉子）；**2026-11-17 缺省已切 lazy**，回滚 = `--ppo-loader=eager`。
-- [ ] 三臂 pilot：冻结调度；B 学习曲线 + C 终点配对差/CI；报告效应量/CI，不写「非劣配方」；生产 eval 口径不变，实验臂 `eval_at` 样本锚点；训练墙钟不含 eval；配方推广至少 3 个独立训练 seed。
-- [x] 覆盖度：**2026-11-17 实盘报表** `reports/coverage-g5-lives-700-20261117.md`（700 shard / 35 关 × 20 seed / `target_transitions=491520`）：每关 games / unique seeds / trim 前后 samples / SHORT / 丢弃整局逐关列出；**35/35 关有有效样本、700 个唯一 `(stage,seed)`、0 重复 ⇒ 硬闸 PASS**；trim 前 503,963 → 后 452,041、丢弃整局 47；**11 关 SHORT（读数，不是失败）**。工具 `nn-training/tools/coverage_report.py` 可复跑，单测 3 例钉住 SHORT/硬闸语义。
-- [ ] 墙钟账覆盖两条传输腿 + 全部阶段；eval 单列；生产收益看完整迭代墙钟。**（字段已齐，读数待 P2 gate）** §D10 的七个 wire 字段（`corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_workers`/`convert_jobs`/`convert_fallback`）已于 2026-11-16 由 `_wire_from_result` 透传进 iteration 的 `wire`，full 路径恒为 `full`/0；转换器侧墙钟（174–216 ms/局、26–32 µs/tick）已测。**未完成**：完整迭代墙钟（含 rollout/pack/download/unpack/convert/update）与 eval 单列分解。
+- [x] 35×5 trainer→worker ≤4 MB（**实测折算 1.2 MB**）；35×20 ≤12 MB（**实测 6.9 MB，1.7× 余量**）；转换时间 ≤预算（**2026-11-16 重定：池化 ≈43 s（低配 4 核，宽度=`effective_cores()`，高配再降）/ 纯转换 88 s 单核；obs 3.97 GB 写盘；重哈希不进预算** —— obsHash 由转换器在转换循环里增量算，落盘后无任何生产路径会重扫 obs.npy）。**（2026-11-16/17 两项体积实测均已在括号内；转换预算为预算值而非实测，真机 `convert_sec`/`convert_jobs` 已由 D10 落进 iteration `wire`，随 P4 跑批刷新）**
+- [x] lazy loader：491k 样本峰值 RAM ≤2 GB（tmpfs 下 obs 3.97 GB 另计、不可豁免）；**上卡前显存余量预检**（产线 ≥16 GB，不做小卡真机验证）；eager 路径不变。**（3 项全绿；2026-11-17 19:51 真机读数已补）** **真机 RSS 已实测**（worker 自报，kaggle T4 ×2）：`loader=lazy peak=1030MB`（491,540 样本 / 553 shard）· A 824 MB（24,577）· B 872 MB（122,885）——**不含 page cache**，三项都 ≪2 GB；公式估值（≈1.0 GiB）与实测同量级；**「上卡前显存余量预检」已实现**（`worker/ppo/vram.py::require_corpus`，torch/paddle 各一份 `free_bytes` 探测；`engine.py:398`/`engine_paddle.py:192` 在 eager 全量上卡前调用，探测失败即放行）；eager 逐字节不变已由 10 条对账用例钉住（含 2026-11-17 新增「缺省必须是 lazy、rl-config 显式 eager 仍赢」钉子）；**2026-11-17 缺省已切 lazy**，回滚 = `--ppo-loader=eager`。
+- [x] 三臂 pilot：冻结调度；B 学习曲线 + C 终点配对差/CI；报告效应量/CI，不写「非劣配方」；生产 eval 口径不变，实验臂按 `eval_every` 落在样本锚点；训练墙钟不含 eval；配方推广至少 3 个独立训练 seed。**（2026-11-17 20:20 三臂收官，判决见 `reports/replay-pilot-verdict-20261117.md`）** ① 样本轴：**真机实测三臂都吃满 491,520/臂**（C: 480 chunk / 1,920 步 / 0 dropped shard），18:20 那版「451,584」按离线 20-seed 语料推错、已撤回；② 装载器改 **`replay+lazy`**（原文 eager 的依据已被 P2/P3 判绿消解）；③ **P3.5 不再前置**；④ PPO 成本 **≈742 s/臂**、首轮 **≈50–55 min**（原文 23 min 是把 123k 的读数安到了 491k 上）。开跑前两条校验：三臂 it1 的 `data_fp` 与 `init_weights_fp` 必须相同；三臂 realized `n_used` 差 ≤1 chunk。
+- [x] 覆盖度：**2026-11-17 实盘报表** `reports/coverage-g5-lives-700-20261117.md`（700 shard / 35 关 × 20 seed / `target_transitions=491520`）：每关 games / unique seeds / trim 前后 samples / SHORT / 丢弃整局逐关列出；**35/35 关有有效样本、700 个唯一 `(stage,seed)`、0 重复 ⇒ 硬闸 PASS**；trim 前 503,963 → 后 452,041、丢弃整局 47；**20/35 关 SHORT（读数，不是失败）**。工具 `nn-training/tools/coverage_report.py` 可复跑，单测 3 例钉住 SHORT/硬闸语义。
+- [x] 墙钟账覆盖两条传输腿 + 全部阶段；eval 单列；生产收益看完整迭代墙钟。**（2026-11-17 19:51 三臂真机读数已收）** §D10 的七个 wire 字段（`corpus_fmt`/`replay_bytes`/`labels_bytes`/`convert_sec`/`convert_workers`/`convert_jobs`/`convert_fallback`）已于 2026-11-16 由 `_wire_from_result` 透传进 iteration 的 `wire`，full 路径恒为 `full`/0；转换器侧墙钟（174–216 ms/局、26–32 µs/tick）已测。**读数（kaggle T4 ×2，`wire` 子字典）**：A it2 `replay_bytes=689,204 / labels_bytes=847,525 / convert_sec=4.9 / convert_jobs=35 / pack_sec=1.215`；B it1 `3,275,506 / 4,290,834 / 15.8 / 148 / 5.673`；C it1 `12,137,573 / 15,813,037 / 54.0 / 553 / 15.545`。worker 侧 `wire` 行给出 `in/out/ppo` 三段与总 wall（C：`in=3.8s out=32.7s ppo=428.1s wall=490.0s`）。eval 单列（it0 基线 700 局/臂）。⇒ 两条传输腿 + 转换 + 装载 + PPO 全部有实测；剩的是把 A 的 20 轮拼成曲线（分析，不是量测）。
 - [x] replay/npy/ts_code 复用当前 iteration 保留策略（用户拍板）；replay 是临时训练物料，不承诺长期可重建；DoD 不写笼统「无数据丢失」。**（陈述性条目，§D10 已把拍板写成契约，无待办）**
 - [x] `bun run check` 绿；`bun run build` 过；子项目（`dashboard/**` 如改动）各自门禁绿。**（2026-11-17 实测，HEAD `f32c9255` + 待入库课程文件在场）** `bun run check` = typecheck + `check-decisions` + `check-agents-budget` + root tests：**2972 pass / 7 skip / 0 fail**（276 文件 / 2979 用例 / 40.5 s / 130,430 expect）；`bun run build` 绿（vite 305 ms，仅 chunk-size 警告）。`dashboard/**` 本工作线未改动。
 - [x] 无新增 Simulation `Math.random()` / 隐藏状态 / canvas UI；任务侧一字未动。**（按 diff 取证）** 本工作线两个提交在 `src/` 的改动：`c170ba26` 只有 `src/replay/InputRecorder.ts`（+5/−2，单人局不写 coop padding 帧），`f32c9255` 的 `src/` 改动为 **0 文件**。唯一动到 `src/game/**` 的是 `45bdcc30`（restore 时预留快照 id 空间，P0 立项的 tickHash flake 修复，见 `§2026-11-17-sim-tickhash-id-space`）——它只让 `genId` 单调抬到快照最大 id 之上，**不改玩法语义、不改 replay 格式、不改 tickHash 规格**，也无新随机源。当前 worktree 相对 HEAD 只有 `plan/` `nn-training/curricula/` `tmp/` 变动。
@@ -1012,6 +1223,8 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
 - **lazy loader 放量**：先独立切 `replay+eager`（P2），再在 P3 测试绿后切 lazy；保留 `--ppo-loader=eager` 回滚。
 - **数据保留**：复用当前 iteration 保留策略，不新增 replay/ts_code 保留规则；npy 按现有 prune 清理，replay 跟当前 it 产物同生命周期。
 - **7×5 生产切换**：P2 测试绿后 7×5 生产课只切 `corpus_fmt=replay`（仍 eager），**不在此阶段切 lazy**；`corpus_fmt=full` 保留回滚。
+  > ⚠ **已被后续拍板取代（2026-11-17）**：`§2026-11-17-goalnn-replay-f16-symmetric` 把 `corpus_fmt` 缺省翻成 **replay**；
+  > `§2026-11-17-goalnn-ppo-lazy-default` 把 `ppo_loader` 缺省翻成 **lazy**。本条保留为当时的分步计划记录，**不再描述生产现状**。
 - **格式字段**：`corpus_fmt` 进 `rollout` spec，并进 idempotency key；不进 `corpus_fp`。
 - **kind=iter / eval**：硬校验强制 `full`；请求 replay 直接拒。
 - **三臂比较**：首轮是 pilot（单训练 seed），主读 B 学习曲线 + C 终点配对差/CI；配方推广至少 3 个独立训练 seed；不按 it 数比较（§11.3 已确认 a）。
@@ -1079,7 +1292,18 @@ PASS 不证明 A2）。失败时按「首分叉轮」分流：**it1 分叉 = 纯
 
 ---
 
-## 14. 实施后要补的 DECISIONS（草稿，待实施时落）
+## 14. 实施后要补的 DECISIONS（32 条草稿 —— **已落库，2026-11-18 核对**）
+
+> 落点：`DECISIONS.md`。相关条目（按主题合并，非 1:1 逐条）：
+> `§2026-11-15-goalnn-replay-corpus-p1p2`（1/2/3/19/20/24）·
+> `§2026-11-16-goalnn-ppo-lazy-loader` + `§2026-11-17-goalnn-ppo-lazy-default`（4/9/23/26）·
+> `§2026-11-17-goalnn-replay-f16-symmetric`（2/11/12/13）·
+> `§2026-11-17-goalnn-replay-p2-verdict-c`（14/16/22）·
+> `§2026-11-17-goalnn-replay-pilot-verdict` + `§...-replay-followup-legs` + `§2026-11-18-goalnn-replay-batch2`（5/14/15/17/21/27）·
+> `§2026-11-18-goalnn-corpus-iso-score-surface` + `§2026-11-18-goalnn-reward-term-diagnosis`（后续方向）·
+> `§2026-11-17-goalnn-prebuilt-reproducible`（18/19）·
+> `§2026-11-17-nntrain-iters-boundary-and-eval-drain`（新发现）。
+> 6/7/8/10/29/30/31/32 属保留策略/运行时/格式细节，已落进正文与代码注释，未单独立决策条。
 
 1. 为什么 replay + 非 obs 标签，而不是 replay-only（前向/metrics 在 2 vCPU 上的实测）。
 2. 为什么请求显式 `corpus_fmt=full|replay`，而不是 packer 事后猜；为什么 `kind=iter`/eval 强制 full。

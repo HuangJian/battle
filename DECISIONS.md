@@ -5999,3 +5999,107 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **仍未被本机证明**：35×20 真语料的 GPU H2D / update 墙钟与显存余量（本机无 GPU；RSS 探针缺 psutil ⇒ 留空不编数）——判据在 plan §6.6 五档 verify（`verify-fl` vs `verify-fe` 即装载器 A/B），回滚一个 flag。
 - **否决**：① 继续等 GPU 真机再切（装载段已有量级差，且 lazy 峰值与语料总量无关，等下去只是继续付 ~3× obs 峰值）；② 只切课程缺省、不动 CLI（rl-config 缺键时仍 eager ⇒ 生产不生效，账实不符）；③ 连协议缺省一起切（旧 manifest 会从 eager 变 lazy，等于**静默**改变历史包语义）；④ paddle 静默退回 eager（manifest 与日志各说各话，2026-11-16 已否决，维持）。
 - 全文 → `docs/nn/remote-transport.md` §156；代码 `nn-training/worker/{cli,ppo/engine}.py` · `biz/course_spec.py` · `tools/perf/ppo-loader-bench.py` · `tests/worker/test_ppo_lazy_loader.py`。
+
+## §2026-11-17-goalnn-replay-f16-symmetric（取消 f16 单边偏置 + `corpus_fmt` 翻成生产缺省 replay）
+
+- **背景**（2026-11-17 补记，决定当日已实施于 `c170ba26`）：五臂真机 A/B（`reports/replay-corpus-five-arm-20261117.md`）里 `fe`/`fe2`/`fl` 三臂逐字节相同，而 `re`/`l`（replay 语料）与它们的 it1 语料**同源**（samples 65026=65026、30 shard、kept 24577、rotation/volume_stage_stats 逐字相同）却在 it2 就分叉（终态权重 max|Δ| 9.5e-3、changed 18940/73668）。
+- **根因**：`remote/payload_slim._member` 里 `REPLAY_DROP_FILES` 排在 f16 **之前**，而 `scalars`/`extra` 同时出现在 `RL_F16_FIELDS` 与 `REPLAY_DROP_FILES` 里 ⇒ **full 语料这两张被量化成 f16，replay 语料由转换器以 f4 重造**。同一份 rollout 的两种表示精度不等价 —— 这不是「误差多大」的问题，是「两臂必须被同等对待」的问题。plan §7 没抓到是因为那次对账是**离线比两份 npy**，绕过了 `payload_slim`（f16 只在上线传输时发生）。
+- **决定**：① `common/shard.py:139` 的 `RL_F16_FIELDS` 收窄成 `("lp_move","lp_fire")`（`scalars`/`extra` 移出）。`lp_*` 两臂都不过 DROP ⇒ f16 对称，保留；代价实测（xz 后）payload **+474 KB / +10.5%**（4.50 → 4.98 MB），下载 +0.3 s（obs 才是压缩大头，「翻倍」的直觉估法不成立）。② 默认值翻成 `replay`：`worker/cli.py --corpus-fmt`、`rl-config.json` 的 `rl.corpus_fmt`、`biz/course_spec.CourseSpec.corpus_fmt`（后者是文档值，`model_fields_set` 决定显式才生效）。③ **默认不是全局**：`trainer/loop_round_steps._resolve_corpus_fmt`（:363）按「rollout 与 PPO 是否同一台机器」裁决，`rollout_src=node`（kind=iter）与 `--export-bundle`（kind=run）**强制回 full** 并留一行日志（显式请求被降级必须可解释）；`worker/cmd.build_rollout_cmd(node_side=True)` 是同一规则的第二道闸。该函数可重入（每轮都调）⇒ 从 `args._corpus_fmt_req` 的**请求**起算，不从上一轮结果起算，否则一次降级会把整门课永久钉在 full。
+- **护栏**：`tests/remote/test_payload_slim.py::test_f16_set_never_intersects_replay_drop_set`（:239）断言两表**不相交**（把根因铸成断言，而不是逐字段查精度）；`trainer/stream.py` 的本机 PPO 兜底读盘遇 replay 显式 `SystemExit`（该腿自 `plan/accident.plan.md §3` 起 `args.stream` 恒 0，正常跑不到，但绝不静默炸在「找不到 obs.npy」）。
+- **迁移口径**：历史权重链的「语料精度」**一次性断代** —— 2026-11-17 之前的 full 语料是 f16 版 `scalars/extra`，之后是 f32。跨这条线的权重比较里 `changed` 是**下界**（微差被 i16 权重容器吃掉），不据此判「没学到东西」。已训练权重本身不受影响（不 bump shard schema）。
+- **被否决**：① 只改转换器去对齐 f16（replay 侧没有原值，转出来的就是 f32，量化回去等于人为造差）；② 整个取消 f16（`lp_*` 两臂对称，取消只是白丢压缩）；③ 只翻默认不加「同机回 full」闸（同机腿零 wire 收益却白烧 CPU，且节点盘上不再有 obs ⇒ 同机读 shard 的腿会断）；④ 新老语料混算不声明（跨断代点的 `changed` 会被误读成「没变化」）。
+- 全文 → `docs/nn/remote-transport.md` §155；代码 → `nn-training/common/shard.py` · `remote/payload_slim.py` · `trainer/loop_round_steps.py` · `worker/cmd.py`。
+
+## §2026-11-17-goalnn-prebuilt-reproducible（prebuilt 逐字节可复现 + 过期判据改「剥注释摘要」）
+
+- **背景**（2026-11-17 补记，实施于 `0534585e`）：起因是「改 C 注释要不要重跑 9 目标交叉编译」——原判据是**源码原始字节 sha256**，改一个注释字节就要重编全套，为注释付这个代价不值，于是 3 个 C 文件里「native↔wasm 逐位一致」的错话一直留着。查这件事时挖出更严重的一条：**「源码不变 ⇒ 二进制不变」这个前提根本不成立** —— 同一份 `conv.c` + 同一份 flags 连编两次差 **11 字节**。
+- **根因**：**产物文件名被编进了产物**。临时名 `<out>.tmp-<pid>` 的 pid 进了 `.rdata`（实测能直接搜到 `conv_native.dll.tmp-20780` 这类 ASCII），PE 头 `TimeDateStamp`（偏移 `0x80` 与 `0x3c0c`）是第二个；`-Brepro` 只压得住后者。拆解实验：固定输出名逐字节相同 / 换输出名立刻不同 / 同 basename 换目录仍相同 ⇒ 唯一不确定源 = basename 里的 pid。
+- **决定**：① pid 从**文件名**挪到**目录名**（旧 `<dir>/conv_native.dll.tmp-5680` → 新 `<dir>/.build-5680/conv_native.dll`），`tmpSibling`/`commitTmp`/`dropTmp` 覆盖 4 处（共享库 / 参考 CLI / wasm / prebuilt 9 目标）；② 参考 CLI 补 `reproducibleLinkArgs()`（coff `-Brepro` / macho `-no_uuid`）—— 它链系统 libc，用不了 `nativeLinkArgs` 那套 freestanding 参数，所以**从来没拿到过** `-Brepro`；③ 过期判据换成 `SOURCE_DIGEST_SCHEME='c-strip-comments+lf/v1'`（`tools/agent/native-build.ts:160`）：剥注释 + 归一 LF 后取摘要，旧 manifest 无 `digest` 时回落原始 sha（重建一次即迁移）。已证「剥注释重编 = 逐字节同产物」：改注释 `--check-prebuilt` rc=0、改一个代码字节立刻 rc=1。
+- **被否决**：① 保留原始 sha 判据、每次改注释都重跑 `--cross`（数秒 + 大段 manifest diff，换来的只是「不用想」）；② 手写简单注释剥离器（正则扛不住字符串里的 `//`）；③ 把 `sources[].sha256` 写回 manifest（改注释后必然与盘上不符，且已无消费者）。
+- **后果/坑**：`codeHash` 集内文件字节一变 ⇒ 节点判 stale，**跑批前先重启 hub**（`code.zip` 快照在 hub 启动时锚定）。⚠ **Windows：正被映射的 .dll 不能 rename 覆盖（EPERM）** ⇒ hub/worker/dashboard 活着时重建 prebuilt 会失败，且**只失败在它加载的那个变体**（x64 是 `fma`）—— 停掉占用方再重跑。
+- 全文 → `reports/build-repro-20261117.md`；代码 → `tools/agent/native-build.ts` · `src/nn/conv/native-prebuilt.ts` · `conv.c`/`conv_cli.c`/`conv_wasm.h` 的注释。
+
+## §2026-11-17-goalnn-replay-p2-verdict-c（P2 gate 判据改「实测噪声底 ∪ 2 ulp」，判 PASS）
+
+- **背景**：`plan/replay-corpus.plan.md` P2 的判据原是「逐位相同、无容差」，依据是 s1 里 `fe` vs `fe2` 两轮 44/44 张量 bit-identical（把噪声底当成 0）。A2 之后 s2 复跑仍非逐位 ⇒ 先判 FAIL；s3（同 fmt 第三次独立跑）随后证明**噪声底不是 0**。
+- **根因**：`src/nn/conv/conv_native_adapter.ts:347` 的 `ATTEST_TOLERANCE=1e-5` 是**相对容差**（注释自承比观测值宽 ~20×），rollout 每局在 native（FMA，一次舍入）与 wasm（两次舍入）之间**动态选**，两者差 1 ulp 也被放行 ⇒ 同配置两次独立采集**构造上就不逐位相同**。「逐位无容差」在混合后端下不可达，不是被测对象有问题。
+- **决定**：判据改 C —— `容差(项) = max(实测噪声底(项), 2×ulp32(|x|))`，逐项判 `|Δ| ≤ 容差`；判决里**分开报告**「≤ 实测底」与「靠预算兜住」两种，后者单列不藏。噪声底取**两对**独立重跑逐项 max（`fe-s2↔fe-s3`、`re-s2↔re-s3`），并先过有效性闸：四臂 it1 的 `shards=30` / `data_fp=75f03448f325` 全同 ⇒ 噪声对与 A/B 对是**同一批局**。2 ulp 预算必须留 —— 有限对样本包不住下一次抽样的尾部。
+- **判决**：P2 **PASS**。44 张量 **41 个逐位相同**，余 3 个各差 1–2 个元素、每个正好 **1 ulp（2.3842e-07）**；`value`/`entropy` 逐位；`policy` 1.649e-10 ≤ 底；`kl` 4.123e-11（**0.2 ulp**，超底 1.17×，靠预算兜住）；`mean_ret` 落在相邻量化档（7.761e-11 与底同值 ⇒ 离散台阶，非连续量）。**并且**：钉死后端（`NN_NATIVE=0`）后零容差直比，两路 `obs`/`scalars`/`extra` 三张 **sha256 逐字节相同**（`tmp/replay-verify/ab/`）⇒ P2 的原始命题成立，残余 2.38e-07 **100% 来自后端选择**、与 `corpus_fmt` 无关。运行时另有零容差闸常年守着：`tools/sim/replay-to-shard.ts:290-295` 的 `obsHash`/`nSamples`/`decisionTicks`/tickHash 链/终局状态五项，不符即 `throw` 不写半成品。
+- **不做**：不为「逐位」去钉后端（`NN_NATIVE=0` 实测慢 **3.5×**，`elapsedSec` 1.6 → 5.7，直接吃采样吞吐）。真要清理走 `-ffp-contract=off` 重编（根治，但要重编 wasm + 6 个平台 DLL，改完 `ATTEST_TOLERANCE` 才真收窄），与下一次 `src/nn/**` 正常改动合并在一个重启窗口里做。
+- **被否决**：① 维持逐位判据并「重采到逐位」（重采掩盖真差，且构造上永远采不到）；② 用 per-target golden 哈希替代容差 attestation（arm64/darwin 本机跑不了，退化成「只有一台机器有真证据」）；③ 48h 后把已知不匹配转为可接受（时间不是证据）。
+- **后果**：`plan/replay-corpus.plan.md` P2 勾绿，DoD 与新增 §6.6.2 同步；`conv.ts`/`conv_native_adapter.ts`/`conv_wasm_adapter.ts`/`conv_ts.ts` 里「逐字节/逐位一致」的错话改成容差等价（`bun test tests/native-parity.test.ts` 11 pass）。
+- 全文 → `reports/p2-verdict-c-20261117.md` · `docs/nn/remote-transport.md` §157。
+
+## §2026-11-17-goalnn-replay-pilot-verdict（三臂 pilot：刷新频率有效，冻结大池最差；P5「扩量」前提被否）
+
+- **背景**：`plan/replay-corpus.plan.md` §6.5 的三臂 pilot —— 在**等总样本（≈491,520）、等 mb、等 epochs（1,920 步）**前提下，只改「数据刷新频率 / on-policy 滞后」。
+  三臂：A 7 关/it × 20 it（20 次刷新）· B 35 关/it × 4 it（4 次）· C 35 关/it × 1 it（1 次冻结）。全量报告 → `reports/replay-pilot-verdict-20261117.md`。
+- **决定**：**接受「刷新频率对样本效率有可测正效应」这一方向**，并按预注册规则判 **B 臂 No-Go**（连续 3 个样本锚点 < A −2pp）。
+  **同时否定 P5 原定的「10×/20× 扩量」路线**——扩量（35 关一次采满、一轮训完）正是 C 臂的做法，而 C 是三臂里最差的（C−A = −6.86pp，CI [−11.29, −2.29]）。
+- **证据（kaggle Tesla T4 ×2，三臂同 runId、同起点 sha `bec039d88e2dcc9e`、同 700 局面板）**：
+  it0 三臂逐字相同 **471/700 = 67.3%**；终点/峰值 A 77.7%（it15）/ 75.0%（it20）· B 72.4% · C 68.1%。
+  B−A 四个锚点 = **+3.00 / −3.57 / −6.57 / −2.57pp**（唯一 CI 排除 0 的是 −6.57 [−11.00, −2.14]）；C−B（干净对照，同为 35 关）= **−4.29pp** [−9.00, +0.29]。
+  **排除替代解释**：PPO 计算时间三臂 431/423/428 s、步数都是 1,920（排除算力）；kl 全部 0.0006–0.0027、entropy 0.41–0.50（排除崩塌）；样本量极差 4,096 = 0.83%，比效应小一个数量级。
+- **被否决**：① 把 C 的 68.1% 当「大池不行」的定理（1 个训练 seed、1 个终点，CI 还含 0）；② 用 A 的 35.9 min 墙钟当「高频刷新不能上产」的结论（差额是**每轮固定开销**，不是 PPO 算力）；③ 继续按 P5 扩量（把池子再加大只会更像 C）。
+- **后果 / 下一步**：P5 改为三件事 —— ① 补 **3 个独立训练 seed** 复跑 **A vs C 两个端点**（不是全跑）；② 压每轮固定开销（A 每轮 PPO 21 s，其余 ≈104 s 是打包/发布/等 worker/回传），这条决定高频刷新能否上产；③ 若要把它做成生产自动旋钮，需正文 §D9 的 it 内样本轴调度（`it_equiv`），本 plan 不做。
+- **不做**：不据此改任务侧（关卡/命数/敌数/max_ticks）；不把 B/C 的读数写进任何「配方已证」的结论（§6.3 统计边界：CI 只覆盖 eval-seed 噪声）。
+
+## §2026-11-17-goalnn-replay-followup-legs（四条后续腿：继续降池 +7pp 唯一超散布；A 的「平台」是抽样低点）
+
+- **背景**：pilot 判决（§2026-11-17-goalnn-replay-pilot-verdict）留下两个问题 ——「池子还能不能再降」「A 到 491k 后是不是平台」。四条腿并行跑完（同机 T4×2、同进程、同 700 局面板）：`replay-dose2`（池 12,288 × 40 it）· `replay-a-cont`（A 的 it20 续训 20 轮）· `replay-a-lr2`（lr 2e-4）· `replay-a-s2`（同配方只换 `paired_rotate_seed`）。全文 → `reports/replay-pilot-verdict-20261117.md` 附节。
+- **决定**：① **接受「继续降池」为下一步**（D2 终点 **82.0%**，vs A 75.0% = **+7.00pp** [+3.00,+11.29]，且曲线单调不回落）；② **撤回「A 是平台」的判断**（CONT 从 A 的 it20 继续训到 **81.3%**）；③ **不采纳 lr 2e-4**（+3.14pp 落在实测散布内），但记为「与 D2 组合再测」的候选；④ **新增一条判读纪律：单 run 内 <4pp 的差不作结论**。
+- **证据（kaggle T4 ×2，四条腿均 `replay+lazy`、同 runId、同面板）**：
+  | 腿 | 终点 | Δ vs A | 说明 |
+  |---|---:|---:|---|
+  | A（基线） | 75.0% | — | 曲线 67.3→77.7→**75.0**（先涨后掉） |
+  | D2（池减半） | **82.0%** | **+7.00pp** [+3.00,+11.29] | 单调 67.3→74.0→77.0→79.4→82.0；**高于 g5-safe 80.94% 平台** |
+  | CONT（续训） | 78.9%（it15 **81.3%**） | +3.86pp（基线不同） | 从 A 的 it20 起，+6.3pp 到峰值 |
+  | LR2（lr 2e-4） | 78.1% | +3.14pp [−1.00,+7.43] | kl 0.0016–0.0051、ent 0.42–0.50，前期更快 |
+  | S2（换批局） | 79.0% | +4.00pp [−0.29,+8.43] | **散布标尺**：同配方换数据即差 4pp |
+  **机制**：五腿 PPO 算力 423–446 s、步数 1,920（含 D2 的 40×48）⇒ 差异不是算力。
+- **被否决**：① 用 LR2 的 +3.1pp 判「高 lr 有效」（<4pp 散布，且 kl 未进危险区也不代表有效）；② 用 A 的 75.0% 当配方上限（S2/CONT 都更高）；③ 把 pilot 的 B−A −6.57pp 当铁证（同量级散布存在）。
+- **顺带发现的 harness 缺陷（未修，需单独立项）**：`replay-a-cont` 声明 `iters=20` 却跑了 **21 轮**（`run_complete` 在 it20 写完后又跑 it21，同一 `run_start`），且 it20 的 eval **重复派发 469 局**（1,169 行含重复 `(stage,seed)`）。影响：多烧一轮、最后一点不再是 700 局、`run_complete.cause=iters` 语义失真。本报告已去重并用 it15 作主读数，但缺陷本身未修。
+- **后果 / 下一步**：P5 改为「继续降池（6,144 × 80 it）+ D2 与 lr 的组合腿」，并在开跑前**先修 iters 边界**（否则每条腿都多烧一轮、末点读数不可信）；配方推广仍需 ≥3 个独立训练 seed（换 runId = 换 trainer 进程）。
+
+## §2026-11-17-nntrain-iters-boundary-and-eval-drain（iters 边界超一轮 + 收官 drain 重派在飞轮）
+
+- **背景**：`replay-a-cont` 声明 `iters=20` 却跑了 **21 轮**（`run_complete` 写两次「it20/20」「it21/20」），且 it20 的 eval 落了 **1,169 行**（700 + 469 条重复 `(stage,seed)`）。22:05 复查发现 `replay-a-lr2` 同样在跑 it21 ⇒ **系统性**，非单课偶发。
+- **根因（两条独立）**：① 预算判满只在 `LoopRunner.planner`，而预采/队列可能在「判满之前」就把下一轮排进来 ⇒ 那一轮照样被执行；② 收官 drain 的「未覆盖」判据只看 `eval_summary`，而**在飞的轮还没写 summary** ⇒ 收官那一刻必然判成未覆盖再派一次。
+- **决定**：① `LoopRunner._pending_steps` 加**第二道预算闸**（`budget_exhausted(it, budget)` ⇒ 空表 + `finished` + 一行日志「拦下预算外的 itN」），判据与 `planner` 同源；② 新增 `EvalArbiter.active_its(course_fp)` 与纯函数 `drop_inflight_rounds`，drain 前把在飞轮剔出候选并单独记一行。**判据的语义改成「这轮是不是已经有人在做」，而不是「账上有没有结论」**——后者在收官瞬间必然为假。
+- **证据**：`test_pending_steps_refuses_over_budget_round` 回退实现即红（`_pending_steps("c", 21)` 返回 13 个 Task，实测已复现）；修复后绿，并有正向对照 `test_pending_steps_allows_the_last_budgeted_round`（it20=预算内必须放行）。`test_eval_drain_dedup.py` 5 例钉住去重语义（在飞剔除、旧缺口保留、umbrella 空集、`active_its` 默认空）。相关五文件 85 pass。
+- **被否决**：① 只改 `planner`（预采/队列已能绕过它，是本次的实际漏点）；② 在 `run_step` 里拦（四态里没有「不执行这一轮」的终态，拦不成）；③ 靠事后去重（读数还能救，但多烧的一轮与 `run_complete` 双写仍然污染账本）。
+- **后果**：修复需**重启 trainer** 生效（进程内加载）⇒ runId 变（`98b8d9b9…` → `375bfcf6…`），跨重启的两批课不能互相比 `job_seed`。已收官的七门课先 `stopCourse` 再重启，避免复活时被重新排队。
+
+## §2026-11-18-goalnn-replay-batch2（第二批三腿：D2 的 82% 是高抽样，真实平台 77–79%；**语料调度这条路到头**）
+
+- **背景**：承接 `§2026-11-17-goalnn-replay-followup-legs` 的「继续降池」决定，跑三条单变量腿：`replay-d35`（池不变、窗口 7→35 关）· `replay-dose4`（池 12,288→6,144 × 80 it）· `replay-dose2-lr2`（+lr 2e-4）。本批 runId `375bfcf6…`（修 iters 边界后重启），与第一批只按 eval 面板配对。全文 → `reports/replay-pilot-verdict-20261117.md` 附二。
+- **决定**：① **撤回「D2 的 82.0% 破了 g5-safe 80.94% 平台」**——三条独立腿全部落在 77.0–77.7%，终点 vs D2 = −4.29 / −4.43 / −5.00pp 且四条 CI 不含 0；结合 S2 实测的 4pp 散布，**D2 的 82.0% 是 +4~5pp 的高抽样，真实平台 77–79%**。② **停止语料调度方向的调参**：池大小（6k/12k/24.5k/123k/491k）、每轮关数（7/35）、刷新次数（1/4/20/40/80）已全部扫过，落在同一簇。③ **新纪律：新腿只跑 25 万样本（约 10 轮 × 24.5k）就够判**——实测后半程（245k→491k）平均只值 **+0.37pp**，八条腿里四条是负的。
+- **证据**：D35 77.7% · D4 77.6%（峰值 80.0% @it60）· DLR 77.0%；参考 D2 82.0% / S2 79.0% / CONT 78.9% / LR2 78.1% / A 75.0% / B 72.4% / C 68.1%。
+  单变量读数：**广度**（D35）−4.3pp ⇒ 窄窗口不劣（**「多样性 vs 更新率」仍未分离**，因为 D2 本身是高抽样）；**池大小**（D4）−4.4pp ⇒ 不再降池；**lr 组合**（DLR）−5.0pp ⇒ 小池 + 高 lr 互相抵消（同一 lr 在 24.5k 池上是 +3.1pp）。
+- **被否决**：① 继续按「降池」推进（D4 已证无益且更贵）；② 用 D2 的 82.0% 当配方上限写进任何结论；③ 把 6,144 的 it60 峰值 80.0% 当拐点（单点、单 seed，且终点回落到 77.6%）。
+- **后果 / 下一步**：瓶颈不在样本量（25 万饱和）、不在算力（PPO 423–446 s 全同）、不在熵/kl（0.0002–0.0051）。要破 80.94% 只能动**奖励塑形 / 观测 / 架构**三类之一，**不是**语料调度。开新腿前按「25 万样本」定预算。
+
+## §2026-11-18-goalnn-corpus-iso-score-surface（语料调度处在「等分面」上：换路径不换高度；轮换不产生遗忘）
+
+- **背景**：用户提出核心质疑 —— replay→npy 的原始动机是「每 it 覆盖全 35 关 + seeds≥5 保多样性，避免偏置语料被过拟合并被后续迭代洗掉」，但八条腿实测显示「每 it 只 7 关轮换」「每 it 语料减半」都不影响质量。需要一个机制解释，而不是「反正没差」。
+- **决定**：把结论定为 **77–79% 是一个等分面（iso-score surface）**，语料调度只改变到达路径、不改变高度。据此：① **停止在语料调度上花算力**；② 明确 replay 基础设施的价值**只在传输与可行性**（s2t 12×、35×20 可行），不在「覆盖/多样性改善质量」；③ 后续只动**奖励塑形 / 观测 / 架构**。
+- **证据（四条，全部可从 `reports/replay-pilot-verdict-20261117.md` 附三复算）**：
+  1. **轮换不产生遗忘**：A（7 关/轮×20）终点逐关分数与「距上次训练几轮」相关 **r=+0.09**，lag0 73% / lag4 **77%** ⇒「互相拉扯被洗掉」不成立。
+  2. **同分不同策**：任意两腿在同 700 局上的通过/不通过一致率只有 **65–71%**，而「各自 ~78%、彼此独立」的基线 ≈ **66%** ⇒ 胜负几乎无关联。**连 S2（同配方只换一批局）也只有 65.1%**。
+  3. **强项在换、总分不变**：逐关剖面跨腿相关 **r=0.50–0.72**，各腿最差关各不相同（2034/2030/2026/2032）。
+  4. **饱和**：245,760→491,520 平均增益 **+0.37pp**（八条腿，四条为负）。
+- **机制**：① 35 关是同一规则下的布局变体（20 敌/3 命/同奖励/同观测），**单模态** ⇒ 7 关已张成该分布，加覆盖率边际信息≈0；多样性只在多模态任务上值钱。② 刷新频率的收益在 ~20 次饱和，唯一悬崖在最左端（C：1 次刷新 68.1%）。
+- **被否决**：① 「多试几组池大小/关数就能找到更好的点」（五个维度已扫遍，同层）；② 「先把覆盖做满再谈别的」（覆盖不是约束）；③ 「轮换导致遗忘，所以要在每轮都覆盖全关」（r=+0.09 直接否掉）。
+- **后果**：新腿预算按 **25 万样本**（≈10 轮 × 24.5k）；任何「换采样」提案先默认驳回，除非能说明它改变了**学什么**而不是**看哪些局**。
+
+## §2026-11-18-goalnn-reward-term-diagnosis（7,000 局奖励诊断：排序对、五税空转、终局定价反了）
+
+- **背景**：语料调度被判「等分面」（`§2026-11-18-goalnn-corpus-iso-score-surface`）后，下一个候选是奖励。用户要求先用**盘上既有数据**诊断，不新跑批。
+- **证据（7,000 局 = 10 条腿终点 eval，同一 700 局面板；`tmp/reward-term-analysis.py` 逐项复算，全文 `reports/reward-terms-vs-win-20261118.md`）**：
+  1. **排序正确**：Φ 判别赢/输 **AUC = 0.985**；同 `(stage,seed)` 的 10,581 对「一赢一输」里只有 **1.0%** 反转；「该项在输局更划算（ΔΦ<0）」的项 **为零**。⇒ **不重排奖励**。
+  2. **五项纯税空转**：`wThreat −11.46 / wEncl −5.99 / wIdle −4.25 / wStuck −4.24 / wWall −3.36` 在**赢局照收**，合计 **−29.3 分/局**（占赢局 Φ 的 8.3%），而与本局胜负的相关只有 **r = 0.02–0.14**。历史侧证：g5-safe 收课时已记「税一直在收、行为没变」，safe2 加到 4.5× 仍无变化。
+  3. **终局定价反了**：`base_destroyed = −35` 比 `lives_exhausted = −45` 更轻，**只值 2.3 个击杀**；而 **8.4% 的局（412/4,900）是基地被拆**。极端案例：17 杀 0 伤 0 死但基地被拆 ⇒ Φ **+362**；20 杀通关但承伤 1,566 死 5 次 ⇒ Φ **+2**。
+  4. 判别力集中在两项：`wKill`（ΔΦ +95.2，r=0.79）与 `wWin`（+80.0，r=1.00）合计 **61.6%**；**击杀的权重是通关的 3.75 倍**。
+- **决定**：开两条干预腿（各 **25 万样本 ≈ 10 轮**，不跑满 491k）：**T1 砍税**（删/缩那五项，至少 `wThreat`+`wEncl`）与 **T2 修终局**（`base_destroyed` −35 → **−90**）。**不**重排奖励、**不**加新税、**不**动 `wKill`。
+- **被否决**：① 重排奖励（AUC 0.985 已足够）；② 继续加税（两次历史实测无效）；③ 动 `wKill`（判别力主力，风险最高）；④ 只凭本报告下结论（相关性 ≠ 因果，T1/T2 才是干预）。
+- **局限**：全部是终点策略分布；某项「无判别力」也可能是它**已经完成任务**（`wIdle`/`wWall` 大概率属这类）——那删它没有收益也没有坏处。T2 有「变龟缩」风险，用 25 万样本先看 78% 有没有动。

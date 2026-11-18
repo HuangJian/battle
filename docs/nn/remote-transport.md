@@ -6,6 +6,43 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §157 P2 gate 判据改「实测噪声底 ∪ 2 ulp」，判 PASS（2026-11-17）
+
+**背景**：P2（`corpus_fmt=replay` 与 `full` 在相同起点/采样/seed 下 PPO 结果一致）的判据原是
+「逐位相同、无容差」，依据是 s1 里 `fe` vs `fe2` 两轮 44/44 张量 bit-identical。A2（§155）之后
+s2 复跑仍非逐位 ⇒ 先判 FAIL；s3 随即证明噪声底不是 0。
+
+**根因**：`src/nn/conv/conv_native_adapter.ts:347` 的 `ATTEST_TOLERANCE = 1e-5` 是**相对容差**
+（注释自承比观测值宽 ~20×），rollout 每局在 native（FMA，一次舍入）与 wasm（两次舍入）之间
+**动态选**，差 1 ulp 也被放行 ⇒ 同配置两次独立采集**构造上就不逐位相同**。「逐位无容差」在
+混合后端下不可达，不是被测对象有问题。**这也是「同 seed 重跑必须逐字节」这类断言在整仓的
+通用前提**：凡涉及 NN 前向的读数，容差必须从实测噪声底起算。
+
+**判据 C**（可复算）：`容差(项) = max(实测噪声底(项), 2×ulp32(|x|))`，逐项判 `|Δ| ≤ 容差`；
+判决里分开报告「≤ 实测底」与「靠预算兜住」两种。噪声底取**两对**独立重跑逐项 max
+（`fe-s2↔fe-s3`、`re-s2↔re-s3`），先过有效性闸：四臂 it1 的 `shards=30` / `data_fp=75f03448f325`
+全同 ⇒ 噪声对与 A/B 对是同一批局。
+
+| 噪声对 | kl | policy | value | entropy | mean_ret | 张量最大 |
+|---|---|---|---|---|---|---|
+| `fe-s2↔fe-s3` | 3.517e-11 | 4.366e-11 | 6.209e-10 | **0** | 7.761e-11 | 2.384e-07 |
+| `re-s2↔re-s3` | 2.728e-11 | 5.772e-10 | 1.242e-09 | 3.104e-10 | 3.881e-11 | 3.576e-07 |
+
+**判决 = PASS**：44 张量 41 个逐位相同，余 3 个各差 1–2 个元素、每个正好 1 ulp；`value`/`entropy`
+逐位；`policy` 1.649e-10 ≤ 底；`kl` 4.123e-11（0.2 ulp，超底 1.17×，靠预算兜住）；`mean_ret`
+相邻量化档。**且**钉死后端（`NN_NATIVE=0`）后零容差直比，两路 `obs`/`scalars`/`extra` 三张
+**sha256 逐字节相同** ⇒ 残余 2.38e-07 全部来自后端选择，与 `corpus_fmt` 无关。
+
+**不做**：不为「逐位」钉后端（`NN_NATIVE=0` 慢 3.5×，直接吃采样吞吐）。真要清理走
+`-ffp-contract=off` 重编（`reports/build-repro-20261117.md` §8 方案 B），与下一次 `src/nn/**`
+正常改动合并在一个重启窗口里做。
+
+**顺带纠正的两条旧说法**：①「entropy 天然免疫（被 f16 抹平）」——`re` 对抖 3.104e-10，那是运气；
+②「`lp_*` 都是 f16」——实际 `RL_F16_FIELDS = ("lp_move","lp_fire")`，`lp_hold`/`reward`/`value` 是 f32。
+
+全文 → `reports/p2-verdict-c-20261117.md`；决策 → `DECISIONS.md §2026-11-17-goalnn-replay-p2-verdict-c`。
+复算：`nn-training/.venv/Scripts/python.exe tmp/cmp-verify-s2.py`，机读输出 `tmp/replay-verify/s2-verdict-c.txt|.md`。
+
 ## §156 P3 落地：PPO 语料装载器缺省切 lazy（2026-11-17）
 
 **背景**：P3（`plan/replay-corpus.plan.md` D6/§5）的两半已在 2026-11-16 落过 —— lazy 装载器
