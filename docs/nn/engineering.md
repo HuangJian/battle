@@ -25,6 +25,18 @@
 
 ---
 
+## §181 长函数存量第三刀：离线租约领取 211 → 168（2026-11-18）
+
+`hub/offline.py::_post_offline_lease` **211 → 168 行**，长函数存量 **35 → 34**
+（`LONG_FUNCS_BASELINE` 删除 `hub/offline.py` 条目）。
+
+一刀纯搬移：`HubHandler._offline_claim_refusal(course, worker, why)`——`claim_offline`
+领不到时的三条 409 回执（BC 课 / busy / 被 live 接管）。这是 claim 腿里唯一一段
+「只读租约状态 + 只写 HTTP 回执」的相位，边界干净；拒因文案、`holder` 快照与返回码
+逐字保留。
+
+---
+
 ## §180 长函数存量第二刀：rollout 派发 207 → 191（2026-11-18）
 
 `trainer/rollout_phase.py::dispatch_rollout_phase` **207 → 191 行**，长函数存量

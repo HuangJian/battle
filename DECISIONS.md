@@ -7401,3 +7401,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   207 → **191** 行（拆出 `_stream_extra_kwargs`：stream 腿的 backend/update_kwargs
   注入，纯取值、不碰闭包），长函数存量 **36 → 35**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §180。
+- **2026-11-18（长函数存量第三刀：离线租约领取）**：`hub/offline.py::_post_offline_lease`
+  211 → **168** 行（拆出 `_offline_claim_refusal`：claim 被拒的三条 409 回执，
+  文案/返回码逐字不变），长函数存量 **35 → 34**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §181。

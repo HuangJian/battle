@@ -570,50 +570,7 @@ class OfflineRoutes:
             takeover = _q("takeover").lower() in ("1", "true", "yes")
             lease, why = self.hub.claim_offline(course, worker, takeover=takeover)
             if not lease:
-                if why == "bc_course":
-                    self._json(
-                        {
-                            "error": "这是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）",
-                            "course": course,
-                            "bc_course": True,
-                        },
-                        409,
-                    )
-                    return
-                if why == "busy":
-                    self._json(
-                        {
-                            # ★M1b：busy 按 **worker** 判（同一台盘串行；别的盘不互挡）——
-                            # 所以这里必须把发起方带进去，否则回执里说不出「哪台盘在跑哪门课」。
-                            "error": self.hub.busy_reason(course, worker)
-                            or "别的课正在跑（一拖一：一次只 drain 一门）",
-                            "course": course,
-                            "busy": True,
-                            "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
-                        },
-                        409,
-                    )
-                    return
-                holder = self.hub.holder_info(course)
-                who = holder["worker_id"] if holder else "?"
-                left = float(holder["expires_in"]) if holder else 0.0
-                # ★M1b（plan §1.2-③ 不变量 3 + P2-4）：**live 的接管不可被顶**——`?takeover=1`
-                # 也不再能覆盖它（旧文案说的「加 takeover=1 顶掉」已作废）。要清只有两条路：
-                # ① 它自己进度静默超阈（届时新主**自动**接管）② 人到控制台点「强制解除接管」。
-                # 为什么改：旧写法把「不能覆盖 live」变成一句空话（任何人一个参数就能双跑）。
-                self._json(
-                    {
-                        "error": (
-                            f"这门课的离线任务正被 {who} 接管（{left:.0f}s 内无进度即自动可接管）"
-                            "——live 的接管不可被顶（takeover 也不行）；请换下一门，"
-                            "或到控制台点「强制解除接管」再领"
-                        ),
-                        "course": course,
-                        "held": True,
-                        "holder": holder,
-                    },
-                    409,
-                )
+                self._offline_claim_refusal(course, worker, why)
                 return
             # 包真的在手里的这一刻，把「缺包重试」账本清掉（下次再缺从零计数）。
             reset_auto_handoff_triggers(course)
@@ -682,6 +639,56 @@ class OfflineRoutes:
             )
             return
         self._json({"released": True, "course": course}, 200)
+
+    def _offline_claim_refusal(self, course: str, worker: str, why: str) -> None:
+        """`claim_offline` 领不到时的三条 409 回执（BC 课 / busy / 被 live 接管）。
+
+        自 `_post_offline_lease` 的 claim 腿原样搬出：拒因文案与返回码逐字不变。
+        """
+        if why == "bc_course":
+            self._json(
+                {
+                    "error": "这是 BC 课程：不领课程租约（BC job 走 /jobs/{id}/claim）",
+                    "course": course,
+                    "bc_course": True,
+                },
+                409,
+            )
+            return
+        if why == "busy":
+            self._json(
+                {
+                    # ★M1b：busy 按 **worker** 判（同一台盘串行；别的盘不互挡）——
+                    # 所以这里必须把发起方带进去，否则回执里说不出「哪台盘在跑哪门课」。
+                    "error": self.hub.busy_reason(course, worker)
+                    or "别的课正在跑（一拖一：一次只 drain 一门）",
+                    "course": course,
+                    "busy": True,
+                    "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                },
+                409,
+            )
+            return
+        holder = self.hub.holder_info(course)
+        who = holder["worker_id"] if holder else "?"
+        left = float(holder["expires_in"]) if holder else 0.0
+        # ★M1b（plan §1.2-③ 不变量 3 + P2-4）：**live 的接管不可被顶**——`?takeover=1`
+        # 也不再能覆盖它（旧文案说的「加 takeover=1 顶掉」已作废）。要清只有两条路：
+        # ① 它自己进度静默超阈（届时新主**自动**接管）② 人到控制台点「强制解除接管」。
+        # 为什么改：旧写法把「不能覆盖 live」变成一句空话（任何人一个参数就能双跑）。
+        self._json(
+            {
+                "error": (
+                    f"这门课的离线任务正被 {who} 接管（{left:.0f}s 内无进度即自动可接管）"
+                    "——live 的接管不可被顶（takeover 也不行）；请换下一门，"
+                    "或到控制台点「强制解除接管」再领"
+                ),
+                "course": course,
+                "held": True,
+                "holder": holder,
+            },
+            409,
+        )
 
     def _post_offline_progress(self) -> None:
         """`POST /offline/progress?course=<课>&lease=<token>`（★M1b / Q2）：**进度打点**。
