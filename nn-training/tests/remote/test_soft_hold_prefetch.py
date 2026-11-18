@@ -255,7 +255,8 @@ def test_prune_keeps_a_handed_off_stage_but_sweeps_the_orphans(tmp_path: Path) -
     assert store.prune() >= 2
     assert not (root / JID / "shards.tmp").exists(), "崩溃残留的 .tmp 没清"
     assert not (root / "deadbeefdeadbeef").exists(), "不在册的残壳没清"
-    assert Path(store._handoff[JID]).is_dir(), "交棒的那份被 prune 扫掉了（搬入会失败）"
+    handoff = store.handoff_path(JID)
+    assert handoff is not None and handoff.is_dir(), "交棒的那份被 prune 扫掉了（搬入会失败）"
 
 
 def test_unpack_failure_falls_back_to_bytes_without_raising(tmp_path: Path) -> None:

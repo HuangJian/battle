@@ -574,7 +574,8 @@ def test_lease_file_is_owner_only_and_goes_to_argv(tmp_path: Path) -> None:
     no_lease = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f")
     assert "--hub-lease-file" not in no_lease
     # 日志用的 argv 不得把它露出来（与 `--hub-token` 同一处理）
-    assert "***" in offline_boot._redact(["--hub-lease", "l3ak"])
+    redacted = offline_boot._redact(["--hub-lease", "l3ak"])
+    assert "***" in redacted
 
 
 def test_course_from_pack_name_only_speaks_when_it_is_sure(tmp_path: Path) -> None:

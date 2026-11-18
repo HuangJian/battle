@@ -263,6 +263,12 @@ class StreamCollector:
         """本关**还没结算**的局数（派出去但没回来的）。"""
         return max(0, int(self.games.get(stage, 0)) - int(self.settled.get(stage, 0)))
 
+    def plan_cap(self, stage: int) -> int:
+        """快照里 `cap_games` 的来源（plan 模式 = 计划硬顶；alpha 模式 = α 批量上限）。只读。"""
+        return int(
+            self._alpha_cap(stage) if self.sched == "alpha" else self._plan_caps.get(stage, 0)
+        )
+
     def _cap(self, stage: int) -> int:
         """本关局数**硬顶**（防「一局零样本 ⇒ 无限补」把一轮拖死）。
 
@@ -559,9 +565,7 @@ class StreamCollector:
                     "games": int(self.games.get(s, 0)),
                     # `est_s` = 计划钉的本关估计（与训练侧分母同源）；`cap_games` = 同一份硬顶。
                     "est_s": int(self.ests.get(s, 0)),
-                    "cap_games": int(
-                        self._alpha_cap(s) if self.sched == "alpha" else self._plan_caps.get(s, 0)
-                    ),
+                    "cap_games": self.plan_cap(s),
                 }
                 for s in self.stages
             },

@@ -372,7 +372,7 @@ def _ack_outbox_locked(
     }
 
 
-class LocalOutboxDeliverer:
+class LocalOutboxDeliverer(runtime.ThreadOwner):
     """把补传产物**落成本地文件**的腿（`DelivererLike` 的同形面，不连任何网络）。
 
     `background=False`（子进程模式 / 同步调试）：`submit_*` 当场物化；

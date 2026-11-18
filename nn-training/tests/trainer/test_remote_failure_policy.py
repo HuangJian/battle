@@ -191,7 +191,7 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
         hc.time.sleep, hc.publish_job = orig_sleep, orig_publish
     assert publish_calls == []  # 一个字都没再发出去
     assert sleep_calls == []  # 也没在「睡 30s 再试同一 job」的阶梯上转圈
-    assert loop._consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
+    assert loop.resume_state().consec_fail == 1  # 失败留痕（iter_error）仍然照写；只是不再重试
     # 对照：腿没被判死时同一条路会返回 ROUND_RETRY（重跑本轮 = 重发同一 job）——
     # 也就是说「不重发」靠的正是上面那个 `_leg_abort` 闸。
     loop._leg_abort = False

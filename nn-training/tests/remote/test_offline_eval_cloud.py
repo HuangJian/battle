@@ -850,7 +850,8 @@ def test_backfeed_body_carries_only_this_rounds_eval_rows(tmp_path: Path) -> Non
     assert [r["event"] for r in got] == ["eval", "eval_summary", "eval_agg"], got
     assert got[0]["seed"] == 1, "逐局行只发自家的、本轮的（source 行不随行）"
     assert got[1]["games"] == 4
-    assert d._eval_rows_for(9) == []
+    missing = d._eval_rows_for(9)
+    assert missing == []
 
     # 上界（2026-11-03）：整轮读数放行；只有异常大才按关分层（宁少不错）。
     full = [

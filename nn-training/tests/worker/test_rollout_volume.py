@@ -710,14 +710,14 @@ class _StubLoop:
         # 桩先声明，测试才能断言首波读数（mypy 也才看得见这个属性）。
         self._volume_stage_stats: dict = {}
         # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
-        self._journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
+        self.journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
         self.dispatched: list[list[tuple[int, int]]] = []
         #: 熔断后**没派出去**的候选局数（新语义：它们从不运行）
         self.undispatched: int = 0
         self._volume_halted: bool = False
 
     def _commit_journal(self) -> CommitJournal:
-        return self._journal
+        return self.journal
 
     def _dispatch_volume_wave(
         self,
@@ -1002,7 +1002,7 @@ def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None)
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 无需补波
     assert stub.volume_view().collected == 4 * 16 * 967  # g0=ceil(15000/967)=16
-    assert stub._journal.pending() == []
+    assert stub.journal.pending() == []
 
 
 def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None) -> None:
@@ -1019,7 +1019,9 @@ def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None)
     assert view.waves == 3
     assert view.collected == 4 * (16 + 8 + 4) * 500
     assert view.capped is False
-    assert stub._journal.pending() == []  # 每波 start 都有配对的 finish
+    # 通过**生产同名钩子**读（假引擎也实现了 `_commit_journal`；同时是 G5 扫描面活性锚，
+    # 见 `tests/test_private_assert_budget.py::test_scan_sees_the_known_surface`）。
+    assert stub._commit_journal().pending() == []  # 每波 start 都有配对的 finish
     # 报告已逐波并入（补波确实是本轮报告的一部分）
     assert view.report["games"] == 4 * (16 + 8 + 4)
     assert view.report["totalSamples"] == view.collected
@@ -1116,7 +1118,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     _settle_first_wave(stub)
     # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 8 局）
     games = {0: 8, 1: 8, 2: 8, 3: 8}
-    stub._journal.start(
+    stub.journal.start(
         WAVE_PHASE, wave_round_key(1, 2), games={str(k): v for k, v in games.items()}
     )
     stub._volume_topup(1, None)
@@ -1135,8 +1137,8 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
-    stub._journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 8})
-    stub._journal.finish(WAVE_PHASE, wave_round_key(1, 2))
+    stub.journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 8})
+    stub.journal.finish(WAVE_PHASE, wave_round_key(1, 2))
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 预算已用满（w2 ⇒ waves=3）⇒ 无新波
     assert stub.volume_view().waves == 3

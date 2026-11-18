@@ -98,7 +98,7 @@ def test_first_read_parses_the_whole_file(tmp_path: Path) -> None:
     st = _store(tmp_path)
     _append(st, 5)
     assert _rows(st) == _expect(st.jsonl_path)
-    assert st._ledger_off == st.jsonl_path.stat().st_size, "整份都解析完了 ⇒ offset 到头"
+    assert st.ledger_offset() == st.jsonl_path.stat().st_size, "整份都解析完了 ⇒ offset 到头"
 
 
 def test_appending_one_row_reads_only_the_new_bytes(tmp_path: Path, monkeypatch: Any) -> None:

@@ -161,7 +161,7 @@ def test_sync_mode_is_the_old_behaviour_inline() -> None:
     up.submit(_task(JID1))
     assert seen == [JID1], "sync 模式必须当场发完"
     assert up.stats()["pending"] == 0
-    assert up._thread is None, "sync 模式不该起上传线程"
+    assert up.running is False, "sync 模式不该起上传线程"
     assert up.mode == "sync"
 
 

@@ -55,7 +55,8 @@ def test_code_changed_error_is_not_protocol_error() -> None:
 def test_request_reload_requires_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
     """restart_argv 为空 → False（无监督器，不退出）；非空 → 以 HOT_RELOAD_EXIT 退出。"""
     logs: list[str] = []
-    assert W._request_reload(None, log=logs.append) is False
+    reloaded = W._request_reload(None, log=logs.append)
+    assert reloaded is False
     assert any("restart_argv" in m for m in logs)
 
     # 非空 = 有监督器：必须干净退出（SystemExit），绝不 execv —— execv 会打掉

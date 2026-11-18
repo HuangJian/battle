@@ -74,7 +74,7 @@ def write_heartbeat(payload: dict, *, path: str | None = None, log_fn=None) -> N
         say(f"[heartbeat] WARN: 写心跳失败（{e}）——控制台会看不到这一拍（不影响训练）")
 
 
-class HeartbeatPublisher:
+class HeartbeatPublisher(runtime.ThreadOwner):
     """心跳发布器：主线程 `publish(**fields)` 刷快照，写线程按周期落盘。
 
     线程只负责「把最后一次刷新的快照 + 当前时刻」写出去 ⇒ 主线程卡在任何一步里都不影响

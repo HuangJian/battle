@@ -25,6 +25,37 @@
 
 ---
 
+## §176 G5 第三十七批：五处生命周期读数 + 四处增量读面（2026-11-18）
+
+十六个文件清零、一个留活性锚：`test_hub_ledger_incremental.py` / `test_role_routing.py` /
+`test_async_result_upload.py` / `test_deliver_outbox.py` / `test_offline_bc_course.py` /
+`test_offline_boot.py` / `test_offline_eval_cloud.py` / `test_offline_local_first.py` /
+`test_offline_push_face.py` / `test_opt_blob_shape.py` / `test_remote_hotswap.py` /
+`test_result_upload_proc.py` / `test_soft_hold_prefetch.py` /
+`test_remote_failure_policy.py` / `test_stream_collect_stats.py` / `test_trainer_heartbeat.py`
+各 **1 → 0**；`test_rollout_volume.py` **2 → 1**（G5 **195 → 178**，72 → 56 文件）。
+
+新读数（都是「后台线程/增量读现在走到哪」的只读问句）：
+
+- `common.runtime.ThreadOwner.running`：后台线程是否还活着（`sync` / 未启动 / 已收线 ⇒ False）。
+  结果上传 / outbox 物化 / 心跳写三条腿共用这一份实现——三处各抄一遍会被
+  `tests/test_reuse_ledger.py` 的逐字节重复审计记成新增债（实测 14 → 15，门禁红）。
+- `UploaderProcess.degraded`：是否已 sticky 降级到进程内腿（与 `stats()["degrade_reason"]`
+  同一事实的布尔面）。
+- `PrefetchStore.handoff_path(jid)`：已交棒未搬走的暂存目录（消费方仍是 `release_handoff`）。
+- `StreamCollector.plan_cap(stage)`：`cap_games` 的唯一来源（快照内部改用它，口径单源）。
+- `_JobStore.ledger_offset()`：增量读跟进到的字节位（纯读；「整份都解析完了」的可观测面）。
+  store 拆分守卫 `MIXIN_METHODS` 76 → 77。
+
+其余：`_run_bc_once` / `_redact` / `_http_error_body` / `_eval_rows_for` /
+`_course_from_pack_name` / `_cache_produced_weights` / `_request_reload` 的调用移出 assert；
+role-routing 的「拒了不许留痕」改读 `inflight()` + `has_lease()`；远端失败策略的轮级连击
+改读 `resume_state().consec_fail`；`test_rollout_volume` 的两处 `_journal` 里，替身字段改公开
+`journal`，保留的一处走**生产同名钩子** `_commit_journal()`——它同时是该自检要求的扫描面
+活性锚（见 §170）。
+
+---
+
 ## §175 G5 第三十六批：心跳读数 + 哨兵快照 + 十处纯判据（2026-11-18）
 
 十二个文件清零：`test_hub_leases.py` / `test_hold.py` / `test_offline_metrics.py` /

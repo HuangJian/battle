@@ -308,7 +308,8 @@ def test_weights_produced_lands_in_blob_cache(tmp_path: Path) -> None:
     assert sha == _sha(raw)
     assert (blob_root / sha).read_bytes() == raw
     # 二次调用幂等（同 sha 已存在直接返回，不重写）
-    assert download_mod._cache_produced_weights(blob_root, raw, _log) == sha
+    again = download_mod._cache_produced_weights(blob_root, raw, _log)
+    assert again == sha
 
     # 下一轮：hub 用同一份字节的 sha 发 init blob ⇒ 命中、零字节
     jd = _job(tmp_path, "next_job")

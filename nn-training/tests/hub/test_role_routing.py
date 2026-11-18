@@ -279,7 +279,7 @@ def test_store_gate_rejects_role_mismatch_without_touching_the_lease(tmp_path: P
     store.publish(OFF_JID, _manifest(OFF_JID, kind="run"), b"PK\x03\x04fake")
     out = store.claim_outcome(OFF_JID, worker_id="online-disk", role=ROLE_ONLINE)
     assert out.ok is False and out.status == "role"
-    assert store._leases == {} and store._lease_owners == {}, "拒了就不许留痕"
+    assert store.inflight() == [] and not store.has_lease(OFF_JID), "拒了就不许留痕"
     assert store.claimable_job_ids() == [OFF_JID], "还回池里等对的人"
     ok = store.claim_outcome(OFF_JID, worker_id="offline-disk", role=ROLE_OFFLINE)
     assert ok.ok is True and ok.status == "ok"

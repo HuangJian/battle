@@ -233,6 +233,11 @@ class UploaderProcess:
     def off_critical_path(self) -> bool:
         return True
 
+    @property
+    def degraded(self) -> bool:
+        """是否已降级到进程内线程腿（sticky；`stats()["degrade_reason"]` 是同一事实的人读面）。"""
+        return self._fallback is not None
+
     def submit(self, task: UploadTask) -> None:
         """交一份结果：**只排票**（序列化与网络都在 writer 线程 / 子进程里）。"""
         fb = self._fallback

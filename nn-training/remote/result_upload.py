@@ -132,7 +132,7 @@ class Outcome:
         return not self.error
 
 
-class ResultUploader:
+class ResultUploader(runtime.ThreadOwner):
     """后台回传队列：`submit()` 立刻返回，POST 在专用线程里做（叠在下一份 job 上）。
 
     `mode="sync"` 时 `submit()` 就是**同步**发完再返回（逐字等价于改造前的行为）。

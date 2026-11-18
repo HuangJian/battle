@@ -110,6 +110,10 @@ class LedgerMixin:
     def _job_dir(self, job_id: str) -> Path:
         return self.job_root / job_id
 
+    def ledger_offset(self) -> int:
+        """增量读跟进到账本的第几个字节（只读；诊断 / 用例用，不做任何 IO）。"""
+        return self._ledger_off
+
     # ---- jsonl 账本（job_pending / job_completed 双态，§3.1/D8） ----
     def _read_ledger(self) -> list[dict]:
         if not self.jsonl_path.exists():

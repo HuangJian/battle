@@ -7376,3 +7376,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   心跳锚）与 `HubHandler.pulse_readout()`（哨兵只读快照；`pulse_events` 会推进状态）；
   其余为纯判据调用移出 assert。store 守卫 `MIXIN_METHODS` 75 → 76。转发名 / 身份 /
   兼容参数 / 归属缓存本体等 6 个文件刻意保留。全文 → `docs/nn/engineering.md` §175。
+- **2026-11-18（G5 第三十七批：生命周期读数与增量读面）**：16 个文件各 1 → 0，
+  `test_rollout_volume.py` 2 → 1（G5 195 → **178**，56 文件）。新增
+  `common.runtime.ThreadOwner.running`（三条后台线程腿共用一份实现——三处各抄会被
+  逐字节重复审计记成新增债）、`UploaderProcess.degraded`、`PrefetchStore.handoff_path`、
+  `StreamCollector.plan_cap`、`_JobStore.ledger_offset`；其余为纯判据调用移出 assert 与
+  既有读数替换。store 守卫 `MIXIN_METHODS` 76 → 77。`test_rollout_volume` 保留 1 处
+  `_commit_journal()`（生产同名钩子 + 扫描面活性锚）。全文 → `docs/nn/engineering.md` §176。

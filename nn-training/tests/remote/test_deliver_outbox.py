@@ -400,7 +400,7 @@ def test_background_mode_writes_the_same_files_without_blocking(tmp_path: Path) 
         assert (out / FINAL_NAME).exists()
     finally:
         ob.close(5.0)
-    assert ob._thread is None, "收线必须把线程停掉（否则进程退不干净）"
+    assert ob.running is False, "收线必须把线程停掉（否则进程退不干净）"
     assert read_state(out)["rounds"]["1"]["rev"] == 1
 
 

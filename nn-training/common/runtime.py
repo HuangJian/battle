@@ -116,6 +116,23 @@ class RuntimeCancelledError(RuntimeError):
     """
 
 
+class ThreadOwner:
+    """持有一条后台线程的对象：`running` 是它的只读问句。
+
+    结果回传 / outbox 物化 / 心跳写三条腿都要回答同一个问题——「线程还活着吗」。
+    实现只留这一份：`tests/test_reuse_ledger.py` 的逐字节重复审计会把三份同文实现
+    记为新增债（实测：三处各抄一遍 ⇒ 重复组 14 → 15，门禁红）。
+    """
+
+    _thread: threading.Thread | None
+
+    @property
+    def running(self) -> bool:
+        """后台线程还活着吗（未启动 / 已收线 ⇒ False；诊断 / 用例用）。"""
+        t = self._thread
+        return t is not None and t.is_alive()
+
+
 class Runtime:
     """一个并发域的所有者：池、线程名、取消事件、上限报数都归它。
 

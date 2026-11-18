@@ -243,7 +243,7 @@ def test_boot_failure_degrades_to_thread_and_still_delivers() -> None:
     """子进程起不来（在飞的代码树里没有这个模块）⇒ **sticky 降级**，结果照样送达。"""
     delivered: list[str] = []
     up, logs = _proc(upload=_recorder(delivered), spawn=lambda _argv: _FakeChild(boot=False))
-    assert up._fallback is not None, "没握手成功就必须降级"
+    assert up.degraded is True, "没握手成功就必须降级"
     assert up.mode == "async" and up.stats()["mode"] == "async"
     up.submit(_task(JID1))
     assert up.close(timeout=5.0) is True

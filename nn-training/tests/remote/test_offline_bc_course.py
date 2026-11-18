@@ -192,7 +192,8 @@ def test_run_bc_once_passes_the_course_to_worker_loop(
 
     monkeypatch.setattr(worker_mod, "worker_loop", fake_loop)
     monkeypatch.setattr(ob, "CODE_DIR", str(tmp_path))
-    assert ob._run_bc_once({}, "http://hub", "t", lambda _m: None, course="bc1") == 1
+    rc = ob._run_bc_once({}, "http://hub", "t", lambda _m: None, course="bc1")
+    assert rc == 1
     filt = seen["job_filter"]
     assert filt({"course": "bc1"}) is True
     assert filt({"course": "rl1"}) is False

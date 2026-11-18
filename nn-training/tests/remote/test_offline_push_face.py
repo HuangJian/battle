@@ -524,4 +524,5 @@ def test_course_parser_matches_the_export_convention() -> None:
     import remote.offline_boot as boot
 
     for name in ("task-c5-gae.zip", "task-Y31_null.zip", "not-a-pack.zip"):
-        assert face._course_from_pack_name(name) == boot.course_from_pack_name(name)
+        from_face = face._course_from_pack_name(name)
+        assert from_face == boot.course_from_pack_name(name)
