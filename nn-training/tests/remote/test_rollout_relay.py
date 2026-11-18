@@ -543,66 +543,126 @@ def _stub_layers(
     *,
     tls: tuple[str, str],
     ctrl: tuple[str, str] | None = None,
+    net: tuple[str, str] | None = None,
 ) -> None:
     """把预检的三层全部打桩：只验判词分叉，不碰网络（真机行为由 DSW 现场日志背书）。
 
     只收 `(verdict, 人读)` 双元组（同一条结论对每个地址成立）—— 这一层要判的是
     「哪一类失败」，不是「哪个地址特殊」，多地址差异由真机日志背书。
 
-    `ctrl=None` = **对照主机解析不出地址**（连问都问不到）—— 这时不该出现 `tls_ctrl` 键，
-    判词也不许借对照分叉；用它同时钉住「对照缺失时退回保守判词」这条边界。
+    `None` = **该主机解析不出地址**（连问都问不到）—— 这时不该出现对应的 `tls_ctrl` /
+    `tls_net` 键，判词也不许借它分叉；用它同时钉住「对照缺失时退回保守判词」这条边界。
+    两条对照都**必须显式给**（没有默认值）：它们的结论正是判词要分开的东西，
+    默认成「通」会让用例在假设里偷偷少探一家。
     """
     monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
     monkeypatch.setattr(
         rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
     )
+    ips = {
+        rr.CTRL_HOST: ["104.16.230.132"],
+        rr.CTRL_HOST_NET: ["203.119.0.1"],
+    }
 
     def _ips(host: str, _port: int) -> list[str]:
-        if host == rr.CTRL_HOST:
-            return ["104.16.230.132"] if ctrl is not None else []
+        if host in ips:
+            return ips[host] if (ctrl if host == rr.CTRL_HOST else net) is not None else []
         return ["104.16.231.132"]
 
-    def _sweep(ips: list[str], _port: int, sni: str, _t: float) -> dict[str, tuple[str, str]]:
-        # 按 SNI 分叉：对照主机与 hub 拿到的结论必须能不同，否则「按域名掐」判不出来。
-        spec = ctrl if (sni == rr.CTRL_HOST and ctrl is not None) else tls
-        return {ip: spec for ip in ips}
+    def _sweep(ips_: list[str], _port: int, sni: str, _t: float) -> dict[str, tuple[str, str]]:
+        # 按 SNI 分叉：两条对照与 hub 拿到的结论必须能各不相同，否则分不出是哪一层被掐。
+        if sni == rr.CTRL_HOST and ctrl is not None:
+            spec = ctrl
+        elif sni == rr.CTRL_HOST_NET and net is not None:
+            spec = net
+        else:
+            spec = tls
+        return {ip: spec for ip in ips_}
 
     monkeypatch.setattr(rr, "_resolve_ips", _ips)
-    monkeypatch.setattr(rr, "_tcp_sweep", lambda ips, port, t: {ip: "ok" for ip in ips})
+    monkeypatch.setattr(rr, "_tcp_sweep", lambda ips_, port, t: {ip: "ok" for ip in ips_})
     monkeypatch.setattr(rr, "_tls_sweep", _sweep)
 
 
-def test_hint_names_tls_block_when_control_host_also_stalls(
+def test_hint_names_cf_block_when_cf_stalls_but_non_cf_handshakes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TCP 通 + 握手全无应答 + 对照主机也卡 ⇒ 掐的是「到 CF 边缘的 TLS」（换承载/走代理）。"""
-    _stub_layers(monkeypatch, tls=("timeout", "握手无应答"), ctrl=("timeout", "握手无应答"))
+    """两条对照分工：CF 另一个域名也卡、非 CF 站点握手成功 ⇒ **只有 CF 这一家被掐**。
+
+    判据是 DSW 2026-11-18 第三次现场：旧的单对照就是 `api.trycloudflare.com`，与 hub 同属一个
+    后缀 ⇒ 按 `trycloudflare.com` 这一段掐时对照必然一起卡，判词落到 `tls-blocked`
+    （「走代理/换机器」），把最便宜的「换个非 CF 入口」抹掉。`cf-blocked` 把这两档分开。
+    """
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=("timeout", "握手无应答"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
     ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
     assert ok is False
-    assert facts["hint"] == "tls-blocked", facts
-    # 两层读数都要进 `facts`：人读行只给现场看，机器判据不能靠子串。
+    assert facts["hint"] == "cf-blocked", facts
+    # 三层读数都要进 `facts`：人读行只给现场看，机器判据不能靠子串。
     assert facts["tls"] == {"104.16.231.132": "timeout"}, facts
     assert facts["tls_ctrl"] == {"104.16.230.132": "timeout"}, facts
+    assert facts["tls_net"] == {"203.119.0.1": "ok:TLSv1.3"}, facts
+
+
+def test_hint_names_tls_block_when_nothing_handshakes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连不在 CF 上的对照主机也握不上手 ⇒ 本机 TLS 出网整体被中间层掐（代理 / 换机器）。"""
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=("timeout", "握手无应答"),
+        net=("timeout", "握手无应答"),
+    )
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "tls-blocked", facts
+    assert facts["tls_net"] == {"203.119.0.1": "timeout"}, facts
 
 
 def test_hint_names_sni_block_when_control_host_handshakes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """对照主机（同边缘、不同域名）握手成功 ⇒ 按域名/SNI 掐：换隧道域名或换入口。"""
+    """CF 边缘的另一个域名握手成功 ⇒ 按域名/SNI 掐：最便宜的一档是换个域名（同一边缘）。"""
     _stub_layers(
         monkeypatch,
         tls=("timeout", "握手无应答"),
         ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
     )
     _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
     assert facts["hint"] == "sni-blocked", facts
+
+
+def test_hint_keeps_sni_block_when_cf_control_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CF 对照解析不出地址、而非 CF 对照通 ⇒ 只说得了「这个域被掐」（不许升格成「整家 CF」）。"""
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=None,
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "sni-blocked", facts
+    assert {"tls_ctrl"}.isdisjoint(facts), "问不到就别编读数"
+    assert facts["tls_net"] == {"203.119.0.1": "ok:TLSv1.3"}, facts
 
 
 def test_hint_points_at_hub_when_tls_handshake_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """握手成功、只有 HTTPS 无应答 ⇒ 别再查节点出网，去 hub 那侧看进程与隧道。"""
-    _stub_layers(monkeypatch, tls=("ok:TLSv1.3", "TLSv1.3（150ms）"))
+    _stub_layers(
+        monkeypatch,
+        tls=("ok:TLSv1.3", "TLSv1.3（150ms）"),
+        ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
     _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
     assert facts["hint"] == "app-stall", facts
     assert facts["tls"]["104.16.231.132"] == "ok:TLSv1.3"

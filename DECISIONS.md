@@ -6182,3 +6182,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `test_worker_replay_prepass.py::test_logs_runtime_and_per_shard_elapsed`；文本断言口径 A/B 不抬格。
 - **全文** → `docs/nn/remote-transport.md` §160；代码 → `remote/{rollout_node,notebook_runtime,notebook_boot,replay_corpus}.py` ·
   `ipynb/battle.{tailscale,cloudflared}.ipynb`。
+
+## §2026-11-18-goalnn-relay-cf-blocked-verdict
+
+- **现场**：DSW relay 预检 `TCP` 全 ok、`TLS` 全 timeout、唯一对照 `api.trycloudflare.com` 也 timeout ⇒
+  判词 `tls-blocked`（「走代理 / 换非 CF 入口 / 换机器」）。**这一步是误判**：对照与 hub 同属
+  `trycloudflare.com` 后缀，按这个后缀掐时对照必然一起卡 ⇒ 最便宜的修法（换个域名，同一边缘）被抹掉。
+- **裁定**：预检带**两条用途不同的对照**（同预算内并行）——`CTRL_HOST = cloudflare.com`（同边缘、不同注册域）
+  与 `CTRL_HOST_NET = registry.npmmirror.com`（非 CF）。hub 卡 + 前者通 ⇒ `sni-blocked`（换域名最便宜）；
+  前者也卡 + 后者通 ⇒ 新判词 **`cf-blocked`**（只有 CF 被掐 ⇒ 换非 CF 入口 / 代理，**换机器无用**）；
+  两个都卡 ⇒ `tls-blocked`（本机 TLS 出网整体被掐）。对照问不到（DNS 空）时如实降级，不升格成「整家 CF」。
+- **被否决**：保留单对照并对 `tls-blocked` 的措辞加一句「也可能是按域名掐」（读者要在两种修法间自己猜，
+  等于把 §159.3 刚消灭的猜的那一步又请回来）· 把 `github.com` 当非 CF 对照（DSW 上它常要走 gh-proxy 镜像，
+  拿它当「本机出网正常」的证据会把 `tls-blocked` 误报成 `cf-blocked`）。
+- **护栏**：`tests/remote/test_rollout_relay.py` 21 → 25 例，判据只钉 `facts["hint"]` / `tls_ctrl` / `tls_net`，
+  文本断言仍 1502（+0）。
+- **全文** → `docs/nn/remote-transport.md` §161；代码 → `remote/rollout_relay.py` · notebook 排查表 → `ipynb/rollout.ipynb`。

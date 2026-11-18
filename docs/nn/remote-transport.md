@@ -6,6 +6,44 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §161 relay 预检加第四条判词 `cf-blocked`：两条对照才分得清「按域名掐 / 只有 CF 被掐 / 整机被掐」（2026-11-18）
+
+**现场**（DSW 第三次，20:16–20:21）：`TCP` 两个 v4 全 `ok`、`TLS` 两个地址全 `timeout`，而唯一的对照
+`api.trycloudflare.com` **也** `timeout` ⇒ 判词落到 `tls-blocked`：「到 CF 边缘的 TLS 被中间层丢弃：
+用 `CFG.net_proxy` / 换非 CF 入口 / 换机器」。
+
+**但这一步推理本身就是错的。** `api.trycloudflare.com` 与 hub 域名**同属 `trycloudflare.com` 后缀**；
+封锁若不是「整家 CF」而是「按 `trycloudflare.com` 这一段掐」，对照必然一起卡 —— 于是判词把
+**最便宜的那档（换个域名：同一边缘，hub 一个字节都不用动）**从选项里抹掉，直接把人推到最贵的一档。
+§159.3 的「边界」已经预告过这件事（「对照主机只覆盖 CF 这一条路径 … 否则 `sni-blocked` 会误报」），
+这次现场就是它兑现的样子。
+
+**修法 = 两条用途不同的对照**，仍在**同一个 `TLS_PROBE_SEC` 预算内并行**（多问一家不加预算）：
+
+| 对照 | 它回答的问题 | 通了意味着 |
+|---|---|---|
+| `CTRL_HOST = cloudflare.com` | 同一边缘、**不同注册域**的握手通不通 | 封锁按域名/SNI ⇒ **换个域名最便宜** |
+| `CTRL_HOST_NET = registry.npmmirror.com` | **完全不在 CF 上**的站点通不通 | 本机 TLS 出网是好的 ⇒ **只有 CF 这家的边缘被掐** |
+
+| hub 握手 | `cloudflare.com` | `registry.npmmirror.com` | `kind` | 修法 |
+|---|---|---|---|---|
+| 无应答 | ok | ok | `sni-blocked` | 换域名（自有域名 + 命名隧道，hub 不动） |
+| 无应答 | 卡 | ok | `cf-blocked` | 非 CF 入口（自有域名反代 / 内网直连 / tailnet）或 `CFG.net_proxy` |
+| 无应答 | 卡 | 卡 | `tls-blocked` | 代理 / 换机器 |
+| 无应答 | 问不到（DNS 空） | ok | `sni-blocked` | 只说得了「这个域被掐」，不升格成「整家 CF」 |
+
+人读行随之变成
+`… ｜ TLS=104.16.231.132 timeout（握手无应答）；对照 cloudflare.com=timeout（1 个地址一致）,registry.npmmirror.com=ok:TLSv1.3（1 个地址一致） ⇒ …`
+
+**单测**：`test_rollout_relay.py` 21 → **25** 例（`cf-blocked` 与 `tls-blocked` 分开 / 对照①问不到时不升格 /
+两条对照的读数分别进 `facts["tls_ctrl"]` / `facts["tls_net"]`）。判据仍只钉 `facts["hint"]` 这类结构化字段，
+**文本断言 +0**（护栏仍 1502）。
+
+**边界**：`registry.npmmirror.com` 取的是「中国大陆云机上确实可达」的代表，换机房就跟着换；
+`cloudflare.com` 必须与 hub **同一边缘**，否则 `sni-blocked` 又会误报（与 §159.3 同一条约束）。
+notebook 的排查表由「对照卡/通」两行拆成三行（`cloudflare.com` 通 / 它卡而非 CF 通 / 两个都卡），
+并顺手删掉表里重复的一次 `refused/unreachable` 行；curl 复核也换成 `hub / cf-other / non-cf` 三条。
+
 ## §160 两块在线盘开机供给 bun（replay → npy 的转换运行时）＋持久缓存（2026-11-18）
 
 **用户口径**：「`battle.cloudflared.ipynb` 与 `battle.tailscale.ipynb` 环境启动后，需要先安装 bun，

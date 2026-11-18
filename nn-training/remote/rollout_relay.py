@@ -60,9 +60,17 @@ TCP_PROBE_SEC = 2.0
 #: 裸 TLS 握手预算（秒）：CF 边缘握手正常 ~150ms，3s 还不回 ServerHello 就是被中间层丢了。
 #: 比 HTTPS 的 6s 短，因为这一层只需要「握手能不能起来」。
 TLS_PROBE_SEC = 3.0
-#: TLS 对照主机：**同一个 CF 边缘、同一套泛域名证书**，但不带「隧道域名」的随机前缀。
-#: hub 卡而它通 ⇒ 掐的是这个域名；它也卡 ⇒ 掐的是「本机到 CF 边缘的 TLS」——两者修法不同。
-CTRL_HOST = "api.trycloudflare.com"
+#: TLS 对照主机 ①：**同一个 CF 边缘、但不在 `trycloudflare.com` 这个域名下**。
+#:
+#: 2026-11-18 第三次真机暴露出旧取值的盲点：旧对照写成 `api.trycloudflare.com`，与 hub 域名**同属
+#: 一个后缀** ⇒ 封锁若是「按 `trycloudflare.com` 这一段掐」的，对照必然一起卡，判词就落到
+#: `tls-blocked`（「整家 CF 边缘被掐 ⇒ 走代理 / 换机器」），把**最便宜那档（换个域名、同一边缘）**
+#: 从选项里抹掉 —— 恰恰是把人往最贵的修法上推。`cloudflare.com` 与 hub 同边缘、不同注册域，
+#: 才问得出「按域名掐 还是 整家 CF 被掐」。
+CTRL_HOST = "cloudflare.com"
+#: TLS 对照主机 ②：**完全不在 CF 上**（阿里云 CDN；DSW 上装 bun 就走它）。
+#: 它通 ⇒ 本机 TLS 出网是好的，故障只在 CF 这一家；它也卡 ⇒ 本机 TLS 出网整体被中间层掐。
+CTRL_HOST_NET = "registry.npmmirror.com"
 #: 网关类状态码：**中间层（代理 / Cloudflare 边缘）到不了上游**，因此不算「路由通」。
 #: 502/504 来自代理或 CF；52x 是 CF 的 origin 不可达族；530 是 CF 隧道/DNS 解析失败。
 #: `503` 故意不在内：hub 自己的 503（磁盘熔断）说明链路是通的，那是业务拒绝。
@@ -248,12 +256,19 @@ def _fail_hint(
     tcp: dict[str, str],
     tls: dict[str, str] | None = None,
     ctrl: dict[str, str] | None = None,
+    net: dict[str, str] | None = None,
 ) -> tuple[str, str]:
-    """逐 IP 的 TCP（+ TLS、+ 对照）结论 → `(kind, 一句该改什么)`。
+    """逐 IP 的 TCP（+ TLS、+ 两条对照）结论 → `(kind, 一句该改什么)`。
 
     `kind` 是**判据**，措辞只是给人看的：用例钉 `kind`，改文案不会把用例弄红
     （否则红得没有意义）。`kind ∈ {dns,blackhole,unroutable,tls-blocked,sni-blocked,
-    tls-error,app-stall}`。
+    cf-blocked,tls-error,app-stall}`。
+
+    两条对照问的是**两个互不相同**的问题（2026-11-18 第三次 DSW 现场）：
+
+    · `ctrl` = CF 边缘的**别的域名** ⇒ 通 ⇒ 封锁按域名/SNI，换个域名（同一边缘）就够；
+    · `net`  = **完全不在 CF 上**的站点 ⇒ 通 ⇒ 本机 TLS 出网是好的，故障只在 CF 这一家
+      （`cf-blocked`：换非 CF 入口，**不必**换机器）；它也卡 ⇒ 本机 TLS 出网整体被掐。
     """
     if not tcp:
         return "dns", "DNS 没给出任何地址：hub_url 拼写或节点 DNS 不通"
@@ -283,14 +298,33 @@ def _fail_hint(
             "TCP 通但握手被回绝（证书/TLS 错误）⇒ 中间层在顶替对端（企业代理 MITM / 证书链不对）："
             "走代理并确认其根证书，或换成不经过该中间层的入口"
         )
-    if ctrl and any(v.startswith("ok:") for v in set(ctrl.values())):
+    ctrl_vals = list(ctrl.values()) if ctrl else []
+    net_vals = list(net.values()) if net else []
+    ctrl_ok = any(v.startswith("ok:") for v in ctrl_vals)
+    net_ok = any(v.startswith("ok:") for v in net_vals)
+    if ctrl_ok:
         return "sni-blocked", (
-            f"TCP 通、握手全无应答，而对照 {CTRL_HOST} 握手成功 ⇒ 按**域名/SNI** 掐："
-            "换一条隧道域名（重建 quick tunnel）或换入口；这不是「这台机器上不了网」"
+            f"TCP 通、握手全无应答，而对照 {CTRL_HOST}（同边缘、不同域名）握手成功 ⇒ 按**域名/SNI** 掐："
+            "最便宜的一档是**换个域名**（自有域名 + 命名隧道，同一边缘换个名字就够，hub 一个字节都不用动），"
+            "其次换入口；这不是「这台机器上不了网」"
+        )
+    if net_ok:
+        # 非 CF 站点握得起来 ⇒ 本机 TLS 出网是好的，被掐的只是 CF 这一家。
+        if ctrl:
+            return "cf-blocked", (
+                f"TCP 通、握手全无应答，对照 {CTRL_HOST}（CF 边缘另一个域名）也卡、而 {CTRL_HOST_NET}"
+                "（非 CF）握手成功"
+                " ⇒ **只有 CF 这一家被掐**（不是本机没网）：hub 换**非 CF 入口**（自有域名反代 / 内网直连 / "
+                "tailnet），或给节点配 CFG.net_proxy；换机器无用"
+            )
+        # 对照①问不出来（DNS 都没给地址）⇒ 只知道 hub 这个域名被掐。
+        return "sni-blocked", (
+            f"TCP 通、握手全无应答，而 {CTRL_HOST_NET}（非 CF）握手成功"
+            " ⇒ 本机 TLS 出网正常、被掐的是这个域：换域名或换入口；重试无用"
         )
     return "tls-blocked", (
-        "TCP 通、握手全无应答（连对照主机也一样）⇒ 到 CF 边缘的 TLS 被中间层丢弃："
-        "用 CFG.net_proxy 走出站代理 / 换非 CF 入口 / 换机器；重试无用"
+        "TCP 通、握手全无应答（连不在 CF 上的对照主机也一样）⇒ 本机 TLS 出网整体被中间层掐："
+        "配 CFG.net_proxy 走出站代理 / 换机器；重试无用"
     )
 
 
@@ -357,6 +391,7 @@ def probe_hub(
         # 互不相干。对照主机（同边缘、不同域名）一起探，用**同一个支付一次**的预算。
         tls: dict[str, str] = {}
         ctrl: dict[str, str] = {}
+        net: dict[str, str] = {}
         ok_ips = [ip for ip, verdict in tcp.items() if verdict == "ok"]
         # TLS 这一层只对 `https://` 有意义：`http://1.2.3.4:8787` 上的裸握手必然失败，
         # 那不是「被掐」，把它的失败写成 `tls-blocked` 只会把人送去换机器。
@@ -364,35 +399,51 @@ def probe_hub(
         if ok_ips and scheme == "https":
             ctl_out: dict[str, dict[str, str]] = {}
 
-            def _ctl_probe() -> None:
-                # 对照恒用 443：要问的是「本机到 CF 边缘的 TLS 通不通」，与 hub 的端口无关。
-                ctl_ips = _resolve_ips(CTRL_HOST, 443)
+            def _ctl_probe(ctl_host: str) -> None:
+                # 对照恒用 443：要问的是「本机到那边的 TLS 起不起得来」，与 hub 的端口无关。
+                ctl_ips = _resolve_ips(ctl_host, 443)
                 if ctl_ips:
-                    swept = _tls_sweep(ctl_ips, 443, CTRL_HOST, TLS_PROBE_SEC)
-                    ctl_out["v"] = {ip: v for ip, (v, _h) in swept.items()}
+                    swept = _tls_sweep(ctl_ips, 443, ctl_host, TLS_PROBE_SEC)
+                    ctl_out[ctl_host] = {ip: v for ip, (v, _h) in swept.items()}
 
-            ctl_thread = threading.Thread(target=_ctl_probe, daemon=True)
-            ctl_thread.start()  # 与下面那轮 hub TLS 并行：对照不该再加一份预算
+            # 两条对照与 hub 那轮 TLS **并行**：多问一家不该再加一份预算。
+            ctl_threads = [
+                threading.Thread(target=_ctl_probe, args=(h,), daemon=True)
+                for h in (CTRL_HOST, CTRL_HOST_NET)
+            ]
+            for t in ctl_threads:
+                t.start()
             tls_out = _tls_sweep(ok_ips, port, host, TLS_PROBE_SEC)
-            ctl_thread.join()
+            for t in ctl_threads:
+                t.join()
             tls = {ip: v for ip, (v, _h) in tls_out.items()}
-            ctrl = ctl_out.get("v", {})
+            ctrl = ctl_out.get(CTRL_HOST, {})
+            net = ctl_out.get(CTRL_HOST_NET, {})
             facts["tls"] = tls
             if ctrl:
                 facts["tls_ctrl"] = ctrl
+            if net:
+                facts["tls_net"] = net
             line += " ｜ TLS=" + ",".join(
                 f"{ip} {v}（{human}）" for ip, (v, human) in tls_out.items()
             )
-            if ctrl:
-                vals = list(ctrl.values())
+            tails: list[str] = []
+            for ctl_host, ctl_got in ((CTRL_HOST, ctrl), (CTRL_HOST_NET, net)):
+                if not ctl_got:
+                    continue
+                vals = list(ctl_got.values())
                 # 四个地址各不相同会把这行淹掉；一致时只说一次 + 地址数。
-                tail = (
-                    f"{vals[0]}（{len(vals)} 个地址一致）"
-                    if len(set(vals)) == 1
-                    else ",".join(vals)
+                tails.append(
+                    f"{ctl_host}="
+                    + (
+                        f"{vals[0]}（{len(vals)} 个地址一致）"
+                        if len(set(vals)) == 1
+                        else ",".join(vals)
+                    )
                 )
-                line += f"；对照 {CTRL_HOST}=" + tail
-        kind, hint = _fail_hint(tcp, tls, ctrl)
+            if tails:
+                line += "；对照 " + ",".join(tails)
+        kind, hint = _fail_hint(tcp, tls, ctrl, net)
         facts["hint"] = kind
         line += " ⇒ " + hint
         line += "；hub 未升级只会 404，不会超时"
