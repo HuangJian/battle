@@ -25,13 +25,28 @@
 
 ---
 
+## §191 长函数存量第十三刀：intent 探针 261 → 171（2026-11-18）
+
+`worker/train/intent_probe.py::main` **261 → 171 行**，长函数存量 **25 → 24**
+（`LONG_FUNCS_BASELINE` 删除 `worker/train/intent_probe.py` 条目；`WIDE_FUNCS_BASELINE`
+的 1 条保留——`quota_sample_priority` 仍宽参）。
+
+两刀纯搬移：
+- `_probe_parser()`：argv 定义表（描述 / 默认值 / help 逐字保留）。
+- `_build_report(...)`：评估报告（overall / 三桶 / 8x8 混淆 / 类级 recall），返回原 dict。
+
+helper 名用模块专属的 `_probe_parser` 而不是 `_build_parser`：后者在 `run_loop` /
+`smoke_loopback` 已有两份，第三份会触发「同名散落（≥3 模块）」账本（113 → 114 红）。
+
+---
+
 ## §190 长函数存量第十二刀：回环冒烟 249 → 177（2026-11-18）
 
 `hub/smoke_loopback.py::main` **249 → 177 行**，长函数存量 **26 → 25**
 （`LONG_FUNCS_BASELINE` 删除 `hub/smoke_loopback.py` 条目）。
 
 三刀纯搬移：
-- `_build_parser()`：argv 定义表（描述 / 默认值 / help 逐字保留）。
+- `_smoke_parser()`：argv 定义表（描述 / 默认值 / help 逐字保留）。
 - `_check_round_wire(rd, m, store, jid, result, work)`：轮级计量对账 + M2 blob 命中断言，
   返回 hub.sent 字节（断言文案逐字保留；`mark_job_completed` 的局部 import 随之上提到
   模块级，供末轮断言 helper 使用）。

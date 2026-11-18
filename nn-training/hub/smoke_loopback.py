@@ -130,7 +130,7 @@ def _write_synthetic_shard(
 # ------------------------------------------------------------------ 主流程
 
 
-def _build_parser():
+def _smoke_parser():
     """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser(description="remote PPO loopback smoke (M0d/M1)")
     ap.add_argument("--work", default="tmp/remote-smoke", help="冒烟工作目录（仓库内，gitignore）")
@@ -228,7 +228,7 @@ def _assert_smoke_final(
 
 
 def main() -> int:
-    args = _build_parser().parse_args()
+    args = _smoke_parser().parse_args()
 
     import numpy as np  # noqa: F401 — 确保 import 顺序稳定
 

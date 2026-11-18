@@ -142,7 +142,8 @@ def quota_sample_priority(
     ), picked
 
 
-def main() -> None:
+def _probe_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser()
     ap.add_argument(
         "--data",
@@ -188,7 +189,72 @@ def main() -> None:
     )
     ap.add_argument("--h", type=int, default=DEFAULT_H, help="主干宽度（探针可瘦身；M5 全尺寸 64）")
     ap.add_argument("--d", type=int, default=DEFAULT_D)
-    args = ap.parse_args()
+    return ap
+
+
+def _build_report(
+    *,
+    vi: np.ndarray,
+    pred: np.ndarray,
+    vb: np.ndarray,
+    args,
+    shards: list[str],
+    n_train: int,
+) -> dict:
+    """评估报告（overall / 三桶 / 8x8 混淆 / 类级 recall；自 `main` 原样搬出）。"""
+    report: dict = {
+        "gate": "any-bucket margin < 0.1 -> fail (prereg #16)",
+        "marginGate": MARGIN_GATE,
+        "shards": len(shards),
+        "trainFrames": n_train,
+        "valFrames": len(vi),
+        "epochs": args.epochs,
+        "inject": args.inject,
+        "quota": args.quota,
+        "overall": {"acc": float((pred == vi).mean())},
+        "buckets": {},
+        "confusion8x8": np.zeros((8, 8), dtype=int).tolist(),
+    }
+    cm = np.zeros((8, 8), dtype=int)
+    for t, p in zip(vi, pred, strict=True):
+        cm[t][p] += 1
+    report["confusion8x8"] = cm.tolist()
+
+    for bk in range(3):
+        m = vb == bk
+        if m.sum() == 0:
+            continue
+        y, yh = vi[m], pred[m]
+        counts = np.bincount(y, minlength=8)
+        majority = float(counts.max()) / len(y)
+        acc = float((y == yh).mean())
+        report["buckets"][BUCKET_NAMES[bk]] = {
+            "frames": int(m.sum()),
+            "acc": acc,
+            "majorityAcc": majority,
+            "margin": acc - majority,
+            "pass": bool(acc - majority >= MARGIN_GATE),
+            "majorityClass": INTENT_IDS[int(counts.argmax())],
+            "perClassTrue": counts.tolist(),
+        }
+
+    report["gatePass"] = all(b["pass"] for b in report["buckets"].values())
+
+    # M5 gate：类级 recall vs majority（§18 修订口径）——非多数类 recall 必须显著 >0。
+    perClassRecall = {}
+    perClassMajority = {}
+    total = len(vi)
+    for c in range(8):
+        n_c = int((vi == c).sum())
+        perClassRecall[INTENT_IDS[c]] = float((pred[vi == c] == c).sum() / n_c) if n_c else None
+        perClassMajority[INTENT_IDS[c]] = n_c / total
+    report["perClassRecall"] = perClassRecall
+    report["perClassShare"] = perClassMajority
+    return report
+
+
+def main() -> None:
+    args = _probe_parser().parse_args()
 
     torch.manual_seed(args.seed)
     rng = np.random.RandomState(args.seed)
@@ -348,54 +414,9 @@ def main() -> None:
             preds.append(logits.argmax(1).numpy())
     pred = np.concatenate(preds)
 
-    report: dict = {
-        "gate": "any-bucket margin < 0.1 -> fail (prereg #16)",
-        "marginGate": MARGIN_GATE,
-        "shards": len(shards),
-        "trainFrames": len(xi),
-        "valFrames": len(vi),
-        "epochs": args.epochs,
-        "inject": args.inject,
-        "quota": args.quota,
-        "overall": {"acc": float((pred == vi).mean())},
-        "buckets": {},
-        "confusion8x8": np.zeros((8, 8), dtype=int).tolist(),
-    }
-    cm = np.zeros((8, 8), dtype=int)
-    for t, p in zip(vi, pred, strict=True):
-        cm[t][p] += 1
-    report["confusion8x8"] = cm.tolist()
-
-    for bk in range(3):
-        m = vb == bk
-        if m.sum() == 0:
-            continue
-        y, yh = vi[m], pred[m]
-        counts = np.bincount(y, minlength=8)
-        majority = float(counts.max()) / len(y)
-        acc = float((y == yh).mean())
-        report["buckets"][BUCKET_NAMES[bk]] = {
-            "frames": int(m.sum()),
-            "acc": acc,
-            "majorityAcc": majority,
-            "margin": acc - majority,
-            "pass": bool(acc - majority >= MARGIN_GATE),
-            "majorityClass": INTENT_IDS[int(counts.argmax())],
-            "perClassTrue": counts.tolist(),
-        }
-
-    report["gatePass"] = all(b["pass"] for b in report["buckets"].values())
-
-    # M5 gate：类级 recall vs majority（§18 修订口径）——非多数类 recall 必须显著 >0。
-    perClassRecall = {}
-    perClassMajority = {}
-    total = len(vi)
-    for c in range(8):
-        n_c = int((vi == c).sum())
-        perClassRecall[INTENT_IDS[c]] = float((pred[vi == c] == c).sum() / n_c) if n_c else None
-        perClassMajority[INTENT_IDS[c]] = n_c / total
-    report["perClassRecall"] = perClassRecall
-    report["perClassShare"] = perClassMajority
+    report = _build_report(
+        vi=vi, pred=pred, vb=vb, args=args, shards=shards, n_train=len(xi)
+    )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
