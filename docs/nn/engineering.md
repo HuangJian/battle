@@ -25,6 +25,22 @@
 
 ---
 
+## §192 长函数存量第十四刀：BC 云端作业 263 → 184（2026-11-18）
+
+`remote/bc_job.py::_run_bc_job` **263 → 184 行**，长函数存量 **24 → 23**
+（`LONG_FUNCS_BASELINE` 删除 `remote/bc_job.py` 条目；`WIDE_FUNCS_BASELINE` 的 1 条保留）。
+
+四刀纯搬移：
+- `_check_corpus_lineage(manifest, shard_dirs)`：D14 语料血缘（fixed 源跳过，其余逐 shard 拒收）。
+- `_run_bc_echo(jid, manifest, job_dir, log)`：`--echo` 冒烟占位结果 + 落盘 + 日志。
+- `_load_bc_trainer(backend, torch_threads)`：延迟 import 训练器（torch/paddle 仍不在模块顶层）。
+- `_bc_train_namespace(...)`：`train/bc*.py` 的 argv 命名空间。
+
+结构守卫随之改锚：`test_bc_job_split` 的「延迟 import 在函数内」断言从 `_run_bc_job`
+改查 `_load_bc_trainer`（模块顶层零 torch/paddle 的口径不变）。
+
+---
+
 ## §191 长函数存量第十三刀：intent 探针 261 → 171（2026-11-18）
 
 `worker/train/intent_probe.py::main` **261 → 171 行**，长函数存量 **25 → 24**
