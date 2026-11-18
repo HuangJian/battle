@@ -25,6 +25,60 @@
 
 ---
 
+## §125 两处满载计时 flake 的**源头**：事件门 + 「让号重试」（2026-11-17）
+
+§124 的三连全量里有一红，另一处同源红在 2026-11-17 的其它批次。两处都不是被测代码出错，而是
+**判据把「契约被遵守」与「机器够快」混成一条断言**（`tests/test_no_sleep_as_sync.py` §第三条
+那四种形状的反面）。修的是判据本身，不是调宽数字。
+
+### ① `test_eval_builder_falls_back_when_a_step_exceeds_its_ceiling`
+
+原判据：`first < 1.5` 且 `second < 0.5`（1.5 = `0.3s × 5` 步，自己从 `DRAIN_CEILING_SEC` 推的，
+「≥5× 余量」）。满载实测 **2.46s** 假红。
+
+**先证伪「上界没生效」**：直接探 `platform_utils.call_bounded(…, 0.3)` —— 空载 `0.304s`，
+40 个满载进程下 `0.315–0.340s`。上界鲁得像石头 ⇒ 2.46s 是**测量区间**被调度/GC 拖长，
+不是落点段漏包上界。所以调宽阈值是错的（1.5→5 只是把同一个 bad judge 往后挪），要换判据。
+
+**换成的四条**（夹具从 `sleep(2.0)` 改成**永不返回**的 Event 桩 `release.wait(30.0)`）：
+
+| 原判据 | 新判据 | 为什么与负载无关 |
+|---|---|---|
+| `first < 1.5` | `assert not finished`（`finished == []`） | 被放弃的那一笔**没跑完**是事实：包了上界就永远不会 append |
+| `second < 0.5` | `len(bounded)` 不再增长（patch 一层计数） | 降档后「一次都不再进落点段」是次数，不是时长 |
+| 回退路径三条 | 不变（逐字回退档、不换根） | —— |
+| 一条 WARN | 不变 | —— |
+
+墙钟只留一条 `first < 5.0`（`# timing-ok: 上界兜底`）：真回归（裸调用）现在表现为**挂起**，
+pytest 的 60s 上限把它变成红 —— 不需要余量，也就不再假红。
+
+**红检**：把 `plan_handoff.call_bounded` 换成裸 `(True, fn())` ⇒ 新用例在 `assert not finished`
+上当场红（夹具 `release.wait` 让那一笔真跑完）。
+
+### ② `test_port_free_for_next_bind_after_teardown`
+
+`tests/subproc_util.free_port()` 的 docstring 自己写着是 TOCTOU（「只是此刻空闲，不是归你」）：
+探号 → `start_bootstrap_server` 真 `bind("0.0.0.0", port)` 之间，别的 forkdist worker 完全可能
+把这个号拿走 ⇒ `OSError: [Errno 98] Address already in use`，看起来像「teardown 没释放端口」。
+
+**两处抢号都要让开**（都是同一个有界重试，每轮换号，`_PORT_ATTEMPTS = 5`）：
+* **起号时**被抢：`_bootstrap_on_a_won_port()` 捕获 `OSError` 换号重来（新 socket 起服务这一步）；
+* **关掉后**被抢：`server_close()` 之后**同一瞬间**别人 bind 走它 —— 断言 `bind` 成功也重试。
+
+真回归（`close_bootstrap_server` 里丢了 `server_close()`）**每一轮都占不上** ⇒ 5 轮全败之后
+`AssertionError`，语义没松。红检：把「已被告占用」的号递给旧体 ⇒ `errno.EADDRINUSE`（复现成功）；
+新体在同一抢占下走第二轮并通过 —— 这条被钉成用例 `test_a_stolen_port_is_not_a_teardown_failure`
+（第一轮必被抢，断言探号调用 ≥2 次且整体仍通过）。
+
+### 判据沉淀
+
+上界断言的阈值**不得与被测上界同量级**（`0.3s×5` 的 1.5s vs 2.46s 实测）：那一档的余量挡不住
+调度毛刺。同量级时只有两条出路 —— 换事实判据（事件门 / 计数 / 状态），或把「机器够快」那半
+从断言里拿掉。`test_no_sleep_as_sync` 里 `契约上界` 因此只剩 e2e 一处（≥14× 余量）。
+
+**读数**：两文件 ×3 连跑（`--forkdist 16`、40 个满载进程、`loadavg ≈ 34`）44/44 全绿；
+单测 ×2 连跑 8/8；mypy / ruff 绿；`test_no_sleep_as_sync` / `test_python_loc_budget` 绿。
+
 ## §124 裸线程收编第四批：模块级扇出清零，G18 转零容忍（2026-11-17）
 
 第三批之后账上还剩 **27 处 / 21 文件**，全部在**模块级函数**里（§122 当初把它们留账的理由是
@@ -73,7 +127,7 @@
 **读数**：就地 `Thread(...)` **0 处**（`rt.thread(...)` 49 处）· 全量 **6194 收下 / 2 skipped** ·
 mypy 958 · ruff 全绿 · 全量 ×3（2 绿；1 次 `test_push_bootstrap_teardown::test_port_free_for_next_bind_
 after_teardown` 红在 `bind` 的 `Address already in use`——端口回收的满载计时 flake，单跑 6/6 绿，
-该文件本刀没动过）。
+该文件本刀没动过；源头与修法见 §125）。
 
 ## §123 裸线程收编第三批：十一个「自己就知道自己是谁」的类（2026-11-17）
 

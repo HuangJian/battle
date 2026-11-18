@@ -74,8 +74,10 @@ serve_pool 端到端 / `bulk_sched` 单通道 / `eval_local` 硬顶 / `push_prio
   3. **炸弹**：把 `time.sleep` / 同步物化那条路换成 `pytest.fail` —— 走了就红，没走就证明没走。
   4. **状态**：`is_alive()` / `inflight_it()` / `not finished` 这类**事实**，与机器快慢无关。
 
-留下来的 `契约上界` 只有三处，都实测有 ≥5× 余量（`test_rollout_scratch` 的两条按被测自己的
-`DRAIN_CEILING_SEC` 推导、e2e 那条桩每轮固定 0.07s 而阈值 1s）。新加的一律先试上面四种。
+留下来的 `契约上界` 只有一处（e2e 那条：桩每轮固定 0.07s 而阈值 1s，≥14× 余量）。
+`test_rollout_scratch` 的两条同一天也换了（2026-11-17 全量 flake：满载实测 2.46s，而阈值
+1.5s = 0.3s×5 正好在调度毛刺同一档）——现在一条是**事件门 + `not finished`**，另一条是
+**上界调用计数**（降档后一次都不再进），都不看墙钟。新加的一律先试上面四种。
 """
 
 from __future__ import annotations

@@ -23,6 +23,9 @@ import socket
 import sys
 import threading
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -42,6 +45,24 @@ def _running_bootstrap(port: int, tmp_path: Path):
     return srv
 
 
+#: `free_port()` 只保证「探号那一刻空闲」：从探号到真 bind 之间，并行跑的另一个 xdist
+#: worker 完全可能把这个号拿走（2026-11-17 全量 flake 的形态：`Address already in use`）。
+#: 被抢走 ≠ 被测行为 —— 那是调度巧合，不是 `close_bootstrap_server` 没释放端口。
+_PORT_ATTEMPTS = 5
+
+
+def _bootstrap_on_a_won_port(tmp_path: Path) -> tuple[int, Any]:
+    """起一个引导服务，且**端口已经在手里**（被抢走就换号重来，有界）。"""
+    last: OSError | None = None
+    for _ in range(_PORT_ATTEMPTS):
+        port = free_port()
+        try:
+            return port, _running_bootstrap(port, tmp_path)
+        except OSError as e:  # 探号→bind 的窗口里被抢：换号重试，不记在 teardown 账上
+            last = e
+    raise AssertionError(f"连试 {_PORT_ATTEMPTS} 次都没占到端口：{last}")
+
+
 def test_teardown_closes_listening_socket(tmp_path: Path) -> None:
     """`close_bootstrap_server` 必须真正关掉监听套接字（只 shutdown() 红）。
 
@@ -50,7 +71,7 @@ def test_teardown_closes_listening_socket(tmp_path: Path) -> None:
     变 -1）。所以判「已关闭」要看 `fileno()`。只调 `shutdown()` 时套接字仍开着
     （`fileno() >= 0`）⇒ 端口没释放 ⇒ 本断言红。
     """
-    srv = _running_bootstrap(free_port(), tmp_path)
+    _, srv = _bootstrap_on_a_won_port(tmp_path)
 
     close_bootstrap_server(srv)
 
@@ -63,17 +84,55 @@ def test_port_free_for_next_bind_after_teardown(tmp_path: Path) -> None:
 
     新 socket 刻意**不设** SO_REUSEADDR：Windows 上「双 SO_REUSEADDR」才允许抢占，
     不设即能在两个平台上都正确判出「端口还被占着」。
+
+    抢号的两处都要让开（2026-11-17 全量 flake）：探号→bind 之间可能被别的 xdist worker
+    抢走，`server_close()` 之后**同一瞬间**也可能被别人占回去 —— 两者都不是「teardown 没
+    释放端口」。真回归则每一轮都占不上（同一个 `server_close` 缺失）⇒ 照样红。
     """
-    port = free_port()
-    srv = _running_bootstrap(port, tmp_path)
+    last: OSError | None = None
+    for _ in range(_PORT_ATTEMPTS):
+        port, srv = _bootstrap_on_a_won_port(tmp_path)
+        close_bootstrap_server(srv)
+        again = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            again.bind(("0.0.0.0", port))  # 未释放则抛 OSError: address already in use
+            return
+        except OSError as e:
+            last = e
+        finally:
+            again.close()
+    raise AssertionError(f"关掉引导服务后端口仍 bind 不上（{_PORT_ATTEMPTS} 轮，每轮换号）：{last}")
 
-    close_bootstrap_server(srv)
 
-    again = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def test_a_stolen_port_is_not_a_teardown_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并行 worker 在窗口里抢走端口 ⇒ 换号重试，而不是记一笔假红。
+
+    判据 = 行为：第一轮故意递一个**已被告占用**的号（模拟被抢），断言这一轮让开（探号
+    调用 ≥2 次）且整个用例仍然通过。真回归（`server_close()` 缺失）每轮都占不上 ⇒ 红。
+    """
+    hog = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    hog.bind(("127.0.0.1", 0))
+    hog.listen(1)
+    stolen = int(hog.getsockname()[1])
+    real = free_port
+    seen: list[int] = []
+
+    def maybe_stolen(host: str = "127.0.0.1") -> int:
+        if not seen:
+            seen.append(stolen)
+            return stolen
+        port = real(host)
+        seen.append(port)
+        return port
+
+    monkeypatch.setattr(sys.modules[__name__], "free_port", maybe_stolen)
     try:
-        again.bind(("0.0.0.0", port))  # 未释放则抛 OSError: address already in use
+        test_port_free_for_next_bind_after_teardown(tmp_path)
     finally:
-        again.close()
+        hog.close()
+    assert len(seen) >= 2, "被抢走的那一轮必须让开（换号重试），不是硬红"
 
 
 def test_call_site_uses_teardown_helper() -> None:
