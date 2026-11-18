@@ -67,6 +67,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import threading
 import time
 import urllib.parse
 from collections.abc import Iterator
@@ -116,10 +117,10 @@ from hub.offline import OfflineRoutes
 # 类属性 `hub: _HubQueue` 要能模块级解析（`from __future__ import annotations` 只推迟求值，
 # mypy 仍要那个名字在）⇒ 组合类随本模块一起 import。`hub.queue` 是 L4，本模块据它算 L5。
 from hub.queue import _HubQueue
+from hub.relay import CHANNEL_STALE_SEC, PING_SERVE_MAX_SEC, PING_TTL_SEC, RelayTimeoutError
 from hub.relay import POLL_WAIT_DEFAULT as RELAY_POLL_WAIT
 from hub.relay import POLL_WAIT_MAX as RELAY_POLL_WAIT_MAX
 from hub.relay import RELAY as NODE_RELAY
-from hub.relay import RelayTimeoutError
 from hub.relay import content_type_of as _relay_ctype
 from hub.result import ResultRoutes
 from hub.schedule import ScheduleRoutes
@@ -164,6 +165,12 @@ SEND_LOG_MIN_BYTES = 256 * 1024
 #: timeout 更短时必然出现这一幕。记成 ERROR 有两个害处：真错误被淹、复盘时分不清「链路抖动」
 #: 与「hub 崩了」。
 CLIENT_GONE_LOG_EVERY = 10
+
+#: relay 模式下**后台刷新** `/v1/ping` 载荷的等待上限（秒）。
+#:
+#: 它不受调用方预算（3s）约束：这条线程的存在意义只是「让下一次请求命中缓存」，给足一个
+#: 长轮询周期才可能成功；而它失败也不影响任何调用方。
+RELAY_PING_REFRESH_SEC = 25.0
 
 
 def _is_ip_literal(s: str) -> bool:
@@ -925,6 +932,10 @@ class HubHandler(
         if via != "peer" or not _is_loopback(peer):
             self._json({"error": "relay 调用面只接受本机回环（trainer 与 hub 同机）"}, 403)
             return
+        # 探活短路：`/v1/ping` 拿「通道心跳 + 上次载荷」答，不等往返（见 `_serve_relay_ping`）。
+        # 位置有讲究：必须在回环闸之后（否则公网能拿它当探测器）、在 `call` 之前（否则又等一轮）。
+        if method == "GET" and tail == "v1/ping" and self._serve_relay_ping(node):
+            return
         raw = b""
         if method != "GET":
             raw = self._read_raw_body()
@@ -939,9 +950,67 @@ class HubHandler(
         except RelayTimeoutError as e:
             self._json({"error": f"relay timeout: {e}"}, 504)
             return
+        if tail == "v1/ping" and status == 200:
+            # 回落路径也得**把载荷存下来**：否则缓存永远空 ⇒ 每次都走真调用，短路白写。
+            self._cache_relay_ping(node, body)
         self._send_headers(len(body), status=status or 502, ctype=_relay_ctype(rhdrs))
         if body:
             self.wfile.write(body)
+
+    @staticmethod
+    def _cache_relay_ping(node: str, raw: bytes) -> bool:
+        """把一次（真调用或后台刷新拿到的）`/v1/ping` 载荷记进缓存；`False` = 这体不能用。"""
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else None
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        NODE_RELAY.note_ping(node, payload)
+        return True
+
+    def _serve_relay_ping(self, node: str) -> bool:
+        """`/v1/ping` 用**通道心跳 + 上次载荷**回答；`False` = 这次答不了，照旧走真调用。
+
+        治什么（2026-11-18 DSW 稳定性）：hub 每轮派发都要 ping（调用方预算 3s），而 relay
+        一次调用得等节点下一次长轮询（≤20s）⇒ 约一半探活**假失败**（节点被当成「这轮够不着」），
+        同时那个 handler 线程空占到 15s 才放手。今夜 hub 日志：`/relay/dsw/v1/ping`
+        186 ok / 192 ×「对端先走」/ 67 ×504 —— 全是同一个结构性问题，不是隧道坏。
+
+        判据换成**本地事实**：节点最近一次 `_poll` 有多久（= 通道活着）+ 上一次真 ping 的载荷。
+        过期载荷照用、**后台刷一次**（单飞行），于是稳态下 ping 零往返、零超时；
+        载荷比 `PING_SERVE_MAX_SEC` 还旧就老实走真调用（不拿化石台账骗派发器）。
+        """
+        age = NODE_RELAY.channel_age(node)
+        if age is not None and age > CHANNEL_STALE_SEC:
+            # 通道确实断了（节点不再轮询）⇒ **快速失败**，别让调用方等 15s 才拿到同样的结论
+            self._json({"error": f"relay 通道心跳过期（{age:.0f}s 未轮询）"}, 503)
+            return True
+        body, cache_age = NODE_RELAY.ping_snapshot(node)
+        if body is None or cache_age > PING_SERVE_MAX_SEC:
+            return False
+        body["relayAgeSec"] = round(cache_age, 1)
+        self._json(body, 200)
+        if cache_age > PING_TTL_SEC and NODE_RELAY.claim_ping_refresh(node):
+            threading.Thread(
+                target=self._refresh_relay_ping,
+                args=(node, dict(self.headers.items())),
+                daemon=True,
+            ).start()
+        return True
+
+    def _refresh_relay_ping(self, node: str, headers: dict[str, str]) -> None:
+        """后台把过期载荷刷一遍：**不阻塞任何调用方**，成败都由自己放回单飞行。"""
+        try:
+            status, _hdrs, raw = NODE_RELAY.call(
+                node, "GET", "/v1/ping", headers, b"", timeout=RELAY_PING_REFRESH_SEC
+            )
+            if status == 200:
+                self._cache_relay_ping(node, raw)
+        except Exception:  # 后台线程里的任何异常都与调用方无关（这条链路的语义是 best-effort）
+            pass
+        finally:
+            NODE_RELAY.release_ping_refresh(node)
 
     def _query_float(self, key: str, default: float) -> float:
         """查询参数取浮点；缺失/非法 ⇒ 缺省（`_poll` 的 wait 是唯一读者）。"""

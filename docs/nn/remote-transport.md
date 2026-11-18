@@ -510,6 +510,110 @@ except ConnectionError as e:                       # 10053 / 10054 / EPIPE 一�
 要么把调用方预算抬到 ≥ hub 的 `_RELAY_TIMEOUTS`（`/v1/result` = 45s），要么就别当故障查。
 见到 `ERROR /relay/…` 才是真问题。
 
+### §159.6 同一现场 23:20：「能连上但不稳」的根因是**探活结构性地在等一次往返**（心跳 + 载荷缓存）
+
+端口回退 + `对端先走` 降噪之后，节点在 DSW 上**连续工作**了，但用户读数仍是「稳定性不佳」，
+并给了一个决定性的反证 —— 直连（`--noproxy '*'`）连发三次同一个请求：
+
+```
+401 1.260564 / 401 3.523289 / curl: (28) Operation timed out after 6001 ms with 0 out of 25 bytes
+```
+
+`401` 说明链路与 hub 鉴权都在回话（不是踩代理、不是被中间层掐），**但延迟从 1.3s 漂到 6s 超时**。
+⇒ 「改成直连就更稳」这条假设当场作废：抖动是 `quick tunnel` + 单连接排队久的固有方差，
+不在客户端选路。于是这一轮全部精力放到 hub 侧：**把等往返的次数降到零**。
+
+#### 读数（hub 日志 22:40–23:20，非猜测）
+
+| 面 | 读数 | 判读 |
+|---|---|---|
+| 「未处理错误」1273 行 | **全是 10053/10054**：`/admin/offline` 883 · `/offline/artifact` 197 · `/relay/dsw/v1/ping` **192** · 其余 ~40 | 没有一条是 hub 真崩（§159.5 已把它们从 ERROR 分离） |
+| `/relay/dsw/v1/ping` | **186 ok / 192 ×「对端先走」/ 67 × 504** | 探活**一半以上**非 200 |
+| `/relay/dsw/v1/task` | 314 ok / 62 ×202（空拍，正常）/ 63 ×504 | 派工也有一档在等 |
+| `/relay/dsw/v1/weights` | 16 ok / 2 ×204 / 2 ×504 | 同族 |
+| 节点侧自报 | `polls=499 served=438 errors=83`（**16.6% 轮询失败**）、`route=inherit`、预检 `inherit=ok（11010ms）｜direct=TimeoutError` | 出网只有经隧道一条路 |
+| 经隧道请求量 | 6968 条，其中 `_poll` **1903**；峰值单分钟 ~85 条、其中 relay 66 | 隧道是稀缺资源，不能靠「祈祷快一点」 |
+| 530 突发（23:07:48–23:08:16，失败 40→70） | 与 hub 侧 `task 504` 扎堆（23:07:58–23:08:00 共 19 个）**时间吻合** | 轮询一断 ⇒ hub 侧排队撞 45s |
+
+**两条独立故障**，必须分开修（混成一条就永远修不完）：
+
+1. **`/v1/ping` 在 relay 下结构性不可行**：hub 探活的调用方预算是
+   `common.distribution.STATUS_TIMEOUT_SEC = 3s`，而 relay 里一次 `call` 要等节点**下一次长轮询**
+   （`POLL_WAIT_DEFAULT = 20s`）才有人取走 ⇒ 两层预算差一个量级，探活约一半时间**注定假失败**
+   （节点被记成「这轮够不着」），那个 handler 线程还要空占到 15s 才放手。
+   这不是隧道坏，**是设计把一次「本地事实查询」实现成了「一次分布式往返」**。
+2. **链路本身抖**（上面三次 curl）：这条只能靠「少用隧道」缓解，不能靠换路解决。
+
+#### 修法：探活改判**本地事实**，载荷按 TTL 顶答
+
+`hub/relay.py`：
+
+```python
+CHANNEL_STALE_SEC = 3 * POLL_WAIT_DEFAULT      # 60s：节点每一次 `_poll` 都刷新它
+PING_TTL_SEC = 30.0                            # 过这个年龄就后台刷一次（照用不误）
+PING_SERVE_MAX_SEC = 120.0                     # 顶到这份上就老实走真调用（不喂化石台账）
+```
+
+* `_Box` 加 `last_poll`（**通道心跳的唯一真相**：`poll()` 每轮刷新）、`ping` / `ping_at`
+  （最近一次**成功**的 `/v1/ping` 载荷）、`ping_busy`（后台刷新单飞行）；
+* 四个方法：`channel_age` / `ping_snapshot` / `note_ping` / `claim_ping_refresh` /
+  `release_ping_refresh`（`_Box.__slots__` 同步扩容）。
+
+`hub/http_face.py::_relay_route` 在**回环闸之后、`call` 之前**插一条短路：
+
+```python
+if method == "GET" and tail == "v1/ping" and self._serve_relay_ping(node):
+    return
+```
+
+`_serve_relay_ping` 的三段判据（顺序即优先级）：
+
+| 条件 | 动作 | 为什么 |
+|---|---|---|
+| `channel_age > CHANNEL_STALE_SEC` | **503** + `relay 通道心跳过期（Ns 未轮询）` | 节点不再轮询 = 通道真断了。**快速失败**，别让调用方等 15s 才拿到同一个结论 |
+| 有载荷且 `age ≤ PING_SERVE_MAX_SEC` | 200 + 载荷 + `relayAgeSec`；`age > PING_TTL_SEC` 时**顺带**起一个后台刷新 | 稳态下 ping **零往返**；过期载荷先答，下一拍就新 |
+| 无载荷 / 载荷比 `PING_SERVE_MAX_SEC` 还旧 | 返回 `False`，照旧走真调用 | 不拿化石台账去喂 `codeHash` 门 |
+
+配套两处细节（都踩过）：
+
+* **回落路径也必须把载荷存下来**（`_relay_route` 里 `tail == "v1/ping" and status == 200` ⇒
+  `_cache_relay_ping`）：否则缓存永远空 ⇒ 每次都走真调用，短路白写。
+* **单飞行标记的放回是认领者的义务**（`_refresh_relay_ping` 用 `finally` 放）：
+  让 `note_ping` 顺手放回会让两条路互相打开对方的重入权 ⇒ 同一节点两个刷新线程抢同一条更差的链路。
+
+#### 数值为什么是这个数（两头夹，别随手改）
+
+* `PING_TTL_SEC` **下界** ≥ 刷新本身耗时（后台刷新走一次 relay 往返，得等 ≤20s 的长轮询）；
+  比它短就变成「刚刷完立刻又该刷」= 每拍一次调用。
+* `PING_TTL_SEC` **上界** = 这份载荷的「事实」能滞后多久。它**不是**普通健康快照：
+  `codeHash`（派发门，a98 事故就是两个代码版本混跑）与 `bootId`（单实例门）都在体里
+  ⇒ **30s 的滞后是可接受的代价，120s 不是**。
+* `PING_SERVE_MAX_SEC = 120s` 只覆盖「隧道黑洞」那一档（今夜实测 30s+、curl 撞 6s 超时）；
+  再久宁可诚实报「这轮够不着」。
+* ⚠ **已知代价（写在这儿免得下一个人当 bug）**：relay 模式下的 `codeHash` / `bootId` 判据最多滞后
+  `PING_SERVE_MAX_SEC`。若出现「节点刚重启、本轮却被判 bootId 不一致」，先看
+  `worker/node_identity.py` 的钉是否钉在了一条旧载荷上 —— `relayAgeSec` 就是给这条排查留的读数。
+
+#### 单测 `tests/hub/test_relay_ping_cache.py`（6 例，真起 `make_server`）
+
+1. 心跳新鲜 + 有载荷 ⇒ 200，且 `NODE_RELAY.call` 被换成「一调就炸」的桩 —— **证明零往返**；
+2. 心跳过期 ⇒ 503 **且不调 `call`**，墙钟 < 3s（`timing-ok: 上界兜底`）；
+3. 载荷过期 ⇒ **先答旧值**、后台刷一次；刷新挂在链路上时再来 3 条请求只顶答（`len(seen) == 1`），
+   落地后载荷变新值；刷新用的 `timeout` 断言 > 20s（它不挡任何人，给足一个长轮询周期）；
+4. 无载荷 ⇒ 走真调用，**并把这次载荷存下**（第二条起零往返、多出 `relayAgeSec`）；
+5. 载荷比 `PING_SERVE_MAX_SEC` 还旧 ⇒ 不用化石（走真调用）；
+6. 单飞行开关：第二次 `claim` 为 `False`、`note_ping` **不**代放、`release` 才放回。
+
+#### 怎么读
+
+* 见到 `503 {"error": "relay 通道心跳过期（Ns 未轮询）"}` ⇒ **节点不在轮询**（进程死了 / 出网断了），
+  而不是「ping 端点坏了」；`Ns` 就是最后一条长轮询距今。
+* 见到 200 且体里 `relayAgeSec` 很大 ⇒ 这条是缓存顶答的（隧道可能正在抖），不是节点坏。
+* 探活**不再**是「这轮够不着」的主要来源；再出现 `/v1/ping` 504 只可能落在「载荷比 120s 还旧
+  且真调用又超时」那一档 —— 那说明链路已经断了至少两分钟。
+
+
+
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 
 **现场（ModelScope / 阿里云 8C32G，`rollout.ipynb`）**：连续多个会话死在同一个点。

@@ -6268,3 +6268,30 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **全文** → `docs/nn/remote-transport.md` §159.5；代码 → `hub/http_face.py`
   （`CLIENT_GONE_LOG_EVERY` / `HubHandler.note_client_gone`）。
 
+## §2026-11-18-goalnn-relay-ping-from-heartbeat（relay 模式的探活**不再等一次往返**：通道心跳 + 载荷缓存）
+
+- **现场**：端口回退 + `对端先走` 降噪后节点在 DSW 连续工作了，但用户读数仍「稳定性不佳」，
+  并给了决定性反证：直连（`--noproxy '*'`）连发三次同一请求 `401 1.26s / 401 3.52s / curl(28) 6.00s 0 字节`
+  ⇒ 链路通（401 = hub 鉴权在回话）但**延迟从 1.3s 漂到超时**，「改走直连就更稳」当场作废。
+  hub 日志 22:40–23:20 定量：`/relay/dsw/v1/ping` **186 ok / 192 ×「对端先走」/ 67 ×504**；
+  节点自报 `polls=499 served=438 errors=83`（16.6% 轮询失败）；530 突发与 hub 侧 `task 504` 扎堆时间吻合。
+- **裁定**：病灶是**设计**把「一次本地事实查询」实现成了「一次分布式往返」—— 调用方预算
+  `STATUS_TIMEOUT_SEC=3s`，而 relay 一次 `call` 要等节点下一次长轮询（`POLL_WAIT_DEFAULT=20s`）⇒
+  约一半探活**注定假失败**，handler 线程还空占 15s。判据换成两个本地事实：
+  ① `channel_age`（节点每次 `_poll` 刷新的**通道心跳**，> `CHANNEL_STALE_SEC=60s` ⇒ **503 快速失败**）
+  ② 上一次成功 `/v1/ping` 的**载荷缓存**（`PING_TTL_SEC=30s` 过期即后台刷一次、单飞行；
+  `PING_SERVE_MAX_SEC=120s` 之外老实走真调用，不拿化石台账喂 `codeHash`/`bootId` 门）。
+- **为什么 TTL 是 30s 不是 600s**：载荷里带 `codeHash`（派发门，a98 = 两版本混跑）与 `bootId`
+  （单实例门），滞后必须短；下界又被「刷新本身要等一次长轮询」夹住 ⇒ 30s 是两头夹出来的，
+  120s 只是**隧道黑洞**那一档的兜底。已知代价（relay 模式下这两个门最多滞后 120s）写进文档。
+- **被否决**：① 让节点把轮询间隔缩到 3s（隧道请求 ×7，`_poll` 今夜已 1903 条/3h，稀缺资源不能这么烧）；
+  ② 把 hub 侧探活预算抬到 20s（注册会被拖成 20s+，且调用方还是超时）；③ 只靠直连/换路（用户读数已否）。
+- **易踩**：回落路径**也得把载荷存下来**（否则缓存永远空，短路白写）；单飞行标记只由认领者
+  `finally` 放回（`note_ping` 顺手放会让两条路互相打开重入权）。
+- **护栏**：`tests/hub/test_relay_ping_cache.py` **6 例**（零往返 / 503 快速失败 / 先答后刷 + 单飞行 /
+  回落即缓存 / 化石不用 / 开关语义），文本断言口径不抬格（`"relayAgeSec" in payload` 改成
+  `set(payload) >= {...}`，护栏仍 1502）。
+- **全文** → `docs/nn/remote-transport.md` §159.6；代码 → `hub/relay.py`
+  （`CHANNEL_STALE_SEC` / `PING_TTL_SEC` / `PING_SERVE_MAX_SEC` / `channel_age` / `ping_snapshot`）·
+  `hub/http_face.py`（`_serve_relay_ping` / `_refresh_relay_ping` / `_cache_relay_ping`）。
+

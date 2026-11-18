@@ -156,6 +156,14 @@ def test_real_error_still_logs_error_and_500(
     srv = _boot(tmp_path)
 
     class _Boom:
+        # 探活短路会先问「通道心跳」与「上次载荷」：这里是**真调用**路径的反证用例，
+        # 两个都回「没有」，好让它照旧走到 `call`（否则 AttributeError 先炸，测的就不是它了）。
+        def channel_age(self, _node: str) -> None:
+            return None
+
+        def ping_snapshot(self, _node: str) -> tuple[None, float]:
+            return None, 0.0
+
         def call(self, *_args: object, **_kwargs: object) -> None:
             raise RuntimeError("boom-for-test")
 

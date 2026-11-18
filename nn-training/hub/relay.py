@@ -52,6 +52,25 @@ CALL_TTL_SEC = 180.0
 #: `_poll` 的缺省/上限挂起时长（秒）。长轮询的意义：请求到达时立刻唤醒，而不是等下一个节拍。
 POLL_WAIT_DEFAULT = 20.0
 POLL_WAIT_MAX = 60.0
+#: 「通道心跳」多旧就算断了（秒）：节点**每一次** `_poll` 都会刷新它。
+#:
+#: 为什么拿它当探活判据（2026-11-18 DSW 稳定性）：hub 每轮派发都要 `/v1/ping`（调用方预算
+#: 3s），而 relay 一次调用得等节点下一次长轮询（≤`POLL_WAIT_DEFAULT`）⇒ 约一半探活假失败、
+#: 且 handler 线程空占到 15s。今夜实测 `/relay/dsw/v1/ping` 186 ok / 192 客户端先走 /
+#: 67 超时。「节点最近一次轮询有多久」是本地事实，判它比等一次往返可靠一个量级。
+CHANNEL_STALE_SEC = 3 * POLL_WAIT_DEFAULT
+#: 缓存 ping 载荷的 TTL（秒）：过这个年龄就**后台刷一次**（照用不误，见 `PING_SERVE_MAX_SEC`）。
+#:
+#: 取值约束（两头夹）：**下界** ≥ 刷新本身的耗时 —— 后台刷新走一次 relay 往返，得等节点下一次
+#: 长轮询（≤`POLL_WAIT_DEFAULT`），TTL 比它短就会「刚刷完立刻又该刷」，等于每拍都发一次调用；
+#: **上界** = 这个载荷的「事实」能滞后多久。它不是普通健康快照：`codeHash`（派发门，a98 事故
+#: 就是两个代码版本混跑）与 `bootId`（单实例门）都在这份体里 ⇒ 30s 的滞后是能接受的代价，
+#: 120s 不是。稳态下真正被顶答的年龄 = TTL 上下（刷新一落地就重新计时）。
+PING_TTL_SEC = 30.0
+#: 过期载荷最多还能顶多久（秒）：一次隧道级黑洞（今夜实测 30s+，curl 三次 1.26/3.52/6.00s）
+#: 不该让每次探活都去等一次注定超时的往返；但超过这个岁数就老实走真调用 ——
+#: 宁可把「这轮够不着」诚实地报出来，也不拿化石台账去喂派发门。
+PING_SERVE_MAX_SEC = 120.0
 
 
 class RelayTimeoutError(Exception):
@@ -61,7 +80,18 @@ class RelayTimeoutError(Exception):
 class _Call:
     """一次待转发的请求 + 它等的那份回执。"""
 
-    __slots__ = ("at", "body", "event", "headers", "method", "path", "rbody", "rheaders", "rid", "status")
+    __slots__ = (
+        "at",
+        "body",
+        "event",
+        "headers",
+        "method",
+        "path",
+        "rbody",
+        "rheaders",
+        "rid",
+        "status",
+    )
 
     def __init__(
         self,
@@ -86,7 +116,20 @@ class _Call:
 class _Box:
     """一台节点的待办队列 + 在飞回执。"""
 
-    __slots__ = ("calls", "cond", "dropped", "late", "pending", "polls", "served", "timeouts")
+    __slots__ = (
+        "calls",
+        "cond",
+        "dropped",
+        "last_poll",
+        "late",
+        "pending",
+        "ping",
+        "ping_at",
+        "ping_busy",
+        "polls",
+        "served",
+        "timeouts",
+    )
 
     def __init__(self, lock: Any) -> None:
         self.pending: deque[_Call] = deque()
@@ -97,6 +140,13 @@ class _Box:
         self.dropped = 0
         self.timeouts = 0
         self.late = 0
+        #: 最近一次 `_poll` 的墙钟时刻（0 = 从没轮询过）—— 通道心跳的唯一真相。
+        self.last_poll = 0.0
+        #: 最近一次**成功**的 `/v1/ping` 载荷（供通道活着时直接顶答）。
+        self.ping: dict[str, Any] | None = None
+        self.ping_at = 0.0
+        #: 后台刷新单飞行标记（同一台节点同时只允许一个，见 `claim_ping_refresh`）。
+        self.ping_busy = False
 
 
 class NodeRelay:
@@ -129,6 +179,7 @@ class NodeRelay:
         with self._lock:
             box = self._box_locked(node)
             box.polls += 1
+            box.last_poll = time.time()  # 通道心跳：探活/超时判定都读它
         while True:
             with self._lock:
                 now = time.time()
@@ -210,6 +261,56 @@ class NodeRelay:
 
     # ---------------------------------------------------------------- 观测
 
+    def channel_age(self, node: str) -> float | None:
+        """节点上一次 `_poll` 距今多少秒（`None` = 从没轮询过）。
+
+        **它是「通道活着」的唯一判据**：节点侧任何一次长轮询都会刷新它，而长轮询是节点自己
+        发起的 —— 所以「心跳新鲜」= 节点进程在跑且出网正常，与「这一拍能不能拿到往返」
+        （受隧道抖动影响）是两件事。
+        """
+        with self._lock:
+            box = self._boxes.get(node)
+            if box is None or not box.last_poll:
+                return None
+            return max(0.0, time.time() - box.last_poll)
+
+    def ping_snapshot(self, node: str) -> tuple[dict[str, Any] | None, float]:
+        """最近一次**成功**的 `/v1/ping` 载荷 + 它的年龄（秒）；没有载荷 ⇒ `(None, 0.0)`。"""
+        with self._lock:
+            box = self._boxes.get(node)
+            if box is None or box.ping is None:
+                return None, 0.0
+            return dict(box.ping), max(0.0, time.time() - box.ping_at)
+
+    def note_ping(self, node: str, body: dict[str, Any]) -> None:
+        """记一条成功的 ping 载荷（真调用与后台刷新都走这里）。
+
+        **不动单飞行标记**：那个开关的所有权属于认领者（`claim_ping_refresh` 的返回者），
+        由它自己在 `release_ping_refresh` 放回 —— 两条路都去放会互相把对方的重入权打开。
+        """
+        with self._lock:
+            box = self._box_locked(node)
+            box.ping = dict(body)
+            box.ping_at = time.time()
+
+    def claim_ping_refresh(self, node: str) -> bool:
+        """单飞行：同一台节点同时只允许一个后台刷新（`True` = 你负责去刷）。
+
+        没有它的话，每一条过期请求都会各起一个线程 —— 隧道一抖就是几十个线程抢同一条
+        带宽更差的链路，正是要避免的「抖动放大」。
+        """
+        with self._lock:
+            box = self._box_locked(node)
+            if box.ping_busy:
+                return False
+            box.ping_busy = True
+            return True
+
+    def release_ping_refresh(self, node: str) -> None:
+        """刷新失败时放开单飞行（否则这台节点再也不会被刷新）。"""
+        with self._lock:
+            self._box_locked(node).ping_busy = False
+
     def stats(self) -> dict[str, dict[str, int]]:
         """每台节点的计数器（`/admin/nodes` 之外的排障读数；零副作用）。"""
         with self._lock:
@@ -247,7 +348,10 @@ RELAY = NodeRelay()
 
 __all__ = [
     "CALL_TTL_SEC",
+    "CHANNEL_STALE_SEC",
     "PENDING_MAX",
+    "PING_SERVE_MAX_SEC",
+    "PING_TTL_SEC",
     "POLL_WAIT_DEFAULT",
     "POLL_WAIT_MAX",
     "RELAY",
