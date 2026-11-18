@@ -1557,3 +1557,26 @@ def test_start_cloudflared_caches_after_download(
     )
     assert out is not None
     assert stored and stored[0][0] == cache and stored[0][1] == "cloudflared"
+
+
+def test_banner_blames_relay_not_cloudflared_when_channel_is_relay() -> None:
+    """relay 模式没有 cloudflared 进程 —— 空 URL 时不能再指「看 cloudflared 日志尾部」。
+
+    2026-11-18 DSW 现场：日志最后一段把真因指向了根本不存在的 cloudflared 日志，
+    而真正的死因（hub 地址不可达）一行没提。
+    """
+    lines = rn._banner_lines(
+        node_id="dsw",
+        url="",
+        auth="ak",
+        workers=8,
+        bun_version="1.4.4",
+        code_hash="",
+        hub_configured=True,
+        reg_state={"url": "", "authKey": ""},
+        channel=rn.LINK_RELAY,
+        hub_url="https://x.trycloudflare.com",
+    )
+    joined = "\n".join(lines)
+    assert "relay 预检" in joined and "cloudflared 日志" not in joined, joined
+    assert any("x.trycloudflare.com" in ln for ln in lines), lines

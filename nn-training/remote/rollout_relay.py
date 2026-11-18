@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from typing import Any
@@ -47,11 +49,161 @@ BODY_MAX = 32 * 1024 * 1024
 EXEC_TIMEOUT_SEC = 140.0
 #: 回执投递的预算（秒）：小请求，抖动重试留给下一轮。
 REPLY_TIMEOUT_SEC = 30.0
+#: 通道预检的单次预算（秒）：DNS + 每条路由一次 `_poll?wait=0`。
+#: 它的读者只有一行日志，所以 = `CLOUDFLARED_PROBE_TIMEOUT` 的两倍量级足够。
+PROBE_TIMEOUT_SEC = 6.0
+#: 同一条失败连续刷屏的上限：6 个线程同拍超时会打出 6 行**完全一样**的话，
+#: 而真因（host/reason）只需要看第一行。之后每 N 条汇总一次。
+ERR_LOG_EVERY = 10
 
 #: 不该透传给本地 agent 的逐跳头（`Host` 必须重算成本机地址；长度由 urllib 自己算）。
 _HOP_HEADERS = frozenset(
     {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "te", "trailer"}
 )
+
+
+class RelayUnreachable(urllib.error.URLError):
+    """每条路由都失败（`reason` = `继承代理=timeout；直连=ok` 这种逐路由结论）。
+
+    继承 `URLError`：上层 `except Exception` / `except URLError` 的语义不变
+    （`rollout_node` 与 `_worker` 都按基类收），只是**读得出是什么坏了**。
+    """
+
+
+def _err_text(e: BaseException) -> str:
+    """一条异常 → 一句话死因（host 由调用方补；这里只管「怎么坏的」）。
+
+    为什么值得写这么长：2026-11-18 DSW 现场 6 个线程各卡 35s，日志只有
+    `relay 轮询失败（URLError）`——`URLError` 同时意味着 DNS 失败、连接被拒、TLS 失败、
+    代理吊死与地址黑洞，等于没写。一句 `timeout` / `refused` / `getaddrinfo` 能把人
+    直接送到修法上（预检、代理、hub_url）。
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code}"
+    reason = getattr(e, "reason", None)
+    if reason is None:
+        return f"{type(e).__name__}: {e}".strip()
+    text = reason if isinstance(reason, str) else f"{type(reason).__name__}: {reason}".strip()
+    low = text.lower()
+    if "timed out" in low or isinstance(reason, (TimeoutError,)):
+        return "timeout（连接/读取全程无应答 —— 地址被黑洞、代理吊死或该端口不回话）"
+    if "refused" in low:
+        return "refused（对端端口没开 / 只绑了回环）"
+    if "getaddrinfo" in low or "name or service not known" in low:
+        return "DNS 解析失败（先查域名拼写与本机 resolver）"
+    if "certificate" in low or "ssl" in low:
+        return f"TLS 失败（{text[:80]}）"
+    return text[:120]
+
+
+def _route_open(route: str, req: Any, timeout: float):
+    """按路由发一条请求，**两条路都并行竞速多地址**：`inherit` 挂进程代理，`direct` 摘掉代理。
+
+    竞速不是优化而是修 bug：云机的隧道域名常解析出 2 个 IPv6 + 2 个 IPv4（2026-11-18 实测
+    `2606:4700::6810:e784(v6),…,104.16.230.132(v4)`），而 `socket.create_connection` 串行试
+    且 timeout 是**每地址**的 ⇒ 前面那几个地址黑洞时墙钟 = N×timeout
+    （`common/net_http.py` 头部 2026-11-11 实测 16.24s vs 0.21s；2026-11-18 DSW 现场就是
+    每条长轮询卡满 35s）。竞速把它压成一次预算，第一个成功的赢。
+    """
+    if route == "direct":
+        return net_http.racing_opener(no_proxy=True).open(req, timeout=timeout)
+    return net_http.racing_opener().open(req, timeout=timeout)
+
+
+def _host_port(url: str) -> tuple[str, int]:
+    """`hub_url` → `(host, port)`：**显式端口优先**，没有才按 scheme 取 80/443。
+
+    别用「有没有 `https://` 就判 443」：自建 hub 常写成 `http://1.2.3.4:8787`，
+    那样会把 `:8787` 吞掉、日志指着一个没人监听的 80 端口。
+    """
+    parts = urllib.parse.urlsplit(str(url or ""))
+    host = parts.hostname or net_http.host_of(url) or "(空)"
+    if parts.port:
+        return host, int(parts.port)
+    return host, 443 if (parts.scheme or "").lower() == "https" else 80
+
+
+def probe_hub(
+    hub_url: str, token: str, node_id: str, timeout: float = PROBE_TIMEOUT_SEC
+) -> tuple[bool, str, dict[str, Any]]:
+    """relay 预检：**一条**人读日志 + 一份结构化读数（`(ok, line, facts)`）。
+
+    真机事故（2026-11-18 DSW）就是这段缺失：hub 公网地址完全正确（本机 1.2s 401），
+    节点侧却每条长轮询卡满 35s 才 `URLError`，而日志既没打地址也没打 reason ——
+    人只能猜是 hub 未升级、令牌错还是出网断。有了这行，猜的那一步消失。
+
+    为什么还回 `facts`：判据要能被**结构化**消费（`dns` / `routes` 逐条结论），
+    否则用例只能对着日志措辞断言 —— 改一个词就红，而红得没有意义。
+    """
+    host, port = _host_port(hub_url)
+    dns = _dns_summary(host, port)
+    facts: dict[str, Any] = {"host": host, "port": port, "dns": dns, "routes": {}}
+    url = f"{str(hub_url).rstrip('/')}/relay/{node_id}/_poll?wait=0"
+    ok_route: list[str] = []
+    fails: list[str] = []
+    # 回环 / `NO_PROXY` 点名的目标只走直连：否则本机那台 LAN 代理会把一条「本来必然通」
+    # 的回环请求也吊到 timeout，日志里就多出一条吓人的 `inherit=timeout`（实测 6s/次）。
+    routes = ["direct"] if net_http.bypass_proxy(hub_url) else ["inherit", "direct"]
+    for route in routes:
+        req = urllib.request.Request(url, method="GET")
+        req.add_header("Authorization", f"Bearer {token}")
+        t0 = time.monotonic()
+        try:
+            with _route_open(route, req, timeout) as r:
+                r.read(4096)
+        except urllib.error.HTTPError as e:  # 401/404 也是**应答**：路由通了
+            ms = (time.monotonic() - t0) * 1000
+            facts["routes"][route] = f"http-{e.code}"
+            ok_route.append(f"{route}=HTTP {e.code}（{ms:.0f}ms）")
+            continue
+        except Exception as e:
+            facts["routes"][route] = "fail"
+            fails.append(f"{route}={_err_text(e)}")
+            continue
+        ms = (time.monotonic() - t0) * 1000
+        facts["routes"][route] = "ok"
+        ok_route.append(f"{route}=ok（{ms:.0f}ms）")
+    line = f"relay 预检 {host}:{port} → DNS={dns} ｜ " + " ｜ ".join(ok_route + fails)
+    if not ok_route:
+        line += (
+            " ⇒ 两条路由都不通：hub_url 拼写/DNS、节点出网策略或代理（CFG.net_proxy）"
+            "；hub 未升级只会 404，不会超时"
+        )
+    return bool(ok_route), line, facts
+
+
+def _dns_summary(host: str, port: int) -> str:
+    """DNS 读数的紧凑表示：`104.21.x.x(v4),2606:4700::1(v6)` / `fail`。
+
+    地址族要显式标出来：云机上「解析出 IPv6 但没有可用 IPv6 路由」是最常见的假死，
+    而这一点在 `URLError` 一句话里永远看不见。
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except OSError as e:
+        return f"fail({type(e).__name__})"
+    out: list[str] = []
+    for family, _t, _p, _c, sa in infos:
+        tag = "v4" if family == socket.AF_INET else ("v6" if family == socket.AF_INET6 else "?")
+        item = f"{sa[0]}({tag})"
+        if item not in out:
+            out.append(item)
+    return ",".join(out[:6]) or "empty"
+
+
+def _pick_route(facts: dict[str, Any]) -> str:
+    """预检读数 → 该钉哪条路由（`""` = 都不可用，别钉）。
+
+    优先 `inherit`：`HTTPS_PROXY` 被显式配好时，出网大概率要它；`direct` 只是它的兜底。
+    """
+    routes = facts.get("routes") if isinstance(facts, dict) else None
+    if not isinstance(routes, dict):
+        return ""
+    for route in ("inherit", "direct"):
+        verdict = str(routes.get(route) or "")
+        if verdict == "ok" or verdict.startswith("http-"):
+            return route
+    return ""
 
 
 def _b64(raw: bytes) -> str:
@@ -142,6 +294,12 @@ class RelayLink:
         # 「锁内不透明调用」（`tests/test_lock_reentrancy.py` 会红）——而这里恰好每拍都在锁内加一。
         self._counters: dict[str, int] = {"polls": 0, "served": 0, "errors": 0}
         self._started_at = 0.0
+        #: 上一次**成功**的路由（`inherit` = 走进程代理，`direct` = 摘掉代理）。
+        #: 只用它把成功过的路由排到前面：失败一次就换另一条，两条都不行再报。
+        self._route = ""
+        #: 最近一次失败的逐路由结论（`RelayChannel` 放弃时把它打出来）。
+        self._last_error = ""
+        self._err_seen = 0
 
     # ---------------------------------------------------------------- 生命周期
 
@@ -198,20 +356,75 @@ class RelayLink:
         uptime = int(time.time() - self._started_at) if self._started_at else 0
         return (
             f"relay polls={self.polls} served={self.served} errors={self.errors} "
-            f"workers={self._workers} 秒={uptime}"
+            f"route={self._route or '?'} workers={self._workers} 秒={uptime}"
         )
+
+    @property
+    def last_error(self) -> str:
+        """最近一次失败的逐路由结论（空 = 还没失败过）。"""
+        return self._last_error
+
+    @property
+    def hub_host(self) -> str:
+        """`host:port`（日志用；不带 scheme，免得把令牌/路径混进来）。"""
+        host, port = _host_port(self.hub_url)
+        return f"{host}:{port}"
 
     # ---------------------------------------------------------------- 轮询
 
+    def _route_order(self) -> list[str]:
+        """路由尝试顺序：回环/NO_PROXY 点名的目标**只能**直连；其余先试上次成功的。
+
+        「先代理再直连」不是保险丝而是**真机必需**：平台（PAI-DSW / 企业网关）常把
+        `HTTPS_PROXY` 预置好，而 cloudflared 这种 Go 二进制不走代理 ⇒ 「隧道能建、
+        python 请求全吊死」是完全可能的组合（2026-11-18 DSW 的头号嫌疑）。
+        """
+        if net_http.bypass_proxy(self.hub_url):
+            return ["direct"]
+        rest = ["inherit", "direct"]
+        if self._route in rest:
+            rest.remove(self._route)
+            return [self._route, *rest]
+        return rest
+
+    def _open(self, req: Any, timeout: float):
+        """按路由发请求：第一条成功的胜；全崩 ⇒ `RelayUnreachable`（带逐路由结论）。"""
+        fails: list[str] = []
+        for route in self._route_order():
+            try:
+                resp = _route_open(route, req, timeout)
+            except urllib.error.HTTPError:
+                # 4xx/5xx 是**应答**：路由通了（401 = 令牌、404 = hub 没升级），别换路由重试。
+                self._note_route(route)
+                raise
+            except Exception as e:
+                fails.append(f"{route}={_err_text(e)}")
+                continue
+            self._note_route(route)
+            return resp
+        self._last_error = "；".join(fails)
+        raise RelayUnreachable(self._last_error)
+
+    def _note_route(self, route: str) -> None:
+        if self._route != route:
+            self._route = route
+
+    def pin_route(self, route: str) -> None:
+        """钉住预检验过的那条路由：否则**第一拍**会先撞错的那条，白烧一整个长轮询预算
+        （代理吊死的机器上 = 35s > `PORT_WAIT_SEC`，首轮注册直接判死）。"""
+        if route in ("inherit", "direct"):
+            self._route = route
+
     def _worker(self) -> None:
         while not self._stop.is_set():
+            started = time.monotonic()
             try:
                 answer = self._poll()
             except Exception as e:
                 self._bump("errors")
                 if self._stop.is_set():
                     return
-                self.log(f"relay 轮询失败（{type(e).__name__}）——{BACKOFF_SEC:g}s 后重试")
+                self._log_failure(e, time.monotonic() - started)
                 self._stop.wait(BACKOFF_SEC)
                 continue
             self._bump("polls")
@@ -230,13 +443,28 @@ class RelayLink:
                 self._post_reply(str(req["rid"]), resp)
             except Exception as e:
                 self._bump("errors")
-                self.log(f"relay 回执投递失败（{type(e).__name__}）—— 调用方会看到超时")
+                self.log(
+                    f"relay 回执投递失败（{_err_text(e)}）—— 调用方会看到超时（hub={self.hub_host}）"
+                )
+
+    def _log_failure(self, e: BaseException, elapsed: float) -> None:
+        """首条打全（host + 死因 + 耗时），之后每 `ERR_LOG_EVERY` 条汇总一次。
+
+        6 个线程同拍超时会打出 6 行一模一样的话 —— 真因只看第一行，其余是噪声。
+        """
+        self._err_seen += 1
+        head = f"relay 轮询失败（hub={self.hub_host}，{elapsed:.1f}s）"
+        if self._err_seen == 1:
+            self.log(f"{head}：{_err_text(e)}；{BACKOFF_SEC:g}s 后重试")
+            return
+        if self._err_seen % ERR_LOG_EVERY == 0:
+            self.log(f"{head}：累计 {self._err_seen} 次，最近一次 {_err_text(e)}")
 
     def _poll(self) -> dict[str, Any] | None:
         url = f"{self.hub_url}/relay/{self.node_id}/_poll?wait={self.poll_wait:g}"
         req = urllib.request.Request(url, method="GET")
         req.add_header("Authorization", f"Bearer {self.token}")
-        with urllib.request.urlopen(req, timeout=self.poll_wait + 15.0) as r:
+        with self._open(req, self.poll_wait + 15.0) as r:
             data = json.loads(r.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
 
@@ -246,7 +474,7 @@ class RelayLink:
         req = urllib.request.Request(url, data=payload, method="POST")
         req.add_header("Authorization", f"Bearer {self.token}")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=REPLY_TIMEOUT_SEC) as r:
+        with self._open(req, REPLY_TIMEOUT_SEC) as r:
             r.read()
 
     def _bump(self, name: str) -> None:
@@ -288,16 +516,35 @@ class RelayChannel:
         self.link: RelayLink | None = None
 
     def open(self, reason: str) -> str:
-        """起通道并等端口；成功返回注册 URL，失败返回 `""`（已 stop、已打日志）。"""
+        """起通道并等端口；成功返回注册 URL，失败返回 `""`（已 stop、已打日志）。
+
+        起线程**之前**先跑一次 `probe_hub`：它用一条日志说清「DNS 给了什么地址 +
+        哪条路由通」，把「40s 静默后才说 hub 未应答」压成「6s 内点名死因」。
+        预检失败**不**短路：一次抖动不该让整台节点挂掉，通道照起（日志已经点名了）。
+        """
         self.log(f"relay 通道（{reason}）：节点出站长轮询 hub，不做入站、不建隧道")
         link = RelayLink(**self._args)
+        ok, line, facts = probe_hub(
+            link.hub_url, link.token, link.node_id, timeout=PROBE_TIMEOUT_SEC
+        )
+        self.log(line)
+        picked = _pick_route(facts) if ok else ""
+        if picked:
+            link.pin_route(picked)
+        if not ok:
+            self.log("★ relay 预检不通 —— 上面那行是逐路由结论；通道仍会重试，但先修它再谈注册")
         link.start()
         url = link.registration_url(link.wait_local_port(self._wait_sec))
         if not url:
             link.stop()
+            detail = link.last_error or "长轮询无任何应答"
             self.log(
-                f"relay 未就绪（{self._wait_sec:g}s 内 hub 未应答长轮询）—— 检查 hub 地址/令牌与出网；"
-                "hub 需已升级到带 /relay/ 的版本"
+                f"relay 未就绪（{self._wait_sec:g}s 内 hub 未应答长轮询，hub={link.hub_host}）"
+                f"：{detail}"
+            )
+            self.log(
+                "  → hub 未升级只会 404（预检那行会写 HTTP 404）；401 = 令牌不一致；"
+                "timeout/DNS = 地址或出网/代理问题（relay 不需要入站，也不需要 cloudflared）"
             )
             self.link = None
             return ""
@@ -336,6 +583,9 @@ __all__ = [
     "POLL_WAIT_SEC",
     "POLL_WORKERS",
     "PORT_WAIT_SEC",
+    "PROBE_TIMEOUT_SEC",
     "RelayChannel",
     "RelayLink",
+    "RelayUnreachable",
+    "probe_hub",
 ]

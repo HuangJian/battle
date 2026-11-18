@@ -6,6 +6,83 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §159 relay 连不上 hub 时「日志不能自证」：一次 DSW 现场的取证与四处修法（2026-11-18）
+
+**现场（`node_id=dsw`，`link=relay`，`hub_url` 为公网 quick tunnel）**：注册循环，每 60s 重建一次、连挂 3 轮。
+
+```
+[13:55:25] relay 轮询失败（URLError）——2s 后重试        ← 同秒 6 条（=6 个轮询线程），每条静默 35s
+[13:56:05] relay 未就绪（40s 内 hub 未应答长轮询）
+[13:56:05] ★ 未注册：隧道 URL 未取到
+[13:56:05] ★ URL : (未取到)
+```
+
+三条判词的**语义都不对**：`URLError` 一个词同时覆盖 DNS 失败 / 连接被拒 / TLS 失败 / 代理吊死 / 地址黑洞；
+「hub 未应答长轮询」把「我这边的请求根本没出去」写成了「对方不回话」；「隧道 URL 未取到」在 relay 模式下
+指的是本机 agent 端口（跟隧道毫无关系）。⇒ **日志把三种互斥真因压成一个词，现场无法自证。**
+
+**取证（本机实测，非推断）**
+
+| 观测 | 读数 | 排除了什么 |
+|---|---|---|
+| hub 隧道 `/relay/dsw/_poll?wait=2`（不带令牌） | `401 {"error":"unauthorized"}` / **1.2s** | 路由存在、hub 已升级、鉴权在工作 |
+| `tmp/hub-server.out`（223MB）grep `/relay/` | **0 次** | 节点的轮询**一条都没到过 hub**（到过就必然留行，401 也记账） |
+| 对照 `http://100.124.208.62:8787`（tailnet） | `401` / **0.1s** | 秒级应答正常 |
+| 对照 `http://127.0.0.1:8900`（dashboard 端口，非 hub） | `404` / **0.0s** | **404 也是秒级** |
+| 旁证：`dsw` 当天 12:56–13:27 自建 quick tunnel 并 `节点登记` 成功 | — | 到 CF 边缘这一跳是通的 |
+
+⇒ 只有「地址黑洞 / 代理吊死 / 多地址串行超时」才会出现 35s 静默；DNS 失败、端口拒绝、404、530 **全是秒级**。
+请求死在**节点出网这一段**，不是 hub、不是令牌、不是 hub 未升级。
+
+**35s 是从哪来的（这次拿到了直接读数）**：对 hub 域名做 `probe_hub`，DNS 返回
+
+```
+2606:4700::6810:e784(v6), 2606:4700::6810:e684(v6), 104.16.230.132(v4), 104.16.231.132(v4)
+```
+
+**先给 2 个 IPv6，再给 2 个 IPv4**。`socket.create_connection` 的 `timeout` 是**每地址**的 ⇒ 串行 connect
+墙钟 = N × timeout（`common/net_http.py` 模块头 2026-11-11 实测 16.24s vs 0.21s）。20s 的 poll 配 15s 的 connect
+正好凑出观察到的 35s 档位。**这条与 `URLError` 合并后完全不可见** —— 日志里只有「失败」两个字。
+
+**四处修法（都在 `remote/rollout_relay.py`）**
+
+1. **死因可读**：`_err_text(e)` 把异常翻成 `timeout（…地址被黑洞、代理吊死或该端口不回话）` /
+   `refused（对端端口没开 / 只绑了回环）` / `DNS 解析失败` / `TLS 失败(…)` / `HTTP {code}`；日志行补
+   `hub={host:port}` 与实测耗时。首条打全文，之后每 `ERR_LOG_EVERY=10` 条汇总一次（治 6 线程同拍刷屏）。
+2. **不再赌路由**：`_route_open` 两条腿**都竞速** —— `direct` 走 `racing_opener(no_proxy=True)`，
+   `inherit` 走 `racing_opener()`；`_route_order()` 让上次成功的排第一；`_open()` 逐路由尝试，`HTTPError`
+   视为**应答**（不换路由），全崩才 `raise RelayUnreachable`（继承 `URLError`，上层 `except URLError` 语义不变，
+   `reason` 里带逐路由结论 `继承代理=timeout；直连=ok`）。
+3. **决策前先预检**：`probe_hub()` 6s 内给出 `(ok, 人读一行, facts)`，`facts = {"host","port","dns","routes"}`，
+   `routes[route] ∈ {"ok","http-401","http-404","fail"}`；失败时附判词「hub 未升级只会 404，不会超时」。
+   `RelayChannel.open()` 在起线程**之前**打这行并 `pin_route()` —— 否则第一拍先撞错的腿，35s > `PORT_WAIT_SEC`，
+   首轮直接判死（正是本次事故的形态）。
+4. **横幅不再误导**：`rollout_node._banner_lines` 的 relay 分支改说「relay 通道没拿到 hub 的本机端口 —— 真因看上面
+   『relay 预检』那行」+「relay 只需节点**出网到 hub**，不建隧道、不要入站端口」，**不再**把人指向不存在的
+   cloudflared 日志。
+
+**两处易错细节（都用真机读数钉过）**
+
+- **端口判定不能用「有没有 `https://`」**：`http://1.2.3.4:8787` 会被读成 80，日志里就写成 `:80`（用例红过）。
+  改用 `_host_port()`（`urlsplit` + 显式 `parts.port` 优先）。
+- **回环 / `NO_PROXY` 目标只跑 `direct`**：否则本机 LAN 代理会把必然通的回环请求吊满 6s（实测某用例耗时 6.12s，
+  超 5s 警告阈值）。判据 = `net_http.bypass_proxy(hub_url)`。
+
+**验收**：`tests/remote/test_rollout_relay.py` 6 → **14** 例（不可达 hub ⇒ `last_error` 以 `direct=` 开头且仍是
+`URLError`；首行日志含 `hub=host:port` + 耗时，之后 8 条静默；`_err_text` 三种死因互不混淆；`probe_hub` 对活 hub
+给出 `routes`；预检结论被 `pin_route` 钉住；代理腿吊死时回落到 `direct`；`RelayChannel` 起不来时点名预检与 hub 主机）·
+`tests/remote/test_rollout_node.py` +1（relay 横幅**不**提 cloudflared、且带出 `hub_url` 主机名）·
+`test_source_text_assert_budget.py` 口径 A `1498 → 1502`（+4，把能结构化的（`facts["routes"]`、`.startswith`）
+先结构化，只留确需看文本的 4 条）· `nn-python-gate.sh` 全绿（ruff + mypy + **6202 passed, 10 skipped**，150s）。
+
+**边界（记账，不假装）**
+
+- quick tunnel 域名**每次 hub 重启都变**；relay 节点的 `hub_url` 是**死值**，hub 换域名后必须重跑 cell，否则
+  预检那行会稳定报 `timeout`/`DNS`（现在 6s 就能看到，不再是 40s 后的一句「hub 未应答」）。
+- `rollout.ipynb` 的 `NO_PROXY` 合并目前只含 `CFG.hub_ip`，填 `hub_url` 时 hub 主机进不去 —— **未修**，
+  但 relay 的 `direct` 腿已天然绕代理（`racing_opener(no_proxy=True)`），影响面已从「必踩」降到「无所谓」。
+- `hub_url` **必须是公网地址**：tailnet / LAN 地址节点根本到不了（这一条已写进 notebook 的 CFG 注释）。
+
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 
 **现场（ModelScope / 阿里云 8C32G，`rollout.ipynb`）**：连续多个会话死在同一个点。

@@ -45,7 +45,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from common import node_report
+from common import net_http, node_report
 from common.env_probe import probe_cloud_env, worker_name
 from common.proc import run_capture
 from remote import tailscale_boot
@@ -913,8 +913,14 @@ def _banner_lines(
     code_hash: str,
     hub_configured: bool,
     reg_state: dict[str, str],
+    channel: str = "",
+    hub_url: str = "",
 ) -> list[str]:
-    """启动横幅的纯函数：空 URL 时**不**打印粘进去必 400 的 `nodes[]` 片段。"""
+    """启动横幅的纯函数：空 URL 时**不**打印粘进去必 400 的 `nodes[]` 片段。
+
+    `channel` 决定「没有 URL」该怪谁：relay 模式根本没有 cloudflared 进程，
+    还去指「看 cloudflared 日志尾部」是把人往错方向送（2026-11-18 DSW 现场）。
+    """
     lines = ["=" * 68]
     if hub_configured and reg_state.get("url"):
         lines.append(f"★ 已自动注册 : id={node_id}（rl-config.nodes[] 每轮热读，已生效）")
@@ -922,6 +928,11 @@ def _banner_lines(
         lines.append("★ 未注册 —— 如需手工：写入本机 nn-training/rl-config.json：")
         lines.append(
             f'  {{"nodes":[{{"id":"{node_id}","url":"{url}","authKey":"{auth}"}}]}}'
+        )
+    elif channel == LINK_RELAY:
+        lines.append("★ 未注册：relay 通道没拿到 hub 的本机端口 —— 真因看上面「relay 预检」那行。")
+        lines.append(
+            f"   relay 只需节点**出网到 hub**（当前 hub_url={hub_url or '未填'}），不建隧道、不要入站端口。"
         )
     else:
         lines.append(
@@ -974,7 +985,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     log(
         f"环境={env} 通道={link} workers={workers}（{slot_note}）"
         f" 磁盘={floor_mb}/{warn_mb}MB node_id={node_id} "
-        f"hub={'已配置' if hub_configured else '未配置（降级为手工登记）'}"
+        f"hub={'已配置 ' + (net_http.host_of(hub_url) or '?') if hub_configured else '未配置（降级为手工登记）'}"
     )
 
     # ── 2. bun（公网安装在 ensure 之前）───────────────────────────────────
@@ -1150,6 +1161,8 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         code_hash=str((ping or {}).get("codeHash", "")),
         hub_configured=hub_configured,
         reg_state=reg_state,
+        channel=link,
+        hub_url=hub_url,
     ):
         log(line)
 
