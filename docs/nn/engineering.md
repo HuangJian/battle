@@ -25,6 +25,27 @@
 
 ---
 
+## §203 长函数存量第二十四刀：采样节点会话对象（remote）312 → 175（2026-11-18）
+
+`remote/rollout_node.py::run` **312 → 175 行**，长函数存量 **14 → 13**
+（`LONG_FUNCS_BASELINE` 删除 `remote/rollout_node.py` 条目）。
+
+这一刀不是纯搬移：§201 已判定它「cell 入口顺序编排 + 两处跨隧道建立与监护循环共享的闭包」，
+必须先造上下文对象。新增两个小 dataclass 与一个 Protocol：
+- `_Tunnel`：cloudflared 的 URL / 进程 / 预检姿势缓存 + `open_cloudflared(reason, attempts,
+  wait_timeout)`（原 `_get_postures` / `_open_cloudflared` 两个闭包的等价物）。
+- `_Session`：注册 / 重启 / 隧道自愈的会话状态（`_try_register` / `register_first` /
+  `restart_agent` / `check_tunnel` / `maybe_register`）。
+- `_Proc`（Protocol）：子进程句柄的最小面（`returncode` / `poll` / `terminate`），
+  让两个 dataclass 不再需要 `Any` 字段。
+
+`run` 保留 §0–§6 的一次性装配与 §7 的**监护循环骨架 + try/finally 收线**（`unregister` +
+`_terminate(agent)` / `_terminate(cfp)` 仍在原位；`tests/remote/test_rollout_node_notebook.py`
+的顺序 / 收线契约不改）。47 处日志调用逐条比对：只有 `url` → `tunnel.url` 的取值改写，
+文案与顺序不变。
+
+---
+
 ## §202 长函数存量第二十三刀：配对功效报表（tools）625 → 35（2026-11-18）
 
 `tools/paired_power.py::main` **625 → 35 行**，长函数存量 **15 → 14**

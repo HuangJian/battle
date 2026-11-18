@@ -7498,3 +7498,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   625 → **35** 行（按 §1–§11 报表段拆出 11 个 `_print_*` helper，打印与判据逐字不变），
   长函数存量 **15 → 14**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §202。
+- **2026-11-18（长函数存量第二十四刀：采样节点会话对象 remote）**：`remote/rollout_node.py::run`
+  312 → **175** 行（新增 `_Tunnel` / `_Session` 两个上下文对象，原 `_get_postures` /
+  `_open_cloudflared` 闭包与注册 / 重启 / 隧道自愈块搬进方法；`run` 保留监护循环骨架与
+  try/finally 收线），长函数存量 **14 → 13**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §203。

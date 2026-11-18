@@ -37,8 +37,9 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from common.env_probe import probe_cloud_env, worker_name
 from common.errors import NET_ERRORS
@@ -581,6 +582,246 @@ def _banner_lines(
 
 # ---------------------------------------------------------------- 主流程（cell 调用）
 
+class _Proc(Protocol):
+    """子进程句柄的最小面（`Popen` 与测试替身都满足）。"""
+
+    returncode: int | None
+
+    def poll(self) -> int | None: ...
+
+    def terminate(self) -> None: ...
+
+
+@dataclass
+class _Tunnel:
+    """隧道状态：tailscale 只给初始 URL，cloudflared 的重建 / 补拿都走这里。"""
+
+    cfg: dict[str, object]
+    log: Callable[[str], None]
+    port: int
+    cf_log: Path
+    link: str
+    url: str = ""
+    cfp: _Proc | None = None
+    probe_postures: tuple[str, str] | None = None
+
+    def postures(self) -> tuple[str, str]:
+        if self.probe_postures is None:
+            self.probe_postures = _net_probe(self.log)
+        return self.probe_postures
+
+    def open_cloudflared(
+        self,
+        reason: str,
+        *,
+        attempts: int = CLOUDFLARED_ATTEMPTS,
+        wait_timeout: float = 90.0,
+    ) -> bool:
+        """起 / 复用 cloudflared；`reason` 只进日志，返回「本次是否新起」。"""
+        self.log(f"cloudflared 通道（{reason}）")
+        self.url, self.cfp, started = _open_cloudflared_once(
+            current_url=self.url,
+            cfp=self.cfp,
+            ensure=lambda: _ensure_cloudflared_url(
+                self.cfg,
+                self.port,
+                self.cf_log,
+                self.log,
+                attempts=attempts,
+                postures=self.postures(),
+                wait_timeout=wait_timeout,
+            ),
+        )
+        if started:
+            self.link = LINK_CLOUDFLARED
+        return started
+
+
+@dataclass
+class _Session:
+    """采样节点会话：注册 / 重启 / 隧道自愈（`run` 只做一次装配与循环编排）。"""
+
+    tunnel: _Tunnel
+    env: str
+    cfg: dict[str, object]
+    log: Callable[[str], None]
+    port: int
+    workers: int
+    code_dir: Path
+    bun: str
+    entry: Path
+    agent: _Proc
+    auth: str
+    agent_log: Path
+    auth_path: Path
+    node_id: str
+    hub_url: str
+    hub_token: str
+    hub_configured: bool
+    reg_state: dict[str, str]
+    backoff: float
+    next_retry: float
+    next_tunnel_try: float
+    next_tunnel_probe: float
+    tunnel_probe_fails: int = 0
+
+    def _try_register(self) -> dict:
+        t = self.tunnel
+        out = _try_register_once(
+            url=t.url,
+            auth=self.auth,
+            node_id=self.node_id,
+            workers=self.workers,
+            label=worker_name(self.env, "t" if t.link == LINK_TAILSCALE else "c"),
+            hub_url=self.hub_url,
+            hub_token=self.hub_token,
+            log=self.log,
+            urlopen=urllib.request.urlopen,
+        )
+        if out["ok"]:
+            self.reg_state.update({"url": t.url, "authKey": self.auth})
+            self.log(f"已注册节点 id={self.node_id} url={t.url} action={out['action']}")
+        return out
+
+    def register_first(self) -> None:
+        """首拍注册；422（tailscale 入站不可达）⇒ 回落 cloudflared 并重注册。"""
+        t = self.tunnel
+        out = self._try_register()
+        if not out["ok"] and int(out.get("status") or 0) == 422 and t.link == LINK_TAILSCALE:
+            self.log("hub ping 门 422：tailscale 入站不可达 —— 回落 cloudflared 并重注册")
+            if not t.open_cloudflared("ping 门 422"):
+                # B1：cf 全败时**不能**拿旧 tailscale URL 再发一次必然 422 的注册。
+                self.hub_configured = False
+                t.url = ""
+                self.log(
+                    "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
+                    "—— 本会话不再自动注册"
+                )
+            else:
+                out = self._try_register()
+                if not out["ok"] and int(out.get("status") or 0) == 422:
+                    self.hub_configured = False
+                    self.log(
+                        "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
+                        "—— 本会话不再自动注册"
+                    )
+        if not out["ok"] and self.hub_configured:
+            if out["kind"] == "auth":
+                self.hub_configured = False
+                self.log("HUB_TOKEN 被拒（auth）——注册放弃：token 不对，重试无意义（检查 secret 后重跑）")
+            elif out["kind"] == "nourl":
+                self.next_tunnel_try = time.time() + TUNNEL_RETRY_SEC
+                self.log("首拍未注册：隧道 URL 未取到 —— 等待补拿（不进入注册退避）")
+            else:
+                self.backoff = RETRY_FIRST_SEC
+                self.next_retry = time.time() + self.backoff
+                self.log(f"首拍注册失败（{out['kind']}）——{int(self.backoff)}s 后重试")
+
+    def restart_agent(self) -> None:
+        """受监护重启：清旧进程、从盘上拉起、等 authKey（变了就让外层重注册）。"""
+        _terminate(self.agent)
+        self.agent = _start_agent(
+            self.bun, self.entry, self.code_dir, self.port, self.workers, self.cfg, self.agent_log
+        )
+        auth2 = _wait_auth(self.agent, self.auth_path, 30)
+        if auth2 and auth2 != self.auth:
+            self.auth = auth2
+            self.next_retry = 0.0
+            self.log("★ authKey 变了 —— 将重注册")
+
+    def check_tunnel(self, now: float) -> None:
+        """隧道死亡检测 / 补拿 / 换名（每拍一次；判死后归一成「无隧道」再重建）。"""
+        t = self.tunnel
+        # 隧道死亡检测（plan/rollout-node-tunnel-death-blindspot）：静默死的隧道 URL 不变、
+        # 日志尾部仍是旧域名，既有「补拿/换名」两道闸都看不见。判死后归一成「无隧道」
+        # （cfp=None + url=""），复用补拿闸重建、复用 should_register 语义强制重注册。
+        agent_ok = self.agent.poll() is None
+        if not agent_ok:
+            self.tunnel_probe_fails = 0  # 本机不健康时连败数不作数（问题不在隧道）
+        if (
+            t.link == LINK_CLOUDFLARED
+            and agent_ok
+            and t.url
+            and t.cfp is not None
+            and t.cfp.poll() is None
+            and now >= self.next_tunnel_probe
+        ):
+            probe_ok = _public_ping(t.url, self.auth) is not None
+            self.tunnel_probe_fails = 0 if probe_ok else self.tunnel_probe_fails + 1
+            self.next_tunnel_probe = now + TUNNEL_PROBE_SEC
+        if _tunnel_dead(
+            is_cloudflared=t.link == LINK_CLOUDFLARED,
+            url=t.url,
+            cfp=t.cfp,
+            agent_ok=agent_ok,
+            probe_fails=self.tunnel_probe_fails,
+        ):
+            why = (
+                "cloudflared 进程已退出"
+                if t.cfp is None or t.cfp.poll() is not None
+                else f"公网探针连续 {self.tunnel_probe_fails} 次失败"
+            )
+            self.log(f"★ 隧道判定死亡（{why}）—— 重建 cloudflared 并重注册")
+            _terminate(t.cfp)
+            t.cfp = None
+            t.url = ""
+            # 绕过 should_register 的去重（重建后即便拿到同名 URL 也要重注册）。
+            # 副作用：重新注册成功前，收线时不会发 unregister（hub 侧由 ping 门兜底）。
+            self.reg_state["url"] = ""
+            self.tunnel_probe_fails = 0
+            self.next_tunnel_try = now
+        if _tunnel_retry_due(t.url, now, self.next_tunnel_try):
+            self.log("隧道补拿：尝试重新建 cloudflared…")
+            t.url, t.cfp, started = _open_cloudflared_once(
+                current_url=t.url,
+                cfp=t.cfp,
+                ensure=lambda: _ensure_cloudflared_url(
+                    self.cfg,
+                    self.port,
+                    t.cf_log,
+                    self.log,
+                    attempts=1,
+                    postures=t.postures(),
+                    wait_timeout=TUNNEL_RETRY_WAIT_SEC,
+                ),
+            )
+            if started:
+                t.link = LINK_CLOUDFLARED
+                self.log(f"★ 隧道就绪（补拿）：{t.url} —— 将重注册")
+                self.next_retry = 0.0
+                self.tunnel_probe_fails = 0
+                self.next_tunnel_probe = now + TUNNEL_PROBE_SEC
+            self.next_tunnel_try = now + TUNNEL_RETRY_SEC
+        if t.url and t.cfp is not None:
+            cur = _tunnel_url(t.cf_log)
+            if cur and cur != t.url:
+                t.url = cur
+                self.next_retry = 0.0
+                self.tunnel_probe_fails = 0
+                self.next_tunnel_probe = now + TUNNEL_PROBE_SEC
+                self.log(f"★ 隧道换名（quick tunnel 重连）：{t.url} —— 将重注册")
+
+    def maybe_register(self, now: float) -> None:
+        """URL / authKey 变了或退避到点 ⇒ 重注册（失败按指数退避）。"""
+        t = self.tunnel
+        if (
+            self.hub_configured
+            and t.url
+            and should_register(self.reg_state, t.url, self.auth)
+            and now >= self.next_retry
+        ):
+            out = self._try_register()
+            if out["ok"]:
+                self.backoff, self.next_retry = 0.0, 0.0
+            elif out["kind"] == "auth":
+                self.hub_configured = False
+                self.log("HUB_TOKEN 被拒（auth）——注册放弃")
+            else:
+                self.backoff = RETRY_FIRST_SEC if self.backoff <= 0 else min(RETRY_MAX_SEC, self.backoff * 2)
+                self.next_retry = now + self.backoff
+                self.log(f"重注册失败（{out['kind']}）——{int(self.backoff)}s 后重试")
+
+
 def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
     """采样节点主流程。返回进程退出码（0 = 正常收线）。
 
@@ -620,55 +861,27 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         return 2
 
     # ── 3. 通道：tailscale 优先；失败回落 cloudflared ─────────────────────
-    agent = None
-    cfp = None
     cf_log = Path("/tmp/rollout-cloudflared.log")
-    url = ""
     forced_cf = str(cfg.get("link") or "").strip().lower() == LINK_CLOUDFLARED
-    probe_postures: tuple[str, str] | None = None
+    tunnel = _Tunnel(cfg=cfg, log=log, port=port, cf_log=cf_log, link=link)
 
-    def _get_postures() -> tuple[str, str]:
-        nonlocal probe_postures
-        if probe_postures is None:
-            probe_postures = _net_probe(log)
-        return probe_postures
-
-    def _open_cloudflared(reason: str) -> bool:
-        nonlocal link, url, cfp
-        log(f"cloudflared 通道（{reason}）")
-        url, cfp, started = _open_cloudflared_once(
-            current_url=url,
-            cfp=cfp,
-            ensure=lambda: _ensure_cloudflared_url(
-                cfg,
-                port,
-                cf_log,
-                log,
-                attempts=CLOUDFLARED_ATTEMPTS,
-                postures=_get_postures(),
-            ),
-        )
-        if started:
-            link = LINK_CLOUDFLARED
-        return started
-
-    if link == LINK_TAILSCALE:
-        url, ok = _open_tailscale(cfg, ts_authkey, port, log)
+    if tunnel.link == LINK_TAILSCALE:
+        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, port, log)
         if not ok:
             log("—— 回落 cloudflared")
-            link = LINK_CLOUDFLARED
-    if link != LINK_TAILSCALE:
-        _open_cloudflared("通道决策=cloudflared")
-    if not url and not forced_cf and has_ts:
+            tunnel.link = LINK_CLOUDFLARED
+    if tunnel.link != LINK_TAILSCALE:
+        tunnel.open_cloudflared("通道决策=cloudflared")
+    if not tunnel.url and not forced_cf and has_ts:
         log("cloudflared 未就绪 —— 回落 tailscale")
-        url, ok = _open_tailscale(cfg, ts_authkey, port, log)
+        tunnel.url, ok = _open_tailscale(cfg, ts_authkey, port, log)
         if ok:
-            link = LINK_TAILSCALE
-    elif not url and forced_cf:
+            tunnel.link = LINK_TAILSCALE
+    elif not tunnel.url and forced_cf:
         log("强制通道=cloudflared，跳过 tailscale 回落")
-    elif not url and not has_ts:
+    elif not tunnel.url and not has_ts:
         log("无 ts_authkey ⇒ 本会话无法回落 tailscale")
-    next_tunnel_try = time.time() + TUNNEL_RETRY_SEC if not url else 0.0
+    next_tunnel_try = time.time() + TUNNEL_RETRY_SEC if not tunnel.url else 0.0
 
     # ── 4. sampler-agent ─────────────────────────────────────────────────
     entry = _agent_entry(code_dir)
@@ -684,70 +897,45 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         log("agent 30–60s 未就绪 —— 下面是 agent 日志尾部（真因通常在这）：")
         _dump_tail(agent_log, log)
 
+    session = _Session(
+        tunnel=tunnel,
+        env=env,
+        cfg=cfg,
+        log=log,
+        port=port,
+        workers=workers,
+        code_dir=code_dir,
+        bun=bun,
+        entry=entry,
+        agent=agent,
+        auth=auth,
+        agent_log=agent_log,
+        auth_path=auth_path,
+        node_id=node_id,
+        hub_url=hub_url,
+        hub_token=hub_token,
+        hub_configured=hub_configured,
+        reg_state={"url": "", "authKey": ""},
+        backoff=0.0,
+        next_retry=0.0,
+        next_tunnel_try=next_tunnel_try,
+        next_tunnel_probe=time.time() + TUNNEL_PROBE_SEC,
+    )
+
     # ── 5. 注册（首拍；422 ⇒ tailscale 入站不可达 ⇒ 回落重注册）───────────
-    reg_state: dict[str, str] = {"url": "", "authKey": ""}
-    backoff = 0.0
-    next_retry = 0.0
-
-    def _try_register() -> dict:
-        out = _try_register_once(
-            url=url,
-            auth=auth,
-            node_id=node_id,
-            workers=workers,
-            label=worker_name(env, "t" if link == LINK_TAILSCALE else "c"),
-            hub_url=hub_url,
-            hub_token=hub_token,
-            log=log,
-            urlopen=urllib.request.urlopen,
-        )
-        if out["ok"]:
-            reg_state.update({"url": url, "authKey": auth})
-            log(f"已注册节点 id={node_id} url={url} action={out['action']}")
-        return out
-
     if hub_configured:
-        out = _try_register()
-        if not out["ok"] and int(out.get("status") or 0) == 422 and link == LINK_TAILSCALE:
-            log("hub ping 门 422：tailscale 入站不可达 —— 回落 cloudflared 并重注册")
-            if not _open_cloudflared("ping 门 422"):
-                # B1：cf 全败时**不能**拿旧 tailscale URL 再发一次必然 422 的注册。
-                hub_configured = False
-                url = ""
-                log(
-                    "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
-                    "—— 本会话不再自动注册"
-                )
-            else:
-                out = _try_register()
-                if not out["ok"] and int(out.get("status") or 0) == 422:
-                    hub_configured = False
-                    log(
-                        "两种通道都不可用（tailscale 入站不通 + cloudflared 未建起）"
-                        "—— 本会话不再自动注册"
-                    )
-        if not out["ok"] and hub_configured:
-            if out["kind"] == "auth":
-                hub_configured = False
-                log("HUB_TOKEN 被拒（auth）——注册放弃：token 不对，重试无意义（检查 secret 后重跑）")
-            elif out["kind"] == "nourl":
-                next_tunnel_try = time.time() + TUNNEL_RETRY_SEC
-                log("首拍未注册：隧道 URL 未取到 —— 等待补拿（不进入注册退避）")
-            else:
-                backoff = RETRY_FIRST_SEC
-                next_retry = time.time() + backoff
-                log(f"首拍注册失败（{out['kind']}）——{int(backoff)}s 后重试")
+        session.register_first()
 
     # ── 6. 横幅（注册成功 = 自动；否则保留手工路径）───────────────────────
     for line in _banner_lines(
         node_id=node_id,
-        url=url,
-        auth=auth,
+        url=tunnel.url,
+        auth=session.auth,
         workers=workers,
         bun_version=_proc_bun_version(bun, fallback=""),
         code_hash=str((ping or {}).get("codeHash", "")),
-        hub_configured=hub_configured,
-        reg_state=reg_state,
+        hub_configured=session.hub_configured,
+        reg_state=session.reg_state,
     ):
         log(line)
 
@@ -757,28 +945,25 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     restarts, tick, miss = 0, 0, 0
     # 「近 30 分钟产出」摘要：按**墙钟**而不是 tick 计数（sleep 漂移不会把 10 分钟变成 11 分钟）
     next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
-    # 隧道健康：进程退出每拍判；公网 URL 探针按墙钟节拍跑（给新隧道一个完整的传播窗口）。
-    next_tunnel_probe = time.time() + TUNNEL_PROBE_SEC
-    tunnel_probe_fails = 0
     try:
         while True:
             if time.time() > deadline:
                 log("会话上限到点 —— 收线")
                 break
             dead, why = False, ""
-            if agent.poll() is not None:
-                dead, why = True, f"rc={agent.returncode}"
+            if session.agent.poll() is not None:
+                dead, why = True, f"rc={session.agent.returncode}"
             else:
                 tick += 1
                 if tick % 6 == 0:
-                    if _ping(port, auth) is None:
+                    if _ping(port, session.auth) is None:
                         miss += 1
                         if miss >= 3:
                             dead, why = True, "HTTP 探活连续 3 次失败"
                     else:
                         miss = 0
             if dead:
-                planned = agent.returncode == AGENT_RESTART_EXIT_CODE
+                planned = session.agent.returncode == AGENT_RESTART_EXIT_CODE
                 if planned:
                     # 远控 /v1/restart：agent 已 pull 完并按受监护模式退出。重新拉起即加载新代码；
                     # 这是计划内重启，不能吃崩溃预算（否则几次正常升级就把节点停了）。
@@ -789,104 +974,23 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                         break
                     restarts += 1
                     log(f"agent 判定死亡（{why}）—— 第 {restarts} 次重启")
-                _terminate(agent)
-                agent = _start_agent(bun, entry, code_dir, port, workers, cfg, agent_log)
+                session.restart_agent()
                 miss = 0
-                auth2 = _wait_auth(agent, auth_path, 30)
-                if auth2 and auth2 != auth:
-                    auth = auth2
-                    next_retry = 0.0
-                    log("★ authKey 变了 —— 将重注册")
             now = time.time()
-            # 隧道死亡检测（plan/rollout-node-tunnel-death-blindspot）：静默死的隧道 URL 不变、
-            # 日志尾部仍是旧域名，既有「补拿/换名」两道闸都看不见。判死后归一成「无隧道」
-            # （cfp=None + url=""），复用补拿闸重建、复用 should_register 语义强制重注册。
-            agent_ok = agent.poll() is None
-            if not agent_ok:
-                tunnel_probe_fails = 0  # 本机不健康时连败数不作数（问题不在隧道）
-            if (
-                link == LINK_CLOUDFLARED
-                and agent_ok
-                and url
-                and cfp is not None
-                and cfp.poll() is None
-                and now >= next_tunnel_probe
-            ):
-                probe_ok = _public_ping(url, auth) is not None
-                tunnel_probe_fails = 0 if probe_ok else tunnel_probe_fails + 1
-                next_tunnel_probe = now + TUNNEL_PROBE_SEC
-            if _tunnel_dead(
-                is_cloudflared=link == LINK_CLOUDFLARED,
-                url=url,
-                cfp=cfp,
-                agent_ok=agent_ok,
-                probe_fails=tunnel_probe_fails,
-            ):
-                why = (
-                    "cloudflared 进程已退出"
-                    if cfp is None or cfp.poll() is not None
-                    else f"公网探针连续 {tunnel_probe_fails} 次失败"
-                )
-                log(f"★ 隧道判定死亡（{why}）—— 重建 cloudflared 并重注册")
-                _terminate(cfp)
-                cfp = None
-                url = ""
-                # 绕过 should_register 的去重（重建后即便拿到同名 URL 也要重注册）。
-                # 副作用：重新注册成功前，收线时不会发 unregister（hub 侧由 ping 门兜底）。
-                reg_state["url"] = ""
-                tunnel_probe_fails = 0
-                next_tunnel_try = now
-            if _tunnel_retry_due(url, now, next_tunnel_try):
-                log("隧道补拿：尝试重新建 cloudflared…")
-                url, cfp, started = _open_cloudflared_once(
-                    current_url=url,
-                    cfp=cfp,
-                    ensure=lambda: _ensure_cloudflared_url(
-                        cfg,
-                        port,
-                        cf_log,
-                        log,
-                        attempts=1,
-                        postures=_get_postures(),
-                        wait_timeout=TUNNEL_RETRY_WAIT_SEC,
-                    ),
-                )
-                if started:
-                    link = LINK_CLOUDFLARED
-                    log(f"★ 隧道就绪（补拿）：{url} —— 将重注册")
-                    next_retry = 0.0
-                    tunnel_probe_fails = 0
-                    next_tunnel_probe = now + TUNNEL_PROBE_SEC
-                next_tunnel_try = now + TUNNEL_RETRY_SEC
-            if url and cfp is not None:
-                cur = _tunnel_url(cf_log)
-                if cur and cur != url:
-                    url = cur
-                    next_retry = 0.0
-                    tunnel_probe_fails = 0
-                    next_tunnel_probe = now + TUNNEL_PROBE_SEC
-                    log(f"★ 隧道换名（quick tunnel 重连）：{url} —— 将重注册")
-            if hub_configured and url and should_register(reg_state, url, auth) and now >= next_retry:
-                out = _try_register()
-                if out["ok"]:
-                    backoff, next_retry = 0.0, 0.0
-                elif out["kind"] == "auth":
-                    hub_configured = False
-                    log("HUB_TOKEN 被拒（auth）——注册放弃")
-                else:
-                    backoff = RETRY_FIRST_SEC if backoff <= 0 else min(RETRY_MAX_SEC, backoff * 2)
-                    next_retry = now + backoff
-                    log(f"重注册失败（{out['kind']}）——{int(backoff)}s 后重试")
+            session.check_tunnel(now)
+            session.maybe_register(now)
             # 产出摘要（每 10 分钟一行）：先于 sleep 判定，保证第一行不会因重启/重注册被推迟。
             # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。
             if time.time() >= next_output_at:
-                emit_output_summary(port, auth, log)
+                emit_output_summary(port, session.auth, log)
                 next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
             time.sleep(10)
     except KeyboardInterrupt:
         log("收到中断")
     finally:
-        if hub_configured and reg_state["url"]:
+        agent = session.agent
+        cfp = tunnel.cfp
+        if session.hub_configured and session.reg_state["url"]:
             out = unregister(urllib.request.urlopen, hub_url, hub_token, node_id, log)
             log(f"unregister id={node_id}: {'ok' if out['ok'] else out['error']}")
         _terminate(agent)
