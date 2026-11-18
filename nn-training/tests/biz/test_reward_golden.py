@@ -136,7 +136,7 @@ def test_limits_trigger_degrade_card() -> None:
     # 声明了 builtin → 回退到内置（不静默：走 log warning 分支）
     spec = RewardSpec(formula=long_f, builtin="v7", params=dict(V7_DEFAULT_PARAMS))
     fn = build_reward_fn(spec)
-    assert fn._compiled is None and fn._builtin is not None
+    assert fn.backend == "builtin"
     out = fn(_metrics(3, kills=1, enemyTotal=4), "stage_clear", 0.0, 1)
     assert out.shape == (2,) and np.all(np.isfinite(out))
 
@@ -153,7 +153,7 @@ def test_degrade_only_on_quantitative_triggers() -> None:
     long_f = " + ".join(["kills"] * (MAX_FORMULA_CHARS // 5 + 10))
     spec = RewardSpec(formula=long_f, builtin="v7", params=dict(V7_DEFAULT_PARAMS))
     fn = build_reward_fn(spec)
-    assert fn._compiled is None and fn._builtin is not None
+    assert fn.backend == "builtin"
 
     # 语法错误 + builtin → 硬失败（不回退）
     with pytest.raises(FormulaError, match="语法错误"):
@@ -286,7 +286,7 @@ def test_v7_formula_matches_builtin_bitwise() -> None:
     course = load_course("s4b")
     spec = course.reward_spec()
     fn = build_reward_fn(spec)
-    assert fn._compiled is not None, "v7 公式应能编译（607 字符 < MAX_FORMULA_CHARS 限长）"
+    assert fn.backend == "formula", "v7 公式应能编译（607 字符 < MAX_FORMULA_CHARS 限长）"
     m = _v7_corpus(n=2000, seed=3)
     a = fn.phi(m, 1)
     b = v7_phi(m, spec.params)

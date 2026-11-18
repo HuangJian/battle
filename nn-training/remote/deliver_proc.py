@@ -260,6 +260,10 @@ class DelivererProcess:
         if why:
             self._degrade(why)
 
+    def child(self) -> subprocess.Popen | None:
+        """子进程句柄（无 ⇒ `None`）。活引用：调用方只读（`poll()` / 观测）。"""
+        return self._proc
+
     def _spawn(self, ctl: Path, *, offset: int) -> str:
         """拉起子进程。返回 `""` = 成功（等到 `boot ok`），否则是**降级理由**。"""
         assert self._status_path is not None

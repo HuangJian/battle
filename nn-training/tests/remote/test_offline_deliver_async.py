@@ -292,8 +292,9 @@ def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> No
         d.submit_eval_round(1)  # 登记重投 + 唤醒（旧实现此后进自旋）
         # sleep-ok: 轮询步长（等的是「探针是否被触发」这个状态，超时只当挂起兜底）
         _wait_until(lambda: d._idle_spins > 0, timeout=0.6)
-        assert d._idle_spins == 0, (
-            f"补传线程空转了 {d._idle_spins} 圈（既不干活也不 wait）——"
+        idle = d.status()["idle_spins"]
+        assert idle == 0, (
+            f"补传线程空转了 {idle} 圈（既不干活也不 wait）——"
             "不变量：每一次唤醒，要么干活，要么 wait"
         )
         assert rec.calls == [], "530 时不该有任何请求被当成投递"
@@ -557,8 +558,9 @@ def test_restart_restating_the_final_does_not_self_lock(
     d.start()
     ctl = Path(str(d.status()["ctl"]))
     d.submit_final(it_end=1, state="complete", summary={}, end_it_reached=True)
-    assert d._proc is not None
-    d._proc.kill()  # 子进程「崩了」（OOM / 被平台杀）
+    proc = d.child()
+    assert proc is not None
+    proc.kill()  # 子进程「崩了」（OOM / 被平台杀）
     # `result_done` 还没落的窗口（hub 收到 POST ≠ 子进程已记账）⇒ 重启后要重述 final
     monkeypatch.setattr(d, "_result_done_from_disk", lambda: False)
     done = threading.Event()
@@ -605,6 +607,7 @@ def test_result_done_prefers_the_ledger_over_a_stale_status_snapshot(
     )
     # 状态面：**陈旧快照**（上一个 tick 写的，说没送）—— 0.5s 的窗口就在这
     monkeypatch.setattr(d, "_child_status", lambda: {"pid": 4321, "result_done": False})
-    assert d._result_done_from_disk() is True, (
+    from_disk = d._result_done_from_disk()
+    assert from_disk is True, (
         "账本说送了、快照还没刷新 ⇒ 必须信账本（否则重启白重述一次 ~1.9MB 的段末摘要）"
     )

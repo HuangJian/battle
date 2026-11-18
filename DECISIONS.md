@@ -7352,3 +7352,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `test_lifecycle.py` 3 → 0（G5 270 → **256**，93 文件）。驱动调用移出 assert；
   notebook 命名空间里的 `_fetch_archive` 先取结果；bound method 先赋 `handler`；
   测试替身的 `"_block"` 键改公开 `"block"`。全文 → `docs/nn/engineering.md` §171。
+- **2026-11-18（G5 第三十三批：三处状态读数）**：`test_bc_dp.py` 4 → 0、`test_reward_golden.py`
+  3 → 0、`test_stream_alpha.py` 3 → 0、`test_admin_cancel_job.py` 3 → 0、
+  `test_offline_deliver_async.py` 3 → 0、`test_offline_task_queue.py` 3 → 1、
+  `test_bulk_sched.py` 3 → 1（G5 256 → **236**，88 文件）。新增 `RewardFn.backend`
+  （`formula` / `builtin`）、`DelivererProcess.child()`、`StreamCollector.alpha_started`；
+  其余为公开门面替换与纯判据调用移出 assert。留 `_TASK_PACK_TRIGGERS`（清单即契约）与
+  `_p1_waiting`（计数器对称性白盒）各 1。全文 → `docs/nn/engineering.md` §172。

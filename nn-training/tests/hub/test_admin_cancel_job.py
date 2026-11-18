@@ -90,12 +90,12 @@ def test_cancel_job_endpoint_cancels_claimable_job(tmp_path: Path) -> None:
     try:
         _course(tmp_path, hub)
         _publish(hub, "poison-1")
-        assert hub._stores[COURSE].claimable_job_ids() == ["poison-1"]
+        assert hub.claimable_job_ids(COURSE) == ["poison-1"]
 
         st, raw = _req(base, f"{ADMIN_CANCEL_JOB_PATH}?job_id=poison-1", method="POST")
         body = _json(raw)
         assert st == 200 and body["cancelled"] is True, raw[:200]
-        assert hub._stores[COURSE].claimable_job_ids() == []
+        assert hub.claimable_job_ids(COURSE) == []
         assert _cancelled_ids(hub) == ["poison-1"]
         ev = next(
             e
@@ -160,7 +160,7 @@ def test_cancel_job_endpoint_refuses_job_with_result(tmp_path: Path) -> None:
         _publish(hub, "landed-1")
         jd = hub._stores[COURSE]._job_dir("landed-1")
         (jd / "result").mkdir()  # 首写已分胜负：池里看不见它
-        assert hub._stores[COURSE].claimable_job_ids() == []
+        assert hub.claimable_job_ids(COURSE) == []
 
         st, raw = _req(base, f"{ADMIN_CANCEL_JOB_PATH}?job_id=landed-1", method="POST")
         body = _json(raw)

@@ -25,6 +25,31 @@
 
 ---
 
+## §172 G5 第三十三批：三处状态读数 + 两处纯判据（2026-11-18）
+
+七个文件：`test_bc_dp.py` **4 → 0**、`test_reward_golden.py` **3 → 0**、
+`test_stream_alpha.py` **3 → 0**、`test_admin_cancel_job.py` **3 → 0**、
+`test_offline_deliver_async.py` **3 → 0**、`test_offline_task_queue.py` **3 → 1**、
+`test_bulk_sched.py` **3 → 1**（G5 **256 → 236**，93 → 88 文件）。
+
+三条新读数（都是「构造期/运行期定型、之后只读」的状态）：
+
+- `RewardFn.backend`（`"formula"` / `"builtin"`）：奖励函数实际走哪条实现。构造期定死，
+  用例不必再同时看 `_compiled` / `_builtin` 两格；降级卡回退是**可观测结论**，不是内部布局。
+- `DelivererProcess.child()`：子进程句柄（`Popen | None`，活引用）。用例既断言它存在、
+  也拿它模拟崩溃（`kill()`），两次都走同一条读数。
+- `StreamCollector.alpha_started`：α 模式是否已开跑（进入点 = 第一次真正派发 α 批）。
+
+其余：`hub.claimable_job_ids(COURSE)` 替代 `hub._stores[...]`；`status()["idle_spins"]`
+替代内部计数器；`_bc_raw` / `_alpha_cap` / `_bulk_yield_params` / `_progress_label` /
+`_explicit_leases` / `_result_done_from_disk` 的调用移出 assert。
+
+**刻意各留 1 处**：`offline_task_queue` 的 `hub_server._TASK_PACK_TRIGGERS`（模块级**清单**
+本身就是契约，没有别的读名）与 `bulk_sched` 的 `s._p1_waiting`（内部计数器的增/减对称性
+白盒断言）。
+
+---
+
 ## §171 G5 第三十二批：notebook 与信号面的小尾巴（2026-11-18）
 
 四个文件清零：`tests/trainer/test_ppo_redo.py` **3 → 0**、`tests/remote/test_seg_end_kind.py`

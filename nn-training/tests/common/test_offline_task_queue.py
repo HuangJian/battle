@@ -1668,7 +1668,8 @@ def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
         hub._now = real_now
     # 2026-10-25：日志行与发报解耦 —— 「进度」那一行由 `progress_text` 单独打，
     # 送达另起一行（不再把 label 塞进送达行里重复一遍）。
-    assert any(offline_boot._progress_label("iter", it=0, done=1, total=4) in ln for ln in lines), lines
+    label = offline_boot._progress_label("iter", it=0, done=1, total=4)
+    assert any(label in ln for ln in lines), lines
     # ★ 2026-10-30（云机 log 节食）：「[打点] 已送达 hub」那一行**删掉了**（每轮一句、
     # 零新信息——送达这件事上面那句 `state == "live"` 已经用**行为**证明了：hold 被刷活
     # 只可能是这一记打点 POST 干的）。原来这里还有一条文本断言钉它 ⇒ 跟着删（判据归位到行为面）。
@@ -1846,7 +1847,8 @@ def test_explicit_leases_stays_empty_without_a_hub(monkeypatch: pytest.MonkeyPat
     """没有可用的 hub 地址 ⇒ 点名腿不领租约（纯离线 + 手动包：取包/回传照旧）。"""
     _no_net(monkeypatch)
     lines: list[str] = []
-    assert offline_boot._explicit_leases({}, {}, lines.append) == {}
+    leases = offline_boot._explicit_leases({}, {}, lines.append)
+    assert leases == {}
     assert any("纯离线" in ln for ln in lines), lines
 
 

@@ -63,13 +63,13 @@ def test_cold_start_soft_waits_instead_of_ending_after_two_per_stage() -> None:
         assert argv, "冷启动 2n 之内必须有活"
         first.append(argv)
     assert col.next_game() == [], "2n 局都还在飞 ⇒ 软停（[]），不是终局（None）"
-    assert not col._alpha_started and not col.no_data
+    assert not col.alpha_started and not col.no_data
 
     for i, argv in enumerate(first):
         _settle(col, argv, 100, 101.0 + i)
     # 所有关都有结算 ⇒ 进 α；此时不该再返回软停
     assert col.next_game(), "冷启动结算后应继续派 α 局"
-    assert col._alpha_started
+    assert col.alpha_started
 
 
 def test_alpha_never_reads_est() -> None:
@@ -108,7 +108,8 @@ def test_alpha_cap_is_frozen_on_entry() -> None:
             break
         assert argv
         _settle(col, argv, 100, 200.0 + i)
-    assert {s: col._alpha_cap(s) for s in STAGES} == caps, "cap 必须在进入 α 时冻结"
+    frozen = {s: col._alpha_cap(s) for s in STAGES}
+    assert frozen == caps, "cap 必须在进入 α 时冻结"
 
 
 def test_t_fill_none_until_every_stage_reaches_quota() -> None:

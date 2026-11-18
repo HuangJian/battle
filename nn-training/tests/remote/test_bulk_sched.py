@@ -480,7 +480,8 @@ def test_yield_once_control_has_waited_past_the_threshold():
 
 def test_always_mode_keeps_the_old_semantics():
     """`always` 档（after=0.0）逐字回旧语义：控制面一在途就让；映射在 `worker._bulk_yield_params`。"""
-    assert W._bulk_yield_params("always") == (0.0, None)
+    params = W._bulk_yield_params("always")
+    assert params == (0.0, None)
     clk = _FakeClock()
     s = _sched(yield_budget_sec=0.02, yield_step_sec=0.01, clock=clk)
     with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
@@ -507,7 +508,8 @@ def test_never_mode_never_yields():
 
 def test_auto_mode_mapping_matches_the_plan():
     """`auto` = 条件让路 + 单条传输累计 5s（W1/W1b 的目标态）。"""
-    assert W._bulk_yield_params("auto") == (1.0, 5.0)
+    params = W._bulk_yield_params("auto")
+    assert params == (1.0, 5.0)
 
 
 def test_yield_total_is_capped_per_transfer():

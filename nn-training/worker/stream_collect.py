@@ -289,6 +289,11 @@ class StreamCollector:
 
     # ────────────────────────── α（P1）──────────────────────────
 
+    @property
+    def alpha_started(self) -> bool:
+        """α 模式是否已经开跑（进入点 = 第一次真正派发 α 批；只读）。"""
+        return self._alpha_started
+
     def _alpha_cap(self, stage: int, *, freeze: bool = True) -> int:
         """α 模式的独立硬顶：按**实测** samples/局反解，进入 α 时冻结。
 
