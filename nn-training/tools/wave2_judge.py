@@ -240,19 +240,8 @@ def _wording(confirmed: bool, broke: bool, shown: str) -> str:
     return f"破线未证实（{shown}）" if broke else f"未破（{shown}）"
 
 
-def main() -> int:
-    print("=" * 104)
-    print(
-        "Wave 2 判据段（预注册 → docs/nn/experiments.md §69；"
-        f"b0 零奖励 / b1 f={F_PCT['b1']}% / b2 f={F_PCT['b2']}%）"
-    )
-    print("=" * 104)
-    missing = [p for p in LEDGERS.values() if not p.exists()]
-    if missing:
-        print(f"  判据段账本不在（缺 {len(missing)}/{len(ITS)} 份）⇒ 跳过（非失败）。")
-        print(f"  预期位置：{LEDGERS[ITS[0]]}")
-        return 0
-
+def _load_judge_rows():
+    """加载判据段账本并做权重身份检查（自 `main` 原样搬出）。"""
     healthy = True
     wmap, problems = key_map()
     for pr in problems:
@@ -268,36 +257,11 @@ def main() -> int:
     if unknown:
         print(f"  ✗ 未知权重身份键的行 {unknown} 条 ⇒ 判据段读数不可信")
         healthy = False
+    return healthy, rows, unknown
 
-    # 1. 体检：局数 / seed 集合互等（配对前提）
-    print(f"  {'it':>4} {'局数 b0/b1/b2':>16} {'seed 区间':>18} {'配对前提':>10}")
-    for it in ITS:
-        per = {a: sorted(s for i, s in rows[a] if i == it) for a in ARMS}
-        ns = [len(per[a]) for a in ARMS]
-        same = per["b0"] == per["b1"] == per["b2"]
-        if not same or ns[0] != GAMES_PER_ARM:
-            healthy = False
-        rng = f"{per['b0'][0]}–{per['b0'][-1]}" if per["b0"] else "—"
-        print(f"  {it:>4} {ns[0]:>5}/{ns[1]:>4}/{ns[2]:>4}  {rng:>18}  {'是' if same else '**否**':>10}")
-    print(
-        f"  ⇒ 未知 wver 行 {unknown}（应 0）；seed 段 {SEED0}–{SEED0 + GAMES_PER_ARM - 1}"
-        "，与日常段 860001–860200 / 补评估段 861011–861310 **均不相交**"
-    )
-    games = {a: {k: PP.ra2(r) for k, r in rows[a].items()} for a in ARMS}
 
-    # 2. 臂水平 + 对照臂自漂（b0 无 it0 基线 ⇒ 以 it30 为参照点）
-    print()
-    print("  臂水平 rA2（%）与对照臂 b0 自漂（b0 无 it0 基线 ⇒ 以 it30 为参照点）：")
-    base30 = PP.arm_level(games[CONTROL], ITS[0])
-    print(f"  {'it':>4} " + "".join(f"{a + ' rA2%':>9} {a + ' 漂%':>9}" for a in ARMS))
-    for it in ITS:
-        txt = ""
-        for a in ARMS:
-            lvl = PP.arm_level(games[a], it)
-            txt += f"{lvl * 100:>9.3f} {(lvl / base30 - 1) * 100:>+9.1f}"
-        print(f"  {it:>4} {txt}")
-
-    # 3. 逐点配对 Δrel（主终点）
+def _print_point_deltas(rows) -> dict[str, list[tuple[int, float, float]]]:
+    """§3 逐点配对 Δrel（主终点；自 `main` 原样搬出）。"""
     print()
     print(f"  逐点配对 Δrel（% of 同 it {CONTROL} 水平，主终点 rA2）：")
     print(f"  {'it':>4} " + "".join(f"{'Δrel ' + a:>10} {'SE%':>7} {'t':>7} {'p₁':>7}" for a in TREATED))
@@ -315,8 +279,15 @@ def main() -> int:
             pts_rel[a].append((it, m_rel, se_rel))
             txt += f"{m_rel:>10.2f} {se_rel:>7.2f} {t:>7.2f} {PP.norm_cdf(t):>7.3f}"
         print(f"  {it:>4} {txt}")
+    return pts_rel
 
-    # 4. 尾巴 3 点合并（预注册主判据）+ Q 前置
+
+def _print_tail(rows, pts_rel) -> tuple[dict[str, tuple[float, float, float, bool]], bool]:
+    """§4 尾巴 3 点合并（预注册主判据；自 `main` 原样搬出）。
+
+    返回 `(tail, healthy)`；任一臂有效判据点不足 ⇒ healthy=False（与调用方同口径）。
+    """
+    healthy = True
     print()
     print(f"  尾巴 {len(ITS)} 点合并（预注册主判据；前置 Q ≤ χ²(0.95, df={len(ITS) - 1}) = 5.991）：")
     print(
@@ -358,6 +329,66 @@ def main() -> int:
             f"       断言：不到绿线 {below_green}（需 CI 下沿 > −{PP.GREEN_REL:.0f}%）· "
             f"效应可靠为正 {positive}（需 CI 上沿 < 0）· 逆方差加权均值 {ivw:+.2f}%"
         )
+    return tail, healthy
+
+
+def _print_health(rows, unknown) -> tuple[dict, bool]:
+    """§1 体检（自 `main` 原样搬出）：局数 / seed 集合互等；返回 `(games, healthy)`。"""
+    healthy = True
+    print(f"  {'it':>4} {'局数 b0/b1/b2':>16} {'seed 区间':>18} {'配对前提':>10}")
+    for it in ITS:
+        per = {a: sorted(s for i, s in rows[a] if i == it) for a in ARMS}
+        ns = [len(per[a]) for a in ARMS]
+        same = per["b0"] == per["b1"] == per["b2"]
+        if not same or ns[0] != GAMES_PER_ARM:
+            healthy = False
+        rng = f"{per['b0'][0]}–{per['b0'][-1]}" if per["b0"] else "—"
+        print(f"  {it:>4} {ns[0]:>5}/{ns[1]:>4}/{ns[2]:>4}  {rng:>18}  {'是' if same else '**否**':>10}")
+    print(
+        f"  ⇒ 未知 wver 行 {unknown}（应 0）；seed 段 {SEED0}–{SEED0 + GAMES_PER_ARM - 1}"
+        "，与日常段 860001–860200 / 补评估段 861011–861310 **均不相交**"
+    )
+    games = {a: {k: PP.ra2(r) for k, r in rows[a].items()} for a in ARMS}
+    return games, healthy
+
+
+def main() -> int:
+    print("=" * 104)
+    print(
+        "Wave 2 判据段（预注册 → docs/nn/experiments.md §69；"
+        f"b0 零奖励 / b1 f={F_PCT['b1']}% / b2 f={F_PCT['b2']}%）"
+    )
+    print("=" * 104)
+    missing = [p for p in LEDGERS.values() if not p.exists()]
+    if missing:
+        print(f"  判据段账本不在（缺 {len(missing)}/{len(ITS)} 份）⇒ 跳过（非失败）。")
+        print(f"  预期位置：{LEDGERS[ITS[0]]}")
+        return 0
+
+    healthy, rows, unknown = _load_judge_rows()
+
+    # 1. 体检：局数 / seed 集合互等（配对前提）
+    games, health_ok = _print_health(rows, unknown)
+    healthy = healthy and health_ok
+
+    # 2. 臂水平 + 对照臂自漂（b0 无 it0 基线 ⇒ 以 it30 为参照点）
+    print()
+    print("  臂水平 rA2（%）与对照臂 b0 自漂（b0 无 it0 基线 ⇒ 以 it30 为参照点）：")
+    base30 = PP.arm_level(games[CONTROL], ITS[0])
+    print(f"  {'it':>4} " + "".join(f"{a + ' rA2%':>9} {a + ' 漂%':>9}" for a in ARMS))
+    for it in ITS:
+        txt = ""
+        for a in ARMS:
+            lvl = PP.arm_level(games[a], it)
+            txt += f"{lvl * 100:>9.3f} {(lvl / base30 - 1) * 100:>+9.1f}"
+        print(f"  {it:>4} {txt}")
+
+    # 3. 逐点配对 Δrel（主终点）
+    pts_rel = _print_point_deltas(rows)
+
+    # 4. 尾巴 3 点合并（预注册主判据）+ Q 前置
+    tail, tail_ok = _print_tail(rows, pts_rel)
+    healthy = healthy and tail_ok
 
     # 5. 剂量-响应形状（线性锚 = §67 实测 f = 3.6% 档 −8.52%）
     print()

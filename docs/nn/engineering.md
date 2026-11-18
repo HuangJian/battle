@@ -25,6 +25,19 @@
 
 ---
 
+## §200 长函数存量第二十二刀：Wave2 判据（tools）270 → 189（2026-11-18）
+
+`tools/wave2_judge.py::main` **270 → 189 行**，长函数存量 **16 → 15**
+（`LONG_FUNCS_BASELINE` 删除 `tools/wave2_judge.py` 条目）。
+
+四刀纯搬移（报表段落，打印内容与判据一字未动）：
+- `_load_judge_rows()`：账本加载 + 权重身份检查 → `(healthy, rows, unknown)`。
+- `_print_health(rows, unknown)`：§1 体检（局数 / seed 互等）→ `(games, healthy)`。
+- `_print_point_deltas(rows)`：§3 逐点配对 Δrel。
+- `_print_tail(rows, pts_rel)`：§4 尾巴 3 点合并（Q 前置 / CI / 判语）→ `(tail, healthy)`。
+
+---
+
 ## §199 长函数存量第二十一刀：空间探针（tools）232 → 152（2026-11-18）
 
 `tools/spatial-probe.py::main` **232 → 152 行**，长函数存量 **17 → 16**

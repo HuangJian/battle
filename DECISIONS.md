@@ -7481,3 +7481,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   232 → **152** 行（拆出 `_probe_linear_bufa` / `_probe_region16`），长函数存量
   **17 → 16**，形状基线删除该文件的长函数条目（宽参数条目保留）。
   全文 → `docs/nn/engineering.md` §199。
+- **2026-11-18（长函数存量第二十二刀：Wave2 判据 tools）**：`tools/wave2_judge.py::main`
+  270 → **189** 行（拆出 `_load_judge_rows` / `_print_health` / `_print_point_deltas` /
+  `_print_tail`），长函数存量 **16 → 15**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §200。
