@@ -7038,3 +7038,28 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   那是把宽捕当契约 —— 改成真实失败形态（`load_dist_config → None`）+ 两条「程序员错穿出去」的
   反向判据（把 `return_value` 改回 `side_effect` 即红）。G4 397 → **385**（该文件 9 → 1，剩那处是
   `_with_node_failover` 的单节点边界）、G9 26 → **25**。全文 → `docs/nn/engineering.md` §132。
+
+- **2026-11-18（P0-7 第十七批：`hub/task_pack.py` 的观测面捕什么要写清楚）**：三个读包助手
+  （`pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind`）与三个打控制台的调用点
+  （触发重导 ×2、问导出状态 ×1）原为 `except Exception`。前者是**观测面**（离线清单 + 段末判据），
+  必须捕；但宽捕把本模块的 `AttributeError`（索引 JSON 从对象变列表）读成「这包没有计划」⇒
+  云机拿到空段末判据、静默回退旧行为，而包其实是好的；后者把本模块的 bug 记成「控制台不可达 →
+  降级为手动导出」（有人会去查隧道）。改成两个**具名异常集**：`_PACK_UNREADABLE`（OSError /
+  BadZipFile / EOFError / KeyError / NotImplementedError / ValueError = 真读不出来）与
+  `_CONSOLE_NET_ERRORS`（OSError / HTTPException / ValueError = 传输失败）；`AttributeError` /
+  `TypeError` 穿出。判据 `tests/hub/test_offline_task_pack.py` +3。G4 385 → **379**（138 文件）。
+  全文 → `docs/nn/engineering.md` §133。
+
+- **2026-11-18（P0-7 第十八批：`hub/offline_push.py` 的读面边界 + 「查询升公开」而非抬 G5 基线）**：
+  该文件 10 处 `except Exception` 混了四种东西：① 三个**契约永不抛**的读面（`traj_root()` 返回
+  `Path | None`、`pack_index_meta()` 已是总函数、`_release`/`_anchor` 按 key 直取）⇒ 直接删 `try`，
+  按契约的返回值写；② 「盘上那份派发记录读不出来」⇒ 新具名集 `_STORE_READ_ERRORS`
+  （OSError / ValueError / KeyError）；③ `still_mine` 的 **fail-open**（读不到 ⇒ 「还是我的」）；
+  ④ 真边界 2 处（pump 主循环的单轮兜底、`_claim` 的网络腿）留宽捕并留痕。删 `try` 的关键收益：
+  `Path.cwd()` 原本是 `except Exception` 的**危险缺省** —— hub 读面一坏就静默往启动目录落包。
+  返工记账（G5）：新增的三条判据原打 `_default_root` / `_still_mine` / `_resume_ok`，撞
+  `private_assert_baseline.json`「只许降」。修法是**把只读查询升成公开名**（`still_mine` /
+  `resume_ok`：不调网络、不改状态），`_default_root` 改从公开构造路径验（`root=None` 能构造 ⇒
+  落到 cwd；`traj_root` 抛 `AttributeError` ⇒ 构造失败）—— 抬基线会把这批的诚实换掉。判据
+  `tests/hub/test_offline_push_dispatch.py` +3。G4 379 → **371**（138 文件）、G9 25 不变。
+  全文 → `docs/nn/engineering.md` §134。

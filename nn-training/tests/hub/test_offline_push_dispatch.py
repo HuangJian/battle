@@ -1255,3 +1255,57 @@ def test_admin_offline_push_workers_exposes_state_without_secrets(tmp_path: Path
     finally:
         srv2.shutdown()
         srv2.server_close()
+
+
+# ── P0-7 第十八批：派发器的「读不到」与「我们错了」分开（2026-11-18）────────────
+
+
+def test_a_dispatcher_with_no_root_asks_the_hub_instead_of_guessing(tmp_path: Path, monkeypatch) -> None:
+    """`traj_root()` 说 None ⇒ cwd（契约）；它自己抛 ⇒ 穿出去（不是「推不出来」）。"""
+    hub, _ = _mk_hub(tmp_path)
+    workers = OfflinePushWorkers(tmp_path / "rl-config.json", log=lambda _m: None)
+
+    monkeypatch.setattr(hub, "traj_root", lambda: None)
+    disp = OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+    assert disp.assignments is not None  # 构造成功 = 落到了 cwd，没有拿 bug 去换缺省
+
+    def boom():
+        raise AttributeError("discover root descriptor changed")
+
+    monkeypatch.setattr(hub, "traj_root", boom)
+    with pytest.raises(AttributeError):
+        OfflinePushDispatcher(hub, workers, TOKEN, port=0, log=lambda _m: None)
+
+
+def test_still_mine_treats_no_hold_as_mine_and_lets_our_bug_through(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`hold_of` 返回 None = 没人持有（仍是我的）；`AttributeError` 不该被读成「还是我的」。"""
+    hub, _ = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+    rec = {"lease_token": "tok"}
+
+    monkeypatch.setattr(hub, "course_open", lambda _c: True)
+    monkeypatch.setattr(hub, "hold_of", lambda _c: None)
+    assert disp.still_mine(COURSE, rec) is True
+
+    def boom(_c):
+        raise AttributeError("hold record shape changed")
+
+    monkeypatch.setattr(hub, "hold_of", boom)
+    with pytest.raises(AttributeError):
+        disp.still_mine(COURSE, rec)
+
+
+def test_an_unreadable_store_still_fails_open(tmp_path: Path, monkeypatch) -> None:
+    """真失败形态：盘读不出来 ⇒ 不编（`still_mine` fail-open，`resume_ok` 保守）。"""
+    hub, _ = _mk_hub(tmp_path)
+    disp, _workers = _dispatcher(hub, tmp_path)
+
+    def broken(_c):
+        raise OSError("course tree is gone")
+
+    monkeypatch.setattr(hub, "course_open", broken)
+    assert disp.still_mine(COURSE, {"lease_token": "tok"}) is True
+    monkeypatch.setattr(hub, "resume_anchor", broken)
+    assert disp.resume_ok(COURSE, {"pack_path": str(tmp_path / COURSE / f"task-{COURSE}.zip")}) is False

@@ -16,7 +16,7 @@
   "hub/deltas.py": 1,
   "hub/http_face.py": 4,
   "hub/offline_ingest.py": 1,
-  "hub/offline_push.py": 10,
+  "hub/offline_push.py": 2,
   "hub/offline_push_assign.py": 1,
   "hub/store_offline.py": 3,
   "hub/tunnel_ab_probe.py": 3,

@@ -25,6 +25,72 @@
 
 ---
 
+## §134 P0-7 第十八批：`hub/offline_push` 的八个「读不到就编」（2026-11-18）
+
+派发器的运气**不应该**决定于一本书读不读得出来，所以这些位置必须捕。问题在于宽捕把
+「读不到」与「我们错了」抹成同一分支，而缺省值不是中性的：
+
+| 位置 | 宽捕的后果 | 修法 |
+|---|---|---|
+| `_default_root` | `traj_root()` 的契约是 `Path | None`（推不出来就 None，不抛）⇒ 宽捕只能吞自己的 bug，而缺省是 `Path.cwd()` —— **一个扫错目录的派发器比一个挂掉的派发器危险得多** | 删掉 try，按 `None` 契约写 |
+| `_pack_meta` | 包的 `pack_index_meta` 自己已是总函数（§133）⇒ 只剩自吞 | 删掉 try |
+| `_anchor` / `_warn_…` / `_still_fresh` / `resume_ok` / `_release` | 「读不到 ⇒ 不编」（日志 / 保守值）是**对的**，但 `AttributeError` 也被这么读 | 收窄成 `_STORE_READ_ERRORS`（OSError / ValueError / KeyError） |
+| `still_mine` | fail-open：读不到 ⇒「还是我的」。宽捕把 `hold_of` 的形状 bug（返回 `None` 以外的意外）读成「永远是我的」⇒ **永不放手** | 显式化 `hold = … or {}` + 收窄 |
+
+留下 2 处，都是**真边界且都留痕**：pump 线程主循环（线程不许死 + 带异常类型入日志 + `_drop`）与
+`_claim`（拒因里带异常类型，pump 据此放弃本拍而不是死）。
+
+判据（`tests/hub/test_offline_push_dispatch.py` +3）：
+
+1. `root=None` 构造 ⇒ 落到 `cwd`；`traj_root()` 抛 `AttributeError` ⇒ 构造失败（不换缺省）；
+2. `hold_of → None` ⇒「仍是我的」；`AttributeError` 穿出去；
+3. 盘真读不出来（`OSError`）⇒ 仍 fail-open / 仍保守。
+
+**G5 返工（记账）**：这三条最初打的是 `_default_root` / `_still_mine` / `_resume_ok`，撞
+`private_assert_baseline.json`「只许降」。修法不是抬基线 —— `still_mine` / `resume_ok` 是**只读
+查询**（不调网络、不改状态），升成公开名后测试问它们；`_default_root` 则从公开构造路径验。
+否则这批的诚实就等于「用一次基线豁免换掉的谎言」。
+
+读数：G4 **379 → 371**（`hub/offline_push.py` 10 → 2）· G9 25 不变 · 6222 收下 / 2 skipped。
+
+---
+
+## §133 P0-7 第十七批：`hub/task_pack` 的观测面（2026-11-18）
+
+这个文件两个半边各写了一串 `except Exception`，两边的错法刚好相反：
+
+### 半边一：读包（后果最阴）
+
+`pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind` 是**观测面** —— 离线任务清单与
+「这一段是课的末段吗」的判据。它们是故意不报错的（清单不能因为一个坏包变 500）。但宽捕会让
+**好包也被当成坏包**：索引 JSON 从对象变成列表、或字段改名 ⇒ `AttributeError` / `TypeError`
+⇒ 返回值是 `""` / 空元信息，调用方的读法就是「这包没有计划」。后果：云机拿到空的段末判据、
+静默回退旧行为，而日志一个字都没有。
+
+→ `_PACK_UNREADABLE`：`OSError`（不在 / 没权限）、`zipfile.BadZipFile`（截断 / 不是 zip）、
+**`EOFError`**（截断的 ZIP 流中 `zipfile` 有时抛这个而不是 `BadZipFile`）、`KeyError`（包里没那个成员）、
+**`NotImplementedError`**（外部工具打的包用了不认识的压缩方式）、`ValueError`（JSON 坏了 / 非 UTF-8）。
+后两个不写进集合，「读不出来」就会变成 500。
+
+### 半边二：打控制台
+
+触发重导（×2）与问导出状态（×1）的 `except Exception as e` 把本模块的 bug 记成
+「控制台不可达 —— 降级为手动导出」。这不是「不报错」，是**报错报错了对象**：有人会去查隧道。
+
+→ `_CONSOLE_NET_ERRORS`：`OSError`（`URLError` / `HTTPError` / 拒绝 / 超时）、
+`http.client.HTTPException`、`ValueError`（坏 URL / 坏头）。为什么不用 `remote.http.NET_ERRORS`：
+那是 hub→remote 的**向上** import，层账不允许；口径保持同形，取证各自组装。
+
+### 判据（`tests/hub/test_offline_task_pack.py` +3）
+
+1. 真失败形态：不是 zip ⇒ `pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind` 都回「不可知」；
+2. 反向：读包路径里的 `AttributeError` **穿出去**（把 `_PACK_UNREADABLE` 改回 `Exception` 即红）；
+3. `console_export_status`：控制台不可达 ⇒ `{"unknown": True}`（不可知不是失败），本模块 bug ⇒ 抛。
+
+读数：G4 **385 → 379**（`hub/task_pack.py` 6 → 0，文件 139 → 138）。
+
+---
+
 ## §132 P0-7 第十六批：`loop_transport` 的五处宽捕其实是五处自欺（2026-11-18）
 
 `trainer/loop_transport.py` 里五个函数读 rl-config 的课级覆盖，写法都是：
