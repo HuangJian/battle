@@ -187,6 +187,28 @@ def _greedy_plan_games(
     )
 
 
+@dataclass
+class _Continuous:
+    """连续配额一轮的常量快照（循环段与收官段共用；不再靠 20+ 个局部量）。"""
+
+    stages: list[int]
+    target: int
+    quota: int
+    max_batches: int
+    width: int
+    game_cap: int
+    stage_caps: dict[int, int]
+    course_fp: str
+    corpus_fp: str
+    extra_wver: str
+    est_global: int
+    est_s: dict[int, int]
+    start_idx: dict[int, int]
+    first_est_used: dict[int, int]
+    first_est_raw: dict[int, int]
+    first_est_src: dict[int, str]
+
+
 class TrainingVolume:
     """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
 
@@ -571,7 +593,7 @@ class TrainingVolume:
             replay_report = self._dispatch_volume_wave(it, replay_pairs, dist_cfg)
             self._report = combine_reports([self._report, replay_report])
         while True:
-            wver = common.distribution.weights_fingerprint(args.out)
+            wver = common.distribution.weights_fingerprint(self.args.out)
             totals = settled_stage_totals(
                 self._traj_dir,
                 wver,
@@ -683,23 +705,8 @@ class TrainingVolume:
 
             self._report = adopt_volume_report(None)
             return
-        import common.distribution
-        from worker.resume import settled_stage_totals
-        from worker.volume_alloc import (
-            DEFAULT_POOL_MULT,
-            VOLUME_ALLOC_RULE,
-            default_game_caps,
-            pick_stage_est,
-            pool_games_by_stage,
-            pull_est_low,
-            quota_met,
-            spread_games_by_stage,
-        )
-        from worker.volume_quota import (
-            DEFAULT_MAX_BATCHES,
-            continuous_pairs,
-            target_per_stage,
-        )
+        from worker.volume_alloc import default_game_caps
+        from worker.volume_quota import DEFAULT_MAX_BATCHES, target_per_stage
 
         stages = self._volume_stages(it)
         # greedy 阶段用它过滤普通批已派过的 (stage, seed)，保证两批种子不相交。
@@ -726,7 +733,6 @@ class TrainingVolume:
         corpus_fp = self._corpus_fp
         extra_wver = self._extra_wver
         start_idx = {s: 0 for s in stages}
-        combined: dict | None = None
         self._volume_capped = False
         self._volume_waves = 0
         # 首波的 est 读数（进 iteration 事件）：批数由**首波**决定，所以要记首波用了什么，
@@ -740,18 +746,55 @@ class TrainingVolume:
         first_est_raw: dict[int, int] = {}
         first_est_src: dict[int, str] = {}
 
+        self._volume_halted = False
+        state = _Continuous(
+            stages=stages,
+            target=target,
+            quota=quota,
+            max_batches=max_batches,
+            width=width,
+            game_cap=game_cap,
+            stage_caps=stage_caps,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            extra_wver=extra_wver,
+            est_global=est_global,
+            est_s=est_s,
+            start_idx=start_idx,
+            first_est_used=first_est_used,
+            first_est_raw=first_est_raw,
+            first_est_src=first_est_src,
+        )
+        combined = self._volume_continuous_loop(it, dist_cfg, state)
+        self._volume_continuous_settle(it, state, combined)
+
+    def _volume_continuous_loop(
+        self, it: int, dist_cfg: dict | None, state: _Continuous
+    ) -> dict | None:
+        import threading
+
+        import common.distribution
+        from worker.resume import settled_stage_totals
+        from worker.volume_alloc import (
+            DEFAULT_POOL_MULT,
+            pick_stage_est,
+            pool_games_by_stage,
+            pull_est_low,
+            quota_met,
+            spread_games_by_stage,
+        )
+        from worker.volume_quota import continuous_pairs
+
         # ★★ 铺满 + 满额即停（用户口径 2026-10-21）：
         #   派出去的是一个**候选池**（缺口 × mult），不是"刚好够的局数"；dispatcher 的队列语义
         #   本来就是「空一个槽就从池里取下一个」，所以每个槽从 t=0 起满负荷、结算一局补一局；
         #   `_quota_watch`（on_result 回调）实时累加逐关样本，**逐关**全满额就置 `halt` ⇒ worker 立即停止取新任务
         #   ⇒ 池里剩下的候选**从不运行**（不是"派了再丢"）。在飞副本走既有 dedup 路径丢弃。
-        import threading
-
         halt = threading.Event()
         live: dict[int, int] = {}
-        stage_set = {int(s) for s in stages}
-        pool_mult = float(getattr(args, "volume_pool_mult", 0) or DEFAULT_POOL_MULT)
-        self._volume_halted = False
+        stage_set = {int(s) for s in state.stages}
+        pool_mult = float(getattr(self.args, "volume_pool_mult", 0) or DEFAULT_POOL_MULT)
+        combined: dict | None = None
 
         def _quota_watch(summary: object) -> None:
             if not isinstance(summary, dict):
@@ -766,22 +809,22 @@ class TrainingVolume:
             if isinstance(n, int) and n > 0:
                 live[key] = live.get(key, 0) + int(n)
             # 判据是**逐关**（短局关不能靠长局关顶），与 `shortfall_by_stage` 同源
-            if quota_met(stages=stages, collected=live, target_transitions=target):
+            if quota_met(stages=state.stages, collected=live, target_transitions=state.target):
                 halt.set()
 
-        while self._volume_waves < max_batches:
-            wver = common.distribution.weights_fingerprint(args.out)
+        while self._volume_waves < state.max_batches:
+            wver = common.distribution.weights_fingerprint(self.args.out)
             totals = settled_stage_totals(
                 self._traj_dir,
                 wver,
-                extra_wver=extra_wver,
-                course_fp=course_fp,
-                corpus_fp=corpus_fp,
+                extra_wver=state.extra_wver,
+                course_fp=state.course_fp,
+                corpus_fp=state.corpus_fp,
                 state_init=self._state_init,
                 mem=self._round_mem_shards(it),
             )
-            collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
-            games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
+            collected = {s: int(totals.get(s, (0, 0))[1]) for s in state.stages}
+            games_done = {s: int(totals.get(s, (0, 0))[0]) for s in state.stages}
             # 实时账本从盘上事实起步（**原地**更新：`_quota_watch` 持有的是同一个 dict）
             live.clear()
             live.update(collected)
@@ -796,12 +839,12 @@ class TrainingVolume:
             # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
             est_s_now: dict[int, int] = {}
             est_src_now: dict[int, str] = {}
-            for s in stages:
+            for s in state.stages:
                 est_s_now[s], est_src_now[s] = pick_stage_est(
                     _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0)),
-                    int(est_s.get(s, 0) or 0),
+                    int(state.est_s.get(s, 0) or 0),
                 )
-            est_now = int(est_global or 0) or _learned_samples_per_game(
+            est_now = int(state.est_global or 0) or _learned_samples_per_game(
                 sum(collected.values()), sum(games_done.values())
             )
             # 派局用的 est 往低处拉（A0-c）：`ceil(缺口/est)` 因此多派 ~8% 局，把「局长继续变短」
@@ -816,57 +859,61 @@ class TrainingVolume:
                 #   池里剩下的候选**从不运行**。墙钟由「配额达成时刻」决定，与池多大无关，
                 #   因此 est 的 ±40% 跳变不再换来「第二批」。
                 plan_g = pool_games_by_stage(
-                    stages=stages,
+                    stages=state.stages,
                     collected=collected,
                     games_done=games_done,
-                    target_transitions=target,
+                    target_transitions=state.target,
                     ests=est_dispatch,
-                    game_caps=stage_caps,
+                    game_caps=state.stage_caps,
                     width=0,  # 池远大于槽位 ⇒ 不需要（也没法）知道集群有几个槽
                     mult=pool_mult,
                 )
                 short_note = {
-                    s: quota - int(collected.get(s, 0))
-                    for s in stages
-                    if int(collected.get(s, 0)) < quota
+                    s: state.quota - int(collected.get(s, 0))
+                    for s in state.stages
+                    if int(collected.get(s, 0)) < state.quota
                 }
                 plan_capped = False
                 pool_note = f"池 {sum(plan_g.values())} 局（×{pool_mult}）"
             else:
                 # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
                 plan_g = spread_games_by_stage(
-                    stages=stages,
+                    stages=state.stages,
                     collected=collected,
                     games_done=games_done,
-                    target_transitions=target,
-                    game_caps=stage_caps,
-                    width=width,
+                    target_transitions=state.target,
+                    game_caps=state.stage_caps,
+                    width=state.width,
                 )
                 short_note = {
-                    s: quota - int(collected.get(s, 0))
-                    for s in stages
-                    if int(collected.get(s, 0)) < quota
+                    s: state.quota - int(collected.get(s, 0))
+                    for s in state.stages
+                    if int(collected.get(s, 0)) < state.quota
                 }
                 plan_capped = False
                 est_src = "cold-start"
-                est_src_now = {s: "cold-start" for s in stages}
-                pool_note = f"池 {sum(plan_g.values())} 局（冷启动按宽度 {width} 铺）"
+                est_src_now = {s: "cold-start" for s in state.stages}
+                pool_note = f"池 {sum(plan_g.values())} 局（冷启动按宽度 {state.width} 铺）"
             if not plan_g:
                 break
             # 首波读数：进 iteration 事件（`est_used` / `est_src`）—— 批数由首波决定，
             # 记末波的 est 等于「事后诸葛亮」，会读不出「首波高估了多少」。
-            if not first_est_used:
+            if not state.first_est_used:
                 # 冷启动档（无 learned、无 trailing）根本不是「用了某个估计」：那批是
                 # `spread_games_by_stage(width)` 按机器宽度铺的。记 `-1` 而不是 `0`
                 # （0 在下游是「无估计」的值，会和「估出来是 0」混成一件事）。
                 cold = all(v == "cold-start" for v in est_src_now.values())
-                first_est_used = {s: (-1 if cold else int(est_dispatch.get(s, 0))) for s in stages}
-                first_est_raw = {s: (-1 if cold else int(est_s_now.get(s, 0))) for s in stages}
-                first_est_src = dict(est_src_now)
-            pairs = continuous_pairs(self._rotate_seed, it, plan_g, start_idx)
+                state.first_est_used = {
+                    s: (-1 if cold else int(est_dispatch.get(s, 0))) for s in state.stages
+                }
+                state.first_est_raw = {
+                    s: (-1 if cold else int(est_s_now.get(s, 0))) for s in state.stages
+                }
+                state.first_est_src = dict(est_src_now)
+            pairs = continuous_pairs(self._rotate_seed, it, plan_g, state.start_idx)
             self._volume_ordinary_seeds.update(pairs)
             for s, n in plan_g.items():
-                start_idx[s] = start_idx.get(s, 0) + int(n)
+                state.start_idx[s] = state.start_idx.get(s, 0) + int(n)
             self._volume_waves += 1
             log(
                 f"[volume] it{it}: batch{self._volume_waves} "
@@ -874,7 +921,7 @@ class TrainingVolume:
                 f"est_used={ {s: est_dispatch.get(s) for s in plan_g} } "
                 f"est_raw={ {s: est_s_now.get(s) for s in plan_g} } src={est_src}"
                 + (
-                    f"，无历史 ⇒ 按宽度 {width} 满铺（不猜 est））"
+                    f"，无历史 ⇒ 按宽度 {state.width} 满铺（不猜 est））"
                     if est_src == "cold-start"
                     else "）"
                 )
@@ -890,29 +937,37 @@ class TrainingVolume:
             if halt.is_set():
                 self._volume_halted = True
                 break
+        return combined
 
-        wver = common.distribution.weights_fingerprint(args.out)
+    def _volume_continuous_settle(
+        self, it: int, state: _Continuous, combined: dict | None
+    ) -> None:
+        import common.distribution
+        from worker.resume import settled_stage_totals
+        from worker.volume_alloc import VOLUME_ALLOC_RULE
+
+        wver = common.distribution.weights_fingerprint(self.args.out)
         totals = settled_stage_totals(
             self._traj_dir,
             wver,
-            extra_wver=extra_wver,
-            course_fp=course_fp,
-            corpus_fp=corpus_fp,
+            extra_wver=state.extra_wver,
+            course_fp=state.course_fp,
+            corpus_fp=state.corpus_fp,
             state_init=self._state_init,
             mem=self._round_mem_shards(it),
         )
-        collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
+        collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in state.stages)
         unmet = {
-            s: quota - int(totals.get(s, (0, 0))[1])
-            for s in stages
-            if int(totals.get(s, (0, 0))[1]) < quota
+            s: state.quota - int(totals.get(s, (0, 0))[1])
+            for s in state.stages
+            if int(totals.get(s, (0, 0))[1]) < state.quota
         }
         if unmet:
             self._volume_capped = True
             log(
-                f"[volume] WARN it{it}: 连续配额未满 batches={self._volume_waves}/{max_batches} "
-                f"unmet={unmet} per_stage_quota={quota} game_cap={game_cap}——"
-                f"est 持续低估或触硬顶（非静默；pooled={collected_total}/{target}）"
+                f"[volume] WARN it{it}: 连续配额未满 batches={self._volume_waves}/{state.max_batches} "
+                f"unmet={unmet} per_stage_quota={state.quota} game_cap={state.game_cap}——"
+                f"est 持续低估或触硬顶（非静默；pooled={collected_total}/{state.target}）"
             )
         stage_stats = {
             s: {
@@ -923,13 +978,13 @@ class TrainingVolume:
                 # 的估计原值（learned / trailing），两者放在一起才读得出「首波高估了多少」，
                 # 也才分得清「估计器错」与「0.92 系数错」（P0-2 的口径；2026-10-21 评审 P1）。
                 # `-1` = 冷启动（那批不是按估计铺的，是按机器宽度满铺）。
-                "est_s": int(est_s.get(s, est_global)),
-                "est_used": int(first_est_used.get(s, 0)),
-                "est_raw": int(first_est_raw.get(s, 0)),
-                "est_src": first_est_src.get(s, "none"),
-                "cap_games": int(stage_caps.get(s, 0)),
+                "est_s": int(state.est_s.get(s, state.est_global)),
+                "est_used": int(state.first_est_used.get(s, 0)),
+                "est_raw": int(state.first_est_raw.get(s, 0)),
+                "est_src": state.first_est_src.get(s, "none"),
+                "cap_games": int(state.stage_caps.get(s, 0)),
             }
-            for s in stages
+            for s in state.stages
         }
         # 进 iteration 事件的**分关账**（2026-10-07，plan/rollout-stage-balance §4.2）：
         # 规则版本 + 分关 collected/games/est_s/cap_games + 缺口（硬指标）。为什么带上规则
@@ -937,7 +992,7 @@ class TrainingVolume:
         # 换了分配口径」必须在**事件**里可读（§15.5 的精神：不许静默漂移，也不拒收在训课程）。
         # 顶层 `est_src`：只在全关同源时给具体值，否则 `mixed`（拼一个「首关的源」会把
         # 「一半 learned 一半 trailing」这轮最该看的情形抹平）。
-        _srcs = set(first_est_src.values()) or {"none"}
+        _srcs = set(state.first_est_src.values()) or {"none"}
         self._volume_stage_stats = {
             "rule": VOLUME_ALLOC_RULE,
             "est_src": next(iter(_srcs)) if len(_srcs) == 1 else "mixed",
@@ -946,14 +1001,14 @@ class TrainingVolume:
             "est_agg": str(getattr(self.args, "est_agg", "latest") or "latest"),
             # `halted` = 逐关配额全部达成、池里剩下的候选没派出去（2026-10-21 用户口径）
             "halted": bool(getattr(self, "_volume_halted", False)),
-            "quota": int(quota),
-            "stages": {str(s): stage_stats[s] for s in stages},
+            "quota": int(state.quota),
+            "stages": {str(s): stage_stats[s] for s in state.stages},
             "shortfall": {str(s): int(v) for s, v in unmet.items()},
         }
         log(
             f"[volume] it{it}: continuous 收官 batches={self._volume_waves} "
-            f"collected={collected_total}/{target} 达标关="
-            f"{len(stages) - len(unmet)}/{len(stages)} rule={VOLUME_ALLOC_RULE} stats={stage_stats}"
+            f"collected={collected_total}/{state.target} 达标关="
+            f"{len(state.stages) - len(unmet)}/{len(state.stages)} rule={VOLUME_ALLOC_RULE} stats={stage_stats}"
         )
         self._volume_collected = collected_total
         # 报告真源 = 本轮盘上 shard（与 settled_stage_totals 同源）；wave 只补时间锚点。
@@ -966,13 +1021,13 @@ class TrainingVolume:
         disk_reports = resumed_manifests(
             self._traj_dir,
             wver,
-            extra_wver=extra_wver,
-            course_fp=course_fp,
+            extra_wver=state.extra_wver,
+            course_fp=state.course_fp,
             state_init=self._state_init,
             mem=self._round_mem_shards(it),
         )
-        if stages:
-            stage_set = {int(s) for s in stages}
+        if state.stages:
+            stage_set = {int(s) for s in state.stages}
             filtered: list[dict] = []
             for r in disk_reports:
                 st = r.get("stage")

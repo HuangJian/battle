@@ -7508,3 +7508,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   闭包搬成 `_Corpus.run_slot`，计数改 `_Stats` 字段表，`_is_busy_hint` 提为模块级），
   长函数存量 **13 → 12**，形状基线删除该文件的长函数条目（宽参数条目保留）。
   全文 → `docs/nn/engineering.md` §204。
+- **2026-11-18（长函数存量第二十六刀：连续配额循环 / 收官 trainer）**：
+  `trainer/loop_volume.py::_volume_collect_continuous` 327 → **48** 行（新增 `_Continuous`
+  常量快照，循环与收官分别搬进 `_volume_continuous_loop` / `_volume_continuous_settle`），
+  长函数存量 **12 → 11**，形状基线删除该文件条目；测试侧 `_StubLoop` 与
+  `test_loop_volume_split.CLUSTER` 同步登记。
+  全文 → `docs/nn/engineering.md` §205。

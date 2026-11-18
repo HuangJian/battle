@@ -25,6 +25,23 @@
 
 ---
 
+## §205 长函数存量第二十六刀：连续配额循环 / 收官（trainer）327 → 48（2026-11-18）
+
+`trainer/loop_volume.py::TrainingVolume._volume_collect_continuous` **327 → 48 行**，
+长函数存量 **12 → 11**（`LONG_FUNCS_BASELINE` 删除 `trainer/loop_volume.py` 条目）。
+
+这一刀按 §201 的「先造上下文对象」：
+- `_Continuous`：一轮连续配额的常量快照（关集 / 配额 / 硬顶 / est / 首波读数），
+  消掉循环段与收官段之间的 20+ 个共享局部量。
+- `_volume_continuous_loop`（165 行）：`_quota_watch` + 候选池规划 + 派发循环。
+- `_volume_continuous_settle`（102 行）：盘上收官读数 / 分关账 / 报告合并。
+
+`_volume_collect_continuous` 现在只做前置分支（流式 / collect-only）+ 快照构造 + 两段调用。
+16 处日志逐条比对：文案与顺序不变。测试侧 `_StubLoop` 补两条 unbound 转发，
+`test_loop_volume_split.CLUSTER` 闭集登记两个新方法名。
+
+---
+
 ## §204 长函数存量第二十五刀：BC 派发槽位上下文（worker）316 → 185（2026-11-18）
 
 `worker/bc_dispatch.py::dispatch_bc_corpus` **316 → 185 行**，长函数存量 **13 → 12**

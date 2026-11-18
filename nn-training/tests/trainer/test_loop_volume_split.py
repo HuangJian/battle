@@ -71,6 +71,9 @@ CLUSTER = (
     "_volume_journal_replay",
     "_volume_topup",
     "_volume_collect_continuous",
+    # 2026-11-18（长函数存量）：`_volume_collect_continuous` 拆出的循环段与收官段。
+    "_volume_continuous_loop",
+    "_volume_continuous_settle",
     # greedy 结果配额（plan/greedy-outcome-quota rev4）：独立采集阶段。
     "_volume_collect_greedy",
     # 2026-11-18（长函数存量）：`_volume_collect_greedy` 拆出的派发波与盘上扫描。

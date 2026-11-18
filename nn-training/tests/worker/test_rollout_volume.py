@@ -618,6 +618,16 @@ class _StubLoop:
     def _volume_collect_continuous(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_continuous(cast(Any, self), it, dist_cfg)
 
+    def _volume_continuous_loop(
+        self, it: int, dist_cfg: dict | None, state: Any
+    ) -> dict | None:
+        return TrainingLoop._volume_continuous_loop(cast(Any, self), it, dist_cfg, state)
+
+    def _volume_continuous_settle(
+        self, it: int, state: Any, combined: dict | None
+    ) -> None:
+        TrainingLoop._volume_continuous_settle(cast(Any, self), it, state, combined)
+
     def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_greedy(cast(Any, self), it, dist_cfg)
 
