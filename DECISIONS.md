@@ -7106,3 +7106,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   边界）、`_slot_count` 的 platform_utils 兜底（异常类型已写进 `note`）、`_open_tailscale`（异常族
   由 `tailscale_boot.ensure` 定义）。判据 `tests/remote/test_rollout_node.py` +2；反向把集改回
   `(Exception,)` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §137。
+
+- **2026-11-18（P0-7 第二十二批：进程内判据不许宽捕）**：`remote/push_dispatch.py` 6 → **3**
+  （G4 352 → **349**）。这一批立了一条分界线：**这个 try 包住的代码能不能自己坏？** 能（网络 /
+  盘 / 对端进程 / 第三方 API）⇒ 宽捕是边界；不能（纯内存、同进程的两个我们自己的对象）⇒ 宽捕
+  只能是垃圾桶。① `_job_priority_of` 读 hub 本地判据表：`PRIORITY_HIGHEST` 的语义是「没人在做
+  这一份」⇒ 备份不派；旧宽捕把判据表换形状的 `AttributeError` 读成那件事 ⇒ **备份永不派发且
+  无日志**，现在整段删 try（边界在 `run_tick_loop`）。「老 hub / 替身没有该方法」那条兼容分支
+  保留，判据同时钉住两条。② `_http` 收窄成 `_PUSH_HTTP_ERRORS`（`NET_ERRORS` +
+  `http.client.HTTPException` + `ValueError`），4xx/5xx 仍算「有答」；HTTPError 里读体失败收窄成
+  `(OSError, http.client.HTTPException)`（状态码已经是结论）。判据
+  `tests/remote/test_hub_push_dispatch.py` +1。全文 → `docs/nn/engineering.md` §138。

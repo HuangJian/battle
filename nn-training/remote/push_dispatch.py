@@ -31,6 +31,7 @@ store_job_failure/_job_dir`；★M4b：`mode_of` 随模式退役）。
 
 from __future__ import annotations
 
+import http.client
 import json
 import secrets
 import threading
@@ -44,6 +45,7 @@ from threading import Lock
 from typing import Any
 
 from common import net_http, runtime
+from common.errors import NET_ERRORS
 from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
@@ -100,6 +102,17 @@ def _status_of(body: bytes) -> str:
     return str((doc or {}).get("status") or "") if isinstance(doc, dict) else ""
 
 
+#: 「这一发没答」的真失败形态（`_http` 的路面）：传输面 = `NET_ERRORS`（OSError 盖 URLError /
+#: 超时 / TLS），再加 `http.client.HTTPException`（状态行/体被截断）与 `ValueError`（URL 拼不对）。
+#: **4xx/5xx 不算**（那是「有答」，见 `_http` docstring）。把自家 bug 落进这个集，现场就是
+#: 「这台 worker 一会儿连得上一会儿连不上」，而调度据此把人换掉。
+_PUSH_HTTP_ERRORS: tuple[type[BaseException], ...] = (
+    *NET_ERRORS,
+    http.client.HTTPException,
+    ValueError,
+)
+
+
 def _http(
     url: str,
     key: str,
@@ -126,9 +139,10 @@ def _http(
     except urllib.error.HTTPError as e:
         try:
             return e.code, e.read()
-        except Exception:
+        except (OSError, http.client.HTTPException):
+            # 有答但体读不出来（截断/对端早关）：状态码已经是结论，体丢了就交空串
             return e.code, b""
-    except Exception:
+    except _PUSH_HTTP_ERRORS:
         return None
 
 
@@ -797,10 +811,10 @@ class PushDispatcher(TickLoopHost):
         fn = getattr(self.hub, "job_priority_of", None)
         if fn is None:
             return PRIORITY_HIGHEST  # 老 hub / 测试替身：不知道就按「没人在做」
-        try:
-            return str(fn(jid))
-        except Exception:
-            return PRIORITY_HIGHEST
+        # 无 try：这是**进程内**的本地判据（纯内存，不调网络、不摸盘），它抛出只能是我们的 bug。
+        # 旧宽捕把 bug 读成 `PRIORITY_HIGHEST` = 「没人在做这一份」——于是备份**永不派发**，
+        # 现场表现为「这一课莫名不备份」。抛出由 `run_tick_loop` 的边界接（一行日志 + 下一拍）。
+        return str(fn(jid))
 
     def _backup_target_in(self, view: _TickView, course: str) -> str | None:
         """该课「值得再派一份备份」的那份活的 jid；无 → None（判据全部取自**快照**）。

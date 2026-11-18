@@ -1356,3 +1356,31 @@ def test_start_beacon_failure_is_logged(tmp_path: Path) -> None:
     head, _, cause = logs[0].partition("（")
     assert head.endswith("jid-beacon-1 @ push:w1: 开算打点没打上")
     assert cause.startswith("OSError('hub 不可达')")
+
+
+def test_a_priority_bug_is_not_read_as_nobody_is_doing_it(
+    tmp_path: Path, worker_factory
+) -> None:
+    """`_job_priority_of` 的判据（P0-7 第二十二批）：进程内本地读面，不许再宽捕。
+
+    `PRIORITY_HIGHEST` 的语义是「没人在做这一份」⇒ **备份不派**。旧宽捕把 hub 方法自己的
+    bug（判据表换了形状 ⇒ `AttributeError`）读成那件事，现场就是「这一课莫名不备份」而日志
+    一个字都没有。它不调网络、不摸盘 ⇒ 抛出只能是我们的 bug，交给 `run_tick_loop` 的边界接。
+    """
+    from common.protocol import PRIORITY_HIGHEST
+
+    hub = _hub(tmp_path, ["ppo-c"])
+    disp = _dispatcher(hub, _workers_with(tmp_path, worker_factory, (worker_factory(), {})))
+
+    class _BuggyHub:
+        def job_priority_of(self, _jid: str) -> str:
+            raise AttributeError("priority table lost .get")
+
+    disp.hub = _BuggyHub()
+    with pytest.raises(AttributeError):
+        disp._job_priority_of("p" * 16)
+
+    # 老 hub / 测试替身没有这个面 ⇒ 仍按「没人在做」（这条是既有契约，不许被上一条改掉）
+    disp.hub = object()
+    prio = disp._job_priority_of("p" * 16)
+    assert prio == PRIORITY_HIGHEST

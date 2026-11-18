@@ -57,7 +57,7 @@
   "remote/prefetch.py": 2,
   "remote/push_bootstrap.py": 4,
   "remote/push_client.py": 2,
-  "remote/push_dispatch.py": 6,
+  "remote/push_dispatch.py": 3,
   "remote/push_register.py": 4,
   "remote/push_tunnel.py": 1,
   "remote/result_upload.py": 2,

@@ -25,6 +25,29 @@
 
 ---
 
+## §138 P0-7 第二十二批：进程内判据不许宽捕（2026-11-18）
+
+`remote/push_dispatch.py` 6 → **3**。这一批的判据是一条**分界线**，而不是一个候选清单：
+
+> 这个 `try` 包住的代码**能不能自己坏**？——能（网络、盘、对端进程、第三方 API）⇒ 宽捕是边界；
+> 不能（纯内存、同进程的两个我们自己的对象）⇒ 宽捕只能是垃圾桶。
+
+| 位置 | 宽捕读成了什么 | 现场 | 修法 |
+|---|---|---|---|
+| `_job_priority_of` | hub 判据表换形状（`AttributeError`）⇒ `PRIORITY_HIGHEST` = 「没人在做这一份」 | **备份永不派发**，且一行日志都没有（「这一课莫名不备份」） | 整段删 try：进程内纯内存读 ⇒ 抛出只能是我们的 bug；边界交给 `run_tick_loop`（一行「派发拍异常」+ 下拍） |
+| `_http` 传输失败 | 自家 bug ⇒ `None` = 「这台 worker 没答」 | 调度把人换掉，现场是「一会儿连得上一会儿连不上」 | `_PUSH_HTTP_ERRORS` = `NET_ERRORS` + `http.client.HTTPException` + `ValueError`（4xx/5xx 仍是「有答」） |
+| `_http` 读 4xx/5xx 的体 | 体读不出来也当「有答无体」——这一处**是对的** | — | 但集合要写出来：`(OSError, http.client.HTTPException)` |
+
+「老 hub / 测试替身没有 `job_priority_of`」那条分支保持不变（`getattr(...) is None` ⇒ HIGHEST），
+它与「方法抛异常」是两件事，判据同时钉住了这两条（否则删 try 会把兼容口也删掉）。
+
+判据（`tests/remote/test_hub_push_dispatch.py` +1）：`job_priority_of` 抛 `AttributeError` ⇒ **穿出去**；
+`disp.hub` 换成没有该方法的对象 ⇒ 仍 `PRIORITY_HIGHEST`。
+
+读数：G4 **352 → 349**（137 文件）· G9 25 不变。
+
+---
+
 ## §137 P0-7 第二十一批：探活面的结论最贵（2026-11-18）
 
 `remote/rollout_node.py` 8 → **4**。这一批的关键不是「捕得宽不宽」，而是**结论有多贵**：
