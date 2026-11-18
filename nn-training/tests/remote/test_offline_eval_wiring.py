@@ -728,7 +728,8 @@ def test_backfeed_body_includes_eval_rows_for_the_round(tmp_path: Path) -> None:
         now_fn=time.time,
         log=_quiet,
     )
-    assert d._post_artifact(2)
+    posted = d._post_artifact(2)
+    assert posted
     assert sent and [r["event"] for r in sent[0]["eval_rows"]] == [
         "eval",
         "eval_summary",
@@ -771,8 +772,12 @@ def test_deliverer_reposts_a_delivered_round_for_late_eval_rows(
     # （「有后台线程才重投」——那条守卫本身由 `test_deliverer_*` 系列覆盖）。
     monkeypatch.setattr(d, "probe", probe)
     monkeypatch.setattr(d, "_thread", threading.current_thread())
-    assert d._sync() == 1 and posted == [1], "首投按常规积压走"
-    assert d._sync() == 0 and posted == [1], "投过了就不再重复"
+    sent_n = d._sync()
+    assert sent_n == 1 and posted == [1], "首投按常规积压走"
+    sent_n = d._sync()
+    assert sent_n == 0 and posted == [1], "投过了就不再重复"
     d.submit_eval_round(1)
-    assert d._sync() == 1 and posted == [1, 1], "评估落账后必须重投该轮（否则读数等段末）"
-    assert d._sync() == 0 and posted == [1, 1], "重投只补一次（幂等，不刷屏）"
+    sent_n = d._sync()
+    assert sent_n == 1 and posted == [1, 1], "评估落账后必须重投该轮（否则读数等段末）"
+    sent_n = d._sync()
+    assert sent_n == 0 and posted == [1, 1], "重投只补一次（幂等，不刷屏）"

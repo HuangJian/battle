@@ -7323,3 +7323,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `guard_state().cloud_halted`、连败/停腿读 `remote_fail_state()`，两处驱动调用移出 assert。
   收编旧用例是接缝建设的一部分 —— 否则「视图没人用」与「视图没建」在基线上无法区分。
   全文 → `docs/nn/engineering.md` §166。
+- **2026-11-18（G5 第二十八批：驱动入口）**：`test_boot_wire_guard.py` 4 → 0、
+  `test_offline_eval_wiring.py` 5 → 0（G5 312 → **303**，102 文件）。零生产改动：
+  `offline_boot` 是生成物（改名要重建发行物，收益为零），`_sync()` / `_post_artifact()` 的
+  返回值就是判据 ⇒ 调用赋给局部变量后再断言。全文 → `docs/nn/engineering.md` §167。

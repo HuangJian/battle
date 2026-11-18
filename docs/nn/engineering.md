@@ -25,6 +25,19 @@
 
 ---
 
+## §167 G5 第二十八批：引导侧与补传侧的驱动入口（2026-11-18）
+
+`tests/remote/test_boot_wire_guard.py` **4 → 0**、`tests/remote/test_offline_eval_wiring.py`
+**5 → 0**（G5 **312 → 303**，104 → 102 文件）。零生产改动，全部是驱动入口移出 assert：
+
+- 引导侧：`offline_boot` 是**生成物**（`remote/_offline_boot/*.pyfrag`），`_min_rate()` /
+  `_read_body(...)` 是引导孪生实现；给它们改名要连带重建发行物，换不到契约收益
+  ⇒ `floor = ts._min_rate()` / `body = ts._read_body(...)` 后再断言。
+- 补传侧：`_post_artifact(2)` 与四次 `_sync()` 的结果就是判据本身（投了几轮 / 幂等），
+  统一 `sent_n = d._sync(); assert sent_n == …`。
+
+---
+
 ## §166 G5 第二十七批：复用既有接缝（2026-11-18）
 
 `tests/trainer/test_loop_gate_nopark.py` **5 → 0**、`tests/worker/test_remote_ppo_phases.py`
