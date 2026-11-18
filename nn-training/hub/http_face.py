@@ -155,6 +155,16 @@ SEND_CHUNK = 256 * 1024
 #: 打「发送完成」日志的最小 body（字节）：小 JSON 不打（高频），payload/code 这类必打。
 SEND_LOG_MIN_BYTES = 256 * 1024
 
+#: 「对端提前断开」的日志节流（首条 + 每 N 条一条）。
+#:
+#: 2026-11-18 DSW 现场：`ERROR /relay/dsw/v1/result: [WinError 10053] An established connection
+#: was aborted by the software in your host machine` 一分钟 16 条，全被组件错误注册表当成
+#: 「未处理错误」上报。**它不是 hub 的错误** —— 10053/10054 的语义是「这条连接被对端/本机
+#: 栈终止」，而 relay 的 `/relay/<node>/v1/result` 会让 hub 等最多 45s 再写回执，调用方自己的
+#: timeout 更短时必然出现这一幕。记成 ERROR 有两个害处：真错误被淹、复盘时分不清「链路抖动」
+#: 与「hub 崩了」。
+CLIENT_GONE_LOG_EVERY = 10
+
 
 def _is_ip_literal(s: str) -> bool:
     """是否是合法的 IP 字面量（`ipaddress` 严格解析；带端口的 `1.2.3.4:56` 不算）。"""
@@ -192,6 +202,7 @@ def attributed_source(peer: str, cf_header: str) -> tuple[str, str]:
     if cf and _is_ip_literal(cf) and not _is_loopback(cf):
         return cf, "cf"
     return p, "peer"
+
 
 # ------------------------------------------------------------------ HTTP
 
@@ -236,6 +247,25 @@ class HubHandler(
     #: 与 `_seen_worker_sources` 同规：进程级类属性（ThreadingHTTPServer 每请求新建实例）。
     _worker_pulse: WorkerPulse = WorkerPulse()
 
+    #: ★ 对端提前断开的累计次数（进程级，与 `_blocked_logged` 同规）。
+    #: 只进不该打 ERROR 的那条分支：它不是故障计数，是**链路抖动**的读数。
+    _client_gone: dict[str, int] = {"n": 0}
+
+    @classmethod
+    def note_client_gone(cls, path: str, err: BaseException) -> str:
+        """对端先走 ⇒ 该打的那一行（`""` = 这一条不打了，只计数）。
+
+        判据不是「异常长得像不像 10053」（那是 Windows 文案），而是**异常类型**：
+        `ConnectionError` 一族（`ConnectionAbortedError` 10053 / `ConnectionResetError` 10054 /
+        `BrokenPipeError`）的语义统一是「这条连接没了」。对端走了，hub 再回 500 也没人收 ——
+        上一版正是在这里写 500，写失败又把 traceback 打进了错误注册表。
+        """
+        cls._client_gone["n"] = int(cls._client_gone.get("n", 0)) + 1
+        n = int(cls._client_gone["n"])
+        if n == 1 or n % CLIENT_GONE_LOG_EVERY == 0:
+            return f"WARN {path}: 对端提前断开（累计 {n} 次，非 hub 错误）：{err}"
+        return ""
+
     # ---- 基础 ----
     @classmethod
     def pulse_events(cls) -> list[dict]:
@@ -263,10 +293,14 @@ class HubHandler(
         # 恰恰最爱发生在这些高频路径上，静默等于抹掉唯一的破案线索。
         line = fmt % args
         if (
-            '"GET /ping ' in line
-            or '"GET /jobs/peek' in line
-            or ('"GET /jobs/' in line and ('/result ' in line or '/payload ' in line))
-        ) and ' 401 ' not in line and ' 403 ' not in line:
+            (
+                '"GET /ping ' in line
+                or '"GET /jobs/peek' in line
+                or ('"GET /jobs/' in line and ("/result " in line or "/payload " in line))
+            )
+            and " 401 " not in line
+            and " 403 " not in line
+        ):
             return
         # 隧道来源还原（B，2026-09-17）：回源流量在这里本来全写成 127.0.0.1（x1-rebirth 事故
         # 排查时最大的阻雾），有归因来源就补上——`log_message` 只打非常规事件，不刷屏。
@@ -580,9 +614,7 @@ class HubHandler(
                     return
                 # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
                 # replay 语料（claim 闸 + 转换器合同已在本进程）。additive；旧客户端忽略。
-                self._json(
-                    {"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200
-                )
+                self._json({"status": "ok", "capabilities": [CAP_REPLAY_CORPUS]}, 200)
             elif path == "/code":
                 self._get_shared_code()
             elif path == "/jobs/peek":
@@ -645,6 +677,13 @@ class HubHandler(
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
+        except ConnectionError as e:
+            # 对端提前断开（10053/10054/EPIPE）：**不是** hub 出错，也不回 500 ——
+            # 那条 socket 已经死了，写只会再抛一次同样的事（而那一次的 traceback 才是
+            # dashboard 里那条「未处理错误」）。计数 + 节流一行 WARN，见 `note_client_gone`。
+            note = self.note_client_gone(path, e)
+            if note:
+                self.log_message("%s", note)
         except Exception as e:  # 服务器不因单请求崩溃
             self.log_message("ERROR %s: %s", path, e)
             self._json({"error": "internal"}, 500)
@@ -728,6 +767,12 @@ class HubHandler(
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
             self._json({"error": str(e)}, 400)
+        except ConnectionError as e:
+            # 同 `do_GET`：对端先走不是 hub 的错误。relay 的回执就写在这条分支上 ——
+            # `/relay/<node>/v1/result` 等 45s 才写，调用方 timeout 更短时必然撞上。
+            note = self.note_client_gone(path, e)
+            if note:
+                self.log_message("%s", note)
         except Exception as e:
             self.log_message("ERROR %s: %s", path, e)
             self._json({"error": "internal"}, 500)
@@ -954,8 +999,7 @@ class HubHandler(
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server] claim job={jid} course={course or '-'} "
             f"worker={worker_id or '?'} mode={mode} "
-            f"lease={token[:8] if token else 'none'}"
-            + (f" reclaims={n}" if n else ""),
+            f"lease={token[:8] if token else 'none'}" + (f" reclaims={n}" if n else ""),
             flush=True,
         )
 
@@ -1007,6 +1051,7 @@ class HubHandler(
             self._json({"error": f"请求体截断（声明 {n}，实收 {len(raw)}）"}, 400)
             return None
         return raw
+
     #: "kind:jid:status" -> 上次告警墙钟（hub 侧拒绝日志的 60s 节流用的）
     _REJECT_WARN_AT: dict[str, float] = {}
 

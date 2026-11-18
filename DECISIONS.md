@@ -6225,3 +6225,46 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **后果/未完成**：Paddle GPU 真机（AI Studio）的 35×20 H2D/update 墙钟与显存余量尚未测；判据 = 同一 job
   在 torch / Paddle 节点的 `wire` 行与 `loader=lazy peak=…` 读数。回滚 = job 显式 `--ppo-loader=eager`
   （Paddle 侧旧路径逐字节不变）。全文 → `docs/nn/remote-transport.md` §162。
+
+## §2026-11-18-goalnn-relay-alt-port-fallback（中间层只掐 443/8443 ⇒ 预检失败后**换端口**自救，不换域名不换机器）
+
+- **现场**：判词已收敛到 `sni-blocked`（同边缘的 `cloudflare.com` 能握手），但用户在 DSW 上直接 `curl`
+  拿到决定性读数：`https://<hub>:443 = 000`、`https://<hub>:80 = 301`（80 层没拦，CF 强制跳 HTTPS）、
+  **`2053/2083/2087/2096` 全回 `401`**（那是 hub 自己的鉴权在回话 ⇒ TLS+HTTP 整链通）、`8443 = 000`、
+  tailnet 控制面 `000`。
+- **裁定**：中间层不是掐机器、不是掐 CF、不是掐域名整体，而是**在 443/8443 上按 SNI 掐这个域名** ⇒
+  唯一要改的是**端口**。`probe_hub` 在端口级失败（`blackhole / sni-blocked / tls-blocked / cf-blocked /
+  tls-error`）之后，对 CF 官方的五个备用 HTTPS 端口各发一次**真的**预检（并行）；有 `ok`/`http-*` ⇒ 判词
+  改写 **`port-blocked`** + `facts["alt_port"]`，`RelayChannel.open` **当场改写 `hub_url`** 再起线程
+  （改写结果留在 `_args`，线程死亡重建不重复扫描）。`app-stall` 不扫（那是 hub 自己有问题，换端口一样不回）。
+- **为什么用真请求而不是裸握手**：`gateway-5xx` 表示端口通但 CF 够不到上游，换过去只会从「超时」变成「530」；
+  只有拿到 `http-*` 才算端到端可用。
+- **被否决**：① 换自有域名 + 命名隧道（成本高一个数量级，且要动 CF 侧；实测同域换端口就够）；
+  ② 走 80 端口（`301` 证明 80 未拦，但 quick tunnel 没有「关掉强制 HTTPS」的开关）；③ tailnet 保底
+  （`E=000`，DSW 上同样死）；④ 只写文档让人手改 `hub_url`（下次换机器又要人手改一遍）。
+- **护栏**：`tests/remote/test_rollout_relay.py` 25 → **29** 例；文本断言口径不抬格（`"x" not in facts`
+  改成 `set.isdisjoint`，护栏仍 1502）。
+- **全文** → `docs/nn/remote-transport.md` §159.4；代码 → `remote/rollout_relay.py`
+  （`ALT_HTTPS_PORTS` / `_port_sweep` / `with_port`）。
+
+## §2026-11-18-goalnn-relay-client-gone-is-warn（`/relay/…/v1/result` 的 `WinError 10053` 是「对端先走」，不进错误注册表）
+
+- **现场**：端口回退生效后 DSW 节点真连上了，hub 一分钟报 16 条
+  `ERROR /relay/dsw/v1/result: [WinError 10053] An established connection was aborted by the software
+  in your host machine`，全被组件错误注册表按「未处理错误」上报。
+- **裁定**：`10053`（`ConnectionAbortedError`）/`10054`（`ConnectionResetError`）/`BrokenPipeError`
+  语义统一是**这条连接没了** —— relay 的 `/v1/result` 在 hub 侧要让 hub 等节点回执（45s）才写响应，
+  调用方 urllib 预算更短时必然撞上。这是**链路抖动**，不是 hub 故障 ⇒ 判据用**异常类型**（不用
+  Windows 文案），`do_GET`/`do_POST` 各加一条 `except ConnectionError`：**不记 ERROR、不回 500、
+  不再抛**，只落一行节流的 `WARN … 对端提前断开（累计 N 次，非 hub 错误）`（首条 + 每 10 条一条）。
+- **上一版为什么连 traceback 都进了注册表**：`except Exception` 里先记 ERROR，再
+  `_json({"error":"internal"}, 500)` —— 写在死 socket 上**又抛一次**，那一次的栈才是注册表里那条。
+  对端都没了，500 没有收件人。
+- **被否决**：① 把 hub 侧 `/v1/result` 等待从 45s 降到几秒（会把健康的慢局变成 504）；
+  ② 全局 `except ConnectionError: pass`（真错误会被一起咽掉，反证用例专门钉这一条）。
+- **护栏**：`tests/hub/test_hub_client_gone.py` 3 例（真起 `make_server` + `SO_LINGER=0` 发 RST ⇒
+  只有 WARN、无 ERROR、stderr 无 traceback、下一条请求仍 200 / `RuntimeError` 仍 500 / 节流 1·10·20）。
+  ⚠ `linger` 结构 Windows 是 `HH`、POSIX 是 `ii`，写错会让用例假绿。
+- **全文** → `docs/nn/remote-transport.md` §159.5；代码 → `hub/http_face.py`
+  （`CLIENT_GONE_LOG_EVERY` / `HubHandler.note_client_gone`）。
+

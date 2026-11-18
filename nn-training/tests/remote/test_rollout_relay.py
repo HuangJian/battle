@@ -668,6 +668,76 @@ def test_hint_points_at_hub_when_tls_handshake_succeeds(
     assert facts["tls"]["104.16.231.132"] == "ok:TLSv1.3"
 
 
+def test_probe_falls_back_to_a_working_alternate_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """443 的握手被掐、备用端口整链通 ⇒ 判词直接给「换端口」，并回 `alt_port` 供通道自救。
+
+    读数来自 2026-11-18 DSW 实机（用户在该机直接 curl）：`443=000` 而
+    `2053/2083/2087/2096=401`（**hub 自己的鉴权在回话**，说明 TLS+HTTP 整条链都通）、
+    `8443=000`。⇒ 中间层只盯标准 HTTPS 端口，换端口是同机零成本的修法。
+    """
+    _stub_layers(
+        monkeypatch,
+        tls=("timeout", "握手无应答"),
+        ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
+    swept = {2083: "http-401", 2096: "fail", 2053: "fail", 2087: "fail", 8443: "fail"}
+    monkeypatch.setattr(rr, "_port_sweep", lambda host, ports, token, node_id, t: dict(swept))
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "port-blocked", facts
+    assert facts["alt_port"] == 2083, facts
+    assert facts["alt_ports"]["2083"] == "http-401", facts
+
+
+def test_probe_skips_the_port_sweep_when_the_hub_side_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """握手成功、只有 HTTP 不回（隧道死了 / hub 进程没跑）⇒ **别**去换端口。
+
+    这条是上一条的反证：`app-stall` 时换端口只会把「超时」变成「530 / 一样不回」，
+    白花 5 条请求的钱，还会把人的注意力引到错误的开关上。
+    """
+    _stub_layers(
+        monkeypatch,
+        tls=("ok:TLSv1.3", "TLSv1.3（150ms）"),
+        ctrl=("ok:TLSv1.3", "TLSv1.3（120ms）"),
+        net=("ok:TLSv1.3", "TLSv1.3（60ms）"),
+    )
+
+    def _boom(*_args: object, **_kwargs: object) -> dict[int, str]:
+        raise AssertionError("app-stall 不该触发端口扫描")
+
+    monkeypatch.setattr(rr, "_port_sweep", _boom)
+    _ok, _line, facts = probe_hub("https://hub.example.com", "t", "n1", timeout=0.2)
+    assert facts["hint"] == "app-stall", facts
+    assert {"alt_port", "alt_ports"}.isdisjoint(facts), facts
+
+
+def test_with_port_keeps_scheme_path_and_ipv6_brackets() -> None:
+    """换端口只动端口：scheme / path 原样，裸 IPv6 必须补方括号（`::1:2083` 不是地址）。"""
+    assert rr.with_port("https://hub.example.com/x/", 2083) == "https://hub.example.com:2083/x/"
+    assert rr.with_port("http://[::1]:8787", 2083) == "http://[::1]:2083"
+
+
+def test_channel_switches_hub_url_to_the_alternate_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """预检说「只有 :2083 通」时通道**自己改地址** —— 不让人回去改 CFG 再重跑 cell（≈3 分钟）。"""
+    monkeypatch.setattr(rr, "probe_hub", lambda *_a, **_k: (False, "预检行", {"alt_port": 2083}))
+    logs: list[str] = []
+    ch = RelayChannel(
+        hub_url="https://127.0.0.1",
+        token="t",
+        node_id="n1",
+        agent_port=18999,
+        log=logs.append,
+        wait_sec=0.3,
+    )
+    try:
+        assert ch.open("测试") == ""  # 换过去也连不上（本机没有监听），但地址必须已经改了
+        assert ch._args["hub_url"] == "https://127.0.0.1:2083"
+    finally:
+        ch.stop()
+
+
 def test_tls_verdict_reports_timeout_and_handshake_error() -> None:
     """`_tls_verdict` 的两条真路径：对端**不说话** = timeout；对端**接了又关** = TLS 错误。"""
     silent = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

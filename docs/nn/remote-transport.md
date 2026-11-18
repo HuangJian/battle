@@ -389,6 +389,127 @@ hint=sni-blocked
 hub 若换成非 CF 入口（自建反代 / 内网直连），对照要跟着换，否则 `sni-blocked` 会误报。
 `__all__` 已导出 `TLS_PROBE_SEC` / `CTRL_HOST`，外部（现场脚本 / 烟雾用例）不必摸私有名。
 
+### §159.4 第四次真机（同日 22:43）：换端口就通 —— 中间层只盯 443/8443，`2053/2083/2087/2096` 全回 401
+
+§159.3 的判词（`sni-blocked`：按域名/SNI 掐）在第四次现场被**证实并收窄**。用户在 DSW 上直接跑
+`curl`（`--noproxy '*'`），拿到三组读数：
+
+```
+B  https://<hub>:443                000  8.0s      ← 握手被丢
+C  http://<hub>:80                  301  6.0s      ← 通，但 CF 强制跳 HTTPS（拿到回复了！）
+D  https://<hub>:2053               401  2.7s
+D  https://<hub>:2083               401  1.4s      ← 全通
+D  https://<hub>:2087               401  1.98s
+D  https://<hub>:2096               401  1.26s
+D  https://<hub>:8443               000  6.0s      ← 也被掐
+E  https://login.tailscale.com      000  8.0s      ← tailnet 这条路也不通
+F  MODELSCOPE_NOTEBOOK_PROXY_URL=…   （不是 HTTP_PROXY，urllib/curl 都不吃它）
+```
+
+**四条结论，每条都排掉一层猜测**：
+
+1. **`401` 是 hub 自己的鉴权应答**（不是 CF 边缘的）⇒ 那些端口上 **TLS + HTTP 整条链都通**，
+   请求真的到了 hub。这不是「边缘回了个 4xx」，是端到端可用。
+2. ⇒ **中间层不是「掐这台机器」「掐 CF」「掐这个域名」，而是「在 443/8443 上按 SNI 掐这个域名」**。
+   同一台机器、同一个域名、同一个边缘，换个端口就通。
+3. `C=301` 说明 **80 端口这一层没被拦**（能拿到 CF 的重定向），但 CF 对 `*.trycloudflare.com`
+   强制 HTTPS ⇒ 80 端口不能用来承载 relay（除非改 CF 侧策略，quick tunnel 没有这个开关）。
+4. `E=000` ⇒ **tailnet（`CFG.TS_AUTHKEY` + `link=tailscale`）这条路在 DSW 上也是死的**，
+   别再把它当保底方案。
+
+**修法一（一分钟，零代码）**：`CFG.hub_url` 直接带端口。
+
+```python
+"hub_url": "https://reason-labor-deluxe-electric.trycloudflare.com:2083",
+```
+
+**修法二（同一轮落进代码，免得下次还要人手改）**：
+
+* `ALT_HTTPS_PORTS = (2083, 2096, 2053, 2087, 8443)` —— CF 官方支持的备用 HTTPS 端口全集
+  （除 443 只有这五个），按实测快慢排；
+* `probe_hub` 在**端口级失败**（`blackhole / sni-blocked / tls-blocked / cf-blocked / tls-error`）
+  之后，对这五个端口各发**一次真的 HTTPS 预检**（并行，不是裸握手 —— `gateway-5xx` 说明端口通
+  但 CF 够不到 hub，那和「被掐」是两件事，换过去只会从超时变成 530）；
+* 有任一端口回 `ok`/`http-*` ⇒ 判词改写为 **`port-blocked`**，`facts["alt_port"] = <端口>`；
+* `RelayChannel.open` 见到 `alt_port` **当场改写** `hub_url` 再起线程，并打一行
+  `→ 本次改走 :2083（https://…:2083）`；改写结果留在 `_args` 里，线程死亡重建时直接用新端口，
+  不会再花一次扫描的钱；
+* `app-stall`（握手成功、只有 HTTP 不回）**不扫** —— 那时 hub 自己有问题，换端口一样不回。
+
+**真机读数（本机 Windows，`_port_sweep` 直连实测）**
+
+```
+_port_sweep(hub_host, ALT_HTTPS_PORTS, …) →
+  {2083: 'http-401', 2096: 'http-401', 2053: 'http-401', 2087: 'http-401', 8443: 'http-401'}
+with_port('https://a.example.com/x/', 2083) → https://a.example.com:2083/x/
+with_port('http://[::1]:8787', 2083)        → http://[::1]:2083      ← 裸 v6 补了方括号
+```
+
+（本机这条家宽五个端口全通，所以 8443 也 `401`；DSW 上 8443 被掐正是「按端口掐」的第二个证据。）
+
+**单测**：`test_rollout_relay.py` 25 → **29** 例（+4）——端口回退判词 / `app-stall` 不扫的反证 /
+`with_port` 的 v6 方括号 / 通道自己改 `hub_url`。文本断言口径**不抬格**（`"x" not in facts`
+被计数成形态断言 ⇒ 改 `set.isdisjoint`，护栏仍 1502）。
+
+**边界**：CF 只在这五个端口上听 HTTPS，别的端口一律连不上（不是「随便换个端口都行」）；
+换端口**不影响** relay 的任何契约（注册 URL 仍是 `http://127.0.0.1:<hub 端口>/relay/<node>`，
+节点侧不建隧道、不要入站）；中间层若哪天把这五个端口一起掐，就只剩「换域名 / 换承载 / 换机器」。
+
+### §159.5 同一现场 23:00：`ERROR /relay/dsw/v1/result: [WinError 10053]` 不是 hub 的错
+
+端口回退生效后，DSW 节点**真的连上了**（hub 日志里开始出现 `/relay/dsw/v1/result`，
+不再是清一色超时）。随之冒出来的第一条「错误」是这个，一分钟 16 条，全被组件错误注册表
+按「未处理错误」上报：
+
+```
+[22:59:56] [hub-server 127.0.0.1] ERROR /relay/dsw/v1/result: [WinError 10053]
+An established connection was aborted by the software in your host machine
+```
+
+**它的真实语义：对端先走了。**
+
+* `/relay/<node>/v1/result` 在 hub 侧要**等节点回执**才写响应，`_RELAY_TIMEOUTS` 给到
+  **45s**；而调用方（本机 trainer）自己的 urllib 预算更短 ⇒ 它先超时、关连接，
+  hub 拿着一条死 socket 去写 ⇒ `10053`（`ConnectionAbortedError`）。同族的
+  `10054`（`ConnectionResetError`）与 `BrokenPipeError` 语义一致：**这条连接没了**。
+* 所以它是**链路抖动的读数**，不是 hub 的故障。记成 `ERROR` 有两个害处：真错误被淹；
+  复盘时分不清「调用方等不及」与「hub 崩了」。
+* 上一版为什么连 traceback 都进了注册表：`except Exception` 里先 `ERROR …` 记一笔，
+  再 `_json({"error": "internal"}, 500)` —— **写在死 socket 上又抛一次**，那一次的栈才是
+  注册表里真正被当成「未处理错误」的那条。对端都没了，回 500 没有任何收件人。
+
+**修法**（`hub/http_face.py`，`do_GET` / `do_POST` 各一处）：
+
+```python
+except ConnectionError as e:                       # 10053 / 10054 / EPIPE 一族
+    note = self.note_client_gone(path, e)          # 计数 + 节流，返回 "" 表示这条不打
+    if note:
+        self.log_message("%s", note)
+```
+
+* **判据用异常类型，不用文案**（`WinError 10053` 是 Windows 说法，Linux 上是
+  `ConnectionResetError`/`EPIPE`）；
+* **不回 500、不再抛**：这条分支只落一行
+  `WARN /relay/dsw/v1/result: 对端提前断开（累计 N 次，非 hub 错误）：…`；
+* **节流**：首条 + 每 `CLIENT_GONE_LOG_EVERY = 10` 条一条 —— 首条当场可见（不用等第
+  10 次才知道有这回事），15 连发也不会刷 15 行；
+* 计数在 `HubHandler._client_gone`（进程级，与 `_blocked_logged` 同规）。
+
+**单测** `tests/hub/test_hub_client_gone.py`（3 例，连跑 5 次稳定）：
+
+1. 真起 `make_server`，节点线程先 `poll` 拿到 call（**证明 hub 已读完请求体、正阻塞在等回执**），
+   主线程再 `SO_LINGER=0` 关连接 ⇒ 立刻发 RST，此时那次写必然炸 —— 断言只有 `WARN`、
+   **没有** `ERROR`、stderr 里**没有** `Traceback`，且同一台 hub 下一条 `/ping` 照常 200；
+2. 反证：`RuntimeError` 仍走 `ERROR` + 500（别把修复做成「把所有异常都咽掉」）；
+3. 节流：12 连发只落 `1 / 10 / 20` 三条。
+
+⚠ `SO_LINGER` 的 `linger` 结构 **Windows 是 `HH`、POSIX 是 `ii`** —— 写错格式在 Windows 上
+`setsockopt` 直接失败，测出来的就是「没发 RST、写成功了」，用例会假绿。
+
+**怎么读**：见到 `WARN … 对端提前断开（累计 N 次）` 就说明**调用方等不及先走了**，
+要么把调用方预算抬到 ≥ hub 的 `_RELAY_TIMEOUTS`（`/v1/result` = 45s），要么就别当故障查。
+见到 `ERROR /relay/…` 才是真问题。
+
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 
 **现场（ModelScope / 阿里云 8C32G，`rollout.ipynb`）**：连续多个会话死在同一个点。

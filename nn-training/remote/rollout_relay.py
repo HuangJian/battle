@@ -71,6 +71,17 @@ CTRL_HOST = "cloudflare.com"
 #: TLS 对照主机 ②：**完全不在 CF 上**（阿里云 CDN；DSW 上装 bun 就走它）。
 #: 它通 ⇒ 本机 TLS 出网是好的，故障只在 CF 这一家；它也卡 ⇒ 本机 TLS 出网整体被中间层掐。
 CTRL_HOST_NET = "registry.npmmirror.com"
+#: CF 边缘的**备用 HTTPS 端口**（官方支持 443 / 2053 / 2083 / 2087 / 2096 / 8443，无其他）。
+#:
+#: 2026-11-18 DSW 实测（用户在该机直接跑 curl）：`443` 的握手被中间层丢弃（`000`），
+#: 而 `2053 / 2083 / 2087 / 2096` 全部回 **401** —— TLS + HTTP 整条链都通、hub 自己的鉴权
+#: 在回话；`8443` 也被掐。⇒ 那个中间层只盯 443（和 8443）这两个「标准 HTTPS 端口」。
+#: 这比换域名便宜一个量级：**同一台机器、同一个域名、hub 一个字节都不用动**。
+#: 顺序按实测快慢排（2083/2096 最快），不是按大小。
+ALT_HTTPS_PORTS = (2083, 2096, 2053, 2087, 8443)
+#: 值得再试一遍备用端口的判词：共同点是**只在 hub 那个端口上失败**（换端口可能就有救）。
+#: `app-stall`（握手成功、只有 HTTP 不回）故意不在内：那时 hub 自己有问题，换端口一样不回。
+_SWEEP_HINTS = frozenset({"blackhole", "sni-blocked", "tls-blocked", "cf-blocked", "tls-error"})
 #: 网关类状态码：**中间层（代理 / Cloudflare 边缘）到不了上游**，因此不算「路由通」。
 #: 502/504 来自代理或 CF；52x 是 CF 的 origin 不可达族；530 是 CF 隧道/DNS 解析失败。
 #: `503` 故意不在内：hub 自己的 503（磁盘熔断）说明链路是通的，那是业务拒绝。
@@ -144,6 +155,43 @@ def _host_port(url: str) -> tuple[str, int]:
     if parts.port:
         return host, int(parts.port)
     return host, 443 if (parts.scheme or "").lower() == "https" else 80
+
+
+def with_port(url: str, port: int) -> str:
+    """换成另一个端口的同一个地址（scheme / host / path 原样保留）。
+
+    单独一个函数是因为「拼 URL」最容易出的错是**裸 IPv6 少了方括号**（`::1:2083` 不是地址），
+    而那正好会发生在自建 hub 用 `http://[::1]:8787` 的场合。
+    """
+    parts = urllib.parse.urlsplit(str(url or ""))
+    host = parts.hostname or net_http.host_of(url) or ""
+    netloc = f"[{host}]" if ":" in host else host
+    return urllib.parse.urlunsplit(
+        (parts.scheme, f"{netloc}:{port}", parts.path, parts.query, parts.fragment)
+    )
+
+
+def _port_sweep(
+    host: str, ports: tuple[int, ...], token: str, node_id: str, timeout: float
+) -> dict[int, str]:
+    """并行对备用端口各发**一次真的 HTTPS 预检**（不是裸握手）。
+
+    只有真请求才算数：`gateway-5xx` 说明 CF 边缘够不到上游（端口通但 hub 不在），
+    那和「端口被掐」是两件事 —— 换过去只会从「超时」变成「530」。
+    """
+    out: dict[int, str] = {}
+
+    def _sweep_port(port: int) -> None:
+        url = f"https://{host}:{port}/relay/{node_id}/_poll?wait=0"
+        verdict, _human = _probe_one_route("direct", url, token, timeout)
+        out[port] = verdict
+
+    threads = [threading.Thread(target=_sweep_port, args=(p,), daemon=True) for p in ports]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {p: out.get(p, "fail") for p in ports}
 
 
 def _probe_one_route(route: str, url: str, token: str, timeout: float) -> tuple[str, str]:
@@ -262,7 +310,8 @@ def _fail_hint(
 
     `kind` 是**判据**，措辞只是给人看的：用例钉 `kind`，改文案不会把用例弄红
     （否则红得没有意义）。`kind ∈ {dns,blackhole,unroutable,tls-blocked,sni-blocked,
-    cf-blocked,tls-error,app-stall}`。
+    cf-blocked,tls-error,app-stall}`；`probe_hub` 在备用端口验通后把它改写成
+    `port-blocked`（那是「换端口就够」，与这里每一条的修法都不一样）。
 
     两条对照问的是**两个互不相同**的问题（2026-11-18 第三次 DSW 现场）：
 
@@ -444,6 +493,30 @@ def probe_hub(
             if tails:
                 line += "；对照 " + ",".join(tails)
         kind, hint = _fail_hint(tcp, tls, ctrl, net)
+        # 最后一张牌：**换端口**。2026-11-18 DSW 用户在机器上直接验过 —— 同一个域名 443 握手被丢
+        # （`000`），而 2053/2083/2087/2096 全回 401（TLS+HTTP 整链通、hub 在回话），8443 也被掐。
+        # ⇒ 那个中间层只盯标准 HTTPS 端口。它比「换域名 / 换机器 / 配代理」便宜一个数量级，
+        # 所以放在所有判词之后、只在**端口级失败**时问一次。
+        if scheme == "https" and kind in _SWEEP_HINTS and port not in ALT_HTTPS_PORTS:
+            swept = _port_sweep(
+                host, ALT_HTTPS_PORTS, token, node_id, min(timeout, PROBE_TIMEOUT_SEC)
+            )
+            facts["alt_ports"] = {str(p): v for p, v in swept.items()}
+            alt = next(
+                (p for p in ALT_HTTPS_PORTS if str(swept.get(p, "")).startswith(("ok", "http-"))),
+                0,
+            )
+            if alt:
+                facts["alt_port"] = alt
+                kind = "port-blocked"
+                hint = (
+                    f"{port} 的 TLS 被中间层掐，但**同一域名走 :{alt} 整链通**（hub 回了 HTTP）"
+                    f" ⇒ 换端口就够：hub_url 写成 https://{host}:{alt} —— 本次已自动改，CFG 不用动，"
+                    "也不用换域名/换机器/配代理"
+                )
+                line += f" ｜ 备用端口 :{alt} 通（{swept[alt]}）"
+            else:
+                line += " ｜ 备用端口全不通（" + ",".join(str(p) for p in ALT_HTTPS_PORTS) + "）"
         facts["hint"] = kind
         line += " ⇒ " + hint
         line += "；hub 未升级只会 404，不会超时"
@@ -847,6 +920,16 @@ class RelayChannel:
             link.hub_url, link.token, link.node_id, timeout=PROBE_TIMEOUT_SEC
         )
         self.log(line)
+        alt = facts.get("alt_port")
+        if alt:
+            # 443 被中间层掐、备用端口整链通 ⇒ **当场换**，不让人回去改 CFG 再重跑
+            # （一次 cell 重跑 ≈ 3 分钟；而这条路上 20s 就能判完）。换完的 URL 留在 `_args` 里，
+            # 下一次 `open`（线程死亡重建）直接用新端口，不会再花一次预检的钱。
+            self._args["hub_url"] = with_port(link.hub_url, int(alt))
+            link = RelayLink(**self._args)
+            facts["routes"] = {}  # 旧路由结论属于 443，换端口后作废（不能拿去 pin 路由）
+            ok = True
+            self.log(f"  → 本次改走 :{alt}（{link.hub_url}）")
         picked = _pick_route(facts) if ok else ""
         if picked:
             link.pin_route(picked)
@@ -898,6 +981,7 @@ class RelayChannel:
 
 
 __all__ = [
+    "ALT_HTTPS_PORTS",
     "BODY_MAX",
     "CTRL_HOST",
     "POLL_WAIT_SEC",
@@ -911,4 +995,5 @@ __all__ = [
     "RelayUnreachable",
     "probe_hub",
     "stop_stale_links",
+    "with_port",
 ]
