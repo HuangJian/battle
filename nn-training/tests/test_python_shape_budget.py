@@ -41,7 +41,6 @@ LONG_FUNCS_BASELINE = {
     "worker/iter_rollout.py": 1,
     "worker/ppo/engine.py": 1,
     "worker/train/bc.py": 1,
-    "worker/train/bc_paddle.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。

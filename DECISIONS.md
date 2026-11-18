@@ -7530,3 +7530,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   四档异常与收尾分别为 `start` / `_execute` / `run`），长函数存量 **9 → 8**，
   形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §208。
+- **2026-11-18（长函数存量第三十刀：Paddle BC 训练循环 worker）**：
+  `worker/train/bc_paddle.py::train` 372 → **138** 行（新增 `_Train`，
+  `run_epochs` / `finalize` 两段搬出；`args` 作方法参数以免新增 `Any` 字段），
+  长函数存量 **8 → 7**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §209。
