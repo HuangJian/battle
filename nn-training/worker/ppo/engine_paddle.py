@@ -148,6 +148,75 @@ def clip_grad_norm_(parameters, max_norm: float) -> paddle.Tensor:
     return total
 
 
+def _prepare_demo(
+    demo_bank: DemoBank | None, demo_bc_coef: float, demo_per_mb: int
+) -> tuple[dict[str, paddle.Tensor], int, bool]:
+    """demo bank → tensor 视图 + 局数 + 是否启用（自 `ppo_update` 原样搬出）。"""
+    demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
+    demo_t: dict[str, paddle.Tensor] = {}
+    demo_n = 0
+    if demo_on:
+        assert demo_bank is not None
+        demo_t = {
+            "obs": paddle.to_tensor(np.asarray(demo_bank["obs"])),
+            "scalars": paddle.to_tensor(np.asarray(demo_bank["scalars"]).astype(np.float32)),
+            "actions": paddle.to_tensor(np.asarray(demo_bank["actions"]).astype(np.int64)),
+            "masks": paddle.to_tensor(np.asarray(demo_bank["masks"]).astype(np.float32)),
+        }
+        demo_n = int(demo_t["actions"].shape[0])
+        demo_on = demo_n > 0
+        if demo_on and "extra" in demo_bank:
+            demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
+    return demo_t, demo_n, demo_on
+
+
+def _build_ref_cache(
+    tensored: list[dict], ref_model, kickstart_kl: float, space: ActionSpace
+) -> list[tuple[paddle.Tensor, ...] | None]:
+    """kickstart ref 前向每 chunk 只算一次（与 torch 侧 ref_cache 同语义；数值相同）。"""
+    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * len(tensored)
+    if ref_model is not None and kickstart_kl > 0:
+        with paddle.no_grad():
+            for _i, _e in enumerate(tensored):
+                _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
+                _m = _e["mask"]
+                _ref_space = ActionSpace.from_forward_arity(len(_ro))
+                if _ref_space is not space:
+                    raise ValueError(
+                        f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 "
+                        f"{len(_ro)} 个头（{_ref_space.value}），chunk 是 {space.value}"
+                    )
+                _layout = head_layout(_ref_space)
+                _heads: tuple[paddle.Tensor, ...] = (
+                    masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
+                    masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
+                )
+                if _layout.hold_slice is not None:
+                    _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
+                ref_cache[_i] = _heads
+    return ref_cache
+
+
+def _zero_stats() -> dict[str, float]:
+    """0 步时的零值表（键集合与正常 `stats` 一致）。"""
+    return {
+        k: 0.0
+        for k in (
+            "policy",
+            "value",
+            "entropy",
+            "kl",
+            "kickstart",
+            "demo_bc",
+            "mean_ret",
+            "mean_adv",
+            "gnorm",
+            "value_new_rms",
+            "policy_new_rms",
+        )
+    }
+
+
 def ppo_update(
     model,
     opt,
@@ -195,42 +264,8 @@ def ppo_update(
     # 动作空间只在数据边界嗅一次；ref 与每个 minibatch 都读这份契约。
     space = ActionSpace.from_batch(tensored[0]) if tensored else ActionSpace.LEGACY
     layout = head_layout(space)
-    demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
-    demo_t: dict[str, paddle.Tensor] = {}
-    demo_n = 0
-    if demo_on:
-        assert demo_bank is not None
-        demo_t = {
-            "obs": paddle.to_tensor(np.asarray(demo_bank["obs"])),
-            "scalars": paddle.to_tensor(np.asarray(demo_bank["scalars"]).astype(np.float32)),
-            "actions": paddle.to_tensor(np.asarray(demo_bank["actions"]).astype(np.int64)),
-            "masks": paddle.to_tensor(np.asarray(demo_bank["masks"]).astype(np.float32)),
-        }
-        demo_n = int(demo_t["actions"].shape[0])
-        demo_on = demo_n > 0
-        if demo_on and "extra" in demo_bank:
-            demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
-    # kickstart ref 前向每 chunk 只算一次（与 torch 侧 ref_cache 同语义；数值相同）。
-    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * len(tensored)
-    if ref_model is not None and kickstart_kl > 0:
-        with paddle.no_grad():
-            for _i, _e in enumerate(tensored):
-                _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
-                _m = _e["mask"]
-                _ref_space = ActionSpace.from_forward_arity(len(_ro))
-                if _ref_space is not space:
-                    raise ValueError(
-                        f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 "
-                        f"{len(_ro)} 个头（{_ref_space.value}），chunk 是 {space.value}"
-                    )
-                _layout = head_layout(_ref_space)
-                _heads: tuple[paddle.Tensor, ...] = (
-                    masked_logsoftmax(_ro[0], _m[:, _layout.move_slice]),
-                    masked_logsoftmax(_ro[1], _m[:, _layout.fire_slice]),
-                )
-                if _layout.hold_slice is not None:
-                    _heads = (*_heads, masked_logsoftmax(_ro[2], _m[:, _layout.hold_slice]))
-                ref_cache[_i] = _heads
+    demo_t, demo_n, demo_on = _prepare_demo(demo_bank, demo_bc_coef, demo_per_mb)
+    ref_cache = _build_ref_cache(tensored, ref_model, kickstart_kl, space)
     t0 = time.time()
     last_hb = t0
     start_epoch, steps_done = load_ckpt(model, opt, ckpt_path, ppo_rng)
@@ -361,22 +396,7 @@ def ppo_update(
         steps_out["steps_done"] = int(steps_done)
     if not stats:
         log("[ppo-paddle] 0 grad steps — returning zero aggregate")
-        return {
-            k: 0.0
-            for k in (
-                "policy",
-                "value",
-                "entropy",
-                "kl",
-                "kickstart",
-                "demo_bc",
-                "mean_ret",
-                "mean_adv",
-                "gnorm",
-                "value_new_rms",
-                "policy_new_rms",
-            )
-        }
+        return _zero_stats()
     return aggregate_stats(stats, list(stats[0].keys()))
 
 

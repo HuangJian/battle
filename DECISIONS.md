@@ -7413,3 +7413,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   218 → **191** 行（拆出 `_init_background_state` / `_init_probe_state` 两组状态位，
   赋值次序不变），长函数存量 **33 → 32**，形状基线删除该文件的长函数条目
   （宽参数条目保留）。全文 → `docs/nn/engineering.md` §183。
+- **2026-11-18（长函数存量第六刀：Paddle PPO 更新）**：`worker/ppo/engine_paddle.py::ppo_update`
+  230 → **181** 行（拆出 `_prepare_demo` / `_build_ref_cache` / `_zero_stats`，
+  数值口径与循环体不变），长函数存量 **32 → 31**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §184。

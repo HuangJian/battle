@@ -25,6 +25,22 @@
 
 ---
 
+## §184 长函数存量第六刀：Paddle PPO 更新 230 → 181（2026-11-18）
+
+`worker/ppo/engine_paddle.py::ppo_update` **230 → 181 行**，长函数存量 **32 → 31**
+（`LONG_FUNCS_BASELINE` 删除 `worker/ppo/engine_paddle.py` 条目；`WIDE_FUNCS_BASELINE`
+的 1 条保留——签名仍 >8 参）。
+
+三刀纯搬移（torch/paddle 数值口径一字未动）：
+- `_prepare_demo(demo_bank, demo_bc_coef, demo_per_mb)`：demo bank → tensor 视图 + 局数 + 开关。
+- `_build_ref_cache(tensored, ref_model, kickstart_kl, space)`：kickstart ref 前向（每 chunk 一次）。
+- `_zero_stats()`：0 步时的零值聚合表（键集合与正常 stats 一致）。
+
+主循环（逐 minibatch 的 loss/backward/统计）原样留在原地：它读十几个循环局部变量，
+搬出去要么传十几个参数、要么造上下文对象，收益不抵风险。
+
+---
+
 ## §183 长函数存量第五刀：补传器构造 218 → 191（2026-11-18）
 
 `remote/offline_deliver.py::OfflineDeliverer.__init__` **218 → 191 行**，长函数存量
