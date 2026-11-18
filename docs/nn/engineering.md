@@ -25,6 +25,29 @@
 
 ---
 
+## §141 P0-7 第二十五批：拉起子进程的那条边（2026-11-18）
+
+`remote/deliver_proc.py` 7 → **4**、`remote/child_proc.py` 7 → **6**。这两个文件都在回答同一个
+问题：**子进程起不来时，该怪谁？**
+
+| 位置 | 旧宽捕的结论 | 为什么错 | 修法 |
+|---|---|---|---|
+| `deliver_proc._spawn` / `child_proc.spawn_module` | 「Popen 失败」⇒ 现场去查权限/路径/资源 | 我们拼 `env` / `sys.path` 的姿势坏了（`AttributeError` / `TypeError`）也被报成那件事 | `(OSError, ValueError, subprocess.SubprocessError)` = Popen 的真失败面 |
+| `deliver_proc._new_state_path` | 「没 run_id」⇒ 用固定 `run-` 占位 | `sanitize_run_id` 只有 `ProtocolError` 一种契约失败 | `except ProtocolError` |
+| `deliver_proc.backup_pending` | 「备份腿异常（忽略）」 | 失败面是盘 + 账行形状（与 `OfflineDeliverer.backup_pending` 同集） | `(OSError, ValueError, KeyError)` |
+
+留下的 3 处（`_stop_child` 的两级收尾、`_spawn` 以外的读面）各自就地写了「为什么只能宽」。
+
+判据（+2，都走公开面）：
+
+1. `Popen` 抛 `OSError` ⇒ `start()` 不抛，`status()["mode"] == "thread"`（sticky 降级）；
+   抛 `AttributeError` ⇒ 穿出 `start()`；
+2. `spawn_module`：`OSError` / `SubprocessError` ⇒ `(None, "Popen 失败…")`；`AttributeError` ⇒ 穿出。
+
+读数：G4 **343 → 339**（137 文件）· G9 25 不变。
+
+---
+
 ## §140 P0-7 第二十四批：引导态的控制面读面（2026-11-18）
 
 `remote/offline_boot.py` 16 → **13**（仍是生成物：改分片 → `tools/build_offline_boot.py`）。

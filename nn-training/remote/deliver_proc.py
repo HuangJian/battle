@@ -27,7 +27,7 @@ from typing import IO, Protocol
 
 from common import runtime
 from common.platform_utils import POPEN_NO_WINDOW
-from common.protocol import sanitize_run_id
+from common.protocol import ProtocolError, sanitize_run_id
 from remote import deliver_parts
 from remote.child_proc import pump_lines
 from remote.deliver_outbox import LocalOutboxDeliverer
@@ -233,7 +233,10 @@ class DelivererProcess:
         """
         try:
             rid = sanitize_run_id(self._run_id_raw)
-        except Exception:
+        except ProtocolError:
+            # 契约就这一种失败（规则见 `sanitize_run_id`）：非法 run_id ⇒ 用固定串占位，
+            # 保证文件名仍带会话身份。宽捕只会把这个函数的 bug（正则改名 / 返回非串）
+            # 也读成「没 run_id」。
             rid = "run"
         stamp = time.strftime("%Y%m%dT%H%M%S")
         return Path(self.work_dir) / f"{prefix}-{rid}-{stamp}-{os.getpid()}{suffix}"
@@ -331,7 +334,9 @@ class DelivererProcess:
                 # 裸 spawn 会给子进程新建一块**可见**控制台窗口（2026-10-13 用户报障）。
                 **POPEN_NO_WINDOW,
             )
-        except Exception as e:
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            # Popen 的真失败面：OSError（权限/路径/资源）+ ValueError（argv/环境非法）+
+            # `SubprocessError`。我们自己的 bug（例如 env 形状读错）不在集里 ⇒ 穿出去。
             return f"Popen 失败（{type(e).__name__}: {e}）"
         self._proc = proc
         self._forwarders = [
@@ -646,7 +651,9 @@ class DelivererProcess:
             mirror.backup_root = Path(self.backup_root)
             mirror.log = self.log
             return int(mirror.backup_pending(force=force))
-        except Exception as e:  # 备份绝不抛（它本就是第二份拷贝）
+        except (OSError, ValueError, KeyError) as e:  # 备份绝不抛（它本就是第二份拷贝）
+            # 失败面 = 盘 + 账行形状（与 `OfflineDeliverer.backup_pending` 同一个集）。
+            # 我们的 `AttributeError`（镜像装配错了）现在会穿出去而不是伪装成「备份腿异常」。
             self.log(f"WARN 备份腿异常（忽略）：{type(e).__name__}: {e}")
             return 0
 

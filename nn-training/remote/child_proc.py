@@ -76,7 +76,9 @@ def spawn_module(
             bufsize=1,
             **POPEN_NO_WINDOW,
         )
-    except Exception as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        # Popen 的真失败面（同 `deliver_proc._spawn`）。`env`/`sys.path` 拼错是我们自己的 bug
+        # （`AttributeError` / `TypeError`）⇒ 穿出去，而不是报成「Popen 失败」去查系统。
         return None, f"Popen 失败（{type(e).__name__}: {e}）"
     return proc, ""
 

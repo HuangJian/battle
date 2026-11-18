@@ -657,3 +657,39 @@ def test_forward_keeps_watching_after_log_callback_raises() -> None:
     # 末尾那一条是行泵的收尾报数（`log` 传的就是这个必然抛的回调，所以也进 `seen`）。
     assert seen[:2] == ["第一行就抛", "boot ok"]
     assert seen[2].startswith("行泵：2 行被回调丢弃")
+
+
+def test_spawn_failure_is_systemic_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_spawn` 的异常面（P0-7 第二十五批）：起不来的真形态 ⇒ sticky 降级；我们自己的 bug ⇒ 穿出。
+
+    `start()` 的契约是「子进程起不来是常态 ⇒ 本段降级为进程内线程模式」。`OSError`/`ValueError`/
+    `SubprocessError` 是那一族；而 `env` 形状读错（`AttributeError`）是**我们**的 bug，把它也
+    读成「Popen 失败」会把一个永不工作的配置伪装成正常的降级路径。
+    """
+    import remote.deliver_proc as dp
+
+    def _proc(tmp_path: Path) -> dp.DelivererProcess:
+        return dp.DelivererProcess(
+            base_url="http://127.0.0.1:9/",
+            token=TOKEN,
+            run_id=RUN,
+            artifacts_dir=_make_artifacts(tmp_path / "art"),
+            work_dir=tmp_path / "work",
+            log=lambda _m: None,
+        )
+
+    def denied(*_a: object, **_k: object) -> object:
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(dp.subprocess, "Popen", denied)
+    degraded = _proc(tmp_path)
+    degraded.start()
+    assert degraded.status()["mode"] == "thread", "起不来的真形态 ⇒ sticky 降级（训练不受影响）"
+
+    def buggy(*_a: object, **_k: object) -> object:
+        raise AttributeError("env lost .copy")
+
+    monkeypatch.setattr(dp.subprocess, "Popen", buggy)
+    broken = _proc(tmp_path / "b")
+    with pytest.raises(AttributeError):
+        broken.start()

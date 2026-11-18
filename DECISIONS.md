@@ -7139,3 +7139,16 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   旧宽捕把它读成「没有 tailnet 候选」⇒ 云机改走公网 URL 并**白起隧道**且日志看不出少了什么。
   判据 `tests/remote/test_offline_boot.py` +2。全文 → `docs/nn/engineering.md` §140。
   累计第十六~二十四批：G4 **397 → 343**（139 → 137 文件）。
+
+- **2026-11-18（P0-7 第二十五批：拉起子进程的那条边）**：`remote/deliver_proc.py` 7 → **4**、
+  `remote/child_proc.py` 7 → **6**（G4 343 → **339**）。这两个文件都在回答「子进程起不来时该怪谁」：
+  ① `_spawn` / `spawn_module` 收窄到 Popen 的真失败面 `(OSError, ValueError,
+  subprocess.SubprocessError)` —— 我把 `env`/`sys.path` 拼错（`AttributeError`）报成「Popen 失败」，
+  现场就会去查权限/路径/资源，而真因永远不露头；② `_new_state_path` 只捕 `sanitize_run_id` 唯一
+  的契约失败 `ProtocolError`；③ `backup_pending` 收窄成盘 + 账行形状 `(OSError, ValueError,
+  KeyError)`（与 §136 的 `OfflineDeliverer.backup_pending` 同一个集）。留下的 3 处是 `_stop_child`
+  的两级收尾（G9 冻结）与读面，均就地注明。
+  反面记录：`trainer/stream._load_wave` 同型（「坏 shard」混了我们的 `AttributeError`），但它住在
+  `run_rollout_stream` 的闭包里、没有公开接缝 ⇒ **按 §7「先有判据再改」的口径暂不动**（宁可留着宽捕，
+  也不留一个没人能验证的收窄）。判据 `tests/remote/test_offline_deliver_proc.py` +1、
+  `tests/remote/test_child_proc_pump.py` +1。全文 → `docs/nn/engineering.md` §141。

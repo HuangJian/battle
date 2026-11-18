@@ -18,7 +18,9 @@ import io
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import IO, cast
+from typing import IO, Any, cast
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -82,3 +84,33 @@ def test_summary_log_that_itself_raises_does_not_escape() -> None:
         raise ValueError("I/O operation on closed file")
 
     child_proc.pump_lines(cast("IO[str]", _Stream()), boom, log=boom)  # 不抛即通过
+
+
+def test_spawn_reports_systemic_failure_but_not_our_bug() -> None:
+    """`spawn_module` 的异常面（P0-7 第二十五批）。
+
+    `why` 字符串的读者（调用方）会把它写成一行日志、然后走降级兜底 —— 这对
+    「Popen 起不来」是对的。我们拼 `env`/`sys.path` 的姿势坏了（`AttributeError`）则是**另一个
+    故事**，旧宽捕把它也报成「Popen 失败」⇒ 现场被指去查系统（权限/路径/资源），而真因不会露头。
+    """
+    import subprocess
+
+    def denied(_argv: list[str]) -> Any:
+        raise OSError(13, "Permission denied")
+
+    proc, why = child_proc.spawn_module("remote.worker_loop", spawn=denied)
+    assert proc is None, "起不来 ⇒ 没有 proc"
+    assert why, "起不来必须带回一行理由（调用方拿它写日志 + 走降级）"
+
+    def buggy(_argv: list[str]) -> Any:
+        raise AttributeError("env lost .copy")
+
+    with pytest.raises(AttributeError):
+        child_proc.spawn_module("remote.worker_loop", spawn=buggy)
+
+    def broken_argv(_argv: list[str]) -> Any:
+        raise subprocess.SubprocessError("bad state")
+
+    proc2, why2 = child_proc.spawn_module("remote.worker_loop", spawn=broken_argv)
+    assert proc2 is None, "SubprocessError 也属于「起不来」"
+    assert why2, why2
