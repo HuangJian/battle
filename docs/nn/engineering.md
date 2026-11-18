@@ -25,6 +25,24 @@
 
 ---
 
+## §204 长函数存量第二十五刀：BC 派发槽位上下文（worker）316 → 185（2026-11-18）
+
+`worker/bc_dispatch.py::dispatch_bc_corpus` **316 → 185 行**，长函数存量 **13 → 12**
+（`LONG_FUNCS_BASELINE` 删除 `worker/bc_dispatch.py` 条目；`WIDE_FUNCS_BASELINE` 的
+1 条保留）。
+
+这一刀按 §201 的「先造上下文对象」：
+- `_Corpus`：一轮派发的共享状态（派局参数 + `work` / `stats` / `lock` / 熔断账），
+  把 152 行的 `slot_worker` 闭包搬成方法 `run_slot(node)`。
+- `_Stats`：计数从异构 dict 改成字段表（`games` / `kept` / … / `elapsed_sec` /
+  `failed_nodes`），返回前 `as_dict()`；`Any` 仍只有那 1 处（`as_dict` 的返回注）。
+- `_is_busy_hint` 提为模块级纯函数（原嵌套闭包，无捕获）。
+
+`dispatch_bc_corpus` 保留校验 / 节点过滤 / 权重下发 / 槽位展开 / 线程 join / 对账。
+11 处日志逐条比对：文案与顺序不变（仅 `stats['x']` → `stats.x` 的取值改写）。
+
+---
+
 ## §203 长函数存量第二十四刀：采样节点会话对象（remote）312 → 175（2026-11-18）
 
 `remote/rollout_node.py::run` **312 → 175 行**，长函数存量 **14 → 13**

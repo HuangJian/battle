@@ -7503,3 +7503,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_open_cloudflared` 闭包与注册 / 重启 / 隧道自愈块搬进方法；`run` 保留监护循环骨架与
   try/finally 收线），长函数存量 **14 → 13**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §203。
+- **2026-11-18（长函数存量第二十五刀：BC 派发槽位上下文 worker）**：
+  `worker/bc_dispatch.py::dispatch_bc_corpus` 316 → **185** 行（152 行的 `slot_worker`
+  闭包搬成 `_Corpus.run_slot`，计数改 `_Stats` 字段表，`_is_busy_hint` 提为模块级），
+  长函数存量 **13 → 12**，形状基线删除该文件的长函数条目（宽参数条目保留）。
+  全文 → `docs/nn/engineering.md` §204。
