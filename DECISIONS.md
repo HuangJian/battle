@@ -7186,3 +7186,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   摘课判据改问 `courses()` / `halt_of()` / `queue_state()["cursor"]`；留下的 3 处是**纯提速缓存**
   （`_peeked` / `_locate_cache`，无处可问但清了只是下次探测多花几毫秒）与 `_dispatch`/`_leases`
   的「落盘两个不动」对账。口径同前两批：只降耦合，不降被测对象。全文 → `docs/nn/engineering.md` §145。
+- **2026-11-18（G5 第四批）**：`tests/hub/test_priority_schedule.py` 9 → **3**（G5 685 → **679**）。
+  `job_root` / `stale_holder` / `lease_worker` / `courses` / `queue_state()["cursor"]` 全是既有公开面。
+  留下的 3 处读的是**别的查询不覆盖的字段**（租约截止时刻、token→owner 映射、承诺痕迹归属人），
+  不是同义改写 —— 口径仍是「只降耦合，不降被测对象」。全文 → `docs/nn/engineering.md` §146。

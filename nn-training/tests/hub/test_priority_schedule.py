@@ -107,7 +107,7 @@ def _publish(store: _JobStore, jid: str = JID) -> None:
     """在**给定 store** 上发布一份 pending job（store 层用例要让账本与租约同源：
     `claimable_job_ids` 读账本，写到另一份 store 上会得到空池——本文件初版就这么错过）。"""
     store.publish(jid, _mini_manifest(jid), b"PK\x03\x04fake")
-    assert (store._job_dir(jid) / PAYLOAD_NAME).exists()
+    assert (store.job_root / jid / PAYLOAD_NAME).exists()
 
 
 def _publish_online_course(root: Path, course: str = "c5-gae", jid: str = JID) -> None:
@@ -237,7 +237,7 @@ def test_backup_claim_does_not_poison_or_reclaim(tmp_path: Path) -> None:
     _publish(store)
     store.claim_outcome(JID, worker_id="A")
     store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
-    assert store._stale_holders.get(JID, "") == ""
+    assert store.stale_holder(JID) == ""
     assert store.reclaims(JID) == 0
     clock.t += CLAIM_TTL_SEC + 1
     assert store.claimable_job_ids() == [JID], "原租约照旧会过期（备份没把它 pop 掉）"
@@ -305,7 +305,7 @@ def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:
     _publish(store)
     out = store.claim_outcome(JID, mode="race")
     assert out.ok is False and out.status == "bad_mode"
-    assert store._leases.get(JID) is None, "写错的模式绝不能静默降级成独占"
+    assert store.lease_worker(JID) == "", "写错的模式绝不能静默降级成独占"
 
 
 # ═══════════════════════════ HTTP 面：peek / priority / claim ═══════════════════════════
@@ -315,7 +315,7 @@ def test_peek_is_side_effect_free(tmp_path: Path) -> None:
     """R1-4：peek 不置租约、不动 `_cursor`、不改可领取池、不动 epoch。"""
     _publish_online_course(tmp_path)
     with _hub(tmp_path) as (base, hub):
-        assert "c5-gae" in hub._stores  # 夹具已在建 hub 时 discover（见 `_hub`）
+        assert hub.courses() == ["c5-gae"], "夹具已在建 hub 时 discover（见 `_hub`）"
         before_pool = hub.claimable_job_ids("c5-gae")
         before_epoch = hub.epoch_of(JID)
         got = W.peek_jobs(base, TOKEN, worker_id="w1")
@@ -326,10 +326,10 @@ def test_peek_is_side_effect_free(tmp_path: Path) -> None:
         assert halt is False
         st = hub._store_of(JID)
         assert st is not None
-        assert JID not in st._leases, "peek 绝不置租约（软持有的前提）"
+        assert st.lease_worker(JID) == "", "peek 绝不置租约（软持有的前提）"
         assert hub.claimable_job_ids("c5-gae") == before_pool
         assert hub.epoch_of(JID) == before_epoch, "peek 不改调度面版本"
-        assert hub._cursor is None, "游标只由真正 claim 成功的一方推进（R2-C2）"
+        assert hub.queue_state()["cursor"] is None, "游标只由真正 claim 成功的一方推进（R2-C2）"
 
 
 def test_peek_registers_worker_for_avoidance_chain(tmp_path: Path) -> None:

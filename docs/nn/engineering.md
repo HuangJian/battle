@@ -25,6 +25,28 @@
 
 ---
 
+## §146 G5 第四批：优先级/租约用例（2026-11-18）
+
+`tests/hub/test_priority_schedule.py` 9 → **3**。这批换的全是「已经存在但没人用」的读数：
+
+| 旧判据 | 换成 |
+|---|---|
+| `store._job_dir(jid) / PAYLOAD_NAME` | `store.job_root / jid / PAYLOAD_NAME`（`job_root` 本来就是公开属性） |
+| `store._stale_holders.get(JID, "") == ""` | `store.stale_holder(JID) == ""` |
+| `store._leases.get(JID) is None` | `store.lease_worker(JID) == ""` |
+| `"c5-gae" in hub._stores` | `hub.courses() == ["c5-gae"]` |
+| `JID not in st._leases` | `st.lease_worker(JID) == ""` |
+| `hub._cursor is None` | `hub.queue_state()["cursor"] is None` |
+
+留下的 3 处：`_leases[JID] == expiry_before`（备份副本不得推迟原租约的**截止时刻**，公开面只
+回答「谁持有」不回答「到几点」）、`_lease_owners[JID] == a_token`（token 的持有者映射）、
+`_claimed[JID]["worker"] == "A"`（承诺痕迹的归属人）。这三条读的是**别的查询不覆盖的字段**，
+而不是同义改写。
+
+读数：G5 **685 → 679**（126 文件）· G4 339 · G9 25 · G3 126。
+
+---
+
 ## §145 G5 第三批：摘课用例的公开口径（2026-11-18）
 
 `tests/hub/test_hub_discover_eviction.py` 9 → **3**。这条用例守的是「课程目录消失 ⇒ 课程表摘掉、
