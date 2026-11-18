@@ -187,25 +187,8 @@ def leg_trend(ledger: Path) -> list[tuple[int, int, float, float, float]]:
     ]
 
 
-def main() -> int:
-    wmap, problems = WJ.key_map()
-    for pr in problems:
-        print(f"  ✗ 权重定位：{pr} ⇒ 面板不可信")
-    rows_by_arm: dict[str, list[dict[str, Any]]] = {a: [] for a in WJ.ARMS}
-    unknown = 0
-    if any(not p.exists() for p in WJ.LEDGERS.values()):
-        print("判据段账本不在 tmp/h4-lane-judge/ ⇒ 扫描跳过（非失败）")
-        return 0
-    for it in WJ.ITS:
-        part, n_unknown = WJ.load_rows(WJ.LEDGERS[it], wmap)
-        unknown += n_unknown
-        for a in WJ.ARMS:
-            rows_by_arm[a].extend(part[a].values())
-    print("=" * 100)
-    print("塑形杠杆扫描（探索性读数；**不进** DoD/门/阈值，AGENTS §0.2）")
-    print("=" * 100)
-    print(f"  语料：判据段 {sum(len(v) for v in rows_by_arm.values())} 局（未知权重键 {unknown} 行）")
-
+def _print_panel(rows_by_arm: dict[str, list[dict[str, Any]]]) -> None:
+    """§1 面板体检 + §2 税基尺寸表（自 `main` 原样搬出）。"""
     # §1 面板体检
     print()
     print("§1 面板体检（分母先钉住）")
@@ -247,6 +230,28 @@ def main() -> int:
         "  ⇒ 读法：**现役 lane 税的税基只占 0.25% 的 tick**（在线 ∧ 移动），其余 lane 时间（静止/架枪）免费；"
     )
     print("     而 lane 全家只有 4.6% 的 tick ⇒ 这条轴「单位力度大、可动空间小」是结构性的。")
+
+
+def main() -> int:
+    wmap, problems = WJ.key_map()
+    for pr in problems:
+        print(f"  ✗ 权重定位：{pr} ⇒ 面板不可信")
+    rows_by_arm: dict[str, list[dict[str, Any]]] = {a: [] for a in WJ.ARMS}
+    unknown = 0
+    if any(not p.exists() for p in WJ.LEDGERS.values()):
+        print("判据段账本不在 tmp/h4-lane-judge/ ⇒ 扫描跳过（非失败）")
+        return 0
+    for it in WJ.ITS:
+        part, n_unknown = WJ.load_rows(WJ.LEDGERS[it], wmap)
+        unknown += n_unknown
+        for a in WJ.ARMS:
+            rows_by_arm[a].extend(part[a].values())
+    print("=" * 100)
+    print("塑形杠杆扫描（探索性读数；**不进** DoD/门/阈值，AGENTS §0.2）")
+    print("=" * 100)
+    print(f"  语料：判据段 {sum(len(v) for v in rows_by_arm.values())} 局（未知权重键 {unknown} 行）")
+
+    _print_panel(rows_by_arm)
 
     # §3 剂量扫描
     print()

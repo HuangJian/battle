@@ -37,7 +37,6 @@ LONG_FUNCS_BASELINE = {
     "remote/rollout_node.py": 1,
     "remote/train_core.py": 2,
     "remote/worker.py": 2,
-    "tools/lever_scan.py": 1,
     "tools/paired_power.py": 1,
     "tools/spatial-probe.py": 1,
     "tools/tpu-probe.py": 1,
