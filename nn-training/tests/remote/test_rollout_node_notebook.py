@@ -164,10 +164,8 @@ def test_credentials_are_read_before_tailscale_ensure(
         return {"ip": "100.64.0.1", "mode": "kernel"}
 
     monkeypatch.setattr(rn.tailscale_boot, "ensure", _fake_ensure)
-    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == (
-        "http://100.64.0.1:8443",
-        True,
-    )
+    opened = rn._open_tailscale({}, "ak", 8443, lambda _m: None)
+    assert opened == ("http://100.64.0.1:8443", True)
     assert seen == [
         {
             "ts_authkey": "ak",
@@ -405,7 +403,8 @@ def test_cell_archive_fallback_extracts_stripped_tree(tmp_path: Path) -> None:
             "_DL_BACKOFF": (),
         },
     )
-    assert ns["_fetch_archive"]([]) is True
+    ran = ns["_fetch_archive"]([])
+    assert ran is True
     assert (code_dir / "tools" / "agent" / "sampler-agent.ts").read_text(encoding="utf-8") == "x"
     assert not (code_dir / "battle-goal-nn").exists()
 
@@ -442,7 +441,8 @@ def test_cell_archive_bad_zip_falls_back_to_next_source(tmp_path: Path) -> None:
             "_DL_BACKOFF": (),
         },
     )
-    assert ns["_fetch_archive"]([]) is True
+    ran = ns["_fetch_archive"]([])
+    assert ran is True
     assert fetched == ["https://m/bad.zip", "https://m/good.zip"]
     assert (code_dir / "tools" / "agent" / "a.ts").is_file()
 
@@ -478,7 +478,8 @@ def test_cell_archive_retries_after_whole_round_fails(tmp_path: Path) -> None:
             "_DL_BACKOFF": (),
         },
     )
-    assert ns["_fetch_archive"]([]) is True
+    ran = ns["_fetch_archive"]([])
+    assert ran is True
     assert attempts == ["https://m/archive.zip", "https://m/archive.zip"]
     assert (code_dir / "tools" / "agent" / "a.ts").is_file()
 

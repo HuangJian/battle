@@ -113,11 +113,13 @@ def test_redo_cancels_then_republishes_the_same_jid_once(tmp_path: Path) -> None
     ctx = RoundContext(it=IT, resumable=True)
 
     # 第一拍：发布（还没有会话可撤——意图在下一拍才消费，因为它必须先有一个在飞会话）。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == []
 
     # 第二拍：命中意图 ⇒ 撤当前 sess、丢它、同拍重新发布。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == [JID]
     assert [s.jid for s in rig.published] == [JID, JID]
     assert [s.it for s in rig.published] == [IT, IT]
@@ -125,7 +127,8 @@ def test_redo_cancels_then_republishes_the_same_jid_once(tmp_path: Path) -> None
     assert read_redo_applied(tmp_path) == (IT, at)
 
     # 第三拍：同一份意图还在盘上，但回执的 at 与它相等 ⇒ **不得**再撤（否则无限重发）。
-    assert rig.step._remote_ppo_step(ctx) is not None
+    outcome = rig.step._remote_ppo_step(ctx)
+    assert outcome is not None
     assert rig.cancelled == [JID]
     assert rig.calls.count("publish") == 2
 

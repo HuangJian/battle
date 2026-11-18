@@ -48,13 +48,13 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     box: list[dict[str, Any]] = []
 
     def _post(base: str, token: str, payload: dict[str, Any], **_: Any) -> bool:
-        box.append({**payload, "_block": True})
+        box.append({**payload, "block": True})
         return True
 
     def _report(base: str, token: str, **kw: Any) -> None:
         kw.pop("log", None)
         wid = kw.pop("worker_id", "")
-        box.append({**LC.error_payload(worker=wid, **kw), "_block": False})
+        box.append({**LC.error_payload(worker=wid, **kw), "block": False})
 
     monkeypatch.setattr(LC, "post_error", _post)
     monkeypatch.setattr(LC, "report_error", _report)
@@ -98,7 +98,7 @@ def test_start_and_close_are_blocking_and_named(tmp_path: Path, sent: list[dict[
     lc.why("空闲超时 >28800s")
     lc.close(done=5)
 
-    assert [e["_block"] for e in sent] == [True, True]
+    assert [e["block"] for e in sent] == [True, True]
     assert [e["component"] for e in sent] == [LIFECYCLE_COMPONENT, LIFECYCLE_COMPONENT]
     assert sent[0]["reason"].startswith("worker 启动")
     assert sent[1]["reason"] == "worker 收线（空闲超时 >28800s）"
@@ -122,7 +122,7 @@ def test_tick_is_throttled(tmp_path: Path, sent: list[dict[str, Any]]) -> None:
     lc.tick()
     assert len(sent) == 1
     assert sent[0]["reason"].startswith("读点")
-    assert sent[0]["_block"] is False  # 异步：绝不占关键路径
+    assert sent[0]["block"] is False  # 异步：绝不占关键路径
 
     lc.tick()  # 同一分钟内再调不重复发
     assert len(sent) == 1
@@ -146,7 +146,8 @@ def test_signals_installed_then_restored(tmp_path: Path, sent: list[dict[str, An
     before = signal.getsignal(signal.SIGTERM)
     lc = _life(tmp_path, _Clock())
     lc.start()
-    assert signal.getsignal(signal.SIGTERM) == lc._on_signal  # bound method 恒等
+    handler = lc._on_signal
+    assert signal.getsignal(signal.SIGTERM) == handler  # bound method 恒等
     lc.close(done=0)
     assert signal.getsignal(signal.SIGTERM) == before
 

@@ -25,6 +25,22 @@
 
 ---
 
+## §171 G5 第三十二批：notebook 与信号面的小尾巴（2026-11-18）
+
+四个文件清零：`tests/trainer/test_ppo_redo.py` **3 → 0**、`tests/remote/test_seg_end_kind.py`
+**4 → 0**、`tests/remote/test_rollout_node_notebook.py` **4 → 0**、
+`tests/remote/test_lifecycle.py` **3 → 0**（G5 **270 → 256**，97 → 93 文件）。
+
+- ppo redo / 段末判据：`_remote_ppo_step(...)` / `_end_it_reached(...)` / `_seg_end_kind(...)`
+  的调用移出 assert（返回值就是判据）。
+- notebook cell：`ns["_fetch_archive"]([])` 在 notebook 命名空间里按名字取函数——先
+  `ran = …` 再断言。
+- 信号面：`lc._on_signal` 是 **bound method**，先取 `handler` 再与
+  `signal.getsignal(...)` 比较；测试替身自己记的 `"_block"` 键改公开 `"block"`
+  （替身记账表不是被测状态）。
+
+---
+
 ## §170 G5 第三十一批：纯判据与多课程 hub（2026-11-18）
 
 `tests/hub/test_multi_course_hub.py` **5 → 1**；四个 trainer 文件清零：

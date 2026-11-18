@@ -7347,3 +7347,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `test_scan_sees_the_known_surface` 的 `len(baseline) >= 100` 改为按扫到的测试文件数
   （`>= 150`，实测 554）——旧地板在清到 97 个文件后从「防扫描坏了」变成「不许清干净」。
   全文 → `docs/nn/engineering.md` §170。
+- **2026-11-18（G5 第三十二批：notebook 与信号面的小尾巴）**：`test_ppo_redo.py` 3 → 0、
+  `test_seg_end_kind.py` 4 → 0、`test_rollout_node_notebook.py` 4 → 0、
+  `test_lifecycle.py` 3 → 0（G5 270 → **256**，93 文件）。驱动调用移出 assert；
+  notebook 命名空间里的 `_fetch_archive` 先取结果；bound method 先赋 `handler`；
+  测试替身的 `"_block"` 键改公开 `"block"`。全文 → `docs/nn/engineering.md` §171。
