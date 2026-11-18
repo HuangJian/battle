@@ -79,7 +79,7 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.stats` | **观测字段数值化口径**（`num_or_none`：bool / 非数值 → `None`）——`worker/loop_guards_trip` 与 `worker/train_ledger` 的唯一实现（S2，2026-10-11） |
 | `common.cli` | **入口约定**（`house_parser`：全仓 `ArgumentParser` 唯一构造点 · `run_main`：`None→0` / `int→该码` / `Ctrl-C→130`）——用户裁定「一次性全迁 + `--help`/退出码非契约，**只保 flags 语义**」（S2，2026-10-11；实测 54 个构造点 + 62 个出口，flags 面 diff 0） |
 | `common.http_respond` | **JSON 响应形状**（`respond_json`：头部顺序 / UTF-8 / `ensure_ascii=False` / 长度按字节）——`hub/http_face` 与 `remote/worker_server` 的唯一实现；`remote/push_bootstrap`（code.zip 之前的内联态）**故意不 import 它**（S2，2026-10-11） |
-| `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 / `coef_active`）——原 `remote/protocol.py`；失败类型与线格式已下沉（见下两行），留 `X as X` 门面。result 信封 = `CloudResult` 模型 |
+| `common.protocol` / `common.scheduling` | 前者 = 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 `CloudResult` / `coef_active`）——原 `remote/protocol.py`，留 `X as X` 门面；后者 = **调度策略**（优先级表 / push 选人 / 节点能力形状，B8 第二刀：策略会变、协议不该变），protocol 对它也是门面 |
 | `common.errors` | **失败类型族**（`ProtocolError` / `RetryableError` / `UnreapableChildError` / `JobCancelledError` / `JobFailedError` / `CodeChangedError`）——每条继承线 = 一个处置分支。**零依赖叶子**（S5 第六刀） |
 | `common.wire_codec` | **传输编码 / 线格式**（v1 gzip+base64 编解码 + v2 裸二进制 `BRV2`/`BRJ2`）。依赖 = stdlib + `common.errors`（S5 第六刀） |
 | `common.job_identity` | **job 身份**（幂等键 `idempotency_key` / `job_id` / 发布端撞名守卫 `collision_rows` + 扫描面常量）。stdlib-only 叶子（S5 第七刀） |

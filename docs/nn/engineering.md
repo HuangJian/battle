@@ -25,6 +25,41 @@
 
 ---
 
+## §130 B8 第二刀：调度策略离开线协议（`common/scheduling.py`，2026-11-18）
+
+`python.refactor.md` §5.1 的判词很具体：「`protocol.py` 把**线协议常量**与**调度策略**混在一起；
+策略会变、协议不该变，将来改调度要动『协议模块』，评审时很难判断是否破坏兼容。」
+
+做法是**逐字节搬家**（不重写）：32 个名字整段剪进 `common/scheduling.py`，`protocol.py` 只留
+32 行 `X as X` 门面（房规 `force-single-line` ⇒ 真是一行一条 import 块，与 `common.manifest`
+那边的门面同形）。
+
+| 搬走的三族 | 名字（32） |
+|---|---|
+| 优先级 | `PRIORITY_*` 五档 + `PRIORITY_ORDER` + `job_priority`（§1.4 表唯一实现，时基只认 `computing_at`）+ `STRAGGLER_SEC` / `JOB_CANCEL_POLL_SEC` + `CLAIM_MODE_*` |
+| hub 中介推送 | `DISPATCH_HUB_PUSH` + `PUSH_POLL_SEC` / `PUSH_PING_SEC` / `PUSH_DEAD_MISSES` / `PUSH_TIMEOUT_SEC` / `PUSH_AHEAD_DEFAULT` / `PUSH_COOLDOWN_SEC` / `PUSH_SLOW_UPLOAD_SEC` / `PUSH_SLOW_RESULT_SEC` / `PUSH_WORKER_PREFIX` / `push_worker_id_of` / `push_job_wants_hub_push` |
+| 节点能力形状 | `CAP_GPU_PUSH` / `CAP_OFFLINE_PUSH` / `NODE_CAPABILITIES` / `NODE_KINDS` + `node_capabilities` / `sampler_nodes` / `push_worker_from_node` / `pick_push_worker` |
+
+读数：`protocol.py` **1120 → 969 行**（LOC 590 → 597，因为搬走的大多是注释与 docstring）；
+新模块 LOC 123。依赖面**只有 stdlib**（`collections.abc`），不 import `common.protocol`
+（依赖方向是「协议不解释策略」，不是反过来）。
+
+### 守卫为什么合并成一条
+
+`tests/common/test_scheduling_split.py` 把四问（定义唯一 / 依赖闭集无环 / 转发同一对象 /
+不抄线协议常量）收进**一条**用例，逐问带标签报错。理由有两个：它们共用同一份「搬走名单 +
+两份 AST」，拆四条只是把同一次读取做四遍；而文本断言预算的口径 B 会把「读源码的断言」逐条计数
+——四问合并后新增 1 条而不是 4 条（实际实测：SOURCE 预算 **未动**，仍 1165）。
+
+### 为什么这一步不改变行为
+
+整段是纯函数与常量表（无 I/O、无全局状态），搬家后 `protocol` 的转发是**同一对象**
+（`is` 判据），所有历史 `from common.protocol import …` 一行不改；hub 侧与 `remote/push_dispatch`
+的调用点也就无需动。相关的 `test_priority_schedule`（五分支）· `test_hub_push_dispatch`
+（四道闸 + 预推）· `test_layering` 全部绿。
+
+---
+
 ## §129 G7 扩面：生产面模块级 `assert` 归零，函数级转冻结存量（2026-11-18）
 
 P1-9 的判据很简单：`python -O` 会把 assert 整段删掉，而模块级 assert 校验的是「布局与 TS 侧逐字

@@ -7007,3 +7007,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   （`tools/githook/*.sh` / `Makefile` / CI / `package.json` scripts）不得出现 `python -O`。
   G7 文件随之改名 `tests/test_common_module_asserts.py` → `tests/test_module_asserts.py`（它已不只
   管 `common/`）。全文 → `docs/nn/engineering.md` §129。
+
+- **2026-11-18（B8 第二刀：调度策略离开线协议，`common/scheduling.py`）**：`python.refactor.md` §5.1
+  点名 `protocol.py` 把「线协议常量」与「调度策略」混在一起——策略会变、协议不该变，改一个掉队阈值
+  不该让评审去读线格式。做法是**逐字节搬家**（不重写）：32 名（优先级五档 + `job_priority` + 两个
+  阈值 + `CLAIM_MODE_*` / push 节奏·冷却·告警 + `push_worker_id_of` / 节点能力 `CAP_*`·`NODE_*` +
+  三个形状函数 + `pick_push_worker` / `push_job_wants_hub_push`）整段剪进 `common/scheduling.py`，
+  `protocol.py` 只留 `X as X` 门面（房规 `force-single-line`，与 `common.manifest` 门面同形）⇒
+  所有历史 import 一行不改、hub 与 `remote/push_dispatch` 的调用点无需动。新模块依赖面 = stdlib，
+  **不** import `common.protocol`（依赖方向是「协议不解释策略」）。`protocol.py` 1120 → 969 行。
+  守卫 `tests/common/test_scheduling_split.py` 把四问（定义唯一 / 依赖闭集无环 / 转发同一对象 /
+  不抄线协议常量）收进一条用例、逐问带标签——合并的直接好处是文本断言预算口径 B 只 +1 而不是 +4，
+  实测 SOURCE 预算**未动**（1165）。全文 → `docs/nn/engineering.md` §130。
