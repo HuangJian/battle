@@ -47,6 +47,7 @@ flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import threading
@@ -71,6 +72,8 @@ from common.protocol import (
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_DELIVERED_NAME,
     OFFLINE_RESULT_PATH,
+    ProtocolError,
+    RetryableError,
     sanitize_run_id,
 )
 from remote import deliver_mode, deliver_parts, deliver_wire
@@ -251,7 +254,9 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         #: 而不是每轮一个 400）。
         try:
             self.run_id = sanitize_run_id(run_id)
-        except Exception:
+        except ProtocolError:
+            # 契约就这一种失败（规则见 `sanitize_run_id`）：非法 run_id ⇒ 这条腿不投产物。
+            # 宽捕会把这个函数的 bug（`_RUN_ID_OK` 改名 / 返回类型变了）也读成「没 run_id」。
             self.run_id = ""
         self.root = Path(artifacts_dir)
         #: 本份产物属于 hub 的**哪门课**（多课程 hub 的归位键）。
@@ -624,7 +629,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
         """后台线程里执行一件补传工作：任何异常只记一笔（线程必须活到下次提交）。"""
         try:
             fn(*a, **kw)
-        except BaseException as e:  # 后台腿不得因任何异常静默死掉（含 KeyboardInterrupt 类）
+        except Exception as e:  # 后台腿不得因任何异常静默死掉（但不含 SystemExit / KeyboardInterrupt）
             try:
                 self.log(f"补传后台异常（忽略，线程继续）：{type(e).__name__}: {e}")
             except Exception:
@@ -657,7 +662,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             status, _body = self._opener(
                 f"{self.base_url}/ping", b"", self._headers(), min(self.timeout, 20.0)
             )
-        except Exception as e:  # 网络层任何异常（DNS/连接被拒/超时/TLS）= 不可达
+        except _DELIVER_NET_ERRORS as e:  # 网络层（DNS/连接被拒/超时/TLS/体被截断）= 不可达
             self._reachable = False
             self._throttled_log(
                 "unreachable", f"hub 不可达（{type(e).__name__}: {e}）——本轮跳过补传"
@@ -891,7 +896,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             return 0
         try:
             rounds = self.pending()
-        except Exception as e:  # 判据面坏了也只记一笔
+        except (OSError, ValueError, KeyError) as e:  # 判据面（盘 + 账行形状）坏了只记一笔
             self._throttled_log("backup-pending", f"备份跳过：算不出待投轮次（{e}）")
             return 0
         if not force:
@@ -927,7 +932,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             return
         try:
             rounds = set(self._ledger_its())  # 本地**真轮次**（内容对账用；不读网络盘）
-        except Exception:
+        except (OSError, ValueError, KeyError):
             rounds = set()
         p = drawer.prune_delivered(
             confirmed=set(self._delivered),
@@ -1438,7 +1443,7 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
             status, body = self._opener(
                 f"{self.base_url}{path}", raw, self._headers(), timeout
             )
-        except Exception as e:
+        except _DELIVER_NET_ERRORS as e:
             self._last_elapsed = max(0.0, time.monotonic() - t0)
             # ★ 只作废**探活成功缓存**：数据面失败与「hub 不可达」是两件事（评审 P1-1）。
             # 下一拍会立刻重探一次（≤20s），探通了就接着推；`_reachable` 的语义与负缓存不变。
@@ -1575,13 +1580,22 @@ WORKER_NAME_ENV = "NN_WORKER_NAME"
 #: 老快照子进程两个都不认 ⇒ hub 侧从包里的 `plan.json` 反推（`pack_seg_end_kind`）。
 SEG_END_KIND_ENV = "NN_SEG_END_KIND"
 
+#: 「这一发没送达」的真失败形态 —— `_opener`（生产 = `_urllib_opener`）的路面：
+#: `URLError` / `HTTPError` / socket 超时全是 `OSError`；体读到一半被截断是
+#: `http.client.IncompleteRead`（`HTTPException`）；大 body 首块太慢由 `remote.http` 抛
+#: `WireSlowError`（`RetryableError` 子类）。**程序员错不落这个集**：`_headers()` 的
+#: `KeyError`、`_timeout_for` 的 `TypeError` 是配置/形状坏了，把它记成「没送达 ⇒ 下轮再试」
+#: 会让一条永不成功的坏配置伪装成网络抖动（`_post` 与 `probe` 共用同一个口径）。
+_DELIVER_NET_ERRORS = (OSError, http.client.HTTPException, RetryableError)
+
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:
-    """把 hub 的错误体压成一行（远端文本不可信：截断 + 去换行）。"""
-    try:
-        s = resp.decode("utf-8", "replace")
-    except Exception:
-        return ""
+    """把 hub 的错误体压成一行（远端文本不可信：截断 + 去换行）。
+
+    不解 try：`bytes.decode("utf-8", "replace")` 按定义不抛（任意字节都有替换字符），
+    所以旧的那条 `except Exception: return ""` 只能吞掉我们自己的 bug（`resp` 不是 bytes）。
+    """
+    s = resp.decode("utf-8", "replace")
     try:
         obj = json.loads(s)
         if isinstance(obj, dict) and obj.get("error"):

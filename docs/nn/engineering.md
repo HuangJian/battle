@@ -25,6 +25,34 @@
 
 ---
 
+## §136 P0-7 第二十批：补传腿的「不可达 / 没送达」不许当成垃圾桶（2026-11-18）
+
+`remote/offline_deliver.py` 12 → **6**。这里两句话经常被合写成一句：
+**「hub 连不上」（传输事实）**与**「这一发没成」（我们自己的判断）**。前者补传必须忍，后者不能忍：
+
+| 位置 | 宽捕读成了什么 | 修法 |
+|---|---|---|
+| `probe()` / `_post()` | `_headers()` 的 `KeyError`（配置键改名）、`_timeout_for` 的 `TypeError` ⇒ 「hub 不可达 / 没送达 ⇒ 下轮再试」 | `_DELIVER_NET_ERRORS = (OSError, http.client.HTTPException, RetryableError)` = `_opener` 的全部路面 |
+| `__init__` 的 `sanitize_run_id` | 它的任何 bug ⇒ `run_id = ""` ⇒ **补传静默关闭** | `except ProtocolError`（那是它唯一的契约失败） |
+| `backup_pending()` / `_prune_drawer()` | 判据面（`pending()` / `_ledger_its()`）的读错 ⇒ 「算不出待投轮次，跳过备份」——一条永不生效的备份路径 | `(OSError, ValueError, KeyError)` = 盘 + 账行形状 |
+| `_err_text()` | 解码不可能抛（`errors="replace"`）⇒ 只能吞自己 | 整段删掉 try |
+| `_guard()` | `except BaseException` 把 `SystemExit` / `KeyboardInterrupt` 也扣在后台线程里 | `except Exception`（内层 `pass` 保留：日志写不出去 ≠ 线程该死） |
+
+留下 6 处，各自就地写了「为什么只能宽」：`_cpu_seconds`（埋点契约「永不抛」）、`_guard` 外层（线程
+必须活到下次提交）、`sync` 兜底（补传的任何意外不得波及训练）、`_post_artifact_guarded`（毒轮次靠
+`POST_FAILURE_LIMIT` 收敛成拒收）、`deliver_result`（段末摘要 best-effort）、`_guard` 内层的 `pass`
+（G9 冻结，不是旧债）。
+
+判据（`tests/remote/test_offline_deliver.py` +3，全走公开面）：
+
+1. `ConnectionRefusedError` ⇒ `probe() is False`（补传跳过本轮）；`AttributeError` ⇒ 穿出去；
+2. `run_id="../evil"` ⇒ `run_id == ""`；把 `sanitize_run_id` 换成抛 `KeyError` ⇒ 构造失败；
+3. `backup_pending()`：`pending()` 抛 `OSError` ⇒ 返回 0；抛 `AttributeError` ⇒ 穿出去。
+
+读数：G4 **362 → 356**（137 文件）· G9 25 不变（`_guard` 内层 `pass` 是冻结项）· 用例 6229 → 6232。
+
+---
+
 ## §135 P0-7 第十九批：四条 fail-open 读面捕什么（2026-11-18）
 
 这一批的共同形状：**失败权本来就在对方手里**（客户端 / 传输 / 课文件 / hub 网络），而我们自己的

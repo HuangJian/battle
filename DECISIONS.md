@@ -7079,3 +7079,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   路面 ⇒ `AttributeError` 不再被记成「网络不通」而白等两轮退避。留下的 5 处都就地注释了为什么只能宽
   （handler 顶层分 400/500、torch 探针、调用方给的任意课程对象）。判据 4 处全部从公开入口/可观察结果
   验，四组反向判据改回宽捕各实测红。全文 → `docs/nn/engineering.md` §135。
+
+- **2026-11-18（P0-7 第二十批：补传腿的「不可达 / 没送达」不许当垃圾桶）**：
+  `remote/offline_deliver.py` 12 → **6**（G4 362 → **356**）。这一批的错法是一句话被合写成两句：
+  **「hub 连不上」是传输事实**（补传必须忍，跳过本轮即可），**「这一发没成」是我们自己的判断**
+  （不能忍）。① `probe()` / `_post()` 改捕 `_DELIVER_NET_ERRORS = (OSError, http.client.HTTPException,
+  RetryableError)` = `_opener` 的全部路面 —— 旧宽捕把 `_headers()` 的 `KeyError`（配置键改名）与
+  `_timeout_for` 的 `TypeError` 记成「hub 不可达 ⇒ 下轮再试」，于是坏配置伪装成网络抖动、永远重试；
+  ② 构造器里 `sanitize_run_id` 只捕 `ProtocolError`（它唯一的契约失败）—— 旧宽捕把它的 bug 读成
+  「run_id 空 ⇒ 补传静默关闭」；③ `backup_pending` 的 `pending()` 与 `_prune_drawer` 的
+  `_ledger_its()` 收窄成 `(OSError, ValueError, KeyError)`（盘 + 账行形状）；④ `_err_text` 删 try
+  （`decode("utf-8","replace")` 按定义不抛）；⑤ `_guard` 的 `BaseException` → `Exception`（后台线程
+  不该吞 `SystemExit` / `KeyboardInterrupt`；内层 `pass` 是 G9 冻结的「日志写不出去 ≠ 线程该死」）。
+  留下的 6 处全部就地写明只能宽的理由。判据 `tests/remote/test_offline_deliver.py` +3（全走公开面：
+  断连仍不可达 / 本模块 bug 穿出 / 非法 run_id 是唯一构造失败 + 备份判据面）。
+  全文 → `docs/nn/engineering.md` §136。

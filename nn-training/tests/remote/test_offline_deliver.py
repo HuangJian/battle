@@ -2004,3 +2004,95 @@ def test_without_any_eval_rows_every_pending_round_is_sent(tmp_path: Path) -> No
 
     assert d.sync() == 3
     assert sorted(b["it"] for b in op.bodies) == [1, 2, 3]
+
+
+# ────────────────────────── 异常面（P0-7 第二十批） ──────────────────────────
+
+
+def test_probe_calls_only_transport_failure_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_DELIVER_NET_ERRORS` 的边界：传输失败 ⇒ 「不可达」；我们自己的 bug ⇒ 穿出去。
+
+    `probe()` 的处置是「本轮跳过补传 + 一行节流日志」——这对断连/超时/体被截断是**正确**的，
+    但 `AttributeError`（`_opener` 接口改形 / 配置访问拼错）被它读成「hub 不可达」以后，现场
+    永远只看到「hub 时好时坏」，而 `_post` 用的**同一个**常量（它的失败处置是「状态 0 = 没送达」，
+    同样只对传输失败成立）。
+    """
+    from common import net_http
+
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    d = _deliverer("http://hub.invalid", root)
+
+    def refused(req, timeout: float = 30.0):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr(net_http, "urlopen", refused)
+    assert d.probe() is False, "断连是「不可达」——补传跳过本轮，训练照跑"
+
+    def buggy(req, timeout: float = 30.0):
+        raise AttributeError("opener lost .read")
+
+    monkeypatch.setattr(net_http, "urlopen", buggy)
+    # 新建一份：上一份刚把「不可达」进了负缓存（`PROBE_FAIL_TTL_SEC` 内不再真探）。
+    with pytest.raises(AttributeError):
+        _deliverer("http://hub.invalid", root).probe()
+
+
+def test_a_bad_run_id_is_the_only_constructor_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sanitize_run_id` 的契约只有一种失败（`ProtocolError`）⇒ 构造器也只捕它。
+
+    `run_id` 是 hub 侧目录名，非法 ⇒ 这条腿不投产物（`run_id == ""`）。旧宽捕会把这个函数的
+    **bug**（正则改名 / 返回类型变了）也读成「没 run_id」，于是补传静默关闭。
+    """
+    root = _make_artifacts(tmp_path / "art")
+    bad = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="t",
+        run_id="../evil",
+        artifacts_dir=root,
+        log=_quiet,
+    )
+    assert bad.run_id == "", "非法 run_id ⇒ 不投产物（不是崩，也不是拼进路径）"
+
+    import remote.offline_deliver as od
+
+    def buggy(_raw: object) -> str:
+        raise KeyError("RUN_ID_MAX was renamed")
+
+    monkeypatch.setattr(od, "sanitize_run_id", buggy)
+    with pytest.raises(KeyError):
+        OfflineDeliverer(
+            base_url="http://hub.invalid",
+            token="t",
+            run_id=RUN,
+            artifacts_dir=root,
+            log=_quiet,
+        )
+
+
+def test_backup_pending_treats_only_disk_and_row_shape_as_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`backup_pending` 的判据面只许失在「盘 + 账行形状」上（`backup_grace=0` 时也照这句）。
+
+    「算不出待投轮次」的后果是**跳过备份**（网络盘上少一份副本，训练与回传都不受影响）——
+    对 `OSError` 是对的；对我们自己的 `AttributeError` 则是一条永不生效的备份路径。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    d = _deliverer("http://hub.invalid", root, backup_root=tmp_path / "drawer")
+
+    def broken(_self) -> list[int]:
+        raise OSError("artifacts dir vanished")
+
+    monkeypatch.setattr(OfflineDeliverer, "pending", broken)
+    assert d.backup_pending() == 0, "盘坏了 ⇒ 跳过备份，不抛"
+
+    def buggy(_self) -> list[int]:
+        raise AttributeError("pending lost .iterdir")
+
+    monkeypatch.setattr(OfflineDeliverer, "pending", buggy)
+    with pytest.raises(AttributeError):
+        d.backup_pending()
