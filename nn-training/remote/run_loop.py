@@ -460,8 +460,8 @@ def _read_secret_file(path: str, flag: str) -> str:
         return ""
 
 
-def main(argv: list[str] | None = None) -> int:
-    """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
+def _build_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
     ap.add_argument(
         "--bundle",
@@ -610,6 +610,12 @@ def main(argv: list[str] | None = None) -> int:
             "典型值 = `<网络产物根>/backup`，由 remote/offline_boot 传（见 plan/offline-local-disk-first §3.4）"
         ),
     )
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
+    ap = _build_parser()
     args = ap.parse_args(argv)
     if not args.artifacts and not args.bundle:
         print("[run] 需要 --artifacts 或 --bundle 之一", file=sys.stderr, flush=True)

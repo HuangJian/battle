@@ -40,7 +40,6 @@ LONG_FUNCS_BASELINE = {
     "remote/offline_eval.py": 1,
     "remote/plan_run.py": 1,
     "remote/rollout_node.py": 1,
-    "remote/run_loop.py": 1,
     "remote/train_core.py": 2,
     "remote/worker.py": 2,
     "tools/lever_scan.py": 1,

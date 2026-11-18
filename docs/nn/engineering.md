@@ -25,6 +25,17 @@
 
 ---
 
+## §185 长函数存量第七刀：run_loop CLI 233 → 86（2026-11-18）
+
+`remote/run_loop.py::main` **233 → 86 行**，长函数存量 **31 → 30**
+（`LONG_FUNCS_BASELINE` 删除 `remote/run_loop.py` 条目）。
+
+一刀纯搬移：`_build_parser()`——`main` 的整张 argv 定义表（148 行 `add_argument`，
+描述 / 默认值 / help / choices 逐字保留）。入口 `main` 只剩「解析 → bundle 导入 →
+`run_standalone` → 错误上报 → 收尾打印」。
+
+---
+
 ## §184 长函数存量第六刀：Paddle PPO 更新 230 → 181（2026-11-18）
 
 `worker/ppo/engine_paddle.py::ppo_update` **230 → 181 行**，长函数存量 **32 → 31**

@@ -7417,3 +7417,6 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   230 → **181** 行（拆出 `_prepare_demo` / `_build_ref_cache` / `_zero_stats`，
   数值口径与循环体不变），长函数存量 **32 → 31**，形状基线删除该文件的长函数条目
   （宽参数条目保留）。全文 → `docs/nn/engineering.md` §184。
+- **2026-11-18（长函数存量第七刀：run_loop CLI）**：`remote/run_loop.py::main`
+  233 → **86** 行（拆出 `_build_parser()`：整张 argv 定义表，描述/默认值/help 逐字保留），
+  长函数存量 **31 → 30**，形状基线删除该文件条目。全文 → `docs/nn/engineering.md` §185。
