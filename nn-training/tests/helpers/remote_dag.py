@@ -237,6 +237,10 @@ LAYERS: dict[str, int] = {
     # `remote.tailscale_boot`(L0) 与 `remote.push_tunnel`(L0) ⇒ 拓扑秩 **L1**。
     # 读者只有 `rollout_node`。
     "remote.rollout_tunnel": 1,
+    # 采样节点要用的二进制工具链（2026-11-18，G5 建接缝）：bun / cloudflared 的查找、下载、
+    # 持久缓存只碰 `cfg` / `log` / 文件系统；依赖 `remote.tailscale_boot`(L0) 与账本外的
+    # `common.*` ⇒ 拓扑秩 **L1**。读者是 `rollout_node`(L2)。
+    "remote.node_toolchain": 1,
     # 采样节点运行时（2026-10-10，plan/rollout-node-auto-register v2）：cell 拆薄后逻辑住
     # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)、
     # `remote.push_register`(L0)、`push_tunnel`(L0) 与 `rollout_tunnel`(L1)

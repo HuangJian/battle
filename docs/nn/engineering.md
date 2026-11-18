@@ -25,6 +25,48 @@
 
 ---
 
+## §150 G5 第七批：节点工具链独立成 `remote/node_toolchain.py`（2026-11-18）
+
+`tests/remote/test_rollout_node.py` 私有断言 **43 → 8**、`test_rollout_node_notebook.py` **5 → 4**
+（G5 **631 → 595**，126 文件不变）。
+
+`rollout_node` 那 43 条里有 **38 条**其实在测「bun / cloudflared 从哪来」：GitHub 镜像候选、
+256KB 测速排序、下载重试与退避、npmmirror 兜底、持久缓存命中、`--version` 校验、缓存写失败
+不致命。这些函数只碰 `cfg` / `log` / 文件系统，不碰节点状态、隧道进程或注册面 —— 它们住在
+监护模块里纯属历史（模块初版把 notebook cell 整段收进来）。拆成 `remote/node_toolchain.py`
+后：
+
+| 旧判据 | 换成 |
+|---|---|
+| `rn._github_candidates` / `_bun_install_bases` | `nt.github_candidates` / `_bun_install_bases` |
+| `rn._speed_probe` / `_rank_fastest` / `_download_retry` | `nt.speed_probe` / `rank_fastest` / `_download_retry` |
+| `rn._ensure_bun` / `_find_cloudflared` / `_bin_cache_dir` | `nt.ensure_bun` / `find_cloudflared` / `bin_cache_dir` |
+| `rn._cached_bin` / `_store_bin` / `_install_bun_mirror` | `nt.cached_bin` / `store_bin` / `install_bun_mirror` |
+
+45 个工具链用例搬进 `tests/remote/test_node_toolchain.py`，断言的是**公开函数**；`rollout_node`
+只剩 `from remote.node_toolchain import ensure_bun, ensure_cloudflared` 两个名字。横幅里的
+bun 版本不再自带实现，改调 `common.proc.bun_version(bun, fallback="")` —— 搬家时
+`test_reuse_ledger` 当场抓到 `bun_version` 在 `common/proc.py` / `worker/iter_rollout.py` 之外
+又多了一份（同名 ≥3 从 113 涨到 114）；复用之后组数不变，并顺手给这行加了 10s 超时
+（旧 `_sh` 不设超时，bun 卡住会把启动横幅一起拖住；版本串仍是单行、失败仍为空串）。
+搬家是逐字搬的：对 18 个函数的 AST 做了归一化比对（去掉下划线前缀后），差异只有 docstring 与
+调用名。`remote_dag.LAYERS` 新增 `remote.node_toolchain: 1`（只依赖 `remote.tailscale_boot`(L0)
+与账本外的 `common.*`）。
+
+同批把隧道日志/健康用例从 `test_rollout_node.py` 拆到 `tests/remote/test_rollout_tunnel.py`：
+被测对象 2026-11-08 就住在 `remote/rollout_tunnel.py`，用例却经由 `rollout_node` 的私有别名
+调用 —— 于是「隧道怎么判死」看起来像在测节点的私有实现。
+
+notebook 守卫同步改锚点：`test_public_downloads_are_wrapped_in_platform_net_env` 现在扫
+`node_toolchain` 的 `with public_net():` 块（bun 盯 `curl -fsSL https://bun.sh/install` 字面量；
+cloudflared 盯 `_download_retry` 调用本身 —— 直连产物是模块常量，不在函数体里）。
+
+**留下的 8 处**都是 `rn._status` / `_slot_count` / `_start_cloudflared` / `_open_tailscale`
+的**调用**（驱动被测入口，不是读私有状态），以及 notebook 守卫里同一形态的 3 处；监护循环
+不再替「工具从哪来」背测试，反过来工具链也不用知道监护状态机。
+
+---
+
 ## §149 G5 第六批：采集链的公开读数 `volume_view()`（2026-11-18）
 
 `tests/worker/test_rollout_volume.py` 私有断言 **46 → 2**（G5 **675 → 631**，126 文件不变）。

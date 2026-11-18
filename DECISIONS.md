@@ -7212,3 +7212,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   三条私有**方法调用**（`_iteration_pairs` / `_volume_stages` / `_volume_stage_ests_map`）
   移出断言表达式：驱动被测入口不是「读私有状态」。成员闭集守卫同步 +1。全文 →
   `docs/nn/engineering.md` §149。
+- **2026-11-18（G5 第七批：节点工具链分家）**：`tests/remote/test_rollout_node.py` 私有断言
+  43 → **8**、`test_rollout_node_notebook.py` 5 → **4**（G5 631 → **595**）。那 43 条里有 38 条
+  其实在测「bun / cloudflared 从哪来」—— 镜像候选、测速排序、下载重试、持久缓存、
+  `--version` 校验。它们只碰 `cfg`/`log`/文件系统，于是整段搬进 `remote/node_toolchain.py`
+  （L1），45 个用例改对公开函数断言。搬家逐字：18 个函数 AST 归一化后只剩 docstring 与
+  下划线前缀的差异。横幅的 `bun_version` 不再搬一份实现，改调 `common.proc.bun_version`
+  （`test_reuse_ledger` 当场抓到同名 ≥3 会从 113 涨到 114；复用后不变，并顺手给了 10s 超时）。
+  隧道用例同步搬去 `test_rollout_tunnel.py`（被测对象早就在那里）。
+  留下的 8 处都是驱动 `_status`/`_slot_count`/`_start_cloudflared`/`_open_tailscale` 的调用。
+  全文 → `docs/nn/engineering.md` §150。

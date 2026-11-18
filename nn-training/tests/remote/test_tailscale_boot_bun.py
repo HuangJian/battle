@@ -14,8 +14,8 @@
   3. **该有 bun 的链仍然有**：`battle.offline.ipynb`（Kaggle/TPU，Kaggle 不给 tailnet ⇒ 只能走
      cloudflared 隧道，它自己跑 rollout）的 cell 里必须还装着 bun；**采样节点**
      （`rollout.ipynb`，2026-10-10 由 `rollout.cloudflared.ipynb` 改名、cell 拆薄）的 bun 安装
-     随逻辑住 `remote/rollout_node.py`，且**不许内联回 cell** —— 只删不加，会把「谁需要 bun」
-     这件事做没。
+     随逻辑住 `remote/node_toolchain.py`（2026-11-18 从 `rollout_node` 拆出），且**不许内联回
+     cell** —— 只删不加，会把「谁需要 bun」这件事做没。
 """
 
 from __future__ import annotations
@@ -24,7 +24,13 @@ import inspect
 import json
 from pathlib import Path
 
-from remote import notebook_boot, notebook_runtime, push_bootstrap, rollout_node, tailscale_boot
+from remote import (
+    node_toolchain,
+    notebook_boot,
+    notebook_runtime,
+    push_bootstrap,
+    tailscale_boot,
+)
 
 NN = Path(__file__).resolve().parents[2]
 IPYNB = NN / "ipynb"
@@ -51,9 +57,11 @@ ONLINE_MODULES = {
 #: ★ 2026-10-01：约定履行，notebook 入库（用户裁决），名字加回（见 `DECISIONS.md`
 #: §2026-09-25-goalnn-online-worker-no-bun）。
 #: ★ 2026-10-10：cell 拆薄（plan/rollout-node-auto-register v2）——离线盘仍住 cell，
-#: 采样节点的 bun 安装搬进 `remote/rollout_node.py`（`ROLLOUT_MODULES`），cell 里**不许**再有。
+#: 采样节点的 bun 安装搬进 `remote/rollout_node.py`，cell 里**不许**再有。
+#: ★ 2026-11-18：安装实现（`ensure_bun` / 镜像 / 持久缓存）拆进 `remote/node_toolchain.py`，
+#: 采样节点只 import 它 —— 边界 3b 跟着实现走。
 ROLLOUT_DISKS = ("battle.offline.ipynb",)
-ROLLOUT_MODULES = {"remote/rollout_node.py": rollout_node}
+ROLLOUT_MODULES = {"remote/node_toolchain.py": node_toolchain}
 
 
 def _cell_source(name: str) -> str:
@@ -115,14 +123,14 @@ def test_retired_bun_helpers_do_not_come_back() -> None:
 
 
 def test_sampling_node_installs_bun_in_module_not_cell() -> None:
-    """边界 3a（新）：采样节点 cell 拆薄后，bun 安装只许住 `remote/rollout_node.py`。
+    """边界 3a（新）：采样节点 cell 拆薄后，bun 安装只许住 `remote/node_toolchain.py`。
 
     安装必须在 **tailscale 引导之前**（或包 `platform_net_env()`）——`ensure` 落到 userspace
     时会改写 HTTP_PROXY，之后公网 curl 走不通（2026-09-17 事故同族）。
     """
     src = _cell_source("rollout.ipynb")
     assert all(m not in src for m in INSTALL_MARKERS), (
-        "采样节点 cell 又内联装 bun —— 应住 remote/rollout_node.py（cell 只留 CFG/凭据/保活/clone/调用）"
+        "采样节点 cell 又内联装 bun —— 应住 remote/node_toolchain.py（cell 只留 CFG/凭据/保活/clone/调用）"
     )
 
 
@@ -131,7 +139,7 @@ def test_rollout_chains_still_provide_bun() -> None:
 
     `battle.offline.ipynb` = Kaggle/TPU 上的离线盘（Kaggle 不给 tailnet ⇒ 只能走 cloudflared
     隧道进 hub），它自己跑 rollout，安装必须留在 cell 里；
-    采样节点的安装住 `remote/rollout_node.py`（见 `ROLLOUT_MODULES`）。
+    采样节点的安装住 `remote/node_toolchain.py`（见 `ROLLOUT_MODULES`）。
     """
     missing = [n for n in ROLLOUT_DISKS if not any(m in _cell_source(n) for m in INSTALL_MARKERS)]
     missing += [

@@ -33,6 +33,7 @@ from typing import Any, cast
 
 import pytest
 
+from remote import node_toolchain as nt
 from remote import rollout_node as rn
 
 NN = Path(__file__).resolve().parents[2]
@@ -79,7 +80,7 @@ def test_cell_does_only_its_share_of_the_work() -> None:
 
 
 def test_cell_inlines_no_installs() -> None:
-    """bun / cloudflared 的安装住模块（`_ensure_bun` / `_start_cloudflared`），cell 里不许有。"""
+    """bun / cloudflared 的安装住模块（`remote/node_toolchain.py`），cell 里不许有。"""
     text = _cells("code") + _cells("markdown")
     for marker in ("bun.sh/install", "cloudflared-linux-amd64", "apt-get install"):
         assert marker not in text, f"采样节点 cell 又内联安装（{marker}）—— 应住 remote/rollout_node.py"
@@ -180,11 +181,11 @@ def test_credentials_are_read_before_tailscale_ensure(
     ]
 
 
-def _download_statements_inside_public_net(
-    func: Callable[..., Any], url_prefix: str
+def _statements_inside_public_net(
+    func: Callable[..., Any], matches: Callable[[ast.AST], bool]
 ) -> tuple[list[ast.AST], list[ast.AST]]:
-    """把 `func` 里含 `url_prefix` 的 URL 字面量（= 公网下载）与「落在 `with _public_net():` 里」
-    的节点各收一份（AST 判定：不挂源码措辞，也不靠 `assert "…" in src`）。"""
+    """把 `func` 里 `matches` 选中的节点与「落在 `with public_net():` 里」的节点各收一份
+    （AST 判定：不挂源码措辞，也不靠 `assert "…" in src`）。"""
     tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
     wrapped: set[int] = set()
     for node in ast.walk(tree):
@@ -193,35 +194,45 @@ def _download_statements_inside_public_net(
         if not any(
             isinstance(it.context_expr, ast.Call)
             and isinstance(it.context_expr.func, ast.Name)
-            and it.context_expr.func.id == "_public_net"
+            and it.context_expr.func.id == "public_net"
             for it in node.items
         ):
             continue
         for stmt in node.body:
             wrapped.update(id(x) for x in ast.walk(stmt))
-    urls: list[ast.AST] = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and node.value.startswith(url_prefix)
-    ]
-    return urls, [u for u in urls if id(u) not in wrapped]
+    matched = [node for node in ast.walk(tree) if matches(node)]
+    return matched, [n for n in matched if id(n) not in wrapped]
+
+
+def _url_literal(prefix: str) -> Callable[[ast.AST], bool]:
+    def _m(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith(prefix)
+        )
+
+    return _m
+
+
+def _call_named(name: str) -> Callable[[ast.AST], bool]:
+    def _m(node: ast.AST) -> bool:
+        return isinstance(node, ast.Call) and getattr(node.func, "id", "") == name
+
+    return _m
 
 
 def test_public_downloads_are_wrapped_in_platform_net_env() -> None:
     """F5：`ensure()` 之后任何公网下载都得还原平台代理（先例 `battle.offline.ipynb:408-409`）。"""
-    assert callable(rn._public_net)
-    for func, prefix in (
-        (rn._ensure_bun, "curl -fsSL https://bun.sh/install"),
-        (
-            rn._start_cloudflared,
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
-        ),
+    assert callable(nt.public_net)
+    for func, matches in (
+        (nt.ensure_bun, _url_literal("curl -fsSL https://bun.sh/install")),
+        # cloudflared 的直连产物是模块常量（`CLOUDFLARED_ASSET_URL`），这里盯下载动作本身。
+        (nt.ensure_cloudflared, _call_named("_download_retry")),
     ):
-        urls, unwrapped = _download_statements_inside_public_net(func, prefix)
-        assert urls, f"{func.__name__} 里找不到公网下载字面量（守卫锚点该更新了）"
-        assert unwrapped == [], f"{func.__name__} 的下载没包 `_public_net()`（代理注入后公网不通）"
+        hits, unwrapped = _statements_inside_public_net(func, matches)
+        assert hits, f"{func.__name__} 里找不到公网下载（守卫锚点该更新了）"
+        assert unwrapped == [], f"{func.__name__} 的下载没包 `public_net()`（代理注入后公网不通）"
 
 
 def test_run_owns_unregister_on_exit() -> None:
@@ -258,7 +269,7 @@ def test_cell_clone_auto_tries_builtin_mirrors(monkeypatch: pytest.MonkeyPatch) 
     direct = "https://github.com/HuangJian/battle.git"
     got = ns["_clone_candidates"](direct)
     assert got[0] == direct
-    assert set(got[1:]) == {m + "/HuangJian/battle.git" for m in rn.GITHUB_MIRRORS}
+    assert set(got[1:]) == {m + "/HuangJian/battle.git" for m in nt.GITHUB_MIRRORS}
 
     nb_calls = [n for n in ast.walk(nb_ast) if isinstance(n, ast.Call)]
     assert any(getattr(c.func, "id", "") == "_clone_candidates" for c in nb_calls), "clone 分支没用候选表"

@@ -82,7 +82,7 @@
     "remote/push_register.py": 3,
     "remote/push_tunnel.py": 2,
     "remote/result_upload.py": 2,
-    "remote/rollout_node.py": 12,
+    "remote/rollout_node.py": 11,
     "remote/rollout_tunnel.py": 2,
     "remote/run_loop.py": 3,
     "remote/tailscale_boot.py": 6,
