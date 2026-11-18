@@ -25,6 +25,26 @@
 
 ---
 
+## §207 长函数存量第二十八刀：云评估逐局与轮内重投（remote）401 → 182（2026-11-18）
+
+`remote/offline_eval.py::run_cloud_eval` **401 → 182 行**，长函数存量 **10 → 9**
+（`LONG_FUNCS_BASELINE` 删除 `remote/offline_eval.py` 条目）。
+
+按 §201 的「先造上下文对象」：
+- `_eval_preflight(plan, it, weights_path, ts_root, bun, eval_jsonl, log)`：预检与
+  「要评哪些局」，返回 `_EvalPrep | None` + `wver`（`out["wver"]` 的时机逐字保留）。
+- `_EvalRound`：一轮评估的共享状态（21 个字段 = 原 `run_one` 的捕获量）。
+  - `run_one(task, course, log, pool)`：单局原地重试 + 落账（原嵌套闭包，119 行）。
+  - `run_rounds(course, n_slots, eb, out, log, pool)`：机器级停滞的轮内重投（79 行）。
+  - `finish_round(rollout_winrate, course_fp, eb, t0, out, round_retries, log)`：耗时分布 /
+    失败清单 / summary 结算（35 行）。
+- `run_cloud_eval` 只留预检调用、池装配、上下文构造、三段调用与永不抛的收尾。
+
+17 处日志逐条比对：文案与顺序不变。命名避开了同名散落账本：`run_round` → `run_rounds`、
+`settle` → `finish_round`（两者原本会把「≥3 模块同名」读数抬高）。
+
+---
+
 ## §206 长函数存量第二十七刀：推送守候两条分支（remote）336 → 99（2026-11-18）
 
 `remote/notebook_runtime.py::run_push_worker` **336 → 99 行**，长函数存量 **11 → 10**

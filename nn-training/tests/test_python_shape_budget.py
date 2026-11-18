@@ -32,7 +32,6 @@ LONG_FUNCS_BASELINE = {
     "remote/hub_client.py": 1,
     "remote/job_round.py": 1,
     "remote/offline_boot.py": 1,
-    "remote/offline_eval.py": 1,
     "remote/train_core.py": 2,
     "remote/worker.py": 2,
     "trainer/dispatch.py": 2,

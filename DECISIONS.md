@@ -7519,3 +7519,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   主分支的守候循环搬成 `_wait_existing_serving` / `_wait_started_serving`），
   长函数存量 **11 → 10**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §206。
+- **2026-11-18（长函数存量第二十八刀：云评估逐局与轮内重投 remote）**：
+  `remote/offline_eval.py::run_cloud_eval` 401 → **182** 行（新增 `_eval_preflight` /
+  `_EvalPrep` / `_EvalRound`，逐局闭包搬成 `run_one`，轮内重投与结算搬成
+  `run_rounds` / `finish_round`），长函数存量 **10 → 9**，形状基线删除该文件条目；
+  命名避开同名散落账本（`run_round` → `run_rounds`、`settle` → `finish_round`）。
+  全文 → `docs/nn/engineering.md` §207。
