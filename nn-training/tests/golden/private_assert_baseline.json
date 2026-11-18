@@ -118,7 +118,7 @@
   "tests/worker/test_remote_serve_pool.py": 10,
   "tests/worker/test_rl_remote_fixes.py": 2,
   "tests/worker/test_rollout_end_event.py": 1,
-  "tests/worker/test_rollout_volume.py": 46,
+  "tests/worker/test_rollout_volume.py": 2,
   "tests/worker/test_shard_action_space_v6.py": 7,
   "tests/worker/test_stream_alpha.py": 3,
   "tests/worker/test_stream_collect_stats.py": 1,

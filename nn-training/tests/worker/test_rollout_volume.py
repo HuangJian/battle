@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from biz.course import build_pairs
 from tests.conftest import bp_args
 from trainer.loop_core import TrainingLoop
+from trainer.loop_volume import TrainingVolume, VolumeView
 from worker.commit_journal import CommitJournal
 from worker.config import CourseConfig, corpus_identity_fp
 from worker.greedy_quota import GREEDY_QUOTA_RULE_V1
@@ -620,6 +621,9 @@ class _StubLoop:
     def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_greedy(cast(Any, self), it, dist_cfg)
 
+    def volume_view(self) -> VolumeView:
+        return TrainingVolume.volume_view(cast(Any, self))
+
     #: 零落盘（2026-10-28）：桩上没有段账 ⇒ `settled_stage_totals` 只读盘上 shard
     #: （本文件测的正是「重启后从盘上回填」那条老路径）。
     _payload_parts = None
@@ -792,18 +796,21 @@ def test_settled_totals_accept_both_manifest_schemas(tmp_path: Path) -> None:
 def test_iteration_pairs_identity_without_volume(tmp_path: Path, _patch_wver: None) -> None:
     """★ 无键课程：走 build_pairs 原路，逐字节同一（接线不许动老路径）。"""
     stub = _StubLoop(tmp_path)
-    assert stub._iteration_pairs(9) == build_pairs(stub.args, 9, stub._rotate_seed)
-    assert stub._volume_target is None and stub._volume_collected is None
+    pairs = stub._iteration_pairs(9)
+    view = stub.volume_view()
+    assert pairs == build_pairs(stub.args, 9, view.rotation_seed)
+    assert view.target is None and view.collected is None
 
 
 def test_iteration_pairs_volume_initial_wave(tmp_path: Path, _patch_wver: None) -> None:
     """volume 课程仍产出 node/export 预排表；串行连续采集不预置 waves=1。"""
     stub = _StubLoop(tmp_path, target=600000, est=967)
     pairs = stub._iteration_pairs(3)
-    assert stub._volume_waves == 0
-    assert stub._volume_g0 == 156
-    assert stub._volume_target == 600000
-    assert pairs == wave_pairs(stub._rotate_seed, 3, {s: 156 for s in range(4)}, 0)
+    view = stub.volume_view()
+    assert view.waves == 0
+    assert view.g0 == 156
+    assert view.target == 600000
+    assert pairs == wave_pairs(view.rotation_seed, 3, {s: 156 for s in range(4)}, 0)
     assert len(pairs) == 4 * 156
     assert {st for st, _ in pairs} == {0, 1, 2, 3}
 
@@ -833,7 +840,8 @@ def test_volume_stages_uses_explicit_stages(tmp_path: Path) -> None:
     """显式 --stages 正常解析（回归：P2-c 改动不得误伤正常路径）。"""
     stub = _StubLoop(tmp_path, target=600000)
     stub.args.stages = "2000-2003"
-    assert stub._volume_stages(1) == [2000, 2001, 2002, 2003]
+    stages = stub._volume_stages(1)
+    assert stages == [2000, 2001, 2002, 2003]
 
 
 def test_continuous_restart_quota_met_backfills_winrate_from_shards(
@@ -853,14 +861,15 @@ def test_continuous_restart_quota_met_backfills_winrate_from_shards(
             outcome = "stage_clear" if seed == 0 else "timeout"
             _manifest(stub._traj_dir, stage, seed, _WVER, 200, outcome=outcome)
     stub._volume_collect_continuous(76, None)
+    view = stub.volume_view()
     assert stub.dispatched == []  # 配额已满 ⇒ 零新采
-    assert stub._volume_waves == 0
+    assert view.waves == 0
     # 报告口径 = 盘上本轮 shard，不是本进程 combine([]) 的空壳
-    assert stub._report["games"] == 8
-    assert stub._report["outcomes"].get("stage_clear") == 4
-    assert stub._report["outcomes"].get("timeout") == 4
-    assert stub._report["winRate"] == 0.5
-    assert stub._report["totalSamples"] == 8 * 200
+    assert view.report["games"] == 8
+    assert view.report["outcomes"].get("stage_clear") == 4
+    assert view.report["outcomes"].get("timeout") == 4
+    assert view.report["winRate"] == 0.5
+    assert view.report["totalSamples"] == 8 * 200
 
 
 def test_continuous_cold_start_spreads_by_width(tmp_path: Path, _patch_wver: None) -> None:
@@ -885,11 +894,13 @@ def test_continuous_cold_start_spreads_by_width(tmp_path: Path, _patch_wver: Non
     second = len(stub.dispatched[1])
     assert 12 <= second <= pool, second
     assert second + stub.undispatched == pool, "没派出去的候选必须没跑（不是派了再丢）"
-    assert stub._volume_halted is True, "逐关配额满额后必须熔断"
-    assert stub._volume_waves == 2
+    view = stub.volume_view()
+    assert view.halted is True, "逐关配额满额后必须熔断"
+    assert view.waves == 2
     assert {s for s, _ in stub.dispatched[1]} == {0, 1, 2, 3}
     # 首波不是「按估计铺的」⇒ 读数记 -1（0 在下游是「无估计」的值，会和「估出来是 0」混掉）
-    stage0 = stub._volume_stage_stats["stages"]["0"]
+    assert view.stage_stats is not None
+    stage0 = view.stage_stats["stages"]["0"]
     assert stage0["est_used"] == -1 and stage0["est_raw"] == -1, stage0
     assert stage0["est_src"] == "cold-start"
 
@@ -919,8 +930,9 @@ def test_continuous_with_history_uses_an_overprovisioned_pool(
     assert next(len(w) for w in stub.dispatched) <= pool, stub.dispatched
     assert len(stub.dispatched) == 1, "一批到底（池够大 ⇒ 不需要第二批）"
     assert len(stub.dispatched[0]) + stub.undispatched == pool
-    assert stub._volume_halted is True
-    assert stub._volume_waves == 1
+    view = stub.volume_view()
+    assert view.halted is True
+    assert view.waves == 1
 
 
 def test_continuous_autocalibrates_and_pulls_est_low(tmp_path: Path, _patch_wver: None) -> None:
@@ -938,13 +950,15 @@ def test_continuous_autocalibrates_and_pulls_est_low(tmp_path: Path, _patch_wver
     pool = 24
     assert len(stub.dispatched) == 1, stub.dispatched  # ★ 一批到底（旧口径是两批）
     assert len(stub.dispatched[0]) + stub.undispatched == pool
-    assert stub._volume_halted is True
-    assert stub._volume_waves == 1
+    view = stub.volume_view()
+    assert view.halted is True
+    assert view.waves == 1
     # 首波读数已落事件：est_used 是**压过**的值，est_raw 是估计原值，est_s 仍是盘上历史（可对账）。
-    stage0 = stub._volume_stage_stats["stages"]["0"]
+    assert view.stage_stats is not None
+    stage0 = view.stage_stats["stages"]["0"]
     assert stage0["est_used"] == 18 and stage0["est_raw"] == 20 and stage0["est_s"] == 20
     assert stage0["est_src"] == "trailing"
-    assert stub._volume_stage_stats["est_src"] == "trailing"
+    assert view.stage_stats["est_src"] == "trailing"
 
 
 def test_stage_est_ignores_the_empty_current_round(tmp_path: Path, _patch_wver: None) -> None:
@@ -975,7 +989,8 @@ def test_stage_est_ignores_the_empty_current_round(tmp_path: Path, _patch_wver: 
 
     # `--est-agg pooled`（评审 #8 的旋钮）：近 3 轮池化，**仍然排除本轮** ⇒ stage0=(900+530)/2=715
     stub.args.est_agg = "pooled"
-    assert stub._volume_stage_ests_map(3)[0] == 715
+    pooled = stub._volume_stage_ests_map(3)
+    assert pooled[0] == 715
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
@@ -986,7 +1001,7 @@ def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None)
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 无需补波
-    assert stub._volume_collected == 4 * 16 * 967  # g0=ceil(15000/967)=16
+    assert stub.volume_view().collected == 4 * 16 * 967  # g0=ceil(15000/967)=16
     assert stub._journal.pending() == []
 
 
@@ -1000,13 +1015,14 @@ def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None)
     sizes = [len(w) for w in stub.dispatched]
     # w1 ceil(7000/967)=8，w2 ceil(3000/967)=4（分关缺口，samples 口径）
     assert sizes == [4 * 8, 4 * 4]
-    assert stub._volume_waves == 3
-    assert stub._volume_collected == 4 * (16 + 8 + 4) * 500
-    assert stub._volume_capped is False
+    view = stub.volume_view()
+    assert view.waves == 3
+    assert view.collected == 4 * (16 + 8 + 4) * 500
+    assert view.capped is False
     assert stub._journal.pending() == []  # 每波 start 都有配对的 finish
     # 报告已逐波并入（补波确实是本轮报告的一部分）
-    assert stub._report["games"] == 4 * (16 + 8 + 4)
-    assert stub._report["totalSamples"] == stub._volume_collected
+    assert view.report["games"] == 4 * (16 + 8 + 4)
+    assert view.report["totalSamples"] == view.collected
 
 
 def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -> None:
@@ -1017,8 +1033,9 @@ def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert [len(w) for w in stub.dispatched] == [4 * 4]  # 20-16 剩余额度（本波想要 8）
-    assert stub._volume_capped is True
-    assert stub._volume_waves == 2
+    view = stub.volume_view()
+    assert view.capped is True
+    assert view.waves == 2
 
 
 def test_volume_topup_partial_ledger_replays_same_continuation(
@@ -1062,7 +1079,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
     per_stage = {st: sum(1 for t, _ in crashed.dispatched[0] if t == st) for st in range(4)}
     assert per_stage[0] == per_stage[1] == 4  # ceil(3000/967)
     assert per_stage[2] == per_stage[3] == 8  # ceil(7000/967)
-    assert (crashed._volume_collected or 0) > 0
+    assert (crashed.volume_view().collected or 0) > 0
 
 
 def test_parse_wave_records_roundtrip(tmp_path: Path) -> None:
@@ -1104,9 +1121,9 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     )
     stub._volume_topup(1, None)
     # 重放的一定是 w2 的对局表（不是按账本新算的 w1）
-    assert stub.dispatched[0] == wave_pairs(stub._rotate_seed, 1, games, 2)
+    assert stub.dispatched[0] == wave_pairs(stub.volume_view().rotation_seed, 1, games, 2)
     # 波次预算不因重启重领：w2 已用过 ⇒ 重放后直接触 wave_cap，不再开新波
-    assert stub._volume_waves == 3
+    assert stub.volume_view().waves == 3
     assert len(stub.dispatched) == 1
 
 
@@ -1122,7 +1139,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
     stub._journal.finish(WAVE_PHASE, wave_round_key(1, 2))
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 预算已用满（w2 ⇒ waves=3）⇒ 无新波
-    assert stub._volume_waves == 3
+    assert stub.volume_view().waves == 3
 
 
 def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> None:
@@ -1134,7 +1151,7 @@ def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> No
     stub._stream_meta = {"rollout_sec": 1.0}
     stub._volume_topup(1, None)
     assert stub.dispatched == []
-    assert stub._volume_collected is None
+    assert stub.volume_view().collected is None
 
 
 def test_volume_topup_skips_when_disabled(tmp_path: Path, _patch_wver: None) -> None:
@@ -1249,14 +1266,16 @@ def test_greedy_collect_reads_current_round_dir(tmp_path: Path) -> None:
     flat = [pair for wave in stub.dispatched for pair in wave]
     assert flat, "greedy 阶段应至少派出一波"
     assert len(flat) == len(set(flat)), "greedy 波次不得重派同一 (stage, seed)"
-    assert stub._greedy_waves >= 2
-    assert stub._greedy_stats is not None
-    assert stub._greedy_stats["total"] > 0
+    view = stub.volume_view()
+    assert view.greedy_waves >= 2
+    st = view.greedy_stats
+    assert st is not None
+    assert st["total"] > 0
     # collect_target=8000；允许一个波次的离散步长（本测试 4 关 × 50 samples）
-    assert stub._greedy_stats["total"] <= 8000 + 4 * stub.samples, (
-        f"本地 greedy 过采：total={stub._greedy_stats['total']} collect_target=8000"
+    assert st["total"] <= 8000 + 4 * stub.samples, (
+        f"本地 greedy 过采：total={st['total']} collect_target=8000"
     )
-    assert stub._greedy_stats["rule"] == GREEDY_QUOTA_RULE_V1, (
+    assert st["rule"] == GREEDY_QUOTA_RULE_V1, (
         "iteration 事件里的 rule 必须与选择器/语料身份同源，不能硬编码旧版本"
     )
 
@@ -1470,8 +1489,9 @@ def test_greedy_all_zero_quota_is_noop(tmp_path: Path) -> None:
     """三档全 0 = 合法关闭：不建 plan、不派局、不写 stats（与缺席等价）。"""
     stub = _greedy_stub(tmp_path, {"win": 0, "loss": 0, "timeout": 0})
     stub._volume_collect_greedy(1, None)
-    assert stub._greedy_plan is None and stub._greedy_stats is None
-    assert stub.dispatched == [] and stub._greedy_waves == 0
+    view = stub.volume_view()
+    assert view.greedy_plan is None and view.greedy_stats is None
+    assert stub.dispatched == [] and view.greedy_waves == 0
 
 
 @pytest.mark.parametrize("skip", ["collect_only", "export_bundle"])
@@ -1483,7 +1503,8 @@ def test_greedy_skips_export_only_paths(tmp_path: Path, skip: str) -> None:
     else:
         stub.args.export_bundle = "tmp/bundle"
     stub._volume_collect_greedy(1, None)
-    assert stub._greedy_plan is None and stub._greedy_stats is None
+    view = stub.volume_view()
+    assert view.greedy_plan is None and view.greedy_stats is None
     assert stub.dispatched == []
 
 
@@ -1520,21 +1541,23 @@ def test_greedy_waves_merge_into_main_report(tmp_path: Path) -> None:
     assert rep["winRate"] < 1.0, "败局/超时局必须把主胜率拉下来"
     assert rep["totalSamples"] > 1000, "greedy transitions 必须并进 samples"
 
-    st = stub._greedy_stats
+    st = stub.volume_view().greedy_stats
     assert st is not None
     assert st["sampling_report"]["winRate"] == 1.0
     assert st["sampling_report"]["samples"] == 1000
     assert st["greedy_report"]["outcomes"]["lives_exhausted"] >= 2
     assert st["greedy_report"]["samples"] > 0
+    view = stub.volume_view()
     # 其余 rollout 指标也统计 greedy（用户追加口径）。
-    assert stub._volume_collected == 1000 + st["total"], (
+    assert view.collected == 1000 + st["total"], (
         "transitions_collected 必须含 greedy，且与 report.totalSamples 同口径"
     )
-    g = stub._volume_stage_stats.get("greedy") or {}
+    assert view.stage_stats is not None
+    g = view.stage_stats.get("greedy") or {}
     assert g.get("samples") == st["total"]
     assert g.get("games", 0) > 0
     assert g.get("stages"), "分关 greedy 账不能空"
-    assert stub._volume_stage_stats["stages"] == {}, (
+    assert view.stage_stats["stages"] == {}, (
         "普通配额诊断口径不许被 greedy 覆盖"
     )
 

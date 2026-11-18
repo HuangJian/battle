@@ -7201,3 +7201,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `heartbeat(...) is True` 覆盖了 owner、到期与心跳三件事。留下的 2 处是**否定断言**（错 token
   心跳后截止时刻与心跳时刻「一动没动」）—— 公开面只说「现在能不能领」，说不出「一刻没动」。
   全文 → `docs/nn/engineering.md` §148。
+- **2026-11-18（G5 第六批：采集链的公开读数）**：`tests/worker/test_rollout_volume.py`
+  私有断言 46 → **2**（G5 675 → **631**）。这条用例的 46 条断言里绝大多数只是**读进度**
+  （配额目标/已采、波次、初波局数、熔断、分关账、greedy、报告合并），却逐条伸进
+  `_volume_*` / `_greedy_*` / `_report`。新增 `VolumeView`（frozen dataclass）+
+  `TrainingVolume.volume_view()` 作为这一簇唯一的只读观测面：字段名取 `worker.events`
+  iteration 行的语义（不是内部布局镜像），`report`/`stage_stats`/`greedy_stats` 是活引用
+  （只读契约，不复制 dict）。留下的 2 处是 `CommitJournal.pending()`（独立的 WAL 对象，
+  它自己已有公开查询；要迁得先给训练循环一个「未闭合提交」读面，另开一刀）。
+  三条私有**方法调用**（`_iteration_pairs` / `_volume_stages` / `_volume_stage_ests_map`）
+  移出断言表达式：驱动被测入口不是「读私有状态」。成员闭集守卫同步 +1。全文 →
+  `docs/nn/engineering.md` §149。

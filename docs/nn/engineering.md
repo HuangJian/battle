@@ -25,6 +25,45 @@
 
 ---
 
+## §149 G5 第六批：采集链的公开读数 `volume_view()`（2026-11-18）
+
+`tests/worker/test_rollout_volume.py` 私有断言 **46 → 2**（G5 **675 → 631**，126 文件不变）。
+
+这条用例守的是动态采集的算术与断点续跑，46 条断言里绝大多数只是**读进度**：配额目标/已采、
+波次、初波每关局数、熔断、分关账、greedy 读数、报告合并。它们原先逐条伸进
+`_volume_*` / `_greedy_*` / `_report` —— 等于把 `TrainingVolume` 的实现槽位钉成事实 API，
+而 `trainer/loop_volume.py` 的模块头已经把「状态归属」写成契约，读数却没有对应的公开面。
+
+新增 `VolumeView`（frozen dataclass）+ `TrainingVolume.volume_view()`：
+
+| 旧判据 | 换成 |
+|---|---|
+| `stub._volume_target` / `_volume_collected` | `view.target` / `view.collected` |
+| `_volume_waves` / `_volume_g0` / `_volume_est` | `view.waves` / `view.g0` / `view.est` |
+| `_volume_capped` / `_volume_halted` | `view.capped` / `view.halted` |
+| `_volume_stage_stats["stages"]["0"]` | `view.stage_stats["stages"]["0"]` |
+| `_greedy_plan` / `_greedy_stats` / `_greedy_waves` | `view.greedy_plan` / `view.greedy_stats` / `view.greedy_waves` |
+| `_report`（5 处） | `view.report` |
+| `_rotate_seed`（3 处） | `view.rotation_seed` |
+
+**为什么是视图而不是 12 个 property**：这些字段在方法之间一起流动（一波结束同时改
+collected/waves/halted/stage_stats），一次快照比逐字段读取更能表达「同一时刻的采集进度」；
+也让测试**不必知道**哪个字段住在哪个混入。`report` / `stage_stats` / `greedy_stats` 是活引用
+（dict 不复制）——视图是只读面，不是深拷贝，写作侧仍只改私有槽位。
+
+**留下的 2 处**：`stub._journal.pending() == []`（每波 start 都有配对的 finish）。`CommitJournal`
+是独立的 WAL 对象，`pending()` 已是它的公开查询；要迁得先给训练循环一个「未闭合提交」读面，
+那是另一刀（且这条断言的被测对象本来就是账本本身）。另有 3 处私有**方法调用**（`_iteration_pairs`
+/ `_volume_stages` / `_volume_stage_ests_map`）已移出断言表达式：它们是这一簇的入口函数，
+测试驱动它们不是「读私有状态」，G5 的口径也不该把「调用被测函数」算成耦合。
+
+**不是为了数字**：视图的字段名直接取 `worker.events` iteration 行的语义（target/collected/
+capped/stage_stats/greedy），所以它不是内部布局的镜像——后续控制台或诊断要读这些数时，
+不必再开第二个面。守卫 `tests/trainer/test_loop_volume_split.py` 的成员闭集同步 +1
+（12 个方法；顶层 import 闭集加 `dataclasses`）。
+
+---
+
 ## §148 G5 第五批：租约用例（2026-11-18）
 
 `tests/hub/test_hub_leases.py` 6 → **2**。这条用例守「claim 同时置 owner + 到期 + 心跳」，

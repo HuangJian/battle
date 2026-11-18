@@ -1,6 +1,6 @@
 """loop_volume —— **动态采集（按样本量）编排** mixin（2026-09-25 从 trainer/loop_core.py 拆出，S4 第十八刀）。
 
-这一簇是 `TrainingLoop` 里**唯一一条真正的方法间调用链**：9 个成员 / 445 行（占原模块 32%），
+这一簇是 `TrainingLoop` 里**唯一一条真正的方法间调用链**：12 个成员 / 445 行（占原模块 32%），
 其余方法都是被主循环各自调用的叶子。链的形状 = **入口（轮内预排表）→ 关集/估计解算 →
 逐关补波或连续配额派发 → 报告合并**（v2 起生产路径是 `_volume_collect_continuous`，
 `_volume_topup` 的 wave 规则只留给旧 e2e 与 `--collect-only` 之外的历史路径）：
@@ -54,6 +54,7 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）──► _dispatch_v
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,31 @@ from common.log import log
 from trainer.rollout_phase import begin_payload_parts, dispatch_rollout_phase
 from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeView:
+    """本轮采集的**只读观测面**（配额进度 / 分关账 / greedy 读数）。
+
+    `_volume_*` 与 `_greedy_*` 是这一簇的实现状态：它们在方法之间传递、也会逐波改写。
+    读它们（尤其是断言它们）原本只能伸进实例私有槽位；本对象是那条链的公开读数 ——
+    字段名与 `worker.events` 的 iteration 字段同义，是**观测契约**，不是内部布局的镜像。
+    `report` / `stage_stats` / `greedy_stats` 是活引用（dict 不复制）：调用方只读。
+    """
+
+    report: dict
+    target: int | None
+    collected: int | None
+    waves: int
+    g0: int
+    est: int
+    capped: bool
+    halted: bool
+    stage_stats: dict | None
+    rotation_seed: int
+    greedy_plan: object | None
+    greedy_stats: dict | None
+    greedy_waves: int
 
 
 def _learned_samples_per_game(samples: int, games: int) -> int:
@@ -144,6 +170,29 @@ class TrainingVolume:
     _greedy_waves: int
     #: 普通连续配额已派出的 (stage, seed)；greedy 阶段过滤掉它们。
     _volume_ordinary_seeds: Any
+
+    # ------------------------------------------------- 观测面
+    def volume_view(self) -> VolumeView:
+        """本轮采集的只读快照（字段语义见 `VolumeView`）。
+
+        读它不改变任何状态；dict 字段是活引用（只读契约）。写作侧照旧改私有槽位 ——
+        视图不给调用方一个可写句柄，也不替生产逻辑做决定。
+        """
+        return VolumeView(
+            report=self._report,
+            target=self._volume_target,
+            collected=self._volume_collected,
+            waves=int(self._volume_waves),
+            g0=int(self._volume_g0),
+            est=int(self._volume_est),
+            capped=bool(self._volume_capped),
+            halted=bool(self._volume_halted),
+            stage_stats=self._volume_stage_stats,
+            rotation_seed=int(self._rotate_seed),
+            greedy_plan=self._greedy_plan,
+            greedy_stats=self._greedy_stats,
+            greedy_waves=int(self._greedy_waves),
+        )
 
     # ------------------------------------------------- 零落盘（按轮）
     def _round_mem_shards(self, it: int) -> dict[str, dict] | None:
