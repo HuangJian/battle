@@ -21,10 +21,8 @@
   "tests/remote/test_download_split.py": 1,
   "tests/remote/test_http_split.py": 1,
   "tests/remote/test_job_identity_collision.py": 2,
-  "tests/remote/test_offline_deliver_proc.py": 1,
   "tests/remote/test_offline_deliverable_split.py": 1,
   "tests/remote/test_prefetch_proc.py": 1,
-  "tests/remote/test_push_priority_dispatch.py": 1,
   "tests/remote/test_push_register.py": 1,
   "tests/remote/test_remote_iter.py": 1,
   "tests/remote/test_rollout_node.py": 1,
@@ -52,7 +50,6 @@
   "tests/worker/test_gate_inputs_split.py": 4,
   "tests/worker/test_gate_judges_split.py": 2,
   "tests/worker/test_rl_remote_fixes.py": 2,
-  "tests/worker/test_rollout_end_event.py": 1,
   "tests/worker/test_rollout_volume.py": 1,
   "tests/worker/test_shard_action_space_v6.py": 7
 }

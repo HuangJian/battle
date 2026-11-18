@@ -68,7 +68,8 @@ def test_primary_then_one_backup_then_cap(tmp_path: Path, worker_factory) -> Non
         # 第二拍 ⇒ 备份先落地 ⇒ `== [jid]` 红。那不是「双主副本」，是把**快慢**当成了**先后**
         # ——「主副本在途后备份立刻获授权」本身是 §2.9 的既定语义（同 `_backup_target`）。
         assert _pump(
-            disp, lambda: sum(1 for r in disp._inflight.values() if r["mode"] != "backup") >= 1
+            disp,
+            lambda: sum(1 for r in disp.inflight_records() if r["mode"] != "backup") >= 1,
         ), "主副本没被派出去"
         assert _wait_until(
             lambda: len(w1.received) + len(w2.received) >= 1

@@ -7383,3 +7383,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `StreamCollector.plan_cap`、`_JobStore.ledger_offset`；其余为纯判据调用移出 assert 与
   既有读数替换。store 守卫 `MIXIN_METHODS` 76 → 77。`test_rollout_volume` 保留 1 处
   `_commit_journal()`（生产同名钩子 + 扫描面活性锚）。全文 → `docs/nn/engineering.md` §176。
+- **2026-11-18（G5 第三十八批：派发器在飞快照）**：`test_rollout_end_event.py` /
+  `test_offline_deliver_proc.py` / `test_push_priority_dispatch.py` 各 1 → 0
+  （G5 178 → **175**，53 文件）。新增 `PushDispatcher.inflight_records()`（同步状态副本，
+  防止把快慢读成先后）；`ctl_offset` 改读 `status()`（它本就并入子进程状态面）；断言里的
+  `_traj_dir` 改读脚手架路径。全文 → `docs/nn/engineering.md` §177。

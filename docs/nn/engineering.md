@@ -25,6 +25,21 @@
 
 ---
 
+## §177 G5 第三十八批：派发器在飞快照 + 两处既有读数（2026-11-18）
+
+三个文件清零：`test_rollout_end_event.py` / `test_offline_deliver_proc.py` /
+`test_push_priority_dispatch.py` 各 **1 → 0**（G5 **178 → 175**，56 → 53 文件）。
+
+- 新增 `PushDispatcher.inflight_records()`：在飞记录的**副本**快照（`tick()["inflight"]`
+  只有槽位名）。那条用例要停在「主副本已派、备份还没派」这一刻，读的必须是派发器自己的
+  同步状态——异步上传的落地计数会把**快慢**当成**先后**（满载时红）。
+- `test_offline_deliver_proc`：`status()` 本来就整体并入子进程状态面（`_child_status` 的
+  每个键），`ctl_offset` 直接读 `status()["ctl_offset"]`。
+- `test_rollout_end_event`：断言里的 `_traj_dir` 改读脚手架自己的 `_iter_dir(tmp_path)`——
+  同一条路径在夹具与断言各写一份是重复事实源，不是被测对象的公开面缺口。
+
+---
+
 ## §176 G5 第三十七批：五处生命周期读数 + 四处增量读面（2026-11-18）
 
 十六个文件清零、一个留活性锚：`test_hub_ledger_incremental.py` / `test_role_routing.py` /

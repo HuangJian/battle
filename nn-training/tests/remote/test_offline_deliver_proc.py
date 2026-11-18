@@ -310,7 +310,7 @@ def test_control_file_is_consumed_incrementally_and_half_lines_survive(
         # 等子进程**真的读到了那半行**（状态面里的 `ctl_offset` 是它自己的读偏移）：它必须把它
         # 留在缓冲区里等下半截，而不是当「坏行」跳过去 —— 跳过去就永远拼不回来了。
         assert _wait_until(
-            lambda: int(d._child_status().get("ctl_offset") or 0) >= len(partial), timeout=10.0
+            lambda: int(d.status().get("ctl_offset") or 0) >= len(partial), timeout=10.0
         ), f"子进程没读到半行：{st.logs}"
         with ctl.open("ab") as f:
             # 段末三态（J2）也走这一行：它是**新键穿控制文件协议**的现场（老快照子进程不认它）

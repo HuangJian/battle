@@ -742,6 +742,15 @@ class PushDispatcher(TickLoopHost):
             "inflight": sorted(self._inflight),
         }
 
+    def inflight_records(self) -> list[dict]:
+        """在飞记录的**副本**快照（`tick()["inflight"]` 只有槽位名；观测 / 用例用）。
+
+        与 `_snapshot()` 同一把锁：测试想停在「主副本已派、备份还没派」这一刻，读的必须是
+        派发器自己的同步状态，而不是异步上传的落地计数（满载时会把快慢当先后）。
+        """
+        with self._lock:
+            return [dict(rec) for rec in self._inflight.values()]
+
     def _snapshot(self) -> _TickView:
         """一拍内**唯一**一份派发器自有状态的读数（一次 `self._lock` 取出；`_dispatch` 的入口）。
 

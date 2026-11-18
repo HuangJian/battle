@@ -139,13 +139,18 @@ GAME = {
 }
 
 
+def _iter_dir(tmp_path: Path) -> Path:
+    """本轮目录（脚手架与断言共用的唯一一份，避免断言去读 `_traj_dir`）。"""
+    return tmp_path / "it6"
+
+
 def _rollout_host(tmp_path: Path, parts: object) -> TrainingLoop:
     """`_record_rollout` 的最小宿主（与文件里其它用例同一套脚手架）。"""
     loop = TrainingLoop(
         _args(traj=str(tmp_path), out=str(tmp_path / "weights.json")), None, "bun", {}
     )
     loop._jsonl_path = tmp_path / "training_log.jsonl"
-    loop._traj_dir = tmp_path / "it6"
+    loop._traj_dir = _iter_dir(tmp_path)
     loop._traj_dir.mkdir()
     loop._report = dict(REPORT)
     loop._rollout_sec = 31.5
@@ -184,7 +189,7 @@ def test_record_rollout_ignores_previous_round_memory_shards(tmp_path: Path) -> 
 
     loop._record_rollout(6)
 
-    assert not (loop._traj_dir / "per-game.json").exists()
+    assert not (_iter_dir(tmp_path) / "per-game.json").exists()
 
 
 def test_record_rollout_is_idempotent(tmp_path: Path) -> None:
