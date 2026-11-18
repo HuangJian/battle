@@ -25,6 +25,38 @@
 
 ---
 
+## §201 长函数存量本轮收口：37 → 15（2026-11-18）
+
+从 `python.refactor.md` 附录 B「真·下一批」第 1 项开工，本轮共 **22 刀**，
+>200 行函数 **37 → 15**。每刀都是纯搬移（失败语义 / 返回码 / 日志逐字不变），
+并同步形状基线（文件计数归零即删条目、减少即调小）。
+
+**剩余 15 个**均为「闭包/局部状态编排」或超长报表，纯搬移没有干净切面；不是漏做，
+而是需要先造上下文对象（或按工具报表单独开一批）。逐条理由：
+
+| 函数 | 行数 | 为什么这一轮不动 |
+|------|------|------------------|
+| `remote/rollout_node.run` | 312 | cell 入口顺序编排；`_get_postures` / `_open_cloudflared` 跨隧道建立与监护循环共享 |
+| `worker/bc_dispatch.dispatch_bc_corpus` | 316 | 核心是 161 行单写者 `slot_worker` 闭包（约 28 个捕获量） |
+| `remote/offline_boot.run_one_course` | 323 | 生成式分片（`06_run.pyfrag`）+ 顺序编排（两套产物根/包/锚点） |
+| `trainer/loop_volume._volume_collect_continuous` | 327 | 循环内 est / 批计划 / 首波读数互相咬合，单相位拆不够、全拆超宽参 |
+| `remote/worker.worker_loop` | 334 | 轮询 setup 与 try/finally 主体互引（life/uploader/pf_stores 等） |
+| `remote/notebook_runtime.run_push_worker` | 336 | 两条守候循环各持 6+ 闭包（`_drain` / `_ping` / 状态节流） |
+| `worker/train/bc_paddle.train` | 372 | epoch 训练 / 验证 / 收尾共享 12+ 局部量（必要时造训练状态对象） |
+| `remote/job_round.run_one_round` | 396 | 预取 / 心跳 / `on_settled` 闭包与单轮结算互引 |
+| `remote/offline_eval.run_cloud_eval` | 401 | 嵌套 `run_one` 工作者闭包 + 轮内重投循环 |
+| `remote/hub_client.publish_job` | 418 | 55 个 `PublishSpec` 字段绑到局部名 + 顺序构建（spec 已是上下文对象，但函数体仍须整体改造） |
+| `remote/worker.run_job` | 439 | job 相位编排 + 多处嵌套回调 |
+| `trainer/stream.run_rollout_stream` | 442 | 6+ 嵌套闭包（on_result / on_epoch / fire_eval / collector / drain） |
+| `trainer/loop_remote_job._remote_ppo_publish` | 444 | 发布 → 等结果 → 落位的三段编排，回调共享状态 |
+| `worker/train/bc.train` | 456 | 与 `bc_paddle.train` 同型（训练状态对象） |
+| `tools/paired_power.main` | 625 | 10 段报表；压到 ≤200 需拆 9 个段 helper（工具面独立批次） |
+
+下一步接法：先为「训练状态」「发布状态」「守候循环」各造一个小上下文对象，
+再把上表逐项降下来；每刀仍按本轮纪律：纯搬移 + 形状基线 + 三份文档。
+
+---
+
 ## §200 长函数存量第二十二刀：Wave2 判据（tools）270 → 189（2026-11-18）
 
 `tools/wave2_judge.py::main` **270 → 189 行**，长函数存量 **16 → 15**

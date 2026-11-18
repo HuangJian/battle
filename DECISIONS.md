@@ -7485,3 +7485,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   270 → **189** 行（拆出 `_load_judge_rows` / `_print_health` / `_print_point_deltas` /
   `_print_tail`），长函数存量 **16 → 15**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §200。
+- **2026-11-18（长函数存量本轮收口：37 → 15）**：共 22 刀纯搬移，每刀独立提交并过
+  全量门禁。余 15 个均为闭包/局部状态编排或超长报表（`rollout_node.run` 312、
+  `bc_dispatch.dispatch_bc_corpus` 316、`offline_boot.run_one_course` 323、
+  `loop_volume._volume_collect_continuous` 327、`worker.worker_loop` 334、
+  `notebook_runtime.run_push_worker` 336、`bc_paddle.train` 372、`job_round.run_one_round`
+  396、`offline_eval.run_cloud_eval` 401、`hub_client.publish_job` 418、`worker.run_job`
+  439、`stream.run_rollout_stream` 442、`loop_remote_job._remote_ppo_publish` 444、
+  `bc.train` 456、`paired_power.main` 625），纯搬移无干净切面；逐条理由与下一步接法
+  → `docs/nn/engineering.md` §201。**不是欠账消失**：门禁读数仍是 15。
