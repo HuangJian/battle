@@ -19,7 +19,6 @@
   "hub/offline_push.py": 10,
   "hub/offline_push_assign.py": 1,
   "hub/store_offline.py": 3,
-  "hub/task_pack.py": 6,
   "hub/tunnel_ab_probe.py": 3,
   "remote/artifacts.py": 2,
   "remote/bc_job.py": 4,

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import time
@@ -43,6 +44,30 @@ from common.hold_window import hold_progress_stale_sec
 from common.logutil import tag_logger
 from common.net_http import urlopen as _net_urlopen
 from common.protocol import PLAN_NAME
+
+#: 「这个包读不出来」的异常集（P0-7 第十七批，2026-11-18）。
+#:
+#: 这三个函数（`pack_index_part_sha` / `pack_index_meta` / `pack_seg_end_kind`）是**观测面**
+#: （清单 + 段末判据），坏包不许变成 500 —— 所以它们必须捕。但捕什么要写清楚：以前的
+#: `except Exception` 把本模块自己的 bug（`AttributeError`：索引 JSON 从对象变成列表、
+#: `TypeError`：字段改名）也读成「包不可读」，现场表现是「这个包没有计划 / 没有 sha」，
+#: 而包其实是好的 —— 云机拿到了空的段末判据，回退成旧行为。
+_PACK_UNREADABLE: tuple[type[BaseException], ...] = (
+    OSError,  # 不在 / 没权限
+    zipfile.BadZipFile,  # 截断 / 根本不是 zip
+    EOFError,  # 截断的 ZIP 流（zipfile 有时抛这个而不是 BadZipFile）
+    KeyError,  # 包里没有那个成员
+    NotImplementedError,  # 压缩方式不认识（外部工具打的包）
+    ValueError,  # 索引/计划 JSON 坏了，或非 UTF-8
+)
+
+#: 打控制台的传输失败集（与 `remote.http.NET_ERRORS` 同口径，但**不经由 remote** 取证
+#: —— hub→remote 是向上 import，层账不允许）；多一个 `ValueError`：坏 URL / 坏头。
+_CONSOLE_NET_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,  # URLError / HTTPError / 连接被拒 / 超时
+    http.client.HTTPException,
+    ValueError,
+)
 
 #: 行日志：格式/时间戳只走 `common/logutil`（`[HH:MM:SS] [tag] msg`）。
 _log = tag_logger("hub-server", lambda: time)
@@ -289,7 +314,7 @@ def pack_index_part_sha(pack_path: Path, part: str) -> str:
     try:
         with zipfile.ZipFile(pack_path) as zf:
             idx = json.loads(zf.read(TASK_PACK_INDEX_NAME).decode("utf-8"))
-    except Exception:
+    except _PACK_UNREADABLE:
         return ""
     parts = idx.get("parts") if isinstance(idx, dict) else None
     rec = parts.get(part) if isinstance(parts, dict) else None
@@ -312,7 +337,7 @@ def pack_index_meta(pack_path: Path) -> dict:
                 plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
             except (KeyError, ValueError):
                 plan = {}
-    except Exception:
+    except _PACK_UNREADABLE:
         return empty
     if not isinstance(idx, dict):
         return empty
@@ -367,7 +392,7 @@ def pack_seg_end_kind(pack_path: Path) -> str:
     try:
         with zipfile.ZipFile(pack_path) as zf:
             plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
-    except Exception:
+    except _PACK_UNREADABLE:
         return ""
     if not isinstance(plan, dict):
         return ""
@@ -517,7 +542,7 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
             return False, f"http {e.code}"
         log(f"task-pack {course}: 控制台触发失败 HTTP {e.code}——降级为手动导出")
         return False, f"http {e.code}"
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"task-pack {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动导出")
         return False, f"{type(e).__name__}"
     log(f"task-pack {course}: 已触发控制台重导（旧包已作废，窗口期本端点会 404）")
@@ -572,7 +597,7 @@ def console_export_status(
     try:
         with _net_urlopen(req, timeout=timeout) as resp:
             parsed = json.loads(resp.read().decode("utf-8") or "{}")
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"export-status {course}: 控制台不可达/不接受（{type(e).__name__}）——视为不可知")
         return {"unknown": True}
     exporting: bool | None = None
@@ -721,7 +746,7 @@ def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
             return False, f"http {e.code}"
         log(f"auto-handoff {course}: 控制台触发失败 HTTP {e.code}——降级为手动")
         return False, f"http {e.code}"
-    except Exception as e:
+    except _CONSOLE_NET_ERRORS as e:
         log(f"auto-handoff {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动")
         return False, f"{type(e).__name__}"
     log(f"auto-handoff {course}: 已触发控制台（写 rl-config + 导包；完成前云机会等新包）")
