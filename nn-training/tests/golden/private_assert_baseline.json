@@ -105,7 +105,6 @@
   "tests/worker/test_backend_contract.py": 1,
   "tests/worker/test_baseline_eval.py": 16,
   "tests/worker/test_bc_dp.py": 4,
-  "tests/worker/test_eval_timing.py": 32,
   "tests/worker/test_gate_inputs_split.py": 4,
   "tests/worker/test_gate_judges_split.py": 2,
   "tests/worker/test_greedy_rollout_chain.py": 6,

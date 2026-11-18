@@ -48,12 +48,40 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import common.runtime
 from common.log import log
 from trainer.eval_m1 import read_eval_summary
+
+
+class EvalThread(Protocol):
+    """评估轮线程的最小可观测面（`threading.Thread` 与单测替身都满足它）。"""
+
+    def is_alive(self) -> bool: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+
+@dataclass(frozen=True)
+class EvalTimingView:
+    """in-loop 评估链的**只读快照**（G5：用例不再逐个伸手进私有槽位）。
+
+    字段名取「读这一簇的人关心什么」，不是内部布局镜像：`round_thread` 是当前在飞的那一轮
+    （与尾巴不同，它还没交棒）；`tail` 是已交棒给下一次 rollout 收官的 `(thread, 派发时刻)`；
+    `backfill` 是重启补账的剩余缺口（None = 还没扫，空元组 = 扫过且无缺口）。
+    `open_threads` 与 `open_eval_threads()` 同源（顺手剪掉已收工的）。
+    """
+
+    round_thread: EvalThread | None
+    gate: threading.Event | None
+    tail: tuple[EvalThread, float] | None
+    join_sec: float
+    backfill: tuple[tuple[int, str], ...] | None
+    pending_m: int | None
+    open_threads: tuple[EvalThread, ...]
 
 
 class TrainingEval:
@@ -82,8 +110,10 @@ class TrainingEval:
     _stream_meta: dict | None
 
     # ---- 本簇自己的状态（S4 第十七刀随簇搬来；旧类里也只被这一簇读写）--------------
-    _eval_thread: threading.Thread | None
-    _eval_gate: threading.Event | None
+    #: 当前在飞的一轮 eval（未收工；`_dispatch_delayed_eval` 每轮先清空再重新派发）。
+    #: 类级默认值同 `_eval_tail`：裸构造的实例（单测脚手架）没有 __init__ 赋值。
+    _eval_thread: threading.Thread | None = None
+    _eval_gate: threading.Event | None = None
     #: 本轮收官时仍未结束的 eval 尾巴 `(thread, 派发时刻)`——交给下一轮 rollout 收官
     #: 这个自然边界收拢（`_sweep_eval_tail`，不站等）。None = 无尾巴。
     #: 给类级默认值（而不只声明类型）：裸构造的实例（单测脚手架）没有 __init__ 赋值。
@@ -146,6 +176,19 @@ class TrainingEval:
         alive = tuple(t for t in self._eval_open if t.is_alive())
         self._eval_open = alive
         return alive
+
+    def eval_timing(self) -> EvalTimingView:
+        """这一簇的公开读数（监护 / 用例 / 诊断共用；只读，不改变任何等待语义）。"""
+        backfill = None if self._eval_backfill is None else tuple(self._eval_backfill)
+        return EvalTimingView(
+            round_thread=self._eval_thread,
+            gate=self._eval_gate,
+            tail=self._eval_tail,
+            join_sec=self._eval_join_sec,
+            backfill=backfill,
+            pending_m=self._eval_pending_m,
+            open_threads=self._eval_open_threads(),
+        )
 
     def _eval_course_fp(self) -> str:
         """本课文件血缘（`""` = 无课程身份的旧路径）：冻结与在飞轮数都按它分账。"""

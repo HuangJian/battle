@@ -50,17 +50,19 @@ EVAL_PY = NN_ROOT / "trainer" / "loop_eval.py"
 STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
 CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 
-#: 这一簇的成员（闭集）：14 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
+#: 这一簇的成员（闭集）：15 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
 #: 2026-11-04（F1 重启补账）：`_dispatch_eval_round`（单轮派发体，从 `_dispatch_delayed_eval`
 #: 提出）+ `_uncovered_eval_rounds`（drain 与补账共用的缺口发现）+ `_backfill_eval_gaps`。
 #: 2026-11-04（停课闸）：`_course_stopped`（控制台停课 ⇒ 不再补任何 eval 空缺）。
 #: 2026-11-04（§113 单开轮上限）：`_eval_open_threads`（本课在跑轮线程清活）+
 #: `_eval_course_fp`（课指纹，查仲裁器里本课是否已有登记轮）。
+#: 2026-11-18（G5）：`eval_timing`（公开只读快照，用例不再伸进私有槽位）。
 CLUSTER = (
     "_eval_on_round",
     "_eval_policy_cfg",
     "_course_stopped",
     "_eval_open_threads",
+    "eval_timing",
     "_eval_course_fp",
     "_eval_join_soft_sec",
     "_sweep_eval_tail",
@@ -91,6 +93,7 @@ CROSS_MODULE_HANDS = (
 #: 顶层 import 面的闭集（模块名）。
 TOP_LEVEL_ALLOWED = {
     "__future__",
+    "dataclasses",
     "json",
     "threading",
     "time",
@@ -174,7 +177,7 @@ def _in_function_imports(path: Path) -> set[str]:
 
 
 def test_cluster_is_defined_in_loop_eval_only() -> None:
-    """本簇（14 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
+    """本簇（15 个成员）定义在 `TrainingEval`；`TrainingSteps` 里**不得**再有同名定义。
 
     这条挡的是「就地补一个同名方法」——那会让 `TrainingEval` 里那份变成死代码，而测试
     （跑在组合实例上，MRO 取到旧类那份）照样绿。

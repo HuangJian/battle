@@ -25,6 +25,46 @@
 
 ---
 
+## §151 G5 第八批：in-loop 评估链的公开读数 `eval_timing()`（2026-11-18）
+
+`tests/worker/test_eval_timing.py` 私有断言 **32 → 0**（G5 **595 → 563**，126 → 125 文件）。
+
+这条用例守的是「eval 标签超前一轮」的修复与后续四条时序规则（延迟派发、尾巴交棒、
+每课单轮上限 + latest-wins 顺延、停课闸）。32 条断言里绝大多数只是**读派发状态**：
+在飞线程、local gate、已交棒的尾巴、补账队列、顺延位、在跑轮集合。它们逐条伸进
+`_eval_thread` / `_eval_gate` / `_eval_tail` / `_eval_backfill` / `_eval_pending_m` /
+`_eval_open_threads()` —— 等于把 `trainer/loop_eval.py` 的五个私有槽位钉成事实 API。
+
+新增 `EvalTimingView`（frozen dataclass）+ `TrainingEval.eval_timing()`：
+
+| 旧判据 | 换成 |
+|---|---|
+| `ts._eval_thread` | `view.round_thread` |
+| `ts._eval_gate` | `view.gate` |
+| `ts._eval_tail` | `view.tail`（`(thread, 派发时刻)`） |
+| `ts._eval_join_sec` | `view.join_sec` |
+| `ts._eval_backfill` | `view.backfill`（None = 未扫；`()` = 扫过无缺口） |
+| `ts._eval_pending_m` | `view.pending_m` |
+| `ts._eval_open_threads()` / `ts._eval_open` | `view.open_threads` |
+
+**为什么 `backfill` 是元组而 `tail` 是活引用**：补账队列会被每轮 `pop(0)` 改写，快照成
+元组才能让「这一时刻还剩哪些缺口」不被下一次派发改掉；`tail` 本来每次整体替换、线程对象
+不可变，活引用即可（与 `volume_view` 的 `report` 同一口径：只读契约，不复制对象）。
+
+线程字段的类型是 `EvalThread`（`is_alive` / `join` 两个方法的 Protocol），不是 `Any`：
+`threading.Thread` 与单测替身都结构化满足它，G14（Any 预算）因此 +0；`gate` 直接用
+`threading.Event`。
+
+**顺手补的类级默认值**：`_eval_thread` / `_eval_gate` 原来只有注解（运行期由
+`_dispatch_delayed_eval` 先清空再派发），裸构造的单测脚手架在「还没派发」时读视图会
+`AttributeError`；给 `None` 类级默认值后与 `_eval_tail` / `_eval_join_sec` 同形。
+`tests/trainer/test_loop_eval_split.py` 的成员闭集 14 → 15、import 闭集 + `dataclasses`。
+
+`eval_timing()` 没有加锁：五个槽位都是单线程（训练主链）读写，视图是**同一时刻**的引用
+快照；并发读者（若将来有）应把它当 best-effort 观测，而不是一致性快照。
+
+---
+
 ## §150 G5 第七批：节点工具链独立成 `remote/node_toolchain.py`（2026-11-18）
 
 `tests/remote/test_rollout_node.py` 私有断言 **43 → 8**、`test_rollout_node_notebook.py` **5 → 4**

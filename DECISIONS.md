@@ -7222,3 +7222,11 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   隧道用例同步搬去 `test_rollout_tunnel.py`（被测对象早就在那里）。
   留下的 8 处都是驱动 `_status`/`_slot_count`/`_start_cloudflared`/`_open_tailscale` 的调用。
   全文 → `docs/nn/engineering.md` §150。
+- **2026-11-18（G5 第八批：in-loop 评估链的公开读数）**：`tests/worker/test_eval_timing.py`
+  私有断言 32 → **0**（G5 595 → **563**，125 文件）。32 条里绝大多数只是读派发状态
+  （在飞线程 / local gate / 已交棒的尾巴 / 补账队列 / 顺延位 / 在跑轮集合），却逐条伸进
+  `trainer/loop_eval.py` 的五个私有槽位。新增 `EvalTimingView`（frozen dataclass）+
+  `TrainingEval.eval_timing()`：`round_thread` / `gate` / `tail` / `join_sec` /
+  `backfill`（元组快照，队列会被 pop）/ `pending_m` / `open_threads`。顺手给
+  `_eval_thread` / `_eval_gate` 补类级 `None` 默认值（裸构造脚手架在「还没派发」时能读）。
+  成员闭集守卫同步 14 → 15、import 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §151。
