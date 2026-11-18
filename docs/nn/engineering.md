@@ -25,6 +25,25 @@
 
 ---
 
+## §215 长函数存量第三十六刀：流式迭代（trainer）442 → 112（2026-11-18）
+
+`trainer/stream.py::run_rollout_stream` **442 → 112 行**，长函数存量 **2 → 1**
+（`LONG_FUNCS_BASELINE` 删除 `trainer/stream.py` 条目）。
+
+这个函数原来的体积大半来自**嵌套闭包**（collector 回调 / wave 装载 / drain / eval 闸），
+它们在 AST 上全算进外层函数。本刀把执行面搬进同文件的 `_StreamRun`（方法：
+`_on_result` / `_fire_eval_once` / `_on_queue_drained` / `_on_queue_active` / `_collector` /
+`_load_wave` / `_drain` / `_seed_precollected` / `run`），输入与运行时状态收进 `_StreamCtx`
+（22 个输入 + 运行时字段）；宿主只做装配（PPO RNG 派生 + `_StreamCtx` + `run()`）。
+
+三条纪律：① 16 处 `log` 与 2 处 `raise` 用 AST 逐条比对（归一化 `c.` 前缀）——全等；
+② 延迟 import 的位置随 RNG 派生一起搬到**宿主函数体**（调用时执行，模块顶层仍零 torch）；
+③ `update_kwargs` 仍是**原地**补 `rng` / `on_epoch_done`（调用方 dict 对象不变）。
+`trainer/stream.py` LOC 387 → 478（类结构开销，远低于 1000）。
+`_StreamRun.run` 176 行、`run_rollout_stream` 112 行。
+
+---
+
 ## §214 长函数存量第三十五刀：作业壳（remote）439 → 134（2026-11-18）
 
 `remote/worker.py::run_job` **439 → 134 行**，长函数存量 **3 → 2**

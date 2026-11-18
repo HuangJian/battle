@@ -30,7 +30,6 @@ PARAM_LIMIT = 8
 #: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
 LONG_FUNCS_BASELINE = {
     "trainer/loop_remote_job.py": 1,
-    "trainer/stream.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。

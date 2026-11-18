@@ -7567,3 +7567,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   形状基线删除 `remote/worker.py` 条目。同批把 `_bulk_yield_params` /
   `_setup_bulk_yield` / `epoch_mult_of` 下沉 `worker_session.py`（worker LOC 996 → 807）。
   全文 → `docs/nn/engineering.md` §214。
+- **2026-11-18（长函数存量第三十六刀：流式迭代 trainer）**：
+  `trainer/stream.py::run_rollout_stream` 442 → **112** 行（嵌套闭包搬进同文件的
+  `_StreamRun`：collector 回调 / wave 装载 / drain / eval 闸 / 预采播种 / 收尾；
+  输入与运行时状态收进 `_StreamCtx`；PPO RNG 派生留在宿主函数体，模块顶层仍零 torch），
+  长函数存量 **2 → 1**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §215。
