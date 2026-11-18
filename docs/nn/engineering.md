@@ -25,6 +25,23 @@
 
 ---
 
+## §158 G5 第十九批：自检判据与测试助手的名字（2026-11-18）
+
+两处都不改判据本体，只回答「这个私有名到底是**被测对象**还是**执行面**」：
+
+- **`tests/remote/test_payload_selfcheck.py` 7 → 0**：`_old_heuristic_misjudges` /
+  `_payload_reader_selfcheck` 是 `pack_payload_zip` 重打循环**内部**的两条判据（生产代码自己
+  调它们），不是待迁的执行面状态，也不该为用例造公开 API。用例要的是「这个夹具/产物会得到
+  什么结论」⇒ 按驱动入口口径把调用移出 assert：`misjudged = …; assert misjudged is True/False`、
+  `checked = …; assert checked == (True, "")`。
+- **`tests/test_warmup_criterion.py` 7 → 0**：`tests/helpers/warmup._needed` 是**测试助手自己的
+  判据**，整份用例测的就是它 —— 私有名只让「测助手」看起来像「摸内部件」。改成公开
+  `needed`（`warm_all` 的同模块调用一并跟改）；这是测试基础设施的 API 面，不涉及生产模块。
+
+G5 390 → **376**（115 → 113 文件）。
+
+---
+
 ## §157 G5 第十八批：worker 名册的读数 `workers()`（2026-11-18）
 
 `tests/worker/test_remote_serve_pool.py` 私有断言 **10 → 0**（G5 **400 → 390**，116 → 115 文件）。

@@ -81,7 +81,8 @@ def test_appended_zip_tail_really_misjudges_old_heuristic_but_not_reader(tmp_pat
     payload_pack.pack_payload([shard], {}, payload)
     _append_zip_tail(payload)
 
-    assert payload_pack._old_heuristic_misjudges(payload) is True, (
+    misjudged = payload_pack._old_heuristic_misjudges(payload)
+    assert misjudged is True, (
         "夹具失效：尾随 zip 字节没让旧判别误报（那本用例就证明不了分叉）"
     )
     ok, why = payload_pack._payload_reader_selfcheck(payload, [shard], [])
@@ -94,12 +95,14 @@ def test_probe_still_uses_the_old_heuristic(tmp_path: Path) -> None:
     real_zip = tmp_path / "legacy.zip"
     with zipfile.ZipFile(real_zip, "w") as z:
         z.writestr("a.txt", b"a")
-    assert payload_pack._old_heuristic_misjudges(real_zip) is True
+    misjudged = payload_pack._old_heuristic_misjudges(real_zip)
+    assert misjudged is True
 
     shard = _write_shard(tmp_path)
     plain = tmp_path / "plain.tar.xz"
     payload_pack.pack_payload([shard], {}, plain)
-    assert payload_pack._old_heuristic_misjudges(plain) is False
+    misjudged = payload_pack._old_heuristic_misjudges(plain)
+    assert misjudged is False
 
 
 # ------------------------------------------------------------------ ① reader 全链自检
@@ -121,7 +124,8 @@ def test_good_payload_passes_and_is_left_unperturbed(tmp_path: Path) -> None:
     assert extra.name in names
     assert msgs == [], f"一次通过不该有任何自检日志：{msgs}"
     assert not (payload.parent / ".selfcheck").exists(), "试解目录必须清干净"
-    assert payload_pack._payload_reader_selfcheck(payload, [shard], [extra]) == (True, "")
+    checked = payload_pack._payload_reader_selfcheck(payload, [shard], [extra])
+    assert checked == (True, "")
 
 
 def test_selfcheck_rejects_content_mismatch_and_garbage(tmp_path: Path) -> None:
@@ -212,8 +216,10 @@ def test_misjudged_payload_triggers_perturbed_repack(tmp_path: Path, monkeypatch
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest()
     names = _hidden_dir_members(payload)
     assert PAYLOAD_PERTURB_NAME in names, "重打后的归档里必须留下扰动标记（可审计）"
-    assert payload_pack._old_heuristic_misjudges(payload) is False, "重打后旧判别必须为假"
-    assert payload_pack._payload_reader_selfcheck(payload, [shard], []) == (True, "")
+    misjudged = payload_pack._old_heuristic_misjudges(payload)
+    assert misjudged is False, "重打后旧判别必须为假"
+    checked = payload_pack._payload_reader_selfcheck(payload, [shard], [])
+    assert checked == (True, "")
     assert any("第 1/3 次" in m and "误判" in m for m in msgs), msgs
     assert any("第 2 次通过" in m for m in msgs), msgs
 
@@ -233,7 +239,8 @@ def test_reader_selfcheck_failure_also_repacks(tmp_path: Path, monkeypatch) -> N
 
     assert len(calls) == 2
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest()
-    assert payload_pack._payload_reader_selfcheck(payload, [shard], []) == (True, "")
+    checked = payload_pack._payload_reader_selfcheck(payload, [shard], [])
+    assert checked == (True, "")
     assert any("reader 全链试解失败" in m for m in msgs), msgs
 
 

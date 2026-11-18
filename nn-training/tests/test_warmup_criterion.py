@@ -40,31 +40,31 @@ def _item_for(dirpath: Path, name: str, body: str) -> _Item:
 def test_unused_things_stay_cold(tmp_path: Path) -> None:
     """源码里没提到 ⇒ 不预热（`test_forkdist` 那种 scratch 目录就是这种）。"""
     item = _item_for(tmp_path, "alice", "def test_a():\n    assert True\n")
-    assert warmup._needed(_NO_MODULE, ("import torch", "from torch"), [item]) is False
+    assert warmup.needed(_NO_MODULE, ("import torch", "from torch"), [item]) is False
 
 
 def test_a_lazy_import_in_the_source_is_enough(tmp_path: Path) -> None:
     """**核心**：源码里 import 了（哪怕在函数里、此刻还没真的 import）⇒ 必须预热。"""
     item = _item_for(tmp_path, "bob", "def test_b():\n    import torch\n    assert torch\n")
-    assert warmup._needed(_NO_MODULE, ("import torch", "from torch"), [item]) is True, (
+    assert warmup.needed(_NO_MODULE, ("import torch", "from torch"), [item]) is True, (
         "改懒之后预热会静默失效 —— 判据必须能只看源码就成立"
     )
 
 
 def test_the_from_form_also_counts(tmp_path: Path) -> None:
     item = _item_for(tmp_path, "carol", "from torch import nn\n")
-    assert warmup._needed(_NO_MODULE, ("import torch", "from torch"), [item]) is True
+    assert warmup.needed(_NO_MODULE, ("import torch", "from torch"), [item]) is True
 
 
 def test_an_unreadable_item_is_not_a_failure(tmp_path: Path) -> None:
     """读不到文件 ⇒ 当「没提」，绝不让预热把门禁弄红。"""
-    assert warmup._needed(_NO_MODULE, ("import torch",), [_Item(tmp_path / "missing")]) is False
-    assert warmup._needed(_NO_MODULE, ("import torch",), [_Item(None)]) is False
+    assert warmup.needed(_NO_MODULE, ("import torch",), [_Item(tmp_path / "missing")]) is False
+    assert warmup.needed(_NO_MODULE, ("import torch",), [_Item(None)]) is False
 
 
 def test_items_without_path_attribute_are_skipped() -> None:
     """测试替身/非文件 item 不能把判据炸掉。"""
-    assert warmup._needed(_NO_MODULE, ("import torch",), [types.SimpleNamespace()]) is False
+    assert warmup.needed(_NO_MODULE, ("import torch",), [types.SimpleNamespace()]) is False
 
 
 def test_the_loaded_module_is_still_a_fallback() -> None:
@@ -72,7 +72,7 @@ def test_the_loaded_module_is_still_a_fallback() -> None:
 
     拿 `pytest` 验：跑测试的进程里它必定在 `sys.modules`，与运行机器无关。
     """
-    assert warmup._needed("pytest", ("never-appears-in-any-source",), []) is True
+    assert warmup.needed("pytest", ("never-appears-in-any-source",), []) is True
 
 
 def test_every_entry_declares_both_signals() -> None:

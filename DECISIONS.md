@@ -7273,3 +7273,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `ServePool.workers()` —— 返回**活引用元组**（锁内快照），因为「跨轮复用不重建」与
   「未就绪不杀」两条契约要看同一个 worker 的身份和它的 `proc.poll()`，计数读数不够。
   全文 → `docs/nn/engineering.md` §157。
+- **2026-11-18（G5 第十九批：自检判据与测试助手的名字）**：G5 390 → **376**（113 文件）。
+  ① `test_payload_selfcheck.py` 7 → 0：`_old_heuristic_misjudges` / `_payload_reader_selfcheck`
+  是重打循环内部的两条判据（生产自己调），不是契约 ⇒ 不为用例造公开 API，只把调用移出 assert。
+  ② `test_warmup_criterion.py` 7 → 0：`tests/helpers/warmup._needed` 是测试助手自己的判据，
+  整份用例测的就是它 ⇒ 改成公开 `needed`（助手 API，不涉生产）。全文 → `docs/nn/engineering.md` §158。
