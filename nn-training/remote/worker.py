@@ -124,7 +124,7 @@ from remote.bulk_sched import (
 from remote.bulk_sched import (
     yield_worth_it as yield_worth_it,
 )
-from remote.cloud_pool import CLOUD_ROLLOUT_POOL, acquire_rollout, release_rollout
+from remote.cloud_pool import acquire_rollout, release_rollout
 
 # 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
 # 注入点分档（第十二刀后重划）：
@@ -304,7 +304,7 @@ from remote.job_lifecycle import (
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
 # `tests/remote/test_job_round_split.py`）。
-from remote.job_round import run_one_round
+from remote.job_round import RoundOutcome, run_one_round
 from remote.lifecycle import Lifecycle
 from remote.offline_greedy import collect_round
 from remote.payload_proc import PayloadProcess, make_prefetcher
@@ -317,6 +317,7 @@ from remote.prefetch import (
 from remote.result_upload import (
     RESULT_UPLOAD_MODE_DEFAULT,
     RESULT_UPLOAD_MODES,
+    UploaderLike,
 )
 
 # 显式转发（`as` 自别名）：测试/旧调用方从 `remote.worker` 取这个名字（线程模式的实现）。
@@ -444,6 +445,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
+from remote.worker_session import acquire_retry, close_worker, hub_plan, yield_self_check
 from worker.iter_rollout import RoundContext, resolve_bun
 from worker.stream_collect import StreamCollector
 
@@ -956,6 +958,116 @@ def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: flo
     log(f"{where} (no job yet, {done} done, {polls} polls, idle {int(time.time() - idle_since)}s)")
 
 
+def _setup_bulk_yield(
+    bulk_yield: str, log
+) -> tuple[tuple[float, float | None], object, dict[int, PrefetchStore | PayloadProcess]]:
+    """装配 bulk 让路策略 + P1 协同广播；返回 (旧策略, 旧观察者, 预取暂存区表) 供 finally 还原。"""
+    set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
+    # bulk 让路策略（W1）：装配 + 启动行（可见即判据）。`configure_yield` 返回旧策略，
+    # **退出时必须还原**：`_BULK` 是进程单例，不还原会把 auto 泄漏给同进程后续使用者
+    # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
+    _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
+    _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
+    # 下行腿分进程后的 P1 协同（2026-10-20）：预取的 P2 在**子进程**里，而本进程的关键下载/回传
+    # （P1）要能挡住它。`_BULK` 的 P1 进出等待在这里广播给每个预取子进程（`foreign_p1` 同口径：
+    # 不开新工 + 当场打断在飞的那份）。**多个 hub ⇒ 多个子进程 ⇒ 全广播**（每一条 P2 都该让）。
+    # 与 `configure_yield` 同一条纪律：`_BULK` 是进程单例 ⇒ 退出时必须还原。
+    pf_stores: dict[int, PrefetchStore | PayloadProcess] = {}
+
+    def _p1_broadcast(waiting: bool) -> None:
+        for _pf in list(pf_stores.values()):
+            note = getattr(_pf, "note_p1", None)
+            if note is not None:
+                note(waiting)
+
+    _prev_p1_observer = _BULK.set_p1_observer(_p1_broadcast)
+    _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
+    _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
+    log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
+    return _prev_yield, _prev_p1_observer, pf_stores
+
+
+def _start_services(
+    base_url: str,
+    token: str,
+    work_dir: Path,
+    device: str,
+    role: str,
+    once: bool,
+    log,
+) -> tuple[str, Lifecycle]:
+    """身份 + 生命周期上发：两件跨 job 存活的会话级服务。"""
+    # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
+    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。plan/worker-name-readable：
+    # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
+    # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
+    worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
+    # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
+    # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
+    log(f"worker 身份：{worker_id}")
+    # 生命周期上发（2026-10-31，`remote/lifecycle.py`）：启动 / 读点 / SIGTERM / 收线四条。
+    # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
+    # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
+    life = Lifecycle(
+        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+    )
+    life.start()
+    return worker_id, life
+
+
+def _ensure_pf_store(
+    stores: dict[int, PrefetchStore | PayloadProcess],
+    hi: int,
+    part_dir: Path,
+    prefetch_mode: str,
+    prefetch_depth: int,
+    prefetch_unpack: int,
+    log,
+) -> None:
+    """首次轮询到某 hub 时建预取暂存区（进程 / 线程模式），并清上一会话残壳。"""
+    if prefetch_depth <= 0 or hi in stores:
+        return
+    # staged 条数上限 = **槽位数**（2026-10-12：撤销 256MiB 字节闸，见
+    # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
+    # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
+    # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
+    stores[hi] = make_prefetcher(
+        part_dir,
+        mode=prefetch_mode,
+        log=log,
+        staged_max=max(prefetch_depth, prefetch_unpack),
+    )
+    # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
+    # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
+    # 进程模式的 `init` 已经扫过（子进程是暂存区的**唯一写者**）⇒ 不重复下一道命令。
+    if isinstance(stores[hi], PrefetchStore):
+        stores[hi].prune()
+
+
+def _poll_halt(job: object, hi: int, halt_seen: dict[int, bool], log) -> None:
+    """§386：停机达令只在状态**翻转**时动作（停不掉则照常执行任务）；hub resume 后复位。"""
+    got_halt = isinstance(job, dict) and job.get("halt") is True
+    if got_halt and not halt_seen.get(hi):
+        # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
+        # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
+        halt_seen[hi] = True
+        log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
+        _release_cloud_machine(log)
+    elif not got_halt and halt_seen.get(hi):
+        halt_seen[hi] = False  # 停机条件消失（hub resume）→ 复位
+
+
+def _once_result(uploader: UploaderLike, round_: RoundOutcome, done: int) -> int:
+    """--once 收尾：先 drain 再按落定判成败（H8）；失败返回 -1、成功返回已完成数。"""
+    uploader.drain()
+    job_ok = round_.ok
+    if round_.uploaded:
+        _out = uploader.outcome(round_.jid)
+        if _out is not None:
+            job_ok = _out.ok
+    return -1 if not job_ok else done
+
+
 def worker_loop(
     base_url: str,
     token: str,
@@ -1011,87 +1123,28 @@ def worker_loop(
       留共享根。异 commit job 由既有 _ACTIVE_CODE_SHA 守卫转 86 + 监督器重拉。
     """
     done = 0
-    set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
-    # bulk 让路策略（W1）：装配 + 启动行（可见即判据）。`configure_yield` 返回旧策略，
-    # **退出时必须还原**：`_BULK` 是进程单例，不还原会把 auto 泄漏给同进程后续使用者
-    # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
-    _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
-    _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
-    # 下行腿分进程后的 P1 协同（2026-10-20）：预取的 P2 在**子进程**里，而本进程的关键下载/回传
-    # （P1）要能挡住它。`_BULK` 的 P1 进出等待在这里广播给每个预取子进程（`foreign_p1` 同口径：
-    # 不开新工 + 当场打断在飞的那份）。**多个 hub ⇒ 多个子进程 ⇒ 全广播**（每一条 P2 都该让）。
-    # 与 `configure_yield` 同一条纪律：`_BULK` 是进程单例 ⇒ 退出时必须还原。
-    def _p1_broadcast(waiting: bool) -> None:
-        for _pf in list(pf_stores.values()):
-            note = getattr(_pf, "note_p1", None)
-            if note is not None:
-                note(waiting)
-
-    _prev_p1_observer = _BULK.set_p1_observer(_p1_broadcast)
+    _prev_yield, _prev_p1_observer, pf_stores = _setup_bulk_yield(bulk_yield, log)
     #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
     #: 控制面分位数，超阈值即**就地降为 never 语义**并打一行原因（一次性、不回升）。
     _yield_live = bulk_yield != "never"
-    _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
-    _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
-    log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
-    # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
-    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。plan/worker-name-readable：
-    # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
-    # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
-    worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
-    # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
-    # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
-    log(f"worker 身份：{worker_id}")
-    # 生命周期上发（2026-10-31，`remote/lifecycle.py`）：启动 / 读点 / SIGTERM / 收线四条。
-    # 云机被整机收走时，**只有 hub 侧的请求间隔**还留着（notebook 日志是浏览器抓的，人不在就断）
-    # ⇒ 这四条是「云机自己说的最后一句」。不阻塞训练、失败即丢、不进任何判据。
-    life = Lifecycle(
-        base_url, token, worker_id, work_dir=work_dir, device=device, role=role, once=once, log=log
+    # 会话级服务先起（静默的缓存根 mkdir 在它之前，日志顺序与拆分前一致）。
+    hubs, multi, _cache_root, _code_cache_arg = hub_plan(
+        hub_urls, base_url, work_dir, cache_dir
     )
-    life.start()
+    worker_id, life = _start_services(base_url, token, work_dir, device, role, once, log)
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
     _polls_since_accept = 0
-    #: 连续 acquire 失败次数（iii-2，2026-10-12）：控制面一次超时常常就是链路抖动，**首败不退避**
-    #: —— 12s 超时已经等过了，再睡一个 poll_sec 等于把自己的抖动放大成 17s 空转（真机：`acquire
-    #: failed` 之后 `retry in 5.0s`）。连败才退避：那时才像 hub 真出问题，退避要挡住热循环。
+    #: 连续 acquire 失败次数（iii-2）：首败不退避、连败才退避（理由见 `acquire_retry`）。
     _acquire_fails = 0
-    # 多 hub 轮询（P3b §3.8）：None/空 → 单 hub（默认行为零变化）；多 hub round-robin。
-    hubs = [u for u in (hub_urls or [base_url]) if u]
-    if not hubs:
-        hubs = [base_url]
-    multi = len(hubs) > 1
-    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cache_dir` 给了就把**内容寻址
-    # 缓存**（code / ts_code / blob）挂到它下面（跨会话复用），**job 工作目录仍走 work_dir**
-    # （`/tmp`，每轮清场重建的语义不变）。缺省 None ⇒ 逐字旧行为（`work_dir/code_cache`）。
-    _cache_root = Path(cache_dir) if cache_dir is not None else work_dir
-    shared_code_cache = _cache_root / "code_cache"
-    if cache_dir is not None:
-        _cache_root.mkdir(parents=True, exist_ok=True)
-    # 单 hub 且无 cache_dir 时**故意仍传 None**（保持改造前的调用形状）；否则显式给根。
-    _code_cache_arg = shared_code_cache if (multi or cache_dir is not None) else None
     hi = 0
     # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
     halt_seen: dict[int, bool] = {}
-    # P2.5 异步回传（2026-09-22）：把 `out` 从关键路径上摘下来。`post_result` 按**调用时**
-    # 解析（供测试 monkeypatch）；`sync` = 逐字回退到改造前（`--result-upload sync`）。
-    # ★ 2026-10-20（plan/ppo-worker-transfer-isolation）：`process` 档把整条回传腿搬进
-    # **独立子进程**（`remote/upload_worker.py`）——与自主 worker 的补传腿同形：`json.dumps`
-    # （~1.6MB）+ gzip + HTTP 不再压在训练线程的 GIL 上。子进程起不来 ⇒ 它自己 sticky 降级回
-    # 线程（响亮一行），训练永不受影响。
+    # P2.5：`post_result` 按**调用时**解析 ⇒ patch `remote.worker.post_result` 仍生效。
     uploader = make_uploader(
-        upload=post_result,
-        mode=result_upload,
-        log=log,
-        # 子进程交回的传输账重放进**本进程**的每 job 账（实现住 `job_lifecycle`：
-        # `_wire_add` 一族的调用点归那一簇，`test_job_lifecycle_split` 有闸）。
-        record_wire=record_upload_wire,
+        upload=post_result, mode=result_upload, log=log, record_wire=record_upload_wire
     )
-
-    # P2 软持有暂存区（按 hub 分区；`blob_cache` 共享根与 run_job 的口径一致）。
-    # 缺省 = 进程模式（`PayloadProcess`）；`thread` 档 = 进程内 `PrefetchStore`（旧行为）。
-    pf_stores: dict[int, PrefetchStore | PayloadProcess] = {}
     try:
         while True:
             base_url = hubs[hi]
@@ -1100,22 +1153,9 @@ def worker_loop(
             part_dir = work_dir / f"hub{hi}" if multi else work_dir
             if multi:
                 part_dir.mkdir(parents=True, exist_ok=True)
-            if prefetch_depth > 0 and hi not in pf_stores:
-                # staged 条数上限 = **槽位数**（2026-10-12：撤销 256MiB 字节闸，见
-                # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
-                # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
-                # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
-                pf_stores[hi] = make_prefetcher(
-                    part_dir,
-                    mode=prefetch_mode,
-                    log=log,
-                    staged_max=max(prefetch_depth, prefetch_unpack),
-                )
-                # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
-                # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
-                # 进程模式的 `init` 已经扫过（子进程是暂存区的**唯一写者**）⇒ 不重复下一道命令。
-                if isinstance(pf_stores[hi], PrefetchStore):
-                    pf_stores[hi].prune()
+            _ensure_pf_store(
+                pf_stores, hi, part_dir, prefetch_mode, prefetch_depth, prefetch_unpack, log
+            )
             pf_store = pf_stores.get(hi)
             try:
                 _polls_since_log += 1
@@ -1134,25 +1174,13 @@ def worker_loop(
                     log=log,
                 )
             except Exception as e:
-                _acquire_fails += 1
-                # iii-2：首败**立即重试**（见 `_acquire_fails` 的注释）；连败才退避。
-                wait_s = 0.0 if _acquire_fails < 2 else poll_sec
-                tail = "立即重试" if wait_s <= 0.0 else f"retry in {wait_s}s"
-                log(f"acquire failed: {e} — {tail}（连续 {_acquire_fails} 次）")
+                _acquire_fails, wait_s = acquire_retry(_acquire_fails, e, poll_sec, log)
                 if wait_s > 0.0:
                     time.sleep(wait_s)
                 hi = (hi + 1) % len(hubs)
                 continue
             _acquire_fails = 0  # 控制面通了（无论有没有活）：连败计数归零
-            got_halt = isinstance(job, dict) and job.get("halt") is True
-            if got_halt and not halt_seen.get(hi):
-                # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；
-                # 停不掉（Kaggle 无 API）→ **照常执行下面的任务**（云机活着就不闲置，能继续训练）。
-                halt_seen[hi] = True
-                log("云端停机达令已送达：先尝试停机宿主实例（停不掉则照常执行任务）")
-                _release_cloud_machine(log)
-            elif not got_halt and halt_seen.get(hi):
-                halt_seen[hi] = False  # 停机条件消失（hub resume）→ 复位
+            _poll_halt(job, hi, halt_seen, log)
             if job is None:
                 if once:
                     break  # --once：无 job 或已处理完都退出（冒烟/单发）
@@ -1222,74 +1250,20 @@ def worker_loop(
                 # 「距上次**被接受**」变成「距上次**产出结果**」（收没收看落定行/收尾行）。
                 # 它是存活日志里的诊断读数（是不是在疯狂轮询却不产活），不是判据。
                 _polls_since_accept = 0
-            # ── A2 让路自适应关闭（plan/aistudio-transfer-hardening §3.2）──────
-            # 每轮收尾复查一次控制面分位数：**纯函数判定 + 一行原因**（静默关闭会被读成 bug）。
-            # 一次性降级、会话内不回升——分位数是会话累计的（`stats()` 的 `p0_ms` 只增不清），
-            # 回升需要「这一轮比之前好」，那是另一个判据，本轮不做。
-            if _yield_live:
-                _sd = _BULK.stats()
-                # ★ 直接**下标**取（不是 `.get(..., 0.0)`）：键名被改时这里当场 KeyError，
-                #   而不是静默拿到 0.0 ⇒「分位为 0 = 没数据」⇒ 自适应永不触发、无人察觉。
-                #   （两个键都恒在，见 `BulkScheduler.stats()`；对应用例
-                #   `test_the_check_reads_the_quantiles_stats_exposes`。）
-                _p50 = float(_sd["p0_rt_ms_p50"])
-                _p95 = float(_sd["p0_rt_ms_p95"])
-                if not yield_worth_it(p50_ms=_p50, p95_ms=_p95, n=int(_sd["p0_count"])):
-                    _yield_live = False
-                    _BULK.configure_yield(after_sec=float("inf"), total_budget_sec=0)
-                    log(
-                        f"让路自适应关闭：p0_p95={_p95 / 1000:.1f}s ≫ p50={_p50 / 1000:.1f}s"
-                        f"（n={int(_sd['p0_count'])}，控制面尾部不是被 bulk 挤的）"
-                        "——让路只拖长传输；回退档 --bulk-yield always"
-                    )
+            # A2 让路自适应关闭：每轮收尾复查一次分位，判据/原因行在 `yield_self_check`。
+            _yield_live = yield_self_check(_yield_live, log)
             if round_.stop:
                 life.why("hub 要求停算")
                 return done
-            job_ok = round_.ok
             if once:
                 # H8（review-hy）：--once 模式 job 失败必须非零退出——冒烟/单发场景
                 # 退出码 0 会静默掩盖失败（smoke 只判 returncode）。
                 # P2.5：async 下成败只能等回传落定才知道，所以 --once 必须先 drain 再判。
-                uploader.drain()
-                if round_.uploaded:
-                    _out = uploader.outcome(round_.jid)
-                    if _out is not None:
-                        job_ok = _out.ok
-                return -1 if not job_ok else done
+                return _once_result(uploader, round_, done)
             hi = (hi + 1) % len(hubs)  # 跑完一个换下一 hub（round-robin 公平）
         return done
     finally:
-        # 让路策略还原（W1/§3.5 ★）：库层缺省必须回到老语义，否则同进程后续使用者
-        # （测试 / 多会话）继承 auto——`test_control_plane_bypass.py` 那类「要求无条件让路」
-        # 的既有用例会确定性变红。
-        _BULK.configure_yield(after_sec=_prev_yield[0], total_budget_sec=_prev_yield[1])
-        _BULK.set_p1_observer(_prev_p1_observer)
-        # 下行腿收尾（2026-10-20）：进程模式要收掉填充线程与子进程（否则一个会话漏一个
-        # `python -m remote.payload_worker`）。它**不丢任何东西**——暂存区是软持有（无租约），
-        # 没被 claim 的候选本来就要蒸发。
-        for _pf in list(pf_stores.values()):
-            _closer = getattr(_pf, "close", None)
-            if _closer is not None:
-                _closer()
-        # P2.5（2026-09-22）：**每条**退出路径都要过这里——`break`（空闲/停机）、
-        # `--once` 的 return、热替换的 SystemExit(86)、以及任何异常。队列里可能还有
-        # 没送出去的结果；不等它落定就退出 = 静默丢掉最贵的产物（训练侧要等租约
-        # 过期才看得出来，正是「3.5 小时静默」那一类事故）。
-        _drained = uploader.close()
-        _st = uploader.stats()
-        log(
-            f"回传收尾: mode={_st['mode']} 提交={_st['submitted']} "
-            f"成功={_st['ok']} 失败={_st['failed']} 未落定={_st['pending']} "
-            f"同步退化={_st['sync_fallback']}"
-        )
-        if not _drained or _st['failed']:
-            log(
-                "★ 回传收尾有未落定/失败的结果——训练侧会在租约过期后才发现，"
-                "请按上面的 jid 排查（hub 日志 / 网络）"
-            )
-        # 收线上报放在**回传收尾之后**：最后一个读点因此包含「结果到底交没交出去」之后的状态。
-        CLOUD_ROLLOUT_POOL.close_all()
-        life.close(done)
+        close_worker(_prev_yield, _prev_p1_observer, pf_stores, uploader, life, done, log)
 
 
 def main() -> None:

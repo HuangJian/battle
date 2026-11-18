@@ -7552,3 +7552,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `PublishStaged` 下沉 `remote/publish_spec.py`，本地 55 行绑定块删除），
   长函数存量 **5 → 4**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §212。
+- **2026-11-18（长函数存量第三十四刀：worker 轮询壳 remote）**：
+  `remote/worker.py::worker_loop` 334 → **196** 行（while 体一行未动；壳外四段搬进新模块
+  `remote/worker_session.py`：`hub_plan` / `acquire_retry` / `yield_self_check` /
+  `close_worker`；接缝件 `_setup_bulk_yield` / `_ensure_pf_store` / `_start_services` /
+  `_poll_halt` 与 `make_uploader` 调用点因 `W.*` patch 点留在宿主），长函数存量 **4 → 3**，
+  形状基线 `remote/worker.py` 2 → 1。
+  全文 → `docs/nn/engineering.md` §213。

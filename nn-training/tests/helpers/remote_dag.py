@@ -415,6 +415,11 @@ LAYERS: dict[str, int] = {
     #: 背掉「rollout + greedy 波 + 并账」，依赖 `worker.greedy_round`(L3) / `worker.iter_rollout`(L1)
     #: / `worker.reports`(L0) ⇒ **L4**（作业壳 L5 直接调它）。
     "remote.offline_greedy": 4,
+    # worker 轮询壳的**会话级外件**（2026-11-18，LOC 预算 1000）：多 hub/缓存根装配、acquire
+    # 退避、让路自适应复查、退出收线。依赖 `lifecycle`(L1) / `payload_proc`(L1) /
+    # `bulk_sched`·`cloud_pool`·`prefetch`·`result_upload`(L0) ⇒ 拓扑秩 **L2**；
+    # `remote.worker`(L5) 站在它上面，边严格向下。
+    "remote.worker_session": 2,
     "remote.worker": 5,
     # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。

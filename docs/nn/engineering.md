@@ -25,6 +25,32 @@
 
 ---
 
+## §213 长函数存量第三十四刀：worker 轮询壳（remote）334 → 196（2026-11-18）
+
+`remote/worker.py::worker_loop` **334 → 196 行**，长函数存量 **4 → 3**
+（`LONG_FUNCS_BASELINE` 的 `remote/worker.py` 计数 2 → 1）。
+
+while 体本身（轮询 / claim / halt / idle / run_one_round）**一行未动**——它是
+`test_job_round_split.py` 钉死的壳（`run_one_round` 调用点、`_alive_log` 两处相位、
+20 个关键字逐名一致）。搬走的是壳**外面**的四段（新模块 `remote/worker_session.py`，
+L2，LOC 72）：
+
+- `hub_plan`：多 hub 列表 / 分区标志 / 缓存根 / `code_cache` 实参；
+- `acquire_retry`：iii-2 首败不退避、连败才退避（读数是同一个计数，仅参数改名）；
+- `yield_self_check`：A2 每轮收尾的分位复查与一次性降级；
+- `close_worker`：finally 的让路还原 / 预取腿收线 / 回传 drain / 池收线 / 生命周期收线。
+
+**刻意不搬**的四件（接缝在宿主命名空间，搬走 = 静默失效的 patch 目标）：
+`_setup_bulk_yield`（宿主持有还原账）、`_ensure_pf_store`（`W.make_prefetcher`）、
+`_poll_halt`（`W._release_cloud_machine`）、`_start_services` +`make_uploader` 调用点
+（`W.post_result` 是 20+ 处 patch 的目标，`test_job_lifecycle_split` 用 AST 钉住
+`worker_loop` 里的**传值引用**）。
+
+`worker.py` LOC 996 → 989；账本登记 `remote.worker_session: 2`
+（依赖 `lifecycle`(L1) / `payload_proc`(L1) / 其余 L0 ⇒ 秩 2 < worker 的 L5）。
+
+---
+
 ## §212 长函数存量第三十三刀：发布编排（remote）418 → 173（2026-11-18）
 
 `remote/hub_client.py::publish_job` **418 → 23 行**（纯接线），长函数存量 **5 → 4**
