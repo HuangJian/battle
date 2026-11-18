@@ -1,0 +1,363 @@
+// 课程 g5-pilot —— 「保易关 + 学难关」pilot（2026-11-15，基于 g5-aim2）
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────────
+//   奖励与 g5-aim2 **逐字节相同**；只改两个训练侧旋钮，回答一个问题：
+//   **在 g5-aim2 的奖励下，能不能保住 Easy 13 关的胜率（≥ bc−1pp），
+//   同时留下 Hard 9 关的增益（≥ bc+3pp）？**
+//
+// ── 1. 背景（2026-11-15 全 35 关分析，`tmp/_g5v2-stages.txt`）────────────────
+//   g5-aim2 相对 bc（g5-safe.it230）：
+//     Easy 13 关（bc≥90%）平均 **−8.31pp**；Medium 13 关 −2.92pp；Hard 9 关（bc≤70%）**+4.00pp**。
+//   g5-safe2 同口径：Easy −5.23 / Medium −3.00 / Hard **+9.11**。
+//   ⇒ 两腿都不是学不会复杂关，而是用简单关的胜率换复杂关的胜率。
+//   本 pilot 只验证「保持」能否由 **常数 BC 锚 + 固定哨兵采样** 实现；
+//   不改奖励、不改任务侧、不做 35 关逐关定价。
+//
+// ── 2. 本课相对 g5-aim2 的两个改动（都是训练侧，AGENTS §0.2 允许）────────────
+//   ① 常数 BC 锚：`kickstart_init` 0.1→**0.05**，`kickstart_decay` 0.5→**1.0**。
+//      原缰绳 it7 就归零；本课保持 0.05 常数 KL(π‖π_bc)，只保「已学会的易关行为」。
+//      若 Easy 仍掉：先升到 0.1；若 Hard 增益被压没：降到 0.02 或改 per-tier KL。
+//   ② 固定哨兵采样：`rotation_mode` even→**pinned**，
+//      pinned = 4 个 Easy 哨兵（2002/2007/2022/2023）+ 4 个 Hard（2018/2030/2032/2034），
+//      `rotation_per_it=3`（余额关轮换）⇒ 每轮 **8 固定 + 3 轮换 = 11 关**，
+//      target_transitions 24576 / 11 ≈ 2234/关。
+//      选这 8 关的理由：4 个 Easy 是 g5-aim2 显著退化关（p<0.01，S2007/S2023/S2022/S2002）；
+//      4 个 Hard 是 bc≤70% 且失败结构最值得盯的关（2030 30% / 2032、2034 60% / 2018 65%）。
+//      ⚠ pinned 只决定**采样**，不改变 NN 的决策；不是按关卡名特殊化（§81 精神）。
+//
+// ── 3. 不变项 ──────────────────────────────────────────────────────────────
+//   任务侧一字不动：classic35-safe-base / 35 关 / 20 敌 / 3 命 / 36000 拍 / hard。
+//   奖励逐字节 = g5-aim2（wKill 15 / wHit 2.5 / 空射份额税 / farHit / speed / explore / 生存税）。
+//   eval 同网格：35 关 × 20 seed 每 5 iter；bc = g5-safe.it230；paired_rotate_seed 20261115。
+//
+// ── 4. 判据（pilot 只看三点；五点窗，禁单点）────────────────────────────────
+//   主 1（保易关）：Easy 13 关均值（同 stage/seed 配对）≥ bc −**1.0pp**。
+//   主 2（学难关）：Hard 9 关均值 ≥ bc +**3.0pp**（g5-aim2 是 +4.0，允许锚吃掉 1pp）。
+//   主 3（总胜率）：五点窗 ≥ **80.5%**（bc 80.86；g5-aim2 77.71）。
+//   哨兵：S2007/S2023/S2022/S2002 单关掉 >2pp ⇒ 加锚（0.05→0.1）或停。
+//   守卫：hits ≥42 · shots ≥70 · kills ≥17.5 · deaths ≤1.9 · cells ≥140 · timeout ≤7%。
+//   ⚠ 机制门只作解释项，不作停止判据（AGENTS §15.3）。
+//
+// ── 5. 预算与产物 ──────────────────────────────────────────────────────────
+//   150 iter / 8h（pilot；≈110s/it ⇒ 4.6h 训完，留 eval/排队余量）。
+//   out/traj/backup = tmp/g5-pilot、nn-training/weights/g5-pilot。
+//   若 pilot 达标：下一腿用同配置跑 500 it，或另开 2×2 归因（锚-only / pinned-only）。
+//   本课不中途改奖励/采样（§15.5）。
+//
+// ── 6. 已知局限 ────────────────────────────────────────────────────────────
+//   ① 本 pilot 同时改了「锚」与「采样」两项；若达标，不能单独归因——后续 2×2 再拆。
+//   ② pinned 固定 8 关每轮必采 ⇒ 这 8 关样本量约为其余关的 4 倍；其余 27 关靠
+//      每轮 3 个轮换位覆盖（150 iter ⇒ 约 16 轮覆盖，密度低但足够看趋势）。
+//   ③ 常数锚对 Hard 也生效 ⇒ Hard 增益可能缩水；这正是主 2 要测的。
+//   ④ `rotation_mode` 进 corpus_identity_fp ⇒ 本课与 g5-aim2 不是同一语料身份，禁跨课续跑。
+
+{
+  // ── 课程身份与环境（任务侧：一个字不许动，AGENTS §0.2）──────────────────
+  // 课程文件格式版本；5 = 当前 pydantic CourseConfig schema。
+  "version": 5,
+  // 课程名 = 文件名 = 控制台下拉里显示的名字。
+  "name": "g5-pilot",
+  // 逐 tick 出奖励（另一档 per-game）。本项目所有 g 系腿都是 per-tick。
+  "mode": "per-tick",
+  // 关卡集：classic35-safe-base（35 关 / 20 敌 / 3 命 / 36000 拍）。任务侧不可动。
+  "level": "classic35-safe-base",
+
+  // ── 语料轮换（pilot：固定哨兵 + 余额轮换；§15.1 语料身份会变）────────────
+  // pinned = 8 个哨兵关每轮必采（4 Easy + 4 Hard）+ 3 个余额关从其余 27 关轮换。
+  // ⇒ 每轮 11 关；其余 27 关约 9 轮覆盖一遍，pinned 8 关样本密度约为其余关的 4 倍。
+  "rotation_mode": "pinned",
+  // 余额关数（pinned 之外轮换的关数）：3。pinned 8 关恒在 ⇒ 每轮 11 关。
+  "rotation_per_it": 3,
+  "rotation_pinned": "2002,2007,2018,2022,2023,2030,2032,2034",
+
+  // ── 自主云机采样覆盖（用户 2026-11-15：g5-pilot 起，新课程默认带）────────
+  // 设备分档；云机按 resolve_device 选一档，块生效时 notebook 的 sample_mult/epoch_mult 不生效。
+  // 顶层 pinned 11 关是本机基线；GPU/TPU 用各自档（账本每轮记 sampling_profile）。
+  // 数值来自 plan/autonomous-cloud-overrides.plan.md §8：
+  //   TPU 35 关全轮 35×3072=107520（4–5 seed/关）；GPU 7 关窗口 7×7020=49152（9–10 seed/关）。
+  // ⚠ 块是预注册执行变体：不进 flat_overrides / corpus_identity_fp；缺对应档的设备首轮前拒跑。
+  "autonomous_cloud_overrides": {
+    "gpu": {
+      "target_transitions": 49152,
+      "rotation_mode": "even",
+      "rotation_per_it": 7,
+    },
+    "tpu": {
+      "target_transitions": 107520,
+      "rotation_mode": "even",
+      "rotation_per_it": 35,
+    },
+  },
+
+  // ── 奖励（formula 逐项注释、params 剂量见下）────────────────────────────
+  "reward": {
+    "formula": [
+      // ── ① 收入骨架 ──────────────────────────────────────────────────────
+      // 杀一辆敌车 +15。基线 18.87 杀/局 ⇒ +283，**最大收入项**，任何税不许把它压过去。
+      "wKill*kills",
+      // 每命中一发 +2.5（g5-safe 是 1.5）。基线 42.85 命中/局 ⇒ +107（原 +64）。
+      // 提价理由：让「多打中」始终压过「靠少开枪换命中率」——后者是 g5 的失败形态。
+      "+ wHit*aimHits",
+      // 命中率 ×5（细调项）。基线 46.3% ⇒ +2.3。不承担主信号（主信号 = 上一条 + 空射份额税）。
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻/盾窗内命中 +1.2/发，封 12（满 +14.4）。基线 8.47 发 ⇒ +10.2。
+      // 奖励「窗口内上前打」，与 threatTicks 的冻/盾豁免同向。
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 每真拆一格砖 +1.0，封 12（满 +12）。基线 8.59 格 ⇒ +8.6。
+      // 只认 terrain_destroyed（真拆掉），空射/打钢不破不算。
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 捡一个道具 +4，封 6（满 +24）。基线 5.50 个 ⇒ +22。
+      // 本课**不加**「漏捡」税（隔河/隔墙的道具没有可靠列），见文件头 §3-⑤。
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80。基线 80.94% ⇒ +64.8。主奖，与 terminal 的负值分开计。
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // ── ② 提速（治「打得慢」）────────────────────────────────────────────
+      // 通关提速：9000 拍 0 分、6000 拍满分、封 24。基线 7265 拍 ⇒ +13.9。
+      // 改拐点的理由：原 13000/1400 对 ≤7500 拍的局已满额（(13000−7265)/1400 > 1），**零梯度**。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // ── ③ 空射（治「一直乱开枪」）────────────────────────────────────────
+      // 空射**份额**税：超过 30% 的部分每 1pp −2 分，封顶 30pp（−60）。
+      // 基线 miss/shots 42.7% ⇒ −25.4；输局 49.5% ⇒ −39；赢局 32.9% ⇒ −5.8。
+      // min(1, shots/20) 让 shots<20 的开局试探按比例打折，避免一枪不中就重罚。
+      // 为什么按份额不按发数：按发罚会与「命中 +2.5/发」对撞，平衡点只有 7% 命中率，压不住乱射。
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      // 极端空射长尾税：80 发以内不罚；100 发 −4、150 发 −24（封顶）。
+      // 基线 39.45 ⇒ 0；只有 p99（612 发）那种局才吃满。治「一直按着开火键」。
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      // ── ④ 远狙（治「只追近身、不会远距离狙击」）─────────────────────────
+      // 超过 4 格的部分每格 +1.5，封 120。基线平均命中距 3.68 格 ⇒ **0（不白送）**；
+      // 5.0 格 ⇒ +64；6.5 格 ⇒ 封顶。**不罚近身**（贴脸有 wKill/wHit 在，硬压会把杀敌一起压掉）。
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      // ── ⑤ 探索（治「无意义掉头」的代理）─────────────────────────────────
+      // 访问格数封顶奖：基线 151.5 格 ⇒ +7.6；200 格 ⇒ +10；220 格封顶 +11。
+      // 这是代理不是直读：`moveHist` 只有 4 方向直方图，拿不到转向序列（见文件头 §1）。
+      // 「掉头但走不出新格」拿不到这笔钱，「走出去」才拿。
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      // ── ⑥ 生存骨架（与 g5-safe 相同，仅 wStuck 加倍）─────────────────────
+      // 每掉 1 血 −0.12。基线 454.4 血/局 ⇒ −54.5。只罚真掉血，不罚「接近弹道」。
+      "- wDmg*playerDamageTaken",
+      // 每死一次 −24。基线 1.34 次/局 ⇒ −32.2；三条命打光 = −72（与 terminal −45 合计 −117）。
+      "- wDeath*playerDeaths",
+      // 不动拍占比 ×100（占比式，与局长短无关）。基线 2.88% ⇒ −2.9。防站桩。
+      "- wIdle*idleTicks/(ticks+1)",
+      // 死锁（没换格且没打中）超过 200 拍的部分 −0.08/拍，封 900（满 −72）。
+      // 比 g5-safe 加倍（0.04 / free 300）：基线 mean 789.8、p90 879 ⇒ 约 −47。
+      // 专治「原地打转」——这是「无意义掉头」唯一能被梯度看见的痕迹。
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 顶墙超过 350 拍的部分 −0.08/拍，封 300（满 −24）。基线 347.7 ⇒ 0（多数局不触发），只罚长尾。
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+    },
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  // ── 起点与缰绳（用哪份权重起跑、起步锁多紧）──────────────────────────────
+  // 空串 = 不用 dodge 参考策略（本项目的 dodge 通道未启用）。
+  "dodge": "",
+  // 起点权重 = g5-safe.it230（用户 2026-11-15 指定）。两门课同一起点 ⇒ 可单变量归因。
+  "bc": "nn-training/weights/g5-safe/g5-safe.it230.20261115-074454.json",
+  // bc 是「学到手的策略」⇒ 开 kickstart 参考 KL 缰绳。
+  // （随机初始化的 bc 必须关它，否则等于把策略钉死在随机输出上。）
+  "kickstart_ref": true,
+  // pilot：常数锚 kk(it)=0.05（decay 1.0）——原课 0.1×0.5^(it−1) 在 it7 归零，
+  // 本课要它整程都在，专门压住「简单关漂移」。
+  "kickstart_init": 0.05,
+  // 1.0 = 不衰减（常数 0.05）。若 Easy 仍掉升 init；若 Hard 增益被压没降 init 或改 per-tier。
+  "kickstart_decay": 1.0,
+  // 0 = 不做 warmup（非 0 会直接启动失败）。
+  "warmup_iters": 0,
+  // value 头牵引率 0.001：把 V 拉向 Φ 的持有值，防 value 漂走。g5 系全部这个量级。
+  "value_anchor": 0.001,
+
+  // ── 预算与优化器（训练侧：允许动）────────────────────────────────────────
+  // pilot：150 iter（≈4.6h @110s/it）。主判窗口 = 末 5 点（130–150）。
+  "iters": 150,
+  // pilot 墙钟上限 8h：够 150 iter + eval/排队余量，不占 worker 一整天。
+  "max_hours": 8.0,
+  // lr 1.2e-4（g5 是 8e-5）。提它的理由：g5 两腿 KL 只有 0.0006、230 iter 参数只挪 1%。
+  "lr": 0.00012,
+  // 每轮 4 个 epoch（与 g5 相同）。
+  "epochs": 4,
+  // minibatch 1024；target_transitions 24576 ⇒ 每轮整 24 块（必须整倍数）。
+  "mb": 1024,
+  // 回报标准化：按 batch 的 return 均值/方差归一，稳定 value 回归。
+  "normalize_ret": true,
+  // 折扣 0.998（≈500 拍半衰期）。本环境一局 7000+ 拍，长程信用全靠它。
+  "gamma": 0.998,
+  // GAE λ 0.95（偏差/方差折中）。
+  "lam": 0.95,
+  // PPO 调度：kl_coef 0.05→0.02（g5 的 KL 被压到 0.0006，放松以提有效步长）；
+  // kl_cap 每段都必须显式写 —— 缺席会回落到 rl-config 的 0.18，语义悄悄漂移。
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+
+  // ── 采样量 ─────────────────────────────────────────────────────────────
+  // 24576 = 24 × mb。必须能被 mb 整除：ragged 末块会让 XLA 每 epoch 重编译（50s vs 0.18s/步）。
+  "target_transitions": 24576,
+  // 配对轮换种子：两腿共用 ⇒ 同 iter 拿到同一批 (stage,seed)，可逐局配对检验。
+  "paired_rotate_seed": 20261115,
+
+  // ── 决策门（动作多久出一次）────────────────────────────────────────────
+  // false = 均匀 K 拍出一次动作（true 会走 threat-ONSET 事件门，本腿不开）。
+  "decision_events": false,
+  // K=10：每 10 拍一个决策步。与 g5 相同 ⇒ 跨腿可比（换 K 后 shots/千 等指标要重算）。
+  "decision_k": 10,
+
+  // ── 开局接管（本课程的关键口径：改它 = 换实验）──────────────────────────
+  // true = 对 strict 不连通的 13 关套 OpeningController：开局把 P1↔P2 打通后 handoff 给 NN。
+  // eval 与 rollout 同口径（用户 2026-11-15 定规：课程启用了接管，就必须在接管基础上评估）。
+  // ⚠ 关掉它 = 换一个面板 ⇒ 与 g5 系历史读数不可比。
+  "opening_connect": true,
+
+  // ── 产物路径（新奖励 = 新实验 ⇒ 新目录，禁与 g5-safe 续跑，AGENTS §15.5）──
+  // pilot 独立工作区（新实验，禁与 g5-aim2 续跑）。
+  "out": "tmp/g5-pilot/weights.json",
+  // 轨迹/台账目录（eval_log.jsonl、training_log.jsonl、逐 iter shard）。
+  "traj": "tmp/g5-pilot",
+  // 每 iter 的权重快照目录（复现与回滚用）。
+  "backup_dir": "nn-training/weights/g5-pilot",
+  // 快照文件名前缀：<prefix>.it<N>.<时间戳>.json。
+  "backup_prefix": "g5-pilot",
+
+  // ── 过程熔断（跑飞就停，不等它烧完 24h）──────────────────────────────────
+  // true = 关掉 KL/NaN 过程熔断，只留熵熔断。g5 系全部这么跑，靠人工盯曲线。
+  "breakers_off": true,
+  // 熵熔断：entropy 连续 8 个 iter < 0.25 ⇒ 停。0.25 是「探索崩了」，不是「正常下降」。
+  "ent_break": 0.25,
+  // 连续 8 个 iter 都低于阈值才熔断（单次抖动不触发）。
+  "ent_break_consec": 8,
+  // 只在胜率为 0 时才允许熵熔断（非 0 会把正常熵下降误判成崩塌）。
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（判读口径：五点窗，禁单点）──────────────────────────────────
+  // 35 关全量（2000–2034）。与 g5-safe 同网格 ⇒ 可跨腿逐局配对。
+  "eval_stages": "2000-2034",
+  // 每关 20 seed ⇒ 每点 700 局；五点窗 = 25 iter = 3500 局。
+  "eval_games_per_stage": 20,
+  // 每 5 iter 一个 eval 点。
+  "eval_every": 5,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-11-15，用户停课，it103/150）
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ── 0. 运行账 ─────────────────────────────────────────────────────────────
+//   起：2026-11-15 13:46:57（本地 pinned 段）；停：22:32（it103）。
+//   eval：21 点 × 700 局（it0,5,...,100；35 关 × 20 seed，seed 2000000001..20）。
+//   两段语料（用户裁定）：
+//     前半 it1–68   = 本地 pinned：8 固定哨兵（4 Easy 2002/2007/2022/2023 +
+//                     4 Hard 2018/2030/2032/2034）+ 3 个余额关轮换 = 11 关/轮。
+//     后半 it69–103 = TPU 全 35 关：autonomous_cloud_overrides.tpu 107520/even/35
+//                     （35×3072/关），224 CPU 核 / 222 workers；TPU 段 35 it / 70.5s/it。
+//   熔断：无。KL mean 0.0013 / max 0.0021；entropy min 0.478；value last 0.604。
+//   注：training_log 有 3 条 run_start（13:46 本地、13:50 导出、21:46 TPU 导出）；
+//       iteration 事件 103 条 = 本地 68 + TPU 35，与 heartbeat rounds_done=68 对齐。
+//
+// ── 1. 主结果（末 5 点，vs bc=g5-safe.it230，700 seed 配对）──────────────────
+//   bc：Easy 93.1% / Hard 62.2% / 总 80.86%。
+//
+//   前半 pinned（45–65）：
+//     win 79.66% · all −1.20pp(p=0.444) · Easy −6.54pp(p<0.001)
+//     · Medium −3.31pp(p=0.212) · Hard +9.56pp(p=0.012)
+//     shots 82.44 · hits 42.56 · missRate 37.26% · avgHitDist 3.62 · clearT 7012
+//     deaths 1.471 · dmg 467.7 · gameover 17.94% · timeout 2.49%
+//     同 iters 对照 g5-aim2（45–65）：all −2.97 / Easy −8.92 / Medium −2.23 / Hard +4.56
+//     ⇒ pilot 比 aim2：总 +1.77pp、Easy +2.38pp、Hard +5.00pp；Medium 反而 −1.08pp。
+//
+//   后半 TPU 全 35 关（80–100）：
+//     win 78.60% · all −2.26pp(p=0.164) · Easy −7.00pp(p<0.001)
+//     · Medium −6.08pp(p=0.030) · Hard +10.11pp(p=0.009)
+//     gameover 17.71% · timeout 3.77% · deaths 1.437 · dmg 459.5 · kills 18.5
+//     ⚠ TPU eval 行只回传核心字段：shots/hits/cells/threat/hurt/clearTick/Φ 全缺
+//       （表格里为 0 不是真实值）⇒ 机制/Φ 结论只用前半 + TPU rollout log；
+//       TPU 段的 win/tier/outcome/kills/deaths/dmg 有效。
+//
+//   分段对比（TPU − pinned）：all −2.26 vs −1.20（−1.06pp）、Easy −7.00 vs −6.54
+//   （−0.46）、Medium −6.08 vs −3.31（−2.77）、Hard +10.11 vs +9.56（+0.55）。
+//   ⇒ 全 35 关采样没有救回 Easy/Medium；Hard 增益保住并略升；总胜率略降。
+//
+//   逐点 win：it0 80.86 → it35 82.57（峰值）→ it65 80.86 → it70 77.00（段切换后低点）
+//   → it100 79.14。TPU 段 77.0–79.1 横盘，无上升斜率。
+//   TPU 单轮 rollout log（用户提供）：454 局/23.0s/222 workers；p50 5.21s、p90 7.69s、
+//   p99 11.62s、max 17.45s；0 局 ≥20s、0 重试；采集 367111 vs 目标 107520，
+//   over-collect 259591；该轮 winRate 77.53%。
+//
+// ── 2. 机制与门槛（仅前半有效）────────────────────────────────────────────
+//   前半末 5 点：win 79.66（门 ≥80.5 FAIL）· missRate 37.26（≤32 FAIL）·
+//   avgHitDist 3.62（≥4.5 FAIL）· clearT 7012（≤6600 FAIL）。
+//   守卫：shots 82.44≥70 · hits 42.56≥42 · kills 18.5≥17.5 · deaths 1.47≤1.9 ·
+//   cells 150.8≥140 · timeout 2.49≤7 —— 全过。
+//   前半 Φ 392.78（bc 400.5）；税项以 dmg/death/miss/stuck 为主，八项躲弹税仍不被
+//   行为响应（与 g5-safe2 同结论）。TPU 段 Φ 不可算（字段缺失）。
+//
+//   逐关（TPU 80–100 vs bc）：worst S2020 −40 · S2007 −30 · S2023 −19 ·
+//   S2012 −17 · S2013 −16；best S2030 +24 · S2028 +15 · S2034 +14 ·
+//   S2005 +12 · S2033 +10。⇒ Easy 哨兵仍在失血，Hard 的 S2030/S2034 继续赚。
+//
+// ── 3. 结论 ───────────────────────────────────────────────────────────────
+//   ① 方向性成立、目标未达成：0.05 常数锚 + pinned 哨兵采样在**同 iters** 下比
+//      g5-aim2 好（总 +1.77pp、Easy +2.38pp、Hard +5.00pp），把 Easy 失血从 −8.9
+//      压到 −6.5、Hard 从 +4.6 抬到 +9.6；但 Easy **没有保住**（终段 −7.00pp），
+//      总胜率 −2.26pp。0.05 锚不够。
+//   ② TPU 全 35 关段不是解药：Easy −7.00、Medium −6.08，均比 pinned 段更差；Hard
+//      +10.11 略好；总 −2.26。全关覆盖减少了采样偏差，但没有替代「每关行为要保住」
+//      的锚/约束。
+//   ③ 段切换与平台/采样同时变化（pinned→TPU even/35、CPU→TPU、107520 target）
+//      ⇒ 不能把后半的变化单归因给「全 35 关采样」；本课是 pilot，不是 2×2。
+//   ④ 数据缺口：TPU eval 行缺 dense 遥测，后半只能判 win/tier/outcome；下一条 TPU
+//      腿要么回传全字段，要么单独跑一次 35×20 全量 eval。
+//
+// ── 4. 下一步（不修改本课，另开新腿）──────────────────────────────────────
+//   · 锚：0.05 → 0.10，或 tiered（Easy 1.0 / Medium 0.3 / Hard 0），目标 Easy ≥85%；
+//   · 归因：clean 2×2（anchor-only / pinned-only），不要把锚+采样+平台混在一腿；
+//   · 采样：若继续 pinned，保留 4 Easy 哨兵 + 4 Hard；若全 35 关，需配更强的
+//     Easy 锚，否则 Medium/Easy 会继续被 Hard 的梯度挤掉；
+//   · 2 命任务（g5-lives）是另一条线：它用 lifeScale=1.5 的生存校准，不沿用本课的
+//     pinned 采样结论。
+//
+// 详细数据：tmp/g5-pilot/final-report-data.txt；原始账本：tmp/g5-pilot/training_log.jsonl、
+// eval_log.jsonl；TPU 单轮日志见用户 2026-11-15 贴文。

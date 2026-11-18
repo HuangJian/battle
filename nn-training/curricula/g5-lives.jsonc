@@ -1,0 +1,388 @@
+// 课程 g5-lives —— 2 命任务实验（2026-11-15，以 g5-safe2 为基础）
+//
+// 状态：**已结课**（2026-11-18 结算；235/500 iter，云端 worker 会话结束，非门限非熔断）
+//   → **2 命任务判负**：末点 win 62.97%（门 ≥70）· easy 74.00（≥85）· hard 52.44（≥55）·
+//     gameover 33.51（≤25）⇒ **DoD 5/11**，best it230 67.14（6/11）
+//   → 平台 it50–235 均值 62.48（σ 1.87）vs it0 61.43 ⇒ +1.05pp，**落 4pp 散布内**
+//   → 机制层全部动对方向（nearSq −30% · 命打光 29.3→22.6 · 承伤 −25.5），**不换胜率**
+//   → **同权重回 3 命 83.00% vs 母本 81.86%（+1.14pp, p=.559）**，命打光 −39%、承伤 −36.7（p=.001）
+//   全文 = **文件尾「结课报告」**；台账 `docs/nn/experiments.md §142`；报告 `reports/g5-lives-closing-20261118.md`
+//
+// ── 0. 一句话 ───────────────────────────────────────────────────────────────
+//   任务侧 player.lives 3 → 2；bc = g5-safe2.it185（3 命策略）；奖励在 g5-safe2 的
+//   17+8 项骨架上，把「生存族」统一乘 lifeScale=1.5（=3/2），收入/瞄准/速度/探索/空射税不动。
+//   目的：在 2 命下重建「简单关高胜率 + 复杂关继续赢」的策略，而不是把 3 命读数直接搬过来。
+//
+// ── 1. 任务侧改动（用户 2026-11-15 点名）──────────────────────────────────
+//   不新建关卡文件：课程侧 `lives: 2` 覆盖（course_resolve §49，`_apply_level` 消费后写回
+//   `player.lives`）；level 仍引用 classic35-safe-base ⇒ 35 关 / 20 敌 / 36000 拍 / hard /
+//   基地环改钢全部不变。
+//   ⚠ 这是任务侧新实验，不是训练侧降难度：AGENTS §0.2 的默认「任务侧不可动」由用户点名解除；
+//     关卡难度口径仍以人类熟练玩家体验为准，本课不据此改关卡难度或其它任务字段。
+//
+// ── 2. bc it185 的 2 命基线（35×20，seed 2000000001..20；与 3 命 it180 同 seed）────
+//   指标                     3 命 it180     2 命 it185     变化
+//   总胜率                    79.43%         60.86%        −18.57pp
+//   Easy 13 关                93.64%         69.55%        −24.09pp
+//   Medium 13 关              80.33%         62.67%        −17.67pp
+//   Hard 9 关                 60.56%         47.22%        −13.33pp
+//   gameover                  17.57%         35.86%        +18.29pp
+//   timeout                    3.14%          3.43%         +0.29pp
+//   死亡/局                    1.354          1.259         −0.095
+//   承伤/局                    441.8          391.1         −50.7
+//   胜局残血 hp                0.572          0.429         −0.143
+//   clearTick（胜局）          7911           7640          −272
+//   maxDamage120               169.2          164.2         −5.0
+//   damageBursts               1.083          0.979         −0.104
+//   postHit%                   0.725          0.669         −0.056
+//   threat%                    6.74           6.19          −0.55
+//   hurtWeight                 153.6          143.0         −10.6
+//   nearSqSum                  2593.6         2590.8        −2.8
+//   encl%                      11.29          11.68         +0.39
+//   pickups                    5.53           4.67          −0.85
+//   配对（n=700）：both win 341 · only 3-life win 215 · only 2-life win 85 · both lose 59。
+//   2 命胜率按 3 命死亡数：0 死 69.4% · 1 死 60.3% · 2 死 59.5% · 3+ 死 54.9%。
+//   分关最大跌幅：S2020 85→10（−75）· S2012 95→40（−55）· S2004 95→45（−50）·
+//   S2001 75→35（−40）· S2027 100→65 / S2030 55→20 / S2005 85→50（−35）。
+//
+// ── 3. 数据 → 奖励校准（formula + params）────────────────────────────────
+//   3 命 bc 在 2 命下：胜率 −18.6pp、gameover×2.0、HP 0.57→0.43；但每局 maxD/bursts/
+//   postHit/threat/hurt 只降 3–10% ⇒ **每条命的暴露约为 3 命的 1.4–1.5×**：
+//     maxD 169.2/2 ÷ (169.2/3)=1.50；bursts 1.46；postHit 1.39；threat 1.38；
+//     hurt 1.40；damage 1.33；nearSq 1.50；encl 1.55。
+//   因此：生存族（wDmg / wDeath / wThreat / wHurt / wPostHit / wBurst / wMaxDmg /
+//   wLowDmg / wNearSq / wEncl）统一乘 **lifeScale=1.5（=3/2）**；收入/瞄准/速度/探索/
+//   空射税不动。
+//   全损死亡税：3×24=72 → 2×24×1.5=72；terminal swing 不变（win +80 / loss 117）。
+//   wDeath 有效 36/次；wDmg 有效 0.18；2 命承伤 391 ⇒ −70.4（3 命 441.8×0.12=−53.0，
+//   按每命预算更贵）。这是把「每命更贵」写进同一套骨架，不是额外加税项。
+//
+// ── 4. 起点与缰绳 ─────────────────────────────────────────────────────────
+//   bc = g5-safe2.it185（用户 2026-11-15 指定）。它是 3 命策略，2 命下 OOD（win 60.9%）；
+//   因此只做短 warm start（kickstart_init 0.1 / decay 0.5，锁 it1–7），不长期锚定 3 命行为。
+//
+// ── 5. 建议主判（it400–500 五点窗；2 命）─────────────────────────────────
+//   总胜率 ≥70.0%（bc 60.9）；Easy ≥85.0%（bc 69.6）；Hard ≥55.0%（bc 47.2）。
+//   守卫：gameover ≤25%（bc 35.9）· timeout ≤7% · deaths ≤1.2 · damage ≤400 ·
+//         hits ≥40 · kills ≥18 · cells ≥130 · stuck ≤900。
+//   机制门只作解释项，不作停止判据（AGENTS §15.3）。
+//
+// ── 6. 判读边界 ───────────────────────────────────────────────────────────
+//   ① 2 命 bc eval 是「3 命策略 OOD」基线，不是本课预期性能；本课从它 warm start 后训练。
+//   ② 2 命改变了整个残局/复活结构：Easy 掉得比 Hard 更狠（−24.1 vs −13.3），
+//      说明 3 命的「简单关」胜率依赖生命余量；本课要重建的是 2 命下的安全边际。
+//   ③ 任务/奖励与 g5-safe2 不同 ⇒ 不与 g5-safe2 的 3 命读数逐局混比；只与本课 bc 2 命基线比。
+//   ④（**已过期** —— 本课已开课并结课，见文件尾结课报告）本课未开课；开课前检查 bc/关卡/权重与 GPU/TPU 采样档。
+//
+// ── 7. 自主云机采样覆盖（用户 2026-11-15：g5-pilot 起新课程默认带）──────────
+//   gpu 49152/even/7；tpu 215040/even/35（TPU 224 核 / 2× 采集）；块不进
+//   flat_overrides/corpus_identity_fp；缺对应档设备首轮前拒跑。
+//   实测 g5-pilot TPU（2026-11-15）：454 局/23.0s、222 workers、采集 367111 transitions；
+//   原目标 107520 ⇒ over-collect 259591；×2 目标 215040 可把同一次采集的利用率翻倍、减少 trim。
+
+{
+  // ── 课程身份与环境（任务侧：一个字不许动，AGENTS §0.2）──────────────────
+  // 课程文件格式版本；5 = 当前 pydantic CourseConfig schema。
+  "version": 5,
+  // 课程名 = 文件名 = 控制台下拉里显示的名字。
+  "name": "g5-lives",
+  // 逐 tick 出奖励（另一档 per-game）。本项目所有 g 系腿都是 per-tick。
+  "mode": "per-tick",
+  // 关卡集：classic35-safe-base（35 关 / 20 敌 / 36000 拍）；2 命由下方课程级 `lives: 2` 覆盖
+  // （course_resolve §49：覆盖键在 _apply_level 消费后写回 player，不新建关卡文件）。
+  "level": "classic35-safe-base",
+  "lives": 2,
+
+  // ── 语料轮换（防「把评估集记成记忆」，AGENTS §15.1）─────────────────────
+  // even = 每轮按轮次均匀取 7 关；配 rotation_per_it=7 ⇒ 5 轮覆盖全部 35 关。
+  // 与 g5-safe2 同一轮换配方，但关卡是 2 命变体 ⇒ 语料身份不同。
+  "rotation_mode": "even",
+  // 每 iter 采 7 关。
+  "rotation_per_it": 7,
+
+  // ── 自主云机采样覆盖（g5-pilot 起新课程默认带）──────────────────────────
+  // 云机按 resolve_device 选一档；块生效时 notebook 的 sample_mult/epoch_mult 不生效。
+  // 数值来自 plan/autonomous-cloud-overrides.plan.md §8：TPU 35 关全轮 35×6144=215040
+  // （224 核 / 2× 采集）；GPU 7 关窗口 7×7020=49152。块不进 flat_overrides / corpus_identity_fp。
+  "autonomous_cloud_overrides": {
+    "gpu": {
+      "target_transitions": 49152,
+      "rotation_mode": "even",
+      "rotation_per_it": 7,
+    },
+    "tpu": {
+      "target_transitions": 215040,
+      "rotation_mode": "even",
+      "rotation_per_it": 35,
+    },
+  },
+
+  // ── 奖励（g5-safe2 的 17+8 项 + 2 命 lifeScale；生存族 ×1.5，注释见下）─────
+  // ⚠ 本课是 2 命：生存族（wDmg/wDeath/八项躲弹税）统一乘 lifeScale=1.5；
+  //    以下注释里的“基线 x ⇒ −y”是 3 命 g5-safe2 的读数，2 命实际税 = 1.5×y。
+  "reward": {
+    "formula": [
+      // ── ① 收入骨架（与 g5-aim2 逐字相同）────────────────────────────────
+      // 杀一辆敌车 +15。基线 18.87 杀/局 ⇒ +283，最大收入项，任何税不许把它压过去。
+      "wKill*kills",
+      // 每命中一发 +2.5。基线 42.85 命中/局 ⇒ +107。保证「多打中」压过「躲着不打」。
+      "+ wHit*aimHits",
+      // 命中率 ×5（细调）。基线 46.3% ⇒ +2.3。
+      "+ wAcc*aimHits/(playerShots+1)",
+      // 冻/盾窗内命中 +1.2/发，封 12（满 +14.4）。基线 8.47 发 ⇒ +10.2。
+      "+ wWinHit*min(hitsInFreezeShieldWindow, winHitCap)",
+      // 每真拆一格砖 +1.0，封 12（满 +12）。基线 8.59 格 ⇒ +8.6。
+      "+ wBrick*min(aimBricks, brickCap)",
+      // 捡一个道具 +4，封 6（满 +24）。基线 5.50 个 ⇒ +22。
+      "+ wPickup*min(powerUpsCollected, pickupCap)",
+      // 通关 +80。基线 80.94% ⇒ +64.8。主奖，与 terminal 的负值分开计。
+      "+ wWin*where(clearTick>=0, 1, 0)",
+      // 通关提速：9000 拍 0 分、6000 拍满分、封 24。基线 7265 拍 ⇒ +13.9。
+      "+ wSpeed*where(clearTick>=0, max(0, min(1, (speedEnd-clearTick)/speedSpan)), 0)",
+      // 空射份额税：超过 30% 的部分每 1pp −2 分，封顶 30pp（−60）。
+      // 基线 42.7% ⇒ −25.4；输局 49.5% ⇒ −39。min(1,shots/20) 让开局试探按比例打折。
+      "- wMissRate*min(1, playerShots/20)*max(0, aimMisses/(playerShots+1) - missRateFree)",
+      // 极端空射长尾税：80 发以内不罚；150 发 −24（封顶）。基线 39.45 ⇒ 0。
+      "- min(missHardCap, wMissHard*max(0, aimMisses - missHard)**2)",
+      // 远距离命中奖：超过 4 格的部分每格 +1.5，封 120。基线 3.68 格 ⇒ 0；5.0 格 ⇒ +64。
+      "+ wFarHit*min(farCap, max(0, aimHitDistSum - farDistFree*aimHits))",
+      // 探索封顶奖：基线 151.5 格 ⇒ +7.6；220 格封顶 +11。治「原地掉头」的代理。
+      "+ wExplore*min(exploreCap, cellsVisited)",
+      // ── ② 生存骨架（与 g5-aim2 逐字相同）────────────────────────────────
+      // 每掉 1 血 −0.12 × lifeScale 1.5 ⇒ 有效 0.18。3 命基线 454.4 ⇒ −54.5；
+      // 2 命 bc 391.1 ⇒ −70.4（按每命预算更贵）。
+      "- lifeScale*wDmg*playerDamageTaken",
+      // 每死一次 −24 × lifeScale 1.5 ⇒ 有效 36。3 命基线 1.354 ⇒ −32.5；
+      // 2 命全损 2×36=72=3×24，terminal swing 不变。
+      "- lifeScale*wDeath*playerDeaths",
+      // 不动拍占比 ×100。基线 2.88% ⇒ −2.9。防站桩。
+      "- wIdle*idleTicks/(ticks+1)",
+      // 死锁超过 200 拍的部分 −0.08/拍，封 900（满 −72）。基线 mean 789.8 ⇒ 约 −47。
+      "- wStuck*min(max(0, stuckTicks - stuckFree), stuckCap)",
+      // 顶墙超过 350 拍的部分 −0.08/拍，封 300（满 −24）。基线 347.7 ⇒ 0。
+      "- wWall*min(max(0, wallPressTicks - wallFree), wallCap)",
+      // ── ③ 本臂增量：八项躲弹税（唯一与 g5-aim2 不同的部分）───────────────
+      // ⑭ 在敌弹道/炮口线上的拍占比 ×180，封 20%（满 −36）。
+      //    基线 8.58% ⇒ −15.4；p90 15.26% ⇒ −27.5。v13 起冻/盾期豁免（只计非豁免拍）。
+      //    这是「不躲炮口」最直的一列：19px 带 + 判墙体遮挡，口径冻结在 danger-metrics.ts。
+      "- lifeScale*wThreat*min(threatRateCap, threatTicks/(ticks+1))",
+      // ⑮ 近失/命中加权 −0.12/点，封 400（满 −48）。基线 159.7 ⇒ −19.2；p90 301 ⇒ −36.1。
+      //    Σmax(0,6−x)（x≤5 拍）⇒ 越贴着弹道挨越贵，与 wDmg 互补（后者只数真掉的血）。
+      "- lifeScale*wHurt*min(hurtCap, hurtWeight)",
+      // ⑯ 挨打后仍赖在原火线轴上的拍占比 ×1500，封 3%（满 −45）。
+      //    基线 1.03% ⇒ −15.5；p90 2.66% ⇒ −39.9。专治「挨了一发还不换位」。
+      "- lifeScale*wPostHit*min(postHitRateCap, postHitLaneTicks/(ticks+1))",
+      // ⑰ 相邻两笔扣血间隔 ≤120 拍算一次「连挨」，每次 −8，封 8 次（满 −64）。
+      //    基线 1.21 次 ⇒ −9.7；p90 3 次 ⇒ −24。这是「傻站火线连续饮弹」的直读列。
+      "- lifeScale*wBurst*min(burstCap, damageBursts)",
+      // ⑱ 120 拍滑窗最大承伤超过 120 的部分 −0.18/点，封 300（满 −54）。
+      //    基线 174.4 ⇒ −9.8；p90 256 ⇒ −24.5。含义：单次交火最多能掉 41% 血。
+      "- lifeScale*wMaxDmg*min(maxDmgCap, max(0, maxDamage120 - maxDmgFree))",
+      // ⑲ 低血（hp<0.4）期承伤 −0.05/点，封 600（满 −30）。基线 207.6 ⇒ −10.4；p90 372 ⇒ −18.6。
+      //    只在低血罚，不与 wDmg 对正常承伤重复计价。
+      "- lifeScale*wLowDmg*min(lowDmgCap, damageWhileLow)",
+      // ⑳ 贴脸暴露（d≤3 的存活敌车每拍 Σ(3−d)²）×0.006，封 3000（满 −18）。
+      //    基线 2712.7 ⇒ −16.3；p50 988 ⇒ −5.9。本课新增项，专治「贴到堆里站桩」。
+      //    ⚠ 不罚「近身」本身——只罚「多个敌人贴到 2 格内」这个暴露形状，近身杀敌仍由 wKill 兜着。
+      "- lifeScale*wNearSq*min(nearSqCap, nearSqSum)",
+      // ㉑ 同行/同列（≥2 敌车）拍占比 ×60，封 40%（满 −24）。基线 14.65% ⇒ −8.8；p90 26.85% ⇒ −16.1。
+      //    被夹 = 只能朝两个方向逃，是「掉头也没用」的形状。
+      "- lifeScale*wEncl*min(enclRateCap, enclWeightTicks/(ticks+1))",
+    ],
+    "params": {
+      "wKill": 15.0,
+      "wHit": 2.5,
+      "wAcc": 5.0,
+      "wWinHit": 1.2,
+      "winHitCap": 12.0,
+      "wBrick": 1.0,
+      "brickCap": 12.0,
+      "wPickup": 4.0,
+      "pickupCap": 6.0,
+      "wWin": 80.0,
+      "wSpeed": 24.0,
+      "speedEnd": 9000.0,
+      "speedSpan": 3000.0,
+      "wMissRate": 200.0,
+      "missRateFree": 0.3,
+      "wMissHard": 0.01,
+      "missHard": 80.0,
+      "missHardCap": 24.0,
+      "wFarHit": 1.5,
+      "farDistFree": 4.0,
+      "farCap": 120.0,
+      "wExplore": 0.05,
+      "exploreCap": 220.0,
+      "wDmg": 0.12,
+      // 2 命校准：生存族统一 ×1.5（=3/2）；数据见头部 §2/§3。
+      "lifeScale": 1.5,
+      "wDeath": 24.0,
+      "wIdle": 100.0,
+      "wStuck": 0.08,
+      "stuckFree": 200.0,
+      "stuckCap": 900.0,
+      "wWall": 0.08,
+      "wallFree": 350.0,
+      "wallCap": 300.0,
+      // 八项躲弹税（相对 g5-aim2 唯一增量）。
+      "wThreat": 180.0,
+      "threatRateCap": 0.2,
+      "wHurt": 0.12,
+      "hurtCap": 400.0,
+      "wPostHit": 1500.0,
+      "postHitRateCap": 0.03,
+      "wBurst": 8.0,
+      "burstCap": 8.0,
+      "wMaxDmg": 0.18,
+      "maxDmgFree": 120.0,
+      "maxDmgCap": 300.0,
+      "wLowDmg": 0.05,
+      "lowDmgCap": 600.0,
+      "wNearSq": 0.006,
+      "nearSqCap": 3000.0,
+      "wEncl": 60.0,
+      "enclRateCap": 0.4,
+    },
+    // 2 命全损：2×24×1.5 + 45 = 117 = 3 命 3×24 + 45；terminal swing 不变。
+    "terminal": {
+      "timeout": -60.0,
+      "lives_exhausted": -45.0,
+      "base_destroyed": -35.0,
+      "stage_clear": 0.0,
+    },
+    "scheme": "toy",
+  },
+  // ── 起点与缰绳（与 g5-aim2 逐字相同 ⇒ 单变量）────────────────────────────
+  // 空串 = 不用 dodge 参考策略（本项目的 dodge 通道未启用）。
+  "dodge": "",
+  // 起点权重 = g5-safe2.it185（用户 2026-11-15 指定）。它是 3 命策略，2 命下 OOD（win 60.9%）；
+  // 因此只做短 warm start，不长期锚定 3 命行为。
+  "bc": "nn-training/weights/g5-safe2/g5-safe2.it185.20261115-155401.json",
+  // bc 是「学到手的策略」⇒ 开 kickstart 参考 KL 缰绳（随机初始化的 bc 必须关）。
+  "kickstart_ref": true,
+  // 缰绳初值 0.1，与 kl_coef 并列相加；系数 = 0.1 × 0.5^(it−1) ⇒ 实质只锁 it1–7。
+  // bc 是 3 命策略，2 命任务只做短 warm start，不长期锚定。
+  "kickstart_init": 0.1,
+  // 每 iter 减半（0.9 会锁 20+ iter）。
+  "kickstart_decay": 0.5,
+  // 0 = 不做 warmup（非 0 会直接启动失败）。
+  "warmup_iters": 0,
+  // value 头牵引率 0.001：把 V 拉向 Φ 的持有值，防 value 漂走。
+  "value_anchor": 0.001,
+
+  // ── 预算与优化器（与 g5-aim2 逐字相同）──────────────────────────────────
+  // 500 iter 上限；主判窗口 = it400–500 的五点窗。
+  "iters": 500,
+  // 24 小时墙钟上限。
+  "max_hours": 24.0,
+  // lr 1.2e-4（g5 是 8e-5）：g5 两腿 KL 只有 0.0006，必须提有效步长。
+  "lr": 0.00012,
+  // 每轮 4 个 epoch。
+  "epochs": 4,
+  // minibatch 1024；24576 / 1024 = 24 整块（必须整倍数，否则 XLA 每 epoch 重编译）。
+  "mb": 1024,
+  // 回报标准化：稳定 value 回归。
+  "normalize_ret": true,
+  // 折扣 0.998（≈500 拍半衰期）；一局 7000+ 拍，长程信用靠它。
+  "gamma": 0.998,
+  // GAE λ 0.95。
+  "lam": 0.95,
+  // PPO 调度：kl_coef 0.05→0.02；kl_cap 每段显式写（缺席会回落 rl-config 的 0.18）。
+  "ppo_schedule": [
+    {
+      "kl_coef": 0.02,
+      "lr": 0.00012,
+      "kl_cap": 0.1,
+    },
+  ],
+
+  // ── 采样量（与 g5-aim2 逐字相同）────────────────────────────────────────
+  // 24576 = 24 × mb，必须整倍数。
+  "target_transitions": 24576,
+  // 语料轮换种子；与 g5 系同值，但任务/奖励不同 ⇒ 不与 g5-safe2 逐局配对。
+  "paired_rotate_seed": 20261115,
+
+  // ── 决策门（与 g5-aim2 逐字相同）────────────────────────────────────────
+  // false = 均匀 K 拍出一次动作。
+  "decision_events": false,
+  // K=10：每 10 拍一个决策步。
+  "decision_k": 10,
+
+  // ── 开局接管（本课程的关键口径：改它 = 换实验）──────────────────────────
+  // true = 对 strict 不连通的 13 关套 OpeningController：开局打通 P1↔P2 后 handoff 给 NN。
+  // eval 与 rollout 同口径（用户 2026-11-15 定规）。
+  // ⚠ 关掉它 = 换一个面板 ⇒ 与 g5 系历史读数不可比。
+  "opening_connect": true,
+
+  // ── 产物路径（2 命 = 新任务/新奖励 ⇒ 新目录，禁与 g5-safe2 续跑）──────────
+  // 训练中每 iter 覆盖写入的实时权重。
+  "out": "tmp/g5-lives/weights.json",
+  // 轨迹/台账目录。
+  "traj": "tmp/g5-lives",
+  // 每 iter 的权重快照目录。
+  "backup_dir": "nn-training/weights/g5-lives",
+  // 快照文件名前缀：<prefix>.it<N>.<时间戳>.json。
+  "backup_prefix": "g5-lives",
+
+  // ── 过程熔断（与 g5-aim2 逐字相同）──────────────────────────────────────
+  // true = 关掉 KL/NaN 熔断，只留熵熔断。
+  "breakers_off": true,
+  // entropy 连续 8 iter < 0.25 ⇒ 停（0.25 是「探索崩了」）。
+  "ent_break": 0.25,
+  // 连续 8 个 iter 都低于阈值才熔断（单次抖动不触发）。
+  "ent_break_consec": 8,
+  // 只在胜率 0 时允许熵熔断。
+  "ent_break_max_winrate": 0.0,
+
+  // ── 评估网格（35×20；与 g5-safe2 同 seed，但任务不同 ⇒ 只与本课 bc 2 命基线比）───
+  // 35 关全量（2000–2034）。
+  "eval_stages": "2000-2034",
+  // 每关 20 seed ⇒ 每点 700 局；五点窗 = 25 iter = 3500 局。
+  "eval_games_per_stage": 20,
+  // 每 5 iter 一个 eval 点。
+  "eval_every": 5,
+}
+
+// ── 结课报告（2026-11-18；235/500 iter，云端 worker 会话结束，非门限非熔断）────────────
+// ① 实况：235 iter（台账 236 行，it146 因重启重记一次）· 50.75M 训练步 / 119.0M 采集拍 · 8.0h；
+//    走 TPU 档 215040/it、35 关全轮（GPU 档 49152/7 关未用）；KL mean .0029 / max .0038 ·
+//    entropy min .472 / last .474 · KL→bc 参考 .0038→.037（末点仍近母本）⇒ 过程健康，无熔断。
+//    收益早已饱和：it50–235 均值 62.48（σ 1.87）vs it0 61.43 ⇒ +1.05pp；后 185 轮（40M 步）
+//    边际 <1pp ⇒ 按 25 万样本饱和的既有结论，本腿跑了 ~4.8 倍的过量算力（50.75M vs ~10.8M）。
+// ② 主判（2 命，35×20 = 700 局/点）：win **62.97**（门 ≥70）· easy **74.00**（≥85）·
+//    hard **52.44**（≥55）· gameover **33.51**（≤25）⇒ **DoD 5/11，3 条主判全 FAIL**；
+//    best it230 = 67.14 / 77.69 / 57.22 / 29.71 ⇒ 6/11。配对 last5−it0 **+0.29pp（p=.906）**；
+//    it230 单点 +5.71pp（p=.023）与 hard +11.11（p=.029）都是 48 点里的挑高点，不得作先验引用。
+// ③ 机制（it0 → it230，八项躲弹税**每一项**都朝设计方向）：nearSq **−30%**（2614→1827）·
+//    围夹 12.50→9.53% · hurt 144.8→133.5 · threat 6.74→5.99% · bursts 1.00→0.89 ·
+//    postHit .74→.57% · 承伤 398.5→373.1 · 命打光 29.29→22.57%。代价：clearTick(胜) 7533→8074
+//    （+541）· missRate 36.2→37.2% · cells 141.3→136.7 ⇒ **省血是拿效率换的**。
+// ④ 为什么机制量不换胜率（两处结构，都不在奖励射程内）：
+//    ㈠ 2 死即输 ⇒ win ≤ P(死亡≤1) = 68.00%，it230 实测 67.14 **贴顶（差 0.9pp）**；
+//       奖励已把每命价提到 1.5×，死亡/局只从 1.27 降到 1.18 ⇒ 再磨奖励不涨胜率。
+//    ㈡ 基地被拆 **7.14%**（3 命 8.14 / bc 8.43）与命数无关；**不掉一命却输的局占 27.6%（34/123）**
+//       ⇒ `gameover ≤25` 在 2 命下**构造上不可达**（把命打光率压到 0 也 ≥7%）。
+//    ㈢ 旁路：d≥2 的 224 局仍 **27.2% 通关**，与 `puSpawnTank`（加命坦克生成）强相关（1.34 vs 0.22）
+//       ⇒ 2 命不是严格 2 死即死，上面的天花板只作近似。
+// ⑤ 跨任务交叉检验（同权重 it230 回 3 命，同 700 局；`tmp/g5-lives/eval-it230-3life.jsonl`）：
+//    **83.00% vs 母本 g5-safe2.it185 81.86%（+1.14pp, p=.559）**；gameover 13.00 vs 16.43
+//    （**命打光 4.86 vs 8.00**，基地 8.14 vs 8.43）；承伤 **−36.68（p=.001）**、死亡 **−0.15（p=.001）**、
+//    出手 **+10.66（p=.002）**；代价 missRate **+9.18pp** · 卡死 **+357** · nearSq **+1048**。
+//    ⇒ **2 命训练不毁 3 命能力（下行风险 = 0）**；×1.5 生存价唯一的硬产物 = **命打光率 −39%**；
+//      「更耐打」与「更会打」在这套奖励下互斥（出手涨而命中不涨），净额打平。
+// ⑥ 判词与后继：**2 命任务判负，不重开**。杠杆不在奖励侧（八项税已买到头），在基毁定价与死亡结构。
+//    · 3 命路线直接以 `g5-lives.it230` 替 `g5-safe2.it185` 当起点：免费 +1.14pp、承伤 −36.7（显著）、不 OOD。
+//    · 要再动 2 命必须先修 `base_destroyed`（−35 ⇒ ≈−90，同 11-18 总账结论），否则 7.14% 固定税
+//      吃掉三分之一增益。
+//    · `gameover` 门须拆 lives_exhausted / base_destroyed（eval 的 `outcome` 现在混成一个，
+//      只能靠 `baseAlive==0` 事后拆；训练日志里两者本来就是分开的）。
+// ⑦ 口径边界（引用前必读）：面板 = A 层 200 seed 池的**前 20 个连续 seed**（2000000001..020），
+//    按铁律不作判决级读数，**满池复核未做**（200×35 = 7000 局，本机 ≈58min @2.0 games/s）；
+//    所有 pp 只在同面板内可比；bc 两处读数 60.86（独立 2 命 eval）vs 61.43（trainer it0）差 4 局，
+//    配对比较不受影响；单训练 seed，无重复臂。
+// 产物：`nn-training/weights/g5-lives/`（it1–235，**交付点 it230**）· `tmp/g5-lives/eval_log.jsonl`
+//   （48 点 × 700）· `tmp/g5-lives/eval-it230-3life.jsonl`（3 命对照）· 读数脚本
+//   `tmp/g5lives-closing-report.py` → `tmp/g5-lives/closing-analysis.txt` ·
+//   全文 `reports/g5-lives-closing-20261118.md` · 台账 `docs/nn/experiments.md §142`。
+// ⚠ 本结课报告改了课程文件字节 ⇒ `course_fp`（sha256 文件字节）由 `8e400986…` 变为新值。
+//   本课已停、无 resume 需求；但**重开同名课会按新 fp 去重，旧 shard 不再复用**（D14 血缘，属预期）。
