@@ -33,7 +33,6 @@ import os
 import platform
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -61,9 +60,17 @@ from remote.push_register import register as register
 from remote.push_register import should_register as should_register
 from remote.push_register import unregister as unregister
 from remote.push_tunnel import tunnel_url_of as _tunnel_url
+from remote.rollout_relay import RelayChannel
+from remote.rollout_tunnel import CLOUDFLARED_PROBE_TIMEOUT as CLOUDFLARED_PROBE_TIMEOUT
 from remote.rollout_tunnel import PROBE_SEC as TUNNEL_PROBE_SEC
 from remote.rollout_tunnel import dead_reason as _dead_reason
+
+# 预检/姿态工具住 `remote/rollout_tunnel.py`（2026-11-18 下沉：它们与「隧道健康」同一个所有者，
+# 也把本模块压回 1000 行以内）。`X as X` = 显式 re-export —— `tests/remote/test_rollout_node.py`
+# 的 `rn._net_probe(...)` / `rn._direct_env()` 用法逐字不变（两个探针本身只在新模块内部互调）。
+from remote.rollout_tunnel import direct_env as _direct_env
 from remote.rollout_tunnel import dump_tail as _dump_tail
+from remote.rollout_tunnel import net_probe as _net_probe
 from remote.rollout_tunnel import public_ping as _public_ping
 from remote.rollout_tunnel import reset_log as _reset_cf_log
 from remote.rollout_tunnel import retry_due as _tunnel_retry_due
@@ -73,6 +80,10 @@ from remote.rollout_tunnel import wait_url as _wait_tunnel_url
 #: 通道名（与 hub/nodes 注册载荷里的 url 形态对应）。
 LINK_TAILSCALE = "tailscale"
 LINK_CLOUDFLARED = "cloudflared"
+#: 反向会合（2026-11-18）：节点长轮询 hub，**不需要任何入站端口**。用于「建不出 quick
+#: tunnel」的机器（ModelScope/阿里云 buys 7844 与 api.trycloudflare.com 一起封掉的那种；
+#: 真机现场见 `remote/rollout_relay.py` 头部）。`auto` 下它是 cloudflared 失败后的回落档。
+LINK_RELAY = "relay"
 
 #: 退避上限（net/server 类失败）。
 RETRY_MAX_SEC = 300.0
@@ -82,7 +93,6 @@ RETRY_FIRST_SEC = 30.0
 #: 第 3 次回到首选姿势并开 debug，把「死因」打出来。
 CLOUDFLARED_ATTEMPTS = 3
 CLOUDFLARED_RETRY_SEC = 5.0
-CLOUDFLARED_PROBE_TIMEOUT = 3.0
 #: 首拍失败后的「补拿」节拍与监护循环里的等待上限（不能每拍阻塞 90s）。
 TUNNEL_RETRY_SEC = 60.0
 TUNNEL_RETRY_WAIT_SEC = 30.0
@@ -124,9 +134,13 @@ RegisterFn = Callable[..., Any]
 # ---------------------------------------------------------------- 纯函数（可单测）
 
 def resolve_link(env: str, cfg_link: str, has_ts_authkey: bool) -> str:
-    """通道决策：`cfg_link` 可强压；否则 Colab 优先 tailscale、其余看有没有 TS_AUTHKEY。"""
+    """通道决策：`cfg_link` 可强压；否则 Colab 优先 tailscale、其余看有没有 TS_AUTHKEY。
+
+    `relay` 也可强压（`CFG.link = "relay"`）；留 `auto` 时它是**运行期回落档**（cloudflared
+    建不起来才启用）——所以这里不预选它：预选会把「隧道能用的机器」也降级成 polling。
+    """
     forced = str(cfg_link or "").strip().lower()
-    if forced in (LINK_TAILSCALE, LINK_CLOUDFLARED):
+    if forced in (LINK_TAILSCALE, LINK_CLOUDFLARED, LINK_RELAY):
         return forced
     if str(env or "").strip().lower() == "colab":
         return LINK_TAILSCALE
@@ -167,81 +181,6 @@ def _sh(
 def _public_net() -> Any:
     """公网下载上下文：还原 ensure 之前的代理环境（没有注入时是空操作）。"""
     return tailscale_boot.platform_net_env()
-
-
-def _direct_env() -> dict[str, str]:
-    """给 cloudflared 子进程的「直连」环境：摘掉代理键，但保留 NO_PROXY 的本地回环。
-
-    为什么不能用 `platform_net_env()`：它只在 tailscale `set_proxy_env()` 跑过之后才有
-    还原对象；cf-only 路径（没有 TS_AUTHKEY）里它是空操作，平台代理仍在。
-    为什么不能连 `NO_PROXY` 一起清：cloudflared 还要访问 `http://localhost:<port>`，
-    没有 bypass 条目时它可能被塞进代理。
-    """
-    env = dict(os.environ)
-    for key in tailscale_boot.PROXY_ENV_KEYS:
-        if key.lower() != "no_proxy":
-            env.pop(key, None)
-    bypass = env.get("NO_PROXY") or env.get("no_proxy") or ""
-    parts = [p for p in ("localhost", "127.0.0.1", "::1", bypass) if p]
-    env["NO_PROXY"] = ",".join(dict.fromkeys(parts))
-    env["no_proxy"] = env["NO_PROXY"]
-    return env
-
-
-def _probe_https(
-    posture: str,
-    host: str = "api.trycloudflare.com",
-    timeout: float = CLOUDFLARED_PROBE_TIMEOUT,
-) -> bool:
-    """代理感知的 HTTPS 可达性：`direct` 显式不挂代理，`inherit` 用进程当前代理。
-
-    为什么不用 `socket.create_connection`：原始 socket 不读 `HTTP(S)_PROXY`，
-    `inherit` 与 `direct` 的结果必然相同（plan/rollout-tunnel-url-retry B3）。
-    """
-    handlers = [urllib.request.ProxyHandler({})] if posture == "direct" else []
-    opener = urllib.request.build_opener(*handlers)
-    req = urllib.request.Request(f"https://{host}/", method="HEAD")
-    try:
-        with opener.open(req, timeout=timeout):
-            return True
-    except urllib.error.HTTPError:
-        return True  # 404/405 也说明 DNS/TLS/代理链通了
-    except Exception:
-        return False
-
-
-def _probe_tcp(
-    host: str, port: int, timeout: float = CLOUDFLARED_PROBE_TIMEOUT
-) -> bool:
-    """原始 TCP 可达性（不看代理；只作边缘 7844 的诊断，不参与姿势选择）。"""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _net_probe(log: Callable[[str], None]) -> tuple[str, str]:
-    """一次预检：用代理感知的 HTTPS 选首选姿势，原始 TCP 只诊断边缘 7844。"""
-    inherit = _probe_https("inherit")
-    direct = _probe_https("direct")
-    edge = _probe_tcp("region1.v2.argotunnel.com", 7844)
-    log(
-        "预检: api.trycloudflare.com:443 "
-        f"inherit={'ok' if inherit else 'fail'} direct={'ok' if direct else 'fail'} "
-        f"｜ 边缘7844 tcp={'ok' if edge else 'fail'}"
-    )
-    if inherit:
-        log("⇒ 采用 inherit 姿势")
-        return "inherit", "direct"
-    if direct:
-        log("⇒ inherit 不通、direct 可达 ⇒ 先试 direct 姿势")
-        return "direct", "inherit"
-    log(
-        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；"
-        "仍按 inherit 尝试"
-    )
-    return "inherit", "direct"
 
 
 def _terminate(p: Any) -> None:
@@ -1047,6 +986,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     # ── 3. 通道：tailscale 优先；失败回落 cloudflared ─────────────────────
     agent = None
     cfp = None
+    relay: RelayChannel | None = None
     cf_log = Path("/tmp/rollout-cloudflared.log")
     url = ""
     forced_cf = str(cfg.get("link") or "").strip().lower() == LINK_CLOUDFLARED
@@ -1077,22 +1017,51 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             link = LINK_CLOUDFLARED
         return started
 
+    def _open_relay(reason: str) -> bool:
+        """起「节点长轮询 hub」通道（无需入站/隧道）。返回是否就绪。
+
+        `local_port` 由 hub 的长轮询应答告知（节点只知道 hub 的**公网**地址，而 trainer
+        要打的是**本机回环**）。拿不到 ⇒ 本档放弃、URL 留空 —— 不拿错端口硬填。
+        细节（起线程/等端口/失败清理）全在 `RelayChannel`，这里只管 link/url 两个变量。
+        """
+        nonlocal link, url, relay
+        if not hub_configured:
+            log(f"relay 通道候选（{reason}）—— hub 未配置（缺 HUB_IP/hub_url 或 HUB_TOKEN），跳过")
+            return False
+        if relay is None:
+            relay = RelayChannel(
+                hub_url=hub_url, token=hub_token, node_id=node_id, agent_port=port, log=log
+            )
+        url = relay.supervise(reason)
+        if not url:
+            return False
+        link = LINK_RELAY
+        return True
+
+    if link == LINK_RELAY:
+        _open_relay("通道决策=relay")
     if link == LINK_TAILSCALE:
         url, ok = _open_tailscale(cfg, ts_authkey, port, log)
         if not ok:
             log("—— 回落 cloudflared")
             link = LINK_CLOUDFLARED
-    if link != LINK_TAILSCALE:
+    if link != LINK_TAILSCALE and link != LINK_RELAY:
         _open_cloudflared("通道决策=cloudflared")
-    if not url and not forced_cf and has_ts:
+    if not url and not forced_cf and link != LINK_RELAY and has_ts:
         log("cloudflared 未就绪 —— 回落 tailscale")
         url, ok = _open_tailscale(cfg, ts_authkey, port, log)
         if ok:
             link = LINK_TAILSCALE
     elif not url and forced_cf:
-        log("强制通道=cloudflared，跳过 tailscale 回落")
-    elif not url and not has_ts:
+        log("强制通道=cloudflared，跳过 tailscale/relay 回落")
+    elif not url and link != LINK_RELAY and not has_ts:
         log("无 ts_authkey ⇒ 本会话无法回落 tailscale")
+    # ── relay 回落（`auto` 的最后一档，2026-11-18）────────────────────────
+    # 真机（ModelScope）：`api.trycloudflare.com:443` 与边缘 7844 都不通 ⇒ cloudflared 16s 后
+    # rc=1，三次阶梯全败。这时**唯一**还能工作的就是「节点主动会合」：只要它连得上 hub 的
+    # 公网地址，就能被派活。显式 `CFG.link=cloudflared` 不回落（明确的意图不该被改写）。
+    if not url and not forced_cf and link != LINK_RELAY:
+        _open_relay("隧道不可用（本机建不出 quick tunnel）")
     next_tunnel_try = time.time() + TUNNEL_RETRY_SEC if not url else 0.0
 
     # ── 4. sampler-agent ─────────────────────────────────────────────────
@@ -1124,7 +1093,11 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             auth=auth,
             node_id=node_id,
             workers=workers,
-            label=worker_name(env, "t" if link == LINK_TAILSCALE else "c"),
+            label=(
+                worker_name(env, "t")
+                if link == LINK_TAILSCALE
+                else (worker_name(env, "r") if link == LINK_RELAY else worker_name(env, "c"))
+            ),
             hub_url=hub_url,
             hub_token=hub_token,
             log=log,
@@ -1243,6 +1216,14 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             agent_ok = agent.poll() is None
             if not agent_ok:
                 tunnel_probe_fails = 0  # 本机不健康时连败数不作数（问题不在隧道）
+            # relay 通道的死亡证据 = 轮询线程全停（没有进程/域名可看）。归一成「无 URL」后
+            # 重建 + 重注册：重建后回环端口可能变 ⇒ 必须清 reg_state 强注册（新地址≠旧地址）。
+            if link == LINK_RELAY and now >= next_tunnel_try and (relay is None or not relay.alive()):
+                log("★ relay 轮询线程已停 —— 重建通道并重注册")
+                url = relay.supervise("relay 线程死亡") if relay is not None else ""
+                reg_state["url"] = ""
+                next_retry = 0.0 if url else next_retry
+                next_tunnel_try = now + TUNNEL_RETRY_SEC
             if (
                 link == LINK_CLOUDFLARED
                 and agent_ok
@@ -1275,7 +1256,7 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                 reg_state["url"] = ""
                 tunnel_probe_fails = 0
                 next_tunnel_try = now
-            if _tunnel_retry_due(url, now, next_tunnel_try):
+            if link == LINK_CLOUDFLARED and _tunnel_retry_due(url, now, next_tunnel_try):
                 log("隧道补拿：尝试重新建 cloudflared…")
                 url, cfp, started = _open_cloudflared_once(
                     current_url=url,
@@ -1320,6 +1301,8 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
             # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。
             if time.time() >= next_output_at:
                 emit_output_summary(port, auth, log)
+                if relay is not None:
+                    log(relay.stats_line())
                 next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
             time.sleep(10)
     except KeyboardInterrupt:
@@ -1328,6 +1311,8 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
         if hub_configured and reg_state["url"]:
             out = unregister(urllib.request.urlopen, hub_url, hub_token, node_id, log)
             log(f"unregister id={node_id}: {'ok' if out['ok'] else out['error']}")
+        if relay is not None:
+            relay.stop()
         _terminate(agent)
         _terminate(cfp)
     log("采样节点结束")

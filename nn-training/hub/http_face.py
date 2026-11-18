@@ -64,6 +64,7 @@ token 永不落日志。
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import time
@@ -115,6 +116,11 @@ from hub.offline import OfflineRoutes
 # 类属性 `hub: _HubQueue` 要能模块级解析（`from __future__ import annotations` 只推迟求值，
 # mypy 仍要那个名字在）⇒ 组合类随本模块一起 import。`hub.queue` 是 L4，本模块据它算 L5。
 from hub.queue import _HubQueue
+from hub.relay import POLL_WAIT_DEFAULT as RELAY_POLL_WAIT
+from hub.relay import POLL_WAIT_MAX as RELAY_POLL_WAIT_MAX
+from hub.relay import RELAY as NODE_RELAY
+from hub.relay import RelayTimeoutError
+from hub.relay import content_type_of as _relay_ctype
 from hub.result import ResultRoutes
 from hub.schedule import ScheduleRoutes
 
@@ -567,7 +573,9 @@ class HubHandler(
             # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
             self._note_offline_disk()
         try:
-            if path == "/ping" or path == "/":
+            if path.startswith("/relay/"):
+                self._relay_route(method="GET")
+            elif path == "/ping" or path == "/":
                 if not self._auth_ok():
                     return
                 # 能力位（2026-11-16，plan/replay-corpus.plan.md D2/B7）：hub 自己声明支持
@@ -648,7 +656,9 @@ class HubHandler(
             # 同上：租约/补传也在这条前缀下（POST 面）。
             self._note_offline_disk()
         try:
-            if path.startswith("/jobs/") and path.endswith("/heartbeat"):
+            if path.startswith("/relay/"):
+                self._relay_route(method="POST")
+            elif path.startswith("/jobs/") and path.endswith("/heartbeat"):
                 self._post_heartbeat()
             elif path == "/jobs/priority":
                 self._post_priority()
@@ -804,6 +814,96 @@ class HubHandler(
         except Exception as e:
             self._json({"error": f"read body failed: {e}"}, 400)
             return None
+
+    # ───────────── relay：只能出网（无入站隧道）的节点的反向会合面 ─────────────
+    # 协议与「为什么需要」见 `hub/relay.py` 头部；这里只做 HTTP 形状：
+    #   * `_poll` / `_reply` 是**节点侧**（Bearer = HUB_TOKEN，与其余端点同一把锁）；
+    #   * 其余路径是**调用方侧**（trainer / eval / dashboard，全部与 hub 同机）⇒ 只接受
+    #     本机回环，且**绝不放行经隧道的流量**：cloudflared 回源的对端也是 127.0.0.1，靠
+    #     `attributed_source` 的 `via == "peer"` 区分；否则公网上任何人知道 node id 就能
+    #     借 hub 打本机。
+    #: 调用方等待上限**按路径**取（与调用方自己的 urllib 预算同量级；比它短会让健康的慢请求
+    #: 变成 504，比它长则节点掉线时白占一个 handler 线程）。
+    _RELAY_TIMEOUTS: tuple[tuple[str, float], ...] = (
+        ("/v1/result", 45.0),
+        ("/v1/task", 45.0),
+        ("/v1/weights", 150.0),
+    )
+
+    def _relay_route(self, *, method: str) -> None:
+        raw_path = self.path
+        path = raw_path.split("?", 1)[0]
+        node, _, tail = path[len("/relay/") :].partition("/")
+        if not node or not tail:
+            self._json({"error": "not found"}, 404)
+            return
+        if tail == "_poll":
+            if not self._auth_ok():
+                return
+            wait = self._query_float("wait", RELAY_POLL_WAIT)
+            req = NODE_RELAY.poll(node, min(max(wait, 0.0), RELAY_POLL_WAIT_MAX))
+            # `local_port` 是「注册 URL 该填哪个端口」的唯一来源：节点只知道 hub 的**公网**
+            # 地址，而 trainer 要打的是**本机回环**（两者端口可以不同）。
+            port = int(getattr(self.server, "server_address", ("", 0))[1])
+            self._json({"req": req, "local_port": port}, 200)
+            return
+        if tail.startswith("_reply/"):
+            if not self._auth_ok():
+                return
+            rid = tail[len("_reply/") :]
+            raw = self._read_raw_body()
+            if raw is None:
+                return
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError as e:
+                self._json({"error": f"bad json: {e}"}, 400)
+                return
+            if not isinstance(body, dict):
+                self._json({"error": "体必须是对象"}, 400)
+                return
+            try:
+                payload = base64.b64decode(str(body.get("body_b64") or ""), validate=True)
+            except (ValueError, TypeError):
+                self._json({"error": "body_b64 非法"}, 400)
+                return
+            ok = NODE_RELAY.reply(
+                node, rid, int(body.get("status") or 0), dict(body.get("headers") or {}), payload
+            )
+            self._json({"ok": ok}, 200)
+            return
+        # —— 调用方侧（本机回环）——
+        peer = self.client_address[0]
+        _ip, via = attributed_source(
+            peer, self.headers.get(CF_SOURCE_HEADER, "") if self.headers else ""
+        )
+        if via != "peer" or not _is_loopback(peer):
+            self._json({"error": "relay 调用面只接受本机回环（trainer 与 hub 同机）"}, 403)
+            return
+        raw = b""
+        if method != "GET":
+            raw = self._read_raw_body()
+            if raw is None:
+                return
+        target = "/" + tail + (("?" + raw_path.split("?", 1)[1]) if "?" in raw_path else "")
+        timeout = next((t for pfx, t in self._RELAY_TIMEOUTS if target.startswith(pfx)), 15.0)
+        try:
+            status, rhdrs, body = NODE_RELAY.call(
+                node, method, target, dict(self.headers.items()), raw, timeout=timeout
+            )
+        except RelayTimeoutError as e:
+            self._json({"error": f"relay timeout: {e}"}, 504)
+            return
+        self._send_headers(len(body), status=status or 502, ctype=_relay_ctype(rhdrs))
+        if body:
+            self.wfile.write(body)
+
+    def _query_float(self, key: str, default: float) -> float:
+        """查询参数取浮点；缺失/非法 ⇒ 缺省（`_poll` 的 wait 是唯一读者）。"""
+        try:
+            return float(self._query_str(key) or default)
+        except ValueError:
+            return default
 
     def _worker_id(self) -> str:
         return self.headers.get(WORKER_ID_HEADER, "")

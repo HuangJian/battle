@@ -6103,3 +6103,18 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **决定**：开两条干预腿（各 **25 万样本 ≈ 10 轮**，不跑满 491k）：**T1 砍税**（删/缩那五项，至少 `wThreat`+`wEncl`）与 **T2 修终局**（`base_destroyed` −35 → **−90**）。**不**重排奖励、**不**加新税、**不**动 `wKill`。
 - **被否决**：① 重排奖励（AUC 0.985 已足够）；② 继续加税（两次历史实测无效）；③ 动 `wKill`（判别力主力，风险最高）；④ 只凭本报告下结论（相关性 ≠ 因果，T1/T2 才是干预）。
 - **局限**：全部是终点策略分布；某项「无判别力」也可能是它**已经完成任务**（`wIdle`/`wWall` 大概率属这类）——那删它没有收益也没有坏处。T2 有「变龟缩」风险，用 25 万样本先看 78% 有没有动。
+
+## §2026-11-18-goalnn-rollout-relay-rendezvous（采样节点「只出网」接入：hub 会合 relay，cloudflared 失败自动回落）
+
+- **背景（ModelScope / 阿里云 8C32G 真机 2026-11-18）**：`rollout.ipynb` 在这台机器上**建不出任何 quick tunnel** —— `预检: api.trycloudflare.com:443 inherit=fail direct=fail ｜ 边缘7844 tcp=fail`，cloudflared 停在 `Requesting new quick Tunnel on trycloudflare.com...` 16s 后 `rc=1`，三次阶梯（http2/direct/auto）一模一样；而同一台机器 `github.com:443` 119ms / `registry.npmmirror.com:443` 20ms 通，**hub 自己的 `*.trycloudflare.com` 也通**（443 tcp ok 417ms、未带令牌时回 401）。⇒ 缺的是「hub→节点入站」这半条，不是没网，也不是脚本姿势：7844 是 Cloudflare 写死的唯一边缘端口，cloudflared 的边缘拨号**不读** `HTTP(S)_PROXY`（PR #1514 仍未合入），换协议/换 edge IP/填 `CFG.net_proxy` 都到不了。
+- **决定**：新增 `link=relay` —— 节点**出站长轮询** hub，hub 把它「本该发给节点 URL 的请求」放进队列，节点在本机 `127.0.0.1:<agent_port>` 执行后交回执。`auto` 下它是 **cloudflared/tailscale 都建不起来时的最后一档**（`CFG.link=cloudflared` 显式强压时不回落）。
+  - 节点按 **hub 告知的本机端口**注册 `http://127.0.0.1:<hub 端口>/relay/<node>`（`_poll` 应答带 `local_port`；trainer 与 hub 同机）⇒ `common.distribution` / trainer / eval / dashboard 的调用面**零改动**。
+  - 鉴权：节点侧 `_poll`/`_reply` 用 `HUB_TOKEN`（与其余端点同一把锁）；调用侧**只接受本机回环且 `via=="peer"`**（cloudflared 回源对端也是 127.0.0.1，靠归因头区分）—— 否则任何人知道 node id 就能借 hub 打本机。
+  - 一切等待有界：调用方 timeout（按路径 15/45/150s）· `_poll` wait ≤60s · 待办上限 32（满了丢最老）· 回执 TTL 180s；**迟到回执按 rid 丢弃**（rid 已不在 `calls` 里 ⇒ `reply` 返回 False），绝不让上一条的答案串给下一条。
+- **通道所有者 = `remote/rollout_relay.py::RelayChannel`**（起/等端口/失败清理/监护重建）；`rollout_node` 只持有它并维护 `link`/`url` 两个变量 —— 通道状态（线程/端口/URL）一旦有两份写者，「重建后忘清注册 URL」就是下一个事故。监护判据 = 轮询线程全停 ⇒ `supervise()` 重建 + 清 `reg_state["url"]` 强制重注册（回环端口可能变）。
+- **顺带的归属调整**：`remote/rollout_node.py` 已顶在 1000 行 LOC 预算（门禁红），把「预检/姿态」四项（`direct_env`/`probe_https`/`probe_tcp`/`net_probe`）下沉到 `remote/rollout_tunnel.py`，`rollout_node` 保留同名 re-export（`X as X`），测试里的 `rn._net_probe` / `rn._direct_env` 用法不变。
+- **证据**：`tests/hub/test_relay.py`（往返含请求体逐字节 / 空拍 / 超时后迟到回执丢弃 / 路由只收回环与 CF 归因 403）· `tests/remote/test_rollout_relay.py` 6 例（hub→agent→hub 全链路 / `local_port` 与注册 URL / agent 4xx 原样回执 vs 端口不通 502 / `RelayChannel` 起通道 / 老 hub 不回 `local_port` 时放弃且不留半开通道 / 线程全停后 `supervise` 重建）· `tests/remote/test_rollout_node.py`（`resolve_link` 强压表 +2）· 分层账本登记 `hub/relay`/`remote/rollout_relay` 均 L0；`nn-python-gate.sh` 全绿（ruff + mypy 941 文件 + pytest 6191 passed）。
+- **被否决**：① named tunnel / 域名（用户排除，且仍要走 7844）· ② 第三方免费隧道（把 1/3 算力押在一个免费服务 + 它的域名可达性上，且新增运行时依赖）· ③ 在 hub 上开 CONNECT 代理给 cloudflared 用（家宽上行与公网暴露面都更差，且**建隧道那一步 443 仍不通**）· ④ 把 rollout/eval 派发改成原生 pull（要动「谁发起」语义与 agent 的任务参数面，是主链路手术；relay 复用的是同一条线上契约）。
+- **代价/边界**：每请求多一跳节点↔hub RTT（国内 200–400ms），对 3s ping 门与 20s `/v1/result` 轮询够用；带宽不增加（权重本来就经 hub 家宽出、节点回包）。`nodes[].url` 在控制台显示为 `http://127.0.0.1:<port>/relay/<id>`，语义是「只在这台 hub 上有效」。
+- **未验证（记账，不假装有）**：真机复测未做（需 ModelScope 重跑 + hub 重启到带 `/relay/` 的版本）；relay 通道下 `emit_output_summary` 的 `/v1/status` 读数与「relay 线程死亡重建」在真机上的恢复时间未测。
+- **全文** → `docs/nn/remote-transport.md` §158；代码 → `hub/relay.py` · `hub/http_face.py::_relay_route` · `remote/rollout_relay.py`（`RelayLink` + `RelayChannel`）· `remote/rollout_node.py` · `remote/rollout_tunnel.py`（预检下沉）。

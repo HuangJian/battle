@@ -144,6 +144,9 @@ LAYERS: dict[str, int] = {
     # 面(L2) + 注册(L0) + 隧道(L0) ⇒ **L3**；训练子进程入口 `offline_push_task` 站在
     # `offline_boot`(L8) 上 ⇒ **L9**（与「入口模块只做接线」的先例一致）。
     "remote.push_tunnel": 0,
+    # 反向会合通道（2026-11-18）：只用 stdlib + `common.net_http`，不 import 任何 remote/hub
+    # 模块 ⇒ 叶子。读者是 `remote.rollout_node`（supervisor）。
+    "remote.rollout_relay": 0,
     "remote.offline_push_face": 2,
     "remote.offline_push": 3,
     "remote.offline_push_task": 9,
@@ -162,6 +165,9 @@ LAYERS: dict[str, int] = {
     # 的后台线程——两条边都严格向上，秩不变。
     "hub.worker_pulse": 0,
     "hub.blob": 0,
+    # 反向会合面的**引擎**（2026-11-18）：纯 stdlib、零 hub/remote import ⇒ 叶子。HTTP 形状在
+    # `hub.http_face._relay_route`（它 import 本模块，方向向下）。
+    "hub.relay": 0,
     "hub.schedule": 0,
     # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
     # 另需 `remote.artifacts`（L0）⇒ 高一档住 L1。它们彼此**零 import**（跨域调用经 `self`）。

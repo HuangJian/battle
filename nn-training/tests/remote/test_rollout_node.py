@@ -36,6 +36,8 @@ from remote import tailscale_boot
         ("aistudio", "", False, "cloudflared"),
         ("local", "AUTO", False, "cloudflared"),
         ("kaggle", "tailscale", False, "tailscale"),  # 强压（引导失败后由 run 回落）
+        ("local", "relay", False, "relay"),  # 强压：节点长轮询 hub（无入站）
+        ("modelscope", "RELAY", True, "relay"),  # 大小写不敏感；有 TS key 也照强压
     ],
 )
 def test_resolve_link_table(env: str, cfg_link: str, has_key: bool, want: str) -> None:
@@ -1220,8 +1222,10 @@ def test_dead_reason_extracted_from_log(tmp_path: Path) -> None:
 def test_net_probe_uses_proxy_aware_https(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(rn, "_probe_https", lambda posture, **_k: posture == "inherit")
-    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: True)
+    # 预检已下沉到 `remote/rollout_tunnel.py`（rollout_node 只 re-export）⇒ 插件目标在新所有者上，
+    # 迁到之的都是两条真相。
+    monkeypatch.setattr("remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "inherit")
+    monkeypatch.setattr("remote.rollout_tunnel.probe_tcp", lambda *_a, **_k: True)
     logs: list[str] = []
     postures = rn._net_probe(logs.append)
     assert postures == ("inherit", "direct")
@@ -1234,8 +1238,8 @@ def test_net_probe_uses_proxy_aware_https(
 def test_net_probe_falls_back_to_direct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(rn, "_probe_https", lambda posture, **_k: posture == "direct")
-    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: True)
+    monkeypatch.setattr("remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "direct")
+    monkeypatch.setattr("remote.rollout_tunnel.probe_tcp", lambda *_a, **_k: True)
     logs: list[str] = []
     postures = rn._net_probe(logs.append)
     assert postures == ("direct", "inherit")
@@ -1248,8 +1252,8 @@ def test_net_probe_falls_back_to_direct(
 def test_net_probe_reports_unreachable_but_still_returns_postures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(rn, "_probe_https", lambda *_a, **_k: False)
-    monkeypatch.setattr(rn, "_probe_tcp", lambda *_a, **_k: False)
+    monkeypatch.setattr("remote.rollout_tunnel.probe_https", lambda *_a, **_k: False)
+    monkeypatch.setattr("remote.rollout_tunnel.probe_tcp", lambda *_a, **_k: False)
     logs: list[str] = []
     postures = rn._net_probe(logs.append)
     assert postures == ("inherit", "direct")
