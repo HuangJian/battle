@@ -355,3 +355,153 @@ def test_lazy_peak_budget_under_2gb_for_491k() -> None:
     )
     peak = plan.lazy_peak_bytes(batch_size=1024)
     assert peak <= (2 << 30), f"lazy 峰值 {peak / (1 << 30):.2f} GiB 超过 2 GiB gate"
+
+
+# ───────────────────── Paddle 双生（2026-11-18）：lazy 不再是 torch 专属 ─────────────────────
+# 本机 venv 没有 paddle ⇒ 这两条 skip；AI Studio / Paddle 真机跑时钉住「与 eager 逐位一致」。
+# 判据与 torch 版同源：同 seed 的 eager/lazy 最终权重逐字节 + 统计量一致，且 lazy 不上全量副本。
+
+
+def test_load_ppo_episodes_passes_manifest_loader(monkeypatch) -> None:
+    """两条训练核共用的分派点：manifest 写什么就传什么，缺键保持协议缺省 eager。"""
+    import worker.ppo.lazy_corpus as lc
+    from remote.train_common import load_ppo_episodes
+
+    seen: dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake(root, **kwargs):
+        seen.update({"root": root, **kwargs})
+        return sentinel
+
+    monkeypatch.setattr(lc, "load_ppo_corpus", _fake)
+    manifest = {
+        "ppo_loader": "lazy",
+        "gamma": 0.99,
+        "lam": 0.95,
+        "adv_norm": "batch",
+        "normalize_ret": True,
+        "per_stage_quota": 12,
+        "mb": 1024,
+    }
+    assert load_ppo_episodes("root", manifest, None) is sentinel
+    assert seen["loader"] == "lazy"
+    assert seen["mb"] == 1024 and seen["per_stage_quota"] == 12
+    assert seen["root"] == "root" and seen["bundle"] is None
+    manifest.pop("ppo_loader")
+    load_ppo_episodes("root", manifest, None)
+    assert seen["loader"] == "eager", "协议缺省必须仍是 eager（旧 manifest 逐字节旧路径）"
+
+
+def test_paddle_ppo_update_eager_lazy_final_weights_identical(tmp_path: Path) -> None:
+    paddle = pytest.importorskip("paddle")
+
+    from worker.models.student_paddle import PPOStudent
+    from worker.ppo import engine_paddle
+
+    _write_shard(tmp_path, "s1", 12, seed=1)
+    _write_shard(tmp_path, "s2", 12, seed=2)
+    np.random.seed(5)
+    chunks_e = np_core.chunk_episodes(_eager(tmp_path), 8)
+    np.random.seed(5)
+    chunks_l = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8)
+    _assert_same_chunks(chunks_e, chunks_l)
+
+    paddle.set_device("cpu")
+    paddle.seed(0)
+    m1 = PPOStudent(h=8, d=1, head_hidden=16)
+    paddle.seed(0)
+    m2 = PPOStudent(h=8, d=1, head_hidden=16)
+    paddle.seed(1)
+    ref = PPOStudent(h=8, d=1, head_hidden=16)
+    ref.eval()
+    for p in ref.parameters():
+        p.stop_gradient = True
+    rng = np.random.default_rng(9)
+    demo = {
+        "obs": rng.integers(0, 256, (20, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
+        "scalars": rng.random((20, SCALAR_DIM), dtype=np.float32),
+        "actions": rng.integers(0, np.array([5, 2]), size=(20, 2), dtype=np.int64),
+        "masks": np.ones((20, 7), dtype=np.float32),
+    }
+    o1 = paddle.optimizer.Adam(learning_rate=1e-4, parameters=m1.parameters())
+    o2 = paddle.optimizer.Adam(learning_rate=1e-4, parameters=m2.parameters())
+    kw: dict[str, Any] = dict(
+        kl_coef=0.02,
+        ref_model=ref,
+        kickstart_kl=0.5,
+        demo_bank=demo,
+        demo_bc_coef=0.5,
+        demo_per_mb=4,
+        value_anchor=0.1,
+    )
+    np.random.seed(31)
+    a1 = engine_paddle.ppo_update(m1, o1, chunks_e, 2, **kw)
+    np.random.seed(31)
+    a2 = engine_paddle.ppo_update(m2, o2, chunks_l, 2, lazy=True, **kw)
+    for name, p1 in m1.state_dict().items():
+        np.testing.assert_array_equal(
+            p1.numpy(), m2.state_dict()[name].numpy(), err_msg=f"lazy 与 eager 的 {name} 必须逐字节一致"
+        )
+    for k in a1:
+        assert a1[k] == pytest.approx(a2[k], rel=0, abs=1e-12), f"统计量 {k} 不一致"
+
+
+def test_paddle_lazy_transfers_only_per_batch(tmp_path: Path, monkeypatch) -> None:
+    """Paddle lazy 也不得建全量副本：每步只搬当前 mb 行。"""
+    paddle = pytest.importorskip("paddle")
+
+    from worker.ppo import engine_paddle as eng
+
+    _write_shard(tmp_path, "s1", 16, seed=1)
+    chunks = np_core.chunk_episodes(_lazy(tmp_path, mb=8), 8)
+    seen: list[tuple[int, ...]] = []
+    real_batch = eng.tensored_batch
+
+    def _spy(item):
+        seen.append(tuple(item["obs"].shape))
+        return real_batch(item)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("paddle lazy 路径不得调用 tensored_chunks（全量副本会顶爆显存）")
+
+    monkeypatch.setattr(eng, "tensored_batch", _spy)
+    monkeypatch.setattr(eng, "tensored_chunks", _boom)
+
+    class Tiny:
+        """引擎只要 callable + `parameters()`/`train()`。
+
+        不继承 `paddle.nn.Layer`：基类表达式不能引用函数内的局部名（mypy `name-defined`）。
+        """
+
+        def __init__(self) -> None:
+            self.net = paddle.nn.Linear(OBS_CHANNELS * BOARD * BOARD + SCALAR_DIM, 16)
+            self.mv = paddle.nn.Linear(16, 5)
+            self.fr = paddle.nn.Linear(16, 2)
+            self.v = paddle.nn.Linear(16, 1)
+
+        def parameters(self):
+            return [
+                *self.net.parameters(),
+                *self.mv.parameters(),
+                *self.fr.parameters(),
+                *self.v.parameters(),
+            ]
+
+        def train(self) -> None:
+            return None
+
+        def __call__(self, obs, sc, extra=None):
+            flat = obs.reshape([obs.shape[0], -1]).astype("float32")
+            h = paddle.nn.functional.relu(self.net(paddle.concat([flat, sc], axis=1)))
+            return self.mv(h), self.fr(h), self.v(h)
+
+    paddle.set_device("cpu")
+    paddle.seed(0)
+    model = Tiny()
+    opt = paddle.optimizer.Adam(learning_rate=1e-3, parameters=model.parameters())
+    np.random.seed(3)
+    eng.ppo_update(model, opt, chunks, 2, lazy=True)
+    assert seen == [(8, OBS_CHANNELS, BOARD, BOARD)] * 4, (
+        f"每批只应搬 mb=8 行（2 chunks × 2 epochs），实得 {seen}"
+    )

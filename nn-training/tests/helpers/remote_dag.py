@@ -403,9 +403,10 @@ LAYERS: dict[str, int] = {
     "remote.upload_worker": 4,
     # 训练核的**框架无关半场**（2026-10-27，Paddle 双生）：有效遍数 / kick 开关 / blob 需求 /
     # 课程装配 / demo bank 校验。顶层只碰 `common.protocol`（不在账本内）；`worker.config`(L1)
-    # 与 `biz.reward_*` 都是**函数内**延迟 import ⇒ 拓扑秩 = 1 + 1 = **L2**。
+    # 与 `biz.reward_*` 都是**函数内**延迟 import。2026-11-18 P3 收尾：`load_ppo_episodes`
+    # 在这里做 eager/lazy 的唯一分派，延迟 import `worker.ppo.lazy_corpus`(L2) ⇒ 秩 **L3**。
     # 读它的是 `remote.train_core`(L4)；两核必须共用同一份判据（分叉 = 混跑时一边收一边拒）。
-    "remote.train_common": 2,
+    "remote.train_common": 3,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，

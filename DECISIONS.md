@@ -6198,3 +6198,30 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **护栏**：`tests/remote/test_rollout_relay.py` 21 → 25 例，判据只钉 `facts["hint"]` / `tls_ctrl` / `tls_net`，
   文本断言仍 1502（+0）。
 - **全文** → `docs/nn/remote-transport.md` §161；代码 → `remote/rollout_relay.py` · notebook 排查表 → `ipynb/rollout.ipynb`。
+
+## §2026-11-18-goalnn-paddle-ppo-lazy（Paddle 后端支持 PPO lazy loader：共用分派 + 逐批上卡 + ref 惰性预计算）
+
+- **背景/决定**：生产缺省 `ppo_loader=lazy`（§2026-11-17-goalnn-ppo-lazy-default）后，Paddle worker 仍对 lazy
+  job **响亮拒收**（`remote/paddle_env.check_ppo_loader`）⇒ `g6-speed-c1` 等课程在 Paddle 节点上直接失败
+  （`job … REJECTED: paddle 后端不支持 ppo_loader='lazy'`）。本条把 P3 lazy 接到 Paddle 双生，**取代**
+  §2026-11-16-goalnn-ppo-lazy-loader 与 §2026-11-17-goalnn-ppo-lazy-default 里「Paddle 拒收 lazy」那一条。
+- **实现**：`remote/train_common.load_ppo_episodes` 成为**两条训练核共用的唯一分派点**（eager 逐字节旧
+  `np_core.load_episodes`；lazy 只在 manifest 显式声明时走 mmap）；Paddle 核改用它，并把装载器自身的
+  `.lazy` 传给 `engine_paddle.ppo_update(lazy=…)`（不重读 manifest，避免「说 lazy 实际 eager」的错账）。
+  引擎 lazy 路径跳过 `require_corpus`/全量 `tensored_chunks`，每步 `tensored_batch` 只搬当前 minibatch；
+  kickstart ref 改为 chunk 首次使用时现算（`_ref_logprobs` 抽出，与 eager 共用同一份头数/动作空间校验）。
+  删除 `paddle_env.check_ppo_loader` 与整条拒收路径。
+- **证据（本机 2026-11-18，paddle 3.3.1）**：`tests/worker/test_ppo_lazy_loader.py` +3 条 —— 分派器按
+  manifest 透传 `loader/mb/per_stage_quota`（缺键仍 eager）；Paddle eager/lazy 同 seed 的**最终权重逐字节
+  一致**且统计量 `abs=1e-12`；lazy 只逐批搬 `mb` 行且 `tensored_chunks` 被调用即失败（2 chunks × 2 epochs
+  = 4 次 `(8,C,B,B)`）。`tests/remote/test_train_core_split.py` 用 `__code__.co_names` 钉住 Paddle 核引用
+  `load_ppo_episodes`、不再引用 `load_episodes`/`check_ppo_loader`。`bash tools/githook/nn-python-gate.sh`
+  全绿：ruff / mypy 941 文件 / **6232 passed, 10 skipped**。
+- **层号**：`remote.train_common` L2 → **L3**（延迟 import `worker.ppo.lazy_corpus`(L2)，拓扑秩 = 1+2）；
+  读它的 `remote.train_core`(L4) 不变（账本已同步）。
+- **被否决**：① Paddle 静默退回 eager（manifest 与日志各说各话，2026-11-16 已否决）；② 把装载分派留在
+  `train_core`（有效 LOC 981，且两核共用判据会重新分叉）；③ 复制 torch `tensored_batch` 的
+  `memory_format` 分支（Paddle 无此参数；逐批 `paddle.to_tensor` 已覆盖语义）。
+- **后果/未完成**：Paddle GPU 真机（AI Studio）的 35×20 H2D/update 墙钟与显存余量尚未测；判据 = 同一 job
+  在 torch / Paddle 节点的 `wire` 行与 `loader=lazy peak=…` 读数。回滚 = job 显式 `--ppo-loader=eager`
+  （Paddle 侧旧路径逐字节不变）。全文 → `docs/nn/remote-transport.md` §162。

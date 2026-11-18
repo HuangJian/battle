@@ -74,6 +74,7 @@ from remote.train_common import (
     course_prep,
     decode_demo_bank,
     kick_kl_value,
+    load_ppo_episodes,
     ppo_shards_root,
 )
 from remote.wire import _wire_block
@@ -747,21 +748,7 @@ def run_training_core(
     # 才走 mmap + 逐批上卡。lazy 是独立开关，回滚 = 不带这个键。
     ppo_loader = str(manifest.get("ppo_loader", "eager") or "eager")
     try:
-        from worker.ppo.lazy_corpus import load_ppo_corpus
-
-        episodes = load_ppo_corpus(
-            shards_root,
-            loader=ppo_loader,
-            gamma=float(manifest["gamma"]),
-            lam=float(manifest["lam"]),
-            normalize_adv=str(manifest["adv_norm"]) != "none",
-            normalize_ret=bool(manifest.get("normalize_ret", False)),
-            # 严格样本量配额（target_transitions 路线）：逐关只收前 N 步，截断在 GAE
-            # 之前。0/缺失（旧 hub 产出的 manifest）= 全收，历史行为逐字节不变。
-            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-            mb=int(manifest["mb"]),
-            bundle=prep_b,
-        )
+        episodes = load_ppo_episodes(shards_root, manifest, prep_b)
         # ★ 装载完成 = 「本 job 准备」这一段结束：**一行**把所有入口/设备/opt/demo/装载
         # 读数一次说清（原来 ~10 行），随后才进 PPO（2026-09-24 日志节食）。
         prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
@@ -1009,8 +996,6 @@ def _run_training_core_paddle(
     顶层零 torch/numpy/paddle 的纪律同样适用：三个框架都是**函数内**延迟 import。
     """
     prep_b = LogBundle(log) if prep is None else prep
-    # P3：lazy loader 只实现了 torch 路径（`tensored_batch` 逐批上卡）。
-    paddle_env.check_ppo_loader(jid, manifest)
     # `--threads` 在 Paddle 侧只能靠环境变量，且必须早于 import（见 remote/paddle_env.py）。
     paddle_env.apply(torch_threads, prep_b)
     paddle_env.silence_import_warnings()
@@ -1201,17 +1186,11 @@ def _run_training_core_paddle(
     #: `steps_total` 那一段。
     steps_box: dict[str, int] = {}
     try:
-        episodes = ppo_np.load_episodes(
-            shards_root,
-            float(manifest["gamma"]),
-            float(manifest["lam"]),
-            normalize_adv=str(manifest["adv_norm"]) != "none",
-            normalize_ret=bool(manifest.get("normalize_ret", False)),
-            per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
-            bundle=prep_b,
-        )
+        episodes = load_ppo_episodes(shards_root, manifest, prep_b)
         prep_b.emit(f"job {jid}: 准备完成 {time.time() - t_prep:.1f}s")
-        total_steps = sum(e["obs"].shape[0] for e in episodes)
+        from worker.ppo.trainer import corpus_samples
+
+        total_steps = corpus_samples(episodes)
         chunks = ppo_np.chunk_episodes(
             episodes, int(manifest["mb"]), shuffle=bool(manifest["shuffle"])
         )
@@ -1237,6 +1216,9 @@ def _run_training_core_paddle(
             progress=train_b,
             progress_head=f"job {jid}: PPO 训练中",
             steps_out=steps_box,
+            # 判据来自装载器本身（`LazyChunks.lazy`），不重读 manifest —— 避免「说 lazy
+            # 实际 eager」的错账；eager list 没有这个属性 ⇒ False。
+            lazy=bool(getattr(chunks, "lazy", False)),
             log=log,
         )
     except ProtocolError:

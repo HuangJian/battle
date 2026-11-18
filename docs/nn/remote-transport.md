@@ -6,6 +6,48 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §162 Paddle 后端支持 PPO lazy loader（2026-11-18）
+
+**现场**：生产缺省已在 2026-11-17 切成 `ppo_loader=lazy`（§156），但 Paddle worker 的
+`remote/paddle_env.check_ppo_loader` 仍按 P3 初期的边界**响亮拒收**：
+
+```
+job c8b71ec9fa47755d REJECTED: job …: paddle 后端不支持 ppo_loader='lazy'
+（P3 lazy loader 只接了 torch 路径）——请把该 job 发到 torch worker
+```
+
+`g6-speed-c1` 这类课程在 AI Studio / Paddle 节点上因此一局未训。本次把 lazy 接到 Paddle 双生，
+**删除**该拒收函数与整条路径（`check_device` 的 torch-only 设备闸保留）。
+
+**接线（一处判据，两核共用）**
+
+| 件 | 改动 |
+|---|---|
+| `remote/train_common.load_ppo_episodes` | 新增：`ppo_loader` 的**唯一分派点**（eager 逐字节旧 `np_core.load_episodes`；lazy 由 manifest 显式声明），torch / Paddle 两核都调它 |
+| `remote/train_core._run_training_core_paddle` | 改用共用分派；`lazy=` 取装载器自身的 `chunks.lazy`（不重读 manifest） |
+| `worker/ppo/engine_paddle` | 新增 `lazy=` 参数与 `tensored_batch`；lazy 跳过 `require_corpus`/全量 `tensored_chunks`，每步只搬当前 minibatch；`_ref_logprobs` 抽出，eager 预计算 / lazy 首次使用共用同一份校验 |
+| `remote/paddle_env` | 删除 `check_ppo_loader` |
+
+**语义与 eager 的逐位关系**：与 torch lazy 同一套契约 —— shard 顺序/行序/`per_stage_quota` 截断点/
+adv・ret 归一/全局 permutation 都由 `LazyCorpus` 复刻；Paddle 侧只是把 `torch.from_numpy(...).to(device)`
+换成 `paddle.to_tensor(...)`（只读数组先复制），kickstart ref 冻结 ⇒ 预计算与首次使用现算数值相同。
+
+**证据（本机 2026-11-18，paddle 3.3.1）**
+
+* `tests/worker/test_ppo_lazy_loader.py` +3：分派器透传 `loader/mb/per_stage_quota`（缺键 eager）；
+  Paddle eager/lazy 同 seed 最终权重**逐字节一致**、统计量 `abs=1e-12`；lazy 逐批 4 次
+  `(8,C,B,B)` 且 `tensored_chunks` 被调用即失败。
+* `tests/remote/test_train_core_split.py`：`__code__.co_names` 钉住 Paddle 核引用
+  `load_ppo_episodes`、不再引用 `load_episodes` / `check_ppo_loader`（不读源码文本）。
+* `bash tools/githook/nn-python-gate.sh`：ruff / mypy 941 文件 / **6232 passed, 10 skipped**。
+
+**层号**：`remote.train_common` L2 → **L3**（延迟 import `worker.ppo.lazy_corpus`(L2)，拓扑秩 = 1+2）；
+`remote.train_core`(L4) 不变。账本与模块 docstring 已同步。
+
+**未完成**：Paddle GPU 真机的 35×20 H2D/update 墙钟与显存余量（本机 CPU 只能证数值等价与「不上全量
+副本」）；判据 = 同一 job 在 torch / Paddle 节点各跑一轮，比较 `wire` 行与 `loader=lazy peak=…`。
+回滚 = job 显式 `--ppo-loader=eager`（Paddle 旧路径逐字节不变）。
+
 ## §161 relay 预检加第四条判词 `cf-blocked`：两条对照才分得清「按域名掐 / 只有 CF 被掐 / 整机被掐」（2026-11-18）
 
 **现场**（DSW 第三次，20:16–20:21）：`TCP` 两个 v4 全 `ok`、`TLS` 两个地址全 `timeout`，而唯一的对照
@@ -461,7 +503,7 @@ s2 复跑仍非逐位 ⇒ 先判 FAIL；s3 随即证明噪声底不是 0。
 `manifest.get(..., "eager")` —— 发布端只在 `ppo_loader != "eager"` 时写键 ⇒ 旧 manifest 逐字节跑
 旧路径，lazy 永远显式声明。回滚 = `--ppo-loader eager` / `rl.ppo_loader: "eager"`（课程里的显式值
 照旧优先）。Paddle 后端仍**响亮拒收** lazy（`remote/paddle_env.check_ppo_loader`）——实验臂必须
-显式写 eager，不静默退回。
+显式写 eager，不静默退回。**（2026-11-18 作废：Paddle 双生已接 lazy，见 §162。）**
 
 **同机 A/B**（新台架 `tools/perf/ppo-loader-bench.py`；合成语料 40 shard × 502 = 20,080 样本 /
 obs 220 MB / mb=1024，win32 2 vCPU 本机）：

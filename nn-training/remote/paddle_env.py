@@ -78,13 +78,3 @@ def check_device(jid: str, device: Any) -> str:
             "（XLA / DataParallel / Apple MPS 是 torch 专属实验臂）—— 用 cpu / cuda"
         )
     return dev
-
-
-def check_ppo_loader(jid: str, manifest: dict) -> None:
-    """P3：lazy loader 只接了 torch 路径；Paddle 侧拒收（不静默退回 eager 造成错账）。"""
-    raw = str(manifest.get("ppo_loader", "eager") or "eager")
-    if raw != "eager":
-        raise ProtocolError(
-            f"job {jid}: paddle 后端不支持 ppo_loader={raw!r}"
-            "（P3 lazy loader 只接了 torch 路径）——请把该 job 发到 torch worker"
-        )

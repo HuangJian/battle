@@ -28,7 +28,7 @@ import paddle
 
 from common.schema import FIRE3_DIM, FIRE_DIM, MOVE4_DIM, MOVE_DIM
 from worker.ppo.checkpoint_paddle import load_ckpt, save_ckpt
-from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per
+from worker.ppo.trainer import aggregate_stats, cat_entropy, cat_entropy_per, chunk_count
 from worker.ppo.vram import paddle_free_bytes, require_corpus
 
 CLIP_EPS = 0.2
@@ -44,6 +44,47 @@ F = paddle.nn.functional
 def tensored_chunks(chunks: list[dict]) -> list[dict]:
     """numpy minibatch chunks → paddle tensors（数值逐位：同一份 numpy 字节）。"""
     return [{k: paddle.to_tensor(v) for k, v in c.items()} for c in chunks]
+
+
+def tensored_batch(item: dict) -> dict:
+    """单个 numpy minibatch → paddle tensors（P3 lazy 的逐批上卡）。
+
+    只读数组（`np.load(mmap_mode="r")` 的切片视图）先复制成可写；`gather()` 的
+    fancy index 结果本就可写，这里零成本。
+    """
+    return {
+        k: paddle.to_tensor(v if v.flags.writeable else np.array(v))
+        for k, v in item.items()
+    }
+
+
+def _ref_logprobs(ref_model: Any, e: dict) -> tuple[paddle.Tensor, ...]:
+    """冻结 ref 在单个 minibatch 上的分头 log-softmax（kickstart KL）。
+
+    eager 在训练前按 chunk 预计算，lazy 在 chunk 首次被取到时现算——ref 冻结且与
+    训练模型状态无关 ⇒ 两者数值逐位相同。抽成函数让两条路径共用同一份
+    「头数 vs 数据动作空间」校验。
+    """
+    _ro = ref_model(e["obs"], e["scalars"], e.get("extra"))
+    _m = e["mask"]
+    _ref_v6 = len(_ro) >= 4
+    _data_v6 = e.get("a_hold") is not None
+    if _ref_v6 != _data_v6:
+        raise ValueError(
+            f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
+            f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
+            f"{'带' if _data_v6 else '不带'} a_hold"
+        )
+    if _ref_v6:
+        return (
+            masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
+            masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
+            masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
+        )
+    return (
+        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
+        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
+    )
 
 
 def masked_logsoftmax(logits: paddle.Tensor, mask: paddle.Tensor) -> paddle.Tensor:
@@ -172,12 +213,18 @@ def ppo_update(
     #: `epochs × len(chunks)` 自己重算 —— 引擎一旦跳 chunk / 从 ckpt 中途起步，重算就会静默
     #: 漂移，而那个数要写进 `state.json` 与回传的 opt `step`（bias correction 的时基）。
     steps_out: dict[str, int] | None = None,
+    lazy: bool = False,
     log=lambda _msg: None,
 ):
     """Paddle PPO update. Same math as `worker.ppo.engine.ppo_update`; see module doc.
 
     `ckpt_path` 语义与 torch 侧一致：开跑前载入（model/opt/epochs_done/RNG），
     每个 epoch 尾落盘一次；torch 与 Paddle 写出的 checkpoint 互相可读。
+
+    `lazy`（P3）：`chunks` 是 `LazyChunks`（逐 chunk 物化 numpy）。此时不建全量
+    paddle 副本，每步 `tensored_batch` 现转当前 minibatch；kickstart ref 改为
+    chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。缺省 False =
+    旧路径逐字节不变。
     """
     model.train()
     if device is not None:
@@ -189,10 +236,13 @@ def ppo_update(
     clip = CLIP_EPS
     ent_c = ENT_COEF if ent_coef is None else float(ent_coef)
     stats: list[dict[str, float]] = []
-    # 与 torch 侧同规：全量上卡前查显存（探测不到就放行，绝不误拦 CPU 训练）。
-    require_corpus(chunks, paddle_free_bytes(device))
-    tensored = tensored_chunks(chunks)
-    total_steps = len(tensored) * epochs
+    # 与 torch 侧同规：eager 全量上卡前查显存（探测不到就放行，绝不误拦 CPU 训练）。
+    # lazy 逐批上卡 ⇒ 没有「全量语料」可言，`corpus_bytes` 也不接受 LazyChunks。
+    if not lazy:
+        require_corpus(chunks, paddle_free_bytes(device))
+    tensored: Any = chunks if lazy else tensored_chunks(chunks)
+    n_chunks = chunk_count(chunks)
+    total_steps = n_chunks * epochs
     demo_on = demo_bank is not None and float(demo_bc_coef) > 0.0 and int(demo_per_mb) > 0
     demo_t: dict[str, paddle.Tensor] = {}
     demo_n = 0
@@ -209,31 +259,12 @@ def ppo_update(
         if demo_on and "extra" in demo_bank:
             demo_t["extra"] = paddle.to_tensor(np.asarray(demo_bank["extra"]).astype(np.float32))
     # kickstart ref 前向每 chunk 只算一次（与 torch 侧 ref_cache 同语义；数值相同）。
-    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * len(tensored)
-    if ref_model is not None and kickstart_kl > 0:
+    # lazy：不预计算（那是全量 chunks 的遍历），chunk 首次被取到时现算。
+    ref_cache: list[tuple[paddle.Tensor, ...] | None] = [None] * n_chunks
+    if ref_model is not None and kickstart_kl > 0 and not lazy:
         with paddle.no_grad():
             for _i, _e in enumerate(tensored):
-                _ro = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
-                _m = _e["mask"]
-                _ref_v6 = len(_ro) >= 4
-                _data_v6 = _e.get("a_hold") is not None
-                if _ref_v6 != _data_v6:
-                    raise ValueError(
-                        f"[ppo-paddle] kickstart ref 与数据动作空间不同源：ref 返回 {len(_ro)} 个头"
-                        f"（{'v6 4/3/2' if _ref_v6 else 'legacy 5/2'}），chunk "
-                        f"{'带' if _data_v6 else '不带'} a_hold"
-                    )
-                if _ref_v6:
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE4_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE4_DIM : MOVE4_DIM + FIRE3_DIM]),
-                        masked_logsoftmax(_ro[2], _m[:, MOVE4_DIM + FIRE3_DIM :]),
-                    )
-                else:
-                    ref_cache[_i] = (
-                        masked_logsoftmax(_ro[0], _m[:, :MOVE_DIM]),
-                        masked_logsoftmax(_ro[1], _m[:, MOVE_DIM : MOVE_DIM + FIRE_DIM]),
-                    )
+                ref_cache[_i] = _ref_logprobs(ref_model, _e)
     t0 = time.time()
     last_hb = t0
     start_epoch, steps_done = load_ckpt(model, opt, ckpt_path)
@@ -243,9 +274,12 @@ def ppo_update(
             f"(continuing remaining {epochs - start_epoch}, steps_done={steps_done})"
         )
     for ep in range(start_epoch, epochs):
-        perm = np.random.permutation(len(tensored))
+        perm = np.random.permutation(n_chunks)
         for j, i in enumerate(perm):
-            e = tensored[int(i)]
+            e = tensored.get(int(i)) if lazy else tensored[int(i)]
+            if lazy:
+                # 只把当前 minibatch 上卡；全量 chunks 不再有 paddle 副本。
+                e = tensored_batch(e)
             obs = e["obs"]
             sc = e["scalars"]
             a_move = e["a_move"]
@@ -311,6 +345,11 @@ def ppo_update(
                     loss = loss + kl_coef * (kl_per * w).sum() / denom
             kick_mean = _zero_scalar()
             _ref = ref_cache[int(i)]
+            if _ref is None and lazy and ref_model is not None and kickstart_kl > 0:
+                # lazy：chunk 首次使用时现算（ref 冻结 ⇒ 与 eager 预计算逐位相同）。
+                with paddle.no_grad():
+                    _ref = _ref_logprobs(ref_model, e)
+                ref_cache[int(i)] = _ref
             if _ref is not None:
                 kl_m = (move_logp.exp() * (move_logp - _ref[0])).sum(axis=-1)
                 kl_f = (fire_logp.exp() * (fire_logp - _ref[1])).sum(axis=-1)
@@ -365,7 +404,7 @@ def ppo_update(
                 now = time.time()
                 if now - last_hb >= HB_SEC:
                     last_hb = now
-                    done = ep * len(tensored) + j + 1
+                    done = ep * n_chunks + j + 1
                     el = now - t0
                     eta = el / done * (total_steps - done)
                     progress.add(
@@ -422,6 +461,7 @@ __all__ = [
     "policy_new_rms_of",
     "ppo_update",
     "sync_scalars",
+    "tensored_batch",
     "tensored_chunks",
     "update",
 ]

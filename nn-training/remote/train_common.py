@@ -14,8 +14,9 @@
 `remote/train_core.py` 已顶到 LOC 预算（`tests/test_python_loc_budget.py`）。放在这里还顺手钉住
 「两核共用同一份判据」——哪天只改一边，混跑就开始分叉。
 
-层号 **L2**（`tests/helpers/remote_dag.py`）：顶层只碰 `common.*`(L0) 与 `remote.wire`(L1)；
-`worker.config`(L1) 与 `biz.reward_*` 都在**函数内**延迟 import。`train_core`(L4) 站在本模块上面。
+层号 **L3**（`tests/helpers/remote_dag.py`）：顶层只碰 `common.*`(L0) 与 `remote.wire`(L1)；
+`worker.config`(L1) 与 `biz.reward_*` 都在**函数内**延迟 import；`load_ppo_episodes` 延迟
+import `worker.ppo.lazy_corpus`(L2) ⇒ 秩 = 1 + 2 = **L3**。`train_core`(L4) 站在本模块上面。
 
 2026-11-16（P3）：PPO 收尾账（`_ppo_done_log` / `_agg_block` + lazy chunks 的步数/装载器
 读数）从 `train_core` 搬来这里——同一类「两条核共用的账」判据，也让训练核回到 LOC 预算内。
@@ -94,6 +95,27 @@ def copy_iter_metrics(result: dict, iter_info: dict | None) -> None:
     for key in ("report", "volume_stage_stats", "greedy_quota_stats"):
         if key in iter_info:
             result[key] = iter_info[key]
+
+
+def load_ppo_episodes(shards_root: str, manifest: dict, prep_b: Any) -> Any:
+    """PPO 语料装载 —— `ppo_loader=eager|lazy` 的**唯一分派点**（两条训练核共用）。
+
+    eager 逐字节走旧 `np_core.load_episodes`；lazy 走 obs mmap + 逐 minibatch 物化。
+    协议缺省仍是 eager（旧 manifest 不带键），lazy 始终由发布端显式声明。
+    """
+    from worker.ppo.lazy_corpus import load_ppo_corpus
+
+    return load_ppo_corpus(
+        shards_root,
+        loader=str(manifest.get("ppo_loader", "eager") or "eager"),
+        gamma=float(manifest["gamma"]),
+        lam=float(manifest["lam"]),
+        normalize_adv=str(manifest["adv_norm"]) != "none",
+        normalize_ret=bool(manifest.get("normalize_ret", False)),
+        per_stage_quota=int(manifest.get("per_stage_quota", 0) or 0),
+        mb=int(manifest["mb"]),
+        bundle=prep_b,
+    )
 
 
 def ppo_shards_root(job_dir: str | Path, iter_info: dict | None) -> str:
