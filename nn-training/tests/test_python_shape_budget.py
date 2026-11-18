@@ -44,7 +44,6 @@ LONG_FUNCS_BASELINE = {
     "remote/run_loop.py": 1,
     "remote/train_core.py": 2,
     "remote/worker.py": 2,
-    "remote/worker_server.py": 1,
     "tools/lever_scan.py": 1,
     "tools/paired_power.py": 1,
     "tools/spatial-probe.py": 1,

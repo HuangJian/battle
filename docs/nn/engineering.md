@@ -25,6 +25,21 @@
 
 ---
 
+## §182 长函数存量第四刀：worker 服务端 213 → 182（2026-11-18）
+
+`remote/worker_server.py::make_worker_server` **213 → 182 行**，长函数存量 **34 → 33**
+（`LONG_FUNCS_BASELINE` 删除 `remote/worker_server.py` 条目）。
+
+一刀纯搬移：`_decode_job_body(raw, state)`——`POST /job` 的体解析与校验（v2 解包 /
+JSON 解码 / manifest normalize / payload sha / code、ts-code、blob 的 428 补传判定）。
+返回 `(字段, None)` 或 `({}, (错误体, 状态码))`；解析异常照旧上抛给 do_POST 的 400 兜底，
+错误文案与状态码逐字不变。
+
+Handler 类本身没有外移：它闭包 `token` / `state`，搬出去要先造 handler 工厂，
+收益不抵风险；先把最独立的「体解析」相位切走。
+
+---
+
 ## §181 长函数存量第三刀：离线租约领取 211 → 168（2026-11-18）
 
 `hub/offline.py::_post_offline_lease` **211 → 168 行**，长函数存量 **35 → 34**

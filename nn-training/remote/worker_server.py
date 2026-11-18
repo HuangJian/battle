@@ -378,6 +378,57 @@ def _execute_job(
         state.kick()  # 失败不堵队：队首立即顶上（流水线无间隙）
 
 
+def _decode_job_body(
+    raw: bytes, state: WorkerServerState
+) -> tuple[dict, tuple[dict, int] | None]:
+    """解析 `POST /job` 体 → 已校验字段；失败返回 `({}, (错误体, 状态码))`。
+
+    自 `make_worker_server` 的 do_POST 原样搬出：v2 解包 / JSON 解码 / manifest
+    normalize / payload sha 校验 / code、ts-code、blob 的 428 补传判定。解析异常
+    （ValueError / KeyError / ProtocolError）照旧上抛，由调用方的 400 兜底。
+    """
+    if raw.startswith(WIRE_JOB_MAGIC):
+        # M2 B5：v2 体（payload/code/blob 为裸二进制段）→ 旧 JSON 形状，
+        # 下游字段名不变（payload_b64/code_b64/blobs）。非法体响亮 400。
+        try:
+            body = unpack_job_v2(raw)
+        except ProtocolError as e:
+            return {}, ({"error": f"job v2 体非法: {e}"}, 400)
+    else:
+        body = json.loads(raw.decode("utf-8"))
+    manifest = normalize_manifest(body["manifest"])
+    payload_zip = base64.b64decode(body["payload_b64"])
+    if hashlib.sha256(payload_zip).hexdigest() != manifest["payload_sha256"]:
+        return {}, ({"error": "payload_sha256 不匹配——上传损坏（重传）"}, 400)
+    code_b64 = body.get("code_b64")
+    code_zip = base64.b64decode(code_b64) if code_b64 else None
+    if code_zip is None and not state.code_cached(manifest["code_sha256"]):
+        return {}, ({"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428)
+    # M3 kind=iter：TS 运行时 zip 同规（body 未带且缓存未命中 → 428 补传）。
+    ts_b64 = body.get("ts_code_b64")
+    ts_code_zip = base64.b64decode(ts_b64) if ts_b64 else None
+    _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
+    if ts_code_zip is None and _ts_sha and not state.ts_code_cached(_ts_sha):
+        return {}, ({"error": "ts-code-missing", "ts_code_sha256": _ts_sha}, 428)
+    # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
+    blobs_raw = body.get("blobs") or {}
+    blobs: dict[str, bytes] = {}
+    if isinstance(blobs_raw, dict):
+        for k, v in blobs_raw.items():
+            if isinstance(v, str) and v:
+                blobs[str(k)] = base64.b64decode(v)
+    need_blobs = missing_blobs(manifest, blobs, state.blob_cached)
+    if need_blobs:
+        return {}, ({"error": "blob-missing", "need": need_blobs}, 428)
+    return {
+        "manifest": manifest,
+        "payload_zip": payload_zip,
+        "code_zip": code_zip,
+        "ts_code_zip": ts_code_zip,
+        "blobs": blobs,
+    }, None
+
+
 def make_worker_server(
     state: WorkerServerState,
     port: int,
@@ -491,47 +542,16 @@ def make_worker_server(
                     self._json({"error": "not found"}, 404)
                     return
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                if raw.startswith(WIRE_JOB_MAGIC):
-                    # M2 B5：v2 体（payload/code/blob 为裸二进制段）→ 旧 JSON 形状，
-                    # 下游字段名不变（payload_b64/code_b64/blobs）。非法体响亮 400。
-                    try:
-                        body = unpack_job_v2(raw)
-                    except ProtocolError as e:
-                        self._json({"error": f"job v2 体非法: {e}"}, 400)
-                        return
-                else:
-                    body = json.loads(raw.decode("utf-8"))
-                manifest = normalize_manifest(body["manifest"])
+                fields, err = _decode_job_body(raw, state)
+                if err is not None:
+                    self._json(err[0], err[1])
+                    return
+                manifest = fields["manifest"]
                 jid = manifest["job_id"]
-                payload_zip = base64.b64decode(body["payload_b64"])
-                if hashlib.sha256(payload_zip).hexdigest() != manifest["payload_sha256"]:
-                    self._json({"error": "payload_sha256 不匹配——上传损坏（重传）"}, 400)
-                    return
-                code_b64 = body.get("code_b64")
-                code_zip = base64.b64decode(code_b64) if code_b64 else None
-                if code_zip is None and not state.code_cached(manifest["code_sha256"]):
-                    self._json(
-                        {"error": "code-missing", "code_sha256": manifest["code_sha256"]}, 428
-                    )
-                    return
-                # M3 kind=iter：TS 运行时 zip 同规（body 未带且缓存未命中 → 428 补传）。
-                ts_b64 = body.get("ts_code_b64")
-                ts_code_zip = base64.b64decode(ts_b64) if ts_b64 else None
-                _ts_sha = str(manifest.get("ts_code_sha256", "") or "")
-                if ts_code_zip is None and _ts_sha and not state.ts_code_cached(_ts_sha):
-                    self._json({"error": "ts-code-missing", "ts_code_sha256": _ts_sha}, 428)
-                    return
-                # M2 B3：opt/ref blob —— body 未带且本地缓存未命中 → 428 要求重发。
-                blobs_raw = body.get("blobs") or {}
-                blobs: dict[str, bytes] = {}
-                if isinstance(blobs_raw, dict):
-                    for k, v in blobs_raw.items():
-                        if isinstance(v, str) and v:
-                            blobs[str(k)] = base64.b64decode(v)
-                need_blobs = missing_blobs(manifest, blobs, state.blob_cached)
-                if need_blobs:
-                    self._json({"error": "blob-missing", "need": need_blobs}, 428)
-                    return
+                payload_zip = fields["payload_zip"]
+                code_zip = fields["code_zip"]
+                ts_code_zip = fields["ts_code_zip"]
+                blobs = fields["blobs"]
                 echo = self.headers.get("X-Smoke-Echo", "") == "1"
                 item = {
                     "manifest": manifest,
