@@ -7174,3 +7174,11 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   不一致正是「两份实现」的活标本，顺势补齐（本次唯一的可见行为变化）。
   `ladder_ledger.updated_at` 的 `%Y-%m-%d %H:%M:%S` 是**数据字段**不是日志行，换成本模块的
   `%H:%M:%S` 会破坏台账消费方 ⇒ 不动。全文 → `docs/nn/engineering.md` §143。
+- **2026-11-18（B6 第一刀：BC 的 epoch 打乱不再用全局 numpy 流）**：`worker/train/goal_bc.py` 的
+  `np.random.seed(args.seed)` + `np.random.permutation(...)` 改成
+  `np.random.default_rng(list(common.runtime.substream(seed, "goal-bc-epoch")))`。原因：全局播种的
+  「可复现」只在进程里没别人动 `np.random` 时成立 —— 对 BC 意味着同一命令重跑 episode 顺序就变，
+  loss 曲线对不上。`torch.manual_seed` 保留（种子权重初始化是另一条流）。
+  判据 `tests/worker/test_goal_bc_epoch_rng.py` 3 条（同 seed 同序 / 不吃全局流 / 外部抽样不干扰），
+  其中「不吃全局流」在旧实现上实测为红。B6 残留 6 处 `np.random.seed` 已逐个记下理由（云核 /
+  dataloader 全局态）。全文 → `docs/nn/engineering.md` §144。

@@ -25,6 +25,39 @@
 
 ---
 
+## §144 B6 第一刀：BC 的 epoch 打乱不再用全局 numpy 流（2026-11-18）
+
+`worker/train/goal_bc.py` 原来这样「保证可复现」：
+
+```python
+np.random.seed(args.seed)          # 种在**全局** numpy 状态上
+...
+order = np.random.permutation(len(episodes))
+```
+
+「同 seed 两跑一致」只在**进程里没有别人动过 `np.random`** 时成立 —— 任何导入期抽样、
+任何库的一次 `np.random.*` 都会插进这条流。对 BC 这是真事故形状：同一条命令重跑，episode
+顺序变了，loss 曲线对不上，复盘只能猜。
+
+改法就是把种子的所有权收回本地：`common.runtime.substream(seed, "goal-bc-epoch")` 派生
+128 bit，再 `np.random.default_rng(...)` —— 与 `SEED_TAG` 同一个派生源，流名分开，互不干扰。
+`torch.manual_seed` 保留（它管权重初始化，与打乱是两条流）。
+
+判据 `tests/worker/test_goal_bc_epoch_rng.py`（3 条，全走公开的 `epoch_rng`）：
+
+1. 同 seed ⇒ 同顺序，且不是恒等排列；
+2. 建流**不吃**全局流：`np.random.seed(1234)` 后先取一个数、再建流取数，两次相同；
+3. 中途 `np.random.random(1000)` 不会改变顺序。
+
+第 2 条在旧实现上是红的（已实测：旧写法建完流后全局状态被推进）。
+
+**B6 残留**（`np.random.seed` 还有 6 处，各自有理由，未动）：`remote/train_core.py` ×2（云核
+按 seed_hex 播种，进程即训练进程）、`train/train_bc_v6.py`、`trainer/loop_lifecycle.py`、
+`worker/data/dataset.py` ×2（后者同时给 `random` 播种，dataloader 侧要的是全局态）。
+下一次动它们之前先问一句：那条流是否真的被第三方代码共享。
+
+---
+
 ## §143 P0-6 第三批：日志行格式的第三、第四份副本（2026-11-18）
 
 `common/logutil.py` 立起来之后，「`[{HH:MM:SS}] [{tag}] {消息}`」的**字面量**还剩两处没人管：
