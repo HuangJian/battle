@@ -31,16 +31,9 @@ PARAM_LIMIT = 8
 LONG_FUNCS_BASELINE = {
     "remote/hub_client.py": 1,
     "remote/offline_boot.py": 1,
-    "remote/train_core.py": 2,
     "remote/worker.py": 2,
-    "trainer/dispatch.py": 2,
-    "trainer/eval_dispatch.py": 1,
     "trainer/loop_remote_job.py": 1,
     "trainer/stream.py": 1,
-    "worker/cli.py": 1,
-    "worker/iter_rollout.py": 1,
-    "worker/ppo/engine.py": 1,
-    "worker/train/bc.py": 1,
 }
 
 #: 存量：包含 >8 参数函数的文件 → 个数。

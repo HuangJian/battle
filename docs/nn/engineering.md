@@ -25,6 +25,23 @@
 
 ---
 
+## §210 长函数存量第三十一刀：Torch BC 训练循环（worker）456 → 145（2026-11-18）
+
+`worker/train/bc.py::train` **456 → 145 行**，长函数存量 **7 → 6**
+（形状基线删除 `worker/train/bc.py`，**并顺手清掉三条已归零的历史条目**：
+`remote/train_core.py` 2、`trainer/dispatch.py` 2、`trainer/eval_dispatch.py` 1 ——
+它们的函数早已 ≤200，条目只是陈旧的上限）。
+
+与 §209 同型（Paddle 双生）：
+- `_resolve_class_weights(args, counts, action_v6, dev)`：类别权重与一行日志（48 行）。
+- `_Train`（29 个字段）：`run_epochs(args)`（191 行）、`_emit_epoch(...)`（27 行，`on_epoch`
+  回调；参数收成 `(gepoch, loss 元组, v)` 以避开宽参数门禁）、`finalize_bc(args)`（68 行）。
+- `train` 只留前置校验 / 数据与模型装配 / 上下文构造 / 两段调用；`args` 不进上下文（不新增 `Any`）。
+
+11 处 `say` 逐条比对：文案与顺序不变。
+
+---
+
 ## §209 长函数存量第三十刀：Paddle BC 训练循环（worker）372 → 138（2026-11-18）
 
 `worker/train/bc_paddle.py::train` **372 → 138 行**，长函数存量 **8 → 7**

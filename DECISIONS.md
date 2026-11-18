@@ -7535,3 +7535,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `run_epochs` / `finalize` 两段搬出；`args` 作方法参数以免新增 `Any` 字段），
   长函数存量 **8 → 7**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §209。
+- **2026-11-18（长函数存量第三十一刀：Torch BC 训练循环 worker）**：
+  `worker/train/bc.py::train` 456 → **145** 行（`_resolve_class_weights` + `_Train`：
+  `run_epochs` / `_emit_epoch` / `finalize_bc`），长函数存量 **7 → 6**；
+  形状基线删除该文件条目，并清掉三条已归零的历史条目（`train_core` / `dispatch` /
+  `eval_dispatch`）。全文 → `docs/nn/engineering.md` §210。
