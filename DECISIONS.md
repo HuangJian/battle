@@ -7397,3 +7397,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   202 → **157** 行（拆出 `_load_games` / `_read_replay_ledger`，失败语义与返回码逐字不变），
   长函数存量 **37 → 36**，形状基线删除该文件条目——`python.refactor.md` 附录 B
   「真·下一批」第 1 项开始还债。全文 → `docs/nn/engineering.md` §179。
+- **2026-11-18（长函数存量第二刀：rollout 派发）**：`trainer/rollout_phase.py::dispatch_rollout_phase`
+  207 → **191** 行（拆出 `_stream_extra_kwargs`：stream 腿的 backend/update_kwargs
+  注入，纯取值、不碰闭包），长函数存量 **36 → 35**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §180。

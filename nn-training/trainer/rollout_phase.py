@@ -228,6 +228,36 @@ def begin_payload_parts(args, it: int, parts: Any) -> None:
     parts.begin(int(it), wire_diet=True, slim=slim)
 
 
+def _stream_extra_kwargs(
+    args, ppo_backend, update_kwargs, it: int, start_it: int, ref_model
+) -> dict:
+    """stream 腿的 backend/update_kwargs 注入（`dispatch_rollout_phase` 内联段原样搬出）。
+
+    intent/goal = value warmup + kickstarting；per-tick 课程 = ppo_schedule 的 kl_coef
+    （M1c，plan §8）。门控条件与取值口径逐字保留。
+    """
+    _stream_kwargs: dict = {}
+    if args.mode in ("intent", "goal") or float(getattr(args, "_kl_coef", 0.0) or 0.0) > 0:
+        # backend/update_kwargs 注入：intent/goal = value warmup + kickstarting；
+        # per-tick 课程 = ppo_schedule 的 kl_coef（M1c，plan §8）。
+        if args.mode in ("intent", "goal"):
+            _stream_kwargs = {
+                "backend": ppo_backend,
+                "update_kwargs": update_kwargs(args, it, start_it, ref_model),
+            }
+        else:
+            _stream_kwargs = {
+                "backend": ppo_backend,
+                "update_kwargs": {"kl_coef": float(args._kl_coef)},
+            }
+            # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关。
+            # intent/goal 分支走 update_kwargs() 函数链，不经这里，不受影响）。
+            _stream_kwargs["update_kwargs"]["value_anchor"] = float(
+                getattr(args, "value_anchor", 0.0) or 0.0
+            )
+    return _stream_kwargs
+
+
 def dispatch_rollout_phase(
     args,
     bun: str,
@@ -349,25 +379,9 @@ def dispatch_rollout_phase(
                         f"(rest of ppo_backend hides collection)"
                     )
 
-            _stream_kwargs = {}
-            if args.mode in ("intent", "goal") or float(getattr(args, "_kl_coef", 0.0) or 0.0) > 0:
-                # backend/update_kwargs 注入：intent/goal = value warmup + kickstarting；
-                # per-tick 课程 = ppo_schedule 的 kl_coef（M1c，plan §8）。
-                if args.mode in ("intent", "goal"):
-                    _stream_kwargs = {
-                        "backend": ppo_backend,
-                        "update_kwargs": update_kwargs(args, it, start_it, ref_model),
-                    }
-                else:
-                    _stream_kwargs = {
-                        "backend": ppo_backend,
-                        "update_kwargs": {"kl_coef": float(args._kl_coef)},
-                    }
-                    # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关。
-                    # intent/goal 分支走 update_kwargs() 函数链，不经这里，不受影响）。
-                    _stream_kwargs["update_kwargs"]["value_anchor"] = float(
-                        getattr(args, "value_anchor", 0.0) or 0.0
-                    )
+            _stream_kwargs = _stream_extra_kwargs(
+                args, ppo_backend, update_kwargs, it, start_it, ref_model
+            )
             report = run_rollout_stream(
                 bun,
                 args.out,

@@ -25,6 +25,22 @@
 
 ---
 
+## §180 长函数存量第二刀：rollout 派发 207 → 191（2026-11-18）
+
+`trainer/rollout_phase.py::dispatch_rollout_phase` **207 → 191 行**，长函数存量
+**36 → 35**（`LONG_FUNCS_BASELINE` 删除 `trainer/rollout_phase.py` 条目）。
+
+一刀纯搬移：`_stream_extra_kwargs(args, ppo_backend, update_kwargs, it, start_it, ref_model)`
+——stream 腿的 backend/update_kwargs 注入（intent/goal = value warmup + kickstarting；
+per-tick 课程 = `ppo_schedule` 的 kl_coef + value_anchor）。选它的理由：纯取值计算、
+不碰闭包与 `nonlocal` 状态，门控条件与取值口径逐字保留，`run_rollout_stream` 收到的
+kwargs 与拆前完全一致。
+
+`_fire_eval` / `_on_epoch_done` 两个闭包留在原位：它们要改 `collect_child` /
+`spawned_early` 的 nonlocal 状态，搬出去得先造可变容器，收益不抵风险。
+
+---
+
 ## §179 长函数存量第一刀：replay 导出 202 → 157（2026-11-18）
 
 `python.refactor.md` 附录 B 的「真·下一批」第 1 项（37 个 >200 行函数）开刀：

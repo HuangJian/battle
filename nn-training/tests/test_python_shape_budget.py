@@ -57,7 +57,6 @@ LONG_FUNCS_BASELINE = {
     "trainer/loop_serve.py": 1,
     "trainer/loop_volume.py": 2,
     "trainer/queue_local.py": 1,
-    "trainer/rollout_phase.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_dispatch.py": 1,
     "worker/bc_eval.py": 1,
