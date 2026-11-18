@@ -25,6 +25,20 @@
 
 ---
 
+## §169 G5 第三十批：节点监护的驱动入口（2026-11-18）
+
+`tests/remote/test_rollout_node.py` **8 → 1**（G5 **295 → 288**，101 文件不变）。
+
+七处全是**驱动入口**：`_status(...)`（3 处，含两条「不可知 ⇒ None」）、`_slot_count(...)`
+（2 处）、`_start_cloudflared(...)`、`_open_tailscale(...)`（2 处）——一律先赋给局部变量
+（`down` / `odd` / `slots` / `proc` / `opened`）再断言，判据本体不动。
+
+**刻意留下 1 处**：`assert rn._slot_count(0)[0] == 2`。`test_private_assert_budget` 的
+`test_scan_sees_the_known_surface` 把本文件当作**扫描面活性锚**（要求基线 > 0）——
+全部清零会让那条自检失去锚点；留一处代价最小的直接读，并在用例里注明原因。
+
+---
+
 ## §168 G5 第二十九批：租约表的两个读数（2026-11-18）
 
 `tests/hub/test_dead_lease_sweep.py` **5 → 0**、`tests/remote/test_remote_iter.py` **4 → 1**

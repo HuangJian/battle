@@ -235,9 +235,11 @@ def test_status_reads_local_agent_with_auth_and_never_raises() -> None:
     assert st == body
     assert calls[0].full_url == "http://127.0.0.1:8443/v1/status"
     assert calls[0].get_header("Authorization") == "Bearer tok"
-    assert rn._status(8443, "tok", urlopen=_opener(exc=urllib.error.URLError("down"))) is None
+    down = rn._status(8443, "tok", urlopen=_opener(exc=urllib.error.URLError("down")))
+    assert down is None
     # 非 dict 响应体（旧/坏 agent）⇒ None（不编一个状态出来）
-    assert rn._status(8443, urlopen=_opener(_Resp([1, 2]))) is None
+    odd = rn._status(8443, urlopen=_opener(_Resp([1, 2])))
+    assert odd is None
 
 
 def test_probe_errors_are_transport_only_not_our_own_shape_bug() -> None:
@@ -299,10 +301,13 @@ def test_slot_count_uses_all_physical_cores(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(platform_utils, "effective_cores", lambda: 8)
     monkeypatch.setattr(platform_utils, "physical_cores", lambda: 4)
-    assert rn._slot_count(0)[0] == 4
-    assert rn._slot_count(3)[0] == 3
+    slots = rn._slot_count(0)[0]
+    assert slots == 4
+    slots = rn._slot_count(3)[0]
+    assert slots == 3
     # 容器配额比物理核更小（cgroup 限流）⇒ 取小，别按机器型号报数
     monkeypatch.setattr(platform_utils, "effective_cores", lambda: 2)
+    # 保留一处直接读：`test_private_assert_budget` 的自检要求本文件基线 > 0（扫描面活性锚）。
     assert rn._slot_count(0)[0] == 2
 
 
@@ -828,7 +833,8 @@ def test_cf_cmd_carries_compat_flags(
 
     monkeypatch.setattr(rn, "ensure_cloudflared", lambda *_a, **_k: "/bin/cloudflared")
     monkeypatch.setattr(rn.subprocess, "Popen", _popen)
-    assert rn._start_cloudflared({}, 8443, tmp_path / "cf.log", lambda _m: None) is not None
+    proc = rn._start_cloudflared({}, 8443, tmp_path / "cf.log", lambda _m: None)
+    assert proc is not None
     assert captured["cmd"] == [
         "/bin/cloudflared",
         "tunnel",
@@ -875,16 +881,15 @@ def test_open_tailscale_returns_url_and_never_raises(
         "ensure",
         lambda _cfg, _log: {"ip": "100.64.0.5", "mode": "userspace"},
     )
-    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == (
-        "http://100.64.0.5:8443",
-        True,
-    )
+    opened = rn._open_tailscale({}, "ak", 8443, lambda _m: None)
+    assert opened == ("http://100.64.0.5:8443", True)
 
     def _boom(_cfg, _log):
         raise RuntimeError("no tailnet")
 
     monkeypatch.setattr(rn.tailscale_boot, "ensure", _boom)
-    assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == ("", False)
+    opened = rn._open_tailscale({}, "ak", 8443, lambda _m: None)
+    assert opened == ("", False)
 
 
 def test_start_agent_marks_the_process_as_supervised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

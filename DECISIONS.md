@@ -7333,3 +7333,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `scheduling_facts()`；`_leg_abort` 读 `remote_fail_state()`，`_kill_and_reap` 调用移出
   assert。留 1 处 `_zero_shard_streak`（测试替身承载、生产直接读写的槽位）。
   store 拆分守卫 `MIXIN_METHODS` 72 → 74。全文 → `docs/nn/engineering.md` §168。
+- **2026-11-18（G5 第三十批：节点监护的驱动入口）**：`test_rollout_node.py` 8 → **1**
+  （G5 295 → **288**，101 文件）。`_status` / `_slot_count` / `_start_cloudflared` /
+  `_open_tailscale` 的调用全部移出 assert；刻意留 1 处 `_slot_count` 作为
+  `test_scan_sees_the_known_surface` 的扫描面活性锚（该自检要求本文件基线 > 0）。
+  全文 → `docs/nn/engineering.md` §169。

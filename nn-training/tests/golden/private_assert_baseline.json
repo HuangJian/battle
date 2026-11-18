@@ -51,7 +51,7 @@
   "tests/remote/test_remote_hotswap.py": 1,
   "tests/remote/test_remote_iter.py": 1,
   "tests/remote/test_result_upload_proc.py": 1,
-  "tests/remote/test_rollout_node.py": 8,
+  "tests/remote/test_rollout_node.py": 1,
   "tests/remote/test_rollout_node_notebook.py": 4,
   "tests/remote/test_rollout_scratch.py": 2,
   "tests/remote/test_run_loop.py": 2,
