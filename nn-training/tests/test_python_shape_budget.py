@@ -37,7 +37,6 @@ LONG_FUNCS_BASELINE = {
     "remote/job_round.py": 1,
     "remote/notebook_runtime.py": 1,
     "remote/offline_boot.py": 1,
-    "remote/offline_deliver.py": 1,
     "remote/offline_eval.py": 1,
     "remote/plan_run.py": 1,
     "remote/rollout_node.py": 1,

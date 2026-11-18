@@ -7409,3 +7409,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   213 → **182** 行（拆出 `_decode_job_body`：`POST /job` 体解析与 428 补传判定，
   错误文案/状态码逐字不变），长函数存量 **34 → 33**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §182。
+- **2026-11-18（长函数存量第五刀：补传器构造）**：`remote/offline_deliver.py::OfflineDeliverer.__init__`
+  218 → **191** 行（拆出 `_init_background_state` / `_init_probe_state` 两组状态位，
+  赋值次序不变），长函数存量 **33 → 32**，形状基线删除该文件的长函数条目
+  （宽参数条目保留）。全文 → `docs/nn/engineering.md` §183。

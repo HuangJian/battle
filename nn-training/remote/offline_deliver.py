@@ -379,6 +379,21 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
         #: 两个数一起看才是读数——只有一个数时无法区分「没评」与「瘦到 0」。
         self._eval_rows_raw_bytes = 0
         self._eval_rows_wire_bytes = 0
+        self._init_background_state(background)
+        self._init_probe_state()
+        self._load_ledger()
+        if not self.enabled and not self.disabled_reason:
+            missing = []
+            if not self.base_url:
+                missing.append("hub_url")
+            if not self.token:
+                missing.append("token")
+            if not self.run_id:
+                missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
+            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
+
+    def _init_background_state(self, background: bool) -> None:
+        """后台并行（单写者线程）的状态位；自 `__init__` 原样搬出，赋值次序不变。"""
         # ---- 后台并行（单写者线程；除 submit_*/close 外所有状态读写都在它里面）----
         self.background = bool(background)
         self._cv = threading.Condition()
@@ -394,6 +409,9 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
         self._thread: threading.Thread | None = None
         #: `submit_final` 来过没有（段末核对的输入之一：final 提交了而 `result_done` 仍假 = 摘要丢了）。
         self._final_submitted = False
+
+    def _init_probe_state(self) -> None:
+        """埋点与不变量探针（§2.4 / §2.3）；自 `__init__` 原样搬出，赋值次序不变。"""
         # ---- 埋点与不变量探针（§2.4 / §2.3；零成本：两个 int + 一次 `os.times`）----
         #: 外层循环**真正走到循环体**的圈数（内层 `wait` 超时不算）——忙等时每秒涨几万次。
         #: 云上它是 H6a 的读数；本地它只是埋点（**判据**是下面的 `_idle_spins`）。
@@ -408,16 +426,6 @@ class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixi
         self._rejected_fp: dict[int, str] = {}
         #: 同一 `it` 连续投递异常的次数（毒丸项识别；见 `_post_artifact` 的调用点）。
         self._post_failures: dict[int, int] = {}
-        self._load_ledger()
-        if not self.enabled and not self.disabled_reason:
-            missing = []
-            if not self.base_url:
-                missing.append("hub_url")
-            if not self.token:
-                missing.append("token")
-            if not self.run_id:
-                missing.append(f"合法 run_id（收到 {str(run_id)[:40]!r}）")
-            self.log(f"补传未启用（缺 {' / '.join(missing)}）——产物只落本地产物目录")
 
     # ------------------------------------------------------------ 后台并行（submit / close）
 

@@ -25,6 +25,23 @@
 
 ---
 
+## §183 长函数存量第五刀：补传器构造 218 → 191（2026-11-18）
+
+`remote/offline_deliver.py::OfflineDeliverer.__init__` **218 → 191 行**，长函数存量
+**33 → 32**（`LONG_FUNCS_BASELINE` 删除 `remote/offline_deliver.py` 条目；
+`WIDE_FUNCS_BASELINE` 的 1 条保留——签名本身仍 >8 参）。
+
+两刀纯搬移（赋值次序不变）：
+- `_init_background_state(background)`：后台单写者线程状态位（`_cv` / `_want_sync` /
+  `_repost` / 段末三元组 / `_thread` / `_final_submitted`）。
+- `_init_probe_state()`：埋点与不变量探针（`_drain_ticks` / `_idle_spins` / `_cpu_prev` /
+  拒收指纹 / 毒丸计数）。
+
+`__init__` 是一长串 `self.x = …`，没有可切的动作相位；能干净搬走的只有末尾两组
+「与构造参数无关、只初始化状态」的赋值块。
+
+---
+
 ## §182 长函数存量第四刀：worker 服务端 213 → 182（2026-11-18）
 
 `remote/worker_server.py::make_worker_server` **213 → 182 行**，长函数存量 **34 → 33**
