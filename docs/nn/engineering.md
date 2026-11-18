@@ -25,6 +25,58 @@
 
 ---
 
+## §128 B5 第四块：manifest / result 的 pydantic 模型（`model_validate` 成为校验的唯一实现，2026-11-18）
+
+`common/manifest.normalize_manifest` 曾是一条 ~110 行的 `isinstance` 链：能校验，但错误信息靠拼
+字符串、字段类型不进 mypy 视野、`bool` 冒充 `int` 这类陷阱靠注释提醒。现在字段级校验归
+`common.manifest.Manifest`（`BaseModel`），`common.protocol.CloudResult` 同理管 result 信封；
+两个旧函数都降级为**薄包装**。
+
+### 形状：模型管字段，包装管语义
+
+| 面 | 归谁 | 为什么不能塞进对方 |
+|---|---|---|
+| 字段级类型 / 非空 / 必填（按 kind 算出的集合） | `Manifest`（`before` validator 判声明、字段声明判类型） | 需要原始 dict（缺键在默认值合并后不可见） |
+| 协议红线（`proto`、kind↔mode↔arch、`role` 词域、`rollout` 规格） | `Manifest._check_red_lines` | 跨字段，且 `validate_rollout_spec` 会归一化 |
+| 默认值补齐 + **保留未知键** | `normalize_manifest` | `model_dump()` 会吃掉字段表外的键；manifest 会进 payload/账本 |
+| 与 manifest 的三方对账、bc/ppo 指标族、iter/run 逐轮形状 | `validate_result` | 要 manifest、且要写回调用方的 `r`（`r["report"] = …`） |
+
+三个**刻意**口径，都是「模型化不许改变今天收/拒的集合」：
+
+1. **`extra="allow"`**：未知字段保留（proto=1 的「未知字段忽略」，而包装历来返回原字典浅拷贝）。
+2. **严格标量**：`Annotated[int, Field(strict=True)]` / `float | int` 双严格分支 —— `True` 不能冒充
+   `1`（混进 `epochs`/`per_stage_quota` 会静默变数），`"5"` 不能冒充 `5`；同时 **`int` 仍是
+   `float` 的合法替身且类型不变**（`gamma=1` 出去还是 `1`，进 jsonl 的文本才稳定）。
+3. **错误文案逐字保留**：`proto=` / `kind=` / `mode='bc'` / `role=` / `缺失必填字段` / `result 缺失
+   字段 x` / `result.weights_json 必须非空` —— 它们被用例与现场日志当关键词。模型抛的是
+   `ProtocolError`（不是 `ValidationError`），只有 pydantic 自己的类型错误才在包装里翻成
+   `manifest 校验失败：<字段>: <原因>` / `result 校验失败：…`（字段级定位是这次要买到的东西）。
+
+### 层契约的代价：`common/` 多了 `pydantic`
+
+L0 的契约①原本写「只依赖 stdlib」，`tests/common/test_common_layer.py` 把它做成闭集门禁。`Manifest`
+只能住在 `common/`（它是 `manifest.py` 的唯一实现，下游 `distribution`/hub/worker 全靠它；搬去 `biz/`
+就是 L0 反向 import）。裁定：**放行 `pydantic` 一个包**，理由是它在本项目里早就是声明依赖
+（`pyproject.dependencies`）、纯 Python、随 `code.zip` 一起装 ⇒ 与那条契约要防的
+「云机没有 torch/numpy/trainer」不是同一类风险。代价写进三处并留成闭集：
+
+* `common/__init__.py` 层契约①（唯一例外 + 指向本节）；
+* `tests/common/test_common_layer.py::THIRD_PARTY_ALLOWED = {"pydantic"}`（第二个包要动它）；
+* `tests/common/test_manifest_split.py::ALLOWED_IMPORTS`（manifest 侧的文件级闭集）。
+
+### 守卫（都是行为判据，不是文本）
+
+`test_manifest_model_is_the_validator_and_keeps_the_wire_shape`（严格标量 3 条 + 未知键保留 +
+bc 不凭空多 `gamma`）· `test_required_of_mirrors_the_declared_schema`（必填集只有一份，
+`ppo`/`bc`/`run` 三种 kind 与常量对账）· `test_result_envelope_model_is_the_field_level_validator`
+（缺键/空 `weights_json`/类型错的**文案关键词**各一条）。
+
+**门禁读数**：6210 收下 / 2 skipped · mypy 959 · ruff 绿 · G14 不动（`object` 而非 `Any`）·
+G5 不动 · 模块 docstring 预算与文本断言基线**都未抬**（`common/__init__` 的说明压回原行数，
+新判据用 `set(...).isdisjoint` 而非 `"x" not in …`）。
+
+---
+
 ## §127 B5 第三块：episode 契约跨 `RolloutBackend` / `trainer/stream`（2026-11-18）
 
 §126 把 shard 与 episode 的**键**变成了契约，但三个 `load_episode_from_shard` 当时仍返回裸

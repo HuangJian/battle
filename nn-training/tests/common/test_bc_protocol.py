@@ -70,6 +70,24 @@ def test_bc_manifest_normalizes() -> None:
     assert m["kl_coef"] == 0.0  # 可选缺省仍归一化（worker 读它安全）
 
 
+def test_result_envelope_model_is_the_field_level_validator() -> None:
+    """信封校验的唯一实现 = `CloudResult.model_validate`（B5，2026-11-18）；
+
+    包装层（`validate_result`）只留**要 manifest 或改写 `r`** 的活：三方指纹对账与逐 kind
+    形状。下面三条把「模型化不能改变收/拒集合」钉住（文案关键词保留）：
+    """
+    m = normalize_manifest(_bc_manifest())
+    assert validate_result(_bc_result(), m)["weights_json"] == "e30="
+    missing = _bc_result()
+    del missing["commit_echo"]
+    with pytest.raises(ProtocolError, match="result 缺失字段 commit_echo"):
+        validate_result(missing, m)
+    with pytest.raises(ProtocolError, match=r"result\.weights_json 必须非空"):
+        validate_result(_bc_result(weights_json=""), m)
+    with pytest.raises(ProtocolError, match="result 校验失败：job_id"):
+        validate_result(_bc_result(job_id=7), m)
+
+
 def test_bc_manifest_requires_arch() -> None:
     bad = _bc_manifest()
     del bad["arch"]

@@ -9,7 +9,9 @@
 本文件钉五件事：
 
 1. **定义唯一**——这 38 名不许在 `protocol.py` 里再实现一遍；
-2. **依赖面闭集（且无环）**——只准 stdlib + `common.errors`；**不** import `common.protocol`；
+2. **依赖面闭集（且无环）**——只准 stdlib + `common.errors` + **`pydantic`**（2026-11-18，B5：
+   `Manifest` 模型是校验的唯一实现，见 `common/__init__` 层契约①的同一条例外；L0 的第三方面
+   **只许它一个**，由 `tests/test_layering.py` 的总闸看着）；**不** import `common.protocol`；
 3. **不得碰上层包**（`common/` 是 L0，要随 code.zip 解到云机上）；
 4. **转发同一对象**——`protocol` 的每个搬走名都是新模块的转发（`is`），`ProtocolError` 尤其重要；
 5. **契约语义没变**（功能性）：必填/missing fail fast · kind 红线（bc/iter 的 mode）· role 拼错拒收 ·
@@ -88,7 +90,11 @@ ALLOWED_IMPORTS = {
     "os",
     "pathlib",
     "re",
+    "typing",
     "common.errors",
+    # 2026-11-18（B5）：`Manifest` 模型 = manifest 校验的唯一实现（字段级错误 + mypy 看得见类型）。
+    # 这是 L0 唯一的第三方依赖，理由与总闸见 `common/__init__` 层契约①。
+    "pydantic",
 }
 
 
@@ -207,6 +213,43 @@ def test_normalize_manifest_fills_defaults_and_rejects_missing_required() -> Non
         manifest_mod.normalize_manifest(_min_manifest(proto=2))
     with pytest.raises(ProtocolError, match="kind="):
         manifest_mod.normalize_manifest(_min_manifest(kind="nope"))
+
+
+def test_manifest_model_is_the_validator_and_keeps_the_wire_shape() -> None:
+    """`Manifest.model_validate` = 字段级校验的唯一实现（B5，2026-11-18）。
+
+    包装层（`normalize_manifest`）只干两件事：按 `MANIFEST_OPTIONAL_DEFAULTS` 补默认值、
+    保留原字典的未知键。下面四条把「模型化不能改变收/拒集合」钉住：
+    """
+    m = _min_manifest()
+    model = manifest_mod.Manifest.model_validate(m)
+    assert model.job_id == m["job_id"] and model.lr == 1e-3 and model.kind == "ppo"
+    # ① 严格标量：`bool` 不得冒充 int，字符串数字不得冒充 number（`True` 混进 epochs 会静默变 1）
+    with pytest.raises(ProtocolError, match="manifest 校验失败：epochs"):
+        manifest_mod.normalize_manifest(_min_manifest(epochs=True))
+    with pytest.raises(ProtocolError, match="manifest 校验失败：gamma"):
+        manifest_mod.normalize_manifest(_min_manifest(gamma="0.99"))
+    # ② `int` 仍是 `float` 的合法替身，且**类型不变**（manifest 进 jsonl：`1` 与 `1.0` 文本不同）
+    out = manifest_mod.normalize_manifest(_min_manifest(gamma=1))
+    assert out["gamma"] == 1 and isinstance(out["gamma"], int)
+    # ③ 未知字段保留（今天返回的是浅拷贝；`model_dump()` 会把不在字段表里的键吃掉）
+    assert manifest_mod.normalize_manifest(_min_manifest(note="keep-me"))["note"] == "keep-me"
+    # ④ bc 不凭空多出 PPO 专有键（模型声明了 `gamma: None`，但包装层不许把它注入输出）
+    bc = _min_manifest(kind="bc", mode="bc", arch="student")
+    for k in manifest_mod.MANIFEST_BC_EXEMPT:
+        bc.pop(k)
+    assert set(manifest_mod.normalize_manifest(bc)).isdisjoint({"gamma"})
+
+
+def test_required_of_mirrors_the_declared_schema() -> None:
+    """必填集只有一份（`required_of`）：加 kind 忘给 `MANIFEST_*_EXTRA` 会当场红。"""
+    assert manifest_mod.required_of("ppo") == manifest_mod.MANIFEST_REQUIRED
+    assert set(manifest_mod.required_of("bc")) == (
+        set(manifest_mod.MANIFEST_REQUIRED) - set(manifest_mod.MANIFEST_BC_EXEMPT)
+    ) | set(manifest_mod.MANIFEST_BC_EXTRA)
+    assert set(manifest_mod.required_of("run")) == set(manifest_mod.required_of("iter")) | {
+        "plan_sha256"
+    }
 
 
 def test_normalize_manifest_keeps_kind_redlines() -> None:

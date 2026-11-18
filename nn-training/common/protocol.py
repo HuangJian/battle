@@ -28,6 +28,11 @@ import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Annotated
+
+# 2026-11-18（B5）：`common/` 的第三方例外**只有 pydantic**（理由与总闸见 `common/__init__`
+# 层契约①）：result 信封来自网络，字段级校验 + 类型进 mypy 视野。
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 # ------------------------------------------------------------------ 下沉（S5 第六刀，2026-09-27）
 # 「失败类型族」→ `common/errors.py`；「传输编码 / v1+v2 线格式」→ `common/wire_codec.py`。
@@ -913,6 +918,61 @@ def job_seed(run_id: str, it: int, init_weights_fp: str) -> str:
 # ------------------------------------------------------------------ result
 
 
+#: 云回传结果的必带键（信封面；`CloudResult` 的必填字段与它同源）。
+RESULT_REQUIRED: tuple[str, ...] = (
+    "job_id",
+    "data_fp",
+    "init_weights_fp",
+    "weights_json",
+    "commit_echo",
+)
+
+
+class CloudResult(BaseModel):
+    """云回传结果的**信封**（B5，2026-11-18）。
+
+    模型只表达「结果对象长什么样」（五个必带键 + weights_json 的类型事实）；**跨对象对账**
+    （与 manifest 的三方指纹、bc/ppo 的指标族、iter/run 的逐轮形状）留在 `validate_result`：
+    它们要 manifest、要改调用方的 dict，不属于一个自洽的模型。
+
+    `extra="allow"`：结果面比信封宽得多（agg/metrics/report/iters/smoke…），未知字段一律保留。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    job_id: str
+    data_fp: str
+    init_weights_fp: str
+    commit_echo: str
+    #: base64 文本或原始字节（wire v1 两种都出现过）；`strict` = 不做 str↔bytes 转换。
+    weights_json: Annotated[str, Field(strict=True)] | Annotated[bytes, Field(strict=True)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_envelope(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            raise ProtocolError(f"result 必须是对象，收到 {type(data).__name__}")
+        for k in RESULT_REQUIRED:
+            if k not in data:
+                raise ProtocolError(f"result 缺失字段 {k}")
+        return data
+
+    @model_validator(mode="after")
+    def _weights_json_must_be_non_empty(self) -> CloudResult:
+        if not self.weights_json:
+            raise ProtocolError("result.weights_json 必须非空（base64 或原始字节）")
+        return self
+
+
+def _result_validation_text(e: ValidationError) -> str:
+    """pydantic 的类型错误 → 带**字段定位**的一行（`result 校验失败：job_id: …`）。"""
+    parts = []
+    for err in e.errors():
+        loc = ".".join(str(p) for p in err["loc"]) or "<根>"
+        parts.append(f"{loc}: {err['msg']}")
+    return "result 校验失败：" + "；".join(parts)
+
+
 def validate_result(
     r: dict,
     manifest: dict,
@@ -922,14 +982,16 @@ def validate_result(
     """云回传结果校验（附录 A）：job_id/data_fp/init_weights_fp 与 manifest 对账 +
     weights_json 非空 + agg 关键字段。返回归一化结果。校验失败抛 ProtocolError。
 
+    信封的字段级校验是 `CloudResult.model_validate`（B5，2026-11-18）的活，这里只留对账与
+    逐 kind 的形状检查（它们需要 manifest 或会改写 `r` 本身）。
+
     commit_echo_must_match=False：hub 侧对账时用（hub 不依赖云 echo 决定 commit
     是否一致——manifest.commit 是 hub 自己写的，echo 只是审计）。
     """
-    if not isinstance(r, dict):
-        raise ProtocolError(f"result 必须是对象，收到 {type(r).__name__}")
-    for k in ("job_id", "data_fp", "init_weights_fp", "weights_json", "commit_echo"):
-        if k not in r:
-            raise ProtocolError(f"result 缺失字段 {k}")
+    try:
+        CloudResult.model_validate(r)
+    except ValidationError as e:
+        raise ProtocolError(_result_validation_text(e)) from None
     if r["job_id"] != manifest["job_id"]:
         raise ProtocolError(
             f"result.job_id={r['job_id']!r} != manifest.job_id={manifest['job_id']!r}——job 混用"
@@ -940,9 +1002,6 @@ def validate_result(
         raise ProtocolError("result.init_weights_fp != manifest.init_weights_fp（拒收）")
     if commit_echo_must_match and r["commit_echo"] != manifest["commit"]:
         raise ProtocolError("result.commit_echo != manifest.commit——代码版本不一致（拒收）")
-    wj = r["weights_json"]
-    if not isinstance(wj, (str, bytes)) or len(wj) == 0:
-        raise ProtocolError("result.weights_json 必须非空（base64 或原始字节）")
     if str(manifest.get("kind", "ppo") or "ppo") == "bc":
         # BC 结果：无 agg（PPO 训练指标），改查 metrics（train/bc.py 产出的训练汇总）。
         metrics = r.get("metrics")

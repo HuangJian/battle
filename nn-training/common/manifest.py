@@ -22,7 +22,9 @@
 `manifest.role` 的词）；`ROLE_HEADER`/`ROLE_HEADER_VALUE`（HTTP 头名）与 `role_from_header`（会话角色解析）
 仍住 `protocol`——那是**请求头**面，不是 manifest。
 
-依赖面 = stdlib（`hashlib` / `json` / `os` / `re` / `collections.abc` / `pathlib`）+ `common.errors`。
+依赖面 = stdlib（`hashlib` / `json` / `os` / `re` / `collections.abc` / `pathlib`）+ `common.errors`
++ **`pydantic`**（2026-11-18，B5：manifest 来自网络，要字段级错误——`Manifest` 模型是校验的唯一
+实现，`normalize_manifest` 只做包装；L0 的第三方例外**只有它**，见 `common/__init__` 层契约①）。
 **不** import `common.protocol`（无环）。`common/protocol.py` 保留 `X as X` 门面 ⇒ 历史 import 一行不改。
 """
 
@@ -34,6 +36,9 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Annotated, cast
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from common.errors import ProtocolError
 
@@ -251,105 +256,167 @@ RUN_NODE_LABEL = "run"
 #: export.ts::RUN_MAX_ITERS_HARD_CAP`，两边各有对账用例）。
 RUN_MAX_ITERS_HARD_CAP = 500
 
-def normalize_manifest(m: dict) -> dict:
-    """校验 + 归一化 job manifest（proto=1：缺失必填 fail fast，未知字段忽略）。
+# ------------------------------------------------------------------ 校验模型（B5）
+#
+# 为什么是 pydantic（`python.refactor.md` §P0-4 / §7.1）：manifest 来自网络、必须校验、
+# 要报**字段级**错误。手写 `isinstance` 链能校验，但错误信息靠拼字符串、类型不进 mypy 视野；
+# 模型让「哪个字段、期望什么」由**一份声明**回答。
+#
+# 三个刻意的口径（都是为了**不改变今天收/拒的集合**）：
+#   * `extra="allow"`：未知字段**保留**（proto=1 的「未知字段忽略」，而 `normalize_manifest`
+#     历来返回原字典的浅拷贝 —— 丢掉未知键会让 payload 与账本静默少字段）；
+#   * **严格标量**：`bool` 不是 `int` 的替身（`True` 混进配额会静默变成 1）、`"5"` 也不是
+#     （手写检查历来拒字符串数字）；`int` 仍是 `float` 的合法替身（`gamma=1` 合法），
+#     且**保留原类型**（`1` 不会变成 `1.0` —— manifest 会进 jsonl/账本，序列化文本要逐字稳定）；
+#   * 协议红线的错误文案**逐字保留**（`proto=` / `kind=` / `mode='bc'` / `role=` / `缺失必填字段`），
+#     它们被用例与现场日志当关键词用。
+StrictInt = Annotated[int, Field(strict=True)]
+#: `float | int`（不是 float 一把梭）：保留原类型，且 `bool` 与字符串都被拒。
+StrictNum = Annotated[float, Field(strict=True)] | Annotated[int, Field(strict=True)]
+NonEmptyStr = Annotated[str, Field(min_length=1)]
 
-    返回浅拷贝的 manifest（必填齐全、可选字段带默认值）。校验失败抛
-    `ProtocolError`，错误信息指明缺失字段。
-    """
-    if not isinstance(m, dict):
-        raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
-    kind = str(m.get("kind", "ppo") or "ppo")
-    if kind not in MANIFEST_KINDS:
-        # 允许列表与 `KIND_ROLES` 同一份（`MANIFEST_KINDS`）——加 kind 而忘了给角色会当场红。
-        raise ProtocolError(
-            f"kind={kind!r} 未知（只认 {'|'.join(repr(k) for k in MANIFEST_KINDS)}）——拒收"
-        )
-    required = [
-        k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
-    ]
+
+def required_of(kind: str) -> tuple[str, ...]:
+    """kind → 必填字段集（模型与下游共用一份；加 kind 只改 `MANIFEST_*_EXTRA` 常量）。"""
+    required = [k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)]
     if kind == "bc":
         required += list(MANIFEST_BC_EXTRA)
     if kind == "iter":
         required += list(MANIFEST_ITER_EXTRA)
     if kind == "run":
         required += list(MANIFEST_RUN_EXTRA)
-    missing = [k for k in required if k not in m]
-    if missing:
-        raise ProtocolError(f"manifest 缺失必填字段: {missing}")
-    if int(m.get("proto", -1)) != PROTO:
-        raise ProtocolError(f"proto={m.get('proto')!r} != {PROTO}（协议版本不匹配）")
+    return tuple(required)
+
+
+class Manifest(BaseModel):
+    """job manifest 的 wire 形状（proto=1）。
+
+    字段分三档：① **必填**（缺则拒，集合由 `required_of(kind)` 算）；② **按 kind 必填** ——
+    声明成 `X | None`，缺席由 `_check_declaration` 拦；③ 可选（默认值仍由
+    `MANIFEST_OPTIONAL_DEFAULTS` 补，模型不把它们写进字段表，否则 bc 作业会凭空多出
+    `reward_formula: null` 这类键）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # ① 必填（`kind=bc` 免除的那几个单独声明在下面，带 `| None`）
+    proto: int
+    runId: NonEmptyStr  # noqa: N815 —— wire 字段名就是 `runId`（改它会破 wire 兼容）
+    job_id: NonEmptyStr
+    commit: NonEmptyStr
+    code_sha256: NonEmptyStr
+    course: NonEmptyStr
+    course_fp: NonEmptyStr
+    mode: NonEmptyStr
+    seed: NonEmptyStr
+    init_weights_fp: NonEmptyStr
+    data_fp: NonEmptyStr
+    payload_sha256: NonEmptyStr
+
+    # ② 按 kind 必填 / 只在存在时校验类型
+    kind: str = "ppo"
+    it: StrictInt | None = None
+    epochs: StrictInt | None = None
+    mb: StrictInt | None = None
+    metrics_version: StrictInt | None = None
+    lr: StrictNum | None = None
+    gamma: StrictNum | None = None
+    lam: StrictNum | None = None
+    reward_formula: object | None = None  # 只查存在，不查类型（与手写检查同口径）
+    formula_hash: object | None = None
+    arch: str | None = None
+    ts_code_sha256: str | None = None
+    plan_sha256: str | None = None
+    rollout: dict | None = None
+    role: str | None = None
+
+    # ③ 可选但**有类型**的（手写检查历来校验它们）
+    normalize_ret: Annotated[bool, Field(strict=True)] = False
+    kickstart_kl: StrictNum = 0.0
+    per_stage_quota: StrictInt = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_declaration(cls, data: object) -> object:
+        """声明面：kind 合法 + 按 kind 的必填集。必须先于字段校验（否则默认值会掩盖缺席）。"""
+        if not isinstance(data, dict):
+            raise ProtocolError(f"manifest 必须是对象，收到 {type(data).__name__}")
+        kind = str(data.get("kind", "ppo") or "ppo")
+        if kind not in MANIFEST_KINDS:
+            # 允许列表与 `KIND_ROLES` 同一份（`MANIFEST_KINDS`）——加 kind 而忘了给角色会当场红。
+            raise ProtocolError(
+                f"kind={kind!r} 未知（只认 {'|'.join(repr(k) for k in MANIFEST_KINDS)}）——拒收"
+            )
+        missing = [k for k in required_of(kind) if k not in data]
+        if missing:
+            raise ProtocolError(f"manifest 缺失必填字段: {missing}")
+        return {**data, "kind": kind}
+
+    @model_validator(mode="after")
+    def _check_red_lines(self) -> Manifest:
+        """协议红线：版本 / 区间 / kind↔mode↔arch / role 词域 / rollout 规格。"""
+        if self.proto != PROTO:
+            raise ProtocolError(f"proto={self.proto!r} != {PROTO}（协议版本不匹配）")
+        for k in ("gamma", "lam", "lr"):
+            v = getattr(self, k)
+            if v is not None and float(v) <= 0:
+                raise ProtocolError(f"{k} 必须 > 0，收到 {v!r}")
+        if float(self.kickstart_kl) < 0:
+            raise ProtocolError("kickstart_kl 必须 >= 0")
+        if self.per_stage_quota < 0:
+            raise ProtocolError(f"per_stage_quota 必须是非负整数，收到 {self.per_stage_quota!r}")
+        # kind 红线（plan/bc-cloud-integration.plan.md §1）：ppo 仅 per-tick（v1 原红线），
+        # bc 仅 mode="bc"——两种任务类型在 mode 通道上互斥，杜绝串型。
+        if self.kind == "bc":
+            if self.mode != "bc":
+                raise ProtocolError(f"kind=bc 要求 mode='bc'，收到 {self.mode!r}（拒收）")
+            if self.arch not in ("bc", "student"):
+                raise ProtocolError(
+                    f"bc manifest arch 必须是 'bc'|'student'，收到 {self.arch!r}"
+                )
+        elif self.mode != "per-tick":
+            # M3 mode 互斥红线：iter/ppo/run 只承载 per-tick rollout（goal/intent 导出器的
+            # rollout 语义未在协议里建模）。
+            raise ProtocolError(
+                f"mode={self.mode!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
+            )
+        if self.kind == "iter":
+            # rollout 规格逐字段校验并归一化（argv 白名单 / 相对路径 / 重复局）
+            self.rollout = validate_rollout_spec(cast(dict, self.rollout))
+        # 归属字段（2026-09-25）：**可选**（旧 job 没有它 ⇒ `role_of` 按 kind 兜底），
+        # 但一旦存在就必须合法——一个拼错的 role 静默变成 online 正是那种「看不见」的失败。
+        if self.role not in (None, "") and str(self.role) not in ROLES:
+            raise ProtocolError(f"{ROLE_FIELD}={self.role!r} 未知（只认 {list(ROLES)}）——拒收")
+        return self
+
+
+def _validation_text(e: ValidationError) -> str:
+    """pydantic 的类型错误 → 带**字段定位**的一行（`manifest 校验失败：it: …`）。"""
+    parts = []
+    for err in e.errors():
+        loc = ".".join(str(p) for p in err["loc"]) or "<根>"
+        parts.append(f"{loc}: {err['msg']}")
+    return "manifest 校验失败：" + "；".join(parts)
+
+
+def normalize_manifest(m: dict) -> dict:
+    """校验 + 归一化 job manifest（proto=1：缺失必填 fail fast，未知字段保留）。
+
+    现在是 `Manifest.model_validate` 的**薄包装**（B5，2026-11-18）：模型拥有字段级校验与
+    全部协议红线，这里只做两件模型不该管的事 —— ① 把 pydantic 的类型错误翻成
+    `ProtocolError`（带字段级定位）；② 按 `MANIFEST_OPTIONAL_DEFAULTS` 补默认值、保留原字典
+    里的未知字段（`dict(m)` 就是今天的返回形状；改 `model_dump()` 会让未知键与「缺席 vs null」
+    的区分静默变样）。校验失败抛 `ProtocolError`，错误信息指明缺失/非法字段。
+    """
+    try:
+        model = Manifest.model_validate(m)
+    except ValidationError as e:
+        raise ProtocolError(_validation_text(e)) from None
     out = dict(m)
     for k, v in MANIFEST_OPTIONAL_DEFAULTS.items():
         out.setdefault(k, v)
-    # 标量类型校验（fail fast，防拼错/串位）——按 kind 实际持有的键校验
-    if not isinstance(out["runId"], str) or not out["runId"]:
-        raise ProtocolError("runId 必须是非空 str")
-    for k in ("it", "epochs", "mb", "metrics_version"):
-        if k not in out:
-            continue
-        if not isinstance(out[k], int) or isinstance(out[k], bool):
-            raise ProtocolError(f"{k} 必须是 int，收到 {out[k]!r}")
-    for k in ("gamma", "lam", "lr"):
-        v = out.get(k)
-        if v is None:
-            continue
-        if not isinstance(v, (int, float)) or isinstance(v, bool):
-            raise ProtocolError(f"{k} 必须是 float，收到 {v!r}")
-        if float(v) <= 0:
-            raise ProtocolError(f"{k} 必须 > 0，收到 {v!r}")
-    for k in (
-        "commit",
-        "code_sha256",
-        "course",
-        "course_fp",
-        "mode",
-        "seed",
-        "init_weights_fp",
-        "data_fp",
-        "payload_sha256",
-        "job_id",
-    ):
-        if not isinstance(out[k], str) or not out[k]:
-            raise ProtocolError(f"{k} 必须是非空 str")
-    # kind 红线（plan/bc-cloud-integration.plan.md §1）：ppo 仅 per-tick（v1 原红线），
-    # bc 仅 mode="bc"——两种任务类型在 mode 通道上互斥，杜绝串型。
-    if kind == "bc":
-        if out["mode"] != "bc":
-            raise ProtocolError(f"kind=bc 要求 mode='bc'，收到 {out['mode']!r}（拒收）")
-        if out["arch"] not in ("bc", "student"):
-            raise ProtocolError(f"bc manifest arch 必须是 'bc'|'student'，收到 {out['arch']!r}")
-    else:
-        if out["mode"] != "per-tick":
-            raise ProtocolError(
-                f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
-            )
-    if kind == "iter":
-        # M3 mode 互斥红线：iter 只承载 per-tick rollout（goal/intent 导出器不在
-        # 上云范围内——它们的 rollout 语义未在协议里建模）。ts_code_sha256 必须是
-        # 非空 str（下面的通用非空串循环已覆盖），rollout 规格逐字段校验。
-        if out["mode"] != "per-tick":
-            raise ProtocolError(
-                f"kind=iter 要求 mode='per-tick'，收到 {out['mode']!r}（M3 只上云 per-tick rollout）"
-            )
-        out["rollout"] = validate_rollout_spec(out["rollout"])
-    # 归属字段（2026-09-25）：**可选**（旧 job 没有它 ⇒ `role_of` 按 kind 兜底），
-    # 但一旦存在就必须合法——一个拼错的 role 静默变成 online 正是那种「看不见」的失败。
-    role_raw = out.get(ROLE_FIELD)
-    if role_raw not in (None, "") and str(role_raw) not in ROLES:
-        raise ProtocolError(f"{ROLE_FIELD}={role_raw!r} 未知（只认 {list(ROLES)}）——拒收")
-    if not isinstance(out.get("normalize_ret", False), bool):
-        raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
-    if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
-        out.get("kickstart_kl", 0.0), bool
-    ):
-        raise ProtocolError(f"kickstart_kl 必须是 number，收到 {out.get('kickstart_kl')!r}")
-    if float(out.get("kickstart_kl", 0.0)) < 0:
-        raise ProtocolError("kickstart_kl 必须 >= 0")
-    psq = out.get("per_stage_quota", 0)
-    # bool 是 int 的子类 ⇒ 必须先挡 bool（True/False 混进来会让配额变成 1/0 而不报错）。
-    if isinstance(psq, bool) or not isinstance(psq, int) or psq < 0:
-        raise ProtocolError(f"per_stage_quota 必须是非负整数，收到 {psq!r}")
+    if model.kind == "iter":
+        out["rollout"] = model.rollout  # 归一化后的规格（argv[0] 归位、默认值补齐）
     return out
 
 

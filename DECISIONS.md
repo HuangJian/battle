@@ -6979,3 +6979,19 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   还数得出」（存量归零后「数到多少处」证明不了扫描器活着）、两向护栏下限 1 → 40（实测 49 处）。存量
   **51 → 0 处**（四批）。读数：6194 收下 / 2 skipped · mypy 958 · ruff 全绿 · 全量 ×3（1 次端口回收计时 flake，
   单跑全绿）。全文 → `docs/nn/engineering.md` §124。
+
+- **2026-11-18（B5 第四块：manifest / result 校验改用 pydantic 模型，`common/` 放行 pydantic 一个包）**：
+  `python.refactor.md` §P0-4 / §7.1 要的是「字段级错误 + 类型进 mypy 视野」，手写 `isinstance` 链给不了。
+  `Manifest` 与 `CloudResult` 就此成为字段级校验的**唯一实现**，`normalize_manifest` / `validate_result`
+  降为薄包装（默认值补齐 + 保留未知键；三方对账与逐 kind 形状仍留在 `validate_result`——它要 manifest、
+  还要写回 `r`）。三条「不许改变收/拒集合」的口径：`extra="allow"`（未知键保留，`model_dump()` 会吃掉它们）·
+  严格标量（`True` 不冒充 int、`"5"` 不冒充 number，但 `int` 仍是 `float` 的合法替身**且类型不变**——
+  manifest 进 jsonl，`1` 与 `1.0` 是不同文本）· 错误文案关键词逐字保留（`proto=` / `kind=` / `mode='bc'` /
+  `role=` / `缺失必填字段` / `result 缺失字段 x`）。
+  **代价（本条才是决策）**：`Manifest` 只能住 `common/`（搬去 `biz/` = L0 反向 import），于是 L0 的
+  「stdlib-only」契约①第一次有例外。裁定放行**且仅放行** `pydantic`：它本就是 `pyproject.dependencies`
+  里的声明依赖、纯 Python、随 `code.zip` 装 ⇒ 与那条契约要防的「云机没有 torch/numpy/trainer」不同类。
+  闭集落在三处：`common/__init__` 契约①（指向 §128）· `test_common_layer::THIRD_PARTY_ALLOWED` ·
+  `test_manifest_split::ALLOWED_IMPORTS`——加第二个第三方包必须先改这三处，不能顺手。
+  读数：6210 收下 / 2 skipped · mypy 959 · ruff 绿 · G14/G5 不动 · 模块 docstring 与文本断言基线**都没抬**。
+  全文 → `docs/nn/engineering.md` §128。

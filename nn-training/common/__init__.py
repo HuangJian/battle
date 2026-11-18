@@ -1,12 +1,12 @@
-"""common —— nn-training 的**共享原语层**（stdlib-only；随 `code.zip` 下发）。
+"""common —— nn-training 的**共享原语层**（stdlib + pydantic；随 `code.zip` 下发）。
 
 ## 层契约（改本包之前先读这一节）
 
-1. **只依赖 stdlib**（包**内**互相 import 不算越界 —— 2026-09-30 刀 2 之后
-   `platform_utils` / `pid_probe` / `schema` / `distribution` 等同层模块都住在本包里了）。
-   本包会被 `remote.hub_client.pack_code_zip` 打进 `code.zip` 解到云机 `sys.path`
-   ——那里没有 torch、没有 numpy、也没有 `trainer/` 的运行前提。因此本包**不得** import
-   `trainer.*` / `remote.*` / `ppo.*` / `torch` / `numpy`，否则云端解包即 ImportError。
+1. **只依赖 stdlib**（唯一第三方例外 = `pydantic`：`manifest.py`/`protocol.py` 的校验模型，理由与
+   封闭集见 `docs/nn/engineering.md` §128）。包**内**互相 import 不算越界 —— 2026-09-30 刀 2 之后
+   `platform_utils` / `pid_probe` / `schema` / `distribution` 等同层模块都住在本包里。本包会被
+   `remote.hub_client.pack_code_zip` 打进 `code.zip` 解到云机 `sys.path` —— 那里没有 torch/numpy、
+   也没有 `trainer/` ⇒ **不得** import `trainer.*` / `remote.*` / `ppo.*` / `torch` / `numpy`。
 2. **本包不得反向 import 上层**（同上；依赖方向永远是 `上层 → common`）。
 3. **无副作用**：import 本包不读环境变量、不开文件、不起线程、不发网络请求。
 4. **无模块级可变状态**（`pid_probe` 那种只读常量表除外）——只放纯函数与不可变常量。
@@ -79,12 +79,12 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.stats` | **观测字段数值化口径**（`num_or_none`：bool / 非数值 → `None`）——`worker/loop_guards_trip` 与 `worker/train_ledger` 的唯一实现（S2，2026-10-11） |
 | `common.cli` | **入口约定**（`house_parser`：全仓 `ArgumentParser` 唯一构造点 · `run_main`：`None→0` / `int→该码` / `Ctrl-C→130`）——用户裁定「一次性全迁 + `--help`/退出码非契约，**只保 flags 语义**」（S2，2026-10-11；实测 54 个构造点 + 62 个出口，flags 面 diff 0） |
 | `common.http_respond` | **JSON 响应形状**（`respond_json`：头部顺序 / UTF-8 / `ensure_ascii=False` / 长度按字节）——`hub/http_face` 与 `remote/worker_server` 的唯一实现；`remote/push_bootstrap`（code.zip 之前的内联态）**故意不 import 它**（S2，2026-10-11） |
-| `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 / `coef_active`）——原 `remote/protocol.py`；失败类型与线格式已下沉（见下两行），留 `X as X` 门面 |
+| `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 / `coef_active`）——原 `remote/protocol.py`；失败类型与线格式已下沉（见下两行），留 `X as X` 门面。result 信封 = `CloudResult` 模型 |
 | `common.errors` | **失败类型族**（`ProtocolError` / `RetryableError` / `UnreapableChildError` / `JobCancelledError` / `JobFailedError` / `CodeChangedError`）——每条继承线 = 一个处置分支。**零依赖叶子**（S5 第六刀） |
 | `common.wire_codec` | **传输编码 / 线格式**（v1 gzip+base64 编解码 + v2 裸二进制 `BRV2`/`BRJ2`）。依赖 = stdlib + `common.errors`（S5 第六刀） |
 | `common.job_identity` | **job 身份**（幂等键 `idempotency_key` / `job_id` / 发布端撞名守卫 `collision_rows` + 扫描面常量）。stdlib-only 叶子（S5 第七刀） |
 | `common.payload` | **语料归档**（`pack_payload` / `unpack_payload` 双读 tar.xz+legacy zip / `find_payload` / 容器名常量）。依赖 = stdlib + `common.errors`（S5 第八刀） |
-| `common.manifest` | **job manifest 契约**（`PROTO` / 角色词汇 / `MANIFEST_*` schema / kind→role / TS·plan 产物契约 / rollout 规格校验 / shard 命名与 `data_fp`）。依赖 = stdlib + `common.errors`（S5 第九刀） |
+| `common.manifest` | **job manifest 契约**（`PROTO` / 角色词汇 / `MANIFEST_*` schema / kind→role / TS·plan 产物契约 / rollout 规格校验 / shard 命名与 `data_fp`）。依赖 = stdlib + `common.errors` + `pydantic`（`Manifest` 模型；`normalize_manifest` 是薄包装） |
 | `common.game_watch` | 单局子进程**停滞看门狗**的口径常量与四行日志——原 `remote/game_watch.py` |
 | `common.distribution` | 分布式采样 trainer 侧公共工具（codeHash 配方 / 结果容器 v1+v2 / 取任务 / 权重下发 / 节点探活 / 主动升级）——原 `dist_common.py`（**去 `dist_` 前缀**，2026-09-30 刀 2） |
 | `common.shard` | shard 清单 + 远端结果容器校验 + 唯一落盘出口——原 `dist_shard.py`（同上） |
