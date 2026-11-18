@@ -106,6 +106,59 @@ def test_resume_reuses_matching_markers(tmp_path: Path) -> None:
     assert got["reused"] == 2
 
 
+def test_logs_runtime_and_per_shard_elapsed(tmp_path: Path) -> None:
+    """运行时与耗时必须**显式**进日志（用户 2026-11-18：「worker 日志显式打印 replay 转换
+    实际用了 bun 还是 node 及耗时」）。
+
+    两行两个面：开场 `档位=primary|fallback`（转换可能跑几分钟，不能等到末尾才看见选了谁），
+    收尾带**单 shard 均值/最长**（只给一个总时长，看不出是慢在每一局还是漏在单个 shard 上）。
+    """
+    logs: list[str] = []
+    job, man, shards = _job(tmp_path)
+    got = rc.convert_replay_corpus(job, shards, man, workers=2, log=logs.append)
+    # 本用例的运行时是 sys.executable（python），不是 bun 主运行时 ⇒ fallback 档。
+    assert got["convert_fallback"] == 1
+    assert logs[0].startswith("replay 转换运行时：")
+    assert logs[0].split("· 档位=")[1].startswith("fallback")
+    done = [ln for ln in logs if ln.startswith("replay 转换完成：")]
+    assert len(done) == 1
+    stats = done[0].split(" · ")[1]
+    assert stats.startswith("单 shard 均值 ")
+    assert stats.split(" / 最长 ")[1].endswith("ms")
+    # 复用轮没跑子进程 ⇒ 不能把 0ms 当成「很快」报出去。
+    logs2: list[str] = []
+    rc.convert_replay_corpus(job, shards, man, workers=2, log=logs2.append)
+    done2 = [ln for ln in logs2 if ln.startswith("replay 转换完成：")]
+    assert done2[0].split(" · ")[1].startswith("全部命中标记")
+
+
+def test_fallback_warns_loudly_and_primary_stays_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回落档要**额外**一条醒目行（代价 1.15× + 修法）；主运行时档不许有。
+
+    用户 2026-11-18：「replay 转换处在 fallback（node）档时让 worker 额外打一条醒目提醒，
+    避免长期静默慢 1.15×」—— 每轮都打而不是只打一次：长会话里日志会滚过，去重会让
+    「已经不慢了」这件事重新变回静默；转换按轮发生，不按 shard 刷屏。
+    """
+    job, man, shards = _job(tmp_path)
+    logs: list[str] = []
+    rc.convert_replay_corpus(job, shards, man, workers=2, log=logs.append)
+    warn = [ln for ln in logs if ln.startswith("WARN replay 转换在 ")]
+    assert len(warn) == 1
+    assert warn[0].split("修法：")[1].startswith("让 bun 落进持久缓存")
+    # 第二轮（仍回落）同样要有一条 —— 不是「只提醒一次」。
+    logs2: list[str] = []
+    rc.convert_replay_corpus(job, shards, man, workers=2, log=logs2.append)
+    assert len([ln for ln in logs2 if ln.startswith("WARN replay 转换在 ")]) == 1
+    # 主运行时（bun）档：全部命中标记 ⇒ 不跑子进程，日志里一条 WARN 都不许有。
+    monkeypatch.setattr(rc, "resolve_js_runtime", lambda: "bun")
+    logs3: list[str] = []
+    rc.convert_replay_corpus(job, shards, man, workers=2, log=logs3.append)
+    assert [ln for ln in logs3 if ln.startswith("WARN")] == []
+    assert logs3[0].split("· 档位=")[1].startswith("primary")
+
+
 def test_convert_readout_bytes_and_jobs(tmp_path: Path) -> None:
     """D10：replay/labels 字节、实际转换 job 数、运行时回落位。"""
     job, man, shards = _job(tmp_path)

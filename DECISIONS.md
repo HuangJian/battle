@@ -6159,3 +6159,26 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **证据**：`tests/remote/test_rollout_relay.py` 17 → **23** 例（+4：`tls-blocked` 对照也卡 / `sni-blocked` 对照成功 / `app-stall` 握手成功 / `_tls_verdict` 两条真路径 —— 只 accept 不说话 → `timeout`、accept 后立刻 close → `err:tls*`）。判据全部钉 `facts["hint"]` / `facts["tls"]` / `facts["tls_ctrl"]`，**不钉子串** ⇒ 文本形态断言口径**不抬格**（护栏仍 1502；第一版写了 `assert "TLS=" in line` 被护栏拦下，改成结构化断言）。
 - **边界**：裸握手不验应用层，`ok` 只说明「能握手」；对照主机只覆盖 CF 这条路径，hub 换非 CF 入口（自建反代 / 内网直连）时对照要跟着换，否则 `sni-blocked` 会误报。`__all__` 已导出 `TLS_PROBE_SEC` / `CTRL_HOST`。
 - **全文** → `docs/nn/remote-transport.md` §159.3；代码 → `remote/rollout_relay.py`（`TLS_PROBE_SEC` / `CTRL_HOST` / `_tls_verdict` / `_tls_sweep` / `_fail_hint` 四类新分支 / `probe_hub` 第四层）· `tests/remote/test_rollout_relay.py`（`_stub_layers` 打桩 + 4 例）。
+
+## §2026-11-18-goalnn-online-worker-bun-for-replay — 两块在线盘**开机供给 bun**（落持久缓存）：replay → npy 的转换在 worker 侧跑
+
+- **用户口径（2026-11-18 原话）**：「两块在线盘环境启动后，需要先安装 bun，以执行 replay 到 npy 的转换。
+  需要像 rollout 一样，定义安装文件的持久化位置，避免每次新会话都下载。」
+- **为什么**：`corpus_fmt=replay`（2026-11-17 起默认）把 `replay.json` 下给 worker，obs/scalars/extra 由
+  `remote/replay_corpus` 在 worker 进程里重建，运行时顺序 **Bun 优先**、Node 兜底（plan D5）⇒ 开机没 bun
+  就每个会话都退到 Node（1.15× 慢，两套运行时口径）。
+- **决定**（`§2026-09-25-…-online-worker-no-bun` 的例外再扩一格，沿 `§2026-10-21-…-bun-for-self-collect`
+  四条硬约束）：① 装机**复用** `remote/rollout_node.ensure_bun`（⇒ `_ensure_bun` + `_bin_cache_dir`），
+  不另写一份；② 供给点**早于任何 worker 子进程**（`run_notebook` 第一件事 + `notebook_boot._push`
+  因 push 先 spawn 而自己补一次）；③ 持久位置是**数据**（`CFG.bin_cache_dir` / `BATTLE_BIN_CACHE`，
+  否则按平台持久根 → `.battle-bin/bun`）；④ 装不上**不致命**（回落 node，仅记一行）。
+- **读数（同日补）**：转换开场打 `replay 转换运行时：<bun|node>（<路径>）· 档位=primary|fallback`（回落附
+  原因）+ 回落档**额外**一条 `WARN … 比 bun 慢约 1.15×（22.1→25.4 µs/tick）…修法：持久缓存 / corpus_fmt=full`
+  （**每轮都打、不设 warned 位**：去重会让长会话在日志滚过后重新静默）；收尾行补 `单 shard 均值/最长`，
+  bundle 行带运行时 —— 原先只有末尾 `runtime=node`，读者得先知道「本该是 bun」才看得出回落。
+- **被否决**：cell 内联装（两份装机必漂 + 在线 cell 禁安装机制）· 在 `resolve_js_runtime` 里 JIT 装
+  （把公网下载塞进 job 关键路径）· 只在 worker 进程里装（装完还得重启才进 PATH）。
+- **护栏**：`tests/remote/test_tailscale_boot_bun.py`（一份实现 / 早于 spawn / 持久位置是数据 / 不致命）+
+  `test_worker_replay_prepass.py::test_logs_runtime_and_per_shard_elapsed`；文本断言口径 A/B 不抬格。
+- **全文** → `docs/nn/remote-transport.md` §160；代码 → `remote/{rollout_node,notebook_runtime,notebook_boot,replay_corpus}.py` ·
+  `ipynb/battle.{tailscale,cloudflared}.ipynb`。

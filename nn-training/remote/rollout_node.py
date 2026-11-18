@@ -574,6 +574,27 @@ def _ensure_bun(code_dir: Path, cfg: dict, log: Callable[[str], None]) -> str:
     return bun
 
 
+def ensure_bun(
+    cfg: dict | None = None,
+    log: Callable[[str], None] | None = None,
+    *,
+    code_dir: str | Path | None = None,
+) -> str:
+    """**别的盘**复用这一份装机 + 持久缓存（DECISIONS §2026-11-18-goalnn-online-worker-bun-for-replay）。
+
+    2026-11-18 用户口径：「两块在线盘环境启动后先装 bun，以执行 replay 到 npy 的转换」，
+    并「像 rollout 一样定义持久化位置，避免每次新会话都下载」。⇒ 它们**不另写一份安装逻辑**
+    （DECISIONS §2026-10-21-goalnn-online-worker-bun-for-self-collect 约束①），而是调本函数：
+    同一套候选/PATH 探测、同一套镜像与退避、同一份持久缓存（`_bin_cache_dir` ⇒
+    `<持久根>/.battle-bin/bun`，跨会话命中即跳过下载）。
+
+    返回 bun 路径；也装不上 ⇒ `""`（调用方**响亮记一行**后继续跑：replay 转换会回落 node，
+    `remote/replay_corpus.resolve_js_runtime` 两者皆无才失败）。
+    `code_dir` 只给 `cfg.bun_install_deps` 的 `bun install` 用（缺省 `/tmp`；该开关缺省关）。
+    """
+    return _ensure_bun(Path(code_dir or "/tmp"), dict(cfg or {}), log or (lambda _m: None))
+
+
 def _find_cloudflared(cfg: dict, log: Callable[[str], None]) -> str:
     """已安装的 cloudflared（显式 → PATH → 常见目录）。
 

@@ -12,6 +12,7 @@ cfg 键（cell 的 CFG dict）：
   max_session_hours · poll_interval_sec · idle_floor_sec · max_worker_restarts ·
   keepalive_stop (threading.Event，cell 的保活线程停机柄) · log (callable) ·
   code_dir (已解包的 code.zip 目录，push 模式起服务用) ·
+  bin_cache_dir (可选：bun 的持久缓存目录，见 `ensure_replay_bun`) ·
   work_dir (可选覆盖 /tmp 工作目录——单测注入 tmp_path 用)
 
 ★ 后端不在这里选：`resolve_device` 用 `remote.bc_job.resolve_ppo_backend("auto")` 问出
@@ -1011,8 +1012,51 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
 # ════════════════════════ 入口：banner → runner → 崩溃退避重启 ════════════════════════
 
 
+def ensure_replay_bun(cfg: dict[str, Any], log) -> str:
+    """开机供给 replay → npy 的运行时（Bun 优先），并落到**持久缓存**。
+
+    为什么在线盘也要 bun（2026-11-18，DECISIONS §2026-11-18-goalnn-online-worker-bun-for-replay）：
+    `corpus_fmt=replay` 的 kind=ppo job 把 replay.json 下给 worker，由 worker 侧的转换器
+    （`remote/replay_corpus`）重建 obs/scalars/extra，而运行时选择是 **Bun 优先**、Node 只作兜底
+    （那两者都缺才是响亮失败）。两块在线盘（tailscale / cloudflared）正是收这类 job 的盘。
+
+    装在哪：**复用采样节点的同一份实现**（`remote.rollout_node.ensure_bun` ⇒ `_ensure_bun`）——
+    候选/镜像/退避与持久缓存全部同一份（`<持久根>/.battle-bin/bun`：DSW `/mnt/workspace`、
+    Kaggle `/kaggle/working`、Colab `/content`；显式口子 `CFG.bin_cache_dir` / `BATTLE_BIN_CACHE`）。
+    不另写安装逻辑（DECISIONS §2026-10-21 约束①）；`_ensure_bun` 自己的下载都包在
+    `_public_net()`（= `tailscale_boot.platform_net_env`）里，所以落在 tailnet 引导之后也不会被
+    只转发 tailnet 的本地代理卡住。
+
+    装不上**不致命**：转换回落 Node；这里只记一行，绝不因此让 worker 起不来。
+    只有带代码根的**真会话**才供给 —— `code_dir` 是 `bun install` 的落点，单测/嵌入宿主没有它
+    （也就没有 replay 活要干），跳过可让那些用例保持零网络/零子进程。
+    """
+    code_dir = str(cfg.get("code_dir") or "").strip()
+    if not code_dir:
+        return ""
+    try:
+        from remote.rollout_node import ensure_bun
+
+        bun = ensure_bun(cfg, log, code_dir=code_dir)
+    except Exception as e:  # 装机模块/网络任何异常都不该拖垮 worker
+        log(f"bun 供给失败（{type(e).__name__}: {e}）—— replay 转换将回落 node")
+        return ""
+    if not bun:
+        log("bun 不可用（装不上）—— replay 转换将回落 node；两者皆无则转换会响亮失败")
+        return ""
+    ver = ""
+    try:
+        from common.proc import bun_version
+
+        ver = bun_version(bun, timeout=30.0, fallback="", require_zero=True)
+    except Exception:
+        pass
+    log(f"bun 就绪: {bun}{(' v' + ver) if ver else ''}（replay → npy 转换的运行时）")
+    return bun
+
+
 def run_notebook(cfg: dict[str, Any]) -> int:
-    """cell 委托入口：设备解析 → runner（pull/push）→ 崩溃退避重启 → 保活停机。
+    """cell 委托入口：bun 供给 → 设备解析 → runner（pull/push）→ 崩溃退避重启 → 保活停机。
 
     返回最终 rc（0 = 干净；-2 = 配置致命）。KeyboardInterrupt 穿透到 cell
     （interrupt = 停机），由调用方 kernel 收尾——子进程由各 runner 的 finally 回收。
@@ -1022,6 +1066,9 @@ def run_notebook(cfg: dict[str, Any]) -> int:
     code_dir = cfg.get("code_dir")
     if code_dir:
         log(f"运行时代码: {code_dir}")
+    # ★ 必须先于**任何 worker 子进程**：replay 转换在 worker 里跑，而它按 `shutil.which("bun")`
+    #   找运行时 —— 本函数里改的 PATH 只被子进程继承，spawn 之后再装就晚了（所以这里是第一行）。
+    ensure_replay_bun(cfg, log)
     # 已解析则复用：push-first 的 cell 会在 **spawn worker_server 之前**先解析一次
     # （spawn 走的是 `--device`，不先解析就会把字面量 "auto" 传给 worker —— 2026-09-15 事故）。
     # 复用同时保证：① 设备探测只跑一次、日志只出一份；② resolve_device 在 TPU 分支打的

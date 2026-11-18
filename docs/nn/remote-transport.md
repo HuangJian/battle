@@ -6,6 +6,64 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §160 两块在线盘开机供给 bun（replay → npy 的转换运行时）＋持久缓存（2026-11-18）
+
+**用户口径**：「`battle.cloudflared.ipynb` 与 `battle.tailscale.ipynb` 环境启动后，需要先安装 bun，
+以执行 replay 到 npy 的转换。需要像 rollout 一样，定义安装文件的持久化位置，避免每次新会话都下载。」
+
+**为什么现在需要**：`corpus_fmt=replay`（2026-11-17 起默认）把 `replay.json` 下给 worker，
+obs/scalars/extra 由 `remote/replay_corpus` 的转换器在 **worker 进程里**重建；运行时顺序是
+**Bun 优先**、Node 兜底（`resolve_js_runtime`）。两块在线盘正是收 `kind=ppo` 的盘 ⇒ 没 bun 就
+每个会话都退到 Node（1.15× 慢，且两套运行时口径）。
+
+**落点（一处实现，两个调用点）**
+
+| 件 | 作用 |
+|---|---|
+| `remote/rollout_node.ensure_bun(cfg, log, *, code_dir=)` | 薄公开入口：转调既有 `_ensure_bun`（候选 / PATH / 镜像 / 退避 / **持久缓存** `_bin_cache_dir`），**不另写**第二份装机 |
+| `remote/notebook_runtime.ensure_replay_bun(cfg, log)` | 开机供给：`run_notebook` 的**第一件事**（先于设备解析与任何 worker spawn）；无 `code_dir` 的宿主（单测/嵌入）直接跳过；装不上只记一行「回落 node」 |
+| `remote/notebook_boot._push` | tailscale 的 push 在 `run_notebook` **之前**就 `spawn_full_worker_server` ⇒ 自己先供给一次（worker 子进程继承 PATH） |
+| `ipynb/battle.{tailscale,cloudflared}.ipynb` | `CFG.bin_cache_dir` 口子（空 = 按平台持久根自动探测）+ cloudflared push-first 兜底「先供给再 spawn」（cell 里只调模块，不内联装机） |
+
+**持久缓存口径**（与 `rollout.ipynb` 同一份）：显式 `CFG.bin_cache_dir` / env `BATTLE_BIN_CACHE`
+优先，否则按 `PERSISTENT_ROOTS` 探测第一个存在的根 —— DSW `/mnt/workspace` · AI Studio
+`/home/aistudio` · Kaggle `/kaggle/working` · Colab `/content`，缓存子目录 `.battle-bin/`
+（`bun` 与 `cloudflared` 平铺）。命中时先跑 `--version` 验架构/坏档，通过才复用（跳过一次下载）。
+
+**顺序（代理）**：tailscale 链的供给点在 `tailscale_boot.ensure()` 之后（之前没有代码根，
+`remote/` 不可用），下载因此包在 `_public_net()`（= `platform_net_env()`）里 —— 与 cloudflared
+那条腿已知做法相同；cloudflared 链没有代理注入，无需还原。
+
+**护栏**（`tests/remote/test_tailscale_boot_bun.py`，12 例）：① 四个在线模块里不许出现安装机制
+字面量 `bun.sh/install`（一份实现）；② 供给必须早于 `run_pull_worker` / `run_push_worker` /
+`spawn_full_worker_server`（AST 调用顺序）；③ 两块盘的 `CFG` 必须有 `bin_cache_dir`；
+④ `ensure_replay_bun` 收不到代码根或装不上都返回 `""` 且不抛（monkeypatch 行为面）；
+保留「`ensure()` 不碰 bun」「退役符号不回」「离线盘 + 采样节点仍有 bun」。文本断言口径不抬格。
+
+**读数（2026-11-18 同日补）**：转换本身也把「用了谁、多久」打进 worker 日志 ——
+开场一行 `replay 转换运行时：bun（<path>）· 档位=primary`（回落时 `档位=fallback` + 原因：
+`bun 不在 PATH —— 开机供给未命中`），收尾一行
+`replay 转换完成：N shard（复用 R），X.Xs runtime=bun workers=8 · 单 shard 均值 16.6ms / 最长 42.0ms …`
+（复用轮报「全部命中标记（未跑子进程）」而不是 0ms）；job 级 bundle 行同样带上运行时
+（`X.Xs bun → N shard`）。此前只有末尾 `runtime=node`，读者得先知道「本该是 bun」才看得出回落。
+
+回落档**额外**一条醒目行（用户 2026-11-18：「避免长期静默慢 1.15×」）：
+
+```
+WARN replay 转换在 node 回退档：比 bun 慢约 1.15×（实测 22.1 → 25.4 µs/tick，plan/replay-corpus.plan.md D5）
+—— 这台盘上没有可用的 bun。修法：让 bun 落进持久缓存（开机供给 / CFG bin_cache_dir / BATTLE_BIN_CACHE），
+或把这门课改回 corpus_fmt=full
+```
+
+**每轮都打、不设 warned 位**：进程级去重会让长会话在日志滚过之后重新变回静默，而转换按 job/轮发生
+（不是按 shard），一轮一行不会刷屏。上面那行说「发生了什么」，这一行说「代价 + 怎么修」——
+能让人动手的是后者；主运行时（bun）档一条 WARN 都不打（`test_fallback_warns_loudly_and_primary_stays_quiet` 钉着）。
+
+**边界**：`~/.bun/bin` 仍然每次会话丢（系统盘），本决定只保证「装过一次就落在持久根」；
+版本漂移沿用既有 `bun patch differs … allowed (yellow)` 容差。
+
+---
+
 ## §159 relay 连不上 hub 时「日志不能自证」：一次 DSW 现场的取证与四处修法（2026-11-18）
 
 **现场（`node_id=dsw`，`link=relay`，`hub_url` 为公网 quick tunnel）**：注册循环，每 60s 重建一次、连挂 3 轮。

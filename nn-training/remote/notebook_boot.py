@@ -131,6 +131,9 @@ def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str)
         "idle_floor_sec": 3600, "max_worker_restarts": 5,
         # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N；缺省 1.0 = 课程原样）。
         "epoch_mult": cfg.get("epoch_mult", 1.0),
+        # ★ 2026-11-18：bun 的持久缓存目录（replay → npy 转换的运行时；见 run_notebook 的
+        #   ensure_replay_bun）。空串 = 按平台持久根自动探测，与采样节点同一份实现。
+        "bin_cache_dir": cfg.get("bin_cache_dir", ""),
         "keepalive_stop": keepalive_stop, "log": log, "code_dir": CODE_DIR,
     })
 
@@ -211,7 +214,7 @@ def _push(cfg: dict, log, secret, keepalive_stop, ip: str, tok: str) -> int:
         time.sleep(0.5)
 
     sys.path.insert(0, CODE_DIR)
-    from remote.notebook_runtime import resolve_device, run_notebook
+    from remote.notebook_runtime import ensure_replay_bun, resolve_device, run_notebook
     from remote.push_bootstrap import requeue_job, spawn_full_worker_server, wait_ping
 
     rl_cfg: dict = {
@@ -221,8 +224,14 @@ def _push(cfg: dict, log, secret, keepalive_stop, ip: str, tok: str) -> int:
         "idle_floor_sec": 3600, "max_worker_restarts": 5,
         # ★ 2026-10-26：训练侧放大（PPO 每轮更新遍数 × N；缺省 1.0 = 课程原样）。
         "epoch_mult": cfg.get("epoch_mult", 1.0),
+        # ★ 2026-11-18：bun 的持久缓存目录（replay → npy 转换的运行时）。
+        "bin_cache_dir": cfg.get("bin_cache_dir", ""),
         "keepalive_stop": keepalive_stop, "log": log, "code_dir": CODE_DIR,
     }
+    # ★ push 比 pull 早一步起 worker_server（`spawn_full_worker_server` 就在下面），所以
+    #   `run_notebook` 里的那次供给来得太晚 —— 这里先装：worker 子进程继承本进程 PATH，
+    #   `remote/replay_corpus.resolve_js_runtime` 才找得到 Bun。装不上不致命（回落 node）。
+    ensure_replay_bun(rl_cfg, log)
     # 设备必须在 spawn 之前解析：spawn 传 --device，给 "auto" 会当场炸（2026-09-15 事故）
     rl_cfg["device_resolved"] = resolve_device(rl_cfg, log)
     real = spawn_full_worker_server(

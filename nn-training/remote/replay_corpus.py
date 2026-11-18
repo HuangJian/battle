@@ -342,7 +342,28 @@ def convert_replay_corpus(
         raise ProtocolError("corpus_fmt=replay 但 payload 里没有任何 shard——拒收（不训空）")
     converter, conv_sha = verify_converter(job_dir, manifest)
     runtime = resolve_js_runtime()
+    runtime_name = Path(runtime).name
     n_workers = convert_workers(workers, len(dirs), verify_only=verify_only)
+    # ★ 2026-11-18：运行时**开场就报**，别等到转换完才在第一行里看见。这里也是「回落到 node」
+    #   唯一会被人看见的地方 —— 之前只有末尾那行 `runtime=node`，读者得先意识到「本该是 bun」。
+    #   解析与判定同一个口径（`convert_fallback_flag`）：bun = 主运行时，其余 = 回落。
+    if convert_fallback_flag(runtime_name):
+        log(
+            f"replay 转换运行时：{runtime_name}（{runtime}）· 档位=fallback"
+            "（bun 不在 PATH —— 开机供给未命中，见 CFG bin_cache_dir / ensure_replay_bun 那几行）"
+        )
+        # ★ 2026-11-18（用户口径「fallback 档时额外打一条醒目提醒，避免长期静默慢 1.15×」）：
+        #   上面那行说「发生了什么」，这一行说「**代价 + 怎么修**」—— 能让人动手的是后者。
+        #   每轮都打，**不设 warned 位**：进程级去重会让长会话在日志滚过之后重新变成静默，
+        #   而它一轮只出现一次（转换按 job/轮发生，不是按 shard，不会按拍刷屏）。
+        log(
+            f"WARN replay 转换在 {runtime_name} 回退档：比 bun 慢约 1.15×"
+            "（实测 22.1 → 25.4 µs/tick，plan/replay-corpus.plan.md D5）—— 这台盘上没有可用的 bun。"
+            "修法：让 bun 落进持久缓存（开机供给 / CFG bin_cache_dir / BATTLE_BIN_CACHE），"
+            "或把这门课改回 corpus_fmt=full"
+        )
+    else:
+        log(f"replay 转换运行时：{runtime_name}（{runtime}）· 档位=primary")
     t0 = time.time()
     reused = 0
     # D10 墙钟账（additive）：replay/labels 的真实字节在转换前量（转换只增不减）。
@@ -370,12 +391,14 @@ def convert_replay_corpus(
                 verify_only=verify_only,
             )
 
-    def _one(sd: Path) -> bool:
+    def _one(sd: Path) -> tuple[bool, float]:
+        """（标记命中没、这个 shard 实际花了多久）。耗时按**并发**计 —— 每 shard 各算各的。"""
+        t = time.time()
         if verify_only:
             # 诊断路径：直接对真实 shard 跑 `--verify-only`，不建事务目录、不写标记/产物。
             _submit_via_pool(sd, sd.name)
-            return False
-        return _convert_tx(
+            return False, time.time() - t
+        reused_one = _convert_tx(
             sd,
             converter=converter,
             converter_sha=conv_sha,
@@ -383,22 +406,32 @@ def convert_replay_corpus(
             timeout_sec=SHARD_TIMEOUT_SEC,
             submit=lambda tmp: _submit_via_pool(tmp, sd.name),
         )
+        return reused_one, time.time() - t
 
+    #: 真跑了子进程的 shard 的**单体耗时**（复用标记的不算 —— 它们没花转换时间）。
+    durations: list[float] = []
     try:
         n = max(1, min(n_workers, len(dirs)))
         with ThreadPoolExecutor(max_workers=n) as ex:
-            for got in ex.map(_one, dirs):
+            for got, dt in ex.map(_one, dirs):
                 if got:
                     reused += 1
+                else:
+                    durations.append(dt)
     finally:
         if pool is not None:
             log(pool.summary())
             pool.close()
     sec = time.time() - t0
-    runtime_name = Path(runtime).name
+    spread = (
+        f"单 shard 均值 {1000 * sum(durations) / len(durations):.1f}ms / "
+        f"最长 {1000 * max(durations):.1f}ms"
+        if durations
+        else "全部命中标记（未跑子进程）"
+    )
     log(
         f"replay 转换完成：{len(shard_dirs)} shard（复用 {reused}），"
-        f"{sec:.1f}s runtime={runtime_name} workers={n_workers} "
+        f"{sec:.1f}s runtime={runtime_name} workers={n_workers} · {spread} · "
         f"{'verify-only ' if verify_only else ''}converter={conv_sha[:12]}…"
     )
     return {
@@ -451,9 +484,11 @@ def prepass(
         verify_only=verify_only,
     )
     if bundle is not None:
+        # 日志节食（短口径）：**运行时也进这一行** —— worker 日志里「这轮转换用的是 bun 还是
+        # node」与耗时是同一件事的两个面，分开写就一定会有人只读到一半。
         bundle.add(
             "replay 转换",
-            f"{got['sec']}s → {got['shards']} shard（复用 {got['reused']}）",
+            f"{got['sec']}s {got['runtime']} → {got['shards']} shard（复用 {got['reused']}）",
         )
     return got
 
