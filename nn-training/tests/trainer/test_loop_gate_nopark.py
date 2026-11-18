@@ -75,9 +75,10 @@ def test_remediate_never_parks_and_halts_cloud(
 ) -> None:
     """REMEDIATE：落账但不停车；向 hub 下发停机达令。"""
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
-    assert TrainingGuards._apply_verdict(fake, 3, _res("REMEDIATE")) is False  # 不停车
+    applied = TrainingGuards._apply_verdict(fake, 3, _res("REMEDIATE"))
+    assert applied is False  # 不停车
     assert halt_calls == [True]
-    assert fake._cloud_halted is True
+    assert fake.guard_state().cloud_halted is True
     ev = json.loads((tmp_path / "tl.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert ev["event"] == "gate_verdict" and ev["verdict"] == "REMEDIATE"
 
@@ -85,7 +86,8 @@ def test_remediate_never_parks_and_halts_cloud(
 def test_pause_and_abort_also_halts_cloud(halt_calls: list[bool], tmp_path: Path) -> None:
     for v in ("PAUSE", "ABORT"):
         fake = _fake(jsonl=tmp_path / "tl.jsonl")
-        assert TrainingGuards._apply_verdict(fake, 1, _res(v)) is False
+        applied = TrainingGuards._apply_verdict(fake, 1, _res(v))
+        assert applied is False
     assert halt_calls == [True, True]
 
 
@@ -95,7 +97,7 @@ def test_hold_after_halt_resumes_cloud(halt_calls: list[bool], tmp_path: Path) -
     fake._cloud_halted = True
     TrainingGuards._sync_cloud_halt(fake, 5, "HOLD")
     assert halt_calls == [False]
-    assert fake._cloud_halted is False
+    assert fake.guard_state().cloud_halted is False
 
     halt_calls.clear()
     fresh = _fake()
@@ -106,7 +108,8 @@ def test_hold_after_halt_resumes_cloud(halt_calls: list[bool], tmp_path: Path) -
 def test_stop_verdict_does_not_touch_cloud(halt_calls: list[bool], tmp_path: Path) -> None:
     """预算 STOP 走 _budget_hard_cut 真停车——不是停机达令，不发给云机。"""
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
-    assert TrainingGuards._apply_verdict(fake, 9, _res("STOP", "max_hours 到顶")) is False
+    applied = TrainingGuards._apply_verdict(fake, 9, _res("STOP", "max_hours 到顶"))
+    assert applied is False
     assert halt_calls == []
 
 

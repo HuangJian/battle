@@ -25,6 +25,22 @@
 
 ---
 
+## §166 G5 第二十七批：复用既有接缝（2026-11-18）
+
+`tests/trainer/test_loop_gate_nopark.py` **5 → 0**、`tests/worker/test_remote_ppo_phases.py`
+**5 → 0**（G5 **322 → 312**，106 → 104 文件）。这两处**不新增任何生产代码** —— 前面几批
+建好的读数正好覆盖它们：
+
+- `TrainingGuards._apply_verdict(...)` 的调用移出 assert；停机旗标改读
+  `guard_state().cloud_halted`（§154）。
+- `_remote_ppo_step(...)` 的调用移出 assert；连败数 / 停腿旗标改读
+  `remote_fail_state().consecutive_failures` / `.leg_aborted`（§155 第十三批）。
+
+这条批次的判据价值：接缝建成后要**回头把旧用例收编**，否则「视图存在但没人用」与
+「视图还没建」在基线上无法区分。
+
+---
+
 ## §165 G5 第二十六批：收工读数的两条入口（2026-11-18）
 
 `tests/trainer/test_loop_park.py` 私有断言 **6 → 1**（G5 **327 → 322**，106 文件不变）。

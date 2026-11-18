@@ -7318,3 +7318,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `collect_child()`（活引用），`finish_course` 内部同步改用；`_budget_hard_cut` 的调用移出
   assert。留 1 处 `_node_rollout` 初值断言 —— 它是**构造契约**（AttributeError 事故），
   不是执行面读数。lifecycle 拆分守卫成员闭集 7 → 9。全文 → `docs/nn/engineering.md` §165。
+- **2026-11-18（G5 第二十七批：复用既有接缝）**：`test_loop_gate_nopark.py` 5 → 0、
+  `test_remote_ppo_phases.py` 5 → 0（G5 322 → **312**，104 文件）。零生产改动：停机旗标读
+  `guard_state().cloud_halted`、连败/停腿读 `remote_fail_state()`，两处驱动调用移出 assert。
+  收编旧用例是接缝建设的一部分 —— 否则「视图没人用」与「视图没建」在基线上无法区分。
+  全文 → `docs/nn/engineering.md` §166。
