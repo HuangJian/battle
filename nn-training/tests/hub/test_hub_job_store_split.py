@@ -648,18 +648,19 @@ def test_cross_domain_call_chain_works_on_one_object(tmp_path: Path) -> None:
 
     out = store.claim_outcome(jid, mode="exclusive", worker_id="w1")
     assert out.ok, out
-    # 租约簇自己那份
-    assert store._leases.get(jid), "claim 没设租约"
-    assert store._lease_owners.get(jid) == out.token, "claim 没记 owner"
-    assert store._last_heartbeat.get(jid), "claim 没记心跳"
+    # 租约簇自己那份 —— 全是公开读数：`lease_worker` / `result_token_ok` / `inflight`
+    # （`inflight` 只收「活」租约，而活 = 心跳晚于 claim 时刻，所以它也反向证了心跳落过）
+    assert store.lease_worker(jid) == "w1", "claim 没设租约"
+    assert store.result_token_ok(jid, out.token) is True, "claim 没记 owner token"
+    assert jid in store.inflight(), "claim 没记心跳（租约不活）"
     # 调度簇那份（跨域：`_claim_locked` 里经 `self` 推 epoch / 写 `_claimed`）
-    assert (store._claimed.get(jid) or {}).get("worker") == "w1", "claim 没写调度簇的 _claimed"
-    assert store._epoch >= 1, "claim 没推 epoch"
+    assert store.scheduling_facts(jid)["claimed"] is True, "claim 没写调度簇的 _claimed"
+    assert store.scheduling_epoch() >= 1, "claim 没推 epoch"
 
     store.record_payload_sent(jid, 10)
     assert store.wire_stats(jid) == {"sent_bytes": 10}
     store.record_result_recv(jid, 4)
-    assert store._wire[jid]["recv_bytes"] == 4
+    assert store.wire_stats(jid)["recv_bytes"] == 4
 
 
 def test_one_lock_governs_even_the_most_independent_domain(tmp_path: Path) -> None:

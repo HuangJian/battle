@@ -7162,3 +7162,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   留下的 11 处**不迁**并在就地写明：它们是**被测对象本体**（`__mro__` / `__bases__` 分簇结构对账、
   `STATE_WRITERS` 跨域写入面、`_adopt_solo` 搬状态、`_job_dir` 哨兵契约），改成公开面等于把被验证的
   东西挖掉。口径：G5 只降「耦合」，不降「被测对象」。全文 → `docs/nn/engineering.md` §142。
+- **2026-11-18（G5 第二批）**：`tests/hub/test_hub_job_store_split.py` 15 → **9**（G5 697 → **691**）。
+  与第一批同一口径：`lease_worker` / `result_token_ok` / `inflight` / `scheduling_facts` /
+  `scheduling_epoch` / `wire_stats` 都是现成公开读数，覆盖了 `_leases` / `_lease_owners` /
+  `_last_heartbeat` / `_claimed` / `_epoch` / `_wire` 六处白盒读。`inflight()` 顺带替代「有没有心跳」
+  ——活租约 = 心跳晚于 claim，比读字典键更贴原意。留下的 9 处是本体（`__mro__` / 常量 / `LAYERS` /
+  增量读缓存）。全文 → `docs/nn/engineering.md` §142。

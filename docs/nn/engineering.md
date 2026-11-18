@@ -46,7 +46,19 @@ G5 的门禁只拦增长（**702 条 / 126 文件**），存量不动 —— 因
 「停机达令 / worker 登记 / 鉴权计数」不被静默清）、`_job_dir` 哨兵契约。把这些改成公开面
 等于把被验证的东西挖掉。
 
-读数：G5 **702 → 697**（126 文件）· G4 339 · G9 25。
+### 第二批：`_JobStore` 的租约与计量（15 → 9）
+
+同一个口径在 store 侧也成立：`lease_worker()` / `result_token_ok()` / `inflight()` /
+`scheduling_facts()` / `scheduling_epoch()` / `wire_stats()` 全都在，用例却在直接摸
+`_leases` / `_lease_owners` / `_last_heartbeat` / `_claimed` / `_epoch` / `_wire`。
+
+一处值得记住的替换：`assert jid in store.inflight()` 同时替代了「有没有心跳」——
+`inflight()` 只收**活**租约，而活 = 心跳晚于 claim 时刻，所以它反而比读 `_last_heartbeat`
+更接近那句断言的意图（「租约是活的」，不是「字典里有这个键」）。
+
+留下的 9 处同理是本体（`__mro__` / 跨簇 mixin 常量 / `LAYERS` / `_ledger_cache` 的增量读）。
+
+读数：G5 **702 → 691**（126 文件）· G4 339 · G9 25。
 
 ---
 
