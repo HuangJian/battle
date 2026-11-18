@@ -42,8 +42,13 @@ EVALBOARD_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"
 #: hub Bearer token（notebook secret / Kaggle secret 的自然容器；不进命令行、不进任务包）。
 HUB_TOKEN_ENV = "BATTLE_HUB_TOKEN"
 
+#: 直推节点的**显式覆盖**（冒烟预演注入本机伪节点）。三个读者：`trainer/loop_transport`
+#: （两处：候选表 / 传输可用性门）与 `trainer/bc_loop`（传输裁决）。原先三处各自
+#: `os.environ.get(...)`，其中一处还包了 `str(... or "")` —— 同一根旋钮的归一化写了三遍。
+PUSH_NODE_ENV = "REMOTE_PUSH_NODE"
+
 #: 已经收进本模块的旋钮名（G13 的「单家」判据从这里取，别在门禁里另抄一份字面量）。
-MIGRATED_ENV: tuple[str, ...] = (EVALBOARD_DATA_ENV, HUB_TOKEN_ENV)
+MIGRATED_ENV: tuple[str, ...] = (EVALBOARD_DATA_ENV, HUB_TOKEN_ENV, PUSH_NODE_ENV)
 
 
 def evalboard_data_root(env: Mapping[str, str] | None = None) -> Path:
@@ -58,3 +63,13 @@ def evalboard_data_root(env: Mapping[str, str] | None = None) -> Path:
 def hub_token_from_env(env: Mapping[str, str] | None = None) -> str:
     """`$BATTLE_HUB_TOKEN`（去首尾空白；未设 ⇒ 空串）。**只读环境变量**的理由见 `HUB_TOKEN_ENV`。"""
     return (env if env is not None else os.environ).get(HUB_TOKEN_ENV, "").strip()
+
+
+def push_node_from_env(env: Mapping[str, str] | None = None) -> str:
+    """`$REMOTE_PUSH_NODE`（去首尾空白；未设 / 空 ⇒ 空串 = 无覆盖）。
+
+    只做「读 + 去空白」：要不要 `rstrip("/")` 由拼 URL 的调用方决定（这是一根旋钮，不是一个
+    已归一化的 URL）。空串的语义是**显式无覆盖**，不是 "没配也能用"——三处读者都按
+    「非空 ⇒ 独占候选 / 可用」判。
+    """
+    return (env if env is not None else os.environ).get(PUSH_NODE_ENV, "").strip()

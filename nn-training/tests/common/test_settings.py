@@ -19,8 +19,10 @@ from common.settings import (
     EVALBOARD_DATA_ROOT,
     HUB_TOKEN_ENV,
     MIGRATED_ENV,
+    PUSH_NODE_ENV,
     evalboard_data_root,
     hub_token_from_env,
+    push_node_from_env,
 )
 
 
@@ -50,6 +52,14 @@ def test_hub_token_is_stripped_and_optional() -> None:
     assert hub_token_from_env({HUB_TOKEN_ENV: "  tk-1 \n"}) == "tk-1"
 
 
+def test_push_node_override_is_stripped_and_empty_means_absent() -> None:
+    """空串 = **显式无覆盖**（三处读者都按 truthiness 判，`None`/空白必须同形）。"""
+    assert push_node_from_env({}) == ""
+    assert push_node_from_env({PUSH_NODE_ENV: "  http://127.0.0.1:9000 \n"}) == "http://127.0.0.1:9000"
+    # 不做 `rstrip("/")`：那是拼 URL 的调用方的细节，不是旋钮语义（见 §131）
+    assert push_node_from_env({PUSH_NODE_ENV: "http://h/"}) == "http://h/"
+
+
 def test_migrated_knobs_are_registered() -> None:
     """G13 的单家判据从 `MIGRATED_ENV` 取；新旋钮忘了登记 = 门禁静默放行。"""
-    assert set(MIGRATED_ENV) == {EVALBOARD_DATA_ENV, HUB_TOKEN_ENV}
+    assert set(MIGRATED_ENV) == {EVALBOARD_DATA_ENV, HUB_TOKEN_ENV, PUSH_NODE_ENV}

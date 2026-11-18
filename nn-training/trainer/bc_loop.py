@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import secrets
 import shutil
@@ -58,6 +57,7 @@ def _strip_stamp(line: str) -> str:
     return _STAMP_PREFIX.sub("", line)
 from common.paths import REPO_ROOT
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.settings import push_node_from_env
 from remote.code_snapshot import (
     current_code_zip_path,
     published_code_zip,
@@ -750,7 +750,7 @@ def resolve_bc_runtime(
     # 直推目标只从 env 来（冒烟预演注入本机的伪节点）。真实的 push 执行面走 hub 中介派发：
     # BC 课在共享 trainer 里没有 env，resolve_transport(auto) 因而落在 `hub`（发布到 hub、
     # 等 worker 领取）——与「所有 worker 都可能接到任何课程的活」同一个模型。
-    push_url = str(os.environ.get("REMOTE_PUSH_NODE") or "")
+    push_url = push_node_from_env()
     token = str(args.remote_token or rl_block.get("remote_token") or "")
     # 共享 hub（2026-09-18）：URL 是**全局**事实（一条隧道/一个 hub 服务所有课程）⇒
     # 只认单键 `rl.remote_hub_url`（python 侧与 run_rl 同口径）。旧 per-course 的

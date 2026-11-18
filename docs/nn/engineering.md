@@ -25,6 +25,29 @@
 
 ---
 
+## §131 P1-5 第二批：`REMOTE_PUSH_NODE` 收进 `common/settings.py`（2026-11-18）
+
+第一批（2026-11-16）建了 `common/settings.py` 与 G13（按文件冻结 env 直读，只许调小），当时只收了
+两个多读者旋钮。这次按 AST 重扫全生产面，结果很干净：**只剩 `REMOTE_PUSH_NODE` 仍被两处各解一次**
+（`PATH` 另算，但它两处读的是系统变量，不是本项目的旋钮）。
+
+三处读法（前两处在 `trainer/loop_transport.py`，第三处在 `trainer/bc_loop.py`）：
+
+| 位置 | 当时写法 | 问题 |
+|---|---|---|
+| `loop_transport._push_nodes` | `os.environ.get("REMOTE_PUSH_NODE")` | 得到 `None`，再靠 truthiness 判 |
+| `loop_transport.ensure_transport` | `env_push if env_push is not None else os.environ.get(...)` | 同上，另一处解 |
+| `bc_loop.resolve_bc_runtime` | `str(os.environ.get("REMOTE_PUSH_NODE") or "")` | 包了一层 `str(... or "")`，归一化第三份 |
+
+现在统一 `push_node_from_env()`（去首尾空白；未设 / 空 ⇒ 空串 = 无覆盖），写进 `MIGRATED_ENV` ⇒
+G13 的「单家」判据开始盯它（除 `common/settings.py` 外谁再写字面读法就红）。**只做「读 + 去空白」**：
+要不要 `rstrip("/")` 留给拼 URL 的调用方（那是一个 URL 细节，不是旋钮语义）。
+
+读数：G13 存量 **63 / 32 → 60 / 30**（`trainer/bc_loop.py` 1→0、`trainer/loop_transport.py` 2→0，
+条目归零即删）；`trainer/` 全量 817 条用例绿。
+
+---
+
 ## §130 B8 第二刀：调度策略离开线协议（`common/scheduling.py`，2026-11-18）
 
 `python.refactor.md` §5.1 的判词很具体：「`protocol.py` 把**线协议常量**与**调度策略**混在一起；

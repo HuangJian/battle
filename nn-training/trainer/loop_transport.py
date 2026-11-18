@@ -17,7 +17,6 @@ patch `trainer.loop_transport.*`；测 `TrainingSteps` **方法**的用例仍 pa
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -30,6 +29,7 @@ from common.protocol import (
     RetryableError,
     coef_active,
 )
+from common.settings import push_node_from_env
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from worker.schedule import kickstart_coef as _kickstart_coef
@@ -274,7 +274,7 @@ def _gpu_push_nodes(remote_token: str) -> list[dict]:
     env 注入是**独占**的显式覆盖（冒烟预演）：设了它就只有它，登记节点一律不参与——
     否则伪节点一失败，failover 会把预演的 job 送去真 GPU 上跑（「冒烟不该碰真训练」）。"""
     out: list[dict] = []
-    env_node = os.environ.get("REMOTE_PUSH_NODE")
+    env_node = push_node_from_env()
     if env_node:
         return [{"url": env_node.rstrip("/"), "authKey": remote_token}]
     cfg = common.distribution.load_dist_config() or {}
@@ -420,7 +420,7 @@ def require_remote_transport(
     - 传输：hub_url（pull）**或** gpu_nodes/env（push 直推云机隧道）。
     不满足 → SystemExit（响亮，不静默回落）。
     """
-    env = env_push if env_push is not None else os.environ.get("REMOTE_PUSH_NODE")
+    env = env_push if env_push is not None else push_node_from_env()
     if not token and not env and not any(n.get("authKey") for n in gpu_nodes):
         raise SystemExit(
             "[run_rl] PPO 需要 --remote-token"
