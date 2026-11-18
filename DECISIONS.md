@@ -7152,3 +7152,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `run_rollout_stream` 的闭包里、没有公开接缝 ⇒ **按 §7「先有判据再改」的口径暂不动**（宁可留着宽捕，
   也不留一个没人能验证的收窄）。判据 `tests/remote/test_offline_deliver_proc.py` +1、
   `tests/remote/test_child_proc_pump.py` +1。全文 → `docs/nn/engineering.md` §141。
+
+- **2026-11-18（G5 第一批：先用已有公开面，再谈新建 seams）**：`tests/hub/test_hub_queue_split.py`
+  私有断言 16 → **11**（G5 702 → **697**）。修之前先查了「公开查询是否真的不存在」—— `_HubQueue`
+  早有 `queue_state()` / `active_worker_count()` / `course_of()`，用例只是习惯了伸手：`_stores` 表 →
+  `queue_state()["courses"]`、`_workers` 登记 → `active_worker_count()`；`_locate_cache` / `_cursor` /
+  `_leases` 三处白盒读已被公开面覆盖（`course_of` / `qs["cursor"]` / `result_token_ok` + `epoch_of`），
+  删掉重复断言而不是另造接缝。
+  留下的 11 处**不迁**并在就地写明：它们是**被测对象本体**（`__mro__` / `__bases__` 分簇结构对账、
+  `STATE_WRITERS` 跨域写入面、`_adopt_solo` 搬状态、`_job_dir` 哨兵契约），改成公开面等于把被验证的
+  东西挖掉。口径：G5 只降「耦合」，不降「被测对象」。全文 → `docs/nn/engineering.md` §142。

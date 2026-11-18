@@ -17,7 +17,7 @@
   "tests/hub/test_hub_job_store_split.py": 15,
   "tests/hub/test_hub_leases.py": 6,
   "tests/hub/test_hub_ledger_incremental.py": 1,
-  "tests/hub/test_hub_queue_split.py": 16,
+  "tests/hub/test_hub_queue_split.py": 11,
   "tests/hub/test_hub_routes_split.py": 5,
   "tests/hub/test_multi_course_hub.py": 5,
   "tests/hub/test_offline_metrics.py": 2,

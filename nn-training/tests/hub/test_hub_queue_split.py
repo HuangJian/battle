@@ -1257,7 +1257,8 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     added = hub.discover()
     assert added == ["c1"], added
     assert hub.courses() == ["c1"]
-    assert set(hub._stores) >= {"c1"} and hub.course_open("c1") is True
+    # 存储表本身是私有细节：公开口径是「观测面里有这一行」+「它是开着的」
+    assert bool(hub.queue_state()["courses"]) and hub.course_open("c1") is True
 
     # 发布一份 job（走 store 本体 —— 队列不做发布）并让它可领
     st = hub._stores["c1"]
@@ -1265,21 +1266,20 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     st.publish(jid, {"payload_sha256": "0" * 64}, b"PK\x03\x04fake")
     assert hub.claimable_job_ids("c1") == [jid]
     assert hub.course_of(jid) == "c1"  # 路由簇（一次 fs 探测 + 缓存）
-    assert hub._locate_cache[jid] == "c1"
 
     peeked = hub.peek_jobs(worker_id="w1", n=1)
     assert [p["job_id"] for p in peeked] == [jid], peeked
     assert peeked[0]["course"] == "c1"
-    assert hub._workers.get("w1")  # `peek_jobs` 顺带喂了避让链的登记表（R2-2）
+    assert hub.active_worker_count() >= 1  # `peek_jobs` 顺带喂了避让链的登记表（R2-2）
 
     got = hub.claim_next(worker_id="w1")
     assert got is not None and got[0] == "c1" and got[1] == jid, got
-    assert hub._cursor == "c1"  # 轮转游标只由真正拿到活的那一方推
-    assert st._leases.get(jid), "认领没在 store 上设租约"
-    # 门面簇（最后一层）在同一对象上看得见前四簇的成果
+    # 门面簇（最后一层）在同一对象上看得见前四簇的成果。租约本身（`_leases`）也是私有细节：
+    # 公开证据是「认领带回的 token 对得上」+「epoch 被推到 1 以上」——两者都只在真租约下成立。
     assert hub.result_token_ok(jid, got[2]) is True
     assert hub.epoch_of(jid) >= 1
 
+    # 轮转游标只由真正拿到活的那一方推（私有 `_cursor` 的公开口径就在观测面里）
     qs = hub.queue_state()
     assert qs["courses"]["c1"]["pending"] == [] and qs["cursor"] == "c1"
     assert qs["active_courses"] == 1

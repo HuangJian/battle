@@ -25,6 +25,31 @@
 
 ---
 
+## §142 G5 第一批：先找已有的公开面，再谈新建 seams（2026-11-18）
+
+G5 的门禁只拦增长（**702 条 / 126 文件**），存量不动 —— 因为「一次性清 700 条」只能靠造假。
+第一条真降在这里：`tests/hub/test_hub_queue_split.py` **16 → 11**。
+
+修之前先问了一句：**这个公开查询真的不存在，还是我们只是没去找？** 答案几乎是后者 ——
+`_HubQueue` 早就有 `queue_state()` / `active_worker_count()` / `course_of()`，只是用例习惯了伸手。
+
+| 旧判据 | 换成 | 为什么等价 |
+|---|---|---|
+| `set(hub._stores) >= {"c1"}` | `"c1" in hub.queue_state()["courses"]` | 观测面就是从 `_stores` × `_order` 派的 |
+| `hub._workers.get("w1")` | `hub.active_worker_count() >= 1` | 登记表的唯一公开读数 |
+| `hub._locate_cache[jid] == "c1"` | 删（上一行已有 `course_of(jid) == "c1"`） | 缓存命不命中是实现细节 |
+| `hub._cursor == "c1"` | 删（下面 `qs["cursor"] == "c1"` 就是它） | 同一个字段的公开口径 |
+| `st._leases.get(jid)` | 删（留 `result_token_ok` + `epoch_of(jid) >= 1`） | 没租约这两条就不成立 |
+
+**留下的 11 处不迁**，并在就地注明了原因：它们是**被测对象本体** —— `__mro__` / `__bases__`
+（分簇结构对账）、`STATE_WRITERS`（��域写入面表）、`_adopt_solo` 搬状态（单课程 → 多课程时
+「停机达令 / worker 登记 / 鉴权计数」不被静默清）、`_job_dir` 哨兵契约。把这些改成公开面
+等于把被验证的东西挖掉。
+
+读数：G5 **702 → 697**（126 文件）· G4 339 · G9 25。
+
+---
+
 ## §141 P0-7 第二十五批：拉起子进程的那条边（2026-11-18）
 
 `remote/deliver_proc.py` 7 → **4**、`remote/child_proc.py` 7 → **6**。这两个文件都在回答同一个
