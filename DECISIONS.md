@@ -7473,3 +7473,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   204 → **164** 行（拆出 `_print_panel`：§1 面板体检 + §2 税基尺寸表），长函数存量
   **19 → 18**，形状基线删除该文件条目。生产侧余量均为闭包式编排，先收工具面。
   全文 → `docs/nn/engineering.md` §197。
+- **2026-11-18（长函数存量第二十刀：TPU 探针 tools）**：`tools/tpu-probe.py::main`
+  207 → **151** 行（拆出 `_tpu_parser`：整张 argv 表），长函数存量 **18 → 17**，
+  形状基线删除该文件条目；notebook 脚本 cell 由 `sync_tpu_probe_nb.py` 重新生成。
+  全文 → `docs/nn/engineering.md` §198。

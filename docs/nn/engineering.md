@@ -25,6 +25,17 @@
 
 ---
 
+## §198 长函数存量第二十刀：TPU 探针（tools）207 → 151（2026-11-18）
+
+`tools/tpu-probe.py::main` **207 → 151 行**，长函数存量 **18 → 17**
+（`LONG_FUNCS_BASELINE` 删除 `tools/tpu-probe.py` 条目）。
+
+一刀纯搬移：`_tpu_parser()`——整张 argv 定义表（57 行，描述 / 默认值 / help 逐字保留）。
+伴随 `tools/sync_tpu_probe_nb.py` 重新生成 notebook 的脚本 cell（`test_tpu_probe_notebook`
+要求两处逐字一致）。
+
+---
+
 ## §197 长函数存量第十九刀：杠杆扫描（tools）204 → 164（2026-11-18）
 
 `tools/lever_scan.py::main` **204 → 164 行**，长函数存量 **19 → 18**
