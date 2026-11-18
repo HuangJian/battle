@@ -315,13 +315,23 @@ def reclaim_kill(pid: int, log: Callable[[str], None]) -> int:
     deadline = time.monotonic() + (RECLAIM_GRACE_SEC if waited else 0.0)
     while time.monotonic() < deadline and pid_alive(pid):
         time.sleep(RECLAIM_POLL_SEC)
+    hard = False
     if pid_alive(pid):
         reclaim_signal(pid, interrupt=False)
+        hard = True
         time.sleep(RECLAIM_POLL_SEC)
     if pid_alive(pid):
         log(f"  pid={pid} 仍未退出 —— 它守的子进程可能已成孤儿；手动 kill 后重跑本 cell")
         return 0
-    log(f"  pid={pid} 已收线（它自己的 bun agent / cloudflared 随它的 finally 一起收掉）")
+    # 收线方式不同，后果不同 —— 日志不许含糊（SIGINT 走 finally 会自己收子进程，SIGKILL 不会）。
+    log(
+        f"  pid={pid} 已收线"
+        + (
+            "（SIGKILL：它守的 bun agent / cloudflared 可能已成孤儿，留意 agent_port 占用）"
+            if hard
+            else "（SIGINT 走完 finally，bun agent / cloudflared 已随它收掉）"
+        )
+    )
     return pid
 
 
