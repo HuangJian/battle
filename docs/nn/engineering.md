@@ -25,6 +25,25 @@
 
 ---
 
+## §145 G5 第三批：摘课用例的公开口径（2026-11-18）
+
+`tests/hub/test_hub_discover_eviction.py` 9 → **3**。这条用例守的是「课程目录消失 ⇒ 课程表摘掉、
+旁表不许留半死状态」，但判据全在读 `_stores` / `_order` / `_halts` / `_cursor`。
+
+| 旧判据 | 换成 |
+|---|---|
+| `set(hub._stores) == {…} and hub._order == […]` ×3 | `hub.courses() == […]` |
+| `hub._halts == {}` | `hub.halt_of("a") is False`（被摘的课不该还留着停机达令） |
+| `hub._cursor is None` | `hub.queue_state()["cursor"] is None` |
+
+**留下 3 处并写明理由**：`_peeked`（peek 时刻）与 `_locate_cache`（归属缓存）是**纯提速缓存** ——
+清没清只影响下一次探测要多花几毫秒，本身没有可问的公开面；`_dispatch` / `_leases` 的
+`isinstance` 对账守的是「落盘的两个不动」，同属本体。
+
+读数：G5 **691 → 685**（126 文件）· G4 339 · G9 25 · G3 126。
+
+---
+
 ## §144 B6 第一刀：BC 的 epoch 打乱不再用全局 numpy 流（2026-11-18）
 
 `worker/train/goal_bc.py` 原来这样「保证可复现」：

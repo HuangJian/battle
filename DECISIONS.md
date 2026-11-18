@@ -7182,3 +7182,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   判据 `tests/worker/test_goal_bc_epoch_rng.py` 3 条（同 seed 同序 / 不吃全局流 / 外部抽样不干扰），
   其中「不吃全局流」在旧实现上实测为红。B6 残留 6 处 `np.random.seed` 已逐个记下理由（云核 /
   dataloader 全局态）。全文 → `docs/nn/engineering.md` §144。
+- **2026-11-18（G5 第三批）**：`tests/hub/test_hub_discover_eviction.py` 9 → **3**（G5 691 → **685**）。
+  摘课判据改问 `courses()` / `halt_of()` / `queue_state()["cursor"]`；留下的 3 处是**纯提速缓存**
+  （`_peeked` / `_locate_cache`，无处可问但清了只是下次探测多花几毫秒）与 `_dispatch`/`_leases`
+  的「落盘两个不动」对账。口径同前两批：只降耦合，不降被测对象。全文 → `docs/nn/engineering.md` §145。

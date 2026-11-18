@@ -12,7 +12,7 @@
   "tests/hub/test_dead_lease_sweep.py": 5,
   "tests/hub/test_hold.py": 2,
   "tests/hub/test_hub_auth_d9_order.py": 8,
-  "tests/hub/test_hub_discover_eviction.py": 9,
+  "tests/hub/test_hub_discover_eviction.py": 3,
   "tests/hub/test_hub_entry_split.py": 2,
   "tests/hub/test_hub_job_store_split.py": 9,
   "tests/hub/test_hub_leases.py": 6,
