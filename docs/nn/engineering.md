@@ -25,6 +25,26 @@
 
 ---
 
+## §143 P0-6 第三批：日志行格式的第三、第四份副本（2026-11-18）
+
+`common/logutil.py` 立起来之后，「`[{HH:MM:SS}] [{tag}] {消息}`」的**字面量**还剩两处没人管：
+
+* `biz/course.py` 三条课程日志（curriculum / rotate 换纪 / rotate 分批）自己拼
+  `f"[{time.strftime('%H:%M:%S')}] [run_rl] …"`；
+* `biz/ladder_ledger.py` 五条 CLI 消息里四条自己拼，第五条（`graduated`）**干脆没时间戳**
+  —— 同一份输出的行格式在同一次运行里不一致，正是「两份实现」的活标本。
+
+全部改走 `log_line("run_rl" | "ladder-ledger", msg)`：字节输出不变（`log_line` 用同一个
+`stamp()`），`flush=True` 由它保证；`graduated` 那条顺带补上时间戳（它是这次唯一的可见行为变化，
+也是原本就该有的一格）。`biz/course.py` 里的 `import time` 随之消失（时间戳不再是本地概念）。
+
+留下的 `time.strftime("%Y-%m-%d %H:%M:%S")`（`ladder_ledger.updated_at`）是**数据字段**不是日志行，
+换成本模块的 `%H:%M:%S` 会破坏台账消费方 —— 不动。
+
+读数：G3 `print` **134 → 126**（42 → 41 文件；`biz/course.py` 归零删键）· G5 691 · G4 339 · G9 25。
+
+---
+
 ## §142 G5 第一批：先找已有的公开面，再谈新建 seams（2026-11-18）
 
 G5 的门禁只拦增长（**702 条 / 126 文件**），存量不动 —— 因为「一次性清 700 条」只能靠造假。

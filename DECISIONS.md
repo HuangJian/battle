@@ -7168,3 +7168,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_last_heartbeat` / `_claimed` / `_epoch` / `_wire` 六处白盒读。`inflight()` 顺带替代「有没有心跳」
   ——活租约 = 心跳晚于 claim，比读字典键更贴原意。留下的 9 处是本体（`__mro__` / 常量 / `LAYERS` /
   增量读缓存）。全文 → `docs/nn/engineering.md` §142。
+- **2026-11-18（P0-6 第三批：日志行格式的第三、第四份副本）**：`biz/course.py` 的三条课程日志与
+  `biz/ladder_ledger.py` 的五条 CLI 消息改走 `common/logutil.log_line`（G3 `print` 134 → **126**，
+  42 → 41 文件）。`ladder_ledger` 的第五条（`graduated`）**原本没有时间戳** —— 同一次输出的行格式
+  不一致正是「两份实现」的活标本，顺势补齐（本次唯一的可见行为变化）。
+  `ladder_ledger.updated_at` 的 `%Y-%m-%d %H:%M:%S` 是**数据字段**不是日志行，换成本模块的
+  `%H:%M:%S` 会破坏台账消费方 ⇒ 不动。全文 → `docs/nn/engineering.md` §143。

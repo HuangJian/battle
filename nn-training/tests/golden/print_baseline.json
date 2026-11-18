@@ -1,7 +1,6 @@
 {
-  "biz/course.py": 3,
   "biz/course_archive.py": 4,
-  "biz/ladder_ledger.py": 7,
+  "biz/ladder_ledger.py": 2,
   "common/cli.py": 1,
   "common/distribution.py": 1,
   "common/instance_lock.py": 4,
