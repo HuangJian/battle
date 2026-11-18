@@ -7420,3 +7420,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **2026-11-18（长函数存量第七刀：run_loop CLI）**：`remote/run_loop.py::main`
   233 → **86** 行（拆出 `_build_parser()`：整张 argv 定义表，描述/默认值/help 逐字保留），
   长函数存量 **31 → 30**，形状基线删除该文件条目。全文 → `docs/nn/engineering.md` §185。
+- **2026-11-18（长函数存量第八刀：评估结算）**：`worker/eval_track.py::settle_eval_summary`
+  238 → **180** 行（拆出 `_scan_ledger` + `_LedgerTally` 读数对象，行过滤/去重口径
+  逐字不变），长函数存量 **30 → 29**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §186。

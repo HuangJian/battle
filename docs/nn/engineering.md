@@ -25,6 +25,19 @@
 
 ---
 
+## §186 长函数存量第八刀：评估结算 238 → 180（2026-11-18）
+
+`worker/eval_track.py::settle_eval_summary` **238 → 180 行**，长函数存量 **30 → 29**
+（`LONG_FUNCS_BASELINE` 删除 `worker/eval_track.py` 条目）。
+
+一刀搬移 + 一个读数对象：账本扫描段整块搬到 `_scan_ledger(eval_jsonl, key16, it)`，
+返回 `_LedgerTally`（keys / wins / clears / outcomes / nodes / kills / phits / pu /
+zero_kill / timeout）。行过滤（event/wver/iter/source）、同 (stage,seed) 只认第一行、
+缺字段保守记 0 的口径逐字保留；`settle_eval_summary` 只读 `tally.*` 与后续的缺口/summary
+逻辑。
+
+---
+
 ## §185 长函数存量第七刀：run_loop CLI 233 → 86（2026-11-18）
 
 `remote/run_loop.py::main` **233 → 86 行**，长函数存量 **31 → 30**
