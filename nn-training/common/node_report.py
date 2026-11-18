@@ -12,10 +12,15 @@
 
 from __future__ import annotations
 
+import os
+import re
+import tempfile
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from common.distribution_limits import node_slots, node_slots_note
+from common.pid_probe import pid_alive
 
 DISK_FLOOR_MB_DEFAULT = 2048
 DISK_WARN_MB_DEFAULT = 4096
@@ -72,11 +77,7 @@ def disk_thresholds(cfg: dict) -> tuple[int, int]:
     raw_floor = cfg.get("disk_floor_mb")
     raw_warn = cfg.get("disk_warn_mb")
     floor = int(raw_floor) if raw_floor not in (None, "") else DISK_FLOOR_MB_DEFAULT
-    warn = (
-        int(raw_warn)
-        if raw_warn not in (None, "")
-        else max(floor + DISK_HYST_MB, floor * 2)
-    )
+    warn = int(raw_warn) if raw_warn not in (None, "") else max(floor + DISK_HYST_MB, floor * 2)
     return floor, warn
 
 
@@ -201,3 +202,41 @@ def workers_selfcheck_line(workers: int, slot_note: str, base_ms: int) -> str:
         f"workers 自检: workers={workers}（{slot_note}） ping={base_ms}ms"
         f" — 持续 >1.5×且≥1s 即超额认购（回退：CFG.workers = 物理核数）"
     )
+
+
+# ────────────────────────── 同一 node_id 的重复进程（2026-11-18 DSW）──────────────────────────
+
+
+def node_id_pidfile(node_id: str) -> Path:
+    """同一 `node_id` 的「谁在轮询」记在临时目录（不进仓库、不进 CFG）。"""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", node_id)[:64] or "node"
+    return Path(tempfile.gettempdir()) / f"battle-rollout-{safe}.pid"
+
+
+def warn_if_node_id_taken(node_id: str, log: Callable[[str], None]) -> int:
+    """同一 `node_id` 上已有进程在轮询时告警，返回那个 pid（没有 = `0`）。**只告警、不退出**。
+
+    2026-11-18 DSW 现场：旧进程没随 notebook 重启退出，两个进程同时轮询同一个 node ——
+    日志里新旧两种格式交替出现，看起来像「代码没生效」，实际是两份进程在说话。
+    误判一个还在干活的会话比多一条警告贵得多，所以这里永不 `sys.exit`。
+    返回值是给用例的结构化出口（判据不该靠对日志措辞断言）。
+
+    判活一律用 `common.pid_probe.pid_alive`（唯一实现）：`os.kill(pid, 0)` 在 Windows 上是
+    `TerminateProcess`，会真把对方打死 —— `tests/common/test_pid_probe_windows_safe.py` 守着它。
+    """
+    path = node_id_pidfile(node_id)
+    try:
+        other = int(path.read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        other = 0
+    taken = bool(other) and other != os.getpid() and pid_alive(other)
+    if taken:
+        log(
+            f"⚠ 同一 node_id 已有进程在轮询（pid={other}，本进程 pid={os.getpid()}）"
+            f" —— 两个消费者会抢同一个 hub 队列，日志也会混成两份；先 kill {other} 再启动"
+        )
+    try:
+        path.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass  # 写不了 pidfile 不影响启动；下一次启动只是拿不到「已被占用」这条提示
+    return other if taken else 0

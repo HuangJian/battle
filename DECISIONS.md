@@ -6130,3 +6130,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
 - **被否决**：① 只改日志文案（真因是竞速与路由，文案只能让它下次更快被读出来）；② 把 `hub_url` 换成 tailnet 地址（节点到不了，且不是本次真因）；③ 在 relay 里加「自动重解析 DNS 换 IP」的重试层（`racing_opener` 已经按地址族并行拨，再加一层只会掩盖问题）；④ 顺手修 `rollout.ipynb` 的 `NO_PROXY` 窄口（`direct` 腿已天然绕代理，改动面大于收益）。
 - **边界**：quick tunnel 域名**每次 hub 重启都变**，relay 节点的 `hub_url` 是死值，换域名须重跑 cell（现在 6s 就能看到 `timeout`/`DNS`，不再等 40s 的一句「hub 未应答」）；`NO_PROXY` 只含 `CFG.hub_ip` 的窄口**未修**（记账）。
 - **全文** → `docs/nn/remote-transport.md` §159；代码 → `remote/rollout_relay.py`（`_err_text` / `_route_open` / `_open` / `pin_route` / `probe_hub` / `RelayChannel.open`）· `remote/rollout_node.py`（横幅 relay 分支 + 环境行打 hub 主机）· `ipynb/rollout.ipynb`（CFG 注释：`hub_port` 8787 ≠ dashboard 8900、relay 必须填公网地址、新增「relay 起不来先看哪一行」小节）。
+- **复盘（同日 15:23 真机复跑，`commit=bcce16b`，见 §159.1）**：
+  - **旧格式日志 ≠ 新代码没生效**：`grep "2s 后重试"` 全仓 rc=1 ⇒ 那几行只能来自**另一个还活着的旧进程**（notebook 重启不杀 `rollout-node` 子进程）。⇒ 横幅加 `pid=`，新增 `_warn_if_node_id_taken()`（`<tmp>/battle-rollout-<id>.pid`，别人活着就打「先 kill 它」），**只告警不退出**；判活**禁** `os.kill(pid,0)`（Windows 上等于 TerminateProcess）。
+  - **`HTTPError` 一律算「路由通」是 bug**：实测 LAN 代理对黑洞地址回 `502/5047ms`，旧实现会 `ok=True` 并把代理腿钉住，之后每拍长轮询都吃 502。⇒ `GATEWAY_CODES={502,504,52x,530}` 记 `gateway-<code>`，不算通也不进 `_pick_route`；`503` 排除（hub 自己的熔断说明链路通）。
+  - **`timeout` 仍分不清三件事** ⇒ 预检失败时追加**逐 IP 裸 TCP**（并行、2s），判词分 `dns/blackhole/tls/unroutable`，结构化出口 `facts["hint"]`；两条路由的 HTTPS 预检改**并行**（串行 12s → 6s）。
+  - **hub 侧同时段复测仍正常**（隧道 `401/1.08s`；hub 日志 18 条 `/relay/` 全是本机测试，节点 0 条）⇒ DSW 的出网对该组 anycast IP 是黑洞，修法在承载侧（`CFG.net_proxy` / 非 CF 入口 / 换机器），不在代码侧。
+  - **验收**：relay 单测 14→17、node +2；文本断言口径 A **不抬格**（措辞断言换成 `kind`/返回值结构判据）。
+

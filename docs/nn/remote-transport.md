@@ -83,6 +83,51 @@
   但 relay 的 `direct` 腿已天然绕代理（`racing_opener(no_proxy=True)`），影响面已从「必踩」降到「无所谓」。
 - `hub_url` **必须是公网地址**：tailnet / LAN 地址节点根本到不了（这一条已写进 notebook 的 CFG 注释）。
 
+### §159.1 真机复跑（同日 15:23）：预检生效了，但暴露三个新问题
+
+**现场（节点已拿到 `commit=bcce16b`）**
+
+```
+[15:23:55] 环境=local 通道=relay workers=8 磁盘=… node_id=dsw hub=已配置 reason-labor-…trycloudflare.com
+[15:23:56] relay 轮询失败（URLError）——2s 后重试          ← ①**旧格式**，见下
+[15:24:04] relay 轮询失败（URLError）——2s 后重试
+[15:24:07] relay 预检 reason-…:443 → DNS=104.16.231.132(v4),104.16.230.132(v4),
+           2606:4700::6810:e684(v6),2606:4700::6810:e784(v6) ｜ inherit=timeout ｜ direct=timeout
+[15:24:07] ★ relay 预检不通 —— 上面那行是逐路由结论；通道仍会重试，但先修它再谈注册
+```
+
+**结论 1：这行旧格式日志不可能是 `bcce16b` 打的** —— `grep -r "2s 后重试"` 在整个仓库返回 **rc=1**
+（文案已换成 `relay 轮询失败（hub=host:port，X.Xs）：…`）。⇒ 只有一种解释：**盘上/进程上还有一份旧代码在跑**，
+最可能是 notebook 重启没杀掉的旧 `rollout-node` 子进程（两份进程的 stdout 混在同一个日志流里）。
+⇒ 落地：启动横幅加 `pid=`，并新增 `_warn_if_node_id_taken()`（pidfile `<tmp>/battle-rollout-<id>.pid`，
+别的 pid 还活着就打「先 kill 它」），**只告警不退出**。⚠ 判活**禁止** `os.kill(pid, 0)`：Windows 上那是
+`TerminateProcess`，会真把对方打死 —— 非 POSIX 一律保守当活着。
+
+**结论 2：hub 侧此刻仍然完全正常**（本机复测）——隧道 `/relay/dsw/_poll` 不带令牌 `401 / 1.08s`；
+hub 日志里 18 条 `/relay/` **全部**来自本机测试（`104.194.71.215` 经 CF、`100.124.208.62` tailnet、回环），
+**节点一条都没到**。⇒ 字节没出 DSW，问题仍在这一段的出网策略。
+
+**结论 3：两处判据不可靠，都修掉**
+
+1. **`HTTPError` 一律算「路由通」是错的**。实测本机 LAN 代理对黑洞地址 `10.255.255.1:8787` 回
+   **`HTTP 502` / 5047ms** —— 旧实现据此判 `ok=True` 并把代理那条腿**钉住**，接着每一拍长轮询都拿 502。
+   ⇒ 新增 `GATEWAY_CODES = {502,504,52x,530}`：它们是「中间层到不了上游」，归 `gateway-<code>`，
+   既不算通、也不进 `_pick_route`。`503` 故意不在内（hub 自己的磁盘熔断说明链路是通的）。
+2. **`timeout` 一个词仍然分不清三件事**（IP 黑洞 / TCP 通但 TLS 被掐 / 本机没有 v6 路由）。
+   ⇒ 预检**失败时**追加一层逐 IP 的裸 TCP（`TCP_PROBE_SEC=2.0`，**并行**，串行 4×2s 又是一份空白），
+   输出 `… ｜ TCP=104.16.230.132:443 timeout,2606:…:e784:443 unreachable ⇒ 判词`，判词分四类
+   `dns / blackhole / tls / unroutable`（`facts["hint"]` 是结构化出口，用例钉 `kind` 而不是措辞）。
+   同时把两条路由的 HTTPS 预检改成**并行**：串行 = 2×timeout（实测 12s），而预检只要「通不通」。
+
+**验收（第二轮）**：`tests/remote/test_rollout_relay.py` 14 → **17** 例（逐 IP 扫描存在且每地址有结论 ·
+判词四类分叉 · 网关码不算通且不被钉住）· `tests/remote/test_rollout_node.py` +2（重复 pid 告警 /
+自己的 pid 与死进程不告警）· 文本断言口径 A **不抬格**（把措辞断言全换成 `kind` / 返回值这类结构化判据，
+仍是 1502）· `nn-python-gate.sh` 全绿。
+
+**这条现场给下一轮的判据**：再跑一次若看到 `TCP=` **全是 `timeout`** ⇒ 整组 anycast IP 被黑洞，重试无用
+（配 `CFG.net_proxy` 或换承载/机器）；若有 `ok` 而 HTTPS 挂 ⇒ 掐在 TLS/SNI（换域名或走代理）。
+notebook 的排查小节已补上「在节点上自己复核」的三行 `curl`（`cf-api` / `hub` / `github` 对照）。
+
 ## §158 采样节点的「只出网」接入：hub 会合 relay（2026-11-18）
 
 **现场（ModelScope / 阿里云 8C32G，`rollout.ipynb`）**：连续多个会话死在同一个点。

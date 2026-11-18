@@ -23,6 +23,7 @@ hub 侧实现与协议见 `hub/relay.py` 头部。
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import socket
 import threading
@@ -52,6 +53,13 @@ REPLY_TIMEOUT_SEC = 30.0
 #: 通道预检的单次预算（秒）：DNS + 每条路由一次 `_poll?wait=0`。
 #: 它的读者只有一行日志，所以 = `CLOUDFLARED_PROBE_TIMEOUT` 的两倍量级足够。
 PROBE_TIMEOUT_SEC = 6.0
+#: 预检失败后逐 IP 的裸 TCP 探测预算（秒）：只分「连得上 / 连不上」，2s 足够；
+#: 它和 `PROBE_TIMEOUT_SEC` 分开，是因为这层要的是**区分**地址而不是等应答。
+TCP_PROBE_SEC = 2.0
+#: 网关类状态码：**中间层（代理 / Cloudflare 边缘）到不了上游**，因此不算「路由通」。
+#: 502/504 来自代理或 CF；52x 是 CF 的 origin 不可达族；530 是 CF 隧道/DNS 解析失败。
+#: `503` 故意不在内：hub 自己的 503（磁盘熔断）说明链路是通的，那是业务拒绝。
+GATEWAY_CODES = frozenset({502, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530})
 #: 同一条失败连续刷屏的上限：6 个线程同拍超时会打出 6 行**完全一样**的话，
 #: 而真因（host/reason）只需要看第一行。之后每 N 条汇总一次。
 ERR_LOG_EVERY = 10
@@ -123,6 +131,93 @@ def _host_port(url: str) -> tuple[str, int]:
     return host, 443 if (parts.scheme or "").lower() == "https" else 80
 
 
+def _probe_one_route(route: str, url: str, token: str, timeout: float) -> tuple[str, str]:
+    """单条路由的一次 HTTPS 预检 → `(verdict, 人读片段)`。
+
+    `verdict ∈ {"ok", "http-<code>", "gateway-<code>", "fail"}`。**4xx 算通**（对端应用回了话），
+    而 **502/504/52x/530 算不通**：那是代理或 CF 边缘「我连不上上游」的应答 —— 它回话很快，
+    但路由并没有通。把两者混成「HTTPError ⇒ 通」会让预检在代理吊死时给出 `ok=True`，
+    接着每一拍长轮询都拿 502（2026-11-18 实测：LAN 代理对黑洞地址回 502/5047ms）。
+    """
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    t0 = time.monotonic()
+    try:
+        with _route_open(route, req, timeout) as r:
+            r.read(4096)
+    except urllib.error.HTTPError as e:  # 401/404 是**应答**：路由通了；502/530 不是
+        ms = (time.monotonic() - t0) * 1000
+        if e.code in GATEWAY_CODES:
+            return f"gateway-{e.code}", f"{route}=网关 {e.code}（{ms:.0f}ms）"
+        return f"http-{e.code}", f"{route}=HTTP {e.code}（{ms:.0f}ms）"
+    except Exception as e:
+        return "fail", f"{route}={_err_text(e)}"
+    return "ok", f"{route}=ok（{(time.monotonic() - t0) * 1000:.0f}ms）"
+
+
+def _tcp_verdict(ip: str, port: int, timeout: float) -> str:
+    """对单个解析地址做一次裸 TCP connect，回一个**短**结论。
+
+    这一层是 `_err_text` 看不清的地方：HTTPS 超时可能是 ①IP 被黑洞 ②TCP 通但 TLS/SNI 被掐
+    ③本机没有该地址族的路由（立刻 ENETUNREACH）。三者的修法完全不同，而都只表现为
+    `timeout` 或 `URLError`。
+    """
+    family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect((ip, port))
+    except TimeoutError:
+        return "timeout"
+    except ConnectionRefusedError:
+        return "refused"
+    except OSError as e:
+        if e.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL):
+            return "unreachable"
+        return f"errno{e.errno}"
+    return "ok"
+
+
+def _tcp_sweep(ips: list[str], port: int, timeout: float) -> dict[str, str]:
+    """并行探所有解析地址（**串行 4×timeout 就是又一份 8s 的空白**）。"""
+    out: dict[str, str] = {}
+
+    def _sweep_addr(ip: str) -> None:
+        out[ip] = _tcp_verdict(ip, port, timeout)
+
+    threads = [threading.Thread(target=_sweep_addr, args=(ip,), daemon=True) for ip in ips]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return {ip: out.get(ip, "?") for ip in ips}
+
+
+def _fail_hint(tcp: dict[str, str]) -> tuple[str, str]:
+    """逐 IP 的 TCP 结论 → `(kind, 一句该改什么)`。
+
+    `kind ∈ {"dns", "blackhole", "tls", "unroutable"}` 是**判据**，措辞只是给人看的：
+    用例钉 `kind`，改文案不会把用例弄红（否则红得没有意义）。
+    """
+    if not tcp:
+        return "dns", "DNS 没给出任何地址：hub_url 拼写或节点 DNS 不通"
+    vals = set(tcp.values())
+    if vals == {"timeout"}:
+        return "blackhole", (
+            "所有地址连 TCP 都不通（不只是 HTTPS）⇒ 对端是黑洞，重试无用："
+            "先排 hub_url 拼写/DNS，再查节点出网策略与 CFG.net_proxy，否则换承载（非 CF 入口）或机器"
+        )
+    if "ok" in vals:
+        return "tls", (
+            "TCP 通而 HTTPS 不通 ⇒ 掐在 TLS/SNI 层（按域名的策略）：换 hub_url 的域名或走代理；"
+            "这不是「地址不可达」"
+        )
+    return (
+        "unroutable",
+        "按上面逐 IP 的结论：refused/unreachable 说明该地址段不可路由（不是「慢」）—— 查 hub_url 的 DNS 与出网策略",
+    )
+
+
 def probe_hub(
     hub_url: str, token: str, node_id: str, timeout: float = PROBE_TIMEOUT_SEC
 ) -> tuple[bool, str, dict[str, Any]]:
@@ -136,59 +231,87 @@ def probe_hub(
     否则用例只能对着日志措辞断言 —— 改一个词就红，而红得没有意义。
     """
     host, port = _host_port(hub_url)
-    dns = _dns_summary(host, port)
+    ips = _resolve_ips(host, port)  # 只解析**一次**：DNS 轮转会让两条日志自相矛盾
+    dns = _dns_summary(host, port, ips)
     facts: dict[str, Any] = {"host": host, "port": port, "dns": dns, "routes": {}}
     url = f"{str(hub_url).rstrip('/')}/relay/{node_id}/_poll?wait=0"
-    ok_route: list[str] = []
-    fails: list[str] = []
     # 回环 / `NO_PROXY` 点名的目标只走直连：否则本机那台 LAN 代理会把一条「本来必然通」
     # 的回环请求也吊到 timeout，日志里就多出一条吓人的 `inherit=timeout`（实测 6s/次）。
     routes = ["direct"] if net_http.bypass_proxy(hub_url) else ["inherit", "direct"]
-    for route in routes:
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Authorization", f"Bearer {token}")
-        t0 = time.monotonic()
-        try:
-            with _route_open(route, req, timeout) as r:
-                r.read(4096)
-        except urllib.error.HTTPError as e:  # 401/404 也是**应答**：路由通了
-            ms = (time.monotonic() - t0) * 1000
-            facts["routes"][route] = f"http-{e.code}"
-            ok_route.append(f"{route}=HTTP {e.code}（{ms:.0f}ms）")
-            continue
-        except Exception as e:
-            facts["routes"][route] = "fail"
-            fails.append(f"{route}={_err_text(e)}")
-            continue
-        ms = (time.monotonic() - t0) * 1000
-        facts["routes"][route] = "ok"
-        ok_route.append(f"{route}=ok（{ms:.0f}ms）")
+    got: dict[str, tuple[str, str]] = {}
+
+    def _run(route: str) -> None:
+        got[route] = _probe_one_route(route, url, token, timeout)
+
+    if len(routes) == 1:
+        _run(routes[0])
+    else:
+        # 两条腿**并行**：串行就是 2×timeout（DSW 实测 12s），而预检要的只是「通不通」，
+        # 两条路之间没有先后依赖；并行还顺带修掉「前一条把预算烧完、后一条没机会说话」。
+        ths = [threading.Thread(target=_run, args=(r,), daemon=True) for r in routes]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+    ok_route: list[str] = []
+    fails: list[str] = []
+    for route in routes:  # 保序：人读行的字段顺序不随线程完成顺序漂
+        verdict, human = got.get(route, ("fail", f"{route}=fail"))
+        facts["routes"][route] = verdict
+        # `gateway-*` 也归到「不通」那一栏：它只是回话快，路由并没有通
+        if verdict == "ok" or verdict.startswith("http-"):
+            ok_route.append(human)
+        else:
+            fails.append(human)
     line = f"relay 预检 {host}:{port} → DNS={dns} ｜ " + " ｜ ".join(ok_route + fails)
     if not ok_route:
-        line += (
-            " ⇒ 两条路由都不通：hub_url 拼写/DNS、节点出网策略或代理（CFG.net_proxy）"
-            "；hub 未升级只会 404，不会超时"
-        )
+        gw = [f"{r}={v}" for r, v in facts["routes"].items() if str(v).startswith("gateway-")]
+        if gw:
+            line += (
+                f"（{','.join(gw)}：中间层回话快但到不了 hub —— 代理/CF 边缘那一跳断了，不算通）"
+            )
+        # HTTPS 全不通时补一层**逐 IP 的裸 TCP**：把「IP 黑洞 / TLS 被掐 / 没有 v6 路由」
+        # 分开 —— 三者都只表现为 timeout，却对应完全不同的修法（2026-11-18 DSW 现场）。
+        tcp = _tcp_sweep(ips, port, TCP_PROBE_SEC)
+        facts["tcp"] = tcp
+        if tcp:
+            line += " ｜ TCP=" + ",".join(f"{ip}:{port} {verdict}" for ip, verdict in tcp.items())
+        kind, hint = _fail_hint(tcp)
+        facts["hint"] = kind
+        line += " ⇒ " + hint
+        line += "；hub 未升级只会 404，不会超时"
     return bool(ok_route), line, facts
 
 
-def _dns_summary(host: str, port: int) -> str:
+def _dns_summary(host: str, port: int, ips: list[str] | None = None) -> str:
     """DNS 读数的紧凑表示：`104.21.x.x(v4),2606:4700::1(v6)` / `fail`。
 
     地址族要显式标出来：云机上「解析出 IPv6 但没有可用 IPv6 路由」是最常见的假死，
     而这一点在 `URLError` 一句话里永远看不见。
     """
+    ips = _resolve_ips(host, port) if ips is None else ips
+    if not ips:
+        return "fail"
+    return ",".join(f"{ip}({'v6' if ':' in ip else 'v4'})" for ip in ips[:6])
+
+
+def _resolve_ips(host: str, port: int) -> list[str]:
+    """域名 → **去重后**的地址表（v4/v6 混排，保持解析顺序）。
+
+    为什么单独一个函数：`_dns_summary` 要给人读的一行，逐 IP 的 TCP 探测要原始地址表，
+    两者必须来自**同一次**解析 —— 各自 `getaddrinfo` 会在轮转 DNS 上给出不同答案，
+    日志里就会自相矛盾（「列了 4 个地址」但「只探了 3 个」）。
+    """
     try:
         infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-    except OSError as e:
-        return f"fail({type(e).__name__})"
+    except OSError:
+        return []
     out: list[str] = []
-    for family, _t, _p, _c, sa in infos:
-        tag = "v4" if family == socket.AF_INET else ("v6" if family == socket.AF_INET6 else "?")
-        item = f"{sa[0]}({tag})"
-        if item not in out:
-            out.append(item)
-    return ",".join(out[:6]) or "empty"
+    for _family, _t, _p, _c, sa in infos:
+        ip = str(sa[0])
+        if ip not in out:
+            out.append(ip)
+    return out
 
 
 def _pick_route(facts: dict[str, Any]) -> str:
@@ -306,9 +429,7 @@ class RelayLink:
     def start(self) -> None:
         self._started_at = time.time()
         for i in range(self._workers):
-            t = threading.Thread(
-                target=self._worker, name=f"relay-{i}", daemon=True
-            )
+            t = threading.Thread(target=self._worker, name=f"relay-{i}", daemon=True)
             t.start()
             self._threads.append(t)
 
@@ -584,6 +705,7 @@ __all__ = [
     "POLL_WORKERS",
     "PORT_WAIT_SEC",
     "PROBE_TIMEOUT_SEC",
+    "TCP_PROBE_SEC",
     "RelayChannel",
     "RelayLink",
     "RelayUnreachable",

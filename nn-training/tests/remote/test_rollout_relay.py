@@ -246,6 +246,7 @@ def test_channel_ensure_rebuilds_after_workers_die() -> None:
 
 # ---------------------------------------------------------------- 连不上时说得清（2026-11-18 DSW）
 
+
 def _dead_port() -> int:
     """一个**没人监听**的本机端口（连上必 ECONNREFUSED，且是秒级，不靠墙钟）。"""
     probe = socket.socket()
@@ -310,9 +311,9 @@ def test_err_text_distinguishes_timeout_from_dns_and_refused() -> None:
     assert rr._err_text(
         urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
     ).startswith("DNS")
-    assert rr._err_text(
-        urllib.error.URLError(ConnectionRefusedError(61, "refused"))
-    ).startswith("refused")
+    assert rr._err_text(urllib.error.URLError(ConnectionRefusedError(61, "refused"))).startswith(
+        "refused"
+    )
     assert rr._err_text(urllib.error.HTTPError("u", 404, "nf", {}, None)) == "HTTP 404"  # type: ignore[arg-type]
 
 
@@ -337,6 +338,66 @@ def test_probe_hub_flags_unreachable_with_actionable_hint() -> None:
     assert ok is False
     assert set(facts["routes"].values()) == {"fail"}
     assert "hub_url" in line  # 判词要直接指向可改的那个开关
+
+
+def test_probe_hub_sweeps_every_resolved_ip_when_https_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTPS 全不通时必须补逐 IP 的裸 TCP —— 这是「黑洞 / TLS 被掐 / 没有 v6 路由」的分叉。
+
+    2026-11-18 DSW 现场只有一句 `inherit=timeout ｜ direct=timeout`，看不出是整组 anycast IP
+    被挡还是 TCP 通、掐在 SNI 上；两者的修法完全不同（换承载 vs 换域名/走代理）。
+    """
+    port = _dead_port()
+    monkeypatch.setattr(net_http, "bypass_proxy", lambda _u: False)
+    monkeypatch.setattr(
+        rr, "_probe_one_route", lambda route, url, token, timeout: ("fail", f"{route}=stub")
+    )
+    monkeypatch.setattr(rr, "_resolve_ips", lambda _h, _p: ["127.0.0.1", "::1"])
+    ok, _line, facts = probe_hub(f"http://127.0.0.1:{port}", "t", "n1", timeout=1.0)
+    assert ok is False
+    # 两个地址各探一次、各给一个**具体**结论（Windows 沙箱里连闭合的回环口是 timeout 而不是
+    # refused，所以这里只钉「有结论」，不钉具体措辞 —— 措辞分叉由下一条用例结构化钉住）
+    assert set(facts["tcp"]) == {"127.0.0.1", "::1"}, facts["tcp"]
+    assert facts["tcp"]["127.0.0.1"] in ("refused", "timeout"), facts["tcp"]
+    assert facts["hint"] in ("blackhole", "unroutable"), facts
+
+
+def test_fail_hint_separates_blackhole_from_tls_block() -> None:
+    """判词是给人看的分叉：全 timeout = IP 黑洞（重试无用）；有 ok = 掐在 TLS/SNI。
+
+    钉的是 `kind`（结构化那一半），不是措辞 —— 改文案不该把用例弄红。
+    """
+    assert rr._fail_hint({"1.1.1.1": "timeout", "2606:4700::1": "timeout"})[0] == "blackhole"
+    assert rr._fail_hint({"1.1.1.1": "ok", "2606:4700::1": "timeout"})[0] == "tls"
+    assert rr._fail_hint({"1.1.1.1": "unreachable"})[0] == "unroutable"
+    assert rr._fail_hint({})[0] == "dns"
+
+
+def test_gateway_codes_are_not_treated_as_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """代理 / CF 边缘的 502、530 ≠ 路由通：它回话很快，但上游根本没到。
+
+    2026-11-18 实测：本机 LAN 代理对黑洞地址回 **502 / 5047ms** —— 旧实现「HTTPError 一律算
+    应答」会据此判 `ok=True` 并把那条腿钉住，接着每一拍长轮询都拿 502。
+    """
+    code = {"v": 502}
+
+    class _Gateway:
+        def __enter__(self) -> object:
+            raise urllib.error.HTTPError("u", code["v"], "gw", {}, None)  # type: ignore[arg-type]
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    monkeypatch.setattr(rr, "_route_open", lambda route, req, timeout: _Gateway())
+    verdict, _human = rr._probe_one_route("inherit", "http://x/", "t", 1.0)
+    assert verdict == "gateway-502", verdict
+    assert rr._pick_route({"routes": {"inherit": "gateway-502"}}) == "", "网关腿不能被钉住"
+    # 401（真对端应用回了话）仍然是**通**：这条不能一起改坏
+    code["v"] = 401
+    verdict, _human = rr._probe_one_route("inherit", "http://x/", "t", 1.0)
+    assert verdict == "http-401"
+    assert rr._pick_route({"routes": {"inherit": "http-401"}}) == "inherit"
 
 
 def test_poll_falls_back_to_direct_when_proxy_route_hangs(
@@ -394,8 +455,12 @@ def test_open_pins_route_from_preflight() -> None:
         agent_srv.shutdown()
 
 
-def test_channel_open_failure_names_preflight_and_host() -> None:
+def test_channel_open_failure_names_preflight_and_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """放弃时人读面必须可用：预检行 + 未就绪行（带 host）、并且不再误导去看 cloudflared。"""
+    # 失败路径现在要多花一次逐 IP 的 TCP 扫描（`TCP_PROBE_SEC`）——用例里把两段预算都压小，
+    # 免得这条「只是要看日志措辞」的用例去吃掉 5s 的耗时阈值。
+    monkeypatch.setattr(rr, "PROBE_TIMEOUT_SEC", 0.6)
+    monkeypatch.setattr(rr, "TCP_PROBE_SEC", 0.6)
     agent_log: dict = {}
     agent_srv, agent_port = _fake_agent(agent_log)
     port = _dead_port()

@@ -25,6 +25,7 @@ from remote import tailscale_boot
 
 # ---------------------------------------------------------------- resolve_link
 
+
 @pytest.mark.parametrize(
     ("env", "cfg_link", "has_key", "want"),
     [
@@ -46,6 +47,7 @@ def test_resolve_link_table(env: str, cfg_link: str, has_key: bool, want: str) -
 
 # ---------------------------------------------------------------- registry_url
 
+
 def test_registry_url_is_the_single_address_parser() -> None:
     """转调 `tailscale_boot.resolve_hub_url`（F13：不再抄第二份「逐字一致」）。"""
     cases = [
@@ -62,10 +64,14 @@ def test_registry_url_is_the_single_address_parser() -> None:
         )
     # 具体口径锚点（裸 IP + 默认端口 / 整条 URL 原样）
     assert rn.registry_url("100.64.0.5", 0, "") == "http://100.64.0.5:8787"
-    assert rn.registry_url("", 0, "https://hub.example.ts.net:8443/") == "https://hub.example.ts.net:8443"
+    assert (
+        rn.registry_url("", 0, "https://hub.example.ts.net:8443/")
+        == "https://hub.example.ts.net:8443"
+    )
 
 
 # ---------------------------------------------------------------- payload / 去重
+
 
 def test_payload_omits_concurrency_by_default() -> None:
     """F2：缺省**不写** `concurrency` 键（派发读 `or ping.cpus`；写 1 = 静默单核化）。"""
@@ -103,6 +109,7 @@ def test_should_register_only_on_change() -> None:
 
 # ---------------------------------------------------------------- classify_error
 
+
 def _http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("http://h", code, "err", Message(), BytesIO(b"{}"))
 
@@ -118,6 +125,7 @@ def test_classify_error() -> None:
 
 
 # ---------------------------------------------------------------- register / unregister
+
 
 class _Resp:
     # body 放宽到 Any：有用例要盖「响应体不是 dict」这条分支（agent 变坏/旧版），
@@ -181,7 +189,9 @@ def test_register_failure_is_classified_never_raised() -> None:
     out = rn.register(_opener(exc=_http_error(422)), "http://h", "tok", {}, lambda m: None)
     assert out["ok"] is False and out["kind"] == "server" and out["status"] == 422
 
-    out = rn.register(_opener(exc=urllib.error.URLError("down")), "http://h", "tok", {}, lambda m: None)
+    out = rn.register(
+        _opener(exc=urllib.error.URLError("down")), "http://h", "tok", {}, lambda m: None
+    )
     assert out["ok"] is False and out["kind"] == "net" and out["status"] == 0
 
 
@@ -209,6 +219,7 @@ def test_unregister_posts_id_and_reports_status() -> None:
 
 # ---------------------------------------------------------------- 近 30min 产出摘要（2026-10-18）
 
+
 def test_output_line_prefers_the_agent_line_verbatim() -> None:
     """行形状由 agent 算好（数字只在 `tools/agent/output-window.ts` 一处算）——这里只搬运。
 
@@ -228,11 +239,18 @@ def test_output_line_is_honest_when_unknown() -> None:
     （文本断言计数护栏只许降不许升，全等不计）。
     """
     assert node_report.output_line(None) == "近30min产出 不可知（agent 未应答）"
-    assert node_report.output_line({"gamesDoneTotal": 1240}) == "近30min产出 不可知（旧 agent 无 outputLine）"
-    assert node_report.output_line({"outputLine": "   "}) == "近30min产出 不可知（旧 agent 无 outputLine）"
+    assert (
+        node_report.output_line({"gamesDoneTotal": 1240})
+        == "近30min产出 不可知（旧 agent 无 outputLine）"
+    )
+    assert (
+        node_report.output_line({"outputLine": "   "})
+        == "近30min产出 不可知（旧 agent 无 outputLine）"
+    )
 
 
 # ---------------------------------------------------------------- 准入计数（2026-11-15）
+
 
 def test_node_online_carries_admission_counters() -> None:
     """503 归因：每轮那行 online 带 agent 的准入计数（零新增探测，ping 顺带）。
@@ -311,7 +329,9 @@ def test_emit_output_summary_prints_output_and_disk_lines(monkeypatch: pytest.Mo
     rn.emit_output_summary(8443, "tok", seen.append)
     assert len(calls) == 1, "磁盘行与产出行必须共用同一次 /v1/status（零额外请求）"
     assert seen[0] == "近30min产出 games=7（rollout=7 / eval=0）"
-    assert seen[1] == "磁盘 free=2706MB（warn<4096 / 熔断<2048） · 档位=warn · 拒收=否 · 距熔断 658MB"
+    assert (
+        seen[1] == "磁盘 free=2706MB（warn<4096 / 熔断<2048） · 档位=warn · 拒收=否 · 距熔断 658MB"
+    )
     # agent 不可达 ⇒ 两行都如实说不可知（不是零行、不是抛）
     monkeypatch.setattr(rn, "_status", lambda port, auth: None)
     seen.clear()
@@ -320,6 +340,7 @@ def test_emit_output_summary_prints_output_and_disk_lines(monkeypatch: pytest.Mo
 
 
 # ---------------------------------------------------------------- GitHub 不通时的下载路
+
 
 def test_github_candidates_auto_try_builtin_mirrors() -> None:
     """不填任何开关：直连之后自动跟内置镜像（阿里云 DSW 现场不需要配置）。"""
@@ -335,7 +356,10 @@ def test_github_candidates_explicit_base_goes_first() -> None:
     """缓存了 `github_base` 时显式镜像优先、直连兜底、不重复。"""
     direct = "https://github.com/a/b"
     cfg = {"github_base": "https://mirror.example/https://github.com/"}
-    assert rn._github_candidates(cfg, direct)[:2] == ["https://mirror.example/https://github.com/a/b", direct]
+    assert rn._github_candidates(cfg, direct)[:2] == [
+        "https://mirror.example/https://github.com/a/b",
+        direct,
+    ]
     got = rn._github_candidates({"github_base": "https://gh-proxy.com/https://github.com"}, direct)
     assert got.count("https://gh-proxy.com/https://github.com/a/b") == 1
 
@@ -381,9 +405,7 @@ def test_bun_asset_url_maps_base_to_latest_zip() -> None:
     assert rn._bun_asset_url("", "bun-linux-x64") == (
         "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-x64.zip"
     )
-    assert rn._bun_asset_url(
-        "https://gh-proxy.com/https://github.com", "bun-linux-aarch64"
-    ) == (
+    assert rn._bun_asset_url("https://gh-proxy.com/https://github.com", "bun-linux-aarch64") == (
         "https://gh-proxy.com/https://github.com/oven-sh/bun/releases/latest/download/"
         "bun-linux-aarch64.zip"
     )
@@ -445,9 +467,7 @@ def test_cloudflared_install_uses_fastest_probe_then_falls_back(
                 return SimpleNamespace(returncode=0, stdout="262144 0.200", stderr="")
             return SimpleNamespace(returncode=6, stdout="", stderr="")
         downloads.append(url)
-        return SimpleNamespace(
-            returncode=0 if "ghproxy.net" in url else 6, stdout="", stderr=""
-        )
+        return SimpleNamespace(returncode=0 if "ghproxy.net" in url else 6, stdout="", stderr="")
 
     monkeypatch.setattr(rn, "_sh", _fake_sh)
     monkeypatch.setattr(rn, "_find_cloudflared", lambda _cfg, _log: "")
@@ -456,8 +476,7 @@ def test_cloudflared_install_uses_fastest_probe_then_falls_back(
     out = rn._start_cloudflared({}, 8443, Path("/tmp/x.log"), lambda _m: None)
     assert out is not None
     direct = (
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/"
-        "cloudflared-linux-amd64"
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
     )
     assert downloads == [
         "https://gh-proxy.com/" + direct,
@@ -518,7 +537,10 @@ def test_disk_thresholds_defaults_and_derivation() -> None:
     assert node_report.disk_thresholds({}) == (2048, 4096)
     assert node_report.disk_thresholds({"disk_floor_mb": 1024}) == (1024, 2048)
     assert node_report.disk_thresholds({"disk_floor_mb": 4096}) == (4096, 8192)
-    assert node_report.disk_thresholds({"disk_floor_mb": 3000, "disk_warn_mb": 8000}) == (3000, 8000)
+    assert node_report.disk_thresholds({"disk_floor_mb": 3000, "disk_warn_mb": 8000}) == (
+        3000,
+        8000,
+    )
 
 
 def test_disk_thresholds_validation_is_loud() -> None:
@@ -639,8 +661,7 @@ def test_cloudflared_discovery_prefers_explicit_executable(
 
 def test_latest_bun_version_picks_semver_max() -> None:
     listing = (
-        '[{"name":"bun-v1.4.9/"},{"name":"bun-v1.10.0/"},'
-        '{"name":"bun-v1.4.4/"},{"name":"canary/"}]'
+        '[{"name":"bun-v1.4.9/"},{"name":"bun-v1.10.0/"},{"name":"bun-v1.4.4/"},{"name":"canary/"}]'
     )
     assert rn._latest_bun_version(listing) == "1.10.0"
     assert rn._latest_bun_version("[]") == ""
@@ -651,7 +672,7 @@ def test_latest_bun_version_picks_semver_max() -> None:
     [
         ("x86_64", "flags: avx2", "bun-linux-x64"),
         ("x86_64", "flags: sse2", "bun-linux-x64-baseline"),
-        ("amd64", "", "bun-linux-x64"),          # 读不到 cpuinfo 时不猜 baseline
+        ("amd64", "", "bun-linux-x64"),  # 读不到 cpuinfo 时不猜 baseline
         ("aarch64", "", "bun-linux-aarch64"),
         ("mips", "", ""),
     ],
@@ -661,6 +682,7 @@ def test_bun_target_table(machine: str, cpuinfo: str, want: str) -> None:
 
 
 # ------------------------------------------------ 空 URL 硬闸 / banner / 通道姿势
+
 
 def test_empty_url_never_posts_to_hub() -> None:
     """★ 空 URL 是本地失败：零 HTTP、kind=nourl、不写 reg_state。"""
@@ -789,6 +811,7 @@ def test_tunnel_retry_due_only_when_empty_and_due() -> None:
 
 # ------------------------------------------------ cloudflared 自救 / 预检
 
+
 class _Proc:
     def __init__(self, rc: int | None) -> None:
         self.rc = rc
@@ -835,8 +858,11 @@ def test_tunnel_dead_requires_cloudflared_and_evidence() -> None:
     # tailscale 通道 cfp=None 是正常态；空 URL 走补拿闸。
     assert (
         rn._tunnel_dead(
-            is_cloudflared=False, url="http://100.64.0.5:8443", cfp=None,
-            agent_ok=True, probe_fails=9,
+            is_cloudflared=False,
+            url="http://100.64.0.5:8443",
+            cfp=None,
+            agent_ok=True,
+            probe_fails=9,
         )
         is False
     )
@@ -866,9 +892,7 @@ def test_public_ping_runs_in_platform_net_env(
             seen.append("out")
 
     monkeypatch.setattr(rt.tailscale_boot, "platform_net_env", lambda: _Ctx())
-    assert rn._public_ping("https://x.trycloudflare.com", "ak", lambda *_a: {"ok": 1}) == {
-        "ok": 1
-    }
+    assert rn._public_ping("https://x.trycloudflare.com", "ak", lambda *_a: {"ok": 1}) == {"ok": 1}
     assert seen == ["in", "out"]
 
     def _boom(*_a: object) -> dict | None:
@@ -1195,8 +1219,10 @@ def test_cf_log_is_reset_between_attempts(tmp_path: Path) -> None:
     cf.write_text("https://a.trycloudflare.com", encoding="utf-8")
     rn._reset_cf_log(cf, 1)
     assert cf.read_text(encoding="utf-8") == ""
-    assert (tmp_path / "cf.log.1").read_text(encoding="utf-8").startswith(
-        "https://a.trycloudflare.com"
+    assert (
+        (tmp_path / "cf.log.1")
+        .read_text(encoding="utf-8")
+        .startswith("https://a.trycloudflare.com")
     )
 
     missing = tmp_path / "missing.log"
@@ -1211,9 +1237,7 @@ def test_dead_reason_extracted_from_log(tmp_path: Path) -> None:
         '{"level":"error","message":"failed to dial: no such host"}\n',
         encoding="utf-8",
     )
-    assert rn._dead_reason(cf) == (
-        '{"level":"error","message":"failed to dial: no such host"}'
-    )
+    assert rn._dead_reason(cf) == ('{"level":"error","message":"failed to dial: no such host"}')
 
     cf.write_text('{"level":"info","message":"still connecting"}\n', encoding="utf-8")
     assert rn._dead_reason(cf) == "未能从日志提取"
@@ -1224,7 +1248,9 @@ def test_net_probe_uses_proxy_aware_https(
 ) -> None:
     # 预检已下沉到 `remote/rollout_tunnel.py`（rollout_node 只 re-export）⇒ 插件目标在新所有者上，
     # 迁到之的都是两条真相。
-    monkeypatch.setattr("remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "inherit")
+    monkeypatch.setattr(
+        "remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "inherit"
+    )
     monkeypatch.setattr("remote.rollout_tunnel.probe_tcp", lambda *_a, **_k: True)
     logs: list[str] = []
     postures = rn._net_probe(logs.append)
@@ -1238,7 +1264,9 @@ def test_net_probe_uses_proxy_aware_https(
 def test_net_probe_falls_back_to_direct(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "direct")
+    monkeypatch.setattr(
+        "remote.rollout_tunnel.probe_https", lambda posture, **_k: posture == "direct"
+    )
     monkeypatch.setattr("remote.rollout_tunnel.probe_tcp", lambda *_a, **_k: True)
     logs: list[str] = []
     postures = rn._net_probe(logs.append)
@@ -1259,14 +1287,11 @@ def test_net_probe_reports_unreachable_but_still_returns_postures(
     assert postures == ("inherit", "direct")
     assert logs == [
         "预检: api.trycloudflare.com:443 inherit=fail direct=fail ｜ 边缘7844 tcp=fail",
-        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；"
-        "仍按 inherit 尝试",
+        "⇒ 公网不可达：api.trycloudflare.com:443 两种姿势都不通（检查出网/DNS）；仍按 inherit 尝试",
     ]
 
 
-def test_cf_cmd_carries_compat_flags(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_cf_cmd_carries_compat_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict = {}
 
     def _popen(cmd, **kw):
@@ -1305,9 +1330,7 @@ def test_cf_cmd_direct_posture_uses_child_env(
     monkeypatch.setenv("HTTP_PROXY", "http://platform:3128")
     monkeypatch.setattr(rn, "_find_cloudflared", lambda *_a, **_k: "/bin/cloudflared")
     monkeypatch.setattr(rn.subprocess, "Popen", _popen)
-    rn._start_cloudflared(
-        {}, 8443, tmp_path / "cf.log", lambda _m: None, env_posture="direct"
-    )
+    rn._start_cloudflared({}, 8443, tmp_path / "cf.log", lambda _m: None, env_posture="direct")
     env = captured["env"]
     assert env is not None
     assert env.get("HTTP_PROXY") is None
@@ -1333,7 +1356,10 @@ def test_open_tailscale_returns_url_and_never_raises(
 
     monkeypatch.setattr(rn.tailscale_boot, "ensure", _boom)
     assert rn._open_tailscale({}, "ak", 8443, lambda _m: None) == ("", False)
+
+
 # ---------------------------------------------------------------- 持久二进制缓存
+
 
 def _fake_exe(path: Path) -> Path:
     path.write_bytes(b"fake-binary")
@@ -1377,7 +1403,9 @@ def test_bin_cache_dir_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rn._bin_cache_dir({}, isdir=lambda _p: False) == Path("/env/cache")
 
 
-def test_cached_bin_reuses_valid_executable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cached_bin_reuses_valid_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()
     bun = _fake_exe(cache / "bun")
@@ -1505,7 +1533,9 @@ def test_find_cloudflared_reuses_cache(tmp_path: Path, monkeypatch: pytest.Monke
     assert rn._find_cloudflared({"bin_cache_dir": str(cache)}, lambda _m: None) == str(cf)
 
 
-def test_start_agent_marks_the_process_as_supervised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_agent_marks_the_process_as_supervised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """notebook 启动链必须让 agent 交给外层监护循环重启，而不是自己 spawn detached child。"""
     monkeypatch.delenv(rn.AGENT_SUPERVISED_ENV, raising=False)
     seen: dict[str, Any] = {}
@@ -1580,3 +1610,39 @@ def test_banner_blames_relay_not_cloudflared_when_channel_is_relay() -> None:
     joined = "\n".join(lines)
     assert "relay 预检" in joined and "cloudflared 日志" not in joined, joined
     assert any("x.trycloudflare.com" in ln for ln in lines), lines
+
+
+# ---------------------------------------------------------------- 同一 node_id 重复进程（2026-11-18 DSW）
+
+
+def test_warns_when_same_node_id_already_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已有别的 pid 在轮询同一个 node_id 时必须点名 —— 否则两份进程的日志混在一起，
+    看起来像「新代码没生效」（DSW 现场就这么误判过一次）。
+
+    实现在 `common/node_report`（`rollout_node.py` 已顶在 1000 行预算上）。
+    """
+    monkeypatch.setattr(node_report.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(node_report, "pid_alive", lambda _p: True)
+    (tmp_path / "battle-rollout-dsw.pid").write_text("4242", encoding="utf-8")
+    logs: list[str] = []
+    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 4242, "要直接给出该 kill 的 pid"
+    assert len(logs) == 1, logs
+    # 本进程成为新的 owner：下次启动该看到自己的 pid，而不是继续报 4242
+    assert (tmp_path / "battle-rollout-dsw.pid").read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_no_warn_when_pidfile_is_own_or_dead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自己的 pid / 已死进程都不该告警（只告警不退出，但也不许刷噪声）。"""
+    monkeypatch.setattr(node_report.tempfile, "gettempdir", lambda: str(tmp_path))
+    path = tmp_path / "battle-rollout-dsw.pid"
+    logs: list[str] = []
+    path.write_text(str(os.getpid()), encoding="utf-8")
+    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 0
+    monkeypatch.setattr(node_report, "pid_alive", lambda _p: False)
+    path.write_text("4242", encoding="utf-8")
+    assert node_report.warn_if_node_id_taken("dsw", logs.append) == 0
+    assert logs == [], logs
