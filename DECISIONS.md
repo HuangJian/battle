@@ -7458,3 +7458,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   276 → **162** 行（拆出 `_round_volume` / `_apply_greedy_budget` / `_iter_manifest`），
   长函数存量 **22 → 21**，形状基线删除该文件的长函数条目（宽参数条目保留）。
   全文 → `docs/nn/engineering.md` §194。
+- **2026-11-18（长函数存量第十七刀：greedy 采集）**：`trainer/loop_volume.py::_volume_collect_greedy`
+  286 → **187** 行（拆出 `_dispatch_greedy_wave` / `_greedy_collected` / `_greedy_plan_games` /
+  `_greedy_scan`），长函数存量 **21 → 20**；`LONG_FUNCS_BASELINE` 的 `trainer/loop_volume.py`
+  2 → 1（`_volume_collect_continuous` 327 仍在余量里），`CLUSTER` 守卫 13 → 15，
+  `_StubLoop` 补两个同源转发。
+  全文 → `docs/nn/engineering.md` §195。

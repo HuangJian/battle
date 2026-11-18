@@ -25,6 +25,24 @@
 
 ---
 
+## §195 长函数存量第十七刀：greedy 采集 286 → 187（2026-11-18）
+
+`trainer/loop_volume.py::_volume_collect_greedy` **286 → 187 行**，长函数存量
+**21 → 20**（`LONG_FUNCS_BASELINE` 的 `trainer/loop_volume.py` 由 2 调到 1；
+`_volume_collect_continuous` 327 行仍在余量里）。
+
+四刀纯搬移：
+- `_dispatch_greedy_wave(...)`：派发一波 greedy（halt / on_result 透传、报告合并、日志）。
+- `_greedy_collected(manifests, stages)`：按 greedy manifest 累计每关样本 / 局数。
+- `_greedy_plan_games(...)`：这一波逐关派发局数（本地池按缺口 1× 派）。
+- `_greedy_scan(self, it)`：盘上进度扫描（三处同形调用收成一个）。
+
+测试同步：`test_loop_volume_split` 的 `CLUSTER` 13 → 15（两处新方法登记）；
+`test_rollout_volume` 的 `_StubLoop` 补 `_greedy_scan` / `_dispatch_greedy_wave` 两个
+同源转发（unbound 绑定走生产实现，不复制逻辑）。
+
+---
+
 ## §194 长函数存量第十六刀：单轮执行 276 → 162（2026-11-18）
 
 `remote/plan_run.py::_run_iteration` **276 → 162 行**，长函数存量 **22 → 21**

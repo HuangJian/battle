@@ -46,7 +46,7 @@ LONG_FUNCS_BASELINE = {
     "trainer/dispatch.py": 2,
     "trainer/eval_dispatch.py": 1,
     "trainer/loop_remote_job.py": 1,
-    "trainer/loop_volume.py": 2,
+    "trainer/loop_volume.py": 1,
     "trainer/stream.py": 1,
     "worker/bc_dispatch.py": 1,
     "worker/cli.py": 1,

@@ -621,6 +621,16 @@ class _StubLoop:
     def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         TrainingLoop._volume_collect_greedy(cast(Any, self), it, dist_cfg)
 
+    def _greedy_scan(self, it: int):
+        return TrainingLoop._greedy_scan(cast(Any, self), it)
+
+    def _dispatch_greedy_wave(
+        self, it: int, pairs, dist_cfg, total: int, plan, bins: dict, targets: dict
+    ) -> bool:
+        return TrainingLoop._dispatch_greedy_wave(
+            cast(Any, self), it, pairs, dist_cfg, total, plan, bins, targets
+        )
+
     def volume_view(self) -> VolumeView:
         return TrainingVolume.volume_view(cast(Any, self))
 

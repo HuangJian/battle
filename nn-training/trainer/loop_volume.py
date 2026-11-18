@@ -120,6 +120,73 @@ def _learned_samples_per_game(samples: int, games: int) -> int:
     return max(1, round(s / g)) if g > 0 and s > 0 else 0
 
 
+def _greedy_collected(
+    manifests: dict, stages: list[int]
+) -> tuple[dict[int, int], dict[int, int]]:
+    """按 greedy shard manifest 累计每关样本/局数（自 `_volume_collect_greedy` 搬出）。"""
+    from worker.greedy_quota import is_greedy_manifest, manifest_samples
+
+    collected = {s: 0 for s in stages}
+    games = {s: 0 for s in stages}
+    for _name, mm in manifests.items():
+        if mm is None or not is_greedy_manifest(mm):
+            continue
+        raw_stage = mm.get("stage")
+        if not isinstance(raw_stage, (int, float, str)):
+            continue
+        try:
+            st = int(raw_stage)
+        except (TypeError, ValueError):
+            continue
+        if st not in collected:
+            continue
+        n = manifest_samples(mm)
+        if n > 0:
+            collected[st] += n
+            games[st] += 1
+    return collected, games
+
+
+def _greedy_plan_games(
+    stages, collected, games, est_s, est_global, game_caps, width, target: int
+) -> dict:
+    """这一波的逐关派发局数（自 `_volume_collect_greedy` 搬出；本地池按缺口 1× 派）。"""
+    from worker.volume_alloc import pool_games_by_stage, spread_games_by_stage
+
+    learned = {
+        s: _learned_samples_per_game(collected.get(s, 0), games.get(s, 0)) for s in stages
+    }
+    has_est = bool(est_global) or any(int(est_s.get(s, 0) or 0) > 0 for s in stages)
+    if any(learned.values()) or has_est:
+        est_dispatch = {
+            s: max(1, int(learned.get(s) or est_s.get(s, 0) or est_global or 0))
+            for s in stages
+        }
+        # 本地串行池**一次跑完整批**（halt/on_result 只在整批结束后回来），
+        # 所以候选池必须按缺口 1× 派；×2 的候选会全部落盘 = 2× collect_target
+        # （2026-11-09 S3 实测 18407/8602）。远端队列仍靠 halt 逐局熔断，
+        # 少派候选不会改变墙钟，只少一层无用的排队。
+        return pool_games_by_stage(
+            stages=stages,
+            collected=collected,
+            games_done=games,
+            target_transitions=target,
+            ests=est_dispatch,
+            game_caps=game_caps,
+            width=0,
+            mult=1.0,
+        )
+    # 冷启动（无历史、无本轮结算）⇒ 按机器宽度满铺，不猜 est。
+    return spread_games_by_stage(
+        stages=stages,
+        collected=collected,
+        games_done=games,
+        target_transitions=target,
+        game_caps=game_caps,
+        width=width,
+    )
+
+
 class TrainingVolume:
     """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
 
@@ -920,6 +987,67 @@ class TrainingVolume:
                 f"（首批分发→样本齐；aggregated={self._report.get('rollout_collect_aggregated')}）"
             )
 
+    def _dispatch_greedy_wave(
+        self, it: int, pairs, dist_cfg, total: int, plan, bins: dict, targets: dict
+    ) -> bool:
+        """派发一波 greedy 并合并报告；返回 halt（配额已满）是否置位（自调用点搬出）。"""
+        import threading
+
+        from worker.greedy_quota import manifest_samples
+
+        halt = threading.Event()
+        live = {"total": int(total)}
+
+        # 绑定本轮的 live/halt：回调可能在下一轮开始后才被调（避免串轮）
+        def _watch(summary: object, live: dict[str, int] = live, halt: Any = halt) -> None:
+            if not isinstance(summary, dict):
+                return
+            # 单局摘要的字段口径：本地 TS shard 写 nSamples，远端/队列 path 经
+            # `_ensure_games` 转写 totalSamples（`collect_only._on_result` 同款）。
+            # 只认 nSamples ⇒ 队列路径的逐局熔断永不触发，整批候选跑完 = 过采。
+            n = manifest_samples(summary)
+            if n > 0:
+                live["total"] += n
+                if live["total"] >= plan.collect_target:
+                    halt.set()
+
+        self._greedy_waves += 1
+        args = self.args
+        old_argmax = bool(getattr(args, "rollout_argmax", False))
+        args.rollout_argmax = True
+        try:
+            wave_report = self._dispatch_volume_wave(
+                it,
+                pairs,
+                dist_cfg,
+                halt_event=halt,
+                on_result=_watch,
+                pool_halt=True,
+            )
+        finally:
+            args.rollout_argmax = old_argmax
+        self._greedy_report = (
+            wave_report
+            if self._greedy_report is None
+            else combine_reports([self._greedy_report, wave_report])
+        )
+        log(
+            f"[greedy] it{it}: batch{self._greedy_waves} games={len(pairs)} "
+            f"bins={bins} targets={targets} total={total}/{plan.collect_target}"
+        )
+        return halt.is_set()
+
+    def _greedy_scan(self, it: int):
+        """盘上 greedy 进度（自 `_volume_collect_greedy` 搬出）：`(names, manifests, bins, total)`。"""
+        from worker.greedy_quota import greedy_progress, load_manifests, shard_dirs_for_round
+
+        mem = self._round_mem_shards(it) or {}
+        shard_dirs = shard_dirs_for_round(self._traj_root, it, mem)
+        names = [p.name for p in shard_dirs]
+        manifests = load_manifests(shard_dirs, mem)
+        bins, total = greedy_progress(names, manifests)
+        return names, manifests, bins, total
+
     def _volume_collect_greedy(self, it: int, dist_cfg: dict | None) -> None:
         """greedy 结果配额采集阶段（plan/greedy-outcome-quota rev4）。
 
@@ -956,18 +1084,11 @@ class TrainingVolume:
         from worker.greedy_quota import (
             GREEDY_QUOTA_RULE_V1,
             bin_targets,
-            greedy_progress,
             is_greedy_manifest,
-            load_manifests,
             manifest_samples,
             parse_greedy_quota,
-            shard_dirs_for_round,
         )
-        from worker.volume_alloc import (
-            default_game_caps,
-            pool_games_by_stage,
-            spread_games_by_stage,
-        )
+        from worker.volume_alloc import default_game_caps
         from worker.volume_quota import DEFAULT_MAX_BATCHES, continuous_pairs
 
         stages = self._volume_stages(it)
@@ -982,11 +1103,7 @@ class TrainingVolume:
 
         # 扫描根用 `_traj_root`：shard 在 `<traj_root>/it{it}/w*/rl_s*_seed*`，
         # 递归扫描由 `shard_dirs_for_round` 负责（生产布局，非 itN 直接子目录）。
-        mem = self._round_mem_shards(it) or {}
-        shard_dirs = shard_dirs_for_round(self._traj_root, it, mem)
-        names = [p.name for p in shard_dirs]
-        manifests = load_manifests(shard_dirs, mem)
-        bins, total = greedy_progress(names, manifests)
+        names, manifests, bins, total = self._greedy_scan(it)
         targets = bin_targets(plan)
 
         est_s = self._volume_stage_ests_map(it)
@@ -1011,72 +1128,27 @@ class TrainingVolume:
         stopped_no_games = False
 
         while self._greedy_waves < max_batches:
-            mem = self._round_mem_shards(it) or {}
-            shard_dirs = shard_dirs_for_round(self._traj_root, it, mem)
-            names = [p.name for p in shard_dirs]
-            manifests = load_manifests(shard_dirs, mem)
-            bins, total = greedy_progress(names, manifests)
+            names, manifests, bins, total = self._greedy_scan(it)
             if all(int(bins[b]) >= int(targets[b]) for b in targets):
                 break
             if total >= plan.collect_target:
                 break
 
-            collected = {s: 0 for s in stages}
-            games = {s: 0 for s in stages}
-            for _name, mm in manifests.items():
-                if mm is None or not is_greedy_manifest(mm):
-                    continue
-                raw_stage = mm.get("stage")
-                if not isinstance(raw_stage, (int, float, str)):
-                    continue
-                try:
-                    st = int(raw_stage)
-                except (TypeError, ValueError):
-                    continue
-                if st not in collected:
-                    continue
-                n = manifest_samples(mm)
-                if n > 0:
-                    collected[st] += n
-                    games[st] += 1
+            collected, games = _greedy_collected(manifests, stages)
             # 重启后从已结算局数续抽，不重放已结算的 seed。
             for s in stages:
                 start_idx[s] = max(start_idx.get(s, 0), games.get(s, 0))
 
-            learned = {
-                s: _learned_samples_per_game(collected.get(s, 0), games.get(s, 0))
-                for s in stages
-            }
-            has_est = bool(est_global) or any(int(est_s.get(s, 0) or 0) > 0 for s in stages)
-            if any(learned.values()) or has_est:
-                est_dispatch = {
-                    s: max(1, int(learned.get(s) or est_s.get(s, 0) or est_global or 0))
-                    for s in stages
-                }
-                # 本地串行池**一次跑完整批**（halt/on_result 只在整批结束后回来），
-                # 所以候选池必须按缺口 1× 派；×2 的候选会全部落盘 = 2× collect_target
-                # （2026-11-09 S3 实测 18407/8602）。远端队列仍靠 halt 逐局熔断，
-                # 少派候选不会改变墙钟，只少一层无用的排队。
-                plan_g = pool_games_by_stage(
-                    stages=stages,
-                    collected=collected,
-                    games_done=games,
-                    target_transitions=plan.collect_target,
-                    ests=est_dispatch,
-                    game_caps=game_caps,
-                    width=0,
-                    mult=1.0,
-                )
-            else:
-                # 冷启动（无历史、无本轮结算）⇒ 按机器宽度满铺，不猜 est。
-                plan_g = spread_games_by_stage(
-                    stages=stages,
-                    collected=collected,
-                    games_done=games,
-                    target_transitions=plan.collect_target,
-                    game_caps=game_caps,
-                    width=width,
-                )
+            plan_g = _greedy_plan_games(
+                stages,
+                collected,
+                games,
+                est_s,
+                est_global,
+                game_caps,
+                width,
+                plan.collect_target,
+            )
             if not plan_g:
                 stopped_no_games = True
                 break
@@ -1093,55 +1165,12 @@ class TrainingVolume:
             for s, _sd in pairs:
                 start_idx[s] = start_idx.get(s, 0) + 1
 
-            import threading
-
-            halt = threading.Event()
-            live = {"total": int(total)}
-
-            # 绑定本轮的 live/halt：回调可能在下一轮开始后才被调（避免串轮）
-            def _watch(summary: object, live: dict[str, int] = live, halt: Any = halt) -> None:
-                if not isinstance(summary, dict):
-                    return
-                # 单局摘要的字段口径：本地 TS shard 写 nSamples，远端/队列 path 经
-                # `_ensure_games` 转写 totalSamples（`collect_only._on_result` 同款）。
-                # 只认 nSamples ⇒ 队列路径的逐局熔断永不触发，整批候选跑完 = 过采。
-                n = manifest_samples(summary)
-                if n > 0:
-                    live["total"] += n
-                    if live["total"] >= plan.collect_target:
-                        halt.set()
-
-            self._greedy_waves += 1
-            old_argmax = bool(getattr(args, "rollout_argmax", False))
-            args.rollout_argmax = True
-            try:
-                wave_report = self._dispatch_volume_wave(
-                    it,
-                    pairs,
-                    dist_cfg,
-                    halt_event=halt,
-                    on_result=_watch,
-                    pool_halt=True,
-                )
-            finally:
-                args.rollout_argmax = old_argmax
-            self._greedy_report = (
-                wave_report
-                if self._greedy_report is None
-                else combine_reports([self._greedy_report, wave_report])
-            )
-            log(
-                f"[greedy] it{it}: batch{self._greedy_waves} games={len(pairs)} "
-                f"bins={bins} targets={targets} total={total}/{plan.collect_target}"
-            )
-            if halt.is_set():
+            if self._dispatch_greedy_wave(
+                it, pairs, dist_cfg, int(total), plan, bins, targets
+            ):
                 break
 
-        mem = self._round_mem_shards(it) or {}
-        shard_dirs = shard_dirs_for_round(self._traj_root, it, mem)
-        names = [p.name for p in shard_dirs]
-        manifests = load_manifests(shard_dirs, mem)
-        bins, total = greedy_progress(names, manifests)
+        names, manifests, bins, total = self._greedy_scan(it)
         degraded = any(int(bins[b]) < int(targets[b]) for b in targets)
         cap_hit = bool(degraded and total >= plan.collect_target)
         # 2026-11-10（用户裁决）：主 rollout report 改**全量**口径。此前 greedy 波只进
