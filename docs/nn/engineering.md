@@ -25,6 +25,52 @@
 
 ---
 
+## §127 B5 第三块：episode 契约跨 `RolloutBackend` / `trainer/stream`（2026-11-18）
+
+§126 把 shard 与 episode 的**键**变成了契约，但三个 `load_episode_from_shard` 当时仍返回裸
+`dict` —— 现在它们返回具体契约，跨层的那一面是 `common.contracts.EpisodeLike`：
+
+| 后端 | 返回（契约） | 字段元组来源 |
+|---|---|---|
+| `worker/ppo/np_core`（per-tick） | `Episode` / `EpisodeV6` | `EPISODE_FIELDS[,_V6]` |
+| `worker/ppo/goal` | `GoalEpisode`（带标注的盘上是 `GoalEpisodeLabeled` 子型） | `GOAL_EPISODE_FIELDS` |
+| `worker/ppo/intent` | `IntentEpisode` | `INTENT_EPISODE_FIELDS` |
+
+四串字段元组**全部搬进 `common/contracts.py`**由声明序派生（原先一份在 np_core、两份手写在各模块）：
+守卫要读它们，而 goal/intent 模块 import torch —— 让守卫为了读几个元组去拉起 torch（或在不装
+，torch 的镜像上收集失败）是把 L0 契约拿去换测试方便。
+
+`RolloutBackend.load_episode_from_shard` 与 `trainer/stream._load_wave` 现在都说 `EpisodeLike`
+（流式基础设施不解释字段，唯一碰的键是 `adv` —— wave 归一化改写它，这一点现在被 mypy 对着
+四族契约一起检）。producer 里的 `cast` 不是「相信骨架」：`fields` 就是这个契约的声明序，
+两者是同一份声明（守卫 `tests/common/test_shard_contract.py` 把四串键序逐字钉住）。
+
+### 顺手挤出来的契约破洞（P0-1 同型）
+
+把 `trainer/stream.run_rollout_stream(backend=...)` 的参数从裸 `backend=None`（= `Any`，**什么
+都没被检**）改成 `backend: RolloutBackend | None` 之后，mypy 立刻报两条：
+
+* `stream.py` 恒传 `load_episode_from_shard(shard, gamma, lam)`，而 Protocol 只声明了 `dirpath`；
+* 回退路径的 `load_episodes(root, gamma, lam)` 同理。
+
+真因：**intent / goal 的装载器只收 `dirpath`**（其 `load_episodes` 别名是
+`(data_root, normalize_adv)`）。真把这两个模块接成 backend，逐 shard 装载会全部 `TypeError`，
+而且被 `_load_wave` 的 `except Exception -> "skip bad shard"` 吞成一行日志 —— 不崩、也不训；
+回退路径更是直接抛。修法：两个后端都收 `gamma` / `lam` **且真的用它俩**（传给
+`compute_gae_variable(gamma_tick=, lam=)`），缺省值 = 各自的模块常量（0.995 / 0.95）⇒ 缺省
+数值逐字节不变，传了就以调用方为准（与 per-tick 同口径）。
+
+守卫 `test_episode_loaders_accept_stream_call_shape`（按 mode × 两个成员参数化，静态 AST 签名
+绑定、不拉 torch）：修前**4 条红**（intent/goal × 两个成员），修后全绿。
+
+诚实交代边界：训练主循环目前走的是 `run_training(args, None, ...)` —— `backend` 恒为 `None`，
+`stream` 于是走 `_default_ppo_backend()`（per-tick `engine`），所以那两个后端**在 trainer 里今天
+并不活**（它们经 `worker.modes.get_backend` 被 `worker/model_build` 等使用）。本次只是把契约
+做真、把「一接上就静默死」的坑填掉，不改任何活路径的数值。
+
+**门禁读数**：G14 不动（Protocol 用 `Mapping[str, object]`、np_core 复用 `ShardRow`，零新增
+`Any`）· G5 不动 · mypy 959 · ruff 绿 · 相关子集 69 收下全绿。
+
 ## §126 B5 第二块：shard / episode 的数据面契约（2026-11-18）
 
 P0-4 剩下的那半边（「manifest/result 仍是裸 dict」）的第一步，按审计档 §7.2 的落地顺序：先给

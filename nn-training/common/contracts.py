@@ -192,3 +192,59 @@ class EpisodeV6(Episode):
 
     a_hold: np.ndarray
     lp_hold: np.ndarray
+
+
+class GoalEpisode(TypedDict):
+    """goal 后端（`worker/ppo/goal.load_episode_from_shard`）的 episode 键**与序**。
+
+    `dt` / `inject` 是变步长 GAE 与注入面的两列；`goal_mask` 是每步 N 路可达掩码。
+    """
+
+    obs: np.ndarray
+    scalars: np.ndarray
+    inject: np.ndarray
+    a_goal: np.ndarray
+    lp_goal: np.ndarray
+    value: np.ndarray
+    adv: np.ndarray
+    ret: np.ndarray
+    goal_mask: np.ndarray
+    dt: np.ndarray
+    engage: np.ndarray
+
+
+class GoalEpisodeLabeled(GoalEpisode):
+    """带离线标注的 goal episode：`engage_label.npy` 存在才有（追加在末尾，同 `optional=`）。"""
+
+    engage_label: np.ndarray
+
+
+class IntentEpisode(TypedDict):
+    """intent 后端（`worker/ppo/intent.load_episode_from_shard`）的 episode 键**与序**。"""
+
+    obs: np.ndarray
+    scalars: np.ndarray
+    inject: np.ndarray
+    a_intent: np.ndarray
+    lp_intent: np.ndarray
+    value: np.ndarray
+    adv: np.ndarray
+    ret: np.ndarray
+    mask: np.ndarray
+    dt: np.ndarray
+
+
+#: 三个 backend 的 episode 之一。`RolloutBackend` 与 `trainer/stream` **不解释**字段：
+#: 它们只把 episode 当「数组字典」搬运，唯一碰的键是 `adv`（wave 内归一化改写它）。
+#: 具体字段由各自后端的 `update` 消费 —— 所以这里是一个 union，而不是一个万能宽字典。
+EpisodeLike = Episode | EpisodeV6 | GoalEpisode | GoalEpisodeLabeled | IntentEpisode
+
+#: 四个 episode 族的字段**与序**（从声明序派生）。三个后端的 `load_episode_from_shard` 直接
+#: 拿它们当 `_episode.episode_from_shard(fields=…)`，不再各写一份字面量元组 —— 手写第二份
+#: 就是第二份真相（骨架按此序插入 dict 键，键序是下游对账与 diff 的一部分）。
+EPISODE_FIELDS: tuple[str, ...] = tuple(Episode.__annotations__)
+EPISODE_FIELDS_V6: tuple[str, ...] = tuple(EpisodeV6.__annotations__)
+GOAL_EPISODE_FIELDS: tuple[str, ...] = tuple(GoalEpisode.__annotations__)
+#: 存在才带的那一列 = `GoalEpisodeLabeled` 比 `GoalEpisode` 多出来的键（继承序：末尾）。
+GOAL_EPISODE_OPTIONAL: tuple[str, ...] = ("engage_label",)
+INTENT_EPISODE_FIELDS: tuple[str, ...] = tuple(IntentEpisode.__annotations__)

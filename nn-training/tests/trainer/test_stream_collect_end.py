@@ -19,8 +19,34 @@ import types
 import common.distribution
 import trainer.loop_round_steps as rsteps
 import trainer.stream as stream
+from common.contracts import EpisodeLike
 from trainer.loop_round_steps import RoundSteps
 from worker.loop_round import COLLECT_LOCAL, RoundContext
+
+
+class _NoWaveBackend:
+    """只走「PPO 已在先前进程跑完、本轮无新波」路径的假后端。
+
+    契约五个成员都要在（`RolloutBackend` 是结构契约，mypy 按它检查这里的实参）：
+    除了 `_ppo_load`，其余四个在本条用例的路径上不该被调到 —— 调到就当场失败，
+    这比“随便返回个空值”能钉住“没有白跑一轮装载/更新”。
+    """
+
+    def _ppo_load(self, *_a: object, **_kw: object) -> int:
+        return 1  # 视为 PPO 已跑完 ⇒ 跳过空波更新
+
+    def load_episode_from_shard(self, *_a: object, **_kw: object) -> EpisodeLike | None:
+        raise AssertionError("本轮不该装载 shard（无新结算）")
+
+    def chunk_episodes(self, *_a: object, **_kw: object) -> list[dict]:
+        raise AssertionError("本轮不该切块")
+
+    def load_episodes(self, *_a: object, **_kw: object) -> list[dict]:
+        raise AssertionError("本轮不该全盘装载")
+
+    def update(self, *_a: object, **_kw: object) -> dict:
+        raise AssertionError("本轮不该更新")
+
 
 
 def test_on_collect_end_fires_once_after_collector_exits(tmp_path, monkeypatch) -> None:
@@ -36,10 +62,6 @@ def test_on_collect_end_fires_once_after_collector_exits(tmp_path, monkeypatch) 
     monkeypatch.setattr(stream, "run_rollout_queue", fake_queue)
     monkeypatch.setattr(stream, "completed_pairs", lambda *_a, **_kw: set())
     monkeypatch.setattr(common.distribution, "weights_fingerprint", lambda _p: "w0")
-
-    class _Backend:
-        def _ppo_load(self, *_a, **_kw) -> int:
-            return 1  # 视为 PPO 已在先前进程跑完，跳过空波更新
 
     def on_collect_end() -> None:
         assert collector_done.is_set(), "collector 还没退出就解冻了 eval"
@@ -72,7 +94,7 @@ def test_on_collect_end_fires_once_after_collector_exits(tmp_path, monkeypatch) 
         None,
         None,
         None,
-        backend=_Backend(),
+        backend=_NoWaveBackend(),
         on_collect_end=on_collect_end,
     )
 
@@ -96,10 +118,6 @@ def test_dispatch_gate_opens_on_drain_and_refreezes_on_refill(tmp_path, monkeypa
     monkeypatch.setattr(stream, "run_rollout_queue", fake_queue)
     monkeypatch.setattr(stream, "completed_pairs", lambda *_a, **_kw: set())
     monkeypatch.setattr(common.distribution, "weights_fingerprint", lambda _p: "w0")
-
-    class _Backend:
-        def _ppo_load(self, *_a, **_kw) -> int:
-            return 1
 
     args = types.SimpleNamespace(
         workers=1,
@@ -128,7 +146,7 @@ def test_dispatch_gate_opens_on_drain_and_refreezes_on_refill(tmp_path, monkeypa
         None,
         None,
         None,
-        backend=_Backend(),
+        backend=_NoWaveBackend(),
         on_dispatch_drained=lambda: order.append("release"),
         on_dispatch_active=lambda: order.append("freeze"),
         on_collect_end=lambda: order.append("end"),

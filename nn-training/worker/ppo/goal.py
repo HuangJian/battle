@@ -42,6 +42,7 @@ if _ilu.find_spec("common") is None:
 
 import os
 import time
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -49,6 +50,7 @@ import torch
 import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
+from common.contracts import GOAL_EPISODE_FIELDS, GOAL_EPISODE_OPTIONAL, GoalEpisode
 from common.schema import BOARD
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from worker.ppo._episode import episode_from_shard
@@ -187,36 +189,41 @@ def compute_gae_variable(
     return compute_gae(rewards, values, dones, gamma_tick, lam, dt)
 
 
-def load_episode_from_shard(dirpath: str) -> dict | None:
-    """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。"""
-    return episode_from_shard(
+def load_episode_from_shard(
+    dirpath: str, gamma: float = GAMMA_TICK, lam: float = LAM
+) -> GoalEpisode | None:
+    """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。
+
+    `gamma` / `lam` **必须收**：stream.py 恒传 `(shard, args.gamma, args.lam)`，而本函数以前
+    只收 `dirpath` ⇒ 逐 shard 装载全类型 TypeError，被 `except Exception` 吞成一行
+    `skip bad shard`（不崩、也不训）。缺省值 = 模块常量（数值逐字节不变）。
+    """
+    ep = episode_from_shard(
         load_goal_shard(dirpath),
-        lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
-        fields=(
-            "obs",
-            "scalars",
-            "inject",
-            "a_goal",
-            "lp_goal",
-            "value",
-            "adv",  # 占位：GAE 现算
-            "ret",
-            "goal_mask",
-            "dt",
-            "engage",
+        lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
         ),
-        optional=("engage_label",),
+        fields=GOAL_EPISODE_FIELDS,
+        optional=GOAL_EPISODE_OPTIONAL,
     )
+    # 键集与序就是上面那份契约（fields 从它派生）⇒ cast 只是把骨架的动态 dict 交回静态类型。
+    # 带标注的盘上多一列 `engage_label`（`GoalEpisodeLabeled` 是子型）。
+    return None if ep is None else cast(GoalEpisode, ep)
 
 
-def load_episodes_goal(data_root: str, normalize_adv: bool = True) -> list[dict]:
+def load_episodes_goal(
+    data_root: str, gamma: float = GAMMA_TICK, lam: float = LAM, normalize_adv: bool = True
+) -> list[dict]:
+    """全盘回退装载（stream.py 无新结算时调它，**同样带** gamma/lam）。"""
     return load_episodes_common(
         data_root,
         label="ppo_goal",
         shard_kind="goal RL",
         need_files=("reward.npy", "obs.npy", "dt.npy", "goal_mask.npy"),
         shard_loader=load_goal_shard,
-        gae=lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        gae=lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
+        ),
         gae_name="variable-step GAE",
         normalize_adv=normalize_adv,
         normalize_ret=True,

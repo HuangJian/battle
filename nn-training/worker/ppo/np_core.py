@@ -22,7 +22,15 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from common.contracts import ActionSpace, Episode, EpisodeV6, Shard, ShardV6
+from common.contracts import (
+    EPISODE_FIELDS,
+    EPISODE_FIELDS_V6,
+    ActionSpace,
+    Episode,
+    EpisodeV6,
+    Shard,
+    ShardV6,
+)
 from common.errors import ProtocolError
 from common.log import log
 from common.schema import (
@@ -497,7 +505,7 @@ def xla_delta_str(d: dict[str, float]) -> str:
 
 # ---------------- minibatch chunking ----------------
 def chunk_episodes(
-    episodes: list[dict],
+    episodes: Sequence[ShardRow],
     mb: int,
     shuffle: bool = True,
     *,
@@ -1009,33 +1017,28 @@ def _reward_from_npy(dirpath: str, n_obs: int) -> np.ndarray:
     return np.asarray(r, dtype=np.float32)
 
 
-#: episode 的字段与**序**都从契约派生（`common/contracts.Episode` 的声明序）——手写第二份
-#: 元组就是第二份真相：契约改了而元组没改，键序静默变化（`episode_from_shard` 按此序组装）。
-#: 公开名字：守卫（`tests/common/test_shard_contract.py`）与对账脚本要引它。
-EPISODE_FIELDS: tuple[str, ...] = tuple(Episode.__annotations__)
-EPISODE_FIELDS_V6: tuple[str, ...] = tuple(EpisodeV6.__annotations__)
-
-
-def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
+def load_episode_from_shard(
+    dirpath: str, gamma: float = GAMMA, lam: float = LAM
+) -> Episode | EpisodeV6 | None:
     """流式 backend 接口（trainer/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
 
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
 
-    返回类型仍是裸 `dict`（不收紧到 `Episode`）：`RolloutBackend` 契约与 `trainer/stream`
-    要**可写入**的 dict（wave 内归一化会改写 `ep["adv"]`），把 TypedDict 换上去是一笔跨三层
-    的改造（B5 后续），不是这一刀。键集与序由 `_EPISODE_FIELDS*` 钉住（守卫见
-    `tests/common/test_shard_contract.py`）。
+    返回 `common.contracts.Episode`（v6 盘上是 `EpisodeV6`）：键集**与序**都由那一份声明决定
+    （`EPISODE_FIELDS*` 就是它的声明序），所以下面的 cast 不是「相信骨架」：键集与序本来就
+    是同一份事实。
     """
     d = load_shard(dirpath)
     # B1 v6：多两个字段（存在性判据，见 `_RL_SHARD_OPTIONAL`）。legacy 分支的
     # `fields` 元组逐字不变 ⇒ 历史 shard 的 episode 字典键集也逐字不变。
     fields = EPISODE_FIELDS_V6 if ActionSpace.from_batch(d).is_v6 else EPISODE_FIELDS
-    return episode_from_shard(
+    ep = episode_from_shard(
         d,
         lambda x: compute_gae(x["reward"], x["value"], x["done"], gamma, lam),
         fields=fields,
     )
+    return None if ep is None else cast("Episode | EpisodeV6", ep)
 
 
 def load_episodes(

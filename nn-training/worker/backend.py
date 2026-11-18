@@ -21,7 +21,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from common.contracts import EpisodeLike
 
 if TYPE_CHECKING:  # 避免 Protocol 模块被导入时拉起 torch
     import torch
@@ -41,14 +44,34 @@ class RolloutBackend(Protocol):
       _ppo_load               → stream.py:371（epoch 粒度 checkpoint 续跑）
     """
 
-    def load_episode_from_shard(self, dirpath: str) -> dict | None:
-        """单个 shard 目录 → 可训练 episode dict（adv/ret 未归一）；空/坏 shard 返回 None。"""
+    def load_episode_from_shard(
+        self, dirpath: str, gamma: float = ..., lam: float = ...
+    ) -> EpisodeLike | None:
+        """单个 shard 目录 → 可训练 episode（`adv`/`ret` 未归一）；空/坏 shard 返回 None。
+
+        返回的是**具体契约**（ppo 的 `Episode`/`EpisodeV6`、goal 的 `GoalEpisode`、intent 的
+        `IntentEpisode`）—— 这里是它们的 union，因为流式基础设施不解释字段（只搬 `adv`）。
+
+        `gamma` / `lam` 是 stream.py 的**实际**调用形状（`float(args.gamma), float(args.lam)`）：
+        契约来源是调用点，所以它们就在签名里。三个后端都必须收 —— 以前 intent/goal 只收
+        `dirpath`，逐 shard 装载全 TypeError 又被 `except` 吞成日志（P0-1 同型，
+        `tests/worker/test_backend_contract.py::test_episode_loaders_accept_stream_call_shape` 钉住）。
+        """
         ...
 
     def chunk_episodes(
-        self, episodes: list[dict], mb: int, shuffle: bool = True, *, rng: object | None = None
+        self,
+        episodes: Sequence[Mapping[str, object]],
+        mb: int,
+        shuffle: bool = True,
+        *,
+        rng: object | None = None,
     ) -> list[dict]:
-        """episodes → 固定大小 minibatch chunks（末尾 ragged）。
+        """episodes → 固定大小 minibatch chunks（中间块恰为 `mb`，丢弃尾部 `n % mb`）。
+
+        入参宽一档为 `Sequence[Mapping[str, object]]`（`TypedDict` 不是 `dict` 的子型，而 `Sequence`
+        是协变的 ⇒ episode 契约束成的列表也能递进来）；产物是**动态拼的块**（键集随 episode 变），
+        块内字段由各后端 `update` 消费，所以返回仍是 `list[dict]`。
 
         `shuffle=True` 必须给 `rng`（`PPORng.chunk`，§P1-7）：切块重排不再读全局
         `np.random`，`shuffle=False` 才允许省略。注解是 `object`（**契约模块不 import 实现**：
@@ -72,8 +95,14 @@ class RolloutBackend(Protocol):
         """
         ...
 
-    def load_episodes(self, data_root: str) -> list[dict]:
-        """目录 → 全量 episodes（adv 已归一）。断点续跑零结算时的回退路径。"""
+    def load_episodes(
+        self, data_root: str, gamma: float = ..., lam: float = ...
+    ) -> list[dict]:
+        """目录 → 全量 episodes（adv 已归一）。断点续跑零结算时的回退路径。
+
+        同样按 stream.py 的实际调用带 `gamma` / `lam`（per-tick 走 `np_core.load_episodes`，
+        intent/goal 的别名以前只收 `(data_root, normalize_adv)` ⇒ 回退路径直接 TypeError）。
+        """
         ...
 
     def _ppo_load(self, ckpt_path: str | None, model: Any, opt: Any, rng: object) -> int:

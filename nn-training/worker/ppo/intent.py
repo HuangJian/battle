@@ -39,6 +39,7 @@ if _ilu.find_spec("common") is None:
 
 import os
 import time
+from typing import cast
 
 import numpy as np
 import numpy.typing as npt
@@ -46,6 +47,7 @@ import torch
 import torch.nn.functional as F
 
 from common.cli import house_parser, run_main
+from common.contracts import INTENT_EPISODE_FIELDS, IntentEpisode
 from worker.models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -154,37 +156,43 @@ def compute_gae_variable(
     return compute_gae(rewards, values, dones, gamma_tick, lam, dt)
 
 
-def load_episode_from_shard(dirpath: str) -> dict | None:
+def load_episode_from_shard(
+    dirpath: str, gamma: float = GAMMA_TICK, lam: float = LAM
+) -> IntentEpisode | None:
     """流式 backend 接口（trainer/stream.py）：意图 shard → 可训练 episode（adv/ret 未归一）。
 
     与 ppo.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数复用
-    同一套流式基础设施（意图步变步长 GAE + inject/dt 字段）。"""
-    return episode_from_shard(
+    同一套流式基础设施（意图步变步长 GAE + inject/dt 字段）。
+
+    `gamma` / `lam` **必须收**：stream.py 恒传 `(shard, args.gamma, args.lam)`，而本函数以前
+    只收 `dirpath` ⇒ 逐 shard 装载全类型 TypeError，被 `except Exception` 吞成一行
+    `skip bad shard`（不崩、也不训）。值与模块常量同源（`GAMMA_TICK`/`LAM` = 0.995/0.95），
+    缺省时数值逐字节不变；传了就以调用方为准（与 per-tick 的 `load_episode_from_shard` 一致）。
+    """
+    ep = episode_from_shard(
         load_intent_shard(dirpath),
-        lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
-        fields=(
-            "obs",
-            "scalars",
-            "inject",
-            "a_intent",
-            "lp_intent",
-            "value",
-            "adv",  # 占位：GAE 现算
-            "ret",
-            "mask",
-            "dt",
+        lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
         ),
+        fields=INTENT_EPISODE_FIELDS,
     )
+    # 键集与序就是上面那份契约（fields 从它派生）⇒ cast 只是把骨架的动态 dict 交回静态类型。
+    return None if ep is None else cast(IntentEpisode, ep)
 
 
-def load_episodes_intent(data_root: str, normalize_adv: bool = True) -> list[dict]:
+def load_episodes_intent(
+    data_root: str, gamma: float = GAMMA_TICK, lam: float = LAM, normalize_adv: bool = True
+) -> list[dict]:
+    """全盘回退装载（stream.py 无新结算时调它，**同样带** gamma/lam）。"""
     return load_episodes_common(
         data_root,
         label="ppo_intent",
         shard_kind="intent RL",
         need_files=("reward.npy", "obs.npy", "dt.npy"),
         shard_loader=load_intent_shard,
-        gae=lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        gae=lambda d: compute_gae_variable(
+            d["reward"], d["value"], d["done"], d["dt"], gamma_tick=gamma, lam=lam
+        ),
         gae_name="variable-step GAE",
         normalize_adv=normalize_adv,
         normalize_ret=True,  # intent：adv 与 ret 都全局归一（I13 逐关规范化）

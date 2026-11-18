@@ -12,9 +12,11 @@ import numpy as np
 
 import common.distribution
 import common.runtime
+from common.contracts import EpisodeLike
 from common.log import log
 from common.text import exc_tail
 from trainer.dispatch_queue import local_slots_max_of, run_rollout_queue
+from worker.backend import RolloutBackend
 from worker.resume import _scan_shards, completed_pairs, state_init_enabled
 
 
@@ -102,7 +104,7 @@ def run_rollout_stream(
     on_collect_done=None,
     on_ppo_started=None,
     on_epoch_done=None,
-    backend=None,
+    backend: RolloutBackend | None = None,
     update_kwargs: dict | None = None,
     extra_wver: str | None = None,
     course_fp: str | None = None,
@@ -308,9 +310,9 @@ def run_rollout_stream(
         finally:
             box["t_end"] = time.time()  # rollout_sec 锚点：collector 真实退出时刻
 
-    def _load_wave(summaries: list[dict]) -> list[dict]:
+    def _load_wave(summaries: list[dict]) -> list[EpisodeLike]:
         t_load = time.time()
-        eps = []
+        eps: list[EpisodeLike] = []
         for s in summaries:
             d = s.get("_dir")
             if not d:
