@@ -94,7 +94,7 @@
   "trainer/loop_runner.py": 5,
   "trainer/loop_serve.py": 5,
   "trainer/loop_steps.py": 3,
-  "trainer/loop_transport.py": 9,
+  "trainer/loop_transport.py": 1,
   "trainer/queue_local.py": 1,
   "trainer/queue_worker.py": 3,
   "trainer/rollout_phase.py": 1,

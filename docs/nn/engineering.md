@@ -25,6 +25,61 @@
 
 ---
 
+## §132 P0-7 第十六批：`loop_transport` 的五处宽捕其实是五处自欺（2026-11-18）
+
+`trainer/loop_transport.py` 里五个函数读 rl-config 的课级覆盖，写法都是：
+
+```python
+try:
+    cfg = common.distribution.load_dist_config() or {}
+    course = (cfg.get("courses") or {}).get(stem) or {}
+    ...
+except Exception:
+    <用缺省>   # 有时是 pass，有时是 return "local" / 0 / True
+```
+
+### 为什么它是宽捕里最假的一类
+
+`common.distribution.load_dist_config` 的契约是**永不抛**：文件缺失 ⇒ `None`、坏 JSON / BOM ⇒
+一行 WARN + `None`、`OSError` 也在内部捕住。所以这段 `except Exception` 从来没有在捕「配置读
+不到」——它捕的是**本模块自己的 bug**：
+
+* 配置块从对象变成列表（运维手改、或上游 schema 漂了）⇒ 这里的 `AttributeError`；
+* 键改名（`courses` → `course_cfg`）⇒ 这里的 `TypeError` / 静默落空。
+
+两种形态的现场表现完全一样：**配置改了却没有生效，日志里一个字都没有**，而训练看起一切正常。
+这正是 P0-7 点名的形态（也是 G9 那条「捕了假装没发生」的兄弟：它至少还写了个 `pass`）。
+
+### 修法：形状总函数，不是更窄的 except
+
+新增三个**纯读取、不抛**的助手（`trainer/loop_transport.py` 顶部）：
+
+| 助手 | 职责 | 反例怎么处置 |
+|---|---|---|
+| `_config_block(cfg, key)` | 取一个对象块 | 不是对象 ⇒ 空块 + `warn_once("rl-config:<key>:shape", …)` |
+| `_course_stem(args)` | 课程路径 → 命名空间键 | 空路径 ⇒ `""`；`ImportError`（引导期）/ `ValueError`（非法课名）⇒ `""` |
+| `_course_value(stem, key)` | `courses.<stem>.<key>` > `rl.<key>` | 读不到 ⇒ `None` |
+
+于是五个函数里**没有可捕的东西**了：形状不对会被喊出来（不再是静默缺省），本模块自己的 bug
+直接穿到当轮（不再被伪装成「未配置」）。`_run_segment_iters` 保留一处**窄捕**
+`(TypeError, ValueError)`：配置值写错类型（`"abc"`）是真配置错误，按 0（关）+ 一行。
+
+### 三条用例随之改口径
+
+原来的 `test_config_read_failure_is_silent` / `test_hub_push_survives_a_broken_config` /
+`test_segment_iters_reads_course_then_rl` 用 `side_effect = RuntimeError/OSError` 测「静默」——
+那是**把宽捕当契约**：真实的失败形态是 `load_dist_config` 返回 `None`。现在改成：
+
+1. `return_value = None` ⇒ 静默用缺省（真契约，行为面也能钉）；
+2. `side_effect = AttributeError(...)` ⇒ **穿出去**（`test_a_programmer_error_in_the_config_read_is_not_swallowed` /
+   `test_hub_push_does_not_disguise_a_programmer_error`）—— 把 `return_value` 改回 `side_effect` 就红。
+
+读数：G4 **397 → 385**（该文件 9 → 1，剩的那处是 `_with_node_failover` 的单节点边界：换一个
+节点仍值得试，且已 `log`）、G9 **26 → 25**（该文件 1 → 0）；`tests/trainer/` + `tests/worker/test_run_segment.py`
+全绿。
+
+---
+
 ## §131 P1-5 第二批：`REMOTE_PUSH_NODE` 收进 `common/settings.py`（2026-11-18）
 
 第一批（2026-11-16）建了 `common/settings.py` 与 G13（按文件冻结 env 直读，只许调小），当时只收了

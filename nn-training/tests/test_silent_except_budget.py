@@ -33,6 +33,11 @@
     不一定支持 chmod）⇒ 44 → **40**；该文件另 6 处 `except Exception` 也在同批收窄（见 G4 记账表）。
     `common/distribution.py` 的 `weights_cached_on_node` 同批走窄捕（形状显式判 `isinstance`）
     ⇒ 42 → **41**；同文件另 1 处（`_closer` 对任意响应对象尽力 `close()`）是第三条边界，保留。
+  * **第十六批（2026-11-18，`trainer/loop_transport.py` 1 → 0）**：`_course_cf_tunnel` 的
+    `except Exception: pass` 是这条门禁的教科书反例 —— 它罩的不是配置读失败（`load_dist_config`
+    永不抛），而是本模块自己的 bug，而处置是**什么都不做**。整段换成形状总函数
+    `_config_block` / `_course_stem` / `_course_value` 后没有可捕的东西（形状不对 `warn_once`）。
+    同批 G4 该文件 9 → 1（见图 `test_broad_except_budget.py` 的记账表）。
   * **留在基线里的每一处都要在**现场**写明理由**（2026-11-15 补，`_marker_audit`）。
     `python.refactor.md` 附录 C 把 26 处 A 类逐条定性成「静默就是契约」—— 但那张表在仓库根，
     改这几行代码的人看不到它，于是同一批 `except Exception: pass` 每隔几个月就被重新审计一遍。

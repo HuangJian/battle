@@ -96,7 +96,7 @@ def test_segment_iters_reads_course_then_rl() -> None:
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 6
         dc.load_dist_config.return_value = {"courses": {}, "rl": {"run_iters": 3}}
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 3
-        dc.load_dist_config.side_effect = OSError("no cfg")
+        dc.load_dist_config.return_value = None  # 读不到的**真实形态**（load_dist_config 自己捕 I/O）
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 0
 
 

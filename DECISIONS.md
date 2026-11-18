@@ -7026,3 +7026,15 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   未设/空 ⇒ 空串 = 显式无覆盖），并登记进 `MIGRATED_ENV` 让 G13 的单家判据开始盯它。**刻意不做**
   `rstrip("/")`：那是拼 URL 的调用方的细节，旋钮只负责「读出来的字符串 같不一致」。存量
   63/32 → **60/30**，两个文件条目归零即删。全文 → `docs/nn/engineering.md` §131。
+
+- **2026-11-18（P0-7 第十六批：`loop_transport` 的五处宽捕是五处自欺）**：`trainer/loop_transport.py`
+  五个读 rl-config 课级覆盖的函数各罩一条 `except Exception: <用缺省>`。它们从来没在捕「配置读不到」
+  ——`load_dist_config` 的契约就是永不抛（文件缺失 / 坏 JSON / BOM 都返回 `None` 并在内部喊一行）
+  ——捕的是本模块自己的 bug（配置块从对象变列表 ⇒ `AttributeError`、键改名 ⇒ `TypeError`），处置
+  却是「静默用缺省」：配置改了却没生效，而日志里一个字都没有。修法是**形状总函数**而不是更窄的
+  except：`_config_block` / `_course_stem` / `_course_value` 三个纯读取助手（形状不对 `warn_once`），
+  于是整段没有可捕的东西；`run_iters` 的非数字值仍窄捕 `(TypeError, ValueError)`（真配置错误 ⇒
+  按 0 + 一行）。**顺带改口径**：三条用例原来用 `side_effect = RuntimeError/OSError` 测「静默」，
+  那是把宽捕当契约 —— 改成真实失败形态（`load_dist_config → None`）+ 两条「程序员错穿出去」的
+  反向判据（把 `return_value` 改回 `side_effect` 即红）。G4 397 → **385**（该文件 9 → 1，剩那处是
+  `_with_node_failover` 的单节点边界）、G9 26 → **25**。全文 → `docs/nn/engineering.md` §132。

@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import common.distribution
+from common.log import default_router
 from common.protocol import (
     JobFailedError,
     ProtocolError,
@@ -54,6 +55,58 @@ class SmokeVoidRoundError(Exception):
     """
 
 
+# ---- rl-config 课级覆盖的**单一读法**（P0-7 批次，2026-11-18）--------------------------
+#
+# 这三族函数（`_course_cf_tunnel` / `_rollout_source` / `_run_segment_iters` /
+# `_warn_explicit_source_blocks_restore` / `_hub_push_opt_in`）曾经各自用
+# `try: … except Exception: <用缺省>` 罩住一块配置读取。宽捕获在这里罩住的**并不是**配置读
+# 失败：`common.distribution.load_dist_config` 的契约就是永不抛（文件缺失 / 坏 JSON / BOM
+# 都返回 None 并在内部喊一行）。所以真正被吞掉的是**本模块自己的 bug**（配置块从对象变成
+# 列表 ⇒ AttributeError、键改名 ⇒ 这里的 TypeError），而处置是「静默用缺省」——正是 P0-7
+# 点名的形态：配置改了却没生效，日志里一个字都没有。
+#
+# 现在：形状不对就**喊一次**然后按未配置处理（形状总函数，没有要捕的东西），本模块自己的
+# 程序员错照旧穿出去。
+
+
+def _config_block(cfg: Mapping[str, object], key: str) -> Mapping[str, object]:
+    """取 rl-config 的一个对象块（缺失 ⇒ 空；存在但不是对象 ⇒ 空 + 喊一次）。"""
+    raw = cfg.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        default_router().warn_once(
+            f"rl-config:{key}:shape",
+            f"rl-config 的 {key!r} 不是对象（{type(raw).__name__}）——按未配置处理（这项配置不生效）",
+        )
+        return {}
+    return raw
+
+
+def _course_stem(args: object) -> str:
+    """课程路径 → 命名空间键（空串 = 没有课级覆盖可读）。只 `getattr` 一个键 ⇒ `object` 够。"""
+    path = str(getattr(args, "course_path", "") or "")
+    if not path:
+        return ""
+    try:
+        from worker.train.loop_util import course_key_from_path
+    except ImportError:  # 引导期没有 worker 包：不存在课级覆盖
+        return ""
+    try:
+        return course_key_from_path(path)
+    except ValueError:  # 非法课程名（启动期别处已响亮拒启）：按「读不到」处理
+        return ""
+
+
+def _course_value(stem: str, key: str) -> object:
+    """`courses.<stem>.<key>` > `rl.<key>`（读不到 ⇒ None）。纯读取，不抛。"""
+    cfg = common.distribution.load_dist_config()
+    if not isinstance(cfg, Mapping):
+        return None
+    course = _config_block(_config_block(cfg, "courses"), stem)
+    return course.get(key) or _config_block(cfg, "rl").get(key) or None
+
+
 def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     """本轮**真正生效**的隧道协议/边缘 IP → 写进 iteration 事件的 wire.protocol/edge_ip。
 
@@ -69,24 +122,11 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     edge = str(getattr(args, "remote_cf_edge_ip", "") or "") or None
     if proto and edge:
         return proto, edge  # 两个都由 CLI 给定 → 不必读盘
-    try:
-        from worker.train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        stem = ""
+    stem = _course_stem(args)
     if not stem:
         return proto, edge
-    try:
-        cfg = common.distribution.load_dist_config() or {}
-        course = (cfg.get("courses") or {}).get(stem) or {}
-        rl = cfg.get("rl") or {}
-        proto = proto or str(course.get("cf_protocol") or rl.get("cf_protocol") or "") or None
-        edge = edge or str(course.get("cf_edge_ip") or rl.get("cf_edge_ip") or "") or None
-    except Exception:
-        # 契约静默（G9 冻结，非旧债）：既有契约「配置读不到 ⇒ 用缺省隧道参数」
-        # （tests 里 test_config_read_failure_is_silent 等三条钉死）；改它会破契约。
-        pass
+    proto = proto or str(_course_value(stem, "cf_protocol") or "") or None
+    edge = edge or str(_course_value(stem, "cf_edge_ip") or "") or None
     return proto, edge
 
 
@@ -146,21 +186,10 @@ def _rollout_source(args: Any) -> str:
         # 必须**明说**而不是静默失败（课程会永远等下去，而日志里一个字都没有）。
         _warn_explicit_source_blocks_restore(args, mode)
         return mode
-    try:
-        from worker.train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        stem = ""
+    stem = _course_stem(args)
     if not stem:
         return "local"
-    try:
-        cfg = common.distribution.load_dist_config() or {}
-        course = (cfg.get("courses") or {}).get(stem) or {}
-        rl = cfg.get("rl") or {}
-        val = str(course.get("rollout_src") or rl.get("rollout_src") or "") or "local"
-    except Exception:
-        return "local"
+    val = str(_course_value(stem, "rollout_src") or "") or "local"
     if val in ROLLOUT_SRCS_RETIRED:
         _note_retired_source(stem, val)
         return "local"
@@ -208,12 +237,7 @@ def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
     """
     if mode != "node":
         return
-    try:
-        from worker.train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        stem = ""
+    stem = _course_stem(args)
     key = (stem or "?", mode)
     if key in _RESTORE_UNSUPPORTED_NOTED:
         return
@@ -245,20 +269,25 @@ def _run_segment_iters(args: Any) -> int:
     n = int(getattr(args, "run_iters", 0) or 0)
     if n:
         return n
-    try:
-        from worker.train.loop_util import course_key_from_path
-
-        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
-    except Exception:
-        stem = ""
+    stem = _course_stem(args)
     if not stem:
         return 0
+    raw = _course_value(stem, "run_iters")
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        default_router().warn_once(
+            "rl-config:run_iters:type",
+            f"rl-config 的 run_iters 不是数字（{raw!r}）——按 0（关）处理",
+        )
+        return 0
     try:
-        cfg = common.distribution.load_dist_config() or {}
-        course = (cfg.get("courses") or {}).get(stem) or {}
-        rl = cfg.get("rl") or {}
-        return int(course.get("run_iters") or rl.get("run_iters") or 0)
-    except Exception:
+        return int(raw)
+    except (TypeError, ValueError):
+        default_router().warn_once(
+            "rl-config:run_iters:value",
+            f"rl-config 的 run_iters 解析不成整数（{raw!r}）——按 0（关）处理",
+        )
         return 0
 
 
@@ -304,13 +333,11 @@ def _hub_push_opt_in() -> bool:
     回落 / 多课程公平全集中在一处。显式 `"hub_push": false` 回到直推节点。
     需要 `hub_url` + token 齐备才真生效（`resolve_hub_push`）；缺则维持直推，不炸训练。
     """
-    try:
-        cfg = common.distribution.load_dist_config() or {}
-        rl = cfg.get("rl") or {}
-        v = rl.get("hub_push")
-        return True if v is None else bool(v)
-    except Exception:
-        return True
+    cfg = common.distribution.load_dist_config()
+    if not isinstance(cfg, Mapping):
+        return True  # 读不到配置 = 未配置 ⇒ 允许（缺省口径见上）
+    v = _config_block(cfg, "rl").get("hub_push")
+    return True if v is None else bool(v)
 
 
 def resolve_hub_push(

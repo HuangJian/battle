@@ -21,6 +21,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
@@ -121,10 +123,26 @@ def test_no_args_attributes_at_all_is_safe() -> None:
 
 
 def test_config_read_failure_is_silent() -> None:
-    """读 rl-config 抛异常 = 记录缺失，不是训练故障（wire 字段允许 None）。"""
+    """rl-config 读不到 = 记录缺失，不是训练故障（wire 字段允许 None）。
+
+    `load_dist_config` 的失败形态就是**返回 None**（文件缺失 / 坏 JSON / BOM 它自己捕）；
+    以前这里用 `side_effect = RuntimeError` 测「静默」，实际测的是宽捕获——见下一条。
+    """
     with patch("trainer.loop_transport.common.distribution") as dc:
-        dc.load_dist_config.side_effect = RuntimeError("boom")
+        dc.load_dist_config.return_value = None
         assert _course_cf_tunnel(_args(COURSE, remote_cf_protocol="http2")) == ("http2", None)
+
+
+def test_a_programmer_error_in_the_config_read_is_not_swallowed() -> None:
+    """P0-7：宽捕获吞掉的从来不是「配置读不到」，而是本模块自己的 bug。
+
+    配置块从对象变成列表（AttributeError）/ 键改名（TypeError）这两种形态，现场表现曾是
+    「配置改了却没生效，日志里一个字都没有」。现在它们穿出去，在当轮就响亮失败。
+    """
+    with patch("trainer.loop_transport.common.distribution") as dc:
+        dc.load_dist_config.side_effect = AttributeError("cfg shape changed")
+        with pytest.raises(AttributeError):
+            _course_cf_tunnel(_args(COURSE, remote_cf_protocol="http2"))
 
 
 def test_no_course_path_skips_config_entirely() -> None:
