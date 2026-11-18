@@ -587,6 +587,14 @@ class LeaseMixin:
             return LEASE_ALIVE  # 宽限内
         return LEASE_ALIVE if float(self._last_heartbeat.get(job_id, 0.0)) > at else LEASE_ORPHAN
 
+    def lease_state(self, job_id: str, now: float | None = None) -> str:
+        """租约状态的**公开读数**（四态；`now=None` ⇒ 本 store 时钟）。
+
+        纯读、不回收 —— 会回收的是 `lease_worker()` / `reap_dead_leases()`。诊断与用例
+        要的是「按这把尺子它算哪一档」，不该直接调私有判据。
+        """
+        return self._lease_state(job_id, self._now() if now is None else float(now))
+
     def _lease_held(self, job_id: str, now: float) -> bool:
         """`_lease_state` 的布尔视图：这份 job 现在被**活租约**挡着吗（池的判据）。
 
@@ -836,6 +844,15 @@ class LeaseMixin:
         """上一份**过期**租约的持有人（无 → 空串）。给 `/admin/queue` 观测用。"""
         with self._lock:
             return self._stale_holders.get(job_id, "")
+
+    def has_lease(self, job_id: str) -> bool:
+        """这份 job **有租约记录**吗（不判死活、不触发回收；观测 / 用例用）。
+
+        与 `lease_worker()` 的区别：后者会顺手回收死租约并回答「谁在跑」；这里只回答
+        「租约表里还有没有这一行」（清扫节流窗内「没被回收」的可观测证据）。
+        """
+        with self._lock:
+            return job_id in self._leases
 
     def lease_worker(self, job_id: str) -> str:
         """当前租约持有人身份（无 → 空串）；同时在租约为死（过期 ∨ 孤儿）时走**同一个**

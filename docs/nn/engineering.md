@@ -25,6 +25,26 @@
 
 ---
 
+## §168 G5 第二十九批：租约表的两个读数（2026-11-18）
+
+`tests/hub/test_dead_lease_sweep.py` **5 → 0**、`tests/remote/test_remote_iter.py` **4 → 1**
+（G5 **303 → 295**，102 → 101 文件）。
+
+- **租约簇**（`hub/store_leases.py`）补两条**纯读、不回收**的入口：
+  - `has_lease(job_id)` —— 租约表里还有没有这一行（清扫节流窗内「没被回收」的观测证据；
+    不能用 `lease_worker()` 代替：它会顺手回收，把要证的现场清掉）；
+  - `lease_state(job_id, now=None)` —— 四态判据的公开读数（`now=None` ⇒ 本 store 时钟）。
+  三张调度承诺表（`_claimed` / `_computing` / `_ready`）改用既有的
+  `scheduling_facts(job_id)`（`claimed` / `computing_at` / `ready`），不再逐表伸手。
+- **remote iter**：`_leg_abort` 改读 `remote_fail_state().leg_aborted`（§155 第十三批），
+  `_kill_and_reap(...)` 的调用移出 assert。**留下 1 处** `node._zero_shard_streak`：那个
+  `node` 是承载该槽位的测试替身，生产 `_check_quota_incident` 直接读写它 —— 它没有独立
+  可读面，也不是待迁的执行面状态。
+
+守卫：`test_hub_job_store_split.py` 的 `MIXIN_METHODS` 72 → 74（`has_lease` / `lease_state`）。
+
+---
+
 ## §167 G5 第二十八批：引导侧与补传侧的驱动入口（2026-11-18）
 
 `tests/remote/test_boot_wire_guard.py` **4 → 0**、`tests/remote/test_offline_eval_wiring.py`

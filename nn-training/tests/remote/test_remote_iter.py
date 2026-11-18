@@ -1619,12 +1619,10 @@ def test_kill_and_reap_bounds_the_wait_and_books_the_leftover(monkeypatch) -> No
     p = _UnreapablePopen(["stub"])
     _UnreapablePopen.instances.clear()
     try:
-        assert (
-            iter_rollout._kill_and_reap(
-                p, label="s0/d0", log=msgs.append, where="w0/rollout.log"
-            )
-            is False
+        reaped = iter_rollout._kill_and_reap(
+            p, label="s0/d0", log=msgs.append, where="w0/rollout.log"
         )
+        assert reaped is False
         assert killed == [p], "kill 必须走进程组那一条（连 bun 自己带的子进程一起带走）"
         assert p.unbounded_waits == 0, "不许出现无上限的 wait（那正是整轮挂住的成因）"
         assert p.bounded_waits == [0.05], p.bounded_waits
@@ -2087,7 +2085,7 @@ def test_remote_iter_fatal_http_aborts_without_retry(tmp_path: Path, monkeypatch
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 4
     assert "HTTP 403" in ev[0]["reason"] and "node" in ev[0]["reason"]
-    assert st._leg_abort is True
+    assert st.remote_fail_state().leg_aborted is True
     assert st.calls == 1  # 一次就停，不重发
 
 
@@ -2100,7 +2098,7 @@ def test_remote_iter_transient_failure_stays_retryable(tmp_path: Path, monkeypat
     with pytest.raises(HubClientError):
         st._remote_iter(4, [(0, 0)])
     assert st.events() == []
-    assert st._leg_abort is False
+    assert st.remote_fail_state().leg_aborted is False
     assert st.calls == 1
 
 
