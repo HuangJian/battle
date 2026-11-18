@@ -1296,7 +1296,8 @@ def test_new_rejection_records_its_age_and_tries(tmp_path: Path) -> None:
     """新记一笔拒收要带上 `at`/`tries`（不带 = 下一次加载就只剩「永久有效」这一种语义）。"""
     root = _make_artifacts(tmp_path / "art", iters=(1, 2))
     d = _deliverer("", root)
-    assert d._reject_round(1, "体形状不对", weights_fp="f" * 64) == "skip"
+    verdict = d._reject_round(1, "体形状不对", weights_fp="f" * 64)
+    assert verdict == "skip"
     d._save_ledger()
     row = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["rejected"][0]
     assert row["at"] > 0 and row["tries"] == 1
@@ -1333,10 +1334,12 @@ def test_reset_rejected_revives_the_round_even_while_the_session_is_alive(tmp_pa
     root = _make_artifacts(tmp_path / "art", iters=(1, 2))
     _write_ledger(root, artifacts=[1], rejected=[_rejected_row(root, 2, at=time.time())])
     d = _deliverer("", root)
-    assert 2 in d._rejected and 2 not in d.pending()
+    state = d.deliver_state()
+    assert 2 in state.rejected and 2 not in d.pending()
     assert reset_rejected(root, run_id=RUN, it=2, log=_quiet) == 1
     d._save_ledger()  # 活着的会话落盘一次
-    assert 2 not in d._rejected and 2 in d.pending(), "重置必须真的生效，而不是被下一次落盘覆盖回去"
+    state = d.deliver_state()
+    assert 2 not in state.rejected and 2 in d.pending(), "重置必须真的生效，而不是被下一次落盘覆盖回去"
     data = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))
     assert data["rejected"] == [] and REJECTED_RESET_KEY in data
     assert json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))["artifacts"] == [1]
@@ -1353,10 +1356,10 @@ def test_reset_rejected_only_touches_the_named_round(tmp_path: Path) -> None:
         rejected=[_rejected_row(root, 2, at=now), _rejected_row(root, 3, at=now, why="409")],
     )
     d = _deliverer("", root)
-    assert sorted(d._rejected) == [2, 3]
+    assert d.deliver_state().rejected == (2, 3)
     assert reset_rejected(root, run_id=RUN, it=2, log=_quiet) == 1
     d._save_ledger()
-    assert sorted(d._rejected) == [3], "it3 的拒收不得被连坐放掉"
+    assert d.deliver_state().rejected == (3,), "it3 的拒收不得被连坐放掉"
     assert 2 in d.pending() and 3 not in d.pending()
 
 
@@ -1415,7 +1418,7 @@ def test_drawer_never_prunes_when_the_ledger_is_unreadable(tmp_path: Path) -> No
     # 账本被破坏（半截写入 / 人手动改坏）——同时把这一份标记成「已投递」（内存里）
     (root / OFFLINE_DELIVERED_NAME).write_text("{坏的 json", encoding="utf-8")
     d2 = _deliverer("", root, backup_root=drawer)
-    assert d2._ledger_readable is False
+    assert d2.deliver_state().ledger_readable is False
     d2._delivered.add(1)
     d2._prune_forced = True
     assert d2.backup_pending() == 0

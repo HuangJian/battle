@@ -7294,3 +7294,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `TrainingVolume.greedy_view()`（`plan` / `stats` / `report` / `waves`），用例脚手架换成继承
   `TrainingVolume` 的最小 `_NodeLoop`；volume 拆分守卫成员闭集 12 → 13。
   全文 → `docs/nn/engineering.md` §161。
+- **2026-11-18（G5 第二十三批：补传视图补上拒收面）**：`tests/remote/test_offline_deliver.py`
+  私有断言 6 → **0**（G5 349 → **343**，108 文件）。`DeliverState` 增加
+  `rejected`（升序轮次）与 `ledger_readable`（抽屉删除的硬门槛，DoD-3c），
+  D6 的 TTL/人工重置用例改读它；`_reject_round(...)` 的调用移出 assert。
+  全文 → `docs/nn/engineering.md` §162。

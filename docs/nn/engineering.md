@@ -25,6 +25,21 @@
 
 ---
 
+## §162 G5 第二十三批：补传视图补上拒收面（2026-11-18）
+
+`tests/remote/test_offline_deliver.py` 私有断言 **6 → 0**（G5 **349 → 343**，109 → 108 文件）。
+
+`DeliverState`（§156 建立）原本只覆盖「发送成功」那一半；这批补上**被拒**与**账本可读性**：
+
+- `rejected: tuple[int, ...]`（升序轮次；只出键，不出原因字符串）——D6 的整簇用例
+  （TTL 复活 / 人工重置 / 只重置指名环次）原先逐条读 `_rejected` 的成员/排序；
+- `ledger_readable: bool` —— 抽屉删除的硬门槛（DoD-3c：读不出来 ⇒ 一个字节都不删）。
+
+`_reject_round(...)` 的调用按驱动入口移出 assert。注意 `d2._delivered.add(1)` 这类**写入**
+仍是测试自己的注入面，不在 G5 口径内（只数 assert 里的**读**）。
+
+---
+
 ## §161 G5 第二十二批：greedy 槽位的读数 `greedy_view()`（2026-11-18）
 
 `tests/worker/test_paired_kill.py` **6 → 0**、`tests/worker/test_greedy_rollout_chain.py`

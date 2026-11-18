@@ -21,13 +21,15 @@ from remote.deliver_mode import ModeTracker
 
 @dataclass(frozen=True)
 class DeliverState:
-    """补传腿的只读执行面：已送达轮次、统计件销账与档位（判据本体不在这里）。"""
+    """补传腿的只读执行面：已送达/拒收轮次、统计件销账与档位（判据本体不在这里）。"""
 
     delivered: tuple[int, ...]
     metrics_sent: tuple[int, ...]
     metrics_stat: tuple[int, int]
     metrics_unsupported: bool
     mode: str
+    rejected: tuple[int, ...]
+    ledger_readable: bool
 
 
 class DeliverStateMixin:
@@ -38,6 +40,8 @@ class DeliverStateMixin:
     _metrics_stat: tuple
     _metrics_unsupported: bool
     _modes: ModeTracker
+    _rejected: dict[int, str]
+    _ledger_readable: bool
 
     def deliver_state(self) -> DeliverState:
         """这一腿的公开读数（用例 / 诊断共用；不改变任何发送与销账语义）。"""
@@ -47,4 +51,6 @@ class DeliverStateMixin:
             metrics_stat=(int(self._metrics_stat[0]), int(self._metrics_stat[1])),
             metrics_unsupported=bool(self._metrics_unsupported),
             mode=str(self._modes.mode),
+            rejected=tuple(sorted(self._rejected)),
+            ledger_readable=bool(self._ledger_readable),
         )
