@@ -7437,3 +7437,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   口径逐字不变），长函数存量 **27 → 26**，形状基线删除该文件的长函数条目
   （宽参数条目保留）；新 helper 不新增 `Any`，该文件 `Any` 存量 14 → 12
   （G14 基线同步调小）。全文 → `docs/nn/engineering.md` §189。
+- **2026-11-18（长函数存量第十二刀：回环冒烟）**：`hub/smoke_loopback.py::main`
+  249 → **177** 行（拆出 `_build_parser` / `_check_round_wire` / `_assert_smoke_final`，
+  计量与断言文案逐字不变），长函数存量 **26 → 25**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §190。

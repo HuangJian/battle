@@ -25,6 +25,20 @@
 
 ---
 
+## §190 长函数存量第十二刀：回环冒烟 249 → 177（2026-11-18）
+
+`hub/smoke_loopback.py::main` **249 → 177 行**，长函数存量 **26 → 25**
+（`LONG_FUNCS_BASELINE` 删除 `hub/smoke_loopback.py` 条目）。
+
+三刀纯搬移：
+- `_build_parser()`：argv 定义表（描述 / 默认值 / help 逐字保留）。
+- `_check_round_wire(rd, m, store, jid, result, work)`：轮级计量对账 + M2 blob 命中断言，
+  返回 hub.sent 字节（断言文案逐字保留；`mark_job_completed` 的局部 import 随之上提到
+  模块级，供末轮断言 helper 使用）。
+- `_assert_smoke_final(...)`：末轮产物 + 账本双态断言。
+
+---
+
 ## §189 长函数存量第十一刀：BC 周期评估 244 → 163（2026-11-18）
 
 `worker/bc_eval.py::dispatch_bc_eval` **244 → 163 行**，长函数存量 **27 → 26**
