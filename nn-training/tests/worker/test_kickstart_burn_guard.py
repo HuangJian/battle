@@ -42,8 +42,8 @@ class _Leg(TrainingGuardsLeg):
         self._jsonl_path = traj / "training_log.jsonl"
         self._ledger: list[Any] = []
         self._ledger_apply = lambda rec: self._ledger.append(rec)
-        self._halt_calls: list[str] = []
-        self._sync_cloud_halt = lambda it, verdict, readings=None: self._halt_calls.append(verdict)
+        self.halt_calls: list[str] = []
+        self._sync_cloud_halt = lambda it, verdict, readings=None: self.halt_calls.append(verdict)
         self._gate_halt_mode = lambda: gate_mode
         self._peer = peer
         self._burn_streak = 0
@@ -77,16 +77,19 @@ def test_rein_exhausted_does_not_judge(tmp_path, monkeypatch):
     monkeypatch.setattr(guard_mod, "_rein_active", lambda args, it: False)
     leg = _tripped_leg(tmp_path, block={"mode": "baseline"})
     leg._burn_streak = 2
-    assert leg._kickstart_burn(15) is False
-    assert leg._stop_cause == ""
-    assert leg._burn_streak == 0
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
+    view = leg.burn_view()
+    assert view.stop_cause == ""
+    assert view.streak == 0
 
 
 def test_notify_mode_logs_but_does_not_stop_leg(tmp_path, capsys):
     """缺陷 1：平台开关 notify ⇒ 只提示、不停腿（连呼两次只喊一次）。"""
     leg = _tripped_leg(tmp_path, gate_mode="notify", block={"mode": "baseline"})
-    assert leg._kickstart_burn(15) is False
-    assert leg._stop_cause == "", "notify 模式不许本地停车"
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
+    assert leg.burn_view().stop_cause == "", "notify 模式不许本地停车"
     out1 = capsys.readouterr().out
     assert "CRITICAL KICKSTART-BURN" in out1
     assert "不停车" in out1
@@ -96,46 +99,54 @@ def test_notify_mode_logs_but_does_not_stop_leg(tmp_path, capsys):
     assert (gate[0]["verdict"], gate[0]["decider"]) == ("ABORT", "loop")
     assert gate[0]["reason"].startswith("kickstart-burn(notify")
     # 第二次不再刷屏
-    assert leg._kickstart_burn(15) is False
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
     assert capsys.readouterr().out == "", "notify 只喊一次——第二次一条输出都不该有"
 
 
 def test_halt_mode_still_stops_leg(tmp_path):
     """回归：halt 模式语义不变（显式选择要认）。"""
     leg = _tripped_leg(tmp_path, gate_mode="halt", block={"mode": "baseline"})
-    assert leg._kickstart_burn(15) is True
-    assert leg._stop_cause == "kickstart_burn"
-    assert leg._halt_calls == ["ABORT"]
+    tripped = leg._kickstart_burn(15)
+    assert tripped is True
+    assert leg.burn_view().stop_cause == "kickstart_burn"
+    assert leg.halt_calls == ["ABORT"]
 
 
 def test_auto_without_peer_does_not_fall_back_to_baseline(tmp_path):
     """缺陷 3：mode 缺省（auto）且解析不出唯一对端 ⇒ **不判**，不拿 baseline 代打。"""
     leg = _tripped_leg(tmp_path, gate_mode="halt", block=None, peer=None)
-    assert leg._kickstart_burn(15) is False
-    assert leg._stop_cause == ""
-    assert leg._burn_streak == 0
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
+    view = leg.burn_view()
+    assert view.stop_cause == ""
+    assert view.streak == 0
 
 
 def test_paired_with_peer_still_stops(tmp_path):
     """回归：paired 解析出对端时照判（本臂低 11pp ⇒ 杀臂）。"""
     peer_rows = tuple({"event": "eval_summary", "iter": i, "winRate": BASE} for i in (5, 10, 15))
     leg = _tripped_leg(tmp_path, gate_mode="halt", block={"mode": "paired"}, peer=("peer-leg", peer_rows))
-    assert leg._kickstart_burn(15) is True
-    assert leg._stop_cause == "kickstart_burn"
+    tripped = leg._kickstart_burn(15)
+    assert tripped is True
+    assert leg.burn_view().stop_cause == "kickstart_burn"
 
 
 def test_kickstart_ref_off_short_circuits(tmp_path):
     """回归：没开缰绳 = 一条都不判（历史行为）。"""
     leg = _tripped_leg(tmp_path, ref=False, block={"mode": "baseline"})
-    assert leg._kickstart_burn(15) is False
-    assert leg._burn_streak == 0
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
+    assert leg.burn_view().streak == 0
 
 
 def test_notify_keeps_streak_for_instant_halt_on_switch(tmp_path):
     """notify 不停腿，但 streak 要留着：平台开关拨到 halt 后**下一次判定立即停**。"""
     leg = _tripped_leg(tmp_path, gate_mode="notify", block={"mode": "baseline"})
-    assert leg._kickstart_burn(15) is False
-    assert leg._burn_streak == 3
+    tripped = leg._kickstart_burn(15)
+    assert tripped is False
+    assert leg.burn_view().streak == 3
     leg._gate_halt_mode = lambda: "halt"
-    assert leg._kickstart_burn(15) is True
-    assert leg._stop_cause == "kickstart_burn"
+    tripped = leg._kickstart_burn(15)
+    assert tripped is True
+    assert leg.burn_view().stop_cause == "kickstart_burn"

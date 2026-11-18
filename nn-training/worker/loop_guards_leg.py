@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,17 @@ def _rein_active(args: Any, it: int) -> bool:
         return True
 
 
+@dataclass(frozen=True)
+class BurnGuardView:
+    """干烧熔断执行面的只读快照（判据本体在 `worker/kickstart_burn.py`）。"""
+
+    streak: int
+    stop_cause: str
+    stop_detail: str
+    notified: bool
+    fallback_logged: bool
+
+
 class TrainingGuardsLeg:
     """结果面停腿 mixin（干烧回锚 / 配对杀臂）：读趋势，停腿 + 停云机。"""
 
@@ -77,6 +89,16 @@ class TrainingGuardsLeg:
     _gate_halt_mode: Any
     #: 「notify 模式已提示过」只喊一次（同 `_burn_fallback_logged` 的用处）。
     _burn_notified: bool
+
+    def burn_view(self) -> BurnGuardView:
+        """这一簇的公开读数（用例与诊断共用；判据与等待语义都不受影响）。"""
+        return BurnGuardView(
+            streak=int(getattr(self, "_burn_streak", 0) or 0),
+            stop_cause=str(getattr(self, "_stop_cause", "") or ""),
+            stop_detail=str(getattr(self, "_stop_detail", "") or ""),
+            notified=bool(getattr(self, "_burn_notified", False)),
+            fallback_logged=bool(getattr(self, "_burn_fallback_logged", False)),
+        )
 
     def _burn_paired_rows(self, peer_name: str) -> tuple[str, tuple] | None:
         """配对模式的参照账本：显式 `peer` 优先；否则要求**唯一**同 V 对端。

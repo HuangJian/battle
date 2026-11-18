@@ -25,6 +25,28 @@
 
 ---
 
+## §153 G5 第十批：干烧熔断执行面的读数 `burn_view()`（2026-11-18）
+
+`tests/worker/test_kickstart_burn_guard.py` 私有断言 **20 → 0**（G5 **546 → 526**，124 → 123 文件）。
+
+这条用例守的是干烧熔断的三个**执行面**缺陷（缰绳退火后仍判 / notify 仍本地停车 / auto 解析
+不出对端就回退 baseline）。20 条断言里 18 条只是读执行面的状态：落后计数 `_burn_streak`、
+收工原因 `_stop_cause`、以及测试替身自己的 `_halt_calls`。新增
+`BurnGuardView`（frozen dataclass）+ `TrainingGuardsLeg.burn_view()`：
+`streak` / `stop_cause` / `stop_detail` / `notified` / `fallback_logged`。判据本体
+（`worker/kickstart_burn.py`）一个字没动。
+
+两条口径说明：
+
+* `_halt_calls` 是 `_Leg`（**测试替身**）自己的记录表，不是生产状态；改成公开的
+  `halt_calls` 只是让替身遵守与生产对象同一套命名纪律，没有放宽任何断言。
+* `assert leg._kickstart_burn(15) is False` 这类「驱动被测入口」的私有**方法调用**移出
+  assert 表达式（`tripped = leg._kickstart_burn(15); assert tripped is False`）——G5 的口径
+  不该把「调用被测函数」算成读私有状态（与 §149 的三条私有方法调用同口径）。
+* 守卫 `test_loop_guards_split.py` 的 stdlib 闭集 + `dataclasses`（标准库，不是新依赖）。
+
+---
+
 ## §152 G5 第九批：推模式派发用例走队列的公开结果面（2026-11-18）
 
 `tests/remote/test_hub_push_dispatch.py` 私有断言 **17 → 0**（G5 **563 → 546**，125 → 124 文件）。

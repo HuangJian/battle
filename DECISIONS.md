@@ -7236,3 +7236,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `wire_stats` / `job_status(...)["computing_at"]`），派发器在飞账改读 `disp.tick()["inflight"]`
   （本来就是 `/admin/push-workers` 的快照）。不是为测试新开口；造场景的 `_publish` 与
   `_inflight[...] =` 不在 G5 口径内，保持原样。全文 → `docs/nn/engineering.md` §152。
+- **2026-11-18（G5 第十批：干烧熔断执行面的读数）**：`tests/worker/test_kickstart_burn_guard.py`
+  私有断言 20 → **0**（G5 546 → **526**，123 文件）。新增 `BurnGuardView`（frozen dataclass）+
+  `TrainingGuardsLeg.burn_view()`：`streak` / `stop_cause` / `stop_detail` / `notified` /
+  `fallback_logged`；判据本体没动。测试替身的 `_halt_calls` 改成公开 `halt_calls`（替身自己的
+  记录表，不是生产状态）；`assert leg._kickstart_burn(...)` 这类驱动被测入口的私有方法调用
+  移出 assert 表达式。守卫的 stdlib 闭集 + `dataclasses`。全文 → `docs/nn/engineering.md` §153。

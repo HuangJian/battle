@@ -107,7 +107,6 @@
   "tests/worker/test_gate_inputs_split.py": 4,
   "tests/worker/test_gate_judges_split.py": 2,
   "tests/worker/test_greedy_rollout_chain.py": 6,
-  "tests/worker/test_kickstart_burn_guard.py": 20,
   "tests/worker/test_kickstart_plan.py": 15,
   "tests/worker/test_loop_round.py": 5,
   "tests/worker/test_paired_kill.py": 6,

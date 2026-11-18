@@ -261,7 +261,7 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
 
 #: 允许的 stdlib 顶层 import（闭集的一部分）。
 STDLIB_IMPORTS = frozenset(
-    {"__future__", "json", "math", "time", "pathlib", "typing", "datetime"}
+    {"__future__", "dataclasses", "json", "math", "time", "pathlib", "typing", "datetime"}
 )
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
