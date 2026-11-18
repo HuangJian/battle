@@ -25,6 +25,39 @@
 
 ---
 
+## §156 G5 第十六~十七批：调用移出 assert 与两处传输/补传读数（2026-11-18）
+
+### 第十六批：驱动被测入口的调用移出 assert 表达式（`tests/worker/test_kickstart_plan.py` 15 → 0、`tests/trainer/test_ppo_watchdog.py` 13 → 0）
+
+这两处命中的私有名都只是**驱动入口**（`_kickstart_burn` / `_remote_ppo_step` /
+`_bump_remote_fail`），判据读的是返回值与随后的账本，不是对象内部布局：把调用赋给
+`stopped` / `outcome` 再断言，口径与 §149 / §153 相同。`test_ppo_watchdog` 里顺带把两处
+执行面状态（`_leg_abort`）改用上一批的 `remote_fail_state().leg_aborted`（§155 第十三批）。
+测试自己的注入仍是赋值（`obj._remote_fail = 0` / `g._cloud_halted = False`）——G5 只数
+assert 内的**读**，这批不动注入面。
+
+### 第十七批：`best_rate()` 与 `DeliverState`（`tests/remote/test_wire_reroll.py` 12 → 2、`tests/remote/test_deliver_mode.py` 11 → 0）
+
+- **`remote/wire.py::best_rate()`**：`_BEST_RATE` 是会话级标量，`_note_rate` 用 `global`
+  重绑它；用例原先直接读私有全局来钉「更好即抬 / 连续慢按 `WIRE_RATE_DECAY` 衰减」的语义。
+  现在读公开函数——读数与写入分离，但**注入点仍是 `wire._BEST_RATE`**（重绑转发名无效，
+  见模块 docstring），`test_wire_reroll` 的 autouse 夹具照旧。留下的 2 处是 `_WIRE` /
+  `_BULK` 的**结构断言**（拆分契约：两张账必须仍是同一个对象 / 同一个调度器实例），
+  不属于待迁的耦合。
+- **`DeliverState` + `deliver_state()`**（`remote/deliver_state.py`，L1）：`delivered` /
+  `metrics_sent` 快照成有序元组，`metrics_stat` 成 `(轮数, 字节)`，加
+  `metrics_unsupported` / `mode`。用例原先读 `_metrics_sent` / `_metrics_stat` /
+  `_metrics_unsupported` / `_modes.mode` / `_delivered`。`status()` 保持原样：那是给
+  operator / 启动日志的一行式字典面（含 backlog / eta），与这份执行面读数互不替代。
+  为什么另立模块：腿本体加完这段就 **1008 行**，当场撞上 LOC 预算
+  （`tests/test_python_loc_budget.py`）；读数的所有权（记账水位 + 统计开关 + 档位机）与
+  「探活 / 投递 / 降级」不共享写者，按 `deliver_ledger` / `deliver_parts` 同一条纪律下沉
+  （`DeliverStateMixin` 只声明宿主字段，`OfflineDeliverer` 多一个基类）。拓扑账本登记 L1。
+
+G5 449 → **400**（119 → 116 文件）。
+
+---
+
 ## §155 G5 第十二~十五批：四处执行面读数（2026-11-18）
 
 四个小批次合并记录；共同口径：**执行面状态给公开读数**、**驱动被测入口的私有方法调用移出

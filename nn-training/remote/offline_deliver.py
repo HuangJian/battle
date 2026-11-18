@@ -92,6 +92,7 @@ from remote.deliver_ledger import (
 )
 from remote.deliver_mode import eta_text, need_bps
 from remote.deliver_parts import DeliverMetricsMixin
+from remote.deliver_state import DeliverStateMixin
 from remote.deliver_wire import pick_anchors, read_eval_iters
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
@@ -192,7 +193,7 @@ def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tupl
         return int(e.code), e.read()
 
 
-class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin):
+class OfflineDeliverer(DeliverLedgerMixin, DeliverMetricsMixin, DeliverStateMixin):
     """一段自主训练的产物补传器（best-effort；每个公开方法都**不会抛**）。
 
     只读产物目录、只写一个 `delivered.json`——它不参与训练的任何判定（不是调度器的一部分），

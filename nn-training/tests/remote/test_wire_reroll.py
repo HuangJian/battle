@@ -154,20 +154,24 @@ def test_reroll_decision_honours_the_remaining_time_budget() -> None:
 
 def test_min_rate_is_relative_to_the_session_best() -> None:
     """好签观测过 900 KB/s ⇒ 阈值抬到 225 KB/s（明显偏离才算坏）；没观测过就用绝对下限。"""
-    assert worker_mod._min_rate() == worker_mod.WIRE_MIN_RATE
+    floor = worker_mod._min_rate()
+    assert floor == worker_mod.WIRE_MIN_RATE
 
     worker_mod._note_rate(900 * 1024, 4 * MB)
-    assert worker_mod._min_rate() == pytest.approx(225 * 1024)
+    floor = worker_mod._min_rate()
+    assert floor == pytest.approx(225 * 1024)
 
     # 小 body 的瞬时速率不代表链路 ⇒ 不参与采样（否则 1 KB 的 JSON 会把阈值抬到天上）
     worker_mod._note_rate(10 * 1024 * 1024, 2 * 1024)
-    assert worker_mod._min_rate() == pytest.approx(225 * 1024)
+    floor = worker_mod._min_rate()
+    assert floor == pytest.approx(225 * 1024)
 
 
 def test_min_rate_never_drops_below_the_absolute_floor() -> None:
     """本会话只见过慢签（100 KB/s）⇒ 阈值仍是绝对下限 80 KB/s，不会退化成「见谁都重抽」。"""
     worker_mod._note_rate(100 * 1024, 4 * MB)
-    assert worker_mod._min_rate() == worker_mod.WIRE_MIN_RATE
+    floor = worker_mod._min_rate()
+    assert floor == worker_mod.WIRE_MIN_RATE
 
 
 # ──────────────── ③④ 重抽循环：有界、最后一次不重抽、浪费有界 ────────────────
@@ -329,21 +333,23 @@ def test_reference_rate_decays_after_repeated_slow_samples() -> None:
     mb = 1024 * 1024
     wire_mod._BEST_RATE = 0.0
     worker_mod._note_rate(3 * mb, 4 * mb)
-    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
+    assert abs(wire_mod.best_rate() - 3 * mb) < 1.0
 
     worker_mod._note_rate(150 * 1024, 4 * mb)  # 第 1 个慢样本：迟滞内，参照不动
-    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
-    assert worker_mod._min_rate() == pytest.approx(3 * mb / 4)  # 旧语义下这一条就是 772KB/s
+    assert abs(wire_mod.best_rate() - 3 * mb) < 1.0
+    floor = worker_mod._min_rate()
+    assert floor == pytest.approx(3 * mb / 4)  # 旧语义下这一条就是 772KB/s
 
     worker_mod._note_rate(150 * 1024, 4 * mb)  # 第 2 个：开始衰减
-    assert abs(wire_mod._BEST_RATE - 3 * mb * wire_mod.WIRE_RATE_DECAY) < 1.0
+    assert abs(wire_mod.best_rate() - 3 * mb * wire_mod.WIRE_RATE_DECAY) < 1.0
 
     for _ in range(6):
         worker_mod._note_rate(80 * 1024, 4 * mb)
-    assert worker_mod._min_rate() == worker_mod.WIRE_MIN_RATE, "持续慢之后门槛没落回地板"
+    floor = worker_mod._min_rate()
+    assert floor == worker_mod.WIRE_MIN_RATE, "持续慢之后门槛没落回地板"
 
     worker_mod._note_rate(3 * mb, 4 * mb)  # 链路恢复 ⇒ 参照瞬时回到新高（不惩罚恢复）
-    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
+    assert abs(wire_mod.best_rate() - 3 * mb) < 1.0
 
 
 def test_reroll_disabled_path_is_untouched(monkeypatch) -> None:

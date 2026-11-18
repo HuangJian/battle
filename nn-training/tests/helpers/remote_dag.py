@@ -356,6 +356,10 @@ LAYERS: dict[str, int] = {
     # 搬出（同一个 LOC 预算又把它顶到 1000 行）。依赖面 = `common.protocol`（不在本账本）+
     # `remote.artifacts`(L0) ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
     "remote.deliver_ledger": 1,
+    # 补传腿的**执行面只读快照**（2026-11-18，G5 接缝）：从 `offline_deliver` 搬出（同一个 LOC
+    # 预算：读数加进去就 1008 行）。依赖面 = stdlib + `deliver_mode`(L0，只用于类型)
+    # ⇒ 拓扑秩 **L1**；`offline_deliver` 站在它上面，仍是 L2。
+    "remote.deliver_state": 1,
     # 补传腿本体（投递/探活/降级）：最深依赖是 `backup_drawer`/`deliver_ledger`(L1) ⇒ 拓扑秩 **L2**。
     "remote.offline_deliver": 2,
     # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：

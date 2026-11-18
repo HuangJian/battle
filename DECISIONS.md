@@ -7257,3 +7257,13 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   份额门复用 `eval_timing().gate`；④ `test_train_ledger_wiring.py` 16 → 0：`ResumeState` +
   `TrainingLifecycle.resume_state()`（启动继承十二项 + 账本摘要），停腿复用 `guard_state()`。
   三个拆分守卫同步成员闭集 / stdlib 闭集。全文 → `docs/nn/engineering.md` §155。
+- **2026-11-18（G5 第十六~十七批：调用移出 assert 与两处传输/补传读数）**：G5 449 → **400**（116 文件）。
+  ① `test_kickstart_plan.py` 15 → 0、`test_ppo_watchdog.py` 13 → 0：命中的私有名都只是驱动入口
+  （`_kickstart_burn` / `_remote_ppo_step` / `_bump_remote_fail`），调用赋给局部变量再断言；
+  `_leg_abort` 改读 `remote_fail_state().leg_aborted`。② `test_wire_reroll.py` 12 → 2：
+  `remote/wire.py` 新增 `best_rate()`（读与写分离；注入点仍必须是 `wire._BEST_RATE`），
+  留 2 处 `_WIRE` / `_BULK` 拆分契约的结构断言。③ `test_deliver_mode.py` 11 → 0：
+  `DeliverState` + `DeliverStateMixin.deliver_state()`（`delivered` / `metrics_sent` /
+  `metrics_stat` / `metrics_unsupported` / `mode`），`status()` 的 operator 字典面不变；
+  读数按 LOC 预算（腿本体 1008 行）下沉成 `remote/deliver_state.py`（L1，拓扑账本同步）。
+  全文 → `docs/nn/engineering.md` §156。
