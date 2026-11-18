@@ -7364,3 +7364,10 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   复用已有的 `resume_state().consec_fail`；假引擎加 `leg_aborted` 公开读数（`_leg_abort`
   保留给 `_revive_hygiene` 按槽位清账）；`_revive_hygiene` 的 `SimpleNamespace` 槽位契约
   3 条刻意保留。全文 → `docs/nn/engineering.md` §173。
+- **2026-11-18（G5 第三十五批：租约到期读数与三处纯判据）**：`test_priority_schedule.py`
+  3 → 0、`test_batch_runner_split.py` 3 → 0、`test_tools/test_forkdist.py` 3 → 0、
+  `test_biz/test_course_spec_split.py` 3 → 2（G5 229 → **219**，84 文件）。新增
+  `LeaseMixin.lease_expiry()`（纯读：这次操作有没有动过租约表）；持有人/承诺痕迹改读
+  `lease_worker()` / `scheduling_facts()`；纯判据调用移出 assert。store 拆分守卫
+  `MIXIN_METHODS` 74 → 75。`_block_dict` 两处身份契约刻意保留。全文 →
+  `docs/nn/engineering.md` §174。

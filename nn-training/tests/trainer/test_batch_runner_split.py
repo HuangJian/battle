@@ -363,6 +363,9 @@ def test_done_keys_reads_the_eval_log_from_the_new_home(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    assert br.BatchEvalRunner._done_keys(r, "aa") == {(3, 7)}
-    assert br.BatchEvalRunner._done_keys(r, "bb") == {(3, 8)}
-    assert br.BatchEvalRunner._done_keys(r, "cc") == set()
+    aa = br.BatchEvalRunner._done_keys(r, "aa")
+    bb = br.BatchEvalRunner._done_keys(r, "bb")
+    cc = br.BatchEvalRunner._done_keys(r, "cc")
+    assert aa == {(3, 7)}
+    assert bb == {(3, 8)}
+    assert cc == set()

@@ -854,6 +854,14 @@ class LeaseMixin:
         with self._lock:
             return job_id in self._leases
 
+    def lease_expiry(self, job_id: str) -> float | None:
+        """租约的到期时刻（本 store 时钟；无租约 → None）。纯读、不回收。
+
+        用来回答「这次操作有没有动过租约表」——例如备份认领不得顺手续期原持有者的租约。
+        """
+        with self._lock:
+            return self._leases.get(job_id)
+
     def lease_worker(self, job_id: str) -> str:
         """当前租约持有人身份（无 → 空串）；同时在租约为死（过期 ∨ 孤儿）时走**同一个**
         回收入口（`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`

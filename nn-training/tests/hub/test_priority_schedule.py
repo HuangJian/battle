@@ -215,12 +215,12 @@ def test_backup_claim_takes_no_lease_and_does_not_steal(tmp_path: Path) -> None:
     _publish(store)
     a_token = store.claim_outcome(JID, mode=CLAIM_MODE_EXCLUSIVE, worker_id="A").token
     assert a_token
-    expiry_before = store._leases[JID]
+    expiry_before = store.lease_expiry(JID)
 
     out = store.claim_outcome(JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
     assert out.ok is True and out.status == "backup" and out.token == ""
-    assert store._leases[JID] == expiry_before, "原租约不得被动"
-    assert store._lease_owners[JID] == a_token, "原持有人不得被换掉"
+    assert store.lease_expiry(JID) == expiry_before, "原租约不得被动"
+    assert store.lease_worker(JID) == "A", "原持有人不得被换掉"
     # 双方都能回传：A 有租约 token；B 无租约但被显式授权 ⇒ 首写定胜负
     assert store.result_token_ok(JID, a_token) is True
     assert store.result_token_ok(JID, "") is True, "备份的回传不吃 403（R1-2）"
@@ -295,7 +295,7 @@ def test_highest_single_holder_epoch_gate(tmp_path: Path) -> None:
     third = store.claim_outcome(JID, worker_id="C")
     assert third.ok is False and third.status == "held"
     # 唯一性仍成立：只有 A 留下承诺痕迹
-    assert (store._claimed.get(JID) or {}).get("worker") == "A"
+    assert store.scheduling_facts(JID)["lease_holder"] == "A"
 
 
 def test_claim_rejects_unknown_mode(tmp_path: Path) -> None:

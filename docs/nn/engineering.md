@@ -25,6 +25,25 @@
 
 ---
 
+## §174 G5 第三十五批：租约到期读数 + 三处纯判据（2026-11-18）
+
+四个文件：`test_priority_schedule.py` **3 → 0**、`test_batch_runner_split.py` **3 → 0**、
+`test_tools/test_forkdist.py` **3 → 0**、`test_biz/test_course_spec_split.py` **3 → 2**
+（G5 **229 → 219**，87 → 84 文件）。
+
+- 新增 `LeaseMixin.lease_expiry(job_id)`：租约到期时刻（`float | None`，纯读、不回收）。
+  备份认领那条用例要钉的是「原租约**一格都没被写**」——`has_lease` / `lease_state` 只能
+  回答「还在、还活」，答不了「有没有被顺手续期」；持有人在公开面上由 `lease_worker()`
+  回答，承诺痕迹由 `scheduling_facts()["lease_holder"]` 回答。store 拆分守卫
+  `MIXIN_METHODS` 74 → 75（两处计数同步）。
+- 纯判据（`_done_keys` / `_worker_count_option` / `_default_lives`）：不为用例造公开 API，
+  调用赋给局部变量后再断言。
+
+**刻意留 2 处**：`test_course_spec_split.py` 的 `kb._block_dict is spec_mod.block_dict`
+两处——这是「拆分后共享同一份常量」的**身份**契约，读的是被测对象本体。
+
+---
+
 ## §173 G5 第三十四批：轮级失败连击复用续跑读数 + 假引擎公开死腿态（2026-11-18）
 
 两个文件：`tests/worker/test_loop_round.py` **5 → 0**、
