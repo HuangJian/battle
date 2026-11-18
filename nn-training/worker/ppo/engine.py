@@ -240,7 +240,7 @@ def policy_new_rms_of(model: Any) -> torch.Tensor:
         return torch.cat(parts).pow(2).mean().sqrt() if parts else _zero_scalar(model)
 
 
-def _profile_steps(device: Any) -> int:
+def profile_steps(device: Any) -> int:
     """`PPO_PROFILE=1` ⇒ 抓前 N 个梯度步的 CPU/CUDA 剖面；返回采样步数（0 = 关）。
 
     为什么（2026-10-21，真机步耗卡在 ~0.49s/step）：`PPO_CUDA_DIAG` 只给 median/p95，
@@ -538,8 +538,8 @@ def _prepare(ctx: PPOContext) -> None:
     """建 update 的派生状态：profiler / tensored chunks / 诊断 / demo / ref / 续跑。"""
     model, opt, device = ctx.model, ctx.opt, ctx.device
     model.train()
-    # ---- 可选 profiler（`PPO_PROFILE=1`；判读见 `_profile_steps` 的 docstring）----
-    ctx.prof_steps = _profile_steps(device)
+    # ---- 可选 profiler（`PPO_PROFILE=1`；判读见 `profile_steps` 的 docstring）----
+    ctx.prof_steps = profile_steps(device)
     if ctx.prof_steps:
         import torch.profiler as _tp
 
@@ -739,7 +739,7 @@ def _train_step(ctx: PPOContext, ep: int, j: int, i: int) -> None:
     xla_mark_step(device)
     now = time.time()
     if _prof is not None:
-        # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `_profile_steps`）。
+        # 采样窗口内不记墙钟：profiler 自身的开销会把 median 抬高（见 `profile_steps`）。
         _prof_left -= 1
         if _prof_left <= 0:
             _prof.stop()

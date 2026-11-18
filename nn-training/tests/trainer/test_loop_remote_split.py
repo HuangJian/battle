@@ -188,7 +188,7 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
         }
     ),
 }
-STDLIB_IMPORTS = frozenset({"__future__", "hashlib", "pathlib", "time", "typing"})
+STDLIB_IMPORTS = frozenset({"__future__", "dataclasses", "hashlib", "pathlib", "time", "typing"})
 
 #: 延迟 import（方法体内）逐文件闭集——它们各自服务一段，不许在模块级长出。
 DELAYED_IMPORTS: dict[str, frozenset[str]] = {

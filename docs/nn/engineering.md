@@ -25,6 +25,44 @@
 
 ---
 
+## §155 G5 第十二~十五批：四处执行面读数（2026-11-18）
+
+四个小批次合并记录；共同口径：**执行面状态给公开读数**、**驱动被测入口的私有方法调用移出
+assert 表达式**，判据本体一律不动。G5 **507 → 449**（122 → 119 文件）。
+
+### 第十二批：`profile_steps` 转正（`tests/worker/test_ppo_profile_gate.py` 12 → 0）
+
+`PPO_PROFILE` 的纯判定从 `_profile_steps` 改名为公开的 `profile_steps`（唯一定义 +
+两个调用点 + 用例）。它不是实现细节，而是「这个开关在这台设备上抓不抓、抓几步」的契约；
+私有名让用例看起来在测内部件。
+
+### 第十三批：`RemoteFailState`（`tests/trainer/test_remote_failure_policy.py` 15 → 1）
+
+新增 `RemoteFailState`（frozen dataclass）+ `TrainingRemoteFail.remote_fail_state()`：
+`consecutive_failures` / `leg_aborted`。`_handle_remote_failure(...)` 的调用移出 assert
+（`handled = …; assert handled is True`）。留下的 1 处是 `loop._consec_fail`（**轮级**
+重试计数，不属远端失败簇；要迁得先给 `round_failure` 一条公开读数，另开一刀）。
+
+### 第十四批：`BaselineEvalView`（`tests/worker/test_baseline_eval.py` 16 → 0）
+
+新增 `BaselineEvalView` + `TrainingBaseline.baseline_eval_state()`：
+`landed_wver` / `eval_thread`。份额门断言复用已有的 `eval_timing().gate`（§151）；
+`_baseline_eval_weights(...)` 的前置条件矩阵把调用移到 assert 外（每个条件一行
+`got = …; assert got is None`）。`test_loop_core_tail_split.py` 的成员闭集 +1、stdlib 闭集
++ `dataclasses`。
+
+### 第十五批：`ResumeState`（`tests/worker/test_train_ledger_wiring.py` 16 → 0）
+
+新增 `ResumeState`（frozen dataclass）+ `TrainingLifecycle.resume_state()`：启动继承的
+十二项（`start_it` / `rotate_seed` / `soft_remediate_count` / `kl_streak` / `ent_peak` /
+`train_sec_total` / `train_samples_total` / `consec_fail` / `last_verdict` / `iterations_n` /
+`next_it` / `verdicts`）。`verdicts` 快照成 `tuple[str, ...]`（账本里的 `VerdictRow` 列表
+只在启动扫盘/增量时改写）；`_ledger` 缺失时全部走缺省（裸构造的脚手架可读）。
+停腿两处复用 `guard_state()`（§154）。`test_loop_lifecycle_split.py` 的 stdlib 闭集
++ `dataclasses`。
+
+---
+
 ## §154 G5 第十一批：门禁执行面的读数 `guard_state()`（2026-11-18）
 
 `tests/trainer/test_loop_gate_soft_remediate.py` 私有断言 **19 → 0**（G5 **526 → 507**，123 → 122 文件）。

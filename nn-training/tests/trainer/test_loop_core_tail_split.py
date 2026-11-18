@@ -69,7 +69,10 @@ EVAL_PY = NN_ROOT / "trainer/loop_eval.py"
 
 #: 三簇：新家路径 → (类名, 成员闭集)。
 CLUSTERS = {
-    "trainer/loop_baseline.py": ("TrainingBaseline", ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval")),
+    "trainer/loop_baseline.py": (
+        "TrainingBaseline",
+        ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval", "baseline_eval_state"),
+    ),
     "trainer/loop_iter_dir.py": ("TrainingIterDir", ("_check_quota_incident", "_prepare_iter_dir")),
     "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase", "_finalize_returned_shards")),
 }
@@ -146,7 +149,7 @@ TOP_IMPORTS = {
     # 这是 L0 日志出口，同簇的 `loop_baseline` / `loop_iter_dir` 早已登记同一项；不是重依赖。
     "trainer/loop_dispatch.py": frozenset({"common.log", "trainer.rollout_phase"}),
 }
-STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
+STDLIB_IMPORTS = frozenset({"dataclasses", "pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(

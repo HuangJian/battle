@@ -141,18 +141,19 @@ def test_setup_common_inherits_ledger_state(tmp_path: Path) -> None:
     loop = TrainingLoop(_args(traj), None, "bun", {})
     loop._setup_common()
 
-    assert loop._start_it == 3  # 断点续跑指针
-    assert loop._rotate_seed == 555  # 课程连续性
-    assert loop._soft_remediate_count == 3  # ★ I2：重启不洗白
-    assert loop._kl_streak == 1  # ★ F4 连击
-    assert loop._ent_peak == 0.9
-    assert loop._train_sec_total == sum_train_sec(p) == 120.0
-    assert loop._train_samples_total == sum_train_samples(p) == 4000
+    state = loop.resume_state()
+    assert state.start_it == 3  # 断点续跑指针
+    assert state.rotate_seed == 555  # 课程连续性
+    assert state.soft_remediate_count == 3  # ★ I2：重启不洗白
+    assert state.kl_streak == 1  # ★ F4 连击
+    assert state.ent_peak == 0.9
+    assert state.train_sec_total == sum_train_sec(p) == 120.0
+    assert state.train_samples_total == sum_train_samples(p) == 4000
     # 刻意不继承：重试连击是单腿内的进程护栏（继承 ⇒ 重启即秒死）
-    assert loop._consec_fail == 0
+    assert state.consec_fail == 0
     # 视图本身可用（观测面：末次判决 / 迭代行数）
-    assert loop._ledger.last_verdict == "REMEDIATE"
-    assert loop._ledger.iterations_n == 2
+    assert state.last_verdict == "REMEDIATE"
+    assert state.iterations_n == 2
 
 
 def test_inherited_soft_remediate_count_stops_leg_on_next_hit(tmp_path: Path) -> None:
@@ -178,13 +179,14 @@ def test_inherited_soft_remediate_count_stops_leg_on_next_hit(tmp_path: Path) ->
     stopped = loop._apply_verdict(40, res)
 
     assert stopped is True
-    assert loop._leg_abort is True
-    assert loop._soft_remediate_count == 4
+    guard = loop.guard_state()
+    assert guard.leg_abort is True
+    assert guard.soft_remediate_count == 4
     # 停腿判决落账（ABORT 行可被读盘面看见）
     txt = (traj / "training_log.jsonl").read_text(encoding="utf-8")
     assert '"verdict": "ABORT"' in txt
     # 视图随写增量推进（不重扫）：新判决已在视图里
-    assert loop._ledger.last_verdict == "ABORT"
+    assert loop.resume_state().last_verdict == "ABORT"
 
 
 def test_fresh_traj_counts_from_zero(tmp_path: Path) -> None:
@@ -193,6 +195,7 @@ def test_fresh_traj_counts_from_zero(tmp_path: Path) -> None:
     traj.mkdir()
     loop = TrainingLoop(_args(traj), None, "bun", {})
     loop._setup_common()
-    assert loop._soft_remediate_count == 0
-    assert loop._start_it == 1
-    assert loop._ledger.next_it == 1 and loop._ledger.verdicts == []
+    state = loop.resume_state()
+    assert state.soft_remediate_count == 0
+    assert state.start_it == 1
+    assert state.next_it == 1 and state.verdicts == ()

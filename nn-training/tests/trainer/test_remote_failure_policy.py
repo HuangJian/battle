@@ -50,22 +50,25 @@ def test_retryable_failures_abort_after_three(tmp_path: Path) -> None:
     """可重试失败：未满 3 次不写判决；第 3 次写 ABORT 并停腿（**不**下沉本机）。"""
     st = _Stub(tmp_path)
     for _ in range(2):
-        assert st._handle_remote_failure(2, TimeoutError("wait_job 超时")) is True
-    assert st.events() == [] and st._leg_abort is False
-    assert st._handle_remote_failure(2, TimeoutError("wait_job 超时")) is True
+        handled = st._handle_remote_failure(2, TimeoutError("wait_job 超时"))
+        assert handled is True
+    assert st.events() == [] and st.remote_fail_state().leg_aborted is False
+    handled = st._handle_remote_failure(2, TimeoutError("wait_job 超时"))
+    assert handled is True
     ev = st.events()
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 2
     assert "无本机降级" in ev[0]["reason"]
-    assert st._leg_abort is True
+    assert st.remote_fail_state().leg_aborted is True
 
 
 def test_success_resets_counter_elsewhere(tmp_path: Path) -> None:
     """连败计数的复位点在**成功路径**（`_remote_ppo_step` 落位后置 0）——这里钉住契约。"""
     st = _Stub(tmp_path)
     st._remote_fail = 2
-    assert st._handle_remote_failure(1, TimeoutError("boom")) is True
-    assert st._remote_fail == 3  # 判决只加不减；复位由成功路径负责
+    handled = st._handle_remote_failure(1, TimeoutError("boom"))
+    assert handled is True
+    assert st.remote_fail_state().consecutive_failures == 3  # 判决只加不减；复位由成功路径负责
 
 
 def test_fatal_remote_http_aborts_on_first_failure(tmp_path: Path) -> None:
@@ -83,8 +86,8 @@ def test_fatal_remote_http_aborts_on_first_failure(tmp_path: Path) -> None:
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 3
     assert "HTTP 403" in ev[0]["reason"]
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    assert st.remote_fail_state().leg_aborted is True
+    assert st.remote_fail_state().consecutive_failures == 0  # 确定性失败不消耗连败配额
 
 
 def test_retryable_http_still_counts_consecutive(tmp_path: Path) -> None:
@@ -96,8 +99,9 @@ def test_retryable_http_still_counts_consecutive(tmp_path: Path) -> None:
     st._handle_remote_failure(4, HubClientError("wait_job: HTTP 500: boom"))
     assert st.events() == []  # 未达 3 次：不写判决
     st._handle_remote_failure(4, HubClientError("wait_job: HTTP 500: boom"))
-    assert st._remote_fail == 3
-    assert st._leg_abort is True
+    state = st.remote_fail_state()
+    assert state.consecutive_failures == 3
+    assert state.leg_aborted is True
 
 
 def test_node_failure_in_remote_retryable_set() -> None:
@@ -130,8 +134,8 @@ def test_node_failure_aborts_on_first_failure_with_reason(tmp_path: Path) -> Non
     assert [e["event"] for e in ev] == ["gate_verdict"]
     assert ev[0]["verdict"] == "ABORT" and ev[0]["iter"] == 6
     assert "bun 未安装" in ev[0]["reason"]
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    assert st.remote_fail_state().leg_aborted is True
+    assert st.remote_fail_state().consecutive_failures == 0  # 确定性失败不消耗连败配额
 
 
 def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
@@ -154,8 +158,9 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
     st = _Stub(tmp_path)
     err = JobFailedError("job 43a4eb01cf9fe35c 失败: BadZipFile[kind=ProtocolError]", kind="ProtocolError")
     st._handle_remote_failure(58, err)
-    assert st._leg_abort is True
-    assert st._remote_fail == 0  # 确定性失败不消耗连败配额
+    state = st.remote_fail_state()
+    assert state.leg_aborted is True
+    assert state.consecutive_failures == 0  # 确定性失败不消耗连败配额
 
     # 重试段：bare loop（不跑 __init__）+ 真 `round_failure`
     loop = TrainingLoop.__new__(TrainingLoop)

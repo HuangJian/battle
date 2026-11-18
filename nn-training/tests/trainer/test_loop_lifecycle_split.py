@@ -129,7 +129,7 @@ TOP_IMPORTS = frozenset(
 )
 
 #: 允许的 stdlib 顶层 import（闭集的一部分；多一个也要显式登记）。
-STDLIB_IMPORTS = frozenset({"collections.abc", "sys", "time", "pathlib", "typing"})
+STDLIB_IMPORTS = frozenset({"collections.abc", "dataclasses", "sys", "time", "pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(

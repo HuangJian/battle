@@ -57,6 +57,7 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -293,6 +294,24 @@ def export_refusal(*, export_path: str, iters_total: int, start_it: int) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class ResumeState:
+    """续跑接续面的只读快照（启动继承的槽位 + 账本摘要；判据本体不在这里）。"""
+
+    start_it: int
+    rotate_seed: int | None
+    soft_remediate_count: int
+    kl_streak: int
+    ent_peak: float | None
+    train_sec_total: float
+    train_samples_total: float
+    consec_fail: int
+    last_verdict: str | None
+    iterations_n: int
+    next_it: int
+    verdicts: tuple[str, ...]
+
+
 class TrainingLifecycle:
     """主循环骨架（7 方法 = 一条链；见本模块头注的宿主判据）。
 
@@ -358,6 +377,29 @@ class TrainingLifecycle:
     #: `round_failure` 声明为**精确签名**而不是 `Any`：`run_one_round` 直接 `return` 它，
     #: `Any` 会让 mypy 报 no-any-return（方法体要逐字节保持搬前原样，所以把精度放在声明里）。
     round_failure: Callable[..., RoundOutcome]  # RoundSteps（trainer/loop_round_steps.py）
+
+    def resume_state(self) -> ResumeState:
+        """续跑接续面的公开读数（启动继承后的槽位 + 账本摘要；不重扫盘）。"""
+        ledger = getattr(self, "_ledger", None)
+        verdicts = tuple(
+            str(getattr(v, "verdict", "") or "") for v in (getattr(ledger, "verdicts", []) or [])
+        )
+        ent_peak = getattr(self, "_ent_peak", None)
+        rotate_seed = getattr(self, "_rotate_seed", None)
+        return ResumeState(
+            start_it=int(getattr(self, "_start_it", 1) or 1),
+            rotate_seed=None if rotate_seed is None else int(rotate_seed),
+            soft_remediate_count=int(getattr(self, "_soft_remediate_count", 0) or 0),
+            kl_streak=int(getattr(self, "_kl_streak", 0) or 0),
+            ent_peak=None if ent_peak is None else float(ent_peak),
+            train_sec_total=float(getattr(self, "_train_sec_total", 0.0) or 0.0),
+            train_samples_total=float(getattr(self, "_train_samples_total", 0.0) or 0.0),
+            consec_fail=int(getattr(self, "_consec_fail", 0) or 0),
+            last_verdict=getattr(ledger, "last_verdict", None),
+            iterations_n=int(getattr(ledger, "iterations_n", 0) or 0),
+            next_it=int(getattr(ledger, "next_it", 1) or 1),
+            verdicts=verdicts,
+        )
 
     # ------------------------------------------------------------------ 编排
 

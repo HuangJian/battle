@@ -7248,3 +7248,12 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_apply_verdict` / `_gate_halt_mode` 这类驱动被测入口的私有方法调用移出 assert 表达式。
   守卫三处同步：`STAYS` + `guard_state`、顶层名字闭集 + `GuardStateView`、stdlib + `dataclasses`。
   全文 → `docs/nn/engineering.md` §154。
+- **2026-11-18（G5 第十二~十五批：四处执行面读数）**：G5 507 → **449**（119 文件）。
+  四笔同口径——执行面状态给公开读数，驱动被测入口的私有方法调用移出 assert：
+  ① `test_ppo_profile_gate.py` 12 → 0：`_profile_steps` 转正为 `profile_steps`（纯判定是契约，
+  不是内部件）；② `test_remote_failure_policy.py` 15 → 1：`RemoteFailState` +
+  `TrainingRemoteFail.remote_fail_state()`（连败数 / 停腿），留 1 处轮级 `_consec_fail` 另开一刀；
+  ③ `test_baseline_eval.py` 16 → 0：`BaselineEvalView` + `baseline_eval_state()`（落账 wver / 在飞线程），
+  份额门复用 `eval_timing().gate`；④ `test_train_ledger_wiring.py` 16 → 0：`ResumeState` +
+  `TrainingLifecycle.resume_state()`（启动继承十二项 + 账本摘要），停腿复用 `guard_state()`。
+  三个拆分守卫同步成员闭集 / stdlib 闭集。全文 → `docs/nn/engineering.md` §155。
