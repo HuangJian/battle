@@ -29,7 +29,6 @@ PARAM_LIMIT = 8
 
 #: 存量：包含 >200 行函数的文件 → 该文件里这类函数的**个数**。
 LONG_FUNCS_BASELINE = {
-    "hub/boot.py": 1,
     "remote/hub_client.py": 1,
     "remote/job_round.py": 1,
     "remote/notebook_runtime.py": 1,

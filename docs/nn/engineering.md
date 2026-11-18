@@ -25,6 +25,26 @@
 
 ---
 
+## §196 长函数存量第十八刀：hub 入口 327 → 148（2026-11-18）
+
+`hub/boot.py::main` **327 → 148 行**，长函数存量 **20 → 19**
+（`LONG_FUNCS_BASELINE` 删除 `hub/boot.py` 条目）。
+
+两刀纯搬移：
+- `_hub_parser()`：整张 argv 定义表（描述 / 默认值 / help 逐字保留）。
+- `_build_hub_queue(args)`：课程表构建（多课程 / 发现模式 / 单课程 store；含互斥校验与
+  启动时的 force 扫描线程）。
+
+顺带记录三处**跳过**（结构不适合纯搬移，留待后续设计，不是欠账消失）：
+- `remote/rollout_node.run`（312）：cell 入口的顺序编排，`_get_postures` /
+  `_open_cloudflared` 两个闭包跨「隧道建立」与「监护循环」两段共享；拆出需先造隧道上下文对象。
+- `worker/bc_dispatch.dispatch_bc_corpus`（316）：核心是 161 行的单写者 `slot_worker` 闭包，
+  捕获约 28 个局部量；拆出需先造派发上下文对象。
+- `trainer/loop_volume._volume_collect_continuous`（327）：循环内 est / 批计划 / 首波读数
+  互相咬合，单相位拆不够、全拆会超宽参红线。
+
+---
+
 ## §195 长函数存量第十七刀：greedy 采集 286 → 187（2026-11-18）
 
 `trainer/loop_volume.py::_volume_collect_greedy` **286 → 187 行**，长函数存量

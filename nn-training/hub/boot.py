@@ -161,7 +161,8 @@ def _landing_deps_warn() -> None:
     )
 
 
-def main() -> None:
+def _hub_parser():
+    """`main` 的 argv 定义表（自 `main` 原样搬出；描述 / 默认值 / help 逐字保留）。"""
     ap = house_parser(description="hub-server: remote PPO job queue (stdlib)")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--host", default="0.0.0.0")
@@ -259,50 +260,11 @@ def main() -> None:
         default=OFFLINE_PUSH_POLL_SEC,
         help=f"离线 push 派发器的调度拍（秒；缺省 {OFFLINE_PUSH_POLL_SEC:g}）",
     )
-    args = ap.parse_args()
-    token = args.token
-    if args.token_file:
-        try:
-            token = Path(args.token_file).read_text(encoding="utf-8").strip()
-        except OSError as e:
-            _log(f"ERROR: 读 --token-file 失败: {e}")
-            sys.exit(1)
-    if not token:
-        _log("ERROR: 需要 --token 或 --token-file")
-        sys.exit(1)
-    # §单实例锁（2026-09-17，第二道闸）：端口守卫是「探测 → bind」的 TOCTOU —— 两个
-    # starter 同时探测会双双通过（Windows 的 SO_REUSEADDR 还允许双绑，后启动者静默
-    # 变僵尸）。锁用 O_CREAT|O_EXCL 把启动串行化，且能在**持有者身份可核验**的前提下
-    # 自动接管陈旧锁（PID 复用 / 崩溃残留），不再出现「锁在、进程没了、永远启不来」。
-    lock_path = args.lock_file or default_instance_lock_path("hub_server", args.port)
-    if not acquire_instance_lock(lock_path, marker="hub_server", tag="hub-server"):
-        sys.exit(1)
-    atexit.register(release_instance_lock, lock_path)
-    # §双监听守卫：Windows SO_REUSEADDR 允许双绑同端口（后启动者静默变僵尸）——
-    # bind 前探测，端口已有活监听者即拒绝启动（2026-09-09 8787 双实例事故）。
-    # 通配地址（0.0.0.0 / :: / ""）没有可连的语义 ⇒ 统一探回环，避免 0.0.0.0 在
-    # Windows 上直接 WSAEADDRNOTAVAIL 而让守卫形同虚设。
-    _probe_host = args.host if args.host not in ("0.0.0.0", "::", "") else "127.0.0.1"
-    try:
-        ensure_port_free(_probe_host, args.port)
-    except RuntimeError as e:
-        _log(f"ERROR: {e}")
-        sys.exit(1)
-    # ★ 2026-10-23：**能力自检**放在一切服务活动之前（缺依赖时每一轮回传都会静默降级，
-    # 而那行提示以前只在 42 MB 日志里）。非致命：缺 numpy/torch 只影响「delta → 整份」，
-    # hub 的其余职责（派发/受理原件/账本）照旧 ⇒ 只 WARN，不退出。
-    _landing_deps_warn()
-    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
-    # hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
-    # 所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。
-    # **警告不致命**：hub 起不来的代价远高于一份旧代码；训练侧 publish 有兜底（缺快照 ⇒
-    # per-course 打包 + WARN），`/code` 拿不到快照时会 404 且措辞点名。
-    try:
-        ensure_cluster_snapshot(anchor_kind="hub", log=_log)
-    except OSError as e:
-        _log(
-            f"WARN: 集群代码快照未能建立（{e}）——训练侧将回落 per-course 打包",
-        )
+    return ap
+
+
+def _build_hub_queue(args) -> _HubQueue:
+    """课程表构建（自 `main` 原样搬出）：多课程/发现模式 或 单课程 store。"""
     # ---- 课程表：--course 优先；两者都给 = 响亮拒启（不知道听谁的比听错好）----
     if (args.course or args.discover) and (args.job_root or args.jsonl):
         _log(
@@ -386,6 +348,55 @@ def main() -> None:
             sys.exit(1)
         single = _JobStore(args.job_root, args.jsonl)
         hub = as_hub(single)
+    return hub
+
+
+def main() -> None:
+    args = _hub_parser().parse_args()
+    token = args.token
+    if args.token_file:
+        try:
+            token = Path(args.token_file).read_text(encoding="utf-8").strip()
+        except OSError as e:
+            _log(f"ERROR: 读 --token-file 失败: {e}")
+            sys.exit(1)
+    if not token:
+        _log("ERROR: 需要 --token 或 --token-file")
+        sys.exit(1)
+    # §单实例锁（2026-09-17，第二道闸）：端口守卫是「探测 → bind」的 TOCTOU —— 两个
+    # starter 同时探测会双双通过（Windows 的 SO_REUSEADDR 还允许双绑，后启动者静默
+    # 变僵尸）。锁用 O_CREAT|O_EXCL 把启动串行化，且能在**持有者身份可核验**的前提下
+    # 自动接管陈旧锁（PID 复用 / 崩溃残留），不再出现「锁在、进程没了、永远启不来」。
+    lock_path = args.lock_file or default_instance_lock_path("hub_server", args.port)
+    if not acquire_instance_lock(lock_path, marker="hub_server", tag="hub-server"):
+        sys.exit(1)
+    atexit.register(release_instance_lock, lock_path)
+    # §双监听守卫：Windows SO_REUSEADDR 允许双绑同端口（后启动者静默变僵尸）——
+    # bind 前探测，端口已有活监听者即拒绝启动（2026-09-09 8787 双实例事故）。
+    # 通配地址（0.0.0.0 / :: / ""）没有可连的语义 ⇒ 统一探回环，避免 0.0.0.0 在
+    # Windows 上直接 WSAEADDRNOTAVAIL 而让守卫形同虚设。
+    _probe_host = args.host if args.host not in ("0.0.0.0", "::", "") else "127.0.0.1"
+    try:
+        ensure_port_free(_probe_host, args.port)
+    except RuntimeError as e:
+        _log(f"ERROR: {e}")
+        sys.exit(1)
+    # ★ 2026-10-23：**能力自检**放在一切服务活动之前（缺依赖时每一轮回传都会静默降级，
+    # 而那行提示以前只在 42 MB 日志里）。非致命：缺 numpy/torch 只影响「delta → 整份」，
+    # hub 的其余职责（派发/受理原件/账本）照旧 ⇒ 只 WARN，不退出。
+    _landing_deps_warn()
+    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
+    # hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
+    # 所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。
+    # **警告不致命**：hub 起不来的代价远高于一份旧代码；训练侧 publish 有兜底（缺快照 ⇒
+    # per-course 打包 + WARN），`/code` 拿不到快照时会 404 且措辞点名。
+    try:
+        ensure_cluster_snapshot(anchor_kind="hub", log=_log)
+    except OSError as e:
+        _log(
+            f"WARN: 集群代码快照未能建立（{e}）——训练侧将回落 per-course 打包",
+        )
+    hub = _build_hub_queue(args)
     # push 派发（可选，2026-09-18）：登记表来自 rl-config 的 gpu_push 节点（控制台的
     # worker 登记入口回写它），派发器每拍探活 + 按队列顺序推给空闲 worker。
     push_disp: PushDispatcher | None = None

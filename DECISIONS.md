@@ -7464,3 +7464,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   2 → 1（`_volume_collect_continuous` 327 仍在余量里），`CLUSTER` 守卫 13 → 15，
   `_StubLoop` 补两个同源转发。
   全文 → `docs/nn/engineering.md` §195。
+- **2026-11-18（长函数存量第十八刀：hub 入口）**：`hub/boot.py::main` 327 → **148** 行
+  （拆出 `_hub_parser` / `_build_hub_queue`），长函数存量 **20 → 19**，形状基线删除
+  该文件条目。同日记录三处**结构跳过**（`rollout_node.run` / `bc_dispatch.dispatch_bc_corpus` /
+  `loop_volume._volume_collect_continuous`）：均为需先造上下文对象的闭包式编排，
+  理由见 §196，不是欠账消失。全文 → `docs/nn/engineering.md` §196。
