@@ -267,7 +267,8 @@ def run_eval_runner_capture(
             if (
                 not warned
                 and not game_watch.warn_is_redundant(timeout_sec)
-                and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+                # 点名线跟着本次硬顶走（面板的 tick 预算抬硬顶时不得再报假慢局）
+                and elapsed >= game_watch.slow_warn_sec(timeout_sec)
             ):
                 warned = True
                 (log_fn or log)(

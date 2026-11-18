@@ -687,7 +687,8 @@ class ServePool:
             if (
                 not warned
                 and not game_watch.warn_is_redundant(timeout_sec)
-                and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+                # 点名线随本次硬顶走（面板 36000 拍 ⇒ 合法拉满局 17–30s，2026-11-18）
+                and elapsed >= game_watch.slow_warn_sec(timeout_sec)
             ):
                 warned = True
                 self.log(

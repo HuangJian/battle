@@ -61,6 +61,54 @@ def test_attempt_timeout_explicit_config_wins_on_the_first_attempt() -> None:
     assert game_watch.EXPLICIT_RETRY_FACTOR < game_watch.RETRY_TIMEOUT_FACTOR
 
 
+def test_panel_tick_budget_lifts_the_default_cap_and_the_warn_line() -> None:
+    """★ 硬顶/点名线必须随面板的 **tick 预算** 走（2026-11-18 云机现场）。
+
+    现场（g5-pilot it75，`classic35-safe-base`）：终局线是 `max_ticks=36000`，而实测每拍
+    0.48–0.85 ms（it72 云机逐局真数据：p50 7470 拍 ↔ 5.26s、p99 23955 拍 ↔ 13.9s）
+    ⇒ 一条**合法**的拉满局就是 17–30s。于是：
+      * 点名线 20s **每轮都在叫**（700 局 eval 里 11–27 局 ≥20s、max 26.24s，全部正常结束、
+        重试 0 次；同一 (stage,seed) 每轮都慢 ⇒ s2020 占全部慢局点名的 54%）；
+      * 硬顶 30s 离合法最坏值只差 0–4s（实测 max 27.45s = 92% 的上限）——机器稍慢一点就会把
+        **最贵的那几局**杀掉再跑一遍（一次白烧 25s+，那才是真浪费）。
+    所以缺省硬顶 = `max(30s, tick 预算 × 每拍预算)`，点名线 = 硬顶 − 10s（今天的 20/30 就是它）。
+    """
+    cap = game_watch.game_timeout_sec(36000)
+    assert cap > 40.0, f"36000 拍的合法局 17–30s，硬顶只有 {cap}s ⇒ 会把它们杀掉重跑"
+    warn = game_watch.slow_warn_sec(cap)
+    assert warn > 26.24, f"点名线 {warn}s 仍在合法最坏值（实测 26.24s）以下 ⇒ 每轮都是假警报"
+    assert warn < cap, "点名线必须在硬顶之下（慢了先说话，再杀）"
+    # 短面板逐字不变：12000 拍 ⇒ 仍是兜底 30s + 点名 20s（今天的行为一个字不改）
+    assert game_watch.game_timeout_sec(12000) == game_watch.DEFAULT_GAME_TIMEOUT_SEC
+    assert game_watch.game_timeout_sec(0) == game_watch.DEFAULT_GAME_TIMEOUT_SEC
+    assert (
+        game_watch.slow_warn_sec(game_watch.DEFAULT_GAME_TIMEOUT_SEC)
+        == game_watch.SLOW_GAME_WARN_SEC
+    )
+
+
+def test_max_ticks_of_reads_the_exporter_flag() -> None:
+    """两条腿的 argv 都带 `--max-ticks`（`worker/cmd` 的三种导出器 + eval 的拼接）⇒
+    看门狗从**这一局自己的 argv** 取预算，不靠外部再传一个数。缺席/坏值 = 0（走兜底）。"""
+    argv = [
+        "tools/sim/export-rl-rollout.ts",
+        "--weights",
+        "init_weights.json",
+        "--stages",
+        "2020",
+        "--seeds",
+        "1",
+        "--max-ticks",
+        "36000",
+        "--out",
+        "w0",
+    ]
+    assert game_watch.max_ticks_of(argv) == 36000
+    assert game_watch.max_ticks_of(["x", "--stages", "1"]) == 0
+    assert game_watch.max_ticks_of(["x", "--max-ticks", "abc"]) == 0
+    assert game_watch.game_timeout_sec(game_watch.max_ticks_of(argv)) > 40.0
+
+
 def test_warn_is_redundant_only_when_cap_is_at_or_below_the_line() -> None:
     """软告警与硬顶同值（或硬顶更严）时不该多打一行 WARN；硬顶比点名线**宽**时必须多打。
 

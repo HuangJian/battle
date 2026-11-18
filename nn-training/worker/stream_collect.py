@@ -354,7 +354,16 @@ class StreamCollector:
         return None
 
     def _next_alpha(self) -> list[str] | None:
-        """α 的单拍：冷启动轮转 → 分数最高 → 近分按派发序号交错。终局只有 `None`。"""
+        """α 的单拍：冷启动轮转 → 分数最高 → 近分按派发序号交错。终局只有 `None`。
+
+        ★ **在飞也算账**（2026-11-18，g5-pilot it74 现场）：α 档原先只看「`collected < quota`」
+        ⇒ 222 宽的自助云机上，槽位一空就再派一局，配额早就够了还在同一批关上加派，直到最后
+        一局结算才停 —— 每轮多派 ≈ 一个池宽的局（现场计划 4–5 seed/关 ⇒ ~140 局，实派 435 局、
+        过采 250051 = 采到的样本里 70% 直接丢弃）。这与本模块文件头那条纪律（「在飞的局也算账，
+        否则宽槽位会在同一关上叠派」）是同一件事，只是 α 当初以「不读 est」为名把闸一起丢了——
+        而这条闸**不需要** est：用实测 `samples_s`（一局结算就有）就能算「在飞的局预计算不算补齐」。
+        没有实测的关只留一局在飞（与冷启动同一口径）。
+        """
         if not self._alpha_started:
             stage = self._cold_stage()
             if stage is not None:
@@ -364,16 +373,24 @@ class StreamCollector:
                     return []  # 冷启动在飞：本拍软停，结算后再问（不是终局）
                 self._enter_alpha()
         cands: list[tuple[float, int]] = []
+        #: 还有「未满额、未触顶」的关只是被**在飞**挡住 ⇒ 本拍软停（`[]`），不是终局。
+        waiting = False
         for s in self.stages:
             if s in self.no_data:
                 continue
-            if int(self.collected.get(s, 0)) >= self.quota:
+            got = int(self.collected.get(s, 0))
+            if got >= self.quota:
                 continue
             if int(self.games.get(s, 0)) >= self._alpha_cap(s):
                 continue
+            inflight = self._unsettled(s)
+            samples = float(self.samples_s.get(s, 0.0))
+            if inflight > 0 and (samples <= 0 or got + inflight * samples >= self.quota):
+                waiting = True
+                continue
             cands.append((self._alpha_score(s), int(s)))
         if not cands:
-            return None
+            return [] if waiting else None
         best = max(score for score, _ in cands)
         near = sorted(s for score, s in cands if score >= best * 0.95)
         stage = near[self._seq % len(near)]

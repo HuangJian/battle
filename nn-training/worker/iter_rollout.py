@@ -45,7 +45,8 @@ from typing import Any, cast
 
 # 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 20s、首次尝试硬顶
 # 30s（2026-10-26 由 5s 放宽：经典 35 关 3 命的长局在 4 核 CPU 上常态 6–15s，5s 是误杀）、
-# 重试上限 ×4、最多 3 次、轮询 0.5s。
+# 重试上限 ×4、最多 3 次、轮询 0.5s。**两条线都随面板的 tick 预算缩放**（2026-11-18：
+# 36000 拍的面板上合法拉满局就是 17–30s ⇒ 硬顶 43.2s / 点名 33.2s，见 `game_watch.game_timeout_sec`）。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
 from common import game_watch, progress_hook, scratch
@@ -411,7 +412,7 @@ def _run_one_game(
                 if (
                     not warned
                     and not game_watch.warn_is_redundant(timeout_sec)
-                    and elapsed >= game_watch.SLOW_GAME_WARN_SEC
+                    and elapsed >= game_watch.slow_warn_sec(timeout_sec)
                 ):
                     warned = True
                     log(
@@ -1009,7 +1010,13 @@ def run_iter_rollout(
     # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
     requested = float(spec.get("game_timeout_sec") or 0.0)
     explicit = requested > 0
-    timeout_sec = requested if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
+    # ★ 缺省硬顶随**面板的 tick 预算**走（2026-11-18）：`--max-ticks` 就在每条 argv 里（= 关卡
+    #   的终局线）。固定 30s 在 36000 拍的面板上只比合法最坏值高 0–4s ⇒ 机器稍慢就把最贵的
+    #   长局杀掉重跑（现场 max 27.45s = 92% 上限）。没这个旗标（老计划）⇒ 逐字回到兜底值。
+    panel_ticks = game_watch.max_ticks_of(templates[0]) if templates else 0
+    timeout_sec = requested if explicit else game_watch.game_timeout_sec(panel_ticks)
+    #: 点名线跟着硬顶走（`slow_warn_sec`：缺省 30s 档仍是 20s，一个字不改）。
+    warn_sec = game_watch.slow_warn_sec(timeout_sec)
     # ★ 2026-09-24（日志节食）：本轮的「设置 + 看门狗口径 + 池 + 进度 + 收尾 + 单局耗时」
     # 攒成**一行**（完成时打；未完成时每 60s 心跳一次）。原来这七行随轮刷，云端整段跑几
     # 小时会把控制台日志面板拖死（用户报障）。例外：**重试**与**慢局点名**仍是「发生了才
@@ -1166,12 +1173,18 @@ def run_iter_rollout(
         rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不换根，产出住真 job 目录）")
     rb.add("ts_root", tsd)
     rb.note(
-        f"单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
-        f"首次尝试硬顶 {timeout_sec:g}s"
+        f"单局看门狗：软告警 >{warn_sec:g}s，首次尝试硬顶 {timeout_sec:g}s"
         + (
             "（plan 指定，每次尝试都用它）"
             if explicit
-            else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
+            else (
+                f"（plan 未指定 ⇒ 按面板 {panel_ticks} 拍的 tick 预算推导："
+                f"{game_watch.PER_TICK_BUDGET_SEC * 1000:g}ms/拍，不低于兜底"
+                f" {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s）"
+                if panel_ticks > 0
+                else f"（plan 未指定，用节点兜底 {game_watch.DEFAULT_GAME_TIMEOUT_SEC:g}s；"
+                "argv 无 --max-ticks ⇒ 不按面板推导）"
+            )
         )
         + f"；超时/rc≠0 原地重跑同一 argv，最多 {game_watch.GAME_MAX_ATTEMPTS} 次"
         + (
@@ -1508,6 +1521,7 @@ def run_iter_rollout(
             "rollout",
             list(zip(secs_list, [_game_label(a) for a in argvs], strict=True)),
             retried=sum(1 for v in game_attempts.values() if v > 1),
+            warn_sec=warn_sec,
         ),
         final_only=True,
     )
