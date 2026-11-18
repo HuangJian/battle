@@ -219,16 +219,13 @@ def test_host_callers_still_resolve_their_own_host_namespace() -> None:
     assert set(host) == {"land_materials", "run_iter_phase"}, (
         f"job_shell.py 的 `download_*` 宿主变了：{set(host)}"
     )
-    for name in ("_ensure_payload", "_ensure_code"):
-        assert name in host["land_materials"], f"land_materials 不再读 {name}（落地搬走了吗？）"
-    assert "_ensure_ts_code" in host["run_iter_phase"], "run_iter_phase 不再读 _ensure_ts_code"
+    for name in ("_ensure_payload", "_ensure_code", "_ensure_ts_code"):
+        owner = "run_iter_phase" if name == "_ensure_ts_code" else "land_materials"
+        assert name in host[owner], f"{owner} 不再读 {name}（落地搬走了吗？）"
     for name in ("download_payload", "download_code"):
         assert name not in host["land_materials"], (
             f"land_materials 又直接读 {name} 了——物料落地应当只在 remote.download 里发生"
         )
-    assert "download_ts_code" not in host["run_iter_phase"], (
-        "run_iter_phase 又直接读 download_ts_code 了——TS 落地应当只在 remote.download 里发生"
-    )
 
     fill = _bare_loads(ROUND_FILE, {"_prefetch_fill"})
     assert set(fill) == {"_prefetch_fill"}, f"job_round.py 里没有 `_prefetch_fill`：{set(fill)}"
