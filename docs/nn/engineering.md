@@ -25,6 +25,23 @@
 
 ---
 
+## §208 长函数存量第二十九刀：每 job 一轮的会话对象（remote）396 → 75（2026-11-18）
+
+`remote/job_round.py::run_one_round` **396 → 75 行**，长函数存量 **9 → 8**
+（`LONG_FUNCS_BASELINE` 删除 `remote/job_round.py` 条目）。
+
+按 §201 的「先造上下文对象」：`_Round` 持有本轮全部事实与运行期状态（21 个宿主输入 +
+17 个运行期字段），三段分别是：
+- `start()`（125 行）：取活后的旁路装配（预取填充 / 心跳 / 取消环 / 开算打点）。
+- `_execute()`（90 行）：跑活 → 就绪 → 交回传。
+- `run()`（140 行）：`try: _execute()` + 四档异常处置 + finally 收尾。
+
+`run_one_round` 只做参数装配、`ctx.start()`、`ctx.run()`。17 处日志逐条比对：
+文案与顺序不变（f-string 里的表达式同步改写为 `self.x`）。命名未新增同名散落：
+`start` / `run` 该模块原本就有，`_execute` 为模块独有。
+
+---
+
 ## §207 长函数存量第二十八刀：云评估逐局与轮内重投（remote）401 → 182（2026-11-18）
 
 `remote/offline_eval.py::run_cloud_eval` **401 → 182 行**，长函数存量 **10 → 9**

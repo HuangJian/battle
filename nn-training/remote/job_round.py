@@ -42,7 +42,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -424,170 +424,246 @@ def run_one_round(
     （幂等重拉）。
     """
 
-    jid = job["job_id"]
-    manifest = job.get("manifest") or {}
-    # 本轮的 it（回传失败备份的文件名要它；§3.6）：hub 派的 job 必带，缺了就算 0。
-    job_it = int(manifest.get("it") or 0)
-    # ★2026-11-12（用户口径）：BC 是整门课独占的长跑——训练期间**不起预取**。
-    # 预取的下行腿会抢带宽，而 BC 占用的是整张卡/整门课，下一个 job 也不该在它跑着时
-    # 提前下别人的 payload（尤其 PPO：那会白传一整份，还可能与另一个 worker 抢课）。
-    _is_bc = str(manifest.get("kind") or "") == "bc"
-    _wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从 claim 起算
-    lease_token = str(job.get("lease_token", "") or "")
-    claim_mode = str(job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
-    log(
-        f"job {jid} claimed [mode={claim_mode}]"
-        + ("" if lease_token else "（无租约：先回传者胜，后到者 409 丢弃）")
-        + f" — downloading payload ({polls_since_accept} polls since last accepted result)"
+    ctx = _Round(
+        base_url=base_url,
+        token=token,
+        job=job,
+        part_dir=part_dir,
+        code_cache_dir=code_cache_dir,
+        pf_store=pf_store,
+        polls_since_accept=polls_since_accept,
+        worker_id=worker_id,
+        cache_root=cache_root,
+        device=device,
+        torch_threads=torch_threads,
+        epoch_mult=epoch_mult,
+        backend=backend,
+        echo=echo,
+        restart_argv=restart_argv,
+        role=role,
+        prefetch_depth=prefetch_depth,
+        prefetch_unpack=prefetch_unpack,
+        uploader=uploader,
+        run_job_fn=run_job_fn,
+        log=log,
     )
-    # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
-    # （旧 hub/§343 时代）则不续租，结果胜负由首写锁定决定）。
-    # job 执行期间 60s 周期续租（长 job 靠它活过 CLAIM_TTL_SEC），job 结束 join。
-    # ---- P2 预取填充（后台，与下面的 run_job 重叠）：PPO_A 跑着的时候下载 B ----
-    # 命中即零下载开算（`preloaded` 接缝）；未命中就是「先串行下载关键 payload」，
-    # 用命中率压掉空转。填充线程与 job 同生命周期（job 结束就停，绝不留常驻线程）。
+    ctx.start()
+    return ctx.run()
+
+
+@dataclass
+class _Round:
+    """一轮取活后的全部状态：`start` 装配旁路线程，`run` 执行并按四档处置失败。"""
+
+    # 宿主已定好的事实与旋钮
+    base_url: str
+    token: str
+    job: dict
+    part_dir: Path
+    code_cache_dir: Path | None
+    pf_store: PrefetchStore | PayloadProcess | None
+    polls_since_accept: int
+    worker_id: str
+    cache_root: Path | None
+    device: str
+    torch_threads: int
+    epoch_mult: float
+    backend: str
+    echo: bool
+    restart_argv: list[str] | None
+    role: str
+    prefetch_depth: int
+    prefetch_unpack: int
+    uploader: UploaderLike
+    run_job_fn: Callable[..., dict]
+    log: Callable[[str], None]
+    # 本轮运行期状态（start 装配、run 收尾）
+    jid: str = ""
+    job_it: int = 0
+    lease_token: str = ""
+    claim_mode: str = "ok"
     preloaded: dict | None = None
-    _pf_stop = threading.Event()
+    pf_proc: PayloadProcess | None = None
     pf_thread: threading.Thread | None = None
-    #: 本轮的预取填充与心跳两条旁证线程归这里（`job-<jid前8>-pf` / `-hb`）：
-    #: 与 job 同生命周期（结束就在 finally 里 join），不是常驻线程。
-    rt = common.runtime.Runtime(scope=f"job-{jid[:8]}")
-    # 下行腿在**哪**跑（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
-    # `PayloadProcess` 且**未降级** ⇒ 填充在子进程里（这里只下一道 `fill` 命令）；
-    # 其余（`PrefetchStore` / 降级后的 `PayloadProcess`）⇒ 旧的进程内填充线程。
-    # 降级后 `pf_proc.fills_out_of_process` 会翻成 False，而它自己的 `__getattr__` 把
-    # `store`/`held`/`begin`… 逐字转给进程内那份 ⇒ 下面的旧分支一字不改就能接。
-    pf_proc = pf_store if isinstance(pf_store, PayloadProcess) else None
-    if pf_store is not None:
-        got = pf_store.take(jid)
-        want_sha = str((job.get("manifest") or {}).get("payload_sha256") or "")
-        if got is not None and (not want_sha or str(got.get("blob_sha")) == want_sha):
-            # 两种形状分派（plan §2.2）：staged ⇒ **只交路径**，搬入在 `_ensure_payload`
-            # （它晚于 `run_job` 的 `_result.json` 复用检查——在这里动 job 目录会把那份缓存删掉）。
-            if "staged_dir" in got:
-                preloaded = {
-                    "staged_dir": str(got["staged_dir"]),
-                    "payload_nbytes": int(got["payload_nbytes"]),
-                    "unpack_sec": float(got["unpack_sec"]),
-                }
+    pf_stop: threading.Event = field(default_factory=threading.Event)
+    hb_stop: threading.Event = field(default_factory=threading.Event)
+    hb_thread: threading.Thread | None = None
+    cancel: threading.Event = field(default_factory=threading.Event)
+    watch_stop: threading.Event = field(default_factory=threading.Event)
+    t_ppo0: float = 0.0
+    beacon: _StartBeacon | None = None
+    job_ok: bool = False
+    stop: bool = False
+    uploaded: bool = False
+
+    def start(self) -> None:
+        """取活后的旁路装配：预取填充 / 心跳 / 取消环 / 开算打点。"""
+        self.jid = self.job["job_id"]
+        manifest = self.job.get("manifest") or {}
+        # 本轮的 it（回传失败备份的文件名要它；§3.6）：hub 派的 job 必带，缺了就算 0。
+        self.job_it = int(manifest.get("it") or 0)
+        # ★2026-11-12（用户口径）：BC 是整门课独占的长跑——训练期间**不起预取**。
+        # 预取的下行腿会抢带宽，而 BC 占用的是整张卡/整门课，下一个 job 也不该在它跑着时
+        # 提前下别人的 payload（尤其 PPO：那会白传一整份，还可能与另一个 worker 抢课）。
+        _is_bc = str(manifest.get("kind") or "") == "bc"
+        _wire_start(self.jid)  # 阶段占比（in/out/ppo/other）的 wall 从 claim 起算
+        self.lease_token = str(self.job.get("lease_token", "") or "")
+        self.claim_mode = str(self.job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
+        self.log(
+            f"job {self.jid} claimed [mode={self.claim_mode}]"
+            + ("" if self.lease_token else "（无租约：先回传者胜，后到者 409 丢弃）")
+            + f" — downloading payload ({self.polls_since_accept} polls since last accepted result)"
+        )
+        # 心跳线程仅在有租约时启动（P3b 独占 hub 下发 lease_token；无租约
+        # （旧 hub/§343 时代）则不续租，结果胜负由首写锁定决定）。
+        # job 执行期间 60s 周期续租（长 job 靠它活过 CLAIM_TTL_SEC），job 结束 join。
+        # ---- P2 预取填充（后台，与下面的 run_job 重叠）：PPO_A 跑着的时候下载 B ----
+        # 命中即零下载开算（`preloaded` 接缝）；未命中就是「先串行下载关键 payload」，
+        # 用命中率压掉空转。填充线程与 job 同生命周期（job 结束就停，绝不留常驻线程）。
+        self.preloaded: dict | None = None
+        self.pf_stop = threading.Event()
+        self.pf_thread: threading.Thread | None = None
+        #: 本轮的预取填充与心跳两条旁证线程归这里（`job-<jid前8>-pf` / `-hb`）：
+        #: 与 job 同生命周期（结束就在 finally 里 join），不是常驻线程。
+        rt = common.runtime.Runtime(scope=f"job-{self.jid[:8]}")
+        # 下行腿在**哪**跑（2026-10-20，plan/ppo-worker-transfer-isolation 的下行半场）：
+        # `PayloadProcess` 且**未降级** ⇒ 填充在子进程里（这里只下一道 `fill` 命令）；
+        # 其余（`PrefetchStore` / 降级后的 `PayloadProcess`）⇒ 旧的进程内填充线程。
+        # 降级后 `pf_proc.fills_out_of_process` 会翻成 False，而它自己的 `__getattr__` 把
+        # `store`/`held`/`begin`… 逐字转给进程内那份 ⇒ 下面的旧分支一字不改就能接。
+        self.pf_proc = self.pf_store if isinstance(self.pf_store, PayloadProcess) else None
+        if self.pf_store is not None:
+            got = self.pf_store.take(self.jid)
+            want_sha = str((self.job.get("manifest") or {}).get("payload_sha256") or "")
+            if got is not None and (not want_sha or str(got.get("blob_sha")) == want_sha):
+                # 两种形状分派（plan §2.2）：staged ⇒ **只交路径**，搬入在 `_ensure_payload`
+                # （它晚于 `run_job` 的 `_result.json` 复用检查——在这里动 job 目录会把那份缓存删掉）。
+                if "staged_dir" in got:
+                    self.preloaded = {
+                        "staged_dir": str(got["staged_dir"]),
+                        "payload_nbytes": int(got["payload_nbytes"]),
+                        "unpack_sec": float(got["unpack_sec"]),
+                    }
+                else:
+                    self.preloaded = {"payload_zip": got["payload_zip"]}
+                # S3e：命中在这一刻才算数（零下载开算）——**不能在 `_ensure_payload` 的 preloaded
+                # 分支打点：那条分支同样服务 push 腿，会把 push 标成预取命中。
+                _wire_hit(self.jid, "payload", "prefetch")
+            elif got is not None:
+                # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
+                self.log(f"job {self.jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
+                self.pf_store.drop(self.jid)  # staged 形状的暂存目录也要一起清（drop 连 _handoff 一起清）
+            if _is_bc:
+                # BC 独占：本轮**不起填充**（`take(jid)` 已在上方——上一轮若真暂存了本 job
+                # 的字节，照样零下载开算；但不再为下一份预热任何东西）。
+                pass
             else:
-                preloaded = {"payload_zip": got["payload_zip"]}
-            # S3e：命中在这一刻才算数（零下载开算）——**不能在 `_ensure_payload` 的 preloaded
-            # 分支打点：那条分支同样服务 push 腿，会把 push 标成预取命中。
-            _wire_hit(jid, "payload", "prefetch")
-        elif got is not None:
-            # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
-            log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
-            pf_store.drop(jid)  # staged 形状的暂存目录也要一起清（drop 连 _handoff 一起清）
-        if _is_bc:
-            # BC 独占：本轮**不起填充**（`take(jid)` 已在上方——上一轮若真暂存了本 job
-            # 的字节，照样零下载开算；但不再为下一份预热任何东西）。
-            pass
-        else:
-            # 先试子进程（下行腿已在进程外：网络 + 解包都不抢训练线程的 GIL）。
-            # `start_fill` 返回 False = 没交出去（子进程已降级/死了）：就地回退到进程内线程，
-            # 预取是提前量 —— 它没有自己的失败面（`prefetch.py` 头部 §2）。
-            remote_ok = bool(
-                pf_proc is not None
-                and pf_proc.fills_out_of_process
-                and pf_proc.start_fill(
-                    base_url=base_url,
-                    token=token,
-                    worker_id=worker_id,
-                    role=role,
-                    depth=prefetch_depth,
-                    unpack_n=prefetch_unpack,
-                    skip={jid},
-                    log=log,
+                # 先试子进程（下行腿已在进程外：网络 + 解包都不抢训练线程的 GIL）。
+                # `start_fill` 返回 False = 没交出去（子进程已降级/死了）：就地回退到进程内线程，
+                # 预取是提前量 —— 它没有自己的失败面（`prefetch.py` 头部 §2）。
+                remote_ok = bool(
+                    self.pf_proc is not None
+                    and self.pf_proc.fills_out_of_process
+                    and self.pf_proc.start_fill(
+                        base_url=self.base_url,
+                        token=self.token,
+                        worker_id=self.worker_id,
+                        role=self.role,
+                        depth=self.prefetch_depth,
+                        unpack_n=self.prefetch_unpack,
+                        skip={self.jid},
+                        log=self.log,
+                    )
                 )
-            )
-            if not remote_ok:
-                pf_thread = rt.thread(
-                    _prefetch_fill,
-                    base_url,
-                    token,
-                    pf_store,
-                    _pf_stop,
-                    name="pf",
-                    kwargs={
-                        "worker_id": worker_id,
-                        "role": role,
-                        "depth": prefetch_depth,
-                        "unpack_n": prefetch_unpack,
-                        "skip": {jid},
-                        "log": log,
-                    },
-                    daemon=True,
+                if not remote_ok:
+                    self.pf_thread = rt.thread(
+                        _prefetch_fill,
+                        self.base_url,
+                        self.token,
+                        self.pf_store,
+                        self.pf_stop,
+                        name="pf",
+                        kwargs={
+                            "worker_id": self.worker_id,
+                            "role": self.role,
+                            "depth": self.prefetch_depth,
+                            "unpack_n": self.prefetch_unpack,
+                            "skip": {self.jid},
+                            "log": self.log,
+                        },
+                        daemon=True,
+                    )
+        self.hb_stop = threading.Event()
+        self.hb_thread = None
+        if self.lease_token:
+
+            def _hb_loop() -> None:
+                while not self.hb_stop.wait(HEARTBEAT_SEC):
+                    heartbeat(self.base_url, self.token, self.jid, self.lease_token)
+
+            self.hb_thread = rt.thread(_hb_loop, name="hb", daemon=True)
+        self.job_ok = False
+        self.stop = False  # CodeChangedError + 无监督器 ⇒ 整条循环退出（宿主据此 `return done`）
+        self.uploaded = False  # P2.5：本 job 有没有走到「交回传」（没走到 = finally 里照旧 flush）
+        # 取消环（2026-09-22）：唯一硬取消信号 = `landed`（结果已落盘）。backup 副本与
+        # 掉队重领者都可能正在算一份**别人已经赢下**的 job——停算的收益是省一张卡的 GPU，
+        # 代价是每 1.5s 一个 P0 小包。取消点在 epoch 边界（<20s），实测值进 cancel_latency_s。
+        self.cancel = threading.Event()
+        self.watch_stop = threading.Event()
+        start_cancel_watcher(self.base_url, self.token, self.jid, self.watch_stop, self.cancel, log=self.log)
+        self.t_ppo0 = time.time()
+        self.beacon = (
+            None
+            if self.claim_mode == CLAIM_MODE_BACKUP
+            else _StartBeacon(
+                lambda: job_started(
+                    self.base_url, self.token, self.jid, worker_id=self.worker_id, timeout=START_TIMEOUT_SEC
                 )
-    _hb_stop = threading.Event()
-    hb_thread = None
-    if lease_token:
-
-        def _hb_loop() -> None:
-            while not _hb_stop.wait(HEARTBEAT_SEC):
-                heartbeat(base_url, token, jid, lease_token)
-
-        hb_thread = rt.thread(_hb_loop, name="hb", daemon=True)
-    job_ok = False
-    stop = False  # CodeChangedError + 无监督器 ⇒ 整条循环退出（宿主据此 `return done`）
-    uploaded = False  # P2.5：本 job 有没有走到「交回传」（没走到 = finally 里照旧 flush）
-    # 取消环（2026-09-22）：唯一硬取消信号 = `landed`（结果已落盘）。backup 副本与
-    # 掉队重领者都可能正在算一份**别人已经赢下**的 job——停算的收益是省一张卡的 GPU，
-    # 代价是每 1.5s 一个 P0 小包。取消点在 epoch 边界（<20s），实测值进 cancel_latency_s。
-    _cancel = threading.Event()
-    _watch_stop = threading.Event()
-    start_cancel_watcher(base_url, token, jid, _watch_stop, _cancel, log=log)
-    _t_ppo0 = time.time()
-    _beacon = (
-        None
-        if claim_mode == CLAIM_MODE_BACKUP
-        else _StartBeacon(
-            lambda: job_started(
-                base_url, token, jid, worker_id=worker_id, timeout=START_TIMEOUT_SEC
             )
         )
-    )
-    try:
-        result = run_job_fn(
-            base_url,
-            token,
-            job,
-            work_dir=part_dir,
-            device=device,
-            torch_threads=torch_threads,
-            epoch_mult=epoch_mult,
-            backend=backend,
-            echo=echo,
-            code_cache_dir=code_cache_dir,
-            lease_token=lease_token,
-            preloaded=preloaded,  # P2 命中面：有它则 payload 段零网络
-            log=log,
-            should_cancel=_cancel.is_set,
+
+    def _execute(self) -> None:
+        """跑活 → 就绪 → 交回传（成功路径；失败由 `run` 的四档处置接管）。"""
+        self.result = self.run_job_fn(
+            self.base_url,
+            self.token,
+            self.job,
+            work_dir=self.part_dir,
+            device=self.device,
+            torch_threads=self.torch_threads,
+            epoch_mult=self.epoch_mult,
+            backend=self.backend,
+            echo=self.echo,
+            code_cache_dir=self.code_cache_dir,
+            lease_token=self.lease_token,
+            preloaded=self.preloaded,  # P2 命中面：有它则 payload 段零网络
+            log=self.log,
+            should_cancel=self.cancel.is_set,
             # ★ 备份副本（`mode=backup`，无租约）**不打** computing_at：那份「PPO 真启动」的
             # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
             # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
             # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
             # W2：通道改成线程（`_beacon.start`），落地在下面的 `job_ready()` 之前。
-            on_ppo_start=None if _beacon is None else _beacon.start,
+            on_ppo_start=None if self.beacon is None else self.beacon.start,
         )
         # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
         # 备份副本不报身份：`set_ready` 会顺手写这份 job 的 `_last_heartbeat`，而那个字段是
         # 主人孤儿判据（`_lease_state`）的输入——备份的一次「算完了」不该把主人的静默洗白。
         # W2：`computing_at` 必须在 ready 之前落地（线程 + 超时回退，见 `_StartBeacon`）。
         # 失败时**先 ready**（重复抑制优先），再同步补发一次；仍失败也不阻塞这条腿。
-        _start_ok = True if _beacon is None else _beacon.settle()
-        job_ready(base_url, token, jid, worker_id="" if claim_mode == CLAIM_MODE_BACKUP else worker_id)
-        if _beacon is not None:
+        _start_ok = True if self.beacon is None else self.beacon.settle()
+        job_ready(self.base_url, self.token, self.jid, worker_id="" if self.claim_mode == CLAIM_MODE_BACKUP else self.worker_id)
+        if self.beacon is not None:
             if not _start_ok:
-                log(
-                    f"job {jid}: /start 线程 {_beacon.ms:.0f}ms 未落地 ⇒ ready 后同步补发"
+                self.log(
+                    f"job {self.jid}: /start 线程 {self.beacon.ms:.0f}ms 未落地 ⇒ ready 后同步补发"
                     "（ppo_start_failed=1，不阻塞 PPO）"
                 )
                 job_started(
-                    base_url, token, jid, worker_id=worker_id, timeout=START_TIMEOUT_SEC
+                    self.base_url, self.token, self.jid, worker_id=self.worker_id, timeout=START_TIMEOUT_SEC
                 )
-            elif _beacon.ms >= START_SLOW_MS:
-                log(f"job {jid}: /start 落地 {_beacon.ms:.0f}ms（慢于 {START_SLOW_MS:.0f}ms）")
+            elif self.beacon.ms >= START_SLOW_MS:
+                self.log(f"job {self.jid}: /start 落地 {self.beacon.ms:.0f}ms（慢于 {START_SLOW_MS:.0f}ms）")
         # ★ 关键路径到此为止（P2.5 异步回传）：回传不再占着算力等。交给上传线程，
         #   主循环立刻去领下一份——而下一份的字节多半已被预取到本地（P2），两者
         #   资源不相交（链路 vs CPU/GPU），天然可叠。
@@ -604,169 +680,178 @@ def run_one_round(
             ⚠ 回调跑在**上传线程**里（sync 模式则在主线程），所以它绝不能抛：
             `backup_failed_result` 自带兜底，`ResultUploader._settle` 另有一层。
             """
-            settle_result(_j, _out, _t, uploader=uploader, log=log)
+            settle_result(_j, _out, _t, uploader=self.uploader, log=self.log)
             if not _out.ok:
-                backup_failed_result(part_dir, _j, result, it=job_it, log=log)
+                backup_failed_result(self.part_dir, _j, self.result, it=self.job_it, log=self.log)
             # ---- R0（M0）：身份映射的**受理确认/作废**（2026-10-14，plan/wire-diet.plan.md §3 R0）----
             # 只有「本份被 hub 受理」才能把本机这份产物当成 hub 权威链的延续点——
             # 200/403/409/其它的判据与理由单点在 `course_cache.settle`（本行只转述结论）。
-            if cache_root is not None:
+            if self.cache_root is not None:
                 course_cache.settle(
-                    cache_root,
-                    course_cache.course_fp_of(job),
+                    self.cache_root,
+                    course_cache.course_fp_of(self.job),
                     _j,
                     status=_out.status,
-                    log=log,
+                    log=self.log,
                 )
 
-        uploader.submit(
+        self.uploader.submit(
             UploadTask(
-                jid=jid,
-                base_url=base_url,
-                token=token,
-                result=result,
-                lease_token=lease_token,
-                claim_mode=claim_mode,
-                worker_id=worker_id,
+                jid=self.jid,
+                base_url=self.base_url,
+                token=self.token,
+                result=self.result,
+                lease_token=self.lease_token,
+                claim_mode=self.claim_mode,
+                worker_id=self.worker_id,
                 on_settled=_on_settled,
             )
         )
-        uploaded = True
+        self.uploaded = True
         # 口径微调（P2.5）：async 下此刻还不知道 hub 收没收，所以这一格的含义从
         # 「距上次**被接受**」变成「距上次**产出结果**」（收没收看落定行/收尾行）。
         # 它是存活日志里的诊断读数（是不是在疯狂轮询却不产活），不是判据。
-        job_ok = True
-    except JobCancelledError as e:
-        # ★ 唯一正确的取消处置（§2.4）：不写 _result.json、不 POST、不报 fail、
-        # abandon（release 租约 + 零 reclaim），立刻去问 priority 选下家。
-        # 绝不能落到下方 except ProtocolError（= 把合法放弃报成确定性失败 ⇒ 训练停腿）
-        # 或 except RetryableError（= 把别人已赢下的活 release 回池）。
-        log(
-            f"job {jid} CANCELLED: {e} — 停算丢弃（零回传/零 fail），"
-            f"cancel_latency_s={time.time() - _t_ppo0:.1f}"
-        )
-        abandon_job(base_url, token, jid, worker_id=worker_id, reason="landed")
-    except UnreapableChildError as e:
-        # ★ 机器级停滞（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点；2026-09-25 二次取证）。
-        # **必须排在 `except RetryableError` 之前**——它是 `RetryableError` 的子类，落到那条上
-        # 处置虽然也是 release，但日志会退化成「瞬时失败」，现场就看不出「机器级」这一档（那正是
-        # 这次事故最难查的地方）。处置 = **立即还租约、立即重领重投**：不睡（云机按分钟计费，
-        # 空转就是烧配额）、不报 `report_job_failure`（那会把机器的问题记在内容头上 ⇒ hub 落终局
-        # failed ⇒ 训练停腿 ⇒ 反过来把云机停掉）、不计毒包（hub 只对**租约过期**计 reclaims，
-        # 主动 release 不算 ⇒ 反复重投永远不会把自己冻死）。
-        log(
-            f"job {jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
-            "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
-        )
-        # 观测腿（plan/component-error-registry §4.3-S3b）：**不报 `report_job_failure`**（那会把
-        # 机器的问题记在内容头上 ⇒ hub 落终局 failed ⇒ 训练停腿），但也不能什么都不说——这档
-        # 此前只见于云机日志（2026-09-25 事故最难查的地方）。纯观测、失败即丢、不进任何判据。
-        report_error(
-            base_url,
-            token,
-            reason=f"{type(e).__name__}: {e}",
-            detail=exc_tail(e),
-            component="ppo-worker",
-            course=_course_of(job),
-            job_id=jid,
-            it=job_it,
-            severity="warn",
-            worker_id=worker_id,
-            log=log,
-        )
-        release_job(base_url, token, jid, lease_token, log=log)
-    except RetryableError as e:
-        # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
-        log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")
-        # 观测腿（同上）：连发时它是「这台机器有问题」的唯一信号（本机侧只能看到「活一直在回池」）。
-        report_error(
-            base_url,
-            token,
-            reason=f"{type(e).__name__}: {e}",
-            detail=exc_tail(e),
-            component="ppo-worker",
-            course=_course_of(job),
-            job_id=jid,
-            it=job_it,
-            severity="warn",
-            worker_id=worker_id,
-            log=log,
-        )
-        release_job(base_url, token, jid, lease_token, log=log)
-    except CodeChangedError as e:
-        # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
-        # 结果。有监督器 → 以 HOT_RELOAD_EXIT 干净退出，由 supervise_worker 用同一
-        # 套参数重新拉起子进程（fresh sys.modules → 新代码生效，输出流不断）。
-        # 无监督器（裸 worker_loop 直调）→ 降级为提示人工重启。
-        log(f"job {jid}: {e}")
-        release_job(base_url, token, jid, lease_token, log=log)  # 别占着租约等重启
-        if not _request_reload(restart_argv, log=log):
-            log(
-                "无监督器 —— 请手动重启本进程"
-                "（notebook: Runtime → Restart runtime 后重跑步骤 4）"
+        self.job_ok = True
+
+    def run(self) -> RoundOutcome:
+        """执行本轮并收尾；返回宿主读的结局。"""
+        try:
+            self._execute()
+        except JobCancelledError as e:
+            # ★ 唯一正确的取消处置（§2.4）：不写 _result.json、不 POST、不报 fail、
+            # abandon（release 租约 + 零 reclaim），立刻去问 priority 选下家。
+            # 绝不能落到下方 except ProtocolError（= 把合法放弃报成确定性失败 ⇒ 训练停腿）
+            # 或 except RetryableError（= 把别人已赢下的活 release 回池）。
+            self.log(
+                f"job {self.jid} CANCELLED: {e} — 停算丢弃（零回传/零 fail），"
+                f"cancel_latency_s={time.time() - self.t_ppo0:.1f}"
             )
-            stop = True
-    except ProtocolError as e:
-        log(f"job {jid} REJECTED: {e} — skip (not retried)")
-        # 确定性拒绝（commit 不符/模式不符/节点能力缺失如 bun 装不上）不重试——
-        # 轮询下一个。
-        # 2026-09-17：**必须把原因报给 hub**，否则这条确定性失败在训练侧只表现为
-        # 25 分钟超时（能力缺失被读成网络/排队问题，且每次重试白烧一个超时窗口）。
-        # 只在这一分支报（CodeChangedError 会重启进程靠租约回池、RetryableError
-        # 靠 release 回池，报了就等于把可恢复的 job 钉死）；hub 侧把它落成终局后
-        # 该 job 不再回池，重发同 job（同幂等键）会清标记。
-        report_job_failure(
-            base_url,
-            token,
-            jid,
-            str(e) or type(e).__name__,
-            kind=type(e).__name__,
-            detail=_failure_detail(e),
-            lease_token=lease_token,
-            worker_id=worker_id,
-            log=log,
+            abandon_job(self.base_url, self.token, self.jid, worker_id=self.worker_id, reason="landed")
+        except UnreapableChildError as e:
+            # ★ 机器级停滞（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点；2026-09-25 二次取证）。
+            # **必须排在 `except RetryableError` 之前**——它是 `RetryableError` 的子类，落到那条上
+            # 处置虽然也是 release，但日志会退化成「瞬时失败」，现场就看不出「机器级」这一档（那正是
+            # 这次事故最难查的地方）。处置 = **立即还租约、立即重领重投**：不睡（云机按分钟计费，
+            # 空转就是烧配额）、不报 `report_job_failure`（那会把机器的问题记在内容头上 ⇒ hub 落终局
+            # failed ⇒ 训练停腿 ⇒ 反过来把云机停掉）、不计毒包（hub 只对**租约过期**计 reclaims，
+            # 主动 release 不算 ⇒ 反复重投永远不会把自己冻死）。
+            self.log(
+                f"job {self.jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
+                "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
+            )
+            # 观测腿（plan/component-error-registry §4.3-S3b）：**不报 `report_job_failure`**（那会把
+            # 机器的问题记在内容头上 ⇒ hub 落终局 failed ⇒ 训练停腿），但也不能什么都不说——这档
+            # 此前只见于云机日志（2026-09-25 事故最难查的地方）。纯观测、失败即丢、不进任何判据。
+            report_error(
+                self.base_url,
+                self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+        except RetryableError as e:
+            # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
+            self.log(f"job {self.jid} 瞬时失败: {e} — release 租约回池，立即可重领")
+            # 观测腿（同上）：连发时它是「这台机器有问题」的唯一信号（本机侧只能看到「活一直在回池」）。
+            report_error(
+                self.base_url,
+                self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)
+        except CodeChangedError as e:
+            # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
+            # 结果。有监督器 → 以 HOT_RELOAD_EXIT 干净退出，由 supervise_worker 用同一
+            # 套参数重新拉起子进程（fresh sys.modules → 新代码生效，输出流不断）。
+            # 无监督器（裸 worker_loop 直调）→ 降级为提示人工重启。
+            self.log(f"job {self.jid}: {e}")
+            release_job(self.base_url, self.token, self.jid, self.lease_token, log=self.log)  # 别占着租约等重启
+            if not _request_reload(self.restart_argv, log=self.log):
+                self.log(
+                    "无监督器 —— 请手动重启本进程"
+                    "（notebook: Runtime → Restart runtime 后重跑步骤 4）"
+                )
+                self.stop = True
+        except ProtocolError as e:
+            self.log(f"job {self.jid} REJECTED: {e} — skip (not retried)")
+            # 确定性拒绝（commit 不符/模式不符/节点能力缺失如 bun 装不上）不重试——
+            # 轮询下一个。
+            # 2026-09-17：**必须把原因报给 hub**，否则这条确定性失败在训练侧只表现为
+            # 25 分钟超时（能力缺失被读成网络/排队问题，且每次重试白烧一个超时窗口）。
+            # 只在这一分支报（CodeChangedError 会重启进程靠租约回池、RetryableError
+            # 靠 release 回池，报了就等于把可恢复的 job 钉死）；hub 侧把它落成终局后
+            # 该 job 不再回池，重发同 job（同幂等键）会清标记。
+            report_job_failure(
+                self.base_url,
+                self.token,
+                self.jid,
+                str(e) or type(e).__name__,
+                kind=type(e).__name__,
+                detail=_failure_detail(e),
+                lease_token=self.lease_token,
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        except Exception as e:
+            self.log(f"job {self.jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
+            # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等。
+            # ★ 2026-09-21（§4）：本分支**只准**装真瞬态。内容决定性失败（解包/校验/
+            #   运行时能力缺失）必须在上游就转成 `ProtocolError`（见 unpack_payload_or_fail、
+            #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
+            # 观测腿（同上）：兜底瞬态此前**零出口**——只有云机日志，而日志随机器一起消失。
+            report_error(
+                self.base_url,
+                self.token,
+                reason=f"{type(e).__name__}: {e}",
+                detail=exc_tail(e),
+                component="ppo-worker",
+                course=_course_of(self.job),
+                job_id=self.jid,
+                it=self.job_it,
+                severity="warn",
+                worker_id=self.worker_id,
+                log=self.log,
+            )
+        finally:
+            # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽。
+            # P2.5：async 且本 job **已交回传**时**不**在这里 flush —— `out` 的账要等回传
+            # 落定才记完，过早 flush 会把回传读成 0s（`_result_settled` 负责收）。
+            # 没走到回传（取消/失败/backup 丢弃）的话回传永不会落定，必须在这里收。
+            if not self.uploaded:
+                _wire_flush(self.jid, self.log)
+            # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
+            self.watch_stop.set()
+            self.hb_stop.set()
+            # 预取暂存：`take()` 交棒、搬入在 `_ensure_payload` —— 早退路径（结果复用/bun 自检
+            # 失败/取消/热替换/异常）上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
+            if self.pf_store is not None:
+                self.pf_store.release_handoff()
+            # 预取填充同理：job 结束即停。进程模式等子进程确认收干净（同 30s 预算），
+            # 进程内线程照旧 join（它最多再跑一轮下载）。
+            if self.pf_proc is not None:
+                self.pf_proc.stop_fill()
+            self.pf_stop.set()
+            if self.pf_thread is not None:
+                self.pf_thread.join(timeout=30.0)
+            if self.hb_thread is not None:
+                self.hb_thread.join(timeout=HEARTBEAT_SEC + 5)
+        return RoundOutcome(
+            jid=self.jid, ok=self.job_ok, uploaded=self.uploaded, stop=self.stop
         )
-    except Exception as e:
-        log(f"job {jid} FAILED: {type(e).__name__}: {e} — will re-poll (idempotent)")
-        # 瞬态失败（网络/远端关闭）：租约未续会自动回池，重拉同 job 幂等。
-        # ★ 2026-09-21（§4）：本分支**只准**装真瞬态。内容决定性失败（解包/校验/
-        #   运行时能力缺失）必须在上游就转成 `ProtocolError`（见 unpack_payload_or_fail、
-        #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
-        # 观测腿（同上）：兜底瞬态此前**零出口**——只有云机日志，而日志随机器一起消失。
-        report_error(
-            base_url,
-            token,
-            reason=f"{type(e).__name__}: {e}",
-            detail=exc_tail(e),
-            component="ppo-worker",
-            course=_course_of(job),
-            job_id=jid,
-            it=job_it,
-            severity="warn",
-            worker_id=worker_id,
-            log=log,
-        )
-    finally:
-        # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽。
-        # P2.5：async 且本 job **已交回传**时**不**在这里 flush —— `out` 的账要等回传
-        # 落定才记完，过早 flush 会把回传读成 0s（`_result_settled` 负责收）。
-        # 没走到回传（取消/失败/backup 丢弃）的话回传永不会落定，必须在这里收。
-        if not uploaded:
-            _wire_flush(jid, log)
-        # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
-        _watch_stop.set()
-        _hb_stop.set()
-        # 预取暂存：`take()` 交棒、搬入在 `_ensure_payload` —— 早退路径（结果复用/bun 自检
-        # 失败/取消/热替换/异常）上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
-        if pf_store is not None:
-            pf_store.release_handoff()
-        # 预取填充同理：job 结束即停。进程模式等子进程确认收干净（同 30s 预算），
-        # 进程内线程照旧 join（它最多再跑一轮下载）。
-        if pf_proc is not None:
-            pf_proc.stop_fill()
-        _pf_stop.set()
-        if pf_thread is not None:
-            pf_thread.join(timeout=30.0)
-        if hb_thread is not None:
-            hb_thread.join(timeout=HEARTBEAT_SEC + 5)
-    return RoundOutcome(jid=jid, ok=job_ok, uploaded=uploaded, stop=stop)
+
+

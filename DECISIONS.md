@@ -7525,3 +7525,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `run_rounds` / `finish_round`），长函数存量 **10 → 9**，形状基线删除该文件条目；
   命名避开同名散落账本（`run_round` → `run_rounds`、`settle` → `finish_round`）。
   全文 → `docs/nn/engineering.md` §207。
+- **2026-11-18（长函数存量第二十九刀：每 job 一轮的会话对象 remote）**：
+  `remote/job_round.py::run_one_round` 396 → **75** 行（新增 `_Round`，旁路装配 / 执行 /
+  四档异常与收尾分别为 `start` / `_execute` / `run`），长函数存量 **9 → 8**，
+  形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §208。
