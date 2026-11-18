@@ -1009,3 +1009,41 @@ def test_boot_self_fingerprint_is_present() -> None:
     assert isinstance(offline_boot.BOOT_SELF, str) and offline_boot.BOOT_SELF.strip(), (
         "BOOT_SELF 是「内存里那一份」的唯一可读指纹，删了 notebook 的加载日志就只剩磁盘 sha"
     )
+
+
+def test_progress_judgement_tolerates_only_a_stale_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_progress_label` / `_should_log_progress` 的引导兜底（P0-7 第二十三批）。
+
+    引导形态里 `common/` 要到 `code.zip` 解开后才在 `sys.path` 上 —— 那时**没有这个包**是
+    正常的分支（`ImportError` ⇒ 退回最小标签 / 恒打）。另一类**真存在**的边界是**跨版本**：
+    解开的 `code.zip` 可能是老快照，老 `should_log_progress` 签名不同 ⇒ `TypeError`。
+
+    前者两个都不是「我们自己读错了」（`AttributeError` / `KeyError`）—— 那种要穿出去，否则
+    「进度行全消失」永远被读成「引导形态本来就这样」。
+    """
+    import types
+
+    stale = types.ModuleType("common.progress_text")
+
+    def old_signature(*_a: object, **_k: object) -> bool:
+        raise TypeError("should_log_progress() got an unexpected keyword argument 'shown'")
+
+    # 走 `__dict__`：`ModuleType` 上没有这两个名字的声明（属性赋值撞 mypy），`setattr` 撞
+    # ruff B010，而本仓禁新增抑制符 ⇒ 唯一直说意图的写法就是填模块字典。
+    stale.__dict__.update(
+        should_log_progress=old_signature,
+        progress_text=lambda *_a, **_k: "老标签",
+    )
+    monkeypatch.setitem(sys.modules, "common.progress_text", stale)
+
+    keep = offline_boot._should_log_progress(None, kind="ping", it=1, done=1, total=4)
+    assert keep is True, "跨版本签名不符 ⇒ 宁可恒打，也不许把进度行吞光"
+
+    def buggy_signature(*_a: object, **_k: object) -> bool:
+        raise AttributeError("should_log_progress lost .shown")
+
+    stale.__dict__.update(should_log_progress=buggy_signature)
+    with pytest.raises(AttributeError):
+        offline_boot._should_log_progress(None, kind="ping", it=1, done=1, total=4)

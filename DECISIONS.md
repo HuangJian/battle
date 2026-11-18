@@ -7117,3 +7117,14 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `http.client.HTTPException` + `ValueError`），4xx/5xx 仍算「有答」；HTTPError 里读体失败收窄成
   `(OSError, http.client.HTTPException)`（状态码已经是结论）。判据
   `tests/remote/test_hub_push_dispatch.py` +1。全文 → `docs/nn/engineering.md` §138。
+
+- **2026-11-18（P0-7 第二十三批：引导形态的两类边界）**：`remote/offline_boot.py` 19 → **16**
+  （G4 349 → **346**；**生成物** ⇒ 改 `remote/_offline_boot/07_queue.pyfrag` 后跑
+  `tools/build_offline_boot.py` 重建，`test_offline_boot_is_generated` 守字节一致）。standalone
+  契约（notebook 从 raw 单拉、那时 `code.zip` 还没解开）让 `_progress_label` /
+  `_should_log_progress` 的 `except Exception` 里混了两类**真边界**与一类垃圾桶：① **没这个包**
+  ⇒ `ImportError`（常态，退回最小标签 / 恒打）；② **跨版本** —— 解开的 `code.zip` 可能是老快照，
+  老 `should_log_progress` 签名不同 ⇒ `TypeError` / `ValueError`（宁可恒打，也不吞进度行）；
+  ③ 我们自己读错（`AttributeError` / `KeyError`）现在穿出去 —— 否则「进度行全消失」永远被读成
+  「引导形态本来就这样」，真因一次也不会进日志。判据 `tests/remote/test_offline_boot.py` +1；
+  改回 `except Exception` 实测 `DID NOT RAISE`。全文 → `docs/nn/engineering.md` §139。

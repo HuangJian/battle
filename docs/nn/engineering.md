@@ -25,6 +25,31 @@
 
 ---
 
+## §139 P0-7 第二十三批：引导形态的两类边界（2026-11-18）
+
+`remote/offline_boot.py`（**生成物**：源码在 `remote/_offline_boot/*.pyfrag`，改完跑
+`tools/build_offline_boot.py` 重建，`tests/remote/test_offline_boot_is_generated.py` 守字节一致）
+19 → **16**。这个文件的 standalone 契约是：顶层不得 import 本仓代码，因为 notebook 把它从 raw
+单独拉进容器，那时 `code.zip` 还没解开。于是 `_progress_label` / `_should_log_progress` 的「兜底」
+`except Exception` 里实际混了**两类完全不同的东西**：
+
+| 类别 | 真存在吗 | 处置 | 捕什么 |
+|---|---|---|---|
+| **没这个包**：`common/` 还没在 `sys.path` 上 | 是，且是常态 | 退回最小标签 / 恒打 | `ImportError` |
+| **跨版本**：解开的 `code.zip` 是**老快照**，那里的 `should_log_progress` 签名不同 | 是（真机上跑过老包的云机就是这形状） | 宁可恒打（也不能把进度行吞光） | `TypeError` / `ValueError` |
+| 我们自己读错（`AttributeError` / `KeyError`） | 不是边界 | **穿出去** | — |
+
+旧宽捕把第三类也读成前两类：「进度行全消失」于是永远被解释成「引导形态本来就这样」，
+而真因（`common.progress_text` 的形状被改）一次也不会出现在日志里。
+
+判据（`tests/remote/test_offline_boot.py` +1）：塞一个 `sys.modules["common.progress_text"]`
+替身——签名不符（`TypeError`）⇒ `_should_log_progress` 仍返 `True`；抛 `AttributeError` ⇒ 穿出去。
+实测把那一处改回 `except Exception` ⇒ `DID NOT RAISE` 红。
+
+读数：G4 **349 → 346**（137 文件）· G9 25 不变 · 用例 6236。
+
+---
+
 ## §138 P0-7 第二十二批：进程内判据不许宽捕（2026-11-18）
 
 `remote/push_dispatch.py` 6 → **3**。这一批的判据是一条**分界线**，而不是一个候选清单：

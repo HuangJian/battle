@@ -2254,7 +2254,7 @@ def _progress_label(kind: str, *, it: int, done: int, total: int) -> str:
         # 延迟 import：本模块是 **standalone 引导文件**（notebook 逐文件从 raw 拉），顶层不能
         # 假手 `common.*`；而 `run_one_course` 真正跑起来的形态里 `code.zip` 带了 `common/`。
         from common.progress_text import progress_text
-    except Exception:  # 引导形态：没有 common 包 ⇒ 退回最小标签（日志面，不影响判据）
+    except ImportError:  # 引导形态：没有 common 包 ⇒ 退回最小标签（日志面，不影响判据）
         return str(kind or "ping")
     return progress_text(
         kind=str(kind or ""), it=int(it), done=int(done), total=int(total)
@@ -2272,13 +2272,16 @@ def _should_log_progress(
     """
     try:
         from common.progress_text import should_log_progress
-    except Exception:
+    except ImportError:
         return True
     try:
         return bool(
             should_log_progress(shown, kind=str(kind or ""), it=int(it), done=int(done), total=int(total))
         )
-    except Exception:
+    except (TypeError, ValueError):
+        # **跨版本**边界（真存在）：引导形态解开的 `code.zip` 可能是**老快照**，那里的
+        # `should_log_progress` 签名不同 ⇒ `TypeError`。那确实是「这份判据用不了」，与
+        # 「我们自己读错了」不同 —— 后者（`AttributeError` / `KeyError`）现在会穿出去。
         return True
 
 
