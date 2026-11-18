@@ -25,6 +25,22 @@
 
 ---
 
+## §188 长函数存量第十刀：离线产物落账 243 → 181（2026-11-18）
+
+`hub/store_offline.py::store_offline_artifact` **243 → 181 行**，长函数存量 **28 → 27**
+（`LONG_FUNCS_BASELINE` 删除 `hub/store_offline.py` 条目）。
+
+三刀纯搬移：
+- `_decode_offline_artifact(body)`：补传体校验与解码（run_id / it / weights_json /
+  声明指纹 / row 指纹），失败仍抛 ProtocolError ⇒ 400 且不落盘。
+- `_write_offline_round(...)`：各形态权重/opt + row.json + 首写 run.json。
+- `_artifact_land_note(...)`：`no-stage` 留痕文案与日志（原件已保留）。
+
+幂等 / conflict 裁决（`duplicate` 与 `conflict` 两个返回分支）留在原地：它要同时读
+`to_write` / 已落盘路径 / `landed` / 本轮指纹，参数超过宽参红线，先不搬。
+
+---
+
 ## §187 长函数存量第九刀：动态节点回场 242 → 184（2026-11-18）
 
 `trainer/queue_local.py::rescan_nodes` **242 → 184 行**，长函数存量 **29 → 28**

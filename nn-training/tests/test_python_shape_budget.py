@@ -31,7 +31,6 @@ PARAM_LIMIT = 8
 LONG_FUNCS_BASELINE = {
     "hub/boot.py": 1,
     "hub/smoke_loopback.py": 1,
-    "hub/store_offline.py": 1,
     "remote/bc_job.py": 1,
     "remote/hub_client.py": 1,
     "remote/job_round.py": 1,

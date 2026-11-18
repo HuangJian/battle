@@ -223,6 +223,99 @@ def _metrics_seen(path: Path) -> set[tuple[int, str]]:
     return out
 
 
+def _decode_offline_artifact(body: dict) -> tuple[str, int, bytes, object, str]:
+    """校验并解码补传体 → `(run_id, it, 权重字节, row, sha256)`。
+
+    任一校验不过抛 ProtocolError（调用方透成 400，且**不落盘任何东西**）：
+    run_id 合法 / it 非负整数 / weights_json 解码后非空 / 声明指纹与实际字节相符 /
+    账本行自带的指纹与实收字节一致。口径与 `store_offline_artifact` 的 docstring 逐字一致。
+    """
+    run_id = sanitize_run_id(body.get("run_id"))
+    it = body.get("it")
+    if not isinstance(it, int) or isinstance(it, bool) or it < 0:
+        raise ProtocolError(f"补传 it 非法（要求非负整数）: {it!r}")
+    wj_raw = body.get("weights_json")
+    if not isinstance(wj_raw, str) or not wj_raw:
+        raise ProtocolError("补传缺 weights_json（权重是这一轮唯一不可再生的东西）")
+    wj = decode_weights_json(wj_raw)
+    if not wj:
+        raise ProtocolError("补传 weights_json 解码后为空")
+    declared = str(body.get("weights_fp", "") or "")
+    got = hashlib.sha256(wj).hexdigest()
+    if declared and declared != got:
+        raise ProtocolError(
+            f"补传 it{it} 的权重指纹不符：声明 {declared[:16]}… 实得 {got[:16]}…"
+            "（传输损坏）——拒收"
+        )
+    row = body.get("row")
+    # 账本行自称的权重指纹必须与实收字节一致：这是**节点自己产的**一致性证据
+    # （`ArtifactStore.checkpoint` 写权重后当场算的 sha）。不符 = 产物目录内部不一致
+    # （人改过 / 半截写入），把这样的权重收成「hub 上的产物」比拒收危险得多。
+    if isinstance(row, dict) and row.get("weights_fp"):
+        row_fp = str(row["weights_fp"])
+        if row_fp != got:
+            raise ProtocolError(
+                f"补传 it{it} 的账本行与权重不符：行记 {row_fp[:16]}… 实得 {got[:16]}…"
+                "（产物目录内部不一致）——拒收"
+            )
+    return run_id, it, wj, row, got
+
+
+def _write_offline_round(
+    it_dir: Path,
+    to_write: dict[str, bytes],
+    row: object,
+    run_id: str,
+    it: int,
+    body: dict,
+    now_fn: Callable[[], float],
+) -> None:
+    """落一轮的文件：各形态权重/opt + row.json + 首写 run.json（自调用点原样搬出）。"""
+    it_dir.mkdir(parents=True, exist_ok=True)
+    for name, blob in to_write.items():
+        _write_bytes(it_dir / name, blob)
+    _write_bytes(
+        it_dir / "row.json",
+        json.dumps(
+            row if isinstance(row, dict) else {"it": int(it)},
+            ensure_ascii=False,
+            indent=1,
+        ).encode("utf-8"),
+    )
+    d = it_dir.parent
+    if not (d / "run.json").exists():
+        _write_bytes(
+            d / "run.json",
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "plan_sha256": str(body.get("plan_sha256", "") or ""),
+                    "course_fp": str(body.get("course_fp", "") or ""),
+                    "commit": str(body.get("commit", "") or ""),
+                    "source_dir": str(body.get("source_dir", "") or "")[:300],
+                    "first_seen": now_fn(),
+                },
+                ensure_ascii=False,
+                indent=1,
+            ).encode("utf-8"),
+        )
+
+
+def _artifact_land_note(note: str, wj: bytes, full_fp: str, got: str, it: int) -> str:
+    """「这一轮没拿到整份」的留痕与日志（自 `store_offline_artifact` 原样搬出）。"""
+    if not note and delta_files.named_for("weights.json", wj) != "weights.json" and full_fp == got:
+        note = (
+            "no-stage: 本 hub 进程没有整份落地器（stage 未接线 / 进程未重启到带它的代码）"
+            "——原件已保留；重启 hub 后跑 tools/offline-weights-restore.py 可补"
+        )
+    if note:
+        _log(
+            f"回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
+            f"：{note}",
+        )
+    return note
+
+
 class OfflineRoundsMixin:
     """域混入：见模块头部。"""
 
@@ -335,34 +428,7 @@ class OfflineRoundsMixin:
         （=「成功」）静默丢弃 ⇒ 真权重与读数永不到岸，而运维以为那一轮已经回传了。
         响比静默好：一份不匹配的**不可变快照**只能由人来裁决（哪一份才是这一轮的真实产物）。
         """
-        run_id = sanitize_run_id(body.get("run_id"))
-        it = body.get("it")
-        if not isinstance(it, int) or isinstance(it, bool) or it < 0:
-            raise ProtocolError(f"补传 it 非法（要求非负整数）: {it!r}")
-        wj_raw = body.get("weights_json")
-        if not isinstance(wj_raw, str) or not wj_raw:
-            raise ProtocolError("补传缺 weights_json（权重是这一轮唯一不可再生的东西）")
-        wj = decode_weights_json(wj_raw)
-        if not wj:
-            raise ProtocolError("补传 weights_json 解码后为空")
-        declared = str(body.get("weights_fp", "") or "")
-        got = hashlib.sha256(wj).hexdigest()
-        if declared and declared != got:
-            raise ProtocolError(
-                f"补传 it{it} 的权重指纹不符：声明 {declared[:16]}… 实得 {got[:16]}…"
-                "（传输损坏）——拒收"
-            )
-        row = body.get("row")
-        # 账本行自称的权重指纹必须与实收字节一致：这是**节点自己产的**一致性证据
-        # （`ArtifactStore.checkpoint` 写权重后当场算的 sha）。不符 = 产物目录内部不一致
-        # （人改过 / 半截写入），把这样的权重收成「hub 上的产物」比拒收危险得多。
-        if isinstance(row, dict) and row.get("weights_fp"):
-            row_fp = str(row["weights_fp"])
-            if row_fp != got:
-                raise ProtocolError(
-                    f"补传 it{it} 的账本行与权重不符：行记 {row_fp[:16]}… 实得 {got[:16]}…"
-                    "（产物目录内部不一致）——拒收"
-                )
+        run_id, it, wj, row, got = _decode_offline_artifact(body)
         opt = b""
         opt_raw = body.get("opt_tar_b64")
         if isinstance(opt_raw, str) and opt_raw:
@@ -443,33 +509,7 @@ class OfflineRoundsMixin:
                         "——不覆盖、需人裁决"
                     ),
                 }
-            it_dir.mkdir(parents=True, exist_ok=True)
-            for name, blob in to_write.items():
-                _write_bytes(it_dir / name, blob)
-            _write_bytes(
-                it_dir / "row.json",
-                json.dumps(
-                    row if isinstance(row, dict) else {"it": int(it)},
-                    ensure_ascii=False,
-                    indent=1,
-                ).encode("utf-8"),
-            )
-            if not (d / "run.json").exists():
-                _write_bytes(
-                    d / "run.json",
-                    json.dumps(
-                        {
-                            "run_id": run_id,
-                            "plan_sha256": str(body.get("plan_sha256", "") or ""),
-                            "course_fp": str(body.get("course_fp", "") or ""),
-                            "commit": str(body.get("commit", "") or ""),
-                            "source_dir": str(body.get("source_dir", "") or "")[:300],
-                            "first_seen": self._now(),
-                        },
-                        ensure_ascii=False,
-                        indent=1,
-                    ).encode("utf-8"),
-                )
+            _write_offline_round(it_dir, to_write, row, run_id, int(it), body, self._now)
             # 账本一行 = 一轮（只在**接新**时追加；重复投递不再写——否则同一轮会出现两行，
             # 而这个文件的读方（人/控制台）按 it 画曲线）。
             with open(d / self.OFFLINE_METRICS_NAME, "a", encoding="utf-8") as f:
@@ -525,16 +565,7 @@ class OfflineRoundsMixin:
         #      而全程零提示，只能靠人去数文件才发现；
         #   ② `stage` 在、但基准不在 hub 侧（`note` 非空，原有路径）。
         # 两者都写进账本行与返回值（不只是 stdout）。
-        if not note and delta_files.named_for("weights.json", wj) != "weights.json" and full_fp == got:
-            note = (
-                "no-stage: 本 hub 进程没有整份落地器（stage 未接线 / 进程未重启到带它的代码）"
-                "——原件已保留；重启 hub 后跑 tools/offline-weights-restore.py 可补"
-            )
-        if note:
-            _log(
-                f"回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
-                f"：{note}",
-            )
+        note = _artifact_land_note(note, wj, full_fp, got, int(it))
         return {
             "status": "accepted",
             "run_id": run_id,

@@ -7428,3 +7428,7 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   242 → **184** 行（拆出 `_rescan_stale_code` / `_rescan_push_weights`，codeHash 门与
   权重重握手口径逐字不变），长函数存量 **29 → 28**，形状基线删除该文件的长函数条目
   （宽参数条目保留）。全文 → `docs/nn/engineering.md` §187。
+- **2026-11-18（长函数存量第十刀：离线产物落账）**：`hub/store_offline.py::store_offline_artifact`
+  243 → **181** 行（拆出 `_decode_offline_artifact` / `_write_offline_round` /
+  `_artifact_land_note`），长函数存量 **28 → 27**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §188。
