@@ -25,6 +25,22 @@
 
 ---
 
+## §159 G5 第二十批：派发器的线程读数与替身字段（2026-11-18）
+
+`tests/hub/test_offline_push_dispatch.py` 私有断言 **7 → 0**（G5 **376 → 369**，113 → 112 文件）。
+
+三类命中，三种处置：
+
+- **测试替身自己的字段**（`self._late_body`）：夹具类上记录「晚到的那一轮 body」，与生产无关。
+  改公开 `late_body`（§153 的 `_halt_calls` 同口径：替身的记账表不是被测状态）。
+- **驱动入口**：`_adopt_existing`（3 处）/ `_settle_assignment` / `_settle_retry` 的返回值就是
+  判据本身，把调用移出 assert（`adopted = …; assert adopted is True`）。
+- **执行面读数**：`assert _wait(lambda: not disp1._pumps)` 问的是「拉取线程退干净没有」——
+  新增 `OfflinePushDispatcher.pump_count()`（锁内计数）。没有复用 `tick()["assignments"]`：
+  账本先空、线程后退出，两者不是同一个时刻的同一件事（收摊最后一步是 ack / 释放）。
+
+---
+
 ## §158 G5 第十九批：自检判据与测试助手的名字（2026-11-18）
 
 两处都不改判据本体，只回答「这个私有名到底是**被测对象**还是**执行面**」：

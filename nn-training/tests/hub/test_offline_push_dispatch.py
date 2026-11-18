@@ -133,7 +133,7 @@ class _Worker:
         #: 多课程夹具用：假训练的产物按**收到的那一单的 (course, run_id)** 盖章（真 worker 就是这样）。
         self.follow_task_identity = follow_task_identity
         self.body_course = COURSE
-        self._late_body: tuple[int, bytes] | None = None
+        self.late_body: tuple[int, bytes] | None = None
         self.task: dict | None = None
         self.state = PushFaceState(work_dir=tmp_path / "worker", log=lambda _m: None)
         self.state.set_starter(self._starter)
@@ -183,7 +183,7 @@ class _Worker:
                 _artifact_body(run_id=self.body_run_id, it=it2, course=self.body_course),
                 ensure_ascii=False,
             ).encode("utf-8")
-            self._late_body = (it2, raw2)
+            self.late_body = (it2, raw2)
             rounds_doc[str(it2)] = {
                 "rev": 0,
                 "file": f"rounds/it{it2:04d}.json",
@@ -248,8 +248,8 @@ class _Worker:
 
     def write_late_round(self) -> None:
         """补上 `late_round` 那一轮的 body（模拟「训练刚写到第二轮」；F1 的积压解除点）。"""
-        assert self._late_body is not None and self.state.outbox is not None
-        it, raw = self._late_body
+        assert self.late_body is not None and self.state.outbox is not None
+        it, raw = self.late_body
         (self.state.outbox / "rounds" / f"it{it:04d}.json").write_bytes(raw)
 
     def write_round(self, it: int) -> None:
@@ -507,7 +507,7 @@ def test_training_keeps_going_while_the_hub_is_away_then_backfills(tmp_path: Pat
         disp1.stop()
         for st in list(disp1._pumps.values()):
             st.stop.set()
-        assert _wait(lambda: not disp1._pumps)
+        assert _wait(lambda: disp1.pump_count() == 0)
 
         # 云机继续训练：又写完两轮，hub 那边一条都没有（也没人 ack ⇒ 一轮都没删）
         worker.write_round(2)
@@ -985,7 +985,8 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         }
         monkeypatch.setattr(disp._client, "get_state", lambda _url, _key: dict(state))
         meta = {"task_id": tid, "pack_sha256": sha, "resume_it": 2}
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is True
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is True
         rec = disp.assignments.get(COURSE)
         assert rec is not None
         # 认领的是**同一单**（task_id/resume_it）；`phase` 仍是 `dispatching` —— 接管由
@@ -995,13 +996,15 @@ def test_adoption_accepts_only_the_same_unfinished_task(
         # 别人的单（id 不同）⇒ 不接管，账本原样
         disp.assignments.set_fields(COURSE, task_id="", phase="dispatching")
         state["task"] = {**state["task"], "task_id": "fedcba9876543210"}
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is False
         assert (disp.assignments.get(COURSE) or {}).get("task_id") == ""
 
         # 同 id 但已收尾（ack=true 且非 running）⇒ 重投只会 duplicate，不接管
         state["task"] = {**state["task"], "task_id": tid}
         state.update(phase="done", ack=True)
-        assert disp._adopt_existing(COURSE, "http://w", "k", meta) is False
+        adopted = disp._adopt_existing(COURSE, "http://w", "k", meta)
+        assert adopted is False
     finally:
         disp.stop()
 
@@ -1036,19 +1039,17 @@ def test_settle_without_an_answer_is_parked_then_replayed(
             cancel_task=lambda *_a, **_k: None, post_ack=lambda *_a, **_k: None
         )
         monkeypatch.setattr(disp, "_client", client)
-        assert (
-            disp._settle_assignment(
-                COURSE,
-                "http://w",
-                "k",
-                rec,
-                cancel=True,
-                free_worker=True,
-                reason="conflict",
-                failed=True,
-            )
-            is False
+        settled = disp._settle_assignment(
+            COURSE,
+            "http://w",
+            "k",
+            rec,
+            cancel=True,
+            free_worker=True,
+            reason="conflict",
+            failed=True,
         )
+        assert settled is False
         parked = disp.assignments.get(COURSE)
         assert parked is not None and parked["phase"] == "settling"
         assert parked["settle_reason"] == "conflict"
@@ -1067,9 +1068,10 @@ def test_settle_without_an_answer_is_parked_then_replayed(
 
         client.cancel_task = fake_cancel
         client.post_ack = fake_ack
-        assert disp._settle_retry(
+        retried = disp._settle_retry(
             COURSE, "http://w", "k", disp.assignments.get(COURSE) or parked
-        ) is True
+        )
+        assert retried is True
         assert calls == ["cancel", "ack"]
         assert disp.assignments.get(COURSE) is None
     finally:

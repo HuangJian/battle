@@ -197,6 +197,14 @@ class OfflinePushDispatcher(TickLoopHost):
         for st in pumps:
             st.stop.set()
 
+    def pump_count(self) -> int:
+        """仍在跑的拉取线程数（0 = 所有单都已收摊）。
+
+        公开读数：`tick()["assignments"]` 回答「还有哪些单在册」，这里回答「线程退干净没有」
+        —— 两者不是同一件事（收摊的最后一步是 ack/释放，账本先空、线程后退出）。
+        """
+        with self._lock:
+            return len(self._pumps)
 
     # ------------------------------------------------------------ 单拍
     def tick(self, *, now: float | None = None, ping: bool | None = None) -> dict:

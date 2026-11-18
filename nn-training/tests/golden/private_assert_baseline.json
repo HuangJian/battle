@@ -21,7 +21,6 @@
   "tests/hub/test_hub_routes_split.py": 5,
   "tests/hub/test_multi_course_hub.py": 5,
   "tests/hub/test_offline_metrics.py": 2,
-  "tests/hub/test_offline_push_dispatch.py": 7,
   "tests/hub/test_poison_freeze.py": 1,
   "tests/hub/test_priority_schedule.py": 3,
   "tests/hub/test_role_routing.py": 1,

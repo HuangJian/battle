@@ -7278,3 +7278,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   是重打循环内部的两条判据（生产自己调），不是契约 ⇒ 不为用例造公开 API，只把调用移出 assert。
   ② `test_warmup_criterion.py` 7 → 0：`tests/helpers/warmup._needed` 是测试助手自己的判据，
   整份用例测的就是它 ⇒ 改成公开 `needed`（助手 API，不涉生产）。全文 → `docs/nn/engineering.md` §158。
+- **2026-11-18（G5 第二十批：派发器的线程读数）**：`tests/hub/test_offline_push_dispatch.py`
+  私有断言 7 → **0**（G5 376 → **369**，112 文件）。替身字段 `_late_body` → `late_body`；
+  `_adopt_existing` / `_settle_assignment` / `_settle_retry` 的调用移出 assert；新增
+  `OfflinePushDispatcher.pump_count()` 回答「拉取线程退干净没有」（账本先空、线程后退出，
+  与 `tick()["assignments"]` 不是同一时刻的同一件事）。全文 → `docs/nn/engineering.md` §159。
