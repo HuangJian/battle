@@ -1,8 +1,13 @@
-"""remote/publish_spec.py — 一次发布的**全部输入**（`publish_job` 的唯一入参对象）。
+"""remote/publish_spec.py — 一次发布的**全部数据形状**（`publish_job` 的唯一入参对象）。
 
 从 `remote/hub_client.py` 拆出（LOC 预算 + 单一所有者）：线协议只认这个对象，
 `publish_job(spec)` 之后的打包 / manifest 只读它的字段。调用方直接构造本对象，
 `publish_job` 不再接受字段 kwargs。
+
+另住发布流程的**两个中间形状**（2026-11-18，长函数存量第三十三刀）：
+`PublishFacts`（第一相算出的指纹 / 内容寻址字节）与 `PublishStaged`（第二相建好的
+manifest + job 目录）。它们与 `PublishSpec` 同属「一次发布的数据」，所以放在同一模块；
+发布动作（`_publish_facts` / `_publish_stage` / `_publish_commit`）仍住 `hub_client`。
 """
 
 from __future__ import annotations
@@ -77,3 +82,36 @@ class PublishSpec:
     register: bool = True
     dispatch: str = ""
     role: str = ""
+
+
+@dataclass(frozen=True)
+class PublishFacts:
+    """发布第一相（校验 + 指纹 + 内容寻址字节）；后两相只读它。"""
+
+    kind: str
+    schedule_raw: list
+    rollout_spec: dict | None
+    fp: str
+    init_weights_fp: str
+    opt_raw: bytes
+    opt_sha: str
+    use_opt_blob: bool
+    ref_raw: bytes
+    use_ref_blob: bool
+    demo_raw: bytes
+    demo_sha: str
+    use_demo_blob: bool
+    init_raw: bytes
+    use_init_blob: bool
+    opt_init: str
+
+
+@dataclass(frozen=True)
+class PublishStaged:
+    """发布第二相（manifest + job 身份 + payload 附带文件）；第三相只读它。"""
+
+    m: dict
+    jid: str
+    jd: Path
+    tmp_extra_dir: Path
+    extra_files: list[Path]

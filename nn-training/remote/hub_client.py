@@ -78,7 +78,7 @@ from common.protocol import (
 # 门面不同：后者只依赖 stdlib + `common.*`，留在顶层对 hub 的闭包无害）。
 # 发布端 payload 封装已下沉 `remote.payload_pack`（2026-10-14）：实现搬家、名字留门面。
 from remote.payload_pack import pack_payload_zip as pack_payload_zip
-from remote.publish_spec import PublishSpec
+from remote.publish_spec import PublishFacts, PublishSpec, PublishStaged
 from worker.resume import merge_memory_shards, shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -689,86 +689,13 @@ def pack_ts_code_zip(
 # ------------------------------------------------------------------ 发布（磁盘 IPC）
 
 
-def publish_job(
-    spec: PublishSpec,
-    *,
-    log=_log,
-) -> dict:
-    """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
-
-    所有字段走 `spec`（`PublishSpec`，见 `remote/publish_spec.py`）；`log` 只是出口
-    回调，不是发布内容。返回已归一化 manifest（含 job_id / payload_sha256）。幂等：同 job_id
-    （幂等键相同）已发布 → 覆盖 payload、不重复追加 pending。
-
-    kind="iter"（M3）：payload 里**没有 shard**（只有 init_weights.json + 可选 blob），
-    shard 由节点自己跑 rollout 现产；data_fp 改对**声明集**（argv 里的逐局 stage/seed
-    + rollout.wver）算——节点跑完后对实产目录复算，两侧同函数，相等 ⇔ 实产集 ==
-    声明集（计划 §5.5①）。
-    """
-    # 字段绑定：下游 1000+ 行仍用旧局部名，唯一入口是 PublishSpec。
-    # 新增字段时只改 PublishSpec + 这里一行；函数签名不再出现第 4 个参数。
-    job_root = spec.job_root
-    jsonl_path = spec.jsonl_path
-    run_id = spec.run_id
-    it = spec.it
-    # `traj_dir` 只留在 spec（历史字段，函数体不读；绑定它会被 F841 抓）
-    shard_dirs = spec.shard_dirs
-    commit = spec.commit
-    code_sha256 = spec.code_sha256
-    course = spec.course
-    course_fp = spec.course_fp
-    mode = spec.mode
-    epochs = spec.epochs
-    mb = spec.mb
-    lr = spec.lr
-    code_zip_path = spec.code_zip_path
-    course_name = spec.course_name
-    corpus_fp = spec.corpus_fp
-    init_weights_path = spec.init_weights_path
-    ckpt_remote_dir = spec.ckpt_remote_dir
-    reward_formula = spec.reward_formula
-    formula_hash = spec.formula_hash
-    metrics_version = spec.metrics_version
-    gamma = spec.gamma
-    lam = spec.lam
-    kl_coef = spec.kl_coef
-    kl_cap = spec.kl_cap
-    adv_norm = spec.adv_norm
-    normalize_ret = spec.normalize_ret
-    kickstart_kl = spec.kickstart_kl
-    ent_coef = spec.ent_coef
-    ref_weights_b64 = spec.ref_weights_b64
-    ref_weights_fp = spec.ref_weights_fp
-    wire_diet = spec.wire_diet
-    reward_spec = spec.reward_spec
-    presegmented = spec.presegmented
-    diet_slim = spec.diet_slim
-    mem = spec.mem
-    demo_bank_bytes = spec.demo_bank_bytes
-    demo_bc_coef = spec.demo_bc_coef
-    demo_per_mb = spec.demo_per_mb
-    value_anchor = spec.value_anchor
-    shuffle = spec.shuffle
-    schedule_raw = spec.schedule_raw
-    per_stage_quota = spec.per_stage_quota
-    slim = spec.slim
-    keep_init_weights = spec.keep_init_weights
-    kind = spec.kind
-    extra = spec.extra
-    rollout_spec = spec.rollout_spec
-    ts_code_sha256 = spec.ts_code_sha256
-    ts_code_zip_path = spec.ts_code_zip_path
-    plan_bytes = spec.plan_bytes
-    register = spec.register
-    dispatch = spec.dispatch
-    role = spec.role
-    # R3/M4 / R1/M3：形态位常量与 blob 重打**只在真正发布时**需要 ⇒ 局部 import（理由见模块头）。
+def _publish_facts(spec: PublishSpec) -> PublishFacts:
+    """第一相：校验 kind/rollout_spec、算 data_fp/init 指纹、切出内容寻址的 blob 字节。"""
     import remote.opt_delta as opt_delta
-    import remote.weights_delta as weights_delta
 
-    job_root_p = Path(job_root)
-    kind = str(kind or "ppo")
-    schedule_raw = schedule_raw if schedule_raw is not None else []
+    kind = str(spec.kind or "ppo")
+    schedule_raw = spec.schedule_raw if spec.schedule_raw is not None else []
+    rollout_spec = spec.rollout_spec
     if rollout_spec is not None:
         rollout_spec = validate_rollout_spec(rollout_spec)
         # kind=run 是 kind=iter 的**延长**（同一轮语义 + 计划尾巴）：两者都要
@@ -777,15 +704,15 @@ def publish_job(
             raise HubClientError(
                 f"rollout_spec 只对 kind='iter'/'run' 有意义，收到 kind={kind!r}"
             )
-        if not ts_code_sha256:
+        if not spec.ts_code_sha256:
             raise HubClientError(f"kind={kind!r} 必须带 ts_code_sha256（节点要它定位 TS 运行时）")
-        if shard_dirs:
+        if spec.shard_dirs:
             raise HubClientError(
-                f"kind={kind!r} 不接受本地 shard（实得 {len(shard_dirs)} 个）——"
+                f"kind={kind!r} 不接受本地 shard（实得 {len(spec.shard_dirs)} 个）——"
                 "上云轮由节点现产，混着发会双份采集"
             )
     if kind == "run":
-        if not plan_bytes:
+        if not spec.plan_bytes:
             raise HubClientError(
                 "kind='run' 必须带 plan_bytes（半离线段的唯一输入：没有计划，节点跑完本轮"
                 "就不知道下一轮跑哪些局）——拒发"
@@ -793,44 +720,76 @@ def publish_job(
         if rollout_spec is None:
             raise HubClientError("kind='run' 必须带 rollout_spec（本 job 自己那一轮的采集规格）")
     # 1) data_fp（D1：排序 shard 路径 + manifest {wver,stage,seed}；iter = 声明集）
-    fp = iter_expected_data_fp(rollout_spec) if rollout_spec else data_fp(shard_dirs, mem=mem)
+    fp = (
+        iter_expected_data_fp(rollout_spec)
+        if rollout_spec
+        else data_fp(spec.shard_dirs, mem=spec.mem)
+    )
     # 2) init_weights_fp（fencing：云回传的 init_weights_fp 必须等于当前 args.out 指纹；
     #    BC 无 warm-start → 恒 "bc" 占位）
-    init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
+    init_weights_fp = _sha256_file(spec.init_weights_path) if spec.init_weights_path else "bc"
     # 3) opt/ref 内容寻址（M2 B3）：raw 字节 sha256；未开瘦身则内联 base64（旧口径）
-    opt_raw = opt_delta.opt_tar_bytes(ckpt_remote_dir)
+    opt_raw = opt_delta.opt_tar_bytes(spec.ckpt_remote_dir)
     opt_sha = _sha256_bytes(opt_raw) if opt_raw else ""
-    use_opt_blob = bool(slim and opt_sha)
+    use_opt_blob = bool(spec.slim and opt_sha)
     ref_raw = b""
-    if slim and ref_weights_b64:
+    if spec.slim and spec.ref_weights_b64:
         try:
-            ref_raw = base64.b64decode(ref_weights_b64.encode("ascii"))
+            ref_raw = base64.b64decode(spec.ref_weights_b64.encode("ascii"))
         except (ValueError, UnicodeEncodeError):
             ref_raw = b""
     # ref_sha 口径与 ref_weights_fp 同一（调用方对 raw 权重取 sha）——有字节才寻址。
-    use_ref_blob = bool(slim and ref_weights_fp and ref_raw)
+    use_ref_blob = bool(spec.slim and spec.ref_weights_fp and ref_raw)
     # demo bank 内容寻址：bank 静态（同 run 内逐轮同字节），sha 键天然跨轮复用。
     # 非 slim 下无内联退路（3MB 进 manifest 不可接受）——响亮拒绝，调用方开 slim。
-    demo_raw = demo_bank_bytes or b""
-    if demo_raw and not slim:
+    demo_raw = spec.demo_bank_bytes or b""
+    if demo_raw and not spec.slim:
         raise HubClientError("demo bank 要求 slim=1（内容寻址；非 slim 无内联退路）——拒发")
-    use_demo_blob = bool(slim and demo_raw)
+    use_demo_blob = bool(spec.slim and demo_raw)
     demo_sha = _sha256_bytes(demo_raw) if demo_raw else ""
     # opt-blob-diet（2026-09-24，§3.1/§3.4）：权重的**内容寻址段**。sha 直接复用
     # `init_weights_fp`——它的定义就是 `sha256_file(args.out)`，与内容寻址的要求逐字一致，
     # 所以 **manifest 不新增字段**（加一个同义的 `init_sha` 只会造第二份真相）。
     # raw 字节 = 该轮 `init_weights.json` 原样（= 上一轮 `result.weights_json` 解码后的字节）。
     init_raw = (
-        Path(init_weights_path).read_bytes()
-        if (init_weights_path and Path(init_weights_path).exists())
+        Path(spec.init_weights_path).read_bytes()
+        if (spec.init_weights_path and Path(spec.init_weights_path).exists())
         else b""
     )
-    use_init_blob = bool(slim and init_raw)
+    use_init_blob = bool(spec.slim and init_raw)
     opt_init = (
         ""
         if use_opt_blob
         else (base64.b64encode(opt_raw).decode("ascii") if opt_raw else "")
     )
+    return PublishFacts(
+        kind=kind,
+        schedule_raw=schedule_raw,
+        rollout_spec=rollout_spec,
+        fp=fp,
+        init_weights_fp=init_weights_fp,
+        opt_raw=opt_raw,
+        opt_sha=opt_sha,
+        use_opt_blob=use_opt_blob,
+        ref_raw=ref_raw,
+        use_ref_blob=use_ref_blob,
+        demo_raw=demo_raw,
+        demo_sha=demo_sha,
+        use_demo_blob=use_demo_blob,
+        init_raw=init_raw,
+        use_init_blob=use_init_blob,
+        opt_init=opt_init,
+    )
+
+
+def _publish_stage(spec: PublishSpec, facts: PublishFacts) -> PublishStaged:
+    """第二相：manifest 预建 + job 身份守卫 + payload 附带文件（plan/init）落临时区。"""
+    import remote.opt_delta as opt_delta
+    import remote.weights_delta as weights_delta
+
+    job_root_p = Path(spec.job_root)
+    kind = facts.kind
+    rollout_spec = facts.rollout_spec
     # 4) manifest 预建（payload_sha256 占位）→ 打包（payload 内不再带占位 manifest）
     extra_files: list[Path] = []
     tmp_extra_dir = job_root_p / ".extra_tmp"
@@ -838,40 +797,40 @@ def publish_job(
     # 而 `.extra_tmp` 也算痕迹（半份 job 目录比没有 job 更危险）。
     m = {
         "proto": 1,
-        "runId": run_id,
-        "it": it,
-        "commit": commit,
-        "code_sha256": code_sha256,
-        "course": course,
-        "course_fp": course_fp,
-        "corpus_fp": corpus_fp,
-        "mode": mode,
-        "epochs": epochs,
-        "mb": mb,
-        "lr": lr,
-        "kl_coef": kl_coef,
-        "kl_cap": kl_cap,
-        "adv_norm": adv_norm,
-        "normalize_ret": bool(normalize_ret),
-        "kickstart_kl": float(kickstart_kl),
-        "ent_coef": ent_coef,
-        "ref_weights_b64": "" if use_ref_blob else ref_weights_b64,
-        "ref_weights_fp": ref_weights_fp,
-        "shuffle": shuffle,
-        "schedule_raw": schedule_raw,
-        "per_stage_quota": int(per_stage_quota),
-        "init_weights_fp": init_weights_fp,
-        "opt_init": opt_init,
-        "opt_sha": opt_sha if use_opt_blob else "",
-        "ref_sha": str(ref_weights_fp) if use_ref_blob else "",
-        "opt_bytes": len(opt_raw) if use_opt_blob else 0,
-        "ref_bytes": len(ref_raw) if use_ref_blob else 0,
-        "demo_sha": demo_sha if use_demo_blob else "",
-        "demo_bc_coef": float(demo_bc_coef),
-        "value_anchor": float(value_anchor),
-        "demo_per_mb": int(demo_per_mb),
-        "slim": bool(slim),
-        "data_fp": fp,
+        "runId": spec.run_id,
+        "it": spec.it,
+        "commit": spec.commit,
+        "code_sha256": spec.code_sha256,
+        "course": spec.course,
+        "course_fp": spec.course_fp,
+        "corpus_fp": spec.corpus_fp,
+        "mode": spec.mode,
+        "epochs": spec.epochs,
+        "mb": spec.mb,
+        "lr": spec.lr,
+        "kl_coef": spec.kl_coef,
+        "kl_cap": spec.kl_cap,
+        "adv_norm": spec.adv_norm,
+        "normalize_ret": bool(spec.normalize_ret),
+        "kickstart_kl": float(spec.kickstart_kl),
+        "ent_coef": spec.ent_coef,
+        "ref_weights_b64": "" if facts.use_ref_blob else spec.ref_weights_b64,
+        "ref_weights_fp": spec.ref_weights_fp,
+        "shuffle": spec.shuffle,
+        "schedule_raw": facts.schedule_raw,
+        "per_stage_quota": int(spec.per_stage_quota),
+        "init_weights_fp": facts.init_weights_fp,
+        "opt_init": facts.opt_init,
+        "opt_sha": facts.opt_sha if facts.use_opt_blob else "",
+        "ref_sha": str(spec.ref_weights_fp) if facts.use_ref_blob else "",
+        "opt_bytes": len(facts.opt_raw) if facts.use_opt_blob else 0,
+        "ref_bytes": len(facts.ref_raw) if facts.use_ref_blob else 0,
+        "demo_sha": facts.demo_sha if facts.use_demo_blob else "",
+        "demo_bc_coef": float(spec.demo_bc_coef),
+        "value_anchor": float(spec.value_anchor),
+        "demo_per_mb": int(spec.demo_per_mb),
+        "slim": bool(spec.slim),
+        "data_fp": facts.fp,
         "payload_sha256": "",
     }
     # job 身份：幂等键的五个分量在上面那份字面量里就齐了（下面只补**非键**字段），
@@ -890,7 +849,7 @@ def publish_job(
         )
         raise HubClientError(
             f"job 身份已被别的课程占用——拒发（本课 {job_root_p.parent.name or '<单课程>'} "
-            f"course_fp={str(course_fp)[:12]}… job_id={m['job_id']!s}；占用方：{_who}）。"
+            f"course_fp={str(spec.course_fp)[:12]}… job_id={m['job_id']!s}；占用方：{_who}）。"
             "同一个 (runId, course_fp, it, init_weights_fp, data_fp) 只能属于一门课："
             "两门课内容完全相同（course_fp 相同）时会共享一个 job 身份，"
             "而 hub 无法在两者间区分归属（两个训练轮会读到同一份结果）。"
@@ -898,25 +857,25 @@ def publish_job(
         )
     tmp_extra_dir.mkdir(parents=True, exist_ok=True)
     if rollout_spec is not None:
-        m["ts_code_sha256"] = str(ts_code_sha256)
+        m["ts_code_sha256"] = str(spec.ts_code_sha256)
         m["rollout"] = rollout_spec
         # ★ opt-blob-diet（2026-09-24，§3.4）：kind=iter 不再把 payload 撑成「带权重」。
         # 节点侧 rollout 要的那份权重改由 `init` blob 提供（worker 的 `_resolve_weights`
         # 会在 **rollout 之前**把它落到 `job_dir/init_weights.json`）。
         # 代价 = 发布端多一条守卫：没有权重就根本不该发这份活（否则云上必炸在半路）。
-        if not (init_weights_path and Path(init_weights_path).exists()):
+        if not (spec.init_weights_path and Path(spec.init_weights_path).exists()):
             raise HubClientError(
                 f"kind={kind!r} 必须有 init 权重（rollout 要用它，PPO 也要用它读 arch）："
-                f"init_weights_path={init_weights_path!r} 为空或不存在——拒发"
+                f"init_weights_path={spec.init_weights_path!r} 为空或不存在——拒发"
             )
     if kind == "run":
-        assert plan_bytes is not None  # 上面已拒发（类型收窄给 mypy）
+        assert spec.plan_bytes is not None  # 上面已拒发（类型收窄给 mypy）
         # 计划随 payload 走（与 init_weights.json 同层）：节点解包后 `verify_plan_file(job_dir, …)`
         # 就地拿到它。manifest 只记 sha——全文可达百 KB，不该让 hub 每轮轮询都解析一遍。
         plan_copy = tmp_extra_dir / PLAN_NAME
-        plan_copy.write_bytes(plan_bytes)
+        plan_copy.write_bytes(spec.plan_bytes)
         extra_files.append(plan_copy)
-        m["plan_sha256"] = _sha256_bytes(plan_bytes)
+        m["plan_sha256"] = _sha256_bytes(spec.plan_bytes)
     # M2（B4）：有 opt blob 时不传 init_weights.json（worker 从 opt 恢复即完整
     # model+Adam）。echo 冒烟要保持回显能力，keep_init_weights 时照旧带上。
     #
@@ -926,9 +885,9 @@ def publish_job(
     #   `not use_opt_blob or keep_init_weights` 已经等价于「两个 blob 都齐才省掉 payload
     #   里那份」，而且把首轮/冷启动（无 opt blob）留成了 W0 —— 那条路是导出包与
     #   `bundle.py` 依赖的（plan §2.2：离线冗余是特性，不是浪费）。
-    if init_weights_path and (not use_opt_blob or keep_init_weights):
+    if spec.init_weights_path and (not facts.use_opt_blob or spec.keep_init_weights):
         init_copy = tmp_extra_dir / "init_weights.json"
-        shutil.copyfile(init_weights_path, init_copy)
+        shutil.copyfile(spec.init_weights_path, init_copy)
         extra_files.append(init_copy)
     # M2（B2）：不再打 payload 内 opt_init.tar.b64 —— 全仓无读取方（opt 只从
     # manifest["opt_init"] / opt_sha blob 取）。
@@ -944,85 +903,102 @@ def publish_job(
             m.pop(k, None)
         for k in ("demo_sha", "demo_bc_coef", "demo_per_mb"):
             m.pop(k, None)
-        for k, v in (extra or {}).items():
+        for k, v in (spec.extra or {}).items():
             m[k] = v
     else:
-        m["reward_formula"] = reward_formula
-        m["formula_hash"] = formula_hash
-        m["metrics_version"] = metrics_version
-        m["gamma"] = gamma
-        m["lam"] = lam
+        m["reward_formula"] = spec.reward_formula
+        m["formula_hash"] = spec.formula_hash
+        m["metrics_version"] = spec.metrics_version
+        m["gamma"] = spec.gamma
+        m["lam"] = spec.lam
     # ---- R0（M0，plan/wire-diet.plan.md §3 R0）：把「上一轮是哪个 job」写进 manifest ----
     # 判据在 worker 侧（`remote/course_cache`）：`manifest.opt_from == 本机 latest.job_id`
     # ⇒ 本机那份 f32 全量副本就是**权威链的延续点**（零字节、零降质），否则回退内容寻址。
     # 为什么由**这里**写而不是让 worker 自己推「it−1 邻接」：身份映射的键就是 job_id，
     # 让读取端再推一遍 = 第二份真相。扫不到（首轮 / 上一轮已 prune / 换机重开）⇒ **不添键**
     # （旧端忽略未知键，但没有键才是“回退内容寻址”的准确表述）。
-    _prev = _previous_job_id(job_root_p, run_id, course_fp, it)
+    _prev = _previous_job_id(job_root_p, spec.run_id, spec.course_fp, spec.it)
     if _prev:
         m["opt_from"] = _prev
     # ---- R3（M4）：opt 回传的**形态位**（2026-10-14，plan/wire-diet.plan.md §3 R3 / §12）----
     # 有 base（`use_opt_blob` = 真能发 delta）才写；否则**不添键** —— 对外发布路径的 manifest
     # 逐字节不变（与 `payload_fmt` 同纪律）。发布端写下、验收端就是它（兼容矩阵 §4，缺键 = 旧形态）。
-    if use_opt_blob:
+    if facts.use_opt_blob:
         m["opt_fmt"] = opt_delta.OPT_DELTA_FMT
     # ---- R1（M3）：权重回传的**形态位**（同 opt_fmt 的纪律）----
     # 有 init 字节（= delta 的基准）才写；否则**不添键** —— 对外发布路径的 manifest 逐字节不变。
     # 基准就是本轮发出去的 init 权重（`init_weights_fp` = `sha256(这条字节)`）⇒ 验收端逐字节可对。
-    if use_init_blob:
+    if facts.use_init_blob:
         m["w_fmt"] = weights_delta.W_DELTA_FMT
     m["kind"] = kind
-    m["seed"] = job_seed(run_id, it, init_weights_fp)
-    if course_name:
+    m["seed"] = job_seed(spec.run_id, spec.it, facts.init_weights_fp)
+    if spec.course_name:
         # P4-W2 归属（S9）：在 job_id 计算**之后**注入——幂等键不含短名，旧链字节不变；
         # normalize_manifest 允许未知/可选键，wire 兼容（D1：未知字段忽略）。
-        m["course_name"] = str(course_name)
-    if dispatch:
+        m["course_name"] = str(spec.course_name)
+    if spec.dispatch:
         # 同上：job 身份已定，传输腿的意图是**附加语义**不是身份成分。旧 hub/旧 worker
         # 忽略未知键 ⇒ 缺席即 pull，行为逐字节不变。
-        m["dispatch"] = str(dispatch)
+        m["dispatch"] = str(spec.dispatch)
     # 归属角色（2026-09-25，plan/online-offline-role-routing §2.1）：**发布时定死**的 job
     # 属性——hub 的派发/认领闸读它，不再读易变的「课程当前 mode」。
     # 与 `dispatch` 同位置（job_id 之后）：归属不是身份成分，重发同一轮不会因为归属变化而
     # 变成两个 job。缺省由 kind 推（同一份快照，不引入第二个读盘点）；显式 `role=` 可覆盖。
     # 旧 hub/旧 worker 忽略未知键 ⇒ 没这个字段的旧 job 由 `role_of` 按 kind 兜底。
-    m[ROLE_FIELD] = role if role in ROLES else role_of({"kind": kind})
+    m[ROLE_FIELD] = spec.role if spec.role in ROLES else role_of({"kind": kind})
+    jid = str(m["job_id"])
+    jd = job_root_p / jid
+    return PublishStaged(
+        m=m,
+        jid=jid,
+        jd=jd,
+        tmp_extra_dir=tmp_extra_dir,
+        extra_files=extra_files,
+    )
+
+
+def _publish_commit(
+    spec: PublishSpec, facts: PublishFacts, staged: PublishStaged, *, log=_log
+) -> dict:
+    """第三相：payload 打包 + blob/manifest 落盘 + 账本；返回归一化 manifest。"""
+    m = staged.m
+    jid = staged.jid
+    jd = staged.jd
+    rollout_spec = facts.rollout_spec
     # 5) 落盘 job 目录：payload.zip（zip 内 manifest 为占位副本——payload_sha256 尚
     #    未算出）→ 回填真实 sha → 权威 manifest.json（worker 以 job 记录校验，D1）。
     #    normalize_manifest 在回填后调用：payload_sha256 必填非空，占位空串会误拒。
-    jid = str(m["job_id"])
-    jd = job_root_p / jid
     jd.mkdir(parents=True, exist_ok=True)
     zip_path = jd / PAYLOAD_NAME
     _slim: ShardSlim | None = None
-    if wire_diet:
-        _slim = cast("ShardSlim | None", diet_slim)
+    if spec.wire_diet:
+        _slim = cast("ShardSlim | None", spec.diet_slim)
         if _slim is None:
             from remote.payload_slim import build_slim
 
             _slim = build_slim(
-                reward_spec=reward_spec,
-                it=it,
-                metrics_version=metrics_version,
-                formula_hash=formula_hash,
+                reward_spec=spec.reward_spec,
+                it=spec.it,
+                metrics_version=spec.metrics_version,
+                formula_hash=spec.formula_hash,
                 log=log,
             )
     sha = pack_payload_zip(
-        shard_dirs,
-        extra_files,
+        spec.shard_dirs,
+        staged.extra_files,
         zip_path,
         m,
         member_bytes=(_slim.member_bytes if _slim is not None else None),
         shard_extra=(_slim.shard_extra if _slim is not None else None),
-        presegmented=presegmented,
+        presegmented=spec.presegmented,
         log=log,
     )
     m["payload_sha256"] = sha
-    if presegmented:
+    if spec.presegmented:
         # 验收判据 3（plan §4）：纯分布式腿下两个数该相等（每个 shard 都在 rollout 期压过）。
-        _hit = sum(1 for d in shard_dirs if Path(d).name in presegmented)
+        _hit = sum(1 for d in spec.shard_dirs if Path(d).name in spec.presegmented)
         log(
-            f"[publish] zero-disk it{it}: packed {_hit}/{len(shard_dirs)} presegmented shard"
+            f"[publish] zero-disk it{spec.it}: packed {_hit}/{len(spec.shard_dirs)} presegmented shard"
             "（命中段直接拼接，未读盘/未重压）"
         )
     if _slim is not None:
@@ -1033,14 +1009,14 @@ def publish_job(
             m["payload_fmt"] = _slim.fmt
     # M2 B3：blob 落盘——pull worker 经 /jobs/{id}/blob 取；push 由 push_client 判缓存
     # 后按需随 body 发送（读的就是这两个文件）。
-    if use_opt_blob:
-        blob_path(jd, BLOB_OPT).write_bytes(opt_raw)
-    if use_ref_blob:
-        blob_path(jd, BLOB_REF).write_bytes(ref_raw)
-    if use_demo_blob:
-        blob_path(jd, BLOB_DEMO).write_bytes(demo_raw)
-    if use_init_blob:
-        blob_path(jd, BLOB_INIT).write_bytes(init_raw)
+    if facts.use_opt_blob:
+        blob_path(jd, BLOB_OPT).write_bytes(facts.opt_raw)
+    if facts.use_ref_blob:
+        blob_path(jd, BLOB_REF).write_bytes(facts.ref_raw)
+    if facts.use_demo_blob:
+        blob_path(jd, BLOB_DEMO).write_bytes(facts.demo_raw)
+    if facts.use_init_blob:
+        blob_path(jd, BLOB_INIT).write_bytes(facts.init_raw)
     m = normalize_manifest(m)
     (jd / "manifest.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
     # 重发同一个 job（同幂等键 → 同 job_id，逐轮重试走的正是这条路）必须清掉上一次的
@@ -1054,59 +1030,84 @@ def publish_job(
         except OSError as e:
             log(f"WARN: 失败标记未清掉（{e}）——重发可能被 hub 当成已失败")
     # 复制 code.zip 到 job 目录（hub-server 的 GET /jobs/{id}/code 从此目录服务）
-    if code_zip_path:
-        czp = Path(code_zip_path)
+    if spec.code_zip_path:
+        czp = Path(spec.code_zip_path)
         if czp.exists():
             shutil.copy2(czp, jd / "code.zip")
     # M3：ts_code.zip 同规（GET /jobs/{id}/ts_code）——内容寻址缓存的前提是节点能拿到
     # 原始字节并与 manifest.ts_code_sha256 对账。
-    if rollout_spec is not None and ts_code_zip_path:
-        tzp = Path(ts_code_zip_path)
+    if rollout_spec is not None and spec.ts_code_zip_path:
+        tzp = Path(spec.ts_code_zip_path)
         if not tzp.exists():
             raise HubClientError(f"kind='iter' 的 ts_code.zip 不存在: {tzp}")
         shutil.copy2(tzp, jd / TS_CODE_NAME)
     try:
-        rmtree_best_effort(tmp_extra_dir)
+        rmtree_best_effort(staged.tmp_extra_dir)
     except OSError:
         pass
     # 6) jsonl job_pending（磁盘 IPC；幂等去重——同 job_id 不重复追加）
-    if register:
+    if spec.register:
         # 悬空 job 清理（§381）：发布前作废更早迭代/旧 runId 遗留的 pending job——
         # 否则 loop 重启后无 worker 期间滞留的旧 job 会在 GPU 上线时被全部补做。
-        _n_cancelled = cancel_stale_jobs(jsonl_path, it, jid)
+        _n_cancelled = cancel_stale_jobs(spec.jsonl_path, spec.it, jid)
         if _n_cancelled:
-            log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {it}（旧 runId 遗留，不再派发）")
+            log(f"cancelled {_n_cancelled} stale job(s) with it ≤ {spec.it}（旧 runId 遗留，不再派发）")
         _append_ledger(
-            jsonl_path,
+            spec.jsonl_path,
             {
                 "event": "job_pending",
                 "job_id": jid,
-                "runId": run_id,
-                "it": it,
+                "runId": spec.run_id,
+                "it": spec.it,
                 "ts": time.time(),
             },
         )
     else:
-        log(f"job {jid} it{it}: 不记账本/不进待领池（打包导出用，`register=False`）")
+        log(f"job {jid} it{spec.it}: 不记账本/不进待领池（打包导出用，`register=False`）")
     log(
-        f"published job {jid} it{it}: "
+        f"published job {jid} it{spec.it}: "
         + (
             f"kind=iter games={len(rollout_spec['argv'])} "
-            f"ts_code={str(ts_code_sha256)[:12]}… "
+            f"ts_code={str(spec.ts_code_sha256)[:12]}… "
             if rollout_spec
-            else f"shards={len(shard_dirs)} "
+            else f"shards={len(spec.shard_dirs)} "
         )
-        + f"data_fp={fp[:12]}… payload={sha[:12]}…"
-        + (f" init_blob={init_weights_fp[:12]}…" if use_init_blob else "")
+        + f"data_fp={facts.fp[:12]}… payload={sha[:12]}…"
+        + (f" init_blob={facts.init_weights_fp[:12]}…" if facts.use_init_blob else "")
     )
-    if use_init_blob:
+    if facts.use_init_blob:
         # payload diet 读数：这一刀省下的就是 tar 里那份重复的 model.pt
         # （实测 268,996 B/轮，见 plan/opt-blob-diet.plan.md §1.1）。
         log(
-            f"it{it}: payload diet —— 权重走 init blob（{len(init_raw)} B raw，"
-            f"sha={init_weights_fp[:12]}…）不进 payload；tar 里不再有 model.pt"
+            f"it{spec.it}: payload diet —— 权重走 init blob（{len(facts.init_raw)} B raw，"
+            f"sha={facts.init_weights_fp[:12]}…）不进 payload；tar 里不再有 model.pt"
         )
     return m
+
+
+def publish_job(
+    spec: PublishSpec,
+    *,
+    log=_log,
+) -> dict:
+    """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
+
+    所有字段走 `spec`（`PublishSpec`，见 `remote/publish_spec.py`）；`log` 只是出口
+    回调，不是发布内容。返回已归一化 manifest（含 job_id / payload_sha256）。幂等：同 job_id
+    （幂等键相同）已发布 → 覆盖 payload、不重复追加 pending。
+
+    kind="iter"（M3）：payload 里**没有 shard**（只有 init_weights.json + 可选 blob），
+    shard 由节点自己跑 rollout 现产；data_fp 改对**声明集**（argv 里的逐局 stage/seed
+    + rollout.wver）算——节点跑完后对实产目录复算，两侧同函数，相等 ⇔ 实产集 ==
+    声明集（计划 §5.5①）。
+
+    三相拆分（2026-11-18，长函数存量第三十三刀）：`_publish_facts`（校验 + 指纹）→
+    `_publish_stage`（manifest + job 身份）→ `_publish_commit`（打包 + 落盘 + 账本）。
+    相位边界就是原函数里的 `# 4)` / `# 5)` 段；判据、日志、写盘顺序逐条未动。
+    """
+    facts = _publish_facts(spec)
+    staged = _publish_stage(spec, facts)
+    return _publish_commit(spec, facts, staged, log=log)
 
 
 

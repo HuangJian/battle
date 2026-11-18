@@ -25,6 +25,32 @@
 
 ---
 
+## §212 长函数存量第三十三刀：发布编排（remote）418 → 173（2026-11-18）
+
+`remote/hub_client.py::publish_job` **418 → 23 行**（纯接线），长函数存量 **5 → 4**
+（`LONG_FUNCS_BASELINE` 删除 `remote/hub_client.py` 条目）。
+
+按原函数里的 `# 4)` / `# 5)` 段切成三相，两相的中间形状下沉到 `remote/publish_spec.py`
+（与 `PublishSpec` 同住，L0 纯数据）：
+
+- `_publish_facts(spec)`（91 行）：kind/rollout_spec 校验 + `data_fp` / `init_weights_fp`
+  + opt/ref/demo/init 四条内容寻址字节（`PublishFacts`）。唯一没有写盘的一相。
+- `_publish_stage(spec, facts)`（173 行）：manifest 预建 + job 身份 + 身份冲突守卫 +
+  payload 附带文件（plan / init_weights）落 `.extra_tmp`（`PublishStaged`）。
+- `_publish_commit(spec, facts, staged, log)`（126 行）：payload 打包 → blob/manifest
+  落盘 → 失败标记清理 → code/ts_code 复制 → jsonl 记账 → 两行读数。
+
+三条纪律逐条保持：① 8 处 `log` 与 9 处 `raise` 的文案/顺序用 AST 逐条比对（把旧文件
+`git show HEAD:` 出来归一化 `spec.`/`facts.`/`staged.` 前缀后做多重集比较）——全等；
+② 写盘顺序不变（冲突守卫仍在任何 mkdir 之前；`jd.mkdir` 仍在打包之前）；
+③ `opt_delta`/`weights_delta` 仍是函数内局部 import（hub 闭包不含 numpy/torch，
+`test_hub_import_graph` 绿）。本地绑定块（55 行 `x = spec.x`）随之删除，改读 `spec.X`。
+
+`remote/hub_client.py` LOC 996 → 987（dataclass 下沉抵消了拆分开销），
+`remote/publish_spec.py` 61 → 86。
+
+---
+
 ## §211 长函数存量第三十二刀：离线单课编排（remote）323 → 183（2026-11-18）
 
 `remote/offline_boot.py::run_one_course` **323 → 183 行**，长函数存量 **6 → 5**

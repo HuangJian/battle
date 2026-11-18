@@ -7546,3 +7546,9 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   `_probe_hub` / `_deliver`；ctx 用 `SimpleNamespace` 以保持独立导入），
   长函数存量 **6 → 5**，形状基线删除该文件条目。
   全文 → `docs/nn/engineering.md` §211。
+- **2026-11-18（长函数存量第三十三刀：发布编排 remote）**：
+  `remote/hub_client.py::publish_job` 418 → **23** 行（按原 `# 4)`/`# 5)` 段切三相：
+  `_publish_facts` / `_publish_stage` / `_publish_commit`；中间形状 `PublishFacts` /
+  `PublishStaged` 下沉 `remote/publish_spec.py`，本地 55 行绑定块删除），
+  长函数存量 **5 → 4**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §212。
