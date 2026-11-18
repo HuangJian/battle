@@ -25,6 +25,22 @@
 
 ---
 
+## §206 长函数存量第二十七刀：推送守候两条分支（remote）336 → 99（2026-11-18）
+
+`remote/notebook_runtime.py::run_push_worker` **336 → 99 行**，长函数存量 **11 → 10**
+（`LONG_FUNCS_BASELINE` 删除 `remote/notebook_runtime.py` 条目）。
+
+函数里两条几乎同构的守候循环（already_serving 分支 / 本函数起服务后的主分支）各自
+带着自己的 `_drain` / `_ping` 闭包，搬成两个模块级函数：
+- `_wait_existing_serving(cfg, log, reg, already)`：接管 bootstrap 已起好的服务（124 行）。
+- `_wait_started_serving(cfg, log, reg, serve_proc, cf_proc, cf_url)`：本函数起好服务后的
+  守候（131 行）；`_ping_status` 的 `Request` / `urlopen` 改成它自己的延迟 import。
+
+`run_push_worker` 只留配置校验 / 安装 / 起服务 / 注册 / 两个分支调用。69 处日志逐条比对：
+文案与顺序不变。
+
+---
+
 ## §205 长函数存量第二十六刀：连续配额循环 / 收官（trainer）327 → 48（2026-11-18）
 
 `trainer/loop_volume.py::TrainingVolume._volume_collect_continuous` **327 → 48 行**，

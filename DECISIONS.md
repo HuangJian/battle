@@ -7514,3 +7514,8 @@ left 32% / right 28%，丢基地时玩家 p50 距基地 9 格、6 格内平均 0
   长函数存量 **12 → 11**，形状基线删除该文件条目；测试侧 `_StubLoop` 与
   `test_loop_volume_split.CLUSTER` 同步登记。
   全文 → `docs/nn/engineering.md` §205。
+- **2026-11-18（长函数存量第二十七刀：推送守候两条分支 remote）**：
+  `remote/notebook_runtime.py::run_push_worker` 336 → **99** 行（already_serving 分支与
+  主分支的守候循环搬成 `_wait_existing_serving` / `_wait_started_serving`），
+  长函数存量 **11 → 10**，形状基线删除该文件条目。
+  全文 → `docs/nn/engineering.md` §206。
